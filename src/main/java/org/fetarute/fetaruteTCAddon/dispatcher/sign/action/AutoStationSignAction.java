@@ -55,6 +55,7 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   private static final String TAG_ROUTE_ID = "FTA_ROUTE_ID";
+  private static final String UNKNOWN_TRAIN_NAME = "unknown";
   private static final String TAG_DOOR_FIRST_STOP_DONE = "FTA_DOOR_FIRST_STOP_DONE";
   private static final String TAG_RUN_AT = "FTA_RUN_AT";
   private static final long DOOR_OPEN_DELAY_TICKS = 20L;
@@ -583,6 +584,28 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             if ((ticksSinceOpen - dwellTicks) % 20 != 0) {
               return;
             }
+            if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
+              // 本次停站已由别的流程接手（终点待命复用改名、改派新交路后自己发车）：只收尾，不再替它判发车。
+              debug(
+                  "AutoStation 停站会话已被接管: nodeId="
+                      + definition.nodeId().value()
+                      + ", train="
+                      + trainName
+                      + ", currentTrain="
+                      + group.getProperties().getTrainName()
+                      + ", route="
+                      + shortUuid(routeId)
+                      + ", sid="
+                      + stopSessionId);
+              plugin
+                  .getRuntimeDispatchService()
+                  .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+              exitOffsetState.restore();
+              finalWaitState.stop();
+              plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+              cancel();
+              return;
+            }
 
             boolean canDepart = true;
             if (plugin.getRuntimeDispatchService().isPresent()) {
@@ -964,6 +987,36 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
+   * 这次停站是否已被别的流程接手：停站时的列车改了名，或改派到了另一条交路。
+   *
+   * <p>终点待命复用会把列车改名、换上新交路并自行发车，停站任务却不知道，仍每秒以"从本站发车"替它判一次门控。2026-09-27 实服 NTA： 9675 复用为 1673
+   * 开走后，这个判定一直替 1673 刷新它在 NTA 单线区段上的排队位，对向进站的 4936 被挡了半小时以上；1673 远在 HHU， 却还在被"本站发车"扣着。
+   *
+   * <p>只认确凿证据：当前名字或交路读不到时不算接手，停站任务照旧运行。
+   *
+   * @param stoppedTrainName 停站时的列车名
+   * @param stoppedRouteId 停站时的交路
+   * @param current 列车当前属性
+   * @return 已被接手时为 {@code true}
+   */
+  static boolean stopSessionSuperseded(
+      String stoppedTrainName, UUID stoppedRouteId, TrainProperties current) {
+    if (current == null) {
+      return false;
+    }
+    String currentName = current.getTrainName();
+    if (stoppedTrainName != null
+        && !UNKNOWN_TRAIN_NAME.equals(stoppedTrainName)
+        && currentName != null
+        && !currentName.isBlank()
+        && !currentName.equals(stoppedTrainName)) {
+      return true;
+    }
+    return stoppedRouteId != null
+        && readRouteId(current).filter(routeId -> !routeId.equals(stoppedRouteId)).isPresent();
+  }
+
+  /**
    * 从列车 tag 中解析 {@code FTA_ROUTE_ID}。
    *
    * <p>格式为 {@code FTA_ROUTE_ID=<uuid>}，否则返回空。
@@ -1266,7 +1319,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     } catch (Throwable ignored) {
       // 忽略
     }
-    return "unknown";
+    return UNKNOWN_TRAIN_NAME;
   }
 
   /**
