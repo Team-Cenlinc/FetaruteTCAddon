@@ -49,6 +49,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  *   <li>每走一步检查是否到达另一个节点的锚点
  *   <li>到达则记录边，否则继续走直到超过 maxDistance
  * </ol>
+ *
+ * <p>超过 maxDistance 仍未遇到节点的方向按尽头线处理：另一侧视为没有 FTA 节点（非 FTA 轨道或施工中）， 不产生区间，也不降级本轮足迹证据。
  */
 public final class NodeToNodeEdgeExplorer {
 
@@ -77,6 +79,9 @@ public final class NodeToNodeEdgeExplorer {
   private EdgeExplorationTask currentTask;
   private boolean done = false;
   private boolean footprintEvidenceComplete = true;
+
+  /** 存在超距方向的起点节点：该方向按尽头线处理，构建结束后汇总提示。 */
+  private final Set<String> unterminatedStartNodes = new TreeSet<>();
 
   /**
    * 创建边探索器。
@@ -353,8 +358,9 @@ public final class NodeToNodeEdgeExplorer {
 
     // 检查是否超过最大距离
     if (walker.movedTotal > maxDistance) {
-      markFootprintEvidenceIncomplete("max-distance:" + startNodeId.value());
-      debugLogger.accept("Walker 超过最大距离: node=" + startNodeId + " distance=" + walker.movedTotal);
+      recordUnterminatedDirection(startNodeId);
+      debugLogger.accept(
+          "Walker 超过最大距离，按尽头线处理: node=" + startNodeId + " distance=" + walker.movedTotal);
       return true;
     }
 
@@ -439,10 +445,26 @@ public final class NodeToNodeEdgeExplorer {
   /**
    * 返回本轮探索是否仍具备发布精确物理足迹的完整证据。
    *
-   * <p>超距、无效 anchor、无可用 walker 或异常缺失轨道状态都会永久将本轮降级为不完整；已经成功发现的 edge 坐标仍保留，但最终联锁进入 fail-closed 哨兵模式。
+   * <p>无效 anchor、无可用 walker 或异常缺失轨道状态都会永久将本轮降级为不完整；已经成功发现的 edge 坐标仍保留，但最终联锁进入 fail-closed
+   * 哨兵模式。超距不在此列，见 {@link #unterminatedStartNodes()}。
    */
   public boolean hasCompleteFootprintEvidence() {
     return footprintEvidenceComplete;
+  }
+
+  /**
+   * 返回存在超距方向的起点节点（按 ID 排序）。
+   *
+   * <p>这些方向走满 maxDistance 仍未遇到任何节点，已按尽头线处理。若其中本应有一条真实区间，它会从图中缺失，需要在轨道上补节点牌或截断轨道。
+   */
+  public List<String> unterminatedStartNodes() {
+    return List.copyOf(unterminatedStartNodes);
+  }
+
+  void recordUnterminatedDirection(NodeId startNodeId) {
+    if (startNodeId != null) {
+      unterminatedStartNodes.add(startNodeId.value());
+    }
   }
 
   void markFootprintEvidenceIncomplete(String reason) {

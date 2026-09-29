@@ -455,6 +455,14 @@ public final class RailGraphBuildJob implements Runnable {
     }
 
     debugLogger.accept("节点到节点探索完成: edges=" + currentNodeExplorer.discoveredEdgeCount());
+    List<String> unterminated = currentNodeExplorer.unterminatedStartNodes();
+    if (!unterminated.isEmpty()) {
+      plugin
+          .getLogger()
+          .info(
+              "调度图构建：以下节点有方向超过探索上限仍未遇到节点，已按尽头线处理（另一侧无 FTA 节点或施工中）: "
+                  + String.join(", ", unterminated));
+    }
     return currentNodeExplorer.getExploredEdges();
   }
 
