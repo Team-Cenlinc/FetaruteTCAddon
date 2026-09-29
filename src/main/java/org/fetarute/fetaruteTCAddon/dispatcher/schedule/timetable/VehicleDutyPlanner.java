@@ -11,6 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 
 /**
  * 把已排好的班次打包成有限的车辆交路（duty）。
@@ -45,6 +46,11 @@ import java.util.UUID;
  * </ul>
  *
  * 本类只在<b>已经排定</b>的班次序列上做车辆指派，绝不为了方便复用去改班次的线路或时刻—— 否则车辆周转会反过来扭曲服务比例，而那正是"某终点恰好停着一辆车，于是这条线一直发车"的来源。
+ *
+ * <p>接续偏好相同时，正线折返点取最晚就绪的车，其他端点取最早就绪的车。正线没有站台可供待命；没有 RETURN
+ * 线路时，先到车接班会在正线上多等一个组间隔、挡住同股道后车，后到车的上一班反而被收口逻辑取消。2026-09-28 实测 MT 在 {@code SURC:OFL:MLU:2:004} 停留中位
+ * 185 秒、p90 215 秒，DS 在 OFL:2 排队 173 秒；组间隔调到 300 秒后停留变成 320 秒（一个间隔 + 20
+ * 秒折返）。改取后车把选车引入的等待压回最短折返，未被接走且无法回库的前车班次仍由现有收口逻辑剔除。
  */
 public final class VehicleDutyPlanner {
 
@@ -214,7 +220,11 @@ public final class VehicleDutyPlanner {
    *
    * <p>条件缺一不可：位置对得上（上一班的终点就是这一班的起点）、时间来得及（含折返时间）、
    * 接下后仍不越过硬上限、并且接下之后这辆车仍然回得了库（终点有回库线路，或还有余量再跑一班到有回库线路的终点）。 都满足时先看接续偏好（上一班是这一班的喂车 route），
-   * 再取"最早就绪"的那一个，并列时按 duty 序号——完全确定。
+   * 再按起点类型选车：{@link RouteTerminals#isMainlineTurnback} 判定的正线折返点取"最晚就绪"者，缩短占道等待；
+   * 站台、车库、咽喉等其他端点仍取"最早就绪"者，避免端点长期闲置。并列时按 duty 序号——完全确定。
+   *
+   * <p>正线端没有站台可停、也没有 RETURN 线路时，先到车接班会多占正线一个间隔（上述 MT 实测 300 + 20 = 320 秒），
+   * 后到车的上一班反而在收口时被取消；反过来选车才让留下的班次最短折返，不改变无法回库班次的剔除规则。
    *
    * <p>从车库始发的班次（CRET）永远不接在别的 duty 后面：它的出库票会实体化一辆新车，接不了待命列车。 不同车池（多线联编时的不同线路）之间也永远不接。
    */
@@ -231,6 +241,7 @@ public final class VehicleDutyPlanner {
     }
     Set<UUID> feeders =
         trip.routeId() == null ? Set.of() : preferredFeeders.getOrDefault(trip.routeId(), Set.of());
+    boolean latestFirst = RouteTerminals.isMainlineTurnback(trip.originNodeId());
     OpenDuty best = null;
     boolean bestPreferred = false;
     for (OpenDuty duty : open) {
@@ -268,7 +279,9 @@ public final class VehicleDutyPlanner {
       if (best == null
           || (preferred && !bestPreferred)
           || (preferred == bestPreferred
-              && (duty.readyAtSeconds < best.readyAtSeconds
+              && ((latestFirst
+                      ? duty.readyAtSeconds > best.readyAtSeconds
+                      : duty.readyAtSeconds < best.readyAtSeconds)
                   || (duty.readyAtSeconds == best.readyAtSeconds
                       && duty.sequence < best.sequence)))) {
         best = duty;
