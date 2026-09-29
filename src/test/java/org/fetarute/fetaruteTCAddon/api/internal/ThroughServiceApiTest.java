@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -51,6 +52,9 @@ class ThroughServiceApiTest {
   /** WS 交路在 PPK 起直通 DS（指令写成小写，与主数据大小写不同）：KPO 停 → PPK 停（换线）→ HHU:1 停 → WYB:1 终到。 */
   private Route wsThrough;
 
+  /** DS 线的交路，起步即按 WS 运营（首站备注 CHANGE）：KPO:3 停 → WYB:3 终到。 */
+  private Route dsStart;
+
   /** WS 交路里写了一条不存在的线路：KPO 停 → PPK 停（CHANGE:SURC:XX）→ HHU:3 停 → WYB:2 终到。 */
   private Route wsUnknown;
 
@@ -66,6 +70,12 @@ class ThroughServiceApiTest {
         new String[] {"STOP", "SURC:S:PPK:1", "CHANGE:surc:ds"},
         new String[] {"STOP", "SURC:S:HHU:1"},
         new String[] {"TERMINATE", "SURC:S:WYB:1"});
+    dsStart =
+        storage.route(net.ds, "DS-START", RoutePatternType.LOCAL, RouteOperationType.OPERATION);
+    storage.stops(
+        dsStart,
+        new String[] {"STOP", "SURC:S:KPO:3", "CHANGE:SURC:WS"},
+        new String[] {"TERMINATE", "SURC:S:WYB:3"});
     wsUnknown =
         storage.route(net.ws, "WS-XX", RoutePatternType.LOCAL, RouteOperationType.OPERATION);
     storage.stops(
@@ -164,6 +174,26 @@ class ThroughServiceApiTest {
     TrainSnapshot untagged = trains.getTrainSnapshot("t-untagged").orElseThrow();
     assertEquals(Optional.of("SURC"), untagged.operatorCode());
     assertEquals(Optional.of("WS"), untagged.lineCode());
+  }
+
+  @Test
+  void trainSnapshotAtTheStartShowsTheFirstStopChangeLine() {
+    // 首站的 CHANGE 是起步线路：出车（或折返复用）按 entryLine 写下标签，起点的快照就显示目标线路
+    List<RouteStop> stops = storage.provider().routeStops().listByRoute(dsStart.id());
+    RouteLineChanges.LineRef spawnLine =
+        RouteLineChanges.entryLine(stops, 0, new RouteLineChanges.LineRef("SURC", "DS"));
+    sample("t-start", dsStart, 0, spawnLine.operatorCode(), spawnLine.lineCode());
+
+    TrainSnapshot atStart = trains.getTrainSnapshot("t-start").orElseThrow();
+    assertEquals(Optional.of("SURC"), atStart.operatorCode());
+    assertEquals(Optional.of("WS"), atStart.lineCode(), "起点按 WS 对乘客运营");
+    assertEquals("SURC:DS:DS-START", atStart.routeId(), "交路与管理归属仍是 DS");
+    // 交路 API 给出的起点线路与快照一致：首站标出起步线路（列车从来不是以 DS 到达首站的）
+    List<StopInfo> routeStops = routeApi.getRoute(dsStart.id()).orElseThrow().stops();
+    assertEquals(Optional.of(new LineRef("SURC", "WS")), routeStops.get(0).lineChange());
+    assertEquals(Optional.empty(), routeStops.get(1).lineChange());
+    // 首站只按目标线路统计停靠线路，DS 不会因为交路归属 DS 就算进 KPO
+    assertEquals(List.of("SURC:WS"), codes(stations.linesServing(net.kpo.id())));
   }
 
   @Test

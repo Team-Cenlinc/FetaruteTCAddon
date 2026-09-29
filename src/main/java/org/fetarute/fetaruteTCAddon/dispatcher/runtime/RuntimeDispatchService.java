@@ -60,6 +60,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry.LayoverCandidate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
@@ -16465,18 +16467,19 @@ public final class RuntimeDispatchService {
 
     TrainTagHelper.writeTag(
         properties, RouteProgressRegistry.TAG_ROUTE_ID, ticket.routeId().toString());
-    route
-        .metadata()
-        .ifPresent(
-            meta -> {
-              TrainTagHelper.writeTag(
-                  properties, RouteProgressRegistry.TAG_OPERATOR_CODE, meta.operator());
-              TrainTagHelper.writeTag(
-                  properties, RouteProgressRegistry.TAG_LINE_CODE, meta.lineId());
-              TrainTagHelper.writeTag(
-                  properties, RouteProgressRegistry.TAG_ROUTE_CODE, meta.serviceId());
-            });
-    if (route.metadata().isEmpty()) {
+    if (route.metadata().isPresent()) {
+      RouteMetadata meta = route.metadata().get();
+      // 线路标签是对乘客运营的线路：入路站及之前有 CHANGE（定义书第一站之前的起步线路）就直接写目标线路，
+      // 折返复用的列车已停在首站，不会再“抵达”首站去执行它；交路代码仍是交路自身的。
+      RouteLineChanges.LineRef startLine =
+          RouteLineChanges.entryLine(
+              stops, startIndex, new RouteLineChanges.LineRef(meta.operator(), meta.lineId()));
+      TrainTagHelper.writeTag(
+          properties, RouteProgressRegistry.TAG_OPERATOR_CODE, startLine.operatorCode());
+      TrainTagHelper.writeTag(
+          properties, RouteProgressRegistry.TAG_LINE_CODE, startLine.lineCode());
+      TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_ROUTE_CODE, meta.serviceId());
+    } else {
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_OPERATOR_CODE);
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_LINE_CODE);
       TrainTagHelper.removeTagKey(properties, RouteProgressRegistry.TAG_ROUTE_CODE);
@@ -19935,12 +19938,13 @@ public final class RuntimeDispatchService {
    *   <li>仅更新列车 tags（OPERATOR_CODE/LINE_CODE），不改变当前 Route 或 routeIndex
    *   <li>列车继续沿当前 route 运行，但逻辑上归属于新的 operator/line
    *   <li>典型场景：直通车在枢纽站由 A 线移交给 B 线运营
+   *   <li>首站的 CHANGE 是起步线路（定义书第一站之前的写法），出车与折返复用已按它写好标签；列车已在目标线路上时不重复改写、不记日志
    * </ul>
    *
    * @param trainName 列车名
    * @param properties 列车属性
    * @param stop 当前 RouteStop
-   * @return 是否成功执行换线标识更新
+   * @return 是否实际改写了换线标识；指令格式无效或已在目标线路上时为 false
    */
   private boolean handleChangeAction(String trainName, TrainProperties properties, RouteStop stop) {
     if (stop == null || trainName == null || properties == null) {
@@ -19960,6 +19964,21 @@ public final class RuntimeDispatchService {
               + trainName
               + " raw="
               + intent.raw());
+      return false;
+    }
+
+    // 已在目标线路上就不是换线：首站的 CHANGE 是起步线路，出车与折返复用时标签已经写好，
+    // 列车随后“抵达”首站不能再当成到站换线重复改写、重复记日志。标签与目标不一致时照常补写（自愈）。
+    Optional<RouteLineChanges.LineRef> currentLine =
+        RouteLineChanges.LineRef.of(
+            TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_OPERATOR_CODE)
+                .orElse(null),
+            TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_LINE_CODE)
+                .orElse(null));
+    if (currentLine.isPresent()
+        && currentLine
+            .get()
+            .sameLine(new RouteLineChanges.LineRef(intent.operatorCode(), intent.lineCode()))) {
       return false;
     }
 

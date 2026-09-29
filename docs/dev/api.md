@@ -332,6 +332,7 @@ for (RouteApi.StopInfo stop : detail.stops()) {
 ```
 
 - 每站所属线路 = 该站及之前最后一次换线的目标，没有时为交路自身线路。**换线站本身算新线路**：列车以原线路到达、以新线路发车。
+- **起点的当前线路**：定义书第一站之前的 `CHANGE`（起步线路）存在首站备注里，`StopInfo#lineChange` 在首站给出目标线路；出车与折返复用直接按它写线路标签，所以列车刚出车、还没到首站时，`TrainSnapshot#operatorCode`/`lineCode` 就是这条起步线路（`routeId` 与管理归属仍是交路自身的线路）。
 - 只有真正换线才有值：目标与此前所属线路相同的 CHANGE、缺线路段或有空段的 CHANGE（运行时也不执行）都不算。
 - `LineRef` 的代码在线路存在时按主数据的写法给出（指令可能写成小写），不存在时原样给出；比较请不区分大小写。
 - 列车当前属于哪条线看 `TrainSnapshot#operatorCode`/`lineCode`。

@@ -29,11 +29,13 @@ import org.bukkit.block.sign.SignSide;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
@@ -410,13 +412,37 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (properties == null || runId == null || service == null || route == null) {
       return;
     }
+    TrainSpawnTagInitializer.replaceLifecycleTags(
+        properties, spawnTags(runId, service, depotId, spawnPattern, route, provider, now));
+  }
+
+  /**
+   * 出库车的生命周期标签。
+   *
+   * <p>线路标签（{@code FTA_OPERATOR_CODE}/{@code FTA_LINE_CODE}）是列车对乘客运营的线路：首站有效 CHANGE
+   * 的目标（定义书第一站之前的起步线路，见 {@link RouteLineChanges#entryLine}），没有时为交路自身的线路。 CHANGE
+   * 是“抵达该站后”执行的，出库车没有抵达首站，所以要在这里就写成目标线路；交路代码与管理归属（交路组、时刻表）不受影响。
+   */
+  static Map<String, String> spawnTags(
+      UUID runId,
+      SpawnService service,
+      NodeId depotId,
+      String spawnPattern,
+      Route route,
+      StorageProvider provider,
+      Instant now) {
     Instant ts = now == null ? Instant.now() : now;
+    List<RouteStop> stops =
+        provider == null ? List.of() : provider.routeStops().listByRoute(route.id());
+    RouteLineChanges.LineRef line =
+        RouteLineChanges.entryLine(
+            stops, 0, new RouteLineChanges.LineRef(service.operatorCode(), service.lineCode()));
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
     tags.put("FTA_ROUTE_ID", service.routeId().toString());
     tags.put("FTA_ROUTE_CODE", service.routeCode());
-    tags.put("FTA_LINE_CODE", service.lineCode());
-    tags.put("FTA_OPERATOR_CODE", service.operatorCode());
+    tags.put("FTA_LINE_CODE", line.lineCode());
+    tags.put("FTA_OPERATOR_CODE", line.operatorCode());
     tags.put("FTA_PATTERN", route.patternType().name());
     tags.put("FTA_DEPOT_ID", depotId != null ? depotId.value() : "");
     tags.put(TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "true");
@@ -426,14 +452,14 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     tags.put("FTA_DEST_CODE", "");
     tags.put("FTA_DEST_NAME", "");
 
-    RouteDestinationResolver.resolve(provider, route)
+    RouteDestinationResolver.resolve(
+            stops, Optional.ofNullable(provider), route.name(), route.code())
         .ifPresent(
             dest -> {
               tags.put("FTA_DEST_CODE", dest.code());
               tags.put("FTA_DEST_NAME", dest.name());
             });
-
-    TrainSpawnTagInitializer.replaceLifecycleTags(properties, tags);
+    return tags;
   }
 
   /**

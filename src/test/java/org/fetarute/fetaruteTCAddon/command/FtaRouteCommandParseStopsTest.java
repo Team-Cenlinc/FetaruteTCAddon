@@ -4,7 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyMap;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
@@ -397,6 +399,150 @@ class FtaRouteCommandParseStopsTest {
     assertTrue(stops.get(0).waypointNodeId().isEmpty());
     String notes = stops.get(0).notes().orElse("");
     assertTrue(notes.contains("DYNAMIC:SURN:D:DEPOT:[1:3]"));
+  }
+
+  // ---- 起步线路：第一站之前的 CHANGE 并入首站备注 ----
+
+  private static Optional<List<RouteStop>> parseBook(
+      FtaRouteCommand command, LocaleManager locale, String... texts) {
+    List<FtaRouteCommand.BookLine> lines = new java.util.ArrayList<>();
+    for (int i = 0; i < texts.length; i++) {
+      lines.add(new FtaRouteCommand.BookLine(i + 1, texts[i]));
+    }
+    return command.parseStopsFromBook(
+        locale, mockProvider(), UUID.randomUUID(), UUID.randomUUID(), mock(Player.class), lines);
+  }
+
+  @Test
+  void parseStopsFromBookMergesALeadingChangeIntoTheFirstStop() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+
+    List<RouteStop> stops =
+        parseBook(
+                command,
+                mockLocale(),
+                "# 起步即按 WS 运营",
+                "CHANGE:SURC:WS",
+                "",
+                "STOP SURC:S:NTA:1",
+                "STOP SURC:S:HHU:1 dwell=30",
+                "CHANGE:SURC:MT",
+                "TERM SURC:S:PPK:1")
+            .orElseThrow();
+
+    assertEquals(3, stops.size());
+    assertEquals("SURC:S:NTA:1", stops.get(0).waypointNodeId().orElse(""));
+    assertEquals("CHANGE:SURC:WS", stops.get(0).notes().orElse(""), "起步 CHANGE 存在首站备注里");
+    assertEquals("CHANGE:SURC:MT", stops.get(1).notes().orElse(""), "中途站的 CHANGE 照旧附着在上一站");
+    assertTrue(stops.get(2).notes().isEmpty());
+  }
+
+  @Test
+  void parseStopsFromBookAppendsTheLeadingChangeAfterTheFirstStopActions() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+
+    List<RouteStop> dynamicFirst =
+        parseBook(
+                command,
+                mockLocale(),
+                "CHANGE:SURC:WS",
+                "STOP DYNAMIC:SURC:S:NTA:[1:3]",
+                "TERM SURC:S:PPK:1")
+            .orElseThrow();
+    assertEquals(
+        "DYNAMIC:SURC:S:NTA:[1:3]\nCHANGE:SURC:WS", dynamicFirst.get(0).notes().orElse(""));
+
+    List<RouteStop> cretFirst =
+        parseBook(
+                command,
+                mockLocale(),
+                "CHANGE:SURN:LINE2",
+                "CRET SURN:D:DEPOT:1",
+                "SURN:S:STATION:1")
+            .orElseThrow();
+    assertEquals("CRET SURN:D:DEPOT:1\nCHANGE:SURN:LINE2", cretFirst.get(0).notes().orElse(""));
+
+    List<RouteStop> cretDynamicFirst =
+        parseBook(
+                command,
+                mockLocale(),
+                "change:SURN:LINE2",
+                "CRET DYNAMIC:SURN:D:DEPOT:[1:3]",
+                "SURN:S:STATION:1")
+            .orElseThrow();
+    assertEquals(
+        "CRET DYNAMIC:SURN:D:DEPOT:[1:3]\nCHANGE:SURN:LINE2",
+        cretDynamicFirst.get(0).notes().orElse(""));
+  }
+
+  @Test
+  void leadingChangeStoresTheSameAsTheLegacyLineUnderTheFirstStop() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+
+    List<RouteStop> leading =
+        parseBook(
+                command, locale, "CHANGE:SURC:WS", "STOP DYNAMIC:SURC:S:NTA:[1:3]", "SURC:S:PPK:1")
+            .orElseThrow();
+    // 旧写法：CHANGE 写在第一站下一行，继续接受，存储结果与新写法相同
+    List<RouteStop> legacy =
+        parseBook(
+                command, locale, "STOP DYNAMIC:SURC:S:NTA:[1:3]", "CHANGE:SURC:WS", "SURC:S:PPK:1")
+            .orElseThrow();
+
+    assertEquals(legacy.size(), leading.size());
+    for (int i = 0; i < leading.size(); i++) {
+      assertEquals(legacy.get(i).notes(), leading.get(i).notes(), "seq=" + i);
+      assertEquals(legacy.get(i).waypointNodeId(), leading.get(i).waypointNodeId(), "seq=" + i);
+      assertEquals(legacy.get(i).passType(), leading.get(i).passType(), "seq=" + i);
+    }
+  }
+
+  @Test
+  void parseStopsFromBookStillRejectsOtherActionsBeforeTheFirstStop() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    for (String action : List.of("DYNAMIC:SURC:S:NTA:[1:3]", "ACTION:foo", "dynamic:SURC:S:NTA")) {
+      LocaleManager locale = mockLocale();
+
+      Optional<List<RouteStop>> result = parseBook(command, locale, action, "STOP SURC:S:NTA:1");
+
+      assertTrue(result.isEmpty(), action);
+      verify(locale).component(eq("command.route.define.action-first"), anyMap());
+    }
+    // 只有起步 CHANGE、后面没有任何站：没有可附着的站，仍按“不能是动作”报错
+    LocaleManager locale = mockLocale();
+    assertTrue(parseBook(command, locale, "CHANGE:SURC:WS").isEmpty());
+    verify(locale).component(eq("command.route.define.action-first"), anyMap());
+  }
+
+  @Test
+  void parseStopsFromBookRejectsAmbiguousStartLines() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+
+    // 第一站之前出现多条 CHANGE
+    LocaleManager twoLeading = mockLocale();
+    assertTrue(
+        parseBook(command, twoLeading, "CHANGE:SURC:WS", "CHANGE:SURC:DS", "STOP SURC:S:NTA:1")
+            .isEmpty());
+    verify(twoLeading).component(eq("command.route.define.change-ambiguous"), anyMap());
+
+    // 第一站之前的 CHANGE 与首站下一行的旧写法 CHANGE 并存
+    LocaleManager both = mockLocale();
+    assertTrue(
+        parseBook(command, both, "CHANGE:SURC:WS", "STOP SURC:S:NTA:1", "CHANGE:SURC:DS")
+            .isEmpty());
+    verify(both).component(eq("command.route.define.change-ambiguous"), anyMap());
+
+    // 后一站的 CHANGE 不是首站的：不算歧义
+    assertTrue(
+        parseBook(
+                command,
+                mockLocale(),
+                "CHANGE:SURC:WS",
+                "STOP SURC:S:NTA:1",
+                "STOP SURC:S:HHU:1",
+                "CHANGE:SURC:MT")
+            .isPresent());
   }
 
   private static FetaruteTCAddon mockPlugin() {

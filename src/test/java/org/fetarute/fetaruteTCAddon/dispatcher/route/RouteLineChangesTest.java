@@ -124,6 +124,52 @@ class RouteLineChangesTest {
   }
 
   @Test
+  void entryLineTakesTheFirstStopChangeAsTheStartingLine() {
+    // 起步 CHANGE 存在首站备注里（定义书写在第一站之前）：出车没有“抵达首站”，标签要一开始就是目标线路。
+    List<RouteStop> stops = new ArrayList<>();
+    stops.add(stop("SURC:S:NTA:1", "CHANGE:SURC:WS"));
+    stops.add(stop("SURC:S:HHU:1", "CHANGE:SURC:MT"));
+    stops.add(stop("SURC:S:PPK:1", null));
+    assertEquals(WS, RouteLineChanges.entryLine(stops, 0, new LineRef("SURC", "MT")));
+    // 与显示口径同一把尺子：起点显示的线路就是出车写下的标签
+    assertEquals(
+        RouteLineChanges.lineAt(stops, 0, new LineRef("SURC", "MT")),
+        RouteLineChanges.entryLine(stops, 0, new LineRef("SURC", "MT")));
+  }
+
+  @Test
+  void entryLineKeepsTheRouteLineWithoutAValidFirstStopChange() {
+    LineRef route = new LineRef("SURC", "MT");
+    // 首站没有 CHANGE：CHANGE 只写在中途站，出车时仍是交路自身的线路
+    assertEquals(route, RouteLineChanges.entryLine(throughRoute(), 0, route));
+    // 首站 CHANGE 与交路同线（大小写不同也算）：结果就是交路自身的线路
+    List<RouteStop> sameLine = List.of(stop("SURC:S:KPO:1", "CHANGE:surc:mt"));
+    assertTrue(RouteLineChanges.entryLine(sameLine, 0, route).sameLine(route));
+    // 格式错误的 CHANGE 运行时不执行，这里也不算
+    for (String notes : List.of("CHANGE:SURC", "CHANGE::WS", "CHANGE:SURC:", "CHANGE")) {
+      assertEquals(
+          route, RouteLineChanges.entryLine(List.of(stop("SURC:S:KPO:1", notes)), 0, route), notes);
+    }
+    // 没有停靠表
+    assertEquals(route, RouteLineChanges.entryLine(List.of(), 0, route));
+    assertEquals(route, RouteLineChanges.entryLine(null, 0, route));
+  }
+
+  @Test
+  void entryLineHonoursChangesUpToTheEntryStop() {
+    LineRef route = new LineRef("SURC", "MT");
+    List<RouteStop> stops = new ArrayList<>();
+    stops.add(stop("SURC:S:NTA:1", "DYNAMIC:SURC:S:NTA:[1:3]\nCHANGE:SURC:WS"));
+    stops.add(stop("SURC:S:HHU:1", "CHANGE:SURC:MT"));
+    stops.add(stop("SURC:S:PPK:1", null));
+    assertEquals(WS, RouteLineChanges.entryLine(stops, 0, route), "首站备注里多行动作也能找到 CHANGE");
+    // 折返复用从中途下标入路：前面的 CHANGE 不会由“抵达”来执行，入路时按该处应属的线路
+    assertEquals(route, RouteLineChanges.entryLine(stops, 1, route));
+    assertEquals(WS, RouteLineChanges.entryLine(stops.subList(0, 1), 5, route), "越过末尾按最后一站算");
+    assertEquals(WS, RouteLineChanges.entryLine(stops, -1, route), "负下标按首站算，不像 lineAt 那样取交路自身线路");
+  }
+
+  @Test
   void sameLineIgnoresCase() {
     assertTrue(new LineRef("surc", " ds ").sameLine(DS));
     assertFalse(WS.sameLine(DS));

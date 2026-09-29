@@ -15,6 +15,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  *
  * <ul>
  *   <li><b>某站所属线路</b>：该站及之前最后一个有效 CHANGE 的目标；没有时为交路自身的线路。换线站本身按新线路算—— 列车以原线路到达、以新线路发车，到站那一刻标签就已改写。
+ *   <li><b>起步线路</b>：首站备注里的 CHANGE（定义书第一站之前的 {@code CHANGE:<运营商>:<线路>}）表示起步即按该线路运营。 CHANGE
+ *       是“抵达该站后”执行的，出车与折返复用没有“抵达”首站，所以直接按 {@link #entryLine} 写线路标签； 之后列车抵达首站时已在目标线路上，不再算一次换线。
  *   <li><b>换线</b>：目标与此前所属线路不同（运营商、线路代码均不区分大小写）。写了同一条线的 CHANGE 不算换线。
  *   <li><b>有效</b>：运营商与线路代码都不为空。格式无效的 CHANGE 运行时不执行，这里也不算。
  *   <li><b>列车当前线路</b>：以列车的线路标签为准（出车与 CHANGE 写入）；标签不全时为交路自身的线路。 运行时执行 CHANGE
@@ -164,6 +166,21 @@ public final class RouteLineChanges {
       }
     }
     return routeLine;
+  }
+
+  /**
+   * 列车从下标 {@code index} 处入路（出车、折返复用）时应带的线路标签。
+   *
+   * <p>CHANGE 是“抵达该站后”执行的，而入路的列车没有经过入路站之前的站，也不会“抵达”入路站本身：出车与折返复用都直接写标签， 所以入路站及之前的 CHANGE
+   * 要在这里一并算上。定义书第一站之前的 {@code CHANGE:<运营商>:<线路>} 存在首站备注里，效果就是“起步即按该线路运营”； 没有有效
+   * CHANGE（含格式错误、未写）时仍是交路自身的线路。结果与 {@link #lineAt} 同一把尺子，起点显示的线路就是出车写下的标签。
+   *
+   * @param stops 停靠表（与交路 waypoints 对齐）
+   * @param index 入路站的下标；出车为 0，折返复用为匹配到的下标；负数按 0 算，越过末尾按最后一站算
+   * @param routeLine 交路自身的线路
+   */
+  public static LineRef entryLine(List<RouteStop> stops, int index, LineRef routeLine) {
+    return lineAt(stops, Math.max(0, index), routeLine);
   }
 
   /**

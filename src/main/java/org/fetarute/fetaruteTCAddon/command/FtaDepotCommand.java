@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
@@ -262,9 +263,24 @@ public final class FtaDepotCommand {
                     properties.clearDestinationRoute();
                     properties.clearDestination();
                     TrainSpawnTagInitializer.initializeOwner(properties, trainName);
-                    addTags(properties, runId, resolved, depotId, pattern, destInfo);
+                    List<RouteStop> routeStops =
+                        provider.routeStops().listByRoute(resolved.route().id());
+                    // 线路标签取起步线路：首站有 CHANGE（定义书第一站之前的写法）时，出库车没有“抵达首站”，标签直接写目标线路。
+                    RouteLineChanges.LineRef startLine =
+                        RouteLineChanges.entryLine(
+                            routeStops,
+                            0,
+                            new RouteLineChanges.LineRef(
+                                resolved.operator().code(), resolved.line().code()));
+                    addTags(properties, runId, resolved, startLine, depotId, pattern, destInfo);
                     initializeRouteIndex(
-                        properties, provider, resolved.route(), depotId, sender, locale);
+                        properties,
+                        provider,
+                        resolved.route(),
+                        routeStops,
+                        depotId,
+                        sender,
+                        locale);
                   }
                   Bukkit.getScheduler()
                       .runTaskLater(
@@ -1069,6 +1085,7 @@ public final class FtaDepotCommand {
       TrainProperties properties,
       UUID runId,
       ResolvedRoute resolved,
+      RouteLineChanges.LineRef startLine,
       NodeId depotId,
       String spawnPattern,
       RouteDestinationResolver.DestinationInfo destInfo) {
@@ -1080,8 +1097,8 @@ public final class FtaDepotCommand {
     tags.put("FTA_RUN_ID", runId.toString());
     tags.put("FTA_ROUTE_ID", resolved.route().id().toString());
     tags.put("FTA_ROUTE_CODE", resolved.route().code());
-    tags.put("FTA_LINE_CODE", resolved.line().code());
-    tags.put("FTA_OPERATOR_CODE", resolved.operator().code());
+    tags.put("FTA_LINE_CODE", startLine.lineCode());
+    tags.put("FTA_OPERATOR_CODE", startLine.operatorCode());
     tags.put("FTA_PATTERN", resolved.route().patternType().name());
     tags.put("FTA_DEPOT_ID", depotId != null ? depotId.value() : "");
     tags.put(TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "true");
@@ -1096,13 +1113,13 @@ public final class FtaDepotCommand {
       TrainProperties properties,
       org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
       Route route,
+      List<RouteStop> stops,
       NodeId depotId,
       CommandSender sender,
       LocaleManager locale) {
     if (properties == null || provider == null || route == null || depotId == null) {
       return;
     }
-    List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
     if (stops.isEmpty()) {
       sender.sendMessage(
           locale.component("command.depot.spawn.route-empty", Map.of("route", route.code())));
