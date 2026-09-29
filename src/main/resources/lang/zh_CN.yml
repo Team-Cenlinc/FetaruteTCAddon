@@ -432,6 +432,10 @@ command:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"
         more: "<gray>… 还有 <white><more></white> 处未显示</gray>"
+      unterminated:
+        header: "<prefix> <yellow>有 <white><count></white> 个探索方向超过上限仍未遇到节点，已按尽头线处理</yellow> <gray>(world=<white><world></white>；另一侧视为无 FTA 节点或施工中。若此处本应为真实区间，请补设节点牌子或截断轨道后重建)</gray>"
+        entry: "<gray>-</gray> <white><node></white> <gray>→ 探索止于</gray> <location>"
+        more: "<gray>… 另有 <white><more></white> 个方向未显示，完整清单见控制台</gray>"
       duplicate-node-id:
         header: "<prefix> <red>发现 <white><count></white> 个重复 nodeId</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <white><node></white> <gray>→</gray> <locations>"

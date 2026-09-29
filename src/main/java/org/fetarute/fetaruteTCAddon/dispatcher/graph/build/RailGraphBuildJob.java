@@ -367,7 +367,10 @@ public final class RailGraphBuildJob implements Runnable {
         // 非续跑状态，释放 chunk tickets
         connectedDiscovery.releaseChunkTickets();
       }
-      onFinish.accept(new RailGraphBuildOutcome(result, completion, nextContinuation));
+      List<UnterminatedDirection> unterminatedDirections =
+          currentNodeExplorer != null ? currentNodeExplorer.unterminatedDirections() : List.of();
+      onFinish.accept(
+          new RailGraphBuildOutcome(result, completion, nextContinuation, unterminatedDirections));
     } catch (Throwable ex) {
       cancel();
       onFailure.accept(ex);

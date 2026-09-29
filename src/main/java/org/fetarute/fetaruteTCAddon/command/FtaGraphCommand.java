@@ -18,6 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -65,6 +66,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob.BuildMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.UnterminatedDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideLister;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailControlParsers;
@@ -447,6 +449,8 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                                      reportUnterminatedDirections(
+                                          sender, world, outcome.unterminatedDirections());
                                       validateRoutesAfterBuild(
                                           sender, world, applied.result().graph());
                                       sender.sendMessage(
@@ -600,6 +604,8 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                                      reportUnterminatedDirections(
+                                          sender, world, outcome.unterminatedDirections());
                                       validateRoutesAfterBuild(
                                           sender, world, applied.result().graph());
                                       sender.sendMessage(
@@ -6598,6 +6604,8 @@ public final class FtaGraphCommand {
                               + " 条现有边",
                           NamedTextColor.YELLOW));
                 }
+                reportUnterminatedDirections(
+                    sender, world, nodeToNodeExplorer.unterminatedDirections());
 
                 sender.sendMessage(locale.component("command.graph.build.reroute-hint"));
               }
@@ -7040,6 +7048,72 @@ public final class FtaGraphCommand {
       sender.sendMessage(
           locale.component(
               "command.graph.build.duplicate-node-id.more",
+              Map.of("more", String.valueOf(count - limit))));
+    }
+  }
+
+  /**
+   * 汇报按尽头线处理的超距方向。
+   *
+   * <p>控制台始终写一行完整清单；玩家执行时另在聊天栏列出前 10 条并附可点击传送，便于现场核对该延伸线确实没有 FTA 节点。若其中本应有一条真实区间，它已从图中缺失，
+   * 需补节点牌子或截断轨道后重建。
+   */
+  private void reportUnterminatedDirections(
+      CommandSender sender, World world, List<UnterminatedDirection> directions) {
+    if (directions == null || directions.isEmpty()) {
+      return;
+    }
+    plugin
+        .getLogger()
+        .warning(
+            "调度图构建：以下探索方向超过上限仍未遇到节点，已按尽头线处理（另一侧视为无 FTA 节点或施工中）: world="
+                + world.getName()
+                + " "
+                + directions.stream()
+                    .map(
+                        direction ->
+                            direction.startNode().value()
+                                + "@"
+                                + direction.stopPosition().x()
+                                + ","
+                                + direction.stopPosition().y()
+                                + ","
+                                + direction.stopPosition().z())
+                    .collect(Collectors.joining("; ")));
+    if (!(sender instanceof Player)) {
+      return;
+    }
+
+    LocaleManager locale = plugin.getLocaleManager();
+    int count = directions.size();
+    sender.sendMessage(
+        locale.component(
+            "command.graph.build.unterminated.header",
+            Map.of("count", String.valueOf(count), "world", world.getName())));
+    int limit = Math.min(10, count);
+    for (UnterminatedDirection direction : directions.subList(0, limit)) {
+      RailBlockPos stop = direction.stopPosition();
+      String tp = "/tp " + stop.x() + " " + stop.y() + " " + stop.z();
+      Component location =
+          Component.text(stop.x() + " " + stop.y() + " " + stop.z())
+              .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(tp))
+              .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text(tp)));
+      sender.sendMessage(
+          locale.component(
+              "command.graph.build.unterminated.entry",
+              net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                          "node", direction.startNode().value()))
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                          "location", location))
+                  .build()));
+    }
+    if (count > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.graph.build.unterminated.more",
               Map.of("more", String.valueOf(count - limit))));
     }
   }

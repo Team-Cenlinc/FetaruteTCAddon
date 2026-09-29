@@ -49,11 +49,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  *   <li>每走一步检查是否到达另一个节点的锚点
  *   <li>到达则记录边，否则继续走直到超过 maxDistance
  * </ol>
+ *
+ * <p>超过 maxDistance 仍未遇到节点的方向按尽头线处理（{@link UnterminatedDirection}）：另一侧视为没有 FTA 节点（非 FTA
+ * 轨道或施工中），不产生区间，也不降级本轮足迹证据。上限默认取 {@link EdgeExploreMode#NODE_TO_NODE_MAX_DISTANCE}，
+ * 远大于正常区间长度，使"很长但确实接回线网"的区间仍能被发现，而不是被误当成尽头线。
  */
 public final class NodeToNodeEdgeExplorer {
 
-  /** 单条边最大探索距离（blocks） */
-  private static final double DEFAULT_MAX_DISTANCE = 512.0;
+  private static final double DEFAULT_MAX_DISTANCE = EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE;
 
   /** 每 tick 最大移动步数（大幅增加以提升速度） */
   private static final int DEFAULT_MAX_STEPS_PER_TICK = 2048;
@@ -77,6 +80,9 @@ public final class NodeToNodeEdgeExplorer {
   private EdgeExplorationTask currentTask;
   private boolean done = false;
   private boolean footprintEvidenceComplete = true;
+
+  /** 超距方向：按尽头线处理，构建结束后汇总提示。 */
+  private final Set<UnterminatedDirection> unterminatedDirections = new TreeSet<>();
 
   /**
    * 创建边探索器。
@@ -351,14 +357,6 @@ public final class NodeToNodeEdgeExplorer {
     }
     captureCurrentPath(ws);
 
-    // 检查是否超过最大距离
-    if (walker.movedTotal > maxDistance) {
-      markFootprintEvidenceIncomplete("max-distance:" + startNodeId.value());
-      debugLogger.accept("Walker 超过最大距离: node=" + startNodeId + " distance=" + walker.movedTotal);
-      return true;
-    }
-
-    // 检查当前位置是否是另一个节点的锚点
     Block currentBlock = walker.state.railBlock();
     if (currentBlock == null) {
       markFootprintEvidenceIncomplete("rail-block-missing:" + startNodeId.value());
@@ -368,9 +366,20 @@ public final class NodeToNodeEdgeExplorer {
     RailBlockPos currentPos =
         new RailBlockPos(currentBlock.getX(), currentBlock.getY(), currentBlock.getZ());
     NodeId targetNodeId = anchorIndex.get(currentPos);
+    WalkerStep step = classifyStep(startNodeId, targetNodeId, walker.movedTotal, maxDistance);
+    if (step == WalkerStep.UNTERMINATED) {
+      recordUnterminatedDirection(new UnterminatedDirection(startNodeId, currentPos));
+      debugLogger.accept(
+          "Walker 超过最大距离，按尽头线处理: node="
+              + startNodeId
+              + " distance="
+              + walker.movedTotal
+              + " stop="
+              + currentPos);
+      return true;
+    }
 
-    if (targetNodeId != null && !targetNodeId.equals(startNodeId)) {
-      // 找到了另一个节点！记录边
+    if (step == WalkerStep.ARRIVED) {
       int distance = (int) Math.round(walker.movedTotal);
       EdgeId edgeId = EdgeId.undirected(startNodeId, targetNodeId);
 
@@ -386,8 +395,30 @@ public final class NodeToNodeEdgeExplorer {
       return true;
     }
 
-    // 还没到达节点，继续
     return false;
+  }
+
+  /** 单步推进后的判定结果。 */
+  enum WalkerStep {
+    /** 到达另一个节点的锚点，记录区间。 */
+    ARRIVED,
+    /** 超过探索上限仍未到达节点，按尽头线处理。 */
+    UNTERMINATED,
+    /** 继续前进。 */
+    CONTINUE
+  }
+
+  /**
+   * 判定 walker 本步的结果。
+   *
+   * <p>先判到达、再判超距：走到上限的同一步恰好踏上节点锚点时，这是一条真实区间，不能当成尽头线丢掉。回到起点自身的锚点不算到达。
+   */
+  static WalkerStep classifyStep(
+      NodeId startNodeId, NodeId nodeAtPosition, double movedTotal, double maxDistance) {
+    if (nodeAtPosition != null && !nodeAtPosition.equals(startNodeId)) {
+      return WalkerStep.ARRIVED;
+    }
+    return movedTotal > maxDistance ? WalkerStep.UNTERMINATED : WalkerStep.CONTINUE;
   }
 
   private void captureCurrentPath(WalkerState walkerState) {
@@ -439,10 +470,24 @@ public final class NodeToNodeEdgeExplorer {
   /**
    * 返回本轮探索是否仍具备发布精确物理足迹的完整证据。
    *
-   * <p>超距、无效 anchor、无可用 walker 或异常缺失轨道状态都会永久将本轮降级为不完整；已经成功发现的 edge 坐标仍保留，但最终联锁进入 fail-closed 哨兵模式。
+   * <p>无效 anchor、无可用 walker 或异常缺失轨道状态都会永久将本轮降级为不完整；已经成功发现的 edge 坐标仍保留，但最终联锁进入 fail-closed
+   * 哨兵模式。超距不在此列，见 {@link #unterminatedDirections()}。
    */
   public boolean hasCompleteFootprintEvidence() {
     return footprintEvidenceComplete;
+  }
+
+  /**
+   * 返回按尽头线处理的超距方向（按起点节点、停止位置排序）。
+   *
+   * <p>这些方向走满 maxDistance 仍未遇到任何节点。若其中本应有一条真实区间，它会从图中缺失，需要在停止位置附近补节点牌或截断轨道。
+   */
+  public List<UnterminatedDirection> unterminatedDirections() {
+    return List.copyOf(unterminatedDirections);
+  }
+
+  void recordUnterminatedDirection(UnterminatedDirection direction) {
+    unterminatedDirections.add(Objects.requireNonNull(direction, "direction"));
   }
 
   void markFootprintEvidenceIncomplete(String reason) {
