@@ -354,6 +354,26 @@ class PhasePlannerTest {
         phases.notes().toString());
   }
 
+  /**
+   * 被接方向终到没有出入库线路的站台（原地折返端、但不是正线）时，周期余数照常放到远端：车停在站台上不挡人。 WS 的 NTA 多等 190s 化解 LWN 咽喉冲突就靠它；
+   * 若把无库站台当成正线一样禁止，WS 的咽喉冲突会回来。
+   */
+  @Test
+  void farEndWaitIsStillPlacedAtADepotlessPlatform() {
+    PhasePlanner.Phases phases =
+        PhasePlanner.plan(
+            wsLikeGroups(),
+            Map.of("full", 150, "short", 150),
+            Map.of(RA, 575, RB, 582, RS, 226),
+            TurnaroundTable.fixed(20),
+            3600,
+            Map.of(),
+            new PhasePlanner.Topology(
+                Set.of("OP:S:A"), (g, a, d) -> 55, null, Set.of(RA), Set.of()));
+
+    assertEquals(78, phases.connections().get(0).farEndWaitSeconds());
+  }
+
   /** 被接方向的起点若是它自己往返对的锚定端（本对的车已经喂它），就不做跨组接续，小交路照旧按合流点交错。 */
   @Test
   void noConnectionWhereTheFedOriginIsAlreadyFedByItsOwnPair() {

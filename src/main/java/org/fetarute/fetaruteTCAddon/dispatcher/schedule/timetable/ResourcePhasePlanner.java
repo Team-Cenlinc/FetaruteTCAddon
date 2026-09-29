@@ -29,7 +29,8 @@ import java.util.UUID;
  *   <li><b>正向</b>方向的 δ 是整组平移，不改变组内往返对的相对关系。
  *   <li><b>反向</b>方向的 δ 是<b>端点多等</b>：车到终点之后多停一会儿再发，所以上限是 {@code --max-idle} （再久运行时就把它收回库了）。相位 = 锚定 +
  *       δ，子网格与派车器都不用改，{@code readyAt} 天然吃下这段等待。
- *   <li>按车接续链、以及锚在正线折返点的往返对，整体一起平移（见 {@link #unitsOf}）：前者拆开会换接车，后者单独动一边会把等待加回正线上。
+ *   <li>按车接续链、以及锚在原地折返端（正线折返点，或没有出入库线路的端点）的往返对，整体一起平移（见 {@link #unitsOf}）：前者拆开会换接车，
+ *       后者单独动一边会把等待加到车只能原地折返的那一端——正线上挡后车，无库端点上超出闲置上限、接不上下一班。
  * </ul>
  *
  * <p>评估不另写几何模型，直接把模板铺 {@link #CYCLES} 个周期交给 {@link TimetableConflictChecker}， 再用 {@link
@@ -44,8 +45,16 @@ public final class ResourcePhasePlanner {
   /** 扫描步长。 */
   public static final int SCAN_STEP_SECONDS = 10;
 
-  /** 铺几个周期来评估。周期流的相对相位在整个窗口里重复，前几个周期已经代表全部。 */
+  /**
+   * 铺几个周期来评估。周期流的相对相位在整个窗口里重复，前几个周期已经代表全部。
+   *
+   * <p>周期数按<b>最长的那个间隔</b>算成一个共同的时间视野，所有流都铺满这一段（{@link #cyclesFor}）：间隔不同的组（例如 300 秒的干线与 600 秒的速达）
+   * 各铺自己的 3 个周期，短间隔的流只覆盖 900 秒，长间隔的流的后半段就没有对手可撞，评估会把它们判成"零冲突"。
+   */
   public static final int CYCLES = 3;
+
+  /** 单条流最多铺几个周期：间隔悬殊（60 秒对 3600 秒）时视野会逼出上百个周期，冲突检查的代价跟着涨；封顶后短间隔的流覆盖不满视野，只退回到旧行为的方向。 */
+  static final int MAX_CYCLES = 4 * CYCLES;
 
   private ResourcePhasePlanner() {}
 
@@ -81,7 +90,7 @@ public final class ResourcePhasePlanner {
    * @param separationSeconds 裕量
    * @param maxWaitSeconds 可吸收判据用的单步上限
    * @param maxIdleSeconds 反向 δ 的上限（端点多等不能超过运行时的闲置回收）
-   * @param mainlineTurnbackRoutes 终到正线折返点的 route：含它们的往返对锚在正线端，只能整对平移
+   * @param inPlaceTurnbackRoutes 终到原地折返端的 route：含它们的往返对锚在这一端，只能整对平移
    * @return 带 {@code deltaByDirection} 与 {@code resourceNotes} 的新 {@code Phases}
    */
   public static PhasePlanner.Phases refine(
@@ -94,7 +103,7 @@ public final class ResourcePhasePlanner {
       int separationSeconds,
       int maxWaitSeconds,
       int maxIdleSeconds,
-      Set<UUID> mainlineTurnbackRoutes) {
+      Set<UUID> inPlaceTurnbackRoutes) {
     if (phases == null || groups == null || templates == null || templates.isEmpty()) {
       return phases;
     }
@@ -106,7 +115,8 @@ public final class ResourcePhasePlanner {
     }
     Map<String, Integer> delta = new LinkedHashMap<>();
     List<String> notes = new ArrayList<>();
-    for (Unit unit : unitsOf(order, groups, phases.connections(), mainlineTurnbackRoutes)) {
+    int horizonSeconds = horizonOf(order);
+    for (Unit unit : unitsOf(order, groups, phases.connections(), inPlaceTurnbackRoutes)) {
       int limit = unit.reverse() ? Math.max(0, maxIdleSeconds) : unit.interval();
       Score best = null;
       int bestDelta = 0;
@@ -123,7 +133,8 @@ public final class ResourcePhasePlanner {
                 profiles,
                 index,
                 separationSeconds,
-                maxWaitSeconds);
+                maxWaitSeconds,
+                horizonSeconds);
         // δ=0 先被评，并列时保持它——端点零等待是缺省，只有真能减少不可吸收数才付出等待。
         if (best == null || score.compareTo(best) < 0) {
           best = score;
@@ -207,13 +218,13 @@ public final class ResourcePhasePlanner {
    * 按车接续把几个方向的相位钉在一起（喂车方向到站 + 折返 = 被接方向发车；被接方向的往返对反向在远端多等）， 单独给其中任何一个 δ
    * 都会把接续拆开——实测拆开之后派车器改接另一辆车，交路形态整个翻掉。所以接续链上的方向 （含它们各自的往返对）并成一个单元，只能一起平移；其余方向照旧一个一个定。
    *
-   * <p>锚在正线折返点的往返对同样整对平移：正线上的停留 = 折返 + 反向 δ − 正向 δ，单独给任何一边 δ 都会把等待加回正线上。
+   * <p>锚在原地折返端的往返对同样整对平移：那一端的停留 = 折返 + 反向 δ − 正向 δ，单独给任何一边 δ 都会把等待加回车只能原地折返的一端。
    */
   private static List<Unit> unitsOf(
       List<Direction> order,
       List<ServiceGroupClassifier.Group> groups,
       List<PhasePlanner.Connection> connections,
-      Set<UUID> mainlineTurnbackRoutes) {
+      Set<UUID> inPlaceTurnbackRoutes) {
     Map<String, String> parent = new LinkedHashMap<>();
     for (Direction direction : order) {
       parent.put(direction.key(), direction.key());
@@ -225,7 +236,7 @@ public final class ResourcePhasePlanner {
     }
     for (ServiceGroupClassifier.Group group : groups) {
       for (ServiceGroupClassifier.Direction direction : group.directions()) {
-        if (PhasePlanner.turnsBackOnMainline(direction, mainlineTurnbackRoutes)) {
+        if (PhasePlanner.hasAnyRoute(direction, inPlaceTurnbackRoutes)) {
           linked.add(direction.key());
         }
       }
@@ -291,6 +302,20 @@ public final class ResourcePhasePlanner {
     return root;
   }
 
+  /** 评估视野：{@link #CYCLES} 个最长间隔。 */
+  private static int horizonOf(List<Direction> order) {
+    int longest = order.stream().mapToInt(Direction::interval).max().orElse(0);
+    return CYCLES * longest;
+  }
+
+  /** 这条流在共同视野里要铺几个周期：至少 {@link #CYCLES} 个，间隔更短的流铺得更多，好覆盖同一段时间。 */
+  static int cyclesFor(int intervalSeconds, int horizonSeconds) {
+    if (intervalSeconds <= 0) {
+      return CYCLES;
+    }
+    return Math.min(MAX_CYCLES, Math.max(CYCLES, Math.ceilDiv(horizonSeconds, intervalSeconds)));
+  }
+
   /** 把所有方向按当前 δ 铺开，过一遍冲突模型，按可吸收/不可吸收打分。 */
   private static Score score(
       List<Direction> order,
@@ -300,7 +325,8 @@ public final class ResourcePhasePlanner {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
-      int maxWaitSeconds) {
+      int maxWaitSeconds,
+      int horizonSeconds) {
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     // 每条流从哪个站台组始发——这就是残余判据要的"后车在哪等"。手上没有成品表，但这一条是知道的。
     Map<String, String> waitingPoints = new LinkedHashMap<>();
@@ -312,7 +338,8 @@ public final class ResourcePhasePlanner {
       int phase =
           phases.phaseByDirection().getOrDefault(direction.key(), 0)
               + delta.getOrDefault(direction.key(), 0);
-      List<TimetableConflictChecker.Movement> unrolled = template.unroll(phase, CYCLES);
+      List<TimetableConflictChecker.Movement> unrolled =
+          template.unroll(phase, cyclesFor(direction.interval(), horizonSeconds));
       // 起点站台组判不出来的就不记：留成"判不出"退回按资源保守判，别让空串被当成车库。
       if (!direction.originGroup().isBlank()) {
         for (TimetableConflictChecker.Movement movement : unrolled) {

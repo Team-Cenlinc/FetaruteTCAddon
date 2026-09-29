@@ -564,7 +564,7 @@ public final class TimetableBuilder {
             separation,
             options.repair().maxWaitSeconds(),
             options.dutyLimits().maxIdleSeconds(),
-            mainlineTurnbackRoutes(prepared.operationPlans()));
+            inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs()));
     List<GroupGrid.DirectionGrid> grids = new ArrayList<>();
     List<Placed> placed = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : gridGroups) {
@@ -900,7 +900,7 @@ public final class TimetableBuilder {
             intervalByGroup,
             prepared.runByRoute(),
             options.dutyLimits().turnaround(),
-            mainlineTurnbackRoutes(prepared.operationPlans())));
+            inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())));
   }
 
   /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
@@ -1592,25 +1592,52 @@ public final class TimetableBuilder {
                   turnaround + in.get().enterOffset(),
                   turnaround + in.get().exitOffset() + sep));
         };
-    return new PhasePlanner.Topology(stubs, cost, geometry, mainlineTurnbackRoutes(operationPlans));
+    return new PhasePlanner.Topology(
+        stubs,
+        cost,
+        geometry,
+        inPlaceTurnbackRoutes(operationPlans, legs),
+        mainlineTurnbackRoutes(operationPlans));
   }
 
   /**
    * 终到正线折返点的运营 route：末站 TERMINATE，终点节点是正线折返点（{@link RouteTerminals#isMainlineTurnback}）。
    *
-   * <p>车在那里停着会挡住同一股道的后车，往返对要把锚点放在这一端（见 {@link PhasePlanner#isForward}）。
+   * <p>车在那里停着会挡住同一股道的后车：往返对要把锚点放在这一端（见 {@link PhasePlanner#isForward}），后面的层也不往这里加等待。
    */
   static Set<UUID> mainlineTurnbackRoutes(List<TimetableRoutePlan> operationPlans) {
     Set<UUID> routes = new HashSet<>();
     for (TimetableRoutePlan plan : operationPlans) {
-      List<TimetableStop> stops = plan.stops();
-      if (RouteTerminals.isMainlineTurnback(plan.terminalNodeId())
-          && !stops.isEmpty()
-          && stops.get(stops.size() - 1).passType() == RouteStopPassType.TERMINATE) {
+      if (terminates(plan) && RouteTerminals.isMainlineTurnback(plan.terminalNodeId())) {
         routes.add(plan.routeId());
       }
     }
     return Set.copyOf(routes);
+  }
+
+  /**
+   * 车只能在终点原地折返的运营 route：{@link #mainlineTurnbackRoutes} 加上末站 TERMINATE、终点没有 RETURN 线路的那些（{@link
+   * VehicleDutyPlanner.Legs#returnLegAt}，与派车器的"能不能回库"同一口径）。
+   *
+   * <p>没有出入库线路的站台（例如 WS 的终点 NTA）车停着不挡人，但一辆车也调不走，只能等本端的下一班：周期余量若堆在那一端，
+   * 超出闲置上限就接不上。往返对因此锚在这一端（余量落在另一端）并整对平移，第三层不能单独动一边。
+   */
+  static Set<UUID> inPlaceTurnbackRoutes(
+      List<TimetableRoutePlan> operationPlans, VehicleDutyPlanner.Legs legs) {
+    Set<UUID> routes = new HashSet<>(mainlineTurnbackRoutes(operationPlans));
+    for (TimetableRoutePlan plan : operationPlans) {
+      if (terminates(plan) && legs.returnLegAt(plan.terminalNodeId()).isEmpty()) {
+        routes.add(plan.routeId());
+      }
+    }
+    return Set.copyOf(routes);
+  }
+
+  /** 末站是 TERMINATE（终到后待命复用），而不是销毁收尾的回库形态。 */
+  private static boolean terminates(TimetableRoutePlan plan) {
+    List<TimetableStop> stops = plan.stops();
+    return !stops.isEmpty()
+        && stops.get(stops.size() - 1).passType() == RouteStopPassType.TERMINATE;
   }
 
   /** 这条 route 跑完之后回库走的线路：与派车器同一条选法（优先回出库的那座车库）。 */

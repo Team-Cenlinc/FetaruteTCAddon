@@ -208,6 +208,33 @@ class ResourcePhasePlannerTest {
         mainline);
   }
 
+  /**
+   * 所有流共用一个评估视野（{@code CYCLES × 最长间隔}）：间隔 300 与 600 混排时，300 的流也要铺满 600 的流 3 个周期那么久。 每流各铺 3
+   * 个自己的周期，短间隔的流只覆盖 900 秒，长间隔的流后半段撞谁都看不见，第三层会把有冲突的偏移判成"零冲突"。 实测 prod 库加入
+   * MT-3（600）与干线（300）混排后，旧评估选出的偏移在最终表上有 138 处让不掉的冲突，统一视野后 0 处。
+   */
+  @Test
+  void allFlowsShareOneEvaluationHorizon() {
+    int horizon = ResourcePhasePlanner.CYCLES * 600;
+
+    assertEquals(6, ResourcePhasePlanner.cyclesFor(300, horizon), "短间隔的流铺得更多");
+    assertEquals(ResourcePhasePlanner.CYCLES, ResourcePhasePlanner.cyclesFor(600, horizon));
+    assertEquals(7, ResourcePhasePlanner.cyclesFor(270, horizon), "不整除时向上取整：视野只会多不会少");
+    assertEquals(
+        ResourcePhasePlanner.CYCLES,
+        ResourcePhasePlanner.cyclesFor(300, ResourcePhasePlanner.CYCLES * 300),
+        "间隔相同时与原来每流 CYCLES 个周期一致");
+  }
+
+  /** 间隔悬殊时周期数封顶：60 秒对 3600 秒不能逼出上百个周期拖慢冲突检查。 */
+  @Test
+  void cyclesAreCappedWhenIntervalsAreFarApart() {
+    int horizon = ResourcePhasePlanner.CYCLES * 3600;
+
+    assertEquals(ResourcePhasePlanner.MAX_CYCLES, ResourcePhasePlanner.cyclesFor(60, horizon));
+    assertEquals(ResourcePhasePlanner.CYCLES, ResourcePhasePlanner.cyclesFor(3600, horizon));
+  }
+
   /** 往返对余数只进报告：算得出来，但不参与任何决策。 */
   @Test
   void residuesAreReportedNotActedOn() {
