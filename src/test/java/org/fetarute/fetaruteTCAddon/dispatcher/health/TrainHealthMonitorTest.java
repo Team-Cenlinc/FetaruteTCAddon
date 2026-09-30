@@ -84,7 +84,7 @@ class TrainHealthMonitorTest {
     when(dispatchService.hasRecentGateQueueEntry(anyString(), any())).thenReturn(false);
     stubDefaultDestroyPrecheck();
     when(dispatchService.reviewStuckCleanupCandidate(
-            anyString(), anyInt(), anyBoolean(), any(), any(), any()))
+            anyString(), anyInt(), anyBoolean(), any(), any(), any(), any()))
         .thenReturn(
             SmartDispatcherController.StuckCleanupReview.allowed("verified-long-stuck-cleanup"));
   }
@@ -176,7 +176,8 @@ class TrainHealthMonitorTest {
     disabledMonitor.check(Set.of("train1"), t0.plusSeconds(40));
 
     verify(dispatchService, never())
-        .reviewStuckCleanupCandidate(anyString(), anyInt(), anyBoolean(), any(), any(), any());
+        .reviewStuckCleanupCandidate(
+            anyString(), anyInt(), anyBoolean(), any(), any(), any(), any());
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
   }
 
@@ -213,7 +214,8 @@ class TrainHealthMonitorTest {
             true,
             Duration.ofSeconds(40),
             Duration.ofSeconds(20),
-            Duration.ofSeconds(60));
+            Duration.ofSeconds(60),
+            Set.of());
     verify(dispatchService).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
     assertEquals(1, result.fixedCount(), "销毁/清理是当场完成的状态变化，当场计入");
   }
@@ -311,8 +313,238 @@ class TrainHealthMonitorTest {
     monitor.check(Set.of("waiting"), t0.plusSeconds(40));
 
     verify(dispatchService, never())
-        .reviewStuckCleanupCandidate(anyString(), anyInt(), anyBoolean(), any(), any(), any());
+        .reviewStuckCleanupCandidate(
+            anyString(), anyInt(), anyBoolean(), any(), any(), any(), any());
     verify(dispatchService, never()).destroyTrainByName("waiting", "health-stuck-cleanup-timeout");
+  }
+
+  /**
+   * 三列停滞车首尾相接地排队互等（a 等 b、b 等 c、c 等 a）：每列都"在等前车"，普通清车谁都不接，互卡处理也只认两车配对。 恢复耗尽、停满阈值之后按清理顺序清掉环上的
+   * a，复审时把整个环交给运行时核对，并发一条带环成员的告警。
+   */
+  @Test
+  void stuckTrainsWaitingInACycleLoseOneTrain() {
+    Set<String> trains = Set.of("a", "b", "c");
+    for (String[] edge : new String[][] {{"a", "b"}, {"b", "c"}, {"c", "a"}}) {
+      when(dwellRegistry.remainingSeconds(edge[0])).thenReturn(Optional.empty());
+      when(dispatchService.getTrainState(edge[0]))
+          .thenReturn(Optional.of(state(edge[0], 3, SignalAspect.STOP, 0.0)));
+      when(dispatchService.deadlockTrainContext(edge[0]))
+          .thenReturn(Optional.of(context(edge[0], 3, RouteOperationType.OPERATION, false, false)));
+      when(dispatchService.recentBlockerTrains(eq(edge[0]), any())).thenReturn(Set.of(edge[1]));
+      when(dispatchService.hasRecentGateQueueEntry(eq(edge[0]), any())).thenReturn(true);
+    }
+    when(dispatchService.destroyTrainByName("a", "health-stuck-cleanup-timeout")).thenReturn(true);
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i < 4; i++) {
+      monitor.check(trains, t0.plusSeconds(10L * i));
+    }
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(trains, t0.plusSeconds(40));
+
+    verify(dispatchService)
+        .reviewStuckCleanupCandidate(
+            "a",
+            3,
+            true,
+            Duration.ofSeconds(40),
+            Duration.ofSeconds(20),
+            Duration.ofSeconds(60),
+            Set.of("a", "b", "c"));
+    verify(dispatchService).destroyTrainByName("a", "health-stuck-cleanup-timeout");
+    verify(dispatchService, never()).destroyTrainByName("b", "health-stuck-cleanup-timeout");
+    verify(dispatchService, never()).destroyTrainByName("c", "health-stuck-cleanup-timeout");
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert ->
+                    alert.trainName().equals("a")
+                        && alert.message().startsWith("停滞清车: 已销毁")
+                        && alert.message().contains("等待环=a,b,c")),
+        alerts::toString);
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert ->
+                    alert.trainName().equals("b") && alert.message().contains("清车=等待 c(停滞 40秒)")),
+        alerts::toString);
+  }
+
+  /**
+   * 排在终点待命车后面的车：链的源头是待命车，归回收管，清车不动它；告警点名在等谁、那列车是什么状态—— 生产服往往只贴得出这一行告警（2026-09-30 MT-LN-3832
+   * 停了半小时，告警里只有"恢复尝试=38"）。
+   */
+  @Test
+  void aTrainQueuedBehindAParkedTrainIsReportedButNotCleaned() {
+    when(dwellRegistry.remainingSeconds("waiting")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("waiting"))
+        .thenReturn(Optional.of(state("waiting", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("waiting"))
+        .thenReturn(Optional.of(context("waiting", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.recentBlockerTrains(eq("waiting"), any())).thenReturn(Set.of("parked"));
+    when(dispatchService.deadlockTrainContext("parked"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.DeadlockTrainContext(
+                    "parked",
+                    9,
+                    10,
+                    SignalAspect.STOP,
+                    0.0,
+                    RouteOperationType.OPERATION,
+                    0,
+                    false,
+                    false,
+                    true,
+                    false,
+                    true,
+                    false,
+                    false)));
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i < 4; i++) {
+      monitor.check(Set.of("waiting", "parked"), t0.plusSeconds(10L * i));
+    }
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("waiting", "parked"), t0.plusSeconds(40));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert ->
+                    alert.trainName().equals("waiting")
+                        && alert.message().contains("清车=等待 parked(终点待命)")),
+        alerts::toString);
+  }
+
+  /** 挡路的名字不在存活列车里：车已不在、占用还挂着。清车不动排队的车，告警点名残留占用。 */
+  @Test
+  void aTrainBlockedByALeftoverClaimIsReportedButNotCleaned() {
+    when(dwellRegistry.remainingSeconds("waiting")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("waiting"))
+        .thenReturn(Optional.of(state("waiting", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("waiting"))
+        .thenReturn(Optional.of(context("waiting", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.recentBlockerTrains(eq("waiting"), any())).thenReturn(Set.of("ghost"));
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i < 4; i++) {
+      monitor.check(Set.of("waiting"), t0.plusSeconds(10L * i));
+    }
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("waiting"), t0.plusSeconds(40));
+
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(
+        alerts.stream().anyMatch(alert -> alert.message().contains("清车=等待 ghost(残留占用)")),
+        alerts::toString);
+  }
+
+  /** 运行时复审拒绝了环上第一列（它的 blocker 此刻又多了环外的车）：同一轮接着试下一列，而不是每轮卡在 a 上。 */
+  @Test
+  void aRejectedCycleTargetFallsThroughToTheNextOne() {
+    Set<String> trains = Set.of("a", "b", "c");
+    stuckWaiting("a", "b");
+    stuckWaiting("b", "c");
+    stuckWaiting("c", "a");
+    when(dispatchService.reviewStuckCleanupCandidate(
+            eq("a"), anyInt(), anyBoolean(), any(), any(), any(), any()))
+        .thenReturn(
+            SmartDispatcherController.StuckCleanupReview.rejected("waiting-on-live-blocker"));
+    when(dispatchService.destroyTrainByName("b", "health-stuck-cleanup-timeout")).thenReturn(true);
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    for (int i = 0; i <= 4; i++) {
+      monitor.check(trains, t0.plusSeconds(10L * i));
+    }
+
+    verify(dispatchService, never()).destroyTrainByName("a", "health-stuck-cleanup-timeout");
+    verify(dispatchService).destroyTrainByName("b", "health-stuck-cleanup-timeout");
+  }
+
+  /** 普通候选被复审拒绝（例如实体解析不到）也不挡住等待环：同一轮接着清环上的车。 */
+  @Test
+  void aRejectedOrdinaryCandidateDoesNotHideAWaitCycle() {
+    Set<String> trains = Set.of("lone", "x", "y");
+    when(dwellRegistry.remainingSeconds("lone")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("lone"))
+        .thenReturn(Optional.of(state("lone", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext("lone"))
+        .thenReturn(Optional.of(context("lone", 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.reviewStuckCleanupCandidate(
+            eq("lone"), anyInt(), anyBoolean(), any(), any(), any(), any()))
+        .thenReturn(
+            SmartDispatcherController.StuckCleanupReview.rejected(
+                "target-runtime-group-unresolved"));
+    stuckWaiting("x", "y");
+    stuckWaiting("y", "x");
+    when(dispatchService.destroyTrainByName("x", "health-stuck-cleanup-timeout")).thenReturn(true);
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    for (int i = 0; i <= 4; i++) {
+      monitor.check(trains, t0.plusSeconds(10L * i));
+    }
+
+    verify(dispatchService, never()).destroyTrainByName("lone", "health-stuck-cleanup-timeout");
+    verify(dispatchService).destroyTrainByName("x", "health-stuck-cleanup-timeout");
+  }
+
+  /** 占用上记的是改名前的逻辑名：不在存活列车名里，但运行时的别名解析认得它——报它的状态，不报残留占用。 */
+  @Test
+  void aRenamedLiveBlockerIsNotReportedAsALeftoverClaim() {
+    stuckWaiting("waiting", "old-name");
+    when(dispatchService.deadlockTrainContext("old-name"))
+        .thenReturn(
+            Optional.of(context("old-name", 5, RouteOperationType.OPERATION, false, false)));
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i < 4; i++) {
+      monitor.check(Set.of("waiting"), t0.plusSeconds(10L * i));
+    }
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("waiting"), t0.plusSeconds(40));
+
+    assertTrue(
+        alerts.stream().anyMatch(alert -> alert.message().contains("清车=等待 old-name(状态未知)")),
+        alerts::toString);
+  }
+
+  /** 停在 STOP、排队等 {@code blocker} 的受管空车。 */
+  private void stuckWaiting(String trainName, String blocker) {
+    when(dwellRegistry.remainingSeconds(trainName)).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState(trainName))
+        .thenReturn(Optional.of(state(trainName, 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.deadlockTrainContext(trainName))
+        .thenReturn(Optional.of(context(trainName, 3, RouteOperationType.OPERATION, false, false)));
+    when(dispatchService.recentBlockerTrains(eq(trainName), any())).thenReturn(Set.of(blocker));
+    when(dispatchService.hasRecentGateQueueEntry(eq(trainName), any())).thenReturn(true);
+  }
+
+  private void configureFastCleanup() {
+    monitor.setTrainCleanupEnabled(true);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(5));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(5));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(20));
+    monitor.setStuckCleanupPassengerThreshold(Duration.ofSeconds(60));
+    monitor.setStuckCleanupCooldown(Duration.ZERO);
   }
 
   @Test

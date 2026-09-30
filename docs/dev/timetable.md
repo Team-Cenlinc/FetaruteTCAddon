@@ -681,6 +681,10 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
   车队上限等出库闸门照旧生效。
 - **换下来的车**没有交路：回库闸放行，只能接别的交路的首班；回收闲置满 15 秒就带走它（`回收触发: 交路已换车`），不占着站台等闲置上限。
 - 被换下之前没跑的班次照旧作废、登记取消；替补车接上的班次站牌照常显示。
+- **车没了也走这一套**（2026-09-30）：交路上的车被清车、手动删车或异常清理带走时（`TimetableService#release`），交路同样转成空缺
+  （`TIMETABLE_DUTY_VACATED reason=removed:<离开原因>`），由下一轮出票派替补；从空缺起到替补能接的第一班之前的班次当即登记取消
+  （`VEHICLE_REMOVED`，见"车次取消"），不再等后面每张票各自过容差；已有别的车绑着的班次不取消，取消按发车的日历日登记（跨零点的班次与交路的服务日差一天）。
+  TrainCarts **卸载**不走这一套（`StationStopObserver#RELEASE_UNLOADED`）：车在离线存储里，醒来还是它，交了替补同一交路就有两辆车；只照旧取消当前这一班。
 
 交路身份里的**服务日**统一按计划窗口算：跨零点的班次取模后落在下一个日历日，但它属于前一个服务日的交路
 （`Timetable#serviceDayOf`），与出库/回库票同一口径。
@@ -716,12 +720,13 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 ### 车次取消
 
 站牌（`TimetableApi#departuresAt` 的 `Departure#cancelled`）与公开事件 `TimetableTripCancelledEvent`（API 1.8.0）读同一份登记
-（`TripCancellations`，由 `TimetableService` 维护），以后做 PIDS 用。两种来源：
+（`TripCancellations`，由 `TimetableService` 维护），以后做 PIDS 用。三种来源：
 
 | 范围 | 原因 | 何时登记 |
 | --- | --- | --- |
 | 整趟 `FULL` | `NOT_DISPATCHED` | 运营票过了容差被放弃（`TIMETABLE_SPAWN_SKIP reason=abandoned`）；或服务器卡顿（睡眠、冻结）超过 `max-catch-up-seconds`，追补窗口之外的车次不再出票。这趟车已经有车绑着时不算 |
 | 半途 `PARTIAL`（一站没开出即 `FULL`） | `VEHICLE_REMOVED` | 执行中的车半途离开运行时（卡死清理、互卡销毁、异常清理等），从第一个还没**发车**的停车站起到车次终点都不再停 |
+| 整趟 `FULL` | `VEHICLE_REMOVED` | 交路上的车离开运行时（清车、手动删车、异常清理）而交路还有班次：交路转成空缺派替补（见"交路换车"），替补赶不上的班次**当即**取消，`detail=duty-vacated:<离开原因> replacement-from=<替补接的第一班>`，派不出替补时为 `no-replacement` 且剩下的班次全部取消。起点本身是车库的班次不取消（它自己的票会出车）。只在按表出票（`spawn-enabled: true`）时做 |
 
 - **停完一站以发车为准**：`AutoStation` 放行离站（`onStationDeparture`）才算这一站停完；停着还没发车时被销毁，这一站也算取消。
   **到达车次终点**（第一个 TERMINATE 站，没有时为最后一个停车点）就是跑完了，之后在终点被销毁、回收都不算取消。

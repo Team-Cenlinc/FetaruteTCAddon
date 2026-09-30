@@ -292,6 +292,9 @@ public final class TrainHealthMonitor {
   /** 阻塞快照有效期：仅在最近可见的 blocker 信息上执行互卡解锁。 */
   private Duration blockerSnapshotMaxAge = Duration.ofSeconds(20);
 
+  /** 停滞告警的清车结论里最多点名几列挡路的车。 */
+  private static final int CLEANUP_VERDICT_BLOCKERS_NAMED = 3;
+
   /** 方向证据不足时，last-resort destroy 必须等待更长时间。 */
   private static final int DIRECTION_AUDIT_LAST_RESORT_THRESHOLD_MULTIPLIER = 3;
 
@@ -776,6 +779,9 @@ public final class TrainHealthMonitor {
             }
           }
         }
+        String cleanupVerdict =
+            collectStuckCleanupCandidate(
+                trainName, progressDuration, recovery, now, stuckCleanupCandidates, activeKeys);
         // 无论是否派发了动作，这里都只是**告警**：车还没动。
         alertBus.publish(
             HealthAlert.of(
@@ -788,9 +794,8 @@ public final class TrainHealthMonitor {
                     + " signal="
                     + currentSignal
                     + " 恢复尝试="
-                    + recovery.progressRecoveryAttempts));
-        collectStuckCleanupCandidate(
-            trainName, progressDuration, recovery, now, stuckCleanupCandidates);
+                    + recovery.progressRecoveryAttempts
+                    + cleanupVerdict));
       } else if (progressed || progressDuration.compareTo(progressStuckThreshold) <= 0) {
         recovery.resetProgress();
       }
@@ -1029,17 +1034,29 @@ public final class TrainHealthMonitor {
     return fixed;
   }
 
-  private void collectStuckCleanupCandidate(
+  /**
+   * 收集普通停滞清理候选，并给出附在停滞告警末尾的清车结论。
+   *
+   * <p>结论只在停满清车阈值之后给出（之前清车本来就不接）。停滞告警是 WARN 必留行，生产服往往只贴得出这一行：它要自己说清"为什么还没清"、 在等谁、等的那列是什么状态，而不是让人再去翻
+   * debug 日志（2026-09-30 实服 MT-LN-3832 停了半小时，告警里只有"恢复尝试=38"）。
+   *
+   * @param activeKeys 本轮存活列车键：挡路的车不在其中就是残留占用
+   * @return 以空格开头的结论，如 {@code " 清车=等待 X(停滞 700秒)"}；未到清车阈值时为空串
+   */
+  private String collectStuckCleanupCandidate(
       String trainName,
       Duration progressDuration,
       RecoveryState recovery,
       Instant now,
-      List<StuckTrainCleanupPolicy.Candidate> candidates) {
-    if (!trainCleanupEnabled
-        || progressDuration == null
+      List<StuckTrainCleanupPolicy.Candidate> candidates,
+      Set<String> activeKeys) {
+    if (progressDuration == null
         || progressDuration.compareTo(stuckCleanupThreshold) < 0
         || candidates == null) {
-      return;
+      return "";
+    }
+    if (!trainCleanupEnabled) {
+      return " 清车=未开启";
     }
     Optional<RuntimeDispatchService.DeadlockTrainContext> context =
         dispatchService.deadlockTrainContext(trainName);
@@ -1048,15 +1065,17 @@ public final class TrainHealthMonitor {
           "STUCK_CLEANUP_SKIPPED",
           "stuck-cleanup-context:" + keyOf(trainName),
           "train=" + trainName + " reason=context-missing");
-      return;
+      return " 清车=缺少运行时上下文";
     }
+    Set<String> blockers = dispatchService.recentBlockerTrains(trainName, blockerSnapshotMaxAge);
     StuckTrainCleanupPolicy.Candidate candidate =
         new StuckTrainCleanupPolicy.Candidate(
             context.get(),
             progressDuration,
             cleanupRecoveryObservationComplete(recovery, now),
-            hasRecentBlockers(trainName)
-                || dispatchService.hasRecentGateQueueEntry(trainName, blockerSnapshotMaxAge));
+            !blockers.isEmpty()
+                || dispatchService.hasRecentGateQueueEntry(trainName, blockerSnapshotMaxAge),
+            blockers);
     candidates.add(candidate);
     StuckTrainCleanupPolicy.Eligibility eligibility =
         StuckTrainCleanupPolicy.eligibility(
@@ -1074,6 +1093,86 @@ public final class TrainHealthMonitor {
               + "s attempts="
               + (recovery == null ? 0 : recovery.progressRecoveryAttempts));
     }
+    return " 清车=" + cleanupVerdict(eligibility, blockers, activeKeys, now);
+  }
+
+  /** 清车结论的中文短语：够格就是"待执行"，排队等前车时点名在等谁、那列车此刻是什么状态。 */
+  private String cleanupVerdict(
+      StuckTrainCleanupPolicy.Eligibility eligibility,
+      Set<String> blockers,
+      Set<String> activeKeys,
+      Instant now) {
+    return switch (eligibility) {
+      case ELIGIBLE -> "待执行";
+      case RECOVERY_NOT_EXHAUSTED -> "恢复观察中";
+      case TRAIN_MOVING -> "列车在动";
+      case CONTROLLED_STOP -> "受控停车";
+      case PASSENGER_GRACE -> "载客宽限";
+      case CLEANUP_THRESHOLD_NOT_REACHED -> "未到阈值";
+      case CONTEXT_MISSING -> "缺少运行时上下文";
+      case WAITING_ON_LIVE_BLOCKER -> blockers.isEmpty()
+          ? "排队(未记录前车)"
+          : "等待 " + describeBlockers(blockers, activeKeys, now);
+    };
+  }
+
+  /** 按列车名排序，最多点名三列，每列附上它此刻的状态。 */
+  private String describeBlockers(Set<String> blockers, Set<String> activeKeys, Instant now) {
+    List<String> names =
+        blockers.stream()
+            .sorted(Comparator.comparing(name -> name.toLowerCase(Locale.ROOT)))
+            .toList();
+    StringBuilder out = new StringBuilder();
+    for (int i = 0; i < Math.min(names.size(), CLEANUP_VERDICT_BLOCKERS_NAMED); i++) {
+      if (i > 0) {
+        out.append(',');
+      }
+      out.append(names.get(i))
+          .append('(')
+          .append(blockerState(names.get(i), activeKeys, now))
+          .append(')');
+    }
+    if (names.size() > CLEANUP_VERDICT_BLOCKERS_NAMED) {
+      out.append(" 等").append(names.size()).append("列");
+    }
+    return out.toString();
+  }
+
+  /**
+   * 挡路那列车此刻的状态：运行时解析不到、也不在存活列车里就是残留占用（车已不在、占用还挂着）；待命、停站、扣车各有各的机制收拾； 否则报它自己停了多久——停得和本车一样久，多半是同一个死结。
+   *
+   * <p>先问运行时：占用上记的是逻辑名，折返复用改名后与存活列车名对不上，但运行时的别名解析认得它，不能报成残留占用。
+   */
+  private String blockerState(String blocker, Set<String> activeKeys, Instant now) {
+    String key = keyOf(blocker);
+    Optional<RuntimeDispatchService.DeadlockTrainContext> context =
+        dispatchService.deadlockTrainContext(blocker);
+    if (context.isEmpty() && (key == null || activeKeys == null || !activeKeys.contains(key))) {
+      return "残留占用";
+    }
+    if (context.isPresent()) {
+      RuntimeDispatchService.DeadlockTrainContext value = context.get();
+      if (value.layoverReady()) {
+        return "终点待命";
+      }
+      if (value.dwelling()) {
+        return "停站";
+      }
+      if (value.departureGateHeld()) {
+        return "发车扣车";
+      }
+      if (value.manualHold()) {
+        return "人工扣车";
+      }
+      if (value.speedBlocksPerTick() > lowSpeedThresholdBpt) {
+        return "运行中";
+      }
+    }
+    TrainSnapshot snapshot = snapshots.get(key);
+    if (snapshot == null) {
+      return "状态未知";
+    }
+    return "停滞 " + Duration.between(snapshot.lastProgressTime(), now).toSeconds() + "秒";
   }
 
   /**
@@ -1105,6 +1204,9 @@ public final class TrainHealthMonitor {
    *
    * <p>选择完成后仍调用 RuntimeDispatchService 重新解析实体与上下文；Smart Dispatcher mode gate 再限制 destroy
    * 副作用。这里不释放占用，后车恢复依赖真实 GroupRemove 触发的 OccupancyReleased 事件。
+   *
+   * <p>普通候选之后再看停滞车之间的等待环（{@link StuckTrainCleanupPolicy#waitCycleTargets}）：环上的车排队等的正是环上的车，
+   * 谁都等不到头。清掉环上一列，其余的车下一拍就能重新授权。复审时把环成员一并交给运行时，只有挡住它的车此刻仍全在环里才放行； 被拒就接着试下一列，普通候选被拒也不妨碍试环上的车。
    */
   private boolean tryCleanupLongStuckTrain(
       List<StuckTrainCleanupPolicy.Candidate> candidates, Instant now) {
@@ -1115,22 +1217,45 @@ public final class TrainHealthMonitor {
         || now.isBefore(lastStuckCleanupAt.plus(stuckCleanupCooldown))) {
       return false;
     }
-    Optional<StuckTrainCleanupPolicy.Candidate> selected =
-        StuckTrainCleanupPolicy.select(
-            candidates, stuckCleanupThreshold, stuckCleanupPassengerThreshold);
-    if (selected.isEmpty()) {
-      return false;
+    List<CleanupTarget> targets = new ArrayList<>();
+    StuckTrainCleanupPolicy.select(
+            candidates, stuckCleanupThreshold, stuckCleanupPassengerThreshold)
+        .ifPresent(candidate -> targets.add(new CleanupTarget(candidate, List.of())));
+    for (StuckTrainCleanupPolicy.WaitCycle cycle :
+        StuckTrainCleanupPolicy.waitCycleTargets(
+            candidates, stuckCleanupThreshold, stuckCleanupPassengerThreshold)) {
+      targets.add(new CleanupTarget(cycle.target(), cycle.members()));
     }
-    StuckTrainCleanupPolicy.Candidate candidate = selected.get();
-    RuntimeDispatchService.DeadlockTrainContext context = candidate.context();
+    for (CleanupTarget target : targets) {
+      if (reviewedForCleanup(target)) {
+        return executeStuckCleanup(target, now);
+      }
+    }
+    return false;
+  }
+
+  /** 普通清理的一个目标；{@code waitCycle} 非空时它是等待环上的车，列出整个环。 */
+  private record CleanupTarget(
+      StuckTrainCleanupPolicy.Candidate candidate, List<String> waitCycle) {}
+
+  private boolean reviewedForCleanup(CleanupTarget target) {
+    RuntimeDispatchService.DeadlockTrainContext context = target.candidate().context();
+    if (!target.waitCycle().isEmpty()) {
+      debugLogger.accept(
+          "STUCK_CLEANUP_WAIT_CYCLE train="
+              + context.trainName()
+              + " cycle="
+              + String.join(",", target.waitCycle()));
+    }
     SmartDispatcherController.StuckCleanupReview review =
         dispatchService.reviewStuckCleanupCandidate(
             context.trainName(),
             context.progressIndex(),
-            candidate.recoveryExhausted(),
-            candidate.stuckDuration(),
+            target.candidate().recoveryExhausted(),
+            target.candidate().stuckDuration(),
             stuckCleanupThreshold,
-            stuckCleanupPassengerThreshold);
+            stuckCleanupPassengerThreshold,
+            Set.copyOf(target.waitCycle()));
     if (!review.allowed()) {
       traceHealthEvent(
           "STUCK_CLEANUP_SKIPPED",
@@ -1138,6 +1263,12 @@ public final class TrainHealthMonitor {
           "train=" + context.trainName() + " reason=" + review.reason());
       return false;
     }
+    return true;
+  }
+
+  private boolean executeStuckCleanup(CleanupTarget target, Instant now) {
+    StuckTrainCleanupPolicy.Candidate candidate = target.candidate();
+    RuntimeDispatchService.DeadlockTrainContext context = candidate.context();
     if (!smartDispatcherAllowsHealthMutation(
         context.trainName(),
         DispatchAction.EXECUTE_VERIFIED_STUCK_CLEANUP,
@@ -1168,6 +1299,19 @@ public final class TrainHealthMonitor {
             + " train="
             + context.trainName()
             + " postRemovalRecovery=occupancy-release-event");
+    if (destroyed) {
+      alertBus.publish(
+          HealthAlert.fixed(
+              HealthAlert.AlertType.PROGRESS_STUCK,
+              context.trainName(),
+              "停滞清车: 已销毁 持续="
+                  + candidate.stuckDuration().toSeconds()
+                  + "秒 idx="
+                  + context.progressIndex()
+                  + (target.waitCycle().isEmpty()
+                      ? ""
+                      : " 等待环=" + String.join(",", target.waitCycle()))));
+    }
     return destroyed;
   }
 

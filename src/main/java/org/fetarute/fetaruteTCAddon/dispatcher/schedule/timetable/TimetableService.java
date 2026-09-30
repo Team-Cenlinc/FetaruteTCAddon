@@ -27,6 +27,7 @@ import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ScheduledDeparturePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -853,6 +854,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * 列车离开运行时管辖时释放绑定与交路进度。
    *
    * <p>车次还没跑完就离开的（销毁、异常清理），剩下的停车站登记为取消：已经发车的站不算，到了终点站就是跑完了。
+   *
+   * <p>交路后面还有班次的，交路登记为空缺交给替补（{@link #handOverDuty}）：替补赶得上的班次照常跑，赶不上的立即登记取消。
    */
   public void release(String trainName, String reason) {
     String key = keyOf(trainName);
@@ -862,8 +865,83 @@ public final class TimetableService implements ScheduledDeparturePlan {
     Optional<TimetableAssignment> released = matcher.release(key, reason);
     ServedStops served = servedStops.remove(key);
     released.ifPresent(assignment -> cancelRemainingStops(assignment, served, reason));
+    handOverDuty(key, trainName, reason);
     ledger.release(key, trainName, reason);
     closeDelays(key, trainName, "released:" + reason);
+  }
+
+  /**
+   * 车没了、交路还有班：交路转成空缺，替补赶不上的班次立即登记取消。
+   *
+   * <p>2026-09-30 用户定：清车或手动删车之后，交路不能就这么空着等后面每张票各自过容差再逐张作废（那要拖到末班，站牌与 API 一直报着不会来的车）。 空缺交给 {@link
+   * #replacementsDue} 按交路换车的同一套口径派替补；从空缺起到替补能接的第一班之前的班次，替补无论如何赶不上， 此刻就发 {@link
+   * TripCancellations.Reason#VEHICLE_REMOVED}（后面的票到期时同一班不会再记一次）。一辆替补都派不出（没有能送到起点的出库线路）时，
+   * 剩下的班次全部取消；起点本身是车库的班次不取消——它自己的票会出车，出车即绑上交路。
+   *
+   * <p>只在按表出票时做：只扣车不出票（{@code spawn-enabled: false}）时没有替补可派，后面的班次仍可能被别的车按时间接上。 卸载（{@link
+   * StationStopObserver#RELEASE_UNLOADED}）不算车没了：它在离线存储里，醒来还是它，交了替补同一交路就有两辆车。
+   */
+  private void handOverDuty(String key, String trainName, String reason) {
+    Settings current = settings;
+    if (!current.enabled()
+        || !current.spawnEnabled()
+        || StationStopObserver.RELEASE_UNLOADED.equals(reason)
+        || ledger.progressOf(key).filter(progress -> !progress.exhausted()).isEmpty()) {
+      // 跑完交路回库、从没跑过一班（实体化回滚）的车没有班次可交，不记空缺，免得每次正常回库都印一行"换下"。
+      return;
+    }
+    Instant now = clock.get();
+    ledger
+        .vacate(key, trainName, "removed:" + reason, now)
+        .ifPresent(vacancy -> cancelUncoverable(vacancy, trainName, reason, now, current));
+  }
+
+  private void cancelUncoverable(
+      DutyLedger.Vacancy vacancy, String trainName, String reason, Instant now, Settings current) {
+    Timetable timetable = snapshot.byId().get(vacancy.key().timetableId());
+    VehicleDuty duty =
+        timetable == null ? null : timetable.duty(vacancy.key().dutyId()).orElse(null);
+    if (duty == null) {
+      return;
+    }
+    List<UUID> ids = duty.tripIds();
+    Optional<Replacement> replacement =
+        replacementFor(vacancy.key(), vacancy.fromIndex(), now, current);
+    int coveredFrom = replacement.map(Replacement::tripIndex).orElse(ids.size());
+    String detail =
+        "duty-vacated:"
+            + reason
+            + replacement
+                .map(planned -> " replacement-from=" + planned.trip().tripCode())
+                .orElse(" no-replacement");
+    for (int j = Math.max(0, vacancy.fromIndex()); j < coveredFrom; j++) {
+      TimetableTrip trip = timetable.trip(ids.get(j)).orElse(null);
+      TimetableRoutePlan plan =
+          trip == null ? null : timetable.routePlan(trip.routeId()).orElse(null);
+      if (plan == null || startsAtDepot(plan)) {
+        continue;
+      }
+      Instant departure = timetable.departureOnServiceDay(trip, vacancy.key().serviceDate());
+      // 取消登记、站牌与出票都按起点发车所在的日历日；交路身份用的是服务日，跨零点的班次两者差一天。
+      LocalDate departureDate = LocalDate.ofInstant(departure, timetable.zoneId());
+      OptionalInt origin = plan.firstStopAfter(-1);
+      if (origin.isEmpty() || matcher.claimed(timetable.id(), trip.id(), departureDate)) {
+        continue;
+      }
+      recordCancellation(
+          new TripCancellations.Cancellation(
+              timetable.id(),
+              trip.id(),
+              trip.tripCode(),
+              trip.routeId(),
+              departureDate,
+              departure,
+              TripCancellations.Scope.FULL,
+              origin.getAsInt(),
+              TripCancellations.Reason.VEHICLE_REMOVED,
+              Optional.of(trainName),
+              detail));
+    }
   }
 
   /**

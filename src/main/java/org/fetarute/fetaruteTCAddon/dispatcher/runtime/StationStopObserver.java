@@ -10,6 +10,13 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
  */
 public interface StationStopObserver {
 
+  /**
+   * {@link #onTrainReleased} 的原因：TrainCarts 把列车卸载进了离线存储。
+   *
+   * <p>卸载与移除走同一条运行时清理路径（占用、进度照样释放），但车还在，区块再加载时它会原样醒来。车次层要分清两者： 卸载的车不能把交路交给替补，否则它醒来时同一交路上就有两辆车。
+   */
+  String RELEASE_UNLOADED = "train-unloaded";
+
   /** 列车在车站停稳并完成进度推进。 */
   void onStationArrival(StationStopEvent event);
 
@@ -17,10 +24,10 @@ public interface StationStopObserver {
   void onStationDeparture(StationStopEvent event);
 
   /**
-   * 列车离开运行时管辖（销毁、改派交路或异常清理）。
+   * 列车离开运行时管辖（销毁、卸载、改派交路或异常清理）。
    *
    * @param trainName 规范列车名
-   * @param reason 诊断用原因
+   * @param reason 诊断用原因；卸载时为 {@link #RELEASE_UNLOADED}
    */
   default void onTrainReleased(String trainName, String reason) {}
 }
