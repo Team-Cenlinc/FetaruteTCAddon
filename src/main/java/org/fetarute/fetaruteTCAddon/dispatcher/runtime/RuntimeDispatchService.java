@@ -260,6 +260,10 @@ public final class RuntimeDispatchService {
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
   private Runnable startupRecoveryRequestedListener = () -> {};
 
+  /** 单辆车把自己的水合问题升级成全局重建的频率上限：30 秒内最多 3 次，之后只隔离本车。 */
+  private final StartupEscalationLimiter startupEscalationLimiter =
+      new StartupEscalationLimiter(3, Duration.ofSeconds(30));
+
   /**
    * 车站停靠的观察者播报与发车计划扣留。
    *
@@ -8355,6 +8359,20 @@ public final class RuntimeDispatchService {
       return expectedMaterializedSpawnHydrationBlocks(
           train, trainName, trainKey, runtimeIdentity, expectedSpawn, normalizedSource);
     }
+    // 水合记录用的是 handleRenameIfNeeded 给出的 owner 名（改名迁移失败时是旧名），而这里的 trainKey 来自
+    // resolveTrackedTrainName（直接取当前 TrainCarts 名）。两者在"改名迁移被拒"时不一致：2026-09-30 09:15
+    // 实服里 SURC-DS-LW-5925 被 TrainCarts 命名成 SURC-MT-LP-2498~k，每个 tick 都查不到自己的水合记录，
+    // 于是每次信号检查都重新提交一遍物理占用，提交又唤醒下一轮重评估，链永不收敛。按 tag 里的 owner 名再认一次。
+    String taggedOwnerKey =
+        TrainTagHelper.readTagValue(train.properties(), RouteProgressRegistry.TAG_TRAIN_NAME)
+            .flatMap(RuntimeDispatchService::normalizeTrainName)
+            .map(RuntimeDispatchService::normalizeTrainKey)
+            .orElse("");
+    if (runtimeIdentity != null
+        && !taggedOwnerKey.isBlank()
+        && hydratedPhysicalOwnerIdentities.get(taggedOwnerKey) == runtimeIdentity) {
+      return false;
+    }
     Object hydratedIdentity = hydratedPhysicalOwnerIdentities.get(trainKey);
     if (!trainKey.isBlank() && hydratedIdentity == runtimeIdentity) {
       return false;
@@ -8369,18 +8387,25 @@ public final class RuntimeDispatchService {
               + " source="
               + normalizedSource
               + " action=global-stop-first");
-      beginStartupOccupancyReconstruction("startupOccupancyRecoveryBlocks");
-      try {
-        startupRecoveryRequestedListener.run();
-      } catch (RuntimeException | LinkageError ex) {
+      // 全局重建本身收敛不了"两个活编组带同一逻辑身份"：快照里同名只能记一个，另一个在 READY 后每个 tick 都会
+      // 再次撞进这里，重建—READY—再重建无限循环（2026-09-30 08:37 实服循环 15 秒，直到人工重载）。
+      // 所以除了关全局门，还要把这个多出来的编组隔离并安排销毁，让下一轮重建能在没有孪生的现场上收敛。
+      // 只有同时满足两条才算孪生：已记录的属主编组仍然存活（属主失效说明这是 TrainCarts 重组后的合法继任者），
+      // 且 tag 里的 owner 名与当前名一致（名字对不上时无法断定谁是谁，宁可交给限流也不能销毁）。
+      if (hydratedIdentity != null
+          && (taggedOwnerKey.isBlank() || taggedOwnerKey.equals(trainKey))
+          && (!(hydratedIdentity instanceof MinecartGroup owner) || owner.isValid())) {
+        quarantineVerifiedFtaAbnormalPhysicalIdentity(train);
+        stopAbnormalTrainBeforeDestroy(train, trainName);
+        destroyAbnormalTrain(train, trainName);
         debugLogger.accept(
-            "SMART_STARTUP_RECOVERY_REQUEST_FAILED train="
+            "SMART_DUPLICATE_LOGICAL_OWNER_ISOLATED train="
                 + trainName
-                + " error="
-                + ex.getClass().getSimpleName()
-                + ":"
-                + String.valueOf(ex.getMessage()));
+                + " source="
+                + normalizedSource
+                + " action=quarantine-and-destroy");
       }
+      escalateStartupRecoveryOrContain(train, trainName, normalizedSource);
       return true;
     }
 
@@ -8428,6 +8453,27 @@ public final class RuntimeDispatchService {
               + normalizedSource);
     }
 
+    escalateStartupRecoveryOrContain(train, trainName, normalizedSource);
+    return true;
+  }
+
+  /**
+   * READY 之后某辆车过不了水合校验：关闭全局授权门并请求整网重建，但同一辆车升级过于频繁时只隔离本车。
+   *
+   * <p>整网重建治不好这辆车时，它在下一次信号检查里又会触发同样的升级，全网被一辆车永久冻结。限流之后本车仍保持硬停（调用方已经先停了车）， 其余列车不再被拖回
+   * STOP_FIRST；窗口滑出后自动再给一次机会。
+   */
+  private void escalateStartupRecoveryOrContain(
+      RuntimeTrainHandle train, String trainName, String source) {
+    if (!startupEscalationLimiter.tryAcquire(train.physicalRuntimeIdentity(), clockNow())) {
+      debugLogger.accept(
+          "SMART_STARTUP_ESCALATION_SUPPRESSED train="
+              + trainName
+              + " source="
+              + source
+              + " action=contain-this-train-only");
+      return;
+    }
     beginStartupOccupancyReconstruction("startupOccupancyRecoveryBlocks");
     try {
       startupRecoveryRequestedListener.run();
@@ -8440,7 +8486,6 @@ public final class RuntimeDispatchService {
               + ":"
               + String.valueOf(ex.getMessage()));
     }
-    return true;
   }
 
   /**
@@ -8618,6 +8663,7 @@ public final class RuntimeDispatchService {
     forgetDispatchDestroyedIdentity(removedIdentity);
     unloadedMaterializedSpawnRollbackIdentities.remove(removedIdentity);
     abnormalPhysicalQuarantines.remove(removedIdentity);
+    startupEscalationLimiter.forget(removedIdentity);
     MaterializedSpawnRollbackQuarantine materializedRollback =
         materializedSpawnRollbackQuarantines.remove(removedIdentity);
     String expectedTrainKey = "";
