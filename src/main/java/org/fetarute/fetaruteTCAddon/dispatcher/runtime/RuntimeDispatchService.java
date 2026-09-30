@@ -14974,7 +14974,8 @@ public final class RuntimeDispatchService {
                 effectiveNodes.get(currentIndex),
                 effectiveNodes.get(currentIndex + 1))
             : 0L;
-    SignalLookahead.EdgeSpeedResolver edgeSpeedResolver = createEdgeSpeedResolver(train.worldId());
+    SignalLookahead.EdgeSpeedResolver edgeSpeedResolver =
+        createEdgeSpeedResolver(train.worldId(), stationStopCoordinator.lineSpeedFactor(trainName));
     // 制动曲线只在速度曲线启用时参与（与前瞻同一开关）；加减速取本车车种，与编表按默认车种一致（未打车种标签时）。
     TrainConfig motionConfig = trainConfigResolver.resolve(properties, configManager.current());
     SpeedCurve speedCurve =
@@ -19113,7 +19114,13 @@ public final class RuntimeDispatchService {
     // 先获取边限速作为 PROCEED 基准（而非固定 defaultSpeed）
     double edgeLimit =
         resolveEdgeSpeedLimit(
-            train, graph, currentNode, nextNode, configManager.current(), config.decelBps2());
+            train,
+            graph,
+            currentNode,
+            nextNode,
+            configManager.current(),
+            config.decelBps2(),
+            stationStopCoordinator.lineSpeedFactor(trainName));
     TargetSpeedDecision speedDecision =
         resolveTargetSpeedDecision(
             train != null ? train.worldId() : null,
@@ -30490,6 +30497,7 @@ public final class RuntimeDispatchService {
    * 每趟因此晚 51 秒）。
    *
    * @param decelBps2 列车制动减速度，用于前方更低限速的制动曲线
+   * @param lineSpeedFactor 晚点追赶的线路限速倍率（{@link StationStopCoordinator#lineSpeedFactor}），不追赶时为 1
    */
   private double resolveEdgeSpeedLimit(
       RuntimeTrainHandle train,
@@ -30497,7 +30505,8 @@ public final class RuntimeDispatchService {
       NodeId from,
       NodeId to,
       ConfigManager.ConfigView config,
-      double decelBps2) {
+      double decelBps2,
+      double lineSpeedFactor) {
     if (train == null || graph == null || from == null || to == null || config == null) {
       return -1.0;
     }
@@ -30508,7 +30517,7 @@ public final class RuntimeDispatchService {
     Optional<RailEdge> directEdgeOpt = findEdge(graph, from, to);
     if (directEdgeOpt.isPresent()) {
       return railGraphService.effectiveSpeedLimitBlocksPerSecond(
-          worldId, directEdgeOpt.get(), clockNow(), defaultSpeed);
+          worldId, directEdgeOpt.get(), clockNow(), defaultSpeed, lineSpeedFactor);
     }
 
     // 2. 不相邻：沿最短路取本段限速包络
@@ -30518,7 +30527,7 @@ public final class RuntimeDispatchService {
       return -1.0;
     }
     List<RailEdge> edges = pathOpt.get().edges();
-    SignalLookahead.EdgeSpeedResolver resolver = createEdgeSpeedResolver(worldId);
+    SignalLookahead.EdgeSpeedResolver resolver = createEdgeSpeedResolver(worldId, lineSpeedFactor);
     double brakingDecel = config.runtimeSettings().speedCurveEnabled() ? decelBps2 : 0.0;
     OptionalDouble envelope = SignalLookahead.pathSpeedEnvelope(edges, resolver, brakingDecel, 0L);
     if (envelope.isPresent() && envelope.getAsDouble() < resolver.resolve(edges.get(0))) {
@@ -30531,15 +30540,19 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 创建边限速解析器（用于 SignalLookahead 前瞻）。
+   * 创建边限速解析器（用于 SignalLookahead 前瞻与进站速度天花板）。
    *
    * <p>返回的解析器会考虑 edge override 和 temp speed limit。
+   *
+   * @param lineSpeedFactor 晚点追赶的线路限速倍率，不追赶时为 1；只放大写明的线路限速
    */
-  private SignalLookahead.EdgeSpeedResolver createEdgeSpeedResolver(UUID worldId) {
+  private SignalLookahead.EdgeSpeedResolver createEdgeSpeedResolver(
+      UUID worldId, double lineSpeedFactor) {
     double defaultSpeed = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
     Instant now = clockNow();
     return edge ->
-        railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
+        railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            worldId, edge, now, defaultSpeed, lineSpeedFactor);
   }
 
   /**

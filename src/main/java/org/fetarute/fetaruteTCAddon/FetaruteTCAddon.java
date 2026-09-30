@@ -51,9 +51,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickLi
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
@@ -1228,7 +1230,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofSeconds(settings.holdMaxSeconds()),
             java.time.Duration.ofSeconds(settings.assignToleranceSeconds()),
             java.time.Duration.ofSeconds(settings.maxCatchUpSeconds()),
-            settings.resolveZone()));
+            settings.resolveZone(),
+            // 到站事件在列车停稳后发出，表定到达是压牌时刻：两者差"车站停车开销 − 开门延迟"（居中刹停）。
+            java.time.Duration.ofSeconds(
+                Math.max(
+                    0,
+                    settings.stationStopOverheadSeconds()
+                        - org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
+                            .doorOpenDelaySeconds()))));
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
     // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
     // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
@@ -1264,6 +1273,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .stationStops()
         .setMaxHold(
             settings.enabled() ? java.time.Duration.ofSeconds(settings.holdMaxSeconds()) : null);
+    runtimeDispatchService
+        .stationStops()
+        .setRecovery(
+            settings.enabled()
+                ? new org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .StationStopCoordinator
+                    .Recovery(
+                    settings.recoveryMinDwellSeconds(),
+                    settings.recoveryOverspeedPercent(),
+                    settings.recoveryEngageDelaySeconds())
+                : null);
     // ETA 与站内扣留同一口径：早到的车在站内等点的时间计入 ETA，上限同扣留上限（含 150 秒硬顶）。
     if (etaService != null) {
       etaService.attachPlannedDepartures(
@@ -1449,9 +1472,28 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 停在正线折返点的车：按表交路上接不上下一班就立即回收，不挡着正线等到末班过期。
     reclaimManager.setMainlineReturnGate(
         timetableService == null ? null : timetableService::allowsReturnFromMainlineTurnback);
+    // 单股道车站（如 CHT）同一条规则：车进去没多久就得出来，接不上下一班就立即回收，不占着唯一的股道等后面的车次。
+    reclaimManager.setSingleTrackStation(this::isSingleTrackStation);
+    // 交路已换车的车再也没有班可跑：闲置一个短门槛就回收，不占着站台等闲置上限。
+    reclaimManager.setRetiredVehicle(
+        timetableService == null ? null : timetableService::retiredFromDuty);
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
     }
+  }
+
+  /** 节点是不是单股道车站：在装有它的调度图快照里按站数股道（{@link RouteTerminals#isSingleTrackStation}）。 */
+  private boolean isSingleTrackStation(NodeId nodeId) {
+    RailGraphService service = railGraphService;
+    if (service == null || nodeId == null) {
+      return false;
+    }
+    for (RailGraphService.RailGraphSnapshot snapshot : service.snapshotAll().values()) {
+      if (snapshot != null && snapshot.graph().findNode(nodeId).isPresent()) {
+        return RouteTerminals.isSingleTrackStation(snapshot.graph(), nodeId.value());
+      }
+    }
+    return false;
   }
 
   /**

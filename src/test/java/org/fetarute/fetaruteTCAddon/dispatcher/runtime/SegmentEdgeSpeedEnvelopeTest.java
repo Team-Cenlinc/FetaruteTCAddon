@@ -17,6 +17,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.util.Vector;
@@ -84,12 +85,57 @@ class SegmentEdgeSpeedEnvelopeTest {
     assertEquals(FAST, tick.edgeLimitBps(), 1e-6);
   }
 
+  /**
+   * 晚点追赶：本车次晚 30 秒，控车把放宽倍率交给限速解析（夹具里的限速按倍率放大），基准随之是 22.2 × 1.1。
+   *
+   * <p>钉的是接线：倍率从停靠协作者一路传到 {@code RailGraphService}；哪些限速能放宽由 {@code
+   * RailGraphServiceLineSpeedFactorTest} 管。
+   */
+  @Test
+  void lateTrainRunsAtTheRelaxedLineSpeed() {
+    Tick onTime = signalTick(Optional.of(X), 100.0);
+    Tick late = signalTick(Optional.of(X), 100.0, OptionalLong.of(30));
+
+    assertEquals(FAST, onTime.edgeLimitBps(), 1e-6);
+    assertEquals(FAST * 1.1, late.edgeLimitBps(), 1e-6);
+  }
+
+  /** 同上，线路逐节点写、当前与下一节点相邻时走直连边那一支：倍率同样要传到。 */
+  @Test
+  void lateTrainOnADirectEdgeRunsAtTheRelaxedLineSpeed() {
+    List<NodeId> everyNode = List.of(A, SW, X, B);
+    Tick onTime = signalTick(Optional.empty(), 0.0, OptionalLong.empty(), everyNode);
+    Tick late = signalTick(Optional.empty(), 0.0, OptionalLong.of(30), everyNode);
+
+    assertEquals(FAST, onTime.edgeLimitBps(), 1e-6);
+    assertEquals(FAST * 1.1, late.edgeLimitBps(), 1e-6);
+  }
+
   private record Tick(double edgeLimitBps, double decelBps2) {}
 
   private static Tick signalTick(Optional<NodeId> lastPassed, double headX) {
+    return signalTick(lastPassed, headX, OptionalLong.empty());
+  }
+
+  /**
+   * @param delaySeconds 计划源报告的本车次晚点；为空时不挂计划源
+   */
+  private static Tick signalTick(
+      Optional<NodeId> lastPassed, double headX, OptionalLong delaySeconds) {
+    return signalTick(lastPassed, headX, delaySeconds, List.of(A, B));
+  }
+
+  /**
+   * @param waypoints 线路节点；只写车站时站间走最短路包络，逐节点写时相邻两点直接取那条边
+   */
+  private static Tick signalTick(
+      Optional<NodeId> lastPassed,
+      double headX,
+      OptionalLong delaySeconds,
+      List<NodeId> waypoints) {
     UUID worldId = UUID.randomUUID();
     RouteDefinition route =
-        new RouteDefinition(RouteId.of("WS-2C_FullR"), List.of(A, B), Optional.empty());
+        new RouteDefinition(RouteId.of("WS-2C_FullR"), waypoints, Optional.empty());
     TagStore tags =
         new TagStore(
             TRAIN,
@@ -107,11 +153,13 @@ class SegmentEdgeSpeedEnvelopeTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     sectionlessGraph(lwnToSwn()), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenAnswer(
             invocation -> {
               RailEdge edge = invocation.getArgument(1);
-              return edge.id().equals(EdgeId.undirected(SW, X)) ? SLOW : FAST;
+              double factor = invocation.getArgument(4);
+              return (edge.id().equals(EdgeId.undirected(SW, X)) ? SLOW : FAST) * factor;
             });
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
@@ -156,6 +204,25 @@ class SegmentEdgeSpeedEnvelopeTest {
     RailState head = mock(RailState.class);
     when(head.positionLocation()).thenReturn(new Location(null, headX, 64.0, 0.0));
     train.railState = Optional.of(head);
+
+    delaySeconds.ifPresent(
+        delay -> {
+          service
+              .stationStops()
+              .setPlan(
+                  new ScheduledDeparturePlan() {
+                    @Override
+                    public Optional<Instant> scheduledDepartureAt(StationStopEvent event) {
+                      return Optional.empty();
+                    }
+
+                    @Override
+                    public OptionalLong currentDelaySeconds(String trainName) {
+                      return OptionalLong.of(delay);
+                    }
+                  });
+          service.stationStops().setRecovery(new StationStopCoordinator.Recovery(10, 10, 10));
+        });
 
     service.handleSignalTick(train, false);
 

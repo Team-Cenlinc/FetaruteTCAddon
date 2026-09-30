@@ -235,4 +235,50 @@ class RouteTerminalsTest {
     }
     return out;
   }
+
+  /** 单股道车站：同运营商同站码的车站节点只有它一个。咽喉、车库、多股道车站、查不到的节点都不算。 */
+  @Test
+  void singleTrackStationsAreCountedFromTheGraph() {
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph graph =
+        graphOf(
+            station("SURC:S:CHT:3"),
+            station("SURC:S:PPK:1"),
+            station("SURC:S:PPK:2"),
+            node(
+                "SURC:S:CHT:3:001", org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.WAYPOINT),
+            node("SURC:D:CHT:1", org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.DEPOT),
+            station("OTHER:S:CHT:1"));
+
+    assertTrue(RouteTerminals.isSingleTrackStation(graph, "SURC:S:CHT:3"), "同站码的车库、别家的 CHT 都不算股道");
+    assertFalse(RouteTerminals.isSingleTrackStation(graph, "SURC:S:PPK:1"));
+    assertFalse(RouteTerminals.isSingleTrackStation(graph, "SURC:S:CHT:3:001"), "咽喉不是车站");
+    assertFalse(RouteTerminals.isSingleTrackStation(graph, "SURC:D:CHT:1"), "车库不是车站");
+    assertFalse(RouteTerminals.isSingleTrackStation(graph, "SURC:S:NTA:1"), "图里没有的车站");
+    assertFalse(RouteTerminals.isSingleTrackStation(null, "SURC:S:CHT:3"));
+  }
+
+  private static org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode station(String id) {
+    return node(id, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.STATION);
+  }
+
+  private static org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node(
+      String id, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType type) {
+    return new org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode(
+        NodeId.of(id),
+        type,
+        new org.bukkit.util.Vector(0, 64, 0),
+        Optional.empty(),
+        Optional.empty());
+  }
+
+  private static org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph graphOf(
+      org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode... nodes) {
+    java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> byId =
+        new java.util.LinkedHashMap<>();
+    for (org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node : nodes) {
+      byId.put(node.id(), node);
+    }
+    return new org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph(
+        byId, java.util.Map.of(), java.util.Set.of());
+  }
 }

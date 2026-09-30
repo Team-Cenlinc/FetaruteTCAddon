@@ -177,7 +177,8 @@ class ApproachPathAlignmentTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     sectionlessGraph(graph(waypoints, xs)), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenAnswer(
             invocation -> {
               RailEdge edge = invocation.getArgument(1);

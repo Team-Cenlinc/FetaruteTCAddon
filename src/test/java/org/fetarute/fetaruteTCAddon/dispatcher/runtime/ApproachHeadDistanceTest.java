@@ -174,7 +174,8 @@ class ApproachHeadDistanceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     sectionlessGraph(stationApproachGraph()), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(LINE_BPS);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));

@@ -415,6 +415,56 @@ class ConfigManagerTest {
     assertEquals(20, explicit.congestionNetworkReferenceTrains(), "显式写了就用写的值");
   }
 
+  /** 晚点追赶三个参数：缺省值写死在 {@code TimetableSettings}，模板里的数必须与之一致；负数回退缺省值，0 表示关掉对应手段。 */
+  @Test
+  void timetableRecoveryHasDefaultsAndIsConfigurable() {
+    ConfigManager.TimetableSettings missing =
+        ConfigManager.parse(new YamlConfiguration(), Logger.getLogger("config-test"))
+            .timetableSettings();
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
+        missing.recoveryMinDwellSeconds());
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_OVERSPEED_PERCENT,
+        missing.recoveryOverspeedPercent());
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
+        missing.recoveryEngageDelaySeconds());
+
+    YamlConfiguration explicit = new YamlConfiguration();
+    explicit.set("timetable.recovery.min-dwell-seconds", 0);
+    explicit.set("timetable.recovery.overspeed-percent", 5);
+    explicit.set("timetable.recovery.engage-delay-seconds", -1);
+    ConfigManager.TimetableSettings parsed =
+        ConfigManager.parse(explicit, Logger.getLogger("config-test")).timetableSettings();
+    assertEquals(0, parsed.recoveryMinDwellSeconds(), "0 关闭停站压缩");
+    assertEquals(5, parsed.recoveryOverspeedPercent());
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
+        parsed.recoveryEngageDelaySeconds(),
+        "负数回退缺省值");
+  }
+
+  /** 模板里的晚点追赶参数与代码缺省值一致。 */
+  @Test
+  void bundledTemplateRecoveryMatchesTheDefaults() throws Exception {
+    YamlConfiguration template = new YamlConfiguration();
+    try (java.io.InputStream in = ConfigManager.class.getResourceAsStream("/config.yml")) {
+      template.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+    }
+    ConfigManager.TimetableSettings bundled =
+        ConfigManager.parse(template, Logger.getLogger("config-test")).timetableSettings();
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
+        bundled.recoveryMinDwellSeconds());
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_OVERSPEED_PERCENT,
+        bundled.recoveryOverspeedPercent());
+    assertEquals(
+        ConfigManager.TimetableSettings.DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
+        bundled.recoveryEngageDelaySeconds());
+  }
+
   /**
    * 编表的车站停站开销：缺省 4 秒（实服 136 次停站"压牌→发车"中位 24 秒、dwell 20），可配，负数回退缺省。
    *

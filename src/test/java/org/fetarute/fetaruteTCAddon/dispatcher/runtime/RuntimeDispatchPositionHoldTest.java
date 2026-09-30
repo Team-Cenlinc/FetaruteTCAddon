@@ -284,7 +284,8 @@ class RuntimeDispatchPositionHoldTest {
         .thenReturn(
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(fixture.doubleTrack(), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));

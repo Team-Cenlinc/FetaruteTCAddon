@@ -363,6 +363,11 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           "TURNBACK_FOOTPRINT_GUARD_NO_PLAN",
           "TURNBACK_FOOTPRINT_GUARD_SEALED",
           "TURNBACK_FOOTPRINT_GUARD_FAR_CLEAR",
+          // 晚点追赶两个手段各自唯一的生效证据：某站停站被压缩了多少、某车何时放宽/恢复线路限速。
+          // 每趟跑完的 TIMETABLE_TRIP_DELAY 只说追回了多少秒，分不出是哪个手段追回的；这两行被预算吞掉就无从归因。
+          // 体量：压缩每车每站至多一行、只在确实晚点时出；放宽只在进入/退出时各一行，都不随 tick 放大。
+          "SCHEDULED_DWELL_COMPRESSED",
+          "SCHEDULED_RECOVERY_OVERSPEED",
           // 割等待环上的排队边——这条新恢复动作唯一的生效证据。
           // 第十七轮 MT 两车在相邻道岔上互卡 2839/2700 秒、等待图检测到该环 1455 次，
           // 而当时三个已实现的恢复动作没有一个能割它。体量受限于"真的成环几次"。

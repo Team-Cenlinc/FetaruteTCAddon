@@ -649,7 +649,9 @@ final class DispatchScenarioHarness {
           .when(graphs.getSnapshot(worldId))
           .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
       lenient()
-          .when(graphs.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+          .when(
+              graphs.effectiveSpeedLimitBlocksPerSecond(
+                  any(), any(), any(), anyDouble(), anyDouble()))
           .thenReturn(10.0);
 
       // 交路只列两端车站：中间区间点由路径展开填充。若把每个节点都列为 waypoint，

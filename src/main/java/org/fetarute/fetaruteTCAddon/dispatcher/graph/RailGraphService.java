@@ -439,18 +439,36 @@ public final class RailGraphService {
    */
   public double effectiveSpeedLimitBlocksPerSecond(
       UUID worldId, RailEdge edge, Instant now, double defaultSpeedBlocksPerSecond) {
+    return effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeedBlocksPerSecond, 1.0);
+  }
+
+  /**
+   * 同 {@link #effectiveSpeedLimitBlocksPerSecond(UUID, RailEdge, Instant,
+   * double)}，另按倍率放宽线路限速——晚点追赶用。
+   *
+   * <p>只放宽<b>写明了的线路限速</b>：边基础限速（牌子写的）或永久限速覆盖，也就是编表按它算表定时分的那个数。 不放宽的有三类：没写限速、按默认速度走的边——没有证据说它扛得住更快；
+   * 临时限速——施工、限行是运维硬约束；以及不经过这里的进站限速、CAUTION 与信号给出的速度。
+   *
+   * @param lineSpeedFactor 线路限速倍率；不大于 1 或非有限值时按 1
+   */
+  public double effectiveSpeedLimitBlocksPerSecond(
+      UUID worldId,
+      RailEdge edge,
+      Instant now,
+      double defaultSpeedBlocksPerSecond,
+      double lineSpeedFactor) {
     Objects.requireNonNull(worldId, "worldId");
     Objects.requireNonNull(edge, "edge");
     Objects.requireNonNull(now, "now");
     if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
       throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");
     }
+    double factor =
+        Double.isFinite(lineSpeedFactor) && lineSpeedFactor > 1.0 ? lineSpeedFactor : 1.0;
 
     double baseFromEdge = edge.baseSpeedLimit();
-    double base =
-        Double.isFinite(baseFromEdge) && baseFromEdge > 0.0
-            ? baseFromEdge
-            : defaultSpeedBlocksPerSecond;
+    boolean baseWritten = Double.isFinite(baseFromEdge) && baseFromEdge > 0.0;
+    double base = baseWritten ? baseFromEdge * factor : defaultSpeedBlocksPerSecond;
 
     EdgeId edgeId = edge.id();
     if (edgeId == null) {
@@ -461,7 +479,7 @@ public final class RailGraphService {
         edgeOverrides.getOrDefault(worldId, new ConcurrentHashMap<>()).get(normalized);
     double effective = base;
     if (override != null && override.speedLimitBlocksPerSecond().isPresent()) {
-      effective = override.speedLimitBlocksPerSecond().getAsDouble();
+      effective = override.speedLimitBlocksPerSecond().getAsDouble() * factor;
     }
     if (override != null && override.isTempSpeedActive(now)) {
       effective = Math.min(effective, override.tempSpeedLimitBlocksPerSecond().getAsDouble());

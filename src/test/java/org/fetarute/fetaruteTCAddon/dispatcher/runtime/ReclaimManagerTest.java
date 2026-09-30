@@ -962,6 +962,58 @@ class ReclaimManagerTest {
     assertTrue(fixture.destroyed.isEmpty());
   }
 
+  /** 交路已换车的车再也没有班可跑：闲置满短门槛就回收，不等闲置上限（这里是 3600 秒）。 */
+  @Test
+  void aRetiredVehicleIsReclaimedWithoutWaitingForTheIdleLimit() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"));
+    fixture.manager.setRetiredVehicle(train -> train.equals("train-a"));
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS - 1);
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    verify(fixture.ticketAssigner).forceAssign(eq(fixture.provider), eq("train-a"), any());
+    assertTrue(
+        fixture.logs.stream().anyMatch(line -> line.startsWith("回收触发: 交路已换车 train=train-a")),
+        fixture.logs::toString);
+  }
+
+  /**
+   * 单股道车站（CHT 只有 3 道）与正线折返点同一条规则：下一班接不上就立即回收，不占着唯一的股道等后面的车次。
+   *
+   * <p>2026-09-30 实服：WS 车晚点到 CHT，下一班 2C 已过容差作废，剩下的 2N 从 NTA 发车、它赶不过去；回库闸因"交路还有班次"不放， 它在唯一的股道上一直等到
+   * 2N 也过期，后车全部等待放行、严重晚点 20 分钟。
+   */
+  @Test
+  void aSingleTrackStationWithoutAContinuationIsReclaimedImmediately() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:CHT:3"));
+    fixture.manager.setSingleTrackStation(node -> node.value().equals("SURC:S:CHT:3"));
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    fixture.manager.setReturnGate(train -> false);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    assertTrue(
+        fixture.logs.stream().anyMatch(line -> line.startsWith("回收触发: 单股道车站无后续班次 train=train-a")),
+        fixture.logs::toString);
+    assertEquals(
+        List.of("train-a:reclaim-mainline-turnback"), fixture.destroyed, "没有从 CHT 出发的回库线路时原地处理");
+  }
+
+  /** 单股道车站上、下一班还接得上的车照常等：立即回收闸不放行时，站台那道回库闸照旧说了算。 */
+  @Test
+  void aSingleTrackStationKeepsATrainWhoseNextTripIsStillReachable() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:CHT:3"));
+    fixture.manager.setSingleTrackStation(node -> true);
+    fixture.manager.setMainlineReturnGate((train, route) -> false);
+    fixture.manager.setReturnGate(train -> false);
+
+    fixture.checkAfterIdle(4000);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
   /** 有从折返点出发的 RETURN 交路、只是这一拍没派出去（闭塞、被拒）：不能断定没有回库路，不销毁，照常进滞留计时。 */
   @Test
   void aReturnRouteThatIsOnlyBlockedDoesNotDestroyTheTrain() {
