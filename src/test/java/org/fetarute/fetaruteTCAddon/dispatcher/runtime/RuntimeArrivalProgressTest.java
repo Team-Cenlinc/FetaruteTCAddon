@@ -565,7 +565,7 @@ class RuntimeArrivalProgressTest {
     RailGraphService graphs = mock(RailGraphService.class);
     when(graphs.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(graphs.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(graphs.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     when(routes.findByCodes("op", "l1", "capacity-arrival")).thenReturn(Optional.of(route));

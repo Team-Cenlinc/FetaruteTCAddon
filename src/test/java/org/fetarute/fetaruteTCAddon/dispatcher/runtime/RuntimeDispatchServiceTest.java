@@ -234,7 +234,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -318,7 +319,8 @@ class RuntimeDispatchServiceTest {
                 graphAvailable.get()
                     ? Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now()))
                     : Optional.empty());
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -394,7 +396,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(currentNode, nextNode, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -461,7 +464,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(currentNode, nextNode, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -538,7 +542,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(currentNode, nextNode, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -637,7 +642,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -788,7 +794,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(materializedDepot, firstStation, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(20.0);
     OccupancyManager occupancyManager = mockOccupancyManager();
     when(occupancyManager.canEnter(any())).thenAnswer(allowProceed());
@@ -1054,7 +1061,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -1208,7 +1216,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, allocated, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -1307,7 +1316,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "ppk-arrival")).thenReturn(Optional.of(route));
@@ -2129,7 +2139,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, allocated, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -2192,7 +2203,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "immediate-dynamic-long-path"))
@@ -2341,7 +2353,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "consecutive-dynamic-boundary"))
@@ -2495,7 +2508,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -2669,7 +2683,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -2745,7 +2760,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -2910,7 +2926,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -2973,7 +2990,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3031,7 +3049,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithConflictFreeLinearPath(List.of(a, b, c, d), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3105,7 +3124,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3209,7 +3229,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(20.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3487,7 +3508,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, station, 25), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(40.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3571,7 +3593,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, b, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3638,7 +3661,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithConflictFreeLinearPath(List.of(a, b, c, d), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(40.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3726,7 +3750,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3817,7 +3842,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -3878,7 +3904,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4103,7 +4130,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4189,7 +4217,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4262,7 +4291,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4332,7 +4362,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4401,7 +4432,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
@@ -4509,7 +4541,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
@@ -4577,7 +4610,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4657,7 +4691,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4799,7 +4834,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 2), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -4927,7 +4963,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5004,7 +5041,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5080,7 +5118,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5153,7 +5192,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5227,7 +5267,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5299,7 +5340,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5390,7 +5432,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "front")).thenReturn(Optional.of(frontRoute));
@@ -5477,7 +5520,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5555,7 +5599,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 2), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5633,7 +5678,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5724,7 +5770,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5828,7 +5875,8 @@ class RuntimeDispatchServiceTest {
                 new RailGraphService.RailGraphSnapshot(
                     graphWithConflictFreeLinearPath(List.of(a, m1, m2, m3, d), 10),
                     Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -5906,7 +5954,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 1), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -6043,7 +6092,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     startupPhysicalGraph(worldId), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -7576,7 +7626,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
@@ -7742,7 +7793,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("A"), NodeId.of("B"), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -8368,7 +8420,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(20.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findById(ticketRouteId)).thenReturn(Optional.of(route));
@@ -9449,7 +9502,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("TERM"), NodeId.of("NEXT"), 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -9667,7 +9721,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(NodeId.of("ST"), NodeId.of("TERM"), 20), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -9779,7 +9834,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, stopWp, 1), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -9852,7 +9908,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, b, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -9918,7 +9975,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, station, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -9982,7 +10040,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, station, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10053,7 +10112,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, station, 600), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10116,7 +10176,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10181,7 +10242,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10258,7 +10320,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10317,7 +10380,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, b, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
     when(railGraphService.componentKey(worldId, b)).thenReturn(Optional.of("component-a"));
     when(railGraphService.componentCautionSpeedBlocksPerSecond(worldId, "component-a"))
@@ -10391,7 +10455,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(28.8);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10466,7 +10531,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 10, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(40.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10536,7 +10602,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 60, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(40.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10613,7 +10680,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(a, b, 20), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(40.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -10896,7 +10964,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithTwoEdges(a, b, c, 50, 50), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenAnswer(
             inv -> {
               RailEdge edge = inv.getArgument(1);
@@ -15096,7 +15165,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(20.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("SURC", "MT", "MT-2O_ShortD")).thenReturn(Optional.of(route));
@@ -15302,7 +15372,8 @@ class RuntimeDispatchServiceTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(20.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findByCodes("op", "l1", "r1")).thenReturn(Optional.of(route));
@@ -21594,7 +21665,8 @@ class RuntimeDispatchServiceTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithSingleEdge(current, next, 10), Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);

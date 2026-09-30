@@ -566,7 +566,7 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 
 ## 运行时改变了什么
 
-投入运行后只有两处行为变化，都由 `timetable.enabled` 总开关控制，默认关闭：
+投入运行后有三处行为变化，都由 `timetable.enabled` 总开关控制，默认关闭：早到扣留、按表出票，以及晚点追赶。
 
 ### 出站门控里的计划扣留
 
@@ -580,6 +580,44 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 - 扣留时长被 `StationStopCoordinator.HOLD_CEILING`（150 秒）硬封顶，低于发车门锁自身的 180 秒回收时限。
   否则会进入"自己不动、也不再为别人排队"的状态，那是最难归因的一类停滞。
 - 早到幅度超出上限判为匹配错误，放行并留痕。
+
+### 晚点追赶
+
+扣留只管早到的车；晚点的车以前没有任何手段往回追：中途站停满 dwell、线路限速照旧，晚点 1:1 传到后面每一站，
+直到超过 `assign-tolerance-seconds` 被作废。表定时分就是控车那条运行曲线，没有余裕可吃。现在有两个手段，
+都只对**绑定了表定车次、且确实晚点**的车生效，而且都**只会缩短等待**——早到或准点的车一秒不多停、一点不提速，不会制造新的等待：
+
+- **停站压缩**（`StationStopCoordinator#dwellSecondsFor`）：AutoStation 停稳、到站进度提交之后、排关门时刻之前，
+  按本站计划发车算"刚好赶上要停多久"，夹在 `[下限, 交路 dwell]` 之间；下限取 `recovery.min-dwell-seconds` 与车门开关过程
+  （关门动画开始前至少全开 3 秒，legacy 动画按其实测关门时长）中较大的一个。计划发车只读已有绑定
+  （`ScheduledDeparturePlan#boundDepartureAt`），不在到站时触发车次匹配。出库后第一站（车门 warm-up、开门有重试窗口）、
+  交路起点与终点（终点停站就是折返）不压缩。`DwellRegistry` 记的是压缩后的停站，ETA 对当前站随之一致。
+  审计：`SCHEDULED_DWELL_COMPRESSED`（必留）。
+- **放宽线路限速**（`StationStopCoordinator#lineSpeedFactor` → `RailGraphService#effectiveSpeedLimitBlocksPerSecond` 的倍率重载）：
+  本车次最近一次到发晚点 ≥ `recovery.engage-delay-seconds` 时，线路限速乘 `1 + overspeed-percent/100`；追到阈值以内即恢复。
+  晚点只在到发时更新，同一区间内倍率不会来回跳。**只放宽写明的线路限速**（牌子上的边限速或永久限速覆盖，也就是编表按它算表定时分的那个数）；
+  没写限速走默认速度的边（常见于道岔边）、临时限速、进站限速、CAUTION 与信号给出的速度一律不放宽。制动距离与移动授权按实际车速算，
+  跑得快只会刹得早。审计：`SCHEDULED_RECOVERY_OVERSPEED state=engaged|released`（必留，只在进入/退出时各一行；
+  重载或关掉按表运行时，已放宽的车在下一次查倍率时补一行 `released reason=recovery-disabled`）。
+  "最近一次晚点"只认列车**此刻仍绑定**的车次：改派交路、时刻表下架、回起点重新匹配之后，旧车次的晚点立即作废。
+
+**晚点账**：`TimetableService#observeStop` 在每次到发时记下相对计划的偏差（`TripDelayLedger`），一趟跑到终点站、换了车次或列车离开时结账成一行：
+
+```
+TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carriedIn=+5 final=+0 max=+15 gained=10 recovered=15 detail=0d+5,1a+15,1d+5,2a+0
+```
+
+`carriedIn` 是带入（本趟第一次记录时已晚多少，来自上一趟或起点晚发），`gained` 是本趟途中新增的晚点，`recovered` 是追回的秒数；
+`detail` 逐条是 `序号 + a(到)/d(发) + 偏差`。追赶管不管用看 `recovered`，晚点从哪来看 `carriedIn` 与 `gained`。两处口径：
+
+- 到站事件在列车**停稳之后**才发出，而表定到达是压牌时刻，所以到站按"表定到达 + 停稳耗时"比，停稳耗时 =
+  `station-stop-overhead-seconds` − 开门延迟 1 秒；不补的话每站到达都会凭空晚约 3 秒。
+- `gained`/`recovered` 只数**晚点**部分（负偏差按 0 计）：早到的车在站里按表扣留、偏差从 −20 回到 0 是计划内的，不算新增晚点。
+
+结账原因：`terminated`（到达终点站）、`rebound`（换了车次）、`route-changed`（改派交路）、`timetable-unpublished`（时刻表下架）、`released:<原因>`（列车离开）。
+折返复用出发的车在起点不经过 AutoStation 发车，第一条记录是第 1 站的到达。
+
+当前没做（下一批）：终点折返压缩、ETA 对后续各站按压缩停站与放宽限速估算（现在偏保守，报的晚点略大）。
 
 ### 发车出票
 
@@ -685,12 +723,15 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 | `max-catch-up-seconds` | `300` | 发车侧单次轮询的回补窗口上限 |
 | `reload-interval-seconds` | `60` | publish/unpublish 后最多多久生效（读库在异步线程，兜底 retain 回主线程） |
 | `zone` | `""` | 时刻表默认时区，留空用服务器默认 |
+| `recovery.min-dwell-seconds` | `10` | 晚点追赶：晚点车中途站最少停多少秒（开门 1 秒 + 关门动画 5 秒，再短就是开门即关门）；0 关闭停站压缩 |
+| `recovery.overspeed-percent` | `10` | 晚点追赶：线路限速放宽的百分比，只放宽写明的线路限速；0 关闭 |
+| `recovery.engage-delay-seconds` | `10` | 晚点追赶：最近一次到发晚点达到多少秒才放宽线路限速 |
 | `station-stop-overhead-seconds` | `4` | 编表时车站停车在 dwell 之外多算的秒数：TrainCarts 居中刹停约 3 秒 + AutoStation 开门延迟 1 秒（dwell 从开门起算）。表定发车 = 到站 + dwell + 本值，车站终到的折返同理；车库与区间停车点不加。改了要重新 build |
 
 ## 遥测（未来的 calibration，不是构建输入）
 
 `StationStopObserver` / `StationStopEvent` / `StationStopCoordinator` 这组停靠事件 seam 保留着，
-但**当前没有时刻表方向的消费者**，也不参与 `build`。
+时刻表方向目前只有晚点账（`TIMETABLE_TRIP_DELAY`，见"晚点追赶"）在消费，它也不参与 `build`。
 
 它的用途是将来做对表：
 

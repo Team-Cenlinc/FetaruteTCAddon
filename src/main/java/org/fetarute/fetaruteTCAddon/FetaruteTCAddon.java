@@ -1228,7 +1228,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofSeconds(settings.holdMaxSeconds()),
             java.time.Duration.ofSeconds(settings.assignToleranceSeconds()),
             java.time.Duration.ofSeconds(settings.maxCatchUpSeconds()),
-            settings.resolveZone()));
+            settings.resolveZone(),
+            // 到站事件在列车停稳后发出，表定到达是压牌时刻：两者差"车站停车开销 − 开门延迟"（居中刹停）。
+            java.time.Duration.ofSeconds(
+                Math.max(
+                    0,
+                    settings.stationStopOverheadSeconds()
+                        - org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
+                            .doorOpenDelaySeconds()))));
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
     // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
     // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
@@ -1264,6 +1271,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .stationStops()
         .setMaxHold(
             settings.enabled() ? java.time.Duration.ofSeconds(settings.holdMaxSeconds()) : null);
+    runtimeDispatchService
+        .stationStops()
+        .setRecovery(
+            settings.enabled()
+                ? new org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .StationStopCoordinator
+                    .Recovery(
+                    settings.recoveryMinDwellSeconds(),
+                    settings.recoveryOverspeedPercent(),
+                    settings.recoveryEngageDelaySeconds())
+                : null);
     // ETA 与站内扣留同一口径：早到的车在站内等点的时间计入 ETA，上限同扣留上限（含 150 秒硬顶）。
     if (etaService != null) {
       etaService.attachPlannedDepartures(

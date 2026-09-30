@@ -12,6 +12,7 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -859,5 +860,171 @@ class TimetableServiceTest {
     for (String train : trains) {
       assertTrue(service.dutyProgressOf(train).isEmpty(), () -> train + " 的交路进度没有释放");
     }
+  }
+
+  // ------------------------------------------------------------------ 晚点账
+
+  /**
+   * 逐站记下到发偏差，到达终点站结账成一行：带入 +5（起点晚发）、途中新增 10、追回 15，终到准点。
+   *
+   * <p>R1-001：08:00:00 发，B 站 08:01:40 到、08:02:10 发，C 站 08:03:50 到。
+   */
+  @Test
+  void delayLedgerRecordsEachStopAndClosesAtTheTerminal() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = service(true, logs, timetable(TimetableStatus.PUBLISHED));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+
+    service.observeStop(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")), true);
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:01:55Z")), false);
+    assertEquals(OptionalLong.of(15), service.currentDelaySeconds("TRAIN-A"), "最近一次：B 站晚到 15 秒");
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:02:15Z")), true);
+    assertEquals(OptionalLong.of(5), service.currentDelaySeconds("train-A"), "压缩停站追回 10 秒");
+    service.observeStop(event("train-A", 2, Instant.parse("2026-03-02T08:03:50Z")), false);
+
+    List<String> ledger =
+        logs.stream().filter(line -> line.startsWith("TIMETABLE_TRIP_DELAY ")).toList();
+    assertEquals(1, ledger.size(), logs::toString);
+    String line = ledger.get(0);
+    assertTrue(line.contains("trip=R1-001"), line);
+    assertTrue(line.contains("reason=terminated"), line);
+    assertTrue(line.contains("marks=4"), line);
+    assertTrue(line.contains("carriedIn=+5"), line);
+    assertTrue(line.contains("final=+0"), line);
+    assertTrue(line.contains("max=+15"), line);
+    assertTrue(line.contains("gained=10"), line);
+    assertTrue(line.contains("recovered=15"), line);
+    assertTrue(line.contains("detail=0d+5,1a+15,1d+5,2a+0"), line);
+    assertTrue(service.currentDelaySeconds("train-A").isEmpty(), "结账后不再有当前偏差");
+  }
+
+  /** 车次没跑完列车就离开：照样结账，原因带上离开的理由。 */
+  @Test
+  void releasingATrainClosesItsDelayLedger() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = service(true, logs, timetable(TimetableStatus.PUBLISHED));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:02:40Z")), false);
+
+    service.release("train-A", "destroyed");
+
+    assertTrue(
+        logs.stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("TIMETABLE_TRIP_DELAY ")
+                        && line.contains("reason=released:destroyed")
+                        && line.contains("final=+60")),
+        logs::toString);
+    assertTrue(service.currentDelaySeconds("train-A").isEmpty());
+  }
+
+  /** 停站压缩到站就要查计划发车：只读、不建立绑定，交路对不上时答不上来。 */
+  @Test
+  void boundDepartureIsReadOnlyAndScopedToTheBoundRoute() {
+    TimetableService service = service(true, timetable(TimetableStatus.PUBLISHED));
+    Instant arrival = Instant.parse("2026-03-02T08:01:50Z");
+
+    assertTrue(service.boundDepartureAt(event("train-A", 1, arrival)).isEmpty());
+    assertTrue(service.assignments().isEmpty(), "查询不能建立绑定");
+
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+    assertEquals(
+        Optional.of(Instant.parse("2026-03-02T08:02:10Z")),
+        service.boundDepartureAt(event("train-A", 1, arrival)));
+    assertTrue(
+        service
+            .boundDepartureAt(
+                new StationStopEvent(
+                    "train-A", Optional.of(UUID.randomUUID()), "R9", 1, 3, "OP:S:BBB:1", arrival))
+            .isEmpty(),
+        "改派到别的交路之后不按旧车次压缩");
+  }
+
+  /** 改派到别的交路之后，旧车次的晚点不再算数：否则已经不受时刻表约束的车会一直带着放宽的限速跑。旧账就地结账。 */
+  @Test
+  void currentDelayForgetsATripTheTrainIsNoLongerBoundTo() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = service(true, logs, timetable(TimetableStatus.PUBLISHED));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:02:10Z")), false);
+    assertEquals(OptionalLong.of(30), service.currentDelaySeconds("train-A"));
+
+    service.scheduledDepartureAt(
+        new StationStopEvent(
+            "train-A",
+            Optional.of(UUID.randomUUID()),
+            "R9",
+            0,
+            3,
+            "OP:S:ZZZ:1",
+            Instant.parse("2026-03-02T08:05:00Z")));
+
+    assertTrue(service.currentDelaySeconds("train-A").isEmpty(), "改派后不再有当前偏差");
+    assertTrue(
+        logs.stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("TIMETABLE_TRIP_DELAY ")
+                        && line.contains("reason=route-changed")),
+        logs::toString);
+  }
+
+  /** 回到起点重新匹配到下一班：新车次还没有到发记录之前，上一班的晚点不能顶替成当前偏差。 */
+  @Test
+  void currentDelayIsScopedToTheNewlyBoundTripAfterRebinding() {
+    TimetableService service = service(true, timetable(TimetableStatus.PUBLISHED));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:02:10Z")), false);
+    assertEquals(OptionalLong.of(30), service.currentDelaySeconds("train-A"));
+
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:10:05Z")));
+
+    assertEquals(Optional.of("R1-002"), service.assignmentOf("train-A").map(a -> a.tripCode()));
+    assertTrue(service.currentDelaySeconds("train-A").isEmpty(), "R1-001 的 +30 不属于 R1-002");
+  }
+
+  /**
+   * 两处口径：到站事件在停稳之后，要按"压牌 + 停稳耗时"比；早到后按表扣留回到 0 不算新增晚点。
+   *
+   * <p>停稳耗时 3 秒。B 站早到 20 秒（08:01:23 停稳）、扣到 08:02:10 准点开，C 站 08:03:53 停稳即准点：整趟没有晚点。
+   */
+  @Test
+  void earlyHoldsAndSettlingAreNotCountedAsLateness() {
+    List<String> logs = new ArrayList<>();
+    TimetableService service = new TimetableService(() -> FIXTURE_NOW, logs::add);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            ZONE,
+            Duration.ofSeconds(3)));
+    service.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:00Z")));
+
+    service.observeStop(event("train-A", 0, Instant.parse("2026-03-02T08:00:00Z")), true);
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:01:23Z")), false);
+    service.observeStop(event("train-A", 1, Instant.parse("2026-03-02T08:02:10Z")), true);
+    service.observeStop(event("train-A", 2, Instant.parse("2026-03-02T08:03:53Z")), false);
+
+    String line =
+        logs.stream()
+            .filter(entry -> entry.startsWith("TIMETABLE_TRIP_DELAY "))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(logs.toString()));
+    assertTrue(line.contains("detail=0d+0,1a-20,1d+0,2a+0"), line);
+    assertTrue(line.contains("gained=0"), line);
+    assertTrue(line.contains("recovered=0"), line);
+  }
+
+  /** 总开关关着：没有晚点可言，控车不会因此放宽限速。 */
+  @Test
+  void currentDelayIsEmptyWhenDisabled() {
+    TimetableService service = service(false, timetable(TimetableStatus.PUBLISHED));
+
+    assertTrue(service.currentDelaySeconds("train-A").isEmpty());
   }
 }

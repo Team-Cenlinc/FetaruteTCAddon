@@ -114,7 +114,8 @@ class RuntimeStartLineTagTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
-    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(20.0);
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findById(ticketRouteId)).thenReturn(Optional.of(route));

@@ -16,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -81,6 +82,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   /** 各车在当前车次上已停完的最后一站；车半途离开时据此判断哪些站不再停。 */
   private final ConcurrentMap<String, ServedStops> servedStops = new ConcurrentHashMap<>();
+
+  /** 各车在当前车次上逐站的到发偏差：晚点追赶读最近一次，跑完一趟结账成一行日志。 */
+  private final TripDelayLedger delays = new TripDelayLedger();
 
   private volatile Consumer<TripCancellations.Cancellation> cancellationListener =
       cancellation -> {};
@@ -189,6 +193,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     // 此时若把旧绑定留着，等这辆车绕回原交路时会拿上一圈的车次继续算时刻，而它已经是下一圈了。
     if (existing != null && !existing.routeId().equals(routeId)) {
       matcher.release(key, "route-changed");
+      closeDelays(key, event.trainName(), "route-changed");
       existing = null;
     } else if (existing != null
         && event.stopIndex() == 0
@@ -447,18 +452,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (!settings.enabled()) {
       return Optional.empty();
     }
-    return assignmentOf(trainName)
+    return assignmentOf(trainName).flatMap(assignment -> plannedDeparture(assignment, stopIndex));
+  }
+
+  private Optional<Instant> plannedDeparture(TimetableAssignment assignment, int stopIndex) {
+    return resolveTimetable(assignment)
         .flatMap(
-            assignment ->
-                resolveTimetable(assignment)
+            timetable ->
+                timetable
+                    .tripByCode(assignment.tripCode())
                     .flatMap(
-                        timetable ->
-                            timetable
-                                .tripByCode(assignment.tripCode())
-                                .flatMap(
-                                    trip ->
-                                        timetable.scheduledDeparture(
-                                            trip, stopIndex, assignment.serviceDate()))));
+                        trip ->
+                            timetable.scheduledDeparture(
+                                trip, stopIndex, assignment.serviceDate())));
   }
 
   /**
@@ -484,6 +490,38 @@ public final class TimetableService implements ScheduledDeparturePlan {
                                     trip ->
                                         timetable.scheduledArrival(
                                             trip, stopIndex, assignment.serviceDate()))));
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>只认当前绑定、且车次就在事件所在交路上的：改派之后、重新绑定之前的停靠拿不到时刻，本站按计划停站。
+   */
+  @Override
+  public Optional<Instant> boundDepartureAt(StationStopEvent event) {
+    if (!settings.enabled() || event == null) {
+      return Optional.empty();
+    }
+    return assignmentOf(event.trainName())
+        .filter(assignment -> event.routeUuid().equals(Optional.of(assignment.routeId())))
+        .flatMap(assignment -> plannedDeparture(assignment, event.stopIndex()));
+  }
+
+  /**
+   * {@inheritDoc}
+   *
+   * <p>只认列车<b>此刻仍绑定</b>的那一趟：改派、下架、回起点重新匹配之后，旧车次的偏差不再算数——否则一辆已经不受时刻表约束的车会一直带着放宽的限速跑。
+   */
+  @Override
+  public OptionalLong currentDelaySeconds(String trainName) {
+    if (!settings.enabled()) {
+      return OptionalLong.empty();
+    }
+    String key = keyOf(trainName);
+    return matcher
+        .get(key)
+        .map(assignment -> delays.current(key, assignment.tripId()))
+        .orElse(OptionalLong.empty());
   }
 
   /** 查询某辆车的交路进度。 */
@@ -512,6 +550,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     matcher.retain(keep);
     ledger.retain(keep);
     servedStops.keySet().retainAll(keep);
+    delays.retain(keep);
   }
 
   /**
@@ -528,12 +567,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
     ServedStops served = servedStops.remove(key);
     released.ifPresent(assignment -> cancelRemainingStops(assignment, served, reason));
     ledger.release(key, trainName, reason);
+    closeDelays(key, trainName, "released:" + reason);
   }
 
   /**
    * 记下列车在当前车次上停完了哪一站：发车才算这一站停完，到达车次终点站算整趟跑完。
    *
    * <p>由车站停靠观察者调用。只认当前绑定车次所在交路的事件：改派到别的交路之后、重新绑定之前的停靠不算旧车次的。
+   *
+   * <p>同时记晚点账：每次到发相对计划的偏差。到达终点站即结账。
    *
    * @param event 停靠事件
    * @param departure true 为发车，false 为到达
@@ -544,18 +586,60 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (assignment == null || !event.routeUuid().equals(Optional.of(assignment.routeId()))) {
       return;
     }
+    Optional<Timetable> timetable = resolveTimetable(assignment);
+    recordDelay(key, event, departure, assignment, timetable);
     int through = event.stopIndex();
     if (!departure) {
       OptionalInt terminating =
-          resolveTimetable(assignment)
-              .flatMap(timetable -> timetable.routePlan(assignment.routeId()))
+          timetable
+              .flatMap(table -> table.routePlan(assignment.routeId()))
               .map(TimetableRoutePlan::terminatingSequence)
               .orElse(OptionalInt.empty());
       if (terminating.isEmpty() || through < terminating.getAsInt()) {
         return;
       }
+      closeDelays(key, event.trainName(), "terminated");
     }
     servedStops.merge(key, ServedStops.of(assignment, through), ServedStops::advance);
+  }
+
+  /**
+   * 记一次到发偏差；列车换了车次时，上一趟就此结账。
+   *
+   * <p>到站事件发生在列车停稳之后，而表定到达是压牌时刻（停稳与开门算在车站停车开销里）。两者差一个 {@link
+   * Settings#arrivalSettle()}，不补上的话每一站到达都会凭空晚几秒。
+   */
+  private void recordDelay(
+      String key,
+      StationStopEvent event,
+      boolean departure,
+      TimetableAssignment assignment,
+      Optional<Timetable> timetable) {
+    Optional<Instant> planned =
+        timetable.flatMap(
+            table ->
+                table
+                    .tripByCode(assignment.tripCode())
+                    .flatMap(
+                        trip ->
+                            departure
+                                ? table.scheduledDeparture(
+                                    trip, event.stopIndex(), assignment.serviceDate())
+                                : table
+                                    .scheduledArrival(
+                                        trip, event.stopIndex(), assignment.serviceDate())
+                                    .map(arrival -> arrival.plus(settings.arrivalSettle()))));
+    if (planned.isEmpty()) {
+      return;
+    }
+    long delay = Duration.between(planned.get(), event.at()).getSeconds();
+    delays
+        .record(key, assignment, new TripDelayLedger.Mark(event.stopIndex(), departure, delay))
+        .ifPresent(summary -> debugLogger.accept(summary.logLine(event.trainName(), "rebound")));
+  }
+
+  private void closeDelays(String key, String trainName, String reason) {
+    delays.close(key).ifPresent(summary -> debugLogger.accept(summary.logLine(trainName, reason)));
   }
 
   /**
@@ -864,6 +948,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   private void clearAssignments(String reason) {
     servedStops.clear();
+    delays.clear();
     if (matcher.isEmpty() && ledger.isEmpty()) {
       matcher.clear();
       return;
@@ -878,6 +963,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     Set<String> released = new HashSet<>();
     matcher.dropOutside(next.byId().keySet(), released::add);
     ledger.dropOutside(next.byId().keySet(), released);
+    released.forEach(key -> closeDelays(key, key, "timetable-unpublished"));
     cancellations.retainTimetables(next.byId().keySet());
   }
 
@@ -1114,6 +1200,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param assignTolerance 匹配车次时允许的最大偏差
    * @param maxCatchUp 发车侧单次轮询最多回补多长时间窗口
    * @param zoneId 命令未指定时构建时刻表使用的默认时区
+   * @param arrivalSettle 压牌到停稳的时长：到站事件在停稳之后才发生，晚点账据此把表定到达换算到同一时刻
    */
   public record Settings(
       boolean enabled,
@@ -1121,7 +1208,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Duration maxHold,
       Duration assignTolerance,
       Duration maxCatchUp,
-      ZoneId zoneId) {
+      ZoneId zoneId,
+      Duration arrivalSettle) {
 
     public Settings {
       maxHold = maxHold == null || maxHold.isNegative() ? Duration.ZERO : maxHold;
@@ -1129,6 +1217,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
           assignTolerance == null || assignTolerance.isNegative() ? Duration.ZERO : assignTolerance;
       maxCatchUp = maxCatchUp == null || maxCatchUp.isNegative() ? Duration.ZERO : maxCatchUp;
       zoneId = zoneId == null ? ZoneId.systemDefault() : zoneId;
+      arrivalSettle =
+          arrivalSettle == null || arrivalSettle.isNegative() ? Duration.ZERO : arrivalSettle;
+    }
+
+    /** 不区分压牌与停稳（{@code arrivalSettle} 为 0）；测试与未接配置的调用方用。 */
+    public Settings(
+        boolean enabled,
+        boolean spawnEnabled,
+        Duration maxHold,
+        Duration assignTolerance,
+        Duration maxCatchUp,
+        ZoneId zoneId) {
+      this(enabled, spawnEnabled, maxHold, assignTolerance, maxCatchUp, zoneId, Duration.ZERO);
     }
 
     /** 关闭状态：按表运行完全不参与。 */

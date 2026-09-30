@@ -59,12 +59,26 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final String TAG_DOOR_FIRST_STOP_DONE = "FTA_DOOR_FIRST_STOP_DONE";
   private static final String TAG_RUN_AT = "FTA_RUN_AT";
   private static final long DOOR_OPEN_DELAY_TICKS = 20L;
+
+  /**
+   * 停稳到开门的秒数（中途站）。编表的车站停车开销 = 居中刹停 + 本值，时刻表据此把"停稳"换算回"压牌"。
+   *
+   * @return 开门延迟秒数
+   */
+  public static int doorOpenDelaySeconds() {
+    return (int) (DOOR_OPEN_DELAY_TICKS / 20L);
+  }
+
   private static final long DOOR_OPEN_FIRST_DELAY_TICKS = 60L;
   private static final long TICK_MILLIS = 50L;
   private static final int STOP_WAIT_TIMEOUT_TICKS = 200;
   private static final int STOP_STABLE_TICKS = 1;
   private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
+
+  /** 晚点压缩停站时，关门动画开始前车门至少全开多久（tick）。 */
+  private static final long DOOR_MIN_OPEN_TICKS = 60L;
+
   private static final int DOOR_OPEN_MAX_ATTEMPTS = 12;
   private static final long DOOR_OPEN_MAX_RETRY_WINDOW_TICKS = 160L;
   private static final double EXIT_OFFSET_DISTANCE_BLOCKS = 3.0;
@@ -306,6 +320,23 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
+   * 压缩停站不能短于车门走完一个开关过程：关门动画开始之前车门至少全开 {@link #DOOR_MIN_OPEN_TICKS}。
+   *
+   * <p>关门动画在停站结束前开始（legacy 动画按其实测时长，其余按 {@link #DOOR_CLOSE_EARLY_TICKS}）； 晚点压缩到 10 秒时，长的 legacy
+   * 关门动画会让车门刚开就关。只对压缩生效，计划停站本身不受影响。
+   */
+  private static int doorFloorSeconds(AutoStationDoorController.DoorSession session) {
+    long closeTicks = DOOR_CLOSE_EARLY_TICKS;
+    if (session != null && session.usesLegacyDoorAnimation()) {
+      long estimated = session.estimatedCloseDurationTicks();
+      if (estimated > 0L) {
+        closeTicks = estimated;
+      }
+    }
+    return (int) ((closeTicks + DOOR_MIN_OPEN_TICKS + 19L) / 20L);
+  }
+
+  /**
    * MEMBER_ENTER 触发的去重规则：
    *
    * <ul>
@@ -441,7 +472,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (plugin == null) {
       return;
     }
-    if (dwellSeconds > 0 && !group.isMoving()) {
+    // 先按计划停站登记：到站处理期间信号 tick 靠它保持 STOP；晚点压缩在到站进度提交后再覆盖。
+    boolean dwellRegistered = dwellSeconds > 0 && !group.isMoving();
+    if (dwellRegistered) {
       plugin.getDwellRegistry().ifPresent(registry -> registry.start(trainName, dwellSeconds));
     }
     TrainProperties properties = group.getProperties();
@@ -475,10 +508,31 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     plugin
         .getRuntimeDispatchService()
         .ifPresent(dispatch -> dispatch.handleStationArrival(group, definition));
+    // 晚点的车压缩停站：必须在到站进度提交之后（按本站序号查计划发车）、排关门时刻之前定下来。
+    int effectiveDwellSeconds =
+        plugin
+            .getRuntimeDispatchService()
+            .map(
+                dispatch ->
+                    dispatch
+                        .stationStops()
+                        .dwellSecondsFor(
+                            group,
+                            definition,
+                            dwellSeconds,
+                            firstStop,
+                            firstStop ? DOOR_OPEN_FIRST_DELAY_TICKS : DOOR_OPEN_DELAY_TICKS,
+                            doorFloorSeconds(session)))
+            .orElse(dwellSeconds);
+    if (dwellRegistered && effectiveDwellSeconds != dwellSeconds) {
+      plugin
+          .getDwellRegistry()
+          .ifPresent(registry -> registry.start(trainName, effectiveDwellSeconds));
+    }
     // 非延迟路径可能已经改写 destination；通过 stop() 强制停止并添加 WaitState
     group.stop();
     var finalWaitState = group.getActions().addActionWaitState();
-    long dwellTicks = Math.max(0L, dwellSeconds * 20L);
+    long dwellTicks = Math.max(0L, effectiveDwellSeconds * 20L);
     String location = locationText(info);
     new org.bukkit.scheduler.BukkitRunnable() {
       private long ticksSinceStop = 0L;

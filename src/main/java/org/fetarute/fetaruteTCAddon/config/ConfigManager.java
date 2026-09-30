@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 36;
+  private static final int EXPECTED_CONFIG_VERSION = 37;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -197,7 +197,8 @@ public final class ConfigManager {
   /**
    * 解析时刻表配置段。
    *
-   * <p>所有开关默认关闭：装上这个版本的插件不应该改变任何一列现有列车的行为，必须由运营方显式打开。
+   * <p>总开关默认关闭：装上这个版本的插件不应该改变任何一列现有列车的行为，必须由运营方显式打开。 晚点追赶（{@code recovery.*}）有非零缺省值（2026-09-29
+   * 用户定默认开启），但只在按表运行打开后才起作用。
    */
   private static TimetableSettings parseTimetable(
       ConfigurationSection section, java.util.logging.Logger logger) {
@@ -254,6 +255,29 @@ public final class ConfigManager {
             defaults.stationStopOverheadSeconds(),
             "timetable",
             logger);
+    ConfigurationSection recovery = section.getConfigurationSection("recovery");
+    int recoveryMinDwellSeconds = defaults.recoveryMinDwellSeconds();
+    int recoveryOverspeedPercent = defaults.recoveryOverspeedPercent();
+    int recoveryEngageDelaySeconds = defaults.recoveryEngageDelaySeconds();
+    if (recovery != null) {
+      recoveryMinDwellSeconds =
+          readNonNegativeInt(
+              recovery, "min-dwell-seconds", recoveryMinDwellSeconds, "timetable.recovery", logger);
+      recoveryOverspeedPercent =
+          readNonNegativeInt(
+              recovery,
+              "overspeed-percent",
+              recoveryOverspeedPercent,
+              "timetable.recovery",
+              logger);
+      recoveryEngageDelaySeconds =
+          readNonNegativeInt(
+              recovery,
+              "engage-delay-seconds",
+              recoveryEngageDelaySeconds,
+              "timetable.recovery",
+              logger);
+    }
     return new TimetableSettings(
         enabled,
         spawnEnabled,
@@ -263,7 +287,10 @@ public final class ConfigManager {
         reloadIntervalSeconds,
         recorderFlushIntervalSeconds,
         zone == null ? "" : zone.trim(),
-        stationStopOverheadSeconds);
+        stationStopOverheadSeconds,
+        recoveryMinDwellSeconds,
+        recoveryOverspeedPercent,
+        recoveryEngageDelaySeconds);
   }
 
   private static int readNonNegativeInt(
@@ -1523,6 +1550,9 @@ public final class ConfigManager {
    * @param recorderFlushIntervalSeconds 录制结果落库的间隔
    * @param zone 时刻表默认时区；留空表示服务器默认时区
    * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
+   * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
+   * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
+   * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
    */
   public record TimetableSettings(
       boolean enabled,
@@ -1533,10 +1563,26 @@ public final class ConfigManager {
       int reloadIntervalSeconds,
       int recorderFlushIntervalSeconds,
       String zone,
-      int stationStopOverheadSeconds) {
+      int stationStopOverheadSeconds,
+      int recoveryMinDwellSeconds,
+      int recoveryOverspeedPercent,
+      int recoveryEngageDelaySeconds) {
 
     /** 车站停车开销的缺省值：2026-09-26 实服 136 次停站实测"压牌→发车"中位 24 秒，dwell 20。 */
     public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
+
+    /**
+     * 晚点车最短停站的缺省值。
+     *
+     * <p>开门延迟 1 秒、关门动画在停站结束前 5 秒开始，余下约 4 秒上下客；再短就是开门即关门。
+     */
+    public static final int DEFAULT_RECOVERY_MIN_DWELL_SECONDS = 10;
+
+    /** 晚点车线路限速放宽的缺省百分比：只放宽写明的线路限速，进站、临时限速与信号速度不动。 */
+    public static final int DEFAULT_RECOVERY_OVERSPEED_PERCENT = 10;
+
+    /** 晚点多少秒起放宽线路限速：再小的晚点靠停站压缩就追得回来。 */
+    public static final int DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS = 10;
 
     public TimetableSettings {
       holdMaxSeconds = Math.max(0, holdMaxSeconds);
@@ -1546,12 +1592,26 @@ public final class ConfigManager {
       recorderFlushIntervalSeconds = Math.max(1, recorderFlushIntervalSeconds);
       zone = zone == null ? "" : zone.trim();
       stationStopOverheadSeconds = Math.max(0, stationStopOverheadSeconds);
+      recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
+      recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
+      recoveryEngageDelaySeconds = Math.max(0, recoveryEngageDelaySeconds);
     }
 
-    /** 全部关闭的默认值。 */
+    /** 全部关闭的默认值；晚点追赶的参数有缺省值，但按表运行关着时不起作用。 */
     public static TimetableSettings defaults() {
       return new TimetableSettings(
-          false, false, 120, 300, 300, 60, 5, "", DEFAULT_STATION_STOP_OVERHEAD_SECONDS);
+          false,
+          false,
+          120,
+          300,
+          300,
+          60,
+          5,
+          "",
+          DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
+          DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
+          DEFAULT_RECOVERY_OVERSPEED_PERCENT,
+          DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
     }
 
     /** 解析时区，留空时回退服务器默认。 */

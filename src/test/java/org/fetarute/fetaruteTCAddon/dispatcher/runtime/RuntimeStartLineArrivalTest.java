@@ -89,7 +89,7 @@ class RuntimeStartLineArrivalTest {
             Optional.of(
                 new RailGraphService.RailGraphSnapshot(
                     graphWithConflictFreeLinearPath(List.of(A, B), 80), Instant.now())));
-    when(graphs.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble()))
+    when(graphs.effectiveSpeedLimitBlocksPerSecond(any(), any(), any(), anyDouble(), anyDouble()))
         .thenReturn(1000.0);
     RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     when(routes.findById(routeUuid)).thenReturn(Optional.of(ROUTE));
