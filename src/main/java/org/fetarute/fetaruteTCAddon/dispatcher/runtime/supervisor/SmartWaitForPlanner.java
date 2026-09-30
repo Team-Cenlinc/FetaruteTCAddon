@@ -617,10 +617,10 @@ public final class SmartWaitForPlanner {
               + hardEvidenceStrong
               // 报出**是哪一类冲突资源**造成方向证据不足。摘要放在这条聚合事件上，
               // 而不是 SMART_DISPATCH_DIRECTION_EVIDENCE：后者不在诊断 must-keep 里，
-              // 实服一小时只活下来 10 条，而本事件 241 条且受保护。
+              // 会被诊断预算大量丢弃，而本事件受保护。
               //
-              // 这个区分决定相反的两种行动：single 缺方向是数据缺失（同类里 1692 条有方向，
-              // 说明推导得出来）；switcher 压根没有 A/B 轴，对它要求走廊方向是判据用错了
+              // 这个区分决定相反的两种行动：single 缺方向是数据缺失（同类资源通常推导得出方向）；
+              // switcher 压根没有 A/B 轴，对它要求走廊方向是判据用错了
               // 资源类别，补不出来——那条要换成"车物理上不在该节点"的证据。
               + " directionBlockedBy="
               + directionBlockingResourceClasses(candidates));
@@ -1491,12 +1491,11 @@ public final class SmartWaitForPlanner {
     if (!conflictsMissingDirection.isEmpty()) {
       // 报出**是哪一类资源**害的，而不是只说"方向证据不足"。
       //
-      // 实服第十五轮 NEED_DIRECTION_AUDIT 241 次（占规划失败的 80%），但这条
-      // reason 不说是谁造成的，只能靠交叉比对另一个事件才拆得出来：
-      // 缺方向的 CONFLICT 里 switcher 3763、single 420、interlocking 98。
+      // NEED_DIRECTION_AUDIT 是规划失败的主要来源，若 reason 不说是谁造成的，
+      // 只能靠交叉比对另一个事件才拆得出来。
       //
-      // 这个区分决定了完全相反的两种行动：single 缺方向是**数据缺失**（同类资源里
-      // 1692 条是有方向的，说明推导得出来，只是这 420 条没推出来）；而 switcher
+      // 这个区分决定了完全相反的两种行动：single 缺方向是**数据缺失**（同类资源通常
+      // 推导得出方向，只是这几条没推出来）；而 switcher
       // 压根**没有 A/B 轴**——CorridorDirection 是相对归一化区间定义的，道岔是节点身份，
       // 两车从不同支进同一组道岔无论"同向"与否都冲突。对后者要求走廊方向是判据用错了
       // 资源类别，不是数据缺失，因此不能靠"把方向补上"来修。
@@ -1615,7 +1614,7 @@ public final class SmartWaitForPlanner {
   /**
    * 该边被排除是否**仅仅**因为它是排队位——LOOKAHEAD_PREVIEW 与 STALE_PROTECTIVE_CLAIM 不在放宽范围内。
    *
-   * <p>放宽只针对 QUEUE_POSITION：实服证据是它删掉了互锁环的其中一条边（见下方注释）， 而 preview / stale claim 没有对应证据，按 fail-closed
+   * <p>放宽只针对 QUEUE_POSITION：排除它会删掉互锁环的其中一条边（见下方注释）， 而 preview / stale claim 没有对应证据，按 fail-closed
    * 一律不放。
    */
   private static boolean excludedOnlyAsQueuePosition(InputEdge edge) {
@@ -1644,10 +1643,9 @@ public final class SmartWaitForPlanner {
       // 行车权（见 SimpleOccupancyManager 中该 blocker 的构造注释），所以它不该挡正常准入——这没问题。
       //
       // 但**等待图不是准入**。一个事实上拦住了别人的排队预约，就是一条真实依赖；
-      // 拿准入强度当死锁判据是范畴错误。实服 2026-09-14 第十轮的代价：
-      // WS-LH-0483 ↔ WS-LC-2008 互锁 45 分钟，`0483→2008` 那条 MOVEMENT_REQUIRED 边进了图，
-      // 而 `2008→0483` 因为持有的是 QUEUE_POSITION 被删了 105 次。
-      // 两条边的环删掉一条就永不闭合，全场没有任何一条死锁检测事件，四辆车拖垮全网吞吐（16→1.6 到站/分）。
+      // 拿准入强度当死锁判据是范畴错误：两车互锁时，A→B 的 MOVEMENT_REQUIRED 边进了图，
+      // 而 B→A 因为持有的是 QUEUE_POSITION 被删掉，两条边的环删掉一条就永不闭合，
+      // 死锁检测永远不会触发。
       //
       // 放宽必须窄且 fail-closed：**在动的**车持有的排队位会随队列推进自行解开，无条件进图会造出假环，
       // 而假阳性会一路走到 SMART_DEADLOCK_DESTROY_ELIGIBILITY —— 那是会销毁列车的。
@@ -1660,9 +1658,8 @@ public final class SmartWaitForPlanner {
       }
     }
     // 年龄量的是“多久没重新采样”，不是“这份证据还成不成立”。对一辆**还卡在原地**的车，
-    // 它的边会因为没人再去看而变“旧”，并不是因为阻塞消失了——第十八轮实服里
-    // 被丢掉的 172 条边**全部**属于已不在活跃集里的车，而停顿最久的两辆被丢的边比进图的还多
-    // （19/7、29/7）。于是“越卡越久 → 死锁图对它越瞎”。
+    // 它的边会因为没人再去看而变“旧”，并不是因为阻塞消失了——被丢掉的边集中在已不在活跃集里的车上，
+    // 停顿越久的车被丢的边越多。于是“越卡越久 → 死锁图对它越瞎”。
     //
     // 因此 liveVerified 的边不走年龄判据：调用方已经拿**当前账本**确认过 blocker 仍持有该资源。
     // 这是更强的证据，不是更弱的；复核不了的边照旧按 TTL 丢掉。

@@ -58,7 +58,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * 回收动作仍然由既有的 {@code ReclaimManager} / {@code StorageSpawnManager} 完成——本类不复制一套车辆所有权，
  * 只是把"不准再接班"这个事实告诉它们。因此终止性有两道保险：计划本身的 duty 是有限的， 运行期的否决又保证了有限性不会被"恰好还有下一班"绕过。
  *
- * <p>按表发车时，回库不再只靠闲置回收：每个 duty 在 {@link VehicleDuty#returnSecondOfDay()} 发出一张 RETURN 票 （{@link
+ * <p>按表发车时，回库不只靠闲置回收：每个 duty 在 {@link VehicleDuty#returnSecondOfDay()} 发出一张 RETURN 票 （{@link
  * #dueLegs}），而 {@link #allowsReturn} 保证这张票只带走交路已经跑完的车，不会把正等着跑下一班的车抓回车库。
  */
 public final class TimetableService implements ScheduledDeparturePlan {
@@ -698,7 +698,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * 这张票要从车库新出一辆车、而它的交路已经有车在跑时，返回那辆车。
    *
    * <p>同一交路只能有一辆车。重启后留在线上的车没有交路归属，它在门控上按时间绑到当前那一班，也就接下了那一班的交路；
-   * 这时那一班的出库票再出库，就是同一交路两辆车——后出的那辆只能去抢下一班，从此每辆车错一班（2026-09-27 实服）。
+   * 这时那一班的出库票再出库，就是同一交路两辆车——后出的那辆只能去抢下一班，从此每辆车错一班。
    *
    * <p>只管"会新出一辆车"的票：出库走行票，以及交路没有出库走行、首班本身从车库始发时的首班票。 续班与回库票只接本交路的车，本来就不会多出车。
    *
@@ -873,8 +873,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /**
    * 车没了、交路还有班：交路转成空缺，替补赶不上的班次立即登记取消。
    *
-   * <p>2026-09-30 用户定：清车或手动删车之后，交路不能就这么空着等后面每张票各自过容差再逐张作废（那要拖到末班，站牌与 API 一直报着不会来的车）。 空缺交给 {@link
-   * #replacementsDue} 按交路换车的同一套口径派替补；从空缺起到替补能接的第一班之前的班次，替补无论如何赶不上， 此刻就发 {@link
+   * <p>清车或手动删车之后，交路不能就这么空着等后面每张票各自过容差再逐张作废（那要拖到末班，站牌与 API 一直报着不会来的车）。 空缺交给 {@link #replacementsDue}
+   * 按交路换车的同一套口径派替补；从空缺起到替补能接的第一班之前的班次，替补无论如何赶不上， 此刻就发 {@link
    * TripCancellations.Reason#VEHICLE_REMOVED}（后面的票到期时同一班不会再记一次）。一辆替补都派不出（没有能送到起点的出库线路）时，
    * 剩下的班次全部取消；起点本身是车库的班次不取消——它自己的票会出车，出车即绑上交路。
    *

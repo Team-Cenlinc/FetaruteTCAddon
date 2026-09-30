@@ -130,8 +130,7 @@ public final class TimetableBuildReportText {
   /**
    * 往返对余数：<b>只报告，不参与决策</b>。
    *
-   * <p>实测（WS 290–430 逐档）余数与冲突数无关：余数 5 有 1909 处、余数 185 一处没有、余数 265 有 1129 处。 据它跳档会跳掉 420
-   * 这种干净档，所以这一行是给人看的，不是给搜索用的。
+   * <p>余数与冲突数没有稳定关系：余数小的间隔可能冲突很多，余数大的反而可能一处没有。 据它跳档会跳掉本来干净的间隔， 所以这一行是给人看的，不是给搜索用的。
    */
   public static List<String> describeResidues(List<PhasePlanner.Residue> residues) {
     if (residues == null || residues.isEmpty()) {

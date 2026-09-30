@@ -491,7 +491,7 @@ public final class RuntimeDispatchListener implements Listener {
   /**
    * 出库不久就被卸载时留下证据。
    *
-   * <p>卸载会被运行时当作移除处理（占用随即释放），而冻结在出库口的车体仍在离线存储里：下一班在同一锚点生成，苏醒时同坐标复原并被联挂。这类现场此前不留任何日志。
+   * <p>卸载会被运行时当作移除处理（占用随即释放），而冻结在出库口的车体仍在离线存储里：下一班在同一锚点生成，苏醒时同坐标复原并被联挂。这里留下的证据用于定位这类现场。
    */
   void traceEarlyUnload(RuntimeTrainHandle train) {
     try {
@@ -661,8 +661,7 @@ public final class RuntimeDispatchListener implements Listener {
    * 拆分候选里仍存活的编组：源编组，加上各被移除成员此刻所在的编组，按对象身份去重。
    *
    * <p>查不到编组的成员（实体已死、已卸载，或查询抛异常）不贡献残编、只计数，源编组照常交付。分类一旦整体失败，异常编组就进不了清理，
-   * 成员移除时装上的隔离再也不会收尾，全局现场重建每秒因隔离失败重试——2026-09-28 实服 DS-LH-7549 一节车厢实体死亡， {@code getGroup()}
-   * 想给它新建编组时抛异常，此后全网冻结。
+   * 成员移除时装上的隔离再也不会收尾，全局现场重建每秒因隔离失败重试，全网随之冻结。典型触发是一节车厢实体死亡后， {@code getGroup()} 想给它新建编组时抛异常。
    *
    * @param source 源编组
    * @param removedMembers 同一 tick 内被移除的成员

@@ -240,9 +240,8 @@ public final class OccupancyRequestBuilder {
    *
    * <p>{@link #withMinimumConflictExitDistanceBlocks} 要求联锁区之后累计出"车长 +
    * 停车余量"的泊位；可路线在车库终止时，联锁区之后到车库只有一段库线，
-   * 再往后什么都没有。列车在车库停下（或到达即销毁），停车余量防的"越过泊位撞上下一处冲突"并不存在，只要这段库线容得下整列车，车体就已清出联锁区。 实服 2026-09-27
-   * OFL：车库岔口联锁区之后到 D:OFL:1 只有 45 格，按 74 格要求判"缺少可见清出边"，回库车一进窗口就构建失败， 信号周期退回宽松前瞻请求，把已授予的回库原子进路截在
-   * MLU:1:003，与对向车互等 18 分钟。
+   * 再往后什么都没有。列车在车库停下（或到达即销毁），停车余量防的"越过泊位撞上下一处冲突"并不存在，只要这段库线容得下整列车，车体就已清出联锁区。 若仍按完整泊位要求，库线短于"车长 +
+   * 停车余量"时会判"缺少可见清出边"，回库车一进窗口就构建失败，信号周期退回宽松前瞻请求， 把已授予的回库原子进路截在半途，与对向车互等。
    *
    * <p>只认路径终点、且终点是车库节点；中途车站仍按完整泊位要求（停站车尾可能压着进站咽喉）。
    *
@@ -750,9 +749,8 @@ public final class OccupancyRequestBuilder {
    * 的硬授权。开始提升后仍扫描到下一处 STATION/DEPOT：若已经进入联锁却没有可见清出点，则 fail-closed。
    *
    * <p>两组道岔之间的直线段容不下整列车时，停在段内的车必然压着其中一组，这两组对这列车就是同一组联锁：清出点之后、累计不到 {@link
-   * #minConflictExitDistanceBlocks} 就又碰上联锁节点，这个清出点作废，窗口继续穿过下一组道岔。实服 2026-09-27 OFL 车库口：回库车穿过剪刀渡线后，
-   * 首个清出点 MLU:1:003 离渡线 17 格、离车库岔口 28 格，停在那里车尾还压着渡线、车头对着逆向来车，两车顶牛到关服。道岔后面接长直线时仍取首个清出点；
-   * 未配置泊位距离（0）时与只看首个清出点等价。
+   * #minConflictExitDistanceBlocks} 就又碰上联锁节点，这个清出点作废，窗口继续穿过下一组道岔。典型如渡线紧接车库岔口：停在首个清出点的车
+   * 车尾还压着渡线、车头对着逆向来车，两车顶牛。道岔后面接长直线时仍取首个清出点； 未配置泊位距离（0）时与只看首个清出点等价。
    */
   private AtomicAuthorityWindow resolveAtomicInterlockingWindow(
       List<NodeId> fullPath, List<NodeId> hardWindow, AuthorizationPurpose purpose) {
@@ -2134,9 +2132,9 @@ public final class OccupancyRequestBuilder {
   /**
    * 收集本次请求中“方向已被明确判定为不可确定”的单线冲突 key。
    *
-   * <p>{@code blockedKeys} 原本只用于抑制方向与输出诊断，从未随请求下发；下游因此只能看到 corridorDirections 里的缺键，
+   * <p>{@code blockedKeys} 若只用于抑制方向与输出诊断而不随请求下发，下游只能看到 corridorDirections 里的缺键，
    * 无法区分“本次计划不含该冲突”和“证据矛盾必须 fail-closed”，于是继续沿回退链取用已持有 claim 的旧方向——
-   * 换向后旧方向复活、对向屏障失效的通路正在于此。这里把该集合限定到实际请求资源后随请求下发。
+   * 换向后旧方向复活、对向屏障失效。因此这里把该集合限定到实际请求资源后随请求下发。
    */
   private Set<String> unresolvedDirectionKeys(
       Collection<OccupancyResource> resources,

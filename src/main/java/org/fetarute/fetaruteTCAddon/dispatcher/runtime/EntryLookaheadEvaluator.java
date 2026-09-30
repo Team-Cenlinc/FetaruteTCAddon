@@ -203,7 +203,7 @@ public final class EntryLookaheadEvaluator {
   /**
    * 判断本次 route window 是否直接停在 single-region 的边界节点。
    *
-   * <p>实服路线常把单线出口后的第一个 Station/Depot 作为目标节点，而 expanded path 中不会再出现下一条非冲突边。此时若同一逻辑列车已在 single-region
+   * <p>路线常把单线出口后的第一个 Station/Depot 作为目标节点，而 expanded path 中不会再出现下一条非冲突边。此时若同一逻辑列车已在 single-region
    * 内，抵达该行为节点就是 drain-out，不应因为“缺少出口后的下一条边”误判为不可证明。
    */
   private static boolean targetIsSingleRegionBoundary(

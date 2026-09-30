@@ -631,7 +631,7 @@ P0 单独就有价值（它让搜索在 300–480 之间能成功），先合。
 
 ## 11. 诊断复现
 
-- 量表脚本：`.handoff/WsChtDiagnosisTest.java.txt`（一个 JUnit 用例，反射调用 `TimetableBuilder.prepare/attempt`，输出网格 / 锚定 / 串行三种口径）。
+- 量表脚本：`.handoff/WsChtDiagnosisTest.java.txt`（已移出仓库，`git show 6efe6c1:.handoff/WsChtDiagnosisTest.java.txt` 取回；一个 JUnit 用例，反射调用 `TimetableBuilder.prepare/attempt`，输出网格 / 锚定 / 串行三种口径）。
   复制到 `src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/schedule/timetable/WsChtDiagnosisTest.java`，
   把实服 `plugins/FetaruteTCAddon/data/fetarute.sqlite` **复制**到脚本里 `DB` 常量指向的路径（永远别直接打开实服库），
   `./gradlew test --tests '*WsChtDiagnosisTest'`，结果在 `build/test-results/test/TEST-*WsChtDiagnosisTest.xml` 的 `system-out`。用完删掉，不提交。

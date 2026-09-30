@@ -126,9 +126,8 @@ public final class RailGraphService {
    * org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingZoneIndex#from}
    * 走完整图构建， 逐边足迹齐全，索引可用；{@code fromZones} 从持久化快照重建，**按设计只有 Zone、没有逐边足迹， 索引必然为空**。正常重启的服务器走的是后者。
    *
-   * <p>此前运行时**没有任何诊断**能区分这两种状态：日志里只有构建期特性标志 {@code
-   * liveFootprintReverseIndex=true}，那只说明代码有这个功能，不说明索引真的建起来了。 缺了这一行，就可能在一个证据源结构性为空的地基上去实现 Phase
-   * 4，然后得到一个 代码路径俱在、trace 照常输出、却从不触发的机制——本项目已经栽过三次的形状。
+   * <p>构建期特性标志 {@code liveFootprintReverseIndex=true} 只说明代码有这个功能，不说明索引真的建起来了。
+   * 缺了这一行，运行时便无法区分这两种状态，依赖该索引的机制可能代码路径俱在、trace 照常输出，却从不触发。
    *
    * <p>每次图激活至多一行，不随 tick 放大。
    */
@@ -690,7 +689,6 @@ public final class RailGraphService {
     // 从 Zone 快照恢复（restoreInterlockingState）按设计只有 Zone、没有逐边足迹，
     // 索引必然为空、cellCoverageAvailable() 为假，于是一切以实测覆盖为放行条件的机制
     // （尾部保护释放 / Phase 4）全部 fail-closed 到一个都不放。
-    // 实服第十二轮实测正是 cellCoverageAvailable=false，而尾部保护占全网滞留的 38%。
     //
     // 只有**当真有足迹**时才走这条；否则保持原路径，行为一字不变。
     java.util.Map<EdgeId, RailEdgeFootprint> footprintsByEdge = new HashMap<>();

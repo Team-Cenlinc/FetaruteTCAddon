@@ -185,10 +185,9 @@ public record RuntimeStopState(
   public static RuntimeStopState hardStop(
       String trainName, HardStopReason reason, OccupancyDecision decision, Instant now) {
     HardStopReason safeReason = reason == null ? HardStopReason.UNKNOWN : reason;
-    // 没有 decision 就没有原因可写。此前这里回落到枚举名小写（safety_state_unavailable），
-    // 读日志时与真实明细（safety-state-unavailable:xxx）长得几乎一样，却什么都没说——
-    // 实服 2026-09-13 有 122 次 invalidatesAuthority=true 的硬停车因此无法归因。
-    // 回落值必须自报"我没有原因"，而不是复述停因代码。
+    // 没有 decision 就没有原因可写。若只回落到枚举名小写（safety_state_unavailable），
+    // 读日志时与真实明细（safety-state-unavailable:xxx）长得几乎一样，却什么都没说，
+    // 硬停车因此无法归因。回落值必须自报"没有原因"，而不是复述停因代码。
     return hardStop(
         trainName,
         safeReason,
@@ -205,7 +204,7 @@ public record RuntimeStopState(
    * <p>供没有 {@link OccupancyDecision}（因而没有 blocker 列表）但**知道自己为什么停**的路径使用。
    *
    * <p>存在的理由是日志预算：{@code SMART_STOP_LIFECYCLE} 属于必留的事务审计，而承载原因的那些 trace（如 {@code
-   * SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED}）受普通观察预算门控。实服丢弃率 89% 时，停车本身必然留痕、原因却必然丢失。**fail-closed
+   * SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED}）受普通观察预算门控。预算丢弃率高时，停车本身必然留痕、原因却必然丢失。**fail-closed
    * 停车的原因必须写在必留的那一行里。**
    */
   public static RuntimeStopState hardStop(
@@ -339,11 +338,10 @@ public record RuntimeStopState(
         // 而它要求的是"决出死锁赢家或某个资源被释放"：没有 blocker 就没有赢家、也没有资源可释放，
         // **这个条件永远不可能满足**，列车就此永久挂起。
         //
-        // 实服 2026-09-13 第六轮 207 条快照落在这一族。典型现场（用户报的 LWN 出库堵点）：
-        //   train=SURC-WS-LC-3125 reasonCode=DEADLOCK_CONFIRMED_WAITING heldSeconds=139
-        //   holdsByRole={MOVEMENT_REQUIRED=5}  blockedBy=[]  movementToken=INVALID
-        // 车刚出库、五个资源全部到手、没有任何东西挡着，却被判成死锁并撤销授权；
-        // 而停车本身让进度停滞，HealthMonitor 再次判定 progress-stuck 又重新施加——自我维持。
+        // 典型形态：reasonCode=DEADLOCK_CONFIRMED_WAITING、holdsByRole 全为 MOVEMENT_REQUIRED、
+        // blockedBy=[]、movementToken=INVALID——车刚出库、资源全部到手、没有任何东西挡着，
+        // 却被判成死锁并撤销授权；而停车本身让进度停滞，HealthMonitor 再次判定 progress-stuck
+        // 又重新施加——自我维持。
         //
         // 这条停因真正的来源也不是死锁检测，而是 TrainHealthMonitor 的兜底
         // `reapplyHardStopByName(..., "health-stop-progress-stuck")`——它只是"进度停滞、重新施加停车"。

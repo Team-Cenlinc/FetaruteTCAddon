@@ -29,12 +29,12 @@ import org.fetarute.fetaruteTCAddon.utils.StableCollections;
  * epoch；否则新支路重新汇入旧路径的同名节点时， 旧 epoch 会把错误方向的里程当作列尾清空证据。每个 active epoch 只接受登记路径上的相邻有向节点；跳点、路径外节点会令该
  * epoch fail-retain，倒退则回退当前进度。 已完成 epoch 只能释放未被其他 epoch 引用的资源，因此共享咽喉不会提前释放。
  *
- * <p><b>后备释放：有序路线到达。</b>连续节点事件是唯一证据时，fail-retain 没有出口。2026-09-29 生产服观察到：从 NTA:1 折返出发的两辆车 （41
- * 次折返发车中的 2 次），旧站台节点与咽喉道岔一直被占到车被销毁，期间后车进不了 NTA、发车许可锁扣满 180 秒安全超时。日志当时无法区分该 epoch
- * 是"登记时没有连续路径计划"还是"被越界节点事件封存"，所以两条路径 都补了诊断（{@code TURNBACK_FOOTPRINT_GUARD_NO_PLAN} / {@code
- * _SEALED}），不假定其中一条。后备证据：每个 epoch 另存一份"交路 ID + 路线下标 → 沿登记前进路径累计距离" （{@link
- * RouteEvidence}）；列车按序到达同一条交路的下标 k（路径点到达事件由运行时逐个推进，节点名必须对得上），且累计距离达到（车长 + 车尾保护边距 + {@value
- * #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，车尾必然已经离开旧进路，无论连续节点事件是否成立都可以解除。车长未知、没有路线证据的 epoch 仍然 fail-retain。
+ * <p><b>后备释放：有序路线到达。</b>连续节点事件是唯一证据时，fail-retain 没有出口：旧站台节点与咽喉道岔会一直被占到车被销毁，
+ * 期间后车进不了该站、发车许可锁只能等安全超时。该 epoch 可能是"登记时没有连续路径计划"，也可能是"被越界节点事件封存"，两条路径 都有诊断（{@code
+ * TURNBACK_FOOTPRINT_GUARD_NO_PLAN} / {@code _SEALED}），不假定其中一条。后备证据：每个 epoch 另存一份"交路 ID + 路线下标 →
+ * 沿登记前进路径累计距离" （{@link RouteEvidence}）；列车按序到达同一条交路的下标 k（路径点到达事件由运行时逐个推进，节点名必须对得上），且累计距离达到（车长 +
+ * 车尾保护边距 + {@value #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，车尾必然已经离开旧进路，无论连续节点事件是否成立都可以解除。车长未知、没有路线证据的 epoch
+ * 仍然 fail-retain。
  */
 final class TurnbackFootprintGuardRegistry {
 

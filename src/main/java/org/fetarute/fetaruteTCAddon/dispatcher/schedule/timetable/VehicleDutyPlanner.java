@@ -48,9 +48,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  * 本类只在<b>已经排定</b>的班次序列上做车辆指派，绝不为了方便复用去改班次的线路或时刻—— 否则车辆周转会反过来扭曲服务比例，而那正是"某终点恰好停着一辆车，于是这条线一直发车"的来源。
  *
  * <p>接续偏好相同时，正线折返点取最晚就绪的车，其他端点取最早就绪的车。正线没有站台可供待命；没有 RETURN
- * 线路时，先到车接班会在正线上多等一个组间隔、挡住同股道后车，后到车的上一班反而被收口逻辑取消。2026-09-28 实测 MT 在 {@code SURC:OFL:MLU:2:004} 停留中位
- * 185 秒、p90 215 秒，DS 在 OFL:2 排队 173 秒；组间隔调到 300 秒后停留变成 320 秒（一个间隔 + 20
- * 秒折返）。改取后车把选车引入的等待压回最短折返，未被接走且无法回库的前车班次仍由现有收口逻辑剔除。
+ * 线路时，先到车接班会在正线上多等一个组间隔、挡住同股道后车，后到车的上一班反而被收口逻辑取消，正线停留约为一个组间隔加折返时间。
+ * 改取后车把选车引入的等待压回最短折返，未被接走且无法回库的前车班次仍由现有收口逻辑剔除。
  */
 public final class VehicleDutyPlanner {
 
@@ -76,8 +75,7 @@ public final class VehicleDutyPlanner {
    * @param trips 已按发车时刻升序排定的班次
    * @param legs 各站的出库/回库走行段
    * @param limits 硬上限
-   * @param nextSlotByOrigin 各起点上后续班次的名义发车时刻（升序）；封口判据用它回答"下一班最早什么时候"。
-   *     为空时退化为不按闲置上限收口的旧行为——只关心班次链的用例可以不传。
+   * @param nextSlotByOrigin 各起点上后续班次的名义发车时刻（升序）；封口判据用它回答"下一班最早什么时候"。 为空时退化为不按闲置上限收口——只关心班次链的用例可以不传。
    * @return 打包结果
    */
   public static Result plan(
@@ -93,8 +91,8 @@ public final class VehicleDutyPlanner {
    * 指派车辆并封装 duty，按相位层定下的接续优先选车。
    *
    * <p>相位层按车接续时（例如小交路 1L 到端点折返后接大交路 2C），被接那一班的时刻就是为喂车方向的车排的。
-   * 若仍按"最早就绪优先"选车，端点上先到、本该回库的别路车（2N）会把这一班抢走， 喂车方向的车只好等下一班——开班时抢一次，之后每一辆都晚一个周期接上，全天推后而且排不掉 （实测
-   * WS@150 就是两次抢车换来全天 300 秒）。所以接续的被接班次先在喂车方向的车里挑，挑不到才退回全体候选。
+   * 若仍按"最早就绪优先"选车，端点上先到、本该回库的别路车（2N）会把这一班抢走， 喂车方向的车只好等下一班——开班时抢一次，之后每一辆都晚一个周期接上，全天推后而且排不掉。
+   * 所以接续的被接班次先在喂车方向的车里挑，挑不到才退回全体候选。
    *
    * @param preferredFeeders 被接 route → 喂车 route 集合；空表示不按接续偏好
    * @see #plan(UUID, List, Legs, Limits, Map)
@@ -223,7 +221,7 @@ public final class VehicleDutyPlanner {
    * 再按起点类型选车：{@link RouteTerminals#isMainlineTurnback} 判定的正线折返点取"最晚就绪"者，缩短占道等待；
    * 站台、车库、咽喉等其他端点仍取"最早就绪"者，避免端点长期闲置。并列时按 duty 序号——完全确定。
    *
-   * <p>正线端没有站台可停、也没有 RETURN 线路时，先到车接班会多占正线一个间隔（上述 MT 实测 300 + 20 = 320 秒），
+   * <p>正线端没有站台可停、也没有 RETURN 线路时，先到车接班会多占正线一个间隔（停留约为组间隔加折返时间），
    * 后到车的上一班反而在收口时被取消；反过来选车才让留下的班次最短折返，不改变无法回库班次的剔除规则。
    *
    * <p>从车库始发的班次（CRET）永远不接在别的 duty 后面：它的出库票会实体化一辆新车，接不了待命列车。 不同车池（多线联编时的不同线路）之间也永远不接。
@@ -388,7 +386,7 @@ public final class VehicleDutyPlanner {
   /**
    * 这辆车在当前终点要等多久才有下一班：超过闲置上限就该回库。
    *
-   * <p>没有传时隙表时一律返回 false——退化成旧行为，而不是把所有 duty 都按闲置收口。
+   * <p>没有传时隙表时一律返回 false——退化成不按闲置收口，而不是把所有 duty 都按闲置收口。
    */
   private static boolean idleBeyondLimit(
       OpenDuty duty, Limits limits, Map<String, NavigableSet<Integer>> nextSlotByOrigin) {
@@ -728,8 +726,7 @@ public final class VehicleDutyPlanner {
     /**
      * 带车库偏好的回库段：<b>回自己出库的那个车库</b>的优先，其次显式指定的，再次走行最短。
      *
-     * <p>按最短选会让一条线的车全部涌进离终点最近的那个库——实测里 MT 从 OFL 终到的车全回了 HHU，
-     * 于是别的线的回库走行在同一段咽喉上和它们撞。回原库是运营常识，也让每条线的回库流各走各的。
+     * <p>按最短选会让一条线的车全部涌进离终点最近的那个库， 别的线的回库走行就在同一段咽喉上和它们撞。回原库是运营常识，也让每条线的回库流各走各的。
      *
      * @param stationNodeId 终到节点
      * @param preferredDepotNodeId 本交路的出库车库节点；为空时退化为无偏好
@@ -809,7 +806,7 @@ public final class VehicleDutyPlanner {
 
     public static final int DEFAULT_MAX_DURATION_SECONDS = 7200;
 
-    /** 与 {@code reclaim.max-idle-seconds} 的默认值一致；命令层会用实服配置覆盖它。 */
+    /** 与 {@code reclaim.max-idle-seconds} 的默认值一致；命令层会用服务器配置覆盖它。 */
     public static final int DEFAULT_MAX_IDLE_SECONDS = 300;
 
     public Limits {
@@ -830,7 +827,7 @@ public final class VehicleDutyPlanner {
       this(maxTripsPerDuty, maxDutyDurationSeconds, TurnaroundTable.fixed(fixedTurnaroundSeconds));
     }
 
-    /** 带闲置上限的显式折返值，供用例把既有期望钉在"不回收"的旧行为上（{@code maxIdle} 给很大）。 */
+    /** 带闲置上限的显式折返值，供用例把期望钉在"不回收"上（{@code maxIdle} 给很大）。 */
     public Limits(
         int maxTripsPerDuty,
         int maxDutyDurationSeconds,

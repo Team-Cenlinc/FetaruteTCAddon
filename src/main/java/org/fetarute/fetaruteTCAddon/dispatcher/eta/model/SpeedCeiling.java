@@ -25,7 +25,7 @@ public final class SpeedCeiling {
   /** 每步的里程（格）。 */
   public static final double STEP_BLOCKS = 1.0 / STEPS_PER_BLOCK;
 
-  /** 缓存条目上限；超过即整体清空。控车每列车一条，远大于实服同时在线的列车数。 */
+  /** 缓存条目上限；超过即整体清空。控车每列车一条，远大于常见的同时在线列车数。 */
   private static final int CACHE_LIMIT = 256;
 
   private static final Map<CacheKey, SpeedCeiling> CACHE = new ConcurrentHashMap<>();

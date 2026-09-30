@@ -45,8 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
  *
  * <p>每次停靠同时登记两层站台占用：站台组一层抓"车比股道多"，具体股道一层抓"同一股道被两辆车用"。DYNAMIC 停靠只有组一层—— 它到底停哪股道是运行时才决定的。
  *
- * <p>本类刻意<b>不</b>建模的东西：授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；回放（阶段 8）如果发现本模型漏了约束， 修的是本模型，不是让 build
- * 去依赖回放。
+ * <p>本类刻意<b>不</b>建模的东西：授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；回放如果发现本模型漏了约束， 修的是本模型，不是让 build 去依赖回放。
  */
 public final class TimetableConflictChecker {
 
@@ -234,9 +233,8 @@ public final class TimetableConflictChecker {
   /**
    * 扫描时"仍在场"的占用，一个可复用的缓冲。
    *
-   * <p>原本是每扫一个资源新建一个 {@code ArrayList}，再对每一条占用调一次 {@code removeIf}——那个 lambda 捕获了后车，
-   * 于是<b>每条占用都要新造一个 lambda 对象</b>。全表扫一遍还能忍，增量重扫一次 attempt 要扫近三百万个资源桶，
-   * 这些短命对象就成了大头（实测占总耗时的七成）。改成手写的原地压缩，扫描本身一个对象都不分配。
+   * <p>不用"每个资源新建一个 {@code ArrayList}、每条占用调一次 {@code removeIf}"：那个 lambda 捕获了后车， 于是<b>每条占用都要新造一个
+   * lambda 对象</b>。全表扫一遍还能忍，增量重扫一次 attempt 要扫数以百万计的资源桶， 这些短命对象就成了主要开销。这里用手写的原地压缩，扫描本身一个对象都不分配。
    */
   private static final class Active {
     private Occupation[] items = new Occupation[16];
@@ -246,7 +244,7 @@ public final class TimetableConflictChecker {
       size = 0;
     }
 
-    /** 送走已经腾空的：{@code to + separation <= from} 的不再在场。判据与原来逐字一致。 */
+    /** 送走已经腾空的：{@code to + separation <= from} 的不再在场。 */
     void expire(int separation, int from) {
       int kept = 0;
       for (int i = 0; i < size; i++) {
@@ -281,7 +279,7 @@ public final class TimetableConflictChecker {
   /**
    * 冲突的全序。
    *
-   * <p>原本只比 {@code (firstFrom, resource, first, second)}，其余靠资源遍历序与桶内插入序兜底。增量重扫两样都保不住——
+   * <p>不能只比 {@code (firstFrom, resource, first, second)}、其余靠资源遍历序与桶内插入序兜底：增量重扫两样都保不住——
    * 换一辆车会把它的占用挪到桶尾，只扫一部分资源又不经过完整的遍历序。所以把剩下的字段也比完：并列的两处冲突字段全同， 报哪一处都是同一条记录，报告因此与遍历顺序无关。
    */
   static final Comparator<Conflict> CONFLICT_ORDER =
@@ -430,8 +428,8 @@ public final class TimetableConflictChecker {
   /**
    * 一条 route 的占用足迹：各资源上相对发车的进入与离开偏移，按投影的调用顺序排列。
    *
-   * <p>一次构建里路网与 route 的投影都不变：足迹只算一次，投影一趟车就是把它平移到这趟车的发车时刻。 原来每投影一趟车都要现拼资源键、按名字切站台组、
-   * 查单线区段，而修复循环每换一次车，撤掉的与新加的班次都要各投影一遍——实服三线联编里这部分占总耗时三成多。
+   * <p>一次构建里路网与 route 的投影都不变：足迹只算一次，投影一趟车就是把它平移到这趟车的发车时刻。 否则每投影一趟车都要现拼资源键、按名字切站台组、
+   * 查单线区段，而修复循环每换一次车，撤掉的与新加的班次都要各投影一遍，这部分开销相当可观。
    *
    * @param slots 各格，顺序即投影顺序
    */
@@ -974,7 +972,7 @@ public final class TimetableConflictChecker {
   /**
    * 桶内的全序。
    *
-   * <p>原本只比 {@code (from, code)}，并列的靠插入序兜底。增量索引换一辆车会把它的占用挪到桶尾，插入序保不住了——
+   * <p>不能只比 {@code (from, code)}、并列靠插入序兜底：增量索引换一辆车会把它的占用挪到桶尾，插入序保不住——
    * 所以把剩下的字段也比完。并列的两条占用字段全同（{@code vehicle} 里带着 owner），取哪一条报出来都是同一条 {@link Conflict}，
    * 插在并列的哪一侧也就无所谓。
    */
@@ -1112,7 +1110,7 @@ public final class TimetableConflictChecker {
           continue;
         }
         if (active.size() >= capacity) {
-          // 在场里最早的那个可归责的；并列取先遇到的，与原来 Stream.min 的取法一致。
+          // 在场里最早的那个可归责的；并列取先遇到的（与 Stream.min 的取法一致）。
           Occupation partner = null;
           for (int k = 0; k < active.size(); k++) {
             Occupation current = active.get(k);

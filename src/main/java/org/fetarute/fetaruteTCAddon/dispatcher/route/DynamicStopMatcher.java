@@ -85,7 +85,7 @@ public final class DynamicStopMatcher {
    *
    * <p>声明了范围就按范围；<b>未声明范围时枚举该站在图上实际存在的全部股道</b>（按前缀匹配、只取纯数字股道段）。 {@link #parseDynamicSpec}
    * 对未声明范围的规范返回 {@code from=1, to=1, unbounded=true}，若忽略 {@code unbounded()}，{@code
-   * DYNAMIC:SURC:S:PPK} 就退化成只看 1 号股道（第十六轮实服：PPK 有 1/2 两个站台，候选里却只有一个）。
+   * DYNAMIC:SURC:S:PPK} 就退化成只看 1 号股道，多站台车站的其余站台永远不会成为候选。
    *
    * <p>选台（{@code DynamicPlatformAllocator}）与尚未选台时的 ETA 估算共用这一份枚举。
    *

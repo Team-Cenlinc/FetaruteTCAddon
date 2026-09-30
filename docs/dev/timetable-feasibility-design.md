@@ -13,7 +13,7 @@
 对实服库副本（`../fetarute_experimental/plugins/FetaruteTCAddon/data/fetarute.sqlite` 的**只读副本**）离线跑当前算法。
 口径与 prompt 第二部分一致：窗口 05:00–24:00、`--dwell 20`、折返按终到站 dwell、套 445 条永久限速覆盖、`--max-trips 4`、
 **单次 attempt**（反射进 `prepare/attempt`，绕过搜索——严格失败的 `TimetableBuildResult` 里没有冲突列表，
-prompt 附的探针在失败档聚合出来的"route 对"全是空的，这是它只能给冲突总数的原因）。探针 `.handoff/LiveNetworkProbeTest.v2.java.txt`，
+prompt 附的探针在失败档聚合出来的"route 对"全是空的，这是它只能给冲突总数的原因）。探针 `.handoff/LiveNetworkProbeTest.v2.java.txt`（`.handoff/` 已移出仓库，文件用 `git show 6efe6c1:<路径>` 取回），
 原始输出 `.handoff/probe-2026-09-20.log.txt`，复现见 §11。
 
 ### 0.1 步骤 2：等待预算不是主因
@@ -599,11 +599,11 @@ F1 独立可发，且是实服最急的（MT 今天任何间隔都排不出来�
 
 ```
 cp ../fetarute_experimental/plugins/FetaruteTCAddon/data/fetarute.sqlite <scratch>/live.sqlite     # 只读副本
-cp .handoff/LiveNetworkProbeTest.v2.java.txt src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/schedule/timetable/LiveNetworkProbeTest.java
+git show 6efe6c1:.handoff/LiveNetworkProbeTest.v2.java.txt > src/test/java/org/fetarute/fetaruteTCAddon/dispatcher/schedule/timetable/LiveNetworkProbeTest.java
 # 把文件顶部 DB 常量改成副本路径；探针把每一行同时写到副本旁边的 probe.log
 ./gradlew test --tests '*LiveNetworkProbeTest'
 rm src/test/java/.../LiveNetworkProbeTest.java     # 用完删掉，不提交
 ```
 
 四个用例按顺序：`step1MtAt1200`（整张表 + route 对 + 资源）、`step2MtMaxWait`、`step3WsResonanceScan`、`step2WsMaxWait`（慢，WS@300 每档约 55 s）。
-本文全部数字来自 `.handoff/probe-2026-09-20.log.txt`。
+本文全部数字来自 `.handoff/probe-2026-09-20.log.txt`（已移出仓库，`git show 6efe6c1:.handoff/probe-2026-09-20.log.txt` 取回）。

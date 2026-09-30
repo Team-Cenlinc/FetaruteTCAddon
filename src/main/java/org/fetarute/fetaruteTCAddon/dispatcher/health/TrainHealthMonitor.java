@@ -92,9 +92,9 @@ public final class TrainHealthMonitor {
     /**
      * 已派发但**尚未验证**的恢复动作的时刻；{@link Instant#EPOCH} 表示没有待验证的恢复。
      *
-     * <p>此前 {@code tryFixProgressStuck} 返回 true 就直接发 {@code HealthAlert.fixed("进度停滞已修复")}， 但那个 true
-     * 的含义只是"派发了一个恢复动作"，不是"车动了"。实服第十五轮 SURC-WS-LN-3176 在 idx=17 上每隔约 6 秒就"告警→已修复→告警→已修复"翻一次，翻了 29
-     * 分钟， 而 {@code 持续=} 秒数一路从 182 涨到 1735——车一步没挪。 全局 411 次告警对 394 次"已修复"，这个比例因此是假的。
+     * <p>{@code tryFixProgressStuck} 返回 true 的含义只是"派发了一个恢复动作"，不是"车动了"。若据此直接发 {@code
+     * HealthAlert.fixed("进度停滞已修复")}，一辆一步没挪的车会在同一进度索引上反复"告警→已修复"地翻转，而 {@code 持续=}
+     * 秒数一路上涨，告警与"已修复"的比例也因此失真。所以先记下派发时刻，待进度真正推进后再确认恢复。
      */
     private Instant pendingRecoveryAt = Instant.EPOCH;
 
@@ -537,7 +537,7 @@ public final class TrainHealthMonitor {
    * 执行一次健康检查。
    *
    * <p><b>逐车处理顺序</b>：按列车名自然序（{@link String#compareTo}）。同一 tick 内先处理到的列车先做修复/兜底 destroy，
-   * 两车同时满足互卡兜底条件时谁先动手就取决于这个顺序；此前用 {@code Set.copyOf}，顺序每个 JVM 随机一次。按名字排序也让生产（调用方传 {@code
+   * 两车同时满足互卡兜底条件时谁先动手就取决于这个顺序；若用 {@code Set.copyOf}，顺序会随 JVM 进程随机变化。按名字排序也让生产（调用方传 {@code
    * HashSet}）与回归骨架（传插入序集合）对同一组列车给出同一顺序。规则见 {@link StableCollections}。
    *
    * @param activeTrains 当前存活的列车名集合
@@ -618,7 +618,7 @@ public final class TrainHealthMonitor {
       }
       if (progressed) {
         // **只有到这里，才有资格说"恢复了"**——车的进度索引真的向前走了。
-        // 此前是在派发恢复动作那一刻就宣布已修复，于是一辆一步没挪的车能被宣布 29 分钟的"已修复"。
+        // 若在派发恢复动作那一刻就宣布已修复，一辆一步没挪的车会被反复宣布"已修复"。
         if (recovery.hasPendingRecovery()) {
           long waitedSeconds =
               Math.max(0L, Duration.between(recovery.pendingRecoveryAt, now).toSeconds());
@@ -712,7 +712,6 @@ public final class TrainHealthMonitor {
             // 互卡路径保持"当场计入"：它的终局动作是销毁，那是**当场可验证的状态变化**
             // （车没了），不是"派发了动作、等着看车动不动"。progress-stuck 那边不同，
             // 那边派发的是 refresh/reissue/unlock，能不能生效要看车后来动没动。
-            // 本轮实服 SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED=0，这条路径没有可据以改动的证据。
             fixedCount++;
             recoveryDispatchedCount++;
           }
@@ -879,10 +878,9 @@ public final class TrainHealthMonitor {
     debugLogger.accept(
         "SMART_RECOVERY_ACTION_ORDER train="
             + trainName
-            // 这行宣告过六个动作，而实际只实现了三个——SMART_HOLD_FOLLOWERS 与
-            // SMART_DESTROY_CANDIDATE 从来不存在（destroy 走的是另一条 fallback 路径）。
-            // 日志宣告的恢复能力是实际的两倍，读日志的人（包括我）会据此误判"该动作试过了"。
-            // 现在按实际实现列出；SMART_QUEUE_POSITION_YIELD 是本轮新接的第四个。
+            // 只列出实际实现的动作。宣告并不存在的动作（如 SMART_HOLD_FOLLOWERS、
+            // SMART_DESTROY_CANDIDATE；destroy 走的是另一条 fallback 路径）会让日志宣告的恢复能力
+            // 大于实际，读日志时会据此误判"该动作试过了"。
             + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
             + "SMART_FORWARD_UNLOCK,SMART_QUEUE_POSITION_YIELD");
     RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
@@ -947,8 +945,8 @@ public final class TrainHealthMonitor {
     // 排在前三个动作之后是刻意的：前三个都是让**自己**让出东西（自持 retain、drain、forward
     // unlock），只有这一个动的是**别人**的排队位次，代价是队列公平性，因此放在最后。
     //
-    // 它补上的是这条链此前根本没有的一类解：第十七轮 MT 线两车在相邻道岔上互卡
-    // 2839 / 2700 秒，等待图检测到该环 1455 次，而三个已实现动作没有一个能割它——
+    // 它补上的是前三个动作给不出的一类解：两车在相邻道岔上长时间互卡、等待图反复检测到同一个环，
+    // 而前三个动作没有一个能割它——
     // 因为环上两条边一条是 MOVEMENT_REQUIRED、一条是 QUEUE_POSITION，
     // 前三个动作都只处理自持资源。
     RuntimeDispatchService.SmartRecoveryActionResult queueYield =
@@ -1037,8 +1035,8 @@ public final class TrainHealthMonitor {
   /**
    * 收集普通停滞清理候选，并给出附在停滞告警末尾的清车结论。
    *
-   * <p>结论只在停满清车阈值之后给出（之前清车本来就不接）。停滞告警是 WARN 必留行，生产服往往只贴得出这一行：它要自己说清"为什么还没清"、 在等谁、等的那列是什么状态，而不是让人再去翻
-   * debug 日志（2026-09-30 实服 MT-LN-3832 停了半小时，告警里只有"恢复尝试=38"）。
+   * <p>结论只在停满清车阈值之后给出（之前清车本来就不接）。停滞告警是 WARN 必留行，运维排查时往往只拿得到这一行：它要自己说清"为什么还没清"、
+   * 在等谁、等的那列是什么状态，而不是让人再去翻 debug 日志；只有"恢复尝试=N"的告警回答不了这些问题。
    *
    * @param activeKeys 本轮存活列车键：挡路的车不在其中就是残留占用
    * @return 以空格开头的结论，如 {@code " 清车=等待 X(停滞 700秒)"}；未到清车阈值时为空串
@@ -2451,13 +2449,12 @@ public final class TrainHealthMonitor {
       String evidenceGroup) {
     // 注意：`DESTROY_DISABLED` 这一道**故意放在整条链的最后**，见方法末尾。
     //
-    // 它原本排第一，于是关掉销毁时这条链在第一道就短路，后面八道（阈值、静止时长、信号状态、
-    // 活跃解锁预约、冷却、证据重复性、授权状态…）**一次都不被求值**。
-    // 实服第十二轮 102 次评估全部只报 `DESTROY_DISABLED`——包括那两辆卡死 2073 秒和 1160 秒的车——
-    // 于是"就算打开销毁，它们到底够不够格"这个问题**只能靠真的打开来回答**，
+    // 若排在第一道，关掉销毁时这条链会就此短路，后面八道（阈值、静止时长、信号状态、
+    // 活跃解锁预约、冷却、证据重复性、授权状态…）**一次都不被求值**，每次评估都只报 `DESTROY_DISABLED`，
+    // 于是"就算打开销毁，卡住的车到底够不够格"这个问题**只能靠真的打开来回答**，
     // 而那是个不可逆、玩家可见的动作。
     //
-    // 挪到最后之后：销毁行为**完全不变**（关闭时依旧永远 eligible=false），
+    // 放在最后：销毁行为**完全不变**（关闭时依旧永远 eligible=false），
     // 但报出的是**真正拦住它的那一道**，于是可以在不冒任何风险的前提下回答那个问题。
     if (targetSnapshot == null || targetContext == null) {
       return "TARGET_STATE_MISSING";
@@ -3236,9 +3233,9 @@ public final class TrainHealthMonitor {
   /**
    * 互卡恢复链要不要停在这个动作上。
    *
-   * <p>"链要不要继续往下走"按恢复语境判（{@code destroyContext=false}）：未经测量的有效要计数、连着两次没解开就放行。以前互卡链按销毁语境判，
-   * 假定有效一律当真——链永远停在第一步，每次还报"已修复"。2026-09-27 实服 OFL：DS 每 11 秒释放一次车后的保护占用、下一拍又占回，17 分钟 320
-   * 次；真正能解开的排队位让位一次也没轮到。销毁的去留另由 {@link #appliedEffective} 在调用方挡住，不随这里放宽。
+   * <p>"链要不要继续往下走"按恢复语境判（{@code destroyContext=false}）：未经测量的有效要计数、连着两次没解开就放行。若按销毁语境判，
+   * 假定有效一律当真：一辆车每隔几秒释放一次车后的保护占用、下一拍又占回，链会永远停在第一步，每次还报"已修复"， 真正能解开的排队位让位一次也轮不到。销毁的去留另由 {@link
+   * #appliedEffective} 在调用方挡住，不随这里放宽。
    */
   private boolean holdsMutualChain(
       String trainName,
@@ -3247,7 +3244,7 @@ public final class TrainHealthMonitor {
     return shouldHoldForSafeCandidate(trainName, conflictKey, result, false);
   }
 
-  /** 动作落地且有效（含未经测量的假定有效）：本轮不销毁，与互卡链原先的销毁口径一致。 */
+  /** 动作落地且有效（含未经测量的假定有效）：本轮不销毁，这是互卡链的销毁口径。 */
   private static boolean appliedEffective(RuntimeDispatchService.SmartRecoveryActionResult result) {
     return result != null && result.applied() && result.effectiveness().effective();
   }
@@ -3269,7 +3266,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     if (!result.applied()) {
-      // 候选但**没落地**也必须计数。原来这里无条件 return true，于是一个永远候选、
+      // 候选但**没落地**也必须计数。若这里无条件 return true，一个永远候选、
       // 永远落不了地的动作会**永久卡住整条恢复链**，后面的动作永远轮不到。
       // 无效分支（下面）本来就有计数放行机制，“没落地”比“落地了但无效”更弱，
       // 没有理由反而享受无限期的优先权。
@@ -3280,14 +3277,13 @@ public final class TrainHealthMonitor {
     String resolvedConflict = safeConflictKey(conflictKey, effectiveness);
     String key = safeCandidateFailureKey(trainName, result.decision(), resolvedConflict);
     // "有效"必须是**测量**出来的。5 参构造器的 legacy 默认只是"applied ⇒ effective"的假定：
-    // 第二十六轮实服 SMART_PHYSICAL_EDGE_RETAIN_RELEASED 335 次里 98% 是同一辆车反复释放
-    // 同一组资源（下一 tick 就被重新拿回），每次都在这里被当成有效、把失败计数清零，
-    // 于是链永远停在第一步，割排队位那一步一次都没轮到。未测量 ≠ 有效，按 fail-closed 计数。
+    // 同一辆车可能反复释放同一组资源（下一 tick 就被重新拿回），若每次都在这里被当成有效、
+    // 把失败计数清零，链会永远停在第一步，割排队位那一步永远轮不到。未测量 ≠ 有效，按 fail-closed 计数。
     //
     // **但这个判据同时服务两件性质相反的事，必须按上下文分开：**
     //   destroyContext=false —— 恢复链要不要继续往下走。这里"假定有效"必须计数，否则链停在第一步。
     //   destroyContext=true  —— 要不要**跳过销毁**。这里必须继续挡住：本项目的既定目标是
-    //                           解锁疏通而不是超时删车（deadlock-destroy / stuck-cleanup 长期为 false）。
+    //                           解锁疏通而不是超时删车（deadlock-destroy / stuck-cleanup 默认关闭）。
     // 若不分开，同一个改动会把销毁门槛从"永远够不到"降成"两次尝试"——链修好了，
     // 却顺手改了安全姿态，而那是两个独立的决定。
     boolean assumedEffectiveOnly =
@@ -3319,7 +3315,7 @@ public final class TrainHealthMonitor {
    * 记一次“这个候选没能解决问题”，并决定还要不要继续抢着恢复链。
    *
    * <p>两种失败走同一个计数器：{@code not-applied}（候选但根本没落地）与 {@code
-   * ineffective}（落地了但车没动）。此前只有后者计数，前者无条件保持优先权—— 于是一个永远候选、永远落不了地的动作能把排在它后面的动作永久饿死。
+   * ineffective}（落地了但车没动）。两者都必须计数：若前者无条件保持优先权，一个永远候选、永远落不了地的动作能把排在它后面的动作永久饿死。
    */
   private boolean countSafeCandidateFailure(
       String trainName,
@@ -3681,7 +3677,7 @@ public final class TrainHealthMonitor {
       }
     }
     // 排队位让位：互卡里常见的一种是"一辆只被对方的排队位挡住、另一辆被这一辆的硬占挡住"，前三个动作都只处理自持资源，割不开它。
-    // 以前让位只在单车进度停滞链里，而互卡配对只处理 A 车、B 车整个跳过——2026-09-27 OFL 的 MT 正是只差一个排队位的 B 车。
+    // 只差一个排队位的可能是配对中的任意一辆，只处理 A 车会把恰好需要让位的 B 车整个跳过。
     // 两辆都试；让位本身要求证实经过排队位的等待环，不会凭空改队列。
     for (String yieldTrain : List.of(episode.trainA, episode.trainB)) {
       RuntimeDispatchService.SmartRecoveryActionResult queueYield =
@@ -4389,10 +4385,9 @@ public final class TrainHealthMonitor {
    *
    * <p><b>为什么是平移而不是清空</b>：清空会把冻结**前**已经积累的真实停滞也抄掉， 那是另一个方向的错。平移后，冻结前已卡 40 秒的车仍然是 40 秒。
    *
-   * <p>实服第二十一轮：日志在 10:35→10:43 断了七分钟（HikariCP 同时报 {@code Thread starvation or clock leap
-   * detected}）。恢复后的第一个 tick 里，六辆车<b>在同一瞬间</b> {@code 10:43:07} 全部跨过 300 秒（最大 622s），而它们一分钟后就自己恢复了。
-   * 那不是死锁，是墙钟在说谎。而 {@code deadlock-threshold-seconds}=45、 {@code
-   * stuck-cleanup-threshold-seconds}=600，若销毁兜底开着，一次冻结就是一次大规模删车。
+   * <p>服务器冻结（主线程停摆、宿主机休眠等，HikariCP 通常同时报 {@code Thread starvation or clock leap detected}）恢复后的第一个
+   * tick 里，多辆车会<b>在同一瞬间</b>全部跨过停滞阈值，而它们随后就会自己恢复。 那不是死锁，是墙钟在说谎。而 {@code deadlock-threshold-seconds}、
+   * {@code stuck-cleanup-threshold-seconds} 只有数十秒到数分钟，与一次冻结的时长同阶；若销毁兜底开着，一次冻结就是一次大规模删车。
    */
   public void rebaseAfterFreeze(Duration gap) {
     if (gap == null || gap.isZero() || gap.isNegative()) {
@@ -4458,8 +4453,8 @@ public final class TrainHealthMonitor {
   /**
    * 一次健康检查的结果。
    *
-   * <p>{@code fixedCount} 与 {@code recoveryDispatchedCount} 是**两件事**，此前被混为一谈：
-   * 前者是"车确实重新推进了"，后者是"派发了一个恢复动作"。派发不等于恢复——实服第十五轮 SURC-WS-LN-3176 在同一个 idx 上被反复"修好"了 29 分钟而一步没挪。
+   * <p>{@code fixedCount} 与 {@code recoveryDispatchedCount} 是**两件事**，不可混为一谈：
+   * 前者是"车确实重新推进了"，后者是"派发了一个恢复动作"。派发不等于恢复——一辆车可以在同一个 idx 上被反复"修好"而一步没挪。
    */
   public record CheckResult(
       int stallCount, int progressStuckCount, int fixedCount, int recoveryDispatchedCount) {

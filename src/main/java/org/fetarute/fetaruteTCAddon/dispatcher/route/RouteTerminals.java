@@ -29,8 +29,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  *       的运营商前缀，标签里也会是一串原始节点 ID。
  * </ul>
  *
- * <p>本类只挑“哪一个 stop”，不负责显示：HUD 要双语、站牌要 label、API 要名称，格式各不相同； 但挑哪一站必须是同一把尺子。此前 HUD、站牌、公开
- * API、出车命名、折返改名各有一套实现，在实服数据上已经给出过不同答案。
+ * <p>本类只挑“哪一个 stop”，不负责显示：HUD 要双语、站牌要 label、API 要名称，格式各不相同； 但挑哪一站必须是同一把尺子。HUD、站牌、公开
+ * API、出车命名、折返改名若各有一套实现，就会对同一交路给出不同答案。
  *
  * <p>索引是入参列表的下标。调用方传入 {@link RouteDefinitionCache#listStops} 时，下标与 {@link
  * RouteDefinition#waypoints()} 以及运行时进度的 {@code currentIndex} 对齐。

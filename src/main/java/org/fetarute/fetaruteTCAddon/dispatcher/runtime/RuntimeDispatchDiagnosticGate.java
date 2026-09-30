@@ -54,9 +54,9 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
   /**
    * 使用指定的每分钟观察预算创建诊断 gate。
    *
-   * <p>预算原本是硬编码的 {@value #DEFAULT_MAX_OBSERVATION_EMISSIONS} 条/分钟。实服排查时这个值偏低： 2026-09-13 一轮 42
-   * 分钟里丢弃 305,203 行、写出 36,229 行（**89% 被丢**）， 连 {@code SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED}
-   * 这类只在异常时出现的 trace 都一条没留下—— 于是「没 grep 到」既可能是没发生，也可能是被丢了，**无法区分**，排查因此停摆。
+   * <p>默认预算为 {@value #DEFAULT_MAX_OBSERVATION_EMISSIONS} 条/分钟。多车排查时这个值可能偏低：丢弃率很高时，连 {@code
+   * SMART_POTENTIAL_PHYSICAL_CHANGE_CONTAINED} 这类只在异常时出现的 trace 也会被丢，于是「没 grep
+   * 到」既可能是没发生，也可能是被丢了，**无法区分**。
    *
    * <p>排查期间需要能临时调高；稳定运行时应当调回默认值，否则控制台会按列车数放大。
    *
@@ -255,11 +255,10 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
       return true;
     }
     // 终点站 layover 是列车"跑完一趟之后去哪了"的唯一记录，全部事件驱动、天然低频
-    // （实服 42 分钟：注册 5、复用等待 46、复用成功 18、改名 3），不存在按 tick 放大的路径。
+    // （注册、复用等待、复用成功、改名），不存在按 tick 放大的路径。
     //
     // 它被预算吞掉时后果很隐蔽：复用会给列车改名，旧名从此不再出现。缺了这几行就无法把改名链接起来，
-    // "某个列车名不再出现"会被读成"这辆车冻住了"——2026-09-13 我就是这样误判了一轮，
-    // 据此写下的"5 辆车冻死在终点站"是错的（见 dispatch-disproven-hypotheses #11）。
+    // "某个列车名不再出现"会被误读成"这辆车冻住了"。
     if (message.startsWith("Layover ")) {
       return true;
     }
@@ -270,7 +269,6 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
     //   TrainHealthMonitor.traceHealthEvent：`事件名 + ": " + message`  —— **有冒号**
     // 不归一的话，健康事件的 kind 会是 `SMART_DEADLOCK_DESTROY_EXECUTED:`，
     // 与名单里的字面量永不相等——加进名单也完全不起作用，而代码路径俱在、看起来像在工作。
-    // 这正是本项目反复出现的那个形状（守卫限定的量与真实情况永不相交，见 fec41c0 / CONFLICT-only）。
     String kind = rawKind.endsWith(":") ? rawKind.substring(0, rawKind.length() - 1) : rawKind;
     return switch (kind) {
       case "SMART_ROUTE_ARRIVAL",
@@ -292,73 +290,67 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           "SMART_UNLOCK_ROLLBACK_DONE",
           "SMART_UNLOCK_APPLIED",
           // 恢复层唯一的执行证据。生产端已按 (预约, 生效优先级) 去重，只有意图变化才输出。
-          // 它被普通观察预算吞掉时，"恢复层到底动没动"无法回答——实服 2026-09-13 正是如此。
+          // 它被普通观察预算吞掉时，"恢复层到底动没动"无法回答。
           "SMART_UNLOCK_PRIORITY_INTENT_APPLIED",
           // 周期性**状态**快照（不是状态变化）。它存在的唯一理由就是"事件流推不出当前状态"，
           // 被预算吞掉就等于没加。规模由车队规模与周期节拍决定，不随 tick 放大：
-          // 生产端只为"已被挡住超过 10 秒"的车输出，实服约 27 行/分钟。
+          // 生产端只为"已被挡住超过 10 秒"的车输出。
           "SMART_BLOCKING_SNAPSHOT",
-          // 自持单线续行被拒的**内层**原因。四个互不相同的成因此前被外层标签压成同一个字符串，
-          // 而承载它的 SMART_SELF_OWNED_CONTINUATION_* 走 SignalComputationTrace.Builder——
-          // 那里以信号灯色为判据（PROCEED 一律不输出），实服全场一条都没有。
+          // 自持单线续行被拒的**内层**原因。四个互不相同的成因在外层标签里会被压成同一个字符串，
+          // 而承载外层标签的 SMART_SELF_OWNED_CONTINUATION_* 走 SignalComputationTrace.Builder——
+          // 那里以信号灯色为判据（PROCEED 一律不输出），内层原因经由那条路径到不了日志。
           // 生产端用 emitRaw，自带按整行内容去重：内层原因不变就不会重复输出。
           "SMART_SELF_OWNED_CONTINUATION_REJECTED",
           // 只因放宽才进入 wait-for graph 的排队位边（持有者自己也被挡住）。
-          // 它是"死锁图里少的那条边"这个修复的**唯一**生效证据：被预算吞掉，就分不清
-          // 下一轮吞吐的改善是不是由它带来的。规模受限于同时卡住的车对数，不随 tick 放大。
+          // 它是这条放宽的**唯一**生效证据：被预算吞掉，就分不清
+          // 吞吐的变化是不是由它带来的。规模受限于同时卡住的车对数，不随 tick 放大。
           "SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED",
           // 物理联锁覆盖是否真的可用——「车体实际压住哪些区间」这条证据链的**总闸**。
           // 它为假时 livePhysicalEdgeCoverage 一律返回 incomplete，于是任何以实测覆盖为放行条件的
           // 机制（尾部保护释放 / Phase 4）都会 fail-closed 到一个都不放。
           // 而它有两条构建路径：完整图构建索引可用；从持久化快照重建**按设计索引必然为空**，
           // 正常重启的服务器走的正是后者。丢了这一行，就可能在一个结构性为空的证据源上实现机制，
-          // 得到代码路径俱在、trace 照常输出、却从不触发的结果——本项目已栽过三次的形状。
+          // 得到代码路径俱在、trace 照常输出、却从不触发的结果。
           // 每次图激活至多一行，不随 tick 放大。
           "SMART_INTERLOCKING_COVERAGE",
           // Phase 4（实测覆盖释放尾部保护）**唯一**的生效证据。
-          // 既有回收机制十三轮成功率 0（selfRetainReleaseCandidate=false 2286/2286），
+          // 既有回收机制（selfRetainReleaseCandidate）遇到非 CONFLICT 资源一律不释放，
           // 所以这一条一旦非零，就是 Phase 4 确实跑通了——归因干净。
           // 体量受限于同时可释放的区间数，不随 tick 放大。
           "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
-          // 全局重建 = **全网停车**。实服第十三轮 70.5 分钟里 epoch 走到 22，
-          // 而日志只有 3 行——其余被预算丢掉，于是"发生过多少次、谁触发的"两个都答不出。
-          // 同轮六辆车 heldSeconds 完全相同（1056，回推同一瞬间）而停因各异，
-          // 像被同一个全局事件打中；要证实或排除它，这一行不能丢。
-          // 每次重建至多一行，不随 tick 放大。
+          // 全局重建 = **全网停车**。这一行被预算丢掉时，"发生过多少次、谁触发的"两个都答不出；
+          // 多辆车 heldSeconds 相同（回推到同一瞬间）而停因各异时，也只能靠它证实或排除
+          // "被同一个全局事件打中"。每次重建至多一行，不随 tick 放大。
           "SMART_STARTUP_OCCUPANCY_RECONSTRUCTION",
           // 发车拥堵闸门的分数——**无论是否触发**。
-          // 实服第十三轮 congestion-hold **0 次**，而同期人均吞吐从 8.0 崩到 1.0、
-          // 车从 13 加到 24 总产出反掉 72%：刹车从未踩下，而我们看不见它离阈值多远。
+          // 闸门一直没有触发时，只有分数能说明它离阈值多远：
           // "差一点没够着 0.72"和"根本不在一个量级"要采取的行动完全相反。
           // 生产端按 (gateKey, 0.05 分档) 去重。
           "SMART_SPAWN_CONGESTION_SCORE",
-          // 注意：以下三条 SMART_SPAWN_* 目前并不经过本闸门——SimpleTicketAssigner 拿到的是
-          // loggerManager::debug 本身，不是 RuntimeDispatchDiagnosticGate。列在这里是为了
-          // 将来若改走本闸门不会被预算丢掉；同时也说明一件事：第十三轮 congestion-hold 的
-          // **0 次是真的 0 次**，不是被 91% 丢弃率吃掉的。
-          //
-          // 准入闸门：全网在网车数 / 上限——**无论是否拦下**。
-          // 这是本项目第一道真正的准入控制，它是否生效、以及车队实际稳在哪个数，
-          // 只能从这条看。生产端按 (line|route, active:holding) 去重：
-          // 稳态下 active 贴着 cap 不动，因此每条 route 至多几行，不随 tick 放大。
-          // 灯位决策的唯一去向记录。原本按 tick 产生（raw 约 5000 行/分钟），全被当作
-          // OTHER_DIAGNOSTIC 丢弃——实服 2026-09-17 一轮丢 572957 行，日志里只剩 1224 条零头，
-          // 于是用户看到的"绿灯突然变红、前面明明有空间"根本无法归因。
-          // 生产端已改为**只在灯位结果或理由变化时输出**，体量退化为"灯位真的变了几次"，
+          // 灯位决策的唯一去向记录。按 tick 原样输出时体量远超预算，会被当作 OTHER_DIAGNOSTIC
+          // 整批丢弃，"绿灯突然变红、前面明明有空间"便无法归因。
+          // 生产端因此**只在灯位结果或理由变化时输出**，体量退化为"灯位真的变了几次"，
           // 与车队规模同阶、不随 tick 放大。硬阻塞那条还带 advisorySignal/advisoryBlockers——
           // 它区分"前瞻没看见"与"看见了却仍直接硬停"，这两者的改法完全不同。
           "SIGNAL_ASPECT_STAGING",
+          // 注意：SMART_SPAWN_* 三条（CONGESTION_SCORE、FLEET_CAP、CONGESTION_EXEMPT）目前并不经过
+          // 本闸门——SimpleTicketAssigner 拿到的是 loggerManager::debug 本身，不是
+          // RuntimeDispatchDiagnosticGate。列在这里是为了将来若改走本闸门不会被预算丢掉。
+          //
+          // 准入闸门：全网在网车数 / 上限——**无论是否拦下**。
+          // 它是否生效、以及车队实际稳在哪个数，只能从这条看。
+          // 生产端按 (line|route, active:holding) 去重：
+          // 稳态下 active 贴着 cap 不动，因此每条 route 至多几行，不随 tick 放大。
           "SMART_SPAWN_FLEET_CAP",
-          // RETURN 线路完全绕过拥堵闸门——实服 12 条线里有 4 条是 RETURN。
-          // 这条豁免此前在日志里毫无痕迹。按 gateKey 去重，一条线至多一行。
+          // RETURN 线路完全绕过拥堵闸门，这条豁免只有这一行留痕。按 gateKey 去重，一条线至多一行。
           "SMART_SPAWN_CONGESTION_EXEMPT",
           // 发车许可锁超时释放——一把烂在手里的锁的唯一痕迹。
-          // 实服第十五轮一次这样的卡死让 WS 线半小时产出掉 57%，而全网数字把它摊平看不出来。
+          // 这类卡死会让单条线的产出骤降，而全网数字会把它摊平看不出来。
           // 体量受限于"真的卡死过几次"，正常运行应当长期为 0——非 0 本身就是要查的信号。
           "SMART_DEPARTURE_GATE_EXPIRED",
           // 折返旧进路保护（layover 复用后挂在旧站台上的列尾 guard）的三个关键节点：
           // 没有可用清空计划（永远只能 fail-retain）、被越界节点事件封存、被路线到达兜底释放。
-          // 2026-09-29 实服 NTA 咽喉道岔被一条泄漏的 guard 占了整段发车窗口，日志里没有任何一行说明它为什么没释放。
+          // guard 泄漏会把咽喉道岔整段占住，缺了这三行就无从说明它为什么没释放。
           // 体量受限于"真的登记/封存/兜底释放几次"，正常运行接近 0。
           "TURNBACK_FOOTPRINT_GUARD_NO_PLAN",
           "TURNBACK_FOOTPRINT_GUARD_SEALED",
@@ -368,88 +360,81 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 体量：压缩每车每站至多一行、只在确实晚点时出；放宽只在进入/退出时各一行，都不随 tick 放大。
           "SCHEDULED_DWELL_COMPRESSED",
           "SCHEDULED_RECOVERY_OVERSPEED",
-          // 割等待环上的排队边——这条新恢复动作唯一的生效证据。
-          // 第十七轮 MT 两车在相邻道岔上互卡 2839/2700 秒、等待图检测到该环 1455 次，
-          // 而当时三个已实现的恢复动作没有一个能割它。体量受限于"真的成环几次"。
+          // 割等待环上的排队边——这个恢复动作唯一的生效证据。
+          // 它针对的是两车在相邻道岔上长时间互卡、等待图反复检测到同一个环，
+          // 而其他恢复动作都割不开的形态。体量受限于"真的成环几次"。
           "SMART_QUEUE_POSITION_YIELDED",
           // 割排队边**没有**发生时的原因。与上一条成对，缺一不可：
-          // 第十九轮 WS 被 SURC-WS-LC-4801 掉头堵死 40 分钟，而它正是这个动作要解的
-          // 形态（blocker 全是 QUEUE_POSITION，且与 SURC-WS-LH-1927 正好成环）。
-          // 当时这条 trace 不在名单上，全场只活下来 2 条，于是“动作没机会跑”与
-          // “跑了但默默拒了”无法区分——而两者要采取的下一步完全相反。
+          // 只有上一条时，"动作没机会跑"与"跑了但默默拒了"无法区分——而两者要采取的下一步完全相反。
           // 体量：生产端按 (train, reason) 去重，不随 tick 放大。
           "SMART_QUEUE_POSITION_YIELD_SKIPPED",
-          // 恢复链"为什么没有停在第一步"的唯一证据。第二十六轮 Phase 4 释放 335 次里 98% 是
-          // 同一辆车反复释放同一组资源（下一 tick 被重新拿回），每次都被当成 effective 把计数清零，
-          // 割排队位那一步一次都没轮到；修法是把"假定有效"也计数，而这条就是计数的留痕。
-          // 它当时不在名单上，全轮 0 行——修好与否在日志里根本答不出。
+          // 恢复链"为什么没有停在第一步"的唯一证据。同一辆车可能反复释放同一组资源、下一 tick 又被
+          // 重新拿回；若每次都当成 effective 把计数清零，割排队位那一步永远轮不到。
+          // 因此"假定有效"也要计数，这条就是计数的留痕。
           // 体量：生产端按 (train, action, conflict, failureKind, count) 去重，计数在 2 饱和后不再印。
           "SMART_RECOVERY_SAFE_CANDIDATE_FAILED_COUNT",
-          // 时钟跳变补偿的唯一生效证据。笔记本合盖是**常规操作**，而这条补偿拦的是
-          // “每一辆停着的车在唤醒瞬间集体越过死锁/清理阈值”——若销毁兜底开着就是大规模删车。
-          // 第二十二轮它不在名单上，于是全场 0 条，我无法区分“没触发”与“触发了但日志被砍”。
-          // 体量受限于“真的冻了几次”，正常运行长期为 0。
-          // 站台分配的候选与结果。MT 折返终点 PPK 有两台加十字渡线，却是 4:1 的偏用；
-          // 而“2 号台很少空”与“它空着但分配器偏爱 1 号”要采取的下一步完全相反。
+          // 站台分配的候选与结果。多站台终点出现偏用时，
+          // "某台很少空"与"它空着但分配器偏爱另一台"要采取的下一步完全相反。
           // 按 (spec, 候选数, 空闲数, 选中) 去重，受拓扑限制。
           "DYNAMIC_PLATFORM_DECISION",
           // 选台物理先后规则（前车在咽喉等台时不许后车订走最后一个空台）唯一的生效证据。
-          // 修复前的形态是"前车 no-available-platform、blockers 为空"，被吞掉就又回到无从归因。
+          // 该规则针对的形态是"前车 no-available-platform、blockers 为空"，被吞掉就又回到无从归因。
           // 体量：只在"前车正在等、该台又空着"的那一刻触发，前车下一次评估即取走该台；
           // 生产端再按 (列车, 候选, 挡路者, 起点) 变化去重。
           "DYNAMIC_PLATFORM_ORDER_WITHHELD",
+          // 时钟跳变补偿的唯一生效证据。宿主机休眠或挂起后唤醒是常见情形，而这条补偿拦的是
+          // "每一辆停着的车在唤醒瞬间集体越过死锁/清理阈值"——若销毁兜底开着就是大规模删车。
+          // 不留这一行就无法区分"没触发"与"触发了但日志被砍"。
+          // 体量受限于"真的冻了几次"，正常运行长期为 0。
           "SMART_HEALTH_CLOCK_DISCONTINUITY",
           "SMART_RUNTIME_CLOCK_DISCONTINUITY",
           // 已在单线区内、出口在授权窗口外仍放行——那条放宽唯一的生效证据。
-          // 同一形态连续三轮掐死 WS 线（74 分钟 / 449 秒 / 3260 秒）。
+          // 它针对的形态能把整条单线区间长时间卡死。
           "SMART_ALREADY_INSIDE_CONTINUE_ALLOWED",
           // 入库走行证明唯一的生效证据：计数直接等于"本该被 inside-stop-distance 硬停、
-          // 现在没被硬停"的次数。第十五轮 3 辆车被硬停在离段场一个节点处，最长 172 秒，
-          // 而它们 holds=[] blockedBy=[]。生产端按 (train, routeIndex) 去重。
+          // 现在没被硬停"的次数。它针对的是列车在离段场一个节点处被硬停、而 holds=[] blockedBy=[]
+          // 的形态。生产端按 (train, routeIndex) 去重。
           "SMART_DEPOT_RUN_IN_PROVEN",
           // 已授予的前方授权差点被本拍释放拆开、被保下来的唯一证据（HeldForwardAuthority）。
-          // 2026-09-27 OFL 回库原子进路被截断那一分钟诊断丢了 1.18 万行，截断原因无从查起。
+          // 原子进路被截断时诊断量陡增，这一行被预算丢掉就查不到截断原因。
           // 生产端按列车去重，只有被保下的资源或硬授权成败变化才输出。
           "SMART_FORWARD_AUTHORITY_RETAINED",
-          // 授权回滚没有放掉之前已持有资源的唯一证据（AuthorityRollbackBaseline）。2026-09-28 SPB 合流岔
-          // 一夜 5 次断车，前车那条释放记录都被预算吞了（1269 条生命周期只记下 28 条），只能靠推断。
+          // 授权回滚没有放掉之前已持有资源的唯一证据（AuthorityRollbackBaseline）。合流岔断车时，
+          // 前车的释放记录若被预算吞掉，就只能靠推断。
           // 生产端按列车去重，只有保下的资源或回滚原因变化才输出。
           "SMART_AUTHORITY_ROLLBACK_KEPT_HELD",
-          // 全网重建先停期间补记到达事实的唯一证据。2026-09-28 3291 到站被丢、重建按旧进度摆回上一站，
-          // 与后车永久互卡 5 小时以上；只在重建期间命中，体量受限于重建窗口里的到站次数。
+          // 全网重建先停期间补记到达事实的唯一证据。到站事实若在先停期间丢失，重建会按旧进度把车摆回上一站，
+          // 与后车永久互卡；只在重建期间命中，体量受限于重建窗口里的到站次数。
           "SMART_STARTUP_FREEZE_ARRIVAL_COMMITTED",
-          // 物理进展判据（`a404912`）唯一的生效证据：原判据要回滚、而车体方块证明车动了。
-          // 上一轮漏了它，结果 no-physical-progress 不降反升却无法归因——是判据无效，
+          // 物理进展判据唯一的生效证据：原判据要回滚、而车体方块证明车动了。
+          // 缺了它，no-physical-progress 的升降就无法归因——是判据无效，
           // 还是 fail-closed 空转，两种情况要采取的下一步完全相反。
-          // 体量受限于同时在途的预约数（实服每轮 225 个），不随 tick 放大。
+          // 体量受限于同时在途的预约数，不随 tick 放大。
           "SMART_UNLOCK_PHYSICAL_PROGRESS_SAVED",
           // 「已在区内、要续行、但证不出会离开」的**依据**。结论（ALREADY_INSIDE_CONTINUE_
-          // MISSING_EXIT_PROOF）一直看得见，依据却从来没进过日志——承载它的 trace 走
-          // SignalComputationTrace.emit，那里以信号灯色为门。实服第十二轮 0 条、被预算丢弃也是 0 条。
-          // 代价：`SURC-WS-LC-7203` 整轮 74 分钟停在这条上、到站 0 次，而无从判断为什么。
+          // MISSING_EXIT_PROOF）看得见，依据却进不了日志——承载它的 trace 走
+          // SignalComputationTrace.emit，那里以信号灯色为门。缺了依据，长时间停在这条上的车无从判断为什么。
           // 生产端用 emitRaw，自带按整行内容去重：字段不变就不重复输出。
           "SMART_ENTRY_LOOKAHEAD_BLOCKED",
           // 下面这组是"环终于闭合了没有、闭合之后做了什么"的完整链条。
           //
-          // 为什么必须必留：实服第十轮丢弃率 **91%**（输出 49790 行、丢弃 509047 行）。
-          // 在这个丢弃率下，不在名单里的事件出不出得来基本是抛硬币——修好之后第一次检测到环，
-          // 那一行有九成概率被吞掉，于是"到底修好没有"根本答不出。
+          // 为什么必须必留：多车拥堵时观察预算的丢弃率可达九成。在这个丢弃率下，不在名单里的事件
+          // 出不出得来基本是抛硬币——第一次检测到环的那一行大概率被吞掉，于是"到底修好没有"根本答不出。
           //
           // 体量为什么不必担心：整条链都挂在 planner 的 trace 批次上，而批次由上游
-          // plan-unchanged 节流（同一 throttleKey 整批不输出）。实服实测
-          // `SMART_WAIT_FOR_GRAPH` 74 分钟只发射 **30 批**（且丢弃 0），
-          // 所以这几条的体量上界就是 30 批 × 每批个位数，合计百行量级，占日志 0.3% 以下。
+          // plan-unchanged 节流（同一 throttleKey 整批不输出），批次本身稀少，
+          // 所以这几条的体量上界是"批次数 × 每批个位数"，合计百行量级。
           //
-          // 反面教材就在隔壁：`SMART_DEADLOCK_DESTROY_ELIGIBILITY` 残留只有 128 行，
-          // 看着很便宜，实际体量是 **3076 行 / 74 分钟 ≈ 41 行/分钟**（丢弃 2948 + 残留 128），
-          // 加进来要给日志增重 6%。它是"为什么没资格销毁"，而实服 `destroyEnabled=false`
-          // 销毁根本没开——**故意不加**。判体量要用「丢弃 + 残留」，残留不是体量。
+          // 反面教材：`SMART_DEADLOCK_DESTROY_ELIGIBILITY` 在日志里残留的行数很少，看着很便宜，
+          // 但按「丢弃 + 残留」算实际每分钟数十行，加进来会给日志明显增重。它回答的是"为什么没资格销毁"，
+          // 而默认配置关闭销毁（deadlock-destroy-enabled=false）——**故意不加**。
+          // 判体量要用「丢弃 + 残留」，残留不是体量。
           "SMART_DISPATCH_CYCLE_DETECTED",
           "SMART_DISPATCH_PLAN_SELECTED",
           "SMART_NO_SAME_DIRECTION_UNLOCK_PLAN",
           "SMART_DEADLOCK_LIVE_CYCLE_CONFIRMED",
-          // **销毁列车**：不可逆动作的记录绝不允许被预算丢掉。实服 destroyEnabled=false，
-          // 所以当前体量为 0，纯属"万一哪天开启"的保险——尤其是在放宽了排队位边进图条件之后，
+          // **销毁列车**：不可逆动作的记录绝不允许被预算丢掉。默认配置关闭销毁，此时体量为 0，
+          // 纯属"万一哪天开启"的保险——尤其是在放宽了排队位边进图条件之后，
           // 万一放宽造出假环并据此销毁了车，这一行是唯一的证据。
           "SMART_DEADLOCK_DESTROY_EXECUTED",
           // 提权被空耗的证据；每个预约至多一次。

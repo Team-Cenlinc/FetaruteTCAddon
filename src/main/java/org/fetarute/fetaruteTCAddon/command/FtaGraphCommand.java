@@ -6212,13 +6212,12 @@ public final class FtaGraphCommand {
     }
     List<RouteValidationIssue> issues = new ArrayList<>();
     // DYNAMIC 停靠点**不解析到单一节点**（运行时才在若干站台里选一个），
-    // 所以它会被 resolveNodeId 判为空。此前这里直接报 `node-missing`，
-    // 于是每次 `/fta graph build` 之后，凡是带 DYNAMIC 的路线都会刷出一串
-    // "第 N 个停靠点缺少节点"——**全是误报**。
+    // 所以它会被 resolveNodeId 判为空。若直接报 `node-missing`，
+    // 每次 `/fta graph build` 之后，凡是带 DYNAMIC 的路线都会刷出一串
+    // "第 N 个停靠点缺少节点"的误报。
     //
     // route 包里本就有共享的 DynamicStopMatcher（isDynamicStop / matchesStop），
-    // FtaRouteCommand 定义路线时也确实做了 DYNAMIC 校验并有专用文案；
-    // 只有建图后这条校验路径两者都没用上。同一件事两处各写各的，正是它们分叉的原因。
+    // FtaRouteCommand 定义路线时也用它做 DYNAMIC 校验；这里同样复用，避免两处各写各的而分叉。
     //
     // 按**分段**处理：DYNAMIC 停靠点切断可达性链条。既不报缺节点，
     // 也不随便挑一个站台候选去连边——那会造出假的 `edge-unreachable`。
@@ -6772,8 +6771,7 @@ public final class FtaGraphCommand {
 
     // 逐边足迹必须跟着一起写库，否则下次启动从快照恢复时 cell→edge 索引必然为空、
     // cellCoverageAvailable() 为假，一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase 4）
-    // 全部 fail-closed 到一个都不放。实服第十二轮实测确认 cellCoverageAvailable=false，
-    // 而尾部保护占全网滞留的 38%。
+    // 全部 fail-closed 到一个都不放。
     //
     // 足迹在图对象上不再单独持有（建索引时被消费），所以从 cell→edge 索引反转回来。
     // **覆盖不可用时一律写空**：那种情况下反转结果是空 Map，若当成"这些边没有足迹"写进去，

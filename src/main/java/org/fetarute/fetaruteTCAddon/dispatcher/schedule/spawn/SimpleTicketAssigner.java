@@ -388,8 +388,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 本 tick 已经实体化（调用 {@link DepotSpawner#spawn}）的次数。{@code max-spawn-per-tick} 限的就是它。
    *
    * <p>限的是"生成了几辆车"而不是"试了几张票"：被闭塞挡在预检的票、折返复用的票都不生成实体，不占名额。
-   * 以前按尝试计，每拍唯一的名额总落在同一张出不了库的票上，全网其余的票（含终点折返）一张都轮不到 （2026-09-27 实服：一张被车库咽喉挡住的出库票连试 19 次，WS 在 CHT
-   * 的折返票被延后 41 次）。
+   * 若按尝试计，每拍唯一的名额会反复落在同一张出不了库的票上（例如被车库咽喉挡住的出库票），全网其余的票（含终点折返）一张都轮不到。
    */
   private int materializationsThisTick;
 
@@ -1498,7 +1497,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     if (shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
       // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
-      // 这个隐患此前一直存在，只是拥堵闸门从未触发过一次，所以没人撞上。
       deferByGate(ticket, now, "congestion-hold");
       return false;
     }
@@ -1640,10 +1638,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /**
    * 是否因全网在网列车达到上限而拒绝再实体化新车。
    *
-   * <p>这是本项目第一道真正的**准入控制**。此前系统按周期不断尝试发车，没有任何一个量在 "网里已经有多少车"这个维度上设限：拥堵闸门测的是单条 route 自己的占用比例（且只数
-   * EDGE claim），在 14 辆车时最高只到 0.464，够不着 0.72 的阈值。
+   * <p>这是在"网里已经有多少车"这个维度上设限的**准入控制**。拥堵闸门测的主要是单条 route 自己的占用比例， 全网堵死时评分仍可能够不着阈值，不能替代全网上限。
    *
-   * <p>cap &lt;= 0 表示禁用，此时行为与本改动之前完全一致。
+   * <p>cap &lt;= 0 表示禁用，此时不做任何全网上限拦截。
    */
   boolean shouldHoldByFleetCap(Line line, Route routeEntity) {
     int cap = configManager.current().spawnSettings().maxActiveTrains();
@@ -1660,7 +1657,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 报告准入闸门状态——**无论是否拦下**。
    *
    * <p>按 (line|route, active, holding) 去重：达到上限后 active 会稳在 cap 附近，因此稳态下每条 route 至多几行，不随 tick
-   * 放大。不触发时也报，是为了让"离上限还有多远"可归因——本会话已经 验证过：只在触发时才打印的闸门，等于没有闸门。
+   * 放大。不触发时也报，是为了让"离上限还有多远"可归因：只在触发时才打印的闸门，无法判断它是否在正常工作。
    */
   private void traceFleetCap(Line line, Route routeEntity, int active, int cap, boolean holding) {
     String key =
@@ -1698,10 +1695,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     if (routeEntity.operationType() == RouteOperationType.RETURN) {
-      // RETURN 线路**完全绕过**拥堵闸门——这条豁免此前在日志里毫无痕迹。
-      // 实服 12 条线路里有 4 条是 RETURN，也就是三分之一的发车根本不受拥堵约束。
-      // 先让它可见，再谈这条豁免是否合理（它可能是对的：RETURN 是把车收回去，
-      // 拦住反而会让车积在线上）。按 gateKey 去重，一条线至多一行。
+      // RETURN 线路完全绕过拥堵闸门，这里输出豁免记录使其可见。
+      // 豁免的理由：RETURN 是把车收回去，拦住反而会让车积在线上。按 gateKey 去重，一条线至多一行。
       String returnKey = buildCongestionGateKey(service);
       if (congestionScoreReported.put(returnKey, "return-exempt") == null) {
         debugLogger.accept(
@@ -1718,8 +1713,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (ticket != null && ticket.timetableDriven()) {
       // 表定车次不受拥堵闸门约束：何时发车由时刻表决定，编表时已经过冲突检查；拥堵评分是按间隔发车时代的吞吐启发式，
       // 不管行车安全（安全由占用与联锁负责）。它排在复用在网车之前，拦下表定班次会把折返的车扣在终点——
-      // 单股道尽头（CHT:3）一扣就堵死整条线。实服间隔发车十来辆车时评分已到 0.564（阈值 0.58），
-      // 按表 35 辆车时全网压力一项就会顶满。全网硬上限（max-active-trains）照旧生效。
+      // 单股道尽头一扣就堵死整条线。按表运行的在网车数远多于按间隔发车，全网压力一项就会顶满阈值。
+      // 全网硬上限（max-active-trains）照旧生效。
       String timetableKey = buildCongestionGateKey(service) + "|timetable";
       if (congestionScoreReported.put(timetableKey, "timetable-exempt") == null) {
         debugLogger.accept(
@@ -1758,15 +1753,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         wasHolding ? assessment.score() >= releaseThreshold : assessment.score() >= holdThreshold;
     congestionGates.put(gateKey, new CongestionGateState(holding, assessment.score(), now));
 
-    // **不触发时也要把分数报出来**。
+    // 不触发时也要把分数报出来。
     //
-    // 此前这个 summary 只在 holding 为真时打印，于是闸门从不触发时我们对分数一无所知——
-    // 实服第十三轮 `congestion-hold` **0 次**，而同期人均吞吐从 8.0 崩到 1.0（-87%），
-    // 车从 13 辆加到 24 辆、总产出反而掉了 72%。系统眼睁睁看着自己堵死而刹车从未踩下。
-    //
-    // 而"差一点没够着 0.72"和"根本不在一个量级"要采取的行动完全相反：
-    // 前者调阈值，后者要修评分本身（或那条 RETURN 豁免）。看不见分数就只能猜，
-    // 而本会话已经验证过：盲改会不降反升。
+    // 若只在 holding 为真时输出，闸门从不触发时分数便不可见，网络堵死而闸门未动作也无从判断原因。
+    // "差一点没够着阈值"和"根本不在一个量级"要采取的行动完全相反：
+    // 前者调阈值，后者要修评分本身（或那条 RETURN 豁免）。
     //
     // 按 (gateKey, 分数分档) 去重，不随 tick 放大。
     traceCongestionScore(
@@ -1850,8 +1841,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         if (claim == null || claim.resource() == null) {
           continue;
         }
-        // NODE 此前被整类漏掉。实服一轮里 EDGE 5550 / NODE 5471 / CONFLICT 2016——
-        // 只数 EDGE 等于对约一半的占用视而不见，这是 0.72 阈值够不着的原因之一。
+        // EDGE 与 NODE 都要计入：两类占用数量相当，只数 EDGE 等于对约一半的占用视而不见，评分会系统性偏低。
         if (claim.resource().kind() == ResourceKind.EDGE) {
           String key = normalizeEdgeKey(claim.resource().key());
           if (!key.isBlank() && routeEdges.contains(key)) {
@@ -1904,9 +1894,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             ? 0.0D
             : clamp01((double) activeRouteTrains / (double) targetRouteTrains);
 
-    // 【全网压力】此前评分的三个分量全部是"本 route 自己"的局部量，因此在全网堵死时
-    // 依然可以很低——实服 14 辆车时最高分 0.464，而阈值是 0.72。加入全网在网车数/参考值
-    // 这一项，闸门才可能在撞上硬上限之前就平滑地开始拦车。
+    // 【全网压力】其余分量全部是"本 route 自己"的局部量，全网堵死时评分依然可能远低于阈值。
+    // 加入全网在网车数/参考值这一项，闸门才可能在撞上硬上限之前就平滑地开始拦车。
     //
     // 分母用 congestion-network-reference-trains，**不是** max-active-trains。两者默认相等，
     // 但是不同的量：前者是“网络装多少车算满”，后者是“我们允许发多少车”。
@@ -2974,8 +2963,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (shouldHoldByFleetCap(line, routeEntity)) {
       releaseSpawnLease(spawnLease);
       // 用 deferWithoutAttempt 而不是 requeue：requeue 会 +1 attempts，到 max-attempts
-      // （实服配的是 20）就 spawnManager.complete(ticket) 把票据**丢掉**。
-      // 以 retry-delay 40 ticks 算，持续顶住上限约 40 秒后本该发的车就再也不会发了——
+      // 就 spawnManager.complete(ticket) 把票据**丢掉**。
+      // 持续顶住上限一段时间后本该发的车就再也不会发了——
       // 那是"取消发车"，不是"推迟发车"，等网疏通了班次已经凭空少了一批。
       // 无限延后的兜底是 spawn.queued-ticket-max-age-seconds。
       deferByGate(ticket, now, reasonPrefix + "fleet-cap");
@@ -3665,8 +3654,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 出库被闭塞挡住（车库咽喉、长单线、预检 blocker）：记 depot backoff，延后重试，不消耗重试预算。
    *
    * <p>与 {@link #deferByGate} 同一个道理：挡住它的是别的车，累到 max-attempts 把票丢掉就是取消发车。 表定票被丢掉的代价尤其大——首班出库票没了，
-   * 整个交路都不会有车（2026-09-27 实服 DS-1F_Full 被咽喉挡了约 100 秒就因此作废，而它自己的容差是 300 秒）。 兜底仍在：表定票有自己的到期时刻，按间隔发车的票有
-   * {@code queued-ticket-max-age-seconds}。
+   * 整个交路都不会有车，而重试预算可能远早于票据自身的容差耗尽。 兜底仍在：表定票有自己的到期时刻，按间隔发车的票有 {@code queued-ticket-max-age-seconds}。
    */
   private void deferBlockedAtDepot(SpawnTicket ticket, Instant now, String reason) {
     if (ticket == null) {

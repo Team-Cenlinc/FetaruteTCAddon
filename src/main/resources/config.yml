@@ -1,89 +1,96 @@
-# config 版本，请勿修改
+# 配置版本，由插件维护，请勿修改
 config-version: 37
 
-# 语言标签，对应 lang/ 下的文件名
+# 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
 
 debug:
-  # 是否启用插件调试日志
+  # 是否输出调试日志
   enabled: false
-  # 每分钟最多输出多少条“观察类”调度诊断。
-  # 执行器审计、停因生命周期、资源生命周期等事务证据不受此限制，始终逐条输出。
-  # 默认 120 适合稳定运行；排查拥堵/死锁时调到 1200~3000，查完记得调回来，否则控制台会按列车数放大。
+  # 每分钟最多输出的调度观察类诊断条数；停车原因、资源变化等关键审计不受此限制，始终输出。
+  # 排查拥堵或死锁时可临时调高到 1200~3000，排查结束后请改回，否则日志量会随列车数成倍增长。
   observation-budget-per-minute: 120
 
-# Smart Dispatcher / Traffic Control Supervisor 安全隔离
+# 智能调度器：在拥堵、互卡时尝试解锁与恢复
 smart-dispatcher:
-  # OFF = 不调用智能调度决策器；OBSERVE_ONLY = 只输出 trace；ENFORCE = 允许通过 effect class gate 的动作执行
+  # 运行模式：OFF = 关闭；OBSERVE_ONLY = 只记录决策、不执行；ENFORCE = 执行通过安全审查的动作。
+  # 健康监控的自动恢复与清车（health.deadlock-destroy-enabled）只在 ENFORCE 下实际生效，长期运行的服务器建议设为 ENFORCE。
   mode: OBSERVE_ONLY
-  # Phase 1.8 minimal forward planner。默认只观察，不创建 reservation。
+  # 前向规划器：为疏解拥堵临时预约前方资源。以下参数一般无需调整。
   planner:
     enabled: true
+    # 运行模式：OFF = 关闭；OBSERVE_ONLY = 只记录规划结果、不创建预约；
+    # ENFORCE_MINIMAL_FORWARD = 执行同向、短窗口、可回滚的最小前向解锁（需 smart-dispatcher.mode 为 ENFORCE）
     mode: OBSERVE_ONLY
+    # 单次预约最多包含的资源数
     max-reservation-resources: 4
-    # unlock 预约存活多少个 50ms 信号 tick。1200 = 60 秒。
-    # 它等的是"被提升优先级的列车真的走出去、把资源让出来"，而实测这个过程中位数 21 秒、p90 66 秒。
-    # 旧默认 60（=3 秒）短于它等待的物理过程，恢复层 97% 必然超时失败——改小之前先想清楚这一点。
+    # 解锁预约的有效期（信号 tick，1 tick = 50 毫秒，1200 = 60 秒）。
+    # 需长于被让行列车实际驶离、让出资源所需的时间，调得过短会让预约在生效前就过期。
     reservation-ttl-ticks: 1200
+    # 阻塞关系快照的有效期（毫秒）
     blocker-snapshot-ttl-ms: 10000
+    # 只为同方向的列车预约
     require-same-direction: true
+    # 是否允许为反方向列车预约
     allow-reverse: false
+    # 是否允许在授权边界之前折返
     allow-turnback-before-boundary: false
+    # 每个规划周期最多保留一个生效中的预约
     one-active-reservation-per-cycle: true
 
-# 健康检查与自动修复
+# 健康监控：发现静止、停滞与互卡的列车，并自动恢复或清理
 health:
   # 是否启用健康监控
   enabled: true
   # 检查间隔（秒）
   check-interval-seconds: 5
-  # 是否启用自动修复（false 则只告警不修复）
+  # 是否自动修复；关闭后只告警
   auto-fix-enabled: true
-  # 列车静止告警阈值（秒）：有 PROCEED 信号但静止超过此时间
+  # 有放行信号却静止超过该秒数时告警并尝试恢复
   stall-threshold-seconds: 30
-  # 进度停滞告警阈值（秒）：进度索引长时间不变
+  # 进度（经过的路径点）超过该秒数没有推进时告警
   progress-stuck-threshold-seconds: 60
-  # STOP 信号下 progress stuck 的宽限阈值（秒）：用于区分“正常排队”等待与真实异常
+  # 停在红灯（STOP）下时额外给予的宽限秒数，用于区分正常排队与异常停滞
   progress-stop-grace-seconds: 60
-  # STOP 状态下“互卡解锁”触发阈值（秒）：超过后会优先尝试双车解锁
+  # 红灯下停滞超过该秒数时，优先尝试解开两车互卡
   deadlock-threshold-seconds: 45
-  # 实体列车 destructive cleanup 总开关；兼容保留旧键名，同时控制 confirmed deadlock 与普通长时间停滞 cleanup
+  # 销毁类清理总开关：同时控制"互卡销毁"与"长时间停滞清车"。
+  # 关闭时卡死的列车只能手动删除；长期运行的服务器建议开启（还需 smart-dispatcher.mode 为 ENFORCE）。
+  # 停滞告警里的"清车=…"会说明清车为何没有执行，例如在等哪一列车、那列车处于什么状态。
   deadlock-destroy-enabled: false
-  # STOP 互卡最终销毁阈值（秒）：超过后仍未恢复则销毁互卡对中的稳定 leader；0 表示禁用
+  # 互卡持续超过该秒数仍未恢复时，销毁其中一列；0 表示不销毁
   deadlock-destroy-threshold-seconds: 60
-  # 同一互卡对销毁兜底冷却（秒），避免连续销毁两车
+  # 同一对互卡列车两次销毁之间的冷却（秒），避免连续销毁两列
   deadlock-destroy-cooldown-seconds: 120
-  # 空车持续无进展且常规恢复已耗尽后，允许进入 cleanup 候选的阈值（秒）
+  # 空车停滞超过该秒数、且自动恢复无效后，可被清车。几列车首尾相接互相等待时，也会清理其中一列
   stuck-cleanup-threshold-seconds: 600
-  # 有玩家乘坐列车的更长保护阈值（秒）；空车候选始终优先于载客候选
+  # 载客列车的清车阈值（秒），不得低于空车阈值；空车总是先于载客列车被清理
   stuck-cleanup-passenger-threshold-seconds: 1800
-  # 两次普通 stuck cleanup 尝试之间的全局冷却（秒）；每轮检查最多清理一列车
+  # 两次停滞清车之间的冷却（秒）；每次检查最多清理一列
   stuck-cleanup-cooldown-seconds: 120
-  # blocker 快照短暂消失后的 episode 保留宽限（秒）
+  # 互卡判定的细节参数（秒），一般无需调整：阻塞证据短暂缺失时的保留时长、判定互卡前的最短静止时长、阻塞快照的有效期
   deadlock-episode-grace-seconds: 15
-  # 进入 confirmed mutual deadlock 前的最短 STOP 静止时间（秒）
   deadlock-min-stop-seconds: 20
-  # blocker 快照有效期（秒）：用于识别互相阻塞的列车对
   blocker-snapshot-max-age-seconds: 20
-  # 自动修复动作冷却（秒）：避免每轮健康检查都重复触发恢复动作
+  # 两次自动恢复动作之间的冷却（秒）
   recovery-cooldown-seconds: 10
-  # 占用超时清理阈值（分钟）
+  # 残留占用的超时时间（分钟）
   occupancy-timeout-minutes: 5
-  # 是否启用孤儿占用清理（列车已消失但占用未释放）
+  # 是否清理已消失列车遗留的占用
   orphan-cleanup-enabled: true
-  # 是否启用超时占用清理
+  # 是否清理超时的残留占用
   timeout-cleanup-enabled: true
 
 graph:
-  # 图查询/ETA 默认速度（blocks per second），用于 /fta graph query/path 等诊断命令的估算
+  # 未设置限速的区间使用的默认线路速度（格/秒）。控车、编排时刻表与到站预测共用，修改后需重新编排时刻表
   default-speed-blocks-per-second: 8.0
-  # 牌子节点寻找轨道锚点的半径（blocks）
+  # 节点牌子寻找所属轨道的搜索半径（格）
   sign-anchor-search-radius: 6
-  # switcher 节点寻找轨道锚点的半径（blocks）
+  # 道岔（switcher）牌子寻找所属轨道的搜索半径（格）
   switcher-anchor-search-radius: 2
 
 autostation:
-  # 关门提示音（Bukkit Sound enum 或自定义 sound key）
+  # 关门提示音（Bukkit Sound 名称或自定义声音键）
   door-close-sound: "BLOCK_NOTE_BLOCK_BELL"
   # 关门提示音音量
   door-close-sound-volume: 1.0
@@ -91,22 +98,22 @@ autostation:
   door-close-sound-pitch: 1.2
 
 runtime:
-  # 运行时信号/闭塞监测 tick 间隔
+  # 信号与闭塞检查的间隔（ticks，20 ticks = 1 秒）
   dispatch-tick-interval-ticks: 50
-  # 发车/加速动作节流（ticks），0 表示不节流
+  # 发车、加速动作的最短间隔（ticks），0 表示不限制
   launch-cooldown-ticks: 10
 
   hud:
-    # 双语轮播时中英文的切换周期（ticks，20 ticks = 1 秒）。BossBar、ActionBar、车内 LCD 共用这一个周期，
-    # 保证三块显示同时显示同一种语言；只有一种语言的状态仍按各模板自己的 rotate_ticks / page_duration_ticks 轮播。
+    # 双语轮播时中英文的切换周期（ticks）。BossBar、ActionBar 与车内显示屏共用该周期，保证三者同时显示同一种语言；
+    # 只有一种语言的内容仍按各模板自身的 rotate_ticks / page_duration_ticks 轮播
     language-rotate-ticks: 60
     bossbar:
-      # 是否启用“车上 BossBar HUD”
+      # 是否在车上显示 BossBar 信息栏
       enabled: true
-      # BossBar 刷新间隔（ticks）
+      # 刷新间隔（ticks）
       tick-interval-ticks: 10
-      # BossBar 标题模板（MiniMessage），留空则使用 default_hud_template.yml
-      # 占位符: {label_line} {line} {line_code} {line_name} {line_color} {line_color_tag} {operator}
+      # 标题模板（MiniMessage），留空使用 default_hud_template.yml
+      # 可用占位符: {label_line} {line} {line_code} {line_name} {line_color} {line_color_tag} {operator}
       #        {company} {company_code} {company_name}
       #        {route_code} {route_id} {route_name} {dest_eor} {dest_eor_code} {dest_eor_lang2}
       #        {dest_eop} {dest_eop_code} {dest_eop_lang2} {current_station} {current_station_code} {current_station_lang2}
@@ -116,240 +123,184 @@ runtime:
       #        {train_name} {layover_wait} {player_carriage_no} {player_carriage_total}
       template: ""
     actionbar:
-      # 是否启用“车上 ActionBar HUD”
+      # 是否在车上显示 ActionBar 信息
       enabled: true
-      # ActionBar 刷新间隔（ticks）
+      # 刷新间隔（ticks）
       tick-interval-ticks: 10
-      # ActionBar 模板（MiniMessage），留空则使用 default_hud_template.yml
-      # 占位符同 BossBar（见上方），支持 HUD State 分支（如 ARRIVING/TERM_ARRIVING）
+      # 模板（MiniMessage），留空使用 default_hud_template.yml；占位符同 BossBar，支持按状态分支（如 ARRIVING / TERM_ARRIVING）
       template: ""
     player_display:
-      # 是否启用“车上 Scoreboard LCD（player_display）”
+      # 是否启用车内计分板显示屏
       enabled: true
-      # Scoreboard 刷新间隔（ticks）
+      # 刷新间隔（ticks）
       tick-interval-ticks: 10
-      # Scoreboard 模板（YAML + MiniMessage），留空则使用 default_hud_template.yml
+      # 模板（YAML + MiniMessage），留空使用 default_hud_template.yml
       template: ""
-  # 占用请求 lookahead 边数
+  # 占用申请向前查看的区间数
   lookahead-edges: 3
-  # 同向跟驰最小空闲边数
+  # 同向跟车时与前车之间至少空出的区间数
   min-clear-edges: 2
-  # 尾部保护占用边数：保留整列车身（按估算车长）+ 车尾之后 N 段边；车长未知时保留全部可证明的后向路径
+  # 车尾保护：保留整列车身所在区间，另加车尾之后的区间数；车长未知时保留全部可确认的后方路径
   rear-guard-edges: 1
-  # 道岔区联合锁闭范围（向前 N 段边）
+  # 道岔区联锁范围（向前的区间数）
   switcher-zone-edges: 3
-  # 进站/STOP waypoint approaching 限速（blocks per second）
+  # 进站及停车路径点前的限速（格/秒）
   approach-speed-bps: 10.0
-  # 进库前的限速（blocks per second）
+  # 进入车库前的限速（格/秒）
   approach-depot-speed-bps: 5.0
-  # 进站限速区（blocks）：沿路径逐节点看，节点离它之后的第一个进站触发点不超过该距离时，从这个节点起按进站限速运行；
-  # 区外按车型减速度提前制动至区起点。触发点为车站/车库本体、对应咽喉，以及与本体/咽喉立即相邻的 switcher。
-  # 编表与 ETA 的运行曲线用同一判据，改动后需重新 build 时刻表。0 表示不按距离划区
+  # 进站限速区范围（格）：距下一个进站触发点（车站、车库及其咽喉、紧邻的道岔）不超过该距离的节点起按进站限速运行，
+  # 区外按车型减速度提前制动到区起点。编排时刻表与到站预测使用同一规则，修改后需重新编排时刻表；0 表示不按距离划区
   approach-window-blocks: 96.0
-  # 节点到下一个触发点的边数小于等于该值时也划入进站限速区；0 表示禁用边数判据
+  # 距进站触发点的区间数不超过该值时也划入进站限速区；0 表示不按区间数判断
   approach-window-edges: 0
-  # CAUTION 信号速度上限（blocks per second），可被连通分量覆盖
+  # 注意（CAUTION）信号下的限速（格/秒），可按连通分量单独覆盖
   caution-speed-bps: 10.0
-  # 是否启用“提前减速”速度曲线（根据剩余距离与制动能力动态限速）
+  # 是否根据剩余距离与制动能力提前减速
   speed-curve-enabled: true
-  # 速度曲线类型：physics/linear/quadratic/cubic
+  # 停车曲线类型：physics / linear / quadratic / cubic
   speed-curve-type: "physics"
-  # 速度曲线放大系数（>1 更激进，<1 更保守）：只作用于阻塞/授权终点的停车曲线；进站区外制动与前方限速边按车型减速度原值计算（与编表同口径）
+  # 停车曲线放大系数（大于 1 更激进，小于 1 更保守），只作用于在阻塞点或授权终点前停车；前方限速与进站区外制动按车型减速度计算
   speed-curve-factor: 1.0
-  # 提前减速缓冲距离（blocks），用于更早开始降速
+  # 提前减速的额外缓冲距离（格）
   speed-curve-early-brake-blocks: 0.0
-  # 是否启用移动授权（Movement Authority）：授权距离不足时主动降级信号并压速
+  # 是否启用移动授权：可行驶距离不足时主动降级信号并限速
   movement-authority-enabled: true
-  # STOP 授权安全余量（blocks）：制动距离 + 此余量不足时将强制 STOP
+  # 停车余量（格）：制动距离加该余量超过可行驶距离时强制停车
   movement-authority-stop-margin-blocks: 2.0
-  # CAUTION 授权安全余量（blocks）：制动距离 + 此余量不足时会降级到更保守信号
+  # 注意余量（格）：制动距离加该余量超过可行驶距离时降级为注意信号
   movement-authority-caution-margin-blocks: 8.0
-  # 速度命令迟滞（blocks/s）：目标速度变化小于该值时不更新，抑制抖动
+  # 目标速度变化小于该值（格/秒）时不更新，避免速度指令抖动
   speed-command-hysteresis-bps: 0.15
-  # 速度命令增速限幅系数：基于列车 accel（1.0 表示与列车加速度一致）
+  # 提速限幅系数，相对列车加速度（1.0 表示与列车加速度一致）
   speed-command-accel-factor: 1.0
-  # 速度命令降速限幅系数：兼容旧配置，已不生效。降低 speedLimit 会立即写入，TrainCarts 在下一物理步直接截速
-  # （WaitAcceleration 只管跟车/互斥区，不平滑 speedLimit）；两次调度之间由逐 tick 限速斜坡沿进站/限速制动曲线连续下调
+  # 已废弃，保留仅为兼容旧配置：降速会立即生效，两次调度之间由逐 tick 的限速斜坡沿制动曲线平滑下调
   speed-command-decel-factor: 1.0
-  # 最短路距离缓存异步刷新周期（秒）
+  # 最短路距离缓存的刷新周期（秒）
   distance-cache-refresh-seconds: 3
-  # 兼容旧配置：低速恢复已迁移到 health.stall-threshold-seconds，不再由信号 tick 使用
+  # 已废弃，保留仅为兼容旧配置：低速恢复改由 health.stall-threshold-seconds 负责
   failover-stall-speed-bps: 0.2
-  # 兼容旧配置：不再作为 dispatch tick 重试阈值
+  # 已废弃，保留仅为兼容旧配置
   failover-stall-ticks: 60
-  # failover：目标不可达时强制停车
+  # 目的地不可达时强制停车
   failover-unreachable-stop: true
-  # 硬 STOP（闭塞/授权失败/互卡等待）时清空 TrainCarts destination 与 route，避免旧目标继续牵引列车。
+  # 因闭塞、授权失败或互卡等待而强制停车时，清空 TrainCarts 的目的地与路线，避免旧目标继续牵引列车
   clear-destination-on-hard-stop: true
-  # 是否启用统一信号约束 envelope（保留轻量分类/缓存接口，避免靠扩大 lookahead 解决信号抖动）
+  # 是否启用统一的信号约束计算
   signal-envelope-enabled: true
-  # 占用事件只标记 dirty，由周期 tick 或 coalesced flush 统一处理，避免 acquire 调用栈内重入控车
+  # 占用变化只做标记，统一在周期检查中处理，避免在占用申请过程中重复控车
   signal-event-coalesce: true
-  # STOP 后放宽到 PROCEED 前需要的稳定周期数
+  # 从停车信号恢复为放行前需要连续稳定的周期数
   signal-proceed-stability-ticks: 1
-  # 每 tick 最多构建 envelope 的列车数量
+  # 每个 tick 最多计算信号约束的列车数
   max-envelope-builds-per-tick: 50
-  # 路径/距离缓存最大条目数
+  # 路径与距离缓存的最大条目数
   path-cache-max-size: 4096
-  # stale conflict queue entry 清理 TTL（秒）
+  # 失效排队条目的清理时间（秒）
   stale-queue-entry-ttl-seconds: 30
-  # 同向跟驰最小安全间隔（blocks），默认按 min-clear-edges 的保守下限推导
+  # 同向跟车的最小安全间隔（格）
   following-min-clear-blocks: 2
-  # 同向跟驰 STOP 余量（blocks）
+  # 同向跟车的停车余量（格）
   following-stop-margin-blocks: 4
 
 spawn:
-  # 是否启用“基于线路 baseFrequency 的自动发车”
-  # - enabled=false 时仅提供命令手动 /fta depot spawn
-  # - enabled=true 时将周期性生成 SpawnTicket，并在闭塞门控允许时从 CRET 指定的 depot 自动 spawn 列车
+  # 是否按线路的发车间隔（baseFrequency）自动发车
+  # - false：只能用 /fta depot spawn 手动发车
+  # - true：周期性生成发车票，在闭塞允许时从线路指定的车库自动发车
   enabled: false
-  # 自动发车 tick 间隔（ticks）
+  # 自动发车的检查间隔（ticks）
   tick-interval-ticks: 100
-  # 刷新发车计划的间隔（ticks）：会从数据库重新读取 Company/Operator/Line/Route/RouteStop
+  # 从数据库重新读取公司、运营商、线路与交路配置的间隔（ticks）
   plan-refresh-ticks: 200
-  # 每次 tick 最多实体化（新生成）的列车数（避免卡主线程/刷车）
-  # 只数真正生成的车：被闭塞挡在预检的出库票、折返复用的票都不占名额，每拍都会各试一次
+  # 每次检查最多新生成的列车数，避免卡顿或刷车；被闭塞挡住的票与折返复用的车不占名额
   max-spawn-per-tick: 1
-  # 每次 tick 最多生成的票据数量（用于追赶 dueTime；建议与 max-backlog-per-service 配合）
+  # 每次检查最多生成的发车票数量（用于追赶错过的发车时刻）
   max-generate-per-tick: 5
-  # 每条服务（route）最多积压的票据数量（防止长时间堵塞后爆发性补发）
+  # 每条交路最多积压的发车票数量，防止长时间堵塞后集中补发
   max-backlog-per-service: 5
-  # spawn 失败/门控阻塞后的重试延迟（ticks）
+  # 发车失败或被闭塞挡住后的重试间隔（ticks）
   retry-delay-ticks: 40
-  # spawn 最大重试次数（attempts >= max 时放弃该票据）
+  # 最大重试次数，达到后放弃该发车票
   max-attempts: 10
-  # Layover 复用降级发车：当 RETURN 票据等待超过 (baselineFreq × layover-fallback-multiplier) 秒后，
-  # 从 Depot 直接补发而非继续等待 Layover 列车。设为 0 禁用降级（永远等待 Layover）。
+  # 回库票等待终点待命车超过（线路发车间隔 × 该倍数）秒后，改从车库直接发车；0 表示一直等待待命车
   layover-fallback-multiplier: 2.0
-  # 发车队列票据最大保留时间（秒）：超过后丢弃并释放 backlog，0 表示禁用硬清理
+  # 发车票在队列中的最长保留时间（秒），超过后丢弃；0 表示不限
   queued-ticket-max-age-seconds: 7200
-  # Layover pending 票据最大等待时间（秒）：超过后丢弃并释放 backlog，0 表示禁用硬清理
+  # 等待折返复用的发车票最长保留时间（秒），超过后丢弃；0 表示不限
   pending-layover-max-age-seconds: 7200
-  # 【准入控制】全网在网列车数上限：达到后 depot 不再实体化新车（复用 layover 的车不受限）。
-  # 0 表示禁用。
-  #
-  # 这是"拥堵崩溃"的直接对策，实测依据：
-  #   5 辆 → 8.00 次到站/车/5分钟；13 辆 → 6.85（总产出峰值 89）；24 辆 → 1.04（总产出 25）。
-  # 车队接近翻倍而总产出掉了 72%——系统会一直往网里灌车直到堵死，此前没有任何一道闸门拦得住。
-  # 总产出在 13~14 辆附近见顶，故默认 16（留一点余量以便观察真实拐点是否更高）。
-  #
-  # 注意与 reclaim.max-active-trains 的区别：那个是"出口侧"（超限时回收闲置车），
-  # 本项是"入口侧"（超限时不再发新车）。
+  # 全网在网列车数上限：达到后车库不再生成新车（折返复用的车不受限）；0 表示不限。
+  # 车太多会让网络拥堵、总运量反而下降，建议按线路实际承载能力设置并观察。
+  # 与 reclaim.max-active-trains 不同：本项限制发车，那一项在超限时回收闲置车。
   max-active-trains: 16
-  # 拥挤门控的触发/解除阈值（迟滞），作用于 SMART_SPAWN_CONGESTION_SCORE 里的 score。
-  #
-  # 这两个数需要按实测分布标定，不要凭感觉改。旧默认 0.72/0.58 在实服从未触发过一次：
-  # 14 辆车时最高分只有 0.464，因为评分的三个分量全是"本 route 自己"的局部量，
-  # 而且只数 EDGE claim（漏了约一半的 NODE 占用）。
-  # 现已补上 NODE 并加入 network 分量，当前默认是据此重估的首版取值。
-  #
-  # 【2026-09-15 第十八轮实测，82 分钟】分布拿到了，结论是**先别动这两个数**：
-  #   score 分布  n=368  中位 0.539  p90 0.634  max 0.697   holding=true 占 58%
-  # 也就是说门控确实在工作了（不像旧默认 0.72/0.58 那样从未触发），迟滞也正常
-  # ——holding 的分数下界正好落在 release 阈值 0.48 上。
-  #
-  # 但**不能据此调阈值**，因为分数与它要防的东西对不上：把时间切成 5 分钟窗口、
-  # 按线路配对（n=48 个窗口），score 与同窗口到站数的相关系数只有 r=0.133，
-  # 而且符号与三分位趋势相反（三分位 32.2 → 30.8 → 27.5 是递减的）。
-  # 两边都在噪声里 —— 没有可锚定的产出关联，调数字就是凭感觉。
-  #
-  # 真正可疑的是**评分本身**，不是阈值：
-  #   - 动态范围只有 0.0~0.697，0~1 这把尺子上面三成永远够不到；
-  #   - 与吞吐无相关，说明它没在衡量"再灌车就要崩"这件事。
-  # 下一步该做的是让 score 可预测吞吐（或换一个能预测的量），而不是挪阈值。
-  # 在那之前真正兜底的是上面那道 max-active-trains 硬上限，它不依赖这两个数。
-  # 拥堵评分里"全网算满"的参考车数。**默认与 max-active-trains 相等，但它们是两个不同的量**：
-  # 本项是"网络装多少车算满"（物理/经验量），max-active-trains 是"我们允许发多少车"（策略量）。
-  #
-  # 为什么要拆开：networkPressure = 在网车数 / 本参考值，是拥堵评分四分量里权重最高的一项之一。
-  # 合用一个数时，把 max-active-trains 从 16 提到 24 会**同时**抬高天花板并把软刹车调钝
-  # （分母变大 → networkPressure 从 14/16=0.875 掉到 14/24=0.58），一次改两件事，
-  # 密度实验就无法归因到底是"车更多"还是"刹车更松"起的作用。
-  #
-  # 要扫密度曲线：只动 max-active-trains，本项保持不变，软刹车的灵敏度才是可比的。
-  # 设为 0 表示没有全网压力信号，评分退回三分量旧权重。
+  # 拥堵评分中"全网满载"的参考车数，一般与 max-active-trains 相同；0 表示不计全网压力。
+  # 调整 max-active-trains 做对比时请保持本项不变，以免同时改变拥堵门控的灵敏度。
   congestion-network-reference-trains: 16
+  # 拥堵门控：拥堵评分（0~1）高于 hold 时暂停发车，回落到 release 以下时恢复；hold 应大于 release
   congestion-hold-threshold: 0.58
   congestion-release-threshold: 0.48
 
-# 时刻表：录制实测运行时分 → 编成时刻表 → 按表运行
-#
-# 这一段的所有开关默认关闭。打开 enabled 之前请先看 /fta timetable build 输出的
-# p90/median：那个比值就是"这条线到底有没有稳定的典型运行时分"的判据。
-# 比值大意味着同一个区间这次跑 60 秒、下次跑 600 秒——此时任何一份表定时分都是错的，
-# 按表运行只会让早到的车在站里空等，晚到的车照样晚，净效果是把运力又压低一截。
-# 正确顺序是先把离散度压下来，再编表。
-# 闲置回收（出口侧）：待命车闲置超时、生命周期到达上限或全网超限时派 RETURN 票送回车库。
+# 闲置回收：把闲置过久、生命周期到期或超出全网上限的待命列车送回车库
 reclaim:
   # 是否启用闲置回收
   enabled: false
-  # 待命车闲置多久后触发回收（秒）
+  # 待命列车闲置超过该秒数后回收
   max-idle-seconds: 300
-  # 全网在网列车数超过此值时进入压力模式，每轮回收一辆闲置车（与 spawn.max-active-trains 的入口侧准入不同）
+  # 全网在网列车超过该数时，每轮额外回收一列闲置车（与 spawn.max-active-trains 限制发车不同）
   max-active-trains: 50
   # 回收扫描间隔（秒）
   check-interval-seconds: 60
-  # 兜底：待命车已经该回收、却一直找不到能从它所在终点出发的 RETURN 线路（典型是直通车滞留在别的运营商的终点），
-  # 持续超过此秒数就直接销毁。只销毁没有乘客、也没有进行中折返事务的车。0 表示关闭兜底，
-  # 同时关闭按表运行时"正线折返点接不上下一班就原地销毁"（此时这类车只记滞留）。
+  # 需要回收却找不到可用回库线路的待命车（常见于停在其他运营商终点的直通车），滞留超过该秒数后直接销毁。
+  # 只销毁无乘客、无进行中折返的列车；0 表示不销毁，同时关闭按表运行时"正线折返点接不上下一班即销毁"
   stranded-destroy-seconds: 1800
 
+# 时刻表：录制实测运行时分，编排成时刻表后按表运行（/fta timetable）。
+# 各开关默认关闭。启用前请先用 /fta timetable build 查看区间运行时分的离散程度（p90 与中位数之比）：
+# 比值大说明同一区间的运行时间不稳定，此时按表运行只会让早到的车空等，建议先改善线路再编表。
 timetable:
-  # 按表运行总开关。关闭时录制照常可用，已发布的时刻表也只是数据，不影响任何一列车。
+  # 按表运行总开关。关闭时仍可录制，已发布的时刻表不影响任何列车
   enabled: false
-  # 是否由时刻表接管发车出票（替代 spawn 段的 headway 出票）。需要 enabled 一并打开。
-  # 打开后，凡是有 PUBLISHED 时刻表的 route，headway 票会被拦下，改由表定时刻出票；
-  # 没有时刻表的 route 完全不受影响。
+  # 由时刻表接管发车，替代 spawn 的按间隔发车；需同时开启 enabled。
+  # 只影响有已发布时刻表的交路，其余交路照常按间隔发车
   spawn-enabled: false
-  # 早到列车最多被扣留多少秒。
-  #
-  # 这个数字是安全阀而不是策略参数：它的作用是保证"按表运行"永远不会制造一辆假死车。
-  # 运行时还会再被调度层 150 秒的硬上限封顶（发车门锁本身 180 秒就会被回收，
-  # 扣留必须先于门锁结束，否则会进入"自己不动、也不再排队"的状态）。
-  # 早到幅度超过上限时直接放行并记一条审计——那种情况多半是匹配错了车次，不是真的早到。
+  # 早到列车最多扣留的秒数（安全上限）；早到超过该值直接放行并记录审计，多半是车次匹配有误
   hold-max-seconds: 120
-  # 列车与表定车次匹配时允许的最大偏差秒数。
-  # 偏差超过它就不绑定，该车自由运行。宁可少绑不可错绑：错绑会让车等一个不属于它的时刻。
+  # 列车与表定车次匹配时允许的最大偏差（秒），超过则不绑定、列车自由运行。
+  # 也是车次作废的判据：到点后超过该秒数仍未发出的车次视为取消
   assign-tolerance-seconds: 300
-  # 发车侧单次轮询最多回补多长的时间窗口（秒）。
-  # 服务器停了一整天再启动时，它保证不会把这一天的车一次性全部补发出来。
+  # 发车侧一次最多补发多长时间内错过的车次（秒），避免服务器长时间停机后集中补发
   max-catch-up-seconds: 300
-  # 重新加载已发布时刻表的间隔（秒）。publish/unpublish 之后最多等这么久生效。
+  # 重新加载已发布时刻表的间隔（秒）；发布或下架后最多等待该时长生效
   reload-interval-seconds: 60
-  # 编表时车站停车在 dwell 之外多算的秒数。
-  # 列车压上站牌后由 TrainCarts 居中刹停（约 3 秒），停稳后 AutoStation 再过 1 秒才开门，dwell 从开门起算，
-  # 所以表定发车 = 到站 + dwell + 本值；车站终到的折返同理。车库与区间停车点不加。
-  # 2026-09-26 实服 136 次停站实测"压牌→发车"中位 24 秒（dwell 20）。站牌居中明显更快或更慢时按实测改，改完要重新 build。
+  # 编表时每次车站停车在停站时间（dwell）之外额外计入的秒数，涵盖列车对位刹停与开门延迟。
+  # 若实际"到站→发车"总时长与表定明显不符，可按实测调整，修改后需重新编排时刻表
   station-stop-overhead-seconds: 4
-  # 晚点追赶：只对绑定了表定车次、且确实晚点的车生效，两个手段都只会缩短等待。每趟跑完在日志里记一行 TIMETABLE_TRIP_DELAY
-  # （带入 / 新增 / 追回秒数与逐站偏差），用它判断追赶管不管用。
+  # 晚点追赶：只对已绑定表定车次且确实晚点的列车生效，只会缩短等待，不会让列车更晚。
+  # 每趟车结束时日志记录一行 TIMETABLE_TRIP_DELAY，可据此评估追赶效果
   recovery:
-    # 晚点车在中途站最少停多少秒：停站压缩到刚好赶上表定发车，但不少于本值、也不超过交路定义的停站。
-    # 出库后第一站（开门延迟更长、有重试窗口）、交路起点与终点不压缩。开门 1 秒 + 关门动画 5 秒，再短就是开门即关门；
-    # 关门动画更长的车型（legacy 动画）另按"关门动画时长 + 全开 3 秒"兜底。0 表示不压缩。
+    # 晚点列车在中途站的最短停站秒数：停站压缩到刚好赶上表定发车，但不少于该值。
+    # 出库后首站、交路起点与终点不压缩；0 表示不压缩
     min-dwell-seconds: 10
-    # 晚点车线路限速放宽的百分比。只放宽写明的线路限速（牌子上的边限速或永久限速覆盖，也就是编表用的那个数）；
-    # 没写限速走默认速度的边、临时限速、进站限速、CAUTION 与信号速度一律不放宽。0 表示不放宽。
+    # 晚点列车线路限速放宽的百分比。只放宽明确设置的线路限速（牌子限速或永久限速覆盖）；
+    # 默认速度、临时限速、进站限速与信号限速不放宽；0 表示不放宽
     overspeed-percent: 10
-    # 最近一次到发晚点达到多少秒才放宽线路限速；追到这个数以内就恢复原限速。
+    # 晚点达到该秒数才放宽限速，追回到该值以内即恢复
     engage-delay-seconds: 10
-  # 录制结果落库的间隔（秒）。录制本身不落库，封存好的跑车在这个 tick 上批量写入。
+  # 录制数据写入数据库的间隔（秒）
   recorder-flush-interval-seconds: 5
-  # 时刻表默认时区（如 Asia/Shanghai）。留空使用服务器默认时区。
-  # 时刻表存的是"当日秒数"，换算成绝对时间要靠它；改这个值会让全部已发布时刻表整体平移。
+  # 时刻表时区（如 Asia/Shanghai），留空使用服务器时区。修改后全部已发布时刻表的实际时刻会整体平移
   zone: ""
 
 train:
-  # 默认车种（metro/emu/dmu/diesel_push_pull/electric_loco）：未打车种标签的车与编表、ETA 的运行曲线都按它算，改动后需重新 build 时刻表
+  # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，
+  # 编排时刻表与到站预测也按它计算；修改后需重新编排时刻表
   default-type: metro
-  # 各车种加减速（blocks/s²，1 block 按 1 米计）：低速段平均起动加速度与常用制动减速度，不是紧急制动。
-  # 实际按首尾柔和的 S 形曲线变化（起步、到速、开始制动、减到末速度各有 1.5~2.5 秒渐变），控车与编表同一条曲线
+  # 各车种的加减速度（格/秒²，1 格按 1 米计）：低速段平均起动加速度与常用制动减速度，不是紧急制动。
+  # 实际按首尾柔和的 S 形曲线变化，控车与编表使用同一条曲线
   types:
-    # 地铁/轻轨型电动车组（含 tram-train）：站距短、起停频繁
+    # 地铁、轻轨电动车组：站距短、起停频繁
     metro:
       accel-bps2: 1.1
       decel-bps2: 1.2
-    # 通勤/市域电动车组
+    # 通勤、市域电动车组
     emu:
       accel-bps2: 0.9
       decel-bps2: 1.0
@@ -367,7 +318,7 @@ train:
       decel-bps2: 0.8
 
 storage:
-  # 可选值：sqlite / mysql
+  # 存储后端：sqlite / mysql
   backend: sqlite
 
   sqlite:
@@ -375,26 +326,26 @@ storage:
     file: "data/fetarute.sqlite"
 
   mysql:
-    # 数据库地址，含主机/IP
+    # 数据库地址（主机名或 IP）
     db_address: "127.0.0.1"
     # 数据库端口
     db_port: 3306
-    # 数据库名/Schema
+    # 数据库名
     db_table: "fetarute_tc"
     # 数据库用户名
     db_username: "fta"
     # 数据库密码
     db_password: "change-me"
-    # 可选：表前缀，避免与其他插件冲突
+    # 表前缀，避免与其他插件冲突
     table_prefix: "fta_"
 
   # 连接池设置（HikariCP）
   pool:
-    # 最大连接数（SQLite 会自动收敛为 1）
+    # 最大连接数（SQLite 固定为 1）
     maximum-pool-size: 5
-    # 连接获取超时（毫秒）
+    # 获取连接的超时时间（毫秒）
     connection-timeout-ms: 30000
-    # 空闲连接存活时间（毫秒）
+    # 空闲连接的存活时间（毫秒）
     idle-timeout-ms: 600000
-    # 连接最大生命周期（毫秒）
+    # 连接的最长生命周期（毫秒）
     max-lifetime-ms: 1800000
