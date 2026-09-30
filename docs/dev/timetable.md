@@ -603,8 +603,9 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 - **放宽线路限速**（`StationStopCoordinator#lineSpeedFactor` → `RailGraphService#effectiveSpeedLimitBlocksPerSecond` 的倍率重载）：
   本车次最近一次到发晚点 ≥ `recovery.engage-delay-seconds` 时，线路限速乘 `1 + overspeed-percent/100`；追到阈值以内即恢复。
   晚点只在到发时更新，同一区间内倍率不会来回跳。**只放宽写明的线路限速**（牌子上的边限速或永久限速覆盖，也就是编表按它算表定时分的那个数）；
-  没写限速走默认速度的边（常见于道岔边）、临时限速、进站限速、CAUTION 与信号给出的速度一律不放宽。制动距离与移动授权按实际车速算，
-  跑得快只会刹得早。审计：`SCHEDULED_RECOVERY_OVERSPEED state=engaged|released`（必留，只在进入/退出时各一行；
+  没写限速走默认速度的边（常见于道岔边）、临时限速、进站限速、CAUTION 与信号给出的速度一律不放宽。前方慢速边的制动前瞻
+  （与编表同一条 S 形曲线，`SpeedCeiling#brakingLimitBps`）以放宽后的所在区间限速为巡航速度，约束点取该边自己的限速（写明的放宽、默认的不放宽）；
+  移动授权按实际车速算制动距离，跑得快只会刹得早。审计：`SCHEDULED_RECOVERY_OVERSPEED state=engaged|released`（必留，只在进入/退出时各一行；
   重载或关掉按表运行时，已放宽的车在下一次查倍率时补一行 `released reason=recovery-disabled`）。
   "最近一次晚点"只认列车**此刻仍绑定**的车次：改派交路、时刻表下架、回起点重新匹配之后，旧车次的晚点立即作废。
 

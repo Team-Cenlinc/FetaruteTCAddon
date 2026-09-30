@@ -228,11 +228,7 @@ public final class SpeedCeiling {
     boolean endFromCap = capBound[last];
     for (int i = last - 1; i >= 0; i--) {
       double cruise = cruiseAt[i];
-      // 中点法：低速时一步要走一秒多，减速度在步内变化明显，取半步处的值。
-      double half =
-          Math.sqrt(speed * speed + curve.decelerationBps2(speed, cruise, endSpeed) * STEP_BLOCKS);
-      double decel = curve.decelerationBps2(half, cruise, endSpeed);
-      double raised = Math.sqrt(speed * speed + 2.0 * decel * STEP_BLOCKS);
+      double raised = raise(speed, cruise, endSpeed, curve);
       if (raised >= cruise) {
         speed = cruise;
         endSpeed = cruise;
@@ -244,6 +240,55 @@ public final class SpeedCeiling {
       ceiling[i] = speed;
     }
     return new SpeedCeiling(ceiling, capBound);
+  }
+
+  /**
+   * 前方 {@code distanceBlocks} 处限速 {@code endBps}、此前按 {@code cruiseBps} 巡航时，此刻允许的最高速度。
+   *
+   * <p>与 {@link #of} 同一条 S 形制动曲线（同一步长、同一中点法），相当于一条长 {@code distanceBlocks}、限速 {@code cruiseBps}、
+   * 终点速度 {@code endBps} 的单边天花板在起点的值；只往回推到巡航速度为止，远处的约束不必走完整段。运行时前瞻没有进站天花板可用时
+   * （例如到下一停车点之外的慢速边）用它，与编表口径一致。
+   *
+   * @param curve 加减速曲线
+   * @param cruiseBps 制动开始前的巡航速度（所在区段限速）
+   * @param endBps 约束点的限速
+   * @param distanceBlocks 到约束点的距离（格）；非正时返回约束点限速
+   * @return 允许的最高速度，不超过 {@code cruiseBps}；{@code endBps} 不低于巡航速度时返回 {@code endBps}（该约束不收紧）
+   */
+  public static double brakingLimitBps(
+      SpeedCurve curve, double cruiseBps, double endBps, double distanceBlocks) {
+    Objects.requireNonNull(curve, "curve");
+    double end = Math.max(0.0, endBps);
+    if (!(cruiseBps > end)) {
+      return end;
+    }
+    if (!(distanceBlocks > 0.0)) {
+      return end;
+    }
+    double position = distanceBlocks * STEPS_PER_BLOCK;
+    int whole = (int) Math.min(Integer.MAX_VALUE, Math.floor(position));
+    double speed = end;
+    for (int i = 0; i < whole; i++) {
+      speed = raise(speed, cruiseBps, end, curve);
+      if (speed >= cruiseBps) {
+        return cruiseBps;
+      }
+    }
+    double fraction = position - whole;
+    if (fraction <= 0.0) {
+      return speed;
+    }
+    // 采样点之间按 v² 线性插值，与 limitBps 相同。
+    double next = Math.min(cruiseBps, raise(speed, cruiseBps, end, curve));
+    return Math.sqrt(speed * speed + (next * next - speed * speed) * fraction);
+  }
+
+  /** 往回推一步后的速度（中点法：低速时一步要走一秒多，减速度在步内变化明显，取半步处的值）。 */
+  private static double raise(double speed, double cruise, double endSpeed, SpeedCurve curve) {
+    double half =
+        Math.sqrt(speed * speed + curve.decelerationBps2(speed, cruise, endSpeed) * STEP_BLOCKS);
+    double decel = curve.decelerationBps2(half, cruise, endSpeed);
+    return Math.sqrt(speed * speed + 2.0 * decel * STEP_BLOCKS);
   }
 
   private static List<Double> boxed(double[] values) {

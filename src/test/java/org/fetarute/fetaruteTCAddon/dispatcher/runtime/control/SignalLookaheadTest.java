@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -155,6 +157,9 @@ class SignalLookaheadTest {
           edge(NodeId.of("LWN:SWN:2:001"), NodeId.of("LWN:SWN:2:002"), 53),
           edge(NodeId.of("LWN:SWN:2:002"), NodeId.of("S:SWN:2"), 600));
 
+  /** 与编表同一条 S 形加减速曲线。 */
+  private static final SpeedCurve CURVE = new SpeedCurve(1.0, 1.0);
+
   private static double lwnLimit(RailEdge edge) {
     return edge.to().value().equals("LWN:SWN:2:001") ? 8.0 : 22.2;
   }
@@ -162,25 +167,26 @@ class SignalLookaheadTest {
   @Test
   void pathSpeedEnvelopeBrakesForTheSlowEdgeAheadInsteadOfCappingTheWholeSegment() {
     double envelope =
-        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, 1.0, 0L)
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 0L)
             .orElseThrow();
 
-    assertEquals(Math.sqrt(8.0 * 8.0 + 2.0 * 1.0 * 26), envelope, 1.0e-9);
+    assertEquals(SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 26), envelope, 1.0e-9);
+    assertTrue(envelope > 8.0 && envelope < 22.2);
   }
 
   @Test
   void pathSpeedEnvelopeMeasuresTheSlowEdgeFromTheHead() {
     double atNode =
-        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, 1.0, 0L)
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 0L)
             .orElseThrow();
     double headPastNode =
-        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, 1.0, 20L)
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 20L)
             .orElseThrow();
     double headAtSlowEdge =
-        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, 1.0, 40L)
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 40L)
             .orElseThrow();
 
-    assertEquals(Math.sqrt(8.0 * 8.0 + 2.0 * 1.0 * 6), headPastNode, 1.0e-9);
+    assertEquals(SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 6), headPastNode, 1.0e-9);
     assertTrue(headPastNode < atNode);
     assertEquals(8.0, headAtSlowEdge, 1.0e-9, "车头已到慢速边，距离按 0 计，不会变成负数");
   }
@@ -191,7 +197,7 @@ class SignalLookaheadTest {
 
     assertEquals(
         22.2,
-        SignalLookahead.pathSpeedEnvelope(pastTheSwitch, SignalLookaheadTest::lwnLimit, 1.0, 0L)
+        SignalLookahead.pathSpeedEnvelope(pastTheSwitch, SignalLookaheadTest::lwnLimit, CURVE, 0L)
             .orElseThrow(),
         1.0e-9);
   }
@@ -200,12 +206,7 @@ class SignalLookaheadTest {
   void pathSpeedEnvelopeWithoutBrakingFallsBackToTheSegmentMinimum() {
     assertEquals(
         8.0,
-        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, 0.0, 0L)
-            .orElseThrow(),
-        1.0e-9);
-    assertEquals(
-        8.0,
-        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, Double.NaN, 0L)
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, null, 0L)
             .orElseThrow(),
         1.0e-9);
   }
@@ -216,21 +217,21 @@ class SignalLookaheadTest {
 
     assertEquals(
         8.0,
-        SignalLookahead.pathSpeedEnvelope(slowFirst, SignalLookaheadTest::lwnLimit, 1.0, 30L)
+        SignalLookahead.pathSpeedEnvelope(slowFirst, SignalLookaheadTest::lwnLimit, CURVE, 30L)
             .orElseThrow(),
         1.0e-9);
   }
 
   @Test
   void pathSpeedEnvelopeIgnoresEdgesWithoutAValidLimit() {
-    assertTrue(SignalLookahead.pathSpeedEnvelope(List.of(), edge -> 10.0, 1.0, 0L).isEmpty());
-    assertTrue(SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, edge -> 0.0, 1.0, 0L).isEmpty());
+    assertTrue(SignalLookahead.pathSpeedEnvelope(List.of(), edge -> 10.0, CURVE, 0L).isEmpty());
+    assertTrue(SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, edge -> 0.0, CURVE, 0L).isEmpty());
     assertEquals(
         22.2,
         SignalLookahead.pathSpeedEnvelope(
                 LWN_TO_SWN,
                 edge -> edge.to().value().equals("LWN:SWN:2:001") ? Double.NaN : 22.2,
-                1.0,
+                CURVE,
                 0L)
             .orElseThrow(),
         1.0e-9);

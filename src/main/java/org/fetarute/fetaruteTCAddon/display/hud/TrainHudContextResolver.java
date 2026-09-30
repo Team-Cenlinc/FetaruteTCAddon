@@ -1145,6 +1145,7 @@ public final class TrainHudContextResolver {
    * 获取列车实际速度（blocks per second）。
    *
    * <p>使用实体的物理速度（velocity）而非 TrainCarts 的 getRealSpeed()， 因为后者在 launch 期间会返回目标速度而非实际速度。
+   * 再与限速取小：TrainCarts 用限速截速时只截每步位移、不缩短速度向量，制动途中向量仍是制动前的速度，直接显示会比实际快。
    */
   private double resolveSpeedBlocksPerSecond(MinecartGroup group) {
     if (group == null || group.head() == null) {
@@ -1161,6 +1162,10 @@ public final class TrainHudContextResolver {
       return 0.0;
     }
     double bpt = velocity.length();
+    TrainProperties properties = group.getProperties();
+    if (properties != null && Double.isFinite(properties.getSpeedLimit())) {
+      bpt = Math.min(bpt, Math.max(0.0, properties.getSpeedLimit()));
+    }
     return bpt * 20.0; // blocks/tick → blocks/second
   }
 

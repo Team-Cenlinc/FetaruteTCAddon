@@ -13,6 +13,28 @@ class SpeedCeilingTest {
   private static final double FREE = Double.POSITIVE_INFINITY;
   private static final SpeedCurve CURVE = new SpeedCurve(1.0, 1.0);
 
+  /** 运行时前瞻用的单点制动与编表天花板是同一条曲线：等于一条单边天花板在起点的值。 */
+  @Test
+  void brakingLimitMatchesASingleEdgeCeiling() {
+    for (double distance : new double[] {6.0, 26.0, 50.25, 120.0, 400.0}) {
+      SpeedCeiling ceiling =
+          SpeedCeiling.of(new double[] {distance}, new double[] {22.2}, List.of(), 8.0, CURVE);
+      assertEquals(
+          ceiling.limitBps(0.0),
+          SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, distance),
+          1.0e-9,
+          "距离 " + distance);
+    }
+    assertEquals(22.2, SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 5000.0), 1.0e-9, "远处不收紧");
+    assertEquals(8.0, SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 0.0), 1.0e-9);
+    assertEquals(30.0, SpeedCeiling.brakingLimitBps(CURVE, 22.2, 30.0, 10.0), 1.0e-9, "不低于巡航速度");
+    double halfStep = SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 26.125);
+    assertTrue(
+        halfStep > SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 26.0)
+            && halfStep < SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 26.25),
+        "步长之间插值");
+  }
+
   @Test
   void neverExceedsTheLimitsAndReachesEachLowerLimitInTime() {
     // 300 格 @20 → 100 格 @8 → 200 格 @20，末端进站限速区 [520, 600] 限 10。
