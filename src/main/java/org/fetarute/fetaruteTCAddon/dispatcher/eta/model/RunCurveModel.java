@@ -25,8 +25,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * <p>车站停车的终点速度取进站限速：压上站牌之后的居中刹停由 TrainCarts 完成，它的耗时连同开门延迟一起记在 {@link
  * #stationStopOverheadSeconds()}，不在走行里重复算。区间停车点由调度层刹停，终点速度为 0。
  *
- * <p>2026-09-26 用实服 22 分钟日志（32 个站间区段、136 次停站）校核：走行中位误差 +1%，停站"压牌→发车"中位 24 秒（dwell 20 + 开销
- * 4）。旧口径（每站满速通过、瞬间停车）同一批区段少算 42%。
+ * <p>以运行日志（32 个站间区段、136 次停站）校核：走行中位误差约 +1%，停站"压牌→发车"中位 24 秒（dwell 20 + 开销
+ * 4）。若按每站满速通过、瞬间停车计算，同一批区段会少算约 42%。
  */
 public final class RunCurveModel implements RunTimeModel {
 

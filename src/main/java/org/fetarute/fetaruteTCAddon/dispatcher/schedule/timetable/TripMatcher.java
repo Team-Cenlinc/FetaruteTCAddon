@@ -38,7 +38,7 @@ final class TripMatcher {
   private final ConcurrentMap<String, TimetableAssignment> assignments = new ConcurrentHashMap<>();
   private final ConcurrentMap<TripKey, String> claims = new ConcurrentHashMap<>();
 
-  /** 绑不上车次的累计次数：跨线干扰 → 晚点 → 退回自由运行这条链，以前在数字上完全看不见。 */
+  /** 绑不上车次的累计次数：让"跨线干扰 → 晚点 → 退回自由运行"这条链在数字上可见。 */
   private final AtomicLong assignMisses = new AtomicLong();
 
   private final ConcurrentMap<String, Instant> missLoggedAt = new ConcurrentHashMap<>();
@@ -99,8 +99,7 @@ final class TripMatcher {
    * 为这辆车找一趟表定车次：同一 route、当前停靠点计划发车与"现在"最接近、尚未被别的车占用。
    *
    * <p>已经绑在交路上的车只在<b>本交路</b>里找，且不看容差：交路已经说明了它该跑哪一班，晚点就晚点跑。 按时间去抢别的交路的车次会连锁错班——被抢那一班的车只好再往后抢，
-   * 每辆车都早到整整一班、在站台上等别人的时刻；交路归属与班次进度从此对不上，到终点连回库票都接不了 （2026-09-27 实服 PPK）。同一 route
-   * 在一个交路里相隔整整一圈，就近不会选错。
+   * 每辆车都早到整整一班、在站台上等别人的时刻；交路归属与班次进度从此对不上，到终点连回库票都接不了。同一 route 在一个交路里相隔整整一圈，就近不会选错。
    *
    * <p>没绑交路的车（重启后留在线上的车、自由运行的车）按时间就近匹配，限容差内，并跳过别的车已经绑定的交路： 那一班有它自己的车，孤儿车绑上去就是同一交路两辆车。
    *

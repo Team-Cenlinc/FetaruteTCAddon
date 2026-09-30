@@ -18,7 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
  * 逐 tick 限速斜坡：在两次调度周期之间，让 TrainCarts 限速沿本周期的速度包络连续下降。
  *
  * <p>TrainCarts 的 {@code speedLimit} 是硬上限：每个物理步都把实体最大速度设成它，改低后下一 tick 就直接截速，不经过任何减速过程； {@code
- * WaitAcceleration} 只作用于跟车、互斥区与阻挡牌，与 speedLimit 无关。调度周期（实服每秒一次）只在周期点算目标速度， 减速于是成了
+ * WaitAcceleration} 只作用于跟车、互斥区与阻挡牌，与 speedLimit 无关。调度周期（通常每秒一次）只在周期点算目标速度， 减速于是成了
  * “每秒切一刀、中间匀速”。本类在周期之间按列车实际走过的距离重算包络，每 tick 只下调一小步。
  *
  * <p>三条规则保证它只让减速更平顺，不放宽任何限制：

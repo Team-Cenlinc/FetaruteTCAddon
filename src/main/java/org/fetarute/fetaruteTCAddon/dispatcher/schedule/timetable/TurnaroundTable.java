@@ -10,13 +10,12 @@ import java.util.UUID;
  *
  * <h2>为什么不是一个常数</h2>
  *
- * <p>这里曾经是 {@code Limits.turnaroundSeconds}，一个默认 180 秒的标量。那个数在运行时侧<b>并不存在</b>： 运行时车终到后，AutoStation
- * 居中刹停、开门、按终到 dwell 计时，计时结束才进入待命（{@code LayoverRegistry} 对 readyAt
- * 的定义是"关门完成时间"），之后下一班的票一到就复用，没有任何最短折返。
+ * <p>编表侧不设固定的折返常数，因为运行时侧<b>不存在</b>这样的量： 运行时车终到后，AutoStation 居中刹停、开门、按终到 dwell 计时，计时结束才进入待命（{@code
+ * LayoverRegistry} 对 readyAt 的定义是"关门完成时间"），之后下一班的票一到就复用，没有任何最短折返。
  *
- * <p>一个凭空造出来的 180 秒因此是编表侧独有的第三个事实源，而它正在系统性地虚增端点占用——实测中它一项就贡献了 单股道端点九成的占用。本类把这个量换回<b>route
- * 定义里本来就写着的数</b>：终到停靠点的 dwell，车站终到再加停站开销（居中刹停 + 开门延迟）。秒数由 {@link
- * TimetableTimingCalculator#terminalStopSeconds} 算出，与途中停站共用同一套规则，不另开一个读者。
+ * <p>凭空设定的常数会成为编表侧独有的第三个事实源，系统性地虚增端点占用，单股道端点尤甚。 本类取的是<b>route 定义里本来就写着的数</b>：终到停靠点的
+ * dwell，车站终到再加停站开销（居中刹停 + 开门延迟）。秒数由 {@link TimetableTimingCalculator#terminalStopSeconds}
+ * 算出，与途中停站共用同一套规则，不另开一个读者。
  *
  * <h2>按 route 而不是按节点</h2>
  *

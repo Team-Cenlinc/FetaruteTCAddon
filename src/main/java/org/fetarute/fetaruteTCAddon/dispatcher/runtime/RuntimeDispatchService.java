@@ -333,18 +333,14 @@ public final class RuntimeDispatchService {
   /**
    * 每辆车最近一次观测到的**车体实际方块**指纹（按车名键）。
    *
-   * <p>存在的理由：解锁预约的「无物理进展」判据只看 {@code lastPassedGraphNode} 有没有变—— 那是"越过了一个图节点"，不是"动了"。代码里明确拒绝用
-   * {@code currentNode} 代替，理由正确 （它随规划窗口滑动而变，不是物理证据）；但结果是**整个判据没有任何真正的物理输入**。
+   * <p>存在的理由：解锁预约的「无物理进展」判据若只看 {@code lastPassedGraphNode} 有没有变，衡量的是"越过了一个图节点"，不是"动了"； {@code
+   * currentNode} 随规划窗口滑动而变，也不是物理证据。缺少车体方块，整个判据就没有任何真正的物理输入。
    *
-   * <p>代价已实测：宽限 {@link #SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS} 是 25 秒， 而实服第十/十一轮逐节点耗时**中位 37 / 32
-   * 秒**（p75 66 / 54 秒）——**宽限低于中位数**， 于是 56–59% 的**正常行驶**会被判成"没动"并回滚。第十一轮 98 个预约创建、98 个回滚、
-   * `SMART_UNLOCK_SUCCESS` 连续十一轮为 0，其中 65 次的理由就是 `no-physical-progress`。
+   * <p>宽限 {@link #SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS}（25
+   * 秒）可能低于长区间的逐节点耗时，只按图节点判定会把**正常行驶**误判为"没动"并回滚。 宽限也不能简单调大：逐节点耗时的高分位已逼近 TTL（60
+   * 秒），调大等于废掉早释放机制，让提权一直挂在不动的车上。 因此不动常数，**补一个真正的物理判据**。
    *
-   * <p>注意宽限那个常数标定于第五轮（当时中位 21 秒），**线网变慢后它对应的现实已不存在**； 但也不能简单调大——p75 已逼近 TTL(60 秒)，调到 p75 等于废掉早释放机制，
-   * 把第五轮"提权一直挂在不动的车上"的老问题放回来。所以不动常数，**补一个真正的物理判据**。
-   *
-   * <p>车体方块来自列车句柄（{@code observeLiveRailFootprint}），**不依赖联锁 cell 索引**，
-   * 因此与"持久化快照没有逐边足迹"那个地基问题无关，现在就能用。
+   * <p>车体方块来自列车句柄（{@code observeLiveRailFootprint}），**不依赖联锁 cell 索引**， 因此不受"持久化快照没有逐边足迹"的限制。
    */
   private final java.util.concurrent.ConcurrentMap<String, Integer>
       livePhysicalFootprintFingerprints = new java.util.concurrent.ConcurrentHashMap<>();
@@ -359,16 +355,16 @@ public final class RuntimeDispatchService {
    * <p>取 2 秒的理由：这个指纹**唯一的消费者**是「无物理进展」判据，而那条判据的宽限是 {@link #SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS}（25
    * 秒）。按 2 秒采样仍有 12 倍余量。
    *
-   * <p>而 {@code observeLiveRailFootprint} 每次调用都要遍历列车各节的 tracked rail、 做 Bukkit 世界查询、光栅化路径——实服
-   * {@code dispatch-tick-interval-ticks: 20}（每秒一次）× 25 辆车 意味着每秒 25 次这样的遍历，全在主线程上，纯属过采样。
+   * <p>而 {@code observeLiveRailFootprint} 每次调用都要遍历列车各节的 tracked rail、 做 Bukkit 世界查询、光栅化路径——按 {@code
+   * dispatch-tick-interval-ticks: 20}（每秒一次）逐车采样，意味着每秒每车一次这样的遍历，全在主线程上，纯属过采样。
    */
   private static final Duration LIVE_FOOTPRINT_SAMPLE_INTERVAL = Duration.ofSeconds(2);
 
   /**
    * 发车许可锁的最长持有时长——一把烂在手里的锁的兜底。
    *
-   * <p>取 180 秒：库里最长配置停站 30 秒、均值 20.2 秒，6 倍余量，绝不会截断任何一次正常停站； 而实服那次卡死持续了 1735
-   * 秒。这不是调参旋钮，是防止单点故障掐死整条线的上限， 因此写死而不进配置——需要调它，说明真正该查的是"为什么三条释放路径都没走到"。
+   * <p>取 180 秒：常见配置停站不超过 30 秒，6 倍余量，绝不会截断任何一次正常停站； 而一把没被释放的锁可以把整条线卡住远超这个时长。
+   * 这不是调参旋钮，是防止单点故障掐死整条线的上限， 因此写死而不进配置——需要调它，说明真正该查的是"为什么三条释放路径都没走到"。
    */
   private static final Duration DEPARTURE_GATE_MAX_HOLD = Duration.ofSeconds(180);
 
@@ -426,8 +422,8 @@ public final class RuntimeDispatchService {
   /**
    * 灯位决策上一次输出的签名（按列车名），用于「只在变化时输出」。
    *
-   * <p>{@code SIGNAL_ASPECT_STAGING} 按 tick 产生，raw 约 5000 行/分钟，此前全被诊断预算当作 {@code OTHER_DIAGNOSTIC}
-   * 丢弃（实服一轮丢 572957 行），于是灯位为什么变成红的**无法回答**。 按变化去重后体量退化为「灯位真的变了几次」，才能进必留名单。
+   * <p>{@code SIGNAL_ASPECT_STAGING} 按 tick 产生，raw 约 5000 行/分钟，不去重会全被诊断预算当作 {@code
+   * OTHER_DIAGNOSTIC} 丢弃，于是灯位为什么变成红的**无法回答**。 按变化去重后体量退化为「灯位真的变了几次」，才能进必留名单。
    */
   private final java.util.concurrent.ConcurrentMap<String, String> aspectStagingSignatures =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -439,11 +435,10 @@ public final class RuntimeDispatchService {
    * RuntimeStopState#blockers()}，而 {@code DEPARTURE_GATE_HOLD} 的停因状态建立时 blockers 是空的—— 真正的阻塞者只出现在
    * {@code checkDeparture} 里那条独立的「发车门控阻塞」日志上。
    *
-   * <p>代价是实打实的：2026-09-14 第十轮，WS-LH-0483 的快照连续 106 条写着 {@code blockedBy=[]}，
-   * 于是「它没有被任何东西挡住」被当成了事实，而它其实正被自己的受害者 WS-LC-2008 挡着—— 那是一个 45 分钟的互锁环。**空列表被读成了「不存在阻塞者」。**
+   * <p>若只看 {@code blockedBy}，一辆被发车门控挡住的车会持续显示 {@code blockedBy=[]}，
+   * 看起来「没有被任何东西挡住」，而它可能正处在互锁环里。**空列表容易被读成「不存在阻塞者」。**
    *
-   * <p>因此这里用**独立字段** {@code departureGateBlockedBy} 输出，不去覆盖 {@code blockedBy}：
-   * 两个来源不同的量混进同一个字段，正是当初误导的根源。
+   * <p>因此这里用**独立字段** {@code departureGateBlockedBy} 输出，不去覆盖 {@code blockedBy}： 两个来源不同的量不应混进同一个字段。
    */
   private final java.util.concurrent.ConcurrentMap<String, DepartureGateBlockers>
       departureGateBlockers = new java.util.concurrent.ConcurrentHashMap<>();
@@ -496,10 +491,10 @@ public final class RuntimeDispatchService {
    *
    * <p>{@code handleDestroy} 会立即清掉进度、缓存与 route tag，但 {@code train.destroy()} 的物理销毁延迟 1 tick
    * （见该方法注释：同步释放占用会让 SpawnMonitor 在物理销毁前 acquire 并 spawn 新车导致撞车）。这个窗口里实体仍然存活， 仍可能触发 {@code
-   * MEMBER_ENTER}。此时它看起来就是一列"没有任何 route 证据的陌生列车"，会被迟加载隔离判成现场异常， 进而关闭<b>全局</b>授权门。实服 2026-09-13
-   * 就是这样：LWN 段场一辆车 DSTY 之后同一秒来了一个滞后到站事件， 全局重建被重新触发且再未 READY，此后 8 分钟每辆车每个 tick 都 fail-closed。
+   * MEMBER_ENTER}。此时它看起来就是一列"没有任何 route 证据的陌生列车"，会被迟加载隔离判成现场异常， 进而关闭<b>全局</b>授权门：
+   * 销毁之后同一秒到来的滞后到站事件会重新触发全局重建，此后每辆车每个 tick 都 fail-closed。
    *
-   * <p>因此本集合只用来识别"这是我们自己刚销毁的那辆车的滞后事件"，据此丢弃该事件；它<b>不</b>放宽对真正陌生实体的隔离。
+   * <p>因此本集合只用来识别"这是调度自己刚销毁的那辆车的滞后事件"，据此丢弃该事件；它<b>不</b>放宽对真正陌生实体的隔离。
    */
   /** 生产端去重：每列车最近一次输出过的 unlock priority 意图签名（预约 + 生效优先级）。 */
   private final java.util.concurrent.ConcurrentMap<String, String> lastSmartUnlockPriorityIntent =
@@ -624,12 +619,11 @@ public final class RuntimeDispatchService {
   /**
    * 同一 (资源, 排队者) 两次割排队位之间的最小间隔。
    *
-   * <p>被割的车下一 tick 就会重新入队，若被解锁的车没有在这段时间里抢先通过，环会复原。 没有冷却时每轮健康检查都会再割一次——这正是已被撤回的主动回收尾部保护那个改动
-   * 在第十七轮实服上的败因（同一资源 93 分钟内反复释放 526 次）。
+   * <p>被割的车下一 tick 就会重新入队，若被解锁的车没有在这段时间里抢先通过，环会复原。 没有冷却时每轮健康检查都会再割一次， 同一资源会被反复释放，退化成抖动。
    */
   private static final Duration QUEUE_POSITION_YIELD_COOLDOWN = Duration.ofSeconds(60);
 
-  /** 调度周期最宽也是秒级；超过这个值只能是服务器冻住（笔记本合盖）。 */
+  /** 调度周期最宽也是秒级；超过这个值只能是服务器冻住（例如宿主机休眠）。 */
   private static final Duration SCHEDULER_FREEZE_THRESHOLD = Duration.ofSeconds(15);
 
   /**
@@ -641,12 +635,11 @@ public final class RuntimeDispatchService {
   /**
    * 预约在"完全没有物理进展"时提前放手的宽限（50ms 信号 tick）。
    *
-   * <p>500 tick = 25 秒，略大于实测"放行 → 走到下一个节点"的中位 21 秒（p75 31 秒）。
+   * <p>500 tick = 25 秒，略大于标定时"放行 → 走到下一个节点"的中位耗时（约 21 秒）。
    *
-   * <p>为什么需要它：TTL 从 3 秒放到 60 秒之后，实服第五轮 **16 次超时全部是 {@code currentNodeChanged=true} 而 {@code
-   * lastPassedGraphNodeChanged=false}**——列车整整 60 秒 一个图节点都没真正走过去，而 +{@value
-   * #SMART_UNLOCK_PRIORITY_BOOST} 的提权就一直挂在它身上。 3 秒 TTL 时这件事自限，60 秒不再自限。该轮线网密度低、队列仲裁只发生 7 次，所以没造成伤害；
-   * 密度上去之后会开始咬。
+   * <p>为什么需要它：TTL 为 60 秒时，可能出现 {@code currentNodeChanged=true} 而 {@code
+   * lastPassedGraphNodeChanged=false} 的超时——列车整整 60 秒 一个图节点都没真正走过去，而 +{@value
+   * #SMART_UNLOCK_PRIORITY_BOOST} 的提权就一直挂在它身上。 TTL 很短时这件事自限，60 秒不再自限；线网密度越高，错挂的提权对队列仲裁的影响越大。
    *
    * <p>取 {@code min(ttl, 本值)}：本值编码的是"真实移动需要多久"这个物理事实，不随 TTL 缩放； 而它又不该超过 TTL 本身。
    */
@@ -1574,11 +1567,9 @@ public final class RuntimeDispatchService {
    * 使用可注入时间源构造。
    *
    * <p>调度的排队与仲裁语义带时间：队列条目的 {@code firstSeen} 决定 {@code arbitrationDeadlineMillis}，
-   * 进而决定同一冲突区上谁先走。这些时间戳最终都来自本类读取的"现在"，因此只要它是墙钟， <b>同一组输入在不同机器/不同负载下会得出不同的放行顺序</b>——多车回归场景实测同一份代码连跑
-   * 6 次， 队列位次倒退出现 3 次、不出现 3 次。
+   * 进而决定同一冲突区上谁先走。这些时间戳最终都来自本类读取的"现在"，因此只要它是墙钟， <b>同一组输入在不同机器/不同负载下会得出不同的放行顺序</b>， 多车回归场景因此无法稳定复现。
    *
-   * <p>生产一律使用 {@link Instant#now()}（上面那个构造器），行为与注入前完全一致；本构造器只为让回归骨架
-   * 能给出确定的时间推进。<b>它不改变任何判定逻辑，只改变"现在"从哪里读。</b>
+   * <p>生产一律使用 {@link Instant#now()}（上面那个构造器）；本构造器只为让回归骨架 能给出确定的时间推进。<b>它不改变任何判定逻辑，只改变"现在"从哪里读。</b>
    */
   public RuntimeDispatchService(
       OccupancyManager occupancyManager,
@@ -1765,13 +1756,11 @@ public final class RuntimeDispatchService {
    * 超时释放发车许可锁，并返回"该锁此刻已不存在"。
    *
    * <p>为什么必须有这道超时：这把锁**只有一个获取方**（AutoStation 的 {@code autostation_dwell}）， 释放写在 {@code
-   * AutoStationSignAction} 的三个分支里，三个都没走到锁就是永久的，而此前 {@code departureGates}
+   * AutoStationSignAction} 的三个分支里，三个都没走到锁就是永久的；而除这道超时外，{@code departureGates}
    * 对**活着的**列车没有任何过期机制（只在车消失/销毁/改名时清理）。
    *
-   * <p>实服第十五轮实测：SURC-WS-LN-3176 于 21:11:52 取锁，门在 21:12:07 就正常关闭了， 锁却一直没还——车停在 TPC 二站台 {@code
-   * routeIndex=17}，挡住 {@code NODE:SURC:SLL:TPC:2:004}， 被它挡住的快照 23 条，它自己 28.9 分钟到站 0 次。WS 线同期产出掉
-   * 57%，而 MT/DS 在同一小时里 分别只掉 14% 和 5%——**全网看到的"拥堵崩溃"其实是一辆车掐住了一条线**。 库里最长配置停站 30 秒、均值 20.2 秒，而这把为 20
-   * 秒设计的锁活了 1735 秒。
+   * <p>一把没还的锁会让车一直停在站台、挡住站台节点及其后续列车，整条线的产出随之崩塌——**看起来像全网"拥堵崩溃"，
+   * 其实是一辆车掐住了一条线**。这把锁按正常停站（数十秒）设计，不应存活到分钟级。
    *
    * <p>这不削弱安全：锁的职责是"停站期间别走"，而移动授权是独立的另一层——那辆车全程 {@code
    * movementToken=ACTIVE}，本来就有权走。超时只是把一把烂在手里的锁还回去。
@@ -1779,20 +1768,17 @@ public final class RuntimeDispatchService {
   /**
    * 周期性清扫超时的发车许可锁。
    *
-   * <p><b>为什么不能只挂在读取路径上。</b>第十六轮实服：SURC-WS-LN-7686 卡在 {@code DEPARTURE_GATE_HOLD} 超过 1026 秒（23:14
-   * 之后到站 0 次），而 {@code SMART_DEPARTURE_GATE_EXPIRED} 全场为 0——jar 里确实带着这段代码（已核对 jar 常量池与运行时指纹 {@code
-   * gitCommit=0b2b57f}），锁也确实只在 23:13:37 取过一次、 牌子此后再没触发过。唯一自洽的解释是：{@code handleSignalTick} 对这辆车根本没走到
-   * {@code hasDepartureGate} 那一行就提前 return 了。
+   * <p><b>为什么不能只挂在读取路径上。</b>{@code handleSignalTick} 可能在走到 {@code hasDepartureGate} 之前就对某辆车提前
+   * return，此时读触发的超时永远不会发生，车会一直停在 {@code DEPARTURE_GATE_HOLD}。
    *
-   * <p>教训很直接：<b>超时判据不能依赖那条正卡着的代码路径</b>。把它做成读触发，等于假设 "卡住的车仍会被正常读取"，而卡住恰恰意味着某条路径不再执行。清扫不依赖任何分支。
+   * <p><b>超时判据不能依赖那条正卡着的代码路径</b>。把它做成读触发，等于假设 "卡住的车仍会被正常读取"，而卡住恰恰意味着某条路径不再执行。清扫不依赖任何分支。
    */
   /**
-   * 把受墙钟驱动的运行时状态**向前平移** {@code gap}，用于服务器冻结（笔记本合盖休眠）后的补偿。
+   * 把受墙钟驱动的运行时状态**向前平移** {@code gap}，用于服务器冻结（例如宿主机休眠）后的补偿。
    *
    * <p>只由调度层调用——只有它知道“该跑而没跑”。
    *
-   * <p><b>只平移会因超时而真正动手的那一项：发车门锁。</b>第二十一轮实服里，合盖七分钟后 {@code SMART_DEPARTURE_GATE_EXPIRED} 从唤醒前的 0
-   * 变成唤醒后的 <b>9</b>——九把锁同时过期， 不是因为真的握了 180 秒，而是因为墙钟跳了。
+   * <p><b>只平移会因超时而真正动手的那一项：发车门锁。</b>冻结期间墙钟照走，不平移的话唤醒后多把锁会同时过期， 不是因为真的握了 180 秒，而是因为墙钟跳了。
    *
    * <p>其余墙钟量（blocker 快照 TTL、各类冷却）跳变后的方向都是“过期/放行”， 本身 fail-closed
    * 或无害，不在这里平移；平移它们反而会把已经不再成立的证据假装成新鲜的。
@@ -1800,9 +1786,8 @@ public final class RuntimeDispatchService {
   /**
    * 所有定时任务在每轮**最开头**调一次；第一个发现时钟跳变的人负责补偿。
    *
-   * <p><b>为什么不能只放在健康监控里</b>：第二十二轮实服证明了那样不够。 发车门锁除了被健康监控的清扫回收，还会在 {@link #hasDepartureGate}
-   * **读取时**过期， 而那条路径由 {@code RuntimeSignalMonitor} 驱动——另一个定时任务。唤醒后谁先跑谁说了算， 而 Bukkit 不保证顺序。实测：空洞
-   * 16:46→16:50 之后紧接着四把锁在 16:50:06-07 同时过期 （heldSeconds 218/221/229/233，恰好等于空洞时长）——健康监控的补偿根本没赶上。
+   * <p><b>为什么不能只放在健康监控里</b>：发车门锁除了被健康监控的清扫回收，还会在 {@link #hasDepartureGate} **读取时**过期， 而那条路径由 {@code
+   * RuntimeSignalMonitor} 驱动——另一个定时任务。唤醒后谁先跑谁说了算， 而 Bukkit 不保证顺序； 信号任务先跑时，锁会在健康监控补偿之前按跳变后的墙钟过期。
    *
    * <p>因此检测收到这里：只有一份 {@code lastSchedulerTickAt}，谁先调谁检测，不会重复补偿。 本类自己的状态当场补；健康监控那份存进 {@code
    * pendingFreezeGap}，由它下一轮取走。
@@ -2032,9 +2017,8 @@ public final class RuntimeDispatchService {
   /**
    * 停车持续多久才开始输出状态快照。
    *
-   * <p>30 秒高于正常停站（实测 {@code DEPARTURE_GATE_HOLD} 中位 21 秒），低于任何值得追查的滞留 （{@code
-   * PROTECTIVE_RETAIN_HOLD} 中位 183 秒）。**不按停因种类过滤**——"卡了很久却没有记录 blocker" 恰恰是最需要看见的一类，按 blocker
-   * 是否存在来过滤等于重新制造盲区。
+   * <p>30 秒高于正常停站（{@code DEPARTURE_GATE_HOLD} 中位约 21 秒），低于任何值得追查的滞留 （{@code PROTECTIVE_RETAIN_HOLD}
+   * 通常达数分钟）。**不按停因种类过滤**——"卡了很久却没有记录 blocker" 恰恰是最需要看见的一类，按 blocker 是否存在来过滤等于重新制造盲区。
    */
   private static final Duration BLOCKING_SNAPSHOT_MIN_HELD = Duration.ofSeconds(30);
 
@@ -2044,10 +2028,10 @@ public final class RuntimeDispatchService {
   /**
    * 同一辆车两次状态快照之间的最小间隔。
    *
-   * <p>周期方法在生产端约**每秒**调用一次（`dispatch-tick-interval-ticks: 20`），而实服同时卡住 30 秒以上的 列车峰值约 9 辆。不节流就是 2600
-   * 次 × 9 ≈ 2.3 万行、约 10 MB——这条 trace 又在必留名单里， 绕过重复窗口与预算两道闸，**去重责任全在生产端**（同 239b06b 的规矩）。
+   * <p>周期方法在生产端约**每秒**调用一次（`dispatch-tick-interval-ticks: 20`），而同时卡住 30 秒以上的列车往往不止一辆。
+   * 不节流就是每车每秒一行——这条 trace 又在必留名单里， 绕过重复窗口与预算两道闸，**去重责任全在生产端**。
    *
-   * <p>15 秒对"中位 183 秒"的滞留是足够的分辨率，量降到约 36 行/分钟。
+   * <p>15 秒对数分钟级的滞留是足够的分辨率。
    */
   private static final Duration BLOCKING_SNAPSHOT_MIN_INTERVAL = Duration.ofSeconds(15);
 
@@ -2055,7 +2039,7 @@ public final class RuntimeDispatchService {
    * 发车门控阻塞者证据的有效期。
    *
    * <p>取两倍快照间隔：门控被持有期间 {@code checkDeparture} 每秒重跑一次，证据本该持续刷新；
-   * 超过这个窗口还没刷新，说明门控已经不在被反复拒绝的状态了，此时展示旧值会重演 2026-09-13 那次「把日志的某个切面当成系统状态」的错误。
+   * 超过这个窗口还没刷新，说明门控已经不在被反复拒绝的状态了，此时展示旧值等于把过时的日志切面当成当前系统状态。
    */
   private static final Duration DEPARTURE_GATE_BLOCKERS_TTL = Duration.ofSeconds(30);
 
@@ -2066,11 +2050,10 @@ public final class RuntimeDispatchService {
   /**
    * 周期性输出「谁被挡住了、握着什么、在等什么」的状态快照。
    *
-   * <p>现有诊断全是**事件**（enter/clear、acquire/release），只回答"发生了什么变化"。 要回答"此刻是什么状态"就只能拿事件流去推，而这在 2026-09-13
-   * 至少骗过我两次： 「列车名不再出现」被推成「车停了」（其实是 layover 复用改名）， 「最后一个事件是 acquire」被推成「资源搁浅」（其实是刷新周期里的重新取得）。
-   * 两次都是**把日志的一个切面当成了系统状态**。
+   * <p>现有诊断全是**事件**（enter/clear、acquire/release），只回答"发生了什么变化"。 要回答"此刻是什么状态"就只能拿事件流去推，而这很容易推错：
+   * 「列车名不再出现」可能只是 layover 复用改名，而不是车停了； 「最后一个事件是 acquire」可能只是刷新周期里的重新取得，而不是资源搁浅。 **日志的一个切面不等于系统状态**。
    *
-   * <p>因此这里记的是状态：持有什么（按角色）、被谁挡着、自持尾部保护有没有可释放候选、 物理进度到哪了。规模有界——每个周期每辆**被挡住**的车一行，实服约 27 行/分钟。
+   * <p>因此这里记的是状态：持有什么（按角色）、被谁挡着、自持尾部保护有没有可释放候选、 物理进度到哪了。规模有界——每个周期每辆**被挡住**的车一行。
    */
   private void traceBlockingStateSnapshot(
       Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
@@ -2333,8 +2316,8 @@ public final class RuntimeDispatchService {
     List<SmartWaitForPlanner.InputEdge> edges = new ArrayList<>();
     // 现场持有索引：(列车规范名, 资源) → 该 claim 真的会挡人。每轮只建一次。
     //
-    // 用它把“这条边还成不成立”从“多久没重新采样”里分出来——两者从来就不是同一个量，
-    // 而实服里被当成同一个在用：第十八轮 172 条被丢的边全部属于已不在活跃集里的车。
+    // 用它把“这条边还成不成立”从“多久没重新采样”里分出来——两者不是同一个量：
+    // 已不在活跃集里的车不会重新采样，只按采样年龄丢边会把它们仍在挡人的持有一并丢掉。
     Set<String> liveHolds = new HashSet<>();
     for (OccupancyClaim claim : liveClaims == null ? List.<OccupancyClaim>of() : liveClaims) {
       if (claim == null
@@ -2656,11 +2639,9 @@ public final class RuntimeDispatchService {
    * 等待图用的前向走廊方向。
    *
    * <p>单线方向必须来自 OccupancyRequest/MovementPlanSnapshot 的语义资源方向：route 的 current/next
-   * 只能证明列车仍有前方目标，不能证明它在某个 single conflict 内的 A/B 方向。这句判断一直是对的， <b>但此前这里直接 {@code return
-   * UNKNOWN}，那个"真正的来源"从来没有接上去</b>—— 于是方向证据永远不足，割环候选永远选不出来。实服 2026-09-17 第二十六轮： 等待图检测到环 1035
-   * 次，{@code SMART_DISPATCH_CYCLE_CANDIDATE} <b>0 次</b>， 全部 {@code
-   * INSUFFICIENT_DIRECTION_EVIDENCE}；车只能等 {@code PROGRESS_STUCK} 在中位 592 秒后兜底，最长一辆在 CHT 折返站卡了 1019
-   * 秒、占死唯一站台。
+   * 只能证明列车仍有前方目标，不能证明它在某个 single conflict 内的 A/B 方向。 <b>若不接上这个真正的来源、直接 {@code return
+   * UNKNOWN}</b>，方向证据会永远不足，等待图检测到的环全部落入 {@code INSUFFICIENT_DIRECTION_EVIDENCE}，割环候选永远选不出来；车只能等
+   * {@code PROGRESS_STUCK} 在数分钟后兜底， 期间可能占死折返站的唯一站台。
    *
    * <p>三道守卫一个都不能省，缺任何一道都会把 fail-closed 变成"看起来在工作"：
    *
@@ -2668,7 +2649,7 @@ public final class RuntimeDispatchService {
    *   <li><b>只在前向证明成立时取值</b>。{@code forwardPathEvidencePresent} 代表 movement plan 已通过 TTL、进度对齐与
    *       routeId 校验（见 {@code derivePlannerForwardPathEvidence}）。 没有它就可能拿一份过期计划的方向去割环。
    *   <li><b>{@code unresolvedDirectionKeys} 必须拿得到</b>。拿不到就返回 UNKNOWN——
-   *       集合缺席不等于"没有不可确定的键"，把缺证据当证据正是本仓反复栽的那一处。
+   *       集合缺席不等于"没有不可确定的键"，不得把缺证据当证据。
    *   <li><b>归约本身按红线处理换向</b>，见 {@link OccupancyClaimEvidence#consistentCorridorDirection}。
    * </ol>
    *
@@ -3783,21 +3764,20 @@ public final class RuntimeDispatchService {
       //
       // 只在**基线确实记录过**时才判定——缺基线只能表示"无法判断"，不得当作"没动"
       // （同一条规则见 hasRecordedLastPassedBaseline 的说明）。currentNode 变化不算物理进展：
-      // 它会随规划窗口滑动而变，实服 16 次超时里它全是 true，而 lastPassedGraphNode 全是 false。
+      // 它会随规划窗口滑动而变，车一个图节点都没越过时它也可能是 true。
       long aliveTicks = tick - reservation.createdTick();
       long noProgressGrace = SMART_UNLOCK_NO_PROGRESS_GRACE_TICKS;
       // 只有当宽限**严格短于** TTL 时才有意义：它的全部作用就是把一个过长的 TTL 提前截断。
       // 若 TTL 本身已经不长于宽限，就让正常的 no-release-timeout 去收尾——否则这条分支会把
-      // 那条更具体的结论（"我们真的等满了"）永远抢走，短 TTL 下 no-release-timeout 将不复存在。
+      // 那条更具体的结论（"确实等满了"）永远抢走，短 TTL 下 no-release-timeout 将不复存在。
       // 补一个**真正的物理**输入：车体实际方块动没动。
       //
-      // 原判据只看 lastPassedGraphNode，那是"越过了一个图节点"，不是"动了"。拒绝用 currentNode
-      // 代替是对的（它随规划窗口滑动而变），但结果是整个判据没有任何物理输入，只剩一个时间常数。
-      // 而那个常数（25 秒）标定于第五轮的中位 21 秒；实服第十/十一轮逐节点耗时中位已是 37 / 32 秒，
-      // **宽限低于中位数** ⇒ 56–59% 的正常行驶被判"没动"。第十一轮 98 预约 / 98 回滚，其中 65 次是它。
+      // 只看 lastPassedGraphNode 衡量的是"越过了一个图节点"，不是"动了"；currentNode 随规划窗口
+      // 滑动而变，也不能代替。缺少物理输入时整个判据只剩一个时间常数，而宽限（25 秒）可能短于
+      // 长区间的逐节点耗时，会把正常行驶判成"没动"。
       //
-      // 不调那个常数：p75(54–66 秒) 已逼近 TTL(60 秒)，调到 p75 等于废掉早释放，
-      // 把第五轮"提权挂在不动的车上"的老问题放回来。所以改成——**方块变了就是动了，不回滚**。
+      // 不调那个常数：逐节点耗时的高分位已逼近 TTL(60 秒)，调大等于废掉早释放，
+      // 让提权重新挂在不动的车上。所以改成——**方块变了就是动了，不回滚**。
       //
       // fail-closed：基线或现值任一缺失都视为"无从判断"，保持原行为（该回滚照样回滚）。
       // 指纹在观测不可用时会被**清掉**而不是留旧值，所以"缺失"不会被"没变"冒充。
@@ -3823,8 +3803,8 @@ public final class RuntimeDispatchService {
                 + reservation.initialLastPassedGraphNode()
                 + " currentNodeChanged="
                 + nodeChanged
-                // 没有这三个字段，就分不清"车真的没动"和"物理判据压根没记上"——
-                // `a404912` 上线后 no-physical-progress 不降反升，而我无法归因，正是因为漏了它们。
+                // 没有这三个字段，就分不清"车真的没动"和"物理判据压根没记上"，
+                // no-physical-progress 的增减也就无法归因。
                 // 判据本身可以是对的却无效（车确实没动），也可以是 fail-closed 空转（指纹缺失）；
                 // 这两种要采取的下一步完全相反，必须能分开。
                 + " footprintBaseline="
@@ -3838,7 +3818,7 @@ public final class RuntimeDispatchService {
         continue;
       }
       // 物理判据**救下**了这个预约：原判据要回滚，而车体方块证明它确实动了。
-      // 这是 `a404912` 唯一的生效证据——没有它，"修复有没有用"只能靠猜。
+      // 这是车体物理判据唯一的生效证据——没有它，"物理判据有没有用"只能靠猜。
       if (physicallyMoved
           && noProgressGrace < reservation.ttlTicks()
           && hasRecordedLastPassedBaseline(reservation)
@@ -3871,16 +3851,13 @@ public final class RuntimeDispatchService {
                 + observedToken.claimVersion()
                 + " minimumFreshClaimVersion="
                 + reservation.minimumFreshClaimVersion()
-                // **是谁让授权失效的**——这是这条回滚唯一缺的那一环。
+                // **是谁让授权失效的**——归因这条回滚需要这一项。
                 //
-                // 实服第十二轮，使授权失效的停因排行是
-                // DEADLOCK_CONFIRMED_WAITING 505 / SAFETY_STATE_UNAVAILABLE 307 /
-                // AUTHORIZATION_FAILURE 158。若这里报出来的多是第一个，那就构成一个恶性循环：
+                // 若这里报出来的多是 DEADLOCK_CONFIRMED_WAITING，就构成一个恶性循环：
                 // 死锁恢复建预约去解环 → 「死锁确认等待」这个停因使授权失效 →
-                // 预约被本分支回滚 → 环没解开。而 `1f398c7` 让环第一次被看见之后，
-                // DEADLOCK_CONFIRMED_WAITING 大增，很可能正是它把这条循环点着的。
+                // 预约被本分支回滚 → 环没解开。
                 //
-                // 但那是推断。**先把是谁写下来，下一轮再决定动不动行为**——
+                // 这里只记录、不改行为——
                 // 这条判定本身是对的（权都没了，解锁帮不上忙），要改的话改的是上游谁该使权失效，
                 // 属于安全相关路径，不能凭推断动。
                 + " invalidatedByStopReason="
@@ -4141,8 +4118,7 @@ public final class RuntimeDispatchService {
   /**
    * 记下该车此刻的车体方块指纹；无从观测时**清掉**旧值，绝不留一个过期的指纹冒充现状。
    *
-   * <p>留旧值会让"指纹没变"同时意味着"车没动"和"我看不见车"——那正是本项目反复栽跟头的 「缺证据被当成证据」。清掉之后，缺证据表现为基线或现值缺失，判据一侧按 fail-closed
-   * 保持原行为。
+   * <p>留旧值会让"指纹没变"同时意味着"车没动"和"看不见车"——那正是 「缺证据被当成证据」。清掉之后，缺证据表现为基线或现值缺失，判据一侧按 fail-closed 保持原行为。
    */
   private void rememberLivePhysicalFootprintFingerprint(
       String trainName, RuntimeTrainHandle train) {
@@ -4768,14 +4744,13 @@ public final class RuntimeDispatchService {
   /**
    * 处于停车态的列车此刻对应的占用版本；不在停车态时返回空。
    *
-   * <p>给周期巡检器判断「这辆停着的车要不要再评估一次」。{@link RuntimeSignalMonitor} 原本对 「刚才停、现在还停」的列车整个跳过完整信号
+   * <p>给周期巡检器判断「这辆停着的车要不要再评估一次」。{@link RuntimeSignalMonitor} 对 「刚才停、现在还停」的列车会整个跳过完整信号
    * tick，理由写在那个判据的注释里：停车列车 「应等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估」。
    *
-   * <p>实服 2026-09-17 第二十四轮证明那三个补偿触发里**只有健康恢复真实存在**： {@code RuntimeStopState.retryTrigger()}（值里写着
-   * {@code PERIODIC_RECHECK}）全仓只被读两处—— 一条日志行和一个命令行展示，从不驱动任何重检；也没有任何「占用变化 → 重新评估」的监听。
-   * 于是停车列车实际只能等健康监控的 {@code PROGRESS_STUCK} 兜底，本轮触发 245 次、中位 182 秒。 而那一轮 {@code
-   * PROTECTIVE_RETAIN_HOLD} 里 74.2% 的车「记下的阻塞者已全部消失」， 清空后仍空等中位 141 秒——注释的前提「重复构建进路不能创造新的 authority」
-   * 在阻塞者已释放时恰恰不成立，而那正是绝大多数情形。
+   * <p>但那三个补偿触发里**只有健康恢复真实存在**： {@code RuntimeStopState.retryTrigger()}（值里写着 {@code
+   * PERIODIC_RECHECK}）全仓只被读两处—— 一条日志行和一个命令行展示，从不驱动任何重检；也没有任何「占用变化 → 重新评估」的监听。 于是停车列车实际只能等健康监控的
+   * {@code PROGRESS_STUCK} 兜底，往往要数分钟。 而 {@code PROTECTIVE_RETAIN_HOLD} 里多数车「记下的阻塞者已全部消失」，
+   * 清空后仍在空等——注释的前提「重复构建进路不能创造新的 authority」 在阻塞者已释放时恰恰不成立，而那正是绝大多数情形。
    *
    * <p>用**版本**而不是事件来驱动是有意的：本项目的事件流已被证明不完备 （{@code SMART_RESOURCE_LIFECYCLE} 在某些移除路径上不发 release），
    * 而版本号在任何 claim 变更时都会推进，不会漏。
@@ -4822,7 +4797,7 @@ public final class RuntimeDispatchService {
           continue;
         }
         // 只留资源+角色，**不带列车名**。这个字符串会进入必留的停车明细并参与去重，
-        // 带上车名会让基数随车数爆炸、吃掉诊断预算并挤掉别的必留行（本会话已踩过两次）。
+        // 带上车名会让基数随车数爆炸、吃掉诊断预算并挤掉别的必留行。
         // 资源+角色受拓扑限制，且已足以决定下一步；“是谁”可从资源生命周期 trace 查到。
         return Optional.of(blocker.resource() + "@" + claim.role().name());
       }
@@ -5943,8 +5918,8 @@ public final class RuntimeDispatchService {
   /**
    * 全网重建先停期间的到站/推进点：只提交到达事实，不改占用、不发授权、不销毁、不进待命。
    *
-   * <p>到达是物理事实，先停只该拦住授权。以前整条事件直接丢掉，重建再按旧进度摆放逻辑占用：2026-09-28 实服 3291 在 3423 断车触发重建的同一刻 到达
-   * PTK:1，到站被丢、进度仍记在 SPB:1，重建把它的占用摆回 SPB 一带；空着的 SPB:1 被后车 0366 合法拿走，两车从此永久互卡（5 小时以上）。
+   * <p>到达是物理事实，先停只该拦住授权。若整条事件直接丢掉，重建会按旧进度摆放逻辑占用：列车在重建触发的同一刻到站，
+   * 到站被丢、进度仍记在上一站，重建把它的占用摆回上一站一带；空着的上一站股道被后车合法拿走，两车从此永久互卡。
    *
    * <p>只给已确认的物理主人补记（重建前登记在 {@link #freezeOwnerIdentities}、或本轮重建已重新登记的就是这个实体）：
    * 异常隔离车、重复逻辑身份、已销毁车的滞后事件都不碰。 索引解析与正常路径相同（含 DYNAMIC 实际股道）；不在交路内的图节点只更新最近经过节点；比当前进度靠后的到达不回写。
@@ -7119,10 +7094,10 @@ public final class RuntimeDispatchService {
   /**
    * 带来源的全局重建入口。
    *
-   * <p>每次重建都会把授权门关成 STOP_FIRST，**全网停车**。实服第十三轮 70.5 分钟里 epoch 走到了 **22**， 而日志里只有 3 行（其余被预算丢掉），且 8
-   * 个调用点报出来的 source 全是同一个硬编码字符串 `STARTUP_RECONSTRUCTION`——**既不知道发生过多少次，也不知道是谁触发的**。
+   * <p>每次重建都会把授权门关成 STOP_FIRST，**全网停车**。重建可能被多个调用点反复触发，诊断日志又受预算限制； 若所有调用点报出的 source
+   * 都是同一个硬编码字符串，就**既不知道发生过多少次，也不知道是谁触发的**。
    *
-   * <p>同轮还观察到六辆车的 `heldSeconds` 完全相同（都是 1056，回推同一瞬间 18:37:20） 而停因各不相同，像被同一个全局事件打中。要证实或排除它，必须先能区分来源。
+   * <p>多辆车的 `heldSeconds` 完全相同而停因各不相同时，像是被同一个全局事件打中。要证实或排除它，必须先能区分来源。
    *
    * @param source 触发方标识，用于诊断归因；不参与任何判定
    */
@@ -8312,8 +8287,8 @@ public final class RuntimeDispatchService {
   /**
    * 判断该事件是否来自调度自己刚销毁、实体尚未消失的列车。
    *
-   * <p>这类事件必须丢弃而不是走迟加载隔离：它的 route 证据是我们自己在 {@code handleDestroy} 里清掉的，
-   * 把它当成陌生实体会关闭全局授权门，并且实服观察到关闭后不会再恢复。丢弃只影响这一辆已判死刑的车， 不改变对真正陌生实体的处置。
+   * <p>这类事件必须丢弃而不是走迟加载隔离：它的 route 证据是调度自己在 {@code handleDestroy} 里清掉的，
+   * 把它当成陌生实体会关闭全局授权门，而且关闭后可能不再恢复。丢弃只影响这一辆已判死刑的车， 不改变对真正陌生实体的处置。
    */
   private boolean isDispatchDestroyedStaleEvent(RuntimeTrainHandle train, String source) {
     if (train == null || dispatchDestroyedPhysicalIdentities.isEmpty()) {
@@ -8381,8 +8356,8 @@ public final class RuntimeDispatchService {
           train, trainName, trainKey, runtimeIdentity, expectedSpawn, normalizedSource);
     }
     // 水合记录用的是 handleRenameIfNeeded 给出的 owner 名（改名迁移失败时是旧名），而这里的 trainKey 来自
-    // resolveTrackedTrainName（直接取当前 TrainCarts 名）。两者在"改名迁移被拒"时不一致：2026-09-30 09:15
-    // 实服里 SURC-DS-LW-5925 被 TrainCarts 命名成 SURC-MT-LP-2498~k，每个 tick 都查不到自己的水合记录，
+    // resolveTrackedTrainName（直接取当前 TrainCarts 名）。两者在"改名迁移被拒"时不一致：列车被 TrainCarts
+    // 改成别的名字后，每个 tick 都查不到自己的水合记录，
     // 于是每次信号检查都重新提交一遍物理占用，提交又唤醒下一轮重评估，链永不收敛。按 tag 里的 owner 名再认一次。
     String taggedOwnerKey =
         TrainTagHelper.readTagValue(train.properties(), RouteProgressRegistry.TAG_TRAIN_NAME)
@@ -8409,7 +8384,7 @@ public final class RuntimeDispatchService {
               + normalizedSource
               + " action=global-stop-first");
       // 全局重建本身收敛不了"拆分残编与本体并存"：快照里同名只能记一个，另一个在 READY 后每个 tick 都会再次
-      // 撞进这里（2026-09-30 08:37 实服循环 15 秒）。与 RuntimeSignalMonitor 的 canonical 规则保持一致：
+      // 撞进这里，形成循环。与 RuntimeSignalMonitor 的 canonical 规则保持一致：
       // 只有本车是 ~x 临时别名、且已记录的属主编组仍然存活并占着规范名时，才把这个别名残编隔离并销毁。
       // 两个都是规范名的真重复、或分不清谁是本体的情形不在这里销毁：全局门保持关闭，交给监控的重复列车清理。
       if (isSplitAliasOfLiveHydratedOwner(train, trainName, hydratedIdentity, taggedOwnerKey)) {
@@ -10510,11 +10485,10 @@ public final class RuntimeDispatchService {
     // **授权窗口边界**（至多 ALLOCATION_EDGE_THRESHOLD 条边以外的走行线图节点）。两者只在"下一个路径点恰好落在
     // 授权窗口末端"这个巧合下相等；授权边界落在两个路径点之间才是常态。
     //
-    // 实服 2026-09-13：MT-2F_Short 的路径点是 … → SURC:S:PTK:1 → SURC:S:RVS:1 → …，而授权边界是
-    // SURC:RVS:PTK:1:002（PTK 与 RVS 之间的走行线节点，根本不在路径点列表里）。判定因此恒假——42 分钟里
-    // SMART_UNLOCK_RESERVATION_CREATED 78 次、回滚 78 次，而 SMART_UNLOCK_PRIORITY_INTENT_APPLIED **为 0**：
-    // 恢复层唯一的执行手段一次都没生效过。回滚理由还被写成 canonical-progress-window-moved，而上面那道规范
-    // 进度判定明明刚刚通过——这正是该缺陷长期没被发现的原因。
+    // 例如路径点是 … → 车站 A → 车站 B → …，而授权边界是 A 与 B 之间的走行线节点，根本不在路径点列表里。
+    // 拿两者比较会恒假：每个预约都被回滚，SMART_UNLOCK_PRIORITY_INTENT_APPLIED 永远不会出现，
+    // 恢复层唯一的执行手段一次都不会生效。回滚理由还会被写成 canonical-progress-window-moved，而上面那道规范
+    // 进度判定明明刚刚通过——这类缺陷因此很难从日志上发现。
     //
     // "列车是否仍停在计划采样的位置、朝同一方向"这件事，上面的 smartUnlockCanonicalProgressCurrent
     // （routeId + currentIndex + lastPassedGraphNode）已经完整回答了；nextNode 在这里只剩一个正确的用途：
@@ -10527,7 +10501,7 @@ public final class RuntimeDispatchService {
     }
     if (!reservation.hasCanonicalRouteIdentity()) {
       // 没有规范身份就没有"仍在采样点、朝同一方向"的证据。缺证据只能表示"无法判断"，按 fail-closed 不授予
-      // priority 意图。旧实现在该分支上靠"下一路径点恰好等于授权边界"这个巧合放行，那不是证据。
+      // priority 意图。"下一路径点恰好等于授权边界"只是巧合，不能当作放行证据。
       return baseResolution;
     }
     int priority = saturatingIntAdd(baseResolution.priority(), SMART_UNLOCK_PRIORITY_BOOST);
@@ -10546,7 +10520,7 @@ public final class RuntimeDispatchService {
     // 生产端按 (预约, 生效优先级) 去重后才交给诊断门。
     //
     // 该方法每个周期信号 tick 都会被调用，原样输出会按 tick 放大；而它同时是恢复层**唯一**的执行证据
-    // （实服 2026-09-13 三轮累计 0 次，直接导致"恢复层是否动过"无法判断）。因此走与其它 unlock 事务
+    // （缺了它就无法判断"恢复层是否动过"）。因此走与其它 unlock 事务
     // 边界一致的约定：生产端只在结论变化时输出，诊断门再把它列为必留审计，两边合起来才既不放大又不丢失。
     String priorityIntentSignature = reservation.reservationId() + "@" + selected.priority();
     if (!priorityIntentSignature.equals(
@@ -10579,8 +10553,8 @@ public final class RuntimeDispatchService {
    *
    * <p>硬授权请求的 {@code DirectedTraversalContext} 目前把 lastPassedGraphNode 建为 {@code Optional.empty()}
    * （见 {@code OccupancyRequestBuilder} 主构造点），因此由它派生的 canonical evidence 里该字段是 {@code "-"}。
-   * 拿这个从未记录过的值去和进度表里的真实节点比较，结果恒为“不等”，于是每一个 unlock 预约创建出来就注定被回滚 （实服 2.5 小时：9004 次预约、释放 claim
-   * 0、{@code canonical-progress-window-moved} 回滚 4342 次）， 死锁恢复在实践中完全失效。
+   * 拿这个从未记录过的值去和进度表里的真实节点比较，结果恒为“不等”，于是每一个 unlock 预约创建出来就注定被回滚 （理由为 {@code
+   * canonical-progress-window-moved}，且一个 claim 都没释放）， 死锁恢复会因此完全失效。
    *
    * <p>缺失的基线只能表示“这一项无法判断”，不能表示“列车动了”。
    */
@@ -10598,8 +10572,8 @@ public final class RuntimeDispatchService {
   /**
    * 说明规范进度窗口到底哪一项对不上。
    *
-   * <p>回滚原因此前一律写成 {@code canonical-progress-window-moved}，把 routeId / currentIndex /
-   * lastPassedGraphNode 三个判定揉成一个标签——实服里 80 次回滚全是这个原因，却无法从日志判断是哪一项， 只能回头读代码。这里把它拆开。
+   * <p>若回滚原因一律写成 {@code canonical-progress-window-moved}，就把 routeId / currentIndex /
+   * lastPassedGraphNode 三个判定揉成了一个标签，无法从日志判断是哪一项失配。这里把它拆开。
    *
    * @return 匹配时返回 {@code "-"}，否则返回具体失配项
    */
@@ -10634,9 +10608,7 @@ public final class RuntimeDispatchService {
    * {@link #hasRecordedLastPassedBaseline} 的空值守卫，随后必然比较失败，于是预约在 释放任何 claim 之前就被判成 {@code
    * canonical-progress-window-moved} 回滚。
    *
-   * <p>实服 2026-09-13：80 次 unlock 预约、80 次回滚，全部 {@code releasedReservationClaims=0}， 死锁确认 219 次只解开 1
-   * 次。这与 {@code 22fcde1} 修掉的"拿窗口起点顶替进度锚点"是同一个错误模式， 也与 {@code 5963ab6}
-   * 同一条规则：<b>缺失的基线只能表示"无从判断"，不得由任何别的量顶替</b>。
+   * <p>这与"拿窗口起点顶替进度锚点"是同一个错误模式， 遵循 同一条规则：<b>缺失的基线只能表示"无从判断"，不得由任何别的量顶替</b>。
    */
   static String canonicalUnlockBaseline(Optional<CanonicalForwardPathEvidence> canonicalEvidence) {
     if (canonicalEvidence == null) {
@@ -10870,11 +10842,10 @@ public final class RuntimeDispatchService {
               + result.skipBreakdown());
       return null;
     }
-    // 这条路径**唯一**的生效证据。既有回收机制十三轮成功率 0，
-    // 所以一旦这条非零，就是 Phase 4 确实跑通了——归因干净。
+    // 这条路径**唯一**的生效证据：一旦这条非零，就说明实测覆盖释放确实生效——归因干净。
     //
-    // edges/nodes 分开报：NODE 半边是第十五轮新接的，只有分开数才知道它有没有在出力；
-    // despiteQueue 是"按旧规则本会被排队拦下、现在放行了"的条数，用来单独衡量那条规则改动。
+    // edges/nodes 分开报：只有分开数才知道 NODE 半边有没有在出力；
+    // despiteQueue 是"按排队规则本会被拦下、此处放行了"的条数，用来单独衡量那条规则的影响。
     debugLogger.accept(
         "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
             + input.train()
@@ -10911,10 +10882,9 @@ public final class RuntimeDispatchService {
     if (boundedCandidateOpt.isEmpty()) {
       // Phase 4：既有 CONFLICT 路径没有候选时，再试**实测覆盖**这条平行路径。
       //
-      // 既有路径开头就 `kind != CONFLICT` 返回，而实服 blocker 是
-      // NODE 1012 / EDGE 331 / **CONFLICT 0** —— 判据与现实永不相交，
-      // 实测第十三轮 `selfRetainReleaseCandidate=false` **2286 / 2286，成功率 0**。
-      // 而 `PROTECTIVE_RETAIN_HOLD` 占全网滞留 38%。
+      // 既有路径开头就 `kind != CONFLICT` 返回，而实际的 blocker 几乎全是
+      // NODE / EDGE、极少是 CONFLICT —— 只走既有路径时判据与现实不相交，候选永远为空；
+      // 而 `PROTECTIVE_RETAIN_HOLD` 是全网滞留的主要来源之一。
       SmartRecoveryActionResult physical = applyPhysicalEdgeRetainRelease(manager, input);
       if (physical != null) {
         return physical;
@@ -11761,17 +11731,17 @@ public final class RuntimeDispatchService {
   /**
    * 割掉等待环上的**排队位次**边——环上唯一割了不影响安全的边。
    *
-   * <p>问题形态（第十七轮实服，MT 线整条被掐死 47 分钟）：
+   * <p>问题形态（可以把整条线掐死）：
    *
    * <pre>
-   *   MT-LH-3340  持有 switcher:637(MOVEMENT_REQUIRED)，想要 643
-   *               ← 被 MT-LP-0838 在 643 上的 **QUEUE_POSITION** 挡住
-   *   MT-LP-0838  在 643 排队（**并不持有它**），想要 637
-   *               ← 被 MT-LH-3340 的 MOVEMENT_REQUIRED 挡住
+   *   A  持有 switcher:X(MOVEMENT_REQUIRED)，想要 Y
+   *      ← 被 B 在 Y 上的 **QUEUE_POSITION** 挡住
+   *   B  在 Y 排队（**并不持有它**），想要 X
+   *      ← 被 A 的 MOVEMENT_REQUIRED 挡住
    * </pre>
    *
-   * 0838 永远排不到 643，因为它要的 637 在 3340 手里；而 3340 又被这个排队位挡着。 典型的优先级反转，两车各卡 2839 / 2700 秒。等待图检测到这个环
-   * <b>1455 次</b> （{@code SMART_DISPATCH_CYCLE_DETECTED}），而恢复链里三个已实现的动作没有一个能割它。
+   * B 永远排不到 Y，因为它要的 X 在 A 手里；而 A 又被这个排队位挡着。 典型的优先级反转。等待图能反复检测到这个环 （{@code
+   * SMART_DISPATCH_CYCLE_DETECTED}），而恢复链里的其它动作没有一个能割它。
    *
    * <p><b>为什么割排队边是安全的</b>：{@code SimpleOccupancyManager.createQueueBlocker} 自己 的注释写着「该 blocker
    * 不代表物理占用或已授予的行车权」，而 {@code physicalOccupancyText(QUEUE_POSITION)} 与 {@code
@@ -11846,7 +11816,7 @@ public final class RuntimeDispatchService {
       return queueYieldSkipped(input.train(), "unparseable-resource-key");
     }
     // ③ 冷却。被割的车下一 tick 就会重新入队，环可能立刻复原；没有冷却就会
-    //    退化成每 tick 割一次的抖动（参见已撤回的主动回收尾部保护）。
+    //    退化成每 tick 割一次的抖动。
     String cooldownKey =
         OccupancyClaimEvidence.queuePositionYieldCooldownKey(target.resourceKey(), queueOwner);
     Instant cooldownUntil = queuePositionYieldCooldowns.get(cooldownKey);
@@ -11914,8 +11884,8 @@ public final class RuntimeDispatchService {
    *
    * <p><b>有效期取 {@code smart-dispatcher.planner.blocker-snapshot-ttl-ms}，而不是写死的 {@link
    * #BLOCKER_SNAPSHOT_TTL}。</b>同一份快照的“过没过期”在等待图那边已经有一个定义了——{@code SmartWaitForPlanner}
-   * 用这个配置值把超龄的边判为 {@code STALE_EDGE}。本方法判的是同一件事， 就不能再有第二个值：现网已把它从 10s 调到 120s（{@code cb0498f}
-   * 量过分布），写死 20s 会让两边静默地分叉。读不到配置时才回落到常量。
+   * 用这个配置值把超龄的边判为 {@code STALE_EDGE}。本方法判的是同一件事， 就不能再有第二个值：配置值可以按线网调大（如 120s），写死 20s
+   * 会让两边静默地分叉。读不到配置时才回落到常量。
    *
    * <p>另外这里不能“读不到就当没被挡”——调用方把空 blocker 集合解释成“排队者没被挡，它排队是正当的”， 而那恰恰是**不割**的一边，所以缺证据时失败是闭向的。
    */
@@ -11936,7 +11906,7 @@ public final class RuntimeDispatchService {
   /**
    * 割排队位被跳过时的唯一出口，**路过必留痕**。
    *
-   * <p>上一轮实服这个动作一次都没落地，而我无法从日志区分“根本没走到”与“走到了但默默拒了”—— 八个 {@code skipped(...)} 出口一条日志都没有。兼之 {@code
+   * <p>八个 {@code skipped(...)} 出口若不留日志，就无法从日志区分“根本没走到”与“走到了但默默拒了”。兼之 {@code
    * SmartRecoveryActionResult.skipped} 的 {@code candidate=false}，调用方的 {@code
    * SMART_RECOVERY_DECISION} 也不会打。
    *
@@ -12383,7 +12353,7 @@ public final class RuntimeDispatchService {
   /**
    * 判断互卡 episode 在销毁兜底前是否存在保守的 drain-through 候选。
    *
-   * <p>本轮只确认 single corridor occupant 的清空路径：候选列车必须已经持有同一 {@code CONFLICT:single:*}
+   * <p>此处只确认 single corridor occupant 的清空路径：候选列车必须已经持有同一 {@code CONFLICT:single:*}
    * claim，并且当前有向前方路径能走出该 conflict。switcher occupant-to-many 仅保留诊断，不在这里放宽为可销毁或可放行。
    */
   public Optional<DeadlockDrainability> deadlockDrainability(
@@ -14790,7 +14760,7 @@ public final class RuntimeDispatchService {
           properties,
           trainName,
           "BLOCKED_BY_OCCUPANCY",
-          // 占用层在这条路径上常常不填 reason（实服第七轮 394/417 是 no-decision-reason）。
+          // 占用层在这条路径上常常不填 reason（多为 no-decision-reason）。
           // 至少要分清是**准入判定**拒绝还是**实际取资源**失败——两者是不同的故障，
           // 且"被拒却一个 blocker 都没有"是最需要单独看见的一类。
           blockedStopDetail("canenter", decision),
@@ -15137,8 +15107,8 @@ public final class RuntimeDispatchService {
     boolean plannedStopAuthorityEnd =
         isPlannedStopAuthorityEnd(authorityEnd, plannedTerminusProven);
     // 授权终点就是计划停车点、且进站控制已接管时，停车点按编表运行曲线处理：到站降到进站限速，由 AutoStation 居中刹停。
-    // 此时不再把它当“刹到 0”的终点——那条曲线从上一图节点量距，末段边短于约 54 格时整段被压到进站限速以下（实服末段
-    // 45 格时进站只有 8.1 格/秒）。前方真实阻塞仍按硬约束处理，STOP 信号的处理不变。
+    // 此时不再把它当“刹到 0”的终点——那条曲线从上一图节点量距，末段边短于约 54 格时整段被压到进站限速以下。
+    // 前方真实阻塞仍按硬约束处理，STOP 信号的处理不变。
     boolean plannedStopByApproach =
         plannedStopAuthorityEnd && approachControl.governsAuthorityEnd(authorityEnd);
     if (runtimeSettings.movementAuthorityEnabled() && !stopAtNextWaypoint) {
@@ -15542,8 +15512,8 @@ public final class RuntimeDispatchService {
           properties,
           trainName,
           "SMART_DISPATCH_RECOVERABLE_HOLD",
-          // holdReason 就在手边，却只进了上面 traceSmartSignalFinalDecision 那条受门控的行。
-          // 实服该停因 6 次全是 detail=none blockers=[]——完全无法归因。
+          // holdReason 若只进上面 traceSmartSignalFinalDecision 那条受门控的行，
+          // 该停因就只剩 detail=none blockers=[]——完全无法归因。
           "recoverable-hold:" + holdReason,
           route,
           currentNodeOpt.get(),
@@ -16283,7 +16253,7 @@ public final class RuntimeDispatchService {
     blockerSnapshots.remove(normalizeTrainKey(trainName));
     // 车体指纹与采样时刻同样按车名键：不随任务重置清掉，就会随 layover 改名无界增长，
     // 而且旧名残留的指纹会让「无物理进展」判据拿上一趟的位置去比这一趟——
-    // 本项目已经三次栽在"旧名残留记录"上（改名 / 实时日志切面 / activeStopStates）。
+    // "旧名残留记录"是反复出现的缺陷形态（改名 / 实时日志切面 / activeStopStates）。
     livePhysicalFootprintFingerprints.remove(normalizeTrainKey(trainName));
     livePhysicalFootprintSampledAt.remove(normalizeTrainKey(trainName));
     livePhysicalEdgeCoverages.remove(normalizeTrainKey(trainName));
@@ -16542,10 +16512,9 @@ public final class RuntimeDispatchService {
       // 旧名的停因必须随改名一并退休。
       //
       // 这条链路逐个 rename 各个注册表（layoverRegistry / turnbackFootprintGuards / effectiveNodes /
-      // authority owner），**唯独没碰 activeStopStates**，也不走 migrateRuntimeOwner（那条路径是清理它的）。
-      // 于是旧名的 STOP 记录永久留在表里：实服 2026-09-13 第六轮 24 次复用改名，留下 **17 个**旧名
-      // 停在 DWELL_ACTIVE 上，`remainingSeconds` 冻结在 19，最长 2226 秒——而那些车其实好好地
-      // 以新名在跑。它同时污染一切按停因统计的诊断（新加的 SMART_BLOCKING_SNAPSHOT 里 52% 是这种幽灵）。
+      // authority owner），**唯独不碰 activeStopStates**，也不走 migrateRuntimeOwner（那条路径是清理它的）。
+      // 不在这里清除的话，旧名的 STOP 记录会永久留在表里：停在 DWELL_ACTIVE 上，`remainingSeconds` 冻结，
+      // 而那些车其实好好地以新名在跑。它同时污染一切按停因统计的诊断（包括 SMART_BLOCKING_SNAPSHOT）。
       //
       // 新服务从干净状态开始，旧停因没有任何延续意义，直接清除而不是迁移。
       clearStopState(previousTrainName, "layover-reuse-rename");
@@ -17087,12 +17056,11 @@ public final class RuntimeDispatchService {
   /**
    * 按到前车的距离推导跟驰信号。
    *
-   * <p>距离超过 caution 阈值时返回 {@code baseAspect}，即前车<b>不施加任何额外限制</b>。此前这里无条件返回 {@code
-   * PROCEED_WITH_CAUTION}：只要前向扫描（最多 {@link #FORWARD_TRAIN_SCAN_MAX_EDGES} 条边，按实服边长可达 数百
-   * blocks）里出现任何一辆车，后车就被永久钉在 caution 速度上，哪怕两车之间还隔着好几个空闲区间—— 表现就是“前面明明有空位却只会爬行”。实服 25 分钟日志里 {@code
-   * PROCEED_WITH_CAUTION} 占已发布信号的 45%， 而同期真正的 {@code STOP} 只有 6 次。
+   * <p>距离超过 caution 阈值时返回 {@code baseAspect}，即前车<b>不施加任何额外限制</b>。若这里无条件返回 {@code
+   * PROCEED_WITH_CAUTION}：只要前向扫描（最多 {@link #FORWARD_TRAIN_SCAN_MAX_EDGES} 条边，可达 数百
+   * blocks）里出现任何一辆车，后车就会被永久钉在 caution 速度上，哪怕两车之间还隔着好几个空闲区间—— 表现就是“前面明明有空位却只会爬行”。
    *
-   * <p>STOP 与 CAUTION 两个阈值均未改动；两者都随速度按 {@code v²/2a} 自然增长，因此列车加速后阈值同步放大， 逼近前车时仍会按原有曲线依次降级。
+   * <p>STOP 与 CAUTION 两个阈值都随速度按 {@code v²/2a} 自然增长，因此列车加速后阈值同步放大， 逼近前车时仍会按曲线依次降级。
    */
   private static SignalAspect distanceToForwardTrainSignal(
       long distanceBlocks,
@@ -17684,7 +17652,7 @@ public final class RuntimeDispatchService {
   /**
    * 发车门控拒绝证据的展示串；过期或没有就自报，绝不冒充「没有阻塞者」。
    *
-   * <p>沿用本项目的通用规则：明细要么是原因，要么自报「我没有原因」，不许伪装成结论。
+   * <p>通用规则：明细要么是原因，要么自报「没有原因」，不许伪装成结论。
    */
   private String departureGateBlockedByText(String trainName, Instant now) {
     DepartureGateBlockers recorded = departureGateBlockers.get(normalizeTrainKey(trainName));
@@ -18311,8 +18279,8 @@ public final class RuntimeDispatchService {
     // 对一辆**没有任何东西挡着**的车施加它，唯一效果是再装一个 movement inhibitor、撤销它本来就有的授权，
     // 而停车本身让进度继续停滞、下一轮健康检查再次判定 progress-stuck——自我维持。
     //
-    // 实服 2026-09-13 第七轮：804 条快照落在这一族，**全部** blockedBy=[]、movementToken=INVALID，
-    // 滞留中位 543 秒、最长 1751 秒；同期 inhibitor 占车队比例从 0% 单调涨到 64%。
+    // 表现为这一族快照**全部** blockedBy=[]、movementToken=INVALID，滞留越来越长，
+    // 带 inhibitor 的车在车队中的比例单调上涨。
     //
     // 返回 false 时调用方（TrainHealthMonitor）会退回 refreshSignalByName——
     // 对"没人挡、只是没动"的车，重新算一次信号正是该做的事。
@@ -18382,9 +18350,9 @@ public final class RuntimeDispatchService {
         currentNode,
         nextNode,
         graph,
-        // 原本传 null，停因明细因此回落成 deadlock_confirmed_waiting——复述停因代码，等于没写。
+        // 传 null 的话停因明细会回落成 deadlock_confirmed_waiting——复述停因代码，等于没写。
         // HealthMonitor 自己知道为什么重新施加硬停车，这个原因必须落到必留的 SMART_STOP_LIFECYCLE 上，
-        // 而不是只写进下面那行受预算门控的 debugLogger。实服 2026-09-13 这一族 95 次全部无法归因。
+        // 而不是只写进下面那行受预算门控的 debugLogger，否则这一族停车无法归因。
         new OccupancyDecision(
             false,
             clockNow(),
@@ -18581,7 +18549,7 @@ public final class RuntimeDispatchService {
    *
    * <p>调用方随后都会硬停车（当拍停住，不走制动曲线）。之前已持有的资源由回滚原样留下（{@link AuthorityRollbackBaseline}）， 再照 {@link
    * #applyUnresolvableMovementPlanStop} 的先例收缩到当前位置与列尾防护——列车压着的道岔不会有空档被别的车拿走，
-   * 停着的车前方多余的授权也照旧放掉。以前回滚把整段请求连车身一起放掉，停车保持要到后面几拍才重新占回。
+   * 停着的车前方多余的授权也照旧放掉。若回滚把整段请求连车身一起放掉，停车保持要到后面几拍才能重新占回。
    *
    * @param baseline 本拍 acquire 之前本车已持有的资源；这些不在回滚里释放
    * @param currentNode 就地保持的起点；为空时不收缩
@@ -18962,11 +18930,9 @@ public final class RuntimeDispatchService {
     }
     // previousAspect：停因记下的**这一刻**该车正在显示的物理灯位，也就是"变红之前是什么"。
     //
-    // 为什么在这里而不是在灯位计算那边：`98cd49f` 把探针装在
-    // stageSignalAspectForAuthorityAndAdvisory 的 hardBlocked 分支上，实服第二十八轮
-    // SIGNAL_ASPECT_STAGING 共 513 行、**该分支 0 行**——硬停根本不走那条路，探针装在了
-    // 一个到不了的分支上（本仓反复出现的"守卫条件与真实永不相交"，这次是我自己犯的）。
-    // 而本条 trace 在必留名单上、同轮 4543 行带 STOP，是唯一稳定覆盖硬停的落点。
+    // 为什么在这里而不是在灯位计算那边：硬停根本不走
+    // stageSignalAspectForAuthorityAndAdvisory 的 hardBlocked 分支，装在那里的探针永远到不了
+    // （"守卫条件与真实永不相交"）。而本条 trace 在必留名单上，是唯一稳定覆盖硬停的落点。
     //
     // 取值可靠性：八个 recordStopState 调用点全部**先记停因、后发信号**，
     // 所以此刻 publishedPhysicalSignals 里还是旧值。直接读该表而不走
@@ -19445,7 +19411,7 @@ public final class RuntimeDispatchService {
     return Math.max(0L, total.getAsLong() - remaining.getAsLong());
   }
 
-  // 说明：历史上曾通过 tag/反向来修正发车方向；现在统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导。
+  // 说明：发车方向统一交由 TrainCartsRuntimeHandle 在 launch 时按 destination 推导，不通过 tag/反向修正。
 
   /**
    * Waypoint STOP/TERM 停稳后居中。
@@ -19636,12 +19602,12 @@ public final class RuntimeDispatchService {
             decision,
             // 明细必须先说**什么挡着**，再说恢复状态。
             //
-            // 之前这里只写 releaseCandidate（“no-self-retain-candidate”），而那说的是
-            // **恢复动作没找到可释放的自持保留**，不是阻塞原因——真正挡着的是别人压在
-            // 物理 NODE/EDGE 上的尾部保护。第二十轮它以 562 次占据阻塞榜首，而这个名字
-            // 把我整整骗了一轮：看上去像恢复层失效，实际上 Phase 4 一直在正常释放。
+            // 只写 releaseCandidate（“no-self-retain-candidate”）说的是
+            // **恢复动作没找到可释放的自持保留**，不是阻塞原因——真正挡着的往往是别人压在
+            // 物理 NODE/EDGE 上的尾部保护。只看这个名字，容易误以为恢复层失效，
+            // 实际上实测覆盖释放可能一直在正常工作。
             //
-            // 这正是本仓红线里禁止的那种写法：明细要么是原因，要么自报“我没有原因”，
+            // 明细要么是原因，要么自报“没有原因”，
             // 不许拿别的东西伪装成结论。releaseCandidate 仍然保留（停车行是必留的，
             // 而 STALE_PROTECTIVE_RETAIN_CANDIDATE 受预算门控），只是排到阻塞形态后面。
             "protective-retain:blocked-by:"
@@ -20618,7 +20584,7 @@ public final class RuntimeDispatchService {
     for (int track : tracks) {
       NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
       if (materializedTarget.isPresent() && !materializedTarget.get().equals(candidate)) {
-        // 必须记录：这条分支原本静默 continue，当已固化目标与任何候选都不相等时，
+        // 必须记录：若这条分支静默 continue，当已固化目标与任何候选都不相等时，
         // 整个循环会一声不响地走空，最终只留下 "no-available-dynamic-target rejections=[]"——
         // 列车被硬停在站外而系统说不出任何理由。
         rejections.add(
@@ -22293,12 +22259,11 @@ public final class RuntimeDispatchService {
    * <p>{@code directionContextNodes} 只参与方向解析，不会扩大本 tick 的 NODE/EDGE/CONFLICT 资源。
    *
    * <p>窗口要覆盖“预计停车点 + 安全余量”：预计停车点 = 车头 + 当前制动距离，停着时就是车头。窗口从当前图节点起算，所以要补上车头已驶过当前节点的那一段，
-   * 否则车头在同一条边上越走越远，窗口却一直按“节点起算已够长”不往前伸，直到压过下一节点才发现前方拿不到——此时已在制动距离内。实服 2026-09-27：回库 MT 从 MLU:2:001
-   * 起的窗口 47 格一路“够长”，车头越过 MLU:2:002 才被拒，冲出 17 格停在渡线道岔尖轨上。
+   * 否则车头在同一条边上越走越远，窗口却一直按“节点起算已够长”不往前伸，直到压过下一节点才发现前方拿不到——此时已在制动距离内， 列车可能冲过停车点、停在渡线道岔尖轨上。
    *
    * <p>停着时同样保留余量，要求才前后一致：刹车途中车头前进、制动距离缩短，两者之和不变；停稳后仍是“车头 + 余量”。若停着只要一条边，被挡停下的车下一拍就会按一条边放行、
-   * 起步后按“制动距离 + 余量”又被挡——实服 4 小时里 3 秒内解除的停车 458 次，431 次解除时挡车资源仍在。健康恢复的预览与重发也走同一口径， 否则按单边窗口放行后下一拍又被信号
-   * tick 挡回。例外（停着时保持单边窗口）：停在道岔上的车（道岔出清要能先动），以及余量会盖满整份行车计划时 （离 route 终点或未选站台的 DYNAMIC 不到一个余量）。
+   * 起步后按“制动距离 + 余量”又被挡，反复出现挡车资源仍在却短暂放行的停车。健康恢复的预览与重发也走同一口径， 否则按单边窗口放行后下一拍又被信号 tick
+   * 挡回。例外（停着时保持单边窗口）：停在道岔上的车（道岔出清要能先动），以及余量会盖满整份行车计划时 （离 route 终点或未选站台的 DYNAMIC 不到一个余量）。
    */
   private Optional<OccupancyRequestContext> buildHardAuthorityContextWithDirectionContext(
       RailGraph graph,
@@ -22381,9 +22346,7 @@ public final class RuntimeDispatchService {
    * 硬授权窗口不越过前方第一个计划停车点。
    *
    * <p>列车反正要在那里停（车站由 AutoStation 停车，STOP 路径点按 dwell 停车），站台之后的资源发车前用不到；窗口越过站台时，
-   * 前车留在站台之后的尾部保护会把本车挡在站外，站台明明空着。实服 2026-09-27：MT 进 SPB:1 前被前车留在 PTK:SPB:1:002 的尾部保护挡住，
-   * 0245/8312/2989/4909 各等 29/26/22/143 秒，4909 那 143 秒把后车 6727 堵在汇合岔上，引出了 SPB 汇合岔互等。停着也要余量之前，
-   * 停着的车只要一条边，能先挪进站台；行进中的车则先被挡停、再挪进去。
+   * 前车留在站台之后的尾部保护会把本车挡在站外，站台明明空着；在站外等待的车还可能把后车堵在汇合岔上，引出汇合岔互等。
    *
    * <p>距离沿有效 route 节点逐段取最短路，从当前图节点起算，与 {@code minDistanceBlocks} 同一个起点。停车点落在最小距离之外、
    * 或中途任一段距离读不到时原样返回。列车停稳时车头越过站台节点半个车长，与挪进站台时相同；停车保持随后接管当前边。
@@ -23362,10 +23325,8 @@ public final class RuntimeDispatchService {
         // singleRegionOppositeOrUnknownExternalBarrier 已经放行——真正的安全性质
         // （没有对向或方向未知的外部屏障）在那里守住了，此处再拒不增加任何安全。
         //
-        // 而拒绝的代价是实打实的：第十七轮 SURC-WS-LC-6650 停在
-        // ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF 上 3260 秒（54 分钟），
-        // blockedBy=[] 没有任何车挡它，整条 WS 线在它之后到站归零。
-        // 第十六轮是另一辆车、同一形态 449 秒；第十二轮 SURC-WS-LC-7203 整轮 74 分钟。
+        // 而拒绝的代价是实打实的：车会停在 ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF 上，
+        // blockedBy=[] 没有任何车挡它，却可以一直停下去，整条线在它之后到站归零。
         //
         // 为什么不改成"把硬授权窗口延到出口"：buildHardAuthorityContext 的契约明写
         // 「本窗口只处理无方向的精确 interlocking:*；方向性 single:* 继续由局部硬窗口、
@@ -25543,7 +25504,7 @@ public final class RuntimeDispatchService {
   /**
    * 判断前车 route window 是否终止在死端 Station/Depot。
    *
-   * <p>CHT 这类站前折返终端没有站台后的继续出路。即使当前 single conflict key 能在路径中切换到下一个 key，也不能证明前车会同向驶出整组站区；
+   * <p>站前折返终端没有站台后的继续出路。即使当前 single conflict key 能在路径中切换到下一个 key，也不能证明前车会同向驶出整组站区；
    * 外部后车必须把该终端站前区域视作完全互斥。
    */
   private boolean leaderPlanTerminatesAtDeadEndBehaviorNode(
@@ -26453,13 +26414,13 @@ public final class RuntimeDispatchService {
     // 同时用 emitRaw 单独输出一行。
     //
     // 上面那条走 SignalComputationTrace.emit：以**信号灯色**为门（PROCEED 一律不输出），
-    // 且所有事件被压成单一 token。实服第十二轮它**一条都没进过日志**——不是被预算丢的，是压根没输出。
+    // 且所有事件被压成单一 token。停车时它可能**一条都不进日志**——不是被预算丢的，是压根没输出。
     //
-    // 代价是实打实的：`SURC-WS-LC-7203` 整轮 74 分钟停在
-    // `ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF` 上、**到站 0 次**，一步都没动过，
+    // 代价是实打实的：一辆车可以长时间停在
+    // `ALREADY_INSIDE_CONTINUE_MISSING_EXIT_PROOF` 上、一步都不动，
     // 而"为什么证不出它会离开"这条唯一的解释出不来，只能看到结论、看不到依据。
     //
-    // 与 `4a2e592`（自持单线续行的内层原因）同一个形状、同一个解法：
+    // 与自持单线续行的内层原因输出同一个形状、同一个解法：
     // emitRaw 绕开灯色门控，并自带按整行内容去重——字段不变就不会重复刷屏。
     SignalComputationTrace.emitRaw(
         "SMART_ENTRY_LOOKAHEAD_BLOCKED train="
@@ -26848,8 +26809,8 @@ public final class RuntimeDispatchService {
             && advisoryDecision.blockers() != null
             && !advisoryDecision.blockers().isEmpty();
     if (hardBlocked) {
-      // 【第二十八轮实测：这条分支到不了】SIGNAL_ASPECT_STAGING 全轮 513 行里
-      // result=STOP 0 行——硬停不走本方法。真正覆盖硬停的是 SMART_STOP_LIFECYCLE 的
+      // 【这条分支正常情况下到不了】硬停不走本方法，SIGNAL_ASPECT_STAGING 里不会出现
+      // result=STOP。真正覆盖硬停的是 SMART_STOP_LIFECYCLE 的
       // previousAspect 字段，要查「绿灯为什么突然变红」请看那里。本分支保留是因为
       // 它一旦真的触发就说明多了一条新的硬停路径，那本身就是要查的信号。
       //
@@ -27190,7 +27151,7 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 报告"入库走行证明"生效——它是这条改动**唯一**的生效证据。
+   * 报告"入库走行证明"生效——它是这条证明**唯一**的生效证据。
    *
    * <p>按 (train, routeIndex) 去重：一辆车在一个索引上至多一行，不随信号 tick 放大。 只在 RouteStop
    * 证明缺席、而入库证明补上的时候才报，因此计数直接等于"本该被硬停、现在没被硬停"的次数。
@@ -27212,16 +27173,16 @@ public final class RuntimeDispatchService {
   /**
    * 判断剩余路线是否是一段**通往段场的入库走行**。
    *
-   * <p>为什么需要这条独立的证明来源：实服的 {@code *D}（去段场）路线在 {@code TERMINATE} 之后还挂着一段 全 {@code PASS} 的入库走行，例如
+   * <p>为什么需要这条独立的证明来源：{@code *D}（去段场）路线在 {@code TERMINATE} 之后还挂着一段 全 {@code PASS} 的入库走行，例如
    *
    * <pre>
-   *   MT-2O_ShortD  12 TERMINATE SURC:S:HHU:4 → 13 PASS SURC:D:HHU:1:001 → 14 PASS SURC:D:HHU:1
+   *   12 TERMINATE OP:S:STA:4 → 13 PASS OP:D:DEP:1:001 → 14 PASS OP:D:DEP:1
    * </pre>
    *
    * 而 {@link #hasUpcomingPlannedRouteStop} 只认非 {@code PASS} 的 RouteStop，入库段一个都没有，于是 {@code
    * plannedRouteStopProven} 为假、{@code shouldHardStop} 为真，车在离段场一个节点的地方被 {@code inside-stop-distance}
-   * 硬停住。第十五轮实测 3 辆车中招，最长 172 秒，而它们 {@code holds=[] blockedBy=[]}——什么都没持有、什么都没挡它。销毁兜底也救不了： {@code
-   * DEADLOCK_DESTROY_SKIPPED reason=BLOCKER_SNAPSHOT_MISSING}，它要求有 blocker 快照， 而这个形态恰恰没有 blocker。
+   * 硬停住，而它 {@code holds=[] blockedBy=[]}——什么都没持有、什么都没挡它。销毁兜底也救不了： {@code DEADLOCK_DESTROY_SKIPPED
+   * reason=BLOCKER_SNAPSHOT_MISSING}，它要求有 blocker 快照， 而这个形态恰恰没有 blocker。
    *
    * <p>这不是放宽 fail-closed，而是补上它真正想要的那种证据。原分支拒绝的是"**裸** route 终点"——
    * 路线走完了而不知道那里有什么。段场节点本身就是那个"知道"：{@link NodeType#DEPOT} 是图里登记过的 物理终端设施，其证明力不弱于一条
@@ -27374,8 +27335,8 @@ public final class RuntimeDispatchService {
       traceForwardRiskBlockerDetail(
           trainName, request, decision, blocker, source, freshness, blockerDistance, authorityEnd);
       // 物理尾保的距离必须留下：准入到了那里一定硬停，前瞻要拿它算 caution 制动距离。
-      // 此前只有 LIVE 留距离，尾保的距离被清空后 nearestPlanningDistance 只剩限速点等别的量，
-      // 曾把 44 格外的限速点当成停车点判成 inside-stop-distance（第二十七轮 SURC-MT-LP-7027）。
+      // 若只有 LIVE 留距离，尾保的距离被清空后 nearestPlanningDistance 只剩限速点等别的量，
+      // 会把较远的限速点当成停车点、误判成 inside-stop-distance。
       boolean distanceActionable =
           freshness == RiskFreshness.LIVE || freshness == RiskFreshness.PROTECTIVE_PHYSICAL;
       return new ForwardSignalRiskSnapshot(
@@ -29510,7 +29471,7 @@ public final class RuntimeDispatchService {
    * 是抽象互斥键，放了不会撞车；NODE/EDGE 对应物理空间， 车体还压着时释放就是 co-occupancy。
    *
    * <p><b>缺任何一环都返回 incomplete，调用方必须 fail-closed</b>：现场足迹读不到、 图不带联锁能力、或反向索引不可用（持久化快照重建的图没有逐边足迹）。
-   * "没覆盖"与"无从判断"必须分得开——把后者当前者正是本项目反复栽的那类缺陷。
+   * "没覆盖"与"无从判断"必须分得开——不得把后者当成前者。
    *
    * <p>本方法只做查询，不改变任何状态；接线到释放判定是单独一步。
    */
@@ -30562,8 +30523,7 @@ public final class RuntimeDispatchService {
    * <p>相邻时就是那条边的限速。不相邻（线路只写了车站、中间还有若干图节点）时沿最短路取限速包络：所在区间的限速，以及刹得住前方每条更低限速边的最高速度 （{@link
    * SignalLookahead#pathSpeedEnvelope}，距离从车头量起）。关闭速度曲线时退回整段最小限速。
    *
-   * <p>不能取整段最小值：一条 48 格的默认限速道岔边会把 865 格的站间全压到 8 格/秒， 而编表与 ETA 都按逐边限速算（2026-09-27 实服 WS LWN→SWN
-   * 每趟因此晚 51 秒）。
+   * <p>不能取整段最小值：一条 48 格的默认限速道岔边会把 865 格的站间全压到 8 格/秒， 而编表与 ETA 都按逐边限速算， 取整段最小值会让列车每趟都系统性晚点。
    *
    * @param speedCurve 列车加减速曲线，用于前方更低限速的制动曲线；为 {@code null}（关闭速度曲线）时取整段最小限速
    * @param lineSpeedFactor 晚点追赶的线路限速倍率（{@link StationStopCoordinator#lineSpeedFactor}），不追赶时为 1
@@ -31175,7 +31135,7 @@ public final class RuntimeDispatchService {
    * 解析折返复用后的命名终点（车名首字母与 {@code FTA_DEST_*} 标签）。
    *
    * <p>与出车命名同一口径（{@link RouteDestinationResolver}）：TERMINATE 优先，落在折返线等非车站节点时退回前一个载客站。
-   * 此前这里是一份独立实现，TERMINATE 落在折返线上时会把原始节点 ID 写进标签、车名首字母取成运营商前缀。
+   * 口径不一致时，TERMINATE 落在折返线上会把原始节点 ID 写进标签、车名首字母取成运营商前缀。
    *
    * @param route RouteDefinition
    * @return 终点站信息（name, code）

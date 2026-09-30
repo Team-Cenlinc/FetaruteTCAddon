@@ -1166,8 +1166,8 @@ public final class SimpleOccupancyManager
       changedResources.add(resource);
     }
     // 只有拿到可执行授权的资源才算排到了：此后 selfClaimBypassesQueue 本来就不再看队列。停车保持、尾部保护以 HOLD_ONLY/
-    // PROTECTIVE_RETAIN 接纳只是原地占着，本车仍在等前进授权，排队位次必须留着；以前一并删掉，停着的车每拍被删、下一拍又以新的
-    // firstSeen 入队，排队资历永远是 0（实服 2026-09-27 MT-LP-6727 就这样一直输给后到的 MT-LP-7340）。
+    // PROTECTIVE_RETAIN 接纳只是原地占着，本车仍在等前进授权，排队位次必须留着；若一并删掉，停着的车每拍被删、下一拍又以新的
+    // firstSeen 入队，排队资历永远是 0，会一直输给后到的车。
     int removedQueueEntries =
         queueSatisfiedResources.isEmpty()
             ? 0
@@ -2002,7 +2002,7 @@ public final class SimpleOccupancyManager
       return;
     }
     // 预览路径（ETA 估算）不入队、不改状态，它被队首挡住并不代表列车真的走不了；
-    // 实测 20 条仲裁证据里 19 条来自 canEnterPreview，把真正的一条淹没了。
+    // 且 canEnterPreview 调用远比权威判定频繁，记录下来会把真正的仲裁证据淹没。
     // 该 trace 的用途是回答“这辆车为什么进不去”，因此只记录权威判定。
     if (source != null && source.toLowerCase(Locale.ROOT).contains("preview")) {
       return;
@@ -2827,9 +2827,9 @@ public final class SimpleOccupancyManager
    *       所以这条路径的放行条件只有一个：**实测覆盖证明它不在上面**。
    * </ul>
    *
-   * <p>为什么值得做：实服第十三轮，`PROTECTIVE_RETAIN_HOLD` 占全网滞留 **38%** （260 车·分 / 691 车·分），而既有回收机制
-   * `selfRetainReleaseCandidate=false` **2286 / 2286，成功率 0**——它开头就 `kind != CONFLICT` 返回， 而实服
-   * blocker 是 **NODE 1012 / EDGE 331 / CONFLICT 0**，判据与现实永不相交。
+   * <p>为什么值得做：尾部保护滞留（{@code PROTECTIVE_RETAIN_HOLD}）是全网滞留的主要来源之一，而既有回收机制 {@code
+   * selfRetainReleaseCandidate} 开头就在 {@code kind != CONFLICT} 时返回；实际挡路的 blocker 却几乎全是 NODE/EDGE，
+   * 判据与现实永不相交。
    *
    * <p><b>fail-closed 三重</b>：
    *
@@ -2839,13 +2839,12 @@ public final class SimpleOccupancyManager
    *   <li>该资源上存在任何外部 claim 或外部排队 ⇒ 不放，避免释放后把别人放进来。
    * </ol>
    *
-   * <p>处理 {@link ResourceKind#EDGE} 与 {@link ResourceKind#NODE}。NODE 是后加的，而加法的**方向**是安全性所在： {@code
+   * <p>处理 {@link ResourceKind#EDGE} 与 {@link ResourceKind#NODE}。NODE 的安全性取决于覆盖集合的构造**方向**： {@code
    * livePhysicalEdgeCoverage} 把每条已覆盖 EDGE 的两个端点也**放进**覆盖集合，因此覆盖集合被放大，
    * 这里的放行条件（"资源不在覆盖集合里"）只会更严。反向推导——"不是任何已覆盖区间的端点就算已离开"——
    * 依赖"光栅化无缝隙"这个未经验证的前提，推错就是在车实际压着的节点上解除保护，那才是红线。两者不可混为一谈。
    *
-   * <p>为什么非做不可：实服第十五轮，SURC-MT-LH-1650 在同一秒里被 Phase 4 释放了它够得着的那条 EDGE， 却因为 {@code HHU:4:003}/{@code
-   * 004} 两个 NODE 留着继续卡了 184 秒，并把 SURC-DS-LH-2216 一起堵了 62 秒。 那一轮 8 辆车中过同一个招，最长 324 秒。
+   * <p>NODE 必须一并处理：只释放 EDGE 时，列车会因为身后仍留着的 NODE 保护继续卡住，并把后车一起堵住。
    */
   public synchronized PhysicalEdgeRetainReleaseResult releaseSelfOwnedPhysicalEdgeRetain(
       String trainName, boolean coverageComplete, Set<OccupancyResource> coveredResources) {
@@ -2869,9 +2868,8 @@ public final class SimpleOccupancyManager
       if (resource == null) {
         continue;
       }
-      // NODE 与 EDGE 都处理。NODE 占实服 blocker 的 75%，只接 EDGE 时实测出现过：
-      // 同一秒里 Phase 4 释放了它够得着的那条 EDGE，而车因为两个 NODE 留着继续卡了 184 秒
-      // （SURC-MT-LH-1650，HHU:4:003/004），并把 DS-LH-2216 一起堵了 62 秒。
+      // NODE 与 EDGE 都处理。挡路的 blocker 以 NODE 为主：只释放 EDGE 时，
+      // 车会因为身后仍留着的 NODE 继续卡住，并把后车一起堵住。
       //
       // 安全性来自覆盖集合的构造方向：节点是由「已覆盖 EDGE 的端点」**加进**覆盖集合的，
       // 只会让这里更难放行。判据本身没有放宽，仍然是「资源不在覆盖集合里」。
@@ -2915,7 +2913,7 @@ public final class SimpleOccupancyManager
         //
         // 其一，这个分支**在本路径上不可达**。队列只为 CONFLICT 建立
         // （见 isQueueableConflict：kind != CONFLICT 直接返回 false），而这里只看 EDGE/NODE，
-        // 因此 queues.get(resource) 恒为 null。原先写在这里的 `continue` 是一段死代码，
+        // 因此 queues.get(resource) 恒为 null，在这里拒绝放行只会是一段死代码。
         // 保留计数只是为了万一将来 NODE/EDGE 也进队列时能立刻看见，而不是无声地改变行为。
         //
         // 其二，即便将来可达，也不该据此拒绝。这条路径的前提是**实测覆盖已证明车不在上面**，
@@ -3816,7 +3814,7 @@ public final class SimpleOccupancyManager
   /**
    * 记录一次被显式否决的方向回退。
    *
-   * <p>只做观测。该 trace 让实服日志能直接统计"因为证据矛盾而被拦下的方向回退"次数，从而区分本次收紧到底消除了多少 陈旧方向，而不是把它混进普通的方向判定失败里。
+   * <p>只做观测。该 trace 让日志能直接统计"因为证据矛盾而被拦下的方向回退"次数，从而区分这道收紧消除了多少陈旧方向，而不是把它混进普通的方向判定失败里。
    */
   private void traceDirectionFailClosed(OccupancyRequest request, OccupancyResource resource) {
     SignalComputationTrace.emit(
@@ -3931,14 +3929,13 @@ public final class SimpleOccupancyManager
   /**
    * 把一次拒绝的**原因**写进 {@link OccupancyDecision#reason()}，而不是留给默认值 {@code "none"}。
    *
-   * <p>{@code canEnter} 两条最通用的拒绝路径（blockers / queue-blocked）之前用的是不带 reason 的构造器。{@code
-   * traceDecision} 拿到了描述性标签，但那个标签**不进 decision**， 于是下游的 {@link
+   * <p>{@code canEnter} 两条最通用的拒绝路径（blockers / queue-blocked）若使用不带 reason 的构造器，{@code traceDecision}
+   * 拿到的描述性标签**不进 decision**，于是下游的 {@link
    * org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState#occupancyHold} 只能报 {@code
    * no-decision-reason}——它诚实地说“没人填过”，而问题在上游。
    *
-   * <p><b>代价是真实发生过的。</b>第十九轮 {@code SURC-WS-LC-4801} 掉头堵死整条 WS 线 40 分钟， 而它的阻塞快照里占比最高的原因就是 {@code
-   * canenter-blocked:no-decision-reason}（113 次）—— 全轮卡得最久的车，它绝大多数次被拒的原因是空的。早在第七轮就记录过 394/417
-   * 是这个值。目标是**解锁疏通**而不是超时删车，而说不出为什么被拒就无从疏通。
+   * <p>这类空原因恰恰集中在卡得最久的车上：阻塞快照里占比最高的原因若是 {@code
+   * canenter-blocked:no-decision-reason}，就无从判断它为什么被拒。目标是**解锁疏通**而不是超时删车，而说不出为什么被拒就无从疏通。
    *
    * <p>只用 blocker 自身的角色与资源种类，不带列车名：原因字符串会进入去重键， 带上列车名会让它随车数爆炸。
    */
@@ -4035,8 +4032,8 @@ public final class SimpleOccupancyManager
    * 已验证的道岔占用者出清不排队。
    *
    * <p>{@link VerifiedSwitcherDrainClaims} 证明本车当前节点就是该道岔（车头已越过）、持有道岔节点、计划从道岔驶向出口，且出口路径没有外车硬占用。
-   * 占用者必须先开走，岔外的车才进得来；排队只决定尚未进岔者的先后，不能反过来挡住岔上的车。否则岔外排在前面的车等占用者让出节点、 占用者等它让出队头，互等到底——实服 2026-09-27
-   * SPB 汇合岔 {@code -566:77:1179}：MT-LP-6727 车身在岔上，被还在 WSD:2 的 MT-LP-7340 排在后面，直到关服。
+   * 占用者必须先开走，岔外的车才进得来；排队只决定尚未进岔者的先后，不能反过来挡住岔上的车。否则岔外排在前面的车等占用者让出节点、 占用者等它让出队头，互等到底：
+   * 车身已在岔上的车被还在上游站台的车排在后面，永远解不开。
    *
    * <p>只认 {@code CONFLICT_CLEARING} 请求上、当场按现有 claims 复核通过的 {@code VERIFIED_SWITCHER_OCCUPANT} 证据；
    * 只放行排队，外车实际 claim 仍按原规则判。
@@ -4466,10 +4463,10 @@ public final class SimpleOccupancyManager
     //
     // 为什么不能靠已有的 SMART_SELF_OWNED_CONTINUATION_* trace：它们走 SignalComputationTrace.Builder，
     // 那里 `shouldEmit` 以**信号灯色**为判据（PROCEED 一律不输出），且全部事件压成单一 token
-    // `SignalTrace`。实服 2026-09-14 第九轮全场 177 行 SignalTrace，自持续行事件一条都没有。
+    // `SignalTrace`，自持续行被拒的事件经由那条路径到不了日志。
     // `emitRaw` 绕开那套灯色门控，并自带按整行内容的去重——内层原因不变就不会重复刷屏。
     //
-    // 待答的问题：WS 从 LWN 段场出库的车占着截断正线的单线区 171 秒不走，
+    // 典型的待答问题：出库车占着截断正线的单线区迟迟不走，
     // 到底是 path-does-not-exit-or-continue 还是 external-single-blocker-ahead——
     // `blockedBy` 分不出来，因为 externalSinglePresence 为真时不会往该列表里加任何 claim。
     SignalComputationTrace.emitRaw(
@@ -4492,8 +4489,8 @@ public final class SimpleOccupancyManager
             + " externalSinglePresence="
             + externalSinglePresence
             // 光知道"有对向占用"不够——必须知道**是谁**、以及**是真占着还是只在排队**。
-            // 该存在性检查不往 blocker 列表加任何 claim，所以 blockedBy 补不上这一课
-            // （第十轮我正是因此把"列表里只有自己"误读成"没有外部阻塞"）。
+            // 该存在性检查不往 blocker 列表加任何 claim，所以 blockedBy 补不上这项信息
+            // （只看 blockedBy，"列表里只有自己"会被误读成"没有外部阻塞"）。
             // `queue-only` 意味着挡住一辆**已在区内**的车的只是个尚未进入的排队者——那是缺陷；
             // `claim:...` 则说明屏障在正常工作。两者的下一步完全相反。
             + " externalSinglePresenceOwner="
@@ -4645,12 +4642,10 @@ public final class SimpleOccupancyManager
   /**
    * 单线区上“外部存在”的唯一入口。**相位必须显式给出**。
    *
-   * <p>两个相位的差别只有一处：**排队者算不算存在**。而这正是本仓库反复弄错的地方： 同一座桥 {@code
-   * single:section:bridge:SWITCHER:587~SWITCHER:705} 上，第九、十、十二、十九轮 四次报同一个原因字符串，最后一次把整条 WS 线堵死 40
-   * 分钟、到站归零。
+   * <p>两个相位的差别只有一处：**排队者算不算存在**。这一点一旦弄错，已在区内的车会被尚未入区的排队者挡住， 单线区两端互等，整条线停摆。
    *
-   * <p>以前这里是两个只差一个词的方法（{@code ...Presence} 与 {@code ...ClaimPresence}），
-   * 而那个词说不出“入区还是续行”。现在相位是参数，调用点必须写出自己是哪一种。
+   * <p>相位是显式参数，而不是两个只差一个词的方法（{@code ...Presence} 与 {@code ...ClaimPresence}）：
+   * 那个词说不出“入区还是续行”，参数则迫使调用点写出自己是哪一种。
    */
   private boolean hasExternalSinglePresence(
       OccupancyRequest request, OccupancyResource resource, SingleRegionPhase phase) {
@@ -4713,11 +4708,9 @@ public final class SimpleOccupancyManager
    *
    * <p>{@link #hasExternalSinglePresence} 只返回布尔量，于是日志里 {@code externalSinglePresence=true}
    * 只说明"有"，不说明"是谁"。而它恰恰**不往 blocker 列表里加任何 claim**，所以 {@code blockedBy}
-   * 也补不上这一课——第十轮我正是因此把"列表里只有自己"误读成"没有外部阻塞"。
+   * 也补不上这项信息——只看它，"列表里只有自己"会被误读成"没有外部阻塞"。
    *
-   * <p>代价是三轮复发：同一座桥 {@code single:section:bridge:SWITCHER:587~SWITCHER:705} 上， 第九轮 `WS-LC-2269`、第十轮
-   * `WS-LC-2008`、第十二轮 `WS-LC-9344` 报的是**同一个原因字符串**， 而第十二轮那次还在它身后堵出一辆卡死 2073
-   * 秒的车。看不到"是谁"，就无从判断那是正常对向车、 还是一个早该消失的陈旧占用。
+   * <p>同一个原因字符串背后可能是完全不同的情形。看不到"是谁"，就无从判断那是正常对向车、还是一个早该消失的陈旧占用。
    *
    * <p>更要紧的是区分两种来源：**claim 是真占着，queue 只是在排队等**。 若挡住一辆**已经在区内**的车的只是个尚未进入的排队者，那是真缺陷而不是正常屏障；
    * 反之则是屏障在正常工作。这两种的下一步完全相反，必须能分开。

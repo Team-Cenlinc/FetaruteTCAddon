@@ -179,7 +179,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
     this.loggerManager = new LoggerManager(getLogger());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
-    // 排查期可临时调高；默认 120 条/分钟在实服拥堵时会丢掉约九成诊断，导致"没 grep 到"无法解读。
+    // 排查期可临时调高；默认 120 条/分钟在拥堵时会丢掉大部分诊断，导致"没 grep 到"无法解读。
     this.runtimeDispatchDiagnosticGate =
         new RuntimeDispatchDiagnosticGate(
             loggerManager::debug, getConfig().getInt("debug.observation-budget-per-minute", 120));
@@ -816,9 +816,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
                   if (completed && isEnabled() && runtimeDispatchService == service) {
                     completed = startRuntimeDispatchComponentsAfterRecovery(service, handles);
                   }
-                  // 每次重建尝试都必须留下结论。实服 2026-09-13 的全线冻结里，恢复被请求了 5 次，
-                  // 但三条既有日志（等待收容 / 重建失败 / 桥已启动）一条都没出现——既定不了它有没有跑，
-                  // 也定不了是快照没准备好还是组件没起来。这一行让下一次现场直接给出答案。
+                  // 每次重建尝试都必须留下结论：仅靠等待收容 / 重建失败 / 桥已启动三条日志，
+                  // 无法区分重建是否执行、是快照没准备好还是组件没起来。
                   debug(
                       "运行时占用重建尝试: handles="
                           + handles.size()
@@ -1041,7 +1040,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     signalReevaluationScheduler =
         new RuntimeSignalReevaluationScheduler(
             // 必须是 runTaskLater(1)：runTask(delay 0) 会在同一 tick 的 heartbeat 里再次执行，
-            // 自我重排的 drain 链就成了主线程死循环（2026-09-30 看门狗强杀）。
+            // 自我重排的 drain 链就成了主线程死循环，最终被看门狗强杀。
             task -> getServer().getScheduler().runTaskLater(this, task, 1L),
             runtimeDispatchService::reevaluateSignalByName,
             runtimeDispatchService::failClosedAfterSignalReevaluationFailure,

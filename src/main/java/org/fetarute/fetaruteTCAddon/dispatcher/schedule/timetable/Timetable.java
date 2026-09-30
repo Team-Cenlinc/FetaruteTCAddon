@@ -22,7 +22,7 @@ import java.util.UUID;
  *
  * <p>三层刻意分开，因为它们的变更原因不同：改限速只影响第一层，改运营比例只影响第二层， 改车辆周转策略只影响第三层。把它们揉在一起时，任何一处调整都要重算全部。
  *
- * <p>时刻表<b>不是</b>从历史跑车记录聚合出来的。实测数据只用于事后对表（validation/calibration）， 不参与构建；参见 {@code
+ * <p>时刻表<b>不是</b>从历史跑车记录聚合出来的。实际运行数据只用于事后对表（validation/calibration）， 不参与构建；参见 {@code
  * docs/dev/timetable.md}。
  *
  * @param id 时刻表 UUID

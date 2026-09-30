@@ -213,10 +213,9 @@ public final class StorageManager {
   /**
    * 兼容性迁移：为旧版 rail_edges 表补齐 footprint_json 列。
    *
-   * <p>逐边足迹此前**从未被持久化**：它在图构建时存在，却在写库那一步丢失 （`RailEdge` 不带它，`RailInterlockingState.from(...)`
-   * 建完索引就消费掉了）。 于是每次从快照恢复图，cell→edge 索引必然为空、{@code cellCoverageAvailable()} 为假，
-   * 一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase 4）全部 fail-closed 到一个都不放。 实服第十二轮实测确认 {@code
-   * cellCoverageAvailable=false}，而尾部保护占全网滞留的 38%。
+   * <p>旧版表不持久化逐边足迹：它只在图构建时存在 （`RailEdge` 不带它，`RailInterlockingState.from(...)` 建完索引就消费掉了）。
+   * 没有这一列，每次从快照恢复图，cell→edge 索引必然为空、{@code cellCoverageAvailable()} 为假， 一切以实测覆盖为放行条件的机制（尾部保护释放 /
+   * Phase 4）全部 fail-closed 到一个都不放。
    *
    * <p>附加式、幂等，与既有两处迁移同形：加列失败且原因是"已存在"时静默返回。
    */

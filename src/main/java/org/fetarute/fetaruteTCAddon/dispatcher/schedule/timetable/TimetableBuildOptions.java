@@ -50,10 +50,9 @@ public record TimetableBuildOptions(
     /**
      * 默认单处让车上限，与 {@code timetable.assign-tolerance-seconds} 的默认值一致。
      *
-     * <p>这里曾经是 60 s，并且被 {@code timetable.hold-max-seconds} 封顶，理由写的是"那是车真能被扣留的上限"。
-     * 那是把两种等待混为一谈了：{@code hold-max} 约束的是<b>早到的车在站台被扣多久</b>（超了就 {@code HOLD_SKIPPED} 放行），
-     * 而车在资源前排队等待由占用队列做，运行时无界。表上写 300 s 的让车，运行时的行为是"站台扣一段 + 资源前等一段"， 车次绑定按表定时刻 ± tolerance
-     * 判偏差，仍然绑得上。
+     * <p>不以 {@code timetable.hold-max-seconds} 封顶，否则是把两种等待混为一谈：{@code hold-max}
+     * 约束的是<b>早到的车在站台被扣多久</b>（超了就 {@code HOLD_SKIPPED} 放行）， 而车在资源前排队等待由占用队列做，运行时无界。表上写 300 s
+     * 的让车，运行时的行为是"站台扣一段 + 资源前等一段"， 车次绑定按表定时刻 ± tolerance 判偏差，仍然绑得上。
      */
     public static final int DEFAULT_MAX_WAIT_SECONDS = 300;
 
@@ -122,11 +121,10 @@ public record TimetableBuildOptions(
    * <p>运行时的 {@code HeadwayRule} 是零，真调度器按授权窗口与制动距离放行——这是移动闭塞的形态，不是固定闭塞。
    * 所以这个数只是编表模型自己留的裕量，让表定时分不至于把两趟车贴在一起。
    *
-   * <p>原本是 30 秒，实测显示它过于保守：WS 的 CHT 进站单线一天通过 1804 次，实际占用合计只有 8999 秒 （平均 5 秒一次），而 30 秒裕量堆出 54120
-   * 秒，占到那条单线 72.8% 利用率里的八成以上。降到 15 秒之后 WS 在 300 s 间隔下冲突归零、120 s 间隔（2252 班）也排得出来。
+   * <p>30 秒过于保守：繁忙的进站单线上每次通过的实际占用平均只有 5 秒左右，30 秒裕量会占到这条单线利用率的大部分； 取 15 秒时同一路网在更密的间隔下也排得出来。
    *
-   * <p>再往下压反而变差（实测 10 秒时 300 s 间隔又冒出 8 处不可吸收）：{@code separation} 同时被让车修复用来 算延后量（{@code wait = 前车离开
-   * + separation − 后车进入}），余量太小则每次挪得太少、修不彻底。 要继续压先把这两个角色拆开。
+   * <p>再往下压反而变差（10 秒时又会冒出不可吸收冲突）：{@code separation} 同时被让车修复用来 算延后量（{@code wait = 前车离开 + separation
+   * − 后车进入}），余量太小则每次挪得太少、修不彻底。 要继续压先把这两个角色拆开。
    */
   public static final int DEFAULT_SEPARATION_SECONDS = 15;
 

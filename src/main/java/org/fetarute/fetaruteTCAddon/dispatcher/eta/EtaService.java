@@ -101,7 +101,7 @@ public final class EtaService {
   /**
    * 未知时长扣停的估算上限（秒）。
    *
-   * <p>扣停时长重尾（实服第二十七轮 PROTECTIVE_RETAIN_HOLD 中位 2 秒、p90 12 秒，个别死锁上千秒）， 按“已扣多久就估计还要多久”顺延：扣得越久 ETA
+   * <p>扣停时长重尾（PROTECTIVE_RETAIN_HOLD 多数只有数秒，个别死锁可达上千秒）， 按“已扣多久就估计还要多久”顺延：扣得越久 ETA
    * 越往后推，解除后立刻回落。上限防止一次长时间死锁把站牌推到半小时后。
    */
   static final long HOLD_ESTIMATE_CAP_SEC = 300L;
@@ -109,7 +109,7 @@ public final class EtaService {
   /**
    * 停站计时结束后、正常关门与过发车门控的用时（秒）；超出才算停站超时（扣停）。
    *
-   * <p>实服第二十七轮：停站计时结束到实际发车通常在 5 秒内（例：13:33:03 开始 20 秒停站，13:33:23 发车）。
+   * <p>停站计时结束到实际发车通常在 5 秒内。
    */
   static final long STATION_DEPARTURE_OVERHEAD_SEC = 5L;
 
@@ -665,7 +665,7 @@ public final class EtaService {
   /**
    * 本站还要停多久。
    *
-   * <p>停站计时要等列车停稳若干 tick 才注册，而进度在到站那一刻就推进到本站（实服相差约 3 秒）。这段空档里计时为空， 按 0 计的话 ETA
+   * <p>停站计时要等列车停稳若干 tick 才注册，而进度在到站那一刻就推进到本站（通常相差约 3 秒）。这段空档里计时为空， 按 0 计的话 ETA
    * 会先提前一整段停站、计时注册后再跳回——所以列车已到站（在站记录）、本站停车、计时既没开始也没结束时，按本站计划停站计。
    */
   private int currentDwellSec(String trainName, TrainRuntimeSnapshot snap, RouteStopPlan plan) {

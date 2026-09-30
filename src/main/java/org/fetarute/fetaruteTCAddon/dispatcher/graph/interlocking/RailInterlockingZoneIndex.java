@@ -240,7 +240,7 @@ public final class RailInterlockingZoneIndex {
    * <p>为什么需要反转而不是留存原始足迹：{@code from(...)} 在建索引时就把 {@code footprintsByEdge} 消费掉了，图对象上不再持有它；而 {@code
    * RailEdge} 本身也不带足迹。于是写库那一步 （`FtaGraphCommand` 由 `RailEdge` 建 `RailEdgeRecord`）**根本拿不到足迹**，
    * 逐边足迹就此丢失——下次启动从快照恢复时索引必然为空， {@link #cellCoverageAvailable()} 为假，一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase
-   * 4） 全部 fail-closed 到一个都不放。实服第十二轮实测正是 {@code cellCoverageAvailable=false}。
+   * 4） 全部 fail-closed 到一个都不放。
    *
    * <p>反转是无损的：索引本就是由足迹逐 cell 展开而成，倒回去得到同一组 cell，且不额外占内存。
    *

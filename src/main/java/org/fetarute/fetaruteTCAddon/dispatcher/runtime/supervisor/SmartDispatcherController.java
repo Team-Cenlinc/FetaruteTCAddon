@@ -405,9 +405,9 @@ public final class SmartDispatcherController {
               risk.riskSource(),
               action.effectClass(),
               "braking-anticipation",
-              // 用 BrakingProfile 的真实判定原因，而不是写死一句"with-braking-distance"。
-              // 修复前这个标签在"只因为进入视野而降速"的路径上同样输出，读 trace 会以为
-              // 判定确实算过制动距离——这正是本缺陷长期没被发现的原因。
+              // 用 BrakingProfile 的真实判定原因，而不是写死一句"with-braking-distance"：
+              // 写死的标签会在"只因为进入视野而降速"的路径上同样输出，让 trace 误导为
+              // 判定确实算过制动距离。
               braking.targetSpeedReason(),
               "reduce-speed-before-boundary",
               true,
@@ -786,14 +786,11 @@ public final class SmartDispatcherController {
    *       braking.targetSpeedReason()}（如 {@code inside-stop-distance}）。
    * </ul>
    *
-   * <p>此前这里只取第一个，于是第二种触发时报出来的是 {@code none}。而且原本写的兜底 {@code "direct-stop-allowed"} **是死代码**：{@code
-   * ForwardDecisionInput} 的压缩构造器 早就把该字段填成了字面量 {@code "none"}（非空），所以 {@code normalize} 的兜底永远不触发。
+   * <p>只取第一个的话，第二种触发时报出来的是 {@code none}。{@code ForwardDecisionInput} 的压缩构造器会把该字段填成字面量 {@code
+   * "none"}（非空），所以不能依赖 {@code normalize} 的兜底，必须显式区分。
    *
-   * <p>代价：实服 2026-09-14 第十三轮，往 HHU 段场销毁的车停在 {@code
-   * recoverable-hold:hold_at_signal:route_stop_or_terminal:none} 上 **172–185 秒**， 没有任何阻塞者，而最内层原因是
+   * <p>否则停车明细会形如 {@code recoverable-hold:hold_at_signal:route_stop_or_terminal:none}， 没有阻塞者、最内层原因是
    * {@code none} —— 看得见停，看不见为什么。
-   *
-   * <p>这正是 {@code d4aa7c9} 立的规矩（明细要么是原因，要么自报没有原因，绝不印 {@code none}） 漏掉的一处。
    */
   private static String holdAtSignalSafetyReason(
       ForwardDecisionInput input, BrakingProfile braking) {
@@ -866,12 +863,9 @@ public final class SmartDispatcherController {
     boolean trainMoving = input.currentSpeedBps() > 0.0;
     // 只有"再不减速就来不及"才降速。
     //
-    // 此前这里还有一条并列分支：只要风险落在规划视野内（planningVisible）且元数据新鲜就降速，
-    // 与需要多少距离减速无关。规划视野是"能看多远"，不是"该不该减速"——实服 2026-09-13 里 WS 车在
-    // 距站台 385 blocks 处就被压成黄灯。
-    //
-    // 这与 c18c1ae 修掉的"远处前车把后车永久压在 caution"是同一个错，只是发生在
-    // ROUTE_STOP_OR_TERMINAL 这一支上，当时没有一并修。
+    // 不能"只要风险落在规划视野内（planningVisible）且元数据新鲜就降速"：
+    // 规划视野是"能看多远"，不是"该不该减速"，否则列车会在距站台数百格处就被压成黄灯。
+    // 这与"远处前车把后车永久压在 caution"是同一类错误。
     boolean withinCautionBrakingDistance =
         distanceOpt.isPresent() && distance <= cautionBrakingDistance + input.cautionMarginBlocks();
     boolean shouldApplySpeedLimit =

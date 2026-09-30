@@ -17,7 +17,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
  * <p>所有 {@code TIMETABLE_DUTY_*} / {@code TIMETABLE_RETURN_DENIED} / {@code
  * TIMETABLE_CANDIDATE_REJECT} 日志只从这里发出。
  *
- * <p><b>交路可以换车</b>（2026-09-30 用户定，取代"续班只能由跑完上一班的那辆车来接"）：严重晚点、接不上下一班的车从交路上解下来（{@link #vacate}），
+ * <p><b>交路可以换车</b>，续班不限于由跑完上一班的那辆车来接：严重晚点、接不上下一班的车从交路上解下来（{@link #vacate}），
  * 交路登记为空缺，由出票侧派一辆替补车接它还赶得上的班次；被解下的车记为退役，不许再按时间绑回这个交路——否则同一交路会有两辆车。
  */
 final class DutyLedger {

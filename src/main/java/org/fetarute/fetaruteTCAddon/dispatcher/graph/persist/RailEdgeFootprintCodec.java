@@ -12,8 +12,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintC
  *
  * <p>坐标三元组的写法与 {@link RailInterlockingSnapshotCodec} 的 zone cells 保持一致，避免同一种数据 在库里有两种形状。
  *
- * <p>存在的理由：足迹在图构建时是有的，却在写库那一步被丢掉（`RailEdge` 不带它， `RailInterlockingState.from(...)`
- * 建完索引就把它消费了），于是下次启动从快照恢复时 cell→edge 索引必然为空，{@code cellCoverageAvailable()} 为假， 一切以实测覆盖为放行条件的机制全部
+ * <p>存在的理由：足迹只在图构建时存在（`RailEdge` 不带它， `RailInterlockingState.from(...)` 建完索引就把它消费了），
+ * 若不单独持久化，下次启动从快照恢复时 cell→edge 索引必然为空，{@code cellCoverageAvailable()} 为假， 一切以实测覆盖为放行条件的机制全部
  * fail-closed 到一个都不放。
  */
 public final class RailEdgeFootprintCodec {

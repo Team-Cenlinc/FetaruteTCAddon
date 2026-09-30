@@ -421,4 +421,4 @@ public final class TimetableHeadwayDefaults {
   （车池：每条线一个，一辆车不跨线）、`BuildInput.lineByRoute`、`TimetableNeighborhoodLoader` 的多线排除；命令 `build/publish/unpublish/delete`
   的 `<line>` 接受逗号列表（补全跟着最后一段走），整组发布同一时刻并互记基线。与设计稿的出入：`SetResult` 不是 `Map<lineId, TimetableBuildResult>` 而是
   一份联编报告 + 每线一张表 + 每线一份基线——报告本来就是全部线一起的，拆开只会重复；`--headway` 没加 `组=秒` 语法，用 `--group-headway`（可重复）。
-- 未验实服：Q1 的验收量（WS 2C/2N 各 150 s、CHT 偏离网格班次数、DS 能编出表）要拿 `.handoff/WsChtDiagnosisTest.java.txt` 对 `../fetarute_experimental` 跑一遍。
+- 未验实服：Q1 的验收量（WS 2C/2N 各 150 s、CHT 偏离网格班次数、DS 能编出表）要拿 `.handoff/WsChtDiagnosisTest.java.txt`（已移出仓库，`git show 6efe6c1:.handoff/WsChtDiagnosisTest.java.txt` 取回）对 `../fetarute_experimental` 跑一遍。

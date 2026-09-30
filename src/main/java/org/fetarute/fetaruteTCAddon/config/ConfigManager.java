@@ -83,12 +83,11 @@ public final class ConfigManager {
   /**
    * unlock 预约的存活时长，单位是 50ms 的信号 tick（见 {@code currentSignalTraceTick}）。
    *
-   * <p>原值 60 = **3 秒**。实测「列车被放行 → 走到下一个节点」中位数 **21 秒**、p75 31 秒、p90 66 秒， 只有 **3%** 能在 3
-   * 秒内完成。于是预约必然在它等待的那个移动完成之前过期：实服 2026-09-13 第四轮 68 个预约全部 2–4 秒内夭折，66 次 no-release-timeout 里 **65 次
-   * {@code currentNodeChanged=true}** ——列车明明已经动了，却被 3 秒的秒表判为失败。
+   * <p>「列车被放行 → 走到下一个节点」的耗时中位数约 21 秒、p75 约 31 秒、p90 约 66 秒。 TTL 若只有数秒，预约必然在它等待的那个移动完成之前过期，
+   * 列车明明已经动了（{@code currentNodeChanged=true}），却被判为 no-release-timeout。
    *
    * <p>1200 tick = 60 秒，高于 p75。过长的代价有界（只多保留一会儿队列 priority 意图，且列车一旦推进 就会由 canonical
-   * 进度判定回滚）；过短的代价是恢复层 97% 必然失败。
+   * 进度判定回滚）；过短的代价是恢复层几乎必然失败。
    */
   private static final int DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS = 1200;
 
@@ -197,8 +196,8 @@ public final class ConfigManager {
   /**
    * 解析时刻表配置段。
    *
-   * <p>总开关默认关闭：装上这个版本的插件不应该改变任何一列现有列车的行为，必须由运营方显式打开。 晚点追赶（{@code recovery.*}）有非零缺省值（2026-09-29
-   * 用户定默认开启），但只在按表运行打开后才起作用。
+   * <p>总开关默认关闭：装上这个版本的插件不应该改变任何一列现有列车的行为，必须由运营方显式打开。 晚点追赶（{@code recovery.*}）有非零缺省值（默认开启），
+   * 但只在按表运行打开后才起作用。
    */
   private static TimetableSettings parseTimetable(
       ConfigurationSection section, java.util.logging.Logger logger) {
@@ -1568,7 +1567,7 @@ public final class ConfigManager {
       int recoveryOverspeedPercent,
       int recoveryEngageDelaySeconds) {
 
-    /** 车站停车开销的缺省值：2026-09-26 实服 136 次停站实测"压牌→发车"中位 24 秒，dwell 20。 */
+    /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
     public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
 
     /**

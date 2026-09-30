@@ -80,7 +80,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 /**
  * {@code /fta timetable} 命令：从运行网络生成时刻表并投入运行。
  *
- * <p>只有两步，没有"先去实服录一遍"这一环：
+ * <p>只有两步，不需要先在服务器上录制一遍实际运行：
  *
  * <ol>
  *   <li>{@code build} —— 按 route 定义、调度图限速与运营参数算出整份表，同时报出目标/实际服务比例与车辆交路边界。
@@ -799,7 +799,7 @@ public final class FtaTimetableCommand {
   /**
    * 时刻表写库：在异步线程里用一个事务写完，需要时刷新已发布时刻表缓存，再回主线程收尾。
    *
-   * <p>一张表就是几千行车次与交路。原先在主线程逐行自动提交，实服库副本上三张草稿要 3.4 秒，整个服务器跟着卡； 一个事务 40 毫秒，放到异步线程后主线程完全不等。
+   * <p>一张表就是几千行车次与交路。在主线程逐行自动提交要数秒，整个服务器跟着卡； 合成一个事务只需几十毫秒，放到异步线程后主线程完全不等。
    *
    * <p>{@code write} 返回拒绝理由时不刷新缓存、不执行收尾，理由原样回给发令者。拒绝必须在写任何东西之前判断： 事务照常提交，没有写入就没有副作用。
    *
@@ -1252,7 +1252,7 @@ public final class FtaTimetableCommand {
     if (resolved == null) {
       return;
     }
-    // 取最新那张表的 code 会把这条线路的每张表连同它们的发车表与交路整个读出来（WS 一张就是九百多个
+    // 取最新那张表的 code 会把这条线路的每张表连同它们的发车表与交路整个读出来（一张就可能有近千个
     // 班次），放在主线程上做会卡一跳。读在异步线程，渲染回主线程。
     plugin
         .getServer()
@@ -1325,8 +1325,8 @@ public final class FtaTimetableCommand {
                         "写进交路组，之后每次构建都算数"))));
 
     MaxTripsChoice maxTrips = resolveMaxTrips(null, groups);
-    // [改] 指向值<b>真正来源</b>的那个组。原来固定指第一个组：来源写着 Full、按钮却改 Short，
-    // 而取的又是最大值，于是改 Short 根本不动生效值——点了等于没点。
+    // [改] 指向值<b>真正来源</b>的那个组。生效值取各组最大值，若固定指第一个组，
+    // 按钮改的可能不是来源组，根本不动生效值——点了等于没点。
     Component maxTripsAction =
         maxTrips
             .group()
@@ -2192,7 +2192,7 @@ public final class FtaTimetableCommand {
   /**
    * 解析单个交路最多几班：{@code --max-trips} > 交路组的 {@code maxOperationTrips} > 默认。
    *
-   * <p>与发车间隔同一条优先级链。此前这个值只认 flag，在组上配了 {@code maxOperationTrips} 也白配——而它一旦 偏小，症状是「大交路的班次被大量取消、报
+   * <p>与发车间隔同一条优先级链。组上配置的 {@code maxOperationTrips} 必须参与——这个值一旦 偏小，症状是「大交路的班次被大量取消、报
    * NO_CREATE_ACCESS」，离病因很远：交路接不下去，车只好提前回库， 后面那些从中途站始发的班次就没车可用了。
    *
    * <p>多个组时取<b>最大值</b>：一条交路可以跨组接班（小交路进城、接大交路跑全程），按某一个组的上限卡它没有 道理，取最大才不会把长交路误伤。联编多线时同理，跨线取最大。
@@ -2293,9 +2293,9 @@ public final class FtaTimetableCommand {
   /**
    * 让车参数：{@code --max-wait} 缺省取 {@code timetable.assign-tolerance-seconds}，上限 1800 s。
    *
-   * <p>它<b>不再</b>被 {@code timetable.hold-max-seconds} 封顶。{@code hold-max} 约束的是"早到的车在站台被扣多久"，
-   * 超了运行时直接放行；而车在资源前排队是占用队列的事，无界。两者不是同一种等待，用前者去限制后者会把大量 现实可行的表判成不可行——实测 WS 在这条封顶下把 60 s
-   * 以上的让车全判成了真冲突。 报告里仍用 hold-max 区分让车发生在哪：{@code ≤ hold-max} 是站台扣留，超过的那部分由资源前的排队兑现。
+   * <p>它<b>不</b>被 {@code timetable.hold-max-seconds} 封顶。{@code hold-max} 约束的是"早到的车在站台被扣多久"，
+   * 超了运行时直接放行；而车在资源前排队是占用队列的事，无界。两者不是同一种等待，用前者去限制后者会把大量 现实可行的表判成不可行——超过封顶的让车会全被判成真冲突。 报告里仍用
+   * hold-max 区分让车发生在哪：{@code ≤ hold-max} 是站台扣留，超过的那部分由资源前的排队兑现。
    *
    * <p>累计上限跟 assign-tolerance（超过它车次就对不上了），但不小于单步上限——否则第一处让车就会把交路截断。
    */
@@ -2332,8 +2332,7 @@ public final class FtaTimetableCommand {
   /**
    * 端点闲置上限：不传时取 {@code reclaim.max-idle-seconds}。
    *
-   * <p>编表侧必须和运行时用同一个数——运行时待命超过它就派回库票，编表却让车在端点干等到下一个时隙的话， 表上那段待命占用是假的，还会把站台判成冲突（实测 MT 有车在 PPK 等了 19
-   * 分钟，运行时 5 分钟就收走了）。
+   * <p>编表侧必须和运行时用同一个数——运行时待命超过它就派回库票，编表却让车在端点干等到下一个时隙的话， 表上那段待命占用是假的，还会把站台判成冲突。
    */
   private int resolveMaxIdleSeconds(Integer requested) {
     return resolveMaxIdle(requested).seconds();

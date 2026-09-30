@@ -45,8 +45,8 @@ public final class DispatchPriorityResolver {
   /**
    * 每列车上一次解析出的优先级签名。
    *
-   * <p>优先级每 tick 都会重解析，但只有<b>结果变化</b>才是新证据。生产端在此去重后，该 trace 才能进入诊断门的免预算白名单： 实服日志里它此前只留下 12
-   * 条，涉事列车一条都没有，导致队列仲裁无法归因。
+   * <p>优先级每 tick 都会重解析，但只有<b>结果变化</b>才是新证据。生产端在此去重后，该 trace 才能进入诊断门的免预算白名单；
+   * 否则它会被诊断预算大量丢弃，涉事列车的记录往往一条不剩，队列仲裁无法归因。
    */
   private final ConcurrentMap<String, String> resolvedPrioritySignatures =
       new ConcurrentHashMap<>();

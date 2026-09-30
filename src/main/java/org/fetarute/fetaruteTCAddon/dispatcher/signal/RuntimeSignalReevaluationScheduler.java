@@ -245,8 +245,8 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
   /**
    * 记录列车又一次在紧接着的 drain 里被重评估。
    *
-   * <p>占用事件 → 重评估 → 又改动占用 → 又一次占用事件，这条链只要不收敛就会一直自我重排。调度器不能替授权链掐断它（那会吞掉真实的事实变更）， 但必须让它可见：2026-09-30
-   * 实服的看门狗超时，事后只能从排队序号的增长倒推出"某几辆车被无休止地重评估"。
+   * <p>占用事件 → 重评估 → 又改动占用 → 又一次占用事件，这条链只要不收敛就会一直自我重排。调度器不能替授权链掐断它（那会吞掉真实的事实变更）， 但必须让它可见：
+   * 否则看门狗超时后，只能从排队序号的增长倒推出"某几辆车被无休止地重评估"。
    */
   private void noteConsecutiveReevaluation(String trainName) {
     String logicalName = TrainNameNormalizer.normalizeKey(trainName);
@@ -319,8 +319,8 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
    * 生产环境必须把任务安排到调用发生后的<b>下一个</b> Bukkit tick，不得在当前 tick 的调度循环内执行。
    *
    * <p>不能用 {@code runTask}（delay 0）实现：CraftScheduler 的 heartbeat 会继续取出 nextRun 不晚于当前 tick 的任务， 于是
-   * drain 里重新排的 drain 会在同一个 tick 里接着跑。预算只约束单次 drain，一条自我重排的链就能让主线程永不返回， 2026-09-30 09:15
-   * 实服因此被看门狗强杀。请用 {@code runTaskLater(…, 1L)}。
+   * drain 里重新排的 drain 会在同一个 tick 里接着跑。预算只约束单次 drain，一条自我重排的链就能让主线程永不返回， 最终被看门狗强杀。 请用 {@code
+   * runTaskLater(…, 1L)}。
    */
   @FunctionalInterface
   public interface NextTickScheduler {

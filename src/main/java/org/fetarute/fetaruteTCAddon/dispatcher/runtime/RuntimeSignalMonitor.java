@@ -69,8 +69,8 @@ public final class RuntimeSignalMonitor implements Runnable {
    * <p>占用版本驱动（见 {@link #heldRecheckDue}）覆盖「阻塞者释放了」这一主因；这条节拍是兜底，
    * 覆盖停因不由占用变化解除的情形（发车门控到期、折返停站结束、上游进度写入等）。
    *
-   * <p>取值依据：实服第二十四轮，阻塞者清空后的空等时长中位 141 秒、健康监控兜底中位 182 秒。 只要这个节拍远小于那两个数，兜底就不再是唯一出路；而开销上界是明确的——
-   * 每辆**停着的**车每 5 秒一次完整 tick，与车队规模同阶，不随 tick 放大。
+   * <p>取值依据：没有这条节拍时，阻塞者清空后的空等与健康监控兜底都在数分钟量级。 只要这个节拍远小于这一量级，兜底就不再是唯一出路；而开销上界是明确的—— 每辆**停着的**车每 5
+   * 秒一次完整 tick，与车队规模同阶，不随 tick 放大。
    */
   private static final Duration HELD_TRAIN_RECHECK_INTERVAL = Duration.ofSeconds(5);
 
@@ -163,8 +163,7 @@ public final class RuntimeSignalMonitor implements Runnable {
   @Override
   public void run() {
     // 时钟跳变检测要在**本轮任何工作之前**：发车门锁会在 hasDepartureGate 读取时过期，
-    // 而那条路径就在本任务里。第二十二轮：健康监控的补偿没赶在它前面，
-    // 四把锁在唤醒后一秒内同时过期。
+    // 而那条路径就在本任务里。若补偿晚于它执行，跳变后的第一次读取就会让所有门锁同时过期。
     dispatchService.observeSchedulerTick(java.time.Instant.now());
     runWithFailClosedBoundary(
         "-", this::runGuardedCycle, dispatchService::failClosedAfterSignalReevaluationFailure);
@@ -230,12 +229,11 @@ public final class RuntimeSignalMonitor implements Runnable {
    * <p>首次观测必须完成一次恢复授权；运动中列车仍需持续控制。稳定静止的列车已经在上一轮写入 STOP/queue 状态，重复构建进路**通常**不能创造新的
    * authority，只会重做方向解析并重新触碰占用状态。
    *
-   * <p><b>但「通常」不是「总是」，这里曾经漏掉了最要紧的一类。</b>原注释说静止列车 「应等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估」——实服 2026-09-17
-   * 第二十四轮证明这三个触发里**只有健康恢复真实存在**：{@code RuntimeStopState.retryTrigger()} 的值里写着 {@code
-   * PERIODIC_RECHECK}，而它全仓只被读两处（一条日志行、一个命令行展示）， 从不驱动任何重检；也没有任何「占用变化 → 重新评估」的监听。
+   * <p><b>但「通常」不是「总是」。</b>「等待资源释放、明确生命周期事件或健康恢复再次触发完整重评估」这三个触发里， 只有健康恢复真实存在：{@code
+   * RuntimeStopState.retryTrigger()} 的 {@code PERIODIC_RECHECK} 只用于日志与命令展示，从不驱动任何重检； 也没有任何「占用变化 →
+   * 重新评估」的监听。
    *
-   * <p>后果是整个调度实际靠超时兜底运转：{@code PROGRESS_STUCK} 一轮触发 245 次、中位 182 秒。 同一轮 {@code
-   * PROTECTIVE_RETAIN_HOLD} 里 74.2% 的车「记下的阻塞者已全部消失」， 阻塞清空后仍空等中位 141 秒。**阻塞者已经释放时，重新构建进路恰恰能创造新的
+   * <p>若仅靠这些，调度实际靠 {@code PROGRESS_STUCK} 超时兜底运转，阻塞清空后的车仍会长时间空等。 **阻塞者已经释放时，重新构建进路恰恰能创造新的
    * authority。**
    *
    * <p>因此补上第四个条件 {@code heldRecheckDue}（见 {@link #heldRecheckDue}）： 它不放宽任何判据，{@code
