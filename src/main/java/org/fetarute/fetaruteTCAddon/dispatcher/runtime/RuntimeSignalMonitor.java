@@ -439,6 +439,8 @@ public final class RuntimeSignalMonitor implements Runnable {
       return;
     }
     TrainProperties properties = group.getProperties();
+    // 全服列车（含非本插件的车）都关掉 TrainCarts 摩擦与重力：到速后保持限速，与编表运行曲线一致；脱轨车在下面直接回收。
+    TrainLaunchManager.disableSlowdown(properties);
     boolean ftaTagged = dispatchService.hasFtaRuntimeTag(properties);
     boolean derailed = isDerailed(group);
     if (!shouldInspectRuntimeGroup(ftaTagged, derailed)) {

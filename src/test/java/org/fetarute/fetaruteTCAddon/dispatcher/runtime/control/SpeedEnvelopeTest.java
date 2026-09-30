@@ -7,6 +7,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.junit.jupiter.api.Test;
 
@@ -104,16 +106,40 @@ class SpeedEnvelopeTest {
   }
 
   @Test
-  void edgeSpeedConstraintsBecomeBrakingConstraints() {
+  void edgeSpeedConstraintsFollowTheTimetableBrakingCurve() {
+    SpeedCurve curve = new SpeedCurve(1.0, 1.0);
     SpeedEnvelope envelope =
         SpeedEnvelope.edgeSpeedConstraints(
             List.of(
                 new SignalLookahead.EdgeSpeedConstraint(0L, 20.0),
                 new SignalLookahead.EdgeSpeedConstraint(60L, 8.0)),
-            1.0);
+            curve,
+            20.0);
 
-    assertEquals(Math.sqrt(64.0 + 120.0), envelope.limitBps(0.0), 1.0e-9);
+    // 与编表天花板同一个函数：一条 60 格、限速 20、终点 8 的单边天花板。
+    SpeedCeiling ceiling =
+        SpeedCeiling.of(new double[] {60.0}, new double[] {20.0}, List.of(), 8.0, curve);
+    assertEquals(1, envelope.size(), "不低于巡航速度的约束不收紧，不登记");
+    assertEquals(ceiling.limitBps(0.0), envelope.limitBps(0.0), 1.0e-9);
+    assertEquals(ceiling.limitBps(30.0), envelope.limitBps(30.0), 1.0e-9);
+    assertEquals(
+        SpeedCeiling.brakingLimitBps(curve, 20.0, 8.0, 60.0), envelope.limitBps(0.0), 1.0e-9);
+    assertTrue(envelope.limitBps(0.0) < Math.sqrt(64.0 + 120.0), "S 形制动两端柔和，比恒减速更早开始降速");
     assertEquals(8.0, envelope.limitBps(70.0), 1.0e-9);
+  }
+
+  @Test
+  void originIsKeptThroughComposition() {
+    SpeedEnvelope envelope =
+        SpeedEnvelope.empty()
+            .withHold(traveled -> 12.0)
+            .withOrigin("SW887", 14.0)
+            .with(traveled -> 30.0)
+            .withAll(SpeedEnvelope.empty().withHold(traveled -> 9.0));
+
+    assertEquals("SW887", envelope.originKey().orElseThrow());
+    assertEquals(14.0, envelope.originBlocks(), 1.0e-9);
+    assertTrue(SpeedEnvelope.empty().withOrigin(null, 3.0).originKey().isEmpty());
   }
 
   @Test

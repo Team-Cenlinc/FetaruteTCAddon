@@ -3,6 +3,9 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 
 /**
  * 控车速度包络：以“本次控车命令之后列车又走过的距离”为自变量的限速上界。
@@ -31,14 +34,22 @@ public final class SpeedEnvelope {
     double limitBps(double traveledBlocks);
   }
 
-  private static final SpeedEnvelope EMPTY = new SpeedEnvelope(List.of(), List.of());
+  private static final SpeedEnvelope EMPTY = new SpeedEnvelope(List.of(), List.of(), null, 0.0);
 
   private final List<Constraint> constraints;
   private final List<Constraint> holdConstraints;
+  private final String originKey;
+  private final double originBlocks;
 
-  private SpeedEnvelope(List<Constraint> constraints, List<Constraint> holdConstraints) {
+  private SpeedEnvelope(
+      List<Constraint> constraints,
+      List<Constraint> holdConstraints,
+      String originKey,
+      double originBlocks) {
     this.constraints = constraints;
     this.holdConstraints = holdConstraints;
+    this.originKey = originKey;
+    this.originBlocks = originBlocks;
   }
 
   /** 不含任何随距离变化约束的包络。 */
@@ -51,7 +62,8 @@ public final class SpeedEnvelope {
     if (constraint == null) {
       return this;
     }
-    return new SpeedEnvelope(append(constraints, constraint), holdConstraints);
+    return new SpeedEnvelope(
+        append(constraints, constraint), holdConstraints, originKey, originBlocks);
   }
 
   /**
@@ -63,7 +75,11 @@ public final class SpeedEnvelope {
     if (constraint == null) {
       return this;
     }
-    return new SpeedEnvelope(append(constraints, constraint), append(holdConstraints, constraint));
+    return new SpeedEnvelope(
+        append(constraints, constraint),
+        append(holdConstraints, constraint),
+        originKey,
+        originBlocks);
   }
 
   /** 合并另一包络的全部约束（含保持约束），返回新包络。 */
@@ -71,11 +87,40 @@ public final class SpeedEnvelope {
     if (other == null || other.constraints.isEmpty()) {
       return this;
     }
-    if (constraints.isEmpty()) {
+    if (constraints.isEmpty() && originKey == null) {
       return other;
     }
     return new SpeedEnvelope(
-        concat(constraints, other.constraints), concat(holdConstraints, other.holdConstraints));
+        concat(constraints, other.constraints),
+        concat(holdConstraints, other.holdConstraints),
+        originKey,
+        originBlocks);
+  }
+
+  /**
+   * 记下本包络的取样位置：车头在图节点 {@code nodeKey} 之后 {@code headBlocks} 格处。
+   *
+   * <p>逐 tick 斜坡据此把“走过的距离”换回车头位置（{@code SpeedLimitRamp#headProgressBlocks}）：下一周期仍在同一节点之后时，
+   * 调度层用这个按实际里程推算的位置，而不是按直线距离插值的估计——弯道上两者不一致，每周期重新取样就会让限速忽高忽低。
+   *
+   * @param nodeKey 车头之前最近经过的图节点；为空时不记
+   * @param headBlocks 车头已驶过该节点的距离
+   */
+  public SpeedEnvelope withOrigin(String nodeKey, double headBlocks) {
+    if (nodeKey == null || nodeKey.isBlank() || !Double.isFinite(headBlocks)) {
+      return this;
+    }
+    return new SpeedEnvelope(constraints, holdConstraints, nodeKey, Math.max(0.0, headBlocks));
+  }
+
+  /** 取样时车头之前最近经过的图节点；没有记下时为空。 */
+  public Optional<String> originKey() {
+    return Optional.ofNullable(originKey);
+  }
+
+  /** 取样时车头已驶过 {@link #originKey()} 的距离。 */
+  public double originBlocks() {
+    return originBlocks;
   }
 
   /** 是否没有任何约束。 */
@@ -162,13 +207,47 @@ public final class SpeedEnvelope {
   }
 
   /**
-   * 前方限速边的制动约束。
+   * 按编表运行曲线同一条 S 形制动曲线的约束：前方 {@code distanceBlocks} 处速度须不高于 {@code endSpeedBps}。
+   *
+   * <p>取值即一条长 {@code distanceBlocks}、限速 {@code cruiseBps}、终点速度 {@code endSpeedBps} 的单边速度天花板（{@link
+   * SpeedCeiling}）；越过约束点后恒为 {@code endSpeedBps}。天花板一次算好，逐 tick 求值只是查表。
+   *
+   * @param distanceBlocks 从车头到约束点的距离
+   * @param endSpeedBps 约束点处的限速
+   * @param cruiseBps 制动开始前的巡航速度
+   * @param curve 加减速曲线
+   * @return 约束；约束点限速不低于巡航速度（不收紧）时返回 {@code null}，参数不合法时返回只给出 {@code endSpeedBps} 的保守约束
+   */
+  public static Constraint curveBraking(
+      double distanceBlocks, double endSpeedBps, double cruiseBps, SpeedCurve curve) {
+    if (!Double.isFinite(endSpeedBps) || endSpeedBps < 0.0) {
+      return null;
+    }
+    if (curve == null || !Double.isFinite(distanceBlocks) || !Double.isFinite(cruiseBps)) {
+      return traveled -> endSpeedBps;
+    }
+    if (!(cruiseBps > endSpeedBps)) {
+      return null;
+    }
+    if (!(distanceBlocks > 0.0)) {
+      return traveled -> endSpeedBps;
+    }
+    double distance = distanceBlocks;
+    SpeedCeiling ceiling =
+        SpeedCeiling.of(
+            new double[] {distance}, new double[] {cruiseBps}, List.of(), endSpeedBps, curve);
+    return traveled -> ceiling.limitBps(traveled);
+  }
+
+  /**
+   * 前方限速边的制动约束（S 形制动曲线，见 {@link #curveBraking}）。
    *
    * @param constraints 前瞻给出的限速边（距离须已从车头量起）
-   * @param decelBps2 制动减速度
+   * @param curve 加减速曲线
+   * @param cruiseBps 制动开始前的巡航速度（本周期目标速度）
    */
   public static SpeedEnvelope edgeSpeedConstraints(
-      List<SignalLookahead.EdgeSpeedConstraint> constraints, double decelBps2) {
+      List<SignalLookahead.EdgeSpeedConstraint> constraints, SpeedCurve curve, double cruiseBps) {
     if (constraints == null || constraints.isEmpty()) {
       return EMPTY;
     }
@@ -177,7 +256,8 @@ public final class SpeedEnvelope {
       Objects.requireNonNull(constraint, "constraint");
       envelope =
           envelope.with(
-              braking(constraint.distanceBlocks(), constraint.speedLimitBps(), decelBps2));
+              curveBraking(
+                  constraint.distanceBlocks(), constraint.speedLimitBps(), cruiseBps, curve));
     }
     return envelope;
   }

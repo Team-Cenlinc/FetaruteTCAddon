@@ -21,6 +21,8 @@ import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -34,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.FakeTrain;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.TagStore;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorityHandoffSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -64,7 +67,8 @@ class SegmentEdgeSpeedEnvelopeTest {
   void departingTrainBrakesForTheSlowSwitchAheadInsteadOfCrawlingTheWholeSegment() {
     Tick tick = signalTick(Optional.empty(), 0.0);
 
-    assertEquals(Math.sqrt(SLOW * SLOW + 2.0 * tick.decelBps2() * 26), tick.edgeLimitBps(), 1e-6);
+    assertEquals(
+        SpeedCeiling.brakingLimitBps(tick.curve(), FAST, SLOW, 26), tick.edgeLimitBps(), 1e-6);
     assertTrue(tick.edgeLimitBps() > SLOW);
   }
 
@@ -73,7 +77,8 @@ class SegmentEdgeSpeedEnvelopeTest {
   void theSlowEdgeIsMeasuredFromTheHead() {
     Tick tick = signalTick(Optional.empty(), 20.0);
 
-    assertEquals(Math.sqrt(SLOW * SLOW + 2.0 * tick.decelBps2() * 6), tick.edgeLimitBps(), 1e-6);
+    assertEquals(
+        SpeedCeiling.brakingLimitBps(tick.curve(), FAST, SLOW, 6), tick.edgeLimitBps(), 1e-6);
   }
 
   /** 驶过道岔之后，前方全是 22.2：基准回到 22.2（配合执行层补牵引，列车才能提速）。 */
@@ -84,7 +89,8 @@ class SegmentEdgeSpeedEnvelopeTest {
     assertEquals(FAST, tick.edgeLimitBps(), 1e-6);
   }
 
-  private record Tick(double edgeLimitBps, double decelBps2) {}
+  /** 与编表同一条 S 形加减速曲线（本车车种）。 */
+  private record Tick(double edgeLimitBps, SpeedCurve curve) {}
 
   private static Tick signalTick(Optional<NodeId> lastPassed, double headX) {
     UUID worldId = UUID.randomUUID();
@@ -159,9 +165,10 @@ class SegmentEdgeSpeedEnvelopeTest {
 
     service.handleSignalTick(train, false);
 
+    TrainConfig config = trainConfigs.resolve(tags.properties(), view);
     return new Tick(
         service.getDiagnostics(TRAIN).orElseThrow().edgeLimitBps(),
-        trainConfigs.resolve(tags.properties(), view).decelBps2());
+        new SpeedCurve(config.accelBps2(), config.decelBps2()));
   }
 
   /** A —26— SW —48— X —600— B，节点坐标沿 x 轴与边长一致，供车头位置插值。 */

@@ -6,6 +6,8 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -271,23 +273,24 @@ public final class SignalLookahead {
   }
 
   /**
-   * 一段路径的限速包络：列车所在区间（首条边）的限速，与刹得住前方每条边限速的最高速度 {@code √(v²+2·a·d)} 中的最小值。
+   * 一段路径的限速包络：列车所在区间（首条边）的限速，与刹得住前方每条边限速的最高速度中的最小值。
    *
-   * <p>前方各边的距离 {@code d} 从车头量起：按累计边长扣掉车头已驶过首节点的距离。减速度不可用（非正或非有限）时退回整段最小限速——不能按制动曲线放宽，就不放宽。
+   * <p>制动按编表运行曲线同一条 S 形曲线（{@link SpeedCeiling#brakingLimitBps}），以所在区间限速为巡航速度。前方各边的距离从车头量起：
+   * 按累计边长扣掉车头已驶过首节点的距离。没有加减速曲线（关闭速度曲线）时退回整段最小限速——不能按制动曲线放宽，就不放宽。
    *
    * @param edges 从列车当前图节点出发、按行驶顺序排列的路径边
    * @param resolver 边限速解析（已考虑 override 与临时限速）
-   * @param decelBps2 制动减速度（blocks/s²）；不按制动曲线放宽时传 0
+   * @param curve 加减速曲线；不按制动曲线放宽时传 {@code null}
    * @param headProgressBlocks 车头已驶过首节点的距离（blocks），取不到时传 0
    * @return 包络速度（blocks/s）；没有任何边给出有效限速时为空
    */
   public static OptionalDouble pathSpeedEnvelope(
-      List<RailEdge> edges, EdgeSpeedResolver resolver, double decelBps2, long headProgressBlocks) {
+      List<RailEdge> edges, EdgeSpeedResolver resolver, SpeedCurve curve, long headProgressBlocks) {
     if (edges == null || edges.isEmpty() || resolver == null) {
       return OptionalDouble.empty();
     }
-    boolean braking = Double.isFinite(decelBps2) && decelBps2 > 0.0;
     double envelope = Double.POSITIVE_INFINITY;
+    double cruise = Double.NaN;
     long edgeStart = 0L;
     boolean first = true;
     for (RailEdge edge : edges) {
@@ -297,7 +300,12 @@ public final class SignalLookahead {
       double limit = resolver.resolve(edge);
       if (Double.isFinite(limit) && limit > 0.0) {
         long distance = first ? 0L : Math.max(0L, edgeStart - Math.max(0L, headProgressBlocks));
-        double allowed = braking ? Math.sqrt(limit * limit + 2.0 * decelBps2 * distance) : limit;
+        double allowed = limit;
+        if (Double.isNaN(cruise)) {
+          cruise = limit;
+        } else if (curve != null) {
+          allowed = SpeedCeiling.brakingLimitBps(curve, cruise, limit, distance);
+        }
         envelope = Math.min(envelope, allowed);
       }
       edgeStart += Math.max(0, edge.lengthBlocks());

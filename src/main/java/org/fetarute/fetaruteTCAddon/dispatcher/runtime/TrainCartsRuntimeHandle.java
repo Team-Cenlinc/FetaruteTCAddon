@@ -560,7 +560,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   public void stop() {
     group.stop(false);
     MinecartMember<?> head = group.head();
-    if (head != null && head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
+    if (head != null && isLaunching(head)) {
       head.getActions().clear();
     }
   }
@@ -607,7 +607,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (head == null) {
       return false;
     }
-    if (head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
+    if (isLaunching(head)) {
       return true;
     }
     group.getActions().launchReset();
@@ -704,6 +704,17 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     return false;
   }
 
+  /**
+   * 本插件的发车/调速动作是否正在执行。
+   *
+   * <p>动作经 {@code addGroupAction} 挂在<b>编组</b>队列（归属车头），只看车头自己的队列永远看不到它：已在加速的车会被当成没在加速，
+   * 每次补牵引都再排一个动作到队尾。两边都看；清除用车头队列的 {@code clear()}，它会连同编组队列里归属车头的动作一起移除。
+   */
+  private boolean isLaunching(MinecartMember<?> head) {
+    return group.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)
+        || head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH);
+  }
+
   private static boolean isForeignActionQueue(ActionTracker actions) {
     return actions != null && actions.hasAction() && !actions.isCurrentActionTag(ACTION_TAG_LAUNCH);
   }
@@ -715,15 +726,15 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       return;
     }
     double currentSpeed = currentSpeedBlocksPerTick();
-    // 与 TrainLaunchManager 的补牵引判定同一容差（目标的 1%）：更大的容差会让小幅回升的限速（如 8.0→8.33）永远不补牵引，
-    // 而编表运行曲线在任何回升处都会重新加速。
-    double tolerance = Math.max(0.005, Math.abs(targetBlocksPerTick) * 0.01);
-    // 如果当前速度已经接近目标，不需要重新下发动作
-    if (Math.abs(currentSpeed - targetBlocksPerTick) <= tolerance) {
+    // 提速与 TrainLaunchManager 的补牵引同一门槛：牵引目标就是限速，低于它就补（编表运行曲线在任何回升处都会重新加速）。
+    // 降速只为把 TrainCarts 速度向量重置到目标，留目标 1%（至少 0.005 格/tick）的余量，免得为截速残留的微小差值反复重发。
+    boolean slowingDown =
+        currentSpeed > targetBlocksPerTick + Math.max(0.005, Math.abs(targetBlocksPerTick) * 0.01);
+    if (!slowingDown
+        && currentSpeed >= targetBlocksPerTick - TrainLaunchManager.TRACTION_EPSILON_BPT) {
       return;
     }
-    boolean slowingDown = currentSpeed > targetBlocksPerTick + tolerance;
-    if (head.getActions().isCurrentActionTag(ACTION_TAG_LAUNCH)) {
+    if (isLaunching(head)) {
       if (!slowingDown) {
         return;
       }

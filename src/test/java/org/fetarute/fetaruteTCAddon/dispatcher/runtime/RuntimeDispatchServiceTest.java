@@ -10930,8 +10930,16 @@ class RuntimeDispatchServiceTest {
     ControlDiagnostics diagnostics = service.getDiagnostics("train-1").orElseThrow();
     assertEquals(SignalAspect.PROCEED, diagnostics.currentSignal());
     assertTrue(diagnostics.edgeSpeedLookaheadMinBps().isPresent());
+    // 与编表同一条 S 形制动曲线：以线路速度 40 巡航、50 格外降到 8。
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig config =
+        new TrainConfigResolver().resolve(tags.properties(), configManager.current());
     assertEquals(
-        Math.sqrt(8.0 * 8.0 + 2.0 * 1.0 * 50.0),
+        org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling.brakingLimitBps(
+            new org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve(
+                config.accelBps2(), config.decelBps2()),
+            40.0,
+            8.0,
+            50.0),
         diagnostics.edgeSpeedLookaheadMinBps().getAsDouble(),
         1.0e-6);
     assertEquals("edge_speed_lookahead", diagnostics.finalLimiterSource());

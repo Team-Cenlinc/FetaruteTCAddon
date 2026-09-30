@@ -32,6 +32,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
  * <p>加速中写限速不会打断提速：本插件的发车动作（{@link CurveLaunchAction}）每 tick 直接读当前限速，不像 TrainCarts 的 launch
  * 那样遇限速变化就重新规划。
  *
+ * <p>登记时给了加速度的，斜坡还负责保速：发车动作到速即结束，之后列车若低于当前限速（被推挤、别的插件改了速度等）且身上没有别的 TrainCarts 动作，当 tick
+ * 就补牵引到限速，不等下一个调度周期。牵引目标始终就是当前限速。
+ *
+ * <p>斜坡按实际走过的里程推算车头位置（{@link #headProgressBlocks}），供下一周期的调度层取代按直线距离插值的估计。
+ *
  * <p>包络中的保持约束（{@link
  * SpeedEnvelope#withHold}，即到下一停车点的速度天花板：进站限速区、沿途慢速边与到站速度）另供没有速度上下文的控车调用（过节点时的推进放行）封顶。
  * 只认保持约束、不认周期命令值：周期命令值里有上调限幅的滞后与已驶过区段的限速，拿它封顶会扣住推进放行的补牵引。 保持约束是按制动曲线推出的物理上界，远处就是线路速度，按它封顶不会压低出站加速。
@@ -94,6 +99,22 @@ public final class SpeedLimitRamp {
       double commandedBps,
       SpeedEnvelope envelope,
       int ttlTicks) {
+    arm(train, properties, commandedBps, envelope, ttlTicks, 0.0);
+  }
+
+  /**
+   * 同 {@link #arm(RuntimeTrainHandle, TrainProperties, double, SpeedEnvelope, int)}，另按 {@code
+   * accelBpt2} 在周期之间保速：列车低于当前限速时补牵引到限速。
+   *
+   * @param accelBpt2 补牵引用的加速度（blocks/tick²）；非正时不补牵引
+   */
+  public void arm(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      double commandedBps,
+      SpeedEnvelope envelope,
+      int ttlTicks,
+      double accelBpt2) {
     Object key = keyOf(train);
     if (key == null
         || properties == null
@@ -112,7 +133,14 @@ public final class SpeedLimitRamp {
     }
     entries.put(
         key,
-        new Entry(train, properties, envelope, Math.max(0.0, commandedBps), written, ttlTicks));
+        new Entry(
+            train,
+            properties,
+            envelope,
+            Math.max(0.0, commandedBps),
+            written,
+            ttlTicks,
+            Double.isFinite(accelBpt2) && accelBpt2 > 0.0 ? accelBpt2 : 0.0));
   }
 
   /** 撤销该车的斜坡与命令记录（STOP、硬停、重发、静止时调用）。 */
@@ -147,6 +175,27 @@ public final class SpeedLimitRamp {
     }
     double hold = entry.envelope.holdLimitBps(entry.traveledBlocks);
     return Double.isFinite(hold) ? OptionalDouble.of(hold) : OptionalDouble.empty();
+  }
+
+  /**
+   * 按实际走过的里程推算的车头位置：登记时车头在 {@code nodeKey} 之后多远，再加上此后走过的距离。
+   *
+   * <p>包络没有记下取样位置、取样节点不是 {@code nodeKey}（车头已过下一个图节点）、没有登记或限速已被别处改写时返回空， 调用方退回自己的估计。
+   *
+   * @param nodeKey 车头之前最近经过的图节点
+   */
+  public OptionalDouble headProgressBlocks(RuntimeTrainHandle train, String nodeKey) {
+    Object key = keyOf(train);
+    if (key == null || nodeKey == null) {
+      return OptionalDouble.empty();
+    }
+    Entry entry = entries.get(key);
+    if (entry == null
+        || !entry.stillOwnsSpeedLimit()
+        || !entry.envelope.originKey().map(nodeKey::equals).orElse(false)) {
+      return OptionalDouble.empty();
+    }
+    return OptionalDouble.of(entry.envelope.originBlocks() + entry.traveledBlocks);
   }
 
   /**
@@ -257,6 +306,7 @@ public final class SpeedLimitRamp {
     private final TrainProperties properties;
     private final SpeedEnvelope envelope;
     private final double commandedBps;
+    private final double accelBpt2;
     private double lastWrittenBpt;
     private double traveledBlocks;
     private int remainingTicks;
@@ -267,13 +317,15 @@ public final class SpeedLimitRamp {
         SpeedEnvelope envelope,
         double commandedBps,
         double lastWrittenBpt,
-        int remainingTicks) {
+        int remainingTicks,
+        double accelBpt2) {
       this.train = train;
       this.properties = properties;
       this.envelope = envelope;
       this.commandedBps = commandedBps;
       this.lastWrittenBpt = lastWrittenBpt;
       this.remainingTicks = remainingTicks;
+      this.accelBpt2 = accelBpt2;
     }
 
     /** 列车仍在运行，且限速仍是本斜坡最后写入的值。 */
@@ -299,15 +351,29 @@ public final class SpeedLimitRamp {
           Double.isFinite(speedBpt) && speedBpt > 0.0 ? Math.min(speedBpt, lastWrittenBpt) : 0.0;
       traveledBlocks += movedBpt;
       double limitBps = Math.min(commandedBps, envelope.limitBps(traveledBlocks));
-      if (!Double.isFinite(limitBps)) {
-        return true;
+      if (Double.isFinite(limitBps)) {
+        double limitBpt = Math.max(0.0, limitBps / TICKS_PER_SECOND);
+        if (limitBpt <= lastWrittenBpt - WRITE_STEP_BPT) {
+          properties.setSpeedLimit(limitBpt);
+          lastWrittenBpt = properties.getSpeedLimit();
+        }
       }
-      double limitBpt = Math.max(0.0, limitBps / TICKS_PER_SECOND);
-      if (limitBpt <= lastWrittenBpt - WRITE_STEP_BPT) {
-        properties.setSpeedLimit(limitBpt);
-        lastWrittenBpt = properties.getSpeedLimit();
-      }
+      holdSpeed(speedBpt);
       return true;
+    }
+
+    /**
+     * 保速：低于当前限速就补牵引到限速。正在制动（速度向量高于限速）时不补；已有本插件的发车动作时 {@link RuntimeTrainHandle#accelerateTo}
+     * 自己不重发；身上有别的 TrainCarts 动作（停站、居中）时不补，免得排到它后面。
+     */
+    private void holdSpeed(double speedBpt) {
+      if (accelBpt2 <= 0.0
+          || !Double.isFinite(speedBpt)
+          || speedBpt >= lastWrittenBpt - TrainLaunchManager.TRACTION_EPSILON_BPT
+          || train.hasForeignAction()) {
+        return;
+      }
+      train.accelerateTo(lastWrittenBpt, accelBpt2);
     }
   }
 }

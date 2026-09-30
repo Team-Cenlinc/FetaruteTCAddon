@@ -255,6 +255,87 @@ class SpeedLimitRampTest {
     assertFalse(ramp.holdLimitBps(train).isPresent());
   }
 
+  /** 列车掉到限速以下（被推挤、别的插件改了速度）：当 tick 补牵引，目标就是当前限速，不等下一个调度周期。 */
+  @Test
+  void pullsATrainThatFellBelowTheLimitBackUpToTheLimit() {
+    ManualDriver driver = new ManualDriver();
+    SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
+    RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(22.2 / TICKS);
+    RampTestSupport.MovingTrain train =
+        new RampTestSupport.MovingTrain(limit.properties(), 22.2 / TICKS);
+    train.foreignAction = false;
+
+    ramp.arm(train, limit.properties(), 22.2, hold(30.0), 400, 0.003);
+    driver.tick();
+    assertEquals(0, train.accelerateCalls, "贴住限速时不补");
+
+    train.speedBpt = 21.8 / TICKS;
+    driver.tick();
+    assertEquals(1, train.accelerateCalls);
+    assertEquals(22.2 / TICKS, train.lastAccelerateTargetBpt, 1.0e-12);
+  }
+
+  /** 停站、居中等别的 TrainCarts 动作在身上时不补，免得排到它后面；登记时没给加速度也不补。 */
+  @Test
+  void doesNotPullWhileAnotherActionIsRunningOrWithoutAcceleration() {
+    ManualDriver driver = new ManualDriver();
+    SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
+    RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(22.2 / TICKS);
+    RampTestSupport.MovingTrain train =
+        new RampTestSupport.MovingTrain(limit.properties(), 15.0 / TICKS);
+
+    ramp.arm(train, limit.properties(), 22.2, hold(30.0), 400, 0.003);
+    driver.tick();
+    assertEquals(0, train.accelerateCalls, "有外来动作");
+
+    train.foreignAction = false;
+    ramp.arm(train, limit.properties(), 22.2, hold(30.0), 400);
+    driver.tick();
+    assertEquals(0, train.accelerateCalls, "没给加速度");
+  }
+
+  /** 正在沿包络制动（速度向量高于刚写入的限速）时不补牵引。 */
+  @Test
+  void doesNotPullWhileBrakingAlongTheEnvelope() {
+    ManualDriver driver = new ManualDriver();
+    SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
+    SpeedEnvelope envelope = SpeedEnvelope.empty().with(SpeedEnvelope.braking(40.0, 0.0, 1.0));
+    double commandedBps = envelope.limitBps(0.0);
+    RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(commandedBps / TICKS);
+    RampTestSupport.MovingTrain train =
+        new RampTestSupport.MovingTrain(limit.properties(), commandedBps / TICKS);
+    train.foreignAction = false;
+
+    ramp.arm(train, limit.properties(), commandedBps, envelope, 400, 0.003);
+    for (int tick = 0; tick < 40; tick++) {
+      driver.tick();
+    }
+
+    assertTrue(limit.properties().getSpeedLimit() < commandedBps / TICKS);
+    assertEquals(0, train.accelerateCalls);
+  }
+
+  /** 车头位置按实际里程推算：登记时的取样位置加此后走过的距离；节点不符或没记取样位置时不给。 */
+  @Test
+  void reportsTheDeadReckonedHeadPositionForTheSameNodeOnly() {
+    ManualDriver driver = new ManualDriver();
+    SpeedLimitRamp ramp = new SpeedLimitRamp(driver);
+    RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(20.0 / TICKS);
+    RampTestSupport.MovingTrain train =
+        new RampTestSupport.MovingTrain(limit.properties(), 20.0 / TICKS);
+
+    ramp.arm(train, limit.properties(), 20.0, hold(30.0).withOrigin("SW887", 14.0), 400);
+    for (int tick = 0; tick < 10; tick++) {
+      driver.tick();
+    }
+
+    assertEquals(14.0 + 10.0, ramp.headProgressBlocks(train, "SW887").orElseThrow(), 1.0e-9);
+    assertTrue(ramp.headProgressBlocks(train, "X").isEmpty(), "已过下一节点，取样位置作废");
+
+    ramp.arm(train, limit.properties(), 20.0, hold(30.0), 400);
+    assertTrue(ramp.headProgressBlocks(train, "SW887").isEmpty(), "没记取样位置");
+  }
+
   private static final class ManualDriver implements SpeedLimitRamp.TickDriver {
     private Runnable tick;
     private boolean stopped;

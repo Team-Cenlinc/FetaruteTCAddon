@@ -14,8 +14,9 @@ import org.junit.jupiter.api.Test;
  * <ul>
  *   <li>限速跟随同一个速度天花板（逐 tick 斜坡）；
  *   <li>提速按发车动作的逐 tick 规则（{@link SpeedCurve#nextSpeedBps}，发车动作内部即调用它），动作目标取下发那一刻的天花板， 贴住限速即结束；
- *   <li>动作结束后，限速回升要等下一个调度周期（{@value #CYCLE_TICKS} tick），且高出车速 1%（至少 {@value #RESUME_EPSILON_BPT}
- *       格/tick）才重新下发，作为新的一段加速——与 {@code TrainLaunchManager#shouldResumeTraction} 的门槛一致。
+ *   <li>动作结束后速度保持不变：TrainCarts 的摩擦与重力已关（{@code TrainLaunchManager#disableSlowdown}），这是本模拟成立的前提；
+ *   <li>限速回升要等下一个调度周期（{@value #CYCLE_TICKS} tick），高出车速超过 {@value #RESUME_EPSILON_BPT} 格/tick 就重新下发，
+ *       作为新的一段加速，牵引目标就是限速本身——与 {@code TrainLaunchManager#shouldResumeTraction} 的门槛一致。
  * </ul>
  *
  * <p>剩余偏差来自调度节拍：驶出慢速边后最多晚一个周期才重新加速，每次约 0.1 秒。
@@ -27,11 +28,8 @@ class ControlCurveAlignmentTest {
   /** 调度周期（tick），实服每秒一次。 */
   private static final int CYCLE_TICKS = 20;
 
-  /** 补牵引门槛：目标比车速高出的比例，同 {@code TrainLaunchManager.RESUME_TRACTION_TOLERANCE_RATIO}。 */
-  private static final double RESUME_RATIO = 0.01;
-
-  /** 补牵引门槛的下限（blocks/tick），同 {@code TrainLaunchManager.MOVING_CONTROL_EPSILON_BPT}。 */
-  private static final double RESUME_EPSILON_BPT = 0.005;
+  /** 补牵引门槛（blocks/tick），同 {@code TrainLaunchManager.TRACTION_EPSILON_BPT}。 */
+  private static final double RESUME_EPSILON_BPT = 0.001;
 
   /** 600 格 @20，末端 90 格进站限速区 @10，到站速度 10。 */
   @Test
@@ -73,6 +71,16 @@ class ControlCurveAlignmentTest {
         6.0);
   }
 
+  /** 限速回升不到 1%（22.0→22.15）：旧的 1% 门槛下控车 3000 格一直按 22.0 跑、慢约 0.9 秒，现在牵引目标就是限速。 */
+  @Test
+  void riseBelowOnePercentIsFollowed() {
+    assertAligned(
+        new double[] {200, 3000, 90},
+        new double[] {22.0, 22.15, 22.15},
+        List.of(new SpeedCeiling.Cap(3200.0, 3290.0, 10.0)),
+        10.0);
+  }
+
   private static void assertAligned(
       double[] lengths, double[] speeds, List<SpeedCeiling.Cap> caps, double exitSpeed) {
     double model = RunCurve.nodeTimes(lengths, speeds, caps, 0.0, exitSpeed, METRO)[lengths.length];
@@ -97,9 +105,7 @@ class ControlCurveAlignmentTest {
     double seconds = 0.0;
     for (int n = 0; ; n++) {
       double capBpt = ceiling.limitBps(traveled) / 20.0;
-      if (!launching
-          && n % CYCLE_TICKS == 0
-          && capBpt > velocityBpt + Math.max(RESUME_EPSILON_BPT, capBpt * RESUME_RATIO)) {
+      if (!launching && n % CYCLE_TICKS == 0 && capBpt > velocityBpt + RESUME_EPSILON_BPT) {
         launching = true;
         phaseStartBps = velocityBpt * 20.0;
         targetBpt = capBpt;

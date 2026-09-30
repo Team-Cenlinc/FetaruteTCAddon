@@ -86,6 +86,9 @@ final class RampTestSupport {
     int accelerateCalls;
     double lastAccelerateTargetBpt = Double.NaN;
 
+    /** 身上是否挂着别的 TrainCarts 动作；默认与接口一致（报告不了按“有”处理）。 */
+    boolean foreignAction = true;
+
     MovingTrain(TrainProperties properties, double speedBpt) {
       this.properties = properties;
       this.speedBpt = speedBpt;
@@ -129,6 +132,11 @@ final class RampTestSupport {
     public void accelerateTo(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
       accelerateCalls++;
       lastAccelerateTargetBpt = targetBlocksPerTick;
+    }
+
+    @Override
+    public boolean hasForeignAction() {
+      return foreignAction;
     }
 
     @Override

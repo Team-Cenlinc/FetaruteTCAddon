@@ -134,6 +134,16 @@ public final class RuntimeTrainController {
   }
 
   /**
+   * 逐 tick 斜坡按实际里程推算的车头位置（车头已驶过 {@code nodeKey} 的距离）；推算不可用时为空。
+   *
+   * @param train 运行时列车句柄
+   * @param nodeKey 车头之前最近经过的图节点
+   */
+  public java.util.OptionalDouble headProgressBlocks(RuntimeTrainHandle train, String nodeKey) {
+    return launchManager.headProgressBlocks(train, nodeKey);
+  }
+
+  /**
    * 立即保持停车。
    *
    * <p>用于没有下一节点或异常状态下的兜底停车。常规 STOP 制动仍应优先通过 {@link #applyControl(RuntimeTrainHandle,

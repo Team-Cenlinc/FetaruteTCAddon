@@ -26,7 +26,15 @@ public final class TrainLaunchManager {
   private static final double TICKS_PER_SECOND = 20.0;
   private static final long TICK_MILLIS = 50L;
   private static final double MOVING_CONTROL_EPSILON_BPT = 0.005;
-  private static final double RESUME_TRACTION_TOLERANCE_RATIO = 0.01;
+
+  /**
+   * 补牵引门槛（blocks/tick）：车速低于目标超过它就补牵引，目标就是限速本身。0.001 格/tick = 0.02 格/秒，HUD 上不到 0.1 km/h。
+   *
+   * <p>TrainCarts 摩擦已关（{@link #disableSlowdown}），到速后车速不会自己往下掉，门槛不必留余量；旧的“目标的 1%”会让限速的小幅回升
+   * 永远不补牵引，车一直比编表曲线慢。
+   */
+  static final double TRACTION_EPSILON_BPT = 0.001;
+
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
   private static final String TAG_PENDING_LAUNCH_COMMAND = "FTA_PENDING_LAUNCH_COMMAND";
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
@@ -179,6 +187,7 @@ public final class TrainLaunchManager {
       return new ControlApplicationResult(
           targetBps, OptionalDouble.empty(), Math.max(0.0, targetBps), "none");
     }
+    disableSlowdown(properties);
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
     double decelBpt2 = toBlocksPerTickSquared(config.decelBps2());
     if (accelBpt2 > 0.0 && decelBpt2 > 0.0) {
@@ -232,23 +241,24 @@ public final class TrainLaunchManager {
       }
     }
     boolean resumeTraction = !allowLaunch && shouldResumeTraction(train, toBlocksPerTick(heldBps));
+    // 发车/信号放行/运行中补牵引都由 launch 动作按加速度爬升：速度上限不再“上行限幅”二次压速，也不按迟滞留在旧命令上——
+    // 牵引目标就是限速本身，迟滞会让车一直比限速（编表曲线）慢一截。
+    boolean tractionIssued = allowLaunch || resumeTraction;
     double adjustedBps =
         applySpeedCommandRateLimit(
-            train,
-            properties,
-            heldBps,
-            config,
-            runtimeSettings,
-            false,
-            // 发车/信号放行/运行中补牵引都由 launch 动作按加速度爬升，速度上限不再“上行限幅”二次压速，避免起步或提速过慢。
-            allowLaunch || resumeTraction);
+            train, properties, heldBps, config, runtimeSettings, tractionIssued, tractionIssued);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     if (speedEnvelope == null) {
       speedLimitRamp.acknowledgeWrite(train, properties);
     } else if (train != null && train.isMoving() && !speedEnvelope.isEmpty()) {
       speedLimitRamp.arm(
-          train, properties, adjustedBps, speedEnvelope, speedRampTtlTicks(runtimeSettings));
+          train,
+          properties,
+          adjustedBps,
+          speedEnvelope,
+          speedRampTtlTicks(runtimeSettings),
+          accelBpt2);
     } else {
       speedLimitRamp.release(train);
     }
@@ -303,21 +313,43 @@ public final class TrainLaunchManager {
   }
 
   /**
-   * 运行中列车的目标速度明显高于当前车速时补牵引。
+   * 运行中列车的目标速度高于当前车速时补牵引。
    *
-   * <p>"明显"与 {@link TrainCartsRuntimeHandle#accelerateTo} 的已接近目标判定一致（目标的 1%，至少 {@value
-   * #MOVING_CONTROL_EPSILON_BPT} 格/tick）。身上挂着别的 TrainCarts 动作（停站等待、居中）时不补：launch 会排在它后面执行。
+   * <p>门槛 {@value #TRACTION_EPSILON_BPT} 格/tick，与 {@link TrainCartsRuntimeHandle#accelerateTo}
+   * 一致。身上挂着别的 TrainCarts 动作（停站等待、居中）时不补：launch 会排在它后面执行。
    */
   private boolean shouldResumeTraction(RuntimeTrainHandle train, double targetBlocksPerTick) {
     if (train == null || !train.isMoving() || !Double.isFinite(targetBlocksPerTick)) {
       return false;
     }
     double current = train.currentSpeedBlocksPerTick();
-    double tolerance =
-        Math.max(MOVING_CONTROL_EPSILON_BPT, targetBlocksPerTick * RESUME_TRACTION_TOLERANCE_RATIO);
     return Double.isFinite(current)
-        && targetBlocksPerTick > current + tolerance
+        && targetBlocksPerTick > current + TRACTION_EPSILON_BPT
         && !train.hasForeignAction();
+  }
+
+  /**
+   * 关掉 TrainCarts 的摩擦与坡道重力。
+   *
+   * <p>存档模板没写 {@code slowDown} 时 TrainCarts 默认全开：摩擦每 tick 乘 0.997（22.2 格/秒时约 −1.3 格/秒²）。
+   * 发车动作到速即结束，之后速度一路往下掉，车速就在限速下方来回浮动。列车的加减速全由本插件控制，编表运行曲线也不计摩擦与坡度， 与其一致。全服列车都关（{@link
+   * RuntimeSignalMonitor} 巡检时调用，含非本插件的车）；脱轨车由巡检直接回收，不依赖重力落地。 已关闭时不再写，避免反复触发属性变更。
+   *
+   * @param properties 列车属性；为 {@code null} 时忽略
+   */
+  static void disableSlowdown(TrainProperties properties) {
+    if (properties != null && !properties.isSlowingDownNone()) {
+      properties.setSlowingDown(false);
+    }
+  }
+
+  /**
+   * 逐 tick 斜坡按实际里程推算的车头位置，见 {@link SpeedLimitRamp#headProgressBlocks}。
+   *
+   * @param nodeKey 车头之前最近经过的图节点
+   */
+  public OptionalDouble headProgressBlocks(RuntimeTrainHandle train, String nodeKey) {
+    return speedLimitRamp.headProgressBlocks(train, nodeKey);
   }
 
   /** 撤销该车的逐 tick 限速斜坡（硬停、重发等绕过 {@link #applyControl} 的控车路径调用）。 */

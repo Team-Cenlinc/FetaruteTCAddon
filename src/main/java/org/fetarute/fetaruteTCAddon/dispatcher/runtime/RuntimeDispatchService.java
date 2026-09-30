@@ -19110,19 +19110,34 @@ public final class RuntimeDispatchService {
       return;
     }
     TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+    // 与编表运行曲线同一条 S 形加减速曲线；关闭速度曲线时不按制动曲线提前降速。
+    SpeedCurve speedCurve =
+        configManager.current().runtimeSettings().speedCurveEnabled()
+            ? new SpeedCurve(config.accelBps2(), config.decelBps2())
+            : null;
     // 先获取边限速作为 PROCEED 基准（而非固定 defaultSpeed）
     double edgeLimit =
         resolveEdgeSpeedLimit(
-            train, graph, currentNode, nextNode, configManager.current(), config.decelBps2());
+            train, graph, currentNode, nextNode, configManager.current(), speedCurve);
     TargetSpeedDecision speedDecision =
         resolveTargetSpeedDecision(
             train != null ? train.worldId() : null,
             aspect,
             nextNode,
             edgeLimit,
-            config.decelBps2(),
+            speedCurve,
             lookahead,
             speedOverrides);
+    SpeedEnvelope controlEnvelope = null;
+    if (speedOverrides != null) {
+      controlEnvelope = speedDecision.envelope();
+      ApproachControl approach = speedOverrides.approachControl();
+      if (approach.ceiling().isPresent() && currentNode != null) {
+        // 记下本周期取样的车头位置：斜坡按实际走过的里程推算，下一周期仍在同一节点之后就用它（见 resolveHeadProgressBlocks）。
+        controlEnvelope =
+            controlEnvelope.withOrigin(currentNode.value(), approach.ceilingOffsetBlocks());
+      }
+    }
     // 发车方向由 TrainCarts 依据 destination 自动推导（见 TrainCartsRuntimeHandle#launch），此处不写入额外 tag。
     java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection =
         resolveLaunchDirectionByGraph(graph, currentNode, nextNode);
@@ -19138,7 +19153,7 @@ public final class RuntimeDispatchService {
             launchFallbackDirection,
             configManager.current().runtimeSettings(),
             stopMode,
-            speedOverrides == null ? null : speedDecision.envelope());
+            controlEnvelope);
 
     // 记录诊断数据
     recordDiagnostics(
@@ -19366,13 +19381,25 @@ public final class RuntimeDispatchService {
   /**
    * 车头已驶过当前图节点的距离（沿去往 {@code nextNode} 的首条边）。
    *
-   * <p>取不到车头位置时 {@link TrainPositionResolver} 按整条边剩余计，这里得 0，回到从节点起算的旧口径。
+   * <p>优先用逐 tick 斜坡按实际里程推算的位置（上一周期取样位置加此后走过的距离，见 {@link SpeedLimitRamp#headProgressBlocks}）： {@link
+   * TrainPositionResolver} 按到节点的直线距离占弦长的比例插值，弯道上与实际里程不一致，斜坡在周期之间按里程下调限速，
+   * 每周期再按插值重新取样，限速就会忽高忽低。推算不可用（刚过节点、没有登记斜坡、限速被别处改写）时退回插值；取不到车头位置时 插值按整条边剩余计，这里得 0，回到从节点起算的旧口径。
    */
   private long resolveHeadProgressBlocks(
       RuntimeTrainHandle train, RailGraph graph, NodeId currentNode, NodeId nextNode) {
     OptionalLong total = resolveShortestDistance(graph, currentNode, nextNode);
+    if (total.isEmpty()) {
+      return 0L;
+    }
+    OptionalDouble reckoned =
+        currentNode == null
+            ? OptionalDouble.empty()
+            : runtimeTrainController.headProgressBlocks(train, currentNode.value());
+    if (reckoned.isPresent()) {
+      return Math.max(0L, Math.min(total.getAsLong(), Math.round(reckoned.getAsDouble())));
+    }
     OptionalLong remaining = resolveRemainingDistanceToNode(train, graph, currentNode, nextNode);
-    if (total.isEmpty() || remaining.isEmpty()) {
+    if (remaining.isEmpty()) {
       return 0L;
     }
     return Math.max(0L, total.getAsLong() - remaining.getAsLong());
@@ -27765,7 +27792,7 @@ public final class RuntimeDispatchService {
       SignalAspect aspect,
       NodeId nextNode,
       double edgeLimit,
-      double decelBps2,
+      SpeedCurve speedCurve,
       SignalLookahead.LookaheadResult lookahead,
       ControlSpeedOverrides speedOverrides) {
     double defaultSpeed = configManager.current().graphSettings().defaultSpeedBlocksPerSecond();
@@ -27810,27 +27837,36 @@ public final class RuntimeDispatchService {
                 : "edge_speed_lookahead";
       }
     }
+    // 信号降级（CAUTION）与移动授权给出的上限：不随距离变化，登记为保持约束（见下）。
+    double signalCap = aspect == SignalAspect.PROCEED ? Double.POSITIVE_INFINITY : base;
     if (overrides.movementAuthorityLimitBps().isPresent()) {
       double authorityLimit = overrides.movementAuthorityLimitBps().getAsDouble();
-      if (Double.isFinite(authorityLimit) && authorityLimit >= 0.0 && authorityLimit < target) {
-        target = authorityLimit;
-        limiterSource = "movement_authority";
+      if (Double.isFinite(authorityLimit) && authorityLimit >= 0.0) {
+        signalCap = Math.min(signalCap, authorityLimit);
+        if (authorityLimit < target) {
+          target = authorityLimit;
+          limiterSource = "movement_authority";
+        }
       }
     }
+    if (aspect != SignalAspect.STOP && signalCap < proceedBase - 1.0e-6) {
+      // 过节点的推进放行只按边限速与天花板放行，不知道这两项；不挡住就会每过一个节点把车抬回线路速度、下一周期再硬截回来。
+      // 下一周期按完整判定重新登记，信号恢复即解除。
+      double heldCap = signalCap;
+      envelope = envelope.withHold(traveled -> heldCap);
+    }
     OptionalDouble edgeLookaheadLimit = OptionalDouble.empty();
-    if (lookahead != null
-        && !lookahead.edgeSpeedConstraints().isEmpty()
-        && configManager.current().runtimeSettings().speedCurveEnabled()) {
-      double lookedAhead =
-          applyEdgeSpeedLookahead(target, decelBps2, lookahead.edgeSpeedConstraints());
+    if (lookahead != null && !lookahead.edgeSpeedConstraints().isEmpty() && speedCurve != null) {
+      // 前方慢速边按编表运行曲线同一条 S 形制动曲线提前降速（以本周期目标为巡航速度），车头处的值即本周期上限。
+      SpeedEnvelope edgeEnvelope =
+          SpeedEnvelope.edgeSpeedConstraints(lookahead.edgeSpeedConstraints(), speedCurve, target);
+      double lookedAhead = edgeEnvelope.limitBps(0.0);
       if (lookedAhead < target - 1.0e-6) {
         edgeLookaheadLimit = OptionalDouble.of(lookedAhead);
         target = lookedAhead;
         limiterSource = "edge_speed_lookahead";
       }
-      envelope =
-          envelope.withAll(
-              SpeedEnvelope.edgeSpeedConstraints(lookahead.edgeSpeedConstraints(), decelBps2));
+      envelope = envelope.withAll(edgeEnvelope);
     }
     return new TargetSpeedDecision(
         edgeLimit,
@@ -30489,7 +30525,7 @@ public final class RuntimeDispatchService {
    * <p>不能取整段最小值：一条 48 格的默认限速道岔边会把 865 格的站间全压到 8 格/秒， 而编表与 ETA 都按逐边限速算（2026-09-27 实服 WS LWN→SWN
    * 每趟因此晚 51 秒）。
    *
-   * @param decelBps2 列车制动减速度，用于前方更低限速的制动曲线
+   * @param speedCurve 列车加减速曲线，用于前方更低限速的制动曲线；为 {@code null}（关闭速度曲线）时取整段最小限速
    */
   private double resolveEdgeSpeedLimit(
       RuntimeTrainHandle train,
@@ -30497,7 +30533,7 @@ public final class RuntimeDispatchService {
       NodeId from,
       NodeId to,
       ConfigManager.ConfigView config,
-      double decelBps2) {
+      SpeedCurve speedCurve) {
     if (train == null || graph == null || from == null || to == null || config == null) {
       return -1.0;
     }
@@ -30519,13 +30555,13 @@ public final class RuntimeDispatchService {
     }
     List<RailEdge> edges = pathOpt.get().edges();
     SignalLookahead.EdgeSpeedResolver resolver = createEdgeSpeedResolver(worldId);
-    double brakingDecel = config.runtimeSettings().speedCurveEnabled() ? decelBps2 : 0.0;
-    OptionalDouble envelope = SignalLookahead.pathSpeedEnvelope(edges, resolver, brakingDecel, 0L);
+    SpeedCurve brakingCurve = config.runtimeSettings().speedCurveEnabled() ? speedCurve : null;
+    OptionalDouble envelope = SignalLookahead.pathSpeedEnvelope(edges, resolver, brakingCurve, 0L);
     if (envelope.isPresent() && envelope.getAsDouble() < resolver.resolve(edges.get(0))) {
       // 前方有更低限速在约束：按车头实际位置重算，车头越过首节点越远，离慢速边越近。
       envelope =
           SignalLookahead.pathSpeedEnvelope(
-              edges, resolver, brakingDecel, resolveHeadProgressBlocks(train, graph, from, to));
+              edges, resolver, brakingCurve, resolveHeadProgressBlocks(train, graph, from, to));
     }
     return envelope.orElse(defaultSpeed);
   }
@@ -30540,57 +30576,6 @@ public final class RuntimeDispatchService {
     Instant now = clockNow();
     return edge ->
         railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeed);
-  }
-
-  /**
-   * 边限速前瞻：根据前方边的限速约束计算当前应该的最大速度。
-   *
-   * <p>算法：对于每个前方的限速约束，使用物理公式反推"从当前位置能安全减速到目标限速所需的最大起始速度"：
-   *
-   * <ul>
-   *   <li>制动距离公式: d = (v² - v_target²) / (2 * a)
-   *   <li>反推: v_max = √(v_target² + 2 * a * d)
-   * </ul>
-   *
-   * <p>取所有约束计算结果的最小值作为当前允许的最大速度。
-   *
-   * @param currentTargetBps 当前目标速度（blocks/s）
-   * @param decelBps2 减速度（blocks/s²）
-   * @param constraints 前方边限速约束列表
-   * @return 调整后的目标速度
-   */
-  private double applyEdgeSpeedLookahead(
-      double currentTargetBps,
-      double decelBps2,
-      List<SignalLookahead.EdgeSpeedConstraint> constraints) {
-    if (constraints == null || constraints.isEmpty()) {
-      return currentTargetBps;
-    }
-    if (!Double.isFinite(decelBps2) || decelBps2 <= 0.0) {
-      return currentTargetBps;
-    }
-
-    double minAllowedSpeed = currentTargetBps;
-    for (SignalLookahead.EdgeSpeedConstraint constraint : constraints) {
-      double distance = constraint.distanceBlocks();
-      double targetLimit = constraint.speedLimitBps();
-
-      // 跳过"距离为 0 且限速不低于当前目标"的约束（当前边，已在 targetBps 中考虑）
-      if (distance <= 0 && targetLimit >= currentTargetBps) {
-        continue;
-      }
-
-      // 计算从当前位置能安全减速到 targetLimit 所需的最大起始速度
-      // v_max = √(v_target² + 2 * a * d)
-      double maxSpeedForConstraint =
-          Math.sqrt(targetLimit * targetLimit + 2.0 * decelBps2 * distance);
-
-      if (Double.isFinite(maxSpeedForConstraint) && maxSpeedForConstraint > 0.0) {
-        minAllowedSpeed = Math.min(minAllowedSpeed, maxSpeedForConstraint);
-      }
-    }
-
-    return minAllowedSpeed;
   }
 
   private Optional<RailEdge> findEdge(RailGraph graph, NodeId from, NodeId to) {
