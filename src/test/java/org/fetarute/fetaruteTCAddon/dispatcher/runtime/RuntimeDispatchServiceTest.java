@@ -6838,8 +6838,8 @@ class RuntimeDispatchServiceTest {
     assertTrue(recoveryRequested.get());
     assertTrue(duplicate.hardStopCalls > 0);
     assertEquals(0, duplicate.launchCalls);
-    // 孪生必须被隔离并销毁，否则全局重建永远收敛不了；属主编组不受牵连。
-    assertEquals(1, duplicate.destroyCalls);
+    // 两个都是规范名的真重复分不清本体：不在启动校验里销毁，交给监控的重复列车清理。
+    assertEquals(0, duplicate.destroyCalls);
     assertEquals(0, existing.destroyCalls);
     assertEquals(versionBeforeDuplicate, occupancyManager.version());
     assertTrue(

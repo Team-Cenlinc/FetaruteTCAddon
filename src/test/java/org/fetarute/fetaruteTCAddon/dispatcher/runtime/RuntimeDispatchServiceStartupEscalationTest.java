@@ -61,27 +61,27 @@ class RuntimeDispatchServiceStartupEscalationTest {
         worldId, new TagStore(tcName, tags.toArray(String[]::new)).properties(), false);
   }
 
-  /** 两个活编组带同一逻辑身份：多出来的那个被隔离并销毁，重建才能在没有孪生的现场上收敛。 */
+  /** 拆分别名残编与占着规范名的本体并存：残编被隔离并销毁，重建才能在没有孪生的现场上收敛。 */
   @Test
-  void duplicateTwinIsIsolatedAndRecoveryConverges() {
+  void splitAliasTwinIsIsolatedAndRecoveryConverges() {
     RuntimeDispatchService service = newService(new DwellRegistry());
-    FakeTrain existing = train("shared-owner", null);
-    FakeTrain twin = train("shared-owner", null);
+    FakeTrain existing = train("shared-owner", "shared-owner");
+    FakeTrain twin = train("shared-owner~a", "shared-owner");
     AtomicInteger recoveryRequests = new AtomicInteger();
     service.setStartupRecoveryRequestedListener(recoveryRequests::incrementAndGet);
     assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
 
     service.handleSignalTick(twin, false);
-    assertEquals(1, recoveryRequests.get());
+    assertEquals(1, recoveryRequests.get(), debugMessages::toString);
     assertEquals(1, twin.destroyCalls);
     assertEquals(0, existing.destroyCalls);
 
-    // 孪生已被隔离：它再次触发信号检查只硬停，不会再请求全局恢复。
+    // 残编已被隔离：它再次触发信号检查只硬停，不会再请求全局恢复。
     service.handleSignalTick(twin, false);
     service.handleSignalTick(twin, false);
     assertEquals(1, recoveryRequests.get());
 
-    // 孪生还活着时重建拒绝提交；实体被移除后同一现场一次收敛。
+    // 残编还活着时重建拒绝提交；实体被移除后同一现场一次收敛。
     assertFalse(service.rebuildOccupancySnapshot(List.of(existing, twin)));
     service.handleTrainRemoved(twin);
     int requestsAfterRemoval = recoveryRequests.get();
@@ -93,31 +93,42 @@ class RuntimeDispatchServiceStartupEscalationTest {
   }
 
   /**
-   * 名字对不上时无法断定谁是孪生，不能销毁；这辆车反复触发全局重建时，限流之后只隔离本车、不再拖全网。
+   * 分不清谁是本体（两个都是规范名的真重复）时不能销毁：全局门保持关闭，交给监控的重复列车清理。
    *
-   * <p>重建治不好这辆车（下面每轮都把现场重建回只含 existing 的 READY），它就会在下一次信号检查里再触发一遍。
+   * <p>销毁不可逆，宁可全网等一次监控清理，也不能凭启动校验的名字判断误杀完整编组。
    */
   @Test
-  void repeatedEscalationFromOneAmbiguousTrainIsContainedAfterLimit() {
+  void ambiguousDuplicateIsNotDestroyedAndKeepsGlobalGateClosed() {
     RuntimeDispatchService service = newService(new DwellRegistry());
-    FakeTrain existing = train("shared-owner", null);
-    FakeTrain ambiguous = train("shared-owner", "some-other-owner");
+    FakeTrain existing = train("shared-owner", "shared-owner");
+    FakeTrain otherCanonical = train("shared-owner", "shared-owner");
     AtomicInteger recoveryRequests = new AtomicInteger();
     service.setStartupRecoveryRequestedListener(recoveryRequests::incrementAndGet);
+    assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
 
-    for (int i = 0; i < 10; i++) {
-      assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
-      service.handleSignalTick(ambiguous, false);
-    }
+    service.handleSignalTick(otherCanonical, false);
 
-    assertEquals(3, recoveryRequests.get(), debugMessages::toString);
-    assertEquals(0, ambiguous.destroyCalls, "名字对不上的编组不能被当成孪生销毁");
-    assertTrue(
-        debugMessages.stream().anyMatch(m -> m.contains("SMART_STARTUP_ESCALATION_SUPPRESSED")),
-        debugMessages::toString);
-    // 限流后全局门保持 READY，其余列车不再被牵连。
-    assertTrue(service.captureReadyStartupRecoveryEpoch().isPresent());
-    assertTrue(ambiguous.hardStopCalls > 0, "被限流的车本身仍必须保持硬停");
+    assertEquals(1, recoveryRequests.get());
+    assertEquals(0, otherCanonical.destroyCalls);
+    assertEquals(0, existing.destroyCalls);
+    assertTrue(otherCanonical.hardStopCalls > 0);
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isEmpty(), "全局授权门必须保持关闭");
+  }
+
+  /** tag 里的 owner 名与当前名对不上时，即使当前名是别名也不销毁。 */
+  @Test
+  void aliasWithMismatchedOwnerTagIsNotDestroyed() {
+    RuntimeDispatchService service = newService(new DwellRegistry());
+    FakeTrain existing = train("shared-owner", "shared-owner");
+    FakeTrain mismatched = train("shared-owner~a", "some-other-owner");
+    service.setStartupRecoveryRequestedListener(() -> {});
+    assertTrue(service.rebuildOccupancySnapshot(List.of(existing)));
+
+    service.handleSignalTick(mismatched, false);
+
+    assertEquals(0, mismatched.destroyCalls);
+    assertEquals(0, existing.destroyCalls);
+    assertTrue(service.captureReadyStartupRecoveryEpoch().isEmpty());
   }
 
   /**

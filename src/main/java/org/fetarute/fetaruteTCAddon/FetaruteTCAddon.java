@@ -58,6 +58,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RecoveryRequestBackoff;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchDiagnosticGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
@@ -147,10 +148,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /** 连续恢复请求达到该次数时打一条警告（20 tick 退避后约 2 秒一次，这一串已持续 10 秒以上）。 */
   private static final int RECOVERY_STORM_WARNING_THRESHOLD = 10;
 
-  private final org.fetarute.fetaruteTCAddon.dispatcher.runtime.RecoveryRequestBackoff
-      runtimeRecoveryRequestBackoff =
-          new org.fetarute.fetaruteTCAddon.dispatcher.runtime.RecoveryRequestBackoff(
-              java.time.Duration.ofSeconds(10), System::nanoTime);
+  private final RecoveryRequestBackoff runtimeRecoveryRequestBackoff =
+      new RecoveryRequestBackoff(java.time.Duration.ofSeconds(10), System::nanoTime);
   private org.bukkit.scheduler.BukkitTask healthMonitorTask;
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
@@ -742,7 +741,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   private void scheduleRuntimeOccupancyReconstruction(long delayTicks) {
     RuntimeDispatchService service = runtimeDispatchService;
-    if (service == null || (runtimeRecoveryTask != null && !runtimeRecoveryTask.isCancelled())) {
+    if (service == null || isRuntimeRecoveryTaskPending()) {
       // 已有待执行任务时丢弃本次请求是有意的（避免重复重建），但丢弃本身必须可见：
       // 若任务因故永不执行，这里就是"恢复请求全部被吞掉"的唯一证据。
       debug(
@@ -831,12 +830,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 Math.max(1L, delayTicks));
   }
 
+  private boolean isRuntimeRecoveryTaskPending() {
+    return runtimeRecoveryTask != null && !runtimeRecoveryTask.isCancelled();
+  }
+
   /** 由调度服务请求的迟加载/重组列车全局 fail-safe 恢复。 */
   private void requestRuntimeDispatchRecovery(String reason) {
     if (!isEnabled() || runtimeDispatchService == null) {
       return;
     }
     beginRuntimeDispatchRecovery(reason);
+    if (isRuntimeRecoveryTaskPending()) {
+      // 已有待执行的重建：同一 tick 里几十辆迟加载车的请求只算一次，不能推进退避计数。
+      scheduleRuntimeOccupancyReconstruction(1L);
+      return;
+    }
     long delayTicks = runtimeRecoveryRequestBackoff.nextDelayTicks();
     int burst = runtimeRecoveryRequestBackoff.consecutiveRequests();
     if (burst == RECOVERY_STORM_WARNING_THRESHOLD) {
