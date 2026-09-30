@@ -222,6 +222,64 @@ class RuntimeSignalReevaluationSchedulerTest {
     assertTrue(reevaluated.isEmpty());
   }
 
+  @Test
+  void selfRequeueingTrainIsReportedOncePerIntervalWithoutBeingDropped() {
+    ManualNextTickScheduler nextTick = new ManualNextTickScheduler();
+    List<String> reevaluated = new ArrayList<>();
+    List<String> warnings = new ArrayList<>();
+    RuntimeSignalReevaluationScheduler[] holder = new RuntimeSignalReevaluationScheduler[1];
+    holder[0] =
+        withFrozenClock(
+            nextTick,
+            trainName -> {
+              reevaluated.add(trainName);
+              holder[0].request(trainName);
+            },
+            (trainName, error) -> {},
+            warnings::add);
+
+    holder[0].request("train-A");
+    int ticks = RuntimeSignalReevaluationScheduler.SELF_REQUEUE_WARNING_INTERVAL * 2;
+    for (int i = 0; i < ticks; i++) {
+      nextTick.runNextTick();
+    }
+
+    assertEquals(ticks, reevaluated.size(), "告警只观察，不得吞掉任何一次重评估");
+    assertEquals(2, warnings.size());
+    assertTrue(warnings.get(0).contains("SIGNAL_REEVALUATION_SELF_REQUEUE train=train-A"));
+    assertTrue(warnings.get(0).contains("consecutiveDrains=100"));
+  }
+
+  @Test
+  void streakResetsWhenTrainStopsBeingRequeued() {
+    ManualNextTickScheduler nextTick = new ManualNextTickScheduler();
+    List<String> warnings = new ArrayList<>();
+    // 首次请求 + 98 次自我重排 = 连续 99 个 drain，差一个就到告警线。
+    int[] remaining = {RuntimeSignalReevaluationScheduler.SELF_REQUEUE_WARNING_INTERVAL - 2};
+    RuntimeSignalReevaluationScheduler[] holder = new RuntimeSignalReevaluationScheduler[1];
+    holder[0] =
+        withFrozenClock(
+            nextTick,
+            trainName -> {
+              if (remaining[0]-- > 0) {
+                holder[0].request(trainName);
+              }
+            },
+            (trainName, error) -> {},
+            warnings::add);
+
+    holder[0].request("train-A");
+    for (int i = 0; i < RuntimeSignalReevaluationScheduler.SELF_REQUEUE_WARNING_INTERVAL; i++) {
+      nextTick.runNextTick();
+    }
+    // 链在第 99 个 drain 自然收敛；再来一次请求，计数必须从头开始而不是接着 100。
+    holder[0].request("train-A");
+    remaining[0] = 0;
+    nextTick.runNextTick();
+
+    assertTrue(warnings.isEmpty(), warnings.toString());
+  }
+
   private static final class ManualNextTickScheduler
       implements RuntimeSignalReevaluationScheduler.NextTickScheduler {
 

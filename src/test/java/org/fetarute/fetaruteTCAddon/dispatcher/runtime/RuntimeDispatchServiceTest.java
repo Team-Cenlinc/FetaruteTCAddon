@@ -6838,6 +6838,9 @@ class RuntimeDispatchServiceTest {
     assertTrue(recoveryRequested.get());
     assertTrue(duplicate.hardStopCalls > 0);
     assertEquals(0, duplicate.launchCalls);
+    // 两个都是规范名的真重复分不清本体：不在启动校验里销毁，交给监控的重复列车清理。
+    assertEquals(0, duplicate.destroyCalls);
+    assertEquals(0, existing.destroyCalls);
     assertEquals(versionBeforeDuplicate, occupancyManager.version());
     assertTrue(
         debugMessages.stream()
@@ -7540,7 +7543,8 @@ class RuntimeDispatchServiceTest {
     return startupReconstructionService(worldId, route, occupancyManager, null);
   }
 
-  private static RuntimeDispatchService startupReconstructionService(
+  /** 同包的启动恢复专题测试类复用（本类方法数贴着 1000 上限，新用例另开类）。 */
+  static RuntimeDispatchService startupReconstructionService(
       UUID worldId,
       RouteDefinition route,
       OccupancyManager occupancyManager,
@@ -7555,6 +7559,17 @@ class RuntimeDispatchServiceTest {
       OccupancyManager occupancyManager,
       java.util.function.Consumer<String> debugLogger,
       RailGraph graph) {
+    return startupReconstructionService(
+        worldId, route, occupancyManager, debugLogger, graph, new DwellRegistry());
+  }
+
+  static RuntimeDispatchService startupReconstructionService(
+      UUID worldId,
+      RouteDefinition route,
+      OccupancyManager occupancyManager,
+      java.util.function.Consumer<String> debugLogger,
+      RailGraph graph,
+      DwellRegistry dwellRegistry) {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
     RailGraphService railGraphService = mock(RailGraphService.class);
@@ -7571,14 +7586,14 @@ class RuntimeDispatchServiceTest {
         new RouteProgressRegistry(),
         mock(SignNodeRegistry.class),
         mock(LayoverRegistry.class),
-        new DwellRegistry(),
+        dwellRegistry,
         configManager,
         null,
         new TrainConfigResolver(),
         debugLogger);
   }
 
-  private static RailGraph startupPhysicalGraph(UUID worldId) {
+  static RailGraph startupPhysicalGraph(UUID worldId) {
     NodeId from = NodeId.of("A");
     NodeId to = NodeId.of("B");
     RailEdge edge =

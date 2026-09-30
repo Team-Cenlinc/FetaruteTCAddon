@@ -58,6 +58,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RecoveryRequestBackoff;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchDiagnosticGate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchListener;
@@ -143,6 +144,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private ReclaimManager reclaimManager;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
+
+  /** 连续恢复请求达到该次数时打一条警告（20 tick 退避后约 2 秒一次，这一串已持续 10 秒以上）。 */
+  private static final int RECOVERY_STORM_WARNING_THRESHOLD = 10;
+
+  private final RecoveryRequestBackoff runtimeRecoveryRequestBackoff =
+      new RecoveryRequestBackoff(java.time.Duration.ofSeconds(10), System::nanoTime);
   private org.bukkit.scheduler.BukkitTask healthMonitorTask;
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
@@ -734,7 +741,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   private void scheduleRuntimeOccupancyReconstruction(long delayTicks) {
     RuntimeDispatchService service = runtimeDispatchService;
-    if (service == null || (runtimeRecoveryTask != null && !runtimeRecoveryTask.isCancelled())) {
+    if (service == null || isRuntimeRecoveryTaskPending()) {
       // 已有待执行任务时丢弃本次请求是有意的（避免重复重建），但丢弃本身必须可见：
       // 若任务因故永不执行，这里就是"恢复请求全部被吞掉"的唯一证据。
       debug(
@@ -823,13 +830,35 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 Math.max(1L, delayTicks));
   }
 
+  private boolean isRuntimeRecoveryTaskPending() {
+    return runtimeRecoveryTask != null && !runtimeRecoveryTask.isCancelled();
+  }
+
   /** 由调度服务请求的迟加载/重组列车全局 fail-safe 恢复。 */
   private void requestRuntimeDispatchRecovery(String reason) {
     if (!isEnabled() || runtimeDispatchService == null) {
       return;
     }
     beginRuntimeDispatchRecovery(reason);
-    scheduleRuntimeOccupancyReconstruction(1L);
+    if (isRuntimeRecoveryTaskPending()) {
+      // 已有待执行的重建：同一 tick 里几十辆迟加载车的请求只算一次，不能推进退避计数。
+      scheduleRuntimeOccupancyReconstruction(1L);
+      return;
+    }
+    long delayTicks = runtimeRecoveryRequestBackoff.nextDelayTicks();
+    int burst = runtimeRecoveryRequestBackoff.consecutiveRequests();
+    if (burst == RECOVERY_STORM_WARNING_THRESHOLD) {
+      getLogger()
+          .warning(
+              "运行时恢复请求连续触发 "
+                  + burst
+                  + " 次仍未收敛，已按 "
+                  + delayTicks
+                  + " tick 退避重试；最近原因="
+                  + reason
+                  + "。请检查 SMART_DUPLICATE_LOGICAL_OWNER_IDENTITY / late-load-quarantine 日志定位问题编组。");
+    }
+    scheduleRuntimeOccupancyReconstruction(delayTicks);
   }
 
   /**
@@ -1006,7 +1035,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             occupancyManager, runtimeDispatchService::trainsWaitingForDynamicCapacity);
     signalReevaluationScheduler =
         new RuntimeSignalReevaluationScheduler(
-            task -> getServer().getScheduler().runTask(this, task),
+            // 必须是 runTaskLater(1)：runTask(delay 0) 会在同一 tick 的 heartbeat 里再次执行，
+            // 自我重排的 drain 链就成了主线程死循环（2026-09-30 看门狗强杀）。
+            task -> getServer().getScheduler().runTaskLater(this, task, 1L),
             runtimeDispatchService::reevaluateSignalByName,
             runtimeDispatchService::failClosedAfterSignalReevaluationFailure,
             runtimeDispatchDiagnostics());

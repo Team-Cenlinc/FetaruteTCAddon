@@ -8355,6 +8355,20 @@ public final class RuntimeDispatchService {
       return expectedMaterializedSpawnHydrationBlocks(
           train, trainName, trainKey, runtimeIdentity, expectedSpawn, normalizedSource);
     }
+    // 水合记录用的是 handleRenameIfNeeded 给出的 owner 名（改名迁移失败时是旧名），而这里的 trainKey 来自
+    // resolveTrackedTrainName（直接取当前 TrainCarts 名）。两者在"改名迁移被拒"时不一致：2026-09-30 09:15
+    // 实服里 SURC-DS-LW-5925 被 TrainCarts 命名成 SURC-MT-LP-2498~k，每个 tick 都查不到自己的水合记录，
+    // 于是每次信号检查都重新提交一遍物理占用，提交又唤醒下一轮重评估，链永不收敛。按 tag 里的 owner 名再认一次。
+    String taggedOwnerKey =
+        TrainTagHelper.readTagValue(train.properties(), RouteProgressRegistry.TAG_TRAIN_NAME)
+            .flatMap(RuntimeDispatchService::normalizeTrainName)
+            .map(RuntimeDispatchService::normalizeTrainKey)
+            .orElse("");
+    if (runtimeIdentity != null
+        && !taggedOwnerKey.isBlank()
+        && hydratedPhysicalOwnerIdentities.get(taggedOwnerKey) == runtimeIdentity) {
+      return false;
+    }
     Object hydratedIdentity = hydratedPhysicalOwnerIdentities.get(trainKey);
     if (!trainKey.isBlank() && hydratedIdentity == runtimeIdentity) {
       return false;
@@ -8369,18 +8383,22 @@ public final class RuntimeDispatchService {
               + " source="
               + normalizedSource
               + " action=global-stop-first");
-      beginStartupOccupancyReconstruction("startupOccupancyRecoveryBlocks");
-      try {
-        startupRecoveryRequestedListener.run();
-      } catch (RuntimeException | LinkageError ex) {
+      // 全局重建本身收敛不了"拆分残编与本体并存"：快照里同名只能记一个，另一个在 READY 后每个 tick 都会再次
+      // 撞进这里（2026-09-30 08:37 实服循环 15 秒）。与 RuntimeSignalMonitor 的 canonical 规则保持一致：
+      // 只有本车是 ~x 临时别名、且已记录的属主编组仍然存活并占着规范名时，才把这个别名残编隔离并销毁。
+      // 两个都是规范名的真重复、或分不清谁是本体的情形不在这里销毁：全局门保持关闭，交给监控的重复列车清理。
+      if (isSplitAliasOfLiveHydratedOwner(train, trainName, hydratedIdentity, taggedOwnerKey)) {
+        quarantineVerifiedFtaAbnormalPhysicalIdentity(train);
+        stopAbnormalTrainBeforeDestroy(train, trainName);
+        destroyAbnormalTrain(train, trainName);
         debugLogger.accept(
-            "SMART_STARTUP_RECOVERY_REQUEST_FAILED train="
+            "SMART_DUPLICATE_LOGICAL_OWNER_ISOLATED train="
                 + trainName
-                + " error="
-                + ex.getClass().getSimpleName()
-                + ":"
-                + String.valueOf(ex.getMessage()));
+                + " source="
+                + normalizedSource
+                + " action=quarantine-and-destroy");
       }
+      requestStartupRecoveryAfterHydrationFailure(train, trainName, normalizedSource);
       return true;
     }
 
@@ -8428,6 +8446,18 @@ public final class RuntimeDispatchService {
               + normalizedSource);
     }
 
+    requestStartupRecoveryAfterHydrationFailure(train, trainName, normalizedSource);
+    return true;
+  }
+
+  /**
+   * READY 之后某辆车过不了水合校验：关闭全局授权门并请求整网重建。
+   *
+   * <p>始终失效关闭：这辆车的足迹没能进入占用账本，放行别的列车就可能撞上它。重建请求由插件层按 1 → 5 → 20 tick 退避， 治不好这辆车时全网最多每秒重建一次，而不是每 tick
+   * 一次。
+   */
+  private void requestStartupRecoveryAfterHydrationFailure(
+      RuntimeTrainHandle train, String trainName, String source) {
     beginStartupOccupancyReconstruction("startupOccupancyRecoveryBlocks");
     try {
       startupRecoveryRequestedListener.run();
@@ -8435,12 +8465,46 @@ public final class RuntimeDispatchService {
       debugLogger.accept(
           "SMART_STARTUP_RECOVERY_REQUEST_FAILED train="
               + trainName
+              + " source="
+              + source
               + " error="
               + ex.getClass().getSimpleName()
               + ":"
               + String.valueOf(ex.getMessage()));
     }
-    return true;
+  }
+
+  /**
+   * 本车是不是已记录属主的 ~x 拆分别名残编：属主仍然存活、用规范名、且 tag 名与本车逻辑名一致。
+   *
+   * <p>销毁不可逆，所以判据取最窄：任何一条对不上（属主已失效、属主自己也是别名、名字与 tag 对不上）都返回 false， 由全局门与监控的重复列车清理兜底。
+   */
+  private boolean isSplitAliasOfLiveHydratedOwner(
+      RuntimeTrainHandle train, String trainName, Object hydratedIdentity, String taggedOwnerKey) {
+    if (hydratedIdentity == null
+        || hydratedIdentity == train.physicalRuntimeIdentity()
+        || taggedOwnerKey.isBlank()
+        || !taggedOwnerKey.equals(normalizeTrainKey(trainName))) {
+      return false;
+    }
+    boolean ownerAlive;
+    String ownerRawName;
+    if (hydratedIdentity instanceof MinecartGroup ownerGroup) {
+      ownerAlive = ownerGroup.isValid();
+      TrainProperties ownerProperties = ownerGroup.getProperties();
+      ownerRawName = ownerProperties == null ? null : ownerProperties.getTrainName();
+    } else if (hydratedIdentity instanceof RuntimeTrainHandle ownerHandle) {
+      ownerAlive = ownerHandle.isValid();
+      TrainProperties ownerProperties = ownerHandle.properties();
+      ownerRawName = ownerProperties == null ? null : ownerProperties.getTrainName();
+    } else {
+      return false;
+    }
+    String ownReadableName = train.properties().getTrainName();
+    return ownerAlive
+        && ownerRawName != null
+        && ownerRawName.equalsIgnoreCase(trainName)
+        && isSplitAliasName(ownReadableName, trainName);
   }
 
   /**
