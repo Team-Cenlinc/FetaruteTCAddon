@@ -293,6 +293,67 @@ class TimetableSpawnManagerTest {
                 duty.closeReason())));
   }
 
+  /**
+   * 交路换车：车晚 460 秒到终点 CCC（超过容差 + 追赶余量），替补车现在出库还赶得上第二班（08:10 发、08:15 前），交路空出来；
+   * 下一次轮询发出替补出库票，派发时新车绑上交路。替补票作废则下一轮再发。
+   */
+  @Test
+  void aVacantDutyGetsAReplacementCreateTicket() {
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(DAY.plusSeconds(8 * 3600 + 5));
+    List<String> logs = new ArrayList<>();
+    TimetableService service = new TimetableService(clock::get, logs::add);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofHours(24),
+            ZONE));
+    StorageProvider provider = mock(StorageProvider.class);
+    TimetableRepository repository = mock(TimetableRepository.class);
+    when(provider.timetables()).thenReturn(repository);
+    when(repository.listPublished()).thenReturn(List.of(timetable()));
+    service.reload(provider);
+    SpawnManager delegate = mock(SpawnManager.class);
+    when(delegate.pollDueTickets(any(), any())).thenReturn(List.of());
+    when(delegate.snapshotPlan()).thenReturn(plan());
+    TimetableSpawnManager manager = new TimetableSpawnManager(delegate, service, logs::add);
+
+    service.scheduledDepartureAt(stop("train-A", 0, clock.get()));
+    clock.set(DAY.plusSeconds(8 * 3600 + 11 * 60 + 30));
+    service.observeStop(stop("train-A", 1, clock.get()), false);
+    assertTrue(service.dutyBindingOf("train-A").isEmpty(), "晚 460 秒，交路换车");
+
+    List<SpawnTicket> first = manager.pollDueTickets(provider, clock.get());
+    assertEquals(1, first.size(), first::toString);
+    SpawnTicket replacement = first.get(0);
+    assertEquals(CREATE_ROUTE, replacement.service().routeId());
+    assertTrue(
+        logs.stream()
+            .anyMatch(line -> line.contains("TIMETABLE_SPAWN_TICKET kind=CREATE replacement=true")),
+        logs::toString);
+
+    manager.complete(replacement);
+    List<SpawnTicket> retried = manager.pollDueTickets(provider, clock.get().plusSeconds(5));
+    assertEquals(1, retried.size(), "作废之后还赶得上，再发一张");
+
+    manager.onDispatched(retried.get(0), "train-B");
+    assertEquals(
+        Optional.of(
+            new TimetableService.DutyKey(TIMETABLE, DUTY, java.time.LocalDate.of(2026, 3, 2))),
+        service.dutyBindingOf("train-B"));
+    assertEquals(0, service.vacantDutyCount());
+    assertTrue(manager.pollDueTickets(provider, clock.get().plusSeconds(10)).isEmpty(), "空缺已填上");
+  }
+
+  private static org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent stop(
+      String train, int index, Instant at) {
+    return new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent(
+        train, Optional.of(ROUTE), "R1", index, 2, index == 0 ? "OP:S:AAA:1" : "OP:S:CCC:1", at);
+  }
+
   private static Fixture fixture() {
     return fixture(timetable());
   }

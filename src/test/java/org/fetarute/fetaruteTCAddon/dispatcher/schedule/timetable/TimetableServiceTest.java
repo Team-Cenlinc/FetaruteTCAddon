@@ -28,14 +28,14 @@ import org.junit.jupiter.api.Test;
  */
 class TimetableServiceTest {
 
-  private static final ZoneId ZONE = ZoneId.of("UTC");
+  static final ZoneId ZONE = ZoneId.of("UTC");
   private static final UUID COMPANY = UUID.randomUUID();
   private static final UUID OPERATOR = UUID.randomUUID();
   private static final UUID LINE = UUID.randomUUID();
-  private static final UUID ROUTE = UUID.randomUUID();
-  private static final UUID CREATE_ROUTE = UUID.randomUUID();
+  static final UUID ROUTE = UUID.randomUUID();
+  static final UUID CREATE_ROUTE = UUID.randomUUID();
   private static final UUID RETURN_ROUTE = UUID.randomUUID();
-  private static final UUID TIMETABLE = UUID.randomUUID();
+  static final UUID TIMETABLE = UUID.randomUUID();
 
   /** 两班车、一个只能跑两班的交路。 */
   private static Timetable timetable(TimetableStatus status) {
@@ -43,7 +43,7 @@ class TimetableServiceTest {
   }
 
   /** {@code tripCount} 班车（08:00 起每 10 分钟一班）、一个跑完全部班次的交路。 */
-  private static Timetable timetable(TimetableStatus status, int tripCount) {
+  static Timetable timetable(TimetableStatus status, int tripCount) {
     UUID dutyId = UUID.randomUUID();
     List<TimetableTrip> trips = new ArrayList<>();
     for (int index = 0; index < tripCount; index++) {
@@ -184,7 +184,7 @@ class TimetableServiceTest {
     return service;
   }
 
-  private static StorageProvider providerWith(Timetable... published) {
+  static StorageProvider providerWith(Timetable... published) {
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);
@@ -192,7 +192,7 @@ class TimetableServiceTest {
     return provider;
   }
 
-  private static StationStopEvent event(String train, int index, Instant at) {
+  static StationStopEvent event(String train, int index, Instant at) {
     return new StationStopEvent(train, Optional.of(ROUTE), "R1", index, 3, "OP:S:AAA:1", at);
   }
 

@@ -27,7 +27,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * 一旦多发或漏发，纠正手段只有人工销毁列车。装饰器让“关掉按表运行”退化成不装配这一层， 而不是依赖一个布尔分支在几百行状态机里到处判断。
  *
  * <p>本层出的每张票都带着交路意图（哪个 duty、第几班），并通过三个钩子交给票据分配器：候选过滤（续班只能接本交路的车）、 到期作废（计划时刻 + assign-tolerance
- * 还没车就放弃）、派发回调（把实体车绑到交路上）。出库类票每次放出前还要确认交路没有车在跑：同一交路只能有一辆车。
+ * 还没车就放弃）、派发回调（把实体车绑到交路上）。出库类票每次放出前还要确认交路没有车在跑：同一交路同一时刻只能有一辆车。
+ *
+ * <p>交路换车：严重晚点的车被换下后，交路空缺，本层按 {@link TimetableService#replacementsDue} 发替补出库票，派发即绑上交路。
  *
  * <p><b>前提</b>：时刻表只提供“几点发车”，不提供“从哪发、算谁的”。出库点、线路/运营商 code 仍然取自 {@link StorageSpawnManager}
  * 的计划快照。因此一条 route 必须本来就是可发车服务（配了 depot 与 spawn 开关）， 时刻表才能驱动它——否则本层会跳过并留下审计记录，而不是猜一个 depot。
@@ -95,7 +97,54 @@ public final class TimetableSpawnManager
     if (from != null) {
       out.addAll(withoutRunningDuties(buildTimetableTickets(from, now)));
     }
+    out.addAll(withoutRunningDuties(buildReplacementTickets(now)));
     return List.copyOf(out);
+  }
+
+  /**
+   * 交路换车：为空缺的交路发替补出库票。
+   *
+   * <p>替补票就是一张出库票：走 CREATE 线路从车库实体化一辆车送到它要接的那一班的起点，派发时绑到交路上（{@link #onDispatched}），
+   * 之后那一班及后续班次的续班票只接它。发不出（这条出库线路不是可发车服务）就把空缺退回待派；作废时同样退回（{@link #complete}）。
+   */
+  private List<SpawnTicket> buildReplacementTickets(Instant now) {
+    List<TimetableService.Replacement> due = timetableService.replacementsDue(now);
+    if (due.isEmpty()) {
+      return List.of();
+    }
+    List<SpawnTicket> out = new ArrayList<>(due.size());
+    for (TimetableService.Replacement replacement : due) {
+      TicketIntent intent =
+          new TicketIntent(
+              replacement.timetable().id(),
+              replacement.duty().id(),
+              replacement.key().serviceDate(),
+              RouteOperationType.CREATE,
+              replacement.tripIndex());
+      Optional<SpawnTicket> built = buildLegTicket(replacement.leg(now));
+      if (built.isEmpty()) {
+        timetableService.replacementAbandoned(intent);
+        continue;
+      }
+      // 到期取"最晚还来得及的出库时刻"，不按票面 + 容差：替补常常晚了才派，票面 + 容差会比那一班的截止还晚或早得离谱。
+      ownedTickets.put(
+          built.get().id(),
+          new OwnedTicket(
+              Optional.of(intent), Optional.of(replacement.latestIssue()), Optional.empty()));
+      out.add(built.get());
+      debugLogger.accept(
+          "TIMETABLE_SPAWN_TICKET kind=CREATE replacement=true duty="
+              + replacement.duty().dutyCode()
+              + " trip="
+              + replacement.trip().tripCode()
+              + " route="
+              + replacement.createRouteId()
+              + " plannedDeparture="
+              + replacement.departure()
+              + " serviceDate="
+              + replacement.key().serviceDate());
+    }
+    return out;
   }
 
   /**
@@ -161,6 +210,8 @@ public final class TimetableSpawnManager
                 owned
                     .trip()
                     .ifPresent(due -> timetableService.cancelUndispatched(due, "ticket-abandoned"));
+                // 替补出库票作废：空缺退回待派（普通出库票没有空缺，这一步是空操作）。
+                timetableService.replacementAbandoned(intent);
               });
       return;
     }

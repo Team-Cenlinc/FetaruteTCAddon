@@ -138,6 +138,14 @@ public class ReclaimManager {
   private volatile java.util.function.Predicate<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId>
       singleTrackStation = nodeId -> false;
 
+  /**
+   * 换车判定：这辆待命车是不是从交路上被换下来的（交路已交给替补车）。默认恒否。
+   *
+   * <p>它再也没有班可跑，停在站台上只会挡住别的车；闲置满 {@link #MAINLINE_TURNBACK_MIN_IDLE_SECONDS} 就回收，不等闲置上限。 按表运行时装上
+   * {@code TimetableService#retiredFromDuty}。
+   */
+  private volatile java.util.function.Predicate<String> retiredVehicle = trainName -> false;
+
   private BukkitTask task;
 
   public ReclaimManager(
@@ -214,6 +222,15 @@ public class ReclaimManager {
   /** 装上正线折返点的立即回收闸；{@code null} 恢复恒拒绝。 */
   public void setMainlineReturnGate(java.util.function.BiPredicate<String, Optional<UUID>> gate) {
     this.mainlineReturnGate = gate == null ? (trainName, routeId) -> false : gate;
+  }
+
+  /**
+   * 装上换车判定：被换下来的车闲置满 {@link #MAINLINE_TURNBACK_MIN_IDLE_SECONDS} 即回收。
+   *
+   * @param predicate 列车是不是被换下来的；{@code null} 恢复为恒否
+   */
+  public void setRetiredVehicle(java.util.function.Predicate<String> predicate) {
+    this.retiredVehicle = predicate == null ? trainName -> false : predicate;
   }
 
   /**
@@ -300,6 +317,10 @@ public class ReclaimManager {
                 + " idle="
                 + idleSec
                 + "s");
+      } else if (idleSec >= MAINLINE_TURNBACK_MIN_IDLE_SECONDS
+          && retiredVehicle.test(candidate.trainName())) {
+        shouldReclaim = true;
+        debugLogger.accept("回收触发: 交路已换车 train=" + candidate.trainName() + " idle=" + idleSec + "s");
       } else if (maxOperationTrips > 0 && operationTrips >= maxOperationTrips) {
         shouldReclaim = true;
         debugLogger.accept(

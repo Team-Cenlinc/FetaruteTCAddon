@@ -1474,6 +1474,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
         timetableService == null ? null : timetableService::allowsReturnFromMainlineTurnback);
     // 单股道车站（如 CHT）同一条规则：车进去没多久就得出来，接不上下一班就立即回收，不占着唯一的股道等后面的车次。
     reclaimManager.setSingleTrackStation(this::isSingleTrackStation);
+    // 交路已换车的车再也没有班可跑：闲置一个短门槛就回收，不占着站台等闲置上限。
+    reclaimManager.setRetiredVehicle(
+        timetableService == null ? null : timetableService::retiredFromDuty);
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
     }

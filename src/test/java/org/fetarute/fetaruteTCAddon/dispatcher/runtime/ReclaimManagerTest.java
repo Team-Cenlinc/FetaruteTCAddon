@@ -962,6 +962,22 @@ class ReclaimManagerTest {
     assertTrue(fixture.destroyed.isEmpty());
   }
 
+  /** 交路已换车的车再也没有班可跑：闲置满短门槛就回收，不等闲置上限（这里是 3600 秒）。 */
+  @Test
+  void aRetiredVehicleIsReclaimedWithoutWaitingForTheIdleLimit() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"));
+    fixture.manager.setRetiredVehicle(train -> train.equals("train-a"));
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS - 1);
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    verify(fixture.ticketAssigner).forceAssign(eq(fixture.provider), eq("train-a"), any());
+    assertTrue(
+        fixture.logs.stream().anyMatch(line -> line.startsWith("回收触发: 交路已换车 train=train-a")),
+        fixture.logs::toString);
+  }
+
   /**
    * 单股道车站（CHT 只有 3 道）与正线折返点同一条规则：下一班接不上就立即回收，不占着唯一的股道等后面的车次。
    *

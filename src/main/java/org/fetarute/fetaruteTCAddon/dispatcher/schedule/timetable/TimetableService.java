@@ -83,6 +83,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 各车在当前车次上已停完的最后一站；车半途离开时据此判断哪些站不再停。 */
   private final ConcurrentMap<String, ServedStops> servedStops = new ConcurrentHashMap<>();
 
+  /** 替补车的就绪时间：同一份表里一条出库线路只算一次（要扫全部交路）。表数 × 出库线路数，量很小。 */
+  private final ConcurrentMap<ReadyKey, Long> readyByCreateRoute = new ConcurrentHashMap<>();
+
   /** 各车在当前车次上逐站的到发偏差：晚点追赶读最近一次，跑完一趟结账成一行日志。 */
   private final TripDelayLedger delays = new TripDelayLedger();
 
@@ -313,6 +316,299 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     return allowsReturn(trainName);
+  }
+
+  /**
+   * 严重晚点提前换车的余量：当前晚点超过发车容差再加这么多，才判定追赶也赶不上下一班。
+   *
+   * <p>停站压缩与放宽线路限速每趟大约能追回一到两分钟；超出这段的晚点到终点时下一班的票已经作废，早一点换车，替补车就早一点出库。
+   */
+  static final Duration VACATE_MARGIN = Duration.ofSeconds(120);
+
+  /**
+   * 替补车计划：空缺交路的第 {@code tripIndex} 班由一辆新车接，它走出库线路 {@code createRouteId} 从车库开到那一班的起点。
+   *
+   * @param timetable 所属时刻表
+   * @param duty 空缺的交路
+   * @param key 交路身份
+   * @param tripIndex 替补车接起的那一班（交路内 0 起）
+   * @param trip 那一班
+   * @param createRouteId 替补车的出库线路
+   * @param issueAt 按计划该出库的时刻（计划发车 − 走行 − 就绪），可能已经过去
+   * @param latestIssue 最晚还来得及的出库时刻（计划发车 + 容差 − 走行 − 就绪）：出库票的到期时刻
+   * @param departure 那一班的计划发车
+   */
+  public record Replacement(
+      Timetable timetable,
+      VehicleDuty duty,
+      DutyKey key,
+      int tripIndex,
+      TimetableTrip trip,
+      UUID createRouteId,
+      Instant issueAt,
+      Instant latestIssue,
+      Instant departure) {
+
+    /**
+     * 替补车的出库走行，与交路自己的出库票同一形状；票面时刻取计划出库与现在的较晚者——替补常常是晚了才派的， 按过去的时刻出票，它的到期也会按过去算。
+     *
+     * @param now 出票时刻
+     * @return 出库走行
+     */
+    public DueLeg leg(Instant now) {
+      Instant at = now != null && now.isAfter(issueAt) ? now : issueAt;
+      return new DueLeg(
+          timetable, duty, RouteOperationType.CREATE, createRouteId, key.serviceDate(), at);
+    }
+  }
+
+  /**
+   * 出票侧每轮问一次：该派哪些替补车。
+   *
+   * <p>顺带做两件事：接不上下一班、而替补车赶得上它后面某一班的车，从交路上解下来；剩下的班次全都过了容差的空缺撤销。 每个空缺同时只派一辆（出库票在路上时不再派），替补车绑上交路即填上。
+   *
+   * @param now 调度层当前时间
+   * @return 这一轮要发出的替补出库票
+   */
+  public List<Replacement> replacementsDue(Instant now) {
+    Settings current = settings;
+    if (!current.enabled() || !current.spawnEnabled() || now == null) {
+      return List.of();
+    }
+    for (Map.Entry<String, DutyKey> bound : ledger.bindings().entrySet()) {
+      ledger
+          .progressOf(bound.getKey())
+          .filter(progress -> !progress.exhausted())
+          .filter(progress -> nextTripMissed(bound.getKey(), progress, current))
+          .filter(
+              progress ->
+                  replacementFor(bound.getValue(), progress.assignedTrips(), now, current)
+                      .isPresent())
+          .ifPresent(
+              progress ->
+                  ledger.vacate(
+                      bound.getKey(), ledger.displayName(bound.getKey()), "next-trip-missed", now));
+    }
+    List<Replacement> out = new ArrayList<>();
+    for (DutyLedger.Vacancy vacancy : ledger.vacancies()) {
+      if (vacancy.replacementIndex() >= 0) {
+        // 在途的替补：它要接的那一班过了容差还没绑上，出库票多半已经丢了（票据追踪重置、发车复位），退回待派。
+        if (tripDeadline(vacancy.key(), vacancy.replacementIndex(), current)
+            .filter(deadline -> deadline.isAfter(now))
+            .isPresent()) {
+          continue;
+        }
+        ledger.clearReplacement(vacancy.key(), vacancy.replacementIndex());
+      }
+      if (!anyTripLeft(vacancy, now, current)) {
+        ledger.dropVacancy(vacancy.key(), "remaining-trips-expired");
+        continue;
+      }
+      Optional<Replacement> planned =
+          replacementFor(vacancy.key(), vacancy.fromIndex(), now, current);
+      if (planned.isEmpty() || planned.get().issueAt().isAfter(now)) {
+        continue;
+      }
+      Replacement replacement = planned.get();
+      ledger.markReplacement(vacancy.key(), replacement.tripIndex());
+      debugLogger.accept(
+          "TIMETABLE_DUTY_REPLACEMENT duty="
+              + vacancy.dutyCode()
+              + " trip="
+              + replacement.trip().tripCode()
+              + " tripIndex="
+              + replacement.tripIndex()
+              + " createRoute="
+              + replacement.createRouteId()
+              + " plannedDeparture="
+              + replacement.departure()
+              + " replaced="
+              + vacancy.retiredTrain());
+      out.add(replacement);
+    }
+    return List.copyOf(out);
+  }
+
+  /**
+   * 替补车的出库票作废了（没派出车就过了容差）：那一班不再有车在路上，空缺退回待派，下一轮再为后面的班次试。
+   *
+   * @param intent 出库票的交路意图
+   */
+  public void replacementAbandoned(TicketIntent intent) {
+    if (intent != null && intent.kind() == RouteOperationType.CREATE) {
+      ledger.clearReplacement(intent.key(), intent.tripIndex());
+    }
+  }
+
+  /**
+   * 这辆车是不是被换下来的：交路已交给替补车，它再也没有班可跑，回收应当尽快把它带走，不占着站台等闲置上限。
+   *
+   * @param trainName 列车名
+   * @return 被换下来的车返回 true
+   */
+  public boolean retiredFromDuty(String trainName) {
+    return settings.enabled() && ledger.isRetired(keyOf(trainName));
+  }
+
+  /** 当前空缺的交路数（诊断用）。 */
+  public int vacantDutyCount() {
+    return ledger.vacancies().size();
+  }
+
+  /** 交路里第 {@code index} 班的发车容差截止时刻；查不到时为空。 */
+  private Optional<Instant> tripDeadline(DutyKey key, int index, Settings current) {
+    Timetable timetable = snapshot.byId().get(key.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(key.dutyId())
+        .map(VehicleDuty::tripIds)
+        .filter(ids -> index >= 0 && index < ids.size())
+        .flatMap(ids -> timetable.trip(ids.get(index)))
+        .map(
+            trip ->
+                timetable
+                    .departureOnServiceDay(trip, key.serviceDate())
+                    .plus(current.assignTolerance()));
+  }
+
+  /** 空缺交路还有没有没过容差的班次。 */
+  private boolean anyTripLeft(DutyLedger.Vacancy vacancy, Instant now, Settings current) {
+    Timetable timetable = snapshot.byId().get(vacancy.key().timetableId());
+    if (timetable == null) {
+      return false;
+    }
+    List<UUID> ids =
+        timetable.duty(vacancy.key().dutyId()).map(VehicleDuty::tripIds).orElse(List.of());
+    for (int j = Math.max(0, vacancy.fromIndex()); j < ids.size(); j++) {
+      Optional<TimetableTrip> trip = timetable.trip(ids.get(j));
+      if (trip.isPresent()
+          && timetable
+              .departureOnServiceDay(trip.get(), vacancy.key().serviceDate())
+              .plus(current.assignTolerance())
+              .isAfter(now)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 替补车最早能接交路里的哪一班：从 {@code fromIndex} 起第一班还没过容差、有出库线路能把车及时送到它起点的。
+   *
+   * <p>起点本身就是车库（首站 CRET）的班次不在这里派：那一班自己的票就会从车库出车，交路空着时出车即绑上。 出库线路取表里终点在那一班起点站台组的 CREATE
+   * 线路（走行最短的那条），出库时刻 = 计划发车 − 走行 − 就绪；已经过了这个时刻， 只要现在出库还能在容差内到达也行。没有出库线路或来不及时试下一班。
+   *
+   * @return 替补计划；一班都接不上时为空
+   */
+  private Optional<Replacement> replacementFor(
+      DutyKey key, int fromIndex, Instant now, Settings current) {
+    Timetable timetable = snapshot.byId().get(key.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    Optional<VehicleDuty> dutyOpt = timetable.duty(key.dutyId());
+    if (dutyOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    VehicleDuty duty = dutyOpt.get();
+    List<UUID> ids = duty.tripIds();
+    for (int j = Math.max(0, fromIndex); j < ids.size(); j++) {
+      Optional<TimetableTrip> tripOpt = timetable.trip(ids.get(j));
+      Optional<TimetableRoutePlan> planOpt =
+          tripOpt.flatMap(trip -> timetable.routePlan(trip.routeId()));
+      if (tripOpt.isEmpty() || planOpt.isEmpty()) {
+        continue;
+      }
+      TimetableTrip trip = tripOpt.get();
+      Instant departure = timetable.departureOnServiceDay(trip, key.serviceDate());
+      Instant deadline = departure.plus(current.assignTolerance());
+      if (!deadline.isAfter(now) || startsAtDepot(planOpt.get())) {
+        continue;
+      }
+      Optional<TimetableRoutePlan> create = positioningRoute(timetable, planOpt.get());
+      if (create.isEmpty()) {
+        continue;
+      }
+      long lead = create.get().totalRunSeconds() + readySeconds(timetable, create.get());
+      Instant issueAt = departure.minusSeconds(lead);
+      Instant arrival = (issueAt.isAfter(now) ? issueAt : now).plusSeconds(lead);
+      if (arrival.isAfter(deadline)) {
+        continue;
+      }
+      return Optional.of(
+          new Replacement(
+              timetable,
+              duty,
+              key,
+              j,
+              trip,
+              create.get().routeId(),
+              issueAt,
+              deadline.minusSeconds(lead),
+              departure));
+    }
+    return Optional.empty();
+  }
+
+  /** 这条运营线路是不是从车库出发（首站 CRET）：它的票自己会出车。 */
+  private static boolean startsAtDepot(TimetableRoutePlan plan) {
+    return plan.depotNodeId().isPresent()
+        || TimetableConflictChecker.groupOf(plan.originNodeId()).contains(":D:");
+  }
+
+  /** 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。 */
+  private static Optional<TimetableRoutePlan> positioningRoute(
+      Timetable timetable, TimetableRoutePlan target) {
+    String origin = TimetableConflictChecker.groupOf(target.originNodeId());
+    if (origin.isBlank()) {
+      return Optional.empty();
+    }
+    TimetableRoutePlan best = null;
+    for (TimetableRoutePlan plan : timetable.routePlans()) {
+      if (plan.kind() == RouteOperationType.CREATE
+          && !plan.external()
+          && origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))
+          && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {
+        best = plan;
+      }
+    }
+    return Optional.ofNullable(best);
+  }
+
+  /**
+   * 出库之后到站还要多久才能走：取表里用这条出库线路的交路里最长的那段"首班发车 − 出库时刻 − 走行"。
+   *
+   * <p>编表时它来自出库线路终到站的 dwell；表里没存这个数，从已经排好的交路反推，与原计划同一口径。没有交路用它时按 0 计——判定本身还有发车容差兜底。
+   */
+  private long readySeconds(Timetable timetable, TimetableRoutePlan create) {
+    return readyByCreateRoute.computeIfAbsent(
+        new ReadyKey(timetable.id(), timetable.updatedAt(), create.routeId()),
+        ignored -> computeReadySeconds(timetable, create));
+  }
+
+  /** 就绪时间缓存的键：同一份表（按更新时刻区分重新 build）里的一条出库线路。 */
+  private record ReadyKey(UUID timetableId, Instant updatedAt, UUID createRouteId) {}
+
+  private static long computeReadySeconds(Timetable timetable, TimetableRoutePlan create) {
+    long ready = 0L;
+    for (VehicleDuty duty : timetable.duties()) {
+      if (duty.createRouteId().filter(create.routeId()::equals).isEmpty()
+          || duty.tripIds().isEmpty()) {
+        continue;
+      }
+      Optional<TimetableTrip> first = timetable.trip(duty.tripIds().get(0));
+      if (first.isPresent()) {
+        long gap =
+            Math.floorMod(
+                    first.get().departureSecondOfDay() - duty.plannedStartSecondOfDay(),
+                    TimetableTrip.SECONDS_PER_DAY)
+                - create.totalRunSeconds();
+        ready = Math.max(ready, gap);
+      }
+    }
+    return ready;
   }
 
   /** 交路的下一班（进度之后的第一班）是否已过了发车容差；查不到归属、表、交路或下一班时返回 false。 */
@@ -636,6 +932,29 @@ public final class TimetableService implements ScheduledDeparturePlan {
     delays
         .record(key, assignment, new TripDelayLedger.Mark(event.stopIndex(), departure, delay))
         .ifPresent(summary -> debugLogger.accept(summary.logLine(event.trainName(), "rebound")));
+    vacateIfHopeless(key, event.trainName(), delay, event.at());
+  }
+
+  /**
+   * 严重晚点提前换车：晚点超过容差 + {@link #VACATE_MARGIN}，追赶也赶不上下一班；替补车赶得上下一班时，现在就把车从交路上解下来，
+   * 让替补车早一点出库。这一趟照常跑完，车到终点后没有交路，由回收带走。替补车赶不上下一班时不解——解了反而让原车连后面还接得上的班次也跑不了。
+   */
+  private void vacateIfHopeless(String key, String trainName, long delaySeconds, Instant now) {
+    Settings current = settings;
+    if (!current.spawnEnabled()
+        || delaySeconds <= current.assignTolerance().plus(VACATE_MARGIN).toSeconds()) {
+      return;
+    }
+    Optional<DutyKey> bound = ledger.bindingOf(key);
+    Optional<DutyProgress> progress = ledger.progressOf(key).filter(p -> !p.exhausted());
+    // 只在替补车赶得上<b>下一班</b>时提前换：下一班本身替补也赶不上，原车晚点跑说不定还在容差内（终点有折返余量时），换了反而丢班。
+    if (bound.isPresent()
+        && progress.isPresent()
+        && replacementFor(bound.get(), progress.get().assignedTrips(), now, current)
+            .filter(plan -> plan.tripIndex() == progress.get().assignedTrips())
+            .isPresent()) {
+      ledger.vacate(key, trainName, "late-" + delaySeconds + "s", now);
+    }
   }
 
   private void closeDelays(String key, String trainName, String reason) {

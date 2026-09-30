@@ -30,6 +30,10 @@
 背景：实服 WS 一辆车晚点到 CHT，下一班 2C 已过容差作废，交路里剩下的 2N 从 NTA 发车、它根本赶不过去；回库闸因"交路还有班次"一直不放，
 它在唯一的股道上等到 2N 也过期（约 20 分钟），后车全部等待放行、严重晚点 20 分钟。按表 WS 在 CHT 的每次停留都是 24 秒，问题只在运行时。
 
+**交路已换车的车**（2026-09-30）：严重晚点、被从交路上换下来的车（见 `timetable.md` 交路换车）再也没有班可跑，
+闲置满 `MAINLINE_TURNBACK_MIN_IDLE_SECONDS` 就回收（`ReclaimManager#setRetiredVehicle`，按表运行时装 `TimetableService#retiredFromDuty`），
+日志 `回收触发: 交路已换车`，不占着站台等闲置上限。它没有交路，回库闸本来就放行。
+
 这道闸代替上面的回库闸，按表运行时装的是 `TimetableService#allowsReturnFromMainlineTurnback`，只管**由时刻表出票**的交路：
 
 - 自由运行的交路、只扣车不出票（`timetable.spawn-enabled: false`）、不知道刚跑完哪条交路（缺 `FTA_ROUTE_ID`）、未启用按表运行：

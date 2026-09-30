@@ -16,6 +16,9 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
  *
  * <p>所有 {@code TIMETABLE_DUTY_*} / {@code TIMETABLE_RETURN_DENIED} / {@code
  * TIMETABLE_CANDIDATE_REJECT} 日志只从这里发出。
+ *
+ * <p><b>交路可以换车</b>（2026-09-30 用户定，取代"续班只能由跑完上一班的那辆车来接"）：严重晚点、接不上下一班的车从交路上解下来（{@link #vacate}），
+ * 交路登记为空缺，由出票侧派一辆替补车接它还赶得上的班次；被解下的车记为退役，不许再按时间绑回这个交路——否则同一交路会有两辆车。
  */
 final class DutyLedger {
 
@@ -26,6 +29,41 @@ final class DutyLedger {
   /** 列车 → 它属于哪个交路（哪份表、哪个 duty、哪一天）。出库票实体化时或首次绑定车次时建立。 */
   private final ConcurrentMap<String, TimetableService.DutyKey> bindings =
       new ConcurrentHashMap<>();
+
+  /** 空缺的交路：原来的车已经解下，还有班次等替补车来接。替补车绑上即移除。 */
+  private final ConcurrentMap<TimetableService.DutyKey, Vacancy> vacancies =
+      new ConcurrentHashMap<>();
+
+  /** 列车 → 它被解下的那个交路：它不许再绑回去。列车绑上别的交路、或离开运行时管辖时清掉。 */
+  private final ConcurrentMap<String, TimetableService.DutyKey> retired = new ConcurrentHashMap<>();
+
+  /** 列车键 → 绑定时的列车名：按键扫出的日志要写回显示名，按车名 grep 日志才连得上。 */
+  private final ConcurrentMap<String, String> displayNames = new ConcurrentHashMap<>();
+
+  /**
+   * 一个空缺的交路。
+   *
+   * @param key 交路身份
+   * @param dutyCode 交路号，日志用
+   * @param fromIndex 替补车从交路里的第几班（0 起）接起：原来的车跑到哪一班为止
+   * @param vacatedAt 解下的时刻
+   * @param reason 为什么解下
+   * @param retiredTrain 被解下的车
+   * @param replacementIndex 已经为哪一班派出了替补（出库票在路上）；没派为 −1
+   */
+  record Vacancy(
+      TimetableService.DutyKey key,
+      String dutyCode,
+      int fromIndex,
+      java.time.Instant vacatedAt,
+      String reason,
+      String retiredTrain,
+      int replacementIndex) {
+
+    Vacancy withReplacement(int index) {
+      return new Vacancy(key, dutyCode, fromIndex, vacatedAt, reason, retiredTrain, index);
+    }
+  }
 
   DutyLedger(Consumer<String> debugLogger) {
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
@@ -40,7 +78,7 @@ final class DutyLedger {
   }
 
   boolean isEmpty() {
-    return progress.isEmpty() && bindings.isEmpty();
+    return progress.isEmpty() && bindings.isEmpty() && vacancies.isEmpty() && retired.isEmpty();
   }
 
   /**
@@ -79,10 +117,29 @@ final class DutyLedger {
     }
   }
 
-  /** 把一辆车绑到某个交路上。已经绑在别的交路上时不覆盖——那是一辆被错派的车，覆盖只会把错误藏起来。 */
+  /**
+   * 把一辆车绑到某个交路上。已经绑在别的交路上时不覆盖——那是一辆被错派的车，覆盖只会把错误藏起来。
+   *
+   * <p>从这个交路上被解下的车不许绑回去；绑上的是替补车时，空缺就此填上。
+   */
   void bind(String trainName, String key, TimetableService.DutyKey duty, String reason) {
+    if (duty.equals(retired.get(key))) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_BIND_REFUSED train="
+              + trainName
+              + " duty="
+              + duty.describe()
+              + " reason=retired-from-duty requested="
+              + reason);
+      return;
+    }
     TimetableService.DutyKey previous = bindings.putIfAbsent(key, duty);
     if (previous == null) {
+      // 绑上别的交路就回到了正常运营：退役只拦它回原交路，不能让回收继续把它当成换下来的车。
+      retired.remove(key);
+      if (trainName != null && !trainName.isBlank()) {
+        displayNames.put(key, trainName);
+      }
       debugLogger.accept(
           "TIMETABLE_DUTY_BOUND train="
               + trainName
@@ -90,6 +147,20 @@ final class DutyLedger {
               + duty.describe()
               + " reason="
               + reason);
+      Vacancy filled = vacancies.remove(duty);
+      if (filled != null) {
+        debugLogger.accept(
+            "TIMETABLE_DUTY_REPLACED train="
+                + trainName
+                + " duty="
+                + filled.dutyCode()
+                + " replaced="
+                + filled.retiredTrain()
+                + " fromTrip="
+                + filled.fromIndex()
+                + " vacatedAt="
+                + filled.vacatedAt());
+      }
     } else if (!previous.equals(duty)) {
       debugLogger.accept(
           "TIMETABLE_DUTY_BIND_CONFLICT train="
@@ -103,14 +174,116 @@ final class DutyLedger {
     }
   }
 
-  /** 这个交路是否已经归别的车：没绑交路的车按时间匹配时，不能绑到一个已经有车在跑的交路上。 */
+  /**
+   * 这个交路是否已经归别的车：没绑交路的车按时间匹配时，不能绑到一个已经有车在跑的交路上。
+   *
+   * <p>这辆车自己被解下的交路同样算"不归它"：空缺是留给替补车的，不能让被换下来的车按时间又接回去。
+   */
   boolean heldByOther(TimetableService.DutyKey duty, String key) {
+    if (duty.equals(retired.get(key))) {
+      return true;
+    }
     for (var entry : bindings.entrySet()) {
       if (entry.getValue().equals(duty) && !entry.getKey().equals(key)) {
         return true;
       }
     }
     return false;
+  }
+
+  /**
+   * 把一辆车从它的交路上解下来：交路还有班次没跑时登记为空缺，等替补车来接；这辆车记为退役，不许再绑回去。
+   *
+   * <p>解下之后这辆车没有交路：回库闸放行（没有进度可守），只能接别的交路的首班或被回收。它正在跑的这一趟不受影响——车次绑定在 {@link TripMatcher} 里，到站、结账照旧。
+   *
+   * @param key 规范列车键
+   * @param trainName 列车名
+   * @param reason 为什么解下
+   * @param now 解下的时刻
+   * @return 登记出的空缺；这辆车没绑交路、或交路已经跑完时为空
+   */
+  Optional<Vacancy> vacate(String key, String trainName, String reason, java.time.Instant now) {
+    TimetableService.DutyKey duty = bindings.remove(key);
+    TimetableService.DutyProgress current = progress.remove(key);
+    if (duty == null) {
+      return Optional.empty();
+    }
+    retired.put(key, duty);
+    if (current == null || current.exhausted() || !current.dutyId().equals(duty.dutyId())) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_VACATED train="
+              + trainName
+              + " duty="
+              + duty.describe()
+              + " reason="
+              + reason
+              + " vacancy=none");
+      return Optional.empty();
+    }
+    Vacancy vacancy =
+        new Vacancy(duty, current.dutyCode(), current.assignedTrips(), now, reason, trainName, -1);
+    vacancies.put(duty, vacancy);
+    debugLogger.accept(
+        "TIMETABLE_DUTY_VACATED train="
+            + trainName
+            + " duty="
+            + current.dutyCode()
+            + " trips="
+            + current.assignedTrips()
+            + "/"
+            + current.plannedTrips()
+            + " fromTrip="
+            + current.assignedTrips()
+            + " reason="
+            + reason);
+    return Optional.of(vacancy);
+  }
+
+  /** 这把键对应的列车名（最近一次绑定时记下）；没记过时就是键本身。 */
+  String displayName(String key) {
+    return key == null ? "" : displayNames.getOrDefault(key, key);
+  }
+
+  /** 这辆车是不是从某个交路上被换下来的（还没离开运行时管辖）。 */
+  boolean isRetired(String key) {
+    return key != null && retired.containsKey(key);
+  }
+
+  /** 当前全部绑定的快照：列车键 → 交路。 */
+  java.util.Map<String, TimetableService.DutyKey> bindings() {
+    return java.util.Map.copyOf(bindings);
+  }
+
+  /** 当前全部空缺的快照。 */
+  java.util.List<Vacancy> vacancies() {
+    return java.util.List.copyOf(vacancies.values());
+  }
+
+  /** 记下已为某一班派出替补（出库票在路上）；空缺已被填上或已撤销时不动。 */
+  void markReplacement(TimetableService.DutyKey duty, int tripIndex) {
+    vacancies.computeIfPresent(duty, (key, vacancy) -> vacancy.withReplacement(tripIndex));
+  }
+
+  /** 替补的出库票作废了：这一班不再有车在路上，空缺退回待派。 */
+  void clearReplacement(TimetableService.DutyKey duty, int tripIndex) {
+    vacancies.computeIfPresent(
+        duty,
+        (key, vacancy) ->
+            vacancy.replacementIndex() == tripIndex ? vacancy.withReplacement(-1) : vacancy);
+  }
+
+  /** 撤销空缺：剩下的班次都已过了容差，再派车也没有班可跑。 */
+  void dropVacancy(TimetableService.DutyKey duty, String reason) {
+    Vacancy removed = vacancies.remove(duty);
+    if (removed != null) {
+      debugLogger.accept(
+          "TIMETABLE_DUTY_VACANCY_CLOSED duty="
+              + removed.dutyCode()
+              + " fromTrip="
+              + removed.fromIndex()
+              + " reason="
+              + reason);
+    }
   }
 
   /** 绑在这个交路上的车（任取一辆；折返改名后旧名字要到下一次 retain 才清掉）。 */
@@ -201,6 +374,8 @@ final class DutyLedger {
 
   /** 列车离开运行时管辖：释放进度与归属。 */
   void release(String key, String trainName, String reason) {
+    retired.remove(key);
+    displayNames.remove(key);
     bindings.remove(key);
     TimetableService.DutyProgress removed = progress.remove(key);
     if (removed != null) {
@@ -221,9 +396,11 @@ final class DutyLedger {
   void retain(Set<String> keep) {
     progress.keySet().retainAll(keep);
     bindings.keySet().retainAll(keep);
+    retired.keySet().retainAll(keep);
+    displayNames.keySet().retainAll(keep);
   }
 
-  /** 时刻表下架：归属于它的绑定与被解绑车的进度一起清掉。 */
+  /** 时刻表下架：归属于它的绑定、空缺与被解绑车的进度一起清掉。 */
   void dropOutside(Set<UUID> publishedTimetableIds, Set<String> releasedKeys) {
     for (String key : releasedKeys) {
       progress.remove(key);
@@ -231,10 +408,17 @@ final class DutyLedger {
     bindings
         .entrySet()
         .removeIf(entry -> !publishedTimetableIds.contains(entry.getValue().timetableId()));
+    vacancies.keySet().removeIf(duty -> !publishedTimetableIds.contains(duty.timetableId()));
+    retired
+        .entrySet()
+        .removeIf(entry -> !publishedTimetableIds.contains(entry.getValue().timetableId()));
   }
 
   void clear() {
     progress.clear();
     bindings.clear();
+    vacancies.clear();
+    retired.clear();
+    displayNames.clear();
   }
 }
