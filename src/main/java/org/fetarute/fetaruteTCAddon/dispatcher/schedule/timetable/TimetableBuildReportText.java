@@ -169,7 +169,7 @@ public final class TimetableBuildReportText {
       case STUB_TERMINAL -> "容量 1 端点";
       case OVER_MAX_WAIT -> "超过 max-wait";
       case NO_WAITING_CAPACITY -> "让车点无容量";
-      case CHAIN_TOO_DEEP -> "连锁过深";
+      case CHAIN_TOO_DEEP -> "顺推超限";
     };
   }
 

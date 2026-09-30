@@ -131,18 +131,39 @@ public final class ResourceRepair {
       List<TerminalSerializer.Shift> shifts,
       List<Yield> yields,
       List<UUID> truncatedTripIds,
-      TimetableConflictChecker.Report remaining) {
+      TimetableConflictChecker.Report remaining,
+      WaitPropagation propagation) {
     public Result {
       Objects.requireNonNull(timetable, "timetable");
       shifts = shifts == null ? List.of() : List.copyOf(shifts);
       yields = yields == null ? List.of() : List.copyOf(yields);
       truncatedTripIds = truncatedTripIds == null ? List.of() : List.copyOf(truncatedTripIds);
       remaining = remaining == null ? TimetableConflictChecker.Report.none() : remaining;
+      propagation = propagation == null ? WaitPropagation.NONE : propagation;
     }
+  }
+
+  /**
+   * 必等顺推的结果。
+   *
+   * @param pushed 写进表的顺推次数：某班途中必等，后续班次因此推迟
+   * @param rejected 推不动的次数：推迟超过 {@code --max-wait} 或会截掉班次，留给残余分类判为排不开
+   */
+  public record WaitPropagation(int pushed, int rejected) {
+    /** 没有顺推。 */
+    public static final WaitPropagation NONE = new WaitPropagation(0, 0);
   }
 
   /** 连锁段深度上限：一处让车最多带出五步跟进修复。再深的连锁不是让车能解决的，是相位问题，交给第三层。 */
   public static final int CHAIN_LIMIT = 6;
+
+  /**
+   * 必等顺推最多重扫几遍。
+   *
+   * <p>把后续班次推后会让它与别的车换相位，于是冒出新的必等；新的必等又要再推它的后续。每遍只会推迟、不会提前，推迟量有 {@code --max-wait}
+   * 封顶，所以几遍之内就收敛；这个数只是防御上限。
+   */
+  static final int PROPAGATION_ROUNDS = 8;
 
   /** 重扫方式。增量是生产路径；全量是它的参照物，只在等价性用例里走到。 */
   enum Rescan {
@@ -278,6 +299,8 @@ public final class ResourceRepair {
         yields.add(yieldOf(applied.get(i)));
       }
     }
+    WaitPropagation propagation =
+        rescanner == null ? WaitPropagation.NONE : propagateResidualWaits(input, rescanner, state);
     Timetable current = state.rewrite();
 
     List<TerminalSerializer.Shift> shifts = new ArrayList<>();
@@ -303,7 +326,106 @@ public final class ResourceRepair {
     yields.sort(Comparator.comparingInt(Yield::atSeconds).thenComparing(Yield::resource));
     // 交出去的残余永远来自一次全量重扫：增量只用来在修复过程里做取舍，报出去的数不该依赖它有没有漂移。
     return new Result(
-        current, shifts, yields, new ArrayList<>(truncated), scan(input, allProfiles, current));
+        current,
+        shifts,
+        yields,
+        new ArrayList<>(truncated),
+        scan(input, allProfiles, current),
+        propagation);
+  }
+
+  /**
+   * 必等顺推：修不掉、运行时一定要在资源前等的冲突，等出来的时间沿交路推给后续班次。
+   *
+   * <p>让车修复只写得进"整趟延后"，而一处让车若会引出更多冲突就整段回滚，于是这类冲突留在表外，由运行时后车在资源前等。
+   * 等的那几十秒表上没有：这一班到终点晚了，下一班却仍按原时刻排——同一处冲突每一圈都在，晚点一圈圈累积， 直到超出容差被作废。这里把它写进表：
+   *
+   * <ul>
+   *   <li>每一班途中要等多久：各处等待取最大（{@link #requiredWait}）——等过第一处之后，后面整体跟着晚进入，不会再叠加；
+   *   <li>后续班次按"本班到达 + 折返 + 途中等待"顺推，与让车修复同一条传播（{@code delayTrip}，原因记为车未就绪）；
+   *   <li>推迟使任一班偏离名义超过 {@code --max-wait}、或会截掉班次时整步撤回，不写——残余分类据此判为排不开，搜索放宽间隔。
+   *   <li>推后的班次在容量 1 的端点（单股道车站、它的进站单线）上撞出新冲突时同样撤回：车在那里只能进去就出来， 多待一会儿就是后车在进站单线前等（2026-09-30
+   *       CHT）。端点串行排好的东西不能被顺推拆掉。 间隔规整优先于多排几班（2026-09-29 用户定）。
+   * </ul>
+   *
+   * <p>只推残余分类判为可吸收的那些（{@link ConflictAbsorption#classifyWaits}）：那正是运行时会在资源前等的冲突。
+   * 本班始发站台组上的站台冲突不算：车本来就停在那里，发车不用等别的车离开站台，那是这张表在起点的容量问题。 在起点被前方区间挡住晚发照样算——晚发同样让后续班次晚。 站台放不下、容量 1
+   * 端点、超上限、邻表都不是"等一下"，是这次尝试排不开，推它们只会把别处搅乱。 这一班自身的后半程仍按原时刻（表只能表达整趟发车时刻）。
+   */
+  private static WaitPropagation propagateResidualWaits(
+      Input input, Rescanner rescanner, State state) {
+    Map<UUID, Integer> propagated = new HashMap<>();
+    Set<String> stubs = ConflictAbsorption.stubGroups(input.index());
+    int pushed = 0;
+    int rejected = 0;
+    for (int round = 0; round < PROPAGATION_ROUNDS; round++) {
+      List<TimetableConflictChecker.Conflict> internal = new ArrayList<>();
+      for (List<TimetableConflictChecker.Conflict> group : rescanner.conflicts()) {
+        for (TimetableConflictChecker.Conflict conflict : group) {
+          if (conflict.firstOwner().isEmpty() && conflict.secondOwner().isEmpty()) {
+            internal.add(conflict);
+          }
+        }
+      }
+      if (internal.isEmpty()) {
+        break;
+      }
+      // 只推运行时"在资源前等一下"的那些：站台放不下、容量 1 端点、超上限的不是等待，是这次尝试排不开。
+      Timetable current = state.rewrite();
+      List<ConflictAbsorption.Residual> residuals =
+          ConflictAbsorption.classifyWaits(
+              internal,
+              current,
+              TimetableOccupancyProjector.project(
+                  current, input.profiles(), input.zeroSecondOfDay()),
+              input.index(),
+              input.separationSeconds(),
+              input.maxWaitSeconds());
+      Map<UUID, List<TimetableConflictChecker.Conflict>> blockedTrips = new HashMap<>();
+      for (ConflictAbsorption.Residual residual : residuals) {
+        UUID tripId = state.tripIdOf(residual.mover());
+        if (residual.absorbable()
+            && tripId != null
+            && state.canMove(residual.mover())
+            && !state.atOriginPlatform(tripId, residual.conflict())) {
+          blockedTrips.computeIfAbsent(tripId, key -> new ArrayList<>()).add(residual.conflict());
+        }
+      }
+      List<UUID> ordered = new ArrayList<>(blockedTrips.keySet());
+      ordered.sort(state.chainOrder());
+      boolean moved = false;
+      for (UUID tripId : ordered) {
+        int wait = requiredWait(blockedTrips.get(tripId), input.separationSeconds());
+        if (wait <= propagated.getOrDefault(tripId, 0)) {
+          continue;
+        }
+        propagated.put(tripId, wait);
+        State.PushOutcome outcome = state.pushSuccessors(tripId, wait);
+        switch (outcome.push()) {
+          case APPLIED -> {
+            int d = state.dutyOfTrip(tripId);
+            List<TimetableConflictChecker.Conflict> fresh = rescanner.afterMove(state, d);
+            if (fresh.stream()
+                .anyMatch(c -> ConflictAbsorption.onStubTerminal(c.resource(), stubs))) {
+              // 推后的班次在单股道端点上撞出了新冲突：车会在只有一股道的地方多待、或让后车在进站单线前等。
+              // 端点串行排好的东西不能被顺推拆掉——撤回，交给残余分类判顺推超限。
+              state.restore(outcome.before());
+              rescanner.afterMove(state, d);
+              rejected++;
+            } else {
+              pushed++;
+              moved = true;
+            }
+          }
+          case REJECTED -> rejected++;
+          case NONE -> {}
+        }
+      }
+      if (!moved) {
+        break;
+      }
+    }
+    return new WaitPropagation(pushed, rejected);
   }
 
   /** 把当前表投影成运行 + 待命，连同邻表一起查一遍。与 builder 最后那一遍检查同一口径。 */
@@ -326,6 +448,25 @@ public final class ResourceRepair {
         stays,
         input.separationSeconds(),
         TimetableConflictChecker.vehicleOf(current));
+  }
+
+  /**
+   * 一班车途中被这些冲突挡住，一共要等多久：各处等待取最大，不相加。
+   *
+   * <p>每处等待都是按这班车原来的时刻算的（前车离开 + 裕量 − 本车进入）。运行时它在第一处等过之后，后面每一处都跟着整体晚进入同样的秒数，
+   * 所以逐处递推下来，总等待恰好是各处等待里最大的那个——同一段上连着的几处冲突、先后几个地点被不同的车挡，都是如此。
+   * 按前车或按资源相加会把同一段等待重复算好几遍（区间、站台、单线段各报一处）。
+   *
+   * @param conflicts 这班车作为后车的冲突
+   * @param separation 相邻占用裕量
+   * @return 等待秒数，没有要等的为 0
+   */
+  static int requiredWait(List<TimetableConflictChecker.Conflict> conflicts, int separation) {
+    int wait = 0;
+    for (TimetableConflictChecker.Conflict conflict : conflicts) {
+      wait = Math.max(wait, conflict.firstTo() + separation - conflict.secondFrom());
+    }
+    return wait;
   }
 
   /**
@@ -820,6 +961,117 @@ public final class ResourceRepair {
           input.limits().turnaround(),
           input.routesEndingAtDepot(),
           input.legs());
+    }
+
+    /** code 是班次时它的 id；走行、待命与认不出的 code 为 {@code null}。 */
+    UUID tripIdOf(String code) {
+      return targetOf(code).tripId();
+    }
+
+    /** 班次所在的交路下标；认不出时为 −1。 */
+    int dutyOfTrip(UUID tripId) {
+      int[] pos = position.get(tripId);
+      return pos == null ? -1 : pos[0];
+    }
+
+    /** 这处冲突是不是落在这一班始发站的站台（组）上：那里车本来就停着，不是途中等待。 */
+    boolean atOriginPlatform(UUID tripId, TimetableConflictChecker.Conflict conflict) {
+      if (conflict.kind() != TimetableConflictChecker.Kind.PLATFORM) {
+        return false;
+      }
+      int[] pos = position.get(tripId);
+      if (pos == null) {
+        return false;
+      }
+      TimetableTrip trip = chains.get(pos[0]).get(pos[1]);
+      String origin =
+          table
+              .routePlan(trip.routeId())
+              .map(plan -> TimetableConflictChecker.groupOf(plan.originNodeId()))
+              .orElse(null);
+      if (origin == null || origin.isBlank()) {
+        return false;
+      }
+      String resource = conflict.resource();
+      if (resource.startsWith("platform-group:")) {
+        return origin.equals(resource.substring("platform-group:".length()));
+      }
+      return resource.startsWith("platform:")
+          && origin.equals(
+              TimetableConflictChecker.groupOf(resource.substring("platform:".length())));
+    }
+
+    /** 按（交路，交路内位置）排序：顺推先推前面的班次，结果与冲突的遍历顺序无关。 */
+    Comparator<UUID> chainOrder() {
+      return Comparator.comparingInt((UUID id) -> position.get(id)[0])
+          .thenComparingInt(id -> position.get(id)[1]);
+    }
+
+    /**
+     * 顺推一步的结果，连同施加之前的快照（只在 {@link Push#APPLIED} 时有）：后续判定还要撤回时用它，不必每步都先拍一份整表。
+     *
+     * @param push 结果
+     * @param before 施加之前的状态
+     */
+    record PushOutcome(Push push, Snapshot before) {}
+
+    /** 顺推一步的结果。 */
+    enum Push {
+      /** 折返余量吸收得了，或这是交路最后一班：表不用改。 */
+      NONE,
+      /** 后续班次已推后。 */
+      APPLIED,
+      /** 推不动（超 {@code --max-wait} 或会截断），已撤回。 */
+      REJECTED
+    }
+
+    /**
+     * 第 i 班途中要等 {@code wait} 秒：它晚这么多到终点，下一班按"到达 + 折返 + 等待"顺推，再沿交路传下去。
+     *
+     * <p>交路最后一班不推：回库走行在运行时本来就等车到站。推迟让任一班偏离名义超过 {@code --max-wait}（且比推之前更远）、或触发截断时，整步撤回。
+     */
+    PushOutcome pushSuccessors(UUID tripId, int wait) {
+      PushOutcome none = new PushOutcome(Push.NONE, null);
+      int[] pos = position.get(tripId);
+      if (pos == null || wait <= 0) {
+        return none;
+      }
+      int d = pos[0];
+      int i = pos[1];
+      if (i + 1 >= kept[d]) {
+        return none;
+      }
+      List<TimetableTrip> chain = chains.get(d);
+      TimetableTrip trip = chain.get(i);
+      TimetableRoutePlan plan = table.routePlan(trip.routeId()).orElse(null);
+      if (plan == null) {
+        return none;
+      }
+      TimetableTrip next = chain.get(i + 1);
+      int ready =
+          actual.getOrDefault(trip.id(), nominal.get(trip.id()))
+              + plan.totalRunSeconds()
+              + input.limits().turnaround().secondsFor(trip.routeId())
+              + wait;
+      int shift = ready - actual.getOrDefault(next.id(), nominal.get(next.id()));
+      if (shift <= 0) {
+        return none;
+      }
+      Snapshot before = snapshot();
+      delayTrip(d, i + 1, shift, false);
+      boolean over = truncated.size() > before.truncated().size();
+      for (int j = i + 1; !over && j < kept[d]; j++) {
+        UUID id = chain.get(j).id();
+        int base = nominal.get(id);
+        int now = actual.getOrDefault(id, base) - base;
+        int was = before.actual().getOrDefault(id, base) - base;
+        over = now > input.maxWaitSeconds() && now > was;
+      }
+      if (over) {
+        restore(before);
+        return new PushOutcome(Push.REJECTED, null);
+      }
+      return new PushOutcome(Push.APPLIED, before);
     }
 
     /** 这个 code 是不是我能挪的东西：班次、出库走行、回库走行、待命。 */

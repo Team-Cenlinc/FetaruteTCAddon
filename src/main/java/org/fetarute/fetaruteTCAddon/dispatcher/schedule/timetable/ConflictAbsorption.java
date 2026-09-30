@@ -32,7 +32,9 @@ import java.util.UUID;
  *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
  *   <li><b>让车点没有容量</b>：后车要等的地方在那一刻已经站满 → 不可吸收。
- *   <li><b>连锁过深</b>：这一等会把后续两班以上顶掉 → 不可吸收。
+ *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
+ *       写得进去的顺推已由让车修复的必等顺推写进表（{@link ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait}
+ *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔（2026-09-29 用户定）。
  * </ol>
  *
  * <p>单线对向本身是<b>可吸收</b>的：运行时按区段互斥，后车在区段外等。不可吸收的是"等的地方是容量 1 站台"那一种， 已被第 2 条覆盖。
@@ -41,8 +43,13 @@ import java.util.UUID;
  */
 public final class ConflictAbsorption {
 
-  /** 连锁深度上限：更深的让车会把交路后段整体顶掉，不再是"等一下"。 */
-  public static final int MAX_CHAIN_DEPTH = 2;
+  /**
+   * 表上没写进去的顺推允许几班：0。
+   *
+   * <p>这里曾经是 2，而且判据拿"下一班发车"去比"本班<b>发车</b> + 等待"——一趟车的走行远长于等待，所以它从来没有成立过， 顺推超限一次都没被判出来。
+   * 同一处冲突每一圈都在，晚点一圈圈累积直到被作废，表上却看不出来。现在比的是本班到达 + 折返 + 等待， 写得进去的顺推已经写进表，剩下一班都不放过。
+   */
+  public static final int MAX_CHAIN_DEPTH = 0;
 
   private ConflictAbsorption() {}
 
@@ -58,7 +65,7 @@ public final class ConflictAbsorption {
     OVER_MAX_WAIT,
     /** 让车点在那一刻没有空位。 */
     NO_WAITING_CAPACITY,
-    /** 连锁过深：顶掉的后续班次超过上限。 */
+    /** 顺推超限：后续班次赶不上表定时刻、而表上没有推后它们（推迟超 {@code --max-wait} 或会截断）。 */
     CHAIN_TOO_DEEP
   }
 
@@ -103,6 +110,7 @@ public final class ConflictAbsorption {
    * @param index 图索引：站台组容量
    * @param separationSeconds 相邻占用裕量
    * @param maxWaitSeconds 单步让车上限
+   * @param turnaround 各 route 终到之后多久能再发车：判后续班次赶不赶得上要用
    * @return 每处冲突一条，顺序与 {@code report} 一致
    */
   public static List<Residual> classify(
@@ -111,12 +119,34 @@ public final class ConflictAbsorption {
       TimetableOccupancyProjector.Occupancy occupancy,
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
-      int maxWaitSeconds) {
+      int maxWaitSeconds,
+      TurnaroundTable turnaround) {
     if (report == null || report.conflicts().isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.of(timetable, occupancy, index), report, separationSeconds, maxWaitSeconds);
+        Context.of(timetable, occupancy, index, turnaround),
+        report,
+        separationSeconds,
+        maxWaitSeconds);
+  }
+
+  /** 同上，折返按 0 计（到了就能走）：只给没有 route 上下文的用例用，编表必须传真实的折返表。 */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Timetable timetable,
+      TimetableOccupancyProjector.Occupancy occupancy,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds) {
+    return classify(
+        report,
+        timetable,
+        occupancy,
+        index,
+        separationSeconds,
+        maxWaitSeconds,
+        TurnaroundTable.none());
   }
 
   /**
@@ -140,6 +170,36 @@ public final class ConflictAbsorption {
     return classify(
         Context.ofWaitingPoints(waitingPointByCode, index),
         report,
+        separationSeconds,
+        maxWaitSeconds);
+  }
+
+  /**
+   * 必等顺推用：哪些冲突是运行时"在资源前等一下"就能过去的——判据前四条（邻表、容量 1 端点、超上限、让车点无容量），不看顺推。
+   *
+   * <p>顺推要写进表的正是这类等待；不可吸收的那些本来就会让这次尝试失败、交给搜索放宽，推它们只会把别处搅乱。 顺推本身取决于有没有推，所以这里不能把第五条算进来。
+   *
+   * @param conflicts 当前的冲突
+   * @param timetable 当前表
+   * @param occupancy 当前表的投影
+   * @param index 图索引
+   * @param separationSeconds 相邻占用裕量
+   * @param maxWaitSeconds 单步让车上限
+   * @return 每处冲突一条，顺序与 {@code conflicts} 一致
+   */
+  static List<Residual> classifyWaits(
+      List<TimetableConflictChecker.Conflict> conflicts,
+      Timetable timetable,
+      TimetableOccupancyProjector.Occupancy occupancy,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds) {
+    if (conflicts == null || conflicts.isEmpty()) {
+      return List.of();
+    }
+    return classify(
+        Context.of(timetable, occupancy, index, TurnaroundTable.none()).withoutChain(),
+        new TimetableConflictChecker.Report(conflicts),
         separationSeconds,
         maxWaitSeconds);
   }
@@ -169,6 +229,55 @@ public final class ConflictAbsorption {
       }
     }
     return out;
+  }
+
+  /**
+   * 容量 1 的站台组（只有一股道的车站、车库）：图索引里股道数不超过 1 的组。
+   *
+   * @param index 图索引
+   * @return 站台组名的集合
+   */
+  static Set<String> stubGroups(TimetableConflictChecker.GraphIndex index) {
+    Set<String> stubs = new HashSet<>();
+    if (index != null) {
+      index
+          .platformCapacity()
+          .forEach(
+              (group, tracks) -> {
+                if (tracks != null && tracks <= 1) {
+                  stubs.add(group);
+                }
+              });
+    }
+    return stubs;
+  }
+
+  /**
+   * 资源在不在容量 1 的端点上：那个站台组、它的具体股道，或名字里带该端点节点的单线桥链（进站单线）。
+   *
+   * @param resource 冲突资源键
+   * @param stubGroups {@link #stubGroups} 的结果
+   * @return 在端点上返回 true
+   */
+  static boolean onStubTerminal(String resource, Set<String> stubGroups) {
+    if (resource == null || stubGroups.isEmpty()) {
+      return false;
+    }
+    if (resource.startsWith("platform-group:")) {
+      return stubGroups.contains(resource.substring("platform-group:".length()));
+    }
+    if (resource.startsWith("platform:")) {
+      return stubGroups.contains(
+          TimetableConflictChecker.groupOf(resource.substring("platform:".length())));
+    }
+    if (resource.startsWith("single:")) {
+      for (String stub : stubGroups) {
+        if (resource.contains(stub + ":")) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 
   /** 只要可吸收的那些。 */
@@ -246,29 +355,29 @@ public final class ConflictAbsorption {
 
   // ------------------------------------------------------------------ 上下文
 
-  /** 分类需要的只读索引：全部从成品表与投影算出来，不含构建过程的中间状态。 */
+  /**
+   * 分类需要的只读索引：全部从成品表、投影、图索引与折返表算出来，不含构建过程的中间状态。
+   *
+   * @param chainAfter 班次 code → 从它起到交路末班，每班的 {@code [发车（相对计划窗口起点）, 发车到可再发车的秒数]}
+   */
   private record Context(
       Map<String, String> waitingPointByCode,
       Map<String, List<int[]>> staysByGroup,
       Map<String, Integer> capacityByGroup,
       Set<String> stubGroups,
-      Map<String, List<Integer>> chainDeparturesAfter) {
+      Map<String, List<int[]>> chainAfter) {
 
     static Context of(
         Timetable timetable,
         TimetableOccupancyProjector.Occupancy occupancy,
-        TimetableConflictChecker.GraphIndex index) {
+        TimetableConflictChecker.GraphIndex index,
+        TurnaroundTable turnaround) {
+      TurnaroundTable turnarounds = turnaround == null ? TurnaroundTable.none() : turnaround;
       Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
-      Set<String> stubs = new HashSet<>();
-      capacity.forEach(
-          (group, tracks) -> {
-            if (tracks != null && tracks <= 1) {
-              stubs.add(group);
-            }
-          });
+      Set<String> stubs = ConflictAbsorption.stubGroups(index);
 
       Map<String, String> waitingPoint = new HashMap<>();
-      Map<String, List<Integer>> chain = new HashMap<>();
+      Map<String, List<int[]>> chain = new HashMap<>();
       if (timetable != null) {
         Map<UUID, TimetableTrip> tripById = new HashMap<>();
         for (TimetableTrip trip : timetable.trips()) {
@@ -280,17 +389,36 @@ public final class ConflictAbsorption {
                       waitingPoint.put(
                           trip.tripCode(), TimetableConflictChecker.groupOf(plan.originNodeId())));
         }
+        int serviceStart = timetable.serviceStartSecondOfDay();
         for (VehicleDuty duty : timetable.duties()) {
-          // 交路里这一班之后还有几班：连锁深度按它数，与让车修复沿链传播的口径一致。
-          List<Integer> departures = new ArrayList<>();
+          // 交路里这一班之后的各班：顺推按"到达 + 折返"算，与让车修复沿链传播（delayTrip）同一口径。
+          // 发车取相对计划窗口起点的秒数：取模后的当日秒数跨零点会倒回去，前后两班就比反了。
+          List<int[]> legs = new ArrayList<>();
           for (UUID tripId : duty.tripIds()) {
             TimetableTrip trip = tripById.get(tripId);
-            departures.add(trip == null ? Integer.MIN_VALUE : trip.departureSecondOfDay());
+            if (trip == null) {
+              legs.add(null);
+              continue;
+            }
+            int run =
+                timetable
+                    .routePlan(trip.routeId())
+                    .map(TimetableRoutePlan::totalRunSeconds)
+                    .orElse(0);
+            legs.add(
+                new int[] {
+                  Math.floorMod(
+                      trip.departureSecondOfDay() - serviceStart, TimetableTrip.SECONDS_PER_DAY),
+                  run + turnarounds.secondsFor(trip.routeId())
+                });
           }
           for (int i = 0; i < duty.tripIds().size(); i++) {
             TimetableTrip trip = tripById.get(duty.tripIds().get(i));
             if (trip != null) {
-              chain.put(trip.tripCode(), List.copyOf(departures.subList(i, departures.size())));
+              chain.put(
+                  trip.tripCode(),
+                  java.util.Collections.unmodifiableList(
+                      new ArrayList<>(legs.subList(i, legs.size()))));
             }
           }
           // 出库走行的 code 是「交路号-CREATE」：车还在库里，晚发就是在库里多停一会儿，容量不限（空串）。
@@ -323,13 +451,7 @@ public final class ConflictAbsorption {
     static Context ofWaitingPoints(
         Map<String, String> waitingPointByCode, TimetableConflictChecker.GraphIndex index) {
       Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
-      Set<String> stubs = new HashSet<>();
-      capacity.forEach(
-          (group, tracks) -> {
-            if (tracks != null && tracks <= 1) {
-              stubs.add(group);
-            }
-          });
+      Set<String> stubs = ConflictAbsorption.stubGroups(index);
       return new Context(
           waitingPointByCode == null ? Map.of() : Map.copyOf(waitingPointByCode),
           Map.of(),
@@ -355,24 +477,12 @@ public final class ConflictAbsorption {
 
     /** 资源本身就在容量 1 的端点上：站台组、具体股道，或名字里带该端点节点的单线桥链。 */
     boolean isStubResource(String resource) {
-      if (resource == null) {
-        return false;
-      }
-      if (resource.startsWith("platform-group:")) {
-        return isStubGroup(resource.substring("platform-group:".length()));
-      }
-      if (resource.startsWith("platform:")) {
-        return isStubGroup(
-            TimetableConflictChecker.groupOf(resource.substring("platform:".length())));
-      }
-      if (resource.startsWith("single:")) {
-        for (String stub : stubGroups) {
-          if (resource.contains(stub + ":")) {
-            return true;
-          }
-        }
-      }
-      return false;
+      return onStubTerminal(resource, stubGroups);
+    }
+
+    /** 同一份上下文，不带交路链：顺推判据恒不成立。 */
+    Context withoutChain() {
+      return new Context(waitingPointByCode, staysByGroup, capacityByGroup, stubGroups, Map.of());
     }
 
     /** 让车点在这一刻还有没有空位：容量减去那一刻已经在待命的车。 */
@@ -391,21 +501,30 @@ public final class ConflictAbsorption {
       return capacity - occupied >= 1;
     }
 
-    /** 后车整趟延后 {@code wait} 秒之后，同一交路里被顶到晚于名义时刻的后续班次数。 */
+    /**
+     * 这一班途中等 {@code wait} 秒之后，同一交路里赶不上表定发车的后续班次数。
+     *
+     * <p>本班晚 {@code wait} 到终点，下一班最早在"本班发车 + 走行 + 折返 + 晚点"发车；表定发车比它早就赶不上， 晚点按差值带给再下一班，直到某一班的余量把它吸收掉。
+     */
     int chainDepthAfter(String code, int wait) {
-      List<Integer> departures = chainDeparturesAfter.get(code);
-      if (departures == null || departures.size() <= 1 || wait <= 0) {
+      List<int[]> legs = chainAfter.get(code);
+      if (legs == null || legs.size() <= 1 || wait <= 0 || legs.get(0) == null) {
         return 0;
       }
       int depth = 0;
-      int pushedTo = departures.get(0) + wait;
-      for (int i = 1; i < departures.size(); i++) {
-        int nominal = departures.get(i);
-        if (nominal == Integer.MIN_VALUE || nominal >= pushedTo) {
+      int late = wait;
+      for (int i = 1; i < legs.size(); i++) {
+        int[] previous = legs.get(i - 1);
+        int[] next = legs.get(i);
+        if (next == null) {
+          break;
+        }
+        int ready = previous[0] + previous[1] + late;
+        if (next[0] >= ready) {
           break;
         }
         depth++;
-        pushedTo = nominal + wait;
+        late = ready - next[0];
       }
       return depth;
     }

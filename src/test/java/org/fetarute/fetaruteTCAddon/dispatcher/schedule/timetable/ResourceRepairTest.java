@@ -221,8 +221,170 @@ class ResourceRepairTest {
 
   // ------------------------------------------------------------------ 夹具
 
+  /**
+   * 必等顺推：修不掉的追踪冲突留给运行时，RB 途中要等 35 秒，它的续班 RC 按"到达 + 折返 + 等待"推后。
+   *
+   * <p>邻表 NB 55 秒上 A:1–B：RB 让到 40 或 30 都会撞上它，而且要等的超过 --max-wait（40），让车整段回滚，RA–RB 的冲突 （区间与 C 站单线段
+   * 35、B 站 25）留在表外。RB 这条 route 折返 100 秒（续班避开 D001 的回库走行）：5 发、25 到 C:2、就绪 125； 途中等 35 → RC 从 125 推到
+   * 160（车未就绪）。推完之后按"到达 + 折返"判，这些残余赶得上续班，可吸收。
+   */
+  @Test
+  void residualWaitsArePushedOntoTheFollowingTrips() {
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RA@0", ra, 0)), -100),
+            duty("D002", List.of(trip("RB@5", rb, 5), trip("RC@125", rc, 125)), -100));
+    ResourceRepair.Input input =
+        input(provisional, List.of(neighborOnEdgeAb(55)), 40, 300, turnaroundFor(rb, 100));
+
+    ResourceRepair.Result result = ResourceRepair.repair(input);
+
+    assertEquals(5, departures(result.timetable()).get("RB@5"), "RB 本身让不动");
+    assertEquals(160, departures(result.timetable()).get("RC@125"));
+    assertEquals(new ResourceRepair.WaitPropagation(1, 0), result.propagation());
+    Map<UUID, TerminalSerializer.Shift.Reason> reasons = new LinkedHashMap<>();
+    result.shifts().forEach(shift -> reasons.put(shift.tripId(), shift.reason()));
+    assertEquals(TerminalSerializer.Shift.Reason.VEHICLE_READY, reasons.get(tripId("RC@125")));
+    List<ConflictAbsorption.Residual> residuals = classify(input, result);
+    assertFalse(residuals.isEmpty(), "RA–RB 的冲突仍在表外，运行时由 RB 在资源前等");
+    assertTrue(
+        residuals.stream().allMatch(ConflictAbsorption.Residual::absorbable), residuals::toString);
+  }
+
+  /**
+   * 推不动就不写：RB 这条 route 折返 105 秒，RC 表定 120（夹具刻意压紧，比就绪还早）。RC 先为 D001 的回库走行让了 5 秒到 125； RB 途中等 35 秒 →
+   * 就绪 165，还要再推 40 秒，RC 就偏离名义 45 秒，超过 --max-wait（40）。撤回、表不动，这些残余判为顺推超限—— 排不开，由搜索放宽间隔。
+   */
+  @Test
+  void pushesBeyondMaxWaitAreRejectedAndTheResidualBecomesUnabsorbable() {
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RA@0", ra, 0)), -100),
+            duty("D002", List.of(trip("RB@5", rb, 5), trip("RC@120", rc, 120)), -100));
+    ResourceRepair.Input input =
+        input(provisional, List.of(neighborOnEdgeAb(55)), 40, 300, turnaroundFor(rb, 105));
+
+    ResourceRepair.Result result = ResourceRepair.repair(input);
+
+    assertEquals(125, departures(result.timetable()).get("RC@120"), "撤回之后只剩为回库走行让的 5 秒");
+    assertEquals(new ResourceRepair.WaitPropagation(0, 1), result.propagation());
+    List<ConflictAbsorption.Residual> residuals = classify(input, result);
+    List<ConflictAbsorption.Residual> tooDeep =
+        residuals.stream()
+            .filter(residual -> residual.verdict() == ConflictAbsorption.Verdict.CHAIN_TOO_DEEP)
+            .toList();
+    assertFalse(tooDeep.isEmpty(), residuals::toString);
+    assertTrue(tooDeep.stream().noneMatch(ConflictAbsorption.Residual::absorbable));
+  }
+
+  /**
+   * 顺推不许在容量 1 的端点上撞出新冲突：B 站只有一股道。RC 推到 160 会在 170 与 RY（160 从 A:1 发、170 过 B）同时过 B，
+   * 撤回、表不动，残余判顺推超限——车在只有一股道的地方不能多待，也不能让后车在进站单线前等（2026-09-30 CHT）。
+   */
+  @Test
+  void pushesThatCollideOnACapacityOneStationAreRejected() {
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RA@0", ra, 0)), -100),
+            duty("D002", List.of(trip("RB@5", rb, 5), trip("RC@125", rc, 125)), -100),
+            duty("D003", List.of(trip("RY@160", rb, 160)), -100));
+    ResourceRepair.Input input =
+        input(provisional, List.of(neighborOnEdgeAb(55)), 40, 300, turnaroundFor(rb, 100));
+
+    ResourceRepair.Result result = ResourceRepair.repair(input);
+
+    assertEquals(125, departures(result.timetable()).get("RC@125"), "撤回之后续班原样");
+    assertEquals(new ResourceRepair.WaitPropagation(0, 1), result.propagation());
+    assertTrue(
+        classify(input, result).stream()
+            .anyMatch(residual -> residual.verdict() == ConflictAbsorption.Verdict.CHAIN_TOO_DEEP),
+        () -> classify(input, result).toString());
+  }
+
+  /**
+   * 累计容差等于 --max-wait（默认配置正是如此）时，推不动表现为截断：RC 要偏离名义 45 秒，超过容差 40，delayTrip 会把它截掉。
+   * 截掉的班次不在保留的链上，只看偏离量发现不了——截断本身就要撤回，不能让顺推悄悄删班。
+   */
+  @Test
+  void pushesThatWouldTruncateTheDutyAreRejected() {
+    Timetable provisional =
+        timetable(
+            duty("D001", List.of(trip("RA@0", ra, 0)), -100),
+            duty("D002", List.of(trip("RB@5", rb, 5), trip("RC@120", rc, 120)), -100));
+    ResourceRepair.Input input =
+        input(provisional, List.of(neighborOnEdgeAb(55)), 40, 40, turnaroundFor(rb, 105));
+
+    ResourceRepair.Result result = ResourceRepair.repair(input);
+
+    assertTrue(departures(result.timetable()).containsKey("RC@120"), "顺推不许截掉班次");
+    assertTrue(result.truncatedTripIds().isEmpty(), () -> result.truncatedTripIds().toString());
+    assertEquals(new ResourceRepair.WaitPropagation(0, 1), result.propagation());
+  }
+
+  /** 同一段上连着的几处冲突（区间、站台、单线段）是同一次等待：取最长的 35，不是三处相加的 80。 */
+  @Test
+  void overlappingConflictsAreWaitedOnceNotSummed() {
+    List<TimetableConflictChecker.Conflict> conflicts =
+        List.of(
+            conflict("edge:A~B", "RA", "RB", 10, 5),
+            conflict("platform:B", "RA", "RB", 10, 15),
+            conflict("single:B~C", "RA", "RB", 20, 15));
+
+    assertEquals(35, ResourceRepair.requiredWait(conflicts, SEPARATION));
+  }
+
+  /** 先后两处被两辆车挡（等 20、等 35）：在第一处等过 20 之后第二处整体晚进入 20，只需再等 15——总共 35，即各处的最大值，不是 55。 */
+  @Test
+  void waitsAtSuccessivePointsDoNotAddUp() {
+    List<TimetableConflictChecker.Conflict> conflicts =
+        List.of(conflict("edge:A~B", "R1", "RB", 10, 20), conflict("edge:C~D", "R2", "RB", 95, 90));
+
+    assertEquals(35, ResourceRepair.requiredWait(conflicts, SEPARATION));
+  }
+
+  private static TimetableConflictChecker.Conflict conflict(
+      String resource, String first, String second, int firstTo, int secondFrom) {
+    return new TimetableConflictChecker.Conflict(
+        TimetableConflictChecker.Kind.TRACK,
+        resource,
+        first,
+        second,
+        firstTo - 10,
+        firstTo,
+        secondFrom,
+        secondFrom + 10,
+        Optional.empty(),
+        Optional.empty());
+  }
+
+  /** 只给 {@code route} 另设折返秒数，其余沿用夹具的 {@value #TURNAROUND}。 */
+  private static TurnaroundTable turnaroundFor(UUID route, int seconds) {
+    return new TurnaroundTable(Map.of(route, seconds), TURNAROUND, false);
+  }
+
+  private List<ConflictAbsorption.Residual> classify(
+      ResourceRepair.Input input, ResourceRepair.Result result) {
+    return ConflictAbsorption.classify(
+        result.remaining(),
+        result.timetable(),
+        TimetableOccupancyProjector.project(result.timetable(), profiles, 0),
+        index,
+        SEPARATION,
+        input.maxWaitSeconds(),
+        input.limits().turnaround());
+  }
+
   private ResourceRepair.Input input(
       Timetable provisional, List<NeighborTimetable> neighbors, int maxWait, int tolerance) {
+    return input(provisional, neighbors, maxWait, tolerance, TurnaroundTable.fixed(TURNAROUND));
+  }
+
+  private ResourceRepair.Input input(
+      Timetable provisional,
+      List<NeighborTimetable> neighbors,
+      int maxWait,
+      int tolerance,
+      TurnaroundTable turnaround) {
     VehicleDutyPlanner.Legs legs =
         VehicleDutyPlanner.Legs.of(
             List.of(),
@@ -240,7 +402,7 @@ class ResourceRepairTest {
         maxWait,
         tolerance,
         legs,
-        new VehicleDutyPlanner.Limits(4, 7200, TURNAROUND),
+        new VehicleDutyPlanner.Limits(4, 7200, turnaround),
         Set.of(),
         neighbors);
   }

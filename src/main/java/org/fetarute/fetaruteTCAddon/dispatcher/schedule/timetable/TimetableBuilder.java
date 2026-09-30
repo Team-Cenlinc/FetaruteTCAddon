@@ -856,7 +856,8 @@ public final class TimetableBuilder {
             occupancy,
             prepared.graphIndex(),
             separation,
-            options.repair().maxWaitSeconds());
+            options.repair().maxWaitSeconds(),
+            options.dutyLimits().turnaround());
 
     // 份额按方向报：weight 只在同方向多 route 之间切，跨方向、跨组比没有意义。
     // 数的必须是<b>让车修复之后</b>还留在表上的班次：端点串行之后让车还会再截断一批，按串行后的表数会把
