@@ -30,7 +30,7 @@ public final class TimetableTripCancelledEvent extends Event {
   public enum Reason {
     /** 到点没有派出车：票过了发车容差作废，或服务器卡顿超过追补上限被跳过。 */
     NOT_DISPATCHED,
-    /** 执行这趟车的列车离开了运行时（销毁、异常清理等）。 */
+    /** 执行这趟车的列车离开了运行时（销毁、异常清理等）：本趟剩下的站不再停；它交路上后面替补车赶不上的班次同时整趟取消。 */
     VEHICLE_REMOVED
   }
 

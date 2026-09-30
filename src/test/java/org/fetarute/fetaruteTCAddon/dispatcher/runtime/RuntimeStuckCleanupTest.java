@@ -16,6 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -125,6 +126,52 @@ class RuntimeStuckCleanupTest {
     assertEquals(List.of("following-train"), reevaluated);
   }
 
+  /** 卸载与移除走同一条清理路径，但播报给停靠观察者的原因不同：车次层据此决定交路要不要交给替补——卸载的车还在离线存储里，醒来还是它。 */
+  @Test
+  void unloadIsReportedToStationStopObserversAsUnloadNotRemoval() {
+    RuntimeDispatchService service =
+        createService(mock(OccupancyManager.class), new RouteProgressRegistry());
+    List<String> released = new ArrayList<>();
+    service
+        .stationStops()
+        .setObserver(
+            new StationStopObserver() {
+              @Override
+              public void onStationArrival(StationStopEvent event) {}
+
+              @Override
+              public void onStationDeparture(StationStopEvent event) {}
+
+              @Override
+              public void onTrainReleased(String trainName, String reason) {
+                released.add(trainName + ":" + reason);
+              }
+            });
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.get(anyString())).thenReturn(null);
+      service.handleTrainUnloaded(physicalTrain("parked-train"));
+      service.handleTrainRemoved(physicalTrain("destroyed-train"));
+      service.handleTrainRemoved("cleaned-train");
+    }
+
+    assertEquals(
+        List.of(
+            "parked-train:" + StationStopObserver.RELEASE_UNLOADED,
+            "destroyed-train:train-removed",
+            "cleaned-train:train-removed"),
+        released);
+  }
+
+  private static RuntimeTrainHandle physicalTrain(String name) {
+    com.bergerkiller.bukkit.tc.properties.TrainProperties properties =
+        new RuntimeDispatchTestFixtures.TagStore(name, "FTA_TRAIN_NAME=" + name).properties;
+    RuntimeTrainHandle handle = mock(RuntimeTrainHandle.class);
+    when(handle.properties()).thenReturn(properties);
+    when(handle.physicalRuntimeIdentity()).thenReturn(new Object());
+    return handle;
+  }
+
   @Test
   void stuckCleanupDestroyUsesDedicatedTelemetry() {
     List<String> debugMessages = new ArrayList<>();
@@ -171,7 +218,8 @@ class RuntimeStuckCleanupTest {
               true,
               Duration.ofMinutes(20),
               Duration.ofMinutes(10),
-              Duration.ofMinutes(30));
+              Duration.ofMinutes(30),
+              Set.of());
     }
 
     assertFalse(review.allowed());

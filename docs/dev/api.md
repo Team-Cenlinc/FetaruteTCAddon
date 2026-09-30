@@ -681,7 +681,7 @@ public void onCancelled(TimetableTripCancelledEvent event) {
 | 字段 | 口径 |
 |------|------|
 | `getScope()` | `FULL`：起点就没有发车；`PARTIAL`：开出过，从 `getFirstCancelledStopSequence()` 那一站起不再停 |
-| `getReason()` | `NOT_DISPATCHED`：没派出车；`VEHICLE_REMOVED`：执行的列车离开了运行时 |
+| `getReason()` | `NOT_DISPATCHED`：没派出车；`VEHICLE_REMOVED`：执行的列车离开了运行时——半途离开时本趟 `PARTIAL`，交路上后面替补赶不上的班次同时以 `FULL` 发出（`getTrainName()` 是离开的那列车） |
 | `getFirstCancelledStopSequence()` | 与 `Departure#stopSequence` 同一口径；整趟取消时为首个停车站 |
 | `getServiceDate()` | 与 `Departure#serviceDate` 同一口径（起点发车所在日期） |
 | `getTrainName()` | 执行的列车；没派出车时为空 |

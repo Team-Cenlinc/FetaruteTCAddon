@@ -11,10 +11,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -227,6 +230,210 @@ class TimetableDutyReplacementTest {
         "trip-assigned");
 
     assertFalse(service.retiredFromDuty("train-A"));
+  }
+
+  /**
+   * 车被清掉（清车、手动删车）时交路还有两班：交路转成空缺，替补赶不上的第二班当即取消，第三班留给替补。
+   *
+   * <p>08:12:30 删车：替补现在出库、走行 + 就绪 180 秒，08:15:30 才到，赶不上第二班（08:15 截止）；第三班 08:17 出库赶得上。
+   * 当前这一班（起点还没开出）照旧整趟取消。
+   */
+  @Test
+  void aRemovedVehicleHandsItsDutyToAReplacementAndCancelsWhatItCannotReach() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = timetable(TimetableStatus.PUBLISHED, 3);
+    start(table);
+    List<UUID> trips = table.duties().get(0).tripIds();
+    clock.set(Instant.parse("2026-03-02T08:12:30Z"));
+
+    service.release("train-A", "health-stuck-cleanup-timeout");
+
+    assertEquals(
+        List.of(trips.get(0), trips.get(1)),
+        heard.stream().map(TripCancellations.Cancellation::tripId).toList(),
+        logs::toString);
+    TripCancellations.Cancellation second = heard.get(1);
+    assertEquals(TripCancellations.Scope.FULL, second.scope());
+    assertEquals(TripCancellations.Reason.VEHICLE_REMOVED, second.reason());
+    assertEquals("train-A", second.trainName().orElseThrow());
+    assertTrue(
+        second.detail().startsWith("duty-vacated:health-stuck-cleanup-timeout replacement-from="),
+        second.detail());
+    assertEquals(1, service.vacantDutyCount());
+    assertTrue(
+        logs.stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("TIMETABLE_DUTY_VACATED train=train-A")
+                        && line.contains("reason=removed:health-stuck-cleanup-timeout")
+                        && line.contains("fromTrip=1")),
+        logs::toString);
+    assertFalse(service.retiredFromDuty("train-A"), "车已离开运行时，不再记退役");
+
+    List<TimetableService.Replacement> issued = at("08:17:00");
+    assertEquals(1, issued.size());
+    assertEquals(2, issued.get(0).tripIndex(), "替补接第三班");
+    assertEquals(2, heard.size(), "第三班有替补，不取消");
+  }
+
+  /** 没有出库线路能把替补送到起点：剩下的班次当即全部取消，不再等每张票各自过容差。 */
+  @Test
+  void aRemovedVehicleWithoutAnyReplacementCancelsTheRestOfItsDuty() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = withoutCreateRoutes(timetable(TimetableStatus.PUBLISHED, 3));
+    start(table);
+    clock.set(Instant.parse("2026-03-02T08:05:00Z"));
+
+    service.release("train-A", "train-removed");
+
+    assertEquals(
+        table.duties().get(0).tripIds(),
+        heard.stream().map(TripCancellations.Cancellation::tripId).toList(),
+        logs::toString);
+    assertTrue(heard.get(2).detail().endsWith("no-replacement"), heard.get(2).detail());
+  }
+
+  /** 只扣车不出票：没有替补可派，后面的班次也可能被别的车按时间接上，不提前取消，也不登记空缺。 */
+  @Test
+  void withoutTicketingTheRestOfTheDutyIsLeftAlone() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = timetable(TimetableStatus.PUBLISHED, 3);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            false,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            ZONE));
+    service.reload(providerWith(table));
+    service.scheduledDepartureAt(event("train-A", 0, T0));
+    assertTrue(service.dutyBindingOf("train-A").isPresent());
+
+    service.release("train-A", "train-removed");
+
+    assertEquals(
+        List.of(table.duties().get(0).tripIds().get(0)),
+        heard.stream().map(TripCancellations.Cancellation::tripId).toList(),
+        "只有当前这一班");
+    assertEquals(0, service.vacantDutyCount());
+  }
+
+  /** 跑完交路的车回库销毁是正常收车：没有班次可交，不记空缺、不印"换下"。 */
+  @Test
+  void aVehicleThatFinishedItsDutyLeavesNoVacancy() {
+    start(timetable(TimetableStatus.PUBLISHED, 1));
+
+    service.release("train-A", "depot-stored");
+
+    assertEquals(0, service.vacantDutyCount());
+    assertTrue(
+        logs.stream().noneMatch(line -> line.startsWith("TIMETABLE_DUTY_VACATED")), logs::toString);
+  }
+
+  /** TrainCarts 卸载不算车没了：车在离线存储里，醒来还是它。交路不交给替补，也不提前取消后面的班次。 */
+  @Test
+  void anUnloadedVehicleKeepsItsDutyForWhenItWakesUp() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = timetable(TimetableStatus.PUBLISHED, 3);
+    start(table);
+    clock.set(Instant.parse("2026-03-02T08:12:30Z"));
+
+    service.release("train-A", StationStopObserver.RELEASE_UNLOADED);
+
+    assertEquals(0, service.vacantDutyCount());
+    assertEquals(
+        List.of(table.duties().get(0).tripIds().get(0)),
+        heard.stream().map(TripCancellations.Cancellation::tripId).toList(),
+        "只有当前这一班（与改动前相同）");
+  }
+
+  /**
+   * 跨零点：交路属于 3 月 2 日的服务日，00:00 那班却在 3 月 3 日发车。当即取消要按发车的日历日登记——站牌、出票、到期作废都按日历日查，
+   * 按服务日登记站牌看不到，票到期还会再发一次事件。
+   */
+  @Test
+  void cancellationsAcrossMidnightUseTheDepartureDate() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = overnight(timetable(TimetableStatus.PUBLISHED, 3));
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            ZONE));
+    service.reload(providerWith(table));
+    service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T23:50:05Z")));
+    UUID midnightTrip = table.duties().get(0).tripIds().get(1);
+    clock.set(Instant.parse("2026-03-03T00:02:30Z"));
+
+    service.release("train-A", "train-removed");
+
+    TripCancellations.Cancellation midnight =
+        heard.stream().filter(c -> c.tripId().equals(midnightTrip)).findFirst().orElseThrow();
+    assertEquals(LocalDate.of(2026, 3, 3), midnight.serviceDate());
+    assertEquals(Instant.parse("2026-03-03T00:00:00Z"), midnight.plannedDeparture());
+    assertTrue(
+        service.cancellationOf(table.id(), midnightTrip, LocalDate.of(2026, 3, 3)).isPresent());
+    assertEquals(2, heard.size(), "00:10 那班替补赶得上，不取消: " + heard);
+  }
+
+  /** 同一份表挪到深夜：三班 23:50、00:00、00:10，计划窗口 23:00 起，后两班跨零点。 */
+  private static Timetable overnight(Timetable source) {
+    VehicleDuty duty = source.duties().get(0);
+    int[] departures = {23 * 3600 + 50 * 60, 0, 10 * 60};
+    List<TimetableTrip> trips = new ArrayList<>();
+    for (int i = 0; i < source.trips().size(); i++) {
+      TimetableTrip trip = source.trips().get(i);
+      trips.add(
+          new TimetableTrip(
+              trip.id(),
+              trip.timetableId(),
+              trip.routeId(),
+              trip.sequence(),
+              trip.tripCode(),
+              departures[i],
+              trip.dutyId()));
+    }
+    VehicleDuty shifted =
+        new VehicleDuty(
+            duty.id(),
+            duty.timetableId(),
+            duty.sequence(),
+            duty.dutyCode(),
+            duty.startDepotNodeId(),
+            duty.endDepotNodeId(),
+            duty.createRouteId(),
+            duty.returnRouteId(),
+            duty.tripIds(),
+            departures[0] - 180,
+            24 * 3600 + departures[2] + 230 + 120,
+            24 * 3600 + departures[2] + 230 + 120 + 90,
+            duty.closeReason());
+    return new Timetable(
+        source.id(),
+        source.companyId(),
+        source.operatorId(),
+        source.lineId(),
+        source.code(),
+        source.name(),
+        source.status(),
+        source.zoneId(),
+        23 * 3600,
+        25 * 3600,
+        source.routePlans(),
+        trips,
+        List.of(shifted),
+        source.notes(),
+        source.createdAt(),
+        source.updatedAt());
   }
 
   /** 同一份表去掉 CREATE 线路：替补车无路可走。 */

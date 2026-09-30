@@ -598,6 +598,19 @@ public final class RuntimeDispatchService {
   private final ControlDiagnosticsCache diagnosticsCache = new ControlDiagnosticsCache();
   private static final Duration BLOCKER_SNAPSHOT_TTL = Duration.ofSeconds(20);
 
+  /** 调度自愈日志里最多点名几列被释放残留占用的车：反复出现同一个名字就是它的占用在不断复生。 */
+  private static final int ORPHAN_CLEANUP_NAMES_LOGGED = 5;
+
+  private static final String RELEASE_REMOVED = "train-removed";
+
+  /**
+   * 移除清理播报给停靠观察者的原因：平时是移除，{@link #handleTrainUnloaded} 调用栈内是卸载。
+   *
+   * <p>卸载与移除走同一条清理路径（占用、进度照样释放），只有车次层要分清——卸载的车还在离线存储里，不能把它的交路交给替补（{@link
+   * StationStopObserver#RELEASE_UNLOADED}）。只在主线程读写。
+   */
+  private String removalReleaseReason = RELEASE_REMOVED;
+
   /**
    * 调度销毁之后，仍把该物理身份的事件视为"自己刚销毁的滞后事件"的时长。
    *
@@ -6912,6 +6925,7 @@ public final class RuntimeDispatchService {
     }
 
     java.util.Set<String> released = new java.util.HashSet<>();
+    List<String> releasedNames = new ArrayList<>();
     int releasedTrains = 0;
     List<OccupancyClaim> claims = occupancyManager.snapshotClaims();
     if (claims != null && !claims.isEmpty()) {
@@ -6930,6 +6944,9 @@ public final class RuntimeDispatchService {
         occupancyManager.releaseByTrain(trainName);
         clearRuntimeCachesForTrain(trainName);
         releasedTrains++;
+        if (releasedNames.size() < ORPHAN_CLEANUP_NAMES_LOGGED) {
+          releasedNames.add(trainName.trim());
+        }
       }
     }
 
@@ -6968,6 +6985,7 @@ public final class RuntimeDispatchService {
               + removedProgress
               + " releasedTrains="
               + releasedTrains
+              + (releasedNames.isEmpty() ? "" : " trains=" + String.join(",", releasedNames))
               + " removedLayovers="
               + removedLayovers);
     }
@@ -7446,7 +7464,13 @@ public final class RuntimeDispatchService {
       }
     }
     if (rollback == null) {
-      handleTrainRemoved(unloadedTrain);
+      String previous = removalReleaseReason;
+      removalReleaseReason = StationStopObserver.RELEASE_UNLOADED;
+      try {
+        handleTrainRemoved(unloadedTrain);
+      } finally {
+        removalReleaseReason = previous;
+      }
       return;
     }
     unloadedMaterializedSpawnRollbackIdentities.add(identity);
@@ -8843,7 +8867,7 @@ public final class RuntimeDispatchService {
     }
     progressRegistry.remove(resolvedTrainName);
     clearRuntimeCachesForTrain(resolvedTrainName);
-    stationStopCoordinator.notifyReleased(resolvedTrainName, "train-removed");
+    stationStopCoordinator.notifyReleased(resolvedTrainName, removalReleaseReason);
     refreshScheduledSurvivorAfterRemoval(resolvedTrainName, trainName);
   }
 
@@ -13430,6 +13454,11 @@ public final class RuntimeDispatchService {
    *
    * <p>HealthMonitor 的候选排序只使用采样快照；这里会重新解析精确 TrainCarts group、FTA 标记、进度索引、真实乘客、受控停车、实时速度、blocker 与
    * active unlock reservation。任一事实已经变化都会拒绝销毁，避免用旧健康快照误删刚恢复或正常排队的列车。
+   *
+   * <p>{@code waitCycleTrains} 非空时是健康监控认定的停滞等待环：此刻挡住它的车若全在环里，它的"在等"就等不到头，不再按"在等前车"拒绝；
+   * 挡住它的车里只要有一列不在环里（或说不清在等谁），照旧拒绝。
+   *
+   * @param waitCycleTrains 等待环成员（含自身）；普通清理传空集
    */
   public SmartDispatcherController.StuckCleanupReview reviewStuckCleanupCandidate(
       String trainName,
@@ -13437,7 +13466,8 @@ public final class RuntimeDispatchService {
       boolean recoveryExhausted,
       Duration persisted,
       Duration threshold,
-      Duration passengerThreshold) {
+      Duration passengerThreshold,
+      Set<String> waitCycleTrains) {
     RuntimeTrainResolution resolution =
         resolveRuntimeTrainForHealth(trainName, RuntimeTrainResolvePurpose.DESTROY);
     TrainProperties properties = resolution.properties();
@@ -13463,6 +13493,7 @@ public final class RuntimeDispatchService {
             .orElse(true);
     boolean recentlyProgressed =
         context.map(value -> value.progressIndex() != expectedProgressIndex).orElse(true);
+    Set<String> blockers = recentBlockerTrains(trainName, BLOCKER_SNAPSHOT_TTL);
     return smartDispatcherController.reviewStuckCleanupCandidate(
         new SmartDispatcherController.StuckCleanupInput(
             trainName,
@@ -13472,8 +13503,10 @@ public final class RuntimeDispatchService {
             recoveryExhausted,
             controlledStop,
             context.map(value -> value.speedBlocksPerTick() > 0.01).orElse(true),
-            !recentBlockerTrains(trainName, BLOCKER_SNAPSHOT_TTL).isEmpty()
-                || hasRecentGateQueueEntry(trainName, BLOCKER_SNAPSHOT_TTL),
+            WaitCycleEvidence.waitingOnLiveBlocker(
+                blockers,
+                blockers.isEmpty() && hasRecentGateQueueEntry(trainName, BLOCKER_SNAPSHOT_TTL),
+                waitCycleTrains),
             hasActiveSmartUnlockReservation(trainName),
             context.map(DeadlockTrainContext::hasPassengers).orElse(true),
             persisted,

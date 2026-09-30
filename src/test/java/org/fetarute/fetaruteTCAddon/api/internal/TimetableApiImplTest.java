@@ -249,7 +249,10 @@ class TimetableApiImplTest {
         "按运营商过滤");
   }
 
-  /** 车在 BBB 发车后被销毁：BBB 及之前照常，QQQ 起（含终点）标为取消；下一趟不受影响。 */
+  /**
+   * 车在 BBB 发车后被销毁：这一趟 BBB 及之前照常，QQQ 起（含终点）标为取消。同一交路的下一趟没有出库线路可派替补，当即整趟标为取消（2026-09-30
+   * 起，此前要等它的票过了容差才作废）。
+   */
   @Test
   void departuresMarkTheStopsACancelledTripNoLongerServes() {
     TimetableService service = service(true);
@@ -265,13 +268,13 @@ class TimetableApiImplTest {
 
     Instant from = Instant.parse("2026-03-02T07:59:00Z");
     assertEquals(
-        List.of(false, false),
+        List.of(false, true),
         cancelledFlags(api.departuresAt(OPERATOR, "BBB", from, Duration.ofMinutes(20), 10)));
     assertEquals(
-        List.of(true, false),
+        List.of(true, true),
         cancelledFlags(api.departuresAt(OPERATOR, "QQQ", from, Duration.ofMinutes(20), 10)));
     assertEquals(
-        List.of(true, false),
+        List.of(true, true),
         cancelledFlags(api.departuresAt(OPERATOR, "CCC", from, Duration.ofMinutes(20), 10)));
   }
 

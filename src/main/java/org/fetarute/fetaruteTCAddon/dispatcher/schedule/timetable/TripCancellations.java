@@ -29,7 +29,7 @@ public final class TripCancellations {
   public enum Reason {
     /** 到点没派出车：票过了发车容差作废，或服务器卡顿超过追补上限被跳过。 */
     NOT_DISPATCHED,
-    /** 执行中的车离开运行时（销毁、异常清理等），剩下的站不再停。 */
+    /** 执行中的车离开运行时（销毁、异常清理等），剩下的站不再停；它交路上后面替补赶不上的班次同时整趟取消。 */
     VEHICLE_REMOVED
   }
 
