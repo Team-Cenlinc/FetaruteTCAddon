@@ -29,11 +29,12 @@ import org.fetarute.fetaruteTCAddon.utils.StableCollections;
  * epoch；否则新支路重新汇入旧路径的同名节点时， 旧 epoch 会把错误方向的里程当作列尾清空证据。每个 active epoch 只接受登记路径上的相邻有向节点；跳点、路径外节点会令该
  * epoch fail-retain，倒退则回退当前进度。 已完成 epoch 只能释放未被其他 epoch 引用的资源，因此共享咽喉不会提前释放。
  *
- * <p><b>后备释放：有序路线到达。</b>连续节点事件是唯一证据时，fail-retain 没有出口：2026-09-29 生产服 41 次折返发车里有 2 次（NTA:1
- * 站台直行出站，物理上先碰到的是渡线菱形里不在最短路径上的道岔节点）守卫被封存，旧进站 footprint 一直留到车销毁，列车早已开出五个站， 仍然占着 NTA
- * 咽喉的道岔，后车进站被扣满发车许可锁的 180 秒安全超时，同班的下一趟因此作废。所以每个 epoch 另存一份"路线下标 → 沿登记前进路径累计距离"的证据（{@link
- * RouteEvidence}）：列车按序到达路线下标 k（路径点到达事件严格逐个推进，节点名必须对得上），且累计距离达到（车长 + 车尾保护边距 + {@value
- * #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，车尾一定已经离开旧进路，无论连续节点事件是否成立都可以解除。 车长未知、没有路线证据的 epoch 仍然 fail-retain。
+ * <p><b>后备释放：有序路线到达。</b>连续节点事件是唯一证据时，fail-retain 没有出口。2026-09-29 生产服观察到：从 NTA:1 折返出发的两辆车 （41
+ * 次折返发车中的 2 次），旧站台节点与咽喉道岔一直被占到车被销毁，期间后车进不了 NTA、发车许可锁扣满 180 秒安全超时。日志当时无法区分该 epoch
+ * 是"登记时没有连续路径计划"还是"被越界节点事件封存"，所以两条路径 都补了诊断（{@code TURNBACK_FOOTPRINT_GUARD_NO_PLAN} / {@code
+ * _SEALED}），不假定其中一条。后备证据：每个 epoch 另存一份"交路 ID + 路线下标 → 沿登记前进路径累计距离" （{@link
+ * RouteEvidence}）；列车按序到达同一条交路的下标 k（路径点到达事件由运行时逐个推进，节点名必须对得上），且累计距离达到（车长 + 车尾保护边距 + {@value
+ * #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，车尾必然已经离开旧进路，无论连续节点事件是否成立都可以解除。车长未知、没有路线证据的 epoch 仍然 fail-retain。
  */
 final class TurnbackFootprintGuardRegistry {
 
@@ -122,8 +123,8 @@ final class TurnbackFootprintGuardRegistry {
                 route,
                 attempt.requiredClearDistanceBlocks().getAsDouble() + FAR_CLEAR_MARGIN_BLOCKS)
             : Optional.empty();
-    registerInternal(trainName, resources, attempt.plan(), farClearance);
-    if (attempt.plan().isEmpty()) {
+    boolean registered = registerInternal(trainName, resources, attempt.plan(), farClearance);
+    if (registered && attempt.plan().isEmpty()) {
       diagnostics.accept(
           "TURNBACK_FOOTPRINT_GUARD_NO_PLAN train="
               + trainName
@@ -260,15 +261,16 @@ final class TurnbackFootprintGuardRegistry {
   /**
    * 记录一次按序的路线路径点到达（后备释放）。
    *
-   * <p>路线下标 {@code routeIndex} 由运行时进度逐个推进，节点名必须与登记时该下标上的路径点一致；对应的累计前进距离达到 （车长 + 车尾保护边距 + {@value
+   * <p>路线下标 {@code routeIndex} 由运行时进度逐个推进，交路标识与节点名都必须与登记时一致；对应的累计前进距离达到 （车长 + 车尾保护边距 + {@value
    * #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，无论连续节点事件是否成立，旧进路上的车尾都已离开。 不提供路线证据或车长未知的 epoch 不受影响，继续
    * fail-retain。
    *
    * @return 可解除 sidecar 保护的旧资源，语义同 {@link #observeProgress}
    */
-  Optional<Release> observeRouteArrival(String trainName, int routeIndex, NodeId arrivedNode) {
+  Optional<Release> observeRouteArrival(
+      String trainName, String routeKey, int routeIndex, NodeId arrivedNode) {
     String key = keyOf(trainName);
-    if (key == null || arrivedNode == null || routeIndex < 0) {
+    if (key == null || routeKey == null || arrivedNode == null || routeIndex < 0) {
       return Optional.empty();
     }
     List<String> notes = new ArrayList<>();
@@ -282,7 +284,10 @@ final class TurnbackFootprintGuardRegistry {
       Set<OccupancyResource> completedResources = new LinkedHashSet<>();
       for (Guard epoch : current) {
         FarClearance far = epoch.farClearance().orElse(null);
-        RouteWaypoint waypoint = far == null ? null : far.waypointsByRouteIndex().get(routeIndex);
+        RouteWaypoint waypoint =
+            far == null || !far.routeKey().equals(routeKey)
+                ? null
+                : far.waypointsByRouteIndex().get(routeIndex);
         if (waypoint == null
             || !waypoint.node().equals(arrivedNode)
             || waypoint.cumulativeBlocks() + DISTANCE_EPSILON < far.thresholdBlocks()) {
@@ -367,14 +372,17 @@ final class TurnbackFootprintGuardRegistry {
     }
   }
 
-  private void registerInternal(
+  /**
+   * @return 是否真的登记了 guard（没有列车名或没有资源时不登记）
+   */
+  private boolean registerInternal(
       String trainName,
       Set<OccupancyResource> resources,
       Optional<RearClearPlan> plan,
       Optional<FarClearance> farClearance) {
     String key = keyOf(trainName);
     if (key == null || resources == null || resources.isEmpty()) {
-      return;
+      return false;
     }
     Set<OccupancyResource> immutableResources = Set.copyOf(resources);
     Optional<RearClearPlan> normalizedPlan = plan == null ? Optional.empty() : plan;
@@ -385,6 +393,7 @@ final class TurnbackFootprintGuardRegistry {
       epochs.add(new Guard(normalizedPlan, 0, immutableResources, true, farClearance));
       guards.put(key, List.copyOf(epochs));
     }
+    return true;
   }
 
   private static PlanAttempt buildRearClearPlan(
@@ -533,17 +542,18 @@ final class TurnbackFootprintGuardRegistry {
   /**
    * handoff 时的路线上下文：路线节点序列（生效节点，下标 0 起）与折返所在的下标。后备释放只认下标严格大于 {@code startIndex} 的路径点。
    *
+   * @param routeKey 交路标识；路线下标只在同一条交路内有意义，同一列车换交路后旧 epoch 不能用新交路的下标去比对
    * @param routeNodes 路线的生效路径点序列
    * @param startIndex 折返发生在路线的哪个下标（列车出库/复用时所在的首站）
    */
-  record RouteEvidence(List<NodeId> routeNodes, int startIndex) {
+  record RouteEvidence(String routeKey, List<NodeId> routeNodes, int startIndex) {
     RouteEvidence {
       routeNodes = routeNodes == null ? List.of() : List.copyOf(routeNodes);
     }
 
     /** 不提供后备证据。 */
     static RouteEvidence none() {
-      return new RouteEvidence(List.of(), -1);
+      return new RouteEvidence(null, List.of(), -1);
     }
   }
 
@@ -551,7 +561,7 @@ final class TurnbackFootprintGuardRegistry {
 
   /** 路线下标 → 该路径点沿登记前进路径的累计距离，以及要达到的阈值（车长 + 车尾保护边距 + 余量）。 */
   private record FarClearance(
-      Map<Integer, RouteWaypoint> waypointsByRouteIndex, double thresholdBlocks) {
+      String routeKey, Map<Integer, RouteWaypoint> waypointsByRouteIndex, double thresholdBlocks) {
     private FarClearance {
       waypointsByRouteIndex = Map.copyOf(waypointsByRouteIndex);
     }
@@ -564,6 +574,7 @@ final class TurnbackFootprintGuardRegistry {
       if (handoffNode == null
           || forwardPath == null
           || route == null
+          || route.routeKey() == null
           || route.startIndex() < 0
           || !Double.isFinite(thresholdBlocks)
           || thresholdBlocks <= 0.0) {
@@ -611,7 +622,7 @@ final class TurnbackFootprintGuardRegistry {
       }
       return byIndex.isEmpty()
           ? Optional.empty()
-          : Optional.of(new FarClearance(byIndex, thresholdBlocks));
+          : Optional.of(new FarClearance(route.routeKey(), byIndex, thresholdBlocks));
     }
   }
 

@@ -5619,7 +5619,7 @@ public final class RuntimeDispatchService {
     observePhysicalNodeForSpawnOrigin(properties, currentNode, currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneDynamicResolutionState(trainName, route, currentIndex);
-    observeTurnbackFootprintProgress(trainName, currentNode, currentIndex);
+    observeTurnbackFootprintProgress(trainName, currentNode, route, currentIndex);
     Instant now = clockNow();
     // 处理 DSTY 销毁
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
@@ -5863,7 +5863,7 @@ public final class RuntimeDispatchService {
     Instant now = clockNow();
     progressRegistry.updateLastPassedGraphNode(trainName, nodeId, now);
     observePhysicalNodeForSpawnOrigin(properties, nodeId, -1);
-    observeTurnbackFootprintProgress(trainName, nodeId, -1);
+    observeTurnbackFootprintProgress(trainName, nodeId, null, -1);
   }
 
   /**
@@ -6142,7 +6142,7 @@ public final class RuntimeDispatchService {
     if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
       return;
     }
-    observeTurnbackFootprintProgress(trainName, currentNode, currentIndex);
+    observeTurnbackFootprintProgress(trainName, currentNode, route, currentIndex);
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     boolean stopAtWaypoint = false;
     int waypointDwellSeconds = 0;
@@ -16203,11 +16203,13 @@ public final class RuntimeDispatchService {
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
     Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
     // 种别取库里交路的 pattern_type：车名字母与 FTA_PATTERN 标签共用，HUD 才不会把快速列车显示成各站停。
-    RoutePatternType routePattern = resolvePatternType(ticket.routeId());
+    Optional<RoutePatternType> routePattern = resolvePatternType(ticket.routeId());
     // 车名首字母取站码，与出车命名（SimpleTicketAssigner）一致；取站名会在中文站名下得到汉字首字。
     String regeneratedTrainName =
         regenerateTrainName(
-            route, routePattern, destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
+            route,
+            routePattern.orElse(RoutePatternType.LOCAL),
+            destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
 
     // 首站匹配：支持 TerminalKey 匹配和 DYNAMIC 匹配
     NodeId routeFirstNode = route.waypoints().get(0);
@@ -16362,7 +16364,8 @@ public final class RuntimeDispatchService {
         turnbackFootprintBeforeHandoff,
         resolveTurnbackForwardPath(graph, ctx, effectiveNodes, startIndex),
         configManager.current().runtimeSettings().rearGuardEdges(),
-        new TurnbackFootprintGuardRegistry.RouteEvidence(effectiveNodes, startIndex));
+        new TurnbackFootprintGuardRegistry.RouteEvidence(
+            route.id().value(), effectiveNodes, startIndex));
 
     String previousTrainName = trainName;
     if (regeneratedTrainName != null && !regeneratedTrainName.equals(previousTrainName)) {
@@ -16473,7 +16476,10 @@ public final class RuntimeDispatchService {
     TrainTagHelper.writeTag(
         properties, RouteProgressRegistry.TAG_ROUTE_ID, ticket.routeId().toString());
     // 出车时写下的 FTA_PATTERN 是出库那条交路的种别；复用换交路后必须跟着改，否则 HUD 一直显示出车时的种别。
-    TrainTagHelper.writeTag(properties, "FTA_PATTERN", routePattern.name());
+    // 解析不出种别时不写：写一个默认值会把原本可能正确的标签覆盖掉。
+    if (routePattern.isPresent()) {
+      TrainTagHelper.writeTag(properties, "FTA_PATTERN", routePattern.get().name());
+    }
     if (route.metadata().isPresent()) {
       RouteMetadata meta = route.metadata().get();
       // 线路标签是对乘客运营的线路：入路站及之前有 CHANGE（定义书第一站之前的起步线路）就直接写目标线路，
@@ -28383,15 +28389,16 @@ public final class RuntimeDispatchService {
    * 按物理 footprint 角色释放折返旧进路，证据有两种：真实节点事件连续跨过列尾保护窗口；或路线路径点按序到达（{@code routeIndex >= 0}）且累计前进
    * 已超过列尾清空阈值。后者兜住连续节点链被漏事件/离线切断的情形，见 {@link TurnbackFootprintGuardRegistry#observeRouteArrival}。
    */
-  void observeTurnbackFootprintProgress(String trainName, NodeId observedNode, int routeIndex) {
+  void observeTurnbackFootprintProgress(
+      String trainName, NodeId observedNode, RouteDefinition route, int routeIndex) {
     if (occupancyManager == null) {
       return;
     }
     List<TurnbackFootprintGuardRegistry.Release> releases = new ArrayList<>(2);
     turnbackFootprintGuards.observeProgress(trainName, observedNode).ifPresent(releases::add);
-    if (routeIndex >= 0) {
+    if (route != null && routeIndex >= 0) {
       turnbackFootprintGuards
-          .observeRouteArrival(trainName, routeIndex, observedNode)
+          .observeRouteArrival(trainName, route.id().value(), routeIndex, observedNode)
           .ifPresent(releases::add);
     }
     for (TurnbackFootprintGuardRegistry.Release release : releases) {
@@ -31119,23 +31126,18 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 按交路 UUID 查库里的种别（{@code pattern_type}）。
+   * 按交路 UUID 取交路的种别（{@code pattern_type}）。
    *
-   * <p>存储未就绪或查不到交路时回退 LOCAL：车名字母与 HUD 种别只是展示，不影响调度，宁可显示各站停也不阻断复用。 本类贴着 SpotBugs 的方法数上限，这里不用
-   * lambda（会编译成合成方法）。
+   * <p>取自 {@link
+   * RouteDefinitionCache#findRecord}：运营类型与交路阶段都在内存快照里，复用路径每个派发周期都会走到这里，不能为它同步查库。查不到时返回空，由调用方决定
+   * 车名回退与是否改写标签。本类贴着 SpotBugs 的方法数上限，这里不用 lambda（会编译成合成方法）。
    */
-  private RoutePatternType resolvePatternType(UUID routeId) {
-    if (routeId == null || storageManager == null || !storageManager.isReady()) {
-      return RoutePatternType.LOCAL;
+  private Optional<RoutePatternType> resolvePatternType(UUID routeId) {
+    if (routeId == null || routeDefinitions == null) {
+      return Optional.empty();
     }
-    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> provider =
-        storageManager.provider();
-    if (provider.isEmpty()) {
-      return RoutePatternType.LOCAL;
-    }
-    Optional<org.fetarute.fetaruteTCAddon.company.model.Route> stored =
-        provider.get().routes().findById(routeId);
-    return stored.isPresent() ? stored.get().patternType() : RoutePatternType.LOCAL;
+    Optional<RouteDefinitionCache.RouteRecord> record = routeDefinitions.findRecord(routeId);
+    return record.isPresent() ? Optional.of(record.get().route().patternType()) : Optional.empty();
   }
 
   /** 终点站显示信息。 */

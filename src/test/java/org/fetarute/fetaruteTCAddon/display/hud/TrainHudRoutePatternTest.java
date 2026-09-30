@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.hud;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
@@ -126,15 +125,36 @@ class TrainHudRoutePatternTest {
     assertEquals(Optional.of(RoutePatternType.RAPID), context.routePatternType());
   }
 
-  /** 存储没就绪（或库里查不到交路）时才退回标签，不让种别整段消失。 */
+  /** HUD 不再自带种别缓存：交路缓存重载后，管理员改的种别马上反映到 HUD。 */
   @Test
-  void theTagIsOnlyTheFallbackWhenTheDatabaseCannotAnswer() {
-    TrainHudContextResolver resolver = resolver(false);
-    TrainHudContext context =
-        resolve(resolver, "FTA_ROUTE_ID=" + rapid.id(), "FTA_ROUTE_INDEX=0", "FTA_PATTERN=EXPRESS")
-            .orElseThrow();
+  void aPatternChangeInTheRouteCacheShowsUpWithoutClearingHudCaches() {
+    TrainHudContextResolver resolver = resolver(true);
+    String[] tags = {"FTA_ROUTE_ID=" + rapid.id(), "FTA_ROUTE_INDEX=0"};
+    assertEquals(
+        Optional.of(RoutePatternType.RAPID),
+        resolve(resolver, tags).orElseThrow().routePatternType());
 
-    assertTrue(context.routePatternType().isPresent());
-    assertEquals(RoutePatternType.EXPRESS, context.routePatternType().orElseThrow());
+    storage
+        .provider()
+        .routes()
+        .save(
+            new Route(
+                rapid.id(),
+                rapid.code(),
+                rapid.lineId(),
+                rapid.name(),
+                rapid.secondaryName(),
+                RoutePatternType.EXPRESS,
+                rapid.operationType(),
+                rapid.distanceMeters(),
+                rapid.runtimeSeconds(),
+                rapid.metadata(),
+                rapid.createdAt(),
+                rapid.updatedAt()));
+    routes.reload(storage.provider());
+
+    assertEquals(
+        Optional.of(RoutePatternType.EXPRESS),
+        resolve(resolver, tags).orElseThrow().routePatternType());
   }
 }

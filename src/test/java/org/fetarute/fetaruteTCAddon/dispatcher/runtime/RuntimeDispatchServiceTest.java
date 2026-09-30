@@ -8140,8 +8140,8 @@ class RuntimeDispatchServiceTest {
     service.releaseResourcesNotInRequest("turning-train", List.of(), Set.of());
     assertEquals(2, manager.snapshotClaims().size());
 
-    service.observeTurnbackFootprintProgress("turning-train", middle, -1);
-    service.observeTurnbackFootprintProgress("turning-train", clear, -1);
+    service.observeTurnbackFootprintProgress("turning-train", middle, null, -1);
+    service.observeTurnbackFootprintProgress("turning-train", clear, null, -1);
     assertFalse(
         manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())));
     assertTrue(
@@ -8195,15 +8195,19 @@ class RuntimeDispatchServiceTest {
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(middle, clear, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(clear, far, 40.0)),
         1,
-        new TurnbackFootprintGuardRegistry.RouteEvidence(List.of(terminal, clear, far), 0));
+        new TurnbackFootprintGuardRegistry.RouteEvidence(
+            "far-route", List.of(terminal, clear, far), 0));
 
+    RouteDefinition farRoute =
+        new RouteDefinition(
+            RouteId.of("far-route"), List.of(terminal, clear, far), Optional.empty());
     // MID 的节点事件丢了：直接看到 CLEAR，节点链断开，guard 封存；此处累计 20 格，没到阈值 44 格
-    service.observeTurnbackFootprintProgress("turning-train", clear, 1);
+    service.observeTurnbackFootprintProgress("turning-train", clear, farRoute, 1);
     assertTrue(
         manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())),
         "封存后、未走够阈值前旧进路必须保留");
 
-    service.observeTurnbackFootprintProgress("turning-train", far, 2);
+    service.observeTurnbackFootprintProgress("turning-train", far, farRoute, 2);
     assertFalse(
         manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())),
         "路线路径点按序到达且累计 60 格超过阈值后，封存的 guard 应当释放 " + debugMessages);
@@ -8463,7 +8467,7 @@ class RuntimeDispatchServiceTest {
                             claim.trainName(), committedTrainName)
                         && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
 
-    service.observeTurnbackFootprintProgress(committedTrainName, throat, -1);
+    service.observeTurnbackFootprintProgress(committedTrainName, throat, null, -1);
 
     assertTrue(
         manager.snapshotClaims().stream()
@@ -8472,7 +8476,7 @@ class RuntimeDispatchServiceTest {
                     oldApproachResource.equals(claim.resource())
                         && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
 
-    service.observeTurnbackFootprintProgress(committedTrainName, clear, -1);
+    service.observeTurnbackFootprintProgress(committedTrainName, clear, null, -1);
 
     assertFalse(
         manager.snapshotClaims().stream()

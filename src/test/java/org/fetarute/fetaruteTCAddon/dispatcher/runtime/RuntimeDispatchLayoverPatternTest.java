@@ -15,10 +15,11 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
-import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -37,8 +38,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
-import org.fetarute.fetaruteTCAddon.storage.StorageManager;
-import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -55,8 +54,12 @@ class RuntimeDispatchLayoverPatternTest {
 
   private record Reused(String trainName, TagStore tags) {}
 
-  /** 在 TERM 站复用 {@code patternInDatabase} 种别的交路；列车身上带着出车时写下的 LOCAL 标签。 */
-  private Reused reuseOnto(RoutePatternType patternInDatabase) {
+  /**
+   * 在 TERM 站复用一条交路；列车身上带着 {@code initialPatternTag} 标签。
+   *
+   * @param patternInCache 交路缓存里该交路的种别；为空表示缓存里查不到这条交路
+   */
+  private Reused reuseOnto(Optional<RoutePatternType> patternInCache, String initialPatternTag) {
     NodeId approach = NodeId.of("SURC:TERM:APPROACH:1");
     NodeId terminal = NodeId.of("SURC:S:TERM:1");
     NodeId throat = NodeId.of("SURC:S:TERM:1:001");
@@ -108,27 +111,27 @@ class RuntimeDispatchLayoverPatternTest {
     when(routeDefinitions.findById(ticketRouteId)).thenReturn(Optional.of(route));
     when(routeDefinitions.listStops(route.id())).thenReturn(List.of());
 
-    Route stored =
-        new Route(
-            ticketRouteId,
-            "MT-3N_DPExp",
-            UUID.randomUUID(),
-            "两港快线",
-            Optional.empty(),
-            patternInDatabase,
-            RouteOperationType.OPERATION,
-            Optional.empty(),
-            Optional.empty(),
-            Map.of(),
-            Instant.now(),
-            Instant.now());
-    RouteRepository routeRepository = mock(RouteRepository.class);
-    when(routeRepository.findById(ticketRouteId)).thenReturn(Optional.of(stored));
-    StorageProvider provider = mock(StorageProvider.class);
-    when(provider.routes()).thenReturn(routeRepository);
-    StorageManager storageManager = mock(StorageManager.class);
-    when(storageManager.isReady()).thenReturn(true);
-    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    if (patternInCache.isPresent()) {
+      Route stored =
+          new Route(
+              ticketRouteId,
+              "MT-3N_DPExp",
+              UUID.randomUUID(),
+              "两港快线",
+              Optional.empty(),
+              patternInCache.get(),
+              RouteOperationType.OPERATION,
+              Optional.empty(),
+              Optional.empty(),
+              Map.of(),
+              Instant.now(),
+              Instant.now());
+      when(routeDefinitions.findRecord(ticketRouteId))
+          .thenReturn(
+              Optional.of(
+                  new RouteDefinitionCache.RouteRecord(
+                      mock(Operator.class), mock(Line.class), stored)));
+    }
 
     LayoverRegistry layoverRegistry = new LayoverRegistry();
     layoverRegistry.register(
@@ -147,10 +150,10 @@ class RuntimeDispatchLayoverPatternTest {
             layoverRegistry,
             new DwellRegistry(),
             configManager,
-            storageManager,
+            null,
             new TrainConfigResolver(),
             null);
-    TagStore tags = new TagStore(PREVIOUS, "FTA_PATTERN=LOCAL");
+    TagStore tags = new TagStore(PREVIOUS, "FTA_PATTERN=" + initialPatternTag);
     FakeTrain train = new FakeTrain(worldId, tags.properties(), false);
     LayoverRegistry.LayoverCandidate candidate = layoverRegistry.get(PREVIOUS).orElseThrow();
     ServiceTicket ticket =
@@ -175,7 +178,7 @@ class RuntimeDispatchLayoverPatternTest {
 
   @Test
   void reuseRewritesThePatternTagToTheNewRoute() {
-    Reused reused = reuseOnto(RoutePatternType.RAPID);
+    Reused reused = reuseOnto(Optional.of(RoutePatternType.RAPID), "LOCAL");
 
     assertEquals(
         Optional.of("RAPID"),
@@ -184,7 +187,7 @@ class RuntimeDispatchLayoverPatternTest {
 
   @Test
   void reuseNamesTheTrainAfterTheNewRoutePattern() {
-    Reused reused = reuseOnto(RoutePatternType.RAPID);
+    Reused reused = reuseOnto(Optional.of(RoutePatternType.RAPID), "LOCAL");
 
     // <OP>-<LINE>-<PATTERN><DEST>-<SEQ>：第三段首字母是种别（RAPID → R），不再永远是 L
     String[] parts = reused.trainName().split("-");
@@ -194,10 +197,21 @@ class RuntimeDispatchLayoverPatternTest {
 
   @Test
   void aLocalRouteStillGetsTheLocalPattern() {
-    Reused reused = reuseOnto(RoutePatternType.LOCAL);
+    Reused reused = reuseOnto(Optional.of(RoutePatternType.LOCAL), "RAPID");
 
     assertEquals(
         Optional.of("LOCAL"),
+        TrainTagHelper.readTagValue(reused.tags().properties(), "FTA_PATTERN"));
+    assertEquals('L', reused.trainName().split("-")[2].charAt(0), reused.trainName());
+  }
+
+  /** 交路缓存答不上来时，不能把原本可能正确的标签覆盖成默认的 LOCAL；车名字母回退 L。 */
+  @Test
+  void anUnresolvedPatternLeavesTheTagAlone() {
+    Reused reused = reuseOnto(Optional.empty(), "EXPRESS");
+
+    assertEquals(
+        Optional.of("EXPRESS"),
         TrainTagHelper.readTagValue(reused.tags().properties(), "FTA_PATTERN"));
     assertEquals('L', reused.trainName().split("-")[2].charAt(0), reused.trainName());
   }

@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalDouble;
 import java.util.Set;
@@ -12,6 +13,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.junit.jupiter.api.Test;
 
 class TurnbackFootprintGuardRegistryTest {
+
+  /** 测试里所有路线证据共用的交路标识；另一条交路用 {@code OTHER_ROUTE}。 */
+  private static final String ROUTE = "route-a";
+
+  private static final String OTHER_ROUTE = "route-b";
 
   @Test
   void backtrackAndJitterDoNotIncreaseForwardClearance() {
@@ -299,11 +305,14 @@ class TurnbackFootprintGuardRegistryTest {
     assertEquals(Set.of(oldApproach), registry.protectedResources("far"));
 
     // 路线下标 1 = C，累计 30 < 车长 6 + 边距 10 + 余量 32
-    assertTrue(registry.observeRouteArrival("far", 1, NodeId.of("C")).isEmpty());
+    assertTrue(registry.observeRouteArrival("far", ROUTE, 1, NodeId.of("C")).isEmpty());
     // 路线下标 2 = STATION，累计 60 ≥ 48
     assertEquals(
         Set.of(oldApproach),
-        registry.observeRouteArrival("far", 2, NodeId.of("STATION")).orElseThrow().resources());
+        registry
+            .observeRouteArrival("far", ROUTE, 2, NodeId.of("STATION"))
+            .orElseThrow()
+            .resources());
     assertTrue(registry.protectedResources("far").isEmpty());
     assertFalse(registry.contains("far"));
   }
@@ -321,10 +330,10 @@ class TurnbackFootprintGuardRegistryTest {
         1,
         routeEvidence(0, "TERM", "C", "STATION"));
 
-    assertTrue(registry.observeRouteArrival("mismatch", 2, NodeId.of("OTHER")).isEmpty());
+    assertTrue(registry.observeRouteArrival("mismatch", ROUTE, 2, NodeId.of("OTHER")).isEmpty());
     // 远处的节点出现在更早的下标上：下标是有序证据，节点名相同也不能借用
-    assertTrue(registry.observeRouteArrival("mismatch", 1, NodeId.of("STATION")).isEmpty());
-    assertTrue(registry.observeRouteArrival("mismatch", 9, NodeId.of("STATION")).isEmpty());
+    assertTrue(registry.observeRouteArrival("mismatch", ROUTE, 1, NodeId.of("STATION")).isEmpty());
+    assertTrue(registry.observeRouteArrival("mismatch", ROUTE, 9, NodeId.of("STATION")).isEmpty());
     assertEquals(Set.of(oldApproach), registry.protectedResources("mismatch"));
   }
 
@@ -340,7 +349,8 @@ class TurnbackFootprintGuardRegistryTest {
         OptionalDouble.of(6.0),
         1);
 
-    assertTrue(registry.observeRouteArrival("no-evidence", 2, NodeId.of("STATION")).isEmpty());
+    assertTrue(
+        registry.observeRouteArrival("no-evidence", ROUTE, 2, NodeId.of("STATION")).isEmpty());
     assertEquals(Set.of(legacy), registry.protectedResources("no-evidence"));
   }
 
@@ -358,7 +368,7 @@ class TurnbackFootprintGuardRegistryTest {
         routeEvidence(0, "TERM", "STATION"));
 
     assertTrue(
-        registry.observeRouteArrival("unknown-length", 1, NodeId.of("STATION")).isEmpty(),
+        registry.observeRouteArrival("unknown-length", ROUTE, 1, NodeId.of("STATION")).isEmpty(),
         "车长未知就没有阈值可比，仍然 fail-retain");
     assertEquals(Set.of(unknown), registry.protectedResources("unknown-length"));
   }
@@ -380,7 +390,10 @@ class TurnbackFootprintGuardRegistryTest {
     assertTrue(registry.observeProgress("revisit", NodeId.of("STATION")).isEmpty());
     assertEquals(
         Set.of(oldApproach),
-        registry.observeRouteArrival("revisit", 1, NodeId.of("STATION")).orElseThrow().resources());
+        registry
+            .observeRouteArrival("revisit", ROUTE, 1, NodeId.of("STATION"))
+            .orElseThrow()
+            .resources());
   }
 
   @Test
@@ -399,7 +412,10 @@ class TurnbackFootprintGuardRegistryTest {
     // 一个节点事件也没收到，epoch 仍是 active——但列车已经按序到了 60 格外的车站
     assertEquals(
         Set.of(oldApproach),
-        registry.observeRouteArrival("silent", 1, NodeId.of("STATION")).orElseThrow().resources());
+        registry
+            .observeRouteArrival("silent", ROUTE, 1, NodeId.of("STATION"))
+            .orElseThrow()
+            .resources());
   }
 
   @Test
@@ -427,7 +443,7 @@ class TurnbackFootprintGuardRegistryTest {
     assertEquals(
         Set.of(first),
         registry
-            .observeRouteArrival("two-epochs", 1, NodeId.of("STATION-A"))
+            .observeRouteArrival("two-epochs", ROUTE, 1, NodeId.of("STATION-A"))
             .orElseThrow()
             .resources());
     assertEquals(Set.of(shared, second), registry.protectedResources("two-epochs"));
@@ -456,7 +472,7 @@ class TurnbackFootprintGuardRegistryTest {
         noRouteEvidence());
 
     registry.observeProgress("diag", NodeId.of("C"));
-    registry.observeRouteArrival("diag", 1, NodeId.of("STATION"));
+    registry.observeRouteArrival("diag", ROUTE, 1, NodeId.of("STATION"));
 
     assertTrue(
         messages.stream()
@@ -481,6 +497,48 @@ class TurnbackFootprintGuardRegistryTest {
         messages.toString());
   }
 
+  /** 路线下标只在同一条交路内有意义：换交路后，新交路同下标同名节点不能释放旧交路登记的证据。 */
+  @Test
+  void routeArrivalOnAnotherRouteNeverReleasesTheEpochOfTheFirst() {
+    TurnbackFootprintGuardRegistry registry = new TurnbackFootprintGuardRegistry();
+    registry.register(
+        "cross-route",
+        NodeId.of("TERM"),
+        Set.of(OccupancyResource.forNode(NodeId.of("OLD"))),
+        List.of(
+            new TurnbackFootprintGuardRegistry.ForwardPathEdge(
+                NodeId.of("TERM"), NodeId.of("A"), 10.0),
+            new TurnbackFootprintGuardRegistry.ForwardPathEdge(
+                NodeId.of("A"), NodeId.of("STATION"), 80.0)),
+        OptionalDouble.of(6.0),
+        1,
+        routeEvidence(0, "TERM", "STATION"));
+
+    assertTrue(
+        registry.observeRouteArrival("cross-route", OTHER_ROUTE, 1, NodeId.of("STATION")).isEmpty(),
+        "另一条交路的同下标同名节点不是这条交路的证据");
+    assertTrue(
+        registry.observeRouteArrival("cross-route", ROUTE, 1, NodeId.of("STATION")).isPresent());
+  }
+
+  /** 没有登记任何 guard（没有资源）时不该留 NO_PLAN 诊断：该 token 不受日志预算限制，噪声会淹没真正要看的 SEALED/FAR_CLEAR。 */
+  @Test
+  void planlessRegistrationWithoutResourcesEmitsNoDiagnostic() {
+    List<String> messages = new ArrayList<>();
+    TurnbackFootprintGuardRegistry registry = new TurnbackFootprintGuardRegistry(messages::add);
+
+    registry.register(
+        "empty",
+        NodeId.of("TERM"),
+        Set.of(),
+        List.of(),
+        OptionalDouble.empty(),
+        1,
+        noRouteEvidence());
+
+    assertTrue(messages.isEmpty(), messages.toString());
+  }
+
   private static TurnbackFootprintGuardRegistry.RouteEvidence noRouteEvidence() {
     return TurnbackFootprintGuardRegistry.RouteEvidence.none();
   }
@@ -489,7 +547,7 @@ class TurnbackFootprintGuardRegistryTest {
   private static TurnbackFootprintGuardRegistry.RouteEvidence routeEvidence(
       int startIndex, String... routeNodes) {
     return new TurnbackFootprintGuardRegistry.RouteEvidence(
-        java.util.Arrays.stream(routeNodes).map(NodeId::of).toList(), startIndex);
+        ROUTE, java.util.Arrays.stream(routeNodes).map(NodeId::of).toList(), startIndex);
   }
 
   private static List<TurnbackFootprintGuardRegistry.ForwardPathEdge> forwardPath(

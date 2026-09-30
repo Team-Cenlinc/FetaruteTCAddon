@@ -23,6 +23,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.Set;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -37,7 +39,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.FakeTrain;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.TagStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -429,6 +433,84 @@ class RuntimeArrivalProgressTest {
                     fixture.train(),
                     new SignNodeDefinition(
                         fixture.platform(), NodeType.STATION, Optional.empty(), Optional.empty())));
+  }
+
+  /**
+   * 折返 guard 的路线到达兜底释放要靠运行时把"路线下标"喂进来；两处入口（waypoint 推进、站台到达）各自传 currentIndex，传错或改成 -1 时
+   * 兜底会静默失效、旧站台占用留到车销毁。这里从真实入口驱动，节点事件链故意断开（跳过 MID），只有路线到达证据能放行。
+   */
+  @Test
+  void waypointProgressFeedsTheRouteIndexToTheTurnbackGuard() {
+    PassArrivalFixture fixture = passArrivalFixture();
+    OccupancyResource stale = OccupancyResource.forConflict("stale-turnback");
+    registerTurnbackGuardWithBrokenNodeChain(fixture, stale);
+    assertTrue(isProtected(fixture, stale));
+
+    fixture.arrive();
+
+    assertEquals(1, fixture.progress().currentIndex());
+    assertFalse(isProtected(fixture, stale), "到达路线下标 1 且累计前进已超过阈值，兜底应当放行");
+  }
+
+  @Test
+  void stationArrivalFeedsTheRouteIndexToTheTurnbackGuard() {
+    PassArrivalFixture fixture = passArrivalFixture();
+    OccupancyResource stale = OccupancyResource.forConflict("stale-turnback");
+    registerTurnbackGuardWithBrokenNodeChain(fixture, stale);
+    assertTrue(isProtected(fixture, stale));
+
+    fixture
+        .service()
+        .handleStationArrival(
+            fixture.train(),
+            new SignNodeDefinition(
+                fixture.platform(), NodeType.STATION, Optional.empty(), Optional.empty()));
+
+    assertEquals(2, fixture.progress().currentIndex());
+    assertFalse(isProtected(fixture, stale), "到达路线下标 2 且累计前进已超过阈值，兜底应当放行");
+  }
+
+  /** 登记路径 station → MID → approach → platform，其中 MID 不在路线上、列车不会触发它：连续节点链必然断开。 */
+  private void registerTurnbackGuardWithBrokenNodeChain(
+      PassArrivalFixture fixture, OccupancyResource stale) {
+    NodeId station = fixture.route().waypoints().get(0);
+    NodeId mid = NodeId.of("OP:MID:1");
+    RuntimeTrainHandle guarded = mock(RuntimeTrainHandle.class);
+    when(guarded.estimatedTrainLengthBlocks()).thenReturn(OptionalDouble.of(2.0));
+    fixture
+        .service()
+        .registerTurnbackFootprintGuard(
+            guarded,
+            "incoming",
+            station,
+            Set.of(stale),
+            List.of(
+                new TurnbackFootprintGuardRegistry.ForwardPathEdge(station, mid, 10.0),
+                new TurnbackFootprintGuardRegistry.ForwardPathEdge(mid, fixture.approach(), 70.0),
+                new TurnbackFootprintGuardRegistry.ForwardPathEdge(
+                    fixture.approach(), fixture.platform(), 80.0)),
+            1,
+            new TurnbackFootprintGuardRegistry.RouteEvidence(
+                fixture.route().id().value(), fixture.route().waypoints(), 0));
+  }
+
+  private static boolean isProtected(PassArrivalFixture fixture, OccupancyResource resource) {
+    OccupancyDecision decision =
+        new OccupancyDecision(
+            false,
+            Instant.now(),
+            SignalAspect.STOP,
+            List.of(
+                new OccupancyClaim(
+                    resource,
+                    "other",
+                    Optional.empty(),
+                    Instant.now(),
+                    Duration.ZERO,
+                    Optional.empty(),
+                    ClaimRole.MOVEMENT_REQUIRED)),
+            false);
+    return fixture.service().hasTurnbackProtectedBlocker("incoming", decision);
   }
 
   /** 线路证据暂缺时立即撤销旧放行，保留已确认进度和现场占用。 */

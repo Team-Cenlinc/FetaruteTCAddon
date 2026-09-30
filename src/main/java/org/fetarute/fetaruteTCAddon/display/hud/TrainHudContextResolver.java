@@ -79,7 +79,6 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class TrainHudContextResolver {
 
   private static final long VEHICLE_HOPS = 3;
-  private static final String TAG_ROUTE_PATTERN = "FTA_PATTERN";
   private static final List<String> DEFAULT_LOCALE_TAGS = List.of("zh_CN", "en_US");
 
   private final FetaruteTCAddon plugin;
@@ -97,7 +96,6 @@ public final class TrainHudContextResolver {
   private boolean stationCacheLoaded = false;
   private final Map<String, CompanyDisplay> companyByOperatorCode = new HashMap<>();
   private boolean companyCacheLoaded = false;
-  private final Map<UUID, Optional<RoutePatternType>> routePatternById = new HashMap<>();
   private final Map<UUID, Optional<RouteOperationType>> routeOperationById = new HashMap<>();
   private final Map<String, Map<RoutePatternType, String>> patternTextByLocale = new HashMap<>();
   private final Map<String, EtaStatusTemplates> etaStatusByLocale = new HashMap<>();
@@ -373,7 +371,6 @@ public final class TrainHudContextResolver {
     stationCacheLoaded = false;
     companyByOperatorCode.clear();
     companyCacheLoaded = false;
-    routePatternById.clear();
     routeOperationById.clear();
     patternTextByLocale.clear();
     etaStatusByLocale.clear();
@@ -847,10 +844,10 @@ public final class TrainHudContextResolver {
   }
 
   /**
-   * 解析列车当前交路的种别（各站停/快速/特快…）。
+   * 解析列车当前交路的种别（各站停/快速/特快…），取自交路缓存里的 {@code pattern_type}。
    *
-   * <p>以库里交路的 {@code pattern_type} 为准；{@code FTA_PATTERN} 标签只在库答不上来（存储未就绪、交路已不在库里）时兜底。
-   * 标签是出车时写下的，折返复用换交路时不会更新：快速交路的车全靠复用接班，先读标签就会一直显示出车时那条交路的种别。
+   * <p>不读 {@code FTA_PATTERN} 标签：它是出车时写下的，折返复用换交路时不一定同步，快速交路的车全靠复用接班，读标签就会一直显示出车时那条交路的种别。缓存随交路重载刷新，
+   * 管理员改了种别不必再等 HUD 自己的缓存过期。
    */
   private Optional<RoutePatternType> resolveRoutePatternType(
       TrainProperties properties,
@@ -868,28 +865,10 @@ public final class TrainHudContextResolver {
           TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
               .flatMap(TrainHudContextResolver::parseUuid);
     }
-    if (routeId.isPresent()) {
-      Optional<RoutePatternType> cached = routePatternById.get(routeId.get());
-      if (cached == null) {
-        Optional<StorageProvider> providerOpt = providerIfReady();
-        if (providerOpt.isPresent()) {
-          cached = providerOpt.get().routes().findById(routeId.get()).map(Route::patternType);
-          routePatternById.put(routeId.get(), cached);
-        }
-      }
-      if (cached != null && cached.isPresent()) {
-        return cached;
-      }
-    }
-    return resolvePatternFromTag(properties);
-  }
-
-  private Optional<RoutePatternType> resolvePatternFromTag(TrainProperties properties) {
-    if (properties == null) {
-      return Optional.empty();
-    }
-    return TrainTagHelper.readTagValue(properties, TAG_ROUTE_PATTERN)
-        .flatMap(RoutePatternType::fromToken);
+    return routeId
+        .flatMap(routeDefinitions::findRecord)
+        .map(RouteDefinitionCache.RouteRecord::route)
+        .map(Route::patternType);
   }
 
   private Map<String, String> resolvePatternLocalePlaceholders(
