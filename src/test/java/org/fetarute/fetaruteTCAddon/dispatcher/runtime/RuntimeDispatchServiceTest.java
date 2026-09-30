@@ -181,7 +181,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(
                 NodeId.of("A"), NodeId.of("B"), 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
     OccupancyDecision protectedDecision =
         new OccupancyDecision(
             false,
@@ -7982,7 +7983,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(a, b, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(b, clear, 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
     java.lang.reflect.Method method =
         RuntimeDispatchService.class.getDeclaredMethod(
             "isSpeculativeBehindClaim",
@@ -8035,7 +8037,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(terminal, middle, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(middle, clear, 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
     OccupancyClaim movement =
         new OccupancyClaim(
             sharedSection,
@@ -8111,7 +8114,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(terminal, middle, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(middle, clear, 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
 
     java.lang.reflect.Method rollback =
         RuntimeDispatchService.class.getDeclaredMethod(
@@ -8136,8 +8140,8 @@ class RuntimeDispatchServiceTest {
     service.releaseResourcesNotInRequest("turning-train", List.of(), Set.of());
     assertEquals(2, manager.snapshotClaims().size());
 
-    service.observeTurnbackFootprintProgress("turning-train", middle);
-    service.observeTurnbackFootprintProgress("turning-train", clear);
+    service.observeTurnbackFootprintProgress("turning-train", middle, -1);
+    service.observeTurnbackFootprintProgress("turning-train", clear, -1);
     assertFalse(
         manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())));
     assertTrue(
@@ -8146,6 +8150,63 @@ class RuntimeDispatchServiceTest {
 
     service.releaseResourcesNotInRequest("turning-train", List.of(), Set.of());
     assertTrue(manager.snapshotClaims().isEmpty());
+  }
+
+  /**
+   * 2026-09-29 实服 NTA：节点事件链断了（漏掉中间节点）会把 guard 封存，此后 fail-retain 到车被销毁，旧站台挡住咽喉道岔。
+   * 路线路径点按序到达且累计前进超过阈值时必须兜底释放。
+   */
+  @Test
+  void sealedTurnbackGuardIsReleasedByRouteProgressFarBeyondTheRearClearance() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource oldApproach = OccupancyResource.forNode(NodeId.of("OLD"));
+    OccupancyRequest inbound =
+        new OccupancyRequest(
+            "turning-train", Optional.empty(), Instant.now(), List.of(oldApproach), Map.of());
+    assertTrue(manager.acquire(inbound).allowed());
+
+    List<String> debugMessages = new ArrayList<>();
+    RuntimeDispatchService service = createMinimalService(manager, debugMessages);
+    Set<OccupancyResource> footprint = service.snapshotTurnbackFootprintResources("turning-train");
+    assertEquals(Set.of(oldApproach), footprint);
+
+    // 原子交接：旧进路降为物理 footprint，只能由 guard 证据释放
+    NodeId terminal = NodeId.of("TERM");
+    NodeId middle = NodeId.of("MID");
+    NodeId clear = NodeId.of("CLEAR");
+    NodeId far = NodeId.of("FAR");
+    OccupancyResource outboundEdge = OccupancyResource.forEdge(EdgeId.undirected(terminal, middle));
+    OccupancyRequest outbound =
+        new OccupancyRequest(
+            "turning-train", Optional.empty(), Instant.now(), List.of(outboundEdge), Map.of());
+    assertTrue(manager.handoffAuthority(outbound).allowed());
+
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.estimatedTrainLengthBlocks()).thenReturn(OptionalDouble.of(2.0));
+    service.registerTurnbackFootprintGuard(
+        train,
+        "turning-train",
+        terminal,
+        footprint,
+        List.of(
+            new TurnbackFootprintGuardRegistry.ForwardPathEdge(terminal, middle, 10.0),
+            new TurnbackFootprintGuardRegistry.ForwardPathEdge(middle, clear, 10.0),
+            new TurnbackFootprintGuardRegistry.ForwardPathEdge(clear, far, 40.0)),
+        1,
+        new TurnbackFootprintGuardRegistry.RouteEvidence(List.of(terminal, clear, far), 0));
+
+    // MID 的节点事件丢了：直接看到 CLEAR，节点链断开，guard 封存；此处累计 20 格，没到阈值 44 格
+    service.observeTurnbackFootprintProgress("turning-train", clear, 1);
+    assertTrue(
+        manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())),
+        "封存后、未走够阈值前旧进路必须保留");
+
+    service.observeTurnbackFootprintProgress("turning-train", far, 2);
+    assertFalse(
+        manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())),
+        "路线路径点按序到达且累计 60 格超过阈值后，封存的 guard 应当释放 " + debugMessages);
   }
 
   @Test
@@ -8402,7 +8463,7 @@ class RuntimeDispatchServiceTest {
                             claim.trainName(), committedTrainName)
                         && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
 
-    service.observeTurnbackFootprintProgress(committedTrainName, throat);
+    service.observeTurnbackFootprintProgress(committedTrainName, throat, -1);
 
     assertTrue(
         manager.snapshotClaims().stream()
@@ -8411,7 +8472,7 @@ class RuntimeDispatchServiceTest {
                     oldApproachResource.equals(claim.resource())
                         && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
 
-    service.observeTurnbackFootprintProgress(committedTrainName, clear);
+    service.observeTurnbackFootprintProgress(committedTrainName, clear, -1);
 
     assertFalse(
         manager.snapshotClaims().stream()

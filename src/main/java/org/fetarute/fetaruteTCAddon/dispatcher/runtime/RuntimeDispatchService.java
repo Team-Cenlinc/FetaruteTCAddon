@@ -1599,6 +1599,7 @@ public final class RuntimeDispatchService {
         new DispatchPriorityResolver(
             storageManager, routeDefinitions, progressRegistry, this.debugLogger);
     SignalComputationTrace.configureLogger(this.debugLogger);
+    turnbackFootprintGuards.useDiagnostics(this.debugLogger);
     if (occupancyManager instanceof SimpleOccupancyManager simpleOccupancyManager) {
       simpleOccupancyManager.setLiveBlockerSnapshotListener(this::updateLiveBlockerSnapshot);
     }
@@ -5618,7 +5619,7 @@ public final class RuntimeDispatchService {
     observePhysicalNodeForSpawnOrigin(properties, currentNode, currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneDynamicResolutionState(trainName, route, currentIndex);
-    observeTurnbackFootprintProgress(trainName, currentNode);
+    observeTurnbackFootprintProgress(trainName, currentNode, currentIndex);
     Instant now = clockNow();
     // 处理 DSTY 销毁
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
@@ -5862,7 +5863,7 @@ public final class RuntimeDispatchService {
     Instant now = clockNow();
     progressRegistry.updateLastPassedGraphNode(trainName, nodeId, now);
     observePhysicalNodeForSpawnOrigin(properties, nodeId, -1);
-    observeTurnbackFootprintProgress(trainName, nodeId);
+    observeTurnbackFootprintProgress(trainName, nodeId, -1);
   }
 
   /**
@@ -6141,7 +6142,7 @@ public final class RuntimeDispatchService {
     if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
       return;
     }
-    observeTurnbackFootprintProgress(trainName, currentNode);
+    observeTurnbackFootprintProgress(trainName, currentNode, currentIndex);
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     boolean stopAtWaypoint = false;
     int waypointDwellSeconds = 0;
@@ -16357,7 +16358,8 @@ public final class RuntimeDispatchService {
         candidate.locationNodeId(),
         turnbackFootprintBeforeHandoff,
         resolveTurnbackForwardPath(graph, ctx, effectiveNodes, startIndex),
-        configManager.current().runtimeSettings().rearGuardEdges());
+        configManager.current().runtimeSettings().rearGuardEdges(),
+        new TurnbackFootprintGuardRegistry.RouteEvidence(effectiveNodes, startIndex));
 
     String previousTrainName = trainName;
     if (regeneratedTrainName != null && !regeneratedTrainName.equals(previousTrainName)) {
@@ -28289,7 +28291,8 @@ public final class RuntimeDispatchService {
       NodeId handoffNode,
       Set<OccupancyResource> retainedFootprint,
       List<TurnbackFootprintGuardRegistry.ForwardPathEdge> forwardPath,
-      int rearGuardEdges) {
+      int rearGuardEdges,
+      TurnbackFootprintGuardRegistry.RouteEvidence route) {
     if (occupancyManager == null || train == null || retainedFootprint == null) {
       return;
     }
@@ -28299,7 +28302,8 @@ public final class RuntimeDispatchService {
         retainedFootprint,
         forwardPath == null ? List.of() : List.copyOf(forwardPath),
         train.estimatedTrainLengthBlocks(),
-        rearGuardEdges);
+        rearGuardEdges,
+        route);
   }
 
   /**
@@ -28370,28 +28374,35 @@ public final class RuntimeDispatchService {
     }
   }
 
-  /** 只在真实节点事件跨过列尾保护窗口后，按物理 footprint 角色释放折返旧进路。 */
-  void observeTurnbackFootprintProgress(String trainName, NodeId observedNode) {
+  /**
+   * 按物理 footprint 角色释放折返旧进路，证据有两种：真实节点事件连续跨过列尾保护窗口；或路线路径点按序到达（{@code routeIndex >= 0}）且累计前进
+   * 已超过列尾清空阈值。后者兜住连续节点链被漏事件/离线切断的情形，见 {@link TurnbackFootprintGuardRegistry#observeRouteArrival}。
+   */
+  void observeTurnbackFootprintProgress(String trainName, NodeId observedNode, int routeIndex) {
     if (occupancyManager == null) {
       return;
     }
-    turnbackFootprintGuards
-        .observeProgress(trainName, observedNode)
-        .ifPresent(
-            release -> {
-              int released =
-                  occupancyManager.releaseResourcesByTrainAndRole(
-                      trainName, List.copyOf(release.resources()), ClaimRole.PHYSICAL_FOOTPRINT);
-              debugLogger.accept(
-                  "Layover 折返列尾已离开旧进路: train="
-                      + trainName
-                      + " node="
-                      + observedNode.value()
-                      + " resources="
-                      + release.resources().size()
-                      + " released="
-                      + released);
-            });
+    List<TurnbackFootprintGuardRegistry.Release> releases = new ArrayList<>(2);
+    turnbackFootprintGuards.observeProgress(trainName, observedNode).ifPresent(releases::add);
+    if (routeIndex >= 0) {
+      turnbackFootprintGuards
+          .observeRouteArrival(trainName, routeIndex, observedNode)
+          .ifPresent(releases::add);
+    }
+    for (TurnbackFootprintGuardRegistry.Release release : releases) {
+      int released =
+          occupancyManager.releaseResourcesByTrainAndRole(
+              trainName, List.copyOf(release.resources()), ClaimRole.PHYSICAL_FOOTPRINT);
+      debugLogger.accept(
+          "Layover 折返列尾已离开旧进路: train="
+              + trainName
+              + " node="
+              + observedNode.value()
+              + " resources="
+              + release.resources().size()
+              + " released="
+              + released);
+    }
   }
 
   private void recordEffectiveNode(

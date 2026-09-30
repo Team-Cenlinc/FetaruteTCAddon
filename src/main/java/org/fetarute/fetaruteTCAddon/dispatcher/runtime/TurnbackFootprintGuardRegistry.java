@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
@@ -27,12 +28,35 @@ import org.fetarute.fetaruteTCAddon.utils.StableCollections;
  * <p>同一列车连续折返时，每次 handoff 使用独立 traversal epoch。新 handoff 会封存所有旧 epoch，后续节点只推进最新
  * epoch；否则新支路重新汇入旧路径的同名节点时， 旧 epoch 会把错误方向的里程当作列尾清空证据。每个 active epoch 只接受登记路径上的相邻有向节点；跳点、路径外节点会令该
  * epoch fail-retain，倒退则回退当前进度。 已完成 epoch 只能释放未被其他 epoch 引用的资源，因此共享咽喉不会提前释放。
+ *
+ * <p><b>后备释放：有序路线到达。</b>连续节点事件是唯一证据时，fail-retain 没有出口：2026-09-29 生产服 41 次折返发车里有 2 次（NTA:1
+ * 站台直行出站，物理上先碰到的是渡线菱形里不在最短路径上的道岔节点）守卫被封存，旧进站 footprint 一直留到车销毁，列车早已开出五个站， 仍然占着 NTA
+ * 咽喉的道岔，后车进站被扣满发车许可锁的 180 秒安全超时，同班的下一趟因此作废。所以每个 epoch 另存一份"路线下标 → 沿登记前进路径累计距离"的证据（{@link
+ * RouteEvidence}）：列车按序到达路线下标 k（路径点到达事件严格逐个推进，节点名必须对得上），且累计距离达到（车长 + 车尾保护边距 + {@value
+ * #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，车尾一定已经离开旧进路，无论连续节点事件是否成立都可以解除。 车长未知、没有路线证据的 epoch 仍然 fail-retain。
  */
 final class TurnbackFootprintGuardRegistry {
 
   private static final double DISTANCE_EPSILON = 1.0e-6;
 
+  /** 后备释放在原阈值（车长 + 车尾保护边距）之上多要求的余量：路线到达点是站台中心，车头越过节点约半个车长。 */
+  static final double FAR_CLEAR_MARGIN_BLOCKS = 32.0;
+
   private final Map<String, List<Guard>> guards = new HashMap<>();
+
+  /** 封存、无计划与后备释放的诊断出口；运行时接调试日志，测试里默认丢弃。 */
+  private volatile Consumer<String> diagnostics = message -> {};
+
+  TurnbackFootprintGuardRegistry() {}
+
+  TurnbackFootprintGuardRegistry(Consumer<String> diagnostics) {
+    useDiagnostics(diagnostics);
+  }
+
+  /** 接上诊断日志出口；为空时丢弃。 */
+  void useDiagnostics(Consumer<String> diagnostics) {
+    this.diagnostics = diagnostics == null ? message -> {} : diagnostics;
+  }
 
   /**
    * 兼容旧调用方的保守注册入口。
@@ -41,7 +65,7 @@ final class TurnbackFootprintGuardRegistry {
    */
   void register(
       String trainName, NodeId handoffNode, Set<OccupancyResource> resources, int rearGuardEdges) {
-    registerInternal(trainName, resources, Optional.empty());
+    registerInternal(trainName, resources, Optional.empty(), Optional.empty());
   }
 
   /**
@@ -64,9 +88,54 @@ final class TurnbackFootprintGuardRegistry {
       List<ForwardPathEdge> forwardPath,
       OptionalDouble estimatedTrainLengthBlocks,
       int rearGuardEdges) {
-    Optional<RearClearPlan> plan =
+    register(
+        trainName,
+        handoffNode,
+        resources,
+        forwardPath,
+        estimatedTrainLengthBlocks,
+        rearGuardEdges,
+        RouteEvidence.none());
+  }
+
+  /**
+   * 登记折返防护，并带上路线有序到达的后备证据。
+   *
+   * @param route handoff 时的路线节点序列与折返所在下标；{@link RouteEvidence#none()} 表示不提供后备证据
+   * @see #observeRouteArrival
+   */
+  void register(
+      String trainName,
+      NodeId handoffNode,
+      Set<OccupancyResource> resources,
+      List<ForwardPathEdge> forwardPath,
+      OptionalDouble estimatedTrainLengthBlocks,
+      int rearGuardEdges,
+      RouteEvidence route) {
+    PlanAttempt attempt =
         buildRearClearPlan(handoffNode, forwardPath, estimatedTrainLengthBlocks, rearGuardEdges);
-    registerInternal(trainName, resources, plan);
+    Optional<FarClearance> farClearance =
+        attempt.requiredClearDistanceBlocks().isPresent()
+            ? FarClearance.create(
+                handoffNode,
+                forwardPath,
+                route,
+                attempt.requiredClearDistanceBlocks().getAsDouble() + FAR_CLEAR_MARGIN_BLOCKS)
+            : Optional.empty();
+    registerInternal(trainName, resources, attempt.plan(), farClearance);
+    if (attempt.plan().isEmpty()) {
+      diagnostics.accept(
+          "TURNBACK_FOOTPRINT_GUARD_NO_PLAN train="
+              + trainName
+              + " handoff="
+              + (handoffNode == null ? "-" : handoffNode.value())
+              + " reason="
+              + attempt.failureReason()
+              + " resources="
+              + (resources == null ? 0 : resources.size())
+              + " farEvidence="
+              + farClearance.isPresent());
+    }
   }
 
   /**
@@ -83,7 +152,8 @@ final class TurnbackFootprintGuardRegistry {
     registerInternal(
         trainName,
         resources,
-        RearClearPlan.create(handoffNode, forwardPath, requiredClearDistanceBlocks));
+        RearClearPlan.create(handoffNode, forwardPath, requiredClearDistanceBlocks),
+        Optional.empty());
   }
 
   /** 返回必须并入通用 shrink 保护集的资源。 */
@@ -129,6 +199,8 @@ final class TurnbackFootprintGuardRegistry {
     if (key == null || observedNode == null) {
       return Optional.empty();
     }
+    List<String> notes = new ArrayList<>();
+    Optional<Release> release;
     synchronized (guards) {
       List<Guard> current = guards.get(key);
       if (current == null || current.isEmpty()) {
@@ -150,36 +222,114 @@ final class TurnbackFootprintGuardRegistry {
         if (observedIndex < 0 || observedIndex > epoch.currentNodeIndex() + 1) {
           // 单独命中后续汇流点不能证明走过登记的有向子段；保守封存本 epoch。
           remaining.add(epoch.withActive(false));
+          notes.add(
+              "TURNBACK_FOOTPRINT_GUARD_SEALED train="
+                  + trainName
+                  + " observed="
+                  + observedNode.value()
+                  + " observedIndex="
+                  + observedIndex
+                  + " expectedIndex="
+                  + (epoch.currentNodeIndex() + 1)
+                  + " handoff="
+                  + plan.observations().get(0).node().value()
+                  + " resources="
+                  + epoch.resources().size()
+                  + " farEvidence="
+                  + epoch.farClearance().isPresent());
           continue;
         }
         if (observedIndex < epoch.currentNodeIndex()) {
           // 真实倒退会缩短列尾净清空距离，必须同步回退，而不是保留历史最大值。
-          remaining.add(new Guard(epoch.plan(), observedIndex, epoch.resources(), true));
+          remaining.add(epoch.withProgress(observedIndex));
           continue;
         }
         double observedDistance = plan.observations().get(observedIndex).cumulativeDistanceBlocks();
         if (observedDistance + DISTANCE_EPSILON < plan.requiredClearDistanceBlocks()) {
-          remaining.add(new Guard(epoch.plan(), observedIndex, epoch.resources(), true));
+          remaining.add(epoch.withProgress(observedIndex));
           continue;
         }
         completedResources.addAll(epoch.resources());
       }
-      if (completedResources.isEmpty()) {
-        guards.put(key, List.copyOf(remaining));
+      release = finishRelease(key, remaining, completedResources);
+    }
+    notes.forEach(diagnostics);
+    return release;
+  }
+
+  /**
+   * 记录一次按序的路线路径点到达（后备释放）。
+   *
+   * <p>路线下标 {@code routeIndex} 由运行时进度逐个推进，节点名必须与登记时该下标上的路径点一致；对应的累计前进距离达到 （车长 + 车尾保护边距 + {@value
+   * #FAR_CLEAR_MARGIN_BLOCKS} 格余量）时，无论连续节点事件是否成立，旧进路上的车尾都已离开。 不提供路线证据或车长未知的 epoch 不受影响，继续
+   * fail-retain。
+   *
+   * @return 可解除 sidecar 保护的旧资源，语义同 {@link #observeProgress}
+   */
+  Optional<Release> observeRouteArrival(String trainName, int routeIndex, NodeId arrivedNode) {
+    String key = keyOf(trainName);
+    if (key == null || arrivedNode == null || routeIndex < 0) {
+      return Optional.empty();
+    }
+    List<String> notes = new ArrayList<>();
+    Optional<Release> release;
+    synchronized (guards) {
+      List<Guard> current = guards.get(key);
+      if (current == null || current.isEmpty()) {
         return Optional.empty();
       }
-      if (remaining.isEmpty()) {
-        guards.remove(key);
-      } else {
-        guards.put(key, List.copyOf(remaining));
+      List<Guard> remaining = new ArrayList<>(current.size());
+      Set<OccupancyResource> completedResources = new LinkedHashSet<>();
+      for (Guard epoch : current) {
+        FarClearance far = epoch.farClearance().orElse(null);
+        RouteWaypoint waypoint = far == null ? null : far.waypointsByRouteIndex().get(routeIndex);
+        if (waypoint == null
+            || !waypoint.node().equals(arrivedNode)
+            || waypoint.cumulativeBlocks() + DISTANCE_EPSILON < far.thresholdBlocks()) {
+          remaining.add(epoch);
+          continue;
+        }
+        completedResources.addAll(epoch.resources());
+        notes.add(
+            "TURNBACK_FOOTPRINT_GUARD_FAR_CLEAR train="
+                + trainName
+                + " routeIndex="
+                + routeIndex
+                + " node="
+                + arrivedNode.value()
+                + " distance="
+                + Math.round(waypoint.cumulativeBlocks())
+                + " threshold="
+                + Math.round(far.thresholdBlocks())
+                + " active="
+                + epoch.active()
+                + " resources="
+                + epoch.resources().size());
       }
-      for (Guard epoch : remaining) {
-        completedResources.removeAll(epoch.resources());
-      }
-      return completedResources.isEmpty()
-          ? Optional.empty()
-          : Optional.of(new Release(completedResources));
+      release = finishRelease(key, remaining, completedResources);
     }
+    notes.forEach(diagnostics);
+    return release;
+  }
+
+  /** 完成的 epoch 从表里摘掉；其资源里仍被别的 epoch 引用的不能释放。调用方持有 {@code guards} 锁。 */
+  private Optional<Release> finishRelease(
+      String key, List<Guard> remaining, Set<OccupancyResource> completedResources) {
+    if (completedResources.isEmpty()) {
+      guards.put(key, List.copyOf(remaining));
+      return Optional.empty();
+    }
+    if (remaining.isEmpty()) {
+      guards.remove(key);
+    } else {
+      guards.put(key, List.copyOf(remaining));
+    }
+    for (Guard epoch : remaining) {
+      completedResources.removeAll(epoch.resources());
+    }
+    return completedResources.isEmpty()
+        ? Optional.empty()
+        : Optional.of(new Release(completedResources));
   }
 
   /** 迁移列车名；源列车没有 guard 时视为成功的 no-op。 */
@@ -218,7 +368,10 @@ final class TurnbackFootprintGuardRegistry {
   }
 
   private void registerInternal(
-      String trainName, Set<OccupancyResource> resources, Optional<RearClearPlan> plan) {
+      String trainName,
+      Set<OccupancyResource> resources,
+      Optional<RearClearPlan> plan,
+      Optional<FarClearance> farClearance) {
     String key = keyOf(trainName);
     if (key == null || resources == null || resources.isEmpty()) {
       return;
@@ -229,40 +382,47 @@ final class TurnbackFootprintGuardRegistry {
       List<Guard> existing = guards.getOrDefault(key, List.of());
       List<Guard> epochs = new ArrayList<>(existing.size() + 1);
       existing.stream().map(epoch -> epoch.withActive(false)).forEach(epochs::add);
-      epochs.add(new Guard(normalizedPlan, 0, immutableResources, true));
+      epochs.add(new Guard(normalizedPlan, 0, immutableResources, true, farClearance));
       guards.put(key, List.copyOf(epochs));
     }
   }
 
-  private static Optional<RearClearPlan> buildRearClearPlan(
+  private static PlanAttempt buildRearClearPlan(
       NodeId handoffNode,
       List<ForwardPathEdge> forwardPath,
       OptionalDouble estimatedTrainLengthBlocks,
       int rearGuardEdges) {
     if (estimatedTrainLengthBlocks == null || estimatedTrainLengthBlocks.isEmpty()) {
-      return Optional.empty();
+      return PlanAttempt.failed("length-unknown");
     }
     double trainLength = estimatedTrainLengthBlocks.getAsDouble();
-    if (!Double.isFinite(trainLength) || trainLength <= 0.0 || forwardPath == null) {
-      return Optional.empty();
+    if (!Double.isFinite(trainLength) || trainLength <= 0.0) {
+      return PlanAttempt.failed("length-invalid");
+    }
+    if (forwardPath == null) {
+      return PlanAttempt.failed("path-missing");
     }
     int guardEdgeCount = Math.max(1, rearGuardEdges);
     if (forwardPath.size() < guardEdgeCount) {
-      return Optional.empty();
+      return PlanAttempt.failed("path-shorter-than-rear-guard");
     }
     double rearGuardDistance = 0.0;
     for (int i = 0; i < guardEdgeCount; i++) {
       ForwardPathEdge edge = forwardPath.get(i);
       if (edge == null || !Double.isFinite(edge.lengthBlocks()) || edge.lengthBlocks() <= 0.0) {
-        return Optional.empty();
+        return PlanAttempt.failed("rear-guard-edge-invalid");
       }
       rearGuardDistance += edge.lengthBlocks();
       if (!Double.isFinite(rearGuardDistance)) {
-        return Optional.empty();
+        return PlanAttempt.failed("rear-guard-edge-invalid");
       }
     }
     double requiredDistance = trainLength + rearGuardDistance;
-    return RearClearPlan.create(handoffNode, forwardPath, requiredDistance);
+    Optional<RearClearPlan> plan = RearClearPlan.create(handoffNode, forwardPath, requiredDistance);
+    return plan.isPresent()
+        ? new PlanAttempt(plan, OptionalDouble.of(requiredDistance), "-")
+        : new PlanAttempt(
+            plan, OptionalDouble.of(requiredDistance), "path-not-continuous-or-insufficient");
   }
 
   private static String keyOf(String trainName) {
@@ -340,15 +500,118 @@ final class TurnbackFootprintGuardRegistry {
       Optional<RearClearPlan> plan,
       int currentNodeIndex,
       Set<OccupancyResource> resources,
-      boolean active) {
+      boolean active,
+      Optional<FarClearance> farClearance) {
     private Guard {
       plan = plan == null ? Optional.empty() : plan;
       currentNodeIndex = Math.max(0, currentNodeIndex);
       resources = resources == null ? Set.of() : Set.copyOf(resources);
+      farClearance = farClearance == null ? Optional.empty() : farClearance;
     }
 
     private Guard withActive(boolean nextActive) {
-      return active == nextActive ? this : new Guard(plan, currentNodeIndex, resources, nextActive);
+      return active == nextActive
+          ? this
+          : new Guard(plan, currentNodeIndex, resources, nextActive, farClearance);
+    }
+
+    private Guard withProgress(int nextNodeIndex) {
+      return new Guard(plan, nextNodeIndex, resources, true, farClearance);
+    }
+  }
+
+  /** 连续路径计划的构建结果：计划本身、无论计划成败都算得出的清空阈值，以及失败原因（诊断用）。 */
+  private record PlanAttempt(
+      Optional<RearClearPlan> plan,
+      OptionalDouble requiredClearDistanceBlocks,
+      String failureReason) {
+    private static PlanAttempt failed(String reason) {
+      return new PlanAttempt(Optional.empty(), OptionalDouble.empty(), reason);
+    }
+  }
+
+  /**
+   * handoff 时的路线上下文：路线节点序列（生效节点，下标 0 起）与折返所在的下标。后备释放只认下标严格大于 {@code startIndex} 的路径点。
+   *
+   * @param routeNodes 路线的生效路径点序列
+   * @param startIndex 折返发生在路线的哪个下标（列车出库/复用时所在的首站）
+   */
+  record RouteEvidence(List<NodeId> routeNodes, int startIndex) {
+    RouteEvidence {
+      routeNodes = routeNodes == null ? List.of() : List.copyOf(routeNodes);
+    }
+
+    /** 不提供后备证据。 */
+    static RouteEvidence none() {
+      return new RouteEvidence(List.of(), -1);
+    }
+  }
+
+  private record RouteWaypoint(NodeId node, double cumulativeBlocks) {}
+
+  /** 路线下标 → 该路径点沿登记前进路径的累计距离，以及要达到的阈值（车长 + 车尾保护边距 + 余量）。 */
+  private record FarClearance(
+      Map<Integer, RouteWaypoint> waypointsByRouteIndex, double thresholdBlocks) {
+    private FarClearance {
+      waypointsByRouteIndex = Map.copyOf(waypointsByRouteIndex);
+    }
+
+    private static Optional<FarClearance> create(
+        NodeId handoffNode,
+        List<ForwardPathEdge> forwardPath,
+        RouteEvidence route,
+        double thresholdBlocks) {
+      if (handoffNode == null
+          || forwardPath == null
+          || route == null
+          || route.startIndex() < 0
+          || !Double.isFinite(thresholdBlocks)
+          || thresholdBlocks <= 0.0) {
+        return Optional.empty();
+      }
+      // 沿登记路径展开节点与累计距离；路径不连续或边长无效处停止，后面的路径点没有证据
+      List<NodeId> nodes = new ArrayList<>();
+      List<Double> cumulative = new ArrayList<>();
+      nodes.add(handoffNode);
+      cumulative.add(0.0);
+      double total = 0.0;
+      NodeId expectedFrom = handoffNode;
+      for (ForwardPathEdge edge : forwardPath) {
+        if (edge == null
+            || edge.fromNode() == null
+            || edge.toNode() == null
+            || !expectedFrom.equals(edge.fromNode())
+            || !Double.isFinite(edge.lengthBlocks())
+            || edge.lengthBlocks() <= 0.0) {
+          break;
+        }
+        total += edge.lengthBlocks();
+        nodes.add(edge.toNode());
+        cumulative.add(total);
+        expectedFrom = edge.toNode();
+      }
+      // 路线路径点按下标依次在路径上向后找：下标单调，路径位置也必须单调不减
+      Map<Integer, RouteWaypoint> byIndex = new HashMap<>();
+      int position = 0;
+      List<NodeId> routeNodes = route.routeNodes();
+      for (int index = route.startIndex() + 1; index < routeNodes.size(); index++) {
+        NodeId target = routeNodes.get(index);
+        int found = -1;
+        for (int i = position; i < nodes.size(); i++) {
+          if (nodes.get(i).equals(target)) {
+            found = i;
+            break;
+          }
+        }
+        if (found < 0) {
+          break;
+        }
+        byIndex.put(index, new RouteWaypoint(target, cumulative.get(found)));
+        position = found;
+      }
+      return byIndex.isEmpty()
+          ? Optional.empty()
+          : Optional.of(new FarClearance(byIndex, thresholdBlocks));
     }
   }
 
