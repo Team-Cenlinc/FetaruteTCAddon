@@ -33,7 +33,8 @@ autostation
   - 对 `doorL10/doorR10`：默认取前 5 秒作为开门段，剩余部分作为关门段；若总时长不足 10 秒则按一半切分。
   - 其他 legacy 动画：开门段优先按 “scene marker 含 open” 的节点截取，其次按“位姿变化量最大”的节点；若无明显变化再用“最长持续时间”兜底。
   - 若无法解析动画节点，将回退直接播放 `doorL10/doorR10`。
-- AutoStation 触发开/关门时会使用 TrainCarts animation queue；若同一附件正在播放升弓、受电弓复位等动画，门动画会排队执行，避免直接打断现有动画。
+- AutoStation 开/关门动画同时置 `reset` 与 `queue`。TrainCarts 的 `Attachment#startAnimation` 先判 `reset`：直接顶掉附件上当前的动画并清空队列，`queue` 分支走不到——即门动画**总会打断**同一附件上正在播放的其它模型动画（升弓、受电弓复位等），并不排队。要真正排队必须去掉 `reset`，那样门动画不再从头开始，行为会变，需单独评估。
+- 出库与首站**不做门动画预热**。曾经的预热以 `reset + speed=0` 播放门动画把门摆回起点，但速度为零则动画永远播不完，TrainCarts 只在当前动画播完后才推进附件动画队列，此后显式带 `queue` 且不带 `reset` 的动画（TC 牌子 `animate` 写了 `queue`、命令 `--queue`）会一直卡在它后面；用 chest 生成的车没有这一步，动画从第一次起就能动。
 - N/E/S/W/NE/NW/SE/SW 的门侧判定必须由 `doorL/doorR` 附件世界位置决定，不使用列车 facing/travel vector 猜测动画名。附件局部探针仅用于取得更可靠的世界位置，不改变“世界方向投影更大者胜出”的规则。
 - 关门提示音：关门时会在门位置播放提示音，仅当附近 12 格内存在玩家时触发。
   - 门位置优先取含 `doorL/doorR/doorL10/doorR10` 动画的附件坐标；找不到则回退到车体位置。

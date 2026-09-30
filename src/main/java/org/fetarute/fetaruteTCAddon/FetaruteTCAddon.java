@@ -725,7 +725,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
         () -> requestRuntimeDispatchRecovery("late-loaded-or-relinked-train"));
     getServer()
         .getPluginManager()
-        .registerEvents(new RuntimeDispatchListener(runtimeDispatchService), this);
+        .registerEvents(
+            // 联挂否决是异常证据，走 WARN 而不是受 debug 开关和观察预算约束的诊断通道；监听器已按列车对限流。
+            RuntimeDispatchListener.withDiagnostics(runtimeDispatchService, loggerManager::warn),
+            this);
     initEtaService();
     if (etaService != null) {
       runtimeDispatchService.setEtaService(etaService);

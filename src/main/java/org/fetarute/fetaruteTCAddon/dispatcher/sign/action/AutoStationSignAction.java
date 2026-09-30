@@ -351,15 +351,6 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (group == null) {
       return;
     }
-    if (firstStop) {
-      Bukkit.getScheduler()
-          .runTaskLater(plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 2L);
-      Bukkit.getScheduler()
-          .runTaskLater(plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 10L);
-      Bukkit.getScheduler()
-          .runTaskLater(
-              plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group, true), 20L);
-    }
     new org.bukkit.scheduler.BukkitRunnable() {
       private int waitedTicks = 0;
 

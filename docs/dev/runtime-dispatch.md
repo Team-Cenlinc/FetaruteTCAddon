@@ -112,8 +112,8 @@
 - 已经持有同一 single claim 的列车继续前进时，仍必须检查同向外部 leader 是否正停在终端/停站/折返陷阱中；若 leader 不能证明会真正排空本区间，`ALLOW_ALREADY_INSIDE_CONTINUE` 会被收紧为 local-only hold，并输出 `SMART_ALREADY_INSIDE_REGION_BLOCKED_BY_SAME_DIRECTION_LEADER`。该守卫只允许对“可证明在本车前方”的 leader 生效：优先比较同 route index，跨 route 时用本轮展开路径的共同下游锚点剩余图距离定序，只有两者都无法证明时才使用稳定 train key 指定一侧让行；若发现候选 leader 也正在等本车，则跳过守卫，避免同向列车互相把对方焊成 STOP。
 - 自持 single continuation 被外部 owner 阻断时，拒绝结果会把外部 same-single claim 一并放入 blockers。这样 health monitor 的 live blocker cycle 可以看到真实 wait-for 边，而不是只看到 self claim 后退化为 snapshot missing / timeout destroy。
 - 自持 stale-retain 候选会固化采样请求的完整 hard-authority scope；若当前判定已发现外部 NODE/EDGE/interlocking blocker，则清除旧候选。health 缩减复核仍复用这份 scope，最终 occupancy mutation 前再检查其中是否出现外车 claim，不能因只重建 single resource 而遗忘平交硬阻塞。
-- 占用采用事件反射式：推进点会释放窗口外资源；普通列车卸载/移除事件会主动释放占用；实体化回滚列车的 GroupUnload 只转入 TrainCarts offline 精确收容，不能提前释放 claims。信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
-- TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建；但 `SpawnableGroup#spawn()` 会在 Depot 事务取得物理 group、写入正式 owner/route/index 与登记 provisional identity 之前同步触发 GroupCreate。因此 GroupCreate 当 tick 只同步收容持久 rollback tombstone、硬停继承 FTA 标签的模板编组，并把完整属性读取/信号评估推迟到下一 tick；不得把半初始化的新 Depot 车判成 late-load。列车改名依赖信号 tick 清理旧缓存。
+- 占用采用事件反射式：推进点会释放窗口外资源；普通列车卸载/移除事件会主动释放占用（**已知缺口**：卸载的车仍躺在 TrainCarts 离线存储里，占用却已释放，下一班可能在同一位置叠放；对策是让受管列车永远不被卸载——出库时强制 `keepChunksLoaded`，见 `spawn-scheduler.md`；出库后 60 秒内的卸载会留 `SMART_FTA_EARLY_UNLOAD`）；实体化回滚列车的 GroupUnload 只转入 TrainCarts offline 精确收容，不能提前释放 claims。信号 tick 仍会对“已不存在列车”的遗留占用做被动清理。
+- TrainCarts 的 GroupCreate/GroupLink 会触发一次信号评估，用于覆盖 split/merge 后的状态重建（受管列车之间**跨属主**的联挂在 HIGH 优先级被否决，不进入该路径，见下文“联挂否决”）；但 `SpawnableGroup#spawn()` 会在 Depot 事务取得物理 group、写入正式 owner/route/index 与登记 provisional identity 之前同步触发 GroupCreate。因此 GroupCreate 当 tick 只同步收容持久 rollback tombstone、硬停继承 FTA 标签的模板编组，并把完整属性读取/信号评估推迟到下一 tick；不得把半初始化的新 Depot 车判成 late-load。列车改名依赖信号 tick 清理旧缓存。
 - spawn/layover 发车成功后，运行时会按本次占用资源收集受影响列车（claim + queue），并请求下一 Bukkit tick 的完整重评估。新车自身的首次 expected-identity 硬停/水合刷新仍留在实体化提交器；其他列车不得在 acquire 或实体化调用栈内同步重入信号计算，避免绕过 Gate Queue 合并与产生嵌套授权。
 - Depot 物理实体生成后不会立即完成 SpawnTicket。Spawner 在物理 group 创建后立即返回 `MaterializedSpawn`，调用方取得 identity 后才执行 tags/warm-up 等可失败初始化；owner tag 是第一项写入，确保其余初始化失败时残留实体仍可被启动恢复识别。调度器随后以同一 READY recovery epoch 登记 provisional physical identity，并保持硬停车；周期巡检取得完整实时 rail footprint、原子替换本车现场资源并 promotion 后，TicketAssigner 才提交票据与成功计数。等待超过 4 秒（小于 `SpawnControl` 的 5 秒租约 TTL）、物理 identity 丢失、刷新异常或 epoch 改变时，事务原子进入 `ROLLBACK_REQUIRED`，同时写入 runtime 物理 quarantine；硬停、销毁安排与账务重排完成后转入 `AWAITING_REMOVAL`，继续保留事务并重试销毁，直到 TrainCarts 精确发出 GroupRemove。`group.isValid()==false` 可能只是 GroupUnload，禁止把它合成为移除；卸载前的 quarantine 会通过持久化回滚标签转移到重载后的新物理身份。离线编组则只通过 TrainCarts `OfflineGroupManager.destroyGroupAsync` 的成功结果确认收容，启动恢复会从 `TrainPropertiesStore` 重新发现 tombstone，清理完成前保持 STOP_FIRST。外部 GroupCreate/周期信号入口在这两个阶段都只能保持硬停。收容或账务动作失败会保留记录；同 ticket 只允许一个活动实体化事务，额外 group 独立收容但不重复完成/重排票据；owner 先移除时，逻辑 claims 仍保留到同名额外 identity 全部精确移除。`destroy()` 已安排但精确 `GroupRemove` 尚未到达的窗口仍视为 live rollback identity，同名票据不得再次 spawn 或登记 provisional 身份。达到普通尝试上限或通用 queue age 的实体化失败会继续退避保留票据，不能把水合竞态记作班次完成。重载或停用前先把全部 pending identity 登记 quarantine，再逐一销毁；重载中止后现场恢复任务继续调用旧 assigner 推进收容。成功替换调度器时按 UUID 去重恢复 queue 与 layover pending，并原样迁移服务 `nextDueAt` 与全局 sequence。重试时间下限为 1 tick，避免回滚票据在同一 tick 再次实体化。持久化 `FTA_SPAWN_ORIGIN_PENDING` 仅用于生命周期恢复，不能单独充当 expected-spawn 授权。
 - 常规 Depot 发车与 Layover fallback 在物理 group 出现前共用同一 `PreparedDepotSpawn` 预检：固定实际 depot、构造动态 authority 与 gate request、确认 smart-admission/preview、捕获 READY recovery epoch。预检失败必须在 `spawn()` 前撤销动态 authority、释放租约并保留各入口的重试原因；普通 due-ticket 会在预分配阶段记录 depot，超时回库 fallback 则在预检固化实际股道后写入同一 tick 的共享选择账本。待复用 fallback、普通 due-ticket 与其直接 fallback 共用该账本，避免同轮所有实际 Depot 发车连续压入同一短股道，同时避免普通票据在预检时重复计数。
@@ -290,6 +290,8 @@ DYNAMIC/同站异台的 effective node 覆盖会同时绑定创建它的 routeId
 
 TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事件内两个 group 不是稳定的联挂后快照。运行时因此在事件当下只做全局 `STOP_FIRST`、逐物理实例硬停、撤销旧 Movement Authority 并保留 claims；下一 tick 再从最终 RailTracker 状态执行同一套原子现场重建。周期巡检和事件重评估若遭遇 `RuntimeException` 或 TrainCarts ABI `LinkageError`，也会进入该 fail-closed 恢复边界，并跳过本轮 orphan cleanup，避免异常后错误释放现场资源。
 
+联挂否决：TrainCarts 默认把相撞的两列车联挂成一个编组（列车碰撞模式默认 LINK），并把一方属性整个覆盖到另一方、对调列车名。受管列车之间由信号互斥，不存在需要联挂的场景，因此 `RuntimeDispatchListener#onGroupLinkVeto`（HIGH，先于上面的 MONITOR 恢复处理器，后者 `ignoreCancelled`）对**两侧都带 FTA 标签且逻辑属主不同**的联挂取消事件。判据：`FTA_TRAIN_NAME` 标签与 TrainCarts 名两个维度各自归一化（`~a` 拆分别名视为同名）后都相等才算同一列车——这里刻意不用 `resolveTrackedTrainName`，它在两者不一致时改以 TC 名为准，会把 tag=DS、名=MT~k 的车判成与 MT 同属主而放行。认不出属主同样否决；任一侧不是受管列车（玩家的车厢）保持 TrainCarts 原行为；判定本身抛异常时不取消。**否决的效果是穿模，不是停车**：取消后 TrainCarts 对朝向对方运动的车厢既不停车也不推挤。被否决的联挂不会“完成”，叠着的编组每个物理 tick 都会再撞一次，因此 `SMART_GROUP_LINK_VETOED` 按列车对限流（30 秒起，持续叠放每次放大 4 倍，封顶 1 小时），走 WARN 而不依赖 debug 开关。
+
 ## 健康监控（高频服务）
 - 健康检查支持分级修复与冷却控制：
   - `STALL`：`refreshSignal -> forceRelaunch`
@@ -407,7 +409,7 @@ javap -p <class> | grep -cE '\(.*\)( throws [^;]*)?;$'
 详见 `docs/dev/timetable.md`。
 
 ## 已知限制
-- 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理，占用快照仍可能在非正常断线时短暂残留。
+- 占用释放采用事件反射式：列车推进后释放窗口外资源；列车卸载/移除事件主动清理（卸载的车仍在离线存储里，见上文已知缺口），占用快照仍可能在非正常断线时短暂残留。
 - 目前默认用 speedLimit/launch 控车；STOP 与 approach 均会按剩余距离计算制动曲线，但仍以 TrainCarts 动作队列执行最终物理运动。
 - Smart planner 对真实多分支 merge 的强制 loser claim 释放仍保持关闭；后续只有在 loser 已物理停车、未进入共享 switcher/egress footprint、双方 movement-plan TTL/progress 证据未变，并有 lease 阻止其立即重抢时，才能引入两阶段执行。当前吞吐修复依赖 Gate Queue 正确区分 `QUEUE_POSITION` 与已授予的 hard authority。
 

@@ -3,11 +3,15 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyBoolean;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -135,6 +139,51 @@ class TrainCartsDepotSpawnerTest {
         "42", TrainTagHelper.readTagValue(train.properties(), "FTA_PRIORITY").orElseThrow());
     assertEquals(1L, train.countTag("FTA_PRIORITY"), "保存模板声明的人工调度优先级必须保留");
     assertEquals(1L, train.countTag("FTA_BYPASS"), "保存模板声明的牌子旁路能力必须保留");
+  }
+
+  /**
+   * 2026-09-30 实服：spawn pattern 的存档没开 keepChunksLoaded，出库车第一个物理 tick 就因 5x5 区块区未全部加载被 TrainCarts
+   * 卸载，冻结在出库口， 下一班叠在同一锚点。FTA 的占用模型假设受管列车一直被模拟，出库车必须常驻加载，不能依赖存档配置。
+   */
+  @Test
+  void spawnedTrainIsForcedToKeepItsChunksLoadedWhenThePatternDoesNotSayso() {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.isKeepingChunksLoaded()).thenReturn(false);
+
+    boolean changed = TrainCartsDepotSpawner.ensureKeepChunksLoaded(properties);
+
+    assertTrue(changed);
+    verify(properties).setKeepChunksLoaded(true);
+  }
+
+  @Test
+  void spawnedTrainThatAlreadyKeepsChunksLoadedIsLeftAlone() {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.isKeepingChunksLoaded()).thenReturn(true);
+
+    boolean changed = TrainCartsDepotSpawner.ensureKeepChunksLoaded(properties);
+
+    assertFalse(changed);
+    verify(properties, never()).setKeepChunksLoaded(anyBoolean());
+  }
+
+  /**
+   * 物理编组一旦生成就必须先把身份返回上层，可失败的初始化不能在返回前冒泡（smart-dispatcher.md 出库事务）： 否则出库被当作抛异常重试，而无 tag
+   * 的编组已经在出库锚点上，成为无主幽灵车。
+   */
+  @Test
+  void keepChunksLoadedFailuresNeverEscapeTheSpawnTransaction() {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.isKeepingChunksLoaded()).thenReturn(false);
+    doThrow(new IllegalStateException("chunk-holder-failed"))
+        .when(properties)
+        .setKeepChunksLoaded(true);
+
+    assertFalse(TrainCartsDepotSpawner.ensureKeepChunksLoaded(properties));
+
+    TrainProperties unreadable = mock(TrainProperties.class);
+    when(unreadable.isKeepingChunksLoaded()).thenThrow(new IllegalStateException("unloaded"));
+    assertFalse(TrainCartsDepotSpawner.ensureKeepChunksLoaded(unreadable));
   }
 
   /** 提供可变 TrainProperties 名称与 tag，复现 spawn pattern 继承模板身份的真实行为。 */

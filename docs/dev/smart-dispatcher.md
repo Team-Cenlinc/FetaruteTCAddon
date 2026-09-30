@@ -172,6 +172,7 @@ NODE/EDGE blocker 没有 `A_TO_B/B_TO_A` 这种二值走廊方向。Planner 会�
 - [x] 所有正常 claim shrink 都合并本轮实时 RailTracker 车体足迹；现场证据不完整时保留全部既有 claim。
 - [x] 重启先冻结全部列车，再原子重建完整现场快照。
 - [x] GroupLink 在 TrainCarts 完成编组变更前只关闭授权门并硬停，下一 tick 才读取最终物理编组并原子重建。
+- [x] 受管列车之间跨属主的 GroupLink 在 HIGH 优先级被否决（取消事件，不进入上一条的恢复路径），判据与效果见 `runtime-dispatch.md` “联挂否决”。
 - [x] Route/Graph/index/footprint 不一致时 fail-closed。
 - [x] FTA member-remove 在事件当下撤销旧 token、硬停并保留 claim，关闭延迟分类窗口。
 - [x] 恢复失败自动重试；资源释放与进度变化继续触发正常重评估。
