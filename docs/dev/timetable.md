@@ -597,7 +597,7 @@ route metadata 显式写了 `spawn_enabled=false` 的 route **不进 build**（�
 - **停站压缩**（`StationStopCoordinator#dwellSecondsFor`）：AutoStation 停稳、到站进度提交之后、排关门时刻之前，
   按本站计划发车算"刚好赶上要停多久"，夹在 `[下限, 交路 dwell]` 之间；下限取 `recovery.min-dwell-seconds` 与车门开关过程
   （关门动画开始前至少全开 3 秒，legacy 动画按其实测关门时长）中较大的一个。计划发车只读已有绑定
-  （`ScheduledDeparturePlan#boundDepartureAt`），不在到站时触发车次匹配。出库后第一站（车门 warm-up、开门有重试窗口）、
+  （`ScheduledDeparturePlan#boundDepartureAt`），不在到站时触发车次匹配。出库后第一站（开门延迟更长、有重试窗口）、
   交路起点与终点（终点停站就是折返）不压缩。`DwellRegistry` 记的是压缩后的停站，ETA 对当前站随之一致。
   审计：`SCHEDULED_DWELL_COMPRESSED`（必留）。
 - **放宽线路限速**（`StationStopCoordinator#lineSpeedFactor` → `RailGraphService#effectiveSpeedLimitBlocksPerSecond` 的倍率重载）：

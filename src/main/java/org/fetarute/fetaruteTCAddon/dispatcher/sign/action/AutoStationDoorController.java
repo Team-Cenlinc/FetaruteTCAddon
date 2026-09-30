@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
 import com.bergerkiller.bukkit.common.config.ConfigurationNode;
-import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.attachments.animation.Animation;
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationNode;
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationOptions;
@@ -1229,97 +1228,10 @@ public final class AutoStationDoorController {
     return Math.max(0L, LEGACY_CLOSE_SOUND_DELAY_TICKS);
   }
 
-  /**
-   * 尝试预热门动画与附件树。
-   *
-   * <p>用于列车刚生成时确保附件变换就绪并重置门动画到起点。
-   */
-  public static void warmUpDoorAnimations(MinecartGroup group) {
-    warmUpDoorAnimations(group, false);
-  }
-
-  public static void warmUpDoorAnimations(MinecartGroup group, boolean probePlay) {
-    if (group == null) {
-      return;
-    }
-    for (MinecartMember<?> member : group) {
-      if (member == null || member.getAttachments() == null) {
-        continue;
-      }
-      if (!member.getAttachments().isAttached()) {
-        continue;
-      }
-      Attachment root = member.getAttachments().getRootAttachment();
-      if (root != null) {
-        root.getTransform();
-        root.getChildren();
-      }
-    }
-
-    Collection<String> animationNames = group.getAnimationNames();
-    if (animationNames == null || animationNames.isEmpty()) {
-      return;
-    }
-    warmUpAnimation(group, animationNames, DOOR_LEFT, probePlay);
-    warmUpAnimation(group, animationNames, DOOR_RIGHT, probePlay);
-    warmUpAnimation(group, animationNames, DOOR_LEFT_LEGACY, probePlay);
-    warmUpAnimation(group, animationNames, DOOR_RIGHT_LEGACY, probePlay);
-  }
-
-  private static void warmUpAnimation(
-      MinecartGroup group, Collection<String> animationNames, String key, boolean probePlay) {
-    if (group == null || animationNames == null || key == null) {
-      return;
-    }
-    String name = findAnimationName(animationNames, key);
-    if (name == null) {
-      return;
-    }
-    List<Attachment> targets = findAnimationTargets(group, name);
-    if (!hasAttachedTargets(targets)) {
-      return;
-    }
-    warmUpAnchors(targets);
-    AnimationOptions options = new AnimationOptions(name);
-    options.setReset(true);
-    options.setSpeed(0.0);
-    group.playNamedAnimation(options);
-    if (probePlay) {
-      AnimationOptions playOptions = new AnimationOptions(name);
-      playOptions.setReset(true);
-      playOptions.setSpeed(-1.0);
-      group.playNamedAnimation(playOptions);
-      TrainCarts trainCarts = TrainCarts.plugin;
-      if (trainCarts != null) {
-        Bukkit.getScheduler()
-            .runTaskLater(
-                trainCarts,
-                () -> {
-                  AnimationOptions reset = new AnimationOptions(name);
-                  reset.setReset(true);
-                  reset.setSpeed(0.0);
-                  group.playNamedAnimation(reset);
-                },
-                2L);
-      }
-    }
-  }
-
-  private static void warmUpAnchors(List<Attachment> targets) {
-    if (targets == null || targets.isEmpty()) {
-      return;
-    }
-    for (Attachment target : targets) {
-      if (target == null) {
-        continue;
-      }
-      Attachment anchor = resolveAnchorAttachment(target, 1);
-      if (anchor == null || !anchor.isAttached()) {
-        continue;
-      }
-      anchor.getTransform();
-    }
-  }
+  // 曾有 warmUpDoorAnimations：出库和首站时以 reset + speed=0 播放门动画把门摆回起点。速度为零则动画时间永不前进、
+  // hasReachedEnd() 永远为 false，而 TrainCarts 只在当前动画播完后才推进附件的动画队列——此后显式带 queue 且不带 reset 的
+  // 动画（TC 牌子 animate 写了 queue、命令 --queue）全部卡在它后面，直到出现一次带 reset 的播放。用 chest 生成的车没有这一步，
+  // 动画从第一次起就能动。去掉动画播放后剩下的 getTransform()/getChildren() 只是 getter，整个预热已删除。
 
   /**
    * 构建门动画动作。
@@ -1874,7 +1786,10 @@ public final class AutoStationDoorController {
   /**
    * 生成门动画播放选项。
    *
-   * <p>{@code queue=true} 让开/关门排进 TrainCarts 的动画队列，避免打断同一附件上正在执行的升弓、受电弓复位等模型动画。
+   * <p>注意 {@code reset=true} 与 {@code queue=true} 同时置位时，TrainCarts 的 {@code
+   * Attachment#startAnimation} 先判 reset：直接顶掉附件上当前的动画并清空队列，{@code queue}
+   * 分支根本走不到。也就是说开/关门<b>总会打断</b>同一附件上正在执行的其它模型动画（升弓、 受电弓复位等），并不会排队等它们播完；{@code queue}
+   * 只是保留的标志位。要真正排队必须去掉 reset，那样门动画不再从头开始，行为会变，需单独评估。
    */
   static AnimationOptions doorAnimationOptions(String name, double speed) {
     AnimationOptions options = new AnimationOptions(name);

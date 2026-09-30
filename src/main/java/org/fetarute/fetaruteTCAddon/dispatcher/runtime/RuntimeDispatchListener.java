@@ -16,8 +16,10 @@ import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.bukkit.Bukkit;
@@ -27,6 +29,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
@@ -44,17 +47,46 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser
  */
 public final class RuntimeDispatchListener implements Listener {
 
+  /** 同一对列车的联挂否决证据至少间隔这么久才再写一条；持续叠放时逐次退避到上限。 */
+  private static final long LINK_VETO_TRACE_WINDOW_MILLIS = 30_000L;
+
+  private static final long LINK_VETO_TRACE_MAX_WINDOW_MILLIS = 3_600_000L;
+
+  private static final int LINK_VETO_TRACE_MAX_PAIRS = 256;
+
+  /** 出库后多久内被卸载算异常：正常运行的车出库后至少会在原地停留发车授权流程，不会几秒内就掉出加载范围。 */
+  private static final long EARLY_UNLOAD_THRESHOLD_MILLIS = 60_000L;
+
   private final RuntimeDispatchService dispatchService;
   private final Consumer<Runnable> nextTickScheduler;
+  private final Consumer<String> diagnostics;
+  private final LongSupplier clockMillis;
+  private final LinkVetoTraceLimiter linkVetoTraceLimiter =
+      new LinkVetoTraceLimiter(
+          LINK_VETO_TRACE_WINDOW_MILLIS,
+          LINK_VETO_TRACE_MAX_WINDOW_MILLIS,
+          LINK_VETO_TRACE_MAX_PAIRS);
   private final DeferredIdentityBatch<MinecartGroup, PendingUnexpectedSplit>
       pendingUnexpectedSplits;
 
   public RuntimeDispatchListener(RuntimeDispatchService dispatchService) {
-    this(
-        dispatchService,
-        task ->
-            Bukkit.getScheduler()
-                .runTask(JavaPlugin.getProvidingPlugin(RuntimeDispatchListener.class), task));
+    this(dispatchService, bukkitNextTick(), message -> {});
+  }
+
+  /**
+   * 创建带诊断出口的监听器。
+   *
+   * @param diagnostics 事件级异常证据的输出端；应接不受观察预算限制的诊断通道
+   */
+  public static RuntimeDispatchListener withDiagnostics(
+      RuntimeDispatchService dispatchService, Consumer<String> diagnostics) {
+    return new RuntimeDispatchListener(dispatchService, bukkitNextTick(), diagnostics);
+  }
+
+  private static Consumer<Runnable> bukkitNextTick() {
+    return task ->
+        Bukkit.getScheduler()
+            .runTask(JavaPlugin.getProvidingPlugin(RuntimeDispatchListener.class), task);
   }
 
   /**
@@ -64,8 +96,27 @@ public final class RuntimeDispatchListener implements Listener {
    */
   RuntimeDispatchListener(
       RuntimeDispatchService dispatchService, Consumer<Runnable> nextTickScheduler) {
+    this(dispatchService, nextTickScheduler, message -> {});
+  }
+
+  /** 同包测试入口：同时注入下一 tick 调度器与诊断出口。 */
+  RuntimeDispatchListener(
+      RuntimeDispatchService dispatchService,
+      Consumer<Runnable> nextTickScheduler,
+      Consumer<String> diagnostics) {
+    this(dispatchService, nextTickScheduler, diagnostics, System::currentTimeMillis);
+  }
+
+  /** 同包测试入口：再注入时钟，使证据限流的窗口可精确推进。 */
+  RuntimeDispatchListener(
+      RuntimeDispatchService dispatchService,
+      Consumer<Runnable> nextTickScheduler,
+      Consumer<String> diagnostics,
+      LongSupplier clockMillis) {
     this.dispatchService = dispatchService;
     this.nextTickScheduler = nextTickScheduler;
+    this.diagnostics = diagnostics != null ? diagnostics : message -> {};
+    this.clockMillis = clockMillis;
     this.pendingUnexpectedSplits =
         new DeferredIdentityBatch<>(nextTickScheduler, this::classifyUnexpectedSplit);
   }
@@ -120,6 +171,119 @@ public final class RuntimeDispatchListener implements Listener {
             .map(TrainCartsRuntimeHandle::new)
             .toList(),
         "group-link");
+  }
+
+  /**
+   * 否决受管列车之间的跨属主联挂。
+   *
+   * <p>优先级高于监听联挂的 MONITOR 处理器（后者 {@code ignoreCancelled}），被否决的联挂不会触发全局 STOP_FIRST 恢复。
+   */
+  @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+  public void onGroupLinkVeto(GroupLinkEvent event) {
+    if (event == null || event.getGroup1() == null || event.getGroup2() == null) {
+      return;
+    }
+    vetoLinkIfCrossOwner(
+        new TrainCartsRuntimeHandle(event.getGroup1()),
+        new TrainCartsRuntimeHandle(event.getGroup2()),
+        event::setCancelled);
+  }
+
+  /**
+   * 跨属主则通过 {@code cancel} 否决联挂；证据按列车对限流（被否决的联挂不会完成，叠着的编组每个物理 tick 都会再撞）。
+   *
+   * <p>取消永远执行，限流只作用于日志。
+   */
+  void vetoLinkIfCrossOwner(
+      RuntimeTrainHandle first, RuntimeTrainHandle second, Consumer<Boolean> cancel) {
+    boolean veto;
+    try {
+      veto = shouldVetoGroupLink(first, second);
+    } catch (RuntimeException | LinkageError ex) {
+      // 判定失败保持 TrainCarts 原行为：默认取消会误伤玩家自己的车厢。同样的错误每个物理 tick 都会重现，走限流。
+      String errorKey = "error|" + ex.getClass().getName();
+      if (linkVetoTraceLimiter.admit(errorKey, clockMillis.getAsLong()).isPresent()) {
+        diagnostics.accept(
+            "SMART_GROUP_LINK_VETO_ERROR error="
+                + ex.getClass().getSimpleName()
+                + ":"
+                + ex.getMessage());
+      }
+      return;
+    }
+    if (!veto) {
+      return;
+    }
+    cancel.accept(Boolean.TRUE);
+    String firstSide = describeLinkSide(first);
+    String secondSide = describeLinkSide(second);
+    String pairKey =
+        firstSide.compareTo(secondSide) <= 0
+            ? firstSide + "|" + secondSide
+            : secondSide + "|" + firstSide;
+    OptionalInt suppressed = linkVetoTraceLimiter.admit(pairKey, clockMillis.getAsLong());
+    if (suppressed.isPresent()) {
+      diagnostics.accept(
+          "SMART_GROUP_LINK_VETOED first="
+              + firstSide
+              + " second="
+              + secondSide
+              + " suppressed="
+              + suppressed.getAsInt());
+    }
+  }
+
+  private static String describeLinkSide(RuntimeTrainHandle train) {
+    TrainProperties properties = train == null ? null : train.properties();
+    if (properties == null) {
+      return "-";
+    }
+    String tagOwner =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME).orElse("-");
+    return properties.getTrainName() + "(tagOwner=" + tagOwner + ")";
+  }
+
+  /**
+   * 两个受管列车是否会被联挂成同一个编组——是则否决。
+   *
+   * <p>只有两侧都带 FTA 标签才可能否决；任何一侧不是受管列车（玩家自己的车厢等）保持 TrainCarts 原行为。
+   *
+   * <p>同一列车要求 {@code FTA_TRAIN_NAME} 标签与 TrainCarts 名<b>两个维度</b>都一致（各自归一化，TC 拆分别名 {@code ~a} 视为同名）。
+   * 这里刻意不用运行时的 {@code resolveTrackedTrainName}：它在两者不一致时改以 TC 名为准，会把 tag=DS、名=MT~k 的车判成与 MT
+   * 同属主而放行联挂。
+   */
+  boolean shouldVetoGroupLink(RuntimeTrainHandle first, RuntimeTrainHandle second) {
+    Optional<OwnerIdentity> firstOwner = managedOwner(first);
+    Optional<OwnerIdentity> secondOwner = managedOwner(second);
+    if (firstOwner.isEmpty() || secondOwner.isEmpty()) {
+      return false;
+    }
+    // 认不出属主无法证明是同一列车，与“属主不同”同样处理。
+    return !firstOwner.get().knownSameAs(secondOwner.get());
+  }
+
+  /** 受管列车的逻辑身份：标签属主与 TrainCarts 名，均已归一化；缺标签时标签属主取名字。 */
+  private record OwnerIdentity(String tagKey, String nameKey) {
+    boolean knownSameAs(OwnerIdentity other) {
+      return !nameKey.isEmpty()
+          && !tagKey.isEmpty()
+          && tagKey.equals(other.tagKey)
+          && nameKey.equals(other.nameKey);
+    }
+  }
+
+  /** 非受管列车为空；受管列车即使认不出属主也返回身份（键为空字符串）。 */
+  private Optional<OwnerIdentity> managedOwner(RuntimeTrainHandle train) {
+    TrainProperties properties = train == null ? null : train.properties();
+    if (properties == null || !dispatchService.hasFtaRuntimeTag(properties)) {
+      return Optional.empty();
+    }
+    String nameKey = TrainNameNormalizer.normalizeKey(properties.getTrainName());
+    String tagKey =
+        TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+            .map(TrainNameNormalizer::normalizeKey)
+            .orElse(nameKey);
+    return Optional.of(new OwnerIdentity(tagKey, nameKey));
   }
 
   @EventHandler(priority = EventPriority.MONITOR)
@@ -319,7 +483,40 @@ public final class RuntimeDispatchListener implements Listener {
     if (group == null) {
       return;
     }
-    notifyGroupUnloaded(dispatchService, new TrainCartsRuntimeHandle(group));
+    TrainCartsRuntimeHandle handle = new TrainCartsRuntimeHandle(group);
+    traceEarlyUnload(handle);
+    notifyGroupUnloaded(dispatchService, handle);
+  }
+
+  /**
+   * 出库不久就被卸载时留下证据。
+   *
+   * <p>卸载会被运行时当作移除处理（占用随即释放），而冻结在出库口的车体仍在离线存储里：下一班在同一锚点生成，苏醒时同坐标复原并被联挂。这类现场此前不留任何日志。
+   */
+  void traceEarlyUnload(RuntimeTrainHandle train) {
+    try {
+      TrainProperties properties = train == null ? null : train.properties();
+      if (properties == null || !dispatchService.hasFtaRuntimeTag(properties)) {
+        return;
+      }
+      Optional<Long> runAt = TrainTagHelper.readLongTag(properties, "FTA_RUN_AT");
+      if (runAt.isEmpty()) {
+        return;
+      }
+      long ageMillis = clockMillis.getAsLong() - runAt.get();
+      if (ageMillis < 0L || ageMillis >= EARLY_UNLOAD_THRESHOLD_MILLIS) {
+        return;
+      }
+      diagnostics.accept(
+          "SMART_FTA_EARLY_UNLOAD train="
+              + properties.getTrainName()
+              + " ageMs="
+              + ageMillis
+              + " keepChunksLoaded="
+              + properties.isKeepingChunksLoaded());
+    } catch (RuntimeException | LinkageError ignored) {
+      // 证据是尽力而为，读取失败不能影响卸载事件本身的处理。
+    }
   }
 
   /**

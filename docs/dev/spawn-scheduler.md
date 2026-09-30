@@ -195,6 +195,9 @@ pending 里到了降级时刻的折返票则原样留在 pending，不重置降�
 
 ### 出库区块加载
 - Depot 出车前会加载 depot 周边区块，并持有约 10 秒的 plugin chunk ticket，避免刚加载即卸载导致 spawn 失败。
+- 出库车**一律强制 `keepChunksLoaded`**（`TrainCartsDepotSpawner#ensureKeepChunksLoaded`，物理编组生成后同一 tick 内设置；手动 `/fta depot spawn` 同样）。原因：TrainCarts 对未开启常驻加载的车，只要其 5x5 区块区内有未加载区块就在第一个物理 tick 卸载它，出库口附近无人时车会冻结在出库口，而 FTA 把卸载当作移除释放占用，下一班就在同一锚点叠放，苏醒时同坐标复原并被联挂（2026-09-30 实服事故）。spawn pattern 的存档没开常驻加载时会告警一次（按 pattern 去重）；设置失败不会冒泡，只留告警，出库事务不受影响。
+- TrainCarts 配置 `keepChunksLoadedOnlyWhenMoving=true` 时，静止且不在等待动作中的车仍可被卸载，上一条对刚出库的车会失效，首次出库时会告警；请保持其为 `false`。
+- 出库点附近若仍有离线（已卸载）的编组，会按区块粒度留一条 WARN（每车库最多每 10 分钟一次），**只观测不拦截**。
 
 ### Depot Movement Authority
 - `TicketAssigner` 会先把本次实际选择的 depot（`selectedDepotNodeId`/`depotNodeId`）写入 route 第 0 个节点，再从这条有向选定路径构建 spawn gate；预览、spawn 后 acquire 与首次 signal refresh 使用同一份路径上下文。

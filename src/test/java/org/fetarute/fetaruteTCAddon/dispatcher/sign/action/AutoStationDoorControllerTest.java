@@ -157,8 +157,11 @@ class AutoStationDoorControllerTest {
             thirtyDegreesEastOfNorth, BlockFace.WEST));
   }
 
+  /**
+   * 同时置 reset 与 queue；TrainCarts 先判 reset，queue 实际不生效，见 {@code TrainCartsAnimationSemanticsTest}。
+   */
   @Test
-  void doorAnimationOptionsEnterTrainCartsQueue() {
+  void doorAnimationOptionsRestartTheAnimationAndCarryTheQueueFlag() {
     AnimationOptions options = AutoStationDoorController.doorAnimationOptions("doorL", 1.0);
 
     assertTrue(options.getQueue());
