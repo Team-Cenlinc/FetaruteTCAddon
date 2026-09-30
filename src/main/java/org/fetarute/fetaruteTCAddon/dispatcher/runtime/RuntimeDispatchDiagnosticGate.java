@@ -356,6 +356,13 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
           // 实服第十五轮一次这样的卡死让 WS 线半小时产出掉 57%，而全网数字把它摊平看不出来。
           // 体量受限于"真的卡死过几次"，正常运行应当长期为 0——非 0 本身就是要查的信号。
           "SMART_DEPARTURE_GATE_EXPIRED",
+          // 折返旧进路保护（layover 复用后挂在旧站台上的列尾 guard）的三个关键节点：
+          // 没有可用清空计划（永远只能 fail-retain）、被越界节点事件封存、被路线到达兜底释放。
+          // 2026-09-29 实服 NTA 咽喉道岔被一条泄漏的 guard 占了整段发车窗口，日志里没有任何一行说明它为什么没释放。
+          // 体量受限于"真的登记/封存/兜底释放几次"，正常运行接近 0。
+          "TURNBACK_FOOTPRINT_GUARD_NO_PLAN",
+          "TURNBACK_FOOTPRINT_GUARD_SEALED",
+          "TURNBACK_FOOTPRINT_GUARD_FAR_CLEAR",
           // 割等待环上的排队边——这条新恢复动作唯一的生效证据。
           // 第十七轮 MT 两车在相邻道岔上互卡 2839/2700 秒、等待图检测到该环 1455 次，
           // 而当时三个已实现的恢复动作没有一个能割它。体量受限于"真的成环几次"。

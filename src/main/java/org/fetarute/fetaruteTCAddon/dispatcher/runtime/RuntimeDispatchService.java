@@ -1599,6 +1599,7 @@ public final class RuntimeDispatchService {
         new DispatchPriorityResolver(
             storageManager, routeDefinitions, progressRegistry, this.debugLogger);
     SignalComputationTrace.configureLogger(this.debugLogger);
+    turnbackFootprintGuards.useDiagnostics(this.debugLogger);
     if (occupancyManager instanceof SimpleOccupancyManager simpleOccupancyManager) {
       simpleOccupancyManager.setLiveBlockerSnapshotListener(this::updateLiveBlockerSnapshot);
     }
@@ -5618,7 +5619,7 @@ public final class RuntimeDispatchService {
     observePhysicalNodeForSpawnOrigin(properties, currentNode, currentIndex);
     recordEffectiveNode(trainName, route, currentIndex, currentNode);
     pruneDynamicResolutionState(trainName, route, currentIndex);
-    observeTurnbackFootprintProgress(trainName, currentNode);
+    observeTurnbackFootprintProgress(trainName, currentNode, route, currentIndex);
     Instant now = clockNow();
     // 处理 DSTY 销毁
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
@@ -5862,7 +5863,7 @@ public final class RuntimeDispatchService {
     Instant now = clockNow();
     progressRegistry.updateLastPassedGraphNode(trainName, nodeId, now);
     observePhysicalNodeForSpawnOrigin(properties, nodeId, -1);
-    observeTurnbackFootprintProgress(trainName, nodeId);
+    observeTurnbackFootprintProgress(trainName, nodeId, null, -1);
   }
 
   /**
@@ -6141,7 +6142,7 @@ public final class RuntimeDispatchService {
     if (!shouldHandleProgressTrigger(trainName, currentNode, currentIndex, now)) {
       return;
     }
-    observeTurnbackFootprintProgress(trainName, currentNode);
+    observeTurnbackFootprintProgress(trainName, currentNode, route, currentIndex);
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), currentIndex);
     boolean stopAtWaypoint = false;
     int waypointDwellSeconds = 0;
@@ -16265,9 +16266,14 @@ public final class RuntimeDispatchService {
     NodeId startNode = candidate.locationNodeId();
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
     Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
+    // 种别取库里交路的 pattern_type：车名字母与 FTA_PATTERN 标签共用，HUD 才不会把快速列车显示成各站停。
+    Optional<RoutePatternType> routePattern = resolvePatternType(ticket.routeId());
     // 车名首字母取站码，与出车命名（SimpleTicketAssigner）一致；取站名会在中文站名下得到汉字首字。
     String regeneratedTrainName =
-        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
+        regenerateTrainName(
+            route,
+            routePattern.orElse(RoutePatternType.LOCAL),
+            destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
 
     // 首站匹配：支持 TerminalKey 匹配和 DYNAMIC 匹配
     NodeId routeFirstNode = route.waypoints().get(0);
@@ -16421,7 +16427,9 @@ public final class RuntimeDispatchService {
         candidate.locationNodeId(),
         turnbackFootprintBeforeHandoff,
         resolveTurnbackForwardPath(graph, ctx, effectiveNodes, startIndex),
-        configManager.current().runtimeSettings().rearGuardEdges());
+        configManager.current().runtimeSettings().rearGuardEdges(),
+        new TurnbackFootprintGuardRegistry.RouteEvidence(
+            route.id().value(), effectiveNodes, startIndex));
 
     String previousTrainName = trainName;
     if (regeneratedTrainName != null && !regeneratedTrainName.equals(previousTrainName)) {
@@ -16531,6 +16539,11 @@ public final class RuntimeDispatchService {
 
     TrainTagHelper.writeTag(
         properties, RouteProgressRegistry.TAG_ROUTE_ID, ticket.routeId().toString());
+    // 出车时写下的 FTA_PATTERN 是出库那条交路的种别；复用换交路后必须跟着改，否则 HUD 一直显示出车时的种别。
+    // 解析不出种别时不写：写一个默认值会把原本可能正确的标签覆盖掉。
+    if (routePattern.isPresent()) {
+      TrainTagHelper.writeTag(properties, "FTA_PATTERN", routePattern.get().name());
+    }
     if (route.metadata().isPresent()) {
       RouteMetadata meta = route.metadata().get();
       // 线路标签是对乘客运营的线路：入路站及之前有 CHANGE（定义书第一站之前的起步线路）就直接写目标线路，
@@ -28353,7 +28366,8 @@ public final class RuntimeDispatchService {
       NodeId handoffNode,
       Set<OccupancyResource> retainedFootprint,
       List<TurnbackFootprintGuardRegistry.ForwardPathEdge> forwardPath,
-      int rearGuardEdges) {
+      int rearGuardEdges,
+      TurnbackFootprintGuardRegistry.RouteEvidence route) {
     if (occupancyManager == null || train == null || retainedFootprint == null) {
       return;
     }
@@ -28363,7 +28377,8 @@ public final class RuntimeDispatchService {
         retainedFootprint,
         forwardPath == null ? List.of() : List.copyOf(forwardPath),
         train.estimatedTrainLengthBlocks(),
-        rearGuardEdges);
+        rearGuardEdges,
+        route);
   }
 
   /**
@@ -28434,28 +28449,36 @@ public final class RuntimeDispatchService {
     }
   }
 
-  /** 只在真实节点事件跨过列尾保护窗口后，按物理 footprint 角色释放折返旧进路。 */
-  void observeTurnbackFootprintProgress(String trainName, NodeId observedNode) {
+  /**
+   * 按物理 footprint 角色释放折返旧进路，证据有两种：真实节点事件连续跨过列尾保护窗口；或路线路径点按序到达（{@code routeIndex >= 0}）且累计前进
+   * 已超过列尾清空阈值。后者兜住连续节点链被漏事件/离线切断的情形，见 {@link TurnbackFootprintGuardRegistry#observeRouteArrival}。
+   */
+  void observeTurnbackFootprintProgress(
+      String trainName, NodeId observedNode, RouteDefinition route, int routeIndex) {
     if (occupancyManager == null) {
       return;
     }
-    turnbackFootprintGuards
-        .observeProgress(trainName, observedNode)
-        .ifPresent(
-            release -> {
-              int released =
-                  occupancyManager.releaseResourcesByTrainAndRole(
-                      trainName, List.copyOf(release.resources()), ClaimRole.PHYSICAL_FOOTPRINT);
-              debugLogger.accept(
-                  "Layover 折返列尾已离开旧进路: train="
-                      + trainName
-                      + " node="
-                      + observedNode.value()
-                      + " resources="
-                      + release.resources().size()
-                      + " released="
-                      + released);
-            });
+    List<TurnbackFootprintGuardRegistry.Release> releases = new ArrayList<>(2);
+    turnbackFootprintGuards.observeProgress(trainName, observedNode).ifPresent(releases::add);
+    if (route != null && routeIndex >= 0) {
+      turnbackFootprintGuards
+          .observeRouteArrival(trainName, route.id().value(), routeIndex, observedNode)
+          .ifPresent(releases::add);
+    }
+    for (TurnbackFootprintGuardRegistry.Release release : releases) {
+      int released =
+          occupancyManager.releaseResourcesByTrainAndRole(
+              trainName, List.copyOf(release.resources()), ClaimRole.PHYSICAL_FOOTPRINT);
+      debugLogger.accept(
+          "Layover 折返列尾已离开旧进路: train="
+              + trainName
+              + " node="
+              + observedNode.value()
+              + " resources="
+              + release.resources().size()
+              + " released="
+              + released);
+    }
   }
 
   private void recordEffectiveNode(
@@ -31150,7 +31173,8 @@ public final class RuntimeDispatchService {
    *
    * <p>用于 Layover 复用时更新列车名，确保 destination 首字母正确。
    */
-  private String regenerateTrainName(RouteDefinition route, String destName) {
+  private String regenerateTrainName(
+      RouteDefinition route, RoutePatternType pattern, String destName) {
     if (route == null) {
       return null;
     }
@@ -31158,7 +31182,6 @@ public final class RuntimeDispatchService {
         route.metadata();
     String operator = metaOpt.map(m -> m.operator()).orElse("OP");
     String line = metaOpt.map(m -> m.lineId()).orElse("LINE");
-    RoutePatternType pattern = resolvePatternType(route);
     String dest = destName;
     if (dest == null || dest.isBlank()) {
       dest = route.id().value();
@@ -31166,17 +31189,19 @@ public final class RuntimeDispatchService {
     return TrainNameFormatter.buildTrainName(operator, line, pattern, dest, UUID.randomUUID());
   }
 
-  /** 从 RouteDefinition 解析 RoutePatternType，查询数据库或回退默认值。 */
   /**
-   * 从 RouteDefinition 解析 RoutePatternType。
+   * 按交路 UUID 取交路的种别（{@code pattern_type}）。
    *
-   * <p>当前简化实现：直接使用 LOCAL 作为默认值。 完整实现需要从 metadata 中解析 operator/line 并查询数据库， 但这会增加复杂度且 trainName 中的
-   * pattern 主要用于人眼识别，不影响调度逻辑。
+   * <p>取自 {@link
+   * RouteDefinitionCache#findRecord}：运营类型与交路阶段都在内存快照里，复用路径每个派发周期都会走到这里，不能为它同步查库。查不到时返回空，由调用方决定
+   * 车名回退与是否改写标签。本类贴着 SpotBugs 的方法数上限，这里不用 lambda（会编译成合成方法）。
    */
-  private RoutePatternType resolvePatternType(RouteDefinition route) {
-    // 简化实现：从 route metadata 中无法直接获取 patternType，
-    // 完整查询需要 operator->line->route 链路，这里回退到 LOCAL
-    return RoutePatternType.LOCAL;
+  private Optional<RoutePatternType> resolvePatternType(UUID routeId) {
+    if (routeId == null || routeDefinitions == null) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinitionCache.RouteRecord> record = routeDefinitions.findRecord(routeId);
+    return record.isPresent() ? Optional.of(record.get().route().patternType()) : Optional.empty();
   }
 
   /** 终点站显示信息。 */

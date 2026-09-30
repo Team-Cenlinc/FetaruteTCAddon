@@ -181,7 +181,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(
                 NodeId.of("A"), NodeId.of("B"), 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
     OccupancyDecision protectedDecision =
         new OccupancyDecision(
             false,
@@ -7997,7 +7998,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(a, b, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(b, clear, 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
     java.lang.reflect.Method method =
         RuntimeDispatchService.class.getDeclaredMethod(
             "isSpeculativeBehindClaim",
@@ -8050,7 +8052,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(terminal, middle, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(middle, clear, 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
     OccupancyClaim movement =
         new OccupancyClaim(
             sharedSection,
@@ -8126,7 +8129,8 @@ class RuntimeDispatchServiceTest {
         List.of(
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(terminal, middle, 10.0),
             new TurnbackFootprintGuardRegistry.ForwardPathEdge(middle, clear, 10.0)),
-        1);
+        1,
+        TurnbackFootprintGuardRegistry.RouteEvidence.none());
 
     java.lang.reflect.Method rollback =
         RuntimeDispatchService.class.getDeclaredMethod(
@@ -8151,8 +8155,8 @@ class RuntimeDispatchServiceTest {
     service.releaseResourcesNotInRequest("turning-train", List.of(), Set.of());
     assertEquals(2, manager.snapshotClaims().size());
 
-    service.observeTurnbackFootprintProgress("turning-train", middle);
-    service.observeTurnbackFootprintProgress("turning-train", clear);
+    service.observeTurnbackFootprintProgress("turning-train", middle, null, -1);
+    service.observeTurnbackFootprintProgress("turning-train", clear, null, -1);
     assertFalse(
         manager.snapshotClaims().stream().anyMatch(claim -> oldApproach.equals(claim.resource())));
     assertTrue(
@@ -8417,7 +8421,7 @@ class RuntimeDispatchServiceTest {
                             claim.trainName(), committedTrainName)
                         && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
 
-    service.observeTurnbackFootprintProgress(committedTrainName, throat);
+    service.observeTurnbackFootprintProgress(committedTrainName, throat, null, -1);
 
     assertTrue(
         manager.snapshotClaims().stream()
@@ -8426,7 +8430,7 @@ class RuntimeDispatchServiceTest {
                     oldApproachResource.equals(claim.resource())
                         && claim.role() == ClaimRole.PHYSICAL_FOOTPRINT));
 
-    service.observeTurnbackFootprintProgress(committedTrainName, clear);
+    service.observeTurnbackFootprintProgress(committedTrainName, clear, null, -1);
 
     assertFalse(
         manager.snapshotClaims().stream()
