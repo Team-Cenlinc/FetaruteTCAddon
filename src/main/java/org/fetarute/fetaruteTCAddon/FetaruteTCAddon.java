@@ -1006,7 +1006,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             occupancyManager, runtimeDispatchService::trainsWaitingForDynamicCapacity);
     signalReevaluationScheduler =
         new RuntimeSignalReevaluationScheduler(
-            task -> getServer().getScheduler().runTask(this, task),
+            // 必须是 runTaskLater(1)：runTask(delay 0) 会在同一 tick 的 heartbeat 里再次执行，
+            // 自我重排的 drain 链就成了主线程死循环（2026-09-30 看门狗强杀）。
+            task -> getServer().getScheduler().runTaskLater(this, task, 1L),
             runtimeDispatchService::reevaluateSignalByName,
             runtimeDispatchService::failClosedAfterSignalReevaluationFailure,
             runtimeDispatchDiagnostics());

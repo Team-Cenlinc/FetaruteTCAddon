@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -23,6 +24,9 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
 
   private static final Duration DEFAULT_DRAIN_WORK_BUDGET = Duration.ofMillis(5);
 
+  /** 同一列车连续多少个 drain 都被重评估就报一次警告（20 TPS 下约 5 秒）。 */
+  static final int SELF_REQUEUE_WARNING_INTERVAL = 100;
+
   private final Object monitor = new Object();
   private final NextTickScheduler nextTickScheduler;
   private final Consumer<String> reevaluationAttempt;
@@ -31,6 +35,9 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
   private final long drainWorkBudgetNanos;
   private final LongSupplier nanoTime;
   private final Map<String, String> pendingByLogicalName = new LinkedHashMap<>();
+
+  /** 逻辑列车名 -> 连续被重评估的 drain 数；只在 drain 内访问，不需要 monitor。 */
+  private final Map<String, Integer> consecutiveDrainsByLogicalName = new HashMap<>();
 
   private boolean scheduled;
   private boolean draining;
@@ -204,6 +211,7 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
     try {
       for (; processed < batch.size() && hasRemainingWorkBudget(startedAt); processed++) {
         String trainName = batch.get(processed);
+        noteConsecutiveReevaluation(trainName);
         try {
           reevaluationAttempt.accept(trainName);
         } catch (RuntimeException | LinkageError error) {
@@ -218,6 +226,7 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
         }
       }
     } finally {
+      forgetTrainsWithoutFollowUp();
       boolean scheduleNextBatch = false;
       synchronized (monitor) {
         draining = false;
@@ -230,6 +239,35 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
       if (scheduleNextBatch) {
         scheduleDrain();
       }
+    }
+  }
+
+  /**
+   * 记录列车又一次在紧接着的 drain 里被重评估。
+   *
+   * <p>占用事件 → 重评估 → 又改动占用 → 又一次占用事件，这条链只要不收敛就会一直自我重排。调度器不能替授权链掐断它（那会吞掉真实的事实变更），
+   * 但必须让它可见：2026-09-30 实服的看门狗超时，事后只能从排队序号的增长倒推出"某几辆车被无休止地重评估"。
+   */
+  private void noteConsecutiveReevaluation(String trainName) {
+    String logicalName = TrainNameNormalizer.normalizeKey(trainName);
+    if (logicalName.isEmpty()) {
+      return;
+    }
+    int drains = consecutiveDrainsByLogicalName.merge(logicalName, 1, Integer::sum);
+    if (drains % SELF_REQUEUE_WARNING_INTERVAL == 0) {
+      safeDebug(
+          "SIGNAL_REEVALUATION_SELF_REQUEUE train="
+              + trainName
+              + " consecutiveDrains="
+              + drains
+              + " action=observe-only");
+    }
+  }
+
+  /** drain 结束时，没有再被排队的列车连续计数清零。 */
+  private void forgetTrainsWithoutFollowUp() {
+    synchronized (monitor) {
+      consecutiveDrainsByLogicalName.keySet().retainAll(pendingByLogicalName.keySet());
     }
   }
 
@@ -277,7 +315,13 @@ public final class RuntimeSignalReevaluationScheduler implements AutoCloseable {
     }
   }
 
-  /** 生产环境必须把任务安排到调用发生后的下一 Bukkit tick。 */
+  /**
+   * 生产环境必须把任务安排到调用发生后的<b>下一个</b> Bukkit tick，不得在当前 tick 的调度循环内执行。
+   *
+   * <p>不能用 {@code runTask}（delay 0）实现：CraftScheduler 的 heartbeat 会继续取出 nextRun 不晚于当前 tick 的任务，
+   * 于是 drain 里重新排的 drain 会在同一个 tick 里接着跑。预算只约束单次 drain，一条自我重排的链就能让主线程永不返回，
+   * 2026-09-30 09:15 实服因此被看门狗强杀。请用 {@code runTaskLater(…, 1L)}。
+   */
   @FunctionalInterface
   public interface NextTickScheduler {
 
