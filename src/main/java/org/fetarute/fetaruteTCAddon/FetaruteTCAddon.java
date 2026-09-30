@@ -143,6 +143,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private ReclaimManager reclaimManager;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
+
+  /** 连续恢复请求达到该次数时打一条警告（20 tick 退避后约 2 秒一次，这一串已持续 10 秒以上）。 */
+  private static final int RECOVERY_STORM_WARNING_THRESHOLD = 10;
+
+  private final org.fetarute.fetaruteTCAddon.dispatcher.runtime.RecoveryRequestBackoff
+      runtimeRecoveryRequestBackoff =
+          new org.fetarute.fetaruteTCAddon.dispatcher.runtime.RecoveryRequestBackoff(
+              java.time.Duration.ofSeconds(10), System::nanoTime);
   private org.bukkit.scheduler.BukkitTask healthMonitorTask;
   private SpawnManager spawnManager;
   private TicketAssigner spawnTicketAssigner;
@@ -829,7 +837,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
       return;
     }
     beginRuntimeDispatchRecovery(reason);
-    scheduleRuntimeOccupancyReconstruction(1L);
+    long delayTicks = runtimeRecoveryRequestBackoff.nextDelayTicks();
+    int burst = runtimeRecoveryRequestBackoff.consecutiveRequests();
+    if (burst == RECOVERY_STORM_WARNING_THRESHOLD) {
+      getLogger()
+          .warning(
+              "运行时恢复请求连续触发 "
+                  + burst
+                  + " 次仍未收敛，已按 "
+                  + delayTicks
+                  + " tick 退避重试；最近原因="
+                  + reason
+                  + "。请检查 SMART_DUPLICATE_LOGICAL_OWNER_IDENTITY / late-load-quarantine 日志定位问题编组。");
+    }
+    scheduleRuntimeOccupancyReconstruction(delayTicks);
   }
 
   /**
