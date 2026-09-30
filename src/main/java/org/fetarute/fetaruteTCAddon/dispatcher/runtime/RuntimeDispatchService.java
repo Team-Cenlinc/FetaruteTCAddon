@@ -16202,9 +16202,12 @@ public final class RuntimeDispatchService {
     NodeId startNode = candidate.locationNodeId();
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
     Optional<DestinationDisplayInfo> destInfoOpt = resolveEndOfOperationInfo(route);
+    // 种别取库里交路的 pattern_type：车名字母与 FTA_PATTERN 标签共用，HUD 才不会把快速列车显示成各站停。
+    RoutePatternType routePattern = resolvePatternType(ticket.routeId());
     // 车名首字母取站码，与出车命名（SimpleTicketAssigner）一致；取站名会在中文站名下得到汉字首字。
     String regeneratedTrainName =
-        regenerateTrainName(route, destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
+        regenerateTrainName(
+            route, routePattern, destInfoOpt.map(DestinationDisplayInfo::code).orElse(null));
 
     // 首站匹配：支持 TerminalKey 匹配和 DYNAMIC 匹配
     NodeId routeFirstNode = route.waypoints().get(0);
@@ -16469,6 +16472,8 @@ public final class RuntimeDispatchService {
 
     TrainTagHelper.writeTag(
         properties, RouteProgressRegistry.TAG_ROUTE_ID, ticket.routeId().toString());
+    // 出车时写下的 FTA_PATTERN 是出库那条交路的种别；复用换交路后必须跟着改，否则 HUD 一直显示出车时的种别。
+    TrainTagHelper.writeTag(properties, "FTA_PATTERN", routePattern.name());
     if (route.metadata().isPresent()) {
       RouteMetadata meta = route.metadata().get();
       // 线路标签是对乘客运营的线路：入路站及之前有 CHANGE（定义书第一站之前的起步线路）就直接写目标线路，
@@ -31097,7 +31102,8 @@ public final class RuntimeDispatchService {
    *
    * <p>用于 Layover 复用时更新列车名，确保 destination 首字母正确。
    */
-  private String regenerateTrainName(RouteDefinition route, String destName) {
+  private String regenerateTrainName(
+      RouteDefinition route, RoutePatternType pattern, String destName) {
     if (route == null) {
       return null;
     }
@@ -31105,7 +31111,6 @@ public final class RuntimeDispatchService {
         route.metadata();
     String operator = metaOpt.map(m -> m.operator()).orElse("OP");
     String line = metaOpt.map(m -> m.lineId()).orElse("LINE");
-    RoutePatternType pattern = resolvePatternType(route);
     String dest = destName;
     if (dest == null || dest.isBlank()) {
       dest = route.id().value();
@@ -31113,17 +31118,24 @@ public final class RuntimeDispatchService {
     return TrainNameFormatter.buildTrainName(operator, line, pattern, dest, UUID.randomUUID());
   }
 
-  /** 从 RouteDefinition 解析 RoutePatternType，查询数据库或回退默认值。 */
   /**
-   * 从 RouteDefinition 解析 RoutePatternType。
+   * 按交路 UUID 查库里的种别（{@code pattern_type}）。
    *
-   * <p>当前简化实现：直接使用 LOCAL 作为默认值。 完整实现需要从 metadata 中解析 operator/line 并查询数据库， 但这会增加复杂度且 trainName 中的
-   * pattern 主要用于人眼识别，不影响调度逻辑。
+   * <p>存储未就绪或查不到交路时回退 LOCAL：车名字母与 HUD 种别只是展示，不影响调度，宁可显示各站停也不阻断复用。 本类贴着 SpotBugs 的方法数上限，这里不用
+   * lambda（会编译成合成方法）。
    */
-  private RoutePatternType resolvePatternType(RouteDefinition route) {
-    // 简化实现：从 route metadata 中无法直接获取 patternType，
-    // 完整查询需要 operator->line->route 链路，这里回退到 LOCAL
-    return RoutePatternType.LOCAL;
+  private RoutePatternType resolvePatternType(UUID routeId) {
+    if (routeId == null || storageManager == null || !storageManager.isReady()) {
+      return RoutePatternType.LOCAL;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> provider =
+        storageManager.provider();
+    if (provider.isEmpty()) {
+      return RoutePatternType.LOCAL;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.company.model.Route> stored =
+        provider.get().routes().findById(routeId);
+    return stored.isPresent() ? stored.get().patternType() : RoutePatternType.LOCAL;
   }
 
   /** 终点站显示信息。 */

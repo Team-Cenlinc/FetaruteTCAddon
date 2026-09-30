@@ -167,6 +167,9 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{route_pattern}` → `特快`
 - `route_pattern_<locale>`：指定语言标签的运行模式（从 lang/<locale>.yml 读取）
   - 例：`{route_pattern_zh_CN}` → `特快`
+  - 取数：以库里交路的 `pattern_type` 为准（按列车当前交路 ID）；列车标签 `FTA_PATTERN` 只在库答不上来（存储未就绪、交路已不在库里）时兜底。
+    `FTA_PATTERN` 是出车时写下的，折返复用换交路时运行时会同步改写它（车名的种别字母也取自同一处）；早先版本不改写，
+    所以靠复用接班的快速交路（如 MT-3）会一直显示出车时那条交路的种别。
 - `label_line`：语言文件里的“线路”标签
   - 例：`<dark_aqua>{label_line}</dark_aqua>` → `线路`
 - `label_next`：语言文件里的“下一站”标签

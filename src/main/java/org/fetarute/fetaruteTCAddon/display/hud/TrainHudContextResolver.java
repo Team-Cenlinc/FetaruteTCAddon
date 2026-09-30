@@ -846,16 +846,18 @@ public final class TrainHudContextResolver {
     return routeDefinitions.findById(routeUuid.get());
   }
 
+  /**
+   * 解析列车当前交路的种别（各站停/快速/特快…）。
+   *
+   * <p>以库里交路的 {@code pattern_type} 为准；{@code FTA_PATTERN} 标签只在库答不上来（存储未就绪、交路已不在库里）时兜底。
+   * 标签是出车时写下的，折返复用换交路时不会更新：快速交路的车全靠复用接班，先读标签就会一直显示出车时那条交路的种别。
+   */
   private Optional<RoutePatternType> resolveRoutePatternType(
       TrainProperties properties,
       Optional<RouteProgressRegistry.RouteProgressEntry> progressEntry,
       Optional<RouteDefinition> routeOpt) {
     if (routeOpt == null || routeOpt.isEmpty()) {
       return Optional.empty();
-    }
-    Optional<RoutePatternType> tagPattern = resolvePatternFromTag(properties);
-    if (tagPattern.isPresent()) {
-      return tagPattern;
     }
     Optional<UUID> routeId =
         progressEntry != null
@@ -866,21 +868,20 @@ public final class TrainHudContextResolver {
           TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
               .flatMap(TrainHudContextResolver::parseUuid);
     }
-    if (routeId.isEmpty()) {
-      return Optional.empty();
+    if (routeId.isPresent()) {
+      Optional<RoutePatternType> cached = routePatternById.get(routeId.get());
+      if (cached == null) {
+        Optional<StorageProvider> providerOpt = providerIfReady();
+        if (providerOpt.isPresent()) {
+          cached = providerOpt.get().routes().findById(routeId.get()).map(Route::patternType);
+          routePatternById.put(routeId.get(), cached);
+        }
+      }
+      if (cached != null && cached.isPresent()) {
+        return cached;
+      }
     }
-    Optional<RoutePatternType> cached = routePatternById.get(routeId.get());
-    if (cached != null) {
-      return cached;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    Optional<RoutePatternType> resolved =
-        providerOpt.get().routes().findById(routeId.get()).map(Route::patternType);
-    routePatternById.put(routeId.get(), resolved);
-    return resolved;
+    return resolvePatternFromTag(properties);
   }
 
   private Optional<RoutePatternType> resolvePatternFromTag(TrainProperties properties) {
