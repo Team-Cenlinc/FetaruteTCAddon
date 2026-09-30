@@ -129,6 +129,15 @@ public class ReclaimManager {
   private volatile java.util.function.BiPredicate<String, Optional<UUID>> mainlineReturnGate =
       (trainName, routeId) -> false;
 
+  /**
+   * 单股道车站判定：车停在上面就占住了全站唯一的股道（如 CHT）。默认恒否。
+   *
+   * <p>与正线折返点同一条规则：车进去没多久就得出来，不能在里面等后面的车次。2026-09-30 实服 WS 一辆车晚点到 CHT、 下一班 2C 已过容差作废，交路里剩下的 2N 从
+   * NTA 发车、它根本赶不过去，回库闸却因"交路还有班次"一直不放， 它就在唯一的股道上等到 2N 也过期——后车全部等待放行，严重晚点 20 分钟。装上后这种车与正线折返点一样立即回收。
+   */
+  private volatile java.util.function.Predicate<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId>
+      singleTrackStation = nodeId -> false;
+
   private BukkitTask task;
 
   public ReclaimManager(
@@ -207,6 +216,16 @@ public class ReclaimManager {
     this.mainlineReturnGate = gate == null ? (trainName, routeId) -> false : gate;
   }
 
+  /**
+   * 装上单股道车站判定：停在这种站上、且过了立即回收闸（{@link #setMainlineReturnGate}）的车，与正线折返点一样立即回收。
+   *
+   * @param predicate 节点是不是单股道车站；{@code null} 恢复为恒否
+   */
+  public void setSingleTrackStation(
+      java.util.function.Predicate<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId> predicate) {
+    this.singleTrackStation = predicate == null ? nodeId -> false : predicate;
+  }
+
   public void start() {
     stop();
     long interval = configManager.current().reclaimSettings().checkIntervalSeconds() * 20L;
@@ -262,17 +281,19 @@ public class ReclaimManager {
       int operationTrips = readPositiveIntTag(candidate.tags(), TAG_OPERATION_TRIPS);
       int maxOperationTrips = readPositiveIntTag(candidate.tags(), TAG_MAX_OPERATION_TRIPS);
 
+      String blockingKind = blockingTurnbackKind(candidate.locationNodeId());
       boolean mainlineReturn =
           idleSec >= MAINLINE_TURNBACK_MIN_IDLE_SECONDS
-              && candidate.locationNodeId() != null
-              && RouteTerminals.isMainlineTurnback(candidate.locationNodeId().value())
+              && blockingKind != null
               && mainlineReturnGate.test(
                   candidate.trainName(),
                   parseUuidTag(candidate.tags(), RouteProgressRegistry.TAG_ROUTE_ID));
       if (mainlineReturn) {
         shouldReclaim = true;
         debugLogger.accept(
-            "回收触发: 正线折返点无后续班次 train="
+            "回收触发: "
+                + blockingKind
+                + "无后续班次 train="
                 + candidate.trainName()
                 + " node="
                 + candidate.locationNodeId().value()
@@ -343,6 +364,22 @@ public class ReclaimManager {
         }
       }
     }
+  }
+
+  /**
+   * 车停在这里会不会挡住后车：正线折返点（挡同股道后车）或单股道车站（占住全站唯一股道）；都不是时为 {@code null}。
+   *
+   * @return 用于日志的位置类别
+   */
+  private String blockingTurnbackKind(
+      org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId locationNodeId) {
+    if (locationNodeId == null) {
+      return null;
+    }
+    if (RouteTerminals.isMainlineTurnback(locationNodeId.value())) {
+      return "正线折返点";
+    }
+    return singleTrackStation.test(locationNodeId) ? "单股道车站" : null;
   }
 
   /**

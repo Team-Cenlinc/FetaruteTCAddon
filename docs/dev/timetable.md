@@ -168,7 +168,7 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 唯一的例外是**交路断了**：剩下的班次全都过了 `assign-tolerance-seconds`（它们的票都已作废，再没人会派这辆车），
 `allowsReturn` 放行（`TIMETABLE_DUTY_CONTINUATION_LOST`）。否则它会被自己交路的回库票以"还有班次"永远拒绝，只能在终点等兜底销毁。
 
-停在**正线折返点**（区间路径点，不是站台）的车另有一道更宽的闸 `allowsReturnFromMainlineTurnback`：除上面的情形外，
+停在**正线折返点**（区间路径点，不是站台）或**单股道车站**（如 CHT，2026-09-30 起）的车另有一道更宽的闸 `allowsReturnFromMainlineTurnback`：除上面的情形外，
 本交路的**下一班**作废就放行（`TIMETABLE_DUTY_NEXT_TRIP_MISSED`），不等末班也作废——车停在正线上挡着后车，
 而再下一次回到这个折返点发车要等一整个往返。这道闸只对由时刻表出票（`spawn-enabled: true`）的交路生效，由 `ReclaimManager` 的正线立即回收使用：
 确实没有从折返点出发的 RETURN 交路时原地销毁（见 `reclaim-policy.md`）。

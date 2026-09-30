@@ -51,9 +51,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickLi
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
@@ -1470,9 +1472,25 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 停在正线折返点的车：按表交路上接不上下一班就立即回收，不挡着正线等到末班过期。
     reclaimManager.setMainlineReturnGate(
         timetableService == null ? null : timetableService::allowsReturnFromMainlineTurnback);
+    // 单股道车站（如 CHT）同一条规则：车进去没多久就得出来，接不上下一班就立即回收，不占着唯一的股道等后面的车次。
+    reclaimManager.setSingleTrackStation(this::isSingleTrackStation);
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
     }
+  }
+
+  /** 节点是不是单股道车站：在装有它的调度图快照里按站数股道（{@link RouteTerminals#isSingleTrackStation}）。 */
+  private boolean isSingleTrackStation(NodeId nodeId) {
+    RailGraphService service = railGraphService;
+    if (service == null || nodeId == null) {
+      return false;
+    }
+    for (RailGraphService.RailGraphSnapshot snapshot : service.snapshotAll().values()) {
+      if (snapshot != null && snapshot.graph().findNode(nodeId).isPresent()) {
+        return RouteTerminals.isSingleTrackStation(snapshot.graph(), nodeId.value());
+      }
+    }
+    return false;
   }
 
   /**

@@ -6,8 +6,10 @@ import java.util.OptionalInt;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -315,6 +317,37 @@ public final class RouteTerminals {
   public static boolean isMainlineTurnback(String nodeId) {
     return parseWaypoint(nodeId).map(WaypointMetadata::kind).orElse(null) == WaypointKind.INTERVAL
         && SwitcherSignDefinitionParser.tryParseRailPos(NodeId.of(nodeId)).isEmpty();
+  }
+
+  /**
+   * 节点是不是只有一股道的车站：图里同一运营商、同一站码的车站本体节点只有它自己（如 CHT 只有 {@code SURC:S:CHT:3}）。
+   *
+   * <p>车停在这种站上就占住了全站唯一的股道，后车只能在站外等——与正线折返点同一个性质：车进去没多久就得出来，
+   * 不能在里面等后面的车次。股道按图里的车站节点数，与编表的站台组容量同一口径。车站以外的节点、查不到的节点都不算。
+   *
+   * @param graph 调度图
+   * @param nodeId 图节点 ID
+   * @return 是单股道车站返回 true
+   */
+  public static boolean isSingleTrackStation(RailGraph graph, String nodeId) {
+    Optional<StationRef> self = stationRefOfNode(nodeId);
+    if (graph == null || self.isEmpty()) {
+      return false;
+    }
+    int tracks = 0;
+    for (RailNode node : graph.nodes()) {
+      if (node == null || node.id() == null || node.type() != NodeType.STATION) {
+        continue;
+      }
+      Optional<StationRef> ref = stationRefOfNode(node.id().value());
+      if (ref.isPresent()
+          && ref.get().operatorCode().equalsIgnoreCase(self.get().operatorCode())
+          && ref.get().stationCode().equalsIgnoreCase(self.get().stationCode())
+          && ++tracks > 1) {
+        return false;
+      }
+    }
+    return tracks == 1;
   }
 
   /**
