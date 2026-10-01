@@ -142,15 +142,25 @@ class PidsSnapshotProviderTest {
   }
 
   @Test
-  void invalidateAllForcesAFreshQuery() {
+  // 找取消行要扫全部时刻表：站牌每个有效期重取，取消行只在缓存过期或被作废时重扫。
+  void cancelledRowsAreRescannedOnlyAfterTheirRefreshOrAnInvalidation() {
     board();
     departures();
     provider.snapshot(CCC);
 
-    provider.invalidateAll();
+    now.set(T0.plus(TTL));
     provider.snapshot(CCC);
-
     verify(eta, times(2)).getBoard(any(), any(), any(), any());
+    verify(timetables, times(1)).departuresAt(any(), any(), any(), any(), anyInt());
+
+    provider.invalidateCancellations();
+    now.set(T0.plus(TTL).plus(TTL));
+    provider.snapshot(CCC);
+    verify(timetables, times(2)).departuresAt(any(), any(), any(), any(), anyInt());
+
+    now.set(T0.plus(TTL).plus(TTL).plus(PidsSnapshotProvider.CANCELLED_REFRESH));
+    provider.snapshot(CCC);
+    verify(timetables, times(3)).departuresAt(any(), any(), any(), any(), anyInt());
   }
 
   @Test

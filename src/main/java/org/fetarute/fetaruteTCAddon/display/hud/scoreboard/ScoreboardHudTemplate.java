@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.display.hud.scoreboard;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -36,6 +37,9 @@ public final class ScoreboardHudTemplate {
   private final Optional<String> title;
   private final int maxWidth;
 
+  /** 各页的语言，解析模板时算好：轮播每次刷新都要对每页判断语言，现算要拼全文、跑正则。 */
+  private final Map<Page, HudLanguageRotation.Language> pageLanguages;
+
   private ScoreboardHudTemplate(
       Map<HudState, List<Page>> pagesByState,
       List<Page> fallbackPages,
@@ -49,6 +53,12 @@ public final class ScoreboardHudTemplate {
     this.pageDurationTicks = pageDurationTicks;
     this.title = title == null ? Optional.empty() : title;
     this.maxWidth = maxWidth;
+    Map<Page, HudLanguageRotation.Language> languages = new HashMap<>();
+    pagesByState
+        .values()
+        .forEach(pages -> pages.forEach(page -> languages.put(page, pageLanguage(page))));
+    fallbackPages.forEach(page -> languages.put(page, pageLanguage(page)));
+    this.pageLanguages = Map.copyOf(languages);
   }
 
   /** 行数上限（Scoreboard 最大 15 行）。 */
@@ -96,8 +106,12 @@ public final class ScoreboardHudTemplate {
     }
     // 与 BossBar/ActionBar 同一套语言轮播：中文页与英文页和横栏同时切换。
     return Optional.ofNullable(
-        HudLanguageRotation.select(
-            pages, ScoreboardHudTemplate::pageLanguage, tick, pageDurationTicks));
+        HudLanguageRotation.select(pages, this::languageOf, tick, pageDurationTicks));
+  }
+
+  private HudLanguageRotation.Language languageOf(Page page) {
+    HudLanguageRotation.Language language = pageLanguages.get(page);
+    return language != null ? language : pageLanguage(page);
   }
 
   /** 按页面全部文字推断语言（标题、表头、行模板、表尾）。 */

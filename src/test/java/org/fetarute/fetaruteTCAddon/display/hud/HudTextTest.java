@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.display.hud;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
@@ -52,6 +53,13 @@ class HudTextTest {
     assertTrue(
         HudText.parse("<red>{x}</red><key:key.swapOffhand>", null).children().size() > 0,
         "颜色与按键名照常解析");
+  }
+
+  @Test
+  void identicalTextIsParsedOnce() {
+    String line = "<yellow>下一站</yellow> <white>新笛矢·壑湖</white>";
+
+    assertSame(HudText.parse(line, null), HudText.parse(line, null), "同样的文字共用解析结果");
   }
 
   private static boolean noEvents(Component component) {

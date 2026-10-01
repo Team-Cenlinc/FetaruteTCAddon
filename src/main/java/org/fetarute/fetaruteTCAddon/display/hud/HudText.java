@@ -1,9 +1,12 @@
 package org.fetarute.fetaruteTCAddon.display.hud;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
+import java.util.regex.Pattern;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.MiniMessage;
@@ -45,6 +48,20 @@ public final class HudText {
                   StandardTags.translatableFallback(),
                   StandardTags.sprite()))
           .build();
+
+  private static final Pattern HEX_COLOR = Pattern.compile("[0-9A-Fa-f]{6}");
+
+  /** 解析结果缓存：同一列车上的乘客、同一乘客相邻两次刷新，多数行的文字完全相同；组件不可变，可以共享。按最近使用淘汰。 */
+  private static final int PARSE_CACHE_SIZE = 1024;
+
+  private static final Map<String, Component> PARSED =
+      Collections.synchronizedMap(
+          new LinkedHashMap<>(PARSE_CACHE_SIZE * 4 / 3, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Component> eldest) {
+              return size() > PARSE_CACHE_SIZE;
+            }
+          });
 
   /** 原版颜色名的英式拼写，MiniMessage 也认。 */
   private static final Map<String, String> COLOR_ALIASES =
@@ -144,14 +161,21 @@ public final class HudText {
     if (resolved == null || resolved.isBlank()) {
       return Component.empty();
     }
+    Component cached = PARSED.get(resolved);
+    if (cached != null) {
+      return cached;
+    }
+    Component parsed;
     try {
-      return MINI_MESSAGE.deserialize(resolved);
+      parsed = MINI_MESSAGE.deserialize(resolved);
     } catch (RuntimeException ex) {
       if (debugLogger != null) {
         debugLogger.accept("HUD 模板解析失败: " + ex.getMessage());
       }
-      return Component.text(resolved);
+      parsed = Component.text(resolved);
     }
+    PARSED.put(resolved, parsed);
+    return parsed;
   }
 
   /**
@@ -178,7 +202,7 @@ public final class HudText {
     }
     String value = raw.trim();
     String hex = value.startsWith("#") ? value.substring(1) : value;
-    if (hex.matches("[0-9A-Fa-f]{6}")) {
+    if (HEX_COLOR.matcher(hex).matches()) {
       return "#" + hex.toUpperCase(Locale.ROOT);
     }
     String lower = value.toLowerCase(Locale.ROOT);

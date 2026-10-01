@@ -37,6 +37,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  *
  * <p>有效期取 {@code render.snapshot-ttl-seconds}，查询窗口取 {@code render.horizon-minutes}；同一车站的并发请求只算一次。
  * 查询失败时沿用上一份快照的行并留下调试日志，时间戳记为本次，等下一个有效期再重试，避免每块屏每次刷新都重试。
+ *
+ * <p>取消行单独缓存 {@link #CANCELLED_REFRESH}：找取消行要把全部已发布时刻表的车次与停靠点扫一遍，而取消很少发生。 车次取消或重新绑定（取消之后又有车接上）时由
+ * {@link #invalidateCancellations()} 立即作废，下一份快照就能看到。
  */
 public final class PidsSnapshotProvider {
 
@@ -46,6 +49,9 @@ public final class PidsSnapshotProvider {
   /** 取消行要从全部计划到发里筛，条数上限按大站高峰留足。 */
   private static final int DEPARTURE_LOOKUP_LIMIT = 500;
 
+  /** 取消行缓存多久：只影响查询窗口两端进出的时机（窗口 30 分钟级），取消本身由事件立即作废。 */
+  static final Duration CANCELLED_REFRESH = Duration.ofSeconds(60);
+
   private final EtaApi eta;
   private final TimetableApi timetables;
   private final RouteApi routes;
@@ -53,6 +59,7 @@ public final class PidsSnapshotProvider {
   private final InstantSource clock;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<PidsStationKey, PidsSnapshot> cache = new ConcurrentHashMap<>();
+  private final ConcurrentMap<PidsStationKey, CancelledRows> cancelled = new ConcurrentHashMap<>();
 
   /**
    * @param eta ETA 接口
@@ -92,9 +99,9 @@ public final class PidsSnapshotProvider {
                 : load(key, now, horizon, cached));
   }
 
-  /** 丢弃全部缓存（配置重载、主数据变化时调用）。 */
-  public void invalidateAll() {
-    cache.clear();
+  /** 丢弃各车站缓存的取消行：车次取消或重新绑定时调用。 */
+  public void invalidateCancellations() {
+    cancelled.clear();
   }
 
   private PidsSnapshot load(
@@ -105,7 +112,7 @@ public final class PidsSnapshotProvider {
           eta.getBoard(station.operatorCode(), station.stationCode(), null, horizon).rows()) {
         rows.add(fromBoard(row, now));
       }
-      rows.addAll(cancelledRows(station, now, horizon));
+      rows.addAll(cancelledRowsCached(station, now, horizon));
       rows.sort(Comparator.comparing(PidsRow::expectedAt));
       return new PidsSnapshot(station, now, rows);
     } catch (RuntimeException ex) {
@@ -139,6 +146,24 @@ public final class PidsSnapshotProvider {
       case ARRIVING -> PidsRow.Status.ARRIVING;
       case AT_STATION -> PidsRow.Status.BOARDING;
     };
+  }
+
+  private List<PidsRow> cancelledRowsCached(PidsStationKey station, Instant now, Duration horizon) {
+    return cancelled
+        .compute(
+            station,
+            (key, cached) ->
+                cached != null && now.isBefore(cached.takenAt().plus(CANCELLED_REFRESH))
+                    ? cached
+                    : new CancelledRows(now, cancelledRows(key, now, horizon)))
+        .rows();
+  }
+
+  /** 一个车站的取消行与取数时刻。 */
+  private record CancelledRows(Instant takenAt, List<PidsRow> rows) {
+    private CancelledRows {
+      rows = List.copyOf(rows);
+    }
   }
 
   private List<PidsRow> cancelledRows(PidsStationKey station, Instant now, Duration horizon) {

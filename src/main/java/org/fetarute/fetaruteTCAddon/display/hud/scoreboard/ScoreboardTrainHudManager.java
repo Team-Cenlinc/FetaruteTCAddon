@@ -260,9 +260,9 @@ public final class ScoreboardTrainHudManager implements Listener {
 
     PlayerHudState stateHolder = ensureScoreboard(player, template.lineCount());
     updateScoreboardTitle(stateHolder, title, template.maxWidth());
-    if (!normalized.equals(stateHolder.lastLines)) {
+    if (!normalized.equals(stateHolder.lastLines)
+        || stateHolder.lastMaxWidth != template.maxWidth()) {
       updateScoreboardLines(stateHolder, normalized, template.maxWidth());
-      stateHolder.lastLines = List.copyOf(normalized);
     }
     return Optional.of(trainName);
   }
@@ -316,25 +316,40 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
   }
 
+  /**
+   * 只更新与上次不同的行。原版每次设置队伍前缀都会发一个队伍包、并遍历全服玩家找这块计分板的观看者，不比较新旧值； 时间行每秒都变，整屏重发就是每位乘客每秒十几个包。最大宽度变了时整屏重画。
+   */
   private void updateScoreboardLines(PlayerHudState state, List<String> lines, int maxWidth) {
     if (state.scoreboard == null) {
       return;
     }
+    List<String> previous = state.lastMaxWidth == maxWidth ? state.lastLines : List.of();
     int lineCount = Math.min(state.lineCount, lines.size());
-    for (int i = 0; i < lineCount; i++) {
+    for (int i : changedLines(previous, lines.subList(0, lineCount))) {
+      String line = lines.get(i);
       String entry = lineEntry(i);
       Team team = state.scoreboard.getTeam(teamName(i));
       if (team == null) {
         continue;
       }
-      Component component =
-          HudTextWidth.truncate(HudText.parse(lines.get(i), debugLogger), maxWidth);
-      team.prefix(component);
-      team.suffix(Component.empty());
+      team.prefix(HudTextWidth.truncate(HudText.parse(line, debugLogger), maxWidth));
       if (!team.hasEntry(entry)) {
         team.addEntry(entry);
       }
     }
+    state.lastLines = List.copyOf(lines);
+    state.lastMaxWidth = maxWidth;
+  }
+
+  /** 与上次相比变了的行号（上次没有这一行也算变了）。 */
+  static List<Integer> changedLines(List<String> previous, List<String> lines) {
+    List<Integer> changed = new ArrayList<>();
+    for (int i = 0; i < lines.size(); i++) {
+      if (i >= previous.size() || !lines.get(i).equals(previous.get(i))) {
+        changed.add(i);
+      }
+    }
+    return changed;
   }
 
   private void updateScoreboardTitle(PlayerHudState state, String title, int maxWidth) {
@@ -711,6 +726,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     private Objective objective;
     private int lineCount;
     private List<String> lastLines = List.of();
+    private int lastMaxWidth = -1;
     private String lastTitle = "";
   }
 

@@ -21,10 +21,16 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.ItemFrame;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
+import org.bukkit.event.HandlerList;
+import org.bukkit.event.Listener;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
@@ -96,6 +102,7 @@ public final class PidsService {
   private final PidsFrames frames;
   private final PidsAccess access;
   private final PidsAnnouncer announcer;
+  private final Listener cancellationListener = new CancellationListener();
 
   /** 本次运行中拆除的屏幕：区块加载时只自动还原这些屏幕的展示框。 */
   private final Set<UUID> removedThisRun = ConcurrentHashMap.newKeySet();
@@ -178,6 +185,7 @@ public final class PidsService {
             .runTaskTimerAsynchronously(
                 plugin, this::refreshDirectory, 0L, DIRECTORY_REFRESH_TICKS);
     announcer.start();
+    Bukkit.getPluginManager().registerEvents(cancellationListener, plugin);
   }
 
   public void stop() {
@@ -186,6 +194,7 @@ public final class PidsService {
       directoryTask = null;
     }
     announcer.stop();
+    HandlerList.unregisterAll(cancellationListener);
   }
 
   /** 重建名称目录；连续失败只在第一次告警，恢复后再失败会再次告警。 */
@@ -484,5 +493,18 @@ public final class PidsService {
   private static OptionalLong worldTime(UUID worldId) {
     World world = Bukkit.getWorld(worldId);
     return world == null ? OptionalLong.empty() : OptionalLong.of(world.getTime());
+  }
+
+  /** 车次取消或重新绑定（取消之后又有车接上）时作废取消行缓存，站台屏与站台广播的下一份快照即可看到。 */
+  private final class CancellationListener implements Listener {
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onCancelled(TimetableTripCancelledEvent event) {
+      snapshots.invalidateCancellations();
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onAssigned(TimetableTripAssignedEvent event) {
+      snapshots.invalidateCancellations();
+    }
   }
 }

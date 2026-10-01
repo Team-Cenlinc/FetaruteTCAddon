@@ -82,6 +82,8 @@ public final class TrainHudContextResolver {
 
   private static final long VEHICLE_HOPS = 3;
   private static final List<String> DEFAULT_LOCALE_TAGS = List.of("zh_CN", "en_US");
+  private static final DateTimeFormatter CLOCK_MINUTES = DateTimeFormatter.ofPattern("HH:mm");
+  private static final DateTimeFormatter CLOCK_SECONDS = DateTimeFormatter.ofPattern("HH:mm:ss");
 
   private final FetaruteTCAddon plugin;
   private final LocaleManager locale;
@@ -441,8 +443,8 @@ public final class TrainHudContextResolver {
   public Map<String, String> buildPlaceholders(TrainHudContext context, float progress) {
     Map<String, String> placeholders = new HashMap<>();
     LocalTime now = LocalTime.now();
-    String timeHhmm = now.format(DateTimeFormatter.ofPattern("HH:mm"));
-    String timeHhmmss = now.format(DateTimeFormatter.ofPattern("HH:mm:ss"));
+    String timeHhmm = now.format(CLOCK_MINUTES);
+    String timeHhmmss = now.format(CLOCK_SECONDS);
     StationDisplay safeCurrent =
         context.currentStation() == null
             ? StationDisplay.empty()
