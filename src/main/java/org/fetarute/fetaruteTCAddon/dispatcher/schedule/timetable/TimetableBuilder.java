@@ -154,7 +154,9 @@ public final class TimetableBuilder {
             separation,
             base.options().serviceStartSecondOfDay());
     TimetableBuildResult measured =
-        base.result().withPhaseNote(RapidStagger.describe(measure, routeCodes(chosen)));
+        base.result()
+            .withPhaseNote(RapidStagger.describe(measure, routeCodes(chosen)))
+            .withRapidCatchUp(RapidStagger.total(measure));
     if (!requested.rapidStagger() || measure.seconds() == 0L) {
       return measured;
     }
@@ -395,7 +397,8 @@ public final class TimetableBuilder {
             chosen.unabsorbable(),
             chosen.resourceNotes(),
             chosen.residues(),
-            List.copyOf(warnings));
+            List.copyOf(warnings),
+            TimetableBuildResult.CatchUp.NONE);
     return new Built(result, Optional.of(prepared), Optional.of(chosenPrepared), options);
   }
 
@@ -476,6 +479,7 @@ public final class TimetableBuilder {
     RapidStagger.Measure chosenMeasure =
         search.improved().map(RapidStagger.Candidate::measure).orElse(baseMeasure);
     return chosen
+        .withRapidCatchUp(RapidStagger.total(chosenMeasure))
         .withPhaseNote(RapidStagger.describe(chosenMeasure, codes))
         .withPhaseNote(
             RapidStagger.describeSearch(baseMeasure, search.improved(), search.tried(), millis));

@@ -95,6 +95,11 @@ final class RapidStagger {
     return new Measure(seconds, trips.size(), caught);
   }
 
+  /** 实测的合计，交给构建结果。 */
+  static TimetableBuildResult.CatchUp total(Measure measure) {
+    return new TimetableBuildResult.CatchUp(measure.seconds(), measure.trips());
+  }
+
   /** 含快车（某段共线上比别的交路明显更快）的交路组名，按名字排序。 */
   static List<String> fastGroups(
       List<ServiceGroupClassifier.Group> groups,
