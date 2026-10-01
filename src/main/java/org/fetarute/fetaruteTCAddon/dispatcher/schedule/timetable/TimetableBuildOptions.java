@@ -25,6 +25,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  * @param strictConflicts 目标 headway 排出来有冲突时：{@code true} 构建失败；{@code false} 回退到最小可行 headway 并警告
  * @param groupIntervals 交路组 → 该组每个方向的发车间隔（秒）；没列出的组用 {@code headway}
  * @param repair 让车修复参数（单处上限、累计上限）
+ * @param rapidStagger 快车错峰搜索：排完之后用完整编表逐个试快车组的平移量与停站，按成品表实测的快车被卡秒数挑位置（慢，见 {@link RapidStagger}）
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -37,7 +38,8 @@ public record TimetableBuildOptions(
     Duration separation,
     boolean strictConflicts,
     Map<String, Integer> groupIntervals,
-    Repair repair) {
+    Repair repair,
+    boolean rapidStagger) {
 
   /**
    * 让车修复参数。
@@ -164,6 +166,34 @@ public record TimetableBuildOptions(
     repair = repair == null ? Repair.defaults() : repair;
   }
 
+  /** 不做快车错峰搜索的构造。 */
+  public TimetableBuildOptions(
+      int serviceStartSecondOfDay,
+      int serviceEndSecondOfDay,
+      Duration headway,
+      Duration defaultDwell,
+      VehicleDutyPlanner.Limits dutyLimits,
+      String tripCodePrefix,
+      ZoneId zoneId,
+      Duration separation,
+      boolean strictConflicts,
+      Map<String, Integer> groupIntervals,
+      Repair repair) {
+    this(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        false);
+  }
+
   /** 没有让车参数的构造：默认 60 s / 300 s。 */
   public TimetableBuildOptions(
       int serviceStartSecondOfDay,
@@ -271,7 +301,8 @@ public record TimetableBuildOptions(
         separation,
         strictConflicts,
         intervals,
-        repair);
+        repair,
+        rapidStagger);
   }
 
   /** 换让车参数，其余不变。 */
@@ -287,7 +318,25 @@ public record TimetableBuildOptions(
         separation,
         strictConflicts,
         groupIntervals,
-        nextRepair);
+        nextRepair,
+        rapidStagger);
+  }
+
+  /** 开关快车错峰搜索，其余不变。 */
+  public TimetableBuildOptions withRapidStagger(boolean enabled) {
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        enabled);
   }
 
   /** 计划窗口长度（秒）：首班发车到运营结束。 */
@@ -319,7 +368,8 @@ public record TimetableBuildOptions(
         separation,
         strictConflicts,
         groupIntervals,
-        repair);
+        repair,
+        rapidStagger);
   }
 
   /**

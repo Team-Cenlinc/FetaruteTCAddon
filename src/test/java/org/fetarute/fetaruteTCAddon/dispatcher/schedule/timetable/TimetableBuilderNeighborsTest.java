@@ -86,6 +86,20 @@ class TimetableBuilderNeighborsTest {
     assertEquals(neighbor.timetableId(), result.baselines().get(0).neighborTimetableId());
   }
 
+  /** 快车错峰的候选编表器不放宽：上面那种让车装不下、要放宽才排得开的，候选直接失败（被淘汰），而不是去搜放宽。 */
+  @Test
+  void aStaggerCandidateFailsInsteadOfRelaxing() {
+    TimetableBuildResult result =
+        build(
+            new TimetableBuilder(new TimetableTimingCalculator(), Map.of(), false),
+            List.of(neighborAt(300)),
+            300,
+            new TimetableBuildOptions.Repair(Duration.ofSeconds(30), Duration.ofSeconds(300)),
+            false);
+
+    assertFalse(result.success(), () -> result.warnings().toString());
+  }
+
   /** 严格模式只对真冲突失败：只有让车的表照常成表。 */
   @Test
   void strictModeAcceptsATableThatOnlyYields() {
@@ -203,6 +217,15 @@ class TimetableBuilderNeighborsTest {
       int headway,
       TimetableBuildOptions.Repair repair,
       boolean strict) {
+    return build(new TimetableBuilder(), neighbors, headway, repair, strict);
+  }
+
+  private TimetableBuildResult build(
+      TimetableBuilder builder,
+      List<NeighborTimetable> neighbors,
+      int headway,
+      TimetableBuildOptions.Repair repair,
+      boolean strict) {
     UUID ra = TimetableTestFixtures.routeId("RA");
     UUID crt = TimetableTestFixtures.routeId("CRT");
     UUID ret = TimetableTestFixtures.routeId("RET");
@@ -246,21 +269,20 @@ class TimetableBuilderNeighborsTest {
             strict,
             Map.of(),
             repair);
-    return new TimetableBuilder()
-        .build(
-            new TimetableBuilder.BuildInput(
-                UUID.nameUUIDFromBytes("TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                UUID.randomUUID(),
-                "TT1",
-                "测试表",
-                routes,
-                graph,
-                TimetableTestFixtures.perEdgeSpeedModel(),
-                Optional.empty(),
-                neighbors),
-            options,
-            BUILT_AT);
+    return builder.build(
+        new TimetableBuilder.BuildInput(
+            UUID.nameUUIDFromBytes("TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            UUID.randomUUID(),
+            "TT1",
+            "测试表",
+            routes,
+            graph,
+            TimetableTestFixtures.perEdgeSpeedModel(),
+            Optional.empty(),
+            neighbors),
+        options,
+        BUILT_AT);
   }
 }
