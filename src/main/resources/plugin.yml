@@ -50,6 +50,9 @@ permissions:
   fetarute.pids.manage:
     description: 管理全部站台屏（/fta pids；公司成员无此权限也可管理本公司车站的屏幕）
     default: op
+  fetarute.trip:
+    description: 查看所乘列车的后续站点（/fta trip）
+    default: true
   fetarute.template:
     description: HUD 模板管理（/fta template）
     default: op

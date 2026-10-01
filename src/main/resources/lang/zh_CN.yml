@@ -76,6 +76,31 @@ display:
         <white>Next stop {next_station_lang2}</white>
       tc_destination:
         empty: "暂无目的地"
+  # 后续站点对话框（乘车时按副手交换键或 /fta trip 打开）。
+  # title/summary/row.* 与 HUD 模板同一写法：{key} 占位符 + MiniMessage；{?key} 缺值时整行省略。
+  # 行内占位符同车内显示屏的列表行（station、station_lang2、eta、transfer_lines、delay_minutes 等），
+  # 另有 line_change：直通运转在这一站换到另一条线时为新线路名。
+  trip:
+    title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <gray>·</gray> <white>{route_pattern}</white> <gray>·</gray> <white>开往 {dest_eop}</white>"
+    summary: "<gray>列车 {train_name} · 共 {player_carriage_total} 节 · 您在第 {player_carriage_no} 节</gray>"
+    row:
+      next: "<green>下一站</green> <yellow>{station}</yellow> <gray>{eta}</gray>"
+      stop: "<white>{station}</white> <gray>{eta}</gray>"
+      terminal: "<gold>终点</gold> <white>{station}</white> <gray>{eta}</gray>"
+      details:
+        - "<gray>{?station_lang2}</gray>"
+        - "<gray>换乘</gray> {?transfer_lines}"
+        - "<yellow>晚点 {?delay_minutes} 分钟</yellow>"
+        - "<aqua>⇄</aqua> <gray>本站起改为</gray> <{line_color_tag}>█</{line_color_tag}><white>{?line_change}</white> <gray>运行</gray>"
+    empty: "<gray>前方没有停靠站。</gray>"
+    more: "<gray>另有 <count> 站未列出。</gray>"
+    not-on-train: "<prefix> <gray>请在乘坐列车时查看后续站点。</gray>"
+    unavailable: "<prefix> <red>后续站点暂不可用：</red><gray>展示服务未启动。</gray>"
+    button:
+      refresh: "刷新"
+      transfers-only: "只看换乘站"
+      show-all: "显示全部站"
+      close: "关闭"
 
 sign:
   created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
@@ -110,6 +135,8 @@ command:
     hover-info: "<gray>点击执行:</gray> <white>/fta info</white>\n<dark_aqua>显示插件版本与构建信息</dark_aqua>"
     entry-help: "<gray>/fta help</gray> <white>-</white> <dark_aqua>显示此帮助</dark_aqua>"
     hover-help: "<gray>点击执行:</gray> <white>/fta help</white>\n<dark_aqua>显示此帮助</dark_aqua>"
+    entry-trip: "<gray>/fta trip</gray> <white>-</white> <dark_aqua>查看所乘列车的后续站点（乘车时也可按副手交换键）</dark_aqua>"
+    hover-trip: "<gray>点击执行:</gray> <white>/fta trip</white>\n<dark_aqua>列出前方各站的到达时间、换乘与晚点</dark_aqua>"
     entry-company: "<gray>/fta company</gray> <white>-</white> <dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     hover-company: "<gray>点击填充:</gray> <white>/fta company </white>\n<dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     entry-operator: "<gray>/fta operator</gray> <white>-</white> <dark_aqua>运营商管理（如 SURN）</dark_aqua>"

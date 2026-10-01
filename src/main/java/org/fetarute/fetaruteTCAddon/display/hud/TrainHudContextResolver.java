@@ -22,15 +22,18 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -58,6 +61,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
+import org.fetarute.fetaruteTCAddon.display.DisplayService;
+import org.fetarute.fetaruteTCAddon.display.Lateness;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext.Destinations;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext.StationDisplay;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.HudWaypointLabel;
@@ -212,6 +217,18 @@ public final class TrainHudContextResolver {
     Destinations destinations = resolveDestinations(routeOpt, routeIndex, operationType);
 
     EtaResult eta = etaService.getForTrain(trainName, EtaTarget.nextStop());
+    List<TrainHudContext.Transfer> nextStopTransfers =
+        nextStopOpt
+            .map(
+                next ->
+                    resolveTransfers(
+                        next.nodeId(), routeStops, next.stopIndex(), routeLine, currentLine))
+            .orElse(List.of());
+    OptionalLong nextStopDelay =
+        nextStopOpt
+            .filter(next -> next.routeIndex() >= 0)
+            .map(next -> etaService.arrivalDeviationSeconds(trainName, next.routeIndex(), eta))
+            .orElse(OptionalLong.empty());
     Optional<TrainRuntimeSnapshot> snapshotOpt = etaService.getRuntimeSnapshot(trainName);
     Optional<NodeId> currentNode = snapshotOpt.flatMap(TrainRuntimeSnapshot::currentNodeId);
     StationDisplay currentStation =
@@ -261,7 +278,9 @@ public final class TrainHudContextResolver {
             speedBps,
             currentLine,
             throughService,
-            outOfService);
+            outOfService,
+            nextStopTransfers,
+            nextStopDelay);
     return Optional.of(context);
   }
 
@@ -304,6 +323,62 @@ public final class TrainHudContextResolver {
   }
 
   /**
+   * 停靠点可换乘的线路：停靠该站及同组车站的线路（{@link StationDirectory.Snapshot#linesServing}，与站台屏同一口径），
+   * 去掉本车在这一站所属的线路——换线站以原线路到达、以新线路发车，两条都去掉。
+   *
+   * @param node 停靠点节点
+   * @param stops 交路停靠表
+   * @param stopIndex 停靠表下标
+   * @param routeLine 交路自身的线路
+   * @param currentLine 列车当前所属线路（交路线路不明时用它排除本线）
+   * @return 可换乘线路；节点不是车站或没有车站目录时为空列表
+   */
+  private List<TrainHudContext.Transfer> resolveTransfers(
+      Optional<NodeId> node,
+      List<RouteStop> stops,
+      int stopIndex,
+      Optional<RouteLineChanges.LineRef> routeLine,
+      Optional<RouteLineChanges.LineRef> currentLine) {
+    Optional<StationDirectory.Snapshot> snapshot =
+        node.isEmpty()
+            ? Optional.empty()
+            : plugin.getStationDirectory().map(StationDirectory::snapshot);
+    if (snapshot.isEmpty()) {
+      return List.of();
+    }
+    // 按该站所属线路排除：换线之后的站，列车离开的那条线在那里就是一条可换乘的线。
+    List<RouteLineChanges.LineRef> own =
+        routeLine
+            .map(
+                base ->
+                    List.of(
+                        RouteLineChanges.lineAt(stops, stopIndex, base),
+                        RouteLineChanges.lineAt(stops, stopIndex - 1, base)))
+            .orElseGet(() -> currentLine.map(List::of).orElse(List.of()));
+    List<TrainHudContext.Transfer> transfers = new ArrayList<>();
+    for (StationDirectory.ServingLineEntry entry :
+        snapshot
+            .get()
+            .stationIdOfNode(node.get().value())
+            .map(snapshot.get()::linesServing)
+            .orElse(List.of())) {
+      Line line = entry.line().line();
+      RouteLineChanges.LineRef ref =
+          new RouteLineChanges.LineRef(entry.line().operator().code(), line.code());
+      if (own.stream().anyMatch(ref::sameLine)) {
+        continue;
+      }
+      transfers.add(
+          new TrainHudContext.Transfer(
+              line.code(),
+              line.name(),
+              line.secondaryName().filter(name -> !name.isBlank()).orElse(line.name()),
+              HudText.colorTag(entry.line().color().orElse(""))));
+    }
+    return List.copyOf(transfers);
+  }
+
+  /**
    * 解析“未来几站”列表，用于 Scoreboard/LCD 渲染。
    *
    * <p>limit=0 仅返回 total 计数，不计算 ETA。
@@ -330,6 +405,9 @@ public final class TrainHudContextResolver {
             .flatMap(RouteLineChanges.LineRef::of)
             .map(base -> RouteLineChanges.linesByIndex(stops, base))
             .orElse(List.of());
+    Optional<RouteLineChanges.LineRef> routeLine =
+        route.metadata().flatMap(RouteLineChanges.LineRef::of);
+    int lastStopIndex = resolveLastStopIndex(stops);
     int safeLimit = Math.max(0, limit);
     List<UpcomingStop> upcoming = new ArrayList<>();
     int total = 0;
@@ -348,7 +426,7 @@ public final class TrainHudContextResolver {
         continue;
       }
       total++;
-      if (safeLimit > 0 && upcoming.size() >= safeLimit) {
+      if (upcoming.size() >= safeLimit) {
         continue;
       }
       EtaTarget target = resolveStopTarget(stop, nodeIdOpt, display);
@@ -359,7 +437,16 @@ public final class TrainHudContextResolver {
       String track = nodeIdOpt.map(this::resolveTrackFromNodeId).orElse("-");
       Optional<RouteLineChanges.LineRef> line =
           stopIndex < lines.size() ? Optional.of(lines.get(stopIndex)) : Optional.empty();
-      upcoming.add(new UpcomingStop(total, display, eta, track, line));
+      upcoming.add(
+          new UpcomingStop(
+              total,
+              display,
+              eta,
+              track,
+              line,
+              resolveTransfers(nodeIdOpt, stops, stopIndex, routeLine, context.currentLine()),
+              etaService.arrivalDeviationSeconds(context.trainName(), nodeIndex, eta),
+              stopIndex == lastStopIndex));
     }
     return new UpcomingStops(List.copyOf(upcoming), total);
   }
@@ -436,6 +523,8 @@ public final class TrainHudContextResolver {
     putLinePlaceholders(placeholders, "", context.lineInfo(), lineCode);
     placeholders.put("operator", safeOrDash(operatorCode));
     putThroughPlaceholders(placeholders, context.throughService());
+    applyStopPlaceholders(
+        placeholders, context.nextStopTransfers(), context.nextStopDelaySeconds());
     placeholders.put("route_code", safeOrDash(routeCode));
     placeholders.put("route_id", safeOrDash(routeId));
     placeholders.put("route_name", safeOrDash(routeName));
@@ -526,7 +615,7 @@ public final class TrainHudContextResolver {
       lineLang2 = info.get().secondaryName();
       lineColor = info.get().color();
     }
-    String lineColorTag = lineColor != null && !lineColor.isBlank() ? lineColor : "white";
+    String lineColorTag = HudText.colorTag(lineColor);
     String lineLabel = resolveLineLabel(lineName, lineCode);
     String safeLine = lineLabel.isBlank() ? "-" : lineLabel;
     placeholders.put(prefix + "line", safeLine);
@@ -561,9 +650,118 @@ public final class TrainHudContextResolver {
   }
 
   /**
-   * 注入玩家侧占位符（车厢号/编组总数）。
+   * 写入一个停靠站的换乘与晚点占位符：下一站（全局占位符）与前方停靠列表的每一行共用。
    *
-   * <p>ActionBar/BossBar 共用，避免重复实现；非列车或未在编组内时输出 {@code "-"}。
+   * <ul>
+   *   <li>{@code transfer_lines}：换乘线路的色块 + 线路代码，如 {@code █DS █WS}
+   *   <li>{@code transfer_line_names} / {@code transfer_line_names_lang2}：色块 + 线路名 / 第二语言名
+   *   <li>{@code delay_minutes}：按表运行时晚点的分钟数（晚点达到 {@link Lateness#LATE_SECONDS} 才有值）
+   * </ul>
+   *
+   * <p>缺失时都是 {@code -}，配合条件占位符 {@code {?key}} 可让整行只在有换乘、有晚点时显示。
+   *
+   * @param placeholders 占位符表
+   * @param transfers 可换乘线路
+   * @param delaySeconds 相对计划的偏差秒数；不按表运行时为空
+   */
+  public void applyStopPlaceholders(
+      Map<String, String> placeholders,
+      List<TrainHudContext.Transfer> transfers,
+      OptionalLong delaySeconds) {
+    placeholders.put("transfer_lines", transferChips(transfers, TrainHudContext.Transfer::code));
+    placeholders.put(
+        "transfer_line_names", transferChips(transfers, TrainHudContext.Transfer::name));
+    placeholders.put(
+        "transfer_line_names_lang2", transferChips(transfers, TrainHudContext.Transfer::lang2));
+    placeholders.put(
+        "delay_minutes",
+        delaySeconds.isPresent() && Lateness.of(delaySeconds.getAsLong()) != Lateness.ON_TIME
+            ? String.valueOf(Lateness.minutes(delaySeconds.getAsLong()))
+            : HudText.MISSING);
+  }
+
+  /**
+   * 前方停靠列表一行的占位符：在全局占位符之上覆盖该站的站名、站台、ETA、换乘、晚点与所属线路。
+   *
+   * <p>车内显示屏的列表行与后续站点对话框共用。线路占位符（{@code line}、{@code line_color_tag} 等）取该站所属线路：
+   * 直通运转换线之后的各站按新线路着色，与列车当前线路相同的站不覆盖。
+   *
+   * @param base 全局占位符（不修改）
+   * @param stop 停靠站；为空表示列表补位的空行
+   * @param sequence 行序号（从 1 起）
+   * @param currentLine 列车当前所属线路
+   * @return 新的占位符表
+   */
+  public Map<String, String> stopPlaceholders(
+      Map<String, String> base,
+      Optional<UpcomingStop> stop,
+      int sequence,
+      Optional<RouteLineChanges.LineRef> currentLine) {
+    Map<String, String> placeholders = new HashMap<>(base);
+    if (stop.isEmpty()) {
+      placeholders.put("idx", "");
+      placeholders.put("index", "");
+      placeholders.put("station", HudText.MISSING);
+      placeholders.put("station_code", HudText.MISSING);
+      placeholders.put("station_lang2", HudText.MISSING);
+      placeholders.put("station_track", HudText.MISSING);
+      placeholders.put("eta", "");
+      placeholders.put("eta_minutes", HudText.MISSING);
+      applyEtaStatusPlaceholders(placeholders, null);
+      applyStopPlaceholders(placeholders, List.of(), OptionalLong.empty());
+      return placeholders;
+    }
+    UpcomingStop row = stop.get();
+    String seq = String.valueOf(sequence);
+    placeholders.put("idx", seq);
+    placeholders.put("index", seq);
+    placeholders.put("station", row.display().label());
+    placeholders.put("station_code", row.display().code());
+    placeholders.put("station_lang2", row.display().lang2());
+    placeholders.put("station_track", row.track());
+    String status = formatEtaStatus(row.eta());
+    placeholders.put("eta", status == null || status.isBlank() ? HudText.MISSING : status);
+    int minutes = row.eta().etaMinutesRounded();
+    placeholders.put("eta_minutes", minutes >= 0 ? String.valueOf(minutes) : HudText.MISSING);
+    applyEtaStatusPlaceholders(placeholders, row.eta());
+    applyStopPlaceholders(placeholders, row.transfers(), row.delaySeconds());
+    row.line()
+        .filter(line -> currentLine.map(current -> !current.sameLine(line)).orElse(true))
+        .ifPresent(line -> applyLinePlaceholders(placeholders, line));
+    return placeholders;
+  }
+
+  /**
+   * 换乘线路写成 MiniMessage：每条线一个线路色色块紧跟文字，线路之间空一格；没有换乘时为 {@code -}。
+   *
+   * @param transfers 可换乘线路
+   * @param label 每条线显示的文字（代码、线路名等）
+   */
+  public static String transferChips(
+      List<TrainHudContext.Transfer> transfers, Function<TrainHudContext.Transfer, String> label) {
+    if (transfers == null || transfers.isEmpty()) {
+      return HudText.MISSING;
+    }
+    StringBuilder out = new StringBuilder();
+    for (TrainHudContext.Transfer transfer : transfers) {
+      if (!out.isEmpty()) {
+        out.append(' ');
+      }
+      out.append('<')
+          .append(transfer.colorTag())
+          .append(">█</")
+          .append(transfer.colorTag())
+          .append('>')
+          .append(label.apply(transfer));
+    }
+    return out.toString();
+  }
+
+  /**
+   * 注入玩家侧占位符：车厢号/编组总数，与后续站点对话框的入口按键 {@code trip_dialog_key}。
+   *
+   * <p>三块 HUD 共用，避免重复实现；非列车或未在编组内时输出 {@code "-"}。{@code trip_dialog_key} 只在玩家还没打开过对话框时有值（见 {@link
+   * org.fetarute.fetaruteTCAddon.display.hud.trip.TripDialogService#hintKey}），配合条件占位符做一次性的入口提示。
    */
   public void applyPlayerPlaceholders(
       Map<String, String> placeholders, Player player, MinecartGroup group) {
@@ -575,6 +773,13 @@ public final class TrainHudContextResolver {
     placeholders.put("player_carriage_no", carriageNo > 0 ? String.valueOf(carriageNo) : "-");
     placeholders.put(
         "player_carriage_total", carriageTotal > 0 ? String.valueOf(carriageTotal) : "-");
+    placeholders.put(
+        "trip_dialog_key",
+        plugin
+            .getDisplayService()
+            .flatMap(DisplayService::tripDialog)
+            .flatMap(dialog -> dialog.hintKey(player))
+            .orElse(HudText.MISSING));
   }
 
   /** 注入 ETA 状态占位符（含当前语言与指定语言版本）。 */
@@ -992,7 +1197,7 @@ public final class TrainHudContextResolver {
         int index = nodeIndexOpt.get();
         if (index > routeIndex && index < bestIndex) {
           bestIndex = index;
-          best = new NextStop(display, nodeIdOpt, i == lastStopIndex);
+          best = new NextStop(display, nodeIdOpt, i == lastStopIndex, i, index);
         }
       }
     }
@@ -1004,7 +1209,7 @@ public final class TrainHudContextResolver {
       Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
       StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
       if (!display.isEmpty()) {
-        return Optional.of(new NextStop(display, nodeIdOpt, true));
+        return Optional.of(new NextStop(display, nodeIdOpt, true, lastStopIndex, -1));
       }
     }
     return Optional.empty();
@@ -1745,7 +1950,18 @@ public final class TrainHudContextResolver {
 
   private record StationKey(String operator, String station) {}
 
-  private record NextStop(StationDisplay display, Optional<NodeId> nodeId, boolean terminal) {
+  /**
+   * 下一停靠站。
+   *
+   * @param stopIndex 停靠表下标
+   * @param routeIndex 进度下标（时刻表停靠序号）；只能退回末站时为 -1
+   */
+  private record NextStop(
+      StationDisplay display,
+      Optional<NodeId> nodeId,
+      boolean terminal,
+      int stopIndex,
+      int routeIndex) {
     private NextStop {
       Objects.requireNonNull(display, "display");
       nodeId = nodeId == null ? Optional.empty() : nodeId;
@@ -1779,17 +1995,23 @@ public final class TrainHudContextResolver {
   }
 
   /**
-   * 未来停靠预览项（用于 LCD/Scoreboard）。
+   * 未来停靠预览项（用于车内显示屏与后续站点对话框）。
    *
-   * <p>{@code track} 为站台编号（从 NodeId 解析，如 "1"/"2"），若无法解析则为 "-"。{@code line} 为列车在该站所属的线路
-   * （直通运转换线后为新线路）；交路线路不明时为空。
+   * @param track 站台编号（从 NodeId 解析，如 "1"/"2"），无法解析时为 "-"
+   * @param line 列车在该站所属的线路（直通运转换线后为新线路）；交路线路不明时为空
+   * @param transfers 该站可换乘的线路（不含本车在该站所属的线路）
+   * @param delaySeconds 按表运行时到达该站的偏差秒数（正数为晚点）；不按表运行时为空
+   * @param terminal 是否为本交路最后一个停靠站
    */
   public record UpcomingStop(
       int sequence,
       StationDisplay display,
       EtaResult eta,
       String track,
-      Optional<RouteLineChanges.LineRef> line) {
+      Optional<RouteLineChanges.LineRef> line,
+      List<TrainHudContext.Transfer> transfers,
+      OptionalLong delaySeconds,
+      boolean terminal) {
     public UpcomingStop {
       Objects.requireNonNull(display, "display");
       Objects.requireNonNull(eta, "eta");
@@ -1798,11 +2020,8 @@ public final class TrainHudContextResolver {
       }
       track = track == null || track.isBlank() ? "-" : track;
       line = line == null ? Optional.empty() : line;
-    }
-
-    /** 兼容旧构造：不含 track 字段与所属线路。 */
-    public UpcomingStop(int sequence, StationDisplay display, EtaResult eta) {
-      this(sequence, display, eta, "-", Optional.empty());
+      transfers = transfers == null ? List.of() : List.copyOf(transfers);
+      delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
     }
   }
 

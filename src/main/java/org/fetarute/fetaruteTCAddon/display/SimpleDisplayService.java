@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.display;
 
 import java.util.Objects;
+import java.util.Optional;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -12,13 +13,14 @@ import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.actionbar.ActionBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.scoreboard.ScoreboardTrainHudManager;
+import org.fetarute.fetaruteTCAddon.display.hud.trip.TripDialogService;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 
 /**
- * 展示层实现：目前包含车上 BossBar 与 ActionBar HUD。
+ * 展示层实现：车上 BossBar、ActionBar、车内显示屏与后续站点对话框。
  *
- * <p>根据配置分别启动定时任务，互不影响，可独立启停。
+ * <p>三块 HUD 根据配置分别启动定时任务，互不影响，可独立启停；后续站点对话框由乘客按需打开，总是可用。
  */
 public final class SimpleDisplayService implements DisplayService {
 
@@ -27,6 +29,7 @@ public final class SimpleDisplayService implements DisplayService {
   private final BossBarTrainHudManager bossBarHud;
   private final ActionBarTrainHudManager actionBarHud;
   private final ScoreboardTrainHudManager scoreboardHud;
+  private final TripDialogService tripDialog;
 
   private BukkitTask bossBarTask;
   private BukkitTask actionBarTask;
@@ -79,6 +82,16 @@ public final class SimpleDisplayService implements DisplayService {
             templateService,
             defaultTemplateService,
             plugin::debug);
+    this.tripDialog =
+        new TripDialogService(
+            plugin,
+            plugin.getLocaleManager(),
+            etaService,
+            routeDefinitions,
+            routeProgressRegistry,
+            layoverRegistry,
+            templateService,
+            plugin::debug);
   }
 
   @Override
@@ -87,6 +100,7 @@ public final class SimpleDisplayService implements DisplayService {
     if (bossBarTask != null || actionBarTask != null || scoreboardTask != null) {
       return;
     }
+    tripDialog.register();
 
     ConfigManager.ConfigView view = configManager.current();
     if (view == null || view.runtimeSettings() == null) {
@@ -154,6 +168,7 @@ public final class SimpleDisplayService implements DisplayService {
     actionBarHud.unregister();
     scoreboardHud.shutdown();
     scoreboardHud.unregister();
+    tripDialog.unregister();
   }
 
   @Override
@@ -161,5 +176,11 @@ public final class SimpleDisplayService implements DisplayService {
     bossBarHud.clearCaches();
     actionBarHud.clearCaches();
     scoreboardHud.clearCaches();
+    tripDialog.clearCaches();
+  }
+
+  @Override
+  public Optional<TripDialogService> tripDialog() {
+    return Optional.of(tripDialog);
   }
 }

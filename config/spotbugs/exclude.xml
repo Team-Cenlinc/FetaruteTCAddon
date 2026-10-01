@@ -153,6 +153,25 @@
         <Class name="org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <!-- 后续站点对话框：服务与命令持有插件句柄；TripSheet 的字段是不可变的 Adventure Component -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripDialogService"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTripCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Or>
+            <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet"/>
+            <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet$Row"/>
+        </Or>
+        <Or>
+            <Bug pattern="EI_EXPOSE_REP"/>
+            <Bug pattern="EI_EXPOSE_REP2"/>
+        </Or>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManager"/>
         <Method name="applySchemaIfReady"/>

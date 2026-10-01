@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeSet;
+import org.fetarute.fetaruteTCAddon.display.Lateness;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSnapshot;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
@@ -40,12 +41,6 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * </ul>
  */
 public final class PidsViewBuilder {
-
-  /** 晚点达到这个秒数算晚点。 */
-  static final long LATE_SECONDS = 60L;
-
-  /** 晚点达到这个秒数算严重晚点。 */
-  static final long SEVERELY_LATE_SECONDS = 300L;
 
   private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
@@ -216,15 +211,14 @@ public final class PidsViewBuilder {
       return Optional.empty();
     }
     long delay = delaySeconds.getAsLong();
-    if (delay < LATE_SECONDS) {
-      return Optional.of(Label.of(vocabulary.onTime(), Tone.NORMAL));
-    }
-    long minutes = delay / 60L;
-    return delay < SEVERELY_LATE_SECONDS
-        ? Optional.of(Label.of(vocabulary.late(minutes), Tone.AMBER))
-        : Optional.of(
-            Label.of(vocabulary.severelyLate(minutes), Tone.RED)
-                .withCompact(vocabulary.late(minutes)));
+    long minutes = Lateness.minutes(delay);
+    return Optional.of(
+        switch (Lateness.of(delay)) {
+          case ON_TIME -> Label.of(vocabulary.onTime(), Tone.NORMAL);
+          case LATE -> Label.of(vocabulary.late(minutes), Tone.AMBER);
+          case SEVERELY_LATE -> Label.of(vocabulary.severelyLate(minutes), Tone.RED)
+              .withCompact(vocabulary.late(minutes));
+        });
   }
 
   /** 距到达的分钟数，向上取整、不小于 0：还差 10 秒也显示 1 分，到点之前不显示 0。 */

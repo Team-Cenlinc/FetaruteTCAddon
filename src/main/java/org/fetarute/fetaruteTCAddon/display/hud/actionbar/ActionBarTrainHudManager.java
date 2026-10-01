@@ -27,10 +27,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplate;
-import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplateRenderer;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressExpression;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressTracker;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
@@ -200,8 +200,9 @@ public final class ActionBarTrainHudManager implements Listener {
     state =
         HudStateTracker.applyOutOfService(
             state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
-    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
-    Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
+    String templateLine =
+        template.resolveLine(state, HudLanguageRotation.nowTicks(), placeholders).orElse("");
+    Component title = HudText.render(templateLine, placeholders, debugLogger);
     player.sendActionBar(title);
     showingPlayers.add(player.getUniqueId());
     return Optional.of(trainName);

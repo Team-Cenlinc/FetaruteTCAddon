@@ -39,6 +39,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
+import org.fetarute.fetaruteTCAddon.display.hud.HudTextWidth;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressTracker;
@@ -263,9 +265,9 @@ public final class ScoreboardTrainHudManager implements Listener {
     List<String> normalized = normalizeLines(resolvedLines, template.lineCount());
 
     PlayerHudState stateHolder = ensureScoreboard(player, template.lineCount());
-    updateScoreboardTitle(stateHolder, title);
+    updateScoreboardTitle(stateHolder, title, template.maxWidth());
     if (!normalized.equals(stateHolder.lastLines)) {
-      updateScoreboardLines(stateHolder, normalized);
+      updateScoreboardLines(stateHolder, normalized, template.maxWidth());
       stateHolder.lastLines = List.copyOf(normalized);
     }
     return Optional.of(trainName);
@@ -320,7 +322,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
   }
 
-  private void updateScoreboardLines(PlayerHudState state, List<String> lines) {
+  private void updateScoreboardLines(PlayerHudState state, List<String> lines, int maxWidth) {
     if (state.scoreboard == null) {
       return;
     }
@@ -331,8 +333,8 @@ public final class ScoreboardTrainHudManager implements Listener {
       if (team == null) {
         continue;
       }
-      String raw = lines.get(i);
-      Component component = ScoreboardHudTemplateRenderer.renderResolved(raw, debugLogger);
+      Component component =
+          HudTextWidth.truncate(HudText.parse(lines.get(i), debugLogger), maxWidth);
       team.prefix(component);
       team.suffix(Component.empty());
       if (!team.hasEntry(entry)) {
@@ -341,7 +343,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
   }
 
-  private void updateScoreboardTitle(PlayerHudState state, String title) {
+  private void updateScoreboardTitle(PlayerHudState state, String title, int maxWidth) {
     if (state == null || state.objective == null) {
       return;
     }
@@ -349,7 +351,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     if (resolved.equals(state.lastTitle)) {
       return;
     }
-    Component component = ScoreboardHudTemplateRenderer.renderResolved(resolved, debugLogger);
+    Component component = HudTextWidth.truncate(HudText.parse(resolved, debugLogger), maxWidth);
     state.objective.displayName(component);
     state.lastTitle = resolved;
   }
@@ -389,7 +391,7 @@ public final class ScoreboardTrainHudManager implements Listener {
         pageOpt
             .flatMap(ScoreboardHudTemplate.Page::title)
             .orElseGet(() -> template.title().orElse(""));
-    return ScoreboardHudTemplateRenderer.applyPlaceholders(title, placeholders);
+    return HudText.apply(title, placeholders);
   }
 
   private List<String> renderPage(
@@ -405,21 +407,12 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
     ScoreboardHudTemplate.Page page = pageOpt.get();
     if (page instanceof ScoreboardHudTemplate.StaticPage staticPage) {
-      return renderStaticPage(staticPage, placeholders);
+      return renderLineList(staticPage.lines(), placeholders);
     }
     if (page instanceof ScoreboardHudTemplate.ListPage listPage) {
       return renderListPage(listPage, trainName, context, placeholders, state, frameDelta, tick);
     }
     return List.of();
-  }
-
-  private List<String> renderStaticPage(
-      ScoreboardHudTemplate.StaticPage page, Map<String, String> placeholders) {
-    List<String> output = new ArrayList<>();
-    for (String line : page.lines()) {
-      output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(line, placeholders));
-    }
-    return output;
   }
 
   private List<String> renderListPage(
@@ -453,7 +446,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
     if (cappedTotalStops <= 0) {
       String empty = page.empty().orElse("-");
-      String rendered = ScoreboardHudTemplateRenderer.applyPlaceholders(empty, placeholders);
+      String rendered = HudText.apply(empty, placeholders);
       for (int i = 0; i < fixedRows + windowRows; i++) {
         for (int j = 0; j < rowLines; j++) {
           output.add(rendered);
@@ -481,15 +474,15 @@ public final class ScoreboardTrainHudManager implements Listener {
     return output;
   }
 
+  /** 替换占位符；条件占位符缺值的行整行去掉，下面的行依次上移。 */
   private List<String> renderLineList(List<String> lines, Map<String, String> placeholders) {
     if (lines == null || lines.isEmpty()) {
       return List.of();
     }
-    List<String> output = new ArrayList<>();
-    for (String line : lines) {
-      output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(line, placeholders));
-    }
-    return output;
+    return lines.stream()
+        .filter(line -> HudText.shown(line, placeholders))
+        .map(line -> HudText.apply(line, placeholders))
+        .toList();
   }
 
   /**
@@ -507,36 +500,13 @@ public final class ScoreboardTrainHudManager implements Listener {
     List<String> output = new ArrayList<>();
     for (int i = 0; i < rowCount; i++) {
       int index = startIndex + i;
-      Map<String, String> itemPlaceholders = new HashMap<>(placeholders);
-      if (stops != null && index >= 0 && index < stops.size()) {
-        TrainHudContextResolver.UpcomingStop stop = stops.get(index);
-        String seq = String.valueOf(index + 1);
-        itemPlaceholders.put("idx", seq);
-        itemPlaceholders.put("index", seq);
-        itemPlaceholders.put("station", stop.display().label());
-        itemPlaceholders.put("station_code", stop.display().code());
-        itemPlaceholders.put("station_lang2", stop.display().lang2());
-        itemPlaceholders.put("station_track", stop.track());
-        itemPlaceholders.put("eta", formatEta(stop.eta()));
-        itemPlaceholders.put("eta_minutes", formatEtaMinutes(stop.eta()));
-        contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, stop.eta());
-        stop.line()
-            .filter(line -> currentLine.map(current -> !current.sameLine(line)).orElse(true))
-            .ifPresent(line -> contextResolver.applyLinePlaceholders(itemPlaceholders, line));
-      } else {
-        itemPlaceholders.put("idx", "");
-        itemPlaceholders.put("index", "");
-        itemPlaceholders.put("station", "-");
-        itemPlaceholders.put("station_code", "-");
-        itemPlaceholders.put("station_lang2", "-");
-        itemPlaceholders.put("station_track", "-");
-        itemPlaceholders.put("eta", "");
-        itemPlaceholders.put("eta_minutes", "-");
-        contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, null);
-      }
-      for (String rowFormat : rowLines) {
-        output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(rowFormat, itemPlaceholders));
-      }
+      Optional<TrainHudContextResolver.UpcomingStop> stop =
+          stops != null && index >= 0 && index < stops.size()
+              ? Optional.of(stops.get(index))
+              : Optional.empty();
+      Map<String, String> itemPlaceholders =
+          contextResolver.stopPlaceholders(placeholders, stop, index + 1, currentLine);
+      output.addAll(renderLineList(rowLines, itemPlaceholders));
     }
     return output;
   }
@@ -669,22 +639,6 @@ public final class ScoreboardTrainHudManager implements Listener {
       normalized.add("");
     }
     return normalized;
-  }
-
-  private String formatEta(org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult eta) {
-    if (eta == null) {
-      return "-";
-    }
-    String status = contextResolver.formatEtaStatus(eta);
-    return status == null || status.isBlank() ? "-" : status;
-  }
-
-  private String formatEtaMinutes(org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult eta) {
-    if (eta == null) {
-      return "-";
-    }
-    int minutes = eta.etaMinutesRounded();
-    return minutes >= 0 ? String.valueOf(minutes) : "-";
   }
 
   private void clear(Player player) {

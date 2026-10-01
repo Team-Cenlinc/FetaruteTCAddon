@@ -936,6 +936,22 @@ public final class EtaService {
     }
   }
 
+  /**
+   * 按表运行的列车到达某停靠点的偏差秒数（正数为晚点），与站牌行同一口径：预计到达减计划到达。
+   *
+   * @param trainName 列车名
+   * @param stopIndex 停靠序号（与运行时进度索引同义）
+   * @param eta 该列车到达这个停靠点的预计结果
+   * @return 偏差秒数；未按表运行、没有该站计划或预计不可用时为空
+   */
+  public OptionalLong arrivalDeviationSeconds(String trainName, int stopIndex, EtaResult eta) {
+    if (trainName == null || eta == null || eta.etaEpochMillis() <= 0L) {
+      return OptionalLong.empty();
+    }
+    return deviationSeconds(
+        safePlannedTime(plannedArrivals, trainName, stopIndex, "ARRIVAL"), eta.eta());
+  }
+
   /** 实际（预计）时刻相对计划的偏差秒数，正数为晚点。 */
   private static OptionalLong deviationSeconds(Optional<Instant> planned, Instant actual) {
     return planned

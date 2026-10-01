@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.hud.bossbar;
 import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
 
 public final class BossBarProgressExpression {
 
@@ -21,7 +22,7 @@ public final class BossBarProgressExpression {
         return parsed;
       }
     }
-    String resolved = BossBarHudTemplateRenderer.applyPlaceholders(trimmed, placeholders);
+    String resolved = HudText.apply(trimmed, placeholders);
     try {
       double value = new Parser(resolved).parse();
       if (Double.isFinite(value)) {

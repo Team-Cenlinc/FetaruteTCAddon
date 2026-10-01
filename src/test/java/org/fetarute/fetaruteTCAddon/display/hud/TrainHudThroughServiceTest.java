@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -14,6 +15,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
@@ -36,7 +38,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-/** HUD：直通运转换线后线路跟当前线路走；回库车越过运营终点后显示「回库」。 */
+/** HUD：直通运转换线后线路跟当前线路走；回库车越过运营终点后显示「回库」；换乘线路按该站所属线路排除本车。 */
 class TrainHudThroughServiceTest {
 
   @TempDir Path dir;
@@ -44,6 +46,7 @@ class TrainHudThroughServiceTest {
   private SampleTransitNetwork net;
   private Route wsThrough;
   private TrainHudContextResolver resolver;
+  private EtaService eta;
 
   @BeforeEach
   void setUp() throws Exception {
@@ -72,7 +75,7 @@ class TrainHudThroughServiceTest {
     when(plugin.getStationDirectory()).thenReturn(Optional.of(directory));
     HudTemplateService templates = new HudTemplateService(storageManager, message -> {});
     templates.reload();
-    EtaService eta = mock(EtaService.class);
+    eta = mock(EtaService.class);
     when(eta.getForTrain(any(), any())).thenReturn(EtaResult.unavailable("-", List.of()));
 
     LocaleManager locale = mock(LocaleManager.class);
@@ -212,6 +215,73 @@ class TrainHudThroughServiceTest {
         "折返待命优先");
     assertEquals(
         HudState.IN_TRIP, HudStateTracker.applyOutOfService(HudState.IN_TRIP, false, true));
-    assertEquals(Optional.of("回库"), current.resolveLine(HudState.OUT_OF_SERVICE, 0L));
+    assertEquals(Optional.of("回库"), current.resolveLine(HudState.OUT_OF_SERVICE, 0L, Map.of()));
+  }
+
+  @Test
+  void nextStopTransfersLeaveOutBothLinesOfTheThroughChange() {
+    // 下一站 PPK：本车以 WS 到达、以 DS 发车，两条都不是换乘；同组的坪洲（FTA）停狮岭线。
+    TrainHudContext context =
+        resolve(
+                "FTA_ROUTE_ID=" + wsThrough.id(),
+                "FTA_ROUTE_INDEX=0",
+                "FTA_OPERATOR_CODE=SURC",
+                "FTA_LINE_CODE=WS")
+            .orElseThrow();
+
+    assertEquals(
+        List.of(new TrainHudContext.Transfer("SL", "狮岭线", "狮岭线", "#00A0E9")),
+        context.nextStopTransfers());
+    assertEquals("<#00A0E9>█</#00A0E9>SL", placeholders(context).get("transfer_lines"));
+  }
+
+  @Test
+  void afterTheChangeTheLineTheTrainLeftIsATransfer() {
+    TrainHudContext context =
+        resolve(
+                "FTA_ROUTE_ID=" + wsThrough.id(),
+                "FTA_ROUTE_INDEX=0",
+                "FTA_OPERATOR_CODE=SURC",
+                "FTA_LINE_CODE=WS")
+            .orElseThrow();
+    List<TrainHudContextResolver.UpcomingStop> upcoming =
+        resolver.resolveUpcomingStops(context, 5).stops();
+
+    assertEquals(List.of(), upcoming.get(1).transfers(), "海湖只停东山线，本车已是东山线");
+    assertEquals(
+        List.of("WS"),
+        upcoming.get(2).transfers().stream().map(TrainHudContext.Transfer::code).toList(),
+        "湾油埠的西海线是本车换线前的线路，在这里可以换乘");
+    assertTrue(upcoming.get(2).terminal());
+  }
+
+  @Test
+  void stationWithoutOtherLinesHasNoTransferPlaceholders() {
+    TrainHudContext context =
+        resolve(
+                "FTA_ROUTE_ID=" + wsThrough.id(),
+                "FTA_ROUTE_INDEX=1",
+                "FTA_OPERATOR_CODE=surc",
+                "FTA_LINE_CODE=ds")
+            .orElseThrow();
+    Map<String, String> values = placeholders(context);
+
+    assertEquals("-", values.get("transfer_lines"));
+    assertEquals("-", values.get("transfer_line_names"));
+  }
+
+  @Test
+  void delayMinutesFollowTheTimetableDeviationAtTheNextStop() {
+    when(eta.arrivalDeviationSeconds(eq("hud-train"), eq(1), any()))
+        .thenReturn(OptionalLong.of(185));
+    TrainHudContext late =
+        resolve("FTA_ROUTE_ID=" + wsThrough.id(), "FTA_ROUTE_INDEX=0").orElseThrow();
+    assertEquals("3", placeholders(late).get("delay_minutes"));
+
+    when(eta.arrivalDeviationSeconds(eq("hud-train"), eq(1), any()))
+        .thenReturn(OptionalLong.of(45));
+    TrainHudContext onTime =
+        resolve("FTA_ROUTE_ID=" + wsThrough.id(), "FTA_ROUTE_INDEX=0").orElseThrow();
+    assertEquals("-", placeholders(onTime).get("delay_minutes"), "不足 1 分钟算准点");
   }
 }
