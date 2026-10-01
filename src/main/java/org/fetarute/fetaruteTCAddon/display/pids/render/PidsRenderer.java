@@ -672,11 +672,12 @@ public final class PidsRenderer {
         y + (style.box() - style.size()) / 2,
         numberColor);
     if (style.labelSize() > 0) {
+      // “站台”与方块底边对齐：像素字形的最后一行墨迹就在基线那一行，让它与方块最后一行同高。
       p.text(
           label.primary(),
           style.labelSize(),
           x + style.box() + style.gap(),
-          cell.top + (cell.height - style.labelSize()) / 2,
+          y + style.box() - 1 - p.baseline(label.primary(), style.labelSize()),
           p.theme.muted());
     }
   }

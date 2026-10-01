@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.pids.announce;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.NOW;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.TPC;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.cancelled;
+import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.platformPending;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.row;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.running;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,6 +44,18 @@ class PidsAnnouncementTest {
     assertEquals(List.of(), kinds(running(PidsRow.Status.EN_ROUTE, "0366", 31)));
     assertEquals(List.of(), kinds(running(PidsRow.Status.BOARDING, "0366", 0)), "已经停在站台上不再播报进站");
     assertEquals(List.of(), kinds(running(PidsRow.Status.PENDING, null, 10)), "票据没有列车名，身份不稳定，不播报");
+  }
+
+  @Test
+  void arrivalWaitsForThePlatformToBeChosen() {
+    assertEquals(
+        List.of(),
+        kinds(platformPending(running(PidsRow.Status.ARRIVING, "0366", 20))),
+        "动态站台还没选台：不先播一条没有站台的进站");
+    assertEquals(
+        List.of(PidsAnnouncement.Kind.DELAYED),
+        kinds(platformPending(row(PidsRow.Status.EN_ROUTE, "0366", 20, 380, false, false, false))),
+        "严重晚点不依赖站台，照常播");
   }
 
   @Test

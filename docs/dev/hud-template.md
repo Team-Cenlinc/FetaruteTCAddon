@@ -176,7 +176,7 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{next_station_code}` → `CEN`
 - `next_station_lang2`：下一站第二语言名（缺失为 `-`）
   - 例：`{next_station_lang2}` → `Central`
-- `next_station_track`：下一站的站台号（从节点 ID 解析；缺失为 `-`）
+- `next_station_track`：下一站的站台号（从节点 ID 解析；缺失为 `-`）。动态站台按这趟车的选台结果，尚未选台时为 `-`（不显示占位股道）；后续站点对话框与计分板列表的站台号同一口径
 - `current_station`：当前站（由运行时快照推断站名）；缺失为 `-`
   - 例：`本站 {current_station}` → `本站 Central`
 - `current_station_code`：当前站 code

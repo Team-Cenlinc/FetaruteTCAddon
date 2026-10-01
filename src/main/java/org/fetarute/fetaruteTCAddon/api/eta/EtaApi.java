@@ -191,7 +191,8 @@ public interface EtaApi {
    * @param endRouteId 线路终点 ID
    * @param endOperation 运营终点（EOP）显示名
    * @param endOperationId 运营终点 ID
-   * @param platform 站台号；无法解析时为 {@code -}
+   * @param platform 站台号；无法解析时为 {@code -}。1.9.0 起站台待定（见 {@code platformPending}）时也为 {@code -}， 此前给的是
+   *     DYNAMIC 范围里的第一条股道，列车未必去那里
    * @param statusText 状态文本（英文短语）
    * @param reasons 诊断标签
    * @param etaEpochMillis 预计到达或通过本站的时间戳；已在站时为查询时刻；1.8.0 构造器创建的行为 0
@@ -202,6 +203,9 @@ public interface EtaApi {
    * @param outOfService 本站已越过运营终点，列车在回库途中（1.9.0）
    * @param trainName 运行中列车的列车名；票据与预测为空（1.9.0）
    * @param delaySeconds 按表运行时相对计划的偏差，正数为晚点：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空（1.9.0）
+   * @param platformPending 站台待定：本站是动态站台（DYNAMIC）停靠，列车还没有选台。运行中列车通常在到达本站前一个节点
+   *     （多为站咽喉）时选台；未发车的票据与预测一律待定（1.9.0）
+   * @param platformCandidates 站台待定时可能停靠的站台号，按站台号升序；站台已定或候选未知时为空（1.9.0）
    */
   record BoardRow(
       String lineName,
@@ -222,7 +226,9 @@ public interface EtaApi {
       boolean terminating,
       boolean outOfService,
       Optional<String> trainName,
-      OptionalLong delaySeconds) {
+      OptionalLong delaySeconds,
+      boolean platformPending,
+      List<String> platformCandidates) {
 
     public BoardRow {
       destinationId = destinationId == null ? Optional.empty() : destinationId;
@@ -232,6 +238,7 @@ public interface EtaApi {
       phase = phase == null ? BoardPhase.EN_ROUTE : phase;
       trainName = trainName == null ? Optional.empty() : trainName;
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+      platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
     }
 
     /**
@@ -269,7 +276,9 @@ public interface EtaApi {
           false,
           destinationId != null && destinationId.filter("OUT_OF_SERVICE"::equals).isPresent(),
           Optional.empty(),
-          OptionalLong.empty());
+          OptionalLong.empty(),
+          false,
+          List.of());
     }
 
     /** 预计到达或通过本站的时间（1.9.0）；1.8.0 构造器创建的行为空。 */

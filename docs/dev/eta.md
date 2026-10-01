@@ -95,6 +95,9 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
   占位股道只是范围里的第一条，未必是列车会去的那条，甚至未必存在。
 - 已经知道下标时用 `EtaTarget.StopIndex`（交路 0 起下标，与公开 API 停靠序号同一口径），不必按节点反查；
   同一节点在交路里出现两次时，按节点反查只能找到第一次。
+- 是否已选台看运行时的选台记录（`RuntimeDispatchService#hasEffectiveNode`，经 `EtaService#attachPlacedStops` 接入），
+  不看实际节点与声明节点是否相同：选中的恰好是占位股道时两者相同，只有选台记录能把它与尚未选台分开。
+  选台记录保留到列车越过该站；重载后记录清空、列车已停在站内时，站牌按列车最后经过的节点（在 DYNAMIC 范围内）认站台。
 
 ## 其它口径
 - 票据（未发车）ETA 同样计入中途停站时间，并从静止起步、途中停车点同样拆段。
@@ -122,6 +125,7 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
 | `passing` / `terminating` / `outOfService` | 本站通过不停 / 本站是运营终点 / 已越过运营终点在回库途中，均按 `RouteTerminals` 口径 |
 | `trainName` | 运行中列车的列车名；票据与预测为空 |
 | `delaySeconds` | 按表运行时相对计划的偏差（正数为晚点），不按表运行时为空 |
+| `platform` / `platformPending` / `platformCandidates` | 站台号；DYNAMIC 尚未选台时站台号为 `-`、标出待定并给出图上存在的候选股道（只有一条候选时直接给它）。票据与预测没有选台，一律待定 |
 
 - **在站列车**：列车到站后进度已推进到本站，本站不再是“下一个目标”。在站记录（`StationPresenceTracker`，到站事件到发车许可之间）表明列车停在本站时，单独列一行 `AT_STATION`，状态文本为 `Boarding`；否则列车一停稳就会从站牌上消失。通过不停的车站不列。
 - **晚点口径**：运行中为预计到达减表定到达（`TimetableService#plannedArrivalOf`）；在站为预计发车（当前时刻 + 剩余停站 + 扣停估算）减表定发车；未发车的表定票据为 ETA 推算的起点发车减表定发车——走行与停站按编表同一条运行曲线估算，所以它就是到本站的偏差。按间隔发车的票据没有表定时刻，为空。

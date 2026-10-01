@@ -42,6 +42,26 @@ final class AnnounceFixtures {
         Optional.ofNullable(train));
   }
 
+  /** 站台待定（动态站台还没选台）的同一行。 */
+  static PidsRow platformPending(PidsRow row) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        "-",
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        row.passing(),
+        row.terminating(),
+        row.outOfService(),
+        row.trainName(),
+        true,
+        List.of("1", "2"));
+  }
+
   static PidsRow running(PidsRow.Status status, String train, int seconds) {
     return row(status, train, seconds, 0, false, false, false);
   }

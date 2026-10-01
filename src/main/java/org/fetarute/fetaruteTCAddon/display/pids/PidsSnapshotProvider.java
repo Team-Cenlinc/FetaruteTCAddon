@@ -135,7 +135,9 @@ public final class PidsSnapshotProvider {
         row.passing(),
         row.terminating(),
         row.outOfService(),
-        row.trainName());
+        row.trainName(),
+        row.platformPending(),
+        row.platformCandidates());
   }
 
   private static PidsRow.Status status(EtaApi.BoardPhase phase) {
@@ -206,7 +208,9 @@ public final class PidsSnapshotProvider {
         route.map(detail -> detail.info().code()).orElse(departure.routeCode()),
         terminal.map(RouteTerminals.StationRef::stationCode).orElse("-"),
         terminal.map(ref -> ref.operatorCode() + ":" + ref.stationCode()),
-        departure.nodeId().map(RouteTerminals::platformOf).orElse("-"),
+        dynamicStop(route, departure.stopSequence())
+            ? "-"
+            : departure.nodeId().map(RouteTerminals::platformOf).orElse("-"),
         departure.plannedArrival(),
         OptionalLong.empty(),
         departure.stopSequence(),
@@ -214,6 +218,14 @@ public final class PidsSnapshotProvider {
         departure.terminating(),
         false,
         Optional.empty());
+  }
+
+  /** 动态站台停靠：时刻表里的节点只是占位股道，取消的班次从没选过台，不能写成站台号。 */
+  private static boolean dynamicStop(Optional<RouteApi.RouteDetail> route, int stopSequence) {
+    return route
+        .filter(detail -> stopSequence >= 0 && stopSequence < detail.stops().size())
+        .map(detail -> detail.stops().get(stopSequence).dynamic())
+        .orElse(false);
   }
 
   /** 列车到本站时所属线路：本站及之前最后一次换线的目标，没有换线时为交路自身线路（与站牌同一口径）。 */

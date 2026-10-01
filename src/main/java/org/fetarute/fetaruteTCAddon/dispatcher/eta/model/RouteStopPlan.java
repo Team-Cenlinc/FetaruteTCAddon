@@ -2,10 +2,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -21,6 +23,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
  *   <li><b>声明节点</b>：{@code RouteDefinition.waypoints()}，DYNAMIC 处是占位股道 {@code OP:S:CODE:fromTrack}。
  *   <li><b>实际节点</b>：运行时的有效节点，DYNAMIC 选台后换成选中的股道；未发车的票据与声明节点相同。
  *   <li><b>停靠配置</b>：{@code RouteDefinitionCache#listStops}，与声明节点一一对应；缺失时视为“不知道哪里停车”， 既不累加停站也不拆段。
+ *   <li><b>已定站台</b>：运行时已经有实际节点的下标（DYNAMIC 已选台，或到站时记下了实际股道）。选中的恰好是占位股道时，
+ *       实际节点与声明节点相同，只有这份记录能把它与“尚未选台”分开。
  * </ul>
  */
 public final class RouteStopPlan {
@@ -28,8 +32,10 @@ public final class RouteStopPlan {
   private final List<NodeId> declared;
   private final List<NodeId> effective;
   private final List<RouteStop> stops;
+  private final Set<Integer> placed;
 
-  private RouteStopPlan(List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops) {
+  private RouteStopPlan(
+      List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops, Set<Integer> placed) {
     this.declared = List.copyOf(declared);
     this.effective =
         List.copyOf(
@@ -38,9 +44,12 @@ public final class RouteStopPlan {
         stops == null || stops.size() != declared.size()
             ? List.of()
             : Collections.unmodifiableList(new ArrayList<>(stops));
+    this.placed = placed == null ? differing(this.declared, this.effective) : Set.copyOf(placed);
   }
 
   /**
+   * 不知道哪些下标已定站台时用：实际节点与声明节点不同的下标视为已定。选中的恰好是占位股道时会当成尚未选台。
+   *
    * @param declared 交路声明节点
    * @param effective 运行时实际节点；为空或长度不符时按声明节点
    * @param stops 与声明节点对齐的停靠配置；长度不符时视为缺失
@@ -48,7 +57,45 @@ public final class RouteStopPlan {
   public static RouteStopPlan of(
       List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops) {
     Objects.requireNonNull(declared, "declared");
-    return new RouteStopPlan(declared, effective, stops);
+    return new RouteStopPlan(declared, effective, stops, null);
+  }
+
+  /**
+   * @param declared 交路声明节点
+   * @param effective 运行时实际节点；为空或长度不符时按声明节点
+   * @param stops 与声明节点对齐的停靠配置；长度不符时视为缺失
+   * @param placed 运行时已有实际节点的下标
+   */
+  public static RouteStopPlan of(
+      List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops, Set<Integer> placed) {
+    Objects.requireNonNull(declared, "declared");
+    Objects.requireNonNull(placed, "placed");
+    return new RouteStopPlan(declared, effective, stops, placed);
+  }
+
+  private static Set<Integer> differing(List<NodeId> declared, List<NodeId> effective) {
+    Set<Integer> out = new HashSet<>();
+    for (int i = 0; i < declared.size(); i++) {
+      if (!declared.get(i).equals(effective.get(i))) {
+        out.add(i);
+      }
+    }
+    return Set.copyOf(out);
+  }
+
+  /**
+   * 把某下标定在观察到的实际节点上（例如列车已停在站内、运行时却没有选台记录时，按它实际停的股道）。
+   *
+   * @param index 下标
+   * @param node 实际节点
+   */
+  public RouteStopPlan withPlaced(int index, NodeId node) {
+    Objects.requireNonNull(node, "node");
+    List<NodeId> nodes = new ArrayList<>(effective);
+    nodes.set(index, node);
+    Set<Integer> indices = new HashSet<>(placed);
+    indices.add(index);
+    return new RouteStopPlan(declared, nodes, stops, indices);
   }
 
   /** 节点数。 */
@@ -144,14 +191,26 @@ public final class RouteStopPlan {
     return OptionalInt.empty();
   }
 
-  /**
-   * 该下标是否是尚未选台的 DYNAMIC 停靠：停靠配置是 DYNAMIC，且实际节点仍是声明的占位股道。
-   *
-   * <p>选中的恰好是占位股道时也会返回 true；此时按车站级估算与按该股道估算只差站内几格，不值得为此多接一路状态。
-   */
+  /** 该下标是否是尚未选台的 DYNAMIC 停靠：停靠配置是 DYNAMIC，且运行时还没有实际节点。 */
   public boolean unresolvedDynamic(int index) {
     return stop(index).map(DynamicStopMatcher::isDynamicStop).orElse(false)
-        && effective.get(index).equals(declared.get(index));
+        && !placed.contains(index);
+  }
+
+  /**
+   * 尚未选台的 DYNAMIC 停靠在图上存在的候选股道（按股道号升序）；已定站台或不是 DYNAMIC 时为空。
+   *
+   * @param index 下标
+   * @param graph 调度图；为空时没有候选
+   */
+  public List<NodeId> dynamicCandidates(int index, RailGraph graph) {
+    if (!unresolvedDynamic(index)) {
+      return List.of();
+    }
+    return stop(index)
+        .flatMap(DynamicStopMatcher::parseDynamicSpec)
+        .map(spec -> DynamicStopMatcher.candidateNodes(spec, graph))
+        .orElse(List.of());
   }
 
   /**

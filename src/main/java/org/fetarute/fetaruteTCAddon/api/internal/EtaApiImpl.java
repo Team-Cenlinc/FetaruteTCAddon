@@ -189,7 +189,9 @@ public final class EtaApiImpl implements EtaApi {
               row.terminating(),
               row.outOfService(),
               row.trainName(),
-              row.delaySeconds()));
+              row.delaySeconds(),
+              row.platformPending(),
+              row.platformCandidates()));
     }
     return new BoardResult(List.copyOf(rows));
   }

@@ -207,7 +207,8 @@ class PidsViewBuilderTest {
                 PidsTheme.DARK,
                 Set.of("1"),
                 List.of("1"),
-                2));
+                2,
+                true));
 
     assertEquals(2, view.rows().size(), "按布局行数截断");
     assertTrue(view.rows().stream().allMatch(r -> r.platform().number().equals("1")));
@@ -268,9 +269,33 @@ class PidsViewBuilderTest {
                 PidsTheme.DARK,
                 Set.of("3"),
                 List.of("3"),
-                3));
+                3,
+                true));
 
     assertEquals(List.of(MT, WS), view.bandColors());
+  }
+
+  @Test
+  void pendingPlatformIsAHollowDashOnScreensWithAPlatformColumn() {
+    PidsView.Row row = build(pending(PidsRow.Status.EN_ROUTE, List.of("1", "2"))).get(0);
+
+    assertEquals(new PidsView.PlatformCell("-", true), row.platform());
+    assertEquals("准点", row.arrival().status().orElseThrow().text().primary(), "有站台列时状态照常，不另写待定");
+  }
+
+  @Test
+  void singlePlatformScreensListPendingTrainsThatMayCallHere() {
+    PidsRow arriving = pending(PidsRow.Status.ARRIVING, List.of("1", "2"));
+
+    PidsView onTwo = platformScreen("2", arriving);
+    PidsView onThree = platformScreen("3", arriving);
+
+    assertEquals(1, onTwo.rows().size(), "候选里有本站台：列出");
+    PidsView.Arrival arrival = onTwo.rows().get(0).arrival();
+    assertEquals(ArrivalMode.COUNTDOWN, arrival.mode(), "可能停别的站台，不写“进站”");
+    assertEquals("站台待定", arrival.status().orElseThrow().text().primary());
+    assertEquals(Tone.AMBER, arrival.status().orElseThrow().tone());
+    assertTrue(onThree.rows().isEmpty(), "候选里没有本站台：不列");
   }
 
   @Test
@@ -278,6 +303,20 @@ class PidsViewBuilderTest {
     assertEquals(0, PidsViewBuilder.minutesUntil(NOW.minusSeconds(5), NOW));
     assertEquals(1, PidsViewBuilder.minutesUntil(NOW.plusSeconds(10), NOW));
     assertEquals(2, PidsViewBuilder.minutesUntil(NOW.plusMillis(60_500), NOW));
+  }
+
+  /** 单站台屏（没有站台列）。 */
+  private PidsView platformScreen(String platform, PidsRow... rows) {
+    return builder.build(
+        new PidsViewBuilder.Request(
+            new PidsSnapshot(STATION, NOW, List.of(rows)),
+            NOW,
+            ZoneId.of("Asia/Shanghai"),
+            PidsTheme.DARK,
+            Set.of(platform),
+            List.of(platform),
+            3,
+            false));
   }
 
   private PidsView view(PidsRow... rows) {
@@ -289,7 +328,8 @@ class PidsViewBuilderTest {
             PidsTheme.DARK,
             Set.of(),
             List.of("1"),
-            6));
+            6,
+            true));
   }
 
   private List<PidsView.Row> build(PidsRow... rows) {
@@ -311,6 +351,25 @@ class PidsViewBuilderTest {
         false,
         false,
         Optional.of("train"));
+  }
+
+  private static PidsRow pending(PidsRow.Status status, List<String> candidates) {
+    return new PidsRow(
+        status,
+        "WS",
+        "SURC:WS:R1",
+        "NFY",
+        Optional.of("SURC:NFY"),
+        "-",
+        NOW.plusSeconds(120),
+        OptionalLong.of(0),
+        2,
+        false,
+        false,
+        false,
+        Optional.of("train"),
+        true,
+        candidates);
   }
 
   private static PidsRow passing(PidsRow.Status status) {
@@ -365,6 +424,7 @@ class PidsViewBuilderTest {
           Map.entry("pids.board.status.passing", "通过"),
           Map.entry("pids.board.status.boarding", "停靠中"),
           Map.entry("pids.board.status.planned", "计划"),
+          Map.entry("pids.board.status.platform-pending", "站台待定"),
           Map.entry("pids.board.destination.terminating", "本站终到"),
           Map.entry("pids.board.destination.terminating-secondary", "Terminates here"),
           Map.entry("pids.board.destination.out-of-service", "回库"),

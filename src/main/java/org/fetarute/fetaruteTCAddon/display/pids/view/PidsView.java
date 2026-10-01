@@ -168,8 +168,8 @@ public record PidsView(
   /**
    * 站台。
    *
-   * @param number 站台号；未知为“-”
-   * @param hollow 空心（取消）
+   * @param number 站台号；未知或待定为“-”
+   * @param hollow 空心（取消、站台待定）
    */
   public record PlatformCell(String number, boolean hollow) {
 

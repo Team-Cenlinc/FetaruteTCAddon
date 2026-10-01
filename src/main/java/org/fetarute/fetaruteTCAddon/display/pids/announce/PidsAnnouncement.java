@@ -66,6 +66,7 @@ public record PidsAnnouncement(Kind kind, String key, PidsStationKey station, Pi
    *
    * <ul>
    *   <li>进站 / 通过：运行中的列车处于进站状态，或预计在 {@code arriving-lead-seconds} 内到达。回库车与本站终到车也播报进站（文案提醒勿上车）。
+   *       站台待定时不播：动态站台在进站前（通常是站咽喉）选台，选好后带站台号播一次，不先播一条没有站台的再补一条。
    *   <li>取消：取消行（快照里有查询窗口内的取消班次，以及计划时刻已过不久的）。
    *   <li>严重晚点：运行中的列车到达本站的晚点达到 {@link Lateness#SEVERELY_LATE_SECONDS}；通过车与回库车不播。
    * </ul>
@@ -115,7 +116,7 @@ public record PidsAnnouncement(Kind kind, String key, PidsStationKey station, Pi
       Kind approach = row.passing() ? Kind.PASSING : Kind.ARRIVING;
       boolean approachEnabled =
           row.passing() ? settings.triggers().passing() : settings.triggers().arriving();
-      if (approaching && approachEnabled) {
+      if (approaching && approachEnabled && !row.platformPending()) {
         active.add(
             new PidsAnnouncement(
                 approach, key(approach, station, id + "|" + row.platform()), station, row));

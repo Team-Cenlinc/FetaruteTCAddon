@@ -199,7 +199,8 @@ public final class PidsComposer {
                 theme(screen),
                 screen.platforms(),
                 platformLabels,
-                layout.rowCapacity()));
+                layout.rowCapacity(),
+                layout.departures().map(d -> d.columns().platform().isPresent()).orElse(false)));
     if (PidsPlatformSelection.limit(layout).isPresent()) {
       Optional<PidsNotice> page =
           carousel.page(
@@ -225,8 +226,7 @@ public final class PidsComposer {
             row ->
                 row.passing()
                     && row.status() == PidsRow.Status.ARRIVING
-                    && (screen.platforms().isEmpty()
-                        || screen.platforms().contains(row.platform())));
+                    && (screen.platforms().isEmpty() || row.mayUse(screen.platforms())));
   }
 
   private PidsTheme theme(PidsScreen screen) {

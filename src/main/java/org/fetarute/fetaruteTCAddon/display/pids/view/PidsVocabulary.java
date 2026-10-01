@@ -78,6 +78,11 @@ public final class PidsVocabulary {
     return names("status.planned");
   }
 
+  /** 站台待定（单站台屏的状态）。 */
+  public Names platformPending() {
+    return names("status.platform-pending");
+  }
+
   /** 本站终到（代替终点名）。 */
   public Names terminating() {
     return names("destination.terminating");

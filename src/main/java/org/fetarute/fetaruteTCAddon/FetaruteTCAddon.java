@@ -1161,6 +1161,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       // DYNAMIC 选台后按实际股道估算：与控车读同一份有效节点。
       etaService.attachEffectiveWaypoints(
           runtimeDispatchService::resolveEffectiveWaypointsForEvent);
+      etaService.attachPlacedStops(runtimeDispatchService::hasEffectiveNode);
     }
     // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
     etaService.attachStationPresence(this::getStationPresence);

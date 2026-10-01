@@ -38,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  *   <li>通过：终点用次要色，状态写“通过”，优先于晚点
  *   <li>计划（未出票）：分钟数与“计划”框用次要色
  *   <li>晚点：按表运行时才显示状态；不足 1 分为准点，5 分以上为严重晚点（红），其余为晚点（琥珀）
+ *   <li>站台待定：有站台列的屏，站台方块空心写“-”；没有站台列的单站台屏，候选里有本站台就列出， 状态写“站台待定”（琥珀），不显示“进站”
  * </ul>
  */
 public final class PidsViewBuilder {
@@ -65,6 +66,7 @@ public final class PidsViewBuilder {
    * @param platforms 只显示这些站台；为空表示全部
    * @param platformLabels 站台号方块里写的站台；车站统屏为空
    * @param capacity 布局最多显示的行数
+   * @param platformColumn 到发表有站台列
    */
   public record Request(
       PidsSnapshot snapshot,
@@ -73,7 +75,8 @@ public final class PidsViewBuilder {
       PidsTheme theme,
       Set<String> platforms,
       List<String> platformLabels,
-      int capacity) {
+      int capacity,
+      boolean platformColumn) {
 
     public Request {
       Objects.requireNonNull(snapshot, "snapshot");
@@ -92,7 +95,7 @@ public final class PidsViewBuilder {
       if (rows.size() >= request.capacity()) {
         break;
       }
-      if (!request.platforms().isEmpty() && !request.platforms().contains(row.platform())) {
+      if (!request.platforms().isEmpty() && !row.mayUse(request.platforms())) {
         continue;
       }
       rows.add(row(row, request));
@@ -132,11 +135,25 @@ public final class PidsViewBuilder {
 
   private PidsView.Row row(PidsRow row, Request request) {
     boolean cancelled = row.status() == PidsRow.Status.CANCELLED;
+    Arrival arrival = arrival(row, cancelled, request.now());
     return new PidsView.Row(
         badge(row, cancelled, request.theme()),
         destination(row, cancelled),
-        new PlatformCell(row.platform(), cancelled),
-        arrival(row, cancelled, request.now()));
+        platformCell(row, cancelled),
+        row.platformPending() && !request.platformColumn() ? platformPending(arrival) : arrival);
+  }
+
+  private static PlatformCell platformCell(PidsRow row, boolean cancelled) {
+    return new PlatformCell(row.platform(), cancelled || row.platformPending());
+  }
+
+  /** 单站台屏上站台待定的行：列车可能停在别的站台，不能写“进站”；状态改写“站台待定”，分钟数照常倒数。 */
+  private Arrival platformPending(Arrival arrival) {
+    Label pending = Label.of(vocabulary.platformPending(), Tone.AMBER);
+    return arrival.mode() == ArrivalMode.HIGHLIGHT
+        ? new Arrival(ArrivalMode.COUNTDOWN, 0, Tone.NORMAL, Optional.of(pending))
+        : new Arrival(
+            arrival.mode(), arrival.minutes(), arrival.minutesTone(), Optional.of(pending));
   }
 
   private Badge badge(PidsRow row, boolean cancelled, PidsTheme theme) {

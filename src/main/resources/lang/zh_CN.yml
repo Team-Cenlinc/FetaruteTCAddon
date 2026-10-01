@@ -1193,6 +1193,8 @@ pids:
       boarding-secondary: "Boarding"
       planned: "计划"
       planned-secondary: "Planned"
+      platform-pending: "站台待定"
+      platform-pending-secondary: "Platform TBD"
     destination:
       terminating: "本站终到"
       terminating-secondary: "Terminates here"
@@ -1315,6 +1317,7 @@ pids:
   # 站台广播：全站播报，每条带站台号；<platform> 是“N 站台 ”（站台未知时为空），<line> 是线路色块加线路代码
   announce:
     platform: "<white><platform> 站台</white> "
+    platform-pending: "<gray>站台待定</gray> "
     arriving: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white>"
     arriving-terminating: "<aqua>▶</aqua> <platform><line> <white>本站终到列车即将进站，请勿上车</white>"
     arriving-out-of-service: "<aqua>▶</aqua> <platform><white>回库列车即将进站，请勿上车</white>"

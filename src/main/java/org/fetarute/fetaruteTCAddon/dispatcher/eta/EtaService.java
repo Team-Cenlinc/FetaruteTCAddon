@@ -102,6 +102,9 @@ public final class EtaService {
   /** 默认速度（blocks/s），当边无限速配置时使用。 */
   private static final double DEFAULT_FALLBACK_SPEED_BPS = 6.0;
 
+  /** 站牌行站台待定或无法解析时的站台号。 */
+  private static final String UNKNOWN_PLATFORM = "-";
+
   /**
    * 未知时长扣停的估算上限（秒）。
    *
@@ -142,6 +145,9 @@ public final class EtaService {
   /** 运行时实际节点（列车名, 交路 → DYNAMIC 选台后的节点序列）；未接入时按交路声明节点估算。 */
   private volatile java.util.function.BiFunction<String, RouteDefinition, List<NodeId>>
       effectiveWaypoints;
+
+  /** 运行时哪些下标已有实际节点；未接入时把实际节点与声明节点不同的下标视为已定站台。 */
+  private volatile PlacedStops placedStops;
 
   /** 列车在站记录，用来识别“已到站、停站计时尚未开始”的空档；未接入时该空档按 0 计。 */
   private volatile java.util.function.Supplier<Optional<StationPresenceTracker>> stationPresence;
@@ -233,6 +239,27 @@ public final class EtaService {
   public void attachEffectiveWaypoints(
       java.util.function.BiFunction<String, RouteDefinition, List<NodeId>> effectiveWaypoints) {
     this.effectiveWaypoints = effectiveWaypoints;
+  }
+
+  /**
+   * 接入运行时已定站台的记录：DYNAMIC 选中的恰好是占位股道时，实际节点与声明节点相同，只有这份记录能把它与尚未选台分开， 站牌才不会把已选好的站台显示成待定。
+   *
+   * @param placedStops 运行时已定站台的记录；传 null 表示断开
+   */
+  public void attachPlacedStops(PlacedStops placedStops) {
+    this.placedStops = placedStops;
+  }
+
+  /** 运行时某停靠下标是否已有实际节点（DYNAMIC 已选台，或到站时记下了实际股道）。 */
+  @FunctionalInterface
+  public interface PlacedStops {
+
+    /**
+     * @param trainName 列车名
+     * @param route 列车当前交路
+     * @param index 交路节点下标
+     */
+    boolean placed(String trainName, RouteDefinition route, int index);
   }
 
   /**
@@ -464,6 +491,23 @@ public final class EtaService {
         .map(plan -> plan.node(stopIndex));
   }
 
+  /**
+   * 列车在该停靠下标实际停靠的节点：固定站台与已选台的 DYNAMIC 给出节点；DYNAMIC 尚未选台、或不知道这趟车时为空。
+   *
+   * <p>与 {@link #effectiveStopNode} 的区别：未选台时那里给占位股道，这里给空，显示站台号的地方据此写“待定”而不是占位股道。
+   */
+  public Optional<NodeId> placedStopNode(String trainName, int stopIndex) {
+    if (trainName == null || trainName.isBlank() || stopIndex < 0) {
+      return Optional.empty();
+    }
+    return snapshotStore
+        .getSnapshot(trainName)
+        .flatMap(snap -> routeDefinitions.findById(snap.routeUuid()))
+        .map(route -> stopPlan(trainName, route))
+        .filter(plan -> stopIndex < plan.size() && !plan.unresolvedDynamic(stopIndex))
+        .map(plan -> plan.node(stopIndex));
+  }
+
   /** 获取当前采样到的列车名集合（用于补全）。 */
   public Set<String> snapshotTrainNames() {
     return Set.copyOf(snapshotStore.snapshot().keySet());
@@ -644,7 +688,32 @@ public final class EtaService {
             "ETA_EFFECTIVE_WAYPOINTS_READ_FAILED train=" + trainName + " error=" + ex);
       }
     }
-    return RouteStopPlan.of(route.waypoints(), effective, routeDefinitions.listStops(route.id()));
+    List<RouteStop> stops = routeDefinitions.listStops(route.id());
+    PlacedStops placed = this.placedStops;
+    if (placed == null || trainName == null) {
+      return RouteStopPlan.of(route.waypoints(), effective, stops);
+    }
+    return RouteStopPlan.of(
+        route.waypoints(), effective, stops, placedDynamicStops(placed, trainName, route, stops));
+  }
+
+  /** 已定站台的 DYNAMIC 停靠下标；只问 DYNAMIC 停靠，其余下标的站台由交路声明。 */
+  private Set<Integer> placedDynamicStops(
+      PlacedStops placed, String trainName, RouteDefinition route, List<RouteStop> stops) {
+    Set<Integer> out = new HashSet<>();
+    for (int i = 0; i < stops.size(); i++) {
+      if (DynamicStopMatcher.isDynamicStop(stops.get(i))) {
+        try {
+          if (placed.placed(trainName, route, i)) {
+            out.add(i);
+          }
+        } catch (RuntimeException ex) {
+          debugLogger.accept(
+              "ETA_PLACED_STOP_READ_FAILED train=" + trainName + " index=" + i + " error=" + ex);
+        }
+      }
+    }
+    return out;
   }
 
   /** 未发车票据眼中的交路停靠：还没有选台，实际节点即声明节点。 */
@@ -698,14 +767,7 @@ public final class EtaService {
   }
 
   private List<NodeId> targetCandidates(RailGraph graph, RouteStopPlan plan, int index) {
-    if (!plan.unresolvedDynamic(index)) {
-      return List.of(plan.node(index));
-    }
-    List<NodeId> candidates =
-        plan.stop(index)
-            .flatMap(DynamicStopMatcher::parseDynamicSpec)
-            .map(spec -> DynamicStopMatcher.candidateNodes(spec, graph))
-            .orElse(List.of());
+    List<NodeId> candidates = plan.dynamicCandidates(index, graph);
     return candidates.isEmpty() ? List.of(plan.node(index)) : candidates;
   }
 
@@ -1052,7 +1114,7 @@ public final class EtaService {
           .ifPresent(rows::add);
       Optional<BoardStop> stopOpt =
           resolveTargetSelection(route, plan, snap.routeIndex(), stationTarget)
-              .flatMap(target -> runningBoardStop(route, snap.routeUuid(), plan, target, lineId));
+              .flatMap(target -> runningBoardStop(route, snap, plan, target, lineId));
       if (stopOpt.isEmpty()) {
         continue;
       }
@@ -1187,7 +1249,14 @@ public final class EtaService {
         ticket.timetableDriven()
             ? deviationSeconds(Optional.of(ticket.firstDueAt()), now.plusSeconds(result.waitSec()))
             : OptionalLong.empty();
-    BoardStop stop = new BoardStop(route, ticket.service().routeId(), plan, target, lineName);
+    BoardStop stop =
+        new BoardStop(
+            route,
+            ticket.service().routeId(),
+            plan,
+            target,
+            lineName,
+            worldIdForRouteSegment(route, 0, Math.max(1, target.index())));
     return Optional.of(
         new BoardRowEntry(
             result.etaEpochMillis(),
@@ -1214,10 +1283,11 @@ public final class EtaService {
     if (index < 0 || index >= plan.size() || !plan.stopsAt(index) || !atStation(trainName, snap)) {
       return Optional.empty();
     }
+    RouteStopPlan stationPlan = withObservedPlatform(plan, index, snap);
     Optional<BoardStop> stopOpt =
-        resolveTargetSelection(route, plan, index - 1, stationTarget)
+        resolveTargetSelection(route, stationPlan, index - 1, stationTarget)
             .filter(target -> target.index() == index)
-            .flatMap(target -> runningBoardStop(route, snap.routeUuid(), plan, target, lineId));
+            .flatMap(target -> runningBoardStop(route, snap, stationPlan, target, lineId));
     if (stopOpt.isEmpty()) {
       return Optional.empty();
     }
@@ -1250,10 +1320,24 @@ public final class EtaService {
                 terminalContext)));
   }
 
+  /** 已停在站内的列车，DYNAMIC 却没有选台记录（例如重载后记录已清空）：按它最后经过的节点认站台，前提是该节点在本站的 DYNAMIC 范围内。 */
+  private static RouteStopPlan withObservedPlatform(
+      RouteStopPlan plan, int index, TrainRuntimeSnapshot snap) {
+    if (!plan.unresolvedDynamic(index)) {
+      return plan;
+    }
+    Optional<DynamicStopMatcher.DynamicSpec> spec =
+        plan.stop(index).flatMap(DynamicStopMatcher::parseDynamicSpec);
+    return snap.lastPassedNodeId()
+        .filter(node -> spec.map(s -> DynamicStopMatcher.matches(node, s)).orElse(false))
+        .map(node -> plan.withPlaced(index, node))
+        .orElse(plan);
+  }
+
   /** 运行中列车在本站的停靠；按到本站时所属线路过滤，不匹配时为空。 */
   private Optional<BoardStop> runningBoardStop(
       RouteDefinition route,
-      UUID routeUuid,
+      TrainRuntimeSnapshot snap,
       RouteStopPlan plan,
       TargetSelection target,
       String lineId) {
@@ -1262,8 +1346,67 @@ public final class EtaService {
         lineAtStop(route, route.metadata().flatMap(RouteLineChanges.LineRef::of), target.index())
             .orElseGet(() -> resolveLineName(route));
     return lineMatches(route, lineName, lineId)
-        ? Optional.of(new BoardStop(route, routeUuid, plan, target, lineName))
+        ? Optional.of(
+            new BoardStop(
+                route,
+                snap.routeUuid(),
+                plan,
+                target,
+                lineName,
+                Optional.ofNullable(snap.worldId())))
         : Optional.empty();
+  }
+
+  /**
+   * 本站站台：固定站台与已选台的 DYNAMIC 给出站台号；DYNAMIC 尚未选台时站台号为 {@code -}，附上图上存在的候选站台。
+   * 候选只有一条时站台已经确定。占位股道只是范围里的第一条，不能当成列车会去的站台显示。
+   */
+  private BoardPlatform boardPlatform(BoardStop stop) {
+    int index = stop.index();
+    if (!stop.plan().unresolvedDynamic(index)) {
+      return BoardPlatform.of(RouteTerminals.platformOf(stop.target().nodeId().value()));
+    }
+    List<String> candidates =
+        dynamicCandidates(stop.plan(), index, stop.worldId()).stream()
+            .map(node -> RouteTerminals.platformOf(node.value()))
+            .distinct()
+            .toList();
+    return candidates.size() == 1
+        ? BoardPlatform.of(candidates.get(0))
+        : new BoardPlatform(UNKNOWN_PLATFORM, true, candidates);
+  }
+
+  /** 候选股道：先在交路所在世界的图上找，世界未知或图上找不到时再看其余已加载的图。 */
+  private List<NodeId> dynamicCandidates(RouteStopPlan plan, int index, Optional<UUID> worldId) {
+    Optional<List<NodeId>> inWorld =
+        worldId
+            .flatMap(railGraphService::getSnapshot)
+            .map(snapshot -> plan.dynamicCandidates(index, snapshot.graph()))
+            .filter(candidates -> !candidates.isEmpty());
+    if (inWorld.isPresent()) {
+      return inWorld.get();
+    }
+    for (RailGraphService.RailGraphSnapshot snapshot : railGraphService.snapshotAll().values()) {
+      List<NodeId> candidates = plan.dynamicCandidates(index, snapshot.graph());
+      if (!candidates.isEmpty()) {
+        return candidates;
+      }
+    }
+    return List.of();
+  }
+
+  /**
+   * 站牌行的站台。
+   *
+   * @param platform 站台号；待定或无法解析时为 {@code -}
+   * @param pending DYNAMIC 尚未选台
+   * @param candidates 待定时的候选站台，按站台号升序
+   */
+  private record BoardPlatform(String platform, boolean pending, List<String> candidates) {
+
+    static BoardPlatform of(String platform) {
+      return new BoardPlatform(platform, false, List.of());
+    }
   }
 
   /** 组装站牌行：终点、站台与本站停靠属性按同一套口径解析，运行中列车与票据共用。 */
@@ -1283,6 +1426,7 @@ public final class EtaService {
         resolveRowEndOperation(route, stop.routeUuid(), stop.target(), terminal, terminalContext);
     DestinationInfo destInfo = resolveBoardDestination(route, endOperation);
     int index = stop.index();
+    BoardPlatform platform = boardPlatform(stop);
     return new BoardResult.BoardRow(
         stop.lineName(),
         route.id().value(),
@@ -1292,7 +1436,7 @@ public final class EtaService {
         endRoute.destinationId(),
         endOperation.label(),
         endOperation.destinationId(),
-        RouteTerminals.platformOf(stop.target().nodeId().value()),
+        platform.platform(),
         result.statusText(),
         result.reasons(),
         result.eta(),
@@ -1303,7 +1447,9 @@ public final class EtaService {
             .equals(OptionalInt.of(index)),
         endOperation.destinationId().filter(RouteTerminals.OUT_OF_SERVICE_ID::equals).isPresent(),
         trainName,
-        delay);
+        delay,
+        platform.pending(),
+        platform.candidates());
   }
 
   /**
@@ -1314,13 +1460,15 @@ public final class EtaService {
    * @param plan 列车眼中的停靠计划（运行中为实际节点，票据为声明节点）
    * @param target 本站在交路中的位置
    * @param lineName 列车到本站时所属线路
+   * @param worldId 交路所在世界（找 DYNAMIC 候选股道用）；未知时为空
    */
   private record BoardStop(
       RouteDefinition route,
       UUID routeUuid,
       RouteStopPlan plan,
       TargetSelection target,
-      String lineName) {
+      String lineName,
+      Optional<UUID> worldId) {
 
     int index() {
       return target.index();

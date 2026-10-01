@@ -28,7 +28,7 @@ public record BoardResult(List<BoardRow> rows) {
    * @param endRouteId 线路终点 ID
    * @param endOperation 运营终点（EOP）显示名
    * @param endOperationId 运营终点 ID
-   * @param platform 站台号；无法解析时为 {@code -}
+   * @param platform 站台号；无法解析或站台待定时为 {@code -}
    * @param statusText 状态文本（英文短语，供命令与旧消费者显示）
    * @param reasons 诊断标签
    * @param eta 预计到达或通过本站的时刻；已在站时为查询时刻
@@ -39,6 +39,8 @@ public record BoardResult(List<BoardRow> rows) {
    * @param outOfService 本站已越过运营终点，列车在回库途中
    * @param trainName 运行中列车的列车名；票据与预测为空
    * @param delaySeconds 按表运行时相对计划的偏差（正数为晚点）：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空
+   * @param platformPending 本站是 DYNAMIC 停靠且尚未选台
+   * @param platformCandidates 站台待定时可能停靠的站台，按站台号升序；站台已定或候选未知时为空
    */
   public record BoardRow(
       String lineName,
@@ -59,7 +61,9 @@ public record BoardResult(List<BoardRow> rows) {
       boolean terminating,
       boolean outOfService,
       Optional<String> trainName,
-      OptionalLong delaySeconds) {
+      OptionalLong delaySeconds,
+      boolean platformPending,
+      List<String> platformCandidates) {
     public BoardRow {
       Objects.requireNonNull(lineName, "lineName");
       Objects.requireNonNull(routeId, "routeId");
@@ -76,6 +80,7 @@ public record BoardResult(List<BoardRow> rows) {
       Objects.requireNonNull(phase, "phase");
       trainName = trainName == null ? Optional.empty() : trainName;
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+      platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
     }
   }
 }

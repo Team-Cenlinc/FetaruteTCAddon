@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.pids.announce;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.NOW;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.TPC;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.cancelled;
+import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.platformPending;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.row;
 import static org.fetarute.fetaruteTCAddon.display.pids.announce.AnnounceFixtures.running;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -115,5 +116,15 @@ class PidsAnnouncementTextTest {
         "[大港城] 2 站台 █MT 开往 新笛矢·壑湖 的列车晚点约 6 分钟",
         plain(render(row(PidsRow.Status.EN_ROUTE, "0366", 600, 380, false, false, false))));
     assertEquals("[大港城] 另有 2 条站台通知，请留意站台屏。", plain(text.overflow(TPC, 2)));
+  }
+
+  @Test
+  void pendingPlatformIsSaidSoInsteadOfTheTrackNumber() {
+    assertEquals(
+        "[大港城] 站台待定 █MT 开往 新笛矢·壑湖 的列车晚点约 6 分钟",
+        plain(
+            render(
+                platformPending(
+                    row(PidsRow.Status.EN_ROUTE, "0366", 600, 380, false, false, false)))));
   }
 }

@@ -28988,6 +28988,20 @@ public final class RuntimeDispatchService {
   }
 
   /**
+   * 该下标是否已有运行时实际节点（DYNAMIC 已选台，或到站时记下了实际股道）。
+   *
+   * <p>选中的恰好是占位股道时，{@link #resolveEffectiveWaypointsForEvent(String, RouteDefinition)}
+   * 与声明节点相同，看不出是否已选台；站牌据此区分“站台待定”与“已定在占位股道”。覆盖记录保留到列车越过该下标。
+   *
+   * @param trainName 列车名
+   * @param route 列车当前交路；与覆盖记录的交路定义不符时视为没有
+   * @param index 交路节点下标
+   */
+  public boolean hasEffectiveNode(String trainName, RouteDefinition route, int index) {
+    return readEffectiveNode(trainName, route, index).isPresent();
+  }
+
+  /**
    * 供事件信号 provider 解析单线方向的 canonical route leg。
    *
    * <p>与 movement waypoint 不同，这里刻意不应用 lastPassedGraphNode current-node override。DYNAMIC

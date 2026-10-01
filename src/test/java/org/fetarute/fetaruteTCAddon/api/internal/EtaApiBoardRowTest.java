@@ -44,7 +44,9 @@ class EtaApiBoardRowTest {
             true,
             false,
             Optional.of("train-1"),
-            OptionalLong.of(75L));
+            OptionalLong.of(75L),
+            false,
+            List.of());
     EtaService service = mock(EtaService.class);
     when(service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10)))
         .thenReturn(new BoardResult(List.of(internal)));

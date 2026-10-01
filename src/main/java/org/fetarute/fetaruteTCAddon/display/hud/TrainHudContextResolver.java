@@ -269,8 +269,7 @@ public final class TrainHudContextResolver {
     Optional<NextStop> nextStopOpt =
         outOfService ? Optional.empty() : resolveNextStop(routeOpt, routeIndex);
     StationDisplay nextStation = nextStopOpt.map(NextStop::display).orElse(StationDisplay.empty());
-    String nextStationTrack =
-        nextStopOpt.flatMap(NextStop::nodeId).map(this::resolveTrackFromNodeId).orElse("-");
+    String nextStationTrack = nextStopOpt.map(next -> trackFor(trainName, next.info())).orElse("-");
     boolean terminalNextStop =
         nextStopOpt.map(NextStop::terminal).orElse(false) && !nextStation.isEmpty();
     Destinations destinations = resolveDestinations(routeOpt, routeIndex, operationType);
@@ -491,11 +490,22 @@ public final class TrainHudContextResolver {
         sequence,
         info.display(),
         eta,
-        info.track(),
+        trackFor(context.trainName(), info),
         info.line(),
         transfersOf(info, context.currentLine()),
         etaService.arrivalDeviationSeconds(context.trainName(), info.index()),
         info.terminal());
+  }
+
+  /** 站台号：动态站台按这趟车的选台结果，尚未选台时为 {@code -}，不显示占位股道。 */
+  private String trackFor(String trainName, StopInfo info) {
+    if (!info.dynamic()) {
+      return info.track();
+    }
+    return etaService
+        .placedStopNode(trainName, info.index())
+        .map(this::resolveTrackFromNodeId)
+        .orElse("-");
   }
 
   /** 停靠站的换乘线路：交路线路已知时用预先算好的；不明时按列车当前线路排除本线。 */
@@ -550,15 +560,17 @@ public final class TrainHudContextResolver {
           routeLine.isPresent()
               ? Optional.of(resolveTransfers(nodeId, stops, index, routeLine, Optional.empty()))
               : Optional.empty();
+      boolean dynamic = DynamicStopMatcher.isDynamicStop(stop);
       infos.add(
           new StopInfo(
               index,
               nodeId,
               display,
-              nodeId.map(this::resolveTrackFromNodeId).orElse("-"),
+              dynamic ? "-" : nodeId.map(this::resolveTrackFromNodeId).orElse("-"),
               line,
               transfers,
-              index == lastStopIndex));
+              index == lastStopIndex,
+              dynamic));
     }
     return new StopTable(stops, revision, List.copyOf(infos), lastStopIndex);
   }
@@ -1890,10 +1902,11 @@ public final class TrainHudContextResolver {
    * @param index 停靠表下标（与进度下标、时刻表停靠序号同一口径）
    * @param nodeId 停靠节点
    * @param display 站名
-   * @param track 站台号；无法解析时为 {@code -}
+   * @param track 站台号；无法解析或动态站台时为 {@code -}（动态站台的站台号随列车，见 {@code trackFor}）
    * @param line 列车在该站所属的线路（直通运转换线后为新线路）；交路线路不明时为空
    * @param transfers 可换乘线路（按该站所属线路排除本车）；交路线路不明时为空，届时按列车当前线路现算
    * @param terminal 是否为本交路最后一个停车点
+   * @param dynamic 动态站台（DYNAMIC）停靠；{@code nodeId} 是占位股道
    */
   public record StopInfo(
       int index,
@@ -1902,7 +1915,8 @@ public final class TrainHudContextResolver {
       String track,
       Optional<RouteLineChanges.LineRef> line,
       Optional<List<TrainHudContext.Transfer>> transfers,
-      boolean terminal) {
+      boolean terminal,
+      boolean dynamic) {
     public StopInfo {
       Objects.requireNonNull(display, "display");
       nodeId = nodeId == null ? Optional.empty() : nodeId;

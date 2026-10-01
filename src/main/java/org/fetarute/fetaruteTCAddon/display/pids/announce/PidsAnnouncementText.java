@@ -19,7 +19,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsText;
 /**
  * 站台广播的文字。文案在语言文件 {@code pids.announce.*}，站名、线路色与站台屏同一来源（{@link PidsDirectory}）。
  *
- * <p>每条都带站台号（站台未知时省略），ActionBar 与聊天一样，乘客据此判断与自己有没有关系。本站终到与回库车单独成句，提醒勿上车。
+ * <p>每条都带站台号（站台待定时写“站台待定”，站台未知时省略），ActionBar 与聊天一样，乘客据此判断与自己有没有关系。本站终到与回库车单独成句，提醒勿上车。
  */
 final class PidsAnnouncementText {
 
@@ -50,7 +50,7 @@ final class PidsAnnouncementText {
     PidsRow row = announcement.row();
     TagResolver resolver =
         TagResolver.resolver(
-            Placeholder.component("platform", platform(row.platform())),
+            Placeholder.component("platform", platform(row)),
             Placeholder.component("line", line(row)),
             Placeholder.unparsed("destination", destination(row)),
             Placeholder.unparsed("station", stationName(announcement.station())),
@@ -84,8 +84,12 @@ final class PidsAnnouncementText {
     };
   }
 
-  private Component platform(String platform) {
-    if (platform == null || platform.isBlank() || UNKNOWN_PLATFORM.equals(platform)) {
+  private Component platform(PidsRow row) {
+    if (row.platformPending()) {
+      return MINI_MESSAGE.deserialize(text.apply("pids.announce.platform-pending"));
+    }
+    String platform = row.platform();
+    if (platform.isBlank() || UNKNOWN_PLATFORM.equals(platform)) {
       return Component.empty();
     }
     return MINI_MESSAGE.deserialize(

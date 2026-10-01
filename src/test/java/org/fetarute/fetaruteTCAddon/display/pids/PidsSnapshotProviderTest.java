@@ -200,7 +200,9 @@ class PidsSnapshotProviderTest {
         false,
         false,
         trainName,
-        trainName.isPresent() ? OptionalLong.of(45L) : OptionalLong.empty());
+        trainName.isPresent() ? OptionalLong.of(45L) : OptionalLong.empty(),
+        false,
+        List.of());
   }
 
   private static TimetableApi.Departure departure(
