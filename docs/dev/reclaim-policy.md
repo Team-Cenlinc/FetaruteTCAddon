@@ -12,7 +12,7 @@
 
 以上任一条件成立后，还要过**回库闸**（`ReclaimManager#setReturnGate`）：按表运行时装的是 `TimetableService#allowsReturn`，
 与表定回库票同一个判据——交路还有班次要跑的车不收（日志 `回收跳过: 交路还有班次要跑`），也不计入下面的滞留计时；
-交路已经断了（剩下的班次都过了 `timetable.assign-tolerance-seconds`，票都已作废）的车照常回收。
+交路已经断了（剩下的班次都过了 `timetable.assign-tolerance-seconds`，也没有一张票还在等它）的车照常回收。
 没有这道闸时，闲置超时、总量超限、方向供给过剩都能把正等着下一班的车送回车库，那一班就开了天窗。
 
 **正线折返点立即回收**：待命位置是正线区间路径点（`RouteTerminals#isMainlineTurnback`：`WaypointKind.INTERVAL`，例如 MT-1O_ShortR 终到的 `OFL:MLU:2:004`；
@@ -30,6 +30,15 @@
 背景：实服 WS 一辆车晚点到 CHT，下一班 2C 已过容差作废，交路里剩下的 2N 从 NTA 发车、它根本赶不过去；回库闸因"交路还有班次"一直不放，
 它在唯一的股道上等到 2N 也过期（约 20 分钟），后车全部等待放行、严重晚点 20 分钟。按表 WS 在 CHT 的每次停留都是 24 秒，问题只在运行时。
 
+**没有回库线路的车站同一条规则**（2026-10-02）：待命位置所在终点没有任何 RETURN 交路出发（查遍全部运营商，首站匹配与下文"RETURN 搜索范围"相同；
+结果按终点缓存 `ReclaimManager.RETURN_ROUTE_RECHECK_SECONDS` = 300 秒，避免每轮扫描都在主线程扫库），典型是原地折返的车站（NTA）。
+车在这样的站上只能接本交路的下一班，接不上就再也走不了，等闲置上限只会占着站台；两股道被两辆这样的车占满，在这里折返的线路全都进不来。
+只看**绑着交路**的车（`ReclaimManager#setDutyBound`，按表运行时装 `TimetableService#dutyBindingOf`）：没绑交路的车（例如重启后账本丢了）还可能接一张从这里始发的首班票，照旧等闲置上限。
+触发条件与闸同正线折返点（闲置满 15 秒、过正线回送闸），日志 `回收触发: 无回库线路的车站无后续班次`，处置是原地销毁（`RECLAIM_NO_ROUTE_DESTROY`，
+跳过记 `RECLAIM_NO_ROUTE_SKIP`，失败记 `RECLAIM_NO_ROUTE_DESTROY_FAILED`；乘客、交接、`stranded-destroy-seconds: 0` 三道闸相同）。
+背景：零点冷启动时两辆晚点约 4 分钟的 MT-3 到 NTA 时下一班已作废，先后困在 NTA 两股道上各 30 分钟（当时只有滞留兜底），
+SURC 没有越行线，WS-2 与 MT-3 全线停摆。续班票现在等本交路的车（见 `timetable.md`），这条规则是它之外的兜底。
+
 **交路已换车的车**（2026-09-30）：严重晚点、被从交路上换下来的车（见 `timetable.md` 交路换车）再也没有班可跑，
 闲置满 `MAINLINE_TURNBACK_MIN_IDLE_SECONDS` 就回收（`ReclaimManager#setRetiredVehicle`，按表运行时装 `TimetableService#retiredFromDuty`），
 日志 `回收触发: 交路已换车`，不占着站台等闲置上限。它没有交路，回库闸本来就放行。
@@ -38,7 +47,7 @@
 
 - 自由运行的交路、只扣车不出票（`timetable.spawn-enabled: false`）、不知道刚跑完哪条交路（缺 `FTA_ROUTE_ID`）、未启用按表运行：
   不放行，照旧走上面三条规则——接哪一班由间隔出票决定，没有交路上的对应关系可判；
-- 本交路的**下一班**已过了 `timetable.assign-tolerance-seconds`（它的票已作废）放行（`TIMETABLE_DUTY_NEXT_TRIP_MISSED`）：
+- 本交路的**下一班**已过了 `timetable.assign-tolerance-seconds`、它的票也不在了放行（`TIMETABLE_DUTY_NEXT_TRIP_MISSED`；续班票等本交路的车时不到期，见 `timetable.md`）：
   再下一次回到这个折返点发车要等一整个往返，停在正线上等那么久会一直挡着后车；站台上的车则照旧等到末班也作废；
 - 下一班还接得上时落到 `allowsReturn`：没绑交路（例如重启后账本丢了）、交路已跑完、剩下的班次全都作废时放行，否则不放行（`TIMETABLE_RETURN_DENIED`）。
 
@@ -56,8 +65,14 @@
 - **RETURN 搜索范围**：先在本运营商的线路里找，找不到再扩到全部运营商；候选 RETURN 的首站按站点 code、裸节点 id
   与 DYNAMIC 规范三种写法匹配。直通车停在外方终点时，靠这一步才找得到能带它回去的线路。
   站点 code 只和终点所在车站/车库的名字段比（`SURC:S:PPK:1` 的 `PPK`）：区间路径点 `PPK:RVS:1:001` 里的起讫站段不表示车停在 PPK。
-- **滞留销毁兜底**：仍然派不出 RETURN 票的待命车，从第一次判定该回收起计时，超过 `reclaim.stranded-destroy-seconds`
-  （默认 1800，`0` 关闭）走 `destroyTrainByName` 销毁，日志 `RECLAIM_STRANDED_DESTROY`（失败记 `RECLAIM_STRANDED_DESTROY_FAILED`）。
+- **没有回库线路就当场处理**：时刻表已经放行的立即回收（正线折返点、单股道车站、无回库线路的车站）或交路已换车的车，
+  查过全部 RETURN 交路、确实没有一条从这个终点出发时，不等滞留计时，原地销毁（正线折返点与单股道车站记 `RECLAIM_MAINLINE_DESTROY`，
+  其余记 `RECLAIM_NO_ROUTE_DESTROY`）：它不会再有班可跑。闲置超时、车辆超限、方向供需这些泛用回收不知道车还有没有班（自由运行、间隔发车），
+  没有回库线路时照常进下面的滞留计时。乘客、交接两道闸与 `stranded-destroy-seconds: 0`（只记滞留、不销毁）照旧。
+  "终点有没有回库线路"的查询遇到存储异常时按"有"处理、不缓存（`回收: 查询回库线路失败`），不会掐断整轮回收。
+- **滞留销毁兜底**：有回库交路却仍然派不出 RETURN 票（被拒、闭塞、运营商回溯不到、存储不可用）的待命车，从第一次判定该回收起计时，超过 `reclaim.stranded-destroy-seconds`
+  （默认 300，`0` 关闭；没有越行线的线路上一辆车占着终点股道就挡住全部后车，等不起半小时。**升级注意**：已有服务器的 `config.yml`
+  不会被改写，旧值 1800 仍然生效，需要手动改）走 `destroyTrainByName` 销毁，日志 `RECLAIM_STRANDED_DESTROY`（失败记 `RECLAIM_STRANDED_DESTROY_FAILED`）。
   **有乘客**（`reason=has-passengers`）或**有进行中的折返事务**（`reason=dispatch-attempt-in-progress`）的车不碰，记 `RECLAIM_STRANDED_SKIP`。
   一旦这辆车成功派到 RETURN 票，计时清零。
 - **挂起交接只告警**：进行中的折返事务（`LayoverRegistry.DispatchAttempt`）认领之后可能已经改动了占用（改名迁移 owner 等），只能由同一张票重试完成，
@@ -75,7 +90,7 @@ reclaim:
   max-idle-seconds: 300          # 待命超过多少秒触发回收
   max-active-trains: 50          # 压力模式阈值：全服活跃列车数超过它就每轮回收一辆闲置车
   check-interval-seconds: 60     # 检查周期
-  stranded-destroy-seconds: 1800 # 兜底：该回收却一直派不出 RETURN 票的待命车，滞留超过它就销毁；0 关闭（连同正线折返点原地销毁）
+  stranded-destroy-seconds: 300  # 兜底：有回库交路却一直派不出 RETURN 票的待命车，滞留超过它就销毁；0 关闭（连同没有回库线路时的原地销毁）
 ```
 
 `reclaim.max-active-trains` 是**出口侧**的压力阈值，与 `spawn.max-active-trains` 的入口侧准入不是一回事，两者互不替代。

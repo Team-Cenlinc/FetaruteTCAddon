@@ -41,6 +41,13 @@ final class DutyLedger {
   private final ConcurrentMap<String, String> displayNames = new ConcurrentHashMap<>();
 
   /**
+   * 列车键 → 最近一次记下的回库拒绝（交路与进度）。
+   *
+   * <p>回库闸在每个发车 tick、每轮回收扫描都会被问到；车在终点等下一班时答案不变，同车同状态只记一次。
+   */
+  private final ConcurrentMap<String, String> returnDenied = new ConcurrentHashMap<>();
+
+  /**
    * 一个空缺的交路。
    *
    * @param key 交路身份
@@ -319,7 +326,11 @@ final class DutyLedger {
   boolean allowsReturn(String key, String trainName) {
     TimetableService.DutyProgress current = progress.get(key);
     if (current == null || current.exhausted()) {
+      returnDenied.remove(key);
       return true;
+    }
+    if (current.describe().equals(returnDenied.put(key, current.describe()))) {
+      return false;
     }
     debugLogger.accept(
         "TIMETABLE_RETURN_DENIED train="
@@ -376,6 +387,7 @@ final class DutyLedger {
   void release(String key, String trainName, String reason) {
     retired.remove(key);
     displayNames.remove(key);
+    returnDenied.remove(key);
     bindings.remove(key);
     TimetableService.DutyProgress removed = progress.remove(key);
     if (removed != null) {
@@ -398,12 +410,14 @@ final class DutyLedger {
     bindings.keySet().retainAll(keep);
     retired.keySet().retainAll(keep);
     displayNames.keySet().retainAll(keep);
+    returnDenied.keySet().retainAll(keep);
   }
 
   /** 时刻表下架：归属于它的绑定、空缺与被解绑车的进度一起清掉。 */
   void dropOutside(Set<UUID> publishedTimetableIds, Set<String> releasedKeys) {
     for (String key : releasedKeys) {
       progress.remove(key);
+      returnDenied.remove(key);
     }
     bindings
         .entrySet()
@@ -420,5 +434,6 @@ final class DutyLedger {
     vacancies.clear();
     retired.clear();
     displayNames.clear();
+    returnDenied.clear();
   }
 }

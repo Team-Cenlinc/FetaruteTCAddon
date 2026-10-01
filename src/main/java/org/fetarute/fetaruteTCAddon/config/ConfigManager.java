@@ -1733,11 +1733,10 @@ public final class ConfigManager {
     }
   }
 
-  /** 车辆回收配置（ReclaimPolicy）。 */
   /**
-   * 闲置回收配置。
+   * 车辆回收配置（ReclaimPolicy）。
    *
-   * @param strandedDestroySeconds 待命车闲置超时后一直找不到可用 RETURN 线路（例如直通车滞留在外方终点）持续多久就销毁；0 关闭兜底
+   * @param strandedDestroySeconds 该回收、有回库交路却一直派不出 RETURN 票的待命车，滞留多久就销毁（确实没有回库交路的车当场处理）；0 关闭兜底
    */
   public record ReclaimSettings(
       boolean enabled,
@@ -1746,8 +1745,12 @@ public final class ConfigManager {
       long checkIntervalSeconds,
       long strandedDestroySeconds) {
 
-    /** 默认滞留 30 分钟后销毁：比闲置回收窗口长得多，给折返事务与晚到的回库票留足时间。 */
-    public static final long DEFAULT_STRANDED_DESTROY_SECONDS = 1800L;
+    /**
+     * 默认滞留 5 分钟后销毁。
+     *
+     * <p>没有越行线的线路上，一辆车占着终点股道就挡住同一方向的全部后车，等不起半小时。进行中的折返事务不碰，回库票等本交路的车不到期， 都不靠这个时长兜着。
+     */
+    public static final long DEFAULT_STRANDED_DESTROY_SECONDS = 300L;
 
     /** 不带滞留销毁阈值的构造，取默认值。 */
     public ReclaimSettings(
