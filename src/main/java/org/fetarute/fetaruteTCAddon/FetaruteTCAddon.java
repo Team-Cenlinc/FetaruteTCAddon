@@ -337,9 +337,6 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     this.localeManager.reload(configManager.current().locale());
     this.storageManager.apply(configManager.current());
-    if (etaService != null) {
-      etaService.attachStorageProvider(storageManager.provider().orElse(null));
-    }
     if (hudTemplateService != null) {
       hudTemplateService.reload();
     }
@@ -1157,9 +1154,6 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (layoverRegistry != null) {
       etaService.attachLayoverRegistry(layoverRegistry);
     }
-    if (storageManager != null && storageManager.isReady()) {
-      etaService.attachStorageProvider(storageManager.provider().orElse(null));
-    }
     // ETA 的等待只看运行时真实停车状态（信号、占用、授权、尾保等），扣多久顺延多久。
     etaService.attachDebugLogger(loggerManager::debug);
     if (runtimeDispatchService != null) {
@@ -1173,6 +1167,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 站牌行显示直通换线后的线路时，代码按主数据的写法（与公开 API、HUD 同一口径）。
     etaService.attachLineCanonicalizer(
         line -> stationDirectory == null ? line : stationDirectory.snapshot().canonicalLine(line));
+    // 站牌的终点站名查车站目录（内存），站台屏与站台广播在主线程高频取站牌，不能读库。
+    etaService.attachStationLookup(
+        id ->
+            stationDirectory == null ? Optional.empty() : stationDirectory.snapshot().station(id));
     // 走行参数（车种加减速、进站规则、默认速度、停站开销）与编表读同一组配置；每次估算现读，重载即生效。
     etaService.attachConfigSources(
         signNodeRegistry, () -> configManager == null ? null : configManager.current());

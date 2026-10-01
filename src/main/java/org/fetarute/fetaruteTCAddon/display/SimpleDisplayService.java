@@ -172,14 +172,6 @@ public final class SimpleDisplayService implements DisplayService {
   }
 
   @Override
-  public void clearStationCaches() {
-    bossBarHud.clearCaches();
-    actionBarHud.clearCaches();
-    scoreboardHud.clearCaches();
-    tripDialog.clearCaches();
-  }
-
-  @Override
   public Optional<TripDialogService> tripDialog() {
     return Optional.of(tripDialog);
   }

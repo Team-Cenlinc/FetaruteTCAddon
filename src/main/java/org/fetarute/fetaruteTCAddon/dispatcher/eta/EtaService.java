@@ -15,7 +15,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
-import org.fetarute.fetaruteTCAddon.company.model.Operator;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -59,7 +59,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
-import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
  * ETA 服务（唯一入口）。
@@ -73,7 +72,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *   <li>未发车票据：{@link SpawnManager}/{@link TicketAssigner} 的队列快照
  * </ul>
  *
- * <p>约束：EtaService 不做运行时采样；只读 Snapshot + Graph/Route/Occupancy 快照 + Cache。
+ * <p>约束：EtaService 不做运行时采样，也不读库；只读 Snapshot + Graph/Route/车站目录快照 + Cache（站牌由站台屏、站台广播在主线程高频查询）。
  *
  * <p>注意：站牌会合并未出票服务预测（见 {@link SpawnForecastSupport}）；若 SpawnMonitor 未运行或计划为空，站牌仍可能为空。
  *
@@ -164,7 +163,11 @@ public final class EtaService {
   private volatile SpawnManager spawnManager;
   private volatile java.util.function.Supplier<List<SpawnTicket>> pendingTicketSupplier;
   private volatile LayoverRegistry layoverRegistry;
-  private volatile StorageProvider storageProvider;
+
+  /** 车站 ID → 车站与所属运营商（内存目录）；站牌解析终点站用，不读库。 */
+  private volatile java.util.function.Function<UUID, Optional<StationDirectory.StationEntry>>
+      stationLookup = id -> Optional.empty();
+
   private volatile SignNodeRegistry signNodeRegistry;
 
   /** 当前配置；每次估算现读，{@code /fta reload} 之后立即生效。未接入时按默认加减速、不做进站限速、不加停站开销。 */
@@ -265,10 +268,14 @@ public final class EtaService {
     this.layoverRegistry = layoverRegistry;
   }
 
-  /** 绑定 StorageProvider，用于站牌终点站解析与名称辅助。 */
-  public void attachStorageProvider(StorageProvider storageProvider) {
-    this.storageProvider = storageProvider;
-    spawnTrainConfigs.invalidateAll();
+  /**
+   * 接入车站目录：站牌解析终点站（车站 → 站码与运营商）时查内存目录。站牌由站台屏、站台广播在主线程高频查询，不能读库。
+   *
+   * @param stationLookup 车站 ID → 车站与所属运营商；传 null 表示断开（终点站只按节点解析）
+   */
+  public void attachStationLookup(
+      java.util.function.Function<UUID, Optional<StationDirectory.StationEntry>> stationLookup) {
+    this.stationLookup = stationLookup == null ? id -> Optional.empty() : stationLookup;
   }
 
   /**
@@ -391,20 +398,16 @@ public final class EtaService {
       boardStats.recordCacheHit();
       return cached.get();
     }
-    long readsBefore = boardStats.storageReadsSoFar();
     long startNanos = System.nanoTime();
     BoardResult result = computeBoard(stationId, lineId, horizon, now);
     long elapsedNanos = System.nanoTime() - startNanos;
-    long storageReads = boardStats.storageReadsSoFar() - readsBefore;
-    boardStats.recordCompute(elapsedNanos, storageReads);
+    boardStats.recordCompute(elapsedNanos);
     if (elapsedNanos > SLOW_BOARD_NANOS) {
       debugLogger.accept(
           "ETA_BOARD_SLOW station="
               + stationId
               + " ms="
               + elapsedNanos / 1_000_000L
-              + " storageReads="
-              + storageReads
               + " rows="
               + result.rows().size());
     }
@@ -412,7 +415,7 @@ public final class EtaService {
     return result;
   }
 
-  /** 返回站牌查询的统计快照：缓存命中、重算次数、耗时与重算期间的存储读取次数。 */
+  /** 返回站牌查询的统计快照：缓存命中、重算次数与重算耗时。 */
   public EtaBoardStats.Snapshot boardStatsSnapshot() {
     return boardStats.snapshot();
   }
@@ -1020,9 +1023,7 @@ public final class EtaService {
     Instant cutoff = now.plus(window);
     List<BoardRowEntry> rows = new ArrayList<>();
     Map<UUID, TerminalInfo> terminalCache = new HashMap<>();
-    TerminalResolveContext terminalContext =
-        new TerminalResolveContext(
-            storageProvider, new HashMap<>(), new HashMap<>(), new HashMap<>());
+    TerminalResolveContext terminalContext = new TerminalResolveContext(new HashMap<>());
     Set<UUID> returnTicketSeen = new HashSet<>();
 
     for (var entry : snapshotStore.snapshot().entrySet()) {
@@ -2001,28 +2002,15 @@ public final class EtaService {
     if (stationId == null || context == null) {
       return Optional.empty();
     }
-    Map<UUID, Optional<DestinationInfo>> stationCache = context.stationCache();
-    if (stationCache.containsKey(stationId)) {
-      return stationCache.get(stationId);
-    }
-    StorageProvider provider = context.provider();
-    Optional<DestinationInfo> result = Optional.empty();
-    if (provider != null) {
-      boardStats.countStorageRead();
-      Optional<Station> stationOpt = provider.stations().findById(stationId);
-      if (stationOpt.isPresent()) {
-        result = resolveStationDestination(stationOpt.get(), context);
-      }
-    }
-    stationCache.put(stationId, result);
-    return result;
+    return context
+        .stationCache()
+        .computeIfAbsent(
+            stationId, id -> stationLookup.apply(id).flatMap(this::resolveStationDestination));
   }
 
-  private Optional<DestinationInfo> resolveStationDestination(
-      Station station, TerminalResolveContext context) {
-    if (station == null) {
-      return Optional.empty();
-    }
+  /** 车站绑定了图节点时按节点解析（与运行时同一口径）；否则用运营商代码 + 站码。 */
+  private Optional<DestinationInfo> resolveStationDestination(StationDirectory.StationEntry entry) {
+    Station station = entry.station();
     if (station.graphNodeId().isPresent()) {
       Optional<DestinationInfo> infoOpt =
           resolveStationDestination(NodeId.of(station.graphNodeId().get()));
@@ -2031,40 +2019,13 @@ public final class EtaService {
       }
     }
     String stationCode = station.code();
-    if (stationCode == null || stationCode.isBlank() || context == null) {
+    String operator = entry.operator().code();
+    if (stationCode == null || stationCode.isBlank() || operator == null || operator.isBlank()) {
       return Optional.empty();
     }
-    Optional<String> operatorOpt = resolveOperatorCode(station.operatorId(), context);
-    if (operatorOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    String operator = operatorOpt.get();
-    if (operator.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(new DestinationInfo(stationCode, Optional.of(operator + ":" + stationCode)));
-  }
-
-  private Optional<String> resolveOperatorCode(UUID operatorId, TerminalResolveContext context) {
-    if (operatorId == null || context == null) {
-      return Optional.empty();
-    }
-    Map<UUID, Optional<String>> operatorCache = context.operatorCache();
-    if (operatorCache.containsKey(operatorId)) {
-      return operatorCache.get(operatorId);
-    }
-    StorageProvider provider = context.provider();
-    Optional<String> result = Optional.empty();
-    if (provider != null) {
-      boardStats.countStorageRead();
-      result = provider.operators().findById(operatorId).map(Operator::code);
-      if (result.isPresent() && result.get() != null) {
-        String trimmed = result.get().trim();
-        result = trimmed.isBlank() ? Optional.empty() : Optional.of(trimmed);
-      }
-    }
-    operatorCache.put(operatorId, result);
-    return result;
+    String operatorCode = operator.trim();
+    return Optional.of(
+        new DestinationInfo(stationCode, Optional.of(operatorCode + ":" + stationCode)));
   }
 
   private boolean isReturnRoute(UUID routeUuid, TerminalResolveContext context) {
@@ -2073,23 +2034,13 @@ public final class EtaService {
         .orElse(false);
   }
 
+  /** 交路的运营类型，取自交路缓存。 */
   private Optional<RouteOperationType> resolveOperationType(
       UUID routeUuid, TerminalResolveContext context) {
     if (routeUuid == null || context == null) {
       return Optional.empty();
     }
-    Map<UUID, Optional<RouteOperationType>> cache = context.routeOperationCache();
-    if (cache.containsKey(routeUuid)) {
-      return cache.get(routeUuid);
-    }
-    StorageProvider provider = context.provider();
-    Optional<RouteOperationType> result = Optional.empty();
-    if (provider != null) {
-      boardStats.countStorageRead();
-      result = provider.routes().findById(routeUuid).map(r -> r.operationType());
-    }
-    cache.put(routeUuid, result);
-    return result;
+    return routeDefinitions.findRecord(routeUuid).map(record -> record.route().operationType());
   }
 
   private Optional<String> resolveDestinationId(RouteDefinition route) {
@@ -2145,15 +2096,10 @@ public final class EtaService {
     }
   }
 
-  private record TerminalResolveContext(
-      StorageProvider provider,
-      Map<UUID, Optional<DestinationInfo>> stationCache,
-      Map<UUID, Optional<String>> operatorCache,
-      Map<UUID, Optional<RouteOperationType>> routeOperationCache) {
+  /** 一次站牌重算内共用的终点解析结果。 */
+  private record TerminalResolveContext(Map<UUID, Optional<DestinationInfo>> stationCache) {
     private TerminalResolveContext {
       stationCache = stationCache == null ? new HashMap<>() : stationCache;
-      operatorCache = operatorCache == null ? new HashMap<>() : operatorCache;
-      routeOperationCache = routeOperationCache == null ? new HashMap<>() : routeOperationCache;
     }
   }
 
@@ -2196,21 +2142,15 @@ public final class EtaService {
   }
 
   private Optional<Route> readRoute(UUID routeUuid) {
-    StorageProvider provider = this.storageProvider;
-    if (provider == null) {
-      return Optional.empty();
-    }
-    boardStats.countStorageRead();
-    return provider.routes().findById(routeUuid);
+    return routeDefinitions.findRecord(routeUuid).map(RouteDefinitionCache.RouteRecord::route);
   }
 
+  /** 交路缓存里与 waypoints 对齐的停靠表：首项就是出车（CRET）站，与运行时判断同一份数据。 */
   private List<RouteStop> readRouteStops(UUID routeUuid) {
-    StorageProvider provider = this.storageProvider;
-    if (provider == null) {
-      return List.of();
-    }
-    boardStats.countStorageRead();
-    return provider.routeStops().listByRoute(routeUuid);
+    return routeDefinitions
+        .findById(routeUuid)
+        .map(definition -> routeDefinitions.listStops(definition.id()))
+        .orElse(List.of());
   }
 
   private DepotSpawnPattern.SignRead readDepotSign(NodeId depotId) {

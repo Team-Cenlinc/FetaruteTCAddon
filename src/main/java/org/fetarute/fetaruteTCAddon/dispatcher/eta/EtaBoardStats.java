@@ -6,12 +6,9 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.LongAdder;
 
 /**
- * 站牌查询（{@link EtaService#getBoard}）的累计统计：缓存命中、重算次数、重算耗时，以及重算期间的存储读取次数。
+ * 站牌查询（{@link EtaService#getBoard}）的累计统计：缓存命中、重算次数与重算耗时。
  *
- * <p>用途是定位站牌与站台屏的服务端开销。一次重算会遍历全网列车快照与待发票据，并经由 {@code StorageProvider}
- * 读取车站、运营商、路线与停靠表；这些读取发生在调用线程上（通常是主线程）。
- *
- * <p>存储读取按“重算前后的累计计数差”归属到该次重算。若其他线程在同一时段也做了计数，会被一并计入；目前所有调用方都在主线程，误差可忽略。
+ * <p>用途是定位站牌与站台屏的服务端开销。一次重算会遍历全网列车快照与待发票据，在调用线程上（通常是主线程）执行； 车站、交路等名称只查内存目录，不读库。
  */
 public final class EtaBoardStats {
 
@@ -19,9 +16,6 @@ public final class EtaBoardStats {
   private final LongAdder computes = new LongAdder();
   private final LongAdder totalComputeNanos = new LongAdder();
   private final AtomicLong maxComputeNanos = new AtomicLong();
-  private final LongAdder totalStorageReads = new LongAdder();
-  private final AtomicLong maxStorageReads = new AtomicLong();
-  private final AtomicLong storageReadCounter = new AtomicLong();
   private volatile Instant since;
 
   /**
@@ -42,26 +36,12 @@ public final class EtaBoardStats {
    * 记录一次重算。
    *
    * @param elapsedNanos 重算耗时（纳秒）
-   * @param storageReads 重算期间的存储读取次数
    */
-  public void recordCompute(long elapsedNanos, long storageReads) {
+  public void recordCompute(long elapsedNanos) {
     long nanos = Math.max(0L, elapsedNanos);
-    long reads = Math.max(0L, storageReads);
     computes.increment();
     totalComputeNanos.add(nanos);
     maxComputeNanos.accumulateAndGet(nanos, Math::max);
-    totalStorageReads.add(reads);
-    maxStorageReads.accumulateAndGet(reads, Math::max);
-  }
-
-  /** 在每一次经由 {@code StorageProvider} 的读取处调用，供重算前后取差。 */
-  public void countStorageRead() {
-    storageReadCounter.incrementAndGet();
-  }
-
-  /** 返回自创建以来的存储读取累计次数（不受 {@link #reset} 影响，只用于取差）。 */
-  public long storageReadsSoFar() {
-    return storageReadCounter.get();
   }
 
   /**
@@ -75,21 +55,13 @@ public final class EtaBoardStats {
     computes.reset();
     totalComputeNanos.reset();
     maxComputeNanos.set(0L);
-    totalStorageReads.reset();
-    maxStorageReads.set(0L);
     since = now;
   }
 
   /** 返回当前统计的不可变快照。 */
   public Snapshot snapshot() {
     return new Snapshot(
-        since,
-        cacheHits.sum(),
-        computes.sum(),
-        totalComputeNanos.sum(),
-        maxComputeNanos.get(),
-        totalStorageReads.sum(),
-        maxStorageReads.get());
+        since, cacheHits.sum(), computes.sum(), totalComputeNanos.sum(), maxComputeNanos.get());
   }
 
   /**
@@ -100,17 +72,9 @@ public final class EtaBoardStats {
    * @param computes 重算次数
    * @param totalComputeNanos 重算总耗时（纳秒）
    * @param maxComputeNanos 单次重算最长耗时（纳秒）
-   * @param totalStorageReads 重算期间的存储读取总次数
-   * @param maxStorageReads 单次重算最多的存储读取次数
    */
   public record Snapshot(
-      Instant since,
-      long cacheHits,
-      long computes,
-      long totalComputeNanos,
-      long maxComputeNanos,
-      long totalStorageReads,
-      long maxStorageReads) {
+      Instant since, long cacheHits, long computes, long totalComputeNanos, long maxComputeNanos) {
 
     /** 保证起算时刻不为 {@code null}。 */
     public Snapshot {
@@ -136,11 +100,6 @@ public final class EtaBoardStats {
     /** 单次重算最长耗时（毫秒）。 */
     public double maxComputeMillis() {
       return maxComputeNanos / 1_000_000.0;
-    }
-
-    /** 平均每次重算的存储读取次数；没有重算时为 0。 */
-    public double averageStorageReads() {
-      return computes == 0L ? 0.0 : (double) totalStorageReads / computes;
     }
   }
 }

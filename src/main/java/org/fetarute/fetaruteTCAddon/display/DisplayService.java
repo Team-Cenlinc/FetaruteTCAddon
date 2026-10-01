@@ -16,11 +16,6 @@ public interface DisplayService {
   /** 停止展示层（取消任务并释放资源）。 */
   void stop();
 
-  /** 清理站点/公司等缓存，以便下次 tick 重新加载数据库数据。 */
-  default void clearStationCaches() {
-    // 默认空实现
-  }
-
   /** 后续站点对话框；展示层未启用时为空。 */
   default Optional<TripDialogService> tripDialog() {
     return Optional.empty();

@@ -16,7 +16,6 @@ class EtaBoardStatsTest {
     assertEquals(0L, snapshot.calls());
     assertEquals(0.0, snapshot.cacheHitRate());
     assertEquals(0.0, snapshot.averageComputeMillis());
-    assertEquals(0.0, snapshot.averageStorageReads());
     assertEquals(T0, snapshot.since());
   }
 
@@ -24,8 +23,8 @@ class EtaBoardStatsTest {
   void aggregatesComputesAndCacheHits() {
     EtaBoardStats stats = new EtaBoardStats(T0);
 
-    stats.recordCompute(2_000_000L, 4);
-    stats.recordCompute(6_000_000L, 10);
+    stats.recordCompute(2_000_000L);
+    stats.recordCompute(6_000_000L);
     stats.recordCacheHit();
     stats.recordCacheHit();
 
@@ -35,9 +34,6 @@ class EtaBoardStatsTest {
     assertEquals(0.5, snapshot.cacheHitRate());
     assertEquals(4.0, snapshot.averageComputeMillis());
     assertEquals(6.0, snapshot.maxComputeMillis());
-    assertEquals(14L, snapshot.totalStorageReads());
-    assertEquals(7.0, snapshot.averageStorageReads());
-    assertEquals(10L, snapshot.maxStorageReads());
   }
 
   @Test
@@ -45,21 +41,17 @@ class EtaBoardStatsTest {
   void negativeInputsCountAsZero() {
     EtaBoardStats stats = new EtaBoardStats(T0);
 
-    stats.recordCompute(-5L, -3L);
+    stats.recordCompute(-5L);
 
     EtaBoardStats.Snapshot snapshot = stats.snapshot();
     assertEquals(1L, snapshot.computes());
     assertEquals(0L, snapshot.totalComputeNanos());
-    assertEquals(0L, snapshot.totalStorageReads());
   }
 
   @Test
-  // 存储读取计数是累计值，只用来取差；清零统计不能让它倒退，否则清零瞬间正在进行的重算会算出负数。
-  void resetClearsStatsButKeepsTheStorageReadCounter() {
+  void resetClearsStatsAndRestartsTheWindow() {
     EtaBoardStats stats = new EtaBoardStats(T0);
-    stats.countStorageRead();
-    stats.countStorageRead();
-    stats.recordCompute(1_000_000L, 2);
+    stats.recordCompute(1_000_000L);
     Instant later = T0.plusSeconds(60);
 
     stats.reset(later);
@@ -67,8 +59,6 @@ class EtaBoardStatsTest {
     EtaBoardStats.Snapshot snapshot = stats.snapshot();
     assertEquals(0L, snapshot.calls());
     assertEquals(0L, snapshot.maxComputeNanos());
-    assertEquals(0L, snapshot.maxStorageReads());
     assertEquals(later, snapshot.since());
-    assertEquals(2L, stats.storageReadsSoFar());
   }
 }

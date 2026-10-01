@@ -127,6 +127,7 @@ class TrainHudThroughServiceTest {
     assertEquals("DS", values.get("through_line_code"));
     assertEquals("平坪口", values.get("through_station"));
     assertEquals("PPK", values.get("through_station_code"));
+    assertEquals("SURC", values.get("company_code"), "公司查车站目录，不读库");
     assertFalse(context.outOfService());
   }
 

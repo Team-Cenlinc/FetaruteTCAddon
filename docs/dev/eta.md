@@ -130,15 +130,18 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
 ## 站牌查询统计（`/fta eta stats`）
 站牌查询（`EtaService#getBoard`）在主线程上同步执行，PIDS 上线后调用量会随屏幕数增长，因此先计量再决定优化方向。
 
-- `/fta eta stats`：自上次清零以来的调用次数、缓存命中率、重算次数、重算平均/最长耗时、重算期间的存储读取（平均/最多）。
+站牌计算不读库：终点站名查车站目录（`StationDirectory`，经 `attachStationLookup` 接入），交路运营类型、交路实体与停靠表查交路缓存
+（`RouteDefinitionCache#findRecord/findById/listStops`）。两份缓存随改库命令刷新（车站、运营商改库后 `refreshStationDirectory`，交路改库后刷新交路缓存）。
+剩下的只有 CPU：遍历全网列车快照与待发票据、估算走行。整段搬到异步线程还不行——待发票据队列与出车预测读的是主线程在改的普通集合，
+车库牌子要在主线程读方块；要异步需先给发车管理器发布只读快照。
+
+- `/fta eta stats`：自上次清零以来的调用次数、缓存命中率、重算次数、重算平均/最长耗时。
 - `/fta eta stats reset`：清零统计，起算时刻改为现在；权限同其它 ETA 诊断命令（`fetarute.eta`）。
 - 缓存窗口内的重复查询记为命中，不计耗时；只有真正执行 `computeBoard` 的调用记为重算。
-- 存储读取按调用点计数：车站、运营商、交路运营类型（同一次重算内按 UUID 去重），以及未发车票据推断车种时的交路与停靠表读取。
-  车种推断按交路跨调用缓存（见 `docs/dev/train-config.md`），只在缓存未命中或过期时读库，读取次数不随票据数增长。
-- 单次重算超过 5 ms 时，在 `debug.enabled=true` 下输出 `ETA_BOARD_SLOW station=… ms=… storageReads=… rows=…`，便于把慢查询对上具体车站。
+- 单次重算超过 5 ms 时，在 `debug.enabled=true` 下输出 `ETA_BOARD_SLOW station=… ms=… rows=…`，便于把慢查询对上具体车站。
 - 统计只在内存中累积：`/fta reload` 不清零，插件重启后从零开始。
 
-实测建议：高峰时段先 `reset`，运行 10~15 分钟后查看。稳态下剩余的读取来自终点名称与交路运营类型解析，单次重算内去重，次数与经过本站的交路数相当；若平均读取次数仍随站牌行数增长，说明还有未缓存的读库路径。
+实测建议：高峰时段先 `reset`，运行 10~15 分钟后查看平均与最长重算耗时；若明显影响 TPS，再考虑把计算挪到异步线程。
 
 ## 站牌为空的常见原因
 `/fta eta board` 会合并三类来源：运行中列车快照 + 已生成但未发车的票据 + 未出票服务预测。出现 “rows=0” 常见原因如下：

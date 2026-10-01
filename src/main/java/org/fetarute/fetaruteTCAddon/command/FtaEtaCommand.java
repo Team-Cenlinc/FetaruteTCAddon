@@ -216,7 +216,7 @@ public final class FtaEtaCommand {
         locale.component("command.eta.help.hover-stats"));
   }
 
-  /** 输出站牌查询统计：缓存命中、重算耗时与重算期间的存储读取次数，用于定位站牌与站台屏的服务端开销。 */
+  /** 输出站牌查询统计：缓存命中与重算耗时，用于定位站牌与站台屏的服务端开销。 */
   private void showBoardStats(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     EtaService service = plugin.getEtaService();
@@ -252,16 +252,6 @@ public final class FtaEtaCommand {
                 String.format(Locale.ROOT, "%.1f", stats.averageComputeMillis()),
                 "max_ms",
                 String.format(Locale.ROOT, "%.1f", stats.maxComputeMillis()))));
-    sender.sendMessage(
-        locale.component(
-            "command.eta.stats.storage",
-            Map.of(
-                "reads",
-                String.valueOf(stats.totalStorageReads()),
-                "avg_reads",
-                String.format(Locale.ROOT, "%.1f", stats.averageStorageReads()),
-                "max_reads",
-                String.valueOf(stats.maxStorageReads()))));
     sender.sendMessage(
         Component.text("  ")
             .append(

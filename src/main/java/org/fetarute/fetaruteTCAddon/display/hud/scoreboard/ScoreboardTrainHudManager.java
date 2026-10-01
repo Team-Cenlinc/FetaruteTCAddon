@@ -184,16 +184,10 @@ public final class ScoreboardTrainHudManager implements Listener {
     progressTracker.clear();
     stateTracker.clear();
     templateCache.clear();
-    contextResolver.clearCaches();
     playerStates.clear();
     windowStates.clear();
     trainFrames.clear();
     debugLogger.accept("ScoreboardTrainHudManager shutdown");
-  }
-
-  /** 清理站点/公司等缓存，下次 tick 时重新从存储加载。 */
-  public void clearCaches() {
-    contextResolver.clearCaches();
   }
 
   @EventHandler

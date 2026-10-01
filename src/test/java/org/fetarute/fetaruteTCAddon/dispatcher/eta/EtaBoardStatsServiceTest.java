@@ -2,10 +2,10 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.atLeastOnce;
 import static org.mockito.Mockito.mock;
-import static org.mockito.Mockito.mockingDetails;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Duration;
@@ -17,12 +17,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -39,10 +40,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
-import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 
-/** 站牌查询统计：缓存命中与重算分开计数，重算期间的存储读取与实际发生的读取一致。 */
+/** 站牌查询统计：缓存命中与重算分开计数；站牌只查内存缓存。 */
 class EtaBoardStatsServiceTest {
 
   private static final NodeId AAA = NodeId.of("SURN:S:AAA:1");
@@ -73,18 +73,14 @@ class EtaBoardStatsServiceTest {
   }
 
   @Test
-  // 统计里的存储读取必须等于真实打到仓库上的调用次数：少计会掩盖热点，多计会误导优化方向。
-  void storageReadsMatchActualRepositoryCalls() {
+  // 站牌由站台屏与站台广播在主线程高频查询：运营类型、终点等都查内存缓存，EtaService 不再接触存储。
+  void boardResolvesRouteFactsFromTheRouteCache() {
     Fixture fixture = new Fixture();
 
     BoardResult board = fixture.service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10));
 
     assertFalse(board.rows().isEmpty(), "前置：站牌应有一行，重算才会解析终点");
-    long actualCalls = mockingDetails(fixture.routeRepository).getInvocations().size();
-    EtaBoardStats.Snapshot stats = fixture.service.boardStatsSnapshot();
-    assertTrue(actualCalls > 0, "前置：重算应读取过路线");
-    assertEquals(actualCalls, stats.totalStorageReads());
-    assertEquals(actualCalls, stats.maxStorageReads());
+    verify(fixture.routes, atLeastOnce()).findRecord(fixture.routeUuid);
   }
 
   @Test
@@ -97,17 +93,16 @@ class EtaBoardStatsServiceTest {
 
     EtaBoardStats.Snapshot stats = fixture.service.boardStatsSnapshot();
     assertEquals(0L, stats.calls());
-    assertEquals(0L, stats.totalStorageReads());
     assertFalse(stats.since().isBefore(before));
   }
 
-  /** L1 交路 AAA → BBB → CCC，列车停在 AAA；存储里只有这条运营交路。 */
+  /** L1 交路 AAA → BBB → CCC，列车停在 AAA；交路缓存里只有这条运营交路。 */
   private static final class Fixture {
-    private final RouteRepository routeRepository = mock(RouteRepository.class);
+    private final UUID routeUuid = UUID.randomUUID();
+    private final RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
     private final EtaService service;
 
     private Fixture() {
-      UUID routeUuid = UUID.randomUUID();
       UUID worldId = UUID.randomUUID();
       RouteDefinition route =
           new RouteDefinition(
@@ -119,7 +114,6 @@ class EtaBoardStatsServiceTest {
               stop(routeUuid, 0, AAA, RouteStopPassType.STOP),
               stop(routeUuid, 1, BBB, RouteStopPassType.STOP),
               stop(routeUuid, 2, CCC, RouteStopPassType.TERMINATE));
-      RouteDefinitionCache routes = mock(RouteDefinitionCache.class);
       when(routes.findById(routeUuid)).thenReturn(Optional.of(route));
       when(routes.listStops(any())).thenReturn(stops);
 
@@ -146,27 +140,27 @@ class EtaBoardStatsServiceTest {
               Optional.of(SignalAspect.PROCEED),
               Optional.empty()));
 
-      StorageProvider provider = mock(StorageProvider.class);
-      when(provider.routes()).thenReturn(routeRepository);
-      when(routeRepository.findById(routeUuid))
+      when(routes.findRecord(routeUuid))
           .thenReturn(
               Optional.of(
-                  new Route(
-                      routeUuid,
-                      "R1",
-                      UUID.randomUUID(),
-                      "Local",
-                      Optional.empty(),
-                      RoutePatternType.LOCAL,
-                      RouteOperationType.OPERATION,
-                      Optional.empty(),
-                      Optional.empty(),
-                      Map.of(),
-                      Instant.now(),
-                      Instant.now())));
+                  new RouteDefinitionCache.RouteRecord(
+                      mock(Operator.class),
+                      mock(Line.class),
+                      new Route(
+                          routeUuid,
+                          "R1",
+                          UUID.randomUUID(),
+                          "Local",
+                          Optional.empty(),
+                          RoutePatternType.LOCAL,
+                          RouteOperationType.OPERATION,
+                          Optional.empty(),
+                          Optional.empty(),
+                          Map.of(),
+                          Instant.now(),
+                          Instant.now()))));
 
       service = new EtaService(snapshots, graphs, routes);
-      service.attachStorageProvider(provider);
     }
   }
 

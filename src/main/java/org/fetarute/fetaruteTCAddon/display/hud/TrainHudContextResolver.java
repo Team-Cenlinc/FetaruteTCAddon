@@ -34,13 +34,11 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
-import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaTarget;
@@ -67,7 +65,6 @@ import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext.Destinations;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext.StationDisplay;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.HudWaypointLabel;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
-import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -95,13 +92,6 @@ public final class TrainHudContextResolver {
   private final HudTemplateService templateService;
   private final Consumer<String> debugLogger;
 
-  private final Map<String, StationDisplay> stationByKey = new HashMap<>();
-  private final Map<UUID, StationDisplay> stationById = new HashMap<>();
-  private final Map<UUID, Optional<NodeId>> stationNodeById = new HashMap<>();
-  private boolean stationCacheLoaded = false;
-  private final Map<String, CompanyDisplay> companyByOperatorCode = new HashMap<>();
-  private boolean companyCacheLoaded = false;
-  private final Map<UUID, Optional<RouteOperationType>> routeOperationById = new HashMap<>();
   private final Map<String, Map<RoutePatternType, String>> patternTextByLocale = new HashMap<>();
   private final Map<String, EtaStatusTemplates> etaStatusByLocale = new HashMap<>();
 
@@ -445,18 +435,6 @@ public final class TrainHudContextResolver {
               stopIndex == lastStopIndex));
     }
     return new UpcomingStops(List.copyOf(upcoming), total);
-  }
-
-  public void clearCaches() {
-    stationByKey.clear();
-    stationById.clear();
-    stationNodeById.clear();
-    stationCacheLoaded = false;
-    companyByOperatorCode.clear();
-    companyCacheLoaded = false;
-    routeOperationById.clear();
-    patternTextByLocale.clear();
-    etaStatusByLocale.clear();
   }
 
   /** 根据上下文生成模板占位符键值。 */
@@ -1487,72 +1465,44 @@ public final class TrainHudContextResolver {
     return StationDisplay.of(label, "-", "-");
   }
 
+  /** 运营商代码所属公司，查车站目录（与车站、线路查找同一套运营商代码口径）。 */
   private CompanyDisplay resolveCompanyDisplay(String operatorCode) {
     if (operatorCode == null || operatorCode.isBlank()) {
       return CompanyDisplay.empty();
     }
-    ensureCompanyCache();
-    CompanyDisplay cached = companyByOperatorCode.get(operatorCode.trim().toLowerCase(Locale.ROOT));
-    if (cached != null) {
-      return cached;
-    }
-    return CompanyDisplay.empty();
+    return directory()
+        .flatMap(snapshot -> snapshot.companyOfOperator(operatorCode))
+        .map(CompanyDisplay::fromCompany)
+        .orElse(CompanyDisplay.empty());
+  }
+
+  /**
+   * 车站目录的当前快照。HUD 每 tick 为每位乘客解析上下文，车站、运营商、公司都查这份内存目录，不读库； 改库命令会刷新目录（{@code
+   * FetaruteTCAddon#refreshStationDirectory}）。
+   */
+  private Optional<StationDirectory.Snapshot> directory() {
+    return plugin.getStationDirectory().map(StationDirectory::snapshot);
   }
 
   private StationDisplay resolveStationDisplay(UUID stationId) {
     if (stationId == null) {
       return StationDisplay.empty();
     }
-    ensureStationCache();
-    StationDisplay cached = stationById.get(stationId);
-    if (cached != null) {
-      return cached;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return StationDisplay.empty();
-    }
-    StorageProvider provider = providerOpt.get();
-    Optional<Station> stationOpt = provider.stations().findById(stationId);
-    if (stationOpt.isEmpty()) {
-      return StationDisplay.empty();
-    }
-    StationDisplay display = StationDisplay.fromStation(stationOpt.get());
-    Optional<NodeId> nodeId =
-        stationOpt.get().graphNodeId().filter(id -> !id.isBlank()).map(NodeId::of);
-    stationById.put(stationId, display);
-    stationNodeById.put(stationId, nodeId);
-    String key =
-        stationKey(resolveOperatorCode(stationOpt.get().operatorId()).orElse(""), display.code());
-    if (!key.isBlank()) {
-      stationByKey.putIfAbsent(key, display);
-    }
-    return display;
+    return directory()
+        .flatMap(snapshot -> snapshot.station(stationId))
+        .map(entry -> StationDisplay.fromStation(entry.station()))
+        .orElse(StationDisplay.empty());
   }
 
-  /**
-   * 按运营商代码 + 站码找车站。
-   *
-   * <p>车站目录可用时走目录（与公开 API 同一个索引、同一套运营商代码口径，两边不会给出不同的车站）； 目录尚未就绪时退回本地缓存（同样先到先得）。
-   */
+  /** 按运营商代码 + 站码找车站：与公开 API 同一个索引、同一套运营商代码口径，两边不会给出不同的车站。 */
   private StationDisplay resolveStationDisplay(StationKey key) {
     if (key == null) {
       return StationDisplay.empty();
     }
-    Optional<StationDisplay> fromDirectory =
-        plugin
-            .getStationDirectory()
-            .flatMap(directory -> directory.snapshot().findStation(key.operator(), key.station()))
-            .map(entry -> StationDisplay.fromStation(entry.station()));
-    if (fromDirectory.isPresent()) {
-      return fromDirectory.get();
-    }
-    ensureStationCache();
-    StationDisplay cached = stationByKey.get(stationKey(key.operator(), key.station()));
-    if (cached != null) {
-      return cached;
-    }
-    return StationDisplay.empty();
+    return directory()
+        .flatMap(snapshot -> snapshot.findStation(key.operator(), key.station()))
+        .map(entry -> StationDisplay.fromStation(entry.station()))
+        .orElse(StationDisplay.empty());
   }
 
   private Optional<StationKey> resolveStationKey(NodeId nodeId) {
@@ -1615,120 +1565,11 @@ public final class TrainHudContextResolver {
     if (stationId == null) {
       return Optional.empty();
     }
-    ensureStationCache();
-    Optional<NodeId> cached = stationNodeById.get(stationId);
-    if (cached != null) {
-      return cached;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    StorageProvider provider = providerOpt.get();
-    Optional<Station> stationOpt = provider.stations().findById(stationId);
-    if (stationOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    Optional<NodeId> nodeId =
-        stationOpt.get().graphNodeId().filter(id -> !id.isBlank()).map(NodeId::of);
-    stationNodeById.put(stationId, nodeId);
-    return nodeId;
-  }
-
-  private void ensureStationCache() {
-    if (stationCacheLoaded) {
-      return;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return;
-    }
-    StorageProvider provider = providerOpt.get();
-    try {
-      for (Company company : provider.companies().listAll()) {
-        if (company == null) {
-          continue;
-        }
-        for (Operator operator : provider.operators().listByCompany(company.id())) {
-          if (operator == null) {
-            continue;
-          }
-          for (Station station : provider.stations().listByOperator(operator.id())) {
-            if (station == null) {
-              continue;
-            }
-            StationDisplay display = StationDisplay.fromStation(station);
-            Optional<NodeId> nodeId =
-                station.graphNodeId().filter(id -> !id.isBlank()).map(NodeId::of);
-            stationById.put(station.id(), display);
-            stationNodeById.put(station.id(), nodeId);
-            String key = stationKey(operator.code(), station.code());
-            if (!key.isBlank()) {
-              // 跨公司同名运营商时先到先得，与车站目录、公司显示同一规则。
-              stationByKey.putIfAbsent(key, display);
-            }
-          }
-        }
-      }
-      stationCacheLoaded = true;
-    } catch (Exception ex) {
-      debugLogger.accept("HUD station cache load failed: " + ex.getMessage());
-    }
-  }
-
-  private void ensureCompanyCache() {
-    if (companyCacheLoaded) {
-      return;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return;
-    }
-    StorageProvider provider = providerOpt.get();
-    try {
-      for (Company company : provider.companies().listAll()) {
-        if (company == null) {
-          continue;
-        }
-        CompanyDisplay display = CompanyDisplay.fromCompany(company);
-        for (Operator operator : provider.operators().listByCompany(company.id())) {
-          if (operator == null || operator.code() == null || operator.code().isBlank()) {
-            continue;
-          }
-          String key = operator.code().trim().toLowerCase(Locale.ROOT);
-          companyByOperatorCode.putIfAbsent(key, display);
-        }
-      }
-      companyCacheLoaded = true;
-    } catch (Exception ex) {
-      debugLogger.accept("HUD company cache load failed: " + ex.getMessage());
-    }
-  }
-
-  private Optional<String> resolveOperatorCode(UUID operatorId) {
-    if (operatorId == null) {
-      return Optional.empty();
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    StorageProvider provider = providerOpt.get();
-    return provider.operators().findById(operatorId).map(Operator::code);
-  }
-
-  private Optional<StorageProvider> providerIfReady() {
-    if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return Optional.empty();
-    }
-    return plugin.getStorageManager().provider();
-  }
-
-  private String stationKey(String operator, String station) {
-    if (operator == null || operator.isBlank() || station == null || station.isBlank()) {
-      return "";
-    }
-    return operator.trim().toLowerCase(Locale.ROOT) + ":" + station.trim().toLowerCase(Locale.ROOT);
+    return directory()
+        .flatMap(snapshot -> snapshot.station(stationId))
+        .flatMap(entry -> entry.station().graphNodeId())
+        .filter(id -> !id.isBlank())
+        .map(NodeId::of);
   }
 
   private String formatProgressValue(float progress) {
@@ -1872,21 +1713,10 @@ public final class TrainHudContextResolver {
           TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
               .flatMap(TrainHudContextResolver::parseUuid);
     }
-    if (routeId.isEmpty()) {
-      return Optional.empty();
-    }
-    Optional<RouteOperationType> cached = routeOperationById.get(routeId.get());
-    if (cached != null) {
-      return cached;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    Optional<RouteOperationType> resolved =
-        providerOpt.get().routes().findById(routeId.get()).map(Route::operationType);
-    routeOperationById.put(routeId.get(), resolved);
-    return resolved;
+    // 交路缓存随交路改库刷新，不必另读库。
+    return routeId
+        .flatMap(routeDefinitions::findRecord)
+        .map(record -> record.route().operationType());
   }
 
   private String safeOrDash(String value) {

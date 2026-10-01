@@ -126,11 +126,6 @@ public final class TripDialogService implements Listener {
     lastOpened.clear();
   }
 
-  /** 清理站点/公司等缓存。 */
-  public void clearCaches() {
-    resolver.clearCaches();
-  }
-
   /**
    * HUD 入口提示的按键：按键入口开着、且玩家还没打开过对话框时为按键标签，否则为空。
    *

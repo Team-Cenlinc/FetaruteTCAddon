@@ -392,7 +392,7 @@ command:
       entry-board: "<gray>/fta eta board</gray> <white>-</white> <dark_aqua>查看站牌 ETA</dark_aqua>"
       hover-board: "<gray>点击填充:</gray> <white>/fta eta board </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;operator&gt; &lt;stationCode&gt; [lineId] [sec]</white>"
       entry-stats: "<gray>/fta eta stats</gray> <white>-</white> <dark_aqua>查看站牌查询统计</dark_aqua>"
-      hover-stats: "<gray>点击执行:</gray> <white>/fta eta stats</white>\n<dark_aqua>缓存命中、重算耗时与存储读取次数</dark_aqua>\n<gray>清零:</gray> <white>/fta eta stats reset</white>"
+      hover-stats: "<gray>点击执行:</gray> <white>/fta eta stats</white>\n<dark_aqua>缓存命中与重算耗时</dark_aqua>\n<gray>清零:</gray> <white>/fta eta stats reset</white>"
     train:
       header: "<prefix> <dark_aqua>ETA 诊断</dark_aqua> <gray>(train=<white><train></white>, target=<white><target></white>)</gray>"
       summary: "<gray>-</gray> status=<white><status></white> arriving=<white><arriving></white> eta=<white><eta></white> at=<white><at></white> conf=<white><conf></white>"
@@ -415,7 +415,6 @@ command:
       empty: "<gray>-</gray> <gray>尚无站牌查询</gray>"
       calls: "<gray>-</gray> <gray>查询</gray> <white><calls></white> <gray>次，命中缓存</gray> <white><hits></white> <gray>次（<white><hit_rate></white>）</gray>"
       compute: "<gray>-</gray> <gray>重算</gray> <white><computes></white> <gray>次，平均</gray> <white><avg_ms></white> <gray>毫秒，最长</gray> <white><max_ms></white> <gray>毫秒</gray>"
-      storage: "<gray>-</gray> <gray>重算期间读取存储共</gray> <white><reads></white> <gray>次，平均每次重算</gray> <white><avg_reads></white> <gray>次，最多</gray> <white><max_reads></white> <gray>次</gray>"
       reset: "<prefix> <gray>站牌查询统计已清零</gray>"
   graph:
     help:
