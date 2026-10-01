@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaBoardStats;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaConfidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaReason;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
@@ -52,6 +53,8 @@ public final class FtaEtaCommand {
   private static final int SUGGESTION_LIMIT = 20;
   private static final int BOARD_LIMIT = 20;
   private static final int DEFAULT_BOARD_HORIZON_SEC = 600;
+  private static final DateTimeFormatter STATS_TIME_FORMAT =
+      DateTimeFormatter.ofPattern("HH:mm:ss").withZone(java.time.ZoneId.systemDefault());
 
   private final FetaruteTCAddon plugin;
 
@@ -158,6 +161,23 @@ public final class FtaEtaCommand {
                   showBoard(
                       ctx.sender(), operator, station, lineId, Duration.ofSeconds(horizonSec));
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("eta")
+            .literal("stats")
+            .permission("fetarute.eta")
+            .handler(ctx -> showBoardStats(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("eta")
+            .literal("stats")
+            .literal("reset")
+            .permission("fetarute.eta")
+            .handler(ctx -> resetBoardStats(ctx.sender())));
   }
 
   /** 输出 ETA 帮助，并附带可点击建议命令。 */
@@ -189,6 +209,76 @@ public final class FtaEtaCommand {
         locale.component("command.eta.help.entry-board"),
         ClickEvent.suggestCommand("/fta eta board "),
         locale.component("command.eta.help.hover-board"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.eta.help.entry-stats"),
+        ClickEvent.runCommand("/fta eta stats"),
+        locale.component("command.eta.help.hover-stats"));
+  }
+
+  /** 输出站牌查询统计：缓存命中、重算耗时与重算期间的存储读取次数，用于定位站牌与站台屏的服务端开销。 */
+  private void showBoardStats(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    EtaService service = plugin.getEtaService();
+    if (service == null) {
+      sender.sendMessage(locale.component("command.eta.not-ready"));
+      return;
+    }
+    EtaBoardStats.Snapshot stats = service.boardStatsSnapshot();
+    sender.sendMessage(
+        locale.component(
+            "command.eta.stats.header", Map.of("since", STATS_TIME_FORMAT.format(stats.since()))));
+    if (stats.calls() == 0L) {
+      sender.sendMessage(locale.component("command.eta.stats.empty"));
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            "command.eta.stats.calls",
+            Map.of(
+                "calls",
+                String.valueOf(stats.calls()),
+                "hits",
+                String.valueOf(stats.cacheHits()),
+                "hit_rate",
+                String.format(Locale.ROOT, "%.0f%%", stats.cacheHitRate() * 100.0))));
+    sender.sendMessage(
+        locale.component(
+            "command.eta.stats.compute",
+            Map.of(
+                "computes",
+                String.valueOf(stats.computes()),
+                "avg_ms",
+                String.format(Locale.ROOT, "%.1f", stats.averageComputeMillis()),
+                "max_ms",
+                String.format(Locale.ROOT, "%.1f", stats.maxComputeMillis()))));
+    sender.sendMessage(
+        locale.component(
+            "command.eta.stats.storage",
+            Map.of(
+                "reads",
+                String.valueOf(stats.totalStorageReads()),
+                "avg_reads",
+                String.format(Locale.ROOT, "%.1f", stats.averageStorageReads()),
+                "max_reads",
+                String.valueOf(stats.maxStorageReads()))));
+    sender.sendMessage(
+        Component.text("  ")
+            .append(
+                CommandUx.actions(
+                    CommandUx.runAction("[刷新]", "/fta eta stats", "重新读取统计"),
+                    CommandUx.runAction("[清零]", "/fta eta stats reset", "清零统计并重新起算"))));
+  }
+
+  private void resetBoardStats(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    EtaService service = plugin.getEtaService();
+    if (service == null) {
+      sender.sendMessage(locale.component("command.eta.not-ready"));
+      return;
+    }
+    service.resetBoardStats();
+    sender.sendMessage(locale.component("command.eta.stats.reset"));
   }
 
   private void sendHelpEntry(

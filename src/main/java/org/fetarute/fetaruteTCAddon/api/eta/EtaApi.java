@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 
 /**
@@ -163,7 +164,45 @@ public interface EtaApi {
     }
   }
 
-  /** 站牌行。 */
+  /** 站牌行所处的阶段（1.9.0），按离本站由远到近排列。 */
+  enum BoardPhase {
+    /** 未出票的预测班次（按发车计划或时刻表推算）。 */
+    FORECAST,
+    /** 已出票、尚未发车。 */
+    PENDING,
+    /** 运行中，尚未临近本站。 */
+    EN_ROUTE,
+    /** 即将到达或通过本站。 */
+    ARRIVING,
+    /** 已停在本站，尚未获准发车。 */
+    AT_STATION
+  }
+
+  /**
+   * 站牌行。
+   *
+   * <p>1.9.0 起增补结构化字段（时刻、阶段、停靠属性、晚点），显示方不必再解析 {@code statusText}。
+   *
+   * @param lineName 列车到本站时所属线路的代码（直通运转换线后为新线路）
+   * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+   * @param destination 主目的地显示名（运营终点；回库车越过运营终点后为“回库”）
+   * @param destinationId 主目的地 ID
+   * @param endRoute 线路终点（EOR）显示名
+   * @param endRouteId 线路终点 ID
+   * @param endOperation 运营终点（EOP）显示名
+   * @param endOperationId 运营终点 ID
+   * @param platform 站台号；无法解析时为 {@code -}
+   * @param statusText 状态文本（英文短语）
+   * @param reasons 诊断标签
+   * @param etaEpochMillis 预计到达或通过本站的时间戳；已在站时为查询时刻；1.8.0 构造器创建的行为 0
+   * @param phase 所处阶段（1.9.0）
+   * @param stopSequence 本站停靠序号，交路节点的 0 起下标，与 RouteApi、TimetableApi 同一口径；未知时为 -1（1.9.0）
+   * @param passing 本站通过不停（1.9.0）
+   * @param terminating 本站是运营终点，乘客在此下车（1.9.0）
+   * @param outOfService 本站已越过运营终点，列车在回库途中（1.9.0）
+   * @param trainName 运行中列车的列车名；票据与预测为空（1.9.0）
+   * @param delaySeconds 按表运行时相对计划的偏差，正数为晚点：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空（1.9.0）
+   */
   record BoardRow(
       String lineName,
       String routeId,
@@ -175,7 +214,71 @@ public interface EtaApi {
       Optional<String> endOperationId,
       String platform,
       String statusText,
-      List<Reason> reasons) {}
+      List<Reason> reasons,
+      long etaEpochMillis,
+      BoardPhase phase,
+      int stopSequence,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      OptionalLong delaySeconds) {
+
+    public BoardRow {
+      destinationId = destinationId == null ? Optional.empty() : destinationId;
+      endRouteId = endRouteId == null ? Optional.empty() : endRouteId;
+      endOperationId = endOperationId == null ? Optional.empty() : endOperationId;
+      reasons = reasons == null ? List.of() : List.copyOf(reasons);
+      phase = phase == null ? BoardPhase.EN_ROUTE : phase;
+      trainName = trainName == null ? Optional.empty() : trainName;
+      delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+    }
+
+    /**
+     * 1.8.0 及以前的构造器（源码与二进制兼容）：没有结构化字段，阶段按运行中、序号为 -1，{@code outOfService} 按主目的地 ID 是否为 {@code
+     * OUT_OF_SERVICE} 推断。
+     */
+    public BoardRow(
+        String lineName,
+        String routeId,
+        String destination,
+        Optional<String> destinationId,
+        String endRoute,
+        Optional<String> endRouteId,
+        String endOperation,
+        Optional<String> endOperationId,
+        String platform,
+        String statusText,
+        List<Reason> reasons) {
+      this(
+          lineName,
+          routeId,
+          destination,
+          destinationId,
+          endRoute,
+          endRouteId,
+          endOperation,
+          endOperationId,
+          platform,
+          statusText,
+          reasons,
+          0L,
+          BoardPhase.EN_ROUTE,
+          -1,
+          false,
+          false,
+          destinationId != null && destinationId.filter("OUT_OF_SERVICE"::equals).isPresent(),
+          Optional.empty(),
+          OptionalLong.empty());
+    }
+
+    /** 预计到达或通过本站的时间（1.9.0）；1.8.0 构造器创建的行为空。 */
+    public Optional<Instant> eta() {
+      return etaEpochMillis <= 0L
+          ? Optional.empty()
+          : Optional.of(Instant.ofEpochMilli(etaEpochMillis));
+    }
+  }
 
   /**
    * ETA 诊断信息（面向调试/展示）。

@@ -56,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
@@ -691,11 +692,7 @@ public final class FtaRouteCommand {
                           Map.of(
                               "distance",
                               route.distanceMeters().map(String::valueOf).orElse("-"))));
-                  String spawnPattern = "-";
-                  Object rawSpawn = route.metadata().get("spawn_train_pattern");
-                  if (rawSpawn instanceof String raw && !raw.isBlank()) {
-                    spawnPattern = raw.trim();
-                  }
+                  String spawnPattern = DepotSpawnPattern.fromRoute(route).orElse("-");
                   sender.sendMessage(
                       locale.component(
                           "command.route.info.spawn-pattern", Map.of("pattern", spawnPattern)));
@@ -1677,14 +1674,14 @@ public final class FtaRouteCommand {
                       flags.getValue(distanceFlag, route.distanceMeters().orElse(null));
                   Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
                   if (flags.hasFlag(spawnClearFlag)) {
-                    metadata.remove("spawn_train_pattern");
+                    metadata.remove(DepotSpawnPattern.ROUTE_METADATA_KEY);
                   }
                   if (flags.hasFlag(spawnFlag)) {
                     String spawnPattern = normalizeSpawnPattern(flags.getValue(spawnFlag, null));
                     if (spawnPattern == null) {
-                      metadata.remove("spawn_train_pattern");
+                      metadata.remove(DepotSpawnPattern.ROUTE_METADATA_KEY);
                     } else {
-                      metadata.put("spawn_train_pattern", spawnPattern);
+                      metadata.put(DepotSpawnPattern.ROUTE_METADATA_KEY, spawnPattern);
                     }
                   }
                   if (flags.hasFlag(spawnEnabledFlag)) {

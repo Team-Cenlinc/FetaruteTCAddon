@@ -77,7 +77,7 @@ FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6
 | `stations()` | `StationApi` | 站点信息：位置、名称、关联节点；车站组与停靠线路（1.6.0） |
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
-| `eta()` | `EtaApi` | ETA：列车/票据/站牌列表 |
+| `eta()` | `EtaApi` | ETA：列车/票据/站牌列表（1.9.0 站牌行结构化） |
 | `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消） |
 
 ---
@@ -629,6 +629,35 @@ for (EtaApi.BoardRow row : board.rows()) {
 
 站牌行的 `lineName`（线路代码）与 `getBoard` 的线路过滤按列车到达本站时所属的线路（1.7.0，直通运转换线后为新线路，换线站本身即新线路）。
 
+#### 结构化字段（1.9.0）
+
+显示方不必再解析 `statusText`：
+
+```java
+for (EtaApi.BoardRow row : board.rows()) {
+    String when = switch (row.phase()) {
+        case AT_STATION -> "停车中";
+        case ARRIVING -> row.passing() ? "即将通过" : "即将进站";
+        default -> row.eta().map(t -> t.toString()).orElse("-");
+    };
+    String delay = row.delaySeconds().isPresent() && row.delaySeconds().getAsLong() >= 60
+        ? "晚点 " + row.delaySeconds().getAsLong() / 60 + " 分" : "";
+    System.out.println(row.lineName() + " " + (row.terminating() ? "本站终到" : row.destination())
+        + " " + when + " " + delay);
+}
+```
+
+| 字段 | 含义 |
+|---|---|
+| `etaEpochMillis` / `eta()` | 预计到达或通过本站；已在站为查询时刻 |
+| `phase` | `FORECAST` 未出票预测、`PENDING` 已出票未发车、`EN_ROUTE` 运行中、`ARRIVING` 即将到达或通过、`AT_STATION` 停在本站 |
+| `stopSequence` | 本站停靠序号（0 起下标，与 RouteApi、TimetableApi 同一口径） |
+| `passing` / `terminating` / `outOfService` | 本站通过不停 / 本站是运营终点 / 列车在回库途中 |
+| `trainName` | 运行中列车的列车名；票据与预测为空 |
+| `delaySeconds` | 按表运行时相对计划的偏差（正数为晚点）：运行中为到达，已在站为发车，未发车为起点发车；不按表运行时为空 |
+
+**行为变更（1.9.0）**：停在本站的列车（`AT_STATION`）也会列出，此前列车一到站就从本站站牌上消失；时刻表预测不再包含已取消的车次，取消信息从 `TimetableApi.Departure#cancelled` 取。
+
 ### 运行时快照（调试）
 
 ```java
@@ -825,6 +854,7 @@ LineApi.LineStatus: PLANNING, ACTIVE, MAINTENANCE, UNKNOWN
 EtaApi.Confidence: HIGH, MED, LOW
 EtaApi.Reason: NO_VEHICLE, NO_ROUTE, NO_TARGET, NO_PATH, THROAT, SINGLELINE, PLATFORM, DEPOT_GATE, WAIT,
                HOLD（被扣停，ETA 已按扣停时长顺延）, OVERDUE（班次已过计划发车仍未发出）
+EtaApi.BoardPhase: FORECAST, PENDING, EN_ROUTE, ARRIVING, AT_STATION（1.9.0）
 
 // 资源类型
 OccupancyApi.ResourceType: NODE, EDGE, CONFLICT
@@ -908,6 +938,8 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次 |
+| 1.8.0 | 车次取消：`TimetableApi.Departure` 增加 `cancelled`（保留 1.7.0 构造器，取消为 false），新增 `TimetableTripCancelledEvent` |
 | 1.7.0 | 直通运转与回库。**记录新增字段**：`RouteApi.StopInfo` 增加 `lineChange`（新记录 `RouteApi.LineRef`：运营商代码 + 线路代码），`TrainApi.TrainSnapshot` 增加 `operatorCode`、`lineCode`（`Optional<String>`，对乘客显示的当前线路）与 `outOfService`；两者均保留 1.6.0 的全参构造器作为次级构造器（`lineChange` 与当前线路为空、`outOfService` 为 false），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量。两个记录的 `Optional` 分量传 `null` 时规整为空。**行为变更**（均为直通运转换线后面向乘客的口径修正，没有 CHANGE 的交路结果不变；交路、时刻表等管理归属不变）：`StationApi#linesServing`/`linesServingNode` 换线之后的车站算新线路、换线站两条都算（此前一律算交路本身的线路）；`EtaApi.BoardRow#lineName` 与 `getBoard` 的线路过滤按列车到该站时所属的线路。文档修正：`TrainSnapshot#routeCode` 实际与 `routeId` 同为 `运营商:线路:交路`（此前文档写成 `L1-R1`，实现未变） |
 | 1.6.0 | 新增车站组与停靠线路：`StationApi#listStationGroups`/`findGroupOfStation`/`findGroupOfNode`/`linesServing`/`linesServingNode`，记录 `StationGroupInfo`、`StationGroupMember`、`ServingLine` 与枚举 `TransferType`；新增 `FetaruteApi#dataRevision()` 与 `StationGroupChangedEvent`。**记录新增字段**：`RouteApi.RouteInfo` 增加 `stage`（新枚举 `RouteStage`），`RouteApi.StopInfo` 增加 `stationId`、`stationCode`；两者均保留旧的全参构造器作为次级构造器（`stage` 取 `UNKNOWN`，`stationId`/`stationCode` 为空），按旧签名 `new` 的代码源码与二进制均兼容；对这两个记录使用记录模式（record pattern）解构的代码需补上新增分量。**行为变更**：`RouteInfo#id` 不再为 `null`；`RouteInfo#operationType` 按 `pattern_type` 映射（此前恒为 `NORMAL`）；`StopInfo#stationName` 与 `TerminalInfo` 的站名改为车站记录的真实站名（此前普通停靠点为空、DYNAMIC 停靠为站码），查不到记录时退回站码；DYNAMIC 车库停靠点的 `stationName` 改为空（此前为车库代码），与普通车库节点一致 |
 | 1.5.0 | **行为变更**：停靠序号统一为交路节点的 0 起下标——`RouteApi.StopInfo#sequence` 由 1 起改为 0 起，与 `TimetableApi` 的 `stopSequence`、车站到发事件的 `getStopIndex()` 同一口径（此前三者可能差 1）；`TimetableApi.TrainAssignment` 增加 `lastStopNodeId`/`lastStationCode`/`nextStopNodeId`/`nextStationCode`；`TimetableApi.StopTime` 增加 `passType` 与 `stops()`，停车判定改按交路 `passType`（此前按“停站 > 0 秒”猜，停站 0 秒的 STOP 站被当成通过、预计晚点落到后面的站）；`StopTime#stationCode` 只给车站本体节点；DYNAMIC 停靠的预计晚点按实际股道（未选台按车站级）估算；`getAssignment`/`listAssignments` 按 tick 缓存；ETA 中途站未配停站按运行时默认 20 秒计（此前按 0 秒）、TERMINATE 站计入停站、中途停车按起停拆段、到站后停站计时注册前的空档计入本站停站 |

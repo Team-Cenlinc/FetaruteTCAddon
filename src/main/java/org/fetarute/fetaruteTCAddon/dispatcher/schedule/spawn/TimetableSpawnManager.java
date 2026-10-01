@@ -348,12 +348,22 @@ public final class TimetableSpawnManager
       }
     }
     for (TimetableService.DueTrip due : timetableService.tripsBetween(now, now.plus(horizon))) {
-      buildTicket(due).ifPresent(out::add);
+      if (!cancelledFromOrigin(due)) {
+        buildTicket(due).ifPresent(out::add);
+      }
     }
     for (TimetableService.DueLeg due : timetableService.legsBetween(now, now.plus(horizon))) {
       buildLegTicket(due).ifPresent(out::add);
     }
     return List.copyOf(out);
+  }
+
+  /** 整趟取消的车次不会开出，不再预测；站牌与站台屏从时刻表的取消标记显示它。 */
+  private boolean cancelledFromOrigin(TimetableService.DueTrip due) {
+    return timetableService
+        .cancellationOf(due.timetable().id(), due.trip().id(), due.serviceDate())
+        .filter(cancellation -> cancellation.covers(0))
+        .isPresent();
   }
 
   private Set<UUID> managedRoutes() {

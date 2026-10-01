@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health>
+    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
@@ -46,6 +46,10 @@ permissions:
       fetarute.timetable: true
       fetarute.timetable.record: true
       fetarute.timetable.manage: true
+      fetarute.pids.manage: true
+  fetarute.pids.manage:
+    description: 管理全部站台屏（/fta pids；公司成员无此权限也可管理本公司车站的屏幕）
+    default: op
   fetarute.template:
     description: HUD 模板管理（/fta template）
     default: op

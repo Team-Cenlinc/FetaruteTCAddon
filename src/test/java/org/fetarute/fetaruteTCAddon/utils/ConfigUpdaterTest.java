@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.utils;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.ByteArrayInputStream;
@@ -126,6 +127,25 @@ class ConfigUpdaterTest {
         merged.contains("config-version: " + templateVersion), () -> "应升到模板版本 " + templateVersion);
     assertTrue(merged.contains("enabled: true"), "既有的自动发车开关不能被模板覆盖");
     assertTrue(merged.contains("max-attempts: 20"), "既有的重试次数不能被模板覆盖");
+  }
+
+  @Test
+  // forFile 面向任意文件：备份文件名跟随文件名，不能再写死为 config.yml.bak 去覆盖主配置的备份。
+  void forFileBacksUpUnderItsOwnName() throws IOException {
+    Path file = tempDir.resolve("pids.yml");
+    Files.writeString(file, "config-version: 1\nenabled: true\n", StandardCharsets.UTF_8);
+    String template = "config-version: 2\nenabled: true\nextra: 5\n";
+
+    ConfigUpdater.forFile(
+            tempDir.toFile(),
+            "pids.yml",
+            () -> new ByteArrayInputStream(template.getBytes(StandardCharsets.UTF_8)),
+            new LoggerManager(Logger.getLogger("config-updater-test")))
+        .update();
+
+    assertTrue(Files.readString(file, StandardCharsets.UTF_8).contains("extra: 5"));
+    assertTrue(Files.exists(tempDir.resolve("pids.yml.bak")));
+    assertFalse(Files.exists(tempDir.resolve("config.yml.bak")));
   }
 
   private static int versionOf(String yaml) {

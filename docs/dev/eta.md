@@ -111,6 +111,35 @@ ETA 与控车读同一份有效节点（`RuntimeDispatchService#resolveEffective
 
 > 注意：采样频率建议 5~10 tick 一次；ETA 查询端本身还有 TTL 缓存，能进一步降低计算量。
 
+## 站牌行
+站牌（`EtaService#getBoard`）合并三类来源，每行带结构化字段（公开 API 1.9.0 起同样对外）：
+
+| 字段 | 含义 |
+|---|---|
+| `eta` | 预计到达或通过本站的时刻；已在站为查询时刻 |
+| `phase` | `FORECAST`（未出票预测）、`PENDING`（已出票未发车）、`EN_ROUTE`（运行中）、`ARRIVING`（即将到达/通过）、`AT_STATION`（停在本站） |
+| `stopIndex` | 本站停靠序号（交路节点 0 起下标） |
+| `passing` / `terminating` / `outOfService` | 本站通过不停 / 本站是运营终点 / 已越过运营终点在回库途中，均按 `RouteTerminals` 口径 |
+| `trainName` | 运行中列车的列车名；票据与预测为空 |
+| `delaySeconds` | 按表运行时相对计划的偏差（正数为晚点），不按表运行时为空 |
+
+- **在站列车**：列车到站后进度已推进到本站，本站不再是“下一个目标”。在站记录（`StationPresenceTracker`，到站事件到发车许可之间）表明列车停在本站时，单独列一行 `AT_STATION`，状态文本为 `Boarding`；否则列车一停稳就会从站牌上消失。通过不停的车站不列。
+- **晚点口径**：运行中为预计到达减表定到达（`TimetableService#plannedArrivalOf`）；在站为预计发车（当前时刻 + 剩余停站 + 扣停估算）减表定发车；未发车的表定票据为 ETA 推算的起点发车减表定发车——走行与停站按编表同一条运行曲线估算，所以它就是到本站的偏差。按间隔发车的票据没有表定时刻，为空。
+- **取消车次**：时刻表预测（`TimetableSpawnManager#snapshotForecast`）排除整趟取消的车次，站牌不再把它当作计划显示；需要显示“取消”的地方（站台屏）从 `TimetableApi#departuresAt` 的取消标记取。
+
+## 站牌查询统计（`/fta eta stats`）
+站牌查询（`EtaService#getBoard`）在主线程上同步执行，PIDS 上线后调用量会随屏幕数增长，因此先计量再决定优化方向。
+
+- `/fta eta stats`：自上次清零以来的调用次数、缓存命中率、重算次数、重算平均/最长耗时、重算期间的存储读取（平均/最多）。
+- `/fta eta stats reset`：清零统计，起算时刻改为现在；权限同其它 ETA 诊断命令（`fetarute.eta`）。
+- 缓存窗口内的重复查询记为命中，不计耗时；只有真正执行 `computeBoard` 的调用记为重算。
+- 存储读取按调用点计数：车站、运营商、交路运营类型（同一次重算内按 UUID 去重），以及未发车票据推断车种时的交路与停靠表读取。
+  车种推断按交路跨调用缓存（见 `docs/dev/train-config.md`），只在缓存未命中或过期时读库，读取次数不随票据数增长。
+- 单次重算超过 5 ms 时，在 `debug.enabled=true` 下输出 `ETA_BOARD_SLOW station=… ms=… storageReads=… rows=…`，便于把慢查询对上具体车站。
+- 统计只在内存中累积：`/fta reload` 不清零，插件重启后从零开始。
+
+实测建议：高峰时段先 `reset`，运行 10~15 分钟后查看。稳态下剩余的读取来自终点名称与交路运营类型解析，单次重算内去重，次数与经过本站的交路数相当；若平均读取次数仍随站牌行数增长，说明还有未缓存的读库路径。
+
 ## 站牌为空的常见原因
 `/fta eta board` 会合并三类来源：运行中列车快照 + 已生成但未发车的票据 + 未出票服务预测。出现 “rows=0” 常见原因如下：
 

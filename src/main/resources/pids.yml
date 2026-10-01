@@ -1,0 +1,68 @@
+# FetaruteTCAddon 站台 PIDS 配置
+# 本文件只放全局策略；每块屏幕与车站、站台、线路过滤的绑定存放在数据库中，由 /fta pids 命令与配置工具维护。
+# 面向玩家的文案放在 lang/*.yml。
+config-version: 1
+
+# 总开关。关闭后不加载站台屏，也不播报，不影响调度。
+enabled: true
+
+render:
+  # 每隔多少 tick 比对一次将显示的文本，文本变化才重绘（20 tick = 1 秒）
+  check-interval-ticks: 20
+  # 兜底强制刷新间隔（秒）；多页轮播时每次翻页本身就是一次完整重绘
+  force-refresh-seconds: 30
+  # 同一车站的到发快照缓存时间（秒），多块屏共用一次查询
+  snapshot-ttl-seconds: 5
+  # 预测窗口（分钟）：只展示该时间内到发的列车
+  horizon-minutes: 30
+  # 主页（到发）停留时间（秒）
+  slide-main-seconds: 12
+  # 宣传页停留时间（秒）
+  slide-notice-seconds: 4
+  # 通过列车临近时锁定安全页的时长（秒）
+  notice-pin-seconds: 15
+
+limits:
+  # 全服屏幕数量的安全上限；单个车站的屏幕数量不设固定上限
+  max-screens: 200
+
+font:
+  # 中文行的字形版本：zh_hans（简体）、zh_hant（繁体）、ja（日文）；英文行固定用拉丁版
+  cjk-glyphs: zh_hans
+  # 按每段文字的内容选字形：含假名用日文，简体专用字多用简体，繁体专用字多用繁体；
+  # 判断不出（如“湖”“站”这类简繁同形的字）时用上面的 cjk-glyphs
+  detect-glyphs: true
+
+layout:
+  # 站台屏默认布局预设
+  platform: platform-1x3
+  # 车站统屏默认布局预设
+  station: station-3x5
+
+appearance:
+  # 外观：mc-time 按屏幕所在世界的 MC 时间切换深浅，light 固定浅色，dark 固定深色
+  mode: mc-time
+  # 世界时间进入夜间（深色）的刻，范围 0-23999
+  dark-from-tick: 12500
+  # 世界时间进入白天（浅色）的刻，范围 0-23999
+  light-from-tick: 23000
+
+broadcast:
+  # 播报总开关
+  enabled: true
+  # 玩家到来源屏幕的最大距离（方块）
+  range-blocks: 12
+  # 同一事件对同一玩家只播一次的去重窗口（秒）
+  dedupe-seconds: 20
+  # 进站播报的提前量（秒）
+  arriving-lead-seconds: 30
+  # 各类触发的开关
+  trigger-arriving: true
+  trigger-arrived: true
+  trigger-departing: true
+  trigger-cancelled: true
+  trigger-delayed: true
+  trigger-transfer: true
+  # 播报通道
+  channel-text: true
+  channel-sound: true

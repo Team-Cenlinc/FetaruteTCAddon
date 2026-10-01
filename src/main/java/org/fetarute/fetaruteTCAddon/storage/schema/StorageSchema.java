@@ -67,6 +67,7 @@ public final class StorageSchema {
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
+    ddl.add(pidsScreens(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     ddl.add(railEdges(dialect));
@@ -614,6 +615,55 @@ public final class StorageSchema {
         dialect.timestampType(),
         table("lines"),
         table("hud_templates"));
+  }
+
+  /**
+   * 站台屏。车站按运营商代码 + 站码记录（与公开 API 一致），不设外键：车站删掉后屏幕仍在墙上，显示为空表。
+   *
+   * <p>同一世界同一方块同一朝向只能有一块屏幕，唯一约束写在表内（MySQL 不支持 {@code CREATE INDEX IF NOT EXISTS}）。
+   */
+  private String pidsScreens(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    world_id %s NOT NULL,
+                    x %s NOT NULL,
+                    y %s NOT NULL,
+                    z %s NOT NULL,
+                    facing %s NOT NULL,
+                    tile_rows %s NOT NULL,
+                    tile_cols %s NOT NULL,
+                    layout_id %s NOT NULL,
+                    operator_code %s,
+                    station_code %s,
+                    platforms %s,
+                    line_codes %s,
+                    appearance %s NOT NULL,
+                    mode %s NOT NULL,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (world_id, x, y, z, facing)
+                );
+                """,
+        table("pids_screens"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.jsonType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType());
   }
 
   private String railNodes(SqlDialect dialect) {

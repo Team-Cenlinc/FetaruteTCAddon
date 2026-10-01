@@ -1,0 +1,470 @@
+package org.fetarute.fetaruteTCAddon.display.pids;
+
+import java.time.Instant;
+import java.time.InstantSource;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
+import java.util.Collection;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalInt;
+import java.util.OptionalLong;
+import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import org.bukkit.Bukkit;
+import org.bukkit.World;
+import org.bukkit.command.CommandSender;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.ItemFrame;
+import org.bukkit.entity.Player;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scheduler.BukkitTask;
+import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
+import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
+import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
+import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
+import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
+import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrames;
+import org.fetarute.fetaruteTCAddon.display.pids.render.PidsFonts;
+import org.fetarute.fetaruteTCAddon.display.pids.render.PidsRenderer;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsFacing;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsWallFinder;
+import org.fetarute.fetaruteTCAddon.display.pids.view.ApiPidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
+
+/**
+ * 站台屏服务：屏幕表、内容、安装与拆除、附近车站识别、管理权限。
+ *
+ * <p>随插件启动与 {@code /fta reload} 整体重建（公开 API 实例与配置都会换）；地图显示每次现取服务实例，不持有旧的。
+ *
+ * <p>屏幕表启动时整表读入；读失败时不判定“未注册”、也不清理孤立展示框，避免存储故障时把所有屏幕当孤儿拆掉。
+ */
+public final class PidsService {
+
+  private static final long DIRECTORY_REFRESH_TICKS = 20L * 60;
+
+  /** 还原未登记屏幕时找展示框的半径；内置最大屏幕为 5 列。 */
+  private static final int ORPHAN_REACH = 8;
+
+  /** 安装结果。 */
+  public enum Outcome {
+    INSTALLED,
+    /** 地面或天花板上的展示框。 */
+    UNSUPPORTED_FACING,
+    /** 墙上凑不出布局尺寸的空展示框矩形。 */
+    NO_ROOM,
+    /** 附近识别出的车站不归玩家的公司管，或没识别出车站且玩家没有管理权限。 */
+    NO_PERMISSION,
+    /** 达到 {@code limits.max-screens}。 */
+    LIMIT_REACHED,
+    STORAGE_UNAVAILABLE,
+    /** BKC 配置关闭了展示框地图显示。 */
+    MAP_UNAVAILABLE
+  }
+
+  /**
+   * @param outcome 结果
+   * @param screen 安装成功时的屏幕
+   */
+  public record InstallResult(Outcome outcome, Optional<PidsScreen> screen) {}
+
+  private final JavaPlugin plugin;
+  private final PidsSettings settings;
+  private final PidsLayoutRegistry layouts;
+  private final LoggerManager logger;
+  private final StorageProvider storage;
+  private final FetaruteApi api;
+  private final InstantSource clock = InstantSource.system();
+  private final PidsScreenRegistry registry = new PidsScreenRegistry();
+  private final ApiPidsDirectory directory;
+  private final PidsSnapshotProvider snapshots;
+  private final PidsComposer composer;
+  private final PidsItems items;
+  private final PidsFrames frames;
+  private final PidsAccess access;
+
+  /** 本次运行中拆除的屏幕：区块加载时只自动还原这些屏幕的展示框。 */
+  private final Set<UUID> removedThisRun = ConcurrentHashMap.newKeySet();
+
+  private volatile boolean loaded;
+  private volatile boolean directoryFailing;
+  private BukkitTask directoryTask;
+
+  /**
+   * @param storage 存储；不可用时为空，此时不加载屏幕、不能安装
+   */
+  public PidsService(
+      JavaPlugin plugin,
+      PidsSettings settings,
+      PidsLayoutRegistry layouts,
+      LocaleManager locale,
+      LoggerManager logger,
+      Optional<StorageProvider> storage,
+      FetaruteApi api) {
+    this.plugin = Objects.requireNonNull(plugin, "plugin");
+    this.settings = Objects.requireNonNull(settings, "settings");
+    this.layouts = Objects.requireNonNull(layouts, "layouts");
+    this.logger = Objects.requireNonNull(logger, "logger");
+    this.storage = storage.orElse(null);
+    this.api = Objects.requireNonNull(api, "api");
+    this.directory =
+        new ApiPidsDirectory(
+            api.operators(), api.lines(), api.stations(), api.routes(), logger::warn);
+    this.snapshots =
+        new PidsSnapshotProvider(
+            api.eta(), api.timetables(), api.routes(), () -> settings, clock, logger::debug);
+    this.composer =
+        new PidsComposer(
+            registry,
+            () -> loaded,
+            layouts,
+            snapshots::snapshot,
+            new PidsViewBuilder(directory, new PidsVocabulary(locale::text)),
+            directory,
+            new PidsRenderer(
+                PidsFonts.builtIn(settings.font().cjkGlyphs(), settings.font().detectGlyphs())),
+            locale::text,
+            PidsService::worldTime,
+            () -> settings,
+            clock,
+            ZoneId.systemDefault());
+    this.items = new PidsItems(plugin, locale);
+    this.frames = new PidsFrames(plugin);
+    this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
+  }
+
+  /**
+   * 读入屏幕表并开始定时重建名称目录（异步）。
+   *
+   * <p>读表失败（含某一行数据无法解析）不抛出：屏幕表保持“未读入”，既不判定未登记，也不还原任何展示框。
+   */
+  public void start() {
+    if (storage == null) {
+      logger.warn("存储不可用，站台屏未加载");
+    } else {
+      try {
+        registry.replaceAll(storage.pidsScreens().listAll());
+        loaded = true;
+        logger.info("站台屏已加载: " + registry.size() + " 块");
+      } catch (RuntimeException ex) {
+        logger.warn("读取站台屏失败，本次不判定未登记屏幕: " + ex);
+      }
+    }
+    directoryTask =
+        Bukkit.getScheduler()
+            .runTaskTimerAsynchronously(
+                plugin, this::refreshDirectory, 0L, DIRECTORY_REFRESH_TICKS);
+  }
+
+  public void stop() {
+    if (directoryTask != null) {
+      directoryTask.cancel();
+      directoryTask = null;
+    }
+  }
+
+  /** 重建名称目录；连续失败只在第一次告警，恢复后再失败会再次告警。 */
+  private void refreshDirectory() {
+    try {
+      directory.refresh();
+      directoryFailing = false;
+    } catch (RuntimeException ex) {
+      if (!directoryFailing) {
+        logger.warn("站台屏名称目录重建失败，沿用上一份: " + ex);
+      }
+      directoryFailing = true;
+    }
+  }
+
+  /** 地图显示的检查间隔。 */
+  public int checkIntervalTicks() {
+    return settings.render().checkIntervalTicks();
+  }
+
+  /** 见 {@link PidsComposer#content}。 */
+  public Optional<PidsContent> content(Optional<UUID> screenId, int width, int height) {
+    return composer.content(screenId, width, height);
+  }
+
+  public PidsItems items() {
+    return items;
+  }
+
+  public PidsLayoutRegistry layouts() {
+    return layouts;
+  }
+
+  public ApiPidsDirectory directory() {
+    return directory;
+  }
+
+  public PidsComposer composer() {
+    return composer;
+  }
+
+  public PidsSettings settings() {
+    return settings;
+  }
+
+  public Optional<PidsScreen> find(UUID id) {
+    return registry.find(id);
+  }
+
+  public List<PidsScreen> screens() {
+    return registry.all();
+  }
+
+  /**
+   * 按完整 ID 或 ID 前缀（至少 4 位）找屏幕。
+   *
+   * @return 匹配的屏幕；多于一块表示前缀不唯一
+   */
+  public List<PidsScreen> matchIdOrPrefix(String raw) {
+    if (raw == null || raw.isBlank()) {
+      return List.of();
+    }
+    String prefix = raw.trim().toLowerCase(Locale.ROOT);
+    try {
+      return registry.find(UUID.fromString(prefix)).stream().toList();
+    } catch (IllegalArgumentException ignored) {
+      // 不是完整 UUID，按前缀找
+    }
+    if (prefix.length() < 4) {
+      return List.of();
+    }
+    return registry.all().stream().filter(s -> s.id().toString().startsWith(prefix)).toList();
+  }
+
+  /** 唯一匹配的屏幕（见 {@link #matchIdOrPrefix}）。 */
+  public Optional<PidsScreen> findByIdOrPrefix(String raw) {
+    List<PidsScreen> matches = matchIdOrPrefix(raw);
+    return matches.size() == 1 ? Optional.of(matches.get(0)) : Optional.empty();
+  }
+
+  /** 展示框属于哪块屏幕：先查位置索引，再看框里的地图物品（孤立展示框只能靠后者认出）。 */
+  public Optional<UUID> screenOf(ItemFrame frame) {
+    Optional<UUID> indexed =
+        PidsFacing.of(frame.getFacing())
+            .flatMap(
+                facing ->
+                    registry.findByFrame(
+                        new PidsScreenRegistry.FrameKey(
+                            frame.getWorld().getUID(), PidsFrames.position(frame), facing)))
+            .map(PidsScreen::id);
+    return indexed.isPresent() ? indexed : PidsFrames.screenIdOf(frame.getItem());
+  }
+
+  /**
+   * 用安装纸在一面空展示框墙上装屏幕：找矩形、识别附近车站、写库、铺地图。
+   *
+   * @param player 安装的玩家（用于权限判断）
+   * @param clicked 玩家点的展示框
+   * @param layout 安装纸上的布局
+   */
+  public InstallResult install(Player player, ItemFrame clicked, PidsLayout layout) {
+    Optional<PidsFacing> facing = PidsFacing.of(clicked.getFacing());
+    if (facing.isEmpty()) {
+      return new InstallResult(Outcome.UNSUPPORTED_FACING, Optional.empty());
+    }
+    if (storage == null) {
+      return new InstallResult(Outcome.STORAGE_UNAVAILABLE, Optional.empty());
+    }
+    if (registry.size() >= settings.limits().maxScreens()) {
+      return new InstallResult(Outcome.LIMIT_REACHED, Optional.empty());
+    }
+    UUID worldId = clicked.getWorld().getUID();
+    Map<PidsScreen.Position, ItemFrame> wall =
+        PidsFrames.wallAround(clicked, Math.max(layout.tileRows(), layout.tileCols()) + 1);
+    Optional<PidsScreen.Position> anchor =
+        PidsWallFinder.findAnchor(
+            PidsFrames.position(clicked),
+            facing.get(),
+            layout.tileRows(),
+            layout.tileCols(),
+            position -> {
+              ItemFrame frame = wall.get(position);
+              return frame != null
+                  && PidsFrames.isEmpty(frame)
+                  && registry
+                      .findByFrame(new PidsScreenRegistry.FrameKey(worldId, position, facing.get()))
+                      .isEmpty();
+            });
+    if (anchor.isEmpty()) {
+      return new InstallResult(Outcome.NO_ROOM, Optional.empty());
+    }
+    PidsScreen.Position center =
+        PidsScreen.center(anchor.get(), facing.get(), layout.tileRows(), layout.tileCols());
+    List<PidsPlatformNode> nearby =
+        nearby(worldId, center).platforms().stream().map(PidsNearby.Platform::node).toList();
+    Optional<PidsStationKey> station = nearby.stream().findFirst().map(PidsPlatformNode::station);
+    if (!canManage(player, station)) {
+      return new InstallResult(Outcome.NO_PERMISSION, Optional.empty());
+    }
+    Set<String> platforms =
+        station
+            .map(
+                found ->
+                    PidsPlatformSelection.nearest(
+                        nearby, found, PidsPlatformSelection.limit(layout)))
+            .orElse(Set.of());
+    UUID id = UUID.randomUUID();
+    ItemStack mapItem;
+    try {
+      mapItem = frames.mapItem(id);
+    } catch (RuntimeException ex) {
+      logger.warn("无法创建站台屏地图（BKC 是否关闭了展示框地图显示？）: " + ex);
+      return new InstallResult(Outcome.MAP_UNAVAILABLE, Optional.empty());
+    }
+    Instant now = now();
+    PidsScreen screen =
+        new PidsScreen(
+            id,
+            worldId,
+            anchor.get(),
+            facing.get(),
+            layout.tileRows(),
+            layout.tileCols(),
+            layout.id(),
+            station,
+            platforms,
+            Set.of(),
+            PidsScreen.Appearance.AUTO,
+            PidsScreen.Mode.TEST_CARD,
+            now,
+            now);
+    if (!save(screen)) {
+      return new InstallResult(Outcome.STORAGE_UNAVAILABLE, Optional.empty());
+    }
+    PidsFrames.fill(screen.frames().stream().map(wall::get).toList(), mapItem);
+    return new InstallResult(Outcome.INSTALLED, Optional.of(screen));
+  }
+
+  /** 写库并更新屏幕表；写库失败时屏幕表不变。 */
+  public boolean save(PidsScreen screen) {
+    if (storage == null) {
+      return false;
+    }
+    try {
+      storage.pidsScreens().save(screen);
+    } catch (StorageException ex) {
+      logger.warn("保存站台屏失败: " + ex.getMessage());
+      return false;
+    }
+    registry.put(screen);
+    return true;
+  }
+
+  /** 删库、移出屏幕表，并还原已加载区块里的展示框；未加载的等区块加载时再还原（仅限本次运行中拆除的）。 */
+  public boolean remove(PidsScreen screen) {
+    if (storage == null) {
+      return false;
+    }
+    try {
+      storage.pidsScreens().delete(screen.id());
+    } catch (StorageException ex) {
+      logger.warn("删除站台屏失败: " + ex.getMessage());
+      return false;
+    }
+    registry.remove(screen.id());
+    removedThisRun.add(screen.id());
+    PidsFrames.loadedFrames(screen).forEach(PidsFrames::restore);
+    return true;
+  }
+
+  /**
+   * 还原刚加载的区块里、本次运行中已拆除的屏幕的展示框。
+   *
+   * <p>只认本次运行中拆除的：换了存储后端、回滚了数据库或把世界拷到别的服时，库里查不到的屏幕不一定是拆掉的， 自动摘地图无法挽回。这类展示框显示“未登记”测试卡，由管理员用配置棍手动还原。
+   */
+  public void cleanOrphans(Collection<? extends Entity> entities) {
+    if (removedThisRun.isEmpty()) {
+      return;
+    }
+    for (Entity entity : entities) {
+      if (entity instanceof ItemFrame frame) {
+        PidsFrames.screenIdOf(frame.getItem())
+            .filter(removedThisRun::contains)
+            .filter(id -> registry.find(id).isEmpty())
+            .ifPresent(id -> PidsFrames.restore(frame));
+      }
+    }
+  }
+
+  /**
+   * 立即还原一组未登记的站台屏展示框：以玩家点的那个为中心，取附近放着同一屏幕地图的展示框。
+   *
+   * @return 还原的个数；屏幕表未读入或这块屏幕仍有登记时为 0
+   */
+  public int restoreOrphan(ItemFrame clicked) {
+    Optional<UUID> id = PidsFrames.screenIdOf(clicked.getItem());
+    if (!loaded || id.isEmpty() || registry.find(id.get()).isPresent()) {
+      return 0;
+    }
+    List<ItemFrame> cluster =
+        PidsFrames.wallAround(clicked, ORPHAN_REACH).values().stream()
+            .filter(frame -> PidsFrames.screenIdOf(frame.getItem()).equals(id))
+            .toList();
+    cluster.forEach(PidsFrames::restore);
+    return cluster.size();
+  }
+
+  /** 位置附近的站台节点（来自调度图快照）。 */
+  public PidsNearby nearby(UUID worldId, PidsScreen.Position center) {
+    return new PidsNearby(
+        api.graph()
+            .getSnapshot(worldId)
+            .map(snapshot -> PidsNearby.of(snapshot.nodes(), center, PidsNearby.RADIUS).platforms())
+            .orElse(List.of()));
+  }
+
+  /** 调度图里某个车站的全部站台。 */
+  public List<String> platformsOf(UUID worldId, PidsStationKey station) {
+    return api.graph()
+        .getSnapshot(worldId)
+        .map(GraphApi.GraphSnapshot::nodes)
+        .map(nodes -> PidsNearby.platformsOf(nodes, station))
+        .orElse(List.of());
+  }
+
+  /** 屏幕所用的布局（不存在时退回同尺寸内置布局）。 */
+  public Optional<PidsLayout> layoutOf(PidsScreen screen) {
+    return layouts.resolve(screen.layoutId(), screen.tileRows(), screen.tileCols());
+  }
+
+  /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */
+  public OptionalInt platformLimit(PidsScreen screen) {
+    return layoutOf(screen).map(PidsPlatformSelection::limit).orElse(OptionalInt.empty());
+  }
+
+  /** 见 {@link PidsAccess#canManage}。 */
+  public boolean canManage(CommandSender sender, Optional<PidsStationKey> station) {
+    return access.canManage(sender, station);
+  }
+
+  /** 见 {@link PidsAccess#canUseTools}。 */
+  public boolean canUseTools(CommandSender sender) {
+    return access.canUseTools(sender);
+  }
+
+  /** 屏幕的修改时刻；SQLite 按毫秒存，截到毫秒以免读回后不相等。 */
+  public Instant now() {
+    return clock.instant().truncatedTo(ChronoUnit.MILLIS);
+  }
+
+  private static OptionalLong worldTime(UUID worldId) {
+    World world = Bukkit.getWorld(worldId);
+    return world == null ? OptionalLong.empty() : OptionalLong.of(world.getTime());
+  }
+}

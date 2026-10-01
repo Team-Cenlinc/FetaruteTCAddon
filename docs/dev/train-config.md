@@ -42,7 +42,12 @@ tags:
 
 未打车种标签的列车按 `train.default-type` 取值；编表与 ETA 的运行曲线也按默认车种计算，改动车种预设或默认车种后需重新 build 并发布时刻表，否则表定时分与实际运行不一致。
 注意 `ConfigUpdater` 只补缺失键、不改已有值：老服务器升级后 `train.default-type: emu` 与旧的 emu 数值会原样保留，需要手工改为 `metro` 与新预设。
-未发车票据的 ETA 由 `SpawnTrainConfigResolver` 按 CRET 车库牌子的列车模板名推断车种：含 `metro`/`tram`/`light_rail` 的归 `metro`（优先判定），其余按 emu/dmu 等关键字匹配，推断不出来用默认车种。已发车列车只认 `FTA_TRAIN_TYPE` 标签与默认车种。
+未发车票据的 ETA 由 `SpawnTrainConfigResolver` 按出库编组的列车模板名推断车种。编组来源与出库相同（`DepotSpawnPattern`）：交路 metadata 的 `spawn_train_pattern` 优先，其次首站 CRET 指向的车库牌子第 4 行。含 `metro`/`tram`/`light_rail` 的归 `metro`（优先判定），其余按 emu/dmu 等关键字匹配，推断不出来用默认车种。已发车列车只认 `FTA_TRAIN_TYPE` 标签与默认车种。
+
+推断结果按交路缓存，站牌重算时同一交路的票据只推断一次：
+- 只缓存车种，加减速按当前配置取，`/fta reload` 改加减速立即生效。
+- 交路定义变化（`/fta route set`、`define` 等）时清空；车库牌子第 4 行被改写最迟 60 秒后生效。
+- 车库牌子所在区块未加载时不加载区块，沿用该交路上次推断的车种；从未读到过（如刚重启、车库区块一直未加载）时按默认车种，区块加载后的下一次推断自动更正。
 
 ## 命令
 `/fta train config set [train|@train[...]] --type <type> --accel <bps2> --decel <bps2>`

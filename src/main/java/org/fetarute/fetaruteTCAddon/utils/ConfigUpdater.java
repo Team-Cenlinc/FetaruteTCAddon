@@ -40,7 +40,25 @@ public final class ConfigUpdater {
       java.io.File dataFolder,
       java.util.function.Supplier<InputStream> defaultSupplier,
       LoggerManager logger) {
-    return new ConfigUpdater(new File(dataFolder, "config.yml"), defaultSupplier, logger);
+    return forFile(dataFolder, "config.yml", defaultSupplier, logger);
+  }
+
+  /**
+   * 为数据目录下的指定 YAML 文件创建合并器。
+   *
+   * <p>各文件使用各自的 {@code config-version}；写回前的备份为同目录下的 {@code <文件名>.bak}。
+   *
+   * @param dataFolder 插件数据目录
+   * @param fileName 配置文件名，例如 {@code pids.yml}
+   * @param defaultSupplier 内置模板的输入流提供者
+   * @param logger 日志出口
+   */
+  public static ConfigUpdater forFile(
+      File dataFolder,
+      String fileName,
+      Supplier<InputStream> defaultSupplier,
+      LoggerManager logger) {
+    return new ConfigUpdater(new File(dataFolder, fileName), defaultSupplier, logger);
   }
 
   /** 执行合并。若未检测到差异则不写盘。 */
@@ -56,7 +74,7 @@ public final class ConfigUpdater {
       if (!configFile.exists()) {
         ensureParent();
         Files.copy(defaultStream, configFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        logger.info("已创建默认配置文件");
+        logger.info("已创建默认配置文件 " + configFile.getName());
         return new UpdateResult(true, 0, readVersion(configFile), List.of(), List.of());
       }
 
@@ -133,7 +151,7 @@ public final class ConfigUpdater {
 
   private void backupConfig() {
     Path source = configFile.toPath();
-    Path target = source.resolveSibling("config.yml.bak");
+    Path target = source.resolveSibling(configFile.getName() + ".bak");
     try {
       Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
       logger.debug("已备份配置到 " + target.getFileName());
@@ -144,13 +162,14 @@ public final class ConfigUpdater {
 
   private void logResult(UpdateState state) {
     if (state.oldVersion != state.newVersion) {
-      logger.info("config-version " + state.oldVersion + " -> " + state.newVersion);
+      logger.info(
+          configFile.getName() + " config-version " + state.oldVersion + " -> " + state.newVersion);
     }
     if (!state.addedKeys.isEmpty()) {
-      logger.info("新增配置键: " + String.join(", ", state.addedKeys));
+      logger.info(configFile.getName() + " 新增配置键: " + String.join(", ", state.addedKeys));
     }
     if (!state.extraKeys.isEmpty()) {
-      logger.warn("配置中存在未识别的键: " + String.join(", ", state.extraKeys));
+      logger.warn(configFile.getName() + " 中存在未识别的键: " + String.join(", ", state.extraKeys));
     }
   }
 

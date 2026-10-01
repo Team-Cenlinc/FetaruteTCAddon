@@ -93,6 +93,11 @@ public final class FtaInfoCommand {
         locale.component("command.help.hover-depot"));
     sendHelpEntry(
         sender,
+        locale.component("command.help.entry-pids"),
+        ClickEvent.suggestCommand("/fta pids "),
+        locale.component("command.help.hover-pids"));
+    sendHelpEntry(
+        sender,
         locale.component("command.help.entry-graph"),
         ClickEvent.suggestCommand("/fta graph "),
         locale.component("command.help.hover-graph"));

@@ -15,6 +15,7 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
@@ -25,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaPidsCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand;
@@ -97,6 +99,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalEvaluator;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
 import org.fetarute.fetaruteTCAddon.display.SimpleDisplayService;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsConfigManager;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsFrameListener;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsSettings;
+import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -166,6 +173,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private DisplayService displayService;
   private HudTemplateService hudTemplateService;
   private HudDefaultTemplateService hudDefaultTemplateService;
+  private PidsConfigManager pidsConfigManager;
+  private PidsLayoutRegistry pidsLayoutRegistry;
+  private PidsService pidsService;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
 
   @Override
@@ -179,6 +189,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
     this.loggerManager = new LoggerManager(getLogger());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+    this.pidsConfigManager = PidsConfigManager.forPlugin(this, loggerManager);
+    this.pidsConfigManager.reload();
+    this.pidsLayoutRegistry = PidsLayoutRegistry.forPlugin(this);
+    this.pidsLayoutRegistry.reload();
     // 排查期可临时调高；默认 120 条/分钟在拥堵时会丢掉大部分诊断，导致"没 grep 到"无法解读。
     this.runtimeDispatchDiagnosticGate =
         new RuntimeDispatchDiagnosticGate(
@@ -201,6 +215,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initHudDefaultTemplateService();
     initDisplayService();
     initApi();
+    initPidsService();
 
     registerCommands();
     getServer()
@@ -233,6 +248,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (displayService != null) {
       displayService.stop();
       displayService = null;
+    }
+    if (pidsService != null) {
+      pidsService.stop();
+      pidsService = null;
     }
     if (reclaimManager != null) {
       reclaimManager.stop();
@@ -308,6 +327,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .update();
     this.configManager.reload();
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+    if (pidsConfigManager != null) {
+      pidsConfigManager.reload();
+    }
+    if (pidsLayoutRegistry != null) {
+      pidsLayoutRegistry.reload();
+    }
     this.localeManager.reload(configManager.current().locale());
     this.storageManager.apply(configManager.current());
     if (etaService != null) {
@@ -331,6 +356,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initDisplayService();
     // 重新初始化公开 API，确保外部插件引用有效
     initApi();
+    initPidsService();
     scheduleRuntimeOccupancyReconstruction(1L);
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
@@ -350,6 +376,53 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public StorageManager getStorageManager() {
     return storageManager;
+  }
+
+  /** 返回站台 PIDS 配置（{@code pids.yml}）的加载器；插件未完成初始化时为空。 */
+  public Optional<PidsConfigManager> getPidsConfigManager() {
+    return Optional.ofNullable(pidsConfigManager);
+  }
+
+  /** 返回站台屏布局目录（内置布局与 {@code pids/layouts/}）；插件未完成初始化时为空。 */
+  public Optional<PidsLayoutRegistry> getPidsLayoutRegistry() {
+    return Optional.ofNullable(pidsLayoutRegistry);
+  }
+
+  /** 返回站台屏服务；{@code pids.yml} 关闭、公开 API 未就绪或插件未完成初始化时为空。 */
+  public Optional<PidsService> getPidsService() {
+    return Optional.ofNullable(pidsService);
+  }
+
+  /** 站台屏服务依赖公开 API，须在 {@link #initApi()} 之后（重）建；地图显示每次现取服务，不持有旧实例。 */
+  private void initPidsService() {
+    if (pidsService != null) {
+      pidsService.stop();
+      pidsService = null;
+    }
+    if (pidsConfigManager == null || pidsLayoutRegistry == null) {
+      return;
+    }
+    PidsSettings settings = pidsConfigManager.current();
+    Optional<FetaruteApi> api = FetaruteApi.get();
+    if (!settings.enabled() || api.isEmpty() || storageManager == null) {
+      return;
+    }
+    // 站台屏是附属功能：初始化失败只停用站台屏，不能让插件启用或 /fta reload 半途中断（后者会把全网留在冻结状态）
+    try {
+      PidsService service =
+          new PidsService(
+              this,
+              settings,
+              pidsLayoutRegistry,
+              localeManager,
+              loggerManager,
+              storageManager.provider(),
+              api.get());
+      service.start();
+      pidsService = service;
+    } catch (RuntimeException ex) {
+      getLogger().severe("站台屏初始化失败，本次停用: " + ex);
+    }
   }
 
   public HudTemplateService getHudTemplateService() {
@@ -480,6 +553,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaTemplateCommand(this).register(commandManager);
     new FtaHealthCommand(this).register(commandManager);
     new FtaTimetableCommand(this).register(commandManager);
+    new FtaPidsCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");
@@ -556,6 +630,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     getServer()
         .getPluginManager()
         .registerEvents(new TrainSignBypassListener(loggerManager::debug), this);
+    getServer().getPluginManager().registerEvents(new PidsFrameListener(this), this);
   }
 
   private void initOccupancyManager() {
@@ -1300,6 +1375,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
                       org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
                           .HOLD_CEILING.toSeconds()))
               : null);
+      // 站牌行的晚点秒数：预计到达与表定到达之差。
+      etaService.attachPlannedArrivals(
+          settings.enabled() ? timetableService::plannedArrivalOf : null);
     }
     restartTimetableTasks(settings);
     reloadPublishedTimetables();

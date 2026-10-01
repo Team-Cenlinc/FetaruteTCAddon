@@ -181,8 +181,27 @@ public final class EtaApiImpl implements EtaApi {
               row.endOperationId(),
               row.platform(),
               row.statusText(),
-              convertReasons(row.reasons())));
+              convertReasons(row.reasons()),
+              row.eta().toEpochMilli(),
+              convertPhase(row.phase()),
+              row.stopIndex(),
+              row.passing(),
+              row.terminating(),
+              row.outOfService(),
+              row.trainName(),
+              row.delaySeconds()));
     }
     return new BoardResult(List.copyOf(rows));
+  }
+
+  private static BoardPhase convertPhase(
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardPhase phase) {
+    return switch (phase) {
+      case FORECAST -> BoardPhase.FORECAST;
+      case PENDING -> BoardPhase.PENDING;
+      case EN_ROUTE -> BoardPhase.EN_ROUTE;
+      case ARRIVING -> BoardPhase.ARRIVING;
+      case AT_STATION -> BoardPhase.AT_STATION;
+    };
   }
 }
