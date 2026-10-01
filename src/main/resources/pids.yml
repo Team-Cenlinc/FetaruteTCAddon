@@ -17,7 +17,8 @@ render:
   horizon-minutes: 30
   # 主页（到发）停留时间（秒）
   slide-main-seconds: 12
-  # 宣传页停留时间（秒）
+  # 宣传页停留时间（秒）；0 关闭宣传页轮播（通过列车的安全提示页仍会锁定）。
+  # 只有站台屏与多站台屏轮播，车站统屏整页切换要重发全部地图，不轮播
   slide-notice-seconds: 4
   # 通过列车临近时锁定安全页的时长（秒）
   notice-pin-seconds: 15

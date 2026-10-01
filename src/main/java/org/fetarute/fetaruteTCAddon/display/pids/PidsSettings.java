@@ -80,7 +80,8 @@ public record PidsSettings(
             reader.positiveInt("render.snapshot-ttl-seconds", renderDefault.snapshotTtlSeconds()),
             reader.positiveInt("render.horizon-minutes", renderDefault.horizonMinutes()),
             reader.positiveInt("render.slide-main-seconds", renderDefault.slideMainSeconds()),
-            reader.positiveInt("render.slide-notice-seconds", renderDefault.slideNoticeSeconds()),
+            reader.nonNegativeInt(
+                "render.slide-notice-seconds", renderDefault.slideNoticeSeconds()),
             reader.positiveInt("render.notice-pin-seconds", renderDefault.noticePinSeconds()));
 
     LimitSettings limits =

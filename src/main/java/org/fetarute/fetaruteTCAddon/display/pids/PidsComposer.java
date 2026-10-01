@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
+import java.time.Instant;
 import java.time.InstantSource;
 import java.time.ZoneId;
 import java.util.List;
@@ -20,10 +21,13 @@ import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
 
 /**
  * 决定一块屏幕此刻显示什么。
@@ -32,7 +36,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式或未绑定车站：测试卡，列出布局、识别出的车站与屏幕编号
- *   <li>其余：到发信息
+ *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页
  * </ul>
  *
  * <p>不碰 Bukkit：世界时间、文案、快照都由调用方注入，单元测试可直接驱动。
@@ -54,6 +58,8 @@ public final class PidsComposer {
   private final Supplier<PidsSettings> settings;
   private final InstantSource clock;
   private final ZoneId zone;
+  private final PidsVocabulary vocabulary;
+  private final PidsCarousel carousel = new PidsCarousel();
 
   /**
    * @param registry 屏幕表
@@ -94,6 +100,7 @@ public final class PidsComposer {
     this.settings = Objects.requireNonNull(settings, "settings");
     this.clock = Objects.requireNonNull(clock, "clock");
     this.zone = Objects.requireNonNull(zone, "zone");
+    this.vocabulary = new PidsVocabulary(texts);
   }
 
   /** 到发页的内容标识：布局与视图都相同才算没变。 */
@@ -180,19 +187,46 @@ public final class PidsComposer {
                   .filter(row -> screen.lines().contains(row.lineName().toUpperCase(Locale.ROOT)))
                   .toList());
     }
+    Instant now = clock.instant();
     List<String> platformLabels =
         screen.platforms().stream().sorted(PidsPlatformNode.PLATFORM_ORDER).toList();
     PidsView view =
         views.build(
             new PidsViewBuilder.Request(
                 snapshot,
-                clock.instant(),
+                now,
                 zone,
                 theme(screen),
                 screen.platforms(),
                 platformLabels,
                 layout.rowCapacity()));
+    if (PidsPlatformSelection.limit(layout).isPresent()) {
+      Optional<PidsNotice> page =
+          carousel.page(
+              screen.id(), station, passingSoon(screen, snapshot), now, settings.get().render());
+      if (page.isPresent()) {
+        PidsNoticeView notice =
+            new PidsNoticeView(
+                view.theme(),
+                page.get(),
+                vocabulary.noticeTitle(page.get()),
+                vocabulary.noticeBody(page.get()),
+                view.bandColors());
+        return new PidsContent(notice, () -> renderer.renderNotice(layout, notice));
+      }
+    }
     return new PidsContent(new LiveKey(layout, view), () -> renderer.render(layout, view));
+  }
+
+  /** 本屏的站台有通过列车即将通过（已按线路过滤）。 */
+  private static boolean passingSoon(PidsScreen screen, PidsSnapshot snapshot) {
+    return snapshot.rows().stream()
+        .anyMatch(
+            row ->
+                row.passing()
+                    && row.status() == PidsRow.Status.ARRIVING
+                    && (screen.platforms().isEmpty()
+                        || screen.platforms().contains(row.platform())));
   }
 
   private PidsTheme theme(PidsScreen screen) {

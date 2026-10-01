@@ -9,7 +9,6 @@ import java.io.InputStreamReader;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
-import java.time.InstantSource;
 import java.time.ZoneOffset;
 import java.util.List;
 import java.util.Optional;
@@ -28,6 +27,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsFacing;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
@@ -48,6 +49,12 @@ class PidsComposerTest {
   private final PidsScreenRegistry registry = new PidsScreenRegistry();
   private boolean loaded = true;
   private OptionalLong worldTime = OptionalLong.of(6000);
+  private Instant now = NOW;
+  private List<PidsRow> rows = rows();
+
+  /** 默认关掉宣传页轮播，免得固定时刻正好落在宣传页上；轮播另有用例。 */
+  private PidsSettings settings = withNoticeSeconds(0);
+
   private PidsComposer composer;
 
   @BeforeEach
@@ -67,14 +74,14 @@ class PidsComposerTest {
             registry,
             () -> loaded,
             layouts,
-            station -> new PidsSnapshot(station, NOW, rows()),
+            station -> new PidsSnapshot(station, NOW, rows),
             new PidsViewBuilder(directory, new PidsVocabulary(key -> lang.getString(key, key))),
             directory,
             new PidsRenderer(PidsFonts.builtIn(PidsGlyphForm.ZH_HANS)),
             key -> lang.getString(key, key),
             world -> worldTime,
-            PidsSettings::defaults,
-            InstantSource.fixed(NOW),
+            () -> settings,
+            () -> now,
             ZoneOffset.UTC);
   }
 
@@ -152,6 +159,86 @@ class PidsComposerTest {
     assertEquals(PidsTheme.DARK, theme(screen), "夜里");
     worldTime = OptionalLong.empty();
     assertEquals(PidsTheme.DARK, theme(screen), "世界未加载时取深色");
+  }
+
+  @Test
+  void platformScreensRotateCourtesyPagesWithTheSameBand() {
+    settings = PidsSettings.defaults();
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    now = roundStart().plusSeconds(13);
+
+    PidsContent content = composer.content(Optional.of(screen.id()), 384, 128).orElseThrow();
+
+    PidsNoticeView notice = assertInstanceOf(PidsNoticeView.class, content.key());
+    assertEquals(PidsNotice.ORDER, notice.notice());
+    assertEquals("先下后上", notice.title().primary());
+    now = roundStart();
+    PidsView main =
+        assertInstanceOf(
+                PidsComposer.LiveKey.class,
+                composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key())
+            .view();
+    assertEquals(main.bandColors(), notice.bandColors(), "翻页时色带不变");
+  }
+
+  @Test
+  void passingTrainsOnThisPlatformPinTheSafetyPage() {
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    rows = List.of(passing("5"));
+    assertInstanceOf(
+        PidsComposer.LiveKey.class,
+        composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key(),
+        "别的站台的通过车不锁");
+
+    rows = List.of(passing("3"));
+    PidsContent content = composer.content(Optional.of(screen.id()), 384, 128).orElseThrow();
+
+    assertEquals(
+        PidsNotice.PASSING, assertInstanceOf(PidsNoticeView.class, content.key()).notice());
+  }
+
+  private static PidsSettings withNoticeSeconds(int seconds) {
+    PidsSettings defaults = PidsSettings.defaults();
+    PidsSettings.RenderSettings render = defaults.render();
+    return new PidsSettings(
+        defaults.configVersion(),
+        defaults.enabled(),
+        new PidsSettings.RenderSettings(
+            render.checkIntervalTicks(),
+            render.forceRefreshSeconds(),
+            render.snapshotTtlSeconds(),
+            render.horizonMinutes(),
+            render.slideMainSeconds(),
+            seconds,
+            render.noticePinSeconds()),
+        defaults.limits(),
+        defaults.font(),
+        defaults.layout(),
+        defaults.appearance(),
+        defaults.broadcast());
+  }
+
+  /** 这一刻 HHU 的屏幕刚翻回主页（一轮 48 秒）。 */
+  private static Instant roundStart() {
+    long base = NOW.getEpochSecond();
+    return Instant.ofEpochSecond(base - Math.floorMod(base + PidsCarousel.offset(HHU, 48), 48));
+  }
+
+  private static PidsRow passing(String platform) {
+    return new PidsRow(
+        PidsRow.Status.ARRIVING,
+        "WS",
+        "SURC:WS:R1",
+        "TPC",
+        Optional.of("SURC:TPC"),
+        platform,
+        NOW.plusSeconds(20),
+        OptionalLong.of(0),
+        2,
+        true,
+        false,
+        false,
+        Optional.empty());
   }
 
   private PidsTheme theme(PidsScreen screen) {
