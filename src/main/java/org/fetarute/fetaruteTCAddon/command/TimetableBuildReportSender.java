@@ -412,28 +412,41 @@ final class TimetableBuildReportSender {
                                 hint))));
   }
 
-  /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
   /**
-   * 「用快车错峰重建」按钮的悬停说明：这次没开快车错峰、成品表上又有快车被慢车拖住时才给。
+   * 「用快车错峰重建」按钮的悬停说明：成品表上有快车被慢车拖住、而这次没有搜过错峰时才给——没开错峰，或开了但原表已放宽而没搜。
    *
    * <p>重建命令沿用「按放宽后的间隔重建」那一条（各组按实际间隔写成 {@code --group-headway}），再带上 {@code --rapid-stagger}：
    * 错峰只在目标间隔下比，放宽过的表按放宽后的间隔重编才搜得动。
    */
   static Optional<String> rapidStaggerHint(
       TimetableBuildOptions options, TimetableBuildResult result) {
-    TimetableBuildResult.CatchUp catchUp = result.rapidCatchUp();
-    if (options.rapidStagger() || catchUp.seconds() <= 0L) {
+    return rapidStaggerHint(options.rapidStagger(), result.headwayRelaxed(), result.rapidCatchUp());
+  }
+
+  /**
+   * 同上，只看三样：这次开没开错峰、目标间隔放没放宽、快车被拖住多少。
+   *
+   * @param staggered 这次带了 {@code --rapid-stagger}
+   * @param relaxed 目标间隔被放宽了（开了错峰也没搜）
+   * @param catchUp 成品表上快车被拖住的合计
+   */
+  static Optional<String> rapidStaggerHint(
+      boolean staggered, boolean relaxed, TimetableBuildResult.CatchUp catchUp) {
+    if (catchUp.seconds() <= 0L || (staggered && !relaxed)) {
       return Optional.empty();
     }
+    String how = relaxed ? "目标间隔排不开、已放宽，按放宽后的间隔带 --rapid-stagger 重新编表：" : "带 --rapid-stagger 重新编表：";
     return Optional.of(
         String.format(
             Locale.ROOT,
-            "快车 %d 班在共线段被慢车拖住，共 %d 秒。带 --rapid-stagger 重新编表：逐个试快车组整组平移与快车中途加停，"
-                + "在班次不少、不加车、不放宽间隔的前提下挑被拖住最少的位置；需要几分钟，期间不影响服务器运行",
+            "快车 %d 班在共线段被慢车拖住，共 %d 秒。%s逐个试快车组整组平移与快车中途加停，"
+                + "在班次不少、不加车、不放宽间隔的前提下挑被拖住最少的位置；需要几分钟，在后台线程运行，不阻塞服务器主线程",
             catchUp.trips(),
-            catchUp.seconds()));
+            catchUp.seconds(),
+            how));
   }
 
+  /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
   private static String rebuildCommand(
       ResolvedLine first,
       String lineArg,

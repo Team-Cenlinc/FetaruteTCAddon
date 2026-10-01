@@ -143,6 +143,57 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.manager.expiryOf(mock(SpawnTicket.class)).isEmpty(), "不是本层的票没有到期");
   }
 
+  /**
+   * 续班票与回库票等本交路的车：交路有车在路上就不到期，晚点就晚发；首班与出库票照常到期。
+   *
+   * <p>本层同时如实回答"这张票还在不在等车"：派出去之后就不在了。
+   */
+  @Test
+  void aContinuationTicketDoesNotExpireWhileItsVehicleIsOnTheWay() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> tickets = fixture.pollAll();
+    SpawnTicket create = tickets.get(0);
+    SpawnTicket first = tickets.get(1);
+    SpawnTicket second = tickets.get(2);
+    SpawnTicket ret = tickets.get(3);
+    TimetableService.TicketIntent secondIntent =
+        new TimetableService.TicketIntent(
+            TIMETABLE,
+            DUTY,
+            java.time.LocalDate.of(2026, 3, 2),
+            org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.OPERATION,
+            1);
+
+    assertEquals(
+        Optional.of(second.dueAt().plusSeconds(300)),
+        fixture.manager.expiryOf(second),
+        "交路还没有车：照常到期");
+
+    fixture.manager.onDispatched(create, "train-1");
+
+    assertTrue(fixture.manager.expiryOf(second).isEmpty(), "车在出库走行上：续班票等它");
+    assertTrue(fixture.manager.expiryOf(ret).isEmpty(), "回库票同样等它");
+    assertEquals(
+        Optional.of(first.dueAt().plusSeconds(300)), fixture.manager.expiryOf(first), "首班照常到期");
+    assertTrue(fixture.manager.hasPendingTicket(secondIntent));
+
+    fixture.manager.onDispatched(second, "train-1");
+
+    assertFalse(fixture.manager.hasPendingTicket(secondIntent), "派出去就不再等车");
+    assertFalse(fixture.manager.hasPendingTicket(null));
+
+    TimetableService.TicketIntent returnIntent =
+        new TimetableService.TicketIntent(
+            TIMETABLE,
+            DUTY,
+            java.time.LocalDate.of(2026, 3, 2),
+            org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.RETURN,
+            0);
+    assertTrue(fixture.manager.hasPendingTicket(returnIntent));
+    fixture.manager.complete(ret);
+    assertFalse(fixture.manager.hasPendingTicket(returnIntent), "作废（没派出就完成）也不再等车");
+  }
+
   /** 出库票派发成功后，实体车立刻绑到交路上——它就是这个 duty 的车，后面的运营票只认它。 */
   @Test
   void createDispatchBindsTheTrainToTheDuty() {
@@ -305,12 +356,7 @@ class TimetableSpawnManagerTest {
     TimetableService service = new TimetableService(clock::get, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofHours(24),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);
@@ -363,12 +409,7 @@ class TimetableSpawnManagerTest {
     TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofHours(24),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);

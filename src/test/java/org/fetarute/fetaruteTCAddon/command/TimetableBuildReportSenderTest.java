@@ -39,6 +39,21 @@ class TimetableBuildReportSenderTest {
         "已经开过错峰：再给按钮只会重复同一次搜索");
   }
 
+  /** 开了错峰但原表放宽了：错峰没搜，按放宽后的间隔带上错峰重编，要给按钮。 */
+  @Test
+  void aRelaxedTableGetsTheHintEvenWithTheFlag() {
+    TimetableBuildResult.CatchUp caught = new TimetableBuildResult.CatchUp(500L, 9);
+
+    String hint = TimetableBuildReportSender.rapidStaggerHint(true, true, caught).orElseThrow();
+
+    assertTrue(hint.contains("已放宽，按放宽后的间隔带 --rapid-stagger"), hint);
+    assertTrue(TimetableBuildReportSender.rapidStaggerHint(true, false, caught).isEmpty());
+    assertTrue(
+        TimetableBuildReportSender.rapidStaggerHint(false, false, caught)
+            .orElseThrow()
+            .startsWith("快车 9 班在共线段被慢车拖住，共 500 秒。带 --rapid-stagger"));
+  }
+
   @Test
   void theCatchUpTotalSurvivesAddingNotes() {
     TimetableBuildResult result =

@@ -108,7 +108,7 @@ final class CorridorCatchUp {
   /**
    * 快车被拖住的各段：每班、每段共线，被先进入这段的慢车拖住、超过一个裕量的部分，同一段取最狠的那班。
    *
-   * <p>只看两车在这段上快慢有别（后车快出一个裕量以上）的；同一 code 的是同一辆车（班次与它紧接的回库走行），互相不算。
+   * <p>只看两车在这段上快慢有别（后车快出一个裕量以上）的；同时进入这段的按快车在后算。同一 code 的是同一辆车（班次与它紧接的回库走行），互相不算。
    * 前车只可能在后车之前一个全程时分以内发车，按发车排序后只看这个窗口，几千班的整张表也不用两两比较。
    */
   List<Caught> caught(List<TimetableConflictChecker.Movement> movements) {
@@ -136,9 +136,10 @@ final class CorridorCatchUp {
           continue;
         }
         for (Run run : runs(ahead.routeId(), behind.routeId())) {
+          // 同一时刻进入算前车在前：让车修复会把其中一辆推到另一辆后面，谁先谁后说不准，按快车被拖住算。
           if (!faster(run)
               || ahead.startSeconds() + run.aheadEntry()
-                  >= behind.startSeconds() + run.behindEntry()) {
+                  > behind.startSeconds() + run.behindEntry()) {
             continue;
           }
           int seconds = ahead.startSeconds() + run.lead() - behind.startSeconds();

@@ -191,7 +191,9 @@ class RapidStaggerTest {
   void whenShiftingIsNotEnoughTheRapidDwells() {
     FakeEvaluator evaluator =
         new FakeEvaluator(shift -> shift.get("G") == 20 ? 30L : 60L)
-            .dwelling((shift, dwell) -> shift.get("G") == 20 && dwell.seconds() == 30 ? 0L : 40L);
+            .dwelling(
+                (shift, dwell) ->
+                    shift.getOrDefault("G", 0) == 20 && dwell.seconds() == 30 ? 0L : 40L);
 
     RapidStagger.Search search =
         RapidStagger.search(
@@ -202,9 +204,71 @@ class RapidStaggerTest {
     assertEquals(30, best.dwell().orElseThrow().seconds());
     assertEquals(0L, best.measure().seconds());
     assertEquals(
-        RapidStagger.DWELL_SHORTLIST * RapidStagger.DWELL_STEPS.size(),
+        (RapidStagger.DWELL_SHORTLIST + 1) * RapidStagger.DWELL_STEPS.size(),
         evaluator.dwells.size(),
-        "前几个最好的平移各试一遍加停档位");
+        "前几个最好的平移与原表各试一遍加停档位");
+  }
+
+  /** 所有平移都比原表差、而原表上加停就能解决：原表也是加停的起点。 */
+  @Test
+  void theOriginalLayoutIsAlsoTriedWithADwell() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> 500L)
+            .dwelling((shift, dwell) -> shift.isEmpty() && dwell.seconds() == 15 ? 0L : 400L);
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 40), base(100L), measure -> List.of(dwellPoint()), evaluator);
+
+    RapidStagger.Candidate best = search.improved().orElseThrow();
+    assertEquals(Map.of(), best.shift());
+    assertEquals(15, best.dwell().orElseThrow().seconds());
+  }
+
+  /** 前一组已经完全错开：后面的快车组不再逐个编。 */
+  @Test
+  void laterGroupsAreSkippedOnceNothingIsCaught() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.getOrDefault("A", 0) == 20 ? 0L : 50L);
+
+    RapidStagger.Search search =
+        RapidStagger.search(Map.of("A", 30, "B", 30), base(100L), measure -> List.of(), evaluator);
+
+    assertEquals(Map.of("A", 20), search.improved().orElseThrow().shift());
+    assertTrue(
+        evaluator.history.stream().noneMatch(shift -> shift.containsKey("B")),
+        evaluator.history::toString);
+  }
+
+  /** 开了错峰、有快车被拖住、原表没放宽才搜；放宽了不搜但要说一声。 */
+  @Test
+  void searchOnlyWhenEnabledCaughtAndNotRelaxed() {
+    RapidStagger.Measure caught = new RapidStagger.Measure(10L, 1, List.of());
+    RapidStagger.Measure clear = new RapidStagger.Measure(0L, 0, List.of());
+
+    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, caught, false));
+    assertEquals(RapidStagger.Plan.SKIP_RELAXED, RapidStagger.plan(true, caught, true));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, caught, false));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(true, clear, false));
+  }
+
+  /** 实测写进构建结果：结构化合计（报告据此给按钮）与一行说明。 */
+  @Test
+  void theMeasureIsWrittenIntoTheResult() {
+    UUID rapid = TimetableTestFixtures.routeId("RAPID");
+    UUID local = TimetableTestFixtures.routeId("LOCAL");
+    RapidStagger.Measure measure =
+        new RapidStagger.Measure(
+            100L, 1, List.of(new CorridorCatchUp.Caught("R1", rapid, 0, 0, 100, local)));
+
+    TimetableBuildResult result =
+        RapidStagger.annotate(
+            TimetableBuildResult.failure("x", List.of()),
+            measure,
+            Map.of(rapid, "RAPID", local, "LOCAL"));
+
+    assertEquals(new TimetableBuildResult.CatchUp(100L, 1), result.rapidCatchUp());
+    assertEquals(List.of("快车被卡（成品表实测）：RAPID 1 班、共 100s（主要被 LOCAL 拖住）"), result.phaseNotes());
   }
 
   /** 没有一个候选比原表被卡更少：保持原表；编不出来（不可用）的候选跳过。 */

@@ -145,26 +145,32 @@ public final class TimetableBuilder {
       return base.result();
     }
     Prepared chosen = base.chosen().get();
-    int separation = separationOf(base.options());
-    RapidStagger.Measure measure =
-        RapidStagger.measure(
-            base.result().timetable().orElseThrow(),
+    Set<UUID> fastRoutes =
+        RapidStagger.fastRoutes(
+            chosen.classification().groups(),
             chosen.profiles(),
             chosen.graphIndex(),
-            separation,
-            base.options().serviceStartSecondOfDay());
-    TimetableBuildResult measured =
-        base.result()
-            .withPhaseNote(RapidStagger.describe(measure, routeCodes(chosen)))
-            .withRapidCatchUp(RapidStagger.total(measure));
-    if (!requested.rapidStagger() || measure.seconds() == 0L) {
-      return measured;
-    }
-    if (base.result().headwayRelaxed()) {
-      // 候选只在目标间隔下比：目标间隔本身排不开时每个位置都会连同多停搜索一起失败，白耗时间。
-      return measured.withPhaseNote("快车错峰：目标间隔本身排不开（已放宽），先把间隔排开再错峰，这次没有搜");
-    }
-    return staggerRapids(input, requested, builtAt, base, measure);
+            separationOf(base.options()));
+    RapidStagger.Measure measure = measureRapids(base, fastRoutes);
+    return switch (RapidStagger.plan(
+        requested.rapidStagger(), measure, base.result().headwayRelaxed())) {
+      case MEASURE_ONLY -> RapidStagger.annotate(base.result(), measure, routeCodes(chosen));
+      case SKIP_RELAXED -> RapidStagger.annotate(base.result(), measure, routeCodes(chosen))
+          .withPhaseNote("快车错峰：目标间隔本身排不开（已放宽），先把间隔排开再错峰，这次没有搜");
+      case SEARCH -> staggerRapids(input, requested, builtAt, base, measure, fastRoutes);
+    };
+  }
+
+  /** 量一次构建的成品表（用选中那份表自己的准备：多停改过的停站也算在内）。 */
+  private static RapidStagger.Measure measureRapids(Built built, Set<UUID> fastRoutes) {
+    Prepared chosen = built.chosen().orElseThrow();
+    return RapidStagger.measure(
+        built.result().timetable().orElseThrow(),
+        chosen.profiles(),
+        chosen.graphIndex(),
+        separationOf(built.options()),
+        built.options().serviceStartSecondOfDay(),
+        fastRoutes);
   }
 
   /**
@@ -286,10 +292,17 @@ public final class TimetableBuilder {
               failed,
               found.hold());
       warnings.addAll(searchNotes);
+      String outcome =
+          widenedIntervals(
+                  target.intervals(),
+                  target.headwaySeconds(),
+                  chosen.intervals(),
+                  chosen.headwaySeconds())
+              .map(widened -> "，已回退到最小可行间隔 " + widened)
+              .orElse(found.hold().isNone() ? "，间隔不变" : "，间隔不变（靠喂车方向中途多停排开，见上）");
       warnings.add(
           summary
-              + "，已回退到最小可行间隔 "
-              + describeRelaxed(target, chosen)
+              + outcome
               + "（--strict 可改为构建失败）"
               + (target.conflicts().external().isEmpty()
                   ? ""
@@ -411,19 +424,15 @@ public final class TimetableBuilder {
       TimetableBuildOptions requested,
       Instant builtAt,
       Built base,
-      RapidStagger.Measure baseMeasure) {
+      RapidStagger.Measure baseMeasure,
+      Set<UUID> fastRoutes) {
     long started = System.nanoTime();
     Prepared prepared = base.prepared().orElseThrow();
     TimetableBuildOptions candidateOptions = requested.withRapidStagger(false);
-    int separation = separationOf(base.options());
     Map<UUID, String> codes = routeCodes(prepared);
     Map<String, Integer> intervals = intervalsOf(prepared, base.options());
     List<String> fastGroups =
-        RapidStagger.fastGroups(
-            prepared.classification().groups(),
-            prepared.profiles(),
-            prepared.graphIndex(),
-            separation);
+        RapidStagger.fastGroups(prepared.classification().groups(), fastRoutes);
     Map<String, Integer> periods = new TreeMap<>();
     for (String group : fastGroups) {
       List<Integer> others = new ArrayList<>();
@@ -451,26 +460,14 @@ public final class TimetableBuilder {
               @Override
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
                 return stagger(
-                    input,
-                    candidateOptions,
-                    builtAt,
-                    base,
-                    Optional.of(prepared),
-                    shift,
-                    Optional.empty());
+                    input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.empty());
               }
 
               @Override
               public Optional<RapidStagger.Candidate> dwell(
                   Map<String, Integer> shift, RapidStagger.Dwell dwell) {
                 return stagger(
-                    input,
-                    candidateOptions,
-                    builtAt,
-                    base,
-                    Optional.empty(),
-                    shift,
-                    Optional.of(dwell));
+                    input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.of(dwell));
               }
             });
     long millis = (System.nanoTime() - started) / 1_000_000L;
@@ -478,9 +475,7 @@ public final class TimetableBuilder {
         search.improved().map(RapidStagger.Candidate::result).orElse(base.result());
     RapidStagger.Measure chosenMeasure =
         search.improved().map(RapidStagger.Candidate::measure).orElse(baseMeasure);
-    return chosen
-        .withRapidCatchUp(RapidStagger.total(chosenMeasure))
-        .withPhaseNote(RapidStagger.describe(chosenMeasure, codes))
+    return RapidStagger.annotate(chosen, chosenMeasure, codes)
         .withPhaseNote(
             RapidStagger.describeSearch(baseMeasure, search.improved(), search.tried(), millis));
   }
@@ -488,16 +483,17 @@ public final class TimetableBuilder {
   /**
    * 编一个快车错峰的候选：只在目标间隔下排（排不开就淘汰），量成品表。不可用（放宽、少班次、加车）时为空。
    *
-   * @param known 只平移相位时沿用原表的准备；加停改了停站，要重算
+   * <p>只平移相位时输入不变，沿用原表的准备；加停改了停站，时分与投影都要重算。
    */
   private Optional<RapidStagger.Candidate> stagger(
       BuildInput input,
       TimetableBuildOptions options,
       Instant builtAt,
       Built base,
-      Optional<Prepared> known,
+      Set<UUID> fastRoutes,
       Map<String, Integer> shift,
       Optional<RapidStagger.Dwell> dwell) {
+    Optional<Prepared> known = dwell.isPresent() ? Optional.empty() : base.prepared();
     BuildInput variant =
         dwell
             .map(
@@ -520,15 +516,9 @@ public final class TimetableBuilder {
         || !RapidStagger.acceptable(RapidStagger.Outcome.of(base.result()), outcome)) {
       return Optional.empty();
     }
-    Prepared chosen = built.chosen().get();
-    RapidStagger.Measure measure =
-        RapidStagger.measure(
-            built.result().timetable().orElseThrow(),
-            chosen.profiles(),
-            chosen.graphIndex(),
-            separationOf(built.options()),
-            built.options().serviceStartSecondOfDay());
-    return Optional.of(new RapidStagger.Candidate(shift, dwell, built.result(), outcome, measure));
+    return Optional.of(
+        new RapidStagger.Candidate(
+            shift, dwell, built.result(), outcome, measureRapids(built, fastRoutes)));
   }
 
   private static int separationOf(TimetableBuildOptions options) {
@@ -557,20 +547,35 @@ public final class TimetableBuilder {
   }
 
   /** 回退提示里的间隔：只有一组时就是一个数；多组时只列被放宽的组，逐组收紧后回到目标的组不列。 */
-  private static String describeRelaxed(Attempt target, Attempt chosen) {
-    if (target.intervals().size() <= 1) {
-      return chosen.headwaySeconds() + "s";
+  /**
+   * 搜索选中的间隔比目标宽在哪里。
+   *
+   * <p>有交路组时只列仍被放宽的组（逐组收紧后最小的组间隔已不能代表"放宽到多少"），没有时比总间隔。 一组也没放宽时为空：目标间隔下靠喂车方向多停就排开了，不能说成"回退"。
+   *
+   * @param targetIntervals 各组目标间隔
+   * @param targetHeadway 目标间隔
+   * @param chosenIntervals 选中的各组间隔
+   * @param chosenHeadway 选中的间隔
+   * @return 放宽的描述，如 {@code tight 120→210s}；没有放宽时为空
+   */
+  static Optional<String> widenedIntervals(
+      Map<String, Integer> targetIntervals,
+      int targetHeadway,
+      Map<String, Integer> chosenIntervals,
+      int chosenHeadway) {
+    if (targetIntervals.size() <= 1) {
+      return chosenHeadway > targetHeadway ? Optional.of(chosenHeadway + "s") : Optional.empty();
     }
-    List<String> relaxed = new ArrayList<>();
-    new TreeMap<>(target.intervals())
+    List<String> widened = new ArrayList<>();
+    new TreeMap<>(targetIntervals)
         .forEach(
             (group, seconds) -> {
-              int effective = chosen.intervals().getOrDefault(group, seconds);
+              int effective = chosenIntervals.getOrDefault(group, seconds);
               if (effective > seconds) {
-                relaxed.add(group + " " + seconds + "→" + effective + "s");
+                widened.add(group + " " + seconds + "→" + effective + "s");
               }
             });
-    return relaxed.isEmpty() ? chosen.headwaySeconds() + "s" : String.join("、", relaxed);
+    return widened.isEmpty() ? Optional.empty() : Optional.of(String.join("、", widened));
   }
 
   /** 交路形状：跑几班的交路各有多少条；运营者看它判断出入库班配得多不多。 */

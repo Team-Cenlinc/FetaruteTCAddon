@@ -165,6 +165,24 @@ class CorridorCatchUpTest {
             .isEmpty());
   }
 
+  /** 两车同一秒发车、同时进入共线段：让车修复会把其中一辆推到另一辆后面，谁先说不准，按快车被拖住算。 */
+  @Test
+  void aSimultaneousEntryCountsTheFastTrainAsCaught() {
+    UUID local = add(chain, "LOCAL", List.of(A, B, C, D, E), 30);
+    UUID rapid = add(chain, "RAPID", List.of(A, E), 0);
+
+    List<CorridorCatchUp.Caught> caught =
+        catchUp(chain)
+            .caught(
+                List.of(
+                    new TimetableConflictChecker.Movement("L1", local, 0),
+                    new TimetableConflictChecker.Movement("R1", rapid, 0)));
+
+    assertEquals(1, caught.size(), caught.toString());
+    assertEquals("R1", caught.get(0).code());
+    assertEquals(100, caught.get(0).seconds());
+  }
+
   /** 同一班快车被前面两班慢车先后挡住同一段：只记最狠的那一班。 */
   @Test
   void theWorstTrainAheadOnACorridorCounts() {

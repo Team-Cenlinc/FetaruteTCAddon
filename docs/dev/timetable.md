@@ -165,13 +165,14 @@ duty 跑完最后一班 → allowsLayoverReuse=false（不准再接运营班）
 duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在终点等下一班
 ```
 
-唯一的例外是**交路断了**：剩下的班次全都过了 `assign-tolerance-seconds`（它们的票都已作废，再没人会派这辆车），
-`allowsReturn` 放行（`TIMETABLE_DUTY_CONTINUATION_LOST`）。否则它会被自己交路的回库票以"还有班次"永远拒绝，只能在终点等兜底销毁。
+唯一的例外是**交路断了**：剩下的班次全都过了 `assign-tolerance-seconds`，也没有一张票还在等这辆车（再没人会派它），
+`allowsReturn` 放行（`TIMETABLE_DUTY_CONTINUATION_LOST`）。续班票等本交路的车时不按时刻作废（见下表"到期"），所以只看时刻不够：
+票还在等它，车晚点到了终点照样接这一班，不能先被回库闸放走。否则它会被自己交路的回库票以"还有班次"永远拒绝，只能在终点等兜底销毁。
 
 停在**正线折返点**（区间路径点，不是站台）或**单股道车站**（如 CHT，2026-09-30 起）的车另有一道更宽的闸 `allowsReturnFromMainlineTurnback`：除上面的情形外，
-本交路的**下一班**作废就放行（`TIMETABLE_DUTY_NEXT_TRIP_MISSED`），不等末班也作废——车停在正线上挡着后车，
+本交路的**下一班**过了容差、它的票也不在了就放行（`TIMETABLE_DUTY_NEXT_TRIP_MISSED`），不等末班也作废——车停在正线上挡着后车，
 而再下一次回到这个折返点发车要等一整个往返。这道闸只对由时刻表出票（`spawn-enabled: true`）的交路生效，由 `ReclaimManager` 的正线立即回收使用：
-确实没有从折返点出发的 RETURN 交路时原地销毁（见 `reclaim-policy.md`）。
+确实没有从折返点出发的 RETURN 交路时原地销毁（见 `reclaim-policy.md`）。终点没有任何回库线路的车站（原地折返的车站，如 NTA）同样用这道闸。
 
 `allowsLayoverReuse` 只作用于 OPERATION 票，`allowsReturn` 作用于表定 RETURN 票与 `ReclaimManager` 的回收（见 `reclaim-policy.md`）。
 没有第二道闸的话，按表发出的回库票会把正等着跑下一班的车送回车库，那一班就开了天窗。
@@ -297,28 +298,33 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
 
 **实测**（`CorridorCatchUp`，每次 build 都做）：两条交路的互斥资源序列从第一个共用资源起对齐、取逐个相同的一串（至少 4 个资源算一段；
 同一站不同股道出发、途中汇入都算；分开再汇合的算几段），后车相对前车至少要晚发 `max(前车离开第 k 个资源 − 后车进入第 k 个资源)`，
-晚不到这么多、且后车在这段上快出一个裕量以上，差额减去一个裕量就是快车被拖住的秒数。报告"相位"一节记一行
+晚不到这么多、且后车在这段上快出一个裕量以上，差额减去一个裕量就是快车被拖住的秒数；两车同时进入共线段的按快车被拖住算
+（让车修复会把其中一辆推到另一辆后面，谁先说不准）。只算快车交路（排进发车表、某段共线上明显更快的运营交路）的班次：
+出入库走行不停站，跟着慢车也会"被拖住"，但那不是快车。报告"相位"一节记一行
 `快车被卡（成品表实测）：X N 班、共 Ms（主要被 Y 拖住）`，没有就写"无"。量的是成品表（端点串行、让车之后）。
-没开错峰、又有快车被拖住时，保存草稿那一段多一个可点的 `[用快车错峰重建]`：填入的就是"按放宽后的间隔重建"那条命令再带上 `--rapid-stagger`，
-悬停说明被拖住的班次与秒数。
+有快车被拖住、而这次没有搜过错峰（没开，或开了但原表已放宽而没搜）时，保存草稿那一段多一个可点的 `[用快车错峰重建]`：
+填入的就是"按放宽后的间隔重建"那条命令再带上 `--rapid-stagger`，悬停说明被拖住的班次与秒数。
 
 **错峰**（`--rapid-stagger`，默认关）：快车的优先是周转，不是一定要比前车快——前车完全可以先走，快车自己错开。做法是用完整编表逐个试：
 
 1. 含快车的交路组整组平移（往返两个方向一起，车的周转不变），每 10 秒一档扫一个相对周期（与其它各组间隔的 gcd 的最小公倍数，
    prod 库 MT-3 720 秒对其余 360 秒就是 360 秒），再在最好的位置两侧各试 5 秒。每个候选照常带着喂车多停的搜索——
    周围接续的车加一点停站，往往正是错开快车的那一下；但不放宽间隔，目标间隔下排不开就淘汰。被卡 0 已经到底：
-   扫到第一段完全错开的窗口、把这段扫完就停，也不再试加停。
-2. 前三个最好的位置上，给仍被拖住的快车在那段共线之前的最后一个中途停车站加停 15/30/45/60 秒：两段共线各有各的空档时，
-   起点平移对不上第二段，中途停站可以。
+   扫到第一段完全错开的窗口、把这段扫完就停，后面的快车组不再扫，也不再试加停。
+2. 前三个最好的位置与原表上，给仍被拖住的快车在那段共线之前的最后一个中途停车站加停 15/30/45/60 秒：两段共线各有各的空档时，
+   起点平移对不上第二段，中途停站可以；所有平移都比原表差时，原表上加停可能才是最好的。
 3. 候选必须目标间隔下排得开、班次不比原表少、高峰车数不比原表多；在这些里取快车被卡秒数最少的，并列取让车少、改动小的。比原表好才换。
    报告"相位"一节记 `快车错峰：G 整组再平移 Δs、R 在 N 多停 Ds，快车被卡 A s → B s（a → b 班），试了 K 个位置，用时 T s`；
-   没有更好的就写"保持原表"。原表本身已放宽（目标间隔排不开）时不搜：候选只在目标间隔下比，每个位置都会失败。
+   没有更好的就写"保持原表"。原表本身已放宽（目标间隔排不开）时不搜：候选只在目标间隔下比，每个位置都会失败；报告给出按放宽后的间隔重编的按钮。
 
-每个候选都是一次完整构建，一次十几秒到半分钟（build 本来就在异步线程，不卡服）。prod 库上试了 10 个位置、约 3 分钟：
+每个候选都是一次完整构建，一次十几秒到半分钟（build 在后台线程，不阻塞主线程；核数少的主机上会和主线程抢 CPU）。prod 库上试了 10 个位置、约 3 分钟：
 MT-3 整组再平移 70 秒，搜索顺带让 WS-1L 在 HHU 多停 15 秒，快车被卡 14140 秒 → 0，班次 2616、高峰 18 列车不变、不放宽，
 运行时残余从 2569 处降到 0；代价是 WS-2N 发车间隔由均匀 360 秒变为 331/389 交替、MT-3 在南渡的折返停留中位 63 → 169 秒。表不常变，换取的是准确：
 第三层的周期评估估不准这件事——它看不到让车修复按"谁先进资源"把几乎同时发车的快车推到慢车后面，也看不到一个方向被推后之后、
-原地折返接续的反方向跟着晚发；实测周期评估选出的位置在成品表上仍有大半班次被卡，所以不在第三层里做。
+原地折返接续的反方向跟着晚发；周期评估选出的位置在成品表上仍有大半班次被卡，所以不在第三层里做。
+
+时刻表一律用服务器时区（`build` 不再接受 `--zone`，`config.yml` 也不再有 `timetable.zone`）：表上的时刻就是服务器钟面上的时刻。
+早先带时区编出的表把时区存在表里，运行时仍按它换算，重编后才换成服务器时区。
 
 ### 单股道端点：按资源串行
 
@@ -480,7 +486,7 @@ MT-3 整组再平移 70 秒，搜索顺带让 WS-1L 在 HHU 多停 15 秒，快�
   它所在线路自己的 headway 票照常发，我的表只是借它出库/回库。
 - 车辆归属不需要新逻辑：外方 CREATE 实体化的车接我的运营票时标签会改写成我的 route；交路绑定与标签无关。
 - 兜底：该回收却派不出 RETURN 票的车（例如滞留在外方终点）先跨 operator 找 RETURN（首站按站点 code / 裸节点 id / DYNAMIC 都能匹配），
-  仍找不到则滞留超过 `reclaim.stranded-destroy-seconds`（默认 1800，0 关闭）销毁；有乘客或有进行中折返事务的不碰。
+  确实没有一条从这里出发时当场销毁；有回库交路却一直派不出去则滞留超过 `reclaim.stranded-destroy-seconds`（默认 300，0 关闭）销毁；有乘客或有进行中折返事务的不碰。
 - **不支持**一辆车跨两份表接班（duty 里混两份表的 trip）：直通运转的正确表达是"一条 route 属于一条 line，路径跑到别人的资源上"。
 
 ### 服务规划与车辆周转是两件事
@@ -529,7 +535,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站停站）]
         [--separation <sec>] [--max-wait <sec>] [--max-idle <sec>] [--strict] [--rapid-stagger]
-        [--name "<name>"] [--prefix <p>] [--zone <zoneId>]
+        [--name "<name>"] [--prefix <p>]
 /fta timetable config <company> <operator> <line>          # 参数一览：生效值、来源与改它的入口
 /fta timetable neighbors <company> <operator> <line> <code>
 /fta timetable list <company> <operator> <line>
@@ -683,12 +689,15 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 | 钩子 | 规则 |
 | --- | --- |
 | 候选过滤 `acceptsVehicle` | 绑在某交路上的车只接同一交路的票；没绑交路的车只能接**首班**，续班与回库票都不接 |
-| 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），pending 与重试队列都适用，不走全局 max-age |
+| 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），pending 与重试队列都适用，不走全局 max-age。**例外**：续班票与回库票的交路有车在路上（`TimetableService#awaitsOwnVehicle`：车还绑在交路上、还没跑过这一班）时不到期，晚点就晚发；车被换下或离开运行时管辖后照常到期，外层仍有 `spawn.pending-layover-max-age-seconds` |
 | 派发回调 `onDispatched` | 出库票实体化的车、接了首班的车，立刻绑到交路上（`TIMETABLE_DUTY_BOUND`） |
 | 交路已有车 `runningVehicleFor` | 会新出一辆车的票（出库票；交路没有出库走行时的首班票）每次放出前都问：交路已经绑了车就作废（`TIMETABLE_SPAWN_SKIP reason=duty-already-running`）。同一交路同一时刻只能有一辆车（换车见下） |
 
 于是"接班没车"的语义是**等**：续班票在 pending 里等本交路那辆车到站（晚点就晚点跑），不抓别的交路的车，也不新出库；
-超过容差才作废。门控上首次绑定到带 duty 的车次时同样会建立交路绑定，所以自由运行的车一旦绑上表定车次，之后也只认自己的交路。
+车还在路上就一直等，交路没有车（没出库、被换下、被删）时超过容差才作废。
+以前续班票也按容差作废：车晚到 5 分钟以上，到终点时自己的下一班已经作废，无班可接；终点没有回库线路时（原地折返的南渡 NTA），
+它只能占着站台等 30 分钟的滞留兜底。2026-10-02 零点冷启动时 PPK 站台选反、两辆 MT-3 各晚约 4 分钟，先后困在 NTA 的两股道上，
+在这里折返的 MT-3 与 WS-2 全部进不来，全网堵到停服。门控上首次绑定到带 duty 的车次时同样会建立交路绑定，所以自由运行的车一旦绑上表定车次，之后也只认自己的交路。
 自由运行的车不会被表定回库票带走（否则本交路跑完的车会滞留在终点），它们仍由 `ReclaimManager` 的闲置回收处理。
 
 ### 交路换车（2026-09-30）
@@ -698,7 +707,8 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 
 - **换下**（`DutyLedger#vacate`，日志 `TIMETABLE_DUTY_VACATED`）：交路登记为空缺，从原来的车跑到的那一班接起；被换下的车记为退役，
   **不许再按时间绑回这个交路**（`TIMETABLE_DUTY_BIND_REFUSED`），否则同一交路两辆车；它绑上别的交路（接首班）就回到正常运营。它正在跑的这一趟照常跑完、到站、结账。两个时机：
-  - 交路的**下一班已过发车容差**（每轮出票时扫一遍），且替补车赶得上后面某一班（`reason=next-trip-missed`）；
+  - 交路的**下一班已过发车容差、它的票也不在了**（每轮出票时扫一遍），且替补车赶得上后面某一班（`reason=next-trip-missed`）。
+    续班票等本交路的车时不到期，车还在路上就不会走到这一条：换下它会让这一班的票立即作废，而它本来会晚点把这一班跑掉；
   - **晚点超过容差 + 120 秒**（`TimetableService.VACATE_MARGIN`：停站压缩与超速每趟约追回一到两分钟，超出这段追不回来），且替补车赶得上它的**下一班**——
     不等下一班作废，替补车早一点出库（`reason=late-<秒>s`）。替补只赶得上更后面的班次时不提前换：原车晚点跑下一班也许还在容差内（终点有折返余量时）。
   替补车赶不上时不换：换了只会让原车连后面还接得上的班次也跑不了。停在正线折返点或单股道车站、接不上下一班的车照旧立即回收（见 `reclaim-policy.md`），
@@ -820,7 +830,7 @@ planned segment duration   vs   actual segment duration
 | `RECLAIM_STRANDED_DESTROY` / `RECLAIM_STRANDED_DESTROY_FAILED` / `RECLAIM_STRANDED_SKIP` | 该回收却派不出 RETURN 票的待命车滞留超过 `reclaim.stranded-destroy-seconds` 被销毁 / 销毁失败 / 跳过（`reason=has-passengers` 或 `reason=dispatch-attempt-in-progress`）。完整策略见 `reclaim-policy.md` |
 | `RECLAIM_MAINLINE_DESTROY` / `RECLAIM_MAINLINE_DESTROY_FAILED` / `RECLAIM_MAINLINE_SKIP` | 停在正线折返点、接不上下一班又没有从那里出发的 RETURN 交路的车原地销毁 / 销毁失败 / 跳过（原因同上） |
 | `TIMETABLE_DUTY_CLOSED` | 某辆车交路额度用完，复用被否决 |
-| `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票（或回收）被否决、车留在终点 |
+| `TIMETABLE_RETURN_DENIED` | 某辆车交路还没跑完，回库票（或回收）被否决、车留在终点；同车同一进度只记一次，进度变了或放行过再记 |
 | `TIMETABLE_DUTY_CONTINUATION_LOST` | 交路剩下的班次都已过了容差，放它回库 |
 | `TIMETABLE_DUTY_NEXT_TRIP_MISSED` | 停在正线折返点的车，本交路下一班已过了容差，放它立即回收（多为原地销毁，`RECLAIM_MAINLINE_DESTROY`） |
 | `TIMETABLE_DUTY_BOUND` / `TIMETABLE_DUTY_BIND_CONFLICT` | 车绑到交路上 / 已绑别的交路（错派的车暴露在这里） |

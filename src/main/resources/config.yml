@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 37
+config-version: 38
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -248,9 +248,9 @@ reclaim:
   max-active-trains: 50
   # 回收扫描间隔（秒）
   check-interval-seconds: 60
-  # 需要回收却找不到可用回库线路的待命车（常见于停在其他运营商终点的直通车），滞留超过该秒数后直接销毁。
-  # 只销毁无乘客、无进行中折返的列车；0 表示不销毁，同时关闭按表运行时"正线折返点接不上下一班即销毁"
-  stranded-destroy-seconds: 1800
+  # 需要回收、有回库线路却一直派不出去的待命车，滞留超过该秒数后直接销毁；终点确实没有回库线路时当场销毁，不等这个时长。
+  # 只销毁无乘客、无进行中折返的列车；0 表示不销毁（包括没有回库线路时的当场销毁）
+  stranded-destroy-seconds: 300
 
 # 时刻表：录制实测运行时分，编排成时刻表后按表运行（/fta timetable）。
 # 各开关默认关闭。启用前请先用 /fta timetable build 查看区间运行时分的离散程度（p90 与中位数之比）：
@@ -286,8 +286,6 @@ timetable:
     engage-delay-seconds: 10
   # 录制数据写入数据库的间隔（秒）
   recorder-flush-interval-seconds: 5
-  # 时刻表时区（如 Asia/Shanghai），留空使用服务器时区。修改后全部已发布时刻表的实际时刻会整体平移
-  zone: ""
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

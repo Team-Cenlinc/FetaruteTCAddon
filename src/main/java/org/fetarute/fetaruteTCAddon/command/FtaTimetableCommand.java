@@ -118,7 +118,6 @@ public final class FtaTimetableCommand {
 
     CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
     var nameFlag = stringFlag("name", "\"<name>\"");
-    var zoneFlag = stringFlag("zone", "<zoneId>");
     var prefixFlag = stringFlag("prefix", "<tripCodePrefix>");
     var startFlag = stringFlag("start", "<HH:mm>");
     var endFlag = stringFlag("end", "<HH:mm>");
@@ -176,7 +175,6 @@ public final class FtaTimetableCommand {
             .flag(rapidStaggerFlag)
             .flag(nameFlag)
             .flag(prefixFlag)
-            .flag(zoneFlag)
             .handler(
                 ctx ->
                     handleBuild(
@@ -202,8 +200,7 @@ public final class FtaTimetableCommand {
                             ctx.flags().isPresent(strictFlag),
                             ctx.flags().isPresent(rapidStaggerFlag),
                             ctx.flags().getValue(nameFlag).orElse(null),
-                            ctx.flags().getValue(prefixFlag).orElse(null),
-                            ctx.flags().getValue(zoneFlag).orElse(null)))));
+                            ctx.flags().getValue(prefixFlag).orElse(null)))));
 
     manager.command(
         manager
@@ -343,7 +340,7 @@ public final class FtaTimetableCommand {
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
                 + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict"
-                + " --rapid-stagger --name --prefix --zone",
+                + " --rapid-stagger --name --prefix",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("参数一览", "/fta timetable config <company> <operator> <line>"));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
@@ -377,11 +374,8 @@ public final class FtaTimetableCommand {
       sender.sendMessage(Component.text("时刻表 code 不能为空。", NamedTextColor.RED));
       return;
     }
-    ZoneId zone = resolveZone(flags.zone());
-    if (zone == null) {
-      sender.sendMessage(Component.text("无法识别的时区：" + flags.zone(), NamedTextColor.RED));
-      return;
-    }
+    // 时刻表一律用服务器时区：表上的时刻就是服务器钟面上的时刻。
+    ZoneId zone = ZoneId.systemDefault();
     Optional<Integer> start = parseClock(flags.start());
     Optional<Integer> end = parseClock(flags.end());
     if ((flags.start() != null && start.isEmpty()) || (flags.end() != null && end.isEmpty())) {
@@ -568,7 +562,7 @@ public final class FtaTimetableCommand {
             joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY));
     if (flags.rapidStagger()) {
       sender.sendMessage(
-          Component.text("已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟，期间不影响服务器运行。", NamedTextColor.GRAY));
+          Component.text("已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟；在后台线程运行，不阻塞服务器主线程。", NamedTextColor.GRAY));
     }
     Instant builtAt = Instant.now();
     TimetableHeadwayDefaults.Choice headwayChoice = headway;
@@ -2788,18 +2782,6 @@ public final class FtaTimetableCommand {
     return ctx.flags().getValue(flag).orElse(fallback);
   }
 
-  /** 时区解析失败返回 {@code null}，由调用方给出字段级报错；不静默回退，那会让整张表整体平移。 */
-  private static ZoneId resolveZone(String raw) {
-    if (raw == null || raw.isBlank()) {
-      return ZoneId.systemDefault();
-    }
-    try {
-      return ZoneId.of(raw.trim());
-    } catch (java.time.DateTimeException ignored) {
-      return null;
-    }
-  }
-
   private static boolean matches(String value, String prefix) {
     return value != null && (prefix.isBlank() || value.toLowerCase(Locale.ROOT).startsWith(prefix));
   }
@@ -2857,7 +2839,6 @@ public final class FtaTimetableCommand {
    * @param rapidStagger 快车错峰搜索：逐个试快车组的平移与停站、按成品表实测挑（慢）
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
-   * @param zone 时区
    */
   private record BuildFlags(
       Integer headwaySeconds,
@@ -2874,6 +2855,5 @@ public final class FtaTimetableCommand {
       boolean strict,
       boolean rapidStagger,
       String name,
-      String tripCodePrefix,
-      String zone) {}
+      String tripCodePrefix) {}
 }

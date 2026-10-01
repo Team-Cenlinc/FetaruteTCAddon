@@ -1232,7 +1232,6 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofSeconds(settings.holdMaxSeconds()),
             java.time.Duration.ofSeconds(settings.assignToleranceSeconds()),
             java.time.Duration.ofSeconds(settings.maxCatchUpSeconds()),
-            settings.resolveZone(),
             // 到站事件在列车停稳后发出，表定到达是压牌时刻：两者差"车站停车开销 − 开门延迟"（居中刹停）。
             java.time.Duration.ofSeconds(
                 Math.max(
@@ -1427,6 +1426,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
       simpleAssigner.setLayoverCandidateFilter(scheduled::acceptsCandidate);
       simpleAssigner.setTicketExpiry(scheduled::expiryOf);
       simpleAssigner.setDispatchListener(scheduled::onDispatched);
+      if (timetableService != null) {
+        timetableService.setPendingTicketProbe(scheduled::hasPendingTicket);
+      }
+    } else if (timetableService != null) {
+      timetableService.setPendingTicketProbe(null);
     }
     if (etaService != null) {
       etaService.attachTicketSources(spawnManager, spawnTicketAssigner);
@@ -1479,6 +1483,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 交路已换车的车再也没有班可跑：闲置一个短门槛就回收，不占着站台等闲置上限。
     reclaimManager.setRetiredVehicle(
         timetableService == null ? null : timetableService::retiredFromDuty);
+    // 绑着交路的车停在没有回库线路的车站（原地折返）：接不上本交路的下一班就再也走不了，与正线折返点同一条立即回收规则。
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetable =
+        timetableService;
+    reclaimManager.setDutyBound(
+        timetable == null ? null : trainName -> timetable.dutyBindingOf(trainName).isPresent());
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
     }
