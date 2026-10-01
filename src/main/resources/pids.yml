@@ -51,19 +51,19 @@ appearance:
 broadcast:
   # 播报总开关
   enabled: true
-  # 玩家到来源屏幕的最大距离（方块）
-  range-blocks: 12
-  # 同一事件对同一玩家只播一次的去重窗口（秒）
-  dedupe-seconds: 20
-  # 进站播报的提前量（秒）
+  # 全站广播：离玩家最近的已加载站台屏只用来认车站，全站各站台的事件都播报，每条带站台号。
+  # 玩家离最近的已加载站台屏不超过这个距离（方块）才算在站内；正在乘车的玩家不收站台广播
+  range-blocks: 32
+  # 同一条播报对同一玩家只播一次。播报仍有效时一直记着；班次取消与严重晚点失效后再记这么久（秒），
+  # 进站与通过固定再记 2 分钟（循环运行的同一列车几分钟后再到同一站要照常播报）
+  dedupe-seconds: 600
+  # 进站播报的提前量（秒）：预计到达前这么久即播报
   arriving-lead-seconds: 30
-  # 各类触发的开关
+  # 各类播报的开关：进站与通过列车显示在 ActionBar，班次取消与严重晚点（5 分钟以上）发到聊天
   trigger-arriving: true
-  trigger-arrived: true
-  trigger-departing: true
+  trigger-passing: true
   trigger-cancelled: true
   trigger-delayed: true
-  trigger-transfer: true
-  # 播报通道
+  # 播报通道：文字（ActionBar 与聊天）与提示音（声源为来源屏幕）
   channel-text: true
   channel-sound: true

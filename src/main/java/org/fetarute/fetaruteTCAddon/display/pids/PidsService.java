@@ -26,6 +26,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
+import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
@@ -94,6 +95,7 @@ public final class PidsService {
   private final PidsItems items;
   private final PidsFrames frames;
   private final PidsAccess access;
+  private final PidsAnnouncer announcer;
 
   /** 本次运行中拆除的屏幕：区块加载时只自动还原这些屏幕的展示框。 */
   private final Set<UUID> removedThisRun = ConcurrentHashMap.newKeySet();
@@ -143,6 +145,15 @@ public final class PidsService {
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
+    this.announcer =
+        PidsAnnouncer.create(
+            plugin,
+            registry::all,
+            snapshots::snapshot,
+            directory,
+            locale::text,
+            () -> settings,
+            clock);
   }
 
   /**
@@ -166,6 +177,7 @@ public final class PidsService {
         Bukkit.getScheduler()
             .runTaskTimerAsynchronously(
                 plugin, this::refreshDirectory, 0L, DIRECTORY_REFRESH_TICKS);
+    announcer.start();
   }
 
   public void stop() {
@@ -173,6 +185,7 @@ public final class PidsService {
       directoryTask.cancel();
       directoryTask = null;
     }
+    announcer.stop();
   }
 
   /** 重建名称目录；连续失败只在第一次告警，恢复后再失败会再次告警。 */
@@ -212,6 +225,11 @@ public final class PidsService {
 
   public PidsComposer composer() {
     return composer;
+  }
+
+  /** 站台广播。 */
+  public PidsAnnouncer announcer() {
+    return announcer;
   }
 
   public PidsSettings settings() {

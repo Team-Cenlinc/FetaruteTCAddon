@@ -17,6 +17,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
+import org.fetarute.fetaruteTCAddon.command.FtaAnnounceCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
@@ -396,6 +397,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   /** 站台屏服务依赖公开 API，须在 {@link #initApi()} 之后（重）建；地图显示每次现取服务，不持有旧实例。 */
   private void initPidsService() {
+    PidsService previous = pidsService;
     if (pidsService != null) {
       pidsService.stop();
       pidsService = null;
@@ -419,6 +421,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
               loggerManager,
               storageManager.provider(),
               api.get());
+      if (previous != null) {
+        service.announcer().continueFrom(previous.announcer());
+      }
       service.start();
       pidsService = service;
     } catch (RuntimeException ex) {
@@ -556,6 +561,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaTimetableCommand(this).register(commandManager);
     new FtaPidsCommand(this).register(commandManager);
     new FtaTripCommand(this).register(commandManager);
+    new FtaAnnounceCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
     var bukkitCommand = getCommand("fta");

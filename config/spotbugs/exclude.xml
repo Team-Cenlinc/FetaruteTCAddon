@@ -162,6 +162,16 @@
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaTripCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <!-- 站台广播：命令持有插件句柄；站台屏服务对外提供广播服务本身（生命周期随站台屏服务） -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaAnnounceCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.pids.PidsService"/>
+        <Method name="announcer"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Or>
             <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet"/>

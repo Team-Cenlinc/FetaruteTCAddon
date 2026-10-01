@@ -108,11 +108,9 @@ public record PidsSettings(
                 "broadcast.arriving-lead-seconds", broadcastDefault.arrivingLeadSeconds()),
             new BroadcastTriggers(
                 reader.bool("broadcast.trigger-arriving", true),
-                reader.bool("broadcast.trigger-arrived", true),
-                reader.bool("broadcast.trigger-departing", true),
+                reader.bool("broadcast.trigger-passing", true),
                 reader.bool("broadcast.trigger-cancelled", true),
-                reader.bool("broadcast.trigger-delayed", true),
-                reader.bool("broadcast.trigger-transfer", true)),
+                reader.bool("broadcast.trigger-delayed", true)),
             reader.bool("broadcast.channel-text", broadcastDefault.channelText()),
             reader.bool("broadcast.channel-sound", broadcastDefault.channelSound()));
 
@@ -323,33 +321,27 @@ public record PidsSettings(
   }
 
   /**
-   * 播报触发开关。
+   * 播报触发开关。进站、通过走 ActionBar，取消、严重晚点走聊天。
    *
-   * @param arriving 进站（即将到达）
-   * @param arrived 到站
-   * @param departing 发车
-   * @param cancelled 取消
-   * @param delayed 晚点
-   * @param transfer 换乘
+   * @param arriving 列车即将进站
+   * @param passing 有列车通过
+   * @param cancelled 班次取消
+   * @param delayed 严重晚点（达到 {@link
+   *     org.fetarute.fetaruteTCAddon.display.Lateness#SEVERELY_LATE_SECONDS}）
    */
   public record BroadcastTriggers(
-      boolean arriving,
-      boolean arrived,
-      boolean departing,
-      boolean cancelled,
-      boolean delayed,
-      boolean transfer) {}
+      boolean arriving, boolean passing, boolean cancelled, boolean delayed) {}
 
   /**
-   * 播报策略。
+   * 播报策略。全站广播：离玩家最近的已加载屏幕只用来认车站，全站各站台的事件都播报，每条带站台号。
    *
    * @param enabled 播报总开关
-   * @param rangeBlocks 玩家到来源屏幕的最大距离（方块）
-   * @param dedupeSeconds 同一事件对同一玩家只播一次的去重窗口（秒）
-   * @param arrivingLeadSeconds 进站播报的提前量（秒）
+   * @param rangeBlocks 玩家离最近的已加载站台屏不超过这个距离（方块）才算在站内
+   * @param dedupeSeconds 同一条播报对同一玩家只播一次：仍有效时一直记着，取消与严重晚点失效后再记这么久（秒）；进站与通过固定再记 2 分钟
+   * @param arrivingLeadSeconds 进站播报的提前量（秒）：预计到达前这么久即播报，进站状态的列车随时播报
    * @param triggers 各类触发的开关
-   * @param channelText 是否启用文字通道
-   * @param channelSound 是否启用声音通道
+   * @param channelText 是否启用文字通道（ActionBar 与聊天）
+   * @param channelSound 是否启用提示音（声源为来源屏幕）
    */
   public record BroadcastSettings(
       boolean enabled,
@@ -363,13 +355,7 @@ public record PidsSettings(
     /** 内置默认值：全部触发与通道开启。 */
     public static final BroadcastSettings DEFAULT =
         new BroadcastSettings(
-            true,
-            12,
-            20,
-            30,
-            new BroadcastTriggers(true, true, true, true, true, true),
-            true,
-            true);
+            true, 32, 600, 30, new BroadcastTriggers(true, true, true, true), true, true);
 
     /** 保证触发开关不为 {@code null}。 */
     public BroadcastSettings {

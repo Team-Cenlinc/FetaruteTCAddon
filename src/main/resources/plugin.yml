@@ -53,6 +53,9 @@ permissions:
   fetarute.trip:
     description: 查看所乘列车的后续站点（/fta trip）
     default: true
+  fetarute.announce:
+    description: 开启或关闭自己的站台广播（/fta announce）
+    default: true
   fetarute.template:
     description: HUD 模板管理（/fta template）
     default: op
