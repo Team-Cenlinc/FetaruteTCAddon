@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -98,6 +99,42 @@ public record TimetableBuildResult(
     dutyShapes = dutyShapes == null ? List.of() : List.copyOf(dutyShapes);
     phaseNotes = phaseNotes == null ? List.of() : List.copyOf(phaseNotes);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
+  }
+
+  /** 同一份结果，相位说明末尾追加一行。 */
+  public TimetableBuildResult withPhaseNote(String note) {
+    List<String> notes = new ArrayList<>(phaseNotes);
+    notes.add(note);
+    return new TimetableBuildResult(
+        timetable,
+        shares,
+        infeasibleRoutes,
+        droppedTrips,
+        dutyCount,
+        plannedVehicles,
+        peakConcurrentVehicles,
+        maxTripsInAnyDuty,
+        maxDutyDurationSeconds,
+        allDutiesReturnToStorage,
+        longestTripSeconds,
+        targetHeadwaySeconds,
+        effectiveHeadwaySeconds,
+        conflictsAtTarget,
+        neighbors,
+        baselines,
+        shifts,
+        yields,
+        terminals,
+        throats,
+        groupIntervals,
+        interleaves,
+        dutyShapes,
+        notes,
+        absorbable,
+        unabsorbable,
+        resourcePhaseNotes,
+        residues,
+        warnings);
   }
 
   /** 目标 headway 下与邻表撞上的冲突。 */
