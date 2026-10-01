@@ -71,6 +71,29 @@ class PidsMapPaletteTest {
   }
 
   @Test
+  // 渲染器产出的 INT_RGB 整图直接读底层数组；结果必须与走 getRGB 的其他图像类型一致，帧里颜色多到要扩表也一样。
+  void directPixelReadMatchesTheGenericPath() {
+    int width = 40;
+    int height = 30;
+    BufferedImage rgb = new BufferedImage(width, height, BufferedImage.TYPE_INT_RGB);
+    BufferedImage argb = new BufferedImage(width, height, BufferedImage.TYPE_INT_ARGB);
+    for (int y = 0; y < height; y++) {
+      for (int x = 0; x < width; x++) {
+        int color = ((x * 37) << 16) | ((y * 53) << 8) | ((x * y) & 0xFF);
+        rgb.setRGB(x, y, color);
+        argb.setRGB(x, y, 0xFF000000 | color);
+      }
+    }
+    byte[] direct = new byte[width * height];
+    byte[] generic = new byte[width * height];
+
+    PALETTE.convert(rgb, direct);
+    PALETTE.convert(argb, generic);
+
+    assertArrayEquals(generic, direct);
+  }
+
+  @Test
   void rejectsForeignCodesAndShortBuffers() {
     PidsMapPalette tiny = new PidsMapPalette(new byte[] {4}, new int[] {0x000000});
 

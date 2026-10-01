@@ -16,7 +16,6 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BiConsumer;
-import java.util.function.Consumer;
 import net.kyori.adventure.text.event.ClickCallback;
 import org.bukkit.Bukkit;
 import org.bukkit.Material;
@@ -32,14 +31,9 @@ import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.persistence.PersistentDataType;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
-import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -91,27 +85,14 @@ public final class TripDialogService implements Listener {
   /** 各玩家上次打开的时刻，用于冷却。 */
   private final Map<UUID, Instant> lastOpened = new ConcurrentHashMap<>();
 
+  /**
+   * @param resolver 与车内 HUD 共用的上下文解析器
+   */
   public TripDialogService(
-      FetaruteTCAddon plugin,
-      LocaleManager locale,
-      EtaService etaService,
-      RouteDefinitionCache routeDefinitions,
-      RouteProgressRegistry routeProgressRegistry,
-      LayoverRegistry layoverRegistry,
-      HudTemplateService templateService,
-      Consumer<String> debugLogger) {
+      FetaruteTCAddon plugin, LocaleManager locale, TrainHudContextResolver resolver) {
     this.plugin = plugin;
     this.locale = locale;
-    this.resolver =
-        new TrainHudContextResolver(
-            plugin,
-            locale,
-            etaService,
-            routeDefinitions,
-            routeProgressRegistry,
-            layoverRegistry,
-            templateService,
-            debugLogger);
+    this.resolver = resolver;
     this.usedKey = new NamespacedKey(plugin, "trip_dialog_used");
     this.swapHandKey = plugin.getConfig().getBoolean("runtime.hud.trip-dialog.swap-hand-key", true);
   }

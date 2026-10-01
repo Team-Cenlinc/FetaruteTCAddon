@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
+import java.awt.image.BufferedImage;
 import java.time.Instant;
 import java.time.InstantSource;
 import java.time.ZoneId;
@@ -36,7 +37,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
+import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrameCache;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrames;
+import org.fetarute.fetaruteTCAddon.display.pids.map.PidsMapPalette;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsFonts;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsRenderer;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsFacing;
@@ -102,6 +105,10 @@ public final class PidsService {
   private final PidsFrames frames;
   private final PidsAccess access;
   private final PidsAnnouncer announcer;
+
+  /** 换算好的调色板帧，各屏共享；上限约等于 65 块 3×5 统屏或 340 块 1×3 站台屏的整帧。 */
+  private final PidsFrameCache frameCache = new PidsFrameCache(16L * 1024 * 1024);
+
   private final Listener cancellationListener = new CancellationListener();
 
   /** 本次运行中拆除的屏幕：区块加载时只自动还原这些屏幕的展示框。 */
@@ -218,6 +225,30 @@ public final class PidsService {
   /** 见 {@link PidsComposer#content}。 */
   public Optional<PidsContent> content(Optional<UUID> screenId, int width, int height) {
     return composer.content(screenId, width, height);
+  }
+
+  /**
+   * 内容的调色板帧：同一内容在各屏间共享，缓存里没有才渲染、换算。尺寸与要求不符时返回空数组（画面不变）。
+   *
+   * @param content 内容
+   * @param width 宽（像素）
+   * @param height 高（像素）
+   * @return 只读的帧，长度为 {@code width × height}；渲染尺寸不符时为空数组
+   */
+  public byte[] frame(PidsContent content, int width, int height) {
+    return frameCache.frame(
+        content.key(),
+        width,
+        height,
+        () -> {
+          BufferedImage image = content.image().get();
+          if (image.getWidth() != width || image.getHeight() != height) {
+            return new byte[0];
+          }
+          byte[] out = new byte[width * height];
+          PidsMapPalette.minecraft().convert(image, out);
+          return out;
+        });
   }
 
   public PidsItems items() {

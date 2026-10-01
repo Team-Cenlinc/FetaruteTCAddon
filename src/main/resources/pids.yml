@@ -9,8 +9,6 @@ enabled: true
 render:
   # 每隔多少 tick 比对一次将显示的文本，文本变化才重绘（20 tick = 1 秒）
   check-interval-ticks: 20
-  # 兜底强制刷新间隔（秒）；多页轮播时每次翻页本身就是一次完整重绘
-  force-refresh-seconds: 30
   # 同一车站的到发快照缓存时间（秒），多块屏共用一次查询
   snapshot-ttl-seconds: 5
   # 预测窗口（分钟）：只展示该时间内到发的列车

@@ -73,7 +73,7 @@ class PidsCarouselTest {
   @Test
   void zeroNoticeSecondsDisablesCourtesyPagesButKeepsTheSafetyPage() {
     PidsCarousel carousel = new PidsCarousel();
-    PidsSettings.RenderSettings quiet = new PidsSettings.RenderSettings(20, 30, 5, 30, 12, 0, 15);
+    PidsSettings.RenderSettings quiet = new PidsSettings.RenderSettings(20, 5, 30, 12, 0, 15);
     UUID screen = UUID.randomUUID();
     Instant at = roundStart().plusSeconds(13);
 

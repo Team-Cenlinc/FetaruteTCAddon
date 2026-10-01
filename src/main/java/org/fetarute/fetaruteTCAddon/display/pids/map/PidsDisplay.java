@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.display.pids.map;
 
 import com.bergerkiller.bukkit.common.map.MapDisplay;
 import com.bergerkiller.bukkit.common.map.MapSessionMode;
-import java.awt.image.BufferedImage;
 import java.util.ArrayDeque;
 import java.util.List;
 import java.util.Optional;
@@ -15,8 +14,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
  * <ul>
  *   <li>{@link MapSessionMode#VIEWING}：没人看时 BKC 结束会话，不占任何开销；有人走近再重新创建。
  *   <li>每隔 {@code render.check-interval-ticks} 问一次服务该显示什么；内容标识与上次相同就什么都不做。
- *   <li>内容变了才渲染整帧、换成调色板字节，与已写入画布的帧比对，按地图块得出变化的矩形（{@link PidsFrameDiff}）。 集中的一次写完；散在各处的每 tick 写一块，免得
- *       BKC 把它们合成一个大矩形、连中间没变的地图一起重发。
+ *   <li>内容变了才取帧：换算好的调色板帧按内容标识在各屏间共享（{@link PidsFrameCache}），缓存里没有才渲染整帧、换算；
+ *       再与已写入画布的帧比对，按地图块得出变化的矩形（{@link PidsFrameDiff}）。 集中的一次写完；散在各处的每 tick 写一块，免得 BKC
+ *       把它们合成一个大矩形、连中间没变的地图一起重发。
  *   <li>服务每次现取：{@code /fta reload} 会换掉服务实例（字体、配置都可能变），换了就整帧重画。取不到服务时保持原画面。
  * </ul>
  *
@@ -85,21 +85,19 @@ public class PidsDisplay extends MapDisplay {
             PidsFrames.parse(properties.get(PidsFrames.SCREEN_PROPERTY, String.class)),
             getWidth(),
             getHeight())
-        .ifPresent(this::show);
+        .ifPresent(content -> show(service.get(), content));
   }
 
-  private void show(PidsContent content) {
+  private void show(PidsService service, PidsContent content) {
     if (content.key().equals(shownKey)) {
       return;
     }
     int width = getWidth();
     int height = getHeight();
-    BufferedImage image = content.image().get();
-    if (image.getWidth() != width || image.getHeight() != height) {
+    byte[] next = service.frame(content, width, height);
+    if (next.length != width * height) {
       return;
     }
-    byte[] next = new byte[width * height];
-    PidsMapPalette.minecraft().convert(image, next);
     target = next;
     shownKey = content.key();
     pending.clear();

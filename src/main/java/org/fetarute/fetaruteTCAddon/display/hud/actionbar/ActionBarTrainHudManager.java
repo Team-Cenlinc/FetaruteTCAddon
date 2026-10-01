@@ -5,6 +5,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
@@ -20,10 +21,6 @@ import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
@@ -76,10 +73,7 @@ public final class ActionBarTrainHudManager implements Listener {
       FetaruteTCAddon plugin,
       LocaleManager locale,
       ConfigManager configManager,
-      EtaService etaService,
-      RouteDefinitionCache routeDefinitions,
-      RouteProgressRegistry routeProgressRegistry,
-      LayoverRegistry layoverRegistry,
+      TrainHudContextResolver contextResolver,
       HudTemplateService templateService,
       HudDefaultTemplateService defaultTemplateService,
       Consumer<String> debugLogger) {
@@ -89,16 +83,7 @@ public final class ActionBarTrainHudManager implements Listener {
     this.templateService = templateService;
     this.defaultTemplateService = defaultTemplateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
-    this.contextResolver =
-        new TrainHudContextResolver(
-            plugin,
-            locale,
-            etaService,
-            routeDefinitions,
-            routeProgressRegistry,
-            layoverRegistry,
-            templateService,
-            this.debugLogger);
+    this.contextResolver = Objects.requireNonNull(contextResolver, "contextResolver");
   }
 
   public void register() {

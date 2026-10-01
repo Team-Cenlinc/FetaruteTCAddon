@@ -16,6 +16,7 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.HashMap;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -27,6 +28,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -50,6 +52,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
@@ -97,6 +100,21 @@ public final class TrainHudContextResolver {
   private final Map<String, Map<RoutePatternType, String>> patternTextByLocale = new HashMap<>();
   private final Map<String, EtaStatusTemplates> etaStatusByLocale = new HashMap<>();
 
+  /** 交路停靠表里不随列车变化的部分，按交路缓存，见 {@link StopTable}。 */
+  private final Map<RouteId, StopTable> stopTables = new HashMap<>();
+
+  /**
+   * 同一 tick 内的结果复用：三块 HUD 的刷新落在同一个 tick，同一列车上的乘客看的是同一份上下文与占位符。 tick 变了整体作废； tick 来源给负数时不复用。只在主线程使用。
+   */
+  private final LongSupplier tickSource;
+
+  private long memoTick = Long.MIN_VALUE;
+  private final Map<String, Optional<TrainHudContext>> contextMemo = new HashMap<>();
+  private final Map<TrainHudContext, Map<String, String>> placeholderMemo = new IdentityHashMap<>();
+  private final Map<TrainHudContext, List<StopInfo>> upcomingMemo = new IdentityHashMap<>();
+  private final Map<TrainHudContext, Map<Integer, UpcomingStop>> upcomingStopMemo =
+      new IdentityHashMap<>();
+
   private static final String ETA_STATUS_PREFIX = "display.hud.eta.status.";
   private static final EtaStatusTemplates DEFAULT_ETA_STATUS =
       new EtaStatusTemplates(
@@ -111,6 +129,33 @@ public final class TrainHudContextResolver {
       LayoverRegistry layoverRegistry,
       HudTemplateService templateService,
       Consumer<String> debugLogger) {
+    this(
+        plugin,
+        locale,
+        etaService,
+        routeDefinitions,
+        routeProgressRegistry,
+        layoverRegistry,
+        templateService,
+        debugLogger,
+        () -> -1L);
+  }
+
+  /**
+   * 运行时用这个构造器传入服务器 tick（{@code Bukkit::getCurrentTick}），同一 tick 内复用结果；上面的构造器不复用。
+   *
+   * @param tickSource 当前 tick；负数表示不复用
+   */
+  public TrainHudContextResolver(
+      FetaruteTCAddon plugin,
+      LocaleManager locale,
+      EtaService etaService,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry routeProgressRegistry,
+      LayoverRegistry layoverRegistry,
+      HudTemplateService templateService,
+      Consumer<String> debugLogger,
+      LongSupplier tickSource) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.locale = locale;
     this.etaService = Objects.requireNonNull(etaService, "etaService");
@@ -119,6 +164,20 @@ public final class TrainHudContextResolver {
     this.layoverRegistry = Optional.ofNullable(layoverRegistry);
     this.templateService = templateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
+    this.tickSource = Objects.requireNonNull(tickSource, "tickSource");
+  }
+
+  /** tick 变了（或取不到 tick）时作废同 tick 复用的结果。 */
+  private void syncMemo() {
+    long tick = tickSource.getAsLong();
+    if (tick >= 0 && tick == memoTick) {
+      return;
+    }
+    memoTick = tick;
+    contextMemo.clear();
+    placeholderMemo.clear();
+    upcomingMemo.clear();
+    upcomingStopMemo.clear();
   }
 
   /** 从玩家载具链路反查 TrainCarts 编组。 */
@@ -142,13 +201,21 @@ public final class TrainHudContextResolver {
     return Optional.empty();
   }
 
-  /** 构造 HUD 上下文（若不是 FTA 管控列车则返回 empty）。 */
+  /** 构造 HUD 上下文（若不是 FTA 管控列车则返回 empty）；同一 tick 内同一列车只算一次。 */
   public Optional<TrainHudContext> resolveContext(MinecartGroup group) {
     if (group == null) {
       return Optional.empty();
     }
-    return resolveContext(
-        group.getProperties(), group.isMoving(), resolveSpeedBlocksPerSecond(group));
+    TrainProperties properties = group.getProperties();
+    String trainName = properties == null ? null : properties.getTrainName();
+    syncMemo();
+    if (trainName == null || trainName.isBlank() || memoTick < 0) {
+      return resolveContext(properties, group.isMoving(), resolveSpeedBlocksPerSecond(group));
+    }
+    return contextMemo.computeIfAbsent(
+        trainName,
+        ignored ->
+            resolveContext(properties, group.isMoving(), resolveSpeedBlocksPerSecond(group)));
   }
 
   /**
@@ -210,12 +277,7 @@ public final class TrainHudContextResolver {
 
     EtaResult eta = etaService.getForTrain(trainName, EtaTarget.nextStop());
     List<TrainHudContext.Transfer> nextStopTransfers =
-        nextStopOpt
-            .map(
-                next ->
-                    resolveTransfers(
-                        next.nodeId(), routeStops, next.stopIndex(), routeLine, currentLine))
-            .orElse(List.of());
+        nextStopOpt.map(next -> transfersOf(next.info(), currentLine)).orElse(List.of());
     OptionalLong nextStopDelay =
         nextStopOpt
             .filter(NextStop::ahead)
@@ -371,77 +433,152 @@ public final class TrainHudContextResolver {
   }
 
   /**
-   * 解析“未来几站”列表，用于 Scoreboard/LCD 渲染。
+   * 前方停靠列表（车内显示屏、后续站点对话框）：前 {@code limit} 站带 ETA、晚点与换乘，{@code total} 为前方停靠站总数。
    *
    * <p>limit=0 仅返回 total 计数，不计算 ETA。
    */
   public UpcomingStops resolveUpcomingStops(TrainHudContext context, int limit) {
-    if (context == null || context.routeDefinition().isEmpty()) {
-      return UpcomingStops.empty();
+    List<StopInfo> ahead = upcomingStops(context);
+    int count = Math.min(Math.max(0, limit), ahead.size());
+    List<UpcomingStop> stops = new ArrayList<>(count);
+    for (int position = 0; position < count; position++) {
+      stops.add(upcomingStop(context, ahead, position));
     }
-    if (routeDefinitions == null) {
-      return UpcomingStops.empty();
-    }
-    RouteDefinition route = context.routeDefinition().get();
-    if (route.waypoints() == null || route.waypoints().isEmpty()) {
-      return UpcomingStops.empty();
+    return new UpcomingStops(stops, ahead.size());
+  }
+
+  /**
+   * 列车前方各停靠站（能显示站名的停车点）的静态信息，不含 ETA。同一 tick 内同一上下文只算一次。
+   *
+   * @param context 上下文
+   * @return 按停靠顺序；交路不明时为空列表
+   */
+  public List<StopInfo> upcomingStops(TrainHudContext context) {
+    syncMemo();
+    return upcomingMemo.computeIfAbsent(context, this::computeUpcomingStops);
+  }
+
+  private List<StopInfo> computeUpcomingStops(TrainHudContext context) {
+    return context
+        .routeDefinition()
+        .flatMap(this::stopTable)
+        .map(
+            table ->
+                table.infos().stream().filter(info -> info.index() > context.routeIndex()).toList())
+        .orElse(List.of());
+  }
+
+  /**
+   * 前方第 {@code position} 站（0 起，对应 {@link #upcomingStops} 的下标）的完整信息：ETA、晚点与换乘。 只在真正显示的行上计算，同一 tick
+   * 内同一站只算一次。
+   *
+   * @param context 上下文
+   * @param ahead {@link #upcomingStops} 的结果
+   * @param position 前方第几站（0 起）
+   */
+  public UpcomingStop upcomingStop(TrainHudContext context, List<StopInfo> ahead, int position) {
+    syncMemo();
+    return upcomingStopMemo
+        .computeIfAbsent(context, ignored -> new HashMap<>())
+        .computeIfAbsent(
+            position, ignored -> materialize(context, ahead.get(position), position + 1));
+  }
+
+  private UpcomingStop materialize(TrainHudContext context, StopInfo info, int sequence) {
+    EtaResult eta =
+        etaService.getForTrain(context.trainName(), new EtaTarget.StopIndex(info.index()));
+    return new UpcomingStop(
+        sequence,
+        info.display(),
+        eta,
+        info.track(),
+        info.line(),
+        transfersOf(info, context.currentLine()),
+        etaService.arrivalDeviationSeconds(context.trainName(), info.index()),
+        info.terminal());
+  }
+
+  /** 停靠站的换乘线路：交路线路已知时用预先算好的；不明时按列车当前线路排除本线。 */
+  private List<TrainHudContext.Transfer> transfersOf(
+      StopInfo info, Optional<RouteLineChanges.LineRef> currentLine) {
+    return info.transfers()
+        .orElseGet(
+            () ->
+                resolveTransfers(
+                    info.nodeId(), List.of(), info.index(), Optional.empty(), currentLine));
+  }
+
+  /** 交路的静态停靠表。停靠表实例与车站目录版本都没变时复用：交路缓存刷新会换一份新的停靠表，车站、线路改库会让目录版本递增。 */
+  private Optional<StopTable> stopTable(RouteDefinition route) {
+    if (route == null || routeDefinitions == null) {
+      return Optional.empty();
     }
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
     if (stops.isEmpty()) {
-      return UpcomingStops.empty();
+      return Optional.empty();
     }
-    List<RouteLineChanges.LineRef> lines =
-        route
-            .metadata()
-            .flatMap(RouteLineChanges.LineRef::of)
-            .map(base -> RouteLineChanges.linesByIndex(stops, base))
-            .orElse(List.of());
+    long revision = plugin.getStationDirectory().map(StationDirectory::revision).orElse(-1L);
+    StopTable cached = stopTables.get(route.id());
+    if (cached != null && cached.stops() == stops && cached.directoryRevision() == revision) {
+      return Optional.of(cached);
+    }
+    StopTable built = buildStopTable(route, stops, revision);
+    stopTables.put(route.id(), built);
+    return Optional.of(built);
+  }
+
+  private StopTable buildStopTable(RouteDefinition route, List<RouteStop> stops, long revision) {
     Optional<RouteLineChanges.LineRef> routeLine =
         route.metadata().flatMap(RouteLineChanges.LineRef::of);
+    List<RouteLineChanges.LineRef> lines =
+        routeLine.map(base -> RouteLineChanges.linesByIndex(stops, base)).orElse(List.of());
     int lastStopIndex = resolveLastStopIndex(stops);
-    int safeLimit = Math.max(0, limit);
-    List<UpcomingStop> upcoming = new ArrayList<>();
-    int total = 0;
-    // 停靠表与 waypoints 下标一一对齐（RouteDefinitionCache#listStops），下标就是进度下标：
-    // 环线等同一节点出现两次的交路，按节点反查下标会取错。
-    for (int stopIndex = Math.max(0, context.routeIndex() + 1);
-        stopIndex < stops.size();
-        stopIndex++) {
-      RouteStop stop = stops.get(stopIndex);
+    List<StopInfo> infos = new ArrayList<>();
+    for (int index = 0; index < stops.size(); index++) {
+      RouteStop stop = stops.get(index);
       if (stop == null || stop.passType() == RouteStopPassType.PASS) {
         continue;
       }
-      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
-      StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
+      Optional<NodeId> nodeId = resolveStopNodeId(stop);
+      StationDisplay display = resolveStopDisplay(stop, nodeId);
       if (display.isEmpty()) {
         continue;
       }
-      total++;
-      if (upcoming.size() >= safeLimit) {
-        continue;
-      }
-      EtaResult eta =
-          etaService.getForTrain(context.trainName(), new EtaTarget.StopIndex(stopIndex));
-      String track = nodeIdOpt.map(this::resolveTrackFromNodeId).orElse("-");
       Optional<RouteLineChanges.LineRef> line =
-          stopIndex < lines.size() ? Optional.of(lines.get(stopIndex)) : Optional.empty();
-      upcoming.add(
-          new UpcomingStop(
-              total,
+          index < lines.size() ? Optional.of(lines.get(index)) : Optional.empty();
+      Optional<List<TrainHudContext.Transfer>> transfers =
+          routeLine.isPresent()
+              ? Optional.of(resolveTransfers(nodeId, stops, index, routeLine, Optional.empty()))
+              : Optional.empty();
+      infos.add(
+          new StopInfo(
+              index,
+              nodeId,
               display,
-              eta,
-              track,
+              nodeId.map(this::resolveTrackFromNodeId).orElse("-"),
               line,
-              resolveTransfers(nodeIdOpt, stops, stopIndex, routeLine, context.currentLine()),
-              etaService.arrivalDeviationSeconds(context.trainName(), stopIndex),
-              stopIndex == lastStopIndex));
+              transfers,
+              index == lastStopIndex));
     }
-    return new UpcomingStops(List.copyOf(upcoming), total);
+    return new StopTable(stops, revision, List.copyOf(infos), lastStopIndex);
   }
 
-  /** 根据上下文生成模板占位符键值。 */
+  /**
+   * 根据上下文生成模板占位符键值。不含进度的部分同一 tick 内同一上下文只算一次，返回的是可以自由改写的副本。
+   *
+   * @param context 上下文
+   * @param progress 进度（各块 HUD 自己的进度跟踪结果）
+   */
   public Map<String, String> buildPlaceholders(TrainHudContext context, float progress) {
-    Map<String, String> placeholders = new HashMap<>();
+    syncMemo();
+    Map<String, String> placeholders =
+        new HashMap<>(placeholderMemo.computeIfAbsent(context, this::basePlaceholders));
+    applyProgressPlaceholders(placeholders, progress);
+    return placeholders;
+  }
+
+  private Map<String, String> basePlaceholders(TrainHudContext context) {
+    Map<String, String> placeholders = new HashMap<>(128);
     LocalTime now = LocalTime.now();
     String timeHhmm = now.format(CLOCK_MINUTES);
     String timeHhmmss = now.format(CLOCK_SECONDS);
@@ -536,7 +673,6 @@ public final class TrainHudContextResolver {
     placeholders.put("time_hhmmss", timeHhmmss);
     placeholders.put("time_HHmm", timeHhmm);
     placeholders.put("time_HHmmSS", timeHhmmss);
-    applyProgressPlaceholders(placeholders, progress);
     placeholders.put("label_line", labelLine);
     placeholders.put("label_next", labelNext);
     placeholders.put("layover_wait", "-");
@@ -1142,39 +1278,28 @@ public final class TrainHudContextResolver {
       String arriving, String delayed, String scheduled, String minutes, String unavailable) {}
 
   private Optional<NextStop> resolveNextStop(Optional<RouteDefinition> routeOpt, int routeIndex) {
-    if (routeOpt == null || routeOpt.isEmpty() || routeDefinitions == null) {
+    if (routeOpt == null || routeOpt.isEmpty()) {
       return Optional.empty();
     }
     RouteDefinition route = routeOpt.get();
     if (route.waypoints() == null || route.waypoints().isEmpty()) {
       return Optional.empty();
     }
-    List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    if (stops.isEmpty()) {
+    Optional<StopTable> table = stopTable(route);
+    if (table.isEmpty() || table.get().infos().isEmpty()) {
       return Optional.empty();
     }
-    int lastStopIndex = resolveLastStopIndex(stops);
     // 停靠表与 waypoints 下标对齐：下一站就是进度下标之后第一个可显示的停车点。
-    for (int i = Math.max(0, routeIndex + 1); i < stops.size(); i++) {
-      RouteStop stop = stops.get(i);
-      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
-        continue;
-      }
-      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
-      StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
-      if (!display.isEmpty()) {
-        return Optional.of(new NextStop(display, nodeIdOpt, i == lastStopIndex, i, true));
+    List<StopInfo> infos = table.get().infos();
+    for (StopInfo info : infos) {
+      if (info.index() > routeIndex) {
+        return Optional.of(new NextStop(info, true));
       }
     }
-    if (lastStopIndex >= 0) {
-      RouteStop stop = stops.get(lastStopIndex);
-      Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
-      StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
-      if (!display.isEmpty()) {
-        return Optional.of(new NextStop(display, nodeIdOpt, true, lastStopIndex, false));
-      }
-    }
-    return Optional.empty();
+    StopInfo last = infos.get(infos.size() - 1);
+    return last.index() == table.get().lastStopIndex()
+        ? Optional.of(new NextStop(last, false))
+        : Optional.empty();
   }
 
   private int resolveLastStopIndex(List<RouteStop> stops) {
@@ -1733,20 +1858,69 @@ public final class TrainHudContextResolver {
   /**
    * 下一停靠站。
    *
-   * @param stopIndex 停靠表下标，与进度下标、时刻表停靠序号同一口径
+   * @param info 停靠站静态信息
    * @param ahead 在列车前方；前方已没有停车点、只能退回显示末站时为 false
    */
-  private record NextStop(
-      StationDisplay display,
-      Optional<NodeId> nodeId,
-      boolean terminal,
-      int stopIndex,
-      boolean ahead) {
+  private record NextStop(StopInfo info, boolean ahead) {
     private NextStop {
-      Objects.requireNonNull(display, "display");
-      nodeId = nodeId == null ? Optional.empty() : nodeId;
+      Objects.requireNonNull(info, "info");
+    }
+
+    StationDisplay display() {
+      return info.display();
+    }
+
+    Optional<NodeId> nodeId() {
+      return info.nodeId();
+    }
+
+    boolean terminal() {
+      return info.terminal();
+    }
+
+    /** 停靠表下标，与进度下标、时刻表停靠序号同一口径。 */
+    int stopIndex() {
+      return info.index();
     }
   }
+
+  /**
+   * 一个停靠站不随列车变化的信息。
+   *
+   * @param index 停靠表下标（与进度下标、时刻表停靠序号同一口径）
+   * @param nodeId 停靠节点
+   * @param display 站名
+   * @param track 站台号；无法解析时为 {@code -}
+   * @param line 列车在该站所属的线路（直通运转换线后为新线路）；交路线路不明时为空
+   * @param transfers 可换乘线路（按该站所属线路排除本车）；交路线路不明时为空，届时按列车当前线路现算
+   * @param terminal 是否为本交路最后一个停车点
+   */
+  public record StopInfo(
+      int index,
+      Optional<NodeId> nodeId,
+      StationDisplay display,
+      String track,
+      Optional<RouteLineChanges.LineRef> line,
+      Optional<List<TrainHudContext.Transfer>> transfers,
+      boolean terminal) {
+    public StopInfo {
+      Objects.requireNonNull(display, "display");
+      nodeId = nodeId == null ? Optional.empty() : nodeId;
+      line = line == null ? Optional.empty() : line;
+      transfers = transfers == null ? Optional.empty() : transfers.map(List::copyOf);
+    }
+  }
+
+  /**
+   * 交路的静态停靠表。
+   *
+   * @param stops 生成时的停靠表实例（交路缓存刷新会换新实例）
+   * @param directoryRevision 生成时的车站目录版本
+   * @param infos 能显示站名的停车点，按停靠顺序
+   * @param lastStopIndex 最后一个停车点的下标
+   */
+  private record StopTable(
+      List<RouteStop> stops, long directoryRevision, List<StopInfo> infos, int lastStopIndex) {}
 
   private record CompanyDisplay(String label, String code, String name) {
     private CompanyDisplay {

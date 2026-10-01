@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -31,11 +32,7 @@ import org.bukkit.scoreboard.ScoreboardManager;
 import org.bukkit.scoreboard.Team;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
@@ -47,7 +44,6 @@ import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressTracker;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
-import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
  * 车上 Scoreboard HUD：用于车内 LCD/PIDS 多行展示。
@@ -118,12 +114,8 @@ public final class ScoreboardTrainHudManager implements Listener {
 
   public ScoreboardTrainHudManager(
       FetaruteTCAddon plugin,
-      LocaleManager locale,
       ConfigManager configManager,
-      EtaService etaService,
-      RouteDefinitionCache routeDefinitions,
-      RouteProgressRegistry routeProgressRegistry,
-      LayoverRegistry layoverRegistry,
+      TrainHudContextResolver contextResolver,
       HudTemplateService templateService,
       HudDefaultTemplateService defaultTemplateService,
       Consumer<String> debugLogger) {
@@ -132,16 +124,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     this.templateService = templateService;
     this.defaultTemplateService = defaultTemplateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
-    this.contextResolver =
-        new TrainHudContextResolver(
-            plugin,
-            locale,
-            Objects.requireNonNull(etaService, "etaService"),
-            Objects.requireNonNull(routeDefinitions, "routeDefinitions"),
-            routeProgressRegistry,
-            layoverRegistry,
-            templateService,
-            this.debugLogger);
+    this.contextResolver = Objects.requireNonNull(contextResolver, "contextResolver");
   }
 
   public void register() {
@@ -433,8 +416,8 @@ public final class ScoreboardTrainHudManager implements Listener {
       TrainFrameDelta frameDelta,
       long tick) {
     List<String> output = new ArrayList<>();
-    int totalStops = contextResolver.resolveUpcomingStops(context, 0).total();
-    int cappedTotalStops = Math.min(totalStops, page.limit());
+    List<TrainHudContextResolver.StopInfo> ahead = contextResolver.upcomingStops(context);
+    int cappedTotalStops = Math.min(ahead.size(), page.limit());
     int fixedRows = Math.min(page.window().fixed(), page.limit());
     int windowRows = Math.max(0, page.window().size());
     int rowLines = page.rowLines().isEmpty() ? 1 : page.rowLines().size();
@@ -444,9 +427,12 @@ public final class ScoreboardTrainHudManager implements Listener {
         resolveWindowState(
             key, frameDelta, remainingStops, page.window(), frameDelta.nextStopChanged(), tick);
     int windowOffset = computeWindowOffset(windowState, tick, remainingStops, page.window());
-    int limit = Math.min(page.limit(), fixedRows + windowOffset + windowRows);
-    TrainHudContextResolver.UpcomingStops upcoming =
-        contextResolver.resolveUpcomingStops(context, limit);
+    // ETA、晚点与换乘只为真正显示的行计算：固定行加当前窗口，不算窗口前面滚过去的站。
+    IntFunction<Optional<TrainHudContextResolver.UpcomingStop>> row =
+        position ->
+            position >= 0 && position < cappedTotalStops
+                ? Optional.of(contextResolver.upcomingStop(context, ahead, position))
+                : Optional.empty();
 
     output.addAll(renderLineList(page.header(), placeholders));
     if (fixedRows + windowRows <= 0) {
@@ -464,15 +450,10 @@ public final class ScoreboardTrainHudManager implements Listener {
     } else {
       output.addAll(
           renderUpcomingRows(
-              upcoming.stops(),
-              0,
-              fixedRows,
-              placeholders,
-              page.rowLines(),
-              context.currentLine()));
+              row, 0, fixedRows, placeholders, page.rowLines(), context.currentLine()));
       output.addAll(
           renderUpcomingRows(
-              upcoming.stops(),
+              row,
               fixedRows + windowOffset,
               windowRows,
               placeholders,
@@ -500,7 +481,7 @@ public final class ScoreboardTrainHudManager implements Listener {
    * <p>行内的线路占位符（{@code line}、{@code line_color_tag} 等）取该站所属线路：直通运转换线之后的各站按新线路着色， 与列车当前线路相同的站不覆盖。
    */
   private List<String> renderUpcomingRows(
-      List<TrainHudContextResolver.UpcomingStop> stops,
+      IntFunction<Optional<TrainHudContextResolver.UpcomingStop>> row,
       int startIndex,
       int rowCount,
       Map<String, String> placeholders,
@@ -509,12 +490,8 @@ public final class ScoreboardTrainHudManager implements Listener {
     List<String> output = new ArrayList<>();
     for (int i = 0; i < rowCount; i++) {
       int index = startIndex + i;
-      Optional<TrainHudContextResolver.UpcomingStop> stop =
-          stops != null && index >= 0 && index < stops.size()
-              ? Optional.of(stops.get(index))
-              : Optional.empty();
       Map<String, String> itemPlaceholders =
-          contextResolver.stopPlaceholders(placeholders, stop, index + 1, currentLine);
+          contextResolver.stopPlaceholders(placeholders, row.apply(index), index + 1, currentLine);
       output.addAll(renderLineList(rowLines, itemPlaceholders));
     }
     return output;

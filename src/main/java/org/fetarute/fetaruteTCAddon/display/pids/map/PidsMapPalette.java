@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.display.pids.map;
 
 import com.bergerkiller.bukkit.common.map.MapColorPalette;
 import java.awt.image.BufferedImage;
+import java.awt.image.DataBufferInt;
 import java.util.Arrays;
 import java.util.Objects;
 import java.util.concurrent.ConcurrentHashMap;
@@ -76,16 +77,81 @@ public final class PidsMapPalette {
     if (out.length < width * height) {
       throw new IllegalArgumentException("输出缓冲区不足: " + out.length + " < " + width * height);
     }
-    int[] pixels = frame.getRGB(0, 0, width, height, null, 0, width);
+    int[] pixels = pixels(frame);
+    FrameColors colors = new FrameColors();
     int last = ~pixels[0] & 0xFFFFFF;
     byte lastCode = 0;
-    for (int i = 0; i < pixels.length; i++) {
+    for (int i = 0; i < width * height; i++) {
       int rgb = pixels[i] & 0xFFFFFF;
       if (rgb != last) {
         last = rgb;
-        lastCode = code(rgb);
+        lastCode = colors.code(rgb);
       }
       out[i] = lastCode;
+    }
+  }
+
+  /**
+   * 帧的像素：渲染器产出的 {@code TYPE_INT_RGB} 整图直接读底层数组（行优先、无偏移），省掉整帧复制与逐像素的颜色模型换算； 其他类型照常 {@code getRGB}。
+   */
+  private static int[] pixels(BufferedImage frame) {
+    int width = frame.getWidth();
+    int height = frame.getHeight();
+    if (frame.getType() == BufferedImage.TYPE_INT_RGB
+        && frame.getRaster().getDataBuffer() instanceof DataBufferInt buffer
+        && buffer.getNumBanks() == 1
+        && buffer.getOffset() == 0
+        && buffer.getData().length == width * height) {
+      return buffer.getData();
+    }
+    return frame.getRGB(0, 0, width, height, null, 0, width);
+  }
+
+  /** 一帧里用到的颜色：一帧只有几十种颜色，在这里查过一次就不再查全局缓存（全局缓存要装箱、走并发表）。只在单次换算内使用。 */
+  private final class FrameColors {
+    private int[] keys = new int[64];
+    private byte[] values = new byte[64];
+    private boolean[] used = new boolean[64];
+    private int size;
+
+    byte code(int rgb) {
+      int mask = keys.length - 1;
+      int slot = Integer.hashCode(rgb * 0x9E3779B9) & mask;
+      while (used[slot]) {
+        if (keys[slot] == rgb) {
+          return values[slot];
+        }
+        slot = (slot + 1) & mask;
+      }
+      byte code = PidsMapPalette.this.code(rgb);
+      used[slot] = true;
+      keys[slot] = rgb;
+      values[slot] = code;
+      if (++size * 2 > keys.length) {
+        grow();
+      }
+      return code;
+    }
+
+    private void grow() {
+      int[] oldKeys = keys;
+      byte[] oldValues = values;
+      boolean[] oldUsed = used;
+      keys = new int[oldKeys.length * 2];
+      values = new byte[oldKeys.length * 2];
+      used = new boolean[oldKeys.length * 2];
+      int mask = keys.length - 1;
+      for (int i = 0; i < oldKeys.length; i++) {
+        if (oldUsed[i]) {
+          int slot = Integer.hashCode(oldKeys[i] * 0x9E3779B9) & mask;
+          while (used[slot]) {
+            slot = (slot + 1) & mask;
+          }
+          used[slot] = true;
+          keys[slot] = oldKeys[i];
+          values[slot] = oldValues[i];
+        }
+      }
     }
   }
 

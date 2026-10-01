@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.logging.Logger;
@@ -35,6 +36,7 @@ public final class LocaleManager {
   private final MiniMessage miniMessage = MiniMessage.miniMessage();
   private String currentLocale;
   private YamlConfiguration messages;
+  private final Set<String> warnedMissingKeys = ConcurrentHashMap.newKeySet();
   private Component prefix = Component.empty();
   private List<String> availableLocales = List.of();
 
@@ -230,6 +232,7 @@ public final class LocaleManager {
     LocaleFile localeFile = prepareLocaleFile(localeTag);
     messages = YamlConfiguration.loadConfiguration(localeFile.file());
     currentLocale = localeFile.locale();
+    warnedMissingKeys.clear();
     prefix = parsePrefix(messages);
     refreshAvailableLocales();
   }
@@ -427,8 +430,11 @@ public final class LocaleManager {
     return builder.build();
   }
 
+  /** 同一个缺失的键每次加载语言后只警告一次：HUD 每 tick 都会查同一批键，不节流会刷屏并拖慢主线程。 */
   private void logMissingKey(String key) {
-    access.logger().warn("缺少语言键: " + key);
+    if (warnedMissingKeys.add(key)) {
+      access.logger().warn("缺少语言键: " + key);
+    }
   }
 
   private String normalizeLocale(String localeTag) {

@@ -76,7 +76,6 @@ public record PidsSettings(
     RenderSettings render =
         new RenderSettings(
             reader.positiveInt("render.check-interval-ticks", renderDefault.checkIntervalTicks()),
-            reader.positiveInt("render.force-refresh-seconds", renderDefault.forceRefreshSeconds()),
             reader.positiveInt("render.snapshot-ttl-seconds", renderDefault.snapshotTtlSeconds()),
             reader.positiveInt("render.horizon-minutes", renderDefault.horizonMinutes()),
             reader.positiveInt("render.slide-main-seconds", renderDefault.slideMainSeconds()),
@@ -174,7 +173,6 @@ public record PidsSettings(
    * 渲染与翻页节奏。
    *
    * @param checkIntervalTicks 每隔多少 tick 比对一次将显示的文本，变化才重绘
-   * @param forceRefreshSeconds 兜底强制刷新间隔（秒）
    * @param snapshotTtlSeconds 同一车站到发快照的缓存时间（秒）
    * @param horizonMinutes 预测窗口（分钟）
    * @param slideMainSeconds 主页（到发）停留时间（秒）
@@ -183,7 +181,6 @@ public record PidsSettings(
    */
   public record RenderSettings(
       int checkIntervalTicks,
-      int forceRefreshSeconds,
       int snapshotTtlSeconds,
       int horizonMinutes,
       int slideMainSeconds,
@@ -191,7 +188,7 @@ public record PidsSettings(
       int noticePinSeconds) {
 
     /** 内置默认值。 */
-    public static final RenderSettings DEFAULT = new RenderSettings(20, 30, 5, 30, 12, 4, 15);
+    public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 12, 4, 15);
   }
 
   /**

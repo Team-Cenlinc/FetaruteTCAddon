@@ -205,7 +205,6 @@ class PidsComposerTest {
         defaults.enabled(),
         new PidsSettings.RenderSettings(
             render.checkIntervalTicks(),
-            render.forceRefreshSeconds(),
             render.snapshotTtlSeconds(),
             render.horizonMinutes(),
             render.slideMainSeconds(),
