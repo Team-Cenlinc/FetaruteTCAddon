@@ -105,18 +105,33 @@ class TimetableBuilderRapidStaggerTest {
       }
     }
 
+    Timetable shifted = table.withTripsAndDuties(trips, table.duties());
+    Map<UUID, TimetableConflictChecker.RouteProfile> profiles =
+        Map.of(
+            local, profileOf(local, "LOC", List.of(A, B, C, D, E), 90),
+            rapid, profileOf(rapid, "RAP", List.of(A, E2), 0));
+    TimetableConflictChecker.GraphIndex index = TimetableConflictChecker.GraphIndex.of(graph);
+
     RapidStagger.Measure measure =
         RapidStagger.measure(
-            table.withTripsAndDuties(trips, table.duties()),
-            Map.of(
-                local, profileOf(local, "LOC", List.of(A, B, C, D, E), 90),
-                rapid, profileOf(rapid, "RAP", List.of(A, E2), 0)),
-            TimetableConflictChecker.GraphIndex.of(graph),
+            shifted,
+            profiles,
+            index,
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
-            5 * 3600);
+            5 * 3600,
+            java.util.Set.of(rapid));
+    RapidStagger.Measure notFast =
+        RapidStagger.measure(
+            shifted,
+            profiles,
+            index,
+            TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
+            5 * 3600,
+            java.util.Set.of());
 
     assertEquals(1, measure.trips(), measure::toString);
     assertEquals(240L, measure.seconds(), measure::toString);
+    assertEquals(0L, notFast.seconds(), "只算快车交路：出入库走行之类不停站的运行跟着慢车不算快车被卡");
   }
 
   /** 两组一样快就没有快车被卡，开了错峰也不搜。 */

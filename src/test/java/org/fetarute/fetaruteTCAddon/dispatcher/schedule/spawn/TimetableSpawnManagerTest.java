@@ -305,12 +305,7 @@ class TimetableSpawnManagerTest {
     TimetableService service = new TimetableService(clock::get, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofHours(24),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);
@@ -363,12 +358,7 @@ class TimetableSpawnManagerTest {
     TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofHours(24),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);

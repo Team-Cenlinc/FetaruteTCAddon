@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 37;
+  private static final int EXPECTED_CONFIG_VERSION = 38;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -238,15 +238,6 @@ public final class ConfigManager {
                 defaults.recorderFlushIntervalSeconds(),
                 "timetable",
                 logger));
-    String zone = section.getString("zone", defaults.zone());
-    if (zone != null && !zone.isBlank()) {
-      try {
-        java.time.ZoneId.of(zone.trim());
-      } catch (java.time.DateTimeException ex) {
-        logger.warning("timetable.zone 配置无效: " + zone + "，已回退为服务器默认时区");
-        zone = "";
-      }
-    }
     int stationStopOverheadSeconds =
         readNonNegativeInt(
             section,
@@ -285,7 +276,6 @@ public final class ConfigManager {
         maxCatchUpSeconds,
         reloadIntervalSeconds,
         recorderFlushIntervalSeconds,
-        zone == null ? "" : zone.trim(),
         stationStopOverheadSeconds,
         recoveryMinDwellSeconds,
         recoveryOverspeedPercent,
@@ -1547,7 +1537,6 @@ public final class ConfigManager {
    * @param maxCatchUpSeconds 发车侧单次轮询最多回补多长的时间窗口
    * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
    * @param recorderFlushIntervalSeconds 录制结果落库的间隔
-   * @param zone 时刻表默认时区；留空表示服务器默认时区
    * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
    * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
@@ -1561,7 +1550,6 @@ public final class ConfigManager {
       int maxCatchUpSeconds,
       int reloadIntervalSeconds,
       int recorderFlushIntervalSeconds,
-      String zone,
       int stationStopOverheadSeconds,
       int recoveryMinDwellSeconds,
       int recoveryOverspeedPercent,
@@ -1589,7 +1577,6 @@ public final class ConfigManager {
       maxCatchUpSeconds = Math.max(0, maxCatchUpSeconds);
       reloadIntervalSeconds = Math.max(1, reloadIntervalSeconds);
       recorderFlushIntervalSeconds = Math.max(1, recorderFlushIntervalSeconds);
-      zone = zone == null ? "" : zone.trim();
       stationStopOverheadSeconds = Math.max(0, stationStopOverheadSeconds);
       recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
       recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
@@ -1606,23 +1593,10 @@ public final class ConfigManager {
           300,
           60,
           5,
-          "",
           DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
           DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
-    }
-
-    /** 解析时区，留空时回退服务器默认。 */
-    public java.time.ZoneId resolveZone() {
-      if (zone.isBlank()) {
-        return java.time.ZoneId.systemDefault();
-      }
-      try {
-        return java.time.ZoneId.of(zone);
-      } catch (java.time.DateTimeException ignored) {
-        return java.time.ZoneId.systemDefault();
-      }
     }
   }
 

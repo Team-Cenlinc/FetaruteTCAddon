@@ -1232,7 +1232,6 @@ public final class FetaruteTCAddon extends JavaPlugin {
             java.time.Duration.ofSeconds(settings.holdMaxSeconds()),
             java.time.Duration.ofSeconds(settings.assignToleranceSeconds()),
             java.time.Duration.ofSeconds(settings.maxCatchUpSeconds()),
-            settings.resolveZone(),
             // 到站事件在列车停稳后发出，表定到达是压牌时刻：两者差"车站停车开销 − 开门延迟"（居中刹停）。
             java.time.Duration.ofSeconds(
                 Math.max(

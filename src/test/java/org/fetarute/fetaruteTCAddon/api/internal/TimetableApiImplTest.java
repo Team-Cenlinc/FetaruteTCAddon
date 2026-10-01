@@ -155,8 +155,7 @@ class TimetableApiImplTest {
             enabled,
             Duration.ofSeconds(120),
             Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            Duration.ofSeconds(300)));
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);

@@ -68,24 +68,33 @@ final class RapidStagger {
   }
 
   /**
-   * 量一张成品表。
+   * 量一张成品表：只算快车交路的班次被拖住。
+   *
+   * <p>投影里还有出库、回库走行，它们不停站，在共线段跟着慢车也会被"拖住"，但那不是快车——算进来会让报告点名走行线路、
+   * 让错峰去搜一个没有快车组可挪的问题。挡在前面的车则什么都算：走行挡住快车也是挡。
    *
    * @param table 成品表
    * @param profiles 交路投影
    * @param index 图索引
    * @param separation 裕量
    * @param zeroSecondOfDay 计划窗口起点（日内秒）
+   * @param fastRoutes 快车交路（{@link #fastRoutes}）
    */
   static Measure measure(
       Timetable table,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       TimetableConflictChecker.GraphIndex index,
       int separation,
-      int zeroSecondOfDay) {
+      int zeroSecondOfDay,
+      Set<UUID> fastRoutes) {
     CorridorCatchUp corridors = new CorridorCatchUp(profiles, index, separation);
     List<CorridorCatchUp.Caught> caught =
-        corridors.caught(
-            TimetableOccupancyProjector.project(table, profiles, zeroSecondOfDay).movements());
+        corridors
+            .caught(
+                TimetableOccupancyProjector.project(table, profiles, zeroSecondOfDay).movements())
+            .stream()
+            .filter(one -> fastRoutes.contains(one.routeId()))
+            .toList();
     long seconds = 0L;
     Set<String> trips = new TreeSet<>();
     for (CorridorCatchUp.Caught one : caught) {
@@ -100,8 +109,8 @@ final class RapidStagger {
     return new TimetableBuildResult.CatchUp(measure.seconds(), measure.trips());
   }
 
-  /** 含快车（某段共线上比别的交路明显更快）的交路组名，按名字排序。 */
-  static List<String> fastGroups(
+  /** 快车交路：排进发车表的运营交路里，某段共线上比另一条明显更快（快出一个裕量以上）的。 */
+  static Set<UUID> fastRoutes(
       List<ServiceGroupClassifier.Group> groups,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       TimetableConflictChecker.GraphIndex index,
@@ -112,18 +121,46 @@ final class RapidStagger {
         routes.addAll(direction.routeIds());
       }
     }
-    Set<UUID> faster = new CorridorCatchUp(profiles, index, separation).fasterRoutes(routes);
+    return new CorridorCatchUp(profiles, index, separation).fasterRoutes(routes);
+  }
+
+  /** 含快车交路的交路组名，按名字排序。 */
+  static List<String> fastGroups(List<ServiceGroupClassifier.Group> groups, Set<UUID> fastRoutes) {
     List<String> out = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : groups) {
       boolean fast =
           group.directions().stream()
-              .anyMatch(direction -> direction.routeIds().stream().anyMatch(faster::contains));
+              .anyMatch(direction -> direction.routeIds().stream().anyMatch(fastRoutes::contains));
       if (fast) {
         out.add(group.name());
       }
     }
     out.sort(Comparator.naturalOrder());
     return List.copyOf(out);
+  }
+
+  /** 一次构建拿到实测之后怎么办。 */
+  enum Plan {
+    /** 没开错峰，或没有快车被拖住：只报实测。 */
+    MEASURE_ONLY,
+    /** 开了错峰，但原表本身已放宽：候选只在目标间隔下比、每个都会失败，不搜。 */
+    SKIP_RELAXED,
+    /** 搜。 */
+    SEARCH
+  }
+
+  /** 开了错峰、有快车被拖住、原表没有放宽时才搜。 */
+  static Plan plan(boolean enabled, Measure measure, boolean relaxed) {
+    if (!enabled || measure.seconds() == 0L) {
+      return Plan.MEASURE_ONLY;
+    }
+    return relaxed ? Plan.SKIP_RELAXED : Plan.SEARCH;
+  }
+
+  /** 把实测写进构建结果：报告一行说明，加上结构化的合计（报告据此决定给不给错峰重建按钮）。 */
+  static TimetableBuildResult annotate(
+      TimetableBuildResult result, Measure measure, Map<UUID, String> routeCodes) {
+    return result.withRapidCatchUp(total(measure)).withPhaseNote(describe(measure, routeCodes));
   }
 
   /**
@@ -334,8 +371,8 @@ final class RapidStagger {
    *
    * <ol>
    *   <li>每个快车组按名字序扫自己的相对周期（每 {@value #STEP_SECONDS} 秒一档，不含 0），再在最好的位置两侧各试 {@value #REFINE_SECONDS}
-   *       秒；组与组之间贪心，前面定下的不再动。扫到第一段完全错开（被卡 0）的窗口、把这段扫完就停。
-   *   <li>平移没能完全错开时，在前 {@value #DWELL_SHORTLIST} 个最好的平移上（一个都没有就在原表上）给仍被拖住的快车加停。
+   *       秒；组与组之间贪心，前面定下的不再动。扫到第一段完全错开（被卡 0）的窗口、把这段扫完就停，后面的组也不再扫。
+   *   <li>平移没能完全错开时，在前 {@value #DWELL_SHORTLIST} 个最好的平移与原表上给仍被拖住的快车加停。
    * </ol>
    *
    * @param periods 快车组 → 平移的相对周期
@@ -354,6 +391,10 @@ final class RapidStagger {
     Map<String, Integer> shift = new TreeMap<>();
     int tried = 0;
     for (Map.Entry<String, Integer> entry : new TreeMap<>(periods).entrySet()) {
+      if (best != null && best.measure().seconds() == 0L) {
+        // 被卡 0 已到底：后面的快车组只可能在次要指标上略好，不值得每个位置再编一遍。
+        break;
+      }
       String group = entry.getKey();
       int period = entry.getValue();
       List<Integer> offsets = shifts(period);
@@ -393,9 +434,10 @@ final class RapidStagger {
         shift.putAll(best.shift());
       }
     }
-    // 平移已经完全错开时加停不会更好，不试。
+    // 平移已经完全错开时加停不会更好，不试。原表也是起点：所有平移都比原表差时，原表上加停可能才是最好的。
     if (best == null || best.measure().seconds() > 0L) {
-      List<Candidate> starts = top.isEmpty() ? List.of(base) : List.copyOf(top);
+      List<Candidate> starts = new ArrayList<>(top);
+      starts.add(base);
       for (Candidate start : starts) {
         if (start.measure().seconds() == 0L) {
           continue;

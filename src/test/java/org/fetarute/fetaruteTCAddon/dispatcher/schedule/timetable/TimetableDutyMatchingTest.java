@@ -109,12 +109,7 @@ class TimetableDutyMatchingTest {
     TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);

@@ -3,7 +3,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
-import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
@@ -1596,7 +1595,6 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param maxHold 早到列车最多被扣留多久
    * @param assignTolerance 匹配车次时允许的最大偏差
    * @param maxCatchUp 发车侧单次轮询最多回补多长时间窗口
-   * @param zoneId 命令未指定时构建时刻表使用的默认时区
    * @param arrivalSettle 压牌到停稳的时长：到站事件在停稳之后才发生，晚点账据此把表定到达换算到同一时刻
    */
   public record Settings(
@@ -1605,7 +1603,6 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Duration maxHold,
       Duration assignTolerance,
       Duration maxCatchUp,
-      ZoneId zoneId,
       Duration arrivalSettle) {
 
     public Settings {
@@ -1613,7 +1610,6 @@ public final class TimetableService implements ScheduledDeparturePlan {
       assignTolerance =
           assignTolerance == null || assignTolerance.isNegative() ? Duration.ZERO : assignTolerance;
       maxCatchUp = maxCatchUp == null || maxCatchUp.isNegative() ? Duration.ZERO : maxCatchUp;
-      zoneId = zoneId == null ? ZoneId.systemDefault() : zoneId;
       arrivalSettle =
           arrivalSettle == null || arrivalSettle.isNegative() ? Duration.ZERO : arrivalSettle;
     }
@@ -1624,15 +1620,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
         boolean spawnEnabled,
         Duration maxHold,
         Duration assignTolerance,
-        Duration maxCatchUp,
-        ZoneId zoneId) {
-      this(enabled, spawnEnabled, maxHold, assignTolerance, maxCatchUp, zoneId, Duration.ZERO);
+        Duration maxCatchUp) {
+      this(enabled, spawnEnabled, maxHold, assignTolerance, maxCatchUp, Duration.ZERO);
     }
 
     /** 关闭状态：按表运行完全不参与。 */
     public static Settings disabled() {
-      return new Settings(
-          false, false, Duration.ZERO, Duration.ZERO, Duration.ZERO, ZoneId.systemDefault());
+      return new Settings(false, false, Duration.ZERO, Duration.ZERO, Duration.ZERO);
     }
   }
 }
