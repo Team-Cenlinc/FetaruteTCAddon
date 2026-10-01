@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.display.hud.trip;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
+import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -50,12 +51,18 @@ class TripSheetTest {
   }
 
   private static TripSheet build(List<UpcomingStop> stops, int total, boolean transfersOnly) {
+    return build(stops, total, 12, transfersOnly);
+  }
+
+  private static TripSheet build(
+      List<UpcomingStop> stops, int total, int limit, boolean transfersOnly) {
     Map<String, String> base = Map.of("line", "大都会线", "dest_eop", "蒲塘桥", "train_name", "0366");
     return TripSheet.build(
         TEXTS,
         base,
         stops,
         total,
+        limit,
         transfersOnly,
         Optional.of(MT),
         (stop, sequence) -> {
@@ -105,5 +112,23 @@ class TripSheetTest {
         List.of("下一站 新笛矢", "主城湾", "终点 蒲塘桥"),
         sheet.rows().stream().map(row -> plain(row.text()).split("\n")[0]).toList());
     assertEquals(1, sheet.hidden());
+  }
+
+  @Test
+  void transfersFurtherAheadThanTheLimitAreStillListed() {
+    List<UpcomingStop> longLine = new ArrayList<>();
+    for (int i = 1; i <= 20; i++) {
+      longLine.add(stop(i, "站" + i, MT, i == 18 ? List.of(DS) : List.of(), i == 20));
+    }
+
+    TripSheet all = build(longLine, 20, 3, false);
+    assertEquals(3, all.rows().size(), "最多列出 limit 站");
+    assertEquals(17, all.hidden());
+
+    TripSheet transfers = build(longLine, 20, 3, true);
+    assertEquals(
+        List.of("下一站 站1", "站18", "终点 站20"),
+        transfers.rows().stream().map(row -> plain(row.text()).split("\n")[0]).toList(),
+        "先筛后截：第 18 站的换乘站也能列出");
   }
 }

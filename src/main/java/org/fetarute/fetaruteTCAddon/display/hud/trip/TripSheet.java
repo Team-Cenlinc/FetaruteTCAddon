@@ -104,8 +104,9 @@ public record TripSheet(
    *
    * @param texts 文案
    * @param placeholders 列车的全局占位符
-   * @param stops 前方停靠站（已按上限截取）
+   * @param stops 前方停靠站（按顺序；“只看换乘站”时应多给一些，筛完再截）
    * @param total 前方停靠站总数
+   * @param limit 最多列出几站
    * @param transfersOnly 是否只列换乘站
    * @param currentLine 列车当前所属线路
    * @param rowPlaceholders 一行的占位符（全局占位符、停靠站、行序号）
@@ -115,12 +116,13 @@ public record TripSheet(
       Map<String, String> placeholders,
       List<UpcomingStop> stops,
       int total,
+      int limit,
       boolean transfersOnly,
       Optional<RouteLineChanges.LineRef> currentLine,
       BiFunction<UpcomingStop, Integer, Map<String, String>> rowPlaceholders) {
     List<Row> rows = new ArrayList<>();
     Optional<RouteLineChanges.LineRef> previousLine = currentLine;
-    for (int i = 0; i < stops.size(); i++) {
+    for (int i = 0; i < stops.size() && rows.size() < limit; i++) {
       UpcomingStop stop = stops.get(i);
       Map<String, String> values = new HashMap<>(rowPlaceholders.apply(stop, i + 1));
       boolean lineChange =

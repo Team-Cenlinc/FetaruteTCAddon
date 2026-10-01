@@ -86,6 +86,41 @@ class HudDefaultTemplateServiceTest {
         Files.readString(dir.resolve("default_hud_template.yml")),
         new String(resource("default_hud_template.yml").readAllBytes(), StandardCharsets.UTF_8),
         "全是旧版默认模板时整份文件换成新版");
+    assertTrue(Files.exists(dir.resolve("default_hud_template.yml.bak")), "改写前另存一份");
+  }
+
+  @Test
+  void blankChannelStillFallsBackToTheLanguageFileAndBlocksTheRewrite() throws IOException {
+    writePrevious();
+    Path file = dir.resolve("default_hud_template.yml");
+    YamlConfiguration config = YamlConfiguration.loadConfiguration(file.toFile());
+    config.set("bossbar.template", "");
+    config.save(file.toFile());
+    String before = Files.readString(file);
+
+    HudDefaultTemplateService service = service();
+    service.reload();
+
+    assertTrue(service.resolveTemplate(HudTemplateType.BOSSBAR).isEmpty(), "留空表示回退语言文件");
+    assertEquals(
+        bundled(HudTemplateType.ACTIONBAR),
+        service.resolveTemplate(HudTemplateType.ACTIONBAR).orElseThrow());
+    assertEquals(before, Files.readString(file), "整份改写会把留空的通道填回去，所以不改写");
+  }
+
+  @Test
+  void channelsThePluginDoesNotShipAreKept() throws IOException {
+    writePrevious();
+    Path file = dir.resolve("default_hud_template.yml");
+    YamlConfiguration config = YamlConfiguration.loadConfiguration(file.toFile());
+    config.set("announcement.template", "自己加的广播模板");
+    config.save(file.toFile());
+
+    HudDefaultTemplateService service = service();
+    service.reload();
+
+    assertEquals("自己加的广播模板", service.resolveTemplate(HudTemplateType.ANNOUNCEMENT).orElseThrow());
+    assertTrue(Files.readString(file).contains("自己加的广播模板"), "插件不内置的通道算改过，整份改写会把它丢掉");
   }
 
   @Test

@@ -4,6 +4,7 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.display.DisplayService;
+import org.fetarute.fetaruteTCAddon.display.hud.trip.TripDialogService;
 import org.incendo.cloud.CommandManager;
 
 /**
@@ -24,7 +25,7 @@ public final class FtaTripCommand {
         manager
             .commandBuilder("fta")
             .literal("trip")
-            .permission("fetarute.trip")
+            .permission(TripDialogService.PERMISSION)
             .senderType(Player.class)
             .handler(ctx -> open((Player) ctx.sender())));
   }

@@ -7,11 +7,15 @@ import java.util.function.Consumer;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.minimessage.MiniMessage;
+import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
+import net.kyori.adventure.text.minimessage.tag.standard.StandardTags;
 
 /**
  * HUD 模板文本：占位符替换与 MiniMessage 渲染，BossBar、ActionBar 与车内显示屏共用。
  *
- * <p>先替换占位符、再按 MiniMessage 解析，所以占位符的值里可以带颜色标签（如换乘线路色块）。
+ * <p>先替换占位符、再按 MiniMessage 解析，所以占位符的值里可以带颜色标签（如换乘线路色块）。站名、线路名等来自主数据，
+ * 公司成员就能改，会原样进入模板，因此解析只开放展示类标签（颜色、样式、渐变、按键名、精灵图等），不开放点击、悬停、插入、换行、
+ * 选择器与计分板读取：后续站点对话框里的文字可以点，名称里夹带的点击事件不能变成钓鱼链接或命令。
  *
  * <ul>
  *   <li>{@code {key}}：普通占位符；模板里写了但没有提供的 key 原样保留，便于排查模板。
@@ -24,7 +28,28 @@ public final class HudText {
   /** 缺失值的统一写法：上下文解析器把所有缺失数据标准化为它。 */
   public static final String MISSING = "-";
 
-  private static final MiniMessage MINI_MESSAGE = MiniMessage.miniMessage();
+  private static final MiniMessage MINI_MESSAGE =
+      MiniMessage.builder()
+          .tags(
+              TagResolver.resolver(
+                  StandardTags.color(),
+                  StandardTags.decorations(),
+                  StandardTags.gradient(),
+                  StandardTags.rainbow(),
+                  StandardTags.transition(),
+                  StandardTags.pride(),
+                  StandardTags.shadowColor(),
+                  StandardTags.reset(),
+                  StandardTags.keybind(),
+                  StandardTags.translatable(),
+                  StandardTags.translatableFallback(),
+                  StandardTags.sprite()))
+          .build();
+
+  /** 原版颜色名的英式拼写，MiniMessage 也认。 */
+  private static final Map<String, String> COLOR_ALIASES =
+      Map.of("grey", "gray", "dark_grey", "dark_gray");
+
   private static final String DEFAULT_COLOR_TAG = "white";
 
   private HudText() {}
@@ -130,6 +155,15 @@ public final class HudText {
   }
 
   /**
+   * 转义文字里的 MiniMessage 标签，使其原样显示。插件自己拼进占位符的名称（如换乘线路名）用它。
+   *
+   * @param text 原文
+   */
+  public static String escape(String text) {
+    return text == null ? "" : MINI_MESSAGE.escapeTags(text);
+  }
+
+  /**
    * 把线路色转成可直接写进 MiniMessage 的颜色标签名：六位十六进制（带不带 {@code #} 均可）转为 {@code #RRGGBB}， 原版颜色名原样小写；其余（含缺失）为
    * {@code white}。
    *
@@ -147,7 +181,8 @@ public final class HudText {
     if (hex.matches("[0-9A-Fa-f]{6}")) {
       return "#" + hex.toUpperCase(Locale.ROOT);
     }
-    String named = value.toLowerCase(Locale.ROOT);
+    String lower = value.toLowerCase(Locale.ROOT);
+    String named = COLOR_ALIASES.getOrDefault(lower, lower);
     return NamedTextColor.NAMES.value(named) != null ? named : DEFAULT_COLOR_TAG;
   }
 }

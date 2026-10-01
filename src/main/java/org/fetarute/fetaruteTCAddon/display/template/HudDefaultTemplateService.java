@@ -7,6 +7,9 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Reader;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.ArrayList;
@@ -33,9 +36,12 @@ import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
  *
  * <ul>
  *   <li>与插件内置的当前默认模板相同：照用。
- *   <li>与某个已发布过的旧版默认模板相同（指纹见 {@value #HISTORY_RESOURCE}）：管理员没改过，按新版默认模板显示； 文件里所有通道都是这种情况时直接把文件换成新版。
- *   <li>其余（管理员改过）：照用文件里的模板，不覆盖。
+ *   <li>与某个已发布过的旧版默认模板相同（指纹见 {@value #HISTORY_RESOURCE}）：管理员没改过，按新版默认模板显示。
+ *   <li>留空或删掉了：照旧表示不用默认模板文件、回退到语言文件里的模板，算作改过。
+ *   <li>其余（管理员改过，包括插件并不内置的通道）：照用文件里的模板，不覆盖。
  * </ul>
+ *
+ * <p>只有没有任何通道被改过时，才把整份文件换成新版，换之前另存为 {@code default_hud_template.yml.bak}；否则文件不动， 旧版默认模板只在内存里按新版显示。
  *
  * <p>指纹是模板文本按行去掉行尾空白、去掉首尾空行后的 SHA-256。修改内置默认模板时，必须把修改前各通道的指纹追加到历史文件， 否则已部署的旧版会被当成“改过”而停在旧版。
  */
@@ -87,19 +93,20 @@ public final class HudDefaultTemplateService {
       String key = key(type);
       String current = onDisk.getString(key);
       String shipped = bundled.getString(key);
+      boolean ships = shipped != null && !shipped.isBlank();
       if (current == null || current.isBlank()) {
-        if (shipped != null && !shipped.isBlank()) {
+        customized |= ships;
+        continue;
+      }
+      if (ships && !normalize(current).equals(normalize(shipped))) {
+        if (history.getOrDefault(type, Set.of()).contains(fingerprint(current))) {
           resolved.put(type, shipped);
+          upgraded.add(type.name().toLowerCase(Locale.ROOT));
+          continue;
         }
-        continue;
+        customized = true;
       }
-      boolean outdated = shipped != null && !normalize(current).equals(normalize(shipped));
-      if (outdated && history.getOrDefault(type, Set.of()).contains(fingerprint(current))) {
-        resolved.put(type, shipped);
-        upgraded.add(type.name().toLowerCase(Locale.ROOT));
-        continue;
-      }
-      customized |= outdated;
+      customized |= !ships;
       resolved.put(type, current);
     }
     templates = resolved;
@@ -114,8 +121,24 @@ public final class HudDefaultTemplateService {
               + " 仍是旧版默认模板，已按新版显示；文件里其余模板改过，文件未改写");
       return;
     }
+    Path file = dataFolder.toPath().resolve(DEFAULT_FILE_NAME);
+    try {
+      Files.copy(
+          file,
+          file.resolveSibling(DEFAULT_FILE_NAME + ".bak"),
+          StandardCopyOption.REPLACE_EXISTING);
+    } catch (IOException ex) {
+      warnLogger.accept("备份 " + DEFAULT_FILE_NAME + " 失败，本次不改写文件，旧版默认模板按新版显示: " + ex.getMessage());
+      return;
+    }
     resourceSaver.accept(DEFAULT_FILE_NAME, true);
-    infoLogger.accept(DEFAULT_FILE_NAME + " 已升级到新版默认模板：" + String.join("、", upgraded));
+    infoLogger.accept(
+        DEFAULT_FILE_NAME
+            + " 已升级到新版默认模板："
+            + String.join("、", upgraded)
+            + "（原文件另存为 "
+            + DEFAULT_FILE_NAME
+            + ".bak）");
   }
 
   public Optional<String> resolveBossBarTemplate() {

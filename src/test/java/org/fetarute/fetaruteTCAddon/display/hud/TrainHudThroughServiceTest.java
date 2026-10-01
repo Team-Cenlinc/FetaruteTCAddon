@@ -5,7 +5,6 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
-import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
@@ -272,14 +271,12 @@ class TrainHudThroughServiceTest {
 
   @Test
   void delayMinutesFollowTheTimetableDeviationAtTheNextStop() {
-    when(eta.arrivalDeviationSeconds(eq("hud-train"), eq(1), any()))
-        .thenReturn(OptionalLong.of(185));
+    when(eta.arrivalDeviationSeconds("hud-train", 1)).thenReturn(OptionalLong.of(185));
     TrainHudContext late =
         resolve("FTA_ROUTE_ID=" + wsThrough.id(), "FTA_ROUTE_INDEX=0").orElseThrow();
     assertEquals("3", placeholders(late).get("delay_minutes"));
 
-    when(eta.arrivalDeviationSeconds(eq("hud-train"), eq(1), any()))
-        .thenReturn(OptionalLong.of(45));
+    when(eta.arrivalDeviationSeconds("hud-train", 1)).thenReturn(OptionalLong.of(45));
     TrainHudContext onTime =
         resolve("FTA_ROUTE_ID=" + wsThrough.id(), "FTA_ROUTE_INDEX=0").orElseThrow();
     assertEquals("-", placeholders(onTime).get("delay_minutes"), "不足 1 分钟算准点");

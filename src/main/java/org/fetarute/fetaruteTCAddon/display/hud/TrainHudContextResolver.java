@@ -226,8 +226,8 @@ public final class TrainHudContextResolver {
             .orElse(List.of());
     OptionalLong nextStopDelay =
         nextStopOpt
-            .filter(next -> next.routeIndex() >= 0)
-            .map(next -> etaService.arrivalDeviationSeconds(trainName, next.routeIndex(), eta))
+            .filter(NextStop::ahead)
+            .map(next -> etaService.arrivalDeviationSeconds(trainName, next.stopIndex()))
             .orElse(OptionalLong.empty());
     Optional<TrainRuntimeSnapshot> snapshotOpt = etaService.getRuntimeSnapshot(trainName);
     Optional<NodeId> currentNode = snapshotOpt.flatMap(TrainRuntimeSnapshot::currentNodeId);
@@ -398,7 +398,6 @@ public final class TrainHudContextResolver {
     if (stops.isEmpty()) {
       return UpcomingStops.empty();
     }
-    Map<NodeId, Integer> nodeIndexMap = buildNodeIndexMap(route.waypoints());
     List<RouteLineChanges.LineRef> lines =
         route
             .metadata()
@@ -411,7 +410,11 @@ public final class TrainHudContextResolver {
     int safeLimit = Math.max(0, limit);
     List<UpcomingStop> upcoming = new ArrayList<>();
     int total = 0;
-    for (int stopIndex = 0; stopIndex < stops.size(); stopIndex++) {
+    // 停靠表与 waypoints 下标一一对齐（RouteDefinitionCache#listStops），下标就是进度下标：
+    // 环线等同一节点出现两次的交路，按节点反查下标会取错。
+    for (int stopIndex = Math.max(0, context.routeIndex() + 1);
+        stopIndex < stops.size();
+        stopIndex++) {
       RouteStop stop = stops.get(stopIndex);
       if (stop == null || stop.passType() == RouteStopPassType.PASS) {
         continue;
@@ -421,19 +424,12 @@ public final class TrainHudContextResolver {
       if (display.isEmpty()) {
         continue;
       }
-      Integer nodeIndex = nodeIdOpt.map(nodeIndexMap::get).orElse(null);
-      if (nodeIndex == null || nodeIndex <= context.routeIndex()) {
-        continue;
-      }
       total++;
       if (upcoming.size() >= safeLimit) {
         continue;
       }
-      EtaTarget target = resolveStopTarget(stop, nodeIdOpt, display);
       EtaResult eta =
-          target == null
-              ? EtaResult.unavailable("-", List.of())
-              : etaService.getForTrain(context.trainName(), target);
+          etaService.getForTrain(context.trainName(), new EtaTarget.StopIndex(stopIndex));
       String track = nodeIdOpt.map(this::resolveTrackFromNodeId).orElse("-");
       Optional<RouteLineChanges.LineRef> line =
           stopIndex < lines.size() ? Optional.of(lines.get(stopIndex)) : Optional.empty();
@@ -445,7 +441,7 @@ public final class TrainHudContextResolver {
               track,
               line,
               resolveTransfers(nodeIdOpt, stops, stopIndex, routeLine, context.currentLine()),
-              etaService.arrivalDeviationSeconds(context.trainName(), nodeIndex, eta),
+              etaService.arrivalDeviationSeconds(context.trainName(), stopIndex),
               stopIndex == lastStopIndex));
     }
     return new UpcomingStops(List.copyOf(upcoming), total);
@@ -752,7 +748,7 @@ public final class TrainHudContextResolver {
           .append(">█</")
           .append(transfer.colorTag())
           .append('>')
-          .append(label.apply(transfer));
+          .append(HudText.escape(label.apply(transfer)));
     }
     return out.toString();
   }
@@ -1178,61 +1174,27 @@ public final class TrainHudContextResolver {
       return Optional.empty();
     }
     int lastStopIndex = resolveLastStopIndex(stops);
-    Map<NodeId, Integer> nodeIndexMap = buildNodeIndexMap(route.waypoints());
-    NextStop best = null;
-    int bestIndex = Integer.MAX_VALUE;
-    for (int i = 0; i < stops.size(); i++) {
+    // 停靠表与 waypoints 下标对齐：下一站就是进度下标之后第一个可显示的停车点。
+    for (int i = Math.max(0, routeIndex + 1); i < stops.size(); i++) {
       RouteStop stop = stops.get(i);
       if (stop == null || stop.passType() == RouteStopPassType.PASS) {
         continue;
       }
       Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
       StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
-      if (display.isEmpty()) {
-        continue;
+      if (!display.isEmpty()) {
+        return Optional.of(new NextStop(display, nodeIdOpt, i == lastStopIndex, i, true));
       }
-      Optional<Integer> nodeIndexOpt =
-          nodeIdOpt.map(nodeIndexMap::get).filter(index -> index != null);
-      if (nodeIndexOpt.isPresent()) {
-        int index = nodeIndexOpt.get();
-        if (index > routeIndex && index < bestIndex) {
-          bestIndex = index;
-          best = new NextStop(display, nodeIdOpt, i == lastStopIndex, i, index);
-        }
-      }
-    }
-    if (best != null) {
-      return Optional.of(best);
     }
     if (lastStopIndex >= 0) {
       RouteStop stop = stops.get(lastStopIndex);
       Optional<NodeId> nodeIdOpt = resolveStopNodeId(stop);
       StationDisplay display = resolveStopDisplay(stop, nodeIdOpt);
       if (!display.isEmpty()) {
-        return Optional.of(new NextStop(display, nodeIdOpt, true, lastStopIndex, -1));
+        return Optional.of(new NextStop(display, nodeIdOpt, true, lastStopIndex, false));
       }
     }
     return Optional.empty();
-  }
-
-  private EtaTarget resolveStopTarget(
-      RouteStop stop, Optional<NodeId> nodeIdOpt, StationDisplay display) {
-    if (nodeIdOpt != null && nodeIdOpt.isPresent()) {
-      return new EtaTarget.PlatformNode(nodeIdOpt.get());
-    }
-    String stationCode = display == null ? "-" : display.code();
-    if (stationCode != null && !stationCode.isBlank() && !"-".equals(stationCode)) {
-      return new EtaTarget.Station(stationCode);
-    }
-    Optional<UUID> stationId = stop == null ? Optional.empty() : stop.stationId();
-    if (stationId.isPresent()) {
-      StationDisplay resolved = resolveStationDisplay(stationId.get());
-      String code = resolved.code();
-      if (code != null && !code.isBlank() && !"-".equals(code)) {
-        return new EtaTarget.Station(code);
-      }
-    }
-    return null;
   }
 
   private int resolveLastStopIndex(List<RouteStop> stops) {
@@ -1247,20 +1209,6 @@ public final class TrainHudContextResolver {
       return i;
     }
     return -1;
-  }
-
-  private Map<NodeId, Integer> buildNodeIndexMap(List<NodeId> waypoints) {
-    Map<NodeId, Integer> indexMap = new HashMap<>();
-    if (waypoints == null) {
-      return indexMap;
-    }
-    for (int i = 0; i < waypoints.size(); i++) {
-      NodeId nodeId = waypoints.get(i);
-      if (nodeId != null) {
-        indexMap.put(nodeId, i);
-      }
-    }
-    return indexMap;
   }
 
   /**
@@ -1953,15 +1901,15 @@ public final class TrainHudContextResolver {
   /**
    * 下一停靠站。
    *
-   * @param stopIndex 停靠表下标
-   * @param routeIndex 进度下标（时刻表停靠序号）；只能退回末站时为 -1
+   * @param stopIndex 停靠表下标，与进度下标、时刻表停靠序号同一口径
+   * @param ahead 在列车前方；前方已没有停车点、只能退回显示末站时为 false
    */
   private record NextStop(
       StationDisplay display,
       Optional<NodeId> nodeId,
       boolean terminal,
       int stopIndex,
-      int routeIndex) {
+      boolean ahead) {
     private NextStop {
       Objects.requireNonNull(display, "display");
       nodeId = nodeId == null ? Optional.empty() : nodeId;

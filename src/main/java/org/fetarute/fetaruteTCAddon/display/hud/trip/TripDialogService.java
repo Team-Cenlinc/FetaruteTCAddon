@@ -8,13 +8,14 @@ import io.papermc.paper.registry.data.dialog.action.DialogAction;
 import io.papermc.paper.registry.data.dialog.body.DialogBody;
 import io.papermc.paper.registry.data.dialog.type.DialogType;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import net.kyori.adventure.text.event.ClickCallback;
 import org.bukkit.Bukkit;
@@ -35,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.DisplayService;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
@@ -49,6 +51,8 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  *   <li>提示：玩家打开过一次之前，HUD 的 {@code {?trip_dialog_key}} 占位符给出按键名，默认模板据此在 ActionBar 轮播一页提示；
  *       打开过之后（记在玩家数据里）提示不再出现。
  *   <li>内容是打开那一刻的快照，不会自己刷新；对话框里有“刷新”与“只看换乘站”。乘客下车时关掉。
+ *   <li>权限 {@code fetarute.trip}：按键、命令与对话框按钮都检查；同一玩家 {@link #COOLDOWN} 内只打开一次（防连按刷包）。
+ *   <li>按钮回调只记“是否只看换乘站”，执行时现取当前的服务实例：{@code /fta reload} 之后点旧对话框的按钮也走新实例。
  * </ul>
  *
  * <p>对话框需要 1.21.6 及以上的客户端。
@@ -57,6 +61,15 @@ public final class TripDialogService implements Listener {
 
   /** 最多列出的停靠站数。 */
   static final int STOP_LIMIT = 12;
+
+  /** “只看换乘站”往前看多少站：换乘站可能在第 12 站以后。 */
+  static final int TRANSFER_SCAN_LIMIT = 64;
+
+  /** 查看后续站点的权限。 */
+  public static final String PERMISSION = "fetarute.trip";
+
+  /** 同一玩家两次打开的最短间隔。 */
+  static final Duration COOLDOWN = Duration.ofSeconds(1);
 
   /** HUD 提示占位符的值：客户端按玩家自己的键位显示副手交换键。 */
   static final String SWAP_HAND_KEY = "<key:key.swapOffhand>";
@@ -71,7 +84,12 @@ public final class TripDialogService implements Listener {
   private final TrainHudContextResolver resolver;
   private final NamespacedKey usedKey;
   private final boolean swapHandKey;
-  private final Set<UUID> viewers = ConcurrentHashMap.newKeySet();
+
+  /** 打开着对话框的玩家与打开时刻；关闭按钮（含 Esc）会移除。 */
+  private final Map<UUID, Instant> viewers = new ConcurrentHashMap<>();
+
+  /** 各玩家上次打开的时刻，用于冷却。 */
+  private final Map<UUID, Instant> lastOpened = new ConcurrentHashMap<>();
 
   public TripDialogService(
       FetaruteTCAddon plugin,
@@ -105,6 +123,7 @@ public final class TripDialogService implements Listener {
   public void unregister() {
     HandlerList.unregisterAll(this);
     viewers.clear();
+    lastOpened.clear();
   }
 
   /** 清理站点/公司等缓存。 */
@@ -134,6 +153,9 @@ public final class TripDialogService implements Listener {
    * @return 玩家不在 FTA 列车上时为 false（已提示玩家）
    */
   public boolean open(Player player, boolean transfersOnly) {
+    if (!player.hasPermission(PERMISSION) || coolingDown(player)) {
+      return false;
+    }
     Optional<Ride> ride = ride(player);
     if (ride.isEmpty()) {
       player.sendMessage(locale.component("display.trip.not-on-train"));
@@ -143,25 +165,31 @@ public final class TripDialogService implements Listener {
     return true;
   }
 
-  /** 乘车时按副手交换键打开对话框；不在 FTA 列车上时不拦截。 */
+  /** 乘车时按副手交换键打开对话框；不在 FTA 列车上、没有权限时不拦截。 */
   @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
   public void onSwapHand(PlayerSwapHandItemsEvent event) {
-    if (!swapHandKey) {
+    Player player = event.getPlayer();
+    if (!swapHandKey || !player.hasPermission(PERMISSION)) {
       return;
     }
-    Player player = event.getPlayer();
     ride(player)
         .ifPresent(
             ride -> {
               event.setCancelled(true);
-              show(player, ride, false);
+              if (!coolingDown(player)) {
+                show(player, ride, false);
+              }
             });
   }
 
-  /** 下车时关掉还开着的对话框，免得乘客对着过期的列表找站。 */
+  /** 下车时关掉还开着的对话框，免得乘客对着过期的列表找站。只关本插件打开、尚未关闭、且按钮回调仍有效期内的， 不误关其他插件之后打开的对话框。 */
   @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
   public void onDismount(EntityDismountEvent event) {
-    if (event.getEntity() instanceof Player player && viewers.remove(player.getUniqueId())) {
+    if (!(event.getEntity() instanceof Player player)) {
+      return;
+    }
+    Instant openedAt = viewers.remove(player.getUniqueId());
+    if (openedAt != null && Instant.now().isBefore(openedAt.plus(CALLBACK_LIFETIME))) {
       player.closeDialog();
     }
   }
@@ -169,6 +197,18 @@ public final class TripDialogService implements Listener {
   @EventHandler
   public void onQuit(PlayerQuitEvent event) {
     viewers.remove(event.getPlayer().getUniqueId());
+    lastOpened.remove(event.getPlayer().getUniqueId());
+  }
+
+  /** 冷却中返回 true；不在冷却中时记下这一次。 */
+  private boolean coolingDown(Player player) {
+    Instant now = Instant.now();
+    Instant last = lastOpened.get(player.getUniqueId());
+    if (last != null && now.isBefore(last.plus(COOLDOWN))) {
+      return true;
+    }
+    lastOpened.put(player.getUniqueId(), now);
+    return false;
   }
 
   /** 玩家所乘的 FTA 列车；不在车上或不是 FTA 管控的列车时为空。 */
@@ -182,20 +222,21 @@ public final class TripDialogService implements Listener {
     Map<String, String> placeholders = resolver.buildPlaceholders(context, 0.0f);
     resolver.applyPlayerPlaceholders(placeholders, player, ride.group());
     TrainHudContextResolver.UpcomingStops upcoming =
-        resolver.resolveUpcomingStops(context, STOP_LIMIT);
+        resolver.resolveUpcomingStops(context, transfersOnly ? TRANSFER_SCAN_LIMIT : STOP_LIMIT);
     TripSheet sheet =
         TripSheet.build(
             TripSheet.Texts.load(locale::text, locale::stringList),
             placeholders,
             upcoming.stops(),
             upcoming.total(),
+            STOP_LIMIT,
             transfersOnly,
             context.currentLine(),
             (stop, sequence) ->
                 resolver.stopPlaceholders(
                     placeholders, Optional.of(stop), sequence, context.currentLine()));
     player.showDialog(dialog(sheet));
-    viewers.add(player.getUniqueId());
+    viewers.put(player.getUniqueId(), Instant.now());
     player.getPersistentDataContainer().set(usedKey, PersistentDataType.BYTE, (byte) 1);
   }
 
@@ -220,17 +261,18 @@ public final class TripDialogService implements Listener {
                   "display.trip.more", Map.of("count", String.valueOf(sheet.hidden()))),
               SUMMARY_WIDTH));
     }
+    boolean transfersOnly = sheet.transfersOnly();
     ActionButton refresh =
-        button("display.trip.button.refresh", player -> open(player, sheet.transfersOnly()));
+        button(
+            "display.trip.button.refresh", (dialog, player) -> dialog.open(player, transfersOnly));
     ActionButton toggle =
         button(
-            sheet.transfersOnly()
-                ? "display.trip.button.show-all"
-                : "display.trip.button.transfers-only",
-            player -> open(player, !sheet.transfersOnly()));
+            transfersOnly ? "display.trip.button.show-all" : "display.trip.button.transfers-only",
+            (dialog, player) -> dialog.open(player, !transfersOnly));
     ActionButton close =
-        ActionButton.create(
-            locale.component("display.trip.button.close"), null, BUTTON_WIDTH, null);
+        button(
+            "display.trip.button.close",
+            (dialog, player) -> dialog.viewers.remove(player.getUniqueId()));
     return Dialog.create(
         factory ->
             factory
@@ -249,13 +291,21 @@ public final class TripDialogService implements Listener {
                         .build()));
   }
 
-  /** 回调可能不在主线程触发；读列车状态必须回到主线程。 */
-  private ActionButton button(String labelKey, Consumer<Player> action) {
+  /** 带回调的按钮。回调只捕获插件与动作本身（不捕获本服务和对话框内容），执行时回到主线程、现取当前的服务实例。 */
+  private ActionButton button(String labelKey, BiConsumer<TripDialogService, Player> action) {
+    FetaruteTCAddon owner = plugin;
     DialogAction callback =
         DialogAction.customClick(
             (response, audience) -> {
               if (audience instanceof Player player) {
-                Bukkit.getScheduler().runTask(plugin, () -> action.accept(player));
+                Bukkit.getScheduler()
+                    .runTask(
+                        owner,
+                        () ->
+                            owner
+                                .getDisplayService()
+                                .flatMap(DisplayService::tripDialog)
+                                .ifPresent(dialog -> action.accept(dialog, player)));
               }
             },
             ClickCallback.Options.builder().uses(1).lifetime(CALLBACK_LIFETIME).build());

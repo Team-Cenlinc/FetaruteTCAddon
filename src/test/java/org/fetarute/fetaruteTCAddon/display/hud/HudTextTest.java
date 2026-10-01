@@ -4,7 +4,10 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import java.util.Map;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplate;
 import org.junit.jupiter.api.Test;
 
@@ -34,10 +37,47 @@ class HudTextTest {
   }
 
   @Test
+  void interactiveTagsFromNamesAreNotParsed() {
+    Component line =
+        HudText.render(
+            "下一站 {station}",
+            Map.of(
+                "station",
+                "<click:open_url:'https://example.com'>东山</click><hover:show_text:'x'>站</hover>"),
+            null);
+
+    assertTrue(noEvents(line), "名称里的点击、悬停不能生效");
+    assertTrue(
+        PlainTextComponentSerializer.plainText().serialize(line).contains("<click:"), "按原文显示");
+    assertTrue(
+        HudText.parse("<red>{x}</red><key:key.swapOffhand>", null).children().size() > 0,
+        "颜色与按键名照常解析");
+  }
+
+  private static boolean noEvents(Component component) {
+    return component.clickEvent() == null
+        && component.hoverEvent() == null
+        && component.children().stream().allMatch(HudTextTest::noEvents);
+  }
+
+  @Test
+  void transferNamesAreEscaped() {
+    String chips =
+        TrainHudContextResolver.transferChips(
+            List.of(
+                new TrainHudContext.Transfer(
+                    "DS", "<click:run_command:'/op x'>东山线", "", "#F6A000")),
+            TrainHudContext.Transfer::name);
+
+    assertTrue(noEvents(HudText.parse(chips, null)));
+  }
+
+  @Test
   void colorTagAcceptsHexWithOrWithoutHashAndNamedColors() {
     assertEquals("#F6A000", HudText.colorTag("#f6a000"));
     assertEquals("#F6A000", HudText.colorTag("F6A000"), "不带 # 时 MiniMessage 会把它当成文字");
     assertEquals("aqua", HudText.colorTag("AQUA"));
+    assertEquals("dark_gray", HudText.colorTag("dark_grey"), "MiniMessage 也认的英式拼写");
     assertEquals("white", HudText.colorTag("not-a-color"));
     assertEquals("white", HudText.colorTag(null));
   }
