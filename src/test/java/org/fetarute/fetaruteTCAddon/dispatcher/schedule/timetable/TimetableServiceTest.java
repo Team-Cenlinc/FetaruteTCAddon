@@ -178,8 +178,7 @@ class TimetableServiceTest {
             enabled,
             Duration.ofSeconds(120),
             Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            Duration.ofSeconds(300)));
     service.reload(providerWith(published));
     return service;
   }
@@ -439,12 +438,7 @@ class TimetableServiceTest {
     TimetableService service = new TimetableService(clock::get, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     service.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
     service.scheduledDepartureAt(event("train-A", 0, clock.get()));
 
@@ -472,12 +466,7 @@ class TimetableServiceTest {
     TimetableService service = new TimetableService(clock::get, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     service.reload(providerWith(timetable(TimetableStatus.PUBLISHED, 3)));
     service.scheduledDepartureAt(event("train-A", 0, clock.get()));
 
@@ -523,8 +512,7 @@ class TimetableServiceTest {
             false,
             Duration.ofSeconds(120),
             Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            Duration.ofSeconds(300)));
     holdOnly.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
     assertFalse(
         holdOnly.allowsReturnFromMainlineTurnback("train-unbound", Optional.of(ROUTE)),
@@ -603,12 +591,7 @@ class TimetableServiceTest {
     TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(120), Duration.ofSeconds(300)));
     service.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
     service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:05Z")));
 
@@ -1000,7 +983,6 @@ class TimetableServiceTest {
             Duration.ofSeconds(120),
             Duration.ofSeconds(300),
             Duration.ofSeconds(300),
-            ZONE,
             Duration.ofSeconds(3)));
     service.reload(providerWith(timetable(TimetableStatus.PUBLISHED)));
     service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T08:00:00Z")));

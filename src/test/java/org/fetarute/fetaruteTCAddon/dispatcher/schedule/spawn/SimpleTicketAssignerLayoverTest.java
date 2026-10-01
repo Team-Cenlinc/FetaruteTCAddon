@@ -203,6 +203,63 @@ class SimpleTicketAssignerLayoverTest {
     assertTrue(assigner.snapshotPendingTickets().isEmpty());
   }
 
+  /**
+   * 续班票等本交路的车：到期回调说"不到期"时，过了计划时刻 + 容差票照样挂着；晚到的车进入待命就派上它，不作废、不另出车。
+   *
+   * <p>到期回调在出票层由 {@code TimetableService#awaitsOwnVehicle} 决定，这里只钉住分配器一侧：不到期的票不会被别的计时器丢掉。
+   */
+  @Test
+  void aTicketAwaitingItsLateVehicleIsDispatchedWhenTheVehicleArrives() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    LayoverRegistry.LayoverCandidate lateVehicle =
+        new LayoverRegistry.LayoverCandidate(
+            "train-late", "A", NodeId.of("A"), t0.plusSeconds(600), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(lateVehicle), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("train-late"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    assigner.setTicketExpiry(t -> Optional.empty());
+
+    assigner.tick(provider, t0);
+    assigner.tick(provider, t0.plusSeconds(600));
+    verify(spawnManager, never()).complete(any());
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets(), "过了容差仍在等本交路的车");
+
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(lateVehicle));
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      assigner.tick(provider, t0.plusSeconds(610));
+    }
+
+    verify(runtimeDispatchService).dispatchLayover(eq(lateVehicle), any(ServiceTicket.class));
+    verify(spawnManager).complete(ticket);
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+  }
+
   /** 复用成功时先回调派发结果（带改名后的列车名），再向 SpawnManager 报完成。 */
   @Test
   void dispatchListenerSeesTheCommittedTrainNameBeforeCompletion() {

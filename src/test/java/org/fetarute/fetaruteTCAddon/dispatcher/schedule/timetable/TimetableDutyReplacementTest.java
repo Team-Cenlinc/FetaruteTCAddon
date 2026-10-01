@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServiceTest.CREATE_ROUTE;
-import static org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServiceTest.ZONE;
 import static org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServiceTest.event;
 import static org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServiceTest.providerWith;
 import static org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServiceTest.timetable;
@@ -36,12 +35,7 @@ class TimetableDutyReplacementTest {
   private void start(Timetable published) {
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     service.reload(providerWith(published));
     service.scheduledDepartureAt(event("train-A", 0, T0));
   }
@@ -307,8 +301,7 @@ class TimetableDutyReplacementTest {
             false,
             Duration.ofSeconds(120),
             Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            Duration.ofSeconds(300)));
     service.reload(providerWith(table));
     service.scheduledDepartureAt(event("train-A", 0, T0));
     assertTrue(service.dutyBindingOf("train-A").isPresent());
@@ -363,12 +356,7 @@ class TimetableDutyReplacementTest {
     Timetable table = overnight(timetable(TimetableStatus.PUBLISHED, 3));
     service.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     service.reload(providerWith(table));
     service.scheduledDepartureAt(event("train-A", 0, Instant.parse("2026-03-02T23:50:05Z")));
     UUID midnightTrip = table.duties().get(0).tripIds().get(1);

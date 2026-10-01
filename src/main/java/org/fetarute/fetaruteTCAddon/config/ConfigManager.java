@@ -238,15 +238,6 @@ public final class ConfigManager {
                 defaults.recorderFlushIntervalSeconds(),
                 "timetable",
                 logger));
-    String zone = section.getString("zone", defaults.zone());
-    if (zone != null && !zone.isBlank()) {
-      try {
-        java.time.ZoneId.of(zone.trim());
-      } catch (java.time.DateTimeException ex) {
-        logger.warning("timetable.zone 配置无效: " + zone + "，已回退为服务器默认时区");
-        zone = "";
-      }
-    }
     int stationStopOverheadSeconds =
         readNonNegativeInt(
             section,
@@ -285,7 +276,6 @@ public final class ConfigManager {
         maxCatchUpSeconds,
         reloadIntervalSeconds,
         recorderFlushIntervalSeconds,
-        zone == null ? "" : zone.trim(),
         stationStopOverheadSeconds,
         recoveryMinDwellSeconds,
         recoveryOverspeedPercent,
@@ -1547,7 +1537,6 @@ public final class ConfigManager {
    * @param maxCatchUpSeconds 发车侧单次轮询最多回补多长的时间窗口
    * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
    * @param recorderFlushIntervalSeconds 录制结果落库的间隔
-   * @param zone 时刻表默认时区；留空表示服务器默认时区
    * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
    * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
@@ -1561,7 +1550,6 @@ public final class ConfigManager {
       int maxCatchUpSeconds,
       int reloadIntervalSeconds,
       int recorderFlushIntervalSeconds,
-      String zone,
       int stationStopOverheadSeconds,
       int recoveryMinDwellSeconds,
       int recoveryOverspeedPercent,
@@ -1589,7 +1577,6 @@ public final class ConfigManager {
       maxCatchUpSeconds = Math.max(0, maxCatchUpSeconds);
       reloadIntervalSeconds = Math.max(1, reloadIntervalSeconds);
       recorderFlushIntervalSeconds = Math.max(1, recorderFlushIntervalSeconds);
-      zone = zone == null ? "" : zone.trim();
       stationStopOverheadSeconds = Math.max(0, stationStopOverheadSeconds);
       recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
       recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
@@ -1606,23 +1593,10 @@ public final class ConfigManager {
           300,
           60,
           5,
-          "",
           DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
           DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
-    }
-
-    /** 解析时区，留空时回退服务器默认。 */
-    public java.time.ZoneId resolveZone() {
-      if (zone.isBlank()) {
-        return java.time.ZoneId.systemDefault();
-      }
-      try {
-        return java.time.ZoneId.of(zone);
-      } catch (java.time.DateTimeException ignored) {
-        return java.time.ZoneId.systemDefault();
-      }
     }
   }
 
@@ -1759,11 +1733,10 @@ public final class ConfigManager {
     }
   }
 
-  /** 车辆回收配置（ReclaimPolicy）。 */
   /**
-   * 闲置回收配置。
+   * 车辆回收配置（ReclaimPolicy）。
    *
-   * @param strandedDestroySeconds 待命车闲置超时后一直找不到可用 RETURN 线路（例如直通车滞留在外方终点）持续多久就销毁；0 关闭兜底
+   * @param strandedDestroySeconds 该回收、有回库交路却一直派不出 RETURN 票的待命车，滞留多久就销毁（确实没有回库交路的车当场处理）；0 关闭兜底
    */
   public record ReclaimSettings(
       boolean enabled,
@@ -1772,8 +1745,12 @@ public final class ConfigManager {
       long checkIntervalSeconds,
       long strandedDestroySeconds) {
 
-    /** 默认滞留 30 分钟后销毁：比闲置回收窗口长得多，给折返事务与晚到的回库票留足时间。 */
-    public static final long DEFAULT_STRANDED_DESTROY_SECONDS = 1800L;
+    /**
+     * 默认滞留 5 分钟后销毁。
+     *
+     * <p>没有越行线的线路上，一辆车占着终点股道就挡住同一方向的全部后车，等不起半小时。进行中的折返事务不碰，回库票等本交路的车不到期， 都不靠这个时长兜着。
+     */
+    public static final long DEFAULT_STRANDED_DESTROY_SECONDS = 300L;
 
     /** 不带滞留销毁阈值的构造，取默认值。 */
     public ReclaimSettings(

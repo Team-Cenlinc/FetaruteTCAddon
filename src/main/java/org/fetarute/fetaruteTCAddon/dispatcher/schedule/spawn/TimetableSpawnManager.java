@@ -251,13 +251,39 @@ public final class TimetableSpawnManager
    * 发车侧问：这张票等到什么时候就该放弃。不是本层的票没有到期时刻。
    *
    * <p>到期 = 计划时刻 + assign-tolerance：超过容差还没车，这一班就开天窗，再等下去只会让后面的班次跟着乱。
+   *
+   * <p>例外是续班票与回库票还在等本交路的车（{@link TimetableService#awaitsOwnVehicle}）：车在路上就不到期，晚点就晚发。
+   * 那一班别的车本来就接不了，作废它只会让车到了终点无班可接、占着站台。
    */
   public Optional<Instant> expiryOf(SpawnTicket ticket) {
     if (ticket == null || ticket.id() == null) {
       return Optional.empty();
     }
     OwnedTicket owned = ownedTickets.get(ticket.id());
-    return owned == null ? Optional.empty() : owned.expiry();
+    if (owned == null || owned.intent().filter(timetableService::awaitsOwnVehicle).isPresent()) {
+      return Optional.empty();
+    }
+    return owned.expiry();
+  }
+
+  /**
+   * 本层还有没有这个交路意图的票在等车：出了票、还没派出，也没作废。
+   *
+   * <p>装进 {@link TimetableService#setPendingTicketProbe}：续班票不按时刻到期以后，"过了容差"不再等于"接不上"，回库闸要据此判断。
+   *
+   * @param intent 交路意图
+   * @return 有这样一张票时为 true
+   */
+  public boolean hasPendingTicket(TicketIntent intent) {
+    if (intent == null) {
+      return false;
+    }
+    for (OwnedTicket owned : ownedTickets.values()) {
+      if (owned.intent().filter(intent::equals).isPresent()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 发车侧回调：本层的票派给了某辆车。把车绑到交路上，意图随之摘掉。 */

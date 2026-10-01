@@ -89,6 +89,27 @@ class TimetableBuilderTighteningTest {
     assertFalse(rebuilt.headwayRelaxed());
   }
 
+  /** 一组也没放宽（目标间隔下靠喂车方向多停就排开了）不说"回退"；放宽了只列放宽的组，没有交路组时比总间隔。 */
+  @Test
+  void onlyWidenedIntervalsAreReportedAsAFallback() {
+    assertEquals(
+        Optional.empty(),
+        TimetableBuilder.widenedIntervals(
+            Map.of("a", 360, "b", 720), 360, Map.of("a", 360, "b", 720), 360));
+    assertEquals(
+        Optional.of("a 360→400s"),
+        TimetableBuilder.widenedIntervals(
+            Map.of("a", 360, "b", 720), 360, Map.of("a", 400, "b", 720), 400));
+    assertEquals(
+        Optional.empty(),
+        TimetableBuilder.widenedIntervals(
+            Map.of("default", 360), 360, Map.of("default", 360), 360));
+    assertEquals(
+        Optional.of("400s"),
+        TimetableBuilder.widenedIntervals(
+            Map.of("default", 360), 360, Map.of("default", 400), 400));
+  }
+
   /** 收紧只在搜索之后发生：目标间隔本来就排得开时不放宽、也不收紧。 */
   @Test
   void feasibleTargetsAreKeptAsIs() {

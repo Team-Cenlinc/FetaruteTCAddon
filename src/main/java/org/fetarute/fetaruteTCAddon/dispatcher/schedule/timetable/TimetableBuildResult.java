@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -43,6 +44,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param dutyShapes 交路形状：跑几班的交路各有多少条
  * @param phaseNotes 相位选择的说明
  * @param warnings 构建过程中的提示
+ * @param rapidCatchUp 成品表上快车在共线段被慢车拖住的合计（{@link RapidStagger}）；报告据此提示用快车错峰重建
  */
 public record TimetableBuildResult(
     Optional<Timetable> timetable,
@@ -73,7 +75,8 @@ public record TimetableBuildResult(
     List<ConflictAbsorption.Residual> unabsorbable,
     List<String> resourcePhaseNotes,
     List<PhasePlanner.Residue> residues,
-    List<String> warnings) {
+    List<String> warnings,
+    CatchUp rapidCatchUp) {
 
   /** 报告里最多展开多少条冲突明细。 */
   public static final int CONFLICT_DETAIL_LIMIT = 8;
@@ -98,6 +101,64 @@ public record TimetableBuildResult(
     dutyShapes = dutyShapes == null ? List.of() : List.copyOf(dutyShapes);
     phaseNotes = phaseNotes == null ? List.of() : List.copyOf(phaseNotes);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
+    rapidCatchUp = rapidCatchUp == null ? CatchUp.NONE : rapidCatchUp;
+  }
+
+  /**
+   * 快车被卡的合计。
+   *
+   * @param seconds 被拖住、超过一个裕量的秒数合计
+   * @param trips 被拖住的班次数
+   */
+  public record CatchUp(long seconds, int trips) {
+    /** 没量过或没有快车被卡。 */
+    public static final CatchUp NONE = new CatchUp(0L, 0);
+  }
+
+  /** 同一份结果，相位说明末尾追加一行。 */
+  public TimetableBuildResult withPhaseNote(String note) {
+    List<String> notes = new ArrayList<>(phaseNotes);
+    notes.add(note);
+    return copy(List.copyOf(notes), rapidCatchUp);
+  }
+
+  /** 同一份结果，换上成品表的快车被卡合计。 */
+  public TimetableBuildResult withRapidCatchUp(CatchUp catchUp) {
+    return copy(phaseNotes, catchUp);
+  }
+
+  private TimetableBuildResult copy(List<String> nextPhaseNotes, CatchUp nextCatchUp) {
+    return new TimetableBuildResult(
+        timetable,
+        shares,
+        infeasibleRoutes,
+        droppedTrips,
+        dutyCount,
+        plannedVehicles,
+        peakConcurrentVehicles,
+        maxTripsInAnyDuty,
+        maxDutyDurationSeconds,
+        allDutiesReturnToStorage,
+        longestTripSeconds,
+        targetHeadwaySeconds,
+        effectiveHeadwaySeconds,
+        conflictsAtTarget,
+        neighbors,
+        baselines,
+        shifts,
+        yields,
+        terminals,
+        throats,
+        groupIntervals,
+        interleaves,
+        dutyShapes,
+        nextPhaseNotes,
+        absorbable,
+        unabsorbable,
+        resourcePhaseNotes,
+        residues,
+        warnings,
+        nextCatchUp);
   }
 
   /** 目标 headway 下与邻表撞上的冲突。 */
@@ -175,7 +236,8 @@ public record TimetableBuildResult(
         List.of(),
         List.of(),
         List.of(),
-        List.of(Objects.requireNonNullElse(reason, "构建失败")));
+        List.of(Objects.requireNonNullElse(reason, "构建失败")),
+        CatchUp.NONE);
   }
 
   /**

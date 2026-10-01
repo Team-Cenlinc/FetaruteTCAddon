@@ -254,12 +254,7 @@ class TripCancellationTest {
     TimetableService created = new TimetableService(() -> EIGHT, logs::add);
     created.applySettings(
         new TimetableService.Settings(
-            true,
-            true,
-            Duration.ofSeconds(120),
-            Duration.ofSeconds(300),
-            Duration.ofSeconds(300),
-            ZONE));
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     created.reload(providerWith(timetable()));
     created.setCancellationListener(heard::add);
     return created;

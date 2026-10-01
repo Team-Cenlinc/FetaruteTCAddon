@@ -505,9 +505,10 @@ class ReclaimManagerTest {
   }
 
   /**
-   * 兜底：该回收却派不出 RETURN 票的车，滞留超过阈值就销毁；有乘客的不碰。
+   * 兜底：泛用回收（这里是闲置超时）派不出 RETURN 票的车，滞留超过阈值就销毁；有乘客的不碰。
    *
-   * <p>train-a 停在没有任何 RETURN 线路能出发的终点，闲置早已超时。第一轮记下滞留起点，阈值到了才销毁； 同一场景换成有乘客的车，永远不销毁。
+   * <p>train-a 停在没有任何 RETURN 线路能出发的终点，闲置早已超时，但时刻表没有放行它（没装立即回收闸）：闲置超时不知道它还有没有班可跑，
+   * 第一轮记下滞留起点，阈值到了才销毁；同一场景换成有乘客的车，永远不销毁。
    */
   @Test
   void performReclaimCheckDestroysStrandedTrainAfterThresholdUnlessPassengers() {
@@ -1065,6 +1066,134 @@ class ReclaimManagerTest {
   }
 
   /**
+   * 有回库线路、却一直派不出去（被拒、闭塞）的车才进滞留计时：第一次判定起记时，满 {@code stranded-destroy-seconds} 才销毁。
+   *
+   * <p>有交路就可能等来：下一拍闭塞解除就能开走，不能当场删车。
+   */
+  @Test
+  void aReturnRouteThatKeepsFailingIsDestroyedAfterTheStrandedThreshold() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"), false, false, 600);
+    when(fixture.ticketAssigner.forceAssign(eq(fixture.provider), eq("train-a"), any()))
+        .thenReturn(false);
+
+    fixture.checkAfterIdle(4000);
+    assertTrue(fixture.destroyed.isEmpty(), "第一次只记滞留起点");
+    fixture.checkAfterIdle(4599);
+    assertTrue(fixture.destroyed.isEmpty(), "未到阈值");
+    fixture.checkAfterIdle(4600);
+
+    assertEquals(List.of("train-a:reclaim-stranded"), fixture.destroyed);
+  }
+
+  /**
+   * 原地折返的车站（没有一条回库线路从这里出发）与正线折返点同一条规则：时刻表放行就当场处理，不等闲置上限。
+   *
+   * <p>车在这样的站上只能接本交路的下一班，接不上就再也走不了；两股道的站被两辆这样的车占满，在这里折返的线路全都进不来。
+   */
+  @Test
+  void aStationWithoutReturnRoutesIsClearedOnceTheTimetableLetsTheTrainGo() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setDutyBound(train -> true);
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    fixture.manager.setReturnGate(train -> false);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS - 1);
+    assertTrue(fixture.destroyed.isEmpty(), "刚到时自己的下一班票可能还在路上");
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertEquals(List.of("train-a:reclaim-no-return-route"), fixture.destroyed);
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(line -> line.startsWith("回收触发: 无回库线路的车站无后续班次 train=train-a")),
+        fixture.logs::toString);
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(line -> line.startsWith("RECLAIM_NO_ROUTE_DESTROY train=train-a")),
+        fixture.logs::toString);
+  }
+
+  /** 原地折返的车站上、下一班的票还在等它的车照常等：时刻表不放行时，回库闸照旧说了算。 */
+  @Test
+  void aStationWithoutReturnRoutesKeepsATrainWhoseNextTripStillWaits() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setDutyBound(train -> true);
+    fixture.manager.setMainlineReturnGate((train, route) -> false);
+    fixture.manager.setReturnGate(train -> false);
+
+    fixture.checkAfterIdle(4000);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
+  /**
+   * 没绑交路的车（例如重启后账本丢了）停在原地折返的车站：不走立即回收，照旧等闲置上限，之后进滞留计时。
+   *
+   * <p>它还可能接一张从这里始发的首班票；也不为它查库。
+   */
+  @Test
+  void anUnboundVehicleAtAStationWithoutReturnRoutesWaitsForTheIdleLimit() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    org.mockito.Mockito.clearInvocations(fixture.provider.companies());
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    verify(fixture.provider.companies(), never()).listAll();
+    fixture.checkAfterIdle(4000);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty(), "闲置超时只记滞留起点");
+  }
+
+  /** 查"终点有没有回库线路"时存储出错：按有处理、不缓存，本轮回收照常走完，不会被掐断。 */
+  @Test
+  void aStorageFailureWhileLookingForReturnRoutesKeepsTheScanGoing() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setDutyBound(train -> true);
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    when(fixture.provider.companies().listAll())
+        .thenThrow(new org.fetarute.fetaruteTCAddon.storage.api.StorageException("db down"));
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    assertTrue(fixture.destroyed.isEmpty());
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(line -> line.startsWith("回收: 查询回库线路失败 terminal=surc:s:nta:2")),
+        fixture.logs::toString);
+  }
+
+  /** 交路已换车的车停在原地折返的车站：再也没有班可跑、也没有回库线路，当场处理。 */
+  @Test
+  void aRetiredVehicleAtAStationWithoutReturnRoutesIsClearedInPlace() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setRetiredVehicle(train -> train.equals("train-a"));
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    assertEquals(List.of("train-a:reclaim-no-return-route"), fixture.destroyed);
+  }
+
+  /** "终点有没有回库线路"在复查窗口内只查一次库：每轮扫描都要问，查一次要扫遍全部运营商的交路与首站。 */
+  @Test
+  void theReturnRouteLookupIsReusedWithinTheRecheckWindow() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setDutyBound(train -> true);
+    org.mockito.Mockito.clearInvocations(fixture.provider.companies());
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS + 60);
+    verify(fixture.provider.companies(), times(1)).listAll();
+
+    fixture.checkAfterIdle(
+        ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS
+            + ReclaimManager.RETURN_ROUTE_RECHECK_SECONDS);
+    verify(fixture.provider.companies(), times(2)).listAll();
+  }
+
+  /**
    * 正线折返用例的夹具：本运营商 MT 线上一条刚跑完的交路 {@link #shortRoute} 与一条站台 PPK 出发的 RETURN；可选再加一条从正线折返点出发的 RETURN
    * {@link #mainlineReturnRoute}。闲置上限 3600 秒，时钟由用例推进，销毁记为 {@code 列车:原因}。
    */
@@ -1361,6 +1490,7 @@ class ReclaimManagerTest {
     when(operatorRepository.findByCompanyAndCode(companyId, "SURC"))
         .thenReturn(Optional.of(operator));
     when(operatorRepository.findById(operatorId)).thenReturn(Optional.of(operator));
+    when(operatorRepository.listByCompany(companyId)).thenReturn(List.of(operator));
     when(lineRepository.listByOperator(operatorId)).thenReturn(List.of(line));
     when(lineRepository.findById(lineId)).thenReturn(Optional.of(line));
     when(routeRepository.listByLine(lineId)).thenReturn(List.of(returnRoute));
