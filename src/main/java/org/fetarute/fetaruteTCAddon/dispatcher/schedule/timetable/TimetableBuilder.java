@@ -292,10 +292,17 @@ public final class TimetableBuilder {
               failed,
               found.hold());
       warnings.addAll(searchNotes);
+      String outcome =
+          widenedIntervals(
+                  target.intervals(),
+                  target.headwaySeconds(),
+                  chosen.intervals(),
+                  chosen.headwaySeconds())
+              .map(widened -> "，已回退到最小可行间隔 " + widened)
+              .orElse(found.hold().isNone() ? "，间隔不变" : "，间隔不变（靠喂车方向中途多停排开，见上）");
       warnings.add(
           summary
-              + "，已回退到最小可行间隔 "
-              + describeRelaxed(target, chosen)
+              + outcome
               + "（--strict 可改为构建失败）"
               + (target.conflicts().external().isEmpty()
                   ? ""
@@ -540,20 +547,35 @@ public final class TimetableBuilder {
   }
 
   /** 回退提示里的间隔：只有一组时就是一个数；多组时只列被放宽的组，逐组收紧后回到目标的组不列。 */
-  private static String describeRelaxed(Attempt target, Attempt chosen) {
-    if (target.intervals().size() <= 1) {
-      return chosen.headwaySeconds() + "s";
+  /**
+   * 搜索选中的间隔比目标宽在哪里。
+   *
+   * <p>有交路组时只列仍被放宽的组（逐组收紧后最小的组间隔已不能代表"放宽到多少"），没有时比总间隔。 一组也没放宽时为空：目标间隔下靠喂车方向多停就排开了，不能说成"回退"。
+   *
+   * @param targetIntervals 各组目标间隔
+   * @param targetHeadway 目标间隔
+   * @param chosenIntervals 选中的各组间隔
+   * @param chosenHeadway 选中的间隔
+   * @return 放宽的描述，如 {@code tight 120→210s}；没有放宽时为空
+   */
+  static Optional<String> widenedIntervals(
+      Map<String, Integer> targetIntervals,
+      int targetHeadway,
+      Map<String, Integer> chosenIntervals,
+      int chosenHeadway) {
+    if (targetIntervals.size() <= 1) {
+      return chosenHeadway > targetHeadway ? Optional.of(chosenHeadway + "s") : Optional.empty();
     }
-    List<String> relaxed = new ArrayList<>();
-    new TreeMap<>(target.intervals())
+    List<String> widened = new ArrayList<>();
+    new TreeMap<>(targetIntervals)
         .forEach(
             (group, seconds) -> {
-              int effective = chosen.intervals().getOrDefault(group, seconds);
+              int effective = chosenIntervals.getOrDefault(group, seconds);
               if (effective > seconds) {
-                relaxed.add(group + " " + seconds + "→" + effective + "s");
+                widened.add(group + " " + seconds + "→" + effective + "s");
               }
             });
-    return relaxed.isEmpty() ? chosen.headwaySeconds() + "s" : String.join("、", relaxed);
+    return widened.isEmpty() ? Optional.empty() : Optional.of(String.join("、", widened));
   }
 
   /** 交路形状：跑几班的交路各有多少条；运营者看它判断出入库班配得多不多。 */
