@@ -116,7 +116,7 @@ public final class FtaTimetableCommand {
     SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
     SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
     SuggestionProvider<CommandSender> lineSuggestions = lineSuggestions();
-    SuggestionProvider<CommandSender> codeSuggestions = timetableCodeSuggestions();
+    SuggestionProvider<CommandSender> codeSuggestions = timetableCodeSuggestions(false);
 
     CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
     var nameFlag = stringFlag("name", "\"<name>\"");
@@ -158,10 +158,7 @@ public final class FtaTimetableCommand {
             .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .required("line", StringParser.quotedStringParser(), lineSuggestions)
-            .required(
-                "code",
-                StringParser.quotedStringParser(),
-                CommandSuggestionProviders.placeholder("<code>"))
+            .required("code", StringParser.quotedStringParser(), timetableCodeSuggestions(true))
             .flag(headwayFlag)
             .flag(groupHeadwayFlag)
             .flag(startFlag)
@@ -336,8 +333,7 @@ public final class FtaTimetableCommand {
 
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(Component.text("===== /fta timetable =====", NamedTextColor.DARK_AQUA));
-    sender.sendMessage(
-        hint("编表", "/fta timetable build <company> <operator> <line>[,<line>…] <code>"));
+    sender.sendMessage(hint("编表", "/fta timetable build <company> <operator> <line> <code>"));
     sender.sendMessage(
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
@@ -349,15 +345,16 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("详情", "/fta timetable info <company> <operator> <line> <code>"));
     sender.sendMessage(hint("车辆交路", "/fta timetable duties <company> <operator> <line> <code>"));
     sender.sendMessage(hint("邻表", "/fta timetable neighbors <company> <operator> <line> <code>"));
-    sender.sendMessage(
-        hint("投入运行", "/fta timetable publish <company> <operator> <line>[,<line>…] <code>"));
-    sender.sendMessage(
-        hint("撤出运行", "/fta timetable unpublish <company> <operator> <line>[,<line>…] <code>"));
+    sender.sendMessage(hint("投入运行", "/fta timetable publish <company> <operator> <line> <code>"));
+    sender.sendMessage(hint("撤出运行", "/fta timetable unpublish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
     sender.sendMessage(hint("运行态", "/fta timetable status"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
     sender.sendMessage(
-        Component.text("同一 operator 下几条线写成 WS,MT 可以一起编表：共享相位与让车，每线一张表、整组发布。", NamedTextColor.GRAY));
+        Component.text(
+            "同一 operator 下几条线写成 \"WS,MT\" 可以一起编表：共享相位与让车，每线一张表、整组发布、撤下、删除。"
+                + "逗号要放在双引号里，不加引号客户端会把整条命令判错。",
+            NamedTextColor.GRAY));
   }
 
   private void handleBuild(CommandContext<CommandSender> ctx, BuildFlags flags) {
@@ -2453,7 +2450,10 @@ public final class FtaTimetableCommand {
     return new MaxIdleChoice(VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS, "默认");
   }
 
-  /** {@code --group-headway} 的补全：本线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。 */
+  /**
+   * {@code --group-headway} 的补全：线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。几条线联编时给各线组名的并集， 另给带线前缀的
+   * {@code <线>/<组>=}（只作用于那一条线）。
+   */
   private SuggestionProvider<CommandSender> groupHeadwaySuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
@@ -2466,23 +2466,25 @@ public final class FtaTimetableCommand {
           if (matchPrefix.isBlank()) {
             out.add("<group>=<seconds>");
           }
-          resolveLineForSuggestion(ctx)
-              .ifPresent(
-                  pair -> {
-                    List<String> names = new ArrayList<>();
-                    for (SpawnGroup group : LineSpawnMetadata.parseGroups(pair.line().metadata())) {
-                      names.add(group.name());
-                    }
-                    if (names.isEmpty()) {
-                      names.add(ServiceGroupClassifier.DEFAULT_GROUP);
-                    }
-                    for (String name : names) {
-                      String candidate = name + "=";
-                      if (matches(candidate, matchPrefix)) {
-                        out.add(candidate);
-                      }
-                    }
-                  });
+          List<LinePair> lines = resolveLinesForSuggestion(ctx);
+          java.util.Set<String> candidates = new java.util.LinkedHashSet<>();
+          for (LinePair pair : lines) {
+            List<String> names = new ArrayList<>();
+            for (SpawnGroup group : LineSpawnMetadata.parseGroups(pair.line().metadata())) {
+              names.add(group.name());
+            }
+            if (names.isEmpty()) {
+              names.add(ServiceGroupClassifier.DEFAULT_GROUP);
+            }
+            names.forEach(name -> candidates.add(name + "="));
+            if (lines.size() > 1) {
+              names.forEach(name -> candidates.add(pair.line().code() + "/" + name + "="));
+            }
+          }
+          candidates.stream()
+              .filter(candidate -> matches(candidate, matchPrefix))
+              .limit(SUGGESTION_LIMIT)
+              .forEach(out::add);
           return out;
         });
   }
@@ -2745,38 +2747,41 @@ public final class FtaTimetableCommand {
         });
   }
 
-  /** 线路补全：支持逗号分隔的多条线——光标在最后一段上补全，前面已选的原样保留、不再重复建议。 */
+  /**
+   * 线路补全：支持逗号分隔的多条线（联编，或几张表一起发布、撤下、删除）。光标在最后一段上补全，前面已选的原样保留、不再重复建议。
+   *
+   * <p>客户端不认不带引号的逗号，多条线时候选一律带双引号（{@link CommaListInput}）：给收好引号的 {@code "MT,WS"} 与接着写下一条的 {@code
+   * "MT,WS,}。
+   */
   private SuggestionProvider<CommandSender> lineSuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
-          String token = input == null ? "" : input.lastRemainingToken().trim();
-          int comma = token.lastIndexOf(',');
-          String head = comma < 0 ? "" : token.substring(0, comma + 1);
-          String prefix = (comma < 0 ? token : token.substring(comma + 1)).toLowerCase(Locale.ROOT);
-          java.util.Set<String> chosen = new java.util.HashSet<>();
-          for (String part : head.split(",")) {
-            if (!part.isBlank()) {
-              chosen.add(part.trim().toLowerCase(Locale.ROOT));
-            }
-          }
+          CommaListInput typed = CommaListInput.of(input == null ? "" : input.lastRemainingToken());
+          java.util.Set<String> chosen = typed.chosen();
           List<String> out = new ArrayList<>();
-          if (prefix.isBlank() && head.isEmpty()) {
+          if (typed.blank()) {
             out.add("<line>");
+            out.add("\"<line>,<line>\"");
           }
           resolveOperatorForSuggestion(ctx)
               .ifPresent(
                   pair ->
                       pair.provider().lines().listByOperator(pair.operator().id()).stream()
                           .map(Line::code)
-                          .filter(code -> matches(code, prefix))
+                          .filter(code -> matches(code, typed.prefix()))
                           .filter(code -> !chosen.contains(code.toLowerCase(Locale.ROOT)))
                           .limit(SUGGESTION_LIMIT)
-                          .forEach(code -> out.add(head + code)));
+                          .forEach(code -> out.addAll(typed.complete(code))));
           return out;
         });
   }
 
-  private SuggestionProvider<CommandSender> timetableCodeSuggestions() {
+  /**
+   * 时刻表编号补全。几条线时只给每条线都有的编号（联表发布、撤下要每条线都找得到）。
+   *
+   * @param forBuild 编表用：给各线草稿的编号（重新 build 覆盖草稿；运行中的表要先撤下，不给），另给占位符
+   */
+  private SuggestionProvider<CommandSender> timetableCodeSuggestions(boolean forBuild) {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
           String prefix = normalizePrefix(input);
@@ -2784,14 +2789,27 @@ public final class FtaTimetableCommand {
           if (prefix.isBlank()) {
             out.add("<code>");
           }
-          resolveLineForSuggestion(ctx)
-              .ifPresent(
-                  pair ->
-                      pair.provider().timetables().listByLine(pair.line().id()).stream()
-                          .map(Timetable::code)
-                          .filter(code -> matches(code, prefix))
-                          .limit(SUGGESTION_LIMIT)
-                          .forEach(out::add));
+          java.util.Set<String> codes = null;
+          for (LinePair pair : resolveLinesForSuggestion(ctx)) {
+            java.util.Set<String> lineCodes = new java.util.LinkedHashSet<>();
+            pair.provider().timetables().listByLine(pair.line().id()).stream()
+                .filter(timetable -> !forBuild || !timetable.published())
+                .map(Timetable::code)
+                .forEach(lineCodes::add);
+            if (codes == null) {
+              codes = lineCodes;
+            } else if (forBuild) {
+              codes.addAll(lineCodes);
+            } else {
+              codes.retainAll(lineCodes);
+            }
+          }
+          if (codes != null) {
+            codes.stream()
+                .filter(code -> matches(code, prefix))
+                .limit(SUGGESTION_LIMIT)
+                .forEach(out::add);
+          }
           return out;
         });
   }
@@ -2823,17 +2841,29 @@ public final class FtaTimetableCommand {
                     .map(operator -> new OperatorPair(pair.provider(), operator)));
   }
 
-  private Optional<LinePair> resolveLineForSuggestion(CommandContext<CommandSender> ctx) {
+  /** 补全时已输入的线路（逗号分隔的一到多条）；有一条找不到就当作都没有，免得给出只对部分线成立的候选。 */
+  private List<LinePair> resolveLinesForSuggestion(CommandContext<CommandSender> ctx) {
     Optional<String> lineArg = ctx.optional("line").map(String.class::cast).map(String::trim);
     if (lineArg.isEmpty() || lineArg.get().isBlank()) {
-      return Optional.empty();
+      return List.of();
     }
-    return resolveOperatorForSuggestion(ctx)
-        .flatMap(
-            pair ->
-                new CompanyQueryService(pair.provider())
-                    .findLine(pair.operator().id(), lineArg.get())
-                    .map(line -> new LinePair(pair.provider(), line)));
+    Optional<OperatorPair> operator = resolveOperatorForSuggestion(ctx);
+    if (operator.isEmpty()) {
+      return List.of();
+    }
+    CompanyQueryService query = new CompanyQueryService(operator.get().provider());
+    List<LinePair> out = new ArrayList<>();
+    for (String part : lineArg.get().split(",")) {
+      if (part.isBlank()) {
+        continue;
+      }
+      Optional<Line> line = query.findLine(operator.get().operator().id(), part.trim());
+      if (line.isEmpty()) {
+        return List.of();
+      }
+      out.add(new LinePair(operator.get().provider(), line.get()));
+    }
+    return out;
   }
 
   // ----------------------------------------------------------------- helpers

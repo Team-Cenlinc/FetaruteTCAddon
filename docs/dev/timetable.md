@@ -553,7 +553,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 ## 命令
 
 ```
-/fta timetable build <company> <operator> <line>[,<line>…] <code>
+/fta timetable build <company> <operator> <line>|"<line>,<line>…" <code>
         [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站停站）]
@@ -564,11 +564,15 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
 /fta timetable list <company> <operator> <line>
 /fta timetable info <company> <operator> <line> <code> [page]
 /fta timetable duties <company> <operator> <line> <code> [page]
-/fta timetable publish|unpublish <company> <operator> <line>[,<line>…] <code>
-/fta timetable delete <company> <operator> <line>[,<line>…] <code> --confirm
+/fta timetable publish|unpublish <company> <operator> <line>|"<line>,<line>…" <code>
+/fta timetable delete <company> <operator> <line>|"<line>,<line>…" <code> --confirm
 /fta timetable export <company> <operator> <line> <code> [limit]
 /fta timetable status
 ```
+
+几条线联编、一起发布或撤下时，线路写成 `"MT,WS"`：逗号分隔、整体加双引号。客户端按 Brigadier 规则解析参数，不带引号的参数只认字母、数字与
+`_ - . +`，逗号会让整条命令判错。线路补全在多条线时给带引号的候选（收好引号的 `"MT,WS"` 与接着写下一条的 `"MT,WS,`），
+编号补全只给每条线都有的编号（build 给各线草稿编号的并集，运行中的表要先撤下），`--group-headway` 补全给各线组名的并集与带线前缀的 `<线>/<组>=`。
 
 间隔按**交路组**解析，每组一个数，优先级：`--group-headway <组>=<秒>`（可重复，也接受逗号分隔；补全给出本线的组名）里点名的 > `--headway`（给全部组）> 该组在线路 metadata 里的
 `spawn_groups[].baselineSec` > 线路级 `spawnFreqBaselineSec` > 300 秒。组名按 metadata 原样匹配，没配 `spawn_group` 的 route 归 `default` 组。
