@@ -1,10 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * 一段走行的运行曲线：列车在速度天花板下按 {@link SpeedCurve} 起步与制动，逐节点给出到达时刻。
@@ -23,7 +24,7 @@ final class RunCurve {
   /** 判定"贴着天花板"的容差（格/秒）。 */
   private static final double AT_CEILING_TOLERANCE_BPS = 1.0e-6;
 
-  /** {@link #CACHE} 的条目上限，满了整表清空。 */
+  /** {@link #CACHE} 的条目上限，按最近使用淘汰。 */
   private static final int CACHE_LIMIT = 1024;
 
   /**
@@ -31,8 +32,17 @@ final class RunCurve {
    *
    * <p>站牌、时刻表 API 与地图每次刷新都要给每趟车、每张票算到目标的运行曲线。途中停车点之后的各段都从静止起步、节点固定，
    * 未发车票据整条路径都不变，每次刷新输入完全相同；逐采样点积分却要按里程走一遍。结果只取决于输入，可在线程间共享。
+   *
+   * <p>运行中列车的首段（当前速度、首边剩余长度）每次都不同，编表也会塞进大量一次性的输入；按最近使用淘汰才留得住反复命中的那些段。
    */
-  private static final Map<CacheKey, double[]> CACHE = new ConcurrentHashMap<>();
+  private static final Map<CacheKey, double[]> CACHE =
+      Collections.synchronizedMap(
+          new LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<CacheKey, double[]> eldest) {
+              return size() > CACHE_LIMIT;
+            }
+          });
 
   private RunCurve() {}
 
@@ -66,9 +76,6 @@ final class RunCurve {
       return hit.clone();
     }
     double[] computed = computeNodeTimes(lengths, speeds, caps, entrySpeed, exitSpeed, curve);
-    if (CACHE.size() >= CACHE_LIMIT) {
-      CACHE.clear();
-    }
     CACHE.put(key, computed.clone());
     return computed;
   }
@@ -153,7 +160,11 @@ final class RunCurve {
     return (int) Math.min(32.0, Math.max(1.0, Math.ceil(4.0 / Math.max(speedBps, 0.125))));
   }
 
-  /** {@link #CACHE} 的键：全部输入按值比较；数组在构造时复制，调用方之后改数组不影响键。 */
+  /**
+   * {@link #CACHE} 的键：全部输入按值比较；数组在构造时复制，调用方之后改数组不影响键。
+   *
+   * <p>限速区里的 {@code null} 与计算时一样略过。
+   */
   private static final class CacheKey {
     private final double[] lengths;
     private final double[] speeds;
@@ -172,7 +183,7 @@ final class RunCurve {
         SpeedCurve curve) {
       this.lengths = lengths.clone();
       this.speeds = speeds.clone();
-      this.caps = caps == null ? List.of() : List.copyOf(caps);
+      this.caps = caps == null ? List.of() : caps.stream().filter(Objects::nonNull).toList();
       this.entrySpeed = entrySpeed;
       this.exitSpeed = exitSpeed;
       this.curve = curve;
