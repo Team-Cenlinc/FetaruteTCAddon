@@ -7,7 +7,7 @@ import java.util.Optional;
 /**
  * 站台屏布局：画布尺寸与一组内置组件的摆放。
  *
- * <p>坐标与尺寸均为地图像素，原点在左上角；一块地图 {@value #TILE}×{@value #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表），
+ * <p>坐标与尺寸均为地图像素，原点在左上角；一块地图 {@value #TILE}×{@value #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表），
  * 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
  *
  * @param id 布局 ID（文件名去掉扩展名）
@@ -55,9 +55,17 @@ public record PidsLayout(
     return departures().map(Departures::rowCapacity).orElse(0);
   }
 
+  /** 停站表组件；不是停站屏时为空。 */
+  public Optional<StopList> stopList() {
+    return widgets.stream()
+        .filter(StopList.class::isInstance)
+        .map(StopList.class::cast)
+        .findFirst();
+  }
+
   /** 组件。 */
   public sealed interface Widget
-      permits Platform, Clock, LineBand, StationTitle, LineStrip, Departures {}
+      permits Platform, Clock, LineBand, StationTitle, LineStrip, Departures, StopList {}
 
   /**
    * 一组中英文字的字号。
@@ -235,6 +243,86 @@ public record PidsLayout(
         total += style.count() * (style.height() + style.gap());
       }
       return total;
+    }
+  }
+
+  /**
+   * 停站屏（2×1）的主体：下一班的色牌与多久到达、终点、直通或经由一行、停站表与页码。
+   *
+   * <p>自上而下：首行（色牌左缘在 {@code badgeX}，让出左边单独摆放的站台号组件；多久到达靠右）、终点、终点下面一行
+   * （没有直通与经由时不占位）、停站表、页码（最底下一行，靠右）。停站表与上下相邻部分各隔 {@code listGap}，每站一行 {@code rowHeight}，放不下时分页。
+   *
+   * @param x 左
+   * @param y 上
+   * @param width 宽
+   * @param height 高（到页码一行的底边）
+   * @param inset 左右留白
+   * @param headerHeight 首行高
+   * @param badgeX 色牌左缘（相对本组件左缘）
+   * @param badge 色牌
+   * @param minutesSize 分钟数字号
+   * @param unit “分 / min”（上下叠放）
+   * @param destinationHeight 终点一块的高
+   * @param destination 终点中英文（上下叠放）
+   * @param noteGap 终点与下面一行的间距
+   * @param noteHeight 终点下面一行的高（方形标签边长）
+   * @param listGap 停站表与上下相邻部分的间距
+   * @param rowHeight 停站表每站一行的高
+   * @param stop 站名中英文（上下叠放）
+   * @param footerHeight 页码一行的高
+   * @param footerSize 页码字号
+   */
+  public record StopList(
+      int x,
+      int y,
+      int width,
+      int height,
+      int inset,
+      int headerHeight,
+      int badgeX,
+      BadgeStyle badge,
+      int minutesSize,
+      TextStyle unit,
+      int destinationHeight,
+      TextStyle destination,
+      int noteGap,
+      int noteHeight,
+      int listGap,
+      int rowHeight,
+      TextStyle stop,
+      int footerHeight,
+      int footerSize)
+      implements Widget {
+
+    /** 终点一块的顶边。 */
+    public int destinationTop() {
+      return y + headerHeight;
+    }
+
+    /** 终点下面一行的顶边。 */
+    public int noteTop() {
+      return destinationTop() + destinationHeight + noteGap;
+    }
+
+    /** 停站表顶边。 */
+    public int listTop(boolean note) {
+      return destinationTop() + destinationHeight + (note ? noteGap + noteHeight : 0) + listGap;
+    }
+
+    /** 停站表底边。 */
+    public int listBottom() {
+      return y + height - footerHeight - listGap;
+    }
+
+    /** 每页几站。 */
+    public int rowsPerPage(boolean note) {
+      return Math.max(1, (listBottom() - listTop(note)) / rowHeight);
+    }
+
+    /** 这么多站要分几页。 */
+    public int pages(int stops, boolean note) {
+      int rows = rowsPerPage(note);
+      return Math.max(1, (stops + rows - 1) / rows);
     }
   }
 

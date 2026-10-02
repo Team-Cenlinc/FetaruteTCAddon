@@ -29,6 +29,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.RemarkPart;
  * </ol>
  *
  * <p>取消、回库、本站终到、通过的行没有备注；不知道本站停靠序号（或交路停靠点）时只看末班车。
+ *
+ * <p>直通与经由的判定（{@link #trip}、{@link #through}、{@link #via}）也给 2×1 停站屏用：停站表上的经由站、换线站与备注同一口径。
  */
 final class PidsRemarks {
 
@@ -56,14 +58,53 @@ final class PidsRemarks {
       parts.add(
           new RemarkPart(vocabulary.lastTrainTag(), theme.red(), List.of(), Optional.empty()));
     }
+    trip(row)
+        .ifPresent(
+            trip -> {
+              through(trip)
+                  .map(
+                      through ->
+                          new RemarkPart(
+                              vocabulary.throughTag(),
+                              through.color().orElse(theme.outline()),
+                              List.of(through.name()),
+                              through.name().equals(through.code())
+                                  ? Optional.empty()
+                                  : Optional.of(through.code())))
+                  .ifPresent(parts::add);
+              List<String> via = via(row, trip);
+              if (!via.isEmpty()) {
+                parts.add(
+                    new RemarkPart(
+                        vocabulary.viaTag(),
+                        theme.amber(),
+                        via.stream().map(this::stationName).toList(),
+                        Optional.empty()));
+              }
+            });
+    return parts.isEmpty() ? Optional.empty() : Optional.of(new Remark(parts));
+  }
+
+  /**
+   * 列车从本站往后的停靠点。
+   *
+   * @param stops 交路全部停靠点（与停靠序号同下标）
+   * @param here 本站停靠序号
+   * @param end 运营终点（最后一个停车的车站；其后的车库、折返线不算）的停靠序号
+   */
+  record Trip(List<RouteStop> stops, int here, int end) {
+
+    Trip {
+      stops = List.copyOf(stops);
+    }
+  }
+
+  /** 本站之后还有停车站时的停靠点；不知道本站停靠序号、交路停靠点，或本站就是终点时为空。 */
+  Optional<Trip> trip(PidsRow row) {
     List<RouteStop> stops = directory.stops(row.routeId());
     int here = row.stopSequence();
     int end = lastStop(stops);
-    if (here >= 0 && here < end) {
-      through(stops, here, end, theme).ifPresent(parts::add);
-      via(row, stops, here, end, theme).ifPresent(parts::add);
-    }
-    return parts.isEmpty() ? Optional.empty() : Optional.of(new Remark(parts));
+    return here >= 0 && here < end ? Optional.of(new Trip(stops, here, end)) : Optional.empty();
   }
 
   /** 运营终点（最后一个停车的车站；其后的车库、折返线不算）的下标；没有时为 -1。 */
@@ -76,9 +117,22 @@ final class PidsRemarks {
     return -1;
   }
 
-  private Optional<RemarkPart> through(List<RouteStop> stops, int here, int end, PidsTheme theme) {
-    for (int i = here + 1; i < end; i++) {
-      Optional<RouteApi.LineRef> change = stops.get(i).lineChange();
+  /**
+   * 直通：本站之后、终点之前第一次换线。
+   *
+   * @param index 换线站的停靠序号
+   * @param line 换入的线路
+   * @param name 线路名（查不到时为线路代码）
+   * @param code 线路的显示代码
+   * @param color 线路色；查不到线路时为空
+   */
+  record Through(
+      int index, RouteApi.LineRef line, String name, String code, Optional<Integer> color) {}
+
+  /** 本站之后、终点之前第一次换线；本站就是换线站时不算（列车已按新线路发车）。 */
+  Optional<Through> through(Trip trip) {
+    for (int i = trip.here() + 1; i < trip.end(); i++) {
+      Optional<RouteApi.LineRef> change = trip.stops().get(i).lineChange();
       if (change.isPresent()) {
         RouteApi.LineRef line = change.get();
         Optional<PidsDirectory.LineStyle> style =
@@ -91,26 +145,26 @@ final class PidsRemarks {
                 .filter(text -> !text.isBlank())
                 .orElse(code);
         return Optional.of(
-            new RemarkPart(
-                vocabulary.throughTag(),
-                style.map(PidsDirectory.LineStyle::color).orElse(theme.outline()),
-                List.of(name),
-                name.equals(code) ? Optional.empty() : Optional.of(code)));
+            new Through(i, line, name, code, style.map(PidsDirectory.LineStyle::color)));
       }
     }
     return Optional.empty();
   }
 
-  private Optional<RemarkPart> via(
-      PidsRow row, List<RouteStop> stops, int here, int end, PidsTheme theme) {
+  /**
+   * 经由站（{@code 运营商:站码}，大写）：配置了就是配置的、还没经过的站（按配置顺序），没配置时推一个。
+   *
+   * @return 没有可写的经由站时为空
+   */
+  List<String> via(PidsRow row, Trip trip) {
     Set<String> skipped = new HashSet<>();
-    stops.get(here).stationId().ifPresent(id -> skipped.add(normalize(id)));
-    stops.get(end).stationId().ifPresent(id -> skipped.add(normalize(id)));
+    trip.stops().get(trip.here()).stationId().ifPresent(id -> skipped.add(normalize(id)));
+    trip.stops().get(trip.end()).stationId().ifPresent(id -> skipped.add(normalize(id)));
     row.destinationId().ifPresent(id -> skipped.add(normalize(id)));
     List<Candidate> candidates = new ArrayList<>();
     Set<String> seen = new HashSet<>();
-    for (int i = here + 1; i < end; i++) {
-      RouteStop stop = stops.get(i);
+    for (int i = trip.here() + 1; i < trip.end(); i++) {
+      RouteStop stop = trip.stops().get(i);
       Optional<String> station = stop.stationId().map(PidsRemarks::normalize);
       if (stop.stops()
           && station.isPresent()
@@ -128,15 +182,7 @@ final class PidsRemarks {
                     code ->
                         candidates.stream().filter(c -> c.code().equalsIgnoreCase(code)).limit(1))
                 .toList();
-    if (chosen.isEmpty()) {
-      return Optional.empty();
-    }
-    return Optional.of(
-        new RemarkPart(
-            vocabulary.viaTag(),
-            theme.amber(),
-            chosen.stream().map(candidate -> stationName(candidate.stationId())).toList(),
-            Optional.empty()));
+    return chosen.stream().map(Candidate::stationId).toList();
   }
 
   /** 推一个经由站：换乘线路多、站台多、直通站、离本站近，依次比。 */
@@ -155,16 +201,19 @@ final class PidsRemarks {
   }
 
   private int lines(Candidate candidate) {
-    int colon = candidate.stationId().indexOf(':');
-    if (colon <= 0) {
-      return 0;
+    return stationKey(candidate.stationId())
+        .map(key -> directory.linesServing(key).size())
+        .orElse(0);
+  }
+
+  /** {@code 运营商:站码} 拆成车站键；格式不对时为空。 */
+  static Optional<PidsStationKey> stationKey(String stationId) {
+    int colon = stationId.indexOf(':');
+    if (colon <= 0 || colon == stationId.length() - 1) {
+      return Optional.empty();
     }
-    return directory
-        .linesServing(
-            new PidsStationKey(
-                candidate.stationId().substring(0, colon),
-                candidate.stationId().substring(colon + 1)))
-        .size();
+    return Optional.of(
+        new PidsStationKey(stationId.substring(0, colon), stationId.substring(colon + 1)));
   }
 
   private String stationName(String stationId) {
@@ -172,10 +221,15 @@ final class PidsRemarks {
         .stationName(stationId)
         .map(Names::primary)
         .map(PidsText::compactSeparators)
-        .orElseGet(() -> stationId.substring(stationId.indexOf(':') + 1));
+        .orElseGet(() -> code(stationId));
   }
 
-  private static String normalize(String stationId) {
+  /** {@code 运营商:站码} 里的站码：查不到站名时显示它。 */
+  static String code(String stationId) {
+    return stationId.substring(stationId.indexOf(':') + 1);
+  }
+
+  static String normalize(String stationId) {
     return stationId.trim().toUpperCase(Locale.ROOT);
   }
 
@@ -189,7 +243,7 @@ final class PidsRemarks {
   private record Candidate(String stationId, int index, boolean through) {
 
     String code() {
-      return stationId.substring(stationId.indexOf(':') + 1);
+      return PidsRemarks.code(stationId);
     }
   }
 }

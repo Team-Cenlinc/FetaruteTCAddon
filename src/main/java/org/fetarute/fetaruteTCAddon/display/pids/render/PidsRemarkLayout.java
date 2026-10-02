@@ -13,11 +13,16 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.RemarkPart;
  * 再把直通线路名换成线路代码。只剩一段还放不下时截断它的文字；连标签都放不下就整条不写，照常显示英文。
  *
  * <p>色块比标签字左右各宽 {@value #TAG_PAD} 像素：第一段的色块伸进左侧留白，标签字与上面的中文名左对齐；宽度只量到文字为止。
+ *
+ * <p>色块比标签字上下各高 {@value #TAG_PAD_Y} 像素，但向上只伸到与上面的中文名之间还空着 1 像素为止：中英间距只有 1 像素的布局里色块顶边与标签字齐平，不贴住中文名。
  */
 final class PidsRemarkLayout {
 
   /** 色块比标签字左右各宽的像素。 */
   static final int TAG_PAD = 2;
+
+  /** 色块比标签字上下各高的像素（向上受中英间距限制）。 */
+  static final int TAG_PAD_Y = 1;
 
   /** 色块与其后文字的间距。 */
   static final int TAG_GAP = 4;

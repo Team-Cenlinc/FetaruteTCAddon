@@ -21,7 +21,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVacancyView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
@@ -36,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式或未绑定车站：测试卡，列出布局、识别出的车站与屏幕编号
+ *   <li>停站屏（布局带停站表组件）：本站台下一班的停站表，停站多时翻页，不轮播宣传页与空位页；通过列车临近时同样锁定安全提示页
  *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页； 所有到发页的英文与备注按 {@link
  *       PidsCarousel#remarks} 轮换
  * </ul>
@@ -109,6 +112,9 @@ public final class PidsComposer {
 
   /** 空位页的内容标识：渲染随布局（色牌样式、色带位置）而定。 */
   record VacancyKey(PidsLayout layout, PidsVacancyView view) {}
+
+  /** 2×1 停站屏的内容标识：视图含当前页号。 */
+  record StopListKey(PidsLayout layout, PidsStopListView view) {}
 
   /**
    * @param screenId 地图物品上记的屏幕 ID
@@ -194,6 +200,8 @@ public final class PidsComposer {
     Instant now = clock.instant();
     List<String> platformLabels =
         screen.platforms().stream().sorted(PidsPlatformNode.PLATFORM_ORDER).toList();
+    boolean rotating =
+        layout.stopList().isEmpty() && PidsPlatformSelection.limit(layout).isPresent();
     PidsViewBuilder.Request request =
         new PidsViewBuilder.Request(
             snapshot,
@@ -205,26 +213,24 @@ public final class PidsComposer {
             layout.rowCapacity(),
             layout.departures().map(d -> d.columns().platform().isPresent()).orElse(false),
             Optional.of(placement(screen)),
-            PidsCarousel.remarks(station, now, settings.get().render()));
+            PidsCarousel.remarks(station, now, settings.get().render(), rotating));
+    Optional<PidsLayout.StopList> stopList = layout.stopList();
+    if (stopList.isPresent()) {
+      return stopList(screen, layout, stopList.get(), snapshot, request, now);
+    }
     PidsView view = views.build(request);
-    if (PidsPlatformSelection.limit(layout).isPresent()) {
+    if (rotating) {
       Optional<PidsCarousel.Slide> slide =
           carousel.page(
               screen.id(),
               station,
               passingSoon(screen, snapshot),
               views.hasVacancy(request),
+              arrivingHere(screen, snapshot),
               now,
               settings.get().render());
       if (slide.isPresent() && slide.get() instanceof PidsCarousel.Slide.Notice page) {
-        PidsNoticeView notice =
-            new PidsNoticeView(
-                view.theme(),
-                page.notice(),
-                vocabulary.noticeTitle(page.notice()),
-                vocabulary.noticeBody(page.notice()),
-                view.bandColors());
-        return new PidsContent(notice, () -> renderer.renderNotice(layout, notice));
+        return notice(layout, view.theme(), view.bandColors(), page.notice());
       }
       Optional<PidsVacancyView> vacancy =
           slide.isPresent() ? views.vacancy(request) : Optional.empty();
@@ -235,6 +241,41 @@ public final class PidsComposer {
       }
     }
     return new PidsContent(new LiveKey(layout, view), () -> renderer.render(layout, view));
+  }
+
+  /** 宣传页或安全提示页，色带与主页相同。 */
+  private PidsContent notice(
+      PidsLayout layout, PidsTheme theme, List<Integer> bandColors, PidsNotice which) {
+    PidsNoticeView notice =
+        new PidsNoticeView(
+            theme, which, vocabulary.noticeTitle(which), vocabulary.noticeBody(which), bandColors);
+    return new PidsContent(notice, () -> renderer.renderNotice(layout, notice));
+  }
+
+  /** 2×1 停站屏：下一班的停站表，停站多时翻页；不轮播宣传页与空位页，通过列车临近时锁定安全提示页。 */
+  private PidsContent stopList(
+      PidsScreen screen,
+      PidsLayout layout,
+      PidsLayout.StopList widget,
+      PidsSnapshot snapshot,
+      PidsViewBuilder.Request request,
+      Instant now) {
+    PidsStopListView full = views.stopList(request);
+    if (carousel.pinned(screen.id(), passingSoon(screen, snapshot), now, settings.get().render())) {
+      return notice(layout, full.theme(), full.bandColors(), PidsNotice.PASSING);
+    }
+    int pages =
+        full.train()
+            .map(train -> widget.pages(train.stops().size(), full.note().isPresent()))
+            .orElse(1);
+    Object train =
+        full.train()
+            .<Object>map(found -> List.of(found.badge(), found.destination(), found.stops()))
+            .orElse(List.of());
+    PidsStopListView view =
+        full.withPage(carousel.stopPage(screen.id(), train, now, settings.get().render(), pages));
+    return new PidsContent(
+        new StopListKey(layout, view), () -> renderer.renderStopList(layout, view));
   }
 
   /** 屏幕所在世界与站在屏幕前看去的“向右”。 */
@@ -250,9 +291,31 @@ public final class PidsComposer {
             row ->
                 row.passing()
                     && row.status() == PidsRow.Status.ARRIVING
-                    && (screen.platforms().isEmpty()
-                        || (row.mayUse(screen.platforms())
-                            && !row.movedAwayFrom(screen.platforms()))));
+                    && onThisPlatform(screen, row));
+  }
+
+  /**
+   * 本屏站台停车的第一班（已按线路过滤）正在进站或停靠、乘客能上：这时不翻到宣传页。
+   *
+   * <p>本站终到、回库的车乘客不能上，不算；只看第一班，后面的车进站状态不影响。
+   */
+  private static boolean arrivingHere(PidsScreen screen, PidsSnapshot snapshot) {
+    return snapshot.rows().stream()
+        .filter(row -> !row.passing() && row.status() != PidsRow.Status.CANCELLED)
+        .filter(row -> onThisPlatform(screen, row))
+        .findFirst()
+        .filter(
+            row ->
+                (row.status() == PidsRow.Status.ARRIVING || row.status() == PidsRow.Status.BOARDING)
+                    && !row.terminating()
+                    && !row.outOfService())
+        .isPresent();
+  }
+
+  /** 这一行属于本屏的站台：统屏看全部；其余会停在本屏站台之一、且没有改去别的股道。 */
+  private static boolean onThisPlatform(PidsScreen screen, PidsRow row) {
+    return screen.platforms().isEmpty()
+        || (row.mayUse(screen.platforms()) && !row.movedAwayFrom(screen.platforms()));
   }
 
   private PidsTheme theme(PidsScreen screen) {

@@ -33,7 +33,7 @@ public record PidsSettings(
     BroadcastSettings broadcast) {
 
   /** 内置模板的配置版本；模板升级时同步修改。 */
-  public static final int EXPECTED_CONFIG_VERSION = 1;
+  public static final int EXPECTED_CONFIG_VERSION = 2;
 
   /** 一个游戏日的刻数。 */
   private static final int TICKS_PER_DAY = 24000;
@@ -82,7 +82,9 @@ public record PidsSettings(
             reader.nonNegativeInt(
                 "render.slide-notice-seconds", renderDefault.slideNoticeSeconds()),
             reader.positiveInt("render.notice-pin-seconds", renderDefault.noticePinSeconds()),
-            reader.nonNegativeInt("render.remark-seconds", renderDefault.remarkSeconds()));
+            reader.positiveInt("render.english-seconds", renderDefault.englishSeconds()),
+            reader.nonNegativeInt("render.remark-seconds", renderDefault.remarkSeconds()),
+            reader.positiveInt("render.stop-page-seconds", renderDefault.stopPageSeconds()));
 
     LimitSettings limits =
         new LimitSettings(
@@ -180,7 +182,9 @@ public record PidsSettings(
    * @param slideMainSeconds 主页（到发）停留时间（秒）
    * @param slideNoticeSeconds 宣传页停留时间（秒）
    * @param noticePinSeconds 通过列车临近时锁定安全页的时长（秒）
-   * @param remarkSeconds 主页上英文与备注（末班车、直通、经由）轮换，各停留多少秒；0 不显示备注
+   * @param englishSeconds 主页上终点下面写英文停留多少秒（与备注交替）
+   * @param remarkSeconds 主页上终点下面写备注（末班车、直通、经由）停留多少秒；0 不显示备注
+   * @param stopPageSeconds 2×1 停站屏停站多、分页时每页停留多少秒
    */
   public record RenderSettings(
       int checkIntervalTicks,
@@ -189,10 +193,12 @@ public record PidsSettings(
       int slideMainSeconds,
       int slideNoticeSeconds,
       int noticePinSeconds,
-      int remarkSeconds) {
+      int englishSeconds,
+      int remarkSeconds,
+      int stopPageSeconds) {
 
-    /** 内置默认值。 */
-    public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 12, 4, 15, 4);
+    /** 内置默认值：主页（到发）占八成时间，副页停到读得完标题与一行英文；英文是常态、备注是补充，英文停得更久；2×1 每页 6～7 站按一站一秒多扫一遍。 */
+    public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 20, 5, 15, 6, 4, 8);
   }
 
   /**

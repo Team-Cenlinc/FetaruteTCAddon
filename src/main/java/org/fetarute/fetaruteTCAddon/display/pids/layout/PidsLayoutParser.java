@@ -132,6 +132,7 @@ public final class PidsLayoutParser {
               node.optInt("gap", 12)));
       case "line-strip" -> Optional.of(lineStrip(node));
       case "departures" -> Optional.of(departures(node));
+      case "stop-list" -> Optional.of(stopList(node));
       case "" -> Optional.empty();
       default -> {
         node.problem("type", "未知组件类型 " + type);
@@ -157,6 +158,42 @@ public final class PidsLayoutParser {
         chip.optInt("size", 12),
         textStyle(node.child("name"), 12, 10, 6),
         node.optInt("name-gap", 6));
+  }
+
+  private static PidsLayout.StopList stopList(Node node) {
+    Node header = node.child("header");
+    Node badge = header.child("badge");
+    Node destination = node.child("destination");
+    Node note = node.child("note");
+    Node stops = node.child("stops");
+    Node footer = node.child("footer");
+    return new PidsLayout.StopList(
+        node.requireInt("x"),
+        node.requireInt("y"),
+        node.requireInt("width"),
+        node.requireInt("height"),
+        node.optInt("inset", 4),
+        header.optInt("height", 28),
+        header.optInt("badge-x", 32),
+        new BadgeStyle(
+            badge.optInt("width", 40),
+            badge.optInt("height", 24),
+            badge.optInt("code-width", 24),
+            badge.optInt("code", 12),
+            badge.optInt("type", 10),
+            badge.optInt("type-gap", 1),
+            0),
+        header.optInt("minutes", 24),
+        textStyle(header.child("unit"), 12, 10, 1),
+        destination.optInt("height", 34),
+        textStyle(destination, 20, 10, 2),
+        note.optInt("gap", 4),
+        note.optInt("height", 22),
+        stops.optInt("list-gap", 2),
+        stops.optInt("row", 24),
+        textStyle(stops, 12, 10, 1),
+        footer.optInt("height", 12),
+        footer.optInt("size", 10));
   }
 
   private static Departures departures(Node node) {
@@ -451,8 +488,16 @@ public final class PidsLayoutParser {
     }
 
     void run() {
+      boolean stopList = layout.stopList().isPresent();
       for (int i = 0; i < layout.widgets().size(); i++) {
-        check("widgets[" + i + "]", layout.widgets().get(i));
+        Widget widget = layout.widgets().get(i);
+        check("widgets[" + i + "]", widget);
+        if (stopList
+            && (widget instanceof Departures
+                || widget instanceof PidsLayout.StationTitle
+                || widget instanceof PidsLayout.LineStrip)) {
+          problems.add("widgets[" + i + "]: 停站屏只画站台号、时钟、线路色带与停站表，不支持这个组件");
+        }
       }
     }
 
@@ -487,7 +532,31 @@ public final class PidsLayoutParser {
         sizes(path, s.chipSize(), s.name().size(), s.name().secondarySize());
       } else if (widget instanceof Departures d) {
         checkDepartures(path, d);
+      } else if (widget instanceof PidsLayout.StopList l) {
+        checkStopList(path, l);
       }
+    }
+
+    private void checkStopList(String path, PidsLayout.StopList l) {
+      within(path, l.x(), l.y(), l.width(), l.height());
+      if (l.badgeX() + l.badge().width() > l.width() || l.badge().height() > l.headerHeight()) {
+        problems.add(path + ".header.badge: 色牌大于首行");
+      }
+      if (l.rowHeight() < 1 || l.listBottom() - l.listTop(true) < l.rowHeight()) {
+        problems.add(path + ".stops: 有直通或经由一行时一站也放不下");
+      }
+      sizes(
+          path,
+          l.badge().codeSize(),
+          l.badge().typeSize(),
+          l.minutesSize(),
+          l.unit().size(),
+          l.unit().secondarySize(),
+          l.destination().size(),
+          l.destination().secondarySize(),
+          l.stop().size(),
+          l.stop().secondarySize(),
+          l.footerSize());
     }
 
     private void checkDepartures(String path, Departures d) {

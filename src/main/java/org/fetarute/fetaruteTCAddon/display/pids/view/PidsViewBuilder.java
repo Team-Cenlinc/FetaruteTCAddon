@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
+import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.Lateness;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSnapshot;
@@ -48,6 +49,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * <p>空位页（{@link #vacancy}）：首行是可以上车的运行中列车（不是还没开出、通过、本站终到或回库）且读得到载客时，给出各节车有多满与空位数。
  *
  * <p>备注（末班车、直通、经由，见 {@link PidsRemarks}）只在显示要求轮到备注时写进终点，渲染器把英文那一格换成备注。
+ *
+ * <p>2×1 停站屏（{@link #stopList}）：本屏站台下一班可以上车的列车往后停哪些站，直通与经由与备注同一口径。
  */
 public final class PidsViewBuilder {
 
@@ -60,6 +63,9 @@ public final class PidsViewBuilder {
   private static final double HALF = 0.5;
 
   private static final double CROWDED = 0.8;
+
+  /** 2×1 停站屏每站最多画几条可换乘线路的小方块。 */
+  private static final int MAX_TRANSFERS = 3;
 
   /** 屏幕“向右”与行车方向的夹角余弦至少这么大才算屏幕顺着轨道，否则说不清车头朝哪一侧。 */
   private static final double ALONG_TRACK = 0.5;
@@ -237,6 +243,173 @@ public final class PidsViewBuilder {
   /** 本屏此刻有没有空位页：轮播据此决定副页能不能轮到空位页。只看那一行，不构建视图。 */
   public boolean hasVacancy(Request request) {
     return vacancyRow(request, shown(request)).isPresent();
+  }
+
+  /**
+   * 2×1 停站屏：本屏站台下一班可以上车的列车（不是取消、通过、本站终到或回库，改去别的站台的不算）往后停哪些站，到终点为止。
+   *
+   * <p>色牌、终点、多久到达与站台屏首行相同；要提醒的状态（站台待定、站台变更、晚点）另写一行。终点下面一行依次写：
+   * 下一班之前本站台被取消的班次（终点与计划时刻），直通（换入的线路、从哪站起），第一个经由站。停站表上的经由站、换线站与备注同一口径 （{@link
+   * PidsRemarks}）。换线站之后的站按新线路着色，可换乘的线路不含列车所属的线路。
+   *
+   * @param request 显示要求；不看 {@code capacity}，按站台过滤后取第一班可以上车的
+   * @return 第 0 页；合成器按布局每页行数与时钟翻页
+   */
+  public PidsStopListView stopList(Request request) {
+    List<PidsRow> here =
+        request.snapshot().rows().stream()
+            .filter(row -> request.platforms().isEmpty() || row.mayUse(request.platforms()))
+            .filter(row -> !row.movedAwayFrom(request.platforms()))
+            .toList();
+    Optional<PidsRow> next = here.stream().filter(PidsViewBuilder::rideable).findFirst();
+    Optional<PidsRow> cancelled =
+        here.stream()
+            .filter(row -> row.status() == PidsRow.Status.CANCELLED)
+            .filter(row -> next.isEmpty() || !row.expectedAt().isAfter(next.get().expectedAt()))
+            .findFirst();
+    List<PidsView.Row> rows = next.map(row -> List.of(row(row, request))).orElse(List.of());
+    return new PidsStopListView(
+        request.theme(),
+        CLOCK.format(request.now().atZone(request.zone())),
+        request.platformLabels(),
+        next.map(row -> train(row, rows.get(0), request.theme())),
+        cancelled.map(row -> cancelledNote(row, request)),
+        0,
+        vocabulary.stopListLabels(),
+        bandColors(request, rows));
+  }
+
+  /** 取消的班次：红色“取消”标签，第一行终点与计划时刻，第二行终点英文名。 */
+  private PidsStopListView.Note cancelledNote(PidsRow row, Request request) {
+    Names destination = destination(row, true, request).names();
+    return new PidsStopListView.Note(
+        vocabulary.cancelled(),
+        request.theme().red(),
+        destination.primary() + " " + CLOCK.format(row.expectedAt().atZone(request.zone())),
+        Optional.empty(),
+        destination.secondary());
+  }
+
+  /** 停站屏要提醒的状态：站台变更（含已进站、停靠中的），以及琥珀、红色的状态（站台待定、晚点）。 */
+  private Optional<Label> attention(PidsView.Row view) {
+    if (view.platform().changed()) {
+      return Optional.of(Label.of(vocabulary.platformChanged(), Tone.AMBER));
+    }
+    return view.arrival()
+        .status()
+        .filter(label -> label.tone() == Tone.AMBER || label.tone() == Tone.RED);
+  }
+
+  /** 乘客能上的车：不是取消、通过、本站终到或回库（还没开出的也算）。 */
+  private static boolean rideable(PidsRow row) {
+    return row.status() != PidsRow.Status.CANCELLED
+        && !row.passing()
+        && !row.terminating()
+        && !row.outOfService();
+  }
+
+  private PidsStopListView.Train train(PidsRow row, PidsView.Row view, PidsTheme theme) {
+    Optional<PidsRemarks.Trip> trip = remarks.trip(row);
+    if (trip.isEmpty()) {
+      return new PidsStopListView.Train(
+          view.badge(),
+          view.destination().names(),
+          view.arrival(),
+          attention(view),
+          Optional.empty(),
+          List.of());
+    }
+    Optional<PidsRemarks.Through> through = remarks.through(trip.get());
+    List<String> via = remarks.via(row, trip.get());
+    Optional<PidsStopListView.Note> note =
+        through
+            .map(found -> throughNote(found, trip.get(), theme))
+            .or(() -> via.stream().findFirst().map(station -> viaNote(station, theme)));
+    return new PidsStopListView.Train(
+        view.badge(),
+        view.destination().names(),
+        view.arrival(),
+        attention(view),
+        note,
+        stops(trip.get(), Set.copyOf(via), view.badge(), theme));
+  }
+
+  private PidsStopListView.Note throughNote(
+      PidsRemarks.Through through, PidsRemarks.Trip trip, PidsTheme theme) {
+    String from =
+        trip.stops()
+            .get(through.index())
+            .stationId()
+            .map(id -> stationNames(id, PidsRemarks.code(id)).primary())
+            .orElse("");
+    return new PidsStopListView.Note(
+        vocabulary.stopListLabels().through(),
+        through.color().orElse(theme.outline()),
+        through.name(),
+        through.name().equals(through.code()) ? Optional.empty() : Optional.of(through.code()),
+        vocabulary.throughFrom(from));
+  }
+
+  private PidsStopListView.Note viaNote(String station, PidsTheme theme) {
+    Names names = stationNames(station, PidsRemarks.code(station));
+    return new PidsStopListView.Note(
+        vocabulary.stopListLabels().via(),
+        theme.amber(),
+        names.primary(),
+        Optional.empty(),
+        names.secondary());
+  }
+
+  /** 本站之后的停车站，到终点为止；换线站之后按新线路着色。 */
+  private List<PidsStopListView.Stop> stops(
+      PidsRemarks.Trip trip, Set<String> via, Badge badge, PidsTheme theme) {
+    List<PidsStopListView.Stop> out = new ArrayList<>();
+    int color = badge.color();
+    String line = badge.code();
+    for (int i = trip.here() + 1; i <= trip.end(); i++) {
+      PidsDirectory.RouteStop stop = trip.stops().get(i);
+      Optional<RouteApi.LineRef> change = i < trip.end() ? stop.lineChange() : Optional.empty();
+      int after = color;
+      String afterLine = line;
+      if (change.isPresent()) {
+        Optional<PidsDirectory.LineStyle> style =
+            directory.line(change.get().operatorCode(), change.get().lineCode());
+        after = style.map(PidsDirectory.LineStyle::color).orElse(theme.outline());
+        afterLine = style.map(PidsDirectory.LineStyle::code).orElse(change.get().lineCode());
+      }
+      if (stop.stops() && stop.stationId().isPresent()) {
+        String station = PidsRemarks.normalize(stop.stationId().get());
+        PidsStopListView.Kind kind =
+            i == trip.end()
+                ? PidsStopListView.Kind.TERMINAL
+                : change.isPresent()
+                    ? PidsStopListView.Kind.CHANGE
+                    : via.contains(station)
+                        ? PidsStopListView.Kind.VIA
+                        : out.isEmpty() ? PidsStopListView.Kind.NEXT : PidsStopListView.Kind.STOP;
+        out.add(
+            new PidsStopListView.Stop(
+                stationNames(station, PidsRemarks.code(station)),
+                kind,
+                color,
+                after,
+                transfers(station, Set.copyOf(List.of(line, afterLine)))));
+      }
+      color = after;
+      line = afterLine;
+    }
+    return out;
+  }
+
+  /** 这一站可换乘的其他线路颜色，按目录顺序，至多 {@value #MAX_TRANSFERS} 条。 */
+  private List<Integer> transfers(String station, Set<String> ownLines) {
+    return PidsRemarks.stationKey(station).stream()
+        .flatMap(key -> directory.linesServing(key).stream())
+        .filter(chip -> !ownLines.contains(chip.code()))
+        .map(PidsView.LineChip::color)
+        .distinct()
+        .limit(MAX_TRANSFERS)
+        .toList();
   }
 
   /** 空位页画的那一班：本屏首个真会来本站台的行，且可以上车、读得到座位。 */

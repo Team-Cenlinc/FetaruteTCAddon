@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
@@ -53,7 +54,7 @@ class PidsComposerTest {
   private List<PidsRow> rows = rows();
 
   /** 默认关掉宣传页轮播，免得固定时刻正好落在宣传页上；轮播另有用例。 */
-  private PidsSettings settings = withNoticeSeconds(0);
+  private PidsSettings settings = withSlides(12, 0);
 
   private PidsComposer composer;
 
@@ -163,7 +164,7 @@ class PidsComposerTest {
 
   @Test
   void platformScreensRotateCourtesyPagesWithTheSameBand() {
-    settings = PidsSettings.defaults();
+    settings = withSlides(12, 4);
     PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
     now = roundStart().plusSeconds(13);
 
@@ -179,6 +180,68 @@ class PidsComposerTest {
                 composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key())
             .view();
     assertEquals(main.bandColors(), notice.bandColors(), "翻页时色带不变");
+  }
+
+  /** 2×1 停站屏也锁定安全提示页：通过车临近本站台时盖过停站表。 */
+  @Test
+  void stopListScreensStillPinTheSafetyPage() {
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    rows = List.of(passing("3"), row("MT", 120));
+
+    PidsContent content = composer.content(Optional.of(screen.id()), 128, 256).orElseThrow();
+
+    assertEquals(
+        PidsNotice.PASSING, assertInstanceOf(PidsNoticeView.class, content.key()).notice());
+    assertEquals(256, content.image().get().getHeight());
+  }
+
+  /** 本站台第一班在本站终到：乘客不能上，照常翻到宣传页。 */
+  @Test
+  void aTerminatingTrainDoesNotHoldTheMainPage() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    now = roundStart().plusSeconds(13);
+    PidsRow terminating = arriving("3");
+    rows =
+        List.of(
+            new PidsRow(
+                terminating.status(),
+                terminating.lineName(),
+                terminating.routeId(),
+                terminating.destination(),
+                terminating.destinationId(),
+                terminating.platform(),
+                terminating.expectedAt(),
+                terminating.delaySeconds(),
+                terminating.stopSequence(),
+                false,
+                true,
+                false,
+                terminating.trainName()),
+            row("MT", 120));
+
+    assertInstanceOf(
+        PidsNoticeView.class,
+        composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key());
+  }
+
+  /** 本站台的下一班在进站：轮到副页时也不翻到宣传页，留在主页。 */
+  @Test
+  void anArrivingTrainHereKeepsTheMainPage() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    now = roundStart().plusSeconds(13);
+    rows = List.of(arriving("5"), row("MT", 120));
+    assertInstanceOf(
+        PidsNoticeView.class,
+        composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key(),
+        "别的站台的进站车不算");
+
+    rows = List.of(arriving("3"), row("MT", 120));
+
+    assertInstanceOf(
+        PidsComposer.LiveKey.class,
+        composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key());
   }
 
   @Test
@@ -197,7 +260,43 @@ class PidsComposerTest {
         PidsNotice.PASSING, assertInstanceOf(PidsNoticeView.class, content.key()).notice());
   }
 
-  private static PidsSettings withNoticeSeconds(int seconds) {
+  /** 2×1 停站屏：取本站台下一班可以上车的车（通过车不算）。 */
+  @Test
+  void stopListScreensShowTheNextTrainAndNeverRotateNotices() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    PidsRow passing = passing("3");
+    // 通过车还远（运行中、未进站）：不锁安全提示页，停站表跳过它取下一班
+    rows =
+        List.of(
+            new PidsRow(
+                PidsRow.Status.EN_ROUTE,
+                passing.lineName(),
+                passing.routeId(),
+                passing.destination(),
+                passing.destinationId(),
+                passing.platform(),
+                passing.expectedAt(),
+                passing.delaySeconds(),
+                passing.stopSequence(),
+                true,
+                false,
+                false,
+                passing.trainName()),
+            row("MT", 120));
+
+    PidsContent content = composer.content(Optional.of(screen.id()), 128, 256).orElseThrow();
+
+    PidsStopListView view = assertInstanceOf(PidsComposer.StopListKey.class, content.key()).view();
+    assertEquals("MT", view.train().orElseThrow().badge().code());
+    assertEquals(List.of("3"), view.platforms());
+    BufferedImage image = content.image().get();
+    assertEquals(128, image.getWidth());
+    assertEquals(256, image.getHeight());
+  }
+
+  /** 主页与副页停留时间（秒）；其余取默认值。 */
+  private static PidsSettings withSlides(int mainSeconds, int noticeSeconds) {
     PidsSettings defaults = PidsSettings.defaults();
     PidsSettings.RenderSettings render = defaults.render();
     return new PidsSettings(
@@ -207,10 +306,12 @@ class PidsComposerTest {
             render.checkIntervalTicks(),
             render.snapshotTtlSeconds(),
             render.horizonMinutes(),
-            render.slideMainSeconds(),
-            seconds,
+            mainSeconds,
+            noticeSeconds,
             render.noticePinSeconds(),
-            render.remarkSeconds()),
+            render.englishSeconds(),
+            render.remarkSeconds(),
+            render.stopPageSeconds()),
         defaults.limits(),
         defaults.font(),
         defaults.layout(),
@@ -222,6 +323,23 @@ class PidsComposerTest {
   private static Instant roundStart() {
     long base = NOW.getEpochSecond();
     return Instant.ofEpochSecond(base - Math.floorMod(base + PidsCarousel.offset(HHU, 48), 48));
+  }
+
+  private static PidsRow arriving(String platform) {
+    return new PidsRow(
+        PidsRow.Status.ARRIVING,
+        "WS",
+        "SURC:WS:R1",
+        "TPC",
+        Optional.of("SURC:TPC"),
+        platform,
+        NOW.plusSeconds(20),
+        OptionalLong.of(0),
+        2,
+        false,
+        false,
+        false,
+        Optional.of("train"));
   }
 
   private static PidsRow passing(String platform) {
@@ -247,15 +365,20 @@ class PidsComposerTest {
   }
 
   private PidsScreen register(PidsScreen.Mode mode, Set<String> lines) {
+    return register(mode, lines, "platform-1x3", 1, 3);
+  }
+
+  private PidsScreen register(
+      PidsScreen.Mode mode, Set<String> lines, String layout, int tileRows, int tileCols) {
     PidsScreen screen =
         new PidsScreen(
             UUID.randomUUID(),
             WORLD,
             new PidsScreen.Position(0, 64, 0),
             PidsFacing.SOUTH,
-            1,
-            3,
-            "platform-1x3",
+            tileRows,
+            tileCols,
+            layout,
             Optional.of(HHU),
             Set.of("3"),
             lines,

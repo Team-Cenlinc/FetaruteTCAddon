@@ -49,7 +49,7 @@ widgets:
         divider: 2
         count: 2
         badge: {width: 42, height: 26, code-width: 24, code: 12, type: 10, type-gap: 1}
-        destination: {size: 12, secondary: 10, gap: 1, inset: 6}
+        destination: {size: 12, secondary: 10, gap: 2, inset: 6}
         arrival:
           inset: 6
           number: 20
@@ -57,5 +57,5 @@ widgets:
           number-align: right
           number-gap: 2
           unit: {size: 12}
-          status: {size: 12, secondary: 10, gap: 1, stacked: true}
+          status: {size: 12, secondary: 10, gap: 2, stacked: true}
           highlight: {size: 12, secondary: 10, spread: true}

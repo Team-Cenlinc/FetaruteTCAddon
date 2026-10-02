@@ -17,6 +17,7 @@ public final class PidsVocabulary {
   private static final String SECONDARY = "-secondary";
   private static final String MINUTES = "<minutes>";
   private static final String PLATFORM = "<platform>";
+  private static final String STATION = "<station>";
 
   private final Function<String, String> text;
 
@@ -139,6 +140,17 @@ public final class PidsVocabulary {
   /** 备注标签：经由。 */
   public String viaTag() {
     return primary("remark.via");
+  }
+
+  /** 2×1 停站屏文案。 */
+  public PidsStopListView.Labels stopListLabels() {
+    return new PidsStopListView.Labels(
+        names("minutes"), names("no-more-trains"), names("remark.via"), names("remark.through"));
+  }
+
+  /** 2×1 停站屏终点下面一行：从哪站起直通。 */
+  public String throughFrom(String station) {
+    return primary("stop-list.through-from").replace(STATION, station);
   }
 
   /** 色牌上的停站类型；普通、其他不显示。 */

@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
@@ -13,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.fixtures.PidsFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVacancyView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
@@ -381,6 +383,39 @@ class PidsRendererTest {
         "中文终点名不动");
   }
 
+  /** 小字行的备注色块与上面的中文名之间至少空 1 像素：内置布局中英间距为 2，自定义布局间距只有 1 时色块不再向上伸。 */
+  @Test
+  void remarkTagsNeverTouchTheNameAbove() throws Exception {
+    PidsView.Row base = countdown();
+    PidsView.Row oasis =
+        new PidsView.Row(
+            base.badge(),
+            new Destination(new Names("绿洲农场", "Oasis Farmland"), Tone.NORMAL, false),
+            base.platform(),
+            base.arrival());
+    PidsView view =
+        platformView(
+            PidsTheme.DARK, List.of(base, withRemark(oasis, PidsTheme.DARK.amber(), "经由", "主城湾")));
+    PidsLayout tight =
+        PidsFixtures.builtInLayout(
+            "platform-1x3",
+            text ->
+                text.replace(
+                    "destination: {size: 12, secondary: 10, gap: 2, inset: 6}",
+                    "destination: {size: 12, secondary: 10, gap: 1, inset: 6}"));
+
+    for (PidsLayout layout : List.of(PidsFixtures.builtInLayout("platform-1x3"), tight)) {
+      BufferedImage image = renderer.render(layout, view);
+
+      // 第二行终点列：到发表左缘 66 + 色牌 62 = 128 起，宽 128；首行之下 56–120
+      assertTrue(countColor(image, 128, 56, 128, 64, PidsTheme.DARK.amber()) > 0, "第二行写着备注");
+      assertEquals(
+          0,
+          stacked(image, 128, 56, 128, 64, PidsTheme.DARK.text(), PidsTheme.DARK.amber()),
+          "中文名下面紧挨着就是色块");
+    }
+  }
+
   /** 车站统屏的英文写在中文名后面：备注也写在那里，用剩下的宽度。 */
   @Test
   void stationScreensPutTheRemarkAfterTheName() throws Exception {
@@ -410,6 +445,164 @@ class PidsRendererTest {
         List.of(WS),
         List.of(row),
         LABELS);
+  }
+
+  /** 2×1 停站屏：经由站琥珀大圆点、多页时写页码并画向下的箭头，翻到最后一页时没有箭头。 */
+  @Test
+  void stopListScreensDrawTheDotsThePageAndTheArrow() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    PidsStopListView view = stopListView(countdown().arrival(), Optional.empty(), 9);
+
+    BufferedImage first = renderer.renderStopList(layout, view);
+    BufferedImage last = renderer.renderStopList(layout, view.withPage(1));
+
+    assertEquals(128, first.getWidth());
+    assertEquals(256, first.getHeight());
+    // 停站表无终点下面一行时从 64 起，每站 24；圆点竖条在 4–12，竖线在 7–9
+    assertTrue(countColor(first, 4, 88, 9, 24, PidsTheme.DARK.amber()) > 0, "第二站是经由站");
+    assertTrue(countColor(first, 100, 236, 24, 12, PidsTheme.DARK.text()) > 0, "两页时写页码");
+    assertTrue(countColor(first, 4, 229, 9, 5, WS) > 0, "后面还有站：向下的箭头");
+    assertEquals(0, countColor(last, 4, 229, 9, 5, WS), "最后一页没有箭头");
+    assertEquals(WS, rgb(last, 7, 64), "第二页竖线从上沿接下来");
+  }
+
+  /** 2×1 最底下一行左侧写要提醒的状态，按色调着色。 */
+  @Test
+  void stopListScreensWriteTheStatusAtTheBottom() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    Label pending = Label.of(new Names("站台待定", "Platform TBD"), Tone.AMBER);
+
+    BufferedImage plain =
+        renderer.renderStopList(layout, stopListView(countdown().arrival(), Optional.empty(), 3));
+    BufferedImage flagged =
+        renderer.renderStopList(
+            layout, stopListView(countdown().arrival(), Optional.of(pending), 3));
+
+    assertEquals(0, countColor(plain, 4, 236, 90, 12, PidsTheme.DARK.amber()));
+    assertTrue(countColor(flagged, 4, 236, 90, 12, PidsTheme.DARK.amber()) > 0);
+  }
+
+  /** 分钟数伸到色牌上时改用小字号：色牌（32–72）里不出现分钟数的白字。 */
+  @Test
+  void longMinutesDoNotRunIntoTheBadge() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    Arrival late = new Arrival(ArrivalMode.COUNTDOWN, 105, Tone.NORMAL, Optional.empty());
+
+    BufferedImage image = renderer.renderStopList(layout, stopListView(late, Optional.empty(), 3));
+
+    assertEquals(0, countColor(image, 32, 2, 40, 24, PidsTheme.DARK.text()));
+    assertTrue(countColor(image, 73, 2, 51, 24, PidsTheme.DARK.text()) > 0, "分钟数照样写出");
+  }
+
+  /** 终点下面一行的标签按英文加宽：“Cancelled”整个落在红色块里，说明文字从色块右边起。 */
+  @Test
+  void noteTagsWidenForLongEnglish() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    PidsLayout.StopList list = layout.stopList().orElseThrow();
+    PidsStopListView base = stopListView(countdown().arrival(), Optional.empty(), 3);
+    PidsStopListView view =
+        new PidsStopListView(
+            base.theme(),
+            base.clock(),
+            base.platforms(),
+            base.train(),
+            Optional.of(
+                new PidsStopListView.Note(
+                    new Names("取消", "Cancelled"),
+                    PidsTheme.DARK.red(),
+                    "南渡 21:41",
+                    Optional.empty(),
+                    "Nam Toa")),
+            0,
+            base.labels(),
+            base.bandColors());
+
+    BufferedImage image = renderer.renderStopList(layout, view);
+
+    int box = list.noteHeight();
+    int tagRight = list.x() + list.inset() + box;
+    assertTrue(
+        countColor(image, tagRight, list.noteTop(), 8, box, PidsTheme.DARK.red()) > 0, "色块比见方宽");
+    assertEquals(
+        PidsTheme.DARK.red(),
+        rgb(image, list.x() + list.inset(), list.noteTop() + box - 1),
+        "色块左下角仍是底色，英文没有伸出左缘");
+  }
+
+  /** 竖屏的安全提示页：图标块在上方居中，标题在下方，色带不动。 */
+  @Test
+  void portraitScreensStackTheNotice() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    PidsNoticeView notice =
+        new PidsNoticeView(
+            PidsTheme.DARK,
+            PidsNotice.PASSING,
+            new Names("列车通过", "Train passing"),
+            new Names("请勿靠近站台边缘", "Stay back from the platform edge"),
+            List.of(WS));
+
+    BufferedImage image = renderer.renderNotice(layout, notice);
+
+    assertEquals(128, image.getWidth());
+    assertEquals(256, image.getHeight());
+    assertTrue(countColor(image, 32, 0, 64, 128, PidsTheme.DARK.amber()) > 64 * 30, "警示色图标块");
+    assertTrue(countColor(image, 0, 120, 128, 120, PidsTheme.DARK.text()) > 0, "标题与说明在下方");
+    assertEquals(WS, rgb(image, 64, 254), "色带");
+  }
+
+  /** 窄测试卡（2×1）：说明行放不下时折行写完，不截断。 */
+  @Test
+  void narrowTestCardsWrapTheirLines() throws Exception {
+    PidsTestCard card =
+        new PidsTestCard(
+            new Names("站台屏待配置", "Screen not configured"),
+            List.of("车站：新笛矢 · 壑湖（HHU）· 站台 3"),
+            "用配置棍右键调整",
+            2,
+            1);
+
+    BufferedImage image = renderer.renderTestCard(card);
+
+    // 标题改用 12 号：首行说明在 38–50，折到下一行在 52–64
+    assertTrue(countColor(image, 8, 38, 112, 12, PidsTheme.LIGHT.text()) > 0);
+    assertTrue(countColor(image, 8, 52, 112, 12, PidsTheme.LIGHT.text()) > 0, "放不下的部分折到下一行");
+  }
+
+  private static PidsStopListView stopListView(
+      Arrival arrival, Optional<Label> status, int stopCount) {
+    List<PidsStopListView.Stop> stops = new ArrayList<>();
+    for (int i = 0; i < stopCount; i++) {
+      PidsStopListView.Kind kind =
+          i == 0
+              ? PidsStopListView.Kind.NEXT
+              : i == 1
+                  ? PidsStopListView.Kind.VIA
+                  : i == stopCount - 1
+                      ? PidsStopListView.Kind.TERMINAL
+                      : PidsStopListView.Kind.STOP;
+      stops.add(
+          new PidsStopListView.Stop(new Names("站" + i, "Stop " + i), kind, WS, WS, List.of()));
+    }
+    return new PidsStopListView(
+        PidsTheme.DARK,
+        "21:40",
+        List.of("2"),
+        Optional.of(
+            new PidsStopListView.Train(
+                new Badge("WS", Optional.of("各停"), WS, false),
+                new Names("南渡", "Nam Toa"),
+                arrival,
+                status,
+                Optional.empty(),
+                stops)),
+        Optional.empty(),
+        0,
+        new PidsStopListView.Labels(
+            new Names("分", "min"),
+            new Names("暂无后续列车", "No further trains"),
+            new Names("经由", "via"),
+            new Names("直通", "thru")),
+        List.of(WS));
   }
 
   private static PidsView.Row withRemark(PidsView.Row row, int color, String tag, String text) {
@@ -455,6 +648,20 @@ class PidsRendererTest {
 
   private static int[] pixels(BufferedImage image) {
     return image.getRGB(0, 0, image.getWidth(), image.getHeight(), null, 0, image.getWidth());
+  }
+
+  /** 区域里 {@code upper} 色像素正下方紧挨着 {@code lower} 色像素的处数。 */
+  private static int stacked(
+      BufferedImage image, int x, int y, int width, int height, int upper, int lower) {
+    int count = 0;
+    for (int dx = 0; dx < width; dx++) {
+      for (int dy = 0; dy + 1 < height; dy++) {
+        if (rgb(image, x + dx, y + dy) == upper && rgb(image, x + dx, y + dy + 1) == lower) {
+          count++;
+        }
+      }
+    }
+    return count;
   }
 
   private static int countColor(

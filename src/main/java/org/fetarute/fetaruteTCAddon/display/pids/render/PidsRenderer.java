@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVacancyView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
@@ -127,7 +128,7 @@ public final class PidsRenderer {
   /**
    * 渲染测试卡：白底，按地图画格线并在每块右下角写编号（行优先、从 1 起），左上角写标题与说明，底部写提示。
    *
-   * <p>编号让装屏的人一眼看出展示框顺序是否正确。
+   * <p>编号让装屏的人一眼看出展示框顺序是否正确。说明各行放不下时折行；窄屏（2×1）标题改用正文字号。
    */
   public BufferedImage renderTestCard(PidsTestCard card) {
     Objects.requireNonNull(card, "card");
@@ -157,27 +158,33 @@ public final class PidsRenderer {
             }
           }
           int maxWidth = width - CARD_INSET * 4;
-          p.text(card.title().primary(), CARD_TITLE, CARD_INSET * 2, CARD_INSET * 2, theme.text());
+          // 只有一块地图宽的屏（2×1）放不下大标题：改用正文字号，说明各行折行写完
+          int titleSize =
+              p.width(card.title().primary(), CARD_TITLE) <= maxWidth ? CARD_TITLE : CARD_TEXT;
+          p.text(
+              p.ellipsize(card.title().primary(), titleSize, maxWidth),
+              titleSize,
+              CARD_INSET * 2,
+              CARD_INSET * 2,
+              theme.text());
           p.regular(
               p.ellipsizeWords(card.title().secondary(), CARD_SMALL, maxWidth),
               CARD_SMALL,
               CARD_INSET * 2,
-              CARD_INSET * 2 + CARD_TITLE + 3,
+              CARD_INSET * 2 + titleSize + 3,
               theme.muted(),
               false);
-          int top = CARD_INSET * 2 + CARD_TITLE + CARD_SMALL + 8;
+          int top = CARD_INSET * 2 + titleSize + CARD_SMALL + 8;
           int hintTop = height - CARD_SMALL - CARD_TEXT - 6;
+          lines:
           for (String line : card.lines()) {
-            if (top + CARD_TEXT > hintTop - 2) {
-              break;
+            for (String part : wrapChars(p, line, CARD_TEXT, maxWidth)) {
+              if (top + CARD_TEXT > hintTop - 2) {
+                break lines;
+              }
+              p.text(part, CARD_TEXT, CARD_INSET * 2, top, theme.text());
+              top += CARD_TEXT + 2;
             }
-            p.text(
-                p.ellipsize(line, CARD_TEXT, maxWidth),
-                CARD_TEXT,
-                CARD_INSET * 2,
-                top,
-                theme.text());
-            top += CARD_TEXT + 2;
           }
           p.text(
               p.ellipsize(card.hint(), CARD_TEXT, maxWidth),
@@ -192,7 +199,8 @@ public final class PidsRenderer {
    * 渲染宣传页或安全提示页，尺寸与布局相同。
    *
    * <p>第一块地图放图标（宣传页用信息色、安全提示页用警示色的方块，图标颜色按底色取深浅），最后一块放说明（中文一行、英文按词最多两行），
-   * 中间各块放标题；只有一两块地图时省掉说明。色带取布局里的线路色带组件，与主页同一位置、同一配色，翻页时色带不动。
+   * 中间各块放标题；只有一两块地图时省掉说明。只有一块地图宽的竖屏（2×1）改为自上而下排（{@link #drawPortraitNotice}）。
+   * 色带取布局里的线路色带组件，与主页同一位置、同一配色，翻页时色带不动。
    */
   public BufferedImage renderNotice(PidsLayout layout, PidsNoticeView view) {
     Objects.requireNonNull(layout, "layout");
@@ -202,6 +210,17 @@ public final class PidsRenderer {
     int content = band.map(PidsLayout.LineBand::y).orElse(layout.height());
     boolean withBody = layout.tileCols() >= 3;
     PidsTheme theme = view.theme();
+    if (layout.tileCols() == 1) {
+      return paint(
+          width,
+          layout.height(),
+          theme,
+          layout.boldFrom(),
+          p -> {
+            drawPortraitNotice(p, view, width, content);
+            band.ifPresent(found -> drawLineBand(p, found, view.bandColors()));
+          });
+    }
     return paint(
         width,
         layout.height(),
@@ -257,6 +276,85 @@ public final class PidsRenderer {
         });
   }
 
+  /** 按字逐个排、放不下就换行（站名、编号这类不按空格断的行）；一个字也放不下时照样占一行。 */
+  private static List<String> wrapChars(Painter p, String text, int size, int maxWidth) {
+    List<String> lines = new ArrayList<>();
+    StringBuilder line = new StringBuilder();
+    text.codePoints()
+        .forEach(
+            codePoint -> {
+              String next = line + Character.toString(codePoint);
+              if (!line.isEmpty() && p.width(next, size) > maxWidth) {
+                lines.add(line.toString());
+                line.setLength(0);
+              }
+              line.appendCodePoint(codePoint);
+            });
+    if (!line.isEmpty()) {
+      lines.add(line.toString());
+    }
+    return lines;
+  }
+
+  /**
+   * 竖屏（只有一块地图宽，如 2×1 停站屏）的宣传页、安全提示页：图标块、标题、说明自上而下居中排开，整体在色带以上竖向居中。
+   *
+   * @param content 色带顶边（没有色带时为画布高）
+   */
+  private void drawPortraitNotice(Painter p, PidsNoticeView view, int width, int content) {
+    PidsTheme theme = p.theme();
+    int textWidth = width - NOTICE_INSET * 2;
+    List<String> body =
+        wordLines(view.body().secondary(), CARD_SMALL, textWidth, NOTICE_BODY_LINES, p);
+    int bodyHeight = body.isEmpty() ? 0 : body.size() * CARD_SMALL + (body.size() - 1) * 2;
+    int height =
+        NOTICE_BLOCK
+            + NOTICE_INSET
+            + NOTICE_TITLE
+            + NOTICE_GAP
+            + CARD_TEXT
+            + NOTICE_INSET
+            + CARD_TEXT
+            + NOTICE_GAP
+            + bodyHeight;
+    int top = Math.max(NOTICE_INSET, (content - height) / 2);
+    int center = width / 2;
+
+    int blockColor = view.notice().warning() ? theme.amber() : theme.info();
+    int blockX = center - NOTICE_BLOCK / 2;
+    p.fill(blockX, top, NOTICE_BLOCK, NOTICE_BLOCK, blockColor);
+    int inset = (NOTICE_BLOCK - NOTICE_ICON) / 2;
+    drawNoticeIcon(p, view.notice(), blockX + inset, top + inset, PidsTheme.textOn(blockColor));
+
+    int y = top + NOTICE_BLOCK + NOTICE_INSET;
+    p.textCentered(
+        p.ellipsize(view.title().primary(), NOTICE_TITLE, textWidth),
+        NOTICE_TITLE,
+        center,
+        y,
+        theme.text());
+    y += NOTICE_TITLE + NOTICE_GAP;
+    regularCentered(
+        p, p.ellipsizeWords(view.title().secondary(), CARD_TEXT, textWidth), CARD_TEXT, center, y);
+    y += CARD_TEXT + NOTICE_INSET;
+    p.textCentered(
+        p.ellipsize(view.body().primary(), CARD_TEXT, textWidth),
+        CARD_TEXT,
+        center,
+        y,
+        theme.text());
+    y += CARD_TEXT + NOTICE_GAP;
+    for (String line : body) {
+      regularCentered(p, line, CARD_SMALL, center, y);
+      y += CARD_SMALL + 2;
+    }
+  }
+
+  /** 次要色常规字，水平居中。 */
+  private static void regularCentered(Painter p, String text, int size, int center, int top) {
+    p.regular(text, size, center - p.regularWidth(text, size) / 2, top, p.theme().muted(), false);
+  }
+
   /**
    * 空位页（站台屏轮播的一页）：参照长岛铁路站台屏的车厢拥挤度示意图。
    *
@@ -292,7 +390,16 @@ public final class PidsRenderer {
           int right = width - VACANCY_INSET;
           drawBadgeAt(p, left, VACANCY_TOP, badgeStyle, view.badge());
           int destinationRight =
-              drawVacancyArrival(p, view.arrival(), view.labels().minutes(), right);
+              drawStackedArrival(
+                  p,
+                  view.arrival(),
+                  view.labels().minutes(),
+                  new TextStyle(CARD_TITLE, CARD_SMALL, 2),
+                  VACANCY_NUMBER,
+                  NOTICE_GAP,
+                  0,
+                  right,
+                  VACANCY_TOP);
           int destX = left + badgeStyle.width() + VACANCY_INSET;
           int destWidth = destinationRight - VACANCY_INSET - destX;
           p.text(
@@ -321,50 +428,71 @@ public final class PidsRenderer {
   }
 
   /**
-   * 第一行右侧的多久到达，与左侧终点（中文 {@value #CARD_TITLE} 号叠英文 {@value #CARD_SMALL} 号）等高、同两行：
+   * 多久到达，与左侧中英文两行等高：
    *
    * <ul>
-   *   <li>分钟数用 {@value #VACANCY_NUMBER} 号，与英文同基线，数字自中文字顶写到英文字底；其后“分 / min”与终点同字号、同两行。
-   *   <li>进站、停靠中：提示与终点同字号、同两行。
+   *   <li>分钟数与英文同基线，自中文字顶写到英文字底；其后“分 / min”上下叠放。分钟数伸过 {@code left} 时改用单位的字号， 仍放不下就不写单位、只写数字（空位页与
+   *       2×1 停站屏共用）。
+   *   <li>进站、停靠中：提示中英文上下叠放、靠右。
    *   <li>取消、回库不写。
    * </ul>
    *
-   * 返回占用区域的左缘。
+   * @param unit 单位与提示的字号（上下叠放）
+   * @param numberSize 分钟数字号
+   * @param gap 分钟数与单位的间距
+   * @param left 分钟数不能伸过的左缘
+   * @param right 右缘
+   * @param top 两行的顶边
+   * @return 占用区域的左缘
    */
-  private int drawVacancyArrival(Painter p, Arrival arrival, Names minutes, int right) {
-    int secondaryTop = VACANCY_TOP + CARD_TITLE + 2;
+  int drawStackedArrival(
+      Painter p,
+      Arrival arrival,
+      Names minutes,
+      TextStyle unit,
+      int numberSize,
+      int gap,
+      int left,
+      int right,
+      int top) {
+    int secondaryTop = top + unit.size() + unit.gap();
     switch (arrival.mode()) {
       case COUNTDOWN -> {
+        String number = Integer.toString(arrival.minutes());
+        int color = p.color(arrival.minutesTone());
+        int baseline = secondaryTop + p.baseline(minutes.secondary(), unit.secondarySize());
         int unitWidth =
             Math.max(
-                p.width(minutes.primary(), CARD_TITLE),
-                p.regularWidth(minutes.secondary(), CARD_SMALL));
-        p.text(minutes.primary(), CARD_TITLE, right - unitWidth, VACANCY_TOP, p.theme.text());
-        p.regular(
-            minutes.secondary(),
-            CARD_SMALL,
-            right - unitWidth,
-            secondaryTop,
-            p.theme.muted(),
-            false);
-        String number = Integer.toString(arrival.minutes());
-        int baseline = secondaryTop + p.baseline(minutes.secondary(), CARD_SMALL);
-        int numberRight = right - unitWidth - NOTICE_GAP;
-        p.textRight(
-            number,
-            VACANCY_NUMBER,
-            numberRight,
-            baseline - p.baseline(number, VACANCY_NUMBER),
-            p.color(arrival.minutesTone()));
-        return numberRight - p.width(number, VACANCY_NUMBER);
+                p.width(minutes.primary(), unit.size()),
+                p.regularWidth(minutes.secondary(), unit.secondarySize()));
+        for (int size : List.of(numberSize, unit.size())) {
+          int numberRight = right - unitWidth - gap;
+          int numberLeft = numberRight - p.width(number, size);
+          if (numberLeft >= left) {
+            p.text(minutes.primary(), unit.size(), right - unitWidth, top, p.theme.text());
+            p.regular(
+                minutes.secondary(),
+                unit.secondarySize(),
+                right - unitWidth,
+                secondaryTop,
+                p.theme.muted(),
+                false);
+            p.textRight(number, size, numberRight, baseline - p.baseline(number, size), color);
+            return numberLeft;
+          }
+        }
+        p.textRight(number, numberSize, right, baseline - p.baseline(number, numberSize), color);
+        return right - p.width(number, numberSize);
       }
       case HIGHLIGHT -> {
         Names text = arrival.status().map(Label::text).orElse(new Names("", ""));
         int width =
             Math.max(
-                p.width(text.primary(), CARD_TITLE), p.regularWidth(text.secondary(), CARD_SMALL));
-        p.textRight(text.primary(), CARD_TITLE, right, VACANCY_TOP, p.theme.text());
-        p.regularRight(text.secondary(), CARD_SMALL, right, secondaryTop, p.theme.muted());
+                p.width(text.primary(), unit.size()),
+                p.regularWidth(text.secondary(), unit.secondarySize()));
+        p.textRight(text.primary(), unit.size(), right, top, p.theme.text());
+        p.regularRight(
+            text.secondary(), unit.secondarySize(), right, secondaryTop, p.theme.muted());
         return right - width;
       }
       default -> {
@@ -559,15 +687,39 @@ public final class PidsRenderer {
     return image;
   }
 
+  /**
+   * 渲染 2×1 停站屏：站台号、时钟、停站表（{@link PidsStopListPainter}）与线路色带（布局校验不许停站屏带其他组件）。
+   *
+   * <p>停站多时按布局的每页行数取 {@link PidsStopListView#page()} 这一页。
+   */
+  public BufferedImage renderStopList(PidsLayout layout, PidsStopListView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    return paint(
+        layout.width(),
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          for (PidsLayout.Widget widget : layout.widgets()) {
+            if (widget instanceof PidsLayout.Platform platform) {
+              drawPlatform(p, platform, view.platforms(), new Names("", ""));
+            } else if (widget instanceof PidsLayout.LineBand band) {
+              drawLineBand(p, band, view.bandColors());
+            } else if (widget instanceof PidsLayout.Clock clock) {
+              drawClock(p, clock, view.clock());
+            } else if (widget instanceof PidsLayout.StopList list) {
+              new PidsStopListPainter(this, p).draw(list, view);
+            }
+          }
+        });
+  }
+
   private void drawWidget(Painter p, PidsLayout.Widget widget, PidsView view) {
     if (widget instanceof PidsLayout.Platform platform) {
-      drawPlatform(p, platform, view);
+      drawPlatform(p, platform, view.platforms(), view.labels().platform());
     } else if (widget instanceof PidsLayout.Clock clock) {
-      if (clock.align() == PidsLayout.Align.RIGHT) {
-        p.textRight(view.clock(), clock.size(), clock.x(), clock.y(), p.theme.text());
-      } else {
-        p.text(view.clock(), clock.size(), clock.x(), clock.y(), p.theme.text());
-      }
+      drawClock(p, clock, view.clock());
     } else if (widget instanceof PidsLayout.LineBand band) {
       drawLineBand(p, band, view.bandColors());
     } else if (widget instanceof PidsLayout.StationTitle title) {
@@ -576,6 +728,14 @@ public final class PidsRenderer {
       drawLineStrip(p, strip, view.lines());
     } else if (widget instanceof Departures departures) {
       drawDepartures(p, departures, view);
+    }
+  }
+
+  private static void drawClock(Painter p, PidsLayout.Clock clock, String text) {
+    if (clock.align() == PidsLayout.Align.RIGHT) {
+      p.textRight(text, clock.size(), clock.x(), clock.y(), p.theme.text());
+    } else {
+      p.text(text, clock.size(), clock.x(), clock.y(), p.theme.text());
     }
   }
 
@@ -595,10 +755,10 @@ public final class PidsRenderer {
     }
   }
 
-  /** 每个站台一个反白方块，按布局的每行个数排开，至多 {@code max} 个；标签跟在最后一行方块下面。 */
-  private void drawPlatform(Painter p, PidsLayout.Platform platform, PidsView view) {
-    List<String> platforms =
-        view.platforms().subList(0, Math.min(view.platforms().size(), platform.max()));
+  /** 每个站台一个反白方块，按布局的每行个数排开，至多 {@code max} 个；标签跟在最后一行方块下面，标签字号为 0 时不写。 */
+  private void drawPlatform(
+      Painter p, PidsLayout.Platform platform, List<String> numbers, Names caption) {
+    List<String> platforms = numbers.subList(0, Math.min(numbers.size(), platform.max()));
     if (platforms.isEmpty()) {
       return;
     }
@@ -620,9 +780,12 @@ public final class PidsRenderer {
           y + (box - size) / 2,
           p.theme.inverseText());
     }
+    if (platform.label().size() <= 0) {
+      return;
+    }
     int rows = (platforms.size() + platform.perRow() - 1) / platform.perRow();
     p.stacked(
-        view.labels().platform(),
+        caption,
         platform.label(),
         platform.x(),
         platform.y() + rows * box + (rows - 1) * platform.gap() + platform.labelGap(),
@@ -789,7 +952,7 @@ public final class PidsRenderer {
     drawBadgeAt(p, x, cell.top + (cell.height - style.height()) / 2, style, badge);
   }
 
-  private void drawBadgeAt(Painter p, int x, int y, BadgeStyle style, PidsView.Badge badge) {
+  void drawBadgeAt(Painter p, int x, int y, BadgeStyle style, PidsView.Badge badge) {
     int ink;
     if (badge.hollow()) {
       p.outline(x, y, style.width(), style.height(), badge.color());
@@ -906,7 +1069,15 @@ public final class PidsRenderer {
       p.text(lines.get(1), style.fallbackSize(), x, top, primaryColor, dest.struck());
       if (secondaryHeight > 0) {
         top += style.fallbackSize() + text.gap();
-        p.secondary(second, text.secondarySize(), x, top, available, secondaryColor, dest.struck());
+        p.secondary(
+            second,
+            text.secondarySize(),
+            x,
+            top,
+            text.gap(),
+            available,
+            secondaryColor,
+            dest.struck());
       }
       return;
     }
@@ -1261,7 +1432,7 @@ public final class PidsRenderer {
    * <p>主文字（中文名、数字）从 {@code boldFrom} 字号起仿粗体，宽度多 1 像素；次要文字（英文副名）始终常规。量宽、省略、右对齐都按同一规则，
    * 加粗不会把右对齐的文字吃进边界。
    */
-  private final class Painter {
+  final class Painter {
     private final Graphics2D g;
     private final PidsTheme theme;
     private final int boldFrom;
@@ -1270,6 +1441,10 @@ public final class PidsRenderer {
       this.g = g;
       this.theme = theme;
       this.boldFrom = boldFrom;
+    }
+
+    PidsTheme theme() {
+      return theme;
     }
 
     int color(Tone tone) {
@@ -1466,6 +1641,7 @@ public final class PidsRenderer {
                     style.secondarySize(),
                     x,
                     top + style.size() + style.gap(),
+                    style.gap(),
                     maxWidth,
                     secondaryRgb,
                     struck));
@@ -1473,18 +1649,31 @@ public final class PidsRenderer {
       return width;
     }
 
-    /** 画英文那一格：英文名超宽时按词省略；备注已按宽度排好。返回宽度。 */
+    /**
+     * 画英文那一格：英文名超宽时按词省略；备注已按宽度排好。返回宽度。
+     *
+     * @param headroom 这一格上方到上一行文字之间空着的像素（备注色块向上伸出时要留 1 像素）
+     */
     int secondary(
-        Secondary second, int size, int x, int top, int maxWidth, int rgb, boolean struck) {
+        Secondary second,
+        int size,
+        int x,
+        int top,
+        int headroom,
+        int maxWidth,
+        int rgb,
+        boolean struck) {
       return switch (second) {
         case Secondary.Text plain -> regular(
             ellipsizeWords(plain.text(), size, maxWidth), size, x, top, rgb, struck);
-        case Secondary.Remark remark -> remark(remark.parts(), size, x, top, rgb);
+        case Secondary.Remark remark -> remark(remark.parts(), size, x, top, headroom, rgb);
       };
     }
 
     /** 备注：标签画成色块反白（字色按底色亮度取黑白），其后是次要色文字。返回宽度。 */
-    int remark(List<PidsRemarkLayout.Placed> parts, int size, int x, int top, int rgb) {
+    int remark(
+        List<PidsRemarkLayout.Placed> parts, int size, int x, int top, int headroom, int rgb) {
+      int lift = Math.max(0, Math.min(PidsRemarkLayout.TAG_PAD_Y, headroom - 1));
       int cursor = x;
       for (int i = 0; i < parts.size(); i++) {
         PidsRemarkLayout.Placed part = parts.get(i);
@@ -1494,9 +1683,9 @@ public final class PidsRenderer {
         int tagWidth = regularWidth(part.tag(), size);
         fill(
             cursor - PidsRemarkLayout.TAG_PAD,
-            top - 1,
+            top - lift,
             tagWidth + PidsRemarkLayout.TAG_PAD * 2,
-            size + 2,
+            size + PidsRemarkLayout.TAG_PAD_Y + lift,
             part.color());
         regular(part.tag(), size, cursor, top, PidsTheme.textOn(part.color()), false);
         cursor += tagWidth + PidsRemarkLayout.TAG_PAD;
@@ -1576,11 +1765,13 @@ public final class PidsRenderer {
           text(primary, style.size(), x, top, primaryRgb, struck);
           int baseline = top + baseline(primary, style.size());
           int secondaryTop = baseline - baseline(secondaryText(second), style.secondarySize());
+          // 与中文名同一行，上方没有文字
           secondary(
               second,
               style.secondarySize(),
               x + primaryWidth + style.gap(),
               secondaryTop,
+              Integer.MAX_VALUE,
               maxWidth,
               secondaryRgb,
               struck);

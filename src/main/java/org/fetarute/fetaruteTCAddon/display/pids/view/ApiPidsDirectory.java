@@ -230,7 +230,9 @@ public final class ApiPidsDirectory implements PidsDirectory {
                   collectPlatformLines(route, detail, platformLineKeys);
                   waypoints.put(routeKey, List.copyOf(detail.waypoints()));
                   routeStops.put(
-                      routeKey, detail.stops().stream().map(ApiPidsDirectory::routeStop).toList());
+                      routeKey,
+                      List.copyOf(
+                          detail.stops().stream().map(ApiPidsDirectory::routeStop).toList()));
                   if (!detail.via().isEmpty()) {
                     via.put(routeKey, detail.via());
                   }

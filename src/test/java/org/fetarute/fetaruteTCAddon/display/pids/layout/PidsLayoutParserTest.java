@@ -63,6 +63,68 @@ class PidsLayoutParserTest {
     assertTrue(station.departures().orElseThrow().header().isPresent());
   }
 
+  /** 2×1 停站屏：竖屏 128×256，有直通或经由一行时每页 6 站、没有时 7 站。 */
+  @Test
+  void theBuiltInStopListLayoutFitsSixOrSevenStops() {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    PidsLayout.StopList list = layout.stopList().orElseThrow();
+
+    assertEquals(128, layout.width());
+    assertEquals(256, layout.height());
+    assertTrue(layout.departures().isEmpty());
+    assertEquals(6, list.rowsPerPage(true));
+    assertEquals(7, list.rowsPerPage(false));
+    assertEquals(2, list.pages(8, false));
+    assertEquals(1, list.pages(0, true));
+  }
+
+  /** 停站屏只画站台号、时钟、色带与停站表：带上到发表、站名、换乘条的布局作废，免得写了却不显示。 */
+  @Test
+  void stopListLayoutsRejectWidgetsTheyCannotDraw() throws Exception {
+    PidsLayoutParser.Result result =
+        parse(
+            """
+            format: 1
+            tiles: {rows: 2, cols: 1}
+            widgets:
+              - type: clock
+                x: 4
+                y: 230
+              - type: station-title
+                x: 0
+                y: 0
+                width: 128
+              - type: stop-list
+                x: 0
+                y: 0
+                width: 128
+                height: 248
+            """);
+
+    assertEquals(
+        List.of("widgets[1]: 停站屏只画站台号、时钟、线路色带与停站表，不支持这个组件"), result.problems(), "时钟可以，站名不行");
+  }
+
+  @Test
+  void aStopListTooShortForOneStopIsRejected() throws Exception {
+    PidsLayoutParser.Result result =
+        parse(
+            """
+            format: 1
+            tiles: {rows: 1, cols: 1}
+            widgets:
+              - type: stop-list
+                x: 0
+                y: 0
+                width: 128
+                height: 100
+            """);
+
+    assertTrue(
+        result.problems().contains("widgets[0].stops: 有直通或经由一行时一站也放不下"),
+        () -> result.problems().toString());
+  }
+
   @Test
   void omittedStyleKeysTakeDefaults() throws Exception {
     PidsLayout layout = parse(MINIMAL).layout().orElseThrow();

@@ -1022,7 +1022,7 @@ command:
   pids:
     help:
       header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>挂满空展示框后用安装纸安装，再用配置棍调整</gray>"
-      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、station-3x5 或自定义布局）</dark_aqua>"
+      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
       stick: "<gray>/fta pids stick</gray> <white>-</white> <dark_aqua>领取配置棍（右键菜单、左键信息、潜行左键拆除）</dark_aqua>"
       list: "<gray>/fta pids list <white>[页]</white></gray> <white>-</white> <dark_aqua>全部站台屏（需管理权限）</dark_aqua>"
       info: "<gray>/fta pids info|menu|remove <white><屏幕></white></gray> <white>-</white> <dark_aqua>按编号查看、配置或拆除</dark_aqua>"
@@ -1225,7 +1225,12 @@ pids:
     remark:
       last-train: "末班车"
       through: "直通"
+      through-secondary: "thru"
       via: "经由"
+      via-secondary: "via"
+    # 2×1 停站屏：终点下面一行写从哪站起直通
+    stop-list:
+      through-from: "<station>起"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
     notice:
       order:
