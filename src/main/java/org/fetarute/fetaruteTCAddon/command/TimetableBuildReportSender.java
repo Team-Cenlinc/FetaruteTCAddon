@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -330,7 +331,13 @@ final class TimetableBuildReportSender {
     ResolvedLine first = lines.get(0);
     String code = saved.get(0).code();
     String target =
-        first.company().code() + " " + first.operator().code() + " " + lineArg + " " + code;
+        first.company().code()
+            + " "
+            + first.operator().code()
+            + " "
+            + lineCommandArgument(lineArg)
+            + " "
+            + code;
     sender.sendMessage(
         Component.text(
                 (lines.size() > 1 ? "已保存草稿（" + lines.size() + " 张，互为基线）：" : "已保存草稿：")
@@ -424,26 +431,38 @@ final class TimetableBuildReportSender {
   }
 
   /**
-   * 同上，只看三样：这次开没开错峰、目标间隔放没放宽、快车被拖住多少。
+   * 同上，只看三样：这次开没开错峰、目标间隔放没放宽、快车损失多少。
    *
    * @param staggered 这次带了 {@code --rapid-stagger}
-   * @param relaxed 目标间隔被放宽了（开了错峰也没搜）
-   * @param catchUp 成品表上快车被拖住的合计
+   * @param relaxed 目标间隔被放宽了（开了错峰也只试了加长折返）
+   * @param catchUp 成品表上快车被拖住与在表里让车等待的合计
    */
   static Optional<String> rapidStaggerHint(
       boolean staggered, boolean relaxed, TimetableBuildResult.CatchUp catchUp) {
-    if (catchUp.seconds() <= 0L || (staggered && !relaxed)) {
+    if (catchUp.lost() <= 0L || (staggered && !relaxed)) {
       return Optional.empty();
+    }
+    List<String> lost = new ArrayList<>();
+    if (catchUp.seconds() > 0L) {
+      lost.add(
+          String.format(
+              Locale.ROOT, "快车 %d 班在共线段被慢车拖住，共 %d 秒", catchUp.trips(), catchUp.seconds()));
+    }
+    if (catchUp.held() > 0L) {
+      lost.add(String.format(Locale.ROOT, "快车在表里让车等待共 %d 秒", catchUp.held()));
     }
     String how = relaxed ? "目标间隔排不开、已放宽，按放宽后的间隔带 --rapid-stagger 重新编表：" : "带 --rapid-stagger 重新编表：";
     return Optional.of(
-        String.format(
-            Locale.ROOT,
-            "快车 %d 班在共线段被慢车拖住，共 %d 秒。%s逐个试快车组整组平移与快车中途加停，"
-                + "在班次不少、不加车、不放宽间隔的前提下挑被拖住最少的位置；需要几分钟，在后台线程运行，不阻塞服务器主线程",
-            catchUp.trips(),
-            catchUp.seconds(),
-            how));
+        String.join("，", lost)
+            + "。"
+            + how
+            + "逐个试原地折返端加长折返、快车组整组平移与快车中途加停，"
+            + "在班次不少、最多多用一列车、不放宽间隔、不把普通车往后推的前提下挑快车与全网让车损失最少的方案；需要几分钟，在后台线程运行，不阻塞服务器主线程");
+  }
+
+  /** 线路参数在可点命令里的写法：几条线时加双引号，客户端不认不带引号的逗号，整条命令会标红发不出去。 */
+  static String lineCommandArgument(String lineArg) {
+    return lineArg.contains(",") ? CommandUx.quoteCommandArgument(lineArg) : lineArg;
   }
 
   /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
@@ -459,7 +478,7 @@ final class TimetableBuildReportSender {
             .append(' ')
             .append(first.operator().code())
             .append(' ')
-            .append(lineArg)
+            .append(lineCommandArgument(lineArg))
             .append(' ')
             .append(timetable.code());
     for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {

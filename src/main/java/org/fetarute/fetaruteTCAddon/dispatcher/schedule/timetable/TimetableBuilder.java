@@ -155,9 +155,9 @@ public final class TimetableBuilder {
     return switch (RapidStagger.plan(
         requested.rapidStagger(), measure, base.result().headwayRelaxed())) {
       case MEASURE_ONLY -> RapidStagger.annotate(base.result(), measure, routeCodes(chosen));
-      case SKIP_RELAXED -> RapidStagger.annotate(base.result(), measure, routeCodes(chosen))
-          .withPhaseNote("快车错峰：目标间隔本身排不开（已放宽），先把间隔排开再错峰，这次没有搜");
-      case SEARCH -> staggerRapids(input, requested, builtAt, base, measure, fastRoutes);
+      case TURNBACK_ONLY -> staggerRapids(
+          input, requested, builtAt, base, measure, fastRoutes, true);
+      case SEARCH -> staggerRapids(input, requested, builtAt, base, measure, fastRoutes, false);
     };
   }
 
@@ -170,7 +170,8 @@ public final class TimetableBuilder {
         chosen.graphIndex(),
         separationOf(built.options()),
         built.options().serviceStartSecondOfDay(),
-        fastRoutes);
+        fastRoutes,
+        built.result().yields());
   }
 
   /**
@@ -416,8 +417,12 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 快车错峰（{@link RapidStagger}）：含快车的交路组整组平移、快车中途加停，每个候选完整编一遍（只在目标间隔下比，不放宽），
-   * 在成品表上量快车被卡秒数，班次不少、不加车的前提下挑被卡最少的；比原表好才换。
+   * 快车错峰（{@link RapidStagger}）：原地折返端加长折返、含快车的交路组整组平移、快车中途加停，每个候选完整编一遍（只在目标间隔下比，不放宽），
+   * 在成品表上量快车被卡与表里的让车等待，班次不少、最多多用一列车的前提下挑全网损失最少的；快车损失更少、全网损失不更多才换。
+   *
+   * <p>原表已放宽时，候选仍按目标间隔编：选中的候选把间隔排回了目标，班次更多，全网损失不更多这一条因此偏保守。
+   *
+   * @param turnbackOnly 原表已放宽：只试加长折返（它可能正好让目标间隔排得开），不平移、不中途加停
    */
   private TimetableBuildResult staggerRapids(
       BuildInput input,
@@ -425,7 +430,8 @@ public final class TimetableBuilder {
       Instant builtAt,
       Built base,
       RapidStagger.Measure baseMeasure,
-      Set<UUID> fastRoutes) {
+      Set<UUID> fastRoutes,
+      boolean turnbackOnly) {
     long started = System.nanoTime();
     Prepared prepared = base.prepared().orElseThrow();
     TimetableBuildOptions candidateOptions = requested.withRapidStagger(false);
@@ -434,7 +440,7 @@ public final class TimetableBuilder {
     List<String> fastGroups =
         RapidStagger.fastGroups(prepared.classification().groups(), fastRoutes);
     Map<String, Integer> periods = new TreeMap<>();
-    for (String group : fastGroups) {
+    for (String group : turnbackOnly ? List.<String>of() : fastGroups) {
       List<Integer> others = new ArrayList<>();
       intervals.forEach(
           (name, seconds) -> {
@@ -446,16 +452,25 @@ public final class TimetableBuilder {
           group,
           RapidStagger.period(intervals.getOrDefault(group, minInterval(intervals)), others));
     }
+    RapidStagger.Candidate original =
+        new RapidStagger.Candidate(
+            Map.of(),
+            Optional.empty(),
+            base.result(),
+            RapidStagger.Outcome.of(base.result()),
+            baseMeasure);
     RapidStagger.Search search =
         RapidStagger.search(
             periods,
-            new RapidStagger.Candidate(
-                Map.of(),
-                Optional.empty(),
-                base.result(),
-                RapidStagger.Outcome.of(base.result()),
-                baseMeasure),
+            original,
+            RapidStagger.turnbackSource(
+                base.options().dutyLimits().turnaround(),
+                base.result().timetable().orElseThrow(),
+                prepared.profiles(),
+                codes,
+                fastRoutes),
             measure -> RapidStagger.dwellPoints(measure, prepared.profiles(), codes),
+            turnbackOnly,
             new RapidStagger.Evaluator() {
               @Override
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
@@ -477,13 +492,15 @@ public final class TimetableBuilder {
         search.improved().map(RapidStagger.Candidate::measure).orElse(baseMeasure);
     return RapidStagger.annotate(chosen, chosenMeasure, codes)
         .withPhaseNote(
-            RapidStagger.describeSearch(baseMeasure, search.improved(), search.tried(), millis));
+            RapidStagger.describeSearch(
+                original, search.improved(), search.tried(), millis, turnbackOnly));
   }
 
   /**
-   * 编一个快车错峰的候选：只在目标间隔下排（排不开就淘汰），量成品表。不可用（放宽、少班次、加车）时为空。
+   * 编一个快车错峰的候选：只在目标间隔下排（排不开就淘汰），量成品表。不可用（放宽、少班次、多用车超过上限）时为空。
    *
-   * <p>只平移相位时输入不变，沿用原表的准备；加停改了停站，时分与投影都要重算。
+   * <p>只平移相位时输入不变，沿用原表的准备；加停改了停站，时分与投影都要重算。终到折返加长改的是终到停靠的停站时间， 折返表按它重算（{@link
+   * #resolveTurnarounds}）。
    */
   private Optional<RapidStagger.Candidate> stagger(
       BuildInput input,
@@ -546,7 +563,6 @@ public final class TimetableBuilder {
     return List.copyOf(out);
   }
 
-  /** 回退提示里的间隔：只有一组时就是一个数；多组时只列被放宽的组，逐组收紧后回到目标的组不列。 */
   /**
    * 搜索选中的间隔比目标宽在哪里。
    *

@@ -495,6 +495,125 @@ class ReclaimManagerTest {
     assertEquals(List.of(firstRouteId, secondRouteId), attemptedRoutes);
   }
 
+  /** 终点有两条回库线路：先试列车所绑交路的那一条，回到按表该回的车库。 */
+  @Test
+  void performReclaimCheckTriesTheDutysOwnReturnRouteFirst() {
+    Instant now = Instant.now();
+    UUID firstRouteId = UUID.randomUUID();
+    UUID secondRouteId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(firstRouteId, stationId);
+    Company company = provider.companies().listAll().get(0);
+    Operator operator =
+        provider.operators().findByCompanyAndCode(company.id(), "SURC").orElseThrow();
+    Line line = provider.lines().listByOperator(operator.id()).get(0);
+    Route firstRoute = provider.routes().listByLine(line.id()).get(0);
+    Route secondRoute =
+        new Route(
+            secondRouteId,
+            "MT-RET-2",
+            line.id(),
+            "Return 2",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.RETURN,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    when(provider.routes().listByLine(line.id())).thenReturn(List.of(firstRoute, secondRoute));
+    when(provider.routeStops().listByRoute(secondRouteId))
+        .thenReturn(
+            List.of(
+                new RouteStop(
+                    secondRouteId,
+                    0,
+                    Optional.of(stationId),
+                    Optional.empty(),
+                    Optional.empty(),
+                    RouteStopPassType.STOP,
+                    Optional.empty())));
+
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-a",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        now.minusSeconds(30),
+        Map.of(
+            "FTA_OPERATOR_CODE", "SURC",
+            "FTA_OP_TRIPS", "4",
+            "FTA_OP_MAX", "4"));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    List<UUID> attemptedRoutes = new ArrayList<>();
+    when(ticketAssigner.forceAssign(eq(provider), eq("train-a"), any(ServiceTicket.class)))
+        .thenAnswer(
+            invocation -> {
+              ServiceTicket ticket = invocation.getArgument(2);
+              attemptedRoutes.add(ticket.routeId());
+              return true;
+            });
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+    manager.setPreferredReturnRoute(
+        trainName -> "train-a".equals(trainName) ? Optional.of(secondRouteId) : Optional.empty());
+    List<String> reclaimed = new ArrayList<>();
+    manager.setReclaimListener((trainName, routeId) -> reclaimed.add(trainName + "@" + routeId));
+
+    manager.performReclaimCheck();
+
+    assertEquals(List.of(secondRouteId), attemptedRoutes);
+    assertEquals(List.of("train-a@" + secondRouteId), reclaimed, "派走后通知时刻表结清交路");
+  }
+
+  /**
+   * 等自己交路带客回库班的车：不回收，也不算本方向的闲置供给——否则它把同方向另一辆车推成“过剩”，被收走的是那一辆。
+   *
+   * <p>PPK 两辆待命车，train-a 在等回库班：可供给的只剩 train-b 一辆，不过剩，谁也不收。
+   */
+  @Test
+  void performReclaimCheckLeavesTrainsWaitingForTheirOwnReturnLeg() {
+    Instant now = Instant.now();
+    UUID routeId = UUID.randomUUID();
+    UUID stationId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, stationId);
+    FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(plugin.getStorageManager()).thenReturn(storageManager);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    TicketAssigner ticketAssigner = mock(TicketAssigner.class);
+    when(ticketAssigner.snapshotPendingTickets()).thenReturn(List.of());
+    when(ticketAssigner.forceAssign(eq(provider), any(), any())).thenReturn(true);
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register(
+        "train-a",
+        "surc:s:ppk:1",
+        NodeId.of("SURC:S:PPK:1"),
+        now.minusSeconds(400),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    layoverRegistry.register(
+        "train-b",
+        "surc:s:ppk:2",
+        NodeId.of("SURC:S:PPK:2"),
+        now.minusSeconds(300),
+        Map.of("FTA_OPERATOR_CODE", "SURC"));
+    ReclaimManager manager =
+        new ReclaimManager(
+            plugin, layoverRegistry, ticketAssigner, mockConfigManager(), null, () -> 0);
+    manager.setOwnReturnWait((trainName, location) -> "train-a".equals(trainName));
+
+    manager.performReclaimCheck();
+
+    verify(ticketAssigner, never()).forceAssign(any(), any(), any());
+  }
+
   @Test
   void activeTrainCountHandlesEmptyAndMissingGroups() {
     List<MinecartGroup> groups = new ArrayList<>();

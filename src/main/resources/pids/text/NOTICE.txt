@@ -1,0 +1,12 @@
+Open Chinese Convert (OpenCC)
+https://github.com/BYVoid/OpenCC
+
+Bundled unmodified: data/dictionary/STCharacters.txt (simplified -> traditional
+single-character table), taken from the master branch.
+SHA-256: a0ca1601c70648cf48b33c3c6210ccbecc5c7eead4b4c3daf76587ba2c03582b
+
+Licensed under the Apache License 2.0 (LICENSE-OpenCC.txt).
+
+FetaruteTCAddon only reads this table to tell which characters are used in
+simplified-only or traditional-only writing, so that station screens can pick
+simplified, traditional or Japanese glyph shapes from the text itself.

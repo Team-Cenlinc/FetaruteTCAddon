@@ -63,6 +63,16 @@ public final class FtaInfoCommand {
         locale.component("command.help.hover-help"));
     sendHelpEntry(
         sender,
+        locale.component("command.help.entry-trip"),
+        ClickEvent.runCommand("/fta trip"),
+        locale.component("command.help.hover-trip"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-announce"),
+        ClickEvent.suggestCommand("/fta announce "),
+        locale.component("command.help.hover-announce"));
+    sendHelpEntry(
+        sender,
         locale.component("command.help.entry-company"),
         ClickEvent.suggestCommand("/fta company "),
         locale.component("command.help.hover-company"));
@@ -91,6 +101,11 @@ public final class FtaInfoCommand {
         locale.component("command.help.entry-depot"),
         ClickEvent.suggestCommand("/fta depot "),
         locale.component("command.help.hover-depot"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.help.entry-pids"),
+        ClickEvent.suggestCommand("/fta pids "),
+        locale.component("command.help.hover-pids"));
     sendHelpEntry(
         sender,
         locale.component("command.help.entry-graph"),

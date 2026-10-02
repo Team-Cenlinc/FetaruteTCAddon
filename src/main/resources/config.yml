@@ -121,6 +121,8 @@ runtime:
       #        {eta_status} {eta_minutes} {speed} {speed_kmh} {speed_bps} {speed_unit}
       #        {signal_status} {signal_aspect} {service_status} {progress} {progress_percent}
       #        {train_name} {layover_wait} {player_carriage_no} {player_carriage_total}
+      #        {transfer_lines} {transfer_line_names} {transfer_line_names_lang2} {delay_minutes} {trip_dialog_key}
+      # 写成 {?key} 时为条件占位符：值缺失（空或 -）时整行不显示，用于只在有换乘、晚点时才出现的行
       template: ""
     actionbar:
       # 是否在车上显示 ActionBar 信息
@@ -136,6 +138,10 @@ runtime:
       tick-interval-ticks: 10
       # 模板（YAML + MiniMessage），留空使用 default_hud_template.yml
       template: ""
+    trip-dialog:
+      # 乘坐 FTA 列车时按副手交换键（默认 F）打开后续站点对话框；乘车期间该键不再交换副手物品，下车后恢复。
+      # 关闭后乘客仍可用 /fta trip 打开。对话框需要 1.21.6 及以上的客户端
+      swap-hand-key: true
   # 占用申请向前查看的区间数
   lookahead-edges: 3
   # 同向跟车时与前车之间至少空出的区间数

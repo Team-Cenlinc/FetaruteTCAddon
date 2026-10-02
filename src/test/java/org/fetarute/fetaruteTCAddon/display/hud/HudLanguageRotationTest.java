@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.hud;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.util.List;
+import java.util.Map;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation.Language;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplate;
 import org.junit.jupiter.api.Test;
@@ -51,10 +52,10 @@ class HudLanguageRotationTest {
     for (long tick = 0; tick < 60L * 12; tick += 20) {
       Language top =
           HudLanguageRotation.classify(
-              bossbar.resolveLine(HudState.AT_STATION, tick).orElseThrow());
+              bossbar.resolveLine(HudState.AT_STATION, tick, Map.of()).orElseThrow());
       Language bottom =
           HudLanguageRotation.classify(
-              actionbar.resolveLine(HudState.DEPARTING, tick).orElseThrow());
+              actionbar.resolveLine(HudState.DEPARTING, tick, Map.of()).orElseThrow());
       assertEquals(top, bottom, "tick=" + tick);
     }
   }
@@ -79,13 +80,14 @@ class HudLanguageRotationTest {
     // DEPARTING 的两行中文轮流出现在中文相位里，不会因为按语言分组而永远只显示第一行。
     assertEquals(
         "<aqua>▶</aqua> <white>欢迎乘坐</white> <aqua>{operator}</aqua>",
-        actionbar.resolveLine(HudState.DEPARTING, 0).orElseThrow());
+        actionbar.resolveLine(HudState.DEPARTING, 0, Map.of()).orElseThrow());
     assertEquals(
         Language.SECONDARY,
-        HudLanguageRotation.classify(actionbar.resolveLine(HudState.DEPARTING, 60).orElseThrow()));
+        HudLanguageRotation.classify(
+            actionbar.resolveLine(HudState.DEPARTING, 60, Map.of()).orElseThrow()));
     assertEquals(
         "<aqua>▶</aqua> <white>本次列车开往</white> <yellow>{dest_eop}</yellow>",
-        actionbar.resolveLine(HudState.DEPARTING, 120).orElseThrow());
+        actionbar.resolveLine(HudState.DEPARTING, 120, Map.of()).orElseThrow());
   }
 
   @Test

@@ -1,0 +1,64 @@
+# 车站统屏 3×5（640×384，3 行 5 块地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 第 1 行：站名与右上角当前时间、换乘色带与线路编号块；其下为到发表，每块一列（终点跨两块）。
+format: 1
+name: 车站统屏 3×5
+tiles:
+  rows: 3
+  cols: 5
+widgets:
+  - type: station-title
+    x: 12
+    y: 24
+    width: 552
+    sizes: [36, 24, 20]
+    secondary: 20
+    gap: 12
+  # 与站台屏时钟同字号，和站名英文同一基线；右对齐时 x 为右缘
+  - type: clock
+    x: 628
+    y: 39
+    size: 20
+    align: right
+  - type: line-strip
+    x: 0
+    y: 68
+    width: 640
+    band: 8
+    inset: 12
+    tick: {width: 2, height: 4, offset: 6}
+    chip: {height: 16, padding: 6, size: 12}
+    name: {size: 12, secondary: 10, gap: 6}
+    name-gap: 6
+  - type: departures
+    x: 4
+    y: 96
+    width: 632
+    header:
+      height: 20
+      gap: 2
+      inset: 8
+      label: {size: 12, secondary: 10, gap: 4}
+    columns:
+      badge: {x: 0, width: 124}
+      destination: {x: 124, width: 256}
+      platform: {x: 380, width: 128}
+      arrival: {x: 508, width: 124}
+    rows:
+      - height: 42
+        gap: 2
+        panel: true
+        count: 6
+        badge: {width: 74, height: 30, code-width: 48, code: 20, type: 12, type-gap: 2, inset: 8}
+        destination: {size: 24, secondary: 12, gap: 8, inset: 8, inline: true}
+        platform: {box: 28, size: 20, label: 12, gap: 6, inset: 8}
+        arrival:
+          inset: 8
+          inset-right: 4
+          number: 36
+          number-align: left
+          number-gap: 2
+          unit: {size: 12}
+          status: {size: 12, secondary: 0, stacked: false, offset: 58}
+          highlight: {size: 24, secondary: 12, gap: 6, spread: false}
+          dash: false

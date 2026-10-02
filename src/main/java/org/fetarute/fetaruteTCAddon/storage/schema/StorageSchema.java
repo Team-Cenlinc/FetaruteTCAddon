@@ -63,10 +63,12 @@ public final class StorageSchema {
     ddl.add(timetableDuties(dialect));
     ddl.add(uniqueIndex("timetable_duties_code", "timetable_duties", "timetable_id, duty_code"));
     ddl.add(timetableBaselines(dialect));
+    ddl.add(timetablePlatformPlans(dialect));
     ddl.add(index("timetable_baselines_neighbor", "timetable_baselines", "neighbor_timetable_id"));
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
+    ddl.add(pidsScreens(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     ddl.add(railEdges(dialect));
@@ -526,6 +528,31 @@ public final class StorageSchema {
   }
 
   /**
+   * 计划股道：一趟车在某个动态站台停靠的计划股道（build 时按站台组容量排出），运行时作为选台偏好。
+   *
+   * <p>新表（{@code CREATE TABLE IF NOT EXISTS}），旧库自动建出；旧表没有计划，运行时照旧选台，重新 build 才有。
+   */
+  private String timetablePlatformPlans(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    timetable_id %s NOT NULL,
+                    trip_id %s NOT NULL,
+                    stop_sequence %s NOT NULL,
+                    node_id %s NOT NULL,
+                    PRIMARY KEY (timetable_id, trip_id, stop_sequence),
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_platform_plans"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.stringType(),
+        table("timetables"));
+  }
+
+  /**
    * 车辆交路：一辆车从出库到回库之间承担的一串班次。
    *
    * <p>{@code end_depot_node_id} 是"每辆车最终都会回库"这条不变量的物理落点，因此是 NOT NULL—— 没有回库端点的 duty
@@ -614,6 +641,55 @@ public final class StorageSchema {
         dialect.timestampType(),
         table("lines"),
         table("hud_templates"));
+  }
+
+  /**
+   * 站台屏。车站按运营商代码 + 站码记录（与公开 API 一致），不设外键：车站删掉后屏幕仍在墙上，显示为空表。
+   *
+   * <p>同一世界同一方块同一朝向只能有一块屏幕，唯一约束写在表内（MySQL 不支持 {@code CREATE INDEX IF NOT EXISTS}）。
+   */
+  private String pidsScreens(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    world_id %s NOT NULL,
+                    x %s NOT NULL,
+                    y %s NOT NULL,
+                    z %s NOT NULL,
+                    facing %s NOT NULL,
+                    tile_rows %s NOT NULL,
+                    tile_cols %s NOT NULL,
+                    layout_id %s NOT NULL,
+                    operator_code %s,
+                    station_code %s,
+                    platforms %s,
+                    line_codes %s,
+                    appearance %s NOT NULL,
+                    mode %s NOT NULL,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (world_id, x, y, z, facing)
+                );
+                """,
+        table("pids_screens"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.jsonType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType());
   }
 
   private String railNodes(SqlDialect dialect) {

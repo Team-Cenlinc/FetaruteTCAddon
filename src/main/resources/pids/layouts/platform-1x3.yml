@@ -1,0 +1,61 @@
+# 站台屏 1×3（384×128，1 行 3 块地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 块 1：站台号、当前时间与每行色牌；块 2：终点；块 3：到站与状态。首行为下一班，底部为线路色带。
+format: 1
+name: 站台屏 1×3
+tiles:
+  rows: 1
+  cols: 3
+widgets:
+  - type: platform
+    x: 8
+    y: 5
+    box: 24
+    number: 20
+    label-gap: 3
+    label: {size: 12, secondary: 10, gap: 1}
+  - type: clock
+    x: 8
+    y: 92
+    size: 20
+  - type: line-band
+    x: 0
+    y: 120
+    width: 384
+    height: 8
+  - type: departures
+    x: 66
+    y: 4
+    width: 310
+    columns:
+      badge: {x: 0, width: 62}
+      destination: {x: 62, width: 128}
+      arrival: {x: 190, width: 120}
+    rows:
+      # 首行（下一班）
+      - height: 52
+        panel: true
+        badge: {width: 42, height: 28, code-width: 24, code: 12, type: 10, type-gap: 1}
+        destination: {size: 20, secondary: 10, gap: 2, inset: 6, wrap: true, fallback: 12}
+        arrival:
+          inset: 6
+          number: 36
+          number-gap: 3
+          unit: {size: 12, secondary: 10, gap: 1, stacked: true}
+          status: {size: 12, secondary: 10, gap: 1, stacked: true}
+          highlight: {size: 24, secondary: 10, spread: true}
+      # 其余两行
+      - height: 30
+        divider: 2
+        count: 2
+        badge: {width: 42, height: 26, code-width: 24, code: 12, type: 10, type-gap: 1}
+        destination: {size: 12, secondary: 10, gap: 2, inset: 6}
+        arrival:
+          inset: 6
+          number: 20
+          number-box: 24
+          number-align: right
+          number-gap: 2
+          unit: {size: 12}
+          status: {size: 12, secondary: 10, gap: 2, stacked: true}
+          highlight: {size: 12, secondary: 10, spread: true}

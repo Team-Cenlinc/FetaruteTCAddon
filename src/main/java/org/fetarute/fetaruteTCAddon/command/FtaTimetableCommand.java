@@ -39,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
@@ -49,6 +50,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableCsvEx
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableEdgeSpeeds;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableHeadwayDefaults;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetablePlatformPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
@@ -114,7 +116,7 @@ public final class FtaTimetableCommand {
     SuggestionProvider<CommandSender> companySuggestions = companySuggestions();
     SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
     SuggestionProvider<CommandSender> lineSuggestions = lineSuggestions();
-    SuggestionProvider<CommandSender> codeSuggestions = timetableCodeSuggestions();
+    SuggestionProvider<CommandSender> codeSuggestions = timetableCodeSuggestions(false);
 
     CommandFlag<Void> confirmFlag = CommandFlag.builder("confirm").build();
     var nameFlag = stringFlag("name", "\"<name>\"");
@@ -156,10 +158,7 @@ public final class FtaTimetableCommand {
             .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .required("line", StringParser.quotedStringParser(), lineSuggestions)
-            .required(
-                "code",
-                StringParser.quotedStringParser(),
-                CommandSuggestionProviders.placeholder("<code>"))
+            .required("code", StringParser.quotedStringParser(), timetableCodeSuggestions(true))
             .flag(headwayFlag)
             .flag(groupHeadwayFlag)
             .flag(startFlag)
@@ -334,8 +333,7 @@ public final class FtaTimetableCommand {
 
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(Component.text("===== /fta timetable =====", NamedTextColor.DARK_AQUA));
-    sender.sendMessage(
-        hint("编表", "/fta timetable build <company> <operator> <line>[,<line>…] <code>"));
+    sender.sendMessage(hint("编表", "/fta timetable build <company> <operator> <line> <code>"));
     sender.sendMessage(
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
@@ -347,15 +345,16 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("详情", "/fta timetable info <company> <operator> <line> <code>"));
     sender.sendMessage(hint("车辆交路", "/fta timetable duties <company> <operator> <line> <code>"));
     sender.sendMessage(hint("邻表", "/fta timetable neighbors <company> <operator> <line> <code>"));
-    sender.sendMessage(
-        hint("投入运行", "/fta timetable publish <company> <operator> <line>[,<line>…] <code>"));
-    sender.sendMessage(
-        hint("撤出运行", "/fta timetable unpublish <company> <operator> <line>[,<line>…] <code>"));
+    sender.sendMessage(hint("投入运行", "/fta timetable publish <company> <operator> <line> <code>"));
+    sender.sendMessage(hint("撤出运行", "/fta timetable unpublish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
     sender.sendMessage(hint("运行态", "/fta timetable status"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
     sender.sendMessage(
-        Component.text("同一 operator 下几条线写成 WS,MT 可以一起编表：共享相位与让车，每线一张表、整组发布。", NamedTextColor.GRAY));
+        Component.text(
+            "同一 operator 下几条线写成 \"WS,MT\" 可以一起编表：共享相位与让车，每线一张表、整组发布、撤下、删除。"
+                + "逗号要放在双引号里，不加引号客户端会把整条命令判错。",
+            NamedTextColor.GRAY));
   }
 
   private void handleBuild(CommandContext<CommandSender> ctx, BuildFlags flags) {
@@ -574,6 +573,7 @@ public final class FtaTimetableCommand {
             () -> {
               TimetableSetBuilder.SetResult result;
               NeighborReport neighborReport;
+              TimetablePlatformPlanner.Result platformPlans;
               try {
                 NeighborInputs neighborInputs =
                     collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
@@ -590,6 +590,8 @@ public final class FtaTimetableCommand {
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
                             builtAt);
+                platformPlans =
+                    planPlatforms(result, neighborInputs, graphSnapshot, index, neighbors, options);
               } catch (RuntimeException ex) {
                 plugin
                     .getServer()
@@ -603,6 +605,7 @@ public final class FtaTimetableCommand {
               }
               TimetableSetBuilder.SetResult built = result;
               NeighborReport neighbors = neighborReport;
+              TimetablePlatformPlanner.Result platforms = platformPlans;
               plugin
                   .getServer()
                   .getScheduler()
@@ -614,6 +617,7 @@ public final class FtaTimetableCommand {
                               provider,
                               lines,
                               built,
+                              platforms,
                               options,
                               model.settings(),
                               headwayChoice,
@@ -742,12 +746,51 @@ public final class FtaTimetableCommand {
     return !LineSpawnMetadata.readBoolean(route.metadata(), "spawn_enabled").orElse(true);
   }
 
+  /**
+   * 给编出来的表排计划站台（异步线程）：时刻用表上落库的时刻（{@link NeighborInputs#myProfiles}），与运行时、邻表同一口径。 编表失败时不排。
+   *
+   * <p>计划站台只是选台偏好与站牌显示：排程出错时记下原因、不给计划，时刻表照常落库。
+   */
+  private static TimetablePlatformPlanner.Result planPlatforms(
+      TimetableSetBuilder.SetResult result,
+      NeighborInputs inputs,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index,
+      List<NeighborTimetable> neighbors,
+      TimetableBuildOptions options) {
+    if (!result.success()) {
+      return new TimetablePlatformPlanner.Result(Map.of(), 0, 0);
+    }
+    try {
+      List<Timetable> tables = List.copyOf(result.tables().values());
+      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles =
+          new java.util.HashMap<>();
+      for (Timetable table : tables) {
+        profiles.put(table.id(), inputs.myProfiles(table, graph, index));
+      }
+      return TimetablePlatformPlanner.plan(
+          new TimetablePlatformPlanner.Input(
+              tables,
+              profiles,
+              inputs.stopsByRoute(),
+              inputs.definitions(),
+              graph,
+              index,
+              neighbors,
+              options.serviceStartSecondOfDay(),
+              (int) options.separation().toSeconds()));
+    } catch (RuntimeException ex) {
+      return TimetablePlatformPlanner.Result.failed(ex.toString());
+    }
+  }
+
   /** 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。 */
   private void finishBuild(
       CommandSender sender,
       StorageProvider provider,
       List<ResolvedLine> lines,
       TimetableSetBuilder.SetResult set,
+      TimetablePlatformPlanner.Result platforms,
       TimetableBuildOptions options,
       RunCurveModel.Settings run,
       TimetableHeadwayDefaults.Choice headway,
@@ -769,6 +812,26 @@ public final class FtaTimetableCommand {
         result.headwayRelaxed());
     if (!set.success()) {
       return;
+    }
+    platforms
+        .failure()
+        .ifPresent(
+            reason -> {
+              plugin.getLogger().warning("计划站台排程失败：" + reason);
+              sender.sendMessage(
+                  Component.text("计划站台未排定（排程出错，详见控制台），运行时照常临时选台。", NamedTextColor.YELLOW));
+            });
+    if (!platforms.empty()) {
+      sender.sendMessage(
+          Component.text(
+              "计划站台：已为 "
+                  + platforms.planned()
+                  + " 段动态站台停留排定股道"
+                  + (platforms.unplaced() > 0
+                      ? "；" + platforms.unplaced() + " 段在计划时段内没有空闲股道，运行时临时选台"
+                      : "")
+                  + "。",
+              NamedTextColor.GRAY));
     }
     List<Timetable> tables = new ArrayList<>();
     for (ResolvedLine line : lines) {
@@ -792,6 +855,10 @@ public final class FtaTimetableCommand {
                 .timetables()
                 .replaceBaselines(
                     timetable.id(), set.baselines().getOrDefault(timetable.lineId(), List.of()));
+            provider
+                .timetables()
+                .replacePlatformPlans(
+                    timetable.id(), platforms.plans().getOrDefault(timetable.id(), List.of()));
           }
           return Optional.empty();
         },
@@ -865,7 +932,9 @@ public final class FtaTimetableCommand {
     return current.getMessage() == null ? error.getMessage() : current.getMessage();
   }
 
-  /** 几条线在命令里的写法：逗号分隔，不加引号（line code 里没有空格）。 */
+  /**
+   * 几条线的写法：逗号分隔、不加引号，用于提示文字；填进可点命令时由 {@link TimetableBuildReportSender#lineCommandArgument} 加引号。
+   */
   private static String lineArgumentOf(List<ResolvedLine> lines) {
     List<String> codes = new ArrayList<>();
     for (ResolvedLine line : lines) {
@@ -1808,6 +1877,8 @@ public final class FtaTimetableCommand {
    * 把几张表一起置为 PUBLISHED：同一个时刻，互相的基线也记这个时刻（它们从此互为已发布邻表，updatedAt 要对得上）；外部邻表的基线按重检结果更新。
    *
    * <p>写库在一个事务里：先回读核对重检期间表没被删、没被重新 build，再写基线、翻状态。只翻状态，不重写车次。
+   *
+   * <p>同一线路时段重叠的旧表在同一事务里撤为草稿：两张表同时生效时每个班次都会出两张票，接不到车的那张挂满容差作废、登记取消。
    */
   private void publishAll(
       CommandSender sender,
@@ -1822,6 +1893,7 @@ public final class FtaTimetableCommand {
     }
     Map<UUID, List<TimetableBaseline>> refreshed = new java.util.LinkedHashMap<>();
     List<String> notes = new ArrayList<>();
+    List<String> replaced = new java.util.concurrent.CopyOnWriteArrayList<>();
     for (Timetable timetable : tables) {
       ScopeCheck check = checks.get(timetable.id());
       boolean refresh = tables.size() > 1 || (check != null && !check.baselinesMatch());
@@ -1864,6 +1936,14 @@ public final class FtaTimetableCommand {
           }
           refreshed.forEach(provider.timetables()::replaceBaselines);
           for (Timetable timetable : tables) {
+            for (Timetable other : provider.timetables().listByLine(timetable.lineId())) {
+              if (other.published()
+                  && !setIds.contains(other.id())
+                  && PublishedTimetables.overlaps(timetable, other)) {
+                provider.timetables().updateStatus(other.id(), TimetableStatus.DRAFT, now);
+                replaced.add(other.code() + " → DRAFT（被 " + timetable.code() + " 取代）");
+              }
+            }
             provider.timetables().updateStatus(timetable.id(), TimetableStatus.PUBLISHED, now);
           }
           return Optional.empty();
@@ -1872,6 +1952,9 @@ public final class FtaTimetableCommand {
         () -> {
           for (String note : notes) {
             sender.sendMessage(Component.text(note, NamedTextColor.GRAY));
+          }
+          for (String line : replaced) {
+            sender.sendMessage(Component.text(line, NamedTextColor.YELLOW));
           }
           for (Timetable timetable : tables) {
             sender.sendMessage(
@@ -2369,7 +2452,10 @@ public final class FtaTimetableCommand {
     return new MaxIdleChoice(VehicleDutyPlanner.Limits.DEFAULT_MAX_IDLE_SECONDS, "默认");
   }
 
-  /** {@code --group-headway} 的补全：本线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。 */
+  /**
+   * {@code --group-headway} 的补全：线路 metadata 里的交路组名加 {@code =}，没配组时给默认组。几条线联编时给各线组名的并集， 另给带线前缀的
+   * {@code <线>/<组>=}（只作用于那一条线）。
+   */
   private SuggestionProvider<CommandSender> groupHeadwaySuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
@@ -2382,23 +2468,25 @@ public final class FtaTimetableCommand {
           if (matchPrefix.isBlank()) {
             out.add("<group>=<seconds>");
           }
-          resolveLineForSuggestion(ctx)
-              .ifPresent(
-                  pair -> {
-                    List<String> names = new ArrayList<>();
-                    for (SpawnGroup group : LineSpawnMetadata.parseGroups(pair.line().metadata())) {
-                      names.add(group.name());
-                    }
-                    if (names.isEmpty()) {
-                      names.add(ServiceGroupClassifier.DEFAULT_GROUP);
-                    }
-                    for (String name : names) {
-                      String candidate = name + "=";
-                      if (matches(candidate, matchPrefix)) {
-                        out.add(candidate);
-                      }
-                    }
-                  });
+          List<LinePair> lines = resolveLinesForSuggestion(ctx);
+          java.util.Set<String> candidates = new java.util.LinkedHashSet<>();
+          for (LinePair pair : lines) {
+            List<String> names = new ArrayList<>();
+            for (SpawnGroup group : LineSpawnMetadata.parseGroups(pair.line().metadata())) {
+              names.add(group.name());
+            }
+            if (names.isEmpty()) {
+              names.add(ServiceGroupClassifier.DEFAULT_GROUP);
+            }
+            names.forEach(name -> candidates.add(name + "="));
+            if (lines.size() > 1) {
+              names.forEach(name -> candidates.add(pair.line().code() + "/" + name + "="));
+            }
+          }
+          candidates.stream()
+              .filter(candidate -> matches(candidate, matchPrefix))
+              .limit(SUGGESTION_LIMIT)
+              .forEach(out::add);
           return out;
         });
   }
@@ -2661,38 +2749,41 @@ public final class FtaTimetableCommand {
         });
   }
 
-  /** 线路补全：支持逗号分隔的多条线——光标在最后一段上补全，前面已选的原样保留、不再重复建议。 */
+  /**
+   * 线路补全：支持逗号分隔的多条线（联编，或几张表一起发布、撤下、删除）。光标在最后一段上补全，前面已选的原样保留、不再重复建议。
+   *
+   * <p>客户端不认不带引号的逗号，多条线时候选一律带双引号（{@link CommaListInput}）：给收好引号的 {@code "MT,WS"} 与接着写下一条的 {@code
+   * "MT,WS,}。
+   */
   private SuggestionProvider<CommandSender> lineSuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
-          String token = input == null ? "" : input.lastRemainingToken().trim();
-          int comma = token.lastIndexOf(',');
-          String head = comma < 0 ? "" : token.substring(0, comma + 1);
-          String prefix = (comma < 0 ? token : token.substring(comma + 1)).toLowerCase(Locale.ROOT);
-          java.util.Set<String> chosen = new java.util.HashSet<>();
-          for (String part : head.split(",")) {
-            if (!part.isBlank()) {
-              chosen.add(part.trim().toLowerCase(Locale.ROOT));
-            }
-          }
+          CommaListInput typed = CommaListInput.of(input == null ? "" : input.lastRemainingToken());
+          java.util.Set<String> chosen = typed.chosen();
           List<String> out = new ArrayList<>();
-          if (prefix.isBlank() && head.isEmpty()) {
+          if (typed.blank()) {
             out.add("<line>");
+            out.add("\"<line>,<line>\"");
           }
           resolveOperatorForSuggestion(ctx)
               .ifPresent(
                   pair ->
                       pair.provider().lines().listByOperator(pair.operator().id()).stream()
                           .map(Line::code)
-                          .filter(code -> matches(code, prefix))
+                          .filter(code -> matches(code, typed.prefix()))
                           .filter(code -> !chosen.contains(code.toLowerCase(Locale.ROOT)))
                           .limit(SUGGESTION_LIMIT)
-                          .forEach(code -> out.add(head + code)));
+                          .forEach(code -> out.addAll(typed.complete(code))));
           return out;
         });
   }
 
-  private SuggestionProvider<CommandSender> timetableCodeSuggestions() {
+  /**
+   * 时刻表编号补全。几条线时只给每条线都有的编号（联表发布、撤下要每条线都找得到）。
+   *
+   * @param forBuild 编表用：给各线草稿的编号（重新 build 覆盖草稿；运行中的表要先撤下，不给），另给占位符
+   */
+  private SuggestionProvider<CommandSender> timetableCodeSuggestions(boolean forBuild) {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
           String prefix = normalizePrefix(input);
@@ -2700,14 +2791,27 @@ public final class FtaTimetableCommand {
           if (prefix.isBlank()) {
             out.add("<code>");
           }
-          resolveLineForSuggestion(ctx)
-              .ifPresent(
-                  pair ->
-                      pair.provider().timetables().listByLine(pair.line().id()).stream()
-                          .map(Timetable::code)
-                          .filter(code -> matches(code, prefix))
-                          .limit(SUGGESTION_LIMIT)
-                          .forEach(out::add));
+          java.util.Set<String> codes = null;
+          for (LinePair pair : resolveLinesForSuggestion(ctx)) {
+            java.util.Set<String> lineCodes = new java.util.LinkedHashSet<>();
+            pair.provider().timetables().listByLine(pair.line().id()).stream()
+                .filter(timetable -> !forBuild || !timetable.published())
+                .map(Timetable::code)
+                .forEach(lineCodes::add);
+            if (codes == null) {
+              codes = lineCodes;
+            } else if (forBuild) {
+              codes.addAll(lineCodes);
+            } else {
+              codes.retainAll(lineCodes);
+            }
+          }
+          if (codes != null) {
+            codes.stream()
+                .filter(code -> matches(code, prefix))
+                .limit(SUGGESTION_LIMIT)
+                .forEach(out::add);
+          }
           return out;
         });
   }
@@ -2739,17 +2843,29 @@ public final class FtaTimetableCommand {
                     .map(operator -> new OperatorPair(pair.provider(), operator)));
   }
 
-  private Optional<LinePair> resolveLineForSuggestion(CommandContext<CommandSender> ctx) {
+  /** 补全时已输入的线路（逗号分隔的一到多条）；有一条找不到就当作都没有，免得给出只对部分线成立的候选。 */
+  private List<LinePair> resolveLinesForSuggestion(CommandContext<CommandSender> ctx) {
     Optional<String> lineArg = ctx.optional("line").map(String.class::cast).map(String::trim);
     if (lineArg.isEmpty() || lineArg.get().isBlank()) {
-      return Optional.empty();
+      return List.of();
     }
-    return resolveOperatorForSuggestion(ctx)
-        .flatMap(
-            pair ->
-                new CompanyQueryService(pair.provider())
-                    .findLine(pair.operator().id(), lineArg.get())
-                    .map(line -> new LinePair(pair.provider(), line)));
+    Optional<OperatorPair> operator = resolveOperatorForSuggestion(ctx);
+    if (operator.isEmpty()) {
+      return List.of();
+    }
+    CompanyQueryService query = new CompanyQueryService(operator.get().provider());
+    List<LinePair> out = new ArrayList<>();
+    for (String part : lineArg.get().split(",")) {
+      if (part.isBlank()) {
+        continue;
+      }
+      Optional<Line> line = query.findLine(operator.get().operator().id(), part.trim());
+      if (line.isEmpty()) {
+        return List.of();
+      }
+      out.add(new LinePair(operator.get().provider(), line.get()));
+    }
+    return out;
   }
 
   // ----------------------------------------------------------------- helpers
@@ -2836,7 +2952,7 @@ public final class FtaTimetableCommand {
    * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
-   * @param rapidStagger 快车错峰搜索：逐个试快车组的平移与停站、按成品表实测挑（慢）
+   * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
    */

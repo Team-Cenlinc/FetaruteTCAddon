@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
-import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
@@ -12,7 +11,6 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -20,13 +18,10 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Sign;
-import org.bukkit.block.sign.Side;
-import org.bukkit.block.sign.SignSide;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
@@ -50,12 +45,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public final class TrainCartsDepotSpawner implements DepotSpawner {
 
-  private static final String ROUTE_SPAWN_PATTERN_KEY = "spawn_train_pattern";
   private static final long DEPOT_CHUNK_TICKET_TICKS = 200L;
   private static final long OFFLINE_PROBE_COOLDOWN_MILLIS = 60_000L;
   private static final long OFFLINE_WARN_COOLDOWN_MILLIS = 600_000L;
-  private static final PlainTextComponentSerializer PLAIN_TEXT =
-      PlainTextComponentSerializer.plainText();
 
   private final FetaruteTCAddon plugin;
   private final SignNodeRegistry signNodeRegistry;
@@ -125,14 +117,14 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       return Optional.empty();
     }
 
-    Optional<String> routePattern = routeSpawnPattern(route);
-    Optional<String> signPattern = readDepotPattern(sign);
-    String pattern = firstNonBlank(routePattern.orElse(null), signPattern.orElse(null));
-    if (pattern == null) {
+    Optional<String> patternOpt =
+        DepotSpawnPattern.fromRoute(route).or(() -> DepotSpawnPattern.fromSign(sign));
+    if (patternOpt.isEmpty()) {
       debugLogger.accept(
           "自动发车失败: 缺少 spawn pattern route=" + route.code() + " depot=" + depotId.value());
       return Optional.empty();
     }
+    String pattern = patternOpt.get();
 
     TrainCarts trainCarts = TrainCarts.plugin;
     if (trainCarts == null) {
@@ -359,74 +351,6 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
         .filter(info -> nodeId.equals(info.definition().nodeId()))
         .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
         .findFirst();
-  }
-
-  private static Optional<String> routeSpawnPattern(Route route) {
-    if (route == null) {
-      return Optional.empty();
-    }
-    Object value = route.metadata().get(ROUTE_SPAWN_PATTERN_KEY);
-    if (value instanceof String raw) {
-      String normalized = normalizeSpawnPattern(raw);
-      if (normalized != null) {
-        return Optional.of(normalized);
-      }
-    }
-    return Optional.empty();
-  }
-
-  private static Optional<String> readDepotPattern(Sign sign) {
-    if (sign == null) {
-      return Optional.empty();
-    }
-    return readDepotPatternFromSide(sign, Side.FRONT)
-        .or(() -> readDepotPatternFromSide(sign, Side.BACK));
-  }
-
-  private static Optional<String> readDepotPatternFromSide(Sign sign, Side side) {
-    SignSide view = sign.getSide(side);
-    String header = PLAIN_TEXT.serialize(view.line(0)).trim();
-    SignActionHeader parsed = SignActionHeader.parse(header);
-    if (parsed == null || (!parsed.isTrain() && !parsed.isCart())) {
-      return Optional.empty();
-    }
-    String type = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(Locale.ROOT);
-    if (!"depot".equals(type)) {
-      return Optional.empty();
-    }
-    String rawPattern = PLAIN_TEXT.serialize(view.line(3));
-    String normalized = normalizeSpawnPattern(rawPattern);
-    if (normalized == null) {
-      return Optional.empty();
-    }
-    return Optional.of(normalized);
-  }
-
-  private static String normalizeSpawnPattern(String raw) {
-    if (raw == null) {
-      return null;
-    }
-    String trimmed = raw.trim();
-    if (trimmed.isEmpty()) {
-      return null;
-    }
-    return trimmed;
-  }
-
-  private static String firstNonBlank(String... values) {
-    if (values == null) {
-      return null;
-    }
-    for (String raw : values) {
-      if (raw == null) {
-        continue;
-      }
-      String trimmed = raw.trim();
-      if (!trimmed.isEmpty()) {
-        return trimmed;
-      }
-    }
-    return null;
   }
 
   private static Set<RailBlockPos> findAnchorRails(

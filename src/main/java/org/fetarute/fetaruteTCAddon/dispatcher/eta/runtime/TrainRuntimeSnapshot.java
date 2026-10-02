@@ -29,6 +29,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * <p>{@code lineTag} 是采样时列车的线路标签（{@code FTA_OPERATOR_CODE}/{@code FTA_LINE_CODE}，出车与直通运转 CHANGE
  * 写入）。标签只能在主线程读，采样时顺手记下，公开 API 在任意线程读快照即可； 两个标签不全时为空，读取方按交路本身的线路处理（见 {@link
  * RouteLineChanges#current}）。
+ *
+ * <p>{@code load} 是采样时各节车的座位与在座乘客（{@link TrainLoad}），同样只能在主线程读、随快照带出；读不到车辆模型时为空。
  */
 public record TrainRuntimeSnapshot(
     long updatedTick,
@@ -47,7 +49,8 @@ public record TrainRuntimeSnapshot(
     OptionalInt edgeLengthBlocks,
     OptionalDouble traveledSinceLastPassedBlocks,
     HoldTimeline holdTimeline,
-    Optional<RouteLineChanges.LineRef> lineTag) {
+    Optional<RouteLineChanges.LineRef> lineTag,
+    Optional<TrainLoad> load) {
 
   public TrainRuntimeSnapshot {
     Objects.requireNonNull(updatedAt, "updatedAt");
@@ -69,6 +72,47 @@ public record TrainRuntimeSnapshot(
             : traveledSinceLastPassedBlocks;
     holdTimeline = holdTimeline == null ? HoldTimeline.EMPTY : holdTimeline;
     lineTag = lineTag == null ? Optional.empty() : lineTag;
+    load = load == null ? Optional.empty() : load;
+  }
+
+  /** 兼容调用：不带载客。 */
+  public TrainRuntimeSnapshot(
+      long updatedTick,
+      Instant updatedAt,
+      UUID worldId,
+      UUID routeUuid,
+      RouteId routeId,
+      int routeIndex,
+      Optional<NodeId> currentNodeId,
+      Optional<NodeId> lastPassedNodeId,
+      Optional<Integer> dwellRemainingSec,
+      Optional<SignalAspect> signalAspect,
+      Optional<String> ticketId,
+      OptionalDouble currentSpeedBps,
+      OptionalInt distanceToNextBlocks,
+      OptionalInt edgeLengthBlocks,
+      OptionalDouble traveledSinceLastPassedBlocks,
+      HoldTimeline holdTimeline,
+      Optional<RouteLineChanges.LineRef> lineTag) {
+    this(
+        updatedTick,
+        updatedAt,
+        worldId,
+        routeUuid,
+        routeId,
+        routeIndex,
+        currentNodeId,
+        lastPassedNodeId,
+        dwellRemainingSec,
+        signalAspect,
+        ticketId,
+        currentSpeedBps,
+        distanceToNextBlocks,
+        edgeLengthBlocks,
+        traveledSinceLastPassedBlocks,
+        holdTimeline,
+        lineTag,
+        Optional.empty());
   }
 
   /** 兼容调用：不带线路标签。 */
@@ -106,6 +150,7 @@ public record TrainRuntimeSnapshot(
         edgeLengthBlocks,
         traveledSinceLastPassedBlocks,
         holdTimeline,
+        Optional.empty(),
         Optional.empty());
   }
 

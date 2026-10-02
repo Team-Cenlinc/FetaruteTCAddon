@@ -17,10 +17,42 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
+import org.fetarute.fetaruteTCAddon.utils.DiagnosticSink;
 import org.junit.jupiter.api.Test;
 
 /** {@link RuntimeDispatchDiagnosticGate} 的控制台去重测试。 */
 class RuntimeDispatchDiagnosticGateTest {
+
+  @Test
+  void disabledOutputSkipsWithoutConsumingRepeatWindowOrBudget() {
+    List<String> messages = new ArrayList<>();
+    boolean[] on = {false};
+    DiagnosticSink sink =
+        new DiagnosticSink() {
+          @Override
+          public void accept(String message) {
+            messages.add(message);
+          }
+
+          @Override
+          public boolean enabled() {
+            return on[0];
+          }
+        };
+    AtomicLong nowNanos = new AtomicLong();
+    RuntimeDispatchDiagnosticGate gate =
+        new RuntimeDispatchDiagnosticGate(sink, Duration.ofSeconds(5), 32, nowNanos::get);
+    String message = "SMART_SIGNAL_FINAL train=MT-1 tick=100 finalAspect=PROCEED";
+
+    gate.accept(message);
+    assertTrue(messages.isEmpty());
+    assertTrue(!gate.enabled());
+
+    on[0] = true;
+    gate.accept(message);
+
+    assertEquals(List.of(message), messages);
+  }
 
   @Test
   void suppressesPeriodicSignalDiagnosticWhenOnlyTickAndRequestChange() {

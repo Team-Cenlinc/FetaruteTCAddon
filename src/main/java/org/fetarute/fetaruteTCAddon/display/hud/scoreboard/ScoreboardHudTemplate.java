@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.display.hud.scoreboard;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -26,23 +27,38 @@ public final class ScoreboardHudTemplate {
   private static final int DEFAULT_PAGE_DURATION_TICKS = 60;
   private static final int DEFAULT_WINDOW_DURATION_TICKS = 120;
 
+  /** 每行最大宽度的默认值（像素，约 14 个汉字）；模板未写 {@code max_width} 时使用。 */
+  public static final int DEFAULT_MAX_WIDTH = 128;
+
   private final Map<HudState, List<Page>> pagesByState;
   private final List<Page> fallbackPages;
   private final int lineCount;
   private final int pageDurationTicks;
   private final Optional<String> title;
+  private final int maxWidth;
+
+  /** 各页的语言，解析模板时算好：轮播每次刷新都要对每页判断语言，现算要拼全文、跑正则。 */
+  private final Map<Page, HudLanguageRotation.Language> pageLanguages;
 
   private ScoreboardHudTemplate(
       Map<HudState, List<Page>> pagesByState,
       List<Page> fallbackPages,
       int lineCount,
       int pageDurationTicks,
-      Optional<String> title) {
+      Optional<String> title,
+      int maxWidth) {
     this.pagesByState = pagesByState;
     this.fallbackPages = fallbackPages;
     this.lineCount = lineCount;
     this.pageDurationTicks = pageDurationTicks;
     this.title = title == null ? Optional.empty() : title;
+    this.maxWidth = maxWidth;
+    Map<Page, HudLanguageRotation.Language> languages = new HashMap<>();
+    pagesByState
+        .values()
+        .forEach(pages -> pages.forEach(page -> languages.put(page, pageLanguage(page))));
+    fallbackPages.forEach(page -> languages.put(page, pageLanguage(page)));
+    this.pageLanguages = Map.copyOf(languages);
   }
 
   /** 行数上限（Scoreboard 最大 15 行）。 */
@@ -58,6 +74,16 @@ public final class ScoreboardHudTemplate {
   /** 模板标题（MiniMessage）。 */
   public Optional<String> title() {
     return title;
+  }
+
+  /**
+   * 标题与每行的最大宽度（像素，按原版字体估算，见 {@link
+   * org.fetarute.fetaruteTCAddon.display.hud.HudTextWidth}）；超出部分截掉并补省略号，0 表示不限。
+   *
+   * <p>计分板按最长一行撑宽，挡住屏幕右侧；长站名、长英文名最容易把它撑开。
+   */
+  public int maxWidth() {
+    return maxWidth;
   }
 
   /** 模板是否写了该状态的页面（不算 DEFAULT 与回退页）。 */
@@ -80,8 +106,12 @@ public final class ScoreboardHudTemplate {
     }
     // 与 BossBar/ActionBar 同一套语言轮播：中文页与英文页和横栏同时切换。
     return Optional.ofNullable(
-        HudLanguageRotation.select(
-            pages, ScoreboardHudTemplate::pageLanguage, tick, pageDurationTicks));
+        HudLanguageRotation.select(pages, this::languageOf, tick, pageDurationTicks));
+  }
+
+  private HudLanguageRotation.Language languageOf(Page page) {
+    HudLanguageRotation.Language language = pageLanguages.get(page);
+    return language != null ? language : pageLanguage(page);
   }
 
   /** 按页面全部文字推断语言（标题、表头、行模板、表尾）。 */
@@ -124,6 +154,12 @@ public final class ScoreboardHudTemplate {
             debugLogger);
     Optional<String> title =
         Optional.ofNullable(config.getString("title")).map(String::trim).filter(s -> !s.isBlank());
+    int maxWidth =
+        parseNonNegative(
+            config.getInt("max_width", DEFAULT_MAX_WIDTH),
+            DEFAULT_MAX_WIDTH,
+            "max_width",
+            debugLogger);
 
     Map<HudState, List<Page>> pagesByState = new EnumMap<>(HudState.class);
     List<Page> allPages = new ArrayList<>();
@@ -182,7 +218,8 @@ public final class ScoreboardHudTemplate {
 
     int inferredLineCount = lineCount > 0 ? lineCount : inferLineCount(allPages);
     int safeLineCount = clampLineCount(inferredLineCount);
-    return new ScoreboardHudTemplate(normalized, fallbackPages, safeLineCount, pageDuration, title);
+    return new ScoreboardHudTemplate(
+        normalized, fallbackPages, safeLineCount, pageDuration, title, maxWidth);
   }
 
   private static Page parsePage(
@@ -419,7 +456,12 @@ public final class ScoreboardHudTemplate {
 
   private static ScoreboardHudTemplate emptyTemplate() {
     return new ScoreboardHudTemplate(
-        Map.of(), List.of(), DEFAULT_LINES, DEFAULT_PAGE_DURATION_TICKS, Optional.empty());
+        Map.of(),
+        List.of(),
+        DEFAULT_LINES,
+        DEFAULT_PAGE_DURATION_TICKS,
+        Optional.empty(),
+        DEFAULT_MAX_WIDTH);
   }
 
   /** 页面类型。 */

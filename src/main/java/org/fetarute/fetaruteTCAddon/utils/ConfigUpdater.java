@@ -12,6 +12,7 @@ import java.nio.file.StandardCopyOption;
 import java.nio.file.StandardOpenOption;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.Deque;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -40,7 +41,25 @@ public final class ConfigUpdater {
       java.io.File dataFolder,
       java.util.function.Supplier<InputStream> defaultSupplier,
       LoggerManager logger) {
-    return new ConfigUpdater(new File(dataFolder, "config.yml"), defaultSupplier, logger);
+    return forFile(dataFolder, "config.yml", defaultSupplier, logger);
+  }
+
+  /**
+   * 为数据目录下的指定 YAML 文件创建合并器。
+   *
+   * <p>各文件使用各自的 {@code config-version}；写回前的备份为同目录下的 {@code <文件名>.bak}。
+   *
+   * @param dataFolder 插件数据目录
+   * @param fileName 配置文件名，例如 {@code pids.yml}
+   * @param defaultSupplier 内置模板的输入流提供者
+   * @param logger 日志出口
+   */
+  public static ConfigUpdater forFile(
+      File dataFolder,
+      String fileName,
+      Supplier<InputStream> defaultSupplier,
+      LoggerManager logger) {
+    return new ConfigUpdater(new File(dataFolder, fileName), defaultSupplier, logger);
   }
 
   /** 执行合并。若未检测到差异则不写盘。 */
@@ -56,7 +75,7 @@ public final class ConfigUpdater {
       if (!configFile.exists()) {
         ensureParent();
         Files.copy(defaultStream, configFile.toPath(), StandardCopyOption.REPLACE_EXISTING);
-        logger.info("已创建默认配置文件");
+        logger.info("已创建默认配置文件 " + configFile.getName());
         return new UpdateResult(true, 0, readVersion(configFile), List.of(), List.of());
       }
 
@@ -133,7 +152,7 @@ public final class ConfigUpdater {
 
   private void backupConfig() {
     Path source = configFile.toPath();
-    Path target = source.resolveSibling("config.yml.bak");
+    Path target = source.resolveSibling(configFile.getName() + ".bak");
     try {
       Files.copy(source, target, StandardCopyOption.REPLACE_EXISTING);
       logger.debug("已备份配置到 " + target.getFileName());
@@ -144,13 +163,14 @@ public final class ConfigUpdater {
 
   private void logResult(UpdateState state) {
     if (state.oldVersion != state.newVersion) {
-      logger.info("config-version " + state.oldVersion + " -> " + state.newVersion);
+      logger.info(
+          configFile.getName() + " config-version " + state.oldVersion + " -> " + state.newVersion);
     }
     if (!state.addedKeys.isEmpty()) {
-      logger.info("新增配置键: " + String.join(", ", state.addedKeys));
+      logger.info(configFile.getName() + " 新增配置键: " + String.join(", ", state.addedKeys));
     }
     if (!state.extraKeys.isEmpty()) {
-      logger.warn("配置中存在未识别的键: " + String.join(", ", state.extraKeys));
+      logger.warn(configFile.getName() + " 中存在未识别的键: " + String.join(", ", state.extraKeys));
     }
   }
 
@@ -206,6 +226,11 @@ public final class ConfigUpdater {
     }
   }
 
+  /**
+   * 以用户文件为底，把新增键连同模板注释插回去，再把用户已有的值写回模板格式的行。
+   *
+   * <p>插入位置：新键接在所属段的最后一个直属键之后；所属段整段缺失时插入最近的已有祖先段里缺的那一整段；顶层键与顶层段追加到文件末尾。 用户文件的段顺序可以与模板不同。
+   */
   private List<String> mergeWithComments(
       List<String> templateLines,
       List<String> existingLines,
@@ -230,38 +255,36 @@ public final class ConfigUpdater {
       if (isUnderInsertedSection(addedKey, insertedSections)) {
         continue;
       }
-      List<String> block = templateBlocks.get(addedKey);
       String parent = parentPath(addedKey);
       if (!parent.isEmpty() && !sectionEnd.containsKey(parent)) {
+        // 找不到可插入的模板段时跳过（已告警）：带缩进的行追加到末尾会并进文件里最后一段
         SectionCandidate candidate = resolveMissingSection(parent, sectionEnd, sectionBlocks);
         if (candidate != null && insertedSections.add(candidate.sectionPath())) {
           int insertIndex =
               resolveSectionInsertIndex(candidate.sectionPath(), sectionEnd, merged.size());
-          inserts.add(new InsertBlock(insertIndex, order++, candidate.blockLines()));
-          continue;
+          inserts.add(
+              new InsertBlock(
+                  insertIndex, depth(candidate.sectionPath()), order++, candidate.blockLines()));
         }
+        continue;
       }
+      List<String> block = templateBlocks.get(addedKey);
       if (block == null || block.isEmpty()) {
         continue;
       }
-      Integer insertIndex = sectionEnd.get(parent);
-      if (insertIndex == null) {
-        logger.warn("配置合并未找到父级段: " + parent + "，已追加到末尾");
-        inserts.add(new InsertBlock(merged.size(), order++, block));
-      } else {
-        inserts.add(new InsertBlock(insertIndex + 1, order++, block));
-      }
+      int insertIndex = parent.isEmpty() ? merged.size() : sectionEnd.get(parent) + 1;
+      inserts.add(new InsertBlock(insertIndex, depth(addedKey), order++, block));
     }
 
+    // 按插入后的阅读顺序排：同一位置的块，更深的先写（接着上一行所在的段），浅的在后，否则深层的键会落进浅层键之下；
+    // 同深度按模板顺序。文件末尾最常撞位置：最后一段的新键与追加的顶层键都插在那里。
     inserts.sort(
-        (a, b) -> {
-          int indexCompare = Integer.compare(b.index(), a.index());
-          if (indexCompare != 0) {
-            return indexCompare;
-          }
-          return Integer.compare(b.order(), a.order());
-        });
-    for (InsertBlock block : inserts) {
+        Comparator.comparingInt(InsertBlock::index)
+            .thenComparing(Comparator.comparingInt(InsertBlock::depth).reversed())
+            .thenComparingInt(InsertBlock::order));
+    // 自下而上插入：前面的插入不挪动后面块的位置，同一位置后插的排在前面
+    for (int i = inserts.size() - 1; i >= 0; i--) {
+      InsertBlock block = inserts.get(i);
       merged.addAll(block.index(), block.lines());
     }
 
@@ -608,6 +631,11 @@ public final class ConfigUpdater {
     return new LineInfo(true, key, indent, line.substring(0, indent), comment, section);
   }
 
+  /** 路径的嵌套深度：顶层为 0。 */
+  private int depth(String path) {
+    return (int) path.chars().filter(c -> c == '.').count();
+  }
+
   private String parentPath(String key) {
     int index = key.lastIndexOf('.');
     if (index <= 0) {
@@ -644,7 +672,15 @@ public final class ConfigUpdater {
     return String.join("\n", lines) + "\n";
   }
 
-  private record InsertBlock(int index, int order, List<String> lines) {}
+  /**
+   * 待插入的模板块。
+   *
+   * @param index 插入到用户文件的哪一行之前
+   * @param depth 块所属路径的嵌套深度（顶层为 0），同一位置时决定先后
+   * @param order 模板顺序
+   * @param lines 前置注释与键行
+   */
+  private record InsertBlock(int index, int depth, int order, List<String> lines) {}
 
   private record SectionCandidate(String sectionPath, List<String> blockLines) {}
 

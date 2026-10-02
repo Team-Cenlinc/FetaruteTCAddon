@@ -76,6 +76,31 @@ display:
         <white>Next stop {next_station_lang2}</white>
       tc_destination:
         empty: "暂无目的地"
+  # 后续站点对话框（乘车时按副手交换键或 /fta trip 打开）。
+  # title/summary/row.* 与 HUD 模板同一写法：{key} 占位符 + MiniMessage；{?key} 缺值时整行省略。
+  # 行内占位符同车内显示屏的列表行（station、station_lang2、eta、transfer_lines、delay_minutes 等），
+  # 另有 line_change：直通运转在这一站换到另一条线时为新线路名。
+  trip:
+    title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <gray>·</gray> <white>{route_pattern}</white> <gray>·</gray> <white>开往 {dest_eop}</white>"
+    summary: "<gray>列车 {train_name} · 共 {player_carriage_total} 节 · 您在第 {player_carriage_no} 节</gray>"
+    row:
+      next: "<green>下一站</green> <yellow>{station}</yellow> <gray>{eta}</gray>"
+      stop: "<white>{station}</white> <gray>{eta}</gray>"
+      terminal: "<gold>终点</gold> <white>{station}</white> <gray>{eta}</gray>"
+      details:
+        - "<gray>{?station_lang2}</gray>"
+        - "<gray>换乘</gray> {?transfer_lines}"
+        - "<yellow>晚点 {?delay_minutes} 分钟</yellow>"
+        - "<aqua>⇄</aqua> <gray>本站起改为</gray> <{line_color_tag}>█</{line_color_tag}><white>{?line_change}</white> <gray>运行</gray>"
+    empty: "<gray>前方没有停靠站。</gray>"
+    more: "<gray>另有 <count> 站未列出。</gray>"
+    not-on-train: "<prefix> <gray>请在乘坐列车时查看后续站点。</gray>"
+    unavailable: "<prefix> <red>后续站点暂不可用：</red><gray>展示服务未启动。</gray>"
+    button:
+      refresh: "刷新"
+      transfers-only: "只看换乘站"
+      show-all: "显示全部站"
+      close: "关闭"
 
 sign:
   created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
@@ -110,6 +135,10 @@ command:
     hover-info: "<gray>点击执行:</gray> <white>/fta info</white>\n<dark_aqua>显示插件版本与构建信息</dark_aqua>"
     entry-help: "<gray>/fta help</gray> <white>-</white> <dark_aqua>显示此帮助</dark_aqua>"
     hover-help: "<gray>点击执行:</gray> <white>/fta help</white>\n<dark_aqua>显示此帮助</dark_aqua>"
+    entry-trip: "<gray>/fta trip</gray> <white>-</white> <dark_aqua>查看所乘列车的后续站点（乘车时也可按副手交换键）</dark_aqua>"
+    hover-trip: "<gray>点击执行:</gray> <white>/fta trip</white>\n<dark_aqua>列出前方各站的到达时间、换乘与晚点</dark_aqua>"
+    entry-announce: "<gray>/fta announce</gray> <white>-</white> <dark_aqua>开启或关闭站台广播</dark_aqua>"
+    hover-announce: "<gray>点击填充:</gray> <white>/fta announce </white>\n<dark_aqua>on 开启、off 关闭；不带参数查看当前状态</dark_aqua>"
     entry-company: "<gray>/fta company</gray> <white>-</white> <dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     hover-company: "<gray>点击填充:</gray> <white>/fta company </white>\n<dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     entry-operator: "<gray>/fta operator</gray> <white>-</white> <dark_aqua>运营商管理（如 SURN）</dark_aqua>"
@@ -122,6 +151,8 @@ command:
     hover-station: "<gray>点击填充:</gray> <white>/fta station </white>\n<dark_aqua>站点主数据管理（名称/位置/PIDS）</dark_aqua>"
     entry-depot: "<gray>/fta depot</gray> <white>-</white> <dark_aqua>车库指令（手动生成列车）</dark_aqua>"
     hover-depot: "<gray>点击填充:</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
+    entry-pids: "<gray>/fta pids</gray> <white>-</white> <dark_aqua>站台屏（安装纸、配置棍、列表）</dark_aqua>"
+    hover-pids: "<gray>点击填充:</gray> <white>/fta pids </white>\n<dark_aqua>领取安装纸与配置棍，查看与管理站台屏</dark_aqua>"
     entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
@@ -360,6 +391,8 @@ command:
       hover-ticket: "<gray>点击填充:</gray> <white>/fta eta ticket </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;ticketId&gt;</white>"
       entry-board: "<gray>/fta eta board</gray> <white>-</white> <dark_aqua>查看站牌 ETA</dark_aqua>"
       hover-board: "<gray>点击填充:</gray> <white>/fta eta board </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;operator&gt; &lt;stationCode&gt; [lineId] [sec]</white>"
+      entry-stats: "<gray>/fta eta stats</gray> <white>-</white> <dark_aqua>查看站牌查询统计</dark_aqua>"
+      hover-stats: "<gray>点击执行:</gray> <white>/fta eta stats</white>\n<dark_aqua>缓存命中与重算耗时</dark_aqua>\n<gray>清零:</gray> <white>/fta eta stats reset</white>"
     train:
       header: "<prefix> <dark_aqua>ETA 诊断</dark_aqua> <gray>(train=<white><train></white>, target=<white><target></white>)</gray>"
       summary: "<gray>-</gray> status=<white><status></white> arriving=<white><arriving></white> eta=<white><eta></white> at=<white><at></white> conf=<white><conf></white>"
@@ -377,6 +410,12 @@ command:
       empty: "<prefix> <gray>暂无站牌输出</gray>"
       truncated: "<gray>… 已截断，缩小站牌范围或降低 horizon</gray>"
       row: "<gray>-</gray> <white><line></white> <gray>(route=<white><route></white>)</gray> <gray>-></gray> <white><dest></white> <gray>(end=<white><end_route></white> op=<white><end_operation></white>) plat=<white><platform></white> eta=<white><status></white> reasons=<white><reasons></white></gray>"
+    stats:
+      header: "<prefix> <dark_aqua>站牌查询统计</dark_aqua> <gray>（自 <white><since></white> 起）</gray>"
+      empty: "<gray>-</gray> <gray>尚无站牌查询</gray>"
+      calls: "<gray>-</gray> <gray>查询</gray> <white><calls></white> <gray>次，命中缓存</gray> <white><hits></white> <gray>次（<white><hit_rate></white>）</gray>"
+      compute: "<gray>-</gray> <gray>重算</gray> <white><computes></white> <gray>次，平均</gray> <white><avg_ms></white> <gray>毫秒，最长</gray> <white><max_ms></white> <gray>毫秒</gray>"
+      reset: "<prefix> <gray>站牌查询统计已清零</gray>"
   graph:
     help:
       header: "<prefix> <dark_aqua>调度图命令</dark_aqua>"
@@ -778,7 +817,11 @@ command:
       spawn-pattern: "<gray>车型/编组:</gray> <dark_aqua><pattern></dark_aqua>"
       spawn-group: "<gray>交路组:</gray> <dark_aqua><group></dark_aqua>"
       spawn-group-baseline: "<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"
+      via: "<gray>经由:</gray> <dark_aqua><via></dark_aqua>"
+      via-auto: "未配置（站台屏按换乘站、大站与直通站推断）"
       stops: "<gray>停靠点:</gray> <dark_aqua><count></dark_aqua>"
+    via:
+      not-on-route: "<prefix> <red>经由站必须是本运行图停车的车站：</red><white><codes></white> <gray>（可选：<white><stations></white>）</gray>"
     group:
       list:
         header: "<prefix> <dark_aqua>交路组列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white> <gray>(count=<white><count></white>)</gray>"
@@ -813,7 +856,7 @@ command:
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
@@ -976,6 +1019,36 @@ command:
         empty: "<gray>（暂无车站组）</gray>"
         entry: "<white><company></white><gray>:</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua><gray>（成员数：<white><count></white>）</gray>"
         all: "全部"
+  pids:
+    help:
+      header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>挂满空展示框后用安装纸安装，再用配置棍调整</gray>"
+      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
+      stick: "<gray>/fta pids stick</gray> <white>-</white> <dark_aqua>领取配置棍（右键菜单、左键信息、潜行左键拆除）</dark_aqua>"
+      list: "<gray>/fta pids list <white>[页]</white></gray> <white>-</white> <dark_aqua>全部站台屏（需管理权限）</dark_aqua>"
+      info: "<gray>/fta pids info|menu|remove <white><屏幕></white></gray> <white>-</white> <dark_aqua>按编号查看、配置或拆除</dark_aqua>"
+    unavailable: "<prefix> <red>站台屏未启用</red> <gray>请检查 pids.yml 的 enabled 与存储状态</gray>"
+    no-tools-permission: "<prefix> <red>你没有领取站台屏工具的权限</red> <gray>需要 fetarute.pids.manage 或公司成员身份</gray>"
+    not-found: "<prefix> <red>未找到站台屏</red> <gray>(screen=<white><screen></white>)</gray>"
+    ambiguous: "<prefix> <red>编号前缀对应多块站台屏</red> <gray>(screen=<white><screen></white>，共 <white><count></white> 块)，请多写几位</gray>"
+    give:
+      success: "<prefix> <dark_aqua>已获得站台屏安装纸</dark_aqua> <gray>· <white><layout></white>（<size>）</gray>"
+      unknown-layout: "<prefix> <red>未知布局</red> <gray>(layout=<white><layout></white>)</gray>"
+    stick:
+      success: "<prefix> <dark_aqua>已获得站台屏配置棍</dark_aqua>"
+    list:
+      header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>共 <white><count></white> 块 · 第 <white><page></white>/<white><pages></white> 页</gray>"
+      entry: "<gray>-</gray> <white><id></white> <gray><layout>（<size>）· <station> · <mode> · <world> <x> <y> <z></gray>"
+      empty: "<prefix> <gray>暂无站台屏</gray>"
+      unbound: "未绑定"
+    set:
+      saved: "<prefix> <dark_aqua>已更新站台屏 <white><id></white></dark_aqua>"
+      failed: "<prefix> <red>保存失败，请查看控制台日志</red>"
+      unknown-station: "<prefix> <red>未找到车站</red> <gray>(station=<white><station></white>)</gray>"
+      unknown-layout: "<prefix> <red>没有该尺寸的布局</red> <gray>(layout=<white><layout></white>，屏幕 <white><size></white>)</gray>"
+      need-station: "<prefix> <red>请先绑定车站再启用显示</red>"
+      need-platform: "<prefix> <red>站台屏须选定站台</red> <gray>站台号写在左上角，不能为空，也不能选全部；需要显示全部站台时请换用车站统屏布局</gray>"
+      too-many-platforms: "<prefix> <red>这块屏幕最多显示 <white><max></white> 个站台</red> <gray>请先去掉一个，或换用车站统屏布局</gray>"
+      invalid-value: "<prefix> <red>无效的取值</red> <gray>(<white><value></white>)</gray>"
   depot:
     spawn:
       coordinated-only: "<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"
@@ -1089,3 +1162,213 @@ enum:
     dsty: "入库"
     change: "换线"
     action: "动作"
+pids:
+  # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
+  board:
+    platform: "站台"
+    platform-secondary: "Platform"
+    minutes: "分"
+    minutes-secondary: "min"
+    no-more-trains: "暂无后续列车"
+    no-more-trains-secondary: "No further trains"
+    vacancy:
+      advice: "请优先考虑较空的车厢"
+      advice-secondary: "Please use less crowded cars"
+      many: "座位充足"
+      many-secondary: "Many seats"
+      some: "座位较少"
+      some-secondary: "Some seats"
+      few: "座位紧张"
+      few-secondary: "Few seats"
+    header:
+      line: "线路"
+      line-secondary: "Line"
+      destination: "终点"
+      destination-secondary: "Destination"
+      platform: "站台"
+      platform-secondary: "Platform"
+      arrival: "到站"
+      arrival-secondary: "Arrival"
+    status:
+      on-time: "准点"
+      on-time-secondary: "On time"
+      late: "晚点 <minutes> 分"
+      late-secondary: "Late <minutes> min"
+      severely-late: "严重晚点 <minutes> 分"
+      severely-late-secondary: "Late <minutes> min"
+      cancelled: "取消"
+      cancelled-secondary: "Cancelled"
+      arriving: "进站"
+      arriving-secondary: "Arriving"
+      passing: "通过"
+      passing-secondary: "Passing"
+      boarding: "停靠中"
+      boarding-secondary: "Boarding"
+      planned: "计划"
+      planned-secondary: "Planned"
+      platform-pending: "站台待定"
+      platform-pending-secondary: "Platform TBD"
+      platform-changed: "站台变更"
+      platform-changed-secondary: "Plat. changed"
+      moved: "改至 <platform> 站台"
+      moved-secondary: "Now plat. <platform>"
+    destination:
+      terminating: "本站终到"
+      terminating-secondary: "Terminates here"
+      out-of-service: "回库"
+      out-of-service-secondary: "Not in Service"
+    type:
+      local: "各停"
+      rapid: "快速"
+      express: "特急"
+    # 备注：终点下面英文那一格轮换显示的标签（色块反白），标签后写站名或线路名
+    remark:
+      last-train: "末班车"
+      through: "直通"
+      through-secondary: "thru"
+      via: "经由"
+      via-secondary: "via"
+    # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题
+    stop-list:
+      through-from: "<station>起"
+      following: "后续列车"
+      following-secondary: "Following trains"
+    # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
+    # 1×3 与 2×1 上中文标题最多 4 字、英文标题约 18 个字母；说明中文最多 9 字、英文最多两行
+    notice:
+      order:
+        title: "先下后上"
+        title-secondary: "Let others off first"
+        body: "请在车门两侧等候"
+        body-secondary: "Wait beside the doors"
+      queue:
+        title: "排队候车"
+        title-secondary: "Queue to board"
+        body: "请勿拥挤，依次上车"
+        body-secondary: "Board in turn, without pushing"
+      doors:
+        title: "勿挡车门"
+        title-secondary: "Keep doors clear"
+        body: "车门关闭时请勿抢上"
+        body-secondary: "Don't board as the doors close"
+      check:
+        title: "确认终点"
+        title-secondary: "Check your train"
+        body: "各次列车停站不同"
+        body-secondary: "Not all trains make the same stops"
+      gap:
+        title: "注意间隙"
+        title-secondary: "Mind the gap"
+        body: "上下车请留意脚下"
+        body-secondary: "Watch your step as you board"
+      passing:
+        title: "列车通过"
+        title-secondary: "Train passing"
+        body: "请远离站台边缘"
+        body-secondary: "Stand back from the platform edge"
+  # 测试卡：白底说明页；按纯文本读取，不解析 MiniMessage
+  test-card:
+    title: "站台屏待配置"
+    title-secondary: "PIDS not configured"
+    layout: "布局：<layout>（<size>）"
+    station: "车站：<station>（<code>）· <platforms>"
+    station-none: "车站：未识别"
+    platforms: "站台 <platforms>"
+    all-platforms: "全部站台"
+    screen: "屏幕编号：<id>"
+    hint: "手持配置棍右键屏幕进行配置"
+    unregistered:
+      title: "屏幕未登记"
+      title-secondary: "Screen not registered"
+      detail: "该屏幕的登记记录已不存在"
+      hint: "区块重新加载时将自动还原展示框"
+    size-mismatch:
+      title: "屏幕尺寸不符"
+      title-secondary: "Size mismatch"
+      detail: "展示框实际为 <actual>，登记为 <expected>"
+      hint: "请补齐展示框，或用配置棍拆除后重新安装"
+    no-layout:
+      title: "缺少布局"
+      title-secondary: "No layout"
+      detail: "没有 <size> 的布局"
+      hint: "请在 pids/layouts 中添加该尺寸的布局"
+  item:
+    install:
+      name: "<dark_aqua>站台屏安装纸</dark_aqua> <gray>· <white><layout></white>（<size>）</gray>"
+      lore-1: "<gray>手持右键一面空展示框墙，按 <white><size></white> 铺满并登记</gray>"
+      lore-2: "<gray>安装后先显示测试卡，再用配置棍调整与启用</gray>"
+    stick:
+      name: "<dark_aqua>站台屏配置棍</dark_aqua>"
+      lore-1: "<gray>右键屏幕：打开配置菜单</gray>"
+      lore-2: "<gray>左键屏幕：查看屏幕信息</gray>"
+      lore-3: "<gray>潜行左键屏幕：拆除屏幕</gray>"
+  install:
+    success: "<prefix> <dark_aqua>已安装站台屏</dark_aqua> <white><layout></white> <gray>（<size>，编号 <white><id></white>）</gray>"
+    detected: "<prefix> <gray>已识别车站：</gray><white><station></white> <gray><platforms></gray>"
+    not-detected: "<prefix> <yellow>附近未找到站台节点</yellow> <gray>请用配置棍手动指定车站</gray>"
+    next-step: "<prefix> <gray>屏幕当前显示测试卡；手持配置棍右键屏幕即可调整并启用</gray>"
+    get-stick: "<aqua>[领取配置棍]</aqua>"
+    get-stick-hover: "<gray>点击执行：</gray><white>/fta pids stick</white>"
+    unsupported-facing: "<prefix> <red>站台屏只能安装在竖直墙面上</red>"
+    no-room: "<prefix> <red>这面墙上没有 <size> 的空展示框区域</red> <gray>请先挂满空展示框</gray>"
+    no-permission: "<prefix> <red>你无权在此处安装站台屏</red> <gray>附近车站不属于你所在的公司，或未识别到车站</gray>"
+    limit-reached: "<prefix> <red>站台屏数量已达上限</red> <gray>（<white><limit></white> 块）</gray>"
+    storage-unavailable: "<prefix> <red>存储不可用，无法安装站台屏</red>"
+    map-unavailable: "<prefix> <red>无法创建站台屏地图</red> <gray>请确认 BKCommonLib 配置开启了展示框地图显示</gray>"
+    unknown-layout: "<prefix> <red>安装纸上的布局已不存在</red> <gray>(layout=<white><layout></white>)</gray>"
+  menu:
+    header: "<dark_aqua>━━ 站台屏 <white><id></white> · <white><layout></white> <gray>（<size>，<mode>）</gray> ━━</dark_aqua>"
+    mode-test-card: "测试卡"
+    mode-live: "显示中"
+    station: "<gray>车站</gray>"
+    platform: "<gray>站台</gray>"
+    line: "<gray>线路</gray>"
+    layout: "<gray>布局</gray>"
+    appearance: "<gray>外观</gray>"
+    actions: "<gray>操作</gray>"
+    station-manual: "手动指定…"
+    all: "全部"
+    appearance-auto: "自动"
+    appearance-light: "浅色"
+    appearance-dark: "深色"
+    go-live: "启用显示"
+    back-to-test-card: "显示测试卡"
+    remove: "拆除"
+    need-station: "<gray>请先绑定车站</gray>"
+    no-platforms: "<gray>调度图中没有该站的站台节点</gray>"
+    no-lines: "<gray>暂无停靠线路信息</gray>"
+    no-permission: "<prefix> <red>你无权配置这块屏幕</red>"
+    orphan: "<prefix> <yellow>这块屏幕没有登记记录</yellow> <gray>区块重新加载时会自动还原展示框</gray>"
+    orphan-restored: "<prefix> <dark_aqua>已还原 <white><count></white> 个未登记的展示框</dark_aqua>"
+  facing:
+    north: "北"
+    south: "南"
+    east: "东"
+    west: "西"
+  info:
+    header: "<prefix> <dark_aqua>站台屏 <white><id></white></dark_aqua> <gray>· <white><layout></white>（<size>）· <mode></gray>"
+    binding: "<gray>车站：<white><station></white> · <platforms> · 线路：<white><lines></white> · 外观：<white><appearance></white></gray>"
+    location: "<gray>位置：<white><world></white> <white><x></white> <white><y></white> <white><z></white> · 朝 <white><facing></white></gray>"
+  remove:
+    confirm: "<prefix> <yellow>确认拆除站台屏 <white><id></white>？</yellow><gray>展示框将还原为空，并退回安装纸。</gray> "
+    confirm-button: "<red>[确认拆除]</red>"
+    done: "<prefix> <dark_aqua>已拆除站台屏 <white><id></white></dark_aqua>"
+    failed: "<prefix> <red>拆除失败，请查看控制台日志</red>"
+  # 站台广播：全站播报，每条带站台号；<platform> 是“N 站台 ”（站台未知时为空），<line> 是线路色块加线路代码
+  announce:
+    platform: "<white><platform> 站台</white> "
+    platform-pending: "<gray>站台待定</gray> "
+    arriving: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white>"
+    arriving-terminating: "<aqua>▶</aqua> <platform><line> <white>本站终到列车即将进站，请勿上车</white>"
+    arriving-out-of-service: "<aqua>▶</aqua> <platform><white>回库列车即将进站，请勿上车</white>"
+    passing: "<gold>⚠</gold> <platform><white>有列车通过，请在安全线以内候车</white>"
+    cancelled: "<gray>[<station>]</gray> <platform><line> <white><time></white> <gray>开往</gray> <white><destination></white> <red>的班次已取消</red>"
+    delayed: "<gray>[<station>]</gray> <platform><line> <gray>开往</gray> <white><destination></white> <gold>的列车晚点约 <minutes> 分钟</gold>"
+    platform-changed: "<gray>[<station>]</gray> <line> <gray>开往</gray> <white><destination></white> <gold>的列车改在 <white><new> 站台</white>停靠（原 <from> 站台）</gold>"
+    overflow: "<gray>[<station>]</gray> <gray>另有 <count> 条站台通知，请留意站台屏。</gray>"
+    status-on: "<prefix> <gray>站台广播：</gray><green>开启</green> <gray>（输入</gray> <white>/fta announce off</white> <gray>关闭）</gray>"
+    status-off: "<prefix> <gray>站台广播：</gray><red>关闭</red> <gray>（输入</gray> <white>/fta announce on</white> <gray>开启）</gray>"
+    muted: "<prefix> <gray>已关闭站台广播。输入</gray> <white>/fta announce on</white> <gray>可重新开启。</gray>"
+    unmuted: "<prefix> <gray>已开启站台广播。</gray>"
+    unavailable: "<prefix> <red>站台广播暂不可用：</red><gray>站台屏服务未启动。</gray>"
+    server-off: "<prefix> <gray>本服务器未开启站台广播。</gray>"

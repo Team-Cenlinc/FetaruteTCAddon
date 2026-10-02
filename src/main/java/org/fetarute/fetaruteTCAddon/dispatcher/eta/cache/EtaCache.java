@@ -7,16 +7,23 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * ETA 结果缓存（TTL）。
  *
  * <p>目的：避免 HUD/内部占位符高频刷新造成重复计算。
+ *
+ * <p>过期条目在读到时删除，并且每写入 {@link #PURGE_EVERY} 次整体清一遍：列车销毁、换交路后旧的键再也不会被读到，不清就一直留着。
  */
 public final class EtaCache<K, V> {
 
+  /** 每写入多少次清一遍过期条目。 */
+  static final int PURGE_EVERY = 256;
+
   private final Duration ttl;
   private final ConcurrentMap<K, Entry<V>> map = new ConcurrentHashMap<>();
+  private final AtomicInteger puts = new AtomicInteger();
 
   public EtaCache(Duration ttl) {
     this.ttl = Objects.requireNonNull(ttl, "ttl");
@@ -42,7 +49,16 @@ public final class EtaCache<K, V> {
     if (key == null) {
       return;
     }
-    map.put(key, new Entry<>(value, now != null ? now : Instant.now()));
+    Instant at = now != null ? now : Instant.now();
+    map.put(key, new Entry<>(value, at));
+    if (puts.incrementAndGet() % PURGE_EVERY == 0) {
+      map.values().removeIf(entry -> Duration.between(entry.createdAt, at).compareTo(ttl) > 0);
+    }
+  }
+
+  /** 当前条目数（含尚未清掉的过期条目）。 */
+  public int size() {
+    return map.size();
   }
 
   /** 删除特定 key 的缓存。 */

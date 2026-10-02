@@ -21,6 +21,15 @@ class RouteTerminalsTest {
 
   /** 只有区间路径点算正线折返点：车站、咽喉、车库、道岔（自动 ID 形同区间点）和解析不了的节点都不算。 */
   @Test
+  void platformIsTheTrackNumberOfTrackNodes() {
+    assertEquals("2", RouteTerminals.platformOf("SURC:S:OFL:2"));
+    assertEquals("3", RouteTerminals.platformOf("SURC:D:OFL:3"));
+    assertEquals("1", RouteTerminals.platformOf("SURC:S:OFL:1:2"), "咽喉取所属股道");
+    assertEquals("-", RouteTerminals.platformOf("not-a-node"));
+    assertEquals("-", RouteTerminals.platformOf(null));
+  }
+
+  @Test
   void onlyIntervalWaypointsAreMainlineTurnbacks() {
     assertTrue(RouteTerminals.isMainlineTurnback("SURC:OFL:MLU:2:004"));
     for (String node :

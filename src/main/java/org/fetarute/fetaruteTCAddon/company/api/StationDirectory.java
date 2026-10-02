@@ -256,17 +256,18 @@ public final class StationDirectory {
   // 主数据
   // ─────────────────────────────────────────────────────────────────────────────
 
-  /** 主数据：运营商、线路、车站、车站组。不可变。 */
+  /** 主数据：公司、运营商、线路、车站、车站组。不可变。 */
   static final class Catalog {
 
     static final Catalog EMPTY =
         new Catalog(
-            false, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), List.of(),
-            List.of());
+            false, Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+            List.of(), List.of());
 
     /** 是否从存储加载过；没加载过时线路、运营商以交路缓存里的实体为准。 */
     private final boolean loaded;
 
+    private final Map<UUID, Company> companiesById;
     private final Map<UUID, Operator> operatorsById;
     private final Map<String, Operator> operatorsByCode;
     private final Map<UUID, Line> linesById;
@@ -279,6 +280,7 @@ public final class StationDirectory {
 
     private Catalog(
         boolean loaded,
+        Map<UUID, Company> companiesById,
         Map<UUID, Operator> operatorsById,
         Map<String, Operator> operatorsByCode,
         Map<UUID, Line> linesById,
@@ -289,6 +291,7 @@ public final class StationDirectory {
         List<StationGroup> groups,
         List<StationGroupMember> members) {
       this.loaded = loaded;
+      this.companiesById = Map.copyOf(companiesById);
       this.operatorsById = Map.copyOf(operatorsById);
       this.operatorsByCode = Map.copyOf(operatorsByCode);
       this.linesById = Map.copyOf(linesById);
@@ -302,12 +305,14 @@ public final class StationDirectory {
 
     /** 固定几次查询：公司、各公司运营商、全部线路、全部车站、车站组与成员。 */
     static Catalog load(StorageProvider provider, Consumer<String> debugLogger) {
+      Map<UUID, Company> companiesById = new HashMap<>();
       Map<UUID, Operator> operatorsById = new HashMap<>();
       Map<String, Operator> operatorsByCode = new HashMap<>();
       for (Company company : provider.companies().listAll()) {
         if (company == null) {
           continue;
         }
+        companiesById.put(company.id(), company);
         for (Operator operator : provider.operators().listByCompany(company.id())) {
           if (operator == null) {
             continue;
@@ -366,6 +371,7 @@ public final class StationDirectory {
       }
       return new Catalog(
           true,
+          companiesById,
           operatorsById,
           operatorsByCode,
           linesById,
@@ -381,6 +387,12 @@ public final class StationDirectory {
       return stationId == null
           ? Optional.empty()
           : Optional.ofNullable(stationsById.get(stationId));
+    }
+
+    /** 运营商代码所属的公司；跨公司同代码时先到先得，与 {@link #findStation} 同一规则。 */
+    Optional<Company> companyOfOperator(String operatorCode) {
+      return Optional.ofNullable(operatorsByCode.get(lower(operatorCode)))
+          .map(operator -> companiesById.get(operator.companyId()));
     }
 
     /**
@@ -760,6 +772,16 @@ public final class StationDirectory {
     /** 车站记录。 */
     public Optional<StationEntry> station(UUID stationId) {
       return catalog.station(stationId);
+    }
+
+    /**
+     * 运营商代码（不区分大小写）所属的公司；HUD 的公司占位符用它，与车站、线路查找同一套运营商代码口径。
+     *
+     * @param operatorCode 运营商代码
+     * @return 公司；运营商不存在或主数据未加载时为空
+     */
+    public Optional<Company> companyOfOperator(String operatorCode) {
+      return catalog.companyOfOperator(operatorCode);
     }
 
     /**

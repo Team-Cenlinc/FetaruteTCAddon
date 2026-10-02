@@ -1,8 +1,11 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.eta;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainLoad;
 
 /**
  * 站牌（PIDS/列表）输出：一组按站点聚合的 ETA 行。
@@ -15,6 +18,33 @@ public record BoardResult(List<BoardRow> rows) {
     rows = rows == null ? List.of() : List.copyOf(rows);
   }
 
+  /**
+   * 站牌行。
+   *
+   * @param lineName 列车到本站时所属线路的代码
+   * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+   * @param destination 主目的地显示名（运营终点，回库车越过运营终点后为“回库”）
+   * @param destinationId 主目的地 ID
+   * @param endRoute 线路终点（EOR）显示名
+   * @param endRouteId 线路终点 ID
+   * @param endOperation 运营终点（EOP）显示名
+   * @param endOperationId 运营终点 ID
+   * @param platform 站台号；无法解析或站台待定时为 {@code -}
+   * @param statusText 状态文本（英文短语，供命令与旧消费者显示）
+   * @param reasons 诊断标签
+   * @param eta 预计到达或通过本站的时刻；已在站时为查询时刻
+   * @param phase 所处阶段
+   * @param stopIndex 本站停靠序号（交路节点的 0 起下标）
+   * @param passing 本站通过不停
+   * @param terminating 本站是运营终点（乘客在此下车，车次不再载客）
+   * @param outOfService 本站已越过运营终点，列车在回库途中
+   * @param trainName 运行中列车的列车名；票据与预测为空
+   * @param delaySeconds 按表运行时相对计划的偏差（正数为晚点）：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空
+   * @param platformPending 本站是 DYNAMIC 停靠且尚未选台，也没有计划或暂定站台
+   * @param platformCandidates 站台待定时可能停靠的站台，按站台号升序；站台已定或候选未知时为空
+   * @param platformPlanned 站台号是计划站台（时刻表排定）或暂定站台（列车下一个停车站上先定的股道）：列车还没有选台， 进站前选台时这条股道被占会改停别的站台
+   * @param load 运行中列车的载客（各节车的座位与在座乘客）；票据、预测与读不到车辆模型时为空
+   */
   public record BoardRow(
       String lineName,
       String routeId,
@@ -26,22 +56,37 @@ public record BoardResult(List<BoardRow> rows) {
       Optional<String> endOperationId,
       String platform,
       String statusText,
-      List<EtaReason> reasons) {
+      List<EtaReason> reasons,
+      Instant eta,
+      BoardPhase phase,
+      int stopIndex,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      OptionalLong delaySeconds,
+      boolean platformPending,
+      List<String> platformCandidates,
+      boolean platformPlanned,
+      Optional<TrainLoad> load) {
     public BoardRow {
       Objects.requireNonNull(lineName, "lineName");
       Objects.requireNonNull(routeId, "routeId");
       Objects.requireNonNull(destination, "destination");
       destinationId = destinationId == null ? Optional.empty() : destinationId;
-      Objects.requireNonNull(destinationId, "destinationId");
       Objects.requireNonNull(endRoute, "endRoute");
       endRouteId = endRouteId == null ? Optional.empty() : endRouteId;
-      Objects.requireNonNull(endRouteId, "endRouteId");
       Objects.requireNonNull(endOperation, "endOperation");
       endOperationId = endOperationId == null ? Optional.empty() : endOperationId;
-      Objects.requireNonNull(endOperationId, "endOperationId");
       Objects.requireNonNull(platform, "platform");
       Objects.requireNonNull(statusText, "statusText");
       reasons = reasons == null ? List.of() : List.copyOf(reasons);
+      Objects.requireNonNull(eta, "eta");
+      Objects.requireNonNull(phase, "phase");
+      trainName = trainName == null ? Optional.empty() : trainName;
+      delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+      platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
+      load = load == null ? Optional.empty() : load;
     }
   }
 }

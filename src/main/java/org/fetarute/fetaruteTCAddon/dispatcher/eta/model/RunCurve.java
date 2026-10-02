@@ -1,6 +1,10 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 
 /**
@@ -19,6 +23,26 @@ final class RunCurve {
 
   /** 判定"贴着天花板"的容差（格/秒）。 */
   private static final double AT_CEILING_TOLERANCE_BPS = 1.0e-6;
+
+  /** {@link #CACHE} 的条目上限，按最近使用淘汰。 */
+  private static final int CACHE_LIMIT = 1024;
+
+  /**
+   * 输入相同时复用上次的到达秒数。
+   *
+   * <p>站牌、时刻表 API 与地图每次刷新都要给每趟车、每张票算到目标的运行曲线。途中停车点之后的各段都从静止起步、节点固定，
+   * 未发车票据整条路径都不变，每次刷新输入完全相同；逐采样点积分却要按里程走一遍。结果只取决于输入，可在线程间共享。
+   *
+   * <p>运行中列车的首段（当前速度、首边剩余长度）每次都不同，编表也会塞进大量一次性的输入；按最近使用淘汰才留得住反复命中的那些段。
+   */
+  private static final Map<CacheKey, double[]> CACHE =
+      Collections.synchronizedMap(
+          new LinkedHashMap<>(16, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<CacheKey, double[]> eldest) {
+              return size() > CACHE_LIMIT;
+            }
+          });
 
   private RunCurve() {}
 
@@ -46,6 +70,23 @@ final class RunCurve {
     if (lengths.length != speeds.length) {
       throw new IllegalArgumentException("lengths 与 speeds 数量不匹配");
     }
+    CacheKey key = new CacheKey(lengths, speeds, caps, entrySpeed, exitSpeed, curve);
+    double[] hit = CACHE.get(key);
+    if (hit != null) {
+      return hit.clone();
+    }
+    double[] computed = computeNodeTimes(lengths, speeds, caps, entrySpeed, exitSpeed, curve);
+    CACHE.put(key, computed.clone());
+    return computed;
+  }
+
+  private static double[] computeNodeTimes(
+      double[] lengths,
+      double[] speeds,
+      List<SpeedCeiling.Cap> caps,
+      double entrySpeed,
+      double exitSpeed,
+      SpeedCurve curve) {
     int edges = lengths.length;
     int[] nodeStep = SpeedCeiling.nodeSteps(lengths);
     double[] times = new double[edges + 1];
@@ -117,5 +158,59 @@ final class RunCurve {
   /** 低速时的细分步数：每小步不超过约 1/16 秒，最多 32 步；4 格/秒以上不细分。 */
   private static int subSteps(double speedBps) {
     return (int) Math.min(32.0, Math.max(1.0, Math.ceil(4.0 / Math.max(speedBps, 0.125))));
+  }
+
+  /**
+   * {@link #CACHE} 的键：全部输入按值比较；数组在构造时复制，调用方之后改数组不影响键。
+   *
+   * <p>限速区里的 {@code null} 与计算时一样略过。
+   */
+  private static final class CacheKey {
+    private final double[] lengths;
+    private final double[] speeds;
+    private final List<SpeedCeiling.Cap> caps;
+    private final double entrySpeed;
+    private final double exitSpeed;
+    private final SpeedCurve curve;
+    private final int hash;
+
+    private CacheKey(
+        double[] lengths,
+        double[] speeds,
+        List<SpeedCeiling.Cap> caps,
+        double entrySpeed,
+        double exitSpeed,
+        SpeedCurve curve) {
+      this.lengths = lengths.clone();
+      this.speeds = speeds.clone();
+      this.caps = caps == null ? List.of() : caps.stream().filter(Objects::nonNull).toList();
+      this.entrySpeed = entrySpeed;
+      this.exitSpeed = exitSpeed;
+      this.curve = curve;
+      this.hash =
+          Objects.hash(
+              Arrays.hashCode(this.lengths),
+              Arrays.hashCode(this.speeds),
+              this.caps,
+              entrySpeed,
+              exitSpeed,
+              curve);
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other instanceof CacheKey key
+          && Double.compare(entrySpeed, key.entrySpeed) == 0
+          && Double.compare(exitSpeed, key.exitSpeed) == 0
+          && Arrays.equals(lengths, key.lengths)
+          && Arrays.equals(speeds, key.speeds)
+          && caps.equals(key.caps)
+          && curve.equals(key.curve);
+    }
+
+    @Override
+    public int hashCode() {
+      return hash;
+    }
   }
 }

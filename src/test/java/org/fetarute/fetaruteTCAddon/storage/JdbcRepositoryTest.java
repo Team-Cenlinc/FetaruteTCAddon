@@ -1245,6 +1245,50 @@ final class JdbcRepositoryTest {
     assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "删表时基线随之删除");
   }
 
+  /** 计划站台随 build 落库、整体替换：翻发布状态不碰，重存表（车次换了）随之清空，删表随之删除。 */
+  @Test
+  void shouldReplaceAndListPlatformPlans() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT5",
+            "计划站台表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(timetable);
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PlatformPlan plan =
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PlatformPlan(
+            UUID.randomUUID(), 3, "SURC:S:PPK:2");
+
+    provider.timetables().replacePlatformPlans(timetableId, List.of(plan));
+    assertEquals(List.of(plan), provider.timetables().listPlatformPlans(timetableId));
+
+    provider.timetables().updateStatus(timetableId, TimetableStatus.PUBLISHED, now.plusSeconds(1));
+    assertEquals(List.of(plan), provider.timetables().listPlatformPlans(timetableId), "翻发布状态不碰计划");
+
+    provider.timetables().save(timetable);
+    assertTrue(provider.timetables().listPlatformPlans(timetableId).isEmpty(), "重存表换了车次，旧计划随之清空");
+
+    provider.timetables().replacePlatformPlans(timetableId, List.of(plan));
+    provider.timetables().delete(timetableId);
+    assertTrue(provider.timetables().listPlatformPlans(timetableId).isEmpty(), "删表时计划随之删除");
+  }
+
   /**
    * 一次保存是一个事务：半路失败时整份回滚，库里还是上一版。
    *

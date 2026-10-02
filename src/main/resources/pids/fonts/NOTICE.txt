@@ -1,0 +1,15 @@
+Fusion Pixel Font (缝合像素字体)
+https://github.com/TakWolf/fusion-pixel-font
+Release 2026.09.25, proportional, TrueType.
+
+Bundled unmodified: 10px and 12px, variants latin / zh_hans / zh_hant / ja.
+Sources:
+  fusion-pixel-font-10px-proportional-ttf-v2026.09.25.zip
+  fusion-pixel-font-12px-proportional-ttf-v2026.09.25.zip
+
+Licensed under the SIL Open Font License 1.1 (LICENSES/fusion-pixel/OFL.txt).
+Glyphs are merged from the following fonts; their licenses are in LICENSES/:
+  ark-pixel            Ark Pixel Font, OFL 1.1
+  boutique-bitmap-9x9  BoutiqueBitmap9x9 (10px only)
+  cubic-11             Cubic 11 (12px only), OFL 1.1
+  galmuri              Galmuri, OFL 1.1

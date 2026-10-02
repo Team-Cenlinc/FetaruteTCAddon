@@ -1,0 +1,18 @@
+# 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
+# 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
+pids:
+  board:
+    notice:
+      order:
+        title-secondary: ["Off first, then on"]
+        body: ["请让乘客先下车"]
+        body-secondary: ["Let passengers off first"]
+      queue:
+        title-secondary: ["Please queue"]
+        body: ["请勿拥挤，有序上车"]
+        body-secondary: ["No pushing, board in order"]
+      doors:
+        body-secondary: ["Do not rush as the doors close"]
+      passing:
+        body: ["请勿靠近站台边缘"]
+        body-secondary: ["Stand clear of the platform edge"]

@@ -225,6 +225,84 @@ final class TripMatcher {
     return Optional.of(new Match(assignment, best.timetable(), best.trip(), best.duty()));
   }
 
+  /**
+   * 派车时已经知道是哪一班：在起点（序号 0）直接绑这一班，不按时间猜。
+   *
+   * <p>折返复用的车在起点不经过门控，按时间就近匹配要到第一个中途站才绑上，首段就没有车次、没有晚点。 那一班已被别的车占着时不绑（宁可少绑，不可错绑），之后门控照常匹配。
+   *
+   * @param key 列车键
+   * @param trainName 列车名
+   * @param timetable 时刻表
+   * @param trip 这一班
+   * @param serviceDate 这一班起点发车所在的日历日
+   * @param now 派车时刻
+   * @return 绑定；被别的车占着或绑定表已满时为空
+   */
+  Optional<TimetableAssignment> assignExact(
+      String key,
+      String trainName,
+      Timetable timetable,
+      TimetableTrip trip,
+      LocalDate serviceDate,
+      Instant now) {
+    TripKey tripKey = new TripKey(timetable.id(), trip.id(), serviceDate);
+    TimetableAssignment previous = assignments.get(key);
+    if (previous != null
+        && previous.timetableId().equals(timetable.id())
+        && previous.tripId().equals(trip.id())
+        && previous.serviceDate().equals(serviceDate)) {
+      return Optional.of(previous);
+    }
+    String holder = claims.get(tripKey);
+    if ((holder != null && !holder.equals(key))
+        || (previous == null && assignments.size() >= MAX_ASSIGNMENTS)) {
+      debugLogger.accept(
+          "TIMETABLE_ASSIGN_SKIP reason="
+              + (holder != null ? "claimed holder=" + holder : "assignment-limit")
+              + " train="
+              + trainName
+              + " trip="
+              + trip.tripCode()
+              + " scope=dispatch");
+      return Optional.empty();
+    }
+    if (previous != null) {
+      release(key, "dispatched");
+    }
+    claims.put(tripKey, key);
+    long deviation =
+        timetable
+            .scheduledDeparture(trip, 0, serviceDate)
+            .map(at -> Duration.between(at, now).toSeconds())
+            .orElse(0L);
+    TimetableAssignment assignment =
+        new TimetableAssignment(
+            trainName,
+            timetable.id(),
+            trip.id(),
+            trip.tripCode(),
+            trip.routeId(),
+            trip.dutyId(),
+            serviceDate,
+            now,
+            0,
+            deviation);
+    assignments.put(key, assignment);
+    debugLogger.accept(
+        "TIMETABLE_ASSIGN train="
+            + trainName
+            + " trip="
+            + trip.tripCode()
+            + " duty="
+            + trip.dutyId().map(UUID::toString).orElse("-")
+            + " plannedDeparture="
+            + trip.departureText()
+            + " stopIndex=0 deviationSeconds="
+            + deviation
+            + " scope=dispatch");
+    return Optional.of(assignment);
+  }
+
   /** 某趟车在某个日历日发车时所属的交路身份；交路用服务日，跨零点的班次才能和前一晚出库的车对上。 */
   private static Optional<TimetableService.DutyKey> dutyKeyOf(
       Timetable timetable, TimetableTrip trip, LocalDate calendarDate) {

@@ -16,6 +16,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import java.util.logging.Logger;
@@ -31,10 +32,14 @@ public final class LocaleManager {
 
   private static final String DEFAULT_LOCALE = "zh_CN";
 
+  /** 内置文案改写前的旧值所在的资源目录（{@code <目录>/<语言>.yml}，键同语言文件、值为旧值列表）。放在 {@code lang/} 之外，不会被当成一种语言。 */
+  private static final String SUPERSEDED_DIR = "lang-superseded/";
+
   private final LocaleAccess access;
   private final MiniMessage miniMessage = MiniMessage.miniMessage();
   private String currentLocale;
   private YamlConfiguration messages;
+  private final Set<String> warnedMissingKeys = ConcurrentHashMap.newKeySet();
   private Component prefix = Component.empty();
   private List<String> availableLocales = List.of();
 
@@ -230,6 +235,7 @@ public final class LocaleManager {
     LocaleFile localeFile = prepareLocaleFile(localeTag);
     messages = YamlConfiguration.loadConfiguration(localeFile.file());
     currentLocale = localeFile.locale();
+    warnedMissingKeys.clear();
     prefix = parsePrefix(messages);
     refreshAvailableLocales();
   }
@@ -293,13 +299,55 @@ public final class LocaleManager {
           added.add(key);
         }
       }
-      if (!added.isEmpty()) {
+      List<String> replaced = upgradeSuperseded(localeTag, defaults, existing);
+      if (!added.isEmpty() || !replaced.isEmpty()) {
         existing.save(localeFile);
+      }
+      if (!added.isEmpty()) {
         // 补全键属于诊断信息：默认不刷屏，仅在 debug.enabled=true 时输出。
         access.logger().debug("已补全语言键: " + String.join(", ", added));
       }
+      if (!replaced.isEmpty()) {
+        access.logger().info("已换成新的内置文案: " + String.join(", ", replaced));
+      }
     } catch (IOException ex) {
       access.logger().warn("更新语言文件失败: " + ex.getMessage());
+    }
+  }
+
+  /**
+   * 把仍是改写前旧内置文案的键换成新的内置文案：语言文件只补缺失的键，改写已有键的文案到不了已部署的服务器。
+   *
+   * <p>只换值与旧值清单逐字相同的键（服务器没有改过）；改过的、清单里没有的都不动。
+   *
+   * @return 换掉的键
+   */
+  private List<String> upgradeSuperseded(
+      String localeTag, YamlConfiguration defaults, YamlConfiguration existing) throws IOException {
+    try (InputStream stream =
+        LocaleManager.class
+            .getClassLoader()
+            .getResourceAsStream(SUPERSEDED_DIR + localeTag + ".yml")) {
+      if (stream == null) {
+        return List.of();
+      }
+      YamlConfiguration superseded =
+          YamlConfiguration.loadConfiguration(
+              new InputStreamReader(stream, StandardCharsets.UTF_8));
+      List<String> replaced = new ArrayList<>();
+      for (String key : superseded.getKeys(true)) {
+        if (superseded.isConfigurationSection(key) || !defaults.isString(key)) {
+          continue;
+        }
+        String current = existing.getString(key);
+        if (current != null
+            && !current.equals(defaults.getString(key))
+            && superseded.getStringList(key).contains(current)) {
+          existing.set(key, defaults.getString(key));
+          replaced.add(key);
+        }
+      }
+      return replaced;
     }
   }
 
@@ -427,8 +475,11 @@ public final class LocaleManager {
     return builder.build();
   }
 
+  /** 同一个缺失的键每次加载语言后只警告一次：HUD 每 tick 都会查同一批键，不节流会刷屏并拖慢主线程。 */
   private void logMissingKey(String key) {
-    access.logger().warn("缺少语言键: " + key);
+    if (warnedMissingKeys.add(key)) {
+      access.logger().warn("缺少语言键: " + key);
+    }
   }
 
   private String normalizeLocale(String localeTag) {

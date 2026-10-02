@@ -245,6 +245,8 @@ public interface TimetableApi {
    * @param serviceDate 服务日（起点发车所在日期）
    * @param cancelled 这趟车在本站不再停（1.8.0）：整趟没开出，或开出后车离开运行时、本站在剩下的站里。 详情见 {@code
    *     TimetableTripCancelledEvent}
+   * @param plannedNodeId 本站是动态站台（DYNAMIC）停靠时，编表排定的计划股道（1.9.0）。列车进站前选台，计划股道被占时会改停别的股道， 届时发 {@code
+   *     TrainPlatformAssignedEvent}；固定站台、没有排上或在 1.9.0 之前编的表为空
    */
   record Departure(
       UUID timetableId,
@@ -258,7 +260,42 @@ public interface TimetableApi {
       Instant plannedDeparture,
       boolean terminating,
       LocalDate serviceDate,
-      boolean cancelled) {
+      boolean cancelled,
+      Optional<String> plannedNodeId) {
+
+    public Departure {
+      plannedNodeId = plannedNodeId == null ? Optional.empty() : plannedNodeId;
+    }
+
+    /** 1.8.0 的构造器（源码与二进制兼容）：没有计划股道。 */
+    public Departure(
+        UUID timetableId,
+        UUID lineId,
+        UUID routeId,
+        String routeCode,
+        String tripCode,
+        int stopSequence,
+        Optional<String> nodeId,
+        Instant plannedArrival,
+        Instant plannedDeparture,
+        boolean terminating,
+        LocalDate serviceDate,
+        boolean cancelled) {
+      this(
+          timetableId,
+          lineId,
+          routeId,
+          routeCode,
+          tripCode,
+          stopSequence,
+          nodeId,
+          plannedArrival,
+          plannedDeparture,
+          terminating,
+          serviceDate,
+          cancelled,
+          Optional.empty());
+    }
 
     /** 1.7.0 及以前的构造器（源码与二进制兼容）：未取消。 */
     public Departure(
@@ -285,7 +322,8 @@ public interface TimetableApi {
           plannedDeparture,
           terminating,
           serviceDate,
-          false);
+          false,
+          Optional.empty());
     }
   }
 

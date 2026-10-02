@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.command;
 
-import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
@@ -21,13 +20,10 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Sign;
-import org.bukkit.block.sign.Side;
-import org.bukkit.block.sign.SignSide;
 import org.bukkit.command.CommandSender;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
@@ -55,6 +51,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExport
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ScheduleWindow;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
@@ -81,11 +78,8 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  */
 public final class FtaDepotCommand {
 
-  private static final PlainTextComponentSerializer PLAIN_TEXT =
-      PlainTextComponentSerializer.plainText();
   private static final int SUGGESTION_LIMIT = 20;
   private static final long DEPOT_CHUNK_TICKET_TICKS = 200L;
-  private static final String ROUTE_SPAWN_PATTERN_KEY = "spawn_train_pattern";
 
   private final FetaruteTCAddon plugin;
 
@@ -201,17 +195,16 @@ public final class FtaDepotCommand {
                     return;
                   }
 
-                  String patternOverride =
-                      normalizeSpawnPattern(ctx.flags().getValue(patternFlag, null));
-                  Optional<String> routePattern = routeSpawnPattern(resolved.route());
-                  Optional<String> signPattern = readDepotPattern(sign);
-                  String pattern =
-                      firstNonBlank(
-                          patternOverride, routePattern.orElse(null), signPattern.orElse(null));
-                  if (pattern == null) {
+                  Optional<String> patternOpt =
+                      Optional.ofNullable(
+                              normalizeSpawnPattern(ctx.flags().getValue(patternFlag, null)))
+                          .or(() -> DepotSpawnPattern.fromRoute(resolved.route()))
+                          .or(() -> DepotSpawnPattern.fromSign(sign));
+                  if (patternOpt.isEmpty()) {
                     sender.sendMessage(locale.component("command.depot.spawn.pattern-missing"));
                     return;
                   }
+                  String pattern = patternOpt.get();
 
                   TrainCarts trainCarts = TrainCarts.plugin;
                   if (trainCarts == null) {
@@ -897,65 +890,6 @@ public final class FtaDepotCommand {
         .filter(info -> info != null && info.definition() != null)
         .filter(info -> nodeId.equals(info.definition().nodeId()))
         .findFirst();
-  }
-
-  private static Optional<String> routeSpawnPattern(Route route) {
-    if (route == null) {
-      return Optional.empty();
-    }
-    Object value = route.metadata().get(ROUTE_SPAWN_PATTERN_KEY);
-    if (value instanceof String raw) {
-      String normalized = normalizeSpawnPattern(raw);
-      if (normalized != null) {
-        return Optional.of(normalized);
-      }
-    }
-    return Optional.empty();
-  }
-
-  /** 从 depot 牌子读取车型/编组（第 4 行，允许正反面）。 */
-  private static Optional<String> readDepotPattern(Sign sign) {
-    if (sign == null) {
-      return Optional.empty();
-    }
-    return readDepotPatternFromSide(sign, Side.FRONT)
-        .or(() -> readDepotPatternFromSide(sign, Side.BACK));
-  }
-
-  /** 从指定面读取 depot 牌子第 4 行（车型/编组）。 */
-  private static Optional<String> readDepotPatternFromSide(Sign sign, Side side) {
-    SignSide view = sign.getSide(side);
-    String header = PLAIN_TEXT.serialize(view.line(0)).trim();
-    SignActionHeader parsed = SignActionHeader.parse(header);
-    if (parsed == null || (!parsed.isTrain() && !parsed.isCart())) {
-      return Optional.empty();
-    }
-    String type = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(Locale.ROOT);
-    if (!"depot".equals(type)) {
-      return Optional.empty();
-    }
-    String rawPattern = PLAIN_TEXT.serialize(view.line(3));
-    String normalized = normalizeSpawnPattern(rawPattern);
-    if (normalized == null) {
-      return Optional.empty();
-    }
-    return Optional.of(normalized);
-  }
-
-  private static String firstNonBlank(String... values) {
-    if (values == null) {
-      return null;
-    }
-    for (String raw : values) {
-      if (raw == null) {
-        continue;
-      }
-      String trimmed = raw.trim();
-      if (!trimmed.isEmpty()) {
-        return trimmed;
-      }
-    }
-    return null;
   }
 
   private static Set<RailBlockPos> findAnchorRails(
