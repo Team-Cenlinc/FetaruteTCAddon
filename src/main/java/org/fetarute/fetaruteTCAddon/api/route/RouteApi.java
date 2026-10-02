@@ -131,13 +131,31 @@ public interface RouteApi {
    * @param stops 停靠站点列表（有序，与 {@code waypoints} 等长、下标一一对应）
    * @param terminal 终点信息（EOR/EOP）
    * @param totalDistanceBlocks 全程距离（blocks）
+   * @param via 显式配置的经由站（1.9.0）：站码，按配置顺序（{@code /fta route set ... --via}）。未配置为空列表，
+   *     显示方可自行推断（内置站台屏按换乘线路数、股道数与直通站推断）。只是配置值，不保证每个站码都在本交路上停车
    */
   record RouteDetail(
       RouteInfo info,
       List<String> waypoints,
       List<StopInfo> stops,
       TerminalInfo terminal,
-      int totalDistanceBlocks) {}
+      int totalDistanceBlocks,
+      List<String> via) {
+
+    public RouteDetail {
+      via = via == null ? List.of() : List.copyOf(via);
+    }
+
+    /** 1.8.0 及以前的构造器（源码与二进制兼容）；{@code via} 为空。 */
+    public RouteDetail(
+        RouteInfo info,
+        List<String> waypoints,
+        List<StopInfo> stops,
+        TerminalInfo terminal,
+        int totalDistanceBlocks) {
+      this(info, waypoints, stops, terminal, totalDistanceBlocks, List.of());
+    }
+  }
 
   /**
    * 终点信息（End of Route / End of Operation），与 HUD、站牌同一口径。

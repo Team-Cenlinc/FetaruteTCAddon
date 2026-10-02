@@ -8,7 +8,7 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 
 /**
- * 站台屏用到的主数据查询：站名、线路色、停站类型与停靠线路。
+ * 站台屏用到的主数据查询：站名、线路色、停站类型与停靠线路，以及备注（经由、直通）要用的交路停靠点与车站规模。
  *
  * <p>快照只带代码（站码、线路代码、交路 ID），显示需要的名称与颜色由这里解析；实现负责缓存，构建视图时会逐行调用。
  */
@@ -70,10 +70,66 @@ public interface PidsDirectory {
   }
 
   /**
+   * 交路各停靠点（与 {@link #waypoints} 同下标）：备注据此推“经由”、找“直通”。
+   *
+   * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+   * @return 停靠点；不知道时为空
+   */
+  default List<RouteStop> stops(String routeId) {
+    return List.of();
+  }
+
+  /**
+   * 交路显式配置的经由站码，按配置顺序。
+   *
+   * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+   * @return 未配置时为空，备注按换乘线路数、股道数与直通站推断
+   */
+  default List<String> via(String routeId) {
+    return List.of();
+  }
+
+  /**
+   * 车站的站台（股道）数，备注推“经由”时据此认大站。
+   *
+   * @param stationId {@code 运营商:站码}
+   * @return 不知道时为 0
+   */
+  default int platformCount(String stationId) {
+    return 0;
+  }
+
+  /**
+   * 线路的中英文名，写在“直通”标签后面。
+   *
+   * @param operatorCode 运营商代码
+   * @param lineCode 线路代码
+   */
+  default Optional<PidsView.Names> lineName(String operatorCode, String lineCode) {
+    return Optional.empty();
+  }
+
+  /**
    * 线路的显示样式。
    *
    * @param code 显示代码
    * @param color 线路色（{@code 0xRRGGBB}）
    */
   record LineStyle(String code, int color) {}
+
+  /**
+   * 交路上的一个停靠点。
+   *
+   * @param stationId 所属车站（{@code 运营商:站码}）；区间点、咽喉、车库为空
+   * @param stops 在此停车（停车或终到）
+   * @param lineChange 直通运转：从本站起列车对乘客显示的线路；本站不换线时为空
+   */
+  record RouteStop(
+      Optional<String> stationId, boolean stops, Optional<RouteApi.LineRef> lineChange) {
+
+    public RouteStop {
+      stationId = stationId == null ? Optional.empty() : stationId;
+      lineChange = lineChange == null ? Optional.empty() : lineChange;
+    }
+  }
 }

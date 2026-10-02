@@ -18,6 +18,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
  *       时不轮播（空位页也不出现）。
  *   <li>轮换按时钟计算，不依赖屏幕何时开始显示：同一车站的屏幕同时翻页，不同车站按站名错开，免得全服同一秒整页重发。
  *   <li>通过列车即将通过本屏的站台时显示安全提示页，并从最后一次看到它起锁定 {@code notice-pin-seconds}， 列车状态在两次检查之间变化也不会提早翻回主页。
+ *   <li>主页上终点下面的英文与备注（{@link #remarks}）各停 {@code remark-seconds} 秒交替，同样按时钟、同站同步。车站统屏没有副页，但也轮换备注：
+ *       只换英文那一小格，重发的像素很少。
  * </ul>
  *
  * <p>只有锁定时刻是状态，按屏幕记录，过期即删。
@@ -90,6 +92,24 @@ public final class PidsCarousel {
         vacancy && segment % 2 == 0
             ? new Slide.Vacancy()
             : new Slide.Notice(COURTESY.get(segment % COURTESY.size())));
+  }
+
+  /**
+   * 此刻主页上是否轮到备注。
+   *
+   * @param station 屏幕绑定的车站（决定错开量）
+   * @param now 当前时刻
+   * @param render 轮播参数
+   * @return {@code remark-seconds} 为 0 时恒为 false
+   */
+  public static boolean remarks(
+      PidsStationKey station, Instant now, PidsSettings.RenderSettings render) {
+    long seconds = render.remarkSeconds();
+    if (seconds <= 0) {
+      return false;
+    }
+    long cycle = seconds * 2;
+    return Math.floorMod(now.getEpochSecond() + offset(station, cycle), cycle) >= seconds;
   }
 
   /** 按车站错开的秒数：同站同时翻页，不同车站分散。 */

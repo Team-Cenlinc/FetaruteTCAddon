@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
@@ -32,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  * <ul>
  *   <li>到发：{@link EtaApi#getBoard}，含运行中列车、已出票未发车与未出票预测
  *   <li>取消：{@link TimetableApi#departuresAt} 中带取消标记的计划到发。预测已排除取消车次，两处不会重复
+ *   <li>末班车：同一份计划到发里每个服务日开往各终点的最后一班（{@link PidsLastTrains}），只在按表运行启用时标
  * </ul>
  *
  * <h2>缓存与失败</h2>
@@ -41,19 +43,23 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  *
  * <p>运行中列车的行按最近的站台变更（{@link PidsPlatformChanges}）标出变更前的站台；变更时整份缓存作废。
  *
- * <p>取消行单独缓存 {@link #CANCELLED_REFRESH}：找取消行要把全部已发布时刻表的车次与停靠点扫一遍，而取消很少发生。 车次取消或重新绑定（取消之后又有车接上）时由
- * {@link #invalidateCancellations()} 立即作废，下一份快照就能看到。
+ * <p>计划到发单独缓存 {@link #TIMETABLE_REFRESH}：要把全部已发布时刻表的车次与停靠点扫一遍，取消与末班又很少变。 取一整天（{@link
+ * #TIMETABLE_WINDOW}）是为了比到当天最后一班；扫描量由车次与停靠点数决定，与窗口长短无关。车次取消或重新绑定（取消之后又有车接上）时由 {@link
+ * #invalidateCancellations()} 立即作废，下一份快照就能看到。
  */
 public final class PidsSnapshotProvider {
 
   /** 计划时刻已过多久的取消班次仍然显示，让乘客知道等的那班车不会来了。 */
   static final Duration CANCELLED_LOOKBACK = Duration.ofMinutes(5);
 
-  /** 取消行要从全部计划到发里筛，条数上限按大站高峰留足。 */
-  private static final int DEPARTURE_LOOKUP_LIMIT = 500;
+  /** 计划到发查多远：末班要比到当天最后一班，取时刻表接口的上限一整天。 */
+  static final Duration TIMETABLE_WINDOW = Duration.ofHours(24);
 
-  /** 取消行缓存多久：只影响查询窗口两端进出的时机（窗口 30 分钟级），取消本身由事件立即作废。 */
-  static final Duration CANCELLED_REFRESH = Duration.ofSeconds(60);
+  /** 一整天的计划到发条数上限，按大站留足；取满说明可能截断，末班就不标。 */
+  static final int DEPARTURE_LOOKUP_LIMIT = 10_000;
+
+  /** 计划到发缓存多久：只影响取消行进出显示窗口的时机（窗口 30 分钟级），取消本身由事件立即作废。 */
+  static final Duration TIMETABLE_REFRESH = Duration.ofSeconds(60);
 
   private final EtaApi eta;
   private final TimetableApi timetables;
@@ -63,7 +69,7 @@ public final class PidsSnapshotProvider {
   private final Consumer<String> debugLogger;
   private final PidsPlatformChanges platformChanges;
   private final ConcurrentMap<PidsStationKey, PidsSnapshot> cache = new ConcurrentHashMap<>();
-  private final ConcurrentMap<PidsStationKey, CancelledRows> cancelled = new ConcurrentHashMap<>();
+  private final ConcurrentMap<PidsStationKey, TimetableRows> planned = new ConcurrentHashMap<>();
 
   /**
    * @param eta ETA 接口
@@ -123,20 +129,24 @@ public final class PidsSnapshotProvider {
     cache.clear();
   }
 
-  /** 丢弃各车站缓存的取消行：车次取消或重新绑定时调用。 */
+  /** 丢弃各车站缓存的计划到发（取消行与末班）：车次取消或重新绑定时调用。 */
   public void invalidateCancellations() {
-    cancelled.clear();
+    planned.clear();
   }
 
   private PidsSnapshot load(
       PidsStationKey station, Instant now, Duration horizon, PidsSnapshot previous) {
     try {
+      TimetableRows timetable = timetableRowsCached(station, now);
       List<PidsRow> rows = new ArrayList<>();
       for (EtaApi.BoardRow row :
           eta.getBoard(station.operatorCode(), station.stationCode(), null, horizon).rows()) {
-        rows.add(fromBoard(row, station, now));
+        rows.add(fromBoard(row, station, now, timetable.lastTrains()));
       }
-      rows.addAll(cancelledRowsCached(station, now, horizon));
+      Instant until = now.plus(horizon);
+      timetable.cancelled().stream()
+          .filter(row -> row.expectedAt().isBefore(until))
+          .forEach(rows::add);
       rows.sort(Comparator.comparing(PidsRow::expectedAt));
       return new PidsSnapshot(station, now, rows);
     } catch (RuntimeException ex) {
@@ -145,7 +155,9 @@ public final class PidsSnapshotProvider {
     }
   }
 
-  private PidsRow fromBoard(EtaApi.BoardRow row, PidsStationKey station, Instant now) {
+  private PidsRow fromBoard(
+      EtaApi.BoardRow row, PidsStationKey station, Instant now, PidsLastTrains lastTrains) {
+    Instant expectedAt = row.eta().orElse(now);
     return new PidsRow(
         status(row.phase()),
         row.lineName(),
@@ -153,7 +165,7 @@ public final class PidsSnapshotProvider {
         row.destination(),
         row.destinationId(),
         row.platform(),
-        row.eta().orElse(now),
+        expectedAt,
         row.delaySeconds(),
         row.stopSequence(),
         row.passing(),
@@ -164,7 +176,8 @@ public final class PidsSnapshotProvider {
         row.platformCandidates(),
         row.cars().stream().map(car -> new PidsRow.Car(car.seats(), car.occupied())).toList(),
         row.trainName()
-            .flatMap(train -> platformChanges.previousOf(train, station, row.platform())));
+            .flatMap(train -> platformChanges.previousOf(train, station, row.platform())),
+        lastTrains.matches(row.routeId(), row.stopSequence(), expectedAt, row.delaySeconds()));
   }
 
   private static PidsRow.Status status(EtaApi.BoardPhase phase) {
@@ -177,41 +190,52 @@ public final class PidsSnapshotProvider {
     };
   }
 
-  private List<PidsRow> cancelledRowsCached(PidsStationKey station, Instant now, Duration horizon) {
-    return cancelled
-        .compute(
-            station,
-            (key, cached) ->
-                cached != null && now.isBefore(cached.takenAt().plus(CANCELLED_REFRESH))
-                    ? cached
-                    : new CancelledRows(now, cancelledRows(key, now, horizon)))
-        .rows();
+  private TimetableRows timetableRowsCached(PidsStationKey station, Instant now) {
+    return planned.compute(
+        station,
+        (key, cached) ->
+            cached != null && now.isBefore(cached.takenAt().plus(TIMETABLE_REFRESH))
+                ? cached
+                : timetableRows(key, now));
   }
 
-  /** 一个车站的取消行与取数时刻。 */
-  private record CancelledRows(Instant takenAt, List<PidsRow> rows) {
-    private CancelledRows {
-      rows = List.copyOf(rows);
+  /**
+   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按显示窗口筛）与末班。
+   *
+   * @param takenAt 取数时刻
+   * @param cancelled 取消行
+   * @param lastTrains 末班；按表运行未启用、或计划到发取满可能截断时为空
+   */
+  private record TimetableRows(
+      Instant takenAt, List<PidsRow> cancelled, PidsLastTrains lastTrains) {
+    private TimetableRows {
+      cancelled = List.copyOf(cancelled);
     }
   }
 
-  private List<PidsRow> cancelledRows(PidsStationKey station, Instant now, Duration horizon) {
-    Map<UUID, Optional<RouteApi.RouteDetail>> details = new HashMap<>();
-    List<PidsRow> rows = new ArrayList<>();
-    for (TimetableApi.Departure departure :
+  private TimetableRows timetableRows(PidsStationKey station, Instant now) {
+    List<TimetableApi.Departure> found =
         timetables.departuresAt(
             null,
             station.stationCode(),
             now.minus(CANCELLED_LOOKBACK),
-            horizon.plus(CANCELLED_LOOKBACK),
-            DEPARTURE_LOOKUP_LIMIT)) {
-      if (departure.cancelled() && atStation(departure, station)) {
-        rows.add(
-            cancelledRow(
-                departure, details.computeIfAbsent(departure.routeId(), routes::getRoute)));
-      }
-    }
-    return rows;
+            TIMETABLE_WINDOW,
+            DEPARTURE_LOOKUP_LIMIT);
+    List<TimetableApi.Departure> departures =
+        found.stream().filter(departure -> atStation(departure, station)).toList();
+    Map<UUID, Optional<RouteApi.RouteDetail>> details = new HashMap<>();
+    Function<UUID, Optional<RouteApi.RouteDetail>> route =
+        id -> details.computeIfAbsent(id, routes::getRoute);
+    List<PidsRow> cancelled =
+        departures.stream()
+            .filter(TimetableApi.Departure::cancelled)
+            .map(departure -> cancelledRow(departure, route.apply(departure.routeId())))
+            .toList();
+    PidsLastTrains lastTrains =
+        timetables.enabled() && found.size() < DEPARTURE_LOOKUP_LIMIT
+            ? PidsLastTrains.of(departures, route)
+            : PidsLastTrains.NONE;
+    return new TimetableRows(now, cancelled, lastTrains);
   }
 
   /** 站码可能跨运营商重名：按本站节点所属的运营商核对，节点未知时不计入。 */

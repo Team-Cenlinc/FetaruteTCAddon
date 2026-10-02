@@ -129,12 +129,53 @@ public record PidsView(
    * @param names 名称
    * @param tone 色调；{@link Tone#MUTED} 时中英文都用次要色
    * @param struck 划掉（取消）
+   * @param remark 此刻英文那一格改写的备注；不轮到备注、或这一行没有备注时为空
    */
-  public record Destination(Names names, Tone tone, boolean struck) {
+  public record Destination(Names names, Tone tone, boolean struck, Optional<Remark> remark) {
 
     public Destination {
       Objects.requireNonNull(names, "names");
       Objects.requireNonNull(tone, "tone");
+      remark = remark == null ? Optional.empty() : remark;
+    }
+
+    /** 没有备注。 */
+    public Destination(Names names, Tone tone, boolean struck) {
+      this(names, tone, struck, Optional.empty());
+    }
+  }
+
+  /**
+   * 终点下面英文那一格轮换出来的备注：几段“标签 + 文字”，按要紧程度排列（末班车、直通、经由）。
+   *
+   * <p>放不下时渲染器从最后一段起删减：先把多个经由站减到一个，再把直通线路名换成线路代码，再整段去掉；只剩一段还放不下时截断文字。 一段也放不下就照常写英文。
+   *
+   * @param parts 各段，至少一段
+   */
+  public record Remark(List<RemarkPart> parts) {
+
+    public Remark {
+      parts = List.copyOf(parts);
+      if (parts.isEmpty()) {
+        throw new IllegalArgumentException("备注至少要有一段");
+      }
+    }
+  }
+
+  /**
+   * 备注里的一段。
+   *
+   * @param tag 标签（色块反白）
+   * @param color 标签底色；字色按底色亮度取黑白
+   * @param items 标签后的文字（经由站名、直通线路名），用顿号连接；可为空
+   * @param compact 放不下时的短写法（直通写线路代码）；只对单条文字适用
+   */
+  public record RemarkPart(String tag, int color, List<String> items, Optional<String> compact) {
+
+    public RemarkPart {
+      Objects.requireNonNull(tag, "tag");
+      items = List.copyOf(items);
+      compact = compact == null ? Optional.empty() : compact;
     }
   }
 

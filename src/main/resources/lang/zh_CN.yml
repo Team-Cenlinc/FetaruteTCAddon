@@ -817,7 +817,11 @@ command:
       spawn-pattern: "<gray>车型/编组:</gray> <dark_aqua><pattern></dark_aqua>"
       spawn-group: "<gray>交路组:</gray> <dark_aqua><group></dark_aqua>"
       spawn-group-baseline: "<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"
+      via: "<gray>经由:</gray> <dark_aqua><via></dark_aqua>"
+      via-auto: "未配置（站台屏按换乘站、大站与直通站推断）"
       stops: "<gray>停靠点:</gray> <dark_aqua><count></dark_aqua>"
+    via:
+      not-on-route: "<prefix> <red>经由站必须是本运行图停车的车站：</red><white><codes></white> <gray>（可选：<white><stations></white>）</gray>"
     group:
       list:
         header: "<prefix> <dark_aqua>交路组列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white> <gray>(count=<white><count></white>)</gray>"
@@ -852,7 +856,7 @@ command:
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
@@ -1217,6 +1221,11 @@ pids:
       local: "各停"
       rapid: "快速"
       express: "特急"
+    # 备注：终点下面英文那一格轮换显示的标签（色块反白），标签后写站名或线路名
+    remark:
+      last-train: "末班车"
+      through: "直通"
+      via: "经由"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
     notice:
       order:

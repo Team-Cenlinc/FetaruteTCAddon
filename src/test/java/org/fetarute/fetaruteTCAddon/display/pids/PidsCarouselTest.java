@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
 import java.util.Optional;
@@ -8,7 +10,7 @@ import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.junit.jupiter.api.Test;
 
-/** 轮播：主页 12 秒、副页 4 秒轮流出现；有空位信息时副页隔段是空位页；通过列车锁定安全提示页 15 秒；副页时长为 0 时不轮播。 */
+/** 轮播：主页 12 秒、副页 4 秒轮流出现；有空位信息时副页隔段是空位页；通过列车锁定安全提示页 15 秒；副页时长为 0 时不轮播。 主页上英文与备注各 4 秒交替。 */
 class PidsCarouselTest {
 
   private static final PidsStationKey HHU = new PidsStationKey("SURC", "HHU");
@@ -66,9 +68,32 @@ class PidsCarouselTest {
   }
 
   @Test
+  void remarksAlternateWithTheEnglishNameEveryRemarkSeconds() {
+    long offset = PidsCarousel.offset(HHU, 8);
+    long base = 1_790_000_000L;
+    Instant start = Instant.ofEpochSecond(base - Math.floorMod(base + offset, 8));
+
+    assertFalse(PidsCarousel.remarks(HHU, start, RENDER));
+    assertFalse(PidsCarousel.remarks(HHU, start.plusSeconds(3), RENDER));
+    assertTrue(PidsCarousel.remarks(HHU, start.plusSeconds(4), RENDER));
+    assertTrue(PidsCarousel.remarks(HHU, start.plusSeconds(7), RENDER));
+    assertFalse(PidsCarousel.remarks(HHU, start.plusSeconds(8), RENDER));
+  }
+
+  @Test
+  void zeroRemarkSecondsNeverShowsRemarks() {
+    PidsSettings.RenderSettings off = new PidsSettings.RenderSettings(20, 5, 30, 12, 4, 15, 0);
+    Instant start = roundStart();
+
+    for (int second = 0; second < 16; second++) {
+      assertFalse(PidsCarousel.remarks(HHU, start.plusSeconds(second), off));
+    }
+  }
+
+  @Test
   void zeroNoticeSecondsDisablesCourtesyPagesButKeepsTheSafetyPage() {
     PidsCarousel carousel = new PidsCarousel();
-    PidsSettings.RenderSettings quiet = new PidsSettings.RenderSettings(20, 5, 30, 12, 0, 15);
+    PidsSettings.RenderSettings quiet = new PidsSettings.RenderSettings(20, 5, 30, 12, 0, 15, 4);
     UUID screen = UUID.randomUUID();
     Instant at = roundStart().plusSeconds(13);
 

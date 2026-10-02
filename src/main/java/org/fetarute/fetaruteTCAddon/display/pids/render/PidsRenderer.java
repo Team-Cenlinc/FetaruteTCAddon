@@ -831,11 +831,31 @@ public final class PidsRenderer {
     Names names = dest.names();
     if (style.inline()) {
       int top = cell.top + (cell.height - text.size()) / 2;
-      p.inline(names, text, x, top, available, primaryColor, secondaryColor, dest.struck());
+      int room = available - p.width(names.primary(), text.size()) - text.gap();
+      p.inline(
+          names.primary(),
+          secondary(names, dest, text, room),
+          text,
+          x,
+          top,
+          available,
+          primaryColor,
+          secondaryColor,
+          dest.struck());
       return;
     }
+    Secondary second = secondary(names, dest, text, available);
     if (p.width(names.primary(), text.size()) <= available) {
-      p.stackedIn(names, text, x, cell, available, primaryColor, secondaryColor, dest.struck());
+      p.stackedIn(
+          names.primary(),
+          second,
+          text,
+          x,
+          cell,
+          available,
+          primaryColor,
+          secondaryColor,
+          dest.struck());
       return;
     }
     if (style.wrap()) {
@@ -861,7 +881,15 @@ public final class PidsRenderer {
       TextStyle fallback = new TextStyle(style.fallbackSize(), text.secondarySize(), text.gap());
       if (p.width(names.primary(), style.fallbackSize()) <= available || !style.wrap()) {
         p.stackedIn(
-            names, fallback, x, cell, available, primaryColor, secondaryColor, dest.struck());
+            names.primary(),
+            second,
+            fallback,
+            x,
+            cell,
+            available,
+            primaryColor,
+            secondaryColor,
+            dest.struck());
         return;
       }
       List<String> lines =
@@ -870,9 +898,7 @@ public final class PidsRenderer {
               names.primary(),
               available - (p.bold(style.fallbackSize()) ? 1 : 0));
       int secondaryHeight =
-          text.hasSecondary() && !names.secondary().isEmpty()
-              ? text.gap() + text.secondarySize()
-              : 0;
+          text.hasSecondary() && !second.isEmpty() ? text.gap() + text.secondarySize() : 0;
       int block = style.fallbackSize() * 2 + text.gap() + secondaryHeight;
       int top = cell.top + (cell.height - block) / 2;
       p.text(lines.get(0), style.fallbackSize(), x, top, primaryColor, dest.struck());
@@ -880,17 +906,57 @@ public final class PidsRenderer {
       p.text(lines.get(1), style.fallbackSize(), x, top, primaryColor, dest.struck());
       if (secondaryHeight > 0) {
         top += style.fallbackSize() + text.gap();
-        p.regular(
-            p.ellipsizeWords(names.secondary(), text.secondarySize(), available),
-            text.secondarySize(),
-            x,
-            top,
-            secondaryColor,
-            dest.struck());
+        p.secondary(second, text.secondarySize(), x, top, available, secondaryColor, dest.struck());
       }
       return;
     }
-    p.stackedIn(names, text, x, cell, available, primaryColor, secondaryColor, dest.struck());
+    p.stackedIn(
+        names.primary(),
+        second,
+        text,
+        x,
+        cell,
+        available,
+        primaryColor,
+        secondaryColor,
+        dest.struck());
+  }
+
+  /** 终点英文那一格写什么：轮到备注、且备注在 {@code room} 宽度里放得下时写备注，否则写英文名。 */
+  private Secondary secondary(Names names, PidsView.Destination dest, TextStyle text, int room) {
+    if (!text.hasSecondary()) {
+      return new Secondary.Text(names.secondary());
+    }
+    return dest.remark()
+        .flatMap(remark -> PidsRemarkLayout.fit(fonts, remark, text.secondarySize(), room))
+        .<Secondary>map(Secondary.Remark::new)
+        .orElseGet(() -> new Secondary.Text(names.secondary()));
+  }
+
+  /** 中文名下面（或后面）那一格：英文名，或排好的备注。 */
+  private sealed interface Secondary {
+
+    boolean isEmpty();
+
+    /** 英文名。 */
+    record Text(String text) implements Secondary {
+      @Override
+      public boolean isEmpty() {
+        return text.isEmpty();
+      }
+    }
+
+    /** 排好的备注。 */
+    record Remark(List<PidsRemarkLayout.Placed> parts) implements Secondary {
+      public Remark {
+        parts = List.copyOf(parts);
+      }
+
+      @Override
+      public boolean isEmpty() {
+        return parts.isEmpty();
+      }
+    }
   }
 
   private void drawNoMoreTrains(Painter p, Cell cell, Names message) {
@@ -1362,30 +1428,84 @@ public final class PidsRenderer {
         int primaryRgb,
         int secondaryRgb,
         boolean struck) {
-      boolean secondary = style.hasSecondary() && !names.secondary().isEmpty();
+      return stackedIn(
+          names.primary(),
+          new Secondary.Text(names.secondary()),
+          style,
+          x,
+          cell,
+          maxWidth,
+          primaryRgb,
+          secondaryRgb,
+          struck);
+    }
+
+    /** 同上，下面那一格可以是备注。 */
+    int stackedIn(
+        String primary,
+        Secondary second,
+        TextStyle style,
+        int x,
+        Cell cell,
+        int maxWidth,
+        int primaryRgb,
+        int secondaryRgb,
+        boolean struck) {
+      boolean secondary = style.hasSecondary() && !second.isEmpty();
       int block = style.size() + (secondary ? style.gap() + style.secondarySize() : 0);
       int top = cell.top + (cell.height - block) / 2;
       int width =
           text(
-              ellipsize(names.primary(), style.size(), maxWidth),
-              style.size(),
-              x,
-              top,
-              primaryRgb,
-              struck);
+              ellipsize(primary, style.size(), maxWidth), style.size(), x, top, primaryRgb, struck);
       if (secondary) {
         width =
             Math.max(
                 width,
-                regular(
-                    ellipsizeWords(names.secondary(), style.secondarySize(), maxWidth),
+                secondary(
+                    second,
                     style.secondarySize(),
                     x,
                     top + style.size() + style.gap(),
+                    maxWidth,
                     secondaryRgb,
                     struck));
       }
       return width;
+    }
+
+    /** 画英文那一格：英文名超宽时按词省略；备注已按宽度排好。返回宽度。 */
+    int secondary(
+        Secondary second, int size, int x, int top, int maxWidth, int rgb, boolean struck) {
+      return switch (second) {
+        case Secondary.Text plain -> regular(
+            ellipsizeWords(plain.text(), size, maxWidth), size, x, top, rgb, struck);
+        case Secondary.Remark remark -> remark(remark.parts(), size, x, top, rgb);
+      };
+    }
+
+    /** 备注：标签画成色块反白（字色按底色亮度取黑白），其后是次要色文字。返回宽度。 */
+    int remark(List<PidsRemarkLayout.Placed> parts, int size, int x, int top, int rgb) {
+      int cursor = x;
+      for (int i = 0; i < parts.size(); i++) {
+        PidsRemarkLayout.Placed part = parts.get(i);
+        if (i > 0) {
+          cursor += PidsRemarkLayout.PART_GAP;
+        }
+        int tagWidth = regularWidth(part.tag(), size);
+        fill(
+            cursor - PidsRemarkLayout.TAG_PAD,
+            top - 1,
+            tagWidth + PidsRemarkLayout.TAG_PAD * 2,
+            size + 2,
+            part.color());
+        regular(part.tag(), size, cursor, top, PidsTheme.textOn(part.color()), false);
+        cursor += tagWidth + PidsRemarkLayout.TAG_PAD;
+        if (!part.text().isEmpty()) {
+          cursor += PidsRemarkLayout.TAG_GAP;
+          cursor += regular(part.text(), size, cursor, top, rgb, false);
+        }
+      }
+      return cursor - x;
     }
 
     /** 在行内竖向居中叠放、靠右对齐。 */
@@ -1426,32 +1546,64 @@ public final class PidsRenderer {
         int primaryRgb,
         int secondaryRgb,
         boolean struck) {
-      int primaryWidth = width(names.primary(), style.size());
-      boolean secondary = style.hasSecondary() && !names.secondary().isEmpty();
-      if (secondary) {
-        int total =
-            primaryWidth + style.gap() + regularWidth(names.secondary(), style.secondarySize());
+      inline(
+          names.primary(),
+          new Secondary.Text(names.secondary()),
+          style,
+          x,
+          top,
+          maxWidth,
+          primaryRgb,
+          secondaryRgb,
+          struck);
+    }
+
+    /** 同上，后面那一格可以是备注（已按剩余宽度排好）。 */
+    void inline(
+        String primary,
+        Secondary second,
+        TextStyle style,
+        int x,
+        int top,
+        int maxWidth,
+        int primaryRgb,
+        int secondaryRgb,
+        boolean struck) {
+      int primaryWidth = width(primary, style.size());
+      if (style.hasSecondary() && !second.isEmpty()) {
+        int total = primaryWidth + style.gap() + secondaryWidth(second, style.secondarySize());
         if (total <= maxWidth) {
-          text(names.primary(), style.size(), x, top, primaryRgb, struck);
-          int baseline = top + baseline(names.primary(), style.size());
-          int secondaryTop = baseline - baseline(names.secondary(), style.secondarySize());
-          regular(
-              names.secondary(),
+          text(primary, style.size(), x, top, primaryRgb, struck);
+          int baseline = top + baseline(primary, style.size());
+          int secondaryTop = baseline - baseline(secondaryText(second), style.secondarySize());
+          secondary(
+              second,
               style.secondarySize(),
               x + primaryWidth + style.gap(),
               secondaryTop,
+              maxWidth,
               secondaryRgb,
               struck);
           return;
         }
       }
-      text(
-          ellipsize(names.primary(), style.size(), maxWidth),
-          style.size(),
-          x,
-          top,
-          primaryRgb,
-          struck);
+      text(ellipsize(primary, style.size(), maxWidth), style.size(), x, top, primaryRgb, struck);
+    }
+
+    /** 英文那一格的宽度。 */
+    int secondaryWidth(Secondary second, int size) {
+      return switch (second) {
+        case Secondary.Text plain -> regularWidth(plain.text(), size);
+        case Secondary.Remark remark -> PidsRemarkLayout.width(fonts, remark.parts(), size);
+      };
+    }
+
+    /** 定基线用的文字：英文名，或备注的第一个标签。 */
+    private String secondaryText(Secondary second) {
+      return switch (second) {
+        case Secondary.Text plain -> plain.text();
+        case Secondary.Remark remark -> remark.parts().get(0).tag();
+      };
     }
   }
 }

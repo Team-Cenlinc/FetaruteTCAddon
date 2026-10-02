@@ -36,7 +36,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式或未绑定车站：测试卡，列出布局、识别出的车站与屏幕编号
- *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页
+ *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页； 所有到发页的英文与备注按 {@link
+ *       PidsCarousel#remarks} 轮换
  * </ul>
  *
  * <p>不碰 Bukkit：世界时间、文案、快照都由调用方注入，单元测试可直接驱动。
@@ -203,7 +204,8 @@ public final class PidsComposer {
             platformLabels,
             layout.rowCapacity(),
             layout.departures().map(d -> d.columns().platform().isPresent()).orElse(false),
-            Optional.of(placement(screen)));
+            Optional.of(placement(screen)),
+            PidsCarousel.remarks(station, now, settings.get().render()));
     PidsView view = views.build(request);
     if (PidsPlatformSelection.limit(layout).isPresent()) {
       Optional<PidsCarousel.Slide> slide =

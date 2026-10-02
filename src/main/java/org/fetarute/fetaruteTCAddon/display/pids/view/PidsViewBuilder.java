@@ -46,6 +46,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * </ul>
  *
  * <p>空位页（{@link #vacancy}）：首行是可以上车的运行中列车（不是还没开出、通过、本站终到或回库）且读得到载客时，给出各节车有多满与空位数。
+ *
+ * <p>备注（末班车、直通、经由，见 {@link PidsRemarks}）只在显示要求轮到备注时写进终点，渲染器把英文那一格换成备注。
  */
 public final class PidsViewBuilder {
 
@@ -64,10 +66,12 @@ public final class PidsViewBuilder {
 
   private final PidsDirectory directory;
   private final PidsVocabulary vocabulary;
+  private final PidsRemarks remarks;
 
   public PidsViewBuilder(PidsDirectory directory, PidsVocabulary vocabulary) {
     this.directory = Objects.requireNonNull(directory, "directory");
     this.vocabulary = Objects.requireNonNull(vocabulary, "vocabulary");
+    this.remarks = new PidsRemarks(directory, vocabulary);
   }
 
   /**
@@ -82,6 +86,7 @@ public final class PidsViewBuilder {
    * @param capacity 布局最多显示的行数
    * @param platformColumn 到发表有站台列
    * @param placement 屏幕在世界里的朝向；不知道时为空，空位页车头画在左侧、不画前进方向
+   * @param remarks 此刻轮到备注：有备注的行把英文那一格换成备注
    */
   public record Request(
       PidsSnapshot snapshot,
@@ -92,7 +97,8 @@ public final class PidsViewBuilder {
       List<String> platformLabels,
       int capacity,
       boolean platformColumn,
-      Optional<Placement> placement) {
+      Optional<Placement> placement,
+      boolean remarks) {
 
     public Request {
       Objects.requireNonNull(snapshot, "snapshot");
@@ -102,6 +108,30 @@ public final class PidsViewBuilder {
       platforms = Set.copyOf(platforms);
       platformLabels = List.copyOf(platformLabels);
       placement = placement == null ? Optional.empty() : placement;
+    }
+
+    /** 不轮到备注。 */
+    public Request(
+        PidsSnapshot snapshot,
+        Instant now,
+        ZoneId zone,
+        PidsTheme theme,
+        Set<String> platforms,
+        List<String> platformLabels,
+        int capacity,
+        boolean platformColumn,
+        Optional<Placement> placement) {
+      this(
+          snapshot,
+          now,
+          zone,
+          theme,
+          platforms,
+          platformLabels,
+          capacity,
+          platformColumn,
+          placement,
+          false);
     }
 
     /** 不知道屏幕位置。 */
@@ -123,7 +153,8 @@ public final class PidsViewBuilder {
           platformLabels,
           capacity,
           platformColumn,
-          Optional.empty());
+          Optional.empty(),
+          false);
     }
   }
 
@@ -321,7 +352,7 @@ public final class PidsViewBuilder {
     boolean changed = !cancelled && !row.passing() && row.previousPlatform().isPresent();
     return new PidsView.Row(
         badge(row, cancelled, request.theme()),
-        destination(row, cancelled),
+        destination(row, cancelled, request),
         new PlatformCell(row.platform(), cancelled || row.platformPending(), changed),
         changed ? platformChanged(row, request, arrival) : arrival);
   }
@@ -371,7 +402,7 @@ public final class PidsViewBuilder {
     return new Badge(line.code(), type, line.color(), cancelled);
   }
 
-  private Destination destination(PidsRow row, boolean cancelled) {
+  private Destination destination(PidsRow row, boolean cancelled, Request request) {
     Names names;
     if (row.terminating()) {
       names = vocabulary.terminating();
@@ -384,7 +415,11 @@ public final class PidsViewBuilder {
               .orElse(new Names(row.destination(), ""));
     }
     Tone tone = cancelled || row.passing() ? Tone.MUTED : Tone.NORMAL;
-    return new Destination(names, tone, cancelled);
+    return new Destination(
+        names,
+        tone,
+        cancelled,
+        request.remarks() ? remarks.of(row, request.theme()) : Optional.empty());
   }
 
   private Arrival arrival(PidsRow row, boolean cancelled, Instant now) {

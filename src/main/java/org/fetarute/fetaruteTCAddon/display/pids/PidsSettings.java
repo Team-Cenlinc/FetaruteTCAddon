@@ -81,7 +81,8 @@ public record PidsSettings(
             reader.positiveInt("render.slide-main-seconds", renderDefault.slideMainSeconds()),
             reader.nonNegativeInt(
                 "render.slide-notice-seconds", renderDefault.slideNoticeSeconds()),
-            reader.positiveInt("render.notice-pin-seconds", renderDefault.noticePinSeconds()));
+            reader.positiveInt("render.notice-pin-seconds", renderDefault.noticePinSeconds()),
+            reader.nonNegativeInt("render.remark-seconds", renderDefault.remarkSeconds()));
 
     LimitSettings limits =
         new LimitSettings(
@@ -179,6 +180,7 @@ public record PidsSettings(
    * @param slideMainSeconds 主页（到发）停留时间（秒）
    * @param slideNoticeSeconds 宣传页停留时间（秒）
    * @param noticePinSeconds 通过列车临近时锁定安全页的时长（秒）
+   * @param remarkSeconds 主页上英文与备注（末班车、直通、经由）轮换，各停留多少秒；0 不显示备注
    */
   public record RenderSettings(
       int checkIntervalTicks,
@@ -186,10 +188,11 @@ public record PidsSettings(
       int horizonMinutes,
       int slideMainSeconds,
       int slideNoticeSeconds,
-      int noticePinSeconds) {
+      int noticePinSeconds,
+      int remarkSeconds) {
 
     /** 内置默认值。 */
-    public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 12, 4, 15);
+    public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 12, 4, 15, 4);
   }
 
   /**

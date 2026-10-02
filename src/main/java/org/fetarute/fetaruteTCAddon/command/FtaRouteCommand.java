@@ -43,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteViaMetadata;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -51,10 +52,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
@@ -241,6 +244,15 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("<seconds>")))
             .build();
     var spawnGroupBaselineClearFlag = CommandFlag.builder("spawn-group-baseline-clear").build();
+    // 站台屏“经由”：只收本交路停车的站码，逗号分隔。
+    var viaFlag =
+        CommandFlag.<CommandSender>builder("via")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "via", StringParser.quotedStringParser())
+                    .suggestionProvider(viaSuggestions()))
+            .build();
+    var viaClearFlag = CommandFlag.builder("via-clear").build();
     var groupBaselineFlag =
         CommandFlag.<CommandSender>builder("baseline")
             .withComponent(
@@ -722,6 +734,17 @@ public final class FtaRouteCommand {
                               Map.of("seconds", spawnGroupBaseline))
                           .clickEvent(
                               ClickEvent.suggestCommand(setPrefix + "--spawn-group-baseline ")));
+                  List<String> via = RouteViaMetadata.read(route.metadata());
+                  sender.sendMessage(
+                      locale
+                          .component(
+                              "command.route.info.via",
+                              Map.of(
+                                  "via",
+                                  via.isEmpty()
+                                      ? locale.text("command.route.info.via-auto")
+                                      : String.join("、", via)))
+                          .clickEvent(ClickEvent.suggestCommand(setPrefix + "--via ")));
 
                   List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
                   sender.sendMessage(
@@ -1594,6 +1617,8 @@ public final class FtaRouteCommand {
             .flag(spawnGroupClearFlag)
             .flag(spawnGroupBaselineFlag)
             .flag(spawnGroupBaselineClearFlag)
+            .flag(viaFlag)
+            .flag(viaClearFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -1630,7 +1655,9 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(spawnGroupFlag)
                           || flags.hasFlag(spawnGroupClearFlag)
                           || flags.hasFlag(spawnGroupBaselineFlag)
-                          || flags.hasFlag(spawnGroupBaselineClearFlag);
+                          || flags.hasFlag(spawnGroupBaselineClearFlag)
+                          || flags.hasFlag(viaFlag)
+                          || flags.hasFlag(viaClearFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.route.set.noop"));
                     return;
@@ -1705,6 +1732,34 @@ public final class FtaRouteCommand {
                       metadata.remove("spawn_weight");
                     } else {
                       metadata.put("spawn_weight", weight);
+                    }
+                  }
+                  if (flags.hasFlag(viaClearFlag)) {
+                    metadata.remove(RouteViaMetadata.KEY);
+                  }
+                  if (flags.hasFlag(viaFlag)) {
+                    List<String> via =
+                        RouteViaMetadata.parse(flags.getValue(viaFlag, null)).stream()
+                            .map(code -> code.toUpperCase(Locale.ROOT))
+                            .toList();
+                    List<String> stopping = stoppingStationCodes(provider, route);
+                    List<String> unknown =
+                        via.stream().filter(code -> !stopping.contains(code)).toList();
+                    if (!unknown.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.route.via.not-on-route",
+                              Map.of(
+                                  "codes",
+                                  String.join("、", unknown),
+                                  "stations",
+                                  stopping.isEmpty() ? "-" : String.join("、", stopping))));
+                      return;
+                    }
+                    if (via.isEmpty()) {
+                      metadata.remove(RouteViaMetadata.KEY);
+                    } else {
+                      metadata.put(RouteViaMetadata.KEY, via);
                     }
                   }
                   if (flags.hasFlag(timetableCreateRouteClearFlag)) {
@@ -2409,6 +2464,92 @@ public final class FtaRouteCommand {
               .forEach(suggestions::add);
           return suggestions;
         });
+  }
+
+  /** {@code --via} 的补全：本运行图停车的站码。值是逗号分隔的列表，已写下的站不再提示，补全结果带上前面已写的部分。 */
+  private SuggestionProvider<CommandSender> viaSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String token = input.lastRemainingToken().trim();
+          if (token.startsWith("\"") || token.startsWith("'")) {
+            token = token.substring(1);
+          }
+          int comma = token.lastIndexOf(',');
+          String head = comma < 0 ? "" : token.substring(0, comma + 1);
+          String prefix = token.substring(comma + 1).toUpperCase(Locale.ROOT);
+          List<String> written = RouteViaMetadata.parse(head);
+          List<String> suggestions = new ArrayList<>();
+          if (token.isEmpty()) {
+            suggestions.add("<HHU,SPB>");
+          }
+          resolveRouteForSuggestion(ctx)
+              .map(found -> stoppingStationCodes(found.provider(), found.route()))
+              .orElse(List.of())
+              .stream()
+              .filter(code -> code.startsWith(prefix))
+              .filter(code -> written.stream().noneMatch(code::equalsIgnoreCase))
+              .map(code -> head + code)
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /** 补全时按已输入的 company/operator/line/route 找到运行图；找不到或无权查看时为空。 */
+  private Optional<RouteLookup> resolveRouteForSuggestion(
+      org.incendo.cloud.context.CommandContext<CommandSender> ctx) {
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    Optional<String> companyArg = ctx.optional("company").map(String.class::cast);
+    Optional<String> operatorArg = ctx.optional("operator").map(String.class::cast);
+    Optional<String> lineArg = ctx.optional("line").map(String.class::cast);
+    Optional<String> routeArg = ctx.optional("route").map(String.class::cast);
+    if (providerOpt.isEmpty()
+        || companyArg.isEmpty()
+        || operatorArg.isEmpty()
+        || lineArg.isEmpty()
+        || routeArg.isEmpty()) {
+      return Optional.empty();
+    }
+    StorageProvider provider = providerOpt.get();
+    CompanyQueryService query = new CompanyQueryService(provider);
+    return query
+        .findCompany(companyArg.get().trim())
+        .filter(company -> canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id()))
+        .flatMap(company -> query.findOperator(company.id(), operatorArg.get().trim()))
+        .flatMap(operator -> query.findLine(operator.id(), lineArg.get().trim()))
+        .flatMap(line -> provider.routes().findByLineAndCode(line.id(), routeArg.get().trim()))
+        .map(route -> new RouteLookup(provider, route));
+  }
+
+  /** 补全时找到的运行图与所用的存储。 */
+  private record RouteLookup(StorageProvider provider, Route route) {}
+
+  /**
+   * 运行图上停车的车站站码（大写，按停靠顺序去重）：经由只能写这些站。
+   *
+   * <p>停靠点按节点认车站（站台、DYNAMIC 占位股道），没有节点、只绑了车站记录的按记录的站码。
+   */
+  private static List<String> stoppingStationCodes(StorageProvider provider, Route route) {
+    Set<String> codes = new LinkedHashSet<>();
+    for (RouteStop stop : provider.routeStops().listByRoute(route.id())) {
+      if (!stop.stops()) {
+        continue;
+      }
+      stop.waypointNodeId()
+          .or(
+              () ->
+                  DynamicStopMatcher.parseDynamicSpec(stop)
+                      .map(DynamicStopMatcher.DynamicSpec::toPlaceholderNodeId))
+          .flatMap(RouteTerminals::stationCodeOf)
+          .or(
+              () ->
+                  stop.stationId()
+                      .flatMap(id -> provider.stations().findById(id))
+                      .map(Station::code))
+          .map(code -> code.toUpperCase(Locale.ROOT))
+          .ifPresent(codes::add);
+    }
+    return List.copyOf(codes);
   }
 
   /** 将 Cloud 的输入 token 规范化为小写前缀，用于前缀过滤。 */

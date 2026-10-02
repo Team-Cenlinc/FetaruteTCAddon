@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsPlatformNode;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.LineChip;
@@ -37,7 +38,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  *
  * <p>单个车站、单个交路读取失败只跳过那一项并告警，不让整份索引作废。
  *
- * <p>另记各交路的途经节点与各世界调度图节点的坐标，空位页据此定车头朝屏幕哪一侧（前进方向）。
+ * <p>另记各交路的途经节点与各世界调度图节点的坐标，空位页据此定车头朝屏幕哪一侧（前进方向）； 以及各交路的停靠点、配置的经由站与各车站的站台数，备注据此写“经由”“直通”。
  */
 public final class ApiPidsDirectory implements PidsDirectory {
 
@@ -132,6 +133,26 @@ public final class ApiPidsDirectory implements PidsDirectory {
     return Optional.ofNullable(index.positions.getOrDefault(worldId, Map.of()).get(key(nodeId)));
   }
 
+  @Override
+  public List<RouteStop> stops(String routeId) {
+    return routeId == null ? List.of() : index.routeStops.getOrDefault(key(routeId), List.of());
+  }
+
+  @Override
+  public List<String> via(String routeId) {
+    return routeId == null ? List.of() : index.via.getOrDefault(key(routeId), List.of());
+  }
+
+  @Override
+  public int platformCount(String stationId) {
+    return stationId == null ? 0 : index.platformCounts.getOrDefault(key(stationId), 0);
+  }
+
+  @Override
+  public Optional<Names> lineName(String operatorCode, String lineCode) {
+    return Optional.ofNullable(index.lines.get(key(operatorCode, lineCode))).map(Line::names);
+  }
+
   private Index build() {
     Map<UUID, OperatorApi.OperatorInfo> operatorsById = new HashMap<>();
     Map<String, Set<UUID>> companiesByCode = new HashMap<>();
@@ -192,22 +213,27 @@ public final class ApiPidsDirectory implements PidsDirectory {
     }
     Map<String, RouteApi.OperationType> serviceTypes = new HashMap<>();
     Map<String, List<String>> waypoints = new HashMap<>();
+    Map<String, List<RouteStop>> routeStops = new HashMap<>();
+    Map<String, List<String>> via = new HashMap<>();
     Map<String, Set<String>> platformLineKeys = new HashMap<>();
     for (RouteApi.RouteInfo route : routes.listRoutes()) {
       if (ambiguous.contains(key(route.operatorCode()))) {
         continue;
       }
-      serviceTypes.put(
-          key(route.operatorCode(), route.lineCode(), route.routeCode()), route.operationType());
+      String routeKey = key(route.operatorCode(), route.lineCode(), route.routeCode());
+      serviceTypes.put(routeKey, route.operationType());
       try {
         routes
             .getRoute(route.id())
             .ifPresent(
                 detail -> {
                   collectPlatformLines(route, detail, platformLineKeys);
-                  waypoints.put(
-                      key(route.operatorCode(), route.lineCode(), route.routeCode()),
-                      List.copyOf(detail.waypoints()));
+                  waypoints.put(routeKey, List.copyOf(detail.waypoints()));
+                  routeStops.put(
+                      routeKey, detail.stops().stream().map(ApiPidsDirectory::routeStop).toList());
+                  if (!detail.via().isEmpty()) {
+                    via.put(routeKey, detail.via());
+                  }
                 });
       } catch (RuntimeException ex) {
         failures++;
@@ -228,6 +254,7 @@ public final class ApiPidsDirectory implements PidsDirectory {
                     .map(Line::chip)
                     .sorted(Comparator.comparing(LineChip::code))
                     .toList()));
+    GraphIndex graphIndex = graphIndex(waypoints);
     return new Index(
         Map.copyOf(stationIndex),
         Map.copyOf(lineIndex),
@@ -235,22 +262,35 @@ public final class ApiPidsDirectory implements PidsDirectory {
         Map.copyOf(stationLines),
         Map.copyOf(platformLines),
         Map.copyOf(waypoints),
-        positions(waypoints));
+        graphIndex.positions(),
+        Map.copyOf(routeStops),
+        Map.copyOf(via),
+        graphIndex.platformCounts());
+  }
+
+  /** 交路停靠点：车站按节点认（站台、DYNAMIC 占位股道），区间点、咽喉、车库不算车站。 */
+  private static RouteStop routeStop(RouteApi.StopInfo stop) {
+    return new RouteStop(
+        RouteTerminals.stationRefOfNode(stop.nodeId())
+            .map(ref -> key(ref.operatorCode(), ref.stationCode())),
+        stop.passType() != RouteApi.PassType.PASS,
+        stop.lineChange());
   }
 
   /**
-   * 空位页要用的节点坐标：各交路的途经节点与车站站台，按世界分开；没有调度图接口时为空。
+   * 调度图里读出的两样东西：空位页要用的节点坐标（各交路的途经节点与车站站台，按世界分开），与各车站的站台数（备注认大站）。 没有调度图接口时都为空。
    *
-   * <p>坐标只用来定空位页的车头朝向：读失败只告警并沿用上一份，不让站名、线路这些主数据跟着停在旧版本。
+   * <p>两样都只是辅助：读失败只告警并沿用上一份，不让站名、线路这些主数据跟着停在旧版本。
    */
-  private Map<UUID, Map<String, GraphApi.Position>> positions(Map<String, List<String>> waypoints) {
+  private GraphIndex graphIndex(Map<String, List<String>> waypoints) {
     if (graph == null) {
-      return Map.of();
+      return new GraphIndex(Map.of(), Map.of());
     }
     Set<String> wanted = new HashSet<>();
     waypoints.values().forEach(nodes -> nodes.forEach(node -> wanted.add(key(node))));
     try {
-      Map<UUID, Map<String, GraphApi.Position>> out = new HashMap<>();
+      Map<UUID, Map<String, GraphApi.Position>> positions = new HashMap<>();
+      Map<String, Set<String>> platforms = new HashMap<>();
       for (GraphApi.WorldGraphEntry entry : graph.listAllSnapshots()) {
         Map<String, GraphApi.Position> nodes = new HashMap<>();
         for (GraphApi.ApiNode node : entry.snapshot().nodes()) {
@@ -258,15 +298,29 @@ public final class ApiPidsDirectory implements PidsDirectory {
           if (node.type() == GraphApi.NodeType.STATION || wanted.contains(nodeKey)) {
             nodes.put(nodeKey, node.position());
           }
+          if (node.type() == GraphApi.NodeType.STATION) {
+            PidsPlatformNode.parse(node.id())
+                .ifPresent(
+                    platform ->
+                        platforms
+                            .computeIfAbsent(
+                                key(platform.station().toString()), ignored -> new HashSet<>())
+                            .add(key(platform.platform())));
+          }
         }
-        out.put(entry.worldId(), Map.copyOf(nodes));
+        positions.put(entry.worldId(), Map.copyOf(nodes));
       }
-      return Map.copyOf(out);
+      Map<String, Integer> counts = new HashMap<>();
+      platforms.forEach((station, tracks) -> counts.put(station, tracks.size()));
+      return new GraphIndex(Map.copyOf(positions), Map.copyOf(counts));
     } catch (RuntimeException ex) {
-      warn.accept("读取调度图节点坐标失败，空位页车头朝向沿用上一份: " + ex);
-      return index.positions;
+      warn.accept("读取调度图节点失败，空位页车头朝向与车站站台数沿用上一份: " + ex);
+      return new GraphIndex(index.positions, index.platformCounts);
     }
   }
+
+  private record GraphIndex(
+      Map<UUID, Map<String, GraphApi.Position>> positions, Map<String, Integer> platformCounts) {}
 
   private static void collectPlatformLines(
       RouteApi.RouteInfo route, RouteApi.RouteDetail detail, Map<String, Set<String>> out) {
@@ -329,8 +383,13 @@ public final class ApiPidsDirectory implements PidsDirectory {
       Map<String, List<LineChip>> stationLines,
       Map<String, List<LineChip>> platformLines,
       Map<String, List<String>> waypoints,
-      Map<UUID, Map<String, GraphApi.Position>> positions) {
+      Map<UUID, Map<String, GraphApi.Position>> positions,
+      Map<String, List<RouteStop>> routeStops,
+      Map<String, List<String>> via,
+      Map<String, Integer> platformCounts) {
     static final Index EMPTY =
-        new Index(Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+        new Index(
+            Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
+            Map.of(), Map.of());
   }
 }

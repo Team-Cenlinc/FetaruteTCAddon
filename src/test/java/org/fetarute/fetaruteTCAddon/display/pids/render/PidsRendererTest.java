@@ -358,6 +358,76 @@ class PidsRendererTest {
     assertEquals(PidsTheme.DARK.amber(), rgb(image, 394, 127));
   }
 
+  /** 轮到备注时英文那一格画成标签色块：浅色主题的琥珀是深棕底，标签字反白。 */
+  @Test
+  void remarksReplaceTheEnglishNameWithATagBlock() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");
+    PidsView.Row plain = countdown();
+    PidsView.Row remark = withRemark(plain, PidsTheme.LIGHT.amber(), "经由", "新笛矢·壑湖");
+
+    BufferedImage before = renderer.render(layout, platformView(PidsTheme.LIGHT, List.of(plain)));
+    BufferedImage after = renderer.render(layout, platformView(PidsTheme.LIGHT, List.of(remark)));
+
+    // 首行终点列：到发表左缘 66 + 色牌 62 = 128 起，宽 128；首行 4–56
+    assertEquals(0, countColor(before, 128, 4, 128, 52, PidsTheme.LIGHT.amber()));
+    assertTrue(countColor(after, 128, 4, 128, 52, PidsTheme.LIGHT.amber()) > 0);
+    assertTrue(
+        countColor(after, 128, 4, 128, 52, PidsTheme.PAPER)
+            > countColor(before, 128, 4, 128, 52, PidsTheme.PAPER),
+        "深色底上的标签字用白色");
+    assertEquals(
+        countColor(before, 128, 4, 128, 30, PidsTheme.LIGHT.text()),
+        countColor(after, 128, 4, 128, 30, PidsTheme.LIGHT.text()),
+        "中文终点名不动");
+  }
+
+  /** 车站统屏的英文写在中文名后面：备注也写在那里，用剩下的宽度。 */
+  @Test
+  void stationScreensPutTheRemarkAfterTheName() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("station-3x5");
+    PidsView.Row plain = countdown();
+    PidsView.Row remark = withRemark(plain, WS, "直通", "浦蓝线");
+
+    BufferedImage before = renderer.render(layout, stationView(plain));
+    BufferedImage after = renderer.render(layout, stationView(remark));
+
+    // 首行终点列：到发表左缘 4 + 124 = 128 起，宽 256；首行 118–160
+    assertEquals(0, countColor(before, 128, 118, 256, 42, WS));
+    assertTrue(countColor(after, 128, 118, 256, 42, WS) > 0);
+    assertTrue(
+        countColor(after, 128, 118, 256, 42, PidsTheme.INK)
+            > countColor(before, 128, 118, 256, 42, PidsTheme.INK),
+        "浅色底上的标签字用深色");
+  }
+
+  private static PidsView stationView(PidsView.Row row) {
+    return new PidsView(
+        PidsTheme.DARK,
+        "21:40",
+        List.of(),
+        Optional.of(new Names("南渡", "Nam Toa")),
+        List.of(),
+        List.of(WS),
+        List.of(row),
+        LABELS);
+  }
+
+  private static PidsView.Row withRemark(PidsView.Row row, int color, String tag, String text) {
+    Destination plain = row.destination();
+    return new PidsView.Row(
+        row.badge(),
+        new Destination(
+            plain.names(),
+            plain.tone(),
+            plain.struck(),
+            Optional.of(
+                new PidsView.Remark(
+                    List.of(
+                        new PidsView.RemarkPart(tag, color, List.of(text), Optional.empty()))))),
+        row.platform(),
+        row.arrival());
+  }
+
   private static PidsView platformView(PidsTheme theme, List<PidsView.Row> rows) {
     return new PidsView(
         theme, "21:40", List.of("1"), Optional.empty(), List.of(), List.of(WS), rows, LABELS);

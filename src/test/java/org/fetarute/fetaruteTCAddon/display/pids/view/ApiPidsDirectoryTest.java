@@ -5,11 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
@@ -17,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi.PassType;
 import org.fetarute.fetaruteTCAddon.api.station.StationApi;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory.LineStyle;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory.RouteStop;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -118,6 +121,60 @@ class ApiPidsDirectoryTest {
         codes(directory.linesServingPlatform(new PidsStationKey("SURC", "TPC"), "1")),
         "换线后各站算新线路，咽喉不算站台");
     assertTrue(directory.linesServingPlatform(HHU_KEY, "2").isEmpty(), "通过不算");
+  }
+
+  @Test
+  void routeStopsViaPlatformCountsAndLineNamesAreIndexedForRemarks() {
+    when(routes.getRoute(rapid))
+        .thenReturn(
+            Optional.of(
+                withVia(
+                    detail(
+                        stop(0, "SURC:D:LWN:1", PassType.STOP, Optional.empty()),
+                        stop(
+                            1,
+                            "SURC:S:HHU:3",
+                            PassType.STOP,
+                            Optional.of(new RouteApi.LineRef("SURC", "WS"))),
+                        stop(2, "SURC:S:TPC:1:01", PassType.PASS, Optional.empty()),
+                        stop(3, "SURC:S:TPC:1", PassType.TERMINATE, Optional.empty())),
+                    List.of("HHU"))));
+    GraphApi graph = mock(GraphApi.class);
+    when(graph.listAllSnapshots())
+        .thenReturn(
+            List.of(
+                new GraphApi.WorldGraphEntry(
+                    UUID.randomUUID(),
+                    new GraphApi.GraphSnapshot(
+                        List.of(
+                            node("SURC:S:HHU:1", GraphApi.NodeType.STATION),
+                            node("SURC:S:HHU:2", GraphApi.NodeType.STATION),
+                            node("SURC:S:HHU:3", GraphApi.NodeType.STATION),
+                            node("SURC:S:HHU:3:01", GraphApi.NodeType.WAYPOINT),
+                            node("SURC:S:TPC:1", GraphApi.NodeType.STATION)),
+                        List.of(),
+                        Instant.EPOCH,
+                        5,
+                        0,
+                        1))));
+    directory = new ApiPidsDirectory(operators, lines, stations, routes, graph, warnings::add);
+
+    directory.refresh();
+
+    assertEquals(
+        List.of(
+            new RouteStop(Optional.empty(), true, Optional.empty()),
+            new RouteStop(
+                Optional.of("SURC:HHU"), true, Optional.of(new RouteApi.LineRef("SURC", "WS"))),
+            new RouteStop(Optional.empty(), false, Optional.empty()),
+            new RouteStop(Optional.of("SURC:TPC"), true, Optional.empty())),
+        directory.stops("surc:mt:mt-3o_dpexp"),
+        "车库、咽喉不算车站");
+    assertEquals(List.of("HHU"), directory.via("SURC:MT:MT-3O_DPExp"));
+    assertEquals(List.of(), directory.via("SURC:DS:DS-1F_Full"), "没有配置为空");
+    assertEquals(3, directory.platformCount("surc:hhu"), "咽喉不算站台");
+    assertEquals(1, directory.platformCount("SURC:TPC"));
+    assertEquals(Optional.of(new Names("浦蓝线", "WS Line")), directory.lineName("surc", "ws"));
   }
 
   @Test
@@ -243,6 +300,20 @@ class ApiPidsDirectoryTest {
         List.of(stops),
         RouteApi.TerminalInfo.empty(),
         0);
+  }
+
+  private static RouteApi.RouteDetail withVia(RouteApi.RouteDetail detail, List<String> via) {
+    return new RouteApi.RouteDetail(
+        detail.info(),
+        detail.waypoints(),
+        detail.stops(),
+        detail.terminal(),
+        detail.totalDistanceBlocks(),
+        via);
+  }
+
+  private static GraphApi.ApiNode node(String id, GraphApi.NodeType type) {
+    return new GraphApi.ApiNode(id, type, new GraphApi.Position(0, 64, 0), Optional.empty());
   }
 
   private static RouteApi.StopInfo stop(

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -26,7 +27,7 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.junit.jupiter.api.Test;
 
-/** 站台屏快照：站牌行与时刻表取消行合并、按车站缓存、失败时沿用旧数据。 */
+/** 站台屏快照：站牌行与时刻表取消行合并、标出末班车、按车站缓存、失败时沿用旧数据。 */
 class PidsSnapshotProviderTest {
 
   private static final Instant T0 = Instant.parse("2026-09-30T12:00:00Z");
@@ -77,7 +78,7 @@ class PidsSnapshotProviderTest {
   }
 
   @Test
-  void queriesUseTheConfiguredHorizonAndLookBackForCancellations() {
+  void queriesUseTheConfiguredHorizonAndAWholeDayOfTimetable() {
     board();
     departures();
 
@@ -89,8 +90,50 @@ class PidsSnapshotProviderTest {
             isNull(),
             eq("CCC"),
             eq(T0.minus(PidsSnapshotProvider.CANCELLED_LOOKBACK)),
-            eq(HORIZON.plus(PidsSnapshotProvider.CANCELLED_LOOKBACK)),
-            anyInt());
+            eq(PidsSnapshotProvider.TIMETABLE_WINDOW),
+            eq(PidsSnapshotProvider.DEPARTURE_LOOKUP_LIMIT));
+  }
+
+  @Test
+  // 计划到发取一整天，取消行只列显示窗口里的。
+  void cancelledRowsBeyondTheHorizonAreNotShown() {
+    board();
+    departures(
+        departure(true, "SURN:S:CCC:2", T0.plusSeconds(300)),
+        departure(true, "SURN:S:CCC:2", T0.plus(HORIZON).plusSeconds(60)));
+    when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
+
+    assertEquals(1, provider.snapshot(CCC).rows().size());
+  }
+
+  @Test
+  void theLastDepartureOfTheServiceDayIsMarkedAsLastTrain() {
+    when(timetables.enabled()).thenReturn(true);
+    board(
+        boardRow(EtaApi.BoardPhase.FORECAST, T0.plusSeconds(270), Optional.empty()),
+        boardRow(EtaApi.BoardPhase.FORECAST, T0.plusSeconds(870), Optional.empty()));
+    departures(
+        departure(false, "SURN:S:CCC:2", T0.plusSeconds(300)),
+        departure(false, "SURN:S:CCC:2", T0.plusSeconds(900)),
+        departure(true, "SURN:S:CCC:2", T0.plusSeconds(1500)));
+    when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
+
+    List<PidsRow> rows = provider.snapshot(CCC).rows();
+
+    assertEquals(
+        List.of(false, true, false),
+        rows.stream().map(PidsRow::lastTrain).toList(),
+        "取消的那班不算，最后一班开出的是 15 分钟后那班");
+  }
+
+  @Test
+  void lastTrainsAreNotMarkedWhenTimetableRunsAreOff() {
+    when(timetables.enabled()).thenReturn(false);
+    board(boardRow(EtaApi.BoardPhase.FORECAST, T0.plusSeconds(270), Optional.empty()));
+    departures(departure(false, "SURN:S:CCC:2", T0.plusSeconds(300)));
+    when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
+
+    assertFalse(provider.snapshot(CCC).rows().get(0).lastTrain());
   }
 
   @Test
@@ -158,7 +201,7 @@ class PidsSnapshotProviderTest {
     provider.snapshot(CCC);
     verify(timetables, times(2)).departuresAt(any(), any(), any(), any(), anyInt());
 
-    now.set(T0.plus(TTL).plus(TTL).plus(PidsSnapshotProvider.CANCELLED_REFRESH));
+    now.set(T0.plus(TTL).plus(TTL).plus(PidsSnapshotProvider.TIMETABLE_REFRESH));
     provider.snapshot(CCC);
     verify(timetables, times(3)).departuresAt(any(), any(), any(), any(), anyInt());
   }

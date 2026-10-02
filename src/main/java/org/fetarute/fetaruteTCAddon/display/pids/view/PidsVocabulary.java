@@ -126,6 +126,21 @@ public final class PidsVocabulary {
     return names("notice." + notice.key() + ".body");
   }
 
+  /** 备注标签：末班车。 */
+  public String lastTrainTag() {
+    return primary("remark.last-train");
+  }
+
+  /** 备注标签：直通。 */
+  public String throughTag() {
+    return primary("remark.through");
+  }
+
+  /** 备注标签：经由。 */
+  public String viaTag() {
+    return primary("remark.via");
+  }
+
   /** 色牌上的停站类型；普通、其他不显示。 */
   public Optional<String> type(RouteApi.OperationType type) {
     return switch (type) {
