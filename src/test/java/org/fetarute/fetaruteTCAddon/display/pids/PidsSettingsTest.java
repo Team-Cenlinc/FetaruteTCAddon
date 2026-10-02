@@ -18,6 +18,7 @@ import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSettings.AppearanceMode;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSettings.AppearanceSettings;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.junit.jupiter.api.Test;
 
 class PidsSettingsTest {
@@ -109,6 +110,33 @@ class PidsSettingsTest {
     assertEquals(9, parsed.render().slideMainSeconds());
     assertEquals(7, warnings.size(), () -> "每个无效项一条警告: " + warnings);
     assertTrue(warnings.stream().allMatch(message -> message.contains("pids.yml")));
+  }
+
+  /** 宣传页清单：按写的顺序，不分大小写；重复的只留一次，未知的与安全提示页跳过并各警告一次；留空不放宣传页。 */
+  @Test
+  void courtesyNoticesFollowTheConfiguredList() {
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.set("render.notices", List.of("gap", "ORDER", "walk", "passing", "gap"));
+    List<String> warnings = new ArrayList<>();
+
+    PidsSettings parsed = PidsSettings.parse(yaml, loggerCollecting(warnings));
+
+    assertEquals(List.of(PidsNotice.GAP, PidsNotice.ORDER), parsed.render().notices());
+    assertEquals(2, warnings.size(), () -> "walk 与 passing 各一条: " + warnings);
+
+    YamlConfiguration empty = new YamlConfiguration();
+    empty.set("render.notices", List.of());
+    assertEquals(
+        List.of(), PidsSettings.parse(empty, Logger.getAnonymousLogger()).render().notices());
+
+    YamlConfiguration scalar = new YamlConfiguration();
+    scalar.set("render.notices", "order");
+    List<String> scalarWarnings = new ArrayList<>();
+    assertEquals(
+        PidsNotice.courtesy(),
+        PidsSettings.parse(scalar, loggerCollecting(scalarWarnings)).render().notices(),
+        "不是列表时取默认");
+    assertEquals(1, scalarWarnings.size());
   }
 
   @Test

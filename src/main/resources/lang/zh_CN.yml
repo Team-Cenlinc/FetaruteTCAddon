@@ -1228,31 +1228,44 @@ pids:
       through-secondary: "thru"
       via: "经由"
       via-secondary: "via"
-    # 2×1 停站屏：终点下面一行写从哪站起直通
+    # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题
     stop-list:
       through-from: "<station>起"
+      following: "后续列车"
+      following-secondary: "Following trains"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
+    # 1×3 与 2×1 上中文标题最多 4 字、英文标题约 18 个字母；说明中文最多 9 字、英文最多两行
     notice:
       order:
         title: "先下后上"
-        title-secondary: "Off first, then on"
-        body: "请让乘客先下车"
-        body-secondary: "Let passengers off first"
+        title-secondary: "Let others off first"
+        body: "请在车门两侧等候"
+        body-secondary: "Wait beside the doors"
       queue:
         title: "排队候车"
-        title-secondary: "Please queue"
-        body: "请勿拥挤，有序上车"
-        body-secondary: "No pushing, board in order"
+        title-secondary: "Queue to board"
+        body: "请勿拥挤，依次上车"
+        body-secondary: "Board in turn, without pushing"
       doors:
         title: "勿挡车门"
         title-secondary: "Keep doors clear"
         body: "车门关闭时请勿抢上"
-        body-secondary: "Do not rush as the doors close"
+        body-secondary: "Don't board as the doors close"
+      check:
+        title: "确认终点"
+        title-secondary: "Check your train"
+        body: "各次列车停站不同"
+        body-secondary: "Not all trains make the same stops"
+      gap:
+        title: "注意间隙"
+        title-secondary: "Mind the gap"
+        body: "上下车请留意脚下"
+        body-secondary: "Watch your step as you board"
       passing:
         title: "列车通过"
         title-secondary: "Train passing"
-        body: "请勿靠近站台边缘"
-        body-secondary: "Stand clear of the platform edge"
+        body: "请远离站台边缘"
+        body-secondary: "Stand back from the platform edge"
   # 测试卡：白底说明页；按纯文本读取，不解析 MiniMessage
   test-card:
     title: "站台屏待配置"

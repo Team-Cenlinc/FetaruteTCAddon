@@ -14,6 +14,8 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.Lateness;
@@ -114,6 +116,21 @@ public final class PidsViewBuilder {
       platforms = Set.copyOf(platforms);
       platformLabels = List.copyOf(platformLabels);
       placement = placement == null ? Optional.empty() : placement;
+    }
+
+    /** 同一要求，但不轮到备注（只取色牌、终点、到站的页用，免得备注轮换让内容标识跟着变）。 */
+    Request withoutRemarks() {
+      return new Request(
+          snapshot,
+          now,
+          zone,
+          theme,
+          platforms,
+          platformLabels,
+          capacity,
+          platformColumn,
+          placement,
+          false);
     }
 
     /** 不轮到备注。 */
@@ -256,12 +273,9 @@ public final class PidsViewBuilder {
    * @return 第 0 页；合成器按布局每页行数与时钟翻页
    */
   public PidsStopListView stopList(Request request) {
-    List<PidsRow> here =
-        request.snapshot().rows().stream()
-            .filter(row -> request.platforms().isEmpty() || row.mayUse(request.platforms()))
-            .filter(row -> !row.movedAwayFrom(request.platforms()))
-            .toList();
-    Optional<PidsRow> next = here.stream().filter(PidsViewBuilder::rideable).findFirst();
+    List<PidsRow> here = platformRows(request);
+    int index = nextIndex(here);
+    Optional<PidsRow> next = index < 0 ? Optional.empty() : Optional.of(here.get(index));
     Optional<PidsRow> cancelled =
         here.stream()
             .filter(row -> row.status() == PidsRow.Status.CANCELLED)
@@ -277,6 +291,83 @@ public final class PidsViewBuilder {
         0,
         vocabulary.stopListLabels(),
         bandColors(request, rows));
+  }
+
+  /**
+   * 2×1 停站屏的后续列车页：本屏站台下一班可以上车的列车之后，可以上车的列车与取消的班次（通过、本站终到、回库的不列）。
+   *
+   * <p>每班沿用站台屏一行的写法：色牌（取消时空心）、终点（取消时划掉）、多久到达与状态。
+   *
+   * @param request 显示要求；不看 {@code capacity}
+   * @param limit 一页放得下几班
+   * @return 没有下一班或下一班之后没有车时，列车为空，合成器跳过这一页
+   */
+  public PidsFollowingView following(Request request, int limit) {
+    Request plain = request.withoutRemarks();
+    List<PidsRow> here = platformRows(plain);
+    int next = nextIndex(here);
+    List<PidsView.Row> trains =
+        followingRows(here, next).limit(Math.max(0, limit)).map(row -> row(row, plain)).toList();
+    List<PidsView.Row> bands = next < 0 ? List.of() : List.of(row(here.get(next), plain));
+    return new PidsFollowingView(
+        request.theme(),
+        CLOCK.format(request.now().atZone(request.zone())),
+        request.platformLabels(),
+        trains,
+        vocabulary.following(),
+        vocabulary.labels().minutes(),
+        bandColors(request, bands));
+  }
+
+  /** 本屏站台有没有后续列车页可放：下一班之后还有可以上车的列车或取消的班次。只看行，不构建视图。 */
+  public boolean hasFollowing(Request request) {
+    List<PidsRow> here = platformRows(request);
+    return followingRows(here, nextIndex(here)).findAny().isPresent();
+  }
+
+  /**
+   * 本屏站台停车的列车里有没有不同的停站方式：不同线路，或同一线路既有快速又有各停。有才放“确认终点”宣传页。
+   *
+   * <p>读不到停站类型的交路不算另一种停站方式：只有一条线路时，要两种读得到的类型才算。
+   *
+   * @param request 显示要求；按站台过滤，看窗口内全部可以上车的列车
+   */
+  public boolean mixedServices(Request request) {
+    Map<String, Set<RouteApi.OperationType>> byLine =
+        platformRows(request).stream()
+            .filter(PidsViewBuilder::rideable)
+            .collect(
+                Collectors.groupingBy(
+                    PidsRow::lineName,
+                    Collectors.flatMapping(
+                        row -> directory.serviceType(row.routeId()).stream(), Collectors.toSet())));
+    return byLine.size() > 1 || byLine.values().stream().anyMatch(types -> types.size() > 1);
+  }
+
+  /** 本屏站台的行：会停在本屏站台之一、且没有改去别的股道（统屏不过滤）。 */
+  private static List<PidsRow> platformRows(Request request) {
+    return request.snapshot().rows().stream()
+        .filter(row -> request.platforms().isEmpty() || row.mayUse(request.platforms()))
+        .filter(row -> !row.movedAwayFrom(request.platforms()))
+        .toList();
+  }
+
+  /** 本屏站台下一班可以上车的列车在 {@code here} 里的下标；没有时为 -1。停站表与后续列车页共用这一口径。 */
+  private static int nextIndex(List<PidsRow> here) {
+    for (int i = 0; i < here.size(); i++) {
+      if (rideable(here.get(i))) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** 下一班之后可以上车的列车与取消的班次（通过、本站终到、回库的不列）。 */
+  private static Stream<PidsRow> followingRows(List<PidsRow> here, int next) {
+    return next < 0
+        ? Stream.empty()
+        : here.subList(next + 1, here.size()).stream()
+            .filter(row -> rideable(row) || row.status() == PidsRow.Status.CANCELLED);
   }
 
   /** 取消的班次：红色“取消”标签，第一行终点与计划时刻，第二行终点英文名。 */
@@ -300,6 +391,17 @@ public final class PidsViewBuilder {
         .filter(label -> label.tone() == Tone.AMBER || label.tone() == Tone.RED);
   }
 
+  /** 这一班的身份：运行中的车按列车名；计划班次按交路与计划时刻；其余（票据、预测，到站时刻会随估算变动）按交路与停靠序号。 同一交路相邻两班的色牌、终点与停站都一样，要靠它区分。 */
+  private static String identity(PidsRow row) {
+    return row.trainName()
+        .map(name -> "train:" + name)
+        .orElseGet(
+            () ->
+                row.status() == PidsRow.Status.PLANNED
+                    ? "planned:" + row.routeId() + "@" + row.expectedAt().getEpochSecond()
+                    : "route:" + row.routeId() + "#" + row.stopSequence());
+  }
+
   /** 乘客能上的车：不是取消、通过、本站终到或回库（还没开出的也算）。 */
   private static boolean rideable(PidsRow row) {
     return row.status() != PidsRow.Status.CANCELLED
@@ -312,6 +414,7 @@ public final class PidsViewBuilder {
     Optional<PidsRemarks.Trip> trip = remarks.trip(row);
     if (trip.isEmpty()) {
       return new PidsStopListView.Train(
+          identity(row),
           view.badge(),
           view.destination().names(),
           view.arrival(),
@@ -326,6 +429,7 @@ public final class PidsViewBuilder {
             .map(found -> throughNote(found, trip.get(), theme))
             .or(() -> via.stream().findFirst().map(station -> viaNote(station, theme)));
     return new PidsStopListView.Train(
+        identity(row),
         view.badge(),
         view.destination().names(),
         view.arrival(),

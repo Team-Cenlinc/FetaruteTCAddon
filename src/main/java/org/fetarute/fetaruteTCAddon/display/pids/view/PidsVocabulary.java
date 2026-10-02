@@ -148,6 +148,11 @@ public final class PidsVocabulary {
         names("minutes"), names("no-more-trains"), names("remark.via"), names("remark.through"));
   }
 
+  /** 2×1 后续列车页的标题。 */
+  public Names following() {
+    return names("stop-list.following");
+  }
+
   /** 2×1 停站屏终点下面一行：从哪站起直通。 */
   public String throughFrom(String station) {
     return primary("stop-list.through-from").replace(STATION, station);

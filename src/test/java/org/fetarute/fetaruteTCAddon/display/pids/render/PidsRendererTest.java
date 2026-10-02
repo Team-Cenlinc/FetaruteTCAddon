@@ -6,12 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsGlyphForm;
 import org.fetarute.fetaruteTCAddon.display.pids.fixtures.PidsFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -291,6 +293,85 @@ class PidsRendererTest {
     assertEquals(WS, rgb(order, 200, 124), "色带与主页同一位置");
     assertEquals(PidsTheme.DARK.amber(), rgb(passing, 33, 29), "安全提示用警示色");
     assertTrue(countColor(passing, 32, 28, 64, 64, PidsTheme.INK) > 0, "亮黄底上用深色图标");
+  }
+
+  /** 每张宣传页都有自己的图标：图标块里有浅色笔画，且各张互不相同。 */
+  @Test
+  void everyCourtesyPageHasItsOwnIcon() {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");
+    List<List<Integer>> icons = new ArrayList<>();
+
+    for (PidsNotice notice : PidsNotice.courtesy()) {
+      BufferedImage image =
+          renderer.renderNotice(
+              layout,
+              new PidsNoticeView(
+                  PidsTheme.DARK,
+                  notice,
+                  new Names("确认终点", "Check your train"),
+                  new Names("快速列车跨站停靠", "Rapid trains skip some stations"),
+                  List.of(WS)));
+      assertTrue(
+          countColor(image, 40, 36, 48, 48, PidsTheme.PAPER) > 48 * 4, () -> notice + " 有图标");
+      icons.add(Arrays.stream(image.getRGB(40, 36, 48, 48, null, 0, 48)).boxed().toList());
+    }
+
+    assertEquals(icons.size(), Set.copyOf(icons).size(), "各张宣传页的图标互不相同");
+  }
+
+  /** 2×1 后续列车页：首行写页标题，每班色牌与多久到达一行、终点中英文两行，班与班之间一条分隔线；取消的班次在右侧写“取消 / Cancelled”， 晚点写在终点中英文后面。 */
+  @Test
+  void followingPagesListTheLaterTrains() {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
+    Badge mt = new Badge("MT", Optional.of("各停"), WS, false);
+    PidsView.Row normal =
+        new PidsView.Row(
+            mt,
+            new Destination(new Names("南渡", "Nam Toa"), Tone.NORMAL, false),
+            new PlatformCell("2", false),
+            new Arrival(ArrivalMode.COUNTDOWN, 12, Tone.NORMAL, Optional.empty()));
+    PidsView.Row cancelled =
+        new PidsView.Row(
+            new Badge("MT", Optional.of("各停"), WS, true),
+            new Destination(new Names("绿洲农场", "Oasis Farmland"), Tone.MUTED, true),
+            new PlatformCell("2", true),
+            new Arrival(
+                ArrivalMode.DASH,
+                0,
+                Tone.MUTED,
+                Optional.of(Label.of(new Names("取消", "Cancelled"), Tone.RED))));
+    PidsView.Row late =
+        new PidsView.Row(
+            mt,
+            new Destination(new Names("南渡", "Nam Toa"), Tone.NORMAL, false),
+            new PlatformCell("2", false),
+            new Arrival(
+                ArrivalMode.COUNTDOWN,
+                19,
+                Tone.NORMAL,
+                Optional.of(Label.of(new Names("晚点 3 分", "Late 3 min"), Tone.AMBER))));
+    PidsFollowingView view =
+        new PidsFollowingView(
+            PidsTheme.DARK,
+            "21:40",
+            List.of("2"),
+            List.of(normal, cancelled, late),
+            new Names("后续列车", "Following trains"),
+            new Names("分", "min"),
+            List.of(WS));
+
+    BufferedImage image = renderer.renderFollowing(layout, view);
+
+    assertEquals(128, image.getWidth());
+    assertEquals(256, image.getHeight());
+    assertTrue(countColor(image, 32, 0, 92, 28, PidsTheme.DARK.text()) > 0, "首行写页标题");
+    // 每班 50 高、间隔 4：第一班 32 起，第二班 86 起，第三班 140 起；分隔线在间隔中间
+    assertEquals(PidsTheme.DARK.panel(), rgb(image, 20, 84), "第一、二班之间的分隔线");
+    assertTrue(countColor(image, 80, 86, 44, 12, PidsTheme.DARK.red()) > 0, "取消：右侧写中文");
+    assertTrue(countColor(image, 70, 99, 54, 10, PidsTheme.DARK.red()) > 0, "取消：中文下面写英文 Cancelled");
+    assertTrue(countColor(image, 4, 167, 120, 12, PidsTheme.DARK.amber()) > 0, "晚点写在终点中文后面");
+    assertTrue(
+        countColor(image, 4, 180, 120, 10, PidsTheme.DARK.amber()) > 0, "英文终点后面写 Late 3 min");
   }
 
   /** 空位页：车厢按座位情况着色（充足绿、紧张红），车头一节在前进方向一端挖小窗；3 节这样的短编组不拉宽、整列居中；站台线与图例都在， 色带与主页同一位置。 */
@@ -589,6 +670,7 @@ class PidsRendererTest {
         List.of("2"),
         Optional.of(
             new PidsStopListView.Train(
+                "train:t1",
                 new Badge("WS", Optional.of("各停"), WS, false),
                 new Names("南渡", "Nam Toa"),
                 arrival,

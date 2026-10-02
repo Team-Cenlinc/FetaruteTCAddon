@@ -5,14 +5,18 @@ import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView.Note;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView.Stop;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView.Train;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Arrival;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.ArrivalMode;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Badge;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Label;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
 
 /**
  * 2×1 停站屏主体（{@link PidsLayout.StopList}）的画法。
@@ -28,6 +32,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  * </ul>
  *
  * <p>终点下面一行依次写：下一班之前本站台被取消的班次、直通、经由（{@link PidsStopListView#note()}）。
+ *
+ * <p>后续列车页（{@link #drawFollowing}）：首行写页标题，其下每班一块——色牌与多久到达一行（与首行同一画法，数字小一号），终点中英文两行；
+ * 晚点、站台待定等写在终点中英文后面（每行放不下就不写那一行），取消的班次右侧写“取消 / Cancelled”。
  */
 final class PidsStopListPainter {
 
@@ -70,6 +77,12 @@ final class PidsStopListPainter {
   /** 分钟数与“分 / min”的间距，也是分钟数与色牌至少留的空隙。 */
   private static final int MINUTES_GAP = 2;
 
+  /** 后续列车页的分钟数字号。 */
+  private static final int FOLLOWING_MINUTES = 20;
+
+  /** 后续列车页终点与其后状态的间距。 */
+  private static final int FOLLOWING_TAG_GAP = 4;
+
   /** 最底下一行状态中英文之间、状态与页码之间的间距。 */
   private static final int FOOTER_GAP = 4;
 
@@ -107,21 +120,149 @@ final class PidsStopListPainter {
 
   /** 首行：色牌，靠右的多久到达；分钟数伸到色牌上时改用小字号（与空位页同一画法）。 */
   private void drawHeader(PidsLayout.StopList list, Badge badge, Arrival arrival, Names minutes) {
-    int top = list.y();
-    int badgeX = list.x() + list.badgeX();
+    drawBadgeLine(
+        list,
+        list.x() + list.badgeX(),
+        list.y(),
+        list.headerHeight(),
+        badge,
+        arrival,
+        minutes,
+        list.minutesSize());
+  }
+
+  /** 一行色牌与靠右的多久到达，都在这一行里竖向居中。 */
+  private void drawBadgeLine(
+      PidsLayout.StopList list,
+      int badgeX,
+      int top,
+      int height,
+      Badge badge,
+      Arrival arrival,
+      Names minutes,
+      int numberSize) {
     renderer.drawBadgeAt(
-        p, badgeX, top + (list.headerHeight() - list.badge().height()) / 2, list.badge(), badge);
+        p, badgeX, top + (height - list.badge().height()) / 2, list.badge(), badge);
     TextStyle unit = list.unit();
     renderer.drawStackedArrival(
         p,
         arrival,
         minutes,
         unit,
-        list.minutesSize(),
+        numberSize,
         MINUTES_GAP,
         badgeX + list.badge().width() + MINUTES_GAP,
         list.x() + list.width() - list.inset(),
-        top + (list.headerHeight() - unit.size() - unit.gap() - unit.secondarySize()) / 2);
+        top + (height - unit.size() - unit.gap() - unit.secondarySize()) / 2);
+  }
+
+  /** 后续列车页：首行写页标题（从色牌左缘起），其下每班一块，块与块之间画一条分隔线。 */
+  void drawFollowing(PidsLayout.StopList list, PidsFollowingView view) {
+    drawTitle(list, view.title());
+    int left = list.x() + list.inset();
+    int right = list.x() + list.width() - list.inset();
+    int top = list.followingTop();
+    int pitch = list.followingRowHeight() + PidsLayout.StopList.FOLLOWING_GAP;
+    for (int i = 0; i < view.trains().size(); i++) {
+      if (i > 0) {
+        p.fill(left, top - PidsLayout.StopList.FOLLOWING_GAP / 2, right - left, 1, theme.panel());
+      }
+      drawFollowingTrain(list, view.trains().get(i), left, right, top, view.minutes());
+      top += pitch;
+    }
+  }
+
+  /** 页标题：中英文上下叠放，在首行里竖向居中。 */
+  private void drawTitle(PidsLayout.StopList list, Names title) {
+    TextStyle style = list.stop();
+    int x = list.x() + list.badgeX();
+    int top =
+        list.y() + (list.headerHeight() - style.size() - style.gap() - style.secondarySize()) / 2;
+    p.text(title.primary(), style.size(), x, top, theme.text());
+    p.regular(
+        title.secondary(),
+        style.secondarySize(),
+        x,
+        top + style.size() + style.gap(),
+        theme.muted(),
+        false);
+  }
+
+  /**
+   * 后续列车的一班：色牌与多久到达一行，终点中英文两行。取消的班次色牌空心、终点划掉，右侧写状态（中英文上下叠放）；
+   * 晚点、站台待定、计划这类状态写在终点中英文后面，每行各自先试全称、再试短写法，放不下就不写（终点不让位）。
+   */
+  private void drawFollowingTrain(
+      PidsLayout.StopList list, PidsView.Row row, int left, int right, int top, Names minutes) {
+    Arrival arrival = row.arrival();
+    boolean dash = arrival.mode() == ArrivalMode.DASH;
+    drawBadgeLine(
+        list, left, top, list.badge().height(), row.badge(), arrival, minutes, FOLLOWING_MINUTES);
+    if (dash) {
+      arrival.status().ifPresent(label -> drawStatusRight(list, label, right, top));
+    }
+    TextStyle style = list.stop();
+    int nameTop = top + list.badge().height() + PidsLayout.StopList.FOLLOWING_NAME_GAP;
+    int secondaryTop = nameTop + style.size() + style.gap();
+    Names names = row.destination().names();
+    int width = right - left;
+    Optional<Label> tag =
+        dash
+            ? Optional.empty()
+            : arrival.status().filter(label -> label.boxed() || label.tone() != Tone.NORMAL);
+    int nameColor = p.color(row.destination().tone());
+    int nameWidth =
+        p.text(
+            p.ellipsize(names.primary(), style.size(), width),
+            style.size(),
+            left,
+            nameTop,
+            nameColor,
+            row.destination().struck());
+    int secondaryWidth =
+        p.regular(
+            p.ellipsizeWords(names.secondary(), style.secondarySize(), width),
+            style.secondarySize(),
+            left,
+            secondaryTop,
+            theme.muted(),
+            false);
+    tag.ifPresent(
+        label -> {
+          int color = p.color(label.tone());
+          List<Names> written =
+              label.compact().map(c -> List.of(label.text(), c)).orElse(List.of(label.text()));
+          int primaryX = left + nameWidth + FOLLOWING_TAG_GAP;
+          written.stream()
+              .map(Names::primary)
+              .filter(text -> primaryX + p.width(text, style.size()) <= right)
+              .findFirst()
+              .ifPresent(text -> p.text(text, style.size(), primaryX, nameTop, color));
+          int secondaryX = left + secondaryWidth + FOLLOWING_TAG_GAP;
+          written.stream()
+              .map(Names::secondary)
+              .filter(text -> secondaryX + p.regularWidth(text, style.secondarySize()) <= right)
+              .findFirst()
+              .ifPresent(
+                  text ->
+                      p.regular(
+                          text, style.secondarySize(), secondaryX, secondaryTop, color, false));
+        });
+  }
+
+  /** 取消的班次在多久到达的位置写状态：中英文上下叠放、靠右，按色调着色。 */
+  private void drawStatusRight(PidsLayout.StopList list, Label label, int right, int top) {
+    TextStyle unit = list.unit();
+    int color = p.color(label.tone());
+    int textTop =
+        top + (list.badge().height() - unit.size() - unit.gap() - unit.secondarySize()) / 2;
+    p.textRight(label.text().primary(), unit.size(), right, textTop, color);
+    p.regularRight(
+        label.text().secondary(),
+        unit.secondarySize(),
+        right,
+        textTop + unit.size() + unit.gap(),
+        color);
   }
 
   /** 最底下一行：左侧要提醒的状态（站台待定、站台变更、晚点，按色调着色），右侧页码（多于一页时）。 */

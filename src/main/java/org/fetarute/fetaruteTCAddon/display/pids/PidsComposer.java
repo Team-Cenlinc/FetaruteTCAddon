@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -38,7 +39,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式或未绑定车站：测试卡，列出布局、识别出的车站与屏幕编号
- *   <li>停站屏（布局带停站表组件）：本站台下一班的停站表，停站多时翻页，不轮播宣传页与空位页；通过列车临近时同样锁定安全提示页
+ *   <li>停站屏（布局带停站表组件）：本站台下一班的停站表（停站多时翻页）、后续列车页与宣传页依次轮换（{@link PidsCarousel#stopList}），
+ *       不放空位页；通过列车临近时同样锁定安全提示页
  *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页； 所有到发页的英文与备注按 {@link
  *       PidsCarousel#remarks} 轮换
  * </ul>
@@ -115,6 +117,9 @@ public final class PidsComposer {
 
   /** 2×1 停站屏的内容标识：视图含当前页号。 */
   record StopListKey(PidsLayout layout, PidsStopListView view) {}
+
+  /** 2×1 后续列车页的内容标识。 */
+  record FollowingKey(PidsLayout layout, PidsFollowingView view) {}
 
   /**
    * @param screenId 地图物品上记的屏幕 ID
@@ -224,9 +229,11 @@ public final class PidsComposer {
           carousel.page(
               screen.id(),
               station,
-              passingSoon(screen, snapshot),
-              views.hasVacancy(request),
-              arrivingHere(screen, snapshot),
+              new PidsCarousel.Signals(
+                  passingSoon(screen, snapshot),
+                  views.hasVacancy(request),
+                  arrivingHere(screen, snapshot),
+                  courtesy(request)),
               now,
               settings.get().render());
       if (slide.isPresent() && slide.get() instanceof PidsCarousel.Slide.Notice page) {
@@ -252,7 +259,7 @@ public final class PidsComposer {
     return new PidsContent(notice, () -> renderer.renderNotice(layout, notice));
   }
 
-  /** 2×1 停站屏：下一班的停站表，停站多时翻页；不轮播宣传页与空位页，通过列车临近时锁定安全提示页。 */
+  /** 2×1 停站屏：下一班的停站表（停站多时翻页）、后续列车页、宣传页依次轮换；通过列车临近时锁定安全提示页。 */
   private PidsContent stopList(
       PidsScreen screen,
       PidsLayout layout,
@@ -261,21 +268,47 @@ public final class PidsComposer {
       PidsViewBuilder.Request request,
       Instant now) {
     PidsStopListView full = views.stopList(request);
-    if (carousel.pinned(screen.id(), passingSoon(screen, snapshot), now, settings.get().render())) {
-      return notice(layout, full.theme(), full.bandColors(), PidsNotice.PASSING);
-    }
     int pages =
         full.train()
             .map(train -> widget.pages(train.stops().size(), full.note().isPresent()))
             .orElse(1);
     Object train =
-        full.train()
-            .<Object>map(found -> List.of(found.badge(), found.destination(), found.stops()))
-            .orElse(List.of());
-    PidsStopListView view =
-        full.withPage(carousel.stopPage(screen.id(), train, now, settings.get().render(), pages));
-    return new PidsContent(
-        new StopListKey(layout, view), () -> renderer.renderStopList(layout, view));
+        full.train().<Object>map(found -> List.of(found.id(), found.stops())).orElse(List.of());
+    PidsCarousel.StopListSlide slide =
+        carousel.stopList(
+            screen.id(),
+            new PidsCarousel.Signals(
+                passingSoon(screen, snapshot),
+                false,
+                arrivingHere(screen, snapshot),
+                courtesy(request)),
+            new PidsCarousel.StopListPages(
+                train, pages, widget.followingRows() > 0 && views.hasFollowing(request)),
+            now,
+            settings.get().render());
+    return switch (slide) {
+      case PidsCarousel.StopListSlide.Stops stops -> {
+        PidsStopListView view = full.withPage(stops.page());
+        yield new PidsContent(
+            new StopListKey(layout, view), () -> renderer.renderStopList(layout, view));
+      }
+      case PidsCarousel.StopListSlide.Following ignored -> {
+        PidsFollowingView following = views.following(request, widget.followingRows());
+        yield new PidsContent(
+            new FollowingKey(layout, following), () -> renderer.renderFollowing(layout, following));
+      }
+      case PidsCarousel.Slide.Notice page -> notice(
+          layout, full.theme(), full.bandColors(), page.notice());
+    };
+  }
+
+  /** 本屏轮换的宣传页：按配置的顺序；“确认终点”只在本屏站台有不同停站方式（多条线路、快慢车）时放。 */
+  private List<PidsNotice> courtesy(PidsViewBuilder.Request request) {
+    List<PidsNotice> configured = settings.get().render().notices();
+    if (!configured.contains(PidsNotice.CHECK) || views.mixedServices(request)) {
+      return configured;
+    }
+    return configured.stream().filter(notice -> notice != PidsNotice.CHECK).toList();
   }
 
   /** 屏幕所在世界与站在屏幕前看去的“向右”。 */

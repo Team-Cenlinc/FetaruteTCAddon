@@ -1,7 +1,9 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.awt.image.BufferedImage;
@@ -27,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsFacing;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -262,7 +265,7 @@ class PidsComposerTest {
 
   /** 2×1 停站屏：取本站台下一班可以上车的车（通过车不算）。 */
   @Test
-  void stopListScreensShowTheNextTrainAndNeverRotateNotices() {
+  void stopListScreensShowTheNextRideableTrain() {
     settings = withSlides(12, 4);
     PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
     PidsRow passing = passing("3");
@@ -295,6 +298,103 @@ class PidsComposerTest {
     assertEquals(256, image.getHeight());
   }
 
+  /** “确认终点”只在本站台有不同停站方式时轮到：只停一条线路时那一段改放下一张。 */
+  @Test
+  void theCheckPageOnlyRotatesOnMixedPlatforms() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    // 第四段副页：五张宣传页时轮到“确认终点”，去掉它后轮到“注意间隙”
+    now = roundStart().plusSeconds(16 * 3 + 13);
+
+    rows = List.of(row("MT", 120), row("WS", 300));
+    assertEquals(PidsNotice.CHECK, noticeOn(screen, 384, 128));
+
+    PidsScreen single = register(PidsScreen.Mode.LIVE, Set.of());
+    rows = List.of(row("MT", 120), row("MT", 300));
+    assertNotEquals(PidsNotice.CHECK, noticeOn(single, 384, 128));
+  }
+
+  /** 2×1：同一交路的下一班开走、后一班接上时，色牌、终点、停站都一样，仍从停站表第 1 页起。 */
+  @Test
+  void theNextTrainOfTheSameRouteStartsFromTheFirstPage() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    rows = List.of(named("a", 120), named("b", 600));
+    now = NOW;
+    composer.content(Optional.of(screen.id()), 128, 256);
+    now = NOW.plusSeconds(8);
+    assertInstanceOf(
+        PidsComposer.FollowingKey.class,
+        composer.content(Optional.of(screen.id()), 128, 256).orElseThrow().key());
+
+    rows = List.of(named("b", 480));
+    now = NOW.plusSeconds(9);
+
+    PidsStopListView view =
+        assertInstanceOf(
+                PidsComposer.StopListKey.class,
+                composer.content(Optional.of(screen.id()), 128, 256).orElseThrow().key())
+            .view();
+    assertEquals(0, view.page());
+  }
+
+  private static PidsRow named(String train, int seconds) {
+    PidsRow row = row("MT", seconds);
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        false,
+        false,
+        false,
+        Optional.of(train));
+  }
+
+  /** 2×1 停站屏：停站表之后是后续列车页，再是一张宣传页；下一班进站时只翻停站表。 */
+  @Test
+  void stopListScreensTurnToTheFollowingTrainsAndACourtesyPage() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    rows = List.of(row("MT", 120), row("WS", 300), row("MT", 600));
+    now = NOW;
+    assertInstanceOf(
+        PidsComposer.StopListKey.class,
+        composer.content(Optional.of(screen.id()), 128, 256).orElseThrow().key());
+
+    now = NOW.plusSeconds(8);
+    PidsContent following = composer.content(Optional.of(screen.id()), 128, 256).orElseThrow();
+    PidsFollowingView view =
+        assertInstanceOf(PidsComposer.FollowingKey.class, following.key()).view();
+    assertEquals(List.of("WS", "MT"), view.trains().stream().map(t -> t.badge().code()).toList());
+    assertEquals(256, following.image().get().getHeight());
+
+    now = NOW.plusSeconds(16);
+    assertFalse(noticeOn(screen, 128, 256).warning(), "之后是一张宣传页");
+
+    PidsScreen held = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    rows = List.of(arriving("3"), row("MT", 300));
+    now = NOW;
+    composer.content(Optional.of(held.id()), 128, 256);
+    now = NOW.plusSeconds(8);
+    assertInstanceOf(
+        PidsComposer.StopListKey.class,
+        composer.content(Optional.of(held.id()), 128, 256).orElseThrow().key(),
+        "下一班进站时留在停站表");
+  }
+
+  private PidsNotice noticeOn(PidsScreen screen, int width, int height) {
+    return assertInstanceOf(
+            PidsNoticeView.class,
+            composer.content(Optional.of(screen.id()), width, height).orElseThrow().key())
+        .notice();
+  }
+
   /** 主页与副页停留时间（秒）；其余取默认值。 */
   private static PidsSettings withSlides(int mainSeconds, int noticeSeconds) {
     PidsSettings defaults = PidsSettings.defaults();
@@ -319,10 +419,10 @@ class PidsComposerTest {
         defaults.broadcast());
   }
 
-  /** 这一刻 HHU 的屏幕刚翻回主页（一轮 48 秒）。 */
+  /** 这一刻 HHU 的屏幕刚翻回主页（主页 12 秒、副页 4 秒，一轮十段 160 秒）。 */
   private static Instant roundStart() {
     long base = NOW.getEpochSecond();
-    return Instant.ofEpochSecond(base - Math.floorMod(base + PidsCarousel.offset(HHU, 48), 48));
+    return Instant.ofEpochSecond(base - Math.floorMod(base + PidsCarousel.offset(HHU, 160), 160));
   }
 
   private static PidsRow arriving(String platform) {

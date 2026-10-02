@@ -26,8 +26,11 @@ render:
   # 轮播的屏翻回主页先写英文
   english-seconds: 6
   remark-seconds: 4
-  # 2×1 停站屏停站多、分页时每页停留多少秒
+  # 2×1 停站屏停站多、分页时每页停留多少秒；之后的后续列车页也停这么久，再放一张宣传页（停 slide-notice-seconds）
   stop-page-seconds: 8
+  # 轮换哪几张宣传页、按什么顺序：order 先下后上、queue 排队候车、doors 勿挡车门、
+  # check 确认终点（只在快慢车或多条线路共用的站台出现）、gap 注意间隙；留空 [] 不放宣传页
+  notices: [order, queue, doors, check, gap]
 
 limits:
   # 全服屏幕数量的安全上限；单个车站的屏幕数量不设固定上限

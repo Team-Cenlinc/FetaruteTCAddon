@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.display.pids.view;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
@@ -32,6 +34,8 @@ class PidsStopListViewTest {
   private static final PidsStationKey PPK = new PidsStationKey("SURC", "PPK");
   private static final String THROUGH = "SURC:MT:THRU";
   private static final String PLAIN = "SURC:MT:PLAIN";
+  private static final String LOCAL = "SURC:MT:LOCAL";
+  private static final String UNTYPED = "SURC:MT:UNTYPED";
   private static final int MT = 0xD920D9;
   private static final int WS = 0x70DEEE;
   private static final int DS = 0xF6A000;
@@ -67,6 +71,8 @@ class PidsStopListViewTest {
                     case "pids.board.remark.through-secondary" -> "thru";
                     case "pids.board.remark.via" -> "经由";
                     case "pids.board.remark.via-secondary" -> "via";
+                    case "pids.board.stop-list.following" -> "后续列车";
+                    case "pids.board.stop-list.following-secondary" -> "Following trains";
                     default -> key;
                   }));
 
@@ -206,6 +212,95 @@ class PidsStopListViewTest {
     assertTrue(view(cancelled).note().isPresent(), "没有下一班时也写出取消");
   }
 
+  /** 后续列车页：下一班之后可以上车的列车与取消的班次，按先后、不多于一页放得下的；通过、本站终到、回库与别的站台的不列。 */
+  @Test
+  void followingTrainsComeAfterTheNextOne() {
+    PidsRow next = row(PLAIN, PidsRow.Status.EN_ROUTE, "2");
+    PidsRow passing = copy(row(THROUGH, PidsRow.Status.EN_ROUTE, "2"), true, false, false);
+    PidsRow terminating = copy(row(THROUGH, PidsRow.Status.EN_ROUTE, "2"), false, true, false);
+    PidsRow cancelled = row(THROUGH, PidsRow.Status.CANCELLED, "2");
+    PidsRow elsewhere = row(PLAIN, PidsRow.Status.EN_ROUTE, "5");
+    PidsRow later = row(THROUGH, PidsRow.Status.PLANNED, "2");
+    PidsRow last = row(LOCAL, PidsRow.Status.PLANNED, "2");
+
+    PidsFollowingView view =
+        following(4, next, passing, terminating, cancelled, elsewhere, later, last);
+
+    assertEquals(new Names("后续列车", "Following trains"), view.title());
+    assertEquals(
+        List.of(true, false, false),
+        view.trains().stream().map(train -> train.badge().hollow()).toList(),
+        "取消的班次（空心色牌）在前，下一班本身不列");
+    assertTrue(view.trains().get(0).destination().struck());
+    assertEquals(2, following(2, next, cancelled, later, last).trains().size(), "不多于一页放得下的");
+    assertEquals(
+        1,
+        following(4, passing, cancelled, later, last).trains().size(),
+        "下一班之前取消的班次写在停站表页，不进后续列车");
+    assertTrue(following(4, passing, cancelled).trains().isEmpty(), "没有可以上车的下一班时不列");
+  }
+
+  /** 后续列车页不带备注：轮到备注时内容也不变，免得备注轮换让这一页反复重绘。 */
+  @Test
+  void followingTrainsIgnoreTheRemarkTurn() {
+    net.via.put(THROUGH, List.of("KPO"));
+    PidsRow[] rows = {
+      row(PLAIN, PidsRow.Status.EN_ROUTE, "2"), row(THROUGH, PidsRow.Status.PLANNED, "2")
+    };
+
+    PidsFollowingView english = builder.following(request(false, rows), 4);
+    PidsFollowingView remark = builder.following(request(true, rows), 4);
+
+    assertEquals(english, remark);
+    assertTrue(remark.trains().get(0).destination().remark().isEmpty());
+  }
+
+  /** 同一交路相邻两班色牌、终点、停站都一样，身份不同：运行中的按列车名，计划班次按计划时刻。 */
+  @Test
+  void trainsOfTheSameRouteHaveDifferentIds() {
+    String a =
+        view(named(row(PLAIN, PidsRow.Status.EN_ROUTE, "2"), "a")).train().orElseThrow().id();
+    String b =
+        view(named(row(PLAIN, PidsRow.Status.EN_ROUTE, "2"), "b")).train().orElseThrow().id();
+    String arriving =
+        view(named(row(PLAIN, PidsRow.Status.ARRIVING, "2"), "a")).train().orElseThrow().id();
+    String planned = view(row(PLAIN, PidsRow.Status.PLANNED, "2")).train().orElseThrow().id();
+
+    assertNotEquals(a, b);
+    assertEquals(a, arriving, "同一辆车状态变了身份不变");
+    assertNotEquals(a, planned);
+  }
+
+  /** 不同线路、或同一线路的快速与各停都在本站台停车，才放“确认终点”；通过车与别的站台的车不算。 */
+  @Test
+  void mixedServicesNeedTwoLinesOrTwoStoppingPatterns() {
+    PidsRow rapid = row(PLAIN, PidsRow.Status.EN_ROUTE, "2");
+    PidsRow otherRapid = row(THROUGH, PidsRow.Status.PLANNED, "2");
+    PidsRow local = row(LOCAL, PidsRow.Status.PLANNED, "2");
+    PidsRow waterside =
+        new PidsRow(
+            PidsRow.Status.PLANNED,
+            "WS",
+            "SURC:WS:PLAIN",
+            "NTA",
+            Optional.of("SURC:NTA"),
+            "2",
+            NOW.plusSeconds(300),
+            OptionalLong.empty(),
+            0,
+            false,
+            false,
+            false,
+            Optional.empty());
+
+    assertFalse(mixed(rapid, otherRapid), "同一线路的快速");
+    assertTrue(mixed(rapid, local), "快速与各停");
+    assertTrue(mixed(rapid, waterside), "两条线路");
+    assertFalse(mixed(rapid, copy(local, true, false, false)), "通过车不算");
+    assertFalse(mixed(rapid, row(LOCAL, PidsRow.Status.PLANNED, "5")), "别的站台不算");
+    assertFalse(mixed(rapid, row(UNTYPED, PidsRow.Status.PLANNED, "2")), "读不到停站类型的不算另一种");
+  }
+
   @Test
   void anUnknownStopSequenceGivesAnEmptyList() {
     PidsRow row = row(THROUGH, PidsRow.Status.EN_ROUTE, "2");
@@ -233,16 +328,50 @@ class PidsStopListViewTest {
   }
 
   private PidsStopListView view(PidsRow... rows) {
-    return builder.stopList(
-        new PidsViewBuilder.Request(
-            new PidsSnapshot(PPK, NOW, List.of(rows)),
-            NOW,
-            ZoneId.of("Asia/Shanghai"),
-            PidsTheme.DARK,
-            Set.of("2"),
-            List.of("2"),
-            0,
-            false));
+    return builder.stopList(request(rows));
+  }
+
+  private PidsFollowingView following(int limit, PidsRow... rows) {
+    return builder.following(request(rows), limit);
+  }
+
+  private boolean mixed(PidsRow... rows) {
+    return builder.mixedServices(request(rows));
+  }
+
+  private static PidsViewBuilder.Request request(PidsRow... rows) {
+    return request(false, rows);
+  }
+
+  private static PidsViewBuilder.Request request(boolean remarks, PidsRow... rows) {
+    return new PidsViewBuilder.Request(
+        new PidsSnapshot(PPK, NOW, List.of(rows)),
+        NOW,
+        ZoneId.of("Asia/Shanghai"),
+        PidsTheme.DARK,
+        Set.of("2"),
+        List.of("2"),
+        0,
+        false,
+        Optional.empty(),
+        remarks);
+  }
+
+  private static PidsRow named(PidsRow row, String train) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        false,
+        false,
+        false,
+        Optional.of(train));
   }
 
   private static RouteStop stop(String station, boolean stops, RouteApi.LineRef change) {
@@ -310,7 +439,11 @@ class PidsStopListViewTest {
 
     @Override
     public Optional<RouteApi.OperationType> serviceType(String routeId) {
-      return Optional.of(RouteApi.OperationType.RAPID);
+      if (UNTYPED.equals(routeId)) {
+        return Optional.empty();
+      }
+      return Optional.of(
+          LOCAL.equals(routeId) ? RouteApi.OperationType.LOCAL : RouteApi.OperationType.RAPID);
     }
 
     @Override

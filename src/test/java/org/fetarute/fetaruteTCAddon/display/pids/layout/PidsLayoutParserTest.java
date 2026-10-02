@@ -63,7 +63,7 @@ class PidsLayoutParserTest {
     assertTrue(station.departures().orElseThrow().header().isPresent());
   }
 
-  /** 2×1 停站屏：竖屏 128×256，有直通或经由一行时每页 6 站、没有时 7 站。 */
+  /** 2×1 停站屏：竖屏 128×256，有直通或经由一行时每页 6 站、没有时 7 站；后续列车页每页 4 班。 */
   @Test
   void theBuiltInStopListLayoutFitsSixOrSevenStops() {
     PidsLayout layout = PidsFixtures.builtInLayout("platform-2x1");
@@ -76,6 +76,9 @@ class PidsLayoutParserTest {
     assertEquals(7, list.rowsPerPage(false));
     assertEquals(2, list.pages(8, false));
     assertEquals(1, list.pages(0, true));
+    assertEquals(32, list.followingTop(), "后续列车页：首行 28 写标题，隔 4 起列");
+    assertEquals(50, list.followingRowHeight(), "色牌 24 + 3 + 站名 12 + 1 + 英文 10");
+    assertEquals(4, list.followingRows(), "后续列车页每页 4 班");
   }
 
   /** 停站屏只画站台号、时钟、色带与停站表：带上到发表、站名、换乘条的布局作废，免得写了却不显示。 */

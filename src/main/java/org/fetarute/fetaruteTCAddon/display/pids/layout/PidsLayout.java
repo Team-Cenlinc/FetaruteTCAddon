@@ -324,6 +324,29 @@ public record PidsLayout(
       int rows = rowsPerPage(note);
       return Math.max(1, (stops + rows - 1) / rows);
     }
+
+    /** 后续列车页：首行下面的间距，也是每班之间的间距（分隔线画在其中）。 */
+    public static final int FOLLOWING_GAP = 4;
+
+    /** 后续列车页：色牌一行与终点之间的间距。 */
+    public static final int FOLLOWING_NAME_GAP = 3;
+
+    /** 后续列车页第一班的顶边：首行写页标题，其下隔 {@value #FOLLOWING_GAP}。 */
+    public int followingTop() {
+      return y + headerHeight + FOLLOWING_GAP;
+    }
+
+    /** 后续列车页每班的高：色牌一行（色牌高）、终点中文与英文两行（与站名同一字号）。 */
+    public int followingRowHeight() {
+      return badge.height() + FOLLOWING_NAME_GAP + stop.size() + stop.gap() + stop.secondarySize();
+    }
+
+    /** 后续列车页一页放得下几班（不留页码一行）。 */
+    public int followingRows() {
+      return Math.max(
+          0,
+          (y + height - followingTop() + FOLLOWING_GAP) / (followingRowHeight() + FOLLOWING_GAP));
+    }
   }
 
   /**

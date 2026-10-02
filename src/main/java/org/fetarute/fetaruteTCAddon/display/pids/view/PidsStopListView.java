@@ -57,6 +57,7 @@ public record PidsStopListView(
   /**
    * 下一班。
    *
+   * @param id 这一班的身份：运行中的车为列车名，计划班次为交路与计划时刻，其余（票据、预测）为交路与停靠序号；同一交路相邻两班也不相同，停站屏据此换车从第 1 页起
    * @param badge 线路色牌（与站台屏首行相同）
    * @param destination 终点
    * @param arrival 多久到达（与站台屏首行相同）
@@ -65,6 +66,7 @@ public record PidsStopListView(
    * @param stops 本站之后的停车站，到终点为止
    */
   public record Train(
+      String id,
       Badge badge,
       Names destination,
       Arrival arrival,
@@ -73,6 +75,7 @@ public record PidsStopListView(
       List<Stop> stops) {
 
     public Train {
+      Objects.requireNonNull(id, "id");
       Objects.requireNonNull(badge, "badge");
       Objects.requireNonNull(destination, "destination");
       Objects.requireNonNull(arrival, "arrival");

@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.BiConsumer;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.ArrivalStyle;
@@ -19,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.DestinationSt
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.PlatformStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -636,6 +638,24 @@ public final class PidsRenderer {
         p.fill(x + 27, y + 4, 17, 40, rgb);
         p.fill(x + 23, y + 18, 2, 12, rgb);
       }
+      case CHECK -> {
+        // 立在杆上的方向牌，牌面一支向右的箭头：确认终点
+        p.fill(x + 2, y + 6, 44, 3, rgb);
+        p.fill(x + 2, y + 27, 44, 3, rgb);
+        p.fill(x + 2, y + 6, 3, 24, rgb);
+        p.fill(x + 43, y + 6, 3, 24, rgb);
+        p.fill(x + 10, y + 16, 16, 4, rgb);
+        p.triangle(new int[] {x + 26, x + 36, x + 26}, new int[] {y + 11, y + 18, y + 25}, rgb);
+        p.fill(x + 21, y + 30, 6, 12, rgb);
+        p.fill(x + 13, y + 41, 22, 3, rgb);
+      }
+      case GAP -> {
+        // 站台与车厢地板之间的空隙，上方向下的箭头指着它：注意间隙
+        p.fill(x + 22, y + 2, 4, 12, rgb);
+        p.triangle(new int[] {x + 15, x + 33, x + 24}, new int[] {y + 14, y + 14, y + 24}, rgb);
+        p.fill(x + 2, y + 30, 17, 14, rgb);
+        p.fill(x + 29, y + 26, 17, 18, rgb);
+      }
       case PASSING -> {
         p.fill(x + 20, y + 4, 8, 28, rgb);
         p.fill(x + 20, y + 36, 8, 8, rgb);
@@ -695,21 +715,51 @@ public final class PidsRenderer {
   public BufferedImage renderStopList(PidsLayout layout, PidsStopListView view) {
     Objects.requireNonNull(layout, "layout");
     Objects.requireNonNull(view, "view");
+    return renderStopListPage(
+        layout,
+        view.theme(),
+        view.platforms(),
+        view.clock(),
+        view.bandColors(),
+        (painter, list) -> painter.draw(list, view));
+  }
+
+  /** 渲染 2×1 停站屏的后续列车页：站台号、时钟、色带与停站表页相同，停站表组件的位置改画后续几班车。 */
+  public BufferedImage renderFollowing(PidsLayout layout, PidsFollowingView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    return renderStopListPage(
+        layout,
+        view.theme(),
+        view.platforms(),
+        view.clock(),
+        view.bandColors(),
+        (painter, list) -> painter.drawFollowing(list, view));
+  }
+
+  /** 停站屏的一页：按布局画站台号（不写“站台”二字）、时钟、色带，停站表组件交给 {@code body}。 */
+  private BufferedImage renderStopListPage(
+      PidsLayout layout,
+      PidsTheme theme,
+      List<String> platforms,
+      String clockText,
+      List<Integer> bandColors,
+      BiConsumer<PidsStopListPainter, PidsLayout.StopList> body) {
     return paint(
         layout.width(),
         layout.height(),
-        view.theme(),
+        theme,
         layout.boldFrom(),
         p -> {
           for (PidsLayout.Widget widget : layout.widgets()) {
             if (widget instanceof PidsLayout.Platform platform) {
-              drawPlatform(p, platform, view.platforms(), new Names("", ""));
+              drawPlatform(p, platform, platforms, new Names("", ""));
             } else if (widget instanceof PidsLayout.LineBand band) {
-              drawLineBand(p, band, view.bandColors());
+              drawLineBand(p, band, bandColors);
             } else if (widget instanceof PidsLayout.Clock clock) {
-              drawClock(p, clock, view.clock());
+              drawClock(p, clock, clockText);
             } else if (widget instanceof PidsLayout.StopList list) {
-              new PidsStopListPainter(this, p).draw(list, view);
+              body.accept(new PidsStopListPainter(this, p), list);
             }
           }
         });

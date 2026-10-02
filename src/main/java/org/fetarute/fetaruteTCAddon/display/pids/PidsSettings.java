@@ -1,10 +1,13 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.FileConfiguration;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 
 /**
  * 站台 PIDS 的全局策略配置快照，解析自 {@code pids.yml}。
@@ -84,7 +87,8 @@ public record PidsSettings(
             reader.positiveInt("render.notice-pin-seconds", renderDefault.noticePinSeconds()),
             reader.positiveInt("render.english-seconds", renderDefault.englishSeconds()),
             reader.nonNegativeInt("render.remark-seconds", renderDefault.remarkSeconds()),
-            reader.positiveInt("render.stop-page-seconds", renderDefault.stopPageSeconds()));
+            reader.positiveInt("render.stop-page-seconds", renderDefault.stopPageSeconds()),
+            reader.notices("render.notices", renderDefault.notices()));
 
     LimitSettings limits =
         new LimitSettings(
@@ -184,7 +188,8 @@ public record PidsSettings(
    * @param noticePinSeconds 通过列车临近时锁定安全页的时长（秒）
    * @param englishSeconds 主页上终点下面写英文停留多少秒（与备注交替）
    * @param remarkSeconds 主页上终点下面写备注（末班车、直通、经由）停留多少秒；0 不显示备注
-   * @param stopPageSeconds 2×1 停站屏停站多、分页时每页停留多少秒
+   * @param stopPageSeconds 2×1 停站屏停站多、分页时每页停留多少秒（后续列车页也停这么久）
+   * @param notices 轮换哪几张宣传页、按什么顺序；为空时不放宣传页（空位页与安全提示页照常）
    */
   public record RenderSettings(
       int checkIntervalTicks,
@@ -195,10 +200,39 @@ public record PidsSettings(
       int noticePinSeconds,
       int englishSeconds,
       int remarkSeconds,
-      int stopPageSeconds) {
+      int stopPageSeconds,
+      List<PidsNotice> notices) {
 
-    /** 内置默认值：主页（到发）占八成时间，副页停到读得完标题与一行英文；英文是常态、备注是补充，英文停得更久；2×1 每页 6～7 站按一站一秒多扫一遍。 */
+    /** 内置默认值：主页（到发）占八成时间，副页停到读得完标题与一行英文；英文是常态、备注是补充，英文停得更久；2×1 每页 6～7 站按一站一秒多扫一遍；全部宣传页按声明顺序轮换。 */
     public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 20, 5, 15, 6, 4, 8);
+
+    public RenderSettings {
+      notices = List.copyOf(notices);
+    }
+
+    /** 宣传页取默认（全部，按声明顺序）。 */
+    public RenderSettings(
+        int checkIntervalTicks,
+        int snapshotTtlSeconds,
+        int horizonMinutes,
+        int slideMainSeconds,
+        int slideNoticeSeconds,
+        int noticePinSeconds,
+        int englishSeconds,
+        int remarkSeconds,
+        int stopPageSeconds) {
+      this(
+          checkIntervalTicks,
+          snapshotTtlSeconds,
+          horizonMinutes,
+          slideMainSeconds,
+          slideNoticeSeconds,
+          noticePinSeconds,
+          englishSeconds,
+          remarkSeconds,
+          stopPageSeconds,
+          PidsNotice.courtesy());
+    }
   }
 
   /**
@@ -405,6 +439,30 @@ public record PidsSettings(
       }
       warnInvalid(path, String.valueOf(value), String.valueOf(fallback));
       return fallback;
+    }
+
+    /** 宣传页清单：按键找宣传页，未知的键（含安全提示页）跳过并警告，重复的只留第一次；没写这个键时取默认。 */
+    private List<PidsNotice> notices(String path, List<PidsNotice> fallback) {
+      if (!config.contains(path)) {
+        return fallback;
+      }
+      if (!config.isList(path)) {
+        warnInvalid(
+            path,
+            String.valueOf(config.get(path)),
+            fallback.stream().map(PidsNotice::key).toList().toString());
+        return fallback;
+      }
+      LinkedHashSet<PidsNotice> notices = new LinkedHashSet<>();
+      for (String key : config.getStringList(path)) {
+        Optional<PidsNotice> notice = PidsNotice.courtesy(key);
+        if (notice.isPresent()) {
+          notices.add(notice.get());
+        } else {
+          logger.warning("pids.yml 的 " + path + " 里没有宣传页 " + key + "，已跳过");
+        }
+      }
+      return List.copyOf(notices);
     }
 
     private String text(String path, String fallback) {
