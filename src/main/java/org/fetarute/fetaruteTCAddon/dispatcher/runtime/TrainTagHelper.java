@@ -95,7 +95,8 @@ public final class TrainTagHelper {
   /**
    * 写入/覆盖 tag。
    *
-   * <p>写入前会移除已有的同名 key，保证唯一性。
+   * <p>写入前会移除已有的同名 key，保证唯一性。该 key 已经只有这一条、值也相同时不动：TrainCarts 每次增删 tag
+   * 都要逐节车厢同步配置里的列表，运行时每个信号周期都会重写列车名等不变的 tag。
    */
   public static void writeTag(TrainProperties properties, String key, String value) {
     if (properties == null || key == null || key.isBlank()) {
@@ -103,8 +104,12 @@ public final class TrainTagHelper {
     }
     String normalizedKey = key.trim();
     String normalizedValue = value == null ? "" : value.trim();
+    String tag = normalizedKey + "=" + normalizedValue;
+    if (isOnlyTagForKey(properties, normalizedKey, tag)) {
+      return;
+    }
     removeTagKey(properties, normalizedKey);
-    properties.addTags(normalizedKey + "=" + normalizedValue);
+    properties.addTags(tag);
   }
 
   /** 删除指定 key 的 tag。 */
@@ -115,16 +120,7 @@ public final class TrainTagHelper {
     String target = key.trim().toLowerCase(Locale.ROOT);
     List<String> removals = new ArrayList<>();
     for (String tag : properties.getTags()) {
-      if (tag == null) {
-        continue;
-      }
-      String trimmed = tag.trim();
-      if (trimmed.isEmpty()) {
-        continue;
-      }
-      int idx = trimmed.indexOf('=');
-      String currentKey = idx > 0 ? trimmed.substring(0, idx).trim() : trimmed;
-      if (currentKey.toLowerCase(Locale.ROOT).equals(target)) {
+      if (matchesKey(tag, target)) {
         // TrainCarts 按 tag 原始字符串执行删除；匹配时可以 trim，但删除值必须保留原样。
         removals.add(tag);
       }
@@ -132,5 +128,42 @@ public final class TrainTagHelper {
     if (!removals.isEmpty()) {
       properties.removeTags(removals.toArray(new String[0]));
     }
+  }
+
+  /** 该 key 的 tag 是否恰好只有 {@code tag} 这一条（按原始字符串比较）。 */
+  private static boolean isOnlyTagForKey(TrainProperties properties, String key, String tag) {
+    if (!properties.hasTags()) {
+      return false;
+    }
+    Collection<String> tags = properties.getTags();
+    if (tags == null) {
+      return false;
+    }
+    String target = key.toLowerCase(Locale.ROOT);
+    boolean found = false;
+    for (String current : tags) {
+      if (!matchesKey(current, target)) {
+        continue;
+      }
+      if (!tag.equals(current)) {
+        return false;
+      }
+      found = true;
+    }
+    return found;
+  }
+
+  /** tag 的 key（去空白、转小写后）是否等于 {@code lowerCaseKey}；没有 {@code =} 的 tag 整条视为 key。 */
+  private static boolean matchesKey(String tag, String lowerCaseKey) {
+    if (tag == null) {
+      return false;
+    }
+    String trimmed = tag.trim();
+    if (trimmed.isEmpty()) {
+      return false;
+    }
+    int idx = trimmed.indexOf('=');
+    String currentKey = idx > 0 ? trimmed.substring(0, idx).trim() : trimmed;
+    return currentKey.toLowerCase(Locale.ROOT).equals(lowerCaseKey);
   }
 }
