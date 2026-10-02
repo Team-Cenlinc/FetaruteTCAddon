@@ -8,6 +8,7 @@ public final class LoggerManager {
 
   private final Logger logger;
   private volatile boolean debugEnabled;
+  private final DiagnosticSink debugSink = new DebugSink();
 
   public LoggerManager(Logger logger) {
     this.logger = logger;
@@ -20,6 +21,16 @@ public final class LoggerManager {
 
   public void setDebugEnabled(boolean debugEnabled) {
     this.debugEnabled = debugEnabled;
+  }
+
+  /** debug 日志此刻是否开启。 */
+  public boolean debugEnabled() {
+    return debugEnabled;
+  }
+
+  /** 写入 debug 日志的诊断输出端，随 debug 开关实时生效。 */
+  public DiagnosticSink debugSink() {
+    return debugSink;
   }
 
   public void info(String message) {
@@ -37,6 +48,18 @@ public final class LoggerManager {
   public void debug(String message) {
     if (debugEnabled) {
       logger.log(Level.INFO, "[DEBUG] {0}", message);
+    }
+  }
+
+  private final class DebugSink implements DiagnosticSink {
+    @Override
+    public void accept(String message) {
+      debug(message);
+    }
+
+    @Override
+    public boolean enabled() {
+      return debugEnabled;
     }
   }
 }
