@@ -244,7 +244,7 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("<seconds>")))
             .build();
     var spawnGroupBaselineClearFlag = CommandFlag.builder("spawn-group-baseline-clear").build();
-    // 站台屏“经由”：只收本交路停车的站码，逗号分隔。
+    // 站台屏“经由”：只收本交路停车的站码，逗号分隔；多个站要加双引号（客户端不认不带引号的逗号）。
     var viaFlag =
         CommandFlag.<CommandSender>builder("via")
             .withComponent(
@@ -2466,31 +2466,30 @@ public final class FtaRouteCommand {
         });
   }
 
-  /** {@code --via} 的补全：本运行图停车的站码。值是逗号分隔的列表，已写下的站不再提示，补全结果带上前面已写的部分。 */
+  /**
+   * {@code --via} 的补全：本运行图停车的站码，逗号分隔、已写下的站不再提示。
+   *
+   * <p>客户端不认不带引号的逗号，多个站时候选一律带双引号（{@link CommaListInput}）：给收好引号的 {@code "HHU,SPB"} 与接着写下一站的 {@code
+   * "HHU,SPB,}。
+   */
   private SuggestionProvider<CommandSender> viaSuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
-          String token = input.lastRemainingToken().trim();
-          if (token.startsWith("\"") || token.startsWith("'")) {
-            token = token.substring(1);
-          }
-          int comma = token.lastIndexOf(',');
-          String head = comma < 0 ? "" : token.substring(0, comma + 1);
-          String prefix = token.substring(comma + 1).toUpperCase(Locale.ROOT);
-          List<String> written = RouteViaMetadata.parse(head);
+          CommaListInput typed = CommaListInput.of(input == null ? "" : input.lastRemainingToken());
+          Set<String> chosen = typed.chosen();
           List<String> suggestions = new ArrayList<>();
-          if (token.isEmpty()) {
-            suggestions.add("<HHU,SPB>");
+          if (typed.blank()) {
+            suggestions.add("<station>");
+            suggestions.add("\"<station>,<station>\"");
           }
           resolveRouteForSuggestion(ctx)
               .map(found -> stoppingStationCodes(found.provider(), found.route()))
               .orElse(List.of())
               .stream()
-              .filter(code -> code.startsWith(prefix))
-              .filter(code -> written.stream().noneMatch(code::equalsIgnoreCase))
-              .map(code -> head + code)
+              .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(typed.prefix()))
+              .filter(code -> !chosen.contains(code.toLowerCase(Locale.ROOT)))
               .limit(SUGGESTION_LIMIT)
-              .forEach(suggestions::add);
+              .forEach(code -> suggestions.addAll(typed.complete(code)));
           return suggestions;
         });
   }
