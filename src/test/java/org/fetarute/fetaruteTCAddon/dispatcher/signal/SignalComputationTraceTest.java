@@ -30,6 +30,23 @@ class SignalComputationTraceTest {
   }
 
   @Test
+  void rawTraceDedupKeepsOnlyRecentKeysSoEvictedTraceEmitsAgain() {
+    List<String> traces = new ArrayList<>();
+    SignalComputationTrace.configureLogger(traces::add);
+    String first = "SMART_PRIORITY_RESOLVED train=MT-0 priority=0";
+
+    SignalComputationTrace.emitRaw(first, traces::add);
+    SignalComputationTrace.emitRaw(first, traces::add);
+    for (int i = 1; i <= SignalComputationTrace.EMITTED_STABLE_TRACE_LIMIT; i++) {
+      SignalComputationTrace.emitRaw("SMART_PRIORITY_RESOLVED train=MT-" + i + " priority=0");
+    }
+    SignalComputationTrace.emitRaw(first, traces::add);
+
+    assertEquals(SignalComputationTrace.EMITTED_STABLE_TRACE_LIMIT + 2, traces.size());
+    assertEquals(first, traces.get(traces.size() - 1));
+  }
+
+  @Test
   void rawTraceEmitsWhenStableContentChanges() {
     List<String> traces = new ArrayList<>();
     SignalComputationTrace.configureLogger(traces::add);
