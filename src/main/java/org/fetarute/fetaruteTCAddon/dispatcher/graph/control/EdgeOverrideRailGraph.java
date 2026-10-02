@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.control;
 
 import java.time.Instant;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -31,6 +32,7 @@ public final class EdgeOverrideRailGraph
   private final RailGraph delegate;
   private final Map<EdgeId, RailEdgeOverrideRecord> overrides;
   private final Instant now;
+  private volatile Set<EdgeId> overrideBlockedEdges;
 
   public EdgeOverrideRailGraph(
       RailGraph delegate, Map<EdgeId, RailEdgeOverrideRecord> overrides, Instant now) {
@@ -95,6 +97,32 @@ public final class EdgeOverrideRailGraph
       return false;
     }
     return override.isBlockedEffective(now);
+  }
+
+  /** 底层图。 */
+  public RailGraph delegate() {
+    return delegate;
+  }
+
+  /**
+   * 此刻因覆盖而封锁的边，不含底层图自身的封锁。
+   *
+   * <p>本视图只在底层图之上加封锁，可达性完全由“底层图 + 这组边”决定；最短路按它记忆结果。
+   */
+  public Set<EdgeId> overrideBlockedEdges() {
+    Set<EdgeId> blocked = overrideBlockedEdges;
+    if (blocked == null) {
+      Set<EdgeId> collected = new HashSet<>();
+      for (Map.Entry<EdgeId, RailEdgeOverrideRecord> entry : overrides.entrySet()) {
+        RailEdgeOverrideRecord override = entry.getValue();
+        if (entry.getKey() != null && override != null && override.isBlockedEffective(now)) {
+          collected.add(entry.getKey());
+        }
+      }
+      blocked = Set.copyOf(collected);
+      overrideBlockedEdges = blocked;
+    }
+    return blocked;
   }
 
   /** 透传冲突组查询（若底层支持）。 */
