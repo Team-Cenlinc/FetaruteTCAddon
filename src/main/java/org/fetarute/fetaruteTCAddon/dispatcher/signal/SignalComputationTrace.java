@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -33,8 +34,22 @@ public final class SignalComputationTrace {
   private static final long TICK_MILLIS = 50L;
   private static final long FLIP_WINDOW_TICKS = 2L;
   private static final ConcurrentMap<String, LastSignal> LAST_SIGNALS = new ConcurrentHashMap<>();
-  private static final ConcurrentMap<String, Boolean> EMITTED_STABLE_TRACES =
-      new ConcurrentHashMap<>();
+
+  /**
+   * 已输出过的稳定诊断键，按最近使用淘汰。
+   *
+   * <p>键是整条诊断去掉易变字段后的内容，每辆车每个资源事件都不一样；不设上限时整个运行期只增不减，几小时就能攒下几十万条长字符串。 重复输出总是紧跟着发生，保留最近的一批足够去重。
+   */
+  private static final int EMITTED_STABLE_TRACE_LIMIT = 8192;
+
+  private static final Map<String, Boolean> EMITTED_STABLE_TRACES =
+      Collections.synchronizedMap(
+          new LinkedHashMap<>(EMITTED_STABLE_TRACE_LIMIT * 4 / 3, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+              return size() > EMITTED_STABLE_TRACE_LIMIT;
+            }
+          });
   private static volatile Consumer<String> globalLogger = message -> {};
 
   private SignalComputationTrace() {}
