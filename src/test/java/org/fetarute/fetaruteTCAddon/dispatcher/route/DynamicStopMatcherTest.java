@@ -41,13 +41,20 @@ class DynamicStopMatcherTest {
     assertTrue(spec.isDepot());
   }
 
+  /**
+   * 未声明范围表示“该站现有的全部股道”。
+   *
+   * <p>旧行为是默认 1..10 的人为上限。它有两个问题：编号超过 10 的股道会被漏掉；更要命的是 {@code RuntimeDispatchService}
+   * 内的同名解析对同一写法默认成 1..1，两套口径不一致， 导致被分配到 2 道的列车与唯一候选 1 道不相等、候选枚举静默走空，列车被永久挡在站外。 现在统一标记为
+   * unbounded，由调用方按图上实际存在的股道枚举。
+   */
   @Test
-  void parseDynamicSpec_withoutRange_defaultsToReasonableLimit() {
+  void parseDynamicSpec_withoutRange_isUnbounded() {
     Optional<DynamicSpec> result = DynamicStopMatcher.parseDynamicSpec("DYNAMIC:SURC:S:PPK");
     assertTrue(result.isPresent());
     DynamicSpec spec = result.get();
+    assertTrue(spec.unbounded());
     assertEquals(1, spec.fromTrack());
-    assertEquals(10, spec.toTrack()); // 默认上限为 10，避免无限循环
   }
 
   @Test
@@ -127,9 +134,23 @@ class DynamicStopMatcherTest {
   }
 
   @Test
+  void isDynamicStop_withBareInvalidDirective() {
+    RouteStop stop = createStop("DYNAMIC:");
+    assertTrue(DynamicStopMatcher.isDynamicStop(stop));
+    assertTrue(DynamicStopMatcher.parseDynamicSpec(stop).isEmpty());
+  }
+
+  @Test
   void isDynamicStop_withoutDynamic() {
     RouteStop stop = createStop("STOP dwell=30");
     assertFalse(DynamicStopMatcher.isDynamicStop(stop));
+  }
+
+  @Test
+  void isDynamicStop_doesNotTreatNodeSegmentAsDirective() {
+    RouteStop stop = createStop("CHANGE:OP:DYNAMIC");
+    assertFalse(DynamicStopMatcher.isDynamicStop(stop));
+    assertTrue(DynamicStopMatcher.parseDynamicSpec(stop).isEmpty());
   }
 
   @Test

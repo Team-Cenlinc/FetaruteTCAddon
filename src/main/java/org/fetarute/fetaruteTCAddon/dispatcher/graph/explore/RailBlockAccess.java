@@ -36,6 +36,16 @@ public interface RailBlockAccess {
   }
 
   /**
+   * 返回 predecessor 链中的每个位置是否足以覆盖相邻位置之间的全部实体轨迹方块。
+   *
+   * <p>默认 fail-closed。实现只有在 {@link #neighbors(RailBlockPos)} 保证逐方块相邻时才可返回 true；例如 TrainCarts/TCC
+   * junction 可能一步跨越长曲线，不能用两个端点冒充完整足迹。
+   */
+  default boolean supportsExactBlockFootprint() {
+    return false;
+  }
+
+  /**
    * 在指定位置附近寻找“最接近”的轨道方块作为节点锚点。
    *
    * <p>用于把“节点牌子方块”映射到可遍历的轨道网络上；若附近没有轨道返回空集合。

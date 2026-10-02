@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
 import com.bergerkiller.bukkit.common.config.ConfigurationNode;
-import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.attachments.animation.Animation;
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationNode;
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationOptions;
@@ -15,10 +14,14 @@ import java.util.Deque;
 import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.NamespacedKey;
+import org.bukkit.Registry;
 import org.bukkit.Sound;
 import org.bukkit.World;
 import org.bukkit.block.BlockFace;
@@ -1225,97 +1228,10 @@ public final class AutoStationDoorController {
     return Math.max(0L, LEGACY_CLOSE_SOUND_DELAY_TICKS);
   }
 
-  /**
-   * 尝试预热门动画与附件树。
-   *
-   * <p>用于列车刚生成时确保附件变换就绪并重置门动画到起点。
-   */
-  public static void warmUpDoorAnimations(MinecartGroup group) {
-    warmUpDoorAnimations(group, false);
-  }
-
-  public static void warmUpDoorAnimations(MinecartGroup group, boolean probePlay) {
-    if (group == null) {
-      return;
-    }
-    for (MinecartMember<?> member : group) {
-      if (member == null || member.getAttachments() == null) {
-        continue;
-      }
-      if (!member.getAttachments().isAttached()) {
-        continue;
-      }
-      Attachment root = member.getAttachments().getRootAttachment();
-      if (root != null) {
-        root.getTransform();
-        root.getChildren();
-      }
-    }
-
-    Collection<String> animationNames = group.getAnimationNames();
-    if (animationNames == null || animationNames.isEmpty()) {
-      return;
-    }
-    warmUpAnimation(group, animationNames, DOOR_LEFT, probePlay);
-    warmUpAnimation(group, animationNames, DOOR_RIGHT, probePlay);
-    warmUpAnimation(group, animationNames, DOOR_LEFT_LEGACY, probePlay);
-    warmUpAnimation(group, animationNames, DOOR_RIGHT_LEGACY, probePlay);
-  }
-
-  private static void warmUpAnimation(
-      MinecartGroup group, Collection<String> animationNames, String key, boolean probePlay) {
-    if (group == null || animationNames == null || key == null) {
-      return;
-    }
-    String name = findAnimationName(animationNames, key);
-    if (name == null) {
-      return;
-    }
-    List<Attachment> targets = findAnimationTargets(group, name);
-    if (!hasAttachedTargets(targets)) {
-      return;
-    }
-    warmUpAnchors(targets);
-    AnimationOptions options = new AnimationOptions(name);
-    options.setReset(true);
-    options.setSpeed(0.0);
-    group.playNamedAnimation(options);
-    if (probePlay) {
-      AnimationOptions playOptions = new AnimationOptions(name);
-      playOptions.setReset(true);
-      playOptions.setSpeed(-1.0);
-      group.playNamedAnimation(playOptions);
-      TrainCarts trainCarts = TrainCarts.plugin;
-      if (trainCarts != null) {
-        Bukkit.getScheduler()
-            .runTaskLater(
-                trainCarts,
-                () -> {
-                  AnimationOptions reset = new AnimationOptions(name);
-                  reset.setReset(true);
-                  reset.setSpeed(0.0);
-                  group.playNamedAnimation(reset);
-                },
-                2L);
-      }
-    }
-  }
-
-  private static void warmUpAnchors(List<Attachment> targets) {
-    if (targets == null || targets.isEmpty()) {
-      return;
-    }
-    for (Attachment target : targets) {
-      if (target == null) {
-        continue;
-      }
-      Attachment anchor = resolveAnchorAttachment(target, 1);
-      if (anchor == null || !anchor.isAttached()) {
-        continue;
-      }
-      anchor.getTransform();
-    }
-  }
+  // 曾有 warmUpDoorAnimations：出库和首站时以 reset + speed=0 播放门动画把门摆回起点。速度为零则动画时间永不前进、
+  // hasReachedEnd() 永远为 false，而 TrainCarts 只在当前动画播完后才推进附件的动画队列——此后显式带 queue 且不带 reset 的
+  // 动画（TC 牌子 animate 写了 queue、命令 --queue）全部卡在它后面，直到出现一次带 reset 的播放。用 chest 生成的车没有这一步，
+  // 动画从第一次起就能动。去掉动画播放后剩下的 getTransform()/getChildren() 只是 getter，整个预热已删除。
 
   /**
    * 构建门动画动作。
@@ -1870,7 +1786,10 @@ public final class AutoStationDoorController {
   /**
    * 生成门动画播放选项。
    *
-   * <p>{@code queue=true} 让开/关门排进 TrainCarts 的动画队列，避免打断同一附件上正在执行的升弓、受电弓复位等模型动画。
+   * <p>注意 {@code reset=true} 与 {@code queue=true} 同时置位时，TrainCarts 的 {@code
+   * Attachment#startAnimation} 先判 reset：直接顶掉附件上当前的动画并清空队列，{@code queue}
+   * 分支根本走不到。也就是说开/关门<b>总会打断</b>同一附件上正在执行的其它模型动画（升弓、 受电弓复位等），并不会排队等它们播完；{@code queue}
+   * 只是保留的标志位。要真正排队必须去掉 reset，那样门动画不再从头开始，行为会变，需单独评估。
    */
   static AnimationOptions doorAnimationOptions(String name, double speed) {
     AnimationOptions options = new AnimationOptions(name);
@@ -2575,8 +2494,26 @@ public final class AutoStationDoorController {
 
   private record ChimeLocation(Location location, ChimeSound override) {}
 
+  /**
+   * 原版声音注册表 key 对应的常量式名字：{@code minecraft:block.note_block.bell} → {@code BLOCK_NOTE_BLOCK_BELL}。
+   *
+   * <p>与 Bukkit 旧 {@code Sound} 枚举常量的命名规则一致，用来兼容配置里的常量式写法；非原版命名空间返回 null。
+   *
+   * @param key 声音注册表 key
+   * @return 常量式名字；非原版命名空间为 null
+   */
+  static String soundConstantName(NamespacedKey key) {
+    if (key == null || !NamespacedKey.MINECRAFT.equals(key.getNamespace())) {
+      return null;
+    }
+    return key.getKey().replace('.', '_').toUpperCase(Locale.ROOT);
+  }
+
   /** 支持 Bukkit Sound 或自定义 sound key 的提示音封装。 */
   private record ChimeSound(Sound enumSound, String soundKey, float volume, float pitch) {
+    private static final Map<String, Optional<Sound>> SOUNDS_BY_CONSTANT_NAME =
+        new ConcurrentHashMap<>();
+
     static ChimeSound from(String raw, float volume, float pitch) {
       if (raw == null || raw.isBlank() || "none".equalsIgnoreCase(raw)) {
         return disabled();
@@ -2619,15 +2556,29 @@ public final class AutoStationDoorController {
       return 1.0f;
     }
 
+    /**
+     * 按配置里的常量式名字（如 {@code BLOCK_NOTE_BLOCK_BELL}）在声音注册表里找原版声音；找不到时返回 null，调用方把原字符串当自定义声音 key 播放。
+     *
+     * <p>1.21.3 起 {@link Sound} 不再是枚举，{@code Sound.valueOf} 已弃用并将删除。常量名由原版注册表 key 大写、点换下划线得来（{@code
+     * block.note_block.bell} → {@code BLOCK_NOTE_BLOCK_BELL}），这里按同一规则反查。每停一次站都会解析一次，结果按名字缓存。
+     */
     private static Sound parseEnumSound(String raw) {
       if (raw == null || raw.isBlank()) {
         return null;
       }
-      try {
-        return Sound.valueOf(raw.trim().toUpperCase(Locale.ROOT));
-      } catch (IllegalArgumentException ex) {
-        return null;
-      }
+      return SOUNDS_BY_CONSTANT_NAME
+          .computeIfAbsent(raw.trim().toUpperCase(Locale.ROOT), ChimeSound::lookupVanillaSound)
+          .orElse(null);
+    }
+
+    private static Optional<Sound> lookupVanillaSound(String constantName) {
+      return Registry.SOUNDS.stream()
+          .filter(
+              sound -> {
+                NamespacedKey key = Registry.SOUNDS.getKey(sound);
+                return key != null && constantName.equals(soundConstantName(key));
+              })
+          .findFirst();
     }
   }
 }

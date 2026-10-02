@@ -57,6 +57,16 @@ public interface TicketAssigner {
     return 0;
   }
 
+  /**
+   * 在重载或停用前安全收口已经实体化的发车事务。
+   *
+   * @param now 当前现实时间
+   * @return 不再持有任何必须由本实例继续恢复的物理事务时为 {@code true}
+   */
+  default boolean prepareForReplacement(Instant now) {
+    return true;
+  }
+
   /** 清理出车诊断计数（成功/重试/错误分布）。 */
   default void resetDiagnostics() {}
 }

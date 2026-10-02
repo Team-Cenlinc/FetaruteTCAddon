@@ -52,6 +52,42 @@ class SmartDispatcherControllerTest {
   }
 
   @Test
+  @DisplayName("SAME_DIRECTION_FOLLOW 只输出诊断，不降级可见信号")
+  void sameDirectionFollowRiskDoesNotProduceCaution() {
+    List<String> traces = new ArrayList<>();
+    SmartDispatcherController controller = new SmartDispatcherController(traces::add);
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.empty(),
+            OptionalLong.of(32),
+            OptionalLong.of(32),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.of(32),
+            OptionalLong.empty(),
+            RiskSource.SAME_DIRECTION_FOLLOW,
+            RiskFreshness.LIVE,
+            "train-B",
+            "switcher:SWITCHER:Towny:-566:77:1179",
+            false,
+            false,
+            true,
+            false,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(input("train-A", risk));
+
+    assertEquals(DispatchAction.NO_ACTION, decision.action());
+    assertEquals(SignalAspect.PROCEED, decision.targetAspect());
+    assertEquals(RiskSource.SAME_DIRECTION_FOLLOW, decision.riskSource());
+    assertTrue(
+        traces.stream().anyMatch(line -> line.contains("reason=same-direction-follow-trace-only")));
+  }
+
+  @Test
   @DisplayName("规划窗口内的真实风险提前输出 PROCEED_WITH_CAUTION")
   void advisoryBlockerProducesCautionNotStop() {
     SmartDispatcherController controller = new SmartDispatcherController(message -> {});
@@ -120,8 +156,128 @@ class SmartDispatcherControllerTest {
   }
 
   @Test
-  @DisplayName("protective-only blocker 不直接变成 STOP")
-  void protectiveRetainBlockerClassifiedAsProtectiveOnly() {
+  @DisplayName("计划 RouteStop 进入制动距离时只给出减速建议")
+  void plannedRouteStopProducesCautionInsteadOfImmediateStop() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            OptionalLong.of(18),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            RiskSource.ROUTE_STOP_OR_TERMINAL,
+            RiskFreshness.LIVE,
+            "-",
+            "NODE:OP:S:CENTRAL:1",
+            false,
+            false,
+            true,
+            false,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(routeStopInput(risk, true));
+
+    assertEquals(DispatchAction.PROCEED_WITH_CAUTION, decision.action());
+    assertEquals(DispatchEffectClass.SIGNAL_ADVISORY, decision.effectClass());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.targetAspect());
+    assertEquals(6.0, decision.targetSpeedBps());
+  }
+
+  @Test
+  @DisplayName("没有 RouteStop 证明的 route 末端必须保持停车")
+  void routeStopWithoutPlanProofFailsClosed() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            OptionalLong.of(18),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.of(18),
+            RiskSource.ROUTE_STOP_OR_TERMINAL,
+            RiskFreshness.LIVE,
+            "-",
+            "NODE:OP:S:CENTRAL:1",
+            false,
+            false,
+            true,
+            false,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(routeStopInput(risk, false));
+
+    assertEquals(DispatchAction.HOLD_AT_SIGNAL, decision.action());
+    assertEquals(SignalAspect.STOP, decision.targetAspect());
+
+    // 停因明细**必须是原因，或自报"我没有原因"，绝不许印 none**（d4aa7c9 立的规矩）。
+    //
+    // 这条分支有两个互不相同的触发源：调用方显式允许直停，或制动曲线判定已进入停车距离。
+    // 此前只取前者，而 ForwardDecisionInput 的压缩构造器早把该字段填成了字面量 "none"，
+    // 于是后者触发时报出来的就是 none——而且原写的兜底 "direct-stop-allowed" 是**死代码**
+    // （字段非空，normalize 的兜底永远不触发）。
+    //
+    // 代价：实服 2026-09-14 第十三轮，往 HHU 段场销毁的车停在
+    // `recoverable-hold:hold_at_signal:route_stop_or_terminal:none` 上 172–185 秒，
+    // **没有任何阻塞者**，而最内层原因是 none——看得见停，看不见为什么。
+    assertNotEquals(
+        "none",
+        decision.safetyReason(),
+        () -> "HOLD_AT_SIGNAL 的安全原因不许是 none：" + decision.safetyReason());
+    assertTrue(
+        decision.safetyReason().startsWith("braking:")
+            || decision.safetyReason().equals("no-direct-stop-reason"),
+        () -> "制动曲线触发时必须报出它自己的判定原因，否则只是把 none 换个写法：" + decision.safetyReason());
+  }
+
+  @Test
+  @DisplayName("物理 NODE/EDGE 上的尾保在 caution 制动距离内必须提前压黄灯，而不是等准入硬停")
+  void physicalProtectiveRetainAheadProducesCautionBeforeAdmissionHardStop() {
+    // 第二十七轮实服：硬停车 blocker 角色 PROTECTIVE_RETAIN 446 : MOVEMENT_REQUIRED 177，
+    // STOP 前一刻 44 次是 PROCEED。前瞻把尾保当 PROTECTIVE_ONLY 直接忽略，准入却把它当墙。
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    ForwardSignalRiskSnapshot risk =
+        new ForwardSignalRiskSnapshot(
+            "train-A",
+            OptionalLong.of(80),
+            OptionalLong.of(80),
+            OptionalLong.of(80),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            OptionalLong.empty(),
+            RiskSource.PROTECTIVE_ONLY_CLAIM,
+            RiskFreshness.PROTECTIVE_PHYSICAL,
+            "train-B",
+            "NODE:SURC:SPB:JBS:1:002",
+            false,
+            true,
+            true,
+            true,
+            false);
+
+    DispatchDecision decision = controller.decideForwardSignal(input("train-A", risk));
+
+    assertEquals(DispatchAction.PROCEED_WITH_CAUTION, decision.action());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.targetAspect());
+    assertNotEquals(SignalAspect.STOP, decision.targetAspect());
+  }
+
+  @Test
+  @DisplayName("protective-only blocker 不发布无执行器的释放动作")
+  void protectiveRetainBlockerDefersReleaseToCanonicalOccupancyChain() {
     SmartDispatcherController controller = new SmartDispatcherController(message -> {});
     ForwardSignalRiskSnapshot risk =
         new ForwardSignalRiskSnapshot(
@@ -147,8 +303,9 @@ class SmartDispatcherControllerTest {
 
     DispatchDecision decision = controller.decideForwardSignal(input("train-A", risk));
 
-    assertEquals(DispatchAction.RELEASE_STALE_RETAIN, decision.action());
-    assertEquals(DispatchEffectClass.OCCUPANCY_MUTATION, decision.effectClass());
+    assertEquals(DispatchAction.NO_ACTION, decision.action());
+    assertEquals(DispatchEffectClass.DIAGNOSTIC_ONLY, decision.effectClass());
+    assertEquals("canonical-occupancy-recovery", decision.expectedUnblockEffect());
     assertNotEquals(SignalAspect.STOP, decision.targetAspect());
   }
 
@@ -193,49 +350,11 @@ class SmartDispatcherControllerTest {
                 24.0,
                 false,
                 "none",
-                "test"));
+                "test",
+                false));
 
     assertEquals(DispatchAction.NO_ACTION, decision.action());
     assertEquals(SignalAspect.PROCEED, decision.targetAspect());
-  }
-
-  @Test
-  @DisplayName("优先级评分按确定性规则选择 winner")
-  void priorityWinnerIsDeterministic() {
-    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
-    SmartDispatcherController.PrioritySelection selection =
-        controller.selectPriorityWinner(
-            List.of(
-                new SmartDispatcherController.PriorityInput(
-                    "train-B",
-                    "single:X",
-                    false,
-                    OptionalLong.of(20),
-                    false,
-                    false,
-                    2.0,
-                    Duration.ofSeconds(30),
-                    0,
-                    false,
-                    0,
-                    true),
-                new SmartDispatcherController.PriorityInput(
-                    "train-A",
-                    "single:X",
-                    true,
-                    OptionalLong.of(10),
-                    true,
-                    true,
-                    1.0,
-                    Duration.ofSeconds(5),
-                    0,
-                    false,
-                    0,
-                    true)));
-
-    assertNotNull(selection.winner());
-    assertEquals("train-A", selection.winner().trainId());
-    assertEquals(1, selection.losers().size());
   }
 
   @Test
@@ -260,11 +379,329 @@ class SmartDispatcherControllerTest {
                 true,
                 false,
                 true,
+                false,
+                "-",
+                false,
+                false,
+                false,
                 Duration.ofMinutes(10),
                 Duration.ofSeconds(60)));
 
     assertFalse(review.allowed());
     assertEquals("weak-blocker-diagnostic-only", review.reason());
+  }
+
+  @Test
+  @DisplayName("方向证据不足时拒绝快速 destroy")
+  void directionAuditBlocksFastDestroyReview() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.DeadlockDestroyReview review =
+        controller.reviewDestroyCandidate(
+            new SmartDispatcherController.DeadlockDestroyInput(
+                "episode",
+                "train-A",
+                "train-B",
+                "train-A",
+                "single:test:A~B",
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                true,
+                "INSUFFICIENT_DIRECTION_EVIDENCE",
+                true,
+                false,
+                true,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(60)));
+
+    assertFalse(review.allowed());
+    assertEquals("direction-audit-required", review.reason());
+  }
+
+  @Test
+  @DisplayName("方向复审后 last-resort destroy 仍要求活跃交通阻塞证明")
+  void directionAuditLastResortDestroyRequiresActiveTrafficProof() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.DeadlockDestroyReview review =
+        controller.reviewDestroyCandidate(
+            new SmartDispatcherController.DeadlockDestroyInput(
+                "episode",
+                "train-A",
+                "train-B",
+                "train-A",
+                "single:test:A~B",
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                true,
+                "NEED_DIRECTION_AUDIT",
+                true,
+                true,
+                false,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(60)));
+
+    assertFalse(review.allowed());
+    assertEquals("direction-audit-active-traffic-not-proven", review.reason());
+  }
+
+  @Test
+  @DisplayName("方向复审后 last-resort destroy 可通过最终审查")
+  void directionAuditLastResortDestroyCanPassWithActiveTrafficProof() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.DeadlockDestroyReview review =
+        controller.reviewDestroyCandidate(
+            new SmartDispatcherController.DeadlockDestroyInput(
+                "episode",
+                "train-A",
+                "train-B",
+                "train-A",
+                "single:test:A~B",
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                false,
+                true,
+                true,
+                "NEED_DIRECTION_AUDIT",
+                true,
+                true,
+                true,
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(60)));
+
+    assertTrue(review.allowed());
+    assertEquals("confirmed-live-hard-cycle-last-resort-direction-audit", review.reason());
+  }
+
+  @Test
+  @DisplayName("恢复耗尽且长期无 blocker 的空车可通过 stuck cleanup 审查")
+  void stuckCleanupAllowsVerifiedEmptyTrain() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview review =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Duration.ofMinutes(11),
+                Duration.ofMinutes(10),
+                Duration.ofMinutes(30)));
+
+    assertTrue(review.allowed());
+    assertEquals("verified-long-stuck-cleanup", review.reason());
+    assertTrue(review.requiresPostVerification());
+  }
+
+  @Test
+  @DisplayName("载客列车必须等到更长保护阈值")
+  void stuckCleanupRejectsPassengerBeforeProtectedThreshold() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview review =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                true,
+                Duration.ofMinutes(20),
+                Duration.ofMinutes(10),
+                Duration.ofMinutes(30)));
+
+    assertFalse(review.allowed());
+    assertEquals("passenger-grace", review.reason());
+  }
+
+  @Test
+  @DisplayName("正在等新鲜 blocker 的列车不能由通用 cleanup 删除")
+  void stuckCleanupRejectsLiveQueueWaiter() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview review =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                true,
+                false,
+                false,
+                Duration.ofHours(1),
+                Duration.ofMinutes(10),
+                Duration.ofMinutes(30)));
+
+    assertFalse(review.allowed());
+    assertEquals("waiting-on-live-blocker", review.reason());
+  }
+
+  @Test
+  @DisplayName("无效 cleanup 阈值不能把全真安全标志升级为销毁授权")
+  void stuckCleanupRejectsInvalidThresholds() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    SmartDispatcherController.StuckCleanupReview missingThreshold =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Duration.ofHours(1),
+                null,
+                Duration.ofMinutes(30)));
+    SmartDispatcherController.StuckCleanupReview negativePassengerThreshold =
+        controller.reviewStuckCleanupCandidate(
+            new SmartDispatcherController.StuckCleanupInput(
+                "train-A",
+                true,
+                true,
+                false,
+                true,
+                false,
+                false,
+                false,
+                false,
+                false,
+                Duration.ofHours(1),
+                Duration.ofMinutes(10),
+                Duration.ofSeconds(-1)));
+
+    assertFalse(missingThreshold.allowed());
+    assertEquals("cleanup-threshold-invalid", missingThreshold.reason());
+    assertFalse(negativePassengerThreshold.allowed());
+    assertEquals("cleanup-threshold-invalid", negativePassengerThreshold.reason());
+  }
+
+  @Test
+  @DisplayName("远处的站台/终点不得降速：规划视野不是减速判据")
+  void distantRouteStopDoesNotTriggerCaution() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    // 实服 2026-09-13：WS 车在距站台 385 blocks 处就被压成黄灯。
+    //
+    // 这里取 200：它必须<b>同时</b>落在规划视野内（本用例 256）与减速所需距离之外，才能把
+    // "只因为看得见就降速"和"看不见所以不降速"区分开。取 385 会超出视野，新旧实现都不降速，
+    // 用例就成了空的——第一版正是这么写的。以本用例参数（10 bps 接近、6 bps caution 速度、
+    // 减速度 1.0），从 10 减到 6 只需 (100-36)/2 = 32 blocks，加 24 裕量共 56。
+    // 实测：旧实现在 40/100/200/250 全部降速，新实现只在 40 降速。
+    // 以本用例的参数（10 bps 接近、6 bps caution 速度、减速度 1.0），从 10 减到 6 只需
+    // (100-36)/2 = 32 blocks，加上 24 的裕量也只要 56。385 是它的近七倍。
+    DispatchDecision decision =
+        controller.decideForwardSignal(routeStopInput(routeStopRisk(200), true));
+
+    assertEquals(DispatchAction.NO_ACTION, decision.action());
+    assertEquals(SignalAspect.PROCEED, decision.targetAspect());
+  }
+
+  @Test
+  @DisplayName("进入减速距离后必须降速")
+  void routeStopInsideBrakingDistanceTriggersCaution() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+
+    DispatchDecision decision =
+        controller.decideForwardSignal(routeStopInput(routeStopRisk(40), true));
+
+    assertEquals(DispatchAction.PROCEED_WITH_CAUTION, decision.action());
+    assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.targetAspect());
+  }
+
+  @Test
+  @DisplayName("降速生效之后不得自行释放——否则黄灯会反复闪")
+  void cautionDoesNotReleaseOnceTheTrainHasSlowedDown() {
+    SmartDispatcherController controller = new SmartDispatcherController(message -> {});
+    // 列车已经按 caution 降到 6 bps，但线路允许速度仍是 10：一旦释放它就会重新加速。
+    // 判定若用**瞬时**速度算制动距离，此时 (36-36)/2 = 0，阈值塌成 24，35 > 24 便会释放，
+    // 于是"降速->释放->加速->再降速"在二十几 blocks 的带里反复，表现为黄灯反复闪。
+    // 判定改用"不减速会达到的速度"（max(当前, 允许)）之后，阈值稳定在 56，不会释放。
+    SmartDispatcherController.ForwardDecisionInput slowedDown =
+        new SmartDispatcherController.ForwardDecisionInput(
+            "train-A",
+            routeStopRisk(35),
+            SignalAspect.PROCEED_WITH_CAUTION,
+            6.0,
+            10.0,
+            6.0,
+            1.0,
+            256,
+            8.0,
+            24.0,
+            false,
+            "none",
+            "ROUTE_STOP_OR_TERMINAL",
+            true);
+
+    DispatchDecision decision = controller.decideForwardSignal(slowedDown);
+
+    // 断言 action 而不是 targetAspect：NO_ACTION 会把 currentAspect 原样带出，
+    // 而本用例的 currentAspect 恰好就是 PROCEED_WITH_CAUTION——断 aspect 会永远成立。
+    assertEquals(
+        DispatchAction.PROCEED_WITH_CAUTION, decision.action(), "列车已降到 caution 速度后判定被释放，会造成黄灯反复切换");
+  }
+
+  private static ForwardSignalRiskSnapshot routeStopRisk(long distance) {
+    return new ForwardSignalRiskSnapshot(
+        "train-A",
+        OptionalLong.empty(),
+        OptionalLong.of(distance),
+        OptionalLong.of(distance),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.empty(),
+        OptionalLong.of(distance),
+        RiskSource.ROUTE_STOP_OR_TERMINAL,
+        RiskFreshness.LIVE,
+        "-",
+        "edge:A-B",
+        false,
+        false,
+        true,
+        false,
+        false);
   }
 
   private static SmartDispatcherController.ForwardDecisionInput input(
@@ -282,6 +719,26 @@ class SmartDispatcherControllerTest {
         24.0,
         false,
         "none",
-        "test");
+        "test",
+        false);
+  }
+
+  private static SmartDispatcherController.ForwardDecisionInput routeStopInput(
+      ForwardSignalRiskSnapshot risk, boolean plannedRouteStopProven) {
+    return new SmartDispatcherController.ForwardDecisionInput(
+        "train-A",
+        risk,
+        SignalAspect.PROCEED,
+        10.0,
+        10.0,
+        6.0,
+        1.0,
+        256,
+        8.0,
+        24.0,
+        false,
+        "none",
+        "ROUTE_STOP_OR_TERMINAL",
+        plannedRouteStopProven);
   }
 }

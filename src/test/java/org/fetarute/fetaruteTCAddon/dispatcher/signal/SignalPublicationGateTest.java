@@ -13,11 +13,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ConflictReleaseHint;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.EnumSource;
 
 /** 最终信号发布门回归测试。 */
 class SignalPublicationGateTest {
@@ -104,6 +107,28 @@ class SignalPublicationGateTest {
 
     assertFalse(decision.blocked());
     assertEquals(SignalAspect.PROCEED_WITH_CAUTION, decision.visibleAspect());
+  }
+
+  @ParameterizedTest
+  @EnumSource(
+      value = SignalAspect.class,
+      names = {"PROCEED", "PROCEED_WITH_CAUTION", "CAUTION"})
+  void everyMovementAspectRequiresActiveMovementAuthority(SignalAspect candidate) {
+    OccupancyRequest request = movementRequest("train", 0);
+    List<SignalComputationTrace.TokenState> inactiveTokenStates =
+        List.of(
+            SignalComputationTrace.TokenState.NONE,
+            SignalComputationTrace.TokenState.PENDING,
+            SignalComputationTrace.TokenState.INVALID);
+
+    for (SignalComputationTrace.TokenState tokenState : inactiveTokenStates) {
+      SignalPublicationGate.Decision decision =
+          SignalPublicationGate.evaluate(input(request, candidate, false, tokenState));
+
+      assertTrue(decision.blocked(), candidate + ":" + tokenState);
+      assertEquals(SignalAspect.STOP, decision.visibleAspect(), candidate + ":" + tokenState);
+      assertEquals("movement-token-not-active", decision.reason(), candidate + ":" + tokenState);
+    }
   }
 
   @Test
@@ -248,6 +273,99 @@ class SignalPublicationGateTest {
     assertFalse(second.blocked());
   }
 
+  @Test
+  void drainThroughRequiresAnAllowedOccupancyDecision() {
+    OccupancyRequest request =
+        request(
+                "train",
+                1,
+                ResourceIntent.MOVEMENT_REQUIRED,
+                AuthorizationPurpose.CONFLICT_CLEARING)
+            .withConflictReleaseHints(
+                AuthorizationPurpose.CONFLICT_CLEARING,
+                Map.of(
+                    "single:A~B",
+                    ConflictReleaseHint.verifiedDrainAuthority("single:A~B", "test")));
+
+    SignalPublicationGate.Decision allowed =
+        SignalPublicationGate.evaluate(
+            drainInput(
+                request,
+                SignalAspect.PROCEED,
+                false,
+                SignalComputationTrace.TokenState.ACTIVE,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                false));
+    assertEquals(SignalDecisionInputType.DRAIN_THROUGH, allowed.inputType());
+    assertFalse(allowed.blocked());
+    assertEquals(SignalAspect.PROCEED, allowed.visibleAspect());
+
+    OccupancyDecision deniedDecision =
+        new OccupancyDecision(
+            false, Instant.EPOCH, SignalAspect.STOP, List.of(), true, "occupancy-denied");
+
+    SignalPublicationGate.Decision decision =
+        SignalPublicationGate.evaluate(
+            new SignalPublicationGate.Input(
+                request,
+                SignalAspect.PROCEED,
+                false,
+                SignalComputationTrace.TokenState.ACTIVE,
+                true,
+                true,
+                true,
+                true,
+                true,
+                true,
+                false,
+                false,
+                deniedDecision,
+                "-"));
+
+    assertEquals(SignalDecisionInputType.DRAIN_THROUGH, decision.inputType());
+    assertTrue(decision.blocked());
+    assertEquals(SignalAspect.STOP, decision.visibleAspect());
+    assertEquals("occupancy-not-allowed", decision.reason());
+  }
+
+  @Test
+  void forwardMovementRequiresAnAllowedOccupancyDecision() {
+    OccupancyRequest request = movementRequest("train", 1);
+    OccupancyDecision deniedDecision =
+        new OccupancyDecision(
+            false, Instant.EPOCH, SignalAspect.STOP, List.of(), false, "occupancy-denied");
+
+    SignalPublicationGate.Decision decision =
+        SignalPublicationGate.evaluate(
+            new SignalPublicationGate.Input(
+                request,
+                SignalAspect.PROCEED,
+                false,
+                SignalComputationTrace.TokenState.ACTIVE,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                false,
+                true,
+                deniedDecision,
+                "-"));
+
+    assertEquals(SignalDecisionInputType.FORWARD_MOVEMENT, decision.inputType());
+    assertTrue(decision.blocked());
+    assertFalse(decision.localOnlyStop());
+    assertEquals(SignalAspect.STOP, decision.visibleAspect());
+    assertEquals("occupancy-not-allowed", decision.reason());
+  }
+
   private static SignalPublicationGate.Input input(
       OccupancyRequest request,
       SignalAspect candidate,
@@ -294,7 +412,7 @@ class SignalPublicationGateTest {
         pathDrainingTowardExit,
         ordinaryDeparture,
         topologyExitHintOnly,
-        true,
+        new OccupancyDecision(true, Instant.EPOCH, SignalAspect.PROCEED, List.of()),
         "-");
   }
 

@@ -10,7 +10,6 @@ import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnLocat
 import com.bergerkiller.bukkit.tc.controller.spawnable.SpawnableGroup.SpawnMode;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -19,6 +18,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.Bukkit;
@@ -30,18 +30,21 @@ import org.bukkit.block.sign.SignSide;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
- * TrainCarts 实际出车实现：复用 /fta depot spawn 的核心逻辑（查找锚点轨道 → spawn → 写 tags）。
+ * TrainCarts 实际出车实现：查找锚点轨道并生成物理编组，再把可失败的 tags/warm-up 初始化延后交给上层事务执行。
  *
  * <p>注意：本类不负责闭塞门控与队列；上层 TicketAssigner 决定“何时允许 spawn”。
  */
@@ -49,6 +52,8 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
 
   private static final String ROUTE_SPAWN_PATTERN_KEY = "spawn_train_pattern";
   private static final long DEPOT_CHUNK_TICKET_TICKS = 200L;
+  private static final long OFFLINE_PROBE_COOLDOWN_MILLIS = 60_000L;
+  private static final long OFFLINE_WARN_COOLDOWN_MILLIS = 600_000L;
   private static final PlainTextComponentSerializer PLAIN_TEXT =
       PlainTextComponentSerializer.plainText();
 
@@ -57,6 +62,13 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   private final Consumer<String> debugLogger;
   private volatile org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager
       occupancyManager;
+  private final Set<String> keepChunksLoadedWarnedPatterns = ConcurrentHashMap.newKeySet();
+
+  /** 每个车库上次探测离线编组的时间；键是车库节点，数量受车库数限制。 */
+  private final Map<String, Long> offlineProbeAtMillis = new ConcurrentHashMap<>();
+
+  /** 每个车库上次就离线编组告警的时间。 */
+  private final Map<String, Long> offlineWarnAtMillis = new ConcurrentHashMap<>();
 
   public TrainCartsDepotSpawner(
       FetaruteTCAddon plugin, SignNodeRegistry signNodeRegistry, Consumer<String> debugLogger) {
@@ -79,7 +91,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   }
 
   @Override
-  public Optional<MinecartGroup> spawn(
+  public Optional<DepotSpawner.MaterializedSpawn> spawn(
       StorageProvider provider, SpawnTicket ticket, String trainName, Instant now) {
     if (provider == null || ticket == null || ticket.service() == null || trainName == null) {
       return Optional.empty();
@@ -138,6 +150,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       debugLogger.accept("自动发车失败: depot 附近无轨道 node=" + depotId.value());
       return Optional.empty();
     }
+    warnAboutOfflineGroupsNearDepot(world, anchors, depotId);
     Optional<MinecartGroup> spawnedOpt = spawnAtAnchors(world, spawnable, anchors);
     if (spawnedOpt.isEmpty()) {
       debugLogger.accept("自动发车失败: spawn 失败 node=" + depotId.value());
@@ -145,10 +158,30 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
 
     MinecartGroup group = spawnedOpt.get();
+    // 必须在本 tick 内（TrainCarts 首个物理 tick 之前）设置，否则未开启常驻加载的出库车会立刻被卸载。
+    warnAboutKeepChunksLoaded(group.getProperties(), pattern, depotId);
+    return Optional.of(
+        new DepotSpawner.MaterializedSpawn(
+            group,
+            () ->
+                initializeMaterializedSpawn(
+                    group, ticket, service, depotId, pattern, route, provider, trainName, now)));
+  }
+
+  private void initializeMaterializedSpawn(
+      MinecartGroup group,
+      SpawnTicket ticket,
+      SpawnService service,
+      NodeId depotId,
+      String pattern,
+      Route route,
+      StorageProvider provider,
+      String trainName,
+      Instant now) {
     if (group.getProperties() != null) {
+      initializeSpawnOwner(group.getProperties(), trainName);
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
-      group.getProperties().setTrainName(trainName);
       addTags(group.getProperties(), ticket.id(), service, depotId, pattern, route, provider, now);
       TrainTagHelper.writeTag(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX, "0");
       TrainTagHelper.writeTag(
@@ -156,23 +189,167 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
           RouteProgressRegistry.TAG_ROUTE_UPDATED_AT,
           String.valueOf((now == null ? Instant.now() : now).toEpochMilli()));
     }
+  }
 
-    Bukkit.getScheduler()
-        .runTaskLater(
-            plugin,
-            () ->
-                org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController
-                    .warmUpDoorAnimations(group),
-            2L);
-    Bukkit.getScheduler()
-        .runTaskLater(
-            plugin,
-            () ->
-                org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController
-                    .warmUpDoorAnimations(group),
-            10L);
+  /**
+   * 出库点附近还有离线（已卸载）编组时留下证据，但仍然放行。
+   *
+   * <p>TrainCarts 的占用检查只看已加载的车，看不到躺在离线存储里的车。新车在同一锚点生成后，那些车苏醒时会同坐标复原。
+   * 这里只按区块粒度观测，不拦截：拦截一旦误判会让整个车库永久停发，而该现象的根因（出库车未常驻加载）已在 {@link #ensureKeepChunksLoaded}
+   * 处理，本层留待有实测数据再决定是否升级为拦截。
+   */
+  private void warnAboutOfflineGroupsNearDepot(
+      World world, Set<RailBlockPos> anchors, NodeId depotId) {
+    try {
+      TrainCarts trainCarts = TrainCarts.plugin;
+      if (trainCarts == null || trainCarts.getOfflineGroups() == null) {
+        return;
+      }
+      // 快照要加锁并拷贝全部离线编组，而出库重试可能每几秒一次：按车库冷却后再取。
+      long now = System.currentTimeMillis();
+      Long lastProbe = offlineProbeAtMillis.get(depotId.value());
+      if (lastProbe != null
+          && now - lastProbe >= 0L
+          && now - lastProbe < OFFLINE_PROBE_COOLDOWN_MILLIS) {
+        return;
+      }
+      offlineProbeAtMillis.put(depotId.value(), now);
+      List<int[]> blocks = new java.util.ArrayList<>();
+      for (RailBlockPos anchor : anchors) {
+        blocks.add(new int[] {anchor.x(), anchor.z()});
+      }
+      Set<Long> footprint = OfflineSpawnFootprint.chunksAround(blocks, 2);
+      List<OfflineSpawnFootprint.OfflineGroupView> views = new java.util.ArrayList<>();
+      com.bergerkiller.bukkit.common.offline.OfflineWorld offlineWorld =
+          com.bergerkiller.bukkit.common.offline.OfflineWorld.of(world);
+      for (com.bergerkiller.bukkit.tc.offline.train.OfflineGroupWorld groupWorld :
+          trainCarts.getOfflineGroups().createSnapshot()) {
+        if (!offlineWorld.equals(groupWorld.getWorld())) {
+          continue;
+        }
+        for (com.bergerkiller.bukkit.tc.offline.train.OfflineGroup group : groupWorld) {
+          Set<Long> chunks = new java.util.HashSet<>();
+          for (com.bergerkiller.bukkit.tc.offline.train.OfflineMember member : group.members) {
+            chunks.add(OfflineSpawnFootprint.chunkKey(member.cx, member.cz));
+          }
+          views.add(new OfflineSpawnFootprint.OfflineGroupView(group.name, chunks));
+        }
+      }
+      List<String> nearby = OfflineSpawnFootprint.groupsIn(views, footprint);
+      Long lastWarn = offlineWarnAtMillis.get(depotId.value());
+      boolean warnDue =
+          lastWarn == null || now - lastWarn < 0L || now - lastWarn >= OFFLINE_WARN_COOLDOWN_MILLIS;
+      if (!nearby.isEmpty() && warnDue) {
+        offlineWarnAtMillis.put(depotId.value(), now);
+        plugin
+            .getLogger()
+            .warning(
+                "出库点附近存在离线（已卸载）的编组，新出库车可能与其叠放；它们苏醒时会同坐标复原。请确认是否为遗留的幽灵车并清理 depot="
+                    + depotId.value()
+                    + " groups="
+                    + nearby);
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      debugLogger.accept("出库点离线编组探测失败 depot=" + depotId.value() + " error=" + ex);
+    }
+  }
 
-    return Optional.of(group);
+  /** 出库后开启常驻加载；开启了、或开启失败且仍未常驻，都按 pattern 去重后告警一次。 */
+  private void warnAboutKeepChunksLoaded(
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
+      String pattern,
+      NodeId depotId) {
+    warnIfKeepChunksLoadedOnlyWhenMoving();
+    if (ensureKeepChunksLoaded(properties)) {
+      if (keepChunksLoadedWarnedPatterns.add(pattern)) {
+        plugin
+            .getLogger()
+            .warning(
+                "出库车的 spawn pattern 未开启 keepChunksLoaded，已强制开启（否则 TrainCarts 会在首个物理 tick 卸载出库车，"
+                    + "冻结在出库口并被后续班次叠放）。请在该存档中开启常驻加载以消除本告警 pattern="
+                    + pattern
+                    + " depot="
+                    + depotId.value());
+      }
+      return;
+    }
+    if (!keepsChunksLoaded(properties) && keepChunksLoadedWarnedPatterns.add("failed|" + pattern)) {
+      plugin
+          .getLogger()
+          .warning(
+              "无法为出库车开启 keepChunksLoaded，该车可能被 TrainCarts 卸载并冻结在出库口 pattern="
+                  + pattern
+                  + " depot="
+                  + depotId.value());
+    }
+  }
+
+  /**
+   * TrainCarts 配置 {@code keepChunksLoadedOnlyWhenMoving=true} 时，静止且不在等待动作中的车 {@code canUnload()} 仍为
+   * true： 刚出库的车在首个物理 tick 恰好是这种状态，强制常驻加载会静默失效。只在首次出库时告警一次。
+   */
+  private void warnIfKeepChunksLoadedOnlyWhenMoving() {
+    try {
+      if (com.bergerkiller.bukkit.tc.TCConfig.keepChunksLoadedOnlyWhenMoving
+          && keepChunksLoadedWarnedPatterns.add("only-when-moving")) {
+        plugin
+            .getLogger()
+            .warning(
+                "TrainCarts 配置 keepChunksLoadedOnlyWhenMoving=true：静止的出库车仍会被卸载，强制常驻加载对刚出库的车不会生效。"
+                    + "请在 TrainCarts 的 config.yml 中将其改为 false。");
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      debugLogger.accept("读取 TrainCarts keepChunksLoadedOnlyWhenMoving 失败 error=" + ex);
+    }
+  }
+
+  private static boolean keepsChunksLoaded(
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties) {
+    try {
+      return properties != null && properties.isKeepingChunksLoaded();
+    } catch (RuntimeException | LinkageError ex) {
+      return false;
+    }
+  }
+
+  /**
+   * 保证出库车常驻加载区块。
+   *
+   * <p>TrainCarts 对未开启 keepChunksLoaded 的车，只要其 5x5 区块区内有未加载区块就会立刻卸载；出库口附近无人时车在第一个物理 tick 就被冻结。FTA
+   * 的占用模型假设受管列车一直被模拟，因此不依赖存档配置，出库时一律开启。
+   *
+   * <p>本方法在返回 {@code MaterializedSpawn} 之前调用，而物理编组此刻已经存在：按出库事务约定，可失败的初始化不得冒泡，否则出库会被当作抛异常重试， 无 tag
+   * 的编组成为堵在出库锚点的无主幽灵车。因此任何 {@link RuntimeException} / {@link LinkageError} 都在此吞掉并按“未开启”返回。
+   *
+   * @return 本次是否由本方法开启（false 表示原本就是开启的，或读取/设置失败）
+   */
+  public static boolean ensureKeepChunksLoaded(
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties) {
+    try {
+      if (properties == null || properties.isKeepingChunksLoaded()) {
+        return false;
+      }
+      properties.setKeepChunksLoaded(true);
+      return true;
+    } catch (RuntimeException | LinkageError ex) {
+      return false;
+    }
+  }
+
+  /**
+   * 初始化新生成列车的运行时 owner。
+   *
+   * <p>此操作发生在上层用正式列车名提交发车授权之前；TrainCarts 名称与 FTA owner tag 必须作为同一个初始化边界写入，避免 spawn pattern 中继承的旧
+   * tag 被首个信号 tick 误判为手动改名。
+   */
+  static void initializeSpawnOwner(
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties, String trainName) {
+    Objects.requireNonNull(properties, "properties");
+    if (trainName == null || trainName.isBlank()) {
+      throw new IllegalArgumentException("trainName 不能为空");
+    }
+    String owner = trainName.trim();
+    TrainSpawnTagInitializer.initializeOwner(properties, owner);
   }
 
   private static Optional<SignNodeRegistry.SignNodeInfo> findDepotNode(
@@ -378,48 +555,54 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (properties == null || runId == null || service == null || route == null) {
       return;
     }
+    TrainSpawnTagInitializer.replaceLifecycleTags(
+        properties, spawnTags(runId, service, depotId, spawnPattern, route, provider, now));
+  }
+
+  /**
+   * 出库车的生命周期标签。
+   *
+   * <p>线路标签（{@code FTA_OPERATOR_CODE}/{@code FTA_LINE_CODE}）是列车对乘客运营的线路：首站有效 CHANGE
+   * 的目标（定义书第一站之前的起步线路，见 {@link RouteLineChanges#entryLine}），没有时为交路自身的线路。 CHANGE
+   * 是“抵达该站后”执行的，出库车没有抵达首站，所以要在这里就写成目标线路；交路代码与管理归属（交路组、时刻表）不受影响。
+   */
+  static Map<String, String> spawnTags(
+      UUID runId,
+      SpawnService service,
+      NodeId depotId,
+      String spawnPattern,
+      Route route,
+      StorageProvider provider,
+      Instant now) {
     Instant ts = now == null ? Instant.now() : now;
+    List<RouteStop> stops =
+        provider == null ? List.of() : provider.routeStops().listByRoute(route.id());
+    RouteLineChanges.LineRef line =
+        RouteLineChanges.entryLine(
+            stops, 0, new RouteLineChanges.LineRef(service.operatorCode(), service.lineCode()));
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
     tags.put("FTA_ROUTE_ID", service.routeId().toString());
     tags.put("FTA_ROUTE_CODE", service.routeCode());
-    tags.put("FTA_LINE_CODE", service.lineCode());
-    tags.put("FTA_OPERATOR_CODE", service.operatorCode());
+    tags.put("FTA_LINE_CODE", line.lineCode());
+    tags.put("FTA_OPERATOR_CODE", line.operatorCode());
     tags.put("FTA_PATTERN", route.patternType().name());
     tags.put("FTA_DEPOT_ID", depotId != null ? depotId.value() : "");
+    tags.put(TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING, "true");
+    tags.put(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING, "true");
     tags.put("FTA_SPAWN_PATTERN", spawnPattern);
     tags.put("FTA_RUN_AT", String.valueOf(ts.toEpochMilli()));
+    tags.put("FTA_DEST_CODE", "");
+    tags.put("FTA_DEST_NAME", "");
 
-    RouteDestinationResolver.resolve(provider, route)
+    RouteDestinationResolver.resolve(
+            stops, Optional.ofNullable(provider), route.name(), route.code())
         .ifPresent(
             dest -> {
               tags.put("FTA_DEST_CODE", dest.code());
               tags.put("FTA_DEST_NAME", dest.name());
             });
-
-    List<String> out = new ArrayList<>();
-    for (Map.Entry<String, String> entry : tags.entrySet()) {
-      String value = sanitizeTagValue(entry.getValue());
-      if (value.isEmpty()) {
-        continue;
-      }
-      out.add(entry.getKey() + "=" + value);
-    }
-    if (!out.isEmpty()) {
-      properties.addTags(out.toArray(new String[0]));
-    }
-  }
-
-  private static String sanitizeTagValue(String raw) {
-    if (raw == null) {
-      return "";
-    }
-    String trimmed = raw.trim();
-    if (trimmed.isEmpty()) {
-      return "";
-    }
-    String normalized = trimmed.replace('=', '-').replace('|', '-');
-    return normalized.replaceAll("\\s+", "_");
+    return tags;
   }
 
   /**

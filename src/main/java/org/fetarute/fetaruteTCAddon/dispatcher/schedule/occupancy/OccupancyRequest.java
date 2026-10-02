@@ -1,10 +1,14 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy;
 
 import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 
 /**
@@ -18,6 +22,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
  *
  * <p>purpose 标识请求来源；缺失来源只能退化为 {@link AuthorizationPurpose#RUNTIME_MOVE}，不得退化成 {@link
  * AuthorizationPurpose#CONFLICT_CLEARING}。冲突区释放还必须携带 conflictReleaseHints，证明列车已经在同一冲突区内且目标是清空出口。
+ *
+ * <p>unresolvedDirectionKeys 记录“语义解析器已明确判定不可确定方向”的单线冲突 key。它与 corridorDirections
+ * 中单纯的缺键<b>不是</b>同一件事： 缺键可能只是该冲突不在本次计划内，可以继续由其它证据补齐；而出现在本集合中的 key 表示证据本身矛盾或不足，任何回退推断都不得再给出方向， 必须按
+ * UNKNOWN 做 fail-closed 处理。二者若不区分，换向后列车会沿回退链取回自己的旧方向 claim，从而绕过对向屏障。
+ *
+ * <p>该集合必须随每一个 {@code with*} 变换一起传递。运行时授权请求在下发前会依次经过 {@code withDirectedSource}/{@code
+ * withDirected*Version}/{@code withResourceIntents} 等变换；只要其中任何一步退回不带该集合的构造器，标记就会被静默清空， fail-closed
+ * 门在真实运行路径上等于不存在。{@link #withoutLookaheadPreviewResources()} 是唯一允许收窄的场合——资源本身已被移除时， 按资源键索引的元数据同步收窄。
  */
 public record OccupancyRequest(
     String trainName,
@@ -30,7 +42,8 @@ public record OccupancyRequest(
     AuthorizationPurpose purpose,
     Map<String, ConflictReleaseHint> conflictReleaseHints,
     Map<OccupancyResource, ResourceIntent> resourceIntents,
-    Optional<DirectedTraversalContext> directedContext) {
+    Optional<DirectedTraversalContext> directedContext,
+    Set<String> unresolvedDirectionKeys) {
 
   public OccupancyRequest {
     Objects.requireNonNull(trainName, "trainName");
@@ -51,6 +64,45 @@ public record OccupancyRequest(
     conflictEntryOrders = Map.copyOf(conflictEntryOrders);
     conflictReleaseHints = Map.copyOf(conflictReleaseHints);
     resourceIntents = Map.copyOf(resourceIntents);
+    unresolvedDirectionKeys =
+        unresolvedDirectionKeys == null ? Set.of() : Set.copyOf(unresolvedDirectionKeys);
+  }
+
+  /**
+   * 返回该单线冲突的方向是否已被明确判定为不可确定。
+   *
+   * @param conflictKey 单线冲突 key
+   * @return {@code true} 表示必须按 UNKNOWN fail-closed，不得再走任何方向回退
+   */
+  public boolean directionExplicitlyUnresolved(String conflictKey) {
+    return conflictKey != null && unresolvedDirectionKeys.contains(conflictKey);
+  }
+
+  public OccupancyRequest(
+      String trainName,
+      Optional<RouteId> routeId,
+      Instant now,
+      List<OccupancyResource> resources,
+      Map<String, CorridorDirection> corridorDirections,
+      Map<String, Integer> conflictEntryOrders,
+      int priority,
+      AuthorizationPurpose purpose,
+      Map<String, ConflictReleaseHint> conflictReleaseHints,
+      Map<OccupancyResource, ResourceIntent> resourceIntents,
+      Optional<DirectedTraversalContext> directedContext) {
+    this(
+        trainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        directedContext,
+        Set.of());
   }
 
   public OccupancyRequest(
@@ -222,6 +274,23 @@ public record OccupancyRequest(
     return MovementPlanSnapshot.fromRequest(this);
   }
 
+  /** 返回同一授权窗口但使用新列车身份的请求。 */
+  public OccupancyRequest withTrainName(String nextTrainName) {
+    return new OccupancyRequest(
+        nextTrainName,
+        routeId,
+        now,
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        priority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        directedContext.map(context -> context.withTrainKey(nextTrainName)),
+        unresolvedDirectionKeys);
+  }
+
   /** 返回同一资源集合但替换请求来源后的请求。 */
   public OccupancyRequest withPurpose(AuthorizationPurpose nextPurpose) {
     return new OccupancyRequest(
@@ -235,7 +304,8 @@ public record OccupancyRequest(
         nextPurpose,
         conflictReleaseHints,
         resourceIntents,
-        directedContext.map(context -> context.withSource(nextPurpose.name())));
+        directedContext.map(context -> context.withSource(nextPurpose.name())),
+        unresolvedDirectionKeys);
   }
 
   /** 返回同一资源集合但附加冲突清空证据后的请求。 */
@@ -252,7 +322,8 @@ public record OccupancyRequest(
         nextPurpose,
         hints == null ? Map.of() : hints,
         resourceIntents,
-        directedContext.map(context -> context.withSource(nextPurpose.name())));
+        directedContext.map(context -> context.withSource(nextPurpose.name())),
+        unresolvedDirectionKeys);
   }
 
   /** 返回同一资源集合但仅附加冲突清空证据，不改变请求来源或发布语义。 */
@@ -268,7 +339,8 @@ public record OccupancyRequest(
         purpose,
         hints == null ? Map.of() : hints,
         resourceIntents,
-        directedContext);
+        directedContext,
+        unresolvedDirectionKeys);
   }
 
   /** 返回同一请求但替换资源意图映射。 */
@@ -284,7 +356,25 @@ public record OccupancyRequest(
         purpose,
         conflictReleaseHints,
         intents == null ? Map.of() : intents,
-        directedContext);
+        directedContext,
+        unresolvedDirectionKeys);
+  }
+
+  /** 返回同一行车计划与资源窗口，但使用新的刷新时间和调度优先级。 */
+  public OccupancyRequest withSchedulingMetadata(Instant requestTime, int nextPriority) {
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        Objects.requireNonNull(requestTime, "requestTime"),
+        resources,
+        corridorDirections,
+        conflictEntryOrders,
+        nextPriority,
+        purpose,
+        conflictReleaseHints,
+        resourceIntents,
+        directedContext,
+        unresolvedDirectionKeys);
   }
 
   /** 返回同一资源窗口的 advisory lookahead 只读请求。 */
@@ -296,6 +386,72 @@ public record OccupancyRequest(
       }
     }
     return withResourceIntents(intents).withDirectedSource("LOOKAHEAD_PREVIEW");
+  }
+
+  /**
+   * 返回移除全部 advisory preview 资源后的可写请求。
+   *
+   * <p>LOOKAHEAD_PREVIEW 是只读风险查询，不能经由通用 acquire API 落入 claims、队列或版本状态。保留 directed context
+   * 仅供剩余硬资源的方向与路径证明使用；所有按资源键索引的元数据同步收窄。
+   */
+  public OccupancyRequest withoutLookaheadPreviewResources() {
+    List<OccupancyResource> writableResources =
+        resources.stream()
+            .filter(Objects::nonNull)
+            .filter(resource -> intentFor(resource) != ResourceIntent.LOOKAHEAD_PREVIEW)
+            .toList();
+    if (writableResources.size() == resources.size()) {
+      return this;
+    }
+    java.util.Set<String> writableKeys = new LinkedHashSet<>();
+    Map<OccupancyResource, ResourceIntent> writableIntents = new LinkedHashMap<>();
+    for (OccupancyResource resource : writableResources) {
+      writableKeys.add(resource.key());
+      ResourceIntent intent = resourceIntents.get(resource);
+      if (intent != null) {
+        writableIntents.put(resource, intent);
+      }
+    }
+    Map<String, CorridorDirection> writableDirections = new LinkedHashMap<>();
+    corridorDirections.forEach(
+        (key, direction) -> {
+          if (writableKeys.contains(key)) {
+            writableDirections.put(key, direction);
+          }
+        });
+    Map<String, Integer> writableEntryOrders = new LinkedHashMap<>();
+    conflictEntryOrders.forEach(
+        (key, order) -> {
+          if (writableKeys.contains(key)) {
+            writableEntryOrders.put(key, order);
+          }
+        });
+    Map<String, ConflictReleaseHint> writableReleaseHints = new LinkedHashMap<>();
+    conflictReleaseHints.forEach(
+        (key, hint) -> {
+          if (writableKeys.contains(key)) {
+            writableReleaseHints.put(key, hint);
+          }
+        });
+    java.util.Set<String> writableUnresolvedKeys = new LinkedHashSet<>();
+    for (String key : unresolvedDirectionKeys) {
+      if (writableKeys.contains(key)) {
+        writableUnresolvedKeys.add(key);
+      }
+    }
+    return new OccupancyRequest(
+        trainName,
+        routeId,
+        now,
+        writableResources,
+        writableDirections,
+        writableEntryOrders,
+        priority,
+        purpose,
+        writableReleaseHints,
+        writableIntents,
+        directedContext,
+        writableUnresolvedKeys);
   }
 
   /** 返回同一请求但替换有向 traversal 上下文。 */
@@ -311,7 +467,8 @@ public record OccupancyRequest(
         purpose,
         conflictReleaseHints,
         resourceIntents,
-        context == null ? Optional.empty() : context);
+        context == null ? Optional.empty() : context,
+        unresolvedDirectionKeys);
   }
 
   /** 返回同一请求但替换有向 traversal 上下文来源标签。 */
@@ -338,5 +495,14 @@ public record OccupancyRequest(
     }
     return withDirectedContext(
         Optional.of(directedContext.get().withProgressVersion(progressVersion)));
+  }
+
+  /** 返回同一请求但绑定构建时刻的真实进度锚点。 */
+  public OccupancyRequest withDirectedLastPassedGraphNode(Optional<NodeId> lastPassedGraphNode) {
+    if (directedContext.isEmpty()) {
+      return this;
+    }
+    return withDirectedContext(
+        Optional.of(directedContext.get().withLastPassedGraphNode(lastPassedGraphNode)));
   }
 }

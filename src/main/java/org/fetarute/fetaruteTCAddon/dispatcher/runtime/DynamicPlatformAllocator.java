@@ -3,12 +3,13 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -23,12 +24,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicS
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 
 /**
  * 动态站台分配器。
  *
- * <p>在列车接近 DYNAMIC 站点时（距离 ≤5 edges），从候选轨道范围中选择一个可用站台，并把分配结果返回给 Dispatcher。
+ * <p>在列车进入 {@link #ALLOCATION_EDGE_THRESHOLD} edges 的 DYNAMIC 授权窗口时，从候选轨道范围中选择一个可用站台，并把分配结果返回给
+ * Dispatcher。
  *
  * <p>本类不直接写入 TrainCarts destination，也不申请占用资源；destination materialize 与发车授权由 {@link
  * RuntimeDispatchService} 编排，控车落地由 {@link RuntimeTrainController} 执行。
@@ -37,7 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManag
  *
  * <ul>
  *   <li>当前 RouteStop 为 DYNAMIC 类型
- *   <li>列车距离该站点 ≤ {@link #ALLOCATION_EDGE_THRESHOLD} 个 edges
+ *   <li>列车距离该站点 ≤ {@link #ALLOCATION_EDGE_THRESHOLD} 个 edges；若它就是下一 RouteStop，则允许越过该预选阈值
  *   <li>尚未为该站点分配过站台（避免重复分配）
  * </ul>
  *
@@ -46,23 +51,49 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManag
  * <ul>
  *   <li>遍历 [fromTrack, toTrack] 范围内的所有候选站台
  *   <li>优先选择未被占用的站台
- *   <li>若所有站台都被占用，选择第一个候选（排队等待）
+ *   <li>若所有站台都被占用，不生成 materialized destination，由运行时保持在入口等待
  * </ul>
+ *
+ * <h2>物理先后</h2>
+ *
+ * <p>站台按列车<b>实际能到达的先后</b>给出：若另一列正在等待同站容量的列车停在本车通往某候选站台的进站路中间，该站台对本车不可用——
+ * 新订不给，已缓存的预订也在复核时撤回。否则后车订走最后一个空台后，前车没有台开不走、后车被前车挡着也到不了台，形成调度看不见的互卡（预订不是 claim，前车停因里没有 blocker）。
+ *
+ * <p>两车的位置都取物理位置（{@link RouteProgressRegistry#lastPassedGraphNode}），不取交路路径点：同一对路径点之间的车路径点相同，
+ * 分不出先后。<b>任一方位置未知时本规则不生效</b>——拿路径点顶替会把身后的车误判成挡路者，两车可能互相拒绝；两边都是精确位置时，
+ * 最短路长度对称，两车不可能互为对方进站路上的障碍。本规则只会撤回或拒绝预订，从不发放预订，也不触碰任何占用或授权。
  */
 public final class DynamicPlatformAllocator {
 
-  /** 触发分配的 edge 阈值：距离 DYNAMIC 站点 ≤5 edges 时触发。 */
-  public static final int ALLOCATION_EDGE_THRESHOLD = 5;
-
-  /** 候选轨道遍历的安全上限，防止 spec 范围过大导致卡服。 */
-  private static final int MAX_TRACK_CANDIDATES = 20;
+  /**
+   * 触发分配的 edge 阈值。
+   *
+   * <p>该窗口必须覆盖运行时可能写入的最大 hard-authority 窗口；否则 6-8 edges 内的声明占位节点可能先进入可写授权链。
+   */
+  public static final int ALLOCATION_EDGE_THRESHOLD = 8;
 
   private final RouteDefinitionCache routeDefinitions;
   private final OccupancyManager occupancyManager;
   private final Consumer<String> debugLogger;
 
-  /** 已分配记录：trainName -> (routeId:stopSequence) -> allocatedNodeId */
-  private final Map<String, Map<String, NodeId>> allocations = new ConcurrentHashMap<>();
+  /** 容量等待登记；为 null 时物理先后规则不生效。 */
+  private final DynamicCapacityWaitRegistry capacityWaits;
+
+  /** 列车物理位置（最后经过的图节点）；为 null 或返回空时视为位置未知。 */
+  private final Function<String, Optional<NodeId>> physicalPosition;
+
+  /** 物理先后裁定的最近一次输出签名（按请求列车），只在变化时输出，体量受在场车数限制。 */
+  private final Map<String, String> orderWithheldReported = new ConcurrentHashMap<>();
+
+  /** 已分配记录：trainName -> (routeId:stopSequence) -> 带定义证据的分配。 */
+  private final Map<String, Map<String, CachedAllocation>> allocations = new ConcurrentHashMap<>();
+
+  /** 列车改名时保护跨两个 owner key 的原子迁移，避免把并发容器本身作为 monitor。 */
+  private final Object allocationMigrationLock = new Object();
+
+  /** 站台分配决策的去重键集合；受拓扑限制，不随车数增长。 */
+  private final java.util.Set<String> allocationDecisionReported =
+      java.util.concurrent.ConcurrentHashMap.newKeySet();
 
   @SuppressFBWarnings(
       value = "EI_EXPOSE_REP2",
@@ -71,20 +102,43 @@ public final class DynamicPlatformAllocator {
       RouteDefinitionCache routeDefinitions,
       OccupancyManager occupancyManager,
       Consumer<String> debugLogger) {
+    this(routeDefinitions, occupancyManager, debugLogger, null, null);
+  }
+
+  /**
+   * 带物理先后规则的构造器。
+   *
+   * @param capacityWaits 运行时的容量等待登记
+   * @param physicalPosition 按列车名查询物理位置（最后经过的图节点）
+   */
+  @SuppressFBWarnings(
+      value = "EI_EXPOSE_REP2",
+      justification = "OccupancyManager 与容量等待登记都是运行时共享状态；选台必须读取同一份，不能复制。")
+  DynamicPlatformAllocator(
+      RouteDefinitionCache routeDefinitions,
+      OccupancyManager occupancyManager,
+      Consumer<String> debugLogger,
+      DynamicCapacityWaitRegistry capacityWaits,
+      Function<String, Optional<NodeId>> physicalPosition) {
     this.routeDefinitions = Objects.requireNonNull(routeDefinitions, "routeDefinitions");
     this.occupancyManager = occupancyManager;
     this.debugLogger = debugLogger != null ? debugLogger : s -> {};
+    this.capacityWaits = capacityWaits;
+    this.physicalPosition = physicalPosition;
   }
 
   /**
    * 检查并尝试为列车分配动态站台。
+   *
+   * <p>该入口保留旧版 {@link Optional} 合约：没有待解析的 DYNAMIC stop 与 DYNAMIC stop 当前被阻塞都会返回 {@link
+   * Optional#empty()}。调用方不能据此判定可以回退 route 声明节点；本包运行时编排需要区分两者时应使用三态解析结果。
    *
    * @param trainName 列车名称
    * @param route 当前 RouteDefinition
    * @param currentIndex 当前 waypoint 索引
    * @param graph 调度图（用于计算 edge 距离）
    * @param currentNode 列车当前所在节点
-   * @return 分配结果（如果触发分配）
+   * @return 已选中的分配结果；未触发或被阻塞时返回 empty
    */
   public Optional<AllocationResult> tryAllocate(
       String trainName,
@@ -92,11 +146,15 @@ public final class DynamicPlatformAllocator {
       int currentIndex,
       RailGraph graph,
       NodeId currentNode) {
-    return tryAllocate(trainName, route, currentIndex, graph, currentNode, Optional.empty());
+    return resolveAllocation(trainName, route, currentIndex, graph, currentNode, Optional.empty())
+        .selected();
   }
 
   /**
    * 检查并尝试为列车分配动态站台（含方向优选）。
+   *
+   * <p>该入口保留旧版 {@link Optional} 合约：没有待解析的 DYNAMIC stop 与 DYNAMIC stop 当前被阻塞都会返回 {@link
+   * Optional#empty()}。调用方不能据此判定可以回退 route 声明节点；本包运行时编排需要区分两者时应使用三态解析结果。
    *
    * @param trainName 列车名称
    * @param route 当前 RouteDefinition
@@ -104,7 +162,7 @@ public final class DynamicPlatformAllocator {
    * @param graph 调度图（用于计算 edge 距离）
    * @param currentNode 列车当前所在节点
    * @param trainDirection 列车实际运行方向（优先使用；缺失时从 waypoints 推算）
-   * @return 分配结果（如果触发分配）
+   * @return 已选中的分配结果；未触发或被阻塞时返回 empty
    */
   public Optional<AllocationResult> tryAllocate(
       String trainName,
@@ -113,14 +171,52 @@ public final class DynamicPlatformAllocator {
       RailGraph graph,
       NodeId currentNode,
       Optional<BlockFace> trainDirection) {
-    if (trainName == null || route == null || graph == null) {
-      return Optional.empty();
+    return resolveAllocation(trainName, route, currentIndex, graph, currentNode, trainDirection)
+        .selected();
+  }
+
+  /**
+   * 解析当前授权窗口内的 DYNAMIC 站台。
+   *
+   * <p>与兼容入口 {@link #tryAllocate(String, RouteDefinition, int, RailGraph, NodeId, Optional)}
+   * 不同，本方法保留“当前没有 DYNAMIC stop”和“确有 DYNAMIC stop 但没有容量”的差异。运行时必须对后者 fail-closed，禁止退回 route
+   * 声明节点继续申请咽喉进路。
+   *
+   * @param trainName 列车名称
+   * @param route 当前线路
+   * @param currentIndex 当前 waypoint 索引
+   * @param graph 调度图
+   * @param currentNode 当前图节点
+   * @param trainDirection 实际运行方向
+   * @return DYNAMIC 三态解析结果
+   */
+  DynamicResolution<AllocationResult> resolveAllocation(
+      String trainName,
+      RouteDefinition route,
+      int currentIndex,
+      RailGraph graph,
+      NodeId currentNode,
+      Optional<BlockFace> trainDirection) {
+    if (trainName == null || trainName.isBlank() || route == null) {
+      return DynamicResolution.notApplicable("invalid-allocation-context");
     }
 
     List<NodeId> waypoints = route.waypoints();
+    pruneStaleRouteAllocations(trainName, route);
     if (waypoints.isEmpty() || currentIndex < 0 || currentIndex >= waypoints.size()) {
-      return Optional.empty();
+      return DynamicResolution.notApplicable("route-index-out-of-range");
     }
+    if (graph == null || currentNode == null || occupancyManager == null) {
+      String reason =
+          graph == null
+              ? "graph-snapshot-missing"
+              : currentNode == null ? "current-node-missing" : "occupancy-manager-unavailable";
+      return hasDynamicStopInAllocationWindow(route, currentIndex)
+          ? DynamicResolution.blocked(reason)
+          : DynamicResolution.notApplicable(reason);
+    }
+    Optional<BlockFace> effectiveTrainDirection =
+        trainDirection == null ? Optional.empty() : trainDirection;
 
     // 查找下一个 DYNAMIC stop
     for (int lookAhead = 1; lookAhead <= ALLOCATION_EDGE_THRESHOLD + 2; lookAhead++) {
@@ -137,37 +233,93 @@ public final class DynamicPlatformAllocator {
       RouteStop stop = stopOpt.get();
       Optional<DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(stop);
       if (specOpt.isEmpty()) {
+        if (DynamicStopMatcher.isDynamicStop(stop)) {
+          debugLogger.accept(
+              "DYNAMIC 分配阻塞: 声明格式无效 (train="
+                  + trainName
+                  + ", route="
+                  + route.id().value()
+                  + ", stopIndex="
+                  + targetIndex
+                  + ")");
+          return DynamicResolution.blocked("invalid-dynamic-spec", OptionalInt.of(targetIndex));
+        }
         continue;
       }
 
       // 检查是否已分配
       String allocationKey = route.id().value() + ":" + stop.sequence();
-      Map<String, NodeId> trainAllocations =
+      Map<String, CachedAllocation> trainAllocations =
           allocations.computeIfAbsent(
-              trainName.toLowerCase(Locale.ROOT), k -> new ConcurrentHashMap<>());
-      if (trainAllocations.containsKey(allocationKey)) {
-        continue;
+              TrainNameNormalizer.normalizeKey(trainName), k -> new ConcurrentHashMap<>());
+      CachedAllocation cached = trainAllocations.get(allocationKey);
+      if (cached != null) {
+        DynamicSpec currentSpec = specOpt.get();
+        if (isCachedAllocationValid(
+            cached,
+            route.id(),
+            targetIndex,
+            stop.sequence(),
+            currentSpec,
+            graph,
+            currentNode,
+            trainName)) {
+          return DynamicResolution.selected(
+              new AllocationResult(
+                  trainName, route.id(), targetIndex, currentSpec, cached.allocatedNode()));
+        }
+        trainAllocations.remove(allocationKey, cached);
+        debugLogger.accept(
+            "DYNAMIC 缓存分配失效: 定义、图、可达性、占用或预订证据已变化 (train="
+                + trainName
+                + ", allocated="
+                + cached.allocatedNode().value()
+                + ")");
       }
 
-      // 计算到目标的 edge 距离
+      // 计算到目标的 edge 距离。紧邻 DYNAMIC 是当前 route leg 的唯一目标；若它本身
+      // 比预选窗口长，继续等待永远不会让 routeIndex 前进到更近的位置，必须在这里
+      // 先完成候选选择。选择仍只建立预订，实际 NODE/EDGE 授权仍由后续信号链独立裁定。
       int edgeDistance = calculateEdgeDistance(graph, waypoints, currentIndex, targetIndex);
-      if (edgeDistance > ALLOCATION_EDGE_THRESHOLD) {
+      boolean immediateDynamicTarget = targetIndex == currentIndex + 1;
+      if (!immediateDynamicTarget && edgeDistance > ALLOCATION_EDGE_THRESHOLD) {
         continue;
+      }
+      if (immediateDynamicTarget && edgeDistance > ALLOCATION_EDGE_THRESHOLD) {
+        debugLogger.accept(
+            "DYNAMIC 紧邻目标越过预选距离: train="
+                + trainName
+                + ", route="
+                + route.id().value()
+                + ", stopIndex="
+                + targetIndex
+                + ", edgeDistance="
+                + edgeDistance
+                + ", previewThreshold="
+                + ALLOCATION_EDGE_THRESHOLD);
       }
 
       // 执行分配
       DynamicSpec spec = specOpt.get();
       Optional<NodeId> allocated =
           allocatePlatform(
-              trainName, spec, graph, waypoints, currentIndex, currentNode, trainDirection);
+              trainName,
+              spec,
+              graph,
+              waypoints,
+              currentIndex,
+              currentNode,
+              effectiveTrainDirection);
       if (allocated.isEmpty()) {
         debugLogger.accept(
             "DYNAMIC 分配失败: 无可用站台 (train=" + trainName + ", spec=" + formatSpec(spec) + ")");
-        continue;
+        return DynamicResolution.blocked("no-available-platform", OptionalInt.of(targetIndex));
       }
 
       NodeId allocatedNode = allocated.get();
-      trainAllocations.put(allocationKey, allocatedNode);
+      trainAllocations.put(
+          allocationKey,
+          new CachedAllocation(route.id(), targetIndex, stop.sequence(), spec, allocatedNode));
 
       debugLogger.accept(
           "DYNAMIC 分配成功: train="
@@ -179,11 +331,85 @@ public final class DynamicPlatformAllocator {
               + ", edgeDistance="
               + edgeDistance);
 
-      return Optional.of(
+      return DynamicResolution.selected(
           new AllocationResult(trainName, route.id(), targetIndex, spec, allocatedNode));
     }
 
-    return Optional.empty();
+    return DynamicResolution.notApplicable("no-dynamic-stop-in-allocation-window");
+  }
+
+  /**
+   * 按当前 route 定义清理失效的 DYNAMIC 预订。
+   *
+   * <p>同一个 RouteId 在 reload 后可能删短、移除 DYNAMIC、修正 spec，或重排 stop sequence。缓存 key 不能单独证明定义仍相同，因此按
+   * routeId + stopIndex 重新读取当前 stop；任一证据变化都立即释放旧预订。
+   */
+  private void pruneStaleRouteAllocations(String trainName, RouteDefinition route) {
+    if (trainName == null || route == null) {
+      return;
+    }
+    String trainKey = TrainNameNormalizer.normalizeKey(trainName);
+    Map<String, CachedAllocation> trainAllocations = allocations.get(trainKey);
+    if (trainAllocations == null || trainAllocations.isEmpty()) {
+      return;
+    }
+    for (Map.Entry<String, CachedAllocation> entry : new ArrayList<>(trainAllocations.entrySet())) {
+      CachedAllocation cached = entry.getValue();
+      if (cached == null || !route.id().equals(cached.routeId())) {
+        continue;
+      }
+      boolean current =
+          cached.stopIndex() >= 0
+              && cached.stopIndex() < route.waypoints().size()
+              && routeDefinitions
+                  .findStop(route.id(), cached.stopIndex())
+                  .filter(stop -> stop.sequence() == cached.stopSequence())
+                  .flatMap(DynamicStopMatcher::parseDynamicSpec)
+                  .filter(cached.spec()::equals)
+                  .filter(spec -> DynamicStopMatcher.matches(cached.allocatedNode(), spec))
+                  .isPresent();
+      if (!current && trainAllocations.remove(entry.getKey(), cached)) {
+        debugLogger.accept(
+            "DYNAMIC 缓存分配清理: route 定义已变化 train="
+                + trainName
+                + ", route="
+                + route.id().value()
+                + ", stopIndex="
+                + cached.stopIndex()
+                + ", allocated="
+                + cached.allocatedNode().value());
+      }
+    }
+    if (trainAllocations.isEmpty()) {
+      allocations.remove(trainKey, trainAllocations);
+    }
+  }
+
+  /**
+   * 判断当前分配窗口内是否声明了 DYNAMIC stop。
+   *
+   * <p>图快照缺失时解析器仍需区分“没有 DYNAMIC”与“存在 DYNAMIC 但无法安全选台”；这里只读取 route stop 定义，不尝试选择候选或产生副作用。
+   */
+  boolean hasDynamicStopInAllocationWindow(RouteDefinition route, int currentIndex) {
+    if (route == null
+        || route.waypoints().isEmpty()
+        || currentIndex < 0
+        || currentIndex >= route.waypoints().size()) {
+      return false;
+    }
+    for (int lookAhead = 1; lookAhead <= ALLOCATION_EDGE_THRESHOLD + 2; lookAhead++) {
+      int targetIndex = currentIndex + lookAhead;
+      if (targetIndex >= route.waypoints().size()) {
+        return false;
+      }
+      if (routeDefinitions
+          .findStop(route.id(), targetIndex)
+          .map(DynamicStopMatcher::isDynamicStop)
+          .orElse(false)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -198,12 +424,84 @@ public final class DynamicPlatformAllocator {
     if (trainName == null || routeId == null) {
       return Optional.empty();
     }
-    Map<String, NodeId> trainAllocations = allocations.get(trainName.toLowerCase(Locale.ROOT));
+    Map<String, CachedAllocation> trainAllocations =
+        allocations.get(TrainNameNormalizer.normalizeKey(trainName));
     if (trainAllocations == null) {
       return Optional.empty();
     }
     String key = routeId.value() + ":" + stopSequence;
-    return Optional.ofNullable(trainAllocations.get(key));
+    return Optional.ofNullable(trainAllocations.get(key)).map(CachedAllocation::allocatedNode);
+  }
+
+  /**
+   * 释放已经越过的 DYNAMIC stop 预订。
+   *
+   * <p>只删除同一 route 且 stopIndex 小于当前抵达索引的缓存；当前站台在列车尚未离开时继续保留，未来 stop 的预选也不会被误删。
+   */
+  void releaseCompletedAllocations(String trainName, RouteId routeId, int currentIndex) {
+    if (trainName == null || routeId == null || currentIndex < 0) {
+      return;
+    }
+    String trainKey = TrainNameNormalizer.normalizeKey(trainName);
+    Map<String, CachedAllocation> trainAllocations = allocations.get(trainKey);
+    if (trainAllocations == null) {
+      return;
+    }
+    trainAllocations
+        .entrySet()
+        .removeIf(
+            entry ->
+                entry.getValue() != null
+                    && routeId.equals(entry.getValue().routeId())
+                    && entry.getValue().stopIndex() < currentIndex);
+    if (trainAllocations.isEmpty()) {
+      allocations.remove(trainKey, trainAllocations);
+    }
+  }
+
+  /** 判断逻辑列车是否仍持有 DYNAMIC 站台预订。 */
+  boolean hasAllocations(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return false;
+    }
+    Map<String, CachedAllocation> trainAllocations =
+        allocations.get(TrainNameNormalizer.normalizeKey(trainName));
+    return trainAllocations != null && !trainAllocations.isEmpty();
+  }
+
+  /**
+   * 原子迁移列车名对应的 DYNAMIC 站台预订。
+   *
+   * <p>目标 owner 已有预订时拒绝迁移，调用方可以与其它运行时注册表一起回滚。没有旧预订视为成功。
+   */
+  boolean migrateAllocations(String previousTrainName, String currentTrainName) {
+    if (previousTrainName == null
+        || previousTrainName.isBlank()
+        || currentTrainName == null
+        || currentTrainName.isBlank()) {
+      return false;
+    }
+    String previousKey = TrainNameNormalizer.normalizeKey(previousTrainName);
+    String currentKey = TrainNameNormalizer.normalizeKey(currentTrainName);
+    if (previousKey.equals(currentKey)) {
+      return true;
+    }
+    orderWithheldReported.remove(previousKey);
+    synchronized (allocationMigrationLock) {
+      Map<String, CachedAllocation> previous = allocations.get(previousKey);
+      if (previous == null || previous.isEmpty()) {
+        return true;
+      }
+      if (allocations.containsKey(currentKey) || !allocations.remove(previousKey, previous)) {
+        return false;
+      }
+      Map<String, CachedAllocation> conflict = allocations.putIfAbsent(currentKey, previous);
+      if (conflict == null) {
+        return true;
+      }
+      allocations.putIfAbsent(previousKey, previous);
+      return false;
+    }
   }
 
   /**
@@ -213,7 +511,8 @@ public final class DynamicPlatformAllocator {
    */
   public void clearAllocations(String trainName) {
     if (trainName != null) {
-      allocations.remove(trainName.toLowerCase(Locale.ROOT));
+      allocations.remove(TrainNameNormalizer.normalizeKey(trainName));
+      orderWithheldReported.remove(TrainNameNormalizer.normalizeKey(trainName));
     }
   }
 
@@ -278,16 +577,7 @@ public final class DynamicPlatformAllocator {
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
     List<ApproachCandidate> candidates = new ArrayList<>();
 
-    // 安全上限：防止 spec 范围过大导致长时间循环
-    int maxTrack = Math.min(spec.toTrack(), spec.fromTrack() + MAX_TRACK_CANDIDATES - 1);
-    for (int track = spec.fromTrack(); track <= maxTrack; track++) {
-      NodeId candidate =
-          NodeId.of(
-              spec.operatorCode() + ":" + spec.nodeType() + ":" + spec.nodeName() + ":" + track);
-      if (graph.findNode(candidate).isEmpty()) {
-        continue;
-      }
-
+    for (NodeId candidate : DynamicStopMatcher.candidateNodes(spec, graph)) {
       Optional<RailGraphPath> pathOpt =
           pathFinder.shortestPath(
               graph, currentNode, candidate, RailGraphPathFinder.Options.shortestDistance());
@@ -295,7 +585,11 @@ public final class DynamicPlatformAllocator {
         continue;
       }
 
-      boolean free = occupancyManager == null || !occupancyManager.isNodeOccupied(candidate);
+      boolean physicallyFree = !isExternallyOccupied(candidate, trainName);
+      boolean free =
+          physicallyFree
+              && !isReservedByOtherTrain(candidate, trainName)
+              && waiterAheadOnApproach(trainName, candidate, graph).isEmpty();
       candidates.add(new ApproachCandidate(candidate, free, pathOpt.get().nodes()));
     }
 
@@ -303,16 +597,164 @@ public final class DynamicPlatformAllocator {
       return Optional.empty();
     }
 
-    // Pass 1: free first
     List<ApproachCandidate> freeCandidates =
         candidates.stream().filter(ApproachCandidate::free).toList();
+    if (freeCandidates.isEmpty()) {
+      debugLogger.accept(
+          "DYNAMIC 分配阻塞: 候选站台均被占用 train=" + trainName + ", spec=" + formatSpec(spec));
+      return Optional.empty();
+    }
     ApproachCandidate chosen =
-        freeCandidates.isEmpty()
-            ? selectBestCandidateByDirection(trainName, currentNode, travelDir, candidates, graph)
-            : selectBestCandidateByDirection(
-                trainName, currentNode, travelDir, freeCandidates, graph);
-
+        selectBestCandidateByDirection(trainName, currentNode, travelDir, freeCandidates, graph);
+    traceAllocationDecision(spec, candidates, freeCandidates, chosen);
     return Optional.ofNullable(chosen != null ? chosen.nodeId : null);
+  }
+
+  /**
+   * 判断站台是否被其他逻辑列车占用。
+   *
+   * <p>同一列车在进路授权或折返交接后可能已经持有目标节点 claim；该 claim 是已选目标的安全依据，不应反过来阻塞本车。若占用管理器只报告“已占用”却无法提供
+   * claim，则按外部占用 fail-closed。
+   */
+  private boolean isExternallyOccupied(NodeId candidate, String trainName) {
+    if (candidate == null || occupancyManager == null) {
+      return false;
+    }
+    OccupancyResource resource = OccupancyResource.forNode(candidate);
+    boolean selfClaimSeen = false;
+    List<OccupancyClaim> claims = occupancyManager.snapshotClaims();
+    for (OccupancyClaim claim : claims == null ? List.<OccupancyClaim>of() : claims) {
+      if (claim == null || !resource.equals(claim.resource())) {
+        continue;
+      }
+      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        return true;
+      }
+      selfClaimSeen = true;
+    }
+    if (!occupancyManager.isNodeOccupied(candidate)) {
+      return false;
+    }
+    if (selfClaimSeen) {
+      return false;
+    }
+    return occupancyManager
+        .getClaim(resource)
+        .map(claim -> !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName))
+        .orElse(true);
+  }
+
+  private boolean isReservedByOtherTrain(NodeId candidate, String trainName) {
+    if (candidate == null) {
+      return false;
+    }
+    for (Map.Entry<String, Map<String, CachedAllocation>> entry : allocations.entrySet()) {
+      if (entry == null
+          || entry.getKey() == null
+          || TrainNameNormalizer.sameLogicalTrain(entry.getKey(), trainName)) {
+        continue;
+      }
+      Map<String, CachedAllocation> trainAllocations = entry.getValue();
+      if (trainAllocations != null
+          && trainAllocations.values().stream()
+              .filter(Objects::nonNull)
+              .map(CachedAllocation::allocatedNode)
+              .anyMatch(candidate::equals)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private boolean isCachedAllocationValid(
+      CachedAllocation cached,
+      RouteId routeId,
+      int targetIndex,
+      int stopSequence,
+      DynamicSpec currentSpec,
+      RailGraph graph,
+      NodeId currentNode,
+      String trainName) {
+    if (cached == null
+        || !cached.routeId().equals(routeId)
+        || cached.stopIndex() != targetIndex
+        || cached.stopSequence() != stopSequence
+        || !cached.spec().equals(currentSpec)
+        || !DynamicStopMatcher.matches(cached.allocatedNode(), currentSpec)
+        || graph.findNode(cached.allocatedNode()).isEmpty()
+        || new RailGraphPathFinder()
+            .shortestPath(
+                graph,
+                currentNode,
+                cached.allocatedNode(),
+                RailGraphPathFinder.Options.shortestDistance())
+            .isEmpty()) {
+      return false;
+    }
+    return !isExternallyOccupied(cached.allocatedNode(), trainName)
+        && !isReservedByOtherTrain(cached.allocatedNode(), trainName)
+        && waiterAheadOnApproach(trainName, cached.allocatedNode(), graph).isEmpty();
+  }
+
+  /**
+   * 物理先后规则：找出一列停在本车通往 {@code candidate} 的进站路中间、且正在等待同一站台容量的其它列车。
+   *
+   * <p>规则与取位口径见类注释"物理先后"一节。进站路径从本车物理位置起算，只看中间节点：起点是本车自己，终点是站台本身（站台被占由 {@link #isExternallyOccupied}
+   * 负责）。
+   *
+   * @return 挡在前面的等待列车名；没有、或任一方位置未知时为空
+   */
+  private Optional<String> waiterAheadOnApproach(
+      String trainName, NodeId candidate, RailGraph graph) {
+    if (capacityWaits == null || physicalPosition == null || candidate == null || graph == null) {
+      return Optional.empty();
+    }
+    OccupancyResource resource = OccupancyResource.forNode(candidate);
+    if (!capacityWaits.hasOtherWaiterFor(trainName, resource)) {
+      return Optional.empty();
+    }
+    Optional<NodeId> position = physicalPosition.apply(trainName);
+    if (position == null || position.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RailGraphPath> approach =
+        new RailGraphPathFinder()
+            .shortestPath(
+                graph, position.get(), candidate, RailGraphPathFinder.Options.shortestDistance());
+    if (approach.isEmpty() || approach.get().nodes().size() < 3) {
+      return Optional.empty();
+    }
+    List<NodeId> nodes = approach.get().nodes();
+    Optional<String> waiter =
+        capacityWaits.waiterWithin(trainName, resource, nodes.subList(1, nodes.size() - 1));
+    waiter.ifPresent(ahead -> reportOrderWithheld(trainName, candidate, ahead, position.get()));
+    return waiter;
+  }
+
+  /**
+   * 物理先后裁定拒绝或撤回预订时留痕。
+   *
+   * <p>它是规则生效的唯一证据，诊断门把它列为必留（{@code RuntimeDispatchDiagnosticGate}）；按 (候选, 挡路者, 起点) 变化去重，同一裁定在后车逐
+   * tick 重评估时不重复输出。
+   */
+  private void reportOrderWithheld(
+      String trainName, NodeId candidate, String waitingAhead, NodeId from) {
+    String signature = candidate.value() + "|" + waitingAhead + "|" + from.value();
+    String previous =
+        orderWithheldReported.put(TrainNameNormalizer.normalizeKey(trainName), signature);
+    if (signature.equals(previous)) {
+      return;
+    }
+    debugLogger.accept(
+        "DYNAMIC_PLATFORM_ORDER_WITHHELD train="
+            + trainName
+            + " candidate="
+            + candidate.value()
+            + " waitingAhead="
+            + waitingAhead
+            + " from="
+            + from.value()
+            + " reason=waiting-train-ahead-on-approach");
   }
 
   private record ApproachCandidate(NodeId nodeId, boolean free, List<NodeId> pathNodes) {
@@ -321,6 +763,53 @@ public final class DynamicPlatformAllocator {
       Objects.requireNonNull(pathNodes, "pathNodes");
       pathNodes = List.copyOf(pathNodes);
     }
+  }
+
+  private record CachedAllocation(
+      RouteId routeId, int stopIndex, int stopSequence, DynamicSpec spec, NodeId allocatedNode) {
+    private CachedAllocation {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(spec, "spec");
+      Objects.requireNonNull(allocatedNode, "allocatedNode");
+    }
+  }
+
+  /**
+   * 记录一次站台分配的**候选与结果**。
+   *
+   * <p><b>为什么必须有这条</b>：多站台终点的站台使用可能明显失衡。 仅凭 claim 统计无法判定原因：是某个站台很少空闲（那就是容量真的满了），
+   * 还是它空着而分配器仍然偏爱另一个（那就是白白损失终端容量）。 <b>两者要采取的下一步完全相反。</b>
+   *
+   * <p>{@code DYNAMIC(approach) 方向优选} 只在候选 &gt; 1 时才输出，它缺席时无法区分“从来只有一个候选”与“被诊断预算砍掉了”。
+   * 所以这条无条件记录，并把**空闲候选数**一并写出来。
+   *
+   * <p>体量：按 (站点范围, 候选数, 空闲数, 选中股道) 去重，受拓扑限制，不随车数增长。
+   */
+  private void traceAllocationDecision(
+      DynamicSpec spec,
+      List<ApproachCandidate> candidates,
+      List<ApproachCandidate> freeCandidates,
+      ApproachCandidate chosen) {
+    if (spec == null || candidates == null || freeCandidates == null) {
+      return;
+    }
+    String chosenNode = chosen == null ? "-" : chosen.nodeId.value();
+    String key =
+        formatSpec(spec) + "|" + candidates.size() + "|" + freeCandidates.size() + "|" + chosenNode;
+    if (!allocationDecisionReported.add(key)) {
+      return;
+    }
+    debugLogger.accept(
+        "DYNAMIC_PLATFORM_DECISION spec="
+            + formatSpec(spec)
+            + " candidates="
+            + candidates.size()
+            + " free="
+            + freeCandidates.size()
+            + " chosen="
+            + chosenNode
+            + " freeNodes="
+            + freeCandidates.stream().map(c -> c.nodeId.value()).toList());
   }
 
   private ApproachCandidate selectBestCandidateByDirection(

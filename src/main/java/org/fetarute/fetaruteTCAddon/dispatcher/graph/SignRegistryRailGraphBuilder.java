@@ -7,11 +7,15 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphExplorer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -31,6 +35,7 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
   private final Consumer<String> debugLogger;
   private final int anchorSearchRadius;
   private final int maxEdgeDistanceBlocks;
+  private final Function<World, RailBlockAccess> railAccessFactory;
 
   public SignRegistryRailGraphBuilder(SignNodeRegistry registry, Consumer<String> debugLogger) {
     this(registry, debugLogger, DEFAULT_ANCHOR_SEARCH_RADIUS, DEFAULT_MAX_EDGE_DISTANCE_BLOCKS);
@@ -46,6 +51,25 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
       Consumer<String> debugLogger,
       int anchorSearchRadius,
       int maxEdgeDistanceBlocks) {
+    this(
+        registry,
+        debugLogger,
+        anchorSearchRadius,
+        maxEdgeDistanceBlocks,
+        TrainCartsRailBlockAccess::new);
+  }
+
+  /**
+   * 创建可替换轨道访问器的构图器，供不启动 Bukkit/TrainCarts 运行时的确定性测试使用。
+   *
+   * <p>生产构造器始终注入 {@link TrainCartsRailBlockAccess}；该 seam 只替换外部轨道读取边界，不改变构图与联锁逻辑。
+   */
+  SignRegistryRailGraphBuilder(
+      SignNodeRegistry registry,
+      Consumer<String> debugLogger,
+      int anchorSearchRadius,
+      int maxEdgeDistanceBlocks,
+      Function<World, RailBlockAccess> railAccessFactory) {
     this.registry = Objects.requireNonNull(registry, "registry");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     if (anchorSearchRadius < 0) {
@@ -56,6 +80,7 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
     }
     this.anchorSearchRadius = anchorSearchRadius;
     this.maxEdgeDistanceBlocks = maxEdgeDistanceBlocks;
+    this.railAccessFactory = Objects.requireNonNull(railAccessFactory, "railAccessFactory");
   }
 
   @Override
@@ -66,7 +91,8 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
     Map<NodeId, RailNode> nodesById = new HashMap<>();
     Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
 
-    TrainCartsRailBlockAccess railAccess = new TrainCartsRailBlockAccess(world);
+    RailBlockAccess railAccess =
+        Objects.requireNonNull(railAccessFactory.apply(world), "railAccessFactory 返回 null");
     for (SignNodeRegistry.SignNodeInfo info : registry.snapshotInfos().values()) {
       if (!worldId.equals(info.worldId())) {
         continue;
@@ -93,24 +119,31 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
       }
     }
 
-    Map<EdgeId, Integer> edgeLengths =
-        RailGraphExplorer.exploreEdgeLengths(anchorsByNode, railAccess, maxEdgeDistanceBlocks);
+    Map<EdgeId, ExploredRailEdge> exploredEdges =
+        RailGraphExplorer.exploreEdges(anchorsByNode, railAccess, maxEdgeDistanceBlocks);
+    boolean allNodeAnchorsResolved = anchorsByNode.size() == nodesById.size();
 
     Map<EdgeId, RailEdge> edgesById = new HashMap<>();
-    for (Map.Entry<EdgeId, Integer> entry : edgeLengths.entrySet()) {
+    Map<EdgeId, RailEdgeFootprint> footprintsByEdge = new HashMap<>();
+    for (Map.Entry<EdgeId, ExploredRailEdge> entry : exploredEdges.entrySet()) {
       EdgeId edgeId = entry.getKey();
-      int lengthBlocks = entry.getValue();
+      ExploredRailEdge exploredEdge = entry.getValue();
       RailNode a = nodesById.get(edgeId.a());
       RailNode b = nodesById.get(edgeId.b());
       if (a == null || b == null) {
         continue;
       }
+      RailEdgeFootprint footprint = exploredEdge.footprint();
+      if (!allNodeAnchorsResolved && footprint.complete()) {
+        footprint = new RailEdgeFootprint(footprint.formatVersion(), false, footprint.cells());
+      }
+      footprintsByEdge.put(edgeId, footprint);
       RailEdge edge =
           new RailEdge(
               edgeId,
               edgeId.a(),
               edgeId.b(),
-              lengthBlocks,
+              exploredEdge.lengthBlocks(),
               0.0,
               true,
               Optional.of(new RailEdgeMetadata(a.waypointMetadata(), b.waypointMetadata())));
@@ -124,6 +157,8 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
             + nodesById.size()
             + " edges="
             + edgesById.size());
-    return new SimpleRailGraph(nodesById, edgesById, Set.of());
+    RailInterlockingState interlockingState =
+        RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge);
+    return new SimpleRailGraph(nodesById, edgesById, Set.of(), interlockingState);
   }
 }

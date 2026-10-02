@@ -2,7 +2,9 @@ package org.fetarute.fetaruteTCAddon.config;
 
 import java.io.File;
 import java.io.InputStream;
+import java.util.EnumMap;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Properties;
 import org.bukkit.configuration.ConfigurationSection;
@@ -20,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 26;
+  private static final int EXPECTED_CONFIG_VERSION = 38;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -37,7 +39,6 @@ public final class ConfigManager {
   private static final double DEFAULT_APPROACH_SPEED_BPS = 4.0;
   private static final double DEFAULT_APPROACH_WINDOW_BLOCKS = 96.0;
   private static final int DEFAULT_APPROACH_WINDOW_EDGES = 0;
-  private static final int DEFAULT_APPROACH_TARGET_EDGES = 1;
   private static final boolean DEFAULT_HUD_BOSSBAR_ENABLED = true;
   private static final int DEFAULT_HUD_BOSSBAR_TICK_INTERVAL = 10;
   private static final Optional<String> DEFAULT_HUD_BOSSBAR_TEMPLATE = Optional.empty();
@@ -78,7 +79,18 @@ public final class ConfigManager {
   private static final SmartDispatcherPlannerMode DEFAULT_SMART_DISPATCHER_PLANNER_MODE =
       SmartDispatcherPlannerMode.OBSERVE_ONLY;
   private static final int DEFAULT_SMART_DISPATCHER_PLANNER_MAX_RESERVATION_RESOURCES = 4;
-  private static final int DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS = 60;
+
+  /**
+   * unlock 预约的存活时长，单位是 50ms 的信号 tick（见 {@code currentSignalTraceTick}）。
+   *
+   * <p>「列车被放行 → 走到下一个节点」的耗时中位数约 21 秒、p75 约 31 秒、p90 约 66 秒。 TTL 若只有数秒，预约必然在它等待的那个移动完成之前过期，
+   * 列车明明已经动了（{@code currentNodeChanged=true}），却被判为 no-release-timeout。
+   *
+   * <p>1200 tick = 60 秒，高于 p75。过长的代价有界（只多保留一会儿队列 priority 意图，且列车一旦推进 就会由 canonical
+   * 进度判定回滚）；过短的代价是恢复层几乎必然失败。
+   */
+  private static final int DEFAULT_SMART_DISPATCHER_PLANNER_RESERVATION_TTL_TICKS = 1200;
+
   private static final long DEFAULT_SMART_DISPATCHER_PLANNER_BLOCKER_SNAPSHOT_TTL_MS = 10_000L;
   private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_REQUIRE_SAME_DIRECTION = true;
   private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ALLOW_REVERSE = false;
@@ -86,17 +98,25 @@ public final class ConfigManager {
       false;
   private static final boolean DEFAULT_SMART_DISPATCHER_PLANNER_ONE_ACTIVE_RESERVATION_PER_CYCLE =
       true;
-  private static final double DEFAULT_EMU_ACCEL_BPS2 = 0.8;
-  private static final double DEFAULT_EMU_DECEL_BPS2 = 1.0;
-  private static final double DEFAULT_DMU_ACCEL_BPS2 = 0.7;
-  private static final double DEFAULT_DMU_DECEL_BPS2 = 0.9;
-  private static final double DEFAULT_DIESEL_PP_ACCEL_BPS2 = 0.6;
-  private static final double DEFAULT_DIESEL_PP_DECEL_BPS2 = 0.8;
-  private static final double DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2 = 0.9;
-  private static final double DEFAULT_ELECTRIC_LOCO_DECEL_BPS2 = 1.1;
+
+  /** 配置缺失或写错 {@code train.default-type} 时的默认车种。 */
+  private static final TrainType DEFAULT_TRAIN_TYPE = TrainType.METRO;
+
   private static final int DEFAULT_SPAWN_MAX_ATTEMPTS = 10;
   private static final long DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS = 86400L;
   private static final long DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS = 86400L;
+  private static final int DEFAULT_SPAWN_MAX_ACTIVE_TRAINS = 16;
+
+  /**
+   * 拥堵评分里“全网算满”的参考车数。
+   *
+   * <p>默认与 {@link #DEFAULT_SPAWN_MAX_ACTIVE_TRAINS} 相等，但它们是**两个不同的量**：
+   * 前者是“网络装多少车就算满”（物理/经验量），后者是“我们允许发多少车”（策略量）。
+   */
+  private static final int DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS = 16;
+
+  private static final double DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD = 0.58D;
+  private static final double DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD = 0.48D;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -155,6 +175,8 @@ public final class ConfigManager {
     ConfigurationSection healthSection = config.getConfigurationSection("health");
     HealthSettings healthSettings = parseHealth(healthSection, logger);
     SmartDispatcherSettings smartDispatcherSettings = parseSmartDispatcher(config, logger);
+    ConfigurationSection timetableSection = config.getConfigurationSection("timetable");
+    TimetableSettings timetableSettings = parseTimetable(timetableSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -167,7 +189,111 @@ public final class ConfigManager {
         trainConfigSettings,
         reclaimSettings,
         smartDispatcherSettings,
-        healthSettings);
+        healthSettings,
+        timetableSettings);
+  }
+
+  /**
+   * 解析时刻表配置段。
+   *
+   * <p>总开关默认关闭：装上这个版本的插件不应该改变任何一列现有列车的行为，必须由运营方显式打开。 晚点追赶（{@code recovery.*}）有非零缺省值（默认开启），
+   * 但只在按表运行打开后才起作用。
+   */
+  private static TimetableSettings parseTimetable(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    if (section == null) {
+      return TimetableSettings.defaults();
+    }
+    TimetableSettings defaults = TimetableSettings.defaults();
+    boolean enabled = section.getBoolean("enabled", defaults.enabled());
+    boolean spawnEnabled = section.getBoolean("spawn-enabled", defaults.spawnEnabled());
+    int holdMaxSeconds =
+        readNonNegativeInt(
+            section, "hold-max-seconds", defaults.holdMaxSeconds(), "timetable", logger);
+    int assignToleranceSeconds =
+        readNonNegativeInt(
+            section,
+            "assign-tolerance-seconds",
+            defaults.assignToleranceSeconds(),
+            "timetable",
+            logger);
+    int maxCatchUpSeconds =
+        readNonNegativeInt(
+            section, "max-catch-up-seconds", defaults.maxCatchUpSeconds(), "timetable", logger);
+    int reloadIntervalSeconds =
+        Math.max(
+            1,
+            readNonNegativeInt(
+                section,
+                "reload-interval-seconds",
+                defaults.reloadIntervalSeconds(),
+                "timetable",
+                logger));
+    int recorderFlushIntervalSeconds =
+        Math.max(
+            1,
+            readNonNegativeInt(
+                section,
+                "recorder-flush-interval-seconds",
+                defaults.recorderFlushIntervalSeconds(),
+                "timetable",
+                logger));
+    int stationStopOverheadSeconds =
+        readNonNegativeInt(
+            section,
+            "station-stop-overhead-seconds",
+            defaults.stationStopOverheadSeconds(),
+            "timetable",
+            logger);
+    ConfigurationSection recovery = section.getConfigurationSection("recovery");
+    int recoveryMinDwellSeconds = defaults.recoveryMinDwellSeconds();
+    int recoveryOverspeedPercent = defaults.recoveryOverspeedPercent();
+    int recoveryEngageDelaySeconds = defaults.recoveryEngageDelaySeconds();
+    if (recovery != null) {
+      recoveryMinDwellSeconds =
+          readNonNegativeInt(
+              recovery, "min-dwell-seconds", recoveryMinDwellSeconds, "timetable.recovery", logger);
+      recoveryOverspeedPercent =
+          readNonNegativeInt(
+              recovery,
+              "overspeed-percent",
+              recoveryOverspeedPercent,
+              "timetable.recovery",
+              logger);
+      recoveryEngageDelaySeconds =
+          readNonNegativeInt(
+              recovery,
+              "engage-delay-seconds",
+              recoveryEngageDelaySeconds,
+              "timetable.recovery",
+              logger);
+    }
+    return new TimetableSettings(
+        enabled,
+        spawnEnabled,
+        holdMaxSeconds,
+        assignToleranceSeconds,
+        maxCatchUpSeconds,
+        reloadIntervalSeconds,
+        recorderFlushIntervalSeconds,
+        stationStopOverheadSeconds,
+        recoveryMinDwellSeconds,
+        recoveryOverspeedPercent,
+        recoveryEngageDelaySeconds);
+  }
+
+  private static int readNonNegativeInt(
+      ConfigurationSection section,
+      String key,
+      int fallback,
+      String sectionName,
+      java.util.logging.Logger logger) {
+    int value = section.getInt(key, fallback);
+    if (value < 0) {
+      logger.warning(sectionName + "." + key + " 配置无效: " + value + "，已回退为默认值");
+      return fallback;
+    }
+    return value;
   }
 
   /** 解析 Smart Dispatcher / Traffic Control Supervisor 配置段。 */
@@ -311,7 +437,7 @@ public final class ConfigManager {
     }
     logger.info(
         smartDispatcherBuildFingerprintTrace(
-            plugin.getDescription().getVersion(),
+            plugin.getPluginMeta().getVersion(),
             buildInfoProperty("gitCommit"),
             buildInfoProperty("buildTime").or(() -> buildInfoProperty("buildId")),
             pluginJarPath(),
@@ -322,7 +448,7 @@ public final class ConfigManager {
             smartDispatcherDefaultUsedFlags(config)));
     logger.info(
         smartRuntimeBuildFingerprintTrace(
-            plugin.getDescription().getVersion(),
+            plugin.getPluginMeta().getVersion(),
             buildInfoProperty("gitCommit"),
             buildInfoProperty("buildTime").or(() -> buildInfoProperty("buildId"))));
     logger.info(smartDispatcherPlannerConfigTrace(plannerSettings));
@@ -389,7 +515,10 @@ public final class ConfigManager {
         + gitCommit.filter(value -> !value.isBlank()).orElse("unknown")
         + " buildTime="
         + buildTime.filter(value -> !value.isBlank()).orElse("unknown")
-        + " dispatcherPatchLevel=P0_SIGNAL_RETAIN_DISPATCHER"
+        + " dispatcherPatchLevel=P2_PHYSICAL_TOPOLOGY_QUERY_INDEX"
+        + " physicalInterlockingFootprint=true"
+        + " liveFootprintReverseIndex=true"
+        + " startupOccupancyReconstruction=true"
         + " recoverableHoldContainsRouteStopOrTerminal=true";
   }
 
@@ -495,8 +624,11 @@ public final class ConfigManager {
     int progressStopGraceSeconds = 60;
     int deadlockThresholdSeconds = 45;
     int deadlockDestroyThresholdSeconds = 60;
-    boolean deadlockDestroyEnabled = true;
+    boolean trainCleanupEnabled = false;
     int deadlockDestroyCooldownSeconds = 120;
+    int stuckCleanupThresholdSeconds = 600;
+    int stuckCleanupPassengerThresholdSeconds = 1800;
+    int stuckCleanupCooldownSeconds = 120;
     int deadlockEpisodeGraceSeconds = 15;
     int deadlockMinStopSeconds = 20;
     int blockerSnapshotMaxAgeSeconds = 20;
@@ -544,14 +676,38 @@ public final class ConfigManager {
             "health.deadlock-destroy-threshold-seconds 配置无效: " + deadlockDestroyThresholdSeconds);
         deadlockDestroyThresholdSeconds = 60;
       }
-      deadlockDestroyEnabled =
-          section.getBoolean("deadlock-destroy-enabled", deadlockDestroyEnabled);
+      trainCleanupEnabled = section.getBoolean("deadlock-destroy-enabled", trainCleanupEnabled);
       deadlockDestroyCooldownSeconds =
           section.getInt("deadlock-destroy-cooldown-seconds", deadlockDestroyCooldownSeconds);
       if (deadlockDestroyCooldownSeconds < 0) {
         logger.warning(
             "health.deadlock-destroy-cooldown-seconds 配置无效: " + deadlockDestroyCooldownSeconds);
         deadlockDestroyCooldownSeconds = 120;
+      }
+      stuckCleanupThresholdSeconds =
+          section.getInt("stuck-cleanup-threshold-seconds", stuckCleanupThresholdSeconds);
+      if (stuckCleanupThresholdSeconds <= 0) {
+        logger.warning(
+            "health.stuck-cleanup-threshold-seconds 配置无效: " + stuckCleanupThresholdSeconds);
+        stuckCleanupThresholdSeconds = 600;
+      }
+      stuckCleanupPassengerThresholdSeconds =
+          section.getInt(
+              "stuck-cleanup-passenger-threshold-seconds", stuckCleanupPassengerThresholdSeconds);
+      if (stuckCleanupPassengerThresholdSeconds <= 0) {
+        logger.warning(
+            "health.stuck-cleanup-passenger-threshold-seconds 配置无效: "
+                + stuckCleanupPassengerThresholdSeconds);
+        stuckCleanupPassengerThresholdSeconds = 1800;
+      }
+      stuckCleanupPassengerThresholdSeconds =
+          Math.max(stuckCleanupThresholdSeconds, stuckCleanupPassengerThresholdSeconds);
+      stuckCleanupCooldownSeconds =
+          section.getInt("stuck-cleanup-cooldown-seconds", stuckCleanupCooldownSeconds);
+      if (stuckCleanupCooldownSeconds < 0) {
+        logger.warning(
+            "health.stuck-cleanup-cooldown-seconds 配置无效: " + stuckCleanupCooldownSeconds);
+        stuckCleanupCooldownSeconds = 120;
       }
       deadlockEpisodeGraceSeconds =
           section.getInt("deadlock-episode-grace-seconds", deadlockEpisodeGraceSeconds);
@@ -596,8 +752,11 @@ public final class ConfigManager {
         progressStopGraceSeconds,
         deadlockThresholdSeconds,
         deadlockDestroyThresholdSeconds,
-        deadlockDestroyEnabled,
+        trainCleanupEnabled,
         deadlockDestroyCooldownSeconds,
+        stuckCleanupThresholdSeconds,
+        stuckCleanupPassengerThresholdSeconds,
+        stuckCleanupCooldownSeconds,
         deadlockEpisodeGraceSeconds,
         deadlockMinStopSeconds,
         blockerSnapshotMaxAgeSeconds,
@@ -614,6 +773,7 @@ public final class ConfigManager {
     long maxIdleSeconds = 300;
     int maxActiveTrains = 50;
     long checkIntervalSeconds = 60;
+    long strandedDestroySeconds = ReclaimSettings.DEFAULT_STRANDED_DESTROY_SECONDS;
 
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
@@ -632,8 +792,14 @@ public final class ConfigManager {
         logger.warning("reclaim.check-interval-seconds 配置无效: " + checkIntervalSeconds);
         checkIntervalSeconds = 60;
       }
+      strandedDestroySeconds = section.getLong("stranded-destroy-seconds", strandedDestroySeconds);
+      if (strandedDestroySeconds < 0) {
+        logger.warning("reclaim.stranded-destroy-seconds 配置无效: " + strandedDestroySeconds);
+        strandedDestroySeconds = ReclaimSettings.DEFAULT_STRANDED_DESTROY_SECONDS;
+      }
     }
-    return new ReclaimSettings(enabled, maxIdleSeconds, maxActiveTrains, checkIntervalSeconds);
+    return new ReclaimSettings(
+        enabled, maxIdleSeconds, maxActiveTrains, checkIntervalSeconds, strandedDestroySeconds);
   }
 
   /** 解析 spawn 配置段。 */
@@ -650,6 +816,10 @@ public final class ConfigManager {
     double layoverFallbackMultiplier = 2.0;
     long queuedTicketMaxAgeSeconds = DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS;
     long pendingLayoverMaxAgeSeconds = DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS;
+    int maxActiveTrains = DEFAULT_SPAWN_MAX_ACTIVE_TRAINS;
+    int congestionNetworkReferenceTrains = DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS;
+    double congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
+    double congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
       tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
@@ -706,6 +876,40 @@ public final class ConfigManager {
             "spawn.pending-layover-max-age-seconds 配置无效: " + pendingLayoverMaxAgeSeconds);
         pendingLayoverMaxAgeSeconds = DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS;
       }
+      maxActiveTrains = section.getInt("max-active-trains", maxActiveTrains);
+      if (maxActiveTrains < 0) {
+        logger.warning("spawn.max-active-trains 配置无效: " + maxActiveTrains);
+        maxActiveTrains = DEFAULT_SPAWN_MAX_ACTIVE_TRAINS;
+      }
+      congestionNetworkReferenceTrains =
+          section.getInt("congestion-network-reference-trains", congestionNetworkReferenceTrains);
+      if (congestionNetworkReferenceTrains < 0) {
+        logger.warning(
+            "spawn.congestion-network-reference-trains 配置无效: " + congestionNetworkReferenceTrains);
+        congestionNetworkReferenceTrains = DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS;
+      }
+      congestionHoldThreshold =
+          section.getDouble("congestion-hold-threshold", congestionHoldThreshold);
+      congestionReleaseThreshold =
+          section.getDouble("congestion-release-threshold", congestionReleaseThreshold);
+      if (!(congestionHoldThreshold > 0.0D) || congestionHoldThreshold > 1.0D) {
+        logger.warning("spawn.congestion-hold-threshold 配置无效: " + congestionHoldThreshold);
+        congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
+      }
+      if (!(congestionReleaseThreshold > 0.0D) || congestionReleaseThreshold > 1.0D) {
+        logger.warning("spawn.congestion-release-threshold 配置无效: " + congestionReleaseThreshold);
+        congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
+      }
+      if (congestionReleaseThreshold > congestionHoldThreshold) {
+        // 解除阈值高于触发阈值会让闸门一进入 holding 就无法退出，直接判为配置错误。
+        logger.warning(
+            "spawn.congestion-release-threshold 高于 hold 阈值，已回退默认: "
+                + congestionReleaseThreshold
+                + " > "
+                + congestionHoldThreshold);
+        congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
+        congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
+      }
     }
     return new SpawnSettings(
         enabled,
@@ -718,7 +922,11 @@ public final class ConfigManager {
         maxAttempts,
         layoverFallbackMultiplier,
         queuedTicketMaxAgeSeconds,
-        pendingLayoverMaxAgeSeconds);
+        pendingLayoverMaxAgeSeconds,
+        maxActiveTrains,
+        congestionNetworkReferenceTrains,
+        congestionHoldThreshold,
+        congestionReleaseThreshold);
   }
 
   /** 解析 storage 配置段。 */
@@ -830,7 +1038,6 @@ public final class ConfigManager {
     double approachDepotSpeed = DEFAULT_APPROACH_DEPOT_SPEED_BPS;
     double approachWindowBlocks = DEFAULT_APPROACH_WINDOW_BLOCKS;
     int approachWindowEdges = DEFAULT_APPROACH_WINDOW_EDGES;
-    int approachTargetEdges = DEFAULT_APPROACH_TARGET_EDGES;
     boolean speedCurveEnabled = DEFAULT_SPEED_CURVE_ENABLED;
     SpeedCurveType speedCurveType = DEFAULT_SPEED_CURVE_TYPE;
     double speedCurveFactor = DEFAULT_SPEED_CURVE_FACTOR;
@@ -975,13 +1182,6 @@ public final class ConfigManager {
         approachWindowEdges = configuredApproachWindowEdges;
       } else {
         logger.warning("runtime.approach-window-edges 配置无效: " + configuredApproachWindowEdges);
-      }
-      int configuredApproachTargetEdges =
-          section.getInt("approach-target-edges", approachTargetEdges);
-      if (configuredApproachTargetEdges >= 0) {
-        approachTargetEdges = configuredApproachTargetEdges;
-      } else {
-        logger.warning("runtime.approach-target-edges 配置无效: " + configuredApproachTargetEdges);
       }
       boolean configuredSpeedCurve = section.getBoolean("speed-curve-enabled", speedCurveEnabled);
       speedCurveEnabled = configuredSpeedCurve;
@@ -1129,7 +1329,6 @@ public final class ConfigManager {
         approachDepotSpeed,
         approachWindowBlocks,
         approachWindowEdges,
-        approachTargetEdges,
         speedCurveEnabled,
         speedCurveType,
         speedCurveFactor,
@@ -1167,14 +1366,15 @@ public final class ConfigManager {
   private static TrainConfigSettings parseTrain(
       ConfigurationSection section, java.util.logging.Logger logger) {
     ConfigurationSection types = section != null ? section.getConfigurationSection("types") : null;
-    TrainTypeSettings emu = parseTrainType(types, "emu", defaultsEmu(), logger);
-    TrainTypeSettings dmu = parseTrainType(types, "dmu", defaultsDmu(), logger);
-    TrainTypeSettings diesel =
-        parseTrainType(types, "diesel_push_pull", defaultsDieselPushPull(), logger);
-    TrainTypeSettings electric =
-        parseTrainType(types, "electric_loco", defaultsElectricLoco(), logger);
-    String defaultType = section != null ? section.getString("default-type", "emu") : "emu";
-    return new TrainConfigSettings(defaultType, emu, dmu, diesel, electric);
+    Map<TrainType, TrainTypeSettings> parsed = new EnumMap<>(TrainType.class);
+    for (TrainType type : TrainType.values()) {
+      parsed.put(type, parseTrainType(types, type.key(), TrainTypeSettings.preset(type), logger));
+    }
+    String defaultType =
+        section != null
+            ? section.getString("default-type", DEFAULT_TRAIN_TYPE.key())
+            : DEFAULT_TRAIN_TYPE.key();
+    return new TrainConfigSettings(defaultType, parsed);
   }
 
   private static TrainTypeSettings parseTrainType(
@@ -1257,12 +1457,45 @@ public final class ConfigManager {
       TrainConfigSettings trainConfigSettings,
       ReclaimSettings reclaimSettings,
       SmartDispatcherSettings smartDispatcherSettings,
-      HealthSettings healthSettings) {
+      HealthSettings healthSettings,
+      TimetableSettings timetableSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
               ? new SmartDispatcherSettings(DEFAULT_SMART_DISPATCHER_MODE)
               : smartDispatcherSettings;
+      timetableSettings =
+          timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
+    }
+
+    /** 兼容尚未感知时刻表配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          TimetableSettings.defaults());
     }
 
     /** 兼容仍按旧参数列表构造配置快照的测试夹具。 */
@@ -1291,6 +1524,79 @@ public final class ConfigManager {
           reclaimSettings,
           new SmartDispatcherSettings(DEFAULT_SMART_DISPATCHER_MODE),
           healthSettings);
+    }
+  }
+
+  /**
+   * 时刻表（录制 + 按表运行）配置。
+   *
+   * @param enabled 按表运行总开关；关闭时录制仍可用，但已发布的时刻表不会影响任何列车
+   * @param spawnEnabled 是否由时刻表接管发车出票；需要 {@code enabled} 一并打开
+   * @param holdMaxSeconds 早到列车最多被扣留多少秒；运行时还会再被调度层的安全上限封顶
+   * @param assignToleranceSeconds 列车与表定车次匹配时允许的最大偏差秒数
+   * @param maxCatchUpSeconds 发车侧单次轮询最多回补多长的时间窗口
+   * @param reloadIntervalSeconds 重新加载已发布时刻表的间隔
+   * @param recorderFlushIntervalSeconds 录制结果落库的间隔
+   * @param stationStopOverheadSeconds 编表时车站停车在 dwell 之外多算的秒数（TrainCarts 居中刹停 + AutoStation 开门延迟）
+   * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
+   * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
+   * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
+   */
+  public record TimetableSettings(
+      boolean enabled,
+      boolean spawnEnabled,
+      int holdMaxSeconds,
+      int assignToleranceSeconds,
+      int maxCatchUpSeconds,
+      int reloadIntervalSeconds,
+      int recorderFlushIntervalSeconds,
+      int stationStopOverheadSeconds,
+      int recoveryMinDwellSeconds,
+      int recoveryOverspeedPercent,
+      int recoveryEngageDelaySeconds) {
+
+    /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
+    public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
+
+    /**
+     * 晚点车最短停站的缺省值。
+     *
+     * <p>开门延迟 1 秒、关门动画在停站结束前 5 秒开始，余下约 4 秒上下客；再短就是开门即关门。
+     */
+    public static final int DEFAULT_RECOVERY_MIN_DWELL_SECONDS = 10;
+
+    /** 晚点车线路限速放宽的缺省百分比：只放宽写明的线路限速，进站、临时限速与信号速度不动。 */
+    public static final int DEFAULT_RECOVERY_OVERSPEED_PERCENT = 10;
+
+    /** 晚点多少秒起放宽线路限速：再小的晚点靠停站压缩就追得回来。 */
+    public static final int DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS = 10;
+
+    public TimetableSettings {
+      holdMaxSeconds = Math.max(0, holdMaxSeconds);
+      assignToleranceSeconds = Math.max(0, assignToleranceSeconds);
+      maxCatchUpSeconds = Math.max(0, maxCatchUpSeconds);
+      reloadIntervalSeconds = Math.max(1, reloadIntervalSeconds);
+      recorderFlushIntervalSeconds = Math.max(1, recorderFlushIntervalSeconds);
+      stationStopOverheadSeconds = Math.max(0, stationStopOverheadSeconds);
+      recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
+      recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
+      recoveryEngageDelaySeconds = Math.max(0, recoveryEngageDelaySeconds);
+    }
+
+    /** 全部关闭的默认值；晚点追赶的参数有缺省值，但按表运行关着时不起作用。 */
+    public static TimetableSettings defaults() {
+      return new TimetableSettings(
+          false,
+          false,
+          120,
+          300,
+          300,
+          60,
+          5,
+          DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
+          DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
+          DEFAULT_RECOVERY_OVERSPEED_PERCENT,
+          DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
     }
   }
 
@@ -1359,8 +1665,11 @@ public final class ConfigManager {
       int progressStopGraceSeconds,
       int deadlockThresholdSeconds,
       int deadlockDestroyThresholdSeconds,
-      boolean deadlockDestroyEnabled,
+      boolean trainCleanupEnabled,
       int deadlockDestroyCooldownSeconds,
+      int stuckCleanupThresholdSeconds,
+      int stuckCleanupPassengerThresholdSeconds,
+      int stuckCleanupCooldownSeconds,
       int deadlockEpisodeGraceSeconds,
       int deadlockMinStopSeconds,
       int blockerSnapshotMaxAgeSeconds,
@@ -1390,6 +1699,16 @@ public final class ConfigManager {
       if (deadlockDestroyCooldownSeconds < 0) {
         throw new IllegalArgumentException("deadlockDestroyCooldownSeconds 必须为非负数");
       }
+      if (stuckCleanupThresholdSeconds <= 0) {
+        throw new IllegalArgumentException("stuckCleanupThresholdSeconds 必须为正数");
+      }
+      if (stuckCleanupPassengerThresholdSeconds < stuckCleanupThresholdSeconds) {
+        throw new IllegalArgumentException(
+            "stuckCleanupPassengerThresholdSeconds 不得小于 stuckCleanupThresholdSeconds");
+      }
+      if (stuckCleanupCooldownSeconds < 0) {
+        throw new IllegalArgumentException("stuckCleanupCooldownSeconds 必须为非负数");
+      }
       if (deadlockEpisodeGraceSeconds < 0) {
         throw new IllegalArgumentException("deadlockEpisodeGraceSeconds 必须为非负数");
       }
@@ -1409,14 +1728,45 @@ public final class ConfigManager {
 
     public static HealthSettings defaults() {
       return new HealthSettings(
-          true, 5, true, 30, 60, 60, 45, 60, true, 120, 15, 20, 20, 10, 10, true, true);
+          true, 5, true, 30, 60, 60, 45, 60, false, 120, 600, 1800, 120, 15, 20, 20, 10, 10, true,
+          true);
     }
   }
 
-  /** 车辆回收配置（ReclaimPolicy）。 */
+  /**
+   * 车辆回收配置（ReclaimPolicy）。
+   *
+   * @param strandedDestroySeconds 该回收、有回库交路却一直派不出 RETURN 票的待命车，滞留多久就销毁（确实没有回库交路的车当场处理）；0 关闭兜底
+   */
   public record ReclaimSettings(
-      boolean enabled, long maxIdleSeconds, int maxActiveTrains, long checkIntervalSeconds) {
+      boolean enabled,
+      long maxIdleSeconds,
+      int maxActiveTrains,
+      long checkIntervalSeconds,
+      long strandedDestroySeconds) {
+
+    /**
+     * 默认滞留 5 分钟后销毁。
+     *
+     * <p>没有越行线的线路上，一辆车占着终点股道就挡住同一方向的全部后车，等不起半小时。进行中的折返事务不碰，回库票等本交路的车不到期， 都不靠这个时长兜着。
+     */
+    public static final long DEFAULT_STRANDED_DESTROY_SECONDS = 300L;
+
+    /** 不带滞留销毁阈值的构造，取默认值。 */
+    public ReclaimSettings(
+        boolean enabled, long maxIdleSeconds, int maxActiveTrains, long checkIntervalSeconds) {
+      this(
+          enabled,
+          maxIdleSeconds,
+          maxActiveTrains,
+          checkIntervalSeconds,
+          DEFAULT_STRANDED_DESTROY_SECONDS);
+    }
+
     public ReclaimSettings {
+      if (strandedDestroySeconds < 0) {
+        throw new IllegalArgumentException("strandedDestroySeconds 不能为负");
+      }
       if (maxIdleSeconds <= 0) {
         throw new IllegalArgumentException("maxIdleSeconds 必须为正数");
       }
@@ -1441,7 +1791,80 @@ public final class ConfigManager {
       int maxAttempts,
       double layoverFallbackMultiplier,
       long queuedTicketMaxAgeSeconds,
-      long pendingLayoverMaxAgeSeconds) {
+      long pendingLayoverMaxAgeSeconds,
+      int maxActiveTrains,
+      int congestionNetworkReferenceTrains,
+      double congestionHoldThreshold,
+      double congestionReleaseThreshold) {
+
+    /**
+     * 兼容旧调用：未指定全网参考车数时，沿用在网列车上限。
+     *
+     * <p>这正是解耦前的旧行为，只保留给老调用点；新代码请显式传入。
+     */
+    public SpawnSettings(
+        boolean enabled,
+        int tickIntervalTicks,
+        int planRefreshTicks,
+        int maxSpawnPerTick,
+        int maxGeneratePerTick,
+        int maxBacklogPerService,
+        int retryDelayTicks,
+        int maxAttempts,
+        double layoverFallbackMultiplier,
+        long queuedTicketMaxAgeSeconds,
+        long pendingLayoverMaxAgeSeconds,
+        int maxActiveTrains,
+        double congestionHoldThreshold,
+        double congestionReleaseThreshold) {
+      this(
+          enabled,
+          tickIntervalTicks,
+          planRefreshTicks,
+          maxSpawnPerTick,
+          maxGeneratePerTick,
+          maxBacklogPerService,
+          retryDelayTicks,
+          maxAttempts,
+          layoverFallbackMultiplier,
+          queuedTicketMaxAgeSeconds,
+          pendingLayoverMaxAgeSeconds,
+          maxActiveTrains,
+          maxActiveTrains,
+          congestionHoldThreshold,
+          congestionReleaseThreshold);
+    }
+
+    /** 兼容旧调用：未指定在网列车上限与拥挤阈值时沿用默认值。 */
+    public SpawnSettings(
+        boolean enabled,
+        int tickIntervalTicks,
+        int planRefreshTicks,
+        int maxSpawnPerTick,
+        int maxGeneratePerTick,
+        int maxBacklogPerService,
+        int retryDelayTicks,
+        int maxAttempts,
+        double layoverFallbackMultiplier,
+        long queuedTicketMaxAgeSeconds,
+        long pendingLayoverMaxAgeSeconds) {
+      this(
+          enabled,
+          tickIntervalTicks,
+          planRefreshTicks,
+          maxSpawnPerTick,
+          maxGeneratePerTick,
+          maxBacklogPerService,
+          retryDelayTicks,
+          maxAttempts,
+          layoverFallbackMultiplier,
+          queuedTicketMaxAgeSeconds,
+          pendingLayoverMaxAgeSeconds,
+          DEFAULT_SPAWN_MAX_ACTIVE_TRAINS,
+          DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD,
+          DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD);
+    }
+
     public SpawnSettings(
         boolean enabled,
         int tickIntervalTicks,
@@ -1463,7 +1886,10 @@ public final class ConfigManager {
           maxAttempts,
           layoverFallbackMultiplier,
           DEFAULT_SPAWN_QUEUED_TICKET_MAX_AGE_SECONDS,
-          DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS);
+          DEFAULT_SPAWN_PENDING_LAYOVER_MAX_AGE_SECONDS,
+          DEFAULT_SPAWN_MAX_ACTIVE_TRAINS,
+          DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD,
+          DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD);
     }
 
     public SpawnSettings {
@@ -1496,6 +1922,19 @@ public final class ConfigManager {
       }
       if (pendingLayoverMaxAgeSeconds < 0L) {
         throw new IllegalArgumentException("pendingLayoverMaxAgeSeconds 必须为非负数");
+      }
+      if (maxActiveTrains < 0) {
+        throw new IllegalArgumentException("maxActiveTrains 必须为非负数");
+      }
+      if (!(congestionHoldThreshold > 0.0D) || congestionHoldThreshold > 1.0D) {
+        throw new IllegalArgumentException("congestionHoldThreshold 必须落在 (0,1]");
+      }
+      if (!(congestionReleaseThreshold > 0.0D) || congestionReleaseThreshold > 1.0D) {
+        throw new IllegalArgumentException("congestionReleaseThreshold 必须落在 (0,1]");
+      }
+      if (congestionReleaseThreshold > congestionHoldThreshold) {
+        throw new IllegalArgumentException(
+            "congestionReleaseThreshold 不能高于 congestionHoldThreshold");
       }
     }
   }
@@ -1547,7 +1986,6 @@ public final class ConfigManager {
       double approachDepotSpeedBps,
       double approachWindowBlocks,
       int approachWindowEdges,
-      int approachTargetEdges,
       boolean speedCurveEnabled,
       SpeedCurveType speedCurveType,
       double speedCurveFactor,
@@ -1613,9 +2051,6 @@ public final class ConfigManager {
       }
       if (approachWindowEdges < 0) {
         throw new IllegalArgumentException("approachWindowEdges 必须为非负数");
-      }
-      if (approachTargetEdges < 0) {
-        throw new IllegalArgumentException("approachTargetEdges 必须为非负数");
       }
       if (speedCurveType == null) {
         throw new IllegalArgumentException("speedCurveType 不能为空");
@@ -1736,7 +2171,6 @@ public final class ConfigManager {
           approachDepotSpeedBps,
           DEFAULT_APPROACH_WINDOW_BLOCKS,
           DEFAULT_APPROACH_WINDOW_EDGES,
-          DEFAULT_APPROACH_TARGET_EDGES,
           speedCurveEnabled,
           speedCurveType,
           speedCurveFactor,
@@ -1772,34 +2206,33 @@ public final class ConfigManager {
     }
   }
 
-  /** 列车类型默认配置（车种映射 + 默认类型）。 */
-  public record TrainConfigSettings(
-      String defaultType,
-      TrainTypeSettings emu,
-      TrainTypeSettings dmu,
-      TrainTypeSettings dieselPushPull,
-      TrainTypeSettings electricLoco) {
+  /**
+   * 列车类型配置：默认车种与各车种加减速。
+   *
+   * @param defaultType 默认车种（{@code train.default-type}）；为空时取 {@link #DEFAULT_TRAIN_TYPE}
+   * @param types 各车种加减速；未列出的车种取 {@link TrainType} 自带的预设
+   */
+  public record TrainConfigSettings(String defaultType, Map<TrainType, TrainTypeSettings> types) {
 
     public TrainConfigSettings {
       if (defaultType == null || defaultType.isBlank()) {
-        defaultType = "emu";
+        defaultType = DEFAULT_TRAIN_TYPE.key();
       }
+      Map<TrainType, TrainTypeSettings> complete = new EnumMap<>(TrainType.class);
+      for (TrainType type : TrainType.values()) {
+        TrainTypeSettings configured = types == null ? null : types.get(type);
+        complete.put(type, configured != null ? configured : TrainTypeSettings.preset(type));
+      }
+      types = Map.copyOf(complete);
     }
 
     public TrainType defaultTrainType() {
-      return TrainType.parse(defaultType).orElse(TrainType.EMU);
+      return TrainType.parse(defaultType).orElse(DEFAULT_TRAIN_TYPE);
     }
 
+    /** 车种的加减速；{@code null} 按默认车种。 */
     public TrainTypeSettings forType(TrainType type) {
-      if (type == null) {
-        return emu;
-      }
-      return switch (type) {
-        case EMU -> emu;
-        case DMU -> dmu;
-        case DIESEL_PUSH_PULL -> dieselPushPull;
-        case ELECTRIC_LOCO -> electricLoco;
-      };
+      return types.get(type == null ? defaultTrainType() : type);
     }
   }
 
@@ -1813,23 +2246,11 @@ public final class ConfigManager {
         throw new IllegalArgumentException("decelBps2 必须为正数");
       }
     }
-  }
 
-  private static TrainTypeSettings defaultsEmu() {
-    return new TrainTypeSettings(DEFAULT_EMU_ACCEL_BPS2, DEFAULT_EMU_DECEL_BPS2);
-  }
-
-  private static TrainTypeSettings defaultsDmu() {
-    return new TrainTypeSettings(DEFAULT_DMU_ACCEL_BPS2, DEFAULT_DMU_DECEL_BPS2);
-  }
-
-  private static TrainTypeSettings defaultsDieselPushPull() {
-    return new TrainTypeSettings(DEFAULT_DIESEL_PP_ACCEL_BPS2, DEFAULT_DIESEL_PP_DECEL_BPS2);
-  }
-
-  private static TrainTypeSettings defaultsElectricLoco() {
-    return new TrainTypeSettings(
-        DEFAULT_ELECTRIC_LOCO_ACCEL_BPS2, DEFAULT_ELECTRIC_LOCO_DECEL_BPS2);
+    /** 车种自带的预设。 */
+    public static TrainTypeSettings preset(TrainType type) {
+      return new TrainTypeSettings(type.presetAccelBps2(), type.presetDecelBps2());
+    }
   }
 
   /** 存储后端定义。 */

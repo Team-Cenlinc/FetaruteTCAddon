@@ -16,6 +16,9 @@ public interface StationRepository {
 
   List<Station> listByLine(UUID lineId);
 
+  /** 全部车站（内存索引一次性加载用）。 */
+  List<Station> listAll();
+
   Station save(Station station);
 
   void delete(UUID id);

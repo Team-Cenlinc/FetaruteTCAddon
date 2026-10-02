@@ -15,11 +15,20 @@ public record OccupancyRequestContext(
     OccupancyRequest request,
     List<NodeId> pathNodes,
     List<RailEdge> edges,
-    Optional<DirectedTraversalContext> directedContext) {
+    Optional<DirectedTraversalContext> directedContext,
+    long minimumSafeAuthorityDistanceBlocks) {
 
   public OccupancyRequestContext(
       OccupancyRequest request, List<NodeId> pathNodes, List<RailEdge> edges) {
-    this(requireRequest(request), pathNodes, edges, requireRequest(request).directedContext());
+    this(requireRequest(request), pathNodes, edges, requireRequest(request).directedContext(), 0L);
+  }
+
+  public OccupancyRequestContext(
+      OccupancyRequest request,
+      List<NodeId> pathNodes,
+      List<RailEdge> edges,
+      Optional<DirectedTraversalContext> directedContext) {
+    this(request, pathNodes, edges, directedContext, 0L);
   }
 
   public OccupancyRequestContext {
@@ -27,6 +36,9 @@ public record OccupancyRequestContext(
     Objects.requireNonNull(pathNodes, "pathNodes");
     Objects.requireNonNull(edges, "edges");
     directedContext = directedContext == null ? Optional.empty() : directedContext;
+    if (minimumSafeAuthorityDistanceBlocks < 0L) {
+      throw new IllegalArgumentException("minimumSafeAuthorityDistanceBlocks 必须为非负数");
+    }
     pathNodes = List.copyOf(pathNodes);
     edges = List.copyOf(edges);
   }

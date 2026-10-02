@@ -36,7 +36,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -88,17 +87,7 @@ class EtaServiceTest {
             Optional.of(SignalAspect.PROCEED),
             Optional.empty()));
 
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 2);
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
 
     EtaResult result = service.getForTrain("train-1", EtaTarget.nextStop());
 
@@ -131,17 +120,7 @@ class EtaServiceTest {
         .thenReturn(new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of()));
 
     TrainSnapshotStore snapshotStore = new TrainSnapshotStore();
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 2);
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
 
     SpawnService spawnService =
         new SpawnService(
@@ -254,35 +233,32 @@ class EtaServiceTest {
             Optional.of(SignalAspect.PROCEED),
             Optional.empty()));
 
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 2);
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
 
     BoardResult board = service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10));
 
     assertFalse(board.rows().isEmpty());
     BoardResult.BoardRow row = board.rows().get(0);
-    assertEquals("SURN:CCC", row.endRouteId().orElse(""));
+    // EOR 是交路最后一个节点（车库 SURN:D:DEPOT:1）：显示「DEPOT Depot」，ID 与同代码车站区分。
+    assertEquals("SURN:D:DEPOT", row.endRouteId().orElse(""));
+    assertEquals("DEPOT Depot", row.endRoute());
+    assertEquals("SURN:AAA", row.destinationId().orElse(""), "主目的地取运营终点，不是车库");
     assertEquals("SURN:AAA", row.endOperationId().orElse(""));
   }
 
   @Test
-  void boardReturnRouteUsesNotInServiceForEndOperation() {
+  void boardReturnRouteShowsTerminalUntilEndOfOperationThenNotInService() {
+    // 回库线路：运营终点（BBB）及之前的站牌显示终点站名，站台乘客与车上看到的是同一个终点；
+    // 越过运营终点后通过的车站（CCC）才显示“回库”。
     UUID routeUuid = UUID.randomUUID();
     UUID worldId = UUID.randomUUID();
     NodeId start = NodeId.of("SURN:S:AAA:1");
     NodeId end = NodeId.of("SURN:S:BBB:1");
+    NodeId passed = NodeId.of("SURN:S:CCC:1");
     RouteDefinition route =
-        new RouteDefinition(RouteId.of("SURN:L1:R1"), List.of(start, end), Optional.empty());
-    RailGraph graph = buildGraph(start, end, 60);
+        new RouteDefinition(
+            RouteId.of("SURN:L1:R1"), List.of(start, end, passed), Optional.empty());
+    RailGraph graph = buildLinearGraph(List.of(start, end, passed), 60);
 
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
@@ -305,6 +281,14 @@ class EtaServiceTest {
                 Optional.of(end.value()),
                 Optional.empty(),
                 RouteStopPassType.TERMINATE,
+                Optional.empty()),
+            new RouteStop(
+                routeUuid,
+                2,
+                Optional.empty(),
+                Optional.of(passed.value()),
+                Optional.empty(),
+                RouteStopPassType.PASS,
                 Optional.empty()));
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
@@ -351,25 +335,23 @@ class EtaServiceTest {
                     Instant.now(),
                     Instant.now())));
 
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 2);
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
     service.attachStorageProvider(provider);
 
-    BoardResult board = service.getBoard("SURN", "BBB", null, Duration.ofMinutes(10));
+    BoardResult terminalBoard = service.getBoard("SURN", "BBB", null, Duration.ofMinutes(10));
+    assertFalse(terminalBoard.rows().isEmpty());
+    BoardResult.BoardRow terminalRow = terminalBoard.rows().get(0);
+    assertEquals("BBB", terminalRow.endOperation());
+    // 主目的地（“开往 X”）取运营终点：修复前取 EOR，回库车全程显示车库/最后一个节点。
+    assertEquals("BBB", terminalRow.destination());
+    assertEquals("SURN:BBB", terminalRow.endOperationId().orElse(""));
 
-    assertFalse(board.rows().isEmpty());
-    BoardResult.BoardRow row = board.rows().get(0);
-    assertEquals("回库", row.endOperation());
-    assertEquals("OUT_OF_SERVICE", row.endOperationId().orElse(""));
+    BoardResult passBoard = service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10));
+    assertFalse(passBoard.rows().isEmpty());
+    BoardResult.BoardRow passRow = passBoard.rows().get(0);
+    assertEquals("回库", passRow.endOperation());
+    assertEquals("回库", passRow.destination());
+    assertEquals("OUT_OF_SERVICE", passRow.endOperationId().orElse(""));
   }
 
   /**
@@ -468,23 +450,25 @@ class EtaServiceTest {
             Optional.of(SignalAspect.PROCEED),
             Optional.empty()));
 
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 2);
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
 
     EtaResult result = service.getForTrain("train-1", EtaTarget.nextStop());
 
     // 应该返回到 D 站的 ETA，而非到 B 站（第一个 PASS）
     // ETA 应该可用（不是 unavailable，即 etaMinutesRounded >= 0）
     assertTrue(result.etaMinutesRounded() >= 0 || result.arriving(), "ETA 应该可用，因为实际下一 STOP 是 D 站");
+  }
+
+  private static RouteStop terminalStop(
+      UUID routeUuid, int sequence, NodeId node, RouteStopPassType passType) {
+    return new RouteStop(
+        routeUuid,
+        sequence,
+        Optional.empty(),
+        Optional.of(node.value()),
+        Optional.empty(),
+        passType,
+        Optional.empty());
   }
 
   private RailGraph buildLinearGraph(List<NodeId> nodes, int edgeLengthBlocks) {
@@ -572,11 +556,14 @@ class EtaServiceTest {
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
-    when(routeDefinitions.listStops(routeId)).thenReturn(List.of(stopB, stopC));
-    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stopB));
-    when(routeDefinitions.findStop(routeId, 2)).thenReturn(Optional.of(stopC));
-    when(routeDefinitions.findStop(routeId, 0)).thenReturn(Optional.empty());
-    when(routeDefinitions.findStop(routeId, 3)).thenReturn(Optional.empty());
+    // 停靠配置与 waypoints 下标一一对应（与 RouteDefinitionCache#listStops 的契约一致）。
+    when(routeDefinitions.listStops(routeId))
+        .thenReturn(
+            List.of(
+                terminalStop(routeUuid, 0, nodeA, RouteStopPassType.STOP),
+                stopB,
+                stopC,
+                terminalStop(routeUuid, 3, nodeD, RouteStopPassType.TERMINATE)));
 
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     when(occupancyManager.canEnter(any()))
@@ -598,17 +585,7 @@ class EtaServiceTest {
             Optional.of(SignalAspect.PROCEED),
             Optional.empty()));
 
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 4); // arrivingThreshold
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
 
     // 计算到 nodeD 的 ETA
     EtaResult result = service.getForTrain("train-1", new EtaTarget.PlatformNode(nodeD));
@@ -660,11 +637,14 @@ class EtaServiceTest {
 
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
     when(routeDefinitions.findById(routeUuid)).thenReturn(Optional.of(route));
-    when(routeDefinitions.listStops(routeId)).thenReturn(List.of(stopB, stopC));
-    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stopB));
-    when(routeDefinitions.findStop(routeId, 2)).thenReturn(Optional.of(stopC));
-    when(routeDefinitions.findStop(routeId, 0)).thenReturn(Optional.empty());
-    when(routeDefinitions.findStop(routeId, 3)).thenReturn(Optional.empty());
+    // 停靠配置与 waypoints 下标一一对应（与 RouteDefinitionCache#listStops 的契约一致）。
+    when(routeDefinitions.listStops(routeId))
+        .thenReturn(
+            List.of(
+                terminalStop(routeUuid, 0, nodeA, RouteStopPassType.STOP),
+                stopB,
+                stopC,
+                terminalStop(routeUuid, 3, nodeD, RouteStopPassType.TERMINATE)));
 
     OccupancyManager occupancyManager = mock(OccupancyManager.class);
     when(occupancyManager.canEnter(any()))
@@ -686,17 +666,7 @@ class EtaServiceTest {
             Optional.of(SignalAspect.PROCEED),
             Optional.empty()));
 
-    EtaService service =
-        new EtaService(
-            snapshotStore,
-            railGraphService,
-            routeDefinitions,
-            occupancyManager,
-            HeadwayRule.fixed(Duration.ZERO),
-            () -> 2,
-            () -> 0,
-            () -> 0,
-            () -> 4);
+    EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
 
     EtaResult result = service.getForTrain("train-1", new EtaTarget.PlatformNode(nodeD));
 

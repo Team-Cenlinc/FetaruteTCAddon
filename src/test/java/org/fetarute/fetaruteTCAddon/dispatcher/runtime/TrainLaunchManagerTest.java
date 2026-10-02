@@ -1,7 +1,10 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.anyBoolean;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
@@ -15,6 +18,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
@@ -52,6 +56,48 @@ class TrainLaunchManagerTest {
     verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
     double appliedBpt = speedCaptor.getValue();
     assertTrue(appliedBpt < 0.05, "速度命令步长应被限幅，实际 bpt=" + appliedBpt);
+  }
+
+  @Test
+  void applyControlDisablesTrainCartsSlowdown() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-slowdown");
+    when(tags.properties().isSlowingDownNone()).thenReturn(false);
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 22.2 / 20.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 1.2),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(tags.properties()).setSlowingDown(false);
+  }
+
+  @Test
+  void applyControlLeavesSlowdownAloneWhenAlreadyDisabled() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-no-slowdown");
+    when(tags.properties().isSlowingDownNone()).thenReturn(true);
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 22.2 / 20.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 1.2),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(tags.properties(), never()).setSlowingDown(anyBoolean());
   }
 
   @Test
@@ -158,6 +204,55 @@ class TrainLaunchManagerTest {
     TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
     ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
 
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    double appliedBpt = speedCaptor.getValue();
+    assertTrue(appliedBpt >= 0.39, "发车场景应下发接近目标速度，避免起步龟速");
+    assertTrue(result.launchCommandAccepted());
+  }
+
+  @Test
+  void applyControlReportsRejectedLaunchRequest() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-rejected");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return false;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
     manager.applyControl(
         train,
         tags.properties(),
@@ -169,10 +264,69 @@ class TrainLaunchManagerTest {
         Optional.empty(),
         runtime);
 
-    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
-    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
-    double appliedBpt = speedCaptor.getValue();
-    assertTrue(appliedBpt >= 0.39, "发车场景应下发接近目标速度，避免起步龟速");
+    assertFalse(result.launchCommandAccepted());
+    assertEquals(2, attempts.get(), "被 TrainCarts 拒绝的动作不应消耗 launch cooldown");
+    assertFalse(TrainTagHelper.readTagValue(tags.properties(), "FTA_LAST_LAUNCH_AT").isPresent());
+  }
+
+  @Test
+  void identicalStationaryAuthorizationsIssueOneLaunchUntilPhysicalProgress() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-stationary-authority");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return true;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0, 0);
+
+    for (int i = 0; i < 1_000; i++) {
+      TrainLaunchManager.ControlApplicationResult result =
+          manager.applyControl(
+              train,
+              tags.properties(),
+              SignalAspect.PROCEED,
+              8.0,
+              config,
+              true,
+              OptionalLong.empty(),
+              Optional.empty(),
+              runtime);
+      assertTrue(result.launchCommandAccepted());
+    }
+
+    assertEquals(1, attempts.get(), "同一静止授权不能在每次重评估中重新写入 launch action");
+  }
+
+  @Test
+  void applyControlTreatsAlreadyMovingTrainAsAcceptedLaunch() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-already-moving");
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 4.0 / 20.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    assertTrue(result.launchCommandAccepted());
   }
 
   @Test
@@ -272,11 +426,222 @@ class TrainLaunchManagerTest {
     assertEquals("hard_stop", result.finalLimiterSource());
   }
 
+  /**
+   * STOP 制动曲线不高于当前车速：离停车点还远时只保持车速，不借 STOP 加速；进入曲线后照曲线限速。
+   *
+   * <p>沿已持有授权刹车（{@link HeldAuthorityBraking}）一被拒就交出很远的停车距离，靠的就是这一条。车速 15 bps、减速度 1：500 格处曲线
+   * √1000≈31.6，限速取 15；20 格处曲线 √40≈6.3。
+   */
+  @Test
+  void stopCurveHoldsSpeedUntilItBitesAndNeverAccelerates() {
+    ArgumentCaptor<Double> far = ArgumentCaptor.forClass(Double.class);
+    TagStore farTags = stopCurve(500L);
+    verify(farTags.properties()).setSpeedLimit(far.capture());
+    assertEquals(15.0 / 20.0, far.getValue(), 1.0e-9);
+
+    ArgumentCaptor<Double> near = ArgumentCaptor.forClass(Double.class);
+    TagStore nearTags = stopCurve(20L);
+    verify(nearTags.properties()).setSpeedLimit(near.capture());
+    assertEquals(Math.sqrt(40.0) / 20.0, near.getValue(), 1.0e-9);
+  }
+
+  private static TagStore stopCurve(long distanceBlocks) {
+    TagStore tags =
+        new TagStore(
+            "train-braking-" + distanceBlocks,
+            "FTA_LAST_SPEED_CMD_BPS=15.0",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    FakeTrain train = new FakeTrain(tags.properties(), true, 15.0 / 20.0);
+    new TrainLaunchManager()
+        .applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.STOP,
+            0.0,
+            new TrainConfig(TrainType.EMU, 1.0, 1.0),
+            false,
+            OptionalLong.of(distanceBlocks),
+            Optional.empty(),
+            runtimeSettings(0.0, 1.0, 1.0));
+    return tags;
+  }
+
+  /**
+   * 驶过慢速边后目标回升：列车身上没有别的动作时补一次牵引，速度上限直接给到目标、由 launch 按加速度爬升。
+   *
+   * <p>TrainCarts 列车不会因为 speedLimit 调高就自己加速（2026-09-27 实服 WS LWN→SWN 全段 8 格/秒）。
+   */
+  @Test
+  void movingTrainBelowItsTargetResumesTractionWhenNothingElseIsQueued() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = slowTrainTags("train-resume");
+    RuntimeTrainHandle train = movingAt(8.0, false);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train).accelerateTo(22.2 / 20.0, 1.0 / 400.0);
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertEquals(22.2 / 20.0, speedCaptor.getValue(), 1.0e-9);
+  }
+
+  /** 停站等待、居中等动作还在队列里时不补牵引：launch 会排在它后面，等于绕过发车门控。 */
+  @Test
+  void movingTrainWithAnotherActionQueuedIsNotGivenTraction() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = slowTrainTags("train-foreign");
+    RuntimeTrainHandle train = movingAt(8.0, true);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train, never()).accelerateTo(anyDouble(), anyDouble());
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertTrue(speedCaptor.getValue() < 22.2 / 20.0, "不补牵引时速度上限仍按命令限幅逐步抬升");
+  }
+
+  /** 车速比限速只低 0.15 格/秒（不到 1%）也补牵引：牵引目标就是限速本身，否则车会一直比编表曲线慢一截。 */
+  @Test
+  void movingTrainSlightlyBelowItsLimitIsPulledUpToTheLimit() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-near",
+            "FTA_LAST_SPEED_CMD_BPS=22.2",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = movingAt(22.05, false);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train).accelerateTo(org.mockito.ArgumentMatchers.eq(22.2 / 20.0), anyDouble());
+  }
+
+  /** 车速已贴住限速（差 0.01 格/秒，低于补牵引门槛）：不再下发动作。 */
+  @Test
+  void movingTrainAtItsLimitGetsNoNewAction() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-at-limit",
+            "FTA_LAST_SPEED_CMD_BPS=22.2",
+            "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train = movingAt(22.19, false);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    verify(train, never()).accelerateTo(anyDouble(), anyDouble());
+  }
+
+  /** 补牵引时限速不按迟滞留在旧命令上：旧命令 22.1、目标 22.2，差值小于 0.15 的迟滞也要写到 22.2。 */
+  @Test
+  void tractionBypassesHysteresisSoTheLimitIsTheTarget() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-hysteresis",
+            "FTA_LAST_SPEED_CMD_BPS=22.1",
+            "FTA_LAST_SPEED_CMD_AT=" + (System.currentTimeMillis() - 1000L));
+    RuntimeTrainHandle train = movingAt(22.1, false);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.15, 1.0, 1.0));
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties()).setSpeedLimit(speedCaptor.capture());
+    assertEquals(22.2 / 20.0, speedCaptor.getValue(), 1.0e-9);
+    verify(train).accelerateTo(org.mockito.ArgumentMatchers.eq(22.2 / 20.0), anyDouble());
+  }
+
+  /** 报告不了动作队列的实现按"有别的动作"处理，保持只在信号变化时补牵引的旧行为。 */
+  @Test
+  void handlesThatCannotReportTheirActionsKeepTheOldBehaviour() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = slowTrainTags("train-legacy");
+    FakeTrain train = new FakeTrain(tags.properties(), true, 8.0 / 20.0);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        22.2,
+        new TrainConfig(TrainType.EMU, 1.0, 2.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0));
+
+    assertEquals(0, train.accelerateCalls);
+  }
+
+  private static TagStore slowTrainTags(String trainName) {
+    return new TagStore(
+        trainName,
+        "FTA_LAST_SPEED_CMD_BPS=8.0",
+        "FTA_LAST_SPEED_CMD_AT=" + System.currentTimeMillis());
+  }
+
+  private static RuntimeTrainHandle movingAt(double speedBps, boolean foreignAction) {
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isMoving()).thenReturn(true);
+    when(train.currentSpeedBlocksPerTick()).thenReturn(speedBps / 20.0);
+    when(train.hasForeignAction()).thenReturn(foreignAction);
+    return train;
+  }
+
   private static ConfigManager.RuntimeSettings runtimeSettings(
       double hysteresisBps, double accelFactor, double decelFactor) {
+    return runtimeSettings(hysteresisBps, accelFactor, decelFactor, 10);
+  }
+
+  private static ConfigManager.RuntimeSettings runtimeSettings(
+      double hysteresisBps, double accelFactor, double decelFactor, int launchCooldownTicks) {
     return new ConfigManager.RuntimeSettings(
         20,
-        10,
+        launchCooldownTicks,
         2,
         1,
         1,
@@ -356,7 +721,7 @@ class TrainLaunchManagerTest {
     }
   }
 
-  private static final class FakeTrain implements RuntimeTrainHandle {
+  private static class FakeTrain implements RuntimeTrainHandle {
     private final TrainProperties properties;
     private final boolean moving;
     private final double speedBpt;

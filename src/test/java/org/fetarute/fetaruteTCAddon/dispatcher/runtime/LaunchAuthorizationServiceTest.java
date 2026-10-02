@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorityHandoffSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -128,6 +129,27 @@ class LaunchAuthorizationServiceTest {
     assertEquals(0, actions.launchCalls);
   }
 
+  @Test
+  void authorizeHandoffUsesAtomicCapabilityInsteadOfOrdinaryAcquire() {
+    OccupancyRequest request = request("turning");
+    StubOccupancyManager manager =
+        new StubOccupancyManager(allowed(request), allowed(request), false);
+    LaunchAuthorizationService service = new LaunchAuthorizationService(manager, null, null);
+    CountingActions actions = new CountingActions();
+
+    LaunchAuthorizationService.AuthorizationResult result =
+        service.authorizeHandoff(
+            new LaunchAuthorizationService.AuthorizationPlan(
+                request, "turnback", false, true, false, true, actions));
+
+    assertTrue(result.allowed());
+    assertTrue(result.acquired());
+    assertEquals(1, manager.handoffCalls);
+    assertEquals(0, manager.canEnterCalls);
+    assertEquals(0, manager.acquireCalls);
+    assertEquals(1, actions.launchCalls);
+  }
+
   private static OccupancyRequest request(String trainName) {
     return new OccupancyRequest(
         trainName,
@@ -175,12 +197,14 @@ class LaunchAuthorizationServiceTest {
     }
   }
 
-  private static final class StubOccupancyManager implements OccupancyManager {
+  private static final class StubOccupancyManager
+      implements OccupancyManager, AuthorityHandoffSupport {
     private final OccupancyDecision canEnterDecision;
     private final OccupancyDecision acquireDecision;
     private final boolean shouldYield;
     private int canEnterCalls;
     private int acquireCalls;
+    private int handoffCalls;
 
     private StubOccupancyManager(
         OccupancyDecision canEnterDecision,
@@ -226,6 +250,22 @@ class LaunchAuthorizationServiceTest {
     @Override
     public boolean shouldYield(OccupancyRequest request) {
       return shouldYield;
+    }
+
+    @Override
+    public OccupancyDecision handoffAuthority(OccupancyRequest nextAuthority) {
+      handoffCalls++;
+      return acquireDecision;
+    }
+
+    @Override
+    public boolean migrateAuthorityOwner(String currentTrainName, String nextTrainName) {
+      return false;
+    }
+
+    @Override
+    public boolean holdsHardAuthority(OccupancyRequest authority) {
+      return false;
     }
   }
 }

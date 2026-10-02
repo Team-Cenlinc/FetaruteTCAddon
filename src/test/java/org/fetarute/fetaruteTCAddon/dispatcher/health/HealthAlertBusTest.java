@@ -35,7 +35,7 @@ class HealthAlertBusTest {
   }
 
   @Test
-  @DisplayName("限流：同类型+同列车告警在 5 秒内只分发一次")
+  @DisplayName("限流：同类型+同列车的稳定告警在一分钟内只分发一次")
   void throttling() {
     bus.subscribe(received::add);
     HealthAlert alert1 = HealthAlert.of(HealthAlert.AlertType.STALL, "train1", "msg1");
@@ -45,8 +45,28 @@ class HealthAlertBusTest {
     boolean second = bus.publish(alert2);
 
     assertTrue(first, "首次发布应成功");
-    assertFalse(second, "5秒内相同类型+列车的第二次发布应被限流");
+    assertFalse(second, "一分钟内相同类型+列车的第二次稳定告警应被限流");
     assertEquals(1, received.size(), "监听器应只收到一条告警");
+  }
+
+  @Test
+  @DisplayName("状态转换：恢复告警立即穿透活动告警限流")
+  void recoveryTransitionBypassesActiveAlertThrottle() {
+    bus.subscribe(received::add);
+    HealthAlert active = HealthAlert.of(HealthAlert.AlertType.PROGRESS_STUCK, "train1", "进度停滞");
+    HealthAlert recovered =
+        HealthAlert.fixed(HealthAlert.AlertType.PROGRESS_STUCK, "train1", "进度恢复");
+    HealthAlert activeAgain =
+        HealthAlert.of(HealthAlert.AlertType.PROGRESS_STUCK, "train1", "再次停滞");
+
+    boolean activePublished = bus.publish(active);
+    boolean recoveredPublished = bus.publish(recovered);
+    boolean activeAgainPublished = bus.publish(activeAgain);
+
+    assertTrue(activePublished, "首次活动告警应成功发布");
+    assertTrue(recoveredPublished, "恢复状态不应被同一事件的活动告警限流");
+    assertTrue(activeAgainPublished, "恢复后再次出现的活动状态也应立即发布");
+    assertEquals(List.of(active, recovered, activeAgain), received, "监听器应按状态转换顺序收到全部告警");
   }
 
   @Test
@@ -111,18 +131,6 @@ class HealthAlertBusTest {
 
     assertEquals(List.of(), bus.recentAlerts(0));
     assertEquals(List.of(), bus.recentAlerts(-1));
-  }
-
-  @Test
-  @DisplayName("unsubscribe：移除监听器后不再收到告警")
-  void unsubscribe() {
-    bus.subscribe(received::add);
-    bus.publish(HealthAlert.of(HealthAlert.AlertType.STALL, "train1", "msg1"));
-    assertEquals(1, received.size());
-
-    bus.unsubscribe(received::add);
-    // 注意：CopyOnWriteArrayList 使用 equals 比较，lambda 每次创建不同实例
-    // 所以这里需要用相同的 Consumer 实例
   }
 
   @Test

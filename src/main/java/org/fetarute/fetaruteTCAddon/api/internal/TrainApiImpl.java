@@ -7,6 +7,8 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaTarget;
@@ -15,6 +17,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
@@ -29,16 +33,22 @@ public final class TrainApiImpl implements TrainApi {
   private final RouteProgressRegistry progressRegistry;
   private final RouteDefinitionCache routeDefinitions;
   private final EtaService etaService;
+  private final StationDirectory stations;
 
+  /**
+   * @param stations 车站目录；用于把直通指令里写的线路代码换成主数据的写法，为 null 时原样给出
+   */
   public TrainApiImpl(
       TrainSnapshotStore snapshotStore,
       RouteProgressRegistry progressRegistry,
       RouteDefinitionCache routeDefinitions,
-      EtaService etaService) {
+      EtaService etaService,
+      StationDirectory stations) {
     this.snapshotStore = Objects.requireNonNull(snapshotStore, "snapshotStore");
     this.progressRegistry = Objects.requireNonNull(progressRegistry, "progressRegistry");
     this.routeDefinitions = routeDefinitions;
     this.etaService = etaService;
+    this.stations = stations;
   }
 
   @Override
@@ -92,11 +102,20 @@ public final class TrainApiImpl implements TrainApi {
 
   private TrainSnapshot convertSnapshot(String trainName, TrainRuntimeSnapshot snap) {
     // 获取路线信息
-    Optional<String> routeCode = Optional.empty();
-    if (routeDefinitions != null) {
-      Optional<RouteDefinition> routeOpt = routeDefinitions.findById(snap.routeUuid());
-      routeCode = routeOpt.map(r -> r.id().value());
-    }
+    Optional<RouteDefinition> routeOpt =
+        routeDefinitions == null ? Optional.empty() : routeDefinitions.findById(snap.routeUuid());
+    Optional<String> routeCode = routeOpt.map(r -> r.id().value());
+    List<RouteStop> stops = routeOpt.map(r -> routeDefinitions.listStops(r.id())).orElse(List.of());
+    Optional<RouteDefinitionCache.RouteRecord> record =
+        routeOpt.flatMap(r -> routeDefinitions.findRecord(snap.routeUuid()));
+    Optional<RouteLineChanges.LineRef> currentLine = resolveCurrentLine(snap, routeOpt);
+    boolean outOfService =
+        record
+            .map(
+                r ->
+                    RouteTerminals.outOfService(
+                        r.route().operationType(), stops, snap.routeIndex()))
+            .orElse(false);
 
     // 获取进度信息
     Optional<String> nextNode = Optional.empty();
@@ -143,7 +162,20 @@ public final class TrainApiImpl implements TrainApi {
         signal,
         snap.edgeProgressRatio(),
         snap.updatedAt(),
-        eta);
+        eta,
+        currentLine.map(RouteLineChanges.LineRef::operatorCode),
+        currentLine.map(RouteLineChanges.LineRef::lineCode),
+        outOfService);
+  }
+
+  /** 列车当前对乘客显示的线路（{@link RouteLineChanges#current}：线路标签优先，否则为交路本身的线路），按主数据的写法给出。 */
+  private Optional<RouteLineChanges.LineRef> resolveCurrentLine(
+      TrainRuntimeSnapshot snap, Optional<RouteDefinition> routeOpt) {
+    Optional<RouteLineChanges.LineRef> routeLine =
+        routeOpt.flatMap(RouteDefinition::metadata).flatMap(RouteLineChanges.LineRef::of);
+    StationDirectory.Snapshot directory =
+        stations == null ? StationDirectory.detachedSnapshot() : stations.snapshot();
+    return RouteLineChanges.current(snap.lineTag(), routeLine).map(directory::canonicalLine);
   }
 
   private Signal convertSignal(SignalAspect aspect) {

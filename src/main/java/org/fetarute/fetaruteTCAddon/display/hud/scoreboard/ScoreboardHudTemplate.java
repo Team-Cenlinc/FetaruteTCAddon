@@ -11,6 +11,7 @@ import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 
 /**
@@ -59,6 +60,12 @@ public final class ScoreboardHudTemplate {
     return title;
   }
 
+  /** 模板是否写了该状态的页面（不算 DEFAULT 与回退页）。 */
+  public boolean defines(HudState state) {
+    List<Page> pages = pagesByState.get(state);
+    return pages != null && !pages.isEmpty();
+  }
+
   /** 解析当前 HUD 状态的页面（支持分页轮播）。 */
   public Optional<Page> resolvePage(HudState state, long tick) {
     List<Page> pages = pagesByState.get(state);
@@ -71,12 +78,26 @@ public final class ScoreboardHudTemplate {
     if (pages == null || pages.isEmpty()) {
       return Optional.empty();
     }
-    if (pages.size() == 1) {
-      return Optional.of(pages.get(0));
+    // 与 BossBar/ActionBar 同一套语言轮播：中文页与英文页和横栏同时切换。
+    return Optional.ofNullable(
+        HudLanguageRotation.select(
+            pages, ScoreboardHudTemplate::pageLanguage, tick, pageDurationTicks));
+  }
+
+  /** 按页面全部文字推断语言（标题、表头、行模板、表尾）。 */
+  static HudLanguageRotation.Language pageLanguage(Page page) {
+    if (page == null) {
+      return HudLanguageRotation.Language.NEUTRAL;
     }
-    long ticks = Math.max(1L, pageDurationTicks);
-    int index = (int) ((tick / ticks) % pages.size());
-    return Optional.of(pages.get(index));
+    StringBuilder text = new StringBuilder(page.title().orElse(""));
+    if (page instanceof StaticPage staticPage) {
+      staticPage.lines().forEach(line -> text.append('\n').append(line));
+    } else if (page instanceof ListPage listPage) {
+      listPage.header().forEach(line -> text.append('\n').append(line));
+      listPage.rowLines().forEach(line -> text.append('\n').append(line));
+      listPage.footer().forEach(line -> text.append('\n').append(line));
+    }
+    return HudLanguageRotation.classify(text.toString());
   }
 
   /** 解析模板文本（YAML）。 */

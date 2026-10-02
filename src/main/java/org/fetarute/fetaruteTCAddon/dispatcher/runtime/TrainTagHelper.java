@@ -1,7 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.ArrayList;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 
@@ -111,6 +113,7 @@ public final class TrainTagHelper {
       return;
     }
     String target = key.trim().toLowerCase(Locale.ROOT);
+    List<String> removals = new ArrayList<>();
     for (String tag : properties.getTags()) {
       if (tag == null) {
         continue;
@@ -122,9 +125,12 @@ public final class TrainTagHelper {
       int idx = trimmed.indexOf('=');
       String currentKey = idx > 0 ? trimmed.substring(0, idx).trim() : trimmed;
       if (currentKey.toLowerCase(Locale.ROOT).equals(target)) {
-        properties.removeTags(trimmed);
-        return;
+        // TrainCarts 按 tag 原始字符串执行删除；匹配时可以 trim，但删除值必须保留原样。
+        removals.add(tag);
       }
+    }
+    if (!removals.isEmpty()) {
+      properties.removeTags(removals.toArray(new String[0]));
     }
   }
 }

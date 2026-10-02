@@ -8,6 +8,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
@@ -41,5 +42,31 @@ class HealthMonitorTest {
     assertEquals(4, result.totalFixed());
     assertEquals(2, result.orphanCleaned(), "destroyall 后应把运行时孤儿占用计入修复结果");
     verify(dispatchService).cleanupOrphanOccupancyClaimsWithReport(Set.of());
+  }
+
+  @Test
+  void healthCleanupPreservesCurrentResolvedAndTaggedOwnersDuringRenameFailure() {
+    RuntimeDispatchService dispatchService = mock(RuntimeDispatchService.class);
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    ConfigManager configManager = mock(ConfigManager.class);
+    when(dispatchService.cleanupOrphanOccupancyClaimsWithReport(any()))
+        .thenReturn(new RuntimeDispatchService.CleanupResult(Instant.now(), 0, 0, 0));
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    Set<String> activeOwners =
+        HealthMonitor.runtimeOwnerNames(
+            "new-train", Optional.of("resolved-train"), Optional.of("old-owner"));
+    HealthMonitor monitor =
+        new HealthMonitor(
+            dispatchService,
+            occupancyManager,
+            mock(DwellRegistry.class),
+            configManager,
+            message -> {},
+            () -> activeOwners);
+
+    monitor.checkNow();
+
+    verify(dispatchService)
+        .cleanupOrphanOccupancyClaimsWithReport(Set.of("new-train", "resolved-train", "old-owner"));
   }
 }

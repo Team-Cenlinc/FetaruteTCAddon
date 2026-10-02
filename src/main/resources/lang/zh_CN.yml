@@ -38,6 +38,7 @@ display:
         ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将换向，等待调度</white>
         IDLE_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>临时停车</white>
         IDLE_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>等待信号中</white>
+        OUT_OF_SERVICE: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>回库，不再载客</white>
       label:
         line: "线路"
         next: "下一站"
@@ -66,6 +67,7 @@ display:
         TERM_ARRIVING: <yellow>终点 {next_station} 到达</yellow>
         ON_LAYOVER: <white>折返待命中</white>
         IDLE: <white>临时停车</white>
+        OUT_OF_SERVICE: <white>本列车回库，不再载客</white>
         <white>欢迎乘坐 {company}/{operator} 列车</white>
         <white>本次列车为 {line} 列车，前往 {dest_eop}</white>
         <white>下一站 {next_station}</white>
@@ -143,6 +145,7 @@ command:
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
+    materialized-spawn-pending: "<prefix> <red>重载已安全中止</red> <gray>仍有列车处于强制收容重试；处理完成后请再次执行</gray> <white>/fta reload</white>"
 
   speed:
     section:
@@ -408,7 +411,7 @@ command:
       entry-component: "<gray>/fta graph component list</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
       hover-component: "<gray>点击填充:</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
       entry-conflict: "<gray>/fta graph conflict</gray> <white>-</white> <dark_aqua>联合闭锁冲突组</dark_aqua>"
-      hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
+      hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path/interlocking list/interlocking get</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
@@ -420,6 +423,7 @@ command:
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
+      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>当前仍有列车占用 claim；请先停车并清空占用后重试，旧快照保持生效</gray>"
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, replaced_components=<white><replaced_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
@@ -428,6 +432,10 @@ command:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"
         more: "<gray>… 还有 <white><more></white> 处未显示</gray>"
+      unterminated:
+        header: "<prefix> <yellow>有 <white><count></white> 个探索方向超过上限仍未遇到节点，已按尽头线处理</yellow> <gray>(world=<white><world></white>；另一侧视为无 FTA 节点或施工中。若此处本应为真实区间，请补设节点牌子或截断轨道后重建)</gray>"
+        entry: "<gray>-</gray> <white><node></white> <gray>→ 探索止于</gray> <location>"
+        more: "<gray>… 另有 <white><more></white> 个方向未显示，完整清单见控制台</gray>"
       duplicate-node-id:
         header: "<prefix> <red>发现 <white><count></white> 个重复 nodeId</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <white><node></white> <gray>→</gray> <locations>"
@@ -455,6 +463,16 @@ command:
         page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
         empty: "<prefix> <gray>路径未涉及冲突组</gray> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
         entry: "<gray>-</gray> <white><key></white>"
+      interlocking:
+        page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
+        list:
+          header: "<prefix> <dark_aqua>物理联锁区</dark_aqua> <gray>(world=<white><world></white>, count=<white><count></white>)</gray>"
+          empty: "<prefix> <gray>当前图没有精确物理联锁区</gray> <dark_aqua>请同时检查 /fta graph info 的 coverage</dark_aqua>"
+          entry: "<gray>-</gray> <white><key></white> <gray>(first=<white><first_edge></white>, second=<white><second_edge></white>, overlap_cells=<white><cells></white>)</gray>"
+        get:
+          not-found: "<prefix> <red>未找到物理联锁区：</red><white><key></white>"
+          header: "<prefix> <dark_aqua>物理联锁区证据</dark_aqua> <gray>(key=<white><key></white>, first=<white><first_edge></white>, second=<white><second_edge></white>, overlap_cells=<white><cells></white>)</gray>"
+          cell: "<gray>-</gray> <white>(<x>, <y>, <z>)</white>"
 
     edge:
       list:
@@ -606,6 +624,7 @@ command:
       meta: "<gray>-</gray> <dark_aqua>builtAt</dark_aqua>=<white><built_at></white> <dark_aqua>components</dark_aqua>=<white><components></white> <dark_aqua>blocked</dark_aqua>=<white><blocked_edges></white> <dark_aqua>isolated</dark_aqua>=<white><isolated_nodes></white>"
       nodes: "<gray>-</gray> <dark_aqua>nodes</dark_aqua> <gray>(waypoint=<white><waypoint></white>, station=<white><station></white>, depot=<white><depot></white>, destination=<white><destination></white>, switcher=<white><switcher></white>)</gray>"
       switcher: "<gray>-</gray> <dark_aqua>switcher</dark_aqua> <gray>(sign=<white><switcher_sign></white>, auto=<white><switcher_auto></white>)</gray>"
+      interlocking: "<gray>-</gray> <dark_aqua>稀疏物理联锁</dark_aqua> <gray>(catalog=<white><status></white>, covered_edges=<white><captured></white>/<white><expected></white>, zone_cells=<white><cells></white>, multi_zone_cells=<white><shared_cells></white>, exact_zones=<white><zones></white>)</gray>"
       edge-top-header: "<gray>-</gray> <dark_aqua>top edges</dark_aqua> <gray>(by length_blocks)</gray>"
       edge: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(len=<white><len></white>)</gray>"
 
@@ -739,6 +758,8 @@ command:
         entry: "<gray>-</gray> <white><type></white> <dark_aqua><name></dark_aqua>"
 
   route:
+    timetable-route:
+      invalid: "<prefix> <red>走行线路引用格式不对，应为</red> <white><company>/<operator>/<line>/<route></white><gray>（收到 <white><value></white>）</gray>"
     create:
       success: "<prefix> <dark_aqua>运行图已创建：</dark_aqua><white><line></white><gray>/</gray><white><code></white>"
       exists: "<prefix> <red>运行图 code 已存在：</red><white><code></white>"
@@ -801,7 +822,8 @@ command:
       book:
         missing: "<prefix> <red>请手持书与笔或成书</red>"
         invalid: "<prefix> <red>物品不是书与笔/成书</red>"
-      action-first: "<prefix> <red>第 <white><line></white> 行不能是动作：</red><gray><text></gray>"
+      action-first: "<prefix> <red>第 <white><line></white> 行不能是动作：</red><gray><text></gray> <gray>（动作须写在所属站点之后；第一站之前仅可写起步线路 CHANGE）</gray>"
+      change-ambiguous: "<prefix> <red>第 <white><line></white> 行起步线路重复：</red><gray><text></gray> <gray>（第一站之前只能写一条 CHANGE，且不得与首站备注中的 CHANGE 并存）</gray>"
       invalid-line: "<prefix> <red>第 <white><line></white> 行无效：</red><gray><text></gray>"
       station-not-found: "<prefix> <red>第 <white><line></white> 行站点不存在：</red><white><station></white>"
       cret-multi: "<prefix> <red>CRET 只能出现一次</red>"
@@ -817,6 +839,7 @@ command:
       dynamic-no-valid-tracks: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点所有轨道均不存在</red> <gray>(<white><spec></white> <white><range></white>)</gray>"
       dynamic-partial-tracks: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失: <white><missing></white>, 有效: <white><valid></white>)</gray>"
       debug:
+        start-line: "起步线路"
         header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
         page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
         entry: "<white>#<seq></white> <gray><pass></gray> <dark_aqua><target></dark_aqua><dwell_suffix>"
@@ -865,6 +888,7 @@ command:
           - "# 用法：每行一个 stop/action"
           - "# stop: StationCode 或 NodeId"
           - "# action: CHANGE/DYNAMIC/CRET/DSTY/ACTION"
+          - "# 起步线路: 第一站之前可写 CHANGE:<运营商>:<线路>"
           - "# 修饰: PASS/STOP/TERM, dwell=<秒>（基准停车时间）"
           - "# 限制: CRET 仅允许首个 stop；DSTY 必须为最后 stop"
           - "# 规则较长，请翻页查看后续"
@@ -904,22 +928,57 @@ command:
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
     info:
       header: "<prefix> <dark_aqua>站点</dark_aqua> <white><operator></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
-      secondary: "<gray>第二语言名称:</gray> <dark_aqua><secondary></dark_aqua>"
-      node: "<gray>图节点:</gray> <dark_aqua><node></dark_aqua>"
-      world: "<gray>世界:</gray> <dark_aqua><world></dark_aqua>"
-      location: "<gray>位置:</gray> <dark_aqua><location></dark_aqua>"
+      secondary: "<gray>第二语言名称：</gray><dark_aqua><secondary></dark_aqua>"
+      node: "<gray>图节点：</gray><dark_aqua><node></dark_aqua>"
+      world: "<gray>世界：</gray><dark_aqua><world></dark_aqua>"
+      location: "<gray>位置：</gray><dark_aqua><location></dark_aqua>"
     set:
       success: "<prefix> <dark_aqua>站点已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--secondary-clear/--node/--node-clear/--here/--location-clear）</gray>"
+      noop: "<prefix> <gray>未指定任何更新项（可用参数：--name、--secondary、--secondary-clear、--node、--node-clear、--here、--location-clear）</gray>"
     dump:
       header: "<prefix> <dark_aqua>站点清理预览</dark_aqua> <gray>(operator=<white><operator></white>, count=<white><count></white>)</gray>"
-      empty: "<gray>（没有可清理的站点）</gray>"
+      empty: "<gray>（无可清理的站点）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
-      more: "<gray>… 还有 <white><count></white> 个未显示</gray>"
-      success: "<prefix> <dark_aqua>已清理站点</dark_aqua> <gray>(count=<white><count></white>)</gray>"
-
+      more: "<gray>… 另有 <white><count></white> 项未显示</gray>"
+      success: "<prefix> <dark_aqua>站点清理完成</dark_aqua> <gray>(count=<white><count></white>)</gray>"
+    group:
+      not-found: "<prefix> <red>未找到车站组：</red><white><group></white>"
+      ambiguous: "<prefix> <red>车站组代码 <white><group></white> 存在于多家公司，请以「公司代码:组代码」格式指定：</red><white><candidates></white>"
+      walk:
+        seconds: "{seconds} 秒"
+        none: "未设置"
+      operator-ambiguous: "<prefix> <red>运营商代码 <white><operator></white> 存在于多家公司，请以「公司代码:运营商代码」格式指定：</red><white><candidates></white>"
+      create:
+        success: "<prefix> <dark_aqua>车站组已创建：</dark_aqua><white><company></white><gray>:</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+        exists: "<prefix> <red>公司 <white><company></white> 已存在代码为 <white><code></white> 的车站组</red>"
+        invalid: "<prefix> <red>组代码与名称不得为空，且组代码不得包含冒号</red>"
+      add:
+        success: "<prefix> <dark_aqua>车站</dark_aqua> <white><station></white><gray>（<name>）</gray><dark_aqua>已加入车站组</dark_aqua> <white><group></white><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
+        updated: "<prefix> <dark_aqua>车站组</dark_aqua> <white><group></white> <dark_aqua>的成员</dark_aqua> <white><station></white> <dark_aqua>已更新</dark_aqua><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
+        in-other-group: "<prefix> <red>车站 <white><station></white> 已隶属于车站组 <white><other></white>。每个车站仅可隶属于一个车站组，请先将其从原车站组中移除</red>"
+        cross-company-denied: "<prefix> <red>车站 <white><station></white> 隶属于公司 <white><company></white>，当前操作者不具备该公司的管理权限。</red><gray>跨公司添加成员须同时具备双方公司的管理权限，请联系对方公司管理员办理（邀请与确认流程暂未开放）</gray>"
+        invalid-station: "<prefix> <red>车站 <white><station></white> 未关联有效的运营商，无法加入车站组</red>"
+        invalid-type: "<prefix> <red>换乘方式无效：</red><white><type></white><gray>（可选值：SAME_PLATFORM、IN_STATION、OUT_OF_STATION）</gray>"
+      remove:
+        success: "<prefix> <dark_aqua>车站</dark_aqua> <white><station></white> <dark_aqua>已从车站组</dark_aqua> <white><group></white> <dark_aqua>中移除</dark_aqua>"
+        not-member: "<prefix> <red>车站 <white><station></white> 不是车站组 <white><group></white> 的成员</red>"
+      delete:
+        success: "<prefix> <dark_aqua>车站组已删除：</dark_aqua><white><group></white> <gray>（其成员已一并移除）</gray>"
+      info:
+        header: "<prefix> <dark_aqua>车站组</dark_aqua> <white><company></white><gray>:</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
+        secondary: "<gray>第二语言名称：</gray><dark_aqua><secondary></dark_aqua>"
+        empty: "<gray>（暂无成员）</gray>"
+        member: "<gray><index>.</gray> <white><operator></white><gray>/</gray><white><station></white> <dark_aqua><name></dark_aqua><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
+        member-lines: "   <gray>停靠线路：</gray><white><lines></white>"
+        member-no-lines: "   <gray>停靠线路：无</gray>"
+      list:
+        header: "<prefix> <dark_aqua>车站组列表</dark_aqua><gray>（公司：<white><company></white>）</gray>"
+        empty: "<gray>（暂无车站组）</gray>"
+        entry: "<white><company></white><gray>:</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua><gray>（成员数：<white><count></white>）</gray>"
+        all: "全部"
   depot:
     spawn:
+      coordinated-only: "<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"
       not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"
       not-depot: "<prefix> <red>节点不是车库</red> <gray>(node=<white><node></white>)</gray>"
       world-missing: "<prefix> <red>车库所在世界未加载</red> <gray>(world=<white><world></white>)</gray>"
@@ -985,6 +1044,7 @@ command:
       approach: "  <gray>Approach:</gray> node=<white><node></white> kind=<white><kind></white> reason=<white><reason></white> distance=<white><distance></white> limit=<white><limit></white>"
       occupancy: "  <gray>占用诊断:</gray> blockers=<white><blockers></white> request=<white><request></white> claims=<white><claims></white>"
       signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white> destBlocked=<white><destination_blocked></white> retained=<white><retained_destination></white> reason=<white><blocked_reason></white>"
+      stop: "  <gray>STOP 生命周期:</gray> reason=<white><reason></white> detail=<white><detail></white> release=<white><release></white> retry=<white><retry></white> invalidatesAuthority=<white><invalidates_authority></white> blockers=<white><blockers></white>"
       set:
         route:
           storage-not-ready: "<prefix> <red>存储尚未就绪，无法解析公司/线路层级（请先 /fta reload 或检查数据库连接）</red>"
@@ -1005,6 +1065,10 @@ enum:
     commuter: "通勤"
     lrt: "轻轨"
     express: "快线"
+  station-transfer-type:
+    same_platform: "同台换乘"
+    in_station: "站内换乘"
+    out_of_station: "出站换乘"
   route-pattern-type:
     local: "各站停"
     rapid: "快速"

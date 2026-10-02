@@ -8,12 +8,15 @@ import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 
@@ -34,6 +37,8 @@ public interface StorageProvider extends AutoCloseable {
 
   StationRepository stations();
 
+  StationGroupRepository stationGroups();
+
   RouteRepository routes();
 
   RouteStopRepository routeStops();
@@ -47,6 +52,10 @@ public interface StorageProvider extends AutoCloseable {
   RailComponentCautionRepository railComponentCautions();
 
   RailGraphSnapshotRepository railGraphSnapshots();
+
+  RailInterlockingSnapshotRepository railInterlockingSnapshots();
+
+  TimetableRepository timetables();
 
   HudTemplateRepository hudTemplates();
 

@@ -23,7 +23,21 @@
             <property name="tokens" value="LITERAL_TRY, LITERAL_CATCH, LITERAL_FINALLY, LITERAL_IF, LITERAL_ELSE, CLASS_DEF, METHOD_DEF, CTOR_DEF, LITERAL_FOR, LITERAL_WHILE, LITERAL_DO, STATIC_INIT, INSTANCE_INIT"/>
         </module>
         <module name="MethodParamPad"/>
-        <module name="OperatorWrap"/>
+        <!--
+            OperatorWrap 默认 token 里包含 COLON，而 COLON 同时是增强 for 的冒号。
+            google-java-format（由 Spotless 强制执行）把 `for (T x :` 的冒号放在行尾，
+            而本规则要求它另起一行——两者直接矛盾，而且 Spotless 会把手改回改，
+            于是这三条警告永远消不掉，每次 check 都刷一遍。
+
+            去掉 COLON 不会丢掉实际覆盖：三元运算符的冒号 gjf 本来就排在行首，
+            和本规则要求的一致，它已经替我们守住了。这也和上面那句
+            「格式规则交给 Spotless」是同一条原则。
+
+            tokens = 默认集合减去 COLON。
+        -->
+        <module name="OperatorWrap">
+            <property name="tokens" value="QUESTION, EQUAL, NOT_EQUAL, DIV, PLUS, MINUS, STAR, MOD, SR, BSR, GE, GT, SL, LE, LT, BXOR, BOR, LOR, BAND, LAND, TYPE_EXTENSION_AND, LITERAL_INSTANCEOF"/>
+        </module>
         <module name="AnnotationLocation">
             <property name="tokens" value="CLASS_DEF, INTERFACE_DEF, ENUM_DEF, METHOD_DEF, CTOR_DEF, VARIABLE_DEF, ANNOTATION_DEF, ENUM_CONSTANT_DEF, RECORD_DEF, COMPACT_CTOR_DEF"/>
         </module>

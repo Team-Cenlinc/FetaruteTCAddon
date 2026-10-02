@@ -93,8 +93,8 @@ public class SignalEventBus {
     for (Consumer<SignalEvent> subscriber : globalSubscribers) {
       try {
         subscriber.accept(event);
-      } catch (Exception e) {
-        debugLogger.accept("SignalEventBus: global subscriber error: " + e.getMessage());
+      } catch (RuntimeException | LinkageError failure) {
+        safeDebug("global subscriber error", failure);
       }
     }
 
@@ -104,11 +104,30 @@ public class SignalEventBus {
       for (Consumer<? super SignalEvent> handler : handlers) {
         try {
           handler.accept(event);
-        } catch (Exception e) {
-          debugLogger.accept(
-              "SignalEventBus: subscriber error for " + event.eventType() + ": " + e.getMessage());
+        } catch (RuntimeException | LinkageError failure) {
+          safeDebug("subscriber error for " + event.eventType(), failure);
         }
       }
+    }
+  }
+
+  /**
+   * 尽力记录订阅者故障，不允许诊断输出再次打断同步占用事务。
+   *
+   * <p>TrainCarts/BKCommonLib 版本不匹配通常以 {@link LinkageError} 暴露；事件发布发生在 claim
+   * 状态提交之后，因此该错误必须与普通运行时异常一样被订阅边界隔离。
+   */
+  private void safeDebug(String source, Throwable failure) {
+    try {
+      debugLogger.accept(
+          "SignalEventBus: "
+              + source
+              + ": "
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    } catch (RuntimeException | LinkageError ignored) {
+      // 诊断通道不可用不能改变已提交的占用事实，也不能阻断同批后续订阅者。
     }
   }
 

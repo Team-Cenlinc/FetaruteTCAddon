@@ -35,6 +35,14 @@ public final class RouteProgressRegistry {
   private final ConcurrentMap<String, RouteProgressEntry> entries = new ConcurrentHashMap<>();
   private final AtomicLong version = new AtomicLong();
 
+  /**
+   * 当前交路索引的<b>实际到达节点</b>（按列车 key）。
+   *
+   * <p>{@code lastPassedGraphNode} 会随列车驶过每个图节点被覆盖，车头出站之后就不再记得"是从哪条股道出来的"；而身后保护需要这个事实把后向路径钉在实际股道上（见
+   * {@link #arrivalNodeAt}）。只由带现场证据的到达写入，推进到别的索引或换交路时作废。
+   */
+  private final ConcurrentMap<String, ArrivalAnchor> arrivalAnchors = new ConcurrentHashMap<>();
+
   /** 返回进度快照版本。每次 route index、lastPassedGraphNode 或 signal 提交都会递增。 */
   public long version() {
     return version.get();
@@ -49,6 +57,46 @@ public final class RouteProgressRegistry {
   }
 
   /**
+   * 列车的物理位置：最后经过的图节点。
+   *
+   * <p>与 {@link RouteProgressEntry#currentIndex()} 指向的交路路径点不是同一个量——同一对路径点之间的两列车路径点相同，
+   * 只有这里能分出谁在前。没有进度或尚未记录经过节点时返回空，调用方必须把它当作"位置未知"，不能拿路径点顶替。
+   *
+   * @param trainName 列车名
+   * @return 最后经过的图节点
+   */
+  public Optional<NodeId> lastPassedGraphNode(String trainName) {
+    return get(trainName).flatMap(RouteProgressEntry::lastPassedGraphNode);
+  }
+
+  /**
+   * 列车在 {@code currentIndex} 这个交路路径点上实际到达的图节点。
+   *
+   * <p>DYNAMIC 站台就是选台结果、普通站就是声明站台——总之是列车真正走过的那一条。只有到达证据与当前进度属于同一交路、同一索引时才返回；
+   * 否则（没有到达证据的初始化/移交、已推进到别的索引、换了交路）返回空，调用方必须按"未知"处理，不能拿路径点顶替。
+   *
+   * @param trainName 列车名
+   * @param currentIndex 调用方所用的交路索引
+   * @return 该索引上的实际到达节点
+   */
+  public Optional<NodeId> arrivalNodeAt(String trainName, int currentIndex) {
+    String key = keyOf(trainName);
+    if (key == null) {
+      return Optional.empty();
+    }
+    ArrivalAnchor anchor = arrivalAnchors.get(key);
+    RouteProgressEntry entry = entries.get(key);
+    if (anchor == null
+        || entry == null
+        || anchor.currentIndex() != currentIndex
+        || entry.currentIndex() != currentIndex
+        || !anchor.routeId().equals(entry.routeId())) {
+      return Optional.empty();
+    }
+    return Optional.of(anchor.node());
+  }
+
+  /**
    * 根据 tags 初始化列车进度。
    *
    * <p>当 tag 缺失时回退为 0。
@@ -59,7 +107,13 @@ public final class RouteProgressRegistry {
     String normalizedName = requireTrainName(trainName);
     int index = TrainTagHelper.readIntTag(properties, TAG_ROUTE_INDEX).orElse(0);
     RouteProgressEntry entry =
-        upsert(normalizedName, parseRouteId(properties).orElse(null), route, index, Instant.now());
+        upsert(
+            normalizedName,
+            parseRouteId(properties).orElse(null),
+            route,
+            index,
+            Instant.now(),
+            Optional.empty());
     TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     return entry;
   }
@@ -67,7 +121,8 @@ public final class RouteProgressRegistry {
   /**
    * 推进进度并写回 tag。
    *
-   * <p>currentIndex 为“已抵达节点索引”。
+   * <p>currentIndex 为“已抵达节点索引”。该入口供没有现场到达事件的初始化与交路移交使用；有实际节点证据时应调用 {@link #recordArrival}，避免把
+   * DYNAMIC 声明占位节点当成实际位置。
    */
   public RouteProgressEntry advance(
       String trainName,
@@ -76,8 +131,53 @@ public final class RouteProgressRegistry {
       int currentIndex,
       TrainProperties properties,
       Instant now) {
+    return writeProgress(
+        trainName, routeUuid, route, currentIndex, properties, now, Optional.empty());
+  }
+
+  /**
+   * 提交已验证的到达索引和实际图节点，再写回恢复用 tag。
+   *
+   * <p>实际节点可以是 DYNAMIC 选出的股道，不必等于 Route 声明中的占位节点。二者在同一份进度快照内提交，避免后续授权和健康检查读取到
+   * “索引已推进、位置仍指向占位股道”的组合。该操作只记录到达事实，不授予下一跳通行权，也不释放占用。
+   *
+   * @param trainName 规范列车名
+   * @param routeUuid 当前交路 UUID；仅 code 定义的交路可为 {@code null}
+   * @param route 已解析的交路定义
+   * @param currentIndex 已匹配到达节点的交路索引
+   * @param arrivedNode 现场事件确认的实际节点
+   * @param properties 用于持久化进度 tag 的列车属性
+   * @param now 到达时间
+   */
+  public RouteProgressEntry recordArrival(
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      NodeId arrivedNode,
+      TrainProperties properties,
+      Instant now) {
+    return writeProgress(
+        trainName,
+        routeUuid,
+        route,
+        currentIndex,
+        properties,
+        now,
+        Optional.of(Objects.requireNonNull(arrivedNode, "arrivedNode")));
+  }
+
+  private RouteProgressEntry writeProgress(
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      TrainProperties properties,
+      Instant now,
+      Optional<NodeId> arrivedNode) {
     String normalizedName = requireTrainName(trainName);
-    RouteProgressEntry entry = upsert(normalizedName, routeUuid, route, currentIndex, now);
+    RouteProgressEntry entry =
+        upsert(normalizedName, routeUuid, route, currentIndex, now, arrivedNode);
     TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     TrainTagHelper.writeTag(properties, TAG_ROUTE_INDEX, String.valueOf(currentIndex));
     TrainTagHelper.writeTag(properties, TAG_ROUTE_UPDATED_AT, String.valueOf(now.toEpochMilli()));
@@ -119,6 +219,12 @@ public final class RouteProgressRegistry {
     RouteProgressEntry existing = entries.remove(oldKey);
     if (existing == null) {
       return false;
+    }
+    ArrivalAnchor anchor = arrivalAnchors.remove(oldKey);
+    if (anchor != null) {
+      arrivalAnchors.put(newKey, anchor);
+    } else {
+      arrivalAnchors.remove(newKey);
     }
     RouteProgressEntry migrated =
         new RouteProgressEntry(
@@ -204,6 +310,7 @@ public final class RouteProgressRegistry {
     if (key == null) {
       return;
     }
+    arrivalAnchors.remove(key);
     if (entries.remove(key) != null) {
       version.incrementAndGet();
     }
@@ -220,7 +327,12 @@ public final class RouteProgressRegistry {
   }
 
   private RouteProgressEntry upsert(
-      String trainName, UUID routeUuid, RouteDefinition route, int currentIndex, Instant now) {
+      String trainName,
+      UUID routeUuid,
+      RouteDefinition route,
+      int currentIndex,
+      Instant now,
+      Optional<NodeId> arrivedNode) {
     String normalizedName = requireTrainName(trainName);
     if (route.waypoints().isEmpty()) {
       throw new IllegalArgumentException("route waypoints 不能为空");
@@ -237,18 +349,35 @@ public final class RouteProgressRegistry {
     RouteId routeId = route.id();
     RouteProgressEntry existing = entries.get(key);
     SignalAspect lastSignal = existing != null ? existing.lastSignal() : SignalAspect.STOP;
-    // 若 currentIndex 变化，重置 lastPassedGraphNode；否则保留已有值
-    Optional<NodeId> lastPassed =
-        existing != null && existing.currentIndex() == boundedIndex
-            ? existing.lastPassedGraphNode()
-            : Optional.ofNullable(currentWaypoint);
+    // 现场到达证据优先；没有事件证据的恢复/移交仍沿用原来的索引推导规则。
+    Optional<NodeId> lastPassed = arrivedNode;
+    if (lastPassed.isEmpty()) {
+      lastPassed =
+          existing != null && existing.currentIndex() == boundedIndex
+              ? existing.lastPassedGraphNode()
+              : Optional.ofNullable(currentWaypoint);
+    }
     RouteProgressEntry entry =
         new RouteProgressEntry(
             normalizedName, routeUuid, routeId, boundedIndex, next, lastPassed, lastSignal, now);
     entries.put(key, entry);
+    // 到达锚点与 lastPassed 同一口径：有现场证据就记下；没有证据时只有"同交路、同索引"才沿用旧锚点。
+    if (arrivedNode.isPresent()) {
+      arrivalAnchors.put(key, new ArrivalAnchor(routeId, boundedIndex, arrivedNode.get()));
+    } else {
+      ArrivalAnchor previousAnchor = arrivalAnchors.get(key);
+      if (previousAnchor != null
+          && (previousAnchor.currentIndex() != boundedIndex
+              || !previousAnchor.routeId().equals(routeId))) {
+        arrivalAnchors.remove(key, previousAnchor);
+      }
+    }
     version.incrementAndGet();
     return entry;
   }
+
+  /** 一次带现场证据的到达：交路、索引与实际节点。 */
+  private record ArrivalAnchor(RouteId routeId, int currentIndex, NodeId node) {}
 
   private static String requireTrainName(String trainName) {
     if (trainName == null || trainName.isBlank()) {

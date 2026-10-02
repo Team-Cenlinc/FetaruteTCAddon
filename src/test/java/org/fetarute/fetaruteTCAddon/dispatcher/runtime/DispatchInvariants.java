@@ -1,0 +1,712 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueEntry;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyQueueSnapshot;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+
+/**
+ * 动态调度全局不变量。
+ *
+ * <p>每条不变量都从实现推导，并在注释中标注出处与"当前是数据结构保证还是仅代码假设"。这些检查是纯函数：只读快照，不触碰运行时， 也不得为了让场景通过而放宽——Phase 0
+ * 的目的是把现有行为钉住，包括钉住当前是错的行为。
+ *
+ * <p>输出是稳定排序的字符串列表，避免 Map 枚举顺序进入断言。
+ */
+final class DispatchInvariants {
+
+  private static final String SINGLE_PREFIX = "single:";
+
+  private DispatchInvariants() {}
+
+  /**
+   * 单次检查所需的只读现场。
+   *
+   * <p>I1–I3 是纯快照函数。I5 需要"停了多久"，I6 需要"这一 tick 新产生了哪些诊断"，二者都不是单帧信息， 因此由骨架负责跨 tick
+   * 累积后传入——判定本身仍然是纯函数，不持有状态。
+   */
+  record Sample(
+      int tick,
+      List<OccupancyClaim> claims,
+      Map<String, List<NodeId>> routePathsByTrain,
+      Map<NodeId, List<NodeId>> adjacency,
+      List<StoppedTrain> stoppedTrains,
+      List<AuthorityView> authorities,
+      List<OccupancyQueueSnapshot> queues,
+      Map<String, Long> queueBaselines,
+      List<String> diagnosticsSinceLastTick,
+      Set<String> releasedThisTick,
+      Set<String> disappearedClaimKeys,
+      Set<String> destroyedTrainKeys,
+      Set<String> migratedAwayKeys,
+      Set<String> progressRegistryKeys,
+      Set<String> stopStateKeys) {
+    Sample {
+      stopStateKeys = stopStateKeys == null ? Set.of() : Set.copyOf(stopStateKeys);
+      claims = claims == null ? List.of() : List.copyOf(claims);
+      routePathsByTrain = routePathsByTrain == null ? Map.of() : Map.copyOf(routePathsByTrain);
+      adjacency = adjacency == null ? Map.of() : Map.copyOf(adjacency);
+      stoppedTrains = stoppedTrains == null ? List.of() : List.copyOf(stoppedTrains);
+      authorities = authorities == null ? List.of() : List.copyOf(authorities);
+      queues = queues == null ? List.of() : List.copyOf(queues);
+      queueBaselines = queueBaselines == null ? Map.of() : Map.copyOf(queueBaselines);
+      diagnosticsSinceLastTick =
+          diagnosticsSinceLastTick == null ? List.of() : List.copyOf(diagnosticsSinceLastTick);
+      releasedThisTick = releasedThisTick == null ? Set.of() : Set.copyOf(releasedThisTick);
+      disappearedClaimKeys =
+          disappearedClaimKeys == null ? Set.of() : Set.copyOf(disappearedClaimKeys);
+      destroyedTrainKeys = destroyedTrainKeys == null ? Set.of() : Set.copyOf(destroyedTrainKeys);
+      migratedAwayKeys = migratedAwayKeys == null ? Set.of() : Set.copyOf(migratedAwayKeys);
+      progressRegistryKeys =
+          progressRegistryKeys == null ? Set.of() : Set.copyOf(progressRegistryKeys);
+    }
+  }
+
+  /**
+   * 一列处于 STOP 的列车及其已持续的 tick 数。
+   *
+   * @param consecutiveTicks 同一轮 STOP 生命周期（按 reasonCode + enteredAt 判定）已连续出现的 tick 数
+   */
+  record StoppedTrain(String trainName, RuntimeStopState state, int consecutiveTicks) {}
+
+  /**
+   * 一列车本 tick 的"可见信号 + 授权"现场。
+   *
+   * @param visibleSignal 已发布给该车的信号
+   * @param token 当前 Movement Authority token；不存在时为 empty
+   */
+  record AuthorityView(
+      String trainName, SignalAspect visibleSignal, Optional<MovementAuthorizationToken> token) {}
+
+  static List<String> check(Sample sample) {
+    List<String> violations = new ArrayList<>();
+    violations.addAll(checkI1PhysicalHardOccupancyIsExclusive(sample));
+    violations.addAll(checkI2SingleCorridorDirectionIsConsistent(sample));
+    violations.addAll(checkI3ClaimsStayOnOwnRoute(sample));
+    violations.addAll(checkI4ProceedImpliesExecutableAuthority(sample));
+    violations.addAll(checkI5BlockingIsExplainable(sample));
+    violations.addAll(checkI6RequestContextMatchesProgress(sample));
+    violations.addAll(checkI7QueuePositionDoesNotRegress(sample));
+    violations.addAll(checkI8ClaimsDisappearOnlyThroughRelease(sample));
+    violations.addAll(checkI9MigratedAwayNameLeavesNoResidue(sample));
+    violations.addAll(checkI10DestroyedTrainLeavesNoResidue(sample));
+    return List.copyOf(violations);
+  }
+
+  // ------------------------------------------------------------------ I1
+
+  /**
+   * I1 物理资源硬占用唯一性。
+   *
+   * <p>对任意 {@code NODE}/{@code EDGE} 资源，持有硬角色 claim 的列车至多一个。
+   *
+   * <p>出处：{@code SimpleOccupancyManager} 类注释（"真实 MOVEMENT_REQUIRED NODE/EDGE 硬占用始终按 STOP 处理"；{@code
+   * PHYSICAL_FOOTPRINT} "始终作为硬占用"）、{@code firstHardBlocker}。
+   *
+   * <p>当前保证：<b>仅代码假设</b>。{@code claims} 的值类型是 {@code List<OccupancyClaim>}，结构上允许同一资源存在多个 owner。
+   */
+  private static List<String> checkI1PhysicalHardOccupancyIsExclusive(Sample sample) {
+    Map<String, Set<String>> hardOwnersByResource = new TreeMap<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null || !isPhysical(claim.resource()) || !isHardRole(claim.role())) {
+        continue;
+      }
+      hardOwnersByResource
+          .computeIfAbsent(claim.resource().toString(), unused -> new TreeSet<>())
+          .add(TrainNameNormalizer.normalizeKey(claim.trainName()));
+    }
+    List<String> violations = new ArrayList<>();
+    for (Map.Entry<String, Set<String>> entry : hardOwnersByResource.entrySet()) {
+      if (entry.getValue().size() > 1) {
+        violations.add("I1 物理资源硬占用不唯一: resource=" + entry.getKey() + " owners=" + entry.getValue());
+      }
+    }
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I2
+
+  /**
+   * I2 单线走廊方向一致性。
+   *
+   * <p>任一 {@code single:} 冲突资源上，所有 claim 的 {@code corridorDirection} 必须相同；{@code UNKNOWN}
+   * 不得与任何已知方向在同一资源上共存。
+   *
+   * <p>出处：{@code SimpleOccupancyManager.singleRegionOppositeOrUnknownExternalBarrier} 与 {@code
+   * OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER}。
+   *
+   * <p>当前保证：准入路径强制，但<b>账本本身不强制</b>——绕过准入的写入（authority handoff、现场重建、恢复路径）可以打破它。
+   */
+  private static List<String> checkI2SingleCorridorDirectionIsConsistent(Sample sample) {
+    Map<String, Map<String, String>> directionsByResource = new TreeMap<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null || !isSingleCorridorConflict(claim.resource())) {
+        continue;
+      }
+      String direction =
+          claim
+              .corridorDirection()
+              .map(CorridorDirection::name)
+              .orElse(CorridorDirection.UNKNOWN.name());
+      directionsByResource
+          .computeIfAbsent(claim.resource().toString(), unused -> new TreeMap<>())
+          .put(
+              TrainNameNormalizer.normalizeKey(claim.trainName()) + "@" + claim.role().name(),
+              direction);
+    }
+    List<String> violations = new ArrayList<>();
+    for (Map.Entry<String, Map<String, String>> entry : directionsByResource.entrySet()) {
+      Set<String> distinct = new TreeSet<>(entry.getValue().values());
+      if (distinct.size() > 1) {
+        violations.add(
+            "I2 单线冲突区方向不一致: resource=" + entry.getKey() + " holders=" + entry.getValue());
+      }
+    }
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I3
+
+  /**
+   * I3 claim 不得离开本车交路。
+   *
+   * <p>列车持有的每个 {@code NODE}/{@code EDGE} claim 必须位于该车当前交路路径上。
+   *
+   * <p>出处：{@code RuntimeDispatchService.releaseResourcesNotInRequest}（"列车推进后即时释放窗口外资源"）。
+   *
+   * <p>这里刻意采用比"claim ⊆ 当前请求窗口"更弱的形式：窗口大小由生产逻辑决定，在测试里重算窗口等于把调度逻辑复制到测试层。
+   * 限定在"必须位于本车交路上"既能抓住跨交路/跨世代的陈旧残留，又不会把生产的窗口策略钉死。
+   *
+   * <p><b>只检查 {@code MOVEMENT_REQUIRED}</b>。{@code releaseResourcesNotInRequest} 的契约是 "claim ⊆ 请求窗口
+   * ∪ protectedResources"，而 {@code protectedResources} 明确包含 {@code
+   * protectedSwitcherZoneClaims}——道岔联锁区保护会合法地覆盖会让环的并行股道等本车交路之外的资源。 把保护性角色一并纳入会把正确的联锁行为误报成陈旧
+   * claim（首轮实测：会让站 CHARLIE 的 2 道被 1 道列车 PROTECTIVE_RETAIN，这是对的）。硬授权则必须严格落在本车路径上。
+   *
+   * <p>当前保证：<b>靠清理代码维持</b>；任何遗漏的 {@code releaseResourcesNotInRequest} 调用点都会留下陈旧 claim。
+   */
+  private static List<String> checkI3ClaimsStayOnOwnRoute(Sample sample) {
+    Map<String, Set<String>> allowedByTrain = new LinkedHashMap<>();
+    for (Map.Entry<String, List<NodeId>> entry : sample.routePathsByTrain().entrySet()) {
+      allowedByTrain.put(
+          TrainNameNormalizer.normalizeKey(entry.getKey()),
+          physicalResourceKeys(entry.getValue(), sample.adjacency()));
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null
+          || !isPhysical(claim.resource())
+          || claim.role() != ClaimRole.MOVEMENT_REQUIRED) {
+        continue;
+      }
+      String owner = TrainNameNormalizer.normalizeKey(claim.trainName());
+      Set<String> allowed = allowedByTrain.get(owner);
+      if (allowed == null) {
+        // 非场景登记列车（外部注入的占用夹具）不参与本条检查。
+        continue;
+      }
+      String resource = claim.resource().toString();
+      if (!allowed.contains(resource)) {
+        reported.add(
+            "I3 claim 离开本车交路: train="
+                + owner
+                + " resource="
+                + resource
+                + " role="
+                + claim.role().name());
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  /**
+   * 把允许的节点集合展开成资源 key 集合。
+   *
+   * <p>边必须按<b>图邻接</b>展开，不能只取路径上的相邻对：DYNAMIC 选台会把列车分到会让环的另一条股道，
+   * 那条股道与咽喉之间的边在原路径里并不相邻，按相邻对展开会把正确的选台结果误报成越界 claim。
+   */
+  private static Set<String> physicalResourceKeys(
+      List<NodeId> allowedNodes, Map<NodeId, List<NodeId>> adjacency) {
+    Set<String> keys = new LinkedHashSet<>();
+    if (allowedNodes == null) {
+      return keys;
+    }
+    Set<NodeId> allowed = new LinkedHashSet<>(allowedNodes);
+    for (NodeId node : allowed) {
+      if (node != null) {
+        keys.add(OccupancyResource.forNode(node).toString());
+      }
+    }
+    for (NodeId node : allowed) {
+      for (NodeId neighbour : adjacency.getOrDefault(node, List.of())) {
+        if (allowed.contains(neighbour)) {
+          keys.add(OccupancyResource.forEdge(EdgeId.undirected(node, neighbour)).toString());
+        }
+      }
+    }
+    return keys;
+  }
+
+  // ------------------------------------------------------------------ I4
+
+  /**
+   * I4 可见 PROCEED 蕴含可执行授权。
+   *
+   * <p>可见信号 ≠ {@code STOP} ⟹ 存在 {@code active} 的 token、{@code hasPhysicalAuthorityBoundary()} 为真、 且
+   * token 的 {@code resources} 全部由本车持有硬 claim（{@code MOVEMENT_REQUIRED} 或 {@code
+   * PHYSICAL_FOOTPRINT}）。
+   *
+   * <p>出处：{@code MovementAuthorizationToken.hasPhysicalAuthorityBoundary()} 的 Javadoc——
+   * "信号发布、发车与跟驰预测必须在此条件成立后，才可把 token 解释为可执行的 Movement Authority"。
+   *
+   * <p>只检查 token 里的 <b>NODE/EDGE</b> 资源。CONFLICT 资源在账本里的合法角色包括 {@code HOLD_ONLY}、 {@code
+   * PROTECTIVE_RETAIN} 等非硬角色（保位、尾部保护、联锁保护都会这样落账），把它们一并要求成硬 claim
+   * 会把正确的占用形态误报成缺失授权。物理资源则必须是硬持有——那才是"能不能真的走过去"。
+   *
+   * <p>当前保证：<b>仅代码假设</b>。实服曾观察到 {@code ACTIVE + PROCEED} 却静止的列车（7782 / 4252），
+   * 说明这条在生产上不成立；本条负责回答它在骨架现场是否也不成立。
+   */
+  private static List<String> checkI4ProceedImpliesExecutableAuthority(Sample sample) {
+    Map<String, Set<String>> hardClaimsByTrain = new LinkedHashMap<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null || !isPhysical(claim.resource()) || !isHardRole(claim.role())) {
+        continue;
+      }
+      hardClaimsByTrain
+          .computeIfAbsent(
+              TrainNameNormalizer.normalizeKey(claim.trainName()), unused -> new TreeSet<>())
+          .add(claim.resource().toString());
+    }
+    List<String> violations = new ArrayList<>();
+    for (AuthorityView view : sample.authorities()) {
+      if (view == null
+          || view.visibleSignal() == null
+          || view.visibleSignal() == SignalAspect.STOP) {
+        continue;
+      }
+      String train = TrainNameNormalizer.normalizeKey(view.trainName());
+      MovementAuthorizationToken token = view.token().orElse(null);
+      if (token == null) {
+        violations.add("I4 可见非 STOP 但没有 token: train=" + train + " signal=" + view.visibleSignal());
+        continue;
+      }
+      if (!token.active()) {
+        violations.add(
+            "I4 可见非 STOP 但 token 非 active: train=" + train + " signal=" + view.visibleSignal());
+        continue;
+      }
+      if (!token.hasPhysicalAuthorityBoundary()) {
+        violations.add(
+            "I4 可见非 STOP 但 token 没有物理授权边界: train="
+                + train
+                + " signal="
+                + view.visibleSignal()
+                + " authorizedEdgeCount="
+                + token.authorizedEdgeCount());
+        continue;
+      }
+      Set<String> held = hardClaimsByTrain.getOrDefault(train, Set.of());
+      Set<String> missing = new TreeSet<>();
+      for (OccupancyResource resource : token.resources()) {
+        if (isPhysical(resource) && !held.contains(resource.toString())) {
+          missing.add(resource.toString());
+        }
+      }
+      if (!missing.isEmpty()) {
+        violations.add(
+            "I4 token 物理资源未被本车硬持有: train="
+                + train
+                + " signal="
+                + view.visibleSignal()
+                + " missing="
+                + missing);
+      }
+    }
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I5
+
+  /**
+   * I5 阻塞可解释性。
+   *
+   * <p>列车若处于非计划性 STOP 且持续超过 1 个 tick，必须存在一条当前有效的依赖：一个具名 blocker（资源与 owner 都不是占位符 {@code
+   * "-"}），或它在某个冲突队列中有一个具名位次。<b>不允许既没有 blocker 又不在任何队列里</b>——那意味着系统停了车却说不出在等谁。
+   *
+   * <p>出处：{@code RuntimeStopState.blockers} 字段的设计意图（"避免硬停车、普通占用等待和计划停车各自只写一段不可关联的字符串日志"）； 实服中
+   * {@code DEADLOCK_DESTROY_SKIPPED ... blockers=[] conflictKey=-} 伴随 127–178s 停车即是反例。
+   *
+   * <p>只看持续 <b>2 个及以上</b> tick 的 STOP：单 tick 的瞬时停车可能是授权刚撤销、blocker 尚未采样的正常中间态， 把它算进来会把时序噪声报成缺陷。
+   *
+   * <p>计划停车被排除——它们的"依赖"不是资源而是时间（dwell、门控、终到流程）。判别用 {@code releaseCondition} 而不是停因字符串：前者是枚举，后者是自由文本。
+   *
+   * <p>当前保证：<b>不成立</b>，这是收益最高的一条新增不变量。
+   */
+  private static List<String> checkI5BlockingIsExplainable(Sample sample) {
+    List<String> violations = new ArrayList<>();
+    Set<String> queuedTrains = new TreeSet<>();
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry != null) {
+          queuedTrains.add(TrainNameNormalizer.normalizeKey(entry.trainName()));
+        }
+      }
+    }
+    for (StoppedTrain stopped : sample.stoppedTrains()) {
+      if (stopped == null || stopped.state() == null || stopped.consecutiveTicks() < 2) {
+        continue;
+      }
+      RuntimeStopState state = stopped.state();
+      if (!isUnplannedStop(state)) {
+        continue;
+      }
+      if (hasNamedBlocker(state)
+          || queuedTrains.contains(TrainNameNormalizer.normalizeKey(stopped.trainName()))) {
+        continue;
+      }
+      violations.add(
+          "I5 停车不可解释: train="
+              + TrainNameNormalizer.normalizeKey(stopped.trainName())
+              + " reason="
+              + state.reasonCode()
+              + " detail="
+              + state.detail()
+              + " ticks="
+              + stopped.consecutiveTicks()
+              + " blockers="
+              + state.blockers()
+              + " inAnyQueue=false");
+    }
+    return violations;
+  }
+
+  /** 非计划性 STOP：撤销了授权，或是占用等待；计划停车（dwell / 终到流程）按解除条件排除。 */
+  private static boolean isUnplannedStop(RuntimeStopState state) {
+    RuntimeStopState.ReleaseCondition release = state.releaseCondition();
+    if (release == RuntimeStopState.ReleaseCondition.PLANNED_STOP_COMPLETED
+        || release == RuntimeStopState.ReleaseCondition.TERMINAL_LIFECYCLE_COMPLETED
+        || release == RuntimeStopState.ReleaseCondition.LAYOVER_READY_AND_AUTHORITY_REISSUED) {
+      return false;
+    }
+    return state.invalidatesAuthority() || "BLOCKED_BY_OCCUPANCY".equals(state.reasonCode());
+  }
+
+  private static boolean hasNamedBlocker(RuntimeStopState state) {
+    for (RuntimeStopState.Blocker blocker : state.blockers()) {
+      if (blocker != null && isNamed(blocker.resource()) && isNamed(blocker.owner())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isNamed(String value) {
+    return value != null && !value.isBlank() && !"-".equals(value);
+  }
+
+  // ------------------------------------------------------------------ I6
+
+  /**
+   * I6 请求上下文与进度表一致。
+   *
+   * <p>进入准入的请求所携带的进度锚点必须与 {@code RouteProgressRegistry} 当前记录一致，否则该次判定产生的 blocker 证据会被 {@code
+   * liveBlockerSnapshotProgressFresh} 丢弃——后果不是判错，是判不出，直接导致 I5 失效。
+   *
+   * <p>断言方式刻意选择<b>观察生产 trace</b> 而不是反射进内部：{@code SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED}
+   * 正是该丢弃行为唯一的对外信号。骨架的 tick 循环是同步的——信号 tick 阶段不更新进度表，到达提交在其后单独一段——
+   * 因此这里出现的任何"陈旧"都不可能是真的异步滞后，只能是上下文本身没对齐。
+   *
+   * <p>不把 {@code progressVersion == -1} 单列为违反：只有经过 {@code markDirectedRequest} 的运行时授权请求才会被写入版本号，
+   * 后方保护、保位、当前位置等请求天然没有版本，按 -1 判违反会把正常路径报成缺陷。
+   *
+   * <p>出处：{@code RuntimeDispatchService.liveBlockerSnapshotProgressFresh} 与 {@code
+   * traceLiveBlockerSnapshotRejected}。
+   */
+  private static List<String> checkI6RequestContextMatchesProgress(Sample sample) {
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (String line : sample.diagnosticsSinceLastTick()) {
+      if (line != null && line.contains("SMART_LIVE_BLOCKER_SNAPSHOT_REJECTED")) {
+        reported.add("I6 请求上下文与进度表不一致，blocker 证据被丢弃: " + line.trim());
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I7
+
+  /**
+   * I7 队列位次不因 STOP/HOLD/重取而倒退。
+   *
+   * <p>列车在某冲突资源上取得队列位次后，无论中间经历 STOP、HOLD 还是授权重取，其 {@code enqueueSequence} 都不得增大——
+   * 增大意味着它被移出队列又重新入队，<b>静默失去了已经赢下的资格</b>，而后来者会插到它前面。
+   *
+   * <p>出处：{@code OccupancyQueueEntry.enqueueSequence} 的注释（"本冲突队列内的稳定到达序号"）与 {@code
+   * SimpleOccupancyManager.releaseResourceRetainingQueuePosition} 的存在本身——后者是专门为保住位次而写的，
+   * 但<b>没有任何测试验证三条 STOP 路径都调用了它</b>，硬停路径最可疑（它走 {@code releaseMovementAuthorityResources}）。
+   *
+   * <p>基线在列车<b>真正取得该资源的 claim</b> 时清除：那表示位次已经被兑现，之后再排队拿到更大的序号是正常的。 只在"从未兑现却序号变大"时报违反。
+   *
+   * <p>当前保证：有专门方法支持，但调用点覆盖情况未被验证——这正是本条要回答的问题。
+   */
+  private static List<String> checkI7QueuePositionDoesNotRegress(Sample sample) {
+    Set<String> claimHolders = claimedResourceOwners(sample);
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null || queue.resource() == null) {
+        continue;
+      }
+      String resource = queue.resource().toString();
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry == null) {
+          continue;
+        }
+        String key = queueKey(resource, entry.trainName());
+        if (claimHolders.contains(key)) {
+          continue;
+        }
+        Long best = sample.queueBaselines().get(key);
+        if (best != null && entry.enqueueSequence() > best) {
+          reported.add(
+              "I7 队列位次倒退: resource="
+                  + resource
+                  + " train="
+                  + TrainNameNormalizer.normalizeKey(entry.trainName())
+                  + " best="
+                  + best
+                  + " current="
+                  + entry.enqueueSequence());
+        }
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  /**
+   * 计算下一 tick 的队列位次基线。
+   *
+   * <p>由骨架在每次检查之后调用并保存返回值——判定本身仍是纯函数，跨 tick 的记忆放在调用方。
+   */
+  static Map<String, Long> nextQueueBaselines(Sample sample, Map<String, Long> previous) {
+    Map<String, Long> next = new LinkedHashMap<>(previous == null ? Map.of() : previous);
+    // 已经兑现位次的 (资源, 列车) 清除基线：之后重新排队拿到更大的序号是正常的。
+    next.keySet().removeAll(claimedResourceOwners(sample));
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null || queue.resource() == null) {
+        continue;
+      }
+      String resource = queue.resource().toString();
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry == null) {
+          continue;
+        }
+        next.merge(queueKey(resource, entry.trainName()), entry.enqueueSequence(), Math::min);
+      }
+    }
+    return Map.copyOf(next);
+  }
+
+  /** 当前持有 claim 的 (资源, 列车) 组合。 */
+  private static Set<String> claimedResourceOwners(Sample sample) {
+    Set<String> owners = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim != null && claim.resource() != null) {
+        owners.add(queueKey(claim.resource().toString(), claim.trainName()));
+      }
+    }
+    return owners;
+  }
+
+  private static String queueKey(String resource, String trainName) {
+    return resource + "|" + TrainNameNormalizer.normalizeKey(trainName);
+  }
+
+  // ------------------------------------------------------------------ I8
+
+  /**
+   * I8 claim 只能通过宣告过的释放消失。
+   *
+   * <p>账本里某 (列车, 资源) 的 claim 在本 tick 消失了，就必须有一条对应的 {@code
+   * OccupancyReleasedEvent}。静默消失意味着有绕过释放入口的写法，那种路径不会通知信号层重评估， 后车也就不会被唤醒。
+   *
+   * <p>这是规格里 I8「释放的局部性」可稳定断言的形式。原表述是"释放 R 只影响 R"， 但账本每 tick 有大量合法变化，逐资源做 before/after 全量 diff
+   * 会把正常的窗口推进也算进来； 改为盯"消失是否都被宣告过"，既能抓住绕过释放入口的写法，又不会把窗口推进误报。
+   *
+   * <p>出处：{@code SimpleOccupancyManager.publishReleasedEvent} 与 {@code SignalEvaluator}
+   * 的释放唤醒链路——后者正是靠这些事件把队首唤醒的。
+   *
+   * <p>当前保证：<b>仅代码假设</b>；没有任何机制强制"移除 claim 必须发事件"。
+   */
+  private static List<String> checkI8ClaimsDisappearOnlyThroughRelease(Sample sample) {
+    if (sample.disappearedClaimKeys().isEmpty()) {
+      return List.of();
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (String vanished : sample.disappearedClaimKeys()) {
+      if (!sample.releasedThisTick().contains(vanished)) {
+        reported.add("I8 claim 未经宣告即消失: " + vanished);
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I9
+
+  /**
+   * I9 owner 迁移的全有全无（成功侧）。
+   *
+   * <p>{@code migrateRuntimeOwner} 返回 true 之后，<b>旧名不得在任何账本、队列或进度表中残留</b>。
+   * 残留意味着同一列实体同时以两个逻辑身份存在：一个持有 claim、一个被当成 blocker，恢复层会围着一个 不存在的列车打转。
+   *
+   * <p>失败侧（返回 false 后新名不得出现）不是逐 tick 性质，由 S14 在迁移那一刻直接断言。
+   *
+   * <p>出处：{@code migrateRuntimeOwner}（约 90 行手写伪事务）与 {@code
+   * rollbackRuntimeOwnerRegistries}。审计已定位一处缺口：{@code dynamicCapacityWaits.rename()}
+   * 在回滚点<b>之后</b>调用，不在回滚覆盖范围内。
+   *
+   * <p>当前保证：<b>靠手写事务维持</b>，没有结构保证。
+   */
+  private static List<String> checkI9MigratedAwayNameLeavesNoResidue(Sample sample) {
+    if (sample.migratedAwayKeys().isEmpty()) {
+      return List.of();
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim != null
+          && sample
+              .migratedAwayKeys()
+              .contains(TrainNameNormalizer.normalizeKey(claim.trainName()))) {
+        reported.add(
+            "I9 迁移后的旧名仍持有 claim: train="
+                + TrainNameNormalizer.normalizeKey(claim.trainName())
+                + " resource="
+                + claim.resource());
+      }
+    }
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry != null
+            && sample
+                .migratedAwayKeys()
+                .contains(TrainNameNormalizer.normalizeKey(entry.trainName()))) {
+          reported.add(
+              "I9 迁移后的旧名仍在队列中: train="
+                  + TrainNameNormalizer.normalizeKey(entry.trainName())
+                  + " resource="
+                  + queue.resource());
+        }
+      }
+    }
+    for (String key : sample.progressRegistryKeys()) {
+      if (sample.migratedAwayKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
+        reported.add("I9 迁移后的旧名仍在进度表中: train=" + key);
+      }
+    }
+    for (String key : sample.stopStateKeys()) {
+      if (sample.migratedAwayKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
+        // 旧名的停因不退休，会永久留在 activeStopStates 里：实服 2026-09-13 第六轮 24 次
+        // layover 复用改名留下 17 个旧名停在 DWELL_ACTIVE 上（remainingSeconds 冻结、最长 2226 秒），
+        // 而那些车其实好好地以新名在跑。它还会污染一切按停因统计的诊断。
+        reported.add("I9 迁移后的旧名仍留有停因记录: train=" + key);
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ I10
+
+  /**
+   * I10 世代隔离。
+   *
+   * <p>列车被销毁之后，它的 key 不得残留在账本 claim、冲突队列或进度表中。残留会让同名新列车继承 上一世代的状态，也会让恢复层把一个已经不存在的列车当成 blocker。
+   *
+   * <p>出处：{@code handleTrainRemoved} 与 {@code RuntimeDispatchService} 中 38 处 {@code
+   * .remove(key)}——清理分散在几十个 map 上，靠的是每处都没写漏。
+   *
+   * <p>当前保证：<b>靠清理代码维持</b>，没有任何结构保证。
+   */
+  private static List<String> checkI10DestroyedTrainLeavesNoResidue(Sample sample) {
+    if (sample.destroyedTrainKeys().isEmpty()) {
+      return List.of();
+    }
+    List<String> violations = new ArrayList<>();
+    Set<String> reported = new TreeSet<>();
+    for (OccupancyClaim claim : sample.claims()) {
+      if (claim == null) {
+        continue;
+      }
+      String owner = TrainNameNormalizer.normalizeKey(claim.trainName());
+      if (sample.destroyedTrainKeys().contains(owner)) {
+        reported.add("I10 已销毁列车仍持有 claim: train=" + owner + " resource=" + claim.resource());
+      }
+    }
+    for (OccupancyQueueSnapshot queue : sample.queues()) {
+      if (queue == null) {
+        continue;
+      }
+      for (OccupancyQueueEntry entry : queue.entries()) {
+        if (entry == null) {
+          continue;
+        }
+        String owner = TrainNameNormalizer.normalizeKey(entry.trainName());
+        if (sample.destroyedTrainKeys().contains(owner)) {
+          reported.add("I10 已销毁列车仍在队列中: train=" + owner + " resource=" + queue.resource());
+        }
+      }
+    }
+    for (String key : sample.progressRegistryKeys()) {
+      if (sample.destroyedTrainKeys().contains(TrainNameNormalizer.normalizeKey(key))) {
+        reported.add("I10 已销毁列车仍在进度表中: train=" + key);
+      }
+    }
+    violations.addAll(reported);
+    return violations;
+  }
+
+  // ------------------------------------------------------------------ 工具
+
+  private static boolean isPhysical(OccupancyResource resource) {
+    return resource != null
+        && (resource.kind() == ResourceKind.NODE || resource.kind() == ResourceKind.EDGE);
+  }
+
+  private static boolean isHardRole(ClaimRole role) {
+    return role == ClaimRole.MOVEMENT_REQUIRED || role == ClaimRole.PHYSICAL_FOOTPRINT;
+  }
+
+  private static boolean isSingleCorridorConflict(OccupancyResource resource) {
+    return resource != null
+        && resource.kind() == ResourceKind.CONFLICT
+        && resource.key().startsWith(SINGLE_PREFIX);
+  }
+}

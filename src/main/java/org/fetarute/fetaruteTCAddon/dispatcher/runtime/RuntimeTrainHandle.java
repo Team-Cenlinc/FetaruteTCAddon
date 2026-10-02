@@ -2,7 +2,10 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.Optional;
+import java.util.OptionalDouble;
+import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 
 /** 运行时控车抽象：隔离 TrainCarts 具体实现，便于单测与后续扩展。 */
 public interface RuntimeTrainHandle {
@@ -21,6 +24,49 @@ public interface RuntimeTrainHandle {
 
   /** 获取 TrainCarts 属性对象，用于读写 tags/速度/目的地等。 */
   TrainProperties properties();
+
+  /**
+   * 返回用于列尾清空判定的保守列车长度估计（blocks）。
+   *
+   * <p>默认不猜测长度。调用方在结果缺失、非有限或非正数时必须 fail-retain，不能退回车数、节点数或时间窗口提前释放旧进路。
+   */
+  default OptionalDouble estimatedTrainLengthBlocks() {
+    return OptionalDouble.empty();
+  }
+
+  /**
+   * 返回整列车头到列尾当前覆盖的 TrainCarts RailPath 栅格足迹。
+   *
+   * <p>该证据用于启动/迟加载现场占用水合；只要任一车厢未被有效轨迹覆盖、轨迹断开、跨世界或无效，实现就必须返回 empty，调用方不得用实体位置或 routeIndex 猜测。
+   */
+  default Optional<Set<RailFootprintCell>> liveRailFootprintCells() {
+    return Optional.empty();
+  }
+
+  /**
+   * 返回带结构化失败原因的整列实时轨道足迹。
+   *
+   * <p>兼容旧测试句柄与其它实现：只实现 {@link #liveRailFootprintCells()} 时，缺失统一标记为 {@link
+   * LiveRailFootprintObservation.FailureReason#LEGACY_UNAVAILABLE}。TrainCarts 适配器应覆盖本方法并报告精确阶段。
+   */
+  default LiveRailFootprintObservation observeLiveRailFootprint() {
+    Optional<Set<RailFootprintCell>> cells = liveRailFootprintCells();
+    if (cells != null && cells.isPresent() && !cells.orElseThrow().isEmpty()) {
+      return LiveRailFootprintObservation.available(cells.orElseThrow());
+    }
+    return LiveRailFootprintObservation.unavailable(
+        LiveRailFootprintObservation.FailureReason.LEGACY_UNAVAILABLE,
+        "runtime-handle-did-not-report-cells");
+  }
+
+  /**
+   * 返回当前物理编组实例的稳定身份。
+   *
+   * <p>同一逻辑列车名可能在 split/link/create 过渡期同时对应多个实体编组；启动水合 marker 必须同时匹配逻辑 owner 与该实例身份，不能只按列车名复用。
+   */
+  default Object physicalRuntimeIdentity() {
+    return this;
+  }
 
   /**
    * 执行紧急停车（不包含目的地/进度处理）。
@@ -64,6 +110,22 @@ public interface RuntimeTrainHandle {
   }
 
   /**
+   * 请求执行一次带方向兜底的发车，并报告底层是否接受命令。
+   *
+   * <p>默认实现用于测试句柄与兼容实现：调用既有 {@link #launchWithFallback(Optional, double, double)} 后视为已接受。TrainCarts
+   * 实现必须以列车已经移动、已有有效 launch action 或成功新增 action 作为成功证据。
+   *
+   * @return 发车命令是否已由底层接受
+   */
+  default boolean requestLaunchWithFallback(
+      Optional<org.bukkit.block.BlockFace> fallbackDirection,
+      double targetBlocksPerTick,
+      double accelBlocksPerTickSquared) {
+    launchWithFallback(fallbackDirection, targetBlocksPerTick, accelBlocksPerTickSquared);
+    return true;
+  }
+
+  /**
    * 平滑调整到目标速度（无论列车是否在运动）。
    *
    * <p>用于在经过 waypoint/switcher 时补充牵引，也用于 approach/限速场景下按 TrainCarts launch 动作平滑减速。
@@ -76,6 +138,18 @@ public interface RuntimeTrainHandle {
     if (!isMoving()) {
       launch(targetBlocksPerTick, accelBlocksPerTickSquared);
     }
+  }
+
+  /**
+   * 列车身上是否挂着本插件发车动作以外的 TrainCarts 动作（停站等待、停稳居中、其它牌子下发的动作等）。
+   *
+   * <p>运行中补牵引只在没有这类动作时下发：launch 动作排在队尾，要等前面的动作结束才执行，接在停站等待后面就等于绕过发车门控。
+   * 默认视为有——实现报告不了时不补牵引，保持原来"只在信号变化时补牵引"的行为。
+   *
+   * @return 有别的动作，或无法判断时为 {@code true}
+   */
+  default boolean hasForeignAction() {
+    return true;
   }
 
   /**

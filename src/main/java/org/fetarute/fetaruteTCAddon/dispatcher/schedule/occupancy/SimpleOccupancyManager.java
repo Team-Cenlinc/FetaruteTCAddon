@@ -18,8 +18,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalComputationTrace;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.SignalDecisionInputType;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyQueueChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * 基于内存 Map 的占用管理器，适合作为“最小可用版本”。
@@ -28,20 +30,33 @@ import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
  *
  * <p>单线走廊冲突支持方向锁：同向允许多车跟驰，对向互斥。
  *
- * <p>道岔/单线冲突使用 Gate Queue 保障进入顺序，并基于 lookahead entryOrder 优先放行更接近冲突入口的列车。
+ * <p>道岔、单线与物理联锁冲突使用 Gate Queue 保障进入顺序，并基于 priority、等待老化与 lookahead entryOrder 选择稳定
+ * winner。物理联锁始终按无方向共享资源互斥，不复用单线同向跟驰规则。
  *
  * <p>这个实现只负责“资源互斥 + 队列公平性 + 冲突区放行”，不承担列车控车、恢复和调度重排。若上层信号看起来不稳定， 这里优先排查的通常是队列位次、锁定边界和 claim
  * 释放粒度，而不是时刻表本身。
  *
- * <p>冲突区放行只处理已证明正在清空冲突区出口的 CONFLICT blocker；真实 NODE/EDGE 硬占用始终按 STOP 处理。
+ * <p>冲突区放行只处理已证明正在清空冲突区出口的 CONFLICT blocker；真实 {@code MOVEMENT_REQUIRED} NODE/EDGE 硬占用始终按 STOP
+ * 处理。外部列车的 {@code PROTECTIVE_RETAIN}/{@code HOLD_ONLY} NODE/EDGE 同样表示尚未释放的物理窗口，不能仅凭同一
+ * single-corridor 方向一致而共享；同向吞吐必须来自互不重叠的 EDGE/NODE 窗口。{@code PHYSICAL_FOOTPRINT}
+ * 表示折返交接后尚未取得列尾清空证据的完整旧进路足迹，也始终作为硬占用。
  */
 public final class SimpleOccupancyManager
     implements OccupancyManager,
         OccupancyQueueSupport,
         OccupancyPreviewSupport,
-        OccupancyAdvisoryPreviewSupport {
+        OccupancyAdvisoryPreviewSupport,
+        AuthorityHandoffSupport,
+        StartupOccupancyReconstructionSupport,
+        PhysicalFootprintHydrationSupport {
 
+  public static final String OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER =
+      "OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER";
+
+  private static final String SINGLE_SECTION_CONFLICT_PREFIX = "single:section:";
   private static final Duration QUEUE_ENTRY_TTL = Duration.ofSeconds(30);
+  private static final Duration QUEUE_PRIORITY_POINT_ADVANTAGE = Duration.ofMillis(500);
+  private static final Duration QUEUE_MAX_PRIORITY_ADVANTAGE = Duration.ofMinutes(2);
   private static final LiveBlockerSnapshotListener NOOP_LIVE_BLOCKER_SNAPSHOT_LISTENER =
       (trainName, decision, request, sampledAt, source) -> {};
 
@@ -53,14 +68,31 @@ public final class SimpleOccupancyManager
   private final SignalEventBus eventBus;
   private final Map<OccupancyResource, List<OccupancyClaim>> claims = new LinkedHashMap<>();
   private final Map<OccupancyResource, ConflictQueue> queues = new LinkedHashMap<>();
+  private final Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature>
+      switcherClaimSignatures = new LinkedHashMap<>();
+  private final Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature>
+      switcherQueueSignatures = new LinkedHashMap<>();
   private final AtomicLong version = new AtomicLong();
+  private final AtomicLong lifecycleSequence = new AtomicLong();
   private final AtomicLong staleQueueCleanupCount = new AtomicLong();
   private final Map<String, SelfOwnedStaleRetainCandidate> selfOwnedStaleRetainCandidates =
       new LinkedHashMap<>();
+
+  /**
+   * 队列仲裁结果的语义去重。
+   *
+   * <p>仲裁每 tick 都会重算，但只有<b>结果</b>变化才是新证据。生产端按 (资源, 请求方) 记住上一次的结论， 仅在结论变化时输出；这样该 trace
+   * 才能进入诊断门的免预算白名单，不会在稳定期淹没日志。
+   */
+  private final Map<String, String> pendingWinnerArbitrationSignatures = new LinkedHashMap<>();
+
   private volatile LiveBlockerSnapshotListener liveBlockerSnapshotListener =
       NOOP_LIVE_BLOCKER_SNAPSHOT_LISTENER;
 
   /** 冲突区放行锁：key=冲突资源 key，value=被放行列车与锁定过期时间。 */
+  /** 时间源；生产为 {@link Instant#now()}，回归骨架注入确定推进的时钟。 */
+  private final java.util.function.Supplier<Instant> clock;
+
   private final Map<String, DeadlockReleaseLock> deadlockReleaseLocks = new LinkedHashMap<>();
 
   /**
@@ -91,7 +123,8 @@ public final class SimpleOccupancyManager
    * Smart recovery 可释放的自持保护性 retain 候选。
    *
    * <p>候选只来自最近一次真实占用判定：列车被自己持有的 CONFLICT retain 卡住，且该 claim 不是当前前进必须 claim。它不会授权放行，只为 Smart
-   * recovery 的 OCCUPANCY_MUTATION action 提供最小可验证目标。
+   * recovery 的 OCCUPANCY_MUTATION action 提供最小可验证目标。{@code hardAuthorityScope}
+   * 固化采样时完整的前进硬资源集合，最终释放前必须重新检查其中是否出现外车 claim，避免 health 的缩减复核请求遗忘 NODE、EDGE 或物理联锁 blocker。
    */
   public record SelfOwnedStaleRetainCandidate(
       String trainName,
@@ -100,6 +133,7 @@ public final class SimpleOccupancyManager
       ResourceIntent requestIntent,
       CorridorDirection heldDirection,
       CorridorDirection requestedDirection,
+      Set<OccupancyResource> hardAuthorityScope,
       String reason,
       Instant sampledAt) {
 
@@ -111,6 +145,7 @@ public final class SimpleOccupancyManager
       heldDirection = heldDirection == null ? CorridorDirection.UNKNOWN : heldDirection;
       requestedDirection =
           requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+      hardAuthorityScope = hardAuthorityScope == null ? Set.of() : Set.copyOf(hardAuthorityScope);
       reason = reason == null || reason.isBlank() ? "self-owned-retain" : reason.trim();
       sampledAt = sampledAt == null ? Instant.EPOCH : sampledAt;
     }
@@ -132,7 +167,9 @@ public final class SimpleOccupancyManager
   /** 单线方向解析来源，用于区分请求窗口与完整行车快照。 */
   private enum DirectionSource {
     REQUEST_CORRIDOR_DIRECTIONS,
+    REQUEST_SECTION_TOKEN_DIRECTIONS,
     MOVEMENT_PLAN_SINGLE_CONFLICT_DIRECTIONS,
+    MOVEMENT_PLAN_SECTION_TOKEN_DIRECTIONS,
     HELD_DIRECTION_FALLBACK,
     UNKNOWN
   }
@@ -151,11 +188,27 @@ public final class SimpleOccupancyManager
     }
   }
 
+  /** 已提交 single token 的规范化键。 */
+  private record SingleConflictToken(String namespace, String axis, boolean section) {
+    private SingleConflictToken {
+      namespace = namespace == null ? "" : namespace.trim();
+      axis = axis == null ? "" : axis.trim();
+    }
+  }
+
   /** 自持 continuation 被外部 blocker 阻断时的最小可审计身份。 */
   private record ExternalBlockerDetail(String owner, String resourceKey) {
     private ExternalBlockerDetail {
       owner = owner == null || owner.isBlank() ? "-" : owner.trim();
       resourceKey = resourceKey == null || resourceKey.isBlank() ? "-" : resourceKey.trim();
+    }
+  }
+
+  /** 道岔冲突签名缓存 key。 */
+  private record SwitcherClaimKey(OccupancyResource resource, String trainKey) {
+    private SwitcherClaimKey {
+      Objects.requireNonNull(resource, "resource");
+      trainKey = TrainNameNormalizer.normalizeKey(trainKey);
     }
   }
 
@@ -178,9 +231,32 @@ public final class SimpleOccupancyManager
    */
   public SimpleOccupancyManager(
       HeadwayRule headwayRule, SignalAspectPolicy signalPolicy, SignalEventBus eventBus) {
+    this(headwayRule, signalPolicy, eventBus, Instant::now);
+  }
+
+  /**
+   * 使用可注入时间源构建。
+   *
+   * <p>队列条目的 {@code firstSeen} 决定 {@code arbitrationDeadlineMillis}，进而决定同一冲突区上谁先走； TTL
+   * 清理同样看"现在"。只要它是墙钟，同一组输入在不同负载下就可能得出不同的放行顺序。生产一律用 {@link
+   * Instant#now()}（上面那个构造器），行为与注入前完全一致；本构造器只为让回归骨架能给出确定的时间推进。
+   *
+   * @param clock 时间源，不得为 null
+   */
+  public SimpleOccupancyManager(
+      HeadwayRule headwayRule,
+      SignalAspectPolicy signalPolicy,
+      SignalEventBus eventBus,
+      java.util.function.Supplier<Instant> clock) {
+    this.clock = Objects.requireNonNull(clock, "clock");
     this.headwayRule = Objects.requireNonNull(headwayRule, "headwayRule");
     this.signalPolicy = signalPolicy != null ? signalPolicy : SignalAspectPolicy.defaultPolicy();
     this.eventBus = eventBus;
+  }
+
+  /** 读取"现在"。实例方法一律走这里，不要直接调 {@link Instant#now()}。 */
+  private Instant clockNow() {
+    return clock.get();
   }
 
   /** 返回占用/队列快照版本。claim 或 queue 发生真实变更时递增。 */
@@ -191,6 +267,301 @@ public final class SimpleOccupancyManager
   /** 返回因 TTL 清理的 queue entry 数量。 */
   public long staleQueueCleanupCount() {
     return staleQueueCleanupCount.get();
+  }
+
+  /**
+   * 以单次提交替换启动现场逻辑保护与稀疏物理占用。
+   *
+   * <p>方法先在局部结构中完成全部校验与 claim 构建，再替换 live map；任何无效请求都会保持旧快照不变。Route/Node 推导资源保持原逻辑角色，只有快照显式标记的
+   * sparse Zone 写为 {@link ClaimRole#PHYSICAL_FOOTPRINT}。现场重叠不会被准入仲裁吞掉，恢复后的运动授权仍能看到全部真实冲突并保持 STOP。
+   */
+  @Override
+  public synchronized ReconstructionResult reconstructPhysicalSnapshot(
+      List<FieldOccupancySnapshot> fieldSnapshots) {
+    if (fieldSnapshots == null) {
+      return ReconstructionResult.rejected("field-snapshots-null");
+    }
+    List<FieldOccupancySnapshot> orderedSnapshots = new ArrayList<>(fieldSnapshots);
+    if (orderedSnapshots.stream().anyMatch(Objects::isNull)) {
+      return ReconstructionResult.rejected("field-snapshot-null");
+    }
+    orderedSnapshots.sort(
+        java.util.Comparator.comparing(
+            snapshot -> TrainNameNormalizer.normalizeKey(snapshot.request().trainName())));
+    Set<String> trainKeys = new LinkedHashSet<>();
+    List<StartupFieldClaim> stagedClaims = new ArrayList<>();
+    Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> stagedSignatures =
+        new LinkedHashMap<>();
+    for (FieldOccupancySnapshot snapshot : orderedSnapshots) {
+      OccupancyRequest request = snapshot.request();
+      String trainKey = TrainNameNormalizer.normalizeKey(request.trainName());
+      if (trainKey.isBlank() || !trainKeys.add(trainKey)) {
+        return ReconstructionResult.rejected("duplicate-or-empty-train:" + trainKey);
+      }
+      if (request.resourceList().isEmpty()) {
+        return ReconstructionResult.rejected("field-resources-empty:" + request.trainName());
+      }
+      if (!request.resourceList().containsAll(snapshot.physicalResources())) {
+        return ReconstructionResult.rejected(
+            "physical-resource-outside-field-request:" + request.trainName());
+      }
+      Set<OccupancyResource> resources = new LinkedHashSet<>();
+      for (OccupancyResource resource : request.resourceList()) {
+        if (resource == null || !resources.add(resource)) {
+          return ReconstructionResult.rejected(
+              "invalid-or-duplicate-resource:" + request.trainName());
+        }
+        if (request.intentFor(resource).hardAuthority()) {
+          return ReconstructionResult.rejected(
+              "movement-authority-not-allowed:" + request.trainName() + ":" + resource);
+        }
+        OccupancyClaim claim =
+            new OccupancyClaim(
+                resource,
+                request.trainName(),
+                request.routeId(),
+                request.now(),
+                headwayRule.headwayFor(request.routeId(), resource),
+                resolveCorridorDirection(request, resource),
+                snapshot.roleFor(resource));
+        stagedClaims.add(new StartupFieldClaim(resource, trainKey, claim));
+        if (isSwitcherConflictResource(resource)) {
+          switcherSignatureFor(request, resource)
+              .ifPresent(
+                  signature ->
+                      stagedSignatures.put(
+                          new SwitcherClaimKey(resource, request.trainName()), signature));
+        }
+      }
+    }
+    stagedClaims.sort(
+        java.util.Comparator.comparing(
+                (StartupFieldClaim staged) -> staged.resource().kind().name())
+            .thenComparing(staged -> staged.resource().key())
+            .thenComparing(StartupFieldClaim::trainKey));
+    Map<OccupancyResource, List<OccupancyClaim>> nextClaims = new LinkedHashMap<>();
+    for (StartupFieldClaim staged : stagedClaims) {
+      nextClaims
+          .computeIfAbsent(staged.resource(), unused -> new ArrayList<>())
+          .add(staged.claim());
+    }
+
+    Map<OccupancyResource, List<OccupancyClaim>> previousClaims = copyClaims(claims);
+    Map<OccupancyResource, List<OccupancyQueueEntry>> previousQueues = snapshotQueueEntries();
+    Map<String, DeadlockReleaseLock> previousReleaseLocks =
+        new LinkedHashMap<>(deadlockReleaseLocks);
+    claims.clear();
+    claims.putAll(nextClaims);
+    queues.clear();
+    switcherClaimSignatures.clear();
+    switcherClaimSignatures.putAll(stagedSignatures);
+    switcherQueueSignatures.clear();
+    deadlockReleaseLocks.clear();
+    selfOwnedStaleRetainCandidates.clear();
+    version.incrementAndGet();
+    traceReconstructionDiff(previousClaims, previousQueues, previousReleaseLocks, nextClaims);
+    return ReconstructionResult.committed(trainKeys.size(), stagedClaims.size());
+  }
+
+  /** 已验证、尚未提交的单条现场 claim。 */
+  private record StartupFieldClaim(
+      OccupancyResource resource, String trainKey, OccupancyClaim claim) {}
+
+  /** 深拷贝当前 claim 列表结构，供原子提交后生成稳定差异。 */
+  private Map<OccupancyResource, List<OccupancyClaim>> copyClaims(
+      Map<OccupancyResource, List<OccupancyClaim>> source) {
+    Map<OccupancyResource, List<OccupancyClaim>> copy = new LinkedHashMap<>();
+    if (source == null || source.isEmpty()) {
+      return copy;
+    }
+    source.forEach(
+        (resource, resourceClaims) ->
+            copy.put(resource, resourceClaims == null ? List.of() : List.copyOf(resourceClaims)));
+    return copy;
+  }
+
+  /** 复制全部队列条目；返回值不再引用可变的内部 queue map。 */
+  private Map<OccupancyResource, List<OccupancyQueueEntry>> snapshotQueueEntries() {
+    Map<OccupancyResource, List<OccupancyQueueEntry>> snapshot = new LinkedHashMap<>();
+    queues.forEach(
+        (resource, queue) ->
+            snapshot.put(
+                resource, queue == null ? List.of() : queue.snapshotEntries(Instant.EPOCH)));
+    return snapshot;
+  }
+
+  /** 输出启动原子提交造成的 claim、等待队列与 release lock 差异。 */
+  private void traceReconstructionDiff(
+      Map<OccupancyResource, List<OccupancyClaim>> previousClaims,
+      Map<OccupancyResource, List<OccupancyQueueEntry>> previousQueues,
+      Map<String, DeadlockReleaseLock> previousReleaseLocks,
+      Map<OccupancyResource, List<OccupancyClaim>> nextClaims) {
+    traceClaimDiff(previousClaims, nextClaims, "snapshot-", "startup-reconstruction");
+    previousQueues.forEach(
+        (resource, entries) ->
+            entries.forEach(
+                entry ->
+                    traceQueueLifecycle(
+                        resource,
+                        entry,
+                        "WAITING_TRAIN",
+                        "snapshot-clear",
+                        "startup-reconstruction",
+                        null)));
+    previousReleaseLocks.forEach(
+        (conflictKey, lock) ->
+            traceQueueLifecycle(
+                OccupancyResource.forConflict(conflictKey),
+                lock.trainName(),
+                null,
+                null,
+                null,
+                null,
+                null,
+                null,
+                "DEADLOCK_RELEASE_LOCK",
+                "snapshot-clear",
+                "startup-reconstruction",
+                lock.expiresAt()));
+  }
+
+  /** 按 resource + canonical train owner 输出两份 claim 快照的差异。 */
+  private void traceClaimDiff(
+      Map<OccupancyResource, List<OccupancyClaim>> previousClaims,
+      Map<OccupancyResource, List<OccupancyClaim>> nextClaims,
+      String eventPrefix,
+      String reason) {
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    resources.addAll(previousClaims.keySet());
+    resources.addAll(nextClaims.keySet());
+    for (OccupancyResource resource : resources) {
+      Map<String, OccupancyClaim> before = claimsByTrain(previousClaims.get(resource));
+      Map<String, OccupancyClaim> after = claimsByTrain(nextClaims.get(resource));
+      Set<String> owners = new LinkedHashSet<>();
+      owners.addAll(before.keySet());
+      owners.addAll(after.keySet());
+      for (String owner : owners) {
+        OccupancyClaim oldClaim = before.get(owner);
+        OccupancyClaim newClaim = after.get(owner);
+        if (Objects.equals(oldClaim, newClaim)) {
+          continue;
+        }
+        String event =
+            oldClaim == null
+                ? eventPrefix + "acquire"
+                : newClaim == null ? eventPrefix + "remove" : eventPrefix + "update";
+        traceResourceLifecycle(null, resource, oldClaim, newClaim, event, reason);
+      }
+    }
+  }
+
+  /** 将一组 claim 按规范列车名索引，供差异计算使用。 */
+  private Map<String, OccupancyClaim> claimsByTrain(List<OccupancyClaim> source) {
+    Map<String, OccupancyClaim> byTrain = new LinkedHashMap<>();
+    if (source == null || source.isEmpty()) {
+      return byTrain;
+    }
+    for (OccupancyClaim claim : source) {
+      if (claim == null) {
+        continue;
+      }
+      byTrain.put(TrainNameNormalizer.normalizeKey(claim.trainName()), claim);
+    }
+    return byTrain;
+  }
+
+  /**
+   * 原子替换单列现场逻辑保护与稀疏物理 footprint，同时保留所有其它 owner 的 claim 与排队状态。
+   *
+   * <p>全部校验与 claim 构建在修改 live map 之前完成；进入提交段后方法受同一 monitor 保护，外部观察不到“先删后加”的中间状态。现场重叠仍会保留多个 {@link
+   * ClaimRole#PHYSICAL_FOOTPRINT} owner。
+   */
+  @Override
+  public synchronized ReconstructionResult replaceTrainPhysicalFootprint(
+      FieldOccupancySnapshot fieldSnapshot) {
+    if (fieldSnapshot == null) {
+      return ReconstructionResult.rejected("field-snapshot-null");
+    }
+    OccupancyRequest fieldRequest = fieldSnapshot.request();
+    String trainKey = TrainNameNormalizer.normalizeKey(fieldRequest.trainName());
+    if (trainKey.isBlank()) {
+      return ReconstructionResult.rejected("field-train-empty");
+    }
+    Set<OccupancyResource> resources = new LinkedHashSet<>();
+    List<StartupFieldClaim> stagedClaims = new ArrayList<>();
+    Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> stagedSignatures =
+        new LinkedHashMap<>();
+    if (!fieldRequest.resourceList().containsAll(fieldSnapshot.physicalResources())) {
+      return ReconstructionResult.rejected(
+          "physical-resource-outside-field-request:" + fieldRequest.trainName());
+    }
+    for (OccupancyResource resource : fieldRequest.resourceList()) {
+      if (resource == null || !resources.add(resource)) {
+        return ReconstructionResult.rejected(
+            "invalid-or-duplicate-resource:" + fieldRequest.trainName());
+      }
+      if (fieldRequest.intentFor(resource).hardAuthority()) {
+        return ReconstructionResult.rejected(
+            "movement-authority-not-allowed:" + fieldRequest.trainName() + ":" + resource);
+      }
+      OccupancyClaim claim =
+          new OccupancyClaim(
+              resource,
+              fieldRequest.trainName(),
+              fieldRequest.routeId(),
+              fieldRequest.now(),
+              headwayRule.headwayFor(fieldRequest.routeId(), resource),
+              resolveCorridorDirection(fieldRequest, resource),
+              fieldSnapshot.roleFor(resource));
+      stagedClaims.add(new StartupFieldClaim(resource, trainKey, claim));
+      if (isSwitcherConflictResource(resource)) {
+        switcherSignatureFor(fieldRequest, resource)
+            .ifPresent(
+                signature ->
+                    stagedSignatures.put(
+                        new SwitcherClaimKey(resource, fieldRequest.trainName()), signature));
+      }
+    }
+    if (stagedClaims.isEmpty()) {
+      return ReconstructionResult.rejected("field-resources-empty:" + fieldRequest.trainName());
+    }
+
+    Set<OccupancyResource> previousResources =
+        claims.entrySet().stream()
+            .filter(
+                entry ->
+                    entry.getValue() != null
+                        && entry.getValue().stream()
+                            .anyMatch(
+                                claim ->
+                                    claim != null
+                                        && TrainNameNormalizer.sameLogicalTrain(
+                                            claim.trainName(), fieldRequest.trainName())))
+            .map(Map.Entry::getKey)
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+    Map<OccupancyResource, List<OccupancyClaim>> previousClaims = copyClaims(claims);
+    removeClaimsByTrainWithoutEvents(fieldRequest.trainName());
+    removeFromQueuesForTrain(fieldRequest.trainName());
+    releaseDeadlockLocksForTrain(fieldRequest.trainName());
+    selfOwnedStaleRetainCandidates.remove(trainKey);
+    stagedClaims.sort(
+        java.util.Comparator.comparing(
+                (StartupFieldClaim staged) -> staged.resource().kind().name())
+            .thenComparing(staged -> staged.resource().key()));
+    for (StartupFieldClaim staged : stagedClaims) {
+      claims.computeIfAbsent(staged.resource(), unused -> new ArrayList<>()).add(staged.claim());
+    }
+    switcherClaimSignatures.putAll(stagedSignatures);
+    version.incrementAndGet();
+    traceClaimDiff(
+        previousClaims, copyClaims(claims), "field-hydration-", "field-footprint-hydration");
+    previousResources.removeAll(resources);
+    if (!previousResources.isEmpty()) {
+      publishReleasedEvent(
+          fieldRequest.trainName(), List.copyOf(previousResources), fieldRequest.now());
+    }
+    publishAcquiredEvent(fieldRequest, List.copyOf(resources), fieldRequest.now());
+    return ReconstructionResult.committed(1, stagedClaims.size());
   }
 
   /**
@@ -205,9 +576,10 @@ public final class SimpleOccupancyManager
   }
 
   /**
-   * 预判是否允许进入指定资源集合（不写入状态）。
+   * 执行一次可写入的进路准入判定。
    *
-   * <p>用于运行时”尝试放行”的决策预演。
+   * <p>该入口会维护过期队列、刷新冲突队列位次，并可能推进 occupancy version。只读预览必须调用 {@link
+   * #canEnterPreview(OccupancyRequest)}。
    */
   @Override
   public synchronized OccupancyDecision canEnter(OccupancyRequest request) {
@@ -246,7 +618,22 @@ public final class SimpleOccupancyManager
           }
           continue;
         }
+        if (singleRegionOppositeOrUnknownExternalBarrier(request, resource, claim)) {
+          if (!hardAuthority) {
+            return traceDecision(
+                "canEnter:" + OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER,
+                request,
+                singleRegionHardBarrierDecision(now, claim));
+          }
+          blockers.add(claim);
+          blockedResources.add(resource);
+          continue;
+        }
         if (relation == BlockerRelation.STALE_PROTECTIVE_CLAIM) {
+          continue;
+        }
+        if (relation == BlockerRelation.SWITCHER_CONFLICT
+            && sameDirectionSectionAllowsSwitcherClaim(request, resource, claim, "canEnter")) {
           continue;
         }
         if (!hardAuthority || relation == BlockerRelation.SAME_DIRECTION_FRONT) {
@@ -259,6 +646,20 @@ public final class SimpleOccupancyManager
     if (!blockers.isEmpty()) {
       Set<OccupancyResource> queueTargets = resolveQueueTargets(request, blockedResources);
       enqueueWaiting(request, queueTargets, now);
+      Optional<String> singleRegionHardBarrierReason =
+          singleRegionHardBarrierReason(request, blockers);
+      if (singleRegionHardBarrierReason.isPresent()) {
+        return traceDecision(
+            "canEnter:" + singleRegionHardBarrierReason.get(),
+            request,
+            new OccupancyDecision(
+                false,
+                now,
+                SignalAspect.STOP,
+                List.copyOf(blockers),
+                false,
+                singleRegionHardBarrierReason.get()));
+      }
       Optional<String> hardBlockerReason = conflictReleaseHardBlockerReason(request, blockers);
       if (hardBlockerReason.isPresent()) {
         return traceDecision(
@@ -279,7 +680,13 @@ public final class SimpleOccupancyManager
       return traceDecision(
           "canEnter:blockers",
           request,
-          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
+          new OccupancyDecision(
+              false,
+              now,
+              SignalAspect.STOP,
+              List.copyOf(blockers),
+              false,
+              describeBlockingDecision("canenter-blockers", blockers)));
     }
 
     boolean queueBlocked = false;
@@ -288,13 +695,17 @@ public final class SimpleOccupancyManager
         continue;
       }
       OccupancyClaim selfClaim = findClaim(claims.get(resource), request.trainName());
-      if (selfClaim != null) {
+      if (selfClaimBypassesQueue(selfClaim)) {
         Optional<OccupancyDecision> selfBlocked =
             selfOwnedSingleDirectionMismatchDecision(request, resource, selfClaim, now, "canEnter");
         if (selfBlocked.isPresent()) {
           return traceDecision(
               "canEnter:self-owned-single-opposite-direction", request, selfBlocked.get());
         }
+        continue;
+      }
+      if (verifiedSwitcherOccupantBypassesQueue(request, resource)) {
+        traceSwitcherOccupantQueueBypass(request, resource, now);
         continue;
       }
       Optional<OccupancyDecision> directionBlocked =
@@ -304,22 +715,24 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      CorridorDirection effectiveDirection =
+      QueueTouchResult queueTouch =
           touchQueueWithDirectionTrace(request, resource, queue, direction, now, "canEnter");
-      version.incrementAndGet();
-      if (!isQueueAllowed(request.trainName(), resource, effectiveDirection, queue)) {
-        Optional<OccupancyQueueEntry> blockingEntry = queue.blockingEntry(effectiveDirection);
+      CorridorDirection effectiveDirection = queueTouch.direction();
+      commitQueueTouchChange(request, resource, now, queueTouch);
+      if (!isQueueAllowed(request, resource, effectiveDirection, queue, now)) {
+        Optional<OccupancyQueueEntry> blockingEntry = queue.blockingEntry(effectiveDirection, now);
+        Optional<OccupancyQueueEntry> forcedBlocker = Optional.empty();
         if (blockingEntry.isPresent()
             && TrainNameNormalizer.sameLogicalTrain(
                 blockingEntry.get().trainName(), request.trainName())) {
           if (selfOwnedQueueEntryCanContinue(request, resource, queue, blockingEntry.get())) {
             continue;
           }
-          Optional<OccupancyQueueEntry> fallbackBlocker = queue.headAny();
+          Optional<OccupancyQueueEntry> fallbackBlocker = queue.headAny(now);
           if (fallbackBlocker.isPresent()
               && !TrainNameNormalizer.sameLogicalTrain(
                   fallbackBlocker.get().trainName(), request.trainName())) {
-            blockingEntry = fallbackBlocker;
+            forcedBlocker = fallbackBlocker;
           } else {
             return traceDecision(
                 "canEnter:self-owned-single-opposite-direction",
@@ -328,6 +741,12 @@ public final class SimpleOccupancyManager
           }
         }
         queueBlocked = true;
+        blockingEntry =
+            forcedBlocker.or(
+                () ->
+                    blockingQueueEntryFor(request, resource, queue, effectiveDirection, null, now));
+        tracePendingWinnerArbitration(
+            "canEnter", request, resource, blockingEntry, "hold-lower-priority", "queue-blocked");
         blockingEntry.map(entry -> createQueueBlocker(resource, entry)).ifPresent(blockers::add);
       }
     }
@@ -335,7 +754,13 @@ public final class SimpleOccupancyManager
       return traceDecision(
           "canEnter:queue-blocked",
           request,
-          new OccupancyDecision(false, now, SignalAspect.STOP, List.copyOf(blockers)));
+          new OccupancyDecision(
+              false,
+              now,
+              SignalAspect.STOP,
+              List.copyOf(blockers),
+              false,
+              describeBlockingDecision("canenter-queue-blocked", blockers)));
     }
     SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
     return traceDecision(
@@ -351,16 +776,28 @@ public final class SimpleOccupancyManager
    */
   @Override
   public synchronized OccupancyDecision canEnterPreview(OccupancyRequest request) {
+    return canEnterPreview(request, Set.of());
+  }
+
+  /**
+   * 执行只读准入预检，并允许停车折返中的 incumbent 在已经物理持有的资源上保留续行队列权。
+   *
+   * <p>{@code continuationQueueEntitlements} 只跳过纯队列竞争；外部真实 claim 仍在前半段 blocker 扫描中按普通规则拒绝。公开
+   * preview 入口始终传入空集合，只有原子 handoff 会按旧物理 footprint 计算该集合。
+   */
+  private OccupancyDecision canEnterPreview(
+      OccupancyRequest request, Set<OccupancyResource> continuationQueueEntitlements) {
     Objects.requireNonNull(request, "request");
+    Set<OccupancyResource> continuationEntitlements =
+        continuationQueueEntitlements == null ? Set.of() : continuationQueueEntitlements;
     Instant now = request.now();
-    purgeExpiredQueueEntries(now);
     List<OccupancyClaim> blockers = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
       }
       boolean hardAuthority = request.intentFor(resource).hardAuthority();
-      if (hardAuthority) {
+      if (hardAuthority && !continuationEntitlements.contains(resource)) {
         Optional<OccupancyDecision> directionBlocked =
             failClosedUnknownSingleConflictEntry(request, resource, now);
         if (directionBlocked.isPresent()) {
@@ -386,7 +823,16 @@ public final class SimpleOccupancyManager
           }
           continue;
         }
+        if (singleRegionOppositeOrUnknownExternalBarrier(request, resource, claim)) {
+          blockers.add(claim);
+          continue;
+        }
         if (relation == BlockerRelation.STALE_PROTECTIVE_CLAIM) {
+          continue;
+        }
+        if (relation == BlockerRelation.SWITCHER_CONFLICT
+            && sameDirectionSectionAllowsSwitcherClaim(
+                request, resource, claim, "canEnterPreview")) {
           continue;
         }
         if (!hardAuthority || relation == BlockerRelation.SAME_DIRECTION_FRONT) {
@@ -396,6 +842,20 @@ public final class SimpleOccupancyManager
       }
     }
     if (!blockers.isEmpty()) {
+      Optional<String> singleRegionHardBarrierReason =
+          singleRegionHardBarrierReason(request, blockers);
+      if (singleRegionHardBarrierReason.isPresent()) {
+        return traceDecision(
+            "canEnterPreview:" + singleRegionHardBarrierReason.get(),
+            request,
+            new OccupancyDecision(
+                false,
+                now,
+                SignalAspect.STOP,
+                List.copyOf(blockers),
+                false,
+                singleRegionHardBarrierReason.get()));
+      }
       Optional<String> hardBlockerReason = conflictReleaseHardBlockerReason(request, blockers);
       if (hardBlockerReason.isPresent()) {
         return traceDecision(
@@ -424,8 +884,11 @@ public final class SimpleOccupancyManager
       if (!request.intentFor(resource).hardAuthority() || !isQueueableConflict(resource)) {
         continue;
       }
+      if (continuationEntitlements.contains(resource)) {
+        continue;
+      }
       OccupancyClaim selfClaim = findClaim(claims.get(resource), request.trainName());
-      if (selfClaim != null) {
+      if (selfClaimBypassesQueue(selfClaim)) {
         Optional<OccupancyDecision> selfBlocked =
             selfOwnedSingleDirectionMismatchDecision(
                 request, resource, selfClaim, now, "canEnterPreview");
@@ -433,6 +896,9 @@ public final class SimpleOccupancyManager
           return traceDecision(
               "canEnterPreview:self-owned-single-opposite-direction", request, selfBlocked.get());
         }
+        continue;
+      }
+      if (verifiedSwitcherOccupantBypassesQueue(request, resource)) {
         continue;
       }
       Optional<OccupancyDecision> directionBlocked =
@@ -448,25 +914,26 @@ public final class SimpleOccupancyManager
       CorridorDirection effectiveDirection =
           effectiveQueueDirectionForPreview(request, resource, queue, direction);
       if (!isQueueAllowedPreview(
-          request.trainName(),
+          request,
           resource,
           effectiveDirection,
           queue,
           request.priority(),
           queueEntryOrderFor(request, resource),
           now)) {
-        Optional<OccupancyQueueEntry> blockingEntry = queue.blockingEntry(effectiveDirection);
+        Optional<OccupancyQueueEntry> blockingEntry = queue.blockingEntry(effectiveDirection, now);
+        Optional<OccupancyQueueEntry> forcedBlocker = Optional.empty();
         if (blockingEntry.isPresent()
             && TrainNameNormalizer.sameLogicalTrain(
                 blockingEntry.get().trainName(), request.trainName())) {
           if (selfOwnedQueueEntryCanContinue(request, resource, queue, blockingEntry.get())) {
             continue;
           }
-          Optional<OccupancyQueueEntry> fallbackBlocker = queue.headAny();
+          Optional<OccupancyQueueEntry> fallbackBlocker = queue.headAny(now);
           if (fallbackBlocker.isPresent()
               && !TrainNameNormalizer.sameLogicalTrain(
                   fallbackBlocker.get().trainName(), request.trainName())) {
-            blockingEntry = fallbackBlocker;
+            forcedBlocker = fallbackBlocker;
           } else {
             return traceDecision(
                 "canEnterPreview:self-owned-single-opposite-direction",
@@ -475,6 +942,28 @@ public final class SimpleOccupancyManager
           }
         }
         queueBlocked = true;
+        blockingEntry =
+            forcedBlocker.or(
+                () ->
+                    blockingQueueEntryFor(
+                        request,
+                        resource,
+                        queue,
+                        effectiveDirection,
+                        queue.candidateEntry(
+                            request.trainName(),
+                            effectiveDirection,
+                            now,
+                            request.priority(),
+                            queueEntryOrderFor(request, resource)),
+                        now));
+        tracePendingWinnerArbitration(
+            "canEnterPreview",
+            request,
+            resource,
+            blockingEntry,
+            "hold-lower-priority",
+            "queue-blocked");
         blockingEntry.map(entry -> createQueueBlocker(resource, entry)).ifPresent(blockers::add);
       }
     }
@@ -500,8 +989,6 @@ public final class SimpleOccupancyManager
   @Override
   public synchronized List<AdvisoryRisk> scanAdvisoryRisks(OccupancyRequest request) {
     Objects.requireNonNull(request, "request");
-    Instant now = request.now();
-    purgeExpiredQueueEntries(now);
     List<AdvisoryRisk> risks = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null || request.intentFor(resource) != ResourceIntent.LOOKAHEAD_PREVIEW) {
@@ -522,11 +1009,21 @@ public final class SimpleOccupancyManager
       if (!isQueueableConflict(resource)) {
         continue;
       }
+      OccupancyClaim selfClaim = findClaim(existing, request.trainName());
+      if (selfClaimBypassesQueue(selfClaim)
+          || verifiedSwitcherOccupantBypassesQueue(request, resource)) {
+        /*
+         * 排队位次只决定尚未取得进路者的次序。当前列车已经持有同一资源的可执行
+         * MOVEMENT_REQUIRED claim 时，失败方的纯队列记录不能反向成为停车点；
+         * 外部 live claim 已在上方独立扫描，仍会保持 fail-closed。
+         */
+        continue;
+      }
       ConflictQueue queue = queues.get(resource);
       if (queue == null || queue.isEmpty()) {
         continue;
       }
-      for (OccupancyQueueEntry entry : queue.snapshotEntries()) {
+      for (OccupancyQueueEntry entry : queue.snapshotEntries(request.now())) {
         if (entry == null
             || TrainNameNormalizer.sameLogicalTrain(entry.trainName(), request.trainName())) {
           continue;
@@ -549,11 +1046,11 @@ public final class SimpleOccupancyManager
    *
    * <p>若不可进入则返回拒绝决策，并写入排队快照供诊断使用。
    *
-   * <p>成功获取后会发布 {@link OccupancyAcquiredEvent}，通知订阅者重新评估信号。
+   * <p>只有 claim、道岔签名或关联队列实际变化时才发布 {@link OccupancyAcquiredEvent}；同值心跳刷新不会推进版本或触发信号重评估。
    */
   @Override
   public synchronized OccupancyDecision acquire(OccupancyRequest request) {
-    Objects.requireNonNull(request, "request");
+    request = Objects.requireNonNull(request, "request").withoutLookaheadPreviewResources();
     OccupancyDecision decision = canEnter(request);
     if (!decision.allowed()) {
       return decision;
@@ -566,12 +1063,25 @@ public final class SimpleOccupancyManager
         return new OccupancyDecision(
             false, now, SignalAspect.STOP, decision.blockers(), false, hardBlockerReason.get());
       }
+      Optional<OccupancyClaim> unscopedBlocker =
+          firstConflictBlockerOutsideActiveRelease(request, decision.blockers(), now);
+      if (unscopedBlocker.isPresent()) {
+        return new OccupancyDecision(
+            false,
+            now,
+            SignalAspect.STOP,
+            decision.blockers(),
+            false,
+            "conflict-release-unscoped-blocker:" + unscopedBlocker.get().resource());
+      }
     }
     Set<OccupancyResource> blockedResources =
         decision.conflictRelease()
-            ? resolveBlockedResourcesForPartialAcquire(decision, request.trainName())
+            ? resolveBlockedResourcesForPartialAcquire(request, decision, now)
             : Set.of();
-    List<OccupancyResource> acquiredResources = new ArrayList<>();
+    List<OccupancyResource> admittedResources = new ArrayList<>();
+    List<OccupancyResource> changedResources = new ArrayList<>();
+    List<OccupancyResource> queueSatisfiedResources = new ArrayList<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null) {
         continue;
@@ -593,37 +1103,1448 @@ public final class SimpleOccupancyManager
         continue;
       }
       Optional<CorridorDirection> direction = resolveCorridorDirection(request, resource);
-      ClaimRole role = request.claimRoleFor(resource);
+      ClaimRole requestedRole = request.claimRoleFor(resource);
       if (current != null) {
         Duration nextHeadway =
             current.headway().compareTo(headway) >= 0 ? current.headway() : headway;
-        Optional<CorridorDirection> nextDirection =
-            direction.isPresent() ? direction : current.corridorDirection();
-        existing.remove(current);
-        existing.add(
+        ClaimRefresh refresh = resolveClaimRefresh(current, requestedRole, direction);
+        OccupancyClaim updated =
             new OccupancyClaim(
                 resource,
                 current.trainName(),
                 request.routeId(),
                 current.acquiredAt(),
                 nextHeadway,
-                nextDirection,
-                role));
-        acquiredResources.add(resource);
+                refresh.direction(),
+                refresh.role());
+        boolean claimChanged = !updated.equals(current);
+        if (claimChanged) {
+          existing.remove(current);
+          existing.add(updated);
+        }
+        boolean signatureChanged = rememberSwitcherClaimSignature(request, resource);
+        boolean stateChanged = claimChanged || signatureChanged;
+        traceOccupancyClaimMerge(
+            request,
+            current,
+            requestedRole,
+            refresh.role(),
+            direction,
+            refresh.direction(),
+            refresh.reason());
+        String lifecycleEvent =
+            !stateChanged
+                ? "refresh-noop"
+                : refresh.role() == ClaimRole.MOVEMENT_REQUIRED ? "merge" : "retain";
+        traceResourceLifecycle(
+            request, resource, current, updated, lifecycleEvent, refresh.reason());
+        admittedResources.add(resource);
+        if (selfClaimBypassesQueue(updated)) {
+          queueSatisfiedResources.add(resource);
+        }
+        if (stateChanged) {
+          changedResources.add(resource);
+        }
         continue;
       }
-      existing.add(
+      OccupancyClaim created =
           new OccupancyClaim(
-              resource, request.trainName(), request.routeId(), now, headway, direction, role));
-      acquiredResources.add(resource);
+              resource,
+              request.trainName(),
+              request.routeId(),
+              now,
+              headway,
+              direction,
+              requestedRole);
+      existing.add(created);
+      rememberSwitcherClaimSignature(request, resource);
+      traceResourceLifecycle(request, resource, null, created, "acquire", "new-claim");
+      admittedResources.add(resource);
+      if (selfClaimBypassesQueue(created)) {
+        queueSatisfiedResources.add(resource);
+      }
+      changedResources.add(resource);
     }
-    if (!acquiredResources.isEmpty()) {
-      removeFromQueuesForResources(request.trainName(), acquiredResources);
+    // 只有拿到可执行授权的资源才算排到了：此后 selfClaimBypassesQueue 本来就不再看队列。停车保持、尾部保护以 HOLD_ONLY/
+    // PROTECTIVE_RETAIN 接纳只是原地占着，本车仍在等前进授权，排队位次必须留着；若一并删掉，停着的车每拍被删、下一拍又以新的
+    // firstSeen 入队，排队资历永远是 0，会一直输给后到的车。
+    int removedQueueEntries =
+        queueSatisfiedResources.isEmpty()
+            ? 0
+            : removeFromQueuesForResources(request.trainName(), queueSatisfiedResources, false);
+    if (!changedResources.isEmpty() || removedQueueEntries > 0) {
       version.incrementAndGet();
     }
     // 发布占用获取事件
-    publishAcquiredEvent(request, acquiredResources, now);
+    List<OccupancyResource> eventResources =
+        removedQueueEntries > 0 ? List.copyOf(admittedResources) : changedResources;
+    publishAcquiredEvent(request, eventResources, now);
     return decision;
+  }
+
+  /**
+   * 在列车停车换向时原子替换旧、新行车授权。
+   *
+   * <p>预检阶段暂时从内存视图隐藏本车旧 claim 与队列位次，使普通准入逻辑只评估外部竞争者；该暂存状态不会推进
+   * version，也不会发布事件。拒绝时完整恢复。成功时以新授权替换重叠资源，并把未被新窗口覆盖的旧物理 footprint 保留为专用硬角色，等待正常
+   * rear-clear/推进流程释放；整个过程不会发布虚假的资源释放事件。
+   */
+  @Override
+  public synchronized OccupancyDecision handoffAuthority(OccupancyRequest nextAuthority) {
+    Objects.requireNonNull(nextAuthority, "nextAuthority");
+    if (!nextAuthority.hasMovementRequiredResources()) {
+      return handoffRejected(nextAuthority, "authority-handoff-missing-hard-authority", List.of());
+    }
+    DetachedAuthorityState detached = detachAuthorityState(nextAuthority.trainName());
+    if (detached.claims().isEmpty()) {
+      restoreAuthorityState(detached);
+      return handoffRejected(
+          nextAuthority, "authority-handoff-current-authority-missing", List.of());
+    }
+
+    OccupancyDecision preflight;
+    try {
+      preflight =
+          canEnterPreview(
+              nextAuthority, handoffContinuationQueueEntitlements(nextAuthority, detached));
+    } catch (RuntimeException exception) {
+      restoreAuthorityState(detached);
+      throw exception;
+    }
+    if (!preflight.allowed() || preflight.conflictRelease() || !preflight.blockers().isEmpty()) {
+      restoreAuthorityState(detached);
+      if (!preflight.allowed()) {
+        return preflight;
+      }
+      return handoffRejected(
+          nextAuthority, "authority-handoff-requires-clean-window", preflight.blockers());
+    }
+
+    List<OccupancyResource> admittedResources = new ArrayList<>();
+    try {
+      for (OccupancyResource resource : nextAuthority.resourceList()) {
+        if (resource == null) {
+          continue;
+        }
+        List<OccupancyClaim> existing =
+            claims.computeIfAbsent(resource, unused -> new ArrayList<>());
+        if (!nextAuthority.intentFor(resource).hardAuthority()
+            && (hasOtherLogicalClaim(existing, nextAuthority.trainName())
+                || hasOtherQueueEntry(resource, nextAuthority.trainName()))) {
+          if (existing.isEmpty()) {
+            claims.remove(resource);
+          }
+          continue;
+        }
+        Optional<OccupancyClaim> retainedFootprint =
+            nextAuthority.intentFor(resource).hardAuthority()
+                ? Optional.empty()
+                : detachedPhysicalClaim(detached, resource);
+        OccupancyClaim created =
+            retainedFootprint
+                .map(claim -> retainedFootprintClaim(nextAuthority.trainName(), claim))
+                .orElseGet(
+                    () ->
+                        new OccupancyClaim(
+                            resource,
+                            nextAuthority.trainName(),
+                            nextAuthority.routeId(),
+                            nextAuthority.now(),
+                            headwayRule.headwayFor(nextAuthority.routeId(), resource),
+                            resolveCorridorDirection(nextAuthority, resource),
+                            nextAuthority.claimRoleFor(resource)));
+        existing.add(created);
+        if (retainedFootprint.isEmpty()) {
+          rememberSwitcherClaimSignature(nextAuthority, resource);
+          admittedResources.add(resource);
+        }
+        traceResourceLifecycle(
+            nextAuthority,
+            resource,
+            null,
+            created,
+            retainedFootprint.isPresent()
+                ? "authority-handoff-retain"
+                : "authority-handoff-acquire",
+            retainedFootprint.isPresent() ? "terminal-footprint-retained" : "terminal-turnback");
+      }
+      retainDetachedFootprint(nextAuthority.trainName(), detached);
+    } catch (RuntimeException exception) {
+      removeClaimsByTrainWithoutEvents(nextAuthority.trainName());
+      restoreAuthorityState(detached);
+      throw exception;
+    }
+
+    for (OccupancyClaim oldClaim : detached.claims()) {
+      OccupancyClaim replacement =
+          findClaim(claims.get(oldClaim.resource()), nextAuthority.trainName());
+      traceResourceLifecycle(
+          nextAuthority,
+          oldClaim.resource(),
+          oldClaim,
+          replacement,
+          replacement != null && replacement.role() == ClaimRole.PHYSICAL_FOOTPRINT
+              ? "authority-handoff-retain"
+              : "authority-handoff-replace",
+          replacement != null && replacement.role() == ClaimRole.PHYSICAL_FOOTPRINT
+              ? "terminal-footprint-retained"
+              : "terminal-turnback");
+    }
+    removeFromQueuesForTrain(nextAuthority.trainName());
+    releaseDeadlockLocksForTrain(nextAuthority.trainName());
+    selfOwnedStaleRetainCandidates.remove(
+        TrainNameNormalizer.normalizeKey(nextAuthority.trainName()));
+    version.incrementAndGet();
+
+    publishAcquiredEvent(nextAuthority, List.copyOf(admittedResources), nextAuthority.now());
+    return preflight;
+  }
+
+  private void retainDetachedFootprint(String trainName, DetachedAuthorityState detached) {
+    for (OccupancyClaim oldClaim : detached.claims()) {
+      if (oldClaim == null
+          || oldClaim.resource() == null
+          || !isRetainableFootprintClaim(oldClaim)
+          || findClaim(claims.get(oldClaim.resource()), trainName) != null) {
+        continue;
+      }
+      OccupancyClaim retained =
+          new OccupancyClaim(
+              oldClaim.resource(),
+              oldClaim.trainName(),
+              oldClaim.routeId(),
+              oldClaim.acquiredAt(),
+              oldClaim.headway(),
+              oldClaim.corridorDirection(),
+              ClaimRole.PHYSICAL_FOOTPRINT);
+      claims.computeIfAbsent(oldClaim.resource(), unused -> new ArrayList<>()).add(retained);
+    }
+    for (var entry : detached.claimSignatures().entrySet()) {
+      if (detachedPhysicalClaim(detached, entry.getKey().resource()).isPresent()) {
+        switcherClaimSignatures.putIfAbsent(entry.getKey(), entry.getValue());
+      }
+    }
+  }
+
+  private Optional<OccupancyClaim> detachedPhysicalClaim(
+      DetachedAuthorityState detached, OccupancyResource resource) {
+    if (detached == null || resource == null) {
+      return Optional.empty();
+    }
+    return detached.claims().stream()
+        .filter(Objects::nonNull)
+        .filter(claim -> resource.equals(claim.resource()))
+        .filter(SimpleOccupancyManager::isRetainableFootprintClaim)
+        .findFirst();
+  }
+
+  /**
+   * 计算 handoff 预检可保留的 incumbent 队列权。
+   *
+   * <p>旧 claim 必须能证明物理 footprint，且新请求必须把同一资源列为 hard authority。这样只会避免“外车因本车旧 claim
+   * 排队，本车又反过来等待外车”的环形等待，不会让列车跨过尚未持有的前方资源队列。
+   */
+  private Set<OccupancyResource> handoffContinuationQueueEntitlements(
+      OccupancyRequest nextAuthority, DetachedAuthorityState detached) {
+    if (nextAuthority == null || detached == null || detached.claims().isEmpty()) {
+      return Set.of();
+    }
+    Set<OccupancyResource> requestedResources = Set.copyOf(nextAuthority.resourceList());
+    Set<OccupancyResource> entitlements = new LinkedHashSet<>();
+    for (OccupancyClaim claim : detached.claims()) {
+      if (!isRetainableFootprintClaim(claim)
+          || claim.resource() == null
+          || !requestedResources.contains(claim.resource())
+          || !nextAuthority.intentFor(claim.resource()).hardAuthority()
+          || !isQueueableConflict(claim.resource())) {
+        continue;
+      }
+      entitlements.add(claim.resource());
+    }
+    return Set.copyOf(entitlements);
+  }
+
+  private static boolean isRetainableFootprintClaim(OccupancyClaim claim) {
+    if (claim == null) {
+      return false;
+    }
+    return claim.role() == ClaimRole.MOVEMENT_REQUIRED
+        || claim.role() == ClaimRole.PHYSICAL_FOOTPRINT
+        || claim.role() == ClaimRole.PROTECTIVE_RETAIN
+        || claim.role() == ClaimRole.HOLD_ONLY;
+  }
+
+  private OccupancyClaim retainedFootprintClaim(String trainName, OccupancyClaim oldClaim) {
+    return new OccupancyClaim(
+        oldClaim.resource(),
+        trainName,
+        oldClaim.routeId(),
+        oldClaim.acquiredAt(),
+        oldClaim.headway(),
+        oldClaim.corridorDirection(),
+        ClaimRole.PHYSICAL_FOOTPRINT);
+  }
+
+  /** 原子迁移 claim、queue、道岔签名与冲突释放锁的列车 owner。 */
+  @Override
+  public synchronized boolean migrateAuthorityOwner(String currentTrainName, String nextTrainName) {
+    if (currentTrainName == null
+        || currentTrainName.isBlank()
+        || nextTrainName == null
+        || nextTrainName.isBlank()) {
+      return false;
+    }
+    if (currentTrainName.equals(nextTrainName)) {
+      return true;
+    }
+    purgeExpiredQueueEntries(clockNow());
+    if (hasAuthorityState(nextTrainName)) {
+      return false;
+    }
+    boolean changed = false;
+    for (List<OccupancyClaim> existing : claims.values()) {
+      if (existing == null || existing.isEmpty()) {
+        continue;
+      }
+      for (int index = 0; index < existing.size(); index++) {
+        OccupancyClaim claim = existing.get(index);
+        if (claim == null
+            || !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), currentTrainName)) {
+          continue;
+        }
+        OccupancyClaim migrated =
+            new OccupancyClaim(
+                claim.resource(),
+                nextTrainName,
+                claim.routeId(),
+                claim.acquiredAt(),
+                claim.headway(),
+                claim.corridorDirection(),
+                claim.role());
+        existing.set(index, migrated);
+        traceResourceLifecycle(
+            null, claim.resource(), claim, migrated, "owner-migrate", "authority-owner-migration");
+        changed = true;
+      }
+    }
+    for (Map.Entry<OccupancyResource, ConflictQueue> entry : queues.entrySet()) {
+      ConflictQueue queue = entry.getValue();
+      if (queue != null && queue.rename(currentTrainName, nextTrainName)) {
+        queue
+            .entryFor(nextTrainName)
+            .ifPresent(
+                migrated ->
+                    traceQueueLifecycle(
+                        entry.getKey(),
+                        migrated,
+                        "WAITING_TRAIN",
+                        "owner-migrate",
+                        "authority-owner-migration-from:" + currentTrainName,
+                        null));
+        changed = true;
+      }
+    }
+    changed |= migrateSwitcherSignatures(switcherClaimSignatures, currentTrainName, nextTrainName);
+    changed |= migrateSwitcherSignatures(switcherQueueSignatures, currentTrainName, nextTrainName);
+    changed |= migrateDeadlockReleaseLocks(currentTrainName, nextTrainName);
+    changed |= migrateStaleRetainCandidate(currentTrainName, nextTrainName);
+    if (changed) {
+      version.incrementAndGet();
+    }
+    return true;
+  }
+
+  /** 校验硬资源的 owner、角色与单线方向仍与待发布授权一致。 */
+  @Override
+  public synchronized boolean holdsHardAuthority(OccupancyRequest authority) {
+    if (authority == null) {
+      return false;
+    }
+    boolean foundHardAuthority = false;
+    for (OccupancyResource resource : authority.resourceList()) {
+      if (resource == null || !authority.intentFor(resource).hardAuthority()) {
+        continue;
+      }
+      foundHardAuthority = true;
+      OccupancyClaim claim = findClaim(claims.get(resource), authority.trainName());
+      if (claim == null || claim.role() != ClaimRole.MOVEMENT_REQUIRED) {
+        return false;
+      }
+      Optional<CorridorDirection> requested = resolveCorridorDirection(authority, resource);
+      if (requested.isPresent() && !requested.equals(claim.corridorDirection())) {
+        return false;
+      }
+    }
+    return foundHardAuthority;
+  }
+
+  private OccupancyDecision handoffRejected(
+      OccupancyRequest request, String reason, List<OccupancyClaim> blockers) {
+    return new OccupancyDecision(
+        false,
+        request.now(),
+        SignalAspect.STOP,
+        blockers == null ? List.of() : blockers,
+        false,
+        reason);
+  }
+
+  private DetachedAuthorityState detachAuthorityState(String trainName) {
+    List<OccupancyClaim> detachedClaims = new ArrayList<>();
+    Iterator<Map.Entry<OccupancyResource, List<OccupancyClaim>>> claimIterator =
+        claims.entrySet().iterator();
+    while (claimIterator.hasNext()) {
+      Map.Entry<OccupancyResource, List<OccupancyClaim>> entry = claimIterator.next();
+      List<OccupancyClaim> existing = entry.getValue();
+      if (existing == null || existing.isEmpty()) {
+        claimIterator.remove();
+        continue;
+      }
+      Iterator<OccupancyClaim> existingIterator = existing.iterator();
+      while (existingIterator.hasNext()) {
+        OccupancyClaim claim = existingIterator.next();
+        if (claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+          detachedClaims.add(claim);
+          existingIterator.remove();
+        }
+      }
+      if (existing.isEmpty()) {
+        claimIterator.remove();
+      }
+    }
+
+    Map<OccupancyResource, OccupancyQueueEntry> detachedQueues = new LinkedHashMap<>();
+    Iterator<Map.Entry<OccupancyResource, ConflictQueue>> queueIterator =
+        queues.entrySet().iterator();
+    while (queueIterator.hasNext()) {
+      Map.Entry<OccupancyResource, ConflictQueue> entry = queueIterator.next();
+      ConflictQueue queue = entry.getValue();
+      if (queue == null) {
+        queueIterator.remove();
+        continue;
+      }
+      queue.detach(trainName).ifPresent(value -> detachedQueues.put(entry.getKey(), value));
+      if (queue.isEmpty()) {
+        queueIterator.remove();
+      }
+    }
+
+    Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> detachedClaimSignatures =
+        detachSwitcherSignatures(switcherClaimSignatures, trainName);
+    Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> detachedQueueSignatures =
+        detachSwitcherSignatures(switcherQueueSignatures, trainName);
+    // 保留摘下时的顺序：恢复时空队列会按这个顺序重新插回 queues（LinkedHashMap），而 queues 的顺序决定
+    // snapshotQueues() 与唤醒先后。Map.copyOf 的顺序每个 JVM 随机一次，见 StableCollections。
+    return new DetachedAuthorityState(
+        List.copyOf(detachedClaims),
+        StableCollections.copyInInsertionOrder(detachedQueues),
+        StableCollections.copyInInsertionOrder(detachedClaimSignatures),
+        StableCollections.copyInInsertionOrder(detachedQueueSignatures));
+  }
+
+  private void restoreAuthorityState(DetachedAuthorityState state) {
+    if (state == null) {
+      return;
+    }
+    for (OccupancyClaim claim : state.claims()) {
+      claims.computeIfAbsent(claim.resource(), unused -> new ArrayList<>()).add(claim);
+    }
+    for (Map.Entry<OccupancyResource, OccupancyQueueEntry> entry : state.queues().entrySet()) {
+      queues
+          .computeIfAbsent(entry.getKey(), unused -> new ConflictQueue())
+          .restore(entry.getValue());
+    }
+    switcherClaimSignatures.putAll(state.claimSignatures());
+    switcherQueueSignatures.putAll(state.queueSignatures());
+  }
+
+  private Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature>
+      detachSwitcherSignatures(
+          Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> signatures,
+          String trainName) {
+    Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> detached =
+        new LinkedHashMap<>();
+    Iterator<Map.Entry<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature>> iterator =
+        signatures.entrySet().iterator();
+    while (iterator.hasNext()) {
+      Map.Entry<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> entry =
+          iterator.next();
+      if (TrainNameNormalizer.sameLogicalTrain(entry.getKey().trainKey(), trainName)) {
+        detached.put(entry.getKey(), entry.getValue());
+        iterator.remove();
+      }
+    }
+    return detached;
+  }
+
+  private void removeClaimsByTrainWithoutEvents(String trainName) {
+    Iterator<Map.Entry<OccupancyResource, List<OccupancyClaim>>> iterator =
+        claims.entrySet().iterator();
+    while (iterator.hasNext()) {
+      Map.Entry<OccupancyResource, List<OccupancyClaim>> entry = iterator.next();
+      List<OccupancyClaim> existing = entry.getValue();
+      if (existing == null) {
+        iterator.remove();
+        continue;
+      }
+      existing.removeIf(
+          claim ->
+              claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName));
+      if (existing.isEmpty()) {
+        iterator.remove();
+      }
+    }
+    detachSwitcherSignatures(switcherClaimSignatures, trainName);
+  }
+
+  private boolean hasAuthorityState(String trainName) {
+    for (List<OccupancyClaim> existing : claims.values()) {
+      if (findClaim(existing, trainName) != null) {
+        return true;
+      }
+    }
+    for (ConflictQueue queue : queues.values()) {
+      if (queue != null && queue.contains(trainName)) {
+        return true;
+      }
+    }
+    if (switcherClaimSignatures.keySet().stream()
+        .anyMatch(key -> TrainNameNormalizer.sameLogicalTrain(key.trainKey(), trainName))) {
+      return true;
+    }
+    if (switcherQueueSignatures.keySet().stream()
+        .anyMatch(key -> TrainNameNormalizer.sameLogicalTrain(key.trainKey(), trainName))) {
+      return true;
+    }
+    if (deadlockReleaseLocks.values().stream()
+        .filter(Objects::nonNull)
+        .anyMatch(lock -> lock.matches(trainName))) {
+      return true;
+    }
+    return selfOwnedStaleRetainCandidates.containsKey(TrainNameNormalizer.normalizeKey(trainName));
+  }
+
+  private boolean migrateSwitcherSignatures(
+      Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> signatures,
+      String currentTrainName,
+      String nextTrainName) {
+    Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> migrated =
+        detachSwitcherSignatures(signatures, currentTrainName);
+    if (migrated.isEmpty()) {
+      return false;
+    }
+    for (var entry : migrated.entrySet()) {
+      signatures.put(
+          new SwitcherClaimKey(entry.getKey().resource(), nextTrainName), entry.getValue());
+    }
+    return true;
+  }
+
+  private boolean migrateDeadlockReleaseLocks(String currentTrainName, String nextTrainName) {
+    boolean changed = false;
+    for (Map.Entry<String, DeadlockReleaseLock> entry : deadlockReleaseLocks.entrySet()) {
+      DeadlockReleaseLock lock = entry.getValue();
+      if (lock == null || !lock.matches(currentTrainName)) {
+        continue;
+      }
+      DeadlockReleaseLock migrated = new DeadlockReleaseLock(nextTrainName, lock.expiresAt());
+      entry.setValue(migrated);
+      traceQueueLifecycle(
+          OccupancyResource.forConflict(entry.getKey()),
+          migrated.trainName(),
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          "DEADLOCK_RELEASE_LOCK",
+          "owner-migrate",
+          "authority-owner-migration-from:" + currentTrainName,
+          migrated.expiresAt());
+      changed = true;
+    }
+    return changed;
+  }
+
+  private boolean migrateStaleRetainCandidate(String currentTrainName, String nextTrainName) {
+    String currentKey = TrainNameNormalizer.normalizeKey(currentTrainName);
+    SelfOwnedStaleRetainCandidate candidate = selfOwnedStaleRetainCandidates.remove(currentKey);
+    if (candidate == null) {
+      return false;
+    }
+    selfOwnedStaleRetainCandidates.put(
+        TrainNameNormalizer.normalizeKey(nextTrainName),
+        new SelfOwnedStaleRetainCandidate(
+            nextTrainName,
+            candidate.resource(),
+            candidate.claimRole(),
+            candidate.requestIntent(),
+            candidate.heldDirection(),
+            candidate.requestedDirection(),
+            candidate.hardAuthorityScope(),
+            candidate.reason(),
+            candidate.sampledAt()));
+    return true;
+  }
+
+  /**
+   * 解析同一列车对同一资源的 claim 刷新。
+   *
+   * <p>前进授权是当前 traversal 的方向所有者。任何 refresh 都只能在方向缺失时补全证据，不能反向改写已有已知方向；保护或等待请求不能把已经取得的前进授权或尚未取得
+   * rear-clear 证据的物理 footprint 降级为短生命周期 claim。换向必须通过原子 handoff，新硬授权可以接管与其重叠的物理 footprint。
+   */
+  private ClaimRefresh resolveClaimRefresh(
+      OccupancyClaim current,
+      ClaimRole requestedRole,
+      Optional<CorridorDirection> requestedDirection) {
+    Optional<CorridorDirection> safeRequestedDirection =
+        requestedDirection == null ? Optional.empty() : requestedDirection;
+    Optional<CorridorDirection> finalDirection =
+        current.corridorDirection().or(() -> safeRequestedDirection);
+    boolean hardAuthorityRefresh = requestedRole == ClaimRole.MOVEMENT_REQUIRED;
+    boolean preserveCurrentHardRole =
+        !hardAuthorityRefresh
+            && (current.role() == ClaimRole.MOVEMENT_REQUIRED
+                || current.role() == ClaimRole.PHYSICAL_FOOTPRINT);
+    ClaimRole finalRole = preserveCurrentHardRole ? current.role() : requestedRole;
+    String reason =
+        finalRole != requestedRole
+            ? current.role() == ClaimRole.PHYSICAL_FOOTPRINT
+                ? "physical-footprint-preserved"
+                : "movement-authority-preserved"
+            : !finalDirection.equals(safeRequestedDirection)
+                ? "movement-authority-direction-preserved"
+                : "same-owner-resource-claim-refresh";
+    return new ClaimRefresh(finalDirection, finalRole, reason);
+  }
+
+  /**
+   * 记录同一列车在同一资源上的 claim 覆盖细节。
+   *
+   * <p>该 trace 只描述 acquire 内部“旧 claim 被新请求刷新”的事实，不参与角色、方向或 headway 选择。
+   */
+  private void traceOccupancyClaimMerge(
+      OccupancyRequest request,
+      OccupancyClaim current,
+      ClaimRole requestedRole,
+      ClaimRole finalRole,
+      Optional<CorridorDirection> requestedDirection,
+      Optional<CorridorDirection> finalDirection,
+      String reason) {
+    if (request == null || current == null || current.resource() == null) {
+      return;
+    }
+    Optional<CorridorDirection> resolvedFinalDirection =
+        finalDirection == null ? Optional.empty() : finalDirection;
+    if (current.role() == finalRole && current.corridorDirection().equals(resolvedFinalDirection)) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        "SMART_OCCUPANCY_CLAIM_MERGE train="
+            + request.trainName()
+            + " resource="
+            + current.resource()
+            + " requestInputType="
+            + SignalDecisionInputClassifier.classify(request)
+            + " priority="
+            + request.priority()
+            + " operationType=- oldRole="
+            + current.role()
+            + " newRole="
+            + requestedRole
+            + " finalRole="
+            + finalRole
+            + " oldDirection="
+            + current.corridorDirection().orElse(CorridorDirection.UNKNOWN)
+            + " newDirection="
+            + (requestedDirection == null
+                ? CorridorDirection.UNKNOWN
+                : requestedDirection.orElse(CorridorDirection.UNKNOWN))
+            + " finalDirection="
+            + (finalDirection == null
+                ? CorridorDirection.UNKNOWN
+                : finalDirection.orElse(CorridorDirection.UNKNOWN))
+            + " action=updated"
+            + " reason="
+            + reason);
+  }
+
+  /**
+   * 记录全部资源 claim 的统一生命周期，并保留 switcher/物理联锁专用诊断。
+   *
+   * <p>{@code SMART_RESOURCE_LIFECYCLE} 是 NODE、EDGE、single、switcher 与物理联锁共享的审计
+   * seam；专用事件继续承载道岔路径与联锁排障的兼容字段。
+   */
+  private void traceResourceLifecycle(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      OccupancyClaim oldClaim,
+      OccupancyClaim finalClaim,
+      String event,
+      String reason) {
+    if (!hasSemanticClaimTransition(oldClaim, finalClaim)) {
+      return;
+    }
+    OccupancyClaim visibleClaim = finalClaim == null ? oldClaim : finalClaim;
+    if (resource == null || visibleClaim == null) {
+      return;
+    }
+    ClaimRole finalRole = finalClaim == null ? null : finalClaim.role();
+    ClaimRole oldRole = oldClaim == null ? null : oldClaim.role();
+    if (!"refresh-noop".equals(event)) {
+      SignalComputationTrace.emitRaw(
+          "SMART_RESOURCE_LIFECYCLE sequence="
+              + lifecycleSequence.incrementAndGet()
+              + " observedVersion="
+              + version.get()
+              + " train="
+              + safeLifecycleValue(request == null ? visibleClaim.trainName() : request.trainName())
+              + " resource="
+              + resource
+              + " resourceKind="
+              + resource.kind()
+              + " event="
+              + safeLifecycleValue(event)
+              + " owner="
+              + safeLifecycleValue(visibleClaim.trainName())
+              + " oldOwner="
+              + safeLifecycleValue(oldClaim == null ? null : oldClaim.trainName())
+              + " newOwner="
+              + safeLifecycleValue(finalClaim == null ? null : finalClaim.trainName())
+              + " ownerCount="
+              + ownerCount(resource)
+              + " oldRole="
+              + roleText(oldRole)
+              + " newRole="
+              + roleText(finalRole)
+              + " direction="
+              + visibleClaim.corridorDirection().orElse(CorridorDirection.UNKNOWN)
+              + " requestInputType="
+              + (request == null ? "-" : SignalDecisionInputClassifier.classify(request))
+              + " priority="
+              + (request == null ? "-" : request.priority())
+              + " source="
+              + safeLifecycleValue(reason));
+    }
+
+    boolean interlocking = OccupancyResourceResolver.isInterlockingConflict(resource);
+    if (!isSwitcherConflictResource(resource) && !interlocking) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        (interlocking
+                ? "SMART_INTERLOCKING_CLAIM_LIFECYCLE train="
+                : "SMART_SWITCHER_CLAIM_LIFECYCLE train=")
+            + safeLifecycleValue(request == null ? visibleClaim.trainName() : request.trainName())
+            + " resource="
+            + resource
+            + " event="
+            + safeLifecycleValue(event)
+            + " owner="
+            + safeLifecycleValue(visibleClaim.trainName())
+            + " ownerCount="
+            + ownerCount(resource)
+            + " otherOwners="
+            + otherOwners(resource, visibleClaim.trainName())
+            + " oldRole="
+            + roleText(oldRole)
+            + " newRole="
+            + roleText(finalRole)
+            + " finalRole="
+            + roleText(finalRole)
+            + " direction="
+            + visibleClaim.corridorDirection().orElse(CorridorDirection.UNKNOWN)
+            + " requestInputType="
+            + (request == null ? "-" : SignalDecisionInputClassifier.classify(request))
+            + " priority="
+            + (request == null ? "-" : request.priority())
+            + " operationType=- routeId="
+            + routeIdText(request, visibleClaim)
+            + " routeIndex="
+            + routeIndexText(request)
+            + " currentNode="
+            + currentNodeText(request)
+            + " effectiveToNode="
+            + effectiveToNodeText(request)
+            + " physicalFootprint="
+            + physicalFootprintText(visibleClaim.role())
+            + " reservedAuthority="
+            + reservedAuthorityText(visibleClaim.role())
+            + " claimSource="
+            + claimSourceText(request, resource, visibleClaim.role())
+            + " reason="
+            + safeLifecycleValue(reason));
+  }
+
+  /**
+   * 判断 claim 的变化是否会影响占用仲裁或运行时物理语义。
+   *
+   * <p>同一逻辑列车对同一资源的 lease 心跳、读取 blocker 与等价 refresh 不属于生命周期。它们仍可更新内部时效字段，
+   * 但不能产生调度诊断事件或把字符串格式化负担带到主线程。
+   */
+  private static boolean hasSemanticClaimTransition(
+      OccupancyClaim oldClaim, OccupancyClaim finalClaim) {
+    if (oldClaim == null || finalClaim == null) {
+      return oldClaim != finalClaim;
+    }
+    return !TrainNameNormalizer.sameLogicalTrain(oldClaim.trainName(), finalClaim.trainName())
+        || !oldClaim.routeId().equals(finalClaim.routeId())
+        || !oldClaim.headway().equals(finalClaim.headway())
+        || oldClaim.role() != finalClaim.role()
+        || !oldClaim.corridorDirection().equals(finalClaim.corridorDirection());
+  }
+
+  /**
+   * 记录冲突队列及其放行锁的统一生命周期。
+   *
+   * <p>等待条目和临时 release lock 共用同一事件名，以 {@code entryType} 区分；调用方只在调度语义发生变化时输出，lastSeen 心跳不会刷屏。
+   */
+  private void traceQueueLifecycle(
+      OccupancyResource resource,
+      OccupancyQueueEntry entry,
+      String entryType,
+      String event,
+      String reason,
+      Instant expiresAt) {
+    if (resource == null || entry == null) {
+      return;
+    }
+    traceQueueLifecycle(
+        resource,
+        entry.trainName(),
+        entry.direction(),
+        entry.priority(),
+        entry.entryOrder(),
+        entry.enqueueSequence(),
+        entry.firstSeen(),
+        entry.lastSeen(),
+        entryType,
+        event,
+        reason,
+        expiresAt);
+  }
+
+  private void traceQueueLifecycle(
+      OccupancyResource resource,
+      String trainName,
+      CorridorDirection direction,
+      Integer priority,
+      Integer entryOrder,
+      Long enqueueSequence,
+      Instant firstSeen,
+      Instant lastSeen,
+      String entryType,
+      String event,
+      String reason,
+      Instant expiresAt) {
+    if (resource == null) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        "SMART_QUEUE_LIFECYCLE sequence="
+            + lifecycleSequence.incrementAndGet()
+            + " observedVersion="
+            + version.get()
+            + " resource="
+            + resource
+            + " entryType="
+            + safeLifecycleValue(entryType)
+            + " event="
+            + safeLifecycleValue(event)
+            + " train="
+            + safeLifecycleValue(trainName)
+            + " direction="
+            + (direction == null ? "-" : direction)
+            + " priority="
+            + (priority == null ? "-" : priority)
+            + " entryOrder="
+            + (entryOrder == null ? "-" : entryOrder)
+            + " enqueueSequence="
+            + (enqueueSequence == null ? "-" : enqueueSequence)
+            + " firstSeen="
+            + (firstSeen == null ? "-" : firstSeen)
+            + " lastSeen="
+            + (lastSeen == null ? "-" : lastSeen)
+            + " expiresAt="
+            + (expiresAt == null ? "-" : expiresAt)
+            + " reason="
+            + safeLifecycleValue(reason));
+  }
+
+  private void traceSwitcherBlockerReads(
+      String source, OccupancyRequest request, OccupancyDecision decision) {
+    if (decision == null || decision.blockers().isEmpty()) {
+      return;
+    }
+    for (OccupancyClaim blocker : decision.blockers()) {
+      if (blocker == null || blocker.resource() == null) {
+        continue;
+      }
+      traceResourceLifecycle(request, blocker.resource(), blocker, blocker, "blocker-read", source);
+    }
+  }
+
+  /**
+   * 记录因队头 winner 保留而产生的仲裁阻塞。
+   *
+   * <p>recoverable STOP rollback 会释放可执行 hard authority，但释放前会重新写入队列位次。该 trace
+   * 用于证明后续事件重评估没有让低优先级竞争者绕过队头。
+   */
+  private void tracePendingWinnerArbitration(
+      String source,
+      OccupancyRequest request,
+      OccupancyResource resource,
+      Optional<OccupancyQueueEntry> blockingEntry,
+      String decision,
+      String reason) {
+    if (request == null || resource == null || blockingEntry == null || blockingEntry.isEmpty()) {
+      return;
+    }
+    // 预览路径（ETA 估算）不入队、不改状态，它被队首挡住并不代表列车真的走不了；
+    // 且 canEnterPreview 调用远比权威判定频繁，记录下来会把真正的仲裁证据淹没。
+    // 该 trace 的用途是回答“这辆车为什么进不去”，因此只记录权威判定。
+    if (source != null && source.toLowerCase(Locale.ROOT).contains("preview")) {
+      return;
+    }
+    OccupancyQueueEntry entry = blockingEntry.get();
+    long pendingWinnerWaitSeconds =
+        Math.max(0L, Duration.between(entry.firstSeen(), request.now()).toSeconds());
+    // 仲裁主键是 firstSeen 减去有上限的优先级折扣，优先级只有 500ms/点、最多 2 分钟。
+    // 因此“谁先入队”几乎总是决定性的；把两侧的 firstSeen 年龄与折扣一并输出，
+    // 才能判断一次长时间阻塞到底来自优先级、还是来自远处列车提前入队占位。
+    long priorityAdvantageSeconds =
+        Math.min(
+            QUEUE_MAX_PRIORITY_ADVANTAGE.toSeconds(),
+            Math.max(
+                -QUEUE_MAX_PRIORITY_ADVANTAGE.toSeconds(),
+                entry.priority() * QUEUE_PRIORITY_POINT_ADVANTAGE.toMillis() / 1000L));
+    OccupancyQueueEntry requesterEntry =
+        Optional.ofNullable(queues.get(resource))
+            .flatMap(queue -> queue.entryFor(request.trainName()))
+            .orElse(null);
+    long requesterWaitSeconds =
+        requesterEntry == null
+            ? -1L
+            : Math.max(0L, Duration.between(requesterEntry.firstSeen(), request.now()).toSeconds());
+    String message =
+        "SMART_PENDING_WINNER_ARBITRATION requesterTrain="
+            + safeLifecycleValue(request.trainName())
+            + " requesterPriority="
+            + request.priority()
+            + " requesterEntryOrder="
+            + (requesterEntry == null ? -1 : requesterEntry.entryOrder())
+            + " requesterWaitSeconds="
+            + requesterWaitSeconds
+            + " pendingWinnerTrain="
+            + safeLifecycleValue(entry.trainName())
+            + " pendingWinnerPriority="
+            + entry.priority()
+            + " pendingWinnerEntryOrder="
+            + entry.entryOrder()
+            + " pendingWinnerWaitSeconds="
+            + pendingWinnerWaitSeconds
+            + " pendingWinnerPriorityAdvantageSeconds="
+            + priorityAdvantageSeconds
+            + " priorityAdvantageCapSeconds="
+            + QUEUE_MAX_PRIORITY_ADVANTAGE.toSeconds()
+            + " resource="
+            + resource
+            + " decision="
+            + safeLifecycleValue(decision)
+            + " reason="
+            + safeLifecycleValue(reason)
+            + " source="
+            + safeLifecycleValue(source);
+
+    // 只在仲裁结论变化时输出：赢家、决定、原因或双方的相对位次发生变化才算新证据。
+    String signature =
+        safeLifecycleValue(entry.trainName())
+            + "|"
+            + safeLifecycleValue(decision)
+            + "|"
+            + safeLifecycleValue(reason)
+            + "|"
+            + entry.entryOrder()
+            + "|"
+            + (requesterEntry == null ? -1 : requesterEntry.entryOrder());
+    String key = resource + "@" + TrainNameNormalizer.normalizeKey(request.trainName());
+    if (signature.equals(pendingWinnerArbitrationSignatures.get(key))) {
+      return;
+    }
+    pendingWinnerArbitrationSignatures.put(key, signature);
+    SignalComputationTrace.emitRaw(message);
+  }
+
+  private boolean isSwitcherConflictResource(OccupancyResource resource) {
+    return resource != null
+        && resource.kind() == ResourceKind.CONFLICT
+        && resource.key().startsWith("switcher:")
+        && !resource.key().substring("switcher:".length()).isBlank();
+  }
+
+  private boolean sameDirectionSectionAllowsSwitcherClaim(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim, String source) {
+    if (claim == null) {
+      return false;
+    }
+    return sameDirectionSectionAllowsSwitcherTrain(
+        request, resource, claim.trainName(), source, "claim", false);
+  }
+
+  private boolean sameDirectionSectionAllowsSwitcherTrain(
+      OccupancyRequest request,
+      OccupancyResource switcherResource,
+      String otherTrain,
+      String source,
+      String relationSource,
+      boolean knownDirectedPathLeader) {
+    if (!isSwitcherConflictResource(switcherResource)
+        || request == null
+        || otherTrain == null
+        || otherTrain.isBlank()) {
+      return false;
+    }
+    Optional<DirectedTraversalContext.SwitcherPathSignature> requested =
+        switcherSignatureFor(request, switcherResource);
+    Optional<DirectedTraversalContext.SwitcherPathSignature> held =
+        "queue".equals(relationSource)
+            ? switcherQueueSignature(switcherResource, otherTrain)
+            : switcherClaimSignature(switcherResource, otherTrain);
+    if (switcherTerminalBoundaryRequiresMutex(switcherResource, requested, held)) {
+      traceSwitcherTerminalBoundaryMutex(
+          source, request, switcherResource, otherTrain, requested, held, relationSource);
+      return false;
+    }
+    SwitcherMovementTopology.Classification movement =
+        SwitcherMovementTopology.classifyRememberedSignatures(switcherResource, requested, held);
+    if (movement.relation() != SwitcherMovementTopology.Relation.SAME_MOVEMENT) {
+      return false;
+    }
+    Optional<SectionDirectionMatch> match = sameDirectionSectionMatch(request, otherTrain);
+    if (match.isEmpty() && !knownDirectedPathLeader) {
+      return false;
+    }
+    traceSwitcherSameDirectionSectionFollowThrough(
+        source,
+        request,
+        switcherResource,
+        otherTrain,
+        relationSource,
+        match.orElse(
+            new SectionDirectionMatch(
+                switcherResource, CorridorDirection.UNKNOWN, "same-route-progress")));
+    return true;
+  }
+
+  private Optional<SectionDirectionMatch> sameDirectionSectionMatch(
+      OccupancyRequest request, String otherTrain) {
+    if (request == null || otherTrain == null || otherTrain.isBlank()) {
+      return Optional.empty();
+    }
+    for (OccupancyResource section : request.resourceList()) {
+      if (!isSingleCorridorConflict(section)) {
+        continue;
+      }
+      Optional<CorridorDirection> requestedDirection = resolveCorridorDirection(request, section);
+      if (requestedDirection.isEmpty()) {
+        continue;
+      }
+      CorridorDirection requested = requestedDirection.get();
+      OccupancyClaim claim = findClaim(claims.get(section), otherTrain);
+      if (claim != null
+          && claim.corridorDirection().isPresent()
+          && claim.corridorDirection().get() == requested) {
+        return Optional.of(new SectionDirectionMatch(section, requested, "claim"));
+      }
+      ConflictQueue queue = queues.get(section);
+      if (queue == null) {
+        continue;
+      }
+      Optional<CorridorDirection> queued = queue.directionOf(otherTrain);
+      if (queued.isPresent() && queued.get() == requested) {
+        return Optional.of(new SectionDirectionMatch(section, requested, "queue"));
+      }
+    }
+    return Optional.empty();
+  }
+
+  private void traceSwitcherSameDirectionSectionFollowThrough(
+      String source,
+      OccupancyRequest request,
+      OccupancyResource switcherResource,
+      String otherTrain,
+      String relationSource,
+      SectionDirectionMatch match) {
+    if (request == null || switcherResource == null || match == null) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        "SMART_SWITCHER_SAME_DIRECTION_SECTION_FOLLOW_THROUGH train="
+            + safeLifecycleValue(request.trainName())
+            + " otherTrain="
+            + safeLifecycleValue(otherTrain)
+            + " resource="
+            + switcherResource
+            + " section="
+            + match.section()
+            + " direction="
+            + match.direction()
+            + " source="
+            + safeLifecycleValue(source)
+            + " relationSource="
+            + safeLifecycleValue(relationSource)
+            + " evidence="
+            + safeLifecycleValue(match.evidence())
+            + " decision=same-section-same-direction");
+  }
+
+  private boolean switcherQueueAllowsEntry(
+      OccupancyRequest request, OccupancyResource resource, ConflictQueue queue, Instant now) {
+    return switcherConflictingQueueHead(request, resource, queue, null, now)
+        .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), request.trainName()))
+        .orElse(true);
+  }
+
+  private boolean switcherQueueWouldAllowEntry(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      ConflictQueue queue,
+      int priority,
+      int entryOrder,
+      Instant now) {
+    Instant safeNow = now == null ? clockNow() : now;
+    OccupancyQueueEntry candidate =
+        queue.candidateEntry(
+            request.trainName(),
+            queueDirectionFor(request, resource),
+            safeNow,
+            priority,
+            entryOrder);
+    return switcherConflictingQueueHead(request, resource, queue, candidate, safeNow)
+        .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), request.trainName()))
+        .orElse(true);
+  }
+
+  private Optional<OccupancyQueueEntry> blockingQueueEntryFor(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      ConflictQueue queue,
+      CorridorDirection direction,
+      OccupancyQueueEntry candidate,
+      Instant now) {
+    if (isSwitcherConflictResource(resource)) {
+      return switcherConflictingQueueHead(request, resource, queue, candidate, now)
+          .filter(
+              entry ->
+                  !TrainNameNormalizer.sameLogicalTrain(entry.trainName(), request.trainName()));
+    }
+    return queue.blockingEntry(direction, now);
+  }
+
+  private Optional<OccupancyQueueEntry> switcherConflictingQueueHead(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      ConflictQueue queue,
+      OccupancyQueueEntry candidate,
+      Instant now) {
+    if (!isSwitcherConflictResource(resource) || request == null || queue == null) {
+      return Optional.empty();
+    }
+    List<OccupancyQueueEntry> entries = new ArrayList<>(queue.snapshotEntries(now));
+    if (candidate != null && !queue.contains(candidate.trainName())) {
+      entries.add(candidate);
+    }
+    OccupancyQueueEntry best = null;
+    for (OccupancyQueueEntry entry : entries) {
+      if (entry == null) {
+        continue;
+      }
+      if (!switcherQueueEntryConflictsWithRequest(request, resource, entry)) {
+        continue;
+      }
+      if (best == null || queue.compareEntries(entry, best, now) < 0) {
+        best = entry;
+      }
+    }
+    return Optional.ofNullable(best);
+  }
+
+  private boolean switcherQueueEntryConflictsWithRequest(
+      OccupancyRequest request, OccupancyResource resource, OccupancyQueueEntry entry) {
+    if (TrainNameNormalizer.sameLogicalTrain(entry.trainName(), request.trainName())) {
+      return true;
+    }
+    if (sameDirectionSectionAllowsSwitcherTrain(
+        request, resource, entry.trainName(), "queue", "queue", false)) {
+      return false;
+    }
+    return true;
+  }
+
+  private Optional<DirectedTraversalContext.SwitcherPathSignature> switcherSignatureFor(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return Optional.empty();
+    }
+    return SwitcherMovementTopology.verifiedSignature(resource, request.movementPlanSnapshot());
+  }
+
+  private Optional<DirectedTraversalContext.SwitcherPathSignature> switcherClaimSignature(
+      OccupancyResource resource, String trainName) {
+    if (!isSwitcherConflictResource(resource)) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(
+        switcherClaimSignatures.get(new SwitcherClaimKey(resource, trainName)));
+  }
+
+  private Optional<DirectedTraversalContext.SwitcherPathSignature> switcherQueueSignature(
+      OccupancyResource resource, String trainName) {
+    if (!isSwitcherConflictResource(resource)) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(
+        switcherQueueSignatures.get(new SwitcherClaimKey(resource, trainName)));
+  }
+
+  private boolean switcherTerminalBoundaryRequiresMutex(
+      OccupancyResource resource,
+      Optional<DirectedTraversalContext.SwitcherPathSignature> first,
+      Optional<DirectedTraversalContext.SwitcherPathSignature> second) {
+    if (!isSwitcherConflictResource(resource)) {
+      return false;
+    }
+    return first
+            .map(signature -> switcherSignatureTouchesTerminalBoundary(resource, signature))
+            .orElse(false)
+        || second
+            .map(signature -> switcherSignatureTouchesTerminalBoundary(resource, signature))
+            .orElse(false);
+  }
+
+  private boolean switcherSignatureTouchesTerminalBoundary(
+      OccupancyResource resource, DirectedTraversalContext.SwitcherPathSignature signature) {
+    if (!isSwitcherConflictResource(resource) || signature == null) {
+      return false;
+    }
+    String switcherNode = switcherNodeValue(resource);
+    if (switcherNode.isBlank()) {
+      return false;
+    }
+    List<NodeId> path = signature.pathNodes();
+    for (int i = 0; i < path.size(); i++) {
+      NodeId node = path.get(i);
+      if (node == null || !switcherNode.equals(node.value())) {
+        continue;
+      }
+      if (i > 0 && isStationOrDepotBoundaryNode(path.get(i - 1))) {
+        return true;
+      }
+      if (i + 1 < path.size() && isStationOrDepotBoundaryNode(path.get(i + 1))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private String switcherNodeValue(OccupancyResource resource) {
+    if (!isSwitcherConflictResource(resource)) {
+      return "";
+    }
+    return resource.key().substring("switcher:".length()).trim();
+  }
+
+  private boolean isStationOrDepotBoundaryNode(NodeId node) {
+    return node != null && isStationOrDepotBoundaryNodeValue(node.value());
+  }
+
+  private boolean isStationOrDepotBoundaryNodeValue(String value) {
+    if (value == null || value.isBlank()) {
+      return false;
+    }
+    String[] parts = value.split(":");
+    return parts.length == 4 && ("S".equals(parts[1]) || "D".equals(parts[1]));
+  }
+
+  private void traceSwitcherTerminalBoundaryMutex(
+      String source,
+      OccupancyRequest request,
+      OccupancyResource resource,
+      String otherTrain,
+      Optional<DirectedTraversalContext.SwitcherPathSignature> requested,
+      Optional<DirectedTraversalContext.SwitcherPathSignature> existing,
+      String relationSource) {
+    SignalComputationTrace.emitRaw(
+        "SMART_SWITCHER_TERMINAL_BOUNDARY_MUTEX train="
+            + safeLifecycleValue(request == null ? "-" : request.trainName())
+            + " otherTrain="
+            + safeLifecycleValue(otherTrain)
+            + " resource="
+            + resource
+            + " source="
+            + safeLifecycleValue(source)
+            + " relationSource="
+            + safeLifecycleValue(relationSource)
+            + " requestedSignature="
+            + requested.map(Object::toString).orElse("-")
+            + " existingSignature="
+            + existing.map(Object::toString).orElse("-")
+            + " decision=terminal-boundary-switcher-mutex");
+  }
+
+  private boolean rememberSwitcherClaimSignature(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (!isSwitcherConflictResource(resource) || request == null) {
+      return false;
+    }
+    Optional<DirectedTraversalContext.SwitcherPathSignature> signature =
+        switcherSignatureFor(request, resource);
+    SwitcherClaimKey key = new SwitcherClaimKey(resource, request.trainName());
+    if (signature.isEmpty()) {
+      return switcherClaimSignatures.remove(key) != null;
+    }
+    DirectedTraversalContext.SwitcherPathSignature previous =
+        switcherClaimSignatures.put(key, signature.get());
+    return !Objects.equals(previous, signature.get());
+  }
+
+  private boolean rememberSwitcherQueueSignature(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (!isSwitcherConflictResource(resource) || request == null) {
+      return false;
+    }
+    Optional<DirectedTraversalContext.SwitcherPathSignature> signature =
+        switcherSignatureFor(request, resource);
+    SwitcherClaimKey key = new SwitcherClaimKey(resource, request.trainName());
+    if (signature.isEmpty()) {
+      return switcherQueueSignatures.remove(key) != null;
+    }
+    DirectedTraversalContext.SwitcherPathSignature previous =
+        switcherQueueSignatures.put(key, signature.get());
+    return !Objects.equals(previous, signature.get());
+  }
+
+  private void forgetSwitcherClaimSignature(OccupancyResource resource, String trainName) {
+    if (!isSwitcherConflictResource(resource)) {
+      return;
+    }
+    switcherClaimSignatures.remove(new SwitcherClaimKey(resource, trainName));
+  }
+
+  private void forgetSwitcherQueueSignature(OccupancyResource resource, String trainName) {
+    if (!isSwitcherConflictResource(resource)) {
+      return;
+    }
+    switcherQueueSignatures.remove(new SwitcherClaimKey(resource, trainName));
+  }
+
+  private void pruneDetachedSwitcherQueueSignatures() {
+    if (switcherQueueSignatures.isEmpty()) {
+      return;
+    }
+    switcherQueueSignatures
+        .entrySet()
+        .removeIf(
+            entry -> {
+              ConflictQueue queue = queues.get(entry.getKey().resource());
+              return queue == null || !queue.contains(entry.getKey().trainKey());
+            });
+  }
+
+  private int ownerCount(OccupancyResource resource) {
+    List<OccupancyClaim> list = claims.get(resource);
+    return list == null ? 0 : list.size();
+  }
+
+  private List<String> otherOwners(OccupancyResource resource, String owner) {
+    List<OccupancyClaim> list = claims.get(resource);
+    if (list == null || list.isEmpty()) {
+      return List.of();
+    }
+    List<String> result = new ArrayList<>();
+    for (OccupancyClaim claim : list) {
+      if (claim == null || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), owner)) {
+        continue;
+      }
+      result.add(claim.trainName());
+    }
+    return List.copyOf(result);
+  }
+
+  private static String roleText(ClaimRole role) {
+    return role == null ? "-" : role.name();
+  }
+
+  private static String routeIdText(OccupancyRequest request, OccupancyClaim claim) {
+    if (request != null && request.routeId().isPresent()) {
+      return request.routeId().get().value();
+    }
+    return claim == null ? "-" : claim.routeId().map(Object::toString).orElse("-");
+  }
+
+  private static String routeIndexText(OccupancyRequest request) {
+    return request == null
+        ? "-"
+        : request
+            .directedContext()
+            .map(DirectedTraversalContext::currentIndex)
+            .map(String::valueOf)
+            .orElse("-");
+  }
+
+  private static String currentNodeText(OccupancyRequest request) {
+    return request == null
+        ? "-"
+        : request
+            .directedContext()
+            .flatMap(DirectedTraversalContext::currentNode)
+            .map(NodeId::value)
+            .orElse("-");
+  }
+
+  private static String effectiveToNodeText(OccupancyRequest request) {
+    return request == null
+        ? "-"
+        : request
+            .directedContext()
+            .flatMap(DirectedTraversalContext::effectiveToNode)
+            .map(NodeId::value)
+            .orElse("-");
+  }
+
+  private static String physicalFootprintText(ClaimRole role) {
+    if (role == ClaimRole.PHYSICAL_FOOTPRINT) {
+      return "true";
+    }
+    if (role == ClaimRole.UNLOCK_RESERVATION
+        || role == ClaimRole.QUEUE_POSITION
+        || role == ClaimRole.LOOKAHEAD_PREVIEW) {
+      return "false";
+    }
+    return "unknown";
+  }
+
+  private static String reservedAuthorityText(ClaimRole role) {
+    if (role == ClaimRole.UNLOCK_RESERVATION) {
+      return "true";
+    }
+    if (role == ClaimRole.QUEUE_POSITION || role == ClaimRole.LOOKAHEAD_PREVIEW) {
+      return "false";
+    }
+    return "unknown";
+  }
+
+  private static String claimSourceText(
+      OccupancyRequest request, OccupancyResource resource, ClaimRole role) {
+    if (request != null && resource != null) {
+      return request.intentFor(resource).name().toLowerCase(Locale.ROOT);
+    }
+    return role == null ? "unknown" : role.name().toLowerCase(Locale.ROOT);
+  }
+
+  private static String safeLifecycleValue(String value) {
+    return value == null || value.isBlank() ? "-" : value.trim();
   }
 
   /**
@@ -660,6 +2581,37 @@ public final class SimpleOccupancyManager
     return List.copyOf(snapshot);
   }
 
+  @Override
+  public synchronized boolean isProvenSameDirectionFollower(
+      OccupancyRequest request,
+      OccupancyResource blockerResource,
+      String blockerTrainName,
+      boolean knownDirectedPathLeader) {
+    if (request == null
+        || blockerResource == null
+        || blockerTrainName == null
+        || blockerTrainName.isBlank()
+        || TrainNameNormalizer.sameLogicalTrain(request.trainName(), blockerTrainName)) {
+      return false;
+    }
+    if (isSwitcherConflictResource(blockerResource)) {
+      String relationSource =
+          findClaim(claims.get(blockerResource), blockerTrainName) == null ? "queue" : "claim";
+      return sameDirectionSectionAllowsSwitcherTrain(
+          request,
+          blockerResource,
+          blockerTrainName,
+          "forward-risk",
+          relationSource,
+          knownDirectedPathLeader);
+    }
+    if (isSingleCorridorConflict(blockerResource)) {
+      return knownDirectedPathLeader
+          || sameDirectionSectionMatch(request, blockerTrainName).isPresent();
+    }
+    return false;
+  }
+
   /**
    * 获取排队快照。
    *
@@ -678,7 +2630,7 @@ public final class SimpleOccupancyManager
       int activeClaims = claims.getOrDefault(resource, List.of()).size();
       snapshots.add(
           new OccupancyQueueSnapshot(
-              resource, activeDirection, activeClaims, queue.snapshotEntries()));
+              resource, activeDirection, activeClaims, queue.snapshotEntries(clockNow())));
     }
     return List.copyOf(snapshots);
   }
@@ -716,6 +2668,9 @@ public final class SimpleOccupancyManager
       if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
         continue;
       }
+      if (OccupancyResourceResolver.isInterlockingConflict(resource)) {
+        continue;
+      }
       OccupancyClaim selfClaim = findClaim(claims.get(resource), request.trainName());
       if (selfClaim == null || selfClaim.role() != ClaimRole.PROTECTIVE_RETAIN) {
         continue;
@@ -746,6 +2701,7 @@ public final class SimpleOccupancyManager
               request.intentFor(resource),
               held.get(),
               requested.get(),
+              hardAuthorityScope(request),
               "opposite-direction",
               request.now()));
     }
@@ -767,6 +2723,233 @@ public final class SimpleOccupancyManager
           false, false, "self-owned-stale-retain-not-found", List.of());
     }
     return releaseSelfOwnedStaleRetain(trainName, candidateOpt.get());
+  }
+
+  /** {@link #yieldQueuePosition} 的结果。 */
+  public record QueuePositionYieldResult(boolean removed, String reason) {
+    public QueuePositionYieldResult {
+      reason = reason == null || reason.isBlank() ? "-" : reason;
+    }
+  }
+
+  /**
+   * 撤销某列车在某资源上的**排队位次**。
+   *
+   * <p>为什么这是所有解环手段里代价最小的一种：排队位次<b>不是占用</b>。本类自己的 {@code createQueueBlocker} 注释写着「该 blocker
+   * 不代表物理占用或已授予的行车权」， 而 {@code physicalOccupancyText(QUEUE_POSITION)} 与 {@code
+   * reservedAuthorityText(QUEUE_POSITION)} 都返回 {@code "false"}。因此撤销它<b>不可能造成共占</b>——它改变的只是仲裁顺序。
+   *
+   * <p>对照：释放 {@code PROTECTIVE_RETAIN} 会动到物理空间（车体可能还压着）， 释放 {@code MOVEMENT_REQUIRED}
+   * 会动到已授予的行车权。排队位次两者都不是。
+   *
+   * <p>本方法只做"撤销"这一个动作，<b>不判断该不该撤</b>——成环的判定由调用方用 blocker 快照完成，因为那需要跨列车的等待关系，不属于账本的职责。
+   *
+   * @param resource 目标资源
+   * @param trainName 要撤销其排队位次的列车
+   * @return 是否真的撤销了
+   */
+  public synchronized QueuePositionYieldResult yieldQueuePosition(
+      OccupancyResource resource, String trainName) {
+    if (resource == null || trainName == null || trainName.isBlank()) {
+      return new QueuePositionYieldResult(false, "missing-input");
+    }
+    ConflictQueue queue = queues.get(resource);
+    if (queue == null) {
+      return new QueuePositionYieldResult(false, "no-queue");
+    }
+    if (!queue.contains(trainName)) {
+      return new QueuePositionYieldResult(false, "not-queued");
+    }
+    Instant now = clockNow();
+    Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+    OccupancyQueueEntry removedEntry = queue.entryFor(trainName).orElse(null);
+    if (!queue.remove(trainName)) {
+      return new QueuePositionYieldResult(false, "remove-noop");
+    }
+    traceQueueLifecycle(
+        resource, removedEntry, "WAITING_TRAIN", "remove", "smart-queue-position-yield", null);
+    // 道岔队列签名必须跟着队列项一起清——否则仲裁侧仍然认为该车在排队，
+    // 而本方法针对的死锁恰恰就是 switcher 冲突。
+    forgetSwitcherQueueSignature(resource, trainName);
+    // 割排队位的目的是让新队首**立刻**获得仲裁机会。不发资格变化就只能等下一轮
+    // 周期 tick，而被割的车每 tick 都在重新入队，很可能抢先把环恢复，这次割就白割了。
+    List<String> newlyEligible = newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now));
+    if (queue.isEmpty()) {
+      queues.remove(resource);
+    }
+    version.incrementAndGet();
+    publishQueueChangedEvent(trainName, List.of(resource), newlyEligible, now);
+    return new QueuePositionYieldResult(true, "yielded");
+  }
+
+  /** {@link #releaseSelfOwnedPhysicalEdgeRetain} 的结果。 */
+  public record PhysicalEdgeRetainReleaseResult(
+      int releasedCount,
+      String reason,
+      List<OccupancyResource> released,
+      int releasedEdges,
+      int releasedNodes,
+      int skippedStillCovered,
+      int skippedExternalClaim,
+      int releasedDespiteQueue) {
+
+    /** 兼容旧调用：不带分项计数。 */
+    public PhysicalEdgeRetainReleaseResult(
+        int releasedCount, String reason, List<OccupancyResource> released) {
+      this(releasedCount, reason, released, 0, 0, 0, 0, 0);
+    }
+
+    public PhysicalEdgeRetainReleaseResult {
+      released = released == null ? List.of() : List.copyOf(released);
+      reason = reason == null || reason.isBlank() ? "-" : reason;
+    }
+
+    /** 逐原因的跳过计数，用于让"为什么没释放"可归因。 */
+    public String skipBreakdown() {
+      return "stillCovered="
+          + skippedStillCovered
+          + " externalClaim="
+          + skippedExternalClaim
+          + " despiteQueue="
+          + releasedDespiteQueue;
+    }
+  }
+
+  /**
+   * Phase 4：用**车体实测覆盖**证明列车已经离开某条 EDGE，才释放它身后的尾部保护。
+   *
+   * <p>为什么必须另起一条路径，而不是放宽既有的 CONFLICT 判据：
+   *
+   * <ul>
+   *   <li>既有 {@code strictSelfOwnedProtectiveRetainCandidate} 要求 {@code heldDirection !=
+   *       requestedDirection}，那是**反向自锁**语义； 而"车已驶离身后区间"是**同向**，两者是不同的东西，复用会把判据用错地方。
+   *   <li>CONFLICT 是抽象互斥键，NODE/EDGE 对应**物理空间**；车体还压着时释放 = co-occupancy，红线。
+   *       所以这条路径的放行条件只有一个：**实测覆盖证明它不在上面**。
+   * </ul>
+   *
+   * <p>为什么值得做：尾部保护滞留（{@code PROTECTIVE_RETAIN_HOLD}）是全网滞留的主要来源之一，而既有回收机制 {@code
+   * selfRetainReleaseCandidate} 开头就在 {@code kind != CONFLICT} 时返回；实际挡路的 blocker 却几乎全是 NODE/EDGE，
+   * 判据与现实永不相交。
+   *
+   * <p><b>fail-closed 三重</b>：
+   *
+   * <ol>
+   *   <li>{@code coverage.complete()} 为假（观测不可用 / cell 索引不可用）⇒ 一个都不放；
+   *   <li>资源仍在覆盖集合里 ⇒ 车体还压着，不放；
+   *   <li>该资源上存在任何外部 claim 或外部排队 ⇒ 不放，避免释放后把别人放进来。
+   * </ol>
+   *
+   * <p>处理 {@link ResourceKind#EDGE} 与 {@link ResourceKind#NODE}。NODE 的安全性取决于覆盖集合的构造**方向**： {@code
+   * livePhysicalEdgeCoverage} 把每条已覆盖 EDGE 的两个端点也**放进**覆盖集合，因此覆盖集合被放大，
+   * 这里的放行条件（"资源不在覆盖集合里"）只会更严。反向推导——"不是任何已覆盖区间的端点就算已离开"——
+   * 依赖"光栅化无缝隙"这个未经验证的前提，推错就是在车实际压着的节点上解除保护，那才是红线。两者不可混为一谈。
+   *
+   * <p>NODE 必须一并处理：只释放 EDGE 时，列车会因为身后仍留着的 NODE 保护继续卡住，并把后车一起堵住。
+   */
+  public synchronized PhysicalEdgeRetainReleaseResult releaseSelfOwnedPhysicalEdgeRetain(
+      String trainName, boolean coverageComplete, Set<OccupancyResource> coveredResources) {
+    String key = TrainNameNormalizer.normalizeKey(trainName);
+    if (key.isEmpty()) {
+      return new PhysicalEdgeRetainReleaseResult(0, "missing-train", List.of());
+    }
+    if (!coverageComplete) {
+      // 缺证据 ⇒ 无从判断 ⇒ 一个都不放。绝不把"看不见"当成"已离开"。
+      return new PhysicalEdgeRetainReleaseResult(0, "coverage-incomplete", List.of());
+    }
+    Set<OccupancyResource> covered = coveredResources == null ? Set.of() : coveredResources;
+    List<OccupancyResource> releasable = new ArrayList<>();
+    int releasableEdges = 0;
+    int releasableNodes = 0;
+    int skippedStillCovered = 0;
+    int skippedExternalClaim = 0;
+    int releasedDespiteQueue = 0;
+    for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
+      OccupancyResource resource = entry.getKey();
+      if (resource == null) {
+        continue;
+      }
+      // NODE 与 EDGE 都处理。挡路的 blocker 以 NODE 为主：只释放 EDGE 时，
+      // 车会因为身后仍留着的 NODE 继续卡住，并把后车一起堵住。
+      //
+      // 安全性来自覆盖集合的构造方向：节点是由「已覆盖 EDGE 的端点」**加进**覆盖集合的，
+      // 只会让这里更难放行。判据本身没有放宽，仍然是「资源不在覆盖集合里」。
+      if (resource.kind() != ResourceKind.EDGE && resource.kind() != ResourceKind.NODE) {
+        continue;
+      }
+      List<OccupancyClaim> holders = entry.getValue();
+      if (holders == null || holders.isEmpty()) {
+        continue;
+      }
+      boolean selfProtectiveRetain = false;
+      boolean externalPresent = false;
+      for (OccupancyClaim claim : holders) {
+        if (claim == null) {
+          continue;
+        }
+        if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+          if (claim.role() == ClaimRole.PROTECTIVE_RETAIN) {
+            selfProtectiveRetain = true;
+          }
+        } else {
+          externalPresent = true;
+        }
+      }
+      if (!selfProtectiveRetain) {
+        continue;
+      }
+      if (covered.contains(resource)) {
+        skippedStillCovered++;
+        continue; // 车体仍压在上面。
+      }
+      if (externalPresent) {
+        skippedExternalClaim++;
+        continue;
+      }
+      ConflictQueue queue = queues.get(resource);
+      if (queue != null && queue.hasAnyOtherTrain(trainName)) {
+        // 计数，但不据此拒绝放行。
+        //
+        // 两点都要说清楚：
+        //
+        // 其一，这个分支**在本路径上不可达**。队列只为 CONFLICT 建立
+        // （见 isQueueableConflict：kind != CONFLICT 直接返回 false），而这里只看 EDGE/NODE，
+        // 因此 queues.get(resource) 恒为 null，在这里拒绝放行只会是一段死代码。
+        // 保留计数只是为了万一将来 NODE/EDGE 也进队列时能立刻看见，而不是无声地改变行为。
+        //
+        // 其二，即便将来可达，也不该据此拒绝。这条路径的前提是**实测覆盖已证明车不在上面**，
+        // 此时"有别人在排队等它"正是应该释放的理由。共占风险不因排队而增加：
+        // 放行条件仍然只有"车体实测不在该资源上"。
+        releasedDespiteQueue++;
+      }
+      releasable.add(resource);
+      if (resource.kind() == ResourceKind.NODE) {
+        releasableNodes++;
+      } else {
+        releasableEdges++;
+      }
+    }
+    if (releasable.isEmpty()) {
+      return new PhysicalEdgeRetainReleaseResult(
+          0,
+          "no-departed-edge-retain",
+          List.of(),
+          0,
+          0,
+          skippedStillCovered,
+          skippedExternalClaim,
+          releasedDespiteQueue);
+    }
+    int released =
+        releaseResourcesByTrainAndRole(trainName, releasable, ClaimRole.PROTECTIVE_RETAIN);
+    return new PhysicalEdgeRetainReleaseResult(
+        released,
+        released > 0 ? "released" : "release-noop",
+        List.copyOf(releasable),
+        releasableEdges,
+        releasableNodes,
+        skippedStillCovered,
+        skippedExternalClaim,
+        releasedDespiteQueue);
   }
 
   /**
@@ -791,6 +2974,10 @@ public final class SimpleOccupancyManager
       return new SelfOwnedStaleRetainReleaseResult(
           true, false, "external-owner-present", List.of());
     }
+    if (hasExternalClaimInScope(candidate)) {
+      return new SelfOwnedStaleRetainReleaseResult(
+          true, false, "external-hard-blocker-present", List.of());
+    }
     ConflictQueue queue = queues.get(candidate.resource());
     if (queue != null && queue.hasAnyOtherTrain(candidate.trainName())) {
       return new SelfOwnedStaleRetainReleaseResult(
@@ -809,6 +2996,9 @@ public final class SimpleOccupancyManager
       if (!matchesSelfOwnedRetainCandidate(candidate, claim)) {
         continue;
       }
+      traceResourceLifecycle(
+          null, candidate.resource(), claim, null, "release", "release-self-owned-stale-retain");
+      forgetSwitcherClaimSignature(candidate.resource(), claim.trainName());
       iterator.remove();
       released = true;
     }
@@ -825,7 +3015,7 @@ public final class SimpleOccupancyManager
     releaseDeadlockLocksForTrain(candidate.trainName());
     selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(candidate.trainName()));
     version.incrementAndGet();
-    publishReleasedEvent(candidate.trainName(), List.of(candidate.resource()), Instant.now());
+    publishReleasedEvent(candidate.trainName(), List.of(candidate.resource()), clockNow());
     return new SelfOwnedStaleRetainReleaseResult(
         true, true, "released-self-owned-stale-retain", List.of(candidate.resource()));
   }
@@ -833,7 +3023,8 @@ public final class SimpleOccupancyManager
   /**
    * 仅刷新冲突队列中的排队位次，不真正获取占用。
    *
-   * <p>用于停站/门控场景：列车还停在当前位置，但需要持续保留自己在前方冲突区的排队顺序，避免后车先抢到队头。
+   * <p>用于停站/门控场景：列车还停在当前位置，但需要持续保留自己在前方冲突区的排队顺序，避免后车先抢到队头。 lastSeen 心跳始终更新；只有方向、优先级、稳定 entryOrder
+   * 或道岔路径签名变化时才推进 occupancy version。
    */
   @Override
   public synchronized void touchQueues(OccupancyRequest request) {
@@ -851,8 +3042,9 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      touchQueueWithDirectionTrace(request, resource, queue, direction, now, "touchQueues");
-      version.incrementAndGet();
+      QueueTouchResult queueTouch =
+          touchQueueWithDirectionTrace(request, resource, queue, direction, now, "touchQueues");
+      commitQueueTouchChange(request, resource, now, queueTouch);
     }
   }
 
@@ -867,6 +3059,9 @@ public final class SimpleOccupancyManager
       return 0;
     }
     int removed = 0;
+    Instant now = clockNow();
+    List<OccupancyResource> changedResources = new ArrayList<>();
+    Set<String> eligibleTrainNames = new LinkedHashSet<>();
     for (OccupancyResource resource : resources) {
       if (!isQueueableConflict(resource)) {
         continue;
@@ -875,13 +3070,21 @@ public final class SimpleOccupancyManager
       if (queue == null || !queue.contains(trainName)) {
         continue;
       }
+      Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+      OccupancyQueueEntry removedEntry = queue.entryFor(trainName).orElse(null);
       queue.remove(trainName);
+      traceQueueLifecycle(
+          resource, removedEntry, "WAITING_TRAIN", "remove", "explicit-remove", null);
+      forgetSwitcherQueueSignature(resource, trainName);
       removed++;
+      changedResources.add(resource);
+      eligibleTrainNames.addAll(newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now)));
       version.incrementAndGet();
       if (queue.isEmpty()) {
         queues.remove(resource);
       }
     }
+    publishQueueChangedEvent(trainName, changedResources, List.copyOf(eligibleTrainNames), now);
     return removed;
   }
 
@@ -912,6 +3115,8 @@ public final class SimpleOccupancyManager
       while (claimIterator.hasNext()) {
         OccupancyClaim claim = claimIterator.next();
         if (claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+          traceResourceLifecycle(null, entry.getKey(), claim, null, "release", "release-by-train");
+          forgetSwitcherClaimSignature(entry.getKey(), claim.trainName());
           claimIterator.remove();
           releasedResources.add(entry.getKey());
           removed++;
@@ -921,13 +3126,15 @@ public final class SimpleOccupancyManager
         iterator.remove();
       }
     }
-    removeFromQueuesForTrain(trainName);
-    releaseDeadlockLocksForTrain(trainName);
+    int removedQueueEntries = removeFromQueuesForTrain(trainName);
+    int removedReleaseLocks = releaseDeadlockLocksForTrain(trainName);
     selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(trainName));
     // 发布占用释放事件
-    if (!releasedResources.isEmpty()) {
+    if (!releasedResources.isEmpty() || removedQueueEntries > 0 || removedReleaseLocks > 0) {
       version.incrementAndGet();
-      publishReleasedEvent(trainName, releasedResources, Instant.now());
+    }
+    if (!releasedResources.isEmpty()) {
+      publishReleasedEvent(trainName, releasedResources, clockNow());
     }
     return removed;
   }
@@ -951,20 +3158,30 @@ public final class SimpleOccupancyManager
     }
     if (trainName != null && trainName.isPresent()) {
       String expected = trainName.get();
+      list.stream()
+          .filter(
+              claim ->
+                  claim != null
+                      && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), expected))
+          .forEach(
+              claim ->
+                  traceResourceLifecycle(
+                      null, resource, claim, null, "release", "release-resource-train"));
       boolean removed =
           list.removeIf(
               claim ->
                   claim != null
                       && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), expected));
-      if (list.isEmpty()) {
-        claims.remove(resource);
-      }
-      removeFromQueuesForResources(expected, List.of(resource));
       // 发布占用释放事件
       if (removed) {
+        if (list.isEmpty()) {
+          claims.remove(resource);
+        }
+        forgetSwitcherClaimSignature(resource, expected);
+        removeFromQueuesForResources(expected, List.of(resource));
         version.incrementAndGet();
         selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(expected));
-        publishReleasedEvent(expected, List.of(resource), Instant.now());
+        publishReleasedEvent(expected, List.of(resource), clockNow());
       }
       return removed;
     }
@@ -973,16 +3190,65 @@ public final class SimpleOccupancyManager
     for (OccupancyClaim claim : list) {
       if (claim != null && claim.trainName() != null && !claim.trainName().isBlank()) {
         evictedTrains.add(claim.trainName());
+        traceResourceLifecycle(null, resource, claim, null, "release", "release-resource-all");
       }
     }
     claims.remove(resource);
     for (String evicted : evictedTrains) {
+      forgetSwitcherClaimSignature(resource, evicted);
       removeFromQueuesForResources(evicted, List.of(resource));
       selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(evicted));
     }
-    publishReleasedEvent("*", List.of(resource), Instant.now());
+    publishReleasedEvent("*", List.of(resource), clockNow());
     version.incrementAndGet();
     return true;
+  }
+
+  /**
+   * 释放资源时同步保留 winner 的冲突队列位次。
+   *
+   * <p>该入口专供 recoverable STOP rollback 使用。它不会把保留位次写成物理 claim，而是在发布 {@link OccupancyReleasedEvent}
+   * 前刷新队列，使事件驱动重评估立即看到当前 winner 仍是队头。
+   */
+  @Override
+  public synchronized boolean releaseResourceRetainingQueuePosition(
+      OccupancyResource resource, Optional<String> trainName, OccupancyRequest queueRequest) {
+    if (resource == null || trainName == null || trainName.isEmpty()) {
+      releaseResource(resource, trainName);
+      return false;
+    }
+    List<OccupancyClaim> list = claims.get(resource);
+    if (list == null || list.isEmpty()) {
+      return false;
+    }
+    String expected = trainName.get();
+    list.stream()
+        .filter(
+            claim ->
+                claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), expected))
+        .forEach(
+            claim ->
+                traceResourceLifecycle(
+                    null, resource, claim, null, "release", "release-resource-retaining-queue"));
+    boolean removed =
+        list.removeIf(
+            claim ->
+                claim != null && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), expected));
+    if (!removed) {
+      return false;
+    }
+    if (list.isEmpty()) {
+      claims.remove(resource);
+    }
+    forgetSwitcherClaimSignature(resource, expected);
+    boolean retainedQueue = retainQueuePosition(resource, expected, queueRequest);
+    if (!retainedQueue) {
+      removeFromQueuesForResources(expected, List.of(resource));
+    }
+    version.incrementAndGet();
+    selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(expected));
+    publishReleasedEvent(expected, List.of(resource), clockNow());
+    return retainedQueue;
   }
 
   /**
@@ -1012,6 +3278,21 @@ public final class SimpleOccupancyManager
         continue;
       }
       int before = list.size();
+      list.stream()
+          .filter(
+              claim ->
+                  claim != null
+                      && claim.role() == role
+                      && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName))
+          .forEach(
+              claim ->
+                  traceResourceLifecycle(
+                      null,
+                      resource,
+                      claim,
+                      null,
+                      role == ClaimRole.UNLOCK_RESERVATION ? "rollback-release" : "release",
+                      "release-by-train-and-role"));
       list.removeIf(
           claim ->
               claim != null
@@ -1021,6 +3302,7 @@ public final class SimpleOccupancyManager
       if (delta <= 0) {
         continue;
       }
+      forgetSwitcherClaimSignature(resource, trainName);
       removed += delta;
       releasedResources.add(resource);
       removeFromQueuesForResources(trainName, List.of(resource));
@@ -1031,7 +3313,7 @@ public final class SimpleOccupancyManager
     if (removed > 0) {
       selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(trainName));
       version.incrementAndGet();
-      publishReleasedEvent(trainName, releasedResources, Instant.now());
+      publishReleasedEvent(trainName, releasedResources, clockNow());
     }
     return removed;
   }
@@ -1039,8 +3321,8 @@ public final class SimpleOccupancyManager
   /**
    * 清理同车 single conflict 的反向残留占用。
    *
-   * <p>该方法只移除“同一逻辑列车、同一个 single conflict、旧方向与当前请求方向明确相反”的
-   * claim/queue。方向未知时不清理，避免把真实未解析的会车风险误判为残留状态。
+   * <p>该方法只移除“同一逻辑列车、同一个 single conflict、旧方向与当前请求方向明确相反”的 claim/queue。方向未知时不清理，且 {@link
+   * ClaimRole#PHYSICAL_FOOTPRINT} 必须等待专用 rear-clear 证据，避免健康恢复绕过真实列尾释放旧进路。
    */
   @Override
   public synchronized int clearSelfOwnedSingleDirectionMismatches(OccupancyRequest request) {
@@ -1048,8 +3330,11 @@ public final class SimpleOccupancyManager
       return 0;
     }
     int removed = 0;
+    Instant now = clockNow();
     Set<OccupancyResource> releasedResources = new LinkedHashSet<>();
     Set<OccupancyResource> queueResources = new LinkedHashSet<>();
+    Set<OccupancyResource> directQueueChanges = new LinkedHashSet<>();
+    Set<String> eligibleTrainNames = new LinkedHashSet<>();
     for (OccupancyResource resource : request.resourceList()) {
       if (!isSingleCorridorConflict(resource)) {
         continue;
@@ -1067,6 +3352,14 @@ public final class SimpleOccupancyManager
               request.trainName(), claim, requestedDirection.get())) {
             continue;
           }
+          traceResourceLifecycle(
+              request,
+              resource,
+              claim,
+              null,
+              "release",
+              "clear-self-owned-single-direction-mismatch");
+          forgetSwitcherClaimSignature(resource, claim.trainName());
           claimIterator.remove();
           releasedResources.add(resource);
           queueResources.add(resource);
@@ -1084,8 +3377,19 @@ public final class SimpleOccupancyManager
       if (!isKnownDirection(queuedDirection) || queuedDirection.get() == requestedDirection.get()) {
         continue;
       }
+      Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+      OccupancyQueueEntry removedEntry = queue.entryFor(request.trainName()).orElse(null);
       queue.remove(request.trainName());
+      traceQueueLifecycle(
+          resource,
+          removedEntry,
+          "WAITING_TRAIN",
+          "remove",
+          "clear-self-owned-single-direction-mismatch",
+          null);
       queueResources.add(resource);
+      directQueueChanges.add(resource);
+      eligibleTrainNames.addAll(newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now)));
       removed++;
       if (queue.isEmpty()) {
         queues.remove(resource);
@@ -1097,11 +3401,13 @@ public final class SimpleOccupancyManager
     if (!queueResources.isEmpty()) {
       removeFromQueuesForResources(request.trainName(), List.copyOf(queueResources));
     }
+    publishQueueChangedEvent(
+        request.trainName(), List.copyOf(directQueueChanges), List.copyOf(eligibleTrainNames), now);
     releaseDeadlockLocksForTrain(request.trainName());
     selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(request.trainName()));
     version.incrementAndGet();
     if (!releasedResources.isEmpty()) {
-      publishReleasedEvent(request.trainName(), List.copyOf(releasedResources), Instant.now());
+      publishReleasedEvent(request.trainName(), List.copyOf(releasedResources), clockNow());
     }
     return removed;
   }
@@ -1109,7 +3415,7 @@ public final class SimpleOccupancyManager
   /**
    * 优先级让行判定：当冲突队列中存在更高优先级列车时返回 true。
    *
-   * <p>仅针对单线走廊与道岔冲突资源；同向单线不触发让行。
+   * <p>仅针对单线走廊、道岔与物理联锁冲突资源；同向单线不触发让行，物理联锁始终按无方向全局队头仲裁。
    */
   @Override
   public synchronized boolean shouldYield(OccupancyRequest request) {
@@ -1158,6 +3464,9 @@ public final class SimpleOccupancyManager
     if (resolveCorridorDirection(request, resource).isPresent()) {
       return Optional.empty();
     }
+    if (!hasExternalSinglePresence(request, resource, SingleRegionPhase.ENTRY)) {
+      return Optional.empty();
+    }
     return Optional.of(
         new OccupancyDecision(
             false,
@@ -1169,7 +3478,9 @@ public final class SimpleOccupancyManager
   }
 
   private boolean stillHasReleasableSelfOwnedRetain(SelfOwnedStaleRetainCandidate candidate) {
-    if (candidate == null || candidate.resource().kind() != ResourceKind.CONFLICT) {
+    if (candidate == null
+        || candidate.resource().kind() != ResourceKind.CONFLICT
+        || OccupancyResourceResolver.isInterlockingConflict(candidate.resource())) {
       return false;
     }
     List<OccupancyClaim> list = claims.get(candidate.resource());
@@ -1188,6 +3499,7 @@ public final class SimpleOccupancyManager
       String trainName, SelfOwnedStaleRetainCandidate candidate) {
     if (candidate == null
         || candidate.resource().kind() != ResourceKind.CONFLICT
+        || OccupancyResourceResolver.isInterlockingConflict(candidate.resource())
         || candidate.claimRole() != ClaimRole.PROTECTIVE_RETAIN
         || !TrainNameNormalizer.sameLogicalTrain(trainName, candidate.trainName())) {
       return false;
@@ -1251,12 +3563,30 @@ public final class SimpleOccupancyManager
       return false;
     }
     ClaimRole role = claim.role();
-    if (role == ClaimRole.PROTECTIVE_RETAIN
-        || role == ClaimRole.HOLD_ONLY
-        || role == ClaimRole.LOOKAHEAD_PREVIEW) {
+    if (role == ClaimRole.LOOKAHEAD_PREVIEW
+        || role == ClaimRole.QUEUE_POSITION
+        || role == ClaimRole.UNLOCK_RESERVATION) {
+      return false;
+    }
+    if (role == ClaimRole.PHYSICAL_FOOTPRINT) {
+      return true;
+    }
+    if ((role == ClaimRole.PROTECTIVE_RETAIN || role == ClaimRole.HOLD_ONLY)
+        && !isPhysicalOccupancyResource(resource)) {
+      return false;
+    }
+    if (isSwitcherConflictResource(resource)
+        && sameDirectionSectionAllowsSwitcherClaim(request, resource, claim, "advisory-claim")) {
       return false;
     }
     return !isSameDirectionSinglePresence(request, resource, claim.corridorDirection());
+  }
+
+  private boolean isPhysicalOccupancyResource(OccupancyResource resource) {
+    return resource != null
+        && (resource.kind() == ResourceKind.NODE
+            || resource.kind() == ResourceKind.EDGE
+            || OccupancyResourceResolver.isInterlockingConflict(resource));
   }
 
   private boolean isAdvisoryVisibleQueueEntry(
@@ -1269,6 +3599,11 @@ public final class SimpleOccupancyManager
     }
     CorridorDirection direction =
         entry.direction() == null ? CorridorDirection.UNKNOWN : entry.direction();
+    if (isSwitcherConflictResource(resource)
+        && sameDirectionSectionAllowsSwitcherTrain(
+            request, resource, entry.trainName(), "advisory-queue", "queue", false)) {
+      return false;
+    }
     return !isSameDirectionSinglePresence(request, resource, Optional.of(direction));
   }
 
@@ -1332,7 +3667,7 @@ public final class SimpleOccupancyManager
             .request(request));
   }
 
-  private Optional<String> conflictReleaseHardBlockerReason(
+  Optional<String> conflictReleaseHardBlockerReason(
       OccupancyRequest request, List<OccupancyClaim> blockers) {
     if (request == null || request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
       return Optional.empty();
@@ -1355,12 +3690,64 @@ public final class SimpleOccupancyManager
       if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
         continue;
       }
+      if (blocker.role() == ClaimRole.PHYSICAL_FOOTPRINT) {
+        return blocker;
+      }
       ResourceKind kind = blocker.resource().kind();
+      if (BlockerClassifier.isStrictConflictResource(blocker.resource())) {
+        return blocker;
+      }
       if (kind == ResourceKind.NODE || kind == ResourceKind.EDGE) {
         return blocker;
       }
     }
     return null;
+  }
+
+  private Optional<String> singleRegionHardBarrierReason(
+      OccupancyRequest request, List<OccupancyClaim> blockers) {
+    if (request == null || blockers == null || blockers.isEmpty()) {
+      return Optional.empty();
+    }
+    for (OccupancyClaim blocker : blockers) {
+      if (blocker == null || blocker.resource() == null) {
+        continue;
+      }
+      if (singleRegionOppositeOrUnknownExternalBarrier(request, blocker.resource(), blocker)) {
+        return Optional.of(OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private OccupancyDecision singleRegionHardBarrierDecision(Instant now, OccupancyClaim blocker) {
+    Instant effectiveNow = now == null ? clockNow() : now;
+    return new OccupancyDecision(
+        false,
+        effectiveNow,
+        SignalAspect.STOP,
+        blocker == null ? List.of() : List.of(blocker),
+        false,
+        OPPOSITE_OR_UNKNOWN_SINGLE_REGION_HARD_BARRIER);
+  }
+
+  private boolean singleRegionOppositeOrUnknownExternalBarrier(
+      OccupancyRequest request, OccupancyResource resource, OccupancyClaim claim) {
+    if (request == null
+        || resource == null
+        || claim == null
+        || claim.role() == ClaimRole.UNLOCK_RESERVATION
+        || !isSingleCorridorConflict(resource)
+        || TrainNameNormalizer.sameLogicalTrain(request.trainName(), claim.trainName())) {
+      return false;
+    }
+    Optional<CorridorDirection> requested = resolveCorridorDirection(request, resource);
+    Optional<CorridorDirection> held = claim.corridorDirection();
+    return requested.isEmpty()
+        || held.isEmpty()
+        || requested.get() == CorridorDirection.UNKNOWN
+        || held.get() == CorridorDirection.UNKNOWN
+        || requested.get() != held.get();
   }
 
   private Optional<CorridorDirection> resolveCorridorDirection(
@@ -1376,10 +3763,25 @@ public final class SimpleOccupancyManager
     if (!isSingleCorridorConflict(resource)) {
       return DirectionResolution.unknown();
     }
+    if (request.directionExplicitlyUnresolved(resource.key())) {
+      // 语义解析器已判定该冲突的方向证据矛盾或不足。缺键可以继续找其它证据，但"明确不可确定"不行：
+      // 再往下走等价的 section token、movement plan 或已持有 claim 的方向，都会把被否决的推断重新变成
+      // 看似确定的方向——换向后旧方向复活、对向屏障失效正由此而来。这里必须直接 UNKNOWN。
+      traceDirectionFailClosed(request, resource);
+      return DirectionResolution.unknown();
+    }
     CorridorDirection direction = request.corridorDirections().get(resource.key());
     if (direction != null && direction != CorridorDirection.UNKNOWN) {
       return new DirectionResolution(
           Optional.of(direction), DirectionSource.REQUEST_CORRIDOR_DIRECTIONS);
+    }
+    DirectionResolution requestSectionToken =
+        resolveEquivalentSectionTokenDirection(
+            request.corridorDirections(),
+            resource,
+            DirectionSource.REQUEST_SECTION_TOKEN_DIRECTIONS);
+    if (requestSectionToken.direction().isPresent()) {
+      return requestSectionToken;
     }
     Optional<MovementPlanSnapshot> plan = request.movementPlanSnapshot();
     if (plan.isPresent()) {
@@ -1390,8 +3792,120 @@ public final class SimpleOccupancyManager
             Optional.of(snapshotDirection),
             DirectionSource.MOVEMENT_PLAN_SINGLE_CONFLICT_DIRECTIONS);
       }
+      DirectionResolution planSectionToken =
+          resolveEquivalentSectionTokenDirection(
+              plan.get().singleConflictDirections(),
+              resource,
+              DirectionSource.MOVEMENT_PLAN_SECTION_TOKEN_DIRECTIONS);
+      if (planSectionToken.direction().isPresent()) {
+        return planSectionToken;
+      }
+    }
+    if (!request.intentFor(resource).hardAuthority()) {
+      OccupancyClaim heldClaim = findClaim(claims.get(resource), request.trainName());
+      if (heldClaim != null && isKnownDirection(heldClaim.corridorDirection())) {
+        return new DirectionResolution(
+            heldClaim.corridorDirection(), DirectionSource.HELD_DIRECTION_FALLBACK);
+      }
     }
     return DirectionResolution.unknown();
+  }
+
+  /**
+   * 记录一次被显式否决的方向回退。
+   *
+   * <p>只做观测。该 trace 让日志能直接统计"因为证据矛盾而被拦下的方向回退"次数，从而区分这道收紧消除了多少陈旧方向，而不是把它混进普通的方向判定失败里。
+   */
+  private void traceDirectionFailClosed(OccupancyRequest request, OccupancyResource resource) {
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                request.trainName(),
+                request.trainName(),
+                SignalComputationTrace.Source.OCCUPANCY,
+                SignalAspect.STOP)
+            .primaryReason("SMART_DIRECTION_FALLBACK_BLOCKED")
+            .field("conflictKey", resource.key())
+            .field("reason", "semantic-resolver-marked-unresolved")
+            .request(request));
+  }
+
+  private DirectionResolution resolveEquivalentSectionTokenDirection(
+      Map<String, CorridorDirection> directions,
+      OccupancyResource resource,
+      DirectionSource source) {
+    if (directions == null || directions.isEmpty() || resource == null) {
+      return DirectionResolution.unknown();
+    }
+    Optional<SingleConflictToken> target = singleConflictToken(resource.key());
+    if (target.isEmpty() || !resource.key().startsWith(SINGLE_SECTION_CONFLICT_PREFIX)) {
+      return DirectionResolution.unknown();
+    }
+    CorridorDirection matched = null;
+    for (Map.Entry<String, CorridorDirection> entry : directions.entrySet()) {
+      if (entry.getKey() == null
+          || entry.getKey().equals(resource.key())
+          || entry.getValue() == null
+          || entry.getValue() == CorridorDirection.UNKNOWN) {
+        continue;
+      }
+      Optional<SingleConflictToken> candidate = singleConflictToken(entry.getKey());
+      if (!equivalentSectionToken(target.get(), entry.getKey(), candidate)) {
+        continue;
+      }
+      if (matched != null && matched != entry.getValue()) {
+        return DirectionResolution.unknown();
+      }
+      matched = entry.getValue();
+    }
+    return matched == null
+        ? DirectionResolution.unknown()
+        : new DirectionResolution(Optional.of(matched), source);
+  }
+
+  private static Optional<SingleConflictToken> singleConflictToken(String key) {
+    if (key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    boolean section = key.startsWith(SINGLE_SECTION_CONFLICT_PREFIX);
+    String rest;
+    if (section) {
+      rest = key.substring(SINGLE_SECTION_CONFLICT_PREFIX.length());
+    } else if (key.startsWith("single:")) {
+      rest = key.substring("single:".length());
+    } else {
+      return Optional.empty();
+    }
+    int componentEnd = rest.indexOf(':');
+    if (componentEnd <= 0 || componentEnd >= rest.length() - 1) {
+      return Optional.empty();
+    }
+    String namespace = rest.substring(0, componentEnd);
+    String axis = rest.substring(componentEnd + 1);
+    if (!axis.contains("~")) {
+      return Optional.empty();
+    }
+    return Optional.of(new SingleConflictToken(namespace, axis, section));
+  }
+
+  /**
+   * 判断已提交 token 是否能为目标 section 提供同一轴线的方向证据。
+   *
+   * <p>旧 section 继续要求 namespace 与 axis 都一致；新的桥链 section 使用固定 {@code bridge} namespace，其方向可以从同 axis
+   * 的 micro corridor 恢复，但不能从另一个 section、闭环或不同轴线借用。micro component 本身可能是含冒号的 NodeId，因此 bridge 匹配使用完整
+   * axis 后缀，不能按第一个冒号拆 component。
+   */
+  private static boolean equivalentSectionToken(
+      SingleConflictToken target, String candidateKey, Optional<SingleConflictToken> candidate) {
+    if (candidate.isPresent() && target.equals(candidate.get())) {
+      return true;
+    }
+    return target.section()
+        && "bridge".equals(target.namespace())
+        && candidateKey != null
+        && candidateKey.startsWith("single:")
+        && !candidateKey.startsWith(SINGLE_SECTION_CONFLICT_PREFIX)
+        && !candidateKey.contains(":cycle:")
+        && candidateKey.endsWith(":" + target.axis());
   }
 
   private static boolean isKnownDirection(Optional<CorridorDirection> direction) {
@@ -1407,8 +3921,48 @@ public final class SimpleOccupancyManager
     }
     Optional<CorridorDirection> heldDirection = claim.corridorDirection();
     return TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)
+        && claim.role() != ClaimRole.PHYSICAL_FOOTPRINT
         && isKnownDirection(heldDirection)
         && heldDirection.get() != requestedDirection;
+  }
+
+  /**
+   * 把一次拒绝的**原因**写进 {@link OccupancyDecision#reason()}，而不是留给默认值 {@code "none"}。
+   *
+   * <p>{@code canEnter} 两条最通用的拒绝路径（blockers / queue-blocked）若使用不带 reason 的构造器，{@code traceDecision}
+   * 拿到的描述性标签**不进 decision**，于是下游的 {@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState#occupancyHold} 只能报 {@code
+   * no-decision-reason}——它诚实地说“没人填过”，而问题在上游。
+   *
+   * <p>这类空原因恰恰集中在卡得最久的车上：阻塞快照里占比最高的原因若是 {@code
+   * canenter-blocked:no-decision-reason}，就无从判断它为什么被拒。目标是**解锁疏通**而不是超时删车，而说不出为什么被拒就无从疏通。
+   *
+   * <p>只用 blocker 自身的角色与资源种类，不带列车名：原因字符串会进入去重键， 带上列车名会让它随车数爆炸。
+   */
+  private static String describeBlockingDecision(String prefix, List<OccupancyClaim> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      // 拒了却没有任何 blocker——这本身就是个要查的信号，不要静默掩过去。
+      return prefix + ":no-blockers-listed";
+    }
+    java.util.TreeSet<String> shapes = new java.util.TreeSet<>();
+    for (OccupancyClaim claim : blockers) {
+      if (claim == null || claim.resource() == null) {
+        continue;
+      }
+      shapes.add(claim.resource().kind() + "/" + claim.role());
+    }
+    if (shapes.isEmpty()) {
+      return prefix + ":no-blockers-listed";
+    }
+    return prefix + ":" + String.join(",", shapes);
+  }
+
+  /** 单线区判据的两个语境。把它做成**显式参数**而不是靠作者记得， 因为本仓库每一次单线区死锁都是同一个错：**拿入区该算的东西去判续行**。 */
+  private enum SingleRegionPhase {
+    /** 请求者**还没进区**：队列里有别人是真的要让的。 */
+    ENTRY,
+    /** 请求者**已经持有该区**：排队者没进来，也进不来。 */
+    CONTINUATION
   }
 
   private boolean isSingleCorridorConflict(OccupancyResource resource) {
@@ -1422,39 +3976,100 @@ public final class SimpleOccupancyManager
     if (resource == null || resource.kind() != ResourceKind.CONFLICT) {
       return false;
     }
-    return resource.key().startsWith("single:") || resource.key().startsWith("switcher:");
+    return resource.key().startsWith("single:")
+        || resource.key().startsWith("switcher:")
+        || OccupancyResourceResolver.isInterlockingConflict(resource);
   }
 
   private boolean isQueueAllowed(
-      String trainName,
+      OccupancyRequest request,
       OccupancyResource resource,
       CorridorDirection direction,
-      ConflictQueue queue) {
+      ConflictQueue queue,
+      Instant now) {
     if (queue == null || queue.isEmpty()) {
       return true;
     }
     if (!resource.key().startsWith("single:") || resource.key().contains(":cycle:")) {
-      return queue.isHeadAny(trainName);
+      if (isSwitcherConflictResource(resource)) {
+        return switcherQueueAllowsEntry(request, resource, queue, now);
+      }
+      return queue.isHeadAny(request.trainName(), now);
     }
     Optional<CorridorDirection> activeDirection = activeDirectionFor(resource);
     if (activeDirection.isEmpty()) {
       if (direction != CorridorDirection.UNKNOWN && !queue.hasEntriesOutside(direction)) {
         return true;
       }
-      return queue.isHeadAny(trainName);
+      return queue.isHeadAny(request.trainName(), now);
     }
     CorridorDirection active = activeDirection.get();
-    if (direction == CorridorDirection.UNKNOWN || direction != active) {
+    if (direction == CorridorDirection.UNKNOWN) {
+      // 车库口/分叉区可能无法解析语义方向；只有无外部等待时才允许同车 claim 绕过队列自锁。
+      return hasClaimByTrain(resource, request.trainName())
+          && !queue.hasAnyOtherTrain(request.trainName());
+    }
+    if (direction != active) {
       return false;
     }
     if (!queue.hasEntriesOutside(active)) {
       return true;
     }
-    return queue.isHeadForDirection(trainName, direction);
+    return queue.isHeadForDirection(request.trainName(), direction, now);
+  }
+
+  /**
+   * 判断自持 claim 是否可绕过冲突队列。
+   *
+   * <p>{@link ClaimRole#MOVEMENT_REQUIRED} 代表列车已经拥有可执行 hard authority，可以继续刷新同一资源；保护性 retain
+   * 只是当前位置/车尾保护，不能在升级为前进授权时绕过外部 pending winner 队列。
+   */
+  private boolean selfClaimBypassesQueue(OccupancyClaim selfClaim) {
+    return selfClaim != null && selfClaim.role() == ClaimRole.MOVEMENT_REQUIRED;
+  }
+
+  /**
+   * 已验证的道岔占用者出清不排队。
+   *
+   * <p>{@link VerifiedSwitcherDrainClaims} 证明本车当前节点就是该道岔（车头已越过）、持有道岔节点、计划从道岔驶向出口，且出口路径没有外车硬占用。
+   * 占用者必须先开走，岔外的车才进得来；排队只决定尚未进岔者的先后，不能反过来挡住岔上的车。否则岔外排在前面的车等占用者让出节点、 占用者等它让出队头，互等到底：
+   * 车身已在岔上的车被还在上游站台的车排在后面，永远解不开。
+   *
+   * <p>只认 {@code CONFLICT_CLEARING} 请求上、当场按现有 claims 复核通过的 {@code VERIFIED_SWITCHER_OCCUPANT} 证据；
+   * 只放行排队，外车实际 claim 仍按原规则判。
+   */
+  private boolean verifiedSwitcherOccupantBypassesQueue(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
+      return false;
+    }
+    ConflictReleaseHint hint = request.conflictReleaseHints().get(resource.key());
+    return hint != null
+        && hint.kind() == ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT
+        && hasVerifiedSwitcherOccupantHint(request, resource);
+  }
+
+  /** 记录道岔占用者越过队头的一次放行；只在队头确实是别的车时输出，排在最前或队列为空时不算越过。 */
+  private void traceSwitcherOccupantQueueBypass(
+      OccupancyRequest request, OccupancyResource resource, Instant now) {
+    ConflictQueue queue = queues.get(resource);
+    Optional<OccupancyQueueEntry> head = queue == null ? Optional.empty() : queue.headAny(now);
+    if (head.isEmpty()
+        || TrainNameNormalizer.sameLogicalTrain(head.get().trainName(), request.trainName())) {
+      return;
+    }
+    SignalComputationTrace.emitRaw(
+        "SWITCHER_OCCUPANT_QUEUE_BYPASS train="
+            + request.trainName()
+            + " resource="
+            + resource
+            + " queueHead="
+            + head.get().trainName()
+            + " reason=verified-switcher-occupant-clears-first");
   }
 
   private boolean isQueueAllowedPreview(
-      String trainName,
+      OccupancyRequest request,
       OccupancyResource resource,
       CorridorDirection direction,
       ConflictQueue queue,
@@ -1464,10 +4079,14 @@ public final class SimpleOccupancyManager
     if (queue == null || queue.isEmpty()) {
       return true;
     }
+    String trainName = request.trainName();
     if (queue.contains(trainName)) {
-      return isQueueAllowed(trainName, resource, direction, queue);
+      return isQueueAllowed(request, resource, direction, queue, now);
     }
     if (!resource.key().startsWith("single:") || resource.key().contains(":cycle:")) {
+      if (isSwitcherConflictResource(resource)) {
+        return switcherQueueWouldAllowEntry(request, resource, queue, priority, entryOrder, now);
+      }
       return queue.wouldBeHeadAny(trainName, direction, priority, entryOrder, now);
     }
     Optional<CorridorDirection> activeDirection = activeDirectionFor(resource);
@@ -1478,7 +4097,11 @@ public final class SimpleOccupancyManager
       return queue.wouldBeHeadAny(trainName, direction, priority, entryOrder, now);
     }
     CorridorDirection active = activeDirection.get();
-    if (direction == CorridorDirection.UNKNOWN || direction != active) {
+    if (direction == CorridorDirection.UNKNOWN) {
+      // 预览路径保持与可写路径一致：UNKNOWN 只绕过零外部存在的同车队列自锁。
+      return hasClaimByTrain(resource, trainName) && !queue.hasAnyOtherTrain(trainName);
+    }
+    if (direction != active) {
       return false;
     }
     if (!queue.hasEntriesOutside(active)) {
@@ -1561,12 +4184,19 @@ public final class SimpleOccupancyManager
             && held.get() != CorridorDirection.UNKNOWN;
     boolean directionMatches = directionsKnown && requested.get() == held.get();
     boolean pathExitsZone = selfOwnedPathExitsOrContinuesZone(request, resource);
-    boolean externalBlockerAhead = hasExternalHardBlockerAhead(request);
-    boolean externalSinglePresence = hasExternalSinglePresence(request, resource);
-    boolean oppositeSingleAhead =
-        directionsKnown && hasOppositeLiveSinglePresence(request, resource, requested.get());
     Optional<ExternalBlockerDetail> externalBlockerDetail =
-        firstExternalBlockerDetail(request, resource, requested.orElse(CorridorDirection.UNKNOWN));
+        firstExternalHardBlockerDetail(
+            request, resource, requested.orElse(CorridorDirection.UNKNOWN), true);
+    boolean externalBlockerAhead = externalBlockerDetail.isPresent();
+    // 已在区内续行时只看 **claim**，不看队列。排队者根本没进区，而且它正是因为
+    // 被拒才在排队——方向锁就在本车手里，它不可能在本车离开前进来。
+    // 把它算成“存在”的后果是硬死锁：持有者出不去 → 队列永远不清 → 排队者也永远进不来，
+    // 两边都输。入区（failClosedUnknownSingleConflictEntry）仍然数队列，那里不能放宽。
+    boolean externalSinglePresence =
+        hasExternalSinglePresence(request, resource, SingleRegionPhase.CONTINUATION);
+    boolean oppositeSingleAhead =
+        directionsKnown
+            && hasOppositeSinglePresenceForContinuation(request, resource, requested.get());
     traceSmartSelfOwnedContinuation(
         request,
         resource,
@@ -1578,7 +4208,13 @@ public final class SimpleOccupancyManager
         directionMatches,
         pathExitsZone,
         externalBlockerAhead || oppositeSingleAhead);
-    if (!directionsKnown && request.directedContext().isEmpty() && requested.isEmpty()) {
+    // "hold 刷新未带方向" 可以忽略自持 blocker；但语义解析器<b>明确判定</b>不可确定时不行——
+    // 那不是省略，是证据矛盾，必须落到下面的 fail-closed 判定。保护性/hold 请求从不携带该标记，
+    // 因此普通刷新路径不受影响。
+    if (!directionsKnown
+        && !request.directionExplicitlyUnresolved(resource.key())
+        && request.directedContext().isEmpty()
+        && requested.isEmpty()) {
       SignalComputationTrace.emit(
           SignalComputationTrace.builder(
                   request.trainName(),
@@ -1629,6 +4265,43 @@ public final class SimpleOccupancyManager
           request, resource, selfClaim, "SELF_OWNED_RETAIN_IGNORED_FOR_CONTINUATION");
       return Optional.empty();
     }
+    if (!directionsKnown
+        && !externalBlockerAhead
+        && !externalSinglePresence
+        && !oppositeSingleAhead) {
+      traceSmartSelfOwnedContinuation(
+          request,
+          resource,
+          "SMART_SELF_OWNED_CONTINUATION_ALLOWED",
+          SignalAspect.PROCEED,
+          "unknown-direction-self-owned-no-external-presence",
+          held.orElse(CorridorDirection.UNKNOWN),
+          requested.orElse(CorridorDirection.UNKNOWN),
+          false,
+          pathExitsZone,
+          false);
+      SignalComputationTrace.emit(
+          SignalComputationTrace.builder(
+                  request.trainName(),
+                  request.trainName(),
+                  SignalComputationTrace.Source.OCCUPANCY,
+                  SignalAspect.PROCEED)
+              .primaryReason("SELF_OWNED_SINGLE_BLOCKER_IGNORED")
+              .field("conflictKey", resource.key())
+              .field("heldDirection", held.orElse(CorridorDirection.UNKNOWN))
+              .field("requestedDirection", requested.orElse(CorridorDirection.UNKNOWN))
+              .field("source", source)
+              .field("reason", "unknown-direction-self-owned-no-external-presence")
+              .field("selfOwnedDirectionMatches", false)
+              .field("selfOwnedPathExitsZone", pathExitsZone)
+              .field("selfOwnedExternalBlockerAhead", false)
+              .field("selfOwnedExternalSinglePresence", false)
+              .field("selfOwnedOppositeSingleAhead", false)
+              .request(request));
+      traceSelfOwnedBlockerFiltered(
+          request, resource, selfClaim, "SELF_OWNED_RETAIN_IGNORED_FOR_CONTINUATION");
+      return Optional.empty();
+    }
     if (directionMatches && pathExitsZone && !externalBlockerAhead && !oppositeSingleAhead) {
       traceSmartSelfOwnedContinuation(
           request,
@@ -1660,6 +4333,29 @@ public final class SimpleOccupancyManager
               .field("selfOwnedExternalSinglePresence", externalSinglePresence)
               .field("selfOwnedOppositeSingleAhead", false)
               .request(request));
+      traceSelfOwnedBlockerFiltered(
+          request, resource, selfClaim, "SELF_OWNED_RETAIN_IGNORED_FOR_CONTINUATION");
+      return Optional.empty();
+    }
+    if (!pathExitsZone
+        && request.movementPlanSnapshot().isPresent()
+        && !request.intentFor(resource).hardAuthority()) {
+      // 折返/换段后 movement plan 已不再穿越该 zone：自持 claim 只承担车尾/区域保护职责，
+      // 不能反过来否决本车其他方向的移动，否则列车会被自己的旧方向 claim 永久锁死，
+      // 并把真正可被 health 恢复识别的 opposite-direction 拒绝掩盖掉。claim 原样保留，
+      // 外部对向/未知方向列车仍由 single-region barrier 拦截；对该 zone 仍要求 hard
+      // authority 的请求继续走 fail-closed 判定。
+      traceSmartSelfOwnedContinuation(
+          request,
+          resource,
+          "SMART_SELF_OWNED_CONTINUATION_ALLOWED",
+          SignalAspect.PROCEED,
+          "tail-protection-zone-not-on-plan",
+          held.orElse(CorridorDirection.UNKNOWN),
+          requested.orElse(CorridorDirection.UNKNOWN),
+          directionMatches,
+          false,
+          externalBlockerAhead || oppositeSingleAhead);
       traceSelfOwnedBlockerFiltered(
           request, resource, selfClaim, "SELF_OWNED_RETAIN_IGNORED_FOR_CONTINUATION");
       return Optional.empty();
@@ -1711,8 +4407,12 @@ public final class SimpleOccupancyManager
     }
     CorridorDirection heldDirection = held.orElse(CorridorDirection.UNKNOWN);
     CorridorDirection requestedDirection = requested.orElse(CorridorDirection.UNKNOWN);
-    rememberSelfOwnedStaleRetainCandidate(
-        request, resource, selfClaim, heldDirection, requestedDirection, reason, now);
+    if (externalBlockerAhead || externalSinglePresence || oppositeSingleAhead) {
+      selfOwnedStaleRetainCandidates.remove(TrainNameNormalizer.normalizeKey(request.trainName()));
+    } else {
+      rememberSelfOwnedStaleRetainCandidate(
+          request, resource, selfClaim, heldDirection, requestedDirection, reason, now);
+    }
     if (externalBlockerAhead || oppositeSingleAhead) {
       traceSelfOwnedExternalBlocker(request, resource, externalBlockerDetail);
     }
@@ -1753,35 +4453,161 @@ public final class SimpleOccupancyManager
                 "externalBlockerResource",
                 externalBlockerDetail.map(ExternalBlockerDetail::resourceKey).orElse("-"))
             .request(request));
+    // 把**内层**原因单独输出一条原始诊断。
+    //
+    // 外层标签把四个互不相同的内层原因压成同一个字符串（direction-unknown /
+    // path-does-not-exit-or-continue / external-hard-blocker-ahead /
+    // external-single-blocker-ahead），
+    // 于是读日志只知道"续行被拒"，不知道被哪一条拒。而 `decision.reason()` 被十余处用例按等值钉住，
+    // 不能直接改，所以走独立的一行。
+    //
+    // 为什么不能靠已有的 SMART_SELF_OWNED_CONTINUATION_* trace：它们走 SignalComputationTrace.Builder，
+    // 那里 `shouldEmit` 以**信号灯色**为判据（PROCEED 一律不输出），且全部事件压成单一 token
+    // `SignalTrace`，自持续行被拒的事件经由那条路径到不了日志。
+    // `emitRaw` 绕开那套灯色门控，并自带按整行内容的去重——内层原因不变就不会重复刷屏。
+    //
+    // 典型的待答问题：出库车占着截断正线的单线区迟迟不走，
+    // 到底是 path-does-not-exit-or-continue 还是 external-single-blocker-ahead——
+    // `blockedBy` 分不出来，因为 externalSinglePresence 为真时不会往该列表里加任何 claim。
+    SignalComputationTrace.emitRaw(
+        "SMART_SELF_OWNED_CONTINUATION_REJECTED train="
+            + request.trainName()
+            + " resource="
+            + resource.key()
+            + " reason="
+            + reason
+            + " heldDirection="
+            + heldDirection
+            + " requestedDirection="
+            + requestedDirection
+            + " directionMatches="
+            + directionMatches
+            + " pathExitsZone="
+            + pathExitsZone
+            + " externalBlockerAhead="
+            + externalBlockerAhead
+            + " externalSinglePresence="
+            + externalSinglePresence
+            // 光知道"有对向占用"不够——必须知道**是谁**、以及**是真占着还是只在排队**。
+            // 该存在性检查不往 blocker 列表加任何 claim，所以 blockedBy 补不上这项信息
+            // （只看 blockedBy，"列表里只有自己"会被误读成"没有外部阻塞"）。
+            // `queue-only` 意味着挡住一辆**已在区内**的车的只是个尚未进入的排队者——那是缺陷；
+            // `claim:...` 则说明屏障在正常工作。两者的下一步完全相反。
+            + " externalSinglePresenceOwner="
+            + describeExternalSinglePresence(request, resource)
+            + " oppositeSingleAhead="
+            + oppositeSingleAhead);
     return Optional.of(
         new OccupancyDecision(
             false,
             now,
             SignalAspect.STOP,
-            List.of(selfClaim),
+            selfOwnedContinuationBlockers(request, resource, selfClaim, externalBlockerDetail),
             false,
             "opposite-direction".equals(reason)
                 ? "self-owned-single-opposite-direction"
                 : "self-owned-single-continuation-rejected"));
   }
 
+  private List<OccupancyClaim> selfOwnedContinuationBlockers(
+      OccupancyRequest request,
+      OccupancyResource singleResource,
+      OccupancyClaim selfClaim,
+      Optional<ExternalBlockerDetail> externalBlockerDetail) {
+    List<OccupancyClaim> blockers = new ArrayList<>();
+    addUniqueClaim(blockers, selfClaim);
+    addExternalClaimsForResource(blockers, request, singleResource);
+    externalBlockerDetail
+        .map(ExternalBlockerDetail::resourceKey)
+        .ifPresent(resourceKey -> addExternalClaimsForResourceKey(blockers, request, resourceKey));
+    return List.copyOf(blockers);
+  }
+
+  private void addExternalClaimsForResource(
+      List<OccupancyClaim> blockers, OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return;
+    }
+    List<OccupancyClaim> existing = claims.get(resource);
+    if (existing == null || existing.isEmpty()) {
+      return;
+    }
+    for (OccupancyClaim claim : existing) {
+      if (claim == null
+          || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+        continue;
+      }
+      addUniqueClaim(blockers, claim);
+    }
+  }
+
+  private void addExternalClaimsForResourceKey(
+      List<OccupancyClaim> blockers, OccupancyRequest request, String resourceKey) {
+    if (request == null || resourceKey == null || resourceKey.isBlank()) {
+      return;
+    }
+    for (OccupancyResource resource : request.resourceList()) {
+      if (resource == null
+          || (resource.kind() == ResourceKind.CONFLICT
+              && !OccupancyResourceResolver.isInterlockingConflict(resource))
+          || !request.intentFor(resource).hardAuthority()
+          || !resourceKey.equals(resource.kind() + ":" + resource.key())) {
+        continue;
+      }
+      addExternalClaimsForResource(blockers, request, resource);
+    }
+  }
+
+  private static void addUniqueClaim(List<OccupancyClaim> claims, OccupancyClaim claim) {
+    if (claims == null || claim == null || claims.contains(claim)) {
+      return;
+    }
+    claims.add(claim);
+  }
+
+  /**
+   * 判断同车旧 single claim 是否仍位于本次 hard-authority 计划内。
+   *
+   * <p>调度窗口可能短于完整 route plan，导致 movement snapshot 没有当前 single key；此时只要该资源仍是本次 {@link
+   * ResourceIntent#MOVEMENT_REQUIRED} 且请求自身能解析出明确方向，就应视为同向继续运行，而不是把本车旧 claim 当成阻塞。
+   */
   private boolean selfOwnedPathExitsOrContinuesZone(
       OccupancyRequest request, OccupancyResource resource) {
     if (request == null || resource == null || !request.resourceList().contains(resource)) {
       return false;
     }
+    if (!request.intentFor(resource).hardAuthority()) {
+      return false;
+    }
     Optional<MovementPlanSnapshot> plan = request.movementPlanSnapshot();
-    return plan.isPresent() && plan.get().singleConflictDirections().containsKey(resource.key());
+    if (plan.isEmpty()) {
+      return false;
+    }
+    if (plan.get().singleConflictDirections().containsKey(resource.key())) {
+      return true;
+    }
+    return plan.get().movementRequiredResources().contains(resource)
+        && resolveCorridorDirectionWithSource(request, resource).direction().isPresent();
   }
 
   private boolean hasExternalHardBlockerAhead(OccupancyRequest request) {
+    return firstExternalHardBlockerDetail(request, null, CorridorDirection.UNKNOWN, false)
+        .isPresent();
+  }
+
+  private Optional<ExternalBlockerDetail> firstExternalHardBlockerDetail(
+      OccupancyRequest request,
+      OccupancyResource focusResource,
+      CorridorDirection direction,
+      boolean ignoreSameDirectionFront) {
     if (request == null) {
-      return false;
+      return Optional.empty();
     }
     for (OccupancyResource resource : request.resourceList()) {
       if (resource == null
           || !request.intentFor(resource).hardAuthority()
-          || resource.kind() == ResourceKind.CONFLICT) {
+          || (resource.kind() == ResourceKind.CONFLICT
+              && !OccupancyResourceResolver.isInterlockingConflict(resource))) {
         continue;
       }
       List<OccupancyClaim> existing = claims.get(resource);
@@ -1797,16 +4623,33 @@ public final class SimpleOccupancyManager
           continue;
         }
         if (BlockerClassifier.classify(request, resource, claim)
-            != BlockerRelation.STALE_PROTECTIVE_CLAIM) {
-          return true;
+            == BlockerRelation.STALE_PROTECTIVE_CLAIM) {
+          continue;
         }
+        if (ignoreSameDirectionFront
+            && sameDirectionSectionMatch(request, claim.trainName()).isPresent()) {
+          traceSelfOwnedSameDirectionFrontFiltered(
+              request, focusResource, resource, claim, direction);
+          continue;
+        }
+        return Optional.of(
+            new ExternalBlockerDetail(claim.trainName(), resource.kind() + ":" + resource.key()));
       }
     }
-    return false;
+    return Optional.empty();
   }
 
-  private boolean hasExternalSinglePresence(OccupancyRequest request, OccupancyResource resource) {
-    if (request == null || resource == null) {
+  /**
+   * 单线区上“外部存在”的唯一入口。**相位必须显式给出**。
+   *
+   * <p>两个相位的差别只有一处：**排队者算不算存在**。这一点一旦弄错，已在区内的车会被尚未入区的排队者挡住， 单线区两端互等，整条线停摆。
+   *
+   * <p>相位是显式参数，而不是两个只差一个词的方法（{@code ...Presence} 与 {@code ...ClaimPresence}）：
+   * 那个词说不出“入区还是续行”，参数则迫使调用点写出自己是哪一种。
+   */
+  private boolean hasExternalSinglePresence(
+      OccupancyRequest request, OccupancyResource resource, SingleRegionPhase phase) {
+    if (request == null || resource == null || phase == null) {
       return false;
     }
     List<OccupancyClaim> existing = claims.get(resource);
@@ -1818,46 +4661,103 @@ public final class SimpleOccupancyManager
         }
       }
     }
+    if (phase == SingleRegionPhase.CONTINUATION) {
+      // 排队者根本没进区，而且方向锁就在本车手里，它不可能在本车离开前进来。
+      // 把它算成屏障的后果是硬死锁：持有者出不去 → 队列永远不清 → 排队者也永远进不来。
+      return false;
+    }
     ConflictQueue queue = queues.get(resource);
     return queue != null && !queue.isEmpty() && queue.hasAnyOtherTrain(request.trainName());
   }
 
-  private Optional<ExternalBlockerDetail> firstExternalBlockerDetail(
-      OccupancyRequest request, OccupancyResource focusResource, CorridorDirection direction) {
-    if (request == null) {
-      return Optional.empty();
+  /**
+   * 已在区内的车续行时的“对向存在”：**只数 claim**。
+   *
+   * <p>名字里写明相位，理由与 {@link #hasExternalSinglePresence} 完全相同：一个对向的**排队者**
+   * 拿不到行车权（方向锁正在本车手里），把它当成对向屏障只会把两辆车一起锁死。
+   *
+   * <p>不提供 ENTRY 分支：入区的对向判据不在本类（在 {@code
+   * RuntimeDispatchService.singleRegionOppositeOrUnknownExternalBarrier}）。写一个没人调的分支 只会变成下一个被误用的候选。
+   */
+  private boolean hasOppositeSinglePresenceForContinuation(
+      OccupancyRequest request, OccupancyResource resource, CorridorDirection requestedDirection) {
+    List<OccupancyClaim> existing = claims.get(resource);
+    if (existing == null) {
+      return false;
     }
-    for (OccupancyResource resource : request.resourceList()) {
-      if (resource == null || !request.intentFor(resource).hardAuthority()) {
-        continue;
-      }
-      List<OccupancyClaim> existing = claims.get(resource);
-      if (existing == null || existing.isEmpty()) {
-        continue;
-      }
-      for (OccupancyClaim claim : existing) {
-        if (claim == null
-            || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
-          continue;
+    for (OccupancyClaim claim : existing) {
+      if (claim == null
+          || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+        if (claim != null) {
+          traceSelfOwnedBlockerFiltered(
+              request, resource, claim, "SELF_OWNED_OPPOSITE_REJECTED_AS_NOT_EXTERNAL");
         }
-        return Optional.of(
-            new ExternalBlockerDetail(claim.trainName(), resource.kind() + ":" + resource.key()));
+        continue;
+      }
+      CorridorDirection claimDirection =
+          claim.corridorDirection().orElse(CorridorDirection.UNKNOWN);
+      if (claimDirection == CorridorDirection.UNKNOWN || claimDirection != requestedDirection) {
+        return true;
       }
     }
-    if (focusResource == null) {
-      return Optional.empty();
+    return false;
+  }
+
+  /**
+   * 描述"前方对向占用"到底是谁、是哪一种——**纯诊断，不参与任何判定**。
+   *
+   * <p>{@link #hasExternalSinglePresence} 只返回布尔量，于是日志里 {@code externalSinglePresence=true}
+   * 只说明"有"，不说明"是谁"。而它恰恰**不往 blocker 列表里加任何 claim**，所以 {@code blockedBy}
+   * 也补不上这项信息——只看它，"列表里只有自己"会被误读成"没有外部阻塞"。
+   *
+   * <p>同一个原因字符串背后可能是完全不同的情形。看不到"是谁"，就无从判断那是正常对向车、还是一个早该消失的陈旧占用。
+   *
+   * <p>更要紧的是区分两种来源：**claim 是真占着，queue 只是在排队等**。 若挡住一辆**已经在区内**的车的只是个尚未进入的排队者，那是真缺陷而不是正常屏障；
+   * 反之则是屏障在正常工作。这两种的下一步完全相反，必须能分开。
+   */
+  private String describeExternalSinglePresence(
+      OccupancyRequest request, OccupancyResource resource) {
+    if (request == null || resource == null) {
+      return "-";
     }
-    ConflictQueue queue = queues.get(focusResource);
-    if (queue == null) {
-      return Optional.empty();
+    List<OccupancyClaim> existing = claims.get(resource);
+    if (existing != null) {
+      for (OccupancyClaim claim : existing) {
+        if (claim != null
+            && !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
+          return "claim:" + claim.trainName() + "@" + claim.role();
+        }
+      }
     }
-    return queue
-        .firstOtherEntryOutside(direction, request.trainName())
-        .or(() -> queue.firstOtherEntry(request.trainName()))
-        .map(
-            entry ->
-                new ExternalBlockerDetail(
-                    entry.trainName(), focusResource.kind() + ":" + focusResource.key()));
+    ConflictQueue queue = queues.get(resource);
+    if (queue != null && !queue.isEmpty() && queue.hasAnyOtherTrain(request.trainName())) {
+      return "queue-only";
+    }
+    return "none";
+  }
+
+  private void traceSelfOwnedSameDirectionFrontFiltered(
+      OccupancyRequest request,
+      OccupancyResource focusResource,
+      OccupancyResource blockerResource,
+      OccupancyClaim claim,
+      CorridorDirection requestedDirection) {
+    if (request == null || blockerResource == null || claim == null) {
+      return;
+    }
+    SignalComputationTrace.emit(
+        SignalComputationTrace.builder(
+                request.trainName(),
+                request.trainName(),
+                SignalComputationTrace.Source.OCCUPANCY,
+                SignalAspect.PROCEED)
+            .primaryReason("SELF_OWNED_SAME_DIRECTION_FRONT_BLOCKER_FILTERED")
+            .field("conflictKey", focusResource == null ? "-" : focusResource.key())
+            .field("blockerResource", blockerResource)
+            .field("blockerOwner", claim.trainName())
+            .field("requestedDirection", requestedDirection)
+            .field("reason", "same-direction-front-hard-blocker")
+            .request(request));
   }
 
   private void traceSelfOwnedExternalBlocker(
@@ -1931,6 +4831,7 @@ public final class SimpleOccupancyManager
         || resource == null
         || selfClaim == null
         || resource.kind() != ResourceKind.CONFLICT
+        || OccupancyResourceResolver.isInterlockingConflict(resource)
         || !TrainNameNormalizer.sameLogicalTrain(selfClaim.trainName(), request.trainName())) {
       return;
     }
@@ -1954,6 +4855,7 @@ public final class SimpleOccupancyManager
             requestIntent,
             heldDirection,
             requestedDirection,
+            hardAuthorityScope(request),
             reason,
             now != null ? now : request.now());
     selfOwnedStaleRetainCandidates.put(key, candidate);
@@ -1975,6 +4877,31 @@ public final class SimpleOccupancyManager
             .field("destinationMutated", false)
             .field("tokenInvalidated", false)
             .request(request));
+  }
+
+  private static Set<OccupancyResource> hardAuthorityScope(OccupancyRequest request) {
+    if (request == null) {
+      return Set.of();
+    }
+    Set<OccupancyResource> scope = new LinkedHashSet<>();
+    for (OccupancyResource resource : request.resourceList()) {
+      if (resource != null && request.intentFor(resource).hardAuthority()) {
+        scope.add(resource);
+      }
+    }
+    return Set.copyOf(scope);
+  }
+
+  private boolean hasExternalClaimInScope(SelfOwnedStaleRetainCandidate candidate) {
+    if (candidate == null) {
+      return false;
+    }
+    for (OccupancyResource resource : candidate.hardAuthorityScope()) {
+      if (resource != null && hasExternalClaim(resource, candidate.trainName())) {
+        return true;
+      }
+    }
+    return false;
   }
 
   private boolean isStillInsideSwitcherZoneRetain(
@@ -2049,30 +4976,6 @@ public final class SimpleOccupancyManager
             .request(request));
   }
 
-  private boolean hasOppositeLiveSinglePresence(
-      OccupancyRequest request, OccupancyResource resource, CorridorDirection requestedDirection) {
-    List<OccupancyClaim> existing = claims.get(resource);
-    if (existing != null) {
-      for (OccupancyClaim claim : existing) {
-        if (claim == null
-            || TrainNameNormalizer.sameLogicalTrain(claim.trainName(), request.trainName())) {
-          if (claim != null) {
-            traceSelfOwnedBlockerFiltered(
-                request, resource, claim, "SELF_OWNED_OPPOSITE_REJECTED_AS_NOT_EXTERNAL");
-          }
-          continue;
-        }
-        CorridorDirection claimDirection =
-            claim.corridorDirection().orElse(CorridorDirection.UNKNOWN);
-        if (claimDirection == CorridorDirection.UNKNOWN || claimDirection != requestedDirection) {
-          return true;
-        }
-      }
-    }
-    ConflictQueue queue = queues.get(resource);
-    return queue != null && queue.hasEntriesOutside(requestedDirection, request.trainName());
-  }
-
   private boolean selfOwnedQueueEntryCanContinue(
       OccupancyRequest request,
       OccupancyResource resource,
@@ -2082,7 +4985,7 @@ public final class SimpleOccupancyManager
       return false;
     }
     if (!isSingleCorridorConflict(resource)) {
-      return queue.isHeadAny(request.trainName());
+      return queue.isHeadAny(request.trainName(), request.now());
     }
     CorridorDirection requested = queueDirectionFor(request, resource);
     CorridorDirection queued = entry.direction();
@@ -2202,22 +5105,39 @@ public final class SimpleOccupancyManager
       OccupancyRequest request, OccupancyResource conflict) {
     if (request == null
         || conflict == null
+        || OccupancyResourceResolver.isInterlockingConflict(conflict)
         || request.purpose() != AuthorizationPurpose.CONFLICT_CLEARING) {
       return false;
     }
     ConflictReleaseHint hint = request.conflictReleaseHints().get(conflict.key());
-    return hint != null && hint.verifiedFor(conflict.key());
+    if (hint == null || !hint.verifiedFor(conflict.key())) {
+      return false;
+    }
+    if (hint.kind() == ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT) {
+      return verifiedSwitcherDrainClaims(request).contains(conflict);
+    }
+    return true;
+  }
+
+  private boolean hasVerifiedSwitcherOccupantHint(
+      OccupancyRequest request, OccupancyResource conflict) {
+    return conflict != null && verifiedSwitcherDrainClaims(request).contains(conflict);
+  }
+
+  private Set<OccupancyResource> verifiedSwitcherDrainClaims(OccupancyRequest request) {
+    return VerifiedSwitcherDrainClaims.resolve(
+        request,
+        new VerifiedSwitcherDrainClaims.VerificationSnapshot(snapshotClaims(), version(), -1L));
   }
 
   /**
-   * 计算冲突释放时不能写入的 CONFLICT blocker 资源。
+   * 计算冲突释放时不能写入的、且被本车有效 release lock 精确覆盖的 CONFLICT 资源。
    *
-   * <p>冲突释放只能绕过抽象 CONFLICT claim，不能绕过真实 NODE/EDGE 硬占用。硬占用会在 canEnter/acquire 阶段以 {@code
-   * conflict-release-hard-blocker:*} 拒绝。
+   * <p>即使一个请求同时包含多个冲突资源，也只能跳过“hint、release lock 与 blocker key 三者完全一致”的资源。这样前一道岔的短期锁不会顺带绕过后续新出现的道岔。
    */
   private Set<OccupancyResource> resolveBlockedResourcesForPartialAcquire(
-      OccupancyDecision decision, String trainName) {
-    if (decision == null || decision.blockers().isEmpty()) {
+      OccupancyRequest request, OccupancyDecision decision, Instant now) {
+    if (request == null || decision == null || decision.blockers().isEmpty()) {
       return Set.of();
     }
     Set<OccupancyResource> resources = new LinkedHashSet<>();
@@ -2225,10 +5145,10 @@ public final class SimpleOccupancyManager
       if (blocker == null || blocker.resource() == null) {
         continue;
       }
-      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), trainName)) {
+      if (TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())) {
         continue;
       }
-      if (blocker.resource().kind() != ResourceKind.CONFLICT) {
+      if (!activeReleaseCoversConflict(request, blocker.resource(), now)) {
         continue;
       }
       resources.add(blocker.resource());
@@ -2237,12 +5157,55 @@ public final class SimpleOccupancyManager
   }
 
   /**
+   * 查找未被当前 release lock 精确覆盖的外部冲突 blocker。
+   *
+   * <p>这是 acquire 前的防御性复核：canEnter 的 winner 选择即使未来发生回归，也不能把同一次 {@code conflictRelease} 扩张到另一个
+   * conflict key。
+   */
+  private Optional<OccupancyClaim> firstConflictBlockerOutsideActiveRelease(
+      OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
+    if (request == null || blockers == null || blockers.isEmpty()) {
+      return Optional.empty();
+    }
+    for (OccupancyClaim blocker : blockers) {
+      if (blocker == null
+          || blocker.resource() == null
+          || blocker.resource().kind() != ResourceKind.CONFLICT
+          || TrainNameNormalizer.sameLogicalTrain(blocker.trainName(), request.trainName())) {
+        continue;
+      }
+      if (!activeReleaseCoversConflict(request, blocker.resource(), now)) {
+        return Optional.of(blocker);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 判断指定冲突是否同时具备本请求的已验证 hint 与本车尚未过期的同 key release lock。 */
+  private boolean activeReleaseCoversConflict(
+      OccupancyRequest request, OccupancyResource conflict, Instant now) {
+    if (request == null
+        || conflict == null
+        || conflict.kind() != ResourceKind.CONFLICT
+        || OccupancyResourceResolver.isInterlockingConflict(conflict)
+        || !hasVerifiedConflictReleaseHint(request, conflict)) {
+      return false;
+    }
+    DeadlockReleaseLock lock = deadlockReleaseLocks.get(conflict.key());
+    return lock != null && !lock.isExpired(now) && lock.matches(request.trainName());
+  }
+
+  /**
    * 校验阻塞列车是否都在同一冲突队列内。
    *
-   * <p>用于死锁放行锁生效时的安全校验：允许跳过“队头判断”，但仍需确保阻塞来源来自同一冲突队列。
+   * <p>用于死锁放行锁生效时的安全校验：允许跳过“队头判断”，但仍需确保阻塞来源来自同一冲突队列。switcher 当前 owner 在成功 acquire 后会离开等待队列，因此同一个
+   * switcher resource 上仍保有路径签名的 claim 也属于该冲突；该例外不适用于无方向 single claim。
    */
   private boolean areBlockersInQueue(
-      List<OccupancyClaim> blockers, ConflictQueue queue, String trainName) {
+      List<OccupancyClaim> blockers,
+      ConflictQueue queue,
+      String trainName,
+      OccupancyResource conflict) {
     if (blockers == null || blockers.isEmpty() || queue == null) {
       return false;
     }
@@ -2253,11 +5216,25 @@ public final class SimpleOccupancyManager
       if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
         continue;
       }
-      if (!queue.contains(claim.trainName()) && !isDirectionalConflictClaim(claim)) {
+      if (!conflict.equals(claim.resource())) {
+        return false;
+      }
+      if (!queue.contains(claim.trainName())
+          && !isDirectionalConflictClaim(claim)
+          && !isSignedSwitcherClaimForConflict(claim, conflict)) {
         return false;
       }
     }
     return true;
+  }
+
+  private boolean isSignedSwitcherClaimForConflict(
+      OccupancyClaim claim, OccupancyResource conflict) {
+    return claim != null
+        && conflict != null
+        && isSwitcherConflictResource(conflict)
+        && conflict.equals(claim.resource())
+        && switcherClaimSignature(conflict, claim.trainName()).isPresent();
   }
 
   private boolean isDirectionalConflictClaim(OccupancyClaim claim) {
@@ -2347,7 +5324,7 @@ public final class SimpleOccupancyManager
     if (!containsConflictBlocker(blockers)) {
       return null;
     }
-    // 优先检查：列车是否持有任意冲突资源的放行锁（避免主冲突切换导致信号乒乓）
+    // 优先检查：列车是否持有当前 blocker 所属冲突的放行锁（避免主冲突切换导致信号乒乓）
     OccupancyDecision heldLockDecision = tryResolveByHeldLock(request, blockers, now);
     if (heldLockDecision != null) {
       return heldLockDecision;
@@ -2370,14 +5347,15 @@ public final class SimpleOccupancyManager
         }
         // 当前车持有锁（已在 tryResolveByHeldLock 处理，理论上不会到这里）
       }
-      // 单侧放行优先：必须是全局队头才能触发冲突放行
-      if (!queue.isHeadAny(request.trainName())) {
+      // 普通候选必须是全局队头；已认证的 switcher 实体 occupant 优先清空道口。
+      if (!queue.isHeadAny(request.trainName(), now)
+          && !hasVerifiedSwitcherOccupantHint(request, conflict)) {
         continue;
       }
       if (!hasVerifiedConflictReleaseHint(request, conflict)) {
         continue;
       }
-      if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      if (!areBlockersInQueue(blockers, queue, request.trainName(), conflict)) {
         continue;
       }
       if (!hasOppositeDirectionBlockerInQueue(request, blockers, conflict, queue)) {
@@ -2385,19 +5363,41 @@ public final class SimpleOccupancyManager
       }
       // 放行并写入锁定
       Instant expiresAt = now.plus(DEADLOCK_RELEASE_LOCK_TTL);
-      deadlockReleaseLocks.put(
-          conflict.key(), new DeadlockReleaseLock(request.trainName(), expiresAt));
+      rememberDeadlockReleaseLock(conflict.key(), request.trainName(), expiresAt);
       SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
       return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
     }
     return null;
   }
 
+  /** 写入会改变冲突 winner 的放行锁，并同步推进占用快照版本。 */
+  void rememberDeadlockReleaseLock(String conflictKey, String trainName, Instant expiresAt) {
+    DeadlockReleaseLock next = new DeadlockReleaseLock(trainName, expiresAt);
+    DeadlockReleaseLock previous = deadlockReleaseLocks.put(conflictKey, next);
+    if (!next.equals(previous)) {
+      traceQueueLifecycle(
+          OccupancyResource.forConflict(conflictKey),
+          next.trainName(),
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          "DEADLOCK_RELEASE_LOCK",
+          previous == null ? "acquire" : "update",
+          "deadlock-release-winner:previous="
+              + (previous == null ? "-" : safeLifecycleValue(previous.trainName())),
+          next.expiresAt());
+      version.incrementAndGet();
+    }
+  }
+
   /**
-   * 检查列车是否持有任意冲突资源的有效放行锁。
+   * 检查列车是否持有当前外部 blocker 所属冲突的有效放行锁。
    *
-   * <p>当列车请求多个冲突资源时，每次 tick 的"主冲突"可能因 blockers 变化而切换。 此方法在确定主冲突之前先扫描所有请求的冲突资源，
-   * 若列车持有任意一个有效锁，则直接放行，避免因主冲突切换导致的信号乒乓。
+   * <p>当列车请求多个冲突资源时，每次 tick 的“主冲突”可能因 blockers 变化而切换。此方法在确定主冲突之前扫描请求中的 release lock，但只有 hint、lock
+   * 与全部外部 blocker 都精确指向同一个 conflict key 时才续用；前一道岔的锁不能放行后一道岔。
    */
   private OccupancyDecision tryResolveByHeldLock(
       OccupancyRequest request, List<OccupancyClaim> blockers, Instant now) {
@@ -2424,11 +5424,13 @@ public final class SimpleOccupancyManager
       if (!hasVerifiedConflictReleaseHint(request, OccupancyResource.forConflict(conflictKey))) {
         continue;
       }
-      // 当前车持有该冲突的锁：直接放行。
-      // 注意：不再检查 areBlockersInQueue，因为：
-      // 1. 锁在创建时已验证过阻塞来源
-      // 2. 锁有效期内阻塞列车可能已离开队列（如推进到下一站），但锁本身就是放行依据
-      // 3. 过度校验会导致持锁列车因 blocker 变化而被拒绝，产生信号乒乓
+      ConflictQueue queue = queues.get(OccupancyResource.forConflict(conflictKey));
+      if (!areBlockersInQueue(
+          blockers, queue, request.trainName(), OccupancyResource.forConflict(conflictKey))) {
+        continue;
+      }
+      // 当前车持有该冲突的锁，且所有 blocker 仍严格属于同一个冲突区；同 key 内的 owner
+      // 可凭方向或 switcher 路径签名在离开等待队列后继续被识别。
       SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
       return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
     }
@@ -2470,7 +5472,7 @@ public final class SimpleOccupancyManager
           continue;
         }
         // 当前车持有锁：跳过队头判断，但仍需确保阻塞来源在同一队列中。
-        if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+        if (!areBlockersInQueue(blockers, queue, request.trainName(), conflict)) {
           continue;
         }
         if (!hasVerifiedConflictReleaseHint(request, conflict)) {
@@ -2479,17 +5481,18 @@ public final class SimpleOccupancyManager
         SignalAspect signal = signalPolicy.aspectForDelay(Duration.ZERO);
         return new OccupancyDecision(true, now, signal, List.copyOf(blockers), true);
       }
-      // 单侧放行优先：必须是全局队头才能触发冲突放行
+      // 普通候选必须是全局队头；已认证的 switcher 实体 occupant 优先清空道口。
       CorridorDirection direction = queueDirectionFor(request, conflict);
       if (!queue.wouldBeHeadAny(
-          request.trainName(),
-          direction,
-          request.priority(),
-          queueEntryOrderFor(request, conflict),
-          now)) {
+              request.trainName(),
+              direction,
+              request.priority(),
+              queueEntryOrderFor(request, conflict),
+              now)
+          && !hasVerifiedSwitcherOccupantHint(request, conflict)) {
         continue;
       }
-      if (!areBlockersInQueue(blockers, queue, request.trainName())) {
+      if (!areBlockersInQueue(blockers, queue, request.trainName(), conflict)) {
         continue;
       }
       if (!hasVerifiedConflictReleaseHint(request, conflict)) {
@@ -2515,12 +5518,57 @@ public final class SimpleOccupancyManager
       }
       CorridorDirection direction = queueDirectionFor(request, resource);
       ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
-      touchQueueWithDirectionTrace(request, resource, queue, direction, now, "enqueueWaiting");
-      version.incrementAndGet();
+      QueueTouchResult queueTouch =
+          touchQueueWithDirectionTrace(request, resource, queue, direction, now, "enqueueWaiting");
+      commitQueueTouchChange(request, resource, now, queueTouch);
     }
   }
 
-  private CorridorDirection touchQueueWithDirectionTrace(
+  /**
+   * 提交队列刷新产生的仲裁语义变化。
+   *
+   * <p>首次入队的请求仍在当前完整授权链中，无需自我唤醒；既有条目的方向、优先级、入口顺序或道岔路径签名变化却可能把 winner 交给另一列车，因此必须在 version
+   * 提交后通知竞争者进入下一 tick 重评估。
+   */
+  private void commitQueueTouchChange(
+      OccupancyRequest request,
+      OccupancyResource resource,
+      Instant now,
+      QueueTouchResult queueTouch) {
+    if (queueTouch == null || !queueTouch.stateChanged()) {
+      return;
+    }
+    version.incrementAndGet();
+    if (queueTouch.queueHeadChanged()) {
+      publishQueueChangedEvent(
+          request.trainName(), List.of(resource), queueTouch.eligibleTrainNames(), now);
+    }
+  }
+
+  private boolean retainQueuePosition(
+      OccupancyResource resource, String trainName, OccupancyRequest queueRequest) {
+    if (resource == null
+        || trainName == null
+        || trainName.isBlank()
+        || queueRequest == null
+        || !TrainNameNormalizer.sameLogicalTrain(queueRequest.trainName(), trainName)
+        || !queueRequest.resourceList().contains(resource)
+        || !isQueueableConflict(resource)) {
+      return false;
+    }
+    ConflictQueue queue = queues.computeIfAbsent(resource, unused -> new ConflictQueue());
+    CorridorDirection direction = queueDirectionFor(queueRequest, resource);
+    touchQueueWithDirectionTrace(
+        queueRequest,
+        resource,
+        queue,
+        direction,
+        queueRequest.now(),
+        "recoverableAuthorityRelease");
+    return true;
+  }
+
+  private QueueTouchResult touchQueueWithDirectionTrace(
       OccupancyRequest request,
       OccupancyResource resource,
       ConflictQueue queue,
@@ -2528,7 +5576,11 @@ public final class SimpleOccupancyManager
       Instant now,
       String source) {
     if (request == null || resource == null || queue == null) {
-      return requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
+      return new QueueTouchResult(
+          requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection,
+          false,
+          false,
+          List.of());
     }
     CorridorDirection safeRequested =
         requestedDirection == null ? CorridorDirection.UNKNOWN : requestedDirection;
@@ -2544,13 +5596,32 @@ public final class SimpleOccupancyManager
       emitQueueDirectionTrace(
           request, resource, previous.get(), safeRequested, effectiveDirection, source);
     }
-    queue.touch(
-        request.trainName(),
+    Optional<OccupancyQueueEntry> previousEntry = queue.entryFor(request.trainName());
+    Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+    boolean queueChanged =
+        queue.touch(
+            request.trainName(),
+            effectiveDirection,
+            now,
+            request.priority(),
+            queueEntryOrderFor(request, resource));
+    if (queueChanged) {
+      OccupancyQueueEntry finalEntry = queue.entryFor(request.trainName()).orElse(null);
+      traceQueueLifecycle(
+          resource,
+          finalEntry,
+          "WAITING_TRAIN",
+          previousEntry.isEmpty() ? "enqueue" : "update",
+          source,
+          null);
+    }
+    boolean signatureChanged = rememberSwitcherQueueSignature(request, resource);
+    boolean stateChanged = queueChanged || signatureChanged;
+    return new QueueTouchResult(
         effectiveDirection,
-        now,
-        request.priority(),
-        queueEntryOrderFor(request, resource));
-    return effectiveDirection;
+        stateChanged,
+        previousEntry.isPresent(),
+        newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now)));
   }
 
   private CorridorDirection effectiveQueueDirectionForPreview(
@@ -2609,9 +5680,38 @@ public final class SimpleOccupancyManager
     }
     // 清理过期的冲突放行锁
     if (!deadlockReleaseLocks.isEmpty()) {
-      deadlockReleaseLocks
-          .entrySet()
-          .removeIf(e -> e.getValue() == null || e.getValue().isExpired(now));
+      int releaseLockRemoved = 0;
+      List<OccupancyResource> changedLockResources = new ArrayList<>();
+      Iterator<Map.Entry<String, DeadlockReleaseLock>> releaseLockIterator =
+          deadlockReleaseLocks.entrySet().iterator();
+      while (releaseLockIterator.hasNext()) {
+        Map.Entry<String, DeadlockReleaseLock> entry = releaseLockIterator.next();
+        DeadlockReleaseLock lock = entry.getValue();
+        if (lock != null && !lock.isExpired(now)) {
+          continue;
+        }
+        traceQueueLifecycle(
+            OccupancyResource.forConflict(entry.getKey()),
+            lock == null ? null : lock.trainName(),
+            null,
+            null,
+            null,
+            null,
+            null,
+            null,
+            "DEADLOCK_RELEASE_LOCK",
+            "expire",
+            "ttl-expired",
+            lock == null ? null : lock.expiresAt());
+        releaseLockIterator.remove();
+        changedLockResources.add(OccupancyResource.forConflict(entry.getKey()));
+        releaseLockRemoved++;
+      }
+      if (releaseLockRemoved > 0) {
+        version.incrementAndGet();
+        publishQueueChangedEvent(
+            "*", changedLockResources, queueHeadsForResources(changedLockResources, now), now);
+      }
     }
     // 清理过期的队列条目
     if (queues.isEmpty()) {
@@ -2625,15 +5725,31 @@ public final class SimpleOccupancyManager
         iterator.remove();
         continue;
       }
-      int removed = queue.purgeExpired(now, QUEUE_ENTRY_TTL);
-      if (removed > 0) {
-        staleQueueCleanupCount.addAndGet(removed);
+      Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+      List<OccupancyQueueEntry> expiredEntries = queue.purgeExpired(now, QUEUE_ENTRY_TTL);
+      if (!expiredEntries.isEmpty()) {
+        expiredEntries.forEach(
+            expired ->
+                traceQueueLifecycle(
+                    entry.getKey(),
+                    expired,
+                    "WAITING_TRAIN",
+                    "expire",
+                    "ttl-expired",
+                    expired.lastSeen().plus(QUEUE_ENTRY_TTL)));
+        staleQueueCleanupCount.addAndGet(expiredEntries.size());
         version.incrementAndGet();
+        publishQueueChangedEvent(
+            "*",
+            List.of(entry.getKey()),
+            newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now)),
+            now);
       }
       if (queue.isEmpty()) {
         iterator.remove();
       }
     }
+    pruneDetachedSwitcherQueueSignatures();
   }
 
   private OccupancyDecision traceDecision(
@@ -2670,13 +5786,14 @@ public final class SimpleOccupancyManager
         SignalDecisionInputClassifier.isProceedLike(computedSignal)
             && !SignalDecisionInputClassifier.mayPublishProceed(
                 request,
+                inputType,
                 drainLeader,
                 drainAuthorityPresent,
-                !drainAuthorityInconsistent,
+                decision != null && decision.allowed() && !drainAuthorityInconsistent,
                 false,
                 SignalComputationTrace.TokenState.NONE,
                 false);
-    SignalAspect traceSignal = publishSuppressed ? SignalAspect.STOP : computedSignal;
+    SignalAspect traceSignal = computedSignal;
     SignalComputationTrace.emit(
         SignalComputationTrace.builder(
                 request != null ? request.trainName() : "-",
@@ -2722,6 +5839,7 @@ public final class SimpleOccupancyManager
             .field("incident", drainAuthorityInconsistent ? "DRAIN_AUTHORITY_INCONSISTENT" : "-")
             .request(request)
             .decision(decision, request));
+    traceSwitcherBlockerReads(reason, request, decision);
     publishLiveBlockerSnapshot(reason, request, decision);
     return decision;
   }
@@ -2786,30 +5904,65 @@ public final class SimpleOccupancyManager
     return "not-drain-through";
   }
 
-  private void removeFromQueuesForResources(String trainName, List<OccupancyResource> resources) {
+  private int removeFromQueuesForResources(String trainName, List<OccupancyResource> resources) {
+    return removeFromQueuesForResources(trainName, resources, true);
+  }
+
+  /**
+   * 移除指定资源上的排队条目。
+   *
+   * <p>新 claim 已在当前调用栈取得资源时，后继队首尚未 eligible，调用方必须传入 {@code false}，避免“admit 后撤队”伪装成放行事件。
+   */
+  private int removeFromQueuesForResources(
+      String trainName, List<OccupancyResource> resources, boolean publishQueueEligibility) {
     if (trainName == null || trainName.isBlank()) {
-      return;
+      return 0;
     }
     if (resources == null || resources.isEmpty()) {
-      removeFromQueuesForTrain(trainName);
-      return;
+      return removeFromQueuesForTrain(trainName);
     }
+    int removed = 0;
+    Instant now = clockNow();
+    List<OccupancyResource> changedResources = new ArrayList<>();
+    Set<String> eligibleTrainNames = new LinkedHashSet<>();
     for (OccupancyResource resource : resources) {
       ConflictQueue queue = queues.get(resource);
       if (queue == null) {
         continue;
       }
-      queue.remove(trainName);
+      Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+      OccupancyQueueEntry removedEntry = queue.entryFor(trainName).orElse(null);
+      if (queue.remove(trainName)) {
+        traceQueueLifecycle(
+            resource,
+            removedEntry,
+            "WAITING_TRAIN",
+            "remove",
+            "remove-from-queues-for-resources",
+            null);
+        removed++;
+        changedResources.add(resource);
+        if (publishQueueEligibility) {
+          eligibleTrainNames.addAll(newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now)));
+        }
+      }
+      forgetSwitcherQueueSignature(resource, trainName);
       if (queue.isEmpty()) {
         queues.remove(resource);
       }
     }
+    publishQueueChangedEvent(trainName, changedResources, List.copyOf(eligibleTrainNames), now);
+    return removed;
   }
 
-  private void removeFromQueuesForTrain(String trainName) {
+  private int removeFromQueuesForTrain(String trainName) {
     if (trainName == null || trainName.isBlank()) {
-      return;
+      return 0;
     }
+    int removed = 0;
+    Instant now = clockNow();
+    List<OccupancyResource> changedResources = new ArrayList<>();
+    Set<String> eligibleTrainNames = new LinkedHashSet<>();
     Iterator<Map.Entry<OccupancyResource, ConflictQueue>> iterator = queues.entrySet().iterator();
     while (iterator.hasNext()) {
       Map.Entry<OccupancyResource, ConflictQueue> entry = iterator.next();
@@ -2818,30 +5971,86 @@ public final class SimpleOccupancyManager
         iterator.remove();
         continue;
       }
-      queue.remove(trainName);
+      Optional<OccupancyQueueEntry> previousQueueHead = queue.headAny(now);
+      OccupancyQueueEntry removedEntry = queue.entryFor(trainName).orElse(null);
+      if (queue.remove(trainName)) {
+        traceQueueLifecycle(
+            entry.getKey(),
+            removedEntry,
+            "WAITING_TRAIN",
+            "remove",
+            "remove-from-queues-for-train",
+            null);
+        removed++;
+        changedResources.add(entry.getKey());
+        eligibleTrainNames.addAll(newlyEligibleQueueHeads(previousQueueHead, queue.headAny(now)));
+      }
+      forgetSwitcherQueueSignature(entry.getKey(), trainName);
       if (queue.isEmpty()) {
         iterator.remove();
       }
     }
+    publishQueueChangedEvent(trainName, changedResources, List.copyOf(eligibleTrainNames), now);
+    return removed;
   }
 
   /** 释放指定列车持有的冲突区放行锁。 */
-  private void releaseDeadlockLocksForTrain(String trainName) {
+  private int releaseDeadlockLocksForTrain(String trainName) {
     if (trainName == null || trainName.isBlank() || deadlockReleaseLocks.isEmpty()) {
-      return;
+      return 0;
     }
-    deadlockReleaseLocks
-        .entrySet()
-        .removeIf(e -> e.getValue() != null && e.getValue().matches(trainName));
+    int removed = 0;
+    List<OccupancyResource> changedResources = new ArrayList<>();
+    Iterator<Map.Entry<String, DeadlockReleaseLock>> iterator =
+        deadlockReleaseLocks.entrySet().iterator();
+    while (iterator.hasNext()) {
+      Map.Entry<String, DeadlockReleaseLock> entry = iterator.next();
+      DeadlockReleaseLock lock = entry.getValue();
+      if (lock == null || !lock.matches(trainName)) {
+        continue;
+      }
+      traceQueueLifecycle(
+          OccupancyResource.forConflict(entry.getKey()),
+          lock.trainName(),
+          null,
+          null,
+          null,
+          null,
+          null,
+          null,
+          "DEADLOCK_RELEASE_LOCK",
+          "release",
+          "release-by-train",
+          lock.expiresAt());
+      iterator.remove();
+      changedResources.add(OccupancyResource.forConflict(entry.getKey()));
+      removed++;
+    }
+    Instant now = clockNow();
+    publishQueueChangedEvent(
+        trainName, changedResources, queueHeadsForResources(changedResources, now), now);
+    return removed;
   }
 
+  /**
+   * 将排队位次投影为诊断 blocker。
+   *
+   * <p>该 blocker 不代表物理占用或已授予的行车权，必须保留 {@link ClaimRole#QUEUE_POSITION} 来源，避免 advisory 与 Smart
+   * Dispatcher 把失败方队列误判为反向 hard authority。
+   */
   private OccupancyClaim createQueueBlocker(OccupancyResource resource, OccupancyQueueEntry entry) {
     Optional<CorridorDirection> direction =
         entry.direction() == CorridorDirection.UNKNOWN
             ? Optional.empty()
             : Optional.of(entry.direction());
     return new OccupancyClaim(
-        resource, entry.trainName(), Optional.empty(), entry.firstSeen(), Duration.ZERO, direction);
+        resource,
+        entry.trainName(),
+        Optional.empty(),
+        entry.firstSeen(),
+        Duration.ZERO,
+        direction,
+        ClaimRole.QUEUE_POSITION);
   }
 
   private OccupancyClaim findClaim(List<OccupancyClaim> list, String trainName) {
@@ -2920,6 +6129,59 @@ public final class SimpleOccupancyManager
     eventBus.publish(event);
   }
 
+  /** 发布包含精确队首资格变化的 Gate Queue 事件；空资格列表仅用于审计。 */
+  private void publishQueueChangedEvent(
+      String trainName,
+      List<OccupancyResource> resources,
+      List<String> eligibleTrainNames,
+      Instant now) {
+    if (eventBus == null || resources == null || resources.isEmpty()) {
+      return;
+    }
+    eventBus.publish(new OccupancyQueueChangedEvent(now, trainName, resources, eligibleTrainNames));
+  }
+
+  /**
+   * 返回队首变化后获得新仲裁机会的逻辑列车名。
+   *
+   * <p>同一逻辑列车仍为队首时，它没有获得新事实，不能因自己的状态刷新再次唤醒完整授权。
+   */
+  private static List<String> newlyEligibleQueueHeads(
+      Optional<OccupancyQueueEntry> previousHead, Optional<OccupancyQueueEntry> currentHead) {
+    if (currentHead.isEmpty()) {
+      return List.of();
+    }
+    String currentTrainName = currentHead.get().trainName();
+    if (currentTrainName == null || currentTrainName.isBlank()) {
+      return List.of();
+    }
+    if (previousHead.isPresent()
+        && TrainNameNormalizer.sameLogicalTrain(previousHead.get().trainName(), currentTrainName)) {
+      return List.of();
+    }
+    return List.of(currentTrainName);
+  }
+
+  /** 返回指定资源当前可被仲裁的队首，供解除 deadlock release lock 后精确唤醒。 */
+  private List<String> queueHeadsForResources(List<OccupancyResource> resources, Instant now) {
+    if (resources == null || resources.isEmpty()) {
+      return List.of();
+    }
+    Set<String> heads = new LinkedHashSet<>();
+    for (OccupancyResource resource : resources) {
+      ConflictQueue queue = queues.get(resource);
+      if (queue == null) {
+        continue;
+      }
+      queue
+          .headAny(now)
+          .map(OccupancyQueueEntry::trainName)
+          .filter(trainName -> trainName != null && !trainName.isBlank())
+          .ifPresent(heads::add);
+    }
+    return List.copyOf(heads);
+  }
+
   /**
    * 收集等待指定资源的列车名单（排除自己）。
    *
@@ -2959,41 +6221,109 @@ public final class SimpleOccupancyManager
     private final LinkedHashMap<String, OccupancyQueueEntry> forward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> backward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> neutral = new LinkedHashMap<>();
-    private final Map<String, Integer> priorities = new java.util.HashMap<>();
-    private final Map<String, Integer> entryOrders = new java.util.HashMap<>();
+    private long nextEnqueueSequence;
 
-    void touch(
+    boolean touch(
         String trainName, CorridorDirection direction, Instant now, int priority, int entryOrder) {
       if (trainName == null || trainName.isBlank() || now == null) {
-        return;
+        return false;
       }
       String key = normalize(trainName);
-      priorities.put(key, priority);
-      OccupancyQueueEntry existing = detachEntry(key);
+      CorridorDirection safeDirection = direction;
+      if (safeDirection == null) {
+        safeDirection = CorridorDirection.UNKNOWN;
+      }
+      LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(safeDirection);
+      OccupancyQueueEntry existing = null;
+      boolean bucketChanged = false;
+      List<LinkedHashMap<String, OccupancyQueueEntry>> directionBuckets =
+          List.of(forward, backward, neutral);
+      for (LinkedHashMap<String, OccupancyQueueEntry> entries : directionBuckets) {
+        OccupancyQueueEntry candidate = entries.get(key);
+        existing = pickOlder(existing, candidate);
+        if (candidate != null && entries != target) {
+          entries.remove(key);
+          bucketChanged = true;
+        }
+      }
       int stableEntryOrder = resolveStableEntryOrder(existing, entryOrder);
-      entryOrders.put(key, stableEntryOrder);
-      LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
+      boolean schedulingChanged =
+          existing == null
+              || bucketChanged
+              || existing.direction() != safeDirection
+              || existing.priority() != priority
+              || existing.entryOrder() != stableEntryOrder;
       target.put(
           key,
           new OccupancyQueueEntry(
               existing != null ? existing.trainName() : trainName,
-              direction,
+              safeDirection,
               existing != null ? existing.firstSeen() : now,
               now,
               priority,
-              stableEntryOrder));
+              stableEntryOrder,
+              existing != null ? existing.enqueueSequence() : allocateEnqueueSequence()));
+      return schedulingChanged;
     }
 
-    void remove(String trainName) {
+    boolean remove(String trainName) {
       if (trainName == null || trainName.isBlank()) {
-        return;
+        return false;
       }
       String key = normalize(trainName);
-      forward.remove(key);
-      backward.remove(key);
-      neutral.remove(key);
-      priorities.remove(key);
-      entryOrders.remove(key);
+      boolean removed = forward.remove(key) != null;
+      removed |= backward.remove(key) != null;
+      removed |= neutral.remove(key) != null;
+      return removed;
+    }
+
+    Optional<OccupancyQueueEntry> detach(String trainName) {
+      Optional<OccupancyQueueEntry> existing = entryFor(trainName);
+      existing.ifPresent(unused -> remove(trainName));
+      return existing;
+    }
+
+    void restore(OccupancyQueueEntry entry) {
+      if (entry == null) {
+        return;
+      }
+      remove(entry.trainName());
+      String key = normalize(entry.trainName());
+      mapFor(entry.direction()).put(key, entry);
+      observeEnqueueSequence(entry.enqueueSequence());
+    }
+
+    boolean rename(String currentTrainName, String nextTrainName) {
+      Optional<OccupancyQueueEntry> existing = detach(currentTrainName);
+      if (existing.isEmpty()) {
+        return false;
+      }
+      OccupancyQueueEntry entry = existing.get();
+      restore(
+          new OccupancyQueueEntry(
+              nextTrainName,
+              entry.direction(),
+              entry.firstSeen(),
+              entry.lastSeen(),
+              entry.priority(),
+              entry.entryOrder(),
+              entry.enqueueSequence()));
+      return true;
+    }
+
+    private Optional<OccupancyQueueEntry> entryFor(String trainName) {
+      if (trainName == null || trainName.isBlank()) {
+        return Optional.empty();
+      }
+      String key = normalize(trainName);
+      OccupancyQueueEntry entry = forward.get(key);
+      if (entry == null) {
+        entry = backward.get(key);
+      }
+      if (entry == null) {
+        entry = neutral.get(key);
+      }
+      return Optional.ofNullable(entry);
     }
 
     boolean contains(String trainName) {
@@ -3034,64 +6364,63 @@ public final class SimpleOccupancyManager
       return names;
     }
 
-    boolean isHeadForDirection(String trainName, CorridorDirection direction) {
+    boolean isHeadForDirection(
+        String trainName, CorridorDirection direction, Instant arbitrationTime) {
       if (trainName == null || trainName.isBlank()) {
         return false;
       }
-      return headEntry(direction)
+      return headEntry(direction, arbitrationTime)
           .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
           .orElse(false);
     }
 
-    boolean isHeadAny(String trainName) {
+    boolean isHeadAny(String trainName, Instant arbitrationTime) {
       if (trainName == null || trainName.isBlank()) {
         return false;
       }
-      return headAny()
+      return headAny(arbitrationTime)
           .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
           .orElse(false);
     }
 
-    Optional<OccupancyQueueEntry> headEntry(CorridorDirection direction) {
+    Optional<OccupancyQueueEntry> headEntry(CorridorDirection direction, Instant arbitrationTime) {
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       if (target.isEmpty()) {
         return Optional.empty();
       }
-      // 排序规则：priority 倒序，其次 entryOrder 正序，再次 firstSeen 正序
-      return target.values().stream().sorted(this::compareEntries).findFirst();
+      return target.values().stream()
+          .sorted((first, second) -> compareEntries(first, second, arbitrationTime))
+          .findFirst();
     }
 
     Optional<OccupancyQueueEntry> headEntryWithCandidate(
         CorridorDirection direction,
         OccupancyQueueEntry candidate,
         int candidatePriority,
-        int candidateEntryOrder) {
+        int candidateEntryOrder,
+        Instant arbitrationTime) {
       LinkedHashMap<String, OccupancyQueueEntry> target = mapFor(direction);
       OccupancyQueueEntry best = null;
-      int bestPriority = 0;
-      int bestEntryOrder = Integer.MAX_VALUE;
       for (OccupancyQueueEntry entry : target.values()) {
-        int priority = priorities.getOrDefault(normalize(entry.trainName()), 0);
-        int entryOrder = entryOrderFor(entry.trainName());
-        if (best == null
-            || compareEntries(entry, priority, entryOrder, best, bestPriority, bestEntryOrder)
-                < 0) {
+        if (best == null || compareEntries(entry, best, arbitrationTime) < 0) {
           best = entry;
-          bestPriority = priority;
-          bestEntryOrder = entryOrder;
         }
       }
       if (candidate != null) {
-        if (best == null
-            || compareEntries(
-                    candidate,
+        OccupancyQueueEntry normalizedCandidate =
+            candidate.priority() == candidatePriority
+                    && candidate.entryOrder() == candidateEntryOrder
+                ? candidate
+                : new OccupancyQueueEntry(
+                    candidate.trainName(),
+                    candidate.direction(),
+                    candidate.firstSeen(),
+                    candidate.lastSeen(),
                     candidatePriority,
                     candidateEntryOrder,
-                    best,
-                    bestPriority,
-                    bestEntryOrder)
-                < 0) {
-          best = candidate;
+                    candidate.enqueueSequence());
+        if (best == null || compareEntries(normalizedCandidate, best, arbitrationTime) < 0) {
+          best = normalizedCandidate;
         }
       }
       return Optional.ofNullable(best);
@@ -3104,8 +6433,8 @@ public final class SimpleOccupancyManager
       }
       Instant time = now != null ? now : Instant.now();
       OccupancyQueueEntry candidate =
-          new OccupancyQueueEntry(trainName, direction, time, time, priority, entryOrder);
-      return headEntryWithCandidate(direction, candidate, priority, entryOrder)
+          candidateEntry(trainName, direction, time, priority, entryOrder);
+      return headEntryWithCandidate(direction, candidate, priority, entryOrder, time)
           .map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
           .orElse(false);
     }
@@ -3117,19 +6446,22 @@ public final class SimpleOccupancyManager
       }
       Instant time = now != null ? now : Instant.now();
       OccupancyQueueEntry candidate =
-          new OccupancyQueueEntry(trainName, direction, time, time, priority, entryOrder);
+          candidateEntry(trainName, direction, time, priority, entryOrder);
       Optional<OccupancyQueueEntry> head =
           pickEarlier(
               headEntryWithCandidate(
                   CorridorDirection.A_TO_B,
                   direction == CorridorDirection.A_TO_B ? candidate : null,
                   priority,
-                  entryOrder),
+                  entryOrder,
+                  time),
               headEntryWithCandidate(
                   CorridorDirection.B_TO_A,
                   direction == CorridorDirection.B_TO_A ? candidate : null,
                   priority,
-                  entryOrder));
+                  entryOrder,
+                  time),
+              time);
       head =
           pickEarlier(
               head,
@@ -3137,39 +6469,109 @@ public final class SimpleOccupancyManager
                   CorridorDirection.UNKNOWN,
                   direction == CorridorDirection.UNKNOWN ? candidate : null,
                   priority,
-                  entryOrder));
+                  entryOrder,
+                  time),
+              time);
       return head.map(entry -> TrainNameNormalizer.sameLogicalTrain(entry.trainName(), trainName))
           .orElse(false);
     }
 
-    private int compareEntries(OccupancyQueueEntry a, OccupancyQueueEntry b) {
-      int pA = priorities.getOrDefault(normalize(a.trainName()), 0);
-      int pB = priorities.getOrDefault(normalize(b.trainName()), 0);
-      if (pA != pB) {
-        return Integer.compare(pB, pA); // 优先级更高者优先
+    /**
+     * 比较两个冲突候选的实际仲裁顺序。
+     *
+     * <p>priority
+     * 只提供有上限的“时间优势”，首次等待时间持续推进老化；因此持续刷新且仍在等待的列车最终会排在后来到达的高优先级列车之前，避免连续高优先级流量造成永久饥饿。排序键在入队后固定，不会随
+     * tick 往返翻转；相同键再按基础 priority、入口距离、首次等待时间、稳定到达序号与规范列车名确定顺序。
+     */
+    int compareEntries(
+        OccupancyQueueEntry first, OccupancyQueueEntry second, Instant arbitrationTime) {
+      long deadlineFirst = arbitrationDeadlineMillis(first);
+      long deadlineSecond = arbitrationDeadlineMillis(second);
+      if (deadlineFirst != deadlineSecond) {
+        return Long.compare(deadlineFirst, deadlineSecond);
       }
-      int oA = entryOrderFor(a.trainName());
-      int oB = entryOrderFor(b.trainName());
-      if (oA != oB) {
-        return Integer.compare(oA, oB); // entry 更近者优先
+      if (first.priority() != second.priority()) {
+        return Integer.compare(second.priority(), first.priority());
       }
-      return a.firstSeen().compareTo(b.firstSeen()); // 首见更早者优先（FIFO）
+      if (first.entryOrder() != second.entryOrder()) {
+        return Integer.compare(first.entryOrder(), second.entryOrder());
+      }
+      int firstSeen = first.firstSeen().compareTo(second.firstSeen());
+      if (firstSeen != 0) {
+        return firstSeen;
+      }
+      if (first.enqueueSequence() != second.enqueueSequence()) {
+        return Long.compare(first.enqueueSequence(), second.enqueueSequence());
+      }
+      return normalize(first.trainName()).compareTo(normalize(second.trainName()));
     }
 
-    private int compareEntries(
-        OccupancyQueueEntry a,
-        int priorityA,
-        int entryOrderA,
-        OccupancyQueueEntry b,
-        int priorityB,
-        int entryOrderB) {
-      if (priorityA != priorityB) {
-        return Integer.compare(priorityB, priorityA);
+    /** 构造只读仲裁候选；已入队列车必须复用首见时间与到达序号。 */
+    OccupancyQueueEntry candidateEntry(
+        String trainName, CorridorDirection direction, Instant now, int priority, int entryOrder) {
+      Instant safeNow = now == null ? Instant.now() : now;
+      return entryFor(trainName)
+          .map(
+              existing ->
+                  new OccupancyQueueEntry(
+                      existing.trainName(),
+                      direction == null ? CorridorDirection.UNKNOWN : direction,
+                      existing.firstSeen(),
+                      safeNow,
+                      priority,
+                      Math.min(existing.entryOrder(), entryOrder),
+                      existing.enqueueSequence()))
+          .orElseGet(
+              () ->
+                  new OccupancyQueueEntry(
+                      trainName,
+                      direction == null ? CorridorDirection.UNKNOWN : direction,
+                      safeNow,
+                      safeNow,
+                      priority,
+                      entryOrder,
+                      nextEnqueueSequence()));
+    }
+
+    long nextEnqueueSequence() {
+      return nextEnqueueSequence;
+    }
+
+    private long allocateEnqueueSequence() {
+      long allocated = nextEnqueueSequence;
+      if (nextEnqueueSequence < Long.MAX_VALUE) {
+        nextEnqueueSequence++;
       }
-      if (entryOrderA != entryOrderB) {
-        return Integer.compare(entryOrderA, entryOrderB);
+      return allocated;
+    }
+
+    private void observeEnqueueSequence(long sequence) {
+      if (sequence == Long.MAX_VALUE) {
+        nextEnqueueSequence = Long.MAX_VALUE;
+        return;
       }
-      return a.firstSeen().compareTo(b.firstSeen());
+      nextEnqueueSequence = Math.max(nextEnqueueSequence, sequence + 1L);
+    }
+
+    private long arbitrationDeadlineMillis(OccupancyQueueEntry entry) {
+      if (entry == null) {
+        return Long.MAX_VALUE;
+      }
+      long pointAdvantageMillis = Math.max(1L, QUEUE_PRIORITY_POINT_ADVANTAGE.toMillis());
+      long maxAdvantageMillis = Math.max(0L, QUEUE_MAX_PRIORITY_ADVANTAGE.toMillis());
+      long rawAdvantage;
+      try {
+        rawAdvantage = Math.multiplyExact((long) entry.priority(), pointAdvantageMillis);
+      } catch (ArithmeticException ignored) {
+        rawAdvantage = entry.priority() >= 0 ? Long.MAX_VALUE : Long.MIN_VALUE;
+      }
+      long boundedAdvantage =
+          Math.max(-maxAdvantageMillis, Math.min(maxAdvantageMillis, rawAdvantage));
+      try {
+        return Math.subtractExact(entry.firstSeen().toEpochMilli(), boundedAdvantage);
+      } catch (ArithmeticException ignored) {
+        return boundedAdvantage >= 0 ? Long.MIN_VALUE : Long.MAX_VALUE;
+      }
     }
 
     /**
@@ -3189,16 +6591,23 @@ public final class SimpleOccupancyManager
         return false;
       }
       String key = normalize(trainName);
-      java.util.Set<String> keys = new java.util.HashSet<>();
-      keys.addAll(forward.keySet());
-      keys.addAll(backward.keySet());
-      keys.addAll(neutral.keySet());
-      for (String otherKey : keys) {
-        if (otherKey == null || otherKey.equals(key)) {
+      Instant safeNow = now == null ? Instant.now() : now;
+      OccupancyQueueEntry requester =
+          entryFor(trainName)
+              .orElseGet(
+                  () ->
+                      new OccupancyQueueEntry(
+                          trainName,
+                          CorridorDirection.UNKNOWN,
+                          safeNow,
+                          safeNow,
+                          priority,
+                          Integer.MAX_VALUE));
+      for (OccupancyQueueEntry other : snapshotEntries(safeNow)) {
+        if (other == null || normalize(other.trainName()).equals(key)) {
           continue;
         }
-        int otherPriority = priorities.getOrDefault(otherKey, 0);
-        if (otherPriority > priority) {
+        if (compareEntries(other, requester, safeNow) < 0) {
           return true;
         }
       }
@@ -3211,6 +6620,18 @@ public final class SimpleOccupancyManager
         return false;
       }
       String key = normalize(trainName);
+      Instant safeNow = now == null ? Instant.now() : now;
+      OccupancyQueueEntry requester =
+          entryFor(trainName)
+              .orElseGet(
+                  () ->
+                      new OccupancyQueueEntry(
+                          trainName,
+                          direction == null ? CorridorDirection.UNKNOWN : direction,
+                          safeNow,
+                          safeNow,
+                          priority,
+                          Integer.MAX_VALUE));
       List<LinkedHashMap<String, OccupancyQueueEntry>> targets =
           List.of(forward, backward, neutral);
       LinkedHashMap<String, OccupancyQueueEntry> same = mapFor(direction);
@@ -3218,12 +6639,11 @@ public final class SimpleOccupancyManager
         if (target == same) {
           continue;
         }
-        for (String otherKey : target.keySet()) {
-          if (otherKey == null || otherKey.equals(key)) {
+        for (Map.Entry<String, OccupancyQueueEntry> entry : target.entrySet()) {
+          if (entry.getKey() == null || entry.getKey().equals(key) || entry.getValue() == null) {
             continue;
           }
-          int otherPriority = priorities.getOrDefault(otherKey, 0);
-          if (otherPriority > priority) {
+          if (compareEntries(entry.getValue(), requester, safeNow) < 0) {
             return true;
           }
         }
@@ -3311,21 +6731,27 @@ public final class SimpleOccupancyManager
       return Optional.empty();
     }
 
-    Optional<OccupancyQueueEntry> blockingEntry(CorridorDirection direction) {
+    Optional<OccupancyQueueEntry> blockingEntry(
+        CorridorDirection direction, Instant arbitrationTime) {
       if (direction == CorridorDirection.UNKNOWN) {
-        return headAny();
+        return headAny(arbitrationTime);
       }
-      Optional<OccupancyQueueEntry> direct = headEntry(direction);
+      Optional<OccupancyQueueEntry> direct = headEntry(direction, arbitrationTime);
       if (direct.isPresent()) {
         return direct;
       }
-      return headAny();
+      return headAny(arbitrationTime);
     }
 
-    Optional<OccupancyQueueEntry> headAny() {
-      Optional<OccupancyQueueEntry> candidate = headEntry(CorridorDirection.A_TO_B);
-      candidate = pickEarlier(candidate, headEntry(CorridorDirection.B_TO_A));
-      candidate = pickEarlier(candidate, headEntry(CorridorDirection.UNKNOWN));
+    Optional<OccupancyQueueEntry> headAny(Instant arbitrationTime) {
+      Optional<OccupancyQueueEntry> candidate =
+          headEntry(CorridorDirection.A_TO_B, arbitrationTime);
+      candidate =
+          pickEarlier(
+              candidate, headEntry(CorridorDirection.B_TO_A, arbitrationTime), arbitrationTime);
+      candidate =
+          pickEarlier(
+              candidate, headEntry(CorridorDirection.UNKNOWN, arbitrationTime), arbitrationTime);
       return candidate;
     }
 
@@ -3333,65 +6759,44 @@ public final class SimpleOccupancyManager
       return forward.isEmpty() && backward.isEmpty() && neutral.isEmpty();
     }
 
-    List<OccupancyQueueEntry> snapshotEntries() {
+    List<OccupancyQueueEntry> snapshotEntries(Instant arbitrationTime) {
       List<OccupancyQueueEntry> entries = new ArrayList<>();
       entries.addAll(forward.values());
       entries.addAll(backward.values());
       entries.addAll(neutral.values());
-      entries.sort(this::compareEntries);
+      entries.sort((first, second) -> compareEntries(first, second, arbitrationTime));
       return List.copyOf(entries);
     }
 
-    int purgeExpired(Instant now, Duration ttl) {
+    List<OccupancyQueueEntry> purgeExpired(Instant now, Duration ttl) {
       if (now == null || ttl == null || ttl.isNegative()) {
-        return 0;
+        return List.of();
       }
-      int removed = 0;
-      removed += purgeExpired(forward, now, ttl);
-      removed += purgeExpired(backward, now, ttl);
-      removed += purgeExpired(neutral, now, ttl);
-      pruneDetachedMetadata();
-      return removed;
+      List<OccupancyQueueEntry> removed = new ArrayList<>();
+      purgeExpired(forward, now, ttl, removed);
+      purgeExpired(backward, now, ttl, removed);
+      purgeExpired(neutral, now, ttl, removed);
+      return List.copyOf(removed);
     }
 
-    private int purgeExpired(
-        LinkedHashMap<String, OccupancyQueueEntry> map, Instant now, Duration ttl) {
-      int removed = 0;
+    private void purgeExpired(
+        LinkedHashMap<String, OccupancyQueueEntry> map,
+        Instant now,
+        Duration ttl,
+        List<OccupancyQueueEntry> removed) {
       Iterator<Map.Entry<String, OccupancyQueueEntry>> iterator = map.entrySet().iterator();
       while (iterator.hasNext()) {
         Map.Entry<String, OccupancyQueueEntry> entry = iterator.next();
         OccupancyQueueEntry value = entry.getValue();
         if (value == null) {
           iterator.remove();
-          removed++;
           continue;
         }
         if (value.lastSeen().plus(ttl).isBefore(now)) {
           iterator.remove();
-          removed++;
+          removed.add(value);
         }
       }
-      return removed;
-    }
-
-    /**
-     * 从所有方向队列中摘除旧条目，并保留最早 firstSeen。
-     *
-     * <p>用于处理方向更新时的“中立队列 -> 定向队列”迁移，避免同一列车在多个方向桶中重复存在。
-     */
-    private OccupancyQueueEntry detachEntry(String key) {
-      if (key == null || key.isBlank()) {
-        return null;
-      }
-      OccupancyQueueEntry existing = removeEntry(forward, key);
-      existing = pickOlder(existing, removeEntry(backward, key));
-      existing = pickOlder(existing, removeEntry(neutral, key));
-      return existing;
-    }
-
-    private static OccupancyQueueEntry removeEntry(
-        LinkedHashMap<String, OccupancyQueueEntry> map, String key) {
-      return map == null || key == null ? null : map.remove(key);
     }
 
     private static OccupancyQueueEntry pickOlder(
@@ -3405,20 +6810,6 @@ public final class SimpleOccupancyManager
       return candidate.firstSeen().isBefore(current.firstSeen()) ? candidate : current;
     }
 
-    /**
-     * 清理不再出现在任一方向桶中的元数据。
-     *
-     * <p>防止 TTL 回收后残留旧 priority/entryOrder，影响列车重新排队时的排序结果。
-     */
-    private void pruneDetachedMetadata() {
-      Set<String> activeKeys = new LinkedHashSet<>();
-      activeKeys.addAll(forward.keySet());
-      activeKeys.addAll(backward.keySet());
-      activeKeys.addAll(neutral.keySet());
-      priorities.keySet().removeIf(key -> !activeKeys.contains(key));
-      entryOrders.keySet().removeIf(key -> !activeKeys.contains(key));
-    }
-
     private LinkedHashMap<String, OccupancyQueueEntry> mapFor(CorridorDirection direction) {
       if (direction == CorridorDirection.B_TO_A) {
         return backward;
@@ -3430,18 +6821,13 @@ public final class SimpleOccupancyManager
     }
 
     private static String normalize(String trainName) {
-      return trainName.trim().toLowerCase(Locale.ROOT);
-    }
-
-    private int entryOrderFor(String trainName) {
-      if (trainName == null || trainName.isBlank()) {
-        return Integer.MAX_VALUE;
-      }
-      return entryOrders.getOrDefault(normalize(trainName), Integer.MAX_VALUE);
+      return TrainNameNormalizer.normalizeKey(trainName);
     }
 
     private Optional<OccupancyQueueEntry> pickEarlier(
-        Optional<OccupancyQueueEntry> current, Optional<OccupancyQueueEntry> candidate) {
+        Optional<OccupancyQueueEntry> current,
+        Optional<OccupancyQueueEntry> candidate,
+        Instant arbitrationTime) {
       if (candidate == null || candidate.isEmpty()) {
         return current;
       }
@@ -3449,12 +6835,38 @@ public final class SimpleOccupancyManager
         return candidate;
       }
       // 跨方向比较也要遵循 priority 优先，其次 FIFO（与 headEntry 的规则一致）。
-      if (compareEntries(candidate.get(), current.get()) < 0) {
+      if (compareEntries(candidate.get(), current.get(), arbitrationTime) < 0) {
         return candidate;
       }
       return current;
     }
   }
+
+  private record SectionDirectionMatch(
+      OccupancyResource section, CorridorDirection direction, String evidence) {}
+
+  /** 队列刷新结果：区分首次入队、既有条目语义变化与只更新 lastSeen 的心跳。 */
+  private record QueueTouchResult(
+      CorridorDirection direction,
+      boolean stateChanged,
+      boolean existingEntryChanged,
+      List<String> eligibleTrainNames) {
+
+    boolean queueHeadChanged() {
+      return existingEntryChanged && !eligibleTrainNames.isEmpty();
+    }
+  }
+
+  /** 同一列车刷新既有 claim 后最终保留的方向、角色与诊断原因。 */
+  private record ClaimRefresh(
+      Optional<CorridorDirection> direction, ClaimRole role, String reason) {}
+
+  /** 原子折返预检期间暂存的本车授权状态。 */
+  private record DetachedAuthorityState(
+      List<OccupancyClaim> claims,
+      Map<OccupancyResource, OccupancyQueueEntry> queues,
+      Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> claimSignatures,
+      Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> queueSignatures) {}
 
   /**
    * 冲突区放行锁：记录被放行的列车与锁定过期时间。

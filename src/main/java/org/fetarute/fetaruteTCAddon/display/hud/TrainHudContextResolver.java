@@ -29,9 +29,11 @@ import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -47,7 +49,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
@@ -75,7 +79,6 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class TrainHudContextResolver {
 
   private static final long VEHICLE_HOPS = 3;
-  private static final String TAG_ROUTE_PATTERN = "FTA_PATTERN";
   private static final List<String> DEFAULT_LOCALE_TAGS = List.of("zh_CN", "en_US");
 
   private final FetaruteTCAddon plugin;
@@ -93,7 +96,7 @@ public final class TrainHudContextResolver {
   private boolean stationCacheLoaded = false;
   private final Map<String, CompanyDisplay> companyByOperatorCode = new HashMap<>();
   private boolean companyCacheLoaded = false;
-  private final Map<UUID, Optional<RoutePatternType>> routePatternById = new HashMap<>();
+  private final Map<UUID, Optional<RouteOperationType>> routeOperationById = new HashMap<>();
   private final Map<String, Map<RoutePatternType, String>> patternTextByLocale = new HashMap<>();
   private final Map<String, EtaStatusTemplates> etaStatusByLocale = new HashMap<>();
 
@@ -147,7 +150,19 @@ public final class TrainHudContextResolver {
     if (group == null) {
       return Optional.empty();
     }
-    TrainProperties properties = group.getProperties();
+    return resolveContext(
+        group.getProperties(), group.isMoving(), resolveSpeedBlocksPerSecond(group));
+  }
+
+  /**
+   * 按列车属性构造 HUD 上下文；运动状态由调用方从 TrainCarts 编组取出。
+   *
+   * @param properties 列车属性（标签）
+   * @param moving 是否在移动
+   * @param speedBps 速度（blocks/s）
+   */
+  Optional<TrainHudContext> resolveContext(
+      TrainProperties properties, boolean moving, double speedBps) {
     if (properties == null) {
       return Optional.empty();
     }
@@ -162,50 +177,68 @@ public final class TrainHudContextResolver {
       return Optional.empty();
     }
 
-    int routeIndex =
+    Optional<Integer> knownRouteIndex =
         progressEntry
             .map(RouteProgressRegistry.RouteProgressEntry::currentIndex)
-            .orElseGet(
-                () ->
-                    TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX)
-                        .orElse(0));
+            .or(() -> TrainTagHelper.readIntTag(properties, RouteProgressRegistry.TAG_ROUTE_INDEX));
+    int routeIndex = knownRouteIndex.orElse(0);
     Optional<RouteDefinition> routeOpt = resolveRouteDefinition(properties, progressEntry);
-    Optional<HudTemplateService.LineInfo> lineInfo =
-        templateService != null
-            ? templateService.resolveLineInfo(routeOpt.flatMap(RouteDefinition::metadata))
-            : Optional.empty();
+    List<RouteStop> routeStops =
+        routeOpt.map(route -> routeDefinitions.listStops(route.id())).orElse(List.of());
+    Optional<RouteLineChanges.LineRef> routeLine =
+        routeOpt.flatMap(RouteDefinition::metadata).flatMap(RouteLineChanges.LineRef::of);
+    // 直通运转：线路名、颜色、运营商与模板跟列车当前所属的线路走，而不是交路本身的线路。
+    Optional<RouteLineChanges.LineRef> currentLine = resolveCurrentLine(properties, routeLine);
+    Optional<HudTemplateService.LineInfo> lineInfo = currentLine.flatMap(this::resolveLineInfo);
+    Optional<TrainHudContext.ThroughService> throughService =
+        routeLine
+            .flatMap(base -> RouteLineChanges.nextChangeAfter(routeStops, routeIndex, base))
+            .map(change -> resolveThroughService(routeStops, change));
     Optional<RoutePatternType> routePatternType =
         resolveRoutePatternType(properties, progressEntry, routeOpt);
-    Optional<NextStop> nextStopOpt = resolveNextStop(routeOpt, routeIndex);
+    Optional<RouteOperationType> operationType =
+        resolveRouteOperationType(properties, progressEntry);
+    boolean outOfService =
+        routeOpt.isPresent()
+            && RouteTerminals.outOfService(operationType.orElse(null), routeStops, routeIndex);
+    // 越过运营终点后不再有载客停靠站：不能退回去显示已经过的终点站。
+    Optional<NextStop> nextStopOpt =
+        outOfService ? Optional.empty() : resolveNextStop(routeOpt, routeIndex);
     StationDisplay nextStation = nextStopOpt.map(NextStop::display).orElse(StationDisplay.empty());
     String nextStationTrack =
         nextStopOpt.flatMap(NextStop::nodeId).map(this::resolveTrackFromNodeId).orElse("-");
     boolean terminalNextStop =
         nextStopOpt.map(NextStop::terminal).orElse(false) && !nextStation.isEmpty();
-    Destinations destinations = resolveDestinations(routeOpt);
+    Destinations destinations = resolveDestinations(routeOpt, routeIndex, operationType);
 
     EtaResult eta = etaService.getForTrain(trainName, EtaTarget.nextStop());
     Optional<TrainRuntimeSnapshot> snapshotOpt = etaService.getRuntimeSnapshot(trainName);
     Optional<NodeId> currentNode = snapshotOpt.flatMap(TrainRuntimeSnapshot::currentNodeId);
     StationDisplay currentStation =
         currentNode.map(this::resolveStationDisplay).orElse(StationDisplay.empty());
-    boolean stop =
+    // “在站”不能只看停站计时：计时要等车停稳若干 tick 才开始，而进度在那之前就已推进到本站；
+    // 计时到期后还要关门、过发车门控。两个空档里只看计时，HUD 会按“已推进的下一站”闪一下，
+    // 或把站台上关门的车显示成临时停车。
+    boolean dwelling =
         snapshotOpt
             .flatMap(TrainRuntimeSnapshot::dwellRemainingSec)
             .map(sec -> sec > 0)
             .orElse(false);
+    // 在站判定要拿真实进度下标比；下标未知时 routeIndex 的 0 是补出来的，不能参与比较。
+    boolean stop =
+        dwelling
+            || knownRouteIndex.map(index -> isAtStation(trainName, routeOpt, index)).orElse(false);
     SignalAspect signalAspect =
         progressEntry.map(RouteProgressRegistry.RouteProgressEntry::lastSignal).orElse(null);
     Optional<LayoverRegistry.LayoverCandidate> layover = resolveLayover(trainName);
-    Optional<NodeId> eopNodeId = routeOpt.flatMap(this::resolveEndOfOperationNodeId);
+    // 用 stop 匹配而不是节点字符串相等：DYNAMIC 终点的占位节点只是范围里的第一条股道，
+    // 车停进别的股道时字符串永远不相等，终到提示就不会出现。
+    Optional<RouteStop> eopStop = routeOpt.flatMap(this::resolveEndOfOperationStop);
     boolean atLastStation =
         stop
             && currentNode.isPresent()
-            && eopNodeId.isPresent()
-            && currentNode.get().equals(eopNodeId.get());
-
-    double speedBps = resolveSpeedBlocksPerSecond(group);
-    boolean moving = group.isMoving();
+            && eopStop.isPresent()
+            && RouteTerminals.matches(currentNode.get(), eopStop.get());
 
     TrainHudContext context =
         new TrainHudContext(
@@ -225,8 +258,49 @@ public final class TrainHudContextResolver {
             moving,
             atLastStation,
             terminalNextStop,
-            speedBps);
+            speedBps,
+            currentLine,
+            throughService,
+            outOfService);
     return Optional.of(context);
+  }
+
+  /**
+   * 列车当前对乘客显示的线路（{@link RouteLineChanges#current}：线路标签优先，否则为交路本身的线路）。
+   *
+   * @return 交路线路与标签都不明时为空
+   */
+  private Optional<RouteLineChanges.LineRef> resolveCurrentLine(
+      TrainProperties properties, Optional<RouteLineChanges.LineRef> routeLine) {
+    Optional<RouteLineChanges.LineRef> lineTag =
+        RouteLineChanges.LineRef.of(
+            TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_OPERATOR_CODE)
+                .orElse(null),
+            TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_LINE_CODE)
+                .orElse(null));
+    return RouteLineChanges.current(lineTag, routeLine).map(this::canonicalLine);
+  }
+
+  /** 线路存在时换成主数据的写法（{@link StationDirectory.Snapshot#canonicalLine}）；没有车站目录时原样。 */
+  private RouteLineChanges.LineRef canonicalLine(RouteLineChanges.LineRef line) {
+    return plugin
+        .getStationDirectory()
+        .map(directory -> directory.snapshot().canonicalLine(line))
+        .orElse(line);
+  }
+
+  private Optional<HudTemplateService.LineInfo> resolveLineInfo(RouteLineChanges.LineRef line) {
+    return templateService == null
+        ? Optional.empty()
+        : templateService.resolveLineInfo(line.operatorCode(), line.lineCode());
+  }
+
+  private TrainHudContext.ThroughService resolveThroughService(
+      List<RouteStop> stops, RouteLineChanges.Change change) {
+    RouteStop stop = stops.get(change.index());
+    StationDisplay station = resolveStopDisplay(stop, resolveStopNodeId(stop));
+    RouteLineChanges.LineRef line = canonicalLine(change.to());
+    return new TrainHudContext.ThroughService(station, line, resolveLineInfo(line));
   }
 
   /**
@@ -250,10 +324,17 @@ public final class TrainHudContextResolver {
       return UpcomingStops.empty();
     }
     Map<NodeId, Integer> nodeIndexMap = buildNodeIndexMap(route.waypoints());
+    List<RouteLineChanges.LineRef> lines =
+        route
+            .metadata()
+            .flatMap(RouteLineChanges.LineRef::of)
+            .map(base -> RouteLineChanges.linesByIndex(stops, base))
+            .orElse(List.of());
     int safeLimit = Math.max(0, limit);
     List<UpcomingStop> upcoming = new ArrayList<>();
     int total = 0;
-    for (RouteStop stop : stops) {
+    for (int stopIndex = 0; stopIndex < stops.size(); stopIndex++) {
+      RouteStop stop = stops.get(stopIndex);
       if (stop == null || stop.passType() == RouteStopPassType.PASS) {
         continue;
       }
@@ -276,7 +357,9 @@ public final class TrainHudContextResolver {
               ? EtaResult.unavailable("-", List.of())
               : etaService.getForTrain(context.trainName(), target);
       String track = nodeIdOpt.map(this::resolveTrackFromNodeId).orElse("-");
-      upcoming.add(new UpcomingStop(total, display, eta, track));
+      Optional<RouteLineChanges.LineRef> line =
+          stopIndex < lines.size() ? Optional.of(lines.get(stopIndex)) : Optional.empty();
+      upcoming.add(new UpcomingStop(total, display, eta, track, line));
     }
     return new UpcomingStops(List.copyOf(upcoming), total);
   }
@@ -288,7 +371,7 @@ public final class TrainHudContextResolver {
     stationCacheLoaded = false;
     companyByOperatorCode.clear();
     companyCacheLoaded = false;
-    routePatternById.clear();
+    routeOperationById.clear();
     patternTextByLocale.clear();
     etaStatusByLocale.clear();
   }
@@ -318,10 +401,6 @@ public final class TrainHudContextResolver {
     String signalColorTag = resolveSignalColorTag(context.signalAspect());
     String serviceStatus = resolveServiceStatus(context.layover());
     String lineCode = "-";
-    String lineName = "-";
-    String lineLang2 = "-";
-    String lineColor = "";
-    String lineColorTag = "white";
     String operatorCode = "-";
     String routeCode = "-";
     String routeId = "-";
@@ -339,36 +418,24 @@ public final class TrainHudContextResolver {
         routeName = meta.displayName().filter(name -> !name.isBlank()).orElse(routeName);
       }
     }
+    // 直通运转换线后，线路与运营商按列车当前所属的线路；交路代码、名称仍是交路本身的。
+    if (context.currentLine().isPresent()) {
+      operatorCode = context.currentLine().get().operatorCode();
+      lineCode = context.currentLine().get().lineCode();
+    }
     if (context.routePatternType() != null && context.routePatternType().isPresent()) {
       RoutePatternType patternType = context.routePatternType().get();
       routePattern = locale.enumText("enum.route-pattern-type", patternType);
     }
-    if (context.lineInfo() != null && context.lineInfo().isPresent()) {
-      HudTemplateService.LineInfo info = context.lineInfo().get();
-      lineCode = info.code();
-      lineName = info.name();
-      lineLang2 = info.secondaryName();
-      lineColor = info.color();
-    }
-    if (lineColor != null && !lineColor.isBlank()) {
-      lineColorTag = lineColor;
-    }
-    String lineLabel = resolveLineLabel(lineName, lineCode);
-    String safeLine = lineLabel.isBlank() ? "-" : lineLabel;
-    String safeLineLang2 = resolveLineLang2(lineLang2, safeLine);
 
     CompanyDisplay company = resolveCompanyDisplay(operatorCode);
 
     placeholders.put("company", company.label());
     placeholders.put("company_code", company.code());
     placeholders.put("company_name", company.name());
-    placeholders.put("line", safeLine);
-    placeholders.put("line_lang2", safeLineLang2);
-    placeholders.put("line_code", safeOrDash(lineCode));
-    placeholders.put("line_name", safeOrDash(lineName));
-    placeholders.put("line_color", lineColor == null ? "" : lineColor);
-    placeholders.put("line_color_tag", lineColorTag);
+    putLinePlaceholders(placeholders, "", context.lineInfo(), lineCode);
     placeholders.put("operator", safeOrDash(operatorCode));
+    putThroughPlaceholders(placeholders, context.throughService());
     placeholders.put("route_code", safeOrDash(routeCode));
     placeholders.put("route_id", safeOrDash(routeId));
     placeholders.put("route_name", safeOrDash(routeName));
@@ -418,6 +485,79 @@ public final class TrainHudContextResolver {
                     formatDuration(Duration.between(candidate.readyAt(), Instant.now()))));
 
     return placeholders;
+  }
+
+  /**
+   * 覆盖为某条线路的线路占位符（{@code line}、{@code line_lang2}、{@code line_code}、{@code line_name}、{@code
+   * line_color}、{@code line_color_tag}）。
+   *
+   * <p>LCD 前方停靠列表里，直通运转换线之后的各站按该站所属线路着色。
+   *
+   * @param placeholders 占位符表
+   * @param line 线路
+   */
+  public void applyLinePlaceholders(
+      Map<String, String> placeholders, RouteLineChanges.LineRef line) {
+    if (placeholders == null || line == null) {
+      return;
+    }
+    putLinePlaceholders(placeholders, "", resolveLineInfo(line), line.lineCode());
+  }
+
+  /**
+   * 写入一组线路占位符。
+   *
+   * @param prefix 键前缀：当前线路为空串，直通换线后的线路为 {@code through_}
+   * @param info 线路元信息；线路不存在时为空
+   * @param fallbackCode 没有线路元信息时的线路代码
+   */
+  private void putLinePlaceholders(
+      Map<String, String> placeholders,
+      String prefix,
+      Optional<HudTemplateService.LineInfo> info,
+      String fallbackCode) {
+    String lineCode = fallbackCode;
+    String lineName = "-";
+    String lineLang2 = "-";
+    String lineColor = "";
+    if (info != null && info.isPresent()) {
+      lineCode = info.get().code();
+      lineName = info.get().name();
+      lineLang2 = info.get().secondaryName();
+      lineColor = info.get().color();
+    }
+    String lineColorTag = lineColor != null && !lineColor.isBlank() ? lineColor : "white";
+    String lineLabel = resolveLineLabel(lineName, lineCode);
+    String safeLine = lineLabel.isBlank() ? "-" : lineLabel;
+    placeholders.put(prefix + "line", safeLine);
+    placeholders.put(prefix + "line_lang2", resolveLineLang2(lineLang2, safeLine));
+    placeholders.put(prefix + "line_code", safeOrDash(lineCode));
+    placeholders.put(prefix + "line_name", safeOrDash(lineName));
+    placeholders.put(prefix + "line_color", lineColor == null ? "" : lineColor);
+    placeholders.put(prefix + "line_color_tag", lineColorTag);
+  }
+
+  /**
+   * 直通运转占位符：前方下一次换线的车站与新线路（{@code through_station*}、{@code through_line*}、{@code
+   * through_operator}）；没有换线时为 {@code -}（颜色为空、颜色标签为 {@code white}）。
+   */
+  private void putThroughPlaceholders(
+      Map<String, String> placeholders, Optional<TrainHudContext.ThroughService> through) {
+    if (through == null || through.isEmpty()) {
+      putLinePlaceholders(placeholders, "through_", Optional.empty(), "-");
+      placeholders.put("through_operator", "-");
+      placeholders.put("through_station", "-");
+      placeholders.put("through_station_code", "-");
+      placeholders.put("through_station_lang2", "-");
+      return;
+    }
+    TrainHudContext.ThroughService service = through.get();
+    putLinePlaceholders(placeholders, "through_", service.lineInfo(), service.line().lineCode());
+    placeholders.put("through_operator", safeOrDash(service.line().operatorCode()));
+    StationDisplay station = service.station().sanitized();
+    placeholders.put("through_station", station.label());
+    placeholders.put("through_station_code", station.code());
+    placeholders.put("through_station_lang2", station.lang2());
   }
 
   /**
@@ -703,16 +843,18 @@ public final class TrainHudContextResolver {
     return routeDefinitions.findById(routeUuid.get());
   }
 
+  /**
+   * 解析列车当前交路的种别（各站停/快速/特快…），取自交路缓存里的 {@code pattern_type}。
+   *
+   * <p>不读 {@code FTA_PATTERN} 标签：它是出车时写下的，折返复用换交路时不一定同步，快速交路的车全靠复用接班，读标签就会一直显示出车时那条交路的种别。缓存随交路重载刷新，
+   * 管理员改了种别不必再等 HUD 自己的缓存过期。
+   */
   private Optional<RoutePatternType> resolveRoutePatternType(
       TrainProperties properties,
       Optional<RouteProgressRegistry.RouteProgressEntry> progressEntry,
       Optional<RouteDefinition> routeOpt) {
     if (routeOpt == null || routeOpt.isEmpty()) {
       return Optional.empty();
-    }
-    Optional<RoutePatternType> tagPattern = resolvePatternFromTag(properties);
-    if (tagPattern.isPresent()) {
-      return tagPattern;
     }
     Optional<UUID> routeId =
         progressEntry != null
@@ -723,29 +865,10 @@ public final class TrainHudContextResolver {
           TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
               .flatMap(TrainHudContextResolver::parseUuid);
     }
-    if (routeId.isEmpty()) {
-      return Optional.empty();
-    }
-    Optional<RoutePatternType> cached = routePatternById.get(routeId.get());
-    if (cached != null) {
-      return cached;
-    }
-    Optional<StorageProvider> providerOpt = providerIfReady();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    Optional<RoutePatternType> resolved =
-        providerOpt.get().routes().findById(routeId.get()).map(Route::patternType);
-    routePatternById.put(routeId.get(), resolved);
-    return resolved;
-  }
-
-  private Optional<RoutePatternType> resolvePatternFromTag(TrainProperties properties) {
-    if (properties == null) {
-      return Optional.empty();
-    }
-    return TrainTagHelper.readTagValue(properties, TAG_ROUTE_PATTERN)
-        .flatMap(RoutePatternType::fromToken);
+    return routeId
+        .flatMap(routeDefinitions::findRecord)
+        .map(RouteDefinitionCache.RouteRecord::route)
+        .map(Route::patternType);
   }
 
   private Map<String, String> resolvePatternLocalePlaceholders(
@@ -1022,6 +1145,7 @@ public final class TrainHudContextResolver {
    * 获取列车实际速度（blocks per second）。
    *
    * <p>使用实体的物理速度（velocity）而非 TrainCarts 的 getRealSpeed()， 因为后者在 launch 期间会返回目标速度而非实际速度。
+   * 再与限速取小：TrainCarts 用限速截速时只截每步位移、不缩短速度向量，制动途中向量仍是制动前的速度，直接显示会比实际快。
    */
   private double resolveSpeedBlocksPerSecond(MinecartGroup group) {
     if (group == null || group.head() == null) {
@@ -1038,6 +1162,10 @@ public final class TrainHudContextResolver {
       return 0.0;
     }
     double bpt = velocity.length();
+    TrainProperties properties = group.getProperties();
+    if (properties != null && Double.isFinite(properties.getSpeedLimit())) {
+      bpt = Math.min(bpt, Math.max(0.0, properties.getSpeedLimit()));
+    }
     return bpt * 20.0; // blocks/tick → blocks/second
   }
 
@@ -1249,9 +1377,22 @@ public final class TrainHudContextResolver {
     return display;
   }
 
+  /**
+   * 按运营商代码 + 站码找车站。
+   *
+   * <p>车站目录可用时走目录（与公开 API 同一个索引、同一套运营商代码口径，两边不会给出不同的车站）； 目录尚未就绪时退回本地缓存（同样先到先得）。
+   */
   private StationDisplay resolveStationDisplay(StationKey key) {
     if (key == null) {
       return StationDisplay.empty();
+    }
+    Optional<StationDisplay> fromDirectory =
+        plugin
+            .getStationDirectory()
+            .flatMap(directory -> directory.snapshot().findStation(key.operator(), key.station()))
+            .map(entry -> StationDisplay.fromStation(entry.station()));
+    if (fromDirectory.isPresent()) {
+      return fromDirectory.get();
     }
     ensureStationCache();
     StationDisplay cached = stationByKey.get(stationKey(key.operator(), key.station()));
@@ -1370,7 +1511,8 @@ public final class TrainHudContextResolver {
             stationNodeById.put(station.id(), nodeId);
             String key = stationKey(operator.code(), station.code());
             if (!key.isBlank()) {
-              stationByKey.put(key, display);
+              // 跨公司同名运营商时先到先得，与车站目录、公司显示同一规则。
+              stationByKey.putIfAbsent(key, display);
             }
           }
         }
@@ -1451,13 +1593,47 @@ public final class TrainHudContextResolver {
     return progress;
   }
 
-  private Destinations resolveDestinations(Optional<RouteDefinition> routeOpt) {
+  /**
+   * 解析线路终点与运营终点，选站口径见 {@link RouteTerminals}。
+   *
+   * <p>回库线路在越过运营终点之前显示终点站名，之后显示“回库 / Not in Service”——与站牌同一规则。
+   */
+  private Destinations resolveDestinations(
+      Optional<RouteDefinition> routeOpt,
+      int routeIndex,
+      Optional<RouteOperationType> operationType) {
     if (routeOpt == null || routeOpt.isEmpty()) {
       return Destinations.empty();
     }
     RouteDefinition route = routeOpt.get();
-    StationDisplay eor = resolveEndOfRoute(route);
-    StationDisplay eop = resolveEndOfOperation(route, eor);
+    List<RouteStop> stops =
+        routeDefinitions != null ? routeDefinitions.listStops(route.id()) : List.of();
+    java.util.OptionalInt eorIndex = RouteTerminals.endOfRouteIndex(stops);
+    StationDisplay eor =
+        eorIndex.isPresent()
+            ? RouteTerminals.depotRef(stops.get(eorIndex.getAsInt()))
+                .map(this::resolveDepotDisplay)
+                .orElse(StationDisplay.empty())
+            : StationDisplay.empty();
+    if (eor.isEmpty()) {
+      eor = resolveStopDisplay(stops, RouteTerminals.endOfRouteLabelIndex(stops));
+    }
+    if (eor.isEmpty()) {
+      eor = resolveEndOfRoute(route);
+    }
+    StationDisplay eop;
+    if (RouteTerminals.outOfService(operationType.orElse(null), stops, routeIndex)) {
+      eop =
+          StationDisplay.of(
+              RouteTerminals.OUT_OF_SERVICE_LABEL,
+              RouteTerminals.OUT_OF_SERVICE_ID,
+              RouteTerminals.OUT_OF_SERVICE_LANG2);
+    } else {
+      eop = resolveStopDisplay(stops, RouteTerminals.endOfOperationIndex(stops));
+      if (eop.isEmpty()) {
+        eop = eor;
+      }
+    }
     return new Destinations(eor, eop);
   }
 
@@ -1469,129 +1645,95 @@ public final class TrainHudContextResolver {
     return resolveStationDisplay(last);
   }
 
+  private boolean isAtStation(
+      String trainName, Optional<RouteDefinition> routeOpt, int routeIndex) {
+    if (plugin == null || routeOpt == null || routeOpt.isEmpty()) {
+      return false;
+    }
+    String routeKey = routeOpt.get().id().value();
+    return plugin
+        .getStationPresence()
+        .map(presence -> presence.isAtStation(trainName, routeKey, routeIndex))
+        .orElse(false);
+  }
+
   /**
-   * 解析运营终点的 NodeId（用于判断列车是否到达终点）。
+   * 车库显示：同代码车站的名称接「车库」（如「林湾车库 / Lym Won Depot」）；没有同代码车站时用站码（「LWN车库 / LWN Depot」）。
    *
-   * <p>仅考虑 STATION 类型的 stop（AutoStation），不包含 WAYPOINT 类型的 STOP/TERM。 支持 DYNAMIC stop：会从 DYNAMIC
-   * 规范中提取站点信息。
+   * <p>按站码直接查车站会把车库显示成车站本身，与车次终点混在一起。
    */
-  private Optional<NodeId> resolveEndOfOperationNodeId(RouteDefinition route) {
+  private StationDisplay resolveDepotDisplay(RouteTerminals.StationRef depot) {
+    String code = depot.stationCode();
+    StationDisplay station = resolveStationDisplay(new StationKey(depot.operatorCode(), code));
+    if (station.isEmpty()) {
+      return StationDisplay.of(
+          code + RouteTerminals.DEPOT_SUFFIX, code, code + " " + RouteTerminals.DEPOT_SUFFIX_LANG2);
+    }
+    String lang2 =
+        "-".equals(station.lang2())
+            ? code + " " + RouteTerminals.DEPOT_SUFFIX_LANG2
+            : station.lang2() + " " + RouteTerminals.DEPOT_SUFFIX_LANG2;
+    return StationDisplay.of(station.label() + RouteTerminals.DEPOT_SUFFIX, code, lang2);
+  }
+
+  /** 运营终点对应的 stop（用于判断列车是否已停在终点站）。 */
+  private Optional<RouteStop> resolveEndOfOperationStop(RouteDefinition route) {
     if (route == null || routeDefinitions == null) {
       return Optional.empty();
     }
     List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    for (int i = stops.size() - 1; i >= 0; i--) {
-      RouteStop stop = stops.get(i);
-      if (stop == null) {
-        continue;
-      }
-      RouteStopPassType passType = stop.passType();
-      if (passType == RouteStopPassType.PASS) {
-        continue;
-      }
-      // 只考虑有 stationId 的 stop（AutoStation），不包含纯 waypoint
-      if (stop.stationId().isEmpty() && !isStationTypeStop(stop)) {
-        continue;
-      }
-      // 优先检查 DYNAMIC
-      Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-          DynamicStopMatcher.parseDynamicSpec(stop);
-      if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
-        // 返回 DYNAMIC 范围内的第一个候选（用于判断终点时取 key 匹配）
-        DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
-        String candidate = spec.operatorCode() + ":S:" + spec.nodeName() + ":" + spec.fromTrack();
-        return Optional.of(NodeId.of(candidate));
-      }
-      Optional<String> nodeId = stop.waypointNodeId().filter(id -> !id.isBlank());
-      if (nodeId.isPresent()) {
-        return Optional.of(NodeId.of(nodeId.get()));
-      }
-      Optional<UUID> stationId = stop.stationId();
-      if (stationId.isPresent()) {
-        return resolveStationNodeId(stationId.get());
-      }
-    }
-    return Optional.empty();
+    java.util.OptionalInt index = RouteTerminals.endOfOperationIndex(stops);
+    return index.isPresent() ? Optional.ofNullable(stops.get(index.getAsInt())) : Optional.empty();
   }
 
-  /**
-   * 解析运营终点的显示信息（End of Operation）。
-   *
-   * <p>仅考虑 STATION 类型的 stop（AutoStation），不包含 WAYPOINT 类型的 STOP/TERM。 支持 DYNAMIC stop：会从 DYNAMIC
-   * 规范中提取站点信息。
-   *
-   * @param route 路线定义
-   * @param fallback 备用显示（通常是 EOR）
-   * @return 终点站显示信息
-   */
-  private StationDisplay resolveEndOfOperation(RouteDefinition route, StationDisplay fallback) {
-    if (route == null || routeDefinitions == null) {
-      return fallback;
+  /** 把 {@link RouteTerminals} 选中的 stop 解析成显示：stationId → DYNAMIC 占位节点 → waypoint。 */
+  private StationDisplay resolveStopDisplay(List<RouteStop> stops, java.util.OptionalInt index) {
+    if (stops == null || index == null || index.isEmpty()) {
+      return StationDisplay.empty();
     }
-    List<RouteStop> stops = routeDefinitions.listStops(route.id());
-    for (int i = stops.size() - 1; i >= 0; i--) {
-      RouteStop stop = stops.get(i);
-      if (stop == null) {
-        continue;
-      }
-      RouteStopPassType passType = stop.passType();
-      if (passType == RouteStopPassType.PASS) {
-        continue;
-      }
-      // 只考虑有 stationId 的 stop（AutoStation），不包含纯 waypoint
-      if (stop.stationId().isEmpty() && !isStationTypeStop(stop)) {
-        continue;
-      }
-      // 优先检查 stationId
-      Optional<UUID> stationId = stop.stationId();
-      if (stationId.isPresent()) {
-        StationDisplay resolved = resolveStationDisplay(stationId.get());
-        if (!resolved.isEmpty()) {
-          return resolved;
-        }
-      }
-      // 检查 DYNAMIC
-      Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-          DynamicStopMatcher.parseDynamicSpec(stop);
-      if (dynamicSpec.isPresent() && dynamicSpec.get().isStation()) {
-        DynamicStopMatcher.DynamicSpec spec = dynamicSpec.get();
-        String candidate = spec.operatorCode() + ":S:" + spec.nodeName() + ":" + spec.fromTrack();
-        StationDisplay resolved = resolveStationDisplay(NodeId.of(candidate));
-        if (!resolved.isEmpty()) {
-          return resolved;
-        }
-      }
-      Optional<String> nodeId = stop.waypointNodeId().filter(id -> !id.isBlank());
-      if (nodeId.isPresent()) {
-        StationDisplay resolved = resolveStationDisplay(NodeId.of(nodeId.get()));
-        if (!resolved.isEmpty()) {
-          return resolved;
-        }
-      }
-    }
-    return fallback;
-  }
-
-  /** 判断 stop 是否为 Station 类型（通过 DYNAMIC 规范或 waypointNodeId 判断）。 */
-  private boolean isStationTypeStop(RouteStop stop) {
+    RouteStop stop = stops.get(index.getAsInt());
     if (stop == null) {
-      return false;
+      return StationDisplay.empty();
     }
-    // 检查 DYNAMIC 规范
-    Optional<DynamicStopMatcher.DynamicSpec> dynamicSpec =
-        DynamicStopMatcher.parseDynamicSpec(stop);
-    if (dynamicSpec.isPresent()) {
-      return dynamicSpec.get().isStation();
-    }
-    // 检查 waypointNodeId 格式
-    if (stop.waypointNodeId().isPresent()) {
-      String nodeId = stop.waypointNodeId().get();
-      String[] parts = nodeId.split(":", -1);
-      if (parts.length >= 2) {
-        return "S".equalsIgnoreCase(parts[1]);
+    Optional<UUID> stationId = stop.stationId();
+    if (stationId.isPresent()) {
+      StationDisplay resolved = resolveStationDisplay(stationId.get());
+      if (!resolved.isEmpty()) {
+        return resolved;
       }
     }
-    return false;
+    return RouteTerminals.stationRef(stop)
+        .map(ref -> resolveStationDisplay(NodeId.of(ref.nodeId())))
+        .orElse(StationDisplay.empty());
+  }
+
+  private Optional<RouteOperationType> resolveRouteOperationType(
+      TrainProperties properties,
+      Optional<RouteProgressRegistry.RouteProgressEntry> progressEntry) {
+    Optional<UUID> routeId =
+        progressEntry != null
+            ? progressEntry.map(RouteProgressRegistry.RouteProgressEntry::routeUuid)
+            : Optional.empty();
+    if (routeId.isEmpty() && properties != null) {
+      routeId =
+          TrainTagHelper.readTagValue(properties, RouteProgressRegistry.TAG_ROUTE_ID)
+              .flatMap(TrainHudContextResolver::parseUuid);
+    }
+    if (routeId.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RouteOperationType> cached = routeOperationById.get(routeId.get());
+    if (cached != null) {
+      return cached;
+    }
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RouteOperationType> resolved =
+        providerOpt.get().routes().findById(routeId.get()).map(Route::operationType);
+    routeOperationById.put(routeId.get(), resolved);
+    return resolved;
   }
 
   private String safeOrDash(String value) {
@@ -1639,9 +1781,15 @@ public final class TrainHudContextResolver {
   /**
    * 未来停靠预览项（用于 LCD/Scoreboard）。
    *
-   * <p>{@code track} 为站台编号（从 NodeId 解析，如 "1"/"2"），若无法解析则为 "-"。
+   * <p>{@code track} 为站台编号（从 NodeId 解析，如 "1"/"2"），若无法解析则为 "-"。{@code line} 为列车在该站所属的线路
+   * （直通运转换线后为新线路）；交路线路不明时为空。
    */
-  public record UpcomingStop(int sequence, StationDisplay display, EtaResult eta, String track) {
+  public record UpcomingStop(
+      int sequence,
+      StationDisplay display,
+      EtaResult eta,
+      String track,
+      Optional<RouteLineChanges.LineRef> line) {
     public UpcomingStop {
       Objects.requireNonNull(display, "display");
       Objects.requireNonNull(eta, "eta");
@@ -1649,11 +1797,12 @@ public final class TrainHudContextResolver {
         throw new IllegalArgumentException("sequence 必须为正数");
       }
       track = track == null || track.isBlank() ? "-" : track;
+      line = line == null ? Optional.empty() : line;
     }
 
-    /** 兼容旧构造：不含 track 字段。 */
+    /** 兼容旧构造：不含 track 字段与所属线路。 */
     public UpcomingStop(int sequence, StationDisplay display, EtaResult eta) {
-      this(sequence, display, eta, "-");
+      this(sequence, display, eta, "-", Optional.empty());
     }
   }
 

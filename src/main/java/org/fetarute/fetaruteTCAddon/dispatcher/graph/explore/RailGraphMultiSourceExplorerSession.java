@@ -1,12 +1,17 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.explore;
 
+import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdgeAccumulator;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
@@ -17,18 +22,24 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * <ul>
  *   <li>通过 anchorsByNode 传入各节点的轨道锚点（已确保是轨道方块）
  *   <li>反复调用 {@link #step(int)} 分段处理，直到 {@link #isDone()}
- *   <li>完成后用 {@link #edgeLengths()} 获取区间长度结果
+ *   <li>完成后用 {@link #exploredEdges()} 获取区间长度与物理足迹；旧调用方可继续读取 {@link #edgeLengths()}
  * </ul>
  */
 public final class RailGraphMultiSourceExplorerSession {
 
+  private static final Comparator<Entry> ENTRY_ORDER =
+      Comparator.comparingDouble(Entry::distance)
+          .thenComparing(entry -> entry.owner().value())
+          .thenComparingInt(entry -> entry.pos().x())
+          .thenComparingInt(entry -> entry.pos().y())
+          .thenComparingInt(entry -> entry.pos().z());
+
   private final RailBlockAccess access;
   private final int maxDistanceBlocks;
   private final Consumer<RailBlockPos> onJunction;
-  private final PriorityQueue<Entry> queue =
-      new PriorityQueue<>(java.util.Comparator.comparingDouble(Entry::distance));
+  private final PriorityQueue<Entry> queue = new PriorityQueue<>(ENTRY_ORDER);
   private final Map<RailBlockPos, Visit> visits = new HashMap<>();
-  private final Map<EdgeId, Integer> bestLengths = new HashMap<>();
+  private final Map<EdgeId, ExploredRailEdgeAccumulator> exploredEdges = new HashMap<>();
 
   /** 记录每个锚点位置所属的节点，用于判断波前是否到达了另一个节点的锚点。 */
   private final Map<RailBlockPos, NodeId> anchorOwners = new HashMap<>();
@@ -74,7 +85,7 @@ public final class RailGraphMultiSourceExplorerSession {
         anchorOwners.putIfAbsent(anchor, owner);
         Visit existing = visits.get(anchor);
         if (existing == null || existing.distance > 0.0) {
-          visits.put(anchor, new Visit(owner, 0.0));
+          visits.put(anchor, new Visit(owner, 0.0, new PathTrace(anchor, null)));
           queue.add(new Entry(anchor, owner, 0.0));
         }
       }
@@ -152,10 +163,8 @@ public final class RailGraphMultiSourceExplorerSession {
             int candidateInt = (int) Math.round(nextDistance);
             if (candidateInt > 0) {
               EdgeId edgeId = EdgeId.undirected(currentVisit.owner, neighborAnchorOwner);
-              Integer existingBest = bestLengths.get(edgeId);
-              if (existingBest == null || candidateInt < existingBest) {
-                bestLengths.put(edgeId, candidateInt);
-              }
+              recordCandidate(
+                  edgeId, candidateInt, new PathTrace(neighbor, currentVisit.pathTrace));
             }
           }
           // 不将邻居加入队列，因为它是另一个节点的锚点，该节点会自己从那里开始扩展
@@ -164,7 +173,12 @@ public final class RailGraphMultiSourceExplorerSession {
 
         Visit neighborVisit = visits.get(neighbor);
         if (neighborVisit == null || nextDistance + 1e-9 < neighborVisit.distance) {
-          visits.put(neighbor, new Visit(currentVisit.owner, nextDistance));
+          visits.put(
+              neighbor,
+              new Visit(
+                  currentVisit.owner,
+                  nextDistance,
+                  new PathTrace(neighbor, currentVisit.pathTrace)));
           queue.add(new Entry(neighbor, currentVisit.owner, nextDistance));
           continue;
         }
@@ -185,10 +199,11 @@ public final class RailGraphMultiSourceExplorerSession {
             continue;
           }
           EdgeId edgeId = EdgeId.undirected(currentVisit.owner, neighborVisit.owner);
-          Integer existingBest = bestLengths.get(edgeId);
-          if (existingBest == null || candidateInt < existingBest) {
-            bestLengths.put(edgeId, candidateInt);
-          }
+          recordCandidate(
+              edgeId,
+              candidateInt,
+              new PathTrace(neighbor, currentVisit.pathTrace),
+              neighborVisit.pathTrace);
         }
       }
     }
@@ -215,8 +230,36 @@ public final class RailGraphMultiSourceExplorerSession {
     if (!isDone()) {
       throw new IllegalStateException("探索尚未完成，无法读取 edgeLengths");
     }
-    bestLengths.entrySet().removeIf(e -> e.getValue() == null || e.getValue() <= 0);
-    return Map.copyOf(bestLengths);
+    Map<EdgeId, Integer> lengths = new HashMap<>();
+    exploredEdges().forEach((edgeId, edge) -> lengths.put(edgeId, edge.lengthBlocks()));
+    return Map.copyOf(lengths);
+  }
+
+  /**
+   * 返回当前已经发现的区间证据快照。
+   *
+   * <p>探索队列尚未耗尽时，返回的足迹会明确标记为不完整；调用方不得据此建立联锁索引。
+   */
+  public Map<EdgeId, ExploredRailEdge> exploredEdges() {
+    Map<EdgeId, ExploredRailEdge> snapshot = new HashMap<>();
+    boolean complete = isDone() && access.supportsExactBlockFootprint();
+    exploredEdges.forEach(
+        (edgeId, accumulator) -> snapshot.put(edgeId, accumulator.snapshot(complete)));
+    return Map.copyOf(snapshot);
+  }
+
+  private void recordCandidate(EdgeId edgeId, int lengthBlocks, PathTrace... traces) {
+    Set<RailFootprintCell> cells = new HashSet<>();
+    for (PathTrace trace : traces) {
+      PathTrace current = trace;
+      while (current != null) {
+        cells.add(new RailFootprintCell(current.pos.x(), current.pos.y(), current.pos.z()));
+        current = current.previous;
+      }
+    }
+    exploredEdges
+        .computeIfAbsent(edgeId, ignored -> new ExploredRailEdgeAccumulator())
+        .recordCandidate(lengthBlocks, cells);
   }
 
   private boolean isJunction(
@@ -228,12 +271,19 @@ public final class RailGraphMultiSourceExplorerSession {
     return neighbors.size() >= 3;
   }
 
-  private record Visit(NodeId owner, double distance) {
+  private record Visit(NodeId owner, double distance, PathTrace pathTrace) {
     private Visit {
       Objects.requireNonNull(owner, "owner");
+      Objects.requireNonNull(pathTrace, "pathTrace");
       if (!Double.isFinite(distance) || distance < 0.0) {
         throw new IllegalArgumentException("distance 不能为负");
       }
+    }
+  }
+
+  private record PathTrace(RailBlockPos pos, PathTrace previous) {
+    private PathTrace {
+      Objects.requireNonNull(pos, "pos");
     }
   }
 

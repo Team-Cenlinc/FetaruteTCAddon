@@ -15,6 +15,9 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SwitcherMovementTopology;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.utils.StableCollections;
 
 /**
  * Smart Dispatcher 的 wait-for graph planner。
@@ -60,8 +63,41 @@ public final class SmartWaitForPlanner {
       String role,
       String source,
       CorridorDirection direction,
+      Optional<SwitcherMovementTopology.Classification> switcherMovement,
       long ageMs,
-      boolean activeForNormalAdmission) {
+      boolean activeForNormalAdmission,
+      boolean liveVerified) {
+
+    /** 旧调用点：未做现场复核的边，按 TTL 年龄处理。 */
+    public InputEdge(
+        String blockedTrain,
+        String blockerTrain,
+        String resource,
+        String resourceKind,
+        String relation,
+        String intent,
+        String role,
+        String source,
+        CorridorDirection direction,
+        Optional<SwitcherMovementTopology.Classification> switcherMovement,
+        long ageMs,
+        boolean activeForNormalAdmission) {
+      this(
+          blockedTrain,
+          blockerTrain,
+          resource,
+          resourceKind,
+          relation,
+          intent,
+          role,
+          source,
+          direction,
+          switcherMovement,
+          ageMs,
+          activeForNormalAdmission,
+          false);
+    }
+
     public InputEdge {
       blockedTrain = normalize(blockedTrain, "-");
       blockerTrain = normalize(blockerTrain, "-");
@@ -72,7 +108,35 @@ public final class SmartWaitForPlanner {
       role = normalize(role, "UNKNOWN");
       source = normalize(source, "unknown");
       direction = direction == null ? CorridorDirection.UNKNOWN : direction;
+      switcherMovement = switcherMovement == null ? Optional.empty() : switcherMovement;
       ageMs = Math.max(0L, ageMs);
+    }
+
+    public InputEdge(
+        String blockedTrain,
+        String blockerTrain,
+        String resource,
+        String resourceKind,
+        String relation,
+        String intent,
+        String role,
+        String source,
+        CorridorDirection direction,
+        long ageMs,
+        boolean activeForNormalAdmission) {
+      this(
+          blockedTrain,
+          blockerTrain,
+          resource,
+          resourceKind,
+          relation,
+          intent,
+          role,
+          source,
+          direction,
+          Optional.empty(),
+          ageMs,
+          activeForNormalAdmission);
     }
   }
 
@@ -94,7 +158,8 @@ public final class SmartWaitForPlanner {
       boolean fullRouteCandidate,
       boolean createsOppositeConflict,
       boolean blocksUnrelatedNormalTrain,
-      String movementTokenState) {
+      String movementTokenState,
+      Optional<CanonicalForwardPathEvidence> forwardPathEvidence) {
     public TrainState {
       trainName = normalize(trainName, "-");
       routeId = normalize(routeId, "-");
@@ -106,6 +171,50 @@ public final class SmartWaitForPlanner {
       directionInferenceFailureReason = normalize(directionInferenceFailureReason, "-");
       stuckDurationSeconds = Math.max(0L, stuckDurationSeconds);
       movementTokenState = normalize(movementTokenState, "NONE");
+      forwardPathEvidence = forwardPathEvidence == null ? Optional.empty() : forwardPathEvidence;
+      if (forwardPathEvidence.isPresent()
+          && !forwardPathEvidence.orElseThrow().proves(trainName, currentNode, nextNode)) {
+        forwardPathEvidence = Optional.empty();
+      }
+    }
+
+    public TrainState(
+        String trainName,
+        String routeId,
+        int currentIndex,
+        String currentNode,
+        String nextNode,
+        String lastPassedGraphNode,
+        CorridorDirection inferredDirection,
+        String directionSource,
+        String directionInferenceFailureReason,
+        long stuckDurationSeconds,
+        boolean stalled,
+        boolean reverseCandidate,
+        boolean turnbackReverseBeforeBoundary,
+        boolean fullRouteCandidate,
+        boolean createsOppositeConflict,
+        boolean blocksUnrelatedNormalTrain,
+        String movementTokenState) {
+      this(
+          trainName,
+          routeId,
+          currentIndex,
+          currentNode,
+          nextNode,
+          lastPassedGraphNode,
+          inferredDirection,
+          directionSource,
+          directionInferenceFailureReason,
+          stuckDurationSeconds,
+          stalled,
+          reverseCandidate,
+          turnbackReverseBeforeBoundary,
+          fullRouteCandidate,
+          createsOppositeConflict,
+          blocksUnrelatedNormalTrain,
+          movementTokenState,
+          Optional.empty());
     }
 
     public String routeFamily() {
@@ -120,7 +229,8 @@ public final class SmartWaitForPlanner {
       PlannerSettings settings,
       List<InputEdge> edges,
       Map<String, TrainState> trainStates,
-      Set<String> activeCycleReservations) {
+      Set<String> activeCycleReservations,
+      Set<String> activeReservationTrains) {
     public PlannerInput {
       capturedAt = capturedAt == null ? Instant.now() : capturedAt;
       settings =
@@ -132,6 +242,14 @@ public final class SmartWaitForPlanner {
       trainStates = trainStates == null ? Map.of() : Map.copyOf(trainStates);
       activeCycleReservations =
           activeCycleReservations == null ? Set.of() : Set.copyOf(activeCycleReservations);
+      activeReservationTrains =
+          activeReservationTrains == null
+              ? Set.of()
+              : Set.copyOf(
+                  activeReservationTrains.stream()
+                      .map(TrainNameNormalizer::normalizeKey)
+                      .filter(name -> !name.isEmpty())
+                      .toList());
     }
   }
 
@@ -139,7 +257,8 @@ public final class SmartWaitForPlanner {
   public enum CandidateKind {
     FORWARD_TO_AUTHORITY_BOUNDARY,
     FORWARD_TO_RELEASE_BLOCKER,
-    FORWARD_TO_SAFE_HOLD_POINT
+    FORWARD_TO_SAFE_HOLD_POINT,
+    YIELD_TO_HEAD_ON
   }
 
   /** shadow simulation 置信度。 */
@@ -194,7 +313,8 @@ public final class SmartWaitForPlanner {
       GraphOnlySimulation simulation,
       boolean releasesBottleneck,
       boolean improvesSameLineCascade,
-      long stuckDurationSeconds) {
+      long stuckDurationSeconds,
+      Optional<CanonicalForwardPathEvidence> forwardPathEvidence) {
     public UnlockCandidate {
       train = normalize(train, "-");
       cycleId = normalize(cycleId, "-");
@@ -210,10 +330,86 @@ public final class SmartWaitForPlanner {
       reservationResourceLimit = Math.max(1, reservationResourceLimit);
       rejectReason = normalize(rejectReason, accepted ? "-" : "UNKNOWN");
       recommendation = normalize(recommendation, "-");
+      forwardPathEvidence = forwardPathEvidence == null ? Optional.empty() : forwardPathEvidence;
+      if (forwardPathEvidence.isPresent()
+          && !forwardPathEvidence.orElseThrow().proves(train, currentNode, nextNode)) {
+        forwardPathEvidence = Optional.empty();
+      }
+    }
+
+    public UnlockCandidate(
+        String train,
+        String cycleId,
+        CandidateKind kind,
+        List<String> releaseResources,
+        List<String> resources,
+        String authorityEnd,
+        String currentNode,
+        String nextNode,
+        CorridorDirection direction,
+        int releaseResourceCount,
+        int fullRouteResourceCount,
+        int reservationResourceLimit,
+        int score,
+        boolean accepted,
+        String rejectReason,
+        String recommendation,
+        GraphOnlySimulation simulation,
+        boolean releasesBottleneck,
+        boolean improvesSameLineCascade,
+        long stuckDurationSeconds) {
+      this(
+          train,
+          cycleId,
+          kind,
+          releaseResources,
+          resources,
+          authorityEnd,
+          currentNode,
+          nextNode,
+          direction,
+          releaseResourceCount,
+          fullRouteResourceCount,
+          reservationResourceLimit,
+          score,
+          accepted,
+          rejectReason,
+          recommendation,
+          simulation,
+          releasesBottleneck,
+          improvesSameLineCascade,
+          stuckDurationSeconds,
+          Optional.empty());
     }
 
     public int reservationResourceCount() {
       return resources.size();
+    }
+
+    /**
+     * 是否具有足以请求下一 tick 规范重评估的前向证据。
+     *
+     * <p>已知 {@link CorridorDirection} 仍只代表单线/单冲突二值方向；通用 NODE/EDGE 候选必须携带独立的 canonical path
+     * 证明，二者不会互相伪造。
+     */
+    public boolean hasForwardDirectionEvidence() {
+      if (resources.isEmpty()) {
+        return false;
+      }
+      List<String> canonicalResources =
+          resources.stream().filter(SmartWaitForPlanner::canonicalPathResource).toList();
+      boolean canonicalSatisfied =
+          canonicalResources.isEmpty()
+              || forwardPathEvidence
+                  .filter(evidence -> evidence.proves(train, currentNode, nextNode))
+                  .filter(
+                      evidence ->
+                          canonicalResources.stream().allMatch(evidence::coversReleaseResource))
+                  .isPresent();
+      boolean corridorOrConflictSatisfied =
+          resources.stream().allMatch(SmartWaitForPlanner::canonicalPathResource)
+              || direction != CorridorDirection.UNKNOWN;
+      return canonicalSatisfied && corridorOrConflictSatisfied;
     }
 
     public String planHash() {
@@ -225,6 +421,7 @@ public final class SmartWaitForPlanner {
               resources,
               authorityEnd,
               direction,
+              forwardPathEvidence.map(CanonicalForwardPathEvidence::evidenceHash).orElse("-"),
               releaseResourceCount,
               fullRouteResourceCount,
               score));
@@ -265,25 +462,43 @@ public final class SmartWaitForPlanner {
     }
   }
 
+  /**
+   * 一个被识别出的等待形态。
+   *
+   * <p>{@code trains}/{@code blockers} 保留构造方给出的顺序——调用方都已按 {@link #TEXT_ORDER} 排好（{@code
+   * sortedSet}、{@code TreeSet}、单元素集合）。下游有"第一个非当前持有者"、按 blockers 顺序生成候选等依赖顺序的选择，用 {@code Set.copyOf}
+   * 会把排好的顺序换成每个 JVM 随机一次的顺序。规则见 {@link StableCollections}。
+   */
   private record Pattern(
       String id, String type, Set<String> trains, Set<String> blockers, boolean hardCycle) {
     private Pattern {
       id = normalize(id, "-");
       type = normalize(type, "UNKNOWN");
-      trains = trains == null ? Set.of() : Set.copyOf(trains);
-      blockers = blockers == null ? Set.of() : Set.copyOf(blockers);
+      trains = trains == null ? Set.of() : StableCollections.copyInInsertionOrder(trains);
+      blockers = blockers == null ? Set.of() : StableCollections.copyInInsertionOrder(blockers);
     }
   }
 
+  private record SwitcherMergeEvidence(
+      String switcherKey, String currentConflictOwner, String otherTrain, String reason) {}
+
   private record DirectionResolution(
-      CorridorDirection direction, String source, String failureReason) {
+      CorridorDirection direction,
+      Optional<CanonicalForwardPathEvidence> forwardPathEvidence,
+      String source,
+      String failureReason) {
     private DirectionResolution {
       direction = direction == null ? CorridorDirection.UNKNOWN : direction;
+      forwardPathEvidence = forwardPathEvidence == null ? Optional.empty() : forwardPathEvidence;
       source = normalize(source, "UNKNOWN");
       failureReason = normalize(failureReason, "-");
     }
 
     boolean known() {
+      return direction != CorridorDirection.UNKNOWN || forwardPathEvidence.isPresent();
+    }
+
+    boolean corridorKnown() {
       return direction != CorridorDirection.UNKNOWN;
     }
   }
@@ -299,8 +514,11 @@ public final class SmartWaitForPlanner {
     List<Edge> activeEdges = new ArrayList<>();
     int rejected = 0;
     int stale = 0;
+    // 第一趟：按严格规则（不放宽）算出「本身也被一条够强的边挡住」的车。
+    // 第二趟才允许 QUEUE_POSITION 边在持有者属于该集合时进图，见 inputEdgeRejection。
+    Set<String> blockedUnderStrictRules = strictlyBlockedTrains(input.edges(), input.settings());
     for (InputEdge edge : input.edges()) {
-      String rejection = inputEdgeRejection(edge, input.settings());
+      String rejection = inputEdgeRejection(edge, input.settings(), blockedUnderStrictRules);
       if (!rejection.isBlank()) {
         rejected++;
         if ("STALE_EDGE".equals(rejection)) {
@@ -311,6 +529,21 @@ public final class SmartWaitForPlanner {
       }
       activeEdges.add(new Edge(edge));
       traces.add(inputEdgeTrace(edge));
+      if (!edge.activeForNormalAdmission()) {
+        // 这条边只因为放宽才进的图。单独留痕，便于下一轮直接数出放宽被用了多少次、
+        // 以及吞吐的改善是不是由它带来的。
+        traces.add(
+            "SMART_DISPATCH_INPUT_EDGE_QUEUE_POSITION_ADMITTED blockedTrain="
+                + edge.blockedTrain()
+                + " blockerTrain="
+                + edge.blockerTrain()
+                + " resource="
+                + edge.resource()
+                + " intent="
+                + edge.intent()
+                + " role="
+                + edge.role());
+      }
     }
     String graphHash = graphHash(activeEdges);
     traces.add(
@@ -333,8 +566,14 @@ public final class SmartWaitForPlanner {
     }
 
     List<Pattern> patterns = detectPatterns(activeEdges, input.trainStates(), traces);
-    List<UnlockCandidate> candidates = buildCandidates(input, activeEdges, patterns, traces);
-    Optional<UnlockCandidate> selected = selectCandidate(candidates);
+    Map<String, SwitcherMergeEvidence> switcherMerges =
+        detectSwitcherMergeEvidence(activeEdges, patterns, traces);
+    List<Pattern> plannerPatterns =
+        patterns.stream().filter(pattern -> !switcherMerges.containsKey(pattern.id())).toList();
+    boolean onlySwitcherMergePatterns = !switcherMerges.isEmpty() && plannerPatterns.isEmpty();
+    List<UnlockCandidate> candidates = buildCandidates(input, activeEdges, plannerPatterns, traces);
+    traceActiveReservationSkips(input, candidates, traces);
+    Optional<UnlockCandidate> selected = selectCandidate(input, candidates);
     boolean directionAuditNeeded =
         !candidates.isEmpty()
             && candidates.stream()
@@ -364,20 +603,33 @@ public final class SmartWaitForPlanner {
               + plan.planHash());
     } else if (!patterns.isEmpty()) {
       String recommendation =
-          directionAuditNeeded
-              ? "NEED_DIRECTION_AUDIT"
-              : hardEvidenceStrong ? "DESTROY_REVIEW" : "NO_SAFE_SAME_DIRECTION_PLAN";
+          onlySwitcherMergePatterns
+              ? "SWITCHER_MERGE_EXECUTOR_NOT_READY"
+              : directionAuditNeeded
+                  ? "NEED_DIRECTION_AUDIT"
+                  : hardEvidenceStrong ? "DESTROY_REVIEW" : "NO_SAFE_SAME_DIRECTION_PLAN";
       traces.add(
           "SMART_NO_SAME_DIRECTION_UNLOCK_PLAN recommendation="
               + recommendation
               + " directionAuditNeeded="
               + directionAuditNeeded
               + " hardDeadlockEvidenceStrong="
-              + hardEvidenceStrong);
+              + hardEvidenceStrong
+              // 报出**是哪一类冲突资源**造成方向证据不足。摘要放在这条聚合事件上，
+              // 而不是 SMART_DISPATCH_DIRECTION_EVIDENCE：后者不在诊断 must-keep 里，
+              // 会被诊断预算大量丢弃，而本事件受保护。
+              //
+              // 这个区分决定相反的两种行动：single 缺方向是数据缺失（同类资源通常推导得出方向）；
+              // switcher 压根没有 A/B 轴，对它要求走廊方向是判据用错了
+              // 资源类别，补不出来——那条要换成"车物理上不在该节点"的证据。
+              + " directionBlockedBy="
+              + directionBlockingResourceClasses(candidates));
       String fallbackReason =
-          directionAuditNeeded
-              ? "INSUFFICIENT_DIRECTION_EVIDENCE"
-              : stale > 0 ? "STALE_OR_NO_FRESH_EDGE" : "NO_SAFE_SAME_DIRECTION_PLAN";
+          onlySwitcherMergePatterns
+              ? "SWITCHER_MERGE_EXECUTOR_NOT_READY"
+              : directionAuditNeeded
+                  ? "INSUFFICIENT_DIRECTION_EVIDENCE"
+                  : stale > 0 ? "STALE_OR_NO_FRESH_EDGE" : "NO_SAFE_SAME_DIRECTION_PLAN";
       traces.add("SMART_DISPATCH_FALLBACK_NOT_READY reason=" + fallbackReason);
     }
     String selectedPlanHash = selected.map(UnlockCandidate::planHash).orElse("-");
@@ -435,6 +687,43 @@ public final class SmartWaitForPlanner {
           patternTraces.addAll(invariantTraces(candidate));
         }
       }
+      if ("SAME_LINE_CASCADE".equals(pattern.type())) {
+        List<UnlockCandidate> yieldCandidates =
+            headOnYieldCandidates(input, edges, pattern, patternTraces);
+        candidates.addAll(yieldCandidates);
+        if (!yieldCandidates.isEmpty()) {
+          generatedForPattern = true;
+          if (yieldCandidates.stream().anyMatch(UnlockCandidate::accepted)) {
+            acceptedForPattern = true;
+          }
+          if (decisionCandidate == null
+              || (!decisionCandidate.accepted()
+                  && yieldCandidates.stream().anyMatch(UnlockCandidate::accepted))) {
+            decisionCandidate =
+                yieldCandidates.stream().filter(UnlockCandidate::accepted).findFirst().orElse(null);
+          }
+        }
+      }
+      if ("MUTUAL".equals(pattern.type())) {
+        List<UnlockCandidate> mutualYieldCandidates =
+            mutualHeadOnYieldCandidates(input, edges, pattern, patternTraces);
+        candidates.addAll(mutualYieldCandidates);
+        if (!mutualYieldCandidates.isEmpty()) {
+          generatedForPattern = true;
+          if (mutualYieldCandidates.stream().anyMatch(UnlockCandidate::accepted)) {
+            acceptedForPattern = true;
+          }
+          if (decisionCandidate == null
+              || (!decisionCandidate.accepted()
+                  && mutualYieldCandidates.stream().anyMatch(UnlockCandidate::accepted))) {
+            decisionCandidate =
+                mutualYieldCandidates.stream()
+                    .filter(UnlockCandidate::accepted)
+                    .findFirst()
+                    .orElse(null);
+          }
+        }
+      }
       traces.add(candidateDecisionTrace(input, pattern, decisionCandidate, generatedForPattern));
       traces.addAll(patternTraces);
       if (!generatedForPattern || !acceptedForPattern) {
@@ -442,6 +731,323 @@ public final class SmartWaitForPlanner {
       }
     }
     return List.copyOf(candidates);
+  }
+
+  /**
+   * 识别 mutual wait-for 中由同一道岔多分支汇流形成的关系。
+   *
+   * <p>该证据只识别“全部 active edge 都投影到同一个 exact switcher”的纯汇流，不生成 release candidate。没有两阶段停车与 admission
+   * lease 前，planner 不得释放任何一方的 {@code MOVEMENT_REQUIRED} claim。
+   */
+  private static Map<String, SwitcherMergeEvidence> detectSwitcherMergeEvidence(
+      List<Edge> graphEdges, List<Pattern> patterns, List<String> traces) {
+    Map<String, SwitcherMergeEvidence> evidenceByPattern = new TreeMap<>(TEXT_ORDER);
+    for (Pattern pattern : patterns) {
+      if (!"MUTUAL".equals(pattern.type()) || pattern.trains().size() != 2) {
+        continue;
+      }
+      List<Edge> patternEdges =
+          graphEdges.stream()
+              .filter(
+                  edge ->
+                      pattern.trains().contains(edge.blocked())
+                          && pattern.trains().contains(edge.blocker()))
+              .toList();
+      Optional<SwitcherMergeEvidence> evidenceOpt = switcherMergeEvidence(pattern, patternEdges);
+      if (evidenceOpt.isEmpty()) {
+        continue;
+      }
+      SwitcherMergeEvidence evidence = evidenceOpt.get();
+      evidenceByPattern.put(pattern.id(), evidence);
+      traces.add(
+          "SMART_DISPATCH_SWITCHER_MERGE_DETECTED cycleId="
+              + pattern.id()
+              + " switcherKey="
+              + evidence.switcherKey()
+              + " currentConflictOwner="
+              + evidence.currentConflictOwner()
+              + " otherTrain="
+              + evidence.otherTrain()
+              + " relation="
+              + SwitcherMovementTopology.Relation.MERGE
+              + " reason="
+              + evidence.reason()
+              + " action=OBSERVE_ONLY"
+              + " movementAuthorityIssued=false"
+              + " occupancyMutated=false");
+    }
+    return Map.copyOf(evidenceByPattern);
+  }
+
+  private static Optional<SwitcherMergeEvidence> switcherMergeEvidence(
+      Pattern pattern, List<Edge> patternEdges) {
+    if (pattern == null || patternEdges == null || patternEdges.size() < 2) {
+      return Optional.empty();
+    }
+    boolean reciprocal =
+        patternEdges.stream()
+            .allMatch(
+                edge ->
+                    patternEdges.stream()
+                        .anyMatch(
+                            candidate ->
+                                candidate.blocked().equals(edge.blocker())
+                                    && candidate.blocker().equals(edge.blocked())));
+    if (!reciprocal) {
+      return Optional.empty();
+    }
+    Set<String> switcherKeys = new TreeSet<>(TEXT_ORDER);
+    Set<String> reasons = new TreeSet<>(TEXT_ORDER);
+    for (Edge edge : patternEdges) {
+      Optional<SwitcherMovementTopology.Classification> merge =
+          provenMerge(edge.input().switcherMovement());
+      if (merge.isEmpty()) {
+        return Optional.empty();
+      }
+      SwitcherMovementTopology.Classification classification = merge.get();
+      switcherKeys.add(classification.proof().orElseThrow().switcherKey());
+      reasons.add(classification.reason().name());
+    }
+    if (switcherKeys.size() != 1) {
+      return Optional.empty();
+    }
+    String switcherKey = switcherKeys.iterator().next();
+    String switcherNode = switcherKey.substring("switcher:".length());
+    String conflictResource = "CONFLICT:" + switcherKey;
+    String nodeResource = "NODE:" + switcherNode;
+    if (patternEdges.stream()
+        .anyMatch(
+            edge ->
+                !conflictResource.equals(edge.resource())
+                    && !nodeResource.equals(edge.resource()))) {
+      return Optional.empty();
+    }
+    Set<String> conflictOwners = new TreeSet<>(TEXT_ORDER);
+    for (Edge edge : patternEdges) {
+      if (conflictResource.equals(edge.resource())) {
+        conflictOwners.add(edge.blocker());
+      }
+    }
+    if (conflictOwners.size() != 1) {
+      return Optional.empty();
+    }
+    String currentOwner = conflictOwners.iterator().next();
+    Optional<String> otherTrain =
+        pattern.trains().stream().filter(train -> !train.equals(currentOwner)).findFirst();
+    if (otherTrain.isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        new SwitcherMergeEvidence(
+            switcherKey, currentOwner, otherTrain.get(), String.join("+", reasons)));
+  }
+
+  private static Optional<SwitcherMovementTopology.Classification> provenMerge(
+      Optional<SwitcherMovementTopology.Classification> classification) {
+    if (classification == null || classification.isEmpty()) {
+      return Optional.empty();
+    }
+    SwitcherMovementTopology.Classification value = classification.get();
+    return value.relation() == SwitcherMovementTopology.Relation.MERGE && value.proof().isPresent()
+        ? Optional.of(value)
+        : Optional.empty();
+  }
+
+  private static List<UnlockCandidate> headOnYieldCandidates(
+      PlannerInput input, List<Edge> graphEdges, Pattern pattern, List<String> traces) {
+    if (input == null || pattern == null || pattern.blockers().isEmpty()) {
+      return List.of();
+    }
+    List<UnlockCandidate> candidates = new ArrayList<>();
+    for (String chainHead : pattern.blockers()) {
+      TrainState headState = input.trainStates().getOrDefault(chainHead, defaultState(chainHead));
+      CorridorDirection headDirection = headState.inferredDirection();
+      if (headDirection == CorridorDirection.UNKNOWN) {
+        continue;
+      }
+      Map<String, List<Edge>> directBlockers = new TreeMap<>(TEXT_ORDER);
+      for (Edge edge : graphEdges) {
+        if (!chainHead.equals(edge.blocked())) {
+          continue;
+        }
+        TrainState blockerState =
+            input.trainStates().getOrDefault(edge.blocker(), defaultState(edge.blocker()));
+        if (headState.routeFamily().equals(blockerState.routeFamily())) {
+          continue;
+        }
+        CorridorDirection blockerDirection = edge.input().direction();
+        if (blockerDirection == CorridorDirection.UNKNOWN || blockerDirection == headDirection) {
+          continue;
+        }
+        directBlockers.computeIfAbsent(edge.blocker(), unused -> new ArrayList<>()).add(edge);
+      }
+      for (Map.Entry<String, List<Edge>> entry : directBlockers.entrySet()) {
+        TrainState yieldState =
+            input.trainStates().getOrDefault(entry.getKey(), defaultState(entry.getKey()));
+        UnlockCandidate candidate =
+            yieldCandidateForHeadOn(
+                input.settings(), graphEdges, entry.getValue(), pattern, yieldState, true);
+        candidates.add(candidate);
+        traces.add(
+            "SMART_DISPATCH_HEAD_ON_YIELD_DETECTED chainHead="
+                + chainHead
+                + " yieldTrain="
+                + candidate.train()
+                + " resources="
+                + candidate.resources()
+                + " headDirection="
+                + headDirection
+                + " yieldDirection="
+                + candidate.direction());
+        traces.add(candidateTrace(candidate));
+        traces.add(simulationTrace(candidate));
+      }
+    }
+    return List.copyOf(candidates);
+  }
+
+  /**
+   * 为方向已知且相反的 mutual wait-for 环生成让行候选。
+   *
+   * <p>该候选只让执行层释放让行车在相关资源上的非物理 claim/队列；它不释放车体 NODE/EDGE，也不签发新的移动授权。
+   */
+  private static List<UnlockCandidate> mutualHeadOnYieldCandidates(
+      PlannerInput input, List<Edge> graphEdges, Pattern pattern, List<String> traces) {
+    if (input == null || pattern == null || !"MUTUAL".equals(pattern.type())) {
+      return List.of();
+    }
+    List<Edge> patternEdges =
+        graphEdges.stream()
+            .filter(
+                edge ->
+                    pattern.trains().contains(edge.blocked())
+                        && pattern.trains().contains(edge.blocker()))
+            .toList();
+    List<UnlockCandidate> candidates = new ArrayList<>();
+    Set<String> seenPairs = new LinkedHashSet<>();
+    for (Edge edge : patternEdges) {
+      Edge reciprocal =
+          patternEdges.stream()
+              .filter(
+                  candidate ->
+                      candidate.blocked().equals(edge.blocker())
+                          && candidate.blocker().equals(edge.blocked()))
+              .findFirst()
+              .orElse(null);
+      if (reciprocal == null) {
+        continue;
+      }
+      String pairKey = String.join("|", sortedSet(Set.of(edge.blocked(), edge.blocker())));
+      if (!seenPairs.add(pairKey)) {
+        continue;
+      }
+      CorridorDirection firstDirection = edge.input().direction();
+      CorridorDirection secondDirection = reciprocal.input().direction();
+      if (firstDirection == CorridorDirection.UNKNOWN
+          || secondDirection == CorridorDirection.UNKNOWN
+          || firstDirection == secondDirection) {
+        continue;
+      }
+      candidates.add(
+          mutualHeadOnYieldCandidate(
+              input, graphEdges, pattern, traces, edge, secondDirection, firstDirection));
+      candidates.add(
+          mutualHeadOnYieldCandidate(
+              input, graphEdges, pattern, traces, reciprocal, firstDirection, secondDirection));
+    }
+    return List.copyOf(candidates);
+  }
+
+  private static UnlockCandidate mutualHeadOnYieldCandidate(
+      PlannerInput input,
+      List<Edge> graphEdges,
+      Pattern pattern,
+      List<String> traces,
+      Edge releaseEdge,
+      CorridorDirection blockedDirection,
+      CorridorDirection yieldDirection) {
+    TrainState yieldState =
+        input
+            .trainStates()
+            .getOrDefault(releaseEdge.blocker(), defaultState(releaseEdge.blocker()));
+    UnlockCandidate candidate =
+        yieldCandidateForHeadOn(
+            input.settings(), graphEdges, List.of(releaseEdge), pattern, yieldState, false);
+    traces.add(
+        "SMART_DISPATCH_MUTUAL_HEAD_ON_YIELD_DETECTED blockedTrain="
+            + releaseEdge.blocked()
+            + " yieldTrain="
+            + candidate.train()
+            + " resources="
+            + candidate.resources()
+            + " blockedDirection="
+            + blockedDirection
+            + " yieldDirection="
+            + yieldDirection);
+    traces.add(candidateTrace(candidate));
+    traces.add(simulationTrace(candidate));
+    return candidate;
+  }
+
+  private static UnlockCandidate yieldCandidateForHeadOn(
+      PlannerSettings settings,
+      List<Edge> graphEdges,
+      List<Edge> releaseEdges,
+      Pattern pattern,
+      TrainState state,
+      boolean improvesSameLineCascade) {
+    List<Edge> effectiveReleaseEdges = releaseEdges == null ? List.of() : releaseEdges;
+    List<String> resources =
+        effectiveReleaseEdges.stream().map(Edge::resource).distinct().sorted(TEXT_ORDER).toList();
+    List<String> reservationResources =
+        resources.stream().limit(settings.maxReservationResources()).toList();
+    DirectionResolution direction = resolveDirection(effectiveReleaseEdges, state);
+    GraphOnlySimulation simulation =
+        simulate(
+            graphEdges,
+            state.trainName(),
+            reservationResources,
+            pattern.id(),
+            direction.corridorKnown(),
+            state);
+    boolean physicalInterlocking = containsPhysicalInterlocking(effectiveReleaseEdges);
+    boolean accepted =
+        !physicalInterlocking && direction.corridorKnown() && !reservationResources.isEmpty();
+    String rejectReason =
+        physicalInterlocking
+            ? "PHYSICAL_INTERLOCKING_NON_SPECULATIVE"
+            : accepted
+                ? "-"
+                : direction.corridorKnown()
+                    ? "NO_RELEASABLE_BLOCKER_RESOURCE"
+                    : "INSUFFICIENT_DIRECTION_EVIDENCE";
+    int score =
+        accepted
+            ? score(simulation, false, improvesSameLineCascade, state)
+                + 500
+                + (simulation.cycleBroken() ? 500 : 0)
+            : Integer.MIN_VALUE;
+    return new UnlockCandidate(
+        state.trainName(),
+        pattern.id(),
+        CandidateKind.YIELD_TO_HEAD_ON,
+        resources,
+        reservationResources,
+        state.currentNode(),
+        state.currentNode(),
+        state.nextNode(),
+        direction.direction(),
+        resources.size(),
+        0,
+        settings.maxReservationResources(),
+        score,
+        accepted,
+        rejectReason,
+        accepted ? "HEAD_ON_YIELD" : "NEED_DIRECTION_AUDIT",
+        simulation,
+        false,
+        improvesSameLineCascade,
+        state.stuckDurationSeconds());
   }
 
   private static UnlockCandidate candidateForTrain(
@@ -468,11 +1074,43 @@ public final class SmartWaitForPlanner {
     CorridorDirection direction = directionResolution.direction();
     String cycleId = pattern == null ? "-" : pattern.id();
     GraphOnlySimulation simulation =
-        simulate(graphEdges, state.trainName(), reservationResources, cycleId, direction, state);
+        simulate(
+            graphEdges,
+            state.trainName(),
+            reservationResources,
+            cycleId,
+            directionResolution.known(),
+            state);
     String rejectReason = "";
     String recommendation = "-";
-    if (settings.requireSameDirection()
-        && (direction == null || direction == CorridorDirection.UNKNOWN)) {
+    boolean corridorDirectionRequired =
+        safeReleaseEdges.stream()
+            .map(Edge::resource)
+            .anyMatch(resource -> resource.startsWith("CONFLICT:single:"));
+    boolean canonicalPathRequired =
+        safeReleaseEdges.stream()
+            .map(Edge::resource)
+            .anyMatch(SmartWaitForPlanner::canonicalPathResource);
+    boolean conflictDirectionRequired =
+        safeReleaseEdges.stream()
+            .map(Edge::resource)
+            .anyMatch(resource -> !canonicalPathResource(resource));
+    if (containsPhysicalInterlocking(safeReleaseEdges)) {
+      rejectReason = "PHYSICAL_INTERLOCKING_NON_SPECULATIVE";
+    } else if (corridorDirectionRequired
+        && !hasCompleteConsistentSingleCorridorDirection(safeReleaseEdges)) {
+      rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
+      recommendation = "NEED_DIRECTION_AUDIT";
+      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+    } else if (canonicalPathRequired && directionResolution.forwardPathEvidence().isEmpty()) {
+      rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
+      recommendation = "NEED_DIRECTION_AUDIT";
+      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+    } else if (conflictDirectionRequired && !directionResolution.corridorKnown()) {
+      rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
+      recommendation = "NEED_DIRECTION_AUDIT";
+      traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
+    } else if (settings.requireSameDirection() && !directionResolution.known()) {
       rejectReason = "INSUFFICIENT_DIRECTION_EVIDENCE";
       recommendation = "NEED_DIRECTION_AUDIT";
       traces.add(directionEvidenceTrace(state, pattern, safeReleaseEdges, directionResolution));
@@ -526,7 +1164,19 @@ public final class SmartWaitForPlanner {
         simulation,
         pattern != null && "BOTTLENECK".equals(pattern.type()),
         pattern != null && "SAME_LINE_CASCADE".equals(pattern.type()),
-        state.stuckDurationSeconds());
+        state.stuckDurationSeconds(),
+        directionResolution.forwardPathEvidence());
+  }
+
+  /** 物理联锁资源必须等待真实占用释放，planner 不得把它建模成可推测撤销的 reservation。 */
+  private static boolean containsPhysicalInterlocking(List<Edge> edges) {
+    if (edges == null || edges.isEmpty()) {
+      return false;
+    }
+    return edges.stream()
+        .filter(Objects::nonNull)
+        .map(Edge::resource)
+        .anyMatch(resource -> resource.startsWith("CONFLICT:interlocking:"));
   }
 
   private static GraphOnlySimulation simulate(
@@ -534,7 +1184,7 @@ public final class SmartWaitForPlanner {
       String train,
       List<String> resources,
       String cycleId,
-      CorridorDirection direction,
+      boolean forwardDirectionKnown,
       TrainState state) {
     int before = graphEdges.size();
     Set<String> resourceSet = new LinkedHashSet<>(resources);
@@ -553,12 +1203,9 @@ public final class SmartWaitForPlanner {
         state.createsOppositeConflict() || state.blocksUnrelatedNormalTrain() ? 1 : 0;
     Confidence confidence;
     String lowReason = "-";
-    if (direction == CorridorDirection.UNKNOWN || state.nextNode().equals("-")) {
+    if (!forwardDirectionKnown || state.nextNode().equals("-")) {
       confidence = Confidence.LOW;
-      lowReason =
-          direction == CorridorDirection.UNKNOWN
-              ? "direction-unknown"
-              : "authority-boundary-unknown";
+      lowReason = !forwardDirectionKnown ? "direction-unknown" : "authority-boundary-unknown";
     } else if (beforeCycle) {
       confidence = Confidence.HIGH;
     } else {
@@ -599,16 +1246,46 @@ public final class SmartWaitForPlanner {
     return score;
   }
 
-  private static Optional<UnlockCandidate> selectCandidate(List<UnlockCandidate> candidates) {
+  private static Optional<UnlockCandidate> selectCandidate(
+      PlannerInput input, List<UnlockCandidate> candidates) {
     return candidates.stream()
         .filter(UnlockCandidate::accepted)
+        .filter(candidate -> !hasActiveReservation(input, candidate))
         .sorted(
-            Comparator.comparingInt(UnlockCandidate::score)
-                .reversed()
+            Comparator.comparingInt(
+                    (UnlockCandidate candidate) -> candidate.improvesSameLineCascade() ? 0 : 1)
+                .thenComparingInt(
+                    candidate -> candidate.kind() == CandidateKind.YIELD_TO_HEAD_ON ? 0 : 1)
+                .thenComparing(Comparator.comparingInt(UnlockCandidate::score).reversed())
                 .thenComparingInt(UnlockCandidate::reservationResourceCount)
                 .thenComparing(UnlockCandidate::stuckDurationSeconds, Comparator.reverseOrder())
                 .thenComparing(UnlockCandidate::train, TEXT_ORDER))
         .findFirst();
+  }
+
+  private static void traceActiveReservationSkips(
+      PlannerInput input, List<UnlockCandidate> candidates, List<String> traces) {
+    for (UnlockCandidate candidate : candidates) {
+      if (!candidate.accepted() || !hasActiveReservation(input, candidate)) {
+        continue;
+      }
+      boolean cycleActive = input.activeCycleReservations().contains(candidate.cycleId());
+      traces.add(
+          "SMART_DISPATCH_ACTIVE_RESERVATION_SKIPPED train="
+              + candidate.train()
+              + " cycleId="
+              + candidate.cycleId()
+              + " activeBy="
+              + (cycleActive ? "CYCLE" : "TRAIN")
+              + " reason=ACTIVE_RESERVATION_EXISTS");
+    }
+  }
+
+  private static boolean hasActiveReservation(PlannerInput input, UnlockCandidate candidate) {
+    return input.activeCycleReservations().contains(candidate.cycleId())
+        || input
+            .activeReservationTrains()
+            .contains(TrainNameNormalizer.normalizeKey(candidate.train()));
   }
 
   private static List<Pattern> detectPatterns(
@@ -785,30 +1462,111 @@ public final class SmartWaitForPlanner {
   }
 
   private static DirectionResolution resolveDirection(List<Edge> releaseEdges, TrainState state) {
-    Set<CorridorDirection> knownDirections = new LinkedHashSet<>();
-    for (Edge edge : releaseEdges) {
-      CorridorDirection direction = edge.input().direction();
-      if (direction != null && direction != CorridorDirection.UNKNOWN) {
-        knownDirections.add(direction);
+    Optional<CanonicalForwardPathEvidence> forwardPathEvidence =
+        canonicalForwardPathEvidence(releaseEdges, state);
+    List<Edge> singleCorridorEdges =
+        releaseEdges.stream()
+            .filter(edge -> edge.resource().startsWith("CONFLICT:single:"))
+            .toList();
+    if (!singleCorridorEdges.isEmpty()) {
+      if (!hasCompleteConsistentSingleCorridorDirection(singleCorridorEdges)) {
+        return new DirectionResolution(
+            CorridorDirection.UNKNOWN,
+            forwardPathEvidence,
+            forwardPathEvidence.isPresent() ? "CANONICAL_MOVEMENT_PLAN" : "UNKNOWN",
+            "SINGLE_CONFLICT_DIRECTION_MISSING_OR_CONFLICTING");
       }
     }
+
+    List<Edge> directedConflictEdges =
+        releaseEdges.stream().filter(edge -> !canonicalPathResource(edge.resource())).toList();
+    List<Edge> conflictsMissingDirection =
+        directedConflictEdges.stream()
+            .filter(
+                edge -> {
+                  CorridorDirection direction = edge.input().direction();
+                  return direction == null || direction == CorridorDirection.UNKNOWN;
+                })
+            .toList();
+    if (!conflictsMissingDirection.isEmpty()) {
+      // 报出**是哪一类资源**害的，而不是只说"方向证据不足"。
+      //
+      // NEED_DIRECTION_AUDIT 是规划失败的主要来源，若 reason 不说是谁造成的，
+      // 只能靠交叉比对另一个事件才拆得出来。
+      //
+      // 这个区分决定了完全相反的两种行动：single 缺方向是**数据缺失**（同类资源通常
+      // 推导得出方向，只是这几条没推出来）；而 switcher
+      // 压根**没有 A/B 轴**——CorridorDirection 是相对归一化区间定义的，道岔是节点身份，
+      // 两车从不同支进同一组道岔无论"同向"与否都冲突。对后者要求走廊方向是判据用错了
+      // 资源类别，不是数据缺失，因此不能靠"把方向补上"来修。
+      return new DirectionResolution(
+          CorridorDirection.UNKNOWN,
+          forwardPathEvidence,
+          forwardPathEvidence.isPresent() ? "CANONICAL_MOVEMENT_PLAN" : "UNKNOWN",
+          "CONFLICT_DIRECTION_MISSING:"
+              + missingDirectionResourceClasses(conflictsMissingDirection));
+    }
+    Set<CorridorDirection> knownDirections =
+        directedConflictEdges.stream()
+            .map(edge -> edge.input().direction())
+            .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
     if (knownDirections.size() == 1) {
       return new DirectionResolution(
-          knownDirections.iterator().next(), "SINGLE_CONFLICT_DIRECTIONS", "-");
+          knownDirections.iterator().next(), forwardPathEvidence, "CONFLICT_DIRECTIONS", "-");
     }
     if (knownDirections.size() > 1) {
       return new DirectionResolution(
-          CorridorDirection.UNKNOWN, "UNKNOWN", "CONFLICTING_EDGE_DIRECTIONS");
+          CorridorDirection.UNKNOWN,
+          forwardPathEvidence,
+          forwardPathEvidence.isPresent() ? "CANONICAL_MOVEMENT_PLAN" : "UNKNOWN",
+          "CONFLICTING_EDGE_DIRECTIONS");
     }
-    if (state.inferredDirection() != CorridorDirection.UNKNOWN) {
-      return new DirectionResolution(state.inferredDirection(), state.directionSource(), "-");
+    if (forwardPathEvidence.isPresent()) {
+      return new DirectionResolution(
+          CorridorDirection.UNKNOWN, forwardPathEvidence, "CANONICAL_MOVEMENT_PLAN", "-");
     }
     return new DirectionResolution(
         CorridorDirection.UNKNOWN,
+        Optional.empty(),
         "UNKNOWN",
         "-".equals(state.directionInferenceFailureReason())
             ? "INSUFFICIENT_DIRECTION_EVIDENCE"
             : state.directionInferenceFailureReason());
+  }
+
+  /** 仅当 canonical plan 覆盖候选中的每一个 NODE/EDGE blocker 时返回通用路径证明。 */
+  private static Optional<CanonicalForwardPathEvidence> canonicalForwardPathEvidence(
+      List<Edge> releaseEdges, TrainState state) {
+    List<String> canonicalResources =
+        releaseEdges.stream()
+            .map(Edge::resource)
+            .filter(SmartWaitForPlanner::canonicalPathResource)
+            .toList();
+    if (canonicalResources.isEmpty() || state.forwardPathEvidence().isEmpty()) {
+      return Optional.empty();
+    }
+    CanonicalForwardPathEvidence evidence = state.forwardPathEvidence().orElseThrow();
+    return canonicalResources.stream().allMatch(evidence::coversReleaseResource)
+        ? Optional.of(evidence)
+        : Optional.empty();
+  }
+
+  /** 每一条待释放 single-corridor 边都必须携带同一个已知方向，不能由其他边代填。 */
+  private static boolean hasCompleteConsistentSingleCorridorDirection(List<Edge> releaseEdges) {
+    Set<CorridorDirection> directions = new LinkedHashSet<>();
+    boolean singleCorridorPresent = false;
+    for (Edge edge : releaseEdges) {
+      if (!edge.resource().startsWith("CONFLICT:single:")) {
+        continue;
+      }
+      singleCorridorPresent = true;
+      CorridorDirection direction = edge.input().direction();
+      if (direction == null || direction == CorridorDirection.UNKNOWN) {
+        return false;
+      }
+      directions.add(direction);
+    }
+    return singleCorridorPresent && directions.size() == 1;
   }
 
   private static Map<String, Set<String>> adjacency(List<Edge> edges) {
@@ -831,20 +1589,81 @@ public final class SmartWaitForPlanner {
     return nodes;
   }
 
-  private static String inputEdgeRejection(InputEdge edge, PlannerSettings settings) {
+  /**
+   * 按严格规则（不放宽任何 QUEUE_POSITION 边）跑一趟，收集「本身也被挡住」的列车。
+   *
+   * <p>传空集合给 {@link #inputEdgeRejection} 即为严格模式，因此这里不会递归，放宽也只有一级。
+   */
+  private static Set<String> strictlyBlockedTrains(
+      List<InputEdge> edges, PlannerSettings settings) {
+    Set<String> blocked = new TreeSet<>(TEXT_ORDER);
+    if (edges == null) {
+      return blocked;
+    }
+    for (InputEdge edge : edges) {
+      if (inputEdgeRejection(edge, settings, Set.of()).isBlank()) {
+        // 存归一化后的键：blockedTrain 来自 displayTrainNameForKey，blockerTrain 来自 blocker.trainName()，
+        // 是两个不同来源的量，直接比字面量就是在比两个不同的东西。两边都过 normalizeKey 才同口径
+        // （它同时剥掉 TrainCarts split 的临时后缀）。
+        blocked.add(TrainNameNormalizer.normalizeKey(edge.blockedTrain()));
+      }
+    }
+    return blocked;
+  }
+
+  /**
+   * 该边被排除是否**仅仅**因为它是排队位——LOOKAHEAD_PREVIEW 与 STALE_PROTECTIVE_CLAIM 不在放宽范围内。
+   *
+   * <p>放宽只针对 QUEUE_POSITION：排除它会删掉互锁环的其中一条边（见下方注释）， 而 preview / stale claim 没有对应证据，按 fail-closed
+   * 一律不放。
+   */
+  private static boolean excludedOnlyAsQueuePosition(InputEdge edge) {
+    boolean queuePosition =
+        "QUEUE_POSITION".equals(edge.intent()) || "QUEUE_POSITION".equals(edge.role());
+    boolean preview =
+        "LOOKAHEAD_PREVIEW".equals(edge.intent()) || "LOOKAHEAD_PREVIEW".equals(edge.role());
+    boolean staleProtective = "STALE_PROTECTIVE_CLAIM".equals(edge.relation());
+    return queuePosition && !preview && !staleProtective;
+  }
+
+  private static String inputEdgeRejection(
+      InputEdge edge, PlannerSettings settings, Set<String> blockedUnderStrictRules) {
     if (edge == null) {
       return "null-edge";
     }
     if (edge.blockedTrain().equals("-") || edge.blockerTrain().equals("-")) {
       return "missing-train";
     }
-    if (edge.blockedTrain().equalsIgnoreCase(edge.blockerTrain())) {
+    // TrainCarts split 会为同一逻辑列车附加临时后缀；这类边必须在进入 wait-for graph 前剔除。
+    if (TrainNameNormalizer.sameLogicalTrain(edge.blockedTrain(), edge.blockerTrain())) {
       return "self-owned-edge";
     }
     if (!edge.activeForNormalAdmission()) {
-      return "inactive-for-normal-admission";
+      // activeForNormalAdmission 是**准入强度**判据：QUEUE_POSITION 不代表物理占用、也不代表已授予的
+      // 行车权（见 SimpleOccupancyManager 中该 blocker 的构造注释），所以它不该挡正常准入——这没问题。
+      //
+      // 但**等待图不是准入**。一个事实上拦住了别人的排队预约，就是一条真实依赖；
+      // 拿准入强度当死锁判据是范畴错误：两车互锁时，A→B 的 MOVEMENT_REQUIRED 边进了图，
+      // 而 B→A 因为持有的是 QUEUE_POSITION 被删掉，两条边的环删掉一条就永不闭合，
+      // 死锁检测永远不会触发。
+      //
+      // 放宽必须窄且 fail-closed：**在动的**车持有的排队位会随队列推进自行解开，无条件进图会造出假环，
+      // 而假阳性会一路走到 SMART_DEADLOCK_DESTROY_ELIGIBILITY —— 那是会销毁列车的。
+      // 所以只有当持有者**自己也被一条严格规则下成立的边挡住**时，这条排队位才算真依赖。
+      // 这恰好就是成环条件，且在动的车行为完全不变。
+      if (!excludedOnlyAsQueuePosition(edge)
+          || !blockedUnderStrictRules.contains(
+              TrainNameNormalizer.normalizeKey(edge.blockerTrain()))) {
+        return "inactive-for-normal-admission";
+      }
     }
-    if (edge.ageMs() > settings.blockerSnapshotTtlMs()) {
+    // 年龄量的是“多久没重新采样”，不是“这份证据还成不成立”。对一辆**还卡在原地**的车，
+    // 它的边会因为没人再去看而变“旧”，并不是因为阻塞消失了——被丢掉的边集中在已不在活跃集里的车上，
+    // 停顿越久的车被丢的边越多。于是“越卡越久 → 死锁图对它越瞎”。
+    //
+    // 因此 liveVerified 的边不走年龄判据：调用方已经拿**当前账本**确认过 blocker 仍持有该资源。
+    // 这是更强的证据，不是更弱的；复核不了的边照旧按 TTL 丢掉。
+    if (!edge.liveVerified() && edge.ageMs() > settings.blockerSnapshotTtlMs()) {
       return "STALE_EDGE";
     }
     return "";
@@ -869,10 +1688,19 @@ public final class SmartWaitForPlanner {
         + edge.source()
         + " direction="
         + edge.direction()
+        + " switcherRelation="
+        + edge.switcherMovement().map(value -> value.relation().name()).orElse("UNKNOWN")
+        + " switcherReason="
+        + edge.switcherMovement().map(value -> value.reason().name()).orElse("MISSING")
         + " ageMs="
         + edge.ageMs()
         + " activeForNormalAdmission="
-        + edge.activeForNormalAdmission();
+        + edge.activeForNormalAdmission()
+        // 进图的边也必须带这一位。否则日志里无法区分“这条边本来就新鲜”与
+        // “它已经超龄、是现场复核把它留下的”——而后者正是要验收的东西。
+        // 只在被拒的 trace 上带等于没带：复核过的边根本不会因 STALE_EDGE 被拒。
+        + " liveVerified="
+        + edge.liveVerified();
   }
 
   private static String inputEdgeRejectedTrace(
@@ -886,6 +1714,7 @@ public final class SmartWaitForPlanner {
         "STALE_EDGE".equals(reason)
             ? " ageMs=" + safe.ageMs() + " ttlMs=" + settings.blockerSnapshotTtlMs()
             : "";
+    staleDetail = staleDetail + " liveVerified=" + safe.liveVerified();
     return "SMART_DISPATCH_INPUT_EDGE_REJECTED blockedTrain="
         + safe.blockedTrain()
         + " blockerTrain="
@@ -908,12 +1737,21 @@ public final class SmartWaitForPlanner {
         + candidate.resources()
         + " direction="
         + candidate.direction()
+        + " directionEvidenceKind="
+        + directionEvidenceKind(candidate)
+        + " forwardPathEvidenceHash="
+        + candidate
+            .forwardPathEvidence()
+            .map(CanonicalForwardPathEvidence::evidenceHash)
+            .orElse("-")
         + " releaseResourceCount="
         + candidate.releaseResourceCount()
         + " reservationResourceCount="
         + candidate.reservationResourceCount()
         + " fullRouteResourceCount="
         + candidate.fullRouteResourceCount()
+        + " sameLineCascade="
+        + candidate.improvesSameLineCascade()
         + " score="
         + candidate.score();
   }
@@ -943,7 +1781,14 @@ public final class SmartWaitForPlanner {
         + " source="
         + resolution.source()
         + " direction="
-        + resolution.direction();
+        + resolution.direction()
+        + " directionEvidenceKind="
+        + directionEvidenceKind(resolution)
+        + " forwardPathEvidenceHash="
+        + resolution
+            .forwardPathEvidence()
+            .map(CanonicalForwardPathEvidence::evidenceHash)
+            .orElse("-");
   }
 
   private static String directionInferenceFailedTrace(
@@ -1031,7 +1876,7 @@ public final class SmartWaitForPlanner {
     CorridorDirection direction =
         candidate == null ? CorridorDirection.UNKNOWN : candidate.direction();
     boolean sameDirectionSatisfied =
-        !sameDirectionRequired || direction != CorridorDirection.UNKNOWN;
+        !sameDirectionRequired || (candidate != null && candidate.hasForwardDirectionEvidence());
     return "SMART_DISPATCH_CANDIDATE_DECISION cycleId="
         + (pattern == null ? "-" : pattern.id())
         + " tick="
@@ -1070,6 +1915,15 @@ public final class SmartWaitForPlanner {
         + sameDirectionSatisfied
         + " inferredDirection="
         + direction
+        + " directionEvidenceKind="
+        + directionEvidenceKind(candidate)
+        + " forwardPathEvidenceHash="
+        + (candidate == null
+            ? "-"
+            : candidate
+                .forwardPathEvidence()
+                .map(CanonicalForwardPathEvidence::evidenceHash)
+                .orElse("-"))
         + " rejected="
         + (candidate == null || !candidate.accepted())
         + " rejectedReason="
@@ -1092,7 +1946,8 @@ public final class SmartWaitForPlanner {
       case "NO_RELEASABLE_BLOCKER_RESOURCE",
           "GRAPH_NOT_IMPROVED",
           "FULL_ROUTE_PRECLAIM",
-          "WOULD_BLOCK_UNRELATED_NORMAL_TRAIN" -> "NO_SAFE_FORWARD_SLICE";
+          "WOULD_BLOCK_UNRELATED_NORMAL_TRAIN",
+          "PHYSICAL_INTERLOCKING_NON_SPECULATIVE" -> "NO_SAFE_FORWARD_SLICE";
       default -> "UNKNOWN_BUG";
     };
   }
@@ -1135,6 +1990,8 @@ public final class SmartWaitForPlanner {
         + directedEdgeDirection
         + " routeContextDirection="
         + state.inferredDirection()
+        + " canonicalPathEvidence="
+        + state.forwardPathEvidence().map(CanonicalForwardPathEvidence::evidenceHash).orElse("-")
         + " authorityDirection="
         + CorridorDirection.UNKNOWN
         + " currentNode="
@@ -1199,7 +2056,19 @@ public final class SmartWaitForPlanner {
   private static String graphHash(List<Edge> edges) {
     List<String> parts = new ArrayList<>();
     for (Edge edge : edges) {
-      parts.add(edge.blocked() + ">" + edge.blocker() + "@" + edge.resource());
+      String switcherEvidence =
+          edge.input()
+              .switcherMovement()
+              .map(
+                  value ->
+                      value.relation()
+                          + ":"
+                          + value.reason()
+                          + ":"
+                          + value.proof().map(Object::toString).orElse("-"))
+              .orElse("-");
+      parts.add(
+          edge.blocked() + ">" + edge.blocker() + "@" + edge.resource() + "#" + switcherEvidence);
     }
     parts.sort(TEXT_ORDER);
     return Integer.toHexString(parts.hashCode());
@@ -1210,6 +2079,74 @@ public final class SmartWaitForPlanner {
       return "UNKNOWN";
     }
     return resource.substring(0, resource.indexOf(':')).toUpperCase(Locale.ROOT);
+  }
+
+  /**
+   * 汇总"因方向证据不足被拒"的候选里，出现了哪些类别的冲突资源。
+   *
+   * <p>只统计被 {@code INSUFFICIENT_DIRECTION_EVIDENCE} 拒掉的候选——其余拒因与方向无关， 混进来会把这条摘要稀释成噪声。输出形如 {@code
+   * switcher x3,single x1}。
+   */
+  private static String directionBlockingResourceClasses(List<UnlockCandidate> candidates) {
+    if (candidates == null || candidates.isEmpty()) {
+      return "-";
+    }
+    Map<String, Integer> counts = new java.util.TreeMap<>();
+    for (UnlockCandidate candidate : candidates) {
+      if (candidate == null
+          || !"INSUFFICIENT_DIRECTION_EVIDENCE".equals(candidate.rejectReason())) {
+        continue;
+      }
+      for (String resource : candidate.resources()) {
+        if (resource == null || canonicalPathResource(resource)) {
+          continue;
+        }
+        counts.merge(conflictResourceClass(resource), 1, Integer::sum);
+      }
+    }
+    if (counts.isEmpty()) {
+      return "-";
+    }
+    return counts.entrySet().stream()
+        .map(entry -> entry.getKey() + " x" + entry.getValue())
+        .collect(java.util.stream.Collectors.joining(","));
+  }
+
+  /**
+   * 把"缺方向的冲突资源"归纳成可 grep 的类别摘要，例如 {@code switcher x3,single x1}。
+   *
+   * <p>只输出类别与条数，不输出具体 key：类别决定行动，而 key 会让这条 trace 随线网规模放大。
+   */
+  private static String missingDirectionResourceClasses(List<Edge> edges) {
+    Map<String, Integer> counts = new java.util.TreeMap<>();
+    for (Edge edge : edges) {
+      if (edge == null) {
+        continue;
+      }
+      counts.merge(conflictResourceClass(edge.resource()), 1, Integer::sum);
+    }
+    if (counts.isEmpty()) {
+      return "-";
+    }
+    return counts.entrySet().stream()
+        .map(entry -> entry.getKey() + " x" + entry.getValue())
+        .collect(java.util.stream.Collectors.joining(","));
+  }
+
+  /** 冲突资源的类别前缀（{@code CONFLICT:switcher:...} → {@code switcher}）。 */
+  private static String conflictResourceClass(String resource) {
+    if (resource == null || resource.isBlank()) {
+      return "-";
+    }
+    String body =
+        resource.startsWith("CONFLICT:") ? resource.substring("CONFLICT:".length()) : resource;
+    int separator = body.indexOf(':');
+    String head = separator < 0 ? body : body.substring(0, separator);
+    return head.isBlank() ? "-" : head;
+  }
+
+  private static boolean canonicalPathResource(String resource) {
+    return resource != null && (resource.startsWith("NODE:") || resource.startsWith("EDGE:"));
   }
 
   private static String firstOrDash(List<String> values) {
@@ -1249,9 +2186,49 @@ public final class SmartWaitForPlanner {
     if (resolution == null || !resolution.known()) {
       return Confidence.LOW;
     }
-    return "SINGLE_CONFLICT_DIRECTIONS".equals(resolution.source())
+    return "CONFLICT_DIRECTIONS".equals(resolution.source())
+            || "CANONICAL_MOVEMENT_PLAN".equals(resolution.source())
         ? Confidence.HIGH
         : Confidence.MEDIUM;
+  }
+
+  private static String directionEvidenceKind(UnlockCandidate candidate) {
+    if (candidate == null) {
+      return "MISSING";
+    }
+    if (candidate.direction() != CorridorDirection.UNKNOWN
+        && candidate.forwardPathEvidence().isPresent()) {
+      return compositeCanonicalEvidenceKind(candidate.forwardPathEvidence().orElseThrow());
+    }
+    if (candidate.direction() != CorridorDirection.UNKNOWN) {
+      return "SINGLE_CORRIDOR_DIRECTION";
+    }
+    return candidate
+        .forwardPathEvidence()
+        .map(CanonicalForwardPathEvidence::evidenceKind)
+        .orElse("MISSING");
+  }
+
+  private static String directionEvidenceKind(DirectionResolution resolution) {
+    if (resolution == null) {
+      return "MISSING";
+    }
+    if (resolution.corridorKnown() && resolution.forwardPathEvidence().isPresent()) {
+      return compositeCanonicalEvidenceKind(resolution.forwardPathEvidence().orElseThrow());
+    }
+    if (resolution.corridorKnown()) {
+      return "SINGLE_CORRIDOR_DIRECTION";
+    }
+    return resolution
+        .forwardPathEvidence()
+        .map(CanonicalForwardPathEvidence::evidenceKind)
+        .orElse("MISSING");
+  }
+
+  private static String compositeCanonicalEvidenceKind(CanonicalForwardPathEvidence evidence) {
+    return evidence.forwardProgressReleaseResources().isEmpty()
+        ? "COMPOSITE_CORRIDOR_AND_CANONICAL"
+        : "COMPOSITE_CORRIDOR_AND_CANONICAL_REAR_RETAIN";
   }
 
   private static TrainState defaultState(String trainName) {

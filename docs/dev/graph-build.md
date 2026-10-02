@@ -1,6 +1,8 @@
 # 调度图构建（/fta graph）
 
-本插件的调度图（RailGraph）用于把世界中的关键节点（站点、区间点、车库、道岔等）抽象成 `Node`，并计算节点之间的区间距离 `Edge.lengthBlocks`，供后续 ETA/间隔/占用等调度逻辑使用。
+本插件的调度图（RailGraph）用于把世界中的关键节点（站点、区间点、车库、道岔等）抽象成 `Node`，并计算节点之间的区间距离 `Edge.lengthBlocks` 与实际轨道物理足迹，供后续 ETA、间隔、占用与跨区间联锁使用。
+
+图节点不会按轨道方块逐个创建：普通线路长度只增加一个 Node-to-Node Edge 的 `lengthBlocks`，不会产生同等数量的 Node/Edge 或持久化 cell。完整 build 会临时读取实际 RailPath 来发现隐藏平交，随后只保留真实 Zone 的局部方块。数据库与运行时常驻规模因此取决于 Node、Edge 和少量 Zone，而不是线路总方块数；可通过 `/fta graph info` 的 `zone_cells/multi_zone_cells` 监控稀疏空间索引。
 
 ## 构建命令
 
@@ -55,12 +57,12 @@
 
 ### 时间预算（tickBudgetMs）
 
-`--tickBudgetMs` 表示“每 tick 允许本次构建任务消耗的主线程时间预算（毫秒）”：
+`--tickBudgetMs` 表示 discovery 与 edge explore 阶段每 tick 允许消耗的主线程时间预算（毫秒）：
 
 - 值越小：对主线程影响更小，但构建耗时更长
 - 值越大：构建更快，但更可能造成卡顿
 
-默认值为 `1`。
+默认值为 `10`。轨道发现与 Edge 探索受该预算分片；图组装、分量合并、桥接边检查、sparse Zone 编译与 SQL 快照替换仍发生在收尾阶段。普通轨道方块不会写库或常驻，但大图首次完整 build 仍应在低峰期执行并观察 tick/heap 峰值。该限制只影响离线构图，不改变运行期按 `edge -> zone` 和 `zone cell -> zone` 查询的复杂度。
 
 ### 同步模式（--sync）
 
@@ -90,19 +92,27 @@
    - 注意：若线网中没有任何 waypoint/autostation/depot 牌子，则该线网不会被视为“本插件接管的信号线路”，build 可能会提示未扫描到节点。
 
 
-2) `explore_edges`：计算区间距离
-   - **默认（BFS 多源）**：使用"多源 Dijkstra"一次遍历整张轨道网络，计算任意两个节点波前相遇时的最短距离，写入 `Edge.lengthBlocks`
-   - **`--nodeToNode`（节点到节点探索）**：使用 TrainCarts 的 `TrackWalkingPoint` 从每个节点出发，沿轨道走到下一个节点就停止并记录边长
-   - 最大探索距离默认为 `512` blocks，用于防止误扫或无限环路
+2) `explore_edges`：计算区间距离与临时物理采样
+   - **默认（节点到节点探索）**：使用 TrainCarts 的 `TrackWalkingPoint` 从每个节点出发，沿轨道走到下一个节点就停止；每次移动都从 `currentRailPath` 栅格化实际三维轨迹
+   - TCCoasters 的曲线、坡道与多段路径通过 TrainCarts 暴露的实际 `RailPath.Segment` 逐方块遍历；不会把两个 NodeId 端点用直线插值。`--tcc` 只负责从编辑器选择解析 seed，后续探索与普通轨道共用同一适配层
+   - **`--bfs`（BFS 多源）**：使用多源 Dijkstra 一次遍历整张轨道网络；波前相遇时沿 predecessor chain 还原候选路径。TrainCarts/TCC junction 可能一步跨越长曲线，因此 BFS 结果只用于边长，物理足迹保持不完整并触发 fail-closed sentinel
+   - 节点到节点模式以最短候选写入 `Edge.lengthBlocks`，同时在构建期合并全部成功 walker 候选的实际 RailPath 采样，避免较长的并行候选因不是最短路而从联锁发现中消失
+   - 完成探索后，系统只编译“不同 Edge 真实重合”的稀疏联锁 Zone，并立即丢弃普通轨道方块；全轨道采样不会进入 `RailEdge`、SQL 或运行时常驻索引
+   - 只有全部探索任务正常完成时 sparse catalog 才标记为完整；暂停、缺失 anchor 或无法完整还原的结果保持不完整并触发保守联锁
+   - 超距方向不算"无法完整还原"：某方向走满上限仍未遇到任何节点时，按尽头线处理——另一侧视为没有 FTA 节点（非 FTA 轨道或施工中），不产生区间，也不降级 catalog。构建结束时控制台输出一行 `WARN` 清单（`节点@停止坐标`），玩家执行时聊天栏另列出前 10 条并可点击传送；若其中本应是一条真实区间，说明它已从图中缺失，需在停止坐标附近补节点牌子或截断轨道后重建
+   - 同一步既超过上限又踏上节点锚点时按"到达"处理，区间照常记录
+   - 升级自旧数据库或缺少 `rail_interlocking_snapshots` 时，不会把空目录解释成“无交叉”。必须用当前 Jar 完成一次默认节点到节点 build，使 `/fta graph info` 的 captured/expected coverage 完整后才能恢复物理联锁吞吐；`--bfs` 不能完成这一步
+   - 节点到节点模式单方向探索上限默认为 `4096` blocks（`--bfs` 仍为 `512`）。上限只会被无节点的延伸线走满，取得远大于正常区间长度，是为了让"很长但确实接回线网"的区间仍被发现：否则它会被误当成尽头线从图中消失，而 TrainCarts 仍可能按物理最短路把列车引上这段不受占用与联锁保护的图外轨道
 
 ### 边探索模式对比
 
 | 模式 | 命令参数 | 优势 | 劣势 |
 |------|---------|------|------|
-| 节点到节点 | （默认） | 只探索节点之间的轨道段，更快 | 需要节点牌子先被扫描到 |
-| BFS 多源 | `--bfs` | 一次遍历计算所有边 | 可能扫描到大量无关轨道（如废弃矿井） |
+| 节点到节点 | （默认） | 只探索节点之间的轨道段，并能编译稀疏物理联锁 | 需要节点牌子先被扫描到 |
+| BFS 多源 | `--bfs` | 一次遍历计算所有边长 | 可能扫描到大量无关轨道，且不能签发完整稀疏物理联锁目录 |
 
 **说明**：默认使用节点到节点探索模式（使用 TrainCarts 的 `TrackWalkingPoint`），这样不会扫描到无关轨道。如果需要使用旧版 BFS 多源探索，可以加 `--bfs` 参数。
+达到 chunk 上限后的 `/fta graph continue` 会继续 discovery，并在完成后统一使用节点到节点模式重新取得真实 RailPath 足迹。
 
 ## 区块加载约束（重要）
 
@@ -128,11 +138,22 @@
 成功构建后会写入存储快照：
 
 - `rail_nodes`：节点列表（含 nodeType/坐标/元数据）
-- `rail_edges`：区间边与距离
+- `rail_edges`：仅保存 Node-to-Node 区间、距离与运营属性，不保存轨道方块
+- `rail_interlocking_snapshots`：每世界一条已校验稀疏联锁快照，包含 coverage、Edge 签名、Zone 参与边与 Zone 局部检测方块
 - `rail_edge_overrides`：区间运维覆盖（限速/临时限速/封锁等），不会被 build 覆盖
 - `rail_graph_snapshots`：快照元信息（built_at/node_count/edge_count/node_signature）
 
 插件启动时若存储就绪，会从快照预热到内存，`/fta graph info` 可直接查看。
+
+旧数据库若仍有 `rail_edges.footprint_json` 列，新版本会安全忽略该列，不再读取或写入，也不会执行破坏性 DROP。缺少 sparse snapshot、快照损坏、格式不支持或 Edge 签名不匹配时，Node/Edge 图仍可预热用于诊断，但物理联锁目录按不完整加载并保持 fail-closed。当前构建、Paper API、BKCommonLib、TrainCarts 与 TCCoasters 统一使用 `1.21.10` / `1.21.10-v1`，并以 Java 21 编译；它们必须与生产服实际版本族一致。若现场 TrainCarts ABI 不匹配，现场恢复会捕获 `LinkageError`、回退 `STOP_FIRST` 并保持列车硬停，不会把半水合状态开放为运行授权。
+
+联锁目录按世界的完整 Edge universe 校验 coverage。只要任一区间未被本次受支持的发现流程覆盖，所有预期区间都会额外申请同一个 `interlocking:incomplete:<worldId>` 保守资源；这会暂时串行化该世界的进路，但不会把未知覆盖误当成“没有平交冲突”。完成一次覆盖完整的 graph build 后，该 sentinel 会由精确的 pair-zone 资源取代。
+
+启动/重载时，TrainCarts 当前完整车体只与 sparse Zone 局部方块匹配。普通轨道 cell 没有进入目录是正常 clear 结果；普通 EDGE/NODE 保护来自 Route/Node 与真实车长，不靠坐标反查。旧图或不完整 catalog 仍不足以证明不存在隐藏平交，恢复会保持 `STOP_FIRST`。升级后必须先安全停车，再从目标连通分量执行 `/fta graph build --here --loadChunks --maxChunks <足够覆盖整个连通分量的数量>`。不得使用 `--bfs`；全部节点 anchor 必须可解析，构建过程不得有 chunk 加载失败。若命中 chunk 上限，需按提示执行 `/fta graph continue`，直到状态明确报告完整完成。
+
+快速刷新会无条件把最终图中的 sparse catalog 降级为不完整；它只适合保守更新拓扑，不能恢复精确 pair-zone，也不能解除启动现场恢复的 `STOP_FIRST`。要恢复完整 coverage，必须使用上述 `HERE + --loadChunks` 的完整构建流程，不能使用 `refresh`。
+
+若新旧快照会改变列车实际申请的联锁资源投影，而占用管理器仍存在 active claims，服务会拒绝激活新快照并继续保留旧快照。请先安全停车并清空占用后再重试；系统不会在热切换时对 old/new 资源静默双写。
 
 节点牌子的注册表、冲突检测、拆牌清理与 `rail_nodes` 增量同步细节，见：`docs/dev/node-sign-registry.md`。
 
@@ -168,6 +189,7 @@
 - 孤立节点数量（isolatedNodes）
 - 各 NodeType 数量（waypoint/station/depot/destination/switcher）
 - switcher 来源拆分（来自 switcher 牌子 vs 自动分叉）
+- 稀疏物理联锁 catalog（完整/不完整/不可用、covered/expected Edge、zone cell/multi-zone cell、精确联锁区数量）
 - 最长的 10 条边（按 lengthBlocks 降序）
 
 ## 图查询（/fta graph query/path/component）
@@ -302,6 +324,11 @@ TTL 支持 `s/m/h/d`，并支持组合（例如 `1h30m`）：`90s`、`1m`、`2h`
   - 玩家端会把节点坐标做成可点击 `/tp x y z`，便于定位牌子/咽喉/道岔附近的轨道区域
 
 注意：这里的坐标来自图快照记录的节点坐标（通常是牌子方块坐标），不保证一定落在轨道方块上，仅用于诊断定位。
+
+等长平局（`RailGraphPathFinder`，控车、占用、ETA、编表共用）：先取区间数最少的，再按"从终点倒推取节点 ID 自然序最小的前驱"，
+结果只取决于图内容，跨进程一致。区间数优先是为了剪刀渡线——直股一条区间，穿菱形三条，按轨道步数计长度时两者可以等长；
+此前只比节点序，规划会穿菱形而实车走直股，菱形上的占用等不到"经过即释放"，一直挂到列车销毁。
+区间数也相同时（例如会让环两股道）选哪条只为可复现，不表达运营偏好；要按语义选股道必须显式钉住途经节点。
 
 ### 连通分量统计（component）
 

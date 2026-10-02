@@ -9,12 +9,15 @@ import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -33,10 +36,13 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailComponentCau
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailNodeRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRouteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRouteStopRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationGroupRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRepository;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
@@ -56,6 +62,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final OperatorRepository operatorRepository;
   private final LineRepository lineRepository;
   private final StationRepository stationRepository;
+  private final StationGroupRepository stationGroupRepository;
   private final RouteRepository routeRepository;
   private final RouteStopRepository routeStopRepository;
   private final RailNodeRepository railNodeRepository;
@@ -63,6 +70,8 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RailEdgeOverrideRepository railEdgeOverrideRepository;
   private final RailComponentCautionRepository railComponentCautionRepository;
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
+  private final RailInterlockingSnapshotRepository railInterlockingSnapshotRepository;
+  private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
 
@@ -84,19 +93,25 @@ public final class JdbcStorageProvider implements StorageProvider {
     this.lineRepository = new JdbcLineRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.stationRepository =
         new JdbcStationRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.stationGroupRepository =
+        new JdbcStationGroupRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.routeRepository = new JdbcRouteRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.routeStopRepository =
         new JdbcRouteStopRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railNodeRepository =
         new JdbcRailNodeRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railEdgeRepository =
-        new JdbcRailEdgeRepository(dataSource, dialect, tablePrefix, logger::debug);
+        new JdbcRailEdgeRepository(dataSource, dialect, tablePrefix, logger::warn);
     this.railEdgeOverrideRepository =
         new JdbcRailEdgeOverrideRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railComponentCautionRepository =
         new JdbcRailComponentCautionRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railGraphSnapshotRepository =
         new JdbcRailGraphSnapshotRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.railInterlockingSnapshotRepository =
+        new JdbcRailInterlockingSnapshotRepository(dataSource, dialect, tablePrefix, logger::warn);
+    this.timetableRepository =
+        new JdbcTimetableRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudTemplateRepository =
         new JdbcHudTemplateRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudLineBindingRepository =
@@ -147,6 +162,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   }
 
   @Override
+  public StationGroupRepository stationGroups() {
+    return stationGroupRepository;
+  }
+
+  @Override
   public RouteRepository routes() {
     return routeRepository;
   }
@@ -179,6 +199,16 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public RailGraphSnapshotRepository railGraphSnapshots() {
     return railGraphSnapshotRepository;
+  }
+
+  @Override
+  public RailInterlockingSnapshotRepository railInterlockingSnapshots() {
+    return railInterlockingSnapshotRepository;
+  }
+
+  @Override
+  public TimetableRepository timetables() {
+    return timetableRepository;
   }
 
   @Override

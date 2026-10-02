@@ -15,14 +15,15 @@ public final class TrainNameNormalizer {
     if (trimmed.isEmpty()) {
       return "";
     }
-    String lower = trimmed.toLowerCase(Locale.ROOT);
-    int split = lower.lastIndexOf('~');
-    if (split > 0
-        && split + 1 < lower.length()
-        && looksLikeSplitSuffix(lower.substring(split + 1))) {
-      return lower.substring(0, split);
+    String normalized = trimmed.toLowerCase(Locale.ROOT);
+    int split = normalized.lastIndexOf('~');
+    while (split > 0
+        && split + 1 < normalized.length()
+        && looksLikeSplitSuffix(normalized.substring(split + 1))) {
+      normalized = normalized.substring(0, split);
+      split = normalized.lastIndexOf('~');
     }
-    return lower;
+    return normalized;
   }
 
   public static boolean sameLogicalTrain(String first, String second) {

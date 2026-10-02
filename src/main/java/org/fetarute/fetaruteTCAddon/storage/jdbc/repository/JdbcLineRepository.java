@@ -102,6 +102,25 @@ public final class JdbcLineRepository extends JdbcRepositorySupport implements L
   }
 
   @Override
+  public List<Line> listAll() {
+    String sql =
+        "SELECT id, code, operator_id, name, secondary_name, service_type, color, status, spawn_freq_baseline_sec, metadata, created_at, updated_at FROM "
+            + table("lines")
+            + " ORDER BY code ASC";
+    List<Line> results = new ArrayList<>();
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql);
+        var rs = statement.executeQuery()) {
+      while (rs.next()) {
+        results.add(mapRow(rs));
+      }
+      return results;
+    } catch (SQLException ex) {
+      throw new StorageException("列出全部线路失败", ex);
+    }
+  }
+
+  @Override
   public Line save(Line line) {
     Objects.requireNonNull(line, "line");
     String insert =

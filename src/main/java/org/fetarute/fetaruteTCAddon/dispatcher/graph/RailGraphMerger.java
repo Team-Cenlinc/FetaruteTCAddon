@@ -6,6 +6,7 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
@@ -54,11 +55,8 @@ public final class RailGraphMerger {
     }
     for (RailEdge edge : update.edges()) {
       if (nodesById.containsKey(edge.from()) && nodesById.containsKey(edge.to())) {
-        // 取最短边长，避免"绕道边"覆盖已有最短路径
         RailEdge existing = edgesById.get(edge.id());
-        if (existing == null || edge.lengthBlocks() < existing.lengthBlocks()) {
-          edgesById.put(edge.id(), edge);
-        }
+        edgesById.put(edge.id(), existing == null ? edge : mergeUpsertEdge(existing, edge));
       }
     }
 
@@ -70,9 +68,52 @@ public final class RailGraphMerger {
       }
     }
 
-    RailGraph merged = new SimpleRailGraph(nodesById, edgesById, blockedEdges);
+    RailGraph merged =
+        new SimpleRailGraph(
+            nodesById, edgesById, blockedEdges, mergeInterlockingState(base, update, edgesById));
     return new MergeResult(
         merged, MergeAction.UPSERT, 0, 0, 0, merged.nodes().size(), merged.edges().size());
+  }
+
+  /**
+   * 保留图拓扑，但把稀疏联锁目录统一降级为不完整。
+   *
+   * <p>该变换用于局部刷新无法证明完整 Edge universe 的场景。降级后的世界级联锁状态会对全部区间发布同一个 fail-closed sentinel，禁止旧的精确 Zone
+   * 继续授权放行。
+   *
+   * @param graph 待降级的不可变图快照
+   * @return 带有不完整联锁目录的新图快照
+   */
+  public static RailGraph markInterlockingCatalogIncomplete(RailGraph graph) {
+    Objects.requireNonNull(graph, "graph");
+    Map<NodeId, RailNode> nodesById = new HashMap<>();
+    for (RailNode node : graph.nodes()) {
+      nodesById.put(node.id(), node);
+    }
+    Map<EdgeId, RailEdge> edgesById = new HashMap<>();
+    Set<EdgeId> blockedEdges = new HashSet<>();
+    for (RailEdge edge : graph.edges()) {
+      edgesById.put(edge.id(), edge);
+      if (graph.isBlocked(edge.id())) {
+        blockedEdges.add(edge.id());
+      }
+    }
+    RailInterlockingState oldState = interlockingState(graph);
+    RailInterlockingState incomplete =
+        oldState
+            .worldId()
+            .map(worldId -> RailInterlockingState.incomplete(worldId, edgesById.keySet()))
+            .orElseGet(RailInterlockingState::unavailable);
+    return new SimpleRailGraph(nodesById, edgesById, blockedEdges, incomplete);
+  }
+
+  /**
+   * 合并 partial build 对同一区间观察到的纯拓扑结果。
+   *
+   * <p>边长继续取最短路径。稀疏联锁目录不能从两个分别验证的局部快照推断，因此由外层按最终 Edge universe 选择完整 update 或 fail-closed 状态。
+   */
+  private static RailEdge mergeUpsertEdge(RailEdge existing, RailEdge update) {
+    return update.lengthBlocks() < existing.lengthBlocks() ? update : existing;
   }
 
   /**
@@ -157,7 +198,9 @@ public final class RailGraphMerger {
 
     MergeAction action = overlappedNodes > 0 ? MergeAction.REPLACE_COMPONENTS : MergeAction.APPEND;
 
-    RailGraph merged = new SimpleRailGraph(nodesById, edgesById, blockedEdges);
+    RailGraph merged =
+        new SimpleRailGraph(
+            nodesById, edgesById, blockedEdges, mergeInterlockingState(base, update, edgesById));
     return new MergeResult(
         merged,
         action,
@@ -261,7 +304,9 @@ public final class RailGraphMerger {
       }
     }
 
-    RailGraph next = new SimpleRailGraph(nodesById, edgesById, blockedEdges);
+    RailGraph next =
+        new SimpleRailGraph(
+            nodesById, edgesById, blockedEdges, retainInterlockingState(base, edgesById));
     return new RemoveResult(
         next,
         components.componentCount(),
@@ -269,6 +314,35 @@ public final class RailGraphMerger {
         removedEdges,
         next.nodes().size(),
         next.edges().size());
+  }
+
+  private static RailInterlockingState mergeInterlockingState(
+      RailGraph base, RailGraph update, Map<EdgeId, RailEdge> edgesById) {
+    RailInterlockingState updateState = interlockingState(update);
+    if (updateState.available() && updateState.expectedEdges().equals(edgesById.keySet())) {
+      return updateState;
+    }
+    return updateState
+        .worldId()
+        .or(() -> interlockingState(base).worldId())
+        .map(worldId -> RailInterlockingState.incomplete(worldId, edgesById.keySet()))
+        .orElseGet(RailInterlockingState::unavailable);
+  }
+
+  private static RailInterlockingState retainInterlockingState(
+      RailGraph base, Map<EdgeId, RailEdge> edgesById) {
+    RailInterlockingState state = interlockingState(base);
+    if (!state.available()) {
+      return RailInterlockingState.unavailable();
+    }
+    return state.retainEdges(edgesById.keySet());
+  }
+
+  private static RailInterlockingState interlockingState(RailGraph graph) {
+    if (graph instanceof RailGraphInterlockingSupport support) {
+      return support.interlockingState();
+    }
+    return RailInterlockingState.unavailable();
   }
 
   private static ComponentSet collectComponents(RailGraph graph, Set<NodeId> seeds) {

@@ -32,10 +32,11 @@ import org.bukkit.scoreboard.Team;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
@@ -225,9 +226,8 @@ public final class ScoreboardTrainHudManager implements Listener {
 
     Optional<String> templateOpt =
         templateService != null
-            ? templateService.resolveTemplate(
-                HudTemplateType.PLAYER_DISPLAY,
-                context.routeDefinition().flatMap(RouteDefinition::metadata))
+            ? templateService.resolveTemplateForLine(
+                HudTemplateType.PLAYER_DISPLAY, context.currentLine())
             : Optional.empty();
     ScoreboardHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
     long nowMillis = System.currentTimeMillis();
@@ -251,8 +251,12 @@ public final class ScoreboardTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
+    state =
+        HudStateTracker.applyOutOfService(
+            state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
     TrainFrameDelta frameDelta = updateTrainFrame(trainName, context, state);
-    Optional<ScoreboardHudTemplate.Page> pageOpt = template.resolvePage(state, tickCounter);
+    Optional<ScoreboardHudTemplate.Page> pageOpt =
+        template.resolvePage(state, HudLanguageRotation.nowTicks());
     String title = resolveTitle(template, pageOpt, placeholders);
     List<String> resolvedLines =
         renderPage(pageOpt, trainName, context, placeholders, state, frameDelta, tickCounter);
@@ -457,14 +461,21 @@ public final class ScoreboardTrainHudManager implements Listener {
       }
     } else {
       output.addAll(
-          renderUpcomingRows(upcoming.stops(), 0, fixedRows, placeholders, page.rowLines()));
+          renderUpcomingRows(
+              upcoming.stops(),
+              0,
+              fixedRows,
+              placeholders,
+              page.rowLines(),
+              context.currentLine()));
       output.addAll(
           renderUpcomingRows(
               upcoming.stops(),
               fixedRows + windowOffset,
               windowRows,
               placeholders,
-              page.rowLines()));
+              page.rowLines(),
+              context.currentLine()));
     }
     output.addAll(renderLineList(page.footer(), placeholders));
     return output;
@@ -481,12 +492,18 @@ public final class ScoreboardTrainHudManager implements Listener {
     return output;
   }
 
+  /**
+   * 渲染前方停靠行。
+   *
+   * <p>行内的线路占位符（{@code line}、{@code line_color_tag} 等）取该站所属线路：直通运转换线之后的各站按新线路着色， 与列车当前线路相同的站不覆盖。
+   */
   private List<String> renderUpcomingRows(
       List<TrainHudContextResolver.UpcomingStop> stops,
       int startIndex,
       int rowCount,
       Map<String, String> placeholders,
-      List<String> rowLines) {
+      List<String> rowLines,
+      Optional<RouteLineChanges.LineRef> currentLine) {
     List<String> output = new ArrayList<>();
     for (int i = 0; i < rowCount; i++) {
       int index = startIndex + i;
@@ -503,6 +520,9 @@ public final class ScoreboardTrainHudManager implements Listener {
         itemPlaceholders.put("eta", formatEta(stop.eta()));
         itemPlaceholders.put("eta_minutes", formatEtaMinutes(stop.eta()));
         contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, stop.eta());
+        stop.line()
+            .filter(line -> currentLine.map(current -> !current.sameLine(line)).orElse(true))
+            .ifPresent(line -> contextResolver.applyLinePlaceholders(itemPlaceholders, line));
       } else {
         itemPlaceholders.put("idx", "");
         itemPlaceholders.put("index", "");

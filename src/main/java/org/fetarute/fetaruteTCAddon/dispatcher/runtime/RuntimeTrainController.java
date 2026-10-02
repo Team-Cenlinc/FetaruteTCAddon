@@ -7,6 +7,7 @@ import java.util.OptionalLong;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -99,6 +100,50 @@ public final class RuntimeTrainController {
   }
 
   /**
+   * 带速度包络应用一次控车命令（信号 tick 的完整判定）。
+   *
+   * @param speedEnvelope 从车头量起的随距离约束；{@code null} 表示没有速度上下文
+   * @see TrainLaunchManager#applyControl(RuntimeTrainHandle, TrainProperties, SignalAspect, double,
+   *     TrainConfig, boolean, OptionalLong, Optional, ConfigManager.RuntimeSettings,
+   *     StopControlMode, SpeedEnvelope)
+   */
+  public TrainLaunchManager.ControlApplicationResult applyControl(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      Optional<BlockFace> launchFallbackDirection,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode,
+      SpeedEnvelope speedEnvelope) {
+    return launchManager.applyControl(
+        train,
+        properties,
+        aspect,
+        targetBps,
+        config,
+        allowLaunch,
+        distanceOpt,
+        launchFallbackDirection,
+        runtimeSettings,
+        stopMode,
+        speedEnvelope);
+  }
+
+  /**
+   * 逐 tick 斜坡按实际里程推算的车头位置（车头已驶过 {@code nodeKey} 的距离）；推算不可用时为空。
+   *
+   * @param train 运行时列车句柄
+   * @param nodeKey 车头之前最近经过的图节点
+   */
+  public java.util.OptionalDouble headProgressBlocks(RuntimeTrainHandle train, String nodeKey) {
+    return launchManager.headProgressBlocks(train, nodeKey);
+  }
+
+  /**
    * 立即保持停车。
    *
    * <p>用于没有下一节点或异常状态下的兜底停车。常规 STOP 制动仍应优先通过 {@link #applyControl(RuntimeTrainHandle,
@@ -108,6 +153,7 @@ public final class RuntimeTrainController {
    * @param train 运行时列车句柄
    */
   public void stopNow(RuntimeTrainHandle train) {
+    launchManager.releaseSpeedRamp(train);
     if (train != null) {
       train.stop();
     }
@@ -115,6 +161,7 @@ public final class RuntimeTrainController {
 
   /** 立即执行闭塞硬 STOP：不使用制动曲线，不保留 launch action。 */
   public void stopHard(RuntimeTrainHandle train, TrainProperties properties) {
+    launchManager.releaseSpeedRamp(train);
     if (properties != null) {
       properties.setSpeedLimit(0.0);
     }
@@ -159,125 +206,9 @@ public final class RuntimeTrainController {
     }
     double targetBpt = toBlocksPerTick(targetBps);
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
+    launchManager.releaseSpeedRamp(train);
     properties.setSpeedLimit(targetBpt);
     train.forceRelaunch(direction, targetBpt, accelBpt2);
-  }
-
-  /**
-   * 计算 approach 速度包络。
-   *
-   * <p>信号/调度层只提供“需要降速的目标、距离与配置”；这里统一把 preview 区线性下压、正式 approach 限速和物理制动包络合成最终速度上限。
-   *
-   * @param currentTargetBps 当前基础目标速度
-   * @param approachLimitBps approach 目标速度
-   * @param decelBps2 列车制动能力
-   * @param distanceBlocks 到 approach 目标的距离
-   * @param targetEdgeDistanceBlocks approach 目标边界距离
-   * @param edgeCount 到目标的边数量
-   * @param runtime 运行时控车配置
-   * @param previewDistanceBlocks 正式 approach 窗口外的预制动距离
-   * @return 合成后的 approach 速度上限
-   */
-  static double resolveApproachSpeedEnvelope(
-      double currentTargetBps,
-      double approachLimitBps,
-      double decelBps2,
-      OptionalLong distanceBlocks,
-      OptionalLong targetEdgeDistanceBlocks,
-      int edgeCount,
-      ConfigManager.RuntimeSettings runtime,
-      double previewDistanceBlocks) {
-    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
-      return 0.0;
-    }
-    if (!Double.isFinite(approachLimitBps) || approachLimitBps <= 0.0) {
-      return currentTargetBps;
-    }
-    if (runtime == null || distanceBlocks == null || distanceBlocks.isEmpty()) {
-      return Math.min(currentTargetBps, approachLimitBps);
-    }
-    long distance = distanceBlocks.getAsLong();
-    double previewRatio =
-        resolveApproachPreviewRatio(runtime, previewDistanceBlocks, distance, edgeCount);
-    double previewEnvelope =
-        approachPreviewSpeedLimit(currentTargetBps, approachLimitBps, previewRatio);
-    if (!runtime.speedCurveEnabled()
-        || targetEdgeDistanceBlocks == null
-        || targetEdgeDistanceBlocks.isEmpty()
-        || !Double.isFinite(decelBps2)
-        || decelBps2 <= 0.0) {
-      return previewEnvelope;
-    }
-    double brakingDistance = Math.max(0.0, distance - targetEdgeDistanceBlocks.getAsLong());
-    double brakingEnvelope =
-        Math.sqrt(
-            approachLimitBps * approachLimitBps
-                + 2.0 * decelBps2 * brakingDistance * runtime.speedCurveFactor());
-    if (!Double.isFinite(brakingEnvelope) || brakingEnvelope <= 0.0) {
-      return previewEnvelope;
-    }
-    return Math.min(previewEnvelope, Math.max(approachLimitBps, brakingEnvelope));
-  }
-
-  static double approachPreviewRatio(
-      double approachWindowBlocks, double previewDistanceBlocks, long distanceBlocks) {
-    if (!Double.isFinite(approachWindowBlocks)
-        || approachWindowBlocks < 0.0
-        || !Double.isFinite(previewDistanceBlocks)
-        || previewDistanceBlocks <= 0.0
-        || distanceBlocks < 0L) {
-      return 0.0;
-    }
-    if (distanceBlocks <= approachWindowBlocks) {
-      return 1.0;
-    }
-    double distanceToBoundary = distanceBlocks - approachWindowBlocks;
-    if (distanceToBoundary >= previewDistanceBlocks) {
-      return 0.0;
-    }
-    return Math.max(0.0, Math.min(1.0, 1.0 - distanceToBoundary / previewDistanceBlocks));
-  }
-
-  static double approachPreviewSpeedLimit(
-      double currentTargetBps, double approachLimitBps, double ratio) {
-    if (!Double.isFinite(currentTargetBps) || currentTargetBps <= 0.0) {
-      return 0.0;
-    }
-    if (!Double.isFinite(approachLimitBps)
-        || approachLimitBps <= 0.0
-        || approachLimitBps >= currentTargetBps) {
-      return currentTargetBps;
-    }
-    double clampedRatio = Double.isFinite(ratio) ? Math.max(0.0, Math.min(1.0, ratio)) : 0.0;
-    return approachLimitBps + (currentTargetBps - approachLimitBps) * (1.0 - clampedRatio);
-  }
-
-  private static double resolveApproachPreviewRatio(
-      ConfigManager.RuntimeSettings runtime,
-      double previewDistanceBlocks,
-      long distanceBlocks,
-      int edgeCount) {
-    if (runtime == null) {
-      return 0.0;
-    }
-    if (withinApproachWindow(runtime, distanceBlocks, edgeCount)) {
-      return 1.0;
-    }
-    return approachPreviewRatio(
-        runtime.approachWindowBlocks(), previewDistanceBlocks, distanceBlocks);
-  }
-
-  private static boolean withinApproachWindow(
-      ConfigManager.RuntimeSettings runtime, long distanceBlocks, int edgeCount) {
-    if (runtime == null) {
-      return false;
-    }
-    double windowBlocks = runtime.approachWindowBlocks();
-    if (Double.isFinite(windowBlocks) && windowBlocks > 0.0 && distanceBlocks <= windowBlocks) {
-      return true;
-    }
-    int windowEdges = runtime.approachWindowEdges();
-    return windowEdges > 0 && edgeCount >= 0 && edgeCount <= windowEdges;
   }
 
   private static double toBlocksPerTick(double blocksPerSecond) {

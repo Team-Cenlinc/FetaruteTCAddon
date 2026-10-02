@@ -1,6 +1,5 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
-import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
@@ -17,6 +16,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -32,14 +32,17 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchPriorityPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LaunchAuthorizationService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverDispatchResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -63,10 +66,70 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public final class SimpleTicketAssigner implements TicketAssigner {
 
+  enum MaterializedSpawnProgress {
+    WAIT,
+    COMPLETE,
+    ROLLBACK
+  }
+
+  enum PendingMaterializedSpawnPhase {
+    AWAITING_PROMOTION,
+    ROLLBACK_REQUIRED,
+    AWAITING_REMOVAL
+  }
+
+  /** 按票据与精确物理身份区分实体化事务，避免额外实体覆盖唯一票据 owner。 */
+  private static final class MaterializedSpawnKey {
+    private final UUID ticketId;
+    private final Object physicalIdentity;
+
+    private MaterializedSpawnKey(UUID ticketId, RuntimeTrainHandle train) {
+      this.ticketId = Objects.requireNonNull(ticketId, "ticketId");
+      RuntimeTrainHandle requiredTrain = Objects.requireNonNull(train, "train");
+      Object identity = requiredTrain.physicalRuntimeIdentity();
+      this.physicalIdentity = identity == null ? requiredTrain : identity;
+    }
+
+    @Override
+    public boolean equals(Object other) {
+      return other instanceof MaterializedSpawnKey key
+          && ticketId.equals(key.ticketId)
+          && physicalIdentity == key.physicalIdentity;
+    }
+
+    @Override
+    public int hashCode() {
+      return 31 * ticketId.hashCode() + System.identityHashCode(physicalIdentity);
+    }
+  }
+
   private static final java.util.logging.Logger HEALTH_LOGGER =
       java.util.logging.Logger.getLogger("FetaruteTCAddon");
 
   /** 列车已完成运营圈数（按 OPERATION 票据发车成功累计）。 */
+  /**
+   * 车辆复用闸：回答"这辆车还能不能再接一班运营车次"。
+   *
+   * <p>默认恒放行，因此未装配时本类行为与之前完全一致。时刻表层会装上一个按车辆交路（duty）判定的实现， 用来保证"每辆车最终都会回库"——交路额度用完的车会被拒绝复用，从而落进
+   * {@code ReclaimManager} 的闲置回收窗口，由既有回收链路派 RETURN 票送它回库。本类不负责送车回库，只负责不再给它派活。
+   */
+  private volatile java.util.function.Predicate<String> layoverReuseGate = trainName -> true;
+
+  /** RETURN 票的复用闸：交路还没跑完的车不准被回库票带走。默认恒放行。 */
+  private volatile java.util.function.Predicate<String> returnReuseGate = trainName -> true;
+
+  /** 票据级候选过滤：这辆待命车能不能接这张票（时刻表用它把"接班"限定在本交路的车）。默认恒放行。 */
+  private volatile java.util.function.BiPredicate<SpawnTicket, String> layoverCandidateFilter =
+      (ticket, trainName) -> true;
+
+  /** 票据级到期时刻：过了它还挂在 pending 里的票直接作废。默认没有到期。 */
+  private volatile java.util.function.Function<SpawnTicket, Optional<Instant>> ticketExpiry =
+      ticket -> Optional.empty();
+
+  /** 派发成功回调：票据最终派给了哪辆车。默认什么都不做。 */
+  private volatile java.util.function.BiConsumer<SpawnTicket, String> dispatchListener =
+      (ticket, trainName) -> {};
+
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
   /** 列车最大运营圈数（达到后应优先分配 RETURN 回库）。 */
@@ -81,11 +144,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** 待复用票据默认最大保留时间；配置缺失时使用，0 表示显式禁用硬清理。 */
   private static final Duration DEFAULT_PENDING_LAYOVER_MAX_AGE = Duration.ofDays(1);
 
-  /** 拥挤度进入 HOLD 的阈值。 */
-  private static final double CONGESTION_HOLD_THRESHOLD = 0.72D;
-
-  /** 拥挤度退出 HOLD 的阈值（滞回，避免频繁抖动）。 */
-  private static final double CONGESTION_RELEASE_THRESHOLD = 0.58D;
+  /** 新物理编组等待 TrainCarts 提供完整实时 rail footprint 的最长宽限。 */
+  private static final Duration MATERIALIZED_SPAWN_HYDRATION_GRACE = Duration.ofSeconds(4);
 
   /** 拥挤门控状态保留时长（超过后会自动清理）。 */
   private static final Duration CONGESTION_GATE_TTL = Duration.ofMinutes(10);
@@ -130,19 +190,178 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Instant addedAt) {}
 
   /**
+   * 已实体化且尚未完成票据提交或安全回滚的发车事务。
+   *
+   * <p>{@link PendingMaterializedSpawnPhase#AWAITING_PROMOTION} 才允许刷新信号并查询真实 footprint；一旦转入 {@link
+   * PendingMaterializedSpawnPhase#ROLLBACK_REQUIRED}，后续 tick 只能重试硬停车、销毁和账务回滚。账务动作完成后进入 {@link
+   * PendingMaterializedSpawnPhase#AWAITING_REMOVAL}，继续保留 ticket guard 并重试物理销毁，直到 runtime 收到精确
+   * GroupRemove；两个回滚阶段都不能重新进入 promotion 或票据完成路径。
+   */
+  private record PendingMaterializedSpawn(
+      SpawnTicket ticket,
+      SpawnService service,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      long recoveryEpoch,
+      Instant deadline,
+      boolean fallback,
+      boolean ticketOwner,
+      PendingMaterializedSpawnPhase phase,
+      String rollbackReason) {
+
+    private PendingMaterializedSpawn {
+      Objects.requireNonNull(ticket, "ticket");
+      Objects.requireNonNull(service, "service");
+      Objects.requireNonNull(trainName, "trainName");
+      Objects.requireNonNull(spawnLease, "spawnLease");
+      Objects.requireNonNull(train, "train");
+      Objects.requireNonNull(deadline, "deadline");
+      phase = phase == null ? PendingMaterializedSpawnPhase.AWAITING_PROMOTION : phase;
+      rollbackReason = rollbackReason == null ? "-" : rollbackReason;
+    }
+
+    private PendingMaterializedSpawn requiringRollback(String reason) {
+      if (phase == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        return this;
+      }
+      return new PendingMaterializedSpawn(
+          ticket,
+          service,
+          trainName,
+          spawnLease,
+          train,
+          recoveryEpoch,
+          deadline,
+          fallback,
+          ticketOwner,
+          PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED,
+          reason);
+    }
+
+    private PendingMaterializedSpawn awaitingRemoval() {
+      return new PendingMaterializedSpawn(
+          ticket,
+          service,
+          trainName,
+          spawnLease,
+          train,
+          recoveryEpoch,
+          deadline,
+          fallback,
+          ticketOwner,
+          PendingMaterializedSpawnPhase.AWAITING_REMOVAL,
+          rollbackReason);
+    }
+
+    private MaterializedSpawnKey key() {
+      return new MaterializedSpawnKey(ticket.id(), train);
+    }
+  }
+
+  /**
+   * 已生成物理编组后，提交 Depot 发车事务所需的不可变上下文。
+   *
+   * <p>常规发车与 Layover fallback 都必须经过同一提交器。这样两条入口会一致地执行 recovery epoch 检查、硬授权、 expected physical
+   * identity 登记、footprint promotion 以及失败回滚，不能因复制实现而出现一条入口重新引入“新车被视为迟加载”的时序漏洞。
+   */
+  private record MaterializedDepotSpawnContext(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      RouteOperationType operationType,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      DepotGateRequest gateRequest,
+      OccupancyRequest authorityRequest,
+      List<SpawnDepot> lineDepots,
+      DepotSpawner.MaterializedSpawn materializedSpawn,
+      long recoveryEpoch,
+      Instant now,
+      boolean fallback) {
+
+    private MaterializedDepotSpawnContext {
+      // 此对象仅在精确物理 runtime identity 已创建后构造。不能在这里做会逃离回滚边界的校验；
+      // finalizer 会把字段访问或 TrainCarts 调用的任何异常统一转入物理收容路径。
+      lineDepots =
+          lineDepots == null ? List.of() : lineDepots.stream().filter(Objects::nonNull).toList();
+    }
+  }
+
+  /**
+   * 已通过 Depot 发车预检、尚未创建物理编组的不可变上下文。
+   *
+   * <p>常规发车和 Layover fallback 必须共用这一上下文。它只承载已经建立的逻辑发车准备：Depot 选择、动态授权准备、预览联锁判定与 recovery epoch；它不包含
+   * {@link RuntimeTrainHandle}，因此不能触发 TrainCarts 实体化或绕开后续的统一提交与回滚。
+   */
+  private record PreparedDepotSpawn(
+      SpawnTicket ticket,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      List<SpawnDepot> lineDepots,
+      DepotGateRequest gateRequest,
+      long recoveryEpoch) {
+
+    private PreparedDepotSpawn {
+      ticket = Objects.requireNonNull(ticket, "ticket");
+      trainName = Objects.requireNonNull(trainName, "trainName");
+      spawnLease = Objects.requireNonNull(spawnLease, "spawnLease");
+      lineDepots =
+          lineDepots == null ? List.of() : lineDepots.stream().filter(Objects::nonNull).toList();
+      gateRequest = Objects.requireNonNull(gateRequest, "gateRequest");
+    }
+  }
+
+  /** Depot 发车入口的来源语义。 */
+  private enum DepotSpawnOrigin {
+    NORMAL(""),
+    FALLBACK("fallback-");
+
+    private final String reasonPrefix;
+
+    DepotSpawnOrigin(String reasonPrefix) {
+      this.reasonPrefix = reasonPrefix;
+    }
+
+    private boolean fallback() {
+      return this == FALLBACK;
+    }
+
+    private String reasonPrefix() {
+      return reasonPrefix;
+    }
+  }
+
+  /**
    * 拥挤度评估快照。
    *
    * <p>score 范围为 [0,1]，值越高表示越拥挤。
    */
   private record CongestionAssessment(
       double score,
-      double edgeBusyRate,
+      double occupancyRate,
       double routeTrainPressure,
       double lineSignalPressure,
+      double networkPressure,
       int busyEdges,
       int totalEdges,
+      int busyNodes,
+      int totalNodes,
       int activeRouteTrains,
-      int targetRouteTrains) {}
+      int targetRouteTrains,
+      int activeTrains,
+      /** “全网算满”的参考车数，**不是**准入上限。 */
+      int networkReference) {
+
+    int busyResources() {
+      return busyEdges + busyNodes;
+    }
+
+    int totalResources() {
+      return totalEdges + totalNodes;
+    }
+  }
 
   /** 拥挤门控状态（按 line+方向 key）。 */
   private record CongestionGateState(boolean holding, double lastScore, Instant updatedAt) {}
@@ -165,6 +384,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private final int maxSpawnPerTick;
   private final int maxRetryAttempts;
 
+  /**
+   * 本 tick 已经实体化（调用 {@link DepotSpawner#spawn}）的次数。{@code max-spawn-per-tick} 限的就是它。
+   *
+   * <p>限的是"生成了几辆车"而不是"试了几张票"：被闭塞挡在预检的票、折返复用的票都不生成实体，不占名额。
+   * 若按尝试计，每拍唯一的名额会反复落在同一张出不了库的票上（例如被车库咽喉挡住的出库票），全网其余的票（含终点折返）一张都轮不到。
+   */
+  private int materializationsThisTick;
+
   /** 出车成功次数（含 Layover 复用）。 */
   private final java.util.concurrent.atomic.LongAdder spawnSuccess =
       new java.util.concurrent.atomic.LongAdder();
@@ -180,6 +407,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // key 为 ticketId：避免同一 route 在 backlog>1 时覆盖导致“丢票据/永久卡 backlog”。
   private final java.util.Map<java.util.UUID, PendingLayoverEntry> pendingLayoverTickets =
       new java.util.concurrent.ConcurrentHashMap<>();
+  private final java.util.Map<MaterializedSpawnKey, PendingMaterializedSpawn>
+      pendingMaterializedSpawns = new java.util.concurrent.ConcurrentHashMap<>();
   // key 为 "<lineId>|<terminal>"：记录下一次优先尝试的 route 游标，实现同组 route 轮转。
   private final java.util.concurrent.ConcurrentMap<String, Integer> pendingLayoverRouteCursor =
       new java.util.concurrent.ConcurrentHashMap<>();
@@ -261,7 +490,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.launchAuthorizationService =
         new LaunchAuthorizationService(occupancyManager, null, this.debugLogger);
-    this.retryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
+    Duration configuredRetryDelay = retryDelay == null ? Duration.ofSeconds(2) : retryDelay;
+    this.retryDelay =
+        configuredRetryDelay.compareTo(Duration.ofMillis(50)) < 0
+            ? Duration.ofMillis(50)
+            : configuredRetryDelay;
     this.depotDispatchCoordinator = new DepotSpawnScheduler(this.retryDelay);
     this.maxSpawnPerTick = Math.max(1, maxSpawnPerTick);
     this.maxRetryAttempts = Math.max(1, maxRetryAttempts);
@@ -299,7 +532,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     // 尝试复用发车
-    if (runtimeDispatchService.dispatchLayover(candidate, ticket)) {
+    LayoverDispatchResult dispatch = runtimeDispatchService.dispatchLayover(candidate, ticket);
+    if (dispatch.dispatched()) {
+      String committedTrainName = dispatch.trainName().orElseThrow();
+      RouteOperationType operationType =
+          resolveRouteOperationType(Optional.of(provider), ticket.routeId())
+              .orElse(
+                  ticket.mode() == ServiceTicket.TicketMode.RETURN
+                      ? RouteOperationType.RETURN
+                      : RouteOperationType.OPERATION);
+      applyDispatchLifecycleTags(
+          Optional.of(provider), committedTrainName, ticket.routeId(), operationType);
       debugLogger.accept("强制分配成功: " + trainName + " -> ticket " + ticket.ticketId());
       return true;
     }
@@ -341,11 +584,88 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   @Override
   public int clearPendingTickets() {
-    int count = pendingLayoverTickets.size();
-    pendingLayoverTickets.clear();
+    int removed = 0;
+    for (var entry : List.copyOf(pendingLayoverTickets.entrySet())) {
+      PendingLayoverEntry pending = entry.getValue();
+      SpawnTicket ticket = pending == null ? null : pending.ticket();
+      if (preservePendingDispatchAttempt(ticket, "manual-clear")) {
+        continue;
+      }
+      if (pendingLayoverTickets.remove(entry.getKey(), pending)) {
+        removed++;
+      }
+    }
     pendingLayoverRouteCursor.clear();
     immediateLayoverRouteCursor.clear();
-    return count;
+    return removed;
+  }
+
+  /**
+   * 把全部已实体化事务切换为只回滚状态，并同步尝试一次物理收容。
+   *
+   * <p>返回失败时调用方不得替换本 assigner；否则内存中的物理 identity、租约与票据 owner 会失去恢复者。
+   */
+  @Override
+  public boolean prepareForReplacement(Instant now) {
+    Instant recoveryAt = now == null ? Instant.now() : now;
+    List<PendingMaterializedSpawn> snapshot = List.copyOf(pendingMaterializedSpawns.values());
+    List<PendingMaterializedSpawn> rollbackSnapshot = new ArrayList<>();
+    for (PendingMaterializedSpawn pending : snapshot) {
+      if (pending == null) {
+        continue;
+      }
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        rollbackSnapshot.add(pending);
+        continue;
+      }
+      PendingMaterializedSpawn rollback =
+          pending.phase() == PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED
+              ? pending
+              : pending.requiringRollback("ticket-assigner-replacement");
+      if (rollback != pending
+          && !pendingMaterializedSpawns.replace(pending.key(), pending, rollback)) {
+        continue;
+      }
+      rollbackSnapshot.add(rollback);
+    }
+    boolean allQuarantined = true;
+    for (PendingMaterializedSpawn pending : rollbackSnapshot) {
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        continue;
+      }
+      RuntimeTrainHandle handle = pending.train();
+      try {
+        if (handle.isValid()
+            && !runtimeDispatchService.quarantineMaterializedSpawnRollback(
+                handle, pending.trainName(), pending.rollbackReason(), pending.ticketOwner())) {
+          allQuarantined = false;
+        }
+      } catch (RuntimeException | LinkageError failure) {
+        allQuarantined = false;
+        try {
+          debugLogger.accept(
+              "替换前登记实体化回滚隔离失败: train="
+                  + pending.trainName()
+                  + " error="
+                  + failure.getClass().getSimpleName()
+                  + ":"
+                  + String.valueOf(failure.getMessage()));
+        } catch (RuntimeException | LinkageError logFailure) {
+          HEALTH_LOGGER.warning("替换前回滚隔离日志写入失败: " + logFailure.getClass().getSimpleName());
+        }
+      }
+    }
+    if (!allQuarantined) {
+      return false;
+    }
+    for (PendingMaterializedSpawn pending : rollbackSnapshot) {
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        retryPendingMaterializedSpawnRemoval(pending);
+      } else {
+        retryPendingMaterializedSpawnRollback(pending, recoveryAt);
+      }
+    }
+    return pendingMaterializedSpawns.isEmpty();
   }
 
   @Override
@@ -362,10 +682,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     lastStorageProvider = provider;
+    materializationsThisTick = 0;
     spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
+    advancePendingMaterializedSpawns(now);
+    Map<String, Integer> selectedDepotsThisTick = new HashMap<>();
     if (!pendingLayoverTickets.isEmpty()) {
-      refreshExpiredPendingTickets(provider, now);
+      refreshExpiredPendingTickets(provider, now, selectedDepotsThisTick);
       tryDispatchPendingLayover(now, Optional.of(provider), Optional.empty());
     }
     List<SpawnTicket> dueTickets = spawnManager.pollDueTickets(provider, now);
@@ -373,30 +696,423 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return;
     }
     dueTickets = orderDueTicketsWithRouteRotation(dueTickets);
-    dueTickets = applyDepotDispatchCoordination(provider, dueTickets, now);
+    dueTickets = applyDepotDispatchCoordination(provider, dueTickets, selectedDepotsThisTick, now);
     dueTickets = orderDepotTicketsByLineDepotLoad(provider, dueTickets);
-    int remaining = maxSpawnPerTick;
+    // 每张票都试一次；实体化名额在 materializePreparedDepotSpawn 里扣，名额用完的出库票在那里延后。
     for (SpawnTicket ticket : dueTickets) {
-      if (ticket == null) {
-        continue;
+      if (ticket != null) {
+        trySpawn(provider, now, ticket, selectedDepotsThisTick);
       }
-      if (remaining <= 0) {
-        deferWithoutAttempt(ticket, now, "spawn-per-tick-limit");
-        continue;
-      }
-      remaining--;
-      trySpawn(provider, now, ticket);
     }
   }
 
+  /** 本 tick 还能不能再实体化一辆车。 */
+  private boolean spawnBudgetLeft() {
+    return materializationsThisTick < maxSpawnPerTick;
+  }
+
+  /** 推进已实体化发车事务；只有真实 footprint promotion 后才提交票据。 */
+  private void advancePendingMaterializedSpawns(Instant now) {
+    if (pendingMaterializedSpawns.isEmpty()) {
+      return;
+    }
+    for (PendingMaterializedSpawn pending : List.copyOf(pendingMaterializedSpawns.values())) {
+      if (pending == null || pending.ticket() == null || pending.train() == null) {
+        continue;
+      }
+      if (pending.phase() == PendingMaterializedSpawnPhase.AWAITING_REMOVAL) {
+        retryPendingMaterializedSpawnRemoval(pending);
+        continue;
+      }
+      if (!shouldEvaluateMaterializedSpawnPromotion(pending.phase())) {
+        retryPendingMaterializedSpawnRollback(pending, now);
+        continue;
+      }
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(pending.recoveryEpoch())) {
+        failPendingMaterializedSpawn(
+            pending, now, "startup-recovery-epoch-changed-before-pending-refresh");
+        continue;
+      }
+      RuntimeTrainHandle handle = pending.train();
+      if (!handle.isValid()) {
+        failPendingMaterializedSpawn(pending, now, "physical-group-invalid");
+        continue;
+      }
+      RuntimeDispatchService.ExpectedMaterializedSpawnStatus status;
+      try {
+        runtimeDispatchService.refreshSignal(handle);
+        status =
+            runtimeDispatchService.expectedMaterializedSpawnStatus(handle, pending.recoveryEpoch());
+      } catch (RuntimeException | LinkageError failure) {
+        debugLogger.accept(
+            "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=refresh-exception train="
+                + pending.trainName()
+                + " error="
+                + failure.getClass().getSimpleName()
+                + ":"
+                + String.valueOf(failure.getMessage()));
+        failPendingMaterializedSpawn(
+            pending, now, "pending-hydration-refresh-failed:" + failure.getClass().getSimpleName());
+        continue;
+      }
+      MaterializedSpawnProgress progress =
+          materializedSpawnProgress(status, now, pending.deadline());
+      if (progress == MaterializedSpawnProgress.COMPLETE) {
+        completePendingMaterializedSpawn(pending, now);
+        continue;
+      }
+      if (progress == MaterializedSpawnProgress.WAIT) {
+        continue;
+      }
+      String reason =
+          status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL
+              ? "physical-footprint-hydration-timeout"
+              : "physical-footprint-hydration-state-lost";
+      if (status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL) {
+        debugLogger.accept(
+            "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=timeout train="
+                + pending.trainName()
+                + " epoch="
+                + pending.recoveryEpoch()
+                + " deadline="
+                + pending.deadline());
+      }
+      failPendingMaterializedSpawn(pending, now, reason);
+    }
+  }
+
+  /** 根据认证状态与宽限截止时间决定票据继续等待、提交或回滚。 */
+  static MaterializedSpawnProgress materializedSpawnProgress(
+      RuntimeDispatchService.ExpectedMaterializedSpawnStatus status,
+      Instant now,
+      Instant deadline) {
+    if (status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED) {
+      return MaterializedSpawnProgress.COMPLETE;
+    }
+    if (status == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL
+        && now != null
+        && deadline != null
+        && now.isBefore(deadline)) {
+      return MaterializedSpawnProgress.WAIT;
+    }
+    return MaterializedSpawnProgress.ROLLBACK;
+  }
+
+  /** 只有尚未决定回滚的事务可以刷新信号并继续 footprint promotion。 */
+  static boolean shouldEvaluateMaterializedSpawnPromotion(PendingMaterializedSpawnPhase phase) {
+    return phase == PendingMaterializedSpawnPhase.AWAITING_PROMOTION;
+  }
+
+  private void completePendingMaterializedSpawn(PendingMaterializedSpawn pending, Instant now) {
+    if (!pending.ticketOwner() || !pendingMaterializedSpawns.remove(pending.key(), pending)) {
+      return;
+    }
+    if (!runtimeDispatchService.isStartupRecoveryEpochReady(pending.recoveryEpoch())) {
+      retainAndRetryMaterializedSpawnRollback(
+          pending.requiringRollback("startup-recovery-epoch-changed-before-pending-complete"), now);
+      return;
+    }
+    try {
+      notifyDispatched(pending.ticket(), pending.trainName());
+      spawnManager.complete(pending.ticket());
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          "发车票据提交异常: train="
+              + pending.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+      retainAndRetryMaterializedSpawnRollback(
+          pending.requiringRollback(
+              "pending-ticket-complete-failed:" + failure.getClass().getSimpleName()),
+          now);
+      return;
+    }
+    clearCompletedMaterializedSpawnMarker(pending.train(), pending.trainName());
+    recordMaterializedSpawnSuccess(
+        pending.ticket(), pending.service(), pending.trainName(), pending.fallback());
+  }
+
+  /**
+   * 在票据已经提交后清除跨重启事务墓碑。
+   *
+   * <p>清理异常不能把已提交票据重新回队；保留墓碑会让下一次启动 fail-closed 地收容该编组，并留下明确诊断。
+   */
+  private void clearCompletedMaterializedSpawnMarker(RuntimeTrainHandle train, String trainName) {
+    try {
+      TrainProperties properties = Objects.requireNonNull(train, "train").properties();
+      TrainSpawnTagInitializer.clearMaterializedSpawnTransactionPending(
+          Objects.requireNonNull(properties, "properties"));
+      if (TrainTagHelper.readTagValue(
+              properties, TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING)
+          .isPresent()) {
+        debugLogger.accept("实体化发车票据已提交但事务墓碑仍存在，将在下次启动收容: train=" + trainName);
+      }
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          "实体化发车票据已提交但事务墓碑清理失败，将在下次启动收容: train="
+              + trainName
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    }
+  }
+
+  private void failPendingMaterializedSpawn(
+      PendingMaterializedSpawn pending, Instant now, String reason) {
+    PendingMaterializedSpawn rollback = pending.requiringRollback(reason);
+    if (!pendingMaterializedSpawns.replace(pending.key(), pending, rollback)) {
+      return;
+    }
+    retryPendingMaterializedSpawnRollback(rollback, now);
+  }
+
+  private void retainAndRetryMaterializedSpawnRollback(
+      PendingMaterializedSpawn rollback, Instant now) {
+    PendingMaterializedSpawn tracked = rollback;
+    PendingMaterializedSpawn previous =
+        pendingMaterializedSpawns.putIfAbsent(rollback.key(), rollback);
+    if (previous != null) {
+      tracked = previous.requiringRollback(rollback.rollbackReason());
+      if (!pendingMaterializedSpawns.replace(rollback.key(), previous, tracked)) {
+        return;
+      }
+    }
+    retryPendingMaterializedSpawnRollback(tracked, now);
+  }
+
+  private void retryPendingMaterializedSpawnRollback(
+      PendingMaterializedSpawn pending, Instant now) {
+    if (pending.phase() != PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED
+        || pendingMaterializedSpawns.get(pending.key()) != pending) {
+      return;
+    }
+    RuntimeTrainHandle handle = pending.train();
+    if (!handle.isValid()) {
+      if (runtimeDispatchService.consumeMaterializedSpawnRollbackRemoval(handle)) {
+        // 真实 GroupRemove 已先于本次状态推进到达；物理收容已经完成，可以继续回滚账务。
+      } else if (runtimeDispatchService.hasMaterializedSpawnRollbackQuarantine(
+          pending.trainName())) {
+        return;
+      } else {
+        runtimeDispatchService.quarantineMaterializedSpawnRollback(
+            handle, pending.trainName(), pending.rollbackReason(), pending.ticketOwner());
+        debugLogger.accept(
+            "实体化编组句柄失效但尚无 GroupRemove 证明，保留物理隔离: train="
+                + pending.trainName()
+                + " unloaded="
+                + runtimeDispatchService.isMaterializedSpawnRollbackUnloaded(handle));
+        return;
+      }
+    }
+    Optional<RuntimeTrainHandle> liveTrain =
+        handle.isValid() ? Optional.of(handle) : Optional.empty();
+    boolean contained;
+    try {
+      if (liveTrain.isPresent()
+          && !runtimeDispatchService.quarantineMaterializedSpawnRollback(
+              handle, pending.trainName(), pending.rollbackReason(), pending.ticketOwner())) {
+        handle.stopHard();
+        debugLogger.accept("已实体化发车无法登记 runtime 回滚隔离，保持硬停并等待重试: train=" + pending.trainName());
+        return;
+      }
+      contained =
+          pending.ticketOwner()
+              ? abortDepotSpawnForRecovery(
+                  pending.ticket(),
+                  now,
+                  pending.trainName(),
+                  pending.spawnLease(),
+                  liveTrain,
+                  pending.rollbackReason())
+              : containDuplicateMaterializedSpawn(liveTrain, pending.trainName());
+    } catch (RuntimeException | LinkageError failure) {
+      contained = false;
+      debugLogger.accept(
+          "已实体化发车恢复重试异常，继续保留隔离记录: train="
+              + pending.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    }
+    if (contained) {
+      PendingMaterializedSpawn awaitingRemoval = pending.awaitingRemoval();
+      if (pendingMaterializedSpawns.replace(pending.key(), pending, awaitingRemoval)) {
+        retryPendingMaterializedSpawnRemoval(awaitingRemoval);
+      }
+      return;
+    }
+    debugLogger.accept(
+        "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=rollback-retained train="
+            + pending.trainName()
+            + " ticket="
+            + pending.ticket().id()
+            + " reason="
+            + pending.rollbackReason());
+  }
+
+  /** 重试销毁已完成账务回滚、但仍等待精确 GroupRemove 的物理编组。 */
+  private void retryPendingMaterializedSpawnRemoval(PendingMaterializedSpawn pending) {
+    if (pending.phase() != PendingMaterializedSpawnPhase.AWAITING_REMOVAL
+        || pendingMaterializedSpawns.get(pending.key()) != pending) {
+      return;
+    }
+    if (!runtimeDispatchService.hasMaterializedSpawnRollbackQuarantine(pending.trainName())) {
+      // 已由 GroupRemove 或官方离线清理完成实体收容；消费确认，避免旧 group identity 在长运行中滞留。
+      runtimeDispatchService.consumeMaterializedSpawnRollbackRemoval(pending.train());
+      pendingMaterializedSpawns.remove(pending.key(), pending);
+      return;
+    }
+    RuntimeTrainHandle handle = pending.train();
+    if (!handle.isValid()) {
+      // invalid 既可能是销毁，也可能只是 GroupUnload；这里只等待真实 GroupRemove 清除 quarantine。
+      return;
+    }
+    try {
+      handle.stopHard();
+      handle.destroy();
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          "已实体化发车等待移除时销毁重试失败: train="
+              + pending.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+    }
+  }
+
+  private boolean containDuplicateMaterializedSpawn(
+      Optional<RuntimeTrainHandle> liveTrain, String trainName) {
+    if (liveTrain.isEmpty()) {
+      return true;
+    }
+    boolean contained =
+        containMaterializedSpawnBeforeRelease(
+            liveTrain.orElseThrow(), () -> {}, () -> {}, () -> {}, debugLogger);
+    if (!contained) {
+      debugLogger.accept("额外物理编组收容失败，保持隔离记录: train=" + trainName);
+    }
+    return contained;
+  }
+
+  private void rollbackOrRetainMaterializedSpawn(
+      SpawnTicket ticket,
+      SpawnService service,
+      Instant now,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      long recoveryEpoch,
+      boolean fallback,
+      String reason) {
+    Optional<PendingMaterializedSpawn> existingTransaction =
+        pendingMaterializedSpawns.values().stream()
+            .filter(pending -> pending.ticket().id().equals(ticket.id()))
+            .findFirst();
+    boolean ownsTicket =
+        existingTransaction.isEmpty() || existingTransaction.orElseThrow().train() == train;
+    PendingMaterializedSpawn rollback =
+        new PendingMaterializedSpawn(
+            ticket,
+            service,
+            trainName,
+            spawnLease,
+            train,
+            recoveryEpoch,
+            now,
+            fallback,
+            ownsTicket,
+            PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED,
+            reason);
+    if (!ownsTicket) {
+      debugLogger.accept(
+          "检测到同票据的额外物理编组，仅执行物理收容且不重复回队: ticket=" + ticket.id() + " train=" + trainName);
+    }
+    retainAndRetryMaterializedSpawnRollback(rollback, now);
+  }
+
+  private boolean deferMaterializedSpawnUntilPromotion(
+      SpawnTicket ticket,
+      SpawnService service,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      long recoveryEpoch,
+      Instant now,
+      boolean fallback) {
+    PendingMaterializedSpawn pending =
+        new PendingMaterializedSpawn(
+            ticket,
+            service,
+            trainName,
+            spawnLease,
+            train,
+            recoveryEpoch,
+            now.plus(MATERIALIZED_SPAWN_HYDRATION_GRACE),
+            fallback,
+            true,
+            PendingMaterializedSpawnPhase.AWAITING_PROMOTION,
+            "-");
+    if (hasMaterializedSpawnTransaction(ticket.id())
+        || pendingMaterializedSpawns.putIfAbsent(pending.key(), pending) != null) {
+      return false;
+    }
+    debugLogger.accept(
+        "SMART_EXPECTED_SPAWN_PHYSICAL_REGISTRATION result=pending-ticket train="
+            + trainName
+            + " ticket="
+            + ticket.id()
+            + " epoch="
+            + recoveryEpoch
+            + " deadline="
+            + pending.deadline());
+    return true;
+  }
+
+  /** 判断票据是否已有尚未提交或完成物理收容的实体化事务。 */
+  private boolean hasMaterializedSpawnTransaction(java.util.UUID ticketId) {
+    return ticketId != null
+        && pendingMaterializedSpawns.values().stream()
+            .anyMatch(
+                pending ->
+                    pending != null
+                        && pending.ticket() != null
+                        && ticketId.equals(pending.ticket().id()));
+  }
+
+  private void recordMaterializedSpawnSuccess(
+      SpawnTicket ticket, SpawnService service, String trainName, boolean fallback) {
+    spawnSuccess.increment();
+    String depotUsed = ticket.selectedDepotNodeId().orElse(service.depotNodeId());
+    debugLogger.accept(
+        (fallback ? "Layover 降级发车成功: train=" : "自动发车成功: train=")
+            + trainName
+            + " route="
+            + service.operatorCode()
+            + "/"
+            + service.lineCode()
+            + "/"
+            + service.routeCode()
+            + " depot="
+            + depotUsed);
+  }
+
   private List<SpawnTicket> applyDepotDispatchCoordination(
-      StorageProvider provider, List<SpawnTicket> dueTickets, Instant now) {
+      StorageProvider provider,
+      List<SpawnTicket> dueTickets,
+      Map<String, Integer> selectedDepotsThisTick,
+      Instant now) {
     if (provider == null || dueTickets == null || dueTickets.isEmpty()) {
       return dueTickets == null ? List.of() : dueTickets;
     }
     List<SpawnTicket> depotTickets = new ArrayList<>();
     LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-    Map<String, Integer> selectedThisTick = new HashMap<>();
+    Map<String, Integer> selectedThisTick =
+        selectedDepotsThisTick == null ? new HashMap<>() : selectedDepotsThisTick;
     for (SpawnTicket ticket : dueTickets) {
       if (!isDepotSpawnTicket(provider, ticket)) {
         continue;
@@ -501,14 +1217,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *   <li>保留 pending 的“首次入队时间语义”，只在真正超时时刷新窗口
    * </ul>
    */
-  private void refreshExpiredPendingTickets(StorageProvider provider, Instant now) {
+  private void refreshExpiredPendingTickets(
+      StorageProvider provider, Instant now, Map<String, Integer> selectedDepotsThisTick) {
     java.util.List<java.util.UUID> removeIds = new java.util.ArrayList<>();
     java.util.Map<java.util.UUID, PendingLayoverEntry> refreshedEntries = new java.util.HashMap<>();
     int refreshed = 0;
     int fallbackTriggered = 0;
     int hardExpired = 0;
     Duration hardMaxAge = resolvePendingLayoverMaxAge();
-    Map<String, Integer> fallbackSelectedThisTick = new HashMap<>();
+    Map<String, Integer> fallbackSelectedThisTick =
+        selectedDepotsThisTick == null ? new HashMap<>() : selectedDepotsThisTick;
 
     for (var entry : pendingLayoverTickets.entrySet()) {
       java.util.UUID ticketId = entry.getKey();
@@ -524,7 +1242,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         continue;
       }
 
+      Optional<Instant> expiry = ticketExpiry.apply(ticket);
+      if (expiry.isPresent() && !now.isBefore(expiry.get())) {
+        if (preservePendingDispatchAttempt(ticket, "ticket-expiry")) {
+          continue;
+        }
+        removeIds.add(ticketId);
+        hardExpired++;
+        spawnManager.complete(ticket);
+        debugLogger.accept(
+            "票据到期作废: route="
+                + (service != null ? service.routeCode() : "?")
+                + " ticket="
+                + ticketId
+                + " expiry="
+                + expiry.get());
+        continue;
+      }
+
       if (isPendingLayoverHardExpired(pendingEntry, now, hardMaxAge)) {
+        if (preservePendingDispatchAttempt(ticket, "hard-expiry")) {
+          continue;
+        }
         long totalWaitSeconds =
             java.time.Duration.between(pendingEntry.firstAddedAt(), now).getSeconds();
         removeIds.add(ticketId);
@@ -543,6 +1282,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       java.util.OptionalLong fallbackTimeoutSeconds = resolveLayoverFallbackTimeoutSeconds(service);
       if (fallbackTimeoutSeconds.isPresent() && waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
         if (canFallbackSpawnFromDepot(service)) {
+          if (!spawnBudgetLeft() || preservePendingDispatchAttempt(ticket, "depot-fallback")) {
+            // 名额用完时原样保留等待记录：刷新窗口会让降级计时从头再来。
+            continue;
+          }
           removeIds.add(ticketId);
           fallbackTriggered++;
           HEALTH_LOGGER.warning(
@@ -685,7 +1428,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         provider, ticket, service, routeOpt.get(), lineOpt.get(), now, selectedThisTick);
   }
 
-  private boolean trySpawn(StorageProvider provider, Instant now, SpawnTicket ticket) {
+  private boolean trySpawn(
+      StorageProvider provider,
+      Instant now,
+      SpawnTicket ticket,
+      Map<String, Integer> selectedDepotsThisTick) {
+    if (hasMaterializedSpawnTransaction(ticket.id())) {
+      deferWithoutAttempt(ticket, now, "materialized-transaction-active");
+      return false;
+    }
     SpawnService service = ticket.service();
     Optional<Route> routeEntityOpt = provider.routes().findById(service.routeId());
     if (routeEntityOpt.isEmpty()) {
@@ -716,32 +1467,37 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           long waitSeconds = Duration.between(pendingEntry.addedAt(), now).getSeconds();
           if (waitSeconds >= fallbackTimeoutSeconds.getAsLong()) {
             if (canFallbackSpawnFromDepot(service)) {
-              pendingLayoverTickets.remove(ticket.id());
+              if (spawnBudgetLeft()
+                  && !preservePendingDispatchAttempt(ticket, "due-ticket-depot-fallback")) {
+                pendingLayoverTickets.remove(ticket.id());
+                debugLogger.accept(
+                    "Layover 降级发车: route="
+                        + service.routeCode()
+                        + " 等待="
+                        + waitSeconds
+                        + "s (超时="
+                        + fallbackTimeoutSeconds.getAsLong()
+                        + "s) 尝试从 depot 补发");
+                return trySpawnFromDepot(
+                    provider, ticket, service, route, line, now, selectedDepotsThisTick);
+              }
+            } else {
               debugLogger.accept(
-                  "Layover 降级发车: route="
+                  "Layover 降级跳过: route="
                       + service.routeCode()
                       + " 等待="
                       + waitSeconds
-                      + "s (超时="
-                      + fallbackTimeoutSeconds.getAsLong()
-                      + "s) 尝试从 depot 补发");
-              return trySpawnFromDepot(
-                  provider, ticket, service, route, line, now, new HashMap<>());
+                      + "s 但首站非 depot，继续等待复用");
             }
-            debugLogger.accept(
-                "Layover 降级跳过: route="
-                    + service.routeCode()
-                    + " 等待="
-                    + waitSeconds
-                    + "s 但首站非 depot，继续等待复用");
           }
         }
       }
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
 
-    if (shouldHoldByCongestion(provider, service, line, routeEntity, route, now)) {
-      requeue(ticket, now, "congestion-hold");
+    if (shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
+      // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
+      deferByGate(ticket, now, "congestion-hold");
       return false;
     }
 
@@ -774,150 +1530,43 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
-    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
-    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
-      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      selectedDepotOpt =
-          selectBalancedDepot(provider, line.id(), lineDepots, runtimeSnapshot, Map.of(), now);
-    }
-    SpawnTicket effectiveTicket =
-        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket =
-        materializeDynamicDepotSelection(
+    Optional<PreparedDepotSpawn> preparedOpt =
+        prepareDepotSpawn(
             provider,
+            ticket,
             service,
-            effectiveTicket,
-            LineRuntimeSnapshot.capture(runtimeDispatchService),
+            route,
+            line,
+            routeEntity,
+            spawnLease,
             Map.of(),
-            now);
-
-    String destCode =
-        RouteDestinationResolver.resolve(provider, routeEntity)
-            .map(RouteDestinationResolver.DestinationInfo::code)
-            .orElse(routeEntity.code());
-    String trainName =
-        TrainNameFormatter.buildTrainName(
-            service.operatorCode(),
-            service.lineCode(),
-            routeEntity.patternType(),
-            destCode,
-            ticket.id());
-
-    Optional<java.util.UUID> worldIdOpt =
-        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
-    if (worldIdOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "depot-world-missing");
+            now,
+            DepotSpawnOrigin.NORMAL);
+    if (preparedOpt.isEmpty()) {
       return false;
     }
-    Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
-    if (graphOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "graph-missing");
+    PreparedDepotSpawn prepared = preparedOpt.get();
+    Optional<DepotSpawner.MaterializedSpawn> materializedSpawnOpt =
+        materializePreparedDepotSpawn(provider, prepared, now, DepotSpawnOrigin.NORMAL);
+    if (materializedSpawnOpt.isEmpty()) {
       return false;
     }
-    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
-    OccupancyRequestBuilder builder =
-        new OccupancyRequestBuilder(
-            graphOpt.get(),
-            depotSpawnLookaheadEdges(runtime),
-            runtime.minClearEdges(),
-            runtime.rearGuardEdges(),
-            runtime.switcherZoneEdges(),
-            debugLogger);
-    Optional<DepotGateRequest> gateRequestOpt =
-        buildDepotSpawnGateRequest(builder, trainName, route, service, effectiveTicket, now);
-    if (gateRequestOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "occupancy-context-failed");
-      return false;
-    }
-    DepotGateRequest gateRequest = gateRequestOpt.get();
-    OccupancyRequest request = gateRequest.request();
-    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
-        trainName, graphOpt.get(), gateRequest.context())) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "smart-depot-long-single-held");
-      return false;
-    }
-    LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "preview");
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-
-    Optional<MinecartGroup> groupOpt;
-    try {
-      groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
-    } catch (Exception e) {
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      debugLogger.accept("自动发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
-      requeue(effectiveTicket, now, "spawn-failed");
-      return false;
-    }
-    if (groupOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      requeue(effectiveTicket, now, "spawn-failed");
-      return false;
-    }
-    MinecartGroup group = groupOpt.get();
-    authorization = acquireSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "acquire");
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      destroySpawnedGroup(group);
-      requeue(effectiveTicket, now, "gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-    if (group.getProperties() != null && route.waypoints().size() >= 2) {
-      group.getProperties().clearDestinationRoute();
-      group.getProperties().clearDestination();
-      group.getProperties().setDestination(route.waypoints().get(1).value());
-      applySpawnLifecycleTags(
-          Optional.of(provider), group.getProperties(), service, routeEntity.operationType());
-    }
-    runtimeDispatchService.refreshSignal(group);
-    runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
-    spawnManager.complete(effectiveTicket);
-    spawnSuccess.increment();
-    String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
-    debugLogger.accept(
-        "自动发车成功: train="
-            + trainName
-            + " route="
-            + service.operatorCode()
-            + "/"
-            + service.lineCode()
-            + "/"
-            + service.routeCode()
-            + " depot="
-            + depotUsed);
-    return true;
+    return finalizeMaterializedDepotSpawn(
+        new MaterializedDepotSpawnContext(
+            provider,
+            prepared.ticket(),
+            service,
+            route,
+            routeEntity.operationType(),
+            prepared.trainName(),
+            prepared.spawnLease(),
+            prepared.gateRequest(),
+            prepared.gateRequest().request(),
+            prepared.lineDepots(),
+            materializedSpawnOpt.get(),
+            prepared.recoveryEpoch(),
+            now,
+            false));
   }
 
   /**
@@ -925,8 +1574,114 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * <p>该门控只作用于 {@code OPERATION/CREATE}，RETURN 始终允许通过以便回库释放压力。
    */
+  /** 拥堵分数的上次报告分档（按 gateKey），用于去重。 */
+  private final java.util.concurrent.ConcurrentMap<String, String> fleetCapReported =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  private final java.util.concurrent.ConcurrentMap<String, String> congestionScoreReported =
+      new java.util.concurrent.ConcurrentHashMap<>();
+
+  /**
+   * 报告拥堵分数——**无论闸门是否触发**。
+   *
+   * <p>去重按分数的 0.05 分档：分档不变就不重复输出，因此规模由"闸门数 × 分档变化次数"决定， 不随 tick 放大。
+   */
+  private void traceCongestionScore(
+      String gateKey,
+      Line line,
+      Route routeEntity,
+      CongestionAssessment assessment,
+      boolean holding,
+      double holdThreshold,
+      double releaseThreshold) {
+    String bucket =
+        String.format(Locale.ROOT, "%.2f", Math.floor(assessment.score() * 20.0) / 20.0);
+    String signature = bucket + ":" + holding;
+    if (signature.equals(congestionScoreReported.put(gateKey, signature))) {
+      return;
+    }
+    debugLogger.accept(
+        String.format(
+            Locale.ROOT,
+            "SMART_SPAWN_CONGESTION_SCORE line=%s route=%s key=%s score=%.3f holding=%b"
+                + " holdThreshold=%.2f releaseThreshold=%.2f"
+                + " occ=%.3f(%d/%d) edgeBusy=%d nodeBusy=%d"
+                + " route=%.3f(%d/%d) signal=%.3f network=%.3f(%d/%d)",
+            line == null ? "-" : line.code(),
+            routeEntity == null ? "-" : routeEntity.code(),
+            gateKey,
+            assessment.score(),
+            holding,
+            holdThreshold,
+            releaseThreshold,
+            assessment.occupancyRate(),
+            assessment.busyResources(),
+            assessment.totalResources(),
+            assessment.busyEdges(),
+            assessment.busyNodes(),
+            assessment.routeTrainPressure(),
+            assessment.activeRouteTrains(),
+            assessment.targetRouteTrains(),
+            assessment.lineSignalPressure(),
+            assessment.networkPressure(),
+            assessment.activeTrains(),
+            assessment.networkReference()));
+  }
+
+  /** 在网列车数：progress 条目数，与 SMART_DISPATCH_GLOBAL_SNAPSHOT 的 trains= 同源。 */
+  private int activeTrainCount() {
+    Map<String, RouteProgressRegistry.RouteProgressEntry> entries =
+        runtimeDispatchService == null ? null : runtimeDispatchService.snapshotProgressEntries();
+    return entries == null ? 0 : entries.size();
+  }
+
+  /**
+   * 是否因全网在网列车达到上限而拒绝再实体化新车。
+   *
+   * <p>这是在"网里已经有多少车"这个维度上设限的**准入控制**。拥堵闸门测的主要是单条 route 自己的占用比例， 全网堵死时评分仍可能够不着阈值，不能替代全网上限。
+   *
+   * <p>cap &lt;= 0 表示禁用，此时不做任何全网上限拦截。
+   */
+  boolean shouldHoldByFleetCap(Line line, Route routeEntity) {
+    int cap = configManager.current().spawnSettings().maxActiveTrains();
+    if (cap <= 0) {
+      return false;
+    }
+    int active = activeTrainCount();
+    boolean holding = active >= cap;
+    traceFleetCap(line, routeEntity, active, cap, holding);
+    return holding;
+  }
+
+  /**
+   * 报告准入闸门状态——**无论是否拦下**。
+   *
+   * <p>按 (line|route, active, holding) 去重：达到上限后 active 会稳在 cap 附近，因此稳态下每条 route 至多几行，不随 tick
+   * 放大。不触发时也报，是为了让"离上限还有多远"可归因：只在触发时才打印的闸门，无法判断它是否在正常工作。
+   */
+  private void traceFleetCap(Line line, Route routeEntity, int active, int cap, boolean holding) {
+    String key =
+        (line == null ? "-" : line.code()) + "|" + (routeEntity == null ? "-" : routeEntity.code());
+    String signature = active + ":" + holding;
+    if (signature.equals(fleetCapReported.put(key, signature))) {
+      return;
+    }
+    debugLogger.accept(
+        "SMART_SPAWN_FLEET_CAP line="
+            + (line == null ? "-" : line.code())
+            + " route="
+            + (routeEntity == null ? "-" : routeEntity.code())
+            + " active="
+            + active
+            + " cap="
+            + cap
+            + " holding="
+            + holding);
+  }
+
   private boolean shouldHoldByCongestion(
       StorageProvider provider,
+      SpawnTicket ticket,
       SpawnService service,
       Line line,
       Route routeEntity,
@@ -940,6 +1695,37 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     if (routeEntity.operationType() == RouteOperationType.RETURN) {
+      // RETURN 线路完全绕过拥堵闸门，这里输出豁免记录使其可见。
+      // 豁免的理由：RETURN 是把车收回去，拦住反而会让车积在线上。按 gateKey 去重，一条线至多一行。
+      String returnKey = buildCongestionGateKey(service);
+      if (congestionScoreReported.put(returnKey, "return-exempt") == null) {
+        debugLogger.accept(
+            "SMART_SPAWN_CONGESTION_EXEMPT line="
+                + line.code()
+                + " route="
+                + routeEntity.code()
+                + " key="
+                + returnKey
+                + " reason=operation-type-return");
+      }
+      return false;
+    }
+    if (ticket != null && ticket.timetableDriven()) {
+      // 表定车次不受拥堵闸门约束：何时发车由时刻表决定，编表时已经过冲突检查；拥堵评分是按间隔发车时代的吞吐启发式，
+      // 不管行车安全（安全由占用与联锁负责）。它排在复用在网车之前，拦下表定班次会把折返的车扣在终点——
+      // 单股道尽头一扣就堵死整条线。按表运行的在网车数远多于按间隔发车，全网压力一项就会顶满阈值。
+      // 全网硬上限（max-active-trains）照旧生效。
+      String timetableKey = buildCongestionGateKey(service) + "|timetable";
+      if (congestionScoreReported.put(timetableKey, "timetable-exempt") == null) {
+        debugLogger.accept(
+            "SMART_SPAWN_CONGESTION_EXEMPT line="
+                + line.code()
+                + " route="
+                + routeEntity.code()
+                + " key="
+                + timetableKey
+                + " reason=timetable-trip");
+      }
       return false;
     }
     CongestionAssessment assessment =
@@ -947,25 +1733,52 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     String gateKey = buildCongestionGateKey(service);
     CongestionGateState previous = congestionGates.get(gateKey);
     boolean wasHolding = previous != null && previous.holding();
+    ConfigManager.SpawnSettings spawnSettings = configManager.current().spawnSettings();
+    double holdThreshold = spawnSettings.congestionHoldThreshold();
+    double releaseThreshold = spawnSettings.congestionReleaseThreshold();
+
+    // 阈值不在 (0,1] 就把闸门整个关掉，而不是"全部拦下"。
+    //
+    // 这里刻意不 fail-closed：拥堵闸门的"关闭"方向是停止发车，阈值为 0 会让
+    // `score >= 0` 恒真，于是全网再也发不出一辆车——那不是保守，那是停运。
+    // 真正的安全兜底是 shouldHoldByFleetCap 那道硬上限，它不依赖这两个数。
+    if (!(holdThreshold > 0.0D) || holdThreshold > 1.0D || !(releaseThreshold > 0.0D)) {
+      warnThrottled(
+          "congestion-threshold-invalid",
+          "[FTA] 拥挤门控阈值无效，已跳过该门控: hold=" + holdThreshold + " release=" + releaseThreshold);
+      return false;
+    }
+
     boolean holding =
-        wasHolding
-            ? assessment.score() >= CONGESTION_RELEASE_THRESHOLD
-            : assessment.score() >= CONGESTION_HOLD_THRESHOLD;
+        wasHolding ? assessment.score() >= releaseThreshold : assessment.score() >= holdThreshold;
     congestionGates.put(gateKey, new CongestionGateState(holding, assessment.score(), now));
+
+    // 不触发时也要把分数报出来。
+    //
+    // 若只在 holding 为真时输出，闸门从不触发时分数便不可见，网络堵死而闸门未动作也无从判断原因。
+    // "差一点没够着阈值"和"根本不在一个量级"要采取的行动完全相反：
+    // 前者调阈值，后者要修评分本身（或那条 RETURN 豁免）。
+    //
+    // 按 (gateKey, 分数分档) 去重，不随 tick 放大。
+    traceCongestionScore(
+        gateKey, line, routeEntity, assessment, holding, holdThreshold, releaseThreshold);
 
     if (holding) {
       String scoreSummary =
           String.format(
               Locale.ROOT,
-              "score=%.2f edge=%.2f(%d/%d) route=%.2f(%d/%d) signal=%.2f",
+              "score=%.2f occ=%.2f(%d/%d) route=%.2f(%d/%d) signal=%.2f network=%.2f(%d/%d)",
               assessment.score(),
-              assessment.edgeBusyRate(),
-              assessment.busyEdges(),
-              assessment.totalEdges(),
+              assessment.occupancyRate(),
+              assessment.busyResources(),
+              assessment.totalResources(),
               assessment.routeTrainPressure(),
               assessment.activeRouteTrains(),
               assessment.targetRouteTrains(),
-              assessment.lineSignalPressure());
+              assessment.lineSignalPressure(),
+              assessment.networkPressure(),
+              assessment.activeTrains(),
+              assessment.networkReference());
       debugLogger.accept(
           "自动发车拥挤门控: line="
               + line.code()
@@ -1002,12 +1815,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /**
    * 评估当前票据对应方向的拥挤度。
    *
-   * <p>评分由三部分线性组合：
+   * <p>评分由四部分线性组合：
    *
    * <ul>
-   *   <li>edgeBusyRate：route 边集合中被占用的比例
+   *   <li>occupancyRate：route 的边**与节点**集合中被占用的比例
    *   <li>routeTrainPressure：同 route 在途车数 / 目标车数
    *   <li>lineSignalPressure：同 line 列车信号压力（STOP/CAUTION 等）
+   *   <li>networkPressure：全网在网车数 / 准入上限（准入控制关闭时为 0，权重退回旧的三分量口径）
    * </ul>
    */
   private CongestionAssessment evaluateCongestion(
@@ -1017,25 +1831,37 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Route routeEntity,
       RouteDefinition route) {
     Set<String> routeEdges = collectRouteEdgeKeys(route);
+    Set<String> routeNodes = collectRouteNodeKeys(route);
     int totalEdges = routeEdges.size();
+    int totalNodes = routeNodes.size();
     Set<String> busyEdgeKeys = new HashSet<>();
-    if (!routeEdges.isEmpty()) {
+    Set<String> busyNodeKeys = new HashSet<>();
+    if (!routeEdges.isEmpty() || !routeNodes.isEmpty()) {
       for (OccupancyClaim claim : occupancyManager.snapshotClaims()) {
         if (claim == null || claim.resource() == null) {
           continue;
         }
-        if (claim.resource().kind() != ResourceKind.EDGE) {
-          continue;
-        }
-        String key = normalizeEdgeKey(claim.resource().key());
-        if (!key.isBlank() && routeEdges.contains(key)) {
-          busyEdgeKeys.add(key);
+        // EDGE 与 NODE 都要计入：两类占用数量相当，只数 EDGE 等于对约一半的占用视而不见，评分会系统性偏低。
+        if (claim.resource().kind() == ResourceKind.EDGE) {
+          String key = normalizeEdgeKey(claim.resource().key());
+          if (!key.isBlank() && routeEdges.contains(key)) {
+            busyEdgeKeys.add(key);
+          }
+        } else if (claim.resource().kind() == ResourceKind.NODE) {
+          String key = normalizeNodeKey(claim.resource().key());
+          if (!key.isBlank() && routeNodes.contains(key)) {
+            busyNodeKeys.add(key);
+          }
         }
       }
     }
     int busyEdges = busyEdgeKeys.size();
-    double edgeBusyRate =
-        totalEdges <= 0 ? 0.0D : clamp01((double) busyEdges / (double) totalEdges);
+    int busyNodes = busyNodeKeys.size();
+    int totalResources = totalEdges + totalNodes;
+    double occupancyRate =
+        totalResources <= 0
+            ? 0.0D
+            : clamp01((double) (busyEdges + busyNodes) / (double) totalResources);
 
     Map<String, RouteProgressRegistry.RouteProgressEntry> progressEntries =
         runtimeDispatchService.snapshotProgressEntries();
@@ -1068,17 +1894,91 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             ? 0.0D
             : clamp01((double) activeRouteTrains / (double) targetRouteTrains);
 
+    // 【全网压力】其余分量全部是"本 route 自己"的局部量，全网堵死时评分依然可能远低于阈值。
+    // 加入全网在网车数/参考值这一项，闸门才可能在撞上硬上限之前就平滑地开始拦车。
+    //
+    // 分母用 congestion-network-reference-trains，**不是** max-active-trains。两者默认相等，
+    // 但是不同的量：前者是“网络装多少车算满”，后者是“我们允许发多少车”。
+    // 合用时把上限从 16 提到 24，会在抬高天花板的同时把软刹车也调钝
+    // （分母变大 → networkPressure 变小），一次改两件事，密度实验就无法归因。
+    ConfigManager.SpawnSettings congestionSettings = configManager.current().spawnSettings();
+    int networkReference = congestionSettings.congestionNetworkReferenceTrains();
+    int activeTrains = activeTrainCount();
+    double networkPressure =
+        networkReference <= 0 ? 0.0D : clamp01((double) activeTrains / (double) networkReference);
+
     double score =
-        clamp01(edgeBusyRate * 0.55D + routeTrainPressure * 0.30D + lineSignalPressure * 0.15D);
+        combineCongestionScore(
+            occupancyRate,
+            routeTrainPressure,
+            lineSignalPressure,
+            networkPressure,
+            networkReference);
     return new CongestionAssessment(
         score,
-        edgeBusyRate,
+        occupancyRate,
         routeTrainPressure,
         lineSignalPressure,
+        networkPressure,
         busyEdges,
         totalEdges,
+        busyNodes,
+        totalNodes,
         activeRouteTrains,
-        targetRouteTrains);
+        targetRouteTrains,
+        activeTrains,
+        networkReference);
+  }
+
+  /**
+   * 拥挤度四分量的线性组合。
+   *
+   * <p>networkReference &lt;= 0（没有全网压力信号）时退回本改动之前的三分量旧权重，便于用一个配置项
+   * 把判别口径整体还原——这样"评分变了"和"准入控制生效了"两件事可以分别证伪。
+   */
+  /**
+   * 合成拥堵分。
+   *
+   * @param networkReference “全网算满”的参考车数（{@code congestion-network-reference-trains}）。 为 0
+   *     表示没有全网压力信号，此时退回三分量权重。<b>不是</b>准入上限； 两者默认相等但语义不同，详见调用处注释。
+   */
+  static double combineCongestionScore(
+      double occupancyRate,
+      double routeTrainPressure,
+      double lineSignalPressure,
+      double networkPressure,
+      int networkReference) {
+    if (networkReference <= 0) {
+      return clamp01(
+          occupancyRate * 0.55D + routeTrainPressure * 0.30D + lineSignalPressure * 0.15D);
+    }
+    return clamp01(
+        occupancyRate * 0.40D
+            + routeTrainPressure * 0.20D
+            + lineSignalPressure * 0.10D
+            + networkPressure * 0.30D);
+  }
+
+  /** 将 route waypoint 序列归一化为节点 key 集合（与 OccupancyResource.forNode 的 key 同源）。 */
+  static Set<String> collectRouteNodeKeys(RouteDefinition route) {
+    if (route == null || route.waypoints() == null || route.waypoints().isEmpty()) {
+      return Set.of();
+    }
+    Set<String> keys = new HashSet<>();
+    for (NodeId waypoint : route.waypoints()) {
+      if (waypoint == null) {
+        continue;
+      }
+      String key = normalizeNodeKey(waypoint.value());
+      if (!key.isBlank()) {
+        keys.add(key);
+      }
+    }
+    return keys;
+  }
+
+  static String normalizeNodeKey(String raw) {
+    return raw == null ? "" : raw.trim().toLowerCase(Locale.ROOT);
   }
 
   /**
@@ -1402,11 +2302,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnTicket ticket = pendingEntry.ticket();
       SpawnService service = ticket.service();
       if (service == null) {
+        if (preservePendingDispatchAttempt(ticket, "missing-service")) {
+          continue;
+        }
         pendingLayoverTickets.remove(ticket.id());
         continue;
       }
       Optional<RouteDefinition> routeOpt = routeDefinitions.findById(service.routeId());
       if (routeOpt.isEmpty()) {
+        if (preservePendingDispatchAttempt(ticket, "route-definition-missing")) {
+          continue;
+        }
         pendingLayoverTickets.remove(ticket.id());
         spawnManager.complete(ticket);
         debugLogger.accept(
@@ -1418,6 +2324,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       RouteDefinition route = routeOpt.get();
       if (route.waypoints().isEmpty()) {
+        if (preservePendingDispatchAttempt(ticket, "route-waypoints-missing")) {
+          continue;
+        }
         pendingLayoverTickets.remove(ticket.id());
         spawnManager.complete(ticket);
         debugLogger.accept(
@@ -1567,6 +2476,74 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * <p>成功时会同步写入生命周期标签、清理 pending，并通知调度层刷新相关占用。
    */
+  /**
+   * 注册车辆复用闸。
+   *
+   * <p>传入 {@code null} 恢复"恒放行"。闸只作用于 OPERATION 票：RETURN 票必须仍然能复用列车， 否则被拒绝复用的车反而没有回家的手段。
+   *
+   * @param gate 给定列车名，返回是否允许再接一班运营车次
+   */
+  public void setLayoverReuseGate(java.util.function.Predicate<String> gate) {
+    this.layoverReuseGate = gate == null ? trainName -> true : gate;
+  }
+
+  /**
+   * 注册回库复用闸。
+   *
+   * <p>传入 {@code null} 恢复"恒放行"。闸只作用于 RETURN 票：它回答的是"这辆车现在能不能被送回车库"， 用来防止按表发出的回库票把正等着跑下一班的车抓走。
+   *
+   * @param gate 给定列车名，返回是否允许被回库票带走
+   */
+  public void setReturnReuseGate(java.util.function.Predicate<String> gate) {
+    this.returnReuseGate = gate == null ? trainName -> true : gate;
+  }
+
+  /**
+   * 注册票据级候选过滤。
+   *
+   * <p>与两道闸的区别：闸只看列车（额度用完了没有），过滤同时看票（这张票属于哪个交路）。 过滤掉全部候选时票据进入 pending 等待，不会新出库。传入 {@code null}
+   * 恢复"恒放行"。
+   */
+  public void setLayoverCandidateFilter(
+      java.util.function.BiPredicate<SpawnTicket, String> filter) {
+    this.layoverCandidateFilter = filter == null ? (ticket, trainName) -> true : filter;
+  }
+
+  /**
+   * 注册票据级到期时刻。
+   *
+   * <p>pending 清理时先问它：到期的票直接作废并向 SpawnManager 报完成，不走全局的 max-age。 传入 {@code null} 恢复"没有到期"。
+   */
+  public void setTicketExpiry(java.util.function.Function<SpawnTicket, Optional<Instant>> expiry) {
+    this.ticketExpiry = expiry == null ? ticket -> Optional.empty() : expiry;
+  }
+
+  /**
+   * 注册派发成功回调。
+   *
+   * <p>在票据向 SpawnManager 报完成之前调用，带最终的列车名（复用时是改名后的名字）。传入 {@code null} 恢复空回调。
+   */
+  public void setDispatchListener(java.util.function.BiConsumer<SpawnTicket, String> listener) {
+    this.dispatchListener = listener == null ? (ticket, trainName) -> {} : listener;
+  }
+
+  private void notifyDispatched(SpawnTicket ticket, String trainName) {
+    if (ticket == null || trainName == null) {
+      return;
+    }
+    try {
+      dispatchListener.accept(ticket, trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "派发回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+  }
+
   private boolean tryReuseLayover(
       Optional<StorageProvider> providerOpt,
       SpawnTicket ticket,
@@ -1580,8 +2557,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     String startNodeVal = route.waypoints().get(0).value();
+    String ticketId = ticket.id().toString();
+    Optional<LayoverRegistry.LayoverCandidate> attemptOwner =
+        layoverRegistry.findDispatchAttemptOwner(ticketId);
     List<LayoverRegistry.LayoverCandidate> candidates =
-        layoverRegistry.findCandidates(startNodeVal);
+        attemptOwner.map(List::of).orElseGet(() -> layoverRegistry.findCandidates(startNodeVal));
     if (candidates.isEmpty()) {
       if (!pendingAttempt) {
         putPendingLayoverTicket(ticket, now);
@@ -1590,12 +2570,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     // 过滤掉 readyAt 尚未到达（dwell 未结束）的候选
-    List<LayoverRegistry.LayoverCandidate> readyCandidates = new ArrayList<>();
-    for (LayoverRegistry.LayoverCandidate c : candidates) {
-      if (c.readyAt().isAfter(now)) {
-        continue;
+    List<LayoverRegistry.LayoverCandidate> readyCandidates;
+    if (attemptOwner.isPresent()) {
+      readyCandidates = candidates;
+    } else {
+      readyCandidates = new ArrayList<>();
+      for (LayoverRegistry.LayoverCandidate c : candidates) {
+        if (c.readyAt().isAfter(now)) {
+          continue;
+        }
+        readyCandidates.add(c);
       }
-      readyCandidates.add(c);
     }
     if (readyCandidates.isEmpty()) {
       // 所有候选都在 dwell 中，稍后重试
@@ -1612,9 +2597,89 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     RouteOperationType operationType =
         resolveRouteOperationType(providerOpt, service.routeId())
             .orElse(RouteOperationType.OPERATION);
+    if (operationType == RouteOperationType.OPERATION) {
+      // 车辆交路额度用完的车不再接运营班次。这里只做否决，不改它的状态：
+      // 它会留在 layover 闲置，由 ReclaimManager 在既有的回收窗口里派 RETURN 票送它回库。
+      java.util.function.Predicate<String> gate = this.layoverReuseGate;
+      List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(readyCandidates.size());
+      for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+        if (gate.test(candidate.trainName())) {
+          allowed.add(candidate);
+        }
+      }
+      if (allowed.size() != readyCandidates.size()) {
+        debugLogger.accept(
+            "Layover 复用被车辆交路否决: route="
+                + service.routeCode()
+                + " denied="
+                + (readyCandidates.size() - allowed.size())
+                + " remaining="
+                + allowed.size());
+      }
+      readyCandidates = allowed;
+      if (readyCandidates.isEmpty()) {
+        if (!pendingAttempt) {
+          putPendingLayoverTicket(ticket, now);
+        }
+        return false;
+      }
+    }
+    if (operationType == RouteOperationType.RETURN) {
+      // 回库票只能带走交路已经跑完（或根本不在交路里）的车。否则按表发出的回库票会把
+      // 正在终点等着跑下一班的车送回车库，那一班就开了天窗，而时刻表侧看不出原因。
+      java.util.function.Predicate<String> gate = this.returnReuseGate;
+      List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(readyCandidates.size());
+      for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+        if (gate.test(candidate.trainName())) {
+          allowed.add(candidate);
+        }
+      }
+      if (allowed.size() != readyCandidates.size()) {
+        debugLogger.accept(
+            "Layover 回库被车辆交路否决: route="
+                + service.routeCode()
+                + " denied="
+                + (readyCandidates.size() - allowed.size())
+                + " remaining="
+                + allowed.size());
+      }
+      readyCandidates = allowed;
+      if (readyCandidates.isEmpty()) {
+        if (!pendingAttempt) {
+          putPendingLayoverTicket(ticket, now);
+        }
+        return false;
+      }
+    }
+    java.util.function.BiPredicate<SpawnTicket, String> filter = this.layoverCandidateFilter;
+    List<LayoverRegistry.LayoverCandidate> matching = new ArrayList<>(readyCandidates.size());
+    for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
+      if (filter.test(ticket, candidate.trainName())) {
+        matching.add(candidate);
+      }
+    }
+    if (matching.size() != readyCandidates.size()) {
+      debugLogger.accept(
+          "Layover 候选被票据过滤: route="
+              + service.routeCode()
+              + " ticket="
+              + ticket.id()
+              + " rejected="
+              + (readyCandidates.size() - matching.size())
+              + " remaining="
+              + matching.size());
+    }
+    readyCandidates = matching;
+    if (readyCandidates.isEmpty()) {
+      // 本交路的车还没到：等它，不抓别人的车，也不新出库。到期由 ticketExpiry 决定。
+      if (!pendingAttempt) {
+        putPendingLayoverTicket(ticket, now);
+      }
+      return false;
+    }
     ServiceTicket serviceTicket =
         new ServiceTicket(
-            ticket.id().toString(),
+            ticketId,
             ticket.scheduledTime(),
             service.routeId(),
             startNodeVal,
@@ -1632,15 +2697,22 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       if (spawnLease == null) {
         continue;
       }
-      if (runtimeDispatchService.dispatchLayover(candidate, serviceTicket)) {
-        applyDispatchLifecycleTags(providerOpt, candidate.trainName(), service, operationType);
+      LayoverDispatchResult dispatch =
+          runtimeDispatchService.dispatchLayover(candidate, serviceTicket);
+      if (dispatch.dispatched()) {
+        String committedTrainName = dispatch.trainName().orElseThrow();
+        applyDispatchLifecycleTags(providerOpt, committedTrainName, service, operationType);
+        notifyDispatched(ticket, committedTrainName);
         spawnManager.complete(ticket);
         spawnSuccess.increment();
         pendingLayoverTickets.remove(ticket.id());
-        debugLogger.accept("Layover 复用成功: " + candidate.trainName() + " -> " + service.routeCode());
+        debugLogger.accept("Layover 复用成功: " + committedTrainName + " -> " + service.routeCode());
         return true;
       }
       releaseSpawnLease(spawnLease);
+      if (layoverRegistry.findDispatchAttemptOwner(ticketId).isPresent()) {
+        break;
+      }
     }
     putPendingLayoverTicket(ticket, now);
     debugLogger.accept(
@@ -1683,7 +2755,18 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       String trainName,
       SpawnService service,
       RouteOperationType operationType) {
-    if (trainName == null || trainName.isBlank() || service == null) {
+    if (service == null) {
+      return;
+    }
+    applyDispatchLifecycleTags(providerOpt, trainName, service.routeId(), operationType);
+  }
+
+  private void applyDispatchLifecycleTags(
+      Optional<StorageProvider> providerOpt,
+      String trainName,
+      UUID routeId,
+      RouteOperationType operationType) {
+    if (trainName == null || trainName.isBlank() || routeId == null || operationType == null) {
       return;
     }
     TrainProperties properties = TrainPropertiesStore.get(trainName);
@@ -1699,15 +2782,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         };
     TrainTagHelper.writeTag(properties, TAG_OPERATION_TRIPS, String.valueOf(nextTrips));
 
-    Optional<String> groupOpt = resolveServiceSpawnGroup(providerOpt, service.routeId());
+    Optional<String> groupOpt = resolveServiceSpawnGroup(providerOpt, routeId);
     if (groupOpt.isPresent()) {
       TrainTagHelper.writeTag(properties, TAG_CIRCULATION_GROUP, groupOpt.get());
     } else {
       TrainTagHelper.removeTagKey(properties, TAG_CIRCULATION_GROUP);
     }
 
-    Optional<Integer> maxTripsOpt =
-        resolveServiceMaxOperationTrips(providerOpt, service.routeId(), groupOpt);
+    Optional<Integer> maxTripsOpt = resolveServiceMaxOperationTrips(providerOpt, routeId, groupOpt);
     if (maxTripsOpt.isPresent()) {
       TrainTagHelper.writeTag(
           properties, TAG_MAX_OPERATION_TRIPS, String.valueOf(maxTripsOpt.get()));
@@ -1823,6 +2905,255 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
+   * 在破坏性 pending 生命周期操作前确认票据是否已进入折返提交事务。
+   *
+   * <p>dispatch attempt 可能已经完成占用 handoff 与列车改名，此时 pending 是失败重试的唯一稳定票据。hard expiry、fallback、运维
+   * clear 或最大重试都不得把它当作普通 backlog 删除；告警按票据节流，避免每 tick 刷屏。
+   */
+  private boolean preservePendingDispatchAttempt(SpawnTicket ticket, String attemptedAction) {
+    if (ticket == null || !layoverRegistry.hasDispatchAttemptForTicket(ticket.id().toString())) {
+      return false;
+    }
+    String action =
+        attemptedAction == null || attemptedAction.isBlank() ? "unknown" : attemptedAction;
+    SpawnService service = ticket.service();
+    String routeCode = service == null ? "?" : service.routeCode();
+    warnThrottled(
+        "pending-dispatch-attempt:" + ticket.id(),
+        "[FTA] 折返票据已进入 handoff，拒绝破坏性 pending 操作: ticket="
+            + ticket.id()
+            + " route="
+            + routeCode
+            + " action="
+            + action);
+    return true;
+  }
+
+  /**
+   * 准备 Depot 发车的逻辑授权。
+   *
+   * <p>本方法是物理实体化前的唯一预检入口。它可以建立临时动态授权、取得发车租约并进行 preview，但绝不调用 {@link
+   * DepotSpawner#spawn(StorageProvider, SpawnTicket, String,
+   * Instant)}。任何预检失败都会在返回前撤销已建立的临时状态并安排原票据重试。
+   *
+   * @param origin 常规或 fallback 发车来源；决定重试原因与 depot 选择账本的归属
+   * @return 已完成预检的上下文；空值表示失败已被处理
+   */
+  private Optional<PreparedDepotSpawn> prepareDepotSpawn(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      SpawnService service,
+      RouteDefinition route,
+      Line line,
+      Route routeEntity,
+      SpawnControl.Lease spawnLease,
+      Map<String, Integer> selectedThisTick,
+      Instant now,
+      DepotSpawnOrigin origin) {
+    DepotSpawnOrigin effectiveOrigin = origin == null ? DepotSpawnOrigin.NORMAL : origin;
+    String reasonPrefix = effectiveOrigin.reasonPrefix();
+
+    // 【准入控制】全网在网列车上限。
+    //
+    // 放在这里是因为本方法是"物理实体化前的唯一预检入口"——NORMAL 与 FALLBACK 两条路径都经过它。
+    // 拥堵闸门 shouldHoldByCongestion 只挂在常规路径上，layover 降级补发那条 return 在它之前，
+    // 于是降级补发能绕开一切拥堵约束往网里加车；这道闸门堵住的就是那个洞。
+    //
+    // 只拦"新造车"，不拦 layover 复用：复用的车本来就在网里，拦它只会让车积在终点站。
+    if (shouldHoldByFleetCap(line, routeEntity)) {
+      releaseSpawnLease(spawnLease);
+      // 用 deferWithoutAttempt 而不是 requeue：requeue 会 +1 attempts，到 max-attempts
+      // 就 spawnManager.complete(ticket) 把票据**丢掉**。
+      // 持续顶住上限一段时间后本该发的车就再也不会发了——
+      // 那是"取消发车"，不是"推迟发车"，等网疏通了班次已经凭空少了一批。
+      // 无限延后的兜底是 spawn.queued-ticket-max-age-seconds。
+      deferByGate(ticket, now, reasonPrefix + "fleet-cap");
+      return Optional.empty();
+    }
+
+    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
+    Map<String, Integer> depotSelections =
+        selectedThisTick == null ? new HashMap<>() : selectedThisTick;
+    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
+    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
+      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
+      selectedDepotOpt =
+          selectBalancedDepot(
+              provider, line.id(), lineDepots, runtimeSnapshot, depotSelections, now);
+    }
+    SpawnTicket effectiveTicket =
+        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
+    effectiveTicket =
+        materializeDynamicDepotSelection(
+            provider,
+            service,
+            effectiveTicket,
+            LineRuntimeSnapshot.capture(runtimeDispatchService),
+            depotSelections,
+            now);
+    if (effectiveOrigin.fallback()) {
+      recordSelectedDepotForTick(effectiveTicket, lineDepots, selectedDepotOpt, depotSelections);
+    }
+
+    String destinationCode =
+        RouteDestinationResolver.resolve(provider, routeEntity)
+            .map(RouteDestinationResolver.DestinationInfo::code)
+            .orElse(routeEntity.code());
+    String trainName =
+        TrainNameFormatter.buildTrainName(
+            service.operatorCode(),
+            service.lineCode(),
+            routeEntity.patternType(),
+            destinationCode,
+            ticket.id());
+    if (runtimeDispatchService.hasMaterializedSpawnRollbackQuarantine(trainName)) {
+      releaseSpawnLease(spawnLease);
+      deferWithoutAttempt(effectiveTicket, now, "materialized-rollback-identity-live");
+      return Optional.empty();
+    }
+
+    Optional<java.util.UUID> worldIdOpt =
+        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
+    if (worldIdOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "depot-world-missing");
+      return Optional.empty();
+    }
+    Optional<RailGraph> graphOpt =
+        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
+    if (graphOpt.isEmpty()) {
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "graph-missing");
+      return Optional.empty();
+    }
+
+    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
+    Optional<List<NodeId>> preparedWaypointsOpt =
+        runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            trainName, route, spawnWaypoints, graphOpt.get(), now);
+    if (preparedWaypointsOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "dynamic-authority-unavailable");
+      return Optional.empty();
+    }
+
+    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
+    OccupancyRequestBuilder builder =
+        new OccupancyRequestBuilder(
+            graphOpt.get(),
+            depotSpawnLookaheadEdges(runtime),
+            runtime.minClearEdges(),
+            runtime.rearGuardEdges(),
+            runtime.switcherZoneEdges(),
+            debugLogger);
+    Optional<DepotGateRequest> gateRequestOpt =
+        buildDepotSpawnGateRequest(
+            builder,
+            trainName,
+            route,
+            preparedWaypointsOpt.get(),
+            service,
+            effectiveTicket,
+            routeEntity.operationType(),
+            now);
+    if (gateRequestOpt.isEmpty()) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      requeue(effectiveTicket, now, reasonPrefix + "occupancy-context-failed");
+      return Optional.empty();
+    }
+    DepotGateRequest gateRequest = gateRequestOpt.get();
+    OccupancyRequest authorityRequest = gateRequest.request();
+    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
+        trainName, graphOpt.get(), gateRequest.context())) {
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      deferBlockedAtDepot(effectiveTicket, now, reasonPrefix + "smart-depot-long-single-held");
+      return Optional.empty();
+    }
+    LaunchAuthorizationService.AuthorizationResult authorization =
+        previewSpawnGate(authorityRequest);
+    if (!authorization.allowed()) {
+      logDepotGateBlockedTrace(
+          effectiveTicket,
+          service,
+          route,
+          trainName,
+          lineDepots,
+          gateRequest,
+          authorization,
+          spawnLease,
+          reasonPrefix + "preview");
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+      releaseSpawnLease(spawnLease);
+      deferBlockedAtDepot(
+          effectiveTicket,
+          now,
+          reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
+      return Optional.empty();
+    }
+
+    OptionalLong startupRecoveryEpoch = runtimeDispatchService.captureReadyStartupRecoveryEpoch();
+    if (startupRecoveryEpoch.isEmpty()) {
+      abortDepotSpawnForRecovery(
+          effectiveTicket,
+          now,
+          trainName,
+          spawnLease,
+          Optional.empty(),
+          reasonPrefix + "startup-recovery-active");
+      return Optional.empty();
+    }
+    return Optional.of(
+        new PreparedDepotSpawn(
+            effectiveTicket,
+            trainName,
+            spawnLease,
+            lineDepots,
+            gateRequest,
+            startupRecoveryEpoch.getAsLong()));
+  }
+
+  /**
+   * 将已通过预检的 Depot 发车实体化。
+   *
+   * <p>此方法只负责 {@link DepotSpawner} 调用及其前置资源收口；物理 group 一旦返回，调用方必须立即交给 {@link
+   * #finalizeMaterializedDepotSpawn(MaterializedDepotSpawnContext)}，不能在这里加入额外初始化。
+   */
+  private Optional<DepotSpawner.MaterializedSpawn> materializePreparedDepotSpawn(
+      StorageProvider provider, PreparedDepotSpawn prepared, Instant now, DepotSpawnOrigin origin) {
+    DepotSpawnOrigin effectiveOrigin = origin == null ? DepotSpawnOrigin.NORMAL : origin;
+    if (!spawnBudgetLeft()) {
+      // 常规、降级、pending 降级三条出库路径都经过这里：名额只在真要生成实体时扣，也只在这里扣。
+      runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(prepared.trainName());
+      releaseSpawnLease(prepared.spawnLease());
+      deferWithoutAttempt(prepared.ticket(), now, "spawn-per-tick-limit");
+      return Optional.empty();
+    }
+    materializationsThisTick++;
+    try {
+      Optional<DepotSpawner.MaterializedSpawn> materializedSpawn =
+          depotSpawner.spawn(provider, prepared.ticket(), prepared.trainName(), now);
+      if (materializedSpawn.isPresent()) {
+        return materializedSpawn;
+      }
+    } catch (RuntimeException | LinkageError error) {
+      debugLogger.accept(
+          (effectiveOrigin.fallback() ? "Layover 降级发车异常" : "自动发车异常")
+              + ": spawn 抛出异常 train="
+              + prepared.trainName()
+              + " error="
+              + error);
+    }
+    runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(prepared.trainName());
+    releaseSpawnLease(prepared.spawnLease());
+    occupancyManager.releaseByTrain(prepared.trainName());
+    requeue(prepared.ticket(), now, effectiveOrigin.reasonPrefix() + "spawn-failed");
+    return Optional.empty();
+  }
+
+  /**
    * 从 Depot 直接发车的降级路径。
    *
    * <p>仅用于 RETURN 票据的 fallback 补发，不参与常规运营调度。若发车成功，会同步写入生命周期标签并刷新相关占用；失败则回到重试队列。
@@ -1844,6 +3175,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       Line line,
       Instant now,
       Map<String, Integer> selectedThisTick) {
+
+    if (hasMaterializedSpawnTransaction(ticket.id())) {
+      deferWithoutAttempt(ticket, now, "materialized-transaction-active");
+      return false;
+    }
 
     Route routeEntity = provider.routes().findById(service.routeId()).orElse(null);
     if (routeEntity == null) {
@@ -1867,153 +3203,356 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnControl.Lease spawnLease = spawnLeaseOpt.get();
 
-    List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
-    Map<String, Integer> depotSelections =
-        selectedThisTick == null ? new HashMap<>() : selectedThisTick;
-    Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
-      LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
-      selectedDepotOpt =
-          selectBalancedDepot(
-              provider, line.id(), lineDepots, runtimeSnapshot, depotSelections, now);
-    }
-    SpawnTicket effectiveTicket =
-        selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket =
-        materializeDynamicDepotSelection(
+    Optional<PreparedDepotSpawn> preparedOpt =
+        prepareDepotSpawn(
             provider,
+            ticket,
             service,
-            effectiveTicket,
-            LineRuntimeSnapshot.capture(runtimeDispatchService),
-            depotSelections,
-            now);
+            route,
+            line,
+            routeEntity,
+            spawnLease,
+            selectedThisTick,
+            now,
+            DepotSpawnOrigin.FALLBACK);
+    if (preparedOpt.isEmpty()) {
+      return false;
+    }
+    PreparedDepotSpawn prepared = preparedOpt.get();
+    Optional<DepotSpawner.MaterializedSpawn> materializedSpawnOpt =
+        materializePreparedDepotSpawn(provider, prepared, now, DepotSpawnOrigin.FALLBACK);
+    if (materializedSpawnOpt.isEmpty()) {
+      return false;
+    }
+    return finalizeMaterializedDepotSpawn(
+        new MaterializedDepotSpawnContext(
+            provider,
+            prepared.ticket(),
+            service,
+            route,
+            routeEntity.operationType(),
+            prepared.trainName(),
+            prepared.spawnLease(),
+            prepared.gateRequest(),
+            prepared.gateRequest().request(),
+            prepared.lineDepots(),
+            materializedSpawnOpt.get(),
+            prepared.recoveryEpoch(),
+            now,
+            true));
+  }
 
-    String destCode =
-        RouteDestinationResolver.resolve(provider, routeEntity)
-            .map(RouteDestinationResolver.DestinationInfo::code)
-            .orElse(routeEntity.code());
-    String trainName =
-        TrainNameFormatter.buildTrainName(
-            service.operatorCode(),
-            service.lineCode(),
-            routeEntity.patternType(),
-            destCode,
-            ticket.id());
-
-    Optional<java.util.UUID> worldIdOpt =
-        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
-    if (worldIdOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-depot-world-missing");
-      return false;
-    }
-    Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
-    if (graphOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-graph-missing");
-      return false;
-    }
-    ConfigManager.RuntimeSettings runtime = configManager.current().runtimeSettings();
-    OccupancyRequestBuilder builder =
-        new OccupancyRequestBuilder(
-            graphOpt.get(),
-            depotSpawnLookaheadEdges(runtime),
-            runtime.minClearEdges(),
-            runtime.rearGuardEdges(),
-            runtime.switcherZoneEdges(),
-            debugLogger);
-    Optional<DepotGateRequest> gateRequestOpt =
-        buildDepotSpawnGateRequest(builder, trainName, route, service, effectiveTicket, now);
-    if (gateRequestOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-occupancy-context-failed");
-      return false;
-    }
-    DepotGateRequest gateRequest = gateRequestOpt.get();
-    OccupancyRequest request = gateRequest.request();
-    if (!runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
-        trainName, graphOpt.get(), gateRequest.context())) {
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-smart-depot-long-single-held");
-      return false;
-    }
-    LaunchAuthorizationService.AuthorizationResult authorization = previewSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "fallback-preview");
-      releaseSpawnLease(spawnLease);
-      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-
-    Optional<MinecartGroup> groupOpt;
+  /**
+   * 提交已实体化的 Depot 发车。
+   *
+   * <p>该方法是常规与 fallback 两条 Depot 入口唯一允许跨越“物理 group 已存在”边界的位置。它先取得硬授权，再写入 expected
+   * identity，随后才允许首次信号刷新；footprint 未水合时保留事务而不完成票据。任何失败都会先收容实体，再释放账务资源。
+   *
+   * @return 已完成或已安全登记为等待 footprint promotion 时返回 {@code true}
+   */
+  private boolean finalizeMaterializedDepotSpawn(MaterializedDepotSpawnContext context) {
+    RuntimeTrainHandle train = context.materializedSpawn().train();
+    String reasonPrefix = context.fallback() ? "fallback-" : "";
     try {
-      groupOpt = depotSpawner.spawn(provider, effectiveTicket, trainName, now);
-    } catch (Exception e) {
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      debugLogger.accept("Layover 降级发车异常: spawn 抛出异常 train=" + trainName + " error=" + e);
-      requeue(effectiveTicket, now, "fallback-spawn-failed");
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(context.recoveryEpoch())) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "startup-recovery-epoch-changed");
+        return false;
+      }
+      LaunchAuthorizationService.AuthorizationResult authorization =
+          acquireSpawnGate(context.authorityRequest());
+      if (!authorization.allowed()) {
+        logDepotGateBlockedTrace(
+            context.ticket(),
+            context.service(),
+            context.route(),
+            context.trainName(),
+            context.lineDepots(),
+            context.gateRequest(),
+            authorization,
+            context.spawnLease(),
+            context.fallback() ? "fallback-acquire" : "acquire");
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
+        return false;
+      }
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(context.recoveryEpoch())) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "startup-recovery-epoch-changed-after-acquire");
+        return false;
+      }
+      TrainProperties properties =
+          initializeMaterializedSpawnWithRollbackMarker(context.materializedSpawn());
+      if (applyPreparedSpawnDestination(properties, context.gateRequest().effectiveWaypoints())) {
+        applySpawnLifecycleTags(
+            Optional.of(context.provider()),
+            properties,
+            context.service(),
+            context.operationType());
+      }
+      TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+      if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
+          runtimeDispatchService,
+          train,
+          context.authorityRequest(),
+          context.recoveryEpoch(),
+          () -> runtimeDispatchService.refreshSignal(train))) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "expected-spawn-physical-registration-failed");
+        return false;
+      }
+      runtimeDispatchService.requestSignalReevaluationForResources(
+          context.authorityRequest().resourceList(), context.trainName());
+      if (!runtimeDispatchService.isStartupRecoveryEpochReady(context.recoveryEpoch())) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "startup-recovery-epoch-changed-before-complete");
+        return false;
+      }
+      RuntimeDispatchService.ExpectedMaterializedSpawnStatus materializedStatus =
+          runtimeDispatchService.expectedMaterializedSpawnStatus(train, context.recoveryEpoch());
+      if (materializedStatus
+          == RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL) {
+        if (deferMaterializedSpawnUntilPromotion(
+            context.ticket(),
+            context.service(),
+            context.trainName(),
+            context.spawnLease(),
+            train,
+            context.recoveryEpoch(),
+            context.now(),
+            context.fallback())) {
+          return true;
+        }
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "pending-materialized-spawn-registration-conflict");
+        return false;
+      }
+      if (materializedStatus != RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED) {
+        retainMaterializedDepotSpawnRollback(
+            context, reasonPrefix + "expected-spawn-physical-state-lost-before-complete");
+        return false;
+      }
+      notifyDispatched(context.ticket(), context.trainName());
+      spawnManager.complete(context.ticket());
+      clearCompletedMaterializedSpawnMarker(train, context.trainName());
+    } catch (RuntimeException | LinkageError failure) {
+      debugLogger.accept(
+          (context.fallback() ? "Layover 降级发车实体化事务异常: train=" : "自动发车实体化事务异常: train=")
+              + context.trainName()
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
+      retainMaterializedDepotSpawnRollback(
+          context,
+          reasonPrefix
+              + "materialized-spawn-initialization-failed:"
+              + failure.getClass().getSimpleName());
       return false;
     }
-    if (groupOpt.isEmpty()) {
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      requeue(effectiveTicket, now, "fallback-spawn-failed");
-      return false;
-    }
-    MinecartGroup group = groupOpt.get();
-    authorization = acquireSpawnGate(request);
-    if (!authorization.allowed()) {
-      logDepotGateBlockedTrace(
-          effectiveTicket,
-          service,
-          route,
-          trainName,
-          lineDepots,
-          gateRequest,
-          authorization,
-          spawnLease,
-          "fallback-acquire");
-      releaseSpawnLease(spawnLease);
-      occupancyManager.releaseByTrain(trainName);
-      destroySpawnedGroup(group);
-      requeue(effectiveTicket, now, "fallback-gate-blocked:" + spawnGateSignalText(authorization));
-      return false;
-    }
-    if (group.getProperties() != null && route.waypoints().size() >= 2) {
-      group.getProperties().clearDestinationRoute();
-      group.getProperties().clearDestination();
-      group.getProperties().setDestination(route.waypoints().get(1).value());
-      applySpawnLifecycleTags(
-          Optional.of(provider), group.getProperties(), service, routeEntity.operationType());
-    }
-    runtimeDispatchService.refreshSignal(group);
-    runtimeDispatchService.refreshSignalsForResources(request.resourceList(), trainName);
-    spawnManager.complete(effectiveTicket);
-    spawnSuccess.increment();
-    String depotUsed = effectiveTicket.selectedDepotNodeId().orElse(service.depotNodeId());
-    debugLogger.accept(
-        "Layover 降级发车成功: train="
-            + trainName
-            + " route="
-            + service.operatorCode()
-            + "/"
-            + service.lineCode()
-            + "/"
-            + service.routeCode()
-            + " depot="
-            + depotUsed);
+    recordMaterializedSpawnSuccess(
+        context.ticket(), context.service(), context.trainName(), context.fallback());
     return true;
+  }
+
+  /**
+   * 在任何可失败初始化前为精确物理编组写入持久化回滚墓碑。
+   *
+   * <p>TrainCarts 初始化会规范化生命周期 tags，因此 finally 中必须再次确认墓碑仍存在。即使初始化动作删除墓碑后抛错，外层事务也能在本次进程中收容列车，且
+   * 崩溃恢复仍不会把未提交编组误认为可运营列车。
+   *
+   * @param materializedSpawn 已经存在的精确物理编组及其延后初始化动作
+   * @return 同一物理编组的 TrainCarts 属性
+   */
+  static TrainProperties initializeMaterializedSpawnWithRollbackMarker(
+      DepotSpawner.MaterializedSpawn materializedSpawn) {
+    DepotSpawner.MaterializedSpawn requiredSpawn =
+        Objects.requireNonNull(materializedSpawn, "materializedSpawn");
+    TrainProperties properties =
+        Objects.requireNonNull(requiredSpawn.train().properties(), "properties");
+    TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+    try {
+      requiredSpawn.initialize();
+    } finally {
+      TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+    }
+    return properties;
+  }
+
+  /** 将同一实体化事务的所有失败统一交给“先收容、后释放”的回滚入口。 */
+  private void retainMaterializedDepotSpawnRollback(
+      MaterializedDepotSpawnContext context, String reason) {
+    rollbackOrRetainMaterializedSpawn(
+        context.ticket(),
+        context.service(),
+        context.now(),
+        context.trainName(),
+        context.spawnLease(),
+        context.materializedSpawn().train(),
+        context.recoveryEpoch(),
+        context.fallback(),
+        reason);
+  }
+
+  /**
+   * 在已实体化 Depot 编组的首次信号刷新前提交其物理身份登记。
+   *
+   * <p>调用方必须已经成功 acquire {@code acquiredAuthority}。登记失败时不执行刷新，由调用方按已实体化列车的 fail-closed
+   * 顺序回滚；成功时刷新必然发生在登记之后，避免同步信号 tick 把本次新车误判为未知迟加载实体。
+   */
+  static boolean registerExpectedMaterializedSpawnBeforeFirstRefresh(
+      RuntimeDispatchService runtimeDispatchService,
+      RuntimeTrainHandle train,
+      OccupancyRequest acquiredAuthority,
+      long startupRecoveryEpoch,
+      Runnable firstSignalRefresh) {
+    Objects.requireNonNull(runtimeDispatchService, "runtimeDispatchService");
+    Objects.requireNonNull(train, "train");
+    Objects.requireNonNull(acquiredAuthority, "acquiredAuthority");
+    Objects.requireNonNull(firstSignalRefresh, "firstSignalRefresh");
+    if (!runtimeDispatchService.registerExpectedMaterializedSpawn(
+        train, acquiredAuthority, startupRecoveryEpoch)) {
+      return false;
+    }
+    firstSignalRefresh.run();
+    return true;
+  }
+
+  /**
+   * 启动占用恢复抢占发车事务时执行统一回滚。
+   *
+   * <p>未创建实体时直接撤销临时状态；已经实体化时先完成硬停车与延迟销毁安排，并把 occupancy 保留到 GroupRemove 精确释放。票据只能在新的 READY epoch
+   * 中重试。物理收容或账务回滚异常时返回失败，调用方必须保留待处理记录，不得把票据视为已回队或继续执行任何放行动作。
+   *
+   * @return 实体已安全收容且账务动作全部完成，或尚未创建实体且普通回滚完成时为 {@code true}
+   */
+  private boolean abortDepotSpawnForRecovery(
+      SpawnTicket ticket,
+      Instant now,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      Optional<RuntimeTrainHandle> spawnedTrain,
+      String reason) {
+    if (spawnedTrain.isPresent()) {
+      return rollbackMaterializedDepotSpawn(
+          ticket, now, trainName, spawnLease, spawnedTrain.orElseThrow(), reason);
+    }
+    runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
+    releaseSpawnLease(spawnLease);
+    occupancyManager.releaseByTrain(trainName);
+    requeue(ticket, now, reason);
+    return true;
+  }
+
+  /**
+   * 回滚已经实体化的 Depot 编组。
+   *
+   * <p>必须先硬停车并成功安排销毁，随后才能释放发车租约并回队。占用 claim 刻意保留到 GroupRemove 精确释放，避免延迟销毁的一 tick
+   * 内出现“实体仍在、保护已撤销”的窗口。任一收容或账务动作异常都会停止后续放行动作并返回失败，使上层保留恢复记录供下一 tick 重试隔离。
+   *
+   * @return 物理收容和全部账务回滚均完成时为 {@code true}
+   */
+  private boolean rollbackMaterializedDepotSpawn(
+      SpawnTicket ticket,
+      Instant now,
+      String trainName,
+      SpawnControl.Lease spawnLease,
+      RuntimeTrainHandle train,
+      String reason) {
+    boolean contained =
+        containMaterializedSpawnBeforeRelease(
+            train,
+            () -> runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName),
+            () -> releaseSpawnLease(spawnLease),
+            () -> requeueMaterializedSpawn(ticket, now, reason),
+            debugLogger);
+    if (!contained) {
+      debugLogger.accept("已实体化发车回滚未完整完成，不得视为发车成功: train=" + trainName + " reason=" + reason);
+    }
+    return contained;
+  }
+
+  /**
+   * 把已安全销毁的实体化失败票据重新入队。
+   *
+   * <p>普通失败达到尝试上限后可以结束票据；实体化失败则不能静默消费班次，否则一次 TrainCarts 水合竞态会永久丢失该发车。达到上限后保持原 attempts
+   * 并按正常重试间隔退避，等待现场或版本问题修复。
+   */
+  private void requeueMaterializedSpawn(SpawnTicket ticket, Instant now, String error) {
+    if (ticket == null) {
+      return;
+    }
+    spawnRetries.increment();
+    String reason = error == null ? "unknown" : error;
+    String key = "materialized-spawn-rollback:" + reason;
+    requeueByError
+        .computeIfAbsent(key, ignored -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+    Instant retryAt = (now == null ? Instant.now() : now).plus(retryDelay);
+    SpawnTicket retry =
+        ticket.attempts() + 1 >= maxRetryAttempts
+            ? ticket.delayedUntil(retryAt, key)
+            : ticket.withRetry(retryAt, key);
+    spawnManager.requeue(retry);
+    try {
+      debugLogger.accept(
+          "已实体化发车回滚后保留票据: ticket="
+              + ticket.id()
+              + " route="
+              + ticket.service().routeCode()
+              + " attempts="
+              + retry.attempts()
+              + " retryAt="
+              + retry.notBefore()
+              + " reason="
+              + key);
+    } catch (RuntimeException | LinkageError logFailure) {
+      HEALTH_LOGGER.warning("实体化发车回滚日志写入失败: " + logFailure.getClass().getSimpleName());
+    }
+  }
+
+  /**
+   * 以 fail-closed 顺序回滚已实体化编组。
+   *
+   * <p>该边界刻意不释放 occupancy；实体真正移除后由 GroupRemove 事件释放。物理停车或销毁安排失败时，不执行任何会允许重发的后续动作。
+   *
+   * @return 已硬停、安排销毁并完成后续账务动作时为 {@code true}
+   */
+  static boolean containMaterializedSpawnBeforeRelease(
+      RuntimeTrainHandle handle,
+      Runnable cancelPreparedAuthority,
+      Runnable releaseLease,
+      Runnable requeueTicket,
+      Consumer<String> logger) {
+    Objects.requireNonNull(handle, "handle");
+    Objects.requireNonNull(cancelPreparedAuthority, "cancelPreparedAuthority");
+    Objects.requireNonNull(releaseLease, "releaseLease");
+    Objects.requireNonNull(requeueTicket, "requeueTicket");
+    Consumer<String> safeLogger = logger != null ? logger : ignored -> {};
+    try {
+      handle.stopHard();
+      handle.destroy();
+    } catch (RuntimeException | LinkageError ex) {
+      safeLogger.accept(
+          "已实体化发车物理收容失败: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+      return false;
+    }
+    try {
+      cancelPreparedAuthority.run();
+      releaseLease.run();
+      requeueTicket.run();
+      return true;
+    } catch (RuntimeException | LinkageError ex) {
+      safeLogger.accept(
+          "已实体化发车账务回滚失败，编组已硬停并安排销毁: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+      return false;
+    }
   }
 
   /** 返回出车诊断快照（成功/重试/错误分布）。 */
@@ -2038,19 +3577,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     int nextAttempts = ticket.attempts() + 1;
     if (maxRetryAttempts > 0 && nextAttempts >= maxRetryAttempts) {
+      if (preservePendingDispatchAttempt(ticket, "max-retry:" + error)) {
+        putPendingLayoverTicket(ticket, now);
+        return;
+      }
       pendingLayoverTickets.remove(ticket.id());
       spawnManager.complete(ticket);
-      debugLogger.accept(
-          "自动发车放弃: ticket="
-              + ticket.id()
-              + " route="
-              + ticket.service().routeCode()
-              + " attempts="
-              + nextAttempts
-              + " max="
-              + maxRetryAttempts
-              + " error="
-              + error);
+      try {
+        debugLogger.accept(
+            "自动发车放弃: ticket="
+                + ticket.id()
+                + " route="
+                + ticket.service().routeCode()
+                + " attempts="
+                + nextAttempts
+                + " max="
+                + maxRetryAttempts
+                + " error="
+                + error);
+      } catch (RuntimeException | LinkageError logFailure) {
+        HEALTH_LOGGER.warning("自动发车放弃日志写入失败: " + logFailure.getClass().getSimpleName());
+      }
       return;
     }
     spawnRetries.increment();
@@ -2063,25 +3610,76 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     SpawnTicket retry = ticket.withRetry(next, error);
     spawnManager.requeue(retry);
     String routeCode = ticket.service().routeCode();
+    try {
+      debugLogger.accept(
+          "自动发车重试入队: ticket="
+              + ticket.id()
+              + " route="
+              + routeCode
+              + " attempts="
+              + retry.attempts()
+              + " notBefore="
+              + retry.notBefore()
+              + " error="
+              + error);
+
+      if (key.startsWith("spawn-failed")
+          || key.startsWith("graph-missing")
+          || key.startsWith("depot-world-missing")) {
+        warnThrottled(
+            "spawn:" + key + ":" + routeCode,
+            "自动发车异常: route=" + routeCode + " error=" + key + " attempts=" + retry.attempts());
+      }
+    } catch (RuntimeException | LinkageError logFailure) {
+      HEALTH_LOGGER.warning("自动发车重试日志写入失败: " + logFailure.getClass().getSimpleName());
+    }
+  }
+
+  /**
+   * 因线网状态（拥堵 / 准入上限）而延后发车。
+   *
+   * <p>与 {@link #requeue} 的区别是**不消耗票据的重试预算**：线网堵不是这张票的过错，而 requeue 累到 max-attempts 会直接 {@code
+   * spawnManager.complete(ticket)} 把它丢掉——那是 取消发车而不是推迟发车。但仍按原因计数，否则"闸门拦了多少次"就没有了，而这一整轮改动
+   * 的目的恰恰是让闸门可观测。
+   */
+  private void deferByGate(SpawnTicket ticket, Instant now, String reason) {
+    String key = reason == null ? "unknown" : reason;
+    requeueByError
+        .computeIfAbsent(key, ignored -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+    deferWithoutAttempt(ticket, now, key);
+  }
+
+  /**
+   * 出库被闭塞挡住（车库咽喉、长单线、预检 blocker）：记 depot backoff，延后重试，不消耗重试预算。
+   *
+   * <p>与 {@link #deferByGate} 同一个道理：挡住它的是别的车，累到 max-attempts 把票丢掉就是取消发车。 表定票被丢掉的代价尤其大——首班出库票没了，
+   * 整个交路都不会有车，而重试预算可能远早于票据自身的容差耗尽。 兜底仍在：表定票有自己的到期时刻，按间隔发车的票有 {@code queued-ticket-max-age-seconds}。
+   */
+  private void deferBlockedAtDepot(SpawnTicket ticket, Instant now, String reason) {
+    if (ticket == null) {
+      return;
+    }
+    if (isDepotGateFailure(reason)) {
+      depotDispatchCoordinator.recordOccupancyFailure(ticket, now);
+    }
+    spawnRetries.increment();
+    requeueByError
+        .computeIfAbsent(reason, ignored -> new java.util.concurrent.atomic.LongAdder())
+        .increment();
+    SpawnTicket retry = ticket.blockedUntil(now.plus(retryDelay), reason);
+    spawnManager.requeue(retry);
     debugLogger.accept(
         "自动发车重试入队: ticket="
             + ticket.id()
             + " route="
-            + routeCode
+            + ticket.service().routeCode()
             + " attempts="
             + retry.attempts()
             + " notBefore="
             + retry.notBefore()
             + " error="
-            + error);
-
-    if (key.startsWith("spawn-failed")
-        || key.startsWith("graph-missing")
-        || key.startsWith("depot-world-missing")) {
-      warnThrottled(
-          "spawn:" + key + ":" + routeCode,
-          "自动发车异常: route=" + routeCode + " error=" + key + " attempts=" + retry.attempts());
-    }
+            + reason);
   }
 
   private void deferWithoutAttempt(SpawnTicket ticket, Instant now, String reason) {
@@ -2138,7 +3736,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       OccupancyRequestContext context,
       List<NodeId> effectiveWaypoints,
       List<NodeId> expandedPathNodes,
-      int lookoverDepth,
       Optional<NodeId> selectedDepotNode,
       NodeId originalFirstWaypoint,
       NodeId effectiveFirstWaypoint) {
@@ -2155,44 +3752,44 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       OccupancyRequestBuilder builder,
       String trainName,
       RouteDefinition route,
+      List<NodeId> spawnWaypoints,
       SpawnService service,
       SpawnTicket ticket,
+      RouteOperationType operationType,
       Instant now) {
-    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, ticket);
-    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext>
-        ctxOpt =
-            builder.buildContextFromNodes(
-                trainName,
-                Optional.ofNullable(route.id()),
-                spawnWaypoints,
-                0,
-                now,
-                100 + Math.max(0, ticket == null ? 0 : ticket.priority()),
-                AuthorizationPurpose.DEPOT_SPAWN);
+    int priority =
+        DispatchPriorityPolicy.depotSpawnPriority(
+            operationType, ticket == null ? 0 : ticket.priority());
+    Optional<OccupancyRequestContext> ctxOpt =
+        builder.buildContextFromNodes(
+            trainName,
+            Optional.ofNullable(route.id()),
+            spawnWaypoints,
+            0,
+            now,
+            priority,
+            AuthorizationPurpose.DEPOT_SPAWN);
     if (ctxOpt.isEmpty()) {
       return Optional.empty();
     }
     Optional<NodeId> depotNode =
-        resolveDepotLookoverNode(
-            service, ticket == null ? Optional.empty() : ticket.selectedDepotNodeId());
+        resolveDepotNode(service, ticket == null ? Optional.empty() : ticket.selectedDepotNodeId());
     if (depotNode.isEmpty()) {
-      debugLogger.accept("Depot lookover 回退: 未解析到显式 depot 节点 train=" + trainName);
+      debugLogger.accept("Depot authority 回退: 未解析到显式 depot 节点 train=" + trainName);
     }
-    OccupancyRequest request = builder.applyDepotLookover(ctxOpt.get(), depotNode);
-    OccupancyRequestContext requestContext =
-        new OccupancyRequestContext(
-            request,
-            ctxOpt.get().pathNodes(),
-            ctxOpt.get().edges(),
-            ctxOpt.get().directedContext());
+    OccupancyRequestContext requestContext = ctxOpt.get();
+    OccupancyRequest request = requestContext.request();
     NodeId originalFirst = route.waypoints().isEmpty() ? null : route.waypoints().get(0);
     NodeId effectiveFirst = spawnWaypoints.isEmpty() ? null : spawnWaypoints.get(0);
-    int lookoverDepth = builder.depotLookoverDepthForDiagnostics(depotNode.isPresent());
     debugLogger.accept(
         "SMART_DEPOT_SPAWN_AUTHORITY_WINDOW train="
             + trainName
             + " route="
             + formatRouteForTrace(service, route)
+            + " operation="
+            + (operationType == null ? "-" : operationType)
+            + " priority="
+            + priority
             + " firstNode="
             + formatNode(effectiveFirst)
             + " authorityEnd="
@@ -2201,15 +3798,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
                 : formatNode(ctxOpt.get().pathNodes().get(ctxOpt.get().pathNodes().size() - 1)))
             + " resourceCount="
             + request.resourceList().size()
-            + " lookoverDepth="
-            + lookoverDepth);
+            + " authorityEdgeCount="
+            + requestContext.edges().size());
     return Optional.of(
         new DepotGateRequest(
             request,
             requestContext,
             spawnWaypoints,
             ctxOpt.get().pathNodes(),
-            lookoverDepth,
             depotNode,
             originalFirst,
             effectiveFirst));
@@ -2221,6 +3817,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     int localExitWindow = Math.max(1, runtime.switcherZoneEdges() + 1);
     return Math.max(1, Math.min(runtime.lookaheadEdges(), localExitWindow));
+  }
+
+  /**
+   * 将已通过 Depot gate 的安全节点序列写入 TrainCarts。
+   *
+   * <p>第二个节点必须来自 DYNAMIC materialization 后的 {@link DepotGateRequest#effectiveWaypoints()}，不能回读
+   * route 原始占位节点，否则列车生成成功后会把 destination 写回不可寻路的 DYNAMIC 声明。
+   *
+   * @param properties 已生成列车的属性
+   * @param effectiveWaypoints 本次 gate 实际使用的安全节点序列
+   * @return 已写入首个 destination 时返回 {@code true}
+   */
+  static boolean applyPreparedSpawnDestination(
+      TrainProperties properties, List<NodeId> effectiveWaypoints) {
+    if (properties == null || effectiveWaypoints == null || effectiveWaypoints.size() < 2) {
+      return false;
+    }
+    properties.clearDestinationRoute();
+    properties.clearDestination();
+    properties.setDestination(effectiveWaypoints.get(1).value());
+    return true;
   }
 
   /**
@@ -2236,8 +3853,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return List.of();
     }
     Optional<NodeId> depotNode =
-        resolveDepotLookoverNode(
-            service, ticket == null ? Optional.empty() : ticket.selectedDepotNodeId());
+        resolveDepotNode(service, ticket == null ? Optional.empty() : ticket.selectedDepotNodeId());
     if (depotNode.isEmpty()) {
       return route.waypoints();
     }
@@ -2594,8 +4210,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + formatNode(gateRequest.effectiveFirstWaypoint())
             + " expandedPath="
             + formatNodes(gateRequest.expandedPathNodes(), 24)
-            + " lookoverDepth="
-            + gateRequest.lookoverDepth()
+            + " authorityEdgeCount="
+            + gateRequest.context().edges().size()
             + " resources="
             + formatGateResources(request.resourceList(), 48)
             + " blockers="
@@ -2781,19 +4397,6 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
   }
 
-  /**
-   * 回收已实体化但未取得调度占用的 Depot 列车。
-   *
-   * <p>spawn 后 acquire 可能因同 tick 内其他状态变化失败；此时必须销毁刚创建的 TrainCarts group，避免没有 occupancy lease
-   * 的实体车留在线路上。
-   */
-  private static void destroySpawnedGroup(MinecartGroup group) {
-    if (group == null) {
-      return;
-    }
-    new TrainCartsRuntimeHandle(group).destroy();
-  }
-
   private OptionalInt resolveLineMaxTrains(StorageProvider provider, Line line) {
     if (provider == null || line == null) {
       return OptionalInt.empty();
@@ -2840,9 +4443,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /**
    * 按“本线路各 depot 在线负载”重排本轮 depot 发车票据。
    *
-   * <p>{@code DepotDispatchCoordinator} 只负责同一 depot 的互斥与退避；当 {@code maxSpawnPerTick} 小于本轮 ready
-   * 票据数时，仍需要在进入执行循环前把低负载 depot 的票据排到前面。否则列表稳定排序会让 route code 靠前、且经常被单线 depot gate 阻塞的票据反复占用本 tick
-   * 执行名额，导致同线路另一个 depot 的交路组长期得不到尝试。
+   * <p>{@code DepotDispatchCoordinator} 只负责同一 depot 的互斥与退避；本轮能出库的票多于 {@code maxSpawnPerTick}
+   * 时，谁先拿到实体化名额由这里的顺序决定：低负载 depot 的票据排在前面，避免同线路另一个 depot 的交路组长期拿不到名额。 被闭塞挡住的票不占名额，不会再因为排在前面而饿死别人。
    */
   private List<SpawnTicket> orderDepotTicketsByLineDepotLoad(
       StorageProvider provider, List<SpawnTicket> dueTickets) {
@@ -3372,8 +4974,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return resolveDynamicDepotNodeInfo(dynamicSpec).map(SignNodeRegistry.SignNodeInfo::worldId);
   }
 
-  private Optional<NodeId> resolveDepotLookoverNode(
-      SpawnService service, Optional<String> depotOverride) {
+  private Optional<NodeId> resolveDepotNode(SpawnService service, Optional<String> depotOverride) {
     Optional<String> depotSpecOpt = resolveDepotSpec(service, depotOverride);
     if (depotSpecOpt.isEmpty()) {
       return Optional.empty();

@@ -433,6 +433,32 @@ public final class LineSpawnMetadata {
     return null;
   }
 
+  /**
+   * 从 metadata 中读取布尔值，支持 boolean 与 {@code true/false} 字符串（大小写不敏感）；不存在或无法识别时为 empty。
+   *
+   * <p>route 的 {@code spawn_enabled} 就按这个口径读：显式 false 才算停用，缺省与无法识别都不算——与发车计划同一口径。
+   */
+  public static Optional<Boolean> readBoolean(Map<String, Object> metadata, String key) {
+    Objects.requireNonNull(key, "key");
+    if (metadata == null || metadata.isEmpty()) {
+      return Optional.empty();
+    }
+    Object raw = metadata.get(key);
+    if (raw instanceof Boolean value) {
+      return Optional.of(value);
+    }
+    if (raw instanceof String text) {
+      String normalized = text.trim().toLowerCase(Locale.ROOT);
+      if ("true".equals(normalized)) {
+        return Optional.of(true);
+      }
+      if ("false".equals(normalized)) {
+        return Optional.of(false);
+      }
+    }
+    return Optional.empty();
+  }
+
   /** 从 metadata 中读取整数值（若不存在或无效则 empty）。 */
   public static Optional<Integer> readInt(Map<String, Object> metadata, String key) {
     Objects.requireNonNull(key, "key");

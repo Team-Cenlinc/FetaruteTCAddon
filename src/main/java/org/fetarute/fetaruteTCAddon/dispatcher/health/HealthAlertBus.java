@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.health;
 
+import java.time.Duration;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
@@ -7,15 +8,15 @@ import java.util.function.Consumer;
 /**
  * 健康告警总线：分发 {@link HealthAlert} 给所有监听器。
  *
- * <p>支持限流避免短时间内刷屏，并记录最近 N 条告警供诊断命令查询。
+ * <p>同一列车、同一告警类型的稳定状态每分钟最多提醒一次；活动与恢复之间的状态转换始终立即分发。总线同时记录最近 N 条告警供诊断命令查询。
  */
 public final class HealthAlertBus {
 
   /** 最大缓存告警数量。 */
   private static final int MAX_HISTORY_SIZE = 100;
 
-  /** 同类型告警最小间隔（毫秒）。 */
-  private static final long THROTTLE_MS = 5000L;
+  /** 同一活动状态重复提醒的最小间隔（毫秒）。 */
+  private static final long THROTTLE_MS = Duration.ofMinutes(1).toMillis();
 
   private final List<Consumer<HealthAlert>> listeners = new CopyOnWriteArrayList<>();
   private final java.util.Deque<HealthAlert> history =
@@ -38,7 +39,7 @@ public final class HealthAlertBus {
   }
 
   /**
-   * 发布告警（带限流）。
+   * 发布告警（稳定状态限流，状态转换立即分发）。
    *
    * @param alert 告警事件
    * @return true 表示告警被分发，false 表示被限流跳过
@@ -47,8 +48,9 @@ public final class HealthAlertBus {
     if (alert == null) {
       return false;
     }
-    // 限流：同类型 + 同列车的告警在 THROTTLE_MS 内只发一次
+    // 活动与恢复是不同状态：状态转换必须立即可见，稳定状态才按窗口限流。
     String key = buildThrottleKey(alert);
+    lastAlertAtMs.remove(buildThrottleKey(alert.type(), alert.trainName(), !alert.autoFixed()));
     long now = System.currentTimeMillis();
     Long last = lastAlertAtMs.get(key);
     if (last != null && now - last < THROTTLE_MS) {
@@ -90,7 +92,11 @@ public final class HealthAlertBus {
   }
 
   private String buildThrottleKey(HealthAlert alert) {
-    String train = alert.trainName() == null ? "" : alert.trainName();
-    return alert.type().name() + ":" + train;
+    return buildThrottleKey(alert.type(), alert.trainName(), alert.autoFixed());
+  }
+
+  private String buildThrottleKey(HealthAlert.AlertType type, String trainName, boolean autoFixed) {
+    String train = trainName == null ? "" : trainName;
+    return type.name() + ":" + train + ":" + (autoFixed ? "RECOVERED" : "ACTIVE");
   }
 }

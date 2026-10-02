@@ -49,22 +49,36 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * <p>用于承载“停站/开关门/站台行为”等语义，因此只接受站点本体（4 段 {@code Operator:S:Station:Track}）。
  * 站咽喉属于图节点（Waypoint）职责，不应使用 AutoStation 牌子注册。
  *
- * <p>行为触发依赖列车 {@code FTA_ROUTE_ID} tag 与 RouteStop：仅在 STOP/TERMINATE 时停站， {@code dwellSeconds}
- * 缺失时默认 20 秒。开门失败将跳过关门动作，避免“未开门先关门”的误触发。
+ * <p>行为触发依赖列车 {@code FTA_ROUTE_ID} tag 与 RouteStop：仅在 STOP/TERMINATE 时停站， {@code dwellSeconds} 缺失时取
+ * {@link RouteStop#DEFAULT_DWELL_SECONDS}。开门失败将跳过关门动作，避免“未开门先关门”的误触发。
  */
 public final class AutoStationSignAction extends AbstractNodeSignAction {
 
-  private static final int DEFAULT_DWELL_SECONDS = 20;
   private static final String TAG_ROUTE_ID = "FTA_ROUTE_ID";
+  private static final String UNKNOWN_TRAIN_NAME = "unknown";
   private static final String TAG_DOOR_FIRST_STOP_DONE = "FTA_DOOR_FIRST_STOP_DONE";
   private static final String TAG_RUN_AT = "FTA_RUN_AT";
   private static final long DOOR_OPEN_DELAY_TICKS = 20L;
+
+  /**
+   * 停稳到开门的秒数（中途站）。编表的车站停车开销 = 居中刹停 + 本值，时刻表据此把"停稳"换算回"压牌"。
+   *
+   * @return 开门延迟秒数
+   */
+  public static int doorOpenDelaySeconds() {
+    return (int) (DOOR_OPEN_DELAY_TICKS / 20L);
+  }
+
   private static final long DOOR_OPEN_FIRST_DELAY_TICKS = 60L;
   private static final long TICK_MILLIS = 50L;
   private static final int STOP_WAIT_TIMEOUT_TICKS = 200;
   private static final int STOP_STABLE_TICKS = 1;
   private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
+
+  /** 晚点压缩停站时，关门动画开始前车门至少全开多久（tick）。 */
+  private static final long DOOR_MIN_OPEN_TICKS = 60L;
+
   private static final int DOOR_OPEN_MAX_ATTEMPTS = 12;
   private static final long DOOR_OPEN_MAX_RETRY_WINDOW_TICKS = 160L;
   private static final double EXIT_OFFSET_DISTANCE_BLOCKS = 3.0;
@@ -306,6 +320,23 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
+   * 压缩停站不能短于车门走完一个开关过程：关门动画开始之前车门至少全开 {@link #DOOR_MIN_OPEN_TICKS}。
+   *
+   * <p>关门动画在停站结束前开始（legacy 动画按其实测时长，其余按 {@link #DOOR_CLOSE_EARLY_TICKS}）； 晚点压缩到 10 秒时，长的 legacy
+   * 关门动画会让车门刚开就关。只对压缩生效，计划停站本身不受影响。
+   */
+  private static int doorFloorSeconds(AutoStationDoorController.DoorSession session) {
+    long closeTicks = DOOR_CLOSE_EARLY_TICKS;
+    if (session != null && session.usesLegacyDoorAnimation()) {
+      long estimated = session.estimatedCloseDurationTicks();
+      if (estimated > 0L) {
+        closeTicks = estimated;
+      }
+    }
+    return (int) ((closeTicks + DOOR_MIN_OPEN_TICKS + 19L) / 20L);
+  }
+
+  /**
    * MEMBER_ENTER 触发的去重规则：
    *
    * <ul>
@@ -350,15 +381,6 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     MinecartGroup group = info.getGroup();
     if (group == null) {
       return;
-    }
-    if (firstStop) {
-      Bukkit.getScheduler()
-          .runTaskLater(plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 2L);
-      Bukkit.getScheduler()
-          .runTaskLater(plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group), 10L);
-      Bukkit.getScheduler()
-          .runTaskLater(
-              plugin, () -> AutoStationDoorController.warmUpDoorAnimations(group, true), 20L);
     }
     new org.bukkit.scheduler.BukkitRunnable() {
       private int waitedTicks = 0;
@@ -441,7 +463,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (plugin == null) {
       return;
     }
-    if (dwellSeconds > 0 && !group.isMoving()) {
+    // 先按计划停站登记：到站处理期间信号 tick 靠它保持 STOP；晚点压缩在到站进度提交后再覆盖。
+    boolean dwellRegistered = dwellSeconds > 0 && !group.isMoving();
+    if (dwellRegistered) {
       plugin.getDwellRegistry().ifPresent(registry -> registry.start(trainName, dwellSeconds));
     }
     TrainProperties properties = group.getProperties();
@@ -452,8 +476,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             dispatch ->
                 dispatch.acquireDepartureGate(trainName, stopSessionId, "autostation_dwell"));
     ExitOffsetState exitOffsetState = new ExitOffsetState(properties);
-    // 注意：不在这里添加 WaitState，因为 handleStationArrival 会设置 destination 导致 TC 尝试移动
-    // WaitState 会在 handleStationArrival 之后添加
+    // 注意：先推进运行时到站状态，再添加 WaitState。常规中间站会在 departure gate 持有期间延迟写入
+    // TrainCarts destination；终点/DSTY 等非延迟路径仍需要后续 stop + WaitState 兜住物理动作。
     if (timedOut) {
       debug(
           "AutoStation 停站超时: nodeId="
@@ -471,14 +495,35 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               + " @ "
               + locationText(info));
     }
-    // 停车后推进 routeIndex 并设置下一站 destination
+    // 停车后推进 routeIndex；中间站下一跳 destination 由离站授权 tick 提交
     plugin
         .getRuntimeDispatchService()
         .ifPresent(dispatch -> dispatch.handleStationArrival(group, definition));
-    // 设置 destination 后，TC 可能尝试移动列车；通过 stop() 强制停止并添加 WaitState
+    // 晚点的车压缩停站：必须在到站进度提交之后（按本站序号查计划发车）、排关门时刻之前定下来。
+    int effectiveDwellSeconds =
+        plugin
+            .getRuntimeDispatchService()
+            .map(
+                dispatch ->
+                    dispatch
+                        .stationStops()
+                        .dwellSecondsFor(
+                            group,
+                            definition,
+                            dwellSeconds,
+                            firstStop,
+                            firstStop ? DOOR_OPEN_FIRST_DELAY_TICKS : DOOR_OPEN_DELAY_TICKS,
+                            doorFloorSeconds(session)))
+            .orElse(dwellSeconds);
+    if (dwellRegistered && effectiveDwellSeconds != dwellSeconds) {
+      plugin
+          .getDwellRegistry()
+          .ifPresent(registry -> registry.start(trainName, effectiveDwellSeconds));
+    }
+    // 非延迟路径可能已经改写 destination；通过 stop() 强制停止并添加 WaitState
     group.stop();
     var finalWaitState = group.getActions().addActionWaitState();
-    long dwellTicks = Math.max(0L, dwellSeconds * 20L);
+    long dwellTicks = Math.max(0L, effectiveDwellSeconds * 20L);
     String location = locationText(info);
     new org.bukkit.scheduler.BukkitRunnable() {
       private long ticksSinceStop = 0L;
@@ -584,6 +629,28 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             if ((ticksSinceOpen - dwellTicks) % 20 != 0) {
               return;
             }
+            if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
+              // 本次停站已由别的流程接手（终点待命复用改名、改派新交路后自己发车）：只收尾，不再替它判发车。
+              debug(
+                  "AutoStation 停站会话已被接管: nodeId="
+                      + definition.nodeId().value()
+                      + ", train="
+                      + trainName
+                      + ", currentTrain="
+                      + group.getProperties().getTrainName()
+                      + ", route="
+                      + shortUuid(routeId)
+                      + ", sid="
+                      + stopSessionId);
+              plugin
+                  .getRuntimeDispatchService()
+                  .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+              exitOffsetState.restore();
+              finalWaitState.stop();
+              plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+              cancel();
+              return;
+            }
 
             boolean canDepart = true;
             if (plugin.getRuntimeDispatchService().isPresent()) {
@@ -595,7 +662,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             if (canDepart) {
               plugin
                   .getRuntimeDispatchService()
-                  .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+                  .ifPresent(
+                      dispatch -> {
+                        // 这里是列车真正开走的唯一时刻：门控放行、门锁松开、WaitState 结束。
+                        // 时刻表录制取的就是这个时刻，不是 checkDeparture 第一次被问的时刻。
+                        dispatch.stationStops().handleDeparture(group, definition);
+                        dispatch.releaseDepartureGate(trainName, stopSessionId);
+                      });
               exitOffsetState.restore();
               finalWaitState.stop();
               cancel();
@@ -723,6 +796,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                     + location);
           }
           gaveUpOpen = true;
+          // 放弃开门后本任务不再运行，而发车门控是在 handleStop 里、进 WaitState 之前取的。
+          // 这里若不释放，门控就永久留在 departureGates 里：列车不仅自己走不了，
+          // 它身上的预约还会一直挡住别人，且没有任何一条路径会再来收拾。
+          // 另外两处 cancel（组失效、正常发车）都先释放了门控，这里必须对称。
+          plugin
+              .getRuntimeDispatchService()
+              .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+          exitOffsetState.restore();
           finalWaitState.stop();
           cancel();
           return;
@@ -951,6 +1032,36 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
+   * 这次停站是否已被别的流程接手：停站时的列车改了名，或改派到了另一条交路。
+   *
+   * <p>终点待命复用会把列车改名、换上新交路并自行发车，停站任务却不知道，仍每秒以"从本站发车"替它判一次门控。
+   * 复用后的列车开走后，这个判定会一直替它刷新在本站单线区段上的排队位，对向进站的列车被长期挡住，而它早已远离本站。
+   *
+   * <p>只认确凿证据：当前名字或交路读不到时不算接手，停站任务照旧运行。
+   *
+   * @param stoppedTrainName 停站时的列车名
+   * @param stoppedRouteId 停站时的交路
+   * @param current 列车当前属性
+   * @return 已被接手时为 {@code true}
+   */
+  static boolean stopSessionSuperseded(
+      String stoppedTrainName, UUID stoppedRouteId, TrainProperties current) {
+    if (current == null) {
+      return false;
+    }
+    String currentName = current.getTrainName();
+    if (stoppedTrainName != null
+        && !UNKNOWN_TRAIN_NAME.equals(stoppedTrainName)
+        && currentName != null
+        && !currentName.isBlank()
+        && !currentName.equals(stoppedTrainName)) {
+      return true;
+    }
+    return stoppedRouteId != null
+        && readRouteId(current).filter(routeId -> !routeId.equals(stoppedRouteId)).isPresent();
+  }
+
+  /**
    * 从列车 tag 中解析 {@code FTA_ROUTE_ID}。
    *
    * <p>格式为 {@code FTA_ROUTE_ID=<uuid>}，否则返回空。
@@ -1116,8 +1227,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (match.passType() == RouteStopPassType.PASS) {
       return Optional.empty();
     }
-    int dwell = match.dwellSeconds().orElse(DEFAULT_DWELL_SECONDS);
-    return Optional.of(dwell);
+    return Optional.of(match.plannedDwellSeconds());
   }
 
   /** 读取 AutoStation 提示音配置，缺失则返回禁用配置。 */
@@ -1254,7 +1364,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     } catch (Throwable ignored) {
       // 忽略
     }
-    return "unknown";
+    return UNKNOWN_TRAIN_NAME;
   }
 
   /**

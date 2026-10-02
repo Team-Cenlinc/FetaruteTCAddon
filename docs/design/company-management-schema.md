@@ -97,6 +97,28 @@
 | created_at / updated_at | TIMESTAMP | 审计 |
 > 若站点通过首个 Track 牌子进行定位，可在同步流程中读取 Sign 坐标更新上述位置字段。
 
+### StationGroup（车站组，乘客视角的换乘站）
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | 主键 |
+| company_id | UUID | 所有者公司（`ON DELETE CASCADE`） |
+| code | VARCHAR | 组代码，`UNIQUE (company_id, code)` |
+| name / secondary_name | VARCHAR | 名称 |
+| metadata | JSON | 扩展 |
+| created_at / updated_at | TIMESTAMP | 审计 |
+
+#### StationGroupMember
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| group_id | UUID | 所属车站组（`ON DELETE CASCADE`） |
+| station_id | UUID | 成员车站，`UNIQUE`：一个车站最多属于一个组（`ON DELETE CASCADE`） |
+| transfer_type | VARCHAR | `SAME_PLATFORM` / `IN_STATION`（默认）/ `OUT_OF_STATION` |
+| walk_secs | INT | 换乘步行秒数（可选） |
+| sort_order | INT | 组内排序，默认 0 |
+> 主键 `(group_id, station_id)`。成员可跨运营商、跨公司；同一运营商、同一站码的不同股道本来就是同一站，无需建组。
+> 唯一约束写在建表语句内（MySQL 不支持 `CREATE INDEX IF NOT EXISTS`）；仓库写入不使用方言 upsert，冲突在两种后端上都会报错。
+> 删除公司、运营商、车站、车站组时，仓库在同一事务内显式删除相关成员与组，不依赖外键级联。
+
 ### Route
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |

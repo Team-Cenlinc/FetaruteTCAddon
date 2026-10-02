@@ -9,16 +9,23 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
- * 一次成功 acquire 后生成的运动授权令牌。
+ * 一次成功 acquire 后生成、并在相同物理授权下复用的运动授权令牌。
  *
- * <p>destination 写入、发车与健康恢复不得依赖 TrainCarts 残留 destination；必须能追溯到当前 claim version 的 fresh acquire。
+ * <p>destination 写入、发车与健康恢复不得依赖 TrainCarts 残留 destination；必须能追溯到当前 hard authority。完全相同的 物理授权复用既有
+ * token，不得仅因周期检查再次签发 claim version。
+ *
+ * <p>{@code destinationNode} 是交给 TrainCarts 寻路的远端目标；{@code authorityEndNode}/{@code
+ * authorizedEdgeCount} 是本轮实际取得硬资源的连续前缀边界。两者不得互相替代：远端目标可以位于授权边界之外，但跟驰、Smart feedback 与信号发布只能把后者视为
+ * Movement Authority。
  */
 public record MovementAuthorizationToken(
     String trainName,
     long claimVersion,
     Instant issuedAt,
     NodeId fromNode,
-    NodeId toNode,
+    NodeId destinationNode,
+    Optional<NodeId> authorityEndNode,
+    int authorizedEdgeCount,
     List<OccupancyResource> resources,
     SignalAspect aspect,
     boolean active,
@@ -29,6 +36,12 @@ public record MovementAuthorizationToken(
     issuedAt = issuedAt == null ? Instant.now() : issuedAt;
     resources = resources == null ? List.of() : List.copyOf(resources);
     aspect = aspect == null ? SignalAspect.STOP : aspect;
+    authorityEndNode = authorityEndNode == null ? Optional.empty() : authorityEndNode;
+    authorizedEdgeCount = Math.max(0, authorizedEdgeCount);
+    if (authorityEndNode.isEmpty() || authorizedEdgeCount == 0) {
+      authorityEndNode = Optional.empty();
+      authorizedEdgeCount = 0;
+    }
     committedDestination =
         committedDestination == null ? Optional.empty() : committedDestination.map(String::trim);
     if (trainName.isBlank()) {
@@ -41,7 +54,7 @@ public record MovementAuthorizationToken(
       long claimVersion,
       Instant issuedAt,
       NodeId fromNode,
-      NodeId toNode,
+      NodeId destinationNode,
       List<OccupancyResource> resources,
       SignalAspect aspect) {
     this(
@@ -49,7 +62,34 @@ public record MovementAuthorizationToken(
         claimVersion,
         issuedAt,
         fromNode,
-        toNode,
+        destinationNode,
+        Optional.empty(),
+        0,
+        resources,
+        aspect,
+        false,
+        Optional.empty());
+  }
+
+  /** 构造携带明确硬授权边界、但尚未提交 destination 的 token。 */
+  public MovementAuthorizationToken(
+      String trainName,
+      long claimVersion,
+      Instant issuedAt,
+      NodeId fromNode,
+      NodeId destinationNode,
+      Optional<NodeId> authorityEndNode,
+      int authorizedEdgeCount,
+      List<OccupancyResource> resources,
+      SignalAspect aspect) {
+    this(
+        trainName,
+        claimVersion,
+        issuedAt,
+        fromNode,
+        destinationNode,
+        authorityEndNode,
+        authorizedEdgeCount,
         resources,
         aspect,
         false,
@@ -63,7 +103,9 @@ public record MovementAuthorizationToken(
         claimVersion,
         issuedAt,
         fromNode,
-        toNode,
+        destinationNode,
+        authorityEndNode,
+        authorizedEdgeCount,
         resources,
         aspect,
         true,
@@ -84,6 +126,26 @@ public record MovementAuthorizationToken(
             ? committedDestination
             : Optional.of(destinationName.trim());
     return new MovementAuthorizationToken(
-        trainName, claimVersion, issuedAt, fromNode, toNode, resources, aspect, false, retained);
+        trainName,
+        claimVersion,
+        issuedAt,
+        fromNode,
+        destinationNode,
+        authorityEndNode,
+        authorizedEdgeCount,
+        resources,
+        aspect,
+        false,
+        retained);
+  }
+
+  /**
+   * 返回该 token 是否携带至少一条连续区间的真实硬授权边界。
+   *
+   * <p>远端 destination、非空资源列表或 active 状态都不能替代该证据。信号发布、发车与跟驰预测必须在此条件成立后，才可把 token 解释为可执行的 Movement
+   * Authority。
+   */
+  public boolean hasPhysicalAuthorityBoundary() {
+    return authorityEndNode.isPresent() && authorizedEdgeCount > 0;
   }
 }

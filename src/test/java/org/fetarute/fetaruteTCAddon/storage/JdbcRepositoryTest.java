@@ -41,10 +41,22 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.InterlockingZoneInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailInterlockingSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.JdbcStorageProvider;
@@ -623,6 +635,92 @@ final class JdbcRepositoryTest {
   }
 
   @Test
+  void shouldLoadLegacyRailEdgesWithoutFootprintColumn() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-edge-topology.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE fta_rail_edges ("
+              + "world_id TEXT NOT NULL,"
+              + "node_a TEXT NOT NULL,"
+              + "node_b TEXT NOT NULL,"
+              + "length_blocks INTEGER NOT NULL,"
+              + "base_speed_limit REAL NOT NULL,"
+              + "bidirectional INTEGER NOT NULL,"
+              + "PRIMARY KEY (world_id, node_a, node_b)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_edges VALUES (?, 'A', 'B', 14, 0.0, 1)")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+
+    RailEdgeRecord loaded = provider.railEdges().listByWorld(worldId).get(0);
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")), loaded.edgeId());
+    assertEquals(14, loaded.lengthBlocks());
+    assertEquals(0.0, loaded.baseSpeedLimit(), 1e-9);
+    assertTrue(loaded.bidirectional());
+  }
+
+  /**
+   * 旧库里 {@code footprint_json} **列已存在、可空、值全是 NULL** —— 这是用户实服库的真实形状。
+   *
+   * <p>该列是更早一版 schema 的遗留（当时被有意移除，只留下了列）。实测用户库： {@code footprint_json TEXT}（无 NOT NULL、无
+   * DEFAULT），511 行全为 NULL。
+   *
+   * <p>两处必须成立，否则上线即炸：
+   *
+   * <ul>
+   *   <li>兼容性迁移的 {@code ADD COLUMN} 会失败——SQLite 原文是 {@code duplicate column name: footprint_json}，含
+   *       "duplicate"，必须被静默容忍；
+   *   <li>读到 NULL 必须解成**空足迹**而不是抛出——于是 cell→edge 索引不可用、调用方 fail-closed， 行为与升级前一字不差，直到用户跑过一次 {@code
+   *       /fta graph build} 把足迹写进去。
+   * </ul>
+   */
+  @Test
+  void shouldLoadLegacyRailEdgesWithNullableFootprintColumnHoldingNulls() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-edge-null-footprint.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute("DROP TABLE IF EXISTS fta_rail_edges;");
+      // 逐字照搬用户实服库的列定义：可空、无 DEFAULT。
+      statement.execute(
+          "CREATE TABLE fta_rail_edges ("
+              + "world_id TEXT NOT NULL,"
+              + "node_a TEXT NOT NULL,"
+              + "node_b TEXT NOT NULL,"
+              + "length_blocks INTEGER NOT NULL,"
+              + "base_speed_limit REAL NOT NULL,"
+              + "bidirectional INTEGER NOT NULL, footprint_json TEXT,"
+              + "PRIMARY KEY (world_id, node_a, node_b)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_edges VALUES (?, 'A', 'B', 14, 0.0, 1, NULL)")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    // setupProvider 会跑 schema + 兼容性迁移；ADD COLUMN 必然撞 duplicate，必须不抛。
+    StorageProvider provider = setupProvider(dbFile);
+
+    RailEdgeRecord loaded = provider.railEdges().listByWorld(worldId).get(0);
+    assertEquals(EdgeId.undirected(NodeId.of("A"), NodeId.of("B")), loaded.edgeId());
+    assertEquals(14, loaded.lengthBlocks());
+    assertTrue(loaded.footprintCells().isEmpty(), "NULL 必须解成空足迹（= 无从判断），而不是抛出或伪造出覆盖");
+  }
+
+  @Test
   void shouldPersistRailEdgeOverrides() {
     StorageProvider provider = setupProvider(TEST_DB);
     RailEdgeOverrideRepository repository = provider.railEdgeOverrides();
@@ -658,6 +756,87 @@ final class JdbcRepositoryTest {
   }
 
   @Test
+  void shouldPersistRailEdgeTopology() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    RailEdgeRepository repository = provider.railEdges();
+    UUID worldId = UUID.randomUUID();
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+
+    repository.replaceWorld(worldId, List.of(new RailEdgeRecord(worldId, edgeId, 24, 8.5, true)));
+
+    RailEdgeRecord loaded = repository.listByWorld(worldId).get(0);
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(edgeId, loaded.edgeId());
+    assertEquals(24, loaded.lengthBlocks());
+    assertEquals(8.5, loaded.baseSpeedLimit(), 1e-9);
+    assertTrue(loaded.bidirectional());
+  }
+
+  @Test
+  void shouldReplaceAndLoadSparseRailInterlockingSnapshot() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    UUID worldId = UUID.randomUUID();
+    EdgeId first = EdgeId.undirected(NodeId.of("MT-W"), NodeId.of("MT-E"));
+    EdgeId second = EdgeId.undirected(NodeId.of("DS-N"), NodeId.of("DS-S"));
+    RailFootprintCell crossing = new RailFootprintCell(10, 64, 10);
+    InterlockingZoneInfo zone =
+        new InterlockingZoneInfo("interlocking:stable-zone", first, second, Set.of(crossing));
+    RailInterlockingSnapshotRecord snapshot =
+        new RailInterlockingSnapshotRecord(
+            worldId,
+            RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION,
+            "edge-signature",
+            new RailInterlockingCoverage(2, 2, true),
+            Map.of(zone.zoneKey(), zone));
+
+    provider.railInterlockingSnapshots().save(snapshot);
+
+    assertEquals(snapshot, provider.railInterlockingSnapshots().findByWorld(worldId).orElseThrow());
+    provider.railInterlockingSnapshots().delete(worldId);
+    assertTrue(provider.railInterlockingSnapshots().findByWorld(worldId).isEmpty());
+  }
+
+  @Test
+  void shouldIgnoreLegacyFootprintColumnWhenLoadingRailEdgeTopology() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-edge-extra-footprint.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE fta_rail_edges ("
+              + "world_id TEXT NOT NULL,"
+              + "node_a TEXT NOT NULL,"
+              + "node_b TEXT NOT NULL,"
+              + "length_blocks INTEGER NOT NULL,"
+              + "base_speed_limit REAL NOT NULL,"
+              + "bidirectional INTEGER NOT NULL,"
+              + "footprint_json TEXT,"
+              + "PRIMARY KEY (world_id, node_a, node_b)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_edges "
+                  + "(world_id, node_a, node_b, length_blocks, base_speed_limit, bidirectional, footprint_json) "
+                  + "VALUES (?, 'A', 'B', 12, 7.25, 1, '{not-json')")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+
+    RailEdgeRecord loaded = provider.railEdges().listByWorld(worldId).get(0);
+
+    assertEquals(worldId, loaded.worldId());
+    assertEquals(edgeId, loaded.edgeId());
+    assertEquals(12, loaded.lengthBlocks());
+    assertEquals(7.25, loaded.baseSpeedLimit(), 1e-9);
+    assertTrue(loaded.bidirectional());
+  }
+
+  @Test
   void shouldNormalizeEdgeIdAndPersistBlockedFields() {
     StorageProvider provider = setupProvider(TEST_DB);
     RailEdgeOverrideRepository repository = provider.railEdgeOverrides();
@@ -688,6 +867,512 @@ final class JdbcRepositoryTest {
     repository.deleteWorld(worldId);
     assertTrue(repository.listByWorld(worldId).isEmpty());
   }
+
+  /**
+   * 时刻表往返：表头、各 route 的时分档案（JSON 列）、发车表与车辆交路必须整体一致。
+   *
+   * <p>特别钉住两件事：
+   *
+   * <ul>
+   *   <li><b>时区</b>以文本存，读回来必须还是同一个 {@code ZoneId}。存错了不会报错，只会让整张表的时刻
+   *       整体平移几个小时，而那种偏移在现场看起来像"调度突然全线晚点"。
+   *   <li><b>车辆交路的回库端点</b>必须原样带回。它是"每辆车最终都会回库"这条不变量的物理落点， 在存储层丢掉等于这条不变量只在内存里成立。
+   * </ul>
+   */
+  @Test
+  void shouldPersistTimetableWithRoutePlansTripsAndDuties() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    UUID tripId = UUID.randomUUID();
+    UUID dutyId = UUID.randomUUID();
+    UUID createRouteId = UUID.randomUUID();
+    UUID returnRouteId = UUID.randomUUID();
+
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT1",
+            "测试表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("Asia/Shanghai"),
+            5 * 3600,
+            23 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    fixture.routeId(),
+                    "TTR",
+                    5,
+                    List.of(
+                        new TimetableStop(
+                            0,
+                            Optional.of("AAA"),
+                            Optional.of("OP:S:AAA:1"),
+                            0,
+                            0,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            1,
+                            Optional.of("BBB"),
+                            Optional.of("OP:S:BBB:1"),
+                            100,
+                            130,
+                            RouteStopPassType.STOP)),
+                    "OP:S:AAA:1",
+                    "OP:S:BBB:1",
+                    Optional.of("OP:D:DEP:1"),
+                    Optional.empty()),
+                new TimetableRoutePlan(
+                    returnRouteId,
+                    "TTRET",
+                    RouteOperationType.RETURN,
+                    7,
+                    List.of(
+                        new TimetableStop(
+                            0,
+                            Optional.of("BBB"),
+                            Optional.of("OP:S:BBB:1"),
+                            0,
+                            0,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            1,
+                            Optional.empty(),
+                            Optional.of("OP:D:DEP:1"),
+                            40,
+                            40,
+                            RouteStopPassType.PASS)),
+                    "OP:S:BBB:1",
+                    "OP:D:DEP:1",
+                    Optional.empty(),
+                    Optional.empty())),
+            List.of(
+                new TimetableTrip(
+                    tripId,
+                    timetableId,
+                    fixture.routeId(),
+                    0,
+                    "TTR-001",
+                    8 * 3600,
+                    Optional.of(dutyId))),
+            List.of(
+                new VehicleDuty(
+                    dutyId,
+                    timetableId,
+                    0,
+                    "D001",
+                    "OP:D:DEP:1",
+                    "OP:D:DEP:1",
+                    Optional.of(createRouteId),
+                    Optional.of(returnRouteId),
+                    List.of(tripId),
+                    8 * 3600 - 300,
+                    8 * 3600 + 400,
+                    8 * 3600 + 900,
+                    VehicleDuty.CloseReason.MAX_TRIPS)),
+            Optional.of("备注"),
+            now,
+            now);
+
+    provider.timetables().save(timetable);
+    Timetable loaded = provider.timetables().findById(timetableId).orElseThrow();
+
+    assertEquals("TT1", loaded.code());
+    assertEquals(TimetableStatus.DRAFT, loaded.status());
+    assertEquals("Asia/Shanghai", loaded.zoneId().getId());
+    assertEquals(5 * 3600, loaded.serviceStartSecondOfDay());
+    assertEquals(2, loaded.routePlans().size());
+    assertEquals(5, loaded.routePlans().get(0).weight());
+    assertEquals(RouteOperationType.OPERATION, loaded.routePlans().get(0).kind());
+    assertEquals(RouteOperationType.RETURN, loaded.routePlans().get(1).kind());
+    assertEquals(0, loaded.routePlans().get(1).weight(), "非运营线路的 weight 恒为 0");
+    assertEquals(130, loaded.routePlans().get(0).stops().get(1).departureOffsetSeconds());
+    assertEquals(RouteStopPassType.STOP, loaded.routePlans().get(0).stops().get(1).passType());
+    assertEquals(
+        RouteStopPassType.PASS,
+        loaded.routePlans().get(1).stops().get(1).passType(),
+        "停车方式随 route_plans 落库：回库段的车库是通过点");
+    assertEquals(Optional.of("OP:D:DEP:1"), loaded.routePlans().get(0).depotNodeId());
+    assertEquals(1, loaded.trips().size());
+    assertEquals("TTR-001", loaded.trips().get(0).tripCode());
+    assertEquals(Optional.of(dutyId), loaded.trips().get(0).dutyId());
+    assertEquals(1, loaded.duties().size());
+    assertEquals("OP:D:DEP:1", loaded.duties().get(0).endDepotNodeId());
+    assertEquals(Optional.of(createRouteId), loaded.duties().get(0).createRouteId());
+    assertEquals(Optional.of(returnRouteId), loaded.duties().get(0).returnRouteId());
+    assertEquals(8 * 3600 - 300, loaded.duties().get(0).plannedStartSecondOfDay(), "出库可早于服务日");
+    assertEquals(8 * 3600 + 400, loaded.duties().get(0).returnSecondOfDay());
+    assertEquals(VehicleDuty.CloseReason.MAX_TRIPS, loaded.duties().get(0).closeReason());
+    assertEquals(List.of(tripId), loaded.duties().get(0).tripIds());
+    assertEquals(Optional.of("备注"), loaded.notes());
+
+    // 只有 PUBLISHED 才进运行时视图；翻状态只改表头，不碰车次与交路。
+    assertTrue(provider.timetables().listPublished().isEmpty());
+    Instant publishedAt = now.plusSeconds(30);
+    assertTrue(
+        provider.timetables().updateStatus(timetableId, TimetableStatus.PUBLISHED, publishedAt));
+    List<Timetable> published = provider.timetables().listPublished();
+    assertEquals(1, published.size());
+    assertEquals(publishedAt, published.get(0).updatedAt());
+    assertEquals(loaded.trips(), published.get(0).trips());
+    assertEquals(loaded.duties(), published.get(0).duties());
+    assertFalse(
+        provider.timetables().updateStatus(UUID.randomUUID(), TimetableStatus.PUBLISHED, now),
+        "没有这份表时报告未找到");
+
+    // 重新保存必须整体替换子表，而不是累加。
+    provider
+        .timetables()
+        .save(
+            provider
+                .timetables()
+                .findById(timetableId)
+                .orElseThrow()
+                .withTripsAndDuties(List.of(), List.of()));
+    Timetable emptied = provider.timetables().findById(timetableId).orElseThrow();
+    assertTrue(emptied.trips().isEmpty());
+    assertTrue(emptied.duties().isEmpty());
+
+    provider.timetables().delete(timetableId);
+    assertTrue(provider.timetables().findById(timetableId).isEmpty());
+  }
+
+  /** 外方走行线路的标记随 route_plans 的 JSON 落库、读回；旧 JSON 没有这个字段时按 false。 */
+  @Test
+  void shouldRoundTripExternalRoutePlanFlag() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    UUID foreignRoute = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT3",
+            "直通表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    fixture.routeId(),
+                    "RA",
+                    RouteOperationType.OPERATION,
+                    1,
+                    List.of(),
+                    "OP:S:A:1",
+                    "CHT:S:X:1",
+                    Optional.empty(),
+                    Optional.empty()),
+                new TimetableRoutePlan(
+                    foreignRoute,
+                    "NL-RET",
+                    RouteOperationType.RETURN,
+                    0,
+                    List.of(),
+                    "CHT:S:X:1",
+                    "CHT:D:DEP2:1",
+                    Optional.empty(),
+                    Optional.empty(),
+                    true)),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+
+    provider.timetables().save(timetable);
+    Timetable loaded = provider.timetables().findById(timetableId).orElseThrow();
+
+    assertFalse(loaded.routePlan(fixture.routeId()).orElseThrow().external());
+    assertTrue(loaded.routePlan(foreignRoute).orElseThrow().external());
+    assertEquals(List.of(fixture.routeId()), loaded.managedRouteIds());
+  }
+
+  /** 1.5.0 之前落库的 route_plans 没有停车方式：按当时对外的口径回推（首末站与停站大于 0 秒的点算停车）， 停站 0 秒的中途点当作通过——重新发布后才按交路定义。 */
+  @Test
+  void legacyRoutePlanWithoutPassTypeFallsBackToDwellHeuristic() throws Exception {
+    StorageProvider provider = setupProvider(TEST_DB);
+    JdbcStorageProvider jdbcProvider = (JdbcStorageProvider) provider;
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT4",
+            "旧表",
+            TimetableStatus.PUBLISHED,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(
+                new TimetableRoutePlan(
+                    fixture.routeId(),
+                    "RA",
+                    1,
+                    List.of(
+                        new TimetableStop(
+                            0,
+                            Optional.of("AAA"),
+                            Optional.of("OP:S:AAA:1"),
+                            0,
+                            0,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            1,
+                            Optional.of("ZZZ"),
+                            Optional.of("OP:S:ZZZ:1"),
+                            50,
+                            50,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            2,
+                            Optional.of("BBB"),
+                            Optional.of("OP:S:BBB:1"),
+                            100,
+                            130,
+                            RouteStopPassType.STOP),
+                        new TimetableStop(
+                            3,
+                            Optional.of("CCC"),
+                            Optional.of("OP:S:CCC:1"),
+                            230,
+                            230,
+                            RouteStopPassType.TERMINATE)),
+                    "OP:S:AAA:1",
+                    "OP:S:CCC:1",
+                    Optional.empty(),
+                    Optional.empty())),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(timetable);
+
+    // 抹掉 pass 字段，模拟 1.5.0 之前写入的行。
+    try (var connection = jdbcProvider.dataSource().getConnection()) {
+      String json;
+      try (var ps =
+          connection.prepareStatement("SELECT route_plans FROM fta_timetables WHERE id = ?")) {
+        ps.setString(1, timetableId.toString());
+        try (var rs = ps.executeQuery()) {
+          assertTrue(rs.next());
+          json = rs.getString(1);
+        }
+      }
+      assertTrue(json.contains("\"pass\""), "新写入的行带停车方式");
+      try (var ps =
+          connection.prepareStatement("UPDATE fta_timetables SET route_plans = ? WHERE id = ?")) {
+        ps.setString(1, json.replaceAll(",\"pass\":\"[A-Z]+\"", ""));
+        ps.setString(2, timetableId.toString());
+        ps.executeUpdate();
+      }
+    }
+
+    List<TimetableStop> stops =
+        provider.timetables().findById(timetableId).orElseThrow().routePlans().get(0).stops();
+    assertEquals(
+        List.of(
+            RouteStopPassType.STOP,
+            RouteStopPassType.PASS,
+            RouteStopPassType.STOP,
+            RouteStopPassType.STOP),
+        stops.stream().map(TimetableStop::passType).toList());
+  }
+
+  /** 邻表基线随表落库、整体替换、随表删除：publish 重检靠它判断邻表变没变。 */
+  @Test
+  void shouldReplaceAndListTimetableBaselines() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT2",
+            "基线表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(),
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(timetable);
+    UUID neighborId = UUID.randomUUID();
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline baseline =
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline(
+            timetableId, neighborId, "C1/SURC/MT/MT-TT", now.plusSeconds(60), 31, 2, true);
+
+    provider.timetables().replaceBaselines(timetableId, List.of(baseline));
+    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline>
+        loaded = provider.timetables().listBaselines(timetableId);
+
+    assertEquals(List.of(baseline), loaded);
+
+    provider.timetables().replaceBaselines(timetableId, List.of());
+    assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "整体替换：空列表清空基线");
+
+    provider.timetables().replaceBaselines(timetableId, List.of(baseline));
+    provider.timetables().save(timetable);
+    provider.timetables().updateStatus(timetableId, TimetableStatus.PUBLISHED, now.plusSeconds(1));
+    assertEquals(
+        List.of(baseline),
+        provider.timetables().listBaselines(timetableId),
+        "重存表（只重写发车表与交路）与翻状态都不碰基线");
+
+    provider.timetables().delete(timetableId);
+    assertTrue(provider.timetables().listBaselines(timetableId).isEmpty(), "删表时基线随之删除");
+  }
+
+  /**
+   * 一次保存是一个事务：半路失败时整份回滚，库里还是上一版。
+   *
+   * <p>保存先删旧的车次与交路、再逐行插入。此前每条语句自动提交，插到一半撞上唯一约束时旧车次已经删掉了， 库里留下半份表——有表头没车次的表会让一条线"按表运行"却一趟车都发不出来。
+   */
+  @Test
+  void timetableSaveRollsBackAsAWhole() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    Timetable original =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT4",
+            "回滚表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(),
+            List.of(trip(timetableId, fixture.routeId(), "TTR-001", 8 * 3600)),
+            List.of(),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(original);
+
+    // 两趟车同一个车次号：第二行撞上 (timetable_id, trip_code) 唯一约束。
+    Timetable broken =
+        original.withTripsAndDuties(
+            List.of(
+                trip(timetableId, fixture.routeId(), "TTR-002", 9 * 3600),
+                trip(timetableId, fixture.routeId(), "TTR-002", 10 * 3600)),
+            List.of());
+    assertThrows(StorageException.class, () -> provider.timetables().save(broken));
+
+    Timetable reloaded = provider.timetables().findById(timetableId).orElseThrow();
+    assertEquals(original.trips(), reloaded.trips(), "失败的保存不能把上一版的车次删掉");
+  }
+
+  private static TimetableTrip trip(UUID timetableId, UUID routeId, String code, int departure) {
+    return new TimetableTrip(
+        UUID.randomUUID(), timetableId, routeId, 0, code, departure, Optional.empty());
+  }
+
+  /** 建起一条 company → operator → line → route 的最小链路，满足时刻表的外键。 */
+  private TimetableFixture seedRoute(StorageProvider provider) {
+    Instant now = Instant.now();
+    UUID ownerId = UUID.randomUUID();
+    provider
+        .playerIdentities()
+        .save(
+            new PlayerIdentity(
+                ownerId,
+                UUID.randomUUID(),
+                "Owner",
+                IdentityAuthType.ONLINE,
+                Optional.empty(),
+                Map.of(),
+                now,
+                now));
+    UUID companyId = UUID.randomUUID();
+    provider
+        .companies()
+        .save(
+            new Company(
+                companyId,
+                "TTC",
+                "Timetable Co",
+                Optional.empty(),
+                ownerId,
+                CompanyStatus.ACTIVE,
+                0L,
+                Map.of(),
+                now,
+                now));
+    Operator operator =
+        new Operator(
+            UUID.randomUUID(),
+            "TTOP",
+            companyId,
+            "Timetable Operator",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            now,
+            now);
+    provider.operators().save(operator);
+    Line line =
+        new Line(
+            UUID.randomUUID(),
+            "TTL",
+            operator.id(),
+            "Timetable Line",
+            Optional.empty(),
+            LineServiceType.METRO,
+            Optional.empty(),
+            LineStatus.ACTIVE,
+            Optional.of(300),
+            Map.of(),
+            now,
+            now);
+    provider.lines().save(line);
+    Route route =
+        new Route(
+            UUID.randomUUID(),
+            "TTR",
+            line.id(),
+            "Timetable Route",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.of(5_000),
+            Optional.of(300),
+            Map.of(),
+            now,
+            now);
+    provider.routes().save(route);
+    return new TimetableFixture(companyId, operator.id(), line.id(), route.id());
+  }
+
+  private record TimetableFixture(UUID companyId, UUID operatorId, UUID lineId, UUID routeId) {}
 
   private StorageProvider setupProvider(Path dbFile) {
     ConfigManager.StorageSettings settings =
@@ -738,12 +1423,7 @@ final class JdbcRepositoryTest {
                 10,
                 Optional.empty()),
             new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
-            new ConfigManager.TrainConfigSettings(
-                "emu",
-                new ConfigManager.TrainTypeSettings(0.8, 1.0),
-                new ConfigManager.TrainTypeSettings(0.7, 0.9),
-                new ConfigManager.TrainTypeSettings(0.6, 0.8),
-                new ConfigManager.TrainTypeSettings(0.9, 1.1)),
+            new ConfigManager.TrainConfigSettings("emu", Map.of()),
             new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L),
             ConfigManager.HealthSettings.defaults());
     manager = new StorageManager(null, new LoggerManager(Logger.getAnonymousLogger()));

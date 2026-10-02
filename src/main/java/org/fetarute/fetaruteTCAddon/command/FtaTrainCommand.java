@@ -32,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
@@ -464,6 +465,14 @@ public final class FtaTrainCommand {
       return;
     }
 
+    // 线路标签是对乘客运营的线路：列车放在 index 处，入路站及之前的 CHANGE（含首站的起步线路）不会再由“抵达”来执行，
+    // 这里直接按 RouteLineChanges#entryLine 写，与出车、折返复用同一口径。
+    RouteLineChanges.LineRef entryLine =
+        RouteLineChanges.entryLine(
+            provider.routeStops().listByRoute(routeEntity.id()),
+            index,
+            new RouteLineChanges.LineRef(operator.code(), line.code()));
+
     boolean refreshedAny = false;
     for (TrainProperties properties : targets) {
       String trainName = properties.getTrainName();
@@ -476,8 +485,10 @@ public final class FtaTrainCommand {
       // 写入 route tags：同时写 code 三元组与 route UUID，便于后续定位与兼容回退查找。
       TrainTagHelper.writeTag(
           properties, RouteProgressRegistry.TAG_ROUTE_ID, String.valueOf(routeEntity.id()));
-      TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_OPERATOR_CODE, operator.code());
-      TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_LINE_CODE, line.code());
+      TrainTagHelper.writeTag(
+          properties, RouteProgressRegistry.TAG_OPERATOR_CODE, entryLine.operatorCode());
+      TrainTagHelper.writeTag(
+          properties, RouteProgressRegistry.TAG_LINE_CODE, entryLine.lineCode());
       TrainTagHelper.writeTag(properties, RouteProgressRegistry.TAG_ROUTE_CODE, routeEntity.code());
       TrainTagHelper.writeTag(
           properties, RouteProgressRegistry.TAG_ROUTE_INDEX, String.valueOf(index));
@@ -738,6 +749,22 @@ public final class FtaTrainCommand {
                 "destination_blocked", diag.destinationPresentWhileBlocked() ? "yes" : "no",
                 "retained_destination", diag.retainedDestination(),
                 "blocked_reason", diag.blockedReason())));
+    plugin
+        .getRuntimeDispatchService()
+        .flatMap(service -> service.getActiveStopState(diag.trainName()))
+        .ifPresent(
+            stopState ->
+                sender.sendMessage(
+                    locale.component(
+                        "command.train.debug.stop",
+                        Map.of(
+                            "reason", stopState.reasonCode(),
+                            "detail", stopState.detail(),
+                            "release", stopState.releaseCondition().name(),
+                            "retry", stopState.retryTrigger().name(),
+                            "invalidates_authority",
+                                String.valueOf(stopState.invalidatesAuthority()),
+                            "blockers", formatStopBlockers(stopState.blockers())))));
     sender.sendMessage(
         Component.text("  ")
             .append(
@@ -763,6 +790,17 @@ public final class FtaTrainCommand {
       return "-";
     }
     return values.stream().limit(6).collect(java.util.stream.Collectors.joining(", "));
+  }
+
+  private static String formatStopBlockers(
+      List<org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState.Blocker> blockers) {
+    if (blockers == null || blockers.isEmpty()) {
+      return "-";
+    }
+    return blockers.stream()
+        .limit(6)
+        .map(blocker -> blocker.resource() + "@" + blocker.owner() + ":" + blocker.role())
+        .collect(java.util.stream.Collectors.joining(", "));
   }
 
   private static String formatOptionalSpeed(java.util.OptionalDouble bps) {

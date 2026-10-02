@@ -8,6 +8,9 @@ public enum ConflictClearingEvidenceKind {
   /** 占用层已基于 blocker、队列和 release lock 认证过的冲突释放。 */
   VERIFIED_CONFLICT_RELEASE(true),
 
+  /** 运行时已证明列车实体位于 switcher 节点且当前路径正在驶向出口。 */
+  VERIFIED_SWITCHER_OCCUPANT(true),
+
   /** 外部 drain authority 注册表认证过的清空授权。 */
   VERIFIED_DRAIN_AUTHORITY(true);
 

@@ -36,9 +36,9 @@ final class DynamicDestinationResolver {
   /**
    * 解析信号 tick 中可 materialize 的 DYNAMIC effective node。
    *
-   * @return 已选择的 DYNAMIC effective node；empty 表示当前无需或无法 materialize
+   * @return DYNAMIC 三态结果；只有 {@code NOT_APPLICABLE} 可继续使用普通 route，{@code BLOCKED} 必须保持停车且禁止回退声明节点
    */
-  Optional<ResolvedDynamicDestination> resolveSignalTickDestination(
+  DynamicResolution<ResolvedDynamicDestination> resolveSignalTickDestination(
       String trainName,
       RouteDefinition route,
       int currentIndex,
@@ -49,7 +49,7 @@ final class DynamicDestinationResolver {
         trainName, route, currentIndex, worldId, currentNode, forwardDirection, Instant.now());
   }
 
-  Optional<ResolvedDynamicDestination> resolveSignalTickDestination(
+  DynamicResolution<ResolvedDynamicDestination> resolveSignalTickDestination(
       String trainName,
       RouteDefinition route,
       int currentIndex,
@@ -62,7 +62,7 @@ final class DynamicDestinationResolver {
         || route == null
         || worldId == null
         || currentNode == null) {
-      return Optional.empty();
+      return DynamicResolution.notApplicable("invalid-signal-tick-context");
     }
     Optional<RailGraph> graphOpt =
         railGraphService
@@ -78,20 +78,24 @@ final class DynamicDestinationResolver {
                   return new EdgeOverrideRailGraph(graph, overrides, snapshotTime);
                 });
     if (graphOpt.isEmpty()) {
-      return Optional.empty();
+      return allocator.hasDynamicStopInAllocationWindow(route, currentIndex)
+          ? DynamicResolution.blocked("graph-snapshot-missing")
+          : DynamicResolution.notApplicable("graph-snapshot-missing");
     }
-    Optional<DynamicPlatformAllocator.AllocationResult> resultOpt =
-        allocator.tryAllocate(
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> allocation =
+        allocator.resolveAllocation(
             trainName,
             route,
             currentIndex,
             graphOpt.get(),
             currentNode,
             forwardDirection == null ? Optional.empty() : forwardDirection);
-    if (resultOpt.isEmpty()) {
-      return Optional.empty();
+    if (!allocation.isSelected()) {
+      return allocation.isBlocked()
+          ? DynamicResolution.blocked(allocation.reason(), allocation.blockedStopIndex())
+          : DynamicResolution.notApplicable(allocation.reason());
     }
-    DynamicPlatformAllocator.AllocationResult result = resultOpt.get();
+    DynamicPlatformAllocator.AllocationResult result = allocation.selected().orElseThrow();
     debugLogger.accept(
         "DYNAMIC effective node 解析: train="
             + trainName
@@ -99,7 +103,7 @@ final class DynamicDestinationResolver {
             + result.allocatedNode().value()
             + ", idx="
             + result.stopIndex());
-    return Optional.of(
+    return DynamicResolution.selected(
         new ResolvedDynamicDestination(
             result.stopIndex(), result.allocatedNode(), "dynamic-allocator"));
   }

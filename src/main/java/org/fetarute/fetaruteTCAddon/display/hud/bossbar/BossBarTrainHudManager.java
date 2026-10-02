@@ -23,17 +23,18 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
+import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -63,7 +64,6 @@ public final class BossBarTrainHudManager implements Listener {
   private final HudStateTracker stateTracker = new HudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
   private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
   private final Map<UUID, BossBar> bars = new HashMap<>();
-  private long tickCounter = 0L;
 
   public BossBarTrainHudManager(
       FetaruteTCAddon plugin,
@@ -105,8 +105,6 @@ public final class BossBarTrainHudManager implements Listener {
   }
 
   public void tick() {
-    int intervalTicks = resolveIntervalTicks();
-    tickCounter += intervalTicks;
     Set<String> activeTrains = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
       Optional<MinecartGroup> groupOpt = contextResolver.resolveGroup(player);
@@ -169,8 +167,7 @@ public final class BossBarTrainHudManager implements Listener {
 
     Optional<String> templateOpt =
         templateService != null
-            ? templateService.resolveBossBarTemplate(
-                context.routeDefinition().flatMap(RouteDefinition::metadata))
+            ? templateService.resolveTemplateForLine(HudTemplateType.BOSSBAR, context.currentLine())
             : Optional.empty();
     BossBarHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
     long nowMillis = System.currentTimeMillis();
@@ -195,7 +192,10 @@ public final class BossBarTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
-    String templateLine = template.resolveLine(state, tickCounter).orElse("");
+    state =
+        HudStateTracker.applyOutOfService(
+            state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
+    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
 
     BossBar bar =
@@ -304,14 +304,6 @@ public final class BossBarTrainHudManager implements Listener {
     float clamped = clampProgress(value);
     contextResolver.applyProgressPlaceholders(placeholders, clamped);
     return clamped;
-  }
-
-  private int resolveIntervalTicks() {
-    if (configManager != null && configManager.current() != null) {
-      int interval = configManager.current().runtimeSettings().hudBossBarTickIntervalTicks();
-      return Math.max(1, interval);
-    }
-    return 1;
   }
 
   private float clampProgress(float progress) {

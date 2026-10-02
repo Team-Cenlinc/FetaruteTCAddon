@@ -4,7 +4,10 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Objects;
+import java.util.OptionalDouble;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
@@ -82,6 +85,29 @@ public final class SignalLookahead {
           distanceToApproach,
           effectiveSignal,
           Collections.emptyList());
+    }
+
+    /**
+     * 返回限速边距离改为从车头量起的副本。
+     *
+     * <p>前瞻沿路径从当前图节点起算，而车头已驶过该节点 {@code headProgressBlocks}。起点已被车头越过的限速边记 0（车头已在该边上，
+     * 限速即刻生效）。只平移限速边：阻塞/caution/approach 距离仍按节点起算，信号判定与诊断沿用原口径。
+     *
+     * @param headProgressBlocks 车头已驶过当前图节点的距离；不大于 0 时原样返回
+     */
+    public LookaheadResult withEdgeSpeedConstraintsShiftedBy(long headProgressBlocks) {
+      if (headProgressBlocks <= 0L || edgeSpeedConstraints.isEmpty()) {
+        return this;
+      }
+      List<EdgeSpeedConstraint> shifted = new ArrayList<>(edgeSpeedConstraints.size());
+      for (EdgeSpeedConstraint constraint : edgeSpeedConstraints) {
+        shifted.add(
+            new EdgeSpeedConstraint(
+                Math.max(0L, constraint.distanceBlocks() - headProgressBlocks),
+                constraint.speedLimitBps()));
+      }
+      return new LookaheadResult(
+          distanceToBlocker, distanceToCaution, distanceToApproach, effectiveSignal, shifted);
     }
 
     /** 获取到最近限制点的距离（用于速度曲线计算）。 */
@@ -244,6 +270,48 @@ public final class SignalLookahead {
         distanceToApproach,
         effectiveSignal,
         edgeSpeedConstraints);
+  }
+
+  /**
+   * 一段路径的限速包络：列车所在区间（首条边）的限速，与刹得住前方每条边限速的最高速度中的最小值。
+   *
+   * <p>制动按编表运行曲线同一条 S 形曲线（{@link SpeedCeiling#brakingLimitBps}），以所在区间限速为巡航速度。前方各边的距离从车头量起：
+   * 按累计边长扣掉车头已驶过首节点的距离。没有加减速曲线（关闭速度曲线）时退回整段最小限速——不能按制动曲线放宽，就不放宽。
+   *
+   * @param edges 从列车当前图节点出发、按行驶顺序排列的路径边
+   * @param resolver 边限速解析（已考虑 override 与临时限速）
+   * @param curve 加减速曲线；不按制动曲线放宽时传 {@code null}
+   * @param headProgressBlocks 车头已驶过首节点的距离（blocks），取不到时传 0
+   * @return 包络速度（blocks/s）；没有任何边给出有效限速时为空
+   */
+  public static OptionalDouble pathSpeedEnvelope(
+      List<RailEdge> edges, EdgeSpeedResolver resolver, SpeedCurve curve, long headProgressBlocks) {
+    if (edges == null || edges.isEmpty() || resolver == null) {
+      return OptionalDouble.empty();
+    }
+    double envelope = Double.POSITIVE_INFINITY;
+    double cruise = Double.NaN;
+    long edgeStart = 0L;
+    boolean first = true;
+    for (RailEdge edge : edges) {
+      if (edge == null) {
+        continue;
+      }
+      double limit = resolver.resolve(edge);
+      if (Double.isFinite(limit) && limit > 0.0) {
+        long distance = first ? 0L : Math.max(0L, edgeStart - Math.max(0L, headProgressBlocks));
+        double allowed = limit;
+        if (Double.isNaN(cruise)) {
+          cruise = limit;
+        } else if (curve != null) {
+          allowed = SpeedCeiling.brakingLimitBps(curve, cruise, limit, distance);
+        }
+        envelope = Math.min(envelope, allowed);
+      }
+      edgeStart += Math.max(0, edge.lengthBlocks());
+      first = false;
+    }
+    return Double.isFinite(envelope) ? OptionalDouble.of(envelope) : OptionalDouble.empty();
   }
 
   /**

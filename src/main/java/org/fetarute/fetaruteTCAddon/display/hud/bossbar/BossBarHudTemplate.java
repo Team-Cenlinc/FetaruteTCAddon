@@ -8,6 +8,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Consumer;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 
 /**
@@ -47,13 +48,16 @@ public final class BossBarHudTemplate {
     if (candidates == null || candidates.isEmpty()) {
       return Optional.empty();
     }
-    int size = candidates.size();
-    if (size == 1) {
-      return Optional.ofNullable(candidates.get(0).content());
-    }
-    long ticks = Math.max(1L, rotateTicks);
-    int index = (int) ((tick / ticks) % size);
-    return Optional.ofNullable(candidates.get(index).content());
+    // 先定语言再轮播：各显示用同一个时钟时，行数不同的状态也会同时显示同一种语言。
+    TemplateLine selected =
+        HudLanguageRotation.select(candidates, TemplateLine::language, tick, rotateTicks);
+    return selected == null ? Optional.empty() : Optional.ofNullable(selected.content());
+  }
+
+  /** 模板是否写了该状态的行（不算 DEFAULT 与无前缀行的回退）。 */
+  public boolean defines(HudState state) {
+    List<TemplateLine> lines = linesByState.get(state);
+    return lines != null && !lines.isEmpty();
   }
 
   /** 进度表达式（BossBar 专用）。 */
@@ -222,9 +226,14 @@ public final class BossBarHudTemplate {
     return Math.min(colon, equals);
   }
 
-  private record TemplateLine(int order, String content) {
+  private record TemplateLine(int order, String content, HudLanguageRotation.Language language) {
     private TemplateLine {
       Objects.requireNonNull(content, "content");
+      language = language == null ? HudLanguageRotation.classify(content) : language;
+    }
+
+    private TemplateLine(int order, String content) {
+      this(order, content, null);
     }
   }
 

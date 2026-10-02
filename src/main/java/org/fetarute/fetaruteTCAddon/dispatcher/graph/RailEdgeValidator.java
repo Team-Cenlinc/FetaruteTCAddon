@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -161,24 +162,35 @@ public final class RailEdgeValidator {
    */
   public static Map<EdgeId, Integer> filterCrossTrackEdges(
       Map<EdgeId, Integer> edges, Map<NodeId, RailNode> nodesById) {
+    return filterCrossTrackEntries(edges, nodesById);
+  }
+
+  /**
+   * 过滤探索阶段的区间证据，同时原样保留通过验证的长度与物理足迹。
+   *
+   * @param edges 待过滤的区间探索证据
+   * @param nodesById 节点映射（用于获取节点类型）
+   * @return 通过跨轨道约束的区间证据
+   */
+  public static Map<EdgeId, ExploredRailEdge> filterCrossTrackExploredEdges(
+      Map<EdgeId, ExploredRailEdge> edges, Map<NodeId, RailNode> nodesById) {
+    return Map.copyOf(filterCrossTrackEntries(edges, nodesById));
+  }
+
+  private static <T> Map<EdgeId, T> filterCrossTrackEntries(
+      Map<EdgeId, T> edges, Map<NodeId, RailNode> nodesById) {
     Objects.requireNonNull(edges, "edges");
-    Map<EdgeId, Integer> filtered = new java.util.HashMap<>();
-
-    for (Map.Entry<EdgeId, Integer> entry : edges.entrySet()) {
+    Map<EdgeId, T> filtered = new HashMap<>();
+    for (Map.Entry<EdgeId, T> entry : edges.entrySet()) {
       EdgeId edgeId = entry.getKey();
-      NodeId fromId = edgeId.a();
-      NodeId toId = edgeId.b();
-
-      RailNode nodeA = nodesById != null ? nodesById.get(fromId) : null;
-      RailNode nodeB = nodesById != null ? nodesById.get(toId) : null;
+      RailNode nodeA = nodesById != null ? nodesById.get(edgeId.a()) : null;
+      RailNode nodeB = nodesById != null ? nodesById.get(edgeId.b()) : null;
       NodeType typeA = nodeA != null ? nodeA.type() : null;
       NodeType typeB = nodeB != null ? nodeB.type() : null;
-
-      if (!violatesCrossTrackConstraint(fromId.value(), toId.value(), typeA, typeB)) {
+      if (!violatesCrossTrackConstraint(edgeId.a().value(), edgeId.b().value(), typeA, typeB)) {
         filtered.put(edgeId, entry.getValue());
       }
     }
-
     return filtered;
   }
 

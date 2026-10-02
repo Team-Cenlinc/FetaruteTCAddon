@@ -1,8 +1,12 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.lang.reflect.Field;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -10,541 +14,294 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.DirectedTraversalContext;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyPreviewSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyQueueChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyReleasedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-/** SignalEvaluator 单元测试。 */
+/** 占用事件信号重评估触发器测试。 */
 class SignalEvaluatorTest {
 
   private SignalEventBus eventBus;
-  private MockOccupancyManager mockOccupancy;
-  private MockRequestProvider mockProvider;
+  private MockRequestProvider requestProvider;
+  private List<String> reevaluationRequests;
+  private List<String> failClosedRequests;
+  private List<SignalChangedEvent> signalEvents;
   private SignalEvaluator evaluator;
-  private List<SignalChangedEvent> receivedEvents;
 
   @BeforeEach
   void setUp() {
     eventBus = new SignalEventBus();
-    mockOccupancy = new MockOccupancyManager();
-    mockProvider = new MockRequestProvider();
-    evaluator = new SignalEvaluator(eventBus, mockOccupancy, mockProvider);
-    receivedEvents = new ArrayList<>();
-    eventBus.subscribe(SignalChangedEvent.class, receivedEvents::add);
+    requestProvider = new MockRequestProvider();
+    reevaluationRequests = new ArrayList<>();
+    failClosedRequests = new ArrayList<>();
+    signalEvents = new ArrayList<>();
+    evaluator =
+        new SignalEvaluator(
+            eventBus,
+            requestProvider,
+            reevaluationRequests::add,
+            (trainName, error) -> failClosedRequests.add(trainName),
+            message -> {});
+    eventBus.subscribe(SignalChangedEvent.class, signalEvents::add);
   }
 
   @Test
-  void startSubscribesToEvents() {
+  void startSubscribesOnlyToEligibilityChangingFacts() {
     evaluator.start();
-    assertEquals(1, eventBus.subscriberCount(OccupancyAcquiredEvent.class));
+
+    assertEquals(0, eventBus.subscriberCount(OccupancyAcquiredEvent.class));
     assertEquals(1, eventBus.subscriberCount(OccupancyReleasedEvent.class));
+    assertEquals(1, eventBus.subscriberCount(OccupancyQueueChangedEvent.class));
   }
 
   @Test
-  void stopUnsubscribes() {
+  void stopUnsubscribesFromOccupancyFacts() {
     evaluator.start();
     evaluator.stop();
+
     assertEquals(0, eventBus.subscriberCount(OccupancyAcquiredEvent.class));
     assertEquals(0, eventBus.subscriberCount(OccupancyReleasedEvent.class));
+    assertEquals(0, eventBus.subscriberCount(OccupancyQueueChangedEvent.class));
   }
 
   @Test
-  void acquiredEventTriggersReevaluation() {
+  void acquiredEventDoesNotWakeAnyTrain() {
     evaluator.start();
-    Instant now = Instant.now();
-
-    // 配置 mock：列车 B 等待资源，信号为 PROCEED
-    mockProvider.registerTrain("train-B", SignalAspect.PROCEED);
-    mockOccupancy.setDecision("train-B", true, SignalAspect.PROCEED);
-
-    // 发布 acquired 事件，受影响列车包含 train-B
-    OccupancyResource resource = OccupancyResource.forNode(new NodeId("node-1"));
-    OccupancyAcquiredEvent event =
-        new OccupancyAcquiredEvent(now, "train-A", List.of(resource), List.of("train-B"));
-    eventBus.publish(event);
-
-    // train-B 应该被重新评估并发布信号变化事件
-    assertEquals(1, receivedEvents.size());
-    SignalChangedEvent change = receivedEvents.get(0);
-    assertEquals("train-B", change.trainName());
-    assertEquals(SignalAspect.PROCEED, change.newSignal());
-  }
-
-  @Test
-  void releasedEventTriggersReevaluation() {
-    evaluator.start();
-    Instant now = Instant.now();
-
-    // 配置 mock：train-C 等待资源释放
-    OccupancyResource resource = OccupancyResource.forNode(new NodeId("node-2"));
-    mockProvider.registerTrain("train-C", SignalAspect.PROCEED);
-    mockProvider.registerWaiting(resource, "train-C");
-    mockOccupancy.setDecision("train-C", true, SignalAspect.PROCEED);
-
-    // 发布释放事件
-    OccupancyReleasedEvent event = new OccupancyReleasedEvent(now, "train-A", List.of(resource));
-    eventBus.publish(event);
-
-    // train-C 应该被重新评估
-    assertEquals(1, receivedEvents.size());
-    assertEquals("train-C", receivedEvents.get(0).trainName());
-  }
-
-  @Test
-  void noEventIfSignalUnchanged() {
-    evaluator.start();
-    Instant now = Instant.now();
-
-    // 预设 train-D 的信号为 STOP
-    mockProvider.registerTrain("train-D", SignalAspect.STOP);
-    mockOccupancy.setDecision("train-D", false, SignalAspect.STOP);
-    evaluator.updateCache("train-D", SignalAspect.STOP);
-
-    // 发布 acquired 事件
-    OccupancyAcquiredEvent event =
-        new OccupancyAcquiredEvent(
-            now,
-            "train-A",
-            List.of(OccupancyResource.forNode(new NodeId("n1"))),
-            List.of("train-D"));
-    eventBus.publish(event);
-
-    // 信号未变化，不应发布事件
-    assertTrue(receivedEvents.isEmpty());
-  }
-
-  @Test
-  void signalChangeFromStopToProceed() {
-    evaluator.start();
-    Instant now = Instant.now();
-
-    // 预设 train-E 的信号为 STOP
-    mockProvider.registerTrain("train-E", SignalAspect.PROCEED);
-    mockOccupancy.setDecision("train-E", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-E", SignalAspect.STOP);
-
-    // 发布 acquired 事件
-    OccupancyAcquiredEvent event =
-        new OccupancyAcquiredEvent(
-            now,
-            "train-X",
-            List.of(OccupancyResource.forNode(new NodeId("n1"))),
-            List.of("train-E"));
-    eventBus.publish(event);
-
-    // 信号从 STOP 变为 PROCEED
-    assertEquals(1, receivedEvents.size());
-    SignalChangedEvent change = receivedEvents.get(0);
-    assertEquals(SignalAspect.STOP, change.previousSignal());
-    assertEquals(SignalAspect.PROCEED, change.newSignal());
-    assertTrue(change.isUnblocked());
-    assertFalse(change.isBlocked());
-  }
-
-  @Test
-  void protectiveRetainAllowedDoesNotPublishProceed() {
-    evaluator.start();
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    mockProvider.registerRequest(
-        "train-retain", retainRequest("train-retain", now, ResourceIntent.PROTECTIVE_RETAIN, 0));
-    mockOccupancy.setDecision("train-retain", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-retain", SignalAspect.STOP);
 
     eventBus.publish(
         new OccupancyAcquiredEvent(
-            now,
+            Instant.parse("2026-01-01T00:00:00Z"),
             "owner",
-            List.of(OccupancyResource.forNode(NodeId.of("retain-node"))),
-            List.of("train-retain")));
+            List.of(OccupancyResource.forNode(NodeId.of("node-1"))),
+            List.of("train-B", "train-C")));
 
-    assertTrue(receivedEvents.isEmpty());
-    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-retain").orElseThrow());
+    assertTrue(reevaluationRequests.isEmpty());
+    assertTrue(signalEvents.isEmpty());
   }
 
   @Test
-  void holdOnlyAllowedDoesNotPublishProceed() {
+  void releasedEventResolvesWaitingTrainsAndOnlyRequestsFullReevaluation() {
     evaluator.start();
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    mockProvider.registerRequest(
-        "train-hold", retainRequest("train-hold", now, ResourceIntent.HOLD_ONLY, 0));
-    mockOccupancy.setDecision("train-hold", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-hold", SignalAspect.STOP);
-
-    eventBus.publish(
-        new OccupancyAcquiredEvent(
-            now,
-            "owner",
-            List.of(OccupancyResource.forNode(NodeId.of("hold-node"))),
-            List.of("train-hold")));
-
-    assertTrue(receivedEvents.isEmpty());
-    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-hold").orElseThrow());
-  }
-
-  @Test
-  void occupancyEventRetainAllowedDoesNotClearEntryLookaheadStop() {
-    evaluator.start();
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    mockProvider.registerRequest(
-        "train-blocked", retainRequest("train-blocked", now, ResourceIntent.PROTECTIVE_RETAIN, 0));
-    mockProvider.registerWaiting(
-        OccupancyResource.forNode(NodeId.of("blocked-node")), "train-blocked");
-    mockOccupancy.setDecision("train-blocked", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-blocked", SignalAspect.STOP);
+    OccupancyResource released = OccupancyResource.forNode(NodeId.of("node-2"));
+    requestProvider.waitingTrains = List.of("train-C", "train-D");
 
     eventBus.publish(
         new OccupancyReleasedEvent(
-            now, "owner", List.of(OccupancyResource.forNode(NodeId.of("blocked-node")))));
+            Instant.parse("2026-01-01T00:00:00Z"), "owner", List.of(released)));
 
-    assertTrue(receivedEvents.isEmpty());
-    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-blocked").orElseThrow());
+    assertEquals(List.of(released), requestProvider.lastReleasedResources);
+    assertEquals(List.of("train-C", "train-D"), reevaluationRequests);
+    assertTrue(signalEvents.isEmpty());
   }
 
   @Test
-  void currentIndexMinusOneRequestCannotPublishProceed() {
+  void releasedEventNeverReschedulesTheReleasingTrain() {
     evaluator.start();
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    OccupancyRequest request =
-        movementRequest("train-invalid-index", now)
-            .withDirectedContext(
-                Optional.of(
-                    new DirectedTraversalContext(
-                        "train-invalid-index",
-                        Optional.of(RouteId.of("r")),
-                        -1,
-                        Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty(),
-                        Optional.empty(),
-                        List.of(),
-                        List.of(),
-                        Map.of(),
-                        Map.of(),
-                        "EVENT",
-                        1L,
-                        1L,
-                        "test",
-                        Optional.empty())));
-    mockProvider.registerRequest("train-invalid-index", request);
-    mockOccupancy.setDecision("train-invalid-index", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-invalid-index", SignalAspect.STOP);
+    OccupancyResource released = OccupancyResource.forNode(NodeId.of("jbs-crossing"));
+    requestProvider.waitingTrains = List.of("JBS-DS", "JBS-MT");
 
     eventBus.publish(
-        new OccupancyAcquiredEvent(
-            now,
-            "owner",
-            List.of(OccupancyResource.forNode(NodeId.of("idx-node"))),
-            List.of("train-invalid-index")));
+        new OccupancyReleasedEvent(
+            Instant.parse("2026-01-01T00:00:00Z"), "JBS-DS", List.of(released)));
 
-    assertTrue(receivedEvents.isEmpty());
+    assertEquals(List.of("JBS-MT"), reevaluationRequests);
   }
 
   @Test
-  void movementRequiredResourcesZeroCannotPublishProceed() {
+  void queueHeadEligibilityChangeWakesOnlyRecordedNewHead() {
     evaluator.start();
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    mockProvider.registerRequest(
-        "train-preview", retainRequest("train-preview", now, ResourceIntent.LOOKAHEAD_PREVIEW, 0));
-    mockOccupancy.setDecision("train-preview", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-preview", SignalAspect.STOP);
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:queue-wakeup");
 
     eventBus.publish(
-        new OccupancyAcquiredEvent(
-            now,
-            "owner",
-            List.of(OccupancyResource.forNode(NodeId.of("preview-node"))),
-            List.of("train-preview")));
+        new OccupancyQueueChangedEvent(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            "yield-train",
+            List.of(conflict),
+            List.of("winner-train")));
 
-    assertTrue(receivedEvents.isEmpty());
+    assertTrue(requestProvider.lastReleasedResources.isEmpty());
+    assertEquals(List.of("winner-train"), reevaluationRequests);
   }
 
   @Test
-  void fullMovementStopNotOverriddenByRetainCanEnterAllowed() {
+  void ordinaryQueueMaintenanceDoesNotWakeAnyTrain() {
     evaluator.start();
-    Instant now = Instant.parse("2026-01-01T00:00:00Z");
-    mockProvider.registerRequest(
-        "train-stop", retainRequest("train-stop", now, ResourceIntent.HOLD_ONLY, 0));
-    mockOccupancy.setDecision("train-stop", true, SignalAspect.PROCEED);
-    evaluator.updateCache("train-stop", SignalAspect.STOP);
+    requestProvider.waitingTrains = List.of("unrelated-train");
 
     eventBus.publish(
-        new OccupancyAcquiredEvent(
-            now,
-            "owner",
-            List.of(OccupancyResource.forNode(NodeId.of("stop-node"))),
-            List.of("train-stop")));
+        new OccupancyQueueChangedEvent(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            "refreshing-train",
+            List.of(OccupancyResource.forConflict("switcher:queue-maintenance"))));
 
-    assertTrue(receivedEvents.isEmpty());
-    assertEquals(SignalAspect.STOP, evaluator.lastSignal("train-stop").orElseThrow());
+    assertTrue(requestProvider.lastReleasedResources.isEmpty());
+    assertTrue(reevaluationRequests.isEmpty());
   }
 
   @Test
-  void eventEvaluationUsesPreviewWithoutMutatingConflictQueue() {
+  void queueEligibilityChangeNeverReschedulesItsSource() {
+    evaluator.start();
+    OccupancyResource conflict = OccupancyResource.forConflict("switcher:self-source");
+
+    eventBus.publish(
+        new OccupancyQueueChangedEvent(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            "source-train",
+            List.of(conflict),
+            List.of("source-train", "new-winner")));
+
+    assertEquals(List.of("new-winner"), reevaluationRequests);
+  }
+
+  @Test
+  void releasedJbsQueueWinnerReachesFullReevaluationOnlyOnNextTick() {
+    List<Runnable> nextTickTasks = new ArrayList<>();
+    List<String> fullyReevaluated = new ArrayList<>();
+    RuntimeSignalReevaluationScheduler scheduler =
+        new RuntimeSignalReevaluationScheduler(nextTickTasks::add, fullyReevaluated::add);
+    SignalEvaluator bridge =
+        new SignalEvaluator(eventBus, requestProvider, scheduler::request, message -> {});
+    requestProvider.waitingTrains = List.of("JBS-DS", "JBS-MT");
+    bridge.start();
+
+    eventBus.publish(
+        new OccupancyReleasedEvent(
+            Instant.parse("2026-01-01T00:00:00Z"),
+            "JBS-DS",
+            List.of(OccupancyResource.forNode(NodeId.of("jbs-crossing")))));
+
+    assertTrue(fullyReevaluated.isEmpty());
+    assertEquals(1, nextTickTasks.size());
+    nextTickTasks.remove(0).run();
+    assertEquals(List.of("JBS-MT"), fullyReevaluated);
+  }
+
+  @Test
+  void cleanupRemovalReleaseWakesQueuedFollowerOnNextTick() {
     SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
-            (routeId, resource) -> java.time.Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    OccupancyResource conflict = OccupancyResource.forConflict("switcher:SW-1");
-    SignalEvaluator previewEvaluator =
-        new SignalEvaluator(eventBus, manager, new FixedConflictRequestProvider(conflict));
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy(), eventBus);
+    OccupancyResource corridor = OccupancyResource.forConflict("single:ws:lwn~hhu");
+    Instant now = Instant.now();
+    assertTrue(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "stuck-owner",
+                    Optional.empty(),
+                    now,
+                    List.of(corridor),
+                    Map.of(corridor.key(), CorridorDirection.A_TO_B),
+                    20))
+            .allowed());
+    assertFalse(
+        manager
+            .acquire(
+                new OccupancyRequest(
+                    "following-train",
+                    Optional.empty(),
+                    now.plusSeconds(1),
+                    List.of(corridor),
+                    Map.of(corridor.key(), CorridorDirection.B_TO_A),
+                    20))
+            .allowed());
+    List<Runnable> nextTickTasks = new ArrayList<>();
+    List<String> fullyReevaluated = new ArrayList<>();
+    RuntimeSignalReevaluationScheduler scheduler =
+        new RuntimeSignalReevaluationScheduler(nextTickTasks::add, fullyReevaluated::add);
+    SignalEvaluator bridge =
+        new SignalEvaluator(
+            eventBus,
+            new RuntimeDispatchRequestProvider(manager),
+            scheduler::request,
+            message -> {});
+    assertEquals(
+        List.of("following-train"),
+        new RuntimeDispatchRequestProvider(manager).trainsWaitingFor(List.of(corridor)));
+    bridge.start();
 
-    previewEvaluator.start();
-    eventBus.publish(
-        new OccupancyAcquiredEvent(
-            Instant.parse("2026-01-01T00:00:00Z"),
-            "train-A",
-            List.of(conflict),
-            List.of("train-B")));
+    manager.releaseByTrain("stuck-owner");
 
-    assertTrue(manager.snapshotQueues().isEmpty());
+    assertTrue(fullyReevaluated.isEmpty());
+    assertEquals(1, nextTickTasks.size());
+    nextTickTasks.remove(0).run();
+    assertEquals(List.of("following-train"), fullyReevaluated);
   }
 
   @Test
-  void eventEvaluationWithoutPreviewFailsClosedWithoutCallingCanEnter() {
-    NoPreviewCountingOccupancyManager manager = new NoPreviewCountingOccupancyManager();
-    mockProvider.registerTrain("train-F", SignalAspect.PROCEED);
-    SignalEvaluator noPreviewEvaluator = new SignalEvaluator(eventBus, manager, mockProvider);
+  void releasedEventQueryFailureCannotEscapeTheSynchronousEventBus() {
+    evaluator.start();
+    requestProvider.waitingQueryFailure = new LinkageError("provider unavailable");
 
-    noPreviewEvaluator.start();
-    eventBus.publish(
-        new OccupancyAcquiredEvent(
-            Instant.parse("2026-01-01T00:00:00Z"),
-            "train-A",
-            List.of(OccupancyResource.forNode(NodeId.of("node-1"))),
-            List.of("train-F")));
-
-    assertEquals(0, manager.canEnterCalls());
-    assertEquals(1, receivedEvents.size());
-    assertEquals(SignalAspect.STOP, receivedEvents.get(0).newSignal());
+    assertDoesNotThrow(
+        () ->
+            eventBus.publish(
+                new OccupancyReleasedEvent(
+                    Instant.parse("2026-01-01T00:00:00Z"),
+                    "JBS-DS",
+                    List.of(OccupancyResource.forNode(NodeId.of("jbs-crossing"))))));
+    assertTrue(reevaluationRequests.isEmpty());
+    assertEquals(List.of("JBS-DS"), failClosedRequests);
   }
 
   @Test
-  void signalEvaluatorDoesNotOwnTrainControlDependencies() {
-    Set<String> controlDependencies =
-        Set.of("TrainProperties", "RuntimeTrainController", "TrainLaunchManager", "TrainCarts");
+  void invalidHintsAreIgnored() {
+    evaluator.start();
+    requestProvider.waitingTrains = List.of("", "   ", "train-E");
+
+    eventBus.publish(
+        new OccupancyAcquiredEvent(
+            Instant.now(), "owner", List.of(), List.of("", "train-A", "   ")));
+    eventBus.publish(
+        new OccupancyReleasedEvent(
+            Instant.now(), "owner", List.of(OccupancyResource.forNode(NodeId.of("node-3")))));
+
+    assertEquals(List.of("train-E"), reevaluationRequests);
+  }
+
+  @Test
+  void signalEvaluatorDoesNotOwnAuthorityOrTrainControlDependencies() {
+    Set<String> forbiddenDependencies =
+        Set.of(
+            "OccupancyManager",
+            "OccupancyRequest",
+            "TrainProperties",
+            "RuntimeTrainController",
+            "TrainLaunchManager",
+            "TrainCarts");
 
     for (Field field : SignalEvaluator.class.getDeclaredFields()) {
       String fieldType = field.getType().getSimpleName();
-      for (String dependency : controlDependencies) {
+      for (String dependency : forbiddenDependencies) {
         assertFalse(
             fieldType.contains(dependency),
-            "SignalEvaluator must remain a pure signal evaluator: " + fieldType);
+            "SignalEvaluator must only translate facts into wake-ups: " + fieldType);
       }
     }
   }
 
-  // ========== Mock 实现 ==========
+  private static final class MockRequestProvider implements SignalEvaluator.WaitingTrainProvider {
 
-  private static final class FixedConflictRequestProvider
-      implements SignalEvaluator.TrainRequestProvider {
-
-    private final OccupancyResource conflict;
-
-    private FixedConflictRequestProvider(OccupancyResource conflict) {
-      this.conflict = conflict;
-    }
-
-    @Override
-    public Optional<OccupancyRequest> buildRequest(String trainName, Instant now) {
-      if (!"train-B".equals(trainName)) {
-        return Optional.empty();
-      }
-      return Optional.of(
-          new OccupancyRequest(
-              trainName,
-              Optional.empty(),
-              now,
-              List.of(conflict),
-              Map.of(),
-              Map.of(conflict.key(), 0),
-              0));
-    }
+    private List<String> waitingTrains = List.of();
+    private List<OccupancyResource> lastReleasedResources = List.of();
+    private LinkageError waitingQueryFailure;
 
     @Override
     public List<String> trainsWaitingFor(List<OccupancyResource> resources) {
-      return List.of("train-B");
-    }
-  }
-
-  private static class MockOccupancyManager implements OccupancyManager, OccupancyPreviewSupport {
-    private final java.util.Map<String, OccupancyDecision> decisions =
-        new java.util.concurrent.ConcurrentHashMap<>();
-
-    void setDecision(String trainName, boolean allowed, SignalAspect signal) {
-      decisions.put(
-          trainName.toLowerCase(),
-          new OccupancyDecision(allowed, Instant.now(), signal, List.of()));
-    }
-
-    @Override
-    public OccupancyDecision canEnter(OccupancyRequest request) {
-      return decisions.getOrDefault(
-          request.trainName().toLowerCase(),
-          new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
-    }
-
-    @Override
-    public OccupancyDecision canEnterPreview(OccupancyRequest request) {
-      return canEnter(request);
-    }
-
-    @Override
-    public OccupancyDecision acquire(OccupancyRequest request) {
-      return canEnter(request);
-    }
-
-    @Override
-    public Optional<OccupancyClaim> getClaim(OccupancyResource resource) {
-      return Optional.empty();
-    }
-
-    @Override
-    public List<OccupancyClaim> snapshotClaims() {
-      return List.of();
-    }
-
-    @Override
-    public int releaseByTrain(String trainName) {
-      return 0;
-    }
-
-    @Override
-    public boolean releaseResource(OccupancyResource resource, Optional<String> trainName) {
-      return false;
-    }
-
-    @Override
-    public boolean shouldYield(OccupancyRequest request) {
-      return false;
-    }
-  }
-
-  private static final class NoPreviewCountingOccupancyManager implements OccupancyManager {
-    private int canEnterCalls;
-
-    int canEnterCalls() {
-      return canEnterCalls;
-    }
-
-    @Override
-    public OccupancyDecision canEnter(OccupancyRequest request) {
-      canEnterCalls++;
-      return new OccupancyDecision(true, Instant.now(), SignalAspect.PROCEED, List.of());
-    }
-
-    @Override
-    public OccupancyDecision acquire(OccupancyRequest request) {
-      return canEnter(request);
-    }
-
-    @Override
-    public Optional<OccupancyClaim> getClaim(OccupancyResource resource) {
-      return Optional.empty();
-    }
-
-    @Override
-    public List<OccupancyClaim> snapshotClaims() {
-      return List.of();
-    }
-
-    @Override
-    public int releaseByTrain(String trainName) {
-      return 0;
-    }
-
-    @Override
-    public boolean releaseResource(OccupancyResource resource, Optional<String> trainName) {
-      return false;
-    }
-
-    @Override
-    public boolean shouldYield(OccupancyRequest request) {
-      return false;
-    }
-  }
-
-  private static class MockRequestProvider implements SignalEvaluator.TrainRequestProvider {
-    private final java.util.Map<String, SignalAspect> trains =
-        new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.Map<String, OccupancyRequest> requests =
-        new java.util.concurrent.ConcurrentHashMap<>();
-    private final java.util.Map<String, List<String>> waitingMap =
-        new java.util.concurrent.ConcurrentHashMap<>();
-
-    void registerTrain(String name, SignalAspect signal) {
-      trains.put(name.toLowerCase(), signal);
-    }
-
-    void registerRequest(String name, OccupancyRequest request) {
-      trains.put(name.toLowerCase(), SignalAspect.PROCEED);
-      requests.put(name.toLowerCase(), request);
-      for (OccupancyResource resource : request.resourceList()) {
-        registerWaiting(resource, name);
+      if (waitingQueryFailure != null) {
+        throw waitingQueryFailure;
       }
+      lastReleasedResources = List.copyOf(resources);
+      return waitingTrains;
     }
-
-    void registerWaiting(OccupancyResource resource, String trainName) {
-      waitingMap.computeIfAbsent(resource.key(), k -> new ArrayList<>()).add(trainName);
-    }
-
-    @Override
-    public Optional<OccupancyRequest> buildRequest(String trainName, Instant now) {
-      if (!trains.containsKey(trainName.toLowerCase())) {
-        return Optional.empty();
-      }
-      OccupancyRequest registered = requests.get(trainName.toLowerCase());
-      if (registered != null) {
-        return Optional.of(registered);
-      }
-      return Optional.of(movementRequest(trainName, now));
-    }
-
-    @Override
-    public List<String> trainsWaitingFor(List<OccupancyResource> resources) {
-      List<String> result = new ArrayList<>();
-      for (OccupancyResource res : resources) {
-        List<String> waiting = waitingMap.get(res.key());
-        if (waiting != null) {
-          result.addAll(waiting);
-        }
-      }
-      return result;
-    }
-  }
-
-  private static OccupancyRequest movementRequest(String trainName, Instant now) {
-    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("forward-" + trainName));
-    return new OccupancyRequest(trainName, Optional.empty(), now, List.of(resource), Map.of(), 0);
-  }
-
-  private static OccupancyRequest retainRequest(
-      String trainName, Instant now, ResourceIntent intent, int currentIndex) {
-    OccupancyResource resource = OccupancyResource.forNode(NodeId.of("retain-" + trainName));
-    return new OccupancyRequest(
-        trainName,
-        Optional.empty(),
-        now,
-        List.of(resource),
-        Map.of(),
-        Map.of(),
-        0,
-        AuthorizationPurpose.RUNTIME_MOVE,
-        Map.of(),
-        Map.of(resource, intent));
   }
 }

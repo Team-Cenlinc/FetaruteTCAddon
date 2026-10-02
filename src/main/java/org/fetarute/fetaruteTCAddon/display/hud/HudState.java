@@ -17,7 +17,12 @@ public enum HudState {
   DEPARTING,
   ARRIVING,
   TERM_ARRIVING,
-  IN_TRIP;
+  IN_TRIP,
+  /**
+   * 回库车已越过运营终点（「回库 / Not in Service」）。只在模板写了这一状态时使用，见 {@link
+   * HudStateTracker#applyOutOfService}；否则仍按停站、运行等状态显示。
+   */
+  OUT_OF_SERVICE;
 
   /** 解析模板中的状态 key（大小写不敏感）。 */
   public static Optional<HudState> parse(String raw) {

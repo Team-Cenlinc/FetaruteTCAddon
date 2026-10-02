@@ -3,7 +3,6 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor;
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Duration;
 import java.time.Instant;
-import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Objects;
@@ -15,8 +14,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * 确定性智能调度监督器。
  *
  * <p>本类不接管 TrainCarts 物理控制，也不绕过 {@code SignalPublicationGate}。它只基于全局快照、前方风险与 blocker graph
- * 输出可追踪的调度建议：提前 CAUTION、优先级排序、stale 清理候选、forward unlock 候选和 destroy 前置审查。所有排序均使用稳定字段，禁止依赖 HashMap
- * 遍历顺序或随机数。
+ * 输出可追踪的调度建议：提前 CAUTION、stale 清理候选、forward unlock 候选和 destroy 前置审查。资源竞争优先级由运行时 {@code
+ * DispatchPriorityResolver} 与占用层 Gate Queue 统一仲裁，本类不维护第二套评分模型。
  */
 public final class SmartDispatcherController {
 
@@ -84,53 +83,6 @@ public final class SmartDispatcherController {
     }
   }
 
-  /** 单列车优先级输入。 */
-  public record PriorityInput(
-      String trainId,
-      String resourceId,
-      boolean insideConflict,
-      OptionalLong distanceToConflictExit,
-      boolean freshMovementAuthority,
-      boolean compatibleSelfClaim,
-      double currentSpeedBps,
-      Duration waitingDuration,
-      int routePriority,
-      boolean dwellReadyToDepart,
-      int downstreamBlockedTrainCount,
-      boolean safeToMove) {
-
-    public PriorityInput {
-      trainId = normalize(trainId, "-");
-      resourceId = normalize(resourceId, "-");
-      distanceToConflictExit =
-          distanceToConflictExit == null ? OptionalLong.empty() : distanceToConflictExit;
-      currentSpeedBps =
-          Double.isFinite(currentSpeedBps) && currentSpeedBps > 0.0 ? currentSpeedBps : 0.0;
-      waitingDuration =
-          waitingDuration == null || waitingDuration.isNegative() ? Duration.ZERO : waitingDuration;
-      routePriority = Math.max(0, routePriority);
-      downstreamBlockedTrainCount = Math.max(0, downstreamBlockedTrainCount);
-    }
-  }
-
-  /** 确定性优先级评分。 */
-  public record PriorityScore(
-      String trainId, String resourceId, int score, List<String> reasons, boolean safeToMove) {
-
-    public PriorityScore {
-      trainId = normalize(trainId, "-");
-      resourceId = normalize(resourceId, "-");
-      reasons = reasons == null ? List.of() : List.copyOf(reasons);
-    }
-  }
-
-  /** 同一资源竞争的 winner/loser 输出。 */
-  public record PrioritySelection(PriorityScore winner, List<PriorityScore> losers) {
-    public PrioritySelection {
-      losers = losers == null ? List.of() : List.copyOf(losers);
-    }
-  }
-
   /** destroy 前置审查输入。 */
   public record DeadlockDestroyInput(
       String episodeId,
@@ -147,6 +99,11 @@ public final class SmartDispatcherController {
       boolean targetResolvedToRuntimeGroup,
       boolean targetRecentlyProgressed,
       boolean targetFtaManagedOrConfirmedOrphan,
+      boolean directionAuditRequired,
+      String directionAuditReason,
+      boolean directionReauditAttempted,
+      boolean lastResortDestroy,
+      boolean blockingActiveTraffic,
       Duration persisted,
       Duration threshold) {
 
@@ -156,6 +113,7 @@ public final class SmartDispatcherController {
       trainB = normalize(trainB, "-");
       targetTrain = normalize(targetTrain, "-");
       conflictKey = normalize(conflictKey, "-");
+      directionAuditReason = normalize(directionAuditReason, "-");
       persisted = persisted == null || persisted.isNegative() ? Duration.ZERO : persisted;
       threshold = threshold == null || threshold.isNegative() ? Duration.ZERO : threshold;
     }
@@ -180,6 +138,47 @@ public final class SmartDispatcherController {
 
     public static DeadlockDestroyReview rejected(String reason) {
       return new DeadlockDestroyReview(false, reason, false, List.of());
+    }
+  }
+
+  /** 长时间停滞列车 cleanup 的最终审查输入。 */
+  public record StuckCleanupInput(
+      String trainId,
+      boolean targetResolvedToRuntimeGroup,
+      boolean targetFtaManaged,
+      boolean targetRecentlyProgressed,
+      boolean recoveryExhausted,
+      boolean controlledStop,
+      boolean moving,
+      boolean waitingOnLiveBlocker,
+      boolean activeUnlockReservation,
+      boolean hasPassengers,
+      Duration persisted,
+      Duration threshold,
+      Duration passengerThreshold) {
+
+    public StuckCleanupInput {
+      trainId = normalize(trainId, "-");
+      persisted = nonNegative(persisted);
+      threshold = nonNegative(threshold);
+      passengerThreshold = nonNegative(passengerThreshold);
+    }
+  }
+
+  /** 长时间停滞列车 cleanup 的最终审查结果。 */
+  public record StuckCleanupReview(
+      boolean allowed, String reason, boolean requiresPostVerification) {
+
+    public StuckCleanupReview {
+      reason = normalize(reason, allowed ? "allowed" : "rejected");
+    }
+
+    public static StuckCleanupReview allowed(String reason) {
+      return new StuckCleanupReview(true, reason, true);
+    }
+
+    public static StuckCleanupReview rejected(String reason) {
+      return new StuckCleanupReview(false, reason, false);
     }
   }
 
@@ -263,8 +262,8 @@ public final class SmartDispatcherController {
   /**
    * 根据前方风险与制动能力输出调度决策。
    *
-   * <p>该方法不会因为 stale/unknown 风险直接输出 STOP；只有已经进入紧急停车距离、硬安全边界失败或调用方显式传入 {@code directStopAllowed}
-   * 时才返回 {@link DispatchAction#HOLD_AT_SIGNAL}。
+   * <p>该方法不会因为 stale/unknown 风险直接输出 STOP。计划中的 RouteStop/终点只提供减速建议，实际停站由对应的站点或终点运行时行为完成；只有真实 blocker
+   * 等硬安全边界已进入紧急停车距离，或调用方显式传入 {@code directStopAllowed} 时，才返回 {@link DispatchAction#HOLD_AT_SIGNAL}。
    */
   public DispatchDecision decideForwardSignal(ForwardDecisionInput input) {
     Objects.requireNonNull(input, "input");
@@ -286,6 +285,19 @@ public final class SmartDispatcherController {
       traceLogger.accept(
           "SIGNAL_CAUTION_REASON train=" + risk.trainId() + " reason=artificial-window-trace-only");
       return noAction(input, risk, "artificial-window-trace-only");
+    }
+    if (risk.riskSource() == RiskSource.SAME_DIRECTION_FOLLOW) {
+      traceLogger.accept(
+          "SIGNAL_CAUTION_SKIPPED train="
+              + risk.trainId()
+              + " cautionSource="
+              + risk.riskSource()
+              + " reason=same-direction-follow-trace-only");
+      traceLogger.accept(
+          "SIGNAL_CAUTION_REASON train="
+              + risk.trainId()
+              + " reason=same-direction-follow-trace-only");
+      return noAction(input, risk, "same-direction-follow-trace-only");
     }
 
     BrakingProfile braking = buildBrakingProfile(input, risk);
@@ -331,7 +343,7 @@ public final class SmartDispatcherController {
               risk.riskSource(),
               DispatchEffectClass.SIGNAL_CONSTRAINT,
               "safety",
-              normalize(input.directStopReason(), "direct-stop-allowed"),
+              holdAtSignalSafetyReason(input, braking),
               "hold-before-hard-boundary",
               true,
               false,
@@ -340,7 +352,10 @@ public final class SmartDispatcherController {
       return decision;
     }
 
+    // PROTECTIVE_PHYSICAL 不在这里被忽略：准入会在它前面硬停，前瞻若不减速就是"绿灯直接跳红"。
+    // 它只走下面的限速分支；硬停判定（上面）与放行判定（准入侧）一个都不因它改变。
     if (risk.riskFreshness() != RiskFreshness.LIVE
+        && risk.riskFreshness() != RiskFreshness.PROTECTIVE_PHYSICAL
         && risk.riskSource() != RiskSource.NONE
         && risk.riskSource() != RiskSource.EDGE_SPEED_DROP
         && risk.riskSource() != RiskSource.STATION_STOP
@@ -348,24 +363,20 @@ public final class SmartDispatcherController {
         && risk.riskSource() != RiskSource.ROUTE_STOP_OR_TERMINAL
         && risk.riskSource() != RiskSource.MOVEMENT_AUTHORITY_PHYSICAL_END) {
       traceCautionRejected(risk, "stale-or-protective-risk");
-      DispatchAction action =
-          risk.canRelease()
-              ? DispatchAction.RELEASE_STALE_RETAIN
-              : DispatchAction.RECALCULATE_AUTHORITY;
       DispatchDecision decision =
           new DispatchDecision(
               risk.trainId(),
-              action,
+              DispatchAction.NO_ACTION,
               input.currentAspect(),
               input.currentTargetSpeedBps(),
               OptionalLong.empty(),
               OptionalLong.empty(),
               input.authorityEndReason(),
               risk.riskSource(),
-              action.effectClass(),
+              DispatchEffectClass.DIAGNOSTIC_ONLY,
               "stale-risk",
               "stale-or-protective-risk-does-not-stop",
-              "refresh-evidence-before-hard-action",
+              "canonical-occupancy-recovery",
               true,
               false,
               braking);
@@ -394,7 +405,10 @@ public final class SmartDispatcherController {
               risk.riskSource(),
               action.effectClass(),
               "braking-anticipation",
-              "risk-visible-with-braking-distance",
+              // 用 BrakingProfile 的真实判定原因，而不是写死一句"with-braking-distance"：
+              // 写死的标签会在"只因为进入视野而降速"的路径上同样输出，让 trace 误导为
+              // 判定确实算过制动距离。
+              braking.targetSpeedReason(),
               "reduce-speed-before-boundary",
               true,
               false,
@@ -433,7 +447,17 @@ public final class SmartDispatcherController {
     return decision;
   }
 
-  /** 前方风险决策输入。 */
+  /**
+   * 前方风险决策输入。
+   *
+   * <p>{@code plannedRouteStopProven} 接受两种证明，二者都必须来自运行时的规范快照： 当前索引之后存在非 {@code PASS}
+   * RouteStop；或剩余节点全是 {@code PASS} 且末端是图中登记的 {@code DEPOT}（入库走行）。风险来源声称 route
+   * 末端但两种证明都没有时，必须继续按硬停车边界处理， 避免缺失路线证明绕过 Signal 的 fail-closed 授权链。
+   *
+   * <p>加入第二种证明是因为 {@code *D} 路线在 {@code TERMINATE} 之后还有一段全 {@code PASS} 的入库走行， 原判据在那一段拿不到任何证明，于是车被
+   * {@code inside-stop-distance} 停在离段场一个节点的地方。 它拒绝的本意是"**裸** route
+   * 终点"——走完了却不知道那里有什么；而段场节点本身就是那个"知道"。
+   */
   public record ForwardDecisionInput(
       String trainId,
       ForwardSignalRiskSnapshot risk,
@@ -447,7 +471,8 @@ public final class SmartDispatcherController {
       double cautionMarginBlocks,
       boolean directStopAllowed,
       String directStopReason,
-      String authorityEndReason) {
+      String authorityEndReason,
+      boolean plannedRouteStopProven) {
 
     public ForwardDecisionInput {
       trainId = normalize(trainId, "-");
@@ -475,115 +500,6 @@ public final class SmartDispatcherController {
     }
   }
 
-  /** 计算并 trace 优先级评分。 */
-  public PriorityScore scorePriority(PriorityInput input) {
-    Objects.requireNonNull(input, "input");
-    int score = 0;
-    List<String> reasons = new ArrayList<>();
-    if (!input.safeToMove()) {
-      reasons.add("unsafe-to-move");
-      PriorityScore result =
-          new PriorityScore(input.trainId(), input.resourceId(), Integer.MIN_VALUE, reasons, false);
-      tracePriority(result);
-      return result;
-    }
-    if (input.insideConflict()) {
-      score += 10_000;
-      reasons.add("inside-conflict");
-    }
-    if (input.distanceToConflictExit().isPresent()) {
-      long distance = input.distanceToConflictExit().getAsLong();
-      int distanceScore = (int) Math.max(0L, 2_000L - Math.min(2_000L, distance));
-      score += distanceScore;
-      reasons.add("near-exit:" + distance);
-    }
-    if (input.freshMovementAuthority()) {
-      score += 1_500;
-      reasons.add("fresh-authority");
-    }
-    if (input.compatibleSelfClaim()) {
-      score += 1_200;
-      reasons.add("compatible-self-claim");
-    }
-    if (input.currentSpeedBps() > 0.0) {
-      int speedScore = (int) Math.min(900.0, input.currentSpeedBps() * 60.0);
-      score += speedScore;
-      reasons.add("controlled-speed:" + Math.round(input.currentSpeedBps()));
-    }
-    long waitSeconds = input.waitingDuration().toSeconds();
-    int aging = (int) Math.min(1_200L, Math.max(0L, waitSeconds / 5L) * 10L);
-    if (aging > 0) {
-      score += aging;
-      reasons.add("aging:" + waitSeconds + "s");
-      traceLogger.accept(
-          "SMART_DISPATCH_STARVATION_AGING train="
-              + input.trainId()
-              + " seconds="
-              + waitSeconds
-              + " score="
-              + aging);
-    }
-    if (input.routePriority() > 0) {
-      score += input.routePriority() * 50;
-      reasons.add("route-priority:" + input.routePriority());
-    }
-    if (input.dwellReadyToDepart()) {
-      score += 400;
-      reasons.add("dwell-ready");
-    }
-    if (input.downstreamBlockedTrainCount() > 0) {
-      score += input.downstreamBlockedTrainCount() * 120;
-      reasons.add("downstream-blocked:" + input.downstreamBlockedTrainCount());
-    }
-    PriorityScore result =
-        new PriorityScore(input.trainId(), input.resourceId(), score, reasons, input.safeToMove());
-    tracePriority(result);
-    return result;
-  }
-
-  /** 在同一资源的候选列车中选择 winner，排序完全确定。 */
-  public PrioritySelection selectPriorityWinner(List<PriorityInput> inputs) {
-    if (inputs == null || inputs.isEmpty()) {
-      return new PrioritySelection(null, List.of());
-    }
-    List<PriorityScore> scores =
-        inputs.stream()
-            .filter(Objects::nonNull)
-            .map(this::scorePriority)
-            .sorted(
-                Comparator.comparingInt(PriorityScore::score)
-                    .reversed()
-                    .thenComparing(PriorityScore::trainId)
-                    .thenComparing(PriorityScore::resourceId))
-            .toList();
-    if (scores.isEmpty()) {
-      return new PrioritySelection(null, List.of());
-    }
-    PriorityScore winner = scores.get(0);
-    List<PriorityScore> losers = scores.size() <= 1 ? List.of() : scores.subList(1, scores.size());
-    traceLogger.accept(
-        "SMART_DISPATCH_PRIORITY_WINNER train="
-            + winner.trainId()
-            + " resource="
-            + winner.resourceId()
-            + " score="
-            + winner.score()
-            + " reasons="
-            + winner.reasons());
-    for (PriorityScore loser : losers) {
-      traceLogger.accept(
-          "SMART_DISPATCH_PRIORITY_LOSER train="
-              + loser.trainId()
-              + " resource="
-              + loser.resourceId()
-              + " score="
-              + loser.score()
-              + " winner="
-              + winner.trainId());
-    }
-    return new PrioritySelection(winner, losers);
-  }
-
   /** 执行 destroy 前置审查。 */
   public DeadlockDestroyReview reviewDestroyCandidate(DeadlockDestroyInput input) {
     Objects.requireNonNull(input, "input");
@@ -598,6 +514,10 @@ public final class SmartDispatcherController {
             + input.conflictKey()
             + " allBlockersLiveHard="
             + input.allBlockersLiveHard()
+            + " directionAuditRequired="
+            + input.directionAuditRequired()
+            + " directionAuditReason="
+            + input.directionAuditReason()
             + " weak="
             + input.weak());
     traceLogger.accept(
@@ -631,7 +551,14 @@ public final class SmartDispatcherController {
             + input.persisted().toSeconds()
             + "s threshold="
             + input.threshold().toSeconds()
-            + "s");
+            + "s directionAuditRequired="
+            + input.directionAuditRequired()
+            + " directionReauditAttempted="
+            + input.directionReauditAttempted()
+            + " lastResortDestroy="
+            + input.lastResortDestroy()
+            + " blockingActiveTraffic="
+            + input.blockingActiveTraffic());
     if (input.weak() || input.conflictKey().startsWith("weaker:")) {
       traceLogger.accept(
           "DEADLOCK_CYCLE_REJECTED episode="
@@ -652,6 +579,40 @@ public final class SmartDispatcherController {
     }
     if (input.persisted().compareTo(input.threshold()) < 0) {
       return traceDestroyReview(DeadlockDestroyReview.rejected("threshold-not-reached"));
+    }
+    if (input.directionAuditRequired() && !input.directionReauditAttempted()) {
+      traceLogger.accept(
+          "DEADLOCK_DIRECTION_AUDIT_REQUIRED episode="
+              + input.episodeId()
+              + " target="
+              + input.targetTrain()
+              + " reason="
+              + input.directionAuditReason()
+              + " reAuditAttempted=false");
+      return traceDestroyReview(DeadlockDestroyReview.rejected("direction-reaudit-required"));
+    }
+    if (input.directionAuditRequired() && !input.lastResortDestroy()) {
+      traceLogger.accept(
+          "DEADLOCK_DIRECTION_AUDIT_REQUIRED episode="
+              + input.episodeId()
+              + " target="
+              + input.targetTrain()
+              + " reason="
+              + input.directionAuditReason()
+              + " lastResortDestroy=false");
+      return traceDestroyReview(DeadlockDestroyReview.rejected("direction-audit-required"));
+    }
+    if (input.directionAuditRequired() && !input.blockingActiveTraffic()) {
+      traceLogger.accept(
+          "DEADLOCK_DIRECTION_AUDIT_REQUIRED episode="
+              + input.episodeId()
+              + " target="
+              + input.targetTrain()
+              + " reason="
+              + input.directionAuditReason()
+              + " blockingActiveTraffic=false");
+      return traceDestroyReview(
+          DeadlockDestroyReview.rejected("direction-audit-active-traffic-not-proven"));
     }
     if (input.safeDrainCandidate()) {
       return traceDestroyReview(DeadlockDestroyReview.rejected("safe-drain-candidate-exists"));
@@ -690,17 +651,109 @@ public final class SmartDispatcherController {
             + input.targetTrain());
     return traceDestroyReview(
         DeadlockDestroyReview.allowed(
-            "confirmed-live-hard-cycle",
-            List.of("safe-drain", "stale-release", "forward-unlock", "priority-scheduling")));
+            input.directionAuditRequired()
+                ? "confirmed-live-hard-cycle-last-resort-direction-audit"
+                : "confirmed-live-hard-cycle",
+            input.directionAuditRequired()
+                ? List.of(
+                    "direction-reaudit",
+                    "safe-drain",
+                    "stale-release",
+                    "forward-unlock",
+                    "priority-scheduling")
+                : List.of("safe-drain", "stale-release", "forward-unlock", "priority-scheduling")));
+  }
+
+  /**
+   * 对普通长时间停滞列车执行 destroy 前的独立复审。
+   *
+   * <p>该入口不接受“正常排队”作为 cleanup 理由：新鲜外部 blocker、受控停车、仍在移动或尚有 active unlock reservation
+   * 时一律拒绝。载客列车不是永久豁免，但必须满足更长保护阈值；执行层仍需等待真实 GroupRemove 后才能释放占用。
+   */
+  public StuckCleanupReview reviewStuckCleanupCandidate(StuckCleanupInput input) {
+    Objects.requireNonNull(input, "input");
+    traceLogger.accept(
+        "STUCK_CLEANUP_PRECHECK train="
+            + input.trainId()
+            + " persisted="
+            + input.persisted().toSeconds()
+            + "s threshold="
+            + input.threshold().toSeconds()
+            + "s passengerThreshold="
+            + input.passengerThreshold().toSeconds()
+            + "s passengers="
+            + input.hasPassengers()
+            + " recoveryExhausted="
+            + input.recoveryExhausted()
+            + " waitingOnLiveBlocker="
+            + input.waitingOnLiveBlocker());
+    if (input.threshold().isZero()
+        || input.passengerThreshold().isZero()
+        || input.passengerThreshold().compareTo(input.threshold()) < 0) {
+      return StuckCleanupReview.rejected("cleanup-threshold-invalid");
+    }
+    if (!input.targetResolvedToRuntimeGroup()) {
+      return StuckCleanupReview.rejected("target-runtime-group-unresolved");
+    }
+    if (!input.targetFtaManaged()) {
+      return StuckCleanupReview.rejected("target-not-fta-managed");
+    }
+    if (input.targetRecentlyProgressed()) {
+      return StuckCleanupReview.rejected("target-recently-progressed");
+    }
+    if (!input.recoveryExhausted()) {
+      return StuckCleanupReview.rejected("recovery-not-exhausted");
+    }
+    if (input.controlledStop()) {
+      return StuckCleanupReview.rejected("controlled-stop");
+    }
+    if (input.moving()) {
+      return StuckCleanupReview.rejected("train-moving");
+    }
+    if (input.waitingOnLiveBlocker()) {
+      return StuckCleanupReview.rejected("waiting-on-live-blocker");
+    }
+    if (input.activeUnlockReservation()) {
+      return StuckCleanupReview.rejected("active-unlock-reservation");
+    }
+    Duration requiredThreshold =
+        input.hasPassengers()
+            ? max(input.threshold(), input.passengerThreshold())
+            : input.threshold();
+    if (input.persisted().compareTo(requiredThreshold) < 0) {
+      return StuckCleanupReview.rejected(
+          input.hasPassengers() ? "passenger-grace" : "cleanup-threshold-not-reached");
+    }
+    traceLogger.accept(
+        "STUCK_CLEANUP_CONFIRMED train="
+            + input.trainId()
+            + " passengers="
+            + input.hasPassengers()
+            + " persisted="
+            + input.persisted().toSeconds()
+            + "s");
+    return StuckCleanupReview.allowed("verified-long-stuck-cleanup");
   }
 
   /** 记录 destroy 后验证结果。 */
   public void traceDestroyVerification(DestroyVerificationResult result) {
+    traceDestroyVerification(result, "DEADLOCK_DESTROY");
+  }
+
+  /**
+   * 记录指定 cleanup 类型的 destroy 后验证结果。
+   *
+   * @param result 验证结果
+   * @param eventPrefix 事件前缀；仅接受已知 cleanup 前缀，其他值回退为 deadlock
+   */
+  public void traceDestroyVerification(DestroyVerificationResult result, String eventPrefix) {
     if (result == null) {
       return;
     }
+    String prefix =
+        "STUCK_CLEANUP_DESTROY".equals(eventPrefix) ? "STUCK_CLEANUP_DESTROY" : "DEADLOCK_DESTROY";
     traceLogger.accept(
-        (result.passed() ? "DEADLOCK_DESTROY_VERIFY_PASSED" : "DEADLOCK_DESTROY_VERIFY_FAILED")
+        (result.passed() ? prefix + "_VERIFY_PASSED" : prefix + "_VERIFY_FAILED")
             + " train="
             + result.trainId()
             + " runtimeGroupGone="
@@ -720,6 +773,43 @@ public final class SmartDispatcherController {
     if (!result.passed()) {
       traceLogger.accept("DESTROY_INCOMPLETE train=" + result.trainId());
     }
+  }
+
+  /**
+   * HOLD_AT_SIGNAL 的安全原因——**必须是原因，或自报"我没有原因"，不许印 {@code none}**。
+   *
+   * <p>这条分支有**两个互不相同的触发源**：
+   *
+   * <ul>
+   *   <li>{@code input.directStopAllowed()} —— 调用方显式允许直停，原因在 {@code directStopReason}；
+   *   <li>{@code braking.shouldHardStop()} —— 制动曲线判定已进入停车距离，原因在 {@code
+   *       braking.targetSpeedReason()}（如 {@code inside-stop-distance}）。
+   * </ul>
+   *
+   * <p>只取第一个的话，第二种触发时报出来的是 {@code none}。{@code ForwardDecisionInput} 的压缩构造器会把该字段填成字面量 {@code
+   * "none"}（非空），所以不能依赖 {@code normalize} 的兜底，必须显式区分。
+   *
+   * <p>否则停车明细会形如 {@code recoverable-hold:hold_at_signal:route_stop_or_terminal:none}， 没有阻塞者、最内层原因是
+   * {@code none} —— 看得见停，看不见为什么。
+   */
+  private static String holdAtSignalSafetyReason(
+      ForwardDecisionInput input, BrakingProfile braking) {
+    String declared = input == null ? null : input.directStopReason();
+    // "none" 是"没人填过"的默认字面量，必须与真正填过的原因区别对待。
+    boolean declaredPresent =
+        declared != null && !declared.isBlank() && !declared.trim().equalsIgnoreCase("none");
+    if (declaredPresent) {
+      return declared.trim();
+    }
+    if (braking != null && braking.shouldHardStop()) {
+      // 真正的触发源是制动曲线；把它自己的判定原因报出来。
+      String brakingReason = braking.targetSpeedReason();
+      return brakingReason == null || brakingReason.isBlank()
+          ? "braking-hard-stop"
+          : "braking:" + brakingReason.trim();
+    }
+    // 两个来源都说不出原因——自报，而不是伪装成一个结论。
+    return "no-direct-stop-reason";
   }
 
   private DispatchDecision noAction(
@@ -752,33 +842,46 @@ public final class SmartDispatcherController {
             : input.cautionSpeedBps();
     double stopBrakingDistance =
         (input.currentSpeedBps() * input.currentSpeedBps()) / (2.0 * input.decelBps2());
+    // 判定"该不该开始减速"必须用**不减速的话会达到的速度**来算，而不是当前瞬时速度。
+    //
+    // 用瞬时速度会自相矛盾：降速一旦生效，当前速度逼近目标速度，所需制动距离塌向 0，判定随即释放，
+    // 列车重新加速，又重新触发——在一条二十几 blocks 宽的带里反复切黄灯。取"当前速度与当前允许速度
+    // 的较大者"让阈值不随降速缩水，判定因此单向、无振荡。
+    double approachSpeed = Math.max(input.currentSpeedBps(), input.currentTargetSpeedBps());
     double cautionBrakingDistance =
         Math.max(
             0.0,
-            (input.currentSpeedBps() * input.currentSpeedBps() - targetSpeed * targetSpeed)
+            (approachSpeed * approachSpeed - targetSpeed * targetSpeed)
                 / (2.0 * input.decelBps2()));
     boolean planningVisible = distanceOpt.isPresent() && distance <= input.planningHorizonBlocks();
+    boolean plannedRouteStop =
+        input.plannedRouteStopProven() && risk.riskSource() == RiskSource.ROUTE_STOP_OR_TERMINAL;
     boolean shouldHardStop =
-        distanceOpt.isPresent() && distance <= stopBrakingDistance + input.stopMarginBlocks();
+        !plannedRouteStop
+            && distanceOpt.isPresent()
+            && distance <= stopBrakingDistance + input.stopMarginBlocks();
     boolean trainMoving = input.currentSpeedBps() > 0.0;
+    // 只有"再不减速就来不及"才降速。
+    //
+    // 不能"只要风险落在规划视野内（planningVisible）且元数据新鲜就降速"：
+    // 规划视野是"能看多远"，不是"该不该减速"，否则列车会在距站台数百格处就被压成黄灯。
+    // 这与"远处前车把后车永久压在 caution"是同一类错误。
+    boolean withinCautionBrakingDistance =
+        distanceOpt.isPresent() && distance <= cautionBrakingDistance + input.cautionMarginBlocks();
     boolean shouldApplySpeedLimit =
         trainMoving
             && planningVisible
             && !shouldHardStop
-            && risk.riskSource() != RiskSource.NONE
-            && risk.riskFreshness() != RiskFreshness.STALE
-            && risk.riskFreshness() != RiskFreshness.PROTECTIVE_ONLY
-            && risk.riskFreshness() != RiskFreshness.UNKNOWN;
-    if (trainMoving
-        && planningVisible
-        && !shouldHardStop
-        && distance <= cautionBrakingDistance + input.cautionMarginBlocks()) {
-      shouldApplySpeedLimit = true;
-    }
+            && withinCautionBrakingDistance
+            && risk.riskSource() != RiskSource.NONE;
     String reason =
         shouldHardStop
             ? "inside-stop-distance"
-            : shouldApplySpeedLimit ? "inside-planning-horizon" : "outside-planning-horizon";
+            : shouldApplySpeedLimit
+                ? "inside-caution-braking-distance"
+                : withinCautionBrakingDistance
+                    ? "caution-risk-not-actionable"
+                    : "outside-caution-braking-distance";
     return new BrakingProfile(
         input.currentSpeedBps(),
         targetSpeed,
@@ -901,22 +1004,6 @@ public final class SmartDispatcherController {
             + decision.effectClass());
   }
 
-  private void tracePriority(PriorityScore score) {
-    traceLogger.accept(
-        "SMART_DISPATCH_PRIORITY_SCORE train="
-            + score.trainId()
-            + " resource="
-            + score.resourceId()
-            + " score="
-            + score.score()
-            + " safeToMove="
-            + score.safeToMove()
-            + " reasons="
-            + score.reasons());
-    traceLogger.accept(
-        "SMART_DISPATCH_PRIORITY_REASON train=" + score.trainId() + " reasons=" + score.reasons());
-  }
-
   private void traceCautionRejected(ForwardSignalRiskSnapshot risk, String reason) {
     traceLogger.accept(
         "SIGNAL_CAUTION_REJECTED train="
@@ -988,6 +1075,14 @@ public final class SmartDispatcherController {
         .map(String::trim)
         .sorted(String.CASE_INSENSITIVE_ORDER.thenComparing(Comparator.naturalOrder()))
         .toList();
+  }
+
+  private static Duration nonNegative(Duration value) {
+    return value == null || value.isNegative() ? Duration.ZERO : value;
+  }
+
+  private static Duration max(Duration first, Duration second) {
+    return first.compareTo(second) >= 0 ? first : second;
   }
 
   private static String normalize(String raw, String fallback) {

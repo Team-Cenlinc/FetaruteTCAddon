@@ -158,6 +158,27 @@ class SignalEventBusTest {
     }
 
     @Test
+    @DisplayName("订阅者 ABI 错误不逃出同步占用事务")
+    void subscriberLinkageErrorIsolated() {
+      List<String> received = new ArrayList<>();
+
+      bus.subscribe(
+          OccupancyAcquiredEvent.class,
+          event -> {
+            throw new LinkageError("模拟 TrainCarts ABI 不兼容");
+          });
+      bus.subscribe(OccupancyAcquiredEvent.class, event -> received.add(event.trainName()));
+
+      assertDoesNotThrow(
+          () ->
+              bus.publish(
+                  new OccupancyAcquiredEvent(Instant.now(), "train-abi", List.of(), List.of())));
+
+      assertEquals(List.of("train-abi"), received);
+      assertTrue(debugLogs.stream().anyMatch(log -> log.contains("LinkageError")));
+    }
+
+    @Test
     @DisplayName("发布 null 事件不抛异常")
     void publishNullSafe() {
       assertDoesNotThrow(() -> bus.publish(null));

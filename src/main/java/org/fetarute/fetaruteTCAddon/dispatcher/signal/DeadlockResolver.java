@@ -7,11 +7,9 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.DeadlockDetectedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.DeadlockResolvedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.OccupancyAcquiredEvent;
-import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalChangedEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.event.SignalEventBus;
 
 /**
@@ -33,6 +31,7 @@ public class DeadlockResolver {
   private static final Duration LOCK_TTL = Duration.ofSeconds(8);
 
   private final SignalEventBus eventBus;
+  private final Consumer<String> reevaluationRequester;
   private final Consumer<String> debugLogger;
 
   /** 死锁放行锁：key=冲突资源 key，value=被放行列车与锁定过期时间。 */
@@ -46,7 +45,7 @@ public class DeadlockResolver {
    * @param eventBus 事件总线
    */
   public DeadlockResolver(SignalEventBus eventBus) {
-    this(eventBus, msg -> {});
+    this(eventBus, trainName -> {}, message -> {});
   }
 
   /**
@@ -56,7 +55,23 @@ public class DeadlockResolver {
    * @param debugLogger 调试日志输出
    */
   public DeadlockResolver(SignalEventBus eventBus, Consumer<String> debugLogger) {
+    this(eventBus, trainName -> {}, debugLogger);
+  }
+
+  /**
+   * 构建死锁解决器。
+   *
+   * @param eventBus 事件总线
+   * @param reevaluationRequester 下一 tick 完整 Movement Authority 重评估入口
+   * @param debugLogger 调试日志输出
+   */
+  public DeadlockResolver(
+      SignalEventBus eventBus,
+      Consumer<String> reevaluationRequester,
+      Consumer<String> debugLogger) {
     this.eventBus = Objects.requireNonNull(eventBus, "eventBus");
+    this.reevaluationRequester =
+        Objects.requireNonNull(reevaluationRequester, "reevaluationRequester");
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
 
@@ -185,10 +200,8 @@ public class DeadlockResolver {
     DeadlockResolvedEvent event =
         new DeadlockResolvedEvent(now, releasedTrain, conflictResource, lockDuration);
     eventBus.publish(event);
-    // 触发被放行列车的信号变化
-    SignalChangedEvent signalEvent =
-        new SignalChangedEvent(now, releasedTrain, SignalAspect.STOP, SignalAspect.PROCEED);
-    eventBus.publish(signalEvent);
+    // resolved 只表示锁关系已经改变；是否可行车仍必须经过 fresh acquire、active token 与最终发布门。
+    reevaluationRequester.accept(releasedTrain);
   }
 
   /** 死锁放行锁记录。 */

@@ -21,10 +21,10 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
@@ -62,7 +62,6 @@ public final class ActionBarTrainHudManager implements Listener {
   private final HudStateTracker stateTracker = new HudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
   private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
   private final Set<UUID> showingPlayers = new HashSet<>();
-  private long tickCounter = 0L;
 
   public ActionBarTrainHudManager(
       FetaruteTCAddon plugin,
@@ -104,8 +103,6 @@ public final class ActionBarTrainHudManager implements Listener {
   }
 
   public void tick() {
-    int intervalTicks = resolveIntervalTicks();
-    tickCounter += intervalTicks;
     Set<String> activeTrains = new HashSet<>();
     Set<UUID> currentPlayers = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
@@ -174,9 +171,8 @@ public final class ActionBarTrainHudManager implements Listener {
 
     Optional<String> templateOpt =
         templateService != null
-            ? templateService.resolveTemplate(
-                HudTemplateType.ACTIONBAR,
-                context.routeDefinition().flatMap(RouteDefinition::metadata))
+            ? templateService.resolveTemplateForLine(
+                HudTemplateType.ACTIONBAR, context.currentLine())
             : Optional.empty();
     BossBarHudTemplate template = resolveParsedTemplate(resolveTemplate(templateOpt));
     long nowMillis = System.currentTimeMillis();
@@ -201,7 +197,10 @@ public final class ActionBarTrainHudManager implements Listener {
             context.atLastStation(),
             terminalArriving,
             nowMillis);
-    String templateLine = template.resolveLine(state, tickCounter).orElse("");
+    state =
+        HudStateTracker.applyOutOfService(
+            state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
+    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
     Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
     player.sendActionBar(title);
     showingPlayers.add(player.getUniqueId());
@@ -295,14 +294,6 @@ public final class ActionBarTrainHudManager implements Listener {
     float value = (float) parsed.getAsDouble();
     float clamped = clampProgress(value);
     contextResolver.applyProgressPlaceholders(placeholders, clamped);
-  }
-
-  private int resolveIntervalTicks() {
-    if (configManager != null && configManager.current() != null) {
-      int interval = configManager.current().runtimeSettings().hudActionBarTickIntervalTicks();
-      return Math.max(1, interval);
-    }
-    return 1;
   }
 
   private String localeTextOrDefault(String key, String fallback) {

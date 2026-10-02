@@ -12,6 +12,7 @@ import java.util.Objects;
  * @param lastSeen 最近刷新时间
  * @param priority 排队优先级（越大越优先）
  * @param entryOrder 进入冲突区的边序号（越小越接近入口）
+ * @param enqueueSequence 本冲突队列内的稳定到达序号（越小越早）
  */
 public record OccupancyQueueEntry(
     String trainName,
@@ -19,7 +20,23 @@ public record OccupancyQueueEntry(
     Instant firstSeen,
     Instant lastSeen,
     int priority,
-    int entryOrder) {
+    int entryOrder,
+    long enqueueSequence) {
+
+  /**
+   * 构造不参与实时仲裁的诊断队列条目。
+   *
+   * <p>实时队列由占用管理器显式分配 {@code enqueueSequence}；外部测试夹具与诊断快照沿用该构造器时，默认不获得插队优势。
+   */
+  public OccupancyQueueEntry(
+      String trainName,
+      CorridorDirection direction,
+      Instant firstSeen,
+      Instant lastSeen,
+      int priority,
+      int entryOrder) {
+    this(trainName, direction, firstSeen, lastSeen, priority, entryOrder, Long.MAX_VALUE);
+  }
 
   public OccupancyQueueEntry {
     Objects.requireNonNull(trainName, "trainName");
@@ -31,6 +48,9 @@ public record OccupancyQueueEntry(
     }
     if (entryOrder < 0) {
       throw new IllegalArgumentException("entryOrder 不能为负");
+    }
+    if (enqueueSequence < 0L) {
+      throw new IllegalArgumentException("enqueueSequence 不能为负");
     }
   }
 }

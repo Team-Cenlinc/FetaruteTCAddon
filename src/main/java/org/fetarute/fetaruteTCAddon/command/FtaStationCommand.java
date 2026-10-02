@@ -34,7 +34,11 @@ import org.incendo.cloud.parser.standard.StringArrayParser;
 import org.incendo.cloud.parser.standard.StringParser;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
-/** /fta station 命令：维护站点名称、图节点绑定与位置等主数据，用于后续 PIDS/显示系统。 */
+/**
+ * /fta station 命令：维护站点名称、图节点绑定与位置等主数据，用于后续 PIDS/显示系统。
+ *
+ * <p>车站组（{@code /fta station group ...}）见 {@link FtaStationGroupCommand}。
+ */
 public final class FtaStationCommand {
 
   private static final int SUGGESTION_LIMIT = 20;
@@ -449,6 +453,7 @@ public final class FtaStationCommand {
                           Instant.now());
                   provider.stations().save(updated);
                   plugin.getDisplayService().ifPresent(ds -> ds.clearStationCaches());
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.station.set.success", Map.of("code", station.code())));
@@ -536,6 +541,7 @@ public final class FtaStationCommand {
                           Instant.now());
                   provider.stations().save(updated);
                   plugin.getDisplayService().ifPresent(ds -> ds.clearStationCaches());
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.station.link.siding.success",
@@ -729,6 +735,7 @@ public final class FtaStationCommand {
                     provider.stations().delete(station.id());
                   }
                   plugin.getDisplayService().ifPresent(ds -> ds.clearStationCaches());
+                  plugin.refreshStationDirectory();
                   sender.sendMessage(
                       locale.component(
                           "command.station.dump.success",

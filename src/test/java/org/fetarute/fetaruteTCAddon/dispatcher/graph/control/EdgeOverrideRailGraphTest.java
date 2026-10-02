@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.control;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
@@ -13,15 +15,43 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
 import org.junit.jupiter.api.Test;
 
 final class EdgeOverrideRailGraphTest {
+
+  @Test
+  void preservesPhysicalInterlockingStateWhenOverridesAreApplied() {
+    EdgeId first = EdgeId.undirected(NodeId.of("A1"), NodeId.of("A2"));
+    EdgeId second = EdgeId.undirected(NodeId.of("B1"), NodeId.of("B2"));
+    RailFootprintCell crossing = new RailFootprintCell(4, 8, 12);
+    RailInterlockingState state =
+        RailInterlockingState.from(
+            UUID.fromString("11111111-2222-3333-4444-555555555555"),
+            Set.of(first, second),
+            Map.of(
+                first, new RailEdgeFootprint(1, true, Set.of(crossing)),
+                second, new RailEdgeFootprint(1, true, Set.of(crossing))));
+    RailGraph base = new SimpleRailGraph(Map.of(), Map.of(), Set.of(), state);
+    RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
+
+    assertEquals(
+        state.zoneKeysForEdge(first),
+        ((RailGraphInterlockingSupport) wrapped).interlockingState().zoneKeysForEdge(first));
+  }
 
   @Test
   void delegatesToUnderlyingGraphWhenNoOverrides() {
@@ -29,6 +59,19 @@ final class EdgeOverrideRailGraphTest {
     RailGraph base = graph(edgeId, false);
     RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
     assertFalse(wrapped.isBlocked(edgeId));
+  }
+
+  @Test
+  void indexedEdgeLookupNormalizesOrientationAndSurvivesOverrideWrapping() {
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+    EdgeId reversed = new EdgeId(edgeId.b(), edgeId.a());
+    RailGraph base = graph(edgeId, false);
+    RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
+
+    RailEdge expected = base.findEdge(edgeId).orElseThrow();
+
+    assertEquals(Optional.of(expected), base.findEdge(reversed));
+    assertEquals(Optional.of(expected), wrapped.findEdge(reversed));
   }
 
   @Test
@@ -98,6 +141,71 @@ final class EdgeOverrideRailGraphTest {
     RailGraph base = graph(edgeId, true);
     RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(), Instant.EPOCH);
     assertTrue(wrapped.isBlocked(edgeId));
+  }
+
+  @Test
+  void preservesSingleLineSectionResourcesWhenOverridesAreApplied() {
+    NodeId boundaryA = NodeId.of("SURC:S:ALPHA:1");
+    NodeId switcher = NodeId.of("SWITCHER:world:1:64:0");
+    NodeId boundaryB = NodeId.of("SURC:S:BRAVO:1");
+    EdgeId edgeAS = EdgeId.undirected(boundaryA, switcher);
+    EdgeId edgeSB = EdgeId.undirected(switcher, boundaryB);
+    RailEdge as = new RailEdge(edgeAS, boundaryA, switcher, 10, 8.0, true, Optional.empty());
+    RailEdge sb = new RailEdge(edgeSB, switcher, boundaryB, 10, 8.0, true, Optional.empty());
+    RailGraph base =
+        new SimpleRailGraph(
+            Map.of(
+                boundaryA,
+                new SignRailNode(
+                    boundaryA,
+                    NodeType.STATION,
+                    new Vector(0, 0, 0),
+                    Optional.empty(),
+                    Optional.empty()),
+                switcher,
+                new SignRailNode(
+                    switcher,
+                    NodeType.SWITCHER,
+                    new Vector(1, 0, 0),
+                    Optional.empty(),
+                    Optional.empty()),
+                boundaryB,
+                new SignRailNode(
+                    boundaryB,
+                    NodeType.STATION,
+                    new Vector(2, 0, 0),
+                    Optional.empty(),
+                    Optional.empty())),
+            Map.of(edgeAS, as, edgeSB, sb),
+            Set.of());
+    RailGraphSectionSupport sectionSupport = (RailGraphSectionSupport) base;
+    SingleLineSectionInfo section = sectionSupport.sectionInfoForEdge(edgeAS).orElseThrow();
+    SingleLineSectionInfo siblingSection = sectionSupport.sectionInfoForEdge(edgeSB).orElseThrow();
+
+    assertNotEquals(
+        sectionSupport.conflictKeyForEdge(edgeAS).orElseThrow(),
+        sectionSupport.conflictKeyForEdge(edgeSB).orElseThrow());
+    assertEquals(section.key(), siblingSection.key());
+
+    Instant now = Instant.parse("2026-01-01T00:00:00Z");
+    RailEdgeOverrideRecord override =
+        new RailEdgeOverrideRecord(
+            UUID.randomUUID(),
+            edgeAS,
+            OptionalDouble.of(6.0),
+            OptionalDouble.empty(),
+            Optional.empty(),
+            false,
+            Optional.empty(),
+            now);
+    RailGraph wrapped = new EdgeOverrideRailGraph(base, Map.of(edgeAS, override), now);
+
+    assertTrue(
+        OccupancyResourceResolver.resourcesForEdge(wrapped, as)
+            .contains(OccupancyResource.forConflict(section.key())));
+    assertTrue(
+        OccupancyResourceResolver.resourcesForEdge(wrapped, sb)
+            .contains(OccupancyResource.forConflict(section.key())));
   }
 
   private static RailGraph graph(EdgeId edgeId, boolean blocked) {

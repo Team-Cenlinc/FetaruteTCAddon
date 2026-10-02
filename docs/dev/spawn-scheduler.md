@@ -64,13 +64,19 @@ Depot 选择会同时考虑：
 - 当前 active train 数量与 depot 权重。
 - 本 tick 已经选择过的 depot，避免同一轮连续压到同一个出库点。
 - `DepotDispatchCoordinator` 记录的 backoff，刚被 gate/occupancy 阻塞的 depot 会被强烈降权；同线路还有其它候选 depot 时，下一次会优先尝试其它候选。
-- 进入 `spawn.max-spawn-per-tick` 截断前，本轮 ready 的 depot 票据会再按本线路各 depot 的在线负载排序，避免单线 depot 的票据持续占用执行名额而饿死另一 depot 的交路组。
+- 本轮 ready 的 depot 票据会再按本线路各 depot 的在线负载排序：能出库的票多于 `spawn.max-spawn-per-tick` 时，低负载 depot 的票先拿到实体化名额，避免同线路另一个 depot 的交路组长期拿不到名额。
 
 Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 执行。动态 depot 会先 materialize 成具体 `selectedDepotNodeId`，再进入全局 depot key 仲裁。同一个 depot 同 tick 只放行一张票据，其余票据以 `depot-backoff:<depot_key>` 延迟重试；多线路共享同一 depot 时，仲裁器会记录该 depot 上一次放行的 line，并在无长期饥饿票据时轮转到其它 line。同一线路多个交路组共享同一 depot 时，也会记录上一次放行的 route，避免固定排序导致某个交路组长期压住其它交路组。
 
 自动与手动出车的列车名均使用 `<OP>-<LINE>-<PATTERN><DEST>-<SEQ>`。其中 `DEST` 取解析出的运营目的地 `code` 首字符，而不是 station name 或 route name；`FTA_DEST_CODE/FTA_DEST_NAME` tags 仍保留完整目的地信息。
 
-`spawn.max-spawn-per-tick` 只是执行层吞吐上限，不应丢弃已到期票据。超过本 tick 容量的票据会以 `spawn-per-tick-limit` 延迟重入队，且不增加 `attempts`，避免多 depot 或多线路共享单股道 depot 时因为瞬时到期票据过多而破坏 baseline/backlog。
+`spawn.max-spawn-per-tick` 限的是**每拍实体化（调用 `DepotSpawner#spawn`）的列车数**，不是尝试的票数。每张到期票每拍都会试一次：
+被闭塞挡在预检的出库票不生成实体、不占名额；折返复用（含 RETURN）不生成实体、不占名额。名额在唯一的实体化入口扣
+（常规、RETURN 降级、pending 降级三条出库路径都经过它），用完后本拍其余要出库的票以 `spawn-per-tick-limit` 延迟重入队，且不增加 `attempts`；
+pending 里到了降级时刻的折返票则原样留在 pending，不重置降级计时。调用了 spawn 就算用掉名额，哪怕 spawn 本身失败——区块加载与实体生成的开销已经花了。
+
+以前按尝试计名额：一张出不了库的票（例如被车库咽喉挡住）每拍都排在最前、每拍都失败，全网其余的票一张都轮不到。
+2026-09-27 实服一张 DS-1F_Full 出库票连试 19 次，同期 WS 在 CHT 的折返票被延后 41 次、一次都没试过，列车在空线路的终点干等。
 
 ## 线路最大车数（软限制）
 
@@ -151,13 +157,18 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 
 `TicketAssigner` 在实际 spawn 前会先经过 `SpawnControl`，再构建一次“gate 占用请求”。占用门控统一走 `LaunchAuthorizationService`，分为 spawn 前只读 preview 与 spawn 后真实 acquire：
 
-- spawn 前 preview 必须允许且没有 blocker；若 depot throat、长单线 conflict、lookover 分支或入库/出库混行资源被占住，会 requeue/hold，不会强行生成列车。
+- spawn 前 preview 必须允许且没有 blocker；若所选路径上的 depot throat、长单线 conflict，或入库/出库共享联锁资源被占住，会 requeue/hold，不会强行生成列车。仅位于非选定分支的远端物理边不会扩大本车 Movement Authority。
 - spawn 后 acquire 再次确认并写入真实占用；若 acquire 阶段发现 blocker，会释放 SpawnControl 租约、释放该 train 的占用、销毁刚生成的 TrainCarts group，并延迟重试。
 - gate 阻塞会记录具体 blocker 资源（如 `NODE:...@train`、`EDGE:...@train`、`CONFLICT:...@train`），并对实际 selected depot 写入短暂 backoff。单股道 depot 若没有其它候选，会在队列诊断中持续显示阻塞资源；若同线路还有其它 depot，后续选择会避开当前 backoff depot。
 - 允许：生成列车，写入 `FTA_*` tags 与 `FTA_ROUTE_INDEX=0`，下发下一跳 destination，并触发一次 `RuntimeDispatchService.refreshSignal(...)`。
+- TrainCarts spawn pattern 可能继承模板列车 tags；生成后会原子覆盖本次 owner、run/route/line/operator/depot/destination 等插件自有 key，删除本次缺失的可选 destination，并清除模板遗留的 launch/speed 冷却。禁止用 `addTags` 追加同名状态，否则读取顺序可能让新车沿用旧 depot 或旧 route 控车。
 - 允许：生成列车后还会基于本次 `acquire` 的资源集合，主动刷新同资源上的其他列车信号（含冲突队列等待列车），缩短“新车出库后他车仍维持旧信号”的窗口。
 - 不允许/失败：若 spawn 失败会释放已占用资源，票据按 `spawn.retry-delay-ticks` 延迟后重试。
 - 每次重试会把 `SpawnTicket.attempts` +1，并记录 `lastError`（仅用于诊断）。
+- 例外：被闭塞挡住（`gate-blocked:*`、`smart-depot-long-single-held`）是推迟不是失败——挡住它的是别的车。这类重试**不增加 `attempts`**，
+  但丢掉本次选定的 depot（`SpawnTicket#blockedUntil`），下次重新挑，多 depot 线路的 backoff 才能生效。否则它约 100 秒就会被 `max-attempts` 丢掉：
+  表定出库票自己的容差是 300 秒，首班出库票一丢整个交路就没有车（2026-09-27 实服 DS-1F_Full 即如此）。兜底仍在：表定票有自己的到期时刻，
+  按间隔发车的票有 `queued-ticket-max-age-seconds`。
 - 因 `spawn.max-spawn-per-tick` 超出本 tick 执行容量而延后的票据不算失败，只更新 `notBefore/lastError=spawn-per-tick-limit`，不增加 `attempts`。
 - 当 `SpawnTicket.attempts >= spawn.max-attempts` 时会放弃该票据并释放 backlog，避免无限重试。
 - 队列票据会保留 `firstDueAt`。重试会推进 `dueAt/notBefore` 以避免压住队头，但不会推进 `firstDueAt`；当票据真实年龄超过 `spawn.queued-ticket-max-age-seconds` 时会被丢弃并释放 backlog。
@@ -184,14 +195,16 @@ Depot 级仲裁按“实际 depot 节点”执行，而不是按 line 或 route 
 
 ### 出库区块加载
 - Depot 出车前会加载 depot 周边区块，并持有约 10 秒的 plugin chunk ticket，避免刚加载即卸载导致 spawn 失败。
+- 出库车**一律强制 `keepChunksLoaded`**（`TrainCartsDepotSpawner#ensureKeepChunksLoaded`，物理编组生成后同一 tick 内设置；手动 `/fta depot spawn` 同样）。原因：TrainCarts 对未开启常驻加载的车，只要其 5x5 区块区内有未加载区块就在第一个物理 tick 卸载它，出库口附近无人时车会冻结在出库口，而 FTA 把卸载当作移除释放占用，下一班就在同一锚点叠放，苏醒时同坐标复原并被联挂（2026-09-30 实服事故）。spawn pattern 的存档没开常驻加载时会告警一次（按 pattern 去重）；设置失败不会冒泡，只留告警，出库事务不受影响。
+- TrainCarts 配置 `keepChunksLoadedOnlyWhenMoving=true` 时，静止且不在等待动作中的车仍可被卸载，上一条对刚出库的车会失效，首次出库时会告警；请保持其为 `false`。
+- 出库点附近若仍有离线（已卸载）的编组，会按区块粒度留一条 WARN（每车库最多每 10 分钟一次），**只观测不拦截**。
 
-### Depot lookover
-- Depot 出车会对起步段的道岔执行“lookover”：把道岔分支边一并占用，避免刚出库即被其他列车抢占分支。
-- lookover 优先追加“走廊冲突 + 方向”资源以允许同向放行；方向无法判定时回退为“全方向冲突”资源（而不是仅 EDGE），避免道岔门控放宽。
-- `TicketAssigner` 会优先以“实际 depot 节点”（`selectedDepotNodeId`/`depotNodeId`）作为 gate 路径起点和 lookover 锚点，而不是盲目使用 `route.waypoints()[0]`。
-- 当 route 首节点不是 depot 时，lookover 仍会覆盖 depot 周边道岔区，并使用加深窗口（`max(6, max(lookahead, switcherZone*3))`，上限 24 边）用于拦截“回库车已进道岔区但未离开”场景。
-- depot 周边 lookover 会同时加入 edge 派生的 `CONFLICT` 资源，并为这些冲突补齐走廊方向与 entryOrder；长单线入库线共享同一冲突组时，出库车会看到已在走廊内的回库车并延迟生成。
-- 回归覆盖：route 首节点不是实际 depot、depot 前方长单线有车、depot 前方 switcher 分支有车时，spawn 前 gate 均应阻止生成，不允许“先出库再发现 conflict”。
+### Depot Movement Authority
+- `TicketAssigner` 会先把本次实际选择的 depot（`selectedDepotNodeId`/`depotNodeId`）写入 route 第 0 个节点，再从这条有向选定路径构建 spawn gate；预览、spawn 后 acquire 与首次 signal refresh 使用同一份路径上下文。
+- 若出库路径进入 `SWITCHER` 或显式咽喉，授权会原子覆盖从 depot 到首个可证明清出点的 NODE、EDGE 与所选路径内全部道岔 `CONFLICT`。找不到清出点时 fail-closed，不生成列车。
+- 调度图是无向拓扑，但 Movement Authority 不是无向半径：不得把 depot 周边 BFS 扫到的分支或远端物理 EDGE 提升为本车硬授权。否则无关支线会扩大锁闭，甚至因无法证明方向而让所有出库请求永久 STOP。
+- 回库车或交叉进路通过双方选定路径共享的 `switcher:*`、单线 section/corridor 等冲突令牌阻止出库；仅占用不在本次授权内的远端物理 EDGE 不应阻止生成。
+- 回归覆盖：实际 depot 覆盖 route 原始首节点、短 lookahead 仍完整持有到道岔清出点、分支回库车持有共享 switcher 时阻止生成，以及远端非授权 EDGE 不扩大出库锁闭。
 
 > 当前版本已实现两条执行路径：
 > - 停靠表首行为 `CRET`：从 Depot 生成列车。

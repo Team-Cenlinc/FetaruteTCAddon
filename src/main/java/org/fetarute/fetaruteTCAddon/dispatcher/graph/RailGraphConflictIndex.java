@@ -17,6 +17,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  *
  * <p>边界判定：度数≠2 或节点类型为 {@link NodeType#SWITCHER}。无边界闭环会被归并为 {@code
  * CONFLICT:single:<componentKey>:cycle:<minNode>} 形式的冲突组。
+ *
+ * <p>该索引也是图查询与兼容方向推断使用的 micro-corridor 视图。运行时图同时实现 {@link RailGraphSectionSupport} 时，资源解析器只会把确属桥链
+ * section 的 micro key 写入授权；非桥网格不能仅凭本索引的连通关系建立硬互斥。没有任何安全边界的 {@code cycle:*} 是例外，仍保留严格互斥。
  */
 public final class RailGraphConflictIndex {
 

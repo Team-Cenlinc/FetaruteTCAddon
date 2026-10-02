@@ -2,23 +2,31 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doAnswer;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.util.Vector;
@@ -49,10 +57,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverDispatchResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.CorridorDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
@@ -68,6 +81,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.mockito.MockedStatic;
 
 class SimpleTicketAssignerLayoverTest {
 
@@ -106,6 +120,230 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).complete(any());
   }
 
+  /** 票据级过滤把唯一的候选拒掉：票据进 pending 等待，不派给别的车，也不新出库。 */
+  @Test
+  void candidateFilterKeepsTicketPendingInsteadOfTakingAnotherVehicle() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    LayoverRegistry.LayoverCandidate stranger =
+        new LayoverRegistry.LayoverCandidate(
+            "train-other-duty", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(stranger));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    assigner.setLayoverCandidateFilter((t, trainName) -> !trainName.equals("train-other-duty"));
+
+    assigner.tick(provider, Instant.now());
+
+    verify(runtimeDispatchService, never()).dispatchLayover(any(), any(ServiceTicket.class));
+    verify(spawnManager, never()).complete(any());
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+  }
+
+  /** 票据级到期：过了到期时刻还挂在 pending 的票被作废并报完成，不再等全局 max-age。 */
+  @Test
+  void expiredPendingTicketIsAbandoned() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.setTicketExpiry(t -> Optional.of(t0.plusSeconds(300)));
+
+    assigner.tick(provider, t0);
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    assigner.tick(provider, t0.plusSeconds(299));
+    verify(spawnManager, never()).complete(any());
+
+    assigner.tick(provider, t0.plusSeconds(300));
+
+    verify(spawnManager).complete(ticket);
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+  }
+
+  /**
+   * 续班票等本交路的车：到期回调说"不到期"时，过了计划时刻 + 容差票照样挂着；晚到的车进入待命就派上它，不作废、不另出车。
+   *
+   * <p>到期回调在出票层由 {@code TimetableService#awaitsOwnVehicle} 决定，这里只钉住分配器一侧：不到期的票不会被别的计时器丢掉。
+   */
+  @Test
+  void aTicketAwaitingItsLateVehicleIsDispatchedWhenTheVehicleArrives() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    LayoverRegistry.LayoverCandidate lateVehicle =
+        new LayoverRegistry.LayoverCandidate(
+            "train-late", "A", NodeId.of("A"), t0.plusSeconds(600), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(lateVehicle), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("train-late"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    assigner.setTicketExpiry(t -> Optional.empty());
+
+    assigner.tick(provider, t0);
+    assigner.tick(provider, t0.plusSeconds(600));
+    verify(spawnManager, never()).complete(any());
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets(), "过了容差仍在等本交路的车");
+
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(lateVehicle));
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      assigner.tick(provider, t0.plusSeconds(610));
+    }
+
+    verify(runtimeDispatchService).dispatchLayover(eq(lateVehicle), any(ServiceTicket.class));
+    verify(spawnManager).complete(ticket);
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+  }
+
+  /** 复用成功时先回调派发结果（带改名后的列车名），再向 SpawnManager 报完成。 */
+  @Test
+  void dispatchListenerSeesTheCommittedTrainNameBeforeCompletion() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("train-1-renamed"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    List<String> seen = new ArrayList<>();
+    assigner.setDispatchListener(
+        (t, trainName) -> {
+          seen.add(t.id() + "->" + trainName);
+          verify(spawnManager, never()).complete(any());
+        });
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      assigner.tick(provider, Instant.now());
+    }
+
+    assertEquals(List.of(ticket.id() + "->train-1-renamed"), seen);
+    verify(spawnManager).complete(ticket);
+  }
+
+  @Test
+  void clearPendingTicketsPreservesTicketOwnedByDispatchAttempt() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant now = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.tick(provider, now);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), now, Map.of());
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
+
+    assertEquals(0, assigner.clearPendingTickets());
+
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    verify(spawnManager, never()).complete(any());
+  }
+
   @Test
   void tickCompletesWhenLayoverDispatchSucceeds() {
     UUID routeId = UUID.randomUUID();
@@ -123,7 +361,7 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
-        .thenReturn(true);
+        .thenReturn(LayoverDispatchResult.success("train-1-renamed"));
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
@@ -141,7 +379,11 @@ class SimpleTicketAssignerLayoverTest {
             1,
             10);
 
-    assigner.tick(provider, Instant.now());
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      assigner.tick(provider, Instant.now());
+      trainPropertiesStore.verify(() -> TrainPropertiesStore.get("train-1-renamed"));
+    }
 
     verify(spawnManager).complete(ticket);
     verify(spawnManager, never()).requeue(any());
@@ -150,7 +392,62 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
-  void tickRequeuesTicketsBeyondPerTickCapacityWithoutAttemptIncrement() {
+  void forceAssignWritesLifecycleTagsToDispatchedTrainName() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "RET-1", RouteOperationType.RETURN, "A", "B");
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "inbound", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.get("inbound")).thenReturn(Optional.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("outbound-renamed"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            mock(SpawnManager.class),
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    ServiceTicket serviceTicket =
+        new ServiceTicket(
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            routeId,
+            "A",
+            0,
+            ServiceTicket.TicketMode.RETURN);
+    TrainProperties dispatchedProperties = mock(TrainProperties.class);
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      trainPropertiesStore
+          .when(() -> TrainPropertiesStore.get("outbound-renamed"))
+          .thenReturn(dispatchedProperties);
+
+      assertTrue(assigner.forceAssign(provider, "inbound", serviceTicket));
+
+      trainPropertiesStore.verify(() -> TrainPropertiesStore.get("outbound-renamed"));
+      verify(dispatchedProperties).addTags("FTA_OP_TRIPS=0");
+    }
+  }
+
+  /** 折返复用不生成实体，不占 {@code max-spawn-per-tick} 的名额：名额为 1 时两张折返票也都要当拍试到。 */
+  @Test
+  void layoverTicketsDoNotUseTheSpawnBudget() {
     UUID lineId = UUID.randomUUID();
     UUID firstRouteId = UUID.randomUUID();
     UUID secondRouteId = UUID.randomUUID();
@@ -172,7 +469,12 @@ class SimpleTicketAssignerLayoverTest {
             mock(DepotSpawner.class),
             mock(OccupancyManager.class),
             mock(RailGraphService.class),
-            mockRouteDefinitions(firstRouteId),
+            mockRouteDefinitions(
+                Map.of(
+                    firstRouteId,
+                    routeDefinition("OP:L1:R1"),
+                    secondRouteId,
+                    routeDefinition("OP:L1:R2"))),
             mock(RuntimeDispatchService.class),
             mockConfigManager(),
             mock(SignNodeRegistry.class),
@@ -184,14 +486,13 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, now);
 
-    ArgumentCaptor<SpawnTicket> requeueCaptor = ArgumentCaptor.forClass(SpawnTicket.class);
-    verify(spawnManager).requeue(requeueCaptor.capture());
-    SpawnTicket deferred = requeueCaptor.getValue();
-    assertEquals(secondTicket.id(), deferred.id());
-    assertEquals(0, deferred.attempts());
-    assertEquals(Optional.of("spawn-per-tick-limit"), deferred.lastError());
-    assertEquals(now.plusSeconds(1), deferred.notBefore());
-    assertEquals(1, assigner.snapshotPendingTickets().size());
+    verify(spawnManager, never()).requeue(any());
+    assertEquals(
+        Set.of(firstTicket.id(), secondTicket.id()),
+        assigner.snapshotPendingTickets().stream()
+            .map(SpawnTicket::id)
+            .collect(java.util.stream.Collectors.toSet()),
+        "两张折返票都不生成实体，名额为 1 也都要当拍试到");
   }
 
   @Test
@@ -295,9 +596,9 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.dispatchLayover(eq(first), any(ServiceTicket.class)))
-        .thenReturn(false);
+        .thenReturn(LayoverDispatchResult.failed(first.trainName(), "blocked"));
     when(runtimeDispatchService.dispatchLayover(eq(second), any(ServiceTicket.class)))
-        .thenReturn(true);
+        .thenReturn(LayoverDispatchResult.success(second.trainName()));
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
@@ -321,6 +622,118 @@ class SimpleTicketAssignerLayoverTest {
     verify(runtimeDispatchService).dispatchLayover(eq(second), any(ServiceTicket.class));
     verify(spawnManager).complete(ticket);
     assertEquals(1L, assigner.snapshotDiagnostics().success());
+  }
+
+  @Test
+  void tickStopsTryingCandidatesWhenFailedDispatchLeavesActiveAttempt() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider = mockProviderForRoutes(lineId, Map.of(routeId, "R1"), false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    Instant now = Instant.now();
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register("train-1", "A", NodeId.of("A"), now.minusSeconds(2), Map.of());
+    layoverRegistry.register("train-2", "A", NodeId.of("A"), now.minusSeconds(1), Map.of());
+    LayoverRegistry.LayoverCandidate first = layoverRegistry.get("train-1").orElseThrow();
+    LayoverRegistry.LayoverCandidate second = layoverRegistry.get("train-2").orElseThrow();
+
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(any(), any(ServiceTicket.class)))
+        .thenAnswer(
+            invocation -> {
+              LayoverRegistry.LayoverCandidate candidate = invocation.getArgument(0);
+              ServiceTicket serviceTicket = invocation.getArgument(1);
+              if (candidate.trainName().equals(first.trainName())) {
+                layoverRegistry
+                    .claimDispatch(
+                        candidate.trainName(),
+                        serviceTicket.ticketId(),
+                        "train-1-outbound",
+                        Instant.now())
+                    .orElseThrow();
+                return LayoverDispatchResult.failed(
+                    candidate.trainName(), "handoff-commit-pending");
+              }
+              return LayoverDispatchResult.success(candidate.trainName());
+            });
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(Map.of(routeId, routeDefinition("OP:L1:R1"))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, now);
+
+    verify(runtimeDispatchService).dispatchLayover(eq(first), any(ServiceTicket.class));
+    verify(runtimeDispatchService, never()).dispatchLayover(eq(second), any(ServiceTicket.class));
+    assertEquals(
+        "train-1",
+        layoverRegistry.findDispatchAttemptOwner(ticket.id().toString()).orElseThrow().trainName());
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+  }
+
+  @Test
+  void tickRetriesExistingAttemptOwnerInsteadOfEarlierFifoCandidate() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider = mockProviderForRoutes(lineId, Map.of(routeId, "R1"), false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    Instant now = Instant.now();
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    layoverRegistry.register("fifo-first", "A", NodeId.of("A"), now.minusSeconds(2), Map.of());
+    layoverRegistry.register("attempt-owner", "A", NodeId.of("A"), now.minusSeconds(1), Map.of());
+    LayoverRegistry.LayoverCandidate fifoFirst = layoverRegistry.get("fifo-first").orElseThrow();
+    layoverRegistry
+        .claimDispatch(
+            "attempt-owner", ticket.id().toString(), "attempt-owner-outbound", Instant.now())
+        .orElseThrow();
+    LayoverRegistry.LayoverCandidate attemptOwner =
+        layoverRegistry.findDispatchAttemptOwner(ticket.id().toString()).orElseThrow();
+
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(attemptOwner), any(ServiceTicket.class)))
+        .thenReturn(
+            LayoverDispatchResult.failed(attemptOwner.trainName(), "handoff-commit-pending"));
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(Map.of(routeId, routeDefinition("OP:L1:R1"))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, now);
+
+    verify(runtimeDispatchService).dispatchLayover(eq(attemptOwner), any(ServiceTicket.class));
+    verify(runtimeDispatchService, never())
+        .dispatchLayover(eq(fifoFirst), any(ServiceTicket.class));
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
   }
 
   @Test
@@ -350,7 +763,7 @@ class SimpleTicketAssignerLayoverTest {
 
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
-        .thenReturn(false);
+        .thenReturn(LayoverDispatchResult.failed(candidate.trainName(), "blocked"));
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
@@ -415,7 +828,7 @@ class SimpleTicketAssignerLayoverTest {
 
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
-        .thenReturn(true);
+        .thenReturn(LayoverDispatchResult.success(candidate.trainName()));
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
@@ -467,7 +880,7 @@ class SimpleTicketAssignerLayoverTest {
 
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
-        .thenReturn(true);
+        .thenReturn(LayoverDispatchResult.success(candidate.trainName()));
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
@@ -539,6 +952,90 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager).complete(ticket);
   }
 
+  @Test
+  void tickPreservesDispatchAttemptAcrossHardExpiryAndMissingRouteDefinition() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider = mockProviderForRoutes(lineId, Map.of(routeId, "R1"), false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(ticket))
+        .thenReturn(List.of());
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(routeId))
+        .thenReturn(Optional.of(routeDefinition("OP:L1:R1")))
+        .thenReturn(Optional.empty());
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            routeDefinitions,
+            mock(RuntimeDispatchService.class),
+            mockConfigManager(0.0, Duration.ofSeconds(600)),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.tick(provider, t0);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
+
+    assigner.tick(provider, t0.plusSeconds(601));
+
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    verify(spawnManager, never()).complete(any());
+  }
+
+  @Test
+  void maxRetryCannotCompletePendingTicketOwnedByDispatchAttempt() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "R1", 0L);
+    StorageProvider provider = mockProviderForRoutes(lineId, Map.of(routeId, "R1"), false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.dispatchLayover(any(), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.failed("inbound", "handoff-commit-pending"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            1);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.tick(provider, t0);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
+    when(provider.routes().findById(routeId)).thenReturn(Optional.empty());
+
+    assigner.tick(provider, t0.plusSeconds(1));
+
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    verify(spawnManager, never()).complete(any());
+  }
+
   private static SpawnTicket buildTicket(UUID routeId) {
     return buildTicket(routeId, UUID.randomUUID(), "R1", 0L);
   }
@@ -574,6 +1071,16 @@ class SimpleTicketAssignerLayoverTest {
 
   private static StorageProvider mockProviderForRoutes(
       UUID lineId, Map<UUID, String> routes, boolean withCret, Map<String, Object> lineMetadata) {
+    return mockProviderForRoutes(
+        lineId, routes, withCret ? routes.keySet() : Set.of(), lineMetadata);
+  }
+
+  /** 同一条线上有的 route 从车库始发（首站 CRET）、有的从折返站起步。 */
+  private static StorageProvider mockProviderForRoutes(
+      UUID lineId,
+      Map<UUID, String> routes,
+      Set<UUID> cretRoutes,
+      Map<String, Object> lineMetadata) {
     StorageProvider provider = mock(StorageProvider.class);
     LineRepository lineRepository = mock(LineRepository.class);
     RouteRepository routeRepository = mock(RouteRepository.class);
@@ -625,7 +1132,7 @@ class SimpleTicketAssignerLayoverTest {
               Optional.of("A"),
               Optional.empty(),
               RouteStopPassType.STOP,
-              withCret ? Optional.of("CRET SURN:D:DEPOT:1") : Optional.empty());
+              cretRoutes.contains(routeId) ? Optional.of("CRET SURN:D:DEPOT:1") : Optional.empty());
       RouteStop second =
           new RouteStop(
               routeId,
@@ -647,6 +1154,18 @@ class SimpleTicketAssignerLayoverTest {
       RouteOperationType operationType,
       String firstNode,
       String secondNode) {
+    return mockProviderForRouteOperation(
+        lineId, routeId, routeCode, operationType, firstNode, secondNode, Map.of());
+  }
+
+  private static StorageProvider mockProviderForRouteOperation(
+      UUID lineId,
+      UUID routeId,
+      String routeCode,
+      RouteOperationType operationType,
+      String firstNode,
+      String secondNode,
+      Map<String, Object> lineMetadata) {
     StorageProvider provider = mock(StorageProvider.class);
     LineRepository lineRepository = mock(LineRepository.class);
     RouteRepository routeRepository = mock(RouteRepository.class);
@@ -666,7 +1185,7 @@ class SimpleTicketAssignerLayoverTest {
             Optional.empty(),
             LineStatus.ACTIVE,
             Optional.of(60),
-            Map.of(),
+            lineMetadata,
             Instant.now(),
             Instant.now());
     when(lineRepository.findById(lineId)).thenReturn(Optional.of(line));
@@ -967,20 +1486,42 @@ class SimpleTicketAssignerLayoverTest {
       OccupancyResource blockedResource,
       DepotSpawner depotSpawner,
       java.util.function.Consumer<String> debugLogger) {
-    SpawnTicket ticket = buildTicket(routeId);
     SpawnManager spawnManager = mock(SpawnManager.class);
-    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(buildTicket(routeId)));
     when(spawnManager.snapshotQueue()).thenReturn(List.of());
+    return createDepotGateAssigner(
+        provider,
+        spawnManager,
+        Map.of(routeId, route),
+        depotNode,
+        graph,
+        blockedResource,
+        depotSpawner,
+        mock(LayoverRegistry.class),
+        debugLogger);
+  }
 
+  /** 车库出库口被 {@code blockedResource} 挡住的分配器；到期票据、route 定义与折返池由调用方给。 */
+  private static SimpleTicketAssigner createDepotGateAssigner(
+      StorageProvider provider,
+      SpawnManager spawnManager,
+      Map<UUID, RouteDefinition> routes,
+      NodeId depotNode,
+      SimpleRailGraph graph,
+      OccupancyResource blockedResource,
+      DepotSpawner depotSpawner,
+      LayoverRegistry layoverRegistry,
+      java.util.function.Consumer<String> debugLogger) {
     UUID worldId = UUID.randomUUID();
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
     SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     when(occupancyManager.snapshotClaims()).thenReturn(List.of());
-    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
         .thenAnswer(
             inv -> {
               OccupancyRequest request = inv.getArgument(0);
@@ -1008,24 +1549,77 @@ class SimpleTicketAssignerLayoverTest {
         depotSpawner,
         occupancyManager,
         railGraphService,
-        mockRouteDefinitions(Map.of(routeId, route)),
+        mockRouteDefinitions(routes),
         runtimeDispatchService,
         mockConfigManager(),
         signNodeRegistry,
-        mock(LayoverRegistry.class),
+        layoverRegistry,
         debugLogger,
         Duration.ofSeconds(1),
         1,
         10);
   }
 
+  /** 车库 → 道岔 SW → 主线 B：出库要占道岔冲突 {@code switcher:SW}。 */
+  private static SimpleRailGraph graphDepotThroughSwitcher(NodeId depotNode) {
+    NodeId switcherNode = NodeId.of("SW");
+    NodeId mainNode = NodeId.of("B");
+    EdgeId depotSwitcher = EdgeId.undirected(depotNode, switcherNode);
+    EdgeId switcherMain = EdgeId.undirected(switcherNode, mainNode);
+    return new SimpleRailGraph(
+        Map.of(
+            depotNode,
+            new SignRailNode(
+                depotNode,
+                NodeType.DEPOT,
+                new Vector(-10.0, 64.0, 0.0),
+                Optional.empty(),
+                Optional.empty()),
+            switcherNode,
+            new SignRailNode(
+                switcherNode,
+                NodeType.SWITCHER,
+                new Vector(0.0, 64.0, 0.0),
+                Optional.empty(),
+                Optional.empty()),
+            mainNode,
+            new SignRailNode(
+                mainNode,
+                NodeType.WAYPOINT,
+                new Vector(10.0, 64.0, 0.0),
+                Optional.empty(),
+                Optional.empty())),
+        Map.of(
+            depotSwitcher,
+            new RailEdge(depotSwitcher, depotNode, switcherNode, 10, 8.0, true, Optional.empty()),
+            switcherMain,
+            new RailEdge(switcherMain, switcherNode, mainNode, 10, 8.0, true, Optional.empty())),
+        Set.of());
+  }
+
   private static RuntimeDispatchService mockRuntimeDispatchServiceAllowingSmartAdmission() {
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
     when(runtimeDispatchService.snapshotProgressEntries()).thenReturn(Map.of());
     when(runtimeDispatchService.snapshotEffectiveStartNodes()).thenReturn(Map.of());
+    when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            anyString(),
+            any(RouteDefinition.class),
+            any(),
+            any(RailGraph.class),
+            any(Instant.class)))
+        .thenAnswer(
+            invocation -> Optional.of(List.copyOf(invocation.<List<NodeId>>getArgument(2))));
     when(runtimeDispatchService.smartDepotAdmissionAllowsSpawn(
             anyString(), any(RailGraph.class), any(OccupancyRequestContext.class)))
         .thenReturn(true);
+    when(runtimeDispatchService.captureReadyStartupRecoveryEpoch()).thenReturn(OptionalLong.of(1L));
+    when(runtimeDispatchService.isStartupRecoveryEpochReady(anyLong())).thenReturn(true);
+    when(runtimeDispatchService.registerExpectedMaterializedSpawn(
+            any(RuntimeTrainHandle.class), any(OccupancyRequest.class), anyLong()))
+        .thenReturn(true);
+    when(runtimeDispatchService.expectedMaterializedSpawnStatus(
+            any(RuntimeTrainHandle.class), anyLong()))
+        .thenReturn(RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED);
     return runtimeDispatchService;
   }
 
@@ -1132,6 +1726,11 @@ class SimpleTicketAssignerLayoverTest {
     when(spawnSettings.layoverFallbackMultiplier()).thenReturn(layoverFallbackMultiplier);
     when(spawnSettings.pendingLayoverMaxAgeSeconds())
         .thenReturn(Math.max(0L, pendingLayoverMaxAge.toSeconds()));
+    // 准入上限默认关闭（0），使既有 layover 用例的行为与引入准入控制之前一致；
+    // 阈值给真值，避免 Mockito 的 int/double 默认 0 让拥挤门控恒真。
+    when(spawnSettings.maxActiveTrains()).thenReturn(0);
+    when(spawnSettings.congestionHoldThreshold()).thenReturn(0.58D);
+    when(spawnSettings.congestionReleaseThreshold()).thenReturn(0.48D);
     when(runtimeSettings.lookaheadEdges()).thenReturn(2);
     when(runtimeSettings.minClearEdges()).thenReturn(0);
     when(runtimeSettings.rearGuardEdges()).thenReturn(0);
@@ -1244,7 +1843,7 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
-        .thenReturn(false);
+        .thenReturn(LayoverDispatchResult.failed(candidate.trainName(), "blocked"));
 
     SimpleTicketAssigner assigner =
         new SimpleTicketAssigner(
@@ -1337,7 +1936,177 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
-  void tickDepotSpawnRequestIncludesDepotLookoverWhenRouteStartsAtStation() {
+  void tickSkipsEveryDepotFallbackEntryWhileDispatchAttemptIsActive() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId, lineId, "RET-1", 0L);
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "RET-1", RouteOperationType.RETURN, "A", "B");
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry layoverRegistry = new LayoverRegistry();
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.dispatchLayover(any(), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.failed("inbound", "handoff-commit-pending"));
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(1.0),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    assigner.tick(provider, t0);
+    layoverRegistry.register("inbound", "A", NodeId.of("A"), t0, Map.of());
+    layoverRegistry
+        .claimDispatch("inbound", ticket.id().toString(), "outbound", Instant.now())
+        .orElseThrow();
+
+    assigner.tick(provider, t0.plusSeconds(61));
+
+    assertEquals(List.of(ticket), assigner.snapshotPendingTickets());
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+    verify(spawnManager, never()).complete(any());
+  }
+
+  @Test
+  void tickBalancesSameTickFallbackSpawnsAcrossDynamicDepotTracks() {
+    SameTickFallbackFixture fixture = sameTickFallbackFixture(2);
+    SimpleTicketAssigner assigner = fixture.assigner();
+    StorageProvider provider = fixture.provider();
+    DepotSpawner depotSpawner = fixture.depotSpawner();
+    Instant t0 = fixture.t0();
+    NodeId depotOne = fixture.depotOne();
+    NodeId depotTwo = fixture.depotTwo();
+
+    assigner.tick(provider, t0);
+    assertEquals(2, assigner.snapshotPendingTickets().size());
+
+    assigner.tick(provider, t0.plusSeconds(61));
+
+    ArgumentCaptor<SpawnTicket> spawnedTickets = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(depotSpawner, times(2)).spawn(eq(provider), spawnedTickets.capture(), any(), any());
+    assertEquals(
+        Set.of(depotOne.value(), depotTwo.value()),
+        spawnedTickets.getAllValues().stream()
+            .map(ticket -> ticket.selectedDepotNodeId().orElse(""))
+            .collect(java.util.stream.Collectors.toSet()));
+  }
+
+  /**
+   * 同一拍两张折返票都到了降级补发时刻、名额只有 1：一张去车库补发，另一张原样留在 pending。
+   *
+   * <p>不能先把它从 pending 摘下来再在实体化处延后——那样它回到发车队列，下一拍重新进 pending，降级计时从头再来。
+   */
+  @Test
+  void pendingFallbackBeyondTheSpawnBudgetKeepsWaiting() {
+    SameTickFallbackFixture fixture = sameTickFallbackFixture(1);
+    fixture.assigner().tick(fixture.provider(), fixture.t0());
+    assertEquals(2, fixture.assigner().snapshotPendingTickets().size());
+
+    fixture.assigner().tick(fixture.provider(), fixture.t0().plusSeconds(61));
+
+    verify(fixture.depotSpawner(), times(1)).spawn(eq(fixture.provider()), any(), any(), any());
+    assertEquals(1, fixture.assigner().snapshotPendingTickets().size(), "另一张还在等");
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(fixture.spawnManager(), org.mockito.Mockito.atLeast(0)).requeue(requeued.capture());
+    assertTrue(
+        requeued.getAllValues().stream()
+            .noneMatch(ticket -> ticket.lastError().equals(Optional.of("spawn-per-tick-limit"))),
+        () -> requeued.getAllValues().toString());
+  }
+
+  private record SameTickFallbackFixture(
+      SimpleTicketAssigner assigner,
+      StorageProvider provider,
+      SpawnManager spawnManager,
+      DepotSpawner depotSpawner,
+      SpawnTicket first,
+      SpawnTicket second,
+      Instant t0,
+      NodeId depotOne,
+      NodeId depotTwo) {}
+
+  /** 两张 RETURN 票、线路 depot 为 DYNAMIC 两股道，spawn 本身返回空；t0 进 pending，61 秒后到降级补发时刻。 */
+  private static SameTickFallbackFixture sameTickFallbackFixture(int maxSpawnPerTick) {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    NodeId depotOne = NodeId.of("SURN:D:DEPOT:1");
+    NodeId depotTwo = NodeId.of("SURN:D:DEPOT:2");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    SpawnTicket first = buildTicket(routeId, lineId, "RET-1", 0L);
+    SpawnTicket second = buildTicket(routeId, lineId, "RET-1", 1L);
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId,
+            routeId,
+            "RET-1",
+            RouteOperationType.RETURN,
+            depotOne.value(),
+            nodeA.value(),
+            Map.of(LineSpawnMetadata.KEY_DEPOTS, List.of("DYNAMIC:SURN:D:DEPOT:[1:2]")));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    Instant t0 = Instant.parse("2026-02-01T00:00:00Z");
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(first, second))
+        .thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithTwoDepotStarts(depotOne, depotTwo, nodeA, nodeB), t0)));
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), any(), any(), any())).thenReturn(Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(
+                Map.of(
+                    routeId,
+                    new RouteDefinition(
+                        RouteId.of("OP:L1:RET-1"),
+                        List.of(depotOne, nodeA, nodeB),
+                        Optional.empty()))),
+            mockRuntimeDispatchServiceAllowingSmartAdmission(),
+            mockConfigManager(1.0),
+            registryWithDepots(worldId, depotOne, depotTwo),
+            new LayoverRegistry(),
+            null,
+            Duration.ofSeconds(1),
+            maxSpawnPerTick,
+            10);
+    return new SameTickFallbackFixture(
+        assigner, provider, spawnManager, depotSpawner, first, second, t0, depotOne, depotTwo);
+  }
+
+  @Test
+  void tickDepotSpawnRequestIncludesDepotLookaheadWhenRouteStartsAtStation() {
     UUID routeId = UUID.randomUUID();
     SpawnTicket ticket = buildTicket(routeId);
     StorageProvider provider = mockProvider(routeId, true);
@@ -1394,10 +2163,10 @@ class SimpleTicketAssignerLayoverTest {
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.canEnter(requestCaptor.capture()))
+    when(occupancyManager.canEnterPreview(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     SignNodeRegistry signNodeRegistry = mock(SignNodeRegistry.class);
@@ -1433,6 +2202,140 @@ class SimpleTicketAssignerLayoverTest {
     OccupancyRequest captured = requestCaptor.getValue();
     assertTrue(captured.resourceList().contains(OccupancyResource.forEdge(edgeDepotThroat)));
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  @Test
+  void tickFailsClosedBeforeGateWhenDepotDynamicAuthorityCannotBePrepared() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId actualPlatform = NodeId.of("SURN:S:PPK:1");
+    NodeId dynamicPlaceholder = NodeId.of("DYNAMIC:SURN:PPK:[1:2]");
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    SimpleRailGraph graph = graphWithSingleEdge(depotNode, actualPlatform);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
+
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            anyString(), any(RouteDefinition.class), any(), eq(graph), any(Instant.class)))
+        .thenReturn(Optional.empty());
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R1"), List.of(depotNode, dynamicPlaceholder), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(routeId, route)),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(runtimeDispatchService)
+        .prepareDepotSpawnDynamicAuthority(
+            anyString(), eq(route), eq(route.waypoints()), eq(graph), any(Instant.class));
+    verify(runtimeDispatchService).cancelPreparedDepotSpawnDynamicAuthority(anyString());
+    verify(occupancyManager, never()).canEnterPreview(any(OccupancyRequest.class));
+    verify(occupancyManager, never()).canEnter(any(OccupancyRequest.class));
+    verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+    verify(spawnManager).requeue(any(SpawnTicket.class));
+  }
+
+  @Test
+  void tickUsesPreparedDynamicPlatformForDepotGateAndDestination() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId actualPlatform = NodeId.of("SURN:S:PPK:2");
+    NodeId dynamicPlaceholder = NodeId.of("DYNAMIC:SURN:PPK:[1:2]");
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    Instant now = Instant.parse("2026-07-17T08:00:00Z");
+    UUID worldId = UUID.randomUUID();
+    SimpleRailGraph graph = graphWithSingleEdge(depotNode, actualPlatform);
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, now)));
+    SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
+
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
+            anyString(), any(RouteDefinition.class), any(), eq(graph), eq(now)))
+        .thenReturn(Optional.of(List.of(depotNode, actualPlatform)));
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), any(), anyString(), eq(now)))
+        .thenReturn(Optional.empty());
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R1"), List.of(depotNode, dynamicPlaceholder), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(routeId, route)),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, now);
+
+    ArgumentCaptor<OccupancyRequest> requestCaptor =
+        ArgumentCaptor.forClass(OccupancyRequest.class);
+    verify(occupancyManager).canEnterPreview(requestCaptor.capture());
+    OccupancyRequest gateRequest = requestCaptor.getValue();
+    assertTrue(
+        gateRequest
+            .resourceList()
+            .contains(OccupancyResource.forEdge(EdgeId.undirected(depotNode, actualPlatform))));
+    assertTrue(gateRequest.resourceList().contains(OccupancyResource.forNode(actualPlatform)));
+    assertFalse(gateRequest.resourceList().contains(OccupancyResource.forNode(dynamicPlaceholder)));
+    TrainProperties properties = mock(TrainProperties.class);
+    assertTrue(
+        SimpleTicketAssigner.applyPreparedSpawnDestination(
+            properties, List.of(depotNode, actualPlatform)));
+    verify(properties).setDestination(actualPlatform.value());
+    verify(properties, never()).setDestination(dynamicPlaceholder.value());
   }
 
   @Test
@@ -1520,10 +2423,10 @@ class SimpleTicketAssignerLayoverTest {
     when(signNodeRegistry.snapshotInfos())
         .thenReturn(Map.of("depot-1", depotOneInfo, "depot-2", depotTwoInfo));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.canEnter(requestCaptor.capture()))
+    when(occupancyManager.canEnterPreview(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     RuntimeDispatchService runtimeDispatchService =
@@ -1560,7 +2463,7 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
-  void tickDepotSpawnBlocksWhenLookoverCoversLongSingleOccupancy() {
+  void tickDepotSpawnIgnoresRemotePhysicalOccupancyOutsideAuthority() {
     UUID routeId = UUID.randomUUID();
     NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
     NodeId throatNode = NodeId.of("SURN:D:DEPOT:1:001");
@@ -1586,11 +2489,11 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, Instant.now());
 
-    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+    verify(depotSpawner).spawn(any(), any(), anyString(), any());
   }
 
   @Test
-  void tickDepotSpawnBlocksWhenLookoverCoversSwitcherBranchOccupancy() {
+  void tickDepotSpawnBlocksWhenReturningBranchHoldsSharedSwitcher() {
     UUID routeId = UUID.randomUUID();
     NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
     NodeId switcherNode = NodeId.of("SW");
@@ -1650,12 +2553,199 @@ class SimpleTicketAssignerLayoverTest {
             graph,
             new RouteDefinition(
                 RouteId.of("OP:L1:R1"), List.of(depotNode, mainNode), Optional.empty()),
-            OccupancyResource.forEdge(switcherBranch),
+            OccupancyResource.forConflict("switcher:" + switcherNode.value()),
             depotSpawner);
 
     assigner.tick(provider, Instant.now());
 
     verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+  }
+
+  /**
+   * 一张出不了库的票不能占住整拍：2026-09-27 实服每 5 秒唯一的名额总给同一张被车库咽喉挡住的票， WS 在 CHT 的折返票被延后 41 次、一次都没试过。
+   *
+   * <p>被闭塞挡住的出库票不生成实体、不占名额；同一拍里的折返票照常去试（这里没有待命车，所以进 pending）。
+   */
+  @Test
+  void blockedDepotTicketDoesNotStarveTheRestOfTheTick() {
+    UUID lineId = UUID.randomUUID();
+    UUID depotRouteId = UUID.randomUUID();
+    UUID layoverRouteId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    SpawnTicket depotTicket = buildTicket(depotRouteId, lineId, "R1", 0L);
+    SpawnTicket layoverTicket = buildTicket(layoverRouteId, lineId, "R2", 1L);
+    StorageProvider provider =
+        mockProviderForRoutes(
+            lineId,
+            Map.of(depotRouteId, "R1", layoverRouteId, "R2"),
+            Set.of(depotRouteId),
+            Map.of());
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(depotTicket, layoverTicket));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    List<String> debugMessages = new ArrayList<>();
+    SimpleTicketAssigner assigner =
+        createDepotGateAssigner(
+            provider,
+            spawnManager,
+            Map.of(
+                depotRouteId,
+                new RouteDefinition(
+                    RouteId.of("OP:L1:R1"), List.of(depotNode, NodeId.of("B")), Optional.empty()),
+                layoverRouteId,
+                routeDefinition("OP:L1:R2", "A")),
+            depotNode,
+            graphDepotThroughSwitcher(depotNode),
+            OccupancyResource.forConflict("switcher:SW"),
+            depotSpawner,
+            mock(LayoverRegistry.class),
+            debugMessages::add);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(depotSpawner, never()).spawn(any(), any(), any(), any());
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
+    assertEquals(depotTicket.id(), requeued.getValue().id());
+    assertTrue(
+        requeued.getValue().lastError().orElse("").startsWith("gate-blocked"),
+        () -> requeued.getValue().toString());
+    assertEquals(
+        List.of(layoverTicket.id()),
+        assigner.snapshotPendingTickets().stream().map(SpawnTicket::id).toList(),
+        "折返票当拍就试了");
+    assertTrue(
+        debugMessages.stream().noneMatch(line -> line.contains("spawn-per-tick-limit")),
+        debugMessages::toString);
+  }
+
+  /**
+   * 被闭塞挡住是推迟不是失败：不消耗重试预算，并丢掉本次选的 depot（下次重新挑，backoff 才能生效）。
+   *
+   * <p>旧行为是 attempts + 1，重试预算用完就把票丢掉——实服一张表定出库票被咽喉挡了约 100 秒就这样作废，整个交路没了车，而它自己的容差是 300 秒。
+   */
+  @Test
+  void gateBlockedDepotTicketKeepsItsRetryBudget() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    Instant now = Instant.now();
+    SpawnTicket nearlyExhausted = buildTicket(routeId).withSelectedDepot(depotNode.value());
+    for (int i = 0; i < 9; i++) {
+      nearlyExhausted = nearlyExhausted.withRetry(now, "earlier-failure");
+    }
+    nearlyExhausted = nearlyExhausted.withSelectedDepot(depotNode.value());
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(nearlyExhausted));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+    SimpleTicketAssigner assigner =
+        createDepotGateAssigner(
+            provider,
+            spawnManager,
+            Map.of(
+                routeId,
+                new RouteDefinition(
+                    RouteId.of("OP:L1:R1"), List.of(depotNode, NodeId.of("B")), Optional.empty())),
+            depotNode,
+            graphDepotThroughSwitcher(depotNode),
+            OccupancyResource.forConflict("switcher:SW"),
+            mock(DepotSpawner.class),
+            mock(LayoverRegistry.class),
+            message -> {});
+
+    assigner.tick(provider, now);
+
+    verify(spawnManager, never()).complete(any());
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
+    assertEquals(9, requeued.getValue().attempts(), "max-attempts 是 10，被挡住不该把它推到上限");
+    assertTrue(requeued.getValue().selectedDepotNodeId().isEmpty(), "depot 要重新挑");
+  }
+
+  /**
+   * 名额仍然限实体化：两个车库的票都能出库时，一拍只生成一辆，另一张以 {@code spawn-per-tick-limit} 延后且不算失败。
+   *
+   * <p>这里的 spawn 本身失败了（返回空）——调用 spawn 就算用掉名额，因为区块加载与实体生成的开销已经花了。
+   */
+  @Test
+  void spawnBudgetStillCapsMaterializationsPerTick() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeOneId = UUID.randomUUID();
+    UUID routeTwoId = UUID.randomUUID();
+    NodeId depotOne = NodeId.of("SURN:D:DEPOT:1");
+    NodeId depotTwo = NodeId.of("SURN:D:DEPOT:2");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    SpawnTicket depotOneTicket =
+        buildTicket(routeOneId, lineId, "R1", 0L).withSelectedDepot(depotOne.value());
+    SpawnTicket depotTwoTicket =
+        buildTicket(routeTwoId, lineId, "R2", 1L).withSelectedDepot(depotTwo.value());
+    StorageProvider provider =
+        mockProviderForRoutes(
+            lineId,
+            Map.of(routeOneId, "R1", routeTwoId, "R2"),
+            true,
+            Map.of(LineSpawnMetadata.KEY_DEPOTS, List.of(depotOne.value(), depotTwo.value())));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any()))
+        .thenReturn(List.of(depotOneTicket, depotTwoTicket));
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithTwoDepotStarts(depotOne, depotTwo, nodeA, nodeB), Instant.now())));
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
+        .thenAnswer(
+            inv ->
+                new OccupancyDecision(
+                    true,
+                    inv.<OccupancyRequest>getArgument(0).now(),
+                    SignalAspect.PROCEED,
+                    List.of()));
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(any(), any(), any(), any())).thenReturn(Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(
+                Map.of(
+                    routeOneId,
+                    new RouteDefinition(
+                        RouteId.of("OP:L1:R1"), List.of(depotOne, nodeA, nodeB), Optional.empty()),
+                    routeTwoId,
+                    new RouteDefinition(
+                        RouteId.of("OP:L1:R2"),
+                        List.of(depotTwo, nodeA, nodeB),
+                        Optional.empty()))),
+            mockRuntimeDispatchServiceAllowingSmartAdmission(),
+            mockConfigManager(),
+            registryWithDepots(worldId, depotOne, depotTwo),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    verify(depotSpawner, times(1)).spawn(any(), any(), any(), any());
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager, times(2)).requeue(requeued.capture());
+    SpawnTicket deferred =
+        requeued.getAllValues().stream()
+            .filter(ticket -> ticket.lastError().equals(Optional.of("spawn-per-tick-limit")))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(requeued.getAllValues().toString()));
+    assertEquals(0, deferred.attempts(), "名额不够是推迟，不算失败");
   }
 
   @Test
@@ -1729,7 +2819,7 @@ class SimpleTicketAssignerLayoverTest {
     assertTrue(trace.contains("originalFirstWaypoint=" + depotNode.value()));
     assertTrue(trace.contains("effectiveFirstWaypoint=" + depotNode.value()));
     assertTrue(trace.contains("expandedPath=[SURN:D:DEPOT:1, SW, B]"));
-    assertTrue(trace.contains("lookoverDepth="));
+    assertTrue(trace.contains("authorityEdgeCount="));
     assertTrue(trace.contains("CONFLICT:switcher:SW"));
     assertTrue(trace.contains("busy-train"));
     assertTrue(trace.contains("spawnLease=held"));
@@ -1766,10 +2856,10 @@ class SimpleTicketAssignerLayoverTest {
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
 
     SignNodeRegistry signNodeRegistry = registryWithDepots(worldId, depotOne, depotTwo);
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
     ArgumentCaptor<OccupancyRequest> requestCaptor =
         ArgumentCaptor.forClass(OccupancyRequest.class);
-    when(occupancyManager.canEnter(requestCaptor.capture()))
+    when(occupancyManager.canEnterPreview(requestCaptor.capture()))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
 
     RuntimeDispatchService runtimeDispatchService =
@@ -1813,9 +2903,10 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, Instant.now());
 
-    OccupancyRequest captured = requestCaptor.getValue();
-    assertTrue(captured.resourceList().contains(OccupancyResource.forNode(depotTwo)));
-    assertFalse(captured.resourceList().contains(OccupancyResource.forNode(depotOne)));
+    // 两张票都会被试（被挡住的票不占名额）；排序决定谁先试、谁先拿到实体化名额。
+    OccupancyRequest first = requestCaptor.getAllValues().get(0);
+    assertTrue(first.resourceList().contains(OccupancyResource.forNode(depotTwo)));
+    assertFalse(first.resourceList().contains(OccupancyResource.forNode(depotOne)));
   }
 
   @Test
@@ -2022,8 +3113,8 @@ class SimpleTicketAssignerLayoverTest {
             0);
     when(signNodeRegistry.snapshotInfos()).thenReturn(Map.of("depot", depotInfo));
 
-    OccupancyManager occupancyManager = mock(OccupancyManager.class);
-    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
         .thenReturn(new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of()));
     LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
     when(layoverRegistry.findCandidates(any())).thenReturn(List.of());
@@ -2048,7 +3139,7 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, Instant.now());
 
-    verify(occupancyManager).canEnter(any(OccupancyRequest.class));
+    verify(occupancyManager).canEnterPreview(any(OccupancyRequest.class));
     assertEquals(
         0,
         assigner.snapshotPendingTickets().size(),
@@ -2124,6 +3215,317 @@ class SimpleTicketAssignerLayoverTest {
     verify(occupancyManager, never()).canEnter(any(OccupancyRequest.class));
     verify(occupancyManager, never()).acquire(any(OccupancyRequest.class));
     verify(spawnManager).requeue(any(SpawnTicket.class));
+
+    when(runtimeDispatchService.captureReadyStartupRecoveryEpoch())
+        .thenReturn(OptionalLong.empty());
+    assigner.tick(provider, Instant.now().plusSeconds(1));
+
+    verify(depotSpawner, times(1)).spawn(any(), any(), any(), any());
+    verify(spawnManager, times(2)).requeue(any(SpawnTicket.class));
+  }
+
+  @Test
+  void materializedSpawnWritesRollbackMarkerBeforeFallibleInitializationAndReassertsItOnFailure() {
+    MutableTrainTags trainTags = new MutableTrainTags();
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(trainTags.properties());
+    DepotSpawner.MaterializedSpawn materializedSpawn =
+        new DepotSpawner.MaterializedSpawn(
+            train,
+            () -> {
+              assertTrue(
+                  trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+                  "可失败初始化开始前必须已建立持久化回滚边界");
+              TrainTagHelper.removeTagKey(
+                  trainTags.properties(),
+                  TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING);
+              throw new IllegalStateException("test-initializer-failure");
+            });
+
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            SimpleTicketAssigner.initializeMaterializedSpawnWithRollbackMarker(materializedSpawn));
+
+    assertTrue(
+        trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+        "initializer 删除 marker 后抛错时必须在 finally 中恢复墓碑");
+  }
+
+  @Test
+  void tickKeepsMaterializedDepotSpawnPendingUntilFootprintPromotion() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId nextNode = NodeId.of("B");
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    Instant spawnedAt = Instant.parse("2026-07-31T00:00:00Z");
+    when(spawnManager.pollDueTickets(eq(provider), eq(spawnedAt))).thenReturn(List.of(ticket));
+    when(spawnManager.pollDueTickets(eq(provider), eq(spawnedAt.plusSeconds(1))))
+        .thenReturn(List.of());
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(depotNode, nextNode), spawnedAt)));
+    SignNodeRegistry signNodeRegistry = registryWithDepot(worldId, depotNode);
+
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+    when(occupancyManager.canEnter(any(OccupancyRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+    when(occupancyManager.acquire(any(OccupancyRequest.class)))
+        .thenAnswer(
+            invocation -> {
+              OccupancyRequest request = invocation.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+
+    MutableTrainTags trainTags = new MutableTrainTags();
+    TrainProperties properties = trainTags.properties();
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isValid()).thenReturn(true);
+    when(train.properties()).thenReturn(properties);
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), eq(ticket), anyString(), eq(spawnedAt)))
+        .thenReturn(Optional.of(new DepotSpawner.MaterializedSpawn(train, () -> {})));
+
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.expectedMaterializedSpawnStatus(
+            any(RuntimeTrainHandle.class), eq(1L)))
+        .thenReturn(
+            RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL,
+            RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED);
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(
+                Map.of(
+                    routeId,
+                    new RouteDefinition(
+                        RouteId.of("OP:L1:R1"), List.of(depotNode, nextNode), Optional.empty()))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, spawnedAt);
+
+    verify(depotSpawner).spawn(eq(provider), eq(ticket), anyString(), eq(spawnedAt));
+    verify(runtimeDispatchService).refreshSignal(train);
+    verify(spawnManager, never()).complete(any(SpawnTicket.class));
+    verify(spawnManager, never()).requeue(any(SpawnTicket.class));
+    verify(train, never()).destroy();
+    assertTrue(
+        trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+        "等待 footprint promotion 时必须保留跨重启事务墓碑");
+
+    doAnswer(
+            invocation -> {
+              assertTrue(
+                  trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+                  "票据提交完成前不得清除实体化事务墓碑");
+              return null;
+            })
+        .when(spawnManager)
+        .complete(ticket);
+
+    assigner.tick(provider, spawnedAt.plusSeconds(1));
+
+    verify(runtimeDispatchService, times(2)).refreshSignal(train);
+    verify(spawnManager).complete(ticket);
+    verify(spawnManager, never()).requeue(any(SpawnTicket.class));
+    verify(depotSpawner, times(1)).spawn(any(), any(), anyString(), any());
+    verify(train, never()).destroy();
+    assertFalse(
+        trainTags.hasTag(TrainSpawnTagInitializer.TAG_MATERIALIZED_ROLLBACK_PENDING),
+        "票据成功提交后必须清除实体化事务墓碑");
+  }
+
+  @Test
+  void depotSpawnRegistersExpectedPhysicalGroupAfterAcquireBeforeSignalRefresh() {
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    OccupancyRequest authority = mock(OccupancyRequest.class);
+    List<String> order = new ArrayList<>();
+    when(runtimeDispatchService.registerExpectedMaterializedSpawn(train, authority, 7L))
+        .thenAnswer(
+            invocation -> {
+              order.add("register");
+              return true;
+            });
+
+    assertTrue(
+        SimpleTicketAssigner.registerExpectedMaterializedSpawnBeforeFirstRefresh(
+            runtimeDispatchService, train, authority, 7L, () -> order.add("refresh")));
+
+    assertEquals(List.of("register", "refresh"), order);
+
+    order.clear();
+    when(runtimeDispatchService.registerExpectedMaterializedSpawn(train, authority, 8L))
+        .thenAnswer(
+            invocation -> {
+              order.add("register-rejected");
+              return false;
+            });
+    assertFalse(
+        SimpleTicketAssigner.registerExpectedMaterializedSpawnBeforeFirstRefresh(
+            runtimeDispatchService, train, authority, 8L, () -> order.add("refresh")));
+    assertEquals(List.of("register-rejected"), order);
+  }
+
+  @Test
+  void materializedSpawnTicketWaitsOnlyWithinBoundedFootprintHydrationGrace() {
+    Instant deadline = Instant.parse("2026-07-30T12:00:10Z");
+
+    assertEquals(
+        SimpleTicketAssigner.MaterializedSpawnProgress.WAIT,
+        SimpleTicketAssigner.materializedSpawnProgress(
+            RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL,
+            deadline.minusMillis(1),
+            deadline));
+    assertEquals(
+        SimpleTicketAssigner.MaterializedSpawnProgress.ROLLBACK,
+        SimpleTicketAssigner.materializedSpawnProgress(
+            RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROVISIONAL,
+            deadline,
+            deadline));
+    assertEquals(
+        SimpleTicketAssigner.MaterializedSpawnProgress.ROLLBACK,
+        SimpleTicketAssigner.materializedSpawnProgress(
+            RuntimeDispatchService.ExpectedMaterializedSpawnStatus.STALE_OR_UNKNOWN,
+            deadline.minusSeconds(1),
+            deadline));
+    assertEquals(
+        SimpleTicketAssigner.MaterializedSpawnProgress.COMPLETE,
+        SimpleTicketAssigner.materializedSpawnProgress(
+            RuntimeDispatchService.ExpectedMaterializedSpawnStatus.PROMOTED,
+            deadline.plusSeconds(1),
+            deadline));
+  }
+
+  @Test
+  void rollbackRequiredMaterializedSpawnCannotReenterPromotionEvaluation() {
+    assertTrue(
+        SimpleTicketAssigner.shouldEvaluateMaterializedSpawnPromotion(
+            SimpleTicketAssigner.PendingMaterializedSpawnPhase.AWAITING_PROMOTION));
+    assertFalse(
+        SimpleTicketAssigner.shouldEvaluateMaterializedSpawnPromotion(
+            SimpleTicketAssigner.PendingMaterializedSpawnPhase.ROLLBACK_REQUIRED));
+    assertFalse(
+        SimpleTicketAssigner.shouldEvaluateMaterializedSpawnPromotion(
+            SimpleTicketAssigner.PendingMaterializedSpawnPhase.AWAITING_REMOVAL));
+  }
+
+  @Test
+  void materializedSpawnRollbackContainsTrainBeforeReleasingAccountingState() {
+    RuntimeTrainHandle handle = mock(RuntimeTrainHandle.class);
+    List<String> order = new ArrayList<>();
+    doAnswer(
+            invocation -> {
+              order.add("stop-hard");
+              return null;
+            })
+        .when(handle)
+        .stopHard();
+    doAnswer(
+            invocation -> {
+              order.add("destroy");
+              return null;
+            })
+        .when(handle)
+        .destroy();
+
+    boolean rolledBack =
+        SimpleTicketAssigner.containMaterializedSpawnBeforeRelease(
+            handle,
+            () -> order.add("cancel-authority"),
+            () -> order.add("release-lease"),
+            () -> order.add("requeue"),
+            null);
+
+    assertTrue(rolledBack);
+    assertEquals(
+        List.of("stop-hard", "destroy", "cancel-authority", "release-lease", "requeue"), order);
+  }
+
+  @Test
+  void materializedSpawnRollbackRetainsAccountingStateWhenHardStopFails() {
+    RuntimeTrainHandle handle = mock(RuntimeTrainHandle.class);
+    List<String> accountingActions = new ArrayList<>();
+    List<String> diagnostics = new ArrayList<>();
+    doThrow(new NoSuchMethodError("runtime-abi")).when(handle).stopHard();
+
+    boolean rolledBack =
+        SimpleTicketAssigner.containMaterializedSpawnBeforeRelease(
+            handle,
+            () -> accountingActions.add("cancel-authority"),
+            () -> accountingActions.add("release-lease"),
+            () -> accountingActions.add("requeue"),
+            diagnostics::add);
+
+    assertFalse(rolledBack);
+    verify(handle, never()).destroy();
+    assertTrue(accountingActions.isEmpty());
+    assertTrue(diagnostics.stream().anyMatch(message -> message.contains("NoSuchMethodError")));
+  }
+
+  @Test
+  void materializedSpawnRollbackDoesNotReleaseLeaseWhenAuthorityCleanupFails() {
+    RuntimeTrainHandle handle = mock(RuntimeTrainHandle.class);
+    List<String> order = new ArrayList<>();
+    doAnswer(
+            invocation -> {
+              order.add("stop-hard");
+              return null;
+            })
+        .when(handle)
+        .stopHard();
+    doAnswer(
+            invocation -> {
+              order.add("destroy");
+              return null;
+            })
+        .when(handle)
+        .destroy();
+
+    boolean rolledBack =
+        SimpleTicketAssigner.containMaterializedSpawnBeforeRelease(
+            handle,
+            () -> {
+              order.add("cancel-authority");
+              throw new NoSuchMethodError("runtime-abi");
+            },
+            () -> order.add("release-lease"),
+            () -> order.add("requeue"),
+            null);
+
+    assertFalse(rolledBack);
+    assertEquals(List.of("stop-hard", "destroy", "cancel-authority"), order);
   }
 
   @Test
@@ -2162,11 +3564,80 @@ class SimpleTicketAssignerLayoverTest {
 
     assigner.tick(provider, Instant.now());
 
-    verify(spawnManager).requeue(any(SpawnTicket.class));
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
     verify(spawnManager, never()).complete(any());
-    assertEquals(1L, assigner.snapshotDiagnostics().retries());
+    // 拥堵是线网状态，不该消耗这张票的重试预算：attempts 必须原地不动，retries 不计。
+    // 否则顶住闸门约 max-attempts × retry-delay 之后票据会被 complete 掉，
+    // 等网疏通了班次已经凭空少了一批——那是取消发车，不是推迟发车。
+    assertEquals(ticket.attempts(), requeued.getValue().attempts(), "闸门延后不应累加 attempts");
+    assertEquals(0L, assigner.snapshotDiagnostics().retries());
+    // 但"拦了多少次"必须仍然可数。
     assertEquals(
         1L, assigner.snapshotDiagnostics().requeueByError().getOrDefault("congestion-hold", 0L));
+  }
+
+  /**
+   * 表定车次不受拥堵闸门约束：与上一条同样的拥堵现场，票换成按表出的（车次号带 {@code TIMETABLE-} 前缀），就不该因拥堵被扣。
+   *
+   * <p>何时发车由时刻表决定，编表时已经过冲突检查；拥堵闸门排在复用在网车之前，扣下表定班次会把折返的车留在终点。
+   */
+  @Test
+  void timetableTicketIsNotHeldByTheCongestionGate() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket headway = buildTicket(routeId, lineId, "R1", 0L);
+    SpawnTicket ticket =
+        new SpawnTicket(
+            headway.id(),
+            headway.service(),
+            headway.dueAt(),
+            headway.notBefore(),
+            headway.firstDueAt(),
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(SpawnTicket.TIMETABLE_TRIP_PREFIX + "SURC-Composed-R1-001-2026-09-27"),
+            TripSource.SCHEDULED,
+            0);
+    assertTrue(ticket.timetableDriven());
+    assertFalse(headway.timetableDriven(), "按间隔出的票没有车次号");
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "R1", RouteOperationType.OPERATION, "SURN:D:DEPOT:1", "B");
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+
+    OccupancyManager occupancyManager = mock(OccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of(congestedEdgeClaim()));
+
+    RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(congestedProgressEntries(routeId, "OP:L1:R1"));
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, Instant.now());
+
+    assertEquals(
+        0L,
+        assigner.snapshotDiagnostics().requeueByError().getOrDefault("congestion-hold", 0L),
+        "表定车次不该被拥堵闸门扣下");
   }
 
   @Test
@@ -2211,6 +3682,47 @@ class SimpleTicketAssignerLayoverTest {
     verify(spawnManager, never()).requeue(any(SpawnTicket.class));
     assertEquals(1, assigner.snapshotPendingTickets().size());
     assertEquals(0L, assigner.snapshotDiagnostics().retries());
+  }
+
+  /** 提供会真实保存增删结果的 TrainCarts tag mock，供跨 tick 生命周期断言使用。 */
+  private static final class MutableTrainTags {
+    private final TrainProperties properties = mock(TrainProperties.class);
+    private final List<String> tags = new ArrayList<>();
+
+    private MutableTrainTags() {
+      when(properties.hasTags()).thenAnswer(invocation -> !tags.isEmpty());
+      when(properties.getTags()).thenAnswer(invocation -> List.copyOf(tags));
+      doAnswer(
+              invocation -> {
+                for (Object argument : invocation.getArguments()) {
+                  if (argument instanceof String tag) {
+                    tags.add(tag);
+                  }
+                }
+                return null;
+              })
+          .when(properties)
+          .addTags(any(String[].class));
+      doAnswer(
+              invocation -> {
+                for (Object argument : invocation.getArguments()) {
+                  if (argument instanceof String tag) {
+                    tags.remove(tag);
+                  }
+                }
+                return null;
+              })
+          .when(properties)
+          .removeTags(any(String[].class));
+    }
+
+    private TrainProperties properties() {
+      return properties;
+    }
+
+    private boolean hasTag(String key) {
+      return TrainTagHelper.readTagValue(properties, key).isPresent();
+    }
   }
 
   private static OccupancyClaim congestedEdgeClaim() {

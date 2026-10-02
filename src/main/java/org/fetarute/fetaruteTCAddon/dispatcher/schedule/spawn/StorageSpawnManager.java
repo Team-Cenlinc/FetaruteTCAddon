@@ -12,6 +12,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.PriorityQueue;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.stream.Collectors;
@@ -136,6 +137,69 @@ public final class StorageSpawnManager
             .thenComparing(ticket -> ticket.service().routeCode(), String.CASE_INSENSITIVE_ORDER)
             .thenComparing(ticket -> ticket.id().toString()));
     return List.copyOf(snapshot);
+  }
+
+  @Override
+  public ReplacementSnapshot snapshotForReplacement() {
+    Map<SpawnServiceKey, Instant> cursors = new HashMap<>();
+    states.forEach(
+        (key, state) -> {
+          if (key != null && state != null && state.nextDueAt != null) {
+            cursors.put(key, state.nextDueAt);
+          }
+        });
+    return new ReplacementSnapshot(snapshotQueue(), cursors, globalSequence);
+  }
+
+  /**
+   * 恢复重载前尚未完成的票据、服务生成游标与 backlog。
+   *
+   * <p>恢复只接受完整服务票据；同一 UUID 即使同时存在于 queue 与 layover pending 快照中也只计入一次。存在原游标时必须原样恢复；缺失游标的额外 pending
+   * 服务从重载时间重新起算，不能根据很久以前的 firstDueAt 追补历史班次。
+   */
+  @Override
+  public void restoreForReplacement(
+      ReplacementSnapshot snapshot, List<SpawnTicket> additionalTickets, Instant restoredAt) {
+    ReplacementSnapshot safeSnapshot =
+        snapshot == null ? new ReplacementSnapshot(List.of(), Map.of(), 0L) : snapshot;
+    List<SpawnTicket> tickets = new ArrayList<>(safeSnapshot.queuedTickets());
+    if (additionalTickets != null) {
+      tickets.addAll(additionalTickets);
+    }
+    Instant restoreBase = restoredAt == null ? Instant.now() : restoredAt;
+    Set<UUID> knownTicketIds =
+        queue.stream().map(SpawnTicket::id).collect(Collectors.toCollection(HashSet::new));
+    for (SpawnTicket ticket : tickets) {
+      if (ticket == null
+          || ticket.service() == null
+          || ticket.service().key() == null
+          || !knownTicketIds.add(ticket.id())) {
+        continue;
+      }
+      queue.add(ticket);
+      ServiceState state =
+          states.computeIfAbsent(ticket.service().key(), ignored -> new ServiceState());
+      state.backlog++;
+      globalSequence = Math.max(globalSequence, ticket.sequenceNumber() + 1L);
+    }
+    safeSnapshot
+        .nextDueAtByService()
+        .forEach(
+            (key, nextDueAt) -> {
+              if (key != null && nextDueAt != null) {
+                states.computeIfAbsent(key, ignored -> new ServiceState()).nextDueAt = nextDueAt;
+              }
+            });
+    for (SpawnTicket ticket : tickets) {
+      if (ticket == null || ticket.service() == null || ticket.service().key() == null) {
+        continue;
+      }
+      ServiceState state = states.get(ticket.service().key());
+      if (state != null && state.nextDueAt == null) {
+        state.nextDueAt = restoreBase.plus(ticket.service().baseHeadway());
+      }
+    }
+    globalSequence = Math.max(globalSequence, safeSnapshot.nextSequence());
   }
 
   @Override
@@ -279,6 +343,9 @@ public final class StorageSpawnManager
   private boolean isExpiredQueuedTicket(SpawnTicket ticket, Instant now, Duration maxAge) {
     if (ticket == null || now == null || maxAge == null) {
       return ticket == null;
+    }
+    if (ticket.lastError().filter(error -> error.startsWith("materialized-")).isPresent()) {
+      return false;
     }
     Instant firstDueAt = ticket.firstDueAt();
     if (firstDueAt == null) {

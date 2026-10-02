@@ -452,6 +452,9 @@ public final class FtaEtaCommand {
     if (target instanceof EtaTarget.PlatformNode pn) {
       return "platform:" + pn.nodeId().value();
     }
+    if (target instanceof EtaTarget.StopIndex index) {
+      return "stop#" + index.stopIndex();
+    }
     return "unknown";
   }
 

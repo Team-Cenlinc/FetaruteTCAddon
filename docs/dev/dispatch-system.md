@@ -134,10 +134,30 @@ if (!TerminalKeyResolver.matches(startTerminalKey, routeFirstTerminalKey)) {
   return false; // 位置与首站不匹配
 }
 
+if (candidate.readyAt().isAfter(now)
+    || dwellRegistry.remainingSeconds(trainName).isPresent()
+    || waypointCenteringActive(trainName)
+    || trainHandle.isMoving()) {
+  return false; // 真实 dwell/居中/停车事实未完成，继续保留 Layover 候选
+}
+
 // 同站不同站台：从索引 0 开始
 int startIndex = RouteIndexResolver.resolveCurrentIndex(route, OptionalInt.empty(), startNode);
 if (startIndex < 0) {
   startIndex = 0; // fallback
+}
+
+// 停稳后以反向 Movement Plan 原子替换旧方向授权；外部 blocker 存在时旧授权原样保留。
+authorizationService.authorizeHandoff(plan);
+
+// TrainCarts 改名后迁移同一份 claim/queue/lock owner，不得 releaseByTrain(oldName)。
+authorityHandoffSupport.migrateAuthorityOwner(oldName, newName);
+
+// 只有底层已接受/已有 launch action 或列车已移动才完成提交；否则保留候选与进路并硬停重试。
+ControlApplicationResult result = runtimeTrainController.applyControl(...);
+if (!result.launchCommandAccepted()) {
+  holdLayoverAuthorityAfterFailedCommit(...);
+  return false;
 }
 ```
 
@@ -303,7 +323,8 @@ TrainCarts 会根据 `setWaitAcceleration()` 与 `setSpeedLimit()` 自行完成�
 | `runtime.speed-curve-early-brake-blocks` | 提前制动距离 | `0.0` |
 | `runtime.approach-speed-bps` | approaching 速度上限（进站 + STOP/TERM waypoint handoff） | `4.0` |
 | `runtime.approach-depot-speed-bps` | 进库限速 | `3.5` |
-| `runtime.approach-target-edges` | 剩余多少条调度图 edge 时必须达到 approaching 限速 | `1` |
+| `runtime.approach-window-blocks` | 进站限速区：节点离其后第一个进站触发点不超过该距离时从该节点起限速（与编表共用） | `96.0` |
+| `runtime.approach-window-edges` | 同上，按边数判定；`0` 禁用 | `0` |
 
 ## 诊断命令
 

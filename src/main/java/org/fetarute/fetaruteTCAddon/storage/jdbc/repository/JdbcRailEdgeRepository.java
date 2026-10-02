@@ -10,6 +10,7 @@ import java.util.Objects;
 import java.util.UUID;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeFootprintCodec;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -32,7 +33,8 @@ public final class JdbcRailEdgeRepository extends JdbcRepositorySupport
   public List<RailEdgeRecord> listByWorld(UUID worldId) {
     Objects.requireNonNull(worldId, "worldId");
     String sql =
-        "SELECT world_id, node_a, node_b, length_blocks, base_speed_limit, bidirectional FROM "
+        "SELECT world_id, node_a, node_b, length_blocks, base_speed_limit, bidirectional,"
+            + " footprint_json FROM "
             + table("rail_edges")
             + " WHERE world_id = ?"
             + " ORDER BY node_a ASC, node_b ASC";
@@ -63,8 +65,9 @@ public final class JdbcRailEdgeRepository extends JdbcRepositorySupport
     String insert =
         "INSERT INTO "
             + table("rail_edges")
-            + " (world_id, node_a, node_b, length_blocks, base_speed_limit, bidirectional)"
-            + " VALUES (?, ?, ?, ?, ?, ?)";
+            + " (world_id, node_a, node_b, length_blocks, base_speed_limit, bidirectional,"
+            + " footprint_json)"
+            + " VALUES (?, ?, ?, ?, ?, ?, ?)";
 
     try (var connection = openConnection();
         var statement = connection.prepareStatement(insert)) {
@@ -101,6 +104,7 @@ public final class JdbcRailEdgeRepository extends JdbcRepositorySupport
     statement.setInt(4, edge.lengthBlocks());
     statement.setDouble(5, edge.baseSpeedLimit());
     statement.setInt(6, edge.bidirectional() ? 1 : 0);
+    statement.setString(7, RailEdgeFootprintCodec.encode(edge.footprintCells()));
   }
 
   private RailEdgeRecord mapRow(ResultSet rs) throws SQLException {
@@ -118,6 +122,14 @@ public final class JdbcRailEdgeRepository extends JdbcRepositorySupport
       throw new StorageException("rail_edges 行缺少必要字段");
     }
     EdgeId edgeId = EdgeId.undirected(NodeId.of(aRaw), NodeId.of(bRaw));
-    return new RailEdgeRecord(worldId, edgeId, lengthBlocks, baseSpeedLimit, bidirectional != 0);
+    // 足迹是**可选**的：旧库、旧行、乃至解析失败都得到空集合，
+    // 于是 cell→edge 索引不可用、调用方 fail-closed——绝不因为一列坏数据让整张图加载失败。
+    return new RailEdgeRecord(
+        worldId,
+        edgeId,
+        lengthBlocks,
+        baseSpeedLimit,
+        bidirectional != 0,
+        RailEdgeFootprintCodec.decode(rs.getString("footprint_json")));
   }
 }

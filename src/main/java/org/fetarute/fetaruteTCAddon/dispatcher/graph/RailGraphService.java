@@ -10,19 +10,25 @@ import java.util.OptionalDouble;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingEdgeSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailComponentCautionRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailInterlockingSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -35,6 +41,8 @@ public final class RailGraphService {
   private final RailGraphBuilder builder;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<UUID, RailGraphSnapshot> snapshots = new ConcurrentHashMap<>();
+  private final ConcurrentMap<UUID, RailInterlockingState> lastActivatedInterlockingStates =
+      new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailGraphStaleState> staleStates = new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, RailGraphComponentIndex> componentIndexes =
       new ConcurrentHashMap<>();
@@ -42,6 +50,7 @@ public final class RailGraphService {
       new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
+  private volatile BooleanSupplier snapshotActivationGuard = () -> true;
 
   public RailGraphService(SignNodeRegistry registry, Consumer<String> debugLogger) {
     this(new SignRegistryRailGraphBuilder(registry, debugLogger), debugLogger);
@@ -60,9 +69,7 @@ public final class RailGraphService {
     Objects.requireNonNull(world, "world");
     RailGraph graph = builder.build(world);
     UUID worldId = world.getUID();
-    snapshots.put(worldId, new RailGraphSnapshot(graph, Instant.now()));
-    componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
-    staleStates.remove(worldId);
+    activateSnapshot(worldId, graph, Instant.now());
     return graph;
   }
 
@@ -70,10 +77,99 @@ public final class RailGraphService {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(graph, "graph");
     Objects.requireNonNull(builtAt, "builtAt");
-    UUID worldId = world.getUID();
+    activateSnapshot(world.getUID(), graph, builtAt);
+  }
+
+  /**
+   * 设置图快照激活前的静默条件检查。
+   *
+   * <p>只有 old/new 物理联锁资源投影发生变化时才调用该 guard。运行时应注入“当前没有任何占用 claim”；默认恒为 true，以保持独立图测试与启动预热兼容。
+   */
+  public void setSnapshotActivationGuard(BooleanSupplier snapshotActivationGuard) {
+    this.snapshotActivationGuard =
+        Objects.requireNonNull(snapshotActivationGuard, "snapshotActivationGuard");
+  }
+
+  /**
+   * 在持久化新快照前校验其物理联锁资源投影是否允许切换。
+   *
+   * <p>图构建命令在同一主线程调用链中先执行本校验、再提交 SQL 事务、最后调用 {@link #putSnapshot(World, RailGraph, Instant)}。这样既不会在
+   * active claim 存在时先改磁盘，也不会在 SQL 失败时先改内存。
+   *
+   * @throws IllegalStateException 资源投影变化且当前仍有占用 claim
+   */
+  public void validateSnapshotActivation(World world, RailGraph graph) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(graph, "graph");
+    validateSnapshotActivation(world.getUID(), graph);
+  }
+
+  private void activateSnapshot(UUID worldId, RailGraph graph, Instant builtAt) {
+    validateSnapshotActivation(worldId, graph);
+    RailInterlockingState nextState = interlockingState(graph);
+    RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
-    componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
+    componentIndexes.put(worldId, nextComponentIndex);
+    lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
+    traceInterlockingCoverage(worldId, nextState);
+  }
+
+  /**
+   * 图激活时报告物理联锁覆盖的可用性。
+   *
+   * <p>为什么非有不可：{@code cellCoverageAvailable()} 是「车体实际压住哪些区间」这条证据链的**总闸**—— {@code
+   * RuntimeDispatchService.livePhysicalEdgeCoverage} 在它为假时一律返回 incomplete， 于是任何以实测覆盖为放行条件的机制（尾部保护释放
+   * / Phase 4）都会 fail-closed 到**一个都不放**。
+   *
+   * <p>而它有两条构建路径，结果天差地别：{@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingZoneIndex#from}
+   * 走完整图构建， 逐边足迹齐全，索引可用；{@code fromZones} 从持久化快照重建，**按设计只有 Zone、没有逐边足迹， 索引必然为空**。正常重启的服务器走的是后者。
+   *
+   * <p>构建期特性标志 {@code liveFootprintReverseIndex=true} 只说明代码有这个功能，不说明索引真的建起来了。
+   * 缺了这一行，运行时便无法区分这两种状态，依赖该索引的机制可能代码路径俱在、trace 照常输出，却从不触发。
+   *
+   * <p>每次图激活至多一行，不随 tick 放大。
+   */
+  private void traceInterlockingCoverage(UUID worldId, RailInterlockingState state) {
+    debugLogger.accept(
+        "SMART_INTERLOCKING_COVERAGE world="
+            + worldId
+            + " available="
+            + state.available()
+            + " cellCoverageAvailable="
+            + state.cellCoverageAvailable()
+            + " expectedEdges="
+            + state.expectedEdges().size()
+            + " exactZones="
+            + state.exactZoneCount()
+            + " indexedZoneCells="
+            + state.indexedZoneCellCount()
+            + " multiZoneCells="
+            + state.multiZoneCellCount());
+  }
+
+  private void validateSnapshotActivation(UUID worldId, RailGraph graph) {
+    RailGraphSnapshot current = snapshots.get(worldId);
+    RailInterlockingState currentState =
+        lastActivatedInterlockingStates.getOrDefault(
+            worldId,
+            current == null
+                ? RailInterlockingState.unavailable()
+                : interlockingState(current.graph()));
+    RailInterlockingState nextState = interlockingState(graph);
+    if ((current != null || lastActivatedInterlockingStates.containsKey(worldId))
+        && !currentState.sameResourceProjection(nextState)
+        && !snapshotActivationGuard.getAsBoolean()) {
+      throw new IllegalStateException("仍有列车占用 claim，拒绝切换物理联锁资源投影");
+    }
+  }
+
+  private static RailInterlockingState interlockingState(RailGraph graph) {
+    if (graph instanceof RailGraphInterlockingSupport support) {
+      return support.interlockingState();
+    }
+    return RailInterlockingState.unavailable();
   }
 
   public Optional<RailGraphSnapshot> getSnapshot(World world) {
@@ -342,18 +438,36 @@ public final class RailGraphService {
    */
   public double effectiveSpeedLimitBlocksPerSecond(
       UUID worldId, RailEdge edge, Instant now, double defaultSpeedBlocksPerSecond) {
+    return effectiveSpeedLimitBlocksPerSecond(worldId, edge, now, defaultSpeedBlocksPerSecond, 1.0);
+  }
+
+  /**
+   * 同 {@link #effectiveSpeedLimitBlocksPerSecond(UUID, RailEdge, Instant,
+   * double)}，另按倍率放宽线路限速——晚点追赶用。
+   *
+   * <p>只放宽<b>写明了的线路限速</b>：边基础限速（牌子写的）或永久限速覆盖，也就是编表按它算表定时分的那个数。 不放宽的有三类：没写限速、按默认速度走的边——没有证据说它扛得住更快；
+   * 临时限速——施工、限行是运维硬约束；以及不经过这里的进站限速、CAUTION 与信号给出的速度。
+   *
+   * @param lineSpeedFactor 线路限速倍率；不大于 1 或非有限值时按 1
+   */
+  public double effectiveSpeedLimitBlocksPerSecond(
+      UUID worldId,
+      RailEdge edge,
+      Instant now,
+      double defaultSpeedBlocksPerSecond,
+      double lineSpeedFactor) {
     Objects.requireNonNull(worldId, "worldId");
     Objects.requireNonNull(edge, "edge");
     Objects.requireNonNull(now, "now");
     if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
       throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");
     }
+    double factor =
+        Double.isFinite(lineSpeedFactor) && lineSpeedFactor > 1.0 ? lineSpeedFactor : 1.0;
 
     double baseFromEdge = edge.baseSpeedLimit();
-    double base =
-        Double.isFinite(baseFromEdge) && baseFromEdge > 0.0
-            ? baseFromEdge
-            : defaultSpeedBlocksPerSecond;
+    boolean baseWritten = Double.isFinite(baseFromEdge) && baseFromEdge > 0.0;
+    double base = baseWritten ? baseFromEdge * factor : defaultSpeedBlocksPerSecond;
 
     EdgeId edgeId = edge.id();
     if (edgeId == null) {
@@ -364,7 +478,7 @@ public final class RailGraphService {
         edgeOverrides.getOrDefault(worldId, new ConcurrentHashMap<>()).get(normalized);
     double effective = base;
     if (override != null && override.speedLimitBlocksPerSecond().isPresent()) {
-      effective = override.speedLimitBlocksPerSecond().getAsDouble();
+      effective = override.speedLimitBlocksPerSecond().getAsDouble() * factor;
     }
     if (override != null && override.isTempSpeedActive(now)) {
       effective = Math.min(effective, override.tempSpeedLimitBlocksPerSecond().getAsDouble());
@@ -392,6 +506,8 @@ public final class RailGraphService {
     RailEdgeOverrideRepository overrideRepo = provider.railEdgeOverrides();
     RailComponentCautionRepository cautionRepo = provider.railComponentCautions();
     RailGraphSnapshotRepository snapshotRepo = provider.railGraphSnapshots();
+    RailInterlockingSnapshotRepository interlockingSnapshotRepo =
+        provider.railInterlockingSnapshots();
 
     for (World world : worlds) {
       if (world == null) {
@@ -475,6 +591,16 @@ public final class RailGraphService {
       }
 
       java.util.List<RailEdgeRecord> edgeRecords = edgeRepo.listByWorld(worldId);
+      Optional<RailInterlockingSnapshotRecord> interlockingSnapshot = Optional.empty();
+      try {
+        interlockingSnapshot = interlockingSnapshotRepo.findByWorld(worldId);
+      } catch (Exception ex) {
+        debugLogger.accept(
+            "读取 rail_interlocking_snapshots 失败，已按 fail-closed 加载: world="
+                + worldId
+                + " msg="
+                + ex.getMessage());
+      }
       if (snapshot.nodeSignature().isEmpty() && !currentSignature.isEmpty()) {
         RailGraphSnapshotRecord updated =
             new RailGraphSnapshotRecord(
@@ -494,10 +620,13 @@ public final class RailGraphService {
                   + ex.getMessage());
         }
       }
-      RailGraph graph = buildGraphFromRecords(nodeRecords, edgeRecords);
-      snapshots.put(worldId, new RailGraphSnapshot(graph, snapshot.builtAt()));
-      componentIndexes.put(worldId, RailGraphComponentIndex.fromGraph(graph));
-      staleStates.remove(worldId);
+      RailGraph graph = buildGraphFromRecords(nodeRecords, edgeRecords, interlockingSnapshot);
+      try {
+        activateSnapshot(worldId, graph, snapshot.builtAt());
+      } catch (IllegalStateException exception) {
+        debugLogger.accept(
+            "持久化调度图未激活，旧联锁投影保持生效: world=" + worldId + " msg=" + exception.getMessage());
+      }
     }
   }
 
@@ -508,6 +637,21 @@ public final class RailGraphService {
    */
   public static RailGraph buildGraphFromRecords(
       java.util.List<RailNodeRecord> nodeRecords, java.util.List<RailEdgeRecord> edgeRecords) {
+    return buildGraphFromRecords(nodeRecords, edgeRecords, Optional.empty());
+  }
+
+  /**
+   * 从纯 Node/Edge 记录与独立的稀疏联锁快照还原图。
+   *
+   * <p>快照缺失、Edge 签名不一致或 Zone 引用损坏时，图仍可用于诊断，但全部 Edge 会投影同一个 incomplete sentinel，运行授权保持 fail-closed。
+   */
+  public static RailGraph buildGraphFromRecords(
+      java.util.List<RailNodeRecord> nodeRecords,
+      java.util.List<RailEdgeRecord> edgeRecords,
+      Optional<RailInterlockingSnapshotRecord> interlockingSnapshot) {
+    Objects.requireNonNull(nodeRecords, "nodeRecords");
+    Objects.requireNonNull(edgeRecords, "edgeRecords");
+    Objects.requireNonNull(interlockingSnapshot, "interlockingSnapshot");
     Map<org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId, RailNode> nodesById = new HashMap<>();
     for (RailNodeRecord node : nodeRecords) {
       SignRailNode railNode =
@@ -540,7 +684,66 @@ public final class RailGraphService {
       edgesById.put(edgeId, railEdge);
     }
 
-    return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of());
+    // 库里带逐边足迹时，用**完整构建**那条路径重建联锁状态——只有它会建出 cell→edge 反向索引。
+    //
+    // 从 Zone 快照恢复（restoreInterlockingState）按设计只有 Zone、没有逐边足迹，
+    // 索引必然为空、cellCoverageAvailable() 为假，于是一切以实测覆盖为放行条件的机制
+    // （尾部保护释放 / Phase 4）全部 fail-closed 到一个都不放。
+    //
+    // 只有**当真有足迹**时才走这条；否则保持原路径，行为一字不变。
+    java.util.Map<EdgeId, RailEdgeFootprint> footprintsByEdge = new HashMap<>();
+    for (RailEdgeRecord record : edgeRecords) {
+      if (record == null || record.edgeId() == null || record.footprintCells().isEmpty()) {
+        continue;
+      }
+      footprintsByEdge.put(
+          record.edgeId(),
+          new RailEdgeFootprint(
+              RailEdgeFootprint.CURRENT_FORMAT_VERSION, true, record.footprintCells()));
+    }
+    RailInterlockingState interlockingState =
+        resolveWorldId(nodeRecords, edgeRecords)
+            .map(
+                worldId ->
+                    footprintsByEdge.isEmpty()
+                        ? restoreInterlockingState(
+                            worldId, edgesById.keySet(), interlockingSnapshot)
+                        : RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge))
+            .orElseGet(RailInterlockingState::unavailable);
+    return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of(), interlockingState);
+  }
+
+  private static RailInterlockingState restoreInterlockingState(
+      UUID worldId,
+      java.util.Set<EdgeId> expectedEdges,
+      Optional<RailInterlockingSnapshotRecord> snapshotOpt) {
+    if (snapshotOpt.isEmpty()) {
+      return RailInterlockingState.incomplete(worldId, expectedEdges);
+    }
+    RailInterlockingSnapshotRecord snapshot = snapshotOpt.get();
+    String currentSignature = RailInterlockingEdgeSignature.of(expectedEdges);
+    if (!worldId.equals(snapshot.worldId())
+        || snapshot.formatVersion() != RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION
+        || !currentSignature.equals(snapshot.edgeSignature())) {
+      return RailInterlockingState.incomplete(worldId, expectedEdges);
+    }
+    try {
+      return RailInterlockingState.fromSnapshot(
+          worldId, expectedEdges, snapshot.coverage(), snapshot.zones());
+    } catch (IllegalArgumentException exception) {
+      return RailInterlockingState.incomplete(worldId, expectedEdges);
+    }
+  }
+
+  private static Optional<UUID> resolveWorldId(
+      java.util.List<RailNodeRecord> nodeRecords, java.util.List<RailEdgeRecord> edgeRecords) {
+    if (!edgeRecords.isEmpty()) {
+      return Optional.of(edgeRecords.get(0).worldId());
+    }
+    if (!nodeRecords.isEmpty()) {
+      return Optional.of(nodeRecords.get(0).worldId());
+    }
+    return Optional.empty();
   }
 
   public record RailGraphSnapshot(RailGraph graph, Instant builtAt) {

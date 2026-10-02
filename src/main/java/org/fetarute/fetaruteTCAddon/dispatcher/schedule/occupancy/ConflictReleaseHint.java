@@ -70,6 +70,12 @@ public record ConflictReleaseHint(
         conflictKey, true, true, ConflictClearingEvidenceKind.TOPOLOGY_EXIT_HINT, source);
   }
 
+  /** 创建一条由运行时实体位置与有向出口路径共同认证的 switcher 清空证据。 */
+  public static ConflictReleaseHint verifiedSwitcherOccupant(String conflictKey, String source) {
+    return new ConflictReleaseHint(
+        conflictKey, true, true, ConflictClearingEvidenceKind.VERIFIED_SWITCHER_OCCUPANT, source);
+  }
+
   /** 创建一条由 drain authority 注册表认证过的清空授权。 */
   public static ConflictReleaseHint verifiedDrainAuthority(String conflictKey, String source) {
     return new ConflictReleaseHint(

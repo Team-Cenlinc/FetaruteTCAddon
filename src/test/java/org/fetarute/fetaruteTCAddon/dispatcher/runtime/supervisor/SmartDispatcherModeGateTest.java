@@ -67,6 +67,26 @@ class SmartDispatcherModeGateTest {
   }
 
   @Test
+  void smartDispatcherObserveOnlyDoesNotRequestSignalReevaluation() {
+    assertFalse(
+        SmartDispatcherModeGate.permissions(
+                SmartDispatcherMode.OBSERVE_ONLY, DispatchEffectClass.SIGNAL_REEVALUATION_REQUEST)
+            .canRequestSignalReevaluation());
+  }
+
+  @Test
+  void smartDispatcherEnforceCanRequestSignalReevaluationWithoutOtherEffects() {
+    SmartDispatcherModeGate.EffectPermissions permissions =
+        SmartDispatcherModeGate.permissions(
+            SmartDispatcherMode.ENFORCE, DispatchEffectClass.SIGNAL_REEVALUATION_REQUEST);
+
+    assertTrue(permissions.canRequestSignalReevaluation());
+    assertFalse(permissions.canChangeAspect());
+    assertFalse(permissions.canMutateOccupancy());
+    assertFalse(permissions.canDestroy());
+  }
+
+  @Test
   void smartDispatcherOffDoesNotApplyDecision() {
     DispatchDecision decision = signalAdvisoryDecision();
 
@@ -141,6 +161,78 @@ class SmartDispatcherModeGateTest {
     assertTrue(
         SmartDispatcherModeGate.suppresses(
             SmartDispatcherMode.OBSERVE_ONLY, DispatchEffectClass.OCCUPANCY_MUTATION));
+  }
+
+  @Test
+  void allDispatcherMutationsHaveRegisteredAction() {
+    assertTrue(
+        DispatchAction.RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN.executableDispatcherAction());
+    assertTrue(DispatchAction.ACQUIRE_SPECULATIVE_UNLOCK_RESERVATION.executableDispatcherAction());
+    assertTrue(DispatchAction.RELEASE_SPECULATIVE_UNLOCK_RESERVATION.executableDispatcherAction());
+    assertTrue(DispatchAction.REQUEST_UNLOCK_AUTHORITY_REEVALUATION.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_HEAD_ON_YIELD.executableDispatcherAction());
+    assertTrue(
+        DispatchAction.ACQUIRE_VERIFIED_SWITCHER_DRAIN_AUTHORITY.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_ADMISSION_HOLD.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_DRAIN_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
+    assertTrue(DispatchAction.SMART_FORWARD_UNLOCK_SIGNAL_ADVISORY.executableDispatcherAction());
+    assertTrue(DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY.executableDispatcherAction());
+    assertTrue(DispatchAction.EXECUTE_VERIFIED_STUCK_CLEANUP.executableDispatcherAction());
+    assertTrue(DispatchAction.PROCEED_WITH_CAUTION.executableDispatcherAction());
+    assertTrue(DispatchAction.CAUTION_SPEED_LIMIT.executableDispatcherAction());
+  }
+
+  @Test
+  void forbiddenDispatcherActionsAreNotExecutable() {
+    assertFalse(DispatchAction.FORCE_PROCEED.executableDispatcherAction());
+    assertFalse(DispatchAction.DESTROY_TRAIN.executableDispatcherAction());
+    assertFalse(DispatchAction.CLEAR_EXTERNAL_OCCUPANCY.executableDispatcherAction());
+    assertFalse(DispatchAction.CLEAR_DESTINATION.executableDispatcherAction());
+    assertFalse(DispatchAction.INVALIDATE_MOVEMENT_TOKEN.executableDispatcherAction());
+    assertFalse(DispatchAction.ALLOW_OPPOSITE_DIRECTION_BYPASS.executableDispatcherAction());
+    assertFalse(DispatchAction.ALLOW_TURNBACK_BYPASS.executableDispatcherAction());
+    assertFalse(DispatchAction.SAME_DIRECTION_FOLLOW_THROUGH_ALLOW.executableDispatcherAction());
+  }
+
+  @Test
+  void observeOnlySuppressesEveryRegisteredMutationAction() {
+    for (DispatchAction action : DispatchAction.values()) {
+      if (!action.executableDispatcherAction()) {
+        continue;
+      }
+      assertTrue(
+          SmartDispatcherModeGate.suppresses(
+              SmartDispatcherMode.OBSERVE_ONLY, action.effectClass()));
+    }
+  }
+
+  @Test
+  void enforceAllowsOnlyWhitelistedMutationActions() {
+    for (DispatchAction action : DispatchAction.values()) {
+      if (action.forbiddenDispatcherAction()) {
+        assertFalse(action.executableDispatcherAction());
+        continue;
+      }
+      if (action.dispatcherMutation()) {
+        assertTrue(action.executableDispatcherAction());
+      }
+    }
+  }
+
+  @Test
+  void typedActionGateRejectsForbiddenActionEvenInEnforce() {
+    assertTrue(
+        SmartDispatcherModeGate.allows(
+            SmartDispatcherMode.ENFORCE, DispatchAction.SMART_HEALTH_SIGNAL_RECOVERY));
+    assertTrue(
+        SmartDispatcherModeGate.allows(
+            SmartDispatcherMode.ENFORCE, DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY));
+    assertTrue(
+        SmartDispatcherModeGate.allows(
+            SmartDispatcherMode.ENFORCE, DispatchAction.EXECUTE_VERIFIED_STUCK_CLEANUP));
+    assertFalse(
+        SmartDispatcherModeGate.allows(SmartDispatcherMode.ENFORCE, DispatchAction.FORCE_PROCEED));
   }
 
   private static DispatchDecision signalAdvisoryDecision() {

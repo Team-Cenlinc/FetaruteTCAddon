@@ -48,10 +48,22 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("lines_code", "lines", "operator_id, code"));
     ddl.add(stations(dialect));
     ddl.add(uniqueIndex("stations_code", "stations", "operator_id, code"));
+    ddl.add(stationGroups(dialect));
+    ddl.add(stationGroupMembers(dialect));
     ddl.add(routes(dialect));
     ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
     ddl.add(routeStops(dialect));
     ddl.add(index("route_stops_route", "route_stops", "route_id"));
+    ddl.add(timetables(dialect));
+    ddl.add(uniqueIndex("timetables_code", "timetables", "line_id, code"));
+    ddl.add(index("timetables_status", "timetables", "status"));
+    ddl.add(timetableTrips(dialect));
+    ddl.add(uniqueIndex("timetable_trips_code", "timetable_trips", "timetable_id, trip_code"));
+    ddl.add(index("timetable_trips_route", "timetable_trips", "route_id"));
+    ddl.add(timetableDuties(dialect));
+    ddl.add(uniqueIndex("timetable_duties_code", "timetable_duties", "timetable_id, duty_code"));
+    ddl.add(timetableBaselines(dialect));
+    ddl.add(index("timetable_baselines_neighbor", "timetable_baselines", "neighbor_timetable_id"));
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
@@ -59,6 +71,7 @@ public final class StorageSchema {
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     ddl.add(railEdges(dialect));
     ddl.add(index("rail_edges_world", "rail_edges", "world_id"));
+    ddl.add(railInterlockingSnapshots(dialect));
     ddl.add(railEdgeOverrides(dialect));
     ddl.add(index("rail_edge_overrides_world", "rail_edge_overrides", "world_id"));
     ddl.add(railComponentCautions(dialect));
@@ -288,6 +301,64 @@ public final class StorageSchema {
         table("lines"));
   }
 
+  /**
+   * 车站组（乘客视角的换乘站）。
+   *
+   * <p>唯一约束写在表内而不是单独的 {@code CREATE INDEX IF NOT EXISTS}：后者 MySQL 不支持，表内 {@code UNIQUE} 两种后端都能建。
+   */
+  private String stationGroups(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    code %s NOT NULL,
+                    name %s NOT NULL,
+                    secondary_name %s,
+                    metadata %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (company_id, code),
+                    FOREIGN KEY (company_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("station_groups"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("companies"));
+  }
+
+  /** 车站组成员；{@code station_id} 全局唯一，即一个车站最多属于一个组。 */
+  private String stationGroupMembers(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    group_id %s NOT NULL,
+                    station_id %s NOT NULL UNIQUE,
+                    transfer_type %s NOT NULL DEFAULT 'IN_STATION',
+                    walk_secs %s,
+                    sort_order %s NOT NULL DEFAULT 0,
+                    PRIMARY KEY (group_id, station_id),
+                    FOREIGN KEY (group_id) REFERENCES %s(id) ON DELETE CASCADE,
+                    FOREIGN KEY (station_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("station_group_members"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        table("station_groups"),
+        table("stations"));
+  }
+
   private String routes(SqlDialect dialect) {
     return formatDdl(
         """
@@ -349,6 +420,153 @@ public final class StorageSchema {
         dialect.stringType(),
         table("routes"),
         table("stations"));
+  }
+
+  /**
+   * 时刻表表头，含各 route 的站间时分档案。
+   *
+   * <p>档案（{@code route_plans}）做成 JSON 而不是独立表，是因为它对时刻表是整体替换的：一条线路下几条
+   * route、每条二十来个停靠点，读写永远是整份，拆成子表只会多一次 join 和一套"半份档案"的失败模式。 发车表与车辆交路则相反——它们按趟增删、需要按编号唯一，所以各自单列成表。
+   */
+  private String timetables(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    operator_id %s NOT NULL,
+                    line_id %s NOT NULL,
+                    code %s NOT NULL,
+                    name %s NOT NULL,
+                    status %s NOT NULL,
+                    zone_id %s NOT NULL,
+                    service_start_second %s NOT NULL,
+                    service_end_second %s NOT NULL,
+                    route_plans %s NOT NULL,
+                    notes %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    FOREIGN KEY (line_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetables"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.textType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("lines"));
+  }
+
+  /** 发车表：一趟车一行，只存起点发车时刻与承担它的车辆交路。 */
+  private String timetableTrips(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    timetable_id %s NOT NULL,
+                    route_id %s NOT NULL,
+                    duty_id %s,
+                    sequence %s NOT NULL,
+                    trip_code %s NOT NULL,
+                    departure_second_of_day %s NOT NULL,
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_trips"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.intType(),
+        table("timetables"));
+  }
+
+  /**
+   * 邻表基线：build 时读到的邻表身份（id + updatedAt）与冲突计数。publish 时用它判断邻表集合有没有变、要不要重检。
+   *
+   * <p>是新表而不是给 {@code fta_timetables} 加列：本项目没有 schema 迁移，新表会被 {@code CREATE TABLE IF NOT EXISTS}
+   * 自动建出来。
+   */
+  private String timetableBaselines(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    timetable_id %s NOT NULL,
+                    neighbor_timetable_id %s NOT NULL,
+                    neighbor_code %s NOT NULL,
+                    neighbor_updated_at %s NOT NULL,
+                    shared_resources %s NOT NULL,
+                    conflicts_at_target %s NOT NULL,
+                    stale_against_graph %s NOT NULL,
+                    PRIMARY KEY (timetable_id, neighbor_timetable_id),
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_baselines"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.intType(),
+        table("timetables"));
+  }
+
+  /**
+   * 车辆交路：一辆车从出库到回库之间承担的一串班次。
+   *
+   * <p>{@code end_depot_node_id} 是"每辆车最终都会回库"这条不变量的物理落点，因此是 NOT NULL—— 没有回库端点的 duty
+   * 是一条没有出口的链，不允许落库。{@code create_route_id}/{@code return_route_id} 是两端的走行线路， 为空表示首班/末班 route
+   * 本身从车库始发/以销毁收尾；{@code return_second} 是回库票的发出时刻。
+   */
+  private String timetableDuties(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    timetable_id %s NOT NULL,
+                    sequence %s NOT NULL,
+                    duty_code %s NOT NULL,
+                    start_depot_node_id %s NOT NULL,
+                    end_depot_node_id %s NOT NULL,
+                    create_route_id %s,
+                    return_route_id %s,
+                    trip_ids %s NOT NULL,
+                    planned_start_second %s NOT NULL,
+                    return_second %s NOT NULL,
+                    planned_end_second %s NOT NULL,
+                    close_reason %s NOT NULL,
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_duties"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.textType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.intType(),
+        dialect.stringType(),
+        table("timetables"));
   }
 
   private String hudTemplates(SqlDialect dialect) {
@@ -444,6 +662,7 @@ public final class StorageSchema {
                     length_blocks %s NOT NULL,
                     base_speed_limit %s NOT NULL,
                     bidirectional %s NOT NULL,
+                    footprint_json %s NOT NULL DEFAULT '',
                     PRIMARY KEY (world_id, node_a, node_b)
                 );
                 """,
@@ -453,7 +672,8 @@ public final class StorageSchema {
         dialect.stringType(),
         dialect.intType(),
         dialect.doubleType(),
-        dialect.intType());
+        dialect.intType(),
+        dialect.stringType());
   }
 
   private String railEdgeOverrides(SqlDialect dialect) {
@@ -482,6 +702,17 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.timestampType(),
         dialect.timestampType());
+  }
+
+  private String railInterlockingSnapshots(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    world_id %s PRIMARY KEY,
+                    snapshot_json %s NOT NULL
+                );
+                """,
+        table("rail_interlocking_snapshots"), dialect.uuidType(), dialect.textType());
   }
 
   private String railComponentCautions(SqlDialect dialect) {

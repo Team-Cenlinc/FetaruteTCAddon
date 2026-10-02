@@ -347,7 +347,14 @@ abstract class AbstractNodeSignAction extends SignAction {
         .ifPresent(
             definition ->
                 debugLogger.accept(
-                    "触发节点 " + definition.nodeId().value() + " @ " + formatLocation(info)));
+                    "触发节点 "
+                        + definition.nodeId().value()
+                        + " train="
+                        + info.getGroup().getProperties().getTrainName()
+                        + " action="
+                        + info.getAction()
+                        + " @ "
+                        + formatLocation(info)));
   }
 
   /** 判断事件是否由车头触发。 */

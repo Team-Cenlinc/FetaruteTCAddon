@@ -20,11 +20,13 @@ class DeadlockResolverTest {
 
   private SignalEventBus eventBus;
   private DeadlockResolver resolver;
+  private List<String> reevaluationRequests;
 
   @BeforeEach
   void setUp() {
     eventBus = new SignalEventBus();
-    resolver = new DeadlockResolver(eventBus);
+    reevaluationRequests = new ArrayList<>();
+    resolver = new DeadlockResolver(eventBus, reevaluationRequests::add, message -> {});
   }
 
   @Test
@@ -111,7 +113,7 @@ class DeadlockResolverTest {
   }
 
   @Test
-  void publishResolvedCreatesSignalChangedEvent() {
+  void publishResolvedRequestsFreshAuthorityWithoutPublishingProceed() {
     resolver.start();
     List<DeadlockResolvedEvent> resolvedEvents = new ArrayList<>();
     List<SignalChangedEvent> signalEvents = new ArrayList<>();
@@ -125,8 +127,7 @@ class DeadlockResolverTest {
     assertEquals(1, resolvedEvents.size());
     assertEquals("train-A", resolvedEvents.get(0).releasedTrain());
 
-    assertEquals(1, signalEvents.size());
-    assertEquals("train-A", signalEvents.get(0).trainName());
-    assertTrue(signalEvents.get(0).isUnblocked());
+    assertEquals(List.of("train-A"), reevaluationRequests);
+    assertTrue(signalEvents.isEmpty());
   }
 }

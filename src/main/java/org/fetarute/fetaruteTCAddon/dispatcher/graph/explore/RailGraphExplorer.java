@@ -4,6 +4,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
@@ -30,6 +31,22 @@ public final class RailGraphExplorer {
    */
   public static Map<EdgeId, Integer> exploreEdgeLengths(
       Map<NodeId, Set<RailBlockPos>> anchorsByNode, RailBlockAccess access, int maxDistanceBlocks) {
+    Map<EdgeId, Integer> lengths = new java.util.HashMap<>();
+    exploreEdges(anchorsByNode, access, maxDistanceBlocks)
+        .forEach((edgeId, edge) -> lengths.put(edgeId, edge.lengthBlocks()));
+    return Map.copyOf(lengths);
+  }
+
+  /**
+   * 同步探索相邻节点之间的最短长度与完整物理足迹。
+   *
+   * @param anchorsByNode 节点到轨道锚点的映射
+   * @param access 轨道访问器
+   * @param maxDistanceBlocks 单个波前最大探索距离
+   * @return 区间到探索证据的不可变映射
+   */
+  public static Map<EdgeId, ExploredRailEdge> exploreEdges(
+      Map<NodeId, Set<RailBlockPos>> anchorsByNode, RailBlockAccess access, int maxDistanceBlocks) {
     Objects.requireNonNull(anchorsByNode, "anchorsByNode");
     Objects.requireNonNull(access, "access");
     if (maxDistanceBlocks <= 0) {
@@ -41,6 +58,6 @@ public final class RailGraphExplorer {
     while (!session.isDone()) {
       session.step(10_000);
     }
-    return session.edgeLengths();
+    return session.exploredEdges();
   }
 }

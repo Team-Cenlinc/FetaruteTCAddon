@@ -11,6 +11,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
@@ -101,10 +102,11 @@ class TrainConfigResolverTest {
         new ConfigManager.SpawnSettings(false, 20, 200, 1, 5, 5, 40, 10, 2.0),
         new ConfigManager.TrainConfigSettings(
             "emu",
-            new ConfigManager.TrainTypeSettings(0.8, 1.0),
-            new ConfigManager.TrainTypeSettings(0.7, 0.9),
-            new ConfigManager.TrainTypeSettings(0.6, 0.8),
-            new ConfigManager.TrainTypeSettings(0.9, 1.1)),
+            Map.of(
+                TrainType.EMU, new ConfigManager.TrainTypeSettings(0.8, 1.0),
+                TrainType.DMU, new ConfigManager.TrainTypeSettings(0.7, 0.9),
+                TrainType.DIESEL_PUSH_PULL, new ConfigManager.TrainTypeSettings(0.6, 0.8),
+                TrainType.ELECTRIC_LOCO, new ConfigManager.TrainTypeSettings(0.9, 1.1))),
         new ConfigManager.ReclaimSettings(false, 3600L, 100, 60L),
         ConfigManager.HealthSettings.defaults());
   }

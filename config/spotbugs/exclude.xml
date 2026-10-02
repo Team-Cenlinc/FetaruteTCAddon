@@ -162,6 +162,12 @@
         <Class name="org.fetarute.fetaruteTCAddon.utils.ConfigUpdater"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <!-- 车站目录持有共享的交路缓存（注册变更监听），不是防御性拷贝的对象 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.company.api.StationDirectory"/>
+        <Method name="&lt;init&gt;"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
 
     <!-- 使用表前缀动态组装 SQL，表名来自白名单，安全性由代码保证 -->
     <Match>
@@ -217,6 +223,10 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailInterlockingSnapshotRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailComponentCautionRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
@@ -229,8 +239,25 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcStationGroupRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManager"/>
         <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
+
+    <!-- 测试存储按生产建表语句（带表前缀）建表 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.TransitTestStorage"/>
+        <Method name="init"/>
+        <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
+    <!-- 用 Mockito Connection/PreparedStatement 截取 MySQL 方言下生成的 SQL，不会打开真实数据库资源。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.StationGroupRepositoryTest"/>
+        <Method name="mySqlWritesNeverUseDuplicateKeyUpsert"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION,SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
 
     <!-- 测试夹具在 setUp 中清理测试文件，空值路径已由 JUnit 环境保障 -->
@@ -245,10 +272,52 @@
         <Bug pattern="NP_NULL_ON_SOME_PATH_FROM_RETURN_VALUE"/>
     </Match>
 
+    <!-- JDBC migration 单测使用 Mockito Connection/Statement/ResultSet，不会打开真实数据库资源。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManagerTest"/>
+        <Method name="requiredRailEdgeFootprintMigrationPropagatesFailure"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION,ODR_OPEN_DATABASE_RESOURCE,SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManagerTest"/>
+        <Method name="existingRailEdgeFootprintColumnSkipsAlter"/>
+        <Bug pattern="OBL_UNSATISFIED_OBLIGATION,ODR_OPEN_DATABASE_RESOURCE"/>
+    </Match>
+
     <!-- Mockito static mocking 的 when(...) 使用 void lambda 记录调用，SpotBugs 会误报“忽略返回值”。 -->
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParserTest"/>
         <Method name="lambda$ignoresTagSignsOnBukkitSign$0"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+
+    <!-- Paper 1.21 的 ItemStack#setItemMeta 返回兼容性 boolean，但仍会修改 ItemStack；SpotBugs 将其误判为无副作用。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaGraphCommand"/>
+        <Method name="createDebugStick"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaRouteCommand"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener"/>
+        <Method name="createStickItem"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener"/>
+        <Method name="createDebugStickItem"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener"/>
+        <Method name="onRightClickSignOrRail"/>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
     </Match>
 
@@ -293,6 +362,22 @@
     <!-- 测试类使用反射调用私有方法，测试环境不需要 doPrivileged 包装 -->
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchServiceTest"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.LiveBlockerSnapshotProgressAnchorTest"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchScenarioHarness"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchDestroyStaleEventTest"/>
+        <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.SmartUnlockProgressBaselineTest"/>
         <Bug pattern="DP_DO_INSIDE_DO_PRIVILEGED"/>
     </Match>
 
@@ -391,6 +476,14 @@
         <Package name="org.fetarute.fetaruteTCAddon.api.eta"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.api.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
 
     <!-- API 内部实现存储外部服务引用，生命周期由插件主类管理 -->
     <Match>
@@ -473,5 +566,40 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+
+    <!-- stationStops() 故意暴露协作者本体：装配方（主类）与调用方（AutoStation）都需要对它发指令，
+         而 RuntimeDispatchService 的方法数已贴着 SpotBugs 跳过分析的上限，不能为此再摊三个 setter。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService"/>
+        <Method name="stationStops"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+
+    <!-- 时刻表 record 的集合字段已在 compact constructor 中经 List.copyOf/toList 固化，SpotBugs 仍报 EI -->
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Package name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- 发车装饰器持有 delegate 与时刻表服务引用，生命周期由主类管理 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTimetableCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRunRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
 </FindBugsFilter>

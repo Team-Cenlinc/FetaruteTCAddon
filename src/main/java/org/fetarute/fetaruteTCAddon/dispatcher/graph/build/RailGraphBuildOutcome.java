@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.build;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -11,15 +12,20 @@ import java.util.Optional;
  *
  * <p>当 {@link #continuation()} 存在时，表示 discovery 阶段因 {@code maxChunks} 限制暂停，可用 {@code /fta graph
  * continue} 续跑（内存缓存，不保证跨重启）。
+ *
+ * <p>{@link #unterminatedDirections()} 列出按尽头线处理的超距方向，命令层需提示运维核对：若其中本应有真实区间，它已从图中缺失。
  */
 public record RailGraphBuildOutcome(
     RailGraphBuildResult result,
     RailGraphBuildCompletion completion,
-    Optional<RailGraphBuildContinuation> continuation) {
+    Optional<RailGraphBuildContinuation> continuation,
+    List<UnterminatedDirection> unterminatedDirections) {
 
   public RailGraphBuildOutcome {
     Objects.requireNonNull(result, "result");
     Objects.requireNonNull(completion, "completion");
     continuation = continuation != null ? continuation : Optional.empty();
+    unterminatedDirections =
+        unterminatedDirections != null ? List.copyOf(unterminatedDirections) : List.of();
   }
 }

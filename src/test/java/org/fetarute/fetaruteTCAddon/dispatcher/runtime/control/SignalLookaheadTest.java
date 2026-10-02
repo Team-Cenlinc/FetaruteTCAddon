@@ -8,6 +8,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -141,5 +143,97 @@ class SignalLookaheadTest {
     LookaheadResult result = SignalLookahead.compute(null, null, null, null);
     assertEquals(SignalAspect.STOP, result.effectiveSignal());
     assertTrue(result.minConstraintDistance().isEmpty());
+  }
+
+  /**
+   * 实服 WS LWN:2→SWN:2 的开头：站台 26 格（22.2）→ 道岔 48 格（默认 8）→ 主线（22.2）。
+   *
+   * <p>列车在站台边上，基准是"刹得住那条 8 格/秒道岔边"的速度，而不是整段最小的 8。
+   */
+  private static final List<RailEdge> LWN_TO_SWN =
+      List.of(
+          edge(NodeId.of("S:LWN:2"), NodeId.of("SW887"), 26),
+          edge(NodeId.of("SW887"), NodeId.of("LWN:SWN:2:001"), 48),
+          edge(NodeId.of("LWN:SWN:2:001"), NodeId.of("LWN:SWN:2:002"), 53),
+          edge(NodeId.of("LWN:SWN:2:002"), NodeId.of("S:SWN:2"), 600));
+
+  /** 与编表同一条 S 形加减速曲线。 */
+  private static final SpeedCurve CURVE = new SpeedCurve(1.0, 1.0);
+
+  private static double lwnLimit(RailEdge edge) {
+    return edge.to().value().equals("LWN:SWN:2:001") ? 8.0 : 22.2;
+  }
+
+  @Test
+  void pathSpeedEnvelopeBrakesForTheSlowEdgeAheadInsteadOfCappingTheWholeSegment() {
+    double envelope =
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 0L)
+            .orElseThrow();
+
+    assertEquals(SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 26), envelope, 1.0e-9);
+    assertTrue(envelope > 8.0 && envelope < 22.2);
+  }
+
+  @Test
+  void pathSpeedEnvelopeMeasuresTheSlowEdgeFromTheHead() {
+    double atNode =
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 0L)
+            .orElseThrow();
+    double headPastNode =
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 20L)
+            .orElseThrow();
+    double headAtSlowEdge =
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, CURVE, 40L)
+            .orElseThrow();
+
+    assertEquals(SpeedCeiling.brakingLimitBps(CURVE, 22.2, 8.0, 6), headPastNode, 1.0e-9);
+    assertTrue(headPastNode < atNode);
+    assertEquals(8.0, headAtSlowEdge, 1.0e-9, "车头已到慢速边，距离按 0 计，不会变成负数");
+  }
+
+  @Test
+  void pathSpeedEnvelopeReturnsTheCurrentEdgeLimitOnceTheSlowEdgeIsBehind() {
+    List<RailEdge> pastTheSwitch = LWN_TO_SWN.subList(2, LWN_TO_SWN.size());
+
+    assertEquals(
+        22.2,
+        SignalLookahead.pathSpeedEnvelope(pastTheSwitch, SignalLookaheadTest::lwnLimit, CURVE, 0L)
+            .orElseThrow(),
+        1.0e-9);
+  }
+
+  @Test
+  void pathSpeedEnvelopeWithoutBrakingFallsBackToTheSegmentMinimum() {
+    assertEquals(
+        8.0,
+        SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, SignalLookaheadTest::lwnLimit, null, 0L)
+            .orElseThrow(),
+        1.0e-9);
+  }
+
+  @Test
+  void pathSpeedEnvelopeKeepsTheCurrentEdgeLimitWhateverTheHeadProgress() {
+    List<RailEdge> slowFirst = LWN_TO_SWN.subList(1, LWN_TO_SWN.size());
+
+    assertEquals(
+        8.0,
+        SignalLookahead.pathSpeedEnvelope(slowFirst, SignalLookaheadTest::lwnLimit, CURVE, 30L)
+            .orElseThrow(),
+        1.0e-9);
+  }
+
+  @Test
+  void pathSpeedEnvelopeIgnoresEdgesWithoutAValidLimit() {
+    assertTrue(SignalLookahead.pathSpeedEnvelope(List.of(), edge -> 10.0, CURVE, 0L).isEmpty());
+    assertTrue(SignalLookahead.pathSpeedEnvelope(LWN_TO_SWN, edge -> 0.0, CURVE, 0L).isEmpty());
+    assertEquals(
+        22.2,
+        SignalLookahead.pathSpeedEnvelope(
+                LWN_TO_SWN,
+                edge -> edge.to().value().equals("LWN:SWN:2:001") ? Double.NaN : 22.2,
+                CURVE,
+                0L)
+            .orElseThrow(),
+        1.0e-9);
   }
 }

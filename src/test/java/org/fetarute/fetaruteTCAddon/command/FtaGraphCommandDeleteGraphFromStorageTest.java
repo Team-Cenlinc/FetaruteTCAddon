@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRe
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -44,6 +45,8 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
     RailEdgeRepository edgeRepo = mock(RailEdgeRepository.class);
     RailEdgeOverrideRepository overrideRepo = mock(RailEdgeOverrideRepository.class);
     RailGraphSnapshotRepository snapshotRepo = mock(RailGraphSnapshotRepository.class);
+    RailInterlockingSnapshotRepository interlockingRepo =
+        mock(RailInterlockingSnapshotRepository.class);
 
     when(snapshotRepo.findByWorld(worldId))
         .thenReturn(Optional.of(new RailGraphSnapshotRecord(worldId, Instant.now(), 0, 0, "sig")));
@@ -54,6 +57,7 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
     when(provider.railEdges()).thenReturn(edgeRepo);
     when(provider.railEdgeOverrides()).thenReturn(overrideRepo);
     when(provider.railGraphSnapshots()).thenReturn(snapshotRepo);
+    when(provider.railInterlockingSnapshots()).thenReturn(interlockingRepo);
     when(provider.transactionManager()).thenReturn(txManager);
     when(storageManager.provider()).thenReturn(Optional.of(provider));
 
@@ -70,6 +74,7 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
 
     verify(edgeRepo, times(1)).deleteWorld(worldId);
     verify(snapshotRepo, times(1)).delete(worldId);
+    verify(interlockingRepo, times(1)).delete(worldId);
     verify(nodeRepo, times(0)).deleteWorld(worldId);
     verify(overrideRepo, times(0)).deleteWorld(worldId);
   }
@@ -88,6 +93,8 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
     RailEdgeRepository edgeRepo = mock(RailEdgeRepository.class);
     RailEdgeOverrideRepository overrideRepo = mock(RailEdgeOverrideRepository.class);
     RailGraphSnapshotRepository snapshotRepo = mock(RailGraphSnapshotRepository.class);
+    RailInterlockingSnapshotRepository interlockingRepo =
+        mock(RailInterlockingSnapshotRepository.class);
 
     when(snapshotRepo.findByWorld(worldId)).thenReturn(Optional.empty());
 
@@ -97,6 +104,7 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
     when(provider.railEdges()).thenReturn(edgeRepo);
     when(provider.railEdgeOverrides()).thenReturn(overrideRepo);
     when(provider.railGraphSnapshots()).thenReturn(snapshotRepo);
+    when(provider.railInterlockingSnapshots()).thenReturn(interlockingRepo);
     when(provider.transactionManager()).thenReturn(txManager);
     when(storageManager.provider()).thenReturn(Optional.of(provider));
 
@@ -113,6 +121,7 @@ final class FtaGraphCommandDeleteGraphFromStorageTest {
 
     verify(edgeRepo, times(1)).deleteWorld(worldId);
     verify(snapshotRepo, times(1)).delete(worldId);
+    verify(interlockingRepo, times(1)).delete(worldId);
     verify(nodeRepo, times(1)).deleteWorld(worldId);
     verify(overrideRepo, times(1)).deleteWorld(worldId);
   }

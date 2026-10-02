@@ -9,12 +9,15 @@ import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapshotRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -82,6 +85,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   }
 
   @Override
+  public StationGroupRepository stationGroups() {
+    return unsupported(StationGroupRepository.class);
+  }
+
+  @Override
   public RouteRepository routes() {
     return unsupported(RouteRepository.class);
   }
@@ -114,6 +122,16 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public RailGraphSnapshotRepository railGraphSnapshots() {
     return unsupported(RailGraphSnapshotRepository.class);
+  }
+
+  @Override
+  public RailInterlockingSnapshotRepository railInterlockingSnapshots() {
+    return unsupported(RailInterlockingSnapshotRepository.class);
+  }
+
+  @Override
+  public TimetableRepository timetables() {
+    return unsupported(TimetableRepository.class);
   }
 
   @Override

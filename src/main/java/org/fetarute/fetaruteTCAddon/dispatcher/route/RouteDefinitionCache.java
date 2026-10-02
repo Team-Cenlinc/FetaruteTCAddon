@@ -1,7 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.route;
 
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -9,6 +11,7 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -36,6 +39,9 @@ public final class RouteDefinitionCache {
   private final ConcurrentMap<UUID, RouteDefinition> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<RouteCodeKey, RouteDefinition> codeCache = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, List<RouteStop>> stopCache = new ConcurrentHashMap<>();
+  private final ConcurrentMap<UUID, RouteEntry> entryCache = new ConcurrentHashMap<>();
+  private final ConcurrentMap<String, UUID> uuidByRouteKey = new ConcurrentHashMap<>();
+  private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
 
   public RouteDefinitionCache(Consumer<String> debugLogger) {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
@@ -60,6 +66,52 @@ public final class RouteDefinitionCache {
   /** 返回 RouteDefinition 全量快照（只读）。 */
   public Map<UUID, RouteDefinition> snapshot() {
     return Map.copyOf(cache);
+  }
+
+  /**
+   * 交路所属的运营商、线路与交路实体（与 {@link #findById} 同时写入、同时移除）。
+   *
+   * <p>运营类型（{@code pattern_type}）、交路阶段（{@code operation_type}）与所属线路都从这里取，不必再查库。
+   */
+  public Optional<RouteRecord> findRecord(UUID routeId) {
+    if (routeId == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(entryCache.get(routeId)).map(RouteEntry::record);
+  }
+
+  /**
+   * 全部交路条目：每条交路的定义、归属与停靠表是同一次写入的，彼此一致。
+   *
+   * <p>要同时用到这三样时读这里，不要分别调 {@link #snapshot}、{@link #findRecord}、{@link #listStops}——
+   * 三次读之间缓存可能被刷新，拿到的会是不同版本。
+   */
+  public Collection<RouteEntry> entries() {
+    return List.copyOf(entryCache.values());
+  }
+
+  /** 由 {@link RouteDefinition#id()} 反查交路 UUID。 */
+  public Optional<UUID> findUuid(RouteId routeId) {
+    if (routeId == null || routeId.value() == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(uuidByRouteKey.get(normalizeRouteId(routeId.value())));
+  }
+
+  /**
+   * 注册缓存变更监听：{@link #reload}、{@link #refresh}、{@link #remove}、{@link #clear} 之后同步回调。
+   *
+   * <p>车站索引靠它在交路变化时立即重算停靠线路；回调里抛的异常只记日志，不影响缓存本身。
+   */
+  public void addChangeListener(Runnable listener) {
+    if (listener != null) {
+      changeListeners.add(listener);
+    }
+  }
+
+  /** 移除变更监听。 */
+  public void removeChangeListener(Runnable listener) {
+    changeListeners.remove(listener);
   }
 
   /** 获取指定线路的 RouteStop 列表（按 sequence 排序）。 */
@@ -101,6 +153,9 @@ public final class RouteDefinitionCache {
     cache.clear();
     codeCache.clear();
     stopCache.clear();
+    entryCache.clear();
+    uuidByRouteKey.clear();
+    fireChanged();
   }
 
   /**
@@ -115,8 +170,6 @@ public final class RouteDefinitionCache {
    */
   public void reload(StorageProvider provider) {
     Objects.requireNonNull(provider, "provider");
-    cache.clear();
-    codeCache.clear();
 
     CompanyRepository companies = provider.companies();
     OperatorRepository operators = provider.operators();
@@ -125,6 +178,8 @@ public final class RouteDefinitionCache {
     RouteStopRepository routeStops = provider.routeStops();
     StationRepository stations = provider.stations();
 
+    // 先在旁边建好，再整体替换：重载期间其他线程读到的是新旧混合，但不会读到空缓存或半条交路。
+    Staging staging = new Staging();
     int loaded = 0;
     for (var company : companies.listAll()) {
       if (company == null) {
@@ -150,21 +205,22 @@ public final class RouteDefinitionCache {
               continue;
             }
             RouteDefinition definition = definitionOpt.get();
-            RouteCodeKey codeKey = RouteCodeKey.of(operator.code(), line.code(), route.code());
-            cache.put(route.id(), definition);
-            if (codeKey != null) {
-              codeCache.put(codeKey, definition);
-            }
             // 使用 filterStopsWithNodeId 保持 stopCache 索引与 waypoints 对齐
-            stopCache.put(
-                normalizeRouteId(definition.id().value()),
-                List.copyOf(filterStopsWithNodeId(sortedStops(stops), stations)));
+            List<RouteStop> aligned =
+                List.copyOf(filterStopsWithNodeId(sortedStops(stops), stations));
+            staging.put(definition, operator, line, route, aligned);
             loaded++;
           }
         }
       }
     }
+    replaceContents(stopCache, staging.stops);
+    replaceContents(cache, staging.definitions);
+    replaceContents(codeCache, staging.codes);
+    replaceContents(uuidByRouteKey, staging.uuids);
+    replaceContents(entryCache, staging.entries);
     debugLogger.accept("加载 RouteDefinition 缓存完成: routes=" + loaded);
+    fireChanged();
   }
 
   /**
@@ -195,18 +251,26 @@ public final class RouteDefinitionCache {
         codeCache.put(codeKey, definition);
       }
       // 使用 filterStopsWithNodeId 保持 stopCache 索引与 waypoints 对齐
-      stopCache.put(
-          normalizeRouteId(definition.id().value()),
-          List.copyOf(filterStopsWithNodeId(sortedStops(stops), stations)));
+      List<RouteStop> aligned = List.copyOf(filterStopsWithNodeId(sortedStops(stops), stations));
+      String routeKey = normalizeRouteId(definition.id().value());
+      stopCache.put(routeKey, aligned);
+      uuidByRouteKey.put(routeKey, route.id());
+      entryCache.put(
+          route.id(),
+          new RouteEntry(route.id(), definition, new RouteRecord(operator, line, route), aligned));
     } else {
       cache.remove(route.id());
       if (codeKey != null) {
         codeCache.remove(codeKey);
       }
-      stopCache.remove(
+      String routeKey =
           normalizeRouteId(
-              RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id())));
+              RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id()));
+      stopCache.remove(routeKey);
+      entryCache.remove(route.id());
+      uuidByRouteKey.remove(routeKey);
     }
+    fireChanged();
     return definitionOpt;
   }
 
@@ -221,9 +285,89 @@ public final class RouteDefinitionCache {
     if (codeKey != null) {
       codeCache.remove(codeKey);
     }
-    stopCache.remove(
+    String routeKey =
         normalizeRouteId(
-            RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id())));
+            RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id()));
+    stopCache.remove(routeKey);
+    entryCache.remove(route.id());
+    uuidByRouteKey.remove(routeKey);
+    fireChanged();
+  }
+
+  private static <K, V> void replaceContents(ConcurrentMap<K, V> target, Map<K, V> next) {
+    target.keySet().retainAll(next.keySet());
+    target.putAll(next);
+  }
+
+  /** 重载时在旁边建的新内容。 */
+  private static final class Staging {
+    private final Map<UUID, RouteDefinition> definitions = new HashMap<>();
+    private final Map<RouteCodeKey, RouteDefinition> codes = new HashMap<>();
+    private final Map<String, List<RouteStop>> stops = new HashMap<>();
+    private final Map<String, UUID> uuids = new HashMap<>();
+    private final Map<UUID, RouteEntry> entries = new HashMap<>();
+
+    private void put(
+        RouteDefinition definition,
+        Operator operator,
+        Line line,
+        Route route,
+        List<RouteStop> aligned) {
+      definitions.put(route.id(), definition);
+      RouteCodeKey codeKey = RouteCodeKey.of(operator.code(), line.code(), route.code());
+      if (codeKey != null) {
+        codes.put(codeKey, definition);
+      }
+      String routeKey = normalizeRouteId(definition.id().value());
+      stops.put(routeKey, aligned);
+      uuids.put(routeKey, route.id());
+      entries.put(
+          route.id(),
+          new RouteEntry(route.id(), definition, new RouteRecord(operator, line, route), aligned));
+    }
+  }
+
+  /**
+   * 一条交路的定义、归属与停靠表（同一次写入）。
+   *
+   * @param routeId 交路 UUID
+   * @param definition 交路定义
+   * @param record 归属与交路实体
+   * @param stops 与 {@code definition.waypoints()} 下标对齐的停靠表（即 {@link #listStops} 的返回值）
+   */
+  public record RouteEntry(
+      UUID routeId, RouteDefinition definition, RouteRecord record, List<RouteStop> stops) {
+    public RouteEntry {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(definition, "definition");
+      Objects.requireNonNull(record, "record");
+      stops = List.copyOf(stops);
+    }
+  }
+
+  private void fireChanged() {
+    for (Runnable listener : changeListeners) {
+      try {
+        listener.run();
+      } catch (RuntimeException ex) {
+        debugLogger.accept("RouteDefinition 变更监听失败: " + ex);
+      }
+    }
+  }
+
+  /**
+   * 交路的归属与实体快照。
+   *
+   * @param operator 所属运营商
+   * @param line 所属线路
+   * @param route 交路实体（含 {@code patternType} 运营类型与 {@code operationType} 交路阶段）
+   */
+  public record RouteRecord(Operator operator, Line line, Route route) {
+    public RouteRecord {
+      Objects.requireNonNull(operator, "operator");
+      Objects.requireNonNull(line, "line");
+      Objects.requireNonNull(route, "route");
+    }
   }
 
   /**

@@ -18,6 +18,7 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Collectors;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -46,11 +47,13 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdgeValidator;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
@@ -63,6 +66,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildJob.BuildMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.UnterminatedDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideLister;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailControlParsers;
@@ -70,9 +74,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailSpeed;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphExplorer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.InterlockingZoneInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingEdgeSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailInterlockingSnapshotRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
@@ -81,6 +91,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -382,8 +393,16 @@ public final class FtaGraphCommand {
                           signAnchorRadius,
                           switcherAnchorRadius,
                           outcome -> {
-                            AppliedGraphBuild applied =
-                                applyBuildSuccess(world, outcome.result(), outcome.completion());
+                            AppliedGraphBuild applied;
+                            try {
+                              applied =
+                                  applyBuildSuccess(world, outcome.result(), outcome.completion());
+                            } catch (IllegalStateException exception) {
+                              plugin.getLogger().warning("调度图构建未激活: " + exception.getMessage());
+                              sender.sendMessage(
+                                  locale.component("command.graph.build.activation-blocked"));
+                              return;
+                            }
                             outcome
                                 .continuation()
                                 .ifPresentOrElse(
@@ -430,6 +449,8 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                                      reportUnterminatedDirections(
+                                          sender, world, outcome.unterminatedDirections());
                                       validateRoutesAfterBuild(
                                           sender, world, applied.result().graph());
                                       sender.sendMessage(
@@ -522,12 +543,21 @@ public final class FtaGraphCommand {
                           continuation,
                           tickBudgetMs,
                           chunkLoadOptions,
-                          EdgeExploreMode.bfsMultiSource(), // 默认使用 BFS
+                          // 续跑完成 discovery 后必须重新取得真实 RailPath 足迹；BFS 对 TCC 长曲线只掌握端点。
+                          EdgeExploreMode.nodeToNode(),
                           signAnchorRadius,
                           switcherAnchorRadius,
                           outcome -> {
-                            AppliedGraphBuild applied =
-                                applyBuildSuccess(world, outcome.result(), outcome.completion());
+                            AppliedGraphBuild applied;
+                            try {
+                              applied =
+                                  applyBuildSuccess(world, outcome.result(), outcome.completion());
+                            } catch (IllegalStateException exception) {
+                              plugin.getLogger().warning("调度图续建未激活: " + exception.getMessage());
+                              sender.sendMessage(
+                                  locale.component("command.graph.build.activation-blocked"));
+                              return;
+                            }
                             outcome
                                 .continuation()
                                 .ifPresentOrElse(
@@ -574,6 +604,8 @@ public final class FtaGraphCommand {
                                                                   cont.discoverySession()
                                                                       .pendingChunksToLoad())))));
                                       sendDuplicateNodeIdWarnings(sender, world, applied.result());
+                                      reportUnterminatedDirections(
+                                          sender, world, outcome.unterminatedDirections());
                                       validateRoutesAfterBuild(
                                           sender, world, applied.result().graph());
                                       sender.sendMessage(
@@ -1071,6 +1103,35 @@ public final class FtaGraphCommand {
                                   String.valueOf(switcherSignNodes),
                                   "switcher_auto",
                                   String.valueOf(switcherAutoNodes))));
+
+                  RailInterlockingState interlockingState =
+                      graph instanceof RailGraphInterlockingSupport support
+                          ? support.interlockingState()
+                          : RailInterlockingState.unavailable();
+                  var coverage = interlockingState.coverage();
+                  int expectedEdges =
+                      interlockingState.available()
+                          ? coverage.inputEdgeCount()
+                          : graph.edges().size();
+                  String coverageStatus =
+                      !interlockingState.available() ? "不可用" : coverage.complete() ? "完整" : "不完整";
+                  ctx.sender()
+                      .sendMessage(
+                          locale.component(
+                              "command.graph.info.interlocking",
+                              Map.of(
+                                  "status",
+                                  coverageStatus,
+                                  "captured",
+                                  String.valueOf(coverage.participatingEdgeCount()),
+                                  "expected",
+                                  String.valueOf(expectedEdges),
+                                  "zones",
+                                  String.valueOf(interlockingState.exactZoneCount()),
+                                  "cells",
+                                  String.valueOf(interlockingState.indexedZoneCellCount()),
+                                  "shared_cells",
+                                  String.valueOf(interlockingState.multiZoneCellCount()))));
 
                   List<RailEdge> top =
                       graph.edges().stream()
@@ -4619,6 +4680,160 @@ public final class FtaGraphCommand {
                         locale.component("command.graph.conflict.path.entry", Map.of("key", key)));
                   }
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("conflict")
+            .literal("interlocking")
+            .literal("list")
+            .permission("fetarute.graph.query")
+            .optional("page", IntegerParser.integerParser())
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), Instant.now());
+                  if (!(graph instanceof RailGraphInterlockingSupport support)
+                      || !support.interlockingState().available()) {
+                    sender.sendMessage(locale.component("command.graph.conflict.not-supported"));
+                    return;
+                  }
+                  RailInterlockingState state = support.interlockingState();
+                  List<InterlockingZoneInfo> zones = new ArrayList<>(state.exactZones().values());
+                  zones.sort(Comparator.comparing(InterlockingZoneInfo::zoneKey));
+                  if (zones.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.graph.conflict.interlocking.list.empty"));
+                    return;
+                  }
+                  int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
+                  ListPage<InterlockingZoneInfo> pageResult = paginate(zones, page, 10);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.interlocking.list.header",
+                          Map.of("world", world.getName(), "count", String.valueOf(zones.size()))));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.interlocking.page",
+                          Map.of(
+                              "page",
+                              String.valueOf(pageResult.page()),
+                              "pages",
+                              String.valueOf(pageResult.totalPages()))));
+                  for (InterlockingZoneInfo zone : pageResult.items()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.conflict.interlocking.list.entry",
+                            Map.of(
+                                "key",
+                                zone.zoneKey(),
+                                "first_edge",
+                                formatEdgeId(zone.firstEdge()),
+                                "second_edge",
+                                formatEdgeId(zone.secondEdge()),
+                                "cells",
+                                String.valueOf(zone.overlapCells().size()))));
+                  }
+                }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("conflict")
+            .literal("interlocking")
+            .literal("get")
+            .permission("fetarute.graph.query")
+            .required("key", StringParser.quotedStringParser())
+            .optional("page", IntegerParser.integerParser())
+            .handler(
+                ctx -> {
+                  CommandSender sender = ctx.sender();
+                  World world = resolveWorld(sender);
+                  if (world == null) {
+                    sender.sendMessage("未找到可用世界");
+                    return;
+                  }
+                  LocaleManager locale = plugin.getLocaleManager();
+                  Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
+                      requireGraphSnapshot(sender, world, locale);
+                  if (snapshotOpt.isEmpty()) {
+                    return;
+                  }
+                  RailGraph graph =
+                      graphWithEdgeOverrides(
+                          world.getUID(), snapshotOpt.get().graph(), Instant.now());
+                  if (!(graph instanceof RailGraphInterlockingSupport support)
+                      || !support.interlockingState().available()) {
+                    sender.sendMessage(locale.component("command.graph.conflict.not-supported"));
+                    return;
+                  }
+                  String key = ctx.get("key");
+                  Optional<InterlockingZoneInfo> zoneOpt =
+                      support.interlockingState().zoneInfo(key);
+                  if (zoneOpt.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.conflict.interlocking.get.not-found",
+                            Map.of("key", key)));
+                    return;
+                  }
+                  InterlockingZoneInfo zone = zoneOpt.get();
+                  List<RailFootprintCell> cells = new ArrayList<>(zone.overlapCells());
+                  cells.sort(Comparator.naturalOrder());
+                  int page = ctx.optional("page").map(Integer.class::cast).orElse(1);
+                  ListPage<RailFootprintCell> pageResult = paginate(cells, page, 10);
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.interlocking.get.header",
+                          Map.of(
+                              "key",
+                              zone.zoneKey(),
+                              "first_edge",
+                              formatEdgeId(zone.firstEdge()),
+                              "second_edge",
+                              formatEdgeId(zone.secondEdge()),
+                              "cells",
+                              String.valueOf(cells.size()))));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.conflict.interlocking.page",
+                          Map.of(
+                              "page",
+                              String.valueOf(pageResult.page()),
+                              "pages",
+                              String.valueOf(pageResult.totalPages()))));
+                  for (RailFootprintCell cell : pageResult.items()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.graph.conflict.interlocking.get.cell",
+                            Map.of(
+                                "x",
+                                String.valueOf(cell.x()),
+                                "y",
+                                String.valueOf(cell.y()),
+                                "z",
+                                String.valueOf(cell.z()))));
+                  }
+                }));
+  }
+
+  private static String formatEdgeId(EdgeId edgeId) {
+    return edgeId.a().value() + " ↔ " + edgeId.b().value();
   }
 
   private static Component staleInfoMessage(
@@ -5645,16 +5860,14 @@ public final class FtaGraphCommand {
               mergedNodes,
               result.missingSwitcherJunctions(),
               result.duplicateNodeIds());
-      service.putSnapshot(world, merged.graph(), merged.builtAt());
+      activatePersistedGraph(world, merged);
       syncSignNodeRegistry(world, mergedNodes);
-      persistGraph(world, merged);
       scheduleStationAutoSync(world, merged.nodes());
       return new AppliedGraphBuild(merged, Optional.of(merge));
     }
 
-    service.putSnapshot(world, result.graph(), result.builtAt());
+    activatePersistedGraph(world, result);
     syncSignNodeRegistry(world, result.nodes());
-    persistGraph(world, result);
     scheduleStationAutoSync(world, result.nodes());
     return new AppliedGraphBuild(result, Optional.empty());
   }
@@ -5746,8 +5959,8 @@ public final class FtaGraphCommand {
     }
 
     // 执行边探索
-    Map<EdgeId, Integer> rawEdgeLengths =
-        RailGraphExplorer.exploreEdgeLengths(anchorsByNode, access, 512);
+    Map<EdgeId, ExploredRailEdge> rawEdges =
+        RailGraphExplorer.exploreEdges(anchorsByNode, access, 512);
 
     // 构建节点映射用于跨轨道过滤
     Map<NodeId, RailNode> nodesById = new HashMap<>();
@@ -5756,8 +5969,8 @@ public final class FtaGraphCommand {
     }
 
     // 过滤跨轨道直连边
-    Map<EdgeId, Integer> newEdgeLengths =
-        RailEdgeValidator.filterCrossTrackEdges(rawEdgeLengths, nodesById);
+    Map<EdgeId, ExploredRailEdge> newEdges =
+        RailEdgeValidator.filterCrossTrackExploredEdges(rawEdges, nodesById);
 
     // 检查是否有新边
     Map<EdgeId, RailEdge> edgesById = new HashMap<>();
@@ -5767,12 +5980,12 @@ public final class FtaGraphCommand {
 
     int newEdgeCount = 0;
 
-    for (Map.Entry<EdgeId, Integer> entry : newEdgeLengths.entrySet()) {
+    for (Map.Entry<EdgeId, ExploredRailEdge> entry : newEdges.entrySet()) {
       EdgeId edgeId = entry.getKey();
       if (edgesById.containsKey(edgeId)) {
         continue; // 边已存在
       }
-      int lengthBlocks = entry.getValue();
+      ExploredRailEdge exploredEdge = entry.getValue();
       RailNode a = nodesById.get(edgeId.a());
       RailNode b = nodesById.get(edgeId.b());
       if (a == null || b == null) {
@@ -5784,7 +5997,7 @@ public final class FtaGraphCommand {
               edgeId,
               edgeId.a(),
               edgeId.b(),
-              lengthBlocks,
+              exploredEdge.lengthBlocks(),
               0.0,
               true,
               Optional.of(new RailEdgeMetadata(a.waypointMetadata(), b.waypointMetadata()))));
@@ -5805,7 +6018,11 @@ public final class FtaGraphCommand {
       }
     }
 
-    return new SimpleRailGraph(nodesById, edgesById, blockedEdges);
+    return new SimpleRailGraph(
+        nodesById,
+        edgesById,
+        blockedEdges,
+        RailInterlockingState.incomplete(world.getUID(), edgesById.keySet()));
   }
 
   /** build 完成后异步自愈 Station 主数据（用于 PIDS/站点显示）。 */
@@ -5832,7 +6049,15 @@ public final class FtaGraphCommand {
                 java.util.function.Consumer<String> debug =
                     plugin.getLoggerManager() != null ? plugin.getLoggerManager()::debug : m -> {};
                 StationAutoSyncService sync = new StationAutoSyncService(debug);
-                sync.syncFromRailNodes(provider, worldName, nodes);
+                StationAutoSyncService.StationAutoSyncResult result =
+                    sync.syncFromRailNodes(provider, worldName, nodes);
+                if (result.created() > 0 || result.updated() > 0) {
+                  // 新建/补全了车站：回主线程刷新车站目录（停靠点站名、停靠线路随之更新）。
+                  plugin
+                      .getServer()
+                      .getScheduler()
+                      .runTask(plugin, plugin::refreshStationDirectory);
+                }
               } catch (Exception ex) {
                 plugin.getLogger().warning("站点自愈失败: " + ex.getMessage());
               }
@@ -5986,39 +6211,94 @@ public final class FtaGraphCommand {
       return List.of();
     }
     List<RouteValidationIssue> issues = new ArrayList<>();
-    List<NodeId> nodes = new ArrayList<>();
+    // DYNAMIC 停靠点**不解析到单一节点**（运行时才在若干站台里选一个），
+    // 所以它会被 resolveNodeId 判为空。若直接报 `node-missing`，
+    // 每次 `/fta graph build` 之后，凡是带 DYNAMIC 的路线都会刷出一串
+    // "第 N 个停靠点缺少节点"的误报。
+    //
+    // route 包里本就有共享的 DynamicStopMatcher（isDynamicStop / matchesStop），
+    // FtaRouteCommand 定义路线时也用它做 DYNAMIC 校验；这里同样复用，避免两处各写各的而分叉。
+    //
+    // 按**分段**处理：DYNAMIC 停靠点切断可达性链条。既不报缺节点，
+    // 也不随便挑一个站台候选去连边——那会造出假的 `edge-unreachable`。
+    List<List<NodeId>> segments = new ArrayList<>();
+    List<NodeId> current = new ArrayList<>();
     boolean missingNode = false;
     for (RouteStop stop : stops) {
       if (stop == null) {
         continue;
       }
       Optional<NodeId> nodeIdOpt = RouteStopResolver.resolveNodeId(provider, stop);
-      if (nodeIdOpt.isEmpty()) {
-        missingNode = true;
-        addMissingNodeIssue(provider, stop, issues);
+      if (nodeIdOpt.isPresent()) {
+        current.add(nodeIdOpt.get());
         continue;
       }
-      nodes.add(nodeIdOpt.get());
+      if (DynamicStopMatcher.isDynamicStop(stop)) {
+        List<NodeId> candidates = dynamicGraphCandidates(graph, stop);
+        if (candidates.isEmpty()) {
+          // 真的一个站台都不存在——这才是问题，且用 DYNAMIC 专用文案而不是 node-missing。
+          missingNode = true;
+          issues.add(
+              new RouteValidationIssue(
+                  "command.route.define.dynamic-no-valid-tracks",
+                  Map.of(
+                      "seq", String.valueOf(stop.sequence()),
+                      "spec", dynamicSpecText(stop),
+                      "range", "-")));
+        }
+        // 有候选 ⇒ 这个停靠点没问题；但选哪个站台要到运行时才知道，因此在此断段。
+        if (!current.isEmpty()) {
+          segments.add(List.copyOf(current));
+          current.clear();
+        }
+        continue;
+      }
+      missingNode = true;
+      addMissingNodeIssue(provider, stop, issues);
     }
-    if (missingNode || nodes.size() < 2) {
+    if (!current.isEmpty()) {
+      segments.add(List.copyOf(current));
+    }
+    if (missingNode) {
       return List.copyOf(issues);
     }
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
-    for (int i = 0; i < nodes.size() - 1; i++) {
-      NodeId from = nodes.get(i);
-      NodeId to = nodes.get(i + 1);
-      boolean reachable =
-          pathFinder
-              .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
-              .isPresent();
-      if (!reachable) {
-        issues.add(
-            new RouteValidationIssue(
-                "command.route.define.edge-unreachable",
-                Map.of("from", from.value(), "to", to.value())));
+    for (List<NodeId> segment : segments) {
+      for (int i = 0; i < segment.size() - 1; i++) {
+        NodeId from = segment.get(i);
+        NodeId to = segment.get(i + 1);
+        boolean reachable =
+            pathFinder
+                .shortestPath(graph, from, to, RailGraphPathFinder.Options.shortestDistance())
+                .isPresent();
+        if (!reachable) {
+          issues.add(
+              new RouteValidationIssue(
+                  "command.route.define.edge-unreachable",
+                  Map.of("from", from.value(), "to", to.value())));
+        }
       }
     }
     return List.copyOf(issues);
+  }
+
+  /** 图中与该 DYNAMIC 停靠点规格相符的全部候选节点。 */
+  private static List<NodeId> dynamicGraphCandidates(RailGraph graph, RouteStop stop) {
+    if (graph == null || stop == null) {
+      return List.of();
+    }
+    List<NodeId> candidates = new ArrayList<>();
+    for (RailNode node : graph.nodes()) {
+      if (node != null && DynamicStopMatcher.matchesStop(node.id(), stop)) {
+        candidates.add(node.id());
+      }
+    }
+    return List.copyOf(candidates);
+  }
+
+  /** DYNAMIC 规格的可读文本，仅用于校验提示。 */
+  private static String dynamicSpecText(RouteStop stop) {
+    return DynamicStopMatcher.parseDynamicSpec(stop).map(Object::toString).orElse("-");
   }
 
   private void addMissingNodeIssue(
@@ -6175,9 +6455,19 @@ public final class FtaGraphCommand {
 
     // 使用 NodeToNodeEdgeExplorer 探索边
     long startNanos = System.nanoTime();
+    Set<NodeId> switcherNodeIds = new HashSet<>();
+    for (RailNodeRecord node : nodes) {
+      if (node.nodeType() == NodeType.SWITCHER) {
+        switcherNodeIds.add(node.nodeId());
+      }
+    }
     var nodeToNodeExplorer =
         new org.fetarute.fetaruteTCAddon.dispatcher.graph.build.NodeToNodeEdgeExplorer(
-            world, anchorIndex, plugin.getLoggerManager()::debug);
+            world,
+            anchorIndex,
+            switcherNodeIds,
+            exploreMode.maxDistanceBlocks(),
+            plugin.getLoggerManager()::debug);
     for (var entry : anchorsByNode.entrySet()) {
       nodeToNodeExplorer.addNode(entry.getKey(), entry.getValue());
     }
@@ -6205,7 +6495,7 @@ public final class FtaGraphCommand {
                 // 完成
                 task.cancel();
                 long tookMs = TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startNanos);
-                Map<EdgeId, Integer> edgeLengths = nodeToNodeExplorer.getDiscoveredEdges();
+                Map<EdgeId, ExploredRailEdge> exploredEdges = nodeToNodeExplorer.getExploredEdges();
 
                 // 构建图
                 Map<
@@ -6225,9 +6515,11 @@ public final class FtaGraphCommand {
 
                 Map<EdgeId, org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge> edgesById =
                     new HashMap<>();
-                for (var entry : edgeLengths.entrySet()) {
+                Map<EdgeId, ExploredRailEdge> filteredEdges =
+                    RailEdgeValidator.filterCrossTrackExploredEdges(exploredEdges, nodesById);
+                for (var entry : filteredEdges.entrySet()) {
                   EdgeId edgeId = entry.getKey();
-                  int lengthBlocks = entry.getValue();
+                  ExploredRailEdge exploredEdge = entry.getValue();
                   var a = nodesById.get(edgeId.a());
                   var b = nodesById.get(edgeId.b());
                   if (a == null || b == null) {
@@ -6239,7 +6531,7 @@ public final class FtaGraphCommand {
                           edgeId,
                           edgeId.a(),
                           edgeId.b(),
-                          lengthBlocks,
+                          exploredEdge.lengthBlocks(),
                           0.0,
                           true,
                           Optional.empty()));
@@ -6248,7 +6540,7 @@ public final class FtaGraphCommand {
                 // 新探索的边 graph（只包含本次能探索到的边）
                 RailGraph freshEdgesGraph =
                     new org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph(
-                        nodesById, edgesById, Set.of());
+                        nodesById, edgesById, Set.of(), interlockingState(worldId, filteredEdges));
 
                 // 与现有图合并（保留未探索区域的边）
                 RailGraphService service = plugin.getRailGraphService();
@@ -6269,20 +6561,24 @@ public final class FtaGraphCommand {
                 } else {
                   finalGraph = freshEdgesGraph;
                 }
+                finalGraph = markRefreshInterlockingCatalogIncomplete(finalGraph);
 
                 Instant builtAt = Instant.now();
                 String signature =
                     org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature
                         .signatureForNodes(finalNodes);
 
-                // 保存到服务和存储
-                service.putSnapshot(world, finalGraph, builtAt);
-
                 List<RailNodeRecord> mergedNodes = nodeRecordsFromGraph(world.getUID(), finalGraph);
                 RailGraphBuildResult result =
                     new RailGraphBuildResult(
                         finalGraph, builtAt, signature, mergedNodes, List.of(), List.of());
-                persistGraph(world, result);
+                try {
+                  activatePersistedGraph(world, result);
+                } catch (IllegalStateException exception) {
+                  plugin.getLogger().warning("调度图快速刷新未激活: " + exception.getMessage());
+                  sender.sendMessage(locale.component("command.graph.build.activation-blocked"));
+                  return;
+                }
 
                 sender.sendMessage(
                     locale.component(
@@ -6307,6 +6603,8 @@ public final class FtaGraphCommand {
                               + " 条现有边",
                           NamedTextColor.YELLOW));
                 }
+                reportUnterminatedDirections(
+                    sender, world, nodeToNodeExplorer.unterminatedDirections());
 
                 sender.sendMessage(locale.component("command.graph.build.reroute-hint"));
               }
@@ -6339,13 +6637,33 @@ public final class FtaGraphCommand {
       if (nodes.isEmpty() && edges.isEmpty()) {
         return Optional.empty();
       }
-      return Optional.of(RailGraphService.buildGraphFromRecords(nodes, edges));
+      Optional<RailInterlockingSnapshotRecord> interlockingSnapshot =
+          provider.railInterlockingSnapshots().findByWorld(worldId);
+      return Optional.of(
+          RailGraphService.buildGraphFromRecords(nodes, edges, interlockingSnapshot));
     } catch (Exception ex) {
       plugin
           .getLogger()
           .warning("从存储加载调度图失败: world=" + world.getName() + " msg=" + ex.getMessage());
       return Optional.empty();
     }
+  }
+
+  private static RailInterlockingState interlockingState(
+      UUID worldId, Map<EdgeId, ExploredRailEdge> exploredEdges) {
+    Map<EdgeId, RailEdgeFootprint> footprints = new HashMap<>();
+    exploredEdges.forEach((edgeId, edge) -> footprints.put(edgeId, edge.footprint()));
+    return RailInterlockingState.from(worldId, exploredEdges.keySet(), footprints);
+  }
+
+  /**
+   * 把快速刷新结果的稀疏联锁目录整体降级为不完整。
+   *
+   * <p>{@code --refresh} 跳过沿轨道的连通发现与区块加载，即使所有节点 anchor 当前可见，也无法证明中间区块、新增分支和 edge universe
+   * 已被完整观察。降级必须发生在旧图与本轮结果合并之后，防止未认证的局部结果冒充完整目录；普通轨道不会因此写入持久化或常驻索引。
+   */
+  static RailGraph markRefreshInterlockingCatalogIncomplete(RailGraph graph) {
+    return RailGraphMerger.markInterlockingCatalogIncomplete(graph);
   }
 
   private static Component mergeBuildMessage(
@@ -6418,24 +6736,51 @@ public final class FtaGraphCommand {
       int routesChecked, int routeIssueCount, List<RouteValidationEntry> entries) {}
 
   /**
+   * 先提交持久化事务，再激活同一份内存快照。
+   *
+   * <p>调用发生在 Bukkit 主线程的单一构建完成回调中。激活前校验先阻止 active claim 下的资源投影切换；随后 SQL 任一步失败都会终止流程，旧内存快照、Sign
+   * registry 和运行时联锁定义均保持不变。
+   */
+  private void activatePersistedGraph(World world, RailGraphBuildResult result) {
+    RailGraphService service = plugin.getRailGraphService();
+    service.validateSnapshotActivation(world, result.graph());
+    if (!persistGraph(world, result)) {
+      throw new IllegalStateException("调度图持久化失败，保留旧内存快照");
+    }
+    service.putSnapshot(world, result.graph(), result.builtAt());
+  }
+
+  /**
    * 把调度图快照写入存储（SQL）。
    *
    * <p>实现为“按世界 replace”：每次写入会覆盖该世界原有的 rail_nodes/rail_edges/rail_graph_snapshots 记录。
    *
    * <p>当存储未就绪（例如启动失败回退为占位存储）时，该方法会直接 no-op。
    */
-  private void persistGraph(World world, RailGraphBuildResult result) {
+  private boolean persistGraph(World world, RailGraphBuildResult result) {
     if (plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()) {
-      return;
+      return false;
     }
     Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
     if (providerOpt.isEmpty()) {
-      return;
+      return false;
     }
     StorageProvider provider = providerOpt.get();
     java.time.Instant builtAt = result.builtAt();
     java.util.UUID worldId = world.getUID();
 
+    // 逐边足迹必须跟着一起写库，否则下次启动从快照恢复时 cell→edge 索引必然为空、
+    // cellCoverageAvailable() 为假，一切以实测覆盖为放行条件的机制（尾部保护释放 / Phase 4）
+    // 全部 fail-closed 到一个都不放。
+    //
+    // 足迹在图对象上不再单独持有（建索引时被消费），所以从 cell→edge 索引反转回来。
+    // **覆盖不可用时一律写空**：那种情况下反转结果是空 Map，若当成"这些边没有足迹"写进去，
+    // 就会用一份空足迹覆盖掉库里原有的好数据——所以下面显式区分。
+    java.util.Map<EdgeId, java.util.Set<RailFootprintCell>> footprints =
+        (result.graph() instanceof RailGraphInterlockingSupport support
+                && support.interlockingState().cellCoverageAvailable())
+            ? support.interlockingState().footprintCellsByEdge()
+            : java.util.Map.of();
     List<RailEdgeRecord> edges =
         result.graph().edges().stream()
             .map(
@@ -6445,7 +6790,8 @@ public final class FtaGraphCommand {
                         edge.id(),
                         edge.lengthBlocks(),
                         edge.baseSpeedLimit(),
-                        edge.bidirectional()))
+                        edge.bidirectional(),
+                        footprints.getOrDefault(edge.id(), java.util.Set.of())))
             .toList();
     List<RailNodeRecord> nodes = result.nodes();
 
@@ -6456,6 +6802,22 @@ public final class FtaGraphCommand {
               () -> {
                 provider.railNodes().replaceWorld(worldId, nodes);
                 provider.railEdges().replaceWorld(worldId, edges);
+                RailInterlockingState interlocking =
+                    result.graph() instanceof RailGraphInterlockingSupport support
+                        ? support.interlockingState()
+                        : RailInterlockingState.unavailable();
+                if (!interlocking.available()) {
+                  throw new IllegalStateException("图快照缺少可持久化的世界级稀疏联锁状态");
+                }
+                provider
+                    .railInterlockingSnapshots()
+                    .save(
+                        new RailInterlockingSnapshotRecord(
+                            worldId,
+                            RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION,
+                            RailInterlockingEdgeSignature.of(interlocking.expectedEdges()),
+                            interlocking.coverage(),
+                            interlocking.exactZones()));
                 provider
                     .railGraphSnapshots()
                     .save(
@@ -6463,8 +6825,10 @@ public final class FtaGraphCommand {
                             worldId, builtAt, nodes.size(), edges.size(), result.nodeSignature()));
                 return null;
               });
+      return true;
     } catch (Exception ex) {
       plugin.getLogger().warning("持久化调度图失败: " + ex.getMessage());
+      return false;
     }
   }
 
@@ -6491,6 +6855,7 @@ public final class FtaGraphCommand {
               () -> {
                 boolean existed = provider.railGraphSnapshots().findByWorld(worldId).isPresent();
                 provider.railEdges().deleteWorld(worldId);
+                provider.railInterlockingSnapshots().delete(worldId);
                 provider.railGraphSnapshots().delete(worldId);
                 if (hard) {
                   provider.railNodes().deleteWorld(worldId);
@@ -6681,6 +7046,72 @@ public final class FtaGraphCommand {
       sender.sendMessage(
           locale.component(
               "command.graph.build.duplicate-node-id.more",
+              Map.of("more", String.valueOf(count - limit))));
+    }
+  }
+
+  /**
+   * 汇报按尽头线处理的超距方向。
+   *
+   * <p>控制台始终写一行完整清单；玩家执行时另在聊天栏列出前 10 条并附可点击传送，便于现场核对该延伸线确实没有 FTA 节点。若其中本应有一条真实区间，它已从图中缺失，
+   * 需补节点牌子或截断轨道后重建。
+   */
+  private void reportUnterminatedDirections(
+      CommandSender sender, World world, List<UnterminatedDirection> directions) {
+    if (directions == null || directions.isEmpty()) {
+      return;
+    }
+    plugin
+        .getLogger()
+        .warning(
+            "调度图构建：以下探索方向超过上限仍未遇到节点，已按尽头线处理（另一侧视为无 FTA 节点或施工中）: world="
+                + world.getName()
+                + " "
+                + directions.stream()
+                    .map(
+                        direction ->
+                            direction.startNode().value()
+                                + "@"
+                                + direction.stopPosition().x()
+                                + ","
+                                + direction.stopPosition().y()
+                                + ","
+                                + direction.stopPosition().z())
+                    .collect(Collectors.joining("; ")));
+    if (!(sender instanceof Player)) {
+      return;
+    }
+
+    LocaleManager locale = plugin.getLocaleManager();
+    int count = directions.size();
+    sender.sendMessage(
+        locale.component(
+            "command.graph.build.unterminated.header",
+            Map.of("count", String.valueOf(count), "world", world.getName())));
+    int limit = Math.min(10, count);
+    for (UnterminatedDirection direction : directions.subList(0, limit)) {
+      RailBlockPos stop = direction.stopPosition();
+      String tp = "/tp " + stop.x() + " " + stop.y() + " " + stop.z();
+      Component location =
+          Component.text(stop.x() + " " + stop.y() + " " + stop.z())
+              .clickEvent(net.kyori.adventure.text.event.ClickEvent.runCommand(tp))
+              .hoverEvent(net.kyori.adventure.text.event.HoverEvent.showText(Component.text(tp)));
+      sender.sendMessage(
+          locale.component(
+              "command.graph.build.unterminated.entry",
+              net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                          "node", direction.startNode().value()))
+                  .resolver(
+                      net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                          "location", location))
+                  .build()));
+    }
+    if (count > limit) {
+      sender.sendMessage(
+          locale.component(
+              "command.graph.build.unterminated.more",
               Map.of("more", String.valueOf(count - limit))));
     }
   }
