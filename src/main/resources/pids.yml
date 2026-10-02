@@ -62,6 +62,8 @@ broadcast:
   trigger-passing: true
   trigger-cancelled: true
   trigger-delayed: true
+  # 站台变更（已定的站台改了，或没能停到计划站台）发到聊天
+  trigger-platform-changed: true
   # 播报通道：文字（ActionBar 与聊天）与提示音（声源为来源屏幕）
   channel-text: true
   channel-sound: true

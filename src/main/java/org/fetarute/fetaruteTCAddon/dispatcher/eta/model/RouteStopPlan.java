@@ -2,8 +2,10 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
@@ -25,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
  *   <li><b>停靠配置</b>：{@code RouteDefinitionCache#listStops}，与声明节点一一对应；缺失时视为“不知道哪里停车”， 既不累加停站也不拆段。
  *   <li><b>已定站台</b>：运行时已经有实际节点的下标（DYNAMIC 已选台，或到站时记下了实际股道）。选中的恰好是占位股道时，
  *       实际节点与声明节点相同，只有这份记录能把它与“尚未选台”分开。
+ *   <li><b>计划站台</b>：尚未选台的 DYNAMIC 停靠在时刻表里排定的股道。只供展示，不进路径与行程时间：车最终停哪条股道以运行时选台为准。
  * </ul>
  */
 public final class RouteStopPlan {
@@ -33,9 +36,14 @@ public final class RouteStopPlan {
   private final List<NodeId> effective;
   private final List<RouteStop> stops;
   private final Set<Integer> placed;
+  private final Map<Integer, NodeId> planned;
 
   private RouteStopPlan(
-      List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops, Set<Integer> placed) {
+      List<NodeId> declared,
+      List<NodeId> effective,
+      List<RouteStop> stops,
+      Set<Integer> placed,
+      Map<Integer, NodeId> planned) {
     this.declared = List.copyOf(declared);
     this.effective =
         List.copyOf(
@@ -45,6 +53,7 @@ public final class RouteStopPlan {
             ? List.of()
             : Collections.unmodifiableList(new ArrayList<>(stops));
     this.placed = placed == null ? differing(this.declared, this.effective) : Set.copyOf(placed);
+    this.planned = planned == null ? Map.of() : Map.copyOf(planned);
   }
 
   /**
@@ -57,7 +66,7 @@ public final class RouteStopPlan {
   public static RouteStopPlan of(
       List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops) {
     Objects.requireNonNull(declared, "declared");
-    return new RouteStopPlan(declared, effective, stops, null);
+    return new RouteStopPlan(declared, effective, stops, null, null);
   }
 
   /**
@@ -70,7 +79,7 @@ public final class RouteStopPlan {
       List<NodeId> declared, List<NodeId> effective, List<RouteStop> stops, Set<Integer> placed) {
     Objects.requireNonNull(declared, "declared");
     Objects.requireNonNull(placed, "placed");
-    return new RouteStopPlan(declared, effective, stops, placed);
+    return new RouteStopPlan(declared, effective, stops, placed, null);
   }
 
   private static Set<Integer> differing(List<NodeId> declared, List<NodeId> effective) {
@@ -95,7 +104,34 @@ public final class RouteStopPlan {
     nodes.set(index, node);
     Set<Integer> indices = new HashSet<>(placed);
     indices.add(index);
-    return new RouteStopPlan(declared, nodes, stops, indices);
+    return new RouteStopPlan(declared, nodes, stops, indices, planned);
+  }
+
+  /**
+   * 给尚未选台的 DYNAMIC 停靠标上计划站台。计划股道不在该站 DYNAMIC 范围内（编表之后改过交路）时不标。
+   *
+   * @param index 下标
+   * @param node 计划股道
+   */
+  public RouteStopPlan withPlanned(int index, NodeId node) {
+    Objects.requireNonNull(node, "node");
+    boolean allowed =
+        unresolvedDynamic(index)
+            && stop(index)
+                .flatMap(DynamicStopMatcher::parseDynamicSpec)
+                .filter(spec -> DynamicStopMatcher.matches(node, spec))
+                .isPresent();
+    if (!allowed) {
+      return this;
+    }
+    Map<Integer, NodeId> next = new HashMap<>(planned);
+    next.put(index, node);
+    return new RouteStopPlan(declared, effective, stops, placed, next);
+  }
+
+  /** 尚未选台的 DYNAMIC 停靠在时刻表里排定的股道；已选台、不是 DYNAMIC 或没有计划时为空。 */
+  public Optional<NodeId> planned(int index) {
+    return unresolvedDynamic(index) ? Optional.ofNullable(planned.get(index)) : Optional.empty();
   }
 
   /** 节点数。 */

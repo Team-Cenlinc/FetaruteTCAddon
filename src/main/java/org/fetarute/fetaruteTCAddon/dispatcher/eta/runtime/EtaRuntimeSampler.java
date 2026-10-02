@@ -3,6 +3,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
@@ -168,7 +170,29 @@ public final class EtaRuntimeSampler {
             edgeLength,
             traveled,
             timeline,
-            sampleLineTag(group)));
+            sampleLineTag(group),
+            sampleLoad(group)));
+  }
+
+  /**
+   * 各节车的座位数（车辆模型里的座位个数）与在座玩家数，车头在前。
+   *
+   * <p>只供展示：读不到车辆模型或乘客时整车为空，不能让它漏出采样的逐列车边界。
+   */
+  private Optional<TrainLoad> sampleLoad(MinecartGroup group) {
+    try {
+      List<TrainLoad.Car> cars = new ArrayList<>(group.size());
+      for (MinecartMember<?> member : group) {
+        cars.add(
+            new TrainLoad.Car(
+                member.getProperties().getModel().getSeatCount(),
+                member.getEntity().getPlayerPassengers().size()));
+      }
+      return cars.isEmpty() ? Optional.empty() : Optional.of(new TrainLoad(cars));
+    } catch (RuntimeException | LinkageError ex) {
+      debugLogger.accept("ETA_SAMPLER_LOAD_FAILED error=" + ex);
+      return Optional.empty();
+    }
   }
 
   /** 列车的线路标签（直通运转换线后即新线路）；两个标签不全时为空。 */

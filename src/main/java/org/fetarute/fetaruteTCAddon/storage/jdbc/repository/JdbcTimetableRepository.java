@@ -19,6 +19,7 @@ import java.util.UUID;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PlatformPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
@@ -177,7 +178,11 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
             deleteChildren(
                 connection,
                 id,
-                List.of("timetable_trips", "timetable_duties", "timetable_baselines"));
+                List.of(
+                    "timetable_trips",
+                    "timetable_duties",
+                    "timetable_baselines",
+                    "timetable_platform_plans"));
             try (var statement =
                 connection.prepareStatement(
                     "DELETE FROM " + table("timetables") + " WHERE id = ?")) {
@@ -193,11 +198,14 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
 
   /**
    * 整体替换发车表与交路。基线<b>不</b>在这里动：它由 build / publish 重检单独写入（{@link #replaceBaselines}）， 改个状态的 save
-   * 不能把它抹掉。
+   * 不能把它抹掉。计划股道挂在车次上，车次换了它就失效，一并清空，由 build 在 save 之后重写（{@link #replacePlatformPlans}）。
    */
   private void replaceChildren(ConnectionResource connection, Timetable timetable)
       throws SQLException {
-    deleteChildren(connection, timetable.id(), List.of("timetable_trips", "timetable_duties"));
+    deleteChildren(
+        connection,
+        timetable.id(),
+        List.of("timetable_trips", "timetable_duties", "timetable_platform_plans"));
     if (!timetable.trips().isEmpty()) {
       String sql =
           "INSERT INTO "
@@ -296,6 +304,64 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
           });
     } catch (SQLException ex) {
       throw new StorageException("保存时刻表基线失败", ex);
+    }
+  }
+
+  @Override
+  public void replacePlatformPlans(UUID timetableId, List<PlatformPlan> plans) {
+    Objects.requireNonNull(timetableId, "timetableId");
+    String insert =
+        "INSERT INTO "
+            + table("timetable_platform_plans")
+            + " (timetable_id, trip_id, stop_sequence, node_id) VALUES (?, ?, ?, ?)";
+    try {
+      inTransaction(
+          connection -> {
+            deleteChildren(connection, timetableId, List.of("timetable_platform_plans"));
+            if (plans != null && !plans.isEmpty()) {
+              try (var statement = connection.prepareStatement(insert)) {
+                for (PlatformPlan plan : plans) {
+                  setUuid(statement, 1, timetableId);
+                  setUuid(statement, 2, plan.tripId());
+                  statement.setInt(3, plan.stopSequence());
+                  statement.setString(4, plan.nodeId());
+                  statement.addBatch();
+                }
+                statement.executeBatch();
+              }
+            }
+            return null;
+          });
+    } catch (SQLException ex) {
+      throw new StorageException("保存计划股道失败", ex);
+    }
+  }
+
+  @Override
+  public List<PlatformPlan> listPlatformPlans(UUID timetableId) {
+    if (timetableId == null) {
+      return List.of();
+    }
+    String sql =
+        "SELECT trip_id, stop_sequence, node_id FROM "
+            + table("timetable_platform_plans")
+            + " WHERE timetable_id = ?";
+    List<PlatformPlan> out = new ArrayList<>();
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, timetableId);
+      try (var rs = statement.executeQuery()) {
+        while (rs.next()) {
+          out.add(
+              new PlatformPlan(
+                  requireUuid(rs, "trip_id"),
+                  readRequiredInt(rs, "stop_sequence"),
+                  rs.getString("node_id")));
+        }
+      }
+      return List.copyOf(out);
+    } catch (SQLException ex) {
+      throw new StorageException("读取计划股道失败", ex);
     }
   }
 

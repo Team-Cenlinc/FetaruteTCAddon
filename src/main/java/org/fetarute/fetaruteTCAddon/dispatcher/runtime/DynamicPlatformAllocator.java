@@ -1,11 +1,14 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
@@ -17,10 +20,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.PlatformApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
@@ -62,6 +64,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNorma
  * <p>两车的位置都取物理位置（{@link RouteProgressRegistry#lastPassedGraphNode}），不取交路路径点：同一对路径点之间的车路径点相同，
  * 分不出先后。<b>任一方位置未知时本规则不生效</b>——拿路径点顶替会把身后的车误判成挡路者，两车可能互相拒绝；两边都是精确位置时，
  * 最短路长度对称，两车不可能互为对方进站路上的障碍。本规则只会撤回或拒绝预订，从不发放预订，也不触碰任何占用或授权。
+ *
+ * <h2>计划站台与暂定站台</h2>
+ *
+ * <p>选台在空闲候选里优先选偏好的那条：时刻表排定的计划站台（{@link #setPreference}），没有时刻表计划时是暂定站台 （{@link
+ * #tentativePlatform}）——站牌在列车选台前显示的就是它，选台尽量兑现，兑现不了时站台落定事件的原因是"偏离计划"。
  */
 public final class DynamicPlatformAllocator {
 
@@ -84,6 +91,18 @@ public final class DynamicPlatformAllocator {
 
   /** 物理先后裁定的最近一次输出签名（按请求列车），只在变化时输出，体量受在场车数限制。 */
   private final Map<String, String> orderWithheldReported = new ConcurrentHashMap<>();
+
+  /** 站台偏好（计划站台）；为空时只按方向优选。 */
+  private volatile PlatformPreference preference = PlatformPreference.NONE;
+
+  /** 暂定站台：trainKey -> 下一个停车站的暂定股道。一辆车同时只有一条。 */
+  private final Map<String, Tentative> tentatives = new ConcurrentHashMap<>();
+
+  /** 暂定站台每辆车多久重看一次：信号 tick 很密，暂定只供站牌与选台偏好，晚一秒无妨。 */
+  private static final Duration TENTATIVE_REFRESH = Duration.ofSeconds(1);
+
+  /** trainKey -> 下一次重看暂定站台的时刻。 */
+  private final Map<String, Instant> tentativeRefreshAt = new ConcurrentHashMap<>();
 
   /** 已分配记录：trainName -> (routeId:stopSequence) -> 带定义证据的分配。 */
   private final Map<String, Map<String, CachedAllocation>> allocations = new ConcurrentHashMap<>();
@@ -125,6 +144,221 @@ public final class DynamicPlatformAllocator {
     this.debugLogger = debugLogger != null ? debugLogger : s -> {};
     this.capacityWaits = capacityWaits;
     this.physicalPosition = physicalPosition;
+  }
+
+  /**
+   * 接入站台偏好：计划站台空闲时优先选它，不空闲时照常按方向优选。偏好只影响在空闲候选里挑哪一条， 从不让一条不空闲的站台变得可选，也不会让本来能选到站台的车变成没有站台。
+   *
+   * @param preference 站台偏好；传 null 表示没有偏好
+   */
+  void setPreference(PlatformPreference preference) {
+    this.preference = preference == null ? PlatformPreference.NONE : preference;
+  }
+
+  /** 这辆车在该停靠下标偏好的站台：时刻表的计划站台，没有时是暂定站台。推进点选台、本分配器与站台落定事件的"原计划"共用这一份。 */
+  Optional<NodeId> preferredPlatform(String trainName, RouteDefinition route, int stopIndex) {
+    Optional<NodeId> planned = Optional.empty();
+    try {
+      Optional<NodeId> preferred = preference.preferred(trainName, route, stopIndex);
+      planned = preferred == null ? Optional.empty() : preferred;
+    } catch (RuntimeException ex) {
+      debugLogger.accept(
+          "DYNAMIC 站台偏好读取失败: train=" + trainName + ", stopIndex=" + stopIndex + ", error=" + ex);
+    }
+    return planned.isPresent() ? planned : heldTentative(trainName, route, stopIndex);
+  }
+
+  /** 已有的暂定站台（只读，不现定）。 */
+  Optional<NodeId> heldTentative(String trainName, RouteDefinition route, int stopIndex) {
+    if (trainName == null || route == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(tentatives.get(TrainNameNormalizer.normalizeKey(trainName)))
+        .filter(held -> held.matches(route.id(), stopIndex))
+        .map(Tentative::node);
+  }
+
+  /**
+   * 暂定站台：没有时刻表计划的车，在它的下一个停车站（DYNAMIC、尚未选台）上先定一条股道。站牌据此显示站台，选台时优先兑现它。
+   *
+   * <p>沿用上一次暂定的股道，除非它已不空闲（被占用、被别的车预订或暂定）；否则在空闲候选里取进站方向最顺的那条 （{@link
+   * PlatformApproach}）。一条空闲候选都没有时不暂定，站牌照旧待定。暂定只影响在空闲候选里挑哪一条，从不让被占的股道变得可选。
+   *
+   * @param trainName 列车名
+   * @param route 列车当前交路
+   * @param stopIndex 下一个停车站的停靠下标
+   * @param graph 列车所在世界的调度图
+   * @return 暂定股道
+   */
+  public Optional<NodeId> tentativePlatform(
+      String trainName, RouteDefinition route, int stopIndex, RailGraph graph) {
+    if (trainName == null
+        || route == null
+        || graph == null
+        || stopIndex < 1
+        || stopIndex >= route.waypoints().size()) {
+      return Optional.empty();
+    }
+    Optional<DynamicSpec> spec =
+        routeDefinitions
+            .findStop(route.id(), stopIndex)
+            .flatMap(DynamicStopMatcher::parseDynamicSpec);
+    if (spec.isEmpty()) {
+      return Optional.empty();
+    }
+    String key = TrainNameNormalizer.normalizeKey(trainName);
+    java.util.Set<NodeId> heldByOthers = tentativelyHeldByOthers(key);
+    Tentative held = tentatives.get(key);
+    if (held != null
+        && held.matches(route.id(), stopIndex)
+        && DynamicStopMatcher.matches(held.node(), spec.get())
+        && !heldByOthers.contains(held.node())
+        && !isExternallyOccupied(held.node(), trainName)
+        && !isReservedByOtherTrain(held.node(), trainName)) {
+      return Optional.of(held.node());
+    }
+    List<NodeId> waypoints = route.waypoints();
+    NodeId from = waypoints.get(stopIndex - 1);
+    Vector travelDir =
+        stopIndex >= 2
+            ? PlatformApproach.direction(graph, waypoints.get(stopIndex - 2), from).orElse(null)
+            : null;
+    RailGraphPathFinder pathFinder = new RailGraphPathFinder();
+    NodeId best = null;
+    double bestScore = Double.NEGATIVE_INFINITY;
+    for (NodeId candidate : DynamicStopMatcher.candidateNodes(spec.get(), graph)) {
+      if (heldByOthers.contains(candidate)
+          || isExternallyOccupied(candidate, trainName)
+          || isReservedByOtherTrain(candidate, trainName)) {
+        continue;
+      }
+      Optional<RailGraphPath> path =
+          pathFinder.shortestPath(
+              graph, from, candidate, RailGraphPathFinder.Options.shortestDistance());
+      if (path.isEmpty()) {
+        continue;
+      }
+      double score =
+          PlatformApproach.score(graph, from, travelDir, path.get().nodes(), candidate)
+              .orElse(Double.NEGATIVE_INFINITY);
+      if (best == null || score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    if (best == null) {
+      tentatives.remove(key);
+      return Optional.empty();
+    }
+    tentatives.put(key, new Tentative(route.id(), stopIndex, best));
+    debugLogger.accept(
+        "DYNAMIC 暂定站台: train="
+            + trainName
+            + ", route="
+            + route.id().value()
+            + ", stopIndex="
+            + stopIndex
+            + ", node="
+            + best.value());
+    return Optional.of(best);
+  }
+
+  /**
+   * 信号 tick：给列车的下一个停车站（DYNAMIC、尚未选台）现定或沿用暂定站台（{@link #tentativePlatform}）。
+   *
+   * <p>暂定只在调度这边定，站牌只读（{@link #heldTentative}）：选台偏好读的是同一份，不能随有没有人看站牌、 或从哪个线程查站牌而变。每辆车至多每 {@code
+   * TENTATIVE_REFRESH} 重看一次。
+   *
+   * @param trainName 列车名
+   * @param route 列车当前交路
+   * @param currentIndex 列车当前的交路下标
+   * @param graph 列车所在世界的调度图
+   * @param now 当前时刻
+   */
+  void refreshTentative(
+      String trainName, RouteDefinition route, int currentIndex, RailGraph graph, Instant now) {
+    if (trainName == null || route == null || graph == null || now == null) {
+      return;
+    }
+    String key = TrainNameNormalizer.normalizeKey(trainName);
+    Instant due = tentativeRefreshAt.get(key);
+    if (due != null && now.isBefore(due)) {
+      return;
+    }
+    tentativeRefreshAt.put(key, now.plus(TENTATIVE_REFRESH));
+    OptionalInt next = nextStoppingIndex(route, currentIndex);
+    if (next.isEmpty() || isAllocated(key, route.id(), next.getAsInt())) {
+      return;
+    }
+    tentativePlatform(trainName, route, next.getAsInt(), graph);
+  }
+
+  /** {@code currentIndex} 之后第一个停车的下标（PASS 不算）。 */
+  private OptionalInt nextStoppingIndex(RouteDefinition route, int currentIndex) {
+    for (int index = Math.max(0, currentIndex + 1); index < route.waypoints().size(); index++) {
+      if (routeDefinitions.findStop(route.id(), index).map(RouteStop::stops).orElse(false)) {
+        return OptionalInt.of(index);
+      }
+    }
+    return OptionalInt.empty();
+  }
+
+  /** 这辆车已经为该停靠下标选了台（在预订表里）。 */
+  private boolean isAllocated(String trainKey, RouteId routeId, int stopIndex) {
+    Map<String, CachedAllocation> allocated = allocations.get(trainKey);
+    return allocated != null
+        && allocated.values().stream()
+            .filter(Objects::nonNull)
+            .anyMatch(
+                cached -> routeId.equals(cached.routeId()) && cached.stopIndex() == stopIndex);
+  }
+
+  /** 别的车暂定的股道；已经为那一站选了台的车不算（它的选台已在预订表里）。 */
+  private java.util.Set<NodeId> tentativelyHeldByOthers(String trainKey) {
+    java.util.Set<NodeId> out = new java.util.HashSet<>();
+    for (Map.Entry<String, Tentative> entry : tentatives.entrySet()) {
+      Tentative held = entry.getValue();
+      if (entry.getKey().equals(trainKey) || held == null) {
+        continue;
+      }
+      if (!isAllocated(entry.getKey(), held.routeId(), held.stopIndex())) {
+        out.add(held.node());
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 一条暂定站台。
+   *
+   * @param routeId 交路
+   * @param stopIndex 停靠下标
+   * @param node 暂定股道
+   */
+  private record Tentative(RouteId routeId, int stopIndex, NodeId node) {
+    boolean matches(RouteId otherRoute, int otherIndex) {
+      return routeId.equals(otherRoute) && stopIndex == otherIndex;
+    }
+  }
+
+  /**
+   * 站台偏好：这辆车在某个 DYNAMIC 停靠下标计划停哪条股道。
+   *
+   * <p>只读、廉价：信号 tick 里每车每 tick 可能问一次。
+   */
+  @FunctionalInterface
+  public interface PlatformPreference {
+
+    /** 没有偏好。 */
+    PlatformPreference NONE = (trainName, route, stopIndex) -> Optional.empty();
+
+    /**
+     * @param trainName 列车名
+     * @param route 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 计划股道；没有计划时为空
+     */
+    Optional<NodeId> preferred(String trainName, RouteDefinition route, int stopIndex);
   }
 
   /**
@@ -309,7 +543,8 @@ public final class DynamicPlatformAllocator {
               waypoints,
               currentIndex,
               currentNode,
-              effectiveTrainDirection);
+              effectiveTrainDirection,
+              preferredPlatform(trainName, route, targetIndex));
       if (allocated.isEmpty()) {
         debugLogger.accept(
             "DYNAMIC 分配失败: 无可用站台 (train=" + trainName + ", spec=" + formatSpec(spec) + ")");
@@ -443,6 +678,11 @@ public final class DynamicPlatformAllocator {
       return;
     }
     String trainKey = TrainNameNormalizer.normalizeKey(trainName);
+    // 暂定站台：越过了那一站、或车已经换了交路，都不再作数。
+    tentatives.computeIfPresent(
+        trainKey,
+        (key, held) ->
+            !held.routeId().equals(routeId) || held.stopIndex() < currentIndex ? null : held);
     Map<String, CachedAllocation> trainAllocations = allocations.get(trainKey);
     if (trainAllocations == null) {
       return;
@@ -487,6 +727,8 @@ public final class DynamicPlatformAllocator {
       return true;
     }
     orderWithheldReported.remove(previousKey);
+    tentatives.remove(previousKey);
+    tentativeRefreshAt.remove(previousKey);
     synchronized (allocationMigrationLock) {
       Map<String, CachedAllocation> previous = allocations.get(previousKey);
       if (previous == null || previous.isEmpty()) {
@@ -513,6 +755,8 @@ public final class DynamicPlatformAllocator {
     if (trainName != null) {
       allocations.remove(TrainNameNormalizer.normalizeKey(trainName));
       orderWithheldReported.remove(TrainNameNormalizer.normalizeKey(trainName));
+      tentatives.remove(TrainNameNormalizer.normalizeKey(trainName));
+      tentativeRefreshAt.remove(TrainNameNormalizer.normalizeKey(trainName));
     }
   }
 
@@ -540,6 +784,7 @@ public final class DynamicPlatformAllocator {
         java.util.Collections.emptyList(),
         -1,
         currentNode,
+        Optional.empty(),
         Optional.empty());
   }
 
@@ -553,6 +798,8 @@ public final class DynamicPlatformAllocator {
    *   <li>候选方向：{@code currentNode -> guideNode} 的方向向量（guideNode 为路径上首个非 SWITCHER 节点）
    *   <li>用点积作为相似度，选择得分最高者
    * </ol>
+   *
+   * <p>计划站台（{@link PlatformPreference}）在空闲候选里时直接选它，不再比方向。
    */
   private Optional<NodeId> allocatePlatform(
       String trainName,
@@ -561,7 +808,8 @@ public final class DynamicPlatformAllocator {
       List<NodeId> routeWaypoints,
       int currentIndex,
       NodeId currentNode,
-      Optional<BlockFace> trainDirection) {
+      Optional<BlockFace> trainDirection,
+      Optional<NodeId> preferred) {
     if (spec == null || graph == null || routeWaypoints == null || currentNode == null) {
       return Optional.empty();
     }
@@ -570,8 +818,7 @@ public final class DynamicPlatformAllocator {
     Vector travelDir = trainDirection.map(this::blockFaceToVector2d).orElse(null);
     if (travelDir == null && currentIndex > 0 && currentIndex - 1 < routeWaypoints.size()) {
       NodeId prevNode = routeWaypoints.get(currentIndex - 1);
-      travelDir =
-          computeDirection2d(getNodePosition(graph, prevNode), getNodePosition(graph, currentNode));
+      travelDir = PlatformApproach.direction(graph, prevNode, currentNode).orElse(null);
     }
 
     RailGraphPathFinder pathFinder = new RailGraphPathFinder();
@@ -604,8 +851,24 @@ public final class DynamicPlatformAllocator {
           "DYNAMIC 分配阻塞: 候选站台均被占用 train=" + trainName + ", spec=" + formatSpec(spec));
       return Optional.empty();
     }
+    Optional<ApproachCandidate> planned =
+        preferred.flatMap(
+            node -> freeCandidates.stream().filter(c -> c.nodeId.equals(node)).findFirst());
+    Vector direction = travelDir;
     ApproachCandidate chosen =
-        selectBestCandidateByDirection(trainName, currentNode, travelDir, freeCandidates, graph);
+        planned.orElseGet(
+            () ->
+                selectBestCandidateByDirection(
+                    trainName, currentNode, direction, freeCandidates, graph));
+    if (preferred.isPresent() && planned.isEmpty()) {
+      debugLogger.accept(
+          "DYNAMIC 计划站台不可用，改选: train="
+              + trainName
+              + ", planned="
+              + preferred.get().value()
+              + ", chosen="
+              + (chosen == null ? "-" : chosen.nodeId.value()));
+    }
     traceAllocationDecision(spec, candidates, freeCandidates, chosen);
     return Optional.ofNullable(chosen != null ? chosen.nodeId : null);
   }
@@ -644,7 +907,8 @@ public final class DynamicPlatformAllocator {
         .orElse(true);
   }
 
-  private boolean isReservedByOtherTrain(NodeId candidate, String trainName) {
+  /** 该站台是否已被别的列车预订（推进点选台与本分配器同一口径）。 */
+  boolean isReservedByOtherTrain(NodeId candidate, String trainName) {
     if (candidate == null) {
       return false;
     }
@@ -812,6 +1076,7 @@ public final class DynamicPlatformAllocator {
             + freeCandidates.stream().map(c -> c.nodeId.value()).toList());
   }
 
+  /** 在空闲候选里取进站方向最顺的那条（{@link PlatformApproach#score}）；方向算不出来时按股道顺序取第一条。 */
   private ApproachCandidate selectBestCandidateByDirection(
       String trainName,
       NodeId fromNode,
@@ -821,29 +1086,13 @@ public final class DynamicPlatformAllocator {
     if (candidates == null || candidates.isEmpty()) {
       return null;
     }
-    // 无法计算方向时，保持 deterministic：按 track 顺序取第一个。
-    if (travelDir == null) {
-      return candidates.get(0);
-    }
-    Vector fromPos = getNodePosition(graph, fromNode);
-    if (fromPos == null) {
-      return candidates.get(0);
-    }
-
     ApproachCandidate best = null;
     double bestScore = Double.NEGATIVE_INFINITY;
     for (ApproachCandidate cand : candidates) {
-      NodeId guideNode = findPathGuideNode(cand.pathNodes, graph, fromNode);
-      if (guideNode == null) {
-        guideNode = cand.nodeId;
-      }
-      Vector guideDir = computeDirection2d(fromPos, getNodePosition(graph, guideNode));
-      if (guideDir == null) {
-        continue;
-      }
-      double score = travelDir.getX() * guideDir.getX() + travelDir.getZ() * guideDir.getZ();
-      if (score > bestScore) {
-        bestScore = score;
+      OptionalDouble score =
+          PlatformApproach.score(graph, fromNode, travelDir, cand.pathNodes, cand.nodeId);
+      if (score.isPresent() && score.getAsDouble() > bestScore) {
+        bestScore = score.getAsDouble();
         best = cand;
       }
     }
@@ -861,52 +1110,6 @@ public final class DynamicPlatformAllocator {
     }
 
     return best != null ? best : candidates.get(0);
-  }
-
-  private NodeId findPathGuideNode(List<NodeId> pathNodes, RailGraph graph, NodeId fromNode) {
-    if (pathNodes == null || pathNodes.size() < 2 || graph == null) {
-      return null;
-    }
-
-    int fromIndex = -1;
-    for (int i = 0; i < pathNodes.size(); i++) {
-      if (fromNode.equals(pathNodes.get(i))) {
-        fromIndex = i;
-        break;
-      }
-    }
-    int start = fromIndex >= 0 ? fromIndex + 1 : 1;
-    for (int i = start; i < pathNodes.size(); i++) {
-      NodeId node = pathNodes.get(i);
-      if (node == null) {
-        continue;
-      }
-      Optional<RailNode> railNodeOpt = graph.findNode(node);
-      if (railNodeOpt.isEmpty()) {
-        continue;
-      }
-      if (railNodeOpt.get().type() != NodeType.SWITCHER) {
-        return node;
-      }
-    }
-    return null;
-  }
-
-  private Vector getNodePosition(RailGraph graph, NodeId nodeId) {
-    return graph.findNode(nodeId).map(RailNode::worldPosition).orElse(null);
-  }
-
-  private Vector computeDirection2d(Vector from, Vector to) {
-    if (from == null || to == null) {
-      return null;
-    }
-    double dx = to.getX() - from.getX();
-    double dz = to.getZ() - from.getZ();
-    double mag = Math.sqrt(dx * dx + dz * dz);
-    if (mag < 1.0e-6) {
-      return null;
-    }
-    return new Vector(dx / mag, 0.0, dz / mag);
   }
 
   /** 将 BlockFace 转换为归一化 2D 方向向量（X/Z 平面）。 */

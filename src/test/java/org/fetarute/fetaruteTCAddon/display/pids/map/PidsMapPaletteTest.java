@@ -33,6 +33,7 @@ class PidsMapPaletteTest {
               theme.amber(),
               theme.red(),
               theme.info(),
+              theme.green(),
               PidsTheme.INK,
               PidsTheme.PAPER)) {
         assertEquals(

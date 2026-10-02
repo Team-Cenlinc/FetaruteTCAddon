@@ -16,6 +16,7 @@ public final class PidsVocabulary {
   private static final String PREFIX = "pids.board.";
   private static final String SECONDARY = "-secondary";
   private static final String MINUTES = "<minutes>";
+  private static final String PLATFORM = "<platform>";
 
   private final Function<String, String> text;
 
@@ -81,6 +82,28 @@ public final class PidsVocabulary {
   /** 站台待定（单站台屏的状态）。 */
   public Names platformPending() {
     return names("status.platform-pending");
+  }
+
+  /** 站台变更（列车改到这个站台）。 */
+  public Names platformChanged() {
+    return names("status.platform-changed");
+  }
+
+  /** 改至 N 站台（原定停这个站台的车改去别处）。 */
+  public Names movedTo(String platform) {
+    Names names = names("status.moved");
+    return new Names(
+        names.primary().replace(PLATFORM, platform), names.secondary().replace(PLATFORM, platform));
+  }
+
+  /** 空位页文案。 */
+  public PidsVacancyView.Labels vacancyLabels() {
+    return new PidsVacancyView.Labels(
+        names("minutes"),
+        names("vacancy.advice"),
+        names("vacancy.many"),
+        names("vacancy.some"),
+        names("vacancy.few"));
   }
 
   /** 本站终到（代替终点名）。 */

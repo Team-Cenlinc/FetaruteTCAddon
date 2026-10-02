@@ -202,6 +202,8 @@ class PidsSnapshotProviderTest {
         trainName,
         trainName.isPresent() ? OptionalLong.of(45L) : OptionalLong.empty(),
         false,
+        List.of(),
+        false,
         List.of());
   }
 

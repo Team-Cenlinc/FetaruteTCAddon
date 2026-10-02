@@ -63,6 +63,7 @@ public final class StorageSchema {
     ddl.add(timetableDuties(dialect));
     ddl.add(uniqueIndex("timetable_duties_code", "timetable_duties", "timetable_id, duty_code"));
     ddl.add(timetableBaselines(dialect));
+    ddl.add(timetablePlatformPlans(dialect));
     ddl.add(index("timetable_baselines_neighbor", "timetable_baselines", "neighbor_timetable_id"));
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
@@ -523,6 +524,31 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.intType(),
+        table("timetables"));
+  }
+
+  /**
+   * 计划股道：一趟车在某个动态站台停靠的计划股道（build 时按站台组容量排出），运行时作为选台偏好。
+   *
+   * <p>新表（{@code CREATE TABLE IF NOT EXISTS}），旧库自动建出；旧表没有计划，运行时照旧选台，重新 build 才有。
+   */
+  private String timetablePlatformPlans(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    timetable_id %s NOT NULL,
+                    trip_id %s NOT NULL,
+                    stop_sequence %s NOT NULL,
+                    node_id %s NOT NULL,
+                    PRIMARY KEY (timetable_id, trip_id, stop_sequence),
+                    FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("timetable_platform_plans"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.intType(),
+        dialect.stringType(),
         table("timetables"));
   }
 

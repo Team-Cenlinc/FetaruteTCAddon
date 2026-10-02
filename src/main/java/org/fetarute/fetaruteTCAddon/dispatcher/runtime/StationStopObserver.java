@@ -30,4 +30,11 @@ public interface StationStopObserver {
    * @param reason 诊断用原因；卸载时为 {@link #RELEASE_UNLOADED}
    */
   default void onTrainReleased(String trainName, String reason) {}
+
+  /**
+   * 列车在某个停靠下标的实际股道定下来或变了（选台、到站观测、折返交接）。同值不发。
+   *
+   * @param resolution 落定的股道
+   */
+  default void onPlatformResolved(PlatformResolution resolution) {}
 }

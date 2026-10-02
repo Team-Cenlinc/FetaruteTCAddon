@@ -27,6 +27,8 @@ import java.util.OptionalLong;
  * @param trainName 运行中列车的列车名；票据、预测与取消行为空
  * @param platformPending 站台待定：本站是动态站台停靠，列车还没有选台
  * @param platformCandidates 站台待定时可能停靠的站台，按站台号升序；站台已定或候选未知时为空
+ * @param cars 运行中列车各节车的座位与在座乘客，车头在前；没有载客数据时为空
+ * @param previousPlatform 站台变更前的站台：这辆车在本站的站台定下来时与计划（或暂定）不同、或定下后又改了；没有变更时为空
  */
 public record PidsRow(
     Status status,
@@ -43,7 +45,9 @@ public record PidsRow(
     boolean outOfService,
     Optional<String> trainName,
     boolean platformPending,
-    List<String> platformCandidates) {
+    List<String> platformCandidates,
+    List<Car> cars,
+    Optional<String> previousPlatform) {
 
   public PidsRow {
     Objects.requireNonNull(status, "status");
@@ -56,6 +60,83 @@ public record PidsRow(
     delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
     trainName = trainName == null ? Optional.empty() : trainName;
     platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
+    cars = cars == null ? List.of() : List.copyOf(cars);
+    previousPlatform = previousPlatform == null ? Optional.empty() : previousPlatform;
+  }
+
+  /** 没有站台变更的行。 */
+  public PidsRow(
+      Status status,
+      String lineName,
+      String routeId,
+      String destination,
+      Optional<String> destinationId,
+      String platform,
+      Instant expectedAt,
+      OptionalLong delaySeconds,
+      int stopSequence,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      boolean platformPending,
+      List<String> platformCandidates,
+      List<Car> cars) {
+    this(
+        status,
+        lineName,
+        routeId,
+        destination,
+        destinationId,
+        platform,
+        expectedAt,
+        delaySeconds,
+        stopSequence,
+        passing,
+        terminating,
+        outOfService,
+        trainName,
+        platformPending,
+        platformCandidates,
+        cars,
+        Optional.empty());
+  }
+
+  /** 没有载客数据的行。 */
+  public PidsRow(
+      Status status,
+      String lineName,
+      String routeId,
+      String destination,
+      Optional<String> destinationId,
+      String platform,
+      Instant expectedAt,
+      OptionalLong delaySeconds,
+      int stopSequence,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      boolean platformPending,
+      List<String> platformCandidates) {
+    this(
+        status,
+        lineName,
+        routeId,
+        destination,
+        destinationId,
+        platform,
+        expectedAt,
+        delaySeconds,
+        stopSequence,
+        passing,
+        terminating,
+        outOfService,
+        trainName,
+        platformPending,
+        platformCandidates,
+        List.of(),
+        Optional.empty());
   }
 
   /** 站台已定的行。 */
@@ -91,10 +172,26 @@ public record PidsRow(
         List.of());
   }
 
-  /** 列车会停在这些站台之一：站台已定时看站台号，待定时看候选。 */
+  /**
+   * 一节车的座位与在座乘客。
+   *
+   * @param seats 座位数
+   * @param occupied 在座乘客数
+   */
+  public record Car(int seats, int occupied) {}
+
+  /** 列车会停在这些站台之一（站台已定时看站台号，待定时看候选），或原定停在这些站台之一、后来改了站台。 */
   public boolean mayUse(Collection<String> platforms) {
     return platforms.contains(platform)
-        || (platformPending && platformCandidates.stream().anyMatch(platforms::contains));
+        || (platformPending && platformCandidates.stream().anyMatch(platforms::contains))
+        || previousPlatform.filter(platforms::contains).isPresent();
+  }
+
+  /** 原定停在这些站台之一、现在改去别的站台。 */
+  public boolean movedAwayFrom(Collection<String> platforms) {
+    return !platforms.isEmpty()
+        && !platforms.contains(platform)
+        && previousPlatform.filter(platforms::contains).isPresent();
   }
 
   /** 行状态，按离本站由远到近排列，取消单列。 */

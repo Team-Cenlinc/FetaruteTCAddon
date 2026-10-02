@@ -32,8 +32,10 @@ import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
+import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
@@ -100,6 +102,10 @@ public final class PidsService {
   private final PidsScreenRegistry registry = new PidsScreenRegistry();
   private final ApiPidsDirectory directory;
   private final PidsSnapshotProvider snapshots;
+
+  /** 最近的站台变更：站台屏的行与站台广播共用。 */
+  private final PidsPlatformChanges platformChanges = new PidsPlatformChanges();
+
   private final PidsComposer composer;
   private final PidsItems items;
   private final PidsFrames frames;
@@ -137,10 +143,16 @@ public final class PidsService {
     this.api = Objects.requireNonNull(api, "api");
     this.directory =
         new ApiPidsDirectory(
-            api.operators(), api.lines(), api.stations(), api.routes(), logger::warn);
+            api.operators(), api.lines(), api.stations(), api.routes(), api.graph(), logger::warn);
     this.snapshots =
         new PidsSnapshotProvider(
-            api.eta(), api.timetables(), api.routes(), () -> settings, clock, logger::debug);
+            api.eta(),
+            api.timetables(),
+            api.routes(),
+            () -> settings,
+            clock,
+            logger::debug,
+            platformChanges);
     this.composer =
         new PidsComposer(
             registry,
@@ -193,6 +205,16 @@ public final class PidsService {
                 plugin, this::refreshDirectory, 0L, DIRECTORY_REFRESH_TICKS);
     announcer.start();
     Bukkit.getPluginManager().registerEvents(cancellationListener, plugin);
+  }
+
+  /**
+   * 接过重载前实例的状态（在 {@link #start()} 之前）：广播的已听记录与最近的站台变更，免得站内玩家重听、屏幕上的站台变更消失。
+   *
+   * @param previous 重载前的服务（已停止）
+   */
+  public void continueFrom(PidsService previous) {
+    announcer.continueFrom(previous.announcer);
+    platformChanges.absorb(previous.platformChanges);
   }
 
   public void stop() {
@@ -526,7 +548,9 @@ public final class PidsService {
     return world == null ? OptionalLong.empty() : OptionalLong.of(world.getTime());
   }
 
-  /** 车次取消或重新绑定（取消之后又有车接上）时作废取消行缓存，站台屏与站台广播的下一份快照即可看到。 */
+  /**
+   * 公开事件：车次取消或重新绑定（取消之后又有车接上）时作废取消行缓存，站台屏与站台广播的下一份快照即可看到； 站台改了（已定的站台变了，或没能停到计划站台）交给站台广播播报“改在 N 站台”。
+   */
   private final class CancellationListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onCancelled(TimetableTripCancelledEvent event) {
@@ -536,6 +560,26 @@ public final class PidsService {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onAssigned(TimetableTripAssignedEvent event) {
       snapshots.invalidateCancellations();
+    }
+
+    @EventHandler(priority = EventPriority.MONITOR)
+    public void onPlatform(TrainPlatformAssignedEvent event) {
+      Optional<String> from =
+          switch (event.getReason()) {
+            case CHANGED -> event.getPreviousPlatform();
+            case CHANGED_FROM_PLAN -> event.getPlannedPlatform();
+            case ASSIGNED -> Optional.empty();
+          };
+      from.ifPresent(
+          previous -> {
+            platformChanges.record(
+                event.getTrainName(),
+                event.getNodeId(),
+                previous,
+                event.getPlatform(),
+                clock.instant());
+            snapshots.invalidateSnapshots();
+          });
     }
   }
 }

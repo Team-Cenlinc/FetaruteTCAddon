@@ -17,6 +17,7 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -51,6 +52,10 @@ public final class StationStopCoordinator {
 
   private volatile StationStopObserver observer;
   private volatile ScheduledDeparturePlan plan;
+
+  /** 选台器：站牌经本类读暂定站台，站台落定事件经本类读原计划。调度服务构造时接上。 */
+  private volatile DynamicPlatformAllocator platforms;
+
   private volatile Duration maxHold = Duration.ZERO;
 
   private volatile Recovery recovery = Recovery.DISABLED;
@@ -107,6 +112,43 @@ public final class StationStopCoordinator {
   /** 注册发车计划源；{@code null} 会立刻停止一切计划扣留，不需要等任何超时。 */
   public void setPlan(ScheduledDeparturePlan next) {
     this.plan = next;
+  }
+
+  /**
+   * 计划站台（{@link DynamicPlatformAllocator.PlatformPreference}）：按当前计划源查这辆车在该停靠点排定的股道。 没有计划源或没有计划时为空。
+   */
+  Optional<NodeId> plannedPlatform(String trainName, RouteDefinition route, int stopIndex) {
+    ScheduledDeparturePlan current = plan;
+    if (current == null || route == null || routeDefinitions == null) {
+      return Optional.empty();
+    }
+    return routeDefinitions
+        .findUuid(route.id())
+        .flatMap(routeId -> current.plannedPlatformOf(trainName, routeId, stopIndex))
+        .map(NodeId::of);
+  }
+
+  /** 接上选台器（调度服务构造时）。 */
+  void attachPlatforms(DynamicPlatformAllocator allocator) {
+    this.platforms = allocator;
+  }
+
+  /**
+   * 站牌用：运行中列车在某个尚未选台的 DYNAMIC 停靠显示哪条站台。时刻表排定的计划站台优先；没有时读调度这边已定的暂定站台（{@link
+   * DynamicPlatformAllocator#refreshTentative}）。只读，可在任意线程调用。
+   * 选台偏好读的是同一份，站牌显示的就是车会去的那条（被占时改选，并发站台变更）。
+   *
+   * @param trainName 列车名
+   * @param route 列车当前交路
+   * @param stopIndex 停靠下标
+   * @return 计划或暂定股道
+   */
+  public Optional<NodeId> displayPlatform(String trainName, RouteDefinition route, int stopIndex) {
+    Optional<NodeId> planned = plannedPlatform(trainName, route, stopIndex);
+    DynamicPlatformAllocator allocator = platforms;
+    return planned.isPresent() || allocator == null
+        ? planned
+        : allocator.heldTentative(trainName, route, stopIndex);
   }
 
   /** 设置晚点追赶参数；{@code null} 等同全部关闭。 */
@@ -479,6 +521,68 @@ public final class StationStopCoordinator {
       }
     } catch (RuntimeException ex) {
       debugLogger.accept("STATION_STOP_OBSERVER_FAILED train=" + trainName + " error=" + ex);
+    }
+  }
+
+  /**
+   * 某辆车在某个停靠下标的实际股道写定了：选台、到站观测、折返交接写有效节点都经过这里。
+   *
+   * <p>与上一次相同不发（信号 tick 每 tick 都会重写同一个选台结果，先比这个，不必每次查停靠配置）；第一次定下时， 只有 DYNAMIC
+   * 停靠、或实际股道不是声明节点才发——固定站台停在声明的股道上不是新信息。原计划：DYNAMIC 取选台偏好（时刻表的计划站台或暂定站台）， 固定站台就是声明的股道，停到别的股道算偏离计划。
+   *
+   * @param previous 同一交路上一次写定的股道；没有、或上一次属于别的交路定义时为空
+   * @param node 现在写定的股道
+   */
+  void platformRecorded(
+      String trainName, RouteDefinition route, int index, Optional<NodeId> previous, NodeId node) {
+    if (route == null
+        || node == null
+        || index < 0
+        || index >= route.waypoints().size()
+        || previous.filter(node::equals).isPresent()) {
+      return;
+    }
+    NodeId declared = route.waypoints().get(index);
+    boolean dynamic =
+        routeDefinitions != null
+            && routeDefinitions
+                .findStop(route.id(), index)
+                .map(DynamicStopMatcher::isDynamicStop)
+                .orElse(false);
+    if (previous.isEmpty() && !dynamic && node.equals(declared)) {
+      return;
+    }
+    DynamicPlatformAllocator allocator = platforms;
+    Optional<NodeId> planned =
+        !dynamic
+            ? Optional.of(declared)
+            : allocator != null
+                ? allocator.preferredPlatform(trainName, route, index)
+                : Optional.empty();
+    notifyPlatform(
+        new PlatformResolution(
+            trainName,
+            route.id().value(),
+            index,
+            declared,
+            previous,
+            node,
+            planned,
+            dynamic,
+            clock.get()));
+  }
+
+  /** 播报某辆车在某个停靠下标的实际股道定下来或变了；观察者异常不得影响调度。 */
+  public void notifyPlatform(PlatformResolution resolution) {
+    StationStopObserver current = this.observer;
+    if (current == null || resolution == null) {
+      return;
+    }
+    try {
+      current.onPlatformResolved(resolution);
+    } catch (RuntimeException ex) {
+      debugLogger.accept(
+          "STATION_STOP_OBSERVER_FAILED train=" + resolution.trainName() + " error=" + ex);
     }
   }
 

@@ -41,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DutyContinuitySupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnForecastSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
@@ -50,7 +51,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.junit.jupiter.api.Test;
 
 /**
- * 动态站台尚未选台时，站牌行不能把占位股道当站台号：站台写“-”，标出待定并给出候选。
+ * 动态站台尚未选台时，站牌行不能把占位股道当站台号：有时刻表的计划站台就写计划站台，否则站台写“-”，标出待定并给出候选。
  *
  * <p>交路 AAA（停）→ PPK（DYNAMIC 不写范围，终到），图上 PPK 有 1、2 两条股道；占位股道是 1 道。
  */
@@ -149,6 +150,66 @@ class EtaBoardPlatformPendingTest {
     assertEquals(List.of("1", "2"), row.platformCandidates());
   }
 
+  /** 运行中的车还没选台：写计划（或暂定）站台，不算待定。 */
+  @Test
+  void aRunningTrainShowsItsPlannedTrackBeforeSelection() {
+    Fixture fixture = new Fixture(List.of(PPK_1, PPK_2)).running(0, AAA);
+    fixture.service.attachPlannedPlatforms(
+        (train, route, index) ->
+            train.equals(TRAIN) && index == 1 ? Optional.of(PPK_2) : Optional.empty());
+
+    BoardResult.BoardRow row = onlyRow(fixture.service);
+
+    assertEquals("2", row.platform());
+    assertFalse(row.platformPending());
+    assertTrue(row.platformPlanned());
+    assertTrue(row.platformCandidates().isEmpty());
+  }
+
+  /** 选台之后以实际站台为准，计划不再出现。 */
+  @Test
+  void theSelectedTrackOverridesThePlan() {
+    Fixture fixture = new Fixture(List.of(PPK_1, PPK_2)).running(0, AAA);
+    fixture.service.attachPlannedPlatforms((train, route, index) -> Optional.of(PPK_2));
+    fixture.service.attachEffectiveWaypoints((train, route) -> List.of(AAA, PPK_1));
+    fixture.service.attachPlacedStops((train, route, index) -> index == 1);
+
+    BoardResult.BoardRow row = onlyRow(fixture.service);
+
+    assertEquals("1", row.platform());
+    assertFalse(row.platformPlanned());
+  }
+
+  /** 还没派车的票据也写计划站台。 */
+  @Test
+  void aTicketShowsThePlannedTrack() {
+    Fixture fixture = new Fixture(List.of(PPK_1, PPK_2));
+    SpawnTicket ticket = fixture.ticket(Instant.now().plusSeconds(60));
+    DutyContinuitySupport continuity = fixture.attachContinuity(List.of(ticket));
+    when(continuity.plannedPlatformOf(ticket, 1)).thenReturn(Optional.of(PPK_1.value()));
+
+    BoardResult.BoardRow row = onlyRow(fixture.service);
+
+    assertEquals(BoardPhase.PENDING, row.phase());
+    assertEquals("1", row.platform());
+    assertTrue(row.platformPlanned());
+    assertFalse(row.platformPending());
+  }
+
+  /** 计划股道不在这一站的 DYNAMIC 范围里（编表之后改过交路）：不认，照旧待定。 */
+  @Test
+  void aPlanOutsideTheDynamicRangeIsIgnored() {
+    Fixture fixture = new Fixture(List.of(PPK_1, PPK_2)).running(0, AAA);
+    fixture.service.attachPlannedPlatforms(
+        (train, route, index) -> Optional.of(NodeId.of("SURN:S:XYZ:3")));
+
+    BoardResult.BoardRow row = onlyRow(fixture.service);
+
+    assertTrue(row.platformPending());
+    assertFalse(row.platformPlanned());
+    assertEquals("-", row.platform());
+  }
+
   private static BoardResult.BoardRow onlyRow(EtaService service) {
     List<BoardResult.BoardRow> rows =
         service.getBoard("SURN", "PPK", null, Duration.ofMinutes(10)).rows();
@@ -217,6 +278,22 @@ class EtaBoardPlatformPendingTest {
               Optional.of(SignalAspect.PROCEED),
               Optional.empty()));
       return this;
+    }
+
+    /** 挂上带交路衔接的发车层：队列里是给定的票据，没有预测。 */
+    DutyContinuitySupport attachContinuity(List<SpawnTicket> queue) {
+      SpawnManager manager =
+          mock(
+              SpawnManager.class,
+              withSettings()
+                  .extraInterfaces(SpawnForecastSupport.class, DutyContinuitySupport.class));
+      when(manager.snapshotQueue()).thenReturn(queue);
+      when(((SpawnForecastSupport) manager).snapshotForecast(any(), any(), anyInt()))
+          .thenReturn(List.of());
+      TicketAssigner assigner = mock(TicketAssigner.class);
+      when(assigner.snapshotPendingTickets()).thenReturn(List.of());
+      service.attachTicketSources(manager, assigner);
+      return (DutyContinuitySupport) manager;
     }
 
     SpawnTicket ticket(Instant due) {

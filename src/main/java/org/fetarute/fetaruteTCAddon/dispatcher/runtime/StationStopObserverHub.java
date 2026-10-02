@@ -74,4 +74,16 @@ public final class StationStopObserverHub implements StationStopObserver {
           }
         });
   }
+
+  @Override
+  public void onPlatformResolved(PlatformResolution resolution) {
+    observers.forEach(
+        (key, observer) -> {
+          try {
+            observer.onPlatformResolved(resolution);
+          } catch (RuntimeException ex) {
+            debugLogger.accept("STATION_STOP_OBSERVER_FAILED observer=" + key + " error=" + ex);
+          }
+        });
+  }
 }

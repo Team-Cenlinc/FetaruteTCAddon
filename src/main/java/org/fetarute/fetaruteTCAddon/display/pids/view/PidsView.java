@@ -170,11 +170,17 @@ public record PidsView(
    *
    * @param number 站台号；未知或待定为“-”
    * @param hollow 空心（取消、站台待定）
+   * @param changed 站台变更过（方块用琥珀色）
    */
-  public record PlatformCell(String number, boolean hollow) {
+  public record PlatformCell(String number, boolean hollow, boolean changed) {
 
     public PlatformCell {
       Objects.requireNonNull(number, "number");
+    }
+
+    /** 没有变更的站台。 */
+    public PlatformCell(String number, boolean hollow) {
+      this(number, hollow, false);
     }
   }
 

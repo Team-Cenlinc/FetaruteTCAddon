@@ -203,9 +203,13 @@ public interface EtaApi {
    * @param outOfService 本站已越过运营终点，列车在回库途中（1.9.0）
    * @param trainName 运行中列车的列车名；票据与预测为空（1.9.0）
    * @param delaySeconds 按表运行时相对计划的偏差，正数为晚点：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空（1.9.0）
-   * @param platformPending 站台待定：本站是动态站台（DYNAMIC）停靠，列车还没有选台。运行中列车通常在到达本站前一个节点
-   *     （多为站咽喉）时选台；未发车的票据与预测一律待定（1.9.0）
+   * @param platformPending 站台待定：本站是动态站台（DYNAMIC）停靠，列车还没有选台，也没有计划站台（1.9.0）。
+   *     运行中列车通常在到达本站前一个节点（多为站咽喉）时选台
    * @param platformCandidates 站台待定时可能停靠的站台号，按站台号升序；站台已定或候选未知时为空（1.9.0）
+   * @param platformPlanned 站台号是计划站台（1.9.0）：时刻表排定的股道，或没有时刻表计划时列车在下一个停车站上先定的暂定股道。
+   *     列车还没有选台，进站前选台时这条股道被占会改停别的站台，届时发 {@code TrainPlatformAssignedEvent}（原因 {@code
+   *     CHANGED_FROM_PLAN}）。有计划站台时不算待定
+   * @param cars 运行中列车各节车的座位与在座乘客，车头在前（1.9.0）；票据、预测与读不到车辆模型时为空
    */
   record BoardRow(
       String lineName,
@@ -228,7 +232,9 @@ public interface EtaApi {
       Optional<String> trainName,
       OptionalLong delaySeconds,
       boolean platformPending,
-      List<String> platformCandidates) {
+      List<String> platformCandidates,
+      boolean platformPlanned,
+      List<CarLoad> cars) {
 
     public BoardRow {
       destinationId = destinationId == null ? Optional.empty() : destinationId;
@@ -239,6 +245,14 @@ public interface EtaApi {
       trainName = trainName == null ? Optional.empty() : trainName;
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
       platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
+      cars = cars == null ? List.of() : List.copyOf(cars);
+    }
+
+    /** 全车空位数；没有载客数据时为空。 */
+    public java.util.OptionalInt vacantSeats() {
+      return cars.isEmpty()
+          ? java.util.OptionalInt.empty()
+          : java.util.OptionalInt.of(cars.stream().mapToInt(CarLoad::vacant).sum());
     }
 
     /**
@@ -278,6 +292,8 @@ public interface EtaApi {
           Optional.empty(),
           OptionalLong.empty(),
           false,
+          List.of(),
+          false,
           List.of());
     }
 
@@ -286,6 +302,25 @@ public interface EtaApi {
       return etaEpochMillis <= 0L
           ? Optional.empty()
           : Optional.of(Instant.ofEpochMilli(etaEpochMillis));
+    }
+  }
+
+  /**
+   * 一节车的座位与在座乘客（1.9.0）。座位数取车辆模型里的座位个数，在座取坐在这节车上的玩家。
+   *
+   * @param seats 座位数
+   * @param occupied 在座乘客数，不超过座位数
+   */
+  record CarLoad(int seats, int occupied) {
+
+    public CarLoad {
+      seats = Math.max(0, seats);
+      occupied = Math.max(0, Math.min(occupied, seats));
+    }
+
+    /** 空位数。 */
+    public int vacant() {
+      return seats - occupied;
     }
   }
 

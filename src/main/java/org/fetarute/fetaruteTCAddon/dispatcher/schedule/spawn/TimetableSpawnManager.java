@@ -2,9 +2,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
@@ -35,7 +38,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * 的计划快照。因此一条 route 必须本来就是可发车服务（配了 depot 与 spawn 开关）， 时刻表才能驱动它——否则本层会跳过并留下审计记录，而不是猜一个 depot。
  */
 public final class TimetableSpawnManager
-    implements SpawnManager, SpawnForecastSupport, SpawnResetSupport {
+    implements SpawnManager, SpawnForecastSupport, SpawnResetSupport, DutyContinuitySupport {
 
   /** 自有票据追踪上限，防止 assigner 长期不回收时无界增长。 */
   private static final int MAX_TRACKED_TICKETS = 512;
@@ -54,6 +57,14 @@ public final class TimetableSpawnManager
   private final Set<UUID> missingServiceWarned = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
   private volatile Instant lastPoll;
+
+  /**
+   * 最近一次预测出的票据各属于哪个交路的哪一班：预测票不入队，站牌要靠它找到来车。每次预测整张替换。
+   *
+   * <p>按车次标识（{@link SpawnTicket#serviceTripId()}）记，不按票据 ID：预测票每次重新生成、ID 随之变，
+   * 两次预测交错（例如外部插件在别的线程查站牌）时按 ID 记的会互相顶掉，同一车次的标识则不变。
+   */
+  private volatile Map<String, TicketIntent> forecastIntents = Map.of();
 
   public TimetableSpawnManager(
       SpawnManager delegate, TimetableService timetableService, Consumer<String> debugLogger) {
@@ -302,6 +313,7 @@ public final class TimetableSpawnManager
         trainName,
         intent.key(),
         "ticket-" + intent.kind().name().toLowerCase(java.util.Locale.ROOT));
+    timetableService.bindDispatchedTrip(trainName, intent, owned.trip());
     debugLogger.accept(
         "TIMETABLE_SPAWN_DISPATCHED kind="
             + intent.kind().name()
@@ -373,15 +385,102 @@ public final class TimetableSpawnManager
         out.add(ticket);
       }
     }
+    Map<String, TicketIntent> intents = new HashMap<>();
     for (TimetableService.DueTrip due : timetableService.tripsBetween(now, now.plus(horizon))) {
       if (!cancelledFromOrigin(due)) {
-        buildTicket(due).ifPresent(out::add);
+        buildTicket(due)
+            .ifPresent(
+                built -> {
+                  out.add(built);
+                  intentOf(due)
+                      .ifPresent(
+                          intent ->
+                              built.serviceTripId().ifPresent(trip -> intents.put(trip, intent)));
+                });
       }
     }
     for (TimetableService.DueLeg due : timetableService.legsBetween(now, now.plus(horizon))) {
-      buildLegTicket(due).ifPresent(out::add);
+      buildLegTicket(due)
+          .ifPresent(
+              built -> {
+                out.add(built);
+                built.serviceTripId().ifPresent(trip -> intents.put(trip, legIntent(due)));
+              });
     }
+    forecastIntents = Map.copyOf(intents);
     return List.copyOf(out);
+  }
+
+  @Override
+  public Optional<NextDeparture> nextDepartureOf(String trainName) {
+    if (timetableService == null) {
+      return Optional.empty();
+    }
+    return timetableService
+        .nextDepartureOf(trainName)
+        .map(due -> new NextDeparture(due.trip().routeId(), due.departure(), serviceTripIdOf(due)));
+  }
+
+  @Override
+  public Optional<String> awaitedVehicleOf(SpawnTicket ticket) {
+    return ticketIntentOf(ticket).flatMap(timetableService::awaitedVehicle);
+  }
+
+  @Override
+  public Optional<String> plannedPlatformOf(SpawnTicket ticket, int stopIndex) {
+    return ticketIntentOf(ticket)
+        .flatMap(intent -> timetableService.plannedPlatform(intent, stopIndex));
+  }
+
+  /** 已出的票按登记的意图，预测票按最近一次预测记下的意图；派出后意图已摘掉，查不到。 */
+  private Optional<TicketIntent> ticketIntentOf(SpawnTicket ticket) {
+    if (ticket == null || ticket.id() == null || timetableService == null) {
+      return Optional.empty();
+    }
+    OwnedTicket owned = ownedTickets.get(ticket.id());
+    if (owned != null) {
+      return owned.intent();
+    }
+    Map<String, TicketIntent> forecast = forecastIntents;
+    return ticket.serviceTripId().map(forecast::get);
+  }
+
+  /** 一趟车对应票据的车次标识：带客回库班由交路的回库走行票开出，标识跟走行票走（交路号 + 服务日）； 其余按车次号 + 起点发车日历日。 */
+  private static String serviceTripIdOf(TimetableService.DueTrip due) {
+    boolean returnTrip =
+        due.timetable()
+            .routePlan(due.trip().routeId())
+            .map(plan -> plan.kind() == RouteOperationType.RETURN)
+            .orElse(false);
+    if (returnTrip) {
+      Optional<String> legId =
+          due.trip()
+              .dutyId()
+              .flatMap(due.timetable()::duty)
+              .map(
+                  duty ->
+                      legTicketId(
+                          due.timetable().code(),
+                          duty.dutyCode() + "-" + RouteOperationType.RETURN.name(),
+                          due.timetable().serviceDayOf(due.trip(), due.serviceDate())));
+      if (legId.isPresent()) {
+        return legId.get();
+      }
+    }
+    return tripTicketId(due.timetable().code(), due.trip().tripCode(), due.serviceDate());
+  }
+
+  private static String tripTicketId(String timetableCode, String tripCode, LocalDate date) {
+    return SpawnTicket.TIMETABLE_TRIP_PREFIX + timetableCode + "-" + tripCode + "-" + date;
+  }
+
+  private static String legTicketId(String timetableCode, String legCode, LocalDate serviceDay) {
+    return SpawnTicket.TIMETABLE_TRIP_PREFIX + timetableCode + "-" + legCode + "-" + serviceDay;
+  }
+
+  private static TicketIntent legIntent(TimetableService.DueLeg leg) {
+    return new TicketIntent(
+        leg.timetable().id(), leg.duty().id(), leg.serviceDate(), leg.kind(), 0);
   }
 
   /** 整趟取消的车次不会开出，不再预测；站牌与站台屏从时刻表的取消标记显示它。 */
@@ -436,16 +535,7 @@ public final class TimetableSpawnManager
       buildLegTicket(leg)
           .ifPresent(
               built -> {
-                track(
-                    built,
-                    Optional.of(
-                        new TicketIntent(
-                            leg.timetable().id(),
-                            leg.duty().id(),
-                            leg.serviceDate(),
-                            leg.kind(),
-                            0)),
-                    Optional.empty());
+                track(built, Optional.of(legIntent(leg)), Optional.empty());
                 out.add(built);
                 debugLogger.accept(
                     "TIMETABLE_SPAWN_TICKET kind="
@@ -507,13 +597,7 @@ public final class TimetableSpawnManager
       }
       return Optional.empty();
     }
-    String tripId =
-        SpawnTicket.TIMETABLE_TRIP_PREFIX
-            + due.timetable().code()
-            + "-"
-            + due.code()
-            + "-"
-            + due.serviceDate();
+    String tripId = legTicketId(due.timetable().code(), due.code(), due.serviceDate());
     return Optional.of(
         new SpawnTicket(
             UUID.randomUUID(),
@@ -549,13 +633,7 @@ public final class TimetableSpawnManager
     }
     Optional<String> depotOverride =
         due.timetable().routePlan(routeId).flatMap(plan -> plan.depotNodeId());
-    String tripId =
-        SpawnTicket.TIMETABLE_TRIP_PREFIX
-            + due.timetable().code()
-            + "-"
-            + due.trip().tripCode()
-            + "-"
-            + due.serviceDate();
+    String tripId = tripTicketId(due.timetable().code(), due.trip().tripCode(), due.serviceDate());
     return Optional.of(
         new SpawnTicket(
             UUID.randomUUID(),

@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.UUID;
 
 /**
  * 发车计划源：回答“这辆车在这个停靠点应该几点开”。
@@ -51,5 +52,19 @@ public interface ScheduledDeparturePlan {
    */
   default OptionalLong currentDelaySeconds(String trainName) {
     return OptionalLong.empty();
+  }
+
+  /**
+   * 只读：列车在当前交路某个停靠点的计划站台（时刻表排定的股道），DYNAMIC 选台在空闲候选里优先选它。
+   *
+   * <p>选台每个信号 tick 都可能问，实现只能查内存。没有计划时为空——空只会照常按进站方向选台。
+   *
+   * @param trainName 列车名（大小写不敏感）
+   * @param routeId 列车当前交路
+   * @param stopIndex 停靠序号
+   * @return 计划股道节点
+   */
+  default Optional<String> plannedPlatformOf(String trainName, UUID routeId, int stopIndex) {
+    return Optional.empty();
   }
 }

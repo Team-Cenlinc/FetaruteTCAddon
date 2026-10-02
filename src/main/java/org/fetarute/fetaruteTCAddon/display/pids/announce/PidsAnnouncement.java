@@ -21,14 +21,22 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
  * @param key 去重键，见 {@link #active}
  * @param station 车站
  * @param row 触发广播的站台屏行
+ * @param previousPlatform 站台变更前的站台（仅 {@link Kind#PLATFORM_CHANGED}）
  */
-public record PidsAnnouncement(Kind kind, String key, PidsStationKey station, PidsRow row) {
+public record PidsAnnouncement(
+    Kind kind, String key, PidsStationKey station, PidsRow row, Optional<String> previousPlatform) {
 
   public PidsAnnouncement {
     Objects.requireNonNull(kind, "kind");
     Objects.requireNonNull(key, "key");
     Objects.requireNonNull(station, "station");
     Objects.requireNonNull(row, "row");
+    previousPlatform = previousPlatform == null ? Optional.empty() : previousPlatform;
+  }
+
+  /** 不涉及站台变更的广播。 */
+  public PidsAnnouncement(Kind kind, String key, PidsStationKey station, PidsRow row) {
+    this(kind, key, station, row, Optional.empty());
   }
 
   /** 播报通道。 */
@@ -48,7 +56,9 @@ public record PidsAnnouncement(Kind kind, String key, PidsStationKey station, Pi
     /** 班次取消。 */
     CANCELLED(Channel.CHAT),
     /** 严重晚点。 */
-    DELAYED(Channel.CHAT);
+    DELAYED(Channel.CHAT),
+    /** 站台变更：已定的站台改了，或没能停到计划站台。 */
+    PLATFORM_CHANGED(Channel.CHAT);
 
     private final Channel channel;
 
@@ -69,6 +79,7 @@ public record PidsAnnouncement(Kind kind, String key, PidsStationKey station, Pi
    *       站台待定时不播：动态站台在进站前（通常是站咽喉）选台，选好后带站台号播一次，不先播一条没有站台的再补一条。
    *   <li>取消：取消行（快照里有查询窗口内的取消班次，以及计划时刻已过不久的）。
    *   <li>严重晚点：运行中的列车到达本站的晚点达到 {@link Lateness#SEVERELY_LATE_SECONDS}；通过车与回库车不播。
+   *   <li>站台变更：这辆车在本站的站台改了（{@link PidsPlatformChanges}），且快照里已是新站台；通过车不播。
    * </ul>
    *
    * <p>只看有列车名的行：票据与预测没有稳定的身份，晚点也要等列车发车后才确定。
@@ -129,6 +140,18 @@ public record PidsAnnouncement(Kind kind, String key, PidsStationKey station, Pi
       if (severelyLate && settings.triggers().delayed()) {
         active.add(
             new PidsAnnouncement(Kind.DELAYED, key(Kind.DELAYED, station, id), station, row));
+      }
+      if (!row.passing() && settings.triggers().platformChanged()) {
+        row.previousPlatform()
+            .ifPresent(
+                from ->
+                    active.add(
+                        new PidsAnnouncement(
+                            Kind.PLATFORM_CHANGED,
+                            key(Kind.PLATFORM_CHANGED, station, id + "|" + row.platform()),
+                            station,
+                            row,
+                            Optional.of(from))));
       }
     }
     return List.copyOf(active);

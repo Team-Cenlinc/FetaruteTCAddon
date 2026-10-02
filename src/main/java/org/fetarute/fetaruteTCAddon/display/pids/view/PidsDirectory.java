@@ -2,6 +2,8 @@ package org.fetarute.fetaruteTCAddon.display.pids.view;
 
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 
@@ -45,6 +47,27 @@ public interface PidsDirectory {
    * @return 查不到时为空，此时按到发行里出现过的线路
    */
   List<PidsView.LineChip> linesServingPlatform(PidsStationKey station, String platform);
+
+  /**
+   * 交路途经节点（与 {@code RouteApi.RouteDetail#waypoints()} 相同，停靠序号即下标）。
+   *
+   * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+   * @return 途经节点；不知道时为空
+   */
+  default List<String> waypoints(String routeId) {
+    return List.of();
+  }
+
+  /**
+   * 调度图节点的世界坐标。
+   *
+   * @param worldId 世界
+   * @param nodeId 节点 ID
+   * @return 坐标；不知道时为空
+   */
+  default Optional<GraphApi.Position> nodePosition(UUID worldId, String nodeId) {
+    return Optional.empty();
+  }
 
   /**
    * 线路的显示样式。

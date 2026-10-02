@@ -26,6 +26,7 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -402,6 +403,84 @@ class RuntimeArrivalProgressTest {
     assertEquals(0, fixture.train().launchCalls);
   }
 
+  /**
+   * STOP 路点推进到下一站时按信号 tick 的同一个分配器选台：不写范围的 DYNAMIC 是该站现有的全部股道，1 道被占就选 2 道，
+   * 不把车当作“没有站台”扣在原地；选定的股道播报给站台观察者。
+   */
+  @Test
+  void aStopWaypointPicksAFreeTrackOfAnUnboundedDynamicStation() {
+    PassArrivalFixture fixture = passArrivalFixture();
+    NodeId second = NodeId.of("OP:S:PPK:2");
+    RailGraph graph =
+        graphWithConflictFreeLinearPath(
+            List.of(
+                fixture.route().waypoints().get(0), fixture.approach(), second, fixture.platform()),
+            80);
+    when(fixture.graphs().getSnapshot(fixture.train().worldId()))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph, Instant.now())));
+    when(fixture.routes().findStop(fixture.route().id(), 1))
+        .thenReturn(Optional.of(routeStop(1, fixture.approach(), RouteStopPassType.STOP)));
+    RouteStop unbounded = dynamicStop(2, fixture.platform(), "DYNAMIC:OP:S:PPK");
+    when(fixture.routes().findStop(fixture.route().id(), 2)).thenReturn(Optional.of(unbounded));
+    when(fixture.signs().findByNodeId(eq(second), any()))
+        .thenReturn(
+            Optional.of(
+                new SignNodeRegistry.SignNodeInfo(
+                    new SignNodeDefinition(
+                        second, NodeType.STATION, Optional.empty(), Optional.empty()),
+                    fixture.worldId(),
+                    "world",
+                    0,
+                    64,
+                    0)));
+    assertTrue(
+        fixture
+            .occupancy()
+            .acquire(
+                new OccupancyRequest(
+                    "platform-owner",
+                    Optional.empty(),
+                    Instant.now(),
+                    List.of(OccupancyResource.forNode(fixture.platform())),
+                    Map.of()))
+            .allowed());
+    List<PlatformResolution> resolved = new ArrayList<>();
+    fixture
+        .service()
+        .stationStops()
+        .setObserver(
+            new StationStopObserver() {
+              @Override
+              public void onStationArrival(StationStopEvent event) {}
+
+              @Override
+              public void onStationDeparture(StationStopEvent event) {}
+
+              @Override
+              public void onPlatformResolved(PlatformResolution resolution) {
+                resolved.add(resolution);
+              }
+            });
+
+    // STOP 路点不走经过推进（member enter 只记经过节点），推进由进度触发器完成。
+    fixture
+        .service()
+        .handleProgressTrigger(
+            fixture.train(),
+            fixture.event(),
+            new SignNodeDefinition(
+                fixture.approach(), NodeType.WAYPOINT, Optional.empty(), Optional.empty()));
+
+    assertEquals(
+        second,
+        fixture.service().resolveEffectiveWaypointsForEvent("incoming", fixture.route()).get(2));
+    assertTrue(fixture.service().hasEffectiveNode("incoming", fixture.route(), 2));
+    assertEquals(1, resolved.size(), "第一次定下播报一次；之后同值不再播报");
+    assertEquals(second, resolved.get(0).node());
+    assertTrue(resolved.get(0).dynamic());
+    assertEquals(PlatformResolution.Reason.ASSIGNED, resolved.get(0).reason());
+  }
+
   @Test
   void waypointMemberEnterStopsWhenRouteDefinitionIsUnavailable() {
     assertMissingArrivalRouteStops(PassArrivalFixture::arrive);
@@ -614,7 +693,7 @@ class RuntimeArrivalProgressTest {
 
     return new PassArrivalFixture(
         approach, platform, route, routes, graphs, registry, occupancy, service, train, event, logs,
-        eventBus);
+        eventBus, signs, worldId);
   }
 
   private record PassArrivalFixture(
@@ -629,7 +708,9 @@ class RuntimeArrivalProgressTest {
       FakeTrain train,
       com.bergerkiller.bukkit.tc.events.SignActionEvent event,
       List<String> logs,
-      SignalEventBus eventBus) {
+      SignalEventBus eventBus,
+      SignNodeRegistry signs,
+      UUID worldId) {
     void arrive() {
       service.handleWaypointMemberEnter(
           train,

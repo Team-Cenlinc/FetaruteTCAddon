@@ -18,6 +18,7 @@ package org.fetarute.fetaruteTCAddon.display.pids.render;
  * @param amber 晚点；安全提示页的图标块
  * @param red 严重晚点、取消
  * @param info 宣传页的图标块（钢蓝，两种主题相同）
+ * @param green 空位页“座位充足”的车厢
  */
 public record PidsTheme(
     int background,
@@ -30,19 +31,20 @@ public record PidsTheme(
     int inverseMuted,
     int amber,
     int red,
-    int info) {
+    int info,
+    int green) {
 
   /** 深色（夜间）。 */
   public static final PidsTheme DARK =
       new PidsTheme(
           0x191919, 0x282828, 0xFFFFFF, 0xB4B4B4, 0x696969, 0xFFFFFF, 0x191919, 0x3D4040, 0xFAEE4D,
-          0xFF0000, 0x365172);
+          0xFF0000, 0x365172, 0x7FCC19);
 
   /** 浅色（白天）。 */
   public static final PidsTheme LIGHT =
       new PidsTheme(
           0xFFFFFF, 0xDCDCDC, 0x191919, 0x646464, 0xB4B4B4, 0x191919, 0xFFFFFF, 0xC7C7C7, 0x985924,
-          0xBD3031, 0x365172);
+          0xBD3031, 0x365172, 0x007C00);
 
   /** 线路色牌上的深色字。 */
   public static final int INK = 0x191919;

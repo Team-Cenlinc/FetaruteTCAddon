@@ -21,9 +21,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
-import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVacancyView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
@@ -105,6 +105,9 @@ public final class PidsComposer {
 
   /** 到发页的内容标识：布局与视图都相同才算没变。 */
   record LiveKey(PidsLayout layout, PidsView view) {}
+
+  /** 空位页的内容标识：渲染随布局（色牌样式、色带位置）而定。 */
+  record VacancyKey(PidsLayout layout, PidsVacancyView view) {}
 
   /**
    * @param screenId 地图物品上记的屏幕 ID
@@ -190,43 +193,64 @@ public final class PidsComposer {
     Instant now = clock.instant();
     List<String> platformLabels =
         screen.platforms().stream().sorted(PidsPlatformNode.PLATFORM_ORDER).toList();
-    PidsView view =
-        views.build(
-            new PidsViewBuilder.Request(
-                snapshot,
-                now,
-                zone,
-                theme(screen),
-                screen.platforms(),
-                platformLabels,
-                layout.rowCapacity(),
-                layout.departures().map(d -> d.columns().platform().isPresent()).orElse(false)));
+    PidsViewBuilder.Request request =
+        new PidsViewBuilder.Request(
+            snapshot,
+            now,
+            zone,
+            theme(screen),
+            screen.platforms(),
+            platformLabels,
+            layout.rowCapacity(),
+            layout.departures().map(d -> d.columns().platform().isPresent()).orElse(false),
+            Optional.of(placement(screen)));
+    PidsView view = views.build(request);
     if (PidsPlatformSelection.limit(layout).isPresent()) {
-      Optional<PidsNotice> page =
+      Optional<PidsCarousel.Slide> slide =
           carousel.page(
-              screen.id(), station, passingSoon(screen, snapshot), now, settings.get().render());
-      if (page.isPresent()) {
+              screen.id(),
+              station,
+              passingSoon(screen, snapshot),
+              views.hasVacancy(request),
+              now,
+              settings.get().render());
+      if (slide.isPresent() && slide.get() instanceof PidsCarousel.Slide.Notice page) {
         PidsNoticeView notice =
             new PidsNoticeView(
                 view.theme(),
-                page.get(),
-                vocabulary.noticeTitle(page.get()),
-                vocabulary.noticeBody(page.get()),
+                page.notice(),
+                vocabulary.noticeTitle(page.notice()),
+                vocabulary.noticeBody(page.notice()),
                 view.bandColors());
         return new PidsContent(notice, () -> renderer.renderNotice(layout, notice));
+      }
+      Optional<PidsVacancyView> vacancy =
+          slide.isPresent() ? views.vacancy(request) : Optional.empty();
+      if (vacancy.isPresent()) {
+        PidsVacancyView seats = vacancy.get();
+        return new PidsContent(
+            new VacancyKey(layout, seats), () -> renderer.renderVacancy(layout, seats));
       }
     }
     return new PidsContent(new LiveKey(layout, view), () -> renderer.render(layout, view));
   }
 
-  /** 本屏的站台有通过列车即将通过（已按线路过滤）。 */
+  /** 屏幕所在世界与站在屏幕前看去的“向右”。 */
+  static PidsViewBuilder.Placement placement(PidsScreen screen) {
+    return new PidsViewBuilder.Placement(
+        screen.worldId(), screen.facing().rightX(), screen.facing().rightZ());
+  }
+
+  /** 本屏的站台有通过列车即将通过（已按线路过滤）；原定走本站台、已改走别的股道的不算。 */
   private static boolean passingSoon(PidsScreen screen, PidsSnapshot snapshot) {
     return snapshot.rows().stream()
         .anyMatch(
             row ->
                 row.passing()
                     && row.status() == PidsRow.Status.ARRIVING
-                    && (screen.platforms().isEmpty() || row.mayUse(screen.platforms())));
+                    && (screen.platforms().isEmpty()
+                        || (row.mayUse(screen.platforms())
+                            && !row.movedAwayFrom(screen.platforms()))));
   }
 
   private PidsTheme theme(PidsScreen screen) {

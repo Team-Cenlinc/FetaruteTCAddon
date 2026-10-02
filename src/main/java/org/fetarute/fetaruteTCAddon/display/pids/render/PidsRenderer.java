@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVacancyView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Arrival;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Label;
@@ -42,6 +43,42 @@ public final class PidsRenderer {
   /** 空心“计划”框的左右内边距。 */
   private static final int BOX_PADDING = 4;
 
+  /** 空位页：左右留白与顶部留白。 */
+  private static final int VACANCY_INSET = 8;
+
+  private static final int VACANCY_TOP = 4;
+
+  /** 空位页：到站分钟数字号。像素字体只有 10、12 的倍数，40 号数字墨迹高 28 像素，与终点两行合起来最接近。 */
+  private static final int VACANCY_NUMBER = 40;
+
+  /** 空位页：车厢行顶边、车厢高与车厢间距。 */
+  private static final int VACANCY_TRAIN_TOP = 44;
+
+  private static final int VACANCY_CAR_HEIGHT = 24;
+  private static final int VACANCY_CAR_GAP = 4;
+
+  /** 空位页：车厢最宽按这么多节铺满算，编组短时不拉宽、整列居中。 */
+  private static final int VACANCY_FULL_TRAIN = 8;
+
+  /** 空位页：车头小窗的宽、高与离车头端、车顶的距离。 */
+  private static final int VACANCY_WINDOW_WIDTH = 6;
+
+  private static final int VACANCY_WINDOW_HEIGHT = 5;
+  private static final int VACANCY_WINDOW_INSET = 3;
+
+  /** 空位页：站台线离车厢的距离与粗细。 */
+  private static final int VACANCY_PLATFORM_GAP = 3;
+
+  private static final int VACANCY_PLATFORM = 2;
+
+  /** 空位页：底行（提示与图例）顶边、图例色块边长。 */
+  private static final int VACANCY_FOOT_TOP = 88;
+
+  private static final int VACANCY_CHIP = 8;
+
+  /** 空位页首行的色牌样式（布局没有到发表时用）。 */
+  private static final BadgeStyle VACANCY_BADGE = new BadgeStyle(42, 28, 24, 12, 10, 1, 0);
+
   private static final String DASH = "—";
 
   /** 一块地图的边长。 */
@@ -50,6 +87,7 @@ public final class PidsRenderer {
   private static final int CARD_TITLE = 20;
   private static final int CARD_TEXT = 12;
   private static final int CARD_SMALL = 10;
+
   private static final int CARD_INSET = 4;
 
   /** 宣传页图标块边长与其中图标的边长。 */
@@ -160,11 +198,7 @@ public final class PidsRenderer {
     Objects.requireNonNull(layout, "layout");
     Objects.requireNonNull(view, "view");
     int width = layout.width();
-    Optional<PidsLayout.LineBand> band =
-        layout.widgets().stream()
-            .filter(PidsLayout.LineBand.class::isInstance)
-            .map(PidsLayout.LineBand.class::cast)
-            .findFirst();
+    Optional<PidsLayout.LineBand> band = lineBand(layout);
     int content = band.map(PidsLayout.LineBand::y).orElse(layout.height());
     boolean withBody = layout.tileCols() >= 3;
     PidsTheme theme = view.theme();
@@ -221,6 +255,236 @@ public final class PidsRenderer {
           }
           band.ifPresent(found -> drawLineBand(p, found, view.bandColors()));
         });
+  }
+
+  /**
+   * 空位页（站台屏轮播的一页）：参照长岛铁路站台屏的车厢拥挤度示意图。
+   *
+   * <ul>
+   *   <li>第一行：线路色牌与终点（与主页首行相同）；右侧多久到达：分钟数与“分 / min”，或进站、停靠中。
+   *   <li>列车：每节车厢一个圆角矩形，按座位情况着色（充足绿、较少琥珀、紧张红，没有座位的空心），块内写空位数；
+   *       车头一节在前进方向一端挖一个小窗。车厢宽度有上限，编组短时不拉宽、整列居中。
+   *   <li>站台线：车厢下方一条线。
+   *   <li>底行：左侧提示“请优先考虑较空的车厢”，右侧图例。色带与主页同一位置。
+   * </ul>
+   *
+   * <p>不知道列车在屏幕上的朝向时，车头画在左侧。色牌样式取布局到发表首行的样式，与主页一致。
+   */
+  public BufferedImage renderVacancy(PidsLayout layout, PidsVacancyView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    int width = layout.width();
+    Optional<PidsLayout.LineBand> band = lineBand(layout);
+    BadgeStyle badgeStyle =
+        layout
+            .departures()
+            .filter(d -> !d.rows().isEmpty())
+            .map(d -> d.rows().get(0).badge())
+            .orElse(VACANCY_BADGE);
+    boolean frontRight = view.front().filter(PidsVacancyView.Front.RIGHT::equals).isPresent();
+    return paint(
+        width,
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          int left = VACANCY_INSET;
+          int right = width - VACANCY_INSET;
+          drawBadgeAt(p, left, VACANCY_TOP, badgeStyle, view.badge());
+          int destinationRight =
+              drawVacancyArrival(p, view.arrival(), view.labels().minutes(), right);
+          int destX = left + badgeStyle.width() + VACANCY_INSET;
+          int destWidth = destinationRight - VACANCY_INSET - destX;
+          p.text(
+              p.ellipsize(view.destination().primary(), CARD_TITLE, destWidth),
+              CARD_TITLE,
+              destX,
+              VACANCY_TOP,
+              p.theme.text());
+          p.regular(
+              p.ellipsizeWords(view.destination().secondary(), CARD_SMALL, destWidth),
+              CARD_SMALL,
+              destX,
+              VACANCY_TOP + CARD_TITLE + 2,
+              p.theme.muted(),
+              false);
+          drawTrain(p, view.cars(), frontRight, left, right);
+          p.fill(
+              left,
+              VACANCY_TRAIN_TOP + VACANCY_CAR_HEIGHT + VACANCY_PLATFORM_GAP,
+              right - left,
+              VACANCY_PLATFORM,
+              p.theme.muted());
+          drawVacancyFoot(p, view.labels(), left, right);
+          band.ifPresent(found -> drawLineBand(p, found, view.bandColors()));
+        });
+  }
+
+  /**
+   * 第一行右侧的多久到达，与左侧终点（中文 {@value #CARD_TITLE} 号叠英文 {@value #CARD_SMALL} 号）等高、同两行：
+   *
+   * <ul>
+   *   <li>分钟数用 {@value #VACANCY_NUMBER} 号，与英文同基线，数字自中文字顶写到英文字底；其后“分 / min”与终点同字号、同两行。
+   *   <li>进站、停靠中：提示与终点同字号、同两行。
+   *   <li>取消、回库不写。
+   * </ul>
+   *
+   * 返回占用区域的左缘。
+   */
+  private int drawVacancyArrival(Painter p, Arrival arrival, Names minutes, int right) {
+    int secondaryTop = VACANCY_TOP + CARD_TITLE + 2;
+    switch (arrival.mode()) {
+      case COUNTDOWN -> {
+        int unitWidth =
+            Math.max(
+                p.width(minutes.primary(), CARD_TITLE),
+                p.regularWidth(minutes.secondary(), CARD_SMALL));
+        p.text(minutes.primary(), CARD_TITLE, right - unitWidth, VACANCY_TOP, p.theme.text());
+        p.regular(
+            minutes.secondary(),
+            CARD_SMALL,
+            right - unitWidth,
+            secondaryTop,
+            p.theme.muted(),
+            false);
+        String number = Integer.toString(arrival.minutes());
+        int baseline = secondaryTop + p.baseline(minutes.secondary(), CARD_SMALL);
+        int numberRight = right - unitWidth - NOTICE_GAP;
+        p.textRight(
+            number,
+            VACANCY_NUMBER,
+            numberRight,
+            baseline - p.baseline(number, VACANCY_NUMBER),
+            p.color(arrival.minutesTone()));
+        return numberRight - p.width(number, VACANCY_NUMBER);
+      }
+      case HIGHLIGHT -> {
+        Names text = arrival.status().map(Label::text).orElse(new Names("", ""));
+        int width =
+            Math.max(
+                p.width(text.primary(), CARD_TITLE), p.regularWidth(text.secondary(), CARD_SMALL));
+        p.textRight(text.primary(), CARD_TITLE, right, VACANCY_TOP, p.theme.text());
+        p.regularRight(text.secondary(), CARD_SMALL, right, secondaryTop, p.theme.muted());
+        return right - width;
+      }
+      default -> {
+        return right;
+      }
+    }
+  }
+
+  /**
+   * 列车示意图：各节等宽的圆角矩形，按座位情况着色、块内写空位数；车头一节在前进方向一端挖一个小窗。 车厢不宽于 {@value #VACANCY_FULL_TRAIN}
+   * 节铺满时的宽度，编组短时整列居中。
+   */
+  private void drawTrain(
+      Painter p, List<PidsVacancyView.Car> cars, boolean frontRight, int left, int right) {
+    int count = cars.size();
+    int available = right - left;
+    int gap = VACANCY_CAR_GAP;
+    int widest = (available - (VACANCY_FULL_TRAIN - 1) * gap) / VACANCY_FULL_TRAIN;
+    int carWidth = Math.min(widest, (available - (count - 1) * gap) / count);
+    if (carWidth < 6) {
+      gap = 1;
+      carWidth = (available - (count - 1) * gap) / count;
+    }
+    if (carWidth < 2) {
+      return;
+    }
+    int start = left + (available - (count * carWidth + (count - 1) * gap)) / 2;
+    int top = VACANCY_TRAIN_TOP;
+    int height = VACANCY_CAR_HEIGHT;
+    for (int i = 0; i < count; i++) {
+      int x = start + (frontRight ? count - 1 - i : i) * (carWidth + gap);
+      PidsVacancyView.Car car = cars.get(i);
+      int color = levelColor(p.theme, car.level());
+      boolean hollow = car.level() == PidsVacancyView.Level.NONE;
+      p.fill(x, top, carWidth, height, color);
+      if (hollow) {
+        p.fill(x + 1, top + 1, carWidth - 2, height - 2, p.theme.background());
+      }
+      // 圆角：四角各去一个像素
+      int background = p.theme.background();
+      p.fill(x, top, 1, 1, background);
+      p.fill(x + carWidth - 1, top, 1, 1, background);
+      p.fill(x, top + height - 1, 1, 1, background);
+      p.fill(x + carWidth - 1, top + height - 1, 1, 1, background);
+      if (i == 0) {
+        // 车头：前进方向一端挖一个小窗（空心车厢反过来填色）
+        int windowWidth = Math.min(VACANCY_WINDOW_WIDTH, carWidth / 4);
+        int windowX =
+            frontRight
+                ? x + carWidth - VACANCY_WINDOW_INSET - windowWidth
+                : x + VACANCY_WINDOW_INSET;
+        p.fill(
+            windowX,
+            top + VACANCY_WINDOW_INSET,
+            windowWidth,
+            VACANCY_WINDOW_HEIGHT,
+            hollow ? color : background);
+      }
+      String seats = hollow ? "-" : Integer.toString(car.vacant());
+      if (p.width(seats, CARD_TEXT) <= carWidth - 2) {
+        p.textCentered(
+            seats,
+            CARD_TEXT,
+            x + carWidth / 2,
+            top + (height - CARD_TEXT) / 2,
+            hollow ? p.theme.muted() : PidsTheme.textOn(color));
+      }
+    }
+  }
+
+  private static int levelColor(PidsTheme theme, PidsVacancyView.Level level) {
+    return switch (level) {
+      case MANY -> theme.green();
+      case SOME -> theme.amber();
+      case FEW -> theme.red();
+      case NONE -> theme.outline();
+    };
+  }
+
+  /** 底行：左侧提示（中英文叠放），右侧图例（色块 + 中英文叠放），从右往左排。 */
+  private void drawVacancyFoot(Painter p, PidsVacancyView.Labels labels, int left, int right) {
+    int top = VACANCY_FOOT_TOP;
+    int x = right;
+    List<Names> names = List.of(labels.few(), labels.some(), labels.many());
+    List<PidsVacancyView.Level> levels =
+        List.of(PidsVacancyView.Level.FEW, PidsVacancyView.Level.SOME, PidsVacancyView.Level.MANY);
+    for (int i = 0; i < names.size(); i++) {
+      Names item = names.get(i);
+      int itemWidth =
+          Math.max(
+              p.width(item.primary(), CARD_SMALL), p.regularWidth(item.secondary(), CARD_SMALL));
+      x -= itemWidth;
+      p.text(item.primary(), CARD_SMALL, x, top, p.theme.text());
+      p.regular(item.secondary(), CARD_SMALL, x, top + CARD_SMALL + 2, p.theme.muted(), false);
+      x -= VACANCY_CHIP + 3;
+      p.fill(x, top + 1, VACANCY_CHIP, VACANCY_CHIP, levelColor(p.theme, levels.get(i)));
+      x -= VACANCY_INSET;
+    }
+    int adviceWidth = x - left;
+    p.text(
+        p.ellipsize(labels.advice().primary(), CARD_TEXT, adviceWidth),
+        CARD_TEXT,
+        left,
+        top,
+        p.theme.text());
+    p.regular(
+        p.ellipsizeWords(labels.advice().secondary(), CARD_SMALL, adviceWidth),
+        CARD_SMALL,
+        left,
+        top + CARD_TEXT + 2,
+        p.theme.muted(),
+        false);
+  }
+
+  /** 布局里的线路色带（宣传页、空位页与主页同一位置）。 */
+  private static Optional<PidsLayout.LineBand> lineBand(PidsLayout layout) {
+    return layout.widgets().stream()
+        .filter(PidsLayout.LineBand.class::isInstance)
+        .map(PidsLayout.LineBand.class::cast)
+        .findFirst();
   }
 
   /** 48×48 像素图标，坐标都是整数，笔画与像素对齐。 */
@@ -522,7 +786,10 @@ public final class PidsRenderer {
         style.inset() < 0
             ? cell.columnX(column) + (column.width() - style.width()) / 2
             : cell.columnX(column) + style.inset();
-    int y = cell.top + (cell.height - style.height()) / 2;
+    drawBadgeAt(p, x, cell.top + (cell.height - style.height()) / 2, style, badge);
+  }
+
+  private void drawBadgeAt(Painter p, int x, int y, BadgeStyle style, PidsView.Badge badge) {
     int ink;
     if (badge.hollow()) {
       p.outline(x, y, style.width(), style.height(), badge.color());
@@ -661,6 +928,9 @@ public final class PidsRenderer {
     if (platform.hollow()) {
       p.outline(x, y, style.box(), style.box(), p.theme.outline());
       numberColor = p.theme.muted();
+    } else if (platform.changed()) {
+      p.fill(x, y, style.box(), style.box(), p.theme.amber());
+      numberColor = PidsTheme.textOn(p.theme.amber());
     } else {
       p.fill(x, y, style.box(), style.box(), p.theme.inverseBackground());
       numberColor = p.theme.inverseText();
