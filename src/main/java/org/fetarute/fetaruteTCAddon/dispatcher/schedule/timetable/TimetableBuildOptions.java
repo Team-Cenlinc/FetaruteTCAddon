@@ -25,7 +25,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  * @param strictConflicts 目标 headway 排出来有冲突时：{@code true} 构建失败；{@code false} 回退到最小可行 headway 并警告
  * @param groupIntervals 交路组 → 该组每个方向的发车间隔（秒）；没列出的组用 {@code headway}
  * @param repair 让车修复参数（单处上限、累计上限）
- * @param rapidStagger 快车错峰搜索：排完之后用完整编表逐个试快车组的平移量与停站，按成品表实测的快车被卡秒数挑位置（慢，见 {@link RapidStagger}）
+ * @param rapidStagger 快车错峰搜索：排完之后用完整编表逐个试原地折返端的折返、快车组的平移量与停站，按成品表实测的快车被卡秒数挑位置（慢，见 {@link
+ *     RapidStagger}）
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,

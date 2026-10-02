@@ -2952,7 +2952,7 @@ public final class FtaTimetableCommand {
    * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
-   * @param rapidStagger 快车错峰搜索：逐个试快车组的平移与停站、按成品表实测挑（慢）
+   * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
    */

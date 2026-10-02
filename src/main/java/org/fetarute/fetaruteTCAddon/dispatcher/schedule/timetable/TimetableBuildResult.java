@@ -44,7 +44,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param dutyShapes 交路形状：跑几班的交路各有多少条
  * @param phaseNotes 相位选择的说明
  * @param warnings 构建过程中的提示
- * @param rapidCatchUp 成品表上快车在共线段被慢车拖住的合计（{@link RapidStagger}）；报告据此提示用快车错峰重建
+ * @param rapidCatchUp 成品表上快车在共线段被慢车拖住、以及在表里让车等待的合计（{@link RapidStagger}）；报告据此提示用快车错峰重建
  */
 public record TimetableBuildResult(
     Optional<Timetable> timetable,
@@ -109,10 +109,16 @@ public record TimetableBuildResult(
    *
    * @param seconds 被拖住、超过一个裕量的秒数合计
    * @param trips 被拖住的班次数
+   * @param held 表里写给快车的让车等待合计：被卡改成在表里等，快车照样慢了这么多
    */
-  public record CatchUp(long seconds, int trips) {
-    /** 没量过或没有快车被卡。 */
-    public static final CatchUp NONE = new CatchUp(0L, 0);
+  public record CatchUp(long seconds, int trips, long held) {
+    /** 没量过或快车没有损失。 */
+    public static final CatchUp NONE = new CatchUp(0L, 0, 0L);
+
+    /** 快车损失：被卡加表里的等待。 */
+    public long lost() {
+      return seconds + held;
+    }
   }
 
   /** 同一份结果，相位说明末尾追加一行。 */
