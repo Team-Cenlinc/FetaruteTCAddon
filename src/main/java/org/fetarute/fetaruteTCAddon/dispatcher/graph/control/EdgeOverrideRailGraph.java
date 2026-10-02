@@ -1,8 +1,10 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.control;
 
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -29,15 +31,25 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 public final class EdgeOverrideRailGraph
     implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
 
+  /**
+   * 最近一份覆盖表里可能封锁的记录（手动封锁或带 TTL 的）。
+   *
+   * <p>运行时每次解析调度图都新建一个视图，覆盖表却是同一份快照；按引用记住上一份，免得每个视图都把几百条限速覆盖扫一遍。
+   */
+  private static volatile BlockCandidates lastBlockCandidates;
+
   private final RailGraph delegate;
   private final Map<EdgeId, RailEdgeOverrideRecord> overrides;
   private final Instant now;
   private volatile Set<EdgeId> overrideBlockedEdges;
 
+  /**
+   * @param overrides 边覆盖；按构造时的内容生效（不可变的表直接沿用，其余复制一份）
+   */
   public EdgeOverrideRailGraph(
       RailGraph delegate, Map<EdgeId, RailEdgeOverrideRecord> overrides, Instant now) {
     this.delegate = Objects.requireNonNull(delegate, "delegate");
-    this.overrides = Objects.requireNonNull(overrides, "overrides");
+    this.overrides = Map.copyOf(Objects.requireNonNull(overrides, "overrides"));
     this.now = Objects.requireNonNull(now, "now");
   }
 
@@ -113,9 +125,8 @@ public final class EdgeOverrideRailGraph
     Set<EdgeId> blocked = overrideBlockedEdges;
     if (blocked == null) {
       Set<EdgeId> collected = new HashSet<>();
-      for (Map.Entry<EdgeId, RailEdgeOverrideRecord> entry : overrides.entrySet()) {
-        RailEdgeOverrideRecord override = entry.getValue();
-        if (entry.getKey() != null && override != null && override.isBlockedEffective(now)) {
+      for (Map.Entry<EdgeId, RailEdgeOverrideRecord> entry : blockCandidates(overrides)) {
+        if (entry.getValue().isBlockedEffective(now)) {
           collected.add(entry.getKey());
         }
       }
@@ -123,6 +134,24 @@ public final class EdgeOverrideRailGraph
       overrideBlockedEdges = blocked;
     }
     return blocked;
+  }
+
+  private static List<Map.Entry<EdgeId, RailEdgeOverrideRecord>> blockCandidates(
+      Map<EdgeId, RailEdgeOverrideRecord> overrides) {
+    BlockCandidates last = lastBlockCandidates;
+    if (last != null && last.source() == overrides) {
+      return last.entries();
+    }
+    List<Map.Entry<EdgeId, RailEdgeOverrideRecord>> entries = new ArrayList<>();
+    for (Map.Entry<EdgeId, RailEdgeOverrideRecord> entry : overrides.entrySet()) {
+      RailEdgeOverrideRecord override = entry.getValue();
+      if (override.blockedManual() || override.blockedUntil().isPresent()) {
+        entries.add(entry);
+      }
+    }
+    List<Map.Entry<EdgeId, RailEdgeOverrideRecord>> frozen = List.copyOf(entries);
+    lastBlockCandidates = new BlockCandidates(overrides, frozen);
+    return frozen;
   }
 
   /** 透传冲突组查询（若底层支持）。 */
@@ -160,4 +189,8 @@ public final class EdgeOverrideRailGraph
     }
     return RailInterlockingState.unavailable();
   }
+
+  private record BlockCandidates(
+      Map<EdgeId, RailEdgeOverrideRecord> source,
+      List<Map.Entry<EdgeId, RailEdgeOverrideRecord>> entries) {}
 }

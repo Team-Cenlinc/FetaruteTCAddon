@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.query;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -74,6 +75,20 @@ final class RailGraphPathFinderMemoTest {
     assertEquals(VIA_C, shortest(new EdgeOverrideRailGraph(graph, overrides, NOW)).nodes());
     assertEquals(
         VIA_B, shortest(new EdgeOverrideRailGraph(graph, overrides, NOW.plusSeconds(61))).nodes());
+  }
+
+  @Test
+  void viewKeepsOverridesAsOfConstruction() {
+    SimpleRailGraph graph = diamond(Set.of());
+    EdgeId bd = EdgeId.undirected(B, D);
+    Map<EdgeId, RailEdgeOverrideRecord> live = new HashMap<>();
+    EdgeOverrideRailGraph before = new EdgeOverrideRailGraph(graph, live, NOW);
+
+    live.put(bd, block(bd, Optional.empty(), true));
+
+    assertFalse(before.isBlocked(bd));
+    assertEquals(VIA_B, shortest(before).nodes());
+    assertEquals(VIA_C, shortest(new EdgeOverrideRailGraph(graph, live, NOW)).nodes());
   }
 
   @Test
