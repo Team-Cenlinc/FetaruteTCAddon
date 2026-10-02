@@ -90,6 +90,41 @@ class TimetableDispatchBindingTest {
     assertEquals(Optional.empty(), service.nextDepartureOf("train-A"));
   }
 
+  /**
+   * 表从半路生效（开服、刚发布）时，车按时间绑到的那一班之后常有几班早已过了时刻：过了发车容差、票也不在了的那一班不会再出票，
+   * 车接的是后面那一班，站牌上的下一趟也要跳过它；票还在等这辆车时照旧是那一班（晚点就晚发）。
+   */
+  @Test
+  void aTripThatWillNotRunIsSkipped() {
+    start();
+    service.bindDuty("train-A", duty, "ticket-operation");
+    service.bindDispatchedTrip("train-A", intent(0), Optional.of(trip(0)));
+    clock.set(Instant.parse("2026-03-02T08:15:01Z"));
+
+    assertEquals(
+        "R1-003",
+        service.nextDepartureOf("train-A").orElseThrow().trip().tripCode(),
+        "08:10 那一班过了 5 分钟容差、没有票：接 08:20 那一班");
+
+    service.setPendingTicketProbe(intent(1)::equals);
+    assertEquals(
+        "R1-002",
+        service.nextDepartureOf("train-A").orElseThrow().trip().tripCode(),
+        "08:10 那一班的票还在等这辆车：照旧是它");
+  }
+
+  /** 已取消的班次不会开：下一趟跳过它，取后面那一班。 */
+  @Test
+  void aCancelledTripIsSkipped() {
+    start();
+    service.bindDuty("train-A", duty, "ticket-operation");
+    service.bindDispatchedTrip("train-A", intent(0), Optional.of(trip(0)));
+
+    service.cancelUndispatched(trip(1), "ticket-abandoned");
+
+    assertEquals("R1-003", service.nextDepartureOf("train-A").orElseThrow().trip().tripCode());
+  }
+
   /** 续班票等的是本交路的车；车接下那一班以后，那一班就不再等它。 */
   @Test
   void aContinuationTicketAwaitsTheDutyVehicleUntilItTakesTheTrip() {

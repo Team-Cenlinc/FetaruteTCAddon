@@ -1563,6 +1563,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
             this, layoverRegistry, spawnTicketAssigner, configManager, loggerManager::debug);
     // 回收与表定回库票同一个判据：交路还有班次要跑的车不收。
     reclaimManager.setReturnGate(timetableService == null ? null : timetableService::allowsReturn);
+    // 停在自己交路带客回库班起点站的车等回库班；回收时先走它交路的回库线路，派走后结清交路（回库票不再空等它）。
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService returns =
+        timetableService;
+    reclaimManager.setOwnReturnWait(
+        returns == null
+            ? null
+            : (trainName, location) ->
+                location != null && returns.awaitsOwnReturnAt(trainName, location.value()));
+    reclaimManager.setPreferredReturnRoute(returns == null ? null : returns::returnRouteOf);
+    reclaimManager.setReclaimListener(returns == null ? null : returns::reclaimed);
     // 停在正线折返点的车：按表交路上接不上下一班就立即回收，不挡着正线等到末班过期。
     reclaimManager.setMainlineReturnGate(
         timetableService == null ? null : timetableService::allowsReturnFromMainlineTurnback);
