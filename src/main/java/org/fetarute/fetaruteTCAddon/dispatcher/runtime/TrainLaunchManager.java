@@ -1,6 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.IdentityHashMap;
+import java.util.Iterator;
+import java.util.Map;
 import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -43,7 +46,23 @@ public final class TrainLaunchManager {
   /** 逐 tick 斜坡在未被刷新时至少保留的 tick 数；实际取三个调度周期与它的较大者。 */
   private static final int MIN_SPEED_RAMP_TTL_TICKS = 40;
 
+  /** 多久没再下发命令的速度命令参照视为不再受控（列车已销毁或不归调度管），清理时丢掉。 */
+  private static final long SPEED_COMMAND_RETENTION_MS = 5L * 60L * 1000L;
+
+  /** 每记多少次速度命令顺带清理一次过期参照。 */
+  private static final int SPEED_COMMAND_PRUNE_INTERVAL = 256;
+
   private final SpeedLimitRamp speedLimitRamp;
+
+  /**
+   * 每列车上一次下发的速度命令：限幅与迟滞的参照。
+   *
+   * <p>按列车属性对象的身份记——{@link TrainProperties} 继承集合、按车厢内容算 hash，不能放进普通哈希表。原先写在 tag 里，
+   * 时间戳每次控车都变，TrainCarts 每写一次 tag 都要逐节车厢同步配置列表。仅在服务器主线程读写。
+   */
+  private final Map<TrainProperties, SpeedCommand> speedCommands = new IdentityHashMap<>();
+
+  private int speedCommandsSincePrune;
 
   /** 使用 Bukkit 调度器驱动的逐 tick 限速斜坡。 */
   public TrainLaunchManager() {
@@ -246,7 +265,7 @@ public final class TrainLaunchManager {
     boolean tractionIssued = allowLaunch || resumeTraction;
     double adjustedBps =
         applySpeedCommandRateLimit(
-            train, properties, heldBps, config, runtimeSettings, tractionIssued, tractionIssued);
+            properties, heldBps, config, runtimeSettings, tractionIssued, tractionIssued);
     double targetBpt = toBlocksPerTick(adjustedBps);
     properties.setSpeedLimit(targetBpt);
     if (speedEnvelope == null) {
@@ -577,7 +596,6 @@ public final class TrainLaunchManager {
    * </ul>
    */
   private double applySpeedCommandRateLimit(
-      RuntimeTrainHandle train,
       TrainProperties properties,
       double requestedBps,
       TrainConfig config,
@@ -589,22 +607,18 @@ public final class TrainLaunchManager {
     }
     double requested = Math.max(0.0, requestedBps);
     long nowMs = System.currentTimeMillis();
-    long lastAtMs = TrainTagHelper.readLongTag(properties, TAG_LAST_SPEED_CMD_AT).orElse(nowMs);
-    double deltaSeconds = Math.max(0.05, (nowMs - lastAtMs) / 1000.0);
-    java.util.Optional<Double> lastCommandOpt =
-        TrainTagHelper.readDoubleTag(properties, TAG_LAST_SPEED_CMD_BPS).filter(Double::isFinite);
+    SpeedCommand last = lastSpeedCommand(properties, nowMs);
 
     // 首次下发不做限幅，避免从 0 速起步被过度限制。
-    if (lastCommandOpt.isEmpty()) {
-      TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_BPS, Double.toString(requested));
-      TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_AT, Long.toString(nowMs));
+    if (last == null) {
+      rememberSpeedCommand(properties, requested, nowMs);
       return requested;
     }
 
+    double deltaSeconds = Math.max(0.05, (nowMs - last.atMs()) / 1000.0);
     double accelLimitPerSecond =
         Math.max(0.0, config.accelBps2() * runtimeSettings.speedCommandAccelFactor());
-    double referenceSpeed =
-        lastCommandOpt.orElseGet(() -> resolveCurrentSpeedBps(train, requested));
+    double referenceSpeed = last.bps();
 
     double limited = requested;
     boolean lowering = requested < referenceSpeed;
@@ -627,31 +641,56 @@ public final class TrainLaunchManager {
     }
     limited = Math.max(0.0, limited);
 
-    TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_BPS, Double.toString(limited));
-    TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_AT, Long.toString(nowMs));
+    rememberSpeedCommand(properties, limited, nowMs);
     return limited;
+  }
+
+  /**
+   * 上一次下发的速度命令；没有时为 {@code null}。
+   *
+   * <p>内存里没有时读一次旧版本写在 tag 里的参照：升级前就在跑的列车还带着它，接着按它限幅才不会在换版本后第一次控车时跳变。
+   */
+  private SpeedCommand lastSpeedCommand(TrainProperties properties, long nowMs) {
+    SpeedCommand remembered = speedCommands.get(properties);
+    if (remembered != null) {
+      return remembered;
+    }
+    java.util.Optional<Double> legacyBps =
+        TrainTagHelper.readDoubleTag(properties, TAG_LAST_SPEED_CMD_BPS).filter(Double::isFinite);
+    if (legacyBps.isEmpty()) {
+      return null;
+    }
+    long legacyAtMs = TrainTagHelper.readLongTag(properties, TAG_LAST_SPEED_CMD_AT).orElse(nowMs);
+    return new SpeedCommand(legacyBps.get(), legacyAtMs);
   }
 
   private void rememberSpeedCommand(TrainProperties properties, double speedBps) {
     if (properties == null) {
       return;
     }
-    double safeSpeed = Math.max(0.0, speedBps);
-    long nowMs = System.currentTimeMillis();
-    TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_BPS, Double.toString(safeSpeed));
-    TrainTagHelper.writeTag(properties, TAG_LAST_SPEED_CMD_AT, Long.toString(nowMs));
+    rememberSpeedCommand(properties, speedBps, System.currentTimeMillis());
   }
 
-  private double resolveCurrentSpeedBps(RuntimeTrainHandle train, double fallbackBps) {
-    if (train == null) {
-      return fallbackBps;
+  private void rememberSpeedCommand(TrainProperties properties, double speedBps, long nowMs) {
+    speedCommands.put(properties, new SpeedCommand(Math.max(0.0, speedBps), nowMs));
+    if (++speedCommandsSincePrune >= SPEED_COMMAND_PRUNE_INTERVAL) {
+      speedCommandsSincePrune = 0;
+      Iterator<SpeedCommand> commands = speedCommands.values().iterator();
+      while (commands.hasNext()) {
+        if (nowMs - commands.next().atMs() > SPEED_COMMAND_RETENTION_MS) {
+          commands.remove();
+        }
+      }
     }
-    double current = train.currentSpeedBlocksPerTick() * TICKS_PER_SECOND;
-    if (!Double.isFinite(current) || current < 0.0) {
-      return fallbackBps;
-    }
-    return current;
   }
+
+  /**
+   * 上一次下发的速度命令。
+   *
+   * @param bps 命令速度（格/秒）
+   * @param atMs 下发时刻（毫秒时间戳）
+   */
+  private record SpeedCommand(double bps, long atMs) {}
 
   /** blocks/s -> blocks/tick，非法输入返回 0。 */
   private static double toBlocksPerTick(double blocksPerSecond) {

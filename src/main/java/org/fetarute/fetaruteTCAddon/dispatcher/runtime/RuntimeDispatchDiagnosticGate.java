@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 import java.util.function.LongSupplier;
+import org.fetarute.fetaruteTCAddon.utils.DiagnosticSink;
 
 /**
  * Smart Dispatcher 运行时诊断的有界重复抑制器。
@@ -23,7 +24,7 @@ import java.util.function.LongSupplier;
  *
  * <p>缓存采用固定容量的访问顺序 LRU，避免高基数的列车或资源标识无限占用内存。该类不参与授权、占用或速度控制， 因而不能作为任何安全判定的输入。
  */
-public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
+public final class RuntimeDispatchDiagnosticGate implements DiagnosticSink {
 
   private static final Duration DEFAULT_REPEAT_WINDOW = Duration.ofSeconds(5);
   private static final int DEFAULT_MAX_SIGNATURES = 4096;
@@ -136,9 +137,15 @@ public final class RuntimeDispatchDiagnosticGate implements Consumer<String> {
     this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
   }
 
+  /** 实际接收端此刻是否会输出；关着时 {@link #accept} 直接返回，不算签名、不计预算。 */
+  @Override
+  public boolean enabled() {
+    return DiagnosticSink.enabled(output);
+  }
+
   @Override
   public void accept(String message) {
-    if (message == null || message.isBlank()) {
+    if (message == null || message.isBlank() || !enabled()) {
       return;
     }
     if (isUnboundedAudit(message)) {

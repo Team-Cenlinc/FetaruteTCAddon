@@ -198,7 +198,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 排查期可临时调高；默认 120 条/分钟在拥堵时会丢掉大部分诊断，导致"没 grep 到"无法解读。
     this.runtimeDispatchDiagnosticGate =
         new RuntimeDispatchDiagnosticGate(
-            loggerManager::debug, getConfig().getInt("debug.observation-budget-per-minute", 120));
+            loggerManager.debugSink(),
+            getConfig().getInt("debug.observation-budget-per-minute", 120));
 
     this.localeManager = new LocaleManager(this, configManager.current().locale(), loggerManager);
     this.localeManager.reload();
@@ -661,7 +662,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (runtimeDispatchDiagnosticGate != null) {
       return runtimeDispatchDiagnosticGate;
     }
-    return loggerManager == null ? message -> {} : loggerManager::debug;
+    return loggerManager == null ? message -> {} : loggerManager.debugSink();
   }
 
   private void initRouteDefinitionCache() {
