@@ -54,6 +54,13 @@ class TimetableBuildReportSenderTest {
             .startsWith("快车 9 班在共线段被慢车拖住，共 500 秒。带 --rapid-stagger"));
   }
 
+  /** 可点命令里几条线要加引号：客户端不认不带引号的逗号，整条命令标红发不出去。 */
+  @Test
+  void severalLinesAreQuotedInClickableCommands() {
+    assertEquals("\"MT,WS\"", TimetableBuildReportSender.lineCommandArgument("MT,WS"));
+    assertEquals("MT", TimetableBuildReportSender.lineCommandArgument("MT"));
+  }
+
   @Test
   void theCatchUpTotalSurvivesAddingNotes() {
     TimetableBuildResult result =

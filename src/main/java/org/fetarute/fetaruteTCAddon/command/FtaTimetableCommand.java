@@ -932,7 +932,9 @@ public final class FtaTimetableCommand {
     return current.getMessage() == null ? error.getMessage() : current.getMessage();
   }
 
-  /** 几条线在命令里的写法：逗号分隔，不加引号（line code 里没有空格）。 */
+  /**
+   * 几条线的写法：逗号分隔、不加引号，用于提示文字；填进可点命令时由 {@link TimetableBuildReportSender#lineCommandArgument} 加引号。
+   */
   private static String lineArgumentOf(List<ResolvedLine> lines) {
     List<String> codes = new ArrayList<>();
     for (ResolvedLine line : lines) {

@@ -330,7 +330,13 @@ final class TimetableBuildReportSender {
     ResolvedLine first = lines.get(0);
     String code = saved.get(0).code();
     String target =
-        first.company().code() + " " + first.operator().code() + " " + lineArg + " " + code;
+        first.company().code()
+            + " "
+            + first.operator().code()
+            + " "
+            + lineCommandArgument(lineArg)
+            + " "
+            + code;
     sender.sendMessage(
         Component.text(
                 (lines.size() > 1 ? "已保存草稿（" + lines.size() + " 张，互为基线）：" : "已保存草稿：")
@@ -446,6 +452,11 @@ final class TimetableBuildReportSender {
             how));
   }
 
+  /** 线路参数在可点命令里的写法：几条线时加双引号，客户端不认不带引号的逗号，整条命令会标红发不出去。 */
+  static String lineCommandArgument(String lineArg) {
+    return lineArg.contains(",") ? CommandUx.quoteCommandArgument(lineArg) : lineArg;
+  }
+
   /** 按放宽后的各组间隔重建的命令：显式给出各组 --group-headway，其余只带与默认值不同的参数。 */
   private static String rebuildCommand(
       ResolvedLine first,
@@ -459,7 +470,7 @@ final class TimetableBuildReportSender {
             .append(' ')
             .append(first.operator().code())
             .append(' ')
-            .append(lineArg)
+            .append(lineCommandArgument(lineArg))
             .append(' ')
             .append(timetable.code());
     for (TimetableBuildResult.GroupInterval group : result.groupIntervals()) {
