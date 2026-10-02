@@ -426,6 +426,88 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
+   * 闲置回收是不是该等这辆车自己交路的带客回库班：回库班还没开、也没过发车容差，车又正停在它的起点站。
+   *
+   * <p>终点站常有开往不同车库的几条回库线路，回收若抢在回库班前面把车带走、又挑了别的线路，车就开去了别的车库，
+   * 站牌照交路写的终点也成了错的。等的期间回库班的票会把车带走；过了容差还没开成、或车不在它的起点站（票接不到它）时不等， 照常回收（{@link #returnRouteOf}
+   * 让回收优先走它这条线路）。
+   *
+   * <p>与 {@link #nextDepartureOf} 共用 {@link #returnLegAhead}，但不认“票还在等”：回收的等待必须有时刻上的尽头。
+   *
+   * @param trainName 列车名
+   * @param locationNodeId 车停的节点
+   * @return 应当等回库班时为 true
+   */
+  public boolean awaitsOwnReturnAt(String trainName, String locationNodeId) {
+    Settings current = settings;
+    if (!current.enabled() || !current.spawnEnabled()) {
+      return false;
+    }
+    String key = keyOf(trainName);
+    String here = TimetableConflictChecker.groupOf(locationNodeId);
+    if (key == null || here.isEmpty() || ledger.isRetired(key)) {
+      return false;
+    }
+    return ledger
+        .progressOf(key)
+        .flatMap(progress -> returnLegAhead(key, progress, current, false))
+        .flatMap(due -> due.timetable().routePlan(due.trip().routeId()))
+        .filter(
+            plan -> here.equalsIgnoreCase(TimetableConflictChecker.groupOf(plan.originNodeId())))
+        .isPresent();
+  }
+
+  /**
+   * 闲置回收把这辆车派走了。走的是它交路自己的回库线路时，就算跑了带客回库班（绑上那一班，站牌不再列它、回库票不再等它）； 走的是别的线路时，车离开了交路（解绑，回库票同样不再等它）。
+   *
+   * @param trainName 派走前的列车名
+   * @param routeId 回收走的线路
+   */
+  public void reclaimed(String trainName, UUID routeId) {
+    if (!settings.enabled() || routeId == null) {
+      return;
+    }
+    Optional<DutyKey> bound = dutyBindingOf(trainName);
+    if (bound.isEmpty()) {
+      return;
+    }
+    if (returnRouteOf(trainName).filter(routeId::equals).isPresent()) {
+      DutyKey key = bound.get();
+      bindDispatchedTrip(
+          trainName,
+          new TicketIntent(
+              key.timetableId(), key.dutyId(), key.serviceDate(), RouteOperationType.RETURN, 0),
+          Optional.empty());
+      debugLogger.accept(
+          "TIMETABLE_RECLAIM_AS_RETURN_LEG train=" + trainName + " duty=" + key.describe());
+      return;
+    }
+    // 只解交路，不动车次绑定：车跑完的那一趟照旧算跑完，不按“半路离开”给剩下的站登记取消。
+    String key = keyOf(trainName);
+    handOverDuty(key, trainName, "reclaimed");
+    ledger.release(key, trainName, "reclaimed");
+  }
+
+  /**
+   * 这辆车所绑交路的回库线路：回收要带走它时先试这一条，回到按表该回的车库。
+   *
+   * @param trainName 列车名
+   * @return 回库线路；没有绑交路、或交路没有回库线路时为空
+   */
+  public Optional<UUID> returnRouteOf(String trainName) {
+    if (!settings.enabled()) {
+      return Optional.empty();
+    }
+    return ledger
+        .bindingOf(keyOf(trainName))
+        .flatMap(
+            key ->
+                Optional.ofNullable(snapshot.byId().get(key.timetableId()))
+                    .flatMap(timetable -> timetable.duty(key.dutyId())))
+        .flatMap(VehicleDuty::returnRouteId);
+  }
+
+  /**
    * 停在正线折返点（区间路径点，不是车站也不是车库）的车能不能立即回收。
    *
    * <p>车停在正线上会挡同一股道的后车，不能像在站台上那样等闲置上限或交路末班过期。只管由时刻表出票的交路（{@code routeId}
@@ -785,8 +867,16 @@ public final class TimetableService implements ScheduledDeparturePlan {
       // 出库票派出后、首班绑定前还没有进度：车在出库走行上，同样是在路上。
       return true;
     }
-    return progress.get().dutyId().equals(intent.dutyId())
-        && (returnLeg || progress.get().assignedTrips() <= intent.tripIndex());
+    if (!progress.get().dutyId().equals(intent.dutyId())) {
+      return false;
+    }
+    if (!returnLeg) {
+      return progress.get().assignedTrips() <= intent.tripIndex();
+    }
+    // 车已经跑上了回库班（例如被回收沿交路自己的回库线路派走）：这张回库票不再等它。
+    return returnTripOf(intent.key())
+        .filter(due -> due.trip().id().equals(progress.get().lastTripId()))
+        .isEmpty();
   }
 
   /**
@@ -1095,15 +1185,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 跑完当前这一班后，这辆车接下来要跑的那一趟：交路里的下一班；交路跑完了就是带客回库班。
+   * 跑完当前这一班后，这辆车接下来真会开的那一趟：交路里进度之后第一个还开得成的班次；剩下的都开不成时是带客回库班。
    *
-   * <p>只读：不建立绑定、不推进进度。换车、退役、解绑、重启后账本为空时自然为空；那一趟已取消时也为空。
+   * <p>“开得成”与派车同一口径：已取消的不算；过了发车容差、它的票也不在了的不算——那一班不会再出票，车接的是后面那一班的票。
+   * 开服或刚发布时表从半路开始生效，车按时间绑到的那一班之后常有几班早已过了时刻，不跳过它们，站牌就会把车的下一趟写成一班不会开的车。
+   *
+   * <p>只读：不建立绑定、不推进进度。换车、退役、解绑、重启后账本为空时自然为空。
    *
    * @param trainName 列车名
    * @return 下一趟（日期为起点发车所在的日历日）
    */
   public Optional<DueTrip> nextDepartureOf(String trainName) {
-    if (!settings.enabled()) {
+    Settings current = settings;
+    if (!current.enabled()) {
       return Optional.empty();
     }
     String key = keyOf(trainName);
@@ -1114,21 +1208,52 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (progress.isEmpty()) {
       return Optional.empty();
     }
-    return boundDuty(key, progress.get())
-        .flatMap(
-            duty -> {
-              int next = progress.get().assignedTrips();
-              if (next < duty.tripIds().size()) {
-                return duty.trip(next).map(trip -> dueTrip(duty.timetable(), trip, duty.key()));
-              }
-              return returnTripOf(duty.key())
-                  .filter(due -> !due.trip().id().equals(progress.get().lastTripId()));
-            })
+    Optional<BoundDuty> bound = boundDuty(key, progress.get());
+    if (bound.isEmpty()) {
+      return Optional.empty();
+    }
+    BoundDuty duty = bound.get();
+    for (int index = progress.get().assignedTrips(); index < duty.tripIds().size(); index++) {
+      int at = index;
+      Optional<DueTrip> due =
+          duty.trip(at)
+              .filter(trip -> ticketWaiting(duty, at) || !overdue(duty, trip, current))
+              .map(trip -> dueTrip(duty.timetable(), trip, duty.key()))
+              .filter(this::notCancelled);
+      if (due.isPresent()) {
+        return due;
+      }
+    }
+    return returnLegAhead(key, progress.get(), current, true);
+  }
+
+  /**
+   * 交路的带客回库班还开得成：还没跑过、没取消、没过发车容差。
+   *
+   * @param ticketCounts 回库票还在等车时也算开得成（晚点就晚发）；站牌用。回收的等待要有时刻上的尽头，不算
+   */
+  private Optional<DueTrip> returnLegAhead(
+      String key, DutyProgress progress, Settings current, boolean ticketCounts) {
+    Optional<DutyKey> dutyKey = boundDuty(key, progress).map(BoundDuty::key);
+    return dutyKey
+        .flatMap(this::returnTripOf)
+        .filter(due -> !due.trip().id().equals(progress.lastTripId()))
         .filter(
             due ->
-                cancellations
-                    .find(due.timetable().id(), due.trip().id(), due.serviceDate())
-                    .isEmpty());
+                (ticketCounts && returnTicketWaiting(dutyKey.get()))
+                    || due.departure().plus(current.assignTolerance()).isAfter(clock.get()))
+        .filter(this::notCancelled);
+  }
+
+  private boolean notCancelled(DueTrip due) {
+    return cancellations.find(due.timetable().id(), due.trip().id(), due.serviceDate()).isEmpty();
+  }
+
+  /** 出票侧还有交路的回库票在等车。 */
+  private boolean returnTicketWaiting(DutyKey key) {
+    return pendingTicket.test(
+        new TicketIntent(
+            key.timetableId(), key.dutyId(), key.serviceDate(), RouteOperationType.RETURN, 0));
   }
 
   /**
