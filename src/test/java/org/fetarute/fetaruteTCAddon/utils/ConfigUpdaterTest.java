@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.utils;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -9,7 +10,9 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Objects;
+import java.util.Set;
 import java.util.logging.Logger;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
@@ -75,6 +78,83 @@ class ConfigUpdaterTest {
     assertTrue(merged.contains("speed-curve-enabled: true"));
     assertTrue(merged.contains("# B"));
     assertTrue(merged.contains("speed-curve-type: \"physics\""));
+  }
+
+  /**
+   * 用户文件以某个段结尾时，补进该段的新键与追加到文件末尾的顶层键落在同一位置：新键要先接在段里，顶层键放在其后。
+   *
+   * <p>顶层是普通键时，顶层键先写会让段里的新键变成非法 YAML；顶层是缺失的整段时，新键会被并进那一段。
+   */
+  @Test
+  void keysOfTheLastSectionStayInItWhenTopLevelKeysAreAppended() throws Exception {
+    String existing = String.join("\n", "config-version: 1", "render:", "  main: 12", "");
+    String scalarFirst =
+        String.join(
+            "\n",
+            "config-version: 2",
+            "enabled: true",
+            "render:",
+            "  main: 20",
+            "  # 新键",
+            "  notice: 5",
+            "");
+    String sectionFirst =
+        String.join(
+            "\n",
+            "config-version: 2",
+            "# 上限",
+            "limits:",
+            "  max-screens: 200",
+            "render:",
+            "  main: 20",
+            "  notice: 5",
+            "");
+
+    YamlConfiguration afterScalar = parse(runUpdate(scalarFirst, existing));
+    YamlConfiguration afterSection = parse(runUpdate(sectionFirst, existing));
+
+    assertEquals(12, afterScalar.getInt("render.main"), "已有的值保留");
+    assertEquals(5, afterScalar.getInt("render.notice"));
+    assertTrue(afterScalar.getBoolean("enabled"));
+    assertEquals(5, afterSection.getInt("render.notice"));
+    assertEquals(200, afterSection.getInt("limits.max-screens"));
+    assertFalse(afterSection.contains("limits.notice"), "新键不能并进前面补上的整段");
+  }
+
+  /** 嵌套段在文件末尾时同理：补进最内层段的键先写，顶层的键在其后（与模板里谁在前无关）。 */
+  @Test
+  void keysOfANestedSectionAtTheEndStayInIt() throws Exception {
+    String template =
+        String.join(
+            "\n",
+            "config-version: 2",
+            "extra: 1",
+            "broadcast:",
+            "  triggers:",
+            "    arriving: true",
+            "    passing: true",
+            "  range-blocks: 32",
+            "");
+    String existing =
+        String.join(
+            "\n", "config-version: 1", "broadcast:", "  triggers:", "    arriving: false", "");
+
+    YamlConfiguration merged = parse(runUpdate(template, existing));
+
+    assertFalse(merged.getBoolean("broadcast.triggers.arriving"), "已有的值保留");
+    assertTrue(merged.getBoolean("broadcast.triggers.passing"));
+    assertEquals(32, merged.getInt("broadcast.range-blocks"));
+    assertEquals(1, merged.getInt("extra"));
+    assertEquals(
+        Set.of("arriving", "passing"),
+        Objects.requireNonNull(merged.getConfigurationSection("broadcast.triggers"), "触发段应在")
+            .getKeys(false));
+  }
+
+  private static YamlConfiguration parse(String text) throws Exception {
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString(text);
+    return yaml;
   }
 
   private String runUpdate(String template, String existing) throws IOException {
