@@ -419,7 +419,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
               storageManager.provider(),
               api.get());
       if (previous != null) {
-        service.announcer().continueFrom(previous.announcer());
+        service.continueFrom(previous);
       }
       service.start();
       pidsService = service;
@@ -1162,6 +1162,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
       etaService.attachEffectiveWaypoints(
           runtimeDispatchService::resolveEffectiveWaypointsForEvent);
       etaService.attachPlacedStops(runtimeDispatchService::hasEffectiveNode);
+      // 选台前站牌写计划站台（时刻表排定）或下一个停车站的暂定站台，与选台偏好同一份。
+      etaService.attachPlannedPlatforms(runtimeDispatchService.stationStops()::displayPlatform);
     }
     // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
     etaService.attachStationPresence(this::getStationPresence);
@@ -1305,6 +1307,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       timetableService =
           new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService(
               java.time.Instant::now, loggerManager::debug);
+      timetableService.setWarningLogger(getLogger()::warning);
     }
     ConfigManager.TimetableSettings settings = configManager.current().timetableSettings();
     timetableService.applySettings(

@@ -78,6 +78,40 @@ class PidsAnnouncementTest {
     kinds.forEach(kind -> assertEquals(PidsAnnouncement.Channel.CHAT, kind.channel(), kind.name()));
   }
 
+  /** 站台变更走聊天，带原站台；行上没有变更、或通过车不播。 */
+  @Test
+  void platformChangesComeFromTheRow() {
+    PidsRow base = trip(PidsRow.Status.EN_ROUTE, "train-1", "SURC:MT:R1", 3, "1");
+    PidsRow moved =
+        new PidsRow(
+            base.status(),
+            base.lineName(),
+            base.routeId(),
+            base.destination(),
+            base.destinationId(),
+            base.platform(),
+            base.expectedAt(),
+            base.delaySeconds(),
+            base.stopSequence(),
+            false,
+            false,
+            false,
+            base.trainName(),
+            false,
+            List.of(),
+            List.of(),
+            Optional.of("2"));
+
+    List<PidsAnnouncement> active =
+        PidsAnnouncement.active(
+            new PidsSnapshot(TPC, NOW, List.of(moved, base)), NOW, BroadcastSettings.DEFAULT);
+
+    List<PidsAnnouncement> changes =
+        active.stream().filter(a -> a.kind() == PidsAnnouncement.Kind.PLATFORM_CHANGED).toList();
+    assertEquals(1, changes.size());
+    assertEquals(Optional.of("2"), changes.get(0).previousPlatform());
+  }
+
   private static PidsRow trip(
       PidsRow.Status status, String train, String routeId, int stopSequence, String platform) {
     return new PidsRow(
@@ -161,7 +195,7 @@ class PidsAnnouncementTest {
   void disabledTriggersAreSkipped() {
     BroadcastSettings quiet =
         new BroadcastSettings(
-            true, 32, 600, 30, new BroadcastTriggers(false, true, false, true), true, true);
+            true, 32, 600, 30, new BroadcastTriggers(false, true, false, true, true), true, true);
 
     assertEquals(
         List.of(), kinds(quiet, running(PidsRow.Status.ARRIVING, "0366", 20), cancelled(60)));

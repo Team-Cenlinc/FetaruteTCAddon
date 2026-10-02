@@ -91,6 +91,11 @@ final class DynamicDestinationResolver {
             currentNode,
             forwardDirection == null ? Optional.empty() : forwardDirection);
     if (!allocation.isSelected()) {
+      if (!allocation.isBlocked()) {
+        // 还没进选台窗口：给下一个停车站现定或沿用暂定站台，站牌与选台偏好都读它。
+        allocator.refreshTentative(
+            trainName, route, currentIndex, graphOpt.get(), now != null ? now : Instant.now());
+      }
       return allocation.isBlocked()
           ? DynamicResolution.blocked(allocation.reason(), allocation.blockedStopIndex())
           : DynamicResolution.notApplicable(allocation.reason());

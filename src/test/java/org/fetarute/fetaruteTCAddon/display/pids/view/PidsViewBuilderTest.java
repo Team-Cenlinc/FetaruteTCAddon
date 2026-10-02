@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.List;
@@ -11,6 +12,8 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSnapshot;
@@ -26,6 +29,8 @@ class PidsViewBuilderTest {
 
   private static final Instant NOW = Instant.parse("2026-09-30T13:40:00Z");
   private static final PidsStationKey STATION = new PidsStationKey("SURC", "NTA");
+  private static final UUID WORLD =
+      UUID.nameUUIDFromBytes("world".getBytes(StandardCharsets.UTF_8));
   private static final int WS = 0x70DEEE;
   private static final int MT = 0xD920D9;
 
@@ -298,6 +303,125 @@ class PidsViewBuilderTest {
     assertTrue(onThree.rows().isEmpty(), "候选里没有本站台：不列");
   }
 
+  /** 空位页：首行是可以上车的运行中列车时，各节车厢按在座比例分宽松、较挤、拥挤（一半、八成为界），并给出空位数；色牌与终点同主页首行。 */
+  @Test
+  void theFirstTrainHasAVacancyPage() {
+    PidsRow first =
+        loaded(
+            PidsRow.Status.ARRIVING,
+            false,
+            List.of(new PidsRow.Car(4, 0), new PidsRow.Car(4, 2), new PidsRow.Car(5, 4)));
+
+    PidsVacancyView vacancy =
+        builder
+            .vacancy(request(first, row(PidsRow.Status.EN_ROUTE, 300, OptionalLong.empty())))
+            .orElseThrow();
+
+    assertEquals("WS", vacancy.badge().code());
+    assertEquals(
+        List.of(
+            new PidsVacancyView.Car(PidsVacancyView.Level.MANY, 4),
+            new PidsVacancyView.Car(PidsVacancyView.Level.SOME, 2),
+            new PidsVacancyView.Car(PidsVacancyView.Level.FEW, 1)),
+        vacancy.cars());
+    assertEquals("请优先考虑较空的车厢", vacancy.labels().advice().primary());
+    assertTrue(vacancy.front().isEmpty(), "不知道屏幕朝向：车头画在左侧");
+    assertEquals(ArrivalMode.HIGHLIGHT, vacancy.arrival().mode(), "到站与主页首行相同：进站");
+  }
+
+  /** 车头朝屏幕哪一侧：站台节点（NTA:1，原点）到下一个途经节点（BBB:1，东边）向东，屏幕朝南时“向右”是东——车头在右；屏幕朝北时在左； 屏幕朝东（与轨道垂直）说不清。 */
+  @Test
+  void theFrontFollowsTheScreen() {
+    PidsRow first =
+        loaded(
+            PidsRow.Status.ARRIVING, false, List.of(new PidsRow.Car(4, 0), new PidsRow.Car(4, 0)));
+
+    assertEquals(
+        Optional.of(PidsVacancyView.Front.RIGHT),
+        builder
+            .vacancy(placed(new PidsViewBuilder.Placement(WORLD, 1, 0), first))
+            .flatMap(PidsVacancyView::front));
+    assertEquals(
+        Optional.of(PidsVacancyView.Front.LEFT),
+        builder
+            .vacancy(placed(new PidsViewBuilder.Placement(WORLD, -1, 0), first))
+            .flatMap(PidsVacancyView::front));
+    assertEquals(
+        Optional.empty(),
+        builder
+            .vacancy(placed(new PidsViewBuilder.Placement(WORLD, 0, -1), first))
+            .flatMap(PidsVacancyView::front),
+        "屏幕与轨道垂直：说不清车头朝哪一侧");
+  }
+
+  /** 首行本站终到、通过、还没开出或读不到载客：没有空位页，轮播照常放宣传页。 */
+  @Test
+  void vacancyIsOnlyShownForATrainYouCanBoard() {
+    List<PidsRow.Car> cars = List.of(new PidsRow.Car(4, 1));
+
+    assertTrue(
+        builder.vacancy(request(loaded(PidsRow.Status.EN_ROUTE, true, cars))).isEmpty(), "本站终到");
+    assertTrue(
+        builder.vacancy(request(loaded(PidsRow.Status.PENDING, false, cars))).isEmpty(), "还没开出");
+    assertTrue(
+        builder.vacancy(request(loaded(PidsRow.Status.EN_ROUTE, false, List.of()))).isEmpty(),
+        "没有载客");
+    assertTrue(
+        builder
+            .vacancy(
+                request(loaded(PidsRow.Status.EN_ROUTE, false, List.of(new PidsRow.Car(0, 0)))))
+            .isEmpty(),
+        "全车没有座位");
+    assertTrue(builder.vacancy(request(passing(PidsRow.Status.ARRIVING))).isEmpty(), "通过");
+  }
+
+  /** 站台变更：统屏站台方块变色、状态写“站台变更”；进站照旧反白。 */
+  @Test
+  void aChangedPlatformIsMarked() {
+    PidsView.Row enRoute = build(changed(PidsRow.Status.EN_ROUTE, "1", "2")).get(0);
+    PidsView.Row arriving = build(changed(PidsRow.Status.ARRIVING, "1", "2")).get(0);
+
+    assertEquals(new PidsView.PlatformCell("1", false, true), enRoute.platform());
+    assertEquals("站台变更", enRoute.arrival().status().orElseThrow().text().primary());
+    assertEquals(Tone.AMBER, enRoute.arrival().status().orElseThrow().tone());
+    assertEquals(ArrivalMode.HIGHLIGHT, arriving.arrival().mode());
+    assertEquals("进站", arriving.arrival().status().orElseThrow().text().primary());
+  }
+
+  /** 原定停本站台、改去别处的车仍在本站台的屏上列出，写“改至 N 站台”，不写“进站”；新站台的屏照常写进站。 */
+  @Test
+  void theOldPlatformTellsWhereTheTrainWent() {
+    PidsRow moved = changed(PidsRow.Status.ARRIVING, "1", "2");
+
+    PidsView.Arrival onOld = platformScreen("2", moved).rows().get(0).arrival();
+    PidsView.Arrival onNew = platformScreen("1", moved).rows().get(0).arrival();
+
+    assertEquals(ArrivalMode.COUNTDOWN, onOld.mode());
+    assertEquals("改至 1 站台", onOld.status().orElseThrow().text().primary());
+    assertEquals(Tone.AMBER, onOld.status().orElseThrow().tone());
+    assertEquals(ArrivalMode.HIGHLIGHT, onNew.mode());
+    assertTrue(platformScreen("3", moved).rows().isEmpty(), "与这两个站台都无关的屏不列");
+  }
+
+  /** 首行原定停本站台、已改去别处：空位页画下一班真会来本站台的车，不画它。 */
+  @Test
+  void vacancySkipsATrainThatMovedAway() {
+    PidsRow moved = changed(PidsRow.Status.ARRIVING, "2", "1");
+    PidsRow next =
+        loaded(
+            PidsRow.Status.EN_ROUTE, false, List.of(new PidsRow.Car(4, 1), new PidsRow.Car(4, 3)));
+
+    PidsViewBuilder.Request onOne = platformRequest("1", moved, next);
+
+    assertTrue(builder.hasVacancy(onOne));
+    assertEquals(
+        List.of(
+            new PidsVacancyView.Car(PidsVacancyView.Level.MANY, 3),
+            new PidsVacancyView.Car(PidsVacancyView.Level.SOME, 1)),
+        builder.vacancy(onOne).orElseThrow().cars());
+    assertFalse(builder.hasVacancy(platformRequest("1", moved)), "只有改去别处的那一班：没有空位页");
+  }
+
   @Test
   void minutesRoundUpAndNeverGoNegative() {
     assertEquals(0, PidsViewBuilder.minutesUntil(NOW.minusSeconds(5), NOW));
@@ -307,29 +431,71 @@ class PidsViewBuilderTest {
 
   /** 单站台屏（没有站台列）。 */
   private PidsView platformScreen(String platform, PidsRow... rows) {
-    return builder.build(
-        new PidsViewBuilder.Request(
-            new PidsSnapshot(STATION, NOW, List.of(rows)),
-            NOW,
-            ZoneId.of("Asia/Shanghai"),
-            PidsTheme.DARK,
-            Set.of(platform),
-            List.of(platform),
-            3,
-            false));
+    return builder.build(platformRequest(platform, rows));
+  }
+
+  private static PidsViewBuilder.Request platformRequest(String platform, PidsRow... rows) {
+    return new PidsViewBuilder.Request(
+        new PidsSnapshot(STATION, NOW, List.of(rows)),
+        NOW,
+        ZoneId.of("Asia/Shanghai"),
+        PidsTheme.DARK,
+        Set.of(platform),
+        List.of(platform),
+        3,
+        false);
   }
 
   private PidsView view(PidsRow... rows) {
-    return builder.build(
-        new PidsViewBuilder.Request(
-            new PidsSnapshot(STATION, NOW, List.of(rows)),
-            NOW,
-            ZoneId.of("Asia/Shanghai"),
-            PidsTheme.DARK,
-            Set.of(),
-            List.of("1"),
-            6,
-            true));
+    return builder.build(request(rows));
+  }
+
+  private static PidsViewBuilder.Request placed(
+      PidsViewBuilder.Placement placement, PidsRow... rows) {
+    return new PidsViewBuilder.Request(
+        new PidsSnapshot(STATION, NOW, List.of(rows)),
+        NOW,
+        ZoneId.of("Asia/Shanghai"),
+        PidsTheme.DARK,
+        Set.of(),
+        List.of("1"),
+        6,
+        true,
+        Optional.of(placement));
+  }
+
+  private static PidsViewBuilder.Request request(PidsRow... rows) {
+    return new PidsViewBuilder.Request(
+        new PidsSnapshot(STATION, NOW, List.of(rows)),
+        NOW,
+        ZoneId.of("Asia/Shanghai"),
+        PidsTheme.DARK,
+        Set.of(),
+        List.of("1"),
+        6,
+        true);
+  }
+
+  /** 运行中、站台从 {@code from} 改到 {@code to} 的行。 */
+  private static PidsRow changed(PidsRow.Status status, String to, String from) {
+    return new PidsRow(
+        status,
+        "WS",
+        "SURC:WS:R1",
+        "NFY",
+        Optional.of("SURC:NFY"),
+        to,
+        NOW.plusSeconds(120),
+        OptionalLong.of(0),
+        2,
+        false,
+        false,
+        false,
+        Optional.of("train"),
+        false,
+        List.of(),
+        List.of(),
+        Optional.of(from));
   }
 
   private List<PidsView.Row> build(PidsRow... rows) {
@@ -351,6 +517,27 @@ class PidsViewBuilderTest {
         false,
         false,
         Optional.of("train"));
+  }
+
+  private static PidsRow loaded(
+      PidsRow.Status status, boolean terminating, List<PidsRow.Car> cars) {
+    return new PidsRow(
+        status,
+        "WS",
+        "SURC:WS:R1",
+        "NFY",
+        Optional.of("SURC:NFY"),
+        "1",
+        NOW.plusSeconds(60),
+        OptionalLong.empty(),
+        2,
+        false,
+        terminating,
+        false,
+        Optional.of("train"),
+        false,
+        List.of(),
+        cars);
   }
 
   private static PidsRow pending(PidsRow.Status status, List<String> candidates) {
@@ -429,7 +616,11 @@ class PidsViewBuilderTest {
           Map.entry("pids.board.destination.terminating-secondary", "Terminates here"),
           Map.entry("pids.board.destination.out-of-service", "回库"),
           Map.entry("pids.board.destination.out-of-service-secondary", "Not in Service"),
-          Map.entry("pids.board.type.local", "各停"));
+          Map.entry("pids.board.type.local", "各停"),
+          Map.entry("pids.board.vacancy.advice", "请优先考虑较空的车厢"),
+          Map.entry("pids.board.status.platform-changed", "站台变更"),
+          Map.entry("pids.board.status.moved", "改至 <platform> 站台"),
+          Map.entry("pids.board.minutes", "分"));
 
   /** 只认识 WS 线、NFY 与 NTA 两站。 */
   private static final class MapDirectory implements PidsDirectory {
@@ -460,6 +651,27 @@ class PidsViewBuilderTest {
     @Override
     public List<PidsView.LineChip> linesServing(PidsStationKey station) {
       return List.of(new PidsView.LineChip("WS", WS, new Names("西海岸线", "West Shore Line")));
+    }
+
+    /** WS 的交路 R1：AAA → 路径点 → NTA（停靠序号 2）→ BBB。 */
+    @Override
+    public List<String> waypoints(String routeId) {
+      return "SURC:WS:R1".equals(routeId)
+          ? List.of("SURC:S:AAA:1", "SURC:AAA:NTA:1:001", "SURC:S:NTA:1", "SURC:S:BBB:1")
+          : List.of();
+    }
+
+    /** NTA:1 在原点，BBB:1 在正东 100 格。 */
+    @Override
+    public Optional<GraphApi.Position> nodePosition(UUID worldId, String nodeId) {
+      if (!WORLD.equals(worldId)) {
+        return Optional.empty();
+      }
+      return switch (nodeId) {
+        case "SURC:S:NTA:1" -> Optional.of(new GraphApi.Position(0, 64, 0));
+        case "SURC:S:BBB:1" -> Optional.of(new GraphApi.Position(100, 64, 0));
+        default -> Optional.empty();
+      };
     }
 
     /** 3 站台由 MT 与 WS 共用；其余站台查不到。 */

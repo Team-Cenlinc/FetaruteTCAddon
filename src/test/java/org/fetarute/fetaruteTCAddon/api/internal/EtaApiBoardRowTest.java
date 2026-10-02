@@ -16,6 +16,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardPhase;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaReason;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainLoad;
 import org.junit.jupiter.api.Test;
 
 /** 站牌行 1.9.0：结构化字段原样对外，1.8.0 构造器保持可用。 */
@@ -46,7 +47,9 @@ class EtaApiBoardRowTest {
             Optional.of("train-1"),
             OptionalLong.of(75L),
             false,
-            List.of());
+            List.of(),
+            true,
+            Optional.of(new TrainLoad(List.of(new TrainLoad.Car(4, 1), new TrainLoad.Car(4, 6)))));
     EtaService service = mock(EtaService.class);
     when(service.getBoard("SURN", "CCC", null, Duration.ofMinutes(10)))
         .thenReturn(new BoardResult(List.of(internal)));
@@ -63,6 +66,11 @@ class EtaApiBoardRowTest {
     assertEquals(Optional.of("train-1"), row.trainName());
     assertEquals(OptionalLong.of(75L), row.delaySeconds());
     assertEquals(List.of(EtaApi.Reason.HOLD), row.reasons());
+    assertTrue(row.platformPlanned());
+    assertFalse(row.platformPending());
+    assertEquals(
+        List.of(new EtaApi.CarLoad(4, 1), new EtaApi.CarLoad(4, 4)), row.cars(), "在座多于座位时按座位数计");
+    assertEquals(java.util.OptionalInt.of(3), row.vacantSeats());
   }
 
   @Test

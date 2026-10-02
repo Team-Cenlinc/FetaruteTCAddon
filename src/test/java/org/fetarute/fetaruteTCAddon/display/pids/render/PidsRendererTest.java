@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsTestCard;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVacancyView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Arrival;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.ArrivalMode;
@@ -288,6 +289,73 @@ class PidsRendererTest {
     assertEquals(WS, rgb(order, 200, 124), "色带与主页同一位置");
     assertEquals(PidsTheme.DARK.amber(), rgb(passing, 33, 29), "安全提示用警示色");
     assertTrue(countColor(passing, 32, 28, 64, 64, PidsTheme.INK) > 0, "亮黄底上用深色图标");
+  }
+
+  /** 空位页：车厢按座位情况着色（充足绿、紧张红），车头一节在前进方向一端挖小窗；3 节这样的短编组不拉宽、整列居中；站台线与图例都在， 色带与主页同一位置。 */
+  @Test
+  void vacancyPageDrawsTheTrainThePlatformAndTheLegend() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");
+    PidsVacancyView vacancy =
+        new PidsVacancyView(
+            PidsTheme.DARK,
+            new Badge("WS", Optional.of("各停"), WS, false),
+            new Names("南渡", "Nam Toa"),
+            new Arrival(
+                ArrivalMode.COUNTDOWN,
+                3,
+                Tone.NORMAL,
+                Optional.of(Label.of(new Names("准点", "On time"), Tone.NORMAL))),
+            List.of(
+                new PidsVacancyView.Car(PidsVacancyView.Level.MANY, 8),
+                new PidsVacancyView.Car(PidsVacancyView.Level.SOME, 3),
+                new PidsVacancyView.Car(PidsVacancyView.Level.FEW, 0)),
+            Optional.of(PidsVacancyView.Front.RIGHT),
+            new PidsVacancyView.Labels(
+                new Names("分", "min"),
+                new Names("请优先考虑较空的车厢", "Please use less crowded cars"),
+                new Names("座位充足", "Many seats"),
+                new Names("座位较少", "Some seats"),
+                new Names("座位紧张", "Few seats")),
+            List.of(WS));
+
+    BufferedImage image = renderer.renderVacancy(layout, vacancy);
+
+    assertEquals(384, image.getWidth());
+    assertTrue(countColor(image, 300, 4, 76, 30, PidsTheme.DARK.text()) > 0, "右上写多久到达");
+    // 车厢行 44–68；三节各 42 宽、间距 4，整列 134 宽居中于 8–376：125–259
+    assertEquals(PidsTheme.DARK.background(), rgb(image, 100, 56), "短编组不拉宽：左侧空着");
+    assertEquals(PidsTheme.DARK.red(), rgb(image, 140, 60), "车头在右：最后一节（紧张，红）在左");
+    assertEquals(PidsTheme.DARK.green(), rgb(image, 225, 60), "车头一节（充足，绿）在右");
+    assertEquals(PidsTheme.DARK.background(), rgb(image, 254, 49), "车头小窗");
+    assertTrue(countColor(image, 8, 71, 368, 2, PidsTheme.DARK.muted()) > 300, "站台线");
+    assertTrue(countColor(image, 8, 88, 368, 24, PidsTheme.DARK.text()) > 0, "提示与图例");
+    assertEquals(WS, rgb(image, 200, 124), "色带与主页同一位置");
+  }
+
+  /** 站台变更过的站台方块用琥珀色。 */
+  @Test
+  void aChangedPlatformBoxIsAmber() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("station-3x5");
+    PidsView.Row row = countdown();
+    PidsView.Row changed =
+        new PidsView.Row(
+            row.badge(), row.destination(), new PlatformCell("1", false, true), row.arrival());
+
+    BufferedImage image =
+        renderer.render(
+            layout,
+            new PidsView(
+                PidsTheme.DARK,
+                "21:40",
+                List.of(),
+                Optional.of(new Names("南渡", "Nam Toa")),
+                List.of(),
+                List.of(WS),
+                List.of(changed),
+                LABELS));
+
+    // 首行站台方块：到发表左缘 4 + 站台列 380 + 内缩 8，首行顶 118、方块 28 竖向居中
+    assertEquals(PidsTheme.DARK.amber(), rgb(image, 394, 127));
   }
 
   private static PidsView platformView(PidsTheme theme, List<PidsView.Row> rows) {

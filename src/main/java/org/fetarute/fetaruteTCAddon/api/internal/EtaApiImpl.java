@@ -191,7 +191,15 @@ public final class EtaApiImpl implements EtaApi {
               row.trainName(),
               row.delaySeconds(),
               row.platformPending(),
-              row.platformCandidates()));
+              row.platformCandidates(),
+              row.platformPlanned(),
+              row.load()
+                  .map(
+                      load ->
+                          load.cars().stream()
+                              .map(car -> new EtaApi.CarLoad(car.seats(), car.occupied()))
+                              .toList())
+                  .orElse(List.of())));
     }
     return new BoardResult(List.copyOf(rows));
   }

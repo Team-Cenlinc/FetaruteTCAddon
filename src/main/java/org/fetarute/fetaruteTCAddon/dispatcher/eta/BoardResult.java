@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainLoad;
 
 /**
  * 站牌（PIDS/列表）输出：一组按站点聚合的 ETA 行。
@@ -39,8 +40,10 @@ public record BoardResult(List<BoardRow> rows) {
    * @param outOfService 本站已越过运营终点，列车在回库途中
    * @param trainName 运行中列车的列车名；票据与预测为空
    * @param delaySeconds 按表运行时相对计划的偏差（正数为晚点）：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空
-   * @param platformPending 本站是 DYNAMIC 停靠且尚未选台
+   * @param platformPending 本站是 DYNAMIC 停靠且尚未选台，也没有计划或暂定站台
    * @param platformCandidates 站台待定时可能停靠的站台，按站台号升序；站台已定或候选未知时为空
+   * @param platformPlanned 站台号是计划站台（时刻表排定）或暂定站台（列车下一个停车站上先定的股道）：列车还没有选台， 进站前选台时这条股道被占会改停别的站台
+   * @param load 运行中列车的载客（各节车的座位与在座乘客）；票据、预测与读不到车辆模型时为空
    */
   public record BoardRow(
       String lineName,
@@ -63,7 +66,9 @@ public record BoardResult(List<BoardRow> rows) {
       Optional<String> trainName,
       OptionalLong delaySeconds,
       boolean platformPending,
-      List<String> platformCandidates) {
+      List<String> platformCandidates,
+      boolean platformPlanned,
+      Optional<TrainLoad> load) {
     public BoardRow {
       Objects.requireNonNull(lineName, "lineName");
       Objects.requireNonNull(routeId, "routeId");
@@ -81,6 +86,7 @@ public record BoardResult(List<BoardRow> rows) {
       trainName = trainName == null ? Optional.empty() : trainName;
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
       platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
+      load = load == null ? Optional.empty() : load;
     }
   }
 }

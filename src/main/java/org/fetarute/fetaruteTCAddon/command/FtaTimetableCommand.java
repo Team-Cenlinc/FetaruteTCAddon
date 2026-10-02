@@ -39,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
@@ -49,6 +50,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableCsvEx
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableEdgeSpeeds;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableHeadwayDefaults;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableOccupancyProjector;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetablePlatformPlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
@@ -574,6 +576,7 @@ public final class FtaTimetableCommand {
             () -> {
               TimetableSetBuilder.SetResult result;
               NeighborReport neighborReport;
+              TimetablePlatformPlanner.Result platformPlans;
               try {
                 NeighborInputs neighborInputs =
                     collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
@@ -590,6 +593,8 @@ public final class FtaTimetableCommand {
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
                             builtAt);
+                platformPlans =
+                    planPlatforms(result, neighborInputs, graphSnapshot, index, neighbors, options);
               } catch (RuntimeException ex) {
                 plugin
                     .getServer()
@@ -603,6 +608,7 @@ public final class FtaTimetableCommand {
               }
               TimetableSetBuilder.SetResult built = result;
               NeighborReport neighbors = neighborReport;
+              TimetablePlatformPlanner.Result platforms = platformPlans;
               plugin
                   .getServer()
                   .getScheduler()
@@ -614,6 +620,7 @@ public final class FtaTimetableCommand {
                               provider,
                               lines,
                               built,
+                              platforms,
                               options,
                               model.settings(),
                               headwayChoice,
@@ -742,12 +749,51 @@ public final class FtaTimetableCommand {
     return !LineSpawnMetadata.readBoolean(route.metadata(), "spawn_enabled").orElse(true);
   }
 
+  /**
+   * 给编出来的表排计划站台（异步线程）：时刻用表上落库的时刻（{@link NeighborInputs#myProfiles}），与运行时、邻表同一口径。 编表失败时不排。
+   *
+   * <p>计划站台只是选台偏好与站牌显示：排程出错时记下原因、不给计划，时刻表照常落库。
+   */
+  private static TimetablePlatformPlanner.Result planPlatforms(
+      TimetableSetBuilder.SetResult result,
+      NeighborInputs inputs,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index,
+      List<NeighborTimetable> neighbors,
+      TimetableBuildOptions options) {
+    if (!result.success()) {
+      return new TimetablePlatformPlanner.Result(Map.of(), 0, 0);
+    }
+    try {
+      List<Timetable> tables = List.copyOf(result.tables().values());
+      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles =
+          new java.util.HashMap<>();
+      for (Timetable table : tables) {
+        profiles.put(table.id(), inputs.myProfiles(table, graph, index));
+      }
+      return TimetablePlatformPlanner.plan(
+          new TimetablePlatformPlanner.Input(
+              tables,
+              profiles,
+              inputs.stopsByRoute(),
+              inputs.definitions(),
+              graph,
+              index,
+              neighbors,
+              options.serviceStartSecondOfDay(),
+              (int) options.separation().toSeconds()));
+    } catch (RuntimeException ex) {
+      return TimetablePlatformPlanner.Result.failed(ex.toString());
+    }
+  }
+
   /** 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。 */
   private void finishBuild(
       CommandSender sender,
       StorageProvider provider,
       List<ResolvedLine> lines,
       TimetableSetBuilder.SetResult set,
+      TimetablePlatformPlanner.Result platforms,
       TimetableBuildOptions options,
       RunCurveModel.Settings run,
       TimetableHeadwayDefaults.Choice headway,
@@ -769,6 +815,26 @@ public final class FtaTimetableCommand {
         result.headwayRelaxed());
     if (!set.success()) {
       return;
+    }
+    platforms
+        .failure()
+        .ifPresent(
+            reason -> {
+              plugin.getLogger().warning("计划站台排程失败：" + reason);
+              sender.sendMessage(
+                  Component.text("计划站台未排定（排程出错，详见控制台），运行时照常临时选台。", NamedTextColor.YELLOW));
+            });
+    if (!platforms.empty()) {
+      sender.sendMessage(
+          Component.text(
+              "计划站台：已为 "
+                  + platforms.planned()
+                  + " 段动态站台停留排定股道"
+                  + (platforms.unplaced() > 0
+                      ? "；" + platforms.unplaced() + " 段在计划时段内没有空闲股道，运行时临时选台"
+                      : "")
+                  + "。",
+              NamedTextColor.GRAY));
     }
     List<Timetable> tables = new ArrayList<>();
     for (ResolvedLine line : lines) {
@@ -792,6 +858,10 @@ public final class FtaTimetableCommand {
                 .timetables()
                 .replaceBaselines(
                     timetable.id(), set.baselines().getOrDefault(timetable.lineId(), List.of()));
+            provider
+                .timetables()
+                .replacePlatformPlans(
+                    timetable.id(), platforms.plans().getOrDefault(timetable.id(), List.of()));
           }
           return Optional.empty();
         },
@@ -1808,6 +1878,8 @@ public final class FtaTimetableCommand {
    * 把几张表一起置为 PUBLISHED：同一个时刻，互相的基线也记这个时刻（它们从此互为已发布邻表，updatedAt 要对得上）；外部邻表的基线按重检结果更新。
    *
    * <p>写库在一个事务里：先回读核对重检期间表没被删、没被重新 build，再写基线、翻状态。只翻状态，不重写车次。
+   *
+   * <p>同一线路时段重叠的旧表在同一事务里撤为草稿：两张表同时生效时每个班次都会出两张票，接不到车的那张挂满容差作废、登记取消。
    */
   private void publishAll(
       CommandSender sender,
@@ -1822,6 +1894,7 @@ public final class FtaTimetableCommand {
     }
     Map<UUID, List<TimetableBaseline>> refreshed = new java.util.LinkedHashMap<>();
     List<String> notes = new ArrayList<>();
+    List<String> replaced = new java.util.concurrent.CopyOnWriteArrayList<>();
     for (Timetable timetable : tables) {
       ScopeCheck check = checks.get(timetable.id());
       boolean refresh = tables.size() > 1 || (check != null && !check.baselinesMatch());
@@ -1864,6 +1937,14 @@ public final class FtaTimetableCommand {
           }
           refreshed.forEach(provider.timetables()::replaceBaselines);
           for (Timetable timetable : tables) {
+            for (Timetable other : provider.timetables().listByLine(timetable.lineId())) {
+              if (other.published()
+                  && !setIds.contains(other.id())
+                  && PublishedTimetables.overlaps(timetable, other)) {
+                provider.timetables().updateStatus(other.id(), TimetableStatus.DRAFT, now);
+                replaced.add(other.code() + " → DRAFT（被 " + timetable.code() + " 取代）");
+              }
+            }
             provider.timetables().updateStatus(timetable.id(), TimetableStatus.PUBLISHED, now);
           }
           return Optional.empty();
@@ -1872,6 +1953,9 @@ public final class FtaTimetableCommand {
         () -> {
           for (String note : notes) {
             sender.sendMessage(Component.text(note, NamedTextColor.GRAY));
+          }
+          for (String line : replaced) {
+            sender.sendMessage(Component.text(line, NamedTextColor.YELLOW));
           }
           for (Timetable timetable : tables) {
             sender.sendMessage(

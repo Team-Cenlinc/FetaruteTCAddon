@@ -235,7 +235,8 @@ public final class TimetableApiImpl implements TimetableApi {
                   departure,
                   terminating,
                   date,
-                  cancelled));
+                  cancelled,
+                  svc.flatMap(s -> s.plannedPlatform(trip.id(), stop.stopSequence()))));
         }
       }
     }

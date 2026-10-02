@@ -56,7 +56,9 @@ final class PidsAnnouncementText {
             Placeholder.unparsed("station", stationName(announcement.station())),
             Placeholder.unparsed("time", CLOCK.format(row.expectedAt().atZone(zone))),
             Placeholder.unparsed(
-                "minutes", String.valueOf(Lateness.minutes(row.delaySeconds().orElse(0L)))));
+                "minutes", String.valueOf(Lateness.minutes(row.delaySeconds().orElse(0L)))),
+            Placeholder.unparsed("new", row.platform()),
+            Placeholder.unparsed("from", announcement.previousPlatform().orElse("-")));
     return MINI_MESSAGE.deserialize(text.apply(key(announcement)), resolver);
   }
 
@@ -81,6 +83,7 @@ final class PidsAnnouncementText {
       case PASSING -> "pids.announce.passing";
       case CANCELLED -> "pids.announce.cancelled";
       case DELAYED -> "pids.announce.delayed";
+      case PLATFORM_CHANGED -> "pids.announce.platform-changed";
     };
   }
 

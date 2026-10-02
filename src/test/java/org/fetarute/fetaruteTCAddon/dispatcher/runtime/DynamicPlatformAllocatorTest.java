@@ -204,6 +204,175 @@ class DynamicPlatformAllocatorTest {
   }
 
   @Test
+  void aFreePlannedPlatformIsChosenOverTheDefaultOrder() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("PLANNED");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    allocator.setPreference(
+        (train, r, stopIndex) -> stopIndex == 1 ? Optional.of(secondId) : Optional.empty());
+
+    assertEquals(
+        secondId,
+        allocator
+            .tryAllocate("train-planned", route, 0, graph, fromId)
+            .orElseThrow()
+            .allocatedNode(),
+        "没有方向信息时默认取 1 道；计划是 2 道且空闲就选 2 道");
+  }
+
+  @Test
+  void anOccupiedPlannedPlatformFallsBackToAFreeOne() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("PLANNED-BUSY");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    OccupancyResource busy = OccupancyResource.forNode(secondId);
+    when(occupancyManager.isNodeOccupied(secondId)).thenReturn(true);
+    when(occupancyManager.getClaim(busy))
+        .thenReturn(
+            Optional.of(
+                new OccupancyClaim(
+                    busy,
+                    "other-train",
+                    Optional.empty(),
+                    java.time.Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    allocator.setPreference((train, r, stopIndex) -> Optional.of(secondId));
+
+    assertEquals(
+        firstId,
+        allocator.tryAllocate("train-busy", route, 0, graph, fromId).orElseThrow().allocatedNode(),
+        "计划站台被占：照常选空闲的，不因计划把车挡在站外");
+  }
+
+  /** 暂定站台沿用不变；别的车暂定的股道不再给；选台在空闲候选里优先兑现暂定站台，它也是站台落定事件里的"原计划"。 */
+  @Test
+  void aTentativePlatformIsKeptAndSteersTheSelection() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("TENTATIVE");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    assertEquals(Optional.of(firstId), allocator.tentativePlatform("train-a", route, 1, graph));
+    assertEquals(Optional.of(firstId), allocator.tentativePlatform("train-a", route, 1, graph));
+    assertEquals(Optional.of(firstId), allocator.preferredPlatform("train-a", route, 1));
+    assertEquals(
+        Optional.of(secondId),
+        allocator.tentativePlatform("train-b", route, 1, graph),
+        "1 道已暂定给 train-a");
+
+    allocator.clearAllocations("train-a");
+
+    assertEquals(
+        secondId,
+        allocator.tryAllocate("train-b", route, 0, graph, fromId).orElseThrow().allocatedNode(),
+        "1 道空出来了，但站牌写的是 2 道：空闲就兑现暂定站台");
+  }
+
+  /** 信号 tick 给下一个停车站定暂定站台（跳过不停的路径点），每辆车至多每秒重看一次；暂定的股道被实占后改定。 */
+  @Test
+  void theSignalTickKeepsATentativePlatformForTheNextStoppingStation() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("TENTATIVE-TICK");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(stop.stops()).thenReturn(true);
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    java.time.Instant now = java.time.Instant.parse("2026-01-01T00:00:00Z");
+
+    allocator.refreshTentative("train-a", route, 0, graph, now);
+    assertEquals(Optional.of(firstId), allocator.heldTentative("train-a", route, 1));
+
+    OccupancyResource busy = OccupancyResource.forNode(firstId);
+    when(occupancyManager.isNodeOccupied(firstId)).thenReturn(true);
+    when(occupancyManager.getClaim(busy))
+        .thenReturn(
+            Optional.of(
+                new OccupancyClaim(
+                    busy,
+                    "other-train",
+                    Optional.empty(),
+                    java.time.Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+
+    allocator.refreshTentative("train-a", route, 0, graph, now.plusMillis(500));
+    assertEquals(Optional.of(firstId), allocator.heldTentative("train-a", route, 1), "一秒之内不重看");
+
+    allocator.refreshTentative("train-a", route, 0, graph, now.plusSeconds(1));
+    assertEquals(
+        Optional.of(secondId), allocator.heldTentative("train-a", route, 1), "1 道被实占，改定 2 道");
+  }
+
+  /** 暂定的股道被别的车选走了：重新暂定一条空闲的；越过那一站后暂定作废。 */
+  @Test
+  void aTentativePlatformTakenByAnotherTrainIsRedoneAndDroppedOncePassed() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("TENTATIVE-TAKEN");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+
+    assertEquals(Optional.of(firstId), allocator.tentativePlatform("train-a", route, 1, graph));
+    assertEquals(
+        firstId,
+        allocator
+            .tryAllocate("train-other", route, 0, graph, fromId)
+            .orElseThrow()
+            .allocatedNode());
+
+    assertEquals(Optional.of(secondId), allocator.tentativePlatform("train-a", route, 1, graph));
+
+    allocator.releaseCompletedAllocations("train-a", routeId, 2);
+    assertEquals(Optional.empty(), allocator.heldTentative("train-a", route, 1));
+  }
+
+  @Test
   void dynamicStopDoesNotAllocateOccupiedPlatformWhenAllCandidatesOccupied() {
     NodeId fromId = NodeId.of("OP:W:FROM:1:0");
     NodeId firstId = NodeId.of("OP:S:DEST:1");

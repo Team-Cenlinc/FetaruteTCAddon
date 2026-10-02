@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
+import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
 
 /**
  * 站台屏快照：按车站缓存，有效期内同一车站的所有屏幕共用一次查询。
@@ -37,6 +38,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  *
  * <p>有效期取 {@code render.snapshot-ttl-seconds}，查询窗口取 {@code render.horizon-minutes}；同一车站的并发请求只算一次。
  * 查询失败时沿用上一份快照的行并留下调试日志，时间戳记为本次，等下一个有效期再重试，避免每块屏每次刷新都重试。
+ *
+ * <p>运行中列车的行按最近的站台变更（{@link PidsPlatformChanges}）标出变更前的站台；变更时整份缓存作废。
  *
  * <p>取消行单独缓存 {@link #CANCELLED_REFRESH}：找取消行要把全部已发布时刻表的车次与停靠点扫一遍，而取消很少发生。 车次取消或重新绑定（取消之后又有车接上）时由
  * {@link #invalidateCancellations()} 立即作废，下一份快照就能看到。
@@ -58,6 +61,7 @@ public final class PidsSnapshotProvider {
   private final Supplier<PidsSettings> settings;
   private final InstantSource clock;
   private final Consumer<String> debugLogger;
+  private final PidsPlatformChanges platformChanges;
   private final ConcurrentMap<PidsStationKey, PidsSnapshot> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<PidsStationKey, CancelledRows> cancelled = new ConcurrentHashMap<>();
 
@@ -76,6 +80,21 @@ public final class PidsSnapshotProvider {
       Supplier<PidsSettings> settings,
       InstantSource clock,
       Consumer<String> debugLogger) {
+    this(eta, timetables, routes, settings, clock, debugLogger, PidsPlatformChanges.none());
+  }
+
+  /**
+   * @param platformChanges 最近的站台变更：运行中列车的行据此标出变更前的站台
+   */
+  public PidsSnapshotProvider(
+      EtaApi eta,
+      TimetableApi timetables,
+      RouteApi routes,
+      Supplier<PidsSettings> settings,
+      InstantSource clock,
+      Consumer<String> debugLogger,
+      PidsPlatformChanges platformChanges) {
+    this.platformChanges = Objects.requireNonNull(platformChanges, "platformChanges");
     this.eta = Objects.requireNonNull(eta, "eta");
     this.timetables = Objects.requireNonNull(timetables, "timetables");
     this.routes = Objects.requireNonNull(routes, "routes");
@@ -99,6 +118,11 @@ public final class PidsSnapshotProvider {
                 : load(key, now, horizon, cached));
   }
 
+  /** 丢弃各车站缓存的快照：站台变更时调用，屏幕与广播下一次取数就能看到。 */
+  public void invalidateSnapshots() {
+    cache.clear();
+  }
+
   /** 丢弃各车站缓存的取消行：车次取消或重新绑定时调用。 */
   public void invalidateCancellations() {
     cancelled.clear();
@@ -110,7 +134,7 @@ public final class PidsSnapshotProvider {
       List<PidsRow> rows = new ArrayList<>();
       for (EtaApi.BoardRow row :
           eta.getBoard(station.operatorCode(), station.stationCode(), null, horizon).rows()) {
-        rows.add(fromBoard(row, now));
+        rows.add(fromBoard(row, station, now));
       }
       rows.addAll(cancelledRowsCached(station, now, horizon));
       rows.sort(Comparator.comparing(PidsRow::expectedAt));
@@ -121,7 +145,7 @@ public final class PidsSnapshotProvider {
     }
   }
 
-  private static PidsRow fromBoard(EtaApi.BoardRow row, Instant now) {
+  private PidsRow fromBoard(EtaApi.BoardRow row, PidsStationKey station, Instant now) {
     return new PidsRow(
         status(row.phase()),
         row.lineName(),
@@ -137,7 +161,10 @@ public final class PidsSnapshotProvider {
         row.outOfService(),
         row.trainName(),
         row.platformPending(),
-        row.platformCandidates());
+        row.platformCandidates(),
+        row.cars().stream().map(car -> new PidsRow.Car(car.seats(), car.occupied())).toList(),
+        row.trainName()
+            .flatMap(train -> platformChanges.previousOf(train, station, row.platform())));
   }
 
   private static PidsRow.Status status(EtaApi.BoardPhase phase) {
@@ -209,7 +236,7 @@ public final class PidsSnapshotProvider {
         terminal.map(RouteTerminals.StationRef::stationCode).orElse("-"),
         terminal.map(ref -> ref.operatorCode() + ":" + ref.stationCode()),
         dynamicStop(route, departure.stopSequence())
-            ? "-"
+            ? departure.plannedNodeId().map(RouteTerminals::platformOf).orElse("-")
             : departure.nodeId().map(RouteTerminals::platformOf).orElse("-"),
         departure.plannedArrival(),
         OptionalLong.empty(),
@@ -220,7 +247,7 @@ public final class PidsSnapshotProvider {
         Optional.empty());
   }
 
-  /** 动态站台停靠：时刻表里的节点只是占位股道，取消的班次从没选过台，不能写成站台号。 */
+  /** 动态站台停靠：时刻表里的节点只是占位股道，取消的班次从没选过台，不能写成站台号；编表排了计划站台时写计划站台。 */
   private static boolean dynamicStop(Optional<RouteApi.RouteDetail> route, int stopSequence) {
     return route
         .filter(detail -> stopSequence >= 0 && stopSequence < detail.stops().size())

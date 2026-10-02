@@ -71,6 +71,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
   private volatile Settings settings = Settings.disabled();
   private volatile Snapshot snapshot = Snapshot.empty();
 
+  /** 已发布表的计划站台：车次 → 停靠序号 → 股道节点。与 {@link #snapshot} 同在 {@link #reload} 里换。 */
+  private volatile Map<UUID, Map<Integer, String>> platformPlans = Map.of();
+
   /** 车次绑定与 trip 占用。 */
   private final TripMatcher matcher;
 
@@ -88,6 +91,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   /** 各车在当前车次上逐站的到发偏差：晚点追赶读最近一次，跑完一趟结账成一行日志。 */
   private final TripDelayLedger delays = new TripDelayLedger();
+
+  /** 运维告警（同线路多张表同时发布等），关调试日志也要看得见。 */
+  private volatile Consumer<String> warningLogger = message -> {};
 
   private volatile Consumer<TripCancellations.Cancellation> cancellationListener =
       cancellation -> {};
@@ -110,6 +116,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
       clearAssignments("settings-disabled");
       cancellations.clear();
     }
+  }
+
+  /** 设置运维告警输出（插件日志的 WARNING）；传 {@code null} 不输出。 */
+  public void setWarningLogger(Consumer<String> logger) {
+    this.warningLogger = logger == null ? message -> {} : logger;
   }
 
   /**
@@ -155,6 +166,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    *
    * <p>加载失败时保留旧快照：一次数据库抖动不应该让全网列车同时脱表。
    *
+   * <p>同一线路时段重叠的几张已发布表只有最近发布的生效（{@link PublishedTimetables}），其余告警并忽略。
+   *
    * @param provider 存储提供者
    * @return 加载到的时刻表数量；失败时返回 -1
    */
@@ -163,9 +176,21 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return -1;
     }
     try {
-      List<Timetable> published = provider.timetables().listPublished();
-      Snapshot next = Snapshot.of(published);
+      PublishedTimetables.Selection selection =
+          PublishedTimetables.select(provider.timetables().listPublished());
+      for (PublishedTimetables.Shadowed shadowed : selection.shadowed()) {
+        warningLogger.accept(
+            "时刻表 "
+                + shadowed.timetable().code()
+                + " 与同线路较新发布的 "
+                + shadowed.by().code()
+                + " 时段重叠，本次不启用；请用 /fta timetable unpublish 撤下其中一张。");
+      }
+      Snapshot next = Snapshot.of(selection.active());
+      Optional<Map<UUID, Map<Integer, String>>> plans =
+          loadPlatformPlans(provider, next.timetables());
       this.snapshot = next;
+      plans.ifPresent(loaded -> this.platformPlans = loaded);
       dropClaimsOutsideSnapshot(next);
       debugLogger.accept(
           "TIMETABLE_RELOAD timetables="
@@ -177,6 +202,109 @@ public final class TimetableService implements ScheduledDeparturePlan {
       debugLogger.accept("TIMETABLE_RELOAD_FAILED error=" + ex.getMessage());
       return -1;
     }
+  }
+
+  /** 读各表的计划站台。计划站台只是选台偏好与站牌显示，读失败不能连累时刻表本身：告警后为空，沿用上一份 （车次 ID 不变的表照旧有计划，换过的表查不到，照常临时选台）。 */
+  private Optional<Map<UUID, Map<Integer, String>>> loadPlatformPlans(
+      StorageProvider provider, List<Timetable> timetables) {
+    Map<UUID, Map<Integer, String>> out = new HashMap<>();
+    try {
+      for (Timetable timetable : timetables) {
+        for (PlatformPlan plan : provider.timetables().listPlatformPlans(timetable.id())) {
+          out.computeIfAbsent(plan.tripId(), key -> new HashMap<>())
+              .put(plan.stopSequence(), plan.nodeId());
+        }
+      }
+    } catch (RuntimeException ex) {
+      warningLogger.accept("读取时刻表计划站台失败，沿用上一份，运行时照常选台：" + ex.getMessage());
+      return Optional.empty();
+    }
+    Map<UUID, Map<Integer, String>> frozen = new HashMap<>();
+    out.forEach((tripId, byStop) -> frozen.put(tripId, Map.copyOf(byStop)));
+    return Optional.of(Map.copyOf(frozen));
+  }
+
+  /**
+   * 某趟车在某个停靠点的计划站台（编表时排定，见 {@link TimetablePlatformPlanner}）。
+   *
+   * @param tripId 车次
+   * @param stopIndex 停靠序号
+   * @return 计划股道节点；不是动态站台、编表时没有空闲股道、或表是在有计划站台之前编的时为空
+   */
+  public Optional<String> plannedPlatform(UUID tripId, int stopIndex) {
+    if (!settings.enabled() || tripId == null) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(platformPlans.getOrDefault(tripId, Map.of()).get(stopIndex));
+  }
+
+  /**
+   * 运行中的车在当前交路某个停靠点的计划站台，运行时选台偏好与站牌共用这一处。
+   *
+   * <p>绑了车次的车按车次查（车次不在这条交路上时没有计划）。跑出库走行的车还没有车次：走行终点与交路首班的始发是同一段停留， 编表时排的是同一条股道，按首班始发的计划。
+   *
+   * @param trainName 列车名
+   * @param routeId 列车当前交路
+   * @param stopIndex 停靠序号
+   * @return 计划股道节点
+   */
+  @Override
+  public Optional<String> plannedPlatformOf(String trainName, UUID routeId, int stopIndex) {
+    if (!settings.enabled() || routeId == null) {
+      return Optional.empty();
+    }
+    Optional<TimetableAssignment> assignment = assignmentOf(trainName);
+    if (assignment.isPresent()) {
+      return assignment
+          .filter(bound -> routeId.equals(bound.routeId()))
+          .flatMap(bound -> plannedPlatform(bound.tripId(), stopIndex));
+    }
+    return dutyBindingOf(trainName)
+        .flatMap(key -> createLegPlan(key, Optional.of(routeId), stopIndex));
+  }
+
+  /**
+   * 一张表定票（含预测票）的车次在某个停靠点的计划站台。站牌给还没开出的车次标站台用。
+   *
+   * @param intent 票据的交路意图
+   * @param stopIndex 停靠序号
+   * @return 计划股道节点
+   */
+  public Optional<String> plannedPlatform(TicketIntent intent, int stopIndex) {
+    if (!settings.enabled() || intent == null) {
+      return Optional.empty();
+    }
+    return switch (intent.kind()) {
+      case OPERATION -> Optional.ofNullable(snapshot.byId().get(intent.timetableId()))
+          .flatMap(timetable -> timetable.duty(intent.dutyId()))
+          .filter(duty -> intent.tripIndex() >= 0 && intent.tripIndex() < duty.tripIds().size())
+          .flatMap(duty -> plannedPlatform(duty.tripIds().get(intent.tripIndex()), stopIndex));
+      case RETURN -> returnTripOf(intent.key())
+          .flatMap(due -> plannedPlatform(due.trip().id(), stopIndex));
+      case CREATE -> createLegPlan(intent.key(), Optional.empty(), stopIndex);
+    };
+  }
+
+  /**
+   * 出库走行终点的计划站台：走行没有车次，它的终点与首班始发是同一段停留，按首班始发的计划。
+   *
+   * @param routeId 车正在跑的交路；为空时按交路的出库走行线路
+   */
+  private Optional<String> createLegPlan(DutyKey key, Optional<UUID> routeId, int stopIndex) {
+    Timetable timetable = snapshot.byId().get(key.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(key.dutyId())
+        .filter(
+            duty ->
+                duty.createRouteId()
+                    .filter(create -> routeId.map(create::equals).orElse(true))
+                    .flatMap(timetable::routePlan)
+                    .filter(plan -> plan.stops().size() - 1 == stopIndex)
+                    .isPresent())
+        .flatMap(duty -> plannedPlatform(duty.tripIds().get(0), 0));
   }
 
   /** 当前缓存里的已发布时刻表。 */
@@ -923,6 +1051,124 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 查询某辆车的交路进度。 */
   public Optional<DutyProgress> dutyProgressOf(String trainName) {
     return ledger.progressOf(keyOf(trainName));
+  }
+
+  /**
+   * 派车成功：按派出的那一班在起点（序号 0）绑定车次。
+   *
+   * <p>运营票带着车次；回库票对应交路的带客回库班。折返复用的车在起点不经过门控，不在这里绑就要到第一个中途站才按时间匹配上， 首段没有车次，站牌与车内都拿不到晚点。出库走行不是车次，不绑。
+   *
+   * @param trainName 派出的列车（折返改名后的新名字）
+   * @param intent 票据的交路意图
+   * @param trip 运营票的车次；回库票为空
+   */
+  public void bindDispatchedTrip(String trainName, TicketIntent intent, Optional<DueTrip> trip) {
+    if (!settings.enabled() || intent == null) {
+      return;
+    }
+    String key = keyOf(trainName);
+    if (key == null) {
+      return;
+    }
+    Optional<DueTrip> due =
+        trip.isPresent()
+            ? trip
+            : intent.kind() == RouteOperationType.RETURN ? returnTripOf(intent.key()) : trip;
+    due.ifPresent(
+        dispatched ->
+            matcher
+                .assignExact(
+                    key,
+                    trainName,
+                    dispatched.timetable(),
+                    dispatched.trip(),
+                    dispatched.serviceDate(),
+                    clock.get())
+                .ifPresent(
+                    assignment -> {
+                      cancellations.revoke(
+                          dispatched.timetable().id(),
+                          dispatched.trip().id(),
+                          dispatched.serviceDate());
+                      ledger.startOrAdvance(key, dispatched.timetable(), dispatched.trip());
+                    }));
+  }
+
+  /**
+   * 跑完当前这一班后，这辆车接下来要跑的那一趟：交路里的下一班；交路跑完了就是带客回库班。
+   *
+   * <p>只读：不建立绑定、不推进进度。换车、退役、解绑、重启后账本为空时自然为空；那一趟已取消时也为空。
+   *
+   * @param trainName 列车名
+   * @return 下一趟（日期为起点发车所在的日历日）
+   */
+  public Optional<DueTrip> nextDepartureOf(String trainName) {
+    if (!settings.enabled()) {
+      return Optional.empty();
+    }
+    String key = keyOf(trainName);
+    if (key == null || ledger.isRetired(key)) {
+      return Optional.empty();
+    }
+    Optional<DutyProgress> progress = ledger.progressOf(key);
+    if (progress.isEmpty()) {
+      return Optional.empty();
+    }
+    return boundDuty(key, progress.get())
+        .flatMap(
+            duty -> {
+              int next = progress.get().assignedTrips();
+              if (next < duty.tripIds().size()) {
+                return duty.trip(next).map(trip -> dueTrip(duty.timetable(), trip, duty.key()));
+              }
+              return returnTripOf(duty.key())
+                  .filter(due -> !due.trip().id().equals(progress.get().lastTripId()));
+            })
+        .filter(
+            due ->
+                cancellations
+                    .find(due.timetable().id(), due.trip().id(), due.serviceDate())
+                    .isEmpty());
+  }
+
+  /**
+   * 这张续班票（或回库票）在等的车：本交路的车还没跑到这一班时，返回它的列车名。
+   *
+   * <p>站牌据此把来车的晚点传过终点：这一班最早要等这辆车跑完上一班、在终点停完站才能开。
+   *
+   * @param intent 票据的交路意图
+   * @return 等的那辆车；不是续班票、交路没有车、或车已经跑过这一班时为空
+   */
+  public Optional<String> awaitedVehicle(TicketIntent intent) {
+    if (!awaitsOwnVehicle(intent)) {
+      return Optional.empty();
+    }
+    return ledger.holderOf(intent.key()).map(ledger::displayName);
+  }
+
+  /** 交路的带客回库班（RETURN 线路上、属于这个交路的车次）。 */
+  private Optional<DueTrip> returnTripOf(DutyKey key) {
+    Timetable timetable = snapshot.byId().get(key.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(key.dutyId())
+        .flatMap(VehicleDuty::returnRouteId)
+        .flatMap(
+            returnRoute ->
+                timetable.trips().stream()
+                    .filter(trip -> trip.routeId().equals(returnRoute))
+                    .filter(trip -> trip.dutyId().filter(key.dutyId()::equals).isPresent())
+                    .findFirst())
+        .map(trip -> dueTrip(timetable, trip, key));
+  }
+
+  /** 交路某个服务日里的一班：发车时刻按服务日算，日期换成起点发车所在的日历日（车次绑定与取消都按日历日）。 */
+  private static DueTrip dueTrip(Timetable timetable, TimetableTrip trip, DutyKey key) {
+    Instant departure = timetable.departureOnServiceDay(trip, key.serviceDate());
+    return new DueTrip(
+        timetable, trip, LocalDate.ofInstant(departure, timetable.zoneId()), departure);
   }
 
   /** 全部绑定快照。 */

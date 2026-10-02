@@ -109,7 +109,8 @@ public record PidsSettings(
                 reader.bool("broadcast.trigger-arriving", true),
                 reader.bool("broadcast.trigger-passing", true),
                 reader.bool("broadcast.trigger-cancelled", true),
-                reader.bool("broadcast.trigger-delayed", true)),
+                reader.bool("broadcast.trigger-delayed", true),
+                reader.bool("broadcast.trigger-platform-changed", true)),
             reader.bool("broadcast.channel-text", broadcastDefault.channelText()),
             reader.bool("broadcast.channel-sound", broadcastDefault.channelSound()));
 
@@ -325,9 +326,14 @@ public record PidsSettings(
    * @param cancelled 班次取消
    * @param delayed 严重晚点（达到 {@link
    *     org.fetarute.fetaruteTCAddon.display.Lateness#SEVERELY_LATE_SECONDS}）
+   * @param platformChanged 站台变更（走聊天）
    */
   public record BroadcastTriggers(
-      boolean arriving, boolean passing, boolean cancelled, boolean delayed) {}
+      boolean arriving,
+      boolean passing,
+      boolean cancelled,
+      boolean delayed,
+      boolean platformChanged) {}
 
   /**
    * 播报策略。全站广播：离玩家最近的已加载屏幕只用来认车站，全站各站台的事件都播报，每条带站台号。
@@ -352,7 +358,7 @@ public record PidsSettings(
     /** 内置默认值：全部触发与通道开启。 */
     public static final BroadcastSettings DEFAULT =
         new BroadcastSettings(
-            true, 32, 600, 30, new BroadcastTriggers(true, true, true, true), true, true);
+            true, 32, 600, 30, new BroadcastTriggers(true, true, true, true, true), true, true);
 
     /** 保证触发开关不为 {@code null}。 */
     public BroadcastSettings {
