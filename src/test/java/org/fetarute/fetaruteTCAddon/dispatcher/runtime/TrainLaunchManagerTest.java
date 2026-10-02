@@ -59,6 +59,35 @@ class TrainLaunchManagerTest {
   }
 
   @Test
+  void speedCommandReferenceIsRememberedWithoutWritingTags() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-memory");
+    RuntimeTrainHandle train = new FakeTrain(tags.properties(), true, 0.0);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 1.0, 2.0);
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0);
+
+    for (double target : new double[] {0.0, 20.0}) {
+      manager.applyControl(
+          train,
+          tags.properties(),
+          SignalAspect.PROCEED,
+          target,
+          config,
+          false,
+          OptionalLong.empty(),
+          Optional.empty(),
+          runtime);
+    }
+
+    ArgumentCaptor<Double> speedCaptor = ArgumentCaptor.forClass(Double.class);
+    verify(tags.properties(), org.mockito.Mockito.times(2)).setSpeedLimit(speedCaptor.capture());
+    assertTrue(speedCaptor.getAllValues().get(1) < 0.05, "第二次命令应按内存里记下的上一命令限幅");
+    assertTrue(
+        tags.tags.stream().noneMatch(tag -> tag.startsWith("FTA_LAST_SPEED_CMD")),
+        "速度命令参照不应再写进 tag：" + tags.tags);
+  }
+
+  @Test
   void applyControlDisablesTrainCartsSlowdown() {
     TrainLaunchManager manager = new TrainLaunchManager();
     TagStore tags = new TagStore("train-slowdown");
