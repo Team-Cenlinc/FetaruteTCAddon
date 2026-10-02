@@ -1,8 +1,10 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
+import com.bergerkiller.bukkit.tc.properties.CartProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
@@ -95,7 +97,7 @@ public final class TrainTagHelper {
   /**
    * 写入/覆盖 tag。
    *
-   * <p>写入前会移除已有的同名 key，保证唯一性。该 key 已经只有这一条、值也相同时不动：TrainCarts 每次增删 tag
+   * <p>写入前会移除已有的同名 key，保证唯一性。每节车厢上该 key 都已经只有这一条、值也相同时不动：TrainCarts 每次增删 tag
    * 都要逐节车厢同步配置里的列表，运行时每个信号周期都会重写列车名等不变的 tag。
    */
   public static void writeTag(TrainProperties properties, String key, String value) {
@@ -105,7 +107,7 @@ public final class TrainTagHelper {
     String normalizedKey = key.trim();
     String normalizedValue = value == null ? "" : value.trim();
     String tag = normalizedKey + "=" + normalizedValue;
-    if (isOnlyTagForKey(properties, normalizedKey, tag)) {
+    if (everyCartHasOnly(properties, normalizedKey.toLowerCase(Locale.ROOT), tag)) {
       return;
     }
     removeTagKey(properties, normalizedKey);
@@ -130,19 +132,33 @@ public final class TrainTagHelper {
     }
   }
 
-  /** 该 key 的 tag 是否恰好只有 {@code tag} 这一条（按原始字符串比较）。 */
-  private static boolean isOnlyTagForKey(TrainProperties properties, String key, String tag) {
-    if (!properties.hasTags()) {
+  /**
+   * 每节车厢上该 key 的 tag 是否都恰好只有 {@code tag} 这一条（按原始字符串比较）。
+   *
+   * <p>逐节车厢看，不看整列的并集：并集只说明有车厢带着它，后挂上来的车厢可能没有；照常写一遍才能补齐，之后拆分出去的那一截才不会丢标签。 拿不到车厢时照常写。
+   */
+  private static boolean everyCartHasOnly(
+      TrainProperties properties, String lowerCaseKey, String tag) {
+    Iterator<CartProperties> carts = properties.iterator();
+    if (carts == null || !carts.hasNext()) {
       return false;
     }
-    Collection<String> tags = properties.getTags();
+    while (carts.hasNext()) {
+      CartProperties cart = carts.next();
+      if (cart == null || !hasOnly(cart.getTags(), lowerCaseKey, tag)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private static boolean hasOnly(Collection<String> tags, String lowerCaseKey, String tag) {
     if (tags == null) {
       return false;
     }
-    String target = key.toLowerCase(Locale.ROOT);
     boolean found = false;
     for (String current : tags) {
-      if (!matchesKey(current, target)) {
+      if (!matchesKey(current, lowerCaseKey)) {
         continue;
       }
       if (!tag.equals(current)) {
