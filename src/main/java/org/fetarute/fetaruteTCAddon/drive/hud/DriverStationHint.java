@@ -4,7 +4,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 
 /**
@@ -132,21 +132,31 @@ public final class DriverStationHint {
       return Optional.empty();
     }
     String label = link.targetLabel();
-    // 只有进站后（站台量出的停车点）停短才提示前移；进站前停车多半是在等信号。
+    StopWindow window = link.stopWindow();
     boolean precise = target.get().precise();
-    if (stopped && precise && remaining > StopAlignment.acceptBlocks()) {
+    // 停短：进站后（站台量出的停车点）停在窗口外；进站前停车则要行车许可够走进窗口才算停短
+    // （短编组停短时车头还没压到车站牌子），否则多半是在等信号。
+    if (stopped
+        && remaining > window.acceptBlocks()
+        && (precise || link.authorityAheadBlocks() > remaining - window.acceptBlocks())) {
       return Optional.of(
           new Hint(
               Kind.MOVE_UP, "", Map.of("station", label, "distance", formatDistance(remaining))));
     }
-    if (precise && Math.abs(remaining) <= StopAlignment.accurateBlocks()) {
+    if (precise && Math.abs(remaining) <= window.accurateBlocks()) {
       return Optional.of(new Hint(Kind.ON_MARK, "", Map.of("station", label)));
     }
+    // 越过只认站台量出的偏移：进站前的估计按里程外推，略有出入时不当作越过。
+    boolean overrun = precise && remaining < 0.0;
     return Optional.of(
         new Hint(
-            remaining < 0.0 ? Kind.OVERRUN : Kind.APPROACH,
+            overrun ? Kind.OVERRUN : Kind.APPROACH,
             "",
-            Map.of("station", label, "distance", formatDistance(Math.abs(remaining)))));
+            Map.of(
+                "station",
+                label,
+                "distance",
+                formatDistance(overrun ? -remaining : Math.max(0.0, remaining)))));
   }
 
   /** 10 格以内保留一位小数，更远取整。 */

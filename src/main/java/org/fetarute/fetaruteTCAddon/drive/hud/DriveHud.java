@@ -116,12 +116,14 @@ public final class DriveHud {
     }
     if (link != null) {
       Optional<DriverStationHint.Hint> station = DriverStationHint.of(link, session.isStopped());
-      if (station.isPresent() && (!sidebarShown || station.get().actionable())) {
-        return locale.component(station.get().key(), station.get().values());
-      }
-      if (station.isPresent() && station.get().atStation()) {
-        // 停站计时、等待发车时车门开着是正常的，倒计时在侧边栏里。
-        return null;
+      switch (stationSlot(station, sidebarShown)) {
+        case SHOW -> {
+          return locale.component(station.get().key(), station.get().values());
+        }
+        case SUPPRESS -> {
+          return null;
+        }
+        case NONE -> {}
       }
     }
     if (session.anyDoorOpen()) {
@@ -134,6 +136,32 @@ public final class DriveHud {
       return locale.component("drive.hud.driver.wait-signal");
     }
     return null;
+  }
+
+  /** 车站提示在动作栏里怎么处理。 */
+  enum StationSlot {
+    /** 显示这条车站提示。 */
+    SHOW,
+    /** 什么也不显示：停站中车门开着是正常的，倒计时与等待在侧边栏里。 */
+    SUPPRESS,
+    /** 不显示车站提示，接着看后面的提示（车门、停车信号）。 */
+    NONE
+  }
+
+  /**
+   * 车站提示放不放进动作栏：侧边栏看得到时只放要驾驶员动手的提示，其余在侧边栏；侧边栏看不到时全放。
+   *
+   * @param hint 此刻的车站提示
+   * @param sidebarShown 驾驶员此刻看得到侧边栏
+   */
+  static StationSlot stationSlot(Optional<DriverStationHint.Hint> hint, boolean sidebarShown) {
+    if (hint.isEmpty()) {
+      return StationSlot.NONE;
+    }
+    if (!sidebarShown || hint.get().actionable()) {
+      return StationSlot.SHOW;
+    }
+    return hint.get().atStation() ? StationSlot.SUPPRESS : StationSlot.NONE;
   }
 
   /** 驾驶调度列车时防护正在介入的提示；没有介入时为 {@code null}。强制停车最要紧，其次紧急制动、ATP 制动、等待交还、无行车许可。 */

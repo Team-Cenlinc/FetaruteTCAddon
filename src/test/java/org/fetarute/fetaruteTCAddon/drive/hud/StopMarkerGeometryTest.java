@@ -4,7 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import org.bukkit.util.Vector;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -68,17 +68,23 @@ class StopMarkerGeometryTest {
   }
 
   @Test
-  @DisplayName("颜色：进站后停准为绿，越过可开门范围为红，其余为黄")
+  @DisplayName("颜色：进站后停准为绿，进站后越过可开门范围为红，其余为黄")
   void tone() {
-    double accurate = StopAlignment.accurateBlocks();
-    double accept = StopAlignment.acceptBlocks();
-    assertEquals(StopMarkerGeometry.Tone.APPROACH, StopMarkerGeometry.tone(40.0, false));
+    StopWindow window = StopWindow.DEFAULTS;
+    double accurate = window.accurateBlocks();
+    double accept = window.acceptBlocks();
+    assertEquals(StopMarkerGeometry.Tone.APPROACH, StopMarkerGeometry.tone(40.0, false, window));
     assertEquals(
         StopMarkerGeometry.Tone.APPROACH,
-        StopMarkerGeometry.tone(accurate / 2.0, false),
+        StopMarkerGeometry.tone(accurate / 2.0, false, window),
         "估计值不判停准");
-    assertEquals(StopMarkerGeometry.Tone.ON_MARK, StopMarkerGeometry.tone(-accurate, true));
-    assertEquals(StopMarkerGeometry.Tone.APPROACH, StopMarkerGeometry.tone(-accept, true));
-    assertEquals(StopMarkerGeometry.Tone.OVERRUN, StopMarkerGeometry.tone(-accept - 0.5, true));
+    assertEquals(
+        StopMarkerGeometry.Tone.APPROACH,
+        StopMarkerGeometry.tone(-accept - 3.0, false, window),
+        "估计值不判越过");
+    assertEquals(StopMarkerGeometry.Tone.ON_MARK, StopMarkerGeometry.tone(-accurate, true, window));
+    assertEquals(StopMarkerGeometry.Tone.APPROACH, StopMarkerGeometry.tone(-accept, true, window));
+    assertEquals(
+        StopMarkerGeometry.Tone.OVERRUN, StopMarkerGeometry.tone(-accept - 0.5, true, window));
   }
 }

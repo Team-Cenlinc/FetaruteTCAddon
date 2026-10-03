@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopControlMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 
 /**
  * 驾驶员控制的列车的保护包络（相当于 ATP）：把调度层的指令换算成此刻的容许速度，并决定是否介入。
@@ -141,7 +140,7 @@ public final class DriverProtection {
           Math.min(
               permitted,
               brakingCurveBps(
-                  Math.max(0.0, in.stationRemainingBlocks()) + StopAlignment.acceptBlocks(),
+                  Math.max(0.0, in.stationRemainingBlocks()) + config.stopAcceptBlocks(),
                   in.serviceDecelBps2(),
                   in.reactionSeconds()));
     }
@@ -173,7 +172,7 @@ public final class DriverProtection {
       if (iv == Intervention.NONE
           && station
           && in.stationPrecise()
-          && in.stationRemainingBlocks() + StopAlignment.acceptBlocks() < 0.0) {
+          && in.stationRemainingBlocks() + config.stopAcceptBlocks() < 0.0) {
         // 越过停车窗口：再走就错过车站，立即停住。
         iv = Intervention.CLAMP;
       }

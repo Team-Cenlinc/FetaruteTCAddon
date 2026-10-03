@@ -90,6 +90,8 @@ final class ClientBlockDisplay {
       PacketUtil.sendPacket(player, spawn);
       PacketUtil.sendPacket(
           player, PacketPlayOutEntityMetadataHandle.createNew(entityId, metadata, true));
+      // 生成包已带上全部外观：清掉变更标记，免得下一次同步又重发一遍。
+      metadata.packChanges();
       spawnedWorld = world.getUID();
       sentPosition = position.clone();
       return;

@@ -24,33 +24,4 @@ class StopAlignmentTest {
         1e-9);
     assertTrue(Double.isNaN(StopAlignment.signedOffset(stop, stop, new Vector(0, 1, 0))));
   }
-
-  @Test
-  @DisplayName("停车窗口：默认 2.5 格内停准，6 格内可开门，再远分停短与越过")
-  void classify() {
-    StopAlignment.configure(
-        StopAlignment.DEFAULT_ACCURATE_BLOCKS, StopAlignment.DEFAULT_ACCEPT_BLOCKS);
-    assertEquals(StopAlignment.Window.ACCURATE, StopAlignment.classify(-2.5));
-    assertEquals(StopAlignment.Window.ACCURATE, StopAlignment.classify(1.0));
-    assertEquals(StopAlignment.Window.ACCEPTED, StopAlignment.classify(5.9));
-    assertEquals(StopAlignment.Window.ACCEPTED, StopAlignment.classify(-6.0));
-    assertEquals(StopAlignment.Window.SHORT, StopAlignment.classify(-6.1));
-    assertEquals(StopAlignment.Window.OVERRUN, StopAlignment.classify(8.0));
-    assertEquals(StopAlignment.Window.ACCEPTED, StopAlignment.classify(Double.NaN), "量不出时不挡住停站");
-  }
-
-  @Test
-  @DisplayName("窗口可配置；不合理的配置退回默认值")
-  void configure() {
-    try {
-      StopAlignment.configure(1.0, 3.0);
-      assertEquals(StopAlignment.Window.ACCEPTED, StopAlignment.classify(2.0));
-      assertEquals(StopAlignment.Window.SHORT, StopAlignment.classify(-3.5));
-      StopAlignment.configure(4.0, 3.0);
-      assertEquals(StopAlignment.DEFAULT_ACCEPT_BLOCKS, StopAlignment.acceptBlocks(), 1e-9);
-    } finally {
-      StopAlignment.configure(
-          StopAlignment.DEFAULT_ACCURATE_BLOCKS, StopAlignment.DEFAULT_ACCEPT_BLOCKS);
-    }
-  }
 }

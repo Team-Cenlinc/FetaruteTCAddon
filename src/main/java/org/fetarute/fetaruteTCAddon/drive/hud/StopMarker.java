@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.drive.hud;
 
 import com.bergerkiller.bukkit.common.wrappers.BlockData;
-import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.rails.RailLookup;
@@ -12,6 +11,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.Material;
@@ -21,7 +21,6 @@ import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
@@ -53,7 +52,19 @@ public final class StopMarker {
   /** 移动时客户端插值的 tick 数。 */
   private static final int MOVE_TICKS = 2;
 
+  /** 一名驾驶员客户端上的标线。 */
+  interface View {
+    /** 显示或挪到这个位置（标线底面中心），横跨 {@code forward} 方向的轨道。 */
+    void show(
+        Player player, World world, Vector position, Vector forward, StopMarkerGeometry.Tone tone);
+
+    /** 从客户端撤掉；没显示时什么也不做。玩家已离线时为 {@code null}。 */
+    void hide(Player player);
+  }
+
   private final Function<NodeId, Optional<SignNodeRegistry.SignNodeInfo>> signs;
+  private final Supplier<View> views;
+  private final Function<UUID, Player> players;
   private final Map<UUID, State> states = new HashMap<>();
 
   /** 停车点所在的轨道：位置与走向。 */
@@ -63,68 +74,78 @@ public final class StopMarker {
     private Anchor anchor;
     private NodeId failedNode;
     private long retryAtTick;
-    private ClientBlockDisplay display;
-    private StopMarkerGeometry.Tone tone;
+    private View view;
   }
 
   /**
    * @param signs 按节点找车站牌子
    */
   public StopMarker(Function<NodeId, Optional<SignNodeRegistry.SignNodeInfo>> signs) {
-    this.signs = Objects.requireNonNull(signs, "signs");
+    this(signs, ClientView::new, Bukkit::getPlayer);
   }
 
-  /** 刷新驾驶员的停车标：前方没有要对标的车站、已经停妥或改由 ATO 操纵时撤掉。 */
-  public void update(Player player, DriveSession session, MinecartGroup group, long nowTick) {
+  StopMarker(
+      Function<NodeId, Optional<SignNodeRegistry.SignNodeInfo>> signs,
+      Supplier<View> views,
+      Function<UUID, Player> players) {
+    this.signs = Objects.requireNonNull(signs, "signs");
+    this.views = Objects.requireNonNull(views, "views");
+    this.players = Objects.requireNonNull(players, "players");
+  }
+
+  /**
+   * 刷新驾驶员的停车标：前方没有要对标的车站、已经停妥或改由 ATO 操纵时撤下（记录留着，再出现时不必重新找轨道）。
+   *
+   * @param travel 列车前进方向（车尾指向车头）
+   * @param center 列车中心（车头与车尾的中点）
+   * @param seat 驾驶员座位的位置
+   */
+  public void update(
+      Player player,
+      DriveSession session,
+      Vector travel,
+      Vector center,
+      Vector seat,
+      long nowTick) {
     DriverLink link = session.driverLink();
     Optional<DriverLink.StationTarget> target =
         link == null || !link.controlsPhysically() ? Optional.empty() : link.stationTarget();
+    State state = states.computeIfAbsent(player.getUniqueId(), id -> new State());
     if (target.isEmpty()
         || !target.get().station()
-        || Math.abs(target.get().remainingBlocks()) > SHOW_BLOCKS
-        || group == null
-        || group.isEmpty()) {
-      remove(player.getUniqueId());
+        || Math.abs(target.get().remainingBlocks()) > SHOW_BLOCKS) {
+      hide(player, state);
       return;
     }
-    State state = states.computeIfAbsent(player.getUniqueId(), id -> new State());
     World world = player.getWorld();
     Optional<Anchor> anchor = anchor(state, target.get().node(), link, world, nowTick);
     if (anchor.isEmpty() || !anchor.get().worldId().equals(world.getUID())) {
-      discard(player, state);
+      hide(player, state);
       return;
     }
     Optional<StopMarkerGeometry.Placement> placement =
-        StopMarkerGeometry.place(
-            anchor.get().point(),
-            anchor.get().axis(),
-            StopAlignment.travel(group),
-            StopAlignment.center(group),
-            player.getLocation().toVector());
+        StopMarkerGeometry.place(anchor.get().point(), anchor.get().axis(), travel, center, seat);
     if (placement.isEmpty()) {
-      discard(player, state);
+      hide(player, state);
       return;
     }
-    if (state.display == null) {
-      state.display =
-          new ClientBlockDisplay(
-              new Vector(WIDTH, HEIGHT, DEPTH), (float) (SHOW_BLOCKS / 64.0), MOVE_TICKS);
+    if (state.view == null) {
+      state.view = views.get();
     }
-    StopMarkerGeometry.Tone tone =
-        StopMarkerGeometry.tone(target.get().remainingBlocks(), target.get().precise());
-    if (tone != state.tone) {
-      state.display.setAppearance(BlockData.fromMaterial(material(tone)), color(tone).asRGB());
-      state.tone = tone;
-    }
-    state.display.setForward(placement.get().direction());
-    state.display.sync(player, world, placement.get().position().add(new Vector(0.0, LIFT, 0.0)));
+    state.view.show(
+        player,
+        world,
+        placement.get().position().add(new Vector(0.0, LIFT, 0.0)),
+        placement.get().direction(),
+        StopMarkerGeometry.tone(
+            target.get().remainingBlocks(), target.get().precise(), link.stopWindow()));
   }
 
-  /** 撤掉玩家的停车标。 */
+  /** 撤掉玩家的停车标并丢掉记录。驾驶结束时调用。 */
   public void remove(UUID playerId) {
     State state = states.remove(playerId);
     if (state != null) {
-      discard(Bukkit.getPlayer(playerId), state);
+      hide(players.apply(playerId), state);
     }
   }
 
@@ -191,25 +212,49 @@ public final class StopMarker {
     }
   }
 
-  private static void discard(Player player, State state) {
-    if (state.display != null) {
-      state.display.destroy(player);
+  private static void hide(Player player, State state) {
+    if (state.view != null) {
+      state.view.hide(player);
     }
   }
 
-  private static Material material(StopMarkerGeometry.Tone tone) {
-    return switch (tone) {
-      case APPROACH -> Material.YELLOW_CONCRETE;
-      case ON_MARK -> Material.LIME_CONCRETE;
-      case OVERRUN -> Material.RED_CONCRETE;
-    };
-  }
+  /** 用只发给驾驶员的方块展示实体画标线。 */
+  private static final class ClientView implements View {
+    private final ClientBlockDisplay display =
+        new ClientBlockDisplay(
+            new Vector(WIDTH, HEIGHT, DEPTH), (float) (SHOW_BLOCKS / 64.0), MOVE_TICKS);
+    private StopMarkerGeometry.Tone tone;
 
-  private static Color color(StopMarkerGeometry.Tone tone) {
-    return switch (tone) {
-      case APPROACH -> Color.YELLOW;
-      case ON_MARK -> Color.LIME;
-      case OVERRUN -> Color.RED;
-    };
+    @Override
+    public void show(
+        Player player, World world, Vector position, Vector forward, StopMarkerGeometry.Tone next) {
+      if (next != tone) {
+        display.setAppearance(BlockData.fromMaterial(material(next)), color(next).asRGB());
+        tone = next;
+      }
+      display.setForward(forward);
+      display.sync(player, world, position);
+    }
+
+    @Override
+    public void hide(Player player) {
+      display.destroy(player);
+    }
+
+    private static Material material(StopMarkerGeometry.Tone tone) {
+      return switch (tone) {
+        case APPROACH -> Material.YELLOW_CONCRETE;
+        case ON_MARK -> Material.LIME_CONCRETE;
+        case OVERRUN -> Material.RED_CONCRETE;
+      };
+    }
+
+    private static Color color(StopMarkerGeometry.Tone tone) {
+      return switch (tone) {
+        case APPROACH -> Color.YELLOW;
+        case ON_MARK -> Color.LIME;
+        case OVERRUN -> Color.RED;
+      };
+    }
   }
 }

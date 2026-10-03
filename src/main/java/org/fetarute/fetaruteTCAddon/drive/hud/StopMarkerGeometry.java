@@ -2,7 +2,7 @@ package org.fetarute.fetaruteTCAddon.drive.hud;
 
 import java.util.Optional;
 import org.bukkit.util.Vector;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 
 /**
  * 发光停车标的位置与颜色。
@@ -46,7 +46,7 @@ public final class StopMarkerGeometry {
     APPROACH,
     /** 已在停准范围内。 */
     ON_MARK,
-    /** 越过可开门范围。 */
+    /** 进站后越过可开门范围。 */
     OVERRUN
   }
 
@@ -94,12 +94,13 @@ public final class StopMarkerGeometry {
    *
    * @param remainingBlocks 列车中心到停车点的距离（越过为负）
    * @param precise 由站台按实际位置量出（进站后）
+   * @param window 停车窗口
    */
-  public static Tone tone(double remainingBlocks, boolean precise) {
-    if (precise && Math.abs(remainingBlocks) <= StopAlignment.accurateBlocks()) {
+  public static Tone tone(double remainingBlocks, boolean precise, StopWindow window) {
+    if (precise && Math.abs(remainingBlocks) <= window.accurateBlocks()) {
       return Tone.ON_MARK;
     }
-    if (remainingBlocks < -StopAlignment.acceptBlocks()) {
+    if (precise && remainingBlocks < -window.acceptBlocks()) {
       return Tone.OVERRUN;
     }
     return Tone.APPROACH;

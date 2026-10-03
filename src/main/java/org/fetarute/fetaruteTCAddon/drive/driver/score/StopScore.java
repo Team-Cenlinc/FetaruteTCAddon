@@ -28,7 +28,7 @@ public record StopScore(
     return new StopScore(
         stop.stationName(),
         offset,
-        StopAlignment.classify(offset),
+        stop.window().classify(offset),
         stop.wrongDoorOpened(),
         stop.doorsTakenOver());
   }

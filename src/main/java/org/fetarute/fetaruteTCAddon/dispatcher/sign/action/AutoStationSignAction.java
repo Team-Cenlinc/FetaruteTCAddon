@@ -475,7 +475,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           // 驾驶员停得太靠前时等他前移，不当作停妥。
           boolean aligned =
               stop == null
-                  || StopAlignment.classify(stop.offsetBlocks()) != StopAlignment.Window.SHORT;
+                  || stop.window().classify(stop.offsetBlocks()) != StopAlignment.Window.SHORT;
           if (stoppedTicks >= STOP_STABLE_TICKS && aligned) {
             cancel();
             handleStop(

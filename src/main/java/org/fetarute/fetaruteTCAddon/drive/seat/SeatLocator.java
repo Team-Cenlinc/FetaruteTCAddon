@@ -9,8 +9,10 @@ import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import org.bukkit.Location;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.util.Vector;
 
 /**
  * 与 TrainCarts 座位系统的适配：识别玩家当前所坐的座位、按绑定找回座位并让玩家重新入座。
@@ -25,6 +27,27 @@ public final class SeatLocator {
   private static final double RESEAT_RANGE_SQUARED = RESEAT_RANGE * RESEAT_RANGE;
 
   private SeatLocator() {}
+
+  /**
+   * 玩家在 TrainCarts 座位里的眼睛位置（第一人称视角的位置；取不到时用座位位置）。
+   *
+   * <p>服务器上的乘客位置跟着矿车实体（车厢中心），座位附件可能装在车厢前部，这里给的是玩家实际看出去的位置。
+   *
+   * @return 玩家没有坐在 TrainCarts 座位里时为空
+   */
+  public static Optional<Vector> seatEyePosition(Player player) {
+    Entity vehicle = player.getVehicle();
+    MinecartMember<?> member = vehicle == null ? null : MinecartMemberStore.getFromEntity(vehicle);
+    if (member == null) {
+      return Optional.empty();
+    }
+    CartAttachmentSeat seat = member.getAttachments().findSeatOfExistingPassenger(player);
+    if (seat == null) {
+      return Optional.empty();
+    }
+    Location eye = seat.getFirstPersonEyeLocation();
+    return Optional.of(eye != null ? eye.toVector() : seat.getPosition(player).toVector());
+  }
 
   /**
    * 识别玩家当前所坐的 TrainCarts 座位。

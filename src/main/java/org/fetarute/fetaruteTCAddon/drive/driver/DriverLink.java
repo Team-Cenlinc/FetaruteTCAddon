@@ -11,6 +11,7 @@ import java.util.function.LongSupplier;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
@@ -38,6 +39,7 @@ public final class DriverLink {
 
   private DriverStationStop stationStop;
   private NodeId completedStopNode;
+  private StopWindow stopWindow = StopWindow.DEFAULTS;
   private NodeId approachNode;
   private boolean approachStation;
   private double approachRemainingAtSample = Double.NaN;
@@ -60,6 +62,7 @@ public final class DriverLink {
 
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
+  private String nextStopLabel = "";
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -154,6 +157,28 @@ public final class DriverLink {
     return directive == null ? 0.0 : Math.max(0.0, odometer.getAsDouble() - odometerAtDirective);
   }
 
+  /** 行车许可还允许车头往前走多远（格）：不是停车信号时为无穷大；停车信号按授权末端减去收到指令后走过的距离； 没有指令或停车信号没给距离时为 0。 */
+  public double authorityAheadBlocks() {
+    if (directive == null) {
+      return 0.0;
+    }
+    if (!directive.isStop()) {
+      return Double.POSITIVE_INFINITY;
+    }
+    return directive.distanceBlocks().isPresent()
+        ? Math.max(0.0, directive.distanceBlocks().getAsLong() - travelledSinceDirective())
+        : 0.0;
+  }
+
+  /** 站停的停车窗口（驾驶配置）。 */
+  public StopWindow stopWindow() {
+    return stopWindow;
+  }
+
+  public void setStopWindow(StopWindow window) {
+    this.stopWindow = window == null ? StopWindow.DEFAULTS : window;
+  }
+
   /** 调度层要求停车（自动运行下的立即停车）；收到下一条非停车指令时解除，已请求交还时不解除。 */
   public void requestServiceStop() {
     serviceStopRequested = true;
@@ -240,12 +265,18 @@ public final class DriverLink {
   /** 站台交来一次停站。 */
   public void beginStationStop(DriverStationStop stop) {
     this.stationStop = Objects.requireNonNull(stop, "stop");
+    stop.setWindow(stopWindow);
   }
 
   /** 进行中的停站；结束后清掉，并记住这一站，避免调度采样还没刷新时又把它当成前方停车点。 */
   public Optional<DriverStationStop> stationStop() {
     if (stationStop != null && !stationStop.active()) {
       completedStopNode = stationStop.node();
+      if (completedStopNode.equals(approachNode)) {
+        // 停过的这一站不再是前方停车点（调度采样要过一会儿才刷新）。
+        approachNode = null;
+        approachRemainingAtSample = Double.NaN;
+      }
       lastStop = stationStop;
       score.addStop(StopScore.of(stationStop));
       stationStop = null;
@@ -276,13 +307,13 @@ public final class DriverLink {
     if (node != null && !node.equals(completedStopNode)) {
       completedStopNode = null;
     }
-    DriverStationStop current = stationStop().orElse(null);
+    // 先结算已结束的停站，让刚停过的这一站进入 completedStopNode。
+    stationStop();
     if (node == null
         || !stopKind
         || headDistanceBlocks == null
         || headDistanceBlocks.isEmpty()
-        || node.equals(completedStopNode)
-        || (current != null && node.equals(current.node()))) {
+        || node.equals(completedStopNode)) {
       approachNode = null;
       approachRemainingAtSample = Double.NaN;
       return;
@@ -299,13 +330,20 @@ public final class DriverLink {
   /** 前方停车点；进站后按站台量出的偏移，进站前按调度采样推算，都没有时为空。 */
   public Optional<StationTarget> stationTarget() {
     DriverStationStop stop = stationStop().orElse(null);
-    if (stop != null) {
-      if (stop.phase() == DriverStationStop.Phase.APPROACH
-          && Double.isFinite(stop.offsetBlocks())) {
-        return Optional.of(new StationTarget(stop.node(), -stop.offsetBlocks(), true, true));
-      }
+    if (stop == null) {
+      return approachEstimate();
+    }
+    if (stop.phase() != DriverStationStop.Phase.APPROACH) {
       return Optional.empty();
     }
+    if (Double.isFinite(stop.offsetBlocks())) {
+      return Optional.of(new StationTarget(stop.node(), -stop.offsetBlocks(), true, true));
+    }
+    // 站台还没量出偏移（刚交来停站，或量不出列车走向）：沿用进站前对这一站的估计。
+    return approachEstimate().filter(target -> target.node().equals(stop.node()));
+  }
+
+  private Optional<StationTarget> approachEstimate() {
     if (approachNode == null
         || !Double.isFinite(approachRemainingAtSample)
         || clock.getAsLong() - approachSampleTick > APPROACH_SAMPLE_MAX_AGE_TICKS) {
@@ -468,6 +506,15 @@ public final class DriverLink {
   /** 前方停车点的站名（显示用）；没有时为空串。 */
   public String targetLabel() {
     return targetLabel;
+  }
+
+  /** 按交路进度的下一个停靠站（与乘客 HUD 一致）；不明时为空串。 */
+  public String nextStopLabel() {
+    return nextStopLabel;
+  }
+
+  public void setNextStopLabel(String label) {
+    this.nextStopLabel = label == null ? "" : label;
   }
 
   public void setTargetLabel(String label) {

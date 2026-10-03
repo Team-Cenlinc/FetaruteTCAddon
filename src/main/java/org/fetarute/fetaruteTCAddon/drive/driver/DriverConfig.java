@@ -2,7 +2,7 @@ package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 
 /**
  * 驾驶调度列车（DRIVER 模式）的参数（{@code drive.yml} 的 {@code driver} 段）。速度单位为格/秒。
@@ -54,8 +54,8 @@ public record DriverConfig(
         40,
         200,
         1.0,
-        StopAlignment.DEFAULT_ACCURATE_BLOCKS,
-        StopAlignment.DEFAULT_ACCEPT_BLOCKS,
+        StopWindow.DEFAULTS.accurateBlocks(),
+        StopWindow.DEFAULTS.acceptBlocks(),
         true,
         DriverRecovery.defaults());
   }
@@ -96,7 +96,7 @@ public record DriverConfig(
     }
     double stopAccurate = positive(section, "stop-accurate-blocks", d.stopAccurateBlocks, sink);
     double stopAccept = positive(section, "stop-accept-blocks", d.stopAcceptBlocks, sink);
-    if (stopAccept <= stopAccurate) {
+    if (!StopWindow.valid(stopAccurate, stopAccept)) {
       sink.accept("drive.yml 的 driver.stop-accept-blocks 须大于 stop-accurate-blocks，使用默认值");
       stopAccurate = d.stopAccurateBlocks;
       stopAccept = d.stopAcceptBlocks;
@@ -115,6 +115,13 @@ public record DriverConfig(
         stopAccept,
         section.getBoolean("stop-marker", d.stopMarker),
         DriverRecovery.from(section, sink));
+  }
+
+  /** 站停的停车窗口。 */
+  public StopWindow stopWindow() {
+    return StopWindow.valid(stopAccurateBlocks, stopAcceptBlocks)
+        ? new StopWindow(stopAccurateBlocks, stopAcceptBlocks)
+        : StopWindow.DEFAULTS;
   }
 
   private static double positive(

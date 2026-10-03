@@ -140,4 +140,65 @@ class DriverLinkTest {
     assertTrue(link.lastDecision() == null);
     assertFalse(link.controlsPhysically());
   }
+
+  @Test
+  @DisplayName("站台刚交来停站、偏移还没量出时沿用进站估计；停站结束后不再把这一站当作前方")
+  void unmeasuredOffsetFallsBackToEstimate() {
+    org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId node =
+        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:1");
+    link.updateApproach(
+        node, "station", java.util.OptionalDouble.of(20.0), java.time.Instant.EPOCH, 5.0);
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop stop =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
+            node, "站", UUID.randomUUID(), new org.bukkit.util.Vector(), null, false, true);
+    link.beginStationStop(stop);
+    DriverLink.StationTarget estimate = link.stationTarget().orElseThrow();
+    assertFalse(estimate.precise());
+    assertEquals(25.0, estimate.remainingBlocks(), 1.0e-9);
+
+    stop.updateOffset(-2.0);
+    assertTrue(link.stationTarget().orElseThrow().precise());
+
+    stop.markStopped();
+    stop.end();
+    assertTrue(link.stationTarget().isEmpty(), "停过的站在调度采样刷新前就不再是前方停车点");
+  }
+
+  @Test
+  @DisplayName("停车窗口随链路交给每一次停站")
+  void stopWindowFlowsToStationStop() {
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow window =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow(1.0, 3.0);
+    link.setStopWindow(window);
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop stop =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
+            org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:1"),
+            "站",
+            UUID.randomUUID(),
+            new org.bukkit.util.Vector(),
+            null,
+            false,
+            true);
+    link.beginStationStop(stop);
+    assertEquals(window, stop.window());
+  }
+
+  @Test
+  @DisplayName("行车许可还能走多远：没有指令为 0，非停车信号无限，停车信号按授权末端减去已走里程")
+  void authorityAhead() {
+    assertEquals(0.0, link.authorityAheadBlocks(), 1.0e-9);
+    link.acceptDirective(directive(SignalAspect.PROCEED));
+    assertTrue(Double.isInfinite(link.authorityAheadBlocks()));
+    link.acceptDirective(
+        new DriverDirective(
+            SignalAspect.STOP,
+            StopControlMode.BRAKING_TO_PLANNED_STOP,
+            0.0,
+            5.0,
+            false,
+            OptionalLong.of(30L),
+            null));
+    odometer[0] = 12.0;
+    assertEquals(18.0, link.authorityAheadBlocks(), 1.0e-9);
+  }
 }

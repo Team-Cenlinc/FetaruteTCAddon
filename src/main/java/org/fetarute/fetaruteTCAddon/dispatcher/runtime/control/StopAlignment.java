@@ -9,20 +9,9 @@ import org.bukkit.util.Vector;
  *
  * <p>停车点与 TrainCarts 对位一致：列车中心停在车站牌子的轨道中心。偏移沿列车前进方向量，越过为正、未到为负。
  *
- * <p>窗口大小来自 {@code drive.yml}（驾驶配置加载时设置），可在任意线程读。
+ * <p>停车窗口的大小见 {@link StopWindow}。
  */
 public final class StopAlignment {
-
-  /** 默认的停准范围（格）：网络延迟与服务器 tick 会让同样的操作停偏零点几格，留出余量。 */
-  public static final double DEFAULT_ACCURATE_BLOCKS = 2.5;
-
-  /** 默认的可开门范围（格）：未到更多时须前移，越过更多时防护强制停车。 */
-  public static final double DEFAULT_ACCEPT_BLOCKS = 6.0;
-
-  private record Thresholds(double accurate, double accept) {}
-
-  private static volatile Thresholds thresholds =
-      new Thresholds(DEFAULT_ACCURATE_BLOCKS, DEFAULT_ACCEPT_BLOCKS);
 
   /** 停车窗口。 */
   public enum Window {
@@ -33,45 +22,6 @@ public final class StopAlignment {
   }
 
   private StopAlignment() {}
-
-  /** 设置停车窗口；不满足 0 &lt; 停准 &lt; 可开门时用默认值。 */
-  public static void configure(double accurateBlocks, double acceptBlocks) {
-    boolean valid =
-        Double.isFinite(accurateBlocks)
-            && Double.isFinite(acceptBlocks)
-            && accurateBlocks > 0.0
-            && acceptBlocks > accurateBlocks;
-    thresholds =
-        valid
-            ? new Thresholds(accurateBlocks, acceptBlocks)
-            : new Thresholds(DEFAULT_ACCURATE_BLOCKS, DEFAULT_ACCEPT_BLOCKS);
-  }
-
-  /** 偏移在这个范围内算停准（格）。 */
-  public static double accurateBlocks() {
-    return thresholds.accurate();
-  }
-
-  /** 偏移在这个范围内可以开门（格）。 */
-  public static double acceptBlocks() {
-    return thresholds.accept();
-  }
-
-  /** 偏移所在的窗口。量不出偏移（{@code NaN}）时按可接受处理，不挡住停站。 */
-  public static Window classify(double offsetBlocks) {
-    if (Double.isNaN(offsetBlocks)) {
-      return Window.ACCEPTED;
-    }
-    Thresholds current = thresholds;
-    double abs = Math.abs(offsetBlocks);
-    if (abs <= current.accurate()) {
-      return Window.ACCURATE;
-    }
-    if (abs <= current.accept()) {
-      return Window.ACCEPTED;
-    }
-    return offsetBlocks < 0.0 ? Window.SHORT : Window.OVERRUN;
-  }
 
   /**
    * 水平面上 {@code center} 相对 {@code stopPoint} 沿 {@code travel} 方向的偏移。

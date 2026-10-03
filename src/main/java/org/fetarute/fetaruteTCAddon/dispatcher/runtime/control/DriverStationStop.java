@@ -40,6 +40,7 @@ public final class DriverStationStop {
   private final boolean bothSides;
   private final boolean doorsRequired;
 
+  private StopWindow window = StopWindow.DEFAULTS;
   private Phase phase = Phase.APPROACH;
   private double offsetBlocks = Double.NaN;
   private double stoppedOffsetBlocks = Double.NaN;
@@ -103,6 +104,15 @@ public final class DriverStationStop {
 
   public boolean doorsRequired() {
     return doorsRequired;
+  }
+
+  /** 本次停站的停车窗口（驾驶员接下停站时按驾驶配置设置）。 */
+  public StopWindow window() {
+    return window;
+  }
+
+  public void setWindow(StopWindow window) {
+    this.window = window == null ? StopWindow.DEFAULTS : window;
   }
 
   public Phase phase() {

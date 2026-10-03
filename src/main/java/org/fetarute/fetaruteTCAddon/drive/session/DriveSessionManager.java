@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
@@ -139,6 +140,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 每隔多少 tick 检查一次是否到了终点站。 */
   private static final int TERMINAL_CHECK_TICKS = 20;
 
+  /** 按交路进度刷新“下一站”的间隔（tick）。 */
+  private static final int NEXT_STOP_REFRESH_TICKS = 20;
+
   /** 每多少 tick 重发一次背包，兜底没被数据包改写覆盖到的背包更新。重发的内容本身已被改写成驾驶物品，不会触发客户端的“收到物品”动画。 */
   private static final int HOTBAR_REFRESH_TICKS = 100;
 
@@ -207,8 +211,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   private void applyDriverConfig(DriveConfig current) {
     driverRegistry.setAtoConfirmTicks(current.driver().recovery().atoConfirmSeconds() * 20L);
-    StopAlignment.configure(
-        current.driver().stopAccurateBlocks(), current.driver().stopAcceptBlocks());
+    for (DriveSession session : active.values()) {
+      if (session.driverLink() != null) {
+        session.driverLink().setStopWindow(current.driver().stopWindow());
+      }
+    }
   }
 
   private void traceTask(String message) {
@@ -517,6 +524,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               group.getProperties(),
               session::odometerBlocks,
               Bukkit::getCurrentTick);
+      driverLink.setStopWindow(config.driver().stopWindow());
       driverLink.setMode(
           tasks
               .claimFor(player.getUniqueId(), group.getProperties().getTrainName())
@@ -1489,8 +1497,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (now >= session.actionBarHeldUntil()) {
         player.sendActionBar(DriveHud.render(plugin.getLocaleManager(), session, sidebarShown));
       }
-      if (current.driver().stopMarker()) {
-        stopMarker.update(player, session, group, now);
+      if (current.driver().stopMarker() && session.driverLink() != null) {
+        stopMarker.update(
+            player,
+            session,
+            StopAlignment.travel(group),
+            StopAlignment.center(group),
+            SeatLocator.seatEyePosition(player).orElseGet(() -> player.getLocation().toVector()),
+            now);
       } else {
         stopMarker.remove(player.getUniqueId());
       }
@@ -1545,8 +1559,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
     } else {
       link.setRequiredDoorSide(DriverDoorSide.NONE);
+      if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0) {
+        link.setNextStopLabel(nextStopLabel(group));
+      }
+      // 前方有停车点时按它的站名；还没进入调度的进站范围时按交路进度的下一站。
       link.setTargetLabel(
-          link.stationTarget().map(target -> stationLabel(target.node())).orElse(""));
+          link.stationTarget()
+              .map(target -> stationLabel(target.node()))
+              .orElse(link.nextStopLabel()));
       session.setLastStationPhase(null);
     }
     return false;
@@ -2003,6 +2023,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /** 节点所属车站的站名；查不到时用节点编号。 */
+  /** 列车按交路进度的下一个停靠站（与乘客 HUD 同一口径）；展示层未启用或不明时为空串。 */
+  private String nextStopLabel(MinecartGroup group) {
+    return plugin
+        .getDisplayService()
+        .flatMap(display -> display.hudContext(group))
+        .map(TrainHudContext::nextStation)
+        .filter(station -> !station.isEmpty())
+        .map(TrainHudContext.StationDisplay::label)
+        .orElse("");
+  }
+
   private String stationLabel(NodeId node) {
     return plugin
         .getStationDirectory()

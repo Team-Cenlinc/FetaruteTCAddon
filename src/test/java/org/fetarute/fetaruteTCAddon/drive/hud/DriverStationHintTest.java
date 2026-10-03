@@ -6,10 +6,14 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopControlMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.junit.jupiter.api.DisplayName;
@@ -123,5 +127,52 @@ class DriverStationHintTest {
         NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(50.0), Instant.EPOCH, 10.0);
     assertEquals(
         "drive.hud.station.approach", DriverStationHint.of(link, true).orElseThrow().key());
+  }
+
+  private static DriverDirective directive(SignalAspect aspect, long distance) {
+    return new DriverDirective(
+        aspect,
+        StopControlMode.BRAKING_TO_PLANNED_STOP,
+        10.0,
+        10.0,
+        aspect != SignalAspect.STOP,
+        OptionalLong.of(distance),
+        null);
+  }
+
+  @Test
+  @DisplayName("短编组停短在牌子前：行车许可够走进窗口就提示前移，停车信号挡着则不提示")
+  void moveUpBeforeTheSignWhenAuthorityAllows() {
+    link.updateApproach(
+        NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(8.0), Instant.EPOCH, 3.0);
+    link.acceptDirective(directive(SignalAspect.PROCEED, 0L));
+    DriverStationHint.Hint hint = DriverStationHint.of(link, true).orElseThrow();
+    assertEquals(DriverStationHint.Kind.MOVE_UP, hint.kind());
+    assertEquals("11", hint.values().get("distance"));
+
+    link.acceptDirective(directive(SignalAspect.STOP, 2L));
+    assertEquals(
+        DriverStationHint.Kind.APPROACH, DriverStationHint.of(link, true).orElseThrow().kind());
+    link.acceptDirective(directive(SignalAspect.STOP, 40L));
+    assertEquals(
+        DriverStationHint.Kind.MOVE_UP,
+        DriverStationHint.of(link, true).orElseThrow().kind(),
+        "授权末端在站台另一头（出站信号关着）时仍可前移");
+  }
+
+  @Test
+  @DisplayName("估计值略为负时不当作越过")
+  void estimateNeverOverruns() {
+    link.updateApproach(
+        NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(1.0), Instant.EPOCH, 0.0);
+    odometer[0] = 2.0;
+    DriverStationHint.Hint hint = DriverStationHint.of(link, false).orElseThrow();
+    assertEquals(DriverStationHint.Kind.APPROACH, hint.kind());
+    assertEquals("0.0", hint.values().get("distance"));
+
+    link.beginStationStop(stop);
+    stop.updateOffset(3.0);
+    assertEquals(
+        DriverStationHint.Kind.OVERRUN, DriverStationHint.of(link, false).orElseThrow().kind());
   }
 }
