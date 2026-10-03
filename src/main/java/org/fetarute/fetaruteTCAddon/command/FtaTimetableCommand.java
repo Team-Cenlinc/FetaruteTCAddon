@@ -2251,12 +2251,12 @@ public final class FtaTimetableCommand {
     List<NodeId> waypoints = definition.waypoints();
     return plugin
         .getRailGraphService()
-        .findWorldIdForPath(waypoints)
+        .findNetworkWorldForPath(waypoints)
         .flatMap(
             worldId ->
                 plugin
                     .getRailGraphService()
-                    .getSnapshot(worldId)
+                    .getNetworkSnapshot(worldId)
                     .map(snapshot -> new WorldGraph(worldId, snapshot.graph())));
   }
 

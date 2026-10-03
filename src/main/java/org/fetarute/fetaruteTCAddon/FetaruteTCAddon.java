@@ -355,6 +355,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+    if (railGraphService != null) {
+      railGraphService.configureCrossWorld(
+          configManager.current().graphSettings().crossWorld(), portalLinks);
+    }
     if (pidsConfigManager != null) {
       pidsConfigManager.reload();
     }
@@ -680,6 +684,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             new SignRegistryRailGraphBuilder(
                 signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
             loggerManager::debug);
+    railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
     SignNodeStorageSynchronizer storageSync =
         new RailNodeIncrementalSync(storageManager, railGraphService, loggerManager::debug);
     this.waypointSignAction =

@@ -3020,7 +3020,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
+        railGraphService
+            .getSnapshot(worldIdOpt.get())
+            .map(s -> RailGraphService.runtimeGraph(railGraphService, worldIdOpt.get(), s.graph()));
     if (graphOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, reasonPrefix + "graph-missing");

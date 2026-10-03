@@ -22,6 +22,11 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService"/>
+        <Method name="configureCrossWorld"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getSignNodeRegistry"/>
         <Bug pattern="EI_EXPOSE_REP"/>

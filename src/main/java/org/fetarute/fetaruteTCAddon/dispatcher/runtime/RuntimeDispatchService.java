@@ -14040,7 +14040,9 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     UUID worldId = group.getWorld().getUID();
-    return railGraphService.getSnapshot(worldId).map(s -> s.graph());
+    return railGraphService
+        .getSnapshot(worldId)
+        .map(s -> RailGraphService.runtimeGraph(railGraphService, worldId, s.graph()));
   }
 
   /**
@@ -30540,7 +30542,9 @@ public final class RuntimeDispatchService {
         .getSnapshot(worldId)
         .map(
             snapshot -> {
-              RailGraph graph = snapshot.graph();
+              // 跨世界开启时换成站在本世界看的全网，关闭时就是本世界的图。
+              RailGraph graph =
+                  RailGraphService.runtimeGraph(railGraphService, worldId, snapshot.graph());
               java.util.Map<
                       org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId, RailEdgeOverrideRecord>
                   overrides = railGraphService.edgeOverrides(worldId);

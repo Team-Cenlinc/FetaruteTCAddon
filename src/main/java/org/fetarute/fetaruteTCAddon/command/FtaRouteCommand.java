@@ -3492,7 +3492,10 @@ public final class FtaRouteCommand {
           boolean anyReachable = false;
           for (NodeId from : fromNodes) {
             for (NodeId to : toNodes) {
-              if (plugin.getRailGraphService().findWorldIdForConnectedPair(from, to).isPresent()) {
+              if (plugin
+                  .getRailGraphService()
+                  .findNetworkWorldForConnectedPair(from, to)
+                  .isPresent()) {
                 anyReachable = true;
                 break;
               }
@@ -4591,12 +4594,13 @@ public final class FtaRouteCommand {
     if (plugin.getRailGraphService() == null || pathFinder == null) {
       return Optional.empty();
     }
-    Optional<UUID> worldOpt = plugin.getRailGraphService().findWorldIdForConnectedPair(from, to);
+    Optional<UUID> worldOpt =
+        plugin.getRailGraphService().findNetworkWorldForConnectedPair(from, to);
     if (worldOpt.isEmpty()) {
       return Optional.empty();
     }
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService.RailGraphSnapshot>
-        snapshotOpt = plugin.getRailGraphService().getSnapshot(worldOpt.get());
+        snapshotOpt = plugin.getRailGraphService().getNetworkSnapshot(worldOpt.get());
     if (snapshotOpt.isEmpty() || snapshotOpt.get().graph() == null) {
       return Optional.empty();
     }
@@ -4954,7 +4958,7 @@ public final class FtaRouteCommand {
       return;
     }
     Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
-        graphService.findWorldIdForPath(waypoints).flatMap(graphService::getSnapshot);
+        graphService.findNetworkWorldForPath(waypoints).flatMap(graphService::getNetworkSnapshot);
     if (snapshotOpt.isEmpty()) {
       sender.sendMessage(
           locale.component(

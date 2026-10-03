@@ -58,6 +58,21 @@ public final class RailGraphService {
       new ConcurrentHashMap<>();
 
   private final Object edgeOverrideLock = new Object();
+
+  /** 快照每次增删递增，跨世界路网据此判断要不要重建。 */
+  private final java.util.concurrent.atomic.AtomicLong snapshotVersion =
+      new java.util.concurrent.atomic.AtomicLong();
+
+  private volatile boolean crossWorld;
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry
+      portalLinks;
+  private volatile CachedNetwork cachedNetwork;
+
+  private record CachedNetwork(
+      long snapshotVersion,
+      long linkRevision,
+      org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network) {}
+
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
   private volatile BooleanSupplier snapshotActivationGuard = () -> true;
@@ -119,6 +134,7 @@ public final class RailGraphService {
     RailInterlockingState nextState = interlockingState(graph);
     RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
+    snapshotVersion.incrementAndGet();
     componentIndexes.put(worldId, nextComponentIndex);
     lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
@@ -191,6 +207,104 @@ public final class RailGraphService {
   public Optional<RailGraphSnapshot> getSnapshot(UUID worldId) {
     Objects.requireNonNull(worldId, "worldId");
     return Optional.ofNullable(snapshots.get(worldId));
+  }
+
+  /**
+   * 跨世界设置（{@code graph.cross-world}）与传送门连接。关闭时 {@link #getNetworkSnapshot} 与 {@link #getSnapshot}
+   * 完全相同。
+   */
+  public void configureCrossWorld(
+      boolean enabled,
+      org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links) {
+    this.crossWorld = enabled;
+    this.portalLinks = links;
+    this.cachedNetwork = null;
+  }
+
+  /**
+   * 运行时用的图快照：跨世界开启且有传送门连接时，图是站在这个世界看的全网（节点、边全网，物理联锁本世界）；否则与 {@link #getSnapshot} 相同。
+   *
+   * <p>只给运行时控车、ETA、出车、编表与交路校验用；建图、持久化、联锁目录等按世界处理的流程仍用 {@link #getSnapshot}， 免得把别的世界的节点写进本世界。
+   */
+  public Optional<RailGraphSnapshot> getNetworkSnapshot(UUID worldId) {
+    return getSnapshot(worldId)
+        .map(own -> new RailGraphSnapshot(runtimeGraph(this, worldId, own.graph()), own.builtAt()));
+  }
+
+  /**
+   * 站在这个世界看的路网；跨世界未开启、没有传送门连接或本世界还没有图时为 {@code null}。
+   *
+   * <p>调用方一般用 {@link #runtimeGraph}，它在这里返回 {@code null} 时退回本世界的图。
+   */
+  public RailGraph networkGraph(UUID worldId) {
+    if (worldId == null || getSnapshot(worldId).isEmpty()) {
+      return null;
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network = network();
+    return network == null ? null : network.view(worldId);
+  }
+
+  /** 运行时用的图：跨世界开启时换成站在本世界看的路网，否则就是本世界的图。 */
+  public static RailGraph runtimeGraph(RailGraphService service, UUID worldId, RailGraph own) {
+    RailGraph network = service == null ? null : service.networkGraph(worldId);
+    return network != null ? network : own;
+  }
+
+  /** 交路途经节点所在的世界：先按单个世界找，找不到再看跨世界路网（见 {@link #findCrossWorldPath}）。 */
+  public Optional<UUID> findNetworkWorldForPath(List<NodeId> nodes) {
+    return findWorldIdForPath(nodes).or(() -> findCrossWorldPath(nodes));
+  }
+
+  /**
+   * 跨世界开启时，途经节点在路网里是否依次连通；连通则返回起点所在世界（再用 {@link #runtimeGraph} 取路网）。只在单个世界里连通的路径由 {@link
+   * #findWorldIdForPath} 负责。
+   */
+  public Optional<UUID> findCrossWorldPath(List<NodeId> nodes) {
+    if (nodes == null || nodes.isEmpty()) {
+      return Optional.empty();
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network = network();
+    if (network == null) {
+      return Optional.empty();
+    }
+    for (int i = 0; i + 1 < nodes.size(); i++) {
+      if (!network.connected(nodes.get(i), nodes.get(i + 1))) {
+        return Optional.empty();
+      }
+    }
+    return network.worldOf(nodes.get(0));
+  }
+
+  /** 两个相邻停靠点之间：单个世界连通，或跨世界路网连通（交路校验用）。 */
+  public Optional<UUID> findNetworkWorldForConnectedPair(NodeId from, NodeId to) {
+    return findWorldIdForConnectedPair(from, to).or(() -> findCrossWorldPath(List.of(from, to)));
+  }
+
+  /** 当前的跨世界路网；未开启或没有可用的传送门连接时为 {@code null}。 */
+  private org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network() {
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links = portalLinks;
+    if (!crossWorld || links == null || links.links().isEmpty()) {
+      return null;
+    }
+    long version = snapshotVersion.get();
+    long revision = links.revision();
+    CachedNetwork cached = cachedNetwork;
+    if (cached == null
+        || cached.snapshotVersion() != version
+        || cached.linkRevision() != revision) {
+      Map<UUID, RailGraph> graphs = new HashMap<>();
+      for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
+        graphs.put(entry.getKey(), entry.getValue().graph());
+      }
+      cached =
+          new CachedNetwork(
+              version,
+              revision,
+              org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork.build(
+                  graphs, links.links()));
+      cachedNetwork = cached;
+    }
+    return cached.network().hasPortalEdges() ? cached.network() : null;
   }
 
   /** 返回已加载的图快照数量，用于命令校验/诊断。 */
@@ -312,6 +426,7 @@ public final class RailGraphService {
     Objects.requireNonNull(state, "state");
     UUID worldId = world.getUID();
     snapshots.remove(worldId);
+    snapshotVersion.incrementAndGet();
     componentIndexes.remove(worldId);
     staleStates.put(worldId, state);
   }
@@ -328,7 +443,9 @@ public final class RailGraphService {
     UUID worldId = world.getUID();
     staleStates.remove(worldId);
     componentIndexes.remove(worldId);
-    return snapshots.remove(worldId) != null;
+    boolean removed = snapshots.remove(worldId) != null;
+    snapshotVersion.incrementAndGet();
+    return removed;
   }
 
   /** 返回节点所属连通分量的 key（不存在则 empty）。 */
@@ -597,6 +714,7 @@ public final class RailGraphService {
                 snapshot.edgeCount(),
                 nodeRecords.size()));
         snapshots.remove(worldId);
+        snapshotVersion.incrementAndGet();
         continue;
       }
 
@@ -613,6 +731,7 @@ public final class RailGraphService {
                 snapshot.edgeCount(),
                 nodeRecords.size()));
         snapshots.remove(worldId);
+        snapshotVersion.incrementAndGet();
         continue;
       }
 

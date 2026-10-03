@@ -69,7 +69,8 @@ final class DynamicDestinationResolver {
             .getSnapshot(worldId)
             .map(
                 snapshot -> {
-                  RailGraph graph = snapshot.graph();
+                  RailGraph graph =
+                      RailGraphService.runtimeGraph(railGraphService, worldId, snapshot.graph());
                   var overrides = railGraphService.edgeOverrides(worldId);
                   if (overrides.isEmpty()) {
                     return graph;

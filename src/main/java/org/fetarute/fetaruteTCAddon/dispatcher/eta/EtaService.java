@@ -614,8 +614,9 @@ public final class EtaService {
         railGraphService
             .getSnapshot(snap.worldId())
             .map(
-                org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService.RailGraphSnapshot
-                    ::graph)
+                snapshot ->
+                    RailGraphService.runtimeGraph(
+                        railGraphService, snap.worldId(), snapshot.graph()))
             .orElse(null);
     if (graph == null) {
       return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
@@ -2066,7 +2067,12 @@ public final class EtaService {
       Optional<RailGraph> graphOpt =
           worldOpt.flatMap(
               id ->
-                  railGraphService.getSnapshot(id).map(RailGraphService.RailGraphSnapshot::graph));
+                  railGraphService
+                      .getSnapshot(id)
+                      .map(
+                          snapshot ->
+                              RailGraphService.runtimeGraph(
+                                  railGraphService, id, snapshot.graph())));
       if (graphOpt.isEmpty()) {
         return EtaResult.unavailable("N/A", List.of(EtaReason.NO_PATH));
       }
@@ -2158,7 +2164,12 @@ public final class EtaService {
       RouteDefinition route, int startIndex, int targetIndex) {
     return worldIdForRouteSegment(route, startIndex, targetIndex)
         .flatMap(
-            id -> railGraphService.getSnapshot(id).map(RailGraphService.RailGraphSnapshot::graph));
+            id ->
+                railGraphService
+                    .getSnapshot(id)
+                    .map(
+                        snapshot ->
+                            RailGraphService.runtimeGraph(railGraphService, id, snapshot.graph())));
   }
 
   /** 覆盖交路这一段全部路径点的世界。 */
@@ -2171,7 +2182,10 @@ public final class EtaService {
     if (startIndex < 0 || targetIndex >= waypoints.size() || startIndex >= targetIndex) {
       return Optional.empty();
     }
-    return railGraphService.findWorldIdForPath(waypoints.subList(startIndex, targetIndex + 1));
+    List<NodeId> segment = waypoints.subList(startIndex, targetIndex + 1);
+    return railGraphService
+        .findWorldIdForPath(segment)
+        .or(() -> railGraphService.findCrossWorldPath(segment));
   }
 
   private Instant resolveTicketDepartTime(SpawnTicket ticket) {
