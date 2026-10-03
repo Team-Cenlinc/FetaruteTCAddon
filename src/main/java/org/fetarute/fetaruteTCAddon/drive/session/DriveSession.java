@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
+import org.fetarute.fetaruteTCAddon.drive.driver.SignalConfirm;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveDynamics;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
@@ -605,7 +606,7 @@ public final class DriveSession {
       effective = Notch.B4;
     }
     if (driverLink != null && driverLink.controlsPhysically()) {
-      effective = superviseDriver(effective);
+      effective = superviseDriver(effective, nowTick);
     }
     // 失效导向安全：紧急制动、无人驾驶时的自动制动与停放制动不靠主风缸，不随风压打折。
     boolean failSafe = effective == Notch.EB || parkingBraking || phase != Phase.ACTIVE || !seated;
@@ -619,6 +620,9 @@ public final class DriveSession {
             Math.max(0.0, -dynamics.effort()),
             isStopped(),
             phase == Phase.ACTIVE && seated);
+    if (event == Vigilance.Event.TRIPPED && driverLink != null) {
+      driverLink.countVigilanceTrip();
+    }
     if (event == Vigilance.Event.TRIPPED) {
       // 警惕装置超时：紧急制动，停稳前不能缓解（档位选择器的紧急制动锁定）。
       selector.force(Notch.EB);
@@ -636,9 +640,25 @@ public final class DriveSession {
    *
    * <p>立即停住时把积分速度清零（控车动作随之把列车速度写成 0）；紧急制动锁住手柄，停稳后才能缓解。
    */
-  private Notch superviseDriver(Notch effective) {
+  private Notch superviseDriver(Notch effective, long nowTick) {
     DriverLink link = driverLink;
     boolean stopped = isStopped();
+    // 信号变严要右键确认：行车中迟迟不确认先常用制动，再紧急制动。
+    SignalConfirm confirm = link.signalConfirm();
+    if (link.directive() != null) {
+      confirm.observe(
+          link.directive().aspect(),
+          nowTick,
+          !stopped,
+          config.level() == SimulationLevel.SIMULATION);
+    }
+    SignalConfirm.Intervention unconfirmed = confirm.intervention(nowTick, !stopped);
+    if (unconfirmed == SignalConfirm.Intervention.EMERGENCY) {
+      selector.force(Notch.EB);
+      effective = Notch.EB;
+    } else if (unconfirmed == SignalConfirm.Intervention.SERVICE) {
+      effective = atLeastServiceBrake(effective);
+    }
     if (stopped && link.emergencyLatched()) {
       link.releaseEmergency();
     }

@@ -46,6 +46,9 @@ public final class DriverTask {
   private State state = State.CLAIMED;
   private String trainName;
   private long startedTick = -1L;
+  private Instant startedAt;
+  private int points = -1;
+  private String grade = "";
   private String endReason = "";
 
   public DriverTask(
@@ -147,7 +150,28 @@ public final class DriverTask {
   public void start(String train, long nowTick) {
     this.trainName = train;
     this.startedTick = nowTick;
+    this.startedAt = Instant.now();
     this.state = State.DRIVING;
+  }
+
+  /** 开始驾驶的时刻；还没开始时为 {@code null}。 */
+  public Instant startedAt() {
+    return startedAt;
+  }
+
+  /** 记下成绩。 */
+  public void setResult(int points, String grade) {
+    this.points = points;
+    this.grade = grade == null ? "" : grade;
+  }
+
+  /** 得分；还没评分时为 -1。 */
+  public int points() {
+    return points;
+  }
+
+  public String grade() {
+    return grade;
   }
 
   /** 开始驾驶的 tick；还没开始时为 -1。 */

@@ -1,16 +1,21 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
@@ -19,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.parser.standard.StringParser;
@@ -35,6 +41,9 @@ public final class FtaDriveCommand {
   private static final String PERMISSION_ADMIN = "fetarute.drive.admin";
   private static final String PERMISSION_DRIVER = DriveSessionManager.PERMISSION_DRIVER;
   private static final double KMH_PER_BPS = 3.6;
+  private static final int RECORD_LINES = 10;
+  private static final java.time.format.DateTimeFormatter TIME =
+      java.time.format.DateTimeFormatter.ofPattern("MM-dd HH:mm");
 
   private final FetaruteTCAddon plugin;
 
@@ -161,6 +170,44 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("records")
+            .permission(PERMISSION_DRIVER)
+            .optional("player", StringParser.stringParser())
+            .handler(
+                ctx ->
+                    handleRecords(
+                        ctx.sender(),
+                        ctx.optional("player").map(String.class::cast).orElse(null))));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("top")
+            .permission(PERMISSION_DRIVER)
+            .optional(
+                "period",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("week", "all"))
+            .handler(
+                ctx ->
+                    handleTop(
+                        ctx.sender(),
+                        ctx.optional("period").map(String.class::cast).orElse("week"))));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("revoke")
+            .permission(PERMISSION_ADMIN)
+            .required("player", StringParser.stringParser(), driverSuggestions)
+            .handler(ctx -> handleRevoke(ctx.sender(), ((String) ctx.get("player")).trim())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("mode")
             .permission(PERMISSION_DRIVER)
             .required(
@@ -217,6 +264,9 @@ public final class FtaDriveCommand {
             "tasks",
             "task",
             "mode",
+            "records",
+            "top",
+            "revoke",
             "list",
             "stop",
             "handback",
@@ -471,6 +521,152 @@ public final class FtaDriveCommand {
       return;
     }
     sender.sendMessage(plugin.getLocaleManager().component(drive.setDrivingMode(player, mode)));
+  }
+
+  /** 驾驶记录：自己的，或（管理员）别人的。 */
+  private void handleRecords(CommandSender sender, String playerName) {
+    LocaleManager locale = plugin.getLocaleManager();
+    UUID target;
+    String targetName;
+    if (playerName == null || playerName.isBlank()) {
+      Player self = requirePlayer(sender);
+      if (self == null) {
+        return;
+      }
+      target = self.getUniqueId();
+      targetName = self.getName();
+    } else {
+      if (!sender.hasPermission(PERMISSION_ADMIN)) {
+        sender.sendMessage(locale.component("drive.command.records.no-permission"));
+        return;
+      }
+      Player other = Bukkit.getPlayerExact(playerName);
+      if (other == null) {
+        sender.sendMessage(
+            locale.component("drive.command.records.offline", Map.of("player", playerName)));
+        return;
+      }
+      target = other.getUniqueId();
+      targetName = other.getName();
+    }
+    queryAsync(
+        sender,
+        provider -> provider.driveTaskRecords().listByPlayer(target, RECORD_LINES),
+        records -> {
+          if (records.isEmpty()) {
+            sender.sendMessage(
+                locale.component("drive.command.records.empty", Map.of("player", targetName)));
+            return;
+          }
+          sender.sendMessage(
+              locale.component("drive.command.records.header", Map.of("player", targetName)));
+          for (DriveTaskRecord record : records) {
+            sender.sendMessage(
+                locale.component(
+                    "drive.command.records.entry",
+                    Map.of(
+                        "time",
+                        TIME.format(record.finishedAt().atZone(ZoneId.systemDefault())),
+                        "route",
+                        record.routeCode(),
+                        "trip",
+                        record.tripCode(),
+                        "mode",
+                        record.mode(),
+                        "state",
+                        locale.text("drive.task.state." + record.state().toLowerCase(Locale.ROOT)),
+                        "points",
+                        String.valueOf(record.points()),
+                        "grade",
+                        record.grade())));
+          }
+        });
+  }
+
+  /** 排行：本周（近 7 天）或全部完成的任务按总分。 */
+  private void handleTop(CommandSender sender, String period) {
+    LocaleManager locale = plugin.getLocaleManager();
+    boolean all = period.equalsIgnoreCase("all");
+    Instant since = all ? null : Instant.now().minus(Duration.ofDays(7));
+    queryAsync(
+        sender,
+        provider -> provider.driveTaskRecords().leaderboard(since, RECORD_LINES),
+        rows -> {
+          sender.sendMessage(
+              locale.component(
+                  all ? "drive.command.top.header-all" : "drive.command.top.header-week"));
+          if (rows.isEmpty()) {
+            sender.sendMessage(locale.component("drive.command.top.empty"));
+            return;
+          }
+          int rank = 1;
+          for (DriveLeaderboardRow row : rows) {
+            sender.sendMessage(
+                locale.component(
+                    "drive.command.top.entry",
+                    Map.of(
+                        "rank",
+                        String.valueOf(rank++),
+                        "player",
+                        row.playerName(),
+                        "tasks",
+                        String.valueOf(row.tasks()),
+                        "points",
+                        String.valueOf(row.totalPoints()))));
+          }
+        });
+  }
+
+  /** 管理员收回某名玩家的任务。 */
+  private void handleRevoke(CommandSender sender, String playerName) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    Player target = Bukkit.getPlayerExact(playerName);
+    boolean revoked = target != null && drive.revokeTask(target.getUniqueId());
+    sender.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(
+                revoked ? "drive.command.revoke.done" : "drive.command.revoke.none",
+                Map.of("player", playerName)));
+  }
+
+  /** 在异步线程查库，回主线程回复。存储未就绪时直接提示。 */
+  private <T> void queryAsync(
+      CommandSender sender,
+      java.util.function.Function<StorageProvider, T> query,
+      java.util.function.Consumer<T> reply) {
+    Optional<StorageProvider> provider =
+        plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()
+            ? Optional.empty()
+            : plugin.getStorageManager().provider();
+    if (provider.isEmpty()) {
+      sender.sendMessage(plugin.getLocaleManager().component("drive.command.records.unavailable"));
+      return;
+    }
+    Bukkit.getScheduler()
+        .runTaskAsynchronously(
+            plugin,
+            () -> {
+              T result;
+              try {
+                result = query.apply(provider.get());
+              } catch (RuntimeException ex) {
+                plugin.getLogger().warning("读取驾驶记录失败: " + ex);
+                Bukkit.getScheduler()
+                    .runTask(
+                        plugin,
+                        () ->
+                            sender.sendMessage(
+                                plugin
+                                    .getLocaleManager()
+                                    .component("drive.command.records.unavailable")));
+                return;
+              }
+              Bukkit.getScheduler().runTask(plugin, () -> reply.accept(result));
+            });
   }
 
   /** 查看或解除全网熔断。 */

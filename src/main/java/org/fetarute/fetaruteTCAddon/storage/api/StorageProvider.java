@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.Tim
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
 
 /** 汇总所有仓库实例，供服务层注入。 */
 public interface StorageProvider extends AutoCloseable {
@@ -55,6 +56,9 @@ public interface StorageProvider extends AutoCloseable {
   RailGraphSnapshotRepository railGraphSnapshots();
 
   RailInterlockingSnapshotRepository railInterlockingSnapshots();
+
+  /** 驾驶任务记录。 */
+  DriveTaskRecordRepository driveTaskRecords();
 
   TimetableRepository timetables();
 

@@ -62,6 +62,7 @@ drive:
       handback: "<yellow>Handing back to automatic after stopping</yellow>"
       no-signal: "<yellow>No movement authority</yellow>"
       wait-signal: "<red>Stop signal</red>"
+      confirm-signal: "<gold><bold>Signal restricted: right-click to confirm</bold></gold>"
     station:
       approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>blocks</gray>"
       move-up: "<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"
@@ -237,6 +238,8 @@ drive:
     ato:
       notch-ignored: "<aqua>ATO is driving: the handle has no effect, pull to EB to take manual control</aqua>"
       confirmed: "<green>Departure confirmed</green>"
+    signal:
+      confirmed: "<green>Signal confirmed</green>"
     rescue:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
@@ -274,6 +277,7 @@ drive:
     cannot-start: "<red>Cannot take over right now; see /fta drive on for the reason</red>"
     busy: "<red>You are driving another train</red>"
     started: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to the terminus</green>"
+    result: "<prefix> <white>Trip <aqua><trip></aqua> <state></white> <gray>|</gray> score <yellow><points></yellow> <gray>grade</gray> <gold><bold><grade></bold></gold>"
     abandoned: "<prefix> <yellow>Task abandoned</yellow>"
     none: "<prefix> <gray>You have no driving task</gray>"
     status: "<prefix> <white><route></white> <aqua><trip></aqua> <gray>|</gray> <white><station></white> <time> <gray>|</gray> train <white><train></white> <gray>|</gray> <mode> <gray>|</gray> <state>"
@@ -312,6 +316,9 @@ drive:
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- Switch between manual and ATO while stopped</gray>"
       entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- Show or reset the congestion breaker</gray>"
+      entry-records: "  <gray>•</gray> <white>/fta drive records [player]</white> <gray>- Show driving records</gray>"
+      entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- Driving leaderboard</gray>"
+      entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <player></white> <gray>- Revoke a player's driving task</gray>"
     start:
       started: "<prefix> <green>Now driving <white><train></white></green> <gray>Hotbar 1-9 is P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>Manual driving is disabled</red>"
@@ -343,6 +350,21 @@ drive:
     admin-stop:
       stopped: "<prefix> <yellow>Ended driving for <player></yellow>"
       not-driving: "<prefix> <red><player> is not driving</red>"
+    records:
+      header: "<prefix> <dark_aqua>Driving records of <player></dark_aqua>"
+      entry: "  <gray><time></gray> <white><route></white> <aqua><trip></aqua> <gray><mode></gray> <state> <yellow><points></yellow> <gold><grade></gold>"
+      empty: "<prefix> <gray><player> has no driving records yet</gray>"
+      offline: "<prefix> <red><player> is not online</red>"
+      no-permission: "<prefix> <red>You can only view your own records</red>"
+      unavailable: "<prefix> <red>Storage is not ready; records are unavailable</red>"
+    top:
+      header-week: "<prefix> <dark_aqua>Driving leaderboard, last 7 days</dark_aqua>"
+      header-all: "<prefix> <dark_aqua>Driving leaderboard, all time</dark_aqua>"
+      entry: "  <gold><rank>.</gold> <white><player></white> <gray>completed</gray> <white><tasks></white> <gray>trips,</gray> <yellow><points></yellow> <gray>points</gray>"
+      empty: "  <gray>No records yet</gray>"
+    revoke:
+      done: "<prefix> <yellow>Revoked the driving task of <player></yellow>"
+      none: "<prefix> <red><player> has no unfinished driving task</red>"
     mode:
       not-dispatch: "<prefix> <red>ATO is only available when driving a dispatched train</red>"
       need-stop: "<prefix> <red>Stop the train before switching the driving mode</red>"

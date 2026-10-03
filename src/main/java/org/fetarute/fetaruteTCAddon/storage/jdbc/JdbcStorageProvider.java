@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.Tim
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
@@ -28,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
@@ -73,6 +75,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RailComponentCautionRepository railComponentCautionRepository;
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
   private final RailInterlockingSnapshotRepository railInterlockingSnapshotRepository;
+  private final DriveTaskRecordRepository driveTaskRecordRepository;
   private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
@@ -113,6 +116,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcRailGraphSnapshotRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railInterlockingSnapshotRepository =
         new JdbcRailInterlockingSnapshotRepository(dataSource, dialect, tablePrefix, logger::warn);
+    this.driveTaskRecordRepository =
+        new JdbcDriveTaskRecordRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.timetableRepository =
         new JdbcTimetableRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudTemplateRepository =
@@ -209,6 +214,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public RailInterlockingSnapshotRepository railInterlockingSnapshots() {
     return railInterlockingSnapshotRepository;
+  }
+
+  @Override
+  public DriveTaskRecordRepository driveTaskRecords() {
+    return driveTaskRecordRepository;
   }
 
   @Override

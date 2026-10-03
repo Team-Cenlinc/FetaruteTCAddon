@@ -15,6 +15,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -29,6 +30,7 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
@@ -52,6 +54,10 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRescueLadder;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordCodec;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
@@ -351,6 +357,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     if (session.isAto() && session.driverLink().confirmDeparture()) {
                       traceSession(session, "ATO 确认发车");
                       notice(player, "drive.driver.ato.confirmed", Map.of());
+                    } else if (session.driverLink() != null
+                        && !session.isAto()
+                        && session
+                            .driverLink()
+                            .signalConfirm()
+                            .acknowledge(Bukkit.getCurrentTick())
+                            .isPresent()) {
+                      traceSession(session, "确认信号");
+                      notice(player, "drive.driver.signal.confirmed", Map.of());
                     }
                   }
                 });
@@ -514,6 +529,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (driverLink != null) {
       tasks.onSessionStarted(
           player.getUniqueId(), group.getProperties().getTrainName(), Bukkit.getCurrentTick());
+      driverLink.score().setDelayAtStart(delayOf(group.getProperties().getTrainName()));
     }
     traceSession(
         session,
@@ -1140,6 +1156,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       driverRegistry.unbind(link);
       traceSession(session, "交还自动运行: " + reason);
       tasks.onSessionEnded(session.playerId(), taskStateFor(reason), reason.name());
+      recordTask(session, link);
     }
     Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(session.trainName());
     groupOpt.ifPresent(
@@ -1807,6 +1824,114 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return true;
     }
     return tasks.abandon(player.getUniqueId(), "command");
+  }
+
+  /** 列车当前的晚点（秒）；查不到时为空。 */
+  private static OptionalLong delayOf(String trainName) {
+    return DriverTaskManager.timetables()
+        .flatMap(api -> api.getAssignment(trainName))
+        .map(TimetableApi.TrainAssignment::currentDelaySeconds)
+        .orElse(OptionalLong.empty());
+  }
+
+  /** 任务随驾驶结束：评分、告诉驾驶员、写记录（异步）。没有任务（运营人员直接接管）时不记。 */
+  private void recordTask(DriveSession session, DriverLink link) {
+    Optional<DriverTask> taskOpt =
+        tasks
+            .taskOf(session.playerId())
+            .filter(task -> task.startedAt() != null && task.state().finished())
+            .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
+            .filter(task -> task.points() < 0);
+    if (taskOpt.isEmpty()) {
+      return;
+    }
+    DriverTask task = taskOpt.get();
+    TaskScore score = link.finalizeScore();
+    score.setDelayAtEnd(delayOf(session.trainName()));
+    ScoreRules.Result result =
+        ScoreRules.evaluate(score, task.state() == DriverTask.State.COMPLETED);
+    task.setResult(result.points(), result.grade().name());
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player != null && player.isOnline()) {
+      player.sendMessage(
+          plugin
+              .getLocaleManager()
+              .component(
+                  "drive.task.result",
+                  Map.of(
+                      "trip",
+                      task.key().tripCode(),
+                      "state",
+                      plugin
+                          .getLocaleManager()
+                          .text("drive.task.state." + task.state().name().toLowerCase(Locale.ROOT)),
+                      "points",
+                      String.valueOf(result.points()),
+                      "grade",
+                      result.grade().name())));
+    }
+    DriveTaskRecord record =
+        new DriveTaskRecord(
+            UUID.randomUUID(),
+            null,
+            task.playerId(),
+            task.playerName(),
+            task.key().timetableId(),
+            task.key().tripCode(),
+            task.key().serviceDate(),
+            task.routeCode(),
+            task.trainName(),
+            task.mode().name(),
+            task.state().name(),
+            result.points(),
+            result.grade().name(),
+            task.startedAt(),
+            Instant.now(),
+            DriveTaskRecordCodec.encode(score));
+    saveRecord(record);
+  }
+
+  private void saveRecord(DriveTaskRecord record) {
+    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> provider =
+        plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()
+            ? Optional.empty()
+            : plugin.getStorageManager().provider();
+    if (provider.isEmpty()) {
+      plugin.getLogger().warning("存储未就绪，驾驶任务记录未保存: " + record.tripCode());
+      return;
+    }
+    Runnable write =
+        () -> {
+          try {
+            provider.get().driveTaskRecords().save(record);
+          } catch (RuntimeException ex) {
+            plugin.getLogger().warning("保存驾驶任务记录失败: " + ex);
+          }
+        };
+    if (plugin.isEnabled()) {
+      Bukkit.getScheduler().runTaskAsynchronously(plugin, write);
+    } else {
+      write.run();
+    }
+  }
+
+  /**
+   * 管理员收回某名玩家的任务：驾驶中先停车交还。
+   *
+   * @return 玩家是否有未结束的任务
+   */
+  public boolean revokeTask(UUID playerId) {
+    Optional<DriverTask> task = tasks.activeTaskOf(playerId);
+    if (task.isEmpty()) {
+      return false;
+    }
+    DriveSession session = active.get(playerId);
+    if (task.get().state() == DriverTask.State.DRIVING && session != null) {
+      requestHandback(session, "revoked");
+      return true;
+    }
+    task.get().finish(DriverTask.State.INTERRUPTED, "revoked");
+    return true;
   }
 
   /** 节点所属车站的站名；查不到时用节点编号。 */

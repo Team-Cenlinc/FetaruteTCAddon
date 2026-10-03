@@ -138,6 +138,9 @@ public final class DriveHud {
     if (intervention == DriverProtection.Intervention.EMERGENCY || link.emergencyLatched()) {
       return "drive.hud.driver.emergency";
     }
+    if (link.signalConfirm().pending()) {
+      return "drive.hud.driver.confirm-signal";
+    }
     if (intervention == DriverProtection.Intervention.SERVICE) {
       return "drive.hud.driver.service";
     }

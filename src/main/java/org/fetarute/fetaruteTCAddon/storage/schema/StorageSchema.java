@@ -79,6 +79,9 @@ public final class StorageSchema {
     ddl.add(railComponentCautions(dialect));
     ddl.add(index("rail_component_cautions_world", "rail_component_cautions", "world_id"));
     ddl.add(railGraphSnapshots(dialect));
+    ddl.add(driveTaskRecords(dialect));
+    ddl.add(index("drive_task_records_player", "drive_task_records", "player_uuid, finished_at"));
+    ddl.add(index("drive_task_records_finished", "drive_task_records", "finished_at"));
     return Collections.unmodifiableList(ddl);
   }
 
@@ -826,6 +829,47 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.stringType());
+  }
+
+  private String driveTaskRecords(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    server_id %s,
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    timetable_id %s NOT NULL,
+                    trip_code %s NOT NULL,
+                    service_date %s NOT NULL,
+                    route_code %s NOT NULL,
+                    train_name %s NOT NULL,
+                    mode %s NOT NULL,
+                    state %s NOT NULL,
+                    points %s NOT NULL,
+                    grade %s NOT NULL,
+                    started_at %s NOT NULL,
+                    finished_at %s NOT NULL,
+                    detail_json %s NOT NULL
+                );
+                """,
+        table("drive_task_records"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        dialect.textType());
   }
 
   private String formatDdl(String template, Object... args) {

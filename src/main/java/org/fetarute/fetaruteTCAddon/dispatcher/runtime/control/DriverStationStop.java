@@ -43,6 +43,7 @@ public final class DriverStationStop {
   private Phase phase = Phase.APPROACH;
   private double offsetBlocks = Double.NaN;
   private double stoppedOffsetBlocks = Double.NaN;
+  private boolean stopped;
   private long dwellRemainingTicks;
   private boolean correctDoorsOpen;
   private boolean anyDoorOpen;
@@ -135,11 +136,17 @@ public final class DriverStationStop {
 
   /** 停妥：记下停车时的偏移，进入开门（本站不开门时直接计停站时间）。 */
   public void markStopped() {
+    stopped = true;
     stoppedOffsetBlocks = offsetBlocks;
     setPhase(doorsRequired ? Phase.OPEN_DOORS : Phase.DWELL);
   }
 
-  /** 停妥时的偏移；还没停妥时为 {@code NaN}。 */
+  /** 是否停妥过（开过门窗口）。 */
+  public boolean stopped() {
+    return stopped;
+  }
+
+  /** 停妥时的偏移；还没停妥或量不出时为 {@code NaN}。 */
   public double stoppedOffsetBlocks() {
     return stoppedOffsetBlocks;
   }

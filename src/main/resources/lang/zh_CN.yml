@@ -1452,6 +1452,7 @@ drive:
       handback: "<yellow>停车后交还自动运行</yellow>"
       no-signal: "<yellow>无行车许可</yellow>"
       wait-signal: "<red>停车信号</red>"
+      confirm-signal: "<gold><bold>信号变严：右键确认</bold></gold>"
     station:
       approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>格</gray>"
       move-up: "<yellow>请前移 <white><distance></white> 格对标</yellow>"
@@ -1627,6 +1628,8 @@ drive:
     ato:
       notch-ignored: "<aqua>ATO 运行中：手柄不起作用，拉到 EB 立即转为人工驾驶</aqua>"
       confirmed: "<green>已确认发车</green>"
+    signal:
+      confirmed: "<green>信号已确认</green>"
     rescue:
       warn: "<prefix> <yellow>列车已停留 <white><seconds></white> 秒未能前进，请尽快恢复运行；继续停留将转为 ATO</yellow>"
       ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
@@ -1664,6 +1667,7 @@ drive:
     cannot-start: "<red>暂时无法接班，请查看 /fta drive on 的提示</red>"
     busy: "<red>你正在驾驶其他列车</red>"
     started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
+    result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
     abandoned: "<prefix> <yellow>已放弃任务</yellow>"
     none: "<prefix> <gray>你当前没有驾驶任务</gray>"
     status: "<prefix> <white><route></white> <aqua><trip></aqua> <gray>|</gray> <white><station></white> <time> <gray>|</gray> 列车 <white><train></white> <gray>|</gray> <mode> <gray>|</gray> <state>"
@@ -1702,6 +1706,9 @@ drive:
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- 停稳后切换人工驾驶与 ATO</gray>"
       entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>"
+      entry-records: "  <gray>•</gray> <white>/fta drive records [玩家]</white> <gray>- 查看驾驶记录</gray>"
+      entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- 驾驶排行</gray>"
+      entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <玩家></white> <gray>- 收回某名玩家的驾驶任务</gray>"
     start:
       started: "<prefix> <green>已开始驾驶列车 <white><train></white></green> <gray>快捷栏 1–9 依次为 P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>手动驾驶功能已关闭</red>"
@@ -1733,6 +1740,21 @@ drive:
     admin-stop:
       stopped: "<prefix> <yellow>已结束 <player> 的驾驶</yellow>"
       not-driving: "<prefix> <red><player> 当前没有在驾驶</red>"
+    records:
+      header: "<prefix> <dark_aqua><player> 的驾驶记录</dark_aqua>"
+      entry: "  <gray><time></gray> <white><route></white> <aqua><trip></aqua> <gray><mode></gray> <state> <yellow><points></yellow> <gold><grade></gold>"
+      empty: "<prefix> <gray><player> 还没有驾驶记录</gray>"
+      offline: "<prefix> <red><player> 不在线</red>"
+      no-permission: "<prefix> <red>只能查看自己的驾驶记录</red>"
+      unavailable: "<prefix> <red>存储未就绪，暂时无法读取驾驶记录</red>"
+    top:
+      header-week: "<prefix> <dark_aqua>近 7 天驾驶排行</dark_aqua>"
+      header-all: "<prefix> <dark_aqua>驾驶总排行</dark_aqua>"
+      entry: "  <gold><rank>.</gold> <white><player></white> <gray>完成</gray> <white><tasks></white> <gray>趟，共</gray> <yellow><points></yellow> <gray>分</gray>"
+      empty: "  <gray>暂无记录</gray>"
+    revoke:
+      done: "<prefix> <yellow>已收回 <player> 的驾驶任务</yellow>"
+      none: "<prefix> <red><player> 没有未完成的驾驶任务</red>"
     mode:
       not-dispatch: "<prefix> <red>只有驾驶调度列车时才能切换 ATO</red>"
       need-stop: "<prefix> <red>列车停稳后才能切换驾驶方式</red>"

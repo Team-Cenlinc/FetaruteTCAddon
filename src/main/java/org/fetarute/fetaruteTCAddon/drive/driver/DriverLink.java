@@ -11,6 +11,8 @@ import java.util.function.LongSupplier;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
 /**
  * 一名驾驶员与一列调度列车之间的控制链路：调度层交来的最新指令、调度层的停车要求，以及保护包络最近一次的结论。
@@ -43,6 +45,9 @@ public final class DriverLink {
   private Instant approachSampledAt;
 
   private DriverStationStop lastStop;
+  private final SignalConfirm signalConfirm = new SignalConfirm();
+  private final TaskScore score = new TaskScore();
+  private int vigilanceTrips;
   private long stuckTicks;
   private double stuckOdometerAnchor;
   private DriverRescueLadder.Stage ladderStage = DriverRescueLadder.Stage.NONE;
@@ -219,6 +224,7 @@ public final class DriverLink {
     if (stationStop != null && !stationStop.active()) {
       completedStopNode = stationStop.node();
       lastStop = stationStop;
+      score.addStop(StopScore.of(stationStop));
       stationStop = null;
     }
     return Optional.ofNullable(stationStop);
@@ -282,6 +288,36 @@ public final class DriverLink {
     double travelled = Math.max(0.0, odometer.getAsDouble() - odometerAtApproachSample);
     return Optional.of(
         new StationTarget(approachNode, approachRemainingAtSample - travelled, false));
+  }
+
+  /** 信号确认。 */
+  public SignalConfirm signalConfirm() {
+    return signalConfirm;
+  }
+
+  /** 本次驾驶的成绩明细（各站停站随停站结束记入）。 */
+  public TaskScore score() {
+    return score;
+  }
+
+  /** 警惕装置紧急制动一次。 */
+  public void countVigilanceTrip() {
+    vigilanceTrips++;
+  }
+
+  /** 把介入与确认的计数写进成绩明细。 */
+  public TaskScore finalizeScore() {
+    stationStop();
+    score.setCounts(
+        serviceInterventions,
+        emergencyInterventions,
+        forcedStops,
+        signalConfirm.confirmations(),
+        signalConfirm.misses(),
+        signalConfirm.averageReactionSeconds(),
+        vigilanceTrips,
+        lateDepartures);
+    return score;
   }
 
   /** 最近一次已结束的停站；还没停过时为空。 */
