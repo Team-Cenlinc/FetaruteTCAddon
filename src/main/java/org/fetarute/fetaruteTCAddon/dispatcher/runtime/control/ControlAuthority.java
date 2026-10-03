@@ -20,9 +20,9 @@ public interface ControlAuthority {
   boolean isDriverControlled(TrainProperties properties);
 
   /**
-   * 这列车上是否有驾驶员在岗（含 ATO 下由自动运行代为操纵的情况）。
+   * 这列车是否由驾驶员物理操纵（按车名）。
    *
-   * <p>健康层据此不对有人驾驶的车做重发车、销毁等恢复动作。
+   * <p>健康层据此不对它做重发车、改目的地等恢复动作；ATO 下由自动运行操纵，照常恢复。
    */
   default boolean isDriverControlledName(String trainName) {
     return false;
@@ -39,6 +39,16 @@ public interface ControlAuthority {
 
   /** 驾驶员控制的列车进站：站台交出停车点与站台侧，此后双方经这个对象推进停站。 */
   default void beginStationStop(TrainProperties properties, DriverStationStop stop) {}
+
+  /** 自动运行停站结束、出站许可就绪时，是否还要扣着等车上的驾驶员（ATO）确认发车。 */
+  default boolean holdDeparture(TrainProperties properties) {
+    return false;
+  }
+
+  /** 这列车上是否有驾驶员在岗（含 ATO）。死锁与清车遇到它时先请驾驶员交还，不销毁别的车。 */
+  default boolean hasDriver(String trainName) {
+    return isDriverControlledName(trainName);
+  }
 
   /** 通过插件实例查找当前的控制权；插件未加载（如单元测试）时等同 {@link #NONE}。 */
   static ControlAuthority pluginLookup() {

@@ -299,6 +299,16 @@ public final class DriveSession {
     return driverLink != null;
   }
 
+  /** ATO：自动运行操纵列车，驾驶员只确认发车，可拉 EB 转为人工驾驶。 */
+  public boolean isAto() {
+    return driverLink != null && !driverLink.controlsPhysically();
+  }
+
+  /** 让正在运行的控车动作自行退出（转为 ATO 时由自动运行接着操纵）。 */
+  public void releaseAction() {
+    nextActionGeneration();
+  }
+
   /** 会话累计走过的距离（格），按积分速度计。 */
   public double odometerBlocks() {
     return odometerBlocks;

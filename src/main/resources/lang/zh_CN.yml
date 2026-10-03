@@ -1467,6 +1467,8 @@ drive:
       close-doors: "<yellow>停站时间已到，请关门</yellow>"
       wait-departure: "<gray>等待发车</gray>"
       depart: "<green><bold>发车信号</bold></green>"
+    ato:
+      confirm: "<yellow><bold>ATO：右键确认发车</bold></yellow>"
     cab:
       vigilance-warning: "<red><bold>警惕 <seconds></bold></red>"
       vigilance-tripped: "<red><bold>警惕紧急制动</bold></red>"
@@ -1512,6 +1514,7 @@ drive:
         caution: "<gold>减速</gold> <white><limit_kmh></white> <gray>km/h</gray>"
         stop: "<red>停车</red>"
         none: "<gray>无行车许可</gray>"
+        ato: "<aqua>ATO 运行</aqua>"
       station:
         none: "<gray>-</gray>"
       doors:
@@ -1617,6 +1620,61 @@ drive:
       unavailable: "<red>驾驶台暂时无法打开</red>"
       reverser-locked: "<red>调度列车的运行方向由交路决定，不能操作换向手柄</red>"
       doors-not-released: "<red>车门未释放：只有在车站停妥后才能开门</red>"
+  driver:
+    mode:
+      manual: "人工驾驶"
+      ato: "ATO"
+    ato:
+      notch-ignored: "<aqua>ATO 运行中：手柄不起作用，拉到 EB 立即转为人工驾驶</aqua>"
+      confirmed: "<green>已确认发车</green>"
+    rescue:
+      warn: "<prefix> <yellow>列车已停留 <white><seconds></white> 秒未能前进，请尽快恢复运行；继续停留将转为 ATO</yellow>"
+      ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
+      rescued: "<prefix> <yellow>列车 <white><train></white> 长时间无法运行，已将你送至最近车站的站台</yellow>"
+    breaker:
+      tripped: "<prefix> <red>线路拥堵熔断：<white><reason></white>；已交还 <white><count></white> 列驾驶员列车并暂停接班</red>"
+  task:
+    board:
+      title: "<dark_gray>任务板 · </dark_gray><black><station></black>"
+      empty: "<gray>暂无可领取的车次</gray>"
+      info: "<gold>驾驶任务</gold>"
+      info-left: "<gray>左键：领取，人工驾驶</gray>"
+      info-right: "<gray>右键：领取，ATO 辅助驾驶</gray>"
+      entry-name: "<white><route></white> <aqua><trip></aqua>"
+      entry-time: "<gray>计划发车</gray> <white><time></white>"
+      entry-platform: "<gray>站台</gray> <white><platform></white>"
+      entry-train: "<gray>列车</gray> <white><train></white>"
+      entry-unbound: "<gray>列车尚未到达</gray>"
+      entry-dwelling: "<green>正在本站停站</green>"
+      entry-left: "<yellow>左键</yellow> <gray>人工驾驶</gray>"
+      entry-right: "<yellow>右键</yellow> <gray>ATO</gray>"
+      driving: "<prefix> <red>驾驶中不能领取任务</red>"
+      no-station: "<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"
+    claim:
+      claimed: "<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"
+      disabled: "<prefix> <red>驾驶调度列车当前未开放</red>"
+      breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
+      already-has-task: "<prefix> <red>你已有未完成的任务，请先完成或放弃（/fta drive task abandon）</red>"
+      taken: "<prefix> <red>该车次已被其他驾驶员领取</red>"
+      unavailable: "<prefix> <red>该车次不能领取</red>"
+      no-permission: "<prefix> <red>你没有驾驶调度列车的权限</red>"
+    expired: "<prefix> <yellow>车次 <aqua><trip></aqua> 未能在 <white><station></white> 接班，任务已作废</yellow>"
+    arrived: "<aqua><trip></aqua> <white>已在 <station> 停站，请坐进车头驾驶室接班</white>"
+    go-to-cab: "<yellow>请坐到列车前进方向的车头驾驶室</yellow>"
+    cannot-start: "<red>暂时无法接班，请查看 /fta drive on 的提示</red>"
+    busy: "<red>你正在驾驶其他列车</red>"
+    started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
+    abandoned: "<prefix> <yellow>已放弃任务</yellow>"
+    none: "<prefix> <gray>你当前没有驾驶任务</gray>"
+    status: "<prefix> <white><route></white> <aqua><trip></aqua> <gray>|</gray> <white><station></white> <time> <gray>|</gray> 列车 <white><train></white> <gray>|</gray> <mode> <gray>|</gray> <state>"
+    state:
+      claimed: "等待列车"
+      driving: "驾驶中"
+      completed: "已完成"
+      abandoned: "已放弃"
+      expired: "已作废"
+      failed: "未完成"
+      interrupted: "已收回"
   end:
     left-seat: "<prefix> <yellow>你已离开座位，驾驶结束</yellow>"
     seat-lost: "<prefix> <red>无法回到座位，驾驶已结束</red>"
@@ -1626,6 +1684,7 @@ drive:
     handback: "<prefix> <yellow>列车已交还自动运行，驾驶结束</yellow>"
     dispatch-abort: "<prefix> <red>调度系统已收回列车，驾驶结束</red>"
     watchdog: "<prefix> <red>列车长时间未能正常运行，已交还自动运行</red>"
+    task-complete: "<prefix> <green>已到达终点站，任务完成，列车交还自动运行</green>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
     unavailable: "<prefix> <red>手动驾驶功能尚未就绪</red>"
@@ -1639,6 +1698,10 @@ drive:
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"
       entry-handback: "  <gray>•</gray> <white>/fta drive handback <玩家|all></white> <gray>- 把驾驶员控制的调度列车交还自动运行</gray>"
+      entry-tasks: "  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"
+      entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"
+      entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- 停稳后切换人工驾驶与 ATO</gray>"
+      entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>"
     start:
       started: "<prefix> <green>已开始驾驶列车 <white><train></white></green> <gray>快捷栏 1–9 依次为 P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>手动驾驶功能已关闭</red>"
@@ -1649,6 +1712,7 @@ drive:
       no-task: "<prefix> <red>该列车由调度系统运行，需要领取驾驶任务才能接管</red>"
       not-stopped-at-station: "<prefix> <red>只能在列车停站期间接管调度列车</red>"
       not-head-cab: "<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"
+      breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
       train-in-use: "<prefix> <red>该列车正在被驾驶或正在制动停车</red>"
       train-moving: "<prefix> <red>列车正朝驾驶室后方溜行（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"
       cursor-not-empty: "<prefix> <red>光标上有物品，请先放回背包再开始驾驶</red>"
@@ -1669,6 +1733,15 @@ drive:
     admin-stop:
       stopped: "<prefix> <yellow>已结束 <player> 的驾驶</yellow>"
       not-driving: "<prefix> <red><player> 当前没有在驾驶</red>"
+    mode:
+      not-dispatch: "<prefix> <red>只有驾驶调度列车时才能切换 ATO</red>"
+      need-stop: "<prefix> <red>列车停稳后才能切换驾驶方式</red>"
+      invalid: "<prefix> <red>驾驶方式只能是 manual 或 ato</red>"
+      manual: "<prefix> <yellow>已转为人工驾驶</yellow>"
+      ato: "<prefix> <aqua>已转为 ATO，停站结束后请右键确认发车</aqua>"
+    breaker:
+      status: "<prefix> 拥堵熔断：<white><status></white>"
+      reset: "<prefix> <yellow>已解除拥堵熔断</yellow>"
     handback:
       requested: "<prefix> <yellow>已要求 <player> 把列车交还自动运行</yellow>"
       not-driving: "<prefix> <red><player> 当前没有驾驶调度列车</red>"

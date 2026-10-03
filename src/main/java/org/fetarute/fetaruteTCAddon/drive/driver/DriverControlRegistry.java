@@ -41,6 +41,7 @@ public final class DriverControlRegistry implements ControlAuthority {
   private final Map<TrainProperties, DriverLink> byProperties = new IdentityHashMap<>();
   private final Map<String, DriverLink> byName = new HashMap<>();
   private Handler handler = NO_HANDLER;
+  private long atoConfirmTicks = 300L;
 
   public void setHandler(Handler handler) {
     this.handler = handler == null ? NO_HANDLER : handler;
@@ -115,7 +116,24 @@ public final class DriverControlRegistry implements ControlAuthority {
 
   @Override
   public boolean isDriverControlledName(String trainName) {
+    DriverLink link = trainName == null ? null : byName.get(trainName);
+    return link != null && link.controlsPhysically();
+  }
+
+  @Override
+  public boolean hasDriver(String trainName) {
     return trainName != null && byName.containsKey(trainName);
+  }
+
+  @Override
+  public boolean holdDeparture(TrainProperties properties) {
+    DriverLink link = resolve(properties);
+    return link != null && link.holdDeparture(atoConfirmTicks);
+  }
+
+  /** ATO 下等驾驶员确认发车的上限（tick）。 */
+  public void setAtoConfirmTicks(long ticks) {
+    this.atoConfirmTicks = Math.max(0L, ticks);
   }
 
   @Override

@@ -77,6 +77,8 @@ drive:
       close-doors: "<yellow>Dwell time is up, close the doors</yellow>"
       wait-departure: "<gray>Waiting to depart</gray>"
       depart: "<green><bold>Clear to depart</bold></green>"
+    ato:
+      confirm: "<yellow><bold>ATO: right-click to confirm departure</bold></yellow>"
     cab:
       vigilance-warning: "<red><bold>Vigilance <seconds></bold></red>"
       vigilance-tripped: "<red><bold>Vigilance emergency brake</bold></red>"
@@ -122,6 +124,7 @@ drive:
         caution: "<gold>Slow</gold> <white><limit_kmh></white> <gray>km/h</gray>"
         stop: "<red>Stop</red>"
         none: "<gray>No movement authority</gray>"
+        ato: "<aqua>ATO driving</aqua>"
       station:
         none: "<gray>-</gray>"
       doors:
@@ -227,6 +230,61 @@ drive:
       unavailable: "<red>The desk cannot be opened right now</red>"
       reverser-locked: "<red>A dispatched train's direction follows its route; the reverser is locked</red>"
       doors-not-released: "<red>Doors are not released: they can only be opened once stopped at a station</red>"
+  driver:
+    mode:
+      manual: "Manual"
+      ato: "ATO"
+    ato:
+      notch-ignored: "<aqua>ATO is driving: the handle has no effect, pull to EB to take manual control</aqua>"
+      confirmed: "<green>Departure confirmed</green>"
+    rescue:
+      warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
+      ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
+      rescued: "<prefix> <yellow>Train <white><train></white> could not move for a long time; you were taken to the nearest platform</yellow>"
+    breaker:
+      tripped: "<prefix> <red>Congestion breaker: <white><reason></white>; handed back <white><count></white> driver train(s) and paused new shifts</red>"
+  task:
+    board:
+      title: "<dark_gray>Task board · </dark_gray><black><station></black>"
+      empty: "<gray>No trips to take right now</gray>"
+      info: "<gold>Driving tasks</gold>"
+      info-left: "<gray>Left-click: take, manual driving</gray>"
+      info-right: "<gray>Right-click: take, ATO assisted</gray>"
+      entry-name: "<white><route></white> <aqua><trip></aqua>"
+      entry-time: "<gray>Departs</gray> <white><time></white>"
+      entry-platform: "<gray>Platform</gray> <white><platform></white>"
+      entry-train: "<gray>Train</gray> <white><train></white>"
+      entry-unbound: "<gray>Train not here yet</gray>"
+      entry-dwelling: "<green>Standing at this station</green>"
+      entry-left: "<yellow>Left-click</yellow> <gray>manual</gray>"
+      entry-right: "<yellow>Right-click</yellow> <gray>ATO</gray>"
+      driving: "<prefix> <red>You cannot take a task while driving</red>"
+      no-station: "<prefix> <red>No station nearby; open the task board near a platform</red>"
+    claim:
+      claimed: "<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"
+      disabled: "<prefix> <red>Driving dispatched trains is not enabled</red>"
+      breaker-open: "<prefix> <red>The line is congested; new shifts are paused</red>"
+      already-has-task: "<prefix> <red>You already have a task; finish or abandon it first (/fta drive task abandon)</red>"
+      taken: "<prefix> <red>Another driver already took this trip</red>"
+      unavailable: "<prefix> <red>This trip cannot be taken</red>"
+      no-permission: "<prefix> <red>You are not allowed to drive dispatched trains</red>"
+    expired: "<prefix> <yellow>Trip <aqua><trip></aqua> could not be taken over at <white><station></white>; the task was dropped</yellow>"
+    arrived: "<aqua><trip></aqua> <white>is standing at <station>; sit in the leading cab to take over</white>"
+    go-to-cab: "<yellow>Sit in the leading cab</yellow>"
+    cannot-start: "<red>Cannot take over right now; see /fta drive on for the reason</red>"
+    busy: "<red>You are driving another train</red>"
+    started: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to the terminus</green>"
+    abandoned: "<prefix> <yellow>Task abandoned</yellow>"
+    none: "<prefix> <gray>You have no driving task</gray>"
+    status: "<prefix> <white><route></white> <aqua><trip></aqua> <gray>|</gray> <white><station></white> <time> <gray>|</gray> train <white><train></white> <gray>|</gray> <mode> <gray>|</gray> <state>"
+    state:
+      claimed: "Waiting for the train"
+      driving: "Driving"
+      completed: "Completed"
+      abandoned: "Abandoned"
+      expired: "Dropped"
+      failed: "Failed"
+      interrupted: "Taken back"
   end:
     left-seat: "<prefix> <yellow>You left the seat, driving ended</yellow>"
     seat-lost: "<prefix> <red>Could not return to the seat, driving ended</red>"
@@ -236,6 +294,7 @@ drive:
     handback: "<prefix> <yellow>The train was handed back to automatic operation</yellow>"
     dispatch-abort: "<prefix> <red>The dispatcher took the train back, driving ended</red>"
     watchdog: "<prefix> <red>The train made no progress for too long and was handed back to automatic operation</red>"
+    task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"
@@ -249,6 +308,10 @@ drive:
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
       entry-handback: "  <gray>•</gray> <white>/fta drive handback <player|all></white> <gray>- Hand driver-controlled dispatched trains back to automatic operation</gray>"
+      entry-tasks: "  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"
+      entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"
+      entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- Switch between manual and ATO while stopped</gray>"
+      entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- Show or reset the congestion breaker</gray>"
     start:
       started: "<prefix> <green>Now driving <white><train></white></green> <gray>Hotbar 1-9 is P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>Manual driving is disabled</red>"
@@ -259,6 +322,7 @@ drive:
       no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"
       not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"
       not-head-cab: "<prefix> <red>Sit in the leading cab to take over</red>"
+      breaker-open: "<prefix> <red>The line is congested; new shifts are paused</red>"
       train-in-use: "<prefix> <red>This train is being driven or is braking to a stop</red>"
       train-moving: "<prefix> <red>The train is rolling away from this cab (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
       cursor-not-empty: "<prefix> <red>Put the item on your cursor away before driving</red>"
@@ -279,6 +343,15 @@ drive:
     admin-stop:
       stopped: "<prefix> <yellow>Ended driving for <player></yellow>"
       not-driving: "<prefix> <red><player> is not driving</red>"
+    mode:
+      not-dispatch: "<prefix> <red>ATO is only available when driving a dispatched train</red>"
+      need-stop: "<prefix> <red>Stop the train before switching the driving mode</red>"
+      invalid: "<prefix> <red>Mode must be manual or ato</red>"
+      manual: "<prefix> <yellow>Switched to manual driving</yellow>"
+      ato: "<prefix> <aqua>Switched to ATO; right-click to confirm each departure</aqua>"
+    breaker:
+      status: "<prefix> Congestion breaker: <white><status></white>"
+      reset: "<prefix> <yellow>Congestion breaker reset</yellow>"
     handback:
       requested: "<prefix> <yellow>Asked <player> to hand the train back to automatic operation</yellow>"
       not-driving: "<prefix> <red><player> is not driving a dispatched train</red>"

@@ -379,7 +379,7 @@ public final class TrainHealthMonitor {
       return false;
     }
     for (String name : trainNames) {
-      if (name != null && controlAuthority.isDriverControlledName(name)) {
+      if (name != null && controlAuthority.hasDriver(name)) {
         controlAuthority.requestHandback(name, "deadlock");
         found = true;
       }

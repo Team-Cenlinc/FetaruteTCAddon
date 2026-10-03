@@ -116,7 +116,8 @@ class DriverControlRegistryTest {
     link.setMode(DrivingMode.ATO);
 
     assertFalse(registry.isDriverControlled(properties));
-    assertTrue(registry.isDriverControlledName("T-4"));
+    assertFalse(registry.isDriverControlledName("T-4"), "健康层照常恢复 ATO 车");
+    assertTrue(registry.hasDriver("T-4"), "但车上仍有驾驶员：死锁时先请他交还");
   }
 
   @Test

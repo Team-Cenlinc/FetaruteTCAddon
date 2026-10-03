@@ -55,7 +55,10 @@ public final class DriveSidebarRows {
               "drive.sidebar.label.train",
               "drive.sidebar.value.text",
               Map.of("text", session.trainName())));
-      rows.add(signalRow(link));
+      rows.add(
+          session.isAto()
+              ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
+              : signalRow(link));
       rows.add(stationRow(link, session.isStopped()));
     }
     rows.add(new Row("drive.sidebar.label.doors", doorsKey(session), Map.of()));

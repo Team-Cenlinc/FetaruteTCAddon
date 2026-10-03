@@ -10,11 +10,12 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param hotHandover 接管时按热车交接：受电、主断、辅助电源、风压就绪，制动试验视为已做
  * @param overspeedToleranceBps 超过容许速度多少开始常用制动
  * @param serviceReleaseHysteresisBps 常用制动介入后，降到容许速度以下多少才松开
- * @param emergencyOverspeedRatio 超过容许速度的比例达到它时紧急制动
+ * @param emergencyOverspeedRatio 紧急制动线比常用制动线再高出容许速度的这个比例（不少于容差）
  * @param restrictedSpeedBps 指令过期或尚未收到指令时的限制速度
  * @param directiveStaleTicks 运行中多久没收到新指令算过期（tick）
  * @param staleHandbackTicks 运行中多久没收到新指令就停车交还自动运行（tick）
  * @param stopMarginBlocks 停车点、授权末端前留出的余量（格）
+ * @param recovery 驾驶任务与拥堵恢复的参数
  */
 public record DriverConfig(
     boolean enabled,
@@ -25,13 +26,19 @@ public record DriverConfig(
     double restrictedSpeedBps,
     int directiveStaleTicks,
     int staleHandbackTicks,
-    double stopMarginBlocks) {
+    double stopMarginBlocks,
+    DriverRecovery recovery) {
 
   private static final int TICKS_PER_SECOND = 20;
 
+  public DriverConfig {
+    recovery = recovery == null ? DriverRecovery.defaults() : recovery;
+  }
+
   /** 内置默认值。 */
   public static DriverConfig defaults() {
-    return new DriverConfig(true, true, 1.0, 0.5, 0.15, 5.0, 40, 200, 1.0);
+    return new DriverConfig(
+        true, true, 1.0, 0.5, 0.15, 5.0, 40, 200, 1.0, DriverRecovery.defaults());
   }
 
   /**
@@ -77,7 +84,8 @@ public record DriverConfig(
         positive(section, "restricted-speed-bps", d.restrictedSpeedBps, sink),
         staleTicks,
         handbackTicks,
-        nonNegative(section, "stop-margin-blocks", d.stopMarginBlocks, sink));
+        nonNegative(section, "stop-margin-blocks", d.stopMarginBlocks, sink),
+        DriverRecovery.from(section, sink));
   }
 
   private static double positive(

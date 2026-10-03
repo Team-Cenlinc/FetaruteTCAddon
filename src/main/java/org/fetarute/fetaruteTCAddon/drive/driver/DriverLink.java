@@ -42,6 +42,15 @@ public final class DriverLink {
   private long approachSampleTick;
   private Instant approachSampledAt;
 
+  private DriverStationStop lastStop;
+  private long stuckTicks;
+  private double stuckOdometerAnchor;
+  private DriverRescueLadder.Stage ladderStage = DriverRescueLadder.Stage.NONE;
+  private long departureHoldSince = -1L;
+  private long departureHoldQueriedAt = -1L;
+  private boolean departureConfirmed;
+  private int lateDepartures;
+
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
 
@@ -209,6 +218,7 @@ public final class DriverLink {
   public Optional<DriverStationStop> stationStop() {
     if (stationStop != null && !stationStop.active()) {
       completedStopNode = stationStop.node();
+      lastStop = stationStop;
       stationStop = null;
     }
     return Optional.ofNullable(stationStop);
@@ -272,6 +282,107 @@ public final class DriverLink {
     double travelled = Math.max(0.0, odometer.getAsDouble() - odometerAtApproachSample);
     return Optional.of(
         new StationTarget(approachNode, approachRemainingAtSample - travelled, false));
+  }
+
+  /** 最近一次已结束的停站；还没停过时为空。 */
+  public Optional<DriverStationStop> lastStop() {
+    stationStop();
+    return Optional.ofNullable(lastStop);
+  }
+
+  /** 走过这么远算有进展。 */
+  private static final double PROGRESS_BLOCKS = 2.0;
+
+  /**
+   * 每 tick 记一次是否卡住：走了一段就清零；能走却没走（不在表定停站、不被调度扣住）时累计。
+   *
+   * @param held 此刻是表定停站或被调度扣住
+   */
+  public void tickStuck(boolean held) {
+    double travelled = odometer.getAsDouble();
+    if (travelled - stuckOdometerAnchor >= PROGRESS_BLOCKS) {
+      stuckOdometerAnchor = travelled;
+      stuckTicks = 0L;
+      ladderStage = DriverRescueLadder.Stage.NONE;
+      return;
+    }
+    if (!held) {
+      stuckTicks++;
+    }
+  }
+
+  /** 累计卡住的秒数。 */
+  public long stuckSeconds() {
+    return stuckTicks / 20L;
+  }
+
+  /** 时间阶梯已经走到的档位（每档的动作只做一次）。 */
+  public DriverRescueLadder.Stage ladderStage() {
+    return ladderStage;
+  }
+
+  public void setLadderStage(DriverRescueLadder.Stage stage) {
+    this.ladderStage = Objects.requireNonNull(stage, "stage");
+  }
+
+  /** 两次询问相隔超过这么久，算作新的一次停站。 */
+  private static final long DEPARTURE_QUERY_GAP_TICKS = 60L;
+
+  /**
+   * ATO 下站台问是否还要扣着等驾驶员确认发车。驾驶员确认过就放行；等太久也放行，记一次迟确认。
+   *
+   * @param timeoutTicks 最多等多久
+   */
+  public boolean holdDeparture(long timeoutTicks) {
+    if (mode != DrivingMode.ATO) {
+      return false;
+    }
+    long now = clock.getAsLong();
+    if (departureHoldQueriedAt < 0L || now - departureHoldQueriedAt > DEPARTURE_QUERY_GAP_TICKS) {
+      departureHoldSince = now;
+      departureConfirmed = false;
+    }
+    departureHoldQueriedAt = now;
+    if (departureConfirmed) {
+      clearDepartureHold();
+      return false;
+    }
+    if (now - departureHoldSince >= timeoutTicks) {
+      clearDepartureHold();
+      lateDepartures++;
+      return false;
+    }
+    return true;
+  }
+
+  private void clearDepartureHold() {
+    departureHoldSince = -1L;
+    departureHoldQueriedAt = -1L;
+    departureConfirmed = false;
+  }
+
+  /** 站台正在等驾驶员确认发车。 */
+  public boolean departurePending() {
+    return departureHoldSince >= 0L
+        && clock.getAsLong() - departureHoldQueriedAt <= DEPARTURE_QUERY_GAP_TICKS;
+  }
+
+  /**
+   * 驾驶员确认发车。
+   *
+   * @return 站台确实在等确认
+   */
+  public boolean confirmDeparture() {
+    if (!departurePending()) {
+      return false;
+    }
+    departureConfirmed = true;
+    return true;
+  }
+
+  /** ATO 下超时未确认发车的次数。 */
+  public int lateDepartures() {
+    return lateDepartures;
   }
 
   /** 本站应开的门（驾驶会话按驾驶员朝向算好后写入，供显示）。 */

@@ -93,6 +93,24 @@ final class PluginControlAuthority implements ControlAuthority {
   }
 
   @Override
+  public boolean holdDeparture(TrainProperties properties) {
+    try {
+      return delegate().holdDeparture(properties);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
+  public boolean hasDriver(String trainName) {
+    try {
+      return delegate().hasDriver(trainName);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
   public void beginStationStop(TrainProperties properties, DriverStationStop stop) {
     try {
       delegate().beginStationStop(properties, stop);

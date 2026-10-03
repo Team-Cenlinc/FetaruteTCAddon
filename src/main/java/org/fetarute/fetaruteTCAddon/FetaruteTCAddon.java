@@ -112,6 +112,7 @@ import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfigFile;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -410,6 +411,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
     getServer()
         .getPluginManager()
         .registerEvents(new DriveListener(this, driveSessionManager), this);
+    DriveSessionManager manager = driveSessionManager;
+    getServer()
+        .getPluginManager()
+        .registerEvents(
+            new TaskBoardListener(
+                (player, holder, row, mode) ->
+                    player.sendMessage(
+                        getLocaleManager()
+                            .component(
+                                manager.claimTask(player, holder, row, mode),
+                                Map.of("trip", row.key().tripCode(), "route", row.routeCode())))),
+            this);
     driveSessionManager.start();
   }
 

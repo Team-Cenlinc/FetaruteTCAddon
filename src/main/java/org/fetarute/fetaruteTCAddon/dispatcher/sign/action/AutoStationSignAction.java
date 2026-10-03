@@ -881,6 +881,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               canDepart =
                   plugin.getRuntimeDispatchService().get().checkDeparture(group, definition);
             }
+            if (canDepart && plugin.getControlAuthority().holdDeparture(group.getProperties())) {
+              // ATO 下车上的驾驶员要先确认发车（等太久自动放行）。
+              canDepart = false;
+            }
 
             if (canDepart) {
               plugin

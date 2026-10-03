@@ -10,7 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
  *
  * <p>口径与运行时调度一致：带有交路 UUID 标签，或带有运营商、线路、交路任一编码标签（含旧标签名）都算受管。调度系统初始化到一半的列车也算， 手动驾驶不得接管它们。
  */
-final class ManagedTrains {
+public final class ManagedTrains {
 
   private static final String LEGACY_OPERATOR_TAG = "FTA_OPERATOR";
   private static final String LEGACY_LINE_TAG = "FTA_LINE";
@@ -19,7 +19,7 @@ final class ManagedTrains {
   private ManagedTrains() {}
 
   /** 列车是否带有调度系统写入的身份标签。 */
-  static boolean isFtaManaged(TrainProperties properties) {
+  public static boolean isFtaManaged(TrainProperties properties) {
     if (properties == null) {
       return false;
     }

@@ -114,3 +114,20 @@ driver:
   stale-handback-seconds: 10
   # 停车点前预留的余量（格）：防护按“停车点 − 余量”计算制动曲线
   stop-margin-blocks: 1.0
+  # 驾驶任务：任务板列出多少分钟内的发车（/fta drive tasks）
+  task-window-minutes: 20
+  # 一次任务的绝对上限（分钟），超过即停车交还并判未完成
+  max-task-minutes: 90
+  # ATO 下停站结束后等驾驶员右键确认发车的上限（秒），超时自动发车
+  ato-confirm-seconds: 15
+  # 卡住的时间阶梯（秒，须依次递增）：列车能走却不走（表定停站、调度扣车不算）累计到各档时，
+  # 依次告警、转 ATO、交还自动运行并判任务未完成、把驾驶员送到最近车站的站台
+  rescue-warn-seconds: 60
+  rescue-ato-seconds: 120
+  rescue-handback-seconds: 180
+  rescue-teleport-seconds: 300
+  # 拥堵熔断：全网被扣住超过 breaker-held-seconds 秒的车达到 breaker-held-trains 列、且阻挡链里有驾驶员列车时，
+  # 交还全部驾驶员列车，并在 breaker-cooldown-minutes 分钟内暂停接班（/fta drive breaker reset 可提前解除）
+  breaker-held-trains: 5
+  breaker-held-seconds: 60
+  breaker-cooldown-minutes: 15

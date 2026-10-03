@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -9,6 +10,12 @@ import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
@@ -26,6 +33,7 @@ public final class FtaDriveCommand {
 
   private static final String PERMISSION = "fetarute.drive";
   private static final String PERMISSION_ADMIN = "fetarute.drive.admin";
+  private static final String PERMISSION_DRIVER = DriveSessionManager.PERMISSION_DRIVER;
   private static final double KMH_PER_BPS = 3.6;
 
   private final FetaruteTCAddon plugin;
@@ -129,6 +137,58 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("tasks")
+            .permission(PERMISSION_DRIVER)
+            .handler(ctx -> handleTasks(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("task")
+            .permission(PERMISSION_DRIVER)
+            .optional(
+                "action",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("status", "abandon"))
+            .handler(
+                ctx ->
+                    handleTask(
+                        ctx.sender(),
+                        ctx.optional("action").map(String.class::cast).orElse("status"))));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("mode")
+            .permission(PERMISSION_DRIVER)
+            .required(
+                "mode",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("manual", "ato"))
+            .handler(ctx -> handleMode(ctx.sender(), ((String) ctx.get("mode")).trim())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("breaker")
+            .permission(PERMISSION_ADMIN)
+            .optional(
+                "action",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("status", "reset"))
+            .handler(
+                ctx ->
+                    handleBreaker(
+                        ctx.sender(),
+                        ctx.optional("action").map(String.class::cast).orElse("status"))));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("handback")
             .permission(PERMISSION_ADMIN)
             .required("target", StringParser.stringParser(), handbackSuggestions)
@@ -149,7 +209,19 @@ public final class FtaDriveCommand {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("drive.command.help.header"));
     for (String entry :
-        List.of("on", "off", "status", "reverser", "list", "stop", "handback", "probe")) {
+        List.of(
+            "on",
+            "off",
+            "status",
+            "reverser",
+            "tasks",
+            "task",
+            "mode",
+            "list",
+            "stop",
+            "handback",
+            "breaker",
+            "probe")) {
       sender.sendMessage(locale.component("drive.command.help.entry-" + entry));
     }
   }
@@ -286,6 +358,137 @@ public final class FtaDriveCommand {
         locale.component(
             stopped ? "drive.command.admin-stop.stopped" : "drive.command.admin-stop.not-driving",
             Map.of("player", playerName)));
+  }
+
+  /** 打开最近车站的任务板。 */
+  private void handleTasks(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    if (drive.sessionOf(player.getUniqueId()).isPresent()) {
+      sender.sendMessage(locale.component("drive.task.board.driving"));
+      return;
+    }
+    if (!drive.config().driver().enabled()) {
+      sender.sendMessage(locale.component("drive.task.claim.disabled"));
+      return;
+    }
+    Instant now = Instant.now();
+    if (drive.tasks().breaker().open(now)) {
+      sender.sendMessage(locale.component("drive.task.claim.breaker-open"));
+      return;
+    }
+    Optional<TaskBoardSource.Station> station =
+        TaskBoardSource.nearestStation(plugin, player.getLocation());
+    if (station.isEmpty()) {
+      sender.sendMessage(locale.component("drive.task.board.no-station"));
+      return;
+    }
+    List<TaskBoardEntries.Row> rows =
+        TaskBoardEntries.select(
+            TaskBoardSource.departures(
+                plugin, station.get(), now, drive.config().driver().recovery().taskWindowMinutes()),
+            drive.tasks().takenKeys(),
+            now,
+            TaskBoard.ENTRY_SLOTS);
+    TaskBoard.open(
+        player,
+        locale,
+        new TaskBoardHolder(
+            player.getUniqueId(),
+            station.get().operatorCode(),
+            station.get().stationCode(),
+            station.get().name(),
+            rows));
+  }
+
+  /** 查看或放弃自己的任务。 */
+  private void handleTask(CommandSender sender, String action) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    if (action.equalsIgnoreCase("abandon")) {
+      sender.sendMessage(
+          locale.component(drive.abandonTask(player) ? "drive.task.abandoned" : "drive.task.none"));
+      return;
+    }
+    Optional<DriverTask> task = drive.tasks().taskOf(player.getUniqueId());
+    if (task.isEmpty()) {
+      sender.sendMessage(locale.component("drive.task.none"));
+      return;
+    }
+    DriverTask current = task.get();
+    sender.sendMessage(
+        locale.component(
+            "drive.task.status",
+            Map.of(
+                "route",
+                current.routeCode(),
+                "trip",
+                current.key().tripCode(),
+                "station",
+                current.stationName(),
+                "time",
+                TaskBoard.format(current.plannedDeparture()),
+                "train",
+                current.trainName() == null ? "-" : current.trainName(),
+                "mode",
+                locale.text("drive.driver.mode." + current.mode().name().toLowerCase(Locale.ROOT)),
+                "state",
+                locale.text(
+                    "drive.task.state." + current.state().name().toLowerCase(Locale.ROOT)))));
+  }
+
+  /** 切换人工驾驶与 ATO。 */
+  private void handleMode(CommandSender sender, String raw) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    DrivingMode mode;
+    if (raw.equalsIgnoreCase("ato")) {
+      mode = DrivingMode.ATO;
+    } else if (raw.equalsIgnoreCase("manual")) {
+      mode = DrivingMode.MANUAL;
+    } else {
+      sender.sendMessage(plugin.getLocaleManager().component("drive.command.mode.invalid"));
+      return;
+    }
+    sender.sendMessage(plugin.getLocaleManager().component(drive.setDrivingMode(player, mode)));
+  }
+
+  /** 查看或解除全网熔断。 */
+  private void handleBreaker(CommandSender sender, String action) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    if (action.equalsIgnoreCase("reset")) {
+      drive.tasks().breaker().reset();
+      sender.sendMessage(locale.component("drive.command.breaker.reset"));
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            "drive.command.breaker.status",
+            Map.of("status", drive.tasks().breakerStatus(Instant.now()))));
   }
 
   /** 管理员把某名玩家（或全部）驾驶的调度列车交还自动运行：停稳后交还，行驶中先常用制动停车。 */

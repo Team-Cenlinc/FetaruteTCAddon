@@ -149,6 +149,20 @@
         <Method name="controlAuthority"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 驾驶任务：持有插件实例；任务板持有者按 Bukkit 约定交出自己的箱子界面 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Method name="tasks"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>
         <Bug pattern="EI_EXPOSE_REP2"/>

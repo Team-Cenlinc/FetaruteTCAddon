@@ -59,7 +59,8 @@ public final class DriveHud {
         TagResolver.builder()
             .resolver(Placeholder.component("speed", speed))
             .resolver(Placeholder.component("limit", limit))
-            .resolver(Placeholder.unparsed("notch", session.notch().name()))
+            .resolver(
+                Placeholder.unparsed("notch", session.isAto() ? "ATO" : session.notch().name()))
             .resolver(Placeholder.component("force", forceBar(session.effort())))
             .resolver(Placeholder.unparsed("direction", locale.text(directionKey)))
             .build();
@@ -91,6 +92,9 @@ public final class DriveHud {
     if (intervention != null) {
       return locale.component(intervention);
     }
+    if (link != null && link.departurePending()) {
+      return locale.component("drive.hud.ato.confirm");
+    }
     if (!session.setup().ready()) {
       return setupSegment(locale, session);
     }
@@ -114,7 +118,10 @@ public final class DriveHud {
     if (session.anyDoorOpen()) {
       return locale.component("drive.hud.doors-open");
     }
-    if (link != null && link.directive() != null && link.directive().isStop()) {
+    if (link != null
+        && link.controlsPhysically()
+        && link.directive() != null
+        && link.directive().isStop()) {
       return locale.component("drive.hud.driver.wait-signal");
     }
     return null;
@@ -136,6 +143,10 @@ public final class DriveHud {
     }
     if (link.handbackRequested()) {
       return "drive.hud.driver.handback";
+    }
+    if (!link.controlsPhysically()) {
+      // ATO 下由自动运行操纵，不向驾驶员下发行车许可。
+      return null;
     }
     if (link.directive() == null) {
       return "drive.hud.driver.no-signal";
