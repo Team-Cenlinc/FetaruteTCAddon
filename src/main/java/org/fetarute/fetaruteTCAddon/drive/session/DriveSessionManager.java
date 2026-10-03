@@ -69,6 +69,7 @@ import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveHud;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
+import org.fetarute.fetaruteTCAddon.drive.hud.StopMarker;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DrivePacketListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
@@ -172,6 +173,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DrivePacketListener packetListener = new DrivePacketListener(this);
   private final DriveMenu menu;
   private final DriveSidebar sidebar;
+  private final StopMarker stopMarker;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
   private final DriverTaskManager tasks;
@@ -187,6 +189,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.config = config;
     this.menu = new DriveMenu(plugin.getLocaleManager());
     this.sidebar = new DriveSidebar(plugin.getLocaleManager());
+    this.stopMarker =
+        new StopMarker(
+            plugin,
+            node ->
+                plugin.getSignNodeRegistry() == null
+                    ? Optional.empty()
+                    : plugin.getSignNodeRegistry().findByNodeId(node, null));
     driverRegistry.setHandler(new DriverHandler());
     this.tasks = new DriverTaskManager(plugin, this::traceTask);
     applyDriverConfig(config);
@@ -284,6 +293,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     stopping.clear();
     sidebar.hideAll();
+    stopMarker.removeAll();
     DrivePacketListener.unregister(plugin);
   }
 
@@ -1112,6 +1122,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     traceSession(session, "驾驶结束: " + reason);
     closeDoors(session);
     releaseCab(session);
+    stopMarker.remove(session.playerId());
     if (active.remove(session.playerId(), session)) {
       Player player = Bukkit.getPlayer(session.playerId());
       if (player != null && player.isOnline()) {
@@ -1157,6 +1168,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     session.finish(reason);
     closeDoors(session);
     releaseCab(session);
+    stopMarker.remove(session.playerId());
     if (active.remove(session.playerId(), session)) {
       Player player = Bukkit.getPlayer(session.playerId());
       if (player != null && player.isOnline()) {
@@ -1469,13 +1481,19 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       refreshInventory(player, session);
     }
     if (tickCounter % current.hudIntervalTicks() == 0) {
-      if (now >= session.actionBarHeldUntil()) {
-        player.sendActionBar(DriveHud.render(plugin.getLocaleManager(), session));
-      }
+      boolean sidebarShown = false;
       if (current.sidebar()) {
-        sidebar.update(player, session);
+        sidebarShown = sidebar.update(player, session);
       } else {
         sidebar.hide(player);
+      }
+      if (now >= session.actionBarHeldUntil()) {
+        player.sendActionBar(DriveHud.render(plugin.getLocaleManager(), session, sidebarShown));
+      }
+      if (current.driver().stopMarker()) {
+        stopMarker.update(player, session, group, now);
+      } else {
+        stopMarker.remove(player.getUniqueId());
       }
     }
   }

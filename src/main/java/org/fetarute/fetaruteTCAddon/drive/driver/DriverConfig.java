@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
  * @param stopMarginBlocks 停车点、授权末端前留出的余量（格）
  * @param stopAccurateBlocks 站停时列车中心离停车点多近算停准（格）
  * @param stopAcceptBlocks 站停时列车中心离停车点多近可以开门（格）；越过更多时防护强制停车
+ * @param stopMarker 进站时在驾驶员该停的位置显示发光停车标（只有驾驶员本人看得见）
  * @param recovery 驾驶任务与拥堵恢复的参数
  */
 public record DriverConfig(
@@ -32,6 +33,7 @@ public record DriverConfig(
     double stopMarginBlocks,
     double stopAccurateBlocks,
     double stopAcceptBlocks,
+    boolean stopMarker,
     DriverRecovery recovery) {
 
   private static final int TICKS_PER_SECOND = 20;
@@ -54,6 +56,7 @@ public record DriverConfig(
         1.0,
         StopAlignment.DEFAULT_ACCURATE_BLOCKS,
         StopAlignment.DEFAULT_ACCEPT_BLOCKS,
+        true,
         DriverRecovery.defaults());
   }
 
@@ -110,6 +113,7 @@ public record DriverConfig(
         nonNegative(section, "stop-margin-blocks", d.stopMarginBlocks, sink),
         stopAccurate,
         stopAccept,
+        section.getBoolean("stop-marker", d.stopMarker),
         DriverRecovery.from(section, sink));
   }
 

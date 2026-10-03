@@ -1515,7 +1515,9 @@ drive:
     label:
       train: "车次"
       signal: "信号"
-      station: "车站"
+      next-station: "下一站"
+      stop-mark: "停车点"
+      stop: "停站"
       doors: "车门"
       air: "风压"
       vigilance: "警惕"
@@ -1530,6 +1532,21 @@ drive:
         ato: "<aqua>ATO 运行</aqua>"
       station:
         none: "<gray>-</gray>"
+      stop:
+        approach: "<aqua><station></aqua> <white><distance></white> <gray>格</gray>"
+        on-mark: "<green>已对标</green>"
+        move-up: "<yellow>请前移 <white><distance></white> 格</yellow>"
+        overrun: "<red>越过 <white><distance></white> 格</red>"
+        open-doors:
+          left: "<yellow>请开左侧车门</yellow>"
+          right: "<yellow>请开右侧车门</yellow>"
+          both: "<yellow>请开两侧车门</yellow>"
+          any: "<yellow>请开站台侧车门</yellow>"
+          none: "<gray>本站不开门</gray>"
+        dwell: "<white><seconds></white> <gray>秒</gray>"
+        close-doors: "<yellow>请关门</yellow>"
+        wait-departure: "<gray>等待发车</gray>"
+        depart: "<green>可以发车</green>"
       doors:
         closed: "<green>关闭</green>"
         left: "<red>左侧开</red>"

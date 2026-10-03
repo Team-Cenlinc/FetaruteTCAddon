@@ -42,15 +42,17 @@ public final class DriveSidebar {
    * 刷新玩家的侧边栏；还没有时先换上。
    *
    * <p>只在第一次换上：之后若被别的插件换成它的计分板，就让给它，不再刷新也不抢回来，免得两边每秒互相覆盖。
+   *
+   * @return 玩家此刻看到的是驾驶员侧边栏（被别的插件换掉时为 {@code false}）
    */
-  public void update(Player player, DriveSession session) {
+  public boolean update(Player player, DriveSession session) {
     State state = states.get(player.getUniqueId());
     if (state == null) {
       state = create(player);
       states.put(player.getUniqueId(), state);
       player.setScoreboard(state.scoreboard);
     } else if (player.getScoreboard() != state.scoreboard) {
-      return;
+      return false;
     }
     Component title = locale.component("drive.sidebar.title", Map.of("train", session.trainName()));
     if (!title.equals(state.title)) {
@@ -80,6 +82,7 @@ public final class DriveSidebar {
       }
     }
     state.lines = lines;
+    return true;
   }
 
   /** 撤下侧边栏，换回原来的计分板。 */

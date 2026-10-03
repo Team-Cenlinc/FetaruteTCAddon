@@ -4,15 +4,22 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.OptionalDouble;
 import java.util.UUID;
 import org.bukkit.configuration.MemoryConfiguration;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
@@ -79,5 +86,34 @@ class DriveSidebarRowsTest {
 
     assertEquals("↑", row(rows, "air").values().get("pump"));
     assertTrue(row(rows, "air").valueKey().endsWith(".low"));
+  }
+
+  @Test
+  void theStationRowShowsTheNextStationThenTheStopMarkThenTheStopPhase() {
+    DriveSession session = session(CabSystems.disabled());
+    double[] odometer = {0.0};
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> odometer[0], () -> 0L);
+    session.attachDriverLink(link);
+    link.setTargetLabel("测试站");
+
+    DriveSidebarRows.Row next = row(DriveSidebarRows.build(session, 0), "next-station");
+    assertEquals("drive.sidebar.value.text", next.valueKey());
+    assertEquals("测试站", next.values().get("text"));
+
+    link.updateApproach(
+        NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(50.0), Instant.EPOCH, 10.0);
+    DriveSidebarRows.Row mark = row(DriveSidebarRows.build(session, 0), "stop-mark");
+    assertEquals("drive.sidebar.value.stop.approach", mark.valueKey());
+    assertEquals("60", mark.values().get("distance"));
+
+    DriverStationStop stop =
+        new DriverStationStop(
+            NodeId.of("OP:S:STA:1"), "测试站", UUID.randomUUID(), new Vector(), null, false, true);
+    link.beginStationStop(stop);
+    link.setRequiredDoorSide(DriverDoorSide.LEFT);
+    stop.markStopped();
+    assertEquals(
+        "drive.sidebar.value.stop.open-doors.left",
+        row(DriveSidebarRows.build(session, 0), "stop").valueKey());
   }
 }

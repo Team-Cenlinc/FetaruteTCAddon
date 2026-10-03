@@ -15,7 +15,9 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
- * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压与警惕装置；驾驶调度列车时最上面加车次、行车许可与前方车站。
+ * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压与警惕装置；驾驶调度列车时最上面加车次、行车许可与车站。
+ *
+ * <p>车站一行平时显示下一站，进站时换成离停车点的距离，停妥后显示停站阶段。计分板不会被别的插件的动作栏消息顶掉，所以车站信息以这里为准，动作栏只提示要动手的操作。
  *
  * <p>启动、停放制动、制动试验这类一次性步骤只在挡着牵引时由动作栏提示；方向在动作栏里；启动流程各开关的明细在驾驶台菜单里。 每行是“标签 + 值”，都用语言键表示，由 {@link
  * DriveSidebar} 渲染。本类不依赖服务器对象，便于单测。
@@ -86,17 +88,21 @@ public final class DriveSidebarRows {
         Map.of("limit_kmh", String.valueOf(Math.round(permitted * KMH_PER_BPS))));
   }
 
-  /** 前方车站：进站前给距离，停站时给阶段提示。 */
+  /** 车站一行：平时是下一站，进站时换成离停车点的距离，停妥后是停站各阶段。 */
   private static Row stationRow(DriverLink link, boolean stopped) {
-    String label = "drive.sidebar.label.station";
     return DriverStationHint.of(link, stopped)
-        .map(hint -> new Row(label, hint.key(), hint.values()))
+        .map(hint -> new Row(hint.sidebarLabelKey(), hint.sidebarKey(), hint.values()))
         .orElseGet(
             () ->
                 link.targetLabel().isEmpty()
-                    ? new Row(label, "drive.sidebar.value.station.none", Map.of())
+                    ? new Row(
+                        "drive.sidebar.label.next-station",
+                        "drive.sidebar.value.station.none",
+                        Map.of())
                     : new Row(
-                        label, "drive.sidebar.value.text", Map.of("text", link.targetLabel())));
+                        "drive.sidebar.label.next-station",
+                        "drive.sidebar.value.text",
+                        Map.of("text", link.targetLabel())));
   }
 
   private static String doorsKey(DriveSession session) {

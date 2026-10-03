@@ -37,8 +37,12 @@ public final class DriveHud {
 
   private DriveHud() {}
 
-  /** 构建当前这一帧的动作栏内容。 */
-  public static Component render(LocaleManager locale, DriveSession session) {
+  /**
+   * 构建当前这一帧的动作栏内容。
+   *
+   * @param sidebarShown 驾驶员此刻看得到侧边栏：车站的距离、停站倒计时等只在侧边栏显示，动作栏只提示要动手的操作
+   */
+  public static Component render(LocaleManager locale, DriveSession session, boolean sidebarShown) {
     String speedText = format(session.speedBps() * KMH_PER_BPS);
     if (session.phase() != DriveSession.Phase.ACTIVE) {
       return locale.component("drive.hud.line-stopping", Map.of("speed_kmh", speedText));
@@ -78,7 +82,7 @@ public final class DriveHud {
               .append(SPACE)
               .append(line);
     }
-    Component status = statusToken(locale, session);
+    Component status = statusToken(locale, session, sidebarShown);
     if (status != null) {
       line = line.append(SPACE).append(status);
     }
@@ -86,7 +90,8 @@ public final class DriveHud {
   }
 
   /** 动作栏末尾最要紧的一条提示：为什么现在不能牵引。按启动流程、停放制动、风压、制动试验、车门的顺序取第一条；都没有时为 {@code null}。 各系统的完整状态在侧边栏里。 */
-  private static Component statusToken(LocaleManager locale, DriveSession session) {
+  private static Component statusToken(
+      LocaleManager locale, DriveSession session, boolean sidebarShown) {
     DriverLink link = session.driverLink();
     String intervention = link == null ? null : interventionKey(link);
     if (intervention != null) {
@@ -111,8 +116,12 @@ public final class DriveHud {
     }
     if (link != null) {
       Optional<DriverStationHint.Hint> station = DriverStationHint.of(link, session.isStopped());
-      if (station.isPresent()) {
+      if (station.isPresent() && (!sidebarShown || station.get().actionable())) {
         return locale.component(station.get().key(), station.get().values());
+      }
+      if (station.isPresent() && station.get().atStation()) {
+        // 停站计时、等待发车时车门开着是正常的，倒计时在侧边栏里。
+        return null;
       }
     }
     if (session.anyDoorOpen()) {

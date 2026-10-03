@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
-import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 
@@ -106,19 +105,25 @@ public final class StopAlignment {
     if (!group.getWorld().getUID().equals(worldId)) {
       return Double.NaN;
     }
-    MinecartMember<?> head = group.head();
-    MinecartMember<?> tail = group.tail();
-    Vector headPos = head.getEntity().getLocation().toVector();
-    Vector tailPos = tail.getEntity().getLocation().toVector();
-    Vector travel;
-    if (head == tail) {
-      BlockFace direction = head.getDirection();
-      travel = direction == null ? null : direction.getDirection();
-    } else {
-      travel = headPos.clone().subtract(tailPos);
+    return signedOffset(center(group), stopPoint, travel(group));
+  }
+
+  /** 列车中心：车头与车尾的中点。 */
+  public static Vector center(MinecartGroup group) {
+    Vector headPos = group.head().getEntity().getLocation().toVector();
+    Vector tailPos = group.tail().getEntity().getLocation().toVector();
+    return headPos.add(tailPos).multiply(0.5);
+  }
+
+  /** 列车前进方向：车尾指向车头，单节车取它的行进方向；量不出时为 {@code null}。 */
+  public static Vector travel(MinecartGroup group) {
+    if (group.size() < 2) {
+      BlockFace direction = group.head().getDirection();
+      return direction == null ? null : direction.getDirection();
     }
-    Vector center = headPos.clone().add(tailPos).multiply(0.5);
-    return signedOffset(center, stopPoint, travel);
+    Vector headPos = group.head().getEntity().getLocation().toVector();
+    Vector tailPos = group.tail().getEntity().getLocation().toVector();
+    return headPos.subtract(tailPos);
   }
 
   /** 车头到列车中心的水平距离（格）；单节车为 0。 */

@@ -518,6 +518,11 @@
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment"/>
+        <Method name="travel"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver"/>
         <Method name="resolveSpeedBlocksPerSecond"/>
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>

@@ -39,6 +39,7 @@ public final class DriverLink {
   private DriverStationStop stationStop;
   private NodeId completedStopNode;
   private NodeId approachNode;
+  private boolean approachStation;
   private double approachRemainingAtSample = Double.NaN;
   private double odometerAtApproachSample;
   private long approachSampleTick;
@@ -228,8 +229,10 @@ public final class DriverLink {
    * @param node 车站或停车点节点
    * @param remainingBlocks 列车中心到停车点的距离；越过为负
    * @param precise 由站台按实际位置量出（进站后）；否则是按调度采样推算的估计
+   * @param station 车站（按列车中心对标）；否则是区间停车点（调度在车头到点时就地停车）
    */
-  public record StationTarget(NodeId node, double remainingBlocks, boolean precise) {}
+  public record StationTarget(
+      NodeId node, double remainingBlocks, boolean precise, boolean station) {}
 
   /** 估计值超过这么久没有更新就不再使用。 */
   private static final long APPROACH_SAMPLE_MAX_AGE_TICKS = 100L;
@@ -285,6 +288,7 @@ public final class DriverLink {
       return;
     }
     approachNode = node;
+    approachStation = "station".equals(kind);
     // 车站按列车中心对标；区间停车点由调度在车头到点时就地停车，按车头算。
     double offset = "station".equals(kind) ? Math.max(0.0, halfLengthBlocks) : 0.0;
     approachRemainingAtSample = headDistanceBlocks.getAsDouble() + offset;
@@ -298,7 +302,7 @@ public final class DriverLink {
     if (stop != null) {
       if (stop.phase() == DriverStationStop.Phase.APPROACH
           && Double.isFinite(stop.offsetBlocks())) {
-        return Optional.of(new StationTarget(stop.node(), -stop.offsetBlocks(), true));
+        return Optional.of(new StationTarget(stop.node(), -stop.offsetBlocks(), true, true));
       }
       return Optional.empty();
     }
@@ -309,7 +313,8 @@ public final class DriverLink {
     }
     double travelled = Math.max(0.0, odometer.getAsDouble() - odometerAtApproachSample);
     return Optional.of(
-        new StationTarget(approachNode, approachRemainingAtSample - travelled, false));
+        new StationTarget(
+            approachNode, approachRemainingAtSample - travelled, false, approachStation));
   }
 
   /** 信号确认。 */

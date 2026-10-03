@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.hud;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Instant;
@@ -80,5 +81,47 @@ class DriverStationHintTest {
     assertEquals("drive.hud.station.depart", DriverStationHint.of(link, true).orElseThrow().key());
     stop.end();
     assertTrue(DriverStationHint.of(link, true).isEmpty());
+  }
+
+  @Test
+  @DisplayName("动作栏只放要动手的提示；侧边栏进站时是停车点、停妥后是停站")
+  void actionableAndSidebarKeys() {
+    link.updateApproach(
+        NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(40.0), Instant.EPOCH, 10.0);
+    DriverStationHint.Hint approach = DriverStationHint.of(link, false).orElseThrow();
+    assertFalse(approach.actionable());
+    assertFalse(approach.atStation());
+    assertEquals("drive.sidebar.label.stop-mark", approach.sidebarLabelKey());
+    assertEquals("drive.sidebar.value.stop.approach", approach.sidebarKey());
+
+    link.beginStationStop(stop);
+    stop.updateOffset(-8.0);
+    assertTrue(DriverStationHint.of(link, true).orElseThrow().actionable(), "停短须前移");
+
+    link.setRequiredDoorSide(DriverDoorSide.RIGHT);
+    stop.markStopped();
+    DriverStationHint.Hint open = DriverStationHint.of(link, true).orElseThrow();
+    assertTrue(open.actionable());
+    assertTrue(open.atStation());
+    assertEquals("drive.sidebar.label.stop", open.sidebarLabelKey());
+    assertEquals("drive.sidebar.value.stop.open-doors.right", open.sidebarKey());
+
+    stop.setPhase(DriverStationStop.Phase.DWELL);
+    DriverStationHint.Hint dwell = DriverStationHint.of(link, true).orElseThrow();
+    assertFalse(dwell.actionable(), "倒计时只在侧边栏");
+    assertTrue(dwell.atStation());
+    stop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
+    assertFalse(DriverStationHint.of(link, true).orElseThrow().actionable());
+    stop.setPhase(DriverStationStop.Phase.DEPART);
+    assertTrue(DriverStationHint.of(link, true).orElseThrow().actionable());
+  }
+
+  @Test
+  @DisplayName("进站前停车（等信号）不提示前移")
+  void noMoveUpBeforeEnteringTheStation() {
+    link.updateApproach(
+        NodeId.of("OP:S:STA:1"), "station", OptionalDouble.of(50.0), Instant.EPOCH, 10.0);
+    assertEquals(
+        "drive.hud.station.approach", DriverStationHint.of(link, true).orElseThrow().key());
   }
 }

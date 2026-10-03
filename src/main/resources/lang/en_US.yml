@@ -113,7 +113,9 @@ drive:
     label:
       train: "Train"
       signal: "Signal"
-      station: "Station"
+      next-station: "Next"
+      stop-mark: "Stop mark"
+      stop: "Stop"
       doors: "Doors"
       air: "Air"
       vigilance: "Vigilance"
@@ -128,6 +130,21 @@ drive:
         ato: "<aqua>ATO driving</aqua>"
       station:
         none: "<gray>-</gray>"
+      stop:
+        approach: "<aqua><station></aqua> <white><distance></white> <gray>blocks</gray>"
+        on-mark: "<green>On the mark</green>"
+        move-up: "<yellow>Move up <white><distance></white> blocks</yellow>"
+        overrun: "<red>Overran by <white><distance></white> blocks</red>"
+        open-doors:
+          left: "<yellow>Open the left doors</yellow>"
+          right: "<yellow>Open the right doors</yellow>"
+          both: "<yellow>Open both doors</yellow>"
+          any: "<yellow>Open the platform-side doors</yellow>"
+          none: "<gray>No doors at this stop</gray>"
+        dwell: "<white><seconds></white> <gray>s</gray>"
+        close-doors: "<yellow>Close the doors</yellow>"
+        wait-departure: "<gray>Waiting for departure</gray>"
+        depart: "<green>Clear to depart</green>"
       doors:
         closed: "<green>Closed</green>"
         left: "<red>Left open</red>"
