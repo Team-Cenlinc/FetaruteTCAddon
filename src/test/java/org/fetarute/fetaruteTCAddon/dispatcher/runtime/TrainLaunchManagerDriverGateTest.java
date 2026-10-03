@@ -3,9 +3,11 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -105,6 +107,58 @@ class TrainLaunchManagerDriverGateTest {
     assertEquals(14.0, directive.requestedBps(), 1.0e-6);
     assertEquals(14.0, directive.permittedBps(), 1.0e-6);
     assertEquals(14.0, directive.envelope().limitBps(0.0), 1.0e-6);
+  }
+
+  @Test
+  @DisplayName("终点站折返由驾驶员接班：放行那一拍按发车方向调头一次，停车信号与之后的周期刷新不调头")
+  void turnbackFacesTheDepartureDirectionOnceOnRelease() {
+    TrainProperties properties = properties("drv-turnback");
+    RuntimeTrainHandle train = train(properties, 0.0);
+    RecordingControlAuthority authority =
+        new RecordingControlAuthority().control(properties).turnback(properties);
+    TrainLaunchManager manager = new TrainLaunchManager(new SpeedLimitRamp(), authority);
+    Optional<org.bukkit.block.BlockFace> fallback = Optional.of(org.bukkit.block.BlockFace.WEST);
+
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.of(0L),
+        fallback,
+        runtimeSettings(),
+        StopControlMode.BRAKING_TO_PLANNED_STOP,
+        null);
+    verify(train, never()).faceDepartureDirection(any());
+
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.PROCEED,
+        10.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        fallback,
+        runtimeSettings(),
+        StopControlMode.BRAKING_TO_PLANNED_STOP,
+        null);
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.PROCEED,
+        10.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        fallback,
+        runtimeSettings(),
+        StopControlMode.BRAKING_TO_PLANNED_STOP,
+        null);
+
+    verify(train, times(1)).faceDepartureDirection(fallback);
   }
 
   @Test

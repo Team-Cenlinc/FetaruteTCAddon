@@ -57,6 +57,11 @@ public final class TaskScore {
     this.delayAtStartSeconds = seconds == null ? OptionalLong.empty() : seconds;
   }
 
+  /** 是否已记下接班时的晚点。 */
+  public boolean hasDelayAtStart() {
+    return delayAtStartSeconds.isPresent();
+  }
+
   public void setDelayAtEnd(OptionalLong seconds) {
     this.delayAtEndSeconds = seconds == null ? OptionalLong.empty() : seconds;
   }

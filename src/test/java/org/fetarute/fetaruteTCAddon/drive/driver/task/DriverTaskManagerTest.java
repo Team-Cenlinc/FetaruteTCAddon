@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.driver.task;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -98,5 +99,38 @@ class DriverTaskManagerTest {
     assertEquals(
         DriverTaskManager.SeatCheck.WRONG_SEAT,
         DriverTaskManager.checkSeat(new SeatBinding("T1", 5, 0), "T1", 6));
+  }
+
+  @Test
+  @DisplayName("终点站折返接车：后端车厢也可以坐，后半列车的中间车厢仍不行")
+  void eitherEndSeatCheck() {
+    assertEquals(
+        DriverTaskManager.SeatCheck.CONFIRM,
+        DriverTaskManager.checkSeat(new SeatBinding("T1", 5, 0), "T1", 6, true));
+    assertEquals(
+        DriverTaskManager.SeatCheck.WRONG_SEAT,
+        DriverTaskManager.checkSeat(new SeatBinding("T1", 4, 0), "T1", 6, true));
+    assertEquals(
+        DriverTaskManager.SeatCheck.CONFIRM,
+        DriverTaskManager.checkSeat(new SeatBinding("T1", 0, 0), "T1", 6, true));
+  }
+
+  @Test
+  @DisplayName("按车次找任务；接车等到时限只作废还没开始的任务")
+  void taskForTripAndExpireClaim() {
+    Player a = player("a");
+    tasks.claim(a, row("R1-007"), "OP", "AAA", "A 站", DrivingMode.MANUAL, true, NOW);
+    LocalDate date = LocalDate.of(2026, 10, 3);
+
+    assertTrue(tasks.taskForTrip(TT, "r1-007", date).isPresent(), "车次号不分大小写");
+    assertTrue(tasks.taskForTrip(TT, "R1-008", date).isEmpty());
+    assertTrue(tasks.hasActiveTasks());
+
+    tasks.expireClaim(a.getUniqueId(), "pickup-timeout");
+
+    assertEquals(DriverTask.State.EXPIRED, tasks.taskOf(a.getUniqueId()).orElseThrow().state());
+    assertEquals("pickup-timeout", tasks.taskOf(a.getUniqueId()).orElseThrow().endReason());
+    assertTrue(tasks.taskForTrip(TT, "R1-007", date).isEmpty());
+    assertFalse(tasks.hasActiveTasks());
   }
 }

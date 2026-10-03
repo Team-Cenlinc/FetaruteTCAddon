@@ -45,6 +45,7 @@ public final class DriverTask {
   private DrivingMode mode;
   private State state = State.CLAIMED;
   private String trainName;
+  private boolean depotPickup;
   private long startedTick = -1L;
   private Instant startedAt;
   private int points = -1;
@@ -144,6 +145,15 @@ public final class DriverTask {
 
   public void setTrainName(String trainName) {
     this.trainName = trainName;
+  }
+
+  /** 是否要从车库接车：车库出车时扣在股道上等驾驶员，等不到再在接班站接班。 */
+  public boolean depotPickup() {
+    return depotPickup;
+  }
+
+  public void setDepotPickup(boolean depotPickup) {
+    this.depotPickup = depotPickup;
   }
 
   /** 开始驾驶。 */

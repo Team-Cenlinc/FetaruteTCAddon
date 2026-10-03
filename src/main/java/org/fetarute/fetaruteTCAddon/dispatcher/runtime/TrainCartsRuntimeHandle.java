@@ -680,6 +680,46 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
         head, directionOpt.orElse(null), targetBlocksPerTick, accelBlocksPerTickSquared);
   }
 
+  @Override
+  public boolean faceDepartureDirection(Optional<BlockFace> fallbackDirection) {
+    if (group.isMoving()) {
+      return false;
+    }
+    MinecartMember<?> head = group.head();
+    if (head == null) {
+      return false;
+    }
+    LoggerManager logger = resolveLoggerManager();
+    LaunchDirectionResult directionResult =
+        resolveLaunchDirectionByTrainCarts(head, group.getProperties(), logger);
+    Optional<BlockFace> direction = directionResult.face();
+    if (direction.isEmpty() && fallbackDirection != null) {
+      direction = fallbackDirection;
+    }
+    BlockFace facing = head.getDirection();
+    if (direction.isEmpty() || facing == null) {
+      return false;
+    }
+    int dot =
+        direction.get().getModX() * facing.getModX() + direction.get().getModZ() * facing.getModZ();
+    if (dot >= 0) {
+      return false;
+    }
+    group.reverse();
+    if (logger != null) {
+      logger.debug(
+          "驾驶员列车按发车方向调头: train="
+              + group.getProperties().getTrainName()
+              + " facing="
+              + facing.name()
+              + " dir="
+              + direction.get().name()
+              + " detail="
+              + directionResult.detail());
+    }
+    return true;
+  }
+
   /**
    * 强制重发列车（用于回退检测后纠正方向）。
    *

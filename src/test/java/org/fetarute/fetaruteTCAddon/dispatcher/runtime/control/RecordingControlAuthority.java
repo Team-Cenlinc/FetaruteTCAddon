@@ -12,6 +12,7 @@ public final class RecordingControlAuthority implements ControlAuthority {
   private final List<DriverDirective> directives = new ArrayList<>();
   private final List<DriverInterrupt> interrupts = new ArrayList<>();
   private final List<String> handbacks = new ArrayList<>();
+  private final List<TrainProperties> turnbacks = new ArrayList<>();
 
   /** 让这列车由驾驶员控制。 */
   public RecordingControlAuthority control(TrainProperties properties) {
@@ -23,6 +24,17 @@ public final class RecordingControlAuthority implements ControlAuthority {
   public RecordingControlAuthority controlName(String trainName) {
     controlledNames.add(trainName);
     return this;
+  }
+
+  /** 这列车下一次放行时要按发车方向调头（取走一次即清除）。 */
+  public RecordingControlAuthority turnback(TrainProperties properties) {
+    turnbacks.add(properties);
+    return this;
+  }
+
+  @Override
+  public boolean takeTurnback(TrainProperties properties) {
+    return turnbacks.removeIf(candidate -> candidate == properties);
   }
 
   @Override

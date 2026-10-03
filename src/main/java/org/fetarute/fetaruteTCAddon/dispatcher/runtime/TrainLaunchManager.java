@@ -236,6 +236,7 @@ public final class TrainLaunchManager {
           config,
           allowLaunch,
           distanceOpt,
+          launchFallbackDirection,
           runtimeSettings,
           stopMode,
           speedEnvelope);
@@ -379,11 +380,21 @@ public final class TrainLaunchManager {
       TrainConfig config,
       boolean allowLaunch,
       OptionalLong distanceOpt,
+      java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
       ConfigManager.RuntimeSettings runtimeSettings,
       StopControlMode stopMode,
       SpeedEnvelope speedEnvelope) {
     speedLimitRamp.release(train);
     clearPendingLaunchCommand(properties);
+    if (allowLaunch
+        && aspect != SignalAspect.STOP
+        && train != null
+        && !train.isMoving()
+        && authority.takeTurnback(properties)) {
+      // 终点站折返由驾驶员接班：按自动发车同一套寻路判定方向，车头朝反了先调头（车不动），再把发车交给驾驶员。
+      train.faceDepartureDirection(
+          launchFallbackDirection == null ? java.util.Optional.empty() : launchFallbackDirection);
+    }
     // 人工驾驶不受进站限速：停车由驾驶员自己掌握，越过停车点另有防护。
     if (speedEnvelope != null) {
       SpeedEnvelope.ManualView manual = speedEnvelope.manual(targetBps);

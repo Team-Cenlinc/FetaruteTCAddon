@@ -34,7 +34,9 @@ class DriverConfigTest {
             "stale-handback-seconds: 12",
             "stop-margin-blocks: 0.5",
             "stop-accurate-blocks: 3",
-            "stop-accept-blocks: 8"));
+            "stop-accept-blocks: 8",
+            "pickup-wait-seconds: 120",
+            "pickup-teleport: false"));
     List<String> warnings = new ArrayList<>();
 
     DriverConfig config = DriverConfig.from(yaml, warnings::add);
@@ -48,6 +50,10 @@ class DriverConfigTest {
     assertEquals(0.5, config.stopMarginBlocks(), 1.0e-9);
     assertEquals(3.0, config.stopAccurateBlocks(), 1.0e-9);
     assertEquals(8.0, config.stopAcceptBlocks(), 1.0e-9);
+    assertEquals(120, config.pickupWaitSeconds());
+    assertFalse(config.pickupTeleport());
+    assertEquals(90, DriverConfig.defaults().pickupWaitSeconds());
+    assertTrue(DriverConfig.defaults().pickupTeleport());
     assertEquals(
         new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow(3.0, 8.0, 12.0),
         config.stopWindow());

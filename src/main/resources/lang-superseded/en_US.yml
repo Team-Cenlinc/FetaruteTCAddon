@@ -6,6 +6,8 @@ drive:
   hud:
     line: ["<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
   command:
+    help:
+      entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
       managed-train: ["<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"]

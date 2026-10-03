@@ -26,6 +26,18 @@ public interface RuntimeTrainHandle {
   TrainProperties properties();
 
   /**
+   * 停着的列车按发车方向调头：与自动发车同一套寻路判定方向，车头朝反了就把编组前后对调（车不动）。
+   *
+   * <p>只用于驾驶员控制的列车在终点站折返发车：自动运行由发车动作自己调头，驾驶员控制时不下发发车动作。
+   *
+   * @param fallbackDirection 寻路判定不出方向时按调度图给出的方向
+   * @return 是否调了头
+   */
+  default boolean faceDepartureDirection(Optional<org.bukkit.block.BlockFace> fallbackDirection) {
+    return false;
+  }
+
+  /**
    * 返回用于列尾清空判定的保守列车长度估计（blocks）。
    *
    * <p>默认不猜测长度。调用方在结果缺失、非有限或非正数时必须 fail-retain，不能退回车数、节点数或时间窗口提前释放旧进路。

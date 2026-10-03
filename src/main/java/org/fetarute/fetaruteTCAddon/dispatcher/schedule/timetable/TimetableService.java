@@ -347,6 +347,58 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
+   * 交路意图要开的运营车次：运营票是它自己那一班；出库走行票是它要去接的那一班（交路首班，替补出库是替补的那一班）； 回库票没有。只读，供驾驶员接车核对“这张票是不是我领的那一班”。
+   *
+   * @param intent 票据的交路意图
+   * @return 车次；回库票、时刻表或交路已不存在时为空
+   */
+  public Optional<DueTrip> tripOfIntent(TicketIntent intent) {
+    if (intent == null || intent.kind() == RouteOperationType.RETURN) {
+      return Optional.empty();
+    }
+    Timetable timetable = snapshot.byId().get(intent.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(intent.dutyId())
+        .filter(duty -> intent.tripIndex() < duty.tripIds().size())
+        .flatMap(duty -> timetable.trip(duty.tripIds().get(intent.tripIndex())))
+        .map(trip -> dueTrip(timetable, trip, intent.key()));
+  }
+
+  /**
+   * 这一车次的列车从哪个车库出车：线路首站就是车库，或它是某个交路的首班、交路有出库走行。只读。
+   *
+   * @return 车库节点；车次由终点站待命车接班、或查不到时为空
+   */
+  public Optional<String> depotOriginOf(UUID timetableId, String tripCode) {
+    Timetable timetable = timetableId == null ? null : snapshot.byId().get(timetableId);
+    if (timetable == null || tripCode == null) {
+      return Optional.empty();
+    }
+    Optional<TimetableTrip> trip = timetable.tripByCode(tripCode);
+    if (trip.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<TimetableRoutePlan> plan = timetable.routePlan(trip.get().routeId());
+    if (plan.isPresent() && startsAtDepot(plan.get())) {
+      return Optional.of(plan.get().depotNodeId().orElse(plan.get().originNodeId()));
+    }
+    UUID tripId = trip.get().id();
+    return trip.get()
+        .dutyId()
+        .flatMap(timetable::duty)
+        .filter(
+            duty ->
+                duty.createRouteId().isPresent()
+                    && !duty.tripIds().isEmpty()
+                    && duty.tripIds().get(0).equals(tripId))
+        .map(VehicleDuty::startDepotNodeId)
+        .filter(depot -> !depot.isBlank());
+  }
+
+  /**
    * 出库走行终点的计划站台：走行没有车次，它的终点与首班始发是同一段停留，按首班始发的计划。
    *
    * @param routeId 车正在跑的交路；为空时按交路的出库走行线路

@@ -50,6 +50,20 @@ public interface ControlAuthority {
     return isDriverControlledName(trainName);
   }
 
+  /**
+   * 驾驶员控制的列车这次发车前是否要按发车方向调头（终点站折返由驾驶员接班）。返回 true 后标记即清除。
+   *
+   * <p>自动运行的发车动作会自己调头；驾驶员控制时不下发发车动作，由执行层在放行的那一拍代为调头。
+   */
+  default boolean takeTurnback(TrainProperties properties) {
+    return false;
+  }
+
+  /** 这列车是否正停着等驾驶员上车接班（始发站待命、车库出车）：健康层不当它停滞。 */
+  default boolean awaitingDriver(String trainName) {
+    return false;
+  }
+
   /** 通过插件实例查找当前的控制权；插件未加载（如单元测试）时等同 {@link #NONE}。 */
   static ControlAuthority pluginLookup() {
     return PluginControlAuthority.INSTANCE;

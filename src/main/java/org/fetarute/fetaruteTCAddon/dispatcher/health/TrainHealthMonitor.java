@@ -359,6 +359,10 @@ public final class TrainHealthMonitor {
     if (controlAuthority.isDriverControlledName(trainName)) {
       return true;
     }
+    // 停着等驾驶员上车接班：有时限，到时限由驾驶侧放行，期间不派恢复动作。
+    if (controlAuthority.awaitingDriver(trainName)) {
+      return true;
+    }
     StationStopCoordinator stationStops = dispatchService.stationStops();
     return stationStops != null && stationStops.holdingForSchedule(trainName);
   }

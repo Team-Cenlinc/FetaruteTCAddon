@@ -29,11 +29,13 @@ import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
+import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
@@ -43,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
@@ -63,8 +66,10 @@ import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordCodec;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverPickups;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.PickupSpot;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
@@ -188,6 +193,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 已提示过确认接班的座位：换了座位才再在聊天栏提示一次。 */
   private final Map<UUID, SeatBinding> seatPrompts = new HashMap<>();
 
+  /** 始发站与车库接班：派车时先留着列车等驾驶员上车。 */
+  private final DriverPickups pickups = new DriverPickups();
+
+  /** 已提示过换端失败的驾驶员：每次会话只提示一次。 */
+  private final Set<UUID> cabChangeFailed = new HashSet<>();
+
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
   private final DriverTaskManager tasks;
 
@@ -211,6 +222,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             plugin::getStopMarkIndex);
     this.stopMarker = new StopMarker(stationStopPoints::lookup);
     driverRegistry.setHandler(new DriverHandler());
+    driverRegistry.setAwaitingDriver(pickups::awaiting);
     this.tasks = new DriverTaskManager(plugin, this::traceTask);
     applyDriverConfig(config);
   }
@@ -309,6 +321,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       endNow(session, DriveSession.EndReason.DISABLED);
     }
     stopping.clear();
+    for (DriverPickups.Pickup pickup : pickups.all()) {
+      releasePickup(pickup);
+      pickups.remove(pickup.playerId());
+    }
     sidebar.hideAll();
     stopMarker.removeAll();
     DrivePacketListener.unregister(plugin);
@@ -574,6 +590,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     active.put(player.getUniqueId(), session);
     seatPrompts.remove(player.getUniqueId());
+    cabChangeFailed.remove(player.getUniqueId());
+    if (driverLink != null) {
+      onPickupBoarded(session, group.getProperties().getTrainName());
+    }
     if (driverLink != null) {
       tasks.onSessionStarted(
           player.getUniqueId(), group.getProperties().getTrainName(), Bukkit.getCurrentTick());
@@ -1273,10 +1293,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     boolean dwelling =
         plugin.getDwellRegistry().map(r -> r.remainingSeconds(name).isPresent()).orElse(false)
             || plugin.getRuntimeDispatchService().map(d -> d.hasDepartureGate(name)).orElse(false);
-    if (!dwelling) {
+    // 始发站、车库接车：列车停着等这名驾驶员，不在停站中也可以接班。
+    Optional<DriverPickups.Pickup> pickup =
+        pickups
+            .ofTrain(name)
+            .filter(
+                waiting ->
+                    waiting.playerId().equals(player.getUniqueId())
+                        && waiting.stage() == DriverPickups.Stage.WAITING);
+    if (!dwelling && pickup.isEmpty()) {
       return StartOutcome.NOT_STOPPED_AT_STATION;
     }
-    if (binding.cabSign(group.size()) < 0) {
+    // 终点站折返：发车方向要到派车时才定，后端车厢也可以坐，发车时按需换端。
+    boolean eitherEnd =
+        pickup.filter(waiting -> waiting.kind() == DriverPickups.Kind.TERMINAL).isPresent();
+    if (binding.cabSign(group.size()) < 0
+        && !(eitherEnd && binding.memberIndex() == group.size() - 1)) {
       return StartOutcome.NOT_HEAD_CAB;
     }
     return null;
@@ -1446,6 +1478,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     session.markGroupFound();
     MinecartGroup group = groupOpt.get();
+    if (session.driverLink() != null) {
+      followRename(session, group);
+    }
     if (session.isAto()) {
       // ATO 下由自动运行操纵：显示实际车速，按实测车速累计里程。
       double measured = measureSpeedBps(group);
@@ -1465,6 +1500,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       session.rebind(seat.get());
       session.markSeated();
       alignHead(group, session, player, now);
+      if (changeCabIfNeeded(session, group, player)) {
+        return;
+      }
     } else {
       long lostTicks = session.markSeatLost(now);
       boolean sneaked = session.sneakedRecently(now);
@@ -1562,6 +1600,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (superviseTask(session, link, group, trainName)) {
       return true;
     }
+    // 停在终点站待命：派车放行那一拍按发车方向调头（自动运行由发车动作自己调头）。
+    link.setTurnbackPending(
+        plugin
+            .getLayoverRegistry()
+            .map(registry -> registry.get(trainName).isPresent())
+            .orElse(false));
+    if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0 && !link.score().hasDelayAtStart()) {
+      // 接班时还查不到晚点（车库出车、终点站发车前）：等第一次查得到时再记，回送与等驾驶员的时间不算驾驶员的晚点。
+      link.score().setDelayAtStart(delayOf(trainName));
+    }
     plugin
         .getRuntimeDispatchService()
         .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
@@ -1648,7 +1696,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       requestHandback(session, "max-task-minutes");
       return session.phase() == DriveSession.Phase.ENDED;
     }
-    link.tickStuck(heldByDispatch(session, link, trainName));
+    // 停在终点站待命等派车是计划内的：既不算卡住，也不算被扣。
+    boolean layover =
+        plugin
+            .getLayoverRegistry()
+            .map(registry -> registry.get(trainName).isPresent())
+            .orElse(false);
+    if (!layover) {
+      link.tickStuck(heldByDispatch(session, link, trainName));
+    }
     if (link.heldSeconds() >= HELD_HANDBACK_SECONDS && !link.handbackRequested()) {
       // 被扣住太久：驾驶员车不参与健康层的恢复，交还自动运行，让恢复手段（重算信号、释放残留占用等）接手。
       traceSession(session, "被扣住 " + link.heldSeconds() + " 秒，交还自动运行");
@@ -1821,13 +1877,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private void tickTasks(long now) {
     DriveConfig current = config;
     if (tickCounter % TASK_TICKS == 0) {
+      tickPickups();
       tasks.tickClaims(this::tryStartTask, this::sendTaskHint, Instant.now());
       tasks.tickRescues(now, this::sendTaskChat);
     }
     if (tickCounter % BREAKER_TICKS == 0 && !driverRegistry.isEmpty()) {
       Set<String> drivers = new HashSet<>();
       for (DriverLink link : driverRegistry.links()) {
-        drivers.add(link.trainName());
+        drivers.add(link.currentTrainName());
       }
       if (tasks.tickBreaker(drivers, current.driver().recovery(), Instant.now())) {
         int count = handbackAll("breaker");
@@ -1864,11 +1921,21 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     SeatBinding seat = SeatLocator.locate(player).orElse(null);
     Optional<MinecartGroup> group =
         seat == null ? Optional.empty() : SeatLocator.findGroup(seat.trainName());
+    boolean eitherEnd =
+        pickups
+            .ofPlayer(player.getUniqueId())
+            .filter(
+                pickup ->
+                    pickup.kind() == DriverPickups.Kind.TERMINAL
+                        && pickup.stage() == DriverPickups.Stage.WAITING
+                        && pickup.key().equals(task.key()))
+            .isPresent();
     DriverTaskManager.SeatCheck check =
         DriverTaskManager.checkSeat(
             group.isPresent() ? seat : null,
             task.trainName(),
-            group.map(MinecartGroup::size).orElse(0));
+            group.map(MinecartGroup::size).orElse(0),
+            eitherEnd);
     if (check != DriverTaskManager.SeatCheck.CONFIRM) {
       seatPrompts.remove(player.getUniqueId());
       return check == DriverTaskManager.SeatCheck.WRONG_SEAT
@@ -1890,6 +1957,469 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                       String.valueOf(group.get().size()))));
     }
     return "drive.task.confirm-seat";
+  }
+
+  // ---- 始发站与车库接班 ----
+
+  /** 有没有可能要等驾驶员接车：没有驾驶任务时派车侧不必逐张票去查车次。 */
+  public boolean hasDriverPickupInterest() {
+    return tasks.hasActiveTasks() || !pickups.isEmpty();
+  }
+
+  /**
+   * 派车侧问：终点站待命车 {@code trainName} 能不能派去跑 {@code trip}。
+   *
+   * <p>这一班有人领、要在始发站接班时，先留着这列车，通知驾驶员上车坐进驾驶室并确认座位；驾驶员接班后放行，发车由驾驶员完成。 等到时限照常派车。
+   *
+   * @param trip 票据要开的车次；不是表定车次时为 {@code null}
+   */
+  public boolean allowLayoverDispatch(TimetableService.DueTrip trip, String trainName) {
+    Instant now = Instant.now();
+    Optional<DriverTask> task =
+        trip == null
+            ? Optional.empty()
+            : tasks.taskForTrip(trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate());
+    UUID claimant = task.map(DriverTask::playerId).orElse(null);
+    DriverPickups.Verdict verdict =
+        pickups.layover(
+            task.map(DriverTask::key).orElse(null),
+            claimant,
+            trainName,
+            claimant != null && drivingTrain(claimant, trainName),
+            now);
+    if (verdict != DriverPickups.Verdict.START) {
+      return verdict == DriverPickups.Verdict.DISPATCH;
+    }
+    DriverTask claimed = task.orElseThrow();
+    DriveConfig current = config;
+    if (claimed.state() != DriverTask.State.CLAIMED
+        || claimed.boardStopSequence() != 0
+        || !pickupOpen(current)) {
+      return true;
+    }
+    startPickup(
+        claimed,
+        DriverPickups.Kind.TERMINAL,
+        trainName,
+        claimed.stationName(),
+        now.plusSeconds(current.driver().pickupWaitSeconds()));
+    return false;
+  }
+
+  /**
+   * 派车侧问：车库刚出车的 {@code trainName}（担当 {@code trip}，或为它出库）要不要先扣在车库股道上等驾驶员。
+   *
+   * <p>只对领取后选了“从车库接车”的任务生效；扣住后由驾驶员上车或等到时限放行。
+   *
+   * @param trip 这列车要开的车次；不是表定车次时为 {@code null}
+   */
+  public boolean holdDepotSpawn(TimetableService.DueTrip trip, String trainName) {
+    DriveConfig current = config;
+    if (trip == null || trainName == null || !pickupOpen(current)) {
+      return false;
+    }
+    Optional<DriverTask> task =
+        tasks
+            .taskForTrip(trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate())
+            .filter(t -> t.state() == DriverTask.State.CLAIMED && t.depotPickup());
+    if (task.isEmpty()
+        || pickups
+            .ofPlayer(task.get().playerId())
+            .filter(existing -> existing.key().equals(task.get().key()))
+            .isPresent()) {
+      return false;
+    }
+    startPickup(
+        task.get(),
+        DriverPickups.Kind.DEPOT,
+        trainName,
+        depotOriginOf(task.get()).orElse("-"),
+        Instant.now().plusSeconds(current.driver().pickupWaitSeconds()));
+    return true;
+  }
+
+  private boolean pickupOpen(DriveConfig current) {
+    return current.enabled() && current.driver().enabled() && packetsReady;
+  }
+
+  /** 这名驾驶员此刻是否正在驾驶这列车。 */
+  private boolean drivingTrain(UUID playerId, String trainName) {
+    DriveSession session = active.get(playerId);
+    return session != null
+        && session.driverLink() != null
+        && trainName != null
+        && session.trainName().equalsIgnoreCase(trainName);
+  }
+
+  private void startPickup(
+      DriverTask task,
+      DriverPickups.Kind kind,
+      String trainName,
+      String location,
+      Instant deadline) {
+    pickups.start(task.playerId(), task.key(), kind, trainName, location, deadline);
+    task.setTrainName(trainName);
+    traceTask(
+        "等驾驶员接车 "
+            + task.playerName()
+            + " "
+            + task.key().tripCode()
+            + " "
+            + kind
+            + " 列车 "
+            + trainName
+            + " @"
+            + location);
+    Player player = Bukkit.getPlayer(task.playerId());
+    if (player == null || !player.isOnline()) {
+      return;
+    }
+    player.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(
+                kind == DriverPickups.Kind.TERMINAL
+                    ? "drive.task.pickup.terminal"
+                    : "drive.task.pickup.depot",
+                Map.of(
+                    "trip",
+                    task.key().tripCode(),
+                    "train",
+                    trainName,
+                    "location",
+                    location,
+                    "seconds",
+                    String.valueOf(config.driver().pickupWaitSeconds()))));
+    if (config.driver().pickupTeleport()) {
+      player.sendMessage(plugin.getLocaleManager().component("drive.task.pickup.goto-button"));
+    }
+  }
+
+  /** 推进接车：提示驾驶员上车、到时限放行、任务结束时清掉；坐进终点站待命车也可以提前开始接车。 */
+  private void tickPickups() {
+    DriveConfig current = config;
+    if (!pickupOpen(current)) {
+      for (DriverPickups.Pickup pickup : pickups.all()) {
+        releasePickup(pickup);
+        pickups.remove(pickup.playerId());
+      }
+      return;
+    }
+    Instant now = Instant.now();
+    startEarlyPickups(now, current);
+    if (pickups.isEmpty()) {
+      return;
+    }
+    for (DriverPickups.Pickup expired : pickups.expire(now)) {
+      onPickupExpired(expired);
+    }
+    for (DriverPickups.Pickup pickup : pickups.all()) {
+      Optional<DriverTask> task =
+          tasks.activeTaskOf(pickup.playerId()).filter(active -> active.key().equals(pickup.key()));
+      if (task.isEmpty()) {
+        // 任务已结束（放弃、作废、收回）：放开还扣着的车。
+        releasePickup(pickup);
+        pickups.remove(pickup.playerId());
+        continue;
+      }
+      if (pickup.stage() == DriverPickups.Stage.BOARDED) {
+        // 驾驶员在车上；派车改名后（或已离开驾驶）这条记录就用完了。
+        if (!drivingTrain(pickup.playerId(), pickup.trainName())) {
+          pickups.remove(pickup.playerId());
+        }
+        continue;
+      }
+      if (pickup.stage() != DriverPickups.Stage.WAITING) {
+        continue;
+      }
+      Player player = Bukkit.getPlayer(pickup.playerId());
+      if (player == null || !player.isOnline()) {
+        continue;
+      }
+      String hint = tryStartTask(player, task.get());
+      if (hint == null) {
+        continue;
+      }
+      sendTaskHint(
+          player,
+          "drive.task.arrived".equals(hint) ? "drive.task.pickup.waiting" : hint,
+          Map.of(
+              "trip",
+              pickup.key().tripCode(),
+              "train",
+              pickup.trainName(),
+              "location",
+              pickup.location(),
+              "station",
+              task.get().stationName(),
+              "seconds",
+              String.valueOf(pickup.secondsLeft(now))));
+    }
+  }
+
+  /** 坐进终点站待命车、它的下一班正是自己领的那一班：不必等派车，提前开始接车。 */
+  private void startEarlyPickups(Instant now, DriveConfig current) {
+    Optional<TimetableService> timetables = plugin.getTimetableService();
+    Optional<LayoverRegistry> layovers = plugin.getLayoverRegistry();
+    if (timetables.isEmpty() || layovers.isEmpty()) {
+      return;
+    }
+    for (DriverTask task : tasks.activeTasks()) {
+      if (task.state() != DriverTask.State.CLAIMED
+          || task.boardStopSequence() != 0
+          || pickups.ofPlayer(task.playerId()).isPresent()) {
+        continue;
+      }
+      Player player = Bukkit.getPlayer(task.playerId());
+      SeatBinding seat =
+          player == null || !player.isOnline() ? null : SeatLocator.locate(player).orElse(null);
+      if (seat == null
+          || layovers.get().get(seat.trainName()).isEmpty()
+          || pickups.ofTrain(seat.trainName()).isPresent()) {
+        continue;
+      }
+      boolean next =
+          timetables
+              .get()
+              .nextDepartureOf(seat.trainName())
+              .filter(
+                  due ->
+                      task.key()
+                          .matches(due.timetable().id(), due.trip().tripCode(), due.serviceDate()))
+              .isPresent();
+      if (next) {
+        Instant from = task.plannedDeparture().isAfter(now) ? task.plannedDeparture() : now;
+        startPickup(
+            task,
+            DriverPickups.Kind.TERMINAL,
+            seat.trainName(),
+            task.stationName(),
+            from.plusSeconds(current.driver().pickupWaitSeconds()));
+      }
+    }
+  }
+
+  /** 接车等到时限：终点站待命车照常派车、任务作废；车库出车放开门控，车次仍可在接班站接班。 */
+  private void onPickupExpired(DriverPickups.Pickup pickup) {
+    Optional<DriverTask> task =
+        tasks.activeTaskOf(pickup.playerId()).filter(active -> active.key().equals(pickup.key()));
+    traceTask(
+        "接车等到时限 " + pickup.key().tripCode() + " " + pickup.kind() + " 列车 " + pickup.trainName());
+    Player player = Bukkit.getPlayer(pickup.playerId());
+    if (pickup.kind() == DriverPickups.Kind.DEPOT) {
+      releasePickup(pickup);
+      // 出库走行接的是终点站发出的首班：改为在终点站接车。
+      if (task.filter(active -> active.boardStopSequence() == 0).isPresent()) {
+        pickups.remove(pickup.playerId());
+      }
+      if (player != null && player.isOnline()) {
+        player.sendMessage(
+            plugin
+                .getLocaleManager()
+                .component(
+                    "drive.task.pickup.depot-expired",
+                    Map.of("station", task.map(DriverTask::stationName).orElse("-"))));
+      }
+      return;
+    }
+    tasks.expireClaim(pickup.playerId(), "pickup-timeout");
+    if (player != null && player.isOnline()) {
+      player.sendMessage(
+          plugin
+              .getLocaleManager()
+              .component(
+                  "drive.task.pickup.terminal-expired", Map.of("trip", pickup.key().tripCode())));
+    }
+  }
+
+  /** 车库出车扣着的发车门控放开。 */
+  private void releasePickup(DriverPickups.Pickup pickup) {
+    if (pickup.kind() == DriverPickups.Kind.DEPOT
+        && pickup.stage() != DriverPickups.Stage.BOARDED) {
+      plugin
+          .getRuntimeDispatchService()
+          .ifPresent(
+              dispatch ->
+                  dispatch.releaseDepartureGate(
+                      pickup.trainName(), SimpleTicketAssigner.DRIVER_PICKUP_GATE));
+    }
+  }
+
+  /** 驾驶员上了留给他的车：车库出车立即放开门控，由调度按信号给出行车许可。 */
+  private void onPickupBoarded(DriveSession session, String trainName) {
+    pickups
+        .board(session.playerId(), trainName)
+        .ifPresent(
+            pickup -> {
+              traceSession(session, "接车上车 " + pickup.kind() + " " + pickup.location());
+              if (pickup.kind() != DriverPickups.Kind.DEPOT) {
+                return;
+              }
+              plugin
+                  .getRuntimeDispatchService()
+                  .ifPresent(
+                      dispatch ->
+                          dispatch.releaseDepartureGate(
+                              trainName, SimpleTicketAssigner.DRIVER_PICKUP_GATE));
+              boolean viaTerminal =
+                  tasks
+                      .activeTaskOf(session.playerId())
+                      .filter(task -> task.boardStopSequence() == 0)
+                      .isPresent();
+              if (!viaTerminal) {
+                pickups.remove(session.playerId());
+              }
+            });
+  }
+
+  /** 这一车次的列车从哪个车库出车；不从车库出车时为空。 */
+  private Optional<String> depotOriginOf(DriverTask task) {
+    return plugin
+        .getTimetableService()
+        .flatMap(service -> service.depotOriginOf(task.key().timetableId(), task.key().tripCode()));
+  }
+
+  /**
+   * 领取后改为从车库接车，或取消。只对从车库出车的车次有效。
+   *
+   * @return 是否有可切换的任务
+   */
+  public boolean togglePickup(Player player) {
+    Optional<DriverTask> task =
+        tasks
+            .activeTaskOf(player.getUniqueId())
+            .filter(active -> active.state() == DriverTask.State.CLAIMED);
+    if (task.isEmpty()) {
+      return false;
+    }
+    Optional<String> depot = depotOriginOf(task.get());
+    if (depot.isEmpty()) {
+      player.sendMessage(plugin.getLocaleManager().component("drive.task.pickup.not-depot"));
+      return true;
+    }
+    boolean on = !task.get().depotPickup();
+    task.get().setDepotPickup(on);
+    player.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(
+                on ? "drive.task.pickup.depot-on" : "drive.task.pickup.depot-off",
+                Map.of("depot", depot.get(), "station", task.get().stationName())));
+    return true;
+  }
+
+  /**
+   * 前往接车：传送到要接的那列车的车头驾驶室旁边（不塞进座位）。只能去留给自己、还在等的那列车。
+   *
+   * @return 给玩家的提示语言键
+   */
+  public String gotoPickup(Player player) {
+    if (!config.driver().pickupTeleport()) {
+      return "drive.task.goto.disabled";
+    }
+    if (active.containsKey(player.getUniqueId())) {
+      return "drive.task.goto.driving";
+    }
+    Optional<DriverPickups.Pickup> pickup =
+        pickups
+            .ofPlayer(player.getUniqueId())
+            .filter(waiting -> waiting.stage() == DriverPickups.Stage.WAITING);
+    if (pickup.isEmpty()) {
+      return "drive.task.goto.none";
+    }
+    Optional<MinecartGroup> group = SeatLocator.findGroup(pickup.get().trainName());
+    MinecartMember<?> head = group.map(MinecartGroup::head).orElse(null);
+    if (head == null || head.getEntity() == null) {
+      return "drive.task.goto.train-missing";
+    }
+    org.bukkit.Location at = head.getEntity().getLocation();
+    org.bukkit.World world = at.getWorld();
+    if (world == null) {
+      return "drive.task.goto.train-missing";
+    }
+    Optional<Vector> spot =
+        PickupSpot.find(
+            at.toVector(),
+            StopAlignment.travel(group.get()),
+            (x, y, z) ->
+                world.getBlockAt(x, y - 1, z).getType().isSolid()
+                    && world.getBlockAt(x, y, z).isPassable()
+                    && world.getBlockAt(x, y + 1, z).isPassable());
+    if (spot.isEmpty()) {
+      return "drive.task.goto.no-spot";
+    }
+    org.bukkit.Location target =
+        new org.bukkit.Location(world, spot.get().getX(), spot.get().getY(), spot.get().getZ());
+    Vector facing = at.toVector().subtract(spot.get());
+    if (facing.lengthSquared() > 1.0e-6) {
+      target.setDirection(facing);
+    }
+    if (player.isInsideVehicle()) {
+      player.leaveVehicle();
+    }
+    player.teleport(target);
+    traceTask("前往接车 " + player.getName() + " -> " + pickup.get().trainName());
+    return "drive.task.goto.teleported";
+  }
+
+  /** 调度给列车改了名（终点站复用接下一班）：会话与任务跟着新车名走。 */
+  private void followRename(DriveSession session, MinecartGroup group) {
+    String current = group.getProperties().getTrainName();
+    if (current == null || current.isBlank() || current.equals(session.trainName())) {
+      return;
+    }
+    traceSession(session, "列车改名 " + session.trainName() + " -> " + current);
+    session.followRename(current);
+    tasks.activeTaskOf(session.playerId()).ifPresent(task -> task.setTrainName(current));
+  }
+
+  /**
+   * 驾驶员坐在列车后端（终点站折返调头之后，或接车时坐了后端驾驶室）：停稳、拿到行车许可时换到前端驾驶室。
+   *
+   * <p>按车厢位置对调（第 n 节换到倒数第 n 节）、座位序号不变；前端没有空座位时交还自动运行。
+   *
+   * @return 会话是否已经结束
+   */
+  private boolean changeCabIfNeeded(DriveSession session, MinecartGroup group, Player player) {
+    DriverLink link = session.driverLink();
+    int members = group.size();
+    if (link == null
+        || session.isAto()
+        || members < 2
+        || session.binding().cabSign(members) >= 0
+        || !session.isStopped()
+        || link.directive() == null
+        || link.directive().isStop()) {
+      return false;
+    }
+    SeatBinding front =
+        new SeatBinding(
+            session.trainName(),
+            members - 1 - session.binding().memberIndex(),
+            session.binding().seatIndex());
+    boolean moved = SeatLocator.reseat(player, group, front);
+    if (!moved && player.isInsideVehicle()) {
+      player.leaveVehicle();
+      moved = SeatLocator.reseat(player, group, front);
+    }
+    if (moved) {
+      session.rebind(front);
+      refreshInventory(player, session);
+      traceSession(session, "换端：坐到前端驾驶室（第 " + (front.memberIndex() + 1) + " 节）");
+      player.sendMessage(
+          plugin
+              .getLocaleManager()
+              .component(
+                  "drive.task.cab-changed",
+                  Map.of("car", String.valueOf(front.memberIndex() + 1))));
+      return false;
+    }
+    if (cabChangeFailed.add(session.playerId())) {
+      traceSession(session, "换端失败，交还自动运行");
+      player.sendMessage(plugin.getLocaleManager().component("drive.task.cab-change-failed"));
+      requestHandback(session, "cab-change");
+    }
+    return session.phase() == DriveSession.Phase.ENDED;
   }
 
   private void sendTaskHint(Player player, String key, Map<String, String> values) {
@@ -1921,6 +2451,24 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             mode,
             current.enabled() && current.driver().enabled() && packetsReady,
             Instant.now());
+    if (outcome == DriverTaskManager.ClaimOutcome.CLAIMED) {
+      // 车次的列车从车库出车：告诉驾驶员可以改为从车库接车。
+      tasks
+          .activeTaskOf(player.getUniqueId())
+          .flatMap(this::depotOriginOf)
+          .ifPresent(
+              depot ->
+                  Bukkit.getScheduler()
+                      .runTask(
+                          plugin,
+                          () ->
+                              player.sendMessage(
+                                  plugin
+                                      .getLocaleManager()
+                                      .component(
+                                          "drive.task.pickup.depot-option",
+                                          Map.of("depot", depot)))));
+    }
     return "drive.task.claim." + outcome.name().toLowerCase(Locale.ROOT).replace('_', '-');
   }
 

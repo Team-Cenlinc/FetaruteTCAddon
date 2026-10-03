@@ -159,7 +159,7 @@ public final class FtaDriveCommand {
             .optional(
                 "action",
                 StringParser.stringParser(),
-                SuggestionProvider.suggestingStrings("status", "abandon"))
+                SuggestionProvider.suggestingStrings("status", "abandon", "goto", "pickup"))
             .handler(
                 ctx ->
                     handleTask(
@@ -472,6 +472,16 @@ public final class FtaDriveCommand {
     if (action.equalsIgnoreCase("abandon")) {
       sender.sendMessage(
           locale.component(drive.abandonTask(player) ? "drive.task.abandoned" : "drive.task.none"));
+      return;
+    }
+    if (action.equalsIgnoreCase("goto")) {
+      sender.sendMessage(locale.component(drive.gotoPickup(player)));
+      return;
+    }
+    if (action.equalsIgnoreCase("pickup")) {
+      if (!drive.togglePickup(player)) {
+        sender.sendMessage(locale.component("drive.task.none"));
+      }
       return;
     }
     Optional<DriverTask> task = drive.tasks().taskOf(player.getUniqueId());

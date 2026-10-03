@@ -259,6 +259,28 @@ public final class TimetableSpawnManager
   }
 
   /**
+   * 这张票要开的运营车次：运营票是它自己那一班，出库走行票是它要去接的那一班；回库票、别层的票为空。
+   *
+   * <p>驾驶员接车据此判断这张票是不是自己领的那一班：终点站待命车派车前、车库出车时。
+   */
+  public Optional<TimetableService.DueTrip> pickupTripOf(SpawnTicket ticket) {
+    if (ticket == null || ticket.id() == null || timetableService == null) {
+      return Optional.empty();
+    }
+    OwnedTicket owned = ownedTickets.get(ticket.id());
+    if (owned == null) {
+      return Optional.empty();
+    }
+    if (owned.trip().isPresent()) {
+      return owned.trip();
+    }
+    return owned
+        .intent()
+        .filter(intent -> intent.kind() == RouteOperationType.CREATE)
+        .flatMap(timetableService::tripOfIntent);
+  }
+
+  /**
    * 发车侧问：这张票等到什么时候就该放弃。不是本层的票没有到期时刻。
    *
    * <p>到期 = 计划时刻 + assign-tolerance：超过容差还没车，这一班就开天窗，再等下去只会让后面的班次跟着乱。

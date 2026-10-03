@@ -196,6 +196,11 @@ public final class DriveSession {
     return binding.trainName();
   }
 
+  /** 调度给列车改了名（终点站复用接下一班）：座位绑定跟着新车名走，车厢与座位不变。 */
+  public void followRename(String newTrainName) {
+    this.binding = new SeatBinding(newTrainName, binding.memberIndex(), binding.seatIndex());
+  }
+
   public DriveParams params() {
     return dynamics.params();
   }

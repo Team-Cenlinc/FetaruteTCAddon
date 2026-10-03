@@ -1588,6 +1588,45 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
   }
 
+  /** 返回终点站待命登记（若未初始化则为空）。 */
+  public Optional<LayoverRegistry> getLayoverRegistry() {
+    return Optional.ofNullable(layoverRegistry);
+  }
+
+  /** 终点站待命车派车前问驾驶会话；驾驶未启用或出错时照常派车。 */
+  private boolean driverPickupAllowsDispatch(
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager scheduled,
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket,
+      String trainName) {
+    DriveSessionManager drive = driveSessionManager;
+    if (drive == null || !drive.hasDriverPickupInterest()) {
+      return true;
+    }
+    try {
+      return drive.allowLayoverDispatch(scheduled.pickupTripOf(ticket).orElse(null), trainName);
+    } catch (RuntimeException ex) {
+      getLogger().warning("驾驶员接车判定失败，照常派车: " + ex);
+      return true;
+    }
+  }
+
+  /** 车库出车后问驾驶会话要不要扣在股道上等驾驶员；驾驶未启用或出错时不扣。 */
+  private boolean driverPickupHoldsDepotSpawn(
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager scheduled,
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket,
+      String trainName) {
+    DriveSessionManager drive = driveSessionManager;
+    if (drive == null || !drive.hasDriverPickupInterest()) {
+      return false;
+    }
+    try {
+      return drive.holdDepotSpawn(scheduled.pickupTripOf(ticket).orElse(null), trainName);
+    } catch (RuntimeException ex) {
+      getLogger().warning("驾驶员车库接车判定失败，不扣车: " + ex);
+      return false;
+    }
+  }
+
   /** 返回按表运行服务（若未初始化则为空）。 */
   public Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService>
       getTimetableService() {
@@ -1652,7 +1691,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
         instanceof
         org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
         scheduled) {
-      simpleAssigner.setLayoverCandidateFilter(scheduled::acceptsCandidate);
+      // 车次已有人领、要在始发站或车库接班：派车前问驾驶会话，先留着车等驾驶员上车。
+      simpleAssigner.setLayoverCandidateFilter(
+          (ticket, trainName) ->
+              scheduled.acceptsCandidate(ticket, trainName)
+                  && driverPickupAllowsDispatch(scheduled, ticket, trainName));
+      simpleAssigner.setDepotSpawnHold(
+          (ticket, trainName) -> driverPickupHoldsDepotSpawn(scheduled, ticket, trainName));
       simpleAssigner.setTicketExpiry(scheduled::expiryOf);
       simpleAssigner.setDispatchListener(scheduled::onDispatched);
       if (timetableService != null) {

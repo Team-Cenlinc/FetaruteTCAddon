@@ -35,6 +35,8 @@ drive:
   hud:
     line: ["<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
   command:
+    help:
+      entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
       managed-train: ["<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"]

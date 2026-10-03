@@ -130,6 +130,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private volatile java.util.function.BiConsumer<SpawnTicket, String> dispatchListener =
       (ticket, trainName) -> {};
 
+  /** 车库出车、第一拍信号之前问：这列车要不要先扣在车库股道上等驾驶员。默认不扣。 */
+  private volatile java.util.function.BiPredicate<SpawnTicket, String> depotSpawnHold =
+      (ticket, trainName) -> false;
+
+  /** 等驾驶员接车时挂的发车门控会话号：驾驶员上车或等到时限后按它放行。 */
+  public static final String DRIVER_PICKUP_GATE = "driver-pickup";
+
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
   /** 列车最大运营圈数（达到后应优先分配 RETURN 回库）。 */
@@ -2527,6 +2534,32 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.dispatchListener = listener == null ? (ticket, trainName) -> {} : listener;
   }
 
+  /**
+   * 注册车库出车扣车：返回 true 时，列车在第一拍信号之前挂上发车门控（{@link #DRIVER_PICKUP_GATE}），停在车库股道上， 直到有人按这个会话号放行或门控超时。传入
+   * {@code null} 恢复"不扣"。
+   */
+  public void setDepotSpawnHold(java.util.function.BiPredicate<SpawnTicket, String> hold) {
+    this.depotSpawnHold = hold == null ? (ticket, trainName) -> false : hold;
+  }
+
+  /** 驾驶员要从车库接车：先挂发车门控，第一拍信号就把车按在股道上。 */
+  private void holdDepotSpawnIfRequested(SpawnTicket ticket, String trainName) {
+    try {
+      if (depotSpawnHold.test(ticket, trainName)) {
+        runtimeDispatchService.acquireDepartureGate(trainName, DRIVER_PICKUP_GATE, "driver_pickup");
+        debugLogger.accept("车库出车等驾驶员接车: train=" + trainName + " ticket=" + ticket.id());
+      }
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "车库出车扣车回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+  }
+
   private void notifyDispatched(SpawnTicket ticket, String trainName) {
     if (ticket == null || trainName == null) {
       return;
@@ -3293,6 +3326,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             context.operationType());
       }
       TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+      holdDepotSpawnIfRequested(context.ticket(), context.trainName());
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,

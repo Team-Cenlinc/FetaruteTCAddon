@@ -42,6 +42,7 @@ public final class DriverControlRegistry implements ControlAuthority {
   private final Map<String, DriverLink> byName = new HashMap<>();
   private Handler handler = NO_HANDLER;
   private long atoConfirmTicks = 300L;
+  private java.util.function.Predicate<String> awaitingDriver = trainName -> false;
 
   public void setHandler(Handler handler) {
     this.handler = handler == null ? NO_HANDLER : handler;
@@ -147,6 +148,22 @@ public final class DriverControlRegistry implements ControlAuthority {
   public boolean holdDeparture(TrainProperties properties) {
     DriverLink link = resolve(properties);
     return link != null && link.holdDeparture(atoConfirmTicks);
+  }
+
+  /** 哪些列车正停着等驾驶员接班（按车名）。 */
+  public void setAwaitingDriver(java.util.function.Predicate<String> awaiting) {
+    this.awaitingDriver = awaiting == null ? trainName -> false : awaiting;
+  }
+
+  @Override
+  public boolean takeTurnback(TrainProperties properties) {
+    DriverLink link = resolve(properties);
+    return link != null && link.takeTurnback();
+  }
+
+  @Override
+  public boolean awaitingDriver(String trainName) {
+    return trainName != null && awaitingDriver.test(trainName);
   }
 
   /** ATO 下等驾驶员确认发车的上限（tick）。 */

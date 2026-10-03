@@ -20,6 +20,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
  * @param stopAcceptBlocks 站停时列车离停车点多近可以开门（格）；停短更多时须前移
  * @param stopSkipBlocks 站停时越过停车点超过这么远（格）算越站：本站不停，列车继续开
  * @param stopMarker 进站时在驾驶员该停的位置显示发光停车标（只有驾驶员本人看得见）
+ * @param pickupWaitSeconds 始发站待命车、车库出车等驾驶员上车接班最多等多久（秒），过时照常发车
+ * @param pickupTeleport 等驾驶员接班时提供“前往列车”传送（送到车头驾驶室旁，不塞进座位）
  * @param recovery 驾驶任务与拥堵恢复的参数
  */
 public record DriverConfig(
@@ -36,6 +38,8 @@ public record DriverConfig(
     double stopAcceptBlocks,
     double stopSkipBlocks,
     boolean stopMarker,
+    int pickupWaitSeconds,
+    boolean pickupTeleport,
     DriverRecovery recovery) {
 
   private static final int TICKS_PER_SECOND = 20;
@@ -59,6 +63,8 @@ public record DriverConfig(
         StopWindow.DEFAULTS.accurateBlocks(),
         StopWindow.DEFAULTS.acceptBlocks(),
         StopWindow.DEFAULTS.skipBlocks(),
+        true,
+        90,
         true,
         DriverRecovery.defaults());
   }
@@ -122,6 +128,8 @@ public record DriverConfig(
         stopAccept,
         stopSkip,
         section.getBoolean("stop-marker", d.stopMarker),
+        (int) Math.round(positive(section, "pickup-wait-seconds", d.pickupWaitSeconds, sink)),
+        section.getBoolean("pickup-teleport", d.pickupTeleport),
         DriverRecovery.from(section, sink));
   }
 

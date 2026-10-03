@@ -198,6 +198,16 @@ class DriveSessionTest {
   }
 
   @Test
+  void aRenamedTrainKeepsTheSameCarAndSeat() {
+    DriveSession session = newSession(new SeatBinding("OLD-1", 5, 1));
+
+    session.followRename("NEW-7");
+
+    assertEquals("NEW-7", session.trainName());
+    assertEquals(new SeatBinding("NEW-7", 5, 1), session.binding());
+  }
+
+  @Test
   void theMenuWindowSizeIsNeverNegative() {
     DriveSession session = newSession();
     assertEquals(0, session.menuTopSize());

@@ -84,6 +84,33 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.manager.acceptsCandidate(mock(SpawnTicket.class), "anyone"), "不是本层的票一律放行");
   }
 
+  /** 驾驶员接车按票找车次：出库票是交路首班，运营票是自己那一班，回库票与别层的票没有。 */
+  @Test
+  void pickupTripFollowsTheTicketIntent() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> tickets = fixture.pollAll();
+
+    TimetableService.DueTrip viaCreate = fixture.manager.pickupTripOf(tickets.get(0)).orElseThrow();
+    TimetableService.DueTrip first = fixture.manager.pickupTripOf(tickets.get(1)).orElseThrow();
+    assertEquals("R1-001", viaCreate.trip().tripCode());
+    assertEquals("R1-001", first.trip().tripCode());
+    assertEquals(first.serviceDate(), viaCreate.serviceDate(), "出库票找到的车次与运营票同一天");
+    assertEquals(
+        "R1-002", fixture.manager.pickupTripOf(tickets.get(2)).orElseThrow().trip().tripCode());
+    assertTrue(fixture.manager.pickupTripOf(tickets.get(3)).isEmpty());
+    assertTrue(fixture.manager.pickupTripOf(mock(SpawnTicket.class)).isEmpty());
+  }
+
+  /** 交路首班有出库走行：列车从交路的车库出车；续班由终点站待命车接，不从车库出车。 */
+  @Test
+  void depotOriginIsTheDutysStartDepotForItsFirstTrip() {
+    Fixture fixture = fixture();
+
+    assertEquals(Optional.of("OP:D:DEP:1"), fixture.service().depotOriginOf(TIMETABLE, "R1-001"));
+    assertTrue(fixture.service().depotOriginOf(TIMETABLE, "R1-002").isEmpty());
+    assertTrue(fixture.service().depotOriginOf(UUID.randomUUID(), "R1-001").isEmpty());
+  }
+
   /** 重试队列里的票同样到期作废：被 requeue 的出库票过了容差不会再被放出来。 */
   @Test
   void requeuedTicketsExpireToo() {

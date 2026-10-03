@@ -102,6 +102,36 @@ public final class DriverTaskManager {
     return keys;
   }
 
+  /** 领了这一班、还没结束的任务；没人领时为空。 */
+  public Optional<DriverTask> taskForTrip(
+      UUID timetableId, String tripCode, java.time.LocalDate serviceDate) {
+    for (DriverTask task : byPlayer.values()) {
+      if (!task.state().finished() && task.key().matches(timetableId, tripCode, serviceDate)) {
+        return Optional.of(task);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 是否有还没结束的任务。 */
+  public boolean hasActiveTasks() {
+    for (DriverTask task : byPlayer.values()) {
+      if (!task.state().finished()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 已领取、还没开始驾驶的任务作废（例如接车等到时限）。 */
+  public void expireClaim(UUID playerId, String reason) {
+    DriverTask task = byPlayer.get(playerId);
+    if (task != null && task.state() == DriverTask.State.CLAIMED) {
+      task.finish(DriverTask.State.EXPIRED, reason);
+      trace.accept("任务作废 " + task.playerName() + " " + task.key().tripCode() + ": " + reason);
+    }
+  }
+
   /** 全部未结束的任务。 */
   public List<DriverTask> activeTasks() {
     List<DriverTask> tasks = new ArrayList<>();
@@ -316,8 +346,21 @@ public final class DriverTaskManager {
    * @param memberCount 任务列车节数
    */
   public static SeatCheck checkSeat(SeatBinding seat, String trainName, int memberCount) {
+    return checkSeat(seat, trainName, memberCount, false);
+  }
+
+  /**
+   * 判定座位能不能接班。
+   *
+   * @param eitherEnd 终点站折返接车：发车方向要到派车时才定，两端车厢都可以坐，发车时按需换端
+   */
+  public static SeatCheck checkSeat(
+      SeatBinding seat, String trainName, int memberCount, boolean eitherEnd) {
     if (seat == null || trainName == null || !seat.trainName().equalsIgnoreCase(trainName)) {
       return SeatCheck.NOT_ON_TRAIN;
+    }
+    if (eitherEnd && seat.memberIndex() == memberCount - 1) {
+      return SeatCheck.CONFIRM;
     }
     return seat.cabSign(memberCount) < 0 ? SeatCheck.WRONG_SEAT : SeatCheck.CONFIRM;
   }

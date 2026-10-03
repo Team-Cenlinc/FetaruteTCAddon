@@ -67,6 +67,7 @@ public final class DriverLink {
   private String nextStopLabel = "";
   private String skippedStation;
   private boolean doorsClosing;
+  private boolean turnbackPending;
   private DriverSchedule schedule;
 
   private int serviceInterventions;
@@ -567,6 +568,25 @@ public final class DriverLink {
 
   public void setTargetLabel(String label) {
     this.targetLabel = label == null ? "" : label;
+  }
+
+  /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。 */
+  public void setTurnbackPending(boolean pending) {
+    this.turnbackPending = pending;
+  }
+
+  /** 取走调头标记：有标记时返回 true 并清除。 */
+  public boolean takeTurnback() {
+    boolean pending = turnbackPending;
+    turnbackPending = false;
+    return pending;
+  }
+
+  /** 列车此刻的车名：调度改名（终点站复用接下一班）后与接管时的车名不同。 */
+  public String currentTrainName() {
+    TrainProperties current = properties;
+    String name = current == null ? null : current.getTrainName();
+    return name == null || name.isBlank() ? trainName : name;
   }
 
   /** 车门已关、关门动画还在放。 */
