@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids>
+    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids|drive>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
@@ -42,6 +42,8 @@ permissions:
       fetarute.eta: true
       fetarute.train.config: true
       fetarute.train.debug: true
+      fetarute.drive: true
+      fetarute.drive.admin: true
       fetarute.template: true
       fetarute.timetable: true
       fetarute.timetable.record: true
@@ -67,6 +69,12 @@ permissions:
     default: op
   fetarute.timetable.manage:
     description: 编成、发布与删除时刻表（/fta timetable build|publish|delete）
+    default: op
+  fetarute.drive:
+    description: 手动驾驶列车（/fta drive）
+    default: op
+  fetarute.drive.admin:
+    description: 查看驾驶会话、强制结束驾驶、开关驾驶诊断（/fta drive list|stop|probe）
     default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置

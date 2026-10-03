@@ -1,0 +1,10 @@
+# 内置文案改写前的旧值（见 zh_CN.yml 的说明）。服务器上的 lang/en_US.yml 里某个键仍是这里列出的旧值之一时，加载时换成新的内置文案。
+drive:
+  hud:
+    line: ["<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
+  command:
+    start:
+      bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
+      train-moving:
+        - "<prefix> <red>The train is moving, wait until it has stopped</red>"
+        - "<prefix> <red>The train has not stopped (<white><speed_kmh></white> km/h), wait until it has stopped</red>"

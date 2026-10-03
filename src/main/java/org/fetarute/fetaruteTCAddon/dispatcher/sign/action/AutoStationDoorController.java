@@ -142,6 +142,158 @@ public final class AutoStationDoorController {
   }
 
   /**
+   * 一侧车门的手动开关句柄，供手动驾驶使用。
+   *
+   * <p>只播放该侧的门动画（{@code doorL} 或 {@code doorR}，左右按车模型的定义），不做站台侧判定，开关时的提示音与 AutoStation 一致。
+   * 句柄记住开门是否成功，关门时据此还原；编组对象重建（如跨世界）后需要重新创建句柄。
+   */
+  public static final class ManualDoor {
+    private final DoorSession session;
+    private final ManualDoorSide side;
+    private boolean open;
+
+    private ManualDoor(DoorSession session, ManualDoorSide side) {
+      this.session = session;
+      this.side = side;
+    }
+
+    /** 这扇门播放的动画侧：{@code true} 为 {@code doorL}。 */
+    public boolean modelLeft() {
+      return side.modelLeft();
+    }
+
+    /** 这扇门选用哪一侧动画的判定过程，仅用于诊断输出。 */
+    public String summary() {
+      return side.summary();
+    }
+
+    /**
+     * 开门。
+     *
+     * @return 是否触发了门动画；该车没有这一侧的门动画时为 {@code false}
+     */
+    public boolean open() {
+      if (open) {
+        return true;
+      }
+      if (session.open()) {
+        open = true;
+        return true;
+      }
+      return false;
+    }
+
+    /**
+     * 关门。
+     *
+     * <p>无论动画是否成功触发，都视为已关：关门失败时状态卡在“已开”会让驾驶员再也关不上。
+     *
+     * @return 是否触发了关门动画
+     */
+    public boolean close() {
+      if (!open) {
+        return true;
+      }
+      open = false;
+      return session.close();
+    }
+
+    /** 这一侧的门当前是否由本句柄打开着。 */
+    public boolean isOpen() {
+      return open;
+    }
+  }
+
+  /**
+   * 手动开关门选用的动画侧。
+   *
+   * @param modelLeft {@code true} 为 {@code doorL}，{@code false} 为 {@code doorR}（左右按车模型的定义）
+   * @param summary 判定过程，仅用于诊断输出
+   */
+  public record ManualDoorSide(boolean modelLeft, String summary) {}
+
+  /**
+   * 判定驾驶员左手边或右手边的车门对应哪一侧动画。
+   *
+   * <p>与 AutoStation 一致，不假定车模型里 {@code doorL}/{@code doorR} 对应哪一边，而是先把“驾驶员的左（右）手边”换算成世界方位，
+   * 再比较两组门附件在该方位上的位置，靠近那一侧的就是要播放的动画。判定不出（门附件还没挂载、两侧位置重合）时回退到 {@code fallbackModelLeft}。
+   *
+   * @param group 要开关门的编组
+   * @param driverFacing 驾驶员面朝的水平方向（世界坐标）；为 {@code null} 或零向量时直接回退
+   * @param driverLeft {@code true} 为驾驶员的左手边
+   * @param fallbackModelLeft 判定不出时是否使用 {@code doorL}
+   */
+  public static ManualDoorSide resolveManualDoorSide(
+      MinecartGroup group, Vector driverFacing, boolean driverLeft, boolean fallbackModelLeft) {
+    String side = driverLeft ? "left" : "right";
+    String fallback = ",fallback=" + (fallbackModelLeft ? "doorL" : "doorR");
+    BlockFace sideFace = lateralCompassFace(driverFacing, driverLeft);
+    if (sideFace == null) {
+      return new ManualDoorSide(
+          fallbackModelLeft, "side=" + side + ",facing=unavailable" + fallback);
+    }
+    DoorSideDecision decision = chooseDoorSideByWorldDecision(group, sideFace);
+    DoorSideSelection selection = decision.selection();
+    String prefix = "side=" + side + "->" + sideFace;
+    if (selection != null && selection.openLeft != selection.openRight) {
+      return new ManualDoorSide(selection.openLeft, prefix + ";" + decision.summary());
+    }
+    return new ManualDoorSide(fallbackModelLeft, prefix + fallback + ";" + decision.summary());
+  }
+
+  /**
+   * 创建一侧车门的手动开关句柄。
+   *
+   * @param group 要开关门的编组
+   * @param side 要开关的动画侧
+   * @param settings AutoStation 提示音配置；为 {@code null} 时不播放提示音
+   */
+  public static ManualDoor manualDoor(
+      MinecartGroup group,
+      ManualDoorSide side,
+      org.fetarute.fetaruteTCAddon.config.ConfigManager.AutoStationSettings settings) {
+    DoorChimeSettings chime =
+        settings == null
+            ? DoorChimeSettings.none()
+            : DoorChimeSettings.fromConfig(
+                settings.doorCloseSound(),
+                settings.doorCloseSoundVolume(),
+                settings.doorCloseSoundPitch());
+    boolean left = side.modelLeft();
+    return new ManualDoor(new DoorSession(group, left, !left, chime, side.summary()), side);
+  }
+
+  private static final BlockFace[] COMPASS_BY_BEARING = {
+    BlockFace.NORTH,
+    BlockFace.NORTH_EAST,
+    BlockFace.EAST,
+    BlockFace.SOUTH_EAST,
+    BlockFace.SOUTH,
+    BlockFace.SOUTH_WEST,
+    BlockFace.WEST,
+    BlockFace.NORTH_WEST
+  };
+
+  /**
+   * 面朝 {@code facing} 的人，左手边（或右手边）所指的最近的八向世界方位。
+   *
+   * @return 水平分量为零或不是有限数时为 {@code null}
+   */
+  static BlockFace lateralCompassFace(Vector facing, boolean left) {
+    Vector forward = normalizeHorizontalVector(facing);
+    if (forward == null) {
+      return null;
+    }
+    Vector lateral = left ? leftLateralVector(forward) : rightLateralVector(forward);
+    if (lateral == null) {
+      return null;
+    }
+    double bearing = Math.toDegrees(Math.atan2(lateral.getX(), -lateral.getZ()));
+    int index = (int) Math.round(((bearing % 360.0) + 360.0) % 360.0 / 45.0) % 8;
+    return COMPASS_BY_BEARING[index];
+  }
+
+  /**
    * 开门侧选择结果：openLeft/openRight 对应 doorL/doorR（相对列车定义）。
    *
    * <p>注意：这里的 left/right 不依赖列车行进方向推导；left/right 的“世界侧归属”由附件位置决定。

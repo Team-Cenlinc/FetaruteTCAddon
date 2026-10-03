@@ -14,6 +14,8 @@ import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 public final class LocaleManagerTest {
 
@@ -45,10 +47,11 @@ public final class LocaleManagerTest {
   }
 
   /** 旧文案清单里的每个键都还在内置语言文件里，且旧值与现在的文案不同（否则换了也白换）。 */
-  @Test
-  void supersededListMatchesTheBundledLocale() throws Exception {
-    YamlConfiguration bundled = bundled("lang/zh_CN.yml");
-    YamlConfiguration superseded = bundled("lang-superseded/zh_CN.yml");
+  @ParameterizedTest
+  @ValueSource(strings = {"zh_CN", "en_US"})
+  void supersededListMatchesTheBundledLocale(String localeTag) throws Exception {
+    YamlConfiguration bundled = bundled("lang/" + localeTag + ".yml");
+    YamlConfiguration superseded = bundled("lang-superseded/" + localeTag + ".yml");
 
     for (String key : superseded.getKeys(true)) {
       if (superseded.isConfigurationSection(key)) {

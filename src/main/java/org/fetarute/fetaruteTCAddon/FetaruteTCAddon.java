@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.api.event.StationGroupChangedEvent;
 import org.fetarute.fetaruteTCAddon.command.FtaAnnounceCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaCompanyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaDriveCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
@@ -108,6 +109,10 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsSettings;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
+import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.DriveConfigFile;
+import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
+import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
@@ -179,6 +184,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private PidsLayoutRegistry pidsLayoutRegistry;
   private PidsService pidsService;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
+  private DriveSessionManager driveSessionManager;
 
   @Override
   public void onEnable() {
@@ -219,6 +225,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initDisplayService();
     initApi();
     initPidsService();
+    try {
+      initDrive();
+    } catch (RuntimeException | LinkageError ex) {
+      // 手动驾驶是附加功能：它初始化失败不能拖垮调度主体。
+      getLogger().severe("手动驾驶初始化失败，已禁用: " + ex);
+      driveSessionManager = null;
+    }
 
     registerCommands();
     getServer()
@@ -236,6 +249,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   @Override
   public void onDisable() {
+    if (driveSessionManager != null) {
+      driveSessionManager.shutdown();
+      driveSessionManager = null;
+    }
     stopApiEvents();
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     beginRuntimeDispatchShutdown();
@@ -337,6 +354,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       pidsLayoutRegistry.reload();
     }
     this.localeManager.reload(configManager.current().locale());
+    if (driveSessionManager != null) {
+      driveSessionManager.reload(readDriveConfig());
+    }
     this.storageManager.apply(configManager.current());
     if (hudTemplateService != null) {
       hudTemplateService.reload();
@@ -363,6 +383,27 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public LocaleManager getLocaleManager() {
     return localeManager;
+  }
+
+  /** 手动驾驶会话管理器；插件未完成初始化或已停用时为 {@code null}。 */
+  public DriveSessionManager getDriveSessionManager() {
+    return driveSessionManager;
+  }
+
+  private DriveConfig readDriveConfig() {
+    return DriveConfigFile.load(
+        getDataFolder(), () -> getResource(DriveConfigFile.FILE_NAME), loggerManager);
+  }
+
+  private void initDrive() {
+    if (driveSessionManager != null) {
+      driveSessionManager.shutdown();
+    }
+    this.driveSessionManager = new DriveSessionManager(this, readDriveConfig());
+    getServer()
+        .getPluginManager()
+        .registerEvents(new DriveListener(this, driveSessionManager), this);
+    driveSessionManager.start();
   }
 
   public LoggerManager getLoggerManager() {
@@ -553,6 +594,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaSpawnCommand(this).register(commandManager);
     new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
+    new FtaDriveCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
     new FtaHealthCommand(this).register(commandManager);

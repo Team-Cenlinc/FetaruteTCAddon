@@ -27,6 +27,11 @@
         <Method name="getHudTemplateService"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getDriveSessionManager"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
 
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.company.model.CompanyMember"/>
@@ -100,6 +105,31 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaDriveCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.menu.DriveMenuHolder"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession"/>
+        <Method name="rewriter"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>

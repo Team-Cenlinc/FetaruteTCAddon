@@ -143,6 +143,11 @@ public final class ScoreboardTrainHudManager implements Listener {
     Set<String> activeTrains = new HashSet<>();
     Set<UUID> activePlayers = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
+      if (isDriving(player)) {
+        // 手动驾驶的驾驶员有自己的计分板，乘客的让位。
+        clear(player);
+        continue;
+      }
       Optional<MinecartGroup> groupOpt = contextResolver.resolveGroup(player);
       if (groupOpt.isEmpty()) {
         clear(player);
@@ -158,6 +163,11 @@ public final class ScoreboardTrainHudManager implements Listener {
     stateTracker.retain(activeTrains);
     retainWindowStates(activeTrains);
     clearInactivePlayers(activePlayers);
+  }
+
+  private boolean isDriving(Player player) {
+    var drive = plugin.getDriveSessionManager();
+    return drive != null && drive.isDriving(player.getUniqueId());
   }
 
   public void shutdown() {

@@ -100,6 +100,11 @@ public final class ActionBarTrainHudManager implements Listener {
     Set<String> activeTrains = new HashSet<>();
     Set<UUID> currentPlayers = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
+      if (isDriving(player)) {
+        // 手动驾驶的驾驶员有自己的动作栏，乘客的让位。
+        clear(player);
+        continue;
+      }
       Optional<MinecartGroup> groupOpt = contextResolver.resolveGroup(player);
       if (groupOpt.isEmpty()) {
         clear(player);
@@ -114,6 +119,11 @@ public final class ActionBarTrainHudManager implements Listener {
     progressTracker.retain(activeTrains);
     stateTracker.retain(activeTrains);
     clearInactivePlayers(currentPlayers);
+  }
+
+  private boolean isDriving(Player player) {
+    var drive = plugin.getDriveSessionManager();
+    return drive != null && drive.isDriving(player.getUniqueId());
   }
 
   public void shutdown() {

@@ -4,6 +4,14 @@ command:
   pids:
     help:
       give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
+  train:
+    help:
+      entry-config-set:
+        - "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel</white> <gray>- 设置配置</gray>"
+        - "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel/--mode/--mt/--max-speed</white> <gray>- 设置配置</gray>"
+    config:
+      drive-set: ["<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新: mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white>"]
+      drive-list: ["  <gray>驾驶:</gray> mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> <gray>bps</gray>"]
 pids:
   board:
     notice:
@@ -20,3 +28,12 @@ pids:
       passing:
         body: ["请勿靠近站台边缘"]
         body-secondary: ["Stand clear of the platform edge"]
+drive:
+  hud:
+    line: ["<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
+  command:
+    start:
+      bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
+      train-moving:
+        - "<prefix> <red>列车正在行驶，停稳后才能开始驾驶</red>"
+        - "<prefix> <red>列车尚未停稳（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"

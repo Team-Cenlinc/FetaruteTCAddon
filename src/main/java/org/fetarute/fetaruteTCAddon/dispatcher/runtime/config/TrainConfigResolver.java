@@ -19,6 +19,18 @@ public final class TrainConfigResolver {
   public static final String TAG_TRAIN_DECEL_BPS2 = "FTA_TRAIN_DECEL_BPS2";
   public static final String TAG_TRAIN_CONFIG_AT = "FTA_TRAIN_CONFIG_AT";
 
+  /** 动力配置方式（{@code mu} 动车组 / {@code loco} 机车牵引），缺省按车种推断；用于手动驾驶。 */
+  public static final String TAG_TRAIN_MODE = "FTA_TRAIN_MODE";
+
+  /** 动拖比，如 {@code 4M2T} 或 {@code 0.67}；用于手动驾驶。 */
+  public static final String TAG_TRAIN_MT = "FTA_TRAIN_MT";
+
+  /** 受电方式：{@code ptg5} / {@code ptg6} 受电弓、{@code shoe} 集电靴、{@code diesel} 内燃；用于手动驾驶的启动流程。 */
+  public static final String TAG_TRAIN_POWER = "FTA_TRAIN_POWER";
+
+  /** 最高速度上限（格/秒）；用于手动驾驶。 */
+  public static final String TAG_TRAIN_MAX_BPS = "FTA_TRAIN_MAX_BPS";
+
   /**
    * 解析列车配置，优先读取 TrainProperties tags，缺失时回退到配置默认值。
    *

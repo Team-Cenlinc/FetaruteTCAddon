@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationOptions;
@@ -167,5 +168,45 @@ class AutoStationDoorControllerTest {
     assertTrue(options.getQueue());
     assertTrue(options.getReset());
     assertEquals(1.0, options.getSpeed());
+  }
+
+  @Test
+  void driverLateralFaceFollowsTheFacingDirection() {
+    // 面朝东（+X）时，左手边是北，右手边是南。
+    assertEquals(
+        BlockFace.NORTH, AutoStationDoorController.lateralCompassFace(new Vector(1, 0, 0), true));
+    assertEquals(
+        BlockFace.SOUTH, AutoStationDoorController.lateralCompassFace(new Vector(1, 0, 0), false));
+    // 面朝北（-Z）时，左手边是西。
+    assertEquals(
+        BlockFace.WEST, AutoStationDoorController.lateralCompassFace(new Vector(0, 0, -1), true));
+    assertEquals(
+        BlockFace.EAST, AutoStationDoorController.lateralCompassFace(new Vector(0, 0, -1), false));
+    // 面朝南、西同理。
+    assertEquals(
+        BlockFace.EAST, AutoStationDoorController.lateralCompassFace(new Vector(0, 0, 1), true));
+    assertEquals(
+        BlockFace.SOUTH, AutoStationDoorController.lateralCompassFace(new Vector(-1, 0, 0), true));
+  }
+
+  @Test
+  void driverLateralFaceSnapsDiagonalAndCurvedHeadingsToTheNearestCompassPoint() {
+    // 面朝东北，左手边指向西北。
+    assertEquals(
+        BlockFace.NORTH_WEST,
+        AutoStationDoorController.lateralCompassFace(new Vector(1, 0, -1), true));
+    // 稍偏离正东（弯道上）仍取最近的方位。
+    assertEquals(
+        BlockFace.NORTH,
+        AutoStationDoorController.lateralCompassFace(new Vector(1, 0.3, 0.2), true));
+  }
+
+  @Test
+  void driverLateralFaceIgnoresVerticalAndRejectsDegenerateFacing() {
+    assertEquals(
+        BlockFace.NORTH, AutoStationDoorController.lateralCompassFace(new Vector(1, 5, 0), true));
+    assertNull(AutoStationDoorController.lateralCompassFace(new Vector(0, 1, 0), true));
+    assertNull(AutoStationDoorController.lateralCompassFace(null, true));
+    assertNull(AutoStationDoorController.lateralCompassFace(new Vector(Double.NaN, 0, 1), true));
   }
 }

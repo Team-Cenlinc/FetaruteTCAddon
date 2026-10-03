@@ -38,6 +38,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
+import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
+import org.fetarute.fetaruteTCAddon.drive.dynamics.MotorRatio;
+import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -125,6 +128,36 @@ public final class FtaTrainCommand {
                     .build())
             .build();
 
+    var modeFlag =
+        CommandFlag.builder("mode")
+            .withComponent(
+                CommandComponent.builder("mode", StringParser.stringParser())
+                    .suggestionProvider(SuggestionProvider.suggestingStrings("mu", "loco"))
+                    .build())
+            .build();
+    var mtFlag =
+        CommandFlag.builder("mt")
+            .withComponent(
+                CommandComponent.builder("mt", StringParser.stringParser())
+                    .suggestionProvider(SuggestionProvider.suggestingStrings("4M2T", "0.67"))
+                    .build())
+            .build();
+    var powerFlag =
+        CommandFlag.builder("power")
+            .withComponent(
+                CommandComponent.builder("power", StringParser.stringParser())
+                    .suggestionProvider(
+                        SuggestionProvider.suggestingStrings("ptg5", "ptg6", "shoe", "diesel"))
+                    .build())
+            .build();
+    var maxSpeedFlag =
+        CommandFlag.builder("max-speed")
+            .withComponent(
+                CommandComponent.builder("max-speed", DoubleParser.doubleParser())
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<bps>"))
+                    .build())
+            .build();
+
     manager.command(
         manager
             .commandBuilder("fta")
@@ -151,6 +184,10 @@ public final class FtaTrainCommand {
             .flag(typeFlag)
             .flag(accelFlag)
             .flag(decelFlag)
+            .flag(modeFlag)
+            .flag(mtFlag)
+            .flag(maxSpeedFlag)
+            .flag(powerFlag)
             .handler(
                 ctx -> {
                   LocaleManager locale = plugin.getLocaleManager();
@@ -165,30 +202,93 @@ public final class FtaTrainCommand {
                       Optional.ofNullable(typeRaw).flatMap(TrainType::parse);
                   Double accel = ctx.flags().getValue(accelFlag, null);
                   Double decel = ctx.flags().getValue(decelFlag, null);
-                  for (TrainProperties properties : targets) {
-                    TrainConfig current =
-                        resolver.resolve(properties, plugin.getConfigManager().current());
-                    TrainType type = typeOverride.orElse(current.type());
-                    TrainConfig target =
-                        new TrainConfig(
-                            type,
-                            accel != null ? accel : current.accelBps2(),
-                            decel != null ? decel : current.decelBps2());
-                    resolver.writeConfig(
-                        properties, target, Optional.ofNullable(accel), Optional.ofNullable(decel));
+                  String modeRaw = ctx.flags().getValue(modeFlag, null);
+                  String mtRaw = ctx.flags().getValue(mtFlag, null);
+                  Double maxSpeed = ctx.flags().getValue(maxSpeedFlag, null);
+                  String powerRaw = ctx.flags().getValue(powerFlag, null);
+                  Optional<PowerSupply> power =
+                      Optional.ofNullable(powerRaw).flatMap(PowerSupply::parse);
+                  Optional<DriveMode> driveMode =
+                      Optional.ofNullable(modeRaw).flatMap(DriveMode::parse);
+                  String invalidDrive = null;
+                  if (modeRaw != null && driveMode.isEmpty()) {
+                    invalidDrive = "--mode " + modeRaw;
+                  } else if (mtRaw != null && MotorRatio.parse(mtRaw).isEmpty()) {
+                    invalidDrive = "--mt " + mtRaw;
+                  } else if (maxSpeed != null && !(Double.isFinite(maxSpeed) && maxSpeed > 0.0)) {
+                    invalidDrive = "--max-speed " + maxSpeed;
+                  } else if (powerRaw != null && power.isEmpty()) {
+                    invalidDrive = "--power " + powerRaw;
+                  }
+                  if (invalidDrive != null) {
                     ctx.sender()
                         .sendMessage(
                             locale.component(
-                                "command.train.config.set",
-                                Map.of(
-                                    "train",
-                                    properties.getTrainName(),
-                                    "type",
-                                    target.type().name(),
-                                    "accel",
-                                    String.valueOf(target.accelBps2()),
-                                    "decel",
-                                    String.valueOf(target.decelBps2()))));
+                                "command.train.config.drive-invalid", Map.of("raw", invalidDrive)));
+                    return;
+                  }
+                  boolean driveGiven =
+                      driveMode.isPresent()
+                          || mtRaw != null
+                          || maxSpeed != null
+                          || power.isPresent();
+                  boolean configGiven = typeOverride.isPresent() || accel != null || decel != null;
+                  // 只传驾驶参数时不动车种与加减速标签：写入会把当前解析出的值固化下来，车就不再跟随车种预设。
+                  boolean driveOnly = driveGiven && !configGiven;
+                  for (TrainProperties properties : targets) {
+                    if (!driveOnly) {
+                      TrainConfig current =
+                          resolver.resolve(properties, plugin.getConfigManager().current());
+                      TrainType type = typeOverride.orElse(current.type());
+                      TrainConfig target =
+                          new TrainConfig(
+                              type,
+                              accel != null ? accel : current.accelBps2(),
+                              decel != null ? decel : current.decelBps2());
+                      resolver.writeConfig(
+                          properties,
+                          target,
+                          Optional.ofNullable(accel),
+                          Optional.ofNullable(decel));
+                      ctx.sender()
+                          .sendMessage(
+                              locale.component(
+                                  "command.train.config.set",
+                                  Map.of(
+                                      "train",
+                                      properties.getTrainName(),
+                                      "type",
+                                      target.type().name(),
+                                      "accel",
+                                      String.valueOf(target.accelBps2()),
+                                      "decel",
+                                      String.valueOf(target.decelBps2()))));
+                    }
+                    if (driveGiven) {
+                      driveMode.ifPresent(
+                          value ->
+                              TrainTagHelper.writeTag(
+                                  properties, TrainConfigResolver.TAG_TRAIN_MODE, value.name()));
+                      if (mtRaw != null) {
+                        TrainTagHelper.writeTag(
+                            properties, TrainConfigResolver.TAG_TRAIN_MT, mtRaw.trim());
+                      }
+                      power.ifPresent(
+                          value ->
+                              TrainTagHelper.writeTag(
+                                  properties, TrainConfigResolver.TAG_TRAIN_POWER, value.key()));
+                      if (maxSpeed != null) {
+                        TrainTagHelper.writeTag(
+                            properties,
+                            TrainConfigResolver.TAG_TRAIN_MAX_BPS,
+                            String.valueOf(maxSpeed));
+                      }
+                      ctx.sender()
+                          .sendMessage(
+                              locale.component(
+                                  "command.train.config.drive-set",
+                                  driveTagPlaceholders(properties)));
+                    }
                   }
                 }));
 
@@ -226,6 +326,13 @@ public final class FtaTrainCommand {
                                     String.valueOf(config.accelBps2()),
                                     "decel",
                                     String.valueOf(config.decelBps2()))));
+                    if (hasDriveTags(properties)) {
+                      ctx.sender()
+                          .sendMessage(
+                              locale.component(
+                                  "command.train.config.drive-list",
+                                  driveTagPlaceholders(properties)));
+                    }
                   }
                 }));
 
@@ -1123,6 +1230,30 @@ public final class FtaTrainCommand {
     }
     sendNoSelection(sender, locale);
     return List.of();
+  }
+
+  /** 列车是否设置过任一手动驾驶标签。 */
+  private static boolean hasDriveTags(TrainProperties properties) {
+    return TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MODE).isPresent()
+        || TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MT).isPresent()
+        || TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MAX_BPS)
+            .isPresent()
+        || TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_POWER).isPresent();
+  }
+
+  /** 手动驾驶相关标签的展示占位符；未设置的项显示为 {@code -}。 */
+  private static Map<String, String> driveTagPlaceholders(TrainProperties properties) {
+    return Map.of(
+        "train",
+        properties.getTrainName(),
+        "mode",
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MODE).orElse("-"),
+        "mt",
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MT).orElse("-"),
+        "max",
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MAX_BPS).orElse("-"),
+        "power",
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_POWER).orElse("-"));
   }
 
   private void sendHelp(CommandSender sender) {

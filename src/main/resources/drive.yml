@@ -1,0 +1,93 @@
+# 配置版本，由插件维护，请勿修改
+config-version: 1
+
+# 手动驾驶配置（/fta drive）。
+# 缺失或非法的项会回退为内置默认值并在控制台提示；修改后执行 /fta reload 生效，已在进行的驾驶会话保持开始时的参数。
+
+# 是否允许玩家手动驾驶列车（/fta drive）
+enabled: true
+# 仿真等级：standard / simulation。两级都必须先启动才能牵引，紧急制动停稳后才能缓解，车门没关不能牵引。
+# standard 用驾驶台的启动按钮一键启动；simulation 在驾驶台逐项操作开关。
+level: standard
+# 列车未设置 FTA_TRAIN_MAX_BPS 标签时的最高速度（格/秒）
+default-max-speed-bps: 22.0
+# 惰行阻力（格/秒²）：列车在动时始终叠加的减速度
+coast-drag-bps2: 0.03
+# 紧急制动力相对常用制动的倍数（不小于 1）
+emergency-multiplier: 1.4
+# 牵引/制动力每秒的最大变化量（满力为 1），越小换档越柔和
+effort-rate-per-second: 1.5
+# 施加紧急制动时牵引/制动力每秒的最大变化量
+emergency-rate-per-second: 8.0
+# P1、P2、P3 的牵引力占满牵引的比例（递增，不超过 1）
+traction-fractions: [0.33, 0.67, 1.0]
+# B1–B4 的制动力占常用制动的比例（递增，不超过 1）
+brake-fractions: [0.25, 0.5, 0.75, 1.0]
+# 动车组加速度预设对应的动车占比；FTA_TRAIN_MT 给出的动车占比低于它时按比例降低加速度
+mu-reference-motor-fraction: 0.5
+# 机车牵引的加速度预设对应的牵引车厢数；车厢多于它时按比例降低加速度
+loco-reference-cars: 6
+# 低于该速度（格/秒）视为停稳
+stopped-speed-bps: 0.05
+# 驾驶员脱离座位后尝试重新入座的时限（tick）
+reseat-timeout-ticks: 100
+# 按下潜行之后多少 tick 内离座视为主动离座
+exit-sneak-window-ticks: 10
+# 动作栏刷新间隔（tick）
+hud-interval-ticks: 5
+# 是否在驾驶员的侧边栏（计分板）显示启动流程、气压、停放制动、制动试验与警惕装置的详细状态。
+# 动作栏只保留速度、档位、限速、方向和最要紧的一条提示
+sidebar: true
+# 创造模式下是否允许驾驶（旁观模式始终不允许）。驾驶期间背包同样只读：创造模式的取物、丢弃都会被截获
+allow-creative-mode: true
+# 低于该速度（格/秒）的列车视为停着，接管时清掉残余速度；更快的列车视为在溜：
+# 顺着驾驶员前进方向溜就沿用当前车速直接接管，朝驾驶室后方溜则提示先停稳
+start-max-speed-bps: 0.2
+# 是否允许超过限速：true 时 TrainCarts 的限速（牌子或 /train speedlimit 设定）只作提示，
+# 超速时动作栏的速度与限速标黄，超出比例达到下面的值则标红；false 时限速是硬上限
+speed-limit-override: true
+# 超出限速的比例达到该值时标红（0.1 即超出 10%），未达到则标黄
+overspeed-red-ratio: 0.1
+
+# 列车未设置 FTA_TRAIN_POWER 标签时的受电方式：
+# ptg5（受电弓，5 米接触网）/ ptg6（受电弓，6 米接触网）/ shoe（集电靴，第三轨）/ diesel（内燃）
+default-power: ptg5
+# 启动流程各步骤耗时（秒）。standard 级用驾驶台的启动按钮一键完成，simulation 级逐项操作
+setup-seconds:
+  key: 1
+  pantograph: 8
+  shoe: 2
+  engine: 25
+  breaker: 3
+  aux: 5
+# 列车无人驾驶超过多少分钟后按冷车处理（下次上车需重新升弓、合主断）
+cold-after-minutes: 10
+
+# simulation 级的车上系统。压力单位为 kPa，standard 级不使用这一段
+simulation:
+  # 主风缸满压；压缩机充到它就停
+  main-reservoir-max-kpa: 900
+  # 主风缸低于该压力时压缩机自动启动（动车组自动，机车需打开压缩机开关）
+  compressor-cut-in-kpa: 750
+  # 压缩机把主风缸从空充到满压所需的秒数
+  compressor-fill-seconds: 90
+  # 主风缸低于该压力时封锁牵引
+  traction-lockout-kpa: 550
+  # 主风缸至少要有该压力才能发挥全部常用制动力，低于时按比例下降（紧急制动与停放制动不受影响）
+  full-brake-kpa: 450
+  # 缓解停放制动所需的主风缸压力
+  parking-release-kpa: 450
+  # 主风缸跌到该压力以下时停放制动（弹簧制动）自动施加，失风时列车总能停下；不能高于缓解压力
+  parking-auto-apply-kpa: 300
+  # 常用全制动时的制动缸压力
+  brake-cylinder-max-kpa: 350
+  # 制动缸每升高 1 kPa 消耗的主风缸压力
+  brake-cylinder-consumption: 0.1
+  # 无人驾驶时主风缸每分钟的漏泄
+  leak-kpa-per-minute: 30
+  # 制动试验：制动缸须升到该压力，再缓解到下面的压力以下
+  brake-test-apply-kpa: 300
+  brake-test-release-kpa: 20
+  # 警惕装置：行车中多少秒没有操作（换档或右键）就报警，报警后多少秒不确认就紧急制动
+  vigilance-interval-seconds: 60
+  vigilance-warning-seconds: 5
