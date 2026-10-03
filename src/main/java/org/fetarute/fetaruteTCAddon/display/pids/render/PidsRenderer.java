@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.PlatformStyle
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -735,6 +736,26 @@ public final class PidsRenderer {
         view.clock(),
         view.bandColors(),
         (painter, list) -> painter.drawFollowing(list, view));
+  }
+
+  /** 渲染线路运行状况屏：时钟与状况表（{@link PidsLineStatusPainter}；布局校验不许状况屏带其他组件）。 */
+  public BufferedImage renderLineStatus(PidsLayout layout, PidsLineStatusView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    return paint(
+        layout.width(),
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          for (PidsLayout.Widget widget : layout.widgets()) {
+            if (widget instanceof PidsLayout.Clock clock) {
+              drawClock(p, clock, view.clock());
+            } else if (widget instanceof PidsLayout.LineStatus status) {
+              new PidsLineStatusPainter(p).draw(status, view);
+            }
+          }
+        });
   }
 
   /** 停站屏的一页：按布局画站台号（不写“站台”二字）、时钟、色带，停站表组件交给 {@code body}。 */

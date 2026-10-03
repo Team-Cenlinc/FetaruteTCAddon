@@ -1022,7 +1022,7 @@ command:
   pids:
     help:
       header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>挂满空展示框后用安装纸安装，再用配置棍调整</gray>"
-      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
+      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
       stick: "<gray>/fta pids stick</gray> <white>-</white> <dark_aqua>领取配置棍（右键菜单、左键信息、潜行左键拆除）</dark_aqua>"
       list: "<gray>/fta pids list <white>[页]</white></gray> <white>-</white> <dark_aqua>全部站台屏（需管理权限）</dark_aqua>"
       info: "<gray>/fta pids info|menu|remove <white><屏幕></white></gray> <white>-</white> <dark_aqua>按编号查看、配置或拆除</dark_aqua>"
@@ -1233,6 +1233,51 @@ pids:
       through-from: "<station>起"
       following: "后续列车"
       following-secondary: "Following trains"
+    # 线路运行状况屏（3×5）：本站所属运营商各线路的运行状况；说明栏文案按 12 号中文、10 号英文约 170 像素宽来写
+    line-status:
+      title: "线路运行状况"
+      title-secondary: "Service status"
+      header:
+        line: "线路"
+        line-secondary: "Line"
+        status: "运行状况"
+        status-secondary: "Status"
+        details: "说明"
+        details-secondary: "Details"
+      empty: "暂无线路信息"
+      empty-secondary: "No line information"
+      filtered: "本屏线路过滤没有匹配的线路"
+      filtered-secondary: "No lines match this screen's filter"
+      condition:
+        suspended: "全线停运"
+        suspended-secondary: "Suspended"
+        part-suspended: "部分停运"
+        part-suspended-secondary: "Part suspended"
+        severe-delays: "严重延误"
+        severe-delays-secondary: "Severe delays"
+        minor-delays: "轻微延误"
+        minor-delays-secondary: "Minor delays"
+        cancellations: "部分班次取消"
+        cancellations-secondary: "Trips cancelled"
+        good: "运行正常"
+        good-secondary: "Good service"
+        ended: "已结束运营"
+        ended-secondary: "Service ended"
+        no-trains: "暂无列车"
+        no-trains-secondary: "No trains running"
+      detail:
+        late: "晚点最多 <minutes> 分钟"
+        late-secondary: "Up to <minutes> min late"
+        cancelled: "近 1 小时取消 <count> 班"
+        cancelled-secondary: "<count> trips cancelled this hour"
+        # 只取消一班时的英文
+        cancelled-one-secondary: "1 trip cancelled this hour"
+        closed: "<from>—<to> 暂停运营"
+        closed-secondary: "No service <from> – <to>"
+        maintenance: "线路检修"
+        maintenance-secondary: "Under maintenance"
+        first-train: "首班 <time>"
+        first-train-secondary: "First train <time>"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
     # 1×3 与 2×1 上中文标题最多 4 字、英文标题约 18 个字母；说明中文最多 9 字、英文最多两行
     notice:

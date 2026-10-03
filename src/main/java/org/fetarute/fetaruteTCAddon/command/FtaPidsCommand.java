@@ -603,13 +603,9 @@ public final class FtaPidsCommand {
           screenOf(ctx)
               .ifPresent(
                   pair ->
-                      pair.screen()
-                          .station()
-                          .ifPresent(
-                              station ->
-                                  pair.service().directory().linesServing(station).stream()
-                                      .map(line -> line.code())
-                                      .forEach(suggestions::add)));
+                      pair.service().filterableLines(pair.screen()).stream()
+                          .map(line -> line.code())
+                          .forEach(suggestions::add));
           return suggestions;
         });
   }

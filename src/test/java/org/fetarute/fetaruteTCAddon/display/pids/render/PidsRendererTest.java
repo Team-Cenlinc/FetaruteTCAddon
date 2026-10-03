@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsGlyphForm;
 import org.fetarute.fetaruteTCAddon.display.pids.fixtures.PidsFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -722,6 +723,129 @@ class PidsRendererTest {
 
   private static PidsView.Row withArrival(PidsView.Row row, Arrival arrival) {
     return new PidsView.Row(row.badge(), row.destination(), row.platform(), arrival);
+  }
+
+  /**
+   * 线路运行状况屏（大行）：每条线路一行面板色铺底，色牌在行内竖向居中；运行正常写绿字、不画色块、不写说明， 延误画琥珀色块（深字），停运画红色块（白字）；只有一页时不写页码。行从 118
+   * 起，每行 84、间隔 2。
+   */
+  @Test
+  void lineStatusRowsColourTheirStatus() {
+    PidsLayout layout = PidsFixtures.builtInLayout("status-3x5");
+    PidsTheme theme = PidsTheme.DARK;
+    PidsLineStatusView view =
+        statusView(
+            true,
+            0,
+            1,
+            statusRow("WS", "浦蓝线", PidsLineStatusView.Style.GOOD, Optional.empty()),
+            statusRow(
+                "MT",
+                "大都会线",
+                PidsLineStatusView.Style.AMBER,
+                Optional.of(new Names("晚点最多 8 分钟", "Up to 8 min late"))),
+            statusRow(
+                "DS",
+                "探索线",
+                PidsLineStatusView.Style.RED,
+                Optional.of(new Names("主城湾—海兴 暂停运营", "No service Spawn Bay – Hai Hsing"))));
+
+    BufferedImage image = renderer.renderLineStatus(layout, view);
+
+    assertEquals(640, image.getWidth());
+    assertEquals(384, image.getHeight());
+    assertEquals(theme.panel(), rgb(image, 5, 119), "第一行面板");
+    assertEquals(theme.background(), rgb(image, 5, 203), "行间距露出底色");
+    assertEquals(WS, rgb(image, 13, 139), "色牌在行内竖向居中：(84 - 44) / 2 = 20");
+    assertTrue(countColor(image, 300, 118, 140, 84, theme.green()) > 0, "运行正常写绿字");
+    assertEquals(0, countColor(image, 292, 118, 156, 84, theme.amber()), "运行正常不画色块");
+    assertEquals(0, countColor(image, 456, 118, 172, 84, theme.text()), "运行正常不写说明");
+    assertEquals(theme.amber(), rgb(image, 293, 223), "延误画琥珀色块");
+    assertTrue(countColor(image, 300, 222, 140, 48, PidsTheme.INK) > 0, "亮黄底上写深字");
+    assertTrue(countColor(image, 456, 204, 172, 84, theme.text()) > 0, "延误写说明");
+    assertEquals(theme.red(), rgb(image, 293, 309), "停运画红色块");
+    assertTrue(countColor(image, 300, 308, 140, 48, PidsTheme.PAPER) > 0, "红底上写白字");
+    assertEquals(0, countColor(image, 560, 70, 68, 14, theme.text()), "只有一页不写页码");
+    assertTrue(countColor(image, 12, 24, 300, 36, theme.text()) > 0, "页标题");
+    assertTrue(countColor(image, 580, 39, 48, 20, theme.text()) > 0, "右上角时钟");
+  }
+
+  /** 小行：多于一页时运营商名一行右侧写页码；中文线路名大字放不下时改用小一档字号，不压到状况列。 */
+  @Test
+  void compactLineStatusPagesAndShrinksLongLineNames() {
+    PidsLayout layout = PidsFixtures.builtInLayout("status-3x5");
+    PidsTheme theme = PidsTheme.DARK;
+    PidsLineStatusView view =
+        statusView(
+            false,
+            0,
+            2,
+            statusRow("FRn", "新远洛克威支线延长线", PidsLineStatusView.Style.MUTED, Optional.empty()),
+            statusRow("WS", "浦蓝线", PidsLineStatusView.Style.GOOD, Optional.empty()));
+
+    BufferedImage image = renderer.renderLineStatus(layout, view);
+
+    assertTrue(countColor(image, 590, 70, 38, 14, theme.text()) > 0, "页码 1/2 靠右");
+    int[] longName = textRows(image, 96, 118, 186, 50, theme.text());
+    int[] shortName = textRows(image, 96, 170, 186, 50, theme.text());
+    assertTrue(longName[1] - longName[0] < 20, () -> "长名改用 20 号: " + Arrays.toString(longName));
+    assertTrue(shortName[1] - shortName[0] >= 20, () -> "短名用 24 号: " + Arrays.toString(shortName));
+    assertEquals(0, countColor(image, 286, 118, 6, 50, theme.text()), "线路名不压到状况列");
+    assertEquals(theme.panel(), rgb(image, 5, 118 + 52), "第二行在 52 之后");
+  }
+
+  @Test
+  void anEmptyLineStatusSaysSo() {
+    PidsLayout layout = PidsFixtures.builtInLayout("status-3x5");
+
+    BufferedImage image = renderer.renderLineStatus(layout, statusView(true, 0, 1));
+
+    assertTrue(countColor(image, 12, 118, 300, 84, PidsTheme.DARK.muted()) > 0, "第一行写暂无线路信息");
+    assertEquals(PidsTheme.DARK.background(), rgb(image, 5, 210), "其余不画行");
+  }
+
+  private static PidsLineStatusView statusView(
+      boolean roomy, int page, int pages, PidsLineStatusView.Row... rows) {
+    return new PidsLineStatusView(
+        PidsTheme.DARK,
+        "21:40",
+        new Names("线路运行状况", "Service status"),
+        new Names("南城铁路", "SURcentral"),
+        new PidsLineStatusView.Labels(
+            new Names("线路", "Line"),
+            new Names("运行状况", "Status"),
+            new Names("说明", "Details"),
+            new Names("暂无线路信息", "No line information")),
+        List.of(rows),
+        roomy,
+        page,
+        pages);
+  }
+
+  private static PidsLineStatusView.Row statusRow(
+      String code, String name, PidsLineStatusView.Style style, Optional<Names> detail) {
+    return new PidsLineStatusView.Row(
+        new PidsView.LineChip(
+            code, code.equals("WS") ? WS : 0xD920D9, new Names(name, code + " Line")),
+        new Names("状况", "Status"),
+        style,
+        detail);
+  }
+
+  /** 区域里 {@code color} 色像素所在的最上一行与最下一行（绝对坐标）；没有时为 {@code [MAX, MIN]}。 */
+  private static int[] textRows(
+      BufferedImage image, int x, int y, int width, int height, int color) {
+    int top = Integer.MAX_VALUE;
+    int bottom = Integer.MIN_VALUE;
+    for (int dy = 0; dy < height; dy++) {
+      for (int dx = 0; dx < width; dx++) {
+        if (rgb(image, x + dx, y + dy) == color) {
+          top = Math.min(top, y + dy);
+          bottom = Math.max(bottom, y + dy);
+        }
+      }
+    }
+    return new int[] {top, bottom};
   }
 
   private static int rgb(BufferedImage image, int x, int y) {

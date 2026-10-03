@@ -109,6 +109,76 @@ class PidsLayoutParserTest {
   }
 
   @Test
+  void theBuiltInLineStatusLayoutFitsThreeRoomyOrFiveCompactRows() {
+    PidsLayout layout = PidsFixtures.builtInLayout("status-3x5");
+    PidsLayout.LineStatus status = layout.lineStatus().orElseThrow();
+
+    assertEquals(640, layout.width());
+    assertEquals(384, layout.height());
+    assertEquals(3, status.rowsPerPage(status.roomy()));
+    assertEquals(5, status.rowsPerPage(status.compact()));
+    assertEquals(118, status.rowsTop());
+    assertEquals(
+        384,
+        status.rowsTop() + 5 * status.compact().height() + 4 * status.compact().gap() + 8,
+        "五条小行之下留 8 像素");
+  }
+
+  /** 线路运行状况屏只画时钟与状况表；省略的样式键取内置 3×5 的值。 */
+  @Test
+  void lineStatusLayoutsRejectOtherWidgetsAndDefaultTheirStyles() throws Exception {
+    String status =
+        """
+        format: 1
+        tiles: {rows: 3, cols: 5}
+        widgets:
+          - type: clock
+            x: 628
+            y: 39
+            align: right
+          - type: line-status
+            x: 4
+            y: 24
+            width: 632
+            height: 360
+        """;
+    PidsLayout layout = parse(status).layout().orElseThrow();
+    PidsLayout.LineStatus widget = layout.lineStatus().orElseThrow();
+    PidsLayout reference = PidsFixtures.builtInLayout("status-3x5");
+
+    assertEquals(reference.lineStatus().orElseThrow(), widget, "内置布局写出的值与默认值一致");
+    assertEquals(
+        List.of("widgets[2]: 线路运行状况屏只画时钟与状况表，不支持这个组件"),
+        parse(status + "  - type: line-band\n    x: 0\n    y: 0\n    width: 640\n    height: 4\n")
+            .problems());
+  }
+
+  @Test
+  void lineStatusColumnsMustRunLeftToRightAndRowsMustFit() throws Exception {
+    PidsLayoutParser.Result result =
+        parse(
+            """
+            format: 1
+            tiles: {rows: 1, cols: 5}
+            widgets:
+              - type: line-status
+                x: 0
+                y: 0
+                width: 640
+                height: 128
+                columns: {name: 92, status: 460, detail: 452}
+            """);
+
+    assertTrue(
+        result
+            .problems()
+            .contains("widgets[0].columns: 列须从左到右排开（inset < name < status < detail < width）"),
+        () -> result.problems().toString());
+    assertTrue(
+        result.problems().contains("widgets[0].roomy: 一行也放不下"), () -> result.problems().toString());
+  }
+
+  @Test
   void aStopListTooShortForOneStopIsRejected() throws Exception {
     PidsLayoutParser.Result result =
         parse(

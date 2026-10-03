@@ -17,8 +17,10 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
+import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
@@ -30,6 +32,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -55,6 +59,10 @@ class PidsComposerTest {
   private OptionalLong worldTime = OptionalLong.of(6000);
   private Instant now = NOW;
   private List<PidsRow> rows = rows();
+  private int snapshotCalls;
+
+  private Function<PidsDirectory.OperatorLine, PidsLineStatus> statuses =
+      line -> PidsLineStatus.of(PidsLineStatus.Condition.GOOD);
 
   /** 默认关掉宣传页轮播，免得固定时刻正好落在宣传页上；轮播另有用例。 */
   private PidsSettings settings = withSlides(12, 0);
@@ -78,7 +86,10 @@ class PidsComposerTest {
             registry,
             () -> loaded,
             layouts,
-            station -> new PidsSnapshot(station, NOW, rows),
+            station -> {
+              snapshotCalls++;
+              return new PidsSnapshot(station, NOW, rows);
+            },
             new PidsViewBuilder(directory, new PidsVocabulary(key -> lang.getString(key, key))),
             directory,
             new PidsRenderer(PidsFonts.builtIn(PidsGlyphForm.ZH_HANS)),
@@ -86,7 +97,8 @@ class PidsComposerTest {
             world -> worldTime,
             () -> settings,
             () -> now,
-            ZoneOffset.UTC);
+            ZoneOffset.UTC,
+            (line, at) -> statuses.apply(line));
   }
 
   @Test
@@ -464,6 +476,27 @@ class PidsComposerTest {
     return assertInstanceOf(PidsComposer.LiveKey.class, content.key()).view().theme();
   }
 
+  @Test
+  void lineStatusScreensListTheOperatorsLinesWithoutTheDepartureSnapshot() {
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of("WS"), "status-3x5", 3, 5);
+
+    PidsContent first = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    PidsContent second = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+
+    PidsLineStatusView view =
+        assertInstanceOf(PidsComposer.LineStatusKey.class, first.key()).view();
+    assertEquals(
+        List.of("WS"), view.rows().stream().map(row -> row.line().code()).toList(), "按屏幕的线路过滤");
+    assertTrue(view.roomy());
+    assertEquals(first.key(), second.key(), "数据没变时不重绘");
+    assertEquals(0, snapshotCalls, "状况屏不取到发快照");
+
+    statuses = line -> PidsLineStatus.of(PidsLineStatus.Condition.MINOR_DELAYS);
+    PidsContent delayed = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    assertNotEquals(first.key(), delayed.key(), "状况变了就重绘");
+    assertEquals(640, delayed.image().get().getWidth());
+  }
+
   private PidsScreen register(PidsScreen.Mode mode, Set<String> lines) {
     return register(mode, lines, "platform-1x3", 1, 3);
   }
@@ -543,6 +576,23 @@ class PidsComposerTest {
     @Override
     public List<PidsView.LineChip> linesServingPlatform(PidsStationKey station, String platform) {
       return List.of();
+    }
+
+    @Override
+    public List<OperatorLine> operatorLines(String operatorCode) {
+      return List.of(
+          new OperatorLine(
+              UUID.randomUUID(),
+              "SURC",
+              new PidsView.LineChip("MT", 0xD920D9, new Names("大都会线", "Metropolitan Line")),
+              LineApi.LineStatus.ACTIVE,
+              Optional.empty()),
+          new OperatorLine(
+              UUID.randomUUID(),
+              "SURC",
+              new PidsView.LineChip("WS", 0x70DEEE, new Names("浦蓝线", "Waterside Line")),
+              LineApi.LineStatus.ACTIVE,
+              Optional.empty()));
     }
   }
 }

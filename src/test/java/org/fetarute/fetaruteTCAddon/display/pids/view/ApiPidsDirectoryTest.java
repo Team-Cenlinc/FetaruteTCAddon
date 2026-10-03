@@ -237,11 +237,122 @@ class ApiPidsDirectoryTest {
     assertEquals(1, warnings.size(), () -> warnings.toString());
   }
 
+  @Test
+  void operatorLinesSkipPlanningLinesAndRoutesKnowTheirLine() {
+    when(lines.listAllLines())
+        .thenReturn(
+            List.of(
+                line("WS", "浦蓝线", Optional.empty(), LineApi.LineStatus.MAINTENANCE),
+                line("MT", "大都会线", Optional.empty(), LineApi.LineStatus.ACTIVE),
+                line("DS", "探索线", Optional.empty(), LineApi.LineStatus.PLANNING)));
+
+    directory.refresh();
+
+    List<PidsDirectory.OperatorLine> found = directory.operatorLines("surc");
+    assertEquals(List.of("MT", "WS"), found.stream().map(line -> line.chip().code()).toList());
+    assertEquals(LineApi.LineStatus.MAINTENANCE, found.get(1).status());
+    assertEquals(new Names("浦蓝线", "WS Line"), found.get(1).chip().name());
+    assertTrue(found.stream().allMatch(line -> line.suspended().isEmpty()), "没有调度图时不判封锁");
+    assertEquals(Optional.of(new Names("南城", "")), directory.operatorName("Surc"));
+    assertEquals(
+        Optional.of(new RouteApi.LineRef("SURC", "MT")), directory.lineOfRoute(rapid), "管理归属，不随换线");
+    assertTrue(directory.operatorLines("TPC").isEmpty());
+    assertEquals(
+        Optional.of(RouteApi.RouteStage.OPERATION), directory.routeStage("surc:mt:mt-3o_dpexp"));
+    assertEquals(
+        List.of(new RouteApi.LineRef("SURC", "MT"), new RouteApi.LineRef("SURC", "WS")),
+        directory.lineRefsServing(HHU_KEY),
+        "停靠线路带运营商");
+  }
+
+  @Test
+  void lineCodesSortNumbersByValue() {
+    List<String> codes = new ArrayList<>(List.of("L10", "l2", "L1", "MT", "L2A", "A"));
+
+    codes.sort(ApiPidsDirectory.LINE_CODE_ORDER);
+
+    assertEquals(List.of("A", "L1", "l2", "L2A", "L10", "MT"), codes);
+  }
+
+  @Test
+  void aBlockedEdgeSuspendsTheSectionBetweenTheNearestStopsOfTheLineShownThere() {
+    activeLines();
+    GraphApi graph = graph(edge("SURC:S:HHU:3", "SURC:S:TPC:1:01", true));
+    directory = new ApiPidsDirectory(operators, lines, stations, routes, graph, warnings::add);
+
+    directory.refresh();
+
+    assertEquals(
+        Optional.of(new PidsDirectory.Section("SURC:HHU", "SURC:TPC")),
+        suspended("WS"),
+        "壑湖换成 WS 发车，断在咽喉前；前后最近的停车站是壑湖与大港城");
+    assertTrue(suspended("MT").isEmpty(), "换线前的区间没断");
+  }
+
+  @Test
+  void aBlockedEdgeWithADetourDoesNotSuspendTheLine() {
+    activeLines();
+    GraphApi graph =
+        graph(
+            edge("SURC:S:HHU:3", "SURC:S:TPC:1:01", true),
+            edge("SURC:S:HHU:3", "SURC:W:X:1", false),
+            edge("SURC:W:X:1", "SURC:S:TPC:1:01", false));
+    directory = new ApiPidsDirectory(operators, lines, stations, routes, graph, warnings::add);
+
+    directory.refresh();
+
+    assertTrue(suspended("WS").isEmpty(), "绕得过去就不算停运");
+    assertTrue(suspended("MT").isEmpty());
+  }
+
+  private void activeLines() {
+    when(lines.listAllLines())
+        .thenReturn(
+            List.of(
+                line("MT", "大都会线", Optional.empty(), LineApi.LineStatus.ACTIVE),
+                line("WS", "浦蓝线", Optional.empty(), LineApi.LineStatus.ACTIVE)));
+  }
+
+  private Optional<PidsDirectory.Section> suspended(String code) {
+    return directory.operatorLines("SURC").stream()
+        .filter(line -> line.chip().code().equals(code))
+        .findFirst()
+        .orElseThrow()
+        .suspended();
+  }
+
+  /** MT-3O 全程连成一串的调度图，外加 {@code extra} 里的边。 */
+  private static GraphApi graph(GraphApi.ApiEdge... extra) {
+    List<GraphApi.ApiEdge> edges = new ArrayList<>();
+    edges.add(edge("SURC:D:LWN:1", "SURC:S:HHU:2", false));
+    edges.add(edge("SURC:S:HHU:2", "SURC:S:HHU:3", false));
+    edges.add(edge("SURC:S:TPC:1:01", "SURC:S:TPC:1", false));
+    edges.addAll(List.of(extra));
+    GraphApi graph = mock(GraphApi.class);
+    when(graph.listAllSnapshots())
+        .thenReturn(
+            List.of(
+                new GraphApi.WorldGraphEntry(
+                    UUID.randomUUID(),
+                    new GraphApi.GraphSnapshot(
+                        List.of(), edges, Instant.EPOCH, 0, edges.size(), 1))));
+    return graph;
+  }
+
+  private static GraphApi.ApiEdge edge(String a, String b, boolean blocked) {
+    return new GraphApi.ApiEdge(a + "~" + b, a, b, 10, 0, true, blocked);
+  }
+
   private static List<String> codes(List<PidsView.LineChip> chips) {
     return chips.stream().map(PidsView.LineChip::code).toList();
   }
 
   private static LineApi.LineInfo line(String code, String name, Optional<String> color) {
+    return line(code, name, color, LineApi.LineStatus.values()[0]);
+  }
+
+  private static LineApi.LineInfo line(
+      String code, String name, Optional<String> color, LineApi.LineStatus status) {
     return new LineApi.LineInfo(
         UUID.randomUUID(),
         code,
@@ -250,7 +361,7 @@ class ApiPidsDirectoryTest {
         Optional.of(code + " Line"),
         LineApi.ServiceType.values()[0],
         color,
-        LineApi.LineStatus.values()[0],
+        status,
         Optional.empty());
   }
 

@@ -22,6 +22,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusSource;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusViews;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNoticeView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsStopListView;
@@ -39,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式或未绑定车站：测试卡，列出布局、识别出的车站与屏幕编号
+ *   <li>线路运行状况屏（布局带状况表组件）：本站所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页
  *   <li>停站屏（布局带停站表组件）：本站台下一班的停站表（停站多时翻页）、后续列车页与宣传页依次轮换（{@link PidsCarousel#stopList}），
  *       不放空位页；通过列车临近时同样锁定安全提示页
  *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页； 所有到发页的英文与备注按 {@link
@@ -65,6 +69,8 @@ public final class PidsComposer {
   private final InstantSource clock;
   private final ZoneId zone;
   private final PidsVocabulary vocabulary;
+  private final PidsLineStatusSource lineStatuses;
+  private final PidsLineStatusViews lineStatusViews;
   private final PidsCarousel carousel = new PidsCarousel();
 
   /**
@@ -80,6 +86,7 @@ public final class PidsComposer {
    * @param settings 当前配置
    * @param clock 时钟
    * @param zone 时钟时区
+   * @param lineStatuses 线路运行状况
    */
   public PidsComposer(
       PidsScreenRegistry registry,
@@ -93,7 +100,8 @@ public final class PidsComposer {
       Function<UUID, OptionalLong> worldTime,
       Supplier<PidsSettings> settings,
       InstantSource clock,
-      ZoneId zone) {
+      ZoneId zone,
+      PidsLineStatusSource lineStatuses) {
     this.registry = Objects.requireNonNull(registry, "registry");
     this.registryLoaded = Objects.requireNonNull(registryLoaded, "registryLoaded");
     this.layouts = Objects.requireNonNull(layouts, "layouts");
@@ -107,6 +115,8 @@ public final class PidsComposer {
     this.clock = Objects.requireNonNull(clock, "clock");
     this.zone = Objects.requireNonNull(zone, "zone");
     this.vocabulary = new PidsVocabulary(texts);
+    this.lineStatuses = Objects.requireNonNull(lineStatuses, "lineStatuses");
+    this.lineStatusViews = new PidsLineStatusViews(directory, vocabulary);
   }
 
   /** 到发页的内容标识：布局与视图都相同才算没变。 */
@@ -120,6 +130,9 @@ public final class PidsComposer {
 
   /** 2×1 后续列车页的内容标识。 */
   record FollowingKey(PidsLayout layout, PidsFollowingView view) {}
+
+  /** 线路运行状况屏的内容标识：视图含当前页号。 */
+  record LineStatusKey(PidsLayout layout, PidsLineStatusView view) {}
 
   /**
    * @param screenId 地图物品上记的屏幕 ID
@@ -155,7 +168,29 @@ public final class PidsComposer {
     if (screen.mode() == PidsScreen.Mode.TEST_CARD || screen.station().isEmpty()) {
       return Optional.of(card(testCard(screen, layout.get())));
     }
+    Optional<PidsLayout.LineStatus> status = layout.get().lineStatus();
+    if (status.isPresent()) {
+      return Optional.of(lineStatus(screen, layout.get(), status.get(), screen.station().get()));
+    }
     return Optional.of(live(screen, layout.get(), screen.station().get()));
+  }
+
+  /** 线路运行状况屏：线路少时用大行，多了用小行并翻页。 */
+  private PidsContent lineStatus(
+      PidsScreen screen, PidsLayout layout, PidsLayout.LineStatus widget, PidsStationKey station) {
+    PidsLineStatusView view =
+        lineStatusViews.build(
+            new PidsLineStatusViews.Request(
+                station,
+                screen.lines(),
+                theme(screen),
+                clock.instant(),
+                zone,
+                widget.rowsPerPage(widget.roomy()),
+                widget.rowsPerPage(widget.compact())),
+            lineStatuses);
+    return new PidsContent(
+        new LineStatusKey(layout, view), () -> renderer.renderLineStatus(layout, view));
   }
 
   /** 屏幕的测试卡：布局、识别出的车站与站台、屏幕编号。 */

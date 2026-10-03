@@ -13,7 +13,7 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.junit.jupiter.api.Test;
 
-/** 站台屏文案：用到的每个键在默认语言文件里都有；分钟数占位符被替换。 */
+/** 站台屏文案：用到的每个键在默认语言文件里都有；分钟数、班次数与站名等占位符被替换。 */
 class PidsVocabularyTest {
 
   @Test
@@ -55,8 +55,31 @@ class PidsVocabularyTest {
       vocabulary.noticeTitle(notice);
       vocabulary.noticeBody(notice);
     }
+    vocabulary.lineStatusTitle();
+    vocabulary.lineStatusLabels(false);
+    vocabulary.lineStatusLabels(true);
+    for (PidsLineStatus.Condition condition : PidsLineStatus.Condition.values()) {
+      vocabulary.condition(condition);
+    }
+    vocabulary.lateUpTo(8);
+    vocabulary.cancelledTrips(1);
+    vocabulary.cancelledTrips(2);
+    vocabulary.sectionClosed(new Names("主城湾", "Spawn Bay"), new Names("海兴", ""));
+    vocabulary.maintenance();
+    vocabulary.firstTrain("05:30");
 
     assertTrue(missing.isEmpty(), () -> "缺少文案: " + missing);
+    assertEquals(
+        new Names("部分班次取消", "Trips cancelled"),
+        vocabulary.condition(PidsLineStatus.Condition.CANCELLATIONS));
+    assertEquals(
+        new Names("近 1 小时取消 1 班", "1 trip cancelled this hour"), vocabulary.cancelledTrips(1));
+    assertEquals(
+        new Names("近 1 小时取消 2 班", "2 trips cancelled this hour"), vocabulary.cancelledTrips(2));
+    assertEquals(
+        new Names("主城湾—海兴 暂停运营", "No service Spawn Bay – 海兴"),
+        vocabulary.sectionClosed(new Names("主城湾", "Spawn Bay"), new Names("海兴", "")),
+        "没有英文站名时写中文");
     assertEquals(new Names("晚点 3 分", "Late 3 min"), vocabulary.late(3));
     assertEquals(Optional.of("快速"), vocabulary.type(RouteApi.OperationType.RAPID));
     assertEquals(Optional.empty(), vocabulary.type(RouteApi.OperationType.NORMAL));

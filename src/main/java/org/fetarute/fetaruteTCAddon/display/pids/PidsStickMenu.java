@@ -62,8 +62,10 @@ public final class PidsStickMenu {
 
     if (screen.station().isPresent()) {
       PidsStationKey station = screen.station().get();
-      sender.sendMessage(platformRow(service, screen, station, set));
-      sender.sendMessage(lineRow(service, screen, station, set));
+      if (!service.isLineStatus(screen)) {
+        sender.sendMessage(platformRow(service, screen, station, set));
+      }
+      sender.sendMessage(lineRow(service, screen, set));
     } else {
       sender.sendMessage(
           label("pids.menu.platform").append(locale.component("pids.menu.need-station")));
@@ -197,10 +199,10 @@ public final class PidsStickMenu {
     return row;
   }
 
-  private Component lineRow(
-      PidsService service, PidsScreen screen, PidsStationKey station, String set) {
+  /** 线路过滤：线路运行状况屏列本站所属运营商的线路，其余列停靠本站的线路。 */
+  private Component lineRow(PidsService service, PidsScreen screen, String set) {
     Component row = label("pids.menu.line");
-    List<PidsView.LineChip> lines = service.directory().linesServing(station);
+    List<PidsView.LineChip> lines = service.filterableLines(screen);
     if (lines.isEmpty()) {
       return row.append(locale.component("pids.menu.no-lines"));
     }

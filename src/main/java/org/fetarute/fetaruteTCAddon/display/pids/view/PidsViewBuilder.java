@@ -56,7 +56,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  */
 public final class PidsViewBuilder {
 
-  private static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
+  /** 屏幕时钟与计划时刻的写法。 */
+  static final DateTimeFormatter CLOCK = DateTimeFormatter.ofPattern("HH:mm");
 
   /** 回库车色牌上的代码。 */
   private static final String OUT_OF_SERVICE_CODE = "—";

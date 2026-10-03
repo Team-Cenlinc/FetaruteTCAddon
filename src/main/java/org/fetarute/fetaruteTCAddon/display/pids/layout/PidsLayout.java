@@ -7,8 +7,8 @@ import java.util.Optional;
 /**
  * 站台屏布局：画布尺寸与一组内置组件的摆放。
  *
- * <p>坐标与尺寸均为地图像素，原点在左上角；一块地图 {@value #TILE}×{@value #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表），
- * 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
+ * <p>坐标与尺寸均为地图像素，原点在左上角；一块地图 {@value #TILE}×{@value
+ * #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表、线路运行状况）， 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
  *
  * @param id 布局 ID（文件名去掉扩展名）
  * @param name 显示名
@@ -63,9 +63,24 @@ public record PidsLayout(
         .findFirst();
   }
 
+  /** 线路运行状况组件；不是线路运行状况屏时为空。 */
+  public Optional<LineStatus> lineStatus() {
+    return widgets.stream()
+        .filter(LineStatus.class::isInstance)
+        .map(LineStatus.class::cast)
+        .findFirst();
+  }
+
   /** 组件。 */
   public sealed interface Widget
-      permits Platform, Clock, LineBand, StationTitle, LineStrip, Departures, StopList {}
+      permits Platform,
+          Clock,
+          LineBand,
+          StationTitle,
+          LineStrip,
+          Departures,
+          StopList,
+          LineStatus {}
 
   /**
    * 一组中英文字的字号。
@@ -346,6 +361,104 @@ public record PidsLayout(
       return Math.max(
           0,
           (y + height - followingTop() + FOLLOWING_GAP) / (followingRowHeight() + FOLLOWING_GAP));
+    }
+  }
+
+  /**
+   * 线路运行状况屏的主体：页标题、运营商名与页码、表头，以及每条线路一行（色牌、线路名、状况、说明）。
+   *
+   * <p>行有大小两种样式：大行一页放得下全部线路时用大行，否则用小行并翻页（{@link #rowsPerPage}）。各列位置相对本组件左缘； 色牌在行内竖向居中、左缘与页标题同在
+   * {@code inset}，状况色块在行内竖向居中。
+   *
+   * @param x 左
+   * @param y 上（页标题文本框顶边）
+   * @param width 宽
+   * @param height 高（到最后一行的底边）
+   * @param inset 页标题、运营商名、表头首列与色牌的左缩进，页码的右缩进
+   * @param title 页标题（中英文同行）
+   * @param operatorY 运营商名一行的顶边（相对 {@code y}）
+   * @param operator 运营商名（中英文同行）与页码（中文字号）
+   * @param headerY 表头的顶边（相对 {@code y}）
+   * @param header 表头（每列中英文同行）
+   * @param rowsY 第一行的顶边（相对 {@code y}）
+   * @param nameX 线路名列的左缘
+   * @param statusX 状况列（色块）的左缘
+   * @param detailX 说明列的左缘
+   * @param roomy 大行
+   * @param compact 小行
+   */
+  public record LineStatus(
+      int x,
+      int y,
+      int width,
+      int height,
+      int inset,
+      TextStyle title,
+      int operatorY,
+      TextStyle operator,
+      int headerY,
+      TextStyle header,
+      int rowsY,
+      int nameX,
+      int statusX,
+      int detailX,
+      StatusRow roomy,
+      StatusRow compact)
+      implements Widget {
+
+    public LineStatus {
+      Objects.requireNonNull(title, "title");
+      Objects.requireNonNull(operator, "operator");
+      Objects.requireNonNull(header, "header");
+      Objects.requireNonNull(roomy, "roomy");
+      Objects.requireNonNull(compact, "compact");
+    }
+
+    /** 第一行的顶边。 */
+    public int rowsTop() {
+      return y + rowsY;
+    }
+
+    /** 这种行一页放几条（至少 1）。 */
+    public int rowsPerPage(StatusRow row) {
+      return Math.max(1, (y + height - rowsTop() + row.gap()) / (row.height() + row.gap()));
+    }
+  }
+
+  /**
+   * 线路运行状况屏的一种行样式。
+   *
+   * @param height 行高（面板色铺底）
+   * @param gap 行间距
+   * @param badgeWidth 色牌宽
+   * @param badgeHeight 色牌高
+   * @param badgeSize 色牌上线路代码的字号（放不下时改用 12 号，再放不下省略）
+   * @param name 线路名（上下叠放）
+   * @param nameFallback 中文线路名放不下时改用的字号；0 表示直接省略
+   * @param statusWidth 状况色块宽
+   * @param statusHeight 状况色块高
+   * @param statusInset 状况文字距色块左缘的距离（没有色块时同样缩进，与表头对齐）
+   * @param status 状况（上下叠放）
+   * @param detail 说明（上下叠放）
+   */
+  public record StatusRow(
+      int height,
+      int gap,
+      int badgeWidth,
+      int badgeHeight,
+      int badgeSize,
+      TextStyle name,
+      int nameFallback,
+      int statusWidth,
+      int statusHeight,
+      int statusInset,
+      TextStyle status,
+      TextStyle detail) {
+
+    public StatusRow {
+      Objects.requireNonNull(name, "name");
+      Objects.requireNonNull(status, "status");
+      Objects.requireNonNull(detail, "detail");
     }
   }
 

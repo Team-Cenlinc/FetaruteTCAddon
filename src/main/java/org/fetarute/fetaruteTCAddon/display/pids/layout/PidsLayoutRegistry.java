@@ -41,7 +41,8 @@ public final class PidsLayoutRegistry {
           "platform-group-1x3",
           "platform-group-1x4",
           "platform-2x1",
-          "station-3x5");
+          "station-3x5",
+          "status-3x5");
 
   /** 用户布局目录（相对插件数据目录）。 */
   public static final String DIRECTORY = "pids/layouts";

@@ -35,6 +35,38 @@ public final class PidsLayoutParser {
   /** 单块屏幕最多的地图行数或列数。 */
   static final int MAX_TILES = 8;
 
+  /** 线路运行状况屏大行的默认样式（内置 3×5：一页 3 条）。 */
+  private static final PidsLayout.StatusRow ROOMY =
+      new PidsLayout.StatusRow(
+          84,
+          2,
+          74,
+          44,
+          24,
+          new TextStyle(36, 12, 4),
+          24,
+          156,
+          48,
+          8,
+          new TextStyle(24, 12, 2),
+          new TextStyle(12, 10, 2));
+
+  /** 线路运行状况屏小行的默认样式（内置 3×5：一页 5 条）。 */
+  private static final PidsLayout.StatusRow COMPACT =
+      new PidsLayout.StatusRow(
+          50,
+          2,
+          74,
+          34,
+          20,
+          new TextStyle(24, 12, 2),
+          20,
+          156,
+          42,
+          8,
+          new TextStyle(20, 12, 2),
+          new TextStyle(12, 10, 2));
+
   private PidsLayoutParser() {}
 
   /**
@@ -133,6 +165,7 @@ public final class PidsLayoutParser {
       case "line-strip" -> Optional.of(lineStrip(node));
       case "departures" -> Optional.of(departures(node));
       case "stop-list" -> Optional.of(stopList(node));
+      case "line-status" -> Optional.of(lineStatus(node));
       case "" -> Optional.empty();
       default -> {
         node.problem("type", "未知组件类型 " + type);
@@ -194,6 +227,50 @@ public final class PidsLayoutParser {
         textStyle(stops, 12, 10, 1),
         footer.optInt("height", 12),
         footer.optInt("size", 10));
+  }
+
+  private static PidsLayout.LineStatus lineStatus(Node node) {
+    Node operator = node.child("operator");
+    Node header = node.child("header");
+    Node columns = node.child("columns");
+    return new PidsLayout.LineStatus(
+        node.requireInt("x"),
+        node.requireInt("y"),
+        node.requireInt("width"),
+        node.requireInt("height"),
+        node.optInt("inset", 8),
+        textStyle(node.child("title"), 36, 20, 12),
+        operator.optInt("y", 46),
+        textStyle(operator, 12, 10, 6),
+        header.optInt("y", 76),
+        textStyle(header, 12, 10, 4),
+        node.optInt("rows-y", 94),
+        columns.optInt("name", 92),
+        columns.optInt("status", 288),
+        columns.optInt("detail", 452),
+        statusRow(node.child("roomy"), ROOMY),
+        statusRow(node.child("compact"), COMPACT));
+  }
+
+  /** 一种行样式；没写的键取 {@code fallback} 的值。 */
+  private static PidsLayout.StatusRow statusRow(Node node, PidsLayout.StatusRow fallback) {
+    Node badge = node.child("badge");
+    Node name = node.child("name");
+    Node status = node.child("status");
+    Node detail = node.child("detail");
+    return new PidsLayout.StatusRow(
+        node.optInt("height", fallback.height()),
+        node.optInt("gap", fallback.gap()),
+        badge.optInt("width", fallback.badgeWidth()),
+        badge.optInt("height", fallback.badgeHeight()),
+        badge.optInt("code", fallback.badgeSize()),
+        textStyle(name, fallback.name()),
+        name.optInt("fallback", fallback.nameFallback()),
+        status.optInt("width", fallback.statusWidth()),
+        status.optInt("height", fallback.statusHeight()),
+        status.optInt("inset", fallback.statusInset()),
+        textStyle(status, fallback.status()),
+        textStyle(detail, fallback.detail()));
   }
 
   private static Departures departures(Node node) {
@@ -289,6 +366,10 @@ public final class PidsLayoutParser {
   private static TextStyle textStyle(Node node, int size, int secondary, int gap) {
     return new TextStyle(
         node.optInt("size", size), node.optInt("secondary", secondary), node.optInt("gap", gap));
+  }
+
+  private static TextStyle textStyle(Node node, TextStyle fallback) {
+    return textStyle(node, fallback.size(), fallback.secondarySize(), fallback.gap());
   }
 
   /** 把 Bukkit 配置节点转成普通映射，列表项里的映射与顶层用同一套读取方式。 */
@@ -489,10 +570,15 @@ public final class PidsLayoutParser {
 
     void run() {
       boolean stopList = layout.stopList().isPresent();
+      boolean lineStatus = layout.lineStatus().isPresent();
       for (int i = 0; i < layout.widgets().size(); i++) {
         Widget widget = layout.widgets().get(i);
         check("widgets[" + i + "]", widget);
-        if (stopList
+        if (lineStatus) {
+          if (!(widget instanceof PidsLayout.Clock || widget instanceof PidsLayout.LineStatus)) {
+            problems.add("widgets[" + i + "]: 线路运行状况屏只画时钟与状况表，不支持这个组件");
+          }
+        } else if (stopList
             && (widget instanceof Departures
                 || widget instanceof PidsLayout.StationTitle
                 || widget instanceof PidsLayout.LineStrip)) {
@@ -534,7 +620,54 @@ public final class PidsLayoutParser {
         checkDepartures(path, d);
       } else if (widget instanceof PidsLayout.StopList l) {
         checkStopList(path, l);
+      } else if (widget instanceof PidsLayout.LineStatus l) {
+        checkLineStatus(path, l);
       }
+    }
+
+    private void checkLineStatus(String path, PidsLayout.LineStatus l) {
+      within(path, l.x(), l.y(), l.width(), l.height());
+      if (!(l.inset() < l.nameX()
+          && l.nameX() < l.statusX()
+          && l.statusX() < l.detailX()
+          && l.detailX() < l.width())) {
+        problems.add(path + ".columns: 列须从左到右排开（inset < name < status < detail < width）");
+      }
+      if (l.operatorY() < 0 || l.headerY() < 0 || l.rowsY() < 0) {
+        problems.add(path + ": operator.y、header.y 与 rows-y 不能为负数");
+      }
+      sizes(
+          path,
+          l.title().size(),
+          l.title().secondarySize(),
+          l.operator().size(),
+          l.operator().secondarySize(),
+          l.header().size(),
+          l.header().secondarySize());
+      checkStatusRow(path + ".roomy", l, l.roomy());
+      checkStatusRow(path + ".compact", l, l.compact());
+    }
+
+    private void checkStatusRow(String path, PidsLayout.LineStatus l, PidsLayout.StatusRow row) {
+      if (row.height() < 1 || l.rowsY() + row.height() > l.height()) {
+        problems.add(path + ": 一行也放不下");
+      }
+      if (row.badgeHeight() > row.height() || l.inset() + row.badgeWidth() > l.nameX()) {
+        problems.add(path + ".badge: 色牌大于所在格");
+      }
+      if (row.statusHeight() > row.height() || l.statusX() + row.statusWidth() > l.detailX()) {
+        problems.add(path + ".status: 色块大于所在格");
+      }
+      sizes(
+          path,
+          row.badgeSize(),
+          row.name().size(),
+          row.name().secondarySize(),
+          row.nameFallback(),
+          row.status().size(),
+          row.status().secondarySize(),
+          row.detail().size(),
+          row.detail().secondarySize());
     }
 
     private void checkStopList(String path, PidsLayout.StopList l) {

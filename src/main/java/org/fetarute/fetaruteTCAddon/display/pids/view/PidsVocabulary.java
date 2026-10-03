@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.pids.view;
 
+import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
@@ -9,7 +10,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 /**
  * 站台屏文案。中英文同时显示，每条文案取两个键：{@code <键>} 为中文，{@code <键>-secondary} 为英文。
  *
- * <p>文案来自语言文件 {@code pids.board.*}，按纯文本读取；含 {@code <minutes>} 的条目由这里替换分钟数。
+ * <p>文案来自语言文件 {@code pids.board.*}，按纯文本读取；含 {@code <minutes>} 等占位符的条目由这里替换。
  */
 public final class PidsVocabulary {
 
@@ -18,6 +19,10 @@ public final class PidsVocabulary {
   private static final String MINUTES = "<minutes>";
   private static final String PLATFORM = "<platform>";
   private static final String STATION = "<station>";
+  private static final String COUNT = "<count>";
+  private static final String FROM = "<from>";
+  private static final String TO = "<to>";
+  private static final String TIME = "<time>";
 
   private final Function<String, String> text;
 
@@ -158,6 +163,67 @@ public final class PidsVocabulary {
     return primary("stop-list.through-from").replace(STATION, station);
   }
 
+  /** 线路运行状况屏的页标题。 */
+  public Names lineStatusTitle() {
+    return names("line-status.title");
+  }
+
+  /**
+   * 线路运行状况屏的表头与空表提示。
+   *
+   * @param filtered 运营商有线路、只是屏幕的线路过滤一条也对不上：空表提示改说过滤
+   */
+  public PidsLineStatusView.Labels lineStatusLabels(boolean filtered) {
+    return new PidsLineStatusView.Labels(
+        names("line-status.header.line"),
+        names("line-status.header.status"),
+        names("line-status.header.details"),
+        names(filtered ? "line-status.filtered" : "line-status.empty"));
+  }
+
+  /** 线路运行状况。 */
+  public Names condition(PidsLineStatus.Condition condition) {
+    return names(
+        "line-status.condition." + condition.name().toLowerCase(Locale.ROOT).replace('_', '-'));
+  }
+
+  /** 说明：晚点最多 N 分钟。 */
+  public Names lateUpTo(long minutes) {
+    return withMinutes(names("line-status.detail.late"), minutes);
+  }
+
+  /** 说明：近 1 小时取消 N 班（英文单复数分开写）。 */
+  public Names cancelledTrips(int trips) {
+    String count = Integer.toString(trips);
+    String secondary =
+        trips == 1 ? "line-status.detail.cancelled-one" : "line-status.detail.cancelled";
+    return new Names(
+        primary("line-status.detail.cancelled").replace(COUNT, count),
+        text.apply(PREFIX + secondary + SECONDARY).replace(COUNT, count));
+  }
+
+  /** 说明：某站至某站暂停运营；英文没有英文站名时写中文站名。 */
+  public Names sectionClosed(Names from, Names to) {
+    Names names = names("line-status.detail.closed");
+    return new Names(
+        names.primary().replace(FROM, from.primary()).replace(TO, to.primary()),
+        names
+            .secondary()
+            .replace(FROM, secondaryOrPrimary(from))
+            .replace(TO, secondaryOrPrimary(to)));
+  }
+
+  /** 说明：线路检修。 */
+  public Names maintenance() {
+    return names("line-status.detail.maintenance");
+  }
+
+  /** 说明：首班几点。 */
+  public Names firstTrain(String time) {
+    Names names = names("line-status.detail.first-train");
+    return new Names(names.primary().replace(TIME, time), names.secondary().replace(TIME, time));
+  }
+
   /** 色牌上的停站类型；普通、其他不显示。 */
   public Optional<String> type(RouteApi.OperationType type) {
     return switch (type) {
@@ -174,6 +240,10 @@ public final class PidsVocabulary {
 
   private String primary(String key) {
     return text.apply(PREFIX + key);
+  }
+
+  private static String secondaryOrPrimary(Names names) {
+    return names.secondary().isBlank() ? names.primary() : names.secondary();
   }
 
   private static Names withMinutes(Names names, long minutes) {

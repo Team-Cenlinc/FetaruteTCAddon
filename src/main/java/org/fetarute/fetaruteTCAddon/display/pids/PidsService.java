@@ -49,6 +49,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsWallFinder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.ApiPidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusViews;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -106,6 +108,9 @@ public final class PidsService {
   /** 最近的站台变更：站台屏的行与站台广播共用。 */
   private final PidsPlatformChanges platformChanges = new PidsPlatformChanges();
 
+  /** 线路运行状况：车次取消或重新绑定时作废其取消缓存。 */
+  private final PidsLineStatusProvider lineStatuses;
+
   private final PidsComposer composer;
   private final PidsItems items;
   private final PidsFrames frames;
@@ -153,6 +158,8 @@ public final class PidsService {
             clock,
             logger::debug,
             platformChanges);
+    this.lineStatuses =
+        new PidsLineStatusProvider(api.trains(), api.timetables(), directory, logger::debug);
     this.composer =
         new PidsComposer(
             registry,
@@ -167,7 +174,8 @@ public final class PidsService {
             PidsService::worldTime,
             () -> settings,
             clock,
-            ZoneId.systemDefault());
+            ZoneId.systemDefault(),
+            lineStatuses);
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
@@ -523,6 +531,24 @@ public final class PidsService {
     return layouts.resolve(screen.layoutId(), screen.tileRows(), screen.tileCols());
   }
 
+  /**
+   * 屏幕的线路过滤可选的线路：线路运行状况屏为本站所属运营商的线路，其余为停靠本站的线路。
+   *
+   * @param screen 已绑定车站的屏幕
+   * @return 未绑定车站时为空
+   */
+  public List<PidsView.LineChip> filterableLines(PidsScreen screen) {
+    return screen
+        .station()
+        .map(station -> PidsLineStatusViews.filterOptions(directory, station, isLineStatus(screen)))
+        .orElse(List.of());
+  }
+
+  /** 屏幕是线路运行状况屏（布局带状况表组件）：不按站台显示，站台选择不起作用。 */
+  public boolean isLineStatus(PidsScreen screen) {
+    return layoutOf(screen).flatMap(PidsLayout::lineStatus).isPresent();
+  }
+
   /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */
   public OptionalInt platformLimit(PidsScreen screen) {
     return layoutOf(screen).map(PidsPlatformSelection::limit).orElse(OptionalInt.empty());
@@ -549,17 +575,20 @@ public final class PidsService {
   }
 
   /**
-   * 公开事件：车次取消或重新绑定（取消之后又有车接上）时作废取消行缓存，站台屏与站台广播的下一份快照即可看到； 站台改了（已定的站台变了，或没能停到计划站台）交给站台广播播报“改在 N 站台”。
+   * 公开事件：车次取消或重新绑定（取消之后又有车接上）时作废取消行缓存，站台屏、站台广播与线路运行状况屏的下一次取数即可看到；
+   * 站台改了（已定的站台变了，或没能停到计划站台）交给站台广播播报“改在 N 站台”。
    */
   private final class CancellationListener implements Listener {
     @EventHandler(priority = EventPriority.MONITOR)
     public void onCancelled(TimetableTripCancelledEvent event) {
       snapshots.invalidateCancellations();
+      lineStatuses.invalidateCancellations();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
     public void onAssigned(TimetableTripAssignedEvent event) {
       snapshots.invalidateCancellations();
+      lineStatuses.invalidateCancellations();
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
