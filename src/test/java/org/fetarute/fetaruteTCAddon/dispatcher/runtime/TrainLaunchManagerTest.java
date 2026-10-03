@@ -335,6 +335,116 @@ class TrainLaunchManagerTest {
     assertEquals(1, attempts.get(), "同一静止授权不能在每次重评估中重新写入 launch action");
   }
 
+  /**
+   * 硬停清空了 TrainCarts 动作队列，冷却保护的那次 launch 已不存在：冷却期内重新放行必须当拍发车。
+   *
+   * <p>否则这一拍发不了车，而之后信号不再变化、不会再请求发车，静止列车就停在 PROCEED 下等健康监控补发。
+   */
+  @Test
+  void hardStopClearsLaunchCooldownSoTheNextAuthorizationLaunches() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-hard-stop-relaunch");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return true;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    // 冷却取 60 秒：断言不受两次调用之间的墙钟间隔影响。
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0, 20 * 60);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        8.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime);
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime,
+        StopControlMode.HARD_STOP);
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    assertTrue(result.launchCommandAccepted(), "硬停后冷却期内的放行没有发车");
+    assertEquals(2, attempts.get());
+  }
+
+  /** 没有硬停时冷却照旧生效：静止列车在冷却期内收到另一条放行，不重写 launch。 */
+  @Test
+  void launchCooldownStillAppliesWithoutHardStop() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-cooldown-kept");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return true;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    // 冷却取 60 秒：断言不受两次调用之间的墙钟间隔影响。
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0, 20 * 60);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        8.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime);
+    // 兜底方向不同 → 命令签名不同，不会被"相同授权已接受"的去重吸收，只能由冷却挡住。
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.of(org.bukkit.block.BlockFace.NORTH),
+            runtime);
+
+    assertFalse(result.launchCommandAccepted());
+    assertEquals(1, attempts.get(), "冷却期内不应再写 launch");
+  }
+
   @Test
   void applyControlTreatsAlreadyMovingTrainAsAcceptedLaunch() {
     TrainLaunchManager manager = new TrainLaunchManager();

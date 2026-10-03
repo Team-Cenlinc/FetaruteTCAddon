@@ -258,6 +258,10 @@ public final class TrainLaunchManager {
         properties.setSpeedLimit(0.0);
         if (train != null) {
           train.stopHard();
+          // 冷却保护的是已交给 TrainCarts、尚在执行的 launch；硬停把动作队列整个清空，它已不存在。
+          // 不清掉的话，冷却期内重新放行的那一拍发不了车，而之后信号不再变化、不会再请求发车，
+          // 列车停在 PROCEED 下等健康监控补发。
+          TrainTagHelper.removeTagKey(properties, TAG_LAST_LAUNCH_AT);
         }
         return new ControlApplicationResult(targetBps, OptionalDouble.empty(), 0.0, "hard_stop");
       }

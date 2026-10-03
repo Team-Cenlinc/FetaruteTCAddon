@@ -16513,6 +16513,11 @@ public final class RuntimeDispatchService {
             trainHandle, properties, previousTrainName, null, "authority-owner-rename-rejected");
         return LayoverDispatchResult.failed(previousTrainName, "authority-owner-rename-rejected");
       }
+      // 占用账本的属主已经迁到新名，水合 marker 必须跟着迁：信号 tick 按新名查 hydratedPhysicalOwnerIdentities，
+      // 查不到就把这辆车当成迟加载的陌生实体，硬停后重新水合，硬停会清掉复用随后挂上的发车动作。
+      // 与 migrateRuntimeOwner 的手动改名同一做法；marker 只认物理 identity，换了编组照样隔离。
+      migrateStartupPhysicalHydrationOwner(
+          normalizeTrainKey(previousTrainName), normalizeTrainKey(regeneratedTrainName));
       trainName = regeneratedTrainName;
       request = request.withTrainName(trainName);
       // 旧名的停因必须随改名一并退休。
@@ -16531,6 +16536,8 @@ public final class RuntimeDispatchService {
       if (!previousTrainName.equals(trainName)
           && occupancyManager instanceof AuthorityHandoffSupport rollbackSupport
           && rollbackSupport.migrateAuthorityOwner(trainName, previousTrainName)) {
+        migrateStartupPhysicalHydrationOwner(
+            normalizeTrainKey(trainName), normalizeTrainKey(previousTrainName));
         turnbackFootprintGuards.rename(trainName, previousTrainName);
         migrateEffectiveNodeOverrides(trainName, previousTrainName);
         layoverRegistry.rename(trainName, previousTrainName);
