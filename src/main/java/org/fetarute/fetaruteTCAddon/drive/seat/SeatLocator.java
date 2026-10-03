@@ -122,6 +122,13 @@ public final class SeatLocator {
     return trainLocation.distanceSquared(player.getLocation()) <= RESEAT_RANGE_SQUARED;
   }
 
+  /** 绑定的座位存在、且空着或坐着的就是这名玩家。 */
+  public static boolean seatAvailable(MinecartGroup group, SeatBinding binding, Player player) {
+    return resolveSeat(group, binding)
+        .map(seat -> seat.getEntity() == null || seat.getEntity() == player)
+        .orElse(false);
+  }
+
   /** 绑定的座位是否仍然存在。 */
   public static boolean seatExists(MinecartGroup group, SeatBinding binding) {
     return resolveSeat(group, binding).isPresent();

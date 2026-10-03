@@ -133,4 +133,41 @@ class DriverTaskManagerTest {
     assertTrue(tasks.taskForTrip(TT, "R1-007", date).isEmpty());
     assertFalse(tasks.hasActiveTasks());
   }
+
+  @Test
+  @DisplayName("接班时的晚点只认这一班：列车还绑着上一班时为空")
+  void delayOfTripRequiresTheTaskTrip() {
+    LocalDate date = LocalDate.of(2026, 10, 3);
+    org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.TrainAssignment previous =
+        assignment("R1-006", date, 200L);
+    org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.TrainAssignment current =
+        assignment("R1-007", date, 30L);
+    TaskKey key = new TaskKey(TT, "R1-007", date);
+
+    assertTrue(DriverTaskManager.delayOfTrip(previous, key).isEmpty());
+    assertEquals(30L, DriverTaskManager.delayOfTrip(current, key).getAsLong());
+    assertEquals(200L, DriverTaskManager.delayOfTrip(previous, null).getAsLong(), "没有任务时不核对");
+    assertTrue(DriverTaskManager.delayOfTrip(null, key).isEmpty());
+  }
+
+  private static org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.TrainAssignment assignment(
+      String trip, LocalDate date, long delay) {
+    return new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.TrainAssignment(
+        "T-1",
+        TT,
+        trip,
+        UUID.randomUUID(),
+        java.util.Optional.empty(),
+        date,
+        NOW,
+        0L,
+        java.util.Optional.empty(),
+        java.util.Optional.empty(),
+        java.util.Optional.empty(),
+        java.util.OptionalLong.of(delay),
+        java.util.Optional.empty(),
+        java.util.Optional.empty(),
+        java.util.Optional.empty(),
+        java.util.OptionalLong.empty());
+  }
 }

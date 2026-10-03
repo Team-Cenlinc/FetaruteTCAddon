@@ -318,6 +318,7 @@ drive:
       depot-on: "<prefix> <green>You will pick the train up at depot <white><depot></white>; you will be told when it comes out and can click [Go to train]</green>"
       depot-off: "<prefix> <gray>Depot pickup cancelled; take over when the train reaches <white><station></white></gray>"
       not-depot: "<prefix> <red>This trip's train does not come out of a depot</red>"
+      started: "<prefix> <red>You are already driving; the pickup choice can no longer be changed</red>"
     goto:
       teleported: "<prefix> <green>You are next to the train's leading cab; board, sit down and confirm your seat</green>"
       none: "<prefix> <red>No train is waiting for you to take over</red>"

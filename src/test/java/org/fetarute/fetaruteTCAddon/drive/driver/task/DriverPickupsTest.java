@@ -88,4 +88,40 @@ class DriverPickupsTest {
     assertEquals(2L, pickup.secondsLeft(NOW));
     assertEquals(0L, pickup.secondsLeft(NOW.plusSeconds(5)));
   }
+
+  @Test
+  @DisplayName("接车时限不晚于票据作废之前：计划发车 + 容差 − 余量；已经过了就立即放行")
+  void deadlineStaysWithinTheTicketTolerance() {
+    java.time.Duration tolerance = java.time.Duration.ofSeconds(300);
+
+    assertEquals(
+        NOW.plusSeconds(90), DriverPickups.deadline(NOW, 90, NOW, tolerance, 30), "容差足够时按等待时长");
+    assertEquals(
+        NOW.plusSeconds(270),
+        DriverPickups.deadline(NOW.plusSeconds(250), 90, NOW, tolerance, 30),
+        "等待会越过容差时收紧到容差前");
+    assertEquals(
+        NOW.plusSeconds(400),
+        DriverPickups.deadline(NOW.plusSeconds(400), 90, NOW, tolerance, 30),
+        "已经过了容差：立即到期");
+    assertEquals(
+        NOW.plusSeconds(90), DriverPickups.deadline(NOW, 90, null, tolerance, 30), "没有计划发车时不按容差收紧");
+  }
+
+  @Test
+  @DisplayName("车库出车：同一班换了一列车（上次出车回滚）就改等新车；已上车或已过时的不再扣")
+  void depotVerdicts() {
+    assertEquals(DriverPickups.DepotVerdict.START, pickups.depot(driver, TRIP, "T-1"));
+
+    pickups.start(driver, TRIP, DriverPickups.Kind.DEPOT, "T-1", "OP:D:DEP:1", NOW.plusSeconds(90));
+    assertEquals(DriverPickups.DepotVerdict.KEEP, pickups.depot(driver, TRIP, "t-1"));
+    assertEquals(DriverPickups.DepotVerdict.START, pickups.depot(driver, TRIP, "T-2"));
+    assertEquals(DriverPickups.DepotVerdict.START, pickups.depot(driver, OTHER_TRIP, "T-2"));
+
+    pickups.board(driver, "T-1");
+    assertEquals(DriverPickups.DepotVerdict.SKIP, pickups.depot(driver, TRIP, "T-2"));
+
+    pickups.start(driver, TRIP, DriverPickups.Kind.TERMINAL, "T-3", "终点站", NOW.plusSeconds(90));
+    assertEquals(DriverPickups.DepotVerdict.SKIP, pickups.depot(driver, TRIP, "T-4"));
+  }
 }

@@ -27749,8 +27749,12 @@ public final class RuntimeDispatchService {
     if (aspect != SignalAspect.STOP && approach.ceiling().isPresent()) {
       // 速度天花板与编表运行曲线同一个：进站限速区、沿途慢速边与到站速度都在内，随列车前进一直有效，登记为保持约束，
       // 过节点的推进放行也不得越过它。
-      // 人工驾驶不受进站限速（驾驶员自己掌握停车），另记一份给驾驶员（见 SpeedEnvelope#manual）。
-      envelope = envelope.withApproachHold(approach::ceilingLimitBps, target);
+      // 人工驾驶不受进站限速（驾驶员自己掌握停车，越过停车点另有防护），另记一份给驾驶员（见 SpeedEnvelope#manual）；
+      // 车库没有驾驶员停车防护，进库限速对人工驾驶照样有效。
+      envelope =
+          "depot".equals(approach.kind())
+              ? envelope.withHold(approach::ceilingLimitBps)
+              : envelope.withApproachHold(approach::ceilingLimitBps, target);
       double atHead = approach.ceilingLimitBps(0.0);
       OptionalDouble override = overrides.approachLimitBps();
       if (override.isPresent() && (approach.engaged() || atHead < target)) {

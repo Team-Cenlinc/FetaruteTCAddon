@@ -44,6 +44,9 @@ public record DriverConfig(
 
   private static final int TICKS_PER_SECOND = 20;
 
+  /** 接车最多等多久（秒）：车库扣车的发车门控 180 秒后自动失效，留出余量。 */
+  static final int MAX_PICKUP_WAIT_SECONDS = 150;
+
   public DriverConfig {
     recovery = recovery == null ? DriverRecovery.defaults() : recovery;
   }
@@ -128,7 +131,7 @@ public record DriverConfig(
         stopAccept,
         stopSkip,
         section.getBoolean("stop-marker", d.stopMarker),
-        (int) Math.round(positive(section, "pickup-wait-seconds", d.pickupWaitSeconds, sink)),
+        pickupWait(section, d.pickupWaitSeconds, sink),
         section.getBoolean("pickup-teleport", d.pickupTeleport),
         DriverRecovery.from(section, sink));
   }
@@ -151,6 +154,20 @@ public record DriverConfig(
       return fallback;
     }
     return value;
+  }
+
+  private static int pickupWait(ConfigurationSection section, int fallback, Consumer<String> warn) {
+    int wait = (int) Math.round(positive(section, "pickup-wait-seconds", fallback, warn));
+    if (wait > MAX_PICKUP_WAIT_SECONDS) {
+      warn.accept(
+          "drive.yml 的 driver.pickup-wait-seconds 不能超过 "
+              + MAX_PICKUP_WAIT_SECONDS
+              + "（车库扣车的发车门控会先失效），按 "
+              + MAX_PICKUP_WAIT_SECONDS
+              + " 处理");
+      return MAX_PICKUP_WAIT_SECONDS;
+    }
+    return wait;
   }
 
   private static double nonNegative(

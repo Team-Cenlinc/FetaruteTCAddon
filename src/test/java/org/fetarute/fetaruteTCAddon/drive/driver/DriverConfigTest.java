@@ -80,4 +80,17 @@ class DriverConfigTest {
     assertEquals(defaults.staleHandbackTicks(), config.staleHandbackTicks());
     assertEquals(2, warnings.size(), warnings::toString);
   }
+
+  @Test
+  @DisplayName("接车等待不超过上限（车库扣车的发车门控会先失效）")
+  void pickupWaitIsCapped() throws Exception {
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString("pickup-wait-seconds: 600");
+    List<String> warnings = new ArrayList<>();
+
+    DriverConfig config = DriverConfig.from(yaml, warnings::add);
+
+    assertEquals(DriverConfig.MAX_PICKUP_WAIT_SECONDS, config.pickupWaitSeconds());
+    assertEquals(1, warnings.size(), warnings::toString);
+  }
 }

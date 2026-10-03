@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.drive.driver.task;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -42,6 +43,16 @@ public final class DriverPickups {
     HOLD,
     /** 这一班有人领、还没开始接车：由调用方核对能否接车，能则开始接车并留车。 */
     START
+  }
+
+  /** 车库出车的扣车判定。 */
+  public enum DepotVerdict {
+    /** 开始接车（扣车并通知驾驶员）。 */
+    START,
+    /** 同一列车已经在等这名驾驶员：照旧扣着，不再通知。 */
+    KEEP,
+    /** 不扣：这一班已经接过车（驾驶员已上车或已过时限），或不是车库接车。 */
+    SKIP
   }
 
   /** 一次接车。 */
@@ -118,6 +129,30 @@ public final class DriverPickups {
 
   private final Map<UUID, Pickup> byPlayer = new HashMap<>();
 
+  /**
+   * 接车时限：从 {@code from} 起等 {@code waitSeconds}；终点站接车时票据还挂在发车队列里，过了 assign-tolerance 票会作废、
+   * 这一班开天窗，所以不晚于 “计划发车 + 容差 − 余量”。
+   *
+   * @param plannedDeparture 车次的计划发车时刻；为空时不按容差收紧
+   * @param tolerance 票据的 assign-tolerance；为空时不按容差收紧
+   */
+  public static Instant deadline(
+      Instant from,
+      long waitSeconds,
+      Instant plannedDeparture,
+      Duration tolerance,
+      long marginSeconds) {
+    Instant deadline = from.plusSeconds(Math.max(0L, waitSeconds));
+    if (plannedDeparture == null || tolerance == null) {
+      return deadline;
+    }
+    Instant latest = plannedDeparture.plus(tolerance).minusSeconds(Math.max(0L, marginSeconds));
+    if (!latest.isBefore(deadline)) {
+      return deadline;
+    }
+    return latest.isBefore(from) ? from : latest;
+  }
+
   /** 开始一次接车；同一名驾驶员之前的接车记录被替换。 */
   public Pickup start(
       UUID playerId, TaskKey key, Kind kind, String trainName, String location, Instant deadline) {
@@ -182,6 +217,22 @@ public final class DriverPickups {
 
   public boolean isEmpty() {
     return byPlayer.isEmpty();
+  }
+
+  /**
+   * 车库刚为这一班出车的 {@code trainName} 要不要扣着等驾驶员。
+   *
+   * <p>同一班又出了一次车（上次出车在提交前回滚了）时换成新的那一列：调用方先放开旧车的门控，再开始接车。
+   */
+  public DepotVerdict depot(UUID playerId, TaskKey key, String trainName) {
+    Pickup existing = playerId == null ? null : byPlayer.get(playerId);
+    if (existing == null || !existing.key.equals(key)) {
+      return DepotVerdict.START;
+    }
+    if (existing.kind != Kind.DEPOT || existing.stage != Stage.WAITING) {
+      return DepotVerdict.SKIP;
+    }
+    return existing.isTrain(trainName) ? DepotVerdict.KEEP : DepotVerdict.START;
   }
 
   /**

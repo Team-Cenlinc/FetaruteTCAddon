@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
@@ -121,6 +122,21 @@ public final class DriverTaskManager {
       }
     }
     return false;
+  }
+
+  /**
+   * 车次的当前晚点：列车此刻绑定的必须就是这一班（终点站接车时派车之前还绑着上一班，不能拿它当接班时的晚点）。
+   *
+   * @param key 任务的车次；为空时不核对（运营人员直接接管）
+   */
+  public static OptionalLong delayOfTrip(TimetableApi.TrainAssignment assignment, TaskKey key) {
+    if (assignment == null
+        || (key != null
+            && !key.matches(
+                assignment.timetableId(), assignment.tripCode(), assignment.serviceDate()))) {
+      return OptionalLong.empty();
+    }
+    return assignment.currentDelaySeconds();
   }
 
   /** 已领取、还没开始驾驶的任务作废（例如接车等到时限）。 */

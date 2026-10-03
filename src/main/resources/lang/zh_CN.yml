@@ -1724,6 +1724,7 @@ drive:
       depot-on: "<prefix> <green>已改为从车库 <white><depot></white> 接车：出车时将通知你，届时可点击 [前往列车]</green>"
       depot-off: "<prefix> <gray>已取消车库接车，列车到达 <white><station></white> 后再接班</gray>"
       not-depot: "<prefix> <red>该车次的列车不从车库出车</red>"
+      started: "<prefix> <red>已开始驾驶，不能再更改接车方式</red>"
     goto:
       teleported: "<prefix> <green>已到达列车车头驾驶室旁，请上车坐下并确认座位</green>"
       none: "<prefix> <red>当前没有等候你接班的列车</red>"
