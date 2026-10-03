@@ -49,6 +49,8 @@ public final class TrainSpawnTagInitializer {
   private static final List<String> TRANSIENT_CONTROL_TAG_KEYS =
       List.of(
           "FTA_LAST_LAUNCH_AT",
+          "FTA_PENDING_LAUNCH_COMMAND",
+          "FTA_LAUNCH_OWED",
           "FTA_LAST_SPEED_CMD_BPS",
           "FTA_LAST_SPEED_CMD_AT",
           "FTA_DOOR_FIRST_STOP_DONE",

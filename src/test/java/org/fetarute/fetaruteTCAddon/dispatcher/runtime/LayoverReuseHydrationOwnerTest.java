@@ -4,6 +4,7 @@ import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTes
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -13,6 +14,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.spy;
 import static org.mockito.Mockito.when;
 
+import java.lang.reflect.Field;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -41,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolve
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
@@ -247,6 +250,37 @@ class LayoverReuseHydrationOwnerTest {
             .anyMatch(
                 line -> line.contains("SMART_DUPLICATE_LOGICAL_OWNER_IDENTITY train=" + renamed)),
         "新名下的 marker 应只属于原物理编组，冒名编组必须按重复属主隔离：\n  " + String.join("\n  ", tick));
+  }
+
+  /**
+   * 授权门关着（全网重建先停）时复用改名：水合 marker 已在关门时清空，物理主人只记在关门快照里，必须跟着迁到新名。
+   *
+   * <p>否则先停期间这辆车以新名到站，补记到达按新名认不出它，重建会按旧进度摆放它的占用。
+   */
+  @Test
+  void reuseWhileTheGateIsClosedMovesTheFrozenOwnerToTheNewName() throws Exception {
+    Scene scene = new Scene(false);
+    scene.hydrateAtTerminal();
+    scene.service.beginPluginShutdown();
+    assertSame(
+        scene.train, frozenOwners(scene.service).get(TrainNameNormalizer.normalizeKey(PREVIOUS)));
+
+    LayoverDispatchResult result = scene.reuse();
+    assertTrue(result.dispatched(), result.reason());
+    String renamed = result.trainName().orElseThrow();
+
+    Map<String, Object> frozen = frozenOwners(scene.service);
+    assertSame(
+        scene.train, frozen.get(TrainNameNormalizer.normalizeKey(renamed)), frozen.toString());
+    assertFalse(frozen.containsKey(TrainNameNormalizer.normalizeKey(PREVIOUS)), frozen.toString());
+  }
+
+  @SuppressWarnings("unchecked")
+  private static Map<String, Object> frozenOwners(RuntimeDispatchService service)
+      throws ReflectiveOperationException {
+    Field field = RuntimeDispatchService.class.getDeclaredField("freezeOwnerIdentities");
+    field.setAccessible(true);
+    return Map.copyOf((Map<String, Object>) field.get(service));
   }
 
   @Test

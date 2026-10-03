@@ -16513,9 +16513,9 @@ public final class RuntimeDispatchService {
             trainHandle, properties, previousTrainName, null, "authority-owner-rename-rejected");
         return LayoverDispatchResult.failed(previousTrainName, "authority-owner-rename-rejected");
       }
-      // 占用账本的属主已经迁到新名，水合 marker 必须跟着迁：信号 tick 按新名查 hydratedPhysicalOwnerIdentities，
+      // 占用账本的属主已经迁到新名，按 owner 名记的恢复身份必须跟着迁：信号 tick 按新名查水合 marker，
       // 查不到就把这辆车当成迟加载的陌生实体，硬停后重新水合，硬停会清掉复用随后挂上的发车动作。
-      // 与 migrateRuntimeOwner 的手动改名同一做法；marker 只认物理 identity，换了编组照样隔离。
+      // 与 migrateRuntimeOwner 的手动改名共用同一个迁移；marker 只认物理 identity，换了编组照样隔离。
       migrateStartupPhysicalHydrationOwner(
           normalizeTrainKey(previousTrainName), normalizeTrainKey(regeneratedTrainName));
       trainName = regeneratedTrainName;
@@ -21267,7 +21267,14 @@ public final class RuntimeDispatchService {
     }
   }
 
-  /** 在占用 owner 原子迁移成功后同步启动物理保护与水合 marker。 */
+  /**
+   * 在占用 owner 原子迁移成功后，同步迁移按 owner 名记的恢复身份：启动物理保护、水合 marker、关门时的物理主人。
+   *
+   * <p>手动改名（{@link #migrateRuntimeOwner}）与折返复用改名都调用这里，恢复相关的按名状态只在这一处列举；
+   * 漏掉任一张，改名后按新名查不到，同一辆车会被当成陌生实体隔离，或先停期间的到达补记认不出它。
+   *
+   * <p>先写新名、再删旧名：不持锁的读者任何时刻都至少能在一个名下找到这辆车。新名下已有别的编组时保留原值、 只删旧名，后续按重复属主处理（失效关闭）。
+   */
   private void migrateStartupPhysicalHydrationOwner(String previousKey, String currentKey) {
     if (previousKey == null
         || previousKey.isBlank()
@@ -21276,27 +21283,40 @@ public final class RuntimeDispatchService {
         || previousKey.equals(currentKey)) {
       return;
     }
-    Set<OccupancyResource> previousGuard = startupPhysicalFootprintGuards.remove(previousKey);
-    if (previousGuard != null && !previousGuard.isEmpty()) {
-      startupPhysicalFootprintGuards.merge(
-          currentKey,
-          Set.copyOf(previousGuard),
-          (existing, incoming) -> {
-            Set<OccupancyResource> merged = new LinkedHashSet<>(existing);
-            merged.addAll(incoming);
-            return Set.copyOf(merged);
-          });
-    }
-    Object previousIdentity = hydratedPhysicalOwnerIdentities.remove(previousKey);
-    if (previousIdentity != null) {
-      Object existingIdentity =
-          hydratedPhysicalOwnerIdentities.putIfAbsent(currentKey, previousIdentity);
-      if (existingIdentity != null && existingIdentity != previousIdentity) {
-        debugLogger.accept(
-            "SMART_PHYSICAL_HYDRATION_MIGRATION_CONFLICT from="
-                + previousKey
-                + " to="
-                + currentKey);
+    synchronized (runtimeOwnerMigrationLock) {
+      Set<OccupancyResource> previousGuard = startupPhysicalFootprintGuards.get(previousKey);
+      if (previousGuard != null && !previousGuard.isEmpty()) {
+        startupPhysicalFootprintGuards.merge(
+            currentKey,
+            Set.copyOf(previousGuard),
+            (existing, incoming) -> {
+              Set<OccupancyResource> merged = new LinkedHashSet<>(existing);
+              merged.addAll(incoming);
+              return Set.copyOf(merged);
+            });
+      }
+      startupPhysicalFootprintGuards.remove(previousKey);
+      Object previousIdentity = hydratedPhysicalOwnerIdentities.get(previousKey);
+      if (previousIdentity != null) {
+        Object existingIdentity =
+            hydratedPhysicalOwnerIdentities.putIfAbsent(currentKey, previousIdentity);
+        hydratedPhysicalOwnerIdentities.remove(previousKey, previousIdentity);
+        if (existingIdentity != null && existingIdentity != previousIdentity) {
+          debugLogger.accept(
+              "SMART_PHYSICAL_HYDRATION_MIGRATION_CONFLICT from="
+                  + previousKey
+                  + " to="
+                  + currentKey);
+        }
+      }
+      Object frozenIdentity = freezeOwnerIdentities.get(previousKey);
+      if (frozenIdentity != null) {
+        Object existingFrozen = freezeOwnerIdentities.putIfAbsent(currentKey, frozenIdentity);
+        freezeOwnerIdentities.remove(previousKey, frozenIdentity);
+        if (existingFrozen != null && existingFrozen != frozenIdentity) {
+          debugLogger.accept(
+              "SMART_FREEZE_OWNER_MIGRATION_CONFLICT from=" + previousKey + " to=" + currentKey);
+        }
       }
     }
   }

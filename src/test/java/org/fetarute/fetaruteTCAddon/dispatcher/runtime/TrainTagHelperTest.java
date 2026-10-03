@@ -5,6 +5,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -75,6 +76,30 @@ class TrainTagHelperTest {
     TrainTagHelper.writeTag(properties(List.of(tags)), "FTA_TRAIN_NAME", "T1");
 
     assertEquals(Set.of("FTA_TRAIN_NAME=T1"), tags);
+  }
+
+  /** 多个 key 一次遍历删掉（大小写不敏感），其余 tag 不动，只调一次 removeTags。 */
+  @Test
+  void removeTagKeysRemovesSeveralKeysInOnePass() {
+    Set<String> tags = cart("FTA_A=1", "fta_b=2", "FTA_C=3", "OTHER=4");
+    TrainProperties properties = properties(List.of(tags));
+
+    TrainTagHelper.removeTagKeys(properties, "FTA_A", "FTA_B", "FTA_C", "FTA_MISSING");
+
+    assertEquals(Set.of("OTHER=4"), tags);
+    verify(properties, times(1)).removeTags(any(String[].class));
+  }
+
+  /** 一个都没命中时不调用 removeTags，不触发 TrainCarts 的属性同步。 */
+  @Test
+  void removeTagKeysDoesNothingWhenNoKeyMatches() {
+    Set<String> tags = cart("OTHER=4");
+    TrainProperties properties = properties(List.of(tags));
+
+    TrainTagHelper.removeTagKeys(properties, "FTA_A", "FTA_B");
+
+    assertEquals(Set.of("OTHER=4"), tags);
+    verify(properties, never()).removeTags(any(String[].class));
   }
 
   private static Set<String> cart(String... tags) {
