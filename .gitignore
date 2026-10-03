@@ -41,3 +41,5 @@ CLAUDE.md
 
 # 本地工作笔记（不入库）
 CONTEXT.md
+docs/design/pids-and-information.md
+docs/dev/pids-config.md
