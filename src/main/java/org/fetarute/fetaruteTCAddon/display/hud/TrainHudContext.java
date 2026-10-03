@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.hud;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
@@ -28,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
  * @param nextStopTransfers 下一站可换乘的线路（不含本车在该站所属的线路）；没有时为空列表
  * @param nextStopDelaySeconds 按表运行时到达下一站的偏差秒数（正数为晚点，见 {@link
  *     org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService#arrivalDeviationSeconds}）；不按表运行时为空
+ * @param nextStopIndex 前方下一个停靠站的停靠序号（与进度下标、时刻表停靠序号同一口径）；前方没有停靠站时为空
  */
 public record TrainHudContext(
     String trainName,
@@ -51,7 +53,8 @@ public record TrainHudContext(
     Optional<ThroughService> throughService,
     boolean outOfService,
     List<Transfer> nextStopTransfers,
-    OptionalLong nextStopDelaySeconds) {
+    OptionalLong nextStopDelaySeconds,
+    OptionalInt nextStopIndex) {
   public TrainHudContext {
     Objects.requireNonNull(trainName, "trainName");
     routeDefinition = routeDefinition == null ? Optional.empty() : routeDefinition;
@@ -69,6 +72,7 @@ public record TrainHudContext(
     nextStopTransfers = nextStopTransfers == null ? List.of() : List.copyOf(nextStopTransfers);
     nextStopDelaySeconds =
         nextStopDelaySeconds == null ? OptionalLong.empty() : nextStopDelaySeconds;
+    nextStopIndex = nextStopIndex == null ? OptionalInt.empty() : nextStopIndex;
   }
 
   /**

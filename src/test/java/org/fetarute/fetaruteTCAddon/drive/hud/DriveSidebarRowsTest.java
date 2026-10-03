@@ -5,10 +5,13 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.UUID;
 import org.bukkit.configuration.MemoryConfiguration;
 import org.bukkit.inventory.ItemStack;
@@ -20,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
@@ -115,5 +119,43 @@ class DriveSidebarRowsTest {
     assertEquals(
         "drive.sidebar.value.stop.open-doors.left",
         row(DriveSidebarRows.build(session, 0), "stop").valueKey());
+  }
+
+  @Test
+  void theScheduleRowFollowsTheStationRowWhenTheTrainRunsToATimetable() {
+    DriveSession session = session(CabSystems.disabled());
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);
+    session.attachDriverLink(link);
+    Instant planned = Instant.parse("2026-10-03T08:00:00Z");
+    link.setSchedule(new DriverSchedule(false, planned, OptionalLong.of(95L)));
+
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0);
+    DriveSidebarRows.Row schedule = row(rows, "scheduled-arrival");
+
+    assertEquals("drive.sidebar.value.schedule.late", schedule.valueKey());
+    assertEquals(
+        DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault()).format(planned),
+        schedule.values().get("time"));
+    assertEquals("1:35", schedule.values().get("deviation"));
+    assertEquals(
+        "drive.sidebar.label.next-station", rows.get(rows.indexOf(schedule) - 1).labelKey());
+
+    link.setSchedule(new DriverSchedule(true, planned, OptionalLong.of(-20L)));
+    assertEquals(
+        "drive.sidebar.value.schedule.plain",
+        row(DriveSidebarRows.build(session, 0), "scheduled-departure").valueKey());
+  }
+
+  @Test
+  void theDoorsRowShowsClosingUntilTheAnimationHasFinished() {
+    DriveSession session = session(CabSystems.disabled());
+    session.markDoorsClosing(40L);
+
+    assertEquals(
+        "drive.sidebar.value.doors.closing",
+        row(DriveSidebarRows.build(session, 20L), "doors").valueKey());
+    assertEquals(
+        "drive.sidebar.value.doors.closed",
+        row(DriveSidebarRows.build(session, 40L), "doors").valueKey());
   }
 }

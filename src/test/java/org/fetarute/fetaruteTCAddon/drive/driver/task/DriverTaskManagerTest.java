@@ -10,6 +10,7 @@ import java.time.LocalDate;
 import java.util.UUID;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
@@ -81,5 +82,21 @@ class DriverTaskManagerTest {
     DriverTask task = tasks.taskOf(a.getUniqueId()).orElseThrow();
     assertEquals(DriverTask.State.FAILED, task.state());
     assertEquals("stuck", task.endReason());
+  }
+
+  @Test
+  @DisplayName("坐进任务列车车头一端才提示确认接班；后半列车提示换座")
+  void seatCheck() {
+    assertEquals(
+        DriverTaskManager.SeatCheck.NOT_ON_TRAIN, DriverTaskManager.checkSeat(null, "T1", 6));
+    assertEquals(
+        DriverTaskManager.SeatCheck.NOT_ON_TRAIN,
+        DriverTaskManager.checkSeat(new SeatBinding("T2", 0, 0), "T1", 6));
+    assertEquals(
+        DriverTaskManager.SeatCheck.CONFIRM,
+        DriverTaskManager.checkSeat(new SeatBinding("t1", 0, 0), "T1", 6));
+    assertEquals(
+        DriverTaskManager.SeatCheck.WRONG_SEAT,
+        DriverTaskManager.checkSeat(new SeatBinding("T1", 5, 0), "T1", 6));
   }
 }

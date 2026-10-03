@@ -384,6 +384,12 @@ public final class TrainLaunchManager {
       SpeedEnvelope speedEnvelope) {
     speedLimitRamp.release(train);
     clearPendingLaunchCommand(properties);
+    // 人工驾驶不受进站限速：停车由驾驶员自己掌握，越过停车点另有防护。
+    if (speedEnvelope != null) {
+      SpeedEnvelope.ManualView manual = speedEnvelope.manual(targetBps);
+      targetBps = manual.targetBps();
+      speedEnvelope = manual.envelope();
+    }
     StopControlMode resolvedStopMode =
         stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
     double permittedBps;

@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.drive.menu;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import org.bukkit.Bukkit;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -25,6 +26,9 @@ public final class DriveDoors {
     /** 这辆车没有对应的门动画。 */
     UNAVAILABLE
   }
+
+  /** 量不出关门动画时长时，按这么久（tick）算车门还在关。 */
+  static final long DEFAULT_CLOSE_TICKS = 60L;
 
   private MinecartGroup group;
   private String lastSummary = "";
@@ -52,6 +56,10 @@ public final class DriveDoors {
       existing.close();
       lastSummary = existing.summary();
       session.setDoorOpen(physicalLeft, false);
+      long closeTicks = existing.closeDurationTicks();
+      // 关门动画放完前车门还没真正关上：站台等动画结束才给发车信号。
+      session.markDoorsClosing(
+          Bukkit.getCurrentTick() + (closeTicks > 0L ? closeTicks : DEFAULT_CLOSE_TICKS));
       return Result.CLOSED;
     }
     ManualDoor other = physicalLeft ? right : left;

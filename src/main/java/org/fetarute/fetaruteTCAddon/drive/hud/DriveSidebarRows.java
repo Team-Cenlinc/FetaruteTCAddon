@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.hud;
 
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -12,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
@@ -28,6 +31,10 @@ public final class DriveSidebarRows {
 
   /** 压缩机运转时风压后面的标记。 */
   private static final String PUMP_RUNNING = "↑";
+
+  /** 表定时刻按服务器时区显示。 */
+  private static final DateTimeFormatter CLOCK =
+      DateTimeFormatter.ofPattern("HH:mm:ss").withZone(ZoneId.systemDefault());
 
   /**
    * 侧边栏的一行。
@@ -62,8 +69,9 @@ public final class DriveSidebarRows {
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
               : signalRow(link));
       rows.add(stationRow(link, session.isStopped()));
+      link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);
     }
-    rows.add(new Row("drive.sidebar.label.doors", doorsKey(session), Map.of()));
+    rows.add(new Row("drive.sidebar.label.doors", doorsKey(session, nowTick), Map.of()));
     CabSystems cab = session.cab();
     if (cab.enabled()) {
       rows.add(airRow(cab));
@@ -105,10 +113,25 @@ public final class DriveSidebarRows {
                         Map.of("text", link.targetLabel())));
   }
 
-  private static String doorsKey(DriveSession session) {
+  /** 表定时刻一行：时刻按服务器时区写，后面跟晚点或早点多少。 */
+  static Row scheduleRow(DriverSchedule schedule) {
+    return new Row(
+        schedule.departure()
+            ? "drive.sidebar.label.scheduled-departure"
+            : "drive.sidebar.label.scheduled-arrival",
+        "drive.sidebar.value.schedule." + schedule.state().key(),
+        Map.of("time", CLOCK.format(schedule.planned()), "deviation", schedule.deviationText()));
+  }
+
+  private static String doorsKey(DriveSession session, long nowTick) {
     boolean left = session.isLeftDoorOpen();
     boolean right = session.isRightDoorOpen();
-    String state = left && right ? "both" : left ? "left" : right ? "right" : "closed";
+    String state =
+        left && right
+            ? "both"
+            : left
+                ? "left"
+                : right ? "right" : session.doorsClosing(nowTick) ? "closing" : "closed";
     return "drive.sidebar.value.doors." + state;
   }
 

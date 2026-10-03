@@ -202,6 +202,11 @@ public final class AutoStationDoorController {
     public boolean isOpen() {
       return open;
     }
+
+    /** 关门动画要多久（tick）；量不出时为 -1。 */
+    public long closeDurationTicks() {
+      return session.estimatedCloseDurationTicks();
+    }
   }
 
   /**
@@ -1343,7 +1348,7 @@ public final class AutoStationDoorController {
       return openSucceeded;
     }
 
-    /** 估算关门动画时长（tick），仅 legacy 可用。 */
+    /** 估算关门动画时长（tick）；量不出时为 -1。 */
     long estimatedCloseDurationTicks() {
       long left = leftAction.closeDurationTicks();
       long right = rightAction.closeDurationTicks();
@@ -1593,6 +1598,37 @@ public final class AutoStationDoorController {
     return indexAtDuration(nodes, target);
   }
 
+  /** 目标附件（含子附件）上这个名字的动画最长要多久（tick）；找不到时为 -1。 */
+  private static long namedAnimationTicks(List<Attachment> targets, String name) {
+    if (targets == null || name == null) {
+      return -1L;
+    }
+    double longest = -1.0;
+    for (Attachment target : targets) {
+      longest = Math.max(longest, namedAnimationSeconds(target, name, 0));
+    }
+    return longest > 0.0 ? Math.max(1L, Math.round(longest * 20.0)) : -1L;
+  }
+
+  private static double namedAnimationSeconds(Attachment attachment, String name, int depth) {
+    if (attachment == null || depth > 16) {
+      return -1.0;
+    }
+    double longest = -1.0;
+    for (Animation animation : attachment.getAnimations()) {
+      if (animation != null && name.equalsIgnoreCase(animation.getOptions().getName())) {
+        // 播放时 TrainCarts 把动画自带的速度乘进来，延时照加。
+        double speed = Math.abs(animation.getOptions().getSpeed());
+        double seconds = totalDuration(animation.getNodeArray()) / (speed > 1.0e-3 ? speed : 1.0);
+        longest = Math.max(longest, seconds + Math.max(0.0, animation.getOptions().getDelay()));
+      }
+    }
+    for (Attachment child : attachment.getChildren()) {
+      longest = Math.max(longest, namedAnimationSeconds(child, name, depth + 1));
+    }
+    return longest;
+  }
+
   private static double totalDuration(AnimationNode[] nodes) {
     double total = 0.0;
     for (AnimationNode node : nodes) {
@@ -1811,7 +1847,7 @@ public final class AutoStationDoorController {
 
       @Override
       public long closeDurationTicks() {
-        return -1L;
+        return namedAnimationTicks(targets, name);
       }
     }
 
@@ -1842,7 +1878,10 @@ public final class AutoStationDoorController {
 
       @Override
       public long closeDurationTicks() {
-        return -1L;
+        double seconds = pair.closeDurationSeconds();
+        return Double.isFinite(seconds) && seconds > 0.0
+            ? Math.max(1L, Math.round(seconds * 20.0))
+            : -1L;
       }
     }
 

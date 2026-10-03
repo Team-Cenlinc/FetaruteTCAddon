@@ -129,6 +129,9 @@ public final class DriveHud {
     if (session.anyDoorOpen()) {
       return locale.component("drive.hud.doors-open");
     }
+    if (session.doorsClosing(session.lastAdvanceTick())) {
+      return locale.component("drive.hud.doors-closing");
+    }
     if (link != null
         && link.controlsPhysically()
         && link.directive() != null

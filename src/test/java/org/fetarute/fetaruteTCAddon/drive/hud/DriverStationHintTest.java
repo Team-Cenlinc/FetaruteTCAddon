@@ -81,6 +81,12 @@ class DriverStationHintTest {
     stop.setPhase(DriverStationStop.Phase.CLOSE_DOORS);
     assertEquals(
         "drive.hud.station.close-doors", DriverStationHint.of(link, true).orElseThrow().key());
+    link.setDoorsClosing(true);
+    DriverStationHint.Hint closing = DriverStationHint.of(link, true).orElseThrow();
+    assertEquals("drive.hud.station.doors-closing", closing.key());
+    assertEquals("drive.sidebar.value.stop.doors-closing", closing.sidebarKey());
+    assertFalse(closing.actionable());
+    link.setDoorsClosing(false);
     stop.setPhase(DriverStationStop.Phase.DEPART);
     assertEquals("drive.hud.station.depart", DriverStationHint.of(link, true).orElseThrow().key());
     stop.end();

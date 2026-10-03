@@ -55,6 +55,7 @@ drive:
       over: "<red><limit_kmh></red>"
     line-stopping: "<red>Driver left, the train is braking to a stop</red> <dark_gray>|</dark_gray> <gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray>"
     doors-open: "<red>Doors open</red>"
+    doors-closing: "<yellow>Doors closing</yellow>"
     driver:
       forced-stop: "<red><bold>Forced stop</bold></red>"
       emergency: "<red><bold>Emergency brake</bold></red>"
@@ -77,6 +78,7 @@ drive:
         none: "<gray>No doors at this stop</gray>"
       dwell: "<gray>Dwell</gray> <white><seconds></white> <gray>s</gray>"
       close-doors: "<yellow>Dwell time is up, close the doors</yellow>"
+      doors-closing: "<gray>Doors closing</gray>"
       wait-departure: "<gray>Waiting to depart</gray>"
       depart: "<green><bold>Clear to depart</bold></green>"
     ato:
@@ -117,6 +119,8 @@ drive:
       next-station: "Next"
       stop-mark: "Stop mark"
       stop: "Stop"
+      scheduled-arrival: "Sched. arr."
+      scheduled-departure: "Sched. dep."
       doors: "Doors"
       air: "Air"
       vigilance: "Vigilance"
@@ -131,6 +135,11 @@ drive:
         ato: "<aqua>ATO driving</aqua>"
       station:
         none: "<gray>-</gray>"
+      schedule:
+        plain: "<white><time></white>"
+        on-time: "<white><time></white> <green>On time</green>"
+        late: "<white><time></white> <red>Late <deviation></red>"
+        early: "<white><time></white> <aqua>Early <deviation></aqua>"
       stop:
         approach: "<aqua><station></aqua> <white><distance></white> <gray>blocks</gray>"
         on-mark: "<green>On the mark</green>"
@@ -144,10 +153,12 @@ drive:
           none: "<gray>No doors at this stop</gray>"
         dwell: "<white><seconds></white> <gray>s</gray>"
         close-doors: "<yellow>Close the doors</yellow>"
+        doors-closing: "<gray>Doors closing</gray>"
         wait-departure: "<gray>Waiting for departure</gray>"
         depart: "<green>Clear to depart</green>"
       doors:
         closed: "<green>Closed</green>"
+        closing: "<yellow>Closing</yellow>"
         left: "<red>Left open</red>"
         right: "<red>Right open</red>"
         both: "<red>Both open</red>"
@@ -283,7 +294,7 @@ drive:
       driving: "<prefix> <red>You cannot take a task while driving</red>"
       no-station: "<prefix> <red>No station nearby; open the task board near a platform</red>"
     claim:
-      claimed: "<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"
+      claimed: "<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives and confirm your seat</green>"
       disabled: "<prefix> <red>Driving dispatched trains is not enabled</red>"
       breaker-open: "<prefix> <red>The line is congested; new shifts are paused</red>"
       already-has-task: "<prefix> <red>You already have a task; finish or abandon it first (/fta drive task abandon)</red>"
@@ -293,7 +304,8 @@ drive:
     expired: "<prefix> <yellow>Trip <aqua><trip></aqua> could not be taken over at <white><station></white>; the task was dropped</yellow>"
     arrived: "<aqua><trip></aqua> <white>is standing at <station>; sit in the leading cab to take over</white>"
     go-to-cab: "<yellow>Sit in the leading cab</yellow>"
-    cannot-start: "<red>Cannot take over right now; see /fta drive on for the reason</red>"
+    confirm-seat: "<white>Seated</white> <gray>check your seat, then run</gray> <yellow>/fta drive on</yellow> <gray>to take over</gray>"
+    confirm-seat-chat: "<prefix> <white>You are seated in car <yellow><car></yellow> of <cars> on train <aqua><train></aqua>.</white> <gray>Once you are sure this is the leading cab,</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive on</white>'><green>[Take over]</green></hover></click>"
     busy: "<red>You are driving another train</red>"
     started: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to the terminus</green>"
     result: "<prefix> <white>Trip <aqua><trip></aqua> <state></white> <gray>|</gray> score <yellow><points></yellow> <gray>grade</gray> <gold><bold><grade></bold></gold>"

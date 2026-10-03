@@ -34,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCircuitBreaker;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
 
 /**
@@ -289,12 +290,36 @@ public final class DriverTaskManager {
 
   // ---- 等车与接管 ----
 
-  /** 接管尝试的回调：返回是否已开始驾驶。 */
+  /** 列车停在接班站时的回调：告诉玩家该怎么接班。 */
   public interface Starter {
     /**
-     * @return 开始驾驶时为 {@code null}；否则是给玩家的提示语言键
+     * @return 已在驾驶这列车时为 {@code null}；否则是给玩家的提示语言键
      */
     String tryStart(Player player, DriverTask task);
+  }
+
+  /** 玩家此刻的座位能不能接班。 */
+  public enum SeatCheck {
+    /** 没坐在任务列车上。 */
+    NOT_ON_TRAIN,
+    /** 坐在任务列车上，但不在前进方向的车头一端。 */
+    WRONG_SEAT,
+    /** 坐在车头一端：等驾驶员确认座位无误再接班。 */
+    CONFIRM
+  }
+
+  /**
+   * 判定座位能不能接班。
+   *
+   * @param seat 玩家的座位；没坐下时为 {@code null}
+   * @param trainName 任务列车名
+   * @param memberCount 任务列车节数
+   */
+  public static SeatCheck checkSeat(SeatBinding seat, String trainName, int memberCount) {
+    if (seat == null || trainName == null || !seat.trainName().equalsIgnoreCase(trainName)) {
+      return SeatCheck.NOT_ON_TRAIN;
+    }
+    return seat.cabSign(memberCount) < 0 ? SeatCheck.WRONG_SEAT : SeatCheck.CONFIRM;
   }
 
   /**

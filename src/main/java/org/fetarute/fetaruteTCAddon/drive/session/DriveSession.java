@@ -96,6 +96,7 @@ public final class DriveSession {
   private ReverserPosition reverser = ReverserPosition.FORWARD;
   private boolean leftDoorOpen;
   private boolean rightDoorOpen;
+  private long doorsClosingUntilTick = Long.MIN_VALUE;
   private volatile int menuTopSize;
   private volatile boolean rewriteFailed;
   private boolean seated = true;
@@ -232,12 +233,13 @@ public final class DriveSession {
     return current.isTraction() && tractionBlocked() ? Notch.N : current;
   }
 
-  /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关，或 simulation 级的车上系统不允许（停放制动、风压、制动试验）。 */
+  /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（停放制动、风压、制动试验）。 */
   public boolean tractionBlocked() {
     return !setup.ready()
         || cab.tractionBlock().isPresent()
         || reverser == ReverserPosition.NEUTRAL
-        || anyDoorOpen();
+        || anyDoorOpen()
+        || doorsClosing(lastAdvanceTick);
   }
 
   /** 我们命令的当前速度（格/秒）。 */
@@ -408,6 +410,16 @@ public final class DriveSession {
 
   public boolean anyDoorOpen() {
     return leftDoorOpen || rightDoorOpen;
+  }
+
+  /** 车门正在关：关门动画放到这个 tick 才结束。 */
+  public void markDoorsClosing(long untilTick) {
+    doorsClosingUntilTick = Math.max(doorsClosingUntilTick, untilTick);
+  }
+
+  /** 关门动画是否还在放（车门还没真正关上）。 */
+  public boolean doorsClosing(long nowTick) {
+    return !anyDoorOpen() && nowTick < doorsClosingUntilTick;
   }
 
   /**

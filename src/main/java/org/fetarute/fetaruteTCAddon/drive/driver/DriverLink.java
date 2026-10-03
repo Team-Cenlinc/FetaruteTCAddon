@@ -66,6 +66,8 @@ public final class DriverLink {
   private String targetLabel = "";
   private String nextStopLabel = "";
   private String skippedStation;
+  private boolean doorsClosing;
+  private DriverSchedule schedule;
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -565,6 +567,24 @@ public final class DriverLink {
 
   public void setTargetLabel(String label) {
     this.targetLabel = label == null ? "" : label;
+  }
+
+  /** 车门已关、关门动画还在放。 */
+  public boolean doorsClosing() {
+    return doorsClosing;
+  }
+
+  public void setDoorsClosing(boolean closing) {
+    this.doorsClosing = closing;
+  }
+
+  /** 表定时刻（区间里是下一站到站，停站时是本站发车）；不按表运行时为空。 */
+  public Optional<DriverSchedule> schedule() {
+    return Optional.ofNullable(schedule);
+  }
+
+  public void setSchedule(DriverSchedule schedule) {
+    this.schedule = schedule;
   }
 
   public int serviceInterventions() {

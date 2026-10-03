@@ -172,6 +172,32 @@ class DriveSessionTest {
   }
 
   @Test
+  void tractionStaysBlockedUntilTheDoorCloseAnimationHasFinished() {
+    DriveSession session = newSession();
+    session.selector().force(Notch.P1);
+    session.setDoorOpen(true, true);
+    session.setDoorOpen(true, false);
+    session.markDoorsClosing(160L);
+
+    session.touch(100L);
+    assertTrue(session.doorsClosing(100L));
+    assertTrue(session.tractionBlocked());
+
+    session.touch(160L);
+    assertFalse(session.doorsClosing(160L));
+    assertFalse(session.tractionBlocked());
+  }
+
+  @Test
+  void anOpenDoorIsNotReportedAsClosing() {
+    DriveSession session = newSession();
+    session.markDoorsClosing(160L);
+    session.setDoorOpen(false, true);
+
+    assertFalse(session.doorsClosing(100L));
+  }
+
+  @Test
   void theMenuWindowSizeIsNeverNegative() {
     DriveSession session = newSession();
     assertEquals(0, session.menuTopSize());

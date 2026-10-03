@@ -35,6 +35,8 @@ public final class DriverStationHint {
     DWELL("dwell", false, true),
     /** 停站时间到，等驾驶员关门。 */
     CLOSE_DOORS("close-doors", true, true),
+    /** 车门已关，关门动画还在放。 */
+    DOORS_CLOSING("doors-closing", false, true),
     /** 车门已关，等出站许可。 */
     WAIT_DEPARTURE("wait-departure", false, true),
     /** 已有出站许可，可以起步。 */
@@ -117,7 +119,8 @@ public final class DriverStationHint {
                     String.valueOf(
                         (current.dwellRemainingTicks() + TICKS_PER_SECOND - 1)
                             / TICKS_PER_SECOND))));
-        case CLOSE_DOORS -> Optional.of(new Hint(Kind.CLOSE_DOORS, "", station));
+        case CLOSE_DOORS -> Optional.of(
+            new Hint(link.doorsClosing() ? Kind.DOORS_CLOSING : Kind.CLOSE_DOORS, "", station));
         case WAIT_DEPARTURE -> Optional.of(new Hint(Kind.WAIT_DEPARTURE, "", station));
         case DEPART -> Optional.of(new Hint(Kind.DEPART, "", station));
         default -> Optional.empty();

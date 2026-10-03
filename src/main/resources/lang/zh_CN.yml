@@ -1461,6 +1461,7 @@ drive:
       over: "<red><limit_kmh></red>"
     line-stopping: "<red>驾驶员已离开，列车正在制动停车</red> <dark_gray>|</dark_gray> <gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray>"
     doors-open: "<red>车门开</red>"
+    doors-closing: "<yellow>车门关闭中</yellow>"
     driver:
       forced-stop: "<red><bold>强制停车</bold></red>"
       emergency: "<red><bold>紧急制动</bold></red>"
@@ -1483,6 +1484,7 @@ drive:
         none: "<gray>本站不开门</gray>"
       dwell: "<gray>停站</gray> <white><seconds></white> <gray>秒</gray>"
       close-doors: "<yellow>停站时间已到，请关门</yellow>"
+      doors-closing: "<gray>车门关闭中</gray>"
       wait-departure: "<gray>等待发车</gray>"
       depart: "<green><bold>发车信号</bold></green>"
     ato:
@@ -1523,6 +1525,8 @@ drive:
       next-station: "下一站"
       stop-mark: "停车点"
       stop: "停站"
+      scheduled-arrival: "表定到站"
+      scheduled-departure: "表定发车"
       doors: "车门"
       air: "风压"
       vigilance: "警惕"
@@ -1537,6 +1541,11 @@ drive:
         ato: "<aqua>ATO 运行</aqua>"
       station:
         none: "<gray>-</gray>"
+      schedule:
+        plain: "<white><time></white>"
+        on-time: "<white><time></white> <green>正点</green>"
+        late: "<white><time></white> <red>晚点 <deviation></red>"
+        early: "<white><time></white> <aqua>早点 <deviation></aqua>"
       stop:
         approach: "<aqua><station></aqua> <white><distance></white> <gray>格</gray>"
         on-mark: "<green>已对标</green>"
@@ -1550,10 +1559,12 @@ drive:
           none: "<gray>本站不开门</gray>"
         dwell: "<white><seconds></white> <gray>秒</gray>"
         close-doors: "<yellow>请关门</yellow>"
+        doors-closing: "<gray>车门关闭中</gray>"
         wait-departure: "<gray>等待发车</gray>"
         depart: "<green>可以发车</green>"
       doors:
         closed: "<green>关闭</green>"
+        closing: "<yellow>关闭中</yellow>"
         left: "<red>左侧开</red>"
         right: "<red>右侧开</red>"
         both: "<red>两侧开</red>"
@@ -1689,7 +1700,7 @@ drive:
       driving: "<prefix> <red>驾驶中不能领取任务</red>"
       no-station: "<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"
     claim:
-      claimed: "<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"
+      claimed: "<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室，确认座位后接班</green>"
       disabled: "<prefix> <red>驾驶调度列车当前未开放</red>"
       breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
       already-has-task: "<prefix> <red>你已有未完成的任务，请先完成或放弃（/fta drive task abandon）</red>"
@@ -1699,7 +1710,8 @@ drive:
     expired: "<prefix> <yellow>车次 <aqua><trip></aqua> 未能在 <white><station></white> 接班，任务已作废</yellow>"
     arrived: "<aqua><trip></aqua> <white>已在 <station> 停站，请坐进车头驾驶室接班</white>"
     go-to-cab: "<yellow>请坐到列车前进方向的车头驾驶室</yellow>"
-    cannot-start: "<red>暂时无法接班，请查看 /fta drive on 的提示</red>"
+    confirm-seat: "<white>已就座</white> <gray>确认座位无误后输入</gray> <yellow>/fta drive on</yellow> <gray>接班</gray>"
+    confirm-seat-chat: "<prefix> <white>你已坐在列车 <aqua><train></aqua> 第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>确认是前进方向的驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认接班]</green></hover></click>"
     busy: "<red>你正在驾驶其他列车</red>"
     started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"

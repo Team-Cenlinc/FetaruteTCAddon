@@ -164,4 +164,59 @@ class SpeedEnvelopeTest {
     assertEquals(OptionalLong.of(70L), shifted.distanceToApproach());
     assertSame(lookahead, lookahead.withEdgeSpeedConstraintsShiftedBy(0L));
   }
+
+  @Test
+  void manualViewDropsTheApproachCeilingButKeepsSignalHolds() {
+    SpeedEnvelope envelope =
+        SpeedEnvelope.empty()
+            .withApproachHold(traveled -> 3.0, 20.0)
+            .withHold(traveled -> 15.0)
+            .withOrigin("ST1", 4.0);
+
+    SpeedEnvelope.ManualView view = envelope.manual(3.0);
+
+    assertEquals(3.0, envelope.limitBps(0.0), 1.0e-9);
+    assertEquals(15.0, view.targetBps(), 1.0e-9);
+    assertEquals(15.0, view.envelope().limitBps(0.0), 1.0e-9);
+    assertEquals(15.0, view.envelope().holdLimitBps(0.0), 1.0e-9);
+    assertEquals("ST1", view.envelope().originKey().orElseThrow());
+  }
+
+  @Test
+  void manualViewRebuildsEdgeBrakingFromTheTargetBeforeTheApproachCeiling() {
+    SpeedCurve curve = new SpeedCurve(1.0, 1.0);
+    List<SignalLookahead.EdgeSpeedConstraint> edges =
+        List.of(new SignalLookahead.EdgeSpeedConstraint(60L, 8.0));
+    // 自动运行的目标被进站限速压到 6，低于前方限速边：按它建出的边约束为空。
+    SpeedEnvelope envelope =
+        SpeedEnvelope.empty()
+            .withApproachHold(traveled -> 6.0, 20.0)
+            .withAll(SpeedEnvelope.edgeSpeedConstraints(edges, curve, 6.0));
+
+    SpeedEnvelope.ManualView view = envelope.manual(6.0);
+    SpeedEnvelope expected = SpeedEnvelope.edgeSpeedConstraints(edges, curve, 20.0);
+
+    assertEquals(6.0, envelope.limitBps(0.0), 1.0e-9);
+    assertEquals(expected.limitBps(0.0), view.envelope().limitBps(0.0), 1.0e-9);
+    assertEquals(expected.limitBps(40.0), view.envelope().limitBps(40.0), 1.0e-9);
+    assertEquals(8.0, view.envelope().limitBps(60.0), 1.0e-9);
+    assertEquals(Math.min(20.0, expected.limitBps(0.0)), view.targetBps(), 1.0e-9);
+  }
+
+  @Test
+  void manualViewIsUnchangedWithoutAnApproachCeiling() {
+    SpeedEnvelope envelope =
+        SpeedEnvelope.empty()
+            .withHold(traveled -> 12.0)
+            .withAll(
+                SpeedEnvelope.edgeSpeedConstraints(
+                    List.of(new SignalLookahead.EdgeSpeedConstraint(30L, 5.0)),
+                    new SpeedCurve(1.0, 1.0),
+                    12.0));
+
+    SpeedEnvelope.ManualView view = envelope.manual(12.0);
+
+    assertSame(envelope, view.envelope());
+    assertEquals(12.0, view.targetBps(), 1.0e-9);
+  }
 }

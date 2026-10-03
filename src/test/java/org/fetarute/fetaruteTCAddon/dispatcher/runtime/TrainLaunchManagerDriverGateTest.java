@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.RecordingControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -75,6 +76,35 @@ class TrainLaunchManagerDriverGateTest {
     assertTrue(directive.allowLaunch());
     assertTrue(result.launchCommandAccepted(), "起步交给驾驶员，调度层不应反复重试发车");
     assertEquals("driver", result.finalLimiterSource());
+  }
+
+  @Test
+  @DisplayName("人工驾驶不受进站限速：指令按进站限速之前的目标速度，包络去掉进站限速")
+  void manualDrivingIgnoresTheStationApproachCeiling() {
+    TrainProperties properties = properties("drv-approach");
+    RuntimeTrainHandle train = train(properties, 12.0);
+    RecordingControlAuthority authority = new RecordingControlAuthority().control(properties);
+    TrainLaunchManager manager = new TrainLaunchManager(new SpeedLimitRamp(), authority);
+    SpeedEnvelope envelope =
+        SpeedEnvelope.empty().withApproachHold(traveled -> 3.0, 16.0).withHold(traveled -> 14.0);
+
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.PROCEED,
+        3.0,
+        config,
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(),
+        StopControlMode.BRAKING_TO_PLANNED_STOP,
+        envelope);
+
+    DriverDirective directive = authority.lastDirective();
+    assertEquals(14.0, directive.requestedBps(), 1.0e-6);
+    assertEquals(14.0, directive.permittedBps(), 1.0e-6);
+    assertEquals(14.0, directive.envelope().limitBps(0.0), 1.0e-6);
   }
 
   @Test
