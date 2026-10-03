@@ -1783,7 +1783,7 @@ public final class SimpleOccupancyManager
       OccupancyClaim finalClaim,
       String event,
       String reason) {
-    if (!hasSemanticClaimTransition(oldClaim, finalClaim)) {
+    if (!SignalComputationTrace.enabled() || !hasSemanticClaimTransition(oldClaim, finalClaim)) {
       return;
     }
     OccupancyClaim visibleClaim = finalClaim == null ? oldClaim : finalClaim;
@@ -5754,91 +5754,96 @@ public final class SimpleOccupancyManager
 
   private OccupancyDecision traceDecision(
       String reason, OccupancyRequest request, OccupancyDecision decision) {
-    SignalDecisionInputType inputTypeBeforeDrainClassification =
-        SignalDecisionInputClassifier.classify(request);
-    boolean releaseHintVerified = hasAnyVerifiedConflictReleaseHint(request);
-    boolean drainAuthorityPresent =
-        request != null
-            && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING
-            && releaseHintVerified
-            && decision != null
-            && decision.conflictRelease();
-    boolean drainLeader =
-        decision != null
-            && decision.conflictRelease()
-            && request != null
-            && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING;
-    SignalDecisionInputType inputType =
-        SignalDecisionInputClassifier.classify(
-            request,
-            new SignalDecisionInputClassifier.DrainClassificationContext(
-                drainAuthorityPresent,
-                drainAuthorityPresent,
-                releaseHintVerified,
-                releaseHintVerified,
-                releaseHintVerified,
-                false,
-                hasOnlyTopologyExitHints(request)));
-    boolean drainAuthorityInconsistent =
-        drainAuthorityPresent && inputType == SignalDecisionInputType.DRAIN_THROUGH && !drainLeader;
-    SignalAspect computedSignal = decision != null ? decision.signal() : SignalAspect.STOP;
-    boolean publishSuppressed =
-        SignalDecisionInputClassifier.isProceedLike(computedSignal)
-            && !SignalDecisionInputClassifier.mayPublishProceed(
-                request,
-                inputType,
-                drainLeader,
-                drainAuthorityPresent,
-                decision != null && decision.allowed() && !drainAuthorityInconsistent,
-                false,
-                SignalComputationTrace.TokenState.NONE,
-                false);
-    SignalAspect traceSignal = computedSignal;
-    SignalComputationTrace.emit(
-        SignalComputationTrace.builder(
-                request != null ? request.trainName() : "-",
-                request != null ? request.trainName() : "-",
-                SignalComputationTrace.Source.OCCUPANCY,
-                traceSignal)
-            .primaryReason(reason)
-            .field("publicationTrace", "SMART_SIGNAL_PUBLICATION_TRACE")
-            .field("publicationAuthority", "TRACE_ONLY")
-            .field("physicalPublished", false)
-            .field("occupancyVersion", version())
-            .field("staleQueueCleanupCount", staleQueueCleanupCount())
-            .field("inputTypeBeforeDrainClassification", inputTypeBeforeDrainClassification)
-            .field("inputTypeAfterDrainClassification", inputType)
-            .field("signalDecisionInputType", inputType)
-            .field("computedAspect", computedSignal)
-            .field("publishedAspect", publishSuppressed ? "SUPPRESSED" : traceSignal.name())
-            .field("publishSuppressed", publishSuppressed)
-            .field(
-                "zoneMembership",
-                request != null && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING
-                    ? "INSIDE_ZONE"
-                    : "-")
-            .field("drainLeader", drainLeader)
-            .field("canEnterConflictRelease", decision != null && decision.conflictRelease())
-            .field("canEnterReleaseLeader", drainLeader)
-            .field("releaseHintVerified", releaseHintVerified)
-            .field("drainAuthorityActive", drainAuthorityPresent)
-            .field("drainAuthorityLeader", drainLeader)
-            .field("drainAuthorityFresh", drainAuthorityPresent)
-            .field("drainAuthorityZoneMatches", releaseHintVerified)
-            .field("drainGateApplied", inputType == SignalDecisionInputType.DRAIN_THROUGH)
-            .field(
-                "drainGateSkippedReason",
-                inputType == SignalDecisionInputType.DRAIN_THROUGH
-                    ? "-"
-                    : drainGateSkippedReason(request, drainAuthorityPresent, releaseHintVerified))
-            .field(
-                "drainAuthorityId",
-                request == null || request.conflictReleaseHints().isEmpty()
-                    ? "-"
-                    : request.conflictReleaseHints().keySet())
-            .field("incident", drainAuthorityInconsistent ? "DRAIN_AUTHORITY_INCONSISTENT" : "-")
-            .request(request)
-            .decision(decision, request));
+    // 只有诊断要用这些分类；关着时跳过，但下面的实时 blocker 快照照常发布。
+    if (SignalComputationTrace.enabled()) {
+      SignalDecisionInputType inputTypeBeforeDrainClassification =
+          SignalDecisionInputClassifier.classify(request);
+      boolean releaseHintVerified = hasAnyVerifiedConflictReleaseHint(request);
+      boolean drainAuthorityPresent =
+          request != null
+              && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING
+              && releaseHintVerified
+              && decision != null
+              && decision.conflictRelease();
+      boolean drainLeader =
+          decision != null
+              && decision.conflictRelease()
+              && request != null
+              && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING;
+      SignalDecisionInputType inputType =
+          SignalDecisionInputClassifier.classify(
+              request,
+              new SignalDecisionInputClassifier.DrainClassificationContext(
+                  drainAuthorityPresent,
+                  drainAuthorityPresent,
+                  releaseHintVerified,
+                  releaseHintVerified,
+                  releaseHintVerified,
+                  false,
+                  hasOnlyTopologyExitHints(request)));
+      boolean drainAuthorityInconsistent =
+          drainAuthorityPresent
+              && inputType == SignalDecisionInputType.DRAIN_THROUGH
+              && !drainLeader;
+      SignalAspect computedSignal = decision != null ? decision.signal() : SignalAspect.STOP;
+      boolean publishSuppressed =
+          SignalDecisionInputClassifier.isProceedLike(computedSignal)
+              && !SignalDecisionInputClassifier.mayPublishProceed(
+                  request,
+                  inputType,
+                  drainLeader,
+                  drainAuthorityPresent,
+                  decision != null && decision.allowed() && !drainAuthorityInconsistent,
+                  false,
+                  SignalComputationTrace.TokenState.NONE,
+                  false);
+      SignalAspect traceSignal = computedSignal;
+      SignalComputationTrace.emit(
+          SignalComputationTrace.builder(
+                  request != null ? request.trainName() : "-",
+                  request != null ? request.trainName() : "-",
+                  SignalComputationTrace.Source.OCCUPANCY,
+                  traceSignal)
+              .primaryReason(reason)
+              .field("publicationTrace", "SMART_SIGNAL_PUBLICATION_TRACE")
+              .field("publicationAuthority", "TRACE_ONLY")
+              .field("physicalPublished", false)
+              .field("occupancyVersion", version())
+              .field("staleQueueCleanupCount", staleQueueCleanupCount())
+              .field("inputTypeBeforeDrainClassification", inputTypeBeforeDrainClassification)
+              .field("inputTypeAfterDrainClassification", inputType)
+              .field("signalDecisionInputType", inputType)
+              .field("computedAspect", computedSignal)
+              .field("publishedAspect", publishSuppressed ? "SUPPRESSED" : traceSignal.name())
+              .field("publishSuppressed", publishSuppressed)
+              .field(
+                  "zoneMembership",
+                  request != null && request.purpose() == AuthorizationPurpose.CONFLICT_CLEARING
+                      ? "INSIDE_ZONE"
+                      : "-")
+              .field("drainLeader", drainLeader)
+              .field("canEnterConflictRelease", decision != null && decision.conflictRelease())
+              .field("canEnterReleaseLeader", drainLeader)
+              .field("releaseHintVerified", releaseHintVerified)
+              .field("drainAuthorityActive", drainAuthorityPresent)
+              .field("drainAuthorityLeader", drainLeader)
+              .field("drainAuthorityFresh", drainAuthorityPresent)
+              .field("drainAuthorityZoneMatches", releaseHintVerified)
+              .field("drainGateApplied", inputType == SignalDecisionInputType.DRAIN_THROUGH)
+              .field(
+                  "drainGateSkippedReason",
+                  inputType == SignalDecisionInputType.DRAIN_THROUGH
+                      ? "-"
+                      : drainGateSkippedReason(request, drainAuthorityPresent, releaseHintVerified))
+              .field(
+                  "drainAuthorityId",
+                  request == null || request.conflictReleaseHints().isEmpty()
+                      ? "-"
+                      : request.conflictReleaseHints().keySet())
+              .field("incident", drainAuthorityInconsistent ? "DRAIN_AUTHORITY_INCONSISTENT" : "-")
+              .request(request)
+              .decision(decision, request));
+    }
     traceSwitcherBlockerReads(reason, request, decision);
     publishLiveBlockerSnapshot(reason, request, decision);
     return decision;

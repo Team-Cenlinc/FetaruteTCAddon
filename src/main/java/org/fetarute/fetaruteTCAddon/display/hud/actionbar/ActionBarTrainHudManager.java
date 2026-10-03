@@ -5,6 +5,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
@@ -20,17 +21,13 @@ import org.bukkit.event.player.PlayerKickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplate;
-import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarHudTemplateRenderer;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressExpression;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressTracker;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
@@ -46,6 +43,13 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class ActionBarTrainHudManager implements Listener {
 
   private static final long DEPARTING_WINDOW_TICKS = 60L;
+
+  /**
+   * 文字没变时多久重发一次（毫秒）。原版 ActionBar 约 2 秒内完全不透明、之后淡出；刷新间隔默认 0.5 秒， 文字不变也每次重发是白发包，隔 1.5
+   * 秒补一次足以一直显示，被其他插件盖掉后也会很快回来。
+   */
+  private static final long RESEND_MILLIS = 1500L;
+
   private static final String DEFAULT_TEMPLATE =
       "<white>欢迎乘坐 {company}/{operator} 列车</white> <gray>|</gray> <white>{line}</white>"
           + " <gray>|</gray> <white>前往 {dest_eop}</white>";
@@ -61,16 +65,15 @@ public final class ActionBarTrainHudManager implements Listener {
   private final BossBarProgressTracker progressTracker = new BossBarProgressTracker();
   private final HudStateTracker stateTracker = new HudStateTracker(DEPARTING_WINDOW_TICKS * 50L);
   private final Map<String, BossBarHudTemplate> templateCache = new HashMap<>();
-  private final Set<UUID> showingPlayers = new HashSet<>();
+
+  /** 正在显示的玩家，以及上次发出的文字与时刻。 */
+  private final Map<UUID, Shown> showingPlayers = new HashMap<>();
 
   public ActionBarTrainHudManager(
       FetaruteTCAddon plugin,
       LocaleManager locale,
       ConfigManager configManager,
-      EtaService etaService,
-      RouteDefinitionCache routeDefinitions,
-      RouteProgressRegistry routeProgressRegistry,
-      LayoverRegistry layoverRegistry,
+      TrainHudContextResolver contextResolver,
       HudTemplateService templateService,
       HudDefaultTemplateService defaultTemplateService,
       Consumer<String> debugLogger) {
@@ -80,16 +83,7 @@ public final class ActionBarTrainHudManager implements Listener {
     this.templateService = templateService;
     this.defaultTemplateService = defaultTemplateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
-    this.contextResolver =
-        new TrainHudContextResolver(
-            plugin,
-            locale,
-            etaService,
-            routeDefinitions,
-            routeProgressRegistry,
-            layoverRegistry,
-            templateService,
-            this.debugLogger);
+    this.contextResolver = Objects.requireNonNull(contextResolver, "contextResolver");
   }
 
   public void register() {
@@ -129,14 +123,8 @@ public final class ActionBarTrainHudManager implements Listener {
     progressTracker.clear();
     stateTracker.clear();
     templateCache.clear();
-    contextResolver.clearCaches();
     showingPlayers.clear();
     debugLogger.accept("ActionBarTrainHudManager shutdown");
-  }
-
-  /** 清理站点/公司等缓存，下次 tick 时重新从存储加载。 */
-  public void clearCaches() {
-    contextResolver.clearCaches();
   }
 
   @EventHandler
@@ -200,10 +188,9 @@ public final class ActionBarTrainHudManager implements Listener {
     state =
         HudStateTracker.applyOutOfService(
             state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
-    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
-    Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
-    player.sendActionBar(title);
-    showingPlayers.add(player.getUniqueId());
+    String templateLine =
+        template.resolveLine(state, HudLanguageRotation.nowTicks(), placeholders).orElse("");
+    send(player, HudText.apply(templateLine, placeholders), nowMillis);
     return Optional.of(trainName);
   }
 
@@ -214,22 +201,40 @@ public final class ActionBarTrainHudManager implements Listener {
     } else {
       destination = destination.trim();
     }
-    player.sendActionBar(Component.text(destination));
-    showingPlayers.add(player.getUniqueId());
+    send(player, HudText.escape(destination), System.currentTimeMillis());
   }
+
+  /** 文字变了，或距上次发送已超过 {@link #RESEND_MILLIS}，才解析并发送。 */
+  private void send(Player player, String text, long nowMillis) {
+    if (!needsSend(showingPlayers.get(player.getUniqueId()), text, nowMillis)) {
+      return;
+    }
+    player.sendActionBar(HudText.parse(text, debugLogger));
+    showingPlayers.put(player.getUniqueId(), new Shown(text, nowMillis));
+  }
+
+  /** 文字变了、从没发过，或同样的文字已经显示了 {@link #RESEND_MILLIS}。 */
+  static boolean needsSend(Shown last, String text, long nowMillis) {
+    return last == null
+        || !last.text().equals(text)
+        || nowMillis - last.atMillis() >= RESEND_MILLIS;
+  }
+
+  /** 上次发出的文字与时刻。 */
+  record Shown(String text, long atMillis) {}
 
   private void clear(Player player) {
     if (player == null) {
       return;
     }
-    if (showingPlayers.remove(player.getUniqueId())) {
+    if (showingPlayers.remove(player.getUniqueId()) != null) {
       player.sendActionBar(Component.empty());
     }
   }
 
   private void clearInactivePlayers(Set<UUID> currentPlayers) {
     if (currentPlayers == null || currentPlayers.isEmpty()) {
-      for (UUID uuid : new HashSet<>(showingPlayers)) {
+      for (UUID uuid : new HashSet<>(showingPlayers.keySet())) {
         Player player = Bukkit.getPlayer(uuid);
         if (player != null) {
           player.sendActionBar(Component.empty());
@@ -238,7 +243,7 @@ public final class ActionBarTrainHudManager implements Listener {
       showingPlayers.clear();
       return;
     }
-    for (UUID uuid : new HashSet<>(showingPlayers)) {
+    for (UUID uuid : new HashSet<>(showingPlayers.keySet())) {
       if (!currentPlayers.contains(uuid)) {
         Player player = Bukkit.getPlayer(uuid);
         if (player != null) {

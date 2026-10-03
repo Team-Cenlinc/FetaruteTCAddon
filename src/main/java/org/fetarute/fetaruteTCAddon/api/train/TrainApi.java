@@ -64,6 +64,19 @@ public interface TrainApi {
   Collection<TrainSnapshot> listAllActiveTrains();
 
   /**
+   * 获取所有世界的所有活跃列车，可选不算 ETA（1.9.0）。
+   *
+   * <p>{@code includeEta} 为 false 时每辆车的 {@link TrainSnapshot#eta()} 恒为空，省去每车一次到下一站的 ETA 计算；
+   * 只要线路、位置、退出服务等字段的汇总（如按线路数在途列车）用它。
+   *
+   * @param includeEta 是否计算下一站 ETA
+   * @return 列车快照集合（不可变）
+   */
+  default Collection<TrainSnapshot> listAllActiveTrains(boolean includeEta) {
+    return listAllActiveTrains();
+  }
+
+  /**
    * 获取指定列车的快照。
    *
    * @param trainName 列车名称

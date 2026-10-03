@@ -18,5 +18,9 @@
 - 复杂 YAML 结构（多行字符串、嵌套列表）不会被重排，仅保留用户原样。
 - 若用户删除了整个父级段，合并会插入模板中的完整 section 块。
 
+## 多文件
+- `ConfigUpdater.forPlugin` 处理 `config.yml`；`ConfigUpdater.forFile(dataFolder, fileName, 模板, logger)` 处理数据目录下的任意 YAML 文件，目前用于 `pids.yml`（见 `docs/dev/pids-config.md`）。
+- 各文件使用各自的 `config-version`；写回前的备份为同目录下的 `<文件名>.bak`（如 `pids.yml.bak`），互不覆盖。
+
 ## 运维建议
 - 遇到大版本升级时，仍建议对照模板复查关键参数。

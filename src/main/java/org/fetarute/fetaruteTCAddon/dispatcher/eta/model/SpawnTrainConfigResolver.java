@@ -1,158 +1,128 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.eta.model;
 
-import com.bergerkiller.bukkit.tc.SignActionHeader;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
-import org.bukkit.Bukkit;
-import org.bukkit.World;
-import org.bukkit.block.Block;
-import org.bukkit.block.Sign;
-import org.bukkit.block.sign.Side;
-import org.bukkit.block.sign.SignSide;
+import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 
 /**
- * 从 Route CRET depot 推断未发车列车的配置（加减速）。
+ * 推断未发车列车的车种（加减速），供未发车票据的 ETA 使用。
  *
- * <h2>解析优先级</h2>
+ * <h2>推断顺序</h2>
  *
  * <ol>
- *   <li>Route 首站 CRET 指向的 depot
- *   <li>depot 牌子第四行的 spawn pattern → 解析 savedTrain 获取 TrainType
- *   <li>若无法解析，fallback 到 config 默认的 TrainType
+ *   <li>交路 metadata 写明的编组（与出库同一来源，见 {@link DepotSpawnPattern}）
+ *   <li>交路首站 CRET 指向的车库牌子第 4 行
+ *   <li>编组名推断不出车种，或以上都没有时，用配置的默认车种
  * </ol>
  *
- * <h2>用途</h2>
+ * <h2>缓存</h2>
  *
- * <p>ETA 计算在列车未发车时需要知道加减速参数。此工具从 depot 配置推断，而非使用全局默认。
+ * <p>站牌每次重算都要为经过本站的每张票据估算走行，同一交路的票据推断结果相同，因此按交路缓存，命中时不读库、不读牌子。
+ *
+ * <ul>
+ *   <li>只缓存推断出的车种；加减速每次按当前配置取，配置重载不必失效。
+ *   <li>交路定义变化时由调用方 {@link #invalidateAll()}。
+ *   <li>每条结果 {@link #TTL} 后重新推断，车库牌子被改写最迟在这么久后生效。
+ *   <li>车库牌子所在区块未加载时不加载区块，沿用这条交路上次的结果；从未读到过时按默认车种。
+ * </ul>
  */
 public final class SpawnTrainConfigResolver {
 
-  private static final PlainTextComponentSerializer PLAIN_TEXT =
-      PlainTextComponentSerializer.plainText();
+  /** 推断结果的有效期。 */
+  static final Duration TTL = Duration.ofSeconds(60);
 
-  private final SignNodeRegistry signNodeRegistry;
-  private final ConfigManager.ConfigView config;
+  private static final String CREATE_DIRECTIVE = "CRET";
 
+  private final Function<UUID, Optional<Route>> routes;
+  private final Function<UUID, List<RouteStop>> routeStops;
+  private final Function<NodeId, DepotSpawnPattern.SignRead> depotSigns;
+  private final ConcurrentMap<UUID, Inferred> inferred = new ConcurrentHashMap<>();
+
+  /**
+   * @param routes 按 UUID 读交路
+   * @param routeStops 按交路 UUID 读停靠表；只在交路没写编组时读
+   * @param depotSigns 读车库牌子编组；实现不得为此加载区块
+   */
   public SpawnTrainConfigResolver(
-      SignNodeRegistry signNodeRegistry, ConfigManager.ConfigView config) {
-    this.signNodeRegistry = Objects.requireNonNull(signNodeRegistry, "signNodeRegistry");
-    this.config = Objects.requireNonNull(config, "config");
+      Function<UUID, Optional<Route>> routes,
+      Function<UUID, List<RouteStop>> routeStops,
+      Function<NodeId, DepotSpawnPattern.SignRead> depotSigns) {
+    this.routes = Objects.requireNonNull(routes, "routes");
+    this.routeStops = Objects.requireNonNull(routeStops, "routeStops");
+    this.depotSigns = Objects.requireNonNull(depotSigns, "depotSigns");
   }
 
   /**
-   * 根据 Route 推断未发车列车的配置。
+   * 交路上未发车列车的配置。
    *
-   * @param route Route 实体
-   * @param stops Route 对应的停靠列表（用于解析 CRET）
-   * @return 推断的列车配置，若无法推断则使用默认配置
+   * @param routeUuid 交路
+   * @param settings 当前车种配置
+   * @param now 当前时刻，用于判断缓存是否过期
    */
-  public TrainConfig resolveForRoute(Route route, List<RouteStop> stops) {
-    if (route == null || stops == null || stops.isEmpty()) {
-      return defaultConfig();
-    }
-
-    // 1. 查找 CRET depot
-    Optional<String> cretDepot = findCretDepotId(stops);
-    if (cretDepot.isEmpty()) {
-      return defaultConfig();
-    }
-
-    // 2. 从 depot 牌子解析 spawn pattern
-    Optional<String> pattern = resolveDepotSpawnPattern(cretDepot.get(), route);
-    if (pattern.isEmpty()) {
-      return defaultConfig();
-    }
-
-    // 3. 从 pattern 推断 TrainType
-    Optional<TrainType> trainType = inferTrainTypeFromPattern(pattern.get());
-    TrainType type = trainType.orElse(config.trainConfigSettings().defaultTrainType());
-
-    // 4. 根据 TrainType 获取配置
-    ConfigManager.TrainTypeSettings settings = config.trainConfigSettings().forType(type);
-    return new TrainConfig(type, settings.accelBps2(), settings.decelBps2());
+  public TrainConfig resolve(
+      UUID routeUuid, ConfigManager.TrainConfigSettings settings, Instant now) {
+    Objects.requireNonNull(routeUuid, "routeUuid");
+    Objects.requireNonNull(settings, "settings");
+    Objects.requireNonNull(now, "now");
+    TrainType type = inferredType(routeUuid, now).orElse(settings.defaultTrainType());
+    ConfigManager.TrainTypeSettings motion = settings.forType(type);
+    return new TrainConfig(type, motion.accelBps2(), motion.decelBps2());
   }
 
-  /**
-   * 根据 depot NodeId 和 Route 解析 spawn pattern。
-   *
-   * @param depotNodeId depot 节点 ID
-   * @param route Route 实体（可能在 metadata 中有 pattern）
-   * @return spawn pattern 字符串
-   */
-  public Optional<String> resolveDepotSpawnPattern(String depotNodeId, Route route) {
-    // 优先使用 Route metadata 中的 spawn_train_pattern
-    if (route != null && route.metadata() != null) {
-      Object value = route.metadata().get("spawn_train_pattern");
-      if (value instanceof String raw && !raw.isBlank()) {
-        return Optional.of(raw.trim());
-      }
-    }
-
-    // 其次从 depot 牌子读取
-    return readPatternFromDepotSign(depotNodeId);
+  /** 清空全部推断结果；交路定义变化或数据源更换时调用。 */
+  public void invalidateAll() {
+    inferred.clear();
   }
 
-  /** 从 depot 牌子第四行读取 spawn pattern。 */
-  private Optional<String> readPatternFromDepotSign(String depotNodeIdStr) {
-    if (depotNodeIdStr == null || depotNodeIdStr.isBlank()) {
-      return Optional.empty();
+  private Optional<TrainType> inferredType(UUID routeUuid, Instant now) {
+    Inferred cached = inferred.get(routeUuid);
+    if (cached != null && cached.freshAt(now)) {
+      return cached.type();
     }
-
-    NodeId depotNodeId = NodeId.of(depotNodeIdStr);
-    Optional<SignNodeRegistry.SignNodeInfo> infoOpt =
-        signNodeRegistry.snapshotInfos().values().stream()
-            .filter(info -> info != null && info.definition() != null)
-            .filter(info -> depotNodeId.equals(info.definition().nodeId()))
-            .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
-            .findFirst();
-
-    if (infoOpt.isEmpty()) {
-      return Optional.empty();
-    }
-
-    SignNodeRegistry.SignNodeInfo info = infoOpt.get();
-    World world = Bukkit.getWorld(info.worldId());
-    if (world == null) {
-      return Optional.empty();
-    }
-
-    Block block = world.getBlockAt(info.x(), info.y(), info.z());
-    if (!(block.getState() instanceof Sign sign)) {
-      return Optional.empty();
-    }
-
-    return readPatternFromSign(sign);
+    Inference inference = infer(routeUuid);
+    Optional<TrainType> type =
+        inference.signUnread() && cached != null ? cached.type() : inference.type();
+    inferred.put(routeUuid, new Inferred(type, now));
+    return type;
   }
 
-  private Optional<String> readPatternFromSign(Sign sign) {
-    return readPatternFromSide(sign, Side.FRONT).or(() -> readPatternFromSide(sign, Side.BACK));
+  private Inference infer(UUID routeUuid) {
+    Optional<Route> route = routes.apply(routeUuid);
+    if (route.isEmpty()) {
+      return Inference.known(Optional.empty());
+    }
+    Optional<String> routePattern = DepotSpawnPattern.fromRoute(route.get());
+    if (routePattern.isPresent()) {
+      return Inference.known(routePattern);
+    }
+    Optional<NodeId> depot = createDepot(routeStops.apply(routeUuid));
+    if (depot.isEmpty()) {
+      return Inference.known(Optional.empty());
+    }
+    DepotSpawnPattern.SignRead read = depotSigns.apply(depot.get());
+    return read.loaded() ? Inference.known(read.pattern()) : Inference.unread();
   }
 
-  private Optional<String> readPatternFromSide(Sign sign, Side side) {
-    SignSide view = sign.getSide(side);
-    String header = PLAIN_TEXT.serialize(view.line(0)).trim();
-    SignActionHeader parsed = SignActionHeader.parse(header);
-    if (parsed == null || (!parsed.isTrain() && !parsed.isCart())) {
+  private static Optional<NodeId> createDepot(List<RouteStop> stops) {
+    if (stops == null || stops.isEmpty()) {
       return Optional.empty();
     }
-    String type = PLAIN_TEXT.serialize(view.line(1)).trim().toLowerCase(Locale.ROOT);
-    if (!"depot".equals(type)) {
-      return Optional.empty();
-    }
-    String pattern = PLAIN_TEXT.serialize(view.line(3)).trim();
-    return pattern.isEmpty() ? Optional.empty() : Optional.of(pattern);
+    return SpawnDirectiveParser.findDirectiveTarget(stops.get(0), CREATE_DIRECTIVE).map(NodeId::of);
   }
 
   /**
@@ -194,17 +164,28 @@ public final class SpawnTrainConfigResolver {
     return Optional.empty();
   }
 
-  private Optional<String> findCretDepotId(List<RouteStop> stops) {
-    if (stops.isEmpty()) {
-      return Optional.empty();
+  /**
+   * 一次推断的结果。
+   *
+   * @param type 推断出的车种；为空表示按默认车种
+   * @param signUnread 车库牌子所在区块未加载、这次没读到；此时 {@code type} 没有意义
+   */
+  private record Inference(Optional<TrainType> type, boolean signUnread) {
+
+    static Inference known(Optional<String> pattern) {
+      return new Inference(
+          pattern.flatMap(SpawnTrainConfigResolver::inferTrainTypeFromPattern), false);
     }
-    RouteStop firstStop = stops.get(0);
-    return SpawnDirectiveParser.findDirectiveTarget(firstStop, "CRET");
+
+    static Inference unread() {
+      return new Inference(Optional.empty(), true);
+    }
   }
 
-  private TrainConfig defaultConfig() {
-    TrainType type = config.trainConfigSettings().defaultTrainType();
-    ConfigManager.TrainTypeSettings settings = config.trainConfigSettings().forType(type);
-    return new TrainConfig(type, settings.accelBps2(), settings.decelBps2());
+  private record Inferred(Optional<TrainType> type, Instant at) {
+
+    boolean freshAt(Instant now) {
+      return now.isBefore(at.plus(TTL));
+    }
   }
 }

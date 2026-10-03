@@ -1,0 +1,43 @@
+# 线路运行状况屏 3×5（640×384，3 行 5 块地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 本站所属运营商的线路，每条一行：色牌、线路名、运行状况、说明。3 条以内用大行（一页 3 条），
+# 4 条起用小行（一页 5 条），再多每 15 秒翻一页。
+format: 1
+name: 线路运行状况 3×5
+tiles:
+  rows: 3
+  cols: 5
+widgets:
+  # 与车站统屏同位置同字号；右对齐时 x 为右缘
+  - type: clock
+    x: 628
+    y: 39
+    size: 20
+    align: right
+  - type: line-status
+    x: 4
+    y: 24
+    width: 632
+    height: 360
+    inset: 8
+    title: {size: 36, secondary: 20, gap: 12}
+    # 运营商名一行（页码靠右）、表头与第一行的顶边，相对 y
+    operator: {y: 46, size: 12, secondary: 10, gap: 6}
+    header: {y: 76, size: 12, secondary: 10, gap: 4}
+    rows-y: 94
+    # 各列左缘，相对 x
+    columns: {name: 92, status: 288, detail: 452}
+    roomy:
+      height: 84
+      gap: 2
+      badge: {width: 74, height: 44, code: 24}
+      name: {size: 36, secondary: 12, gap: 4, fallback: 24}
+      status: {width: 156, height: 48, inset: 8, size: 24, secondary: 12, gap: 2}
+      detail: {size: 12, secondary: 10, gap: 2}
+    compact:
+      height: 50
+      gap: 2
+      badge: {width: 74, height: 34, code: 20}
+      name: {size: 24, secondary: 12, gap: 2, fallback: 20}
+      status: {width: 156, height: 42, inset: 8, size: 20, secondary: 12, gap: 2}
+      detail: {size: 12, secondary: 10, gap: 2}

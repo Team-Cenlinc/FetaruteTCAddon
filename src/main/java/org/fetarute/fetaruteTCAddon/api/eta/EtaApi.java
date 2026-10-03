@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalLong;
 import java.util.UUID;
 
 /**
@@ -163,7 +164,53 @@ public interface EtaApi {
     }
   }
 
-  /** 站牌行。 */
+  /** 站牌行所处的阶段（1.9.0），按离本站由远到近排列。 */
+  enum BoardPhase {
+    /** 未出票的预测班次（按发车计划或时刻表推算）。 */
+    FORECAST,
+    /** 已出票、尚未发车。 */
+    PENDING,
+    /** 运行中，尚未临近本站。 */
+    EN_ROUTE,
+    /** 即将到达或通过本站。 */
+    ARRIVING,
+    /** 已停在本站，尚未获准发车。 */
+    AT_STATION
+  }
+
+  /**
+   * 站牌行。
+   *
+   * <p>1.9.0 起增补结构化字段（时刻、阶段、停靠属性、晚点），显示方不必再解析 {@code statusText}。
+   *
+   * @param lineName 列车到本站时所属线路的代码（直通运转换线后为新线路）
+   * @param routeId 交路 ID（{@code 运营商:线路:交路}）
+   * @param destination 主目的地显示名（运营终点；回库车越过运营终点后为“回库”）
+   * @param destinationId 主目的地 ID
+   * @param endRoute 线路终点（EOR）显示名
+   * @param endRouteId 线路终点 ID
+   * @param endOperation 运营终点（EOP）显示名
+   * @param endOperationId 运营终点 ID
+   * @param platform 站台号；无法解析时为 {@code -}。1.9.0 起站台待定（见 {@code platformPending}）时也为 {@code -}， 此前给的是
+   *     DYNAMIC 范围里的第一条股道，列车未必去那里
+   * @param statusText 状态文本（英文短语）
+   * @param reasons 诊断标签
+   * @param etaEpochMillis 预计到达或通过本站的时间戳；已在站时为查询时刻；1.8.0 构造器创建的行为 0
+   * @param phase 所处阶段（1.9.0）
+   * @param stopSequence 本站停靠序号，交路节点的 0 起下标，与 RouteApi、TimetableApi 同一口径；未知时为 -1（1.9.0）
+   * @param passing 本站通过不停（1.9.0）
+   * @param terminating 本站是运营终点，乘客在此下车（1.9.0）
+   * @param outOfService 本站已越过运营终点，列车在回库途中（1.9.0）
+   * @param trainName 运行中列车的列车名；票据与预测为空（1.9.0）
+   * @param delaySeconds 按表运行时相对计划的偏差，正数为晚点：运行中为到达本站，已在站为发车，未发车为起点发车；不按表运行时为空（1.9.0）
+   * @param platformPending 站台待定：本站是动态站台（DYNAMIC）停靠，列车还没有选台，也没有计划站台（1.9.0）。
+   *     运行中列车通常在到达本站前一个节点（多为站咽喉）时选台
+   * @param platformCandidates 站台待定时可能停靠的站台号，按站台号升序；站台已定或候选未知时为空（1.9.0）
+   * @param platformPlanned 站台号是计划站台（1.9.0）：时刻表排定的股道，或没有时刻表计划时列车在下一个停车站上先定的暂定股道。
+   *     列车还没有选台，进站前选台时这条股道被占会改停别的站台，届时发 {@code TrainPlatformAssignedEvent}（原因 {@code
+   *     CHANGED_FROM_PLAN}）。有计划站台时不算待定
+   * @param cars 运行中列车各节车的座位与在座乘客，车头在前（1.9.0）；票据、预测与读不到车辆模型时为空
+   */
   record BoardRow(
       String lineName,
       String routeId,
@@ -175,7 +222,107 @@ public interface EtaApi {
       Optional<String> endOperationId,
       String platform,
       String statusText,
-      List<Reason> reasons) {}
+      List<Reason> reasons,
+      long etaEpochMillis,
+      BoardPhase phase,
+      int stopSequence,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      OptionalLong delaySeconds,
+      boolean platformPending,
+      List<String> platformCandidates,
+      boolean platformPlanned,
+      List<CarLoad> cars) {
+
+    public BoardRow {
+      destinationId = destinationId == null ? Optional.empty() : destinationId;
+      endRouteId = endRouteId == null ? Optional.empty() : endRouteId;
+      endOperationId = endOperationId == null ? Optional.empty() : endOperationId;
+      reasons = reasons == null ? List.of() : List.copyOf(reasons);
+      phase = phase == null ? BoardPhase.EN_ROUTE : phase;
+      trainName = trainName == null ? Optional.empty() : trainName;
+      delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
+      platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
+      cars = cars == null ? List.of() : List.copyOf(cars);
+    }
+
+    /** 全车空位数；没有载客数据时为空。 */
+    public java.util.OptionalInt vacantSeats() {
+      return cars.isEmpty()
+          ? java.util.OptionalInt.empty()
+          : java.util.OptionalInt.of(cars.stream().mapToInt(CarLoad::vacant).sum());
+    }
+
+    /**
+     * 1.8.0 及以前的构造器（源码与二进制兼容）：没有结构化字段，阶段按运行中、序号为 -1，{@code outOfService} 按主目的地 ID 是否为 {@code
+     * OUT_OF_SERVICE} 推断。
+     */
+    public BoardRow(
+        String lineName,
+        String routeId,
+        String destination,
+        Optional<String> destinationId,
+        String endRoute,
+        Optional<String> endRouteId,
+        String endOperation,
+        Optional<String> endOperationId,
+        String platform,
+        String statusText,
+        List<Reason> reasons) {
+      this(
+          lineName,
+          routeId,
+          destination,
+          destinationId,
+          endRoute,
+          endRouteId,
+          endOperation,
+          endOperationId,
+          platform,
+          statusText,
+          reasons,
+          0L,
+          BoardPhase.EN_ROUTE,
+          -1,
+          false,
+          false,
+          destinationId != null && destinationId.filter("OUT_OF_SERVICE"::equals).isPresent(),
+          Optional.empty(),
+          OptionalLong.empty(),
+          false,
+          List.of(),
+          false,
+          List.of());
+    }
+
+    /** 预计到达或通过本站的时间（1.9.0）；1.8.0 构造器创建的行为空。 */
+    public Optional<Instant> eta() {
+      return etaEpochMillis <= 0L
+          ? Optional.empty()
+          : Optional.of(Instant.ofEpochMilli(etaEpochMillis));
+    }
+  }
+
+  /**
+   * 一节车的座位与在座乘客（1.9.0）。座位数取车辆模型里的座位个数，在座取坐在这节车上的玩家。
+   *
+   * @param seats 座位数
+   * @param occupied 在座乘客数，不超过座位数
+   */
+  record CarLoad(int seats, int occupied) {
+
+    public CarLoad {
+      seats = Math.max(0, seats);
+      occupied = Math.max(0, Math.min(occupied, seats));
+    }
+
+    /** 空位数。 */
+    public int vacant() {
+      return seats - occupied;
+    }
+  }
 
   /**
    * ETA 诊断信息（面向调试/展示）。

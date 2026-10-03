@@ -1,11 +1,15 @@
 package org.fetarute.fetaruteTCAddon.utils;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.logging.Logger;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.junit.jupiter.api.Test;
@@ -38,5 +42,64 @@ public final class LocaleManagerTest {
 
     // 纯文本键读取（用于 list/status 等占位符）
     assertEquals("生效", locale.text("command.graph.edge.list.status.active"));
+  }
+
+  /** 旧文案清单里的每个键都还在内置语言文件里，且旧值与现在的文案不同（否则换了也白换）。 */
+  @Test
+  void supersededListMatchesTheBundledLocale() throws Exception {
+    YamlConfiguration bundled = bundled("lang/zh_CN.yml");
+    YamlConfiguration superseded = bundled("lang-superseded/zh_CN.yml");
+
+    for (String key : superseded.getKeys(true)) {
+      if (superseded.isConfigurationSection(key)) {
+        continue;
+      }
+      assertTrue(bundled.isString(key), () -> key + " 不在内置语言文件里");
+      assertFalse(superseded.getStringList(key).isEmpty(), key);
+      assertFalse(superseded.getStringList(key).contains(bundled.getString(key)), key);
+    }
+  }
+
+  private static YamlConfiguration bundled(String path) throws Exception {
+    try (InputStream stream = LocaleManagerTest.class.getClassLoader().getResourceAsStream(path)) {
+      YamlConfiguration yaml = new YamlConfiguration();
+      yaml.loadFromString(new String(stream.readAllBytes(), StandardCharsets.UTF_8));
+      return yaml;
+    }
+  }
+
+  /** 服务器语言文件里仍是改写前旧内置文案的键换成新文案，改过的保留，并写回文件。 */
+  @Test
+  void supersededBuiltInTextIsReplacedButCustomTextIsKept(@TempDir Path tempDir) throws Exception {
+    Path langDir = tempDir.resolve("lang");
+    Files.createDirectories(langDir);
+    Files.writeString(
+        langDir.resolve("zh_CN.yml"),
+        String.join(
+            "\n",
+            "prefix: \"\"",
+            "pids:",
+            "  board:",
+            "    notice:",
+            "      order:",
+            "        body: \"请让乘客先下车\"",
+            "      queue:",
+            "        body: \"本站自定义的排队提示\"",
+            ""),
+        StandardCharsets.UTF_8);
+    LoggerManager logger = new LoggerManager(Logger.getLogger("LocaleManagerTest"));
+    LocaleManager locale =
+        new LocaleManager(
+            new LocaleManager.LocaleAccess(tempDir.toFile(), logger, (path, replace) -> {}),
+            "zh_CN",
+            logger);
+
+    locale.reload();
+
+    assertEquals("请在车门两侧等候", locale.text("pids.board.notice.order.body"), "没改过的旧文案换成新的");
+    assertEquals("本站自定义的排队提示", locale.text("pids.board.notice.queue.body"), "改过的保留");
+    assertTrue(
+        Files.readString(langDir.resolve("zh_CN.yml"), StandardCharsets.UTF_8).contains("请在车门两侧等候"),
+        "写回服务器的语言文件");
   }
 }

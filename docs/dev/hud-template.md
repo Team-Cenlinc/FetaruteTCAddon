@@ -10,20 +10,56 @@
 - `STATION_DISPLAY`：站牌显示（预留）。
 
 ## 渲染顺序
-1) `{placeholder}` 替换
-2) MiniMessage 解析
-3) Adventure Component 输出
+1) 去掉条件占位符缺值的行（见下文“条件占位符”）
+2) `{placeholder}` 替换（未提供的 key 原样保留，便于排查模板）
+3) MiniMessage 解析（占位符的值里可以带颜色标签，如换乘线路色块）
+4) Adventure Component 输出；计分板再按 `max_width` 截断
+
+BossBar、ActionBar、计分板与后续站点对话框共用同一套替换与解析（`HudText`）。
+
+解析只开放展示类标签：颜色、样式（粗体、斜体等）、渐变、彩虹、过渡、`pride`、阴影色、`reset`、按键名（`<key:...>`）、
+可翻译文本（`<lang:...>`）与精灵图（`<sprite:...>`，1.21.9 以上客户端）。点击、悬停、插入、换行、字体、选择器、计分板与 NBT 读取
+都不解析、按原文显示：站名、线路名来自主数据，公司成员就能改，会原样进入模板，对话框里的文字又可以点，名称里夹带的点击事件不能变成钓鱼链接或命令。
+
+## 条件占位符 `{?key}`
+写成 `{?key}` 的占位符有值时与 `{key}` 一样替换；值缺失（未提供、空白或 `-`）时**整行不显示**。只对“行”生效：
+
+- BossBar / ActionBar：该行不参与轮播；某状态的行全部被隐藏时，与没写这个状态一样回退到 `DEFAULT`、再到无前缀行。
+- 计分板：静态页、`header` / `footer` 与 `row` 里的该行去掉，下面的行依次上移。
+- 后续站点对话框：每站的说明行省略。
+
+计分板标题与列表的 `empty` 文案、对话框的标题、概况与每站标题行是单行，不做隐藏：缺值时 `{?key}` 与 `{key}` 一样替换（得到 `-` 或空）。
+
+用于只在部分站、部分时刻才有内容的行，例如：
+
+```text
+ARRIVING_1: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white>
+ARRIVING_3: <green>▼</green> <yellow>{next_station}</yellow> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
+IN_TRIP_5: <white>下一站</white> <yellow>{next_station}</yellow> <dark_gray>┃</dark_gray> <gold>晚点约 {?delay_minutes} 分钟</gold>
+```
+
+没有换乘的站只轮播 `ARRIVING_1`；有换乘时两行轮流出现。写错 key 时该行永远不显示，排查时先检查拼写。
 
 ## 默认模板回退顺序
-默认模板优先从 `plugins/FetaruteTCAddon/default_hud_template.yml` 读取：
-- `bossbar.template`
-- `actionbar.template`
+每块 HUD 按以下顺序取模板：线路绑定模板 → `config.yml` 的 `runtime.hud.<通道>.template` →
+`plugins/FetaruteTCAddon/default_hud_template.yml`（`bossbar.template` / `actionbar.template` / `player_display.template`）→
+语言文件（`display.hud.bossbar.template` 等）或内置常量。
 
-当线路未绑定模板且 config 未配置时，BossBar/ActionBar 会回退到对应默认模板；最后才会回退到语言文件中的 `display.hud.bossbar.template` / `display.hud.actionbar.template`。
+### 默认模板升级
+`default_hud_template.yml` 只在文件不存在时从插件复制；为了让新版默认模板到达已部署的服务器，每次加载（启动、`/fta reload`）逐个通道比对：
 
-**升级提醒**：`default_hud_template.yml` 只在文件不存在时生成；语言文件只补缺失的键，而每个模板整块是一个键。
-所以新版本给默认模板加的状态行（如 1.7.0 的 `OUT_OF_SERVICE`）**不会进入已部署服务器**，需要手动把新行加进
-`plugins/FetaruteTCAddon/default_hud_template.yml`（或删掉该文件让插件重新生成），以及已有的线路绑定模板。
+- 与插件内置的当前默认模板相同：照用。
+- 与某个**已发布过的旧版默认模板**相同（指纹列在插件内 `hud/default_hud_template.history`）：说明没改过，按新版显示；
+  文件里所有通道都是这种情况时，直接把文件换成新版并在日志里说明。
+- 留空或删掉某个通道：照旧表示不用这个文件、回退到语言文件里的模板，算作改过。
+- 其余（管理员改过，包括插件并不内置的通道，如 `announcement`）：照用文件里的模板，不覆盖；新版新增的状态行要自己合并。
+
+只有没有任何通道被改过时才整份换成新版，换之前另存为 `default_hud_template.yml.bak`；否则文件不动，旧版默认模板只在内存里按新版显示。
+
+指纹是模板文本按行去掉行尾空白、去掉首尾空行后的 SHA-256。**修改内置默认模板时，必须把修改前各通道的指纹追加到历史文件**，
+否则已部署的旧版会被当成“改过”而停在旧版。
+
+线路绑定模板与 `config.yml` 里的模板属于管理员，不会自动升级。
 
 ## 状态模板（可选）
 BossBar/ActionBar 支持按状态选择模板行，格式为：
@@ -48,7 +84,7 @@ AT_LAST_STATION: <template line>
 - ON_LAYOVER 表示终到后折返/待命，优先级高于 AT_LAST_STATION/AT_STATION
 - OUT_OF_SERVICE 表示回库车已越过运营终点（「回库 / Not in Service」，与 `dest_eop` 显示「回库」同一判定），优先于除 ON_LAYOVER 外的所有状态。
   **只有模板写了 `OUT_OF_SERVICE` 行才生效**：没写的模板（包括此前的全部模板）仍按停站、运行、临时停车等状态显示，不会回退到 `DEFAULT`。
-  越过运营终点后 `next_station` 为 `-`（不再退回去显示已经过的终点站）。已部署服务器的默认模板需手动加上这一状态，见上文“升级提醒”
+  越过运营终点后 `next_station` 为 `-`（不再退回去显示已经过的终点站）。没改过的默认模板会自动升级到含这一状态的版本，改过的需手动加上，见上文“默认模板升级”
 - AT_LAST_STATION 表示停在终点站（EOP），优先级高于 AT_STATION
 - 兼容旧模板的 `STOP`/`LAYOVER`/`TERMINAL_ARRIVING` 前缀，解析时会视为 `AT_STATION`/`ON_LAYOVER`/`TERM_ARRIVING`
 
@@ -117,7 +153,8 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{line_name}` → `东湾快线`
 - `line_color`：线路颜色（Line.color，形如 `#RRGGBB`；缺失为 `""`）
   - 例：`<# {line_color}>` → `<#2BC4FF>`（模板内自行包裹）
-- `line_color_tag`：线路颜色标签（`#RRGGBB` 或默认 `dark_aqua`）
+- `line_color_tag`：线路颜色标签，可直接写成 MiniMessage 标签：六位十六进制（带不带 `#` 均可）规范成 `#RRGGBB`，
+  原版颜色名原样小写（`grey`、`dark_grey` 换成 `gray`、`dark_gray`）；其余（含未设置）为 `white`
   - 例：`<{line_color_tag}>{line}` → `<#2BC4FF>LINE`
 - `operator`：运营商 code（当前线路的运营商；未直通时即 RouteMetadata.operator）
   - 例：`{operator}` → `SURN`
@@ -139,6 +176,7 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{next_station_code}` → `CEN`
 - `next_station_lang2`：下一站第二语言名（缺失为 `-`）
   - 例：`{next_station_lang2}` → `Central`
+- `next_station_track`：下一站的站台号（从节点 ID 解析；缺失为 `-`）。动态站台按这趟车的选台结果，尚未选台时为 `-`（不显示占位股道）；后续站点对话框与计分板列表的站台号同一口径
 - `current_station`：当前站（由运行时快照推断站名）；缺失为 `-`
   - 例：`本站 {current_station}` → `本站 Central`
 - `current_station_code`：当前站 code
@@ -182,6 +220,15 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 - `through_operator`：换线后线路的运营商 code
   - 例：`本列车自 {through_station} 起直通运行 <{through_line_color_tag}>{through_line}</{through_line_color_tag}>`
 
+### 换乘与晚点字段
+- `transfer_lines`：下一站可换乘的线路，每条线一个线路色色块紧跟线路代码（如 `█DS █WS`）；没有换乘为 `-`
+- `transfer_line_names` / `transfer_line_names_lang2`：同上，文字为线路名 / 第二语言名（未填写时为线路名）
+  - 换乘口径与站台屏相同：停靠该站及同组车站的线路（`StationApi#linesServing`），去掉本车在这一站所属的线路——
+    换线站以原线路到达、以新线路发车，两条都去掉；换线之后的站，列车离开的那条线在那里算换乘
+- `delay_minutes`：按表运行时到达下一站的晚点分钟数（预计到达减计划到达，与站台屏同一口径）；不足 1 分钟、不按表运行时为 `-`
+  - 与 `eta_status` 里的“延误”不同：后者是被扣停的时长，不看时刻表
+- 以上字段通常配合条件占位符使用：`可换乘 {?transfer_lines}`、`晚点约 {?delay_minutes} 分钟`
+
 ### ETA 字段
 - `eta_status`：ETA 状态短文本（Arriving/3m/Delayed 5m 等）
   - 列车被扣停（信号、占用、授权等）满 1 分钟显示 `Delayed N m`，N 为已扣分钟数；被扣停时不显示 Arriving
@@ -205,12 +252,16 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
   - 例：`{player_carriage_no}` → `2`
 - `player_carriage_total`：列车编组总车厢数（无法解析为 `-`）
   - 例：`{player_carriage_total}` → `8`
+- `trip_dialog_key`：后续站点对话框的入口按键（`<key:key.swapOffhand>`，客户端按玩家自己的键位显示）；
+  只在按键入口开着、且玩家还没打开过对话框时有值，否则为 `-`。配合 `{?trip_dialog_key}` 做一次性的入口提示
 
 ### 信号/占用字段
 - `signal_status`：中文信号提示（通行/注意/停车）
   - 例：`Signal {signal_status}` → `Signal 注意`
 - `signal_aspect`：枚举值（PROCEED/PROCEED_WITH_CAUTION/CAUTION/STOP/UNKNOWN）
   - 例：`{signal_aspect}` → `PROCEED`
+- `signal_color_tag`：信号颜色标签（可直接写成 MiniMessage 标签）
+  - 例：`<{signal_color_tag}>⬤</{signal_color_tag}>`
 
 ### 运行状态字段
 - `service_status`：营运状态（营运中/待命）
@@ -272,6 +323,9 @@ pages:
 
 ### 顶层字段说明
 - `lines`：每页固定行数（最大 15）。
+- `max_width`：标题与每行的最大宽度（像素，按原版字体估算：汉字 9、多数英文字母 6、空格 4），超出截掉并补 `…`；默认 128（约 14 个汉字），`0` 表示不限。
+  计分板按最长一行撑宽，长站名、长英文名最容易把它撑开挡住画面；换乘这类宽内容建议放 ActionBar。
+  没写 `max_width` 的既有模板（线路绑定模板、`config.yml` 里的模板）同样按 128 截断；要保留原样请写 `max_width: 0`。
 - `page_duration_ticks`：分页轮播间隔（ticks），用于单语状态与同一语言内的多页；中英文页按全局 `language-rotate-ticks` 与 BossBar/ActionBar 同步切换（见“双语轮播”）。
 - `title`：Scoreboard 标题（MiniMessage，占位符同 BossBar/ActionBar；建议在 page 内单独配置）。
 - `pages`：按 HUD 状态分组的页面。
@@ -323,7 +377,22 @@ windowOffset 规则（用于“固定前三站 + 滚动后续”）：
 
 list-item 占位符（`next_stops`）：
 - `index` / `idx`：序号（从 1 开始）
-- `station` / `station_code` / `station_lang2`
+- `station` / `station_code` / `station_lang2` / `station_track`
 - `eta` / `eta_minutes` / `eta_status`
+- `transfer_lines` / `transfer_line_names` / `transfer_line_names_lang2` / `delay_minutes`：该站的换乘与晚点，含义同全局字段
 - 行内的 `line*`（`line`、`line_lang2`、`line_code`、`line_name`、`line_color`、`line_color_tag`）取**该站所属的线路**：
   直通运转换线之后的各站显示新线路（与列车当前线路相同的站不覆盖），所以 `<{line_color_tag}>◘</{line_color_tag}>` 这类行首色块会在换线站起变色
+
+## 后续站点对话框（`/fta trip`）
+乘客需要时自己打开，不在上车时弹出（Paper 对话框，需要 1.21.6 及以上的客户端）：
+
+- 入口：乘坐 FTA 列车时按副手交换键（默认 F），或输入 `/fta trip`（权限 `fetarute.trip`，默认所有人；按键与对话框按钮也检查）。
+  只在乘车时拦截副手交换，下车后按键恢复原功能；`runtime.hud.trip-dialog.swap-hand-key: false` 关掉按键入口。同一玩家 1 秒内只打开一次。
+- 提示：默认 ActionBar 模板在 `IN_TRIP` 轮播里有一页 `按 {?trip_dialog_key} 查看后续站点`，玩家打开过一次后（记在玩家数据
+  `fetarutetcaddon:trip_dialog_used`）不再出现。
+- 内容：标题（线路、种别、终点）、列车概况、前方最多 12 站。每站一个图标——下一站矿车、有换乘的站动力铁轨、终点红旗、其余铁轨；
+  说明行依次为第二语言站名、换乘、晚点、直通换线。内容是打开那一刻的快照，对话框里有“刷新”与“只看换乘站”
+  （只看换乘站时往前看 64 站、筛完再截，仍保留下一站、终点站与换线站）；乘客下车时，本插件打开且未关闭的对话框会关掉。
+- 按钮回调只记“是否只看换乘站”，执行时现取当前服务实例；`/fta reload` 之后点旧对话框的按钮也走新实例。
+- 文案在语言文件 `display.trip.*`，与 HUD 模板同一写法（`{key}` + MiniMessage，`{?key}` 缺值省略整行），
+  行内占位符同计分板列表行，另有 `line_change`（直通运转在这一站换到另一条线时为新线路名）。

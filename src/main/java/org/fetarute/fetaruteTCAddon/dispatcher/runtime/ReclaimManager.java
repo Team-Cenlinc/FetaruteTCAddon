@@ -167,6 +167,32 @@ public class ReclaimManager {
    */
   private volatile java.util.function.Predicate<String> dutyBound = trainName -> false;
 
+  /**
+   * 这辆待命车该走的回库线路（它所绑交路的回库线路）。默认恒空。
+   *
+   * <p>一个终点常有开往不同车库的几条回库线路；回收派票时先试这一条，车回到按表该回的车库，站牌照交路写的终点才对得上。 按表运行时装上 {@code
+   * TimetableService#returnRouteOf}。
+   */
+  private volatile java.util.function.Function<String, Optional<UUID>> preferredReturnRoute =
+      trainName -> Optional.empty();
+
+  /**
+   * 等回库班判定：这辆待命车停在它自己交路带客回库班的起点站、回库班还开得成。默认恒否。
+   *
+   * <p>成立时回收不带走它（让回库班的票带走），它也不算本方向的闲置供给——它马上要随回库班离开，不是能接别的票的车。 按表运行时装上 {@code
+   * TimetableService#awaitsOwnReturnAt}。
+   */
+  private volatile java.util.function.BiPredicate<
+          String, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId>
+      ownReturnWait = (trainName, location) -> false;
+
+  /** 回收派车成功后的通知（派走前的列车名、走的回库线路）。按表运行时用来结清交路。 */
+  private volatile java.util.function.BiConsumer<String, UUID> reclaimListener =
+      (trainName, routeId) -> {};
+
+  /** 已经记过“等回库班”的列车，状态变了才再记一行。 */
+  private final Set<String> ownReturnWaitReported = new HashSet<>();
+
   private BukkitTask task;
 
   public ReclaimManager(
@@ -264,6 +290,36 @@ public class ReclaimManager {
   }
 
   /**
+   * 装上回库线路偏好：回收派票时先试列车所绑交路的回库线路。
+   *
+   * @param resolver 列车名到回库线路；{@code null} 恢复为没有偏好
+   */
+  public void setPreferredReturnRoute(
+      java.util.function.Function<String, Optional<UUID>> resolver) {
+    this.preferredReturnRoute = resolver == null ? trainName -> Optional.empty() : resolver;
+  }
+
+  /**
+   * 装上等回库班判定：停在自己交路带客回库班起点站、回库班还开得成的车不回收，也不算闲置供给。
+   *
+   * @param predicate 列车名与它停的节点；{@code null} 恢复为恒否
+   */
+  public void setOwnReturnWait(
+      java.util.function.BiPredicate<String, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId>
+          predicate) {
+    this.ownReturnWait = predicate == null ? (trainName, location) -> false : predicate;
+  }
+
+  /**
+   * 装上回收派车成功的通知。
+   *
+   * @param listener 派走前的列车名与走的回库线路；{@code null} 恢复为不通知
+   */
+  public void setReclaimListener(java.util.function.BiConsumer<String, UUID> listener) {
+    this.reclaimListener = listener == null ? (trainName, routeId) -> {} : listener;
+  }
+
+  /**
    * 装上单股道车站判定：停在这种站上、且过了立即回收闸（{@link #setMainlineReturnGate}）的车，与正线折返点一样立即回收。
    *
    * @param predicate 节点是不是单股道车站；{@code null} 恢复为恒否
@@ -313,7 +369,18 @@ public class ReclaimManager {
     pruneStranded(candidates);
     reportStaleDispatchAttempts(candidates, now);
     Map<String, Integer> pendingDemandByDirection = buildPendingDemandByDirection();
-    Map<String, Integer> layoverSupplyByDirection = buildLayoverSupplyByDirection(candidates);
+    Set<String> waitingOwnReturn = new HashSet<>();
+    for (LayoverRegistry.LayoverCandidate candidate : candidates) {
+      if (ownReturnWait.test(candidate.trainName(), candidate.locationNodeId())) {
+        waitingOwnReturn.add(candidate.trainName());
+      }
+    }
+    ownReturnWaitReported.retainAll(waitingOwnReturn);
+    Map<String, Integer> layoverSupplyByDirection =
+        buildLayoverSupplyByDirection(
+            candidates.stream()
+                .filter(candidate -> !waitingOwnReturn.contains(candidate.trainName()))
+                .toList());
 
     // 候选排序：优先回收闲置时间更久的列车
     List<LayoverRegistry.LayoverCandidate> sorted =
@@ -408,6 +475,13 @@ public class ReclaimManager {
       if (shouldReclaim && !mainlineReturn && !returnGate.test(candidate.trainName())) {
         // 交路还有班次：这不是派不出回库票，不能记成滞留。
         debugLogger.accept("回收跳过: 交路还有班次要跑 train=" + candidate.trainName());
+        continue;
+      }
+      if (shouldReclaim && !mainlineReturn && waitingOwnReturn.contains(candidate.trainName())) {
+        // 自己交路的带客回库班还开得成：让它的票带走车，不抢先派去别的车库。
+        if (ownReturnWaitReported.add(candidate.trainName())) {
+          debugLogger.accept("回收跳过: 等本交路的带客回库班 train=" + candidate.trainName());
+        }
         continue;
       }
       if (shouldReclaim) {
@@ -612,6 +686,26 @@ public class ReclaimManager {
     return out;
   }
 
+  /** 通知回收派车成功；监听者异常不得影响回收扫描。 */
+  private void notifyReclaimed(String trainName, UUID routeId) {
+    try {
+      reclaimListener.accept(trainName, routeId);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("回收通知失败: train=" + trainName + " error=" + ex);
+    }
+  }
+
+  /** 把偏好的回库线路排到最前面，其余顺序不变。 */
+  private static List<Route> preferredFirst(List<Route> routes, Optional<UUID> preferred) {
+    if (preferred == null || preferred.isEmpty()) {
+      return routes;
+    }
+    List<Route> out = new ArrayList<>(routes.size());
+    routes.stream().filter(route -> route.id().equals(preferred.get())).forEach(out::add);
+    routes.stream().filter(route -> !route.id().equals(preferred.get())).forEach(out::add);
+    return out;
+  }
+
   /** 这条 RETURN 交路的首站是不是这个终点。 */
   private static boolean startsAt(StorageProvider provider, Route route, String terminalKey) {
     List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
@@ -777,7 +871,10 @@ public class ReclaimManager {
     UUID operatorId = operatorOpt.get().id();
     String opCode = operatorOpt.get().code();
 
-    List<Route> allReturnRoutes = allReturnRoutes(provider, Optional.of(operatorId));
+    List<Route> allReturnRoutes =
+        preferredFirst(
+            allReturnRoutes(provider, Optional.of(operatorId)),
+            preferredReturnRoute.apply(candidate.trainName()));
 
     if (allReturnRoutes.isEmpty()) {
       debugLogger.accept(
@@ -802,6 +899,7 @@ public class ReclaimManager {
         boolean success = ticketAssigner.forceAssign(provider, candidate.trainName(), ticket);
         if (success) {
           stableReturnTickets.remove(ticket.ticketId());
+          notifyReclaimed(candidate.trainName(), route.id());
           debugLogger.accept("回收成功: 已分配 RETURN ticket train=" + candidate.trainName());
           return ReturnOutcome.ASSIGNED;
         }

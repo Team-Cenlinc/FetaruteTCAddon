@@ -16,6 +16,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteViaMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -150,8 +151,14 @@ public final class RouteApiImpl implements RouteApi {
     // 总距离（需要从图计算，这里简化为 0）
     int totalDistance = 0;
 
+    List<String> via =
+        routeDefinitions
+            .findRecord(routeUuid)
+            .map(record -> RouteViaMetadata.read(record.route().metadata()))
+            .orElse(List.of());
+
     return new RouteDetail(
-        info, List.copyOf(waypoints), List.copyOf(stops), terminal, totalDistance);
+        info, List.copyOf(waypoints), List.copyOf(stops), terminal, totalDistance, via);
   }
 
   /** 各停靠点的车站身份（与 {@code stops} 下标对齐）；交路缓存重建时已由车站目录算好，这里只查表。 */

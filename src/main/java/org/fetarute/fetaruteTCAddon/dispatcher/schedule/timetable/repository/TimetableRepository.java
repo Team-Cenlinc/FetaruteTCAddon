@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PlatformPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStatus;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
@@ -51,4 +52,15 @@ public interface TimetableRepository {
 
   /** 读一份表的邻表基线。 */
   List<TimetableBaseline> listBaselines(UUID timetableId);
+
+  /**
+   * 替换一份表的计划股道（build 后写入）。计划挂在车次上，{@link #save} 整体替换车次时会一并清空，所以要在 save 之后写。
+   *
+   * @param timetableId 时刻表
+   * @param plans 计划股道；空列表表示没有计划
+   */
+  void replacePlatformPlans(UUID timetableId, List<PlatformPlan> plans);
+
+  /** 读一份表的计划股道。 */
+  List<PlatformPlan> listPlatformPlans(UUID timetableId);
 }

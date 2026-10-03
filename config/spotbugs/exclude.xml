@@ -153,6 +153,35 @@
         <Class name="org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+    <!-- 后续站点对话框：服务与命令持有插件句柄；TripSheet 的字段是不可变的 Adventure Component -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripDialogService"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaTripCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- 站台广播：命令持有插件句柄；站台屏服务对外提供广播服务本身（生命周期随站台屏服务） -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaAnnounceCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.pids.PidsService"/>
+        <Method name="announcer"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Or>
+            <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet"/>
+            <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet$Row"/>
+        </Or>
+        <Or>
+            <Bug pattern="EI_EXPOSE_REP"/>
+            <Bug pattern="EI_EXPOSE_REP2"/>
+        </Or>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManager"/>
         <Method name="applySchemaIfReady"/>
@@ -243,6 +272,10 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.StorageManager"/>
         <Bug pattern="SQL_NONCONSTANT_STRING_PASSED_TO_EXECUTE"/>
     </Match>
@@ -308,6 +341,14 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener"/>
         <Method name="createStickItem"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.pids.PidsItems"/>
+        <Or>
+            <Method name="installPaper"/>
+            <Method name="stick"/>
+        </Or>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
     </Match>
     <Match>

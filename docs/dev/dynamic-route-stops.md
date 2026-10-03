@@ -139,6 +139,26 @@ TrainCarts destination。
 
 ### Materialization 粘性
 
+**选台口径统一**：信号 tick（`DynamicPlatformAllocator`）、车站停站结束与 STOP 路点推进到下一站（`resolveDynamicStationTargetIfNeeded`）
+用同一个分配器——同一份候选枚举（未声明范围即该站现有全部股道）、同一张预订表、同一条物理先后规则；已经选定的站台原样沿用。
+推进点选台（构建进路请求预判的那一路）同样不选别的车已预订的站台。以前车站与 STOP 路点各按股道号取第一个空闲股道：
+未声明范围时只看 1 道，1 道被占就误报“没有站台”把车扣在原地，也会订走别的车已预订的站台。
+
+**计划站台优先**（`DynamicPlatformAllocator#setPreference`）：有计划股道且它在空闲候选里时直接选它，不再比方向；
+计划股道不空闲就照常按方向优选并留痕 `DYNAMIC 计划站台不可用，改选`。偏好只决定在空闲候选里挑哪一条，从不让不空闲的站台变得可选，
+也不会让本来选得到站台的车变成没有站台；已缓存的选台不因计划翻回。计划股道由编表排定（见 timetable.md「计划站台」），
+经停靠协调器的计划源（`ScheduledDeparturePlan#plannedPlatformOf`）读出；按方向优选的打分（`PlatformApproach`）与编表排台共用。
+
+**暂定站台**（`DynamicPlatformAllocator#refreshTentative`）：没有时刻表计划的车，还没进选台窗口时，信号 tick 给它的下一个停车站
+（DYNAMIC、尚未选台）先定一条暂定股道——空闲候选里（没被占用、没被别的车预订或暂定）取进站方向最顺的那条；之后沿用，
+除非它已不空闲（被占用、被别的车选走或暂定）。每辆车至多每秒重看一次。
+站牌经停靠协调器（`StationStopCoordinator#displayPlatform`）只读计划或暂定站台；选台偏好在没有时刻表计划时就是暂定站台，
+所以选台尽量兑现站牌上写的那条，兑现不了时站台落定事件的原因是 `CHANGED_FROM_PLAN`、上一条是暂定股道，站台屏据此播报站台变更。
+一辆车同时只有一条暂定站台；越过那一站、换交路、列车销毁时作废。暂定只由调度这边定，选台结果不随有没有人看站牌、从哪个线程查站牌而变。
+
+**站台落定事件**：所有写有效节点的地方（选台、到站观测、折返交接）都经过同一处，第一次定下（DYNAMIC 停靠、或实际股道不是声明节点）
+或与上一次不同时经 `StationStopObserver#onPlatformResolved` 播报，同值不发；公开为 `TrainPlatformAssignedEvent`（见 api.md）。
+
 同一列车、route 与 stop index 一旦选出合法 effective node，该选择在本段运行中保持稳定。后续中间 waypoint 或周期 signal tick 只能复用已经 materialize 的站台；即使另一站台此刻更空闲，也不能覆盖原选择。原站台 NODE 暂时繁忙时保持 `BLOCKED` 并监听该站台容量释放；站台有容量而进路繁忙时等待普通 Gate Queue，不能通过重新选台制造 destination 与已申请进路分叉。
 
 只有 materialization 的 route/声明节点/RouteStop 定义证据失效、交路 handoff 清理旧状态，或列车真实完成该进度窗口后，运行时才允许建立新的选择。相关回归应同时验证“首次选择成功”和“后续推进点不会从已选股道跳回较小股道”。

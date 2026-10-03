@@ -1,0 +1,69 @@
+# 多站台屏 1×3（384×128，1 行 3 块地图）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 与站台屏 1×3 同一结构，用于楼梯口、换乘通道等对着几个站台的位置：
+# 块 1 左上角每个站台一个方块（最多 4 个，每行 2 个）；每行到发在线路色牌后面写站台号，乘客一眼看出该去哪个站台，
+# 到站时间与状态一侧与站台屏相同。
+format: 1
+name: 多站台屏 1×3
+tiles:
+  rows: 1
+  cols: 3
+widgets:
+  - type: platform
+    x: 8
+    y: 5
+    box: 24
+    number: 20
+    label-gap: 3
+    label: {size: 12, secondary: 10, gap: 1}
+    max: 4
+    per-row: 2
+    gap: 4
+  - type: clock
+    x: 8
+    y: 92
+    size: 20
+  - type: line-band
+    x: 0
+    y: 120
+    width: 384
+    height: 8
+  - type: departures
+    x: 66
+    y: 4
+    width: 310
+    columns:
+      badge: {x: 0, width: 62}
+      platform: {x: 62, width: 26}
+      destination: {x: 88, width: 108}
+      arrival: {x: 196, width: 114}
+    rows:
+      # 首行（下一班）
+      - height: 52
+        panel: true
+        badge: {width: 42, height: 28, code-width: 24, code: 12, type: 10, type-gap: 1}
+        destination: {size: 20, secondary: 10, gap: 2, inset: 6, wrap: true, fallback: 12}
+        platform: {box: 24, size: 20, label: 0, inset: 1}
+        arrival:
+          inset: 6
+          number: 36
+          number-gap: 3
+          unit: {size: 12, secondary: 10, gap: 1, stacked: true}
+          status: {size: 12, secondary: 10, gap: 1, stacked: true}
+          highlight: {size: 24, secondary: 10, spread: true}
+      # 其余两行
+      - height: 30
+        divider: 2
+        count: 2
+        badge: {width: 42, height: 26, code-width: 24, code: 12, type: 10, type-gap: 1}
+        destination: {size: 12, secondary: 10, gap: 2, inset: 6}
+        platform: {box: 20, size: 12, label: 0, inset: 3}
+        arrival:
+          inset: 6
+          number: 20
+          number-box: 24
+          number-align: right
+          number-gap: 2
+          unit: {size: 12}
+          status: {size: 12, secondary: 10, gap: 2, stacked: true}
+          highlight: {size: 12, secondary: 10, spread: true}

@@ -379,6 +379,16 @@ public final class RouteTerminals {
     return -1;
   }
 
+  /**
+   * 站台号：节点的股道号，站牌、站台屏同一口径。
+   *
+   * @param nodeId 站台、咽喉或车库股道节点
+   * @return 股道号；不是股道类节点时为 {@code -}
+   */
+  public static String platformOf(String nodeId) {
+    return parseWaypoint(nodeId).map(meta -> String.valueOf(meta.trackNumber())).orElse("-");
+  }
+
   private static Optional<WaypointMetadata> parseWaypoint(String nodeId) {
     if (nodeId == null || nodeId.isBlank()) {
       return Optional.empty();

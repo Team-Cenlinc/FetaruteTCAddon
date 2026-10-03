@@ -112,6 +112,36 @@ class TimetableBuilderRapidStaggerTest {
             rapid, profileOf(rapid, "RAP", List.of(A, E2), 0));
     TimetableConflictChecker.GraphIndex index = TimetableConflictChecker.GraphIndex.of(graph);
 
+    String rapidTrip =
+        shifted.trips().stream()
+            .filter(trip -> trip.routeId().equals(rapid))
+            .findFirst()
+            .orElseThrow()
+            .tripCode();
+    String localTrip =
+        shifted.trips().stream()
+            .filter(trip -> trip.routeId().equals(local))
+            .findFirst()
+            .orElseThrow()
+            .tripCode();
+    List<ResourceRepair.Yield> yields =
+        List.of(
+            new ResourceRepair.Yield(
+                TimetableConflictChecker.Kind.TRACK,
+                "e",
+                localTrip,
+                Optional.empty(),
+                rapidTrip,
+                25,
+                0),
+            new ResourceRepair.Yield(
+                TimetableConflictChecker.Kind.TRACK,
+                "e",
+                rapidTrip,
+                Optional.empty(),
+                localTrip,
+                40,
+                0));
     RapidStagger.Measure measure =
         RapidStagger.measure(
             shifted,
@@ -119,7 +149,8 @@ class TimetableBuilderRapidStaggerTest {
             index,
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
             5 * 3600,
-            java.util.Set.of(rapid));
+            java.util.Set.of(rapid),
+            yields);
     RapidStagger.Measure notFast =
         RapidStagger.measure(
             shifted,
@@ -127,11 +158,14 @@ class TimetableBuilderRapidStaggerTest {
             index,
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
             5 * 3600,
-            java.util.Set.of());
+            java.util.Set.of(),
+            yields);
 
     assertEquals(1, measure.trips(), measure::toString);
     assertEquals(240L, measure.seconds(), measure::toString);
+    assertEquals(25L, measure.held(), "快车自己在表里的等待算进快车损失；普通车的等待不算");
     assertEquals(0L, notFast.seconds(), "只算快车交路：出入库走行之类不停站的运行跟着慢车不算快车被卡");
+    assertEquals(0L, notFast.held());
   }
 
   /** 两组一样快就没有快车被卡，开了错峰也不搜。 */

@@ -5,6 +5,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
@@ -22,14 +23,11 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
@@ -69,10 +67,7 @@ public final class BossBarTrainHudManager implements Listener {
       FetaruteTCAddon plugin,
       LocaleManager locale,
       ConfigManager configManager,
-      EtaService etaService,
-      RouteDefinitionCache routeDefinitions,
-      RouteProgressRegistry routeProgressRegistry,
-      LayoverRegistry layoverRegistry,
+      TrainHudContextResolver contextResolver,
       HudTemplateService templateService,
       HudDefaultTemplateService defaultTemplateService,
       Consumer<String> debugLogger) {
@@ -82,16 +77,7 @@ public final class BossBarTrainHudManager implements Listener {
     this.templateService = templateService;
     this.defaultTemplateService = defaultTemplateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
-    this.contextResolver =
-        new TrainHudContextResolver(
-            plugin,
-            locale,
-            etaService,
-            routeDefinitions,
-            routeProgressRegistry,
-            layoverRegistry,
-            templateService,
-            this.debugLogger);
+    this.contextResolver = Objects.requireNonNull(contextResolver, "contextResolver");
   }
 
   public void register() {
@@ -125,14 +111,8 @@ public final class BossBarTrainHudManager implements Listener {
     progressTracker.clear();
     stateTracker.clear();
     templateCache.clear();
-    contextResolver.clearCaches();
     bars.clear();
     debugLogger.accept("BossBarTrainHudManager shutdown");
-  }
-
-  /** 清理站点/公司等缓存，下次 tick 时重新从存储加载。 */
-  public void clearCaches() {
-    contextResolver.clearCaches();
   }
 
   @EventHandler
@@ -195,8 +175,9 @@ public final class BossBarTrainHudManager implements Listener {
     state =
         HudStateTracker.applyOutOfService(
             state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
-    String templateLine = template.resolveLine(state, HudLanguageRotation.nowTicks()).orElse("");
-    Component title = BossBarHudTemplateRenderer.render(templateLine, placeholders, debugLogger);
+    String templateLine =
+        template.resolveLine(state, HudLanguageRotation.nowTicks(), placeholders).orElse("");
+    Component title = HudText.render(templateLine, placeholders, debugLogger);
 
     BossBar bar =
         bars.computeIfAbsent(

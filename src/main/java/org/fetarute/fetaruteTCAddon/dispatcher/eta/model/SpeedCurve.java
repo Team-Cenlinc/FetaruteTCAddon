@@ -31,6 +31,12 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
   /** 从满值渐收到末端比例、再贴上目标速度的总时长（秒，按满值计）。 */
   static final double END_SECONDS = 2.5;
 
+  /** {@code ln(1/START_FLOOR)}：编表积分与控车每步都要用，对数只算一次。 */
+  private static final double START_LOG = Math.log(1.0 / START_FLOOR);
+
+  /** {@code ln(1/END_FLOOR) + 1}。 */
+  private static final double END_LOG_PLUS_ONE = Math.log(1.0 / END_FLOOR) + 1.0;
+
   public SpeedCurve {
     if (!Double.isFinite(accelBps2) || accelBps2 <= 0.0) {
       throw new IllegalArgumentException("accelBps2 必须为正数");
@@ -102,8 +108,8 @@ public record SpeedCurve(double accelBps2, double decelBps2) {
    * full}。
    */
   private static double shape(double sinceStartBps, double untilEndBps, double full) {
-    double startBand = START_SECONDS * full * (1.0 - START_FLOOR) / Math.log(1.0 / START_FLOOR);
-    double endBand = END_SECONDS * full / (Math.log(1.0 / END_FLOOR) + 1.0);
+    double startBand = START_SECONDS * full * (1.0 - START_FLOOR) / START_LOG;
+    double endBand = END_SECONDS * full / END_LOG_PLUS_ONE;
     double rise = START_FLOOR + (1.0 - START_FLOOR) * clamp01(sinceStartBps / startBand);
     double fall = Math.max(END_FLOOR, clamp01(untilEndBps / endBand));
     return Math.min(rise, fall);

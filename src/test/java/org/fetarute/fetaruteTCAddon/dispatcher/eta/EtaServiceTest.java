@@ -16,12 +16,13 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.model.Line;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainRuntimeSnapshot;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
@@ -44,7 +45,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnServiceKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
-import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 
 class EtaServiceTest {
@@ -315,28 +315,27 @@ class EtaServiceTest {
             Optional.of(SignalAspect.PROCEED),
             Optional.empty()));
 
-    StorageProvider provider = mock(StorageProvider.class);
-    RouteRepository routeRepo = mock(RouteRepository.class);
-    when(provider.routes()).thenReturn(routeRepo);
-    when(routeRepo.findById(routeUuid))
+    when(routeDefinitions.findRecord(routeUuid))
         .thenReturn(
             Optional.of(
-                new Route(
-                    routeUuid,
-                    "R1",
-                    UUID.randomUUID(),
-                    "Return",
-                    Optional.empty(),
-                    RoutePatternType.LOCAL,
-                    RouteOperationType.RETURN,
-                    Optional.empty(),
-                    Optional.empty(),
-                    Map.of(),
-                    Instant.now(),
-                    Instant.now())));
+                new RouteDefinitionCache.RouteRecord(
+                    mock(Operator.class),
+                    mock(Line.class),
+                    new Route(
+                        routeUuid,
+                        "R1",
+                        UUID.randomUUID(),
+                        "Return",
+                        Optional.empty(),
+                        RoutePatternType.LOCAL,
+                        RouteOperationType.RETURN,
+                        Optional.empty(),
+                        Optional.empty(),
+                        Map.of(),
+                        Instant.now(),
+                        Instant.now()))));
 
     EtaService service = new EtaService(snapshotStore, railGraphService, routeDefinitions);
-    service.attachStorageProvider(provider);
 
     BoardResult terminalBoard = service.getBoard("SURN", "BBB", null, Duration.ofMinutes(10));
     assertFalse(terminalBoard.rows().isEmpty());

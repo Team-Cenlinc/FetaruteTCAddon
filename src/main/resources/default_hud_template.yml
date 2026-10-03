@@ -1,8 +1,8 @@
 bossbar:
   template: |-
     rotate_ticks: 60
-    AT_STATION_1: <{line_color_tag}>█<white> {line}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>开往 {dest_eop}</white>
-    AT_STATION_2: <{line_color_tag}>█<white> {line_lang2}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>To {dest_eop_lang2}</white>
+    DEFAULT_1: <{line_color_tag}>█<white> {line}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>开往 {dest_eop}</white>
+    DEFAULT_2: <{line_color_tag}>█<white> {line_lang2}</white> █</{line_color_tag}> <dark_gray>┃</dark_gray> <white>{train_name}</white> <dark_gray>┃</dark_gray> <white>To {dest_eop_lang2}</white>
     AT_LAST_STATION_1: <gold>◆━━━━━</gold> <white>终点站</white> <yellow>{current_station}</yellow> <white>到了</white> <gold>━━━━━◆</gold>
     AT_LAST_STATION_2: <gold>◆━━━━━</gold> <white>Final stop</white> <yellow>{current_station_lang2}</yellow> <gold>━━━━━◆</gold>
     TERM_ARRIVING_1: <gold>◇━━</gold> <white>终点</white> <yellow>{next_station}</yellow> <white>即将到达</white> <gold>━━◇</gold>
@@ -27,10 +27,22 @@ actionbar:
     DEPARTING_3: <aqua>▶</aqua> <white>Welcome aboard</white> <aqua>{operator}</aqua> <dark_gray>┃</dark_gray> <yellow>{line}</yellow> <white>to</white> <yellow>{dest_eop_lang2}</yellow>
     IN_TRIP_1: <white>下一站</white> <yellow>{next_station}</yellow> <dark_gray>┃</dark_gray> <gray>约</gray> <aqua>{eta_minutes}</aqua> <gray>分钟</gray>
     IN_TRIP_2: <white>Next</white> <yellow>{next_station_lang2}</yellow> <dark_gray>┃</dark_gray> <gray>ETA: </gray><aqua>{eta_minutes}</aqua><gray>min</gray>
+    IN_TRIP_3: <white>下一站</white> <yellow>{next_station}</yellow> <dark_gray>┃</dark_gray> <white>可换乘</white> {?transfer_lines}
+    IN_TRIP_4: <white>Next</white> <yellow>{next_station_lang2}</yellow> <dark_gray>┃</dark_gray> <white>Change for</white> {?transfer_lines}
+    IN_TRIP_5: <white>下一站</white> <yellow>{next_station}</yellow> <dark_gray>┃</dark_gray> <gold>晚点约 {?delay_minutes} 分钟</gold>
+    IN_TRIP_6: <white>Next</white> <yellow>{next_station_lang2}</yellow> <dark_gray>┃</dark_gray> <gold>Delayed by {?delay_minutes} min</gold>
+    IN_TRIP_7: <aqua>⇄</aqua> <white>本列车在</white> <yellow>{?through_station}</yellow> <white>起改为</white> <{through_line_color_tag}>█</{through_line_color_tag}><white>{through_line}</white> <white>运行</white>
+    IN_TRIP_8: <aqua>⇄</aqua> <white>From</white> <yellow>{?through_station_lang2}</yellow> <white>this train runs as</white> <{through_line_color_tag}>█</{through_line_color_tag}><white>{through_line_lang2}</white>
+    IN_TRIP_9: <aqua>▶</aqua> <white>按</white> <yellow>{?trip_dialog_key}</yellow> <white>查看后续站点</white>
+    IN_TRIP_10: <aqua>▶</aqua> <white>Press</white> <yellow>{?trip_dialog_key}</yellow> <white>for upcoming stops</white>
     ARRIVING_1: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <gray>下车请注意安全</gray>
     ARRIVING_2: <green>▼</green> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <gray>Mind the gap</gray>
+    ARRIVING_3: <green>▼</green> <yellow>{next_station}</yellow> <white>到了</white> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
+    ARRIVING_4: <green>▼</green> <white>Now arriving at</white> <yellow>{next_station_lang2}</yellow> <dark_gray>━</dark_gray> <white>Change for</white> {?transfer_lines}
     TERM_ARRIVING_1: <gold>◆</gold> <yellow>终点站 {next_station} 到了</yellow> <gold>◆</gold> <gray>感谢乘坐</gray>
     TERM_ARRIVING_2: <gold>◆</gold> <yellow>Final stop</yellow> <gold>◆</gold> <gray>Thank you for travelling with {operator}</gray>
+    TERM_ARRIVING_3: <gold>◆</gold> <yellow>终点站 {next_station} 到了</yellow> <dark_gray>━</dark_gray> <white>可换乘</white> {?transfer_lines}
+    TERM_ARRIVING_4: <gold>◆</gold> <yellow>Final stop</yellow> <dark_gray>━</dark_gray> <white>Change for</white> {?transfer_lines}
     ON_LAYOVER_1: <aqua>◈</aqua> <gray>等待新行程</gray> <aqua>◈</aqua>
     ON_LAYOVER_2: <aqua>◈</aqua> <gray>Preparing for new trip</gray> <aqua>◈</aqua>
     IDLE_1: <{signal_color_tag}>⬤</{signal_color_tag}> <white>临时停车</white> <dark_gray>━</dark_gray> <gray>等待信号中...</gray>
@@ -41,6 +53,7 @@ player_display:
   template: |-
     lines: 15
     page_duration_ticks: 80
+    max_width: 120
     pages:
       DEFAULT_1:
         title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <{line_color_tag}>█</{line_color_tag}>"
@@ -62,7 +75,7 @@ player_display:
           resetOnStop: true
         footer:
           - "<gray>█</gray> <white>时间：{time_hhmmss}</white>"
-    
+
       DEFAULT_2:
         title: "<{line_color_tag}>█</{line_color_tag}> <white>{line_lang2}</white> <{line_color_tag}>█</{line_color_tag}>"
         kind: list_page
@@ -97,5 +110,5 @@ player_display:
         kind: static
         lines:
           - "<gray>█</gray> <white>Not in Service</white>"
-          - "<gray>█</gray> <gray>This train does not carry passengers</gray>"
+          - "<gray>█</gray> <gray>No passengers</gray>"
           - "<gray>█</gray> <white>Time: {time_hhmmss}</white>"

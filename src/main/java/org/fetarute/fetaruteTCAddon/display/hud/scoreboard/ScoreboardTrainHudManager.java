@@ -13,6 +13,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
+import java.util.function.IntFunction;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -31,21 +32,18 @@ import org.bukkit.scoreboard.ScoreboardManager;
 import org.bukkit.scoreboard.Team;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
 import org.fetarute.fetaruteTCAddon.display.hud.HudStateTracker;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
+import org.fetarute.fetaruteTCAddon.display.hud.HudTextWidth;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarProgressTracker;
 import org.fetarute.fetaruteTCAddon.display.template.HudDefaultTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
 import org.fetarute.fetaruteTCAddon.display.template.HudTemplateType;
-import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
  * 车上 Scoreboard HUD：用于车内 LCD/PIDS 多行展示。
@@ -116,12 +114,8 @@ public final class ScoreboardTrainHudManager implements Listener {
 
   public ScoreboardTrainHudManager(
       FetaruteTCAddon plugin,
-      LocaleManager locale,
       ConfigManager configManager,
-      EtaService etaService,
-      RouteDefinitionCache routeDefinitions,
-      RouteProgressRegistry routeProgressRegistry,
-      LayoverRegistry layoverRegistry,
+      TrainHudContextResolver contextResolver,
       HudTemplateService templateService,
       HudDefaultTemplateService defaultTemplateService,
       Consumer<String> debugLogger) {
@@ -130,16 +124,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     this.templateService = templateService;
     this.defaultTemplateService = defaultTemplateService;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
-    this.contextResolver =
-        new TrainHudContextResolver(
-            plugin,
-            locale,
-            Objects.requireNonNull(etaService, "etaService"),
-            Objects.requireNonNull(routeDefinitions, "routeDefinitions"),
-            routeProgressRegistry,
-            layoverRegistry,
-            templateService,
-            this.debugLogger);
+    this.contextResolver = Objects.requireNonNull(contextResolver, "contextResolver");
   }
 
   public void register() {
@@ -182,16 +167,10 @@ public final class ScoreboardTrainHudManager implements Listener {
     progressTracker.clear();
     stateTracker.clear();
     templateCache.clear();
-    contextResolver.clearCaches();
     playerStates.clear();
     windowStates.clear();
     trainFrames.clear();
     debugLogger.accept("ScoreboardTrainHudManager shutdown");
-  }
-
-  /** 清理站点/公司等缓存，下次 tick 时重新从存储加载。 */
-  public void clearCaches() {
-    contextResolver.clearCaches();
   }
 
   @EventHandler
@@ -263,10 +242,10 @@ public final class ScoreboardTrainHudManager implements Listener {
     List<String> normalized = normalizeLines(resolvedLines, template.lineCount());
 
     PlayerHudState stateHolder = ensureScoreboard(player, template.lineCount());
-    updateScoreboardTitle(stateHolder, title);
-    if (!normalized.equals(stateHolder.lastLines)) {
-      updateScoreboardLines(stateHolder, normalized);
-      stateHolder.lastLines = List.copyOf(normalized);
+    updateScoreboardTitle(stateHolder, title, template.maxWidth());
+    if (!normalized.equals(stateHolder.lastLines)
+        || stateHolder.lastMaxWidth != template.maxWidth()) {
+      updateScoreboardLines(stateHolder, normalized, template.maxWidth());
     }
     return Optional.of(trainName);
   }
@@ -320,28 +299,43 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
   }
 
-  private void updateScoreboardLines(PlayerHudState state, List<String> lines) {
+  /**
+   * 只更新与上次不同的行。原版每次设置队伍前缀都会发一个队伍包、并遍历全服玩家找这块计分板的观看者，不比较新旧值； 时间行每秒都变，整屏重发就是每位乘客每秒十几个包。最大宽度变了时整屏重画。
+   */
+  private void updateScoreboardLines(PlayerHudState state, List<String> lines, int maxWidth) {
     if (state.scoreboard == null) {
       return;
     }
+    List<String> previous = state.lastMaxWidth == maxWidth ? state.lastLines : List.of();
     int lineCount = Math.min(state.lineCount, lines.size());
-    for (int i = 0; i < lineCount; i++) {
+    for (int i : changedLines(previous, lines.subList(0, lineCount))) {
+      String line = lines.get(i);
       String entry = lineEntry(i);
       Team team = state.scoreboard.getTeam(teamName(i));
       if (team == null) {
         continue;
       }
-      String raw = lines.get(i);
-      Component component = ScoreboardHudTemplateRenderer.renderResolved(raw, debugLogger);
-      team.prefix(component);
-      team.suffix(Component.empty());
+      team.prefix(HudTextWidth.truncate(HudText.parse(line, debugLogger), maxWidth));
       if (!team.hasEntry(entry)) {
         team.addEntry(entry);
       }
     }
+    state.lastLines = List.copyOf(lines);
+    state.lastMaxWidth = maxWidth;
   }
 
-  private void updateScoreboardTitle(PlayerHudState state, String title) {
+  /** 与上次相比变了的行号（上次没有这一行也算变了）。 */
+  static List<Integer> changedLines(List<String> previous, List<String> lines) {
+    List<Integer> changed = new ArrayList<>();
+    for (int i = 0; i < lines.size(); i++) {
+      if (i >= previous.size() || !lines.get(i).equals(previous.get(i))) {
+        changed.add(i);
+      }
+    }
+    return changed;
+  }
+
+  private void updateScoreboardTitle(PlayerHudState state, String title, int maxWidth) {
     if (state == null || state.objective == null) {
       return;
     }
@@ -349,7 +343,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     if (resolved.equals(state.lastTitle)) {
       return;
     }
-    Component component = ScoreboardHudTemplateRenderer.renderResolved(resolved, debugLogger);
+    Component component = HudTextWidth.truncate(HudText.parse(resolved, debugLogger), maxWidth);
     state.objective.displayName(component);
     state.lastTitle = resolved;
   }
@@ -389,7 +383,7 @@ public final class ScoreboardTrainHudManager implements Listener {
         pageOpt
             .flatMap(ScoreboardHudTemplate.Page::title)
             .orElseGet(() -> template.title().orElse(""));
-    return ScoreboardHudTemplateRenderer.applyPlaceholders(title, placeholders);
+    return HudText.apply(title, placeholders);
   }
 
   private List<String> renderPage(
@@ -405,21 +399,12 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
     ScoreboardHudTemplate.Page page = pageOpt.get();
     if (page instanceof ScoreboardHudTemplate.StaticPage staticPage) {
-      return renderStaticPage(staticPage, placeholders);
+      return renderLineList(staticPage.lines(), placeholders);
     }
     if (page instanceof ScoreboardHudTemplate.ListPage listPage) {
       return renderListPage(listPage, trainName, context, placeholders, state, frameDelta, tick);
     }
     return List.of();
-  }
-
-  private List<String> renderStaticPage(
-      ScoreboardHudTemplate.StaticPage page, Map<String, String> placeholders) {
-    List<String> output = new ArrayList<>();
-    for (String line : page.lines()) {
-      output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(line, placeholders));
-    }
-    return output;
   }
 
   private List<String> renderListPage(
@@ -431,8 +416,8 @@ public final class ScoreboardTrainHudManager implements Listener {
       TrainFrameDelta frameDelta,
       long tick) {
     List<String> output = new ArrayList<>();
-    int totalStops = contextResolver.resolveUpcomingStops(context, 0).total();
-    int cappedTotalStops = Math.min(totalStops, page.limit());
+    List<TrainHudContextResolver.StopInfo> ahead = contextResolver.upcomingStops(context);
+    int cappedTotalStops = Math.min(ahead.size(), page.limit());
     int fixedRows = Math.min(page.window().fixed(), page.limit());
     int windowRows = Math.max(0, page.window().size());
     int rowLines = page.rowLines().isEmpty() ? 1 : page.rowLines().size();
@@ -442,9 +427,12 @@ public final class ScoreboardTrainHudManager implements Listener {
         resolveWindowState(
             key, frameDelta, remainingStops, page.window(), frameDelta.nextStopChanged(), tick);
     int windowOffset = computeWindowOffset(windowState, tick, remainingStops, page.window());
-    int limit = Math.min(page.limit(), fixedRows + windowOffset + windowRows);
-    TrainHudContextResolver.UpcomingStops upcoming =
-        contextResolver.resolveUpcomingStops(context, limit);
+    // ETA、晚点与换乘只为真正显示的行计算：固定行加当前窗口，不算窗口前面滚过去的站。
+    IntFunction<Optional<TrainHudContextResolver.UpcomingStop>> row =
+        position ->
+            position >= 0 && position < cappedTotalStops
+                ? Optional.of(contextResolver.upcomingStop(context, ahead, position))
+                : Optional.empty();
 
     output.addAll(renderLineList(page.header(), placeholders));
     if (fixedRows + windowRows <= 0) {
@@ -453,7 +441,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     }
     if (cappedTotalStops <= 0) {
       String empty = page.empty().orElse("-");
-      String rendered = ScoreboardHudTemplateRenderer.applyPlaceholders(empty, placeholders);
+      String rendered = HudText.apply(empty, placeholders);
       for (int i = 0; i < fixedRows + windowRows; i++) {
         for (int j = 0; j < rowLines; j++) {
           output.add(rendered);
@@ -462,15 +450,10 @@ public final class ScoreboardTrainHudManager implements Listener {
     } else {
       output.addAll(
           renderUpcomingRows(
-              upcoming.stops(),
-              0,
-              fixedRows,
-              placeholders,
-              page.rowLines(),
-              context.currentLine()));
+              row, 0, fixedRows, placeholders, page.rowLines(), context.currentLine()));
       output.addAll(
           renderUpcomingRows(
-              upcoming.stops(),
+              row,
               fixedRows + windowOffset,
               windowRows,
               placeholders,
@@ -481,15 +464,15 @@ public final class ScoreboardTrainHudManager implements Listener {
     return output;
   }
 
+  /** 替换占位符；条件占位符缺值的行整行去掉，下面的行依次上移。 */
   private List<String> renderLineList(List<String> lines, Map<String, String> placeholders) {
     if (lines == null || lines.isEmpty()) {
       return List.of();
     }
-    List<String> output = new ArrayList<>();
-    for (String line : lines) {
-      output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(line, placeholders));
-    }
-    return output;
+    return lines.stream()
+        .filter(line -> HudText.shown(line, placeholders))
+        .map(line -> HudText.apply(line, placeholders))
+        .toList();
   }
 
   /**
@@ -498,7 +481,7 @@ public final class ScoreboardTrainHudManager implements Listener {
    * <p>行内的线路占位符（{@code line}、{@code line_color_tag} 等）取该站所属线路：直通运转换线之后的各站按新线路着色， 与列车当前线路相同的站不覆盖。
    */
   private List<String> renderUpcomingRows(
-      List<TrainHudContextResolver.UpcomingStop> stops,
+      IntFunction<Optional<TrainHudContextResolver.UpcomingStop>> row,
       int startIndex,
       int rowCount,
       Map<String, String> placeholders,
@@ -507,36 +490,9 @@ public final class ScoreboardTrainHudManager implements Listener {
     List<String> output = new ArrayList<>();
     for (int i = 0; i < rowCount; i++) {
       int index = startIndex + i;
-      Map<String, String> itemPlaceholders = new HashMap<>(placeholders);
-      if (stops != null && index >= 0 && index < stops.size()) {
-        TrainHudContextResolver.UpcomingStop stop = stops.get(index);
-        String seq = String.valueOf(index + 1);
-        itemPlaceholders.put("idx", seq);
-        itemPlaceholders.put("index", seq);
-        itemPlaceholders.put("station", stop.display().label());
-        itemPlaceholders.put("station_code", stop.display().code());
-        itemPlaceholders.put("station_lang2", stop.display().lang2());
-        itemPlaceholders.put("station_track", stop.track());
-        itemPlaceholders.put("eta", formatEta(stop.eta()));
-        itemPlaceholders.put("eta_minutes", formatEtaMinutes(stop.eta()));
-        contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, stop.eta());
-        stop.line()
-            .filter(line -> currentLine.map(current -> !current.sameLine(line)).orElse(true))
-            .ifPresent(line -> contextResolver.applyLinePlaceholders(itemPlaceholders, line));
-      } else {
-        itemPlaceholders.put("idx", "");
-        itemPlaceholders.put("index", "");
-        itemPlaceholders.put("station", "-");
-        itemPlaceholders.put("station_code", "-");
-        itemPlaceholders.put("station_lang2", "-");
-        itemPlaceholders.put("station_track", "-");
-        itemPlaceholders.put("eta", "");
-        itemPlaceholders.put("eta_minutes", "-");
-        contextResolver.applyEtaStatusPlaceholders(itemPlaceholders, null);
-      }
-      for (String rowFormat : rowLines) {
-        output.add(ScoreboardHudTemplateRenderer.applyPlaceholders(rowFormat, itemPlaceholders));
-      }
+      Map<String, String> itemPlaceholders =
+          contextResolver.stopPlaceholders(placeholders, row.apply(index), index + 1, currentLine);
+      output.addAll(renderLineList(rowLines, itemPlaceholders));
     }
     return output;
   }
@@ -671,22 +627,6 @@ public final class ScoreboardTrainHudManager implements Listener {
     return normalized;
   }
 
-  private String formatEta(org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult eta) {
-    if (eta == null) {
-      return "-";
-    }
-    String status = contextResolver.formatEtaStatus(eta);
-    return status == null || status.isBlank() ? "-" : status;
-  }
-
-  private String formatEtaMinutes(org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult eta) {
-    if (eta == null) {
-      return "-";
-    }
-    int minutes = eta.etaMinutesRounded();
-    return minutes >= 0 ? String.valueOf(minutes) : "-";
-  }
-
   private void clear(Player player) {
     if (player == null) {
       return;
@@ -763,6 +703,7 @@ public final class ScoreboardTrainHudManager implements Listener {
     private Objective objective;
     private int lineCount;
     private List<String> lastLines = List.of();
+    private int lastMaxWidth = -1;
     private String lastTitle = "";
   }
 

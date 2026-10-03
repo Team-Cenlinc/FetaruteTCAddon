@@ -17,6 +17,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.LongSupplier;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -33,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoute
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TripCancellations;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.VehicleDuty;
 
 /**
@@ -160,6 +162,30 @@ public final class TimetableApiImpl implements TimetableApi {
         .toList();
   }
 
+  @Override
+  public List<CancelledTrip> cancellations(Instant from, Instant to) {
+    if (from == null || to == null) {
+      return List.of();
+    }
+    return service.get().map(svc -> svc.cancellationsBetween(from, to)).orElse(List.of()).stream()
+        .map(TimetableApiImpl::cancelledTrip)
+        .toList();
+  }
+
+  private static CancelledTrip cancelledTrip(TripCancellations.Cancellation cancellation) {
+    return new CancelledTrip(
+        cancellation.timetableId(),
+        cancellation.tripId(),
+        cancellation.tripCode(),
+        cancellation.routeId(),
+        cancellation.serviceDate(),
+        cancellation.plannedDeparture(),
+        TimetableTripCancelledEvent.Scope.valueOf(cancellation.scope().name()),
+        cancellation.firstCancelledStopSequence(),
+        TimetableTripCancelledEvent.Reason.valueOf(cancellation.reason().name()),
+        cancellation.trainName());
+  }
+
   /** 本 tick 内第一次查询时计算，其后直接返回同一份结果。 */
   private Optional<TrainAssignment> memoized(TimetableService svc, String trainName) {
     long now = tick.getAsLong();
@@ -235,7 +261,8 @@ public final class TimetableApiImpl implements TimetableApi {
                   departure,
                   terminating,
                   date,
-                  cancelled));
+                  cancelled,
+                  svc.flatMap(s -> s.plannedPlatform(trip.id(), stop.stopSequence()))));
         }
       }
     }

@@ -1,7 +1,9 @@
 package org.fetarute.fetaruteTCAddon.display.hud;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
@@ -23,6 +25,9 @@ import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
  * @param throughService 前方的直通换线（下一次换线）；没有时为空
  * @param outOfService 回库车已越过运营终点（{@link
  *     org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals#outOfService}）
+ * @param nextStopTransfers 下一站可换乘的线路（不含本车在该站所属的线路）；没有时为空列表
+ * @param nextStopDelaySeconds 按表运行时到达下一站的偏差秒数（正数为晚点，见 {@link
+ *     org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService#arrivalDeviationSeconds}）；不按表运行时为空
  */
 public record TrainHudContext(
     String trainName,
@@ -44,7 +49,9 @@ public record TrainHudContext(
     double speedBps,
     Optional<RouteLineChanges.LineRef> currentLine,
     Optional<ThroughService> throughService,
-    boolean outOfService) {
+    boolean outOfService,
+    List<Transfer> nextStopTransfers,
+    OptionalLong nextStopDelaySeconds) {
   public TrainHudContext {
     Objects.requireNonNull(trainName, "trainName");
     routeDefinition = routeDefinition == null ? Optional.empty() : routeDefinition;
@@ -59,6 +66,26 @@ public record TrainHudContext(
     layover = layover == null ? Optional.empty() : layover;
     currentLine = currentLine == null ? Optional.empty() : currentLine;
     throughService = throughService == null ? Optional.empty() : throughService;
+    nextStopTransfers = nextStopTransfers == null ? List.of() : List.copyOf(nextStopTransfers);
+    nextStopDelaySeconds =
+        nextStopDelaySeconds == null ? OptionalLong.empty() : nextStopDelaySeconds;
+  }
+
+  /**
+   * 停靠站可换乘的一条线路。
+   *
+   * @param code 线路代码
+   * @param name 线路名
+   * @param lang2 第二语言名；未填写时为线路名
+   * @param colorTag 线路色的 MiniMessage 标签名（见 {@link HudText#colorTag}）
+   */
+  public record Transfer(String code, String name, String lang2, String colorTag) {
+    public Transfer {
+      Objects.requireNonNull(code, "code");
+      Objects.requireNonNull(name, "name");
+      Objects.requireNonNull(lang2, "lang2");
+      Objects.requireNonNull(colorTag, "colorTag");
+    }
   }
 
   /**

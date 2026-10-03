@@ -1,0 +1,80 @@
+# FetaruteTCAddon 站台 PIDS 配置
+# 本文件只放全局策略；每块屏幕与车站、站台、线路过滤的绑定存放在数据库中，由 /fta pids 命令与配置工具维护。
+# 面向玩家的文案放在 lang/*.yml。
+config-version: 2
+
+# 总开关。关闭后不加载站台屏，也不播报，不影响调度。
+enabled: true
+
+render:
+  # 每隔多少 tick 比对一次将显示的文本，文本变化才重绘（20 tick = 1 秒）
+  check-interval-ticks: 20
+  # 同一车站的到发快照缓存时间（秒），多块屏共用一次查询
+  snapshot-ttl-seconds: 5
+  # 预测窗口（分钟）：只展示该时间内到发的列车
+  horizon-minutes: 30
+  # 主页（到发）停留时间（秒）。主页宜占大部分时间：乘客走到屏前多半是来看到发的
+  slide-main-seconds: 20
+  # 副页（宣传页、空位页）停留时间（秒）；0 关闭轮播（通过列车的安全提示页仍会锁定）。
+  # 只有站台屏与多站台屏轮播，车站统屏整页切换要重发全部地图，不轮播；
+  # 本站台的下一班正在进站或停靠时不翻到宣传页（有空位信息时仍放空位页）
+  slide-notice-seconds: 5
+  # 通过列车临近时锁定安全页的时长（秒）
+  notice-pin-seconds: 15
+  # 主页上终点下面的英文与备注（末班车、直通、经由）交替：英文停 english-seconds、备注停 remark-seconds；
+  # remark-seconds 为 0 不显示备注。只换英文那一小格，重发的地图像素很少；车站统屏也交替。
+  # 轮播的屏翻回主页先写英文
+  english-seconds: 6
+  remark-seconds: 4
+  # 2×1 停站屏停站多、分页时每页停留多少秒；之后的后续列车页也停这么久，再放一张宣传页（停 slide-notice-seconds）
+  stop-page-seconds: 8
+  # 轮换哪几张宣传页、按什么顺序：order 先下后上、queue 排队候车、doors 勿挡车门、
+  # check 确认终点（只在快慢车或多条线路共用的站台出现）、gap 注意间隙；留空 [] 不放宣传页
+  notices: [order, queue, doors, check, gap]
+
+limits:
+  # 全服屏幕数量的安全上限；单个车站的屏幕数量不设固定上限
+  max-screens: 200
+
+font:
+  # 中文行的字形版本：zh_hans（简体）、zh_hant（繁体）、ja（日文）；英文行固定用拉丁版
+  cjk-glyphs: zh_hans
+  # 按每段文字的内容选字形：含假名用日文，简体专用字多用简体，繁体专用字多用繁体；
+  # 判断不出（如“湖”“站”这类简繁同形的字）时用上面的 cjk-glyphs
+  detect-glyphs: true
+
+layout:
+  # 站台屏默认布局预设
+  platform: platform-1x3
+  # 车站统屏默认布局预设
+  station: station-3x5
+
+appearance:
+  # 外观：mc-time 按屏幕所在世界的 MC 时间切换深浅，light 固定浅色，dark 固定深色
+  mode: mc-time
+  # 世界时间进入夜间（深色）的刻，范围 0-23999
+  dark-from-tick: 12500
+  # 世界时间进入白天（浅色）的刻，范围 0-23999
+  light-from-tick: 23000
+
+broadcast:
+  # 播报总开关
+  enabled: true
+  # 全站广播：离玩家最近的已加载站台屏只用来认车站，全站各站台的事件都播报，每条带站台号。
+  # 玩家离最近的已加载站台屏不超过这个距离（方块）才算在站内；正在乘车的玩家不收站台广播
+  range-blocks: 32
+  # 同一条播报对同一玩家只播一次。播报仍有效时一直记着；班次取消与严重晚点失效后再记这么久（秒），
+  # 进站与通过固定再记 2 分钟（循环运行的同一列车几分钟后再到同一站要照常播报）
+  dedupe-seconds: 600
+  # 进站播报的提前量（秒）：预计到达前这么久即播报
+  arriving-lead-seconds: 30
+  # 各类播报的开关：进站与通过列车显示在 ActionBar，班次取消与严重晚点（5 分钟以上）发到聊天
+  trigger-arriving: true
+  trigger-passing: true
+  trigger-cancelled: true
+  trigger-delayed: true
+  # 站台变更（已定的站台改了，或没能停到计划站台）发到聊天
+  trigger-platform-changed: true
+  # 播报通道：文字（ActionBar 与聊天）与提示音（声源为来源屏幕）
+  channel-text: true
+  channel-sound: true

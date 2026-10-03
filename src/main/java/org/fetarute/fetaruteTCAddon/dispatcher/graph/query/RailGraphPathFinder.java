@@ -1,16 +1,23 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.query;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.PriorityQueue;
+import java.util.Set;
+import java.util.WeakHashMap;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
@@ -40,6 +47,18 @@ public final class RailGraphPathFinder {
   /** 判定两条路径代价"相等"的容差；与松弛、出队判定共用，保证三处口径一致。 */
   static final double COST_EPSILON = 1e-9;
 
+  /** 每张图快照最多记住多少对起讫点的结果。 */
+  private static final int MEMO_LIMIT_PER_GRAPH = 4096;
+
+  /**
+   * 最短距离查询的结果，按图快照分开记。
+   *
+   * <p>运行时每个信号周期都要把交路相邻途经点展开成路径，同一对节点每辆车每轮都重跑一遍搜索。图快照不可变（重建即换新实例）， 运维覆盖视图只在其上加封锁，所以“快照 + 此刻被覆盖封锁的边
+   * + 起讫点”相同，结果就相同。快照不再被引用时整张表随之回收。 只记 {@link Options#shortestDistance()}：其他代价模型可能读运行时状态。
+   */
+  private static final Map<SimpleRailGraph, Map<MemoKey, Optional<RailGraphPath>>> MEMO =
+      Collections.synchronizedMap(new WeakHashMap<>());
+
   /** 最短路查询选项。 */
   public record Options(RailEdgeCostModel costModel, boolean allowBlockedEdges) {
     public Options {
@@ -48,9 +67,13 @@ public final class RailGraphPathFinder {
 
     /** 距离最短（以 blocks 计），并默认跳过被封锁的边。 */
     public static Options shortestDistance() {
-      return new Options(RailEdgeCostModels.lengthBlocks(), false);
+      return SHORTEST_DISTANCE;
     }
   }
+
+  /** {@link Options#shortestDistance()} 的唯一实例；记忆只认它。 */
+  private static final Options SHORTEST_DISTANCE =
+      new Options(RailEdgeCostModels.lengthBlocks(), false);
 
   /**
    * 计算从 {@code from} 到 {@code to} 的最短路径。
@@ -66,6 +89,44 @@ public final class RailGraphPathFinder {
     Objects.requireNonNull(to, "to");
     Objects.requireNonNull(options, "options");
 
+    if (options != SHORTEST_DISTANCE) {
+      return search(graph, from, to, options);
+    }
+    SimpleRailGraph snapshot;
+    Set<EdgeId> overrideBlocked;
+    if (graph instanceof SimpleRailGraph simple) {
+      snapshot = simple;
+      overrideBlocked = Set.of();
+    } else if (graph instanceof EdgeOverrideRailGraph view
+        && view.delegate() instanceof SimpleRailGraph simple) {
+      snapshot = simple;
+      overrideBlocked = view.overrideBlockedEdges();
+    } else {
+      return search(graph, from, to, options);
+    }
+    Map<MemoKey, Optional<RailGraphPath>> memo =
+        MEMO.computeIfAbsent(snapshot, ignored -> newMemo());
+    MemoKey key = new MemoKey(from, to, overrideBlocked);
+    Optional<RailGraphPath> remembered = memo.get(key);
+    if (remembered != null) {
+      return remembered;
+    }
+    Optional<RailGraphPath> result = search(graph, from, to, options);
+    memo.put(key, result);
+    return result;
+  }
+
+  private static Map<MemoKey, Optional<RailGraphPath>> newMemo() {
+    return Collections.synchronizedMap(
+        new LinkedHashMap<>(16, 0.75f, true) {
+          @Override
+          protected boolean removeEldestEntry(Map.Entry<MemoKey, Optional<RailGraphPath>> eldest) {
+            return size() > MEMO_LIMIT_PER_GRAPH;
+          }
+        });
+  }
+
+  private Optional<RailGraphPath> search(RailGraph graph, NodeId from, NodeId to, Options options) {
     if (graph.findNode(from).isEmpty() || graph.findNode(to).isEmpty()) {
       return Optional.empty();
     }
@@ -212,6 +273,8 @@ public final class RailGraphPathFinder {
     }
     return candidateEdge.id().compareTo(recordedEdge.id()) < 0;
   }
+
+  private record MemoKey(NodeId from, NodeId to, Set<EdgeId> overrideBlocked) {}
 
   private record Entry(NodeId nodeId, double distance) {
     private Entry {

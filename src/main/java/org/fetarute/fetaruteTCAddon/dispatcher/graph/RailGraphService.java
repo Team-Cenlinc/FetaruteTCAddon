@@ -48,6 +48,16 @@ public final class RailGraphService {
       new ConcurrentHashMap<>();
   private final ConcurrentMap<UUID, ConcurrentMap<EdgeId, RailEdgeOverrideRecord>> edgeOverrides =
       new ConcurrentHashMap<>();
+
+  /**
+   * {@link #edgeOverrides(UUID)} 的只读快照：运行时每次解析调度图都要取一次，覆盖却只在运维命令与加载时变。
+   *
+   * <p>改覆盖与建快照都在 {@link #edgeOverrideLock} 里做，建好的快照不会漏掉一次修改；读已有快照不加锁。
+   */
+  private final ConcurrentMap<UUID, Map<EdgeId, RailEdgeOverrideRecord>> edgeOverrideSnapshots =
+      new ConcurrentHashMap<>();
+
+  private final Object edgeOverrideLock = new Object();
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
   private volatile BooleanSupplier snapshotActivationGuard = () -> true;
@@ -389,7 +399,14 @@ public final class RailGraphService {
   /** 返回指定世界的边运维覆盖快照（只读）。 */
   public Map<EdgeId, RailEdgeOverrideRecord> edgeOverrides(UUID worldId) {
     Objects.requireNonNull(worldId, "worldId");
-    return Map.copyOf(edgeOverrides.getOrDefault(worldId, new ConcurrentHashMap<>()));
+    Map<EdgeId, RailEdgeOverrideRecord> cached = edgeOverrideSnapshots.get(worldId);
+    if (cached != null) {
+      return cached;
+    }
+    synchronized (edgeOverrideLock) {
+      return edgeOverrideSnapshots.computeIfAbsent(
+          worldId, id -> Map.copyOf(edgeOverrides.getOrDefault(id, new ConcurrentHashMap<>())));
+    }
   }
 
   /** 查询某条边的运维覆盖。 */
@@ -405,9 +422,12 @@ public final class RailGraphService {
   public void putEdgeOverride(RailEdgeOverrideRecord override) {
     Objects.requireNonNull(override, "override");
     EdgeId normalized = EdgeId.undirected(override.edgeId().a(), override.edgeId().b());
-    edgeOverrides
-        .computeIfAbsent(override.worldId(), ignored -> new ConcurrentHashMap<>())
-        .put(normalized, override);
+    synchronized (edgeOverrideLock) {
+      edgeOverrides
+          .computeIfAbsent(override.worldId(), ignored -> new ConcurrentHashMap<>())
+          .put(normalized, override);
+      edgeOverrideSnapshots.remove(override.worldId());
+    }
   }
 
   /** 删除某条边的运维覆盖（仅更新内存）。 */
@@ -415,13 +435,16 @@ public final class RailGraphService {
     Objects.requireNonNull(worldId, "worldId");
     Objects.requireNonNull(edgeId, "edgeId");
     EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
-    ConcurrentMap<EdgeId, RailEdgeOverrideRecord> byWorld = edgeOverrides.get(worldId);
-    if (byWorld == null) {
-      return;
-    }
-    byWorld.remove(normalized);
-    if (byWorld.isEmpty()) {
-      edgeOverrides.remove(worldId, byWorld);
+    synchronized (edgeOverrideLock) {
+      ConcurrentMap<EdgeId, RailEdgeOverrideRecord> byWorld = edgeOverrides.get(worldId);
+      if (byWorld == null) {
+        return;
+      }
+      byWorld.remove(normalized);
+      if (byWorld.isEmpty()) {
+        edgeOverrides.remove(worldId, byWorld);
+      }
+      edgeOverrideSnapshots.remove(worldId);
     }
   }
 
@@ -523,10 +546,13 @@ public final class RailGraphService {
           EdgeId normalized = EdgeId.undirected(override.edgeId().a(), override.edgeId().b());
           overridesById.put(normalized, override);
         }
-        if (!overridesById.isEmpty()) {
-          edgeOverrides.put(worldId, overridesById);
-        } else {
-          edgeOverrides.remove(worldId);
+        synchronized (edgeOverrideLock) {
+          if (!overridesById.isEmpty()) {
+            edgeOverrides.put(worldId, overridesById);
+          } else {
+            edgeOverrides.remove(worldId);
+          }
+          edgeOverrideSnapshots.remove(worldId);
         }
       } catch (Exception ex) {
         debugLogger.accept(

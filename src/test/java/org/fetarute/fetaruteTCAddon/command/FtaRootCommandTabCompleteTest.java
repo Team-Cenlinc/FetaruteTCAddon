@@ -20,7 +20,8 @@ class FtaRootCommandTabCompleteTest {
     Mockito.when(sender.hasPermission("fetarute.admin")).thenReturn(false);
 
     assertEquals(
-        java.util.List.of("info", "help", "company", "operator", "line", "route", "station"),
+        java.util.List.of(
+            "info", "help", "company", "operator", "line", "route", "station", "pids"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {}));
   }
 
@@ -36,7 +37,16 @@ class FtaRootCommandTabCompleteTest {
 
     assertEquals(
         java.util.List.of(
-            "info", "help", "company", "operator", "line", "route", "station", "graph", "reload"),
+            "info",
+            "help",
+            "company",
+            "operator",
+            "line",
+            "route",
+            "station",
+            "pids",
+            "graph",
+            "reload"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {""}));
   }
 

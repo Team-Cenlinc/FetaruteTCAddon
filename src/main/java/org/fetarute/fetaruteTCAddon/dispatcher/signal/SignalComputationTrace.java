@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.signal;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -22,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
+import org.fetarute.fetaruteTCAddon.utils.DiagnosticSink;
 
 /**
  * 信号计算诊断跟踪器。
@@ -33,8 +35,22 @@ public final class SignalComputationTrace {
   private static final long TICK_MILLIS = 50L;
   private static final long FLIP_WINDOW_TICKS = 2L;
   private static final ConcurrentMap<String, LastSignal> LAST_SIGNALS = new ConcurrentHashMap<>();
-  private static final ConcurrentMap<String, Boolean> EMITTED_STABLE_TRACES =
-      new ConcurrentHashMap<>();
+
+  /**
+   * 已输出过的稳定诊断键，按最近使用淘汰。
+   *
+   * <p>键是整条诊断去掉易变字段后的内容，每辆车每个资源事件都不一样；不设上限时整个运行期只增不减，几小时就能攒下几十万条长字符串。 重复输出总是紧跟着发生，保留最近的一批足够去重。
+   */
+  static final int EMITTED_STABLE_TRACE_LIMIT = 8192;
+
+  private static final Map<String, Boolean> EMITTED_STABLE_TRACES =
+      Collections.synchronizedMap(
+          new LinkedHashMap<>(EMITTED_STABLE_TRACE_LIMIT * 4 / 3, 0.75f, true) {
+            @Override
+            protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+              return size() > EMITTED_STABLE_TRACE_LIMIT;
+            }
+          });
   private static volatile Consumer<String> globalLogger = message -> {};
 
   private SignalComputationTrace() {}
@@ -58,6 +74,15 @@ public final class SignalComputationTrace {
     PENDING,
     ACTIVE,
     INVALID
+  }
+
+  /**
+   * 全局诊断 logger 此刻是否会输出。
+   *
+   * <p>关着时（debug 关闭）调用方应整段跳过诊断行的拼装；本类的 {@link #emitRaw}、{@link Builder} 也会直接放弃。
+   */
+  public static boolean enabled() {
+    return DiagnosticSink.enabled(globalLogger);
   }
 
   /** 设置全局诊断 logger，供没有实例 logger 的占用层使用。 */
@@ -97,15 +122,23 @@ public final class SignalComputationTrace {
       return;
     }
     Consumer<String> out = logger != null ? logger : globalLogger;
+    if (!DiagnosticSink.enabled(out)) {
+      return;
+    }
     if (markStableTraceEmitted(stableRawTraceKey(message))) {
       emitBestEffort(out, message);
     }
   }
 
-  /** trace builder。 */
+  /**
+   * trace builder。
+   *
+   * <p>创建时全局诊断 logger 关着的话整个 builder 不收集任何字段、也不输出：信号诊断只供日志，关着时连格式化都省掉。
+   */
   public static final class Builder {
     private final LinkedHashMap<String, String> fields = new LinkedHashMap<>();
     private final List<String> blockers = new ArrayList<>();
+    private final boolean inert;
     private final String canonicalName;
     private final SignalAspect newAspect;
     private final Source source;
@@ -116,10 +149,15 @@ public final class SignalComputationTrace {
     private boolean hasDistanceOnlyConstraint;
 
     private Builder(String trainName, String rawTrainName, Source source, SignalAspect newAspect) {
-      this.canonicalName = TrainNameNormalizer.normalizeKey(trainName);
+      this.inert = !enabled();
       this.newAspect = newAspect == null ? SignalAspect.STOP : newAspect;
       this.source = source == null ? Source.PERIODIC_TICK : source;
       this.tick = currentTick();
+      if (inert) {
+        this.canonicalName = null;
+        return;
+      }
+      this.canonicalName = TrainNameNormalizer.normalizeKey(trainName);
       field("trainName", trainName);
       field("canonicalName", canonicalName);
       field("rawTrainName", rawTrainName);
@@ -129,17 +167,26 @@ public final class SignalComputationTrace {
     }
 
     public Builder previousAspect(SignalAspect aspect) {
+      if (inert) {
+        return this;
+      }
       previousAspect = aspect;
       field("previousAspect", aspect == null ? "null" : aspect.name());
       return this;
     }
 
     public Builder primaryReason(String reason) {
+      if (inert) {
+        return this;
+      }
       field("primaryReason", reason);
       return this;
     }
 
     public Builder field(String key, Object value) {
+      if (inert) {
+        return this;
+      }
       if (key == null || key.isBlank()) {
         return this;
       }
@@ -148,6 +195,9 @@ public final class SignalComputationTrace {
     }
 
     public Builder nodes(NodeId currentNode, NodeId nextNode) {
+      if (inert) {
+        return this;
+      }
       field("currentNode", currentNode == null ? "-" : currentNode.value());
       field("nextNode", nextNode == null ? "-" : nextNode.value());
       return this;
@@ -159,6 +209,9 @@ public final class SignalComputationTrace {
         int routeIndexAfter,
         Optional<NodeId> lastPassedBefore,
         Optional<NodeId> lastPassedAfter) {
+      if (inert) {
+        return this;
+      }
       field("progressVersion", progressVersion);
       field("routeIndexBefore", routeIndexBefore);
       field("routeIndexAfter", routeIndexAfter);
@@ -168,6 +221,9 @@ public final class SignalComputationTrace {
     }
 
     public Builder request(OccupancyRequest request) {
+      if (inert) {
+        return this;
+      }
       if (request == null) {
         field("requestPurpose", "-");
         field("requestResourceCount", 0);
@@ -215,6 +271,9 @@ public final class SignalComputationTrace {
     }
 
     public Builder directedContext(DirectedTraversalContext context) {
+      if (inert) {
+        return this;
+      }
       if (context == null) {
         return this;
       }
@@ -223,6 +282,9 @@ public final class SignalComputationTrace {
     }
 
     public Builder decision(OccupancyDecision decision, OccupancyRequest request) {
+      if (inert) {
+        return this;
+      }
       if (decision == null) {
         field("decisionAllowed", "-");
         field("decisionReason", "-");
@@ -273,6 +335,9 @@ public final class SignalComputationTrace {
         OptionalLong distanceToAuthorityEnd,
         String authorityEndResource,
         int authorizedEdgeCount) {
+      if (inert) {
+        return this;
+      }
       field("distanceToBlocker", formatLong(distanceToBlocker));
       field("distanceToCaution", formatLong(distanceToCaution));
       field("distanceToApproach", formatLong(distanceToApproach));
@@ -293,6 +358,9 @@ public final class SignalComputationTrace {
         Long tokenClaimVersion,
         boolean destinationPresent,
         String destination) {
+      if (inert) {
+        return this;
+      }
       field("movementInhibited", movementInhibited);
       field("movementTokenState", tokenState == null ? TokenState.NONE : tokenState);
       field("tokenClaimVersion", tokenClaimVersion == null ? "-" : tokenClaimVersion);
@@ -303,6 +371,9 @@ public final class SignalComputationTrace {
 
     public Builder emit(Consumer<String> logger) {
       Consumer<String> out = logger != null ? logger : globalLogger;
+      if (inert || !DiagnosticSink.enabled(out)) {
+        return this;
+      }
       LastSignal previous =
           canonicalName == null || canonicalName.isBlank() ? null : LAST_SIGNALS.get(canonicalName);
       SignalAspect effectivePrevious =

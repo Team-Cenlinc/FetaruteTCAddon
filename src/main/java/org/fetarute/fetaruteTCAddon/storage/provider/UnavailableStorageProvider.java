@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
@@ -137,6 +138,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public HudTemplateRepository hudTemplates() {
     return unsupported(HudTemplateRepository.class);
+  }
+
+  @Override
+  public PidsScreenRepository pidsScreens() {
+    return unsupported(PidsScreenRepository.class);
   }
 
   @Override

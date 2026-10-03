@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 
 /**
@@ -96,6 +97,18 @@ public interface TimetableApi {
 
   /** 当前全部车次绑定（与 {@link #getAssignment} 共用同一份 tick 缓存）。 */
   Collection<TrainAssignment> listAssignments();
+
+  /**
+   * 计划始发时刻落在 {@code [from, to)} 内的已取消车次（1.9.0），按计划始发时刻排序。
+   *
+   * <p>与 {@link TimetableTripCancelledEvent} 同一份登记：取消之后又有车接上的车次不再列出（事件不会另发撤销）。只存内存，重启后清空；
+   * 只保留到前一服务日。适合“近一小时取消了几班”这类汇总，不必自己按事件记账。
+   *
+   * @param from 起点（含）
+   * @param to 终点（不含）
+   * @return 不可变列表；时刻表服务未就绪时为空
+   */
+  List<CancelledTrip> cancellations(Instant from, Instant to);
 
   /**
    * 时刻表概要。
@@ -245,6 +258,8 @@ public interface TimetableApi {
    * @param serviceDate 服务日（起点发车所在日期）
    * @param cancelled 这趟车在本站不再停（1.8.0）：整趟没开出，或开出后车离开运行时、本站在剩下的站里。 详情见 {@code
    *     TimetableTripCancelledEvent}
+   * @param plannedNodeId 本站是动态站台（DYNAMIC）停靠时，编表排定的计划股道（1.9.0）。列车进站前选台，计划股道被占时会改停别的股道， 届时发 {@code
+   *     TrainPlatformAssignedEvent}；固定站台、没有排上或在 1.9.0 之前编的表为空
    */
   record Departure(
       UUID timetableId,
@@ -258,7 +273,42 @@ public interface TimetableApi {
       Instant plannedDeparture,
       boolean terminating,
       LocalDate serviceDate,
-      boolean cancelled) {
+      boolean cancelled,
+      Optional<String> plannedNodeId) {
+
+    public Departure {
+      plannedNodeId = plannedNodeId == null ? Optional.empty() : plannedNodeId;
+    }
+
+    /** 1.8.0 的构造器（源码与二进制兼容）：没有计划股道。 */
+    public Departure(
+        UUID timetableId,
+        UUID lineId,
+        UUID routeId,
+        String routeCode,
+        String tripCode,
+        int stopSequence,
+        Optional<String> nodeId,
+        Instant plannedArrival,
+        Instant plannedDeparture,
+        boolean terminating,
+        LocalDate serviceDate,
+        boolean cancelled) {
+      this(
+          timetableId,
+          lineId,
+          routeId,
+          routeCode,
+          tripCode,
+          stopSequence,
+          nodeId,
+          plannedArrival,
+          plannedDeparture,
+          terminating,
+          serviceDate,
+          cancelled,
+          Optional.empty());
+    }
 
     /** 1.7.0 及以前的构造器（源码与二进制兼容）：未取消。 */
     public Departure(
@@ -285,7 +335,8 @@ public interface TimetableApi {
           plannedDeparture,
           terminating,
           serviceDate,
-          false);
+          false,
+          Optional.empty());
     }
   }
 
@@ -330,4 +381,35 @@ public interface TimetableApi {
       Optional<String> nextStopNodeId,
       Optional<String> nextStationCode,
       OptionalLong projectedDelaySeconds) {}
+
+  /**
+   * 一趟已取消的车次（1.9.0），字段与 {@link TimetableTripCancelledEvent} 一致。
+   *
+   * @param timetableId 时刻表 ID
+   * @param tripId 车次 ID
+   * @param tripCode 车次号
+   * @param routeId 交路 ID
+   * @param serviceDate 服务日（起点发车所在日期）
+   * @param plannedDeparture 起点计划发车时刻
+   * @param scope 取消范围
+   * @param firstCancelledStopSequence 第一个不再停的停靠序号；整趟取消时为首个停车站
+   * @param reason 取消原因
+   * @param trainName 执行这趟车的列车；整趟没派出车时为空
+   */
+  record CancelledTrip(
+      UUID timetableId,
+      UUID tripId,
+      String tripCode,
+      UUID routeId,
+      LocalDate serviceDate,
+      Instant plannedDeparture,
+      TimetableTripCancelledEvent.Scope scope,
+      int firstCancelledStopSequence,
+      TimetableTripCancelledEvent.Reason reason,
+      Optional<String> trainName) {
+
+    public CancelledTrip {
+      trainName = trainName == null ? Optional.empty() : trainName;
+    }
+  }
 }

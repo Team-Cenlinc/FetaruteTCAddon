@@ -3,10 +3,14 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.time.ZoneId;
+import java.util.AbstractList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.RandomAccess;
 import java.util.UUID;
 
 /**
@@ -85,14 +89,15 @@ public record Timetable(
                 .sorted(Comparator.comparing(TimetableRoutePlan::routeCode))
                 .toList();
     trips =
-        trips == null
-            ? List.of()
-            : trips.stream()
-                .filter(Objects::nonNull)
-                .sorted(
-                    Comparator.comparingInt(TimetableTrip::departureSecondOfDay)
-                        .thenComparing(TimetableTrip::tripCode))
-                .toList();
+        new IndexedTrips(
+            trips == null
+                ? List.of()
+                : trips.stream()
+                    .filter(Objects::nonNull)
+                    .sorted(
+                        Comparator.comparingInt(TimetableTrip::departureSecondOfDay)
+                            .thenComparing(TimetableTrip::tripCode))
+                    .toList());
     duties =
         duties == null
             ? List.of()
@@ -141,13 +146,7 @@ public record Timetable(
     if (tripCode == null || tripCode.isBlank()) {
       return Optional.empty();
     }
-    String normalized = tripCode.trim();
-    for (TimetableTrip trip : trips) {
-      if (trip.tripCode().equalsIgnoreCase(normalized)) {
-        return Optional.of(trip);
-      }
-    }
-    return Optional.empty();
+    return ((IndexedTrips) trips).byCode(tripCode.trim());
   }
 
   /** 按 UUID 查车次。 */
@@ -155,12 +154,7 @@ public record Timetable(
     if (tripId == null) {
       return Optional.empty();
     }
-    for (TimetableTrip trip : trips) {
-      if (trip.id().equals(tripId)) {
-        return Optional.of(trip);
-      }
-    }
-    return Optional.empty();
+    return ((IndexedTrips) trips).byId(tripId);
   }
 
   /** 按 duty UUID 查车辆交路。 */
@@ -271,5 +265,58 @@ public record Timetable(
         notes,
         createdAt,
         updatedAt);
+  }
+
+  /**
+   * 发车表：只读列表，附带按车次号、按 UUID 的索引。
+   *
+   * <p>站牌、时刻表 API 每次刷新都要按车次号逐条查表，一份表上千班，线性扫描会成为热点。重复的车次号或 UUID 取发车顺序在前的一条，与逐条查找结果相同。
+   */
+  private static final class IndexedTrips extends AbstractList<TimetableTrip>
+      implements RandomAccess {
+
+    private final List<TimetableTrip> trips;
+    private final Map<String, TimetableTrip> byCode;
+    private final Map<UUID, TimetableTrip> byId;
+
+    private IndexedTrips(List<TimetableTrip> trips) {
+      this.trips = trips;
+      this.byCode = new HashMap<>(trips.size() * 2);
+      this.byId = new HashMap<>(trips.size() * 2);
+      for (TimetableTrip trip : trips) {
+        byCode.putIfAbsent(caseKey(trip.tripCode()), trip);
+        byId.putIfAbsent(trip.id(), trip);
+      }
+    }
+
+    @Override
+    public TimetableTrip get(int index) {
+      return trips.get(index);
+    }
+
+    @Override
+    public int size() {
+      return trips.size();
+    }
+
+    private Optional<TimetableTrip> byCode(String tripCode) {
+      TimetableTrip trip = byCode.get(caseKey(tripCode));
+      return trip != null && trip.tripCode().equalsIgnoreCase(tripCode)
+          ? Optional.of(trip)
+          : Optional.empty();
+    }
+
+    private Optional<TimetableTrip> byId(UUID tripId) {
+      return Optional.ofNullable(byId.get(tripId));
+    }
+
+    /** 与 {@link String#equalsIgnoreCase} 同一口径的归一化：逐字符先转大写再转小写。 */
+    private static String caseKey(String code) {
+      StringBuilder builder = new StringBuilder(code.length());
+      for (int i = 0; i < code.length(); i++) {
+        builder.append(Character.toLowerCase(Character.toUpperCase(code.charAt(i))));
+      }
+      return builder.toString();
+    }
   }
 }

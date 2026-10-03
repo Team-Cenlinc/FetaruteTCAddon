@@ -28,11 +28,14 @@ import org.fetarute.fetaruteTCAddon.api.event.TrainDepartStationEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHealthAlertEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHoldEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainHoldReleasedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainReleasedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainSignalChangeEvent;
 import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.TrainHold;
 import org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlert;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.PlatformResolution;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -159,6 +162,27 @@ public final class ApiEventBridge implements StationStopObserver, Consumer<Healt
     if (hasListeners.test(TrainReleasedEvent.getHandlerList())) {
       enqueue(new TrainReleasedEvent(trainName, reason));
     }
+  }
+
+  @Override
+  public void onPlatformResolved(PlatformResolution resolution) {
+    if (resolution == null || !hasListeners.test(TrainPlatformAssignedEvent.getHandlerList())) {
+      return;
+    }
+    enqueue(
+        new TrainPlatformAssignedEvent(
+            resolution.trainName(),
+            resolution.routeKey(),
+            resolution.stopIndex(),
+            resolution.node().value(),
+            RouteTerminals.platformOf(resolution.node().value()),
+            resolution.previousNode().map(node -> RouteTerminals.platformOf(node.value())),
+            resolution.plannedNode().map(node -> RouteTerminals.platformOf(node.value())),
+            switch (resolution.reason()) {
+              case ASSIGNED -> TrainPlatformAssignedEvent.Reason.ASSIGNED;
+              case CHANGED_FROM_PLAN -> TrainPlatformAssignedEvent.Reason.CHANGED_FROM_PLAN;
+              case CHANGED -> TrainPlatformAssignedEvent.Reason.CHANGED;
+            }));
   }
 
   /** 时刻表车次取消（时刻表服务登记之后调用，发生在调度路径或出票轮询里：只入队）。 */

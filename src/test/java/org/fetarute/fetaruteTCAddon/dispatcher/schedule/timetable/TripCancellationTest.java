@@ -137,9 +137,18 @@ class TripCancellationTest {
     service.release(TRAIN, "train-removed");
     assertTrue(service.cancellationOf(TIMETABLE, TRIP_0800, DATE).isPresent());
 
+    assertEquals(
+        List.of(TRIP_0800),
+        service.cancellationsBetween(EIGHT, EIGHT.plusSeconds(1)).stream()
+            .map(Cancellation::tripId)
+            .toList(),
+        "按计划始发时刻查得到");
+    assertTrue(service.cancellationsBetween(EIGHT.plusSeconds(1), EIGHT.plusSeconds(60)).isEmpty());
+
     assign("SURC-MT-LP-0366", EIGHT.plusSeconds(30));
 
     assertTrue(service.cancellationOf(TIMETABLE, TRIP_0800, DATE).isEmpty());
+    assertTrue(service.cancellationsBetween(EIGHT, EIGHT.plusSeconds(1)).isEmpty(), "撤销后查不到");
     assertEquals(1, heard.size());
   }
 

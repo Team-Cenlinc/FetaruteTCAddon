@@ -2,6 +2,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import java.time.Instant;
 import java.time.LocalDate;
+import java.util.Comparator;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -106,6 +108,22 @@ public final class TripCancellations {
       return Optional.empty();
     }
     return Optional.ofNullable(byTrip.get(new Key(timetableId, tripId, serviceDate)));
+  }
+
+  /**
+   * 计划始发时刻落在 {@code [from, to)} 内、仍有效（没有被撤销）的取消，按计划始发时刻排序。
+   *
+   * @param from 起点（含）
+   * @param to 终点（不含）
+   */
+  public List<Cancellation> between(Instant from, Instant to) {
+    if (from == null || to == null) {
+      return List.of();
+    }
+    return byTrip.values().stream()
+        .filter(c -> !c.plannedDeparture().isBefore(from) && c.plannedDeparture().isBefore(to))
+        .sorted(Comparator.comparing(Cancellation::plannedDeparture))
+        .toList();
   }
 
   /** 撤销：这趟车又有车接上了。 */

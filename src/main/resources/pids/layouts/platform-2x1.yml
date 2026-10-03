@@ -1,0 +1,38 @@
+# 停站屏 2×1（128×256，2 行 1 块地图，竖着挂）
+# 坐标与尺寸为地图像素；字号只能是 10 或 12 的整数倍。
+# 本站台下一班可以上车的列车往后停哪些站：首行站台号、色牌与多久到达，其下终点、直通或经由一行、停站表，
+# 停站多时分页（render.stop-page-seconds），底部为页码与线路色带。
+format: 1
+name: 停站屏 2×1
+tiles:
+  rows: 2
+  cols: 1
+widgets:
+  - type: platform
+    x: 4
+    y: 2
+    box: 24
+    number: 20
+    label-gap: 0
+    label: {size: 0, secondary: 0, gap: 0}
+  - type: stop-list
+    x: 0
+    y: 0
+    width: 128
+    height: 248
+    inset: 4
+    header:
+      height: 28
+      badge-x: 32
+      badge: {width: 40, height: 24, code-width: 24, code: 12, type: 10, type-gap: 1}
+      minutes: 24
+      unit: {size: 12, secondary: 10, gap: 1}
+    destination: {height: 34, size: 20, secondary: 10, gap: 2}
+    note: {gap: 4, height: 22}
+    stops: {list-gap: 2, row: 24, size: 12, secondary: 10, gap: 1}
+    footer: {height: 12, size: 10}
+  - type: line-band
+    x: 0
+    y: 252
+    width: 128
+    height: 4

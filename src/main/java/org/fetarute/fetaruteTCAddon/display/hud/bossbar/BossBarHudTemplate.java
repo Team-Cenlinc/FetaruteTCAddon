@@ -10,6 +10,7 @@ import java.util.Optional;
 import java.util.function.Consumer;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
 import org.fetarute.fetaruteTCAddon.display.hud.HudState;
+import org.fetarute.fetaruteTCAddon.display.hud.HudText;
 
 /**
  * HUD 模板解析器：支持状态分支、轮播与进度表达式。
@@ -36,22 +37,38 @@ public final class BossBarHudTemplate {
     this.rotateTicks = rotateTicks;
   }
 
-  /** 按状态与 tick 解析当前展示行（支持轮播）。 */
-  public Optional<String> resolveLine(HudState state, long tick) {
-    List<TemplateLine> candidates = linesByState.get(state);
-    if (candidates == null || candidates.isEmpty()) {
-      candidates = linesByState.get(HudState.DEFAULT);
+  /**
+   * 按状态与 tick 解析当前展示行（支持轮播）。
+   *
+   * <p>条件占位符（{@code {?key}}）缺值的行不参与轮播；某状态的行全部被隐藏时与没写这个状态一样，依次回退到 DEFAULT 与无前缀行。
+   *
+   * @param state HUD 状态
+   * @param tick 共享时钟（{@link HudLanguageRotation#nowTicks()}）
+   * @param placeholders 本次渲染的占位符，用来判断条件行是否显示
+   */
+  public Optional<String> resolveLine(HudState state, long tick, Map<String, String> placeholders) {
+    List<TemplateLine> candidates = shownLines(linesByState.get(state), placeholders);
+    if (candidates.isEmpty()) {
+      candidates = shownLines(linesByState.get(HudState.DEFAULT), placeholders);
     }
-    if (candidates == null || candidates.isEmpty()) {
-      candidates = fallbackLines;
+    if (candidates.isEmpty()) {
+      candidates = shownLines(fallbackLines, placeholders);
     }
-    if (candidates == null || candidates.isEmpty()) {
+    if (candidates.isEmpty()) {
       return Optional.empty();
     }
     // 先定语言再轮播：各显示用同一个时钟时，行数不同的状态也会同时显示同一种语言。
     TemplateLine selected =
         HudLanguageRotation.select(candidates, TemplateLine::language, tick, rotateTicks);
     return selected == null ? Optional.empty() : Optional.ofNullable(selected.content());
+  }
+
+  private static List<TemplateLine> shownLines(
+      List<TemplateLine> lines, Map<String, String> placeholders) {
+    if (lines == null || lines.isEmpty()) {
+      return List.of();
+    }
+    return lines.stream().filter(line -> HudText.shown(line.content(), placeholders)).toList();
   }
 
   /** 模板是否写了该状态的行（不算 DEFAULT 与无前缀行的回退）。 */

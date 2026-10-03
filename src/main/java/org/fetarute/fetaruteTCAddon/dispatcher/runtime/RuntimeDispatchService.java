@@ -1632,6 +1632,9 @@ public final class RuntimeDispatchService {
             this.debugLogger,
             dynamicCapacityWaits,
             this.progressRegistry::lastPassedGraphNode);
+    // 计划站台跟着停靠协调器的计划源走，站牌经协调器读暂定站台：方法引用不占本类方法数。
+    this.dynamicAllocator.setPreference(this.stationStopCoordinator::plannedPlatform);
+    this.stationStopCoordinator.attachPlatforms(this.dynamicAllocator);
     this.dynamicDestinationResolver =
         new DynamicDestinationResolver(dynamicAllocator, railGraphService, this.debugLogger);
     this.shortestPathDistanceCache =
@@ -20332,10 +20335,13 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 解析紧邻 RouteStop 的 DYNAMIC 目标。
+   * 解析紧邻 RouteStop 的 DYNAMIC 目标（车站停站结束、STOP 路点推进到下一站时）。
    *
    * <p>只有当前 stop 不声明 DYNAMIC 时返回 {@code NOT_APPLICABLE}。声明存在但格式无效、没有空闲可达候选时返回 {@code
    * BLOCKED}，调用方不得回退到 route 声明占位节点。
+   *
+   * <p>已经选定的站台原样沿用；没有时交给信号 tick 用的同一个站台分配器选：同一份候选枚举（未声明范围即该站现有全部股道）、 同一张预订表、同一条物理先后规则。
+   * 各处各选一次的话，口径不一致的那一处会把别的车已订的站台再订一次，或在 1 道被占时误报“没有站台”而把车扣在原地。
    */
   private DynamicResolution<NodeId> resolveDynamicStationTargetIfNeeded(
       String trainName, RouteDefinition route, int targetIndex, NodeId fromNode, RailGraph graph) {
@@ -20344,89 +20350,38 @@ public final class RuntimeDispatchService {
         || route == null
         || fromNode == null
         || graph == null
-        || targetIndex < 0) {
+        || targetIndex < 1) {
       return DynamicResolution.notApplicable("invalid-dynamic-target-context");
     }
     Optional<RouteStop> stopOpt = routeDefinitions.findStop(route.id(), targetIndex);
     if (stopOpt.isEmpty()) {
       return DynamicResolution.notApplicable("route-stop-missing");
     }
-    Optional<String> remainder = routeStopActionResolver.dynamicTarget(stopOpt.get());
-    if (remainder.isEmpty()) {
-      return DynamicStopMatcher.isDynamicStop(stopOpt.get())
-          ? DynamicResolution.blocked("dynamic-stop-invalid")
-          : DynamicResolution.notApplicable("route-stop-not-dynamic");
+    if (!DynamicStopMatcher.isDynamicStop(stopOpt.get())) {
+      return DynamicResolution.notApplicable("route-stop-not-dynamic");
     }
-    Optional<DynamicStopSpec> specOpt = parseDynamicStopSpec(remainder.get());
-    if (specOpt.isEmpty()) {
-      debugLogger.accept(
-          "DYNAMIC 解析失败: train=" + trainName + " idx=" + targetIndex + " raw=" + remainder.get());
-      return DynamicResolution.blocked("dynamic-stop-invalid");
+    Optional<NodeId> materialized =
+        readEffectiveNode(trainName, route, targetIndex)
+            .filter(node -> DynamicStopMatcher.matchesStop(node, stopOpt.get()));
+    if (materialized.isPresent()) {
+      return DynamicResolution.selected(materialized.get());
     }
-    DynamicStopSpec spec = specOpt.get();
-    return selectDynamicStationTarget(trainName, fromNode, graph, spec)
+    DynamicResolution<DynamicPlatformAllocator.AllocationResult> allocation =
+        dynamicAllocator.resolveAllocation(
+            trainName, route, targetIndex - 1, graph, fromNode, Optional.empty());
+    if (allocation.isBlocked()) {
+      return DynamicResolution.blocked(allocation.reason(), OptionalInt.of(targetIndex));
+    }
+    return allocation
+        .selected()
+        .filter(result -> result.stopIndex() == targetIndex)
+        .map(DynamicPlatformAllocator.AllocationResult::allocatedNode)
+        .filter(node -> isDynamicCandidateKnown(node, graph))
         .<DynamicResolution<NodeId>>map(DynamicResolution::selected)
-        .orElseGet(() -> DynamicResolution.blocked("no-available-dynamic-target"));
-  }
-
-  /**
-   * 选择 DYNAMIC 站台/车库目标。
-   *
-   * <p>选择规则：
-   *
-   * <ol>
-   *   <li>优先选择空闲且可达的轨道（按轨道号顺序）
-   *   <li>若无空闲候选，不 materialize 到已占用站台
-   * </ol>
-   *
-   * @param trainName 列车名称
-   * @param fromNode 当前节点
-   * @param graph 调度图
-   * @param spec DYNAMIC 规范
-   * @return 选择的目标节点
-   */
-  private Optional<NodeId> selectDynamicStationTarget(
-      String trainName, NodeId fromNode, RailGraph graph, DynamicStopSpec spec) {
-    if (spec == null || fromNode == null || graph == null) {
-      return Optional.empty();
-    }
-    String operator = spec.operatorCode().trim();
-    String nodeType = spec.nodeType().trim(); // "S" or "D"
-    String nodeName = spec.nodeName().trim();
-    if (operator.isEmpty() || nodeName.isEmpty()) {
-      return Optional.empty();
-    }
-
-    for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
-      NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
-      if (!isDynamicCandidateKnown(candidate, graph)) {
-        continue;
-      }
-      if (!isNodeFree(trainName, candidate)) {
-        continue;
-      }
-      if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
-        continue;
-      }
-      return Optional.of(candidate);
-    }
-
-    debugLogger.accept(
-        "DYNAMIC 失败: 未找到空闲可达站台 train="
-            + trainName
-            + " from="
-            + fromNode.value()
-            + " operator="
-            + operator
-            + " type="
-            + nodeType
-            + " name="
-            + nodeName
-            + " range="
-            + spec.fromTrack()
-            + ":"
-            + spec.toTrack());
-    return Optional.empty();
+        .orElseGet(
+            () ->
+                DynamicResolution.blocked(
+                    "no-available-dynamic-target", OptionalInt.of(targetIndex)));
   }
 
   /**
@@ -20611,6 +20566,11 @@ public final class RuntimeDispatchService {
                     .toList());
         continue;
       }
+      if (materializedTarget.isEmpty()
+          && dynamicAllocator.isReservedByOtherTrain(candidate, trainName)) {
+        rejections.add("candidate=" + candidate.value() + ":reserved-by-other-train");
+        continue;
+      }
       if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
         rejections.add("candidate=" + candidate.value() + ":unreachable");
         continue;
@@ -20662,6 +20622,15 @@ public final class RuntimeDispatchService {
         candidates.stream().filter(candidate -> candidate.decision.allowed()).toList();
     List<DynamicCandidate> selectionPool =
         preferredCandidates.isEmpty() ? candidates : preferredCandidates;
+    Optional<NodeId> planned = dynamicAllocator.preferredPlatform(trainName, route, targetIndex);
+    Optional<DynamicCandidate> plannedCandidate =
+        planned.flatMap(
+            node -> selectionPool.stream().filter(c -> c.candidate.equals(node)).findFirst());
+    if (plannedCandidate.isPresent()) {
+      DynamicCandidate chosen = plannedCandidate.get();
+      return DynamicResolution.selected(
+          new DynamicSelection(chosen.candidate, chosen.context, chosen.decision));
+    }
     if (selectionPool.size() == 1) {
       DynamicCandidate single = selectionPool.get(0);
       return DynamicResolution.selected(
@@ -20935,15 +20904,11 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 按方向选择最佳候选站台。
+   * 按方向选择最佳候选站台：从前一个节点到当前节点的来车方向，与各候选进站路径首个非道岔节点的方向比点积， 取最顺的那条（避免 180 度折回）。
    *
-   * <p>优选规则：
-   *
-   * <ol>
-   *   <li>计算列车运行方向：从前一个节点到当前节点的向量
-   *   <li>计算每个候选的首跳方向：从当前节点到路径上第一个非 switcher 节点的向量
-   *   <li>选择与运行方向夹角最小的候选（避免 180 度折回）
-   * </ol>
+   * <p>评分规则与选台器、编表排计划站台共用 {@link
+   * org.fetarute.fetaruteTCAddon.dispatcher.route.PlatformApproach}：计划站台就是车本来会选的那条。
+   * 来车方向算不出来时取第一个候选。
    */
   private DynamicCandidate selectBestCandidateByDirection(
       String trainName,
@@ -20955,122 +20920,41 @@ public final class RuntimeDispatchService {
     if (candidates == null || candidates.isEmpty() || graph == null) {
       return null;
     }
-
-    // 获取前一个节点用于计算运行方向
-    NodeId prevNode = currentIndex > 0 ? baseNodes.get(currentIndex - 1) : null;
-    if (prevNode == null) {
-      // 无法确定运行方向，返回第一个
+    org.bukkit.util.Vector travelDir =
+        currentIndex > 0
+            ? org.fetarute
+                .fetaruteTCAddon
+                .dispatcher
+                .route
+                .PlatformApproach
+                .direction(graph, baseNodes.get(currentIndex - 1), fromNode)
+                .orElse(null)
+            : null;
+    if (travelDir == null) {
       return candidates.get(0);
     }
-
-    // 获取节点位置
-    org.bukkit.util.Vector prevPos = getNodePosition(graph, prevNode);
-    org.bukkit.util.Vector fromPos = getNodePosition(graph, fromNode);
-    if (prevPos == null || fromPos == null) {
-      return candidates.get(0);
-    }
-
-    // 计算运行方向向量
-    double travelDx = fromPos.getX() - prevPos.getX();
-    double travelDz = fromPos.getZ() - prevPos.getZ();
-    double travelMag = Math.sqrt(travelDx * travelDx + travelDz * travelDz);
-    if (travelMag < 1.0e-6) {
-      return candidates.get(0);
-    }
-    // 归一化
-    travelDx /= travelMag;
-    travelDz /= travelMag;
-
     DynamicCandidate best = null;
     double bestScore = Double.NEGATIVE_INFINITY;
-
     for (DynamicCandidate cand : candidates) {
-      // 获取路径中第一个"引导节点"：过了 switcher 区域后的第一个非 switcher 节点
-      NodeId guideNode = findPathGuideNode(cand.context.pathNodes(), graph, fromNode);
-      if (guideNode == null) {
-        guideNode = cand.candidate;
-      }
-
-      org.bukkit.util.Vector guidePos = getNodePosition(graph, guideNode);
-      if (guidePos == null) {
+      OptionalDouble score =
+          org.fetarute.fetaruteTCAddon.dispatcher.route.PlatformApproach.score(
+              graph, fromNode, travelDir, cand.context.pathNodes(), cand.candidate);
+      if (score.isEmpty()) {
         continue;
       }
-
-      // 计算从当前节点到引导节点的方向
-      double guideDx = guidePos.getX() - fromPos.getX();
-      double guideDz = guidePos.getZ() - fromPos.getZ();
-      double guideMag = Math.sqrt(guideDx * guideDx + guideDz * guideDz);
-      if (guideMag < 1.0e-6) {
-        continue;
-      }
-      guideDx /= guideMag;
-      guideDz /= guideMag;
-
-      // 计算方向相似度（点积，范围 -1 到 1，越大越顺）
-      double dotProduct = travelDx * guideDx + travelDz * guideDz;
-
       debugLogger.accept(
           "DYNAMIC 候选方向评估: train="
               + trainName
               + " candidate="
               + cand.candidate.value()
-              + " guide="
-              + guideNode.value()
               + " score="
-              + String.format("%.3f", dotProduct));
-
-      if (dotProduct > bestScore) {
-        bestScore = dotProduct;
+              + String.format("%.3f", score.getAsDouble()));
+      if (score.getAsDouble() > bestScore) {
+        bestScore = score.getAsDouble();
         best = cand;
       }
     }
-
     return best;
-  }
-
-  /**
-   * 从路径中找到引导节点：跳过起始的 switcher 区域，返回第一个非 switcher 节点。
-   *
-   * <p>用于确定列车应该朝哪个方向行驶（避免被 switcher 误导）。
-   */
-  private NodeId findPathGuideNode(List<NodeId> pathNodes, RailGraph graph, NodeId fromNode) {
-    if (pathNodes == null || pathNodes.size() < 2 || graph == null) {
-      return null;
-    }
-
-    // 跳过起始节点和 switcher 节点，找到第一个非 switcher 的目标节点
-    boolean passedFrom = false;
-    for (NodeId node : pathNodes) {
-      if (node == null) {
-        continue;
-      }
-      if (!passedFrom) {
-        if (node.equals(fromNode)) {
-          passedFrom = true;
-        }
-        continue;
-      }
-      // 检查是否是 switcher
-      Optional<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> railNodeOpt =
-          graph.findNode(node);
-      if (railNodeOpt.isEmpty()) {
-        continue;
-      }
-      if (railNodeOpt.get().type() != NodeType.SWITCHER) {
-        return node;
-      }
-    }
-    return null;
-  }
-
-  private org.bukkit.util.Vector getNodePosition(RailGraph graph, NodeId nodeId) {
-    if (graph == null || nodeId == null) {
-      return null;
-    }
-    return graph
-        .findNode(nodeId)
-        .map(org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode::worldPosition)
-        .orElse(null);
   }
 
   private record DynamicSelection(
@@ -21101,13 +20985,6 @@ public final class RuntimeDispatchService {
             .findStop(route.id(), targetIndex)
             .map(DynamicStopMatcher::isDynamicStop)
             .orElse(false);
-  }
-
-  private boolean isNodeFree(String trainName, NodeId nodeId) {
-    if (nodeId == null || occupancyManager == null) {
-      return false;
-    }
-    return externalNodeClaims(trainName, nodeId).isEmpty();
   }
 
   /** 读取目标节点的外车 claim，供候选筛选与对应拒绝证据共用同一份快照。 */
@@ -28538,6 +28415,12 @@ public final class RuntimeDispatchService {
         effectiveNodeOverrides
             .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
             .put(index, createEffectiveNodeOverride(route, index, effectiveNode));
+    stationStopCoordinator.platformRecorded(
+        trainName,
+        route,
+        index,
+        previous == null ? Optional.empty() : previous.nodeOn(route.id()),
+        effectiveNode);
     if (effectiveNode.equals(declared) && previous != null && !previous.node().equals(declared)) {
       debugLogger.accept(
           "SMART_EFFECTIVE_NODE_OVERRIDE_CLEARED train="
@@ -28666,9 +28549,16 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return;
     }
-    effectiveNodeOverrides
-        .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
-        .put(index, createEffectiveNodeOverride(route, index, effectiveNode));
+    EffectiveNodeOverride previous =
+        effectiveNodeOverrides
+            .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
+            .put(index, createEffectiveNodeOverride(route, index, effectiveNode));
+    stationStopCoordinator.platformRecorded(
+        trainName,
+        route,
+        index,
+        previous == null ? Optional.empty() : previous.nodeOn(route.id()),
+        effectiveNode);
   }
 
   /**
@@ -28770,6 +28660,11 @@ public final class RuntimeDispatchService {
       Objects.requireNonNull(declaredNode, "declaredNode");
       declaredStop = declaredStop == null ? Optional.empty() : declaredStop;
       Objects.requireNonNull(node, "node");
+    }
+
+    /** 这条覆盖在该交路上的股道；属于别的交路定义时为空。 */
+    Optional<NodeId> nodeOn(RouteId currentRoute) {
+      return routeId.equals(currentRoute) ? Optional.of(node) : Optional.empty();
     }
   }
 
@@ -28985,6 +28880,20 @@ public final class RuntimeDispatchService {
    */
   public List<NodeId> resolveEffectiveWaypointsForEvent(String trainName, RouteDefinition route) {
     return resolveEffectiveWaypoints(trainName, route);
+  }
+
+  /**
+   * 该下标是否已有运行时实际节点（DYNAMIC 已选台，或到站时记下了实际股道）。
+   *
+   * <p>选中的恰好是占位股道时，{@link #resolveEffectiveWaypointsForEvent(String, RouteDefinition)}
+   * 与声明节点相同，看不出是否已选台；站牌据此区分“站台待定”与“已定在占位股道”。覆盖记录保留到列车越过该下标。
+   *
+   * @param trainName 列车名
+   * @param route 列车当前交路；与覆盖记录的交路定义不符时视为没有
+   * @param index 交路节点下标
+   */
+  public boolean hasEffectiveNode(String trainName, RouteDefinition route, int index) {
+    return readEffectiveNode(trainName, route, index).isPresent();
   }
 
   /**

@@ -15,6 +15,18 @@
 交路已经断了（剩下的班次都过了 `timetable.assign-tolerance-seconds`，也没有一张票还在等它）的车照常回收。
 没有这道闸时，闲置超时、总量超限、方向供给过剩都能把正等着下一班的车送回车库，那一班就开了天窗。
 
+**等自己交路的带客回库班**（`ReclaimManager#setOwnReturnWait`，装的是 `TimetableService#awaitsOwnReturnAt`）：交路跑完了的车按表还有一班带客回库。
+车停在这一班的起点站、它还没开也没过发车容差时，回收不收（日志 `回收跳过: 等本交路的带客回库班`，状态变了才再记），让回库班的票把车带走；
+这样的车也不算本方向的闲置供给，不会把同方向别的车推成“过剩”收走。车停在别的站（票接不到它）或回库班过了容差还没开成时不等，照常回收——
+等待只认时刻，不认“票还在等”，必有尽头。
+终点站常有开往不同车库的几条 RETURN 线路（例如 PPK 的 MT-1O_ShortD 去绿洲农场、MT-2O_ShortD 去壑湖），回收原先挑第一条从本站出发的，
+抢在回库班前面把车带走时车会开去别的车库，回库班的票则一直空等（`折返票据等待过久`），站牌照交路写的终点也成了错的。
+
+回收派票时**先试列车所绑交路的回库线路**（`ReclaimManager#setPreferredReturnRoute`，装的是 `TimetableService#returnRouteOf`），试不成再按原顺序试其它线路。
+派车成功后通知时刻表结清交路（`ReclaimManager#setReclaimListener` → `TimetableService#reclaimed`）：沿交路自己的回库线路走的，算跑了带客回库班
+（绑上那一班，`TIMETABLE_RECLAIM_AS_RETURN_LEG`）；走别的线路的，车离开交路（交路还有班次时转空缺交给替补，跑完的那一趟照旧算跑完）。
+两种情况交路的回库票都不再等它，按时刻到期撤下，不再在站牌上挂着。
+
 **正线折返点立即回收**：待命位置是正线区间路径点（`RouteTerminals#isMainlineTurnback`：`WaypointKind.INTERVAL`，例如 MT-1O_ShortR 终到的 `OFL:MLU:2:004`；
 车站、咽喉、车库、道岔都不算；编表的往返对锚定用的是同一个判定）的车停在正线上，会挡同一股道的后车，不能等闲置上限。闲置满
 `ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS`（15 秒，实际约为下一次扫描）且过了**正线回送闸**

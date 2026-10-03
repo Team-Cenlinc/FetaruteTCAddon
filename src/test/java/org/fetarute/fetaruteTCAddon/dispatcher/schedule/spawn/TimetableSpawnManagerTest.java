@@ -261,6 +261,27 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_TWO, date).isPresent());
   }
 
+  /** 已取消的车次不会开出，站牌预测里不再出现；站牌与站台屏从时刻表的取消标记显示它。 */
+  @Test
+  void cancelledTripsAreLeftOutOfTheForecast() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> tickets = fixture.pollAll();
+    fixture.manager.complete(tickets.get(2));
+
+    List<SpawnTicket> forecast =
+        fixture.manager.snapshotForecast(DAY.plusSeconds(8 * 3600 - 60), Duration.ofMinutes(20), 5);
+
+    List<UUID> routes = forecast.stream().map(ticket -> ticket.service().routeId()).toList();
+    assertEquals(1, routes.stream().filter(ROUTE::equals).count(), () -> "只剩第 0 班: " + forecast);
+    assertEquals(
+        DAY.plusSeconds(8 * 3600),
+        forecast.stream()
+            .filter(ticket -> ROUTE.equals(ticket.service().routeId()))
+            .findFirst()
+            .orElseThrow()
+            .dueAt());
+  }
+
   /**
    * 出库票在车库口重试期间，重启后留下的车在首站接下了这个交路：出库票作废，不再出第二辆车。
    *

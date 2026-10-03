@@ -66,13 +66,14 @@ public record RailEdgeOverrideRecord(
   public boolean isTempSpeedActive(Instant now) {
     Objects.requireNonNull(now, "now");
     return tempSpeedLimitBlocksPerSecond.isPresent()
-        && tempSpeedLimitUntil.map(now::isBefore).orElse(false);
+        && tempSpeedLimitUntil.isPresent()
+        && now.isBefore(tempSpeedLimitUntil.get());
   }
 
   /** 返回 TTL 封锁是否仍在生效。 */
   public boolean isBlockedTtlActive(Instant now) {
     Objects.requireNonNull(now, "now");
-    return blockedUntil.map(now::isBefore).orElse(false);
+    return blockedUntil.isPresent() && now.isBefore(blockedUntil.get());
   }
 
   /** 返回封锁是否生效（manual + TTL 叠加）。 */
