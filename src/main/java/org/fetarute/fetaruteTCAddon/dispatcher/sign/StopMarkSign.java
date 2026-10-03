@@ -108,11 +108,12 @@ public record StopMarkSign(List<Range> ranges) {
     if (ranges.isEmpty()) {
       return Integer.MAX_VALUE;
     }
-    int total = 0;
+    long total = 0L;
     for (Range range : ranges) {
-      total += range.max() - range.min() + 1;
+      total += (long) range.max() - range.min() + 1L;
     }
-    return total;
+    // 封顶在“任意节数”之下：写了超大范围的标志不会因溢出反而排到最前。
+    return (int) Math.min(total, Integer.MAX_VALUE - 1L);
   }
 
   /** 给玩家看的节数写法，例如 {@code 4,6}、{@code 3-5}、{@code *}。 */

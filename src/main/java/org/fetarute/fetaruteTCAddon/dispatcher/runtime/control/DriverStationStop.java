@@ -51,6 +51,7 @@ public final class DriverStationStop {
   private boolean anyDoorOpen;
   private boolean wrongDoorOpened;
   private boolean doorsTakenOver;
+  private boolean skipped;
 
   /** 列车中心对准停车点（车站牌子的默认对位）。 */
   public DriverStationStop(
@@ -162,6 +163,19 @@ public final class DriverStationStop {
   /** 结束这次停站。 */
   public void end() {
     phase = Phase.ENDED;
+  }
+
+  /** 越站：越过停车点太多，本站不停、不开门，停站就此结束。 */
+  public void markSkipped() {
+    if (phase != Phase.ENDED) {
+      skipped = true;
+      phase = Phase.ENDED;
+    }
+  }
+
+  /** 是否越站。 */
+  public boolean skipped() {
+    return skipped;
   }
 
   /** 列车（按 {@link #reference()} 取中心或车头）相对停车点的偏移（格）：正数为越过，负数为未到；量不出时为 {@code NaN}。 */

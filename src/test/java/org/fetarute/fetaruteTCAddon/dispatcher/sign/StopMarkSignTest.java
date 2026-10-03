@@ -59,4 +59,14 @@ class StopMarkSignTest {
     assertTrue(StopMarkSign.parse("cars:4", "").isEmpty());
     assertTrue(StopMarkSign.parse("4", "").isEmpty());
   }
+
+  @Test
+  @DisplayName("超大范围不会因溢出排到最前")
+  void breadthDoesNotOverflow() {
+    StopMarkSign huge = StopMarkSign.parse("carriage:1-2147483647,3", "").orElseThrow();
+    StopMarkSign exact = StopMarkSign.parse("carriage:3", "").orElseThrow();
+    StopMarkSign any = StopMarkSign.parse("carriage:*", "").orElseThrow();
+    assertTrue(huge.breadth() > exact.breadth());
+    assertTrue(huge.breadth() < any.breadth());
+  }
 }

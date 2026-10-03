@@ -81,11 +81,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /** 驾驶员控车时等停稳的上限：驾驶员可能要慢慢对位。 */
   private static final int DRIVER_STOP_WAIT_TIMEOUT_TICKS = 2400;
 
-  /** 自动运行开往停车位置标时的低速（格/tick）：列车压到车站牌子时往往已经很慢，直接按距离减速会一路蠕行。 */
-  private static final double MARK_CRAWL_BPT = 0.2;
-
-  /** 开往停车位置标时最后这么长（格）从低速制动到停。 */
-  private static final double MARK_BRAKE_BLOCKS = 3.0;
+  private static final double TICKS_PER_SECOND = 20.0;
 
   /** 开往停车位置标时，等停稳多留的 tick（起步与最后制动）。 */
   private static final int MARK_SETTLE_TICKS = 40;
@@ -351,17 +347,27 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /**
    * 自动运行对位：股道上有对应节数的停车位置标时让车头停在标志处，否则按 TrainCarts 把列车中心停在牌子处。
    *
-   * @return 开往标志预计还要多少 tick（等停稳时多留这么久）；按 TrainCarts 居中时为 0
+   * @return 开往标志预计还要多少 tick（等停稳时多留这么久）；按 TrainCarts 居中或就地停住时为 0
    */
   private int alignTrain(SignActionEvent info) {
+    MinecartGroup group = info.getGroup();
     Optional<StopMarks.Selected> mark = stopMarkFor(info);
-    if (mark.isPresent()) {
+    if (mark.isPresent() && group != null) {
       StopMarks.Mark selected = mark.get().mark();
       org.bukkit.block.Block markRail =
           info.getWorld().getBlockAt(selected.rail().x(), selected.rail().y(), selected.rail().z());
-      int ticks = launchHeadTo(info.getGroup(), markRail);
+      int ticks = launchHeadTo(group, markRail);
       if (ticks >= 0) {
         return ticks;
+      }
+      Vector motion = group.head().getRailTracker().getMotionVector();
+      double offset =
+          StopAlignment.signedOffset(StopAlignment.head(group), selected.point(), motion);
+      if (!(offset < -StopMarks.BEHIND_TOLERANCE_BLOCKS)) {
+        // 车头已到或已过标志（进站途中交还时可能如此）：就地停住，不退回去按车站牌子居中。
+        group.getActions().launchReset();
+        group.stop();
+        return 0;
       }
     }
     centerTrain(info);
@@ -379,16 +385,20 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (index == null || center == null || group == null || group.isEmpty()) {
       return Optional.empty();
     }
+    // 车头压在车站牌子上：取车头此刻在轨道上的行进方向，比车尾指向车头的连线准（列车后半截可能还在弯道上）。
     return index.select(
-        info.getRails(), center.toVector(), StopAlignment.travel(group), group.size());
+        info.getRails(),
+        center.toVector(),
+        group.head().getRailTracker().getMotionVector(),
+        group.size());
   }
 
   /**
-   * 把车头沿轨道送到标志所在的轨道：先以低速开到标志前，再在最后几格制动停下。
+   * 把车头沿轨道送到标志所在的轨道：保持进站速度开到标志前，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
    *
    * @return 预计还要多少 tick；前方沿轨道找不到这段轨道时为 -1（不倒车）
    */
-  private static int launchHeadTo(MinecartGroup group, org.bukkit.block.Block markRail) {
+  private int launchHeadTo(MinecartGroup group, org.bukkit.block.Block markRail) {
     MinecartMember<?> head = group.head();
     com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint walk =
         new com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint(
@@ -402,15 +412,65 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       group.stop();
       return 0;
     }
+    ConfigManager.ConfigView config = plugin.getConfigManager().current();
+    double decelBps2 =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver()
+            .resolve(group.getProperties(), config)
+            .decelBps2();
+    StopMarks.Approach approach =
+        StopMarks.approach(
+            distance,
+            head.getRealSpeedLimited(),
+            config.runtimeSettings().approachSpeedBps() / TICKS_PER_SECOND,
+            decelBps2 / (TICKS_PER_SECOND * TICKS_PER_SECOND));
     BlockFace direction =
         com.bergerkiller.bukkit.tc.Util.vecToFace(head.getRailTracker().getMotionVector(), false);
-    if (distance > MARK_BRAKE_BLOCKS + 0.5) {
-      head.getActions().addActionLaunch(direction, distance - MARK_BRAKE_BLOCKS, MARK_CRAWL_BPT);
-      head.getActions().addActionLaunch(MARK_BRAKE_BLOCKS, 0.0);
+    if (approach.holdBlocks() > 0.0) {
+      head.getActions().addActionLaunch(direction, approach.holdBlocks(), approach.holdBpt());
+      head.getActions().addActionLaunch(approach.brakeBlocks(), 0.0);
     } else {
-      head.getActions().addActionLaunch(direction, distance, 0.0);
+      head.getActions().addActionLaunch(direction, approach.brakeBlocks(), 0.0);
     }
-    return (int) Math.ceil(distance / MARK_CRAWL_BPT) + MARK_SETTLE_TICKS;
+    return approach.ticks() + MARK_SETTLE_TICKS;
+  }
+
+  /** 越站：驾驶员越过停车点太多，本站不停、不开门。到站与发车照常记下（交路进度往前走，晚点照算），这趟车的这一站在站台屏上显示为取消， 出站不扣车，下一拍调度按新进度重新控车。 */
+  private void skipStation(
+      SignActionEvent info,
+      SignNodeDefinition definition,
+      String trainName,
+      MinecartGroup group,
+      DriverStationStop stop) {
+    stop.markSkipped();
+    if (plugin == null) {
+      return;
+    }
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(
+            dispatch -> {
+              dispatch.handleStationArrival(group, definition);
+              dispatch.stationStops().handleDeparture(group, definition);
+            });
+    readIntTagValue(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX)
+        .ifPresent(
+            index ->
+                plugin.getTimetableService().ifPresent(table -> table.skipStop(trainName, index)));
+    Bukkit.getScheduler()
+        .runTask(
+            plugin,
+            () ->
+                plugin
+                    .getRuntimeDispatchService()
+                    .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+    debug(
+        "AutoStation 越站: nodeId="
+            + definition.nodeId().value()
+            + ", train="
+            + trainName
+            + String.format(Locale.ROOT, ", 越过 %.2f 格", stop.offsetBlocks())
+            + " @ "
+            + locationText(info));
   }
 
   private static void centerTrain(SignActionEvent info) {
@@ -551,6 +611,12 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         if (stop != null) {
           stop.updateOffset(
               StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint(), stop.reference()));
+          if (stop.window().classify(stop.offsetBlocks()) == StopAlignment.Window.SKIPPED) {
+            // 越过停车点太多：越站，本站不停，列车继续开。
+            cancel();
+            skipStation(info, definition, trainName, group, stop);
+            return;
+          }
         }
         if (!group.isMoving()) {
           stoppedTicks++;

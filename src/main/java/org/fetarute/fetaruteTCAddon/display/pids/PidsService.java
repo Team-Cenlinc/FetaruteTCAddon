@@ -225,6 +225,12 @@ public final class PidsService {
     platformChanges.absorb(previous.platformChanges);
   }
 
+  /** 作废取消行缓存：车次取消、重新绑定或越站之后调用，站台屏、站台广播与线路运行状况屏下一次取数即可看到。 */
+  public void invalidateCancellations() {
+    snapshots.invalidateCancellations();
+    lineStatuses.invalidateCancellations();
+  }
+
   public void stop() {
     if (directoryTask != null) {
       directoryTask.cancel();

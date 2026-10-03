@@ -11,6 +11,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.function.Function;
 import java.util.function.LongSupplier;
 import java.util.function.Predicate;
 import org.bukkit.World;
@@ -28,13 +29,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
 public final class StopMarkIndex {
 
   /** 缓存多久（毫秒）：拆建别的牌子（道岔、节点）不会通知这里，过一会儿重新找。 */
-  private static final long CACHE_MILLIS = 30_000L;
+  static final long CACHE_MILLIS = 30_000L;
+
+  /** 沿途还有区块没加载时，结果只存这么久（毫秒）：既不每拍重扫，区块加载后也很快能找全。 */
+  static final long INCOMPLETE_CACHE_MILLIS = 1_000L;
 
   private record Key(UUID world, RailBlockPos rail) {}
 
-  private record Entry(List<StopMarks.Mark> marks, long atMillis) {}
+  private record Entry(StopMarks.Scan scan, long atMillis) {}
 
-  private final Predicate<Block> nodeSign;
+  private final Function<Block, StopMarks.Scan> scanner;
   private final LongSupplier clock;
   private final Map<Key, Entry> cache = new HashMap<>();
 
@@ -42,11 +46,15 @@ public final class StopMarkIndex {
    * @param nodeSign 这块牌子是调度节点牌子（车站、区间点、车库、道岔等）
    */
   public StopMarkIndex(Predicate<Block> nodeSign) {
-    this(nodeSign, System::currentTimeMillis);
+    this(scannerFor(Objects.requireNonNull(nodeSign, "nodeSign")), System::currentTimeMillis);
   }
 
-  StopMarkIndex(Predicate<Block> nodeSign, LongSupplier clock) {
-    this.nodeSign = Objects.requireNonNull(nodeSign, "nodeSign");
+  private static Function<Block, StopMarks.Scan> scannerFor(Predicate<Block> nodeSign) {
+    return rail -> scanTrack(rail, nodeSign);
+  }
+
+  StopMarkIndex(Function<Block, StopMarks.Scan> scanner, LongSupplier clock) {
+    this.scanner = Objects.requireNonNull(scanner, "scanner");
     this.clock = Objects.requireNonNull(clock, "clock");
   }
 
@@ -61,34 +69,45 @@ public final class StopMarkIndex {
     Key key = new Key(world.getUID(), start);
     long now = clock.getAsLong();
     Entry entry = cache.get(key);
-    if (entry != null && now - entry.atMillis() < CACHE_MILLIS) {
-      return entry.marks();
+    if (entry != null
+        && now - entry.atMillis()
+            < (entry.scan().complete() ? CACHE_MILLIS : INCOMPLETE_CACHE_MILLIS)) {
+      return entry.scan().marks();
     }
-    List<StopMarks.Mark> marks;
+    StopMarks.Scan scan;
     try {
-      marks =
-          List.copyOf(
-              StopMarks.scan(
-                  new TrainCartsRailBlockAccess(world),
-                  start,
-                  StopMarks.SEARCH_BLOCKS,
-                  pos -> hasNodeSign(world, pos),
-                  pos -> marksAt(world, pos)));
+      scan = scanner.apply(stationRail);
     } catch (RuntimeException | LinkageError ex) {
       // TrainCarts 版本不同或轨道正在变化：当作没有标志，过一会儿再找。
-      marks = List.of();
+      scan = new StopMarks.Scan(List.of(), false);
     }
-    cache.put(key, new Entry(marks, now));
-    return marks;
+    cache.put(key, new Entry(scan, now));
+    return scan.marks();
   }
 
-  /** 按节数与行进方向选出车头该停的标志（见 {@link StopMarks#select}）。 */
+  /** 沿车站股道收集标志（TrainCarts 轨道）。 */
+  private static StopMarks.Scan scanTrack(Block stationRail, Predicate<Block> nodeSign) {
+    World world = stationRail.getWorld();
+    return StopMarks.scan(
+        new TrainCartsRailBlockAccess(world),
+        new RailBlockPos(stationRail.getX(), stationRail.getY(), stationRail.getZ()),
+        StopMarks.SEARCH_BLOCKS,
+        pos -> hasNodeSign(world, pos, nodeSign),
+        pos -> marksAt(world, pos),
+        pos -> world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4));
+  }
+
+  /**
+   * 按节数与行进方向选出车头该停的标志（见 {@link StopMarks#select}）。
+   *
+   * @param direction 列车在车站股道上的行进方向（见 {@link StopMarks#orient}）
+   */
   public Optional<StopMarks.Selected> select(
-      Block stationRail, Vector stationPoint, Vector travel, int carriages) {
-    if (stationPoint == null || travel == null) {
+      Block stationRail, Vector stationPoint, Vector direction, int carriages) {
+    if (stationPoint == null || direction == null) {
       return Optional.empty();
     }
-    return StopMarks.select(around(stationRail), stationPoint, travel, carriages);
+    return StopMarks.select(around(stationRail), stationPoint, direction, carriages);
   }
 
   /** 清空缓存：停车位置标牌子建好或拆掉时调用。 */
@@ -96,7 +115,7 @@ public final class StopMarkIndex {
     cache.clear();
   }
 
-  private boolean hasNodeSign(World world, RailBlockPos pos) {
+  private static boolean hasNodeSign(World world, RailBlockPos pos, Predicate<Block> nodeSign) {
     for (RailLookup.TrackedSign sign : signsAt(world, pos)) {
       if (sign.signBlock != null && nodeSign.test(sign.signBlock)) {
         return true;
@@ -105,7 +124,7 @@ public final class StopMarkIndex {
     return false;
   }
 
-  private List<StopMarks.Mark> marksAt(World world, RailBlockPos pos) {
+  private static List<StopMarks.Mark> marksAt(World world, RailBlockPos pos) {
     List<StopMarks.Mark> marks = new ArrayList<>();
     for (RailLookup.TrackedSign sign : signsAt(world, pos)) {
       SignActionHeader header = sign.getHeader();

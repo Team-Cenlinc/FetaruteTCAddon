@@ -1541,6 +1541,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
         .ifPresent(diagnostics -> updateApproach(link, group, diagnostics));
     Optional<DriverStationStop> stop = link.stationStop();
+    link.takeSkippedStation()
+        .ifPresent(
+            station -> {
+              traceSession(session, "越站 " + station);
+              Player player = Bukkit.getPlayer(session.playerId());
+              if (player != null) {
+                notice(player, "drive.hud.station.skipped", Map.of("station", station));
+              }
+            });
     if (stop.isPresent()) {
       DriverStationStop current = stop.get();
       DriverDoorSide side = DriverDoorSide.required(current, DriveDoors.cabFacing(group, session));
@@ -1561,7 +1570,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
     } else {
       link.setRequiredDoorSide(DriverDoorSide.NONE);
-      if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0) {
+      // 停站刚结束时（上一拍还在停站）立刻刷新，否则发车后会把刚停过的站显示成下一站。
+      if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0 || session.lastStationPhase() != null) {
         link.setNextStopLabel(nextStopLabel(group));
       }
       // 前方有停车点时按它的站名；还没进入调度的进站范围时按交路进度的下一站。

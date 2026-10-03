@@ -7,10 +7,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
  * 驾驶员控制的列车的保护包络（相当于 ATP）：把调度层的指令换算成此刻的容许速度，并决定是否介入。
  *
  * <ul>
- *   <li>容许速度：指令的容许速度、随距离收紧的包络、到停车点的常用制动曲线、进站曲线（停到停车窗口末端）、指令过期时的限制速度，取最小；
+ *   <li>容许速度：指令的容许速度、随距离收紧的包络、到停车点的常用制动曲线、进站曲线（最远停到越站阈值处）、指令过期时的限制速度，取最小；
  *   <li>超过容许速度一个容差：常用制动（至少 B4），降到容许速度以下一段回差才松开；
  *   <li>超出容许速度一个容差再加“超速比例”与容差中较大的一档，或闭塞硬停：紧急制动；调度要求停车只用常用制动；
- *   <li>停车信号下按紧急制动也停不到停车点前，或进站越过停车窗口：立即停住（调度层的防撞保证优先于真实感）；
+ *   <li>停车信号下按紧急制动也停不到停车点前：立即停住（调度层的防撞保证优先于真实感）。进站停过头不强制停车：越过越站阈值时由站台按越站处理；
  *   <li>行驶中达到容许速度、停稳时遇到停车信号或不允许起步：切断牵引。
  * </ul>
  *
@@ -133,14 +133,14 @@ public final class DriverProtection {
         permitted = 0.0;
       }
     }
-    // 进站曲线：列车中心最远只能停到停车点后一个停车窗口。
+    // 进站曲线：最远只许冲到越站阈值处（再远就是越站，由站台处理）。
     boolean station = Double.isFinite(in.stationRemainingBlocks());
     if (station) {
       permitted =
           Math.min(
               permitted,
               brakingCurveBps(
-                  Math.max(0.0, in.stationRemainingBlocks()) + config.stopAcceptBlocks(),
+                  Math.max(0.0, in.stationRemainingBlocks()) + config.stopSkipBlocks(),
                   in.serviceDecelBps2(),
                   in.reactionSeconds()));
     }
@@ -168,13 +168,6 @@ public final class DriverProtection {
         if (remaining <= 0.0 || ebDistance > remaining) {
           iv = Intervention.CLAMP;
         }
-      }
-      if (iv == Intervention.NONE
-          && station
-          && in.stationPrecise()
-          && in.stationRemainingBlocks() + config.stopAcceptBlocks() < 0.0) {
-        // 越过停车窗口：再走就错过车站，立即停住。
-        iv = Intervention.CLAMP;
       }
       if (iv == Intervention.NONE && d.isStop() && d.stopMode() == StopControlMode.HARD_STOP) {
         iv = Intervention.EMERGENCY;

@@ -17,6 +17,9 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  */
 public final class StopMarkSignAction extends SignAction {
 
+  /** 建停车位置标的权限：标志会改变经过这里的所有自动运行列车的停车位置。 */
+  public static final String PERMISSION = "fetarute.sign.stopmark";
+
   private final StopMarkIndex index;
   private final LocaleManager locale;
 
@@ -38,6 +41,12 @@ public final class StopMarkSignAction extends SignAction {
   @Override
   public boolean build(SignChangeActionEvent event) {
     if (!event.isTrainSign() && !event.isCartSign()) {
+      return false;
+    }
+    if (event.getPlayer() != null && !event.getPlayer().hasPermission(PERMISSION)) {
+      if (locale != null) {
+        event.getPlayer().sendMessage(locale.component("sign.stopmark.no-permission"));
+      }
       return false;
     }
     index.invalidate();

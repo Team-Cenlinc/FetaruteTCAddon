@@ -196,20 +196,21 @@ class DriverProtectionTest {
   void stationCurve() {
     Decision decision = evalStation(3.0, 20.0, false);
     double expected =
-        DriverProtection.brakingCurveBps(20.0 + CONFIG.stopAcceptBlocks(), SERVICE, REACTION);
+        DriverProtection.brakingCurveBps(20.0 + CONFIG.stopSkipBlocks(), SERVICE, REACTION);
     assertEquals(expected, decision.permittedBps(), 1.0e-9);
     assertEquals(Intervention.NONE, decision.intervention());
     assertEquals(Intervention.SERVICE, evalStation(expected + 1.5, 20.0, false).intervention());
   }
 
   @Test
-  @DisplayName("越过停车窗口：实测时立即停住，估计值不据此停车")
+  @DisplayName("停过头不强制停车：进站曲线最远只许冲到越站阈值，超过曲线用常用制动")
   void stationOverrun() {
     double beyond = -(CONFIG.stopAcceptBlocks() + 1.0);
-    assertEquals(Intervention.CLAMP, evalStation(1.0, beyond, true).intervention());
+    assertEquals(
+        Intervention.NONE, evalStation(1.0, beyond, true).intervention(), "越过可开门范围但还没到越站阈值");
     double overCurve =
-        DriverProtection.brakingCurveBps(CONFIG.stopAcceptBlocks(), SERVICE, REACTION) + 1.5;
-    assertEquals(Intervention.SERVICE, evalStation(overCurve, beyond, false).intervention());
+        DriverProtection.brakingCurveBps(CONFIG.stopSkipBlocks(), SERVICE, REACTION) + 1.5;
+    assertEquals(Intervention.SERVICE, evalStation(overCurve, beyond, true).intervention());
     assertEquals(Intervention.NONE, evalStation(0.0, beyond, true).intervention(), "停稳后不再介入");
   }
 }

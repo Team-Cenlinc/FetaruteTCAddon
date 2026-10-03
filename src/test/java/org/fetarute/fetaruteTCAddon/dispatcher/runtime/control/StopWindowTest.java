@@ -21,20 +21,24 @@ class StopWindowTest {
     assertEquals(StopAlignment.Window.ACCEPTED, window.classify(-6.0));
     assertEquals(StopAlignment.Window.SHORT, window.classify(-6.1));
     assertEquals(StopAlignment.Window.OVERRUN, window.classify(8.0));
+    assertEquals(StopAlignment.Window.OVERRUN, window.classify(12.0), "越过不到越站阈值仍停站");
+    assertEquals(StopAlignment.Window.SKIPPED, window.classify(12.1));
     assertEquals(StopAlignment.Window.ACCEPTED, window.classify(Double.NaN), "量不出时不挡住停站");
   }
 
   @Test
   @DisplayName("自定义窗口；不合理的窗口拒绝")
   void customAndInvalid() {
-    StopWindow window = new StopWindow(1.0, 3.0);
+    StopWindow window = new StopWindow(1.0, 3.0, 6.0);
     assertEquals(StopAlignment.Window.ACCEPTED, window.classify(2.0));
     assertEquals(StopAlignment.Window.SHORT, window.classify(-3.5));
-    assertFalse(StopWindow.valid(4.0, 3.0));
-    assertFalse(StopWindow.valid(0.0, 3.0));
-    assertFalse(StopWindow.valid(Double.NaN, 3.0));
-    assertTrue(StopWindow.valid(2.5, 6.0));
-    assertThrows(IllegalArgumentException.class, () -> new StopWindow(4.0, 3.0));
+    assertEquals(StopAlignment.Window.SKIPPED, window.classify(6.5));
+    assertFalse(StopWindow.valid(4.0, 3.0, 6.0));
+    assertFalse(StopWindow.valid(0.0, 3.0, 6.0));
+    assertFalse(StopWindow.valid(1.0, 3.0, 3.0), "越站阈值须大于可开门范围");
+    assertFalse(StopWindow.valid(Double.NaN, 3.0, 6.0));
+    assertTrue(StopWindow.valid(2.5, 6.0, 12.0));
+    assertThrows(IllegalArgumentException.class, () -> new StopWindow(4.0, 3.0, 6.0));
   }
 
   @Test
@@ -50,7 +54,7 @@ class StopWindowTest {
             false,
             true);
     assertEquals(StopWindow.DEFAULTS, stop.window());
-    stop.setWindow(new StopWindow(1.0, 3.0));
+    stop.setWindow(new StopWindow(1.0, 3.0, 6.0));
     assertEquals(StopAlignment.Window.SHORT, stop.window().classify(-3.5));
   }
 }

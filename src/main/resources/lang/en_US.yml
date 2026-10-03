@@ -68,6 +68,7 @@ drive:
       move-up: "<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"
       on-mark: "<green>On the mark</green>"
       overrun: "<red>Past the stop mark by <white><distance></white> blocks</red>"
+      skipped: "<red><bold>Station skipped</bold></red> <gray>overran too far, no stop at</gray> <white><station></white>"
       open-doors:
         left: "<yellow>Open the left doors</yellow>"
         right: "<yellow>Open the right doors</yellow>"
@@ -403,6 +404,7 @@ sign:
   stopmark:
     created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here"
     invalid: "<prefix> <red>Invalid stop mark</red> <gray>Line 3: carriage:N, e.g. carriage:4, carriage:4,6, carriage:3-5, carriage:*</gray>"
+    no-permission: "<prefix> <red>You do not have permission to build stop marks</red>"
 
 command:
   graph:

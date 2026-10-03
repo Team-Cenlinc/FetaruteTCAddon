@@ -256,8 +256,8 @@ public interface TimetableApi {
    * @param plannedDeparture 计划发车
    * @param terminating 本站是否为该车次终点
    * @param serviceDate 服务日（起点发车所在日期）
-   * @param cancelled 这趟车在本站不再停（1.8.0）：整趟没开出，或开出后车离开运行时、本站在剩下的站里。 详情见 {@code
-   *     TimetableTripCancelledEvent}
+   * @param cancelled 这趟车在本站不再停（1.8.0）：整趟没开出，或开出后车离开运行时、本站在剩下的站里，详情见 {@code
+   *     TimetableTripCancelledEvent}；或驾驶员在本站越站（停过头太多，本站没停），这种情况没有事件
    * @param plannedNodeId 本站是动态站台（DYNAMIC）停靠时，编表排定的计划股道（1.9.0）。列车进站前选台，计划股道被占时会改停别的股道， 届时发 {@code
    *     TrainPlatformAssignedEvent}；固定站台、没有排上或在 1.9.0 之前编的表为空
    */

@@ -17,7 +17,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
  * @param staleHandbackTicks 运行中多久没收到新指令就停车交还自动运行（tick）
  * @param stopMarginBlocks 停车点、授权末端前留出的余量（格）
  * @param stopAccurateBlocks 站停时列车中心离停车点多近算停准（格）
- * @param stopAcceptBlocks 站停时列车中心离停车点多近可以开门（格）；越过更多时防护强制停车
+ * @param stopAcceptBlocks 站停时列车离停车点多近可以开门（格）；停短更多时须前移
+ * @param stopSkipBlocks 站停时越过停车点超过这么远（格）算越站：本站不停，列车继续开
  * @param stopMarker 进站时在驾驶员该停的位置显示发光停车标（只有驾驶员本人看得见）
  * @param recovery 驾驶任务与拥堵恢复的参数
  */
@@ -33,6 +34,7 @@ public record DriverConfig(
     double stopMarginBlocks,
     double stopAccurateBlocks,
     double stopAcceptBlocks,
+    double stopSkipBlocks,
     boolean stopMarker,
     DriverRecovery recovery) {
 
@@ -56,6 +58,7 @@ public record DriverConfig(
         1.0,
         StopWindow.DEFAULTS.accurateBlocks(),
         StopWindow.DEFAULTS.acceptBlocks(),
+        StopWindow.DEFAULTS.skipBlocks(),
         true,
         DriverRecovery.defaults());
   }
@@ -96,10 +99,14 @@ public record DriverConfig(
     }
     double stopAccurate = positive(section, "stop-accurate-blocks", d.stopAccurateBlocks, sink);
     double stopAccept = positive(section, "stop-accept-blocks", d.stopAcceptBlocks, sink);
-    if (!StopWindow.valid(stopAccurate, stopAccept)) {
-      sink.accept("drive.yml 的 driver.stop-accept-blocks 须大于 stop-accurate-blocks，使用默认值");
+    double stopSkip = positive(section, "skip-station-blocks", d.stopSkipBlocks, sink);
+    if (!StopWindow.valid(stopAccurate, stopAccept, stopSkip)) {
+      sink.accept(
+          "drive.yml 的 driver.stop-accurate-blocks < stop-accept-blocks < skip-station-blocks"
+              + " 不成立，使用默认值");
       stopAccurate = d.stopAccurateBlocks;
       stopAccept = d.stopAcceptBlocks;
+      stopSkip = d.stopSkipBlocks;
     }
     return new DriverConfig(
         section.getBoolean("enabled", d.enabled),
@@ -113,14 +120,15 @@ public record DriverConfig(
         nonNegative(section, "stop-margin-blocks", d.stopMarginBlocks, sink),
         stopAccurate,
         stopAccept,
+        stopSkip,
         section.getBoolean("stop-marker", d.stopMarker),
         DriverRecovery.from(section, sink));
   }
 
   /** 站停的停车窗口。 */
   public StopWindow stopWindow() {
-    return StopWindow.valid(stopAccurateBlocks, stopAcceptBlocks)
-        ? new StopWindow(stopAccurateBlocks, stopAcceptBlocks)
+    return StopWindow.valid(stopAccurateBlocks, stopAcceptBlocks, stopSkipBlocks)
+        ? new StopWindow(stopAccurateBlocks, stopAcceptBlocks, stopSkipBlocks)
         : StopWindow.DEFAULTS;
   }
 

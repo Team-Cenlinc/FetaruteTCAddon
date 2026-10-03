@@ -1461,6 +1461,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
             bridge.onTripCancelled(cancellation);
           }
         });
+    // 越站：站台屏立刻把这一站的这趟车换成取消行。站台屏可能晚于本方法建立或被重建，每次取当前的那个。
+    timetableService.setStopSkipListener(
+        () -> {
+          PidsService pids = pidsService;
+          if (pids != null) {
+            pids.invalidateCancellations();
+          }
+        });
     runtimeDispatchService
         .stationStops()
         .setMaxHold(

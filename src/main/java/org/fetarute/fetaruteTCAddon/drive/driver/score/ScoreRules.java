@@ -33,6 +33,9 @@ public final class ScoreRules {
 
   static final long DELAY_ALLOWANCE_SECONDS = 30L;
 
+  /** 越站：乘客没能上下车，按一次强制停车计。 */
+  static final int SKIPPED_STOP_PENALTY = 15;
+
   private ScoreRules() {}
 
   /**
@@ -48,6 +51,7 @@ public final class ScoreRules {
             case ACCURATE -> 0;
             case ACCEPTED -> 2;
             case OVERRUN, SHORT -> 5;
+            case SKIPPED -> SKIPPED_STOP_PENALTY;
           };
       if (stop.wrongDoor()) {
         penalty += 5;

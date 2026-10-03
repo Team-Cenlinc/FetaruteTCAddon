@@ -83,6 +83,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 车次取消登记：站牌与公开事件读这里。 */
   private final TripCancellations cancellations = new TripCancellations();
 
+  private final SkippedStops skippedStops = new SkippedStops();
+
   /** 各车在当前车次上已停完的最后一站；车半途离开时据此判断哪些站不再停。 */
   private final ConcurrentMap<String, ServedStops> servedStops = new ConcurrentHashMap<>();
 
@@ -97,6 +99,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   private volatile Consumer<TripCancellations.Cancellation> cancellationListener =
       cancellation -> {};
+
+  private volatile Runnable stopSkipListener = () -> {};
 
   /** 出票侧还有没有某个交路意图的票在等车；由时刻表出票时由出票层装上。默认恒否。 */
   private volatile Predicate<TicketIntent> pendingTicket = intent -> false;
@@ -115,6 +119,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (!resolved.enabled()) {
       clearAssignments("settings-disabled");
       cancellations.clear();
+      skippedStops.clear();
     }
   }
 
@@ -130,6 +135,52 @@ public final class TimetableService implements ScheduledDeparturePlan {
    */
   public void setCancellationListener(Consumer<TripCancellations.Cancellation> listener) {
     this.cancellationListener = listener == null ? cancellation -> {} : listener;
+  }
+
+  /** 设置越站的监听者（站台屏据此立即刷新取消行）；传 {@code null} 取消监听。回调发生在主线程的车站处理里，只能做轻量操作。 */
+  public void setStopSkipListener(Runnable listener) {
+    this.stopSkipListener = listener == null ? () -> {} : listener;
+  }
+
+  /**
+   * 列车在当前车次的这一站越站（驾驶员停过头太多，本站不停）：这趟车的这一站在站台屏上显示为取消，其余各站照常。
+   *
+   * @param trainName 列车
+   * @param stopSequence 停靠序号（与交路进度下标同一口径）
+   * @return 是否记下（列车没有绑定车次、找不到车次时为 false）
+   */
+  public boolean skipStop(String trainName, int stopSequence) {
+    String key = keyOf(trainName);
+    TimetableAssignment assignment = key == null ? null : matcher.get(key).orElse(null);
+    if (assignment == null || stopSequence < 0) {
+      return false;
+    }
+    Optional<Timetable> timetable = resolveTimetable(assignment);
+    Optional<TimetableTrip> trip =
+        timetable.flatMap(table -> table.tripByCode(assignment.tripCode()));
+    if (timetable.isEmpty() || trip.isEmpty()) {
+      return false;
+    }
+    boolean added =
+        skippedStops.record(
+            timetable.get().id(), trip.get().id(), assignment.serviceDate(), stopSequence);
+    if (added) {
+      debugLogger.accept(
+          "TIMETABLE_STOP_SKIPPED train="
+              + trainName
+              + " trip="
+              + assignment.tripCode()
+              + " seq="
+              + stopSequence);
+      stopSkipListener.run();
+    }
+    return true;
+  }
+
+  /** 这趟车的这一站是否越站。 */
+  public boolean stopSkipped(
+      UUID timetableId, UUID tripId, LocalDate serviceDate, int stopSequence) {
+    return skippedStops.contains(timetableId, tripId, serviceDate, stopSequence);
   }
 
   /**
@@ -1842,6 +1893,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     ledger.dropOutside(next.byId().keySet(), released);
     released.forEach(key -> closeDelays(key, key, "timetable-unpublished"));
     cancellations.retainTimetables(next.byId().keySet());
+    skippedStops.retainTimetables(next.byId().keySet());
   }
 
   private static String keyOf(String trainName) {

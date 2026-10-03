@@ -115,6 +115,7 @@ sign:
   stopmark:
     created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处</dark_aqua>"
     invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"
+    no-permission: "<prefix> <red>没有建停车位置标的权限</red>"
   type:
     depot: "车库"
     depot_throat: "车库咽喉"
@@ -1473,6 +1474,7 @@ drive:
       move-up: "<yellow>请前移 <white><distance></white> 格对标</yellow>"
       on-mark: "<green>已对标</green>"
       overrun: "<red>越过停车点 <white><distance></white> 格</red>"
+      skipped: "<red><bold>越站</bold></red> <gray>越过停车点太多，</gray><white><station></white><gray>未停站</gray>"
       open-doors:
         left: "<yellow>请开左侧车门</yellow>"
         right: "<yellow>请开右侧车门</yellow>"

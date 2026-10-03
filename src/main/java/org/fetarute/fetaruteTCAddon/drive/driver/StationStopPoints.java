@@ -11,7 +11,6 @@ import java.util.UUID;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import org.bukkit.World;
-import org.bukkit.block.Block;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
@@ -75,7 +74,9 @@ public final class StationStopPoints {
   /** 车站轨道缓存多久（tick）：车站牌子挪了位置时过一会儿就能找到新的。 */
   private static final long CACHE_TICKS = 1200L;
 
-  private record Station(UUID worldId, Block rail, Vector point, Vector axis, long atTick) {}
+  /** 车站牌子所在的轨道：只记坐标，不留方块对象（方块引用着世界，世界卸载后不该被这里留住）。 */
+  private record Station(
+      UUID worldId, int x, int y, int z, Vector point, Vector axis, long atTick) {}
 
   private record Failure(long retryAtTick) {}
 
@@ -104,10 +105,15 @@ public final class StationStopPoints {
     }
     Station found = station.get();
     StopMarkIndex index = marks.get();
+    // 列车可能还在进站前的弯道上：按车站轨道的走向（以列车走向定正反）判前后。
     Optional<StopMarks.Selected> mark =
         index == null
             ? Optional.empty()
-            : index.select(found.rail(), found.point(), travel, carriages);
+            : index.select(
+                world.getBlockAt(found.x(), found.y(), found.z()),
+                found.point(),
+                StopMarks.orient(found.axis(), travel),
+                carriages);
     if (mark.isPresent()) {
       return Optional.of(
           new StopPoint(
@@ -131,6 +137,7 @@ public final class StationStopPoints {
     if (failure != null && nowTick < failure.retryAtTick()) {
       return Optional.empty();
     }
+    failures.remove(node);
     Optional<Station> resolved = resolve(node, world, nowTick);
     if (resolved.isPresent()) {
       stations.put(node, resolved.get());
@@ -165,7 +172,9 @@ public final class StationStopPoints {
       return Optional.of(
           new Station(
               world.getUID(),
-              piece.block(),
+              piece.block().getX(),
+              piece.block().getY(),
+              piece.block().getZ(),
               rail.positionLocation().toVector(),
               rail.motionVector(),
               nowTick));

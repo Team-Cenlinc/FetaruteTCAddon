@@ -24,6 +24,7 @@ permissions:
       fetarute.graph.status: true
       fetarute.graph.cancel: true
       fetarute.graph.portal: true
+      fetarute.sign.stopmark: true
       fetarute.graph.delete: true
       fetarute.graph.info: true
       fetarute.graph.sign: true
@@ -89,6 +90,9 @@ permissions:
     default: op
   fetarute.graph.portal:
     description: 查看与管理跨世界传送门连接（/fta graph portal）
+    default: op
+  fetarute.sign.stopmark:
+    description: 建停车位置标牌子（stopmark）
     default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置

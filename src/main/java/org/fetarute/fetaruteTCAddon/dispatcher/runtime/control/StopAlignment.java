@@ -23,10 +23,16 @@ public final class StopAlignment {
 
   /** 停车窗口。 */
   public enum Window {
+    /** 停准。 */
     ACCURATE,
+    /** 可开门。 */
     ACCEPTED,
+    /** 停短：须前移。 */
     SHORT,
-    OVERRUN
+    /** 停过头，仍可开门。 */
+    OVERRUN,
+    /** 越过太多：越站，本站不停。 */
+    SKIPPED
   }
 
   private StopAlignment() {}

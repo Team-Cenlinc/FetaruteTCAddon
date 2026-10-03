@@ -49,7 +49,7 @@ class DriverConfigTest {
     assertEquals(3.0, config.stopAccurateBlocks(), 1.0e-9);
     assertEquals(8.0, config.stopAcceptBlocks(), 1.0e-9);
     assertEquals(
-        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow(3.0, 8.0),
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow(3.0, 8.0, 12.0),
         config.stopWindow());
     assertTrue(warnings.isEmpty(), warnings::toString);
   }

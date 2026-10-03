@@ -19,8 +19,12 @@ public record StopScore(
     boolean wrongDoor,
     boolean doorsTakenOver) {
 
-  /** 从结束的停站取数；没停妥（如进站途中交还）时为 {@code null}。 */
+  /** 从结束的停站取数；越站记为越站；没停妥（如进站途中交还）时为 {@code null}。 */
   public static StopScore of(DriverStationStop stop) {
+    if (stop.skipped()) {
+      return new StopScore(
+          stop.stationName(), stop.offsetBlocks(), StopAlignment.Window.SKIPPED, false, false);
+    }
     if (!stop.stopped()) {
       return null;
     }

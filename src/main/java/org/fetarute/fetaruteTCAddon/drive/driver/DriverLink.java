@@ -65,6 +65,7 @@ public final class DriverLink {
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
   private String nextStopLabel = "";
+  private String skippedStation;
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -286,6 +287,9 @@ public final class DriverLink {
       }
       lastStop = stationStop;
       score.addStop(StopScore.of(stationStop));
+      if (stationStop.skipped()) {
+        skippedStation = stationStop.stationName();
+      }
       stationStop = null;
     }
     return Optional.ofNullable(stationStop);
@@ -541,6 +545,13 @@ public final class DriverLink {
   /** 前方停车点的站名（显示用）；没有时为空串。 */
   public String targetLabel() {
     return targetLabel;
+  }
+
+  /** 刚越站的站名（取走后清空）：驾驶侧据此提示一次。 */
+  public Optional<String> takeSkippedStation() {
+    Optional<String> station = Optional.ofNullable(skippedStation);
+    skippedStation = null;
+    return station;
   }
 
   /** 按交路进度的下一个停靠站（与乘客 HUD 一致）；不明时为空串。 */

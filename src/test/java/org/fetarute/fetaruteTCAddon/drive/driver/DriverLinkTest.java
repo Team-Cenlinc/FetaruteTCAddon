@@ -168,7 +168,7 @@ class DriverLinkTest {
   @DisplayName("停车窗口随链路交给每一次停站")
   void stopWindowFlowsToStationStop() {
     org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow window =
-        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow(1.0, 3.0);
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow(1.0, 3.0, 6.0);
     link.setStopWindow(window);
     org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop stop =
         new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
@@ -231,5 +231,28 @@ class DriverLinkTest {
         org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Reference.CENTER,
         link.stationTarget().orElseThrow().reference(),
         "没有标志时按列车中心对准");
+  }
+
+  @Test
+  @DisplayName("越站：停站结束时记一次越站，提示只取一次")
+  void skippedStationNoticeIsTakenOnce() {
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop stop =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
+            org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:1"),
+            "测试站",
+            UUID.randomUUID(),
+            new org.bukkit.util.Vector(),
+            null,
+            false,
+            true);
+    link.beginStationStop(stop);
+    stop.updateOffset(15.0);
+    stop.markSkipped();
+    assertTrue(link.stationStop().isEmpty());
+    assertEquals(java.util.Optional.of("测试站"), link.takeSkippedStation());
+    assertTrue(link.takeSkippedStation().isEmpty());
+    assertEquals(
+        org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Window.SKIPPED,
+        link.score().stops().get(0).window());
   }
 }

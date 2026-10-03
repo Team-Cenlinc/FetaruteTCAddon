@@ -244,10 +244,16 @@ public final class TimetableApiImpl implements TimetableApi {
             continue;
           }
           LocalDate serviceDate = date;
+          // 整趟（或从某站起）取消，或驾驶员在这一站越站，都显示为取消。
           boolean cancelled =
               svc.flatMap(s -> s.cancellationOf(timetable.id(), trip.id(), serviceDate))
-                  .map(cancellation -> cancellation.covers(stop.stopSequence()))
-                  .orElse(false);
+                      .map(cancellation -> cancellation.covers(stop.stopSequence()))
+                      .orElse(false)
+                  || svc.map(
+                          s ->
+                              s.stopSkipped(
+                                  timetable.id(), trip.id(), serviceDate, stop.stopSequence()))
+                      .orElse(false);
           out.add(
               new Departure(
                   timetable.id(),
