@@ -19,9 +19,15 @@ import org.junit.jupiter.api.Test;
 @DisplayName("停车位置标：沿股道收集与按节数选取")
 class StopMarksTest {
 
-  /** 按给定连接组成的轨道。 */
+  /** 按给定连接组成的轨道；每一段长 {@code segment} 格（TCCoasters 的一段可能很长）。 */
   private static final class Track implements RailBlockAccess {
     private final Map<RailBlockPos, Set<RailBlockPos>> links = new HashMap<>();
+    private double segment = 1.0;
+
+    @Override
+    public double stepCost(RailBlockPos from, RailBlockPos to) {
+      return segment;
+    }
 
     void connect(RailBlockPos a, RailBlockPos b) {
       links.computeIfAbsent(a, k -> new HashSet<>()).add(b);
@@ -77,8 +83,7 @@ class StopMarksTest {
             track,
             pos(0),
             StopMarks.SEARCH_BLOCKS,
-            otherNodes::contains,
-            p -> marks.getOrDefault(p, List.of()),
+            p -> new StopMarks.RailSigns(otherNodes.contains(p), marks.getOrDefault(p, List.of())),
             p -> true);
 
     assertEquals(
@@ -95,8 +100,35 @@ class StopMarksTest {
     track.straight(-10, 40);
     StopMarks.Scan scan =
         StopMarks.scan(
-            track, pos(0), StopMarks.SEARCH_BLOCKS, p -> false, p -> List.of(), p -> p.x() < 32);
+            track, pos(0), StopMarks.SEARCH_BLOCKS, p -> StopMarks.RailSigns.NONE, p -> p.x() < 32);
     assertFalse(scan.complete());
+  }
+
+  @Test
+  @DisplayName("按轨道实际长度限距：400 格长的站台两端都找得到；长段轨道（TCC）按长度而不是段数算")
+  void distanceLimitFollowsTrackLength() {
+    Track track = new Track();
+    track.straight(-260, 260);
+    Map<RailBlockPos, List<StopMarks.Mark>> marks =
+        Map.of(pos(200), List.of(mark(200, "8")), pos(-200), List.of(mark(-200, "8")));
+    StopMarks.Scan longStation =
+        StopMarks.scan(
+            track,
+            pos(0),
+            StopMarks.SEARCH_BLOCKS,
+            p -> new StopMarks.RailSigns(false, marks.getOrDefault(p, List.of())),
+            p -> true);
+    assertEquals(2, longStation.marks().size());
+
+    track.segment = 10.0;
+    StopMarks.Scan coaster =
+        StopMarks.scan(
+            track,
+            pos(0),
+            StopMarks.SEARCH_BLOCKS,
+            p -> new StopMarks.RailSigns(false, marks.getOrDefault(p, List.of())),
+            p -> true);
+    assertTrue(coaster.marks().isEmpty(), "200 段 × 10 格 = 2000 格，超出搜索距离");
   }
 
   @Test

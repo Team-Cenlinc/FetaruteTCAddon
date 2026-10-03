@@ -5,34 +5,38 @@ import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
 import com.bergerkiller.bukkit.tc.rails.RailLookup;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
-import java.util.function.Predicate;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.GraphSignParsers;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
 
 /**
- * 各车站股道上的停车位置标：按车站牌子所在的轨道沿股道找出（见 {@link StopMarks#scan}），结果缓存一会儿；建、拆停车位置标牌子时清空缓存。
+ * 各车站股道上的停车位置标：按车站牌子所在的轨道沿股道找出（见 {@link StopMarks#scan}），结果缓存；建、拆停车位置标或节点牌子时清空缓存。
  *
  * <p>只在服务器主线程使用。
  */
 public final class StopMarkIndex {
 
-  /** 缓存多久（毫秒）：拆建别的牌子（道岔、节点）不会通知这里，过一会儿重新找。 */
-  static final long CACHE_MILLIS = 30_000L;
+  /**
+   * 缓存多久（毫秒）：建、拆停车位置标与节点牌子时立即清空；改轨道（加减道岔）不会通知这里，过一会儿重新找。
+   *
+   * <p>每个车站只在缓存过期后第一趟车进站时找一次；繁忙车站也不会每趟车都沿站台走一遍。
+   */
+  static final long CACHE_MILLIS = 300_000L;
 
   /** 沿途还有区块没加载时，结果只存这么久（毫秒）：既不每拍重扫，区块加载后也很快能找全。 */
-  static final long INCOMPLETE_CACHE_MILLIS = 1_000L;
+  static final long INCOMPLETE_CACHE_MILLIS = 5_000L;
 
   private record Key(UUID world, RailBlockPos rail) {}
 
@@ -40,17 +44,12 @@ public final class StopMarkIndex {
 
   private final Function<Block, StopMarks.Scan> scanner;
   private final LongSupplier clock;
-  private final Map<Key, Entry> cache = new HashMap<>();
 
-  /**
-   * @param nodeSign 这块牌子是调度节点牌子（车站、区间点、车库、道岔等）
-   */
-  public StopMarkIndex(Predicate<Block> nodeSign) {
-    this(scannerFor(Objects.requireNonNull(nodeSign, "nodeSign")), System::currentTimeMillis);
-  }
+  /** 节点注册表可能在异步线程里通知作废，缓存用并发 map。 */
+  private final Map<Key, Entry> cache = new ConcurrentHashMap<>();
 
-  private static Function<Block, StopMarks.Scan> scannerFor(Predicate<Block> nodeSign) {
-    return rail -> scanTrack(rail, nodeSign);
+  public StopMarkIndex() {
+    this(StopMarkIndex::scanTrack, System::currentTimeMillis);
   }
 
   StopMarkIndex(Function<Block, StopMarks.Scan> scanner, LongSupplier clock) {
@@ -85,15 +84,14 @@ public final class StopMarkIndex {
     return scan.marks();
   }
 
-  /** 沿车站股道收集标志（TrainCarts 轨道）。 */
-  private static StopMarks.Scan scanTrack(Block stationRail, Predicate<Block> nodeSign) {
+  /** 沿车站股道收集标志。轨道与牌子都经 TrainCarts 读取，TCCoasters 的轨道与虚拟牌子同样适用；距离按轨道实际长度量。 */
+  private static StopMarks.Scan scanTrack(Block stationRail) {
     World world = stationRail.getWorld();
     return StopMarks.scan(
         new TrainCartsRailBlockAccess(world),
         new RailBlockPos(stationRail.getX(), stationRail.getY(), stationRail.getZ()),
         StopMarks.SEARCH_BLOCKS,
-        pos -> hasNodeSign(world, pos, nodeSign),
-        pos -> marksAt(world, pos),
+        pos -> inspect(world, pos),
         pos -> world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4));
   }
 
@@ -110,23 +108,24 @@ public final class StopMarkIndex {
     return StopMarks.select(around(stationRail), stationPoint, direction, carriages);
   }
 
-  /** 清空缓存：停车位置标牌子建好或拆掉时调用。 */
+  /** 清空缓存：停车位置标或节点牌子建好、拆掉时调用。可在任意线程调用。 */
   public void invalidate() {
     cache.clear();
   }
 
-  private static boolean hasNodeSign(World world, RailBlockPos pos, Predicate<Block> nodeSign) {
-    for (RailLookup.TrackedSign sign : signsAt(world, pos)) {
-      if (sign.signBlock != null && nodeSign.test(sign.signBlock)) {
-        return true;
-      }
+  /** 一段轨道上的牌子：节点牌子按牌子文字认（TCCoasters 的虚拟牌子没有实体方块，不能靠查节点注册表），停车位置标解析出适用节数。 */
+  private static StopMarks.RailSigns inspect(World world, RailBlockPos pos) {
+    RailLookup.TrackedSign[] signs = signsAt(world, pos);
+    if (signs.length == 0) {
+      return StopMarks.RailSigns.NONE;
     }
-    return false;
-  }
-
-  private static List<StopMarks.Mark> marksAt(World world, RailBlockPos pos) {
+    boolean boundary = false;
     List<StopMarks.Mark> marks = new ArrayList<>();
-    for (RailLookup.TrackedSign sign : signsAt(world, pos)) {
+    for (RailLookup.TrackedSign sign : signs) {
+      if (GraphSignParsers.parse(sign).isPresent()) {
+        boundary = true;
+        continue;
+      }
       SignActionHeader header = sign.getHeader();
       if (header == null || !(header.isTrain() || header.isCart())) {
         continue;
@@ -134,10 +133,10 @@ public final class StopMarkIndex {
       if (!StopMarkSign.isStopMark(sign.getLine(1))) {
         continue;
       }
-      Optional<StopMarkSign> parsed = StopMarkSign.parse(sign.getLine(2), sign.getLine(3));
-      parsed.ifPresent(spec -> marks.add(new StopMarks.Mark(pos, railPoint(world, pos), spec)));
+      StopMarkSign.parse(sign.getLine(2), sign.getLine(3))
+          .ifPresent(spec -> marks.add(new StopMarks.Mark(pos, railPoint(world, pos), spec)));
     }
-    return marks;
+    return new StopMarks.RailSigns(boundary, marks);
   }
 
   private static RailLookup.TrackedSign[] signsAt(World world, RailBlockPos pos) {

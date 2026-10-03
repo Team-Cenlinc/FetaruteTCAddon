@@ -23,8 +23,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
  */
 public final class StopMarks {
 
-  /** 沿股道往每一边最多找多远（格）。 */
-  public static final int SEARCH_BLOCKS = 96;
+  /** 沿股道往每一边最多找多远（格），按轨道实际长度量（TCCoasters 的一段轨道可能很长）。遇到道岔或别的节点牌子就会先停，这里只防没有边界的长线一直找下去。 */
+  public static final double SEARCH_BLOCKS = 512.0;
 
   /** 标志在车站牌子（或车头）后方不超过这么多（格）时仍算在前方（同一段轨道上的测量误差）。 */
   public static final double BEHIND_TOLERANCE_BLOCKS = 0.5;
@@ -73,6 +73,21 @@ public final class StopMarks {
   }
 
   /**
+   * 一段轨道上的牌子。
+   *
+   * @param boundary 有别的节点牌子（车站、区间点、车库、道岔等），走到这里就停
+   * @param marks 停车位置标
+   */
+  public record RailSigns(boolean boundary, List<Mark> marks) {
+    /** 没有牌子。 */
+    public static final RailSigns NONE = new RailSigns(false, List.of());
+
+    public RailSigns {
+      marks = List.copyOf(marks);
+    }
+  }
+
+  /**
    * 自动运行开往标志的两段：先以 {@code holdBpt} 走 {@code holdBlocks}，再在 {@code brakeBlocks} 内制动停下。
    *
    * @param holdBlocks 保持速度的一段（格）；为 0 时直接制动
@@ -82,33 +97,31 @@ public final class StopMarks {
    */
   public record Approach(double holdBlocks, double holdBpt, double brakeBlocks, int ticks) {}
 
-  private record Step(RailBlockPos pos, int blocks) {}
+  private record Step(RailBlockPos pos, double blocks) {}
 
   private StopMarks() {}
 
   /**
-   * 从车站牌子所在的轨道沿同一股道往两边收集停车位置标。
+   * 从车站牌子所在的轨道沿同一股道往两边收集停车位置标。每段轨道只查一次牌子。
    *
-   * @param start 车站牌子所在的轨道
-   * @param maxBlocks 每一边最多走多远（格）
-   * @param boundary 这段轨道上有别的节点牌子（走到这里就停）
-   * @param marksAt 这段轨道上的停车位置标
+   * @param start 车站牌子所在的轨道（它自己的节点牌子不算边界）
+   * @param maxBlocks 每一边最多走多远（格，按 {@link RailBlockAccess#stepCost} 累计）
+   * @param inspect 这段轨道上的牌子
    * @param loaded 这个位置所在的区块已加载；沿途有没加载的邻接轨道时结果记为不完整
    */
   public static Scan scan(
       RailBlockAccess access,
       RailBlockPos start,
-      int maxBlocks,
-      Predicate<RailBlockPos> boundary,
-      Function<RailBlockPos, List<Mark>> marksAt,
+      double maxBlocks,
+      Function<RailBlockPos, RailSigns> inspect,
       Predicate<RailBlockPos> loaded) {
-    List<Mark> found = new ArrayList<>(marksAt.apply(start));
+    List<Mark> found = new ArrayList<>(inspect.apply(start).marks());
     boolean complete = allLoaded(access, start, loaded);
     Set<RailBlockPos> visited = new HashSet<>();
     visited.add(start);
     Deque<Step> frontier = new ArrayDeque<>();
     for (RailBlockPos next : access.neighbors(start)) {
-      frontier.add(new Step(next, 1));
+      frontier.add(new Step(next, access.stepCost(start, next)));
     }
     while (!frontier.isEmpty()) {
       Step step = frontier.poll();
@@ -116,14 +129,18 @@ public final class StopMarks {
         continue;
       }
       Set<RailBlockPos> neighbors = access.neighbors(step.pos());
-      if (RailBlockAccess.isJunction(access, step.pos(), neighbors) || boundary.test(step.pos())) {
+      if (RailBlockAccess.isJunction(access, step.pos(), neighbors)) {
         continue;
       }
-      found.addAll(marksAt.apply(step.pos()));
+      RailSigns signs = inspect.apply(step.pos());
+      if (signs.boundary()) {
+        continue;
+      }
+      found.addAll(signs.marks());
       complete &= allLoaded(access, step.pos(), loaded);
       for (RailBlockPos next : neighbors) {
         if (!visited.contains(next)) {
-          frontier.add(new Step(next, step.blocks() + 1));
+          frontier.add(new Step(next, step.blocks() + access.stepCost(step.pos(), next)));
         }
       }
     }

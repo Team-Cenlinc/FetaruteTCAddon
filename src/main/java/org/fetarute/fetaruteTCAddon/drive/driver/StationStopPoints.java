@@ -148,7 +148,7 @@ public final class StationStopPoints {
     return resolved;
   }
 
-  /** 按车站牌子找到它所在的轨道（TrainCarts 认的那一段），取轨道中心与走向。区块未加载时找不到。 */
+  /** 按车站牌子找到它所在的轨道（TrainCarts 认的那一段），取轨道中心与走向；TCCoasters 的虚拟牌子按注册位置上的轨道取。区块未加载时找不到。 */
   private Optional<Station> resolve(NodeId node, World world, long nowTick) {
     Optional<SignNodeRegistry.SignNodeInfo> info = signs.apply(node);
     if (info.isEmpty() || !info.get().worldId().equals(world.getUID())) {
@@ -160,8 +160,12 @@ public final class StationStopPoints {
       return Optional.empty();
     }
     try {
-      RailPiece piece =
-          RailLookup.discoverRailPieceFromSign(world.getBlockAt(x, info.get().y(), z));
+      org.bukkit.block.Block registered = world.getBlockAt(x, info.get().y(), z);
+      RailPiece piece = RailLookup.discoverRailPieceFromSign(registered);
+      if (piece == null || piece.isNone()) {
+        // TCCoasters 的虚拟牌子没有实体牌子方块，注册的位置就是它所在的轨道。
+        piece = RailPiece.create(registered);
+      }
       if (piece == null || piece.isNone()) {
         return Optional.empty();
       }

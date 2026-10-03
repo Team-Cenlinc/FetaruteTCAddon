@@ -710,7 +710,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     SignAction.register(autoStationSignAction);
     SignAction.register(depotSignAction);
     SignNodeRegistry nodes = signNodeRegistry;
-    this.stopMarkIndex = new StopMarkIndex(block -> nodes.get(block).isPresent());
+    this.stopMarkIndex = new StopMarkIndex();
+    StopMarkIndex marks = stopMarkIndex;
+    nodes.setChangeListener(marks::invalidate);
     this.stopMarkSignAction = new StopMarkSignAction(stopMarkIndex, localeManager);
     SignAction.register(stopMarkSignAction);
     // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。

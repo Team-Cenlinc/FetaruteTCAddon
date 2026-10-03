@@ -21,6 +21,7 @@ public final class SignNodeRegistry {
 
   private final ConcurrentMap<String, SignNodeInfo> definitions = new ConcurrentHashMap<>();
   private final Consumer<String> debugLogger;
+  private volatile Runnable changeListener = () -> {};
 
   public SignNodeRegistry() {
     this(message -> {});
@@ -28,6 +29,11 @@ public final class SignNodeRegistry {
 
   public SignNodeRegistry(Consumer<String> debugLogger) {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+  }
+
+  /** 设置节点牌子增删的监听者（停车位置标的股道缓存据此作废）；可能在异步线程回调，只能做轻量操作。传 {@code null} 取消监听。 */
+  public void setChangeListener(Runnable listener) {
+    this.changeListener = listener == null ? () -> {} : listener;
   }
 
   /**
@@ -61,6 +67,7 @@ public final class SignNodeRegistry {
     String safeWorldName = worldName == null ? "unknown" : worldName;
     definitions.put(
         key(worldId, x, y, z), new SignNodeInfo(definition, worldId, safeWorldName, x, y, z));
+    changeListener.run();
   }
 
   public Optional<SignNodeDefinition> get(Block block) {
@@ -90,6 +97,7 @@ public final class SignNodeRegistry {
     if (removed != null) {
       debugLogger.accept(
           "移除节点注册 " + removed.definition().nodeId().value() + " @ " + formatLocation(block));
+      changeListener.run();
     }
     return Optional.ofNullable(removed).map(SignNodeInfo::definition);
   }
@@ -119,6 +127,7 @@ public final class SignNodeRegistry {
 
   public void clear() {
     definitions.clear();
+    changeListener.run();
   }
 
   /** 删除指定世界的所有注册项（不会触发区块加载）。 */
@@ -127,6 +136,7 @@ public final class SignNodeRegistry {
     definitions
         .entrySet()
         .removeIf(entry -> entry != null && worldId.equals(entry.getValue().worldId()));
+    changeListener.run();
   }
 
   /**
