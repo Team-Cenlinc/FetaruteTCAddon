@@ -33,6 +33,11 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getStopMarkIndex"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getOccupancyManager"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>

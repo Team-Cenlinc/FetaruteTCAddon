@@ -199,4 +199,30 @@ class StopMarksTest {
         StopMarks.select(marks, station, new Vector(1, 0, 0), 8).orElseThrow().mark().rail());
     assertTrue(StopMarks.select(marks, station, new Vector(-1, 0, 0), 8).isEmpty());
   }
+
+  @Test
+  @DisplayName("分段推进与一次走完结果相同")
+  void steppedScanMatchesFullScan() {
+    Track track = new Track();
+    track.straight(-50, 50);
+    Map<RailBlockPos, List<StopMarks.Mark>> marks =
+        Map.of(pos(30), List.of(mark(30, "4")), pos(-40), List.of(mark(-40, "6")));
+    StopMarks.ScanJob job =
+        new StopMarks.ScanJob(
+            track,
+            pos(0),
+            StopMarks.SEARCH_BLOCKS,
+            p -> new StopMarks.RailSigns(false, marks.getOrDefault(p, List.of())),
+            p -> true);
+    int steps = 0;
+    while (!job.step(5)) {
+      assertFalse(job.result().complete(), "没走完的结果记为不完整");
+      steps++;
+    }
+    assertTrue(steps > 5);
+    assertTrue(job.result().complete());
+    assertEquals(
+        Set.of(pos(30), pos(-40)),
+        Set.copyOf(job.result().marks().stream().map(StopMarks.Mark::rail).toList()));
+  }
 }

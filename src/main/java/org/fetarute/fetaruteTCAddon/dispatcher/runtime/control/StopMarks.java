@@ -102,7 +102,7 @@ public final class StopMarks {
   private StopMarks() {}
 
   /**
-   * 从车站牌子所在的轨道沿同一股道往两边收集停车位置标。每段轨道只查一次牌子。
+   * 从车站牌子所在的轨道沿同一股道往两边收集停车位置标，一次走完（见 {@link ScanJob}）。
    *
    * @param start 车站牌子所在的轨道（它自己的节点牌子不算边界）
    * @param maxBlocks 每一边最多走多远（格，按 {@link RailBlockAccess#stepCost} 累计）
@@ -115,36 +115,95 @@ public final class StopMarks {
       double maxBlocks,
       Function<RailBlockPos, RailSigns> inspect,
       Predicate<RailBlockPos> loaded) {
-    List<Mark> found = new ArrayList<>(inspect.apply(start).marks());
-    boolean complete = allLoaded(access, start, loaded);
-    Set<RailBlockPos> visited = new HashSet<>();
-    visited.add(start);
-    Deque<Step> frontier = new ArrayDeque<>();
-    for (RailBlockPos next : access.neighbors(start)) {
-      frontier.add(new Step(next, access.stepCost(start, next)));
+    ScanJob job = new ScanJob(access, start, maxBlocks, inspect, loaded);
+    job.step(Integer.MAX_VALUE);
+    return job.result();
+  }
+
+  /**
+   * 可以分段推进的收集：每次只走若干段轨道，长站台可以分到几个 tick 里走完，不卡主线程。
+   *
+   * <p>从车站牌子所在的轨道往两边走，遇到道岔或别的节点牌子就停；每段轨道只查一次牌子。只在服务器主线程使用。
+   */
+  public static final class ScanJob {
+    private final RailBlockAccess access;
+    private final RailBlockPos start;
+    private final double maxBlocks;
+    private final Function<RailBlockPos, RailSigns> inspect;
+    private final Predicate<RailBlockPos> loaded;
+    private final List<Mark> found = new ArrayList<>();
+    private final Set<RailBlockPos> visited = new HashSet<>();
+    private final Deque<Step> frontier = new ArrayDeque<>();
+    private boolean started;
+    private boolean complete = true;
+
+    /** 参数见 {@link StopMarks#scan}。 */
+    public ScanJob(
+        RailBlockAccess access,
+        RailBlockPos start,
+        double maxBlocks,
+        Function<RailBlockPos, RailSigns> inspect,
+        Predicate<RailBlockPos> loaded) {
+      this.access = Objects.requireNonNull(access, "access");
+      this.start = Objects.requireNonNull(start, "start");
+      this.maxBlocks = maxBlocks;
+      this.inspect = Objects.requireNonNull(inspect, "inspect");
+      this.loaded = Objects.requireNonNull(loaded, "loaded");
     }
-    while (!frontier.isEmpty()) {
-      Step step = frontier.poll();
-      if (step.blocks() > maxBlocks || !visited.add(step.pos())) {
-        continue;
+
+    /**
+     * 往前走至多 {@code rails} 段轨道。
+     *
+     * @return 是否已经走完
+     */
+    public boolean step(int rails) {
+      int budget = rails;
+      if (!started) {
+        started = true;
+        found.addAll(inspect.apply(start).marks());
+        complete = allLoaded(access, start, loaded);
+        visited.add(start);
+        for (RailBlockPos next : access.neighbors(start)) {
+          frontier.add(new Step(next, access.stepCost(start, next)));
+        }
+        budget--;
       }
-      Set<RailBlockPos> neighbors = access.neighbors(step.pos());
-      if (RailBlockAccess.isJunction(access, step.pos(), neighbors)) {
-        continue;
-      }
-      RailSigns signs = inspect.apply(step.pos());
-      if (signs.boundary()) {
-        continue;
-      }
-      found.addAll(signs.marks());
-      complete &= allLoaded(access, step.pos(), loaded);
-      for (RailBlockPos next : neighbors) {
-        if (!visited.contains(next)) {
-          frontier.add(new Step(next, step.blocks() + access.stepCost(step.pos(), next)));
+      while (budget > 0 && !frontier.isEmpty()) {
+        Step step = frontier.poll();
+        if (step.blocks() > maxBlocks || !visited.add(step.pos())) {
+          continue;
+        }
+        budget--;
+        Set<RailBlockPos> neighbors = access.neighbors(step.pos());
+        if (RailBlockAccess.isJunction(access, step.pos(), neighbors)) {
+          continue;
+        }
+        RailSigns signs = inspect.apply(step.pos());
+        if (signs.boundary()) {
+          continue;
+        }
+        found.addAll(signs.marks());
+        if (complete && !allLoaded(access, step.pos(), loaded)) {
+          complete = false;
+        }
+        for (RailBlockPos next : neighbors) {
+          if (!visited.contains(next)) {
+            frontier.add(new Step(next, step.blocks() + access.stepCost(step.pos(), next)));
+          }
         }
       }
+      return done();
     }
-    return new Scan(found, complete);
+
+    /** 是否已经走完。 */
+    public boolean done() {
+      return started && frontier.isEmpty();
+    }
+
+    /** 收集结果；还没走完时是到目前为止的结果，记为不完整。 */
+    public Scan result() {
+      return new Scan(found, complete && done());
+    }
   }
 
   private static boolean allLoaded(

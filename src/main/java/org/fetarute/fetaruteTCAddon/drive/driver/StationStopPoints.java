@@ -2,7 +2,6 @@ package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
-import com.bergerkiller.bukkit.tc.rails.RailLookup;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
@@ -105,11 +104,11 @@ public final class StationStopPoints {
     }
     Station found = station.get();
     StopMarkIndex index = marks.get();
-    // 列车可能还在进站前的弯道上：按车站轨道的走向（以列车走向定正反）判前后。
+    // 列车可能还在进站前的弯道上：按车站轨道的走向（以列车走向定正反）判前后。只看缓存不阻塞：还没找过时先按没有标志算，后台找完后自动换上。
     Optional<StopMarks.Selected> mark =
         index == null
             ? Optional.empty()
-            : index.select(
+            : index.selectCached(
                 world.getBlockAt(found.x(), found.y(), found.z()),
                 found.point(),
                 StopMarks.orient(found.axis(), travel),
@@ -154,21 +153,13 @@ public final class StationStopPoints {
     if (info.isEmpty() || !info.get().worldId().equals(world.getUID())) {
       return Optional.empty();
     }
-    int x = info.get().x();
-    int z = info.get().z();
-    if (!world.isChunkLoaded(x >> 4, z >> 4)) {
+    Optional<RailPiece> found =
+        StopMarkIndex.stationRailOf(world, info.get().x(), info.get().y(), info.get().z());
+    if (found.isEmpty()) {
       return Optional.empty();
     }
     try {
-      org.bukkit.block.Block registered = world.getBlockAt(x, info.get().y(), z);
-      RailPiece piece = RailLookup.discoverRailPieceFromSign(registered);
-      if (piece == null || piece.isNone()) {
-        // TCCoasters 的虚拟牌子没有实体牌子方块，注册的位置就是它所在的轨道。
-        piece = RailPiece.create(registered);
-      }
-      if (piece == null || piece.isNone()) {
-        return Optional.empty();
-      }
+      RailPiece piece = found.get();
       RailState rail = RailState.getSpawnState(piece);
       if (rail == null) {
         return Optional.empty();

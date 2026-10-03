@@ -150,6 +150,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private DepotSignAction depotSignAction;
   private StopMarkIndex stopMarkIndex;
   private StopMarkSignAction stopMarkSignAction;
+  private org.bukkit.scheduler.BukkitTask stopMarkTask;
   private OccupancyManager occupancyManager;
   private HeadwayRule headwayRule;
   private SignalEventBus signalEventBus;
@@ -599,6 +600,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return signNodeRegistry;
   }
 
+  /** 已加载区块里各车站牌子所在的轨道：停车位置标在后台提前沿这些股道找。 */
+  private List<org.bukkit.block.Block> loadedStationRails() {
+    SignNodeRegistry registry = signNodeRegistry;
+    if (registry == null) {
+      return List.of();
+    }
+    List<org.bukkit.block.Block> rails = new ArrayList<>();
+    for (SignNodeRegistry.SignNodeInfo info : registry.snapshotInfos().values()) {
+      if (info.definition().nodeType() != NodeType.STATION) {
+        continue;
+      }
+      StopMarkIndex.stationRailOf(
+              getServer().getWorld(info.worldId()), info.x(), info.y(), info.z())
+          .ifPresent(piece -> rails.add(piece.block()));
+    }
+    return rails;
+  }
+
   /** 各车站股道上的停车位置标；牌子系统初始化前为 {@code null}。 */
   public StopMarkIndex getStopMarkIndex() {
     return stopMarkIndex;
@@ -713,6 +732,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.stopMarkIndex = new StopMarkIndex();
     StopMarkIndex marks = stopMarkIndex;
     nodes.setChangeListener(marks::invalidate);
+    marks.setWarmSource(this::loadedStationRails);
+    if (stopMarkTask != null) {
+      stopMarkTask.cancel();
+    }
+    // 停车位置标在后台分片沿股道找，每 tick 只用很少时间，不卡主线程。
+    stopMarkTask = getServer().getScheduler().runTaskTimer(this, marks::tick, 1L, 1L);
     this.stopMarkSignAction = new StopMarkSignAction(stopMarkIndex, localeManager);
     SignAction.register(stopMarkSignAction);
     // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。
@@ -1822,6 +1847,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (stopMarkSignAction != null) {
       SignAction.unregister(stopMarkSignAction);
+    }
+    if (stopMarkTask != null) {
+      stopMarkTask.cancel();
+      stopMarkTask = null;
     }
     CurveLaunchAction.unregisterSerializer(TrainCarts.plugin);
     if (signNodeRegistry != null) {
