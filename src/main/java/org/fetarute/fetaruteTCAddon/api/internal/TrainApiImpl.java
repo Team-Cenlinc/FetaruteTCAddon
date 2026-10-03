@@ -61,7 +61,7 @@ public final class TrainApiImpl implements TrainApi {
     for (var entry : snapshotStore.snapshot().entrySet()) {
       TrainRuntimeSnapshot snap = entry.getValue();
       if (worldId.equals(snap.worldId())) {
-        result.add(convertSnapshot(entry.getKey(), snap));
+        result.add(convertSnapshot(entry.getKey(), snap, true));
       }
     }
     return List.copyOf(result);
@@ -69,9 +69,14 @@ public final class TrainApiImpl implements TrainApi {
 
   @Override
   public Collection<TrainSnapshot> listAllActiveTrains() {
+    return listAllActiveTrains(true);
+  }
+
+  @Override
+  public Collection<TrainSnapshot> listAllActiveTrains(boolean includeEta) {
     List<TrainSnapshot> result = new ArrayList<>();
     for (var entry : snapshotStore.snapshot().entrySet()) {
-      result.add(convertSnapshot(entry.getKey(), entry.getValue()));
+      result.add(convertSnapshot(entry.getKey(), entry.getValue(), includeEta));
     }
     return List.copyOf(result);
   }
@@ -81,7 +86,7 @@ public final class TrainApiImpl implements TrainApi {
     if (trainName == null) {
       return Optional.empty();
     }
-    return snapshotStore.getSnapshot(trainName).map(snap -> convertSnapshot(trainName, snap));
+    return snapshotStore.getSnapshot(trainName).map(snap -> convertSnapshot(trainName, snap, true));
   }
 
   @Override
@@ -100,7 +105,8 @@ public final class TrainApiImpl implements TrainApi {
             .count();
   }
 
-  private TrainSnapshot convertSnapshot(String trainName, TrainRuntimeSnapshot snap) {
+  private TrainSnapshot convertSnapshot(
+      String trainName, TrainRuntimeSnapshot snap, boolean includeEta) {
     // 获取路线信息
     Optional<RouteDefinition> routeOpt =
         routeDefinitions == null ? Optional.empty() : routeDefinitions.findById(snap.routeUuid());
@@ -132,7 +138,7 @@ public final class TrainApiImpl implements TrainApi {
 
     // 获取 ETA
     Optional<EtaInfo> eta = Optional.empty();
-    if (etaService != null) {
+    if (includeEta && etaService != null) {
       try {
         EtaResult etaResult = etaService.getForTrain(trainName, EtaTarget.nextStop());
         if (etaResult.etaEpochMillis() > 0) {

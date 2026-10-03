@@ -156,6 +156,16 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return cancellations.find(timetableId, tripId, serviceDate);
   }
 
+  /**
+   * 计划始发时刻落在 {@code [from, to)} 内的取消（见 {@link TripCancellations#between}）。
+   *
+   * @param from 起点（含）
+   * @param to 终点（不含）
+   */
+  public List<TripCancellations.Cancellation> cancellationsBetween(Instant from, Instant to) {
+    return cancellations.between(from, to);
+  }
+
   /** 当前配置。 */
   public Settings settings() {
     return settings;

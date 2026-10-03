@@ -170,6 +170,9 @@ for (TrainApi.TrainSnapshot train : api.trains().listActiveTrains(worldId)) {
 
 // 全服列车
 Collection<TrainApi.TrainSnapshot> all = api.trains().listAllActiveTrains();
+
+// 只要线路、位置、退出服务等字段时不算 ETA（1.9.0）：eta() 恒为空，省去每车一次到下一站的 ETA 计算
+Collection<TrainApi.TrainSnapshot> cheap = api.trains().listAllActiveTrains(false);
 ```
 
 ### 获取单个列车
@@ -740,6 +743,16 @@ public void onCancelled(TimetableTripCancelledEvent event) {
 以 `departuresAt` 为准的站牌不受影响，只靠事件缓存状态的调用方需要定期用 `departuresAt` 校正。取消只存内存，重启后清空。
 用 1.7.0 签名构造 `Departure` 的代码仍可编译运行：`cancelled` 为 false。
 
+要汇总“最近取消了几班”时不必自己按事件记账：`cancellations(from, to)`（1.9.0）列出计划始发时刻落在 `[from, to)` 内、仍有效的取消（与事件同一份登记，
+接上的车次不再列出），按计划始发排序，字段与事件一致（`CancelledTrip`）。同样只存内存，只保留到前一服务日。
+
+```java
+// 近一小时计划始发、已取消的车次，按交路数
+Instant now = Instant.now();
+Map<UUID, Long> byRoute = tt.cancellations(now.minus(Duration.ofHours(1)), now).stream()
+    .collect(Collectors.groupingBy(TimetableApi.CancelledTrip::routeId, Collectors.counting()));
+```
+
 ### 列车当前车次与偏差
 
 ```java
@@ -960,7 +973,8 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
-| 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`、`platformPending`、`platformCandidates`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。`EtaApi.BoardRow` 另增 `platformPlanned` 与 `cars`（新记录 `EtaApi.CarLoad`，附 `vacantSeats()`）；`TimetableApi.Departure` 增加 `plannedNodeId`（动态站台的计划股道），保留 1.8.0 与 1.7.0 的构造器。`RouteApi.RouteDetail` 增加 `via`（显式配置的经由站码，未配置为空列表），保留 1.8.0 的五参构造器。**新事件**：`TrainPlatformAssignedEvent`（站台定下来或变了）。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次；动态站台尚未选台时 `platform` 为计划站台或 `-`（此前为占位股道）；折返站上已知下一趟的来车按下一趟列出 |
+| 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`、`platformPending`、`platformCandidates`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。`EtaApi.BoardRow` 另增 `platformPlanned` 与 `cars`（新记录 `EtaApi.CarLoad`，附 `vacantSeats()`）；`TimetableApi.Departure` 增加 `plannedNodeId`（动态站台的计划股道），保留 1.8.0 与 1.7.0 的构造器。`RouteApi.RouteDetail` 增加 `via`（显式配置的经由站码，未配置为空列表），保留 1.8.0 的五参构造器。**新方法**：`TimetableApi#cancellations(from, to)`（按计划始发时刻查已取消车次，新记录 `TimetableApi.CancelledTrip`）、
+`TrainApi#listAllActiveTrains(boolean includeEta)`（为 false 时不算 ETA，接口带默认实现）。**新事件**：`TrainPlatformAssignedEvent`（站台定下来或变了）。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次；动态站台尚未选台时 `platform` 为计划站台或 `-`（此前为占位股道）；折返站上已知下一趟的来车按下一趟列出 |
 | 1.8.0 | 车次取消：`TimetableApi.Departure` 增加 `cancelled`（保留 1.7.0 构造器，取消为 false），新增 `TimetableTripCancelledEvent` |
 | 1.7.0 | 直通运转与回库。**记录新增字段**：`RouteApi.StopInfo` 增加 `lineChange`（新记录 `RouteApi.LineRef`：运营商代码 + 线路代码），`TrainApi.TrainSnapshot` 增加 `operatorCode`、`lineCode`（`Optional<String>`，对乘客显示的当前线路）与 `outOfService`；两者均保留 1.6.0 的全参构造器作为次级构造器（`lineChange` 与当前线路为空、`outOfService` 为 false），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量。两个记录的 `Optional` 分量传 `null` 时规整为空。**行为变更**（均为直通运转换线后面向乘客的口径修正，没有 CHANGE 的交路结果不变；交路、时刻表等管理归属不变）：`StationApi#linesServing`/`linesServingNode` 换线之后的车站算新线路、换线站两条都算（此前一律算交路本身的线路）；`EtaApi.BoardRow#lineName` 与 `getBoard` 的线路过滤按列车到该站时所属的线路。文档修正：`TrainSnapshot#routeCode` 实际与 `routeId` 同为 `运营商:线路:交路`（此前文档写成 `L1-R1`，实现未变） |
 | 1.6.0 | 新增车站组与停靠线路：`StationApi#listStationGroups`/`findGroupOfStation`/`findGroupOfNode`/`linesServing`/`linesServingNode`，记录 `StationGroupInfo`、`StationGroupMember`、`ServingLine` 与枚举 `TransferType`；新增 `FetaruteApi#dataRevision()` 与 `StationGroupChangedEvent`。**记录新增字段**：`RouteApi.RouteInfo` 增加 `stage`（新枚举 `RouteStage`），`RouteApi.StopInfo` 增加 `stationId`、`stationCode`；两者均保留旧的全参构造器作为次级构造器（`stage` 取 `UNKNOWN`，`stationId`/`stationCode` 为空），按旧签名 `new` 的代码源码与二进制均兼容；对这两个记录使用记录模式（record pattern）解构的代码需补上新增分量。**行为变更**：`RouteInfo#id` 不再为 `null`；`RouteInfo#operationType` 按 `pattern_type` 映射（此前恒为 `NORMAL`）；`StopInfo#stationName` 与 `TerminalInfo` 的站名改为车站记录的真实站名（此前普通停靠点为空、DYNAMIC 停靠为站码），查不到记录时退回站码；DYNAMIC 车库停靠点的 `stationName` 改为空（此前为车库代码），与普通车库节点一致 |

@@ -23,6 +23,7 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.LongSupplier;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -275,6 +276,18 @@ class TimetableApiImplTest {
     assertEquals(
         List.of(true, true),
         cancelledFlags(api.departuresAt(OPERATOR, "CCC", from, Duration.ofMinutes(20), 10)));
+
+    List<TimetableApi.CancelledTrip> cancelled =
+        api.cancellations(from, from.plus(Duration.ofMinutes(20)));
+    assertEquals(
+        List.of(TRIP_ONE, TRIP_TWO),
+        cancelled.stream().map(TimetableApi.CancelledTrip::tripId).toList(),
+        "按计划始发排序");
+    assertEquals(TimetableTripCancelledEvent.Scope.PARTIAL, cancelled.get(0).scope());
+    assertEquals(3, cancelled.get(0).firstCancelledStopSequence(), "从 QQQ 起，与事件同一口径");
+    assertEquals(TimetableTripCancelledEvent.Scope.FULL, cancelled.get(1).scope());
+    assertEquals(ROUTE, cancelled.get(0).routeId());
+    assertTrue(api.cancellations(from, from.plusSeconds(30)).isEmpty(), "计划始发不在窗口里的不列");
   }
 
   private static List<Boolean> cancelledFlags(List<TimetableApi.Departure> departures) {
