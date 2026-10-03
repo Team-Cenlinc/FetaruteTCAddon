@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaDepotCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaDriveCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
@@ -55,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRegistryRailGraphBuilde
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -88,6 +90,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.StorageSpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TrainCartsDepotSpawner;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.GraphSignParsers;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.RouteEditorAppendListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -138,6 +141,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private LoggerManager loggerManager;
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
+  private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
   private DepotSignAction depotSignAction;
@@ -196,6 +200,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .update();
     this.configManager = new ConfigManager(this);
     this.configManager.reload();
+    GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
 
     this.loggerManager = new LoggerManager(getLogger());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
@@ -348,6 +353,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), loggerManager)
         .update();
     this.configManager.reload();
+    GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
     if (pidsConfigManager != null) {
       pidsConfigManager.reload();
@@ -590,6 +596,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
     storageManager
         .provider()
         .ifPresent(provider -> service.loadFromStorage(provider, getServer().getWorlds()));
+    storageManager
+        .provider()
+        .ifPresent(
+            provider -> {
+              try {
+                portalLinks.replaceAll(provider.portalLinks().listAll());
+              } catch (RuntimeException ex) {
+                getLogger().warning("读取传送门连接失败: " + ex.getMessage());
+              }
+            });
+  }
+
+  /** 传送门连接（跨世界）。 */
+  public PortalLinkRegistry getPortalLinks() {
+    return portalLinks;
   }
 
   private void registerCommands() {
@@ -615,6 +636,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaDriveCommand(this).register(commandManager);
+    new FtaGraphPortalCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
     new FtaHealthCommand(this).register(commandManager);

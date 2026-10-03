@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
@@ -59,6 +60,9 @@ public interface StorageProvider extends AutoCloseable {
 
   /** 驾驶任务记录。 */
   DriveTaskRecordRepository driveTaskRecords();
+
+  /** 传送门连接。 */
+  PortalLinkRepository portalLinks();
 
   TimetableRepository timetables();
 

@@ -417,6 +417,16 @@ command:
       compute: "<gray>-</gray> <gray>重算</gray> <white><computes></white> <gray>次，平均</gray> <white><avg_ms></white> <gray>毫秒，最长</gray> <white><max_ms></white> <gray>毫秒</gray>"
       reset: "<prefix> <gray>站牌查询统计已清零</gray>"
   graph:
+    portal:
+      disabled: "<prefix> <red>跨世界未开启（config.yml 的 graph.cross-world）</red>"
+      no-graph: "<prefix> <red>调度图服务尚未就绪</red>"
+      list-header: "<prefix> <dark_aqua>传送门连接共 <count> 条</dark_aqua>"
+      list-entry: "  <white><from></white> <gray>→</gray> <white><to></white> <gray>(<source>，过门 <transit> 格)</gray>"
+      scanned: "<prefix> <green>已按 MyWorlds 自动连接 <white><linked></white> 条，<white><problems></white> 个传送门未能连接</green>"
+      problem: "  <yellow><problem></yellow>"
+      not-found: "<prefix> <red>找不到该传送门节点（须是已建图的 PORTAL 节点）</red>"
+      linked: "<prefix> <green>已连接 <white><from></white> → <white><to></white></green>"
+      unlinked: "<prefix> <yellow>已删除 <white><from></white> 出发的连接</yellow>"
     help:
       header: "<prefix> <dark_aqua>调度图命令</dark_aqua>"
       entry-build: "<gray>/fta graph build</gray> <white>-</white> <dark_aqua>构建并持久化调度图</dark_aqua>"

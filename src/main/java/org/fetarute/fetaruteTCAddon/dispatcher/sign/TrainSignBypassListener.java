@@ -84,7 +84,7 @@ public final class TrainSignBypassListener implements Listener {
       return;
     }
 
-    if (event.isType(ALLOW_DESTROY) || event.isType(ALLOW_SWITCHER)) {
+    if (event.isType(ALLOW_DESTROY) || event.isType(ALLOW_SWITCHER) || isPortal(event)) {
       return;
     }
 
@@ -192,5 +192,15 @@ public final class TrainSignBypassListener implements Listener {
         + ","
         + location.getBlockZ()
         + ")";
+  }
+
+  /** MyWorlds 传送门牌子（{@code [portal]}）：头部不是 train/cart，{@code isType} 认不出，按头部文字判断。 */
+  private static boolean isPortal(SignActionEvent event) {
+    try {
+      com.bergerkiller.bukkit.tc.SignActionHeader header = event.getHeader();
+      return header != null && "portal".equalsIgnoreCase(header.getModeText());
+    } catch (RuntimeException ex) {
+      return false;
+    }
   }
 }

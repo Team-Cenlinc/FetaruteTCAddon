@@ -586,7 +586,8 @@ public final class RailGraphBuildJob implements Runnable {
   }
 
   private int resolveAnchorRadius(NodeType nodeType) {
-    if (nodeType == NodeType.SWITCHER) {
+    if (nodeType == NodeType.SWITCHER || nodeType == NodeType.PORTAL) {
+      // 道岔与传送门节点的坐标就是轨道方块本身，锚点只在附近找。
       return switcherAnchorSearchRadius;
     }
     return signAnchorSearchRadius;

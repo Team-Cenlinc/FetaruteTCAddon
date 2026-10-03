@@ -11,6 +11,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
@@ -134,6 +135,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public DriveTaskRecordRepository driveTaskRecords() {
     return unsupported(DriveTaskRecordRepository.class);
+  }
+
+  @Override
+  public PortalLinkRepository portalLinks() {
+    return unsupported(PortalLinkRepository.class);
   }
 
   @Override

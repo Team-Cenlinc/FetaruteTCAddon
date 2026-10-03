@@ -93,7 +93,10 @@ public final class RailEdgeValidator {
   public static boolean violatesCrossTrackConstraint(
       String nodeA, String nodeB, NodeType nodeTypeA, NodeType nodeTypeB) {
     // Switcher 节点可以连接不同轨道
-    if (nodeTypeA == NodeType.SWITCHER || nodeTypeB == NodeType.SWITCHER) {
+    if (nodeTypeA == NodeType.SWITCHER
+        || nodeTypeB == NodeType.SWITCHER
+        || nodeTypeA == NodeType.PORTAL
+        || nodeTypeB == NodeType.PORTAL) {
       return false;
     }
 

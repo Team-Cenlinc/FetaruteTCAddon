@@ -1009,6 +1009,9 @@ public final class FtaGraphCommand {
                       case STATION -> stationNodes++;
                       case DEPOT -> depotNodes++;
                       case DESTINATION -> destinationNodes++;
+                      case PORTAL -> {
+                        // 传送门节点只用于跨世界连接，不计入站点统计。
+                      }
                       case SWITCHER -> {
                         switcherNodes++;
                         // Switcher 节点不用于 TC destination，因此复用 trainCartsDestination 字段存放内部 marker，

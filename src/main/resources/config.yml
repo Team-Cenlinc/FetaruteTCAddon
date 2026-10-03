@@ -88,6 +88,9 @@ graph:
   sign-anchor-search-radius: 6
   # 道岔（switcher）牌子寻找所属轨道的搜索半径（格）
   switcher-anchor-search-radius: 2
+  # 跨世界（实验）：把 TrainCarts 的 [portal] 牌子（MyWorlds 传送门）建成图节点，并可用 /fta graph portal 把两边的门连起来。
+  # 关闭时传送门牌子不进图，与旧版行为一致；改动后需重建调度图
+  cross-world: false
 
 autostation:
   # 关门提示音（Bukkit Sound 名称或自定义声音键）

@@ -984,7 +984,11 @@ public final class ConfigManager {
     } else {
       logger.warning("graph.switcher-anchor-search-radius 配置无效: " + configuredSwitcherRadius);
     }
-    return new GraphSettings(speed, signAnchorRadius, switcherAnchorRadius);
+    return new GraphSettings(
+        speed,
+        signAnchorRadius,
+        switcherAnchorRadius,
+        graphSection.getBoolean("cross-world", false));
   }
 
   /** 解析 autostation 配置段。 */
@@ -1943,7 +1947,17 @@ public final class ConfigManager {
   public record GraphSettings(
       double defaultSpeedBlocksPerSecond,
       int signAnchorSearchRadius,
-      int switcherAnchorSearchRadius) {
+      int switcherAnchorSearchRadius,
+      boolean crossWorld) {
+
+    /** 不启用跨世界。 */
+    public GraphSettings(
+        double defaultSpeedBlocksPerSecond,
+        int signAnchorSearchRadius,
+        int switcherAnchorSearchRadius) {
+      this(defaultSpeedBlocksPerSecond, signAnchorSearchRadius, switcherAnchorSearchRadius, false);
+    }
+
     public GraphSettings {
       if (!Double.isFinite(defaultSpeedBlocksPerSecond) || defaultSpeedBlocksPerSecond <= 0.0) {
         throw new IllegalArgumentException("defaultSpeedBlocksPerSecond 必须为正数");

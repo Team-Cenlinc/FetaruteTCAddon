@@ -14,6 +14,15 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getPortalLinks"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getSignNodeRegistry"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
@@ -263,6 +272,10 @@
     <!-- 使用表前缀动态组装 SQL，表名来自白名单，安全性由代码保证 -->
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPortalLinkRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>

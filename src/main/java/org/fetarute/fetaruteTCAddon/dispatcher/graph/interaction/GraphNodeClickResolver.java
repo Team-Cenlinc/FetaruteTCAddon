@@ -11,10 +11,9 @@ import org.bukkit.block.Sign;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.GraphSignParsers;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 
 /**
  * 将玩家点击的牌子或轨道方块解析为调度图节点。
@@ -64,7 +63,7 @@ public final class GraphNodeClickResolver {
     if (!(state instanceof Sign sign)) {
       return Optional.empty();
     }
-    return NodeSignDefinitionParser.parse(sign).or(() -> SwitcherSignDefinitionParser.parse(sign));
+    return GraphSignParsers.parse(sign);
   }
 
   /**

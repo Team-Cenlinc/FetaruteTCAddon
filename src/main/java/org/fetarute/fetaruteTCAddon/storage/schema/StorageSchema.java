@@ -79,6 +79,7 @@ public final class StorageSchema {
     ddl.add(railComponentCautions(dialect));
     ddl.add(index("rail_component_cautions_world", "rail_component_cautions", "world_id"));
     ddl.add(railGraphSnapshots(dialect));
+    ddl.add(railPortalLinks(dialect));
     ddl.add(driveTaskRecords(dialect));
     ddl.add(index("drive_task_records_player", "drive_task_records", "player_uuid, finished_at"));
     ddl.add(index("drive_task_records_finished", "drive_task_records", "finished_at"));
@@ -829,6 +830,30 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.stringType());
+  }
+
+  private String railPortalLinks(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    from_world %s NOT NULL,
+                    from_node %s NOT NULL,
+                    to_world %s NOT NULL,
+                    to_node %s NOT NULL,
+                    source %s NOT NULL,
+                    transit_blocks %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    PRIMARY KEY (from_world, from_node)
+                );
+                """,
+        table("rail_portal_links"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.doubleType(),
+        dialect.timestampType());
   }
 
   private String driveTaskRecords(SqlDialect dialect) {

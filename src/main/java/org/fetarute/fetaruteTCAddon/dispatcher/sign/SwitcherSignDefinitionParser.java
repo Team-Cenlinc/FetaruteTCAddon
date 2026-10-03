@@ -131,7 +131,7 @@ public final class SwitcherSignDefinitionParser {
             nodeId, NodeType.SWITCHER, Optional.of(SWITCHER_SIGN_MARKER), Optional.empty()));
   }
 
-  private static RailBlockPos selectDeterministicAnchor(Set<RailBlockPos> anchors) {
+  static RailBlockPos selectDeterministicAnchor(Set<RailBlockPos> anchors) {
     RailBlockPos best = null;
     for (RailBlockPos candidate : anchors) {
       if (candidate == null) {
@@ -231,6 +231,11 @@ public final class SwitcherSignDefinitionParser {
       }
       return "";
     }
+  }
+
+  /** 牌子关联的轨道方块（供传送门牌子解析复用）。 */
+  static Block railBlockOf(TrackedSign trackedSign) {
+    return resolveRailBlock(trackedSign);
   }
 
   private static Block resolveRailBlock(TrackedSign trackedSign) {

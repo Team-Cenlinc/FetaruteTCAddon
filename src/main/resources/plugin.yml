@@ -23,6 +23,7 @@ permissions:
       fetarute.graph.continue: true
       fetarute.graph.status: true
       fetarute.graph.cancel: true
+      fetarute.graph.portal: true
       fetarute.graph.delete: true
       fetarute.graph.info: true
       fetarute.graph.sign: true
@@ -83,6 +84,9 @@ permissions:
     default: op
   fetarute.drive.driver.admin:
     description: 不领任务直接接管停站中的调度列车
+    default: op
+  fetarute.graph.portal:
+    description: 查看与管理跨世界传送门连接（/fta graph portal）
     default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置

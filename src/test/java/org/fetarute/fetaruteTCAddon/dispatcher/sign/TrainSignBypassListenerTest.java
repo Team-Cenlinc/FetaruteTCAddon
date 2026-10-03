@@ -51,6 +51,19 @@ final class TrainSignBypassListenerTest {
   }
 
   @Test
+  void doesNotCancelPortalSignWhenBypassPredicateTrue() {
+    TrainSignBypassListener listener = new TrainSignBypassListener(message -> {}, event -> true);
+
+    SignActionEvent event = mock(SignActionEvent.class);
+    when(event.getHeader())
+        .thenReturn(com.bergerkiller.bukkit.tc.SignActionHeader.parse("[portal]"));
+
+    listener.onSignActionEarly(event);
+
+    verify(event, never()).setCancelled(true);
+  }
+
+  @Test
   void doesNotCancelWhenBypassPredicateFalse() {
     TrainSignBypassListener listener = new TrainSignBypassListener(message -> {}, event -> false);
 
