@@ -91,4 +91,13 @@ final class PluginControlAuthority implements ControlAuthority {
       // 同上。
     }
   }
+
+  @Override
+  public void beginStationStop(TrainProperties properties, DriverStationStop stop) {
+    try {
+      delegate().beginStationStop(properties, stop);
+    } catch (RuntimeException ignored) {
+      // 同上。
+    }
+  }
 }

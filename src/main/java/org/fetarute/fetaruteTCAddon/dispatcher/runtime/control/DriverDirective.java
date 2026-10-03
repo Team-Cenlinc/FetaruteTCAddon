@@ -12,7 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * @param stopMode STOP 信号的落地模式
  * @param requestedBps 调度层给出的目标速度（格/秒）
  * @param permittedBps 执行层速度曲线处理后的容许速度（格/秒），即自动运行下会写入的限速
- * @param allowLaunch 是否允许静止列车起步
+ * @param allowLaunch 是否允许静止列车起步（不是停车信号即允许）
  * @param distanceBlocks 到约束点（停车点、授权末端）的距离；没有时为空
  * @param envelope 随距离收紧的速度包络，从下发时的车头量起；没有时为 {@code null}
  */

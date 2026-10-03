@@ -172,4 +172,51 @@ class DriverProtectionTest {
     assertEquals(50.0, v * 0.4 + v * v / (2.0 * 1.2), 1.0e-9);
     assertEquals(0.0, DriverProtection.brakingCurveBps(-1.0, 1.2, 0.4), 1.0e-9);
   }
+
+  private static Decision evalStation(double speed, double remaining, boolean precise) {
+    return DriverProtection.evaluate(
+        new Input(
+            speed,
+            speed <= 0.05,
+            proceed(20.0),
+            0L,
+            0.0,
+            SERVICE,
+            EMERGENCY,
+            REACTION,
+            false,
+            false,
+            remaining,
+            precise),
+        CONFIG);
+  }
+
+  @Test
+  @DisplayName("进站曲线：最远停到停车窗口末端")
+  void stationCurve() {
+    Decision decision = evalStation(3.0, 20.0, false);
+    double expected =
+        DriverProtection.brakingCurveBps(
+            20.0
+                + org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .runtime
+                    .control
+                    .StopAlignment
+                    .ACCEPT_BLOCKS,
+            SERVICE,
+            REACTION);
+    assertEquals(expected, decision.permittedBps(), 1.0e-9);
+    assertEquals(Intervention.NONE, decision.intervention());
+    assertEquals(Intervention.SERVICE, evalStation(expected + 1.5, 20.0, false).intervention());
+  }
+
+  @Test
+  @DisplayName("越过停车窗口：实测时立即停住，估计值不据此停车")
+  void stationOverrun() {
+    assertEquals(Intervention.CLAMP, evalStation(1.0, -5.0, true).intervention());
+    assertEquals(Intervention.SERVICE, evalStation(4.0, -5.0, false).intervention());
+    assertEquals(Intervention.NONE, evalStation(0.0, -5.0, true).intervention(), "停稳后不再介入");
+  }
 }

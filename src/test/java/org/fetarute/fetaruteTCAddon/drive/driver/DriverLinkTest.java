@@ -83,4 +83,43 @@ class DriverLinkTest {
     link.setMode(DrivingMode.ATO);
     assertFalse(link.controlsPhysically());
   }
+
+  @Test
+  @DisplayName("进站估计：按采样后走过的里程推算；已停过的站在采样刷新前不再当作前方")
+  void approachEstimate() {
+    org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId node =
+        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:1");
+    link.updateApproach(
+        node, "station", java.util.OptionalDouble.of(50.0), java.time.Instant.EPOCH, 8.0);
+    odometer[0] = 20.0;
+    DriverLink.StationTarget target = link.stationTarget().orElseThrow();
+    assertEquals(38.0, target.remainingBlocks(), 1.0e-9);
+    assertFalse(target.precise());
+
+    link.updateApproach(
+        node, "depot", java.util.OptionalDouble.of(50.0), java.time.Instant.ofEpochSecond(1), 8.0);
+    assertTrue(link.stationTarget().isEmpty(), "只认车站与区间停车点");
+
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop stop =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
+            node, "站", UUID.randomUUID(), new org.bukkit.util.Vector(), null, false, true);
+    link.beginStationStop(stop);
+    stop.updateOffset(-3.0);
+    DriverLink.StationTarget precise = link.stationTarget().orElseThrow();
+    assertEquals(3.0, precise.remainingBlocks(), 1.0e-9);
+    assertTrue(precise.precise());
+    stop.markStopped();
+    assertTrue(link.stationTarget().isEmpty(), "停妥后不再有进站目标");
+    stop.end();
+    link.updateApproach(
+        node, "station", java.util.OptionalDouble.of(0.0), java.time.Instant.ofEpochSecond(2), 8.0);
+    assertTrue(link.stationTarget().isEmpty(), "刚停过的站在调度采样刷新前不能又变成前方停车点");
+    link.updateApproach(
+        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:NXT:1"),
+        "station",
+        java.util.OptionalDouble.of(400.0),
+        java.time.Instant.ofEpochSecond(3),
+        8.0);
+    assertEquals(408.0, link.stationTarget().orElseThrow().remainingBlocks(), 1.0e-9);
+  }
 }

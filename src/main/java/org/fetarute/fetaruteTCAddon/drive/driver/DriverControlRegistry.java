@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 
 /**
  * 哪些调度列车由驾驶员控制。
@@ -130,6 +131,14 @@ public final class DriverControlRegistry implements ControlAuthority {
     DriverLink link = resolve(properties);
     if (link != null && interrupt != null) {
       handler.onInterrupt(link, interrupt);
+    }
+  }
+
+  @Override
+  public void beginStationStop(TrainProperties properties, DriverStationStop stop) {
+    DriverLink link = resolve(properties);
+    if (link != null && stop != null) {
+      link.beginStationStop(stop);
     }
   }
 

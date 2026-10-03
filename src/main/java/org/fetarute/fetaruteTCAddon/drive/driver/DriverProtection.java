@@ -2,15 +2,16 @@ package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopControlMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 
 /**
  * 驾驶员控制的列车的保护包络（相当于 ATP）：把调度层的指令换算成此刻的容许速度，并决定是否介入。
  *
  * <ul>
- *   <li>容许速度：指令的容许速度、随距离收紧的包络、到停车点的常用制动曲线、指令过期时的限制速度，取最小；
+ *   <li>容许速度：指令的容许速度、随距离收紧的包络、到停车点的常用制动曲线、进站曲线（停到停车窗口末端）、指令过期时的限制速度，取最小；
  *   <li>超过容许速度一个容差：常用制动（至少 B4），降到容许速度以下一段回差才松开；
  *   <li>超出容许速度一个容差再加“超速比例”与容差中较大的一档，或闭塞硬停：紧急制动；调度要求停车只用常用制动；
- *   <li>停车信号下按紧急制动也停不到停车点前：立即停住（调度层的防撞保证优先于真实感）；
+ *   <li>停车信号下按紧急制动也停不到停车点前，或进站越过停车窗口：立即停住（调度层的防撞保证优先于真实感）；
  *   <li>行驶中达到容许速度、停稳时遇到停车信号或不允许起步：切断牵引。
  * </ul>
  *
@@ -39,6 +40,8 @@ public final class DriverProtection {
    * @param reactionSeconds 制动力爬升到位需要的时间（折算为反应距离）
    * @param serviceStopRequested 调度层要求停车（自动运行下的立即停车）
    * @param serviceLatched 上一次评估是否处于常用制动介入
+   * @param stationRemainingBlocks 列车中心到前方停车点的距离（越过为负）；没有停车点时为 {@code NaN}
+   * @param stationPrecise 停车点距离是站台按实际位置量出的（否则是估计，不据此强制停车）
    */
   public record Input(
       double speedBps,
@@ -50,7 +53,37 @@ public final class DriverProtection {
       double emergencyDecelBps2,
       double reactionSeconds,
       boolean serviceStopRequested,
-      boolean serviceLatched) {}
+      boolean serviceLatched,
+      double stationRemainingBlocks,
+      boolean stationPrecise) {
+
+    /** 没有前方停车点。 */
+    public Input(
+        double speedBps,
+        boolean stopped,
+        DriverDirective directive,
+        long ticksSinceDirective,
+        double travelledBlocks,
+        double serviceDecelBps2,
+        double emergencyDecelBps2,
+        double reactionSeconds,
+        boolean serviceStopRequested,
+        boolean serviceLatched) {
+      this(
+          speedBps,
+          stopped,
+          directive,
+          ticksSinceDirective,
+          travelledBlocks,
+          serviceDecelBps2,
+          emergencyDecelBps2,
+          reactionSeconds,
+          serviceStopRequested,
+          serviceLatched,
+          Double.NaN,
+          false);
+    }
+  }
 
   /**
    * 评估结果。
@@ -101,6 +134,17 @@ public final class DriverProtection {
         permitted = 0.0;
       }
     }
+    // 进站曲线：列车中心最远只能停到停车点后一个停车窗口。
+    boolean station = Double.isFinite(in.stationRemainingBlocks());
+    if (station) {
+      permitted =
+          Math.min(
+              permitted,
+              brakingCurveBps(
+                  Math.max(0.0, in.stationRemainingBlocks()) + StopAlignment.ACCEPT_BLOCKS,
+                  in.serviceDecelBps2(),
+                  in.reactionSeconds()));
+    }
     boolean moving = !in.stopped();
     if (moving && in.ticksSinceDirective() > config.directiveStaleTicks()) {
       permitted = Math.min(permitted, config.restrictedSpeedBps());
@@ -121,6 +165,13 @@ public final class DriverProtection {
         if (remaining <= 0.0 || ebDistance > remaining) {
           iv = Intervention.CLAMP;
         }
+      }
+      if (iv == Intervention.NONE
+          && station
+          && in.stationPrecise()
+          && in.stationRemainingBlocks() + StopAlignment.ACCEPT_BLOCKS < 0.0) {
+        // 越过停车窗口：再走就错过车站，立即停住。
+        iv = Intervention.CLAMP;
       }
       if (iv == Intervention.NONE && d.isStop() && d.stopMode() == StopControlMode.HARD_STOP) {
         iv = Intervention.EMERGENCY;

@@ -1,11 +1,16 @@
 package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.time.Instant;
 import java.util.Objects;
+import java.util.Optional;
+import java.util.OptionalDouble;
 import java.util.UUID;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 
 /**
  * 一名驾驶员与一列调度列车之间的控制链路：调度层交来的最新指令、调度层的停车要求，以及保护包络最近一次的结论。
@@ -28,6 +33,17 @@ public final class DriverLink {
   private boolean emergencyLatched;
   private String handbackReason;
   private DriverProtection.Decision lastDecision;
+
+  private DriverStationStop stationStop;
+  private NodeId completedStopNode;
+  private NodeId approachNode;
+  private double approachRemainingAtSample = Double.NaN;
+  private double odometerAtApproachSample;
+  private long approachSampleTick;
+  private Instant approachSampledAt;
+
+  private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
+  private String targetLabel = "";
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -170,6 +186,110 @@ public final class DriverLink {
   /** 记一次立即停住（调度层的瞬间归零也算）。 */
   public void countForcedStop() {
     forcedStops++;
+  }
+
+  /**
+   * 前方停车点：列车中心还能走多远（格）。
+   *
+   * @param node 车站或停车点节点
+   * @param remainingBlocks 列车中心到停车点的距离；越过为负
+   * @param precise 由站台按实际位置量出（进站后）；否则是按调度采样推算的估计
+   */
+  public record StationTarget(NodeId node, double remainingBlocks, boolean precise) {}
+
+  /** 估计值超过这么久没有更新就不再使用。 */
+  private static final long APPROACH_SAMPLE_MAX_AGE_TICKS = 100L;
+
+  /** 站台交来一次停站。 */
+  public void beginStationStop(DriverStationStop stop) {
+    this.stationStop = Objects.requireNonNull(stop, "stop");
+  }
+
+  /** 进行中的停站；结束后清掉，并记住这一站，避免调度采样还没刷新时又把它当成前方停车点。 */
+  public Optional<DriverStationStop> stationStop() {
+    if (stationStop != null && !stationStop.active()) {
+      completedStopNode = stationStop.node();
+      stationStop = null;
+    }
+    return Optional.ofNullable(stationStop);
+  }
+
+  /**
+   * 用调度层的诊断采样更新前方停车点的估计。
+   *
+   * @param node 前方停车节点；没有时为 {@code null}
+   * @param kind 停车点类型；只认车站与区间停车点（{@code station}、{@code stop_waypoint}）
+   * @param headDistanceBlocks 车头到停车节点的距离
+   * @param sampledAt 采样时刻；与上次相同时不更新
+   * @param halfLengthBlocks 车头到列车中心的距离
+   */
+  public void updateApproach(
+      NodeId node,
+      String kind,
+      OptionalDouble headDistanceBlocks,
+      Instant sampledAt,
+      double halfLengthBlocks) {
+    if (sampledAt == null || sampledAt.equals(approachSampledAt)) {
+      return;
+    }
+    approachSampledAt = sampledAt;
+    boolean stopKind = "station".equals(kind) || "stop_waypoint".equals(kind);
+    if (node != null && !node.equals(completedStopNode)) {
+      completedStopNode = null;
+    }
+    DriverStationStop current = stationStop().orElse(null);
+    if (node == null
+        || !stopKind
+        || headDistanceBlocks == null
+        || headDistanceBlocks.isEmpty()
+        || node.equals(completedStopNode)
+        || (current != null && node.equals(current.node()))) {
+      approachNode = null;
+      approachRemainingAtSample = Double.NaN;
+      return;
+    }
+    approachNode = node;
+    approachRemainingAtSample = headDistanceBlocks.getAsDouble() + Math.max(0.0, halfLengthBlocks);
+    odometerAtApproachSample = odometer.getAsDouble();
+    approachSampleTick = clock.getAsLong();
+  }
+
+  /** 前方停车点；进站后按站台量出的偏移，进站前按调度采样推算，都没有时为空。 */
+  public Optional<StationTarget> stationTarget() {
+    DriverStationStop stop = stationStop().orElse(null);
+    if (stop != null) {
+      if (stop.phase() == DriverStationStop.Phase.APPROACH
+          && Double.isFinite(stop.offsetBlocks())) {
+        return Optional.of(new StationTarget(stop.node(), -stop.offsetBlocks(), true));
+      }
+      return Optional.empty();
+    }
+    if (approachNode == null
+        || !Double.isFinite(approachRemainingAtSample)
+        || clock.getAsLong() - approachSampleTick > APPROACH_SAMPLE_MAX_AGE_TICKS) {
+      return Optional.empty();
+    }
+    double travelled = Math.max(0.0, odometer.getAsDouble() - odometerAtApproachSample);
+    return Optional.of(
+        new StationTarget(approachNode, approachRemainingAtSample - travelled, false));
+  }
+
+  /** 本站应开的门（驾驶会话按驾驶员朝向算好后写入，供显示）。 */
+  public DriverDoorSide requiredDoorSide() {
+    return requiredDoorSide;
+  }
+
+  public void setRequiredDoorSide(DriverDoorSide side) {
+    this.requiredDoorSide = side == null ? DriverDoorSide.NONE : side;
+  }
+
+  /** 前方停车点的站名（显示用）；没有时为空串。 */
+  public String targetLabel() {
+    return targetLabel;
+  }
+
+  public void setTargetLabel(String label) {
+    this.targetLabel = label == null ? "" : label;
   }
 
   public int serviceInterventions() {

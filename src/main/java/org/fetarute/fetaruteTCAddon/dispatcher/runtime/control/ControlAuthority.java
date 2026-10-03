@@ -37,6 +37,9 @@ public interface ControlAuthority {
   /** 调度层请求把这列车交还自动运行（例如它卡在死锁环里）。 */
   default void requestHandback(String trainName, String reason) {}
 
+  /** 驾驶员控制的列车进站：站台交出停车点与站台侧，此后双方经这个对象推进停站。 */
+  default void beginStationStop(TrainProperties properties, DriverStationStop stop) {}
+
   /** 通过插件实例查找当前的控制权；插件未加载（如单元测试）时等同 {@link #NONE}。 */
   static ControlAuthority pluginLookup() {
     return PluginControlAuthority.INSTANCE;

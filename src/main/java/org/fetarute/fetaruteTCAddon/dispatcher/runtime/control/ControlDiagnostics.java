@@ -61,6 +61,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * @param signalBlockerResources 本次信号判定中的 blocker 资源摘要
  * @param requestResources 本次前向授权请求资源摘要
  * @param currentClaimsForTrain 当前列车持有的占用资源摘要
+ * @param stopNode 前方下一个停车的节点（车站、车库、区间停车点），不论是否已进入进站限速区；没有时为 {@code null}
+ * @param stopKind 前方停车点类型：none/station/depot/stop_waypoint
+ * @param distanceToStopNode 车头到前方停车节点的距离（沿交路展开路径）
  * @param sampledAt 采样时间
  */
 public record ControlDiagnostics(
@@ -101,9 +104,14 @@ public record ControlDiagnostics(
     List<String> signalBlockerResources,
     List<String> requestResources,
     List<String> currentClaimsForTrain,
+    NodeId stopNode,
+    String stopKind,
+    OptionalDouble distanceToStopNode,
     Instant sampledAt) {
 
   public ControlDiagnostics {
+    stopKind = stopKind == null || stopKind.isBlank() ? "none" : stopKind.trim();
+    distanceToStopNode = distanceToStopNode == null ? OptionalDouble.empty() : distanceToStopNode;
     Objects.requireNonNull(trainName, "trainName");
     Objects.requireNonNull(cautionSource, "cautionSource");
     Objects.requireNonNull(approachLimitBps, "approachLimitBps");
@@ -213,6 +221,9 @@ public record ControlDiagnostics(
     private List<String> signalBlockerResources = List.of();
     private List<String> requestResources = List.of();
     private List<String> currentClaimsForTrain = List.of();
+    private NodeId stopNode;
+    private String stopKind = "none";
+    private OptionalDouble distanceToStopNode = OptionalDouble.empty();
     private Instant sampledAt = Instant.now();
 
     public Builder trainName(String trainName) {
@@ -483,7 +494,21 @@ public record ControlDiagnostics(
           signalBlockerResources,
           requestResources,
           currentClaimsForTrain,
+          stopNode,
+          stopKind,
+          distanceToStopNode,
           sampledAt);
+    }
+
+    /** 前方下一个停车节点与车头到它的距离。 */
+    public Builder stopNode(NodeId node, String kind, double distanceBlocks) {
+      this.stopNode = node;
+      this.stopKind = kind;
+      this.distanceToStopNode =
+          Double.isFinite(distanceBlocks)
+              ? OptionalDouble.of(Math.max(0.0, distanceBlocks))
+              : OptionalDouble.empty();
+      return this;
     }
   }
 }

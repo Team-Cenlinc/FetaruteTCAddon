@@ -26,12 +26,16 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
@@ -39,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.BrakeTest;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
@@ -640,6 +645,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     Optional<MinecartGroup> group = SeatLocator.findGroup(session.trainName());
     if (group.isEmpty()) {
       denyMenu(player, "drive.menu.deny.unavailable");
+      return;
+    }
+    boolean opening = left ? !session.isLeftDoorOpen() : !session.isRightDoorOpen();
+    if (opening && !doorsReleased(session)) {
+      denyMenu(player, "drive.menu.deny.doors-not-released");
       return;
     }
     var settings = plugin.getConfigManager().current().autoStationSettings();
@@ -1267,7 +1277,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     session.markGroupFound();
     MinecartGroup group = groupOpt.get();
     ensureAction(group, session, now);
-    if (session.driverLink() != null && tickDriverLink(session)) {
+    if (session.driverLink() != null && tickDriverLink(session, group)) {
       return;
     }
 
@@ -1348,14 +1358,74 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    *
    * @return 会话是否已经结束
    */
-  private boolean tickDriverLink(DriveSession session) {
+  private boolean tickDriverLink(DriveSession session, MinecartGroup group) {
     DriverLink link = session.driverLink();
     if (link.handbackRequested() && session.isStopped()) {
       traceSession(session, "停稳，交还原因: " + link.handbackReason());
       handback(session, DriveSession.EndReason.HANDBACK);
       return true;
     }
+    String trainName = group.getProperties().getTrainName();
+    plugin
+        .getRuntimeDispatchService()
+        .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
+        .ifPresent(
+            diagnostics ->
+                link.updateApproach(
+                    diagnostics.stopNode(),
+                    diagnostics.stopKind(),
+                    diagnostics.distanceToStopNode(),
+                    diagnostics.sampledAt(),
+                    StopAlignment.halfLengthBlocks(group)));
+    Optional<DriverStationStop> stop = link.stationStop();
+    if (stop.isPresent()) {
+      DriverStationStop current = stop.get();
+      DriverDoorSide side = DriverDoorSide.required(current, DriveDoors.cabFacing(group, session));
+      boolean left = session.isLeftDoorOpen();
+      boolean right = session.isRightDoorOpen();
+      current.reportDoors(side.satisfied(left, right), left || right, side.wrong(left, right));
+      link.setRequiredDoorSide(side);
+      link.setTargetLabel(current.stationName());
+      if (current.phase() != session.lastStationPhase()) {
+        traceSession(
+            session,
+            "停站 "
+                + current.stationName()
+                + ": "
+                + current.phase()
+                + String.format(Locale.ROOT, " 偏移 %.2f 格", current.offsetBlocks()));
+        session.setLastStationPhase(current.phase());
+      }
+    } else {
+      link.setRequiredDoorSide(DriverDoorSide.NONE);
+      link.setTargetLabel(
+          link.stationTarget().map(target -> stationLabel(target.node())).orElse(""));
+      session.setLastStationPhase(null);
+    }
     return false;
+  }
+
+  /** 节点所属车站的站名；查不到时用节点编号。 */
+  private String stationLabel(NodeId node) {
+    return plugin
+        .getStationDirectory()
+        .flatMap(directory -> directory.snapshot().stationOfNode(node.value()))
+        .map(StationDirectory.StationEntry::name)
+        .orElse(node.value());
+  }
+
+  /** 调度列车上，车门只在停站的开门、停站阶段才能打开（站台放行车门）。 */
+  private static boolean doorsReleased(DriveSession session) {
+    DriverLink link = session.driverLink();
+    if (link == null) {
+      return true;
+    }
+    return link.stationStop()
+        .map(
+            stop ->
+                stop.phase() == DriverStationStop.Phase.OPEN_DOORS
+                    || stop.phase() == DriverStationStop.Phase.DWELL)
+        .orElse(false);
   }
 
   private void tickStopping(DriveSession session, long now, DriveConfig current) {

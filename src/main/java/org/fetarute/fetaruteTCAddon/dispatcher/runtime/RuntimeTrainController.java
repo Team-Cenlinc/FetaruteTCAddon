@@ -144,6 +144,11 @@ public final class RuntimeTrainController {
     return launchManager.headProgressBlocks(train, nodeKey);
   }
 
+  /** 这列车是否由驾驶员物理控制（调度层的对位、等待动作要跳过）。 */
+  boolean isDriverControlled(TrainProperties properties) {
+    return properties != null && launchManager.authority().isDriverControlled(properties);
+  }
+
   /**
    * 立即保持停车。
    *

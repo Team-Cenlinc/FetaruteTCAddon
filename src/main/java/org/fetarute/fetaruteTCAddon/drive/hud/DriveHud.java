@@ -105,6 +105,12 @@ public final class DriveHud {
                 + cab.brakeTest().stage().name().toLowerCase(Locale.ROOT).replace('_', '-'));
       };
     }
+    if (link != null) {
+      Optional<DriverStationHint.Hint> station = DriverStationHint.of(link, session.isStopped());
+      if (station.isPresent()) {
+        return locale.component(station.get().key(), station.get().values());
+      }
+    }
     if (session.anyDoorOpen()) {
       return locale.component("drive.hud.doors-open");
     }

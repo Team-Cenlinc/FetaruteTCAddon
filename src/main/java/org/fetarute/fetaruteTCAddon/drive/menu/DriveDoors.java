@@ -94,7 +94,7 @@ public final class DriveDoors {
    *
    * @return 取不到方向时为 {@code null}
    */
-  static Vector cabFacing(MinecartGroup group, DriveSession session) {
+  public static Vector cabFacing(MinecartGroup group, DriveSession session) {
     int size = group.size();
     int index = session.binding().memberIndex();
     if (index < 0 || index >= size) {

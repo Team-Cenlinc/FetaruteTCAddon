@@ -78,6 +78,30 @@ class TrainLaunchManagerDriverGateTest {
   }
 
   @Test
+  @DisplayName("信号不变的周期刷新（allowLaunch=false）：驾驶员仍可起步")
+  void steadyProceedStillAllowsTheDriverToStart() {
+    TrainProperties properties = properties("drv-steady");
+    RuntimeTrainHandle train = train(properties, 0.0);
+    RecordingControlAuthority authority = new RecordingControlAuthority().control(properties);
+    TrainLaunchManager manager = new TrainLaunchManager(new SpeedLimitRamp(), authority);
+
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            properties,
+            SignalAspect.PROCEED,
+            12.0,
+            config,
+            false,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtimeSettings());
+
+    assertTrue(authority.lastDirective().allowLaunch());
+    assertFalse(result.launchCommandAccepted());
+  }
+
+  @Test
   @DisplayName("STOP 硬停：容许速度为 0，发车未接受，列车本身不被停住")
   void hardStopPublishesZeroPermitted() {
     TrainProperties properties = properties("drv-2");

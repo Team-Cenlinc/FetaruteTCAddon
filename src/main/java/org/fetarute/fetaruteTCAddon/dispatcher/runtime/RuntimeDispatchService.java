@@ -19286,6 +19286,14 @@ public final class RuntimeDispatchService {
     if (approach.distanceBlocks().isPresent()) {
       builder.distanceToApproach(approach.distanceBlocks());
     }
+    // 前方停车节点不论是否已进入进站限速区都给出：驾驶员要据此提前对标（最后一个限速区就是停车节点本身）。
+    ApproachControl nextStop = overrides.approachControl();
+    if (nextStop.stopNode().isPresent() && !nextStop.zones().isEmpty()) {
+      builder.stopNode(
+          nextStop.stopNode().get(),
+          nextStop.kind(),
+          nextStop.zones().get(nextStop.zones().size() - 1).fromBlocks());
+    }
 
     diagnosticsCache.put(builder.build(), now);
   }
@@ -19518,10 +19526,14 @@ public final class RuntimeDispatchService {
 
       // 关键：强制按 group 语义执行 centerTrain，避免某些事件上下文被识别为 cart sign 后只按单车居中。
       SignActionEvent centerEvent = adaptForGroupCenter(event, group);
-      com.bergerkiller.bukkit.tc.Station station =
-          new com.bergerkiller.bukkit.tc.Station(centerEvent);
-      group.getActions().launchReset();
-      station.centerTrain();
+      // 驾驶员控车时由驾驶员停车：不对位、不清控车动作，也不加等待动作（停站由驻站计时把住）。
+      boolean driverControlled = props != null && runtimeTrainController.isDriverControlled(props);
+      if (!driverControlled) {
+        com.bergerkiller.bukkit.tc.Station station =
+            new com.bergerkiller.bukkit.tc.Station(centerEvent);
+        group.getActions().launchReset();
+        station.centerTrain();
+      }
 
       debugLogger.accept(
           "Waypoint 居中: train="
@@ -19540,7 +19552,9 @@ public final class RuntimeDispatchService {
       if (dwellSeconds > 0 && dwellRegistry != null) {
         scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds, key, sessionId);
       } else {
-        group.getActions().addActionWaitState();
+        if (!driverControlled) {
+          group.getActions().addActionWaitState();
+        }
         clearWaypointStopState(key, sessionId);
       }
     } catch (Throwable ex) {
@@ -19704,7 +19718,9 @@ public final class RuntimeDispatchService {
             if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
               dwellRegistry.start(trainName, dwellSeconds);
             }
-            group.getActions().addActionWaitState();
+            if (!runtimeTrainController.isDriverControlled(group.getProperties())) {
+              group.getActions().addActionWaitState();
+            }
             // dwell 启动后，清理 waypointStopState，由 dwellRegistry 接管
             clearWaypointStopState(waypointKey, sessionId);
             return;
@@ -19718,7 +19734,9 @@ public final class RuntimeDispatchService {
           if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
             dwellRegistry.start(trainName, dwellSeconds);
           }
-          group.getActions().addActionWaitState();
+          if (!runtimeTrainController.isDriverControlled(group.getProperties())) {
+            group.getActions().addActionWaitState();
+          }
           clearWaypointStopState(waypointKey, sessionId);
         }
       }

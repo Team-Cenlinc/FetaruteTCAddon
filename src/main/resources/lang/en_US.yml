@@ -62,6 +62,21 @@ drive:
       handback: "<yellow>Handing back to automatic after stopping</yellow>"
       no-signal: "<yellow>No movement authority</yellow>"
       wait-signal: "<red>Stop signal</red>"
+    station:
+      approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>blocks</gray>"
+      move-up: "<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"
+      on-mark: "<green>On the mark</green>"
+      overrun: "<red>Past the stop mark by <white><distance></white> blocks</red>"
+      open-doors:
+        left: "<yellow>Open the left doors</yellow>"
+        right: "<yellow>Open the right doors</yellow>"
+        both: "<yellow>Open the doors on both sides</yellow>"
+        any: "<yellow>Open the platform-side doors</yellow>"
+        none: "<gray>No doors at this stop</gray>"
+      dwell: "<gray>Dwell</gray> <white><seconds></white> <gray>s</gray>"
+      close-doors: "<yellow>Dwell time is up, close the doors</yellow>"
+      wait-departure: "<gray>Waiting to depart</gray>"
+      depart: "<green><bold>Clear to depart</bold></green>"
     cab:
       vigilance-warning: "<red><bold>Vigilance <seconds></bold></red>"
       vigilance-tripped: "<red><bold>Vigilance emergency brake</bold></red>"
@@ -93,10 +108,22 @@ drive:
     title: "<gold><bold>Driver's Desk</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
+      train: "Train"
+      signal: "Signal"
+      station: "Station"
       doors: "Doors"
       air: "Air"
       vigilance: "Vigilance"
     value:
+      text: "<white><text></white>"
+      signal:
+        proceed: "<green>Proceed</green> <white><limit_kmh></white> <gray>km/h</gray>"
+        proceed-with-caution: "<yellow>Caution</yellow> <white><limit_kmh></white> <gray>km/h</gray>"
+        caution: "<gold>Slow</gold> <white><limit_kmh></white> <gray>km/h</gray>"
+        stop: "<red>Stop</red>"
+        none: "<gray>No movement authority</gray>"
+      station:
+        none: "<gray>-</gray>"
       doors:
         closed: "<green>Closed</green>"
         left: "<red>Left open</red>"
@@ -199,6 +226,7 @@ drive:
       no-door-animation: "<red>This train has no matching door animation</red>"
       unavailable: "<red>The desk cannot be opened right now</red>"
       reverser-locked: "<red>A dispatched train's direction follows its route; the reverser is locked</red>"
+      doors-not-released: "<red>Doors are not released: they can only be opened once stopped at a station</red>"
   end:
     left-seat: "<prefix> <yellow>You left the seat, driving ended</yellow>"
     seat-lost: "<prefix> <red>Could not return to the seat, driving ended</red>"

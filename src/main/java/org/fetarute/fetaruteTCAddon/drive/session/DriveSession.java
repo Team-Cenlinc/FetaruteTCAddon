@@ -7,6 +7,7 @@ import java.util.Objects;
 import java.util.OptionalDouble;
 import java.util.UUID;
 import org.bukkit.inventory.ItemStack;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
@@ -112,6 +113,7 @@ public final class DriveSession {
   private long actionBarHeldUntil = Long.MIN_VALUE;
   private int stallTicks;
   private int actionGeneration;
+  private DriverStationStop.Phase lastStationPhase;
   private DriverLink driverLink;
   private double odometerBlocks;
 
@@ -274,6 +276,15 @@ public final class DriveSession {
   }
 
   /** 驾驶调度列车时的控制链路；驾驶非调度列车时为 {@code null}。 */
+  /** 上一次记进诊断日志的停站阶段（只用于在阶段变化时记一条）。 */
+  public DriverStationStop.Phase lastStationPhase() {
+    return lastStationPhase;
+  }
+
+  public void setLastStationPhase(DriverStationStop.Phase phase) {
+    this.lastStationPhase = phase;
+  }
+
   public DriverLink driverLink() {
     return driverLink;
   }
@@ -624,6 +635,7 @@ public final class DriveSession {
     double serviceDecel =
         dynamics.params().decelBps2() * config.brakeFraction(Notch.B4) * cab.brakeScale();
     double emergencyDecel = dynamics.params().decelBps2() * config.emergencyMultiplier();
+    DriverLink.StationTarget station = link.stationTarget().orElse(null);
     DriverProtection.Decision decision =
         DriverProtection.evaluate(
             new DriverProtection.Input(
@@ -636,7 +648,9 @@ public final class DriveSession {
                 emergencyDecel,
                 1.0 / (2.0 * config.effortRatePerSecond()),
                 link.serviceStopRequested(),
-                link.serviceLatched()),
+                link.serviceLatched(),
+                station == null ? Double.NaN : station.remainingBlocks(),
+                station != null && station.precise()),
             config.driver());
     link.recordDecision(decision);
     if (decision.handbackRequested()) {

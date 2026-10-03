@@ -36,6 +36,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -76,6 +78,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   /** 驾驶员控车时等停稳的上限：驾驶员可能要慢慢对位。 */
   private static final int DRIVER_STOP_WAIT_TIMEOUT_TICKS = 2400;
+
+  /** 驾驶员停妥后迟迟不开门，过这么久由站台代为开关门。 */
+  private static final long DRIVER_DOOR_TIMEOUT_TICKS = 600L;
 
   private static final int STOP_STABLE_TICKS = 1;
   private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
@@ -243,14 +248,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     String trainName = safeTrainName(info);
     String stopSessionId = shortUuid(UUID.randomUUID());
     boolean driverControlled = driverControlled(properties);
-    if (!driverControlled) {
-      // 驾驶员控车时由驾驶员自己停车：不对位，也不能清掉控车动作。
-      com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(info);
-      group.getActions().launchReset();
-      station.centerTrain();
+    AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(info.getLine(3));
+    DriverStationStop driverStop = null;
+    if (driverControlled) {
+      // 驾驶员控车时由驾驶员自己停车：不对位，也不能清掉控车动作；把停车点与站台侧交给驾驶员。
+      driverStop = beginDriverStop(info, properties, definition, doorDirection);
+    } else {
+      centerTrain(info);
     }
 
-    AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(info.getLine(3));
     FacingResult facingResult = resolveFacingDirectionResult(info);
     BlockFace facingDirection = facingResult.face();
     String facingSource = facingResult.source();
@@ -326,7 +332,43 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         chimeSettings,
         session,
         firstStop,
-        driverControlled ? DRIVER_STOP_WAIT_TIMEOUT_TICKS : STOP_WAIT_TIMEOUT_TICKS);
+        driverControlled ? DRIVER_STOP_WAIT_TIMEOUT_TICKS : STOP_WAIT_TIMEOUT_TICKS,
+        driverStop);
+  }
+
+  private static void centerTrain(SignActionEvent info) {
+    com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(info);
+    info.getGroup().getActions().launchReset();
+    station.centerTrain();
+  }
+
+  /** 驾驶员控车进站：以牌子轨道中心为停车点，连同站台侧交给驾驶员。取不到停车点时返回 {@code null}（按普通停站处理）。 */
+  private DriverStationStop beginDriverStop(
+      SignActionEvent info,
+      TrainProperties properties,
+      SignNodeDefinition definition,
+      AutoStationDoorDirection doorDirection) {
+    org.bukkit.Location center = info.getCenterLocation();
+    if (center == null || center.getWorld() == null) {
+      return null;
+    }
+    String stationName =
+        plugin
+            .getStationDirectory()
+            .flatMap(directory -> directory.snapshot().stationOfNode(definition.nodeId().value()))
+            .map(org.fetarute.fetaruteTCAddon.company.api.StationDirectory.StationEntry::name)
+            .orElse(definition.nodeId().value());
+    DriverStationStop stop =
+        new DriverStationStop(
+            definition.nodeId(),
+            stationName,
+            center.getWorld().getUID(),
+            center.toVector(),
+            doorDirection.toBlockFace().orElse(null),
+            doorDirection == AutoStationDoorDirection.BOTH,
+            doorDirection != AutoStationDoorDirection.NONE);
+    plugin.getControlAuthority().beginStationStop(properties, stop);
+    return stop;
   }
 
   /** 列车此刻是否由驾驶员控制（驾驶员控车时站台不替它停车、对位、加等待动作）。 */
@@ -391,7 +433,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       AutoStationDoorController.DoorChimeSettings chimeSettings,
       AutoStationDoorController.DoorSession session,
       boolean firstStop,
-      int stopWaitTimeoutTicks) {
+      int stopWaitTimeoutTicks,
+      DriverStationStop driverStop) {
     if (plugin == null || info == null || !info.hasGroup()) {
       return;
     }
@@ -404,15 +447,36 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
       private int stoppedTicks = 0;
 
+      private int timeoutTicks = stopWaitTimeoutTicks;
+
+      private DriverStationStop stop = driverStop;
+
       @Override
       public void run() {
         if (!group.isValid()) {
+          if (stop != null) {
+            stop.end();
+          }
           cancel();
           return;
         }
+        if (stop != null && !driverControlled(group.getProperties())) {
+          // 进站途中交还了自动运行：按自动运行对位停车。
+          stop.end();
+          stop = null;
+          timeoutTicks = waitedTicks + STOP_WAIT_TIMEOUT_TICKS;
+          centerTrain(info);
+        }
+        if (stop != null) {
+          stop.updateOffset(StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint()));
+        }
         if (!group.isMoving()) {
           stoppedTicks++;
-          if (stoppedTicks >= STOP_STABLE_TICKS) {
+          // 驾驶员停得太靠前时等他前移，不当作停妥。
+          boolean aligned =
+              stop == null
+                  || StopAlignment.classify(stop.offsetBlocks()) != StopAlignment.Window.SHORT;
+          if (stoppedTicks >= STOP_STABLE_TICKS && aligned) {
             cancel();
             handleStop(
                 info,
@@ -428,14 +492,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 chimeSettings,
                 session,
                 false,
-                firstStop);
+                firstStop,
+                stop);
             return;
           }
         } else {
           stoppedTicks = 0;
         }
         waitedTicks++;
-        if (waitedTicks >= stopWaitTimeoutTicks) {
+        if (waitedTicks >= timeoutTicks) {
           cancel();
           handleStop(
               info,
@@ -451,7 +516,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               chimeSettings,
               session,
               true,
-              firstStop);
+              firstStop,
+              stop);
         }
       }
     }.runTaskTimer(plugin, 1L, 1L);
@@ -471,9 +537,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       AutoStationDoorController.DoorChimeSettings chimeSettings,
       AutoStationDoorController.DoorSession session,
       boolean timedOut,
-      boolean firstStop) {
+      boolean firstStop,
+      DriverStationStop driverStop) {
     MinecartGroup group = info == null ? null : info.getGroup();
     if (group == null || !group.isValid()) {
+      if (driverStop != null) {
+        driverStop.end();
+      }
       return;
     }
     FetaruteTCAddon plugin = this.plugin;
@@ -548,7 +618,19 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     }
     long dwellTicks = Math.max(0L, effectiveDwellSeconds * 20L);
     String location = locationText(info);
+    // 驾驶员仍在控车：车门由驾驶员开关，停站从开门起算，出站许可放出后等列车起步才记发车。
+    boolean driverDoorsAtStop =
+        driverStop != null && driverStop.active() && driverControlled(properties);
+    if (driverStop != null) {
+      if (driverDoorsAtStop) {
+        driverStop.markStopped();
+      } else {
+        driverStop.end();
+      }
+    }
     new org.bukkit.scheduler.BukkitRunnable() {
+      private boolean driverDoors = driverDoorsAtStop;
+      private boolean departureReleased = false;
       private long ticksSinceStop = 0L;
       private long ticksSinceOpen = 0L;
       private long lastOpenAttemptTick = -9999L;
@@ -564,6 +646,118 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       private String cachedPlanSummary = null;
       private AutoStationDoorController.DoorSession cachedSession = null;
 
+      /**
+       * 驾驶员控车的停站：等驾驶员开站台侧的门，停站从开门起算；时间到等驾驶员关门，再按出站门控放行；列车起步时才记发车。
+       *
+       * @return 本拍已处理，不再走自动开关门
+       */
+      private boolean driverTick() {
+        if (departureReleased) {
+          if (group.isMoving()) {
+            plugin
+                .getRuntimeDispatchService()
+                .ifPresent(dispatch -> dispatch.stationStops().handleDeparture(group, definition));
+            driverStop.end();
+            cancel();
+          }
+          return true;
+        }
+        if (!driverDoors) {
+          return false;
+        }
+        if (!driverControlled(group.getProperties())) {
+          // 停站中交还了自动运行：剩下的开关门与发车按自动运行处理，驾驶员开着的门随驾驶结束关上。
+          driverDoors = false;
+          driverStop.end();
+          return false;
+        }
+        if (!opened) {
+          if (!driverStop.doorsRequired() || driverStop.correctDoorsOpen()) {
+            opened = true;
+            ticksSinceOpen = 0L;
+            closeStarted = true;
+            applyExitOffset();
+            driverStop.setPhase(DriverStationStop.Phase.DWELL);
+          } else if (ticksSinceStop >= DRIVER_DOOR_TIMEOUT_TICKS) {
+            // 驾驶员迟迟不开门：由站台开关门，停站照常。
+            driverDoors = false;
+            driverStop.markDoorsTakenOver();
+            driverStop.end();
+            debug(
+                "AutoStation 驾驶员未开门，改由站台开关门: nodeId="
+                    + definition.nodeId().value()
+                    + ", train="
+                    + trainName
+                    + ", sid="
+                    + stopSessionId);
+            return false;
+          } else {
+            return true;
+          }
+        }
+        ticksSinceOpen++;
+        driverStop.setDwellRemainingTicks(dwellTicks - ticksSinceOpen);
+        if (ticksSinceOpen < dwellTicks) {
+          return true;
+        }
+        if (driverStop.anyDoorOpen()) {
+          driverStop.setPhase(DriverStationStop.Phase.CLOSE_DOORS);
+          return true;
+        }
+        driverStop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
+        if ((ticksSinceOpen - dwellTicks) % 20 != 0) {
+          return true;
+        }
+        if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
+          plugin
+              .getRuntimeDispatchService()
+              .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+          exitOffsetState.restore();
+          finalWaitState.run();
+          plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+          driverStop.end();
+          cancel();
+          return true;
+        }
+        boolean canDepart =
+            plugin
+                .getRuntimeDispatchService()
+                .map(dispatch -> dispatch.checkDeparture(group, definition))
+                .orElse(true);
+        if (!canDepart) {
+          return true;
+        }
+        plugin
+            .getRuntimeDispatchService()
+            .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+        exitOffsetState.restore();
+        finalWaitState.run();
+        plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+        Bukkit.getScheduler()
+            .runTask(
+                plugin,
+                () ->
+                    plugin
+                        .getRuntimeDispatchService()
+                        .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+        departureReleased = true;
+        driverStop.setPhase(DriverStationStop.Phase.DEPART);
+        return true;
+      }
+
+      /** 乘客下车偏移：与自动开门时一样，朝站台一侧偏出车外。 */
+      private void applyExitOffset() {
+        if (exitOffsetState.applied()) {
+          return;
+        }
+        FacingResult current = resolveFacingDirectionResult(info);
+        BlockFace face = current.face() == null ? facingDirection : current.face();
+        Vector vector = current.vector() == null ? facingVector : current.vector();
+        resolveExitFace(doorDirection)
+            .flatMap(exit -> buildExitOffset(exit, face, vector, EXIT_OFFSET_DISTANCE_BLOCKS))
+            .ifPresent(exitOffsetState::apply);
+      }
+
       @Override
       public void run() {
         if (!group.isValid()) {
@@ -572,10 +766,16 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
           exitOffsetState.restore();
           finalWaitState.run();
+          if (driverStop != null) {
+            driverStop.end();
+          }
           cancel();
           return;
         }
         ticksSinceStop++;
+        if (driverTick()) {
+          return;
+        }
         if (!opened && doorDirection == AutoStationDoorDirection.NONE) {
           opened = true;
           ticksSinceOpen = 0L;

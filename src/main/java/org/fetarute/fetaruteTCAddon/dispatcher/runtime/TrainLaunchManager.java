@@ -368,7 +368,8 @@ public final class TrainLaunchManager {
   /**
    * 驾驶员控制的列车：照常算出自动运行下会写入的速度，但不写限速、不发车、不挂斜坡，只把决定交给驾驶员。
    *
-   * <p>“发车已接受”按 {@code allowLaunch} 报告：起步由驾驶员完成，调度层不应因为没看到发车动作而反复重试。
+   * <p>自动运行的 {@code allowLaunch} 只在信号变化或强制刷新的那一拍为真（是否下发发车动作）；驾驶员能否起步只看是不是停车信号。 “发车已接受”仍按 {@code
+   * allowLaunch} 报告：起步由驾驶员完成，调度层不应因为没看到发车动作而反复重试。
    */
   private ControlApplicationResult publishDriverDirective(
       RuntimeTrainHandle train,
@@ -410,7 +411,7 @@ public final class TrainLaunchManager {
             resolvedStopMode,
             targetBps,
             permittedBps,
-            allowLaunch,
+            aspect != SignalAspect.STOP,
             distanceOpt == null ? OptionalLong.empty() : distanceOpt,
             speedEnvelope));
     return new ControlApplicationResult(
