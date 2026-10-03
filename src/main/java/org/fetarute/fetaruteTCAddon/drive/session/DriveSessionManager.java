@@ -84,6 +84,7 @@ import org.fetarute.fetaruteTCAddon.drive.setup.SetupAnimations;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetupStore;
+import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 
 /**
  * 手动驾驶会话的生命周期：开始、逐 tick 维护、结束，以及网络线程与主线程之间的交接。
@@ -1873,7 +1874,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     DriveTaskRecord record =
         new DriveTaskRecord(
             UUID.randomUUID(),
-            null,
+            ServerIdentity.id().orElse(null),
             task.playerId(),
             task.playerName(),
             task.key().timetableId(),

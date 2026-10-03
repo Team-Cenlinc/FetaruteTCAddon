@@ -20,9 +20,13 @@ public final class TrainSpawnTagInitializer {
   public static final String TAG_MATERIALIZED_ROLLBACK_PENDING =
       "FTA_MATERIALIZED_ROLLBACK_PENDING";
 
+  /** 列车全局 ID：跨服后车名可能重复，跨边界的引用都用它。取值与本次运行 ID 相同。 */
+  public static final String TAG_TRAIN_UID = "FTA_TRAIN_UID";
+
   private static final List<String> LIFECYCLE_TAG_KEYS =
       List.of(
           "FTA_RUN_ID",
+          TAG_TRAIN_UID,
           RouteProgressRegistry.TAG_ROUTE_ID,
           RouteProgressRegistry.TAG_ROUTE_CODE,
           RouteProgressRegistry.TAG_LINE_CODE,

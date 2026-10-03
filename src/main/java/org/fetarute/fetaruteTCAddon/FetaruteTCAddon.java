@@ -118,6 +118,7 @@ import org.fetarute.fetaruteTCAddon.drive.DriveConfigFile;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
+import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
@@ -201,6 +202,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.configManager = new ConfigManager(this);
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
+    ServerIdentity.configure(getConfig().getString("server-id", ""));
 
     this.loggerManager = new LoggerManager(getLogger());
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
@@ -354,6 +356,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .update();
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
+    ServerIdentity.configure(getConfig().getString("server-id", ""));
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
     if (railGraphService != null) {
       railGraphService.configureCrossWorld(

@@ -1025,6 +1025,7 @@ public final class FtaDepotCommand {
     Instant now = Instant.now();
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
+    tags.put(TrainSpawnTagInitializer.TAG_TRAIN_UID, runId.toString());
     tags.put("FTA_ROUTE_ID", resolved.route().id().toString());
     tags.put("FTA_ROUTE_CODE", resolved.route().code());
     tags.put("FTA_LINE_CODE", startLine.lineCode());

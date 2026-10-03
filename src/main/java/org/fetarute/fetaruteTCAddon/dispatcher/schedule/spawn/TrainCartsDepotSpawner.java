@@ -506,6 +506,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
             stops, 0, new RouteLineChanges.LineRef(service.operatorCode(), service.lineCode()));
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
+    tags.put(TrainSpawnTagInitializer.TAG_TRAIN_UID, runId.toString());
     tags.put("FTA_ROUTE_ID", service.routeId().toString());
     tags.put("FTA_ROUTE_CODE", service.routeCode());
     tags.put("FTA_LINE_CODE", line.lineCode());
