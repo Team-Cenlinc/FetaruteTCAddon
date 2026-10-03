@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.drive.hud;
 
+import com.bergerkiller.bukkit.common.wrappers.BlockData;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
@@ -11,16 +12,12 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 import java.util.function.Function;
+import org.bukkit.Bukkit;
 import org.bukkit.Color;
-import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.block.Block;
-import org.bukkit.entity.BlockDisplay;
-import org.bukkit.entity.Display;
 import org.bukkit.entity.Player;
-import org.bukkit.plugin.Plugin;
-import org.bukkit.util.Transformation;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
@@ -28,15 +25,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
-import org.joml.AxisAngle4f;
-import org.joml.Vector3f;
 
 /**
  * 发光停车标：进站时在驾驶员该停的地方画一道横跨轨道的发光标线。
  *
  * <p>停车点取车站牌子所在的轨道（与 TrainCarts 对位一致）：站台交来停站后用它量出的停车点，之前按牌子找到轨道自己算。 位置见 {@link StopMarkerGeometry}。
  *
- * <p>标线是一个不存档的方块展示实体，默认对所有人隐藏，只对驾驶员本人显示，服务器不会把它发给其他玩家的客户端； 没有碰撞，也不参与实体运算。发光轮廓能透过车体看见。只在服务器主线程使用。
+ * <p>标线只在驾驶员本人的客户端渲染（{@link ClientBlockDisplay}，纯数据包，服务器上没有实体）。发光轮廓能透过车体看见。只在服务器主线程使用。
  */
 public final class StopMarker {
 
@@ -55,10 +50,9 @@ public final class StopMarker {
   /** 标线底面比停车点抬高一点，免得与轨道贴图重叠闪烁。 */
   private static final double LIFT = 0.02;
 
-  /** 位置变化小于这个距离（格）不挪动。 */
-  private static final double MOVE_EPSILON_SQUARED = 0.05 * 0.05;
+  /** 移动时客户端插值的 tick 数。 */
+  private static final int MOVE_TICKS = 2;
 
-  private final Plugin plugin;
   private final Function<NodeId, Optional<SignNodeRegistry.SignNodeInfo>> signs;
   private final Map<UUID, State> states = new HashMap<>();
 
@@ -69,17 +63,14 @@ public final class StopMarker {
     private Anchor anchor;
     private NodeId failedNode;
     private long retryAtTick;
-    private BlockDisplay display;
+    private ClientBlockDisplay display;
     private StopMarkerGeometry.Tone tone;
   }
 
   /**
-   * @param plugin 用于按玩家显示实体
    * @param signs 按节点找车站牌子
    */
-  public StopMarker(
-      Plugin plugin, Function<NodeId, Optional<SignNodeRegistry.SignNodeInfo>> signs) {
-    this.plugin = Objects.requireNonNull(plugin, "plugin");
+  public StopMarker(Function<NodeId, Optional<SignNodeRegistry.SignNodeInfo>> signs) {
     this.signs = Objects.requireNonNull(signs, "signs");
   }
 
@@ -100,7 +91,7 @@ public final class StopMarker {
     World world = player.getWorld();
     Optional<Anchor> anchor = anchor(state, target.get().node(), link, world, nowTick);
     if (anchor.isEmpty() || !anchor.get().worldId().equals(world.getUID())) {
-      discard(state);
+      discard(player, state);
       return;
     }
     Optional<StopMarkerGeometry.Placement> placement =
@@ -111,30 +102,29 @@ public final class StopMarker {
             StopAlignment.center(group),
             player.getLocation().toVector());
     if (placement.isEmpty()) {
-      discard(state);
+      discard(player, state);
       return;
     }
-    Vector position = placement.get().position();
-    Location location =
-        new Location(
-            world,
-            position.getX(),
-            position.getY() + LIFT,
-            position.getZ(),
-            placement.get().yaw(),
-            0.0f);
-    show(
-        player,
-        state,
-        location,
-        StopMarkerGeometry.tone(target.get().remainingBlocks(), target.get().precise()));
+    if (state.display == null) {
+      state.display =
+          new ClientBlockDisplay(
+              new Vector(WIDTH, HEIGHT, DEPTH), (float) (SHOW_BLOCKS / 64.0), MOVE_TICKS);
+    }
+    StopMarkerGeometry.Tone tone =
+        StopMarkerGeometry.tone(target.get().remainingBlocks(), target.get().precise());
+    if (tone != state.tone) {
+      state.display.setAppearance(BlockData.fromMaterial(material(tone)), color(tone).asRGB());
+      state.tone = tone;
+    }
+    state.display.setForward(placement.get().direction());
+    state.display.sync(player, world, placement.get().position().add(new Vector(0.0, LIFT, 0.0)));
   }
 
   /** 撤掉玩家的停车标。 */
   public void remove(UUID playerId) {
     State state = states.remove(playerId);
     if (state != null) {
-      discard(state);
+      discard(Bukkit.getPlayer(playerId), state);
     }
   }
 
@@ -201,62 +191,10 @@ public final class StopMarker {
     }
   }
 
-  private void show(Player player, State state, Location location, StopMarkerGeometry.Tone tone) {
-    BlockDisplay display = state.display;
-    if (display != null
-        && (!display.isValid() || !display.getWorld().equals(location.getWorld()))) {
-      discard(state);
-      display = null;
-    }
-    if (display == null) {
-      World world = location.getWorld();
-      if (!world.isChunkLoaded(location.getBlockX() >> 4, location.getBlockZ() >> 4)) {
-        return;
-      }
-      display = world.spawn(location, BlockDisplay.class, created -> configure(created, tone));
-      player.showEntity(plugin, display);
-      state.display = display;
-      state.tone = tone;
-      return;
-    }
-    Location current = display.getLocation();
-    if (current.distanceSquared(location) > MOVE_EPSILON_SQUARED
-        || Math.abs(current.getYaw() - location.getYaw()) > 1.0f) {
-      display.teleport(location);
-    }
-    if (tone != state.tone) {
-      display.setBlock(material(tone).createBlockData());
-      display.setGlowColorOverride(color(tone));
-      state.tone = tone;
-    }
-  }
-
-  private static void configure(BlockDisplay display, StopMarkerGeometry.Tone tone) {
-    // 先隐藏再进入世界：其他玩家的客户端从头到尾收不到这个实体。
-    display.setVisibleByDefault(false);
-    display.setPersistent(false);
-    display.setBlock(material(tone).createBlockData());
-    display.setGlowing(true);
-    display.setGlowColorOverride(color(tone));
-    display.setBrightness(new Display.Brightness(15, 15));
-    display.setShadowRadius(0.0f);
-    // 展示实体默认只在 64 格内渲染；放大到显示距离。
-    display.setViewRange((float) (SHOW_BLOCKS / 64.0));
-    display.setTeleportDuration(2);
-    display.setTransformation(
-        new Transformation(
-            new Vector3f(-WIDTH / 2.0f, 0.0f, -DEPTH / 2.0f),
-            new AxisAngle4f(),
-            new Vector3f(WIDTH, HEIGHT, DEPTH),
-            new AxisAngle4f()));
-  }
-
-  private static void discard(State state) {
+  private static void discard(Player player, State state) {
     if (state.display != null) {
-      state.display.remove();
-      state.display = null;
+      state.display.destroy(player);
     }
-    state.tone = null;
   }
 
   private static Material material(StopMarkerGeometry.Tone tone) {

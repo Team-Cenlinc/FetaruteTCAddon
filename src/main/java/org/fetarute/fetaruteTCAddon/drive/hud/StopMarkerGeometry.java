@@ -16,16 +16,27 @@ public final class StopMarkerGeometry {
    * 停车标的摆放。
    *
    * @param position 停车标中心（轨道面上）
-   * @param yaw 停车标朝向（Minecraft 偏航角，度）：沿轨道走向，标线横跨轨道
+   * @param direction 停车标处轨道的走向（水平单位向量，朝列车前进方向）；标线横跨轨道
    */
-  public record Placement(Vector position, float yaw) {
+  public record Placement(Vector position, Vector direction) {
     public Placement {
       position = position.clone();
+      direction = direction.clone();
     }
 
     @Override
     public Vector position() {
       return position.clone();
+    }
+
+    @Override
+    public Vector direction() {
+      return direction.clone();
+    }
+
+    /** 走向的偏航角（Minecraft 约定，度）：0 为朝南（+Z），90 为朝西（-X）。 */
+    public float yaw() {
+      return (float) Math.toDegrees(Math.atan2(-direction.getX(), direction.getZ()));
     }
   }
 
@@ -75,7 +86,7 @@ public final class StopMarkerGeometry {
             stopPoint.getX() + axis.getX() * seatAhead,
             stopPoint.getY(),
             stopPoint.getZ() + axis.getZ() * seatAhead);
-    return Optional.of(new Placement(position, yaw(axis)));
+    return Optional.of(new Placement(position, axis));
   }
 
   /**
@@ -92,11 +103,6 @@ public final class StopMarkerGeometry {
       return Tone.OVERRUN;
     }
     return Tone.APPROACH;
-  }
-
-  /** 水平方向的偏航角：0 为朝南（+Z），90 为朝西（-X）。 */
-  static float yaw(Vector direction) {
-    return (float) Math.toDegrees(Math.atan2(-direction.getX(), direction.getZ()));
   }
 
   private static Vector horizontalUnit(Vector vector) {

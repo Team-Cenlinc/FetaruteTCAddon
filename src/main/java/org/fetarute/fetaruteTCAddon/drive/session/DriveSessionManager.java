@@ -191,7 +191,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.sidebar = new DriveSidebar(plugin.getLocaleManager());
     this.stopMarker =
         new StopMarker(
-            plugin,
             node ->
                 plugin.getSignNodeRegistry() == null
                     ? Optional.empty()
