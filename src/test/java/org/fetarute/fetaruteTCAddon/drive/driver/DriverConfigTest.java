@@ -32,7 +32,9 @@ class DriverConfigTest {
             "restricted-speed-bps: 4.0",
             "directive-stale-seconds: 3",
             "stale-handback-seconds: 12",
-            "stop-margin-blocks: 0.5"));
+            "stop-margin-blocks: 0.5",
+            "stop-accurate-blocks: 3",
+            "stop-accept-blocks: 8"));
     List<String> warnings = new ArrayList<>();
 
     DriverConfig config = DriverConfig.from(yaml, warnings::add);
@@ -44,6 +46,8 @@ class DriverConfigTest {
     assertEquals(60, config.directiveStaleTicks());
     assertEquals(240, config.staleHandbackTicks());
     assertEquals(0.5, config.stopMarginBlocks(), 1.0e-9);
+    assertEquals(3.0, config.stopAccurateBlocks(), 1.0e-9);
+    assertEquals(8.0, config.stopAcceptBlocks(), 1.0e-9);
     assertTrue(warnings.isEmpty(), warnings::toString);
   }
 

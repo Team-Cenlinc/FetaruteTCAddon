@@ -66,7 +66,7 @@ class ScoreRulesTest {
     DriverStationStop stopped =
         new DriverStationStop(
             NodeId.of("OP:S:STA:2"), "二站", UUID.randomUUID(), new Vector(), null, false, true);
-    stopped.updateOffset(2.5);
+    stopped.updateOffset(4.0);
     stopped.markStopped();
     stopped.end();
     StopScore score = StopScore.of(stopped);

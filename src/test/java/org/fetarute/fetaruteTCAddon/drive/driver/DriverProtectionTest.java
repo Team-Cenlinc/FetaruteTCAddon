@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StopControlMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection.Decision;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection.Input;
@@ -198,13 +199,8 @@ class DriverProtectionTest {
     double expected =
         DriverProtection.brakingCurveBps(
             20.0
-                + org.fetarute
-                    .fetaruteTCAddon
-                    .dispatcher
-                    .runtime
-                    .control
-                    .StopAlignment
-                    .ACCEPT_BLOCKS,
+                + org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment
+                    .acceptBlocks(),
             SERVICE,
             REACTION);
     assertEquals(expected, decision.permittedBps(), 1.0e-9);
@@ -215,8 +211,11 @@ class DriverProtectionTest {
   @Test
   @DisplayName("越过停车窗口：实测时立即停住，估计值不据此停车")
   void stationOverrun() {
-    assertEquals(Intervention.CLAMP, evalStation(1.0, -5.0, true).intervention());
-    assertEquals(Intervention.SERVICE, evalStation(4.0, -5.0, false).intervention());
-    assertEquals(Intervention.NONE, evalStation(0.0, -5.0, true).intervention(), "停稳后不再介入");
+    double beyond = -(StopAlignment.acceptBlocks() + 1.0);
+    assertEquals(Intervention.CLAMP, evalStation(1.0, beyond, true).intervention());
+    double overCurve =
+        DriverProtection.brakingCurveBps(StopAlignment.acceptBlocks(), SERVICE, REACTION) + 1.5;
+    assertEquals(Intervention.SERVICE, evalStation(overCurve, beyond, false).intervention());
+    assertEquals(Intervention.NONE, evalStation(0.0, beyond, true).intervention(), "停稳后不再介入");
   }
 }

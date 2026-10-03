@@ -199,6 +199,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   private void applyDriverConfig(DriveConfig current) {
     driverRegistry.setAtoConfirmTicks(current.driver().recovery().atoConfirmSeconds() * 20L);
+    StopAlignment.configure(
+        current.driver().stopAccurateBlocks(), current.driver().stopAcceptBlocks());
   }
 
   private void traceTask(String message) {

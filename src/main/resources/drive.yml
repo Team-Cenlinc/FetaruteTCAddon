@@ -114,6 +114,10 @@ driver:
   stale-handback-seconds: 10
   # 停车点前预留的余量（格）：防护按“停车点 − 余量”计算制动曲线
   stop-margin-blocks: 1.0
+  # 站停窗口（格）：列车中心离停车点（车站牌子的轨道中心）多近算停准、多近可以开门。
+  # 网络延迟与服务器 tick 会让同样的操作停偏零点几格，窗口留有余量；停短超出可开门范围须前移，越过则防护强制停车
+  stop-accurate-blocks: 2.5
+  stop-accept-blocks: 6.0
   # 驾驶任务：任务板列出多少分钟内的发车（/fta drive tasks）
   task-window-minutes: 20
   # 一次任务的绝对上限（分钟），超过即停车交还并判未完成

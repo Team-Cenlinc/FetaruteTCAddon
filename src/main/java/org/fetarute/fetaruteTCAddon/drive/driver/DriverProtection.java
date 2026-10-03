@@ -141,7 +141,7 @@ public final class DriverProtection {
           Math.min(
               permitted,
               brakingCurveBps(
-                  Math.max(0.0, in.stationRemainingBlocks()) + StopAlignment.ACCEPT_BLOCKS,
+                  Math.max(0.0, in.stationRemainingBlocks()) + StopAlignment.acceptBlocks(),
                   in.serviceDecelBps2(),
                   in.reactionSeconds()));
     }
@@ -173,7 +173,7 @@ public final class DriverProtection {
       if (iv == Intervention.NONE
           && station
           && in.stationPrecise()
-          && in.stationRemainingBlocks() + StopAlignment.ACCEPT_BLOCKS < 0.0) {
+          && in.stationRemainingBlocks() + StopAlignment.acceptBlocks() < 0.0) {
         // 越过停车窗口：再走就错过车站，立即停住。
         iv = Intervention.CLAMP;
       }

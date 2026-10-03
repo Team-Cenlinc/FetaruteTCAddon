@@ -70,13 +70,13 @@ public final class DriverStationHint {
       return Optional.empty();
     }
     String label = link.targetLabel();
-    if (stopped && remaining > StopAlignment.ACCEPT_BLOCKS) {
+    if (stopped && remaining > StopAlignment.acceptBlocks()) {
       return Optional.of(
           new Hint(
               "drive.hud.station.move-up",
               Map.of("station", label, "distance", formatDistance(remaining))));
     }
-    if (target.get().precise() && Math.abs(remaining) <= StopAlignment.ACCURATE_BLOCKS) {
+    if (target.get().precise() && Math.abs(remaining) <= StopAlignment.accurateBlocks()) {
       return Optional.of(new Hint("drive.hud.station.on-mark", Map.of("station", label)));
     }
     return Optional.of(

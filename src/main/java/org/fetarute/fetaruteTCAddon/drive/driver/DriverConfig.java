@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.drive.driver;
 
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 
 /**
  * 驾驶调度列车（DRIVER 模式）的参数（{@code drive.yml} 的 {@code driver} 段）。速度单位为格/秒。
@@ -15,6 +16,8 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param directiveStaleTicks 运行中多久没收到新指令算过期（tick）
  * @param staleHandbackTicks 运行中多久没收到新指令就停车交还自动运行（tick）
  * @param stopMarginBlocks 停车点、授权末端前留出的余量（格）
+ * @param stopAccurateBlocks 站停时列车中心离停车点多近算停准（格）
+ * @param stopAcceptBlocks 站停时列车中心离停车点多近可以开门（格）；越过更多时防护强制停车
  * @param recovery 驾驶任务与拥堵恢复的参数
  */
 public record DriverConfig(
@@ -27,6 +30,8 @@ public record DriverConfig(
     int directiveStaleTicks,
     int staleHandbackTicks,
     double stopMarginBlocks,
+    double stopAccurateBlocks,
+    double stopAcceptBlocks,
     DriverRecovery recovery) {
 
   private static final int TICKS_PER_SECOND = 20;
@@ -38,7 +43,18 @@ public record DriverConfig(
   /** 内置默认值。 */
   public static DriverConfig defaults() {
     return new DriverConfig(
-        true, true, 1.0, 0.5, 0.15, 5.0, 40, 200, 1.0, DriverRecovery.defaults());
+        true,
+        true,
+        1.0,
+        0.5,
+        0.15,
+        5.0,
+        40,
+        200,
+        1.0,
+        StopAlignment.DEFAULT_ACCURATE_BLOCKS,
+        StopAlignment.DEFAULT_ACCEPT_BLOCKS,
+        DriverRecovery.defaults());
   }
 
   /**
@@ -75,6 +91,13 @@ public record DriverConfig(
       staleTicks = d.directiveStaleTicks;
       handbackTicks = d.staleHandbackTicks;
     }
+    double stopAccurate = positive(section, "stop-accurate-blocks", d.stopAccurateBlocks, sink);
+    double stopAccept = positive(section, "stop-accept-blocks", d.stopAcceptBlocks, sink);
+    if (stopAccept <= stopAccurate) {
+      sink.accept("drive.yml 的 driver.stop-accept-blocks 须大于 stop-accurate-blocks，使用默认值");
+      stopAccurate = d.stopAccurateBlocks;
+      stopAccept = d.stopAcceptBlocks;
+    }
     return new DriverConfig(
         section.getBoolean("enabled", d.enabled),
         section.getBoolean("hot-handover", d.hotHandover),
@@ -85,6 +108,8 @@ public record DriverConfig(
         staleTicks,
         handbackTicks,
         nonNegative(section, "stop-margin-blocks", d.stopMarginBlocks, sink),
+        stopAccurate,
+        stopAccept,
         DriverRecovery.from(section, sink));
   }
 
