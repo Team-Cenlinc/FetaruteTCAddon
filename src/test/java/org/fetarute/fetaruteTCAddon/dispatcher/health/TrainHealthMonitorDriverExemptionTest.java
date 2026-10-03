@@ -87,6 +87,31 @@ class TrainHealthMonitorDriverExemptionTest {
   }
 
   @Test
+  @DisplayName("在驾驶员车后面短暂排队不请它交还；到了销毁兜底的时限才请，且绝不销毁别的车")
+  void blockedByDriverTrainRequestsHandbackOnlyPastDestroyThreshold() {
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.TrainRuntimeState("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of("drv"));
+    monitor.setAutoFixEnabled(true);
+    monitor.setDeadlockMinStopDuration(Duration.ofSeconds(20));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 4; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().isEmpty(), "排队 40 秒（比如前车在站里停站）不请交还");
+    for (int i = 5; i <= 8; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().contains("drv:deadlock"), authority.handbacks()::toString);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
   @DisplayName("被驾驶员车挡住的长时间停滞车不清，先请驾驶员车交还")
   void blockedByDriverTrainRequestsHandbackInsteadOfCleanup() {
     when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());

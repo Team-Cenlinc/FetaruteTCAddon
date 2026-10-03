@@ -116,13 +116,31 @@ public final class DriverControlRegistry implements ControlAuthority {
 
   @Override
   public boolean isDriverControlledName(String trainName) {
-    DriverLink link = trainName == null ? null : byName.get(trainName);
+    DriverLink link = byCurrentName(trainName);
     return link != null && link.controlsPhysically();
   }
 
   @Override
   public boolean hasDriver(String trainName) {
-    return trainName != null && byName.containsKey(trainName);
+    return byCurrentName(trainName) != null;
+  }
+
+  /** 按车名找链路；调度改名（例如终点待命复用）后按列车属性上的当前车名也认。 */
+  private DriverLink byCurrentName(String trainName) {
+    if (trainName == null || byName.isEmpty()) {
+      return null;
+    }
+    DriverLink link = byName.get(trainName);
+    if (link != null) {
+      return link;
+    }
+    for (DriverLink candidate : byName.values()) {
+      TrainProperties properties = candidate.properties();
+      if (properties != null && trainName.equals(properties.getTrainName())) {
+        return candidate;
+      }
+    }
+    return null;
   }
 
   @Override
@@ -162,7 +180,7 @@ public final class DriverControlRegistry implements ControlAuthority {
 
   @Override
   public void requestHandback(String trainName, String reason) {
-    DriverLink link = trainName == null ? null : byName.get(trainName);
+    DriverLink link = byCurrentName(trainName);
     if (link != null) {
       handler.onHandbackRequested(link, reason);
     }

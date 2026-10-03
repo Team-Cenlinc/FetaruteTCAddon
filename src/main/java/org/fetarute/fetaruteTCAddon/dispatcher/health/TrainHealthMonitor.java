@@ -368,6 +368,19 @@ public final class TrainHealthMonitor {
     this.controlAuthority = authority == null ? ControlAuthority.NONE : authority;
   }
 
+  /** 阻挡者里有没有驾驶员在岗的车（含 ATO）。 */
+  private boolean blockedByDriver(java.util.Collection<String> trainNames) {
+    if (trainNames == null) {
+      return false;
+    }
+    for (String name : trainNames) {
+      if (name != null && controlAuthority.hasDriver(name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /**
    * 列车中有驾驶员控制的车时，请它们交还自动运行。
    *
@@ -777,9 +790,14 @@ public final class TrainHealthMonitor {
           && currentSignal == SignalAspect.STOP
           && progressDuration.compareTo(deadlockMinStopDuration) >= 0) {
         traceDeadlockSkipped(trainName, current, progressDuration, activeKeys, now);
-        if (requestDriverHandback(
-            dispatchService.recentBlockerTrains(trainName, blockerSnapshotMaxAge))) {
-          // 阻挡者是驾驶员控制的车：先请它交还自动运行，不因它销毁别的车。
+        Set<String> blockers =
+            dispatchService.recentBlockerTrains(trainName, blockerSnapshotMaxAge);
+        if (blockedByDriver(blockers)) {
+          // 阻挡者是有驾驶员的车：绝不因它销毁别的车。在它后面短暂排队（例如它在站里停站）是正常的，
+          // 等到了本来会动用销毁兜底的时限才请它交还自动运行。
+          if (autoFixEnabled && progressDuration.compareTo(deadlockDestroyThreshold) >= 0) {
+            requestDriverHandback(blockers);
+          }
           continue;
         }
         if (autoFixEnabled

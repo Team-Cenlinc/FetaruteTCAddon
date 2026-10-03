@@ -51,16 +51,26 @@ final class TrainSignBypassListenerTest {
   }
 
   @Test
-  void doesNotCancelPortalSignWhenBypassPredicateTrue() {
+  void portalSignPassesOnlyWhenCrossWorldIsEnabled() {
     TrainSignBypassListener listener = new TrainSignBypassListener(message -> {}, event -> true);
+    boolean before = GraphSignParsers.portalsEnabled();
+    try {
+      GraphSignParsers.setPortalsEnabled(true);
+      SignActionEvent enabled = mock(SignActionEvent.class);
+      when(enabled.getHeader())
+          .thenReturn(com.bergerkiller.bukkit.tc.SignActionHeader.parse("[portal]"));
+      listener.onSignActionEarly(enabled);
+      verify(enabled, never()).setCancelled(true);
 
-    SignActionEvent event = mock(SignActionEvent.class);
-    when(event.getHeader())
-        .thenReturn(com.bergerkiller.bukkit.tc.SignActionHeader.parse("[portal]"));
-
-    listener.onSignActionEarly(event);
-
-    verify(event, never()).setCancelled(true);
+      GraphSignParsers.setPortalsEnabled(false);
+      SignActionEvent disabled = mock(SignActionEvent.class);
+      when(disabled.getHeader())
+          .thenReturn(com.bergerkiller.bukkit.tc.SignActionHeader.parse("[portal]"));
+      listener.onSignActionEarly(disabled);
+      verify(disabled).setCancelled(true);
+    } finally {
+      GraphSignParsers.setPortalsEnabled(before);
+    }
   }
 
   @Test

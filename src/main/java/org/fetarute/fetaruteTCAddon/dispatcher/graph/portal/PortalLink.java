@@ -13,7 +13,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * @param toWorld 出口所在世界
  * @param toNode 出口传送门节点
  * @param source 自动解析（MyWorlds）还是手动指定
- * @param transitBlocks 过门按多少格计（ETA、占用、运行时分）
+ * @param transitBlocks 过门按多少格计（保留字段；路网里连接边一律按 1 格）
  * @param updatedAt 更新时刻
  */
 public record PortalLink(
@@ -25,8 +25,8 @@ public record PortalLink(
     double transitBlocks,
     Instant updatedAt) {
 
-  /** 过门默认按 4 格计。 */
-  public static final double DEFAULT_TRANSIT_BLOCKS = 4.0;
+  /** 过门按 1 格计（TrainCarts 过门是瞬时的；路网里连接边的长度见 RailNetwork）。 */
+  public static final double DEFAULT_TRANSIT_BLOCKS = 1.0;
 
   /** 连接来源。 */
   public enum Source {

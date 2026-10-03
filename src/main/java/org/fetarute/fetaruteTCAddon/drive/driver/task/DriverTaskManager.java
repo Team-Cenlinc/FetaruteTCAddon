@@ -54,7 +54,7 @@ public final class DriverTaskManager {
   }
 
   /** 列车没在接班站停站、计划发车又已过去这么久，任务作废。 */
-  static final Duration EXPIRE_AFTER = Duration.ofMinutes(3);
+  static final Duration EXPIRE_AFTER = Duration.ofMinutes(10);
 
   /** 交还后列车走过这么远就不再救援。 */
   private static final double RESCUE_PROGRESS_BLOCKS = 3.0;
@@ -239,15 +239,48 @@ public final class DriverTaskManager {
    *
    * @return 查不到绑定时为 {@code false}
    */
-  public boolean atTerminal(String trainName) {
-    return timetables()
-        .flatMap(api -> api.getAssignment(trainName))
-        .map(
-            assignment ->
-                assignment.lastStopSequence().isPresent()
-                    && assignment.nextStopSequence().isEmpty())
-        .orElse(false);
+  public boolean atTerminal(DriverTask task, String trainName) {
+    Optional<TimetableApi> api = timetables();
+    Optional<TimetableApi.TrainAssignment> assignment =
+        api.flatMap(timetables -> timetables.getAssignment(trainName));
+    if (assignment.isEmpty()
+        || assignment.get().lastStopSequence().isEmpty()
+        || assignment.get().nextStopSequence().isPresent()
+        || assignment.get().lastStationCode().isEmpty()
+        || !task.key()
+            .matches(
+                assignment.get().timetableId(),
+                assignment.get().tripCode(),
+                assignment.get().serviceDate())) {
+      return false;
+    }
+    // “没有下一站”在推算信息缺失时也会出现：再用这一站的发车记录核对它确实是本车次的终到站。
+    int stopSequence = assignment.get().lastStopSequence().get();
+    Instant now = Instant.now();
+    return api
+        .get()
+        .departuresAt(
+            null,
+            assignment.get().lastStationCode().get(),
+            now.minus(TERMINAL_LOOKBACK),
+            TERMINAL_LOOKBACK.plus(TERMINAL_LOOKBACK),
+            TERMINAL_LOOKUP_LIMIT)
+        .stream()
+        .anyMatch(
+            departure ->
+                departure.stopSequence() == stopSequence
+                    && departure.terminating()
+                    && task.key()
+                        .matches(
+                            departure.timetableId(),
+                            departure.tripCode(),
+                            departure.serviceDate()));
   }
+
+  /** 核对终到站时往前后各看多久的发车记录。 */
+  private static final Duration TERMINAL_LOOKBACK = Duration.ofHours(3);
+
+  private static final int TERMINAL_LOOKUP_LIMIT = 2000;
 
   /** 时刻表接口；公开 API 未就绪时为空。 */
   public static Optional<TimetableApi> timetables() {
@@ -270,6 +303,16 @@ public final class DriverTaskManager {
    * @param notify 给玩家发动作栏提示（语言键、占位符）
    */
   public void tickClaims(Starter starter, Notifier notify, Instant now) {
+    boolean anyClaimed = false;
+    for (DriverTask task : byPlayer.values()) {
+      if (task.state() == DriverTask.State.CLAIMED) {
+        anyClaimed = true;
+        break;
+      }
+    }
+    if (!anyClaimed) {
+      return;
+    }
     Optional<TimetableApi> api = timetables();
     Collection<TimetableApi.TrainAssignment> assignments =
         api.map(TimetableApi::listAssignments).orElse(List.of());
@@ -296,7 +339,9 @@ public final class DriverTaskManager {
         continue;
       }
       if (!dwelling) {
-        if (now.isAfter(task.plannedDeparture().plus(EXPIRE_AFTER))) {
+        // 已对上列车、它还没到接班站：晚点也等它来。还没对上列车（绑定在它停过一站后才有）时按时作废。
+        boolean approaching = assignment != null && lastSeq < task.boardStopSequence();
+        if (!approaching && now.isAfter(task.plannedDeparture().plus(EXPIRE_AFTER))) {
           expire(task, notify, "timeout");
         }
         continue;
@@ -357,7 +402,10 @@ public final class DriverTaskManager {
    */
   public void watchForRescue(
       Player player, MinecartGroup group, DriverStationStop lastStop, long dueTick) {
-    Location target = rescueTarget(lastStop).orElse(null);
+    Location target =
+        rescueTarget(lastStop)
+            .or(() -> activeOrLastTask(player.getUniqueId()).flatMap(this::boardStation))
+            .orElse(null);
     Vector head = group.head().getEntity().getLocation().toVector();
     rescues.add(
         new RescueWatch(
@@ -391,15 +439,19 @@ public final class DriverTaskManager {
         it.remove();
         continue;
       }
-      if (nowTick < watch.dueTick()) {
+      if (nowTick < watch.dueTick() || group.get().isMoving()) {
         continue;
       }
       it.remove();
+      if (watch.target() == null) {
+        // 找不到可以送去的站台：不把人放在区间轨道旁，只提示。
+        notify.send(player, "drive.driver.rescue.no-target", Map.of("train", watch.trainName()));
+        plugin.getLogger().warning("驾驶员列车 " + watch.trainName() + " 交还后仍未移动，且找不到可送达的站台；请检查该列车");
+        continue;
+      }
       trace.accept("救援 " + player.getName() + " 离开 " + watch.trainName());
       player.leaveVehicle();
-      if (watch.target() != null) {
-        player.teleport(watch.target());
-      }
+      player.teleport(watch.target());
       notify.send(player, "drive.driver.rescue.rescued", Map.of("train", watch.trainName()));
       plugin
           .getLogger()
@@ -410,6 +462,29 @@ public final class DriverTaskManager {
                   + player.getName()
                   + " 送到站台；请检查该列车");
     }
+  }
+
+  private Optional<DriverTask> activeOrLastTask(UUID playerId) {
+    return Optional.ofNullable(byPlayer.get(playerId));
+  }
+
+  /** 任务接班站的位置（车站设置了位置时）。 */
+  private Optional<Location> boardStation(DriverTask task) {
+    return plugin
+        .getStationDirectory()
+        .flatMap(
+            directory -> directory.snapshot().findStation(task.operatorCode(), task.stationCode()))
+        .map(StationDirectory.StationEntry::station)
+        .flatMap(
+            station ->
+                station
+                    .location()
+                    .flatMap(
+                        location ->
+                            station
+                                .world()
+                                .map(Bukkit::getWorld)
+                                .map(world -> toLocation(world, station.world(), location))));
   }
 
   /** 送到哪里：驾驶员最近停过的车站的站台位置，没有就是停车点旁站台侧两格半。 */

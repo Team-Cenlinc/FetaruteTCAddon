@@ -71,6 +71,11 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     return authority.isDriverControlled(group.getProperties());
   }
 
+  /** 车上有驾驶员（含 ATO）。 */
+  private boolean hasDriver() {
+    return driverControlled() || authority.hasDriver(group.getProperties().getTrainName());
+  }
+
   /**
    * @return TrainCarts MinecartGroup 是否仍有效。
    */
@@ -818,8 +823,8 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (!group.isValid()) {
       return;
     }
-    if (driverControlled()) {
-      // 先结束驾驶（解除绑定、归还属性），再照常销毁。
+    if (hasDriver()) {
+      // 先结束驾驶（解除绑定、归还属性），再照常销毁；ATO 下车上的驾驶员同样要先结束。
       authority.interrupt(group.getProperties(), DriverInterrupt.RELEASE_FOR_DESTROY);
     }
     // 避免在 TrainCarts doPhysics / SignTracker 刷新过程中直接 destroy() 导致 members array 出现 dead entity。
@@ -920,7 +925,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
     if (!group.isValid() || group.isMoving()) {
       return;
     }
-    if (driverControlled()) {
+    if (hasDriver()) {
       authority.interrupt(group.getProperties(), DriverInterrupt.HANDBACK_REQUIRED);
     }
     group.reverse();

@@ -150,7 +150,11 @@ public final class DriverProtection {
       permitted = Math.min(permitted, config.restrictedSpeedBps());
     }
     // 紧急制动按行车许可判断；调度要求停车（含请求交还）只用常用制动停下。
-    double emergencyBasis = permitted;
+    // 没有距离的停车信号（就地停车，例如区间停车点）在限制速度以下只用常用制动。
+    double emergencyBasis =
+        d.isStop() && d.distanceBlocks().isEmpty()
+            ? Math.max(permitted, config.restrictedSpeedBps())
+            : permitted;
     if (in.serviceStopRequested()) {
       permitted = 0.0;
     }

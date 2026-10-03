@@ -144,6 +144,11 @@ public final class RuntimeTrainController {
     return launchManager.headProgressBlocks(train, nodeKey);
   }
 
+  /** 这列车上是否有驾驶员在岗（含 ATO；按控制权登记判断，残留的驾驶员标签不算）。 */
+  boolean hasDriver(String trainName) {
+    return trainName != null && launchManager.authority().hasDriver(trainName);
+  }
+
   /** 这列车是否由驾驶员物理控制（调度层的对位、等待动作要跳过）。 */
   boolean isDriverControlled(TrainProperties properties) {
     return properties != null && launchManager.authority().isDriverControlled(properties);

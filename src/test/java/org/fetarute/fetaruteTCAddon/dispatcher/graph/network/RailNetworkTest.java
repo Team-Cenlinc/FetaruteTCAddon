@@ -92,7 +92,29 @@ class RailNetworkTest {
             .shortestPath(view, A, B, RailGraphPathFinder.Options.shortestDistance())
             .orElseThrow();
     assertEquals(List.of(A, PA, PB, B), path.nodes());
-    assertEquals(10 + 4 + 29, path.totalLengthBlocks());
+    assertEquals(
+        10 + RailNetwork.PORTAL_EDGE_BLOCKS + 29,
+        path.totalLengthBlocks(),
+        "过门按 1 格计，门后被占时停车点落在门前");
+  }
+
+  @Test
+  @DisplayName("同 ID 节点优先取视图所在世界的；没有传送门的世界不换成路网")
+  void ownWorldFirstAndPortalWorlds() {
+    UUID third = UUID.randomUUID();
+    SimpleRailGraph thirdWorld =
+        world(
+            node(A, NodeType.STATION, 500),
+            node(NodeId.of("OP:S:CCC:1"), NodeType.STATION, 520),
+            20);
+    RailNetwork network =
+        RailNetwork.build(
+            Map.of(OVER, OVERWORLD, NETHER, NETHERWORLD, third, thirdWorld),
+            List.of(link(PA, PB, OVER, NETHER)));
+    assertEquals(500.0, network.view(third).findNode(A).orElseThrow().worldPosition().getX(), 1e-9);
+    assertTrue(network.hasPortalIn(OVER));
+    assertFalse(network.hasPortalIn(third));
+    assertSame(network.view(OVER), network.view(OVER), "同一个世界总是同一个视图（最短路记忆按视图）");
   }
 
   @Test

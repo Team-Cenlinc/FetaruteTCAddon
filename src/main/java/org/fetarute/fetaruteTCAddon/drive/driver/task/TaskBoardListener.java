@@ -53,6 +53,21 @@ public final class TaskBoardListener implements Listener {
             });
   }
 
+  /** 别的插件在中间优先级撤销取消也不行：最后再取消一次。 */
+  @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+  public void enforceClickCancelled(InventoryClickEvent event) {
+    if (event.getView().getTopInventory().getHolder() instanceof TaskBoardHolder) {
+      event.setCancelled(true);
+    }
+  }
+
+  @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = false)
+  public void enforceDragCancelled(InventoryDragEvent event) {
+    if (event.getView().getTopInventory().getHolder() instanceof TaskBoardHolder) {
+      event.setCancelled(true);
+    }
+  }
+
   @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
   public void onDrag(InventoryDragEvent event) {
     if (event.getView().getTopInventory().getHolder() instanceof TaskBoardHolder) {

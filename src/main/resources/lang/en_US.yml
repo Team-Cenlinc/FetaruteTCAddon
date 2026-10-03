@@ -244,6 +244,7 @@ drive:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
       rescued: "<prefix> <yellow>Train <white><train></white> could not move for a long time; you were taken to the nearest platform</yellow>"
+      no-target: "<prefix> <red>Train <white><train></white> cannot move and no platform to take you to was found; contact an administrator</red>"
     breaker:
       tripped: "<prefix> <red>Congestion breaker: <white><reason></white>; handed back <white><count></white> driver train(s) and paused new shifts</red>"
   task:
@@ -381,3 +382,17 @@ drive:
     probe:
       "on": "<prefix> <yellow>Driving input diagnostics enabled, packet events go to the console</yellow>"
       "off": "<prefix> <yellow>Driving input diagnostics disabled</yellow>"
+command:
+  graph:
+    portal:
+      disabled: "<prefix> <red>Cross-world is disabled (graph.cross-world in config.yml)</red>"
+      no-graph: "<prefix> <red>The rail graph service is not ready</red>"
+      list-header: "<prefix> <dark_aqua><count> portal link(s)</dark_aqua>"
+      list-entry: "  <white><from></white> <gray>→</gray> <white><to></white> <gray>(<source>)</gray>"
+      scanned: "<prefix> <green>Linked <white><linked></white> portal(s) from MyWorlds; <white><problems></white> could not be linked</green>"
+      problem: "  <yellow><problem></yellow>"
+      not-found: "<prefix> <red>Portal node not found (it must be a PORTAL node in a built graph)</red>"
+      linked: "<prefix> <green>Linked <white><from></white> → <white><to></white></green>"
+      unlinked: "<prefix> <yellow>Removed the link from <white><from></white></yellow>"
+      myworlds-unavailable: "<prefix> <red>MyWorlds portals are unavailable; existing links were left unchanged</red>"
+      save-failed: "<prefix> <red>Saving portal links failed; nothing was changed. Check the console log</red>"

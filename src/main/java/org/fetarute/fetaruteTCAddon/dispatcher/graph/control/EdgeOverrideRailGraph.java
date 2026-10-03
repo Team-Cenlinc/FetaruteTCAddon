@@ -190,6 +190,14 @@ public final class EdgeOverrideRailGraph
     return RailInterlockingState.unavailable();
   }
 
+  @Override
+  public java.util.Set<String> zoneKeysForEdge(EdgeId edgeId) {
+    if (delegate instanceof RailGraphInterlockingSupport support) {
+      return support.zoneKeysForEdge(edgeId);
+    }
+    return java.util.Set.of();
+  }
+
   private record BlockCandidates(
       Map<EdgeId, RailEdgeOverrideRecord> source,
       List<Map.Entry<EdgeId, RailEdgeOverrideRecord>> entries) {}

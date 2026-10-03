@@ -83,6 +83,14 @@ public final class SignalConfirm {
     missCounted = false;
   }
 
+  /** 转换驾驶方式时清掉等着的确认（ATO 下不要求确认，转回人工后从当时的信号重新开始）。 */
+  public void reset() {
+    accepted = SignalAspect.PROCEED;
+    candidate = null;
+    pendingAspect = null;
+    pendingSince = -1L;
+  }
+
   /** 是否在等驾驶员确认。 */
   public boolean pending() {
     return pendingSince >= 0L;

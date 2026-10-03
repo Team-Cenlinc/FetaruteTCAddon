@@ -122,4 +122,22 @@ class DriverLinkTest {
         8.0);
     assertEquals(408.0, link.stationTarget().orElseThrow().remainingBlocks(), 1.0e-9);
   }
+
+  @Test
+  @DisplayName("转人工：清掉 ATO 前的旧许可与等着的确认；转 ATO：清掉防护结论")
+  void modeSwitchClearsStaleState() {
+    link.acceptDirective(directive(SignalAspect.STOP));
+    link.recordDecision(new Decision(Intervention.SERVICE, 0.0, true, false));
+    link.setMode(DrivingMode.ATO);
+    link.enterManual();
+    assertTrue(link.directive() == null, "旧许可的距离与包络早已过时");
+    assertTrue(link.lastDecision() == null);
+    assertFalse(link.signalConfirm().pending());
+    assertTrue(link.controlsPhysically());
+
+    link.recordDecision(new Decision(Intervention.EMERGENCY, 0.0, true, false));
+    link.enterAto();
+    assertTrue(link.lastDecision() == null);
+    assertFalse(link.controlsPhysically());
+  }
 }

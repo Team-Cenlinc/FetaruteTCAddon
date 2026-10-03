@@ -425,7 +425,7 @@ public final class FtaDriveCommand {
       sender.sendMessage(locale.component("drive.task.board.driving"));
       return;
     }
-    if (!drive.config().driver().enabled()) {
+    if (!drive.config().enabled() || !drive.config().driver().enabled()) {
       sender.sendMessage(locale.component("drive.task.claim.disabled"));
       return;
     }
@@ -540,14 +540,15 @@ public final class FtaDriveCommand {
         sender.sendMessage(locale.component("drive.command.records.no-permission"));
         return;
       }
-      Player other = Bukkit.getPlayerExact(playerName);
+      // 记录按 UUID 存：离线玩家按服务器缓存过的名字查。
+      org.bukkit.OfflinePlayer other = Bukkit.getOfflinePlayerIfCached(playerName);
       if (other == null) {
         sender.sendMessage(
             locale.component("drive.command.records.offline", Map.of("player", playerName)));
         return;
       }
       target = other.getUniqueId();
-      targetName = other.getName();
+      targetName = other.getName() == null ? playerName : other.getName();
     }
     queryAsync(
         sender,
@@ -623,8 +624,16 @@ public final class FtaDriveCommand {
     if (drive == null) {
       return;
     }
-    Player target = Bukkit.getPlayerExact(playerName);
-    boolean revoked = target != null && drive.revokeTask(target.getUniqueId());
+    // 领了任务就下线的玩家也要能收回：按任务里记的名字找。
+    Player online = Bukkit.getPlayerExact(playerName);
+    Optional<UUID> target =
+        online != null
+            ? Optional.of(online.getUniqueId())
+            : drive.tasks().activeTasks().stream()
+                .filter(task -> task.playerName().equalsIgnoreCase(playerName))
+                .map(DriverTask::playerId)
+                .findFirst();
+    boolean revoked = target.isPresent() && drive.revokeTask(target.get());
     sender.sendMessage(
         plugin
             .getLocaleManager()
@@ -655,17 +664,21 @@ public final class FtaDriveCommand {
                 result = query.apply(provider.get());
               } catch (RuntimeException ex) {
                 plugin.getLogger().warning("读取驾驶记录失败: " + ex);
-                Bukkit.getScheduler()
-                    .runTask(
-                        plugin,
-                        () ->
-                            sender.sendMessage(
-                                plugin
-                                    .getLocaleManager()
-                                    .component("drive.command.records.unavailable")));
+                if (plugin.isEnabled()) {
+                  Bukkit.getScheduler()
+                      .runTask(
+                          plugin,
+                          () ->
+                              sender.sendMessage(
+                                  plugin
+                                      .getLocaleManager()
+                                      .component("drive.command.records.unavailable")));
+                }
                 return;
               }
-              Bukkit.getScheduler().runTask(plugin, () -> reply.accept(result));
+              if (plugin.isEnabled()) {
+                Bukkit.getScheduler().runTask(plugin, () -> reply.accept(result));
+              }
             });
   }
 

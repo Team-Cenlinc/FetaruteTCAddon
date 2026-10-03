@@ -49,6 +49,7 @@ public final class DriverLink {
   private final TaskScore score = new TaskScore();
   private int vigilanceTrips;
   private long stuckTicks;
+  private long heldTicks;
   private double stuckOdometerAnchor;
   private DriverRescueLadder.Stage ladderStage = DriverRescueLadder.Stage.NONE;
   private long departureHoldSince = -1L;
@@ -102,6 +103,25 @@ public final class DriverLink {
 
   public void setMode(DrivingMode mode) {
     this.mode = Objects.requireNonNull(mode, "mode");
+  }
+
+  /** 转为人工驾驶：ATO 期间调度层不向驾驶员下发行车许可，旧许可的距离与包络早已过时，清掉后由下一条指令重新开始 （没有指令时防护按限制速度、停着不许起步）。 */
+  public void enterManual() {
+    mode = DrivingMode.MANUAL;
+    directive = null;
+    lastDecision = null;
+    signalConfirm.reset();
+    clearDepartureHold();
+    if (handbackReason == null) {
+      serviceStopRequested = false;
+    }
+  }
+
+  /** 转为 ATO：清掉人工驾驶时等着的信号确认与防护结论。 */
+  public void enterAto() {
+    mode = DrivingMode.ATO;
+    lastDecision = null;
+    signalConfirm.reset();
   }
 
   /** 驾驶员是否物理控车（ATO 下由自动运行代为操纵）。 */
@@ -265,7 +285,9 @@ public final class DriverLink {
       return;
     }
     approachNode = node;
-    approachRemainingAtSample = headDistanceBlocks.getAsDouble() + Math.max(0.0, halfLengthBlocks);
+    // 车站按列车中心对标；区间停车点由调度在车头到点时就地停车，按车头算。
+    double offset = "station".equals(kind) ? Math.max(0.0, halfLengthBlocks) : 0.0;
+    approachRemainingAtSample = headDistanceBlocks.getAsDouble() + offset;
     odometerAtApproachSample = odometer.getAsDouble();
     approachSampleTick = clock.getAsLong();
   }
@@ -339,12 +361,20 @@ public final class DriverLink {
     if (travelled - stuckOdometerAnchor >= PROGRESS_BLOCKS) {
       stuckOdometerAnchor = travelled;
       stuckTicks = 0L;
+      heldTicks = 0L;
       ladderStage = DriverRescueLadder.Stage.NONE;
       return;
     }
-    if (!held) {
+    if (held) {
+      heldTicks++;
+    } else {
       stuckTicks++;
     }
+  }
+
+  /** 没有前进、一直被扣住的累计秒数（交还给自动运行后由健康层的恢复手段接手）。 */
+  public long heldSeconds() {
+    return heldTicks / 20L;
   }
 
   /** 累计卡住的秒数。 */

@@ -51,6 +51,7 @@ class DriverRescueLadderTest {
       link.tickStuck(true);
     }
     assertEquals(20, link.stuckSeconds(), "表定停站、调度扣车不算");
+    assertEquals(20, link.heldSeconds(), "被扣住的时间另计（太久就交还给自动运行）");
     link.setLadderStage(DriverRescueLadder.Stage.WARN);
     odometer[0] = 2.5;
     link.tickStuck(false);

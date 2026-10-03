@@ -657,7 +657,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             plugin
                 .getRuntimeDispatchService()
                 .ifPresent(dispatch -> dispatch.stationStops().handleDeparture(group, definition));
-            driverStop.end();
+            if (driverStop != null) {
+              driverStop.end();
+            }
             cancel();
           }
           return true;
@@ -886,6 +888,24 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               canDepart = false;
             }
 
+            if (canDepart && driverControlled(group.getProperties())) {
+              // 本站停站中途被驾驶员接管：放出出站许可，等列车真正起步时才记发车（见 driverTick）。
+              plugin
+                  .getRuntimeDispatchService()
+                  .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
+              exitOffsetState.restore();
+              finalWaitState.run();
+              plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+              Bukkit.getScheduler()
+                  .runTask(
+                      plugin,
+                      () ->
+                          plugin
+                              .getRuntimeDispatchService()
+                              .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+              departureReleased = true;
+              return;
+            }
             if (canDepart) {
               plugin
                   .getRuntimeDispatchService()

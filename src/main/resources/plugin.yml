@@ -80,8 +80,10 @@ permissions:
     description: 查看驾驶会话、强制结束驾驶、交还调度列车、拥堵熔断、开关驾驶诊断（/fta drive list|stop|handback|breaker|probe）
     default: op
   fetarute.drive.driver:
-    description: 领取驾驶任务、驾驶调度列车（/fta drive tasks|task|mode）
+    description: 领取驾驶任务、驾驶调度列车（/fta drive tasks|task|mode|records|top），含手动驾驶的基本命令
     default: op
+    children:
+      fetarute.drive: true
   fetarute.drive.driver.admin:
     description: 不领任务直接接管停站中的调度列车
     default: op

@@ -39,12 +39,13 @@ class PortalSignDefinitionParserTest {
   }
 
   @Test
-  @DisplayName("道岔、传送门的自动 ID 不会被当成区间点（y 为负时也不抛异常）")
+  @DisplayName("传送门的自动 ID 不会被当成区间点（y 为负时也不抛异常）；道岔沿用旧行为")
   void autoIdsAreNotWaypoints() {
     assertTrue(
         SignTextParser.parseWaypointLike("PORTAL:world:10:-12:7", NodeType.WAYPOINT).isEmpty());
-    assertTrue(
-        SignTextParser.parseWaypointLike("SWITCHER:world:10:-12:7", NodeType.WAYPOINT).isEmpty());
+    assertFalse(
+        SignTextParser.parseWaypointLike("SWITCHER:world:10:64:7", NodeType.WAYPOINT).isEmpty(),
+        "咽喉路线仍把道岔自动 ID 当区间点终止");
     assertFalse(
         SignTextParser.parseWaypointLike("OP:AAA:BBB:1:01", NodeType.WAYPOINT).isEmpty(),
         "普通区间点照常解析");

@@ -71,7 +71,11 @@ public final class RailGraphService {
   private record CachedNetwork(
       long snapshotVersion,
       long linkRevision,
+      Instant builtAt,
       org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network) {}
+
+  /** 路网里各世界的运维封锁可能带时限：路网至少每隔这么久按当时的封锁重建一次。 */
+  private static final java.time.Duration NETWORK_MAX_AGE = java.time.Duration.ofSeconds(30);
 
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
@@ -241,7 +245,8 @@ public final class RailGraphService {
       return null;
     }
     org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network = network();
-    return network == null ? null : network.view(worldId);
+    // 没有传送门的世界里的列车出不了本世界，仍用本世界的图（最短路记忆、封锁都与原来一致）。
+    return network == null || !network.hasPortalIn(worldId) ? null : network.view(worldId);
   }
 
   /** 运行时用的图：跨世界开启时换成站在本世界看的路网，否则就是本世界的图。 */
@@ -288,18 +293,29 @@ public final class RailGraphService {
     }
     long version = snapshotVersion.get();
     long revision = links.revision();
+    Instant now = Instant.now();
     CachedNetwork cached = cachedNetwork;
     if (cached == null
         || cached.snapshotVersion() != version
-        || cached.linkRevision() != revision) {
+        || cached.linkRevision() != revision
+        || now.isAfter(cached.builtAt().plus(NETWORK_MAX_AGE))) {
       Map<UUID, RailGraph> graphs = new HashMap<>();
       for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
-        graphs.put(entry.getKey(), entry.getValue().graph());
+        // 各世界叠加自己的运维封锁：从本世界规划跨到别的世界时，也要绕开那边封锁的边。
+        Map<EdgeId, RailEdgeOverrideRecord> overrides = edgeOverrides(entry.getKey());
+        RailGraph graph = entry.getValue().graph();
+        graphs.put(
+            entry.getKey(),
+            overrides.isEmpty()
+                ? graph
+                : new org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph(
+                    graph, overrides, now));
       }
       cached =
           new CachedNetwork(
               version,
               revision,
+              now,
               org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork.build(
                   graphs, links.links()));
       cachedNetwork = cached;
@@ -544,6 +560,7 @@ public final class RailGraphService {
           .computeIfAbsent(override.worldId(), ignored -> new ConcurrentHashMap<>())
           .put(normalized, override);
       edgeOverrideSnapshots.remove(override.worldId());
+      snapshotVersion.incrementAndGet();
     }
   }
 
@@ -562,6 +579,7 @@ public final class RailGraphService {
         edgeOverrides.remove(worldId, byWorld);
       }
       edgeOverrideSnapshots.remove(worldId);
+      snapshotVersion.incrementAndGet();
     }
   }
 
@@ -670,6 +688,7 @@ public final class RailGraphService {
             edgeOverrides.remove(worldId);
           }
           edgeOverrideSnapshots.remove(worldId);
+          snapshotVersion.incrementAndGet();
         }
       } catch (Exception ex) {
         debugLogger.accept(

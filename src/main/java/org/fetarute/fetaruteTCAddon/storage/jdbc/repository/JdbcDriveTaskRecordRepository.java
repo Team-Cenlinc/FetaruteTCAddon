@@ -101,8 +101,8 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
       if (since != null) {
         setInstant(statement, 2, since);
       }
+      List<DriveLeaderboardRow> rows = new ArrayList<>();
       try (ResultSet rs = statement.executeQuery()) {
-        List<DriveLeaderboardRow> rows = new ArrayList<>();
         while (rs.next()) {
           rows.add(
               new DriveLeaderboardRow(
@@ -111,8 +111,26 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
                   rs.getInt("tasks"),
                   rs.getLong("total")));
         }
-        return rows;
       }
+      // 名字取最近一条记录里的（改名后显示新名字），聚合里的 MAX 只是兜底。
+      String latest =
+          "SELECT player_name FROM "
+              + table(TABLE)
+              + " WHERE player_uuid = ? ORDER BY finished_at DESC LIMIT 1";
+      List<DriveLeaderboardRow> named = new ArrayList<>(rows.size());
+      try (var nameStatement = connection.prepareStatement(latest)) {
+        for (DriveLeaderboardRow row : rows) {
+          setUuid(nameStatement, 1, row.playerId());
+          String name = row.playerName();
+          try (ResultSet rs = nameStatement.executeQuery()) {
+            if (rs.next() && rs.getString("player_name") != null) {
+              name = rs.getString("player_name");
+            }
+          }
+          named.add(new DriveLeaderboardRow(row.playerId(), name, row.tasks(), row.totalPoints()));
+        }
+      }
+      return named;
     } catch (SQLException ex) {
       throw new StorageException("读取驾驶排行失败", ex);
     }

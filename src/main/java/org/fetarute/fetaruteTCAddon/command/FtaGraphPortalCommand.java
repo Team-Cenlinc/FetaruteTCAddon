@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.command;
 
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -18,7 +20,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.GraphSignParsers;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
-import org.incendo.cloud.parser.standard.DoubleParser;
 import org.incendo.cloud.parser.standard.StringParser;
 
 /**
@@ -45,14 +46,12 @@ public final class FtaGraphPortalCommand {
         base.literal("link")
             .required("from", StringParser.stringParser())
             .required("to", StringParser.stringParser())
-            .optional("transit", DoubleParser.doubleParser(0.5, 512.0))
             .handler(
                 ctx ->
                     link(
                         ctx.sender(),
                         ((String) ctx.get("from")).trim(),
-                        ((String) ctx.get("to")).trim(),
-                        ctx.optional("transit").map(Double.class::cast).orElse(null))));
+                        ((String) ctx.get("to")).trim())));
     manager.command(
         base.literal("unlink")
             .required("from", StringParser.stringParser())
@@ -86,12 +85,11 @@ public final class FtaGraphPortalCommand {
                   "to",
                   link.toNode().value(),
                   "source",
-                  link.source().name().toLowerCase(java.util.Locale.ROOT),
-                  "transit",
-                  String.format(java.util.Locale.ROOT, "%.1f", link.transitBlocks()))));
+                  link.source().name().toLowerCase(java.util.Locale.ROOT))));
     }
   }
 
+  /** 按 MyWorlds 重新自动连接：手动连接保留不动；这次没解析出来的门保留上次的自动连接；MyWorlds 不可用时什么也不改。先写库（一个事务）、成功后才改内存。 */
   private void scan(CommandSender sender) {
     if (!ready(sender)) {
       return;
@@ -102,24 +100,49 @@ public final class FtaGraphPortalCommand {
       sender.sendMessage(locale.component("command.graph.portal.no-graph"));
       return;
     }
+    if (!PortalLinkResolver.available()) {
+      sender.sendMessage(locale.component("command.graph.portal.myworlds-unavailable"));
+      return;
+    }
     PortalLinkResolver.Result result = PortalLinkResolver.resolve(graphs, Instant.now());
     PortalLinkRegistry registry = plugin.getPortalLinks();
+    Map<NodeId, PortalLink> autoLinks = new LinkedHashMap<>();
+    for (PortalLink existing : registry.links()) {
+      if (existing.source() == PortalLink.Source.AUTO) {
+        autoLinks.put(existing.fromNode(), existing);
+      }
+    }
+    int linked = 0;
+    for (PortalLink resolved : result.links()) {
+      boolean manual =
+          registry
+              .from(resolved.fromNode())
+              .map(link -> link.source() == PortalLink.Source.MANUAL)
+              .orElse(false);
+      if (!manual) {
+        autoLinks.put(resolved.fromNode(), resolved);
+        linked++;
+      }
+    }
+    List<PortalLink> finalAuto = List.copyOf(autoLinks.values());
+    if (!persist(
+        sender,
+        provider -> {
+          provider.portalLinks().deleteAuto();
+          for (PortalLink link : finalAuto) {
+            provider.portalLinks().upsert(link);
+          }
+        })) {
+      return;
+    }
     registry.removeAuto();
-    result.links().forEach(registry::put);
-    storage()
-        .ifPresent(
-            provider -> {
-              provider.portalLinks().deleteAuto();
-              for (PortalLink link : result.links()) {
-                provider.portalLinks().upsert(link);
-              }
-            });
+    finalAuto.forEach(registry::put);
     sender.sendMessage(
         locale.component(
             "command.graph.portal.scanned",
             Map.of(
                 "linked",
-                String.valueOf(result.links().size()),
+                String.valueOf(linked),
                 "problems",
                 String.valueOf(result.problems().size()))));
     for (String problem : result.problems()) {
@@ -128,7 +151,7 @@ public final class FtaGraphPortalCommand {
     }
   }
 
-  private void link(CommandSender sender, String from, String to, Double transit) {
+  private void link(CommandSender sender, String from, String to) {
     if (!ready(sender)) {
       return;
     }
@@ -146,30 +169,69 @@ public final class FtaGraphPortalCommand {
             toNode.get().world(),
             toNode.get().node().id(),
             PortalLink.Source.MANUAL,
-            transit == null ? PortalLink.DEFAULT_TRANSIT_BLOCKS : transit,
+            PortalLink.DEFAULT_TRANSIT_BLOCKS,
             Instant.now());
+    if (!persist(sender, provider -> provider.portalLinks().upsert(link))) {
+      return;
+    }
     plugin.getPortalLinks().put(link);
-    storage().ifPresent(provider -> provider.portalLinks().upsert(link));
     sender.sendMessage(
         locale.component("command.graph.portal.linked", Map.of("from", from, "to", to)));
   }
 
+  /** 删除连接：两个方向都删（路网把一对门两个方向的连接合成一条边，只删一个方向连不断）。 */
   private void unlink(CommandSender sender, String from) {
     if (!ready(sender)) {
       return;
     }
-    Optional<PortalLink> link = plugin.getPortalLinks().from(NodeId.of(from));
+    PortalLinkRegistry registry = plugin.getPortalLinks();
+    Optional<PortalLink> link = registry.from(NodeId.of(from));
     if (link.isEmpty()) {
       sender.sendMessage(plugin.getLocaleManager().component("command.graph.portal.not-found"));
       return;
     }
-    plugin.getPortalLinks().remove(link.get().fromNode());
-    storage()
-        .ifPresent(
-            provider ->
-                provider.portalLinks().delete(link.get().fromWorld(), link.get().fromNode()));
+    List<PortalLink> removed = new ArrayList<>();
+    removed.add(link.get());
+    registry
+        .from(link.get().toNode())
+        .filter(back -> back.toNode().equals(link.get().fromNode()))
+        .ifPresent(removed::add);
+    if (!persist(
+        sender,
+        provider -> {
+          for (PortalLink each : removed) {
+            provider.portalLinks().delete(each.fromWorld(), each.fromNode());
+          }
+        })) {
+      return;
+    }
+    removed.forEach(each -> registry.remove(each.fromNode()));
     sender.sendMessage(
         plugin.getLocaleManager().component("command.graph.portal.unlinked", Map.of("from", from)));
+  }
+
+  /** 写库（一个事务）；存储未就绪时只改内存。失败时提示并返回 {@code false}，调用方不再改内存。 */
+  private boolean persist(
+      CommandSender sender, java.util.function.Consumer<StorageProvider> write) {
+    Optional<StorageProvider> provider = storage();
+    if (provider.isEmpty()) {
+      return true;
+    }
+    try {
+      provider
+          .get()
+          .transactionManager()
+          .execute(
+              () -> {
+                write.accept(provider.get());
+                return null;
+              });
+      return true;
+    } catch (Exception ex) {
+      plugin.getLogger().warning("保存传送门连接失败: " + ex.getMessage());
+      sender.sendMessage(plugin.getLocaleManager().component("command.graph.portal.save-failed"));
+      return false;
+    }
   }
 
   private record Located(UUID world, RailNode node) {}

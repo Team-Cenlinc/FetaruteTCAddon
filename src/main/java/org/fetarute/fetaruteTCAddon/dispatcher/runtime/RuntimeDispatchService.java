@@ -12335,7 +12335,7 @@ public final class RuntimeDispatchService {
     boolean manualHold =
         TrainTagHelper.readTagValue(properties, "FTA_MANUAL_HOLD").isPresent()
             || TrainTagHelper.readTagValue(properties, "FTA_MAINTENANCE_HOLD").isPresent()
-            || DriverControlTags.present(properties);
+            || runtimeTrainController.hasDriver(entry.trainName());
     return Optional.of(
         new DeadlockTrainContext(
             entry.trainName(),

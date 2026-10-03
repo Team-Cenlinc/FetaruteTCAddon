@@ -421,7 +421,9 @@ command:
       disabled: "<prefix> <red>跨世界未开启（config.yml 的 graph.cross-world）</red>"
       no-graph: "<prefix> <red>调度图服务尚未就绪</red>"
       list-header: "<prefix> <dark_aqua>传送门连接共 <count> 条</dark_aqua>"
-      list-entry: "  <white><from></white> <gray>→</gray> <white><to></white> <gray>(<source>，过门 <transit> 格)</gray>"
+      list-entry: "  <white><from></white> <gray>→</gray> <white><to></white> <gray>(<source>)</gray>"
+      myworlds-unavailable: "<prefix> <red>MyWorlds 传送门不可用（未安装 MyWorlds，或 TrainCarts 未启用其传送门支持），未改动现有连接</red>"
+      save-failed: "<prefix> <red>保存传送门连接失败，未作改动，请查看控制台日志</red>"
       scanned: "<prefix> <green>已按 MyWorlds 自动连接 <white><linked></white> 条，<white><problems></white> 个传送门未能连接</green>"
       problem: "  <yellow><problem></yellow>"
       not-found: "<prefix> <red>找不到该传送门节点（须是已建图的 PORTAL 节点）</red>"
@@ -1644,6 +1646,7 @@ drive:
       warn: "<prefix> <yellow>列车已停留 <white><seconds></white> 秒未能前进，请尽快恢复运行；继续停留将转为 ATO</yellow>"
       ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
       rescued: "<prefix> <yellow>列车 <white><train></white> 长时间无法运行，已将你送至最近车站的站台</yellow>"
+      no-target: "<prefix> <red>列车 <white><train></white> 长时间无法运行，且找不到可送达的站台，请联系管理员</red>"
     breaker:
       tripped: "<prefix> <red>线路拥堵熔断：<white><reason></white>；已交还 <white><count></white> 列驾驶员列车并暂停接班</red>"
   task:

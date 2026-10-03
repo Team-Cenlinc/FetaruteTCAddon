@@ -47,10 +47,9 @@ public final class SignTextParser {
       return Optional.empty();
     }
     String[] segments = trimmed.split(":");
-    // 道岔、传送门的自动 ID（SWITCHER:/PORTAL:<world>:x:y:z）也是 5 段，不能当成区间点解析（y 为负时还会抛异常）。
-    if (segments.length > 0
-        && ("SWITCHER".equalsIgnoreCase(segments[0].trim())
-            || "PORTAL".equalsIgnoreCase(segments[0].trim()))) {
+    // 传送门的自动 ID（PORTAL:<world>:x:y:z）也是 5 段，不能当成区间点解析（y 为负时还会抛异常）。
+    // 道岔的自动 ID 沿用旧行为（咽喉路线把它当区间点终止），不在这里拦。
+    if (segments.length > 0 && "PORTAL".equalsIgnoreCase(segments[0].trim())) {
       return Optional.empty();
     }
     if (segments.length == SEGMENTS_TYPED) {

@@ -270,13 +270,16 @@ public final class DriveSession {
    * <p>允许超速时，它是接管之后被牌子等途径设定的限速（车速可以超过它）；否则就是实际生效的速度上限。
    */
   public double displayLimitBps() {
+    if (isAto()) {
+      // ATO 下由自动运行控车，驾驶员看不到行车许可。
+      return Double.NaN;
+    }
     if (driverLink != null && driverLink.lastDecision() != null) {
       return driverLink.lastDecision().permittedBps();
     }
     return speedLimit.displayLimitBps(lastCapBps);
   }
 
-  /** 驾驶调度列车时的控制链路；驾驶非调度列车时为 {@code null}。 */
   /** 上一次记进诊断日志的停站阶段（只用于在阶段变化时记一条）。 */
   public DriverStationStop.Phase lastStationPhase() {
     return lastStationPhase;
@@ -286,6 +289,7 @@ public final class DriveSession {
     this.lastStationPhase = phase;
   }
 
+  /** 驾驶调度列车时的控制链路；驾驶非调度列车时为 {@code null}。 */
   public DriverLink driverLink() {
     return driverLink;
   }
@@ -303,6 +307,13 @@ public final class DriveSession {
   /** ATO：自动运行操纵列车，驾驶员只确认发车，可拉 EB 转为人工驾驶。 */
   public boolean isAto() {
     return driverLink != null && !driverLink.controlsPhysically();
+  }
+
+  /** ATO 下没有控车动作推进：按实测车速累计里程（卡住计时、指令后的里程都靠它）。 */
+  public void addOdometer(double blocks) {
+    if (blocks > 0.0 && Double.isFinite(blocks)) {
+      odometerBlocks += blocks;
+    }
   }
 
   /** 让正在运行的控车动作自行退出（转为 ATO 时由自动运行接着操纵）。 */

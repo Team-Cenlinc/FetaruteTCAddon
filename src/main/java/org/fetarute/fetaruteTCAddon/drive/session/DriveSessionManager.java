@@ -132,6 +132,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 每隔多少 tick 评估一次全网熔断。 */
   private static final int BREAKER_TICKS = 100;
 
+  /** 一直被扣住这么久就交还自动运行（表定停站、按表扣车一般远短于它）。 */
+  private static final long HELD_HANDBACK_SECONDS = 600L;
+
   /** 每隔多少 tick 检查一次是否到了终点站。 */
   private static final int TERMINAL_CHECK_TICKS = 20;
 
@@ -160,6 +163,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final List<DriveSession> stopping = new ArrayList<>();
   private final ConcurrentHashMap<UUID, Boolean> refreshPending = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<UUID, Boolean> ackPending = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<UUID, Long> lastUseTick = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<UUID, Boolean> freshUse = new ConcurrentHashMap<>();
+
+  /** 右键包间隔超过这么多 tick 才算新按下（按住时客户端每几 tick 发一次）。 */
+  private static final long USE_HOLD_GAP_TICKS = 8L;
+
   private final DrivePacketListener packetListener = new DrivePacketListener(this);
   private final DriveMenu menu;
   private final DriveSidebar sidebar;
@@ -345,15 +354,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
     }
     if (signal == InputSignal.USE) {
-      // 右键是警惕装置的确认键。它不会让客户端改动快捷栏，不必重发背包；按住右键时客户端会连续发包，合并到一次。
+      // 右键是警惕装置、信号与 ATO 发车的确认键。它不会让客户端改动快捷栏，不必重发背包；按住右键时客户端会连续发包，合并到一次。
+      // 只认新按下的右键：一直按住不算确认（否则按住不放就能让警惕装置与信号确认失效）。
+      long nowTick = Bukkit.getCurrentTick();
+      Long previous = lastUseTick.put(id, nowTick);
+      if (previous == null || nowTick - previous > USE_HOLD_GAP_TICKS) {
+        freshUse.put(id, Boolean.TRUE);
+      }
       if (ackPending.putIfAbsent(id, Boolean.TRUE) == null) {
         Bukkit.getScheduler()
             .runTask(
                 plugin,
                 () -> {
                   ackPending.remove(id);
+                  boolean fresh = freshUse.remove(id) != null;
                   DriveSession session = active.get(id);
-                  if (session != null) {
+                  if (session != null && fresh) {
                     acknowledgeVigilance(session, "右键");
                     if (session.isAto() && session.driverLink().confirmDeparture()) {
                       traceSession(session, "ATO 确认发车");
@@ -604,9 +620,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     if (session.isAto()) {
       // ATO 下手柄不起作用；拉到 EB 立即转人工驾驶并紧急制动。
+      acknowledgeVigilance(session, "换档");
       if (newSlot == Notch.EB.slot()) {
-        SeatLocator.findGroup(session.trainName())
-            .ifPresent(group -> switchToManual(session, group, true));
+        findSessionGroup(session).ifPresent(group -> switchToManual(session, group, true));
         return Notch.EB.slot();
       }
       notice(player, "drive.driver.ato.notch-ignored", Map.of());
@@ -729,7 +745,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   private void toggleDoor(Player player, DriveSession session, boolean left) {
-    Optional<MinecartGroup> group = SeatLocator.findGroup(session.trainName());
+    Optional<MinecartGroup> group = findSessionGroup(session);
     if (group.isEmpty()) {
       denyMenu(player, "drive.menu.deny.unavailable");
       return;
@@ -817,7 +833,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 启动流程状态变了：受电开始接通就升弓、断开就降弓，并把列车已接通的系统写回标签。 */
   private void onSetupChanged(DriveSession session, TrainSetup.State powerBefore) {
-    Optional<MinecartGroup> group = SeatLocator.findGroup(session.trainName());
+    Optional<MinecartGroup> group = findSessionGroup(session);
     if (group.isEmpty()) {
       return;
     }
@@ -1159,7 +1175,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       tasks.onSessionEnded(session.playerId(), taskStateFor(reason), reason.name());
       recordTask(session, link);
     }
-    Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(session.trainName());
+    Optional<MinecartGroup> groupOpt = findSessionGroup(session);
     groupOpt.ifPresent(
         group ->
             TrainPropertyGuard.restore(group.getProperties(), session.observedSpeedLimitBpt()));
@@ -1365,7 +1381,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       leave(session, DriveSession.EndReason.GAME_MODE);
       return;
     }
-    Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(session.trainName());
+    Optional<MinecartGroup> groupOpt = findSessionGroup(session);
     if (groupOpt.isEmpty()) {
       long missingTicks = session.markGroupMissing(now);
       if (missingTicks == 0) {
@@ -1379,8 +1395,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     session.markGroupFound();
     MinecartGroup group = groupOpt.get();
     if (session.isAto()) {
-      // ATO 下由自动运行操纵：显示实际车速。
-      session.resetSpeed(measureSpeedBps(group));
+      // ATO 下由自动运行操纵：显示实际车速，按实测车速累计里程。
+      double measured = measureSpeedBps(group);
+      session.resetSpeed(measured);
+      session.addOdometer(measured / 20.0);
     } else {
       ensureAction(group, session, now);
     }
@@ -1533,7 +1551,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         && link.stationStop()
             .map(stop -> stop.phase() != DriverStationStop.Phase.APPROACH)
             .orElse(true)
-        && tasks.atTerminal(trainName)) {
+        && tasks.atTerminal(task.get(), trainName)) {
       traceSession(session, "到达终点站，任务完成");
       tasks.complete(session.playerId());
       handback(session, DriveSession.EndReason.TASK_COMPLETE);
@@ -1548,6 +1566,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return session.phase() == DriveSession.Phase.ENDED;
     }
     link.tickStuck(heldByDispatch(session, link, trainName));
+    if (link.heldSeconds() >= HELD_HANDBACK_SECONDS && !link.handbackRequested()) {
+      // 被扣住太久：驾驶员车不参与健康层的恢复，交还自动运行，让恢复手段（重算信号、释放残留占用等）接手。
+      traceSession(session, "被扣住 " + link.heldSeconds() + " 秒，交还自动运行");
+      requestHandback(session, "held");
+      return session.phase() == DriveSession.Phase.ENDED;
+    }
     DriverRescueLadder.Stage stage = DriverRescueLadder.stage(link.stuckSeconds(), recovery);
     if (stage.ordinal() <= link.ladderStage().ordinal()) {
       return false;
@@ -1632,7 +1656,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return;
     }
     closeDoors(session);
-    link.setMode(DrivingMode.ATO);
+    link.enterAto();
     session.releaseAction();
     TrainPropertyGuard.restore(group.getProperties(), session.observedSpeedLimitBpt());
     traceSession(session, "转为 ATO: " + reason);
@@ -1646,13 +1670,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return;
     }
     session.resetSpeed(measureSpeedBps(group));
-    link.setMode(DrivingMode.MANUAL);
+    link.enterManual();
+    // ATO 期间警惕装置没有计时：从现在起重新计时，避免转人工的第一拍就报警。
+    session.acknowledgeVigilance(Bukkit.getCurrentTick());
     TrainPropertyGuard.apply(group.getProperties(), session.params().maxSpeedBps());
     session.setGuardedSpeedLimit(group.getProperties().getSpeedLimit());
     attachAction(group, session);
     if (emergency) {
       session.forceEmergency();
     }
+    // 请调度层马上给出当前的行车许可。
+    refreshSignalLater(group);
     traceSession(session, "转为人工驾驶" + (emergency ? "（紧急制动）" : ""));
   }
 
@@ -1669,7 +1697,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (!session.isStopped()) {
       return "drive.command.mode.need-stop";
     }
-    Optional<MinecartGroup> group = SeatLocator.findGroup(session.trainName());
+    Optional<MinecartGroup> group = findSessionGroup(session);
     if (group.isEmpty()) {
       return "drive.command.unavailable";
     }
@@ -1793,6 +1821,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (!player.hasPermission(PERMISSION_DRIVER)) {
       return "drive.task.claim.no-permission";
     }
+    DriveConfig current = config;
     DriverTaskManager.ClaimOutcome outcome =
         tasks.claim(
             player,
@@ -1801,7 +1830,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             holder.stationCode(),
             holder.stationName(),
             mode,
-            config.driver().enabled(),
+            current.enabled() && current.driver().enabled() && packetsReady,
             Instant.now());
     return "drive.task.claim." + outcome.name().toLowerCase(Locale.ROOT).replace('_', '-');
   }
@@ -1892,27 +1921,34 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     saveRecord(record);
   }
 
+  /** 重载时存储连接池会被换掉：写入失败隔这么久用新的连接池再试一次。 */
+  private static final long RECORD_RETRY_TICKS = 100L;
+
   private void saveRecord(DriveTaskRecord record) {
-    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> provider =
-        plugin.getStorageManager() == null || !plugin.getStorageManager().isReady()
-            ? Optional.empty()
-            : plugin.getStorageManager().provider();
-    if (provider.isEmpty()) {
-      plugin.getLogger().warning("存储未就绪，驾驶任务记录未保存: " + record.tripCode());
+    if (!plugin.isEnabled()) {
+      // 停用时驾驶模块先于存储关闭，同步写入仍打到打开着的连接池。
+      writeRecord(record, false);
       return;
     }
-    Runnable write =
-        () -> {
-          try {
-            provider.get().driveTaskRecords().save(record);
-          } catch (RuntimeException ex) {
-            plugin.getLogger().warning("保存驾驶任务记录失败: " + ex);
-          }
-        };
-    if (plugin.isEnabled()) {
-      Bukkit.getScheduler().runTaskAsynchronously(plugin, write);
-    } else {
-      write.run();
+    Bukkit.getScheduler().runTaskAsynchronously(plugin, () -> writeRecord(record, true));
+  }
+
+  /** 写入时才取当前的存储（重载可能刚换了连接池）；失败且允许重试时隔一会儿再试一次。 */
+  private void writeRecord(DriveTaskRecord record, boolean retry) {
+    try {
+      org.fetarute.fetaruteTCAddon.storage.StorageManager storage = plugin.getStorageManager();
+      if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
+        throw new IllegalStateException("存储未就绪");
+      }
+      storage.provider().get().driveTaskRecords().save(record);
+    } catch (RuntimeException ex) {
+      if (retry && plugin.isEnabled()) {
+        Bukkit.getScheduler()
+            .runTaskLaterAsynchronously(
+                plugin, () -> writeRecord(record, false), RECORD_RETRY_TICKS);
+        return;
+      }
+      plugin.getLogger().warning("保存驾驶任务记录失败: " + record.tripCode() + " " + ex);
     }
   }
 
@@ -1933,6 +1969,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     task.get().finish(DriverTask.State.INTERRUPTED, "revoked");
     return true;
+  }
+
+  /** 会话所驾驶的编组：驾驶调度列车时按控制链路记住的列车属性找（调度可能给列车改名），否则按车名找。 */
+  private static Optional<MinecartGroup> findSessionGroup(DriveSession session) {
+    DriverLink link = session.driverLink();
+    if (link != null && link.properties() != null && link.properties().hasHolder()) {
+      MinecartGroup holder = link.properties().getHolder();
+      if (holder != null && holder.isValid()) {
+        return Optional.of(holder);
+      }
+    }
+    return SeatLocator.findGroup(session.trainName());
   }
 
   /** 节点所属车站的站名；查不到时用节点编号。 */
@@ -1963,7 +2011,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       endNow(session, session.endReason());
       return;
     }
-    Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(session.trainName());
+    Optional<MinecartGroup> groupOpt = findSessionGroup(session);
     if (groupOpt.isEmpty()) {
       endNow(session, DriveSession.EndReason.TRAIN_GONE);
       return;
