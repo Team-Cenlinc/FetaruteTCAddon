@@ -35,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -72,6 +73,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final long DOOR_OPEN_FIRST_DELAY_TICKS = 60L;
   private static final long TICK_MILLIS = 50L;
   private static final int STOP_WAIT_TIMEOUT_TICKS = 200;
+
+  /** 驾驶员控车时等停稳的上限：驾驶员可能要慢慢对位。 */
+  private static final int DRIVER_STOP_WAIT_TIMEOUT_TICKS = 2400;
+
   private static final int STOP_STABLE_TICKS = 1;
   private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
@@ -237,9 +242,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     var group = info.getGroup();
     String trainName = safeTrainName(info);
     String stopSessionId = shortUuid(UUID.randomUUID());
-    com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(info);
-    group.getActions().launchReset();
-    station.centerTrain();
+    boolean driverControlled = driverControlled(properties);
+    if (!driverControlled) {
+      // 驾驶员控车时由驾驶员自己停车：不对位，也不能清掉控车动作。
+      com.bergerkiller.bukkit.tc.Station station = new com.bergerkiller.bukkit.tc.Station(info);
+      group.getActions().launchReset();
+      station.centerTrain();
+    }
 
     AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(info.getLine(3));
     FacingResult facingResult = resolveFacingDirectionResult(info);
@@ -316,7 +325,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         facingSource,
         chimeSettings,
         session,
-        firstStop);
+        firstStop,
+        driverControlled ? DRIVER_STOP_WAIT_TIMEOUT_TICKS : STOP_WAIT_TIMEOUT_TICKS);
+  }
+
+  /** 列车此刻是否由驾驶员控制（驾驶员控车时站台不替它停车、对位、加等待动作）。 */
+  private boolean driverControlled(TrainProperties properties) {
+    ControlAuthority authority = plugin == null ? null : plugin.getControlAuthority();
+    return authority != null && authority.isDriverControlled(properties);
   }
 
   /**
@@ -374,7 +390,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       String facingSource,
       AutoStationDoorController.DoorChimeSettings chimeSettings,
       AutoStationDoorController.DoorSession session,
-      boolean firstStop) {
+      boolean firstStop,
+      int stopWaitTimeoutTicks) {
     if (plugin == null || info == null || !info.hasGroup()) {
       return;
     }
@@ -418,7 +435,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           stoppedTicks = 0;
         }
         waitedTicks++;
-        if (waitedTicks >= STOP_WAIT_TIMEOUT_TICKS) {
+        if (waitedTicks >= stopWaitTimeoutTicks) {
           cancel();
           handleStop(
               info,
@@ -520,9 +537,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           .getDwellRegistry()
           .ifPresent(registry -> registry.start(trainName, effectiveDwellSeconds));
     }
-    // 非延迟路径可能已经改写 destination；通过 stop() 强制停止并添加 WaitState
-    group.stop();
-    var finalWaitState = group.getActions().addActionWaitState();
+    // 非延迟路径可能已经改写 destination；通过 stop() 强制停止并添加 WaitState。
+    // 驾驶员控车时不加：停车由驾驶员负责，等待动作会挡在控车动作后面；发车仍由门控与信号把住。
+    Runnable finalWaitState;
+    if (driverControlled(properties)) {
+      finalWaitState = () -> {};
+    } else {
+      group.stop();
+      finalWaitState = group.getActions().addActionWaitState()::stop;
+    }
     long dwellTicks = Math.max(0L, effectiveDwellSeconds * 20L);
     String location = locationText(info);
     new org.bukkit.scheduler.BukkitRunnable() {
@@ -548,7 +571,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               .getRuntimeDispatchService()
               .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
           exitOffsetState.restore();
-          finalWaitState.stop();
+          finalWaitState.run();
           cancel();
           return;
         }
@@ -646,7 +669,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                   .getRuntimeDispatchService()
                   .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
               exitOffsetState.restore();
-              finalWaitState.stop();
+              finalWaitState.run();
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               cancel();
               return;
@@ -670,7 +693,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                         dispatch.releaseDepartureGate(trainName, stopSessionId);
                       });
               exitOffsetState.restore();
-              finalWaitState.stop();
+              finalWaitState.run();
               cancel();
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               Bukkit.getScheduler()
@@ -804,7 +827,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               .getRuntimeDispatchService()
               .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
           exitOffsetState.restore();
-          finalWaitState.stop();
+          finalWaitState.run();
           cancel();
           return;
         }

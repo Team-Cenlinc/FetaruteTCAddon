@@ -1445,6 +1445,13 @@ drive:
       over: "<red><limit_kmh></red>"
     line-stopping: "<red>驾驶员已离开，列车正在制动停车</red> <dark_gray>|</dark_gray> <gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray>"
     doors-open: "<red>车门开</red>"
+    driver:
+      forced-stop: "<red><bold>强制停车</bold></red>"
+      emergency: "<red><bold>紧急制动</bold></red>"
+      service: "<gold><bold>ATP 制动</bold></gold>"
+      handback: "<yellow>停车后交还自动运行</yellow>"
+      no-signal: "<yellow>无行车许可</yellow>"
+      wait-signal: "<red>停车信号</red>"
     cab:
       vigilance-warning: "<red><bold>警惕 <seconds></bold></red>"
       vigilance-tripped: "<red><bold>警惕紧急制动</bold></red>"
@@ -1581,12 +1588,16 @@ drive:
       brake-test-air: "<red>主风缸压力不足（<white><mr></white> kPa），需要至少 <white><need></white> kPa 才能做制动试验</red>"
       no-door-animation: "<red>这辆车没有对应的车门动画</red>"
       unavailable: "<red>驾驶台暂时无法打开</red>"
+      reverser-locked: "<red>调度列车的运行方向由交路决定，不能操作换向手柄</red>"
   end:
     left-seat: "<prefix> <yellow>你已离开座位，驾驶结束</yellow>"
     seat-lost: "<prefix> <red>无法回到座位，驾驶已结束</red>"
     train-gone: "<prefix> <red>列车已不存在，驾驶已结束</red>"
     game-mode: "<prefix> <red>当前游戏模式不允许驾驶，驾驶已结束</red>"
     admin: "<prefix> <yellow>管理员已结束你的驾驶</yellow>"
+    handback: "<prefix> <yellow>列车已交还自动运行，驾驶结束</yellow>"
+    dispatch-abort: "<prefix> <red>调度系统已收回列车，驾驶结束</red>"
+    watchdog: "<prefix> <red>列车长时间未能正常运行，已交还自动运行</red>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
     unavailable: "<prefix> <red>手动驾驶功能尚未就绪</red>"
@@ -1599,13 +1610,17 @@ drive:
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- 列出全部驾驶会话</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"
+      entry-handback: "  <gray>•</gray> <white>/fta drive handback <玩家|all></white> <gray>- 把驾驶员控制的调度列车交还自动运行</gray>"
     start:
       started: "<prefix> <green>已开始驾驶列车 <white><train></white></green> <gray>快捷栏 1–9 依次为 P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>手动驾驶功能已关闭</red>"
       bad-game-mode: "<prefix> <red>当前游戏模式不允许驾驶</red>"
       already-driving: "<prefix> <yellow>你已经在驾驶中</yellow>"
       not-seated: "<prefix> <red>请先坐在列车的座位上</red>"
-      managed-train: "<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"
+      managed-train: "<prefix> <red>该列车由调度系统运行，当前未开放驾驶员接管</red>"
+      no-task: "<prefix> <red>该列车由调度系统运行，需要领取驾驶任务才能接管</red>"
+      not-stopped-at-station: "<prefix> <red>只能在列车停站期间接管调度列车</red>"
+      not-head-cab: "<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"
       train-in-use: "<prefix> <red>该列车正在被驾驶或正在制动停车</red>"
       train-moving: "<prefix> <red>列车正朝驾驶室后方溜行（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"
       cursor-not-empty: "<prefix> <red>光标上有物品，请先放回背包再开始驾驶</red>"
@@ -1626,6 +1641,10 @@ drive:
     admin-stop:
       stopped: "<prefix> <yellow>已结束 <player> 的驾驶</yellow>"
       not-driving: "<prefix> <red><player> 当前没有在驾驶</red>"
+    handback:
+      requested: "<prefix> <yellow>已要求 <player> 把列车交还自动运行</yellow>"
+      not-driving: "<prefix> <red><player> 当前没有驾驶调度列车</red>"
+      all: "<prefix> <yellow>已要求全部 <count> 列驾驶员控制的列车交还自动运行</yellow>"
     probe:
       "on": "<prefix> <yellow>驾驶输入诊断已开启，数据包事件会写入控制台</yellow>"
       "off": "<prefix> <yellow>驾驶输入诊断已关闭</yellow>"

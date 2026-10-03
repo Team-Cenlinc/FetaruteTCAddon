@@ -65,6 +65,19 @@ public final class CabSystems {
         new Vigilance(config.vigilanceIntervalTicks(), config.vigilanceWarningTicks(), nowTick));
   }
 
+  /**
+   * simulation 级的热车交接：列车一直在运行，主风缸满压、停放制动已缓解、制动试验视为已做。
+   *
+   * @param manualCompressor 压缩机是否要手动打开（机车牵引）；热车交接时开关视为打开
+   */
+  public static CabSystems hotHandover(CabConfig config, boolean manualCompressor, long nowTick) {
+    CabSystems cab =
+        simulation(config, manualCompressor, config.mainReservoirMaxKpa(), true, nowTick);
+    cab.air().toggleParking();
+    cab.brakeTest().markPassed();
+    return cab;
+  }
+
   public boolean enabled() {
     return enabled;
   }

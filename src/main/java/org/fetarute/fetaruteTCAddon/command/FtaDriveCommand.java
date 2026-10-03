@@ -52,6 +52,21 @@ public final class FtaDriveCommand {
               }
               return names;
             });
+    SuggestionProvider<CommandSender> handbackSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> {
+              List<String> names = new ArrayList<>();
+              names.add("all");
+              DriveSessionManager drive = plugin.getDriveSessionManager();
+              if (drive != null) {
+                for (DriveSession session : drive.sessions()) {
+                  if (session.isDispatchDriving()) {
+                    names.add(session.playerName());
+                  }
+                }
+              }
+              return names;
+            });
 
     manager.command(
         manager
@@ -114,6 +129,15 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("handback")
+            .permission(PERMISSION_ADMIN)
+            .required("target", StringParser.stringParser(), handbackSuggestions)
+            .handler(ctx -> handleHandback(ctx.sender(), ((String) ctx.get("target")).trim())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("probe")
             .permission(PERMISSION_ADMIN)
             .optional("state", StringParser.stringParser(), toggleSuggestions)
@@ -124,7 +148,8 @@ public final class FtaDriveCommand {
   private void sendHelp(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("drive.command.help.header"));
-    for (String entry : List.of("on", "off", "status", "reverser", "list", "stop", "probe")) {
+    for (String entry :
+        List.of("on", "off", "status", "reverser", "list", "stop", "handback", "probe")) {
       sender.sendMessage(locale.component("drive.command.help.entry-" + entry));
     }
   }
@@ -219,6 +244,10 @@ public final class FtaDriveCommand {
       sender.sendMessage(locale.component("drive.menu.deny.doors-open"));
       return;
     }
+    if (session.get().isDispatchDriving()) {
+      sender.sendMessage(locale.component("drive.menu.deny.reverser-locked"));
+      return;
+    }
     session.get().setReverser(position.get());
     sender.sendMessage(
         locale.component(
@@ -257,6 +286,27 @@ public final class FtaDriveCommand {
         locale.component(
             stopped ? "drive.command.admin-stop.stopped" : "drive.command.admin-stop.not-driving",
             Map.of("player", playerName)));
+  }
+
+  /** 管理员把某名玩家（或全部）驾驶的调度列车交还自动运行：停稳后交还，行驶中先常用制动停车。 */
+  private void handleHandback(CommandSender sender, String target) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    if (target.equalsIgnoreCase("all")) {
+      int count = drive.handbackAll("admin");
+      sender.sendMessage(
+          locale.component("drive.command.handback.all", Map.of("count", String.valueOf(count))));
+      return;
+    }
+    Player player = Bukkit.getPlayerExact(target);
+    boolean requested = player != null && drive.handback(player.getUniqueId(), "admin");
+    sender.sendMessage(
+        locale.component(
+            requested ? "drive.command.handback.requested" : "drive.command.handback.not-driving",
+            Map.of("player", target)));
   }
 
   private void handleProbe(CommandSender sender, Optional<String> state) {

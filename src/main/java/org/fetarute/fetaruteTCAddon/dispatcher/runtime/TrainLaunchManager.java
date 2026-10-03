@@ -9,6 +9,8 @@ import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
@@ -54,6 +56,9 @@ public final class TrainLaunchManager {
 
   private final SpeedLimitRamp speedLimitRamp;
 
+  /** 列车的物理控制权：驾驶员控制的列车不写限速、不发车，只把决定交给驾驶员。 */
+  private final ControlAuthority authority;
+
   /**
    * 每列车上一次下发的速度命令：限幅与迟滞的参照。
    *
@@ -64,16 +69,32 @@ public final class TrainLaunchManager {
 
   private int speedCommandsSincePrune;
 
-  /** 使用 Bukkit 调度器驱动的逐 tick 限速斜坡。 */
+  /** 使用 Bukkit 调度器驱动的逐 tick 限速斜坡；控制权经插件实例查找。 */
   public TrainLaunchManager() {
-    this(new SpeedLimitRamp());
+    this(new SpeedLimitRamp(), ControlAuthority.pluginLookup());
+  }
+
+  /**
+   * 全部按自动运行控车。
+   *
+   * @param speedLimitRamp 逐 tick 限速斜坡
+   */
+  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp) {
+    this(speedLimitRamp, ControlAuthority.NONE);
   }
 
   /**
    * @param speedLimitRamp 逐 tick 限速斜坡
+   * @param authority 列车的物理控制权
    */
-  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp) {
+  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp, ControlAuthority authority) {
     this.speedLimitRamp = java.util.Objects.requireNonNull(speedLimitRamp, "speedLimitRamp");
+    this.authority = java.util.Objects.requireNonNull(authority, "authority");
+  }
+
+  /** 列车的物理控制权。 */
+  ControlAuthority authority() {
+    return authority;
   }
 
   /**
@@ -206,6 +227,19 @@ public final class TrainLaunchManager {
       return new ControlApplicationResult(
           targetBps, OptionalDouble.empty(), Math.max(0.0, targetBps), "none");
     }
+    if (authority.isDriverControlled(properties)) {
+      return publishDriverDirective(
+          train,
+          properties,
+          aspect,
+          targetBps,
+          config,
+          allowLaunch,
+          distanceOpt,
+          runtimeSettings,
+          stopMode,
+          speedEnvelope);
+    }
     disableSlowdown(properties);
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
     double decelBpt2 = toBlocksPerTickSquared(config.decelBps2());
@@ -329,6 +363,58 @@ public final class TrainLaunchManager {
     }
     return new ControlApplicationResult(
         targetBps, speedCurveLimit, adjustedBps, limiterSource, launchCommandAccepted);
+  }
+
+  /**
+   * 驾驶员控制的列车：照常算出自动运行下会写入的速度，但不写限速、不发车、不挂斜坡，只把决定交给驾驶员。
+   *
+   * <p>“发车已接受”按 {@code allowLaunch} 报告：起步由驾驶员完成，调度层不应因为没看到发车动作而反复重试。
+   */
+  private ControlApplicationResult publishDriverDirective(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode,
+      SpeedEnvelope speedEnvelope) {
+    speedLimitRamp.release(train);
+    clearPendingLaunchCommand(properties);
+    StopControlMode resolvedStopMode =
+        stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
+    double permittedBps;
+    OptionalDouble curveLimit = OptionalDouble.empty();
+    String source;
+    if (aspect == SignalAspect.STOP) {
+      if (resolvedStopMode == StopControlMode.HARD_STOP) {
+        permittedBps = 0.0;
+        source = "driver_hard_stop";
+      } else {
+        permittedBps = Math.max(0.0, resolveStopSpeed(train, config, distanceOpt, runtimeSettings));
+        source = "driver_stop_curve";
+      }
+    } else {
+      permittedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+      if (permittedBps < Math.max(0.0, targetBps) - 1.0e-6) {
+        curveLimit = OptionalDouble.of(permittedBps);
+      }
+      source = "driver";
+    }
+    authority.publish(
+        properties,
+        new DriverDirective(
+            aspect,
+            resolvedStopMode,
+            targetBps,
+            permittedBps,
+            allowLaunch,
+            distanceOpt == null ? OptionalLong.empty() : distanceOpt,
+            speedEnvelope));
+    return new ControlApplicationResult(
+        targetBps, curveLimit, permittedBps, source, allowLaunch && aspect != SignalAspect.STOP);
   }
 
   /**

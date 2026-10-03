@@ -6,6 +6,7 @@ import java.util.Objects;
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverConfig;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
@@ -39,6 +40,7 @@ import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
  * @param coldAfterMinutes 列车无人驾驶超过多少分钟后按冷车处理（受电、主断路器、辅助电源全部断开）
  * @param cab simulation 级车上系统（气压、停放制动、制动试验、警惕装置）的参数
  * @param sidebar 是否在驾驶员的侧边栏（计分板）显示车上系统的详细状态
+ * @param driver 驾驶调度列车（DRIVER 模式）的参数
  */
 public record DriveConfig(
     boolean enabled,
@@ -64,7 +66,8 @@ public record DriveConfig(
     SetupTimings setupTimings,
     int coldAfterMinutes,
     CabConfig cab,
-    boolean sidebar) {
+    boolean sidebar,
+    DriverConfig driver) {
 
   private static final int TRACTION_STEPS = 3;
   private static final int BRAKE_STEPS = 4;
@@ -78,6 +81,7 @@ public record DriveConfig(
     Objects.requireNonNull(defaultPower, "defaultPower");
     Objects.requireNonNull(setupTimings, "setupTimings");
     Objects.requireNonNull(cab, "cab");
+    Objects.requireNonNull(driver, "driver");
     tractionFractions = List.copyOf(tractionFractions);
     brakeFractions = List.copyOf(brakeFractions);
     if (tractionFractions.size() != TRACTION_STEPS || brakeFractions.size() != BRAKE_STEPS) {
@@ -111,7 +115,8 @@ public record DriveConfig(
         SetupTimings.defaults(),
         10,
         CabConfig.defaults(),
-        true);
+        true,
+        DriverConfig.defaults());
   }
 
   /** 给定档位的牵引力比例（占满牵引）；非牵引档为 0。 */
@@ -175,7 +180,8 @@ public record DriveConfig(
         timings(section.getConfigurationSection("setup-seconds"), defaults.setupTimings, sink),
         positiveInt(section, "cold-after-minutes", defaults.coldAfterMinutes, sink),
         cab(section.getConfigurationSection("simulation"), defaults.cab, sink),
-        section.getBoolean("sidebar", defaults.sidebar));
+        section.getBoolean("sidebar", defaults.sidebar),
+        DriverConfig.from(section.getConfigurationSection("driver"), sink));
   }
 
   private static CabConfig cab(

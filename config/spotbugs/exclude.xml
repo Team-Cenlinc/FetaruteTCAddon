@@ -131,6 +131,24 @@
         <Method name="rewriter"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 驾驶调度列车的控制链路：会话、注册表与调度层共用同一个对象，列车属性对象本就由 TrainCarts 持有 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.driver.DriverLink"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession"/>
+        <Or>
+            <Method name="driverLink"/>
+            <Method name="attachDriverLink"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Method name="controlAuthority"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>
         <Bug pattern="EI_EXPOSE_REP2"/>

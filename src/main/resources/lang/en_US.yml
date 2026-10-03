@@ -55,6 +55,13 @@ drive:
       over: "<red><limit_kmh></red>"
     line-stopping: "<red>Driver left, the train is braking to a stop</red> <dark_gray>|</dark_gray> <gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray>"
     doors-open: "<red>Doors open</red>"
+    driver:
+      forced-stop: "<red><bold>Forced stop</bold></red>"
+      emergency: "<red><bold>Emergency brake</bold></red>"
+      service: "<gold><bold>ATP brake</bold></gold>"
+      handback: "<yellow>Handing back to automatic after stopping</yellow>"
+      no-signal: "<yellow>No movement authority</yellow>"
+      wait-signal: "<red>Stop signal</red>"
     cab:
       vigilance-warning: "<red><bold>Vigilance <seconds></bold></red>"
       vigilance-tripped: "<red><bold>Vigilance emergency brake</bold></red>"
@@ -191,12 +198,16 @@ drive:
       brake-test-air: "<red>Main reservoir too low (<white><mr></white> kPa); the brake test needs at least <white><need></white> kPa</red>"
       no-door-animation: "<red>This train has no matching door animation</red>"
       unavailable: "<red>The desk cannot be opened right now</red>"
+      reverser-locked: "<red>A dispatched train's direction follows its route; the reverser is locked</red>"
   end:
     left-seat: "<prefix> <yellow>You left the seat, driving ended</yellow>"
     seat-lost: "<prefix> <red>Could not return to the seat, driving ended</red>"
     train-gone: "<prefix> <red>The train no longer exists, driving ended</red>"
     game-mode: "<prefix> <red>This game mode cannot drive, driving ended</red>"
     admin: "<prefix> <yellow>An administrator ended your driving</yellow>"
+    handback: "<prefix> <yellow>The train was handed back to automatic operation</yellow>"
+    dispatch-abort: "<prefix> <red>The dispatcher took the train back, driving ended</red>"
+    watchdog: "<prefix> <red>The train made no progress for too long and was handed back to automatic operation</red>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"
@@ -209,13 +220,17 @@ drive:
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- List all driving sessions</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
+      entry-handback: "  <gray>•</gray> <white>/fta drive handback <player|all></white> <gray>- Hand driver-controlled dispatched trains back to automatic operation</gray>"
     start:
       started: "<prefix> <green>Now driving <white><train></white></green> <gray>Hotbar 1-9 is P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>Manual driving is disabled</red>"
       bad-game-mode: "<prefix> <red>Driving is not allowed in the current game mode</red>"
       already-driving: "<prefix> <yellow>You are already driving</yellow>"
       not-seated: "<prefix> <red>Sit in a train seat first</red>"
-      managed-train: "<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"
+      managed-train: "<prefix> <red>This train is run by the dispatcher and driver takeover is not enabled</red>"
+      no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"
+      not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"
+      not-head-cab: "<prefix> <red>Sit in the leading cab to take over</red>"
       train-in-use: "<prefix> <red>This train is being driven or is braking to a stop</red>"
       train-moving: "<prefix> <red>The train is rolling away from this cab (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
       cursor-not-empty: "<prefix> <red>Put the item on your cursor away before driving</red>"
@@ -236,6 +251,10 @@ drive:
     admin-stop:
       stopped: "<prefix> <yellow>Ended driving for <player></yellow>"
       not-driving: "<prefix> <red><player> is not driving</red>"
+    handback:
+      requested: "<prefix> <yellow>Asked <player> to hand the train back to automatic operation</yellow>"
+      not-driving: "<prefix> <red><player> is not driving a dispatched train</red>"
+      all: "<prefix> <yellow>Asked all <count> driver-controlled train(s) to hand back to automatic operation</yellow>"
     probe:
       "on": "<prefix> <yellow>Driving input diagnostics enabled, packet events go to the console</yellow>"
       "off": "<prefix> <yellow>Driving input diagnostics disabled</yellow>"

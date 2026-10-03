@@ -34,6 +34,7 @@ drive:
   command:
     start:
       bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
+      managed-train: ["<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"]
       train-moving:
         - "<prefix> <red>列车正在行驶，停稳后才能开始驾驶</red>"
         - "<prefix> <red>列车尚未停稳（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"

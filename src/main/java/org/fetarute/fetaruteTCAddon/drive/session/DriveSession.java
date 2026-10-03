@@ -11,6 +11,8 @@ import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveDynamics;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
@@ -49,7 +51,15 @@ public final class DriveSession {
     GAME_MODE,
     DEATH,
     ADMIN,
-    DISABLED
+    DISABLED,
+    /** 驾驶调度列车：交还自动运行（驾驶员离开、调度层请求、管理员或总开关）。 */
+    HANDBACK,
+    /** 驾驶调度列车：调度层要销毁这列车或列车已异常。 */
+    DISPATCH_ABORT,
+    /** 驾驶调度列车：任务完成。 */
+    TASK_COMPLETE,
+    /** 驾驶调度列车：卡住太久，被看门狗收回。 */
+    WATCHDOG
   }
 
   private static final double TICKS_PER_SECOND = 20.0;
@@ -102,6 +112,8 @@ public final class DriveSession {
   private long actionBarHeldUntil = Long.MIN_VALUE;
   private int stallTicks;
   private int actionGeneration;
+  private DriverLink driverLink;
+  private double odometerBlocks;
 
   /** 不需要启动流程的会话（列车已就绪）。 */
   public DriveSession(
@@ -255,7 +267,35 @@ public final class DriveSession {
    * <p>允许超速时，它是接管之后被牌子等途径设定的限速（车速可以超过它）；否则就是实际生效的速度上限。
    */
   public double displayLimitBps() {
+    if (driverLink != null && driverLink.lastDecision() != null) {
+      return driverLink.lastDecision().permittedBps();
+    }
     return speedLimit.displayLimitBps(lastCapBps);
+  }
+
+  /** 驾驶调度列车时的控制链路；驾驶非调度列车时为 {@code null}。 */
+  public DriverLink driverLink() {
+    return driverLink;
+  }
+
+  /** 接上调度列车的控制链路。 */
+  public void attachDriverLink(DriverLink link) {
+    this.driverLink = link;
+  }
+
+  /** 是否在驾驶调度列车。 */
+  public boolean isDispatchDriving() {
+    return driverLink != null;
+  }
+
+  /** 会话累计走过的距离（格），按积分速度计。 */
+  public double odometerBlocks() {
+    return odometerBlocks;
+  }
+
+  /** 立即施加紧急制动（停稳前不能缓解）。 */
+  public void forceEmergency() {
+    selector.force(Notch.EB);
   }
 
   /** 超出限速的比例达到它时标红，否则标黄。 */
@@ -543,9 +583,13 @@ public final class DriveSession {
       // 行进中停放制动（弹簧制动）施加着，例如失风后自动施加：至少按 B4 制动。
       effective = Notch.B4;
     }
+    if (driverLink != null && driverLink.controlsPhysically()) {
+      effective = superviseDriver(effective);
+    }
     // 失效导向安全：紧急制动、无人驾驶时的自动制动与停放制动不靠主风缸，不随风压打折。
     boolean failSafe = effective == Notch.EB || parkingBraking || phase != Phase.ACTIVE || !seated;
     dynamics.step(STEP_SECONDS, effective, lastCapBps, failSafe ? 1.0 : cab.brakeScale());
+    odometerBlocks += dynamics.speedBps() * STEP_SECONDS;
     Vigilance.Event event =
         cab.tick(
             nowTick,
@@ -564,6 +608,71 @@ public final class DriveSession {
     if (phase == Phase.STOPPING && dynamics.speedBps() <= config.stoppedSpeedBps()) {
       finish(endReason);
     }
+  }
+
+  /**
+   * 保护包络：按调度层的指令决定此刻是否介入，返回介入后实际生效的档位。
+   *
+   * <p>立即停住时把积分速度清零（控车动作随之把列车速度写成 0）；紧急制动锁住手柄，停稳后才能缓解。
+   */
+  private Notch superviseDriver(Notch effective) {
+    DriverLink link = driverLink;
+    boolean stopped = isStopped();
+    if (stopped && link.emergencyLatched()) {
+      link.releaseEmergency();
+    }
+    double serviceDecel =
+        dynamics.params().decelBps2() * config.brakeFraction(Notch.B4) * cab.brakeScale();
+    double emergencyDecel = dynamics.params().decelBps2() * config.emergencyMultiplier();
+    DriverProtection.Decision decision =
+        DriverProtection.evaluate(
+            new DriverProtection.Input(
+                dynamics.speedBps(),
+                stopped,
+                link.directive(),
+                link.ticksSinceDirective(),
+                link.travelledSinceDirective(),
+                serviceDecel,
+                emergencyDecel,
+                1.0 / (2.0 * config.effortRatePerSecond()),
+                link.serviceStopRequested(),
+                link.serviceLatched()),
+            config.driver());
+    link.recordDecision(decision);
+    if (decision.handbackRequested()) {
+      link.requestHandback("directive-stale");
+    }
+    switch (decision.intervention()) {
+      case CLAMP -> {
+        dynamics.reset(0.0);
+        selector.force(Notch.EB);
+        return Notch.EB;
+      }
+      case EMERGENCY -> {
+        selector.force(Notch.EB);
+        return Notch.EB;
+      }
+      case SERVICE -> {
+        return atLeastServiceBrake(effective);
+      }
+      default -> {}
+    }
+    if (link.emergencyLatched()) {
+      selector.force(Notch.EB);
+      return Notch.EB;
+    }
+    if (decision.tractionInhibited() && effective.isTraction()) {
+      return Notch.N;
+    }
+    return effective;
+  }
+
+  /** 至少按 B4 制动；手柄已在更重的档位时保持。 */
+  private static Notch atLeastServiceBrake(Notch effective) {
+    if (effective == Notch.EB || effective == Notch.B4) {
+      return effective;
+    }
+    return Notch.B4;
   }
 
   /**

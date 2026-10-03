@@ -91,3 +91,26 @@ simulation:
   # 警惕装置：行车中多少秒没有操作（换档或右键）就报警，报警后多少秒不确认就紧急制动
   vigilance-interval-seconds: 60
   vigilance-warning-seconds: 5
+
+# 驾驶调度列车（驾驶员接管带交路、时刻表的列车）。调度照常计算信号与行车许可，驾驶员在许可范围内操纵，
+# 超出时车载防护自动制动。任何故障都交还自动运行，不会把列车冻结在原地
+driver:
+  # 是否允许接管调度列车。改为 false 并执行 /fta reload 后，正在驾驶的调度列车全部在停稳后交还自动运行
+  enabled: true
+  # 热车交接：接管时受电、主断、辅助电源保持接通，simulation 级的风压满、停放制动已缓解、制动试验视为已做
+  hot-handover: true
+  # 超过容许速度多少（格/秒）开始自动常用制动
+  overspeed-tolerance-bps: 1.0
+  # 常用制动介入后，速度降到容许速度以下多少（格/秒）才缓解
+  service-release-hysteresis-bps: 0.5
+  # 紧急制动线：在常用制动线（容许速度 + 容差）之上再超出容许速度的该比例（不少于容差）时自动紧急制动。
+  # 0.15 即再超出 15%。调度要求停车或交还时只用常用制动
+  emergency-overspeed-ratio: 0.15
+  # 行车许可过期时的限制速度（格/秒）
+  restricted-speed-bps: 5.0
+  # 调度层多少秒没有发来新的行车许可就按限制速度运行
+  directive-stale-seconds: 2
+  # 调度层多少秒没有发来新的行车许可就停车并交还自动运行（须大于上一项）
+  stale-handback-seconds: 10
+  # 停车点前预留的余量（格）：防护按“停车点 − 余量”计算制动曲线
+  stop-margin-blocks: 1.0

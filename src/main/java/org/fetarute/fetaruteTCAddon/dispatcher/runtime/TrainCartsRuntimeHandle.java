@@ -31,6 +31,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintC
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailPathFootprintRasterizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailPathOccupancySliceResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
@@ -50,8 +52,23 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
   private final MinecartGroup group;
 
+  /** 列车的物理控制权：驾驶员控制的列车不发车、不清动作队列，停车与销毁改为通知驾驶侧。 */
+  private final ControlAuthority authority;
+
   public TrainCartsRuntimeHandle(MinecartGroup group) {
+    this(group, ControlAuthority.pluginLookup());
+  }
+
+  /**
+   * @param authority 列车的物理控制权
+   */
+  public TrainCartsRuntimeHandle(MinecartGroup group, ControlAuthority authority) {
     this.group = Objects.requireNonNull(group, "group");
+    this.authority = Objects.requireNonNull(authority, "authority");
+  }
+
+  private boolean driverControlled() {
+    return authority.isDriverControlled(group.getProperties());
   }
 
   /**
@@ -558,6 +575,10 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   /** 执行紧急停车（不触发目的地逻辑）。 */
   @Override
   public void stop() {
+    if (driverControlled()) {
+      authority.interrupt(group.getProperties(), DriverInterrupt.SERVICE_STOP);
+      return;
+    }
     group.stop(false);
     MinecartMember<?> head = group.head();
     if (head != null && isLaunching(head)) {
@@ -568,6 +589,12 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   /** 执行闭塞硬 STOP：归零速度并清空整列 TrainCarts 动作队列。 */
   @Override
   public void stopHard() {
+    if (driverControlled()) {
+      // 驾驶员控制的列车：同样立即停住，但不清动作队列（驾驶控车动作在里面）；驾驶侧同步把车速归零并锁住紧急制动。
+      authority.interrupt(group.getProperties(), DriverInterrupt.EMERGENCY_INSTANT);
+      group.stop(true);
+      return;
+    }
     group.stop(true);
     group.getActions().clear();
     for (MinecartMember<?> member : group) {
@@ -600,6 +627,10 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       Optional<BlockFace> fallbackDirection,
       double targetBlocksPerTick,
       double accelBlocksPerTickSquared) {
+    if (driverControlled()) {
+      // 起步由驾驶员完成。
+      return true;
+    }
     if (group.isMoving()) {
       return true;
     }
@@ -654,7 +685,7 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
       org.bukkit.block.BlockFace direction,
       double targetBlocksPerTick,
       double accelBlocksPerTickSquared) {
-    if (direction == null) {
+    if (direction == null || driverControlled()) {
       return;
     }
     MinecartMember<?> head = group.head();
@@ -721,6 +752,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
 
   @Override
   public void accelerateTo(double targetBlocksPerTick, double accelBlocksPerTickSquared) {
+    if (driverControlled()) {
+      return;
+    }
     MinecartMember<?> head = group.head();
     if (head == null) {
       return;
@@ -783,6 +817,10 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   public void destroy() {
     if (!group.isValid()) {
       return;
+    }
+    if (driverControlled()) {
+      // 先结束驾驶（解除绑定、归还属性），再照常销毁。
+      authority.interrupt(group.getProperties(), DriverInterrupt.RELEASE_FOR_DESTROY);
     }
     // 避免在 TrainCarts doPhysics / SignTracker 刷新过程中直接 destroy() 导致 members array 出现 dead entity。
     // DSTY 往往在推进点（SignActionEvent）内触发，延迟 1 tick 执行更安全。
@@ -881,6 +919,9 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   public void reverse() {
     if (!group.isValid() || group.isMoving()) {
       return;
+    }
+    if (driverControlled()) {
+      authority.interrupt(group.getProperties(), DriverInterrupt.HANDBACK_REQUIRED);
     }
     group.reverse();
   }

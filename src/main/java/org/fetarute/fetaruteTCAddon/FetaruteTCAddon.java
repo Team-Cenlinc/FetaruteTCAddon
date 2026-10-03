@@ -76,6 +76,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
@@ -388,6 +389,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /** 手动驾驶会话管理器；插件未完成初始化或已停用时为 {@code null}。 */
   public DriveSessionManager getDriveSessionManager() {
     return driveSessionManager;
+  }
+
+  /** 调度层判断列车是否由驾驶员控制；手动驾驶没有启用时一律自动运行。 */
+  public ControlAuthority getControlAuthority() {
+    DriveSessionManager manager = driveSessionManager;
+    return manager == null ? ControlAuthority.NONE : manager.controlAuthority();
   }
 
   private DriveConfig readDriveConfig() {

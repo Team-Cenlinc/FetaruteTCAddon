@@ -5,6 +5,7 @@ drive:
   command:
     start:
       bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
+      managed-train: ["<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"]
       train-moving:
         - "<prefix> <red>The train is moving, wait until it has stopped</red>"
         - "<prefix> <red>The train has not stopped (<white><speed_kmh></white> km/h), wait until it has stopped</red>"

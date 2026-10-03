@@ -7,6 +7,7 @@ import java.util.OptionalLong;
 import org.bukkit.block.BlockFace;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
@@ -154,6 +155,11 @@ public final class RuntimeTrainController {
    */
   public void stopNow(RuntimeTrainHandle train) {
     launchManager.releaseSpeedRamp(train);
+    TrainProperties properties = train != null ? train.properties() : null;
+    if (properties != null && launchManager.authority().isDriverControlled(properties)) {
+      launchManager.authority().interrupt(properties, DriverInterrupt.SERVICE_STOP);
+      return;
+    }
     if (train != null) {
       train.stop();
     }
@@ -162,6 +168,11 @@ public final class RuntimeTrainController {
   /** 立即执行闭塞硬 STOP：不使用制动曲线，不保留 launch action。 */
   public void stopHard(RuntimeTrainHandle train, TrainProperties properties) {
     launchManager.releaseSpeedRamp(train);
+    if (properties != null && launchManager.authority().isDriverControlled(properties)) {
+      // 驾驶员控制的列车：不写限速、不清动作队列，由驾驶侧施加紧急制动。
+      launchManager.authority().interrupt(properties, DriverInterrupt.EMERGENCY);
+      return;
+    }
     if (properties != null) {
       properties.setSpeedLimit(0.0);
     }
@@ -179,6 +190,9 @@ public final class RuntimeTrainController {
    * @param speedBlocksPerTick 速度限制，单位 blocks/tick
    */
   public void setTemporarySpeedLimit(TrainProperties properties, double speedBlocksPerTick) {
+    if (properties != null && launchManager.authority().isDriverControlled(properties)) {
+      return;
+    }
     if (properties != null) {
       properties.setSpeedLimit(Math.max(0.0, speedBlocksPerTick));
     }
@@ -202,6 +216,9 @@ public final class RuntimeTrainController {
       double targetBps,
       TrainConfig config) {
     if (train == null || properties == null || direction == null || config == null) {
+      return;
+    }
+    if (launchManager.authority().isDriverControlled(properties)) {
       return;
     }
     double targetBpt = toBlocksPerTick(targetBps);

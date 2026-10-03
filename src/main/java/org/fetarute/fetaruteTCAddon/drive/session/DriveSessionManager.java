@@ -6,6 +6,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutSetSlotHandle;
 import java.util.ArrayList;
+import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
@@ -25,15 +26,20 @@ import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
 import org.fetarute.fetaruteTCAddon.drive.cab.BrakeTest;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.MotorRatio;
@@ -80,8 +86,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     CURSOR_NOT_EMPTY,
     INVENTORY_BUSY,
     UNAVAILABLE,
-    FAILED
+    FAILED,
+    /** 调度列车：没有可用的驾驶任务（或权限）。 */
+    NO_TASK,
+    /** 调度列车：只能在车站停站时接管。 */
+    NOT_STOPPED_AT_STATION,
+    /** 调度列车：只能坐在车头驾驶室接管。 */
+    NOT_HEAD_CAB
   }
+
+  /** 不领任务也能直接接管调度列车（调试、运营人员）。 */
+  public static final String PERMISSION_DRIVER_ADMIN = "fetarute.drive.driver.admin";
 
   /** 每多少 tick 重发一次背包，兜底没被数据包改写覆盖到的背包更新。重发的内容本身已被改写成驾驶物品，不会触发客户端的“收到物品”动画。 */
   private static final int HOTBAR_REFRESH_TICKS = 100;
@@ -112,6 +127,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DriveMenu menu;
   private final DriveSidebar sidebar;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
+  private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
 
   private volatile DriveConfig config;
   private volatile boolean trace;
@@ -124,6 +140,30 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.config = config;
     this.menu = new DriveMenu(plugin.getLocaleManager());
     this.sidebar = new DriveSidebar(plugin.getLocaleManager());
+    driverRegistry.setHandler(new DriverHandler());
+  }
+
+  /** 调度层经它判断列车是否由驾驶员控制。 */
+  public ControlAuthority controlAuthority() {
+    return driverRegistry;
+  }
+
+  /** 把调度层的停车、销毁要求与交还请求转给对应的驾驶会话。 */
+  private final class DriverHandler implements DriverControlRegistry.Handler {
+    @Override
+    public void onInterrupt(DriverLink link, DriverInterrupt interrupt) {
+      onDriverInterrupt(link, interrupt);
+    }
+
+    @Override
+    public void onHandbackRequested(DriverLink link, String reason) {
+      DriveSession session = sessionOf(link);
+      if (session == null) {
+        driverRegistry.unbind(link);
+        return;
+      }
+      requestHandback(session, reason);
+    }
   }
 
   /**
@@ -150,9 +190,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   private void restoreStaleProperties() {
     for (MinecartGroup group : MinecartGroupStore.getGroups()) {
-      if (group != null && group.isValid() && group.getProperties() != null) {
-        TrainPropertyGuard.restore(group.getProperties());
+      if (group == null || !group.isValid() || group.getProperties() == null) {
+        continue;
       }
+      var properties = group.getProperties();
+      if (properties.getTrainName() != null && trainInUse(properties.getTrainName())) {
+        // 启动后马上开始的会话已经按自己的方式调整了属性，不能当作崩服残留还原。
+        continue;
+      }
+      TrainPropertyGuard.restore(properties);
+      // 崩服前在驾驶的调度列车：标签还在、绑定已不在，清掉标签让它回到自动运行。
+      DriverControlTags.clear(properties);
     }
   }
 
@@ -179,6 +227,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   public void reload(DriveConfig newConfig) {
     this.config = newConfig;
+    if (!newConfig.driver().enabled()) {
+      handbackAll("disabled");
+    }
   }
 
   public void setTrace(boolean enabled) {
@@ -324,11 +375,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return StartOutcome.NOT_SEATED;
     }
     MinecartGroup group = groupOpt.get();
-    if (ManagedTrains.isFtaManaged(group.getProperties())) {
-      return StartOutcome.MANAGED_TRAIN;
-    }
+    boolean dispatchTrain = ManagedTrains.isFtaManaged(group.getProperties());
     if (trainInUse(binding.trainName())) {
       return StartOutcome.TRAIN_IN_USE;
+    }
+    if (dispatchTrain) {
+      StartOutcome refusal = checkDispatchTakeover(player, binding, group, current);
+      if (refusal != null) {
+        return refusal;
+      }
     }
     double rollingBps = measureSpeedBps(group);
     boolean rolling = rollingBps > current.startMaxSpeedBps();
@@ -344,8 +399,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               params,
               current,
               HotbarItems.build(plugin.getLocaleManager()),
-              loadSetup(group, current),
-              loadCab(group, current, params));
+              dispatchTrain ? handoverSetup(group, current) : loadSetup(group, current),
+              dispatchTrain
+                  ? handoverCab(group, current, params)
+                  : loadCab(group, current, params));
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("开始驾驶失败: " + ex);
       return StartOutcome.FAILED;
@@ -354,6 +411,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     // 由驾驶员自己刹停；朝驾驶室后方溜时要先调头才能前进，而调头必须停稳，只能拒绝。
     if (rolling && !session.travelsTowardHead(group.size())) {
       return StartOutcome.TRAIN_MOVING;
+    }
+    DriverLink driverLink = null;
+    if (dispatchTrain) {
+      driverLink =
+          new DriverLink(
+              player.getUniqueId(),
+              group.getProperties().getTrainName(),
+              group.getProperties(),
+              session::odometerBlocks,
+              Bukkit::getCurrentTick);
+      session.attachDriverLink(driverLink);
     }
     try {
       // 上车后的初始状态：换向手柄前进、档位惰行、车门视为全关；停着的车清掉残余速度，溜着的车沿用当前车速。
@@ -364,6 +432,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         group.stop();
       }
       session.setOriginalHeldSlot(player.getInventory().getHeldItemSlot());
+      if (driverLink != null) {
+        // 先登记控制权再动列车属性：同一 tick 里调度层的控车命令已经不会再写限速或发车。
+        driverRegistry.bind(group.getProperties(), driverLink);
+      }
       TrainPropertyGuard.apply(group.getProperties(), params.maxSpeedBps());
       session.setGuardedSpeedLimit(group.getProperties().getSpeedLimit());
       attachAction(group, session);
@@ -372,6 +444,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       plugin.getLogger().warning("开始驾驶失败: " + ex);
       // 控车动作可能已经挂上：结束会话让它自行退出，否则它会一直把列车按在原地、挡住队列里的其它动作。
       session.finish(DriveSession.EndReason.DISABLED);
+      driverRegistry.unbind(driverLink);
       SeatLocator.findGroup(binding.trainName())
           .ifPresent(found -> TrainPropertyGuard.restore(found.getProperties()));
       return StartOutcome.FAILED;
@@ -550,6 +623,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (session.reverser() == position) {
       return;
     }
+    if (session.isDispatchDriving()) {
+      // 调度列车的方向由交路决定，调头只能由自动运行完成。
+      denyMenu(player, "drive.menu.deny.reverser-locked");
+      return;
+    }
     if (session.anyDoorOpen()) {
       denyMenu(player, "drive.menu.deny.doors-open");
       return;
@@ -659,6 +737,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 把列车已接通的系统与（simulation 级的）气压写回标签。 */
   private static void saveTrainState(DriveSession session, MinecartGroup group) {
+    if (session.isDispatchDriving()) {
+      // 调度列车的启动状态由热车交接给出，不写进列车标签。
+      return;
+    }
     long now = System.currentTimeMillis();
     var properties = group.getProperties();
     TrainSetupStore.save(properties, session.setup().persistentOn(), now);
@@ -829,6 +911,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * <p>TrainCarts 的前进力只会沿车头方向推，所以后端驾驶室开车、或换向手柄拨到后退，都靠把整列调头来实现，而不是传负的力。 调头后车厢序号翻转，座位绑定随即刷新。
    */
   private void alignHead(MinecartGroup group, DriveSession session, Player player, long now) {
+    if (session.isDispatchDriving()) {
+      return;
+    }
     int members = group.size();
     if (session.travelsTowardHead(members) || !session.mayReverse(now) || group.isMoving()) {
       return;
@@ -935,7 +1020,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 告诉玩家驾驶为什么结束；玩家主动结束、下线、死亡等不需要提示。 */
   private void notifyEnd(Player player, DriveSession.EndReason reason) {
     switch (reason) {
-      case LEFT_SEAT, SEAT_LOST, TRAIN_GONE, GAME_MODE, ADMIN -> player.sendMessage(
+      case LEFT_SEAT,
+          SEAT_LOST,
+          TRAIN_GONE,
+          GAME_MODE,
+          ADMIN,
+          HANDBACK,
+          DISPATCH_ABORT,
+          WATCHDOG -> player.sendMessage(
           plugin
               .getLocaleManager()
               .component("drive.end." + reason.name().toLowerCase(Locale.ROOT).replace('_', '-')));
@@ -960,10 +1052,173 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
     }
     stopping.remove(session);
-    SeatLocator.findGroup(session.trainName())
-        .ifPresent(
-            group ->
-                TrainPropertyGuard.restore(group.getProperties(), session.observedSpeedLimitBpt()));
+    DriverLink link = session.driverLink();
+    if (link != null) {
+      // 交还自动运行：解除控制权，下一 tick 让调度层从当前状态重新控车。
+      driverRegistry.unbind(link);
+      traceSession(session, "交还自动运行: " + reason);
+    }
+    Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(session.trainName());
+    groupOpt.ifPresent(
+        group ->
+            TrainPropertyGuard.restore(group.getProperties(), session.observedSpeedLimitBpt()));
+    // 插件停用时不能再排任务：重启后列车标签会被清掉，自动运行从头接手。
+    if (link != null && groupOpt.isPresent() && plugin.isEnabled()) {
+      MinecartGroup group = groupOpt.get();
+      Bukkit.getScheduler()
+          .runTask(
+              plugin,
+              () -> {
+                if (group.isValid()) {
+                  plugin.getRuntimeDispatchService().ifPresent(d -> d.refreshSignal(group));
+                }
+              });
+    }
+  }
+
+  // ---- 驾驶调度列车 ----
+
+  /**
+   * 能否接管这列调度列车：驾驶功能开着、有任务或权限、车停在车站里、坐在车头驾驶室。
+   *
+   * @return 不能接管时的原因；可以接管时为 {@code null}
+   */
+  private StartOutcome checkDispatchTakeover(
+      Player player, SeatBinding binding, MinecartGroup group, DriveConfig current) {
+    if (!current.driver().enabled()) {
+      return StartOutcome.MANAGED_TRAIN;
+    }
+    if (!player.hasPermission(PERMISSION_DRIVER_ADMIN)) {
+      return StartOutcome.NO_TASK;
+    }
+    if (measureSpeedBps(group) > current.startMaxSpeedBps()) {
+      return StartOutcome.NOT_STOPPED_AT_STATION;
+    }
+    String name = group.getProperties().getTrainName();
+    boolean dwelling =
+        plugin.getDwellRegistry().map(r -> r.remainingSeconds(name).isPresent()).orElse(false)
+            || plugin.getRuntimeDispatchService().map(d -> d.hasDepartureGate(name)).orElse(false);
+    if (!dwelling) {
+      return StartOutcome.NOT_STOPPED_AT_STATION;
+    }
+    if (binding.cabSign(group.size()) < 0) {
+      return StartOutcome.NOT_HEAD_CAB;
+    }
+    return null;
+  }
+
+  /** 接管调度列车时的启动状态：热车交接时受电、主断、辅助电源都已接通，只差钥匙。 */
+  private TrainSetup handoverSetup(MinecartGroup group, DriveConfig current) {
+    if (!current.driver().hotHandover()) {
+      return loadSetup(group, current);
+    }
+    PowerSupply supply =
+        TrainTagHelper.readTagValue(group.getProperties(), TrainConfigResolver.TAG_TRAIN_POWER)
+            .flatMap(PowerSupply::parse)
+            .orElse(current.defaultPower());
+    TrainSetup setup = new TrainSetup(supply, current.setupTimings());
+    setup.restore(EnumSet.of(SetupSystem.POWER, SetupSystem.BREAKER, SetupSystem.AUX));
+    return setup;
+  }
+
+  /** 接管调度列车时的车上系统：热车交接时满风、停放已缓解、制动试验视为已做。 */
+  private CabSystems handoverCab(MinecartGroup group, DriveConfig current, DriveParams params) {
+    if (current.level() != SimulationLevel.SIMULATION) {
+      return CabSystems.disabled();
+    }
+    if (!current.driver().hotHandover()) {
+      return loadCab(group, current, params);
+    }
+    return CabSystems.hotHandover(
+        current.cab(), params.mode() == DriveMode.LOCO, Bukkit.getCurrentTick());
+  }
+
+  /** 这条控制链路所属的会话（驾驶中或制动停车中）。 */
+  private DriveSession sessionOf(DriverLink link) {
+    for (DriveSession session : active.values()) {
+      if (session.driverLink() == link) {
+        return session;
+      }
+    }
+    for (DriveSession session : stopping) {
+      if (session.driverLink() == link) {
+        return session;
+      }
+    }
+    return null;
+  }
+
+  private void onDriverInterrupt(DriverLink link, DriverInterrupt interrupt) {
+    DriveSession session = sessionOf(link);
+    if (session == null) {
+      driverRegistry.unbind(link);
+      return;
+    }
+    traceSession(session, "调度要求: " + interrupt);
+    switch (interrupt) {
+      case SERVICE_STOP -> link.requestServiceStop();
+      case EMERGENCY -> {
+        link.latchEmergency();
+        session.forceEmergency();
+      }
+      case EMERGENCY_INSTANT -> {
+        session.resetSpeed(0.0);
+        session.forceEmergency();
+        link.countForcedStop();
+      }
+      case RELEASE_FOR_DESTROY -> handback(session, DriveSession.EndReason.DISPATCH_ABORT);
+      case HANDBACK_REQUIRED -> requestHandback(session, "dispatch");
+    }
+  }
+
+  /** 请求交还自动运行：已停稳立即交还，否则先常用制动停车。 */
+  private void requestHandback(DriveSession session, String reason) {
+    DriverLink link = session.driverLink();
+    if (link == null) {
+      return;
+    }
+    link.requestHandback(reason);
+    traceSession(session, "请求交还自动运行: " + reason);
+    if (session.isStopped() || session.phase() != DriveSession.Phase.ACTIVE) {
+      handback(session, DriveSession.EndReason.HANDBACK);
+    }
+  }
+
+  /** 交还自动运行并告诉驾驶员。 */
+  private void handback(DriveSession session, DriveSession.EndReason reason) {
+    if (active.get(session.playerId()) == session) {
+      Player player = Bukkit.getPlayer(session.playerId());
+      if (player != null && player.isOnline()) {
+        notifyEnd(player, reason);
+      }
+    }
+    endNow(session, reason);
+  }
+
+  /** 把所有驾驶员控制的列车交还自动运行（总开关关闭、管理员命令）。 */
+  public int handbackAll(String reason) {
+    int count = 0;
+    for (DriveSession session : sessions()) {
+      if (session.isDispatchDriving()) {
+        requestHandback(session, reason);
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * 把某名玩家驾驶的列车交还自动运行。
+   *
+   * @return 玩家是否在驾驶调度列车
+   */
+  public boolean handback(UUID playerId, String reason) {
+    DriveSession session = active.get(playerId);
+    if (session == null || !session.isDispatchDriving()) {
+      return false;
+    }
+    requestHandback(session, reason);
+    return true;
   }
 
   private void tick() {
@@ -1012,6 +1267,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     session.markGroupFound();
     MinecartGroup group = groupOpt.get();
     ensureAction(group, session, now);
+    if (session.driverLink() != null && tickDriverLink(session)) {
+      return;
+    }
 
     // 以玩家当前所坐的座位为准：编组被调头后车厢序号变了，按旧序号找座位会误判成离座。
     Optional<SeatBinding> seat =
@@ -1083,6 +1341,21 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         sidebar.hide(player);
       }
     }
+  }
+
+  /**
+   * 调度列车的控制链路：已请求交还（调度要求、指令长时间不来、管理员命令）且停稳时交还自动运行。
+   *
+   * @return 会话是否已经结束
+   */
+  private boolean tickDriverLink(DriveSession session) {
+    DriverLink link = session.driverLink();
+    if (link.handbackRequested() && session.isStopped()) {
+      traceSession(session, "停稳，交还原因: " + link.handbackReason());
+      handback(session, DriveSession.EndReason.HANDBACK);
+      return true;
+    }
+    return false;
   }
 
   private void tickStopping(DriveSession session, long now, DriveConfig current) {

@@ -44,6 +44,8 @@ permissions:
       fetarute.train.debug: true
       fetarute.drive: true
       fetarute.drive.admin: true
+      fetarute.drive.driver: true
+      fetarute.drive.driver.admin: true
       fetarute.template: true
       fetarute.timetable: true
       fetarute.timetable.record: true
@@ -74,7 +76,13 @@ permissions:
     description: 手动驾驶列车（/fta drive）
     default: op
   fetarute.drive.admin:
-    description: 查看驾驶会话、强制结束驾驶、开关驾驶诊断（/fta drive list|stop|probe）
+    description: 查看驾驶会话、强制结束驾驶、交还调度列车、开关驾驶诊断（/fta drive list|stop|handback|probe）
+    default: op
+  fetarute.drive.driver:
+    description: 领取驾驶任务、驾驶调度列车
+    default: op
+  fetarute.drive.driver.admin:
+    description: 不领任务直接接管停站中的调度列车
     default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置

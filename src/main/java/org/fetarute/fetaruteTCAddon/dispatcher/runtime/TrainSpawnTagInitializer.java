@@ -53,7 +53,10 @@ public final class TrainSpawnTagInitializer {
           "FTA_MAINTENANCE_HOLD",
           "FTA_OPERATOR",
           "FTA_LINE",
-          "FTA_ROUTE");
+          "FTA_ROUTE",
+          DriverControlTags.TAG_DRIVER,
+          "FTA_DRIVE_SLOWDOWN_ORIG",
+          "FTA_DRIVE_SPEEDLIMIT_ORIG");
 
   private TrainSpawnTagInitializer() {}
 

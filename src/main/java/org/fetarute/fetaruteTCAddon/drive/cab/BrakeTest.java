@@ -33,6 +33,11 @@ public final class BrakeTest {
     return stage == Stage.APPLY || stage == Stage.RELEASE;
   }
 
+  /** 直接视为已通过（热车交接：列车一直在运行，试验早已做过）。 */
+  public void markPassed() {
+    stage = Stage.PASSED;
+  }
+
   /**
    * 开始试验。
    *

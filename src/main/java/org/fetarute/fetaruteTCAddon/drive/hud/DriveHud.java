@@ -10,6 +10,8 @@ import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Bukkit;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupText;
@@ -84,6 +86,11 @@ public final class DriveHud {
 
   /** 动作栏末尾最要紧的一条提示：为什么现在不能牵引。按启动流程、停放制动、风压、制动试验、车门的顺序取第一条；都没有时为 {@code null}。 各系统的完整状态在侧边栏里。 */
   private static Component statusToken(LocaleManager locale, DriveSession session) {
+    DriverLink link = session.driverLink();
+    String intervention = link == null ? null : interventionKey(link);
+    if (intervention != null) {
+      return locale.component(intervention);
+    }
     if (!session.setup().ready()) {
       return setupSegment(locale, session);
     }
@@ -100,6 +107,32 @@ public final class DriveHud {
     }
     if (session.anyDoorOpen()) {
       return locale.component("drive.hud.doors-open");
+    }
+    if (link != null && link.directive() != null && link.directive().isStop()) {
+      return locale.component("drive.hud.driver.wait-signal");
+    }
+    return null;
+  }
+
+  /** 驾驶调度列车时防护正在介入的提示；没有介入时为 {@code null}。强制停车最要紧，其次紧急制动、ATP 制动、等待交还、无行车许可。 */
+  static String interventionKey(DriverLink link) {
+    DriverProtection.Decision decision = link.lastDecision();
+    DriverProtection.Intervention intervention =
+        decision == null ? DriverProtection.Intervention.NONE : decision.intervention();
+    if (intervention == DriverProtection.Intervention.CLAMP) {
+      return "drive.hud.driver.forced-stop";
+    }
+    if (intervention == DriverProtection.Intervention.EMERGENCY || link.emergencyLatched()) {
+      return "drive.hud.driver.emergency";
+    }
+    if (intervention == DriverProtection.Intervention.SERVICE) {
+      return "drive.hud.driver.service";
+    }
+    if (link.handbackRequested()) {
+      return "drive.hud.driver.handback";
+    }
+    if (link.directive() == null) {
+      return "drive.hud.driver.no-signal";
     }
     return null;
   }
