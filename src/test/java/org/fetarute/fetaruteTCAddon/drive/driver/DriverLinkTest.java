@@ -201,4 +201,35 @@ class DriverLinkTest {
     odometer[0] = 12.0;
     assertEquals(18.0, link.authorityAheadBlocks(), 1.0e-9);
   }
+
+  @Test
+  @DisplayName("停车位置标：按车头对准，距离为车头到车站牌子再加标志在牌子前方的距离")
+  void headReferencedApproach() {
+    org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId node =
+        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:1");
+    link.updateApproach(
+        node,
+        "station",
+        java.util.OptionalDouble.of(40.0),
+        java.time.Instant.EPOCH,
+        12.0,
+        org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Reference.HEAD);
+    odometer[0] = 10.0;
+    DriverLink.StationTarget target = link.stationTarget().orElseThrow();
+    assertEquals(42.0, target.remainingBlocks(), 1.0e-9);
+    assertEquals(
+        org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Reference.HEAD,
+        target.reference());
+
+    link.updateApproach(
+        node,
+        "station",
+        java.util.OptionalDouble.of(40.0),
+        java.time.Instant.ofEpochSecond(1),
+        6.0);
+    assertEquals(
+        org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Reference.CENTER,
+        link.stationTarget().orElseThrow().reference(),
+        "没有标志时按列车中心对准");
+  }
 }

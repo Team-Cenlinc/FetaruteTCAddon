@@ -18,6 +18,18 @@ public interface RailBlockAccess {
   Set<RailBlockPos> neighbors(RailBlockPos pos);
 
   /**
+   * 这段轨道是不是道岔：TrainCarts 轨道按真实分叉度（不少于 3），其余按连通邻居数。
+   *
+   * @param neighbors {@code pos} 的连通邻居
+   */
+  static boolean isJunction(RailBlockAccess access, RailBlockPos pos, Set<RailBlockPos> neighbors) {
+    if (access instanceof TrainCartsRailBlockAccess tcAccess) {
+      return tcAccess.junctionCount(pos) >= 3;
+    }
+    return neighbors.size() >= 3;
+  }
+
+  /**
    * 返回“可能连通”的邻居候选集合：允许包含位于未加载区块中的候选。
    *
    * <p>默认实现等同于 {@link #neighbors(RailBlockPos)}；需要支持“沿轨道异步加载区块”的访问器可覆盖该方法。

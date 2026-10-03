@@ -7,8 +7,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 /**
  * 发光停车标的位置与颜色。
  *
- * <p>车站按列车中心对标：列车中心停在车站牌子的轨道中心（停车点）上算停准。驾驶员坐的位置离列车中心有一段距离（长编组时约为半个车长），
- * 所以停车标画在“停车点沿轨道前移这段距离”处：列车停准时，驾驶员正好在停车标上方。 本类不依赖服务器对象，便于单测。
+ * <p>车站牌子按列车中心对标，停车位置标按车头对标：对准部位停在停车点上算停准。驾驶员坐的位置离对准部位有一段距离
+ * （按列车中心对标的长编组约为半个车长），所以停车标画在“停车点沿轨道前移这段距离”处：列车停准时，驾驶员正好在停车标上方。 本类不依赖服务器对象，便于单测。
  */
 public final class StopMarkerGeometry {
 
@@ -55,16 +55,16 @@ public final class StopMarkerGeometry {
   /**
    * 算出停车标的位置。
    *
-   * @param stopPoint 停车点：列车中心应停的位置
+   * @param stopPoint 停车点：对准部位应停的位置
    * @param railAxis 停车点处轨道的走向（不分正反）；为空或水平分量为零时按列车走向
    * @param trainTravel 列车前进方向（车尾指向车头）
-   * @param trainCenter 列车中心（车头与车尾的中点）
+   * @param reference 列车上对准停车点的部位（列车中心或车头）此刻的位置
    * @param seat 驾驶员的位置
    * @return 列车走向量不出时为空
    */
   public static Optional<Placement> place(
-      Vector stopPoint, Vector railAxis, Vector trainTravel, Vector trainCenter, Vector seat) {
-    if (stopPoint == null || trainCenter == null || seat == null) {
+      Vector stopPoint, Vector railAxis, Vector trainTravel, Vector reference, Vector seat) {
+    if (stopPoint == null || reference == null || seat == null) {
       return Optional.empty();
     }
     Vector travel = horizontalUnit(trainTravel);
@@ -77,10 +77,10 @@ public final class StopMarkerGeometry {
     } else if (axis.dot(travel) < 0.0) {
       axis.multiply(-1.0);
     }
-    // 驾驶员在列车中心前方多远（沿列车走向）：停准时驾驶员就在停车点前方这么远。
+    // 驾驶员在对准部位前方多远（沿列车走向）：停准时驾驶员就在停车点前方这么远。
     double seatAhead =
-        (seat.getX() - trainCenter.getX()) * travel.getX()
-            + (seat.getZ() - trainCenter.getZ()) * travel.getZ();
+        (seat.getX() - reference.getX()) * travel.getX()
+            + (seat.getZ() - reference.getZ()) * travel.getZ();
     Vector position =
         new Vector(
             stopPoint.getX() + axis.getX() * seatAhead,

@@ -264,11 +264,7 @@ public final class RailGraphMultiSourceExplorerSession {
 
   private boolean isJunction(
       RailBlockAccess access, RailBlockPos current, Set<RailBlockPos> neighbors) {
-    if (access instanceof TrainCartsRailBlockAccess tcAccess) {
-      int junctions = tcAccess.junctionCount(current);
-      return junctions >= 3;
-    }
-    return neighbors.size() >= 3;
+    return RailBlockAccess.isJunction(access, current, neighbors);
   }
 
   private record Visit(NodeId owner, double distance, PathTrace pathTrace) {

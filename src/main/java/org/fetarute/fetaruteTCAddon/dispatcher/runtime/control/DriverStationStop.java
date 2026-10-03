@@ -36,6 +36,7 @@ public final class DriverStationStop {
   private final String stationName;
   private final UUID worldId;
   private final Vector stopPoint;
+  private final StopAlignment.Reference reference;
   private final BlockFace platformFace;
   private final boolean bothSides;
   private final boolean doorsRequired;
@@ -51,11 +52,32 @@ public final class DriverStationStop {
   private boolean wrongDoorOpened;
   private boolean doorsTakenOver;
 
+  /** 列车中心对准停车点（车站牌子的默认对位）。 */
+  public DriverStationStop(
+      NodeId node,
+      String stationName,
+      UUID worldId,
+      Vector stopPoint,
+      BlockFace platformFace,
+      boolean bothSides,
+      boolean doorsRequired) {
+    this(
+        node,
+        stationName,
+        worldId,
+        stopPoint,
+        StopAlignment.Reference.CENTER,
+        platformFace,
+        bothSides,
+        doorsRequired);
+  }
+
   /**
    * @param node 车站节点
    * @param stationName 显示用的站名
    * @param worldId 停车点所在世界
-   * @param stopPoint 停车点：列车中心应停在这里（与 TrainCarts 对位一致）
+   * @param stopPoint 停车点（与 TrainCarts 对位一致）
+   * @param reference 用列车的哪个部位对准停车点：车站牌子是列车中心，停车位置标是车头
    * @param platformFace 站台在列车的哪个世界方位；两侧开门或不开门时为 {@code null}
    * @param bothSides 两侧开门
    * @param doorsRequired 本站是否开门
@@ -65,6 +87,7 @@ public final class DriverStationStop {
       String stationName,
       UUID worldId,
       Vector stopPoint,
+      StopAlignment.Reference reference,
       BlockFace platformFace,
       boolean bothSides,
       boolean doorsRequired) {
@@ -72,6 +95,7 @@ public final class DriverStationStop {
     this.stationName = stationName == null || stationName.isBlank() ? node.value() : stationName;
     this.worldId = Objects.requireNonNull(worldId, "worldId");
     this.stopPoint = Objects.requireNonNull(stopPoint, "stopPoint").clone();
+    this.reference = Objects.requireNonNull(reference, "reference");
     this.platformFace = platformFace;
     this.bothSides = bothSides;
     this.doorsRequired = doorsRequired;
@@ -91,6 +115,11 @@ public final class DriverStationStop {
 
   public Vector stopPoint() {
     return stopPoint.clone();
+  }
+
+  /** 用列车的哪个部位对准停车点。 */
+  public StopAlignment.Reference reference() {
+    return reference;
   }
 
   /** 站台所在的世界方位；两侧开门或不开门时为空。 */
@@ -135,7 +164,7 @@ public final class DriverStationStop {
     phase = Phase.ENDED;
   }
 
-  /** 列车中心相对停车点的偏移（格）：正数为越过，负数为未到；量不出时为 {@code NaN}。 */
+  /** 列车（按 {@link #reference()} 取中心或车头）相对停车点的偏移（格）：正数为越过，负数为未到；量不出时为 {@code NaN}。 */
   public double offsetBlocks() {
     return offsetBlocks;
   }

@@ -112,6 +112,9 @@ sign:
   conflict: "<prefix> <red>节点 ID 冲突：</red><white><node></white> <gray>(已被 <white><type></white> 使用)</gray>\n<gray>位置:</gray> <location>"
   conflict-hover-teleport: "<gray>点击传送:</gray> <white><cmd></white>"
   removed: "<prefix> <dark_aqua>已移除</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
+  stopmark:
+    created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处</dark_aqua>"
+    invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"
   type:
     depot: "车库"
     depot_throat: "车库咽喉"

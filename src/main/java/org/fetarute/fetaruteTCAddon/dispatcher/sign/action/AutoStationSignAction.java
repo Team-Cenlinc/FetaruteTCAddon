@@ -38,6 +38,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarks;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
@@ -78,6 +80,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
   /** 驾驶员控车时等停稳的上限：驾驶员可能要慢慢对位。 */
   private static final int DRIVER_STOP_WAIT_TIMEOUT_TICKS = 2400;
+
+  /** 自动运行开往停车位置标时的低速（格/tick）：列车压到车站牌子时往往已经很慢，直接按距离减速会一路蠕行。 */
+  private static final double MARK_CRAWL_BPT = 0.2;
+
+  /** 开往停车位置标时最后这么长（格）从低速制动到停。 */
+  private static final double MARK_BRAKE_BLOCKS = 3.0;
+
+  /** 开往停车位置标时，等停稳多留的 tick（起步与最后制动）。 */
+  private static final int MARK_SETTLE_TICKS = 40;
 
   /** 驾驶员停妥后迟迟不开门，过这么久由站台代为开关门。 */
   private static final long DRIVER_DOOR_TIMEOUT_TICKS = 600L;
@@ -250,11 +261,12 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     boolean driverControlled = driverControlled(properties);
     AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(info.getLine(3));
     DriverStationStop driverStop = null;
+    int alignTicks = 0;
     if (driverControlled) {
       // 驾驶员控车时由驾驶员自己停车：不对位，也不能清掉控车动作；把停车点与站台侧交给驾驶员。
       driverStop = beginDriverStop(info, properties, definition, doorDirection);
     } else {
-      centerTrain(info);
+      alignTicks = alignTrain(info);
     }
 
     FacingResult facingResult = resolveFacingDirectionResult(info);
@@ -332,8 +344,73 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         chimeSettings,
         session,
         firstStop,
-        driverControlled ? DRIVER_STOP_WAIT_TIMEOUT_TICKS : STOP_WAIT_TIMEOUT_TICKS,
+        driverControlled ? DRIVER_STOP_WAIT_TIMEOUT_TICKS : STOP_WAIT_TIMEOUT_TICKS + alignTicks,
         driverStop);
+  }
+
+  /**
+   * 自动运行对位：股道上有对应节数的停车位置标时让车头停在标志处，否则按 TrainCarts 把列车中心停在牌子处。
+   *
+   * @return 开往标志预计还要多少 tick（等停稳时多留这么久）；按 TrainCarts 居中时为 0
+   */
+  private int alignTrain(SignActionEvent info) {
+    Optional<StopMarks.Selected> mark = stopMarkFor(info);
+    if (mark.isPresent()) {
+      StopMarks.Mark selected = mark.get().mark();
+      org.bukkit.block.Block markRail =
+          info.getWorld().getBlockAt(selected.rail().x(), selected.rail().y(), selected.rail().z());
+      int ticks = launchHeadTo(info.getGroup(), markRail);
+      if (ticks >= 0) {
+        return ticks;
+      }
+    }
+    centerTrain(info);
+    return 0;
+  }
+
+  /** 这列车在本站该停的停车位置标；没有标志、节数对不上或量不出方向时为空。 */
+  private Optional<StopMarks.Selected> stopMarkFor(SignActionEvent info) {
+    if (plugin == null || !info.hasRails() || !info.hasGroup()) {
+      return Optional.empty();
+    }
+    StopMarkIndex index = plugin.getStopMarkIndex();
+    org.bukkit.Location center = info.getCenterLocation();
+    MinecartGroup group = info.getGroup();
+    if (index == null || center == null || group == null || group.isEmpty()) {
+      return Optional.empty();
+    }
+    return index.select(
+        info.getRails(), center.toVector(), StopAlignment.travel(group), group.size());
+  }
+
+  /**
+   * 把车头沿轨道送到标志所在的轨道：先以低速开到标志前，再在最后几格制动停下。
+   *
+   * @return 预计还要多少 tick；前方沿轨道找不到这段轨道时为 -1（不倒车）
+   */
+  private static int launchHeadTo(MinecartGroup group, org.bukkit.block.Block markRail) {
+    MinecartMember<?> head = group.head();
+    com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint walk =
+        new com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint(
+            head.getRailTracker().getState().clone());
+    if (!walk.moveFindRail(markRail, 2.0 * StopMarks.SEARCH_BLOCKS)) {
+      return -1;
+    }
+    group.getActions().launchReset();
+    double distance = walk.movedTotal;
+    if (distance <= 0.01) {
+      group.stop();
+      return 0;
+    }
+    BlockFace direction =
+        com.bergerkiller.bukkit.tc.Util.vecToFace(head.getRailTracker().getMotionVector(), false);
+    if (distance > MARK_BRAKE_BLOCKS + 0.5) {
+      head.getActions().addActionLaunch(direction, distance - MARK_BRAKE_BLOCKS, MARK_CRAWL_BPT);
+      head.getActions().addActionLaunch(MARK_BRAKE_BLOCKS, 0.0);
+    } else {
+      head.getActions().addActionLaunch(direction, distance, 0.0);
+    }
+    return (int) Math.ceil(distance / MARK_CRAWL_BPT) + MARK_SETTLE_TICKS;
   }
 
   private static void centerTrain(SignActionEvent info) {
@@ -342,7 +419,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     station.centerTrain();
   }
 
-  /** 驾驶员控车进站：以牌子轨道中心为停车点，连同站台侧交给驾驶员。取不到停车点时返回 {@code null}（按普通停站处理）。 */
+  /**
+   * 驾驶员控车进站：股道上有对应节数的停车位置标时以标志的轨道中心为车头停车点，否则以牌子轨道中心为列车中心停车点，连同站台侧交给驾驶员。 取不到停车点时返回 {@code
+   * null}（按普通停站处理）。
+   */
   private DriverStationStop beginDriverStop(
       SignActionEvent info,
       TrainProperties properties,
@@ -358,12 +438,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             .flatMap(directory -> directory.snapshot().stationOfNode(definition.nodeId().value()))
             .map(org.fetarute.fetaruteTCAddon.company.api.StationDirectory.StationEntry::name)
             .orElse(definition.nodeId().value());
+    Optional<StopMarks.Selected> mark = stopMarkFor(info);
     DriverStationStop stop =
         new DriverStationStop(
             definition.nodeId(),
             stationName,
             center.getWorld().getUID(),
-            center.toVector(),
+            mark.map(selected -> selected.mark().point()).orElse(center.toVector()),
+            mark.isPresent() ? StopAlignment.Reference.HEAD : StopAlignment.Reference.CENTER,
             doorDirection.toBlockFace().orElse(null),
             doorDirection == AutoStationDoorDirection.BOTH,
             doorDirection != AutoStationDoorDirection.NONE);
@@ -464,11 +546,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           // 进站途中交还了自动运行：按自动运行对位停车。
           stop.end();
           stop = null;
-          timeoutTicks = waitedTicks + STOP_WAIT_TIMEOUT_TICKS;
-          centerTrain(info);
+          timeoutTicks = waitedTicks + STOP_WAIT_TIMEOUT_TICKS + alignTrain(info);
         }
         if (stop != null) {
-          stop.updateOffset(StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint()));
+          stop.updateOffset(
+              StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint(), stop.reference()));
         }
         if (!group.isMoving()) {
           stoppedTicks++;

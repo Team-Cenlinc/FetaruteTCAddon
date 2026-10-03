@@ -38,6 +38,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
@@ -55,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRescueLadder;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.StationStopPoints;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordCodec;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
@@ -177,6 +179,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DrivePacketListener packetListener = new DrivePacketListener(this);
   private final DriveMenu menu;
   private final DriveSidebar sidebar;
+  private final StationStopPoints stationStopPoints;
   private final StopMarker stopMarker;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
@@ -193,12 +196,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.config = config;
     this.menu = new DriveMenu(plugin.getLocaleManager());
     this.sidebar = new DriveSidebar(plugin.getLocaleManager());
-    this.stopMarker =
-        new StopMarker(
+    this.stationStopPoints =
+        new StationStopPoints(
             node ->
                 plugin.getSignNodeRegistry() == null
                     ? Optional.empty()
-                    : plugin.getSignNodeRegistry().findByNodeId(node, null));
+                    : plugin.getSignNodeRegistry().findByNodeId(node, null),
+            plugin::getStopMarkIndex);
+    this.stopMarker = new StopMarker(stationStopPoints::lookup);
     driverRegistry.setHandler(new DriverHandler());
     this.tasks = new DriverTaskManager(plugin, this::traceTask);
     applyDriverConfig(config);
@@ -1501,9 +1506,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         stopMarker.update(
             player,
             session,
-            StopAlignment.travel(group),
-            StopAlignment.center(group),
-            SeatLocator.seatEyePosition(player).orElseGet(() -> player.getLocation().toVector()),
+            new StopMarker.Train(
+                StopAlignment.travel(group),
+                StopAlignment.center(group),
+                StopAlignment.head(group),
+                SeatLocator.seatEyePosition(player)
+                    .orElseGet(() -> player.getLocation().toVector()),
+                group.size()),
             now);
       } else {
         stopMarker.remove(player.getUniqueId());
@@ -1530,14 +1539,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     plugin
         .getRuntimeDispatchService()
         .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
-        .ifPresent(
-            diagnostics ->
-                link.updateApproach(
-                    diagnostics.stopNode(),
-                    diagnostics.stopKind(),
-                    diagnostics.distanceToStopNode(),
-                    diagnostics.sampledAt(),
-                    StopAlignment.halfLengthBlocks(group)));
+        .ifPresent(diagnostics -> updateApproach(link, group, diagnostics));
     Optional<DriverStationStop> stop = link.stationStop();
     if (stop.isPresent()) {
       DriverStationStop current = stop.get();
@@ -2023,6 +2025,37 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /** 节点所属车站的站名；查不到时用节点编号。 */
+  /** 用调度采样更新前方停车点的估计：车站股道上有对应节数的停车位置标时按车头对准标志，否则按列车中心对准车站牌子。 */
+  private void updateApproach(
+      DriverLink link, MinecartGroup group, ControlDiagnostics diagnostics) {
+    NodeId node = diagnostics.stopNode();
+    if (node != null && "station".equals(diagnostics.stopKind()) && group.getWorld() != null) {
+      Optional<StationStopPoints.StopPoint> point =
+          stationStopPoints.lookup(
+              node,
+              group.getWorld(),
+              StopAlignment.travel(group),
+              group.size(),
+              Bukkit.getCurrentTick());
+      if (point.isPresent() && point.get().reference() == StopAlignment.Reference.HEAD) {
+        link.updateApproach(
+            node,
+            diagnostics.stopKind(),
+            diagnostics.distanceToStopNode(),
+            diagnostics.sampledAt(),
+            point.get().aheadBlocks(),
+            StopAlignment.Reference.HEAD);
+        return;
+      }
+    }
+    link.updateApproach(
+        node,
+        diagnostics.stopKind(),
+        diagnostics.distanceToStopNode(),
+        diagnostics.sampledAt(),
+        StopAlignment.halfLengthBlocks(group));
+  }
+
   /** 列车按交路进度的下一个停靠站（与乘客 HUD 同一口径）；展示层未启用或不明时为空串。 */
   private String nextStopLabel(MinecartGroup group) {
     return plugin

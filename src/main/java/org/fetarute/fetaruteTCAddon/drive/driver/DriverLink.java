@@ -11,6 +11,7 @@ import java.util.function.LongSupplier;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
@@ -42,6 +43,7 @@ public final class DriverLink {
   private StopWindow stopWindow = StopWindow.DEFAULTS;
   private NodeId approachNode;
   private boolean approachStation;
+  private StopAlignment.Reference approachReference = StopAlignment.Reference.CENTER;
   private double approachRemainingAtSample = Double.NaN;
   private double odometerAtApproachSample;
   private long approachSampleTick;
@@ -254,10 +256,15 @@ public final class DriverLink {
    * @param node 车站或停车点节点
    * @param remainingBlocks 列车中心到停车点的距离；越过为负
    * @param precise 由站台按实际位置量出（进站后）；否则是按调度采样推算的估计
-   * @param station 车站（按列车中心对标）；否则是区间停车点（调度在车头到点时就地停车）
+   * @param station 车站；否则是区间停车点（调度在车头到点时就地停车）
+   * @param reference 用列车的哪个部位对准停车点：车站牌子是列车中心，停车位置标与区间停车点是车头
    */
   public record StationTarget(
-      NodeId node, double remainingBlocks, boolean precise, boolean station) {}
+      NodeId node,
+      double remainingBlocks,
+      boolean precise,
+      boolean station,
+      StopAlignment.Reference reference) {}
 
   /** 估计值超过这么久没有更新就不再使用。 */
   private static final long APPROACH_SAMPLE_MAX_AGE_TICKS = 100L;
@@ -299,6 +306,30 @@ public final class DriverLink {
       OptionalDouble headDistanceBlocks,
       Instant sampledAt,
       double halfLengthBlocks) {
+    // 车站按列车中心对标；区间停车点由调度在车头到点时就地停车，按车头算。
+    boolean station = "station".equals(kind);
+    updateApproach(
+        node,
+        kind,
+        headDistanceBlocks,
+        sampledAt,
+        station ? Math.max(0.0, halfLengthBlocks) : 0.0,
+        station ? StopAlignment.Reference.CENTER : StopAlignment.Reference.HEAD);
+  }
+
+  /**
+   * 用调度层的诊断采样更新前方停车点的估计，停车点相对停车节点另有偏移时用这个（例如停车位置标）。
+   *
+   * @param targetOffsetBlocks 停车点比车头到停车节点的距离多出多少（列车中心对标时为半个车长，车头对标时为标志在车站牌子前方的距离）
+   * @param reference 用列车的哪个部位对准停车点
+   */
+  public void updateApproach(
+      NodeId node,
+      String kind,
+      OptionalDouble headDistanceBlocks,
+      Instant sampledAt,
+      double targetOffsetBlocks,
+      StopAlignment.Reference reference) {
     if (sampledAt == null || sampledAt.equals(approachSampledAt)) {
       return;
     }
@@ -320,9 +351,8 @@ public final class DriverLink {
     }
     approachNode = node;
     approachStation = "station".equals(kind);
-    // 车站按列车中心对标；区间停车点由调度在车头到点时就地停车，按车头算。
-    double offset = "station".equals(kind) ? Math.max(0.0, halfLengthBlocks) : 0.0;
-    approachRemainingAtSample = headDistanceBlocks.getAsDouble() + offset;
+    approachReference = reference == null ? StopAlignment.Reference.CENTER : reference;
+    approachRemainingAtSample = headDistanceBlocks.getAsDouble() + targetOffsetBlocks;
     odometerAtApproachSample = odometer.getAsDouble();
     approachSampleTick = clock.getAsLong();
   }
@@ -337,7 +367,8 @@ public final class DriverLink {
       return Optional.empty();
     }
     if (Double.isFinite(stop.offsetBlocks())) {
-      return Optional.of(new StationTarget(stop.node(), -stop.offsetBlocks(), true, true));
+      return Optional.of(
+          new StationTarget(stop.node(), -stop.offsetBlocks(), true, true, stop.reference()));
     }
     // 站台还没量出偏移（刚交来停站，或量不出列车走向）：沿用进站前对这一站的估计。
     return approachEstimate().filter(target -> target.node().equals(stop.node()));
@@ -352,7 +383,11 @@ public final class DriverLink {
     double travelled = Math.max(0.0, odometer.getAsDouble() - odometerAtApproachSample);
     return Optional.of(
         new StationTarget(
-            approachNode, approachRemainingAtSample - travelled, false, approachStation));
+            approachNode,
+            approachRemainingAtSample - travelled,
+            false,
+            approachStation,
+            approachReference));
   }
 
   /** 信号确认。 */

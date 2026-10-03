@@ -399,6 +399,11 @@ drive:
     probe:
       "on": "<prefix> <yellow>Driving input diagnostics enabled, packet events go to the console</yellow>"
       "off": "<prefix> <yellow>Driving input diagnostics disabled</yellow>"
+sign:
+  stopmark:
+    created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here"
+    invalid: "<prefix> <red>Invalid stop mark</red> <gray>Line 3: carriage:N, e.g. carriage:4, carriage:4,6, carriage:3-5, carriage:*</gray>"
+
 command:
   graph:
     portal:

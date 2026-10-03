@@ -16,10 +16,12 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.StationStopPoints;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
@@ -59,9 +61,10 @@ class StopMarkerTest {
   private final World world = mock(World.class);
   private final Player player = mock(Player.class);
   private final List<FakeView> views = new ArrayList<>();
+  private Optional<StationStopPoints.StopPoint> lookup = Optional.empty();
   private final StopMarker marker =
       new StopMarker(
-          node -> Optional.empty(),
+          (node, world, travel, carriages, now) -> lookup,
           () -> {
             FakeView view = new FakeView();
             views.add(view);
@@ -105,13 +108,16 @@ class StopMarkerTest {
   }
 
   private void update() {
-    // 列车朝 +X 走，中心在 x=95.5，驾驶员在中心前方 4 格。
+    // 列车朝 +X 走，中心在 x=95.5，车头在 x=100.5，驾驶员在中心前方 4 格（车头后方 1 格）。
     marker.update(
         player,
         session,
-        new Vector(1.0, 0.0, 0.0),
-        new Vector(95.5, 64.0, 0.5),
-        new Vector(99.5, 65.0, 0.5),
+        new StopMarker.Train(
+            new Vector(1.0, 0.0, 0.0),
+            new Vector(95.5, 64.0, 0.5),
+            new Vector(100.5, 64.0, 0.5),
+            new Vector(99.5, 65.0, 0.5),
+            4),
         0L);
   }
 
@@ -165,5 +171,38 @@ class StopMarkerTest {
     assertEquals(1, views.get(0).hides);
     update();
     assertEquals(2, views.size(), "记录已丢，再画时重新生成");
+  }
+
+  @Test
+  @DisplayName("进站前：股道上有停车位置标时按车头对准，标线画在标志处后退“车头到驾驶员”的距离")
+  void headReferencedBeforeEnteringTheStation() {
+    link.updateApproach(
+        NODE,
+        "station",
+        java.util.OptionalDouble.of(30.0),
+        java.time.Instant.EPOCH,
+        12.0,
+        StopAlignment.Reference.HEAD);
+    lookup =
+        Optional.of(
+            new StationStopPoints.StopPoint(
+                worldId,
+                new Vector(130.5, 64.0, 0.5),
+                new Vector(1.0, 0.0, 0.0),
+                StopAlignment.Reference.HEAD,
+                12.0));
+    update();
+    assertEquals(129.5, views.get(0).shownAt.get(0).getX(), 1.0e-9);
+
+    lookup =
+        Optional.of(
+            new StationStopPoints.StopPoint(
+                worldId,
+                new Vector(118.5, 64.0, 0.5),
+                new Vector(1.0, 0.0, 0.0),
+                StopAlignment.Reference.CENTER,
+                0.0));
+    update();
+    assertEquals(122.5, views.get(0).shownAt.get(1).getX(), 1.0e-9, "车站牌子按列车中心对准");
   }
 }

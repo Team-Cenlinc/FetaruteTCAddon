@@ -79,6 +79,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.HeadwayRule;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
@@ -99,6 +100,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StopMarkSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.WaypointSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.RuntimeDispatchRequestProvider;
 import org.fetarute.fetaruteTCAddon.dispatcher.signal.RuntimeSignalReevaluationScheduler;
@@ -146,6 +148,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
   private DepotSignAction depotSignAction;
+  private StopMarkIndex stopMarkIndex;
+  private StopMarkSignAction stopMarkSignAction;
   private OccupancyManager occupancyManager;
   private HeadwayRule headwayRule;
   private SignalEventBus signalEventBus;
@@ -595,6 +599,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return signNodeRegistry;
   }
 
+  /** 各车站股道上的停车位置标；牌子系统初始化前为 {@code null}。 */
+  public StopMarkIndex getStopMarkIndex() {
+    return stopMarkIndex;
+  }
+
   private void preloadRailGraphFromStorage() {
     RailGraphService service = railGraphService;
     if (service == null || storageManager == null || !storageManager.isReady()) {
@@ -700,6 +709,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     SignAction.register(waypointSignAction);
     SignAction.register(autoStationSignAction);
     SignAction.register(depotSignAction);
+    SignNodeRegistry nodes = signNodeRegistry;
+    this.stopMarkIndex = new StopMarkIndex(block -> nodes.get(block).isPresent());
+    this.stopMarkSignAction = new StopMarkSignAction(stopMarkIndex, localeManager);
+    SignAction.register(stopMarkSignAction);
     // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。
     CurveLaunchAction.registerSerializer(TrainCarts.plugin);
     preloadSignNodeRegistryFromStorage();
@@ -1796,6 +1809,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (depotSignAction != null) {
       SignAction.unregister(depotSignAction);
+    }
+    if (stopMarkSignAction != null) {
+      SignAction.unregister(stopMarkSignAction);
     }
     CurveLaunchAction.unregisterSerializer(TrainCarts.plugin);
     if (signNodeRegistry != null) {
