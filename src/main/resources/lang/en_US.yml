@@ -534,6 +534,7 @@ drive:
     cab-change-failed: "<prefix> <red>You did not reach the leading cab within <seconds> s; the train departed under automatic operation and the task failed</red>"
     cab-change:
       announce: "<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; leaving your seat on the way does not end driving</white>"
+      go-to: "<yellow>Walk to the cab in car <white><car></white> and right-click to board</yellow>"
       start: "<prefix> <yellow>Changing ends: take the cab in car <white><car></white> (the other end) within <white><seconds></white> s. Leaving your seat on the way does not end driving and the train stays stopped</yellow>"
       short: "<prefix> <red>Not enough time: changing ends takes about <white><need></white> s but departure is due in <white><left></white> s, the train will leave late</red>"
       brake-test: "<prefix> <yellow>Departure is due in <white><seconds></white> s: redo the brake test before departing</yellow>"

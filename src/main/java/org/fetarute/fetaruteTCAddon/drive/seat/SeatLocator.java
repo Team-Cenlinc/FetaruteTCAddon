@@ -10,6 +10,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.IntPredicate;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -116,14 +117,27 @@ public final class SeatLocator {
    * @return 是否已坐进去；这节车厢没有空座位或入座被拒绝时为 false
    */
   public static boolean enterNearestFreeSeat(Player player, MinecartMember<?> member) {
+    return enterNearestFreeSeat(player, member, seatIndex -> true);
+  }
+
+  /**
+   * 让玩家坐进这节车厢里离他最近、且符合条件的空座位。
+   *
+   * @param acceptSeat 按座位在这节车厢里的序号判断能不能坐（例如只坐驾驶座）
+   * @return 是否已坐进去
+   */
+  public static boolean enterNearestFreeSeat(
+      Player player, MinecartMember<?> member, IntPredicate acceptSeat) {
     if (member == null || member.isUnloaded()) {
       return false;
     }
     Vector eye = player.getEyeLocation().toVector();
     CartAttachmentSeat best = null;
     double bestDistance = Double.POSITIVE_INFINITY;
-    for (CartAttachmentSeat seat : seatsOf(member)) {
-      if (seat.getEntity() != null) {
+    List<CartAttachmentSeat> seats = seatsOf(member);
+    for (int index = 0; index < seats.size(); index++) {
+      CartAttachmentSeat seat = seats.get(index);
+      if (seat.getEntity() != null || !acceptSeat.test(index)) {
         continue;
       }
       double distance = distanceSquared(seat, player, eye);

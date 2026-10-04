@@ -204,6 +204,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 驾驶台提示在动作栏停留的时间（tick），期间驾驶 HUD 不覆盖动作栏。 */
   private static final long NOTICE_HOLD_TICKS = 40L;
 
+  /** 换端时在要去的车厢旁多远内右键即可上车（车厢中心半个车长之外再加这么多格）。 */
+  private static final double BOARD_REACH_BLOCKS = 4.0;
+
   private static final TrainConfigResolver TRAIN_CONFIG_RESOLVER = new TrainConfigResolver();
 
   /** “结束驾驶”第一次点击后，多少 tick 内再点才算确认。 */
@@ -491,6 +494,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                   ackPending.remove(id);
                   boolean fresh = freshUse.remove(id) != null;
                   DriveSession session = active.get(id);
+                  if (session != null
+                      && fresh
+                      && player.getVehicle() == null
+                      && session.cabChange().allowsLeavingSeat()) {
+                    boardCabByClick(player, session);
+                    return;
+                  }
                   if (session != null && fresh) {
                     acknowledgeVigilance(session, "右键");
                     if (session.isAto() && session.driverLink().confirmDeparture()) {
@@ -896,10 +906,53 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             });
   }
 
+  /**
+   * 折返换端途中的右键：车厢模型没有判定框，右键多半点到了车厢后面的方块或空气，收不到点实体的交互。玩家在要去的那节车厢旁（车厢中心 半个车长加 {@value
+   * #BOARD_REACH_BLOCKS} 格以内）时，代为坐进那节车厢的驾驶座（标记过驾驶座时只坐标记座位）；离得远时提示去第几节。
+   */
+  private void boardCabByClick(Player player, DriveSession session) {
+    Optional<MinecartGroup> groupOpt = findSessionGroup(session);
+    CabChange change = session.cabChange();
+    if (groupOpt.isEmpty() || change.target() == CabSeats.End.NONE) {
+      return;
+    }
+    MinecartGroup group = groupOpt.get();
+    MinecartMember<?> target = change.target() == CabSeats.End.TAIL ? group.tail() : group.head();
+    if (target == null || group.getWorld() == null || !group.getWorld().equals(player.getWorld())) {
+      return;
+    }
+    double reach =
+        StopAlignment.bodyLengthBlocks(group) / Math.max(1, group.size()) / 2.0
+            + BOARD_REACH_BLOCKS;
+    double distance =
+        target.getEntity().getLocation().toVector().distance(player.getLocation().toVector());
+    if (distance > reach) {
+      notice(
+          player, "drive.task.cab-change.go-to", Map.of("car", String.valueOf(change.targetCar())));
+      return;
+    }
+    int memberIndex = group.indexOf(target);
+    CabSeats cabs = SeatLocator.cabSeats(group, config.driver().cabSeatNames());
+    boolean seated =
+        SeatLocator.enterNearestFreeSeat(
+            player, target, seatIndex -> cabs.endOf(memberIndex, seatIndex) == change.target());
+    traceSession(
+        session,
+        "换端右键上车: 第 "
+            + (memberIndex + 1)
+            + " 节 距离 "
+            + String.format(Locale.ROOT, "%.1f", distance)
+            + " 格 "
+            + (seated ? "已入座" : "没有空的驾驶座"));
+  }
+
   /** Space 鸣笛：在驾驶员所在位置播放，附近的玩家都听得到；也算一次警惕确认。 */
   public void onHorn(Player player) {
     DriveSession session = active.get(player.getUniqueId());
-    if (session == null || session.phase() != DriveSession.Phase.ACTIVE) {
+    // 只在座位上鸣笛：换端途中在站台上走动时跳跃不算。
+    if (session == null
+        || session.phase() != DriveSession.Phase.ACTIVE
+        || player.getVehicle() == null) {
       return;
     }
     long now = Bukkit.getCurrentTick();
@@ -1718,7 +1771,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       driverRegistry.unbind(link);
       return;
     }
-    traceSession(session, "调度要求: " + interrupt);
+    // 停站时调度每秒都会再要一次停车：已在停车要求中就不再记日志。
+    if (interrupt != DriverInterrupt.SERVICE_STOP || !link.serviceStopRequested()) {
+      traceSession(session, "调度要求: " + interrupt);
+    }
     switch (interrupt) {
       case SERVICE_STOP -> link.requestServiceStop();
       case EMERGENCY -> {

@@ -1940,6 +1940,7 @@ drive:
     cab-change-failed: "<prefix> <red>未能在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车，任务记为未完成</red>"
     cab-change:
       announce: "<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；换端途中离座不结束驾驶</white>"
+      go-to: "<yellow>请到第 <white><car></white> 节驾驶室旁再右键上车</yellow>"
       start: "<prefix> <yellow>折返换端：请在 <white><seconds></white> 秒内到第 <white><car></white> 节（另一端）驾驶室就座；换端途中离座不结束驾驶，列车保持停车</yellow>"
       short: "<prefix> <red>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，发车将晚点</red>"
       brake-test: "<prefix> <yellow>距计划发车尚有 <white><seconds></white> 秒，请重做制动试验后再发车</yellow>"
