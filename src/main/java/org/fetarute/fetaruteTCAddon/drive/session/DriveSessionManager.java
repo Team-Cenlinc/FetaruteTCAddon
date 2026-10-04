@@ -1824,7 +1824,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       link.setTargetLabel(current.stationName());
       if (current.phase() != DriverStationStop.Phase.APPROACH
           && current.stopped()
-          && session.markStopReported(current)) {
+          && current.markResultReported()) {
         reportStop(session, current);
       }
       if (current.phase() != session.lastStationPhase()) {
@@ -2135,12 +2135,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     Optional<Location> target = tasks.rescueLocation(driverId, lastStop);
     int moved = 0;
-    for (MinecartMember<?> member : group) {
-      for (Player rider : member.getEntity().getPlayerPassengers()) {
-        rider.leaveVehicle();
-        target.ifPresent(rider::teleport);
-        moved++;
+    for (Player rider : Bukkit.getOnlinePlayers()) {
+      boolean aboard =
+          SeatLocator.locate(rider).filter(seat -> seat.trainName().equals(name)).isPresent();
+      if (!aboard) {
+        continue;
       }
+      rider.leaveVehicle();
+      target.ifPresent(rider::teleport);
+      moved++;
     }
     plugin
         .getLogger()

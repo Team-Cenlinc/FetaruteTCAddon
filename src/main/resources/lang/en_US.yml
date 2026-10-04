@@ -116,6 +116,7 @@ drive:
     clear: "<green>Line clear</green> <gray>permitted</gray> <white><limit_kmh></white> <gray>km/h</gray>"
     ato-clear: "<green>Line clear</green> <gray>next</gray> <white><station></white>"
     stop-signal: "<red>Stop signal</red> <white><distance></white> <gray>m</gray>"
+    stop-signal-here: "<red>Stop signal</red> <gray>stop here</gray>"
     station-approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>m</gray>"
     limit: "<gold>Limit <limit_kmh></gold> <white><distance></white> <gray>m</gray>"
     suggest: "<dark_gray>|</dark_gray> <gray>advised</gray> <white><speed_kmh></white> <gray>km/h</gray>"

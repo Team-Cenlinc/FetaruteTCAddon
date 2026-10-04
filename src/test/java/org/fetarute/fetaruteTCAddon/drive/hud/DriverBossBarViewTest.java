@@ -165,4 +165,15 @@ class DriverBossBarViewTest {
             400.0);
     assertTrue(view.suggestedKmh().isEmpty());
   }
+
+  @Test
+  @DisplayName("停车信号就在车头处：写就地停车")
+  void stopHere() {
+    DriverBossBarView view =
+        view(
+            Optional.empty(),
+            advice(DriverGuidance.TargetKind.STOP_SIGNAL, 0.0, 0.0, 0.0, false),
+            false);
+    assertEquals("drive.bossbar.stop-signal-here", view.titleKey());
+  }
 }

@@ -53,7 +53,8 @@ class SpeedEnvelopeEdgeLimitsTest {
 
     SpeedEnvelope rebuilt = envelope.manual(6.0).envelope();
 
-    for (double traveled = 0.0; traveled <= 150.0; traveled += 7.5) {
+    for (int step = 0; step <= 20; step++) {
+      double traveled = step * 7.5;
       assertEquals(expected.limitBps(traveled), rebuilt.limitBps(traveled), 1.0e-9);
     }
   }

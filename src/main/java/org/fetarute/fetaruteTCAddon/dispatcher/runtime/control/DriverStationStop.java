@@ -46,6 +46,7 @@ public final class DriverStationStop {
   private double offsetBlocks = Double.NaN;
   private double stoppedOffsetBlocks = Double.NaN;
   private boolean stopped;
+  private boolean resultReported;
   private long dwellRemainingTicks;
   private boolean correctDoorsOpen;
   private boolean anyDoorOpen;
@@ -197,6 +198,19 @@ public final class DriverStationStop {
   /** 是否停妥过（开过门窗口）。 */
   public boolean stopped() {
     return stopped;
+  }
+
+  /**
+   * 记下驾驶侧已经报过这一站的对标结果。
+   *
+   * @return 第一次调用时为 {@code true}
+   */
+  public boolean markResultReported() {
+    if (resultReported) {
+      return false;
+    }
+    resultReported = true;
+    return true;
   }
 
   /** 停妥时的偏移；还没停妥或量不出时为 {@code NaN}。 */

@@ -128,7 +128,6 @@ public final class DriveSession {
   private double odometerBlocks;
   private boolean adviceBraking;
   private ScoreRules.Result liveScore;
-  private DriverStationStop reportedStop;
   private long endArmedUntilTick = Long.MIN_VALUE;
 
   /** 不需要启动流程的会话（列车已就绪）。 */
@@ -356,9 +355,10 @@ public final class DriveSession {
             ? decision.permittedBps()
             : directive != null ? directive.permittedBps() : speedBps();
     double requested = directive == null ? Double.POSITIVE_INFINITY : directive.requestedBps();
+    // 停车信号没给距离（就地停车）按停车点就在车头处。
     double stopSignal =
-        directive != null && directive.isStop() && directive.distanceBlocks().isPresent()
-            ? link.authorityAheadBlocks()
+        directive != null && directive.isStop()
+            ? directive.distanceBlocks().isPresent() ? link.authorityAheadBlocks() : 0.0
             : Double.NaN;
     List<SignalLookahead.EdgeSpeedConstraint> edges =
         directive == null || directive.envelope() == null
@@ -434,19 +434,6 @@ public final class DriveSession {
 
   public void setLiveScore(ScoreRules.Result result) {
     this.liveScore = result;
-  }
-
-  /**
-   * 记下这一站已经报过对标结果。
-   *
-   * @return 这一站第一次报时为 {@code true}
-   */
-  public boolean markStopReported(DriverStationStop stop) {
-    if (stop == null || stop == reportedStop) {
-      return false;
-    }
-    reportedStop = stop;
-    return true;
   }
 
   /** 驾驶台的“结束驾驶”按钮点过一次，等再次点击确认，直到 {@code untilTick}。 */

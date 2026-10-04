@@ -1522,6 +1522,7 @@ drive:
     clear: "<green>前方畅通</green> <gray>允许</gray> <white><limit_kmh></white> <gray>km/h</gray>"
     ato-clear: "<green>前方畅通</green> <gray>下一站</gray> <white><station></white>"
     stop-signal: "<red>停车信号</red> <white><distance></white> <gray>米</gray>"
+    stop-signal-here: "<red>停车信号</red> <gray>就地停车</gray>"
     station-approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>米</gray>"
     limit: "<gold>限速 <limit_kmh></gold> <white><distance></white> <gray>米</gray>"
     suggest: "<dark_gray>|</dark_gray> <gray>建议</gray> <white><speed_kmh></white> <gray>km/h</gray>"

@@ -46,6 +46,9 @@ public record DriverBossBarView(
 
   private static final double KMH_PER_BPS = 3.6;
 
+  /** 停车信号离车头不到这么远（格）就写“就地停车”，不写距离。 */
+  private static final double STOP_HERE_BLOCKS = 0.5;
+
   /** 停稳时建议速度低于它（格/秒）就不显示（停在停车点前显示“建议 0”没有意义）。 */
   private static final double SHOW_SUGGESTION_BPS = 0.3;
 
@@ -100,7 +103,9 @@ public record DriverBossBarView(
             : "";
     return switch (target.kind()) {
       case STOP_SIGNAL -> new DriverBossBarView(
-          "drive.bossbar.stop-signal",
+          target.distanceBlocks() < STOP_HERE_BLOCKS
+              ? "drive.bossbar.stop-signal-here"
+              : "drive.bossbar.stop-signal",
           Map.of("distance", distance),
           suggestion,
           advice.brake(),
