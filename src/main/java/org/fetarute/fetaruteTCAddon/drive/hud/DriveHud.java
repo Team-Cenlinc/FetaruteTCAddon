@@ -103,6 +103,13 @@ public final class DriveHud {
     if (cabChange != null) {
       return cabChange;
     }
+    long ebGrace = session.selector().ebGraceRemaining(Bukkit.getCurrentTick());
+    if (ebGrace > 0L) {
+      return locale.component(
+          "drive.hud.eb-grace",
+          Map.of(
+              "seconds", String.format(Locale.ROOT, "%.1f", ebGrace / (double) TICKS_PER_SECOND)));
+    }
     DriverLink link = session.driverLink();
     String intervention = link == null ? null : interventionKey(link);
     if (intervention != null) {

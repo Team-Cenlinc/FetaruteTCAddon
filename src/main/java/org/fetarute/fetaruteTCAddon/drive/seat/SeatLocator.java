@@ -110,6 +110,44 @@ public final class SeatLocator {
     return seat.get().enter(player);
   }
 
+  /**
+   * 让玩家坐进这节车厢里离他最近的空座位。驾驶会话期间玩家的右键交互被拦下（保护背包），右键自己驾驶的列车时由这里代为入座。
+   *
+   * @return 是否已坐进去；这节车厢没有空座位或入座被拒绝时为 false
+   */
+  public static boolean enterNearestFreeSeat(Player player, MinecartMember<?> member) {
+    if (member == null || member.isUnloaded()) {
+      return false;
+    }
+    Vector eye = player.getEyeLocation().toVector();
+    CartAttachmentSeat best = null;
+    double bestDistance = Double.POSITIVE_INFINITY;
+    for (CartAttachmentSeat seat : seatsOf(member)) {
+      if (seat.getEntity() != null) {
+        continue;
+      }
+      double distance = distanceSquared(seat, player, eye);
+      if (best == null || distance < bestDistance) {
+        best = seat;
+        bestDistance = distance;
+      }
+    }
+    return best != null && best.enter(player);
+  }
+
+  /** 座位到玩家眼睛的距离；取不到座位位置时排在最后。 */
+  private static double distanceSquared(CartAttachmentSeat seat, Player player, Vector eye) {
+    try {
+      Location at = seat.getPosition(player);
+      if (at == null || at.getWorld() == null || !at.getWorld().equals(player.getWorld())) {
+        return Double.MAX_VALUE;
+      }
+      return at.toVector().distanceSquared(eye);
+    } catch (RuntimeException ex) {
+      return Double.MAX_VALUE;
+    }
+  }
+
   /** 离座的玩家是否应当被送回座位：跨世界传送把玩家落在原世界，或玩家仍在车旁（被挤出座位）时送回； 玩家在同一世界里走远了（自己传送离开、被管理员带走）就不再强拉。 */
   public static boolean canReseat(Player player, MinecartGroup group) {
     MinecartMember<?> head = group.head();

@@ -58,6 +58,7 @@ drive:
     line-stopping: "<red>Driver left, the train is braking to a stop</red> <dark_gray>|</dark_gray> <gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray>"
     doors-open: "<red>Doors open</red>"
     doors-closing: "<yellow>Doors closing</yellow>"
+    eb-grace: "<red><bold>Emergency brake</bold></red> <yellow>move back within <seconds>s to cancel</yellow>"
     driver:
       forced-stop: "<red><bold>Forced stop</bold></red>"
       emergency: "<red><bold>Emergency brake</bold></red>"
@@ -520,6 +521,7 @@ drive:
       depot-on: "<prefix> <green>You will pick the train up at depot <white><depot></white>; you will be told when it comes out and can click [Go to train]</green>"
       depot-off: "<prefix> <gray>Depot pickup cancelled; take over when the train reaches <white><station></white></gray>"
       not-depot: "<prefix> <red>This trip's train does not come out of a depot</red>"
+      reassigned: "<prefix> <yellow>Trip <aqua><trip></aqua> has been reassigned to another train; <aqua><train></aqua> is no longer held for you. You will be notified again once the new train is known</yellow>"
       started: "<prefix> <red>You are already driving; the pickup choice can no longer be changed</red>"
     goto:
       teleported: "<prefix> <green>You are next to the cab you need; board, sit down and confirm your seat</green>"

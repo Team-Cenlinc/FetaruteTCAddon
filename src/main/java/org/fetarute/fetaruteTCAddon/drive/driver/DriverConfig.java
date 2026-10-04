@@ -29,6 +29,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  * @param guidance 行车引导（Boss 栏、建议速度、开始制动提示）的参数
  * @param cabSeatNames 驾驶座名单：座位附件的名字（TrainCarts 附件编辑器里设置）在名单里即为驾驶座，已转为小写；为空时不认标记
  * @param cabChange 折返换端的时间参数
+ * @param pickupAdvanceSeconds 领了从终点站出发的车次后，提前多少秒按交路认出担当的待命车、通知驾驶员并留车（驾驶员可提前上车准备）
  */
 public record DriverConfig(
     boolean enabled,
@@ -49,7 +50,8 @@ public record DriverConfig(
     DriverRecovery recovery,
     DriverGuidanceConfig guidance,
     List<String> cabSeatNames,
-    CabChangeConfig cabChange) {
+    CabChangeConfig cabChange,
+    int pickupAdvanceSeconds) {
 
   private static final int TICKS_PER_SECOND = 20;
 
@@ -65,6 +67,7 @@ public record DriverConfig(
     cabSeatNames =
         List.copyOf(cabSeatNames == null ? DEFAULT_CAB_SEAT_NAMES : normalizeNames(cabSeatNames));
     cabChange = cabChange == null ? CabChangeConfig.defaults() : cabChange;
+    pickupAdvanceSeconds = Math.max(0, pickupAdvanceSeconds);
   }
 
   /** 内置默认值。 */
@@ -88,7 +91,8 @@ public record DriverConfig(
         DriverRecovery.defaults(),
         DriverGuidanceConfig.defaults(),
         DEFAULT_CAB_SEAT_NAMES,
-        CabChangeConfig.defaults());
+        CabChangeConfig.defaults(),
+        300);
   }
 
   /**
@@ -155,7 +159,10 @@ public record DriverConfig(
         DriverRecovery.from(section, sink),
         DriverGuidanceConfig.from(section, sink),
         cabSeatNames(section, d.cabSeatNames, sink),
-        CabChangeConfig.from(section, sink));
+        CabChangeConfig.from(section, sink),
+        (int)
+            Math.round(
+                nonNegative(section, "pickup-advance-seconds", d.pickupAdvanceSeconds, sink)));
   }
 
   /** 驾驶座名单：须是字符串列表；写成别的形式时提示并用默认名单，写成空列表表示不认标记。 */

@@ -1464,6 +1464,7 @@ drive:
     line-stopping: "<red>驾驶员已离开，列车正在制动停车</red> <dark_gray>|</dark_gray> <gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray>"
     doors-open: "<red>车门开</red>"
     doors-closing: "<yellow>车门关闭中</yellow>"
+    eb-grace: "<red><bold>紧急制动</bold></red> <yellow><seconds> 秒内回拨可撤销</yellow>"
     driver:
       forced-stop: "<red><bold>强制停车</bold></red>"
       emergency: "<red><bold>紧急制动</bold></red>"
@@ -1926,6 +1927,7 @@ drive:
       depot-on: "<prefix> <green>已改为从车库 <white><depot></white> 接车：出车时将通知你，届时可点击 [前往列车]</green>"
       depot-off: "<prefix> <gray>已取消车库接车，列车到达 <white><station></white> 后再接班</gray>"
       not-depot: "<prefix> <red>该车次的列车不从车库出车</red>"
+      reassigned: "<prefix> <yellow>车次 <aqua><trip></aqua> 已改由别的列车担当，列车 <aqua><train></aqua> 不再留给本人；担当列车确定后将重新通知</yellow>"
       started: "<prefix> <red>已开始驾驶，不能再更改接车方式</red>"
     goto:
       teleported: "<prefix> <green>已到达指定驾驶室旁，请上车就座并确认座位</green>"

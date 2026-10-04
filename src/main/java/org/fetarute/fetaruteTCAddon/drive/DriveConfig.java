@@ -44,6 +44,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
  * @param sidebar 是否在驾驶员的侧边栏（计分板）显示车上系统的详细状态
  * @param driver 驾驶调度列车（DRIVER 模式）的参数
  * @param sounds 驾驶提示音与鸣笛
+ * @param ebGraceTicks 驾驶员自己选到紧急制动后，多少 tick 内回拨可撤销（防误触）；0 表示立即锁定
  */
 public record DriveConfig(
     boolean enabled,
@@ -71,7 +72,8 @@ public record DriveConfig(
     CabConfig cab,
     boolean sidebar,
     DriverConfig driver,
-    DriveSoundConfig sounds) {
+    DriveSoundConfig sounds,
+    int ebGraceTicks) {
 
   private static final int TRACTION_STEPS = 3;
   private static final int BRAKE_STEPS = 4;
@@ -87,6 +89,7 @@ public record DriveConfig(
     Objects.requireNonNull(cab, "cab");
     Objects.requireNonNull(driver, "driver");
     sounds = sounds == null ? DriveSoundConfig.defaults() : sounds;
+    ebGraceTicks = Math.max(0, ebGraceTicks);
     tractionFractions = List.copyOf(tractionFractions);
     brakeFractions = List.copyOf(brakeFractions);
     if (tractionFractions.size() != TRACTION_STEPS || brakeFractions.size() != BRAKE_STEPS) {
@@ -122,7 +125,8 @@ public record DriveConfig(
         CabConfig.defaults(),
         true,
         DriverConfig.defaults(),
-        DriveSoundConfig.defaults());
+        DriveSoundConfig.defaults(),
+        TICKS_PER_SECOND);
   }
 
   /** 给定档位的牵引力比例（占满牵引）；非牵引档为 0。 */
@@ -188,7 +192,15 @@ public record DriveConfig(
         cab(section.getConfigurationSection("simulation"), defaults.cab, sink),
         section.getBoolean("sidebar", defaults.sidebar),
         DriverConfig.from(section.getConfigurationSection("driver"), sink),
-        DriveSoundConfig.from(section.getConfigurationSection("sounds"), sink));
+        DriveSoundConfig.from(section.getConfigurationSection("sounds"), sink),
+        (int)
+            Math.round(
+                nonNegative(
+                        section,
+                        "eb-grace-seconds",
+                        defaults.ebGraceTicks / (double) TICKS_PER_SECOND,
+                        sink)
+                    * TICKS_PER_SECOND));
   }
 
   private static CabConfig cab(

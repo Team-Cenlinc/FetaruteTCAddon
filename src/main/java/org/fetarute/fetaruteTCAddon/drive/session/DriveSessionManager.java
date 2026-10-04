@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.common.utils.PacketUtil;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutSetSlotHandle;
 import java.time.Duration;
 import java.time.Instant;
@@ -19,11 +20,13 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
+import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.inventory.InventoryType;
@@ -796,7 +799,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     // 换档就是一次操作：警惕装置重新计时。
     acknowledgeVigilance(session, "换档");
-    return session.selector().select(newSlot, session.isStopped()).correctedSlot();
+    return session
+        .selector()
+        .select(newSlot, session.isStopped(), Bukkit.getCurrentTick(), config.ebGraceTicks())
+        .correctedSlot();
   }
 
   /** 驾驶员有操作：警惕装置重新计时；正在报警时记一条诊断日志，便于确认确认键在骑乘时生效。 */
@@ -842,6 +848,43 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     bossBar.hide(playerId);
     cueTrackers.remove(playerId);
     lastHornTick.remove(playerId);
+  }
+
+  /** 驾驶会话中右键了实体：为保护背包，这次交互已被拦下。点的是自己驾驶的列车、且此刻没坐在座位上时，代为坐进这节车厢最近的空座位—— 折返换端时走到另一端、被挤下座位后回座都靠它。 */
+  public void onGuardedEntityClick(Player player, Entity clicked) {
+    DriveSession session = active.get(player.getUniqueId());
+    if (session == null
+        || session.phase() != DriveSession.Phase.ACTIVE
+        || player.getVehicle() != null
+        || clicked == null) {
+      return;
+    }
+    MinecartMember<?> member = MinecartMemberStore.getFromEntity(clicked);
+    MinecartGroup group = member == null ? null : member.getGroup();
+    if (group == null || group.getProperties() == null) {
+      return;
+    }
+    String name = group.getProperties().getTrainName();
+    DriverLink link = session.driverLink();
+    boolean ownTrain =
+        session.trainName().equals(name) || (link != null && link.currentTrainName().equals(name));
+    if (!ownTrain) {
+      return;
+    }
+    Bukkit.getScheduler()
+        .runTask(
+            plugin,
+            () -> {
+              if (active.get(player.getUniqueId()) != session
+                  || player.getVehicle() != null
+                  || !member.getEntity().isValid()) {
+                return;
+              }
+              boolean seated = SeatLocator.enterNearestFreeSeat(player, member);
+              traceSession(
+                  session,
+                  "右键车厢代为入座: 第 " + (group.indexOf(member) + 1) + " 节 " + (seated ? "成功" : "没有空座位"));
+            });
   }
 
   /** Space 鸣笛：在驾驶员所在位置播放，附近的玩家都听得到；也算一次警惕确认。 */
@@ -2695,6 +2738,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (timetables.isEmpty() || layovers.isEmpty()) {
       return;
     }
+    // 每列待命车的下一趟（交路绑定），一次维护里每列车只查一次。
+    Map<String, Optional<TimetableService.DueTrip>> nextByTrain = new HashMap<>();
+    Function<String, Optional<TimetableService.DueTrip>> nextOf =
+        name -> nextByTrain.computeIfAbsent(name, timetables.get()::nextDepartureOf);
+    releaseReassignedPickups(nextOf);
+    long advance = current.driver().pickupAdvanceSeconds();
     for (DriverTask task : tasks.activeTasks()) {
       if (task.state() != DriverTask.State.CLAIMED
           || task.boardStopSequence() != 0
@@ -2702,30 +2751,98 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         continue;
       }
       Player player = Bukkit.getPlayer(task.playerId());
-      SeatBinding seat =
-          player == null || !player.isOnline() ? null : SeatLocator.locate(player).orElse(null);
-      if (seat == null
-          || layovers.get().get(seat.trainName()).isEmpty()
-          || pickups.ofTrain(seat.trainName()).isPresent()) {
+      if (player == null || !player.isOnline()) {
         continue;
       }
-      boolean next =
-          timetables
-              .get()
-              .nextDepartureOf(seat.trainName())
-              .filter(
-                  due ->
-                      task.key()
-                          .matches(due.timetable().id(), due.trip().tripCode(), due.serviceDate()))
-              .isPresent();
-      if (next) {
-        Instant from = task.plannedDeparture().isAfter(now) ? task.plannedDeparture() : now;
-        startPickup(
-            task,
-            DriverPickups.Kind.TERMINAL,
-            seat.trainName(),
-            task.stationName(),
-            pickupDeadline(from, task.plannedDeparture()));
+      // 驾驶员自己坐进了担当这一班的待命车：不论离发车多久，都提前开始接车。
+      String train =
+          SeatLocator.locate(player)
+              .map(SeatBinding::trainName)
+              .filter(name -> layovers.get().get(name).isPresent())
+              .filter(name -> pickups.ofTrain(name).isEmpty())
+              .filter(name -> nextIs(nextOf.apply(name), task))
+              .orElse(null);
+      boolean announced = false;
+      if (train == null
+          && advance > 0
+          && !task.plannedDeparture().isAfter(now.plusSeconds(advance))) {
+        // 发车前的提前量内：按交路认出担当这一班的待命车，通知驾驶员并留车。
+        for (LayoverRegistry.LayoverCandidate candidate : layovers.get().snapshot()) {
+          String name = candidate.trainName();
+          if (pickups.ofTrain(name).isEmpty() && nextIs(nextOf.apply(name), task)) {
+            train = name;
+            announced = true;
+            break;
+          }
+        }
+      }
+      if (train == null) {
+        continue;
+      }
+      Instant from = task.plannedDeparture().isAfter(now) ? task.plannedDeparture() : now;
+      traceTask(
+          (announced ? "提前分配接车 " : "驾驶员已坐进待命车，提前接车 ")
+              + task.playerName()
+              + " "
+              + task.key().tripCode()
+              + " 列车 "
+              + train);
+      startPickup(
+          task,
+          DriverPickups.Kind.TERMINAL,
+          train,
+          task.stationName(),
+          pickupDeadline(from, task.plannedDeparture()));
+    }
+  }
+
+  /** 这列车的下一趟（交路绑定）是不是这一班。 */
+  private static boolean nextIs(Optional<TimetableService.DueTrip> next, DriverTask task) {
+    return next.filter(
+            due ->
+                task.key().matches(due.timetable().id(), due.trip().tripCode(), due.serviceDate()))
+        .isPresent();
+  }
+
+  /**
+   * 交路改派（换车、退役）后，提前留着的待命车已经不跑这一班了：放掉它，下一次维护再按交路找新的担当列车。
+   * 只处理还在等驾驶员的终点站接车；下一趟暂时查不到时不动（等着派车的车次可能已过发车时刻）。
+   */
+  private void releaseReassignedPickups(
+      Function<String, Optional<TimetableService.DueTrip>> nextOf) {
+    for (DriverPickups.Pickup pickup : pickups.all()) {
+      if (pickup.kind() != DriverPickups.Kind.TERMINAL
+          || pickup.stage() != DriverPickups.Stage.WAITING) {
+        continue;
+      }
+      Optional<TimetableService.DueTrip> next = nextOf.apply(pickup.trainName());
+      boolean reassigned =
+          next.isPresent()
+              && !pickup
+                  .key()
+                  .matches(
+                      next.get().timetable().id(),
+                      next.get().trip().tripCode(),
+                      next.get().serviceDate());
+      if (!reassigned) {
+        continue;
+      }
+      pickups.remove(pickup.playerId());
+      traceTask(
+          "交路改派，放掉留给驾驶员的待命车 "
+              + pickup.trainName()
+              + " 车次 "
+              + pickup.key().tripCode()
+              + " 改为 "
+              + next.get().trip().tripCode());
+      Player player = Bukkit.getPlayer(pickup.playerId());
+      if (player != null && player.isOnline()) {
+        player.sendMessage(
+            plugin
+                .getLocaleManager()
+                .component(
+                    "drive.task.pickup.reassigned",
+                    Map.of("trip", pickup.key().tripCode(), "train", pickup.trainName())));
       }
     }
   }
