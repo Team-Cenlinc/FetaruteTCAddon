@@ -63,6 +63,8 @@ class AssignTripActionEntry(
     val mode: DrivingMode = DrivingMode.MANUAL,
     @Help("When the train comes out of a depot, pick it up at the depot.")
     val depotPickup: Boolean = false,
+    @Help("Also take a train already standing at the station. It may leave before the player gets there.")
+    val includeStanding: Boolean = false,
     @Help("Fired when no trip could be assigned.")
     val failedTriggers: List<Ref<TriggerableEntry>> = emptyList(),
 ) : ActionEntry {
@@ -87,7 +89,8 @@ class AssignTripActionEntry(
             }
             val offer = api.offersAt(stationCode, Instant.now(), Duration.ofMinutes(window.toLong()), MAX_OFFERS)
                 .firstOrNull { offer ->
-                    (routeCode.isEmpty() || offer.routeCode().equals(routeCode, ignoreCase = true)) &&
+                    (includeStanding || !offer.dwelling()) &&
+                        (routeCode.isEmpty() || offer.routeCode().equals(routeCode, ignoreCase = true)) &&
                         (tripCode.isEmpty() || offer.tripCode().equals(tripCode, ignoreCase = true))
                 }
             if (offer == null) {

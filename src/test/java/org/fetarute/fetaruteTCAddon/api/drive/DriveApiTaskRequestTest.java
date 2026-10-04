@@ -24,6 +24,7 @@ class DriveApiTaskRequestTest {
     DriveApi.TaskRequest request = DriveApi.TaskRequest.trip(TT, "R1-001", DAY);
 
     assertTrue(request.boardStation().isEmpty());
+    assertEquals(-1, request.boardStopSequence());
     assertTrue(request.alightStation().isEmpty());
     assertEquals(DriveApi.Mode.MANUAL, request.mode());
     assertFalse(request.depotPickup());
@@ -64,5 +65,8 @@ class DriveApiTaskRequestTest {
 
     assertEquals("R1-002", request.tripCode());
     assertEquals(Optional.of("BBB"), request.boardStation());
+    assertEquals(3, request.boardStopSequence(), "从这一次停靠接班");
+    assertEquals(3, request.alightAt("CCC").mode(DriveApi.Mode.ATO).boardStopSequence());
+    assertEquals(-1, request.boardAt("BBB").boardStopSequence(), "改接班站后按站码找");
   }
 }

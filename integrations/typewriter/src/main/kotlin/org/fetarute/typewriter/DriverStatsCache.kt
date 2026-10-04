@@ -78,7 +78,7 @@ class DriverStatsCache : Initializable, Listener {
             base.copy(
                 tasks = base.tasks + 1,
                 completed = base.completed + if (completed) 1 else 0,
-                totalPoints = base.totalPoints + score.points().coerceAtLeast(0),
+                totalPoints = base.totalPoints + if (completed) score.points().coerceAtLeast(0) else 0,
                 bestGrade = better(base.bestGrade, score.grade()),
                 lastPoints = score.points(),
             )

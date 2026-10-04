@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
@@ -29,11 +30,6 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 
 /** 驾驶任务 API 的实现：转给驾驶会话管理器与时刻表；驾驶模块未加载时按不可用处理。 */
 public final class DriveApiImpl implements DriveApi {
-
-  /** 累计成绩最多读多少条记录。 */
-  private static final int STATS_RECORD_LIMIT = 5000;
-
-  private static final String GRADE_ORDER = "SABCD";
 
   private final FetaruteTCAddon plugin;
 
@@ -52,6 +48,7 @@ public final class DriveApiImpl implements DriveApi {
 
   @Override
   public List<TaskOffer> offersAt(String stationCode, Instant from, Duration window, int limit) {
+    requireMainThread("offersAt");
     Optional<DriveSessionManager> drive = manager();
     if (drive.isEmpty() || stationCode == null || stationCode.isBlank() || limit <= 0) {
       return List.of();
@@ -120,7 +117,8 @@ public final class DriveApiImpl implements DriveApi {
       stops.add(new TaskStations.Stop(stop.stopSequence(), stop.stationCode(), stop.stops()));
     }
     Optional<TaskStations.Resolved> resolved =
-        TaskStations.resolve(stops, request.boardStation(), request.alightStation());
+        TaskStations.resolve(
+            stops, request.boardStation(), request.boardStopSequence(), request.alightStation());
     if (resolved.isEmpty()) {
       return AssignResult.INVALID_STATIONS;
     }
@@ -145,6 +143,11 @@ public final class DriveApiImpl implements DriveApi {
         .flatMap(TimetableApi.TrainAssignment::lastStopSequence)
         .filter(last -> last > board.stopSequence())
         .isPresent()) {
+      return AssignResult.DEPARTED;
+    }
+    if (assignment.isEmpty()
+        && Instant.now().isAfter(board.departure().get().plus(DriverTaskManager.EXPIRE_AFTER))) {
+      // 还没对上列车、计划发车又早已过去：这一班已经跑完或不会来了，派出去也会立即作废。
       return AssignResult.DEPARTED;
     }
     Optional<TimetableService.PlannedStop> alight =
@@ -216,33 +219,33 @@ public final class DriveApiImpl implements DriveApi {
     if (playerId == null) {
       return CompletableFuture.completedFuture(new TaskStats(0, 0, 0L, Optional.empty()));
     }
-    return async(() -> statsOf(loadRecords(playerId, STATS_RECORD_LIMIT)));
-  }
-
-  /** 累计成绩：开过车的任务数、开完的任务数、总分、最好的评级。 */
-  static TaskStats statsOf(List<DriveTaskRecord> records) {
-    int completed = 0;
-    long total = 0L;
-    String best = null;
-    for (DriveTaskRecord record : records) {
-      if ("COMPLETED".equals(record.state())) {
-        completed++;
-      }
-      total += Math.max(0, record.points());
-      int rank = GRADE_ORDER.indexOf(record.grade());
-      if (rank >= 0 && (best == null || rank < GRADE_ORDER.indexOf(best))) {
-        best = record.grade();
-      }
-    }
-    return new TaskStats(records.size(), completed, total, Optional.ofNullable(best));
+    return async(
+        () ->
+            repository()
+                .map(repository -> repository.totalsByPlayer(playerId))
+                .map(
+                    totals ->
+                        new TaskStats(
+                            totals.tasks(),
+                            totals.completed(),
+                            totals.completedPoints(),
+                            Optional.of(totals.bestGrade()).filter(grade -> !grade.isEmpty())))
+                .orElseGet(() -> new TaskStats(0, 0, 0L, Optional.empty())));
   }
 
   private List<DriveTaskRecord> loadRecords(UUID playerId, int limit) {
+    return repository()
+        .map(repository -> repository.listByPlayer(playerId, limit))
+        .orElse(List.of());
+  }
+
+  /** 驾驶记录仓库；存储未就绪时为空。 */
+  private Optional<DriveTaskRecordRepository> repository() {
     org.fetarute.fetaruteTCAddon.storage.StorageManager storage = plugin.getStorageManager();
     if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
-      return List.of();
+      return Optional.empty();
     }
-    return storage.provider().get().driveTaskRecords().listByPlayer(playerId, limit);
+    return Optional.of(storage.provider().get().driveTaskRecords());
   }
 
   private static TaskRecord toRecord(DriveTaskRecord record) {

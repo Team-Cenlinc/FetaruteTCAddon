@@ -52,6 +52,22 @@ public final class TaskStations {
    */
   public static Optional<Resolved> resolve(
       List<Stop> stops, Optional<String> boardCode, Optional<String> alightCode) {
+    return resolve(stops, boardCode, -1, alightCode);
+  }
+
+  /**
+   * 找接班站与下车站。
+   *
+   * @param boardCode 接班站站码；为空时取第一个停车的车站
+   * @param boardSequence 接班站的停靠序号（同一车次两次经过同一站时用它区分）；-1 时取该站码的第一次停靠
+   * @param alightCode 下车站站码；为空时开到终点站
+   * @return 找不到、接班站是终点站、或下车站不在接班站之后时为空
+   */
+  public static Optional<Resolved> resolve(
+      List<Stop> stops,
+      Optional<String> boardCode,
+      int boardSequence,
+      Optional<String> alightCode) {
     Objects.requireNonNull(stops, "stops");
     List<Stop> stations = new ArrayList<>();
     for (Stop stop : stops) {
@@ -68,7 +84,8 @@ public final class TaskStations {
       if (station == terminus) {
         break;
       }
-      if (boardCode.isEmpty() || station.isStation(boardCode.get())) {
+      boolean codeMatches = boardCode.isEmpty() || station.isStation(boardCode.get());
+      if (codeMatches && (boardSequence < 0 || station.sequence() == boardSequence)) {
         board = station;
         break;
       }

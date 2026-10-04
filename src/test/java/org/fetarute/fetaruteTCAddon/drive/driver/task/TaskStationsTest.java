@@ -55,4 +55,30 @@ class TaskStationsTest {
     assertTrue(TaskStations.resolve(STOPS, Optional.of("AAA"), Optional.of("BBB")).isEmpty());
     assertTrue(TaskStations.resolve(STOPS, Optional.of("ZZZ"), Optional.empty()).isEmpty());
   }
+
+  @Test
+  @DisplayName("同一车次两次经过同一站：按停靠序号接班")
+  void boardsAtTheGivenOccurrence() {
+    List<TaskStations.Stop> loop =
+        List.of(
+            new TaskStations.Stop(0, Optional.of("AAA"), true),
+            new TaskStations.Stop(1, Optional.of("BBB"), true),
+            new TaskStations.Stop(2, Optional.of("CCC"), true),
+            new TaskStations.Stop(3, Optional.of("BBB"), true),
+            new TaskStations.Stop(4, Optional.of("AAA"), true));
+
+    assertEquals(
+        1,
+        TaskStations.resolve(loop, Optional.of("BBB"), Optional.empty())
+            .orElseThrow()
+            .board()
+            .sequence());
+    TaskStations.Resolved second =
+        TaskStations.resolve(loop, Optional.of("BBB"), 3, Optional.of("AAA")).orElseThrow();
+    assertEquals(3, second.board().sequence());
+    assertTrue(second.alight().isEmpty(), "AAA 在第二次 BBB 之后只剩终点站");
+    assertTrue(
+        TaskStations.resolve(loop, Optional.of("CCC"), 3, Optional.empty()).isEmpty(),
+        "序号与站码不符时不接班");
+  }
 }

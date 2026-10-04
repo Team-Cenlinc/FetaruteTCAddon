@@ -22,9 +22,10 @@ import org.bukkit.entity.Player;
  *
  * <p>派任务不受任务板时间窗限制，也不要求玩家在车站附近；其余规则与任务板相同：驾驶功能开启、没有熔断、每名玩家一个未结束的任务、每个车次一名驾驶员。
  *
- * <p>线程：{@link #assign}、{@link #abandon} 只能在服务器主线程调用；{@link #offersAt} 读时刻表与列车，应在主线程调用；{@link
- * #taskOf}、{@link #sessionOf} 可在任意线程调用，非主线程读到的是最多半秒前的快照；{@link #records} 与 {@link #stats} 读数据库，返回的
- * future 在异步线程完成。所有返回值都是不可变快照。
+ * <p>线程：{@link #offersAt}、{@link #assign}、{@link #abandon} 只能在服务器主线程调用，否则抛出 {@link
+ * IllegalStateException}；{@link #taskOf}、{@link #sessionOf}
+ * 可在任意线程调用，驾驶事件发出时已是最新，其余时候非主线程读到的是最多半秒前的快照；{@link #records} 与 {@link #stats} 读数据库，返回的 future
+ * 在异步线程完成。所有返回值都是不可变快照。
  *
  * <p>驾驶功能未启用（{@code drive.yml} 关闭或模块未加载）时 {@link #enabled()} 为 {@code false}，查询返回空，派任务返回 {@link
  * AssignResult#DISABLED}。
@@ -122,7 +123,7 @@ public interface DriveApi {
     UNAVAILABLE,
     /** 接班站或下车站不是这趟车停车的车站，或下车站不在接班站之后。 */
     INVALID_STATIONS,
-    /** 列车已经开过接班站。 */
+    /** 列车已经开过接班站，或还没对上列车而接班站计划发车已过去 10 分钟以上（会立即作废）。 */
     DEPARTED,
     /** 被 {@code DriverTaskClaimEvent} 取消。 */
     CANCELLED
@@ -271,6 +272,7 @@ public interface DriveApi {
    * @param tripCode 车次号（不分大小写）
    * @param serviceDate 服务日
    * @param boardStation 接班站站码；为空时从这趟车第一个停车的车站接班
+   * @param boardStopSequence 接班站的停靠序号（同一车次两次经过同一站时用它区分）；-1 时取该站码的第一次停靠
    * @param alightStation 下车站站码；为空时开到终点站
    * @param mode 驾驶方式
    * @param depotPickup 列车从车库出车时是否从车库接车
@@ -283,6 +285,7 @@ public interface DriveApi {
       String tripCode,
       LocalDate serviceDate,
       Optional<String> boardStation,
+      int boardStopSequence,
       Optional<String> alightStation,
       Mode mode,
       boolean depotPickup,
@@ -294,6 +297,7 @@ public interface DriveApi {
       Objects.requireNonNull(tripCode, "tripCode");
       Objects.requireNonNull(serviceDate, "serviceDate");
       boardStation = boardStation == null ? Optional.empty() : boardStation;
+      boardStopSequence = Math.max(-1, boardStopSequence);
       alightStation = alightStation == null ? Optional.empty() : alightStation;
       mode = mode == null ? Mode.MANUAL : mode;
       source = source == null || source.isBlank() ? "api" : source;
@@ -307,6 +311,7 @@ public interface DriveApi {
           tripCode,
           serviceDate,
           Optional.empty(),
+          -1,
           Optional.empty(),
           Mode.MANUAL,
           false,
@@ -315,19 +320,33 @@ public interface DriveApi {
           true);
     }
 
-    /** 开一条可领取的车次（从它的这一站接班）。 */
+    /** 开一条可领取的车次：从它的这一站、这一次停靠接班。 */
     public static TaskRequest of(TaskOffer offer, String stationCode) {
       Objects.requireNonNull(offer, "offer");
-      return trip(offer.timetableId(), offer.tripCode(), offer.serviceDate()).boardAt(stationCode);
+      TaskRequest request =
+          trip(offer.timetableId(), offer.tripCode(), offer.serviceDate()).boardAt(stationCode);
+      return new TaskRequest(
+          request.timetableId,
+          request.tripCode,
+          request.serviceDate,
+          request.boardStation,
+          offer.stopSequence(),
+          request.alightStation,
+          request.mode,
+          request.depotPickup,
+          request.source,
+          request.metadata,
+          request.notifyPlayer);
     }
 
-    /** 从这一站接班。 */
+    /** 从这一站接班（该站码的第一次停靠）。 */
     public TaskRequest boardAt(String stationCode) {
       return new TaskRequest(
           timetableId,
           tripCode,
           serviceDate,
           Optional.ofNullable(stationCode).filter(code -> !code.isBlank()),
+          -1,
           alightStation,
           mode,
           depotPickup,
@@ -343,6 +362,7 @@ public interface DriveApi {
           tripCode,
           serviceDate,
           boardStation,
+          boardStopSequence,
           Optional.ofNullable(stationCode).filter(code -> !code.isBlank()),
           mode,
           depotPickup,
@@ -358,6 +378,7 @@ public interface DriveApi {
           tripCode,
           serviceDate,
           boardStation,
+          boardStopSequence,
           alightStation,
           newMode,
           depotPickup,
@@ -373,6 +394,7 @@ public interface DriveApi {
           tripCode,
           serviceDate,
           boardStation,
+          boardStopSequence,
           alightStation,
           mode,
           pickup,
@@ -388,6 +410,7 @@ public interface DriveApi {
           tripCode,
           serviceDate,
           boardStation,
+          boardStopSequence,
           alightStation,
           mode,
           depotPickup,
@@ -403,6 +426,7 @@ public interface DriveApi {
           tripCode,
           serviceDate,
           boardStation,
+          boardStopSequence,
           alightStation,
           mode,
           depotPickup,
@@ -489,7 +513,7 @@ public interface DriveApi {
    *
    * @param tasks 开过车的任务数
    * @param completed 其中开完的任务数
-   * @param totalPoints 总得分
+   * @param totalPoints 开完的任务的总得分（与排行榜同一口径）
    * @param bestGrade 最好的评级；没有记录时为空
    */
   record TaskStats(int tasks, int completed, long totalPoints, Optional<String> bestGrade) {

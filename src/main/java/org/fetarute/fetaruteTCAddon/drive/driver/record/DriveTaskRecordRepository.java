@@ -19,4 +19,17 @@ public interface DriveTaskRecordRepository {
    * @param since 统计期开始；为 {@code null} 时统计全部
    */
   List<DriveLeaderboardRow> leaderboard(Instant since, int limit);
+
+  /** 一名驾驶员的累计成绩（在库里汇总，不读明细）。 */
+  PlayerTotals totalsByPlayer(UUID playerId);
+
+  /**
+   * 累计成绩。
+   *
+   * @param tasks 开过车的任务数
+   * @param completed 其中开完的任务数
+   * @param completedPoints 开完的任务的总得分（与排行同一口径）
+   * @param bestGrade 最好的评级（S/A/B/C/D）；没有记录时为空串
+   */
+  record PlayerTotals(int tasks, int completed, long completedPoints, String bestGrade) {}
 }

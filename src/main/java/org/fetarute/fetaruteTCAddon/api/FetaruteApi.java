@@ -224,17 +224,17 @@ public final class FetaruteApi {
   }
 
   /**
-   * 当前 API 版本。
-   *
-   * @return 语义版本字符串
-   */
-  /**
    * 驾驶任务 API（1.10.0）：派任务、查任务与驾驶状态、读成绩。驾驶功能未加载时返回占位实现，{@link DriveApi#enabled()} 为 {@code false}。
    */
   public DriveApi drive() {
     return driveApi;
   }
 
+  /**
+   * 当前 API 版本。
+   *
+   * @return 语义版本字符串
+   */
   public String version() {
     return API_VERSION;
   }

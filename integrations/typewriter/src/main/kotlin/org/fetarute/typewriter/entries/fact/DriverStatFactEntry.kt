@@ -31,7 +31,7 @@ enum class DriverStat {
  * |------|-------|
  * | Tasks | Trips the player drove |
  * | Completed | Trips driven to the end |
- * | Total points | Sum of points over all trips |
+ * | Total points | Sum of points over trips driven to the end (same as the leaderboard) |
  * | Best grade | S = 5, A = 4, B = 3, C = 2, D = 1, none = 0 |
  * | Last points | Points of the last trip (0 to 100) |
  *

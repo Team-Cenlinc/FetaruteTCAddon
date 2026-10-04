@@ -537,16 +537,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         return refusal;
       }
     }
-    DriveSessionStartEvent startEvent =
-        new DriveSessionStartEvent(
-            player.getUniqueId(),
-            binding.trainName(),
-            dispatchTrain,
-            tasks.claimFor(player.getUniqueId(), binding.trainName()).map(TaskViews::of));
-    callEvent(startEvent);
-    if (startEvent.isCancelled()) {
-      return StartOutcome.CANCELLED;
-    }
     double rollingBps = measureSpeedBps(group);
     boolean rolling = rollingBps > current.startMaxSpeedBps();
     DriveParams params;
@@ -573,6 +563,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     // 由驾驶员自己刹停；朝驾驶室后方溜时要先调头才能前进，而调头必须停稳，只能拒绝。
     if (rolling && !session.travelsTowardHead(group.size())) {
       return StartOutcome.TRAIN_MOVING;
+    }
+    // 拒绝条件都已查过、还没动列车：此时问外部插件；之后万一失败补发结束事件，开始与结束总是成对。
+    Optional<DriveApi.TaskView> startTask =
+        tasks.claimFor(player.getUniqueId(), binding.trainName()).map(TaskViews::of);
+    DriveSessionStartEvent startEvent =
+        new DriveSessionStartEvent(
+            player.getUniqueId(), binding.trainName(), dispatchTrain, startTask);
+    callEvent(startEvent);
+    if (startEvent.isCancelled()) {
+      return StartOutcome.CANCELLED;
     }
     DriverLink driverLink = null;
     if (dispatchTrain) {
@@ -618,6 +618,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       driverRegistry.unbind(driverLink);
       SeatLocator.findGroup(binding.trainName())
           .ifPresent(found -> TrainPropertyGuard.restore(found.getProperties()));
+      callEvent(
+          new DriveSessionEndedEvent(
+              player.getUniqueId(),
+              binding.trainName(),
+              dispatchTrain,
+              StartOutcome.FAILED.name(),
+              startTask));
       return StartOutcome.FAILED;
     }
     active.put(player.getUniqueId(), session);
@@ -1282,12 +1289,24 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     stopping.remove(session);
     DriverLink link = session.driverLink();
+    Optional<DriveApi.TaskScore> score = Optional.empty();
     if (link != null) {
       // 交还自动运行：解除控制权，下一 tick 让调度层从当前状态重新控车。
       driverRegistry.unbind(link);
       traceSession(session, "交还自动运行: " + reason);
       tasks.onSessionEnded(session.playerId(), taskStateFor(reason), reason.name());
-      Optional<DriveApi.TaskScore> score = recordTask(session, link);
+      score = recordTask(session, link);
+      // 停在站内结束时，最后一站在评分时才记下。
+      announceStops(session, link, session.trainName(), tasks.taskOf(session.playerId()));
+    }
+    // 先定下结束的是哪一趟：结束事件的监听器可能当场给玩家派下一班。
+    Optional<DriveApi.TaskView> endedView =
+        tasks
+            .taskOf(session.playerId())
+            .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
+            .map(TaskViews::of);
+    if (link != null) {
+      Optional<DriveApi.TaskScore> finalScore = score;
       tasks
           .taskOf(session.playerId())
           .filter(task -> task.startedAt() != null && task.state().finished())
@@ -1295,18 +1314,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           .ifPresent(
               task ->
                   callEvent(
-                      new DriverTaskFinishedEvent(task.playerId(), TaskViews.of(task), score)));
+                      new DriverTaskFinishedEvent(
+                          task.playerId(), TaskViews.of(task), finalScore)));
     }
     callEvent(
         new DriveSessionEndedEvent(
-            session.playerId(),
-            session.trainName(),
-            link != null,
-            reason.name(),
-            tasks
-                .taskOf(session.playerId())
-                .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
-                .map(TaskViews::of)));
+            session.playerId(), session.trainName(), link != null, reason.name(), endedView));
     Optional<MinecartGroup> groupOpt = findSessionGroup(session);
     groupOpt.ifPresent(
         group ->
@@ -1676,7 +1689,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
         .ifPresent(diagnostics -> updateApproach(link, group, diagnostics));
     Optional<DriverStationStop> stop = link.stationStop();
-    announceStops(session, link, trainName);
+    announceStops(session, link, trainName, tasks.activeTaskOf(session.playerId()));
     link.takeSkippedStation()
         .ifPresent(
             station -> {
@@ -2562,6 +2575,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 发出驾驶事件；监听器的异常由 Bukkit 记录，不影响驾驶。 */
   private void callEvent(Event event) {
+    // 监听方可能转到其他线程读任务与会话（例如 Typewriter 的事实）：先让快照跟上事件。
+    refreshViews();
     try {
       Bukkit.getPluginManager().callEvent(event);
     } catch (RuntimeException ex) {
@@ -2581,18 +2596,20 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             pickup.location()));
   }
 
-  /** 新记下成绩的停站逐站对外报。 */
-  private void announceStops(DriveSession session, DriverLink link, String trainName) {
+  /**
+   * 新记下成绩的停站逐站对外报。
+   *
+   * @param owner 这些停站所属的任务（驾驶中为未结束的任务，结束时为刚结束的那一趟）
+   */
+  private void announceStops(
+      DriveSession session, DriverLink link, String trainName, Optional<DriverTask> owner) {
     int recorded = link.score().stopCount();
     int announced = link.announcedStops();
     if (recorded <= announced) {
       return;
     }
     Optional<DriveApi.TaskView> task =
-        tasks
-            .activeTaskOf(session.playerId())
-            .filter(active -> trainName.equalsIgnoreCase(active.trainName()))
-            .map(TaskViews::of);
+        owner.filter(active -> trainName.equalsIgnoreCase(active.trainName())).map(TaskViews::of);
     List<StopScore> stops = link.score().stops();
     for (int i = announced; i < stops.size(); i++) {
       callEvent(
@@ -2791,19 +2808,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * @return 是否有任务可放弃
    */
   public boolean abandonTask(Player player) {
-    Optional<DriverTask> task = tasks.activeTaskOf(player.getUniqueId());
-    if (task.isEmpty()) {
-      return false;
-    }
-    if (task.get().state() == DriverTask.State.DRIVING) {
-      DriveSession session = active.get(player.getUniqueId());
-      tasks.abandon(player.getUniqueId(), "command");
-      if (session != null) {
-        requestHandback(session, "abandon");
-      }
-      return true;
-    }
-    return tasks.abandon(player.getUniqueId(), "command");
+    return abandonTask(player.getUniqueId(), "command");
   }
 
   /**

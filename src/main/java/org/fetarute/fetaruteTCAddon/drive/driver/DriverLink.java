@@ -416,6 +416,12 @@ public final class DriverLink {
   /** 把介入与确认的计数写进成绩明细。 */
   public TaskScore finalizeScore() {
     stationStop();
+    if (stationStop != null && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
+      // 停在站内就结束驾驶（到终点站、到下车站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
+      lastStop = stationStop;
+      score.addStop(StopScore.of(stationStop));
+      stationStop = null;
+    }
     score.setCounts(
         serviceInterventions,
         emergencyInterventions,

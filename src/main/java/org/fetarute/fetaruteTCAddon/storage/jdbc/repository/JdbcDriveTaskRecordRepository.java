@@ -136,6 +136,41 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
     }
   }
 
+  /** 评级从好到差；汇总时按下标取最小。 */
+  private static final String GRADES = "SABCD";
+
+  @Override
+  public PlayerTotals totalsByPlayer(UUID playerId) {
+    Objects.requireNonNull(playerId, "playerId");
+    String sql =
+        "SELECT COUNT(*) AS tasks,"
+            + " SUM(CASE WHEN state = ? THEN 1 ELSE 0 END) AS completed,"
+            + " SUM(CASE WHEN state = ? AND points > 0 THEN points ELSE 0 END) AS completed_points,"
+            + " MIN(CASE grade WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3"
+            + " WHEN 'D' THEN 4 END) AS best_rank FROM "
+            + table(TABLE)
+            + " WHERE player_uuid = ?";
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      statement.setString(1, COMPLETED);
+      statement.setString(2, COMPLETED);
+      setUuid(statement, 3, playerId);
+      try (ResultSet rs = statement.executeQuery()) {
+        if (!rs.next()) {
+          return new PlayerTotals(0, 0, 0L, "");
+        }
+        int tasks = rs.getInt("tasks");
+        int completed = rs.getInt("completed");
+        long points = rs.getLong("completed_points");
+        int rank = rs.getInt("best_rank");
+        String best = rs.wasNull() ? "" : String.valueOf(GRADES.charAt(rank));
+        return new PlayerTotals(tasks, completed, points, best);
+      }
+    } catch (SQLException ex) {
+      throw new StorageException("汇总 drive_task_records 失败", ex);
+    }
+  }
+
   private DriveTaskRecord read(ResultSet rs) throws SQLException {
     return new DriveTaskRecord(
         requireUuid(rs, "id"),

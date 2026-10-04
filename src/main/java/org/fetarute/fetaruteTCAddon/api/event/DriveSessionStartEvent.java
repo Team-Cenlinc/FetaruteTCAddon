@@ -7,7 +7,11 @@ import org.bukkit.event.Cancellable;
 import org.bukkit.event.HandlerList;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
 
-/** 玩家将要开始驾驶（1.10.0）：各项检查都通过、接管列车之前发出，可取消。取消后玩家收到“无法开始驾驶”的提示。 */
+/**
+ * 玩家将要开始驾驶（1.10.0）：各项检查都通过、接管列车之前发出，可取消。取消后玩家收到“无法开始驾驶”的提示。
+ *
+ * <p>未取消时一定会跟着一个 {@link DriveSessionEndedEvent}：驾驶结束时，或接管列车时出错（原因为 {@code FAILED}）。
+ */
 public final class DriveSessionStartEvent extends DriverEvent implements Cancellable {
 
   private static final HandlerList HANDLERS = new HandlerList();

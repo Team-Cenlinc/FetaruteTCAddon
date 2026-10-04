@@ -38,6 +38,11 @@ class DriveTaskRecordRepositoryTest {
 
   private static DriveTaskRecord record(
       UUID player, String name, String state, int points, Instant finishedAt) {
+    return record(player, name, state, points, "A", finishedAt);
+  }
+
+  private static DriveTaskRecord record(
+      UUID player, String name, String state, int points, String grade, Instant finishedAt) {
     return new DriveTaskRecord(
         UUID.randomUUID(),
         null,
@@ -51,7 +56,7 @@ class DriveTaskRecordRepositoryTest {
         "MANUAL",
         state,
         points,
-        "A",
+        grade,
         finishedAt.minusSeconds(600),
         finishedAt,
         "{\"formatVersion\":1}");
@@ -78,5 +83,23 @@ class DriveTaskRecordRepositoryTest {
 
     List<DriveLeaderboardRow> week = records.leaderboard(NOW.minus(7, ChronoUnit.DAYS), 10);
     assertEquals(List.of(alice), week.stream().map(DriveLeaderboardRow::playerId).toList());
+  }
+
+  @Test
+  void totalsAreSummedInTheDatabase() {
+    UUID carol = UUID.randomUUID();
+    assertEquals(
+        new DriveTaskRecordRepository.PlayerTotals(0, 0, 0L, ""), records.totalsByPlayer(carol));
+
+    records.save(record(carol, "carol", "COMPLETED", 90, "A", NOW));
+    records.save(record(carol, "carol", "COMPLETED", 70, "B", NOW));
+    records.save(record(carol, "carol", "ABANDONED", 40, "S", NOW));
+    records.save(record(carol, "carol", "FAILED", 30, "", NOW));
+    records.save(record(UUID.randomUUID(), "dave", "COMPLETED", 99, "S", NOW));
+
+    assertEquals(
+        new DriveTaskRecordRepository.PlayerTotals(4, 2, 160L, "S"),
+        records.totalsByPlayer(carol),
+        "总分只算开完的任务；最好评级不看终态，空评级不算");
   }
 }

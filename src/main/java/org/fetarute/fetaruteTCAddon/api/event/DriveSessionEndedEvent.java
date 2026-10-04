@@ -39,7 +39,7 @@ public final class DriveSessionEndedEvent extends DriverEvent {
     return dispatched;
   }
 
-  /** 结束原因（如 TASK_COMPLETE、LEFT_SEAT、HANDBACK） */
+  /** 结束原因（如 TASK_COMPLETE、LEFT_SEAT、HANDBACK；开始事件之后接管列车出错为 FAILED） */
   public String getReason() {
     return reason;
   }

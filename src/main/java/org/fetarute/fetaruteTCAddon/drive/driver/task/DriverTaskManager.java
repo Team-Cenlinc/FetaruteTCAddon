@@ -124,7 +124,7 @@ public final class DriverTaskManager {
   }
 
   /** 列车没在接班站停站、计划发车又已过去这么久，任务作废。 */
-  static final Duration EXPIRE_AFTER = Duration.ofMinutes(10);
+  public static final Duration EXPIRE_AFTER = Duration.ofMinutes(10);
 
   /** 交还后列车走过这么远就不再救援。 */
   private static final double RESCUE_PROGRESS_BLOCKS = 3.0;

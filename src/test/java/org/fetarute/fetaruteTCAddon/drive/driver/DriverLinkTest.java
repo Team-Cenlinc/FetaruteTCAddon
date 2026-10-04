@@ -255,4 +255,39 @@ class DriverLinkTest {
         org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Window.SKIPPED,
         link.score().stops().get(0).window());
   }
+
+  @Test
+  @DisplayName("停在站内结束驾驶：已停妥的这一站在评分时记下，只记一次；还在进站的不记")
+  void finalizeRecordsTheStopInProgress() {
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop stop =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
+            org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:1"),
+            "终点站",
+            UUID.randomUUID(),
+            new org.bukkit.util.Vector(),
+            null,
+            false,
+            true);
+    link.beginStationStop(stop);
+    stop.updateOffset(0.5);
+    stop.markStopped();
+
+    assertEquals(1, link.finalizeScore().stopCount());
+    assertEquals("终点站", link.score().stops().get(0).station());
+    stop.end();
+    assertTrue(link.stationStop().isEmpty());
+    assertEquals(1, link.finalizeScore().stopCount(), "站台随后收尾不再重复记");
+
+    DriverLink approaching = new DriverLink(UUID.randomUUID(), "T-2", null, () -> 0.0, clock::get);
+    approaching.beginStationStop(
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop(
+            org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of("OP:S:STA:2"),
+            "进站中",
+            UUID.randomUUID(),
+            new org.bukkit.util.Vector(),
+            null,
+            false,
+            true));
+    assertEquals(0, approaching.finalizeScore().stopCount());
+  }
 }
