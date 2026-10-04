@@ -17,4 +17,11 @@ class TaskBoardIconTest {
     assertEquals(Material.MAP, TaskBoard.entryMaterial(false));
     assertNotEquals(TaskBoard.entryMaterial(true), TaskBoard.entryMaterial(false));
   }
+
+  @Test
+  @DisplayName("别人领走的用标记染红的藏宝图")
+  void claimedEntriesUseTheRedMarkedMap() {
+    assertEquals(Material.FILLED_MAP, TaskBoard.claimedMaterial());
+    assertEquals(0xB02E26, TaskBoard.CLAIMED_MARKINGS.asRGB());
+  }
 }

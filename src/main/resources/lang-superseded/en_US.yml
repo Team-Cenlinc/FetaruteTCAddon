@@ -4,6 +4,7 @@ drive:
     board:
       no-station: ["<prefix> <red>No station nearby; open the task board near a platform</red>"]
       entry-claimed-self: ["<gray>Taken by you</gray>"]
+      info-claimed: ["<gray>Grey trips are already taken by a driver</gray>"]
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
     pickup:

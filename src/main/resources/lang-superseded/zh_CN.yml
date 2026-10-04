@@ -36,6 +36,7 @@ drive:
       entry-platform: ["<gray>站台</gray> <white><platform></white>"]
       entry-train: ["<gray>列车</gray> <white><train></white>"]
       entry-claimed-self: ["<gray>本人已领取</gray>"]
+      info-claimed: ["<gray>灰色车次已有驾驶员领取，不可再领取</gray>"]
     claim:
       claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
     pickup:

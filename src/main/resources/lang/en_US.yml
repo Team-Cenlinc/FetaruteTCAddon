@@ -491,7 +491,7 @@ drive:
       station-choice: "<aqua><code></aqua>"
       station-choice-hover: "<white><station></white> <gray>(<code>)</gray>\n<gray>Click to open its task board</gray>"
       station-ambiguous: "<prefix> <red>Station code <white><station></white> exists under several operators; name the operator: <white><candidates></white></red>"
-      info-claimed: "<gray>Grey trips are already taken by a driver</gray>"
+      info-claimed: "<gray>Trips with red markings are already taken by a driver</gray>"
       entry-name-claimed: "<gray><route> <trip></gray>"
       entry-destination: "<gray>To</gray> <white><destination></white>"
       entry-stops: "<gray>Stops</gray> <white><stops></white> <gray>(incl. terminus)</gray>"

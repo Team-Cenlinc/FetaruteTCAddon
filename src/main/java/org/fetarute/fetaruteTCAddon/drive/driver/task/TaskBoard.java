@@ -13,12 +13,14 @@ import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.Color;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.MapMeta;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -204,7 +206,15 @@ public final class TaskBoard {
         return own;
       }
       lore.add("drive.task.board.entry-claimed");
-      return item(claimedMaterial(), locale, "drive.task.board.entry-name-claimed", values, lore);
+      ItemStack taken =
+          item(claimedMaterial(), locale, "drive.task.board.entry-name-claimed", values, lore);
+      if (taken.getItemMeta() instanceof MapMeta map) {
+        map.setColor(CLAIMED_MARKINGS);
+        if (!taken.setItemMeta(map)) {
+          throw new IllegalStateException("无法为任务板条目设置地图颜色");
+        }
+      }
+      return taken;
     }
     lore.add(
         row.trainName() == null
@@ -225,10 +235,13 @@ public final class TaskBoard {
     return dwelling ? Material.FILLED_MAP : Material.MAP;
   }
 
-  /** 别人已领走的车次：原版物品没有“不可用”样式，用灰色染料表示不能再领。 */
+  /** 别人已领走的车次：画着内容的地图、标记染成红色（像藏宝图），与停站中的车次轮廓相同、颜色不同。 */
   static Material claimedMaterial() {
-    return Material.GRAY_DYE;
+    return Material.FILLED_MAP;
   }
+
+  /** 别人已领走的车次地图上的标记颜色。 */
+  static final Color CLAIMED_MARKINGS = Color.fromRGB(0xB0, 0x2E, 0x26);
 
   private static ItemStack item(
       Material material,

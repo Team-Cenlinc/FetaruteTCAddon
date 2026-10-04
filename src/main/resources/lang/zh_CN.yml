@@ -1897,7 +1897,7 @@ drive:
       station-choice: "<aqua><code></aqua>"
       station-choice-hover: "<white><station></white> <gray>（<code>）</gray>\n<gray>点击打开该站的任务板</gray>"
       station-ambiguous: "<prefix> <red>车站代码 <white><station></white> 在多家运营商下重名，请写明运营商：<white><candidates></white></red>"
-      info-claimed: "<gray>灰色车次已有驾驶员领取，不可再领取</gray>"
+      info-claimed: "<gray>红色标记的车次已有驾驶员领取，不可再领取</gray>"
       entry-name-claimed: "<gray><route> <trip></gray>"
       entry-destination: "<gray>终点站：</gray><white><destination></white>"
       entry-stops: "<gray>停站：</gray><white><stops></white> <gray>站（含终点站）</gray>"
