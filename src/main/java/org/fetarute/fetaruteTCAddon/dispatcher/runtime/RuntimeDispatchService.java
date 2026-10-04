@@ -17646,8 +17646,23 @@ public final class RuntimeDispatchService {
   private void clearDepartureGate(String trainName) {
     String key = normalizeTrainKey(trainName);
     if (!key.isEmpty()) {
-      departureGates.remove(key);
+      DepartureGate removed = departureGates.remove(key);
       departureGateBlockers.remove(key);
+      if (removed != null) {
+        // 门控被别处静默清掉时（不是持有者按会话号释放）记下调用处，便于追查谁放走了扣着的车。
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        debugLogger.accept(
+            "SMART_DEPARTURE_GATE_CLEARED train="
+                + key
+                + " session="
+                + removed.sessionId()
+                + " reason="
+                + removed.reason()
+                + " caller="
+                + (stack.length > 2
+                    ? stack[2].getMethodName() + ":" + stack[2].getLineNumber()
+                    : "-"));
+      }
     }
   }
 

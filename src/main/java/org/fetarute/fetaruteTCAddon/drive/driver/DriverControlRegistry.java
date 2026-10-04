@@ -112,7 +112,12 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean isDriverControlled(TrainProperties properties) {
     DriverLink link = resolve(properties);
-    return link != null && link.controlsPhysically();
+    if (link != null) {
+      return link.controlsPhysically();
+    }
+    // 停着等驾驶员上车接班的车：调度照常给许可，但任何发车路径都不替它起步；驾驶员上车后由他开走，
+    // 等到时限由驾驶侧放行并强制刷新一次信号，交回自动运行。
+    return properties != null && awaitingDriver(properties.getTrainName());
   }
 
   @Override

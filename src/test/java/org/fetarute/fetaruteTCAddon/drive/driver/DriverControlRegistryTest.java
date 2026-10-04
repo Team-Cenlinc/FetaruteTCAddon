@@ -157,4 +157,20 @@ class DriverControlRegistryTest {
     assertSame(directive, link.directive());
     assertEquals(List.of("T-5:EMERGENCY", "T-5:handback:deadlock"), events);
   }
+
+  @Test
+  @DisplayName("停着等驾驶员接班的车按驾驶员控制处理：任何发车路径都不替它起步；驾驶员上车后按链路判断")
+  void aTrainAwaitingItsDriverIsHeldAsDriverControlled() {
+    TrainProperties waiting = properties("T-PICKUP");
+    TrainProperties other = properties("T-OTHER");
+    registry.setAwaitingDriver("t-pickup"::equalsIgnoreCase);
+
+    assertTrue(registry.isDriverControlled(waiting));
+    assertTrue(registry.awaitingDriver("T-PICKUP"));
+    assertFalse(registry.isDriverControlled(other));
+    assertFalse(registry.hasDriver("T-PICKUP"), "还没有驾驶员：死锁与清车不按有人处理");
+
+    registry.setAwaitingDriver(null);
+    assertFalse(registry.isDriverControlled(waiting), "放行后交回自动运行");
+  }
 }

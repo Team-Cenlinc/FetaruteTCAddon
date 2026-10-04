@@ -325,8 +325,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     stopping.clear();
     for (DriverPickups.Pickup pickup : pickups.all()) {
-      releasePickup(pickup);
       pickups.remove(pickup.playerId());
+      releasePickup(pickup);
     }
     sidebar.hideAll();
     stopMarker.removeAll();
@@ -2045,7 +2045,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         pickups
             .ofPlayer(task.get().playerId())
             .filter(previous -> previous.key().equals(task.get().key()))
-            .ifPresent(this::releasePickup);
+            .ifPresent(
+                stale -> {
+                  pickups.remove(stale.playerId());
+                  releasePickup(stale);
+                });
       }
     }
     startPickup(
@@ -2138,8 +2142,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     DriveConfig current = config;
     if (!pickupOpen(current)) {
       for (DriverPickups.Pickup pickup : pickups.all()) {
-        releasePickup(pickup);
         pickups.remove(pickup.playerId());
+        releasePickup(pickup);
       }
       return;
     }
@@ -2156,8 +2160,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           tasks.activeTaskOf(pickup.playerId()).filter(active -> active.key().equals(pickup.key()));
       if (task.isEmpty()) {
         // 任务已结束（放弃、作废、收回）：放开还扣着的车。
-        releasePickup(pickup);
         pickups.remove(pickup.playerId());
+        releasePickup(pickup);
         continue;
       }
       if (pickup.stage() == DriverPickups.Stage.BOARDED) {
@@ -2270,17 +2274,24 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
   }
 
-  /** 车库出车扣着的发车门控放开。 */
+  /**
+   * 放开车库出车扣着的车：撤掉发车门控，强制刷新一次信号让自动运行把车开走。
+   *
+   * <p>等驾驶员期间这列车按驾驶员控制处理、调度没给它下发过发车，信号不变就不会再要求发车，所以要强制刷新。 调用前须先把接车记录移除或标为过时，否则它仍算在等驾驶员。
+   */
   private void releasePickup(DriverPickups.Pickup pickup) {
-    if (pickup.kind() == DriverPickups.Kind.DEPOT
-        && pickup.stage() != DriverPickups.Stage.BOARDED) {
-      plugin
-          .getRuntimeDispatchService()
-          .ifPresent(
-              dispatch ->
-                  dispatch.releaseDepartureGate(
-                      pickup.trainName(), SimpleTicketAssigner.DRIVER_PICKUP_GATE));
+    if (pickup.kind() != DriverPickups.Kind.DEPOT
+        || pickup.stage() == DriverPickups.Stage.BOARDED) {
+      return;
     }
+    plugin
+        .getRuntimeDispatchService()
+        .ifPresent(
+            dispatch -> {
+              dispatch.releaseDepartureGate(
+                  pickup.trainName(), SimpleTicketAssigner.DRIVER_PICKUP_GATE);
+              SeatLocator.findGroup(pickup.trainName()).ifPresent(dispatch::refreshSignal);
+            });
   }
 
   /** 驾驶员上了留给他的车：车库出车立即放开门控，由调度按信号给出行车许可。 */
