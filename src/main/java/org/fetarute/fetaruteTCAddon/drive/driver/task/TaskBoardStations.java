@@ -9,12 +9,13 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.TreeSet;
+import java.util.TreeMap;
 
 /**
- * 按命令参数找任务板的车站：参数写站码（如 {@code HHU}），站码在几家运营商下重名时写 {@code 运营商:站码}。本类不依赖服务器对象，便于单测。
+ * 按命令参数找任务板的车站：参数写站码（如 {@code HHU}），站码在几家运营商下重名时写 {@code 运营商:站码}； 也认节点写法（{@code
+ * 运营商:S:站码}，可带股道号）与站名。本类不依赖服务器对象，便于单测。
  *
- * <p>站码与运营商代码都不区分大小写。
+ * <p>站码、运营商代码与站名都不区分大小写。
  */
 public final class TaskBoardStations {
 
@@ -48,7 +49,7 @@ public final class TaskBoardStations {
    * 按参数找车站。
    *
    * @param stations 全部车站
-   * @param input 命令参数：站码，或 {@code 运营商:站码}
+   * @param input 命令参数：站码、{@code 运营商:站码}、节点写法 {@code 运营商:S:站码[:股道]}，或站名
    */
   public static Lookup find(Collection<TaskBoardSource.Station> stations, String input) {
     Objects.requireNonNull(stations, "stations");
@@ -56,9 +57,36 @@ public final class TaskBoardStations {
     if (raw.isEmpty()) {
       return new Lookup(Outcome.NOT_FOUND, Optional.empty(), List.of());
     }
-    int colon = raw.indexOf(':');
-    String operator = colon > 0 ? raw.substring(0, colon) : null;
-    String code = colon >= 0 ? raw.substring(colon + 1) : raw;
+    String[] parts = raw.split(":", -1);
+    String operator = null;
+    String code = raw;
+    if (parts.length >= 3 && parts[1].equalsIgnoreCase("S")) {
+      // 节点写法：运营商:S:站码[:股道]
+      operator = parts[0];
+      code = parts[2];
+    } else if (parts.length == 2) {
+      operator = parts[0].isEmpty() ? null : parts[0];
+      code = parts[1];
+    }
+    Lookup byCode = byCode(stations, operator, code);
+    if (byCode.outcome() != Outcome.NOT_FOUND) {
+      return byCode;
+    }
+    return byName(stations, raw);
+  }
+
+  private static Lookup byName(Collection<TaskBoardSource.Station> stations, String name) {
+    List<TaskBoardSource.Station> matches = new ArrayList<>();
+    for (TaskBoardSource.Station station : stations) {
+      if (station.name() != null && station.name().trim().equalsIgnoreCase(name)) {
+        matches.add(station);
+      }
+    }
+    return result(matches);
+  }
+
+  private static Lookup byCode(
+      Collection<TaskBoardSource.Station> stations, String operator, String code) {
     List<TaskBoardSource.Station> matches = new ArrayList<>();
     for (TaskBoardSource.Station station : stations) {
       if (station.stationCode() == null || !station.stationCode().equalsIgnoreCase(code)) {
@@ -71,6 +99,10 @@ public final class TaskBoardStations {
       }
       matches.add(station);
     }
+    return result(matches);
+  }
+
+  private static Lookup result(List<TaskBoardSource.Station> matches) {
     if (matches.isEmpty()) {
       return new Lookup(Outcome.NOT_FOUND, Optional.empty(), List.of());
     }
@@ -85,21 +117,40 @@ public final class TaskBoardStations {
     return new Lookup(Outcome.FOUND, Optional.of(matches.get(0)), List.of());
   }
 
-  /** 补全用的写法：站码唯一时只写站码，重名时写 {@code 运营商:站码}；按字母排序、去重。 */
-  public static List<String> suggestions(Collection<TaskBoardSource.Station> stations) {
+  /**
+   * 列给玩家点选的一个车站。
+   *
+   * @param argument 命令参数写法：站码唯一时只写站码，重名时写 {@code 运营商:站码}
+   * @param name 站名
+   */
+  public record Choice(String argument, String name) {}
+
+  /** 列给玩家点选的车站，按命令参数写法排序、去重。 */
+  public static List<Choice> choices(Collection<TaskBoardSource.Station> stations) {
     Map<String, Integer> counts = new HashMap<>();
     for (TaskBoardSource.Station station : stations) {
       if (station.stationCode() != null && !station.stationCode().isBlank()) {
         counts.merge(station.stationCode().toUpperCase(Locale.ROOT), 1, Integer::sum);
       }
     }
-    TreeSet<String> result = new TreeSet<>();
+    Map<String, Choice> result = new TreeMap<>();
     for (TaskBoardSource.Station station : stations) {
       if (station.stationCode() == null || station.stationCode().isBlank()) {
         continue;
       }
       String code = station.stationCode().toUpperCase(Locale.ROOT);
-      result.add(counts.getOrDefault(code, 0) > 1 ? qualified(station) : code);
+      String argument = counts.getOrDefault(code, 0) > 1 ? qualified(station) : code;
+      String name = station.name() == null || station.name().isBlank() ? code : station.name();
+      result.putIfAbsent(argument, new Choice(argument, name));
+    }
+    return List.copyOf(result.values());
+  }
+
+  /** 补全用的写法：站码唯一时只写站码，重名时写 {@code 运营商:站码}；按字母排序、去重。 */
+  public static List<String> suggestions(Collection<TaskBoardSource.Station> stations) {
+    List<String> result = new ArrayList<>();
+    for (Choice choice : choices(stations)) {
+      result.add(choice.argument());
     }
     return List.copyOf(result);
   }

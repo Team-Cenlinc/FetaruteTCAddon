@@ -1893,6 +1893,9 @@ drive:
       driving: "<prefix> <red>驾驶中不能领取任务</red>"
       no-station: "<prefix> <red>附近没有车站。请到车站站台附近再打开任务板，或输入 /fta drive tasks <车站代码></red>"
       station-not-found: "<prefix> <red>找不到车站 <white><station></white></red>"
+      station-list: "<gray>点击车站代码打开该站的任务板：</gray>"
+      station-choice: "<aqua><code></aqua>"
+      station-choice-hover: "<white><station></white> <gray>（<code>）</gray>\n<gray>点击打开该站的任务板</gray>"
       station-ambiguous: "<prefix> <red>车站代码 <white><station></white> 在多家运营商下重名，请写明运营商：<white><candidates></white></red>"
       info-claimed: "<gray>灰色车次已有驾驶员领取，不可再领取</gray>"
       entry-name-claimed: "<gray><route> <trip></gray>"
@@ -2103,6 +2106,7 @@ drive:
     dispatch-abort: "<prefix> <red>调度系统已收回列车，驾驶结束</red>"
     watchdog: "<prefix> <red>列车长时间未能正常运行，已交还自动运行</red>"
     task-complete: "<prefix> <green>已到达终点站，任务完成，列车交还自动运行</green>"
+    service-end: "<prefix> <green>列车已到达收车地点，本次驾驶结束</green>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
     unavailable: "<prefix> <red>手动驾驶功能尚未就绪</red>"

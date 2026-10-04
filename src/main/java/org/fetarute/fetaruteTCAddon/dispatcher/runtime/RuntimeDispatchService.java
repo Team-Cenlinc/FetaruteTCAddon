@@ -19945,7 +19945,11 @@ public final class RuntimeDispatchService {
     layoverRegistry.unregister(trainName);
     if (train != null) {
       rememberDispatchDestroyedIdentity(train);
-      train.destroy();
+      if ("DSTY".equals(reason)) {
+        train.retire();
+      } else {
+        train.destroy();
+      }
     }
     progressRegistry.remove(trainName);
     clearRuntimeCachesForTrain(trainName);

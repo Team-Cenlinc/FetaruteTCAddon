@@ -25,5 +25,9 @@ class DriveSessionManagerTaskStateTest {
     assertEquals(
         DriverTask.State.INTERRUPTED,
         DriveSessionManager.taskStateFor(DriveSession.EndReason.DISPATCH_ABORT));
+    assertEquals(
+        DriverTask.State.COMPLETED,
+        DriveSessionManager.taskStateFor(DriveSession.EndReason.SERVICE_END),
+        "开到收车地点正常收车算完成，不算调度收回");
   }
 }

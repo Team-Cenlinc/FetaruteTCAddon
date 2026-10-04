@@ -75,7 +75,9 @@ public final class DriveSession {
     /** 驾驶调度列车：卡住太久，被看门狗收回。 */
     WATCHDOG,
     /** 驾驶调度列车：折返换端没能在时限内坐进前端驾驶室，交还自动运行发车。 */
-    CAB_CHANGE_TIMEOUT
+    CAB_CHANGE_TIMEOUT,
+    /** 驾驶调度列车：列车按交路开到收车地点（通常是车库）正常收车，驾驶正常结束。 */
+    SERVICE_END
   }
 
   private static final double TICKS_PER_SECOND = 20.0;

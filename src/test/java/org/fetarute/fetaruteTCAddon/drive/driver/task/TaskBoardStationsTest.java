@@ -51,6 +51,33 @@ class TaskBoardStationsTest {
   }
 
   @Test
+  @DisplayName("也认节点写法（运营商:S:站码，可带股道号）与站名")
+  void nodeStyleAndName() {
+    assertEquals(
+        "红湖", TaskBoardStations.find(STATIONS, "SURC:S:HHU:1").station().orElseThrow().name());
+    assertEquals(
+        "METRO",
+        TaskBoardStations.find(STATIONS, "metro:s:lwn").station().orElseThrow().operatorCode());
+    assertEquals(
+        "PPK", TaskBoardStations.find(STATIONS, "平坡").station().orElseThrow().stationCode());
+    assertEquals(
+        TaskBoardStations.Outcome.NOT_FOUND,
+        TaskBoardStations.find(STATIONS, "SURC:S:PPK").outcome());
+  }
+
+  @Test
+  @DisplayName("点选清单：写法与补全相同，带站名")
+  void choices() {
+    assertEquals(
+        List.of(
+            new TaskBoardStations.Choice("HHU", "红湖"),
+            new TaskBoardStations.Choice("METRO:LWN", "柳湾（地铁）"),
+            new TaskBoardStations.Choice("PPK", "平坡"),
+            new TaskBoardStations.Choice("SURC:LWN", "柳湾")),
+        TaskBoardStations.choices(STATIONS));
+  }
+
+  @Test
   @DisplayName("补全：唯一的站码只写站码，重名的写运营商:站码")
   void suggestions() {
     assertEquals(

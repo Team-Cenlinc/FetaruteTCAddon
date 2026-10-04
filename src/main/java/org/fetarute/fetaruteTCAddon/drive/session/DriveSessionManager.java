@@ -1677,6 +1677,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           HANDBACK,
           DISPATCH_ABORT,
           TASK_COMPLETE,
+          SERVICE_END,
           WATCHDOG -> player.sendMessage(
           plugin
               .getLocaleManager()
@@ -1881,8 +1882,21 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         link.countForcedStop();
       }
       case RELEASE_FOR_DESTROY -> handback(session, DriveSession.EndReason.DISPATCH_ABORT);
+      case END_OF_SERVICE -> endOfService(session);
       case HANDBACK_REQUIRED -> requestHandback(session, "dispatch");
     }
+  }
+
+  /** 列车开到收车地点正常收车：还在开的任务算完成，驾驶正常结束。 */
+  private void endOfService(DriveSession session) {
+    if (tasks
+        .activeTaskOf(session.playerId())
+        .filter(task -> task.state() == DriverTask.State.DRIVING)
+        .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
+        .isPresent()) {
+      tasks.complete(session.playerId());
+    }
+    handback(session, DriveSession.EndReason.SERVICE_END);
   }
 
   /** 请求交还自动运行：已停稳立即交还，否则先常用制动停车。 */
@@ -2408,7 +2422,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 会话结束原因对应的任务终态。 */
   static DriverTask.State taskStateFor(DriveSession.EndReason reason) {
     return switch (reason) {
-      case TASK_COMPLETE -> DriverTask.State.COMPLETED;
+      case TASK_COMPLETE, SERVICE_END -> DriverTask.State.COMPLETED;
       case WATCHDOG, CAB_CHANGE_TIMEOUT -> DriverTask.State.FAILED;
       case COMMAND, LEFT_SEAT, SEAT_LOST, OFFLINE, GAME_MODE, DEATH -> DriverTask.State.ABANDONED;
       default -> DriverTask.State.INTERRUPTED;

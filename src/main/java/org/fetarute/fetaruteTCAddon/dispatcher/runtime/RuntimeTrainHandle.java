@@ -193,6 +193,15 @@ public interface RuntimeTrainHandle {
    */
   void destroy();
 
+  /**
+   * 正常收车：列车按交路开到销毁点（DSTY，通常是车库）后销毁。车上有驾驶员时按驾驶正常结束处理，而不是调度收回。
+   *
+   * <p>默认与 {@link #destroy()} 相同。
+   */
+  default void retire() {
+    destroy();
+  }
+
   /** 设置列车当前的 route index。 */
   void setRouteIndex(int index);
 

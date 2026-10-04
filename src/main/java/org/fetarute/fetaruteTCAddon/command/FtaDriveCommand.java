@@ -11,6 +11,9 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -534,6 +537,7 @@ public final class FtaDriveCommand {
       if (lookup.outcome() == TaskBoardStations.Outcome.NOT_FOUND) {
         sender.sendMessage(
             locale.component("drive.task.board.station-not-found", Map.of("station", code)));
+        sendStationChoices(sender, locale);
         return;
       }
       station = lookup.station();
@@ -541,6 +545,7 @@ public final class FtaDriveCommand {
       station = TaskBoardSource.nearestStation(plugin, player.getLocation());
       if (station.isEmpty()) {
         sender.sendMessage(locale.component("drive.task.board.no-station"));
+        sendStationChoices(sender, locale);
         return;
       }
     }
@@ -570,6 +575,32 @@ public final class FtaDriveCommand {
             ? Optional.of(drive.levels().effective(player, drive.config().level()))
             : Optional.empty(),
         drive.isDriving(player.getUniqueId()));
+  }
+
+  /** 列出全部车站，点站码即打开那一站的任务板（悬停显示站名）。 */
+  private void sendStationChoices(CommandSender sender, LocaleManager locale) {
+    List<TaskBoardStations.Choice> choices =
+        TaskBoardStations.choices(TaskBoardSource.stations(plugin));
+    if (choices.isEmpty()) {
+      return;
+    }
+    Component line = locale.component("drive.task.board.station-list");
+    for (TaskBoardStations.Choice choice : choices) {
+      line =
+          line.append(Component.space())
+              .append(
+                  locale
+                      .component(
+                          "drive.task.board.station-choice",
+                          Map.of("code", choice.argument(), "station", choice.name()))
+                      .clickEvent(ClickEvent.runCommand("/fta drive tasks " + choice.argument()))
+                      .hoverEvent(
+                          HoverEvent.showText(
+                              locale.component(
+                                  "drive.task.board.station-choice-hover",
+                                  Map.of("code", choice.argument(), "station", choice.name())))));
+    }
+    sender.sendMessage(line);
   }
 
   /** 新手教程：开始、退出、重置，或跳过当前一步。 */

@@ -487,6 +487,9 @@ drive:
       driving: "<prefix> <red>You cannot take a task while driving</red>"
       no-station: "<prefix> <red>No station nearby; open the task board near a platform, or run /fta drive tasks <station-code></red>"
       station-not-found: "<prefix> <red>Station <white><station></white> not found</red>"
+      station-list: "<gray>Click a station code to open its task board:</gray>"
+      station-choice: "<aqua><code></aqua>"
+      station-choice-hover: "<white><station></white> <gray>(<code>)</gray>\n<gray>Click to open its task board</gray>"
       station-ambiguous: "<prefix> <red>Station code <white><station></white> exists under several operators; name the operator: <white><candidates></white></red>"
       info-claimed: "<gray>Grey trips are already taken by a driver</gray>"
       entry-name-claimed: "<gray><route> <trip></gray>"
@@ -697,6 +700,7 @@ drive:
     dispatch-abort: "<prefix> <red>The dispatcher took the train back, driving ended</red>"
     watchdog: "<prefix> <red>The train made no progress for too long and was handed back to automatic operation</red>"
     task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
+    service-end: "<prefix> <green>The train has reached the end of its run, driving ended</green>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"
