@@ -86,9 +86,7 @@ public final class DriveListener implements Listener {
     if (event.getInput().isSneak()) {
       manager.noteSneak(event.getPlayer().getUniqueId());
     }
-    if (event.getInput().isJump()) {
-      manager.onHorn(event.getPlayer());
-    }
+    manager.onHornInput(event.getPlayer(), event.getInput().isJump());
   }
 
   @EventHandler(priority = EventPriority.MONITOR)

@@ -12,9 +12,11 @@ import org.bukkit.configuration.ConfigurationSection;
  *
  * @param enabled 总开关
  * @param hornCooldownTicks 两次鸣笛至少间隔多少 tick
+ * @param hornHoldTicks 按住 Space 时最多持续鸣响多少 tick；0 表示每按一次只响一声
  * @param specs 各提示音；没有列出的用内置默认值
  */
-public record DriveSoundConfig(boolean enabled, int hornCooldownTicks, Map<DriveCue, Spec> specs) {
+public record DriveSoundConfig(
+    boolean enabled, int hornCooldownTicks, int hornHoldTicks, Map<DriveCue, Spec> specs) {
 
   /**
    * 一种提示音。
@@ -46,11 +48,12 @@ public record DriveSoundConfig(boolean enabled, int hornCooldownTicks, Map<Drive
     }
     specs = Map.copyOf(all);
     hornCooldownTicks = Math.max(0, hornCooldownTicks);
+    hornHoldTicks = Math.max(0, hornHoldTicks);
   }
 
   /** 内置默认值。 */
   public static DriveSoundConfig defaults() {
-    return new DriveSoundConfig(true, 3 * TICKS_PER_SECOND, Map.of());
+    return new DriveSoundConfig(true, TICKS_PER_SECOND, 3 * TICKS_PER_SECOND, Map.of());
   }
 
   /** 某种提示音；总开关关闭或该项被关闭时为空。 */
@@ -75,6 +78,11 @@ public record DriveSoundConfig(boolean enabled, int hornCooldownTicks, Map<Drive
     if (!Double.isFinite(cooldown) || cooldown < 0.0) {
       sink.accept("drive.yml 的 sounds.horn-cooldown-seconds 不能为负数，使用默认值");
       cooldown = d.hornCooldownTicks / 20.0;
+    }
+    double hold = section.getDouble("horn-hold-seconds", d.hornHoldTicks / 20.0);
+    if (!Double.isFinite(hold) || hold < 0.0) {
+      sink.accept("drive.yml 的 sounds.horn-hold-seconds 不能为负数，使用默认值");
+      hold = d.hornHoldTicks / 20.0;
     }
     EnumMap<DriveCue, Spec> specs = new EnumMap<>(DriveCue.class);
     for (DriveCue cue : DriveCue.values()) {
@@ -104,6 +112,7 @@ public record DriveSoundConfig(boolean enabled, int hornCooldownTicks, Map<Drive
     return new DriveSoundConfig(
         section.getBoolean("enabled", d.enabled),
         (int) Math.round(cooldown * TICKS_PER_SECOND),
+        (int) Math.round(hold * TICKS_PER_SECOND),
         specs);
   }
 }

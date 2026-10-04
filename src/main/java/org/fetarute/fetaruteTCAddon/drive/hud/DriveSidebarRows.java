@@ -18,13 +18,14 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverPass;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
  * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压（机车含制动管，电制动出力时标“再生”）、警惕装置、
- * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻与实时评分，折返换端时加换端一行。
+ * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻、下一通过站与实时评分，折返换端时加换端一行。
  *
  * <p>车站一行平时显示下一站，进站时换成离停车点的距离，停妥后显示停站阶段。计分板不会被别的插件的动作栏消息顶掉，所以车站信息以这里为准，动作栏只提示要动手的操作。
  *
@@ -77,6 +78,7 @@ public final class DriveSidebarRows {
               : signalRow(link));
       rows.add(stationRow(link, session.isStopped()));
       link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);
+      link.nextPass().map(DriveSidebarRows::passRow).ifPresent(rows::add);
       session
           .liveScore()
           .ifPresent(
@@ -187,6 +189,20 @@ public final class DriveSidebarRows {
             : "drive.sidebar.label.scheduled-arrival",
         "drive.sidebar.value.schedule." + schedule.state().key(),
         Map.of("time", CLOCK.format(schedule.planned()), "deviation", schedule.deviationText()));
+  }
+
+  /** 下一通过站一行：站名、表定通过时刻，后面跟晚点或早点多少。 */
+  static Row passRow(DriverPass pass) {
+    return new Row(
+        "drive.sidebar.label.next-pass",
+        "drive.sidebar.value.pass." + pass.state().key(),
+        Map.of(
+            "station",
+            pass.station(),
+            "time",
+            CLOCK.format(pass.planned()),
+            "deviation",
+            pass.deviationText()));
   }
 
   private static String doorsKey(DriveSession session, long nowTick) {

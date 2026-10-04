@@ -72,6 +72,7 @@ public final class DriverLink {
   private boolean turnbackPending;
   private int announcedStops;
   private DriverSchedule schedule;
+  private DriverPass nextPass;
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -659,6 +660,15 @@ public final class DriverLink {
 
   public void setSchedule(DriverSchedule schedule) {
     this.schedule = schedule;
+  }
+
+  /** 到下一个停车站之前的通过站与表定通过时刻；没有通过站或不按表运行时为空。 */
+  public Optional<DriverPass> nextPass() {
+    return Optional.ofNullable(nextPass);
+  }
+
+  public void setNextPass(DriverPass pass) {
+    this.nextPass = pass;
   }
 
   /**

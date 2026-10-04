@@ -20,7 +20,8 @@ class DriveSoundConfigTest {
     for (DriveCue cue : DriveCue.values()) {
       assertEquals(cue.defaultSpec(), config.spec(cue).orElseThrow());
     }
-    assertEquals(60, config.hornCooldownTicks());
+    assertEquals(20, config.hornCooldownTicks());
+    assertEquals(60, config.hornHoldTicks());
   }
 
   @Test
@@ -31,6 +32,7 @@ class DriveSoundConfigTest {
         String.join(
             "\n",
             "horn-cooldown-seconds: 5",
+            "horn-hold-seconds: 0",
             "horn:",
             "  key: \"fetarute:drive.horn\"",
             "  volume: 2.5",
@@ -47,6 +49,7 @@ class DriveSoundConfigTest {
     assertEquals(
         "minecraft:block.note_block.flute", config.spec(DriveCue.DEPART).orElseThrow().sound());
     assertEquals(100, config.hornCooldownTicks());
+    assertEquals(0, config.hornHoldTicks());
 
     yaml.set("enabled", false);
     assertFalse(DriveSoundConfig.from(yaml, message -> {}).spec(DriveCue.HORN).isPresent());

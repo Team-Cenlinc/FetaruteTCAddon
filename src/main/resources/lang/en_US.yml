@@ -191,6 +191,7 @@ drive:
       stop: "Stop"
       scheduled-arrival: "Sched. arr."
       scheduled-departure: "Sched. dep."
+      next-pass: "Next pass"
       doors: "Doors"
       air: "Air"
       vigilance: "Vigilance"
@@ -217,6 +218,11 @@ drive:
         on-time: "<white><time></white> <green>On time</green>"
         late: "<white><time></white> <red>Late <deviation></red>"
         early: "<white><time></white> <aqua>Early <deviation></aqua>"
+      pass:
+        plain: "<white><station></white> <white><time></white>"
+        on-time: "<white><station></white> <white><time></white> <green>On time</green>"
+        late: "<white><station></white> <white><time></white> <red>Late <deviation></red>"
+        early: "<white><station></white> <white><time></white> <aqua>Early <deviation></aqua>"
       stop:
         approach: "<aqua><station></aqua> <white><distance></white> <gray>m</gray>"
         on-mark: "<green>On the mark</green>"

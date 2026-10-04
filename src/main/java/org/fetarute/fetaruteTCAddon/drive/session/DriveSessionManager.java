@@ -12,6 +12,7 @@ import java.util.ArrayList;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -76,6 +77,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverPass;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRescueLadder;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
@@ -207,6 +209,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 换端时在要去的车厢旁多远内右键即可上车（车厢中心半个车长之外再加这么多格）。 */
   private static final double BOARD_REACH_BLOCKS = 4.0;
 
+  /** 按住 Space 时每隔多少 tick 再鸣一次（音符盒的音约一秒衰减完，接得上）。 */
+  private static final long HORN_REPEAT_TICKS = 8L;
+
   private static final TrainConfigResolver TRAIN_CONFIG_RESOLVER = new TrainConfigResolver();
 
   /** “结束驾驶”第一次点击后，多少 tick 内再点才算确认。 */
@@ -233,6 +238,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DriveSounds sounds = new DriveSounds();
   private final Map<UUID, DriveCueTracker> cueTrackers = new HashMap<>();
   private final Map<UUID, Long> lastHornTick = new HashMap<>();
+
+  /** 正按着 Space 鸣笛的驾驶员：开始与最近一次鸣响的 tick。 */
+  private final Map<UUID, long[]> hornHeld = new HashMap<>();
+
   private final StationStopPoints stationStopPoints;
   private final StopMarker stopMarker;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
@@ -867,6 +876,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     bossBar.hide(playerId);
     cueTrackers.remove(playerId);
     lastHornTick.remove(playerId);
+    hornHeld.remove(playerId);
   }
 
   /** 驾驶会话中右键了实体：为保护背包，这次交互已被拦下。点的是自己驾驶的列车、且此刻没坐在座位上时，代为坐进这节车厢最近的空座位—— 折返换端时走到另一端、被挤下座位后回座都靠它。 */
@@ -946,25 +956,74 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             + (seated ? "已入座" : "没有空的驾驶座"));
   }
 
-  /** Space 鸣笛：在驾驶员所在位置播放，附近的玩家都听得到；也算一次警惕确认。 */
-  public void onHorn(Player player) {
-    DriveSession session = active.get(player.getUniqueId());
-    // 只在座位上鸣笛：换端途中在站台上走动时跳跃不算。
+  /**
+   * Space 鸣笛：按下鸣一声，按住持续鸣响（最长见 {@code
+   * sounds.horn-hold-seconds}），松开即停。只在座位上生效，换端途中在站台上跳跃不算；按下也算一次警惕确认。
+   *
+   * @param jump 此刻是否按着跳跃键（Paper 在按键状态变化时发来）
+   */
+  public void onHornInput(Player player, boolean jump) {
+    UUID id = player.getUniqueId();
+    if (!jump) {
+      hornHeld.remove(id);
+      return;
+    }
+    if (hornHeld.containsKey(id)) {
+      // 按住跳跃时别的键变了也会再发一次：仍是同一次鸣笛。
+      return;
+    }
+    DriveSession session = active.get(id);
     if (session == null
         || session.phase() != DriveSession.Phase.ACTIVE
         || player.getVehicle() == null) {
       return;
     }
     long now = Bukkit.getCurrentTick();
-    Long last = lastHornTick.get(player.getUniqueId());
+    Long last = lastHornTick.get(id);
     if (last != null && now - last < sounds.config().hornCooldownTicks()) {
       return;
     }
-    if (sounds.broadcast(player.getLocation(), DriveCue.HORN)) {
-      lastHornTick.put(player.getUniqueId(), now);
+    if (blowHorn(player)) {
+      lastHornTick.put(id, now);
+      hornHeld.put(id, new long[] {now, now});
       acknowledgeVigilance(session, "鸣笛");
       traceSession(session, "鸣笛");
     }
+  }
+
+  /** 按住 Space 时持续鸣响；松开、离座、超过最长时长时停。 */
+  private void tickHorns(long now) {
+    if (hornHeld.isEmpty()) {
+      return;
+    }
+    long hold = sounds.config().hornHoldTicks();
+    Iterator<Map.Entry<UUID, long[]>> it = hornHeld.entrySet().iterator();
+    while (it.hasNext()) {
+      Map.Entry<UUID, long[]> entry = it.next();
+      Player player = Bukkit.getPlayer(entry.getKey());
+      long[] times = entry.getValue();
+      if (player == null
+          || !player.isOnline()
+          || player.getVehicle() == null
+          || !active.containsKey(entry.getKey())
+          || now - times[0] >= hold) {
+        it.remove();
+        continue;
+      }
+      if (now - times[1] >= HORN_REPEAT_TICKS) {
+        blowHorn(player);
+        times[1] = now;
+      }
+    }
+  }
+
+  /** 在驾驶员所在位置鸣一声：主音加和音。 */
+  private boolean blowHorn(Player player) {
+    boolean played = sounds.broadcast(player.getLocation(), DriveCue.HORN);
+    if (played) {
+      sounds.broadcast(player.getLocation(), DriveCue.HORN_CHORD);
+    }
+    return played;
   }
 
   // ---- 停车后菜单 ----
@@ -1850,6 +1909,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("驾驶任务维护失败: " + ex);
     }
+    tickHorns(now);
     try {
       stopMarker.tick(now);
     } catch (RuntimeException ex) {
@@ -3779,6 +3839,30 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                             timetables.flatMap(service -> service.plannedDepartureOf(train, index)),
                         Instant.now()))
             .orElse(null));
+    link.setNextPass(context.flatMap(ctx -> nextPassOf(ctx, timetables)).orElse(null));
+  }
+
+  /** 到下一个停车站之前的通过站：按这列车当前绑定的车次查停靠表。 */
+  private Optional<DriverPass> nextPassOf(
+      TrainHudContext ctx, Optional<TimetableService> timetables) {
+    return timetables.flatMap(
+        service ->
+            service
+                .assignmentOf(ctx.trainName())
+                .flatMap(
+                    assignment ->
+                        service.tripPlan(
+                            assignment.timetableId(),
+                            assignment.tripCode(),
+                            assignment.serviceDate()))
+                .flatMap(
+                    plan ->
+                        DriverPass.next(
+                            plan.stops(),
+                            ctx.routeIndex(),
+                            ctx.nextStopIndex(),
+                            ctx.nextStopDelaySeconds(),
+                            node -> stationLabel(new NodeId(node)))));
   }
 
   /** 节点所属车站的站名；查不到时用节点编号。 */
