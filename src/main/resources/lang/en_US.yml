@@ -576,6 +576,10 @@ drive:
       no-spot: "<prefix> <red>There is nowhere to stand next to the train; please go there yourself</red>"
     cab-changed: "<prefix> <green>Ends changed: you are seated in the cab in car <car></green>"
     next-trip: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
+    continue-offer: "<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+    continue-offer-code: "<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+    continued: "<prefix> <green>Now driving trip <aqua><trip></aqua>, scored on its own; drive it to the terminus</green>"
+    cab-change-timeout-settled: "<prefix> <yellow>You did not reach the leading cab within <seconds> s; the train departed under automatic operation. This trip is already scored and driving ended normally</yellow>"
     next-trip-no-destination: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua>, departing at <white><time></white></white>"
     cab-change-failed: "<prefix> <red>You did not reach the leading cab within <seconds> s; the train departed under automatic operation and the task failed</red>"
     cab-change:
@@ -725,6 +729,7 @@ drive:
     watchdog: "<prefix> <red>The train made no progress for too long and was handed back to automatic operation</red>"
     task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
     service-end: "<prefix> <green>The train has reached the end of its run, driving ended</green>"
+    settled: "<prefix> <green>This trip is scored; driving ended and the train returns to automatic operation</green>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"

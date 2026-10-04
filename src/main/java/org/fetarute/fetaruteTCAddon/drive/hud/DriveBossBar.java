@@ -75,12 +75,16 @@ public final class DriveBossBar {
       return;
     }
     CabChange cabChange = session.cabChange();
+    // 终点站停站要驾驶员操作时（开门、停站、关门）提前告知的换端让位于停站倒计时，与动作栏一致；放行后的换端计时照旧最先。
+    boolean stationFirst = !cabChange.holding() && DriveHud.stationBusy(link);
     Optional<DriverBossBarView> changing =
-        DriverBossBarView.cabChange(
-            cabChange.stage(),
-            cabChange.targetCar(),
-            cabChange.secondsLeft(),
-            cabChange.reserveSeconds());
+        stationFirst
+            ? Optional.empty()
+            : DriverBossBarView.cabChange(
+                cabChange.stage(),
+                cabChange.targetCar(),
+                cabChange.secondsLeft(),
+                cabChange.reserveSeconds());
     if (changing.isPresent()) {
       update(player, locale, changing.get());
       return;

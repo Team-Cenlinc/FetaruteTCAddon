@@ -94,14 +94,17 @@ public final class DriveHud {
   }
 
   /**
-   * 动作栏末尾最要紧的一条提示：为什么现在不能牵引。折返换端最先，其次按防护介入、启动流程、车上故障（主断跳闸、受电中断、门关好回路）、停放制动、
+   * 动作栏末尾最要紧的一条提示：为什么现在不能牵引。放行后的换端计时最先，其次按防护介入、启动流程、车上故障（主断跳闸、受电中断、门关好回路）、停放制动、
    * 制动管、风压、制动试验、车门的顺序取第一条；都没有而门旁路接通着时提示旁路；否则为 {@code null}。各系统的完整状态在侧边栏里。
+   *
+   * <p>停站要驾驶员操作时（开门、停站倒计时、关门），提前告知的换端与等确认座位排在停站提示之后：停站信息优先；等待发车（含终点站待命）时换端提示照旧在前。
    */
   private static Component statusToken(
       LocaleManager locale, DriveSession session, boolean sidebarShown) {
     Component cabChange =
         cabChangeToken(locale, session.cabChange(), session.pendingCabSeat().isPresent());
-    if (cabChange != null) {
+    DriverLink link = session.driverLink();
+    if (cabChange != null && (session.cabChange().holding() || !stationBusy(link))) {
       return cabChange;
     }
     long ebGrace = session.selector().ebGraceRemaining(Bukkit.getCurrentTick());
@@ -111,7 +114,6 @@ public final class DriveHud {
           Map.of(
               "seconds", String.format(Locale.ROOT, "%.1f", ebGrace / (double) TICKS_PER_SECOND)));
     }
-    DriverLink link = session.driverLink();
     String intervention = link == null ? null : interventionKey(link);
     if (intervention != null) {
       return locale.component(intervention);
@@ -155,10 +157,13 @@ public final class DriveHud {
           return locale.component(station.get().key(), station.get().values());
         }
         case SUPPRESS -> {
-          return null;
+          return cabChange;
         }
         case NONE -> {}
       }
+    }
+    if (cabChange != null) {
+      return cabChange;
     }
     if (session.anyDoorOpen()) {
       return locale.component("drive.hud.doors-open");
@@ -200,6 +205,19 @@ public final class DriveHud {
           "drive.hud.cab-change.announced", Map.of("car", String.valueOf(change.targetCar())));
       case IDLE -> null;
     };
+  }
+
+  /** 停站正要驾驶员操作：等开门、停站计时、等关门。 */
+  static boolean stationBusy(DriverLink link) {
+    return link != null
+        && link.stationStop()
+            .map(
+                stop ->
+                    switch (stop.phase()) {
+                      case OPEN_DOORS, DWELL, CLOSE_DOORS -> true;
+                      default -> false;
+                    })
+            .orElse(false);
   }
 
   /** 车站提示在动作栏里怎么处理。 */

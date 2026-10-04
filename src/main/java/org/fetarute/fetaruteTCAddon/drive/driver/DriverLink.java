@@ -53,7 +53,11 @@ public final class DriverLink {
 
   private DriverStationStop lastStop;
   private final SignalConfirm signalConfirm = new SignalConfirm();
-  private final TaskScore score = new TaskScore();
+  private TaskScore score = new TaskScore();
+
+  /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
+  private DriverStationStop settledStop;
+
   private int vigilanceTrips;
   private long stuckTicks;
   private long heldTicks;
@@ -315,7 +319,9 @@ public final class DriverLink {
         approachRemainingAtSample = Double.NaN;
       }
       lastStop = stationStop;
-      score.addStop(StopScore.of(stationStop));
+      if (stationStop != settledStop) {
+        score.addStop(StopScore.of(stationStop));
+      }
       if (stationStop.skipped()) {
         skippedStation = stationStop.stationName();
       }
@@ -444,7 +450,9 @@ public final class DriverLink {
     if (stationStop != null && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
       // 停在站内就结束驾驶（到终点站、到下车站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
       lastStop = stationStop;
-      score.addStop(StopScore.of(stationStop));
+      if (stationStop != settledStop) {
+        score.addStop(StopScore.of(stationStop));
+      }
       stationStop = null;
     }
     score.setCounts(
@@ -460,6 +468,41 @@ public final class DriverLink {
   }
 
   /**
+   * 终点站结算这一趟、接着开下一趟：把正在停的这一站记进本趟成绩（停站本身照常进行，不结束），写上计数后交出本趟成绩，再把成绩、计数与已报的停站数清零给下一趟。
+   *
+   * @return 本趟的成绩明细
+   */
+  public TaskScore settleTrip() {
+    stationStop();
+    if (stationStop != null
+        && stationStop != settledStop
+        && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
+      score.addStop(StopScore.of(stationStop));
+      settledStop = stationStop;
+    }
+    // 不走 finalizeScore：那会把正在停的这一站从链路上摘掉，终点站的停站显示与换端还要用它。
+    score.setCounts(
+        serviceInterventions,
+        emergencyInterventions,
+        forcedStops,
+        signalConfirm.confirmations(),
+        signalConfirm.misses(),
+        signalConfirm.averageReactionSeconds(),
+        vigilanceTrips,
+        lateDepartures);
+    TaskScore settled = score;
+    score = new TaskScore();
+    serviceInterventions = 0;
+    emergencyInterventions = 0;
+    forcedStops = 0;
+    vigilanceTrips = 0;
+    lateDepartures = 0;
+    signalConfirm.resetCounts();
+    announcedStops = 0;
+    return settled;
+  }
+
+  /**
    * 到此刻为止的成绩估算：已停过的站（含正在停的这一站）、到此刻的介入与确认计数、此刻的晚点，按开到终点给评级。与结束时同一套规则。
    *
    * @param delayNowSeconds 此刻的晚点（秒）；查不到时为空
@@ -470,6 +513,7 @@ public final class DriverLink {
       live.addStop(stop);
     }
     if (stationStop != null
+        && stationStop != settledStop
         && stationStop.active()
         && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
       live.addStop(StopScore.of(stationStop));

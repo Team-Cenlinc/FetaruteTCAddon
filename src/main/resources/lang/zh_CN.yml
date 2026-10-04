@@ -1982,6 +1982,10 @@ drive:
       no-spot: "<prefix> <red>列车旁没有可落脚的位置，请自行前往</red>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
     next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
+    continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+    continue-offer-code: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+    continued: "<prefix> <green>已接续驾驶车次 <aqua><trip></aqua>，本趟单独计分，请开到终点站</green>"
+    cab-change-timeout-settled: "<prefix> <yellow>未在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车；本趟成绩已结算，驾驶正常结束</yellow>"
     next-trip-no-destination: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
     cab-change-failed: "<prefix> <red>未能在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车，任务记为未完成</red>"
     cab-change:
@@ -2131,6 +2135,7 @@ drive:
     watchdog: "<prefix> <red>列车长时间未能正常运行，已交还自动运行</red>"
     task-complete: "<prefix> <green>已到达终点站，任务完成，列车交还自动运行</green>"
     service-end: "<prefix> <green>列车已到达收车地点，本次驾驶结束</green>"
+    settled: "<prefix> <green>本趟成绩已结算，驾驶结束，列车交还自动运行</green>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
     unavailable: "<prefix> <red>手动驾驶功能尚未就绪</red>"

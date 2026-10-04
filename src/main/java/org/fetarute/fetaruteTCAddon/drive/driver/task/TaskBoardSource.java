@@ -117,6 +117,55 @@ public final class TaskBoardSource {
                     summary.runSeconds()));
   }
 
+  /**
+   * 列车跑的车次当作驾驶员当场接下的任务：从停靠序号 {@code boardSequence} 起（不停的站往后顺延到第一个停车站）开到终点站。
+   *
+   * @param trainName 担当的列车
+   * @param source 来源标记（见 {@link DriverTask#SOURCE_TAKEOVER}、{@link DriverTask#SOURCE_CONTINUATION}）
+   * @return 查不到停靠表、或从这一站起已没有停车站时为空
+   */
+  public static Optional<DriverTaskManager.TaskSpec> tripSpec(
+      FetaruteTCAddon plugin,
+      TimetableService timetables,
+      TaskKey key,
+      int boardSequence,
+      String trainName,
+      String source) {
+    return timetables
+        .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+        .flatMap(
+            plan ->
+                plan.stops().stream()
+                    .filter(stop -> stop.stops() && stop.stopSequence() >= boardSequence)
+                    .findFirst()
+                    .map(
+                        board -> {
+                          String code = board.stationCode().orElse("");
+                          String operator =
+                              board
+                                  .nodeId()
+                                  .flatMap(RouteTerminals::stationIdentityOfNode)
+                                  .map(RouteTerminals.StationRef::operatorCode)
+                                  .orElse("");
+                          return new DriverTaskManager.TaskSpec(
+                              key,
+                              plan.routeCode(),
+                              operator,
+                              code,
+                              stationName(plugin, code, board.nodeId()),
+                              board.nodeId().orElse(null),
+                              board.stopSequence(),
+                              board.departure().or(board::arrival).orElseGet(Instant::now),
+                              trainName,
+                              -1,
+                              null,
+                              null,
+                              false,
+                              source,
+                              java.util.Map.of());
+                        }));
+  }
+
   private static List<TaskTripSummary.Stop> stopsOf(TimetableService.TripPlan plan) {
     List<TaskTripSummary.Stop> stops = new ArrayList<>(plan.stops().size());
     for (TimetableService.PlannedStop stop : plan.stops()) {

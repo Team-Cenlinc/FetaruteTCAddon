@@ -91,6 +91,13 @@ public final class SignalConfirm {
     pendingSince = -1L;
   }
 
+  /** 清掉确认次数、漏确认次数与反应时间（终点站结算后下一趟重新计）。等着的确认不动。 */
+  public void resetCounts() {
+    confirmations = 0;
+    misses = 0;
+    totalReactionTicks = 0L;
+  }
+
   /** 是否在等驾驶员确认。 */
   public boolean pending() {
     return pendingSince >= 0L;

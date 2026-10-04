@@ -139,6 +139,10 @@ public final class DriverTaskManager {
   private final Consumer<String> trace;
   private final Map<UUID, DriverTask> byPlayer = new HashMap<>();
   private final Map<TaskKey, UUID> byKey = new HashMap<>();
+
+  /** 终点站结算后等着接续下一趟的驾驶员：那一班先替他留着，任务板上显示为他所领，别人领不走。 */
+  private final Map<TaskKey, TaskBoardEntries.Claimant> reserved = new HashMap<>();
+
   private final List<RescueWatch> rescues = new ArrayList<>();
   private final DriverCircuitBreaker breaker = new DriverCircuitBreaker();
 
@@ -173,6 +177,7 @@ public final class DriverTaskManager {
         keys.add(entry.getKey());
       }
     }
+    keys.addAll(reserved.keySet());
     return keys;
   }
 
@@ -185,7 +190,67 @@ public final class DriverTaskManager {
         claimants.put(key, new TaskBoardEntries.Claimant(task.playerId(), task.playerName()));
       }
     }
+    reserved.forEach(claimants::putIfAbsent);
     return claimants;
+  }
+
+  /**
+   * 替终点站结算后等着接续的驾驶员留下一班。
+   *
+   * @return 那一班已被别人领走或留下时为 {@code false}
+   */
+  public boolean reserve(UUID playerId, String playerName, TaskKey key) {
+    TaskBoardEntries.Claimant holder = reserved.get(key);
+    if (holder != null) {
+      return holder.playerId().equals(playerId);
+    }
+    if (takenKeys().contains(key)) {
+      return false;
+    }
+    reserved.put(key, new TaskBoardEntries.Claimant(playerId, playerName));
+    return true;
+  }
+
+  /** 放掉替这名驾驶员留着的班次（不继续了，或已开出记成任务）。 */
+  public void releaseReservation(UUID playerId) {
+    reserved.values().removeIf(holder -> holder.playerId().equals(playerId));
+  }
+
+  /**
+   * 驾驶员已经在开这列车：把它此刻跑的（或刚开出的）车次直接记成驾驶中的任务。不看任务板的时间窗与熔断，替他留着的班次先放掉；其余规则与领取相同。
+   *
+   * @param nowTick 开始驾驶的服务器 tick
+   */
+  public ClaimOutcome adopt(
+      Player player, TaskSpec spec, DrivingMode mode, Instant now, long nowTick) {
+    releaseReservation(player.getUniqueId());
+    if (activeTaskOf(player.getUniqueId()).isPresent()) {
+      return ClaimOutcome.ALREADY_HAS_TASK;
+    }
+    if (takenKeys().contains(spec.key())) {
+      return ClaimOutcome.TAKEN;
+    }
+    DriverTask task =
+        new DriverTask(
+            player.getUniqueId(),
+            player.getName(),
+            spec.key(),
+            spec.routeCode(),
+            spec.operatorCode(),
+            spec.stationCode(),
+            spec.stationName(),
+            spec.boardNodeId(),
+            spec.boardStopSequence(),
+            spec.plannedDeparture(),
+            mode,
+            now);
+    task.setTrainName(spec.trainName());
+    task.setSource(spec.source(), spec.metadata());
+    ClaimOutcome outcome = register(player, task);
+    if (outcome == ClaimOutcome.CLAIMED) {
+      task.start(spec.trainName(), nowTick);
+    }
+    return outcome;
   }
 
   /** 领了这一班、还没结束的任务；没人领时为空。 */
