@@ -10,6 +10,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
+import java.util.Map;
 import org.bukkit.Bukkit;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -42,6 +43,22 @@ public final class QueuedAnimations {
 
     private Ticket(List<Entry> entries) {
       this.entries = entries;
+    }
+
+    /** 什么也没排的票。 */
+    public static Ticket empty() {
+      return EMPTY;
+    }
+
+    /** 把几张票合成一张（兜底与判断是否还在排队时一起看）。 */
+    public static Ticket combine(List<Ticket> tickets) {
+      List<Entry> all = new ArrayList<>();
+      for (Ticket ticket : tickets) {
+        if (ticket != null) {
+          all.addAll(ticket.entries);
+        }
+      }
+      return all.isEmpty() ? EMPTY : new Ticket(List.copyOf(all));
     }
 
     /** 是否至少在一个附件上排进了动画。 */
@@ -98,26 +115,50 @@ public final class QueuedAnimations {
   }
 
   /**
-   * 在这些附件上按名字排队播放；没有这个动画的附件跳过。
+   * 在这些附件上按名字排队播放：取附件自己存的动画（名字不区分大小写），没有时与 TrainCarts 一样退回 TC 配置里的默认动画。
    *
    * @param options 动画名与速度等；{@code reset} 与 {@code queue} 由本方法定下（不 reset、排队）
    */
   public static Ticket playNamed(Collection<Attachment> targets, AnimationOptions options) {
+    return playNamed(targets, options, true);
+  }
+
+  private static Ticket playNamed(
+      Collection<Attachment> targets, AnimationOptions options, boolean useDefault) {
     if (targets == null || options == null || options.getName() == null) {
       return Ticket.EMPTY;
     }
     AnimationOptions queued = queuedOptions(options);
+    Animation fallback = useDefault ? TCConfig.defaultAnimations.get(queued.getName()) : null;
     List<Ticket.Entry> entries = new ArrayList<>();
     for (Attachment target : targets) {
       if (target == null || !target.isAttached()) {
         continue;
       }
-      Animation stored = target.getInternalState().animations.get(queued.getName());
+      Animation stored = storedAnimation(target, queued.getName());
+      if (stored == null) {
+        stored = fallback;
+      }
       if (stored != null) {
         entries.add(enqueue(target, stored.clone().applyOptions(queued)));
       }
     }
     return new Ticket(List.copyOf(entries));
+  }
+
+  /** 附件自己存的这个名字的动画：先按原样找，找不到再不区分大小写找（选门附件时就是不区分大小写选的）。 */
+  private static Animation storedAnimation(Attachment target, String name) {
+    Map<String, Animation> animations = target.getInternalState().animations;
+    Animation exact = animations.get(name);
+    if (exact != null) {
+      return exact;
+    }
+    for (Map.Entry<String, Animation> entry : animations.entrySet()) {
+      if (entry.getKey() != null && entry.getKey().equalsIgnoreCase(name)) {
+        return entry.getValue();
+      }
+    }
+    return null;
   }
 
   /**
@@ -142,7 +183,8 @@ public final class QueuedAnimations {
         all.addAll(HelperMethods.listAllAttachments(root));
       }
     }
-    Ticket stored = playNamed(all, options);
+    // 整列车的附件树里只在存了这个动画的附件上播；默认动画只退回到根附件上（与 TrainCarts 相同），不铺到每个附件。
+    Ticket stored = playNamed(all, options, false);
     if (stored.played()) {
       return stored;
     }

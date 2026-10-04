@@ -1494,6 +1494,7 @@ drive:
     ato:
       confirm: "<yellow><bold>ATO：右键确认发车</bold></yellow>"
       armed: "<green>ATO：已确认发车，停站结束即出发</green>"
+    reseat-cab-only: "<yellow>请右键驾驶室所在的车厢坐回驾驶座</yellow>"
     supercap:
       depleted: "<red><bold>电容电量耗尽：牵引切除</bold></red> <gray>请惰行进站开门充电</gray>"
     cab-change:
@@ -1929,7 +1930,6 @@ drive:
         selected: "<yellow>▶ 当前选择</yellow>"
         select: "<gray>点击选择</gray>"
         remember: "<gray>选择将被记住，驾驶调度列车与自由驾驶均适用</gray>"
-        next-session: "<gray>正在驾驶：本次不变，下次开始驾驶时生效</gray>"
       run-time:
         seconds: "<seconds> 秒"
         minutes: "<minutes> 分钟"

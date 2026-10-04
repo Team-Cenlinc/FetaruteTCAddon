@@ -46,20 +46,20 @@ class TaskBoardLevelTest {
   }
 
   @Test
-  @DisplayName("说明行：选中与否、正在驾驶时注明下次生效")
+  @DisplayName("说明行：选中与否，并注明选择会被记住")
   void loreReflectsSelectionAndDriving() {
     assertEquals(
         List.of(
             "drive.task.board.level.standard-desc",
             "drive.task.board.level.selected",
             "drive.task.board.level.remember"),
-        TaskBoard.levelLore(SimulationLevel.STANDARD, true, false));
+        TaskBoard.levelLore(SimulationLevel.STANDARD, true));
     assertEquals(
         List.of(
             "drive.task.board.level.simulation-desc",
             "drive.task.board.level.simulation-desc-2",
             "drive.task.board.level.select",
-            "drive.task.board.level.next-session"),
-        TaskBoard.levelLore(SimulationLevel.SIMULATION, false, true));
+            "drive.task.board.level.remember"),
+        TaskBoard.levelLore(SimulationLevel.SIMULATION, false));
   }
 }

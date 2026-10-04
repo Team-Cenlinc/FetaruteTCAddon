@@ -108,6 +108,13 @@ class DriverRescueLadderTest {
     link.openDepartureArm();
     assertEquals(false, link.departurePrompt(), "放行后原地不再提示");
 
+    clock[0] += 400;
+    link.openDepartureArm();
+    assertEquals(true, link.departurePrompt(), "终点原地折返：过一阵原地再停站照常接受提前确认");
+    assertEquals(true, link.confirmDeparture());
+    clock[0] += 200;
+    assertEquals(false, link.holdDeparture(300), "原地折返的下一趟也一问就放行");
+
     odometer[0] = 500.0;
     clock[0] += 2000;
     link.openDepartureArm();

@@ -88,6 +88,7 @@ drive:
     ato:
       confirm: "<yellow><bold>ATO: right-click to confirm departure</bold></yellow>"
       armed: "<green>ATO: departure confirmed, leaving when the dwell ends</green>"
+    reseat-cab-only: "<yellow>Right-click a cab car to get back into the driver's seat</yellow>"
     supercap:
       depleted: "<red><bold>Supercapacitor empty: traction cut</bold></red> <gray>coast in and open the doors to charge</gray>"
     cab-change:
@@ -523,7 +524,6 @@ drive:
         selected: "<yellow>▶ Selected</yellow>"
         select: "<gray>Click to select</gray>"
         remember: "<gray>Remembered; applies to dispatched trains and free driving</gray>"
-        next-session: "<gray>Driving now: takes effect from your next session</gray>"
       run-time:
         seconds: "<seconds> s"
         minutes: "<minutes> min"

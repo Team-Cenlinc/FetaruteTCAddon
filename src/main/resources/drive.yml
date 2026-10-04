@@ -277,17 +277,18 @@ sounds:
   horn-cooldown-seconds: 1
   # 按住 Space 时持续鸣响的最长秒数；0 表示每按一次只响一声
   horn-hold-seconds: 3
-  # 鸣笛：在列车所在位置播放，附近的玩家都听得到。原版没有铜管乐器，默认用迪吉里杜管（管乐）叠一个小三度和音做双音笛。
-  # 也可以换成：minecraft:event.raid.horn（袭击号角，很响很长）、minecraft:item.goat_horn.sound.0～7（各种山羊角），
+  # 鸣笛：在列车所在位置播放，附近的玩家都听得到。原版没有铜管乐器，默认用长笛压低音高、叠一个小三度和音，近似汽笛；
+  # 长笛的音短，按住 Space 持续鸣响时接得上。也可以换成：minecraft:block.note_block.didgeridoo（迪吉里杜管，低沉，音高 0.6/0.714）、
+  # minecraft:event.raid.horn（袭击号角，很响很长）、minecraft:item.goat_horn.sound.0～7（各种山羊角，音长，建议 horn-hold-seconds 设 0），
   # 或材质包里的自定义列车笛声（如 fetarute:drive.horn，此时把 horn-chord 的 key 留空）
   horn:
-    key: "minecraft:block.note_block.didgeridoo"
+    key: "minecraft:block.note_block.flute"
     volume: 4.0
-    pitch: 0.6
+    pitch: 0.5
   horn-chord:
-    key: "minecraft:block.note_block.didgeridoo"
+    key: "minecraft:block.note_block.flute"
     volume: 4.0
-    pitch: 0.714
+    pitch: 0.595
   # 信号变严、等待右键确认：每秒响一次直到确认
   signal-restrictive:
     key: "minecraft:block.note_block.bit"
@@ -370,3 +371,16 @@ sounds:
     key: "minecraft:block.anvil.land"
     volume: 0.6
     pitch: 0.8
+  # 新手教程：完成一步、全部完成；驾驶情境提示
+  tutorial-step:
+    key: "minecraft:entity.experience_orb.pickup"
+    volume: 0.6
+    pitch: 1.2
+  tutorial-finish:
+    key: "minecraft:ui.toast.challenge_complete"
+    volume: 0.5
+    pitch: 1.0
+  tutorial-tip:
+    key: "minecraft:block.note_block.chime"
+    volume: 0.6
+    pitch: 1.4

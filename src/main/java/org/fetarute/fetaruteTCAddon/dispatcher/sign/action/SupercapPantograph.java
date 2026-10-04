@@ -10,10 +10,9 @@ import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import java.util.ArrayList;
 import java.util.List;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
+import org.fetarute.fetaruteTCAddon.drive.setup.TrainPower;
 
 /**
  * 超级电容车的受电弓：升弓由站台上的 TC {@code animate} 牌子负责；停站结束放行发车时，受电弓还升着就排一个降弓（倒放）。
@@ -91,9 +90,6 @@ final class SupercapPantograph {
   private static boolean isSupercap(FetaruteTCAddon plugin, MinecartGroup group) {
     DriveSessionManager drive = plugin == null ? null : plugin.getDriveSessionManager();
     PowerSupply fallback = drive == null ? PowerSupply.PTG5 : drive.config().defaultPower();
-    return TrainTagHelper.readTagValue(group.getProperties(), TrainConfigResolver.TAG_TRAIN_POWER)
-        .flatMap(PowerSupply::parse)
-        .orElse(fallback)
-        .storesEnergy();
+    return TrainPower.of(group.getProperties(), fallback).storesEnergy();
   }
 }

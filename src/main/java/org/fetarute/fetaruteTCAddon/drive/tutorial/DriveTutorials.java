@@ -17,14 +17,14 @@ import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import net.kyori.adventure.title.Title;
 import org.bukkit.NamespacedKey;
-import org.bukkit.Sound;
-import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
 import org.bukkit.persistence.PersistentDataContainer;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -44,6 +44,7 @@ public final class DriveTutorials {
       Title.Times.times(Duration.ofMillis(250), Duration.ofMillis(3500), Duration.ofMillis(500));
 
   private final Supplier<LocaleManager> locale;
+  private final DriveSounds sounds;
   private final Logger logger;
   private final NamespacedKey doneKey;
   private final Map<DriveTip, NamespacedKey> tipKeys = new EnumMap<>(DriveTip.class);
@@ -64,8 +65,12 @@ public final class DriveTutorials {
   /** 驾驶中的玩家已经出过的情境提示；没有教程权限的玩家不在其中。 */
   private final Map<UUID, Set<DriveTip>> tipsShown = new HashMap<>();
 
-  public DriveTutorials(Plugin plugin, Supplier<LocaleManager> locale) {
+  /**
+   * @param sounds 驾驶提示音（教程的音效也按 drive.yml 的 sounds 段配置与开关）
+   */
+  public DriveTutorials(Plugin plugin, Supplier<LocaleManager> locale, DriveSounds sounds) {
     this.locale = locale;
+    this.sounds = sounds;
     this.logger = plugin.getLogger();
     this.doneKey = new NamespacedKey(plugin, "drive_tutorial_done");
     for (DriveTip tip : DriveTip.values()) {
@@ -264,12 +269,7 @@ public final class DriveTutorials {
         announce(player, messages, started);
       } else if (event instanceof TutorialEvent.StepCompleted completed) {
         if (!completed.skipped()) {
-          player.playSound(
-              player.getLocation(),
-              Sound.ENTITY_EXPERIENCE_ORB_PICKUP,
-              SoundCategory.MASTER,
-              0.6f,
-              1.2f);
+          sounds.play(player, DriveCue.TUTORIAL_STEP);
         }
       } else if (event instanceof TutorialEvent.Reminder reminder) {
         subtitle(
@@ -281,12 +281,7 @@ public final class DriveTutorials {
         markCompleted(player);
         player.sendMessage(messages.component("drive.tutorial.finished"));
         subtitle(player, messages.component("drive.tutorial.finished-subtitle"));
-        player.playSound(
-            player.getLocation(),
-            Sound.UI_TOAST_CHALLENGE_COMPLETE,
-            SoundCategory.MASTER,
-            0.5f,
-            1.0f);
+        sounds.play(player, DriveCue.TUTORIAL_FINISH);
       } else if (event instanceof TutorialEvent.Interrupted) {
         running.remove(player.getUniqueId());
         player.sendMessage(messages.component("drive.tutorial.interrupted"));
@@ -325,8 +320,7 @@ public final class DriveTutorials {
             TagResolver.resolver(
                 Placeholder.component("text", messages.component(base + ".chat")))));
     subtitle(player, messages.component(base + ".subtitle"));
-    player.playSound(
-        player.getLocation(), Sound.BLOCK_NOTE_BLOCK_CHIME, SoundCategory.MASTER, 0.6f, 1.4f);
+    sounds.play(player, DriveCue.TUTORIAL_TIP);
   }
 
   private static void subtitle(Player player, Component text) {

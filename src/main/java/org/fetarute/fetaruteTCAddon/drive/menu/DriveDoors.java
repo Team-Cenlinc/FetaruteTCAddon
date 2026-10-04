@@ -89,6 +89,16 @@ public final class DriveDoors {
     return Result.OPENED;
   }
 
+  /** 关门动画还排在门附件的队里没轮到（前面有牌子排的动画在播）：车门其实还开着，把“车门关闭中”往后推，牵引继续封锁。每 tick 调用。 */
+  public void holdClosingWhilePending(DriveSession session, long nowTick) {
+    for (ManualDoor door : new ManualDoor[] {left, right}) {
+      if (door != null && door.closePending()) {
+        long closeTicks = door.closeDurationTicks();
+        session.markDoorsClosing(nowTick + (closeTicks > 0L ? closeTicks : DEFAULT_CLOSE_TICKS));
+      }
+    }
+  }
+
   /** 最近一次开关的那扇门的左右侧判定过程，仅用于诊断输出。 */
   public String lastSummary() {
     return lastSummary;

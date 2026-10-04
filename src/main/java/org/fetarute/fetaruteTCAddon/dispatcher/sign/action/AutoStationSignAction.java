@@ -790,6 +790,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       private boolean closeStarted = false;
       private boolean closeAnimationTriggered = false;
       private boolean closeSoundPlayed = false;
+
+      /** 关门动画排在门附件的队里没轮到的 tick 数（前面有牌子排的动画在播）：车门还开着，发车跟着往后推。 */
+      private long closeDelayTicks = 0L;
+
       private String cachedAnimations = null;
       private String cachedPlanSummary = null;
       private AutoStationDoorController.DoorSession cachedSession = null;
@@ -865,6 +869,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           exitOffsetState.restore();
           finalWaitState.run();
           plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+          SupercapPantograph.lowerIfRaised(plugin, group);
           driverStop.end();
           cancel();
           return true;
@@ -998,9 +1003,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               cachedSession.playCloseSound();
             }
           }
-          if (ticksSinceOpen >= dwellTicks) {
+          if (closeStarted && cachedSession != null && cachedSession.closePending()) {
+            closeDelayTicks++;
+          }
+          long departAtTick = dwellTicks + closeDelayTicks;
+          if (ticksSinceOpen >= departAtTick) {
             // 每 20 tick (1秒) 检查一次发车门控，避免刷屏与性能浪费。
-            if ((ticksSinceOpen - dwellTicks) % 20 != 0) {
+            if ((ticksSinceOpen - departAtTick) % 20 != 0) {
               return;
             }
             if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
@@ -1022,6 +1031,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               exitOffsetState.restore();
               finalWaitState.run();
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+              // 停站时间已到（终点站转入待命等）：超级电容车充电升起的受电弓在这里降下。
+              SupercapPantograph.lowerIfRaised(plugin, group);
               cancel();
               return;
             }

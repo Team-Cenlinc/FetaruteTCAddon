@@ -116,6 +116,41 @@ class QueuedAnimationsTest {
   }
 
   @Test
+  @DisplayName("动画名不区分大小写：门附件是按不区分大小写选出来的，播放也要找得到")
+  void findsTheAnimationIgnoringCase() {
+    AttachmentInternalState state = new AttachmentInternalState();
+    Attachment door = attachment(state);
+    state.animations.put("DoorR", animation("DoorR"));
+
+    QueuedAnimations.Ticket ticket =
+        QueuedAnimations.playNamed(List.of(door), new AnimationOptions("doorR"));
+
+    assertTrue(ticket.played());
+    assertEquals("DoorR", state.currentAnimation.getOptions().getName());
+  }
+
+  @Test
+  @DisplayName("几张票合成一张：一起判断还有没有排着没轮到的")
+  void combinesTickets() {
+    AttachmentInternalState busyState = new AttachmentInternalState();
+    Attachment busy = attachment(busyState);
+    busy.startAnimation(animation("other"));
+    AttachmentInternalState idleState = new AttachmentInternalState();
+    Attachment idle = attachment(idleState);
+
+    QueuedAnimations.Ticket combined =
+        QueuedAnimations.Ticket.combine(
+            List.of(
+                QueuedAnimations.playNamed(List.of(busy), new AnimationOptions("doorL")),
+                QueuedAnimations.playNamed(List.of(idle), new AnimationOptions("doorL")),
+                QueuedAnimations.Ticket.empty()));
+
+    assertEquals(2, combined.size());
+    assertEquals(1, combined.stuck());
+    assertFalse(QueuedAnimations.Ticket.empty().played());
+  }
+
+  @Test
   @DisplayName("超级电容受电弓：牌子升起（或正排着升弓）才算升着，已经排了降弓就不算")
   void detectsARaisedPantograph() {
     AttachmentInternalState state = new AttachmentInternalState();

@@ -70,8 +70,13 @@ public final class DriverLink {
   /** 提前确认发车时的里程；没有提前确认时为 NaN。列车一动即失效。 */
   private double preConfirmOdometer = Double.NaN;
 
-  /** 站台放行时的里程：同一处不再开始接受确认（毫秒计的剩余停站与按 tick 计的停站可能差一秒）。 */
+  /** 站台放行时的里程与 tick：刚放行的一小段时间里同一处不再开始接受确认（毫秒计的剩余停站与按 tick 计的停站可能差一秒）。 */
   private double departureReleasedOdometer = Double.NaN;
+
+  private long departureReleasedTick = Long.MIN_VALUE;
+
+  /** 放行后多久（tick）内原地不再开始接受确认；之后原地再停站（终点原地折返）照常接受。 */
+  private static final long RELEASE_REARM_GUARD_TICKS = 100L;
 
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
@@ -565,6 +570,7 @@ public final class DriverLink {
     clearDepartureHold();
     departureArmOdometer = Double.NaN;
     departureReleasedOdometer = odometer.getAsDouble();
+    departureReleasedTick = clock.getAsLong();
   }
 
   private void clearDepartureHold() {
@@ -588,9 +594,10 @@ public final class DriverLink {
 
   /** ATO 下停站将尽（剩余停站不超过提前确认的秒数）：从此刻到列车起步，驾驶员都可以提前确认发车。由驾驶会话每 tick 判断后调用。 */
   public void openDepartureArm() {
-    if (mode == DrivingMode.ATO
-        && !stillAt(departureArmOdometer)
-        && !stillAt(departureReleasedOdometer)) {
+    boolean justReleased =
+        stillAt(departureReleasedOdometer)
+            && clock.getAsLong() - departureReleasedTick < RELEASE_REARM_GUARD_TICKS;
+    if (mode == DrivingMode.ATO && !stillAt(departureArmOdometer) && !justReleased) {
       departureArmOdometer = odometer.getAsDouble();
     }
   }

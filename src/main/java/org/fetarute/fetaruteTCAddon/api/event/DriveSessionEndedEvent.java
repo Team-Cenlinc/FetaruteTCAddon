@@ -39,7 +39,11 @@ public final class DriveSessionEndedEvent extends DriverEvent {
     return dispatched;
   }
 
-  /** 结束原因（如 TASK_COMPLETE、LEFT_SEAT、HANDBACK、CAB_CHANGE_TIMEOUT（折返换端超时）；开始事件之后接管列车出错为 FAILED） */
+  /**
+   * 结束原因（如
+   * TASK_COMPLETE、LEFT_SEAT、HANDBACK、CAB_CHANGE_TIMEOUT（折返换端超时）、SERVICE_END（列车按交路开到收车地点正常收车）、
+   * DISPATCH_ABORT（调度收回或列车异常）；开始事件之后接管列车出错为 FAILED）
+   */
   public String getReason() {
     return reason;
   }

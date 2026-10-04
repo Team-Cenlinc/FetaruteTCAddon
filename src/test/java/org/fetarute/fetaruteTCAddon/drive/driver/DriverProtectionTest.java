@@ -215,20 +215,19 @@ class DriverProtectionTest {
     assertEquals(
         Intervention.NONE, evalStation(1.0, beyond, true).intervention(), "越过可开门范围但还没到越站阈值");
     double overCurve =
-        DriverProtection.brakingCurveBps(CONFIG.stopSkipBlocks() + beyond, SERVICE, REACTION) + 1.5;
+        DriverProtection.brakingCurveBps(CONFIG.stopSkipBlocks(), SERVICE, REACTION) + 1.5;
     assertEquals(Intervention.SERVICE, evalStation(overCurve, beyond, true).intervention());
     assertEquals(Intervention.NONE, evalStation(0.0, beyond, true).intervention(), "停稳后不再介入");
   }
 
   @Test
-  @DisplayName("越过停车点后余量随之缩短：冲到越站阈值处容许速度为 0，不会低速一直溜下去")
-  void overrunAllowanceShrinksPastTheStopPoint() {
-    double past = -(CONFIG.stopSkipBlocks() - 2.0);
-    assertEquals(
-        DriverProtection.brakingCurveBps(2.0, SERVICE, REACTION),
-        evalStation(1.0, past, true).permittedBps(),
-        1.0e-9);
-    assertEquals(0.0, evalStation(1.0, -CONFIG.stopSkipBlocks(), true).permittedBps(), 1.0e-9);
+  @DisplayName("中途站越过停车点后不再收紧：冲过越站阈值就是越站，防护不在阈值前把车刹停")
+  void intermediateStationKeepsTheSkipBehaviour() {
+    double atSkip = -CONFIG.stopSkipBlocks();
+    double expected = DriverProtection.brakingCurveBps(CONFIG.stopSkipBlocks(), SERVICE, REACTION);
+    assertEquals(expected, evalStation(1.0, atSkip + 2.0, true).permittedBps(), 1.0e-9);
+    assertEquals(expected, evalStation(1.0, atSkip, true).permittedBps(), 1.0e-9);
+    assertEquals(Intervention.NONE, evalStation(expected - 0.5, atSkip, true).intervention());
   }
 
   @Test
@@ -237,6 +236,11 @@ class DriverProtectionTest {
     double expected =
         DriverProtection.brakingCurveBps(20.0 + CONFIG.stopAcceptBlocks(), SERVICE, REACTION);
     assertEquals(expected, evalStation(3.0, 20.0, true, true).permittedBps(), 1.0e-9);
+    assertEquals(
+        DriverProtection.brakingCurveBps(2.0, SERVICE, REACTION),
+        evalStation(1.0, -(CONFIG.stopAcceptBlocks() - 2.0), true, true).permittedBps(),
+        1.0e-9,
+        "越过停车点后余量随之缩短");
     double past = -CONFIG.stopAcceptBlocks();
     assertEquals(0.0, evalStation(1.0, past, true, true).permittedBps(), 1.0e-9);
     assertTrue(

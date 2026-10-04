@@ -58,7 +58,6 @@ public final class TaskBoard {
    *
    * @param atoAllowed 玩家能否以 ATO 方式领取；不能时不显示右键的说明
    * @param level 玩家此刻选定的仿真等级；玩家不能自选等级时为空，界面上不显示难度按钮
-   * @param driving 玩家是否正在驾驶（选择要到下一次开始驾驶才生效，按钮上注明）
    * @return 是否打开（别的插件可能取消）
    */
   public static boolean open(
@@ -66,8 +65,7 @@ public final class TaskBoard {
       LocaleManager locale,
       TaskBoardHolder holder,
       boolean atoAllowed,
-      Optional<SimulationLevel> level,
-      boolean driving) {
+      Optional<SimulationLevel> level) {
     Inventory inventory =
         Bukkit.createInventory(
             holder,
@@ -94,17 +92,17 @@ public final class TaskBoard {
     info.add("drive.task.board.info-claimed");
     inventory.setItem(
         INFO_SLOT, item(Material.BOOK, locale, "drive.task.board.info", Map.of(), info));
-    level.ifPresent(chosen -> showLevel(holder, locale, chosen, driving));
+    level.ifPresent(chosen -> showLevel(holder, locale, chosen));
     return player.openInventory(inventory) != null;
   }
 
   /** 在已打开的任务板上换选中的难度按钮。 */
   public static void showLevel(
-      TaskBoardHolder holder, LocaleManager locale, SimulationLevel chosen, boolean driving) {
+      TaskBoardHolder holder, LocaleManager locale, SimulationLevel chosen) {
     holder.setLevel(chosen);
     Inventory inventory = holder.getInventory();
     for (SimulationLevel level : SimulationLevel.values()) {
-      inventory.setItem(slotOf(level), levelItem(locale, level, level == chosen, driving));
+      inventory.setItem(slotOf(level), levelItem(locale, level, level == chosen));
     }
   }
 
@@ -129,7 +127,7 @@ public final class TaskBoard {
   }
 
   /** 难度按钮的说明行。 */
-  static List<String> levelLore(SimulationLevel level, boolean selected, boolean driving) {
+  static List<String> levelLore(SimulationLevel level, boolean selected) {
     String prefix = "drive.task.board.level." + level.name().toLowerCase(Locale.ROOT);
     List<String> lore = new ArrayList<>();
     lore.add(prefix + "-desc");
@@ -137,19 +135,19 @@ public final class TaskBoard {
       lore.add(prefix + "-desc-2");
     }
     lore.add(selected ? "drive.task.board.level.selected" : "drive.task.board.level.select");
-    lore.add(driving ? "drive.task.board.level.next-session" : "drive.task.board.level.remember");
+    lore.add("drive.task.board.level.remember");
     return lore;
   }
 
   private static ItemStack levelItem(
-      LocaleManager locale, SimulationLevel level, boolean selected, boolean driving) {
+      LocaleManager locale, SimulationLevel level, boolean selected) {
     ItemStack stack =
         item(
             levelMaterial(level),
             locale,
             "drive.task.board.level." + level.name().toLowerCase(Locale.ROOT),
             Map.of(),
-            levelLore(level, selected, driving));
+            levelLore(level, selected));
     ItemMeta meta = stack.getItemMeta();
     meta.setEnchantmentGlintOverride(selected);
     if (!stack.setItemMeta(meta)) {

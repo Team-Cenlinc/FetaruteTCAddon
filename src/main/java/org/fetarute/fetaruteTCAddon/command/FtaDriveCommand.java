@@ -573,8 +573,7 @@ public final class FtaDriveCommand {
         DrivePermissions.allowsMode(DrivingMode.ATO, player::hasPermission),
         player.hasPermission(DrivePermissions.LEVEL)
             ? Optional.of(drive.levels().effective(player, drive.config().level()))
-            : Optional.empty(),
-        drive.isDriving(player.getUniqueId()));
+            : Optional.empty());
   }
 
   /** 列出全部车站，点站码即打开那一站的任务板（悬停显示站名）。 */

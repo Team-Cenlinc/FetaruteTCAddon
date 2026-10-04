@@ -18,6 +18,9 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  */
 public final class DriverPickups {
 
+  /** 终点站待命车多久重新判定一次发车端。 */
+  static final Duration DEPARTURE_RECHECK = Duration.ofSeconds(5);
+
   /** 从哪里接车。 */
   public enum Kind {
     /** 终点站待命车：派去跑这一班之前留着等驾驶员。 */
@@ -65,6 +68,7 @@ public final class DriverPickups {
     private final String location;
     private final Instant deadline;
     private CabSeats.Departure departure;
+    private Instant nextDepartureCheck;
     private Stage stage = Stage.WAITING;
 
     Pickup(
@@ -113,6 +117,19 @@ public final class DriverPickups {
     /** 下一趟由此刻编组的哪一端驾驶：驾驶员要坐进的驾驶室。 */
     public CabSeats.Departure departure() {
       return departure;
+    }
+
+    /**
+     * 到了该重新判定发车端的时候：每 {@link #DEPARTURE_RECHECK} 一次（要查线路图、可能要寻路，不必每次维护都算）。
+     *
+     * @param now 此刻
+     */
+    public boolean departureCheckDue(Instant now) {
+      if (nextDepartureCheck != null && now.isBefore(nextDepartureCheck)) {
+        return false;
+      }
+      nextDepartureCheck = now.plus(DEPARTURE_RECHECK);
+      return true;
     }
 
     /**

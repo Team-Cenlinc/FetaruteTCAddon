@@ -207,6 +207,11 @@ public final class AutoStationDoorController {
     public long closeDurationTicks() {
       return session.estimatedCloseDurationTicks();
     }
+
+    /** 关门动画还排在附件的队里没轮到（前面有别的动画在播）：车门其实还开着。 */
+    public boolean closePending() {
+      return !open && session.closePending();
+    }
   }
 
   /**
@@ -1371,6 +1376,11 @@ public final class AutoStationDoorController {
       return closed;
     }
 
+    /** 关门动画还排在附件的队里没轮到：车门其实还开着，不能放行发车。 */
+    boolean closePending() {
+      return (openLeft && leftAction.closePending()) || (openRight && rightAction.closePending());
+    }
+
     /** 播放关门提示音（不触发关门动画）。 */
     void playCloseSound() {
       if (group == null || !openSucceeded) {
@@ -1797,6 +1807,11 @@ public final class AutoStationDoorController {
 
     long closeDurationTicks();
 
+    /** 最近一次关门动画还排在附件的队里没轮到（前面有别的动画在播）：车门其实还开着。 */
+    default boolean closePending() {
+      return false;
+    }
+
     static DoorAction named(String name, List<Attachment> targets) {
       return new DoorAction.Named(name, targets);
     }
@@ -1829,12 +1844,14 @@ public final class AutoStationDoorController {
         this.targets = targets == null ? List.of() : List.copyOf(targets);
       }
 
+      private QueuedAnimations.Ticket closing = QueuedAnimations.Ticket.empty();
+
       @Override
       public boolean open(MinecartGroup group) {
         if (group == null || name == null || !hasAttachedTargets(targets)) {
           return false;
         }
-        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, 1.0));
+        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, 1.0)).played();
       }
 
       @Override
@@ -1842,12 +1859,18 @@ public final class AutoStationDoorController {
         if (group == null || name == null || !hasAttachedTargets(targets)) {
           return false;
         }
-        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, -1.0));
+        closing = playNamedAnimationOnTargets(targets, doorAnimationOptions(name, -1.0));
+        return closing.played();
       }
 
       @Override
       public long closeDurationTicks() {
         return namedAnimationTicks(targets, name);
+      }
+
+      @Override
+      public boolean closePending() {
+        return closing.stuck() > 0;
       }
     }
 
@@ -1860,20 +1883,28 @@ public final class AutoStationDoorController {
         this.targets = targets == null ? List.of() : List.copyOf(targets);
       }
 
+      private QueuedAnimations.Ticket closing = QueuedAnimations.Ticket.empty();
+
       @Override
       public boolean open(MinecartGroup group) {
         if (targets.isEmpty()) {
-          return startAnimationOnGroup(group, pair.open());
+          return startAnimationOnGroup(group, pair.open()).played();
         }
-        return startAnimation(targets, pair.open());
+        return startAnimation(targets, pair.open()).played();
       }
 
       @Override
       public boolean close(MinecartGroup group) {
-        if (targets.isEmpty()) {
-          return startAnimationOnGroup(group, pair.close());
-        }
-        return startAnimation(targets, pair.close());
+        closing =
+            targets.isEmpty()
+                ? startAnimationOnGroup(group, pair.close())
+                : startAnimation(targets, pair.close());
+        return closing.played();
+      }
+
+      @Override
+      public boolean closePending() {
+        return closing.stuck() > 0;
       }
 
       @Override
@@ -1911,9 +1942,11 @@ public final class AutoStationDoorController {
         this.closeDurationTicks = estimateCloseDurationTicks(this.targets);
       }
 
+      private QueuedAnimations.Ticket closing = QueuedAnimations.Ticket.empty();
+
       @Override
       public boolean open(MinecartGroup group) {
-        boolean opened = startLegacyTargets(targets, true);
+        boolean opened = startLegacyTargets(targets, true).played();
         if (opened) {
           fallbackUsed = false;
           return true;
@@ -1936,21 +1969,27 @@ public final class AutoStationDoorController {
         if (fallbackUsed) {
           return false;
         }
-        boolean closed = startLegacyTargets(targets, false);
-        if (closed) {
+        closing = startLegacyTargets(targets, false);
+        if (closing.played()) {
           return true;
         }
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        return QueuedAnimations.withFallback(
-                QueuedAnimations.playNamed(group, doorAnimationOptions(name, -1.0)))
-            .played();
+        closing =
+            QueuedAnimations.withFallback(
+                QueuedAnimations.playNamed(group, doorAnimationOptions(name, -1.0)));
+        return closing.played();
       }
 
       @Override
       public long closeDurationTicks() {
         return closeDurationTicks;
+      }
+
+      @Override
+      public boolean closePending() {
+        return closing.stuck() > 0;
       }
     }
 
@@ -1992,12 +2031,12 @@ public final class AutoStationDoorController {
     return options;
   }
 
-  private static boolean playNamedAnimationOnTargets(
+  private static QueuedAnimations.Ticket playNamedAnimationOnTargets(
       List<Attachment> targets, AnimationOptions options) {
     if (targets == null || targets.isEmpty() || options == null) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    return QueuedAnimations.withFallback(QueuedAnimations.playNamed(targets, options)).played();
+    return QueuedAnimations.withFallback(QueuedAnimations.playNamed(targets, options));
   }
 
   /**
@@ -2005,18 +2044,20 @@ public final class AutoStationDoorController {
    *
    * <p>仅对已绑定附件的成员生效，避免空指针和未加载模型时误触发。
    */
-  private static boolean startAnimation(List<Attachment> targets, Animation animation) {
+  private static QueuedAnimations.Ticket startAnimation(
+      List<Attachment> targets, Animation animation) {
     if (targets == null || targets.isEmpty() || animation == null) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    return QueuedAnimations.withFallback(QueuedAnimations.play(targets, animation)).played();
+    return QueuedAnimations.withFallback(QueuedAnimations.play(targets, animation));
   }
 
-  private static boolean startLegacyTargets(List<LegacyTarget> targets, boolean open) {
+  private static QueuedAnimations.Ticket startLegacyTargets(
+      List<LegacyTarget> targets, boolean open) {
     if (targets == null || targets.isEmpty()) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    boolean started = false;
+    List<QueuedAnimations.Ticket> tickets = new ArrayList<>();
     for (LegacyTarget entry : targets) {
       if (entry == null || entry.target() == null) {
         continue;
@@ -2028,19 +2069,19 @@ public final class AutoStationDoorController {
       if (animation == null) {
         continue;
       }
-      started |=
-          QueuedAnimations.withFallback(QueuedAnimations.play(List.of(entry.target()), animation))
-              .played();
+      tickets.add(
+          QueuedAnimations.withFallback(QueuedAnimations.play(List.of(entry.target()), animation)));
     }
-    return started;
+    return QueuedAnimations.Ticket.combine(tickets);
   }
 
   /** 在每节车厢的根附件上播放动画（缺少门附件时的兜底）。 */
-  private static boolean startAnimationOnGroup(MinecartGroup group, Animation animation) {
+  private static QueuedAnimations.Ticket startAnimationOnGroup(
+      MinecartGroup group, Animation animation) {
     if (group == null || animation == null) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    boolean started = false;
+    List<Attachment> roots = new ArrayList<>();
     for (MinecartMember<?> member : group) {
       if (member == null) {
         continue;
@@ -2049,13 +2090,11 @@ public final class AutoStationDoorController {
         continue;
       }
       Attachment root = member.getAttachments().getRootAttachment();
-      if (root == null) {
-        continue;
+      if (root != null) {
+        roots.add(root);
       }
-      started |=
-          QueuedAnimations.withFallback(QueuedAnimations.play(List.of(root), animation)).played();
     }
-    return started;
+    return QueuedAnimations.withFallback(QueuedAnimations.play(roots, animation));
   }
 
   private static boolean hasAttachedTargets(List<Attachment> targets) {
