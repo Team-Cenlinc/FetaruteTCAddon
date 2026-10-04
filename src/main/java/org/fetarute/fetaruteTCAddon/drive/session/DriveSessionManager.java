@@ -1510,6 +1510,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("驾驶任务维护失败: " + ex);
     }
+    try {
+      stopMarker.tick(now);
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("停车标沿轨道采样失败: " + ex);
+    }
     for (DriveSession session : new ArrayList<>(active.values())) {
       try {
         tickActive(session, now, current);
@@ -1645,10 +1650,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             session,
             new StopMarker.Train(
                 StopAlignment.travel(group),
-                StopAlignment.center(group),
                 StopAlignment.head(group),
                 SeatLocator.seatEyePosition(player)
                     .orElseGet(() -> player.getLocation().toVector()),
+                StopAlignment.bodyLengthBlocks(group),
                 group.size()),
             now);
       } else {

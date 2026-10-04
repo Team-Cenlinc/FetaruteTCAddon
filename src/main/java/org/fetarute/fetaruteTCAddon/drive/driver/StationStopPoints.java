@@ -11,6 +11,7 @@ import java.util.function.Function;
 import java.util.function.Supplier;
 import org.bukkit.World;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
@@ -41,19 +42,19 @@ public final class StationStopPoints {
    *
    * @param worldId 所在世界
    * @param point 停车点（轨道中心）
-   * @param axis 车站轨道的走向（不分正反）；取不到时为 {@code null}
+   * @param forward 停车点处轨道朝列车前进一侧的走向；取不到时为 {@code null}
    * @param reference 用列车的哪个部位对准：车站牌子是列车中心，停车位置标是车头
    * @param aheadBlocks 停车点在车站牌子前方多远（沿列车行进方向，格）；车站牌子本身为 0
    */
   public record StopPoint(
       UUID worldId,
       Vector point,
-      Vector axis,
+      Vector forward,
       StopAlignment.Reference reference,
       double aheadBlocks) {
     public StopPoint {
       point = point.clone();
-      axis = axis == null ? null : axis.clone();
+      forward = forward == null ? null : forward.clone();
     }
 
     @Override
@@ -62,8 +63,8 @@ public final class StationStopPoints {
     }
 
     @Override
-    public Vector axis() {
-      return axis == null ? null : axis.clone();
+    public Vector forward() {
+      return forward == null ? null : forward.clone();
     }
   }
 
@@ -105,26 +106,53 @@ public final class StationStopPoints {
     Station found = station.get();
     StopMarkIndex index = marks.get();
     // 列车可能还在进站前的弯道上：按车站轨道的走向（以列车走向定正反）判前后。只看缓存不阻塞：还没找过时先按没有标志算，后台找完后自动换上。
+    Vector forward = StopMarks.orient(found.axis(), travel);
     Optional<StopMarks.Selected> mark =
         index == null
             ? Optional.empty()
             : index.selectCached(
                 world.getBlockAt(found.x(), found.y(), found.z()),
                 found.point(),
-                StopMarks.orient(found.axis(), travel),
+                forward,
                 carriages);
     if (mark.isPresent()) {
       return Optional.of(
           new StopPoint(
               found.worldId(),
               mark.get().mark().point(),
-              found.axis(),
+              markForward(world, mark.get().mark(), found.point(), forward),
               StopAlignment.Reference.HEAD,
               mark.get().aheadBlocks()));
     }
     return Optional.of(
         new StopPoint(
-            found.worldId(), found.point(), found.axis(), StopAlignment.Reference.CENTER, 0.0));
+            found.worldId(), found.point(), forward, StopAlignment.Reference.CENTER, 0.0));
+  }
+
+  /**
+   * 停车位置标处轨道朝列车前进一侧的走向。标志只认车站牌子前方的，所以按“车站停车点指向标志”定正反：标志在站台尽头的弯道上时，那里的走向可能与车站轨道接近垂直，拿车站走向或列车走向定正反会定反。
+   */
+  private static Vector markForward(
+      World world, StopMarks.Mark mark, Vector stationPoint, Vector stationForward) {
+    Vector ahead = mark.point().subtract(stationPoint).setY(0.0);
+    Vector axis = railAxis(world, mark.rail());
+    return StopMarks.orient(
+        axis == null ? stationForward : axis,
+        ahead.lengthSquared() > 1.0e-6 ? ahead : stationForward);
+  }
+
+  /** 这段轨道的走向（不分正反）；区块未加载或读不到时为 {@code null}。 */
+  private static Vector railAxis(World world, RailBlockPos pos) {
+    if (!world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4)) {
+      return null;
+    }
+    try {
+      RailPiece piece = RailPiece.create(world.getBlockAt(pos.x(), pos.y(), pos.z()));
+      RailState state = piece == null || piece.isNone() ? null : RailState.getSpawnState(piece);
+      return state == null ? null : state.motionVector();
+    } catch (RuntimeException | LinkageError ex) {
+      return null;
+    }
   }
 
   private Optional<Station> station(NodeId node, World world, long nowTick) {

@@ -108,15 +108,15 @@ class StopMarkerTest {
   }
 
   private void update() {
-    // 列车朝 +X 走，中心在 x=95.5，车头在 x=100.5，驾驶员在中心前方 4 格（车头后方 1 格）。
+    // 列车朝 +X 走，车身长 10 格（中心在 x=95.5），车头在 x=100.5，驾驶员在中心前方 4 格（车头后方 1 格）。
     marker.update(
         player,
         session,
         new StopMarker.Train(
             new Vector(1.0, 0.0, 0.0),
-            new Vector(95.5, 64.0, 0.5),
             new Vector(100.5, 64.0, 0.5),
             new Vector(99.5, 65.0, 0.5),
+            10.0,
             4),
         0L);
   }
@@ -140,6 +140,80 @@ class StopMarkerTest {
     update();
     assertEquals(1, view.hides, "停妥后撤下");
     assertEquals(1, views.size(), "撤下不丢记录，再出现时沿用同一个标线");
+  }
+
+  @Test
+  @DisplayName("前移沿驾驶员所在世界的轨道走，标线画在走到的位置")
+  void walksAlongTheTrackOfThePlayersWorld() {
+    List<World> walkedIn = new ArrayList<>();
+    StopMarker onRails =
+        new StopMarker(
+            (node, world, travel, carriages, now) -> lookup,
+            () -> {
+              FakeView view = new FakeView();
+              views.add(view);
+              return view;
+            },
+            id -> player,
+            (world, nowTick) -> {
+              walkedIn.add(world);
+              return (start, heading, distance) ->
+                  Optional.of(
+                      new StopMarkerGeometry.Placement(
+                          new Vector(start.getX() + 3.0, start.getY(), start.getZ() + 3.0),
+                          new Vector(1.0, 0.0, 1.0)));
+            });
+    enterStation().updateOffset(-5.0);
+    onRails.update(
+        player,
+        session,
+        new StopMarker.Train(
+            new Vector(1.0, 0.0, 0.0),
+            new Vector(100.5, 64.0, 0.5),
+            new Vector(99.5, 65.0, 0.5),
+            10.0,
+            4),
+        0L);
+
+    assertEquals(List.of(world), walkedIn);
+    Vector shown = views.get(0).shownAt.get(0);
+    assertEquals(103.5, shown.getX(), 1.0e-9);
+    assertEquals(3.5, shown.getZ(), 1.0e-9);
+  }
+
+  @Test
+  @DisplayName("每 tick 交给探测接着采样；插件停用时丢掉探测的缓存，单个驾驶员结束时不丢（各驾驶员共用）")
+  void tickAndClearReachTheSharedProbe() {
+    List<Long> ticks = new ArrayList<>();
+    int[] clears = {0};
+    StopMarker shared =
+        new StopMarker(
+            (node, world, travel, carriages, now) -> lookup,
+            FakeView::new,
+            id -> player,
+            new StopMarker.Probe() {
+              @Override
+              public StopMarkerGeometry.Track track(World world, long nowTick) {
+                return StopMarkerGeometry.Track.STRAIGHT;
+              }
+
+              @Override
+              public void tick(long nowTick) {
+                ticks.add(nowTick);
+              }
+
+              @Override
+              public void clear() {
+                clears[0]++;
+              }
+            });
+
+    shared.tick(7L);
+    shared.remove(player.getUniqueId());
+    assertEquals(0, clears[0], "一名驾驶员结束不影响别人的采样");
+    shared.removeAll();
+    assertEquals(List.of(7L), ticks);
+    assertEquals(1, clears[0]);
   }
 
   @Test

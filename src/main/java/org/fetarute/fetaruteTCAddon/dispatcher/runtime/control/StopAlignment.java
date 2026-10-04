@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 
@@ -95,6 +96,23 @@ public final class StopAlignment {
     Vector headPos = group.head().getEntity().getLocation().toVector();
     Vector tailPos = group.tail().getEntity().getLocation().toVector();
     return headPos.subtract(tailPos);
+  }
+
+  /** 车身沿轨道的长度（格）：相邻车厢中心的距离之和，弯道上比车头到车尾的直线长；单节车为 0。 */
+  public static double bodyLengthBlocks(MinecartGroup group) {
+    if (group == null || group.size() < 2) {
+      return 0.0;
+    }
+    double total = 0.0;
+    Vector previous = null;
+    for (MinecartMember<?> member : group) {
+      Vector position = member.getEntity().getLocation().toVector();
+      if (previous != null) {
+        total += position.distance(previous);
+      }
+      previous = position;
+    }
+    return total;
   }
 
   /** 车头到列车中心的水平距离（格）；单节车为 0。 */
