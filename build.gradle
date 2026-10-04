@@ -5,6 +5,7 @@ plugins {
     id("com.github.spotbugs") version "6.4.8"
     id("xyz.jpenilla.run-paper") version "2.3.1"
     id("com.gradleup.shadow") version "8.3.11"
+    id 'maven-publish'
 }
 
 group = 'org.fetarute'
@@ -206,4 +207,50 @@ processResources {
 
 tasks.named("check") {
     dependsOn("spotlessCheck", "checkstyleMain", "checkstyleTest", "spotbugsMain", "spotbugsTest")
+}
+
+// ---- 公开 API 构件 ----
+// 只含 org.fetarute.fetaruteTCAddon.api 包（不含 internal 实现），供外部插件 compileOnly 依赖；
+// 版本取 FetaruteApi.API_VERSION，与插件版本分开。
+def apiVersion = (file("src/main/java/org/fetarute/fetaruteTCAddon/api/FetaruteApi.java").text =~ /API_VERSION = "([^"]+)"/)[0][1]
+def apiIncludes = { spec ->
+    spec.include("org/fetarute/fetaruteTCAddon/api/**")
+    spec.exclude("org/fetarute/fetaruteTCAddon/api/internal/**")
+}
+
+tasks.register("apiJar", Jar) {
+    group = "build"
+    description = "打包公开 API（不含实现）"
+    archiveBaseName.set("FetaruteTCAddon-api")
+    archiveVersion.set(apiVersion)
+    from(sourceSets.main.output) { apiIncludes(it) }
+}
+
+tasks.register("apiSourcesJar", Jar) {
+    group = "build"
+    description = "打包公开 API 源码"
+    archiveBaseName.set("FetaruteTCAddon-api")
+    archiveVersion.set(apiVersion)
+    archiveClassifier.set("sources")
+    from(sourceSets.main.allJava) { apiIncludes(it) }
+}
+
+tasks.named("build") {
+    dependsOn("apiJar", "apiSourcesJar")
+}
+
+publishing {
+    publications {
+        api(MavenPublication) {
+            groupId = "org.fetarute"
+            artifactId = "fetarute-api"
+            version = apiVersion
+            artifact(tasks.named("apiJar"))
+            artifact(tasks.named("apiSourcesJar"))
+            pom {
+                name = "FetaruteTCAddon API"
+                description = "FetaruteTCAddon 公开 API：调度图、列车、线路、时刻表、驾驶任务与事件"
+            }
+        }
+    }
 }
