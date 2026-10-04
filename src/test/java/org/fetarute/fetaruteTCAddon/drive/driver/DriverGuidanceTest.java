@@ -36,13 +36,13 @@ class DriverGuidanceTest {
   }
 
   @Test
-  void nothingAheadIsClearAndSuggestsJustBelowThePermittedSpeed() {
+  void nothingAheadIsClearAndSuggestsThePermittedSpeed() {
     DriverGuidance.Advice advice =
         DriverGuidance.evaluate(
             input(10.0, 20.0, Double.POSITIVE_INFINITY, Double.NaN, List.of(), 0.0, false), CONFIG);
 
     assertEquals(DriverGuidance.TargetKind.CLEAR, advice.target().kind());
-    assertEquals(20.0 - CONFIG.adviceMarginBps(), advice.suggestedBps(), 1.0e-9);
+    assertEquals(20.0, advice.suggestedBps(), 1.0e-9);
     assertFalse(advice.brake());
     assertEquals(1.0, advice.progress(CONFIG.rangeBlocks()), 1.0e-9);
   }
@@ -68,12 +68,13 @@ class DriverGuidanceTest {
   }
 
   @Test
-  void stopSignalAheadSuggestsTheComfortableBrakingCurveAndAsksToBrakeWhenFaster() {
+  void stopSignalAheadSuggestsTheTimetableBrakingCurveAndAsksToBrakeWhenFaster() {
     DriverGuidance.Advice advice =
         DriverGuidance.evaluate(
             input(15.0, 20.0, 100.0, Double.NaN, List.of(), 0.0, false), CONFIG);
 
-    double expected = DriverGuidance.curveBps(99.0, 0.0, 0.8, 0.5);
+    double expected =
+        DriverGuidance.curveBps(99.0, 0.0, 20.0, CONFIG.adviceBrakeFraction(), 0.5, 15.0);
     assertEquals(DriverGuidance.TargetKind.STOP_SIGNAL, advice.target().kind());
     assertEquals(99.0, advice.target().distanceBlocks(), 1.0e-9);
     assertEquals(expected, advice.suggestedBps(), 1.0e-9);
@@ -106,7 +107,10 @@ class DriverGuidanceTest {
     assertEquals(DriverGuidance.TargetKind.SPEED_LIMIT, advice.target().kind());
     assertEquals(150.0, advice.target().distanceBlocks(), 1.0e-9);
     assertEquals(8.0, advice.target().endSpeedBps(), 1.0e-9);
-    assertEquals(DriverGuidance.curveBps(150.0, 8.0, 0.8, 0.5), advice.suggestedBps(), 1.0e-9);
+    assertEquals(
+        DriverGuidance.curveBps(150.0, 8.0, 20.0, CONFIG.adviceBrakeFraction(), 0.5, 12.0),
+        advice.suggestedBps(),
+        1.0e-9);
   }
 
   @Test
@@ -119,8 +123,13 @@ class DriverGuidanceTest {
 
   @Test
   void brakeAdviceHasHysteresis() {
-    double suggested = DriverGuidance.curveBps(99.0, 0.0, 0.8, 0.5);
-    double between = suggested + CONFIG.brakeAdviceToleranceBps() / 2.0;
+    // 建议速度随车速变（扣掉制动力爬升期间走过的距离）：按“车速 ≈ 建议速度”求出那个点。
+    double between = 10.0;
+    for (int i = 0; i < 50; i++) {
+      double suggested =
+          DriverGuidance.curveBps(99.0, 0.0, 20.0, CONFIG.adviceBrakeFraction(), 0.5, between);
+      between = suggested + CONFIG.brakeAdviceToleranceBps() / 2.0;
+    }
 
     assertFalse(
         DriverGuidance.evaluate(
@@ -154,7 +163,25 @@ class DriverGuidanceTest {
 
   @Test
   void curveHoldsTheEndSpeedAtTheTarget() {
-    assertEquals(8.0, DriverGuidance.curveBps(0.0, 8.0, 0.8, 0.5), 1.0e-9);
-    assertEquals(Double.POSITIVE_INFINITY, DriverGuidance.curveBps(50.0, 0.0, 0.0, 0.5), 1.0e-9);
+    assertEquals(8.0, DriverGuidance.curveBps(0.0, 8.0, 20.0, 0.8, 0.5, 10.0), 1.0e-9);
+    assertEquals(
+        Double.POSITIVE_INFINITY, DriverGuidance.curveBps(50.0, 0.0, 20.0, 0.0, 0.5, 10.0), 1.0e-9);
+    assertEquals(
+        20.0, DriverGuidance.curveBps(5000.0, 0.0, 20.0, 1.0, 0.5, 20.0), 1.0e-9, "远处不超过巡航速度");
+  }
+
+  @Test
+  void curveIsTheTimetableBrakingCurveShiftedByTheReactionDistance() {
+    double cruise = 22.0;
+    double speed = 18.0;
+    double reaction = 0.4;
+    double expected =
+        org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCeiling.brakingLimitBps(
+            new org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve(1.2, 1.2),
+            cruise,
+            0.0,
+            120.0 - speed * reaction);
+    assertEquals(
+        expected, DriverGuidance.curveBps(120.0, 0.0, cruise, 1.2, reaction, speed), 1.0e-9);
   }
 }

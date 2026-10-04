@@ -8,20 +8,18 @@ import org.bukkit.configuration.ConfigurationSection;
  *
  * @param bossBar 是否用 Boss 栏显示前方目标、距离与建议速度
  * @param rangeBlocks Boss 栏满格对应的距离（格）；更远的目标不显示
- * @param adviceBrakeRatio 建议速度按常用全制动的这个比例（舒适制动）反推
- * @param adviceMarginBps 建议速度比此刻容许速度低多少，免得贴着防护线开
+ * @param adviceBrakeFraction 建议速度按常用全制动的这个比例反推（编表同一条 S 形曲线），余下的留给驾驶员修正反应迟滞；1 即与编表完全相同，人跟不住
  * @param brakeAdviceToleranceBps 车速超过建议速度多少时提示开始制动
  */
 public record DriverGuidanceConfig(
     boolean bossBar,
     double rangeBlocks,
-    double adviceBrakeRatio,
-    double adviceMarginBps,
+    double adviceBrakeFraction,
     double brakeAdviceToleranceBps) {
 
   /** 内置默认值。 */
   public static DriverGuidanceConfig defaults() {
-    return new DriverGuidanceConfig(true, 400.0, 0.8, 0.5, 0.3);
+    return new DriverGuidanceConfig(true, 400.0, 0.85, 0.3);
   }
 
   /**
@@ -38,18 +36,17 @@ public record DriverGuidanceConfig(
       return d;
     }
     Consumer<String> sink = warn != null ? warn : message -> {};
-    double ratio = section.getDouble("advice-brake-ratio", d.adviceBrakeRatio);
-    if (!Double.isFinite(ratio) || ratio <= 0.0 || ratio > 1.0) {
+    double fraction = section.getDouble("advice-brake-fraction", d.adviceBrakeFraction);
+    if (!Double.isFinite(fraction) || fraction < 0.5 || fraction > 1.0) {
       sink.accept(
-          "drive.yml 的 driver.guidance.advice-brake-ratio 须在 (0, 1] 之内，使用默认值 "
-              + d.adviceBrakeRatio);
-      ratio = d.adviceBrakeRatio;
+          "drive.yml 的 driver.guidance.advice-brake-fraction 须在 0.5–1 之间，使用默认值 "
+              + d.adviceBrakeFraction);
+      fraction = d.adviceBrakeFraction;
     }
     return new DriverGuidanceConfig(
         section.getBoolean("boss-bar", d.bossBar),
         positive(section, "range-blocks", d.rangeBlocks, sink),
-        ratio,
-        nonNegative(section, "advice-margin-bps", d.adviceMarginBps, sink),
+        fraction,
         nonNegative(section, "brake-advice-tolerance-bps", d.brakeAdviceToleranceBps, sink));
   }
 

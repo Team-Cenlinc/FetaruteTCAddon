@@ -29,15 +29,13 @@ class DriverGuidanceConfigTest {
             "guidance:",
             "  boss-bar: false",
             "  range-blocks: 600",
-            "  advice-brake-ratio: 0.7",
-            "  advice-margin-bps: 1.0",
+            "  advice-brake-fraction: 0.9",
             "  brake-advice-tolerance-bps: 0.5"));
     DriverGuidanceConfig config = DriverConfig.from(yaml, message -> {}).guidance();
 
     assertFalse(config.bossBar());
     assertEquals(600.0, config.rangeBlocks(), 1.0e-9);
-    assertEquals(0.7, config.adviceBrakeRatio(), 1.0e-9);
-    assertEquals(1.0, config.adviceMarginBps(), 1.0e-9);
+    assertEquals(0.9, config.adviceBrakeFraction(), 1.0e-9);
     assertEquals(0.5, config.brakeAdviceToleranceBps(), 1.0e-9);
   }
 
@@ -50,8 +48,8 @@ class DriverGuidanceConfigTest {
             "\n",
             "guidance:",
             "  range-blocks: 0",
-            "  advice-brake-ratio: 1.5",
-            "  advice-margin-bps: -1"));
+            "  advice-brake-fraction: 1.5",
+            "  brake-advice-tolerance-bps: -1"));
     List<String> warnings = new ArrayList<>();
     DriverGuidanceConfig config = DriverGuidanceConfig.from(yaml, warnings::add);
 
