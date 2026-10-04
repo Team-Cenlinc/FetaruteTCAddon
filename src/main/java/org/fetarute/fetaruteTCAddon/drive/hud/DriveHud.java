@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
+import org.fetarute.fetaruteTCAddon.drive.menu.CabGauges;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupText;
@@ -93,8 +94,8 @@ public final class DriveHud {
   }
 
   /**
-   * 动作栏末尾最要紧的一条提示：为什么现在不能牵引。折返换端最先，其次按防护介入、启动流程、停放制动、风压、制动试验、车门的顺序取第一条； 都没有时为 {@code
-   * null}。各系统的完整状态在侧边栏里。
+   * 动作栏末尾最要紧的一条提示：为什么现在不能牵引。折返换端最先，其次按防护介入、启动流程、车上故障（主断跳闸、受电中断、门关好回路）、停放制动、
+   * 制动管、风压、制动试验、车门的顺序取第一条；都没有而门旁路接通着时提示旁路；否则为 {@code null}。各系统的完整状态在侧边栏里。
    */
   private static Component statusToken(
       LocaleManager locale, DriveSession session, boolean sidebarShown) {
@@ -122,11 +123,15 @@ public final class DriveHud {
     Optional<CabSystems.TractionBlock> block = cab.tractionBlock();
     if (block.isPresent()) {
       return switch (block.get()) {
+        case BREAKER_TRIPPED -> locale.component("drive.hud.cab.fault.breaker-trip");
+        case LINE_LOSS -> locale.component("drive.hud.cab.fault.line-loss");
+        case DOOR_CIRCUIT -> locale.component("drive.hud.cab.fault.door");
         case PARKING_BRAKE -> locale.component("drive.hud.cab.parking");
+        case BRAKE_PIPE -> locale.component("drive.hud.cab.brake-pipe");
         case LOW_AIR -> locale.component("drive.hud.cab.low-air");
         case BRAKE_TEST -> locale.component(
-            "drive.hud.cab.brake-test."
-                + cab.brakeTest().stage().name().toLowerCase(Locale.ROOT).replace('_', '-'));
+            "drive.hud.cab.brake-test." + cab.brakeTest().stageKey(),
+            CabGauges.brakeTestValues(cab));
       };
     }
     if (link != null) {
@@ -152,6 +157,9 @@ public final class DriveHud {
         && link.directive() != null
         && link.directive().isStop()) {
       return locale.component("drive.hud.driver.wait-signal");
+    }
+    if (cab.enabled() && cab.faults().doorBypassed()) {
+      return locale.component("drive.hud.cab.door-bypass");
     }
     return null;
   }

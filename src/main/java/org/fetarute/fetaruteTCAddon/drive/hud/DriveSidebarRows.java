@@ -10,7 +10,10 @@ import java.util.Objects;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
+import org.fetarute.fetaruteTCAddon.drive.cab.BrakePipe;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
@@ -20,7 +23,8 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
- * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压与警惕装置；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻与实时评分。
+ * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压（机车含制动管，电制动出力时标“再生”）、警惕装置、
+ * 当前故障与门旁路；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻与实时评分，折返换端时加换端一行。
  *
  * <p>车站一行平时显示下一站，进站时换成离停车点的距离，停妥后显示停站阶段。计分板不会被别的插件的动作栏消息顶掉，所以车站信息以这里为准，动作栏只提示要动手的操作。
  *
@@ -92,6 +96,7 @@ public final class DriveSidebarRows {
     if (cab.enabled()) {
       rows.add(airRow(cab));
       rows.add(vigilanceRow(cab.vigilance(), nowTick, session.isStopped()));
+      addFaultRows(rows, cab.faults());
     }
     return rows;
   }
@@ -116,6 +121,29 @@ public final class DriveSidebarRows {
               Map.of("car", String.valueOf(change.targetCar()))));
       case IDLE -> Optional.empty();
     };
+  }
+
+  /** 每个故障一行；门旁路接通时再加一行警示。 */
+  private static void addFaultRows(List<Row> rows, CabFaults faults) {
+    for (CabFault fault : faults.activeFaults()) {
+      String suffix =
+          fault == CabFault.BREAKER_TRIP
+              ? "."
+                  + faults
+                      .breakerStage()
+                      .map(stage -> stage.name().toLowerCase(Locale.ROOT))
+                      .orElse("tripped")
+              : "";
+      rows.add(
+          new Row(
+              "drive.sidebar.label.fault",
+              "drive.sidebar.value.fault." + fault.key() + suffix,
+              Map.of()));
+    }
+    if (faults.doorBypassed()) {
+      rows.add(
+          new Row("drive.sidebar.label.door-bypass", "drive.sidebar.value.door-bypass", Map.of()));
+    }
   }
 
   /** 行车许可：信号与此刻的容许速度。 */
@@ -173,23 +201,36 @@ public final class DriveSidebarRows {
     return "drive.sidebar.value.doors." + state;
   }
 
-  /** 风压一行：主风缸 / 制动缸，主风缸按启动压力与封锁线着色，压缩机运转时加标记。 */
+  /** 风压一行：动车组为主风缸 / 制动缸，机车为主风缸 / 制动管 / 制动缸；主风缸按启动压力与封锁线着色，压缩机运转时加标记，电制动出力时换用带“再生”标记的写法。 */
   private static Row airRow(CabSystems cab) {
     AirSystem air = cab.air();
     CabConfig config = cab.config();
     double mr = air.mainReservoirKpa();
     String band =
         mr < config.tractionLockoutKpa() ? "low" : mr < config.compressorCutInKpa() ? "warn" : "ok";
+    String pump = air.compressorRunning() ? PUMP_RUNNING : "";
+    String mrText = String.valueOf(Math.round(mr));
+    String bcText = String.valueOf(Math.round(air.brakeCylinderKpa()));
+    String regen = cab.regenerating() ? "-regen" : "";
+    Optional<BrakePipe> pipe = cab.brakePipe();
+    if (pipe.isPresent()) {
+      return new Row(
+          "drive.sidebar.label.air",
+          "drive.sidebar.value.air-loco" + regen + "." + band,
+          Map.of(
+              "mr",
+              mrText,
+              "bp",
+              String.valueOf(Math.round(pipe.get().pressureKpa())),
+              "bc",
+              bcText,
+              "pump",
+              pump));
+    }
     return new Row(
         "drive.sidebar.label.air",
-        "drive.sidebar.value.air." + band,
-        Map.of(
-            "mr",
-            String.valueOf(Math.round(mr)),
-            "bc",
-            String.valueOf(Math.round(air.brakeCylinderKpa())),
-            "pump",
-            air.compressorRunning() ? PUMP_RUNNING : ""));
+        "drive.sidebar.value.air" + regen + "." + band,
+        Map.of("mr", mrText, "bc", bcText, "pump", pump));
   }
 
   private static Row vigilanceRow(Vigilance vigilance, long nowTick, boolean stopped) {

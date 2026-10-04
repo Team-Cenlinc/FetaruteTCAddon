@@ -32,7 +32,8 @@ public final class DriveMenuItems {
     meta.setItemModel(
         new NamespacedKey(
             HotbarItems.MODEL_NAMESPACE,
-            "drive/" + MenuLayout.modelKey(view.action(), view.active(), view.supply())));
+            "drive/"
+                + MenuLayout.modelKey(view.action(), view.active(), view.fault(), view.supply())));
     if ((view.action().isReverser() && view.active())
         || view.busy()
         || (view.action() == MenuAction.END_DRIVING && view.active())) {
@@ -46,6 +47,9 @@ public final class DriveMenuItems {
 
   /** 按钮的默认物品材质。 */
   static Material materialOf(ButtonView view) {
+    if (view.fault()) {
+      return Material.RED_DYE;
+    }
     return switch (view.action()) {
       case REVERSER_FORWARD -> Material.LIME_DYE;
       case REVERSER_NEUTRAL -> Material.GRAY_DYE;
@@ -61,12 +65,13 @@ public final class DriveMenuItems {
       case DRIVING_MODE -> view.active() ? Material.CYAN_DYE : Material.LIME_DYE;
       case END_DRIVING -> Material.RED_DYE;
       case TASK_CARD -> Material.BOOK;
+      case DOOR_BYPASS -> view.active() ? Material.ORANGE_DYE : Material.GRAY_DYE;
     };
   }
 
   /** 按钮名称的语言键。 */
   static String nameKey(ButtonView view) {
-    String state = view.busy() ? "busy" : view.active() ? "on" : "off";
+    String state = view.fault() ? "fault" : view.busy() ? "busy" : view.active() ? "on" : "off";
     return "drive.menu.item."
         + switch (view.action()) {
           case REVERSER_FORWARD -> "reverser-forward";
@@ -85,6 +90,7 @@ public final class DriveMenuItems {
           case DRIVING_MODE -> view.active() ? "driving-mode-ato" : "driving-mode-manual";
           case END_DRIVING -> view.active() ? "end-driving-confirm" : "end-driving";
           case TASK_CARD -> "task-card-free";
+          case DOOR_BYPASS -> view.active() ? "door-bypass-on" : "door-bypass-off";
         };
   }
 
@@ -126,6 +132,7 @@ public final class DriveMenuItems {
           ? "drive.menu.hint.end-driving-confirm"
           : "drive.menu.hint.end-driving";
       case TASK_CARD -> "drive.menu.hint.task-card";
+      case DOOR_BYPASS -> "drive.menu.hint.door-bypass";
     };
   }
 

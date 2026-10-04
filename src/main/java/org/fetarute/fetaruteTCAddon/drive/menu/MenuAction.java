@@ -27,7 +27,9 @@ public enum MenuAction {
   /** 结束驾驶：点两次才执行（调度列车为放弃任务并交还自动运行）。 */
   END_DRIVING,
   /** 任务卡：只显示信息，不可点击。 */
-  TASK_CARD;
+  TASK_CARD,
+  /** 门旁路（simulation 级）：车门故障使门关好回路不通时旁路，解除牵引封锁。 */
+  DOOR_BYPASS;
 
   /** 对应的启动流程系统；不是系统开关时为空。 */
   public Optional<SetupSystem> system() {

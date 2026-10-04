@@ -94,10 +94,20 @@ drive:
       vigilance-tripped: "<red><bold>Vigilance emergency brake</bold></red>"
       parking: "<red>Parking brake</red>"
       low-air: "<red>Low air</red>"
+      brake-pipe: "<red>Brake pipe not charged</red>"
+      door-bypass: "<gold>Door bypass</gold>"
+      fault:
+        breaker-trip: "<red><bold>Main breaker tripped</bold></red>"
+        line-loss: "<red><bold>No line voltage</bold></red>"
+        door: "<red>Door loop open</red>"
       brake-test:
         not-done: "<yellow>Brake test pending</yellow>"
         apply: "<yellow>Brake test: apply B4</yellow>"
         release: "<yellow>Brake test: release to N</yellow>"
+        charge: "<yellow>Brake test: handle to N to charge (brake pipe <bp> kPa)</yellow>"
+        reduce: "<yellow>Brake test: reduce by at least <need> kPa</yellow>"
+        hold: "<yellow>Brake test: hold for <seconds>s</yellow>"
+        failed: "<red>Brake test failed, start it again</red>"
     setup:
       not-ready: "<red>Not started</red>"
       progress: "<yellow><step> <seconds>s</yellow>"
@@ -148,6 +158,19 @@ drive:
     d: "<red><bold>D</bold></red>"
   cab:
     vigilance-tripped: "<prefix> <red>The vigilance device was not acknowledged and applied the emergency brake. Change notch or right-click regularly while moving.</red>"
+    brake-pipe-loss: "<prefix> <red>Brake pipe pressure lost; the emergency brake has been applied. Check the main reservoir, then move the handle to N once stopped to recharge.</red>"
+    fault:
+      line-loss: "<prefix> <red>Line voltage lost: no traction and no electric brake. Stop with the air brake and wait for the supply to return.</red>"
+      breaker-trip: "<prefix> <red>Main breaker tripped: no traction and no electric brake. Once stopped, open the main breaker on the desk, then close it again to reset.</red>"
+      compressor: "<prefix> <red>Compressor failure: the main reservoir will no longer recharge. Use air sparingly and end the run soon.</red>"
+      brake-leak: "<prefix> <red>Brake cylinder leak: the brake will not hold. Stop as soon as possible and apply the parking brake.</red>"
+      door: "<prefix> <red>Door fault: the door-closed loop is open and traction is cut. Make sure the doors are closed, then use the door bypass on the desk.</red>"
+  fault:
+    line-loss: "Line voltage loss"
+    breaker-trip: "Main breaker trip"
+    compressor: "Compressor failure"
+    brake-leak: "Brake cylinder leak"
+    door: "Door fault"
   setup:
     step:
       key: "Activating cab"
@@ -172,6 +195,8 @@ drive:
       vigilance: "Vigilance"
       score: "Score"
       cab-change: "Change ends"
+      fault: "Fault"
+      door-bypass: "Door bypass"
     value:
       text: "<white><text></white>"
       cab-change:
@@ -217,6 +242,28 @@ drive:
         ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         low: "<red><mr></red><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+      air-regen:
+        ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>Regen</aqua>"
+        warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>Regen</aqua>"
+        low: "<red><mr></red><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>Regen</aqua>"
+      air-loco:
+        ok: "<white><mr></white><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+        warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+        low: "<red><mr></red><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+      air-loco-regen:
+        ok: "<white><mr></white><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>Regen</aqua>"
+        warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>Regen</aqua>"
+        low: "<red><mr></red><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>Regen</aqua>"
+      fault:
+        line-loss: "<red>No line voltage</red>"
+        breaker-trip:
+          tripped: "<red>Breaker tripped: open, then close</red>"
+          opened: "<yellow>Breaker open: close it</yellow>"
+          closing: "<yellow>Breaker closing</yellow>"
+        compressor: "<red>Compressor failed</red>"
+        brake-leak: "<red>Brake leak, stop soon</red>"
+        door: "<red>Door loop open</red>"
+      door-bypass: "<gold>Bypassed, check the doors</gold>"
       vigilance:
         stopped: "<gray>Stopped</gray>"
         counting: "<white><seconds></white><gray>s</gray>"
@@ -278,6 +325,10 @@ drive:
       end-driving-confirm: "<red><bold>Click again to end driving</bold></red>"
       task-card-dispatch: "<gold>Current trip</gold>"
       task-card-free: "<gold>Train info</gold>"
+      breaker-fault: "<red>Main breaker: tripped</red>"
+      compressor-fault: "<red>Compressor: failed</red>"
+      door-bypass-on: "<gold>Door bypass: on</gold>"
+      door-bypass-off: "<gray>Door bypass: off</gray>"
     hint:
       reverser: "<gray>Click to select the direction</gray>"
       door: "<gray>Click to open or close the door</gray>"
@@ -295,6 +346,9 @@ drive:
       end-driving: "<gray>Click twice to end driving</gray>"
       end-driving-confirm: "<yellow>Click again within 3 seconds to end driving</yellow>"
       task-card: "<gray>Information only</gray>"
+      door-bypass: "<gray>Click to bypass or restore the door-closed loop; door states are not checked while bypassed, make sure the doors are closed</gray>"
+      gauge: "<gray>Gauges only show readings</gray>"
+      faults: "<gray>The fault display only shows information</gray>"
     detail:
       reservoir: "<gray>Main reservoir <white><mr></white> kPa</gray>"
       parking-needs: "<gray>Release needs main reservoir ≥ <white><need></white> kPa (now <white><mr></white>)</gray>"
@@ -303,6 +357,14 @@ drive:
       brake-test-release: "<yellow>Release to N (brake cylinder <white><bc></white> kPa)</yellow>"
       brake-test-passed: "<gray>Brake cylinder <white><bc></white> kPa</gray>"
       end-dispatch: "<gray>Dispatched train: abandons the task and hands back to automatic</gray>"
+      brake-test-charge: "<yellow>Move the handle to N to charge (brake pipe <white><bp></white> kPa)</yellow>"
+      brake-test-reduce: "<yellow>Move the handle to a brake notch and reduce by at least <white><need></white> kPa (brake pipe <white><bp></white> kPa)</yellow>"
+      brake-test-hold: "<yellow>Keep the handle where it is and hold for <white><seconds></white>s (brake cylinder <white><bc></white> kPa)</yellow>"
+      brake-test-failed: "<red>The brake cylinder leaked too much while holding; test failed (brake cylinder <white><bc></white> kPa)</red>"
+      breaker-tripped: "<red>Main breaker tripped: click to open it, then click again to close and reset</red>"
+      breaker-opened: "<yellow>Main breaker open: click again to close it</yellow>"
+      compressor-failed: "<red>Compressor failed; the main reservoir (<white><mr></white> kPa) will not recharge</red>"
+      door-circuit-open: "<red>The door-closed loop is open; bypass it before traction</red>"
     card:
       train: "<gray>Train: </gray><white><train></white>"
       task-terminal: "<gray>Task: </gray><white><route></white> <aqua><trip></aqua> <gray>to the terminal</gray>"
@@ -317,10 +379,50 @@ drive:
         loco: "<gray>Type: </gray><white>locomotive hauled</white>"
       motion: "<gray>Accel: </gray><white><accel></white> <gray>Decel: </gray><white><decel></white> <gray>m/s²</gray>"
       max-speed: "<gray>Max speed: </gray><white><kmh></white> <gray>km/h</gray>"
+    gauge:
+      range: "<gray>Range 0–<white><range></white> kPa</gray>"
+      main-reservoir:
+        normal: "<green>Main reservoir: <white><value></white> kPa</green>"
+        warning: "<yellow>Main reservoir: <white><value></white> kPa</yellow>"
+        alarm: "<red>Main reservoir: <white><value></white> kPa</red>"
+      brake-cylinder:
+        normal: "<green>Brake cylinder: <white><value></white> kPa</green>"
+        warning: "<yellow>Brake cylinder: <white><value></white> kPa</yellow>"
+        alarm: "<red>Brake cylinder: <white><value></white> kPa</red>"
+      brake-pipe:
+        normal: "<green>Brake pipe: <white><value></white> kPa</green>"
+        warning: "<yellow>Brake pipe: <white><value></white> kPa</yellow>"
+        alarm: "<red>Brake pipe: <white><value></white> kPa</red>"
+      main-reservoir-detail: "<gray>Below <white><lockout></white> kPa traction is cut; below <white><parking></white> kPa the parking brake applies itself</gray>"
+      brake-cylinder-detail: "<gray>Full service <white><full></white> kPa</gray>"
+      brake-cylinder-leak: "<red>Brake cylinder leak: the brake will not hold</red>"
+      brake-pipe-detail: "<gray>Nominal <white><nominal></white> kPa; below <white><full></white> kPa no traction; below <white><emergency></white> kPa automatic emergency brake</gray>"
+    faults:
+      none: "<gray>Fault display: no faults</gray>"
+      active: "<red>Fault display: <count> fault(s)</red>"
+      bypass-only: "<gold>Fault display: door bypass on</gold>"
+      line-loss: "<red>Line voltage lost: wait for the supply to return; no traction or electric brake meanwhile</red>"
+      breaker-trip-tripped: "<red>Main breaker tripped: click the main breaker switch to open it, then click again to close</red>"
+      breaker-trip-opened: "<yellow>Main breaker tripped: open now, click the main breaker switch to close it</yellow>"
+      breaker-trip-closing: "<yellow>Main breaker tripped: closing</yellow>"
+      compressor: "<red>Compressor failure: the main reservoir will not recharge, use air sparingly</red>"
+      brake-leak: "<red>Brake cylinder leak: the brake will not hold, stop soon</red>"
+      door: "<red>Door fault: make sure the doors are closed, then use the door bypass</red>"
+      door-bypass: "<gold>Door bypass on: door states are not checked</gold>"
     notice:
       brake-test-started: "<yellow>Brake test started: close the desk and move the handle to B4</yellow>"
       brake-test-passed: "<green>Brake test passed</green>"
       parking-auto-applied: "<red>Main reservoir too low, the parking brake applied itself</red>"
+      brake-test-started-loco: "<yellow>Brake test started: close the desk and move the handle to N to charge</yellow>"
+      brake-test-failed: "<red>Brake test failed: the brake cylinder leaked too much while holding</red>"
+      fault-recovered:
+        line-loss: "<green>Line voltage restored</green>"
+        breaker-trip: "<green>Main breaker reset</green>"
+      fault-cleared: "<green>Train faults cleared</green>"
+      breaker-opened: "<yellow>Main breaker open, click again to close it</yellow>"
+      breaker-closing: "<yellow>Main breaker closing</yellow>"
+      door-bypass-on: "<gold>Door bypass on, make sure the doors are closed</gold>"
+      door-bypass-off: "<green>Door bypass off</green>"
     deny:
       moving: "<red>The desk can only be used while the train is stopped</red>"
       traction: "<red>Return to coast or a brake notch before opening the desk</red>"
@@ -594,6 +696,7 @@ drive:
       entry-records: "  <gray>•</gray> <white>/fta drive records [player]</white> <gray>- Show driving records</gray>"
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- Driving leaderboard</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <player></white> <gray>- Revoke a player's driving task</gray>"
+      entry-fault: "  <gray>•</gray> <white>/fta drive fault <player> <type|clear></white> <gray>- Inject or clear train faults on a simulation-level driving session</gray>"
     start:
       started: "<prefix> <green>Now driving <white><train></white></green> <gray>Hotbar 1-9 is P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>Manual driving is disabled</red>"
@@ -665,6 +768,15 @@ drive:
     probe:
       "on": "<prefix> <yellow>Driving input diagnostics enabled, packet events go to the console</yellow>"
       "off": "<prefix> <yellow>Driving input diagnostics disabled</yellow>"
+    fault:
+      injected: "<prefix> <yellow>Injected a fault into <player>'s train: <type></yellow>"
+      already-active: "<prefix> <red><player>'s train already has this fault: <type></red>"
+      not-applicable: "<prefix> <red><player>'s train cannot have this fault (diesel trains have no power collection or main breaker): <type></red>"
+      cleared: "<prefix> <green>Cleared <count> fault(s) on <player>'s train</green>"
+      none: "<prefix> <gray><player>'s train has no faults</gray>"
+      not-driving: "<prefix> <red><player> is not driving</red>"
+      not-simulation: "<prefix> <red><player>'s session is not at the simulation level; faults cannot be injected</red>"
+      invalid: "<prefix> <red>The fault type must be line-loss, breaker-trip, compressor, brake-leak, door or clear</red>"
 sign:
   stopmark:
     created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here"

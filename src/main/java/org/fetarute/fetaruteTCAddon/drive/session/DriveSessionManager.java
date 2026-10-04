@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
@@ -60,7 +61,10 @@ import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
 import org.fetarute.fetaruteTCAddon.drive.cab.BrakeTest;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabVehicle;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
@@ -87,7 +91,6 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskViews;
-import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
@@ -197,6 +200,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 驾驶台提示在动作栏停留的时间（tick），期间驾驶 HUD 不覆盖动作栏。 */
   private static final long NOTICE_HOLD_TICKS = 40L;
+
+  private static final TrainConfigResolver TRAIN_CONFIG_RESOLVER = new TrainConfigResolver();
 
   /** “结束驾驶”第一次点击后，多少 tick 内再点才算确认。 */
   private static final long END_CONFIRM_TICKS = 60L;
@@ -915,7 +920,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       case REVERSER_REVERSE -> setReverser(player, session, ReverserPosition.REVERSE);
       case DOOR_LEFT -> toggleDoor(player, session, true);
       case DOOR_RIGHT -> toggleDoor(player, session, false);
-      case KEY, POWER, BREAKER, AUX -> action
+      case BREAKER -> {
+        if (!resetTrippedBreaker(player, session)) {
+          toggleSystem(player, session, SetupSystem.BREAKER);
+        }
+      }
+      case KEY, POWER, AUX -> action
           .system()
           .ifPresent(system -> toggleSystem(player, session, system));
       case START -> pressStart(player, session);
@@ -929,6 +939,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         }
       }
       case TASK_CARD -> {}
+      case DOOR_BYPASS -> toggleDoorBypass(player, session);
     }
     Inventory top = player.getOpenInventory().getTopInventory();
     if (DriveMenu.isMenu(top)) {
@@ -1132,10 +1143,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             group.getProperties(), System.currentTimeMillis(), current.cab().leakKpaPerMinute());
     return CabSystems.simulation(
         current.cab(),
-        params.mode() == DriveMode.LOCO,
+        cabVehicle(group, current, params),
         air.mainReservoirKpa(),
         air.compressorSwitch(),
         Bukkit.getCurrentTick());
+  }
+
+  /** 车上系统要知道的车辆特征：动力配置方式、是否电力牵引、编组节数与车种的拐点速度。 */
+  private CabVehicle cabVehicle(MinecartGroup group, DriveConfig current, DriveParams params) {
+    var properties = group.getProperties();
+    PowerSupply supply =
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_POWER)
+            .flatMap(PowerSupply::parse)
+            .orElse(current.defaultPower());
+    TrainConfig base =
+        TRAIN_CONFIG_RESOLVER.resolve(properties, plugin.getConfigManager().current());
+    return CabVehicle.of(params, supply, base.type(), group.size(), current.cab());
   }
 
   /** simulation 级：机车的压缩机开关；动车组的压缩机自动运转。 */
@@ -1174,24 +1197,32 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       denyMenu(player, "drive.menu.deny.start-first");
       return;
     }
-    if (!cab.brakeTest().passed()
-        && cab.air().mainReservoirKpa() < cab.config().brakeTestApplyKpa()) {
-      // 制动缸压力不会超过主风缸，主风缸不够时试验永远升不到试验压力。
+    boolean pipe = cab.brakeTest().usesBrakePipe();
+    // 制动缸（机车为制动管）压力不会超过主风缸，主风缸不够时试验永远到不了试验压力。
+    double need = pipe ? cab.config().brakePipe().nominalKpa() : cab.config().brakeTestApplyKpa();
+    if (!cab.brakeTest().passed() && cab.air().mainReservoirKpa() < need) {
       notice(
           player,
           "drive.menu.deny.brake-test-air",
           Map.of(
-              "need", String.valueOf(Math.round(cab.config().brakeTestApplyKpa())),
+              "need", String.valueOf(Math.round(need)),
               "mr", String.valueOf(Math.round(cab.air().mainReservoirKpa()))));
       return;
     }
     if (cab.brakeTest().start()) {
-      denyMenu(player, "drive.menu.notice.brake-test-started");
-      traceSession(session, "开始制动试验");
+      denyMenu(
+          player,
+          pipe
+              ? "drive.menu.notice.brake-test-started-loco"
+              : "drive.menu.notice.brake-test-started");
+      traceSession(session, "开始制动试验" + (pipe ? "（制动管）" : ""));
     }
   }
 
-  /** simulation 级车上系统的事件：制动试验进度（通过时提示）、失风自动施加停放制动（提示），警惕装置报警时每秒响一次，超时施加紧急制动时把手柄拨到 EB。 */
+  /**
+   * simulation 级车上系统的事件：制动试验进度（通过、不通过时提示）、失风自动施加停放制动（提示）、车上故障与制动管失压（提示并记日志），
+   * 警惕装置报警时每秒响一次，超时施加紧急制动时把手柄拨到 EB。
+   */
   private void handleCabEvents(Player player, DriveSession session) {
     CabSystems cab = session.cab();
     cab.takeBrakeTestChange()
@@ -1200,8 +1231,25 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               traceSession(session, "制动试验: " + stage);
               if (stage == BrakeTest.Stage.PASSED) {
                 notice(player, "drive.menu.notice.brake-test-passed", Map.of());
+              } else if (stage == BrakeTest.Stage.FAILED) {
+                notice(player, "drive.menu.notice.brake-test-failed", Map.of());
               }
             });
+    for (CabFaults.Event fault : cab.faults().takeEvents()) {
+      announceFault(player, session, fault);
+    }
+    if (cab.takeBrakePipeLoss()) {
+      traceSession(
+          session,
+          "制动管失压，自动紧急制动: 制动管="
+              + cab.brakePipe().map(pipe -> Math.round(pipe.pressureKpa())).orElse(0L)
+              + " kPa 主风缸="
+              + Math.round(cab.air().mainReservoirKpa())
+              + " kPa");
+      player.getInventory().setHeldItemSlot(Notch.EB.slot());
+      sounds.play(player, DriveCue.BRAKE_PIPE_LOSS);
+      player.sendMessage(plugin.getLocaleManager().component("drive.cab.brake-pipe-loss"));
+    }
     if (cab.air().takeParkingAutoApplied()) {
       traceSession(session, "主风缸 " + Math.round(cab.air().mainReservoirKpa()) + " kPa，停放制动自动施加");
       notice(player, "drive.menu.notice.parking-auto-applied", Map.of());
@@ -1220,6 +1268,72 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
       default -> {}
     }
+  }
+
+  /** 车上故障出现、清除或恢复：提示驾驶员并写诊断日志。出现时响一声，主断跳闸另有跳闸声。 */
+  private void announceFault(Player player, DriveSession session, CabFaults.Event event) {
+    CabFault fault = event.fault();
+    traceSession(
+        session,
+        "车上故障 "
+            + fault.key()
+            + ": "
+            + event.kind()
+            + " 主风缸="
+            + Math.round(session.cab().air().mainReservoirKpa())
+            + " kPa 速度="
+            + String.format(Locale.ROOT, "%.1f", session.speedBps() * KMH_PER_BPS)
+            + " km/h");
+    switch (event.kind()) {
+      case INJECTED, RANDOM -> {
+        sounds.play(player, DriveCue.FAULT);
+        if (fault == CabFault.BREAKER_TRIP) {
+          sounds.play(player, DriveCue.BREAKER_TRIP);
+        }
+        player.sendMessage(plugin.getLocaleManager().component("drive.cab.fault." + fault.key()));
+      }
+      case RECOVERED -> notice(
+          player, "drive.menu.notice.fault-recovered." + fault.key(), Map.of());
+      case CLEARED -> notice(player, "drive.menu.notice.fault-cleared", Map.of());
+    }
+  }
+
+  /**
+   * simulation 级：主断跳闸时点击主断开关走复位流程（先断开，再闭合）。
+   *
+   * @return 是否已按复位流程处理；主断没有跳闸时为 {@code false}，按平常的启动流程开关处理
+   */
+  private boolean resetTrippedBreaker(Player player, DriveSession session) {
+    CabSystems cab = session.cab();
+    if (!cab.enabled()) {
+      return false;
+    }
+    CabFaults.BreakerClick click =
+        cab.faults().clickBreaker(Bukkit.getCurrentTick(), config.setupTimings().breakerTicks());
+    switch (click) {
+      case NOT_TRIPPED -> {
+        return false;
+      }
+      case OPENED -> notice(player, "drive.menu.notice.breaker-opened", Map.of());
+      case CLOSING -> notice(player, "drive.menu.notice.breaker-closing", Map.of());
+      case BUSY -> denyMenu(player, "drive.menu.deny.setup-busy");
+    }
+    traceSession(session, "主断复位: " + click);
+    return true;
+  }
+
+  /** simulation 级：切换门旁路。 */
+  private void toggleDoorBypass(Player player, DriveSession session) {
+    CabSystems cab = session.cab();
+    if (!cab.enabled()) {
+      return;
+    }
+    boolean bypassed = cab.faults().toggleDoorBypass();
+    notice(
+        player,
+        bypassed ? "drive.menu.notice.door-bypass-on" : "drive.menu.notice.door-bypass-off",
+        Map.of());
+    traceSession(session, "门旁路: " + (bypassed ? "旁路" : "复位"));
   }
 
   /** 驾驶员离开驾驶室：钥匙随人离开，正在进行的接通作废；列车已接通的系统与气压保留在标签里。 */
@@ -1528,7 +1642,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return loadCab(group, current, params);
     }
     return CabSystems.hotHandover(
-        current.cab(), params.mode() == DriveMode.LOCO, Bukkit.getCurrentTick());
+        current.cab(), cabVehicle(group, current, params), Bukkit.getCurrentTick());
   }
 
   /** 这条控制链路所属的会话（驾驶中或制动停车中）。 */

@@ -6,6 +6,7 @@ import java.util.Objects;
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabConfigSections;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverConfig;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
@@ -39,7 +40,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
  * @param defaultPower 列车未设 {@code FTA_TRAIN_POWER} 标签时的受电方式
  * @param setupTimings 启动流程各步骤的耗时
  * @param coldAfterMinutes 列车无人驾驶超过多少分钟后按冷车处理（受电、主断路器、辅助电源全部断开）
- * @param cab simulation 级车上系统（气压、停放制动、制动试验、警惕装置）的参数
+ * @param cab simulation 级车上系统（气压、停放制动、电空制动、制动管、制动试验、警惕装置、恒功率、故障）的参数
  * @param sidebar 是否在驾驶员的侧边栏（计分板）显示车上系统的详细状态
  * @param driver 驾驶调度列车（DRIVER 模式）的参数
  * @param sounds 驾驶提示音与鸣笛
@@ -229,14 +230,23 @@ public record DriveConfig(
                             "vigilance-warning-seconds",
                             fallback.vigilanceWarningTicks() / (double) TICKS_PER_SECOND,
                             scoped)
-                        * TICKS_PER_SECOND));
+                        * TICKS_PER_SECOND),
+            CabConfigSections.blendedBrake(
+                section.getConfigurationSection("blended-brake"), fallback.blendedBrake(), warn),
+            CabConfigSections.constantPower(
+                section.getConfigurationSection("constant-power"), fallback.constantPower(), warn),
+            CabConfigSections.brakePipe(
+                section.getConfigurationSection("brake-pipe"), fallback.brakePipe(), warn),
+            CabConfigSections.faults(
+                section.getConfigurationSection("faults"), fallback.faults(), warn));
     if (parsed.compressorCutInKpa() >= max
         || parsed.tractionLockoutKpa() > max
         || parsed.parkingReleaseKpa() > max
         || parsed.parkingAutoApplyKpa() > parsed.parkingReleaseKpa()
-        || parsed.brakeTestApplyKpa() <= parsed.brakeTestReleaseKpa()) {
+        || parsed.brakeTestApplyKpa() <= parsed.brakeTestReleaseKpa()
+        || parsed.brakePipe().nominalKpa() > max) {
       warn.accept(
-          "drive.yml 的 simulation 段压力关系不合理（启动压力须低于满压，停放制动自动施加压力不能高于缓解压力，试验施加压力须高于缓解压力），整段使用默认值");
+          "drive.yml 的 simulation 段压力关系不合理（启动压力须低于满压，停放制动自动施加压力不能高于缓解压力，试验施加压力须高于缓解压力，制动管定压不能高于主风缸满压），整段使用默认值");
       return fallback;
     }
     return parsed;

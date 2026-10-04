@@ -16,6 +16,9 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
@@ -277,6 +280,29 @@ public final class FtaDriveCommand {
             .permission(permissionOf("handback"))
             .required("target", StringParser.stringParser(), handbackSuggestions)
             .handler(ctx -> handleHandback(ctx.sender(), ((String) ctx.get("target")).trim())));
+
+    List<String> faultTypes = new ArrayList<>();
+    for (CabFault fault : CabFault.values()) {
+      faultTypes.add(fault.key());
+    }
+    faultTypes.add("clear");
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("fault")
+            .permission(PERMISSION_ADMIN)
+            .required("player", StringParser.stringParser(), driverSuggestions)
+            .required(
+                "type",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings(faultTypes))
+            .handler(
+                ctx ->
+                    handleFault(
+                        ctx.sender(),
+                        ((String) ctx.get("player")).trim(),
+                        ((String) ctx.get("type")).trim())));
 
     manager.command(
         manager
@@ -864,6 +890,52 @@ public final class FtaDriveCommand {
       sender.sendMessage(
           locale.component("drive.command.rescue.destroyed", Map.of("train", train)));
     }
+  }
+
+  /** 管理员给某名驾驶员的列车注入或清除车上故障（仅 simulation 级）。 */
+  private void handleFault(CommandSender sender, String playerName, String type) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    Map<String, String> values = Map.of("player", playerName, "type", type);
+    Player target = Bukkit.getPlayerExact(playerName);
+    Optional<DriveSession> session =
+        target == null ? Optional.empty() : drive.sessionOf(target.getUniqueId());
+    if (session.isEmpty() || session.get().phase() != DriveSession.Phase.ACTIVE) {
+      sender.sendMessage(locale.component("drive.command.fault.not-driving", values));
+      return;
+    }
+    CabSystems cab = session.get().cab();
+    if (!cab.enabled()) {
+      sender.sendMessage(locale.component("drive.command.fault.not-simulation", values));
+      return;
+    }
+    if (type.equalsIgnoreCase("clear")) {
+      int cleared = cab.faults().clearAll();
+      sender.sendMessage(
+          locale.component(
+              cleared > 0 ? "drive.command.fault.cleared" : "drive.command.fault.none",
+              Map.of("player", playerName, "count", String.valueOf(cleared))));
+      return;
+    }
+    Optional<CabFault> fault = CabFault.parse(type);
+    if (fault.isEmpty()) {
+      sender.sendMessage(locale.component("drive.command.fault.invalid", values));
+      return;
+    }
+    CabFaults.Outcome outcome = cab.faults().inject(fault.get(), Bukkit.getCurrentTick());
+    String key =
+        switch (outcome) {
+          case INJECTED -> "drive.command.fault.injected";
+          case ALREADY_ACTIVE -> "drive.command.fault.already-active";
+          case NOT_APPLICABLE -> "drive.command.fault.not-applicable";
+        };
+    sender.sendMessage(
+        locale.component(
+            key,
+            Map.of("player", playerName, "type", locale.text("drive.fault." + fault.get().key()))));
   }
 
   private void handleProbe(CommandSender sender, Optional<String> state) {

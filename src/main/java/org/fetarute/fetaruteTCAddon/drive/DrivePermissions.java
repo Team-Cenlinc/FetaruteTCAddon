@@ -95,6 +95,7 @@ public final class DrivePermissions {
           new Subcommand("stop", List.of(ADMIN)),
           new Subcommand("handback", List.of(ADMIN)),
           new Subcommand("rescue", List.of(ADMIN)),
+          new Subcommand("fault", List.of(ADMIN)),
           new Subcommand("breaker", List.of(ADMIN)),
           new Subcommand("probe", List.of(ADMIN)));
 

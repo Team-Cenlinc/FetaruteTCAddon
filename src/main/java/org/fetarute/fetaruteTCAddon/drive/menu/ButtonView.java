@@ -15,6 +15,7 @@ import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
  * @param clickable 能否点击；standard 级的系统开关与动车组的压缩机只作指示灯
  * @param detailKey 额外一行说明（如风压读数）的语言键；没有时为 {@code null}
  * @param detailValues 说明里的占位符
+ * @param fault 按钮对应的设备是否故障（主断跳闸、压缩机故障）：换用故障贴图与名称
  */
 public record ButtonView(
     MenuAction action,
@@ -24,12 +25,26 @@ public record ButtonView(
     long remainingSeconds,
     boolean clickable,
     String detailKey,
-    Map<String, String> detailValues) {
+    Map<String, String> detailValues,
+    boolean fault) {
 
   public ButtonView {
     Objects.requireNonNull(action, "action");
     Objects.requireNonNull(supply, "supply");
     detailValues = detailValues == null ? Map.of() : Map.copyOf(detailValues);
+  }
+
+  /** 没有故障的按钮。 */
+  public ButtonView(
+      MenuAction action,
+      boolean active,
+      boolean busy,
+      PowerSupply supply,
+      long remainingSeconds,
+      boolean clickable,
+      String detailKey,
+      Map<String, String> detailValues) {
+    this(action, active, busy, supply, remainingSeconds, clickable, detailKey, detailValues, false);
   }
 
   /** 没有额外说明的按钮。 */

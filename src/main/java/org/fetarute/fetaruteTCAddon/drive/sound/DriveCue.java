@@ -38,6 +38,12 @@ public enum DriveCue {
   VIGILANCE_WARNING("vigilance-warning", "minecraft:block.note_block.bell", 1.0f, 1.6f),
   /** 警惕装置超时，紧急制动。 */
   VIGILANCE_TRIPPED("vigilance-tripped", "minecraft:block.anvil.land", 0.6f, 0.8f),
+  /** simulation 级出现车上故障。 */
+  FAULT("fault", "minecraft:block.note_block.bass", 1.0f, 0.6f),
+  /** simulation 级主断路器跳闸（与故障声一起响）。 */
+  BREAKER_TRIP("breaker-trip", "minecraft:block.iron_trapdoor.close", 1.0f, 0.7f),
+  /** 机车制动管失压，自动紧急制动。 */
+  BRAKE_PIPE_LOSS("brake-pipe-loss", "minecraft:block.anvil.land", 0.6f, 0.8f),
   /** 鸣笛：附近的玩家都听得到。 */
   HORN("horn", "minecraft:item.goat_horn.sound.0", 4.0f, 1.0f);
 
