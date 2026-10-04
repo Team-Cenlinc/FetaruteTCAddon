@@ -226,6 +226,8 @@ driver:
   breaker-held-trains: 5
   breaker-held-seconds: 60
   breaker-cooldown-minutes: 15
+  # 驾驶记录（/fta drive records、top）保留多少天，超过的每小时清理一次；0 表示一直保留
+  record-retention-days: 30
   # 挡住后车：后方被驾驶员列车直接挡住的车被扣超过 congestion-warn-seconds 秒时提醒驾驶员，
   # 超过 congestion-ato-seconds 秒且驾驶员列车停着、不在表定停站时强制转 ATO
   congestion-warn-seconds: 60

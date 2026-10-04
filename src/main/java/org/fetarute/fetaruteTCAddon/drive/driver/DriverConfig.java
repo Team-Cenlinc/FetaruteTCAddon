@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  * @param cabSeatNames 驾驶座名单：座位附件的名字（TrainCarts 附件编辑器里设置）在名单里即为驾驶座，已转为小写；为空时不认标记
  * @param cabChange 折返换端的时间参数
  * @param pickupAdvanceSeconds 领了从终点站出发的车次后，提前多少秒按交路认出担当的待命车、通知驾驶员并留车（驾驶员可提前上车准备）
+ * @param recordRetentionDays 驾驶记录保留多少天，超过的定时删除；0 表示一直保留
  */
 public record DriverConfig(
     boolean enabled,
@@ -51,7 +52,8 @@ public record DriverConfig(
     DriverGuidanceConfig guidance,
     List<String> cabSeatNames,
     CabChangeConfig cabChange,
-    int pickupAdvanceSeconds) {
+    int pickupAdvanceSeconds,
+    int recordRetentionDays) {
 
   private static final int TICKS_PER_SECOND = 20;
 
@@ -68,6 +70,7 @@ public record DriverConfig(
         List.copyOf(cabSeatNames == null ? DEFAULT_CAB_SEAT_NAMES : normalizeNames(cabSeatNames));
     cabChange = cabChange == null ? CabChangeConfig.defaults() : cabChange;
     pickupAdvanceSeconds = Math.max(0, pickupAdvanceSeconds);
+    recordRetentionDays = Math.max(0, recordRetentionDays);
   }
 
   /** 内置默认值。 */
@@ -92,7 +95,8 @@ public record DriverConfig(
         DriverGuidanceConfig.defaults(),
         DEFAULT_CAB_SEAT_NAMES,
         CabChangeConfig.defaults(),
-        300);
+        300,
+        30);
   }
 
   /**
@@ -162,7 +166,9 @@ public record DriverConfig(
         CabChangeConfig.from(section, sink),
         (int)
             Math.round(
-                nonNegative(section, "pickup-advance-seconds", d.pickupAdvanceSeconds, sink)));
+                nonNegative(section, "pickup-advance-seconds", d.pickupAdvanceSeconds, sink)),
+        (int)
+            Math.round(nonNegative(section, "record-retention-days", d.recordRetentionDays, sink)));
   }
 
   /** 驾驶座名单：须是字符串列表；写成别的形式时提示并用默认名单，写成空列表表示不认标记。 */

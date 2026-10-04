@@ -253,6 +253,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private volatile boolean trace;
   private volatile boolean packetsReady;
   private BukkitTask tickTask;
+  private BukkitTask pruneTask;
   private long tickCounter;
 
   public DriveSessionManager(FetaruteTCAddon plugin, DriveConfig config) {
@@ -352,6 +353,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       plugin.getLogger().severe("手动驾驶的数据包监听注册失败，手动驾驶不可用: " + ex);
     }
     tickTask = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 1L, 1L);
+    // 驾驶记录只保留一段时间：启动一分钟后清理一次，之后每小时一次，在异步线程读写数据库。
+    pruneTask =
+        Bukkit.getScheduler()
+            .runTaskTimerAsynchronously(plugin, this::pruneRecords, 20L * 60L, 20L * 3600L);
     // 服务器重启前若在驾驶中崩溃，列车标签里还留着调整前的属性；此时没有任何会话，直接还原。
     Bukkit.getScheduler().runTask(plugin, this::restoreStaleProperties);
     Bukkit.getScheduler().runTaskLater(plugin, this::restoreStaleProperties, 100L);
@@ -375,6 +380,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 结束全部会话并注销监听。插件停用时调用；重载配置不会调用它。 */
   public void shutdown() {
+    if (pruneTask != null) {
+      pruneTask.cancel();
+      pruneTask = null;
+    }
     if (tickTask != null) {
       tickTask.cancel();
       tickTask = null;
@@ -3567,6 +3576,31 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               session.holdActionBar(Bukkit.getCurrentTick() + NOTICE_HOLD_TICKS);
               sounds.play(player, DriverReport.stopCue(score.window()));
             });
+  }
+
+  /** 删掉超过保留期的驾驶记录。在异步线程运行；存储没就绪时跳过，下一次再清。 */
+  private void pruneRecords() {
+    int days = config.driver().recordRetentionDays();
+    if (days <= 0) {
+      return;
+    }
+    org.fetarute.fetaruteTCAddon.storage.StorageManager storage = plugin.getStorageManager();
+    if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
+      return;
+    }
+    try {
+      int removed =
+          storage
+              .provider()
+              .get()
+              .driveTaskRecords()
+              .deleteFinishedBefore(Instant.now().minus(Duration.ofDays(days)));
+      if (removed > 0) {
+        plugin.getLogger().info("已删除 " + removed + " 条超过 " + days + " 天的驾驶记录");
+      }
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("清理过期驾驶记录失败: " + ex);
+    }
   }
 
   /** 重载时存储连接池会被换掉：写入失败隔这么久用新的连接池再试一次。 */

@@ -63,6 +63,21 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
   }
 
   @Override
+  public int deleteFinishedBefore(Instant cutoff) {
+    Objects.requireNonNull(cutoff, "cutoff");
+    String sql = "DELETE FROM " + table(TABLE) + " WHERE finished_at < ?";
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setInstant(statement, 1, cutoff);
+      int removed = statement.executeUpdate();
+      connection.commitIfNecessary();
+      return removed;
+    } catch (SQLException ex) {
+      throw new StorageException("清理 drive_task_records 失败", ex);
+    }
+  }
+
+  @Override
   public List<DriveTaskRecord> listByPlayer(UUID playerId, int limit) {
     Objects.requireNonNull(playerId, "playerId");
     String sql =
