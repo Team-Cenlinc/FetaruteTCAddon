@@ -946,8 +946,8 @@ public final class TrainHealthMonitor {
             // 只列出实际实现的动作。宣告并不存在的动作（如 SMART_HOLD_FOLLOWERS、
             // SMART_DESTROY_CANDIDATE；destroy 走的是另一条 fallback 路径）会让日志宣告的恢复能力
             // 大于实际，读日志时会据此误判"该动作试过了"。
-            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
-            + "SMART_FORWARD_UNLOCK,SMART_QUEUE_POSITION_YIELD");
+            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_RELEASE_PHYSICAL_EDGE_RETAIN,"
+            + "SMART_DRAIN_UNLOCK,SMART_FORWARD_UNLOCK,SMART_QUEUE_POSITION_YIELD");
     RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
         safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(input));
     if (selfRetainRelease.candidate()) {
@@ -2430,8 +2430,8 @@ public final class TrainHealthMonitor {
             + emptyDash(followerTrain)
             + " evidenceGroup="
             + emptyDash(evidenceGroup)
-            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
-            + "SMART_FORWARD_UNLOCK");
+            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_RELEASE_PHYSICAL_EDGE_RETAIN,"
+            + "SMART_DRAIN_UNLOCK,SMART_FORWARD_UNLOCK");
 
     FallbackRecoveryAttempt selfRetainRelease =
         fallbackRecoveryCandidate(

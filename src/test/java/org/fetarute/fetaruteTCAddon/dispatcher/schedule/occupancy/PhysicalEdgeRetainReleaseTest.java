@@ -134,6 +134,33 @@ final class PhysicalEdgeRetainReleaseTest {
     assertEquals(0, result.releasedCount(), () -> "CONFLICT 不该被物理路径释放：" + result);
   }
 
+  /**
+   * 预判只读，释放只复核预判列出的资源：预判之后证据变了（车体又压上该区间），释放必须 fail-closed。
+   *
+   * <p>判别两件事：预判前后账本版本不变；复核用的是释放时的覆盖集合而不是预判时的结论。
+   */
+  @Test
+  void previewIsReadOnlyAndReleaseRechecksThePreviewedResources() {
+    SimpleOccupancyManager manager = managerHoldingRetain();
+    long versionBefore = manager.version();
+
+    SimpleOccupancyManager.PhysicalEdgeRetainPreview preview =
+        manager.previewSelfOwnedPhysicalEdgeRetainRelease("train-A", true, Set.of());
+
+    assertEquals(List.of(BEHIND), preview.releasable(), () -> "预判应列出已驶离的区间：" + preview);
+    assertEquals(versionBefore, manager.version(), "预判改写了账本");
+    assertEquals(1, manager.snapshotClaims().size(), "预判不得释放任何 claim");
+
+    SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult stale =
+        manager.releasePreviewedPhysicalEdgeRetain("train-A", Set.of(BEHIND), preview);
+    assertEquals(0, stale.releasedCount(), () -> "复核时车体已压着，绝不许按旧预判释放：" + stale);
+    assertEquals("preview-stale", stale.reason());
+
+    SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult released =
+        manager.releasePreviewedPhysicalEdgeRetain("train-A", Set.of(), preview);
+    assertEquals(1, released.releasedCount(), () -> "复核通过就该放：" + released);
+  }
+
   /** 构造一辆在身后**节点**上持有 PROTECTIVE_RETAIN 的列车。 */
   private static SimpleOccupancyManager managerHoldingNodeRetain() {
     SimpleOccupancyManager manager =

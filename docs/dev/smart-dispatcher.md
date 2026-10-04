@@ -245,13 +245,20 @@ Step 1 recovery 核心 trace：
 
 `PROGRESS_STUCK` 进入 Smart recovery 后不再只等待 destroy。当前顺序固定为：
 
-1. `SMART_RELEASE_SELF_OWNED_STALE_RETAIN`：释放同一逻辑列车持有的 stale/protective CONFLICT retain，effect class 为 `OCCUPANCY_MUTATION`。
+1. `SMART_RELEASE_SELF_OWNED_STALE_RETAIN`：释放同一逻辑列车持有的 stale/protective CONFLICT retain，effect class 为 `OCCUPANCY_MUTATION`。CONFLICT 没有候选时转入实测覆盖分支 `SMART_RELEASE_PHYSICAL_EDGE_RETAIN`：释放车体实测已驶离的 NODE/EDGE 上本车的 `PROTECTIVE_RETAIN`，同为 `OCCUPANCY_MUTATION`（见下文「实测覆盖分支」）。
 2. `SMART_DRAIN_UNLOCK`：普通分支在列车已经位于 controlled region 且没有外部 hard blocker 时，只解除本车本地 inhibitor 并触发信号重判，effect class 为 `SIGNAL_CONSTRAINT`。若 Health 已确认 live switcher cycle，且同一进度窗口的完整 blocked request 仍新鲜，系统会先证明本车实体占有 switcher NODE、首条有向边驶向出口、出口 NODE/EDGE 均在 hard authority 内且没有其他外车硬 blocker，再通过 `ACQUIRE_VERIFIED_SWITCHER_DRAIN_AUTHORITY` 的 `OCCUPANCY_MUTATION` gate 与 `SimpleOccupancyManager.acquire` 锁内复判取得排空授权。证明不完整、版本变化或 `OBSERVE_ONLY/OFF` 时不修改 occupancy。
 3. `SMART_FORWARD_UNLOCK`：`authority-window-exceeded` / movement token pending 且无 blocker 时刷新授权窗口，effect class 为 `SIGNAL_CONSTRAINT`。
 4. stale queue purge / follower hold。
 5. `SMART_DESTROY_CANDIDATE`：只有前面安全解锁都不可用、confirmed hard cycle 持续超过阈值且无 safe alternative 时才到达。
 
-自持 retain release 只处理 `CONFLICT` claim，不释放 NODE/EDGE 车体占用，不清 destination，不 invalidate token，不 destroy。若同一资源上存在外部 owner 或外部队列条目，release 会 fail closed 并输出 skipped reason。self-owned continuation 判定中，`SELF + PROTECTIVE_RETAIN` / `SELF + HOLD_ONLY` 不得被归类为 external hard blocker 或 opposite single blocker；只有 different owner 的 opposite claim 才能阻止 continuation。
+自持 retain release 的 CONFLICT 分支只处理 `CONFLICT` claim，不清 destination，不 invalidate token，不 destroy。若同一资源上存在外部 owner 或外部队列条目，release 会 fail closed 并输出 skipped reason。self-owned continuation 判定中，`SELF + PROTECTIVE_RETAIN` / `SELF + HOLD_ONLY` 不得被归类为 external hard blocker 或 opposite single blocker；只有 different owner 的 opposite claim 才能阻止 continuation。
+
+实测覆盖分支（`SMART_RELEASE_PHYSICAL_EDGE_RETAIN`）：
+
+- 放行条件只有一个：车体实测覆盖完整，且该 NODE/EDGE 不在覆盖集合内；覆盖缺项、仍被车体压着、或资源上有外车 claim 时一律不放（fail-closed）。
+- 与 CONFLICT 分支过同一道 `RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN` 模式闸：先只读预判（`previewSelfOwnedPhysicalEdgeRetainRelease`），确有可释放的尾保才过闸，闸后只复核并释放预判列出的资源。没有可释放的尾保时返回 not-found，不报告被模式压下。
+- **只在 `ENFORCE` 下生效**。`OBSERVE_ONLY` 输出 `SMART_PHYSICAL_EDGE_RETAIN_WOULD_RELEASE`（带 `releasableCount/resources/covered`、`occupancyMutated=false`），`OFF` 输出 `SMART_PHYSICAL_EDGE_RETAIN_RELEASE_SUPPRESSED_BY_MODE`，两者都返回 `suppressed-by-mode`、不改账本。默认配置 `smart-dispatcher.mode: OBSERVE_ONLY` 的服务器上这条回收不会执行，`PROTECTIVE_RETAIN_HOLD` 互卡不会自解；长期运行的服务器须显式设为 `ENFORCE`（`ConfigUpdater` 不改已有值）。
+- 落地证据是必留审计 `SMART_PHYSICAL_EDGE_RETAIN_RELEASED ... covered=`。该分支频率远高于 CONFLICT 分支，不输出 `SMART_STALE_SELF_RETAIN_RELEASE_CANDIDATE`、`SMART_UNLOCK_ATTEMPTED`、`SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE`，以免占满观察预算。
 
 核心 trace：
 

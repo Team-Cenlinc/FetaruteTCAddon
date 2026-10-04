@@ -10800,79 +10800,16 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 执行 Smart self-owned stale retain release。
+   * 回收自持尾部保护，分 CONFLICT 与实测覆盖两条分支。
    *
-   * <p>该入口只释放占用层已识别的自持 stale/protective CONFLICT retain。它不会清理 destination、不会 invalidate movement
-   * token，也不会释放车体 NODE/EDGE claim；真实 mutation 必须先通过 OCCUPANCY_MUTATION effect gate。
+   * <p>CONFLICT 分支释放占用层已识别的自持 stale/protective CONFLICT retain；CONFLICT 没有候选时，实测覆盖分支释放车体已驶离的
+   * NODE/EDGE 上的 {@code PROTECTIVE_RETAIN}。两者都不清理 destination，也不 invalidate movement token。
+   *
+   * <p>两条分支都先只读取证，再过同一道 OCCUPANCY_MUTATION 模式闸，闸后才改账本；闸门不放行时返回 {@code suppressed-by-mode}，一条 claim
+   * 都不动。任何分支都不得在闸前返回一个已落地的结果。
+   *
+   * <p>实测覆盖分支 fail-closed：覆盖缺项（观测不可用 / cell 索引不可用 / 图拿不到）一律不放行。 该缺项**绝不可**被当成"没覆盖"——那正是"缺证据当证据"的红线。
    */
-  /**
-   * Phase 4：用车体实测覆盖释放已驶离区间上的尾部保护。
-   *
-   * <p>返回 {@code null} 表示"这条路径没做任何事"，让调用方继续走原来的 not-found 分支—— 于是既有行为在证据不足时一字不变。
-   *
-   * <p>fail-closed：覆盖缺项（观测不可用 / cell 索引不可用 / 图拿不到）一律不放行。 该缺项**绝不可**被当成"没覆盖"——那正是"缺证据当证据"的红线。
-   */
-  private SmartRecoveryActionResult applyPhysicalEdgeRetainRelease(
-      SimpleOccupancyManager manager, SmartRecoveryInput input) {
-    LivePhysicalEdgeCoverage coverage =
-        livePhysicalEdgeCoverages.get(normalizeTrainKey(input.train()));
-    if (coverage == null) {
-      debugLogger.accept(
-          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
-              + input.train()
-              + " reason=coverage-not-sampled");
-      return null;
-    }
-    if (!coverage.complete()) {
-      debugLogger.accept(
-          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
-              + input.train()
-              + " reason=coverage-incomplete:"
-              + coverage.incompleteReason());
-      return null;
-    }
-    SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult result =
-        manager.releaseSelfOwnedPhysicalEdgeRetain(input.train(), true, coverage.resources());
-    if (result.releasedCount() <= 0) {
-      debugLogger.accept(
-          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
-              + input.train()
-              + " reason="
-              + result.reason()
-              + " covered="
-              + coverage.resources().size()
-              + " "
-              + result.skipBreakdown());
-      return null;
-    }
-    // 这条路径**唯一**的生效证据：一旦这条非零，就说明实测覆盖释放确实生效——归因干净。
-    //
-    // edges/nodes 分开报：只有分开数才知道 NODE 半边有没有在出力；
-    // despiteQueue 是"按排队规则本会被拦下、此处放行了"的条数，用来单独衡量那条规则的影响。
-    debugLogger.accept(
-        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
-            + input.train()
-            + " source=recovery"
-            + " releasedCount="
-            + result.releasedCount()
-            + " edges="
-            + result.releasedEdges()
-            + " nodes="
-            + result.releasedNodes()
-            + " despiteQueue="
-            + result.releasedDespiteQueue()
-            + " resources="
-            + result.released()
-            + " covered="
-            + coverage.resources().size());
-    return new SmartRecoveryActionResult(
-        true,
-        true,
-        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
-        "physical-edge-retain-released:" + result.releasedCount(),
-        DispatchEffectClass.OCCUPANCY_MUTATION);
-  }
-
   public SmartRecoveryActionResult applySmartSelfOwnedStaleRetainRelease(SmartRecoveryInput input) {
     if (input == null || input.train().isBlank()) {
       return SmartRecoveryActionResult.skipped("missing-input");
@@ -10882,58 +10819,108 @@ public final class RuntimeDispatchService {
     }
     Optional<BoundedSelfOwnedRetainCandidate> boundedCandidateOpt =
         boundedSelfOwnedRetainCandidate(manager, input);
+    SimpleOccupancyManager.PhysicalEdgeRetainPreview physicalPreview = null;
+    Set<OccupancyResource> coveredResources = Set.of();
     if (boundedCandidateOpt.isEmpty()) {
       // Phase 4：既有 CONFLICT 路径没有候选时，再试**实测覆盖**这条平行路径。
       //
       // 既有路径开头就 `kind != CONFLICT` 返回，而实际的 blocker 几乎全是
       // NODE / EDGE、极少是 CONFLICT —— 只走既有路径时判据与现实不相交，候选永远为空；
       // 而 `PROTECTIVE_RETAIN_HOLD` 是全网滞留的主要来源之一。
-      SmartRecoveryActionResult physical = applyPhysicalEdgeRetainRelease(manager, input);
-      if (physical != null) {
-        return physical;
+      LivePhysicalEdgeCoverage coverage =
+          livePhysicalEdgeCoverages.get(normalizeTrainKey(input.train()));
+      String physicalSkipReason;
+      if (coverage == null) {
+        physicalSkipReason = "coverage-not-sampled";
+      } else if (!coverage.complete()) {
+        physicalSkipReason = "coverage-incomplete:" + coverage.incompleteReason();
+      } else {
+        coveredResources = coverage.resources();
+        // 只读预判：没有可释放的尾保时走 not-found，不报告"被模式压下"——
+        // 否则观察日志会把"无事可做"读成"本会释放"。
+        physicalPreview =
+            manager.previewSelfOwnedPhysicalEdgeRetainRelease(
+                input.train(), true, coveredResources);
+        physicalSkipReason =
+            physicalPreview.releasableCount() > 0
+                ? null
+                : physicalPreview.reason()
+                    + " covered="
+                    + coveredResources.size()
+                    + " "
+                    + physicalPreview.skipBreakdown();
       }
-      debugLogger.accept(
-          "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
-              + input.train()
-              + " reason=self-owned-stale-retain-not-found");
-      return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+      if (physicalSkipReason != null) {
+        debugLogger.accept(
+            "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+                + input.train()
+                + " reason="
+                + physicalSkipReason);
+        debugLogger.accept(
+            "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+                + input.train()
+                + " reason=self-owned-stale-retain-not-found");
+        return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+      }
     }
-    BoundedSelfOwnedRetainCandidate boundedCandidate = boundedCandidateOpt.get();
-    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = boundedCandidate.candidate();
+    // 两条分支的决策名分开：被压下或落地的是哪条分支，只看返回值就能分清，不依赖会被预算丢弃的观察行。
+    String recoveryDecision =
+        physicalPreview != null
+            ? "SMART_RELEASE_PHYSICAL_EDGE_RETAIN"
+            : "SMART_RELEASE_SELF_OWNED_STALE_RETAIN";
     DispatchEffectClass effectClass = DispatchEffectClass.OCCUPANCY_MUTATION;
-    debugLogger.accept(
-        "SMART_STALE_SELF_RETAIN_RELEASE_CANDIDATE train="
-            + input.train()
-            + " resource="
-            + candidate.resource()
-            + " claimRole="
-            + candidate.claimRole()
-            + " requestIntent="
-            + candidate.requestIntent()
-            + " heldDirection="
-            + candidate.heldDirection()
-            + " requestedDirection="
-            + candidate.requestedDirection()
-            + " reason="
-            + candidate.reason()
-            + " effectClass="
-            + effectClass);
-    debugLogger.accept(
-        "SMART_UNLOCK_ATTEMPTED train="
-            + input.train()
-            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
-            + " effectClass="
-            + effectClass);
+    // 候选 / 尝试 / 放行三行只给 CONFLICT 分支：实测覆盖分支每轮恢复都可能重复释放同一组尾保，
+    // 频率远高于 CONFLICT 分支，它的落地证据是必留的 SMART_PHYSICAL_EDGE_RETAIN_RELEASED，
+    // 再加这几行只会占满观察预算、把别的 trace 挤掉。
+    if (physicalPreview == null) {
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate conflictCandidate =
+          boundedCandidateOpt.get().candidate();
+      debugLogger.accept(
+          "SMART_STALE_SELF_RETAIN_RELEASE_CANDIDATE train="
+              + input.train()
+              + " resource="
+              + conflictCandidate.resource()
+              + " claimRole="
+              + conflictCandidate.claimRole()
+              + " requestIntent="
+              + conflictCandidate.requestIntent()
+              + " heldDirection="
+              + conflictCandidate.heldDirection()
+              + " requestedDirection="
+              + conflictCandidate.requestedDirection()
+              + " reason="
+              + conflictCandidate.reason()
+              + " effectClass="
+              + effectClass);
+      debugLogger.accept(
+          "SMART_UNLOCK_ATTEMPTED train="
+              + input.train()
+              + " recoveryDecision="
+              + recoveryDecision
+              + " effectClass="
+              + effectClass);
+    }
     if (!smartDispatcherRegisteredActionAllowed(
         input.train(),
         "health-progress-stuck",
         DispatchAction.RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN)) {
+      String traceKind =
+          physicalPreview != null ? "SMART_PHYSICAL_EDGE_RETAIN" : "SMART_STALE_SELF_RETAIN";
       if (smartDispatcherMode() == SmartDispatcherMode.OBSERVE_ONLY) {
+        String subject =
+            physicalPreview != null
+                ? " releasableCount="
+                    + physicalPreview.releasableCount()
+                    + " resources="
+                    + physicalPreview.releasable()
+                    + " covered="
+                    + coveredResources.size()
+                : " resource=" + boundedCandidateOpt.get().candidate().resource();
         debugLogger.accept(
-            "SMART_STALE_SELF_RETAIN_WOULD_RELEASE train="
+            traceKind
+                + "_WOULD_RELEASE train="
                 + input.train()
-                + " resource="
-                + candidate.resource()
+                + subject
                 + " mode="
                 + smartDispatcherMode()
                 + " effectClass="
@@ -10941,7 +10928,8 @@ public final class RuntimeDispatchService {
                 + " occupancyMutated=false");
       } else {
         debugLogger.accept(
-            "SMART_STALE_SELF_RETAIN_RELEASE_SUPPRESSED_BY_MODE train="
+            traceKind
+                + "_RELEASE_SUPPRESSED_BY_MODE train="
                 + input.train()
                 + " mode="
                 + smartDispatcherMode()
@@ -10953,20 +10941,72 @@ public final class RuntimeDispatchService {
               + input.train()
               + " mode="
               + smartDispatcherMode()
-              + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+              + " recoveryDecision="
+              + recoveryDecision
               + " effectClass="
               + effectClass);
       return new SmartRecoveryActionResult(
-          true, false, "SMART_RELEASE_SELF_OWNED_STALE_RETAIN", "suppressed-by-mode", effectClass);
+          true, false, recoveryDecision, "suppressed-by-mode", effectClass);
+    }
+    if (physicalPreview != null) {
+      // 只复核预判列出的资源，不再扫全表；复核不过（预判之后账本已变）的一律不放。
+      SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult result =
+          manager.releasePreviewedPhysicalEdgeRetain(
+              input.train(), coveredResources, physicalPreview);
+      if (result.releasedCount() <= 0) {
+        debugLogger.accept(
+            "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+                + input.train()
+                + " reason="
+                + result.reason()
+                + " covered="
+                + coveredResources.size()
+                + " "
+                + result.skipBreakdown());
+        debugLogger.accept(
+            "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+                + input.train()
+                + " reason=self-owned-stale-retain-not-found");
+        return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+      }
+      // 这条路径**唯一**的生效证据：一旦这条非零，就说明实测覆盖释放确实生效——归因干净。
+      //
+      // edges/nodes 分开报：只有分开数才知道 NODE 半边有没有在出力；
+      // despiteQueue 是"按排队规则本会被拦下、此处放行了"的条数，用来单独衡量那条规则的影响。
+      debugLogger.accept(
+          "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
+              + input.train()
+              + " source=recovery"
+              + " releasedCount="
+              + result.releasedCount()
+              + " edges="
+              + result.releasedEdges()
+              + " nodes="
+              + result.releasedNodes()
+              + " despiteQueue="
+              + result.releasedDespiteQueue()
+              + " resources="
+              + result.released()
+              + " covered="
+              + coveredResources.size());
+      return new SmartRecoveryActionResult(
+          true,
+          true,
+          recoveryDecision,
+          "physical-edge-retain-released:" + result.releasedCount(),
+          effectClass);
     }
     debugLogger.accept(
         "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
             + input.train()
-            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+            + " recoveryDecision="
+            + recoveryDecision
             + " effectClass="
             + effectClass
             + " mode="
             + smartDispatcherMode());
+    BoundedSelfOwnedRetainCandidate boundedCandidate = boundedCandidateOpt.get();
+    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = boundedCandidate.candidate();
     SimpleOccupancyManager.SelfOwnedStaleRetainReleaseResult release =
         manager.releaseSelfOwnedStaleRetain(input.train(), candidate);
     if (!release.released()) {

@@ -20,8 +20,8 @@
 
 ### PROGRESS_STUCK
 1. 先桥接到 Smart recovery：输出 `SMART_STUCK_TRAIN_DETECTED`、`SMART_RECOVERY_INPUT` 与 `SMART_RECOVERY_ACTION_ORDER`。
-2. Smart recovery 按固定顺序尝试 `SMART_RELEASE_SELF_OWNED_STALE_RETAIN -> SMART_DRAIN_UNLOCK -> SMART_FORWARD_UNLOCK -> stale queue/follower hold -> destroy candidate`。任何候选都必须先经过 `SmartDispatcherModeGate`；OBSERVE_ONLY/OFF 只 trace，ENFORCE 才执行 effect gate 允许的动作。
-3. 自持 stale/protective retain release 只释放同一逻辑列车的 CONFLICT retain，不释放 NODE/EDGE 车体占用，不清 destination、不 invalidate token。
+2. Smart recovery 按固定顺序尝试 `SMART_RELEASE_SELF_OWNED_STALE_RETAIN -> SMART_RELEASE_PHYSICAL_EDGE_RETAIN -> SMART_DRAIN_UNLOCK -> SMART_FORWARD_UNLOCK -> stale queue/follower hold -> destroy candidate`。任何候选都必须先经过 `SmartDispatcherModeGate`；OBSERVE_ONLY/OFF 只 trace，ENFORCE 才执行 effect gate 允许的动作。
+3. 自持 stale/protective retain release 先释放同一逻辑列车的 CONFLICT retain；没有 CONFLICT 候选时，按车体实测覆盖释放已驶离的 NODE/EDGE 上本车的 `PROTECTIVE_RETAIN`（`SMART_RELEASE_PHYSICAL_EDGE_RETAIN`，只在 ENFORCE 下落地）。两条分支都不清 destination、不 invalidate token。
 4. drain / forward unlock 只刷新本车本地授权或信号重判，不创建 `DRAIN_THROUGH`，也不把 `TOPOLOGY_EXIT_HINT` 升级为 drain authority。
 5. 只有 Smart unlock 都没有候选时，才落到 deprecated fallback：非 STOP 信号下允许 `reissueDestinationByName(train)` / `forceRelaunchByName(train)`；STOP 信号下仍只做非动车 refresh / hard-stop。
 6. 新鲜 blocker 快照只会在 STOP 宽限窗口内抑制恢复；超过 `health.progress-stop-grace-seconds` 后，即使 blocker 仍被信号 tick 持续刷新，也会进入 Smart recovery，避免“看似合法红灯等待”永久掩盖互卡。
