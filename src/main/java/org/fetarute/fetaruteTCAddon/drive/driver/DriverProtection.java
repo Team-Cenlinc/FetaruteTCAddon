@@ -41,6 +41,7 @@ public final class DriverProtection {
    * @param serviceLatched 上一次评估是否处于常用制动介入
    * @param stationRemainingBlocks 列车中心到前方停车点的距离（越过为负）；没有停车点时为 {@code NaN}
    * @param stationPrecise 停车点距离是站台按实际位置量出的（否则是估计，不据此强制停车）
+   * @param stationTerminal 前方停车点是本交路的终点站：后面没有下一站可去，冲过头不能算越站继续开（尽头线再往前就出轨）
    */
   public record Input(
       double speedBps,
@@ -54,7 +55,8 @@ public final class DriverProtection {
       boolean serviceStopRequested,
       boolean serviceLatched,
       double stationRemainingBlocks,
-      boolean stationPrecise) {
+      boolean stationPrecise,
+      boolean stationTerminal) {
 
     /** 没有前方停车点。 */
     public Input(
@@ -80,6 +82,7 @@ public final class DriverProtection {
           serviceStopRequested,
           serviceLatched,
           Double.NaN,
+          false,
           false);
     }
   }
@@ -133,14 +136,18 @@ public final class DriverProtection {
         permitted = 0.0;
       }
     }
-    // 进站曲线：最远只许冲到越站阈值处（再远就是越站，由站台处理）。
+    // 进站曲线：中途站最远只许冲到越站阈值处（再远就是越站，由站台处理）；终点站没有越站可言，最远只许冲到可开门范围。
+    // 越过停车点后剩下的余量随之缩短：冲到界限处容许速度为 0，不会低速一直溜下去（终点站尽头线再往前就出轨）。
     boolean station = Double.isFinite(in.stationRemainingBlocks());
+    boolean terminalLimitReached = false;
     if (station) {
+      double overrun = in.stationTerminal() ? config.stopAcceptBlocks() : config.stopSkipBlocks();
+      terminalLimitReached = in.stationTerminal() && in.stationRemainingBlocks() + overrun <= 0.0;
       permitted =
           Math.min(
               permitted,
               brakingCurveBps(
-                  Math.max(0.0, in.stationRemainingBlocks()) + config.stopSkipBlocks(),
+                  Math.max(0.0, in.stationRemainingBlocks() + overrun),
                   in.serviceDecelBps2(),
                   in.reactionSeconds()));
     }
@@ -171,6 +178,10 @@ public final class DriverProtection {
       }
       if (iv == Intervention.NONE && d.isStop() && d.stopMode() == StopControlMode.HARD_STOP) {
         iv = Intervention.EMERGENCY;
+      }
+      if (iv == Intervention.NONE && terminalLimitReached) {
+        // 终点站冲到可开门范围末端还在动：不论多慢都制动，容差内的低速也不能再往前溜。
+        iv = Intervention.SERVICE;
       }
       if (iv == Intervention.NONE) {
         double tolerance = config.overspeedToleranceBps();

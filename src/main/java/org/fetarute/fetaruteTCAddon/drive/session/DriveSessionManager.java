@@ -3876,6 +3876,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                         Instant.now()))
             .orElse(null));
     link.setNextPass(context.flatMap(ctx -> nextPassOf(ctx, timetables)).orElse(null));
+    link.setTerminalAhead(
+        context.map(ctx -> ctx.terminalNextStop() || ctx.atLastStation()).orElse(false));
   }
 
   /** 到下一个停车站之前的通过站：按这列车当前绑定的车次查停靠表。 */

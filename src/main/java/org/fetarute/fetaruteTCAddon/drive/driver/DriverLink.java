@@ -82,6 +82,7 @@ public final class DriverLink {
   private int announcedStops;
   private DriverSchedule schedule;
   private DriverPass nextPass;
+  private boolean terminalAhead;
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -637,6 +638,15 @@ public final class DriverLink {
 
   public void setRequiredDoorSide(DriverDoorSide side) {
     this.requiredDoorSide = side == null ? DriverDoorSide.NONE : side;
+  }
+
+  /** 前方的停车站是本交路的终点站（或列车已停在终点站）：防护不许冲过可开门范围。 */
+  public boolean terminalAhead() {
+    return terminalAhead;
+  }
+
+  public void setTerminalAhead(boolean terminalAhead) {
+    this.terminalAhead = terminalAhead;
   }
 
   /** 前方停车点的站名（显示用）；没有时为空串。 */

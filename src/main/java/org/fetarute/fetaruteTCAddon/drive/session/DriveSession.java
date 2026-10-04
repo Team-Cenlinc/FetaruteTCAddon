@@ -908,7 +908,8 @@ public final class DriveSession {
                 link.serviceStopRequested(),
                 link.serviceLatched(),
                 station == null ? Double.NaN : station.remainingBlocks(),
-                station != null && station.precise()),
+                station != null && station.precise(),
+                station != null && link.terminalAhead()),
             config.driver());
     link.recordDecision(decision);
     if (decision.handbackRequested()) {
