@@ -21,7 +21,9 @@ public enum MenuAction {
   /** 停放制动（simulation 级）。 */
   PARKING_BRAKE,
   /** 制动试验（simulation 级）。 */
-  BRAKE_TEST;
+  BRAKE_TEST,
+  /** 门旁路（simulation 级）：车门故障使门关好回路不通时旁路，解除牵引封锁。 */
+  DOOR_BYPASS;
 
   /** 对应的启动流程系统；不是系统开关时为空。 */
   public Optional<SetupSystem> system() {

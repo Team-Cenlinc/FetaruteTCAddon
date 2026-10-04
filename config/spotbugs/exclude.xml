@@ -168,6 +168,15 @@
         <Method name="controlAuthority"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- simulation 级车上系统：气压与故障对象由会话、驾驶台菜单与管理员命令共用，按引用交出 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.cab.CabSystems"/>
+        <Or>
+            <Method name="air"/>
+            <Method name="faults"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <!-- 驾驶任务：持有插件实例；任务板持有者按 Bukkit 约定交出自己的箱子界面 -->
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager"/>

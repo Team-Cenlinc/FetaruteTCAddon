@@ -6,11 +6,13 @@ import java.util.List;
 import java.util.Objects;
 import java.util.OptionalDouble;
 import java.util.UUID;
+import java.util.function.DoubleUnaryOperator;
 import org.bukkit.inventory.ItemStack;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabTick;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
@@ -78,6 +80,9 @@ public final class DriveSession {
 
   /** 驾驶员离座或已离开时列车自动使用的常用制动档。 */
   private static final Notch UNATTENDED_NOTCH = Notch.B3;
+
+  /** 失效导向安全的制动：制动力不打折。 */
+  private static final DoubleUnaryOperator FULL_BRAKE = demand -> 1.0;
 
   /** 两次调头之间至少间隔的 tick，防止座位序号判断异常时来回调头。 */
   private static final int MIN_REVERSE_INTERVAL_TICKS = 10;
@@ -238,7 +243,7 @@ public final class DriveSession {
     return current.isTraction() && tractionBlocked() ? Notch.N : current;
   }
 
-  /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（停放制动、风压、制动试验）。 */
+  /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（故障、停放制动、制动管、风压、制动试验）。 */
   public boolean tractionBlocked() {
     return !setup.ready()
         || cab.tractionBlock().isPresent()
@@ -636,18 +641,36 @@ public final class DriveSession {
     if (driverLink != null && driverLink.controlsPhysically()) {
       effective = superviseDriver(effective, nowTick);
     }
-    // 失效导向安全：紧急制动、无人驾驶时的自动制动与停放制动不靠主风缸，不随风压打折。
+    // 失效导向安全：紧急制动、无人驾驶时的自动制动与停放制动不靠主风缸，不随风压打折，也不用电制动。
     boolean failSafe = effective == Notch.EB || parkingBraking || phase != Phase.ACTIVE || !seated;
-    dynamics.step(STEP_SECONDS, effective, lastCapBps, failSafe ? 1.0 : cab.brakeScale());
+    boolean mainCircuit = setup.mainCircuitPowered();
+    double speedBefore = dynamics.speedBps();
+    dynamics.step(
+        STEP_SECONDS,
+        effective,
+        lastCapBps,
+        cab.tractionScale(speedBefore),
+        failSafe ? FULL_BRAKE : demand -> cab.serviceBrakeScale(demand, speedBefore, mainCircuit));
     odometerBlocks += dynamics.speedBps() * STEP_SECONDS;
+    boolean attended = phase == Phase.ACTIVE && seated;
     Vigilance.Event event =
         cab.tick(
             nowTick,
             STEP_SECONDS,
-            setup.state(SetupSystem.AUX) == TrainSetup.State.ON,
-            Math.max(0.0, -dynamics.effort()),
-            isStopped(),
-            phase == Phase.ACTIVE && seated);
+            new CabTick(
+                setup.state(SetupSystem.AUX) == TrainSetup.State.ON,
+                mainCircuit,
+                Math.max(0.0, -dynamics.effort()),
+                failSafe,
+                effective == Notch.EB,
+                speedBefore,
+                isStopped(),
+                attended,
+                setup.ready()));
+    if (cab.takeEmergencyRequest()) {
+      // 制动管失压：紧急制动，停稳前不能缓解。
+      selector.force(Notch.EB);
+    }
     if (event == Vigilance.Event.TRIPPED && driverLink != null) {
       driverLink.countVigilanceTrip();
     }
@@ -704,7 +727,7 @@ public final class DriveSession {
                 link.travelledSinceDirective(),
                 serviceDecel,
                 emergencyDecel,
-                1.0 / (2.0 * config.effortRatePerSecond()),
+                1.0 / (2.0 * config.effortRatePerSecond()) + cab.serviceApplyLagSeconds(),
                 link.serviceStopRequested(),
                 link.serviceLatched(),
                 station == null ? Double.NaN : station.remainingBlocks(),

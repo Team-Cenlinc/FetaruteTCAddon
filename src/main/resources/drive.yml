@@ -91,6 +91,61 @@ simulation:
   # 警惕装置：行车中多少秒没有操作（换档或右键）就报警，报警后多少秒不确认就紧急制动
   vigilance-interval-seconds: 60
   vigilance-warning-seconds: 5
+  # 电空复合制动：电力牵引的列车在受电、主断、辅助电源都正常时优先用电制动（再生制动），不足部分由空气制动补足。
+  # 只有空气制动的部分消耗主风缸；电制动出力时侧边栏风压一行显示“再生”。内燃车没有电制动。
+  # 紧急制动、停放制动与无人驾驶时的自动制动全部由空气制动承担，不受这一段影响
+  blended-brake:
+    # 电制动能承担的制动力占常用全制动的比例（0–1）
+    electric-fraction: 0.7
+    # 电制动退出速度（km/h）：低于它电制动完全退出；高于它 5 km/h 起全额可用，之间线性过渡
+    electric-exit-kmh: 15
+    # 只靠空气制动时能发挥的制动力占常用全制动的比例（0–1）：低速电制动退出后，或失电时，最大常用减速度略低
+    air-fraction: 0.85
+  # 恒功率：速度高于拐点速度后牵引功率不再增加，牵引加速度按“拐点速度 ÷ 当前速度”下降
+  constant-power:
+    # 拐点速度（km/h），未在下面按车种覆盖的车种使用它
+    knee-kmh: 40
+    # 按车种覆盖拐点速度（km/h）；车种写法同 config.yml 的 train.types（emu、dmu、metro、electric-loco、diesel-push-pull）
+    knee-kmh-by-type:
+      emu: 50
+      dmu: 30
+      electric-loco: 45
+      diesel-push-pull: 25
+  # 机车牵引（FTA_TRAIN_MODE 为 loco，或机车车种）的制动管。动车组仍按主风缸/制动缸的电空制动处理。
+  # 手柄在 N 或牵引位时主风缸向制动管充风到定压，制动位按力度减压，制动缸压力与减压量成比例；紧急制动时制动管排空。
+  # 上车时制动管未充风，须先充风并完成制动试验（充风 → 减压 → 保压 → 缓解）
+  brake-pipe:
+    # 制动管定压（kPa），不能高于主风缸满压
+    nominal-kpa: 500
+    # 常用全制动（B4）的减压量（kPa）；制动管低于“定压 − 该值”时不能牵引（紧急制动后须充回）
+    full-service-reduction-kpa: 150
+    # 制动管从 0 充到定压的秒数 = 基础秒数 + 每节车厢秒数 × 编组节数
+    charge-base-seconds: 10
+    charge-seconds-per-car: 4
+    # 常用制动的减压速率（kPa/秒）
+    service-rate-kpa-per-second: 40
+    # 制动管压力跌破该值（不是驾驶员拉紧急制动造成的，例如主风缸失风）时自动紧急制动；须低于常用全制动后的压力
+    emergency-kpa: 250
+    # 制动管每升高 1 kPa、每节车厢消耗的主风缸压力（kPa）
+    consumption-per-car: 0.04
+    # 制动试验：减压量至少达到该值后保压，保压期间制动缸下降不得超过 test-max-leak-kpa
+    test-reduction-kpa: 100
+    test-hold-seconds: 10
+    test-max-leak-kpa: 10
+  # 车上故障。管理员可用 /fta drive fault <玩家> <类型> 注入、/fta drive fault <玩家> clear 清除，不受下面的开关影响。
+  # 故障只存在驾驶会话的内存里，会话结束即消失，不写入列车
+  faults:
+    # 是否在驾驶中随机发生故障（驾驶员在座、列车已启动时才会发生，同一时刻最多一个随机故障）
+    enabled: false
+    # 驾驶一小时内至少发生一次随机故障的概率（0 到 1，不含 1）
+    chance-per-hour: 0.5
+    # 随机故障从这些类型里挑：line-loss（受电中断）、breaker-trip（主断跳闸）、compressor（压缩机故障）、
+    # brake-leak（制动缸漏泄）、door（车门故障）。内燃车不会发生受电中断与主断跳闸
+    types: [line-loss, breaker-trip, compressor, brake-leak, door]
+    # 受电中断多少秒后自动恢复
+    line-loss-seconds: 30
+    # 制动缸漏泄时制动缸每秒下降的压力（kPa）
+    brake-leak-kpa-per-second: 6
 
 # 驾驶调度列车（驾驶员接管带交路、时刻表的列车）。调度照常计算信号与行车许可，驾驶员在许可范围内操纵，
 # 超出时车载防护自动制动。任何故障都交还自动运行，不会把列车冻结在原地

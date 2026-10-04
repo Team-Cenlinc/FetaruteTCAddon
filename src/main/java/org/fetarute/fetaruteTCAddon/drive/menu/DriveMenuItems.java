@@ -31,7 +31,8 @@ public final class DriveMenuItems {
     meta.setItemModel(
         new NamespacedKey(
             HotbarItems.MODEL_NAMESPACE,
-            "drive/" + MenuLayout.modelKey(view.action(), view.active(), view.supply())));
+            "drive/"
+                + MenuLayout.modelKey(view.action(), view.active(), view.fault(), view.supply())));
     if ((view.action().isReverser() && view.active()) || view.busy()) {
       meta.setEnchantmentGlintOverride(true);
     }
@@ -43,6 +44,9 @@ public final class DriveMenuItems {
 
   /** 按钮的默认物品材质。 */
   static Material materialOf(ButtonView view) {
+    if (view.fault()) {
+      return Material.RED_DYE;
+    }
     return switch (view.action()) {
       case REVERSER_FORWARD -> Material.LIME_DYE;
       case REVERSER_NEUTRAL -> Material.GRAY_DYE;
@@ -55,12 +59,13 @@ public final class DriveMenuItems {
           ? Material.YELLOW_DYE
           : view.active() ? Material.LIME_DYE : Material.RED_DYE;
       case PARKING_BRAKE -> view.active() ? Material.LIME_DYE : Material.ORANGE_DYE;
+      case DOOR_BYPASS -> view.active() ? Material.ORANGE_DYE : Material.GRAY_DYE;
     };
   }
 
   /** 按钮名称的语言键。 */
   static String nameKey(ButtonView view) {
-    String state = view.busy() ? "busy" : view.active() ? "on" : "off";
+    String state = view.fault() ? "fault" : view.busy() ? "busy" : view.active() ? "on" : "off";
     return "drive.menu.item."
         + switch (view.action()) {
           case REVERSER_FORWARD -> "reverser-forward";
@@ -76,6 +81,7 @@ public final class DriveMenuItems {
           case COMPRESSOR -> "compressor-" + state;
           case PARKING_BRAKE -> view.active() ? "parking-released" : "parking-applied";
           case BRAKE_TEST -> "brake-test-" + state;
+          case DOOR_BYPASS -> view.active() ? "door-bypass-on" : "door-bypass-off";
         };
   }
 
@@ -112,6 +118,7 @@ public final class DriveMenuItems {
           : "drive.menu.hint.compressor-auto";
       case PARKING_BRAKE -> "drive.menu.hint.parking";
       case BRAKE_TEST -> "drive.menu.hint.brake-test";
+      case DOOR_BYPASS -> "drive.menu.hint.door-bypass";
     };
   }
 

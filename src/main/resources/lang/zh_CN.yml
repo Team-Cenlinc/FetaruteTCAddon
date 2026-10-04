@@ -1494,10 +1494,20 @@ drive:
       vigilance-tripped: "<red><bold>警惕紧急制动</bold></red>"
       parking: "<red>停放制动</red>"
       low-air: "<red>风压不足</red>"
+      brake-pipe: "<red>制动管未充风</red>"
+      door-bypass: "<gold>门旁路</gold>"
+      fault:
+        breaker-trip: "<red><bold>主断跳闸</bold></red>"
+        line-loss: "<red><bold>无网压</bold></red>"
+        door: "<red>门关好回路不通</red>"
       brake-test:
         not-done: "<yellow>未做制动试验</yellow>"
         apply: "<yellow>制动试验：请施加 B4</yellow>"
         release: "<yellow>制动试验：请缓解至 N</yellow>"
+        charge: "<yellow>制动试验：手柄置 N 充风（制动管 <bp> kPa）</yellow>"
+        reduce: "<yellow>制动试验：请减压 <need> kPa 以上</yellow>"
+        hold: "<yellow>制动试验：保压 <seconds> 秒</yellow>"
+        failed: "<red>制动试验未通过，请重新试验</red>"
     setup:
       not-ready: "<red>未启动</red>"
       progress: "<yellow><step>中 <seconds> 秒</yellow>"
@@ -1508,6 +1518,19 @@ drive:
       reverse: "后退"
   cab:
     vigilance-tripped: "<prefix> <red>警惕装置超时未确认，已施加紧急制动。行车中请定期换档或按右键确认。</red>"
+    brake-pipe-loss: "<prefix> <red>制动管失压，已自动施加紧急制动。请检查主风缸压力，停稳后将手柄置于 N 重新充风。</red>"
+    fault:
+      line-loss: "<prefix> <red>受电中断：网压消失，牵引与电制动已失效。请以空气制动停车，等待恢复供电。</red>"
+      breaker-trip: "<prefix> <red>主断路器跳闸：牵引与电制动已失效。请停车后在驾驶台先断开主断路器，再闭合复位。</red>"
+      compressor: "<prefix> <red>压缩机故障：主风缸压力将不再回升。请节约用风，尽快结束运行。</red>"
+      brake-leak: "<prefix> <red>制动缸漏泄：制动保持不住。请尽快停车，停车后施加停放制动。</red>"
+      door: "<prefix> <red>车门故障：门关好回路不通，牵引已封锁。请确认车门已关好后，在驾驶台使用门旁路。</red>"
+  fault:
+    line-loss: "受电中断"
+    breaker-trip: "主断跳闸"
+    compressor: "压缩机故障"
+    brake-leak: "制动缸漏泄"
+    door: "车门故障"
   setup:
     step:
       key: "激活驾驶室"
@@ -1530,6 +1553,8 @@ drive:
       doors: "车门"
       air: "风压"
       vigilance: "警惕"
+      fault: "故障"
+      door-bypass: "门旁路"
     value:
       text: "<white><text></white>"
       signal:
@@ -1572,6 +1597,28 @@ drive:
         ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         low: "<red><mr></red><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+      air-regen:
+        ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>再生</aqua>"
+        warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>再生</aqua>"
+        low: "<red><mr></red><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>再生</aqua>"
+      air-loco:
+        ok: "<white><mr></white><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+        warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+        low: "<red><mr></red><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
+      air-loco-regen:
+        ok: "<white><mr></white><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>再生</aqua>"
+        warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>再生</aqua>"
+        low: "<red><mr></red><dark_gray>/</dark_gray><white><bp></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green> <aqua>再生</aqua>"
+      fault:
+        line-loss: "<red>受电中断</red>"
+        breaker-trip:
+          tripped: "<red>主断跳闸，请断开再闭合</red>"
+          opened: "<yellow>主断已断开，请闭合</yellow>"
+          closing: "<yellow>主断闭合中</yellow>"
+        compressor: "<red>压缩机故障</red>"
+        brake-leak: "<red>制动缸漏泄，请尽快停车</red>"
+        door: "<red>门关好回路不通</red>"
+      door-bypass: "<gold>已旁路，请确认车门关好</gold>"
       vigilance:
         stopped: "<gray>停车中</gray>"
         counting: "<white><seconds></white> <gray>秒</gray>"
@@ -1626,6 +1673,10 @@ drive:
       brake-test-on: "<green>制动试验：已通过</green>"
       brake-test-off: "<gray>制动试验：未做</gray>"
       brake-test-busy: "<yellow>制动试验：进行中</yellow>"
+      breaker-fault: "<red>主断路器：跳闸</red>"
+      compressor-fault: "<red>压缩机：故障</red>"
+      door-bypass-on: "<gold>门旁路：已旁路</gold>"
+      door-bypass-off: "<gray>门旁路：未旁路</gray>"
     hint:
       reverser: "<gray>点击选择方向</gray>"
       door: "<gray>点击开关车门</gray>"
@@ -1639,6 +1690,9 @@ drive:
       compressor-auto: "<gray>动车组的压缩机随辅助电源自动运转</gray>"
       parking: "<gray>点击缓解或施加停放制动；停放制动未缓解时不能牵引</gray>"
       brake-test: "<gray>点击开始试验，再按动作栏提示施加与缓解制动；通过后才能牵引</gray>"
+      door-bypass: "<gray>点击旁路或复位门关好回路；旁路期间不检查车门状态，请确认车门已关好</gray>"
+      gauge: "<gray>表计只显示读数，不能操作</gray>"
+      faults: "<gray>故障指示只显示，不能操作</gray>"
     detail:
       reservoir: "<gray>主风缸 <white><mr></white> kPa</gray>"
       parking-needs: "<gray>缓解需要主风缸 ≥ <white><need></white> kPa（当前 <white><mr></white>）</gray>"
@@ -1646,10 +1700,58 @@ drive:
       brake-test-apply: "<yellow>请把手柄拉到 B4 或以上（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-release: "<yellow>请回到 N 缓解（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-passed: "<gray>制动缸 <white><bc></white> kPa</gray>"
+      brake-test-charge: "<yellow>请把手柄置于 N 充风（制动管 <white><bp></white> kPa）</yellow>"
+      brake-test-reduce: "<yellow>请把手柄拉到制动位，减压 <white><need></white> kPa 以上（制动管 <white><bp></white> kPa）</yellow>"
+      brake-test-hold: "<yellow>请保持手柄位置，保压 <white><seconds></white> 秒（制动缸 <white><bc></white> kPa）</yellow>"
+      brake-test-failed: "<red>保压时制动缸漏泄超标，试验未通过（制动缸 <white><bc></white> kPa）</red>"
+      breaker-tripped: "<red>主断已跳闸：点击断开，再点击闭合即可复位</red>"
+      breaker-opened: "<yellow>主断已断开：请再次点击闭合</yellow>"
+      compressor-failed: "<red>压缩机故障，主风缸 <white><mr></white> kPa 不再回升</red>"
+      door-circuit-open: "<red>门关好回路不通，旁路后才能牵引</red>"
+    gauge:
+      range: "<gray>量程 0–<white><range></white> kPa</gray>"
+      main-reservoir:
+        normal: "<green>主风缸：<white><value></white> kPa</green>"
+        warning: "<yellow>主风缸：<white><value></white> kPa</yellow>"
+        alarm: "<red>主风缸：<white><value></white> kPa</red>"
+      brake-cylinder:
+        normal: "<green>制动缸：<white><value></white> kPa</green>"
+        warning: "<yellow>制动缸：<white><value></white> kPa</yellow>"
+        alarm: "<red>制动缸：<white><value></white> kPa</red>"
+      brake-pipe:
+        normal: "<green>制动管：<white><value></white> kPa</green>"
+        warning: "<yellow>制动管：<white><value></white> kPa</yellow>"
+        alarm: "<red>制动管：<white><value></white> kPa</red>"
+      main-reservoir-detail: "<gray>低于 <white><lockout></white> kPa 封锁牵引，低于 <white><parking></white> kPa 停放制动自动施加</gray>"
+      brake-cylinder-detail: "<gray>常用全制动 <white><full></white> kPa</gray>"
+      brake-cylinder-leak: "<red>制动缸漏泄，制动保持不住</red>"
+      brake-pipe-detail: "<gray>定压 <white><nominal></white> kPa，低于 <white><full></white> kPa 不能牵引，低于 <white><emergency></white> kPa 自动紧急制动</gray>"
+    faults:
+      none: "<gray>故障指示：无故障</gray>"
+      active: "<red>故障指示：<count> 项故障</red>"
+      bypass-only: "<gold>故障指示：门旁路中</gold>"
+      line-loss: "<red>受电中断：等待恢复供电，期间没有牵引与电制动</red>"
+      breaker-trip-tripped: "<red>主断跳闸：点击主断路器开关断开，再点击闭合</red>"
+      breaker-trip-opened: "<yellow>主断跳闸：已断开，请点击主断路器开关闭合</yellow>"
+      breaker-trip-closing: "<yellow>主断跳闸：正在闭合</yellow>"
+      compressor: "<red>压缩机故障：主风缸不再回升，请节约用风</red>"
+      brake-leak: "<red>制动缸漏泄：制动保持不住，请尽快停车</red>"
+      door: "<red>车门故障：确认车门已关好后使用门旁路</red>"
+      door-bypass: "<gold>门旁路已接通：不检查车门状态</gold>"
     notice:
       brake-test-started: "<yellow>制动试验开始：请关闭驾驶台，把手柄拉到 B4</yellow>"
       brake-test-passed: "<green>制动试验通过</green>"
       parking-auto-applied: "<red>主风缸压力过低，停放制动已自动施加</red>"
+      brake-test-started-loco: "<yellow>制动试验开始：请关闭驾驶台，手柄置于 N 充风</yellow>"
+      brake-test-failed: "<red>制动试验未通过：保压时制动缸漏泄超标</red>"
+      fault-recovered:
+        line-loss: "<green>网压已恢复</green>"
+        breaker-trip: "<green>主断路器已复位</green>"
+      fault-cleared: "<green>车上故障已排除</green>"
+      breaker-opened: "<yellow>主断路器已断开，请再次点击闭合</yellow>"
+      breaker-closing: "<yellow>主断路器闭合中</yellow>"
+      door-bypass-on: "<gold>门旁路已接通，请确认车门已关好</gold>"
+      door-bypass-off: "<green>门旁路已复位</green>"
     deny:
       moving: "<red>列车停稳后才能操作驾驶台</red>"
       traction: "<red>请先回到惰行档或制动档，再打开驾驶台</red>"
@@ -1781,6 +1883,7 @@ drive:
       entry-records: "  <gray>•</gray> <white>/fta drive records [玩家]</white> <gray>- 查看驾驶记录</gray>"
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- 驾驶排行</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <玩家></white> <gray>- 收回某名玩家的驾驶任务</gray>"
+      entry-fault: "  <gray>•</gray> <white>/fta drive fault <玩家> <类型|clear></white> <gray>- 给 simulation 级驾驶中的列车注入或清除车上故障</gray>"
     start:
       started: "<prefix> <green>已开始驾驶列车 <white><train></white></green> <gray>快捷栏 1–9 依次为 P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>手动驾驶功能已关闭</red>"
@@ -1844,3 +1947,12 @@ drive:
     probe:
       "on": "<prefix> <yellow>驾驶输入诊断已开启，数据包事件会写入控制台</yellow>"
       "off": "<prefix> <yellow>驾驶输入诊断已关闭</yellow>"
+    fault:
+      injected: "<prefix> <yellow>已向 <player> 的列车注入故障：<type></yellow>"
+      already-active: "<prefix> <red><player> 的列车已有该故障：<type></red>"
+      not-applicable: "<prefix> <red><player> 的列车不会发生该故障（内燃车没有受电与主断）：<type></red>"
+      cleared: "<prefix> <green>已清除 <player> 的列车上的 <count> 项故障</green>"
+      none: "<prefix> <gray><player> 的列车当前没有故障</gray>"
+      not-driving: "<prefix> <red><player> 当前没有在驾驶</red>"
+      not-simulation: "<prefix> <red><player> 的驾驶会话不是 simulation 级，不能注入故障</red>"
+      invalid: "<prefix> <red>故障类型只能是 line-loss、breaker-trip、compressor、brake-leak、door 或 clear</red>"

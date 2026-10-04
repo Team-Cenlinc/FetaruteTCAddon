@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.dynamics;
 
 import java.util.Objects;
+import java.util.function.DoubleUnaryOperator;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 
 /**
@@ -68,7 +69,26 @@ public final class DriveDynamics {
    * @param brakeScale 制动力可发挥的比例，0–1
    */
   public double step(double seconds, Notch notch, double capBps, double brakeScale) {
+    return step(seconds, notch, capBps, 1.0, demand -> brakeScale);
+  }
+
+  /**
+   * 推进一步，牵引力与制动力分别打折。
+   *
+   * <p>牵引力乘以 {@code tractionScale}（恒功率段随速度下降）；制动力乘以 {@code brakeScale} 按本步实际制动力度给出的比例
+   * （电空复合制动时，实际发挥多少取决于电制动承担了多少）。两者都限制在 0–1。
+   *
+   * @param tractionScale 牵引力可发挥的比例，0–1
+   * @param brakeScale 由制动力度（常用全制动为 1）求制动力可发挥的比例
+   */
+  public double step(
+      double seconds,
+      Notch notch,
+      double capBps,
+      double tractionScale,
+      DoubleUnaryOperator brakeScale) {
     Objects.requireNonNull(notch, "notch");
+    Objects.requireNonNull(brakeScale, "brakeScale");
     if (!(seconds > 0.0) || !Double.isFinite(seconds)) {
       return speedBps;
     }
@@ -78,8 +98,12 @@ public final class DriveDynamics {
     double maxDelta = rate * seconds;
     effort += Math.max(-maxDelta, Math.min(maxDelta, target - effort));
 
-    double scale = Math.max(0.0, Math.min(1.0, brakeScale));
-    double a = effort >= 0.0 ? effort * params.accelBps2() : effort * params.decelBps2() * scale;
+    double a;
+    if (effort >= 0.0) {
+      a = effort * params.accelBps2() * clampScale(tractionScale);
+    } else {
+      a = effort * params.decelBps2() * clampScale(brakeScale.applyAsDouble(-effort));
+    }
     if (speedBps > 0.0) {
       a -= config.coastDragBps2();
     }
@@ -90,6 +114,10 @@ public final class DriveDynamics {
       accelerationBps2 = 0.0;
     }
     return speedBps;
+  }
+
+  private static double clampScale(double scale) {
+    return Double.isNaN(scale) ? 1.0 : Math.max(0.0, Math.min(1.0, scale));
   }
 
   private double targetEffort(Notch notch) {
