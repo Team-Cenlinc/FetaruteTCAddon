@@ -624,6 +624,11 @@ public final class DriverLink {
     this.turnbackPending = pending;
   }
 
+  /** 列车停在终点站待命、派车还没放行（放行那一拍取走调头标记）。 */
+  public boolean turnbackPending() {
+    return turnbackPending;
+  }
+
   /** 取走调头标记：有标记时返回 true 并清除。 */
   public boolean takeTurnback() {
     boolean pending = turnbackPending;

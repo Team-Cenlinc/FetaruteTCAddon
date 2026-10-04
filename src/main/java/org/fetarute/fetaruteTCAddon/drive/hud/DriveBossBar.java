@@ -10,6 +10,7 @@ import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
@@ -71,6 +72,17 @@ public final class DriveBossBar {
     DriverLink link = session.driverLink();
     if (link == null) {
       hide(player.getUniqueId());
+      return;
+    }
+    CabChange cabChange = session.cabChange();
+    Optional<DriverBossBarView> changing =
+        DriverBossBarView.cabChange(
+            cabChange.stage(),
+            cabChange.targetCar(),
+            cabChange.secondsLeft(),
+            cabChange.reserveSeconds());
+    if (changing.isPresent()) {
+      update(player, locale, changing.get());
       return;
     }
     Optional<DriverStationHint.Hint> hint = DriverStationHint.of(link, session.isStopped());

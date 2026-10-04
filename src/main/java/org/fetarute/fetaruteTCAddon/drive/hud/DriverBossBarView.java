@@ -5,13 +5,14 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
 
 /**
  * 驾驶员 Boss 栏这一帧显示什么：标题的语言键与占位符、建议速度、是否提示开始制动、颜色与进度。
  *
- * <p>停站中（开门到发车）显示停站阶段，进度是剩余停站时间；其余时候显示行车引导的目标，进度是离目标的距离占引导范围的比例。 本类不依赖服务器对象，由 {@link DriveBossBar}
- * 渲染。
+ * <p>折返换端时显示要去第几节驾驶室与剩余时间；停站中（开门到发车）显示停站阶段，进度是剩余停站时间；其余时候显示行车引导的目标， 进度是离目标的距离占引导范围的比例。 本类不依赖服务器对象，由
+ * {@link DriveBossBar} 渲染。
  *
  * @param titleKey 标题主体的语言键
  * @param values 标题里的占位符
@@ -149,6 +150,40 @@ public record DriverBossBarView(
               false,
               Tone.GREEN,
               1.0);
+    };
+  }
+
+  /**
+   * 折返换端中：放行前提前告知时写下一趟由第几节开出；放行后计时时写去第几节、还剩几秒，进度是剩余时间。
+   *
+   * @return 不在换端时为空
+   */
+  public static Optional<DriverBossBarView> cabChange(
+      CabChange.Stage stage, int targetCar, long secondsLeft, long reserveSeconds) {
+    return switch (stage) {
+      case ANNOUNCED -> Optional.of(
+          new DriverBossBarView(
+              "drive.bossbar.cab-change.announced",
+              Map.of("car", String.valueOf(targetCar)),
+              OptionalInt.empty(),
+              false,
+              false,
+              Tone.YELLOW,
+              1.0));
+      case ACTIVE -> Optional.of(
+          new DriverBossBarView(
+              "drive.bossbar.cab-change.active",
+              Map.of(
+                  "car",
+                  String.valueOf(targetCar),
+                  "seconds",
+                  String.valueOf(Math.max(0L, secondsLeft))),
+              OptionalInt.empty(),
+              false,
+              false,
+              Tone.YELLOW,
+              reserveSeconds > 0L ? Math.max(0L, secondsLeft) / (double) reserveSeconds : 1.0));
+      case IDLE -> Optional.empty();
     };
   }
 

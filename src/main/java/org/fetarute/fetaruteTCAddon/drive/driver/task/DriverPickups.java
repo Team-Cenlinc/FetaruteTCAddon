@@ -9,6 +9,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 
 /**
  * 始发站与车库接班：车次已有人领、列车要从终点站待命或从车库出车时，派车那一刻先不发车，等驾驶员上车坐进驾驶室并确认座位。
@@ -63,6 +64,7 @@ public final class DriverPickups {
     private final String trainName;
     private final String location;
     private final Instant deadline;
+    private CabSeats.Departure departure;
     private Stage stage = Stage.WAITING;
 
     Pickup(
@@ -71,13 +73,15 @@ public final class DriverPickups {
         Kind kind,
         String trainName,
         String location,
-        Instant deadline) {
+        Instant deadline,
+        CabSeats.Departure departure) {
       this.playerId = Objects.requireNonNull(playerId, "playerId");
       this.key = Objects.requireNonNull(key, "key");
       this.kind = Objects.requireNonNull(kind, "kind");
       this.trainName = Objects.requireNonNull(trainName, "trainName");
       this.location = location == null ? "" : location;
       this.deadline = Objects.requireNonNull(deadline, "deadline");
+      this.departure = departure == null ? defaultDeparture(kind) : departure;
     }
 
     public UUID playerId() {
@@ -104,6 +108,25 @@ public final class DriverPickups {
 
     public Instant deadline() {
       return deadline;
+    }
+
+    /** 下一趟由此刻编组的哪一端驾驶：驾驶员要坐进的驾驶室。 */
+    public CabSeats.Departure departure() {
+      return departure;
+    }
+
+    /**
+     * 重新判定发车端（列车待命初期还可能在居中对位，往回挪时 TrainCarts 会把整列调头）。
+     *
+     * @return 是否有变化
+     */
+    public boolean updateDeparture(CabSeats.Departure latest) {
+      CabSeats.Departure next = latest == null ? defaultDeparture(kind) : latest;
+      if (next == departure) {
+        return false;
+      }
+      departure = next;
+      return true;
     }
 
     public Stage stage() {
@@ -153,12 +176,33 @@ public final class DriverPickups {
     return latest.isBefore(from) ? from : latest;
   }
 
-  /** 开始一次接车；同一名驾驶员之前的接车记录被替换。 */
+  /** 开始一次接车，发车端按接车方式取默认（见 {@link #defaultDeparture}）；同一名驾驶员之前的接车记录被替换。 */
   public Pickup start(
       UUID playerId, TaskKey key, Kind kind, String trainName, String location, Instant deadline) {
-    Pickup pickup = new Pickup(playerId, key, kind, trainName, location, deadline);
+    return start(playerId, key, kind, trainName, location, deadline, defaultDeparture(kind));
+  }
+
+  /**
+   * 开始一次接车；同一名驾驶员之前的接车记录被替换。
+   *
+   * @param departure 下一趟由此刻编组的哪一端驾驶（尽头式终点站为车尾端）
+   */
+  public Pickup start(
+      UUID playerId,
+      TaskKey key,
+      Kind kind,
+      String trainName,
+      String location,
+      Instant deadline,
+      CabSeats.Departure departure) {
+    Pickup pickup = new Pickup(playerId, key, kind, trainName, location, deadline, departure);
     byPlayer.put(playerId, pickup);
     return pickup;
+  }
+
+  /** 发车端不明时的默认：车库出车已朝发车方向，坐车头；终点站待命车要到派车才知道方向，两端都可以。 */
+  public static CabSeats.Departure defaultDeparture(Kind kind) {
+    return kind == Kind.DEPOT ? CabSeats.Departure.HEAD : CabSeats.Departure.EITHER;
   }
 
   public Optional<Pickup> ofPlayer(UUID playerId) {

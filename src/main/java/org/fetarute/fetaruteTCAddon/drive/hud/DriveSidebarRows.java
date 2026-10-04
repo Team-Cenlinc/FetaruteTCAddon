@@ -7,11 +7,13 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
@@ -64,6 +66,7 @@ public final class DriveSidebarRows {
               "drive.sidebar.label.train",
               "drive.sidebar.value.text",
               Map.of("text", session.trainName())));
+      cabChangeRow(session.cabChange()).ifPresent(rows::add);
       rows.add(
           session.isAto()
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
@@ -91,6 +94,28 @@ public final class DriveSidebarRows {
       rows.add(vigilanceRow(cab.vigilance(), nowTick, session.isStopped()));
     }
     return rows;
+  }
+
+  /** 折返换端一行：要去第几节，计时中再加剩余秒数；不换端时没有这一行。 */
+  static Optional<Row> cabChangeRow(CabChange change) {
+    String label = "drive.sidebar.label.cab-change";
+    return switch (change.stage()) {
+      case ACTIVE -> Optional.of(
+          new Row(
+              label,
+              "drive.sidebar.value.cab-change.active",
+              Map.of(
+                  "car",
+                  String.valueOf(change.targetCar()),
+                  "seconds",
+                  String.valueOf(Math.max(0L, change.secondsLeft())))));
+      case ANNOUNCED -> Optional.of(
+          new Row(
+              label,
+              "drive.sidebar.value.cab-change.announced",
+              Map.of("car", String.valueOf(change.targetCar()))));
+      case IDLE -> Optional.empty();
+    };
   }
 
   /** 行车许可：信号与此刻的容许速度。 */

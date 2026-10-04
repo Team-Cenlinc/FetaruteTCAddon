@@ -15,6 +15,7 @@ import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
@@ -69,7 +70,9 @@ public final class DriveSession {
     /** 驾驶调度列车：任务完成。 */
     TASK_COMPLETE,
     /** 驾驶调度列车：卡住太久，被看门狗收回。 */
-    WATCHDOG
+    WATCHDOG,
+    /** 驾驶调度列车：折返换端没能在时限内坐进前端驾驶室，交还自动运行发车。 */
+    CAB_CHANGE_TIMEOUT
   }
 
   private static final double TICKS_PER_SECOND = 20.0;
@@ -129,6 +132,7 @@ public final class DriveSession {
   private boolean adviceBraking;
   private ScoreRules.Result liveScore;
   private long endArmedUntilTick = Long.MIN_VALUE;
+  private final CabChange cabChange = new CabChange();
 
   /** 不需要启动流程的会话（列车已就绪）。 */
   public DriveSession(
@@ -239,14 +243,24 @@ public final class DriveSession {
   /**
    * 当前生效的档位。
    *
-   * <p>驾驶员在座时取手柄档位；制动停车阶段或驾驶员暂时离座时取自动制动档。牵引档在{@link #tractionBlocked() 牵引被封锁}时按惰行处理， 制动不受影响。
+   * <p>驾驶员在座时取手柄档位；制动停车阶段、驾驶员暂时离座或正在折返换端时取自动制动档。牵引档在{@link #tractionBlocked() 牵引被封锁}时按惰行处理， 制动不受影响。
    */
   public Notch notch() {
-    if (phase != Phase.ACTIVE || !seated) {
+    if (!attended()) {
       return UNATTENDED_NOTCH;
     }
     Notch current = selector.current();
     return current.isTraction() && tractionBlocked() ? Notch.N : current;
+  }
+
+  /** 驾驶员在驾驶室操纵：会话驾驶中、在座，且不在折返换端途中（换端时坐在原来那一端也不算在岗）。 */
+  private boolean attended() {
+    return phase == Phase.ACTIVE && seated && !cabChange.holding();
+  }
+
+  /** 折返换端的进度。 */
+  public CabChange cabChange() {
+    return cabChange;
   }
 
   /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（停放制动、风压、制动试验）。 */
@@ -760,7 +774,7 @@ public final class DriveSession {
       effective = superviseDriver(effective, nowTick);
     }
     // 失效导向安全：紧急制动、无人驾驶时的自动制动与停放制动不靠主风缸，不随风压打折。
-    boolean failSafe = effective == Notch.EB || parkingBraking || phase != Phase.ACTIVE || !seated;
+    boolean failSafe = effective == Notch.EB || parkingBraking || !attended();
     dynamics.step(STEP_SECONDS, effective, lastCapBps, failSafe ? 1.0 : cab.brakeScale());
     odometerBlocks += dynamics.speedBps() * STEP_SECONDS;
     Vigilance.Event event =
@@ -770,7 +784,7 @@ public final class DriveSession {
             setup.state(SetupSystem.AUX) == TrainSetup.State.ON,
             Math.max(0.0, -dynamics.effort()),
             isStopped(),
-            phase == Phase.ACTIVE && seated);
+            attended());
     if (event == Vigilance.Event.TRIPPED && driverLink != null) {
       driverLink.countVigilanceTrip();
     }

@@ -38,6 +38,11 @@ public final class BrakeTest {
     stage = Stage.PASSED;
   }
 
+  /** 作废已有的结果，须重做（换到另一端驾驶室后）。 */
+  public void reset() {
+    stage = Stage.NOT_DONE;
+  }
+
   /**
    * 开始试验。
    *

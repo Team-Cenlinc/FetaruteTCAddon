@@ -11,6 +11,7 @@ import java.time.LocalDate;
 import java.util.UUID;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -88,31 +89,39 @@ class DriverTaskManagerTest {
   @Test
   @DisplayName("坐进任务列车车头一端才提示确认接班；后半列车提示换座")
   void seatCheck() {
-    assertEquals(
-        DriverTaskManager.SeatCheck.NOT_ON_TRAIN, DriverTaskManager.checkSeat(null, "T1", 6));
+    CabSeats seats = CabSeats.unmarked(6);
     assertEquals(
         DriverTaskManager.SeatCheck.NOT_ON_TRAIN,
-        DriverTaskManager.checkSeat(new SeatBinding("T2", 0, 0), "T1", 6));
+        DriverTaskManager.checkSeat(null, "T1", CabSeats.End.NONE, CabSeats.Departure.HEAD));
+    assertEquals(
+        DriverTaskManager.SeatCheck.NOT_ON_TRAIN,
+        check(seats, new SeatBinding("T2", 0, 0), CabSeats.Departure.HEAD));
     assertEquals(
         DriverTaskManager.SeatCheck.CONFIRM,
-        DriverTaskManager.checkSeat(new SeatBinding("t1", 0, 0), "T1", 6));
+        check(seats, new SeatBinding("t1", 0, 0), CabSeats.Departure.HEAD));
     assertEquals(
         DriverTaskManager.SeatCheck.WRONG_SEAT,
-        DriverTaskManager.checkSeat(new SeatBinding("T1", 5, 0), "T1", 6));
+        check(seats, new SeatBinding("T1", 5, 0), CabSeats.Departure.HEAD));
   }
 
   @Test
-  @DisplayName("终点站折返接车：后端车厢也可以坐，后半列车的中间车厢仍不行")
+  @DisplayName("终点站折返接车：方向未定时后端车厢也可以坐，后半列车的中间车厢仍不行")
   void eitherEndSeatCheck() {
+    CabSeats seats = CabSeats.unmarked(6);
     assertEquals(
         DriverTaskManager.SeatCheck.CONFIRM,
-        DriverTaskManager.checkSeat(new SeatBinding("T1", 5, 0), "T1", 6, true));
+        check(seats, new SeatBinding("T1", 5, 0), CabSeats.Departure.EITHER));
     assertEquals(
         DriverTaskManager.SeatCheck.WRONG_SEAT,
-        DriverTaskManager.checkSeat(new SeatBinding("T1", 4, 0), "T1", 6, true));
+        check(seats, new SeatBinding("T1", 4, 0), CabSeats.Departure.EITHER));
     assertEquals(
         DriverTaskManager.SeatCheck.CONFIRM,
-        DriverTaskManager.checkSeat(new SeatBinding("T1", 0, 0), "T1", 6, true));
+        check(seats, new SeatBinding("T1", 0, 0), CabSeats.Departure.EITHER));
+  }
+
+  private static DriverTaskManager.SeatCheck check(
+      CabSeats seats, SeatBinding seat, CabSeats.Departure expected) {
+    return DriverTaskManager.checkSeat(seat, "T1", seats.endOf(seat), expected);
   }
 
   @Test

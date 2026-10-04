@@ -176,4 +176,25 @@ class DriverBossBarViewTest {
             false);
     assertEquals("drive.bossbar.stop-signal-here", view.titleKey());
   }
+
+  @Test
+  @DisplayName("折返换端：提前告知写第几节；计时中进度是剩余时间")
+  void cabChange() {
+    assertTrue(
+        DriverBossBarView.cabChange(
+                org.fetarute.fetaruteTCAddon.drive.driver.CabChange.Stage.IDLE, 1, -1L, 30L)
+            .isEmpty());
+    DriverBossBarView announced =
+        DriverBossBarView.cabChange(
+                org.fetarute.fetaruteTCAddon.drive.driver.CabChange.Stage.ANNOUNCED, 6, -1L, 30L)
+            .orElseThrow();
+    assertEquals("drive.bossbar.cab-change.announced", announced.titleKey());
+    assertEquals(Map.of("car", "6"), announced.values());
+    DriverBossBarView active =
+        DriverBossBarView.cabChange(
+                org.fetarute.fetaruteTCAddon.drive.driver.CabChange.Stage.ACTIVE, 6, 12L, 30L)
+            .orElseThrow();
+    assertEquals("drive.bossbar.cab-change.active", active.titleKey());
+    assertEquals(0.4, active.progress(), 1.0e-9);
+  }
 }
