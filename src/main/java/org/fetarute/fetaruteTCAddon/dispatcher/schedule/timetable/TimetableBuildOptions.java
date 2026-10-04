@@ -362,8 +362,12 @@ public record TimetableBuildOptions(
         serviceEndSecondOfDay,
         headway,
         defaultDwell,
+        // 闲置上限必须原样带过去：三参构造会把它重置成默认值，--max-idle 与服务器配置就白传了。
         new VehicleDutyPlanner.Limits(
-            dutyLimits.maxTripsPerDuty(), dutyLimits.maxDutyDurationSeconds(), turnarounds),
+            dutyLimits.maxTripsPerDuty(),
+            dutyLimits.maxDutyDurationSeconds(),
+            turnarounds,
+            dutyLimits.maxIdleSeconds()),
         tripCodePrefix,
         zoneId,
         separation,

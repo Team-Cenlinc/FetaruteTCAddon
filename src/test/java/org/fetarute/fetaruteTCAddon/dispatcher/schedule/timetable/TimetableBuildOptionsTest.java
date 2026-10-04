@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.time.Duration;
+import java.time.ZoneId;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -45,6 +46,28 @@ class TimetableBuildOptionsTest {
     assertEquals(
         TimetableBuildOptions.Repair.MAX_WAIT_CEILING_SECONDS, repair.maxWaitSeconds(), "超过上限按上限计");
     assertEquals(1800, TimetableBuildOptions.Repair.MAX_WAIT_CEILING_SECONDS);
+  }
+
+  /** builder 每次 build 都会补折返表；补表只换折返，交路上限与闲置上限都不能被改回默认值。 */
+  @Test
+  void withTurnaroundKeepsOtherDutyLimits() {
+    TimetableBuildOptions requested =
+        new TimetableBuildOptions(
+            TimetableBuildOptions.DEFAULT_SERVICE_START,
+            TimetableBuildOptions.DEFAULT_SERVICE_END,
+            Duration.ofSeconds(TimetableBuildOptions.DEFAULT_HEADWAY_SECONDS),
+            Duration.ofSeconds(TimetableBuildOptions.DEFAULT_DWELL_SECONDS),
+            new VehicleDutyPlanner.Limits(6, 5400, TurnaroundTable.none(), 420),
+            "",
+            ZoneId.of("UTC"));
+
+    TimetableBuildOptions resolved = requested.withTurnaround(TurnaroundTable.fixed(90));
+
+    VehicleDutyPlanner.Limits limits = resolved.dutyLimits();
+    assertEquals(TurnaroundTable.fixed(90), limits.turnaround());
+    assertEquals(6, limits.maxTripsPerDuty());
+    assertEquals(5400, limits.maxDutyDurationSeconds());
+    assertEquals(420, limits.maxIdleSeconds(), "--max-idle 不能在补折返表时被重置成默认 300");
   }
 
   /** 零仍然表示关闭修复，不被"累计不小于单步"那条改写。 */
