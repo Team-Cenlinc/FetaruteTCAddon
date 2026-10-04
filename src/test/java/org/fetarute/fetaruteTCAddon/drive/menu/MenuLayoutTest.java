@@ -118,6 +118,9 @@ class MenuLayoutTest {
     assertEquals("panel/mode_ato", MenuLayout.modelKey(MenuAction.DRIVING_MODE, true, PTG5));
     assertEquals("panel/end", MenuLayout.modelKey(MenuAction.END_DRIVING, false, PTG5));
     assertEquals("panel/end_confirm", MenuLayout.modelKey(MenuAction.END_DRIVING, true, PTG5));
-    assertEquals("panel/task_card", MenuLayout.modelKey(MenuAction.TASK_CARD, false, PTG5));
+    assertThrows(
+        IllegalArgumentException.class,
+        () -> MenuLayout.modelKey(MenuAction.TASK_CARD, false, PTG5),
+        "任务卡用原版书本贴图");
   }
 }

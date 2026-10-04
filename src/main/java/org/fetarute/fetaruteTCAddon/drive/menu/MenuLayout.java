@@ -123,6 +123,7 @@ public final class MenuLayout {
    * @param active 换向手柄：是否选中；车门：是否打开；启动流程开关：是否已接通；启动按钮：列车是否已启动；压缩机：是否运转（机车为开关是否打开）；
    *     停放制动：是否已缓解；制动试验：是否已通过；驾驶方式：是否在 ATO；结束驾驶：是否在等再次点击确认；门旁路：是否旁路
    * @param supply 列车的受电方式，决定受电开关用哪张贴图
+   * @throws IllegalArgumentException 任务卡：它用原版书本贴图，没有模型键
    */
   public static String modelKey(MenuAction action, boolean active, PowerSupply supply) {
     String onOff = active ? "_on" : "_off";
@@ -143,7 +144,7 @@ public final class MenuLayout {
           case BRAKE_TEST -> "test" + onOff;
           case DRIVING_MODE -> active ? "mode_ato" : "mode_manual";
           case END_DRIVING -> active ? "end_confirm" : "end";
-          case TASK_CARD -> "task_card";
+          case TASK_CARD -> throw new IllegalArgumentException("任务卡用原版书本贴图，没有模型键");
           case DOOR_BYPASS -> "door_bypass" + onOff;
         };
   }

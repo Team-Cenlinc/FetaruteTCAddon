@@ -10,7 +10,6 @@ import org.bukkit.NamespacedKey;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
-import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -136,7 +135,7 @@ public final class DriveMenuItems {
     };
   }
 
-  /** 任务卡：书本图标，写卡片上的各行；不可点击。 */
+  /** 任务卡：原版书本贴图（不设 {@code item_model}），写卡片上的各行；不可点击。 */
   public static ItemStack taskCard(LocaleManager locale, TaskCard.Card card) {
     ItemStack stack = new ItemStack(Material.BOOK);
     ItemMeta meta = stack.getItemMeta();
@@ -146,10 +145,6 @@ public final class DriveMenuItems {
       lines.add(line(locale, line.key(), line.values()));
     }
     meta.lore(lines);
-    meta.setItemModel(
-        new NamespacedKey(
-            HotbarItems.MODEL_NAMESPACE,
-            "drive/" + MenuLayout.modelKey(MenuAction.TASK_CARD, false, PowerSupply.PTG5)));
     if (!stack.setItemMeta(meta)) {
       throw new IllegalStateException("无法为任务卡设置物品元数据");
     }
