@@ -22,6 +22,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
@@ -3314,7 +3315,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     Instant planned = null;
     if (seatMatters) {
       reserve = current.driver().cabChange().reserveSeconds(StopAlignment.bodyLengthBlocks(group));
-      planned = plannedDepartureOf(session.playerId(), link);
+      // 计划发车只在换端开始那一拍用到：换端进行中不再每拍查表。
+      if (change.stage() != CabChange.Stage.ACTIVE) {
+        planned = plannedDepartureOf(session.playerId(), link, session.trainName(), preRelease);
+      }
     }
     CabChange.Event event =
         change.tick(
@@ -3403,7 +3407,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         "drive.task.cab-changed",
         Map.of("car", String.valueOf(seat == null ? change.targetCar() : seat.memberIndex() + 1)));
     if (brakeTest) {
-      Instant planned = plannedDepartureOf(session.playerId(), session.driverLink());
+      Instant planned =
+          plannedDepartureOf(
+              session.playerId(), session.driverLink(), session.trainName(), preRelease);
       long left =
           planned == null ? 0L : Math.max(0L, Duration.between(Instant.now(), planned).toSeconds());
       sendTaskChat(
@@ -3415,13 +3421,50 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
   }
 
-  /** 计划发车时刻：所领车次从起点站发车时取车次的计划发车，否则取表定的本站发车；都不明时为 {@code null}。 */
-  private Instant plannedDepartureOf(UUID playerId, DriverLink link) {
-    return tasks
-        .activeTaskOf(playerId)
-        .filter(task -> task.boardStopSequence() == 0)
+  /** 计划发车时刻，见 {@link #cabDeparture}。 */
+  private Instant plannedDepartureOf(
+      UUID playerId, DriverLink link, String trainName, boolean layover) {
+    return cabDeparture(
+        layover,
+        () ->
+            plugin
+                .getTimetableService()
+                .flatMap(timetables -> timetables.nextDepartureOf(trainName))
+                .map(TimetableService.DueTrip::departure),
+        tasks.activeTaskOf(playerId),
+        link.schedule());
+  }
+
+  /**
+   * 计划发车时刻：所领车次从起点站发车时取车次的计划发车，否则取表定的本站发车；都不明时为 {@code null}。
+   *
+   * <p>终点站待命（下一趟还没派下来）时，表定的本站时刻还是刚跑完那一趟的终到、所领车次也可能是刚开完的那一趟，都不能用：
+   * 取这列车按交路的下一趟，查不到时取驾驶员已领、还没开始的车次，再查不到就不明。
+   *
+   * @param layover 列车在终点站待命、下一趟还没派下来
+   * @param nextTrip 列车按交路的下一趟发车时刻；只在待命时查
+   * @param task 驾驶员未结束的任务
+   * @param schedule 表定的本站时刻
+   */
+  static Instant cabDeparture(
+      boolean layover,
+      Supplier<Optional<Instant>> nextTrip,
+      Optional<DriverTask> task,
+      Optional<DriverSchedule> schedule) {
+    Optional<DriverTask> boarding = task.filter(t -> t.boardStopSequence() == 0);
+    if (layover) {
+      return nextTrip
+          .get()
+          .or(
+              () ->
+                  boarding
+                      .filter(t -> t.state() == DriverTask.State.CLAIMED)
+                      .map(DriverTask::plannedDeparture))
+          .orElse(null);
+    }
+    return boarding
         .map(DriverTask::plannedDeparture)
-        .or(() -> link.schedule().filter(DriverSchedule::departure).map(DriverSchedule::planned))
+        .or(() -> schedule.filter(DriverSchedule::departure).map(DriverSchedule::planned))
         .orElse(null);
   }
 

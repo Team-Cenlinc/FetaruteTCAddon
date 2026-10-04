@@ -155,6 +155,20 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     return Optional.empty();
   }
 
+  /** 超级电容车停站结束降弓；排了降弓时记一笔调试日志，便于从日志核对。 */
+  private void lowerPantograph(MinecartGroup group, String trainName, String stopSessionId) {
+    int lowered = SupercapPantograph.lowerIfRaised(plugin, group);
+    if (lowered > 0) {
+      debug(
+          "AutoStation 降弓: train="
+              + trainName
+              + ", sid="
+              + stopSessionId
+              + ", attachments="
+              + lowered);
+    }
+  }
+
   /**
    * AutoStation 执行入口。
    *
@@ -869,7 +883,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           exitOffsetState.restore();
           finalWaitState.run();
           plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
-          SupercapPantograph.lowerIfRaised(plugin, group);
+          lowerPantograph(group, trainName, stopSessionId);
           driverStop.end();
           cancel();
           return true;
@@ -896,7 +910,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                         .getRuntimeDispatchService()
                         .ifPresent(dispatch -> dispatch.refreshSignal(group)));
         departureReleased = true;
-        SupercapPantograph.lowerIfRaised(plugin, group);
+        lowerPantograph(group, trainName, stopSessionId);
         driverStop.setPhase(DriverStationStop.Phase.DEPART);
         return true;
       }
@@ -1032,7 +1046,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               finalWaitState.run();
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               // 停站时间已到（终点站转入待命等）：超级电容车充电升起的受电弓在这里降下。
-              SupercapPantograph.lowerIfRaised(plugin, group);
+              lowerPantograph(group, trainName, stopSessionId);
               cancel();
               return;
             }
@@ -1064,7 +1078,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                               .getRuntimeDispatchService()
                               .ifPresent(dispatch -> dispatch.refreshSignal(group)));
               departureReleased = true;
-              SupercapPantograph.lowerIfRaised(plugin, group);
+              lowerPantograph(group, trainName, stopSessionId);
               return;
             }
             if (canDepart) {
@@ -1080,7 +1094,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               exitOffsetState.restore();
               finalWaitState.run();
               cancel();
-              SupercapPantograph.lowerIfRaised(plugin, group);
+              lowerPantograph(group, trainName, stopSessionId);
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               Bukkit.getScheduler()
                   .runTask(
