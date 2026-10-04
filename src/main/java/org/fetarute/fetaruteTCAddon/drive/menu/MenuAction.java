@@ -21,7 +21,13 @@ public enum MenuAction {
   /** 停放制动（simulation 级）。 */
   PARKING_BRAKE,
   /** 制动试验（simulation 级）。 */
-  BRAKE_TEST;
+  BRAKE_TEST,
+  /** 切换人工驾驶与 ATO（只在调度列车）。 */
+  DRIVING_MODE,
+  /** 结束驾驶：点两次才执行（调度列车为放弃任务并交还自动运行）。 */
+  END_DRIVING,
+  /** 任务卡：只显示信息，不可点击。 */
+  TASK_CARD;
 
   /** 对应的启动流程系统；不是系统开关时为空。 */
   public Optional<SetupSystem> system() {

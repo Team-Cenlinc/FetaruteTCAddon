@@ -260,6 +260,12 @@ drive:
       brake-test-on: "<green>Brake test: passed</green>"
       brake-test-off: "<gray>Brake test: not done</gray>"
       brake-test-busy: "<yellow>Brake test: in progress</yellow>"
+      driving-mode-manual: "<green>Driving: manual</green>"
+      driving-mode-ato: "<aqua>Driving: ATO</aqua>"
+      end-driving: "<red>End driving</red>"
+      end-driving-confirm: "<red><bold>Click again to end driving</bold></red>"
+      task-card-dispatch: "<gold>Current trip</gold>"
+      task-card-free: "<gold>Train info</gold>"
     hint:
       reverser: "<gray>Click to select the direction</gray>"
       door: "<gray>Click to open or close the door</gray>"
@@ -273,6 +279,10 @@ drive:
       compressor-auto: "<gray>Multiple-unit compressors run automatically from auxiliary power</gray>"
       parking: "<gray>Click to release or apply the parking brake; no traction while it is applied</gray>"
       brake-test: "<gray>Click to start, then apply and release the brake as the action bar says; required before traction</gray>"
+      driving-mode: "<gray>Click to switch between manual driving and ATO</gray>"
+      end-driving: "<gray>Click twice to end driving</gray>"
+      end-driving-confirm: "<yellow>Click again within 3 seconds to end driving</yellow>"
+      task-card: "<gray>Information only</gray>"
     detail:
       reservoir: "<gray>Main reservoir <white><mr></white> kPa</gray>"
       parking-needs: "<gray>Release needs main reservoir ≥ <white><need></white> kPa (now <white><mr></white>)</gray>"
@@ -280,6 +290,21 @@ drive:
       brake-test-apply: "<yellow>Move the handle to B4 or beyond (brake cylinder <white><bc></white> kPa)</yellow>"
       brake-test-release: "<yellow>Release to N (brake cylinder <white><bc></white> kPa)</yellow>"
       brake-test-passed: "<gray>Brake cylinder <white><bc></white> kPa</gray>"
+      end-dispatch: "<gray>Dispatched train: abandons the task and hands back to automatic</gray>"
+    card:
+      train: "<gray>Train: </gray><white><train></white>"
+      task-terminal: "<gray>Task: </gray><white><route></white> <aqua><trip></aqua> <gray>to the terminal</gray>"
+      task-interval: "<gray>Task: </gray><white><route></white> <aqua><trip></aqua> <gray>to</gray> <white><station></white>"
+      mode:
+        manual: "<gray>Driving: </gray><white>manual</white>"
+        ato: "<gray>Driving: </gray><aqua>ATO</aqua>"
+      next: "<gray>Next: </gray><white><station></white>"
+      score: "<gray>Live score: </gray><yellow><points></yellow> <gold><bold><grade></bold></gold>"
+      vehicle:
+        mu: "<gray>Type: </gray><white>multiple unit</white>"
+        loco: "<gray>Type: </gray><white>locomotive hauled</white>"
+      motion: "<gray>Accel: </gray><white><accel></white> <gray>Decel: </gray><white><decel></white> <gray>m/s²</gray>"
+      max-speed: "<gray>Max speed: </gray><white><kmh></white> <gray>km/h</gray>"
     notice:
       brake-test-started: "<yellow>Brake test started: close the desk and move the handle to B4</yellow>"
       brake-test-passed: "<green>Brake test passed</green>"

@@ -1666,6 +1666,12 @@ drive:
       brake-test-on: "<green>制动试验：已通过</green>"
       brake-test-off: "<gray>制动试验：未做</gray>"
       brake-test-busy: "<yellow>制动试验：进行中</yellow>"
+      driving-mode-manual: "<green>驾驶方式：人工驾驶</green>"
+      driving-mode-ato: "<aqua>驾驶方式：ATO</aqua>"
+      end-driving: "<red>结束驾驶</red>"
+      end-driving-confirm: "<red><bold>再次点击确认结束驾驶</bold></red>"
+      task-card-dispatch: "<gold>当前车次</gold>"
+      task-card-free: "<gold>列车信息</gold>"
     hint:
       reverser: "<gray>点击选择方向</gray>"
       door: "<gray>点击开关车门</gray>"
@@ -1679,6 +1685,10 @@ drive:
       compressor-auto: "<gray>动车组的压缩机随辅助电源自动运转</gray>"
       parking: "<gray>点击缓解或施加停放制动；停放制动未缓解时不能牵引</gray>"
       brake-test: "<gray>点击开始试验，再按动作栏提示施加与缓解制动；通过后才能牵引</gray>"
+      driving-mode: "<gray>点击在人工驾驶与 ATO 之间切换</gray>"
+      end-driving: "<gray>连续点击两次结束驾驶</gray>"
+      end-driving-confirm: "<yellow>3 秒内再次点击即结束驾驶</yellow>"
+      task-card: "<gray>仅供查看</gray>"
     detail:
       reservoir: "<gray>主风缸 <white><mr></white> kPa</gray>"
       parking-needs: "<gray>缓解需要主风缸 ≥ <white><need></white> kPa（当前 <white><mr></white>）</gray>"
@@ -1686,6 +1696,21 @@ drive:
       brake-test-apply: "<yellow>请把手柄拉到 B4 或以上（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-release: "<yellow>请回到 N 缓解（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-passed: "<gray>制动缸 <white><bc></white> kPa</gray>"
+      end-dispatch: "<gray>调度列车：放弃当前任务并交还自动运行</gray>"
+    card:
+      train: "<gray>列车：</gray><white><train></white>"
+      task-terminal: "<gray>任务：</gray><white><route></white> <aqua><trip></aqua> <gray>开到终点站</gray>"
+      task-interval: "<gray>任务：</gray><white><route></white> <aqua><trip></aqua> <gray>开到</gray> <white><station></white>"
+      mode:
+        manual: "<gray>驾驶方式：</gray><white>人工驾驶</white>"
+        ato: "<gray>驾驶方式：</gray><aqua>ATO</aqua>"
+      next: "<gray>下一站：</gray><white><station></white>"
+      score: "<gray>实时评分：</gray><yellow><points></yellow> <gold><bold><grade></bold></gold>"
+      vehicle:
+        mu: "<gray>车种：</gray><white>动车组</white>"
+        loco: "<gray>车种：</gray><white>机车牵引</white>"
+      motion: "<gray>加速度：</gray><white><accel></white> <gray>减速度：</gray><white><decel></white> <gray>米/秒²</gray>"
+      max-speed: "<gray>最高速度：</gray><white><kmh></white> <gray>km/h</gray>"
     notice:
       brake-test-started: "<yellow>制动试验开始：请关闭驾驶台，把手柄拉到 B4</yellow>"
       brake-test-passed: "<green>制动试验通过</green>"

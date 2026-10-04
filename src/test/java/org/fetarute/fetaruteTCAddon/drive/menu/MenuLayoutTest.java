@@ -26,7 +26,7 @@ class MenuLayoutTest {
   @Test
   void emptySlotsAndSlotsOutsideTheMenuHaveNoAction() {
     assertTrue(MenuLayout.actionAt(3).isEmpty());
-    assertTrue(MenuLayout.actionAt(8).isEmpty());
+    assertTrue(MenuLayout.actionAt(6).isEmpty());
     assertTrue(MenuLayout.actionAt(-1).isEmpty());
     assertTrue(MenuLayout.actionAt(MenuLayout.SIZE).isEmpty());
   }
@@ -93,5 +93,31 @@ class MenuLayoutTest {
     assertEquals("panel/release_on", MenuLayout.modelKey(MenuAction.PARKING_BRAKE, true, PTG5));
     assertEquals("panel/test_off", MenuLayout.modelKey(MenuAction.BRAKE_TEST, false, PTG5));
     assertEquals("panel/compressor_on", MenuLayout.modelKey(MenuAction.COMPRESSOR, true, PTG5));
+  }
+
+  @Test
+  void theThirdRowStartsWithTheTaskCardAndTheFirstRowEndsWithModeAndEnd() {
+    assertEquals(27, MenuLayout.SIZE);
+    assertEquals(Optional.of(MenuAction.DRIVING_MODE), MenuLayout.actionAt(7));
+    assertEquals(Optional.of(MenuAction.END_DRIVING), MenuLayout.actionAt(8));
+    assertEquals(Optional.of(MenuAction.TASK_CARD), MenuLayout.actionAt(18));
+  }
+
+  @Test
+  void dividersNeverCoverAButton() {
+    for (int slot : MenuLayout.dividers()) {
+      assertTrue(slot >= 0 && slot < MenuLayout.SIZE, "玻璃板槽位 " + slot);
+      assertTrue(MenuLayout.actionAt(slot).isEmpty(), "玻璃板盖住了按钮: " + slot);
+      assertTrue(MenuLayout.isDivider(slot));
+    }
+  }
+
+  @Test
+  void newButtonsHaveTheirOwnTextures() {
+    assertEquals("panel/mode_manual", MenuLayout.modelKey(MenuAction.DRIVING_MODE, false, PTG5));
+    assertEquals("panel/mode_ato", MenuLayout.modelKey(MenuAction.DRIVING_MODE, true, PTG5));
+    assertEquals("panel/end", MenuLayout.modelKey(MenuAction.END_DRIVING, false, PTG5));
+    assertEquals("panel/end_confirm", MenuLayout.modelKey(MenuAction.END_DRIVING, true, PTG5));
+    assertEquals("panel/task_card", MenuLayout.modelKey(MenuAction.TASK_CARD, false, PTG5));
   }
 }

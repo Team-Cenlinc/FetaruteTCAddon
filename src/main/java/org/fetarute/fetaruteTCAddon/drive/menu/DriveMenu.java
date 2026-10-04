@@ -4,6 +4,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
@@ -27,9 +29,14 @@ public final class DriveMenu {
   private static final long TICKS_PER_SECOND = 20L;
 
   private final LocaleManager locale;
+  private final Function<UUID, Optional<TaskCard.TaskSummary>> tasks;
 
-  public DriveMenu(LocaleManager locale) {
+  /**
+   * @param tasks 按驾驶员查驾驶任务的摘要（任务卡用）
+   */
+  public DriveMenu(LocaleManager locale, Function<UUID, Optional<TaskCard.TaskSummary>> tasks) {
     this.locale = Objects.requireNonNull(locale, "locale");
+    this.tasks = Objects.requireNonNull(tasks, "tasks");
   }
 
   /**
@@ -60,6 +67,26 @@ public final class DriveMenu {
       inventory.setItem(
           MenuLayout.slotOf(action), view == null ? null : DriveMenuItems.build(locale, view));
     }
+    inventory.setItem(
+        MenuLayout.slotOf(MenuAction.TASK_CARD), DriveMenuItems.taskCard(locale, card(session)));
+    for (int slot : MenuLayout.dividers()) {
+      inventory.setItem(slot, DriveMenuItems.divider());
+    }
+    if (!session.isDispatchDriving()) {
+      // 非调度列车没有驾驶方式可切换：这一格也是玻璃板。
+      inventory.setItem(MenuLayout.slotOf(MenuAction.DRIVING_MODE), DriveMenuItems.divider());
+    }
+  }
+
+  private TaskCard.Card card(DriveSession session) {
+    if (session.driverLink() == null) {
+      return TaskCard.free(session.trainName(), session.params());
+    }
+    return TaskCard.dispatch(
+        session.trainName(),
+        session.driverLink(),
+        tasks.apply(session.playerId()),
+        session.liveScore());
   }
 
   /** 菜单是不是驾驶台菜单。 */
@@ -90,6 +117,27 @@ public final class DriveMenu {
     switch (action) {
       case COMPRESSOR, PARKING_BRAKE, BRAKE_TEST -> {
         return cab.enabled() ? cabView(action, cab, setup) : null;
+      }
+      default -> {}
+    }
+    switch (action) {
+      case DRIVING_MODE -> {
+        return session.isDispatchDriving() ? ButtonView.simple(action, session.isAto()) : null;
+      }
+      case END_DRIVING -> {
+        return new ButtonView(
+            action,
+            session.endArmed(now),
+            false,
+            setup.supply(),
+            -1,
+            true,
+            session.isDispatchDriving() ? "drive.menu.detail.end-dispatch" : null,
+            Map.of());
+      }
+      case TASK_CARD -> {
+        // 任务卡另由 render 按会话写入。
+        return null;
       }
       default -> {}
     }

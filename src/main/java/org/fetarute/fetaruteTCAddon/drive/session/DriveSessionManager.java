@@ -103,6 +103,7 @@ import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveMenu;
 import org.fetarute.fetaruteTCAddon.drive.menu.MenuAction;
 import org.fetarute.fetaruteTCAddon.drive.menu.MenuLayout;
+import org.fetarute.fetaruteTCAddon.drive.menu.TaskCard;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
@@ -192,6 +193,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 驾驶台提示在动作栏停留的时间（tick），期间驾驶 HUD 不覆盖动作栏。 */
   private static final long NOTICE_HOLD_TICKS = 40L;
 
+  /** “结束驾驶”第一次点击后，多少 tick 内再点才算确认。 */
+  private static final long END_CONFIRM_TICKS = 60L;
+
   /** 尝试重新入座的间隔（tick）。 */
   private static final int RESEAT_RETRY_TICKS = 5;
 
@@ -244,7 +248,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   public DriveSessionManager(FetaruteTCAddon plugin, DriveConfig config) {
     this.plugin = plugin;
     this.config = config;
-    this.menu = new DriveMenu(plugin.getLocaleManager());
+    this.menu = new DriveMenu(plugin.getLocaleManager(), this::taskSummary);
     this.sidebar = new DriveSidebar(plugin.getLocaleManager());
     this.stationStopPoints =
         new StationStopPoints(
@@ -898,11 +902,63 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       case COMPRESSOR -> toggleCompressor(player, session);
       case PARKING_BRAKE -> toggleParkingBrake(player, session);
       case BRAKE_TEST -> startBrakeTest(player, session);
+      case DRIVING_MODE -> toggleDrivingMode(player, session);
+      case END_DRIVING -> {
+        if (pressEnd(player, session)) {
+          return;
+        }
+      }
+      case TASK_CARD -> {}
     }
     Inventory top = player.getOpenInventory().getTopInventory();
     if (DriveMenu.isMenu(top)) {
       menu.render(top, session);
     }
+  }
+
+  /** 驾驶台上切换人工驾驶与 ATO（只在调度列车）。 */
+  private void toggleDrivingMode(Player player, DriveSession session) {
+    if (!session.isDispatchDriving()) {
+      return;
+    }
+    String key = setDrivingMode(player, session.isAto() ? DrivingMode.MANUAL : DrivingMode.ATO);
+    player.sendMessage(plugin.getLocaleManager().component(key));
+  }
+
+  /**
+   * 驾驶台的“结束驾驶”：第一次点击只进入待确认，{@value #END_CONFIRM_TICKS} tick 内再点才结束。调度列车按放弃任务处理， 交还自动运行；没有领任务的直接交还。
+   *
+   * @return 是否已经结束驾驶（菜单已关闭）
+   */
+  private boolean pressEnd(Player player, DriveSession session) {
+    long now = Bukkit.getCurrentTick();
+    if (!session.endArmed(now)) {
+      session.armEnd(now + END_CONFIRM_TICKS);
+      return false;
+    }
+    session.armEnd(Long.MIN_VALUE);
+    closeMenuIfOpen(player);
+    traceSession(session, "驾驶台结束驾驶");
+    if (session.isDispatchDriving()) {
+      if (!abandonTask(player.getUniqueId(), "menu")) {
+        requestHandback(session, "menu");
+      }
+    } else {
+      stopSession(player.getUniqueId(), DriveSession.EndReason.COMMAND);
+    }
+    return true;
+  }
+
+  /** 任务卡用的驾驶任务摘要。 */
+  private Optional<TaskCard.TaskSummary> taskSummary(UUID playerId) {
+    return tasks
+        .activeTaskOf(playerId)
+        .map(
+            task ->
+                new TaskCard.TaskSummary(
+                    task.routeCode(),
+                    task.key().tripCode(),
+                    task.alightStopSequence() >= 0 ? task.alightStationName() : ""));
   }
 
   private void setReverser(Player player, DriveSession session, ReverserPosition position) {
@@ -1679,7 +1735,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       onSetupChanged(session, powerBefore);
     }
     handleCabEvents(player, session);
-    boolean liveValues = session.setup().busy() || session.cab().enabled();
+    boolean liveValues =
+        session.setup().busy()
+            || session.cab().enabled()
+            || session.isDispatchDriving()
+            || session.endArmed(now);
     if (session.menuTopSize() > 0 && !session.isStopped()) {
       denyMenu(player, "drive.menu.deny.moving");
       closeMenuIfOpen(player);

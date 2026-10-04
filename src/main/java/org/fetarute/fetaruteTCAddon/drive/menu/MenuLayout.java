@@ -2,20 +2,25 @@ package org.fetarute.fetaruteTCAddon.drive.menu;
 
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 
 /**
  * 停车后菜单的布局：哪个槽位放哪个按钮，以及按钮在各状态下用哪张贴图。
  *
- * <p>菜单两排共 18 格。第一排：前三格是换向手柄（前进、空挡、后退），第五、六格是左右车门，左右以驾驶员面朝的方向为准。第二排是启动流程：
- * 钥匙、受电（受电弓、集电靴或发动机）、主断路器、辅助电源；simulation 级接着是压缩机、停放制动与制动试验，standard 级最后一格是一键启动按钮。
+ * <p>菜单三排共 27 格。第一排是行车操作：前三格是换向手柄（前进、空挡、后退），第五、六格是左右车门（左右以驾驶员面朝的方向为准）， 第八格切换人工驾驶与
+ * ATO（只在调度列车），第九格结束驾驶。第二排是启动流程：钥匙、受电（受电弓、集电靴或发动机）、主断路器、辅助电源； simulation 级接着是压缩机、停放制动与制动试验，standard
+ * 级最后一格是一键启动按钮。第三排第一格是任务卡（调度列车写车次与评分，其余写列车参数）。 各组之间用灰色玻璃板隔开（{@link #isDivider}）。
  *
  * <p>本类不依赖服务器对象，便于单测。
  */
 public final class MenuLayout {
 
   /** 菜单的槽位数。 */
-  public static final int SIZE = 18;
+  public static final int SIZE = 27;
+
+  /** 分组之间的玻璃板。 */
+  private static final Set<Integer> DIVIDERS = Set.of(3, 6, 19, 24, 25, 26);
 
   /** 材质包里模型键的前缀（命名空间之后）。 */
   public static final String MODEL_PREFIX = "panel/";
@@ -34,13 +39,26 @@ public final class MenuLayout {
           Map.entry(13, MenuAction.COMPRESSOR),
           Map.entry(14, MenuAction.PARKING_BRAKE),
           Map.entry(15, MenuAction.BRAKE_TEST),
-          Map.entry(17, MenuAction.START));
+          Map.entry(17, MenuAction.START),
+          Map.entry(7, MenuAction.DRIVING_MODE),
+          Map.entry(8, MenuAction.END_DRIVING),
+          Map.entry(18, MenuAction.TASK_CARD));
 
   private MenuLayout() {}
 
   /** 槽位上的操作；空槽位为空。 */
   public static Optional<MenuAction> actionAt(int slot) {
     return Optional.ofNullable(ACTIONS.get(slot));
+  }
+
+  /** 是不是分组之间的玻璃板。 */
+  public static boolean isDivider(int slot) {
+    return DIVIDERS.contains(slot);
+  }
+
+  /** 分组之间的玻璃板所在的槽位。 */
+  public static Set<Integer> dividers() {
+    return DIVIDERS;
   }
 
   /** 操作所在的槽位。 */
@@ -58,7 +76,7 @@ public final class MenuLayout {
    *
    * @param action 按钮
    * @param active 换向手柄：是否选中；车门：是否打开；启动流程开关：是否已接通；启动按钮：列车是否已启动；压缩机：是否运转（机车为开关是否打开）；
-   *     停放制动：是否已缓解；制动试验：是否已通过
+   *     停放制动：是否已缓解；制动试验：是否已通过；驾驶方式：是否在 ATO；结束驾驶：是否在等再次点击确认
    * @param supply 列车的受电方式，决定受电开关用哪张贴图
    */
   public static String modelKey(MenuAction action, boolean active, PowerSupply supply) {
@@ -78,6 +96,9 @@ public final class MenuLayout {
           case COMPRESSOR -> "compressor" + onOff;
           case PARKING_BRAKE -> "release" + onOff;
           case BRAKE_TEST -> "test" + onOff;
+          case DRIVING_MODE -> active ? "mode_ato" : "mode_manual";
+          case END_DRIVING -> active ? "end_confirm" : "end";
+          case TASK_CARD -> "task_card";
         };
   }
 

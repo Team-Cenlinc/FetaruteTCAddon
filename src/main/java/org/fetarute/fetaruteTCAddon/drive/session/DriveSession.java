@@ -129,6 +129,7 @@ public final class DriveSession {
   private boolean adviceBraking;
   private ScoreRules.Result liveScore;
   private DriverStationStop reportedStop;
+  private long endArmedUntilTick = Long.MIN_VALUE;
 
   /** 不需要启动流程的会话（列车已就绪）。 */
   public DriveSession(
@@ -446,6 +447,16 @@ public final class DriveSession {
     }
     reportedStop = stop;
     return true;
+  }
+
+  /** 驾驶台的“结束驾驶”按钮点过一次，等再次点击确认，直到 {@code untilTick}。 */
+  public void armEnd(long untilTick) {
+    this.endArmedUntilTick = untilTick;
+  }
+
+  /** “结束驾驶”是否在等再次点击确认。 */
+  public boolean endArmed(long nowTick) {
+    return nowTick < endArmedUntilTick;
   }
 
   /** 让正在运行的控车动作自行退出（转为 ATO 时由自动运行接着操纵）。 */
