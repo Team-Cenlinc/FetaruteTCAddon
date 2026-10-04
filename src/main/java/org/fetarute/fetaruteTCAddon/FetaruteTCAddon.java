@@ -77,6 +77,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
@@ -363,6 +364,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
     ServerIdentity.configure(getConfig().getString("server-id", ""));
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+    refreshSpawnMotionTags(configManager.current());
     if (railGraphService != null) {
       railGraphService.configureCrossWorld(
           configManager.current().graphSettings().crossWorld(), portalLinks);
@@ -399,6 +401,34 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initPidsService();
     scheduleRuntimeOccupancyReconstruction(1L);
     sender.sendMessage(localeManager.component("command.reload.success"));
+  }
+
+  /**
+   * 配置重载后，按新的车种配置刷新现场列车上出车写入的加减速标签（{@link SpawnMotionTags}）；用户设定的标签不动。
+   *
+   * <p>控车本就按车种配置解析，不依赖这一步；这里只让标签上看到的数与实际控车一致。未加载的列车在下次折返复用时刷新。
+   *
+   * @param config 重载后的配置
+   */
+  private void refreshSpawnMotionTags(ConfigManager.ConfigView config) {
+    try {
+      List<com.bergerkiller.bukkit.tc.properties.TrainProperties> trains = new ArrayList<>();
+      for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+        if (group != null && group.isValid() && group.getProperties() != null) {
+          trains.add(group.getProperties());
+        }
+      }
+      int refreshed = SpawnMotionTags.refreshStamped(trains, config);
+      if (refreshed > 0) {
+        debug("已按重载后的车种配置刷新出车写入的加减速标签: trains=" + refreshed);
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      debug(
+          "刷新出车写入的加减速标签失败: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+    }
   }
 
   public LocaleManager getLocaleManager() {

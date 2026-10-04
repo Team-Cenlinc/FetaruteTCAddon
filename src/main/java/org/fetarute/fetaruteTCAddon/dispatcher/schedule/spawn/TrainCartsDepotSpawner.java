@@ -26,6 +26,7 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -35,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -175,11 +177,22 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
       addTags(group.getProperties(), ticket.id(), service, depotId, pattern, route, provider, now);
+      stampMotion(group.getProperties());
       TrainTagHelper.writeTag(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX, "0");
       TrainTagHelper.writeTag(
           group.getProperties(),
           RouteProgressRegistry.TAG_ROUTE_UPDATED_AT,
           String.valueOf((now == null ? Instant.now() : now).toEpochMilli()));
+    }
+  }
+
+  /** 写入加减速标签（{@link SpawnMotionTags}）：驾驶员接管时按调度控车同一组加减速开车。只读写标签、不会抛出，失败只留调试日志。 */
+  private void stampMotion(com.bergerkiller.bukkit.tc.properties.TrainProperties properties) {
+    ConfigManager configManager = plugin.getConfigManager();
+    SpawnMotionTags.Outcome outcome =
+        SpawnMotionTags.stamp(properties, configManager == null ? null : configManager.current());
+    if (outcome == SpawnMotionTags.Outcome.FAILED) {
+      debugLogger.accept("出车写入加减速标签失败 train=" + properties.getTrainName());
     }
   }
 
