@@ -107,6 +107,8 @@ final class RapidStagger {
    * @param profiles 交路投影
    * @param index 图索引
    * @param separation 裕量
+   * @param following 跟车规则：启用时被拖住按闭塞时间算（与运行时放行同一口径），否则按占用区间
+   * @param trajectories 闭塞时间用的逐点轨迹
    * @param zeroSecondOfDay 计划窗口起点（日内秒）
    * @param fastRoutes 快车交路（{@link #fastRoutes}）
    * @param yields 表里写的让车（量快车自己的等待）
@@ -116,10 +118,13 @@ final class RapidStagger {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       TimetableConflictChecker.GraphIndex index,
       int separation,
+      TimetableBuildOptions.Following following,
+      BlockingTimes.Trajectories trajectories,
       int zeroSecondOfDay,
       Set<UUID> fastRoutes,
       List<ResourceRepair.Yield> yields) {
-    CorridorCatchUp corridors = new CorridorCatchUp(profiles, index, separation);
+    CorridorCatchUp corridors =
+        new CorridorCatchUp(profiles, index, separation, following, trajectories);
     List<CorridorCatchUp.Caught> caught =
         corridors
             .caught(
@@ -297,16 +302,34 @@ final class RapidStagger {
    * @param dwell 快车中途加停或终到折返加长（没有时为空）
    * @param result 编表结果
    * @param outcome 结果里挑选要看的几个数
-   * @param measure 实测
+   * @param measure 搜索用的实测：搜索里的取舍与早停看它（按占用区间量，见 {@link Picks}）
+   * @param reported 报告与最终挑选用的实测（按闭塞时间量）；没有跟车规则时与 {@code measure} 相同
    */
   record Candidate(
       Map<String, Integer> shift,
       Optional<Dwell> dwell,
       TimetableBuildResult result,
       Outcome outcome,
-      Measure measure) {
+      Measure measure,
+      Measure reported) {
     Candidate {
       shift = Collections.unmodifiableSortedMap(new TreeMap<>(shift));
+      reported = reported == null ? measure : reported;
+    }
+
+    /** 搜索与报告同一口径。 */
+    Candidate(
+        Map<String, Integer> shift,
+        Optional<Dwell> dwell,
+        TimetableBuildResult result,
+        Outcome outcome,
+        Measure measure) {
+      this(shift, dwell, result, outcome, measure, measure);
+    }
+
+    /** 按报告口径看这个候选：挑最终答案、写报告用。 */
+    Candidate asReported() {
+      return new Candidate(shift, dwell, result, outcome, reported, reported);
     }
 
     /** 改动大小：平移秒数与加停秒数之和，并列时取改得少的。 */
@@ -602,9 +625,15 @@ final class RapidStagger {
    */
   record Search(Optional<Candidate> improved, int tried) {}
 
-  /** 最终答案：只从比原表好（{@link Candidate#betterThan}）的候选里取 {@link #ORDER} 最前的。 */
+  /**
+   * 最终答案：只从比原表好（{@link Candidate#betterThan}）的候选里取 {@link #ORDER} 最前的。
+   *
+   * <p>两个口径分开用。搜索里的早停按搜索口径（占用区间）：闭塞时间口径下，慢车间隔比快车所需的小几秒就是结构缺口，被卡到不了 0， 按它早停会把候选全编一遍。
+   * 最终答案在编过的候选里按报告口径（闭塞时间）重新挑：编一个候选要整张表重排，量一遍只是在成品表上逐段比，几乎不花时间。
+   */
   private static final class Picks {
     private final Candidate base;
+    private Candidate searchBest;
     private Candidate chosen;
 
     Picks(Candidate base) {
@@ -612,14 +641,20 @@ final class RapidStagger {
     }
 
     void offer(Candidate candidate) {
-      if (candidate.betterThan(base) && (chosen == null || ORDER.compare(candidate, chosen) < 0)) {
+      if (candidate.betterThan(base)
+          && (searchBest == null || ORDER.compare(candidate, searchBest) < 0)) {
+        searchBest = candidate;
+      }
+      Candidate reported = candidate.asReported();
+      if (reported.betterThan(base.asReported())
+          && (chosen == null || ORDER.compare(reported, chosen.asReported()) < 0)) {
         chosen = candidate;
       }
     }
 
-    /** 已经选到一个快车完全不被卡的：再找只可能在次要指标上略好。 */
+    /** 按搜索口径已经选到一个快车完全不被卡的：再找只可能在次要指标上略好。 */
     boolean settled() {
-      return chosen != null && chosen.measure().seconds() == 0L;
+      return searchBest != null && searchBest.measure().seconds() == 0L;
     }
 
     Search finish(int tried) {
@@ -639,7 +674,7 @@ final class RapidStagger {
    *   <li>平移没能完全错开时，在前 {@value #DWELL_SHORTLIST} 个最好的平移与原表上给仍被拖住的快车加停。
    * </ol>
    *
-   * <p>已经选到快车完全不被卡的候选（{@link Picks#settled}）就不再往下一步。
+   * <p>按搜索口径已经选到快车完全不被卡的候选（{@link Picks#settled}）就不再往下一步；最终答案在编过的候选里按报告口径挑。
    *
    * @param periods 快车组 → 平移的相对周期
    * @param base 原表

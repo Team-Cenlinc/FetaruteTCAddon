@@ -28,10 +28,16 @@ final class CorridorCatchUp {
   private final Map<UUID, TimetableConflictChecker.RouteProfile> profiles;
   private final TimetableConflictChecker.Footprints footprints;
   private final int separation;
+  private final TimetableConflictChecker.GraphIndex index;
+  private final TimetableBuildOptions.Following following;
+  private final BlockingTimes.Trajectories trajectories;
   private final Map<UUID, List<Passage>> passages = new HashMap<>();
+  private final Map<UUID, BlockingTimes> blocking = new HashMap<>();
   private final Map<RoutePair, List<Run>> runs = new HashMap<>();
 
   /**
+   * 最小间隔按占用区间算（不按闭塞时间）。
+   *
    * @param profiles 各交路的投影
    * @param index 图索引
    * @param separation 资源相邻占用的裕量（秒）：快出这么多才算"更快"
@@ -40,9 +46,33 @@ final class CorridorCatchUp {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       TimetableConflictChecker.GraphIndex index,
       int separation) {
+    this(
+        profiles,
+        index,
+        separation,
+        TimetableBuildOptions.Following.NONE,
+        BlockingTimes.Trajectories.NONE);
+  }
+
+  /**
+   * @param profiles 各交路的投影
+   * @param index 图索引
+   * @param separation 资源相邻占用的裕量（秒）：快出这么多才算"更快"
+   * @param following 跟车规则：启用时最小间隔按闭塞时间算（{@link BlockingTimes}），与运行时放行同一口径
+   * @param trajectories 闭塞时间用的逐点轨迹
+   */
+  CorridorCatchUp(
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      TimetableConflictChecker.GraphIndex index,
+      int separation,
+      TimetableBuildOptions.Following following,
+      BlockingTimes.Trajectories trajectories) {
     this.profiles = profiles == null ? Map.of() : profiles;
-    this.footprints = new TimetableConflictChecker.Footprints(index);
+    this.index = index == null ? TimetableConflictChecker.GraphIndex.of(null) : index;
+    this.footprints = new TimetableConflictChecker.Footprints(this.index);
     this.separation = Math.max(0, separation);
+    this.following = following == null ? TimetableBuildOptions.Following.NONE : following;
+    this.trajectories = trajectories == null ? BlockingTimes.Trajectories.NONE : trajectories;
   }
 
   /** 一个互斥资源上的一次占用（相对发车）。 */
@@ -68,10 +98,60 @@ final class CorridorCatchUp {
 
   private record RoutePair(UUID ahead, UUID behind) {}
 
-  /** {@code behind} 跟在 {@code ahead} 后面时的各段共线。 */
+  /**
+   * {@code behind} 跟在 {@code ahead} 后面时的各段共线。
+   *
+   * <p>启用跟车规则时最小间隔换成闭塞时间（{@link BlockingTimes#lead}）：前车放出、后车要用都按运行时的规则算，比占用区间多出授权窗口与尾部保护。
+   */
   List<Run> runs(UUID ahead, UUID behind) {
-    return runs.computeIfAbsent(
-        new RoutePair(ahead, behind), pair -> runsOf(passages(ahead), passages(behind)));
+    return runs.computeIfAbsent(new RoutePair(ahead, behind), pair -> runsBetween(ahead, behind));
+  }
+
+  private List<Run> runsBetween(UUID ahead, UUID behind) {
+    List<Passage> first = passages(ahead);
+    List<Passage> second = passages(behind);
+    List<Run> byOccupation = runsOf(first, second);
+    if (!following.enabled()) {
+      return byOccupation;
+    }
+    List<Shared> shared = sharedRuns(first, second);
+    List<Run> out = new ArrayList<>(byOccupation.size());
+    for (int r = 0; r < byOccupation.size(); r++) {
+      Run run = byOccupation.get(r);
+      int lead =
+          BlockingTimes.lead(blocking(ahead), blocking(behind), keysOf(first, shared.get(r)))
+              .orElse(run.lead());
+      out.add(
+          new Run(
+              run.behindFrom(),
+              run.aheadEntry(),
+              run.behindEntry(),
+              lead,
+              run.aheadSeconds(),
+              run.behindSeconds()));
+    }
+    return List.copyOf(out);
+  }
+
+  /** 一段共线上的资源键，按前车序列的次序。 */
+  private static List<String> keysOf(List<Passage> ahead, Shared shared) {
+    List<String> keys = new ArrayList<>(shared.length());
+    for (int k = 0; k < shared.length(); k++) {
+      keys.add(ahead.get(shared.aheadFrom() + k).key());
+    }
+    return keys;
+  }
+
+  private BlockingTimes blocking(UUID routeId) {
+    return blocking.computeIfAbsent(
+        routeId,
+        id ->
+            BlockingTimes.of(
+                Optional.ofNullable(profiles.get(id))
+                    .orElseThrow(() -> new IllegalStateException("没有交路投影: " + id)),
+                index,
+                following,
+                trajectories));
   }
 
   /** 在某段共线上比另一条交路明显更快（快出一个裕量以上）、因而可能被它拖住的交路。 */
@@ -198,16 +278,24 @@ final class CorridorCatchUp {
   }
 
   /**
-   * 两串资源的各段共线：从前车的资源序列里依次找后车也经过（且在上一段之后）的资源，从那里起逐个相同的一串就是一段。
+   * 一段共线在两条交路资源序列里的位置。
    *
-   * <p>进入/离开时刻都相对各自发车，所以最小间隔 {@code max(前车离开 − 后车进入)} 不管共线段从哪里开始都成立。
+   * @param aheadFrom 前车序列里的起点下标
+   * @param behindFrom 后车序列里的起点下标
+   * @param length 逐个相同的资源数
    */
-  static List<Run> runsOf(List<Passage> ahead, List<Passage> behind) {
+  private record Shared(int aheadFrom, int behindFrom, int length) {}
+
+  /**
+   * 两串资源的各段共线：从前车的资源序列里依次找后车也经过（且在上一段之后）的资源，从那里起逐个相同的一串就是一段， 至少 {@value #MIN_SHARED_RESOURCES}
+   * 个才算。按占用区间与按闭塞时间量被卡用的是这同一个匹配。
+   */
+  private static List<Shared> sharedRuns(List<Passage> ahead, List<Passage> behind) {
     Map<String, Integer> behindAt = new HashMap<>();
     for (int j = behind.size() - 1; j >= 0; j--) {
       behindAt.put(behind.get(j).key(), j);
     }
-    List<Run> out = new ArrayList<>();
+    List<Shared> out = new ArrayList<>();
     int i = 0;
     int floor = 0;
     while (i < ahead.size()) {
@@ -223,21 +311,37 @@ final class CorridorCatchUp {
         n++;
       }
       if (n >= MIN_SHARED_RESOURCES) {
-        int lead = Integer.MIN_VALUE;
-        for (int k = 0; k < n; k++) {
-          lead = Math.max(lead, ahead.get(i + k).exit() - behind.get(j + k).entry());
-        }
-        out.add(
-            new Run(
-                j,
-                ahead.get(i).entry(),
-                behind.get(j).entry(),
-                lead,
-                ahead.get(i + n - 1).exit() - ahead.get(i).entry(),
-                behind.get(j + n - 1).exit() - behind.get(j).entry()));
+        out.add(new Shared(i, j, n));
       }
       i += Math.max(1, n);
       floor = j + Math.max(1, n);
+    }
+    return List.copyOf(out);
+  }
+
+  /**
+   * 两串资源的各段共线（{@link #sharedRuns}），各算最小发车间隔。
+   *
+   * <p>进入/离开时刻都相对各自发车，所以最小间隔 {@code max(前车离开 − 后车进入)} 不管共线段从哪里开始都成立。
+   */
+  static List<Run> runsOf(List<Passage> ahead, List<Passage> behind) {
+    List<Run> out = new ArrayList<>();
+    for (Shared shared : sharedRuns(ahead, behind)) {
+      int i = shared.aheadFrom();
+      int j = shared.behindFrom();
+      int n = shared.length();
+      int lead = Integer.MIN_VALUE;
+      for (int k = 0; k < n; k++) {
+        lead = Math.max(lead, ahead.get(i + k).exit() - behind.get(j + k).entry());
+      }
+      out.add(
+          new Run(
+              j,
+              ahead.get(i).entry(),
+              behind.get(j).entry(),
+              lead,
+              ahead.get(i + n - 1).exit() - ahead.get(i).entry(),
+              behind.get(j + n - 1).exit() - behind.get(j).entry()));
     }
     return List.copyOf(out);
   }

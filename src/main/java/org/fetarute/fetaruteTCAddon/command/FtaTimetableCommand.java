@@ -35,9 +35,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPatternLength;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
@@ -66,6 +69,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Neighbor
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableNeighborhoodLoader;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.TransactionCallback;
@@ -489,6 +493,29 @@ public final class FtaTimetableCommand {
               + TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS
               + "s 复算，两次判据可能不一致。要长期生效得改默认值，不能只靠这个 flag。");
     }
+    // 快车被卡与错峰按闭塞时间量：跟车规则取运行时配置，车长按出车编组。
+    Map<UUID, Long> trainLengths = new java.util.HashMap<>();
+    java.util.Set<String> unknownLength = new java.util.TreeSet<>();
+    for (LineRoutes member : members) {
+      member
+          .trainLengths()
+          .forEach((route, length) -> trainLengths.merge(route, length, Math::max));
+    }
+    for (LineRoutes member : members) {
+      for (TimetableBuilder.RouteInput route : member.inputs()) {
+        if (!trainLengths.containsKey(route.routeId())) {
+          unknownLength.add(route.routeCode());
+        }
+      }
+    }
+    TimetableBuildOptions.Following following =
+        followingRules(
+                plugin.getConfigManager() == null ? null : plugin.getConfigManager().current())
+            .withTrainLengths(trainLengths);
+    if (!unknownLength.isEmpty()) {
+      buildWarnings.add(
+          "读不到出车编组、车长未知：" + String.join("、", unknownLength) + "。快车跟在它们后面时，被卡按占用区间量，不按闭塞时间。");
+    }
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             serviceStart,
@@ -509,7 +536,8 @@ public final class FtaTimetableCommand {
             flags.strict(),
             groupIntervals,
             repairOptions(sender, flags.maxWaitSeconds()),
-            flags.rapidStagger());
+            flags.rapidStagger(),
+            following);
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -636,13 +664,15 @@ public final class FtaTimetableCommand {
    * @param ownRouteIds 属于这条线的 route（车池与拆表归属）
    * @param graph 覆盖这条线的图快照
    * @param timetableId 这条线这份表的 id（已有草稿则沿用）
+   * @param trainLengths 各 route 的保守车长（{@link #trainLengthsOf}）；读不到出车编组的不在里面
    */
   private record LineRoutes(
       ResolvedLine line,
       List<TimetableBuilder.RouteInput> inputs,
       java.util.Set<UUID> ownRouteIds,
       WorldGraph graph,
-      UUID timetableId) {}
+      UUID timetableId,
+      Map<UUID, Long> trainLengths) {}
 
   /** 收集一条线参与 build 的 route；没有可编表的班次或缺定义时提示并返回 null。 */
   private LineRoutes collectRouteInputs(
@@ -734,7 +764,12 @@ public final class FtaTimetableCommand {
       return null;
     }
     return new LineRoutes(
-        resolved, routeInputs, own, graph, existingId.orElseGet(UUID::randomUUID));
+        resolved,
+        routeInputs,
+        own,
+        graph,
+        existingId.orElseGet(UUID::randomUUID),
+        trainLengthsOf(routes, routeInputs));
   }
 
   /**
@@ -744,6 +779,60 @@ public final class FtaTimetableCommand {
    */
   private static boolean spawnDisabled(Route route) {
     return !LineSpawnMetadata.readBoolean(route.metadata(), "spawn_enabled").orElse(true);
+  }
+
+  /**
+   * 各 route 的保守车长，编表按它估前车何时把身后的线路放出来（与运行时尾部保护量车身同一口径，见 {@link SpawnPatternLength}）。
+   *
+   * <p>route 自己读得到出车编组（metadata 写明的，其次首站 CRET 指向的车库牌子，与出库同一来源）就用自己的； 读不到的（运营、回库 route 上的车是别的 route
+   * 出的）取同一交路组里最长的，组里也没有就取这批 route 里最长的。都读不到时不放进结果，由编表报告车长未知。
+   */
+  private Map<UUID, Long> trainLengthsOf(
+      List<Route> routes, List<TimetableBuilder.RouteInput> inputs) {
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    Map<String, java.util.OptionalLong> byPattern = new java.util.HashMap<>();
+    Map<UUID, Long> own = new java.util.HashMap<>();
+    Map<String, Long> byGroup = new java.util.HashMap<>();
+    long longest = 0L;
+    for (TimetableBuilder.RouteInput input : inputs) {
+      Optional<Route> route =
+          routes.stream().filter(candidate -> candidate.id().equals(input.routeId())).findFirst();
+      Optional<String> pattern =
+          route
+              .flatMap(DepotSpawnPattern::fromRoute)
+              .or(
+                  () ->
+                      registry == null
+                          ? Optional.empty()
+                          : SpawnDirectiveParser.findDirectiveTarget(input.stops(), "CRET")
+                              .map(NodeId::of)
+                              .flatMap(depot -> DepotSpawnPattern.read(registry, depot)));
+      java.util.OptionalLong length =
+          pattern
+              .map(text -> byPattern.computeIfAbsent(text, SpawnPatternLength::of))
+              .orElse(java.util.OptionalLong.empty());
+      if (length.isEmpty()) {
+        continue;
+      }
+      long blocks = length.getAsLong();
+      own.put(input.routeId(), blocks);
+      input.spawnGroup().ifPresent(group -> byGroup.merge(group, blocks, Math::max));
+      longest = Math.max(longest, blocks);
+    }
+    Map<UUID, Long> out = new java.util.HashMap<>();
+    for (TimetableBuilder.RouteInput input : inputs) {
+      Long length = own.get(input.routeId());
+      if (length == null) {
+        length = input.spawnGroup().map(byGroup::get).orElse(null);
+      }
+      if (length == null && longest > 0L) {
+        length = longest;
+      }
+      if (length != null) {
+        out.put(input.routeId(), length);
+      }
+    }
+    return Map.copyOf(out);
   }
 
   /**
@@ -2227,6 +2316,29 @@ public final class FtaTimetableCommand {
         run.approach().windowBlocks(),
         run.approach().stationSpeedBps(),
         run.stationStopOverheadSeconds());
+  }
+
+  /**
+   * 编表的跟车规则：与运行时控车读同一组配置，快车被卡与错峰都按它算闭塞时间。减速度按默认车种（与 {@link #runCurveSettings} 同一来源）。 车长不在配置里，由
+   * build 按出车编组补上（{@link #trainLengthsOf}）。
+   *
+   * @param config 当前配置；为空时（插件未加载配置）不按闭塞时间算
+   */
+  static TimetableBuildOptions.Following followingRules(ConfigManager.ConfigView config) {
+    if (config == null) {
+      return TimetableBuildOptions.Following.NONE;
+    }
+    ConfigManager.RuntimeSettings runtime = config.runtimeSettings();
+    double margin =
+        Math.max(
+            runtime.followingMinClearBlocks(),
+            runtime.followingStopMarginBlocks() + runtime.movementAuthorityCautionMarginBlocks());
+    return new TimetableBuildOptions.Following(
+        runCurveSettings(config).motion().decelBps2(),
+        margin,
+        runtime.rearGuardEdges(),
+        runtime.dispatchTickIntervalTicks() / 20.0D,
+        Map.of());
   }
 
   /**

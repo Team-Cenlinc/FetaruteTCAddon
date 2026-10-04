@@ -119,6 +119,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalFootprintHydrationSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalInterlockingBerthPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PositionZoneEvidence;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.RearGuardWindow;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -14213,10 +14214,7 @@ public final class RuntimeDispatchService {
   }
 
   private static boolean shouldTrackIntermediateGraphNode(SignNodeDefinition definition) {
-    if (definition == null || definition.nodeType() == null) {
-      return false;
-    }
-    return definition.nodeType() == NodeType.WAYPOINT || definition.nodeType() == NodeType.SWITCHER;
+    return definition != null && RearGuardWindow.tracksIntermediateNode(definition.nodeType());
   }
 
   /**

@@ -76,6 +76,35 @@ public final class DepotSpawnPattern {
         : SignRead.missing();
   }
 
+  /**
+   * 读车库牌子第 4 行的编组；牌子所在区块未加载时同步加载它。
+   *
+   * <p>只给低频的管理命令用（编表算车长）：车库附近通常没有车、区块多半未加载，按 {@link #readLoaded} 读不到就只能当车长未知。
+   *
+   * @param registry 牌子注册表
+   * @param depotId 车库节点
+   * @return 编组；车库未注册、世界未加载或位置上不是牌子时为空
+   */
+  public static Optional<String> read(SignNodeRegistry registry, NodeId depotId) {
+    Objects.requireNonNull(registry, "registry");
+    Objects.requireNonNull(depotId, "depotId");
+    Optional<SignNodeRegistry.SignNodeInfo> found =
+        registry
+            .findByNodeId(depotId, null)
+            .filter(info -> info.definition().nodeType() == NodeType.DEPOT);
+    if (found.isEmpty()) {
+      return Optional.empty();
+    }
+    SignNodeRegistry.SignNodeInfo info = found.get();
+    World world = Bukkit.getWorld(info.worldId());
+    if (world == null) {
+      return Optional.empty();
+    }
+    return world.getBlockAt(info.x(), info.y(), info.z()).getState() instanceof Sign sign
+        ? fromSign(sign)
+        : Optional.empty();
+  }
+
   private static Optional<String> fromSide(SignSide side) {
     SignActionHeader header = SignActionHeader.parse(PLAIN_TEXT.serialize(side.line(0)).trim());
     if (header == null || (!header.isTrain() && !header.isCart())) {

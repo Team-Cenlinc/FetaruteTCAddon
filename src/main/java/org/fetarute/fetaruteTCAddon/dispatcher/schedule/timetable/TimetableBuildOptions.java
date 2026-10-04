@@ -3,9 +3,12 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import java.time.Duration;
 import java.time.ZoneId;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Objects;
+import java.util.OptionalLong;
 import java.util.TreeMap;
+import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 
 /**
@@ -27,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  * @param repair 让车修复参数（单处上限、累计上限）
  * @param rapidStagger 快车错峰搜索：排完之后用完整编表逐个试原地折返端的折返、快车组的平移量与停站，按成品表实测的快车被卡秒数挑位置（慢，见 {@link
  *     RapidStagger}）
+ * @param following 运行时同向跟车的规则：给了就按闭塞时间量快车被卡（错峰也按它比），否则按占用区间
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -40,7 +44,74 @@ public record TimetableBuildOptions(
     boolean strictConflicts,
     Map<String, Integer> groupIntervals,
     Repair repair,
-    boolean rapidStagger) {
+    boolean rapidStagger,
+    Following following) {
+
+  /**
+   * 运行时同向跟车的规则，编表按它算闭塞时间（{@link BlockingTimes}）：后车多早要用到一段线路、前车多晚才放出来。
+   *
+   * <p>每一项都取自运行时同一份配置与出车编组，编表与控车用的是同一把尺子，不是编表自己留的裕量。{@link #NONE} 表示不按闭塞时间算， 快车被卡按占用区间量。
+   *
+   * @param decelBps2 常用制动减速度（格/秒²），按默认车种
+   * @param marginBlocks 授权余量：制动距离之外还要空出的格数，即运行时的 {@code max(following-min-clear-blocks,
+   *     following-stop-margin-blocks + movement-authority-caution-margin-blocks)}
+   * @param rearGuardEdges 车尾之后多保留的边数（{@code rear-guard-edges}）
+   * @param tickSeconds 调度 tick 的秒数（{@code dispatch-tick-interval-ticks} / 20）
+   * @param trainLengthBlocks 各交路的保守车长（格），按出车编组算，与运行时尾部保护量车身的口径一致；没有的交路车长未知
+   */
+  public record Following(
+      double decelBps2,
+      double marginBlocks,
+      int rearGuardEdges,
+      double tickSeconds,
+      Map<UUID, Long> trainLengthBlocks) {
+
+    /** 不按闭塞时间算。 */
+    public static final Following NONE = new Following(0.0D, 0.0D, 0, 0.0D, Map.of());
+
+    public Following {
+      boolean valid =
+          Double.isFinite(decelBps2)
+              && decelBps2 > 0.0D
+              && Double.isFinite(marginBlocks)
+              && marginBlocks >= 0.0D
+              && rearGuardEdges >= 0
+              && Double.isFinite(tickSeconds)
+              && tickSeconds >= 0.0D;
+      if (!valid) {
+        decelBps2 = 0.0D;
+        marginBlocks = 0.0D;
+        rearGuardEdges = 0;
+        tickSeconds = 0.0D;
+      }
+      Map<UUID, Long> lengths = new HashMap<>();
+      if (valid && trainLengthBlocks != null) {
+        trainLengthBlocks.forEach(
+            (route, length) -> {
+              if (route != null && length != null && length > 0L) {
+                lengths.put(route, length);
+              }
+            });
+      }
+      trainLengthBlocks = Map.copyOf(lengths);
+    }
+
+    /** 是否按闭塞时间算。 */
+    public boolean enabled() {
+      return decelBps2 > 0.0D;
+    }
+
+    /** 这条交路的保守车长；出车编组读不到时为空，前车何时放出线路就算不出来。 */
+    public OptionalLong trainLength(UUID routeId) {
+      Long length = routeId == null ? null : trainLengthBlocks.get(routeId);
+      return length == null ? OptionalLong.empty() : OptionalLong.of(length);
+    }
+
+    /** 换一组车长，其它规则不变。 */
+    public Following withTrainLengths(Map<UUID, Long> lengths) {
+      return new Following(decelBps2, marginBlocks, rearGuardEdges, tickSeconds, lengths);
+    }
+  }
 
   /**
    * 让车修复参数。
@@ -165,6 +236,37 @@ public record TimetableBuildOptions(
     }
     groupIntervals = Collections.unmodifiableMap(intervals);
     repair = repair == null ? Repair.defaults() : repair;
+    following = following == null ? Following.NONE : following;
+  }
+
+  /** 不按闭塞时间算的构造：快车被卡按占用区间量。 */
+  public TimetableBuildOptions(
+      int serviceStartSecondOfDay,
+      int serviceEndSecondOfDay,
+      Duration headway,
+      Duration defaultDwell,
+      VehicleDutyPlanner.Limits dutyLimits,
+      String tripCodePrefix,
+      ZoneId zoneId,
+      Duration separation,
+      boolean strictConflicts,
+      Map<String, Integer> groupIntervals,
+      Repair repair,
+      boolean rapidStagger) {
+    this(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        rapidStagger,
+        Following.NONE);
   }
 
   /** 不做快车错峰搜索的构造。 */
@@ -303,7 +405,8 @@ public record TimetableBuildOptions(
         strictConflicts,
         intervals,
         repair,
-        rapidStagger);
+        rapidStagger,
+        following);
   }
 
   /** 换让车参数，其余不变。 */
@@ -320,7 +423,8 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         nextRepair,
-        rapidStagger);
+        rapidStagger,
+        following);
   }
 
   /** 开关快车错峰搜索，其余不变。 */
@@ -337,7 +441,8 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        enabled);
+        enabled,
+        following);
   }
 
   /** 计划窗口长度（秒）：首班发车到运营结束。 */
@@ -370,7 +475,8 @@ public record TimetableBuildOptions(
         strictConflicts,
         groupIntervals,
         repair,
-        rapidStagger);
+        rapidStagger,
+        following);
   }
 
   /**

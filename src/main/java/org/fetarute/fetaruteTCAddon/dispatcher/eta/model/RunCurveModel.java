@@ -60,6 +60,29 @@ public final class RunCurveModel implements RunTimeModel {
             settings.motion()));
   }
 
+  @Override
+  public Optional<Trajectory> trajectory(RailGraph graph, Run run) {
+    Objects.requireNonNull(run, "run");
+    Optional<CurveInputs> inputs = curveInputs(graph, run, false);
+    if (inputs.isEmpty()) {
+      return Optional.empty();
+    }
+    CurveInputs in = inputs.get();
+    SpeedCeiling ceiling =
+        SpeedCeiling.cached(
+            in.lengths(), in.speeds(), in.caps(), in.exitSpeed(), settings.motion());
+    RunCurve.Motion motion = RunCurve.profile(ceiling, run.entrySpeedBps(), settings.motion());
+    int samples = motion.speed().length;
+    if (samples < 2) {
+      return Optional.empty();
+    }
+    double[] distance = new double[samples];
+    for (int i = 0; i < samples; i++) {
+      distance[i] = i * SpeedCeiling.STEP_BLOCKS;
+    }
+    return Optional.of(new Trajectory(distance, motion.seconds(), motion.speed()));
+  }
+
   /**
    * 这段走行的速度天花板，输入与 {@link #nodeTimes} 完全相同（沿途各边限速、进站限速区、终点速度）。
    *
