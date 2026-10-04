@@ -175,6 +175,18 @@ public final class DriverTaskManager {
     return keys;
   }
 
+  /** 已被领走（未结束）的车次与领取人，任务板据此标明谁领了哪一班。 */
+  public Map<TaskKey, TaskBoardEntries.Claimant> claimants() {
+    Map<TaskKey, TaskBoardEntries.Claimant> claimants = new HashMap<>();
+    for (TaskKey key : takenKeys()) {
+      DriverTask task = byPlayer.get(byKey.get(key));
+      if (task != null) {
+        claimants.put(key, new TaskBoardEntries.Claimant(task.playerId(), task.playerName()));
+      }
+    }
+    return claimants;
+  }
+
   /** 领了这一班、还没结束的任务；没人领时为空。 */
   public Optional<DriverTask> taskForTrip(
       UUID timetableId, String tripCode, java.time.LocalDate serviceDate) {

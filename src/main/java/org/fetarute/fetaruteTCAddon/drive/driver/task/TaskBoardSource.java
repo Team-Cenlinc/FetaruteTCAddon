@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsNearby;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
@@ -63,6 +64,78 @@ public final class TaskBoardSource {
             .map(StationDirectory.StationEntry::name)
             .orElse(key.stationCode());
     return Optional.of(new Station(key.operatorCode(), key.stationCode(), name));
+  }
+
+  /** 车站目录里的全部车站；目录未就绪时为空。 */
+  public static List<Station> stations(FetaruteTCAddon plugin) {
+    return plugin
+        .getStationDirectory()
+        .map(
+            directory ->
+                directory.snapshot().stations().stream()
+                    .map(entry -> new Station(entry.operator().code(), entry.code(), entry.name()))
+                    .toList())
+        .orElse(List.of());
+  }
+
+  /**
+   * 给任务板上的车次补上行程概要：终点站、停站数与按表的运行时长。查不到停靠表的保持原样。
+   *
+   * @param entries 已筛选好的任务板条目（只为要显示的这些查停靠表）
+   */
+  public static List<TaskBoardEntries.Entry> withTrips(
+      FetaruteTCAddon plugin, List<TaskBoardEntries.Entry> entries) {
+    Optional<TimetableService> timetables = plugin.getTimetableService();
+    if (timetables.isEmpty()) {
+      return entries;
+    }
+    List<TaskBoardEntries.Entry> result = new ArrayList<>(entries.size());
+    for (TaskBoardEntries.Entry entry : entries) {
+      TaskKey key = entry.row().key();
+      Optional<TaskBoardEntries.Trip> trip =
+          timetables
+              .get()
+              .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+              .flatMap(plan -> TaskTripSummary.of(stopsOf(plan), entry.row().stopSequence()))
+              .map(
+                  summary ->
+                      new TaskBoardEntries.Trip(
+                          stationName(plugin, summary.terminusCode(), summary.terminusNodeId()),
+                          summary.stopCount(),
+                          summary.runSeconds()));
+      result.add(trip.map(entry::withTrip).orElse(entry));
+    }
+    return result;
+  }
+
+  private static List<TaskTripSummary.Stop> stopsOf(TimetableService.TripPlan plan) {
+    List<TaskTripSummary.Stop> stops = new ArrayList<>(plan.stops().size());
+    for (TimetableService.PlannedStop stop : plan.stops()) {
+      stops.add(
+          new TaskTripSummary.Stop(
+              stop.stopSequence(),
+              stop.stationCode(),
+              stop.nodeId(),
+              stop.stops(),
+              stop.arrival(),
+              stop.departure()));
+    }
+    return stops;
+  }
+
+  /** 站码对应的站名：运营商按节点确定；查不到时用站码。 */
+  private static String stationName(
+      FetaruteTCAddon plugin, String stationCode, Optional<String> nodeId) {
+    String operator =
+        nodeId
+            .flatMap(RouteTerminals::stationIdentityOfNode)
+            .map(RouteTerminals.StationRef::operatorCode)
+            .orElse("");
+    return plugin
+        .getStationDirectory()
+        .flatMap(directory -> directory.snapshot().findStation(operator, stationCode))
+        .map(StationDirectory.StationEntry::name)
+        .orElse(stationCode);
   }
 
   /**

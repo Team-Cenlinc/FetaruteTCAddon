@@ -1,6 +1,8 @@
 # 内置文案改写前的旧值（见 zh_CN.yml 的说明）。服务器上的 lang/en_US.yml 里某个键仍是这里列出的旧值之一时，加载时换成新的内置文案。
 drive:
   task:
+    board:
+      no-station: ["<prefix> <red>No station nearby; open the task board near a platform</red>"]
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
   hud:
@@ -20,6 +22,7 @@ drive:
   command:
     help:
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]
+      entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
       managed-train: ["<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"]

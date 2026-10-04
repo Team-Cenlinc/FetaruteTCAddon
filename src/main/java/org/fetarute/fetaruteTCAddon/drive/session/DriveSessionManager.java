@@ -56,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssign
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
 import org.fetarute.fetaruteTCAddon.drive.cab.BrakeTest;
@@ -113,6 +114,7 @@ import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetupStore;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
+import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
@@ -148,15 +150,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     NOT_HEAD_CAB,
     /** 调度列车：线路拥堵熔断，暂停接班。 */
     BREAKER_OPEN,
+    /** 非调度列车：没有驾驶非调度列车的权限。 */
+    NO_PERMISSION,
     /** 被外部插件拦下（{@code DriveSessionStartEvent} 取消）。 */
     CANCELLED
   }
 
   /** 领取驾驶任务、驾驶调度列车。 */
-  public static final String PERMISSION_DRIVER = "fetarute.drive.driver";
+  public static final String PERMISSION_DRIVER = DrivePermissions.DRIVER;
 
   /** 不领任务也能直接接管调度列车（调试、运营人员）。 */
-  public static final String PERMISSION_DRIVER_ADMIN = "fetarute.drive.driver.admin";
+  public static final String PERMISSION_DRIVER_ADMIN = DrivePermissions.DRIVER_ADMIN;
 
   /** 每隔多少 tick 推进一次已领取的任务。 */
   private static final int TASK_TICKS = 10;
@@ -236,6 +240,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
   private final DriverTaskManager tasks;
+  private final DriveTutorials tutorials;
 
   private volatile DriveConfig config;
   private volatile boolean trace;
@@ -260,12 +265,28 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     driverRegistry.setAwaitingDriver(pickups::awaiting);
     this.tasks = new DriverTaskManager(plugin, this::traceTask);
     tasks.setListener(new TaskEvents());
+    this.tutorials = new DriveTutorials(plugin, plugin::getLocaleManager);
     applyDriverConfig(config);
   }
 
   /** 驾驶任务。 */
   public DriverTaskManager tasks() {
     return tasks;
+  }
+
+  /** 新手教程与情境提示。 */
+  public DriveTutorials tutorials() {
+    return tutorials;
+  }
+
+  /** 开始新手教程：驾驶中立即开始，否则下一次开始驾驶时开始。返回给玩家的提示语言键，已直接给出第一步时为 {@code null}。 */
+  public String startTutorial(Player player) {
+    return tutorials.start(player, active.get(player.getUniqueId()), Bukkit.getCurrentTick());
+  }
+
+  /** 跳过新手教程的当前一步。返回给玩家的提示语言键，已推进时为 {@code null}。 */
+  public String skipTutorialStep(Player player) {
+    return tutorials.skip(player, active.get(player.getUniqueId()), Bukkit.getCurrentTick());
   }
 
   private void applyDriverConfig(DriveConfig current) {
@@ -556,6 +577,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (refusal != null) {
         return refusal;
       }
+    } else if (!player.hasPermission(DrivePermissions.startPermission(false))) {
+      return StartOutcome.NO_PERMISSION;
     }
     double rollingBps = measureSpeedBps(group);
     boolean rolling = rollingBps > current.startMaxSpeedBps();
@@ -698,6 +721,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             + session.binding());
     player.getInventory().setHeldItemSlot(Notch.N.slot());
     refreshInventory(player, session);
+    tutorials.onSessionStarted(player);
     return StartOutcome.STARTED;
   }
 
@@ -1002,6 +1026,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             + ")");
     if (result == DriveDoors.Result.UNAVAILABLE) {
       denyMenu(player, "drive.menu.deny.no-door-animation");
+      tutorials.onDoorUnavailable(player);
     }
   }
 
@@ -1334,6 +1359,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       } else {
         sidebar.forget(session.playerId());
       }
+      tutorials.onSessionEnded(session.playerId(), player, reason);
     }
     // ATO 下列车由自动运行操纵，没有控车动作替驾驶员制动停车：直接交还。
     if (session.isStopped() || session.isAto() || !session.beginStopping(reason)) {
@@ -1379,6 +1405,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       } else {
         sidebar.forget(session.playerId());
       }
+      tutorials.onSessionEnded(session.playerId(), player, reason);
     }
     stopping.remove(session);
     DriverLink link = session.driverLink();
@@ -1730,6 +1757,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     if (tickCounter % HOTBAR_REFRESH_TICKS == 0) {
       refreshInventory(player, session);
+    }
+    if (tickCounter % DriveTutorials.TICK_INTERVAL == 0) {
+      tutorials.tick(player, session, now);
     }
     if (tickCounter % current.hudIntervalTicks() == 0) {
       boolean sidebarShown = false;
@@ -2986,6 +3016,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       Player player, TaskBoardHolder holder, TaskBoardEntries.Row row, DrivingMode mode) {
     if (!player.hasPermission(PERMISSION_DRIVER)) {
       return "drive.task.claim.no-permission";
+    }
+    if (!DrivePermissions.allowsMode(mode, player::hasPermission)) {
+      return "drive.task.claim.no-mode-permission";
     }
     DriveConfig current = config;
     DriverTaskManager.ClaimOutcome outcome =

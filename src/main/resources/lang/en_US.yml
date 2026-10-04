@@ -362,7 +362,20 @@ drive:
       entry-left: "<yellow>Left-click</yellow> <gray>manual</gray>"
       entry-right: "<yellow>Right-click</yellow> <gray>ATO</gray>"
       driving: "<prefix> <red>You cannot take a task while driving</red>"
-      no-station: "<prefix> <red>No station nearby; open the task board near a platform</red>"
+      no-station: "<prefix> <red>No station nearby; open the task board near a platform, or run /fta drive tasks <station-code></red>"
+      station-not-found: "<prefix> <red>Station <white><station></white> not found</red>"
+      station-ambiguous: "<prefix> <red>Station code <white><station></white> exists under several operators; name the operator: <white><candidates></white></red>"
+      info-claimed: "<gray>Grey trips are already taken by a driver</gray>"
+      entry-name-claimed: "<gray><route> <trip></gray>"
+      entry-destination: "<gray>To</gray> <white><destination></white>"
+      entry-stops: "<gray>Stops</gray> <white><stops></white> <gray>(incl. terminus)</gray>"
+      entry-run-time: "<gray>Running time</gray> <white><run_time></white>"
+      entry-claimed: "<gray>Taken by</gray> <white><player></white>"
+      entry-claimed-self: "<gray>Taken by you</gray>"
+      run-time:
+        seconds: "<seconds> s"
+        minutes: "<minutes> min"
+        hours: "<hours> h <minutes> min"
     claim:
       claimed: "<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives and confirm your seat</green>"
       disabled: "<prefix> <red>Driving dispatched trains is not enabled</red>"
@@ -374,6 +387,7 @@ drive:
       taken: "<prefix> <red>Another driver already took this trip</red>"
       unavailable: "<prefix> <red>This trip cannot be taken</red>"
       no-permission: "<prefix> <red>You are not allowed to drive dispatched trains</red>"
+      no-mode-permission: "<prefix> <red>You are not allowed to take tasks with ATO; left-click to take it for manual driving</red>"
     expired: "<prefix> <yellow>Trip <aqua><trip></aqua> could not be taken over at <white><station></white>; the task was dropped</yellow>"
     arrived: "<aqua><trip></aqua> <white>is standing at <station>; sit in the leading cab to take over</white>"
     go-to-cab: "<yellow>Sit in the leading cab</yellow>"
@@ -435,6 +449,101 @@ drive:
       expired: "Dropped"
       failed: "Failed"
       interrupted: "Taken back"
+  tutorial:
+    offer: "<prefix> <gold>First time driving?</gold> <gray>The tutorial walks you through starting the train, pulling away, coasting, braking to a stop and the doors during this drive; each step moves on once you have done it.</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive tutorial start</white>'><green>[Start tutorial]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Stop asking; run /fta drive tutorial start any time</gray>'><gray>[Skip]</gray></hover></click>"
+    started: "<prefix> <gold>Tutorial started</gold> <gray>Follow the prompts; the action bar and sidebar keep showing the driving display.</gray>"
+    step: "<prefix> <gold>Tutorial</gold> <gray>(<index>/<total>)</gray> <text> <buttons>"
+    buttons:
+      skip: "<click:run_command:'/fta drive tutorial skip'><hover:show_text:'<gray>Skip this step</gray>'><yellow>[Skip step]</yellow></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Quit the tutorial and stop asking</gray>'><gray>[Quit tutorial]</gray></hover></click>"
+      continue: "<click:run_command:'/fta drive tutorial skip'><hover:show_text:'<gray>Next step (it also continues by itself shortly)</gray>'><green>[Continue]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Quit the tutorial and stop asking</gray>'><gray>[Quit tutorial]</gray></hover></click>"
+      finish: "<click:run_command:'/fta drive tutorial skip'><hover:show_text:'<gray>Finish the tutorial without ending the drive</gray>'><green>[Finish tutorial]</green></hover></click>"
+    steps:
+      start-button:
+        chat: "<white>Start the train:</white> <gray>While stopped, press</gray> <yellow>F</yellow> <gray>to open the cab panel and click the start button at the right end of the second row, then wait for the systems to come on. The train cannot take power until it has started.</gray>"
+        subtitle: "<yellow>Press F, click the start button</yellow>"
+      setup-switches:
+        chat: "<white>Start the train:</white> <gray>Press</gray> <yellow>F</yellow> <gray>to open the cab panel and follow the \"Next\" prompt on the action bar: switch on the key, power pickup, main breaker and auxiliary power in the second row, in order. Each one takes a few seconds.</gray>"
+        subtitle: "<yellow>Press F, switch on each item as prompted</yellow>"
+      compressor:
+        chat: "<white>Switch on the compressor:</white> <gray>Locomotive-hauled trains need the compressor switched on by hand. Click the compressor switch on the cab panel; it then runs whenever the main reservoir is low.</gray>"
+        subtitle: "<yellow>Switch on the compressor</yellow>"
+      brake-test:
+        chat: "<white>Brake test:</white> <gray>Click the brake test on the cab panel, close the panel, pull the handle to B4 (slot 8) or beyond, and once the brake cylinder has pressure, return to N (slot 4) to release. The train cannot take power until the test passes.</gray>"
+        subtitle: "<yellow>Start the brake test, B4 then back to N</yellow>"
+      release-parking:
+        chat: "<white>Release the parking brake:</white> <gray>Click the parking brake on the cab panel to release it. The train cannot take power while it is applied, and releasing it needs enough main reservoir pressure.</gray>"
+        subtitle: "<yellow>Release the parking brake</yellow>"
+      reverser:
+        chat: "<white>Check the reverser:</white> <gray>The reverser sets the direction of travel and must be in forward to drive ahead; in neutral the train cannot take power. While stopped with the doors closed, change it in the first row of the cab panel or with /fta drive reverser forward.</gray>"
+        subtitle: "<yellow>Make sure the reverser is in forward</yellow>"
+      ato-overview:
+        chat: "<white>ATO:</white> <gray>Automatic operation drives the train, stops it and works the doors. When a stop ends and the action bar asks you to confirm departure, right-click. Pulling to EB (slot 9) switches straight to manual driving with an emergency brake.</gray>"
+        subtitle: "<aqua>ATO: right-click to confirm departure</aqua>"
+      traction:
+        chat: "<white>Pull away:</white> <gray>Hotbar slots 1–3 are P3, P2 and P1; the higher the number, the more power. Pull to P1–P3 to start moving; the action bar shows your speed and the limit.</gray>"
+        subtitle: "<yellow>Pull to P1–P3 (slots 1–3)</yellow>"
+      traction-dispatch:
+        chat: "<white>Pull away:</white> <gray>Dispatched trains run by signal. Once the action bar shows the departure signal, pull to P1–P3 (slots 1–3) and keep within the speed limit shown on the action bar.</gray>"
+        subtitle: "<yellow>On the departure signal, pull to P1–P3</yellow>"
+      coast:
+        chat: "<white>Coast:</white> <gray>Return to N (slot 4) to cut the power and let the train roll. Coasting is how you usually hold your speed.</gray>"
+        subtitle: "<yellow>Return to N (slot 4) to coast</yellow>"
+      service-brake:
+        chat: "<white>Service brake:</white> <gray>Hotbar slots 5–8 are B1–B4; the higher the number, the stronger the brake. Use the service brake to slow down and bring the train to a stop.</gray>"
+        subtitle: "<yellow>Use B1–B4 (slots 5–8) to stop</yellow>"
+      service-brake-dispatch:
+        chat: "<white>Service brake:</white> <gray>Hotbar slots 5–8 are B1–B4; the higher the number, the stronger the brake. For a stop signal or a station, brake early with the service brake and come to a stop.</gray>"
+        subtitle: "<yellow>Use B1–B4 (slots 5–8) to stop</yellow>"
+      emergency-brake:
+        chat: "<white>Emergency brake:</white> <gray>Hotbar slot 9 is EB, the strongest brake; once applied it cannot be released until the train has stopped. Use EB only in an emergency and take care not to select it by accident.</gray>"
+        subtitle: "<red>EB (slot 9) is for emergencies only</red>"
+      open-doors:
+        chat: "<white>Open the doors:</white> <gray>While stopped, press</gray> <yellow>F</yellow> <gray>to open the cab panel and click the left or right door in the first row. Left and right are as seen from the driver's seat.</gray>"
+        subtitle: "<yellow>Press F, open a door</yellow>"
+      close-doors:
+        chat: "<white>Close the doors:</white> <gray>Click the door button again. The train cannot take power until the doors are shut, which is when the closing animation ends.</gray>"
+        subtitle: "<yellow>Close the doors</yellow>"
+      finish:
+        chat: "<white>End the drive:</white> <gray>Press</gray> <yellow>Shift</yellow> <gray>to leave the seat, or run /fta drive off. If the train is moving it brakes to a stop by itself. Ending the drive completes the tutorial.</gray>"
+        subtitle: "<yellow>Press Shift to leave the seat</yellow>"
+      finish-dispatch:
+        chat: "<white>Finish the trip:</white> <gray>Follow the signals to the terminus; once stopped, the train returns to automatic operation and finishing the task completes the tutorial. Leaving the seat or running /fta drive off on the way counts as abandoning the task.</gray>"
+        subtitle: "<yellow>Follow the signals to the terminus</yellow>"
+    tip: "<prefix> <aqua>Driving tip</aqua> <text>"
+    tips:
+      signal-confirm:
+        chat: "<white>Signal restricted:</white> <gray>When a signal ahead drops to caution or stop, the action bar asks you to right-click to confirm. Confirm and keep to the new limit; after about 4 seconds without confirming the service brake is applied, and then the emergency brake.</gray>"
+        subtitle: "<gold>Signal restricted: right-click</gold>"
+      stop-mark:
+        chat: "<white>Stopping at the mark:</white> <gray>The action bar and sidebar show the distance to the stopping point, and a glowing stop mark on the platform shows where to stop. Use the service brake to stop close to it; if you stop short, move up, and if you overrun too far, the station is skipped.</gray>"
+        subtitle: "<aqua>Stop at the stop mark</aqua>"
+      open-doors:
+        chat: "<white>Open the doors:</white> <gray>The train is berthed. Press</gray> <yellow>F</yellow> <gray>and open the platform-side doors shown on the action bar; the dwell timer starts once they are open.</gray>"
+        subtitle: "<yellow>Press F, open the platform-side doors</yellow>"
+      close-doors:
+        chat: "<white>Close the doors:</white> <gray>The dwell time is up. Press</gray> <yellow>F</yellow> <gray>and close the doors; the departure signal comes only after they are shut.</gray>"
+        subtitle: "<yellow>Press F, close the doors</yellow>"
+      departure:
+        chat: "<white>Departure signal:</white> <gray>When the action bar shows the departure signal you may start. Pull to P1–P3 and watch the signals and limits ahead.</gray>"
+        subtitle: "<green>Departure signal: you may start</green>"
+      ato-confirm:
+        chat: "<white>ATO departure:</white> <gray>When the action bar shows \"ATO: right-click to confirm departure\", right-click. If you do not, the train still leaves, but it counts against your score.</gray>"
+        subtitle: "<yellow>Right-click to confirm departure</yellow>"
+      vigilance:
+        chat: "<white>Vigilance device:</white> <gray>While moving you must show you are alert. When it alarms, change notch or right-click; if you do not respond in time, the emergency brake is applied.</gray>"
+        subtitle: "<red>Vigilance alarm: change notch or right-click</red>"
+    doors-unavailable: "<prefix> <gray>This train has no door animation; the door practice was skipped.</gray>"
+    finished: "<prefix> <green>Tutorial complete.</green> <gray>When driving dispatched trains you will also get one short tip the first time you meet a signal confirmation, a stop mark, the doors and a departure signal. Run /fta drive tutorial reset to start over.</gray>"
+    finished-subtitle: "<green>Tutorial complete</green>"
+    interrupted: "<prefix> <yellow>The drive ended, so the tutorial stopped.</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>Start the tutorial again on your next drive</gray>'><green>[Start over]</green></hover></click>"
+    command:
+      already-running: "<prefix> <yellow>The tutorial is already running</yellow>"
+      armed: "<prefix> <green>Tutorial ready: sit in a train seat and run</green> <click:run_command:'/fta drive on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive on</white>'><yellow>/fta drive on</yellow></hover></click> <green>to start driving; the tutorial starts with it.</green>"
+      stopped: "<prefix> <yellow>Tutorial quit; you will not be asked again. Run /fta drive tutorial start any time to start over.</yellow>"
+      dismissed: "<prefix> <gray>Tutorial prompt turned off; run /fta drive tutorial start any time.</gray>"
+      reset: "<prefix> <green>Tutorial and driving tips reset; you will be asked again next time you drive.</green>"
+      not-running: "<prefix> <red>No tutorial is running</red>"
+      invalid: "<prefix> <red>Action must be start, stop, reset or skip</red>"
   end:
     left-seat: "<prefix> <yellow>You left the seat, driving ended</yellow>"
     seat-lost: "<prefix> <red>Could not return to the seat, driving ended</red>"
@@ -459,7 +568,8 @@ drive:
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
       entry-handback: "  <gray>•</gray> <white>/fta drive handback <player|all></white> <gray>- Hand driver-controlled dispatched trains back to automatic operation</gray>"
       entry-rescue: "  <gray>•</gray> <white>/fta drive rescue <train> [destroy]</white> <gray>- End driving on a train and move everyone aboard to a platform, optionally destroying the train</gray>"
-      entry-tasks: "  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"
+      entry-tasks: "  <gray>•</gray> <white>/fta drive tasks [station code]</white> <gray>- Open the task board of the nearest (or given) station</gray>"
+      entry-tutorial: "  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- Start, quit or reset the tutorial, or skip the current step</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- Show or abandon your task, go to the train to pick up, or pick it up at the depot</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- Switch between manual and ATO while stopped</gray>"
       entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- Show or reset the congestion breaker</gray>"
@@ -484,6 +594,7 @@ drive:
       inventory-busy: "<prefix> <red>Close any open screen and empty the crafting grid before driving</red>"
       unavailable: "<prefix> <red>Manual driving is unavailable, check the console log</red>"
       failed: "<prefix> <red>Could not start driving, check the console log</red>"
+      no-permission: "<prefix> <red>You are not allowed to drive trains outside dispatch; take a driving task to drive a dispatched train</red>"
     stop:
       stopped: "<prefix> <yellow>Driving ended</yellow>"
       not-driving: "<prefix> <red>You are not driving</red>"
@@ -517,6 +628,7 @@ drive:
       not-dispatch: "<prefix> <red>ATO is only available when driving a dispatched train</red>"
       need-stop: "<prefix> <red>Stop the train before switching the driving mode</red>"
       invalid: "<prefix> <red>Mode must be manual or ato</red>"
+      no-permission: "<prefix> <red>You are not allowed to drive with ATO</red>"
       manual: "<prefix> <yellow>Switched to manual driving</yellow>"
       ato: "<prefix> <aqua>Switched to ATO; right-click to confirm each departure</aqua>"
     breaker:

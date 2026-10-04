@@ -1760,15 +1760,28 @@ drive:
       info-left: "<gray>左键：领取，人工驾驶</gray>"
       info-right: "<gray>右键：领取，ATO 辅助驾驶</gray>"
       entry-name: "<white><route></white> <aqua><trip></aqua>"
-      entry-time: "<gray>计划发车</gray> <white><time></white>"
-      entry-platform: "<gray>站台</gray> <white><platform></white>"
-      entry-train: "<gray>列车</gray> <white><train></white>"
+      entry-time: "<gray>计划发车：</gray><white><time></white>"
+      entry-platform: "<gray>站台：</gray><white><platform></white>"
+      entry-train: "<gray>列车：</gray><white><train></white>"
       entry-unbound: "<gray>列车尚未到达</gray>"
       entry-dwelling: "<green>正在本站停站</green>"
       entry-left: "<yellow>左键</yellow> <gray>人工驾驶</gray>"
       entry-right: "<yellow>右键</yellow> <gray>ATO</gray>"
       driving: "<prefix> <red>驾驶中不能领取任务</red>"
-      no-station: "<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"
+      no-station: "<prefix> <red>附近没有车站。请到车站站台附近再打开任务板，或输入 /fta drive tasks <车站代码></red>"
+      station-not-found: "<prefix> <red>找不到车站 <white><station></white></red>"
+      station-ambiguous: "<prefix> <red>车站代码 <white><station></white> 在多家运营商下重名，请写明运营商：<white><candidates></white></red>"
+      info-claimed: "<gray>灰色车次已有驾驶员领取，不可再领取</gray>"
+      entry-name-claimed: "<gray><route> <trip></gray>"
+      entry-destination: "<gray>终点站：</gray><white><destination></white>"
+      entry-stops: "<gray>停站：</gray><white><stops></white> <gray>站（含终点站）</gray>"
+      entry-run-time: "<gray>预计运行：</gray><white><run_time></white>"
+      entry-claimed: "<gray>已被</gray> <white><player></white> <gray>领取</gray>"
+      entry-claimed-self: "<gray>本人已领取</gray>"
+      run-time:
+        seconds: "<seconds> 秒"
+        minutes: "<minutes> 分钟"
+        hours: "<hours> 小时 <minutes> 分钟"
     claim:
       claimed: "<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室，确认座位后接班</green>"
       disabled: "<prefix> <red>驾驶调度列车当前未开放</red>"
@@ -1780,6 +1793,7 @@ drive:
       taken: "<prefix> <red>该车次已被其他驾驶员领取</red>"
       unavailable: "<prefix> <red>该车次不能领取</red>"
       no-permission: "<prefix> <red>你没有驾驶调度列车的权限</red>"
+      no-mode-permission: "<prefix> <red>当前没有以 ATO 方式领取任务的权限，请左键以人工驾驶领取</red>"
     expired: "<prefix> <yellow>车次 <aqua><trip></aqua> 未能在 <white><station></white> 接班，任务已作废</yellow>"
     arrived: "<aqua><trip></aqua> <white>已在 <station> 停站，请坐进车头驾驶室接班</white>"
     go-to-cab: "<yellow>请坐到列车前进方向的车头驾驶室</yellow>"
@@ -1841,6 +1855,101 @@ drive:
       expired: "已作废"
       failed: "未完成"
       interrupted: "已收回"
+  tutorial:
+    offer: "<prefix> <gold>初次驾驶</gold> <gray>新手教程将在本次驾驶中逐步引导启动列车、起步、惰行、制动停车与开关车门，每完成一步自动进入下一步。</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive tutorial start</white>'><green>[开始新手教程]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>此后不再自动提示；可随时输入 /fta drive tutorial start 开始</gray>'><gray>[跳过]</gray></hover></click>"
+    started: "<prefix> <gold>新手教程已开始</gold> <gray>请按提示操作，动作栏与侧边栏照常显示驾驶信息。</gray>"
+    step: "<prefix> <gold>新手教程</gold> <gray>(<index>/<total>)</gray> <text> <buttons>"
+    buttons:
+      skip: "<click:run_command:'/fta drive tutorial skip'><hover:show_text:'<gray>跳过这一步</gray>'><yellow>[跳过此步]</yellow></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>退出教程，此后不再自动提示</gray>'><gray>[退出教程]</gray></hover></click>"
+      continue: "<click:run_command:'/fta drive tutorial skip'><hover:show_text:'<gray>进入下一步（稍后也将自动继续）</gray>'><green>[继续]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>退出教程，此后不再自动提示</gray>'><gray>[退出教程]</gray></hover></click>"
+      finish: "<click:run_command:'/fta drive tutorial skip'><hover:show_text:'<gray>不结束驾驶，直接完成教程</gray>'><green>[完成教程]</green></hover></click>"
+    steps:
+      start-button:
+        chat: "<white>启动列车：</white><gray>停稳后按</gray> <yellow>F</yellow> <gray>打开驾驶台，点击第二排最右侧的启动按钮，等待各系统依次接通。列车启动前不能牵引。</gray>"
+        subtitle: "<yellow>按 F 打开驾驶台，点击启动按钮</yellow>"
+      setup-switches:
+        chat: "<white>启动列车：</white><gray>按</gray> <yellow>F</yellow> <gray>打开驾驶台，按动作栏「下一步」的提示，在第二排依次接通钥匙、受电、主断路器与辅助电源；每一项接通需要数秒。</gray>"
+        subtitle: "<yellow>按 F 打开驾驶台，按「下一步」逐项接通</yellow>"
+      compressor:
+        chat: "<white>打开压缩机：</white><gray>机车牵引的压缩机须手动打开。请在驾驶台点击压缩机开关，此后主风缸压力不足时压缩机自动运转。</gray>"
+        subtitle: "<yellow>在驾驶台打开压缩机</yellow>"
+      brake-test:
+        chat: "<white>制动试验：</white><gray>在驾驶台点击制动试验，关闭驾驶台后把手柄拉到 B4（8 号位）或以上，制动缸升压后再回到 N（4 号位）缓解。试验通过前不能牵引。</gray>"
+        subtitle: "<yellow>点击制动试验，拉到 B4 再回到 N</yellow>"
+      release-parking:
+        chat: "<white>缓解停放制动：</white><gray>请在驾驶台点击停放制动将其缓解。停放制动施加时不能牵引，缓解需要足够的主风缸压力。</gray>"
+        subtitle: "<yellow>在驾驶台缓解停放制动</yellow>"
+      reverser:
+        chat: "<white>确认换向手柄：</white><gray>换向手柄决定行驶方向，须在前进位才能向前牵引，空挡时不能牵引。停稳且车门关闭时，可在驾驶台第一排切换，也可输入 /fta drive reverser forward。</gray>"
+        subtitle: "<yellow>确认换向手柄在「前进」</yellow>"
+      ato-overview:
+        chat: "<white>ATO 运行：</white><gray>列车由自动运行操纵，停车与开关门均自动完成。停站结束、动作栏提示确认发车时，请按右键确认；拉到 EB（9 号位）将立即转为人工驾驶并紧急制动。</gray>"
+        subtitle: "<aqua>ATO：停站结束后右键确认发车</aqua>"
+      traction:
+        chat: "<white>起步：</white><gray>快捷栏 1–3 号位依次为 P3、P2、P1，数字越大牵引力越大。请拉到 P1–P3 起步，动作栏显示车速与限速。</gray>"
+        subtitle: "<yellow>拉到 P1–P3（1–3 号位）起步</yellow>"
+      traction-dispatch:
+        chat: "<white>起步：</white><gray>调度列车须按信号行车。动作栏出现发车信号后，再拉到 P1–P3（1–3 号位）起步，车速不得超过动作栏显示的限速。</gray>"
+        subtitle: "<yellow>出现发车信号后拉到 P1–P3 起步</yellow>"
+      coast:
+        chat: "<white>惰行：</white><gray>回到 N（4 号位）切断牵引，列车凭惯性滑行。行车中保持车速时常用惰行。</gray>"
+        subtitle: "<yellow>回到 N（4 号位）惰行</yellow>"
+      service-brake:
+        chat: "<white>常用制动：</white><gray>快捷栏 5–8 号位为 B1–B4，数字越大制动力越大。请用常用制动减速，把列车停稳。</gray>"
+        subtitle: "<yellow>用 B1–B4（5–8 号位）减速并停稳</yellow>"
+      service-brake-dispatch:
+        chat: "<white>常用制动：</white><gray>快捷栏 5–8 号位为 B1–B4，数字越大制动力越大。遇到停车信号或进站时，请用常用制动提前减速并停稳。</gray>"
+        subtitle: "<yellow>用 B1–B4（5–8 号位）减速并停稳</yellow>"
+      emergency-brake:
+        chat: "<white>紧急制动：</white><gray>快捷栏 9 号位为 EB，制动力最大，施加后须停稳才能缓解。EB 仅限紧急情况使用，行车中不得误触。</gray>"
+        subtitle: "<red>EB（9 号位）仅限紧急情况</red>"
+      open-doors:
+        chat: "<white>开门：</white><gray>停稳后按</gray> <yellow>F</yellow> <gray>打开驾驶台，点击第一排的左车门或右车门开门；左右以驾驶员面朝的方向为准。</gray>"
+        subtitle: "<yellow>按 F 打开驾驶台，打开车门</yellow>"
+      close-doors:
+        chat: "<white>关门：</white><gray>再次点击车门按钮关门。车门未关好时不能牵引，关门动画结束后才算关好。</gray>"
+        subtitle: "<yellow>关闭车门</yellow>"
+      finish:
+        chat: "<white>结束驾驶：</white><gray>按</gray> <yellow>Shift</yellow> <gray>离座，或输入 /fta drive off 结束驾驶；行驶中离座时列车自动制动停车。结束驾驶即完成教程。</gray>"
+        subtitle: "<yellow>按 Shift 离座结束驾驶</yellow>"
+      finish-dispatch:
+        chat: "<white>完成任务：</white><gray>请按信号开到终点站，停稳后列车自动交还自动运行，任务完成即完成教程。中途离座或输入 /fta drive off 将记为放弃任务。</gray>"
+        subtitle: "<yellow>按信号开到终点站</yellow>"
+    tip: "<prefix> <aqua>驾驶提示</aqua> <text>"
+    tips:
+      signal-confirm:
+        chat: "<white>信号变严：</white><gray>前方信号转为减速或停车时，动作栏提示「信号变严：右键确认」。请按右键确认，并按新的限速行车；约 4 秒内未确认将施加常用制动，再不确认将紧急制动。</gray>"
+        subtitle: "<gold>信号变严：右键确认</gold>"
+      stop-mark:
+        chat: "<white>进站对标：</white><gray>动作栏与侧边栏显示到停车点的距离，站台上发光的停车标指示停车位置。请用常用制动把列车停在停车点附近；停短须前移，越过停车点太多将越站。</gray>"
+        subtitle: "<aqua>对准停车标停车</aqua>"
+      open-doors:
+        chat: "<white>开门：</white><gray>列车已停妥。请按</gray> <yellow>F</yellow> <gray>打开驾驶台，开启动作栏提示的站台侧车门；开门后开始停站计时。</gray>"
+        subtitle: "<yellow>按 F 开启站台侧车门</yellow>"
+      close-doors:
+        chat: "<white>关门：</white><gray>停站时间已到。请按</gray> <yellow>F</yellow> <gray>打开驾驶台关闭车门，车门关好后方给出发车信号。</gray>"
+        subtitle: "<yellow>按 F 关闭车门</yellow>"
+      departure:
+        chat: "<white>发车信号：</white><gray>动作栏显示「发车信号」即可起步。请拉到 P1–P3 出站，并留意前方信号与限速。</gray>"
+        subtitle: "<green>发车信号：可以起步</green>"
+      ato-confirm:
+        chat: "<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"
+        subtitle: "<yellow>右键确认发车</yellow>"
+      vigilance:
+        chat: "<white>警惕装置：</white><gray>行车中须定期操作以示驾驶员保持警惕。报警时请换档或按右键确认，超时未确认将施加紧急制动。</gray>"
+        subtitle: "<red>警惕报警：换档或右键确认</red>"
+    doors-unavailable: "<prefix> <gray>本车没有车门动画，已略过开关车门的练习。</gray>"
+    finished: "<prefix> <green>新手教程已完成。</green> <gray>驾驶调度列车时，第一次遇到信号确认、进站对标、开关门与发车信号时另有一次简短提示。输入 /fta drive tutorial reset 可重新开始。</gray>"
+    finished-subtitle: "<green>新手教程已完成</green>"
+    interrupted: "<prefix> <yellow>驾驶已结束，新手教程中断。</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>下次开始驾驶时重新开始教程</gray>'><green>[重新开始]</green></hover></click>"
+    command:
+      already-running: "<prefix> <yellow>新手教程正在进行中</yellow>"
+      armed: "<prefix> <green>已准备新手教程：请坐上列车座位后执行</green> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive on</white>'><yellow>/fta drive on</yellow></hover></click> <green>开始驾驶，教程随之开始。</green>"
+      stopped: "<prefix> <yellow>已退出新手教程，此后不再自动提示；可随时输入 /fta drive tutorial start 重新开始。</yellow>"
+      dismissed: "<prefix> <gray>已关闭新手教程提示；可随时输入 /fta drive tutorial start 开始。</gray>"
+      reset: "<prefix> <green>已重置新手教程与驾驶提示，下次开始驾驶时将重新提示。</green>"
+      not-running: "<prefix> <red>当前没有进行中的新手教程</red>"
+      invalid: "<prefix> <red>操作只能是 start、stop、reset 或 skip</red>"
   end:
     left-seat: "<prefix> <yellow>你已离开座位，驾驶结束</yellow>"
     seat-lost: "<prefix> <red>无法回到座位，驾驶已结束</red>"
@@ -1865,7 +1974,8 @@ drive:
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"
       entry-handback: "  <gray>•</gray> <white>/fta drive handback <玩家|all></white> <gray>- 把驾驶员控制的调度列车交还自动运行</gray>"
       entry-rescue: "  <gray>•</gray> <white>/fta drive rescue <列车> [destroy]</white> <gray>- 结束列车上的驾驶并把车上的玩家送到站台，可随后销毁列车</gray>"
-      entry-tasks: "  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"
+      entry-tasks: "  <gray>•</gray> <white>/fta drive tasks [车站代码]</white> <gray>- 打开最近车站（或指定车站）的任务板，领取车次</gray>"
+      entry-tutorial: "  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- 开始、退出或重置新手教程，跳过当前一步</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- 查看或放弃当前任务、前往要接的列车、改为从车库接车</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- 停稳后切换人工驾驶与 ATO</gray>"
       entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>"
@@ -1890,6 +2000,7 @@ drive:
       inventory-busy: "<prefix> <red>请先关闭已打开的界面并清空合成格，再开始驾驶</red>"
       unavailable: "<prefix> <red>手动驾驶当前不可用，请查看控制台日志</red>"
       failed: "<prefix> <red>开始驾驶失败，请查看控制台日志</red>"
+      no-permission: "<prefix> <red>当前没有驾驶非调度列车的权限，请领取驾驶任务后驾驶调度列车</red>"
     stop:
       stopped: "<prefix> <yellow>已结束驾驶</yellow>"
       not-driving: "<prefix> <red>你当前没有在驾驶</red>"
@@ -1923,6 +2034,7 @@ drive:
       not-dispatch: "<prefix> <red>只有驾驶调度列车时才能切换 ATO</red>"
       need-stop: "<prefix> <red>列车停稳后才能切换驾驶方式</red>"
       invalid: "<prefix> <red>驾驶方式只能是 manual 或 ato</red>"
+      no-permission: "<prefix> <red>当前没有以 ATO 方式驾驶的权限</red>"
       manual: "<prefix> <yellow>已转为人工驾驶</yellow>"
       ato: "<prefix> <aqua>已转为 ATO，停站结束后请右键确认发车</aqua>"
     breaker:

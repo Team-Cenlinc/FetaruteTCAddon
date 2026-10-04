@@ -1,0 +1,108 @@
+package org.fetarute.fetaruteTCAddon.drive.tutorial;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+
+import java.util.EnumSet;
+import java.util.Optional;
+import java.util.Set;
+import org.fetarute.fetaruteTCAddon.drive.hud.DriverStationHint;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+
+@DisplayName("驾驶中的情境提示")
+class DriveTipTest {
+
+  private static TutorialSnapshot.Builder manualDispatch() {
+    return TutorialSnapshot.builder().dispatch(true);
+  }
+
+  @Test
+  @DisplayName("信号变严、进站对标、开关门、发车信号只对人工驾驶的调度列车")
+  void stationAndSignalTips() {
+    assertEquals(
+        Optional.of(DriveTip.SIGNAL_CONFIRM),
+        DriveTip.firstDue(manualDispatch().signalConfirmPending(true).build(), Set.of()));
+    for (DriverStationHint.Kind kind :
+        new DriverStationHint.Kind[] {
+          DriverStationHint.Kind.APPROACH,
+          DriverStationHint.Kind.ON_MARK,
+          DriverStationHint.Kind.MOVE_UP,
+          DriverStationHint.Kind.OVERRUN
+        }) {
+      assertTrue(DriveTip.STOP_MARK.due(manualDispatch().stationHint(kind).build()), kind.name());
+    }
+    assertTrue(
+        DriveTip.OPEN_DOORS.due(
+            manualDispatch()
+                .stationHint(DriverStationHint.Kind.OPEN_DOORS)
+                .doorsRequired(true)
+                .build()));
+    assertFalse(
+        DriveTip.OPEN_DOORS.due(
+            manualDispatch().stationHint(DriverStationHint.Kind.OPEN_DOORS).build()),
+        "本站不开门时不提示开门");
+    assertTrue(
+        DriveTip.CLOSE_DOORS.due(
+            manualDispatch().stationHint(DriverStationHint.Kind.CLOSE_DOORS).build()));
+    assertTrue(
+        DriveTip.DEPARTURE.due(
+            manualDispatch().stationHint(DriverStationHint.Kind.DEPART).build()));
+    assertFalse(
+        DriveTip.DEPARTURE.due(
+            manualDispatch().stationHint(DriverStationHint.Kind.WAIT_DEPARTURE).build()));
+
+    TutorialSnapshot freeTrain =
+        TutorialSnapshot.builder()
+            .signalConfirmPending(true)
+            .stationHint(DriverStationHint.Kind.DEPART)
+            .build();
+    assertEquals(Optional.empty(), DriveTip.firstDue(freeTrain, Set.of()), "非调度列车没有这些提示");
+    TutorialSnapshot ato =
+        manualDispatch()
+            .ato(true)
+            .signalConfirmPending(true)
+            .stationHint(DriverStationHint.Kind.APPROACH)
+            .build();
+    assertEquals(Optional.empty(), DriveTip.firstDue(ato, Set.of()), "ATO 自己停车，不提示对标与信号");
+  }
+
+  @Test
+  @DisplayName("ATO 确认发车只在 ATO 下；警惕装置对任何列车（simulation 级）")
+  void atoAndVigilance() {
+    assertEquals(
+        Optional.of(DriveTip.ATO_CONFIRM),
+        DriveTip.firstDue(manualDispatch().ato(true).departurePending(true).build(), Set.of()));
+    assertFalse(DriveTip.ATO_CONFIRM.due(manualDispatch().departurePending(true).build()));
+    assertEquals(
+        Optional.of(DriveTip.VIGILANCE),
+        DriveTip.firstDue(
+            TutorialSnapshot.builder().cab(true).vigilanceWarning(true).build(), Set.of()));
+    assertFalse(DriveTip.VIGILANCE.due(TutorialSnapshot.builder().vigilanceWarning(true).build()));
+  }
+
+  @Test
+  @DisplayName("出过的提示不再出，同时满足时按先后只出一条")
+  void shownTipsAreSkipped() {
+    TutorialSnapshot both =
+        manualDispatch()
+            .signalConfirmPending(true)
+            .stationHint(DriverStationHint.Kind.APPROACH)
+            .build();
+    assertEquals(Optional.of(DriveTip.SIGNAL_CONFIRM), DriveTip.firstDue(both, Set.of()));
+    assertEquals(
+        Optional.of(DriveTip.STOP_MARK),
+        DriveTip.firstDue(both, EnumSet.of(DriveTip.SIGNAL_CONFIRM)));
+    assertEquals(Optional.empty(), DriveTip.firstDue(both, DriveTip.all()));
+  }
+
+  @Test
+  @DisplayName("提示的键各不相同（持久数据标记靠它区分）")
+  void keysAreUnique() {
+    Set<String> keys = new java.util.HashSet<>();
+    for (DriveTip tip : DriveTip.values()) {
+      assertTrue(keys.add(tip.key()), tip.name());
+    }
+  }
+}
