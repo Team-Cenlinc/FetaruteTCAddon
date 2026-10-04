@@ -7,6 +7,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
 import org.bukkit.Location;
@@ -148,6 +149,32 @@ public final class SeatLocator {
       return Optional.empty();
     }
     return Optional.of(seats.get(binding.seatIndex()));
+  }
+
+  /**
+   * 读出列车上哪些座位被标记为驾驶座：座位附件的名字（TrainCarts 附件配置的 {@code names}，附件编辑器里可设）在名单里即是。
+   *
+   * @param cabNames 驾驶座名单（已转小写）；为空时不读标记，按车厢位置认定
+   */
+  public static CabSeats cabSeats(MinecartGroup group, Collection<String> cabNames) {
+    int members = group == null ? 0 : group.size();
+    if (members == 0 || cabNames == null || cabNames.isEmpty()) {
+      return CabSeats.unmarked(members);
+    }
+    List<List<Integer>> marked = new ArrayList<>(members);
+    for (MinecartMember<?> member : group) {
+      List<Integer> seats = new ArrayList<>();
+      if (member != null) {
+        List<CartAttachmentSeat> all = seatsOf(member);
+        for (int i = 0; i < all.size(); i++) {
+          if (CabSeats.nameMatches(all.get(i).getNames(), cabNames)) {
+            seats.add(i);
+          }
+        }
+      }
+      marked.add(seats);
+    }
+    return CabSeats.of(marked);
   }
 
   /** 一节车厢的全部座位，按模型里的出现顺序排列。 */

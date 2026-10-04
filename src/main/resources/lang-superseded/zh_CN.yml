@@ -32,6 +32,12 @@ drive:
   task:
     claim:
       claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
+    pickup:
+      terminal: ["<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进任一端驾驶室并确认座位；发车时如需换端，将自动换到前端驾驶室</white>"]
+    goto:
+      teleported: ["<prefix> <green>已到达列车车头驾驶室旁，请上车坐下并确认座位</green>"]
+    cab-changed: ["<prefix> <white>折返换端：已换到前端驾驶室（第 <car> 节）</white>"]
+    cab-change-failed: ["<prefix> <red>折返换端失败：前端驾驶室没有可用座位，列车交还自动运行</red>"]
   hud:
     line: ["<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
   command:

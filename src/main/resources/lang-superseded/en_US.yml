@@ -3,6 +3,12 @@ drive:
   task:
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
+    pickup:
+      terminal: ["<prefix> <white>Trip <aqua><trip></aqua> runs with train <aqua><train></aqua>, standing at <location>. Board within <yellow><seconds></yellow> s, sit in the cab at either end and confirm your seat; if the train reverses you will be moved to the leading cab</white>"]
+    goto:
+      teleported: ["<prefix> <green>You are next to the train's leading cab; board, sit down and confirm your seat</green>"]
+    cab-changed: ["<prefix> <white>Changed ends: you are now in the leading cab (car <car>)</white>"]
+    cab-change-failed: ["<prefix> <red>Could not change ends: no free seat in the leading cab, the train returns to automatic operation</red>"]
   hud:
     line: ["<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
   command:

@@ -35,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCircuitBreaker;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
 
@@ -504,9 +505,9 @@ public final class DriverTaskManager {
   public enum SeatCheck {
     /** 没坐在任务列车上。 */
     NOT_ON_TRAIN,
-    /** 坐在任务列车上，但不在前进方向的车头一端。 */
+    /** 坐在任务列车上，但不是下一趟要驾驶的那一端的驾驶室。 */
     WRONG_SEAT,
-    /** 坐在车头一端：等驾驶员确认座位无误再接班。 */
+    /** 坐在要驾驶的那一端的驾驶室：等驾驶员确认座位无误再接班。 */
     CONFIRM
   }
 
@@ -515,26 +516,15 @@ public final class DriverTaskManager {
    *
    * @param seat 玩家的座位；没坐下时为 {@code null}
    * @param trainName 任务列车名
-   * @param memberCount 任务列车节数
-   */
-  public static SeatCheck checkSeat(SeatBinding seat, String trainName, int memberCount) {
-    return checkSeat(seat, trainName, memberCount, false);
-  }
-
-  /**
-   * 判定座位能不能接班。
-   *
-   * @param eitherEnd 终点站折返接车：发车方向要到派车时才定，两端车厢都可以坐，发车时按需换端
+   * @param end 座位在哪一端（见 {@link CabSeats#endOf}）
+   * @param expected 下一趟由哪一端驾驶：一般是车头端；终点站折返接车时方向未定为两端都可以，尽头式终点站为车尾端
    */
   public static SeatCheck checkSeat(
-      SeatBinding seat, String trainName, int memberCount, boolean eitherEnd) {
+      SeatBinding seat, String trainName, CabSeats.End end, CabSeats.Departure expected) {
     if (seat == null || trainName == null || !seat.trainName().equalsIgnoreCase(trainName)) {
       return SeatCheck.NOT_ON_TRAIN;
     }
-    if (eitherEnd && seat.memberIndex() == memberCount - 1) {
-      return SeatCheck.CONFIRM;
-    }
-    return seat.cabSign(memberCount) < 0 ? SeatCheck.WRONG_SEAT : SeatCheck.CONFIRM;
+    return CabSeats.accepts(end, expected) ? SeatCheck.CONFIRM : SeatCheck.WRONG_SEAT;
   }
 
   /**

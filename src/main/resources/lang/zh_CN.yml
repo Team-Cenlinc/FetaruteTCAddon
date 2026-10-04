@@ -1489,6 +1489,9 @@ drive:
       depart: "<green><bold>发车信号</bold></green>"
     ato:
       confirm: "<yellow><bold>ATO：右键确认发车</bold></yellow>"
+    cab-change:
+      active: "<gold><bold>换端准备：剩余 <seconds> 秒</bold></gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座</gray>"
+      announced: "<gold>本站折返：请到第 <white><car></white> 节驾驶室</gold>"
     cab:
       vigilance-warning: "<red><bold>警惕 <seconds></bold></red>"
       vigilance-tripped: "<red><bold>警惕紧急制动</bold></red>"
@@ -1530,8 +1533,12 @@ drive:
       doors: "车门"
       air: "风压"
       vigilance: "警惕"
+      cab-change: "换端"
     value:
       text: "<white><text></white>"
+      cab-change:
+        active: "<yellow>第 <car> 节</yellow> <gray>剩余</gray> <white><seconds></white> <gray>秒</gray>"
+        announced: "<yellow>第 <car> 节驾驶室</yellow>"
       signal:
         proceed: "<green>允许</green> <white><limit_kmh></white> <gray>km/h</gray>"
         proceed-with-caution: "<yellow>注意</yellow> <white><limit_kmh></white> <gray>km/h</gray>"
@@ -1713,11 +1720,14 @@ drive:
     expired: "<prefix> <yellow>车次 <aqua><trip></aqua> 未能在 <white><station></white> 接班，任务已作废</yellow>"
     arrived: "<aqua><trip></aqua> <white>已在 <station> 停站，请坐进车头驾驶室接班</white>"
     go-to-cab: "<yellow>请坐到列车前进方向的车头驾驶室</yellow>"
+    go-to-rear-cab: "<yellow>本站折返：请坐进列车尾端（远离线路尽头一端）的驾驶室</yellow>"
+    go-to-end-cab: "<yellow>请坐进列车任一端的驾驶室</yellow>"
     confirm-seat: "<white>已就座</white> <gray>确认座位无误后输入</gray> <yellow>/fta drive on</yellow> <gray>接班</gray>"
     confirm-seat-chat: "<prefix> <white>你已坐在列车 <aqua><train></aqua> 第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>确认是前进方向的驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认接班]</green></hover></click>"
     busy: "<red>你正在驾驶其他列车</red>"
     pickup:
-      terminal: "<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进任一端驾驶室并确认座位；发车时如需换端，将自动换到前端驾驶室</white>"
+      terminal: "<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进任一端驾驶室并确认座位；发车方向与所坐端相反时，须在发车前自行走到另一端驾驶室（约需 <reserve> 秒）</white>"
+      terminal-cab: "<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进第 <yellow><car></yellow> 节驾驶室（共 <cars> 节，即下一趟的车头）并确认座位</white>"
       depot: "<prefix> <white>车次 <aqua><trip></aqua> 的列车 <aqua><train></aqua> 已在车库 <location> 出车，停在股道上等候。请在 <yellow><seconds></yellow> 秒内坐进车头驾驶室并确认座位</white>"
       goto-button: "<click:run_command:'/fta drive task goto'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive task goto</white>'><green>[前往列车]</green></hover></click>"
       waiting: "<white>车次 <aqua><trip></aqua> 在 <location> 等候接班</white> <gray>剩余</gray> <yellow><seconds></yellow> <gray>秒</gray>"
@@ -1729,14 +1739,19 @@ drive:
       not-depot: "<prefix> <red>该车次的列车不从车库出车</red>"
       started: "<prefix> <red>已开始驾驶，不能再更改接车方式</red>"
     goto:
-      teleported: "<prefix> <green>已到达列车车头驾驶室旁，请上车坐下并确认座位</green>"
+      teleported: "<prefix> <green>已到达指定驾驶室旁，请上车就座并确认座位</green>"
       none: "<prefix> <red>当前没有等候你接班的列车</red>"
       disabled: "<prefix> <red>前往列车功能未开放</red>"
       driving: "<prefix> <red>驾驶中不能前往其他列车</red>"
       train-missing: "<prefix> <red>找不到要接班的列车</red>"
       no-spot: "<prefix> <red>列车旁没有可落脚的位置，请自行前往</red>"
-    cab-changed: "<prefix> <white>折返换端：已换到前端驾驶室（第 <car> 节）</white>"
-    cab-change-failed: "<prefix> <red>折返换端失败：前端驾驶室没有可用座位，列车交还自动运行</red>"
+    cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
+    cab-change-failed: "<prefix> <red>未能在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车，任务记为未完成</red>"
+    cab-change:
+      announce: "<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；换端途中离座不结束驾驶</white>"
+      start: "<prefix> <yellow>折返换端：请在 <white><seconds></white> 秒内到第 <white><car></white> 节（另一端）驾驶室就座；换端途中离座不结束驾驶，列车保持停车</yellow>"
+      short: "<prefix> <red>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，发车将晚点</red>"
+      brake-test: "<prefix> <yellow>距计划发车尚有 <white><seconds></white> 秒，请重做制动试验后再发车</yellow>"
     started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
     started-interval: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到 <white><station></white></green>"
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
@@ -1831,6 +1846,7 @@ drive:
     mode:
       not-dispatch: "<prefix> <red>只有驾驶调度列车时才能切换 ATO</red>"
       need-stop: "<prefix> <red>列车停稳后才能切换驾驶方式</red>"
+      cab-change: "<prefix> <red>折返换端期间不得切换驾驶方式</red>"
       invalid: "<prefix> <red>驾驶方式只能是 manual 或 ato</red>"
       manual: "<prefix> <yellow>已转为人工驾驶</yellow>"
       ato: "<prefix> <aqua>已转为 ATO，停站结束后请右键确认发车</aqua>"

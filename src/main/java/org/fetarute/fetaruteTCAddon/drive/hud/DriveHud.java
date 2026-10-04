@@ -10,6 +10,7 @@ import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Bukkit;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
@@ -89,9 +90,16 @@ public final class DriveHud {
     return line;
   }
 
-  /** 动作栏末尾最要紧的一条提示：为什么现在不能牵引。按启动流程、停放制动、风压、制动试验、车门的顺序取第一条；都没有时为 {@code null}。 各系统的完整状态在侧边栏里。 */
+  /**
+   * 动作栏末尾最要紧的一条提示：为什么现在不能牵引。折返换端最先，其次按防护介入、启动流程、停放制动、风压、制动试验、车门的顺序取第一条； 都没有时为 {@code
+   * null}。各系统的完整状态在侧边栏里。
+   */
   private static Component statusToken(
       LocaleManager locale, DriveSession session, boolean sidebarShown) {
+    Component cabChange = cabChangeToken(locale, session.cabChange());
+    if (cabChange != null) {
+      return cabChange;
+    }
     DriverLink link = session.driverLink();
     String intervention = link == null ? null : interventionKey(link);
     if (intervention != null) {
@@ -139,6 +147,22 @@ public final class DriveHud {
       return locale.component("drive.hud.driver.wait-signal");
     }
     return null;
+  }
+
+  /** 折返换端的提示：计时中显示要去第几节与剩余秒数，提前告知时只显示第几节；不换端时为 {@code null}。 */
+  static Component cabChangeToken(LocaleManager locale, CabChange change) {
+    return switch (change.stage()) {
+      case ACTIVE -> locale.component(
+          "drive.hud.cab-change.active",
+          Map.of(
+              "car",
+              String.valueOf(change.targetCar()),
+              "seconds",
+              String.valueOf(Math.max(0L, change.secondsLeft()))));
+      case ANNOUNCED -> locale.component(
+          "drive.hud.cab-change.announced", Map.of("car", String.valueOf(change.targetCar())));
+      case IDLE -> null;
+    };
   }
 
   /** 车站提示在动作栏里怎么处理。 */
