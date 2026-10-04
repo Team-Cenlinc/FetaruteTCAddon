@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param phaseNotes 相位选择的说明
  * @param warnings 构建过程中的提示
  * @param rapidCatchUp 成品表上快车在共线段被慢车拖住、以及在表里让车等待的合计（{@link RapidStagger}）；报告据此提示用快车错峰重建
+ * @param capacity 瓶颈：成品表上最忙一小时占用最高的几个资源（{@link CapacityReport}）；编表器不量，排完计划站台后由调用方补上
  */
 public record TimetableBuildResult(
     Optional<Timetable> timetable,
@@ -76,7 +77,8 @@ public record TimetableBuildResult(
     List<String> resourcePhaseNotes,
     List<PhasePlanner.Residue> residues,
     List<String> warnings,
-    CatchUp rapidCatchUp) {
+    CatchUp rapidCatchUp,
+    CapacityReport.Report capacity) {
 
   /** 报告里最多展开多少条冲突明细。 */
   public static final int CONFLICT_DETAIL_LIMIT = 8;
@@ -102,6 +104,7 @@ public record TimetableBuildResult(
     phaseNotes = phaseNotes == null ? List.of() : List.copyOf(phaseNotes);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
     rapidCatchUp = rapidCatchUp == null ? CatchUp.NONE : rapidCatchUp;
+    capacity = capacity == null ? CapacityReport.Report.NONE : capacity;
   }
 
   /**
@@ -125,15 +128,21 @@ public record TimetableBuildResult(
   public TimetableBuildResult withPhaseNote(String note) {
     List<String> notes = new ArrayList<>(phaseNotes);
     notes.add(note);
-    return copy(List.copyOf(notes), rapidCatchUp);
+    return copy(List.copyOf(notes), rapidCatchUp, capacity);
   }
 
   /** 同一份结果，换上成品表的快车被卡合计。 */
   public TimetableBuildResult withRapidCatchUp(CatchUp catchUp) {
-    return copy(phaseNotes, catchUp);
+    return copy(phaseNotes, catchUp, capacity);
   }
 
-  private TimetableBuildResult copy(List<String> nextPhaseNotes, CatchUp nextCatchUp) {
+  /** 同一份结果，换上瓶颈报告。 */
+  public TimetableBuildResult withCapacity(CapacityReport.Report report) {
+    return copy(phaseNotes, rapidCatchUp, report);
+  }
+
+  private TimetableBuildResult copy(
+      List<String> nextPhaseNotes, CatchUp nextCatchUp, CapacityReport.Report nextCapacity) {
     return new TimetableBuildResult(
         timetable,
         shares,
@@ -164,7 +173,8 @@ public record TimetableBuildResult(
         resourcePhaseNotes,
         residues,
         warnings,
-        nextCatchUp);
+        nextCatchUp,
+        nextCapacity);
   }
 
   /** 目标 headway 下与邻表撞上的冲突。 */
@@ -243,7 +253,8 @@ public record TimetableBuildResult(
         List.of(),
         List.of(),
         List.of(Objects.requireNonNullElse(reason, "构建失败")),
-        CatchUp.NONE);
+        CatchUp.NONE,
+        CapacityReport.Report.NONE);
   }
 
   /**

@@ -429,7 +429,8 @@ public final class TimetableBuilder {
             chosen.resourceNotes(),
             chosen.residues(),
             List.copyOf(warnings),
-            TimetableBuildResult.CatchUp.NONE);
+            TimetableBuildResult.CatchUp.NONE,
+            CapacityReport.Report.NONE);
     return new Built(result, Optional.of(prepared), Optional.of(chosenPrepared), options);
   }
 

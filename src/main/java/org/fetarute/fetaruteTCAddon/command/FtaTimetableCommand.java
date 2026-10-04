@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPatternLength;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CapacityReport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
@@ -618,8 +619,20 @@ public final class FtaTimetableCommand {
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
                             builtAt);
+                Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> tableProfiles =
+                    tableProfiles(result, neighborInputs, graphSnapshot, index);
                 platformPlans =
-                    planPlatforms(result, neighborInputs, graphSnapshot, index, neighbors, options);
+                    planPlatforms(
+                        result,
+                        tableProfiles,
+                        neighborInputs,
+                        graphSnapshot,
+                        index,
+                        neighbors,
+                        options);
+                result =
+                    withCapacity(
+                        result, tableProfiles, platformPlans, index, options, model, graphSnapshot);
               } catch (RuntimeException ex) {
                 plugin
                     .getServer()
@@ -842,6 +855,7 @@ public final class FtaTimetableCommand {
    */
   private static TimetablePlatformPlanner.Result planPlatforms(
       TimetableSetBuilder.SetResult result,
+      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles,
       NeighborInputs inputs,
       RailGraph graph,
       TimetableConflictChecker.GraphIndex index,
@@ -852,11 +866,6 @@ public final class FtaTimetableCommand {
     }
     try {
       List<Timetable> tables = List.copyOf(result.tables().values());
-      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles =
-          new java.util.HashMap<>();
-      for (Timetable table : tables) {
-        profiles.put(table.id(), inputs.myProfiles(table, graph, index));
-      }
       return TimetablePlatformPlanner.plan(
           new TimetablePlatformPlanner.Input(
               tables,
@@ -870,6 +879,58 @@ public final class FtaTimetableCommand {
               (int) options.separation().toSeconds()));
     } catch (RuntimeException ex) {
       return TimetablePlatformPlanner.Result.failed(ex.toString());
+    }
+  }
+
+  /** 各张成品表的 route 投影（异步线程），时刻用表上落库的时刻：排计划站台与量瓶颈共用。编表失败时为空。 */
+  private static Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> tableProfiles(
+      TimetableSetBuilder.SetResult result,
+      NeighborInputs inputs,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index) {
+    Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> out = new java.util.HashMap<>();
+    if (!result.success()) {
+      return out;
+    }
+    for (Timetable table : result.tables().values()) {
+      out.put(table.id(), inputs.myProfiles(table, graph, index));
+    }
+    return out;
+  }
+
+  /**
+   * 给联编结果补上瓶颈报告（异步线程）：排完计划站台之后量，动态站台的停靠才有具体股道（{@link CapacityReport}）。
+   *
+   * <p>瓶颈只是报告：量的时候出错就不报这一节，表照常落库。
+   */
+  private TimetableSetBuilder.SetResult withCapacity(
+      TimetableSetBuilder.SetResult result,
+      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles,
+      TimetablePlatformPlanner.Result platforms,
+      TimetableConflictChecker.GraphIndex index,
+      TimetableBuildOptions options,
+      RunCurveModel model,
+      RailGraph graph) {
+    if (!result.success()) {
+      return result;
+    }
+    try {
+      CapacityReport.Report report =
+          CapacityReport.measure(
+              List.copyOf(result.tables().values()),
+              profiles,
+              platforms.plans(),
+              index,
+              options.following(),
+              model,
+              graph,
+              options.serviceStartSecondOfDay(),
+              CapacityReport.LIMIT);
+      return new TimetableSetBuilder.SetResult(
+          result.joint().withCapacity(report), result.tables(), result.baselines());
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("瓶颈报告计算失败：" + ex);
+      return result;
     }
   }
 
