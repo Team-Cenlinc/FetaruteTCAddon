@@ -1921,7 +1921,10 @@ public final class AutoStationDoorController {
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        boolean played = group.playNamedAnimation(doorAnimationOptions(name, 1.0));
+        boolean played =
+            QueuedAnimations.withFallback(
+                    QueuedAnimations.playNamed(group, doorAnimationOptions(name, 1.0)))
+                .played();
         if (played) {
           fallbackUsed = true;
         }
@@ -1940,7 +1943,9 @@ public final class AutoStationDoorController {
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        return group.playNamedAnimation(doorAnimationOptions(name, -1.0));
+        return QueuedAnimations.withFallback(
+                QueuedAnimations.playNamed(group, doorAnimationOptions(name, -1.0)))
+            .played();
       }
 
       @Override
@@ -1975,16 +1980,13 @@ public final class AutoStationDoorController {
   private record LegacyTarget(Attachment target, AnimationPair pair) {}
 
   /**
-   * 生成门动画播放选项。
+   * 生成门动画播放选项：只排队、不 {@code reset}（见 {@link QueuedAnimations}）。
    *
-   * <p>注意 {@code reset=true} 与 {@code queue=true} 同时置位时，TrainCarts 的 {@code
-   * Attachment#startAnimation} 先判 reset：直接顶掉附件上当前的动画并清空队列，{@code queue}
-   * 分支根本走不到。也就是说开/关门<b>总会打断</b>同一附件上正在执行的其它模型动画（升弓、 受电弓复位等），并不会排队等它们播完；{@code queue}
-   * 只是保留的标志位。要真正排队必须去掉 reset，那样门动画不再从头开始，行为会变，需单独评估。
+   * <p>TrainCarts 的 {@code Attachment#startAnimation} 遇到 {@code reset} 会顶掉当前动画并清空排队列表，TC 牌子 {@code
+   * animate queue} 排进去的动画就被清掉了；只排队时等附件上正在播的放完再播，轮到时从头（关门倒放时从末尾）开始，不需要 {@code reset}。
    */
   static AnimationOptions doorAnimationOptions(String name, double speed) {
     AnimationOptions options = new AnimationOptions(name);
-    options.setReset(true);
     options.setSpeed(speed);
     options.setQueue(true);
     return options;
@@ -1995,16 +1997,7 @@ public final class AutoStationDoorController {
     if (targets == null || targets.isEmpty() || options == null) {
       return false;
     }
-    boolean played = false;
-    for (Attachment target : targets) {
-      if (target == null || !target.isAttached()) {
-        continue;
-      }
-      if (target.playNamedAnimation(options.clone())) {
-        played = true;
-      }
-    }
-    return played;
+    return QueuedAnimations.withFallback(QueuedAnimations.playNamed(targets, options)).played();
   }
 
   /**
@@ -2016,15 +2009,7 @@ public final class AutoStationDoorController {
     if (targets == null || targets.isEmpty() || animation == null) {
       return false;
     }
-    boolean started = false;
-    for (Attachment target : targets) {
-      if (target == null || !target.isAttached()) {
-        continue;
-      }
-      target.startAnimation(queuedAnimation(animation));
-      started = true;
-    }
-    return started;
+    return QueuedAnimations.withFallback(QueuedAnimations.play(targets, animation)).played();
   }
 
   private static boolean startLegacyTargets(List<LegacyTarget> targets, boolean open) {
@@ -2043,8 +2028,9 @@ public final class AutoStationDoorController {
       if (animation == null) {
         continue;
       }
-      entry.target().startAnimation(queuedAnimation(animation));
-      started = true;
+      started |=
+          QueuedAnimations.withFallback(QueuedAnimations.play(List.of(entry.target()), animation))
+              .played();
     }
     return started;
   }
@@ -2066,16 +2052,10 @@ public final class AutoStationDoorController {
       if (root == null) {
         continue;
       }
-      root.startAnimation(queuedAnimation(animation));
-      started = true;
+      started |=
+          QueuedAnimations.withFallback(QueuedAnimations.play(List.of(root), animation)).played();
     }
     return started;
-  }
-
-  private static Animation queuedAnimation(Animation animation) {
-    Animation copy = animation.clone();
-    copy.getOptions().setQueue(true);
-    return copy;
   }
 
   private static boolean hasAttachedTargets(List<Attachment> targets) {

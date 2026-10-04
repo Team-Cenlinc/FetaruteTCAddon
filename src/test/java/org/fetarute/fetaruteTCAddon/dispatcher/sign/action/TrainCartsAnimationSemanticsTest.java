@@ -21,8 +21,8 @@ import org.junit.jupiter.api.Test;
  * 把本插件对 TrainCarts 动画队列的两条依赖钉成特征化测试；TrainCarts 升级改变它们时这里先报警。
  *
  * <p>2026-09-30：出库/首站预热以 {@code reset + speed=0} 播放门动画，留下一个永远播不完的当前动画，TrainCarts
- * 只在当前动画播完后才推进附件的动画队列， 显式带 {@code queue} 且不带 {@code reset} 的动画因此永远卡住；预热已删除。同时门动画选项同时置 {@code reset}
- * 与 {@code queue}， 而 {@code startAnimation} 先判 reset，{@code queue} 从不生效。
+ * 只在当前动画播完后才推进附件的动画队列， 显式带 {@code queue} 且不带 {@code reset} 的动画因此永远卡住；预热已删除。{@code startAnimation}
+ * 先判 reset 并清空排队列表，所以本插件的门与受电弓动画只排队、不带 reset（{@link QueuedAnimations}）。
  */
 class TrainCartsAnimationSemanticsTest {
 
@@ -59,20 +59,41 @@ class TrainCartsAnimationSemanticsTest {
   }
 
   @Test
-  void resetWinsOverQueueSoQueuedDoorAnimationsAreNeverQueued() {
+  void resetWinsOverQueueAndClearsTheQueue() {
     AttachmentInternalState state = new AttachmentInternalState();
     Attachment attachment = mock(Attachment.class, CALLS_REAL_METHODS);
     doReturn(state).when(attachment).getInternalState();
 
     Animation running = twoSecondAnimation();
     attachment.startAnimation(running);
+    Animation queuedBySign = twoSecondAnimation();
+    AnimationOptions queue = new AnimationOptions("doorL");
+    queue.setQueue(true);
+    queuedBySign.applyOptions(queue);
+    attachment.startAnimation(queuedBySign);
 
-    Animation door = twoSecondAnimation();
-    door.applyOptions(AutoStationDoorController.doorAnimationOptions("doorL", 1.0));
-    attachment.startAnimation(door);
+    Animation forced = twoSecondAnimation();
+    AnimationOptions reset = new AnimationOptions("doorL");
+    reset.setReset(true);
+    reset.setQueue(true);
+    forced.applyOptions(reset);
+    attachment.startAnimation(forced);
 
-    assertSame(door, state.currentAnimation, "reset 先判：直接顶掉当前动画");
-    assertTrue(state.nextAnimationQueue.isEmpty(), "queue 分支从未走到");
+    assertSame(forced, state.currentAnimation, "reset 先判：直接顶掉当前动画");
+    assertTrue(state.nextAnimationQueue.isEmpty(), "牌子排进去的动画被清掉——所以门动画不再带 reset");
+  }
+
+  @Test
+  void queuedAnimationStartsFromTheEndWhenPlayedInReverse() {
+    Animation animation = twoSecondAnimation();
+    AnimationOptions reverse = new AnimationOptions("doorL");
+    reverse.setSpeed(-1.0);
+    animation.applyOptions(reverse);
+    animation.start();
+    for (int i = 0; i < 200; i++) {
+      animation.update(0.05, new Matrix4x4());
+    }
+    assertTrue(animation.hasReachedEnd(), "倒放从末尾播到开头也算播完，排在后面的能接着播");
   }
 
   @Test

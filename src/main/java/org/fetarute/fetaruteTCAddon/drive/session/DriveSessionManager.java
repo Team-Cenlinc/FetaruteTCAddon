@@ -1765,7 +1765,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     Optional<MinecartGroup> groupOpt = findSessionGroup(session);
     groupOpt.ifPresent(
         group -> {
-          session.lowerChargingPantograph(group);
+          session.stopCharging();
           // 调度列车接管时按热车满电，电量只为非调度列车记在列车上。
           if (!session.isDispatchDriving()) {
             session

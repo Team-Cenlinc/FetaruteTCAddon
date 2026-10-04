@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -158,15 +159,13 @@ class AutoStationDoorControllerTest {
             thirtyDegreesEastOfNorth, BlockFace.WEST));
   }
 
-  /**
-   * 同时置 reset 与 queue；TrainCarts 先判 reset，queue 实际不生效，见 {@code TrainCartsAnimationSemanticsTest}。
-   */
+  /** 只排队、不 reset：reset 会清空附件上 TC 牌子排进去的动画，见 {@code TrainCartsAnimationSemanticsTest}。 */
   @Test
-  void doorAnimationOptionsRestartTheAnimationAndCarryTheQueueFlag() {
+  void doorAnimationOptionsQueueWithoutReset() {
     AnimationOptions options = AutoStationDoorController.doorAnimationOptions("doorL", 1.0);
 
     assertTrue(options.getQueue());
-    assertTrue(options.getReset());
+    assertFalse(options.getReset());
     assertEquals(1.0, options.getSpeed());
   }
 

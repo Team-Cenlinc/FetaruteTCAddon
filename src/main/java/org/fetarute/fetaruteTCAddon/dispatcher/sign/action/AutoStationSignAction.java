@@ -891,6 +891,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                         .getRuntimeDispatchService()
                         .ifPresent(dispatch -> dispatch.refreshSignal(group)));
         departureReleased = true;
+        SupercapPantograph.lowerIfRaised(plugin, group);
         driverStop.setPhase(DriverStationStop.Phase.DEPART);
         return true;
       }
@@ -1052,6 +1053,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                               .getRuntimeDispatchService()
                               .ifPresent(dispatch -> dispatch.refreshSignal(group)));
               departureReleased = true;
+              SupercapPantograph.lowerIfRaised(plugin, group);
               return;
             }
             if (canDepart) {
@@ -1067,6 +1069,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               exitOffsetState.restore();
               finalWaitState.run();
               cancel();
+              SupercapPantograph.lowerIfRaised(plugin, group);
               plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
               Bukkit.getScheduler()
                   .runTask(
