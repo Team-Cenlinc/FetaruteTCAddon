@@ -14,13 +14,14 @@ import org.bukkit.Bukkit;
 import org.bukkit.Material;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 任务板：一个车站即将发出的车次，一格一趟，写明终点站、停站数与按表的运行时长。左键领取人工驾驶，右键领取 ATO。
+ * 任务板：一个车站即将发出的车次，一格一趟，写明终点站、停站数与按表的运行时长。左键领取人工驾驶，右键领取 ATO。 正在本站停站的车次用画着内容的地图，其余用空地图。
  *
  * <p>已被领走的车次照样列出，灰色显示领取人，点击不起作用。界面只读：所有点击都被取消，物品不会进出背包。
  */
@@ -124,12 +125,12 @@ public final class TaskBoard {
     if (atoAllowed) {
       lore.add("drive.task.board.entry-right");
     }
-    return item(
-        row.dwelling() ? Material.MAP : Material.PAPER,
-        locale,
-        "drive.task.board.entry-name",
-        values,
-        lore);
+    return item(entryMaterial(row.dwelling()), locale, "drive.task.board.entry-name", values, lore);
+  }
+
+  /** 车次条目的图标：正在本站停站（马上能接班）的用画着内容的地图，其余用空地图。两者轮廓相同、一个有字一个没字，一眼分得清；已被领取的用灰色染料。 */
+  static Material entryMaterial(boolean dwelling) {
+    return dwelling ? Material.FILLED_MAP : Material.MAP;
   }
 
   private static ItemStack item(
@@ -146,6 +147,8 @@ public final class TaskBoard {
       lore.add(locale.component(key, values).decoration(TextDecoration.ITALIC, false));
     }
     meta.lore(lore);
+    // 画着内容的地图没有对应的地图数据：藏起“未知地图”等附加说明，只显示条目文字。
+    meta.addItemFlags(ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
     if (!stack.setItemMeta(meta)) {
       throw new IllegalStateException("无法为任务板物品 " + material + " 设置物品元数据");
     }
