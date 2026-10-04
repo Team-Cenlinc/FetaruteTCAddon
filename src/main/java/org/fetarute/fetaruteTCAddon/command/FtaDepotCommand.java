@@ -47,6 +47,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExporter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ScheduleWindow;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
@@ -268,6 +269,8 @@ public final class FtaDepotCommand {
                             new RouteLineChanges.LineRef(
                                 resolved.operator().code(), resolved.line().code()));
                     addTags(properties, runId, resolved, startLine, depotId, pattern, destInfo);
+                    // 与自动出库一致：写入加减速标签，驾驶员接管时按调度控车同一组加减速开车。
+                    SpawnMotionTags.stamp(properties, plugin.getConfigManager().current());
                     initializeRouteIndex(
                         properties,
                         provider,
