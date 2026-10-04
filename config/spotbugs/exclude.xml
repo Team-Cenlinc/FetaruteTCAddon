@@ -179,6 +179,11 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Method name="tutorials"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
         <Method name="tasks"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>

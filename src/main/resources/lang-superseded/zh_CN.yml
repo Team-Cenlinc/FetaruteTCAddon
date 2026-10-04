@@ -30,6 +30,11 @@ pids:
         body-secondary: ["Stand clear of the platform edge"]
 drive:
   task:
+    board:
+      no-station: ["<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"]
+      entry-time: ["<gray>计划发车</gray> <white><time></white>"]
+      entry-platform: ["<gray>站台</gray> <white><platform></white>"]
+      entry-train: ["<gray>列车</gray> <white><train></white>"]
     claim:
       claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
   hud:
@@ -37,6 +42,7 @@ drive:
   command:
     help:
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
+      entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
       managed-train: ["<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"]

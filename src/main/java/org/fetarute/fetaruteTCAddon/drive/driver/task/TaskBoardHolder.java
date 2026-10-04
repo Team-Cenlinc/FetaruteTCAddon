@@ -13,7 +13,7 @@ public final class TaskBoardHolder implements InventoryHolder {
   private final String operatorCode;
   private final String stationCode;
   private final String stationName;
-  private final List<TaskBoardEntries.Row> rows;
+  private final List<TaskBoardEntries.Entry> entries;
   private Inventory inventory;
 
   public TaskBoardHolder(
@@ -21,12 +21,12 @@ public final class TaskBoardHolder implements InventoryHolder {
       String operatorCode,
       String stationCode,
       String stationName,
-      List<TaskBoardEntries.Row> rows) {
+      List<TaskBoardEntries.Entry> entries) {
     this.playerId = playerId;
     this.operatorCode = operatorCode;
     this.stationCode = stationCode;
     this.stationName = stationName;
-    this.rows = List.copyOf(rows);
+    this.entries = List.copyOf(entries);
   }
 
   void bind(Inventory inventory) {
@@ -54,11 +54,16 @@ public final class TaskBoardHolder implements InventoryHolder {
     return stationName;
   }
 
-  /** 这一格对应的车次；空格时为空。 */
-  public Optional<TaskBoardEntries.Row> rowAt(int slot) {
-    if (slot < 0 || slot >= rows.size() || slot >= TaskBoard.ENTRY_SLOTS) {
+  /** 这一格对应的条目（含已被领走的）；空格时为空。 */
+  public Optional<TaskBoardEntries.Entry> entryAt(int slot) {
+    if (slot < 0 || slot >= entries.size() || slot >= TaskBoard.ENTRY_SLOTS) {
       return Optional.empty();
     }
-    return Optional.of(rows.get(slot));
+    return Optional.of(entries.get(slot));
+  }
+
+  /** 这一格可领取的车次；空格或已被领走时为空。 */
+  public Optional<TaskBoardEntries.Row> rowAt(int slot) {
+    return entryAt(slot).filter(entry -> !entry.claimed()).map(TaskBoardEntries.Entry::row);
   }
 }
