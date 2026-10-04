@@ -52,7 +52,75 @@ public final class DriverTaskManager {
     BREAKER_OPEN,
     ALREADY_HAS_TASK,
     TAKEN,
-    UNAVAILABLE
+    UNAVAILABLE,
+    /** 被外部插件拦下（{@code DriverTaskClaimEvent} 取消）。 */
+    CANCELLED
+  }
+
+  /** 任务的对外通知：领取前可拦下，没开过车就结束时报一次（开过车的由驾驶会话评分后报）。 */
+  public interface Listener {
+    /** 将要领取：返回 false 拦下。 */
+    boolean beforeClaim(DriverTask task);
+
+    /** 还没开车就结束（作废、领取后放弃、收回）。 */
+    void onUnstartedFinished(DriverTask task);
+  }
+
+  private static final Listener NO_LISTENER =
+      new Listener() {
+        @Override
+        public boolean beforeClaim(DriverTask task) {
+          return true;
+        }
+
+        @Override
+        public void onUnstartedFinished(DriverTask task) {}
+      };
+
+  /**
+   * 插件派出的任务。
+   *
+   * @param key 车次
+   * @param routeCode 交路代码
+   * @param operatorCode 接班站的运营商
+   * @param stationCode 接班站站码
+   * @param stationName 接班站站名
+   * @param boardNodeId 接班站台节点
+   * @param boardStopSequence 接班站停靠序号
+   * @param plannedDeparture 接班站计划发车
+   * @param trainName 担当的列车；还没对上时为 {@code null}
+   * @param alightStopSequence 下车站停靠序号；开到终点站为 -1
+   * @param alightStationCode 下车站站码
+   * @param alightStationName 下车站站名
+   * @param depotPickup 是否从车库接车
+   * @param source 来源标记
+   * @param metadata 附加数据
+   */
+  public record TaskSpec(
+      TaskKey key,
+      String routeCode,
+      String operatorCode,
+      String stationCode,
+      String stationName,
+      String boardNodeId,
+      int boardStopSequence,
+      Instant plannedDeparture,
+      String trainName,
+      int alightStopSequence,
+      String alightStationCode,
+      String alightStationName,
+      boolean depotPickup,
+      String source,
+      Map<String, String> metadata) {
+    public TaskSpec {
+      metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+    }
+  }
+
+  private Listener listener = NO_LISTENER;
+
+  public void setListener(Listener listener) {
+    this.listener = listener == null ? NO_LISTENER : listener;
   }
 
   /** 列车没在接班站停站、计划发车又已过去这么久，任务作废。 */
@@ -139,13 +207,34 @@ public final class DriverTaskManager {
     return assignment.currentDelaySeconds();
   }
 
+  /** 已领取、还没开始驾驶的任务被收回（管理员命令）。 */
+  public void interruptClaim(UUID playerId, String reason) {
+    DriverTask task = byPlayer.get(playerId);
+    if (task != null && task.state() == DriverTask.State.CLAIMED) {
+      finish(task, DriverTask.State.INTERRUPTED, reason);
+    }
+  }
+
   /** 已领取、还没开始驾驶的任务作废（例如接车等到时限）。 */
   public void expireClaim(UUID playerId, String reason) {
     DriverTask task = byPlayer.get(playerId);
     if (task != null && task.state() == DriverTask.State.CLAIMED) {
-      task.finish(DriverTask.State.EXPIRED, reason);
+      finish(task, DriverTask.State.EXPIRED, reason);
       trace.accept("任务作废 " + task.playerName() + " " + task.key().tripCode() + ": " + reason);
     }
+  }
+
+  /** 结束任务；还没开车就结束的当场对外报一次（开过车的由驾驶会话评分后报）。 */
+  private void finish(DriverTask task, DriverTask.State state, String reason) {
+    task.finish(state, reason);
+    if (task.startedAt() == null && task.announceFinish()) {
+      listener.onUnstartedFinished(task);
+    }
+  }
+
+  /** 每名玩家最近的任务（含已结束、还没被新任务替换的）。 */
+  public List<DriverTask> allTasks() {
+    return new ArrayList<>(byPlayer.values());
   }
 
   /** 全部未结束的任务。 */
@@ -203,20 +292,71 @@ public final class DriverTaskManager {
             mode,
             now);
     task.setTrainName(row.trainName());
+    return register(player, task);
+  }
+
+  /**
+   * 插件派出一个任务：不看任务板的时间窗、不要求玩家在车站附近；其余规则与任务板相同。
+   *
+   * @param enabled 驾驶调度列车是否启用
+   */
+  public ClaimOutcome assign(
+      Player player, TaskSpec spec, DrivingMode mode, boolean enabled, Instant now) {
+    if (!enabled) {
+      return ClaimOutcome.DISABLED;
+    }
+    if (breaker.open(now)) {
+      return ClaimOutcome.BREAKER_OPEN;
+    }
+    if (activeTaskOf(player.getUniqueId()).isPresent()) {
+      return ClaimOutcome.ALREADY_HAS_TASK;
+    }
+    if (takenKeys().contains(spec.key())) {
+      return ClaimOutcome.TAKEN;
+    }
+    DriverTask task =
+        new DriverTask(
+            player.getUniqueId(),
+            player.getName(),
+            spec.key(),
+            spec.routeCode(),
+            spec.operatorCode(),
+            spec.stationCode(),
+            spec.stationName(),
+            spec.boardNodeId(),
+            spec.boardStopSequence(),
+            spec.plannedDeparture(),
+            mode,
+            now);
+    task.setTrainName(spec.trainName());
+    task.setDepotPickup(spec.depotPickup());
+    if (spec.alightStopSequence() >= 0) {
+      task.setAlight(spec.alightStopSequence(), spec.alightStationCode(), spec.alightStationName());
+    }
+    task.setSource(spec.source(), spec.metadata());
+    return register(player, task);
+  }
+
+  private ClaimOutcome register(Player player, DriverTask task) {
+    if (!listener.beforeClaim(task)) {
+      return ClaimOutcome.CANCELLED;
+    }
     DriverTask previous = byPlayer.put(player.getUniqueId(), task);
     if (previous != null) {
       byKey.remove(previous.key(), previous.playerId());
     }
-    byKey.put(row.key(), player.getUniqueId());
+    byKey.put(task.key(), player.getUniqueId());
     trace.accept(
         "领取任务 "
             + player.getName()
             + " -> "
-            + row.routeCode()
+            + task.routeCode()
             + " "
-            + row.key().tripCode()
+            + task.key().tripCode()
             + " "
-            + mode);
+            + task.mode()
+            + (task.alightStopSequence() >= 0 ? " 下车站 " + task.alightStationName() : "")
+            + (DriverTask.SOURCE_BOARD.equals(task.source()) ? "" : " 来源 " + task.source()));
     return ClaimOutcome.CLAIMED;
   }
 
@@ -226,7 +366,7 @@ public final class DriverTaskManager {
     if (task == null || task.state().finished()) {
       return false;
     }
-    task.finish(DriverTask.State.ABANDONED, reason);
+    finish(task, DriverTask.State.ABANDONED, reason);
     return true;
   }
 
@@ -253,7 +393,7 @@ public final class DriverTaskManager {
     if (task == null || task.state() != DriverTask.State.DRIVING || finalState == null) {
       return;
     }
-    task.finish(finalState, reason);
+    finish(task, finalState, reason);
     trace.accept(
         "任务结束 "
             + task.playerName()
@@ -269,7 +409,7 @@ public final class DriverTaskManager {
   public void fail(UUID playerId, String reason) {
     DriverTask task = byPlayer.get(playerId);
     if (task != null && task.state() == DriverTask.State.DRIVING) {
-      task.finish(DriverTask.State.FAILED, reason);
+      finish(task, DriverTask.State.FAILED, reason);
     }
   }
 
@@ -277,7 +417,8 @@ public final class DriverTaskManager {
   public void complete(UUID playerId) {
     DriverTask task = byPlayer.get(playerId);
     if (task != null && task.state() == DriverTask.State.DRIVING) {
-      task.finish(DriverTask.State.COMPLETED, "terminal");
+      finish(
+          task, DriverTask.State.COMPLETED, task.alightStopSequence() >= 0 ? "alight" : "terminal");
     }
   }
 
@@ -290,6 +431,10 @@ public final class DriverTaskManager {
     Optional<TimetableApi> api = timetables();
     Optional<TimetableApi.TrainAssignment> assignment =
         api.flatMap(timetables -> timetables.getAssignment(trainName));
+    if (task.alightStopSequence() >= 0) {
+      return assignment.isPresent()
+          && reachedAlight(task.alightStopSequence(), task.key(), assignment.get());
+    }
     if (assignment.isEmpty()
         || assignment.get().lastStopSequence().isEmpty()
         || assignment.get().nextStopSequence().isPresent()
@@ -322,6 +467,17 @@ public final class DriverTaskManager {
                             departure.timetableId(),
                             departure.tripCode(),
                             departure.serviceDate()));
+  }
+
+  /**
+   * 区间任务是否已到下车站：列车跑的就是这一班，且已经停过（或越过）下车站。
+   *
+   * <p>越站时站台照样记下“停过”这一站，所以越过下车站同样算到站，到下一次停稳时结束任务。
+   */
+  static boolean reachedAlight(
+      int alightStopSequence, TaskKey key, TimetableApi.TrainAssignment assignment) {
+    return key.matches(assignment.timetableId(), assignment.tripCode(), assignment.serviceDate())
+        && assignment.lastStopSequence().filter(last -> last >= alightStopSequence).isPresent();
   }
 
   /** 核对终到站时往前后各看多久的发车记录。 */
@@ -456,7 +612,7 @@ public final class DriverTaskManager {
   }
 
   private void expire(DriverTask task, Notifier notify, String reason) {
-    task.finish(DriverTask.State.EXPIRED, reason);
+    finish(task, DriverTask.State.EXPIRED, reason);
     trace.accept("任务作废 " + task.playerName() + " " + task.key().tripCode() + ": " + reason);
     Player player = Bukkit.getPlayer(task.playerId());
     if (player != null && player.isOnline()) {

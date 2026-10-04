@@ -25,12 +25,21 @@ import org.bukkit.GameMode;
 import org.bukkit.Sound;
 import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Event;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
+import org.fetarute.fetaruteTCAddon.api.event.DriveSessionEndedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.DriveSessionStartEvent;
+import org.fetarute.fetaruteTCAddon.api.event.DriverPickupEvent;
+import org.fetarute.fetaruteTCAddon.api.event.DriverStopScoredEvent;
+import org.fetarute.fetaruteTCAddon.api.event.DriverTaskClaimEvent;
+import org.fetarute.fetaruteTCAddon.api.event.DriverTaskFinishedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.DriverTaskStartedEvent;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
@@ -64,6 +73,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.StationStopPoints;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordCodec;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverPickups;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
@@ -72,6 +82,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.PickupSpot;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskViews;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.MotorRatio;
@@ -128,7 +139,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     /** 调度列车：只能坐在车头驾驶室接管。 */
     NOT_HEAD_CAB,
     /** 调度列车：线路拥堵熔断，暂停接班。 */
-    BREAKER_OPEN
+    BREAKER_OPEN,
+    /** 被外部插件拦下（{@code DriveSessionStartEvent} 取消）。 */
+    CANCELLED
   }
 
   /** 领取驾驶任务、驾驶调度列车。 */
@@ -196,6 +209,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 已提示过确认接班的座位：换了座位才再在聊天栏提示一次。 */
   private final Map<UUID, SeatBinding> seatPrompts = new HashMap<>();
 
+  /** 对外查询的快照（任务、驾驶会话）：主线程每半秒刷新，供其他线程读取（例如 Typewriter 在异步线程读事实值）。 */
+  private volatile Map<UUID, DriveApi.TaskView> taskViews = Map.of();
+
+  private volatile Map<UUID, DriveApi.SessionView> sessionViews = Map.of();
+
   /** 始发站与车库接班：派车时先留着列车等驾驶员上车。 */
   private final DriverPickups pickups = new DriverPickups();
 
@@ -227,6 +245,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     driverRegistry.setHandler(new DriverHandler());
     driverRegistry.setAwaitingDriver(pickups::awaiting);
     this.tasks = new DriverTaskManager(plugin, this::traceTask);
+    tasks.setListener(new TaskEvents());
     applyDriverConfig(config);
   }
 
@@ -518,6 +537,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         return refusal;
       }
     }
+    DriveSessionStartEvent startEvent =
+        new DriveSessionStartEvent(
+            player.getUniqueId(),
+            binding.trainName(),
+            dispatchTrain,
+            tasks.claimFor(player.getUniqueId(), binding.trainName()).map(TaskViews::of));
+    callEvent(startEvent);
+    if (startEvent.isCancelled()) {
+      return StartOutcome.CANCELLED;
+    }
     double rollingBps = measureSpeedBps(group);
     boolean rolling = rollingBps > current.startMaxSpeedBps();
     DriveParams params;
@@ -607,21 +636,29 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           .activeTaskOf(player.getUniqueId())
           .filter(task -> task.state() == DriverTask.State.DRIVING)
           .ifPresent(
-              task ->
-                  player.sendMessage(
-                      plugin
-                          .getLocaleManager()
-                          .component(
-                              "drive.task.started",
-                              Map.of(
-                                  "trip",
-                                  task.key().tripCode(),
-                                  "mode",
-                                  plugin
-                                      .getLocaleManager()
-                                      .text(
-                                          "drive.driver.mode."
-                                              + task.mode().name().toLowerCase(Locale.ROOT))))));
+              task -> {
+                player.sendMessage(
+                    plugin
+                        .getLocaleManager()
+                        .component(
+                            task.alightStopSequence() >= 0
+                                ? "drive.task.started-interval"
+                                : "drive.task.started",
+                            Map.of(
+                                "trip",
+                                task.key().tripCode(),
+                                "station",
+                                task.alightStationName(),
+                                "mode",
+                                plugin
+                                    .getLocaleManager()
+                                    .text(
+                                        "drive.driver.mode."
+                                            + task.mode().name().toLowerCase(Locale.ROOT)))));
+                callEvent(
+                    new DriverTaskStartedEvent(
+                        task.playerId(), TaskViews.of(task), group.getProperties().getTrainName()));
+              });
     }
     traceSession(
         session,
@@ -1250,8 +1287,26 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       driverRegistry.unbind(link);
       traceSession(session, "交还自动运行: " + reason);
       tasks.onSessionEnded(session.playerId(), taskStateFor(reason), reason.name());
-      recordTask(session, link);
+      Optional<DriveApi.TaskScore> score = recordTask(session, link);
+      tasks
+          .taskOf(session.playerId())
+          .filter(task -> task.startedAt() != null && task.state().finished())
+          .filter(DriverTask::announceFinish)
+          .ifPresent(
+              task ->
+                  callEvent(
+                      new DriverTaskFinishedEvent(task.playerId(), TaskViews.of(task), score)));
     }
+    callEvent(
+        new DriveSessionEndedEvent(
+            session.playerId(),
+            session.trainName(),
+            link != null,
+            reason.name(),
+            tasks
+                .taskOf(session.playerId())
+                .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
+                .map(TaskViews::of)));
     Optional<MinecartGroup> groupOpt = findSessionGroup(session);
     groupOpt.ifPresent(
         group ->
@@ -1621,6 +1676,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
         .ifPresent(diagnostics -> updateApproach(link, group, diagnostics));
     Optional<DriverStationStop> stop = link.stationStop();
+    announceStops(session, link, trainName);
     link.takeSkippedStation()
         .ifPresent(
             station -> {
@@ -1882,6 +1938,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private void tickTasks(long now) {
     DriveConfig current = config;
     if (tickCounter % TASK_TICKS == 0) {
+      refreshViews();
       tickPickups();
       tasks.tickClaims(this::tryStartTask, this::sendTaskHint, Instant.now());
       tasks.tickRescues(now, this::sendTaskChat);
@@ -2101,6 +2158,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     DriverPickups.Pickup pickup =
         pickups.start(task.playerId(), task.key(), kind, trainName, location, deadline);
     task.setTrainName(trainName);
+    announcePickup(task, pickup, DriverPickupEvent.Stage.WAITING);
     traceTask(
         "等驾驶员接车 "
             + task.playerName()
@@ -2245,6 +2303,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private void onPickupExpired(DriverPickups.Pickup pickup) {
     Optional<DriverTask> task =
         tasks.activeTaskOf(pickup.playerId()).filter(active -> active.key().equals(pickup.key()));
+    task.ifPresent(active -> announcePickup(active, pickup, DriverPickupEvent.Stage.EXPIRED));
     traceTask(
         "接车等到时限 " + pickup.key().tripCode() + " " + pickup.kind() + " 列车 " + pickup.trainName());
     Player player = Bukkit.getPlayer(pickup.playerId());
@@ -2301,6 +2360,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         .ifPresent(
             pickup -> {
               traceSession(session, "接车上车 " + pickup.kind() + " " + pickup.location());
+              tasks
+                  .activeTaskOf(session.playerId())
+                  .ifPresent(task -> announcePickup(task, pickup, DriverPickupEvent.Stage.BOARDED));
               if (pickup.kind() != DriverPickups.Kind.DEPOT) {
                 return;
               }
@@ -2481,6 +2543,198 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return session.phase() == DriveSession.Phase.ENDED;
   }
 
+  // ---- 对外事件 ----
+
+  /** 驾驶任务的对外事件：领取前可被外部插件拦下，没开过车就结束的当场报。 */
+  private final class TaskEvents implements DriverTaskManager.Listener {
+    @Override
+    public boolean beforeClaim(DriverTask task) {
+      DriverTaskClaimEvent event = new DriverTaskClaimEvent(task.playerId(), TaskViews.of(task));
+      callEvent(event);
+      return !event.isCancelled();
+    }
+
+    @Override
+    public void onUnstartedFinished(DriverTask task) {
+      callEvent(new DriverTaskFinishedEvent(task.playerId(), TaskViews.of(task), Optional.empty()));
+    }
+  }
+
+  /** 发出驾驶事件；监听器的异常由 Bukkit 记录，不影响驾驶。 */
+  private void callEvent(Event event) {
+    try {
+      Bukkit.getPluginManager().callEvent(event);
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("驾驶事件处理失败: " + event.getEventName() + " " + ex);
+    }
+  }
+
+  private void announcePickup(
+      DriverTask task, DriverPickups.Pickup pickup, DriverPickupEvent.Stage stage) {
+    callEvent(
+        new DriverPickupEvent(
+            task.playerId(),
+            TaskViews.of(task),
+            pickup.trainName(),
+            DriverPickupEvent.Kind.valueOf(pickup.kind().name()),
+            stage,
+            pickup.location()));
+  }
+
+  /** 新记下成绩的停站逐站对外报。 */
+  private void announceStops(DriveSession session, DriverLink link, String trainName) {
+    int recorded = link.score().stopCount();
+    int announced = link.announcedStops();
+    if (recorded <= announced) {
+      return;
+    }
+    Optional<DriveApi.TaskView> task =
+        tasks
+            .activeTaskOf(session.playerId())
+            .filter(active -> trainName.equalsIgnoreCase(active.trainName()))
+            .map(TaskViews::of);
+    List<StopScore> stops = link.score().stops();
+    for (int i = announced; i < stops.size(); i++) {
+      callEvent(
+          new DriverStopScoredEvent(
+              session.playerId(), task, trainName, TaskViews.stop(stops.get(i))));
+    }
+    link.setAnnouncedStops(stops.size());
+  }
+
+  // ---- 插件派任务（DriveApi）----
+
+  /**
+   * 插件派出一个驾驶任务（主线程）。成功时按需给玩家发领取提示。
+   *
+   * @param notify 是否给玩家发领取提示
+   */
+  public DriverTaskManager.ClaimOutcome assignTask(
+      Player player, DriverTaskManager.TaskSpec spec, DrivingMode mode, boolean notify) {
+    DriverTaskManager.ClaimOutcome outcome =
+        tasks.assign(player, spec, mode, pickupOpen(config), Instant.now());
+    if (outcome == DriverTaskManager.ClaimOutcome.CLAIMED) {
+      refreshViews();
+    }
+    if (outcome != DriverTaskManager.ClaimOutcome.CLAIMED || !notify) {
+      return outcome;
+    }
+    player.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(
+                spec.alightStopSequence() >= 0
+                    ? "drive.task.claim.assigned-interval"
+                    : "drive.task.claim.assigned",
+                Map.of(
+                    "route",
+                    spec.routeCode(),
+                    "trip",
+                    spec.key().tripCode(),
+                    "station",
+                    spec.stationName(),
+                    "alight",
+                    spec.alightStationName())));
+    if (!spec.depotPickup()) {
+      tasks
+          .activeTaskOf(player.getUniqueId())
+          .flatMap(this::depotOriginOf)
+          .ifPresent(
+              depot ->
+                  player.sendMessage(
+                      plugin
+                          .getLocaleManager()
+                          .component("drive.task.pickup.depot-option", Map.of("depot", depot))));
+    }
+    return outcome;
+  }
+
+  /**
+   * 放弃玩家的任务（插件调用）：还没开始驾驶的直接作废；驾驶中的先停车再交还。
+   *
+   * @return 玩家是否有未结束的任务
+   */
+  public boolean abandonTask(UUID playerId, String reason) {
+    Optional<DriverTask> task = tasks.activeTaskOf(playerId);
+    if (task.isEmpty()) {
+      return false;
+    }
+    String why = reason == null || reason.isBlank() ? "api" : reason;
+    if (task.get().state() == DriverTask.State.DRIVING) {
+      DriveSession session = active.get(playerId);
+      tasks.abandon(playerId, why);
+      if (session != null) {
+        requestHandback(session, "abandon");
+      }
+      return true;
+    }
+    return tasks.abandon(playerId, why);
+  }
+
+  /** 玩家当前驾驶会话的快照。 */
+  public Optional<DriveApi.SessionView> sessionView(UUID playerId) {
+    DriveSession session = active.get(playerId);
+    if (session == null) {
+      return Optional.empty();
+    }
+    DriverLink link = session.driverLink();
+    Optional<String> next =
+        link == null
+            ? Optional.empty()
+            : Optional.of(link.targetLabel().isBlank() ? link.nextStopLabel() : link.targetLabel())
+                .filter(label -> !label.isBlank());
+    return Optional.of(
+        new DriveApi.SessionView(
+            playerId,
+            session.trainName(),
+            link != null,
+            session.isAto() ? DriveApi.Mode.ATO : DriveApi.Mode.MANUAL,
+            session.speedBps() * 3.6,
+            next,
+            tasks
+                .activeTaskOf(playerId)
+                .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
+                .map(DriverTask::taskId)));
+  }
+
+  /**
+   * 玩家最近的任务快照：主线程上取实时值，其他线程取最多半秒前的快照。
+   *
+   * @return 没有任务时为空
+   */
+  public Optional<DriveApi.TaskView> taskView(UUID playerId) {
+    if (Bukkit.isPrimaryThread()) {
+      return tasks.taskOf(playerId).map(TaskViews::of);
+    }
+    return Optional.ofNullable(taskViews.get(playerId));
+  }
+
+  /** 玩家驾驶会话的快照：主线程上取实时值，其他线程取最多半秒前的快照。 */
+  public Optional<DriveApi.SessionView> sessionViewSnapshot(UUID playerId) {
+    if (Bukkit.isPrimaryThread()) {
+      return sessionView(playerId);
+    }
+    return Optional.ofNullable(sessionViews.get(playerId));
+  }
+
+  private void refreshViews() {
+    Map<UUID, DriveApi.TaskView> nextTasks = new HashMap<>();
+    for (DriverTask task : tasks.allTasks()) {
+      nextTasks.put(task.playerId(), TaskViews.of(task));
+    }
+    Map<UUID, DriveApi.SessionView> nextSessions = new HashMap<>();
+    for (UUID playerId : active.keySet()) {
+      sessionView(playerId).ifPresent(view -> nextSessions.put(playerId, view));
+    }
+    taskViews = Map.copyOf(nextTasks);
+    sessionViews = Map.copyOf(nextSessions);
+  }
+
+  /** 驾驶调度列车（任务模式）此刻是否可用。 */
+  public boolean driverTasksOpen() {
+    return pickupOpen(config);
+  }
+
   private void sendTaskHint(Player player, String key, Map<String, String> values) {
     player.sendActionBar(plugin.getLocaleManager().component(key, values));
   }
@@ -2570,7 +2824,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /** 任务随驾驶结束：评分、告诉驾驶员、写记录（异步）。没有任务（运营人员直接接管）时不记。 */
-  private void recordTask(DriveSession session, DriverLink link) {
+  private Optional<DriveApi.TaskScore> recordTask(DriveSession session, DriverLink link) {
     Optional<DriverTask> taskOpt =
         tasks
             .taskOf(session.playerId())
@@ -2578,7 +2832,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
             .filter(task -> task.points() < 0);
     if (taskOpt.isEmpty()) {
-      return;
+      return Optional.empty();
     }
     DriverTask task = taskOpt.get();
     TaskScore score = link.finalizeScore();
@@ -2624,6 +2878,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             Instant.now(),
             DriveTaskRecordCodec.encode(score));
     saveRecord(record);
+    return Optional.of(TaskViews.score(score, result.points(), result.grade().name()));
   }
 
   /** 重载时存储连接池会被换掉：写入失败隔这么久用新的连接池再试一次。 */
@@ -2672,7 +2927,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       requestHandback(session, "revoked");
       return true;
     }
-    task.get().finish(DriverTask.State.INTERRUPTED, "revoked");
+    tasks.interruptClaim(playerId, "revoked");
     return true;
   }
 

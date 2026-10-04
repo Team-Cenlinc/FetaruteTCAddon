@@ -72,6 +72,18 @@ public final class TaskBoardSource {
    */
   public static List<TaskBoardEntries.Row> departures(
       FetaruteTCAddon plugin, Station station, Instant now, int windowMinutes) {
+    return departures(plugin, station, now, Duration.ofMinutes(windowMinutes));
+  }
+
+  /**
+   * 这个车站在时间窗内的发车（未经筛选）。
+   *
+   * @param station 车站；运营商为空时不按运营商区分（同站码的车站都算）
+   * @param from 从这个时刻起（往前多看一小段，正在停站的车不会漏掉）
+   * @param window 往后看多久
+   */
+  public static List<TaskBoardEntries.Row> departures(
+      FetaruteTCAddon plugin, Station station, Instant from, Duration window) {
     Optional<TimetableApi> api = DriverTaskManager.timetables();
     if (api.isEmpty()) {
       return List.of();
@@ -81,8 +93,8 @@ public final class TaskBoardSource {
             .departuresAt(
                 null,
                 station.stationCode(),
-                now.minus(TaskBoardEntries.DEPARTED_GRACE),
-                Duration.ofMinutes(windowMinutes).plus(TaskBoardEntries.DEPARTED_GRACE),
+                from.minus(TaskBoardEntries.DEPARTED_GRACE),
+                window.plus(TaskBoardEntries.DEPARTED_GRACE),
                 DEPARTURE_LIMIT);
     Collection<TimetableApi.TrainAssignment> assignments = api.get().listAssignments();
     List<TaskBoardEntries.Row> rows = new ArrayList<>();
@@ -132,7 +144,10 @@ public final class TaskBoardSource {
     return departure
         .nodeId()
         .flatMap(RouteTerminals::stationIdentityOfNode)
-        .filter(ref -> ref.operatorCode().equalsIgnoreCase(station.operatorCode()))
+        .filter(
+            ref ->
+                station.operatorCode() == null
+                    || ref.operatorCode().equalsIgnoreCase(station.operatorCode()))
         .filter(ref -> ref.stationCode().equalsIgnoreCase(station.stationCode()))
         .isPresent();
   }

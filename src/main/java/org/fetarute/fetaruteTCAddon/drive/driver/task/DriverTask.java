@@ -1,12 +1,16 @@
 package org.fetarute.fetaruteTCAddon.drive.driver.task;
 
 import java.time.Instant;
+import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 
 /** 一名玩家领取的一趟驾驶任务：从领取的车站开到这趟车次的终点站。只在服务器主线程使用。 */
 public final class DriverTask {
+
+  /** 在任务板领取的任务的来源标记。 */
+  public static final String SOURCE_BOARD = "board";
 
   /** 任务状态。 */
   public enum State {
@@ -44,8 +48,15 @@ public final class DriverTask {
   private final Instant claimedAt;
   private DrivingMode mode;
   private State state = State.CLAIMED;
+  private final UUID taskId = UUID.randomUUID();
   private String trainName;
   private boolean depotPickup;
+  private int alightStopSequence = -1;
+  private String alightStationCode = "";
+  private String alightStationName = "";
+  private String source = SOURCE_BOARD;
+  private Map<String, String> metadata = Map.of();
+  private boolean finishAnnounced;
   private long startedTick = -1L;
   private Instant startedAt;
   private int points = -1;
@@ -145,6 +156,56 @@ public final class DriverTask {
 
   public void setTrainName(String trainName) {
     this.trainName = trainName;
+  }
+
+  /** 任务 ID：每次领取或派出都不同，供外部插件辨认。 */
+  public UUID taskId() {
+    return taskId;
+  }
+
+  /** 下车站的停靠序号；开到终点站的任务为 -1。 */
+  public int alightStopSequence() {
+    return alightStopSequence;
+  }
+
+  public String alightStationCode() {
+    return alightStationCode;
+  }
+
+  public String alightStationName() {
+    return alightStationName;
+  }
+
+  /** 开到这一站就结束（区间任务）。 */
+  public void setAlight(int stopSequence, String stationCode, String stationName) {
+    this.alightStopSequence = stopSequence;
+    this.alightStationCode = stationCode == null ? "" : stationCode;
+    this.alightStationName =
+        stationName == null || stationName.isBlank() ? this.alightStationCode : stationName;
+  }
+
+  /** 来源：任务板为 {@link #SOURCE_BOARD}，插件派出的为调用方给的标记。 */
+  public String source() {
+    return source;
+  }
+
+  /** 调用方给的附加数据。 */
+  public Map<String, String> metadata() {
+    return metadata;
+  }
+
+  public void setSource(String source, Map<String, String> metadata) {
+    this.source = source == null || source.isBlank() ? SOURCE_BOARD : source;
+    this.metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+  }
+
+  /** 任务结束只对外报一次：第一次调用返回 true。 */
+  public boolean announceFinish() {
+    if (finishAnnounced || !state.finished()) {
+      return false;
+    }
+    finishAnnounced = true;
+    return true;
   }
 
   /** 是否要从车库接车：车库出车时扣在股道上等驾驶员，等不到再在接班站接班。 */

@@ -1976,6 +1976,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         etaApi,
         timetableApi,
         () -> stationDirectory == null ? 0L : stationDirectory.revision());
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.installDrive(
+        new org.fetarute.fetaruteTCAddon.api.internal.DriveApiImpl(this));
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");

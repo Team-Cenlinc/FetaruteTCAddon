@@ -170,4 +170,80 @@ class DriverTaskManagerTest {
         java.util.Optional.empty(),
         java.util.OptionalLong.empty());
   }
+
+  private static DriverTaskManager.TaskSpec spec(String trip, int alight) {
+    return new DriverTaskManager.TaskSpec(
+        new TaskKey(TT, trip, LocalDate.of(2026, 10, 3)),
+        "R1",
+        "OP",
+        "AAA",
+        "A 站",
+        "OP:S:AAA:1",
+        1,
+        NOW.plusSeconds(3600),
+        null,
+        alight,
+        alight >= 0 ? "CCC" : "",
+        alight >= 0 ? "C 站" : "",
+        true,
+        "typewriter",
+        java.util.Map.of("quest", "q1"));
+  }
+
+  @Test
+  @DisplayName("插件派任务：带下车站、来源与附加数据；与任务板同一套占用规则")
+  void assignCarriesIntervalAndSource() {
+    Player a = player("a");
+    Player b = player("b");
+
+    assertEquals(
+        DriverTaskManager.ClaimOutcome.CLAIMED,
+        tasks.assign(a, spec("R1-010", 4), DrivingMode.MANUAL, true, NOW));
+    DriverTask task = tasks.taskOf(a.getUniqueId()).orElseThrow();
+    assertEquals(4, task.alightStopSequence());
+    assertEquals("C 站", task.alightStationName());
+    assertEquals("typewriter", task.source());
+    assertEquals(java.util.Map.of("quest", "q1"), task.metadata());
+    assertTrue(task.depotPickup());
+
+    assertEquals(
+        DriverTaskManager.ClaimOutcome.TAKEN,
+        tasks.assign(b, spec("R1-010", -1), DrivingMode.MANUAL, true, NOW));
+    assertEquals(
+        DriverTaskManager.ClaimOutcome.ALREADY_HAS_TASK,
+        tasks.assign(a, spec("R1-011", -1), DrivingMode.MANUAL, true, NOW));
+    assertEquals(
+        DriverTaskManager.ClaimOutcome.DISABLED,
+        tasks.assign(b, spec("R1-011", -1), DrivingMode.MANUAL, false, NOW));
+  }
+
+  @Test
+  @DisplayName("外部插件可以拦下领取；没开车就结束的任务只报一次")
+  void listenerVetoesClaimsAndHearsUnstartedEndsOnce() {
+    java.util.List<String> heard = new java.util.ArrayList<>();
+    tasks.setListener(
+        new DriverTaskManager.Listener() {
+          @Override
+          public boolean beforeClaim(DriverTask task) {
+            return !task.key().tripCode().equals("R1-099");
+          }
+
+          @Override
+          public void onUnstartedFinished(DriverTask task) {
+            heard.add(task.key().tripCode() + ":" + task.state());
+          }
+        });
+    Player a = player("a");
+
+    assertEquals(
+        DriverTaskManager.ClaimOutcome.CANCELLED,
+        tasks.assign(a, spec("R1-099", -1), DrivingMode.MANUAL, true, NOW));
+    assertTrue(tasks.taskOf(a.getUniqueId()).isEmpty(), "被拦下的不登记");
+
+    tasks.assign(a, spec("R1-012", -1), DrivingMode.MANUAL, true, NOW);
+    tasks.abandon(a.getUniqueId(), "api");
+    tasks.expireClaim(a.getUniqueId(), "again");
+
+    assertEquals(java.util.List.of("R1-012:ABANDONED"), heard);
+  }
 }

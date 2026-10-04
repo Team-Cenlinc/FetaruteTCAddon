@@ -68,6 +68,7 @@ public final class DriverLink {
   private String skippedStation;
   private boolean doorsClosing;
   private boolean turnbackPending;
+  private int announcedStops;
   private DriverSchedule schedule;
 
   private int serviceInterventions;
@@ -568,6 +569,15 @@ public final class DriverLink {
 
   public void setTargetLabel(String label) {
     this.targetLabel = label == null ? "" : label;
+  }
+
+  /** 已对外报过成绩的停站数。 */
+  public int announcedStops() {
+    return announcedStops;
+  }
+
+  public void setAnnouncedStops(int count) {
+    this.announcedStops = count;
   }
 
   /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。 */

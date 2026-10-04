@@ -33,6 +33,11 @@ public final class TaskScore {
     return List.copyOf(stops);
   }
 
+  /** 已记下成绩的停站数。 */
+  public int stopCount() {
+    return stops.size();
+  }
+
   /** 记下防护介入与确认的计数（结束时一次写入）。 */
   public void setCounts(
       int service,

@@ -24,6 +24,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ScheduledDeparturePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver;
@@ -365,6 +366,74 @@ public final class TimetableService implements ScheduledDeparturePlan {
         .filter(duty -> intent.tripIndex() < duty.tripIds().size())
         .flatMap(duty -> timetable.trip(duty.tripIds().get(intent.tripIndex())))
         .map(trip -> dueTrip(timetable, trip, intent.key()));
+  }
+
+  /**
+   * 一个停靠点的计划。
+   *
+   * @param stopSequence 停靠序号
+   * @param stationCode 站码（只有车站本体节点才有）
+   * @param nodeId 调度图节点
+   * @param stops 是否停车（不是通过）
+   * @param arrival 计划到达
+   * @param departure 计划发车
+   */
+  public record PlannedStop(
+      int stopSequence,
+      Optional<String> stationCode,
+      Optional<String> nodeId,
+      boolean stops,
+      Optional<Instant> arrival,
+      Optional<Instant> departure) {}
+
+  /**
+   * 一趟车次某一天的停靠表。
+   *
+   * @param tripId 车次 ID
+   * @param tripCode 车次号（表里的写法）
+   * @param routeId 交路
+   * @param routeCode 交路代码
+   * @param stops 各停靠点
+   */
+  public record TripPlan(
+      UUID tripId, String tripCode, UUID routeId, String routeCode, List<PlannedStop> stops) {
+    public TripPlan {
+      stops = stops == null ? List.of() : List.copyOf(stops);
+    }
+  }
+
+  /**
+   * 一趟车次某一天的停靠表与各站计划时刻（只读，不看时间窗）；时刻表未发布或没有这个车次时为空。
+   *
+   * @param tripCode 车次号（不分大小写）
+   */
+  public Optional<TripPlan> tripPlan(UUID timetableId, String tripCode, LocalDate serviceDate) {
+    Timetable timetable = timetableId == null ? null : snapshot.byId().get(timetableId);
+    if (timetable == null || tripCode == null || serviceDate == null) {
+      return Optional.empty();
+    }
+    Optional<TimetableTrip> tripOpt = timetable.tripByCode(tripCode.trim());
+    if (tripOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    TimetableTrip trip = tripOpt.get();
+    Optional<TimetableRoutePlan> plan = timetable.routePlan(trip.routeId());
+    if (plan.isEmpty()) {
+      return Optional.empty();
+    }
+    List<PlannedStop> stops = new ArrayList<>();
+    for (TimetableStop stop : plan.get().stops()) {
+      stops.add(
+          new PlannedStop(
+              stop.stopSequence(),
+              stop.stationCode(),
+              stop.nodeId(),
+              stop.passType() != RouteStopPassType.PASS,
+              timetable.scheduledArrival(trip, stop.stopSequence(), serviceDate),
+              timetable.scheduledDeparture(trip, stop.stopSequence(), serviceDate)));
+    }
+    return Optional.of(
+        new TripPlan(trip.id(), trip.tripCode(), trip.routeId(), plan.get().routeCode(), stops));
   }
 
   /**

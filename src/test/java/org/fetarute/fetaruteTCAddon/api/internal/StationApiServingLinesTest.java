@@ -278,7 +278,7 @@ class StationApiServingLinesTest {
       FetaruteApi.initialize(
           null, null, routeApi, null, stations, null, null, null, null, directory::revision);
       FetaruteApi api = FetaruteApi.getInstance();
-      assertEquals("1.9.0", api.version());
+      assertEquals("1.10.0", api.version());
       long before = api.dataRevision();
       assertEquals(directory.revision(), before);
       directory.reload(storage.provider());
