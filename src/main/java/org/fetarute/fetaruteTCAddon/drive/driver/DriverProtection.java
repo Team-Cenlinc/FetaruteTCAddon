@@ -133,17 +133,14 @@ public final class DriverProtection {
         permitted = 0.0;
       }
     }
-    // 进站曲线：驾驶员不制动时由防护在越站阈值之前（留出停车余量）停下，算停过头而不是越站。
-    // 越过停车点后剩余距离为负，照算进去：曲线的终点固定在阈值前，不随列车往前挪；
-    // 防护的停车点若正好是阈值，制动的少许滞后就会把车送过阈值，被判成越站。
+    // 进站曲线：最远只许冲到越站阈值处（再远就是越站，由站台处理）。
     boolean station = Double.isFinite(in.stationRemainingBlocks());
     if (station) {
       permitted =
           Math.min(
               permitted,
               brakingCurveBps(
-                  in.stationRemainingBlocks()
-                      + Math.max(0.0, config.stopSkipBlocks() - config.stopMarginBlocks()),
+                  Math.max(0.0, in.stationRemainingBlocks()) + config.stopSkipBlocks(),
                   in.serviceDecelBps2(),
                   in.reactionSeconds()));
     }
