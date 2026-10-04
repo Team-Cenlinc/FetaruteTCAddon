@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.drive.session;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -80,6 +81,9 @@ public final class DriveSession {
   private static final double TICKS_PER_SECOND = 20.0;
   private static final double STEP_SECONDS = 1.0 / TICKS_PER_SECOND;
 
+  /** 最高速度的变化小于它（格/秒）视为没变。 */
+  private static final double TOP_SPEED_EPS_BPS = 0.01;
+
   /** 车厢实际速度低于它（blocks/tick）视为停住，与 TrainCarts 的 launch 判定相同。 */
   private static final double STALLED_BPT = 0.001;
 
@@ -124,6 +128,10 @@ public final class DriveSession {
   private long seatLostSinceTick = -1;
   private long groupMissingSinceTick = -1;
   private double lastCapBps;
+
+  /** 最近一次为跟随信号抬高到的最高速度（格/秒）。 */
+  private double raisedTopBps;
+
   private final SpeedLimitTracker speedLimit;
   private final TrainSetup setup;
   private final CabSystems cab;
@@ -315,6 +323,32 @@ public final class DriveSession {
       return driverLink.lastDecision().permittedBps();
     }
     return speedLimit.displayLimitBps(lastCapBps);
+  }
+
+  /**
+   * 驾驶调度列车时，信号允许的速度高于车辆最高速度就跟上去：编表与自动运行都只受线路与信号限制，人工驾驶也不该比它们慢。 超速仍由车载防护按信号管着。抬高时一并抬高 TrainCarts
+   * 的限速属性（它是硬上限）；只在允许速度升高时抬，不跟牌子改的限速来回争。
+   */
+  private void raiseTopSpeed(TrainProperties properties) {
+    double top = dynamics.params().maxSpeedBps();
+    DriverLink link = driverLink;
+    if (link != null && link.controlsPhysically() && link.directive() != null) {
+      double permitted = link.directive().permittedBps();
+      if (Double.isFinite(permitted) && permitted > top) {
+        top = permitted;
+      }
+    }
+    dynamics.setTopSpeedBps(top);
+    if (!(top > raisedTopBps + TOP_SPEED_EPS_BPS)) {
+      raisedTopBps = Math.min(raisedTopBps, top);
+      return;
+    }
+    raisedTopBps = top;
+    double wanted = top / TICKS_PER_SECOND;
+    if (properties.getSpeedLimit() < wanted) {
+      properties.setSpeedLimit(wanted);
+      speedLimit.guard(wanted);
+    }
   }
 
   /** 上一次记进诊断日志的停站阶段（只用于在阶段变化时记一条）。 */
@@ -770,9 +804,10 @@ public final class DriveSession {
     }
     lastAdvanceTick = nowTick;
     var properties = group.getProperties();
+    raiseTopSpeed(properties);
     lastCapBps =
         speedLimit.onTick(
-            properties.getSpeedLimit(), dynamics.params().maxSpeedBps(), properties::setSpeedLimit);
+            properties.getSpeedLimit(), dynamics.topSpeedBps(), properties::setSpeedLimit);
     detectStall(group);
     Notch effective = notch();
     boolean parkingBraking = cab.enabled() && cab.air().parkingApplied() && !isStopped();

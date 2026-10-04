@@ -19,6 +19,7 @@ public final class DriveDynamics {
   private double speedBps;
   private double effort;
   private double accelerationBps2;
+  private double topSpeedBps = Double.NaN;
 
   public DriveDynamics(DriveParams params, DriveConfig config) {
     this.params = Objects.requireNonNull(params, "params");
@@ -42,6 +43,16 @@ public final class DriveDynamics {
 
   public DriveParams params() {
     return params;
+  }
+
+  /** 此刻能跑到的最高速度（格/秒）：没有另行设定时为车辆最高速度。 */
+  public double topSpeedBps() {
+    return Double.isFinite(topSpeedBps) ? topSpeedBps : params.maxSpeedBps();
+  }
+
+  /** 另行设定能跑到的最高速度（驾驶调度列车时跟随信号允许的速度）；NaN 表示回到车辆最高速度。 */
+  public void setTopSpeedBps(double value) {
+    this.topSpeedBps = Double.isFinite(value) && value > 0.0 ? value : Double.NaN;
   }
 
   /** 以给定速度重新开始，实际力归零。会话开始、接管已在运动的列车时使用。 */
@@ -108,7 +119,7 @@ public final class DriveDynamics {
       a -= config.coastDragBps2();
     }
     accelerationBps2 = a;
-    double cap = Math.max(0.0, Math.min(capBps, params.maxSpeedBps()));
+    double cap = Math.max(0.0, Math.min(capBps, topSpeedBps()));
     speedBps = Math.max(0.0, Math.min(cap, speedBps + a * seconds));
     if (speedBps <= 0.0 && effort < 0.0) {
       accelerationBps2 = 0.0;
