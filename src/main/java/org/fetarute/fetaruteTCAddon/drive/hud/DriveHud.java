@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
+import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupText;
@@ -19,10 +20,10 @@ import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 驾驶员的动作栏显示：速度、档位、限速与行驶方向。
+ * 驾驶员的动作栏显示：车速与限速、档位与力度、非前进时的行驶方向，以及一条最要紧的提示。
  *
- * <p>速度与限速同时给出 km/h（1 格/秒按 1 米/秒计）。超速时速度与限速按 {@link OverspeedLevel} 标黄、标红。文案走语言文件的 {@code
- * drive.hud.*} 键。
+ * <p>车速与限速写 km/h（1 格/秒按 1 米/秒计），去掉了“速度、档位、限速”标签，一眼读完。超速时车速与限速按 {@link OverspeedLevel} 标黄、标红。
+ * 文案走语言文件的 {@code drive.hud.*} 键。
  */
 public final class DriveHud {
 
@@ -57,8 +58,6 @@ public final class DriveHud {
     Component limit =
         locale.component(
             "drive.hud.limit." + level.key(), Map.of("limit_kmh", format(limitBps * KMH_PER_BPS)));
-    String directionKey =
-        "drive.hud.direction." + session.reverser().name().toLowerCase(Locale.ROOT);
     TagResolver resolver =
         TagResolver.builder()
             .resolver(Placeholder.component("speed", speed))
@@ -66,9 +65,12 @@ public final class DriveHud {
             .resolver(
                 Placeholder.unparsed("notch", session.isAto() ? "ATO" : session.notch().name()))
             .resolver(Placeholder.component("force", forceBar(session.effort())))
-            .resolver(Placeholder.unparsed("direction", locale.text(directionKey)))
+            .resolver(Placeholder.component("direction", direction(locale, session)))
             .build();
-    Component line = locale.component("drive.hud.line", resolver);
+    // 没有限速信息时只写车速，不显示“-”。
+    Component line =
+        locale.component(
+            level == OverspeedLevel.NONE ? "drive.hud.line-no-limit" : "drive.hud.line", resolver);
     CabSystems cab = session.cab();
     long now = Bukkit.getCurrentTick();
     if (cab.enabled() && cab.vigilance().tripped()) {
@@ -195,6 +197,16 @@ public final class DriveHud {
       return "drive.hud.driver.no-signal";
     }
     return null;
+  }
+
+  /** 行驶方向：前进是常态，不占位置；空挡与后退才显示，前面带一个空格。 */
+  static Component direction(LocaleManager locale, DriveSession session) {
+    if (session.reverser() == ReverserPosition.FORWARD) {
+      return Component.empty();
+    }
+    String key = "drive.hud.direction." + session.reverser().name().toLowerCase(Locale.ROOT);
+    return SPACE.append(
+        locale.component("drive.hud.direction-tag", Map.of("direction", locale.text(key))));
   }
 
   /** 十格力度条：点亮的格按种类着色，其余暗灰。 */

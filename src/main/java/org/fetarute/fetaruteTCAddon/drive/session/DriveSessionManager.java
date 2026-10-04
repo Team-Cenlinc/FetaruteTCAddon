@@ -5,6 +5,7 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutSetSlotHandle;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.EnumSet;
@@ -20,10 +21,9 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
-import org.bukkit.Sound;
-import org.bukkit.SoundCategory;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.inventory.InventoryType;
@@ -64,6 +64,8 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRescueLadder;
@@ -88,8 +90,10 @@ import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.MotorRatio;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
+import org.fetarute.fetaruteTCAddon.drive.hud.DriveBossBar;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveHud;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
+import org.fetarute.fetaruteTCAddon.drive.hud.DriverReport;
 import org.fetarute.fetaruteTCAddon.drive.hud.StopMarker;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DrivePacketListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarItems;
@@ -106,7 +110,11 @@ import org.fetarute.fetaruteTCAddon.drive.setup.SetupAnimations;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetupStore;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
  * 手动驾驶会话的生命周期：开始、逐 tick 维护、结束，以及网络线程与主线程之间的交接。
@@ -202,6 +210,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DrivePacketListener packetListener = new DrivePacketListener(this);
   private final DriveMenu menu;
   private final DriveSidebar sidebar;
+  private final DriveBossBar bossBar = new DriveBossBar();
+  private final DriveSounds sounds = new DriveSounds();
+  private final Map<UUID, DriveCueTracker> cueTrackers = new HashMap<>();
+  private final Map<UUID, Long> lastHornTick = new HashMap<>();
   private final StationStopPoints stationStopPoints;
   private final StopMarker stopMarker;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
@@ -255,6 +267,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   private void applyDriverConfig(DriveConfig current) {
+    sounds.configure(current.sounds());
     driverRegistry.setAtoConfirmTicks(current.driver().recovery().atoConfirmSeconds() * 20L);
     for (DriveSession session : active.values()) {
       if (session.driverLink() != null) {
@@ -348,6 +361,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       releasePickup(pickup);
     }
     sidebar.hideAll();
+    for (UUID playerId : new ArrayList<>(active.keySet())) {
+      bossBar.hide(playerId);
+    }
     stopMarker.removeAll();
     DrivePacketListener.unregister(plugin);
   }
@@ -441,6 +457,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     if (session.isAto() && session.driverLink().confirmDeparture()) {
                       traceSession(session, "ATO 确认发车");
                       notice(player, "drive.driver.ato.confirmed", Map.of());
+                      sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
                     } else if (session.driverLink() != null
                         && !session.isAto()
                         && session
@@ -450,6 +467,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                             .isPresent()) {
                       traceSession(session, "确认信号");
                       notice(player, "drive.driver.signal.confirmed", Map.of());
+                      sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
                     }
                   }
                 });
@@ -774,6 +792,47 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             });
   }
 
+  /** Boss 栏的行车引导与提示音：每次刷新 HUD 时算一次。 */
+  private void updateGuidance(Player player, DriveSession session, DriveConfig current, long now) {
+    DriverGuidanceConfig guidance = current.driver().guidance();
+    Optional<DriverGuidance.Advice> advice = session.updateGuidance(guidance);
+    if (advice.isPresent() && guidance.bossBar()) {
+      bossBar.refresh(player, plugin.getLocaleManager(), session, advice.get(), guidance);
+    } else {
+      bossBar.hide(player.getUniqueId());
+    }
+    sounds.playAll(
+        player,
+        cueTrackers
+            .computeIfAbsent(player.getUniqueId(), id -> new DriveCueTracker())
+            .observe(session.cueSnapshot(advice.orElse(null)), now));
+  }
+
+  /** 撤掉驾驶员的 Boss 栏，丢掉提示音与鸣笛的状态。 */
+  private void forgetHud(UUID playerId) {
+    bossBar.hide(playerId);
+    cueTrackers.remove(playerId);
+    lastHornTick.remove(playerId);
+  }
+
+  /** Space 鸣笛：在驾驶员所在位置播放，附近的玩家都听得到；也算一次警惕确认。 */
+  public void onHorn(Player player) {
+    DriveSession session = active.get(player.getUniqueId());
+    if (session == null || session.phase() != DriveSession.Phase.ACTIVE) {
+      return;
+    }
+    long now = Bukkit.getCurrentTick();
+    Long last = lastHornTick.get(player.getUniqueId());
+    if (last != null && now - last < sounds.config().hornCooldownTicks()) {
+      return;
+    }
+    if (sounds.broadcast(player.getLocation(), DriveCue.HORN)) {
+      lastHornTick.put(player.getUniqueId(), now);
+      acknowledgeVigilance(session, "鸣笛");
+      traceSession(session, "鸣笛");
+    }
+  }
+
   // ---- 停车后菜单 ----
 
   /** 按 F 键：停稳且不在牵引档时打开停车后菜单。 */
@@ -1075,12 +1134,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       traceSession(session, "警惕装置开始报警");
     }
     switch (event) {
-      case WARNING_STARTED, WARNING_SECOND -> player.playSound(
-          player.getLocation(), Sound.BLOCK_NOTE_BLOCK_BELL, SoundCategory.MASTER, 1.0f, 1.6f);
+      case WARNING_STARTED, WARNING_SECOND -> sounds.play(player, DriveCue.VIGILANCE_WARNING);
       case TRIPPED -> {
         player.getInventory().setHeldItemSlot(Notch.EB.slot());
-        player.playSound(
-            player.getLocation(), Sound.BLOCK_ANVIL_LAND, SoundCategory.MASTER, 0.6f, 0.8f);
+        sounds.play(player, DriveCue.VIGILANCE_TRIPPED);
         player.sendMessage(plugin.getLocaleManager().component("drive.cab.vigilance-tripped"));
         traceSession(session, "警惕装置超时，施加紧急制动");
       }
@@ -1230,6 +1287,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     closeDoors(session);
     releaseCab(session);
     stopMarker.remove(session.playerId());
+    forgetHud(session.playerId());
     if (active.remove(session.playerId(), session)) {
       Player player = Bukkit.getPlayer(session.playerId());
       if (player != null && player.isOnline()) {
@@ -1276,6 +1334,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     closeDoors(session);
     releaseCab(session);
     stopMarker.remove(session.playerId());
+    forgetHud(session.playerId());
     if (active.remove(session.playerId(), session)) {
       Player player = Bukkit.getPlayer(session.playerId());
       if (player != null && player.isOnline()) {
@@ -1644,6 +1703,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (now >= session.actionBarHeldUntil()) {
         player.sendActionBar(DriveHud.render(plugin.getLocaleManager(), session, sidebarShown));
       }
+      updateGuidance(player, session, current, now);
       if (current.driver().stopMarker() && session.driverLink() != null) {
         stopMarker.update(
             player,
@@ -1689,6 +1749,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       // 接班时还查不到晚点（车库出车、终点站发车前）：等第一次查得到时再记，回送与等驾驶员的时间不算驾驶员的晚点。
       link.score().setDelayAtStart(taskDelayOf(session.playerId(), trainName));
     }
+    if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0) {
+      session.setLiveScore(link.liveResult(taskDelayOf(session.playerId(), trainName)));
+    }
     plugin
         .getRuntimeDispatchService()
         .flatMap(dispatch -> dispatch.getDiagnostics(trainName))
@@ -1721,6 +1784,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       link.setDoorsClosing(closing);
       link.setRequiredDoorSide(side);
       link.setTargetLabel(current.stationName());
+      if (current.phase() != DriverStationStop.Phase.APPROACH
+          && current.stopped()
+          && session.markStopReported(current)) {
+        reportStop(session, current);
+      }
       if (current.phase() != session.lastStationPhase()) {
         traceSession(
             session,
@@ -2852,6 +2920,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     task.setResult(result.points(), result.grade().name());
     Player player = Bukkit.getPlayer(session.playerId());
     if (player != null && player.isOnline()) {
+      showResult(player, task, score, result);
       player.sendMessage(
           plugin
               .getLocaleManager()
@@ -2868,6 +2937,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                       String.valueOf(result.points()),
                       "grade",
                       result.grade().name())));
+      for (DriverReport.Line line : DriverReport.sheet(score)) {
+        player.sendMessage(DriverReport.render(plugin.getLocaleManager(), line));
+      }
     }
     DriveTaskRecord record =
         new DriveTaskRecord(
@@ -2889,6 +2961,47 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             DriveTaskRecordCodec.encode(score));
     saveRecord(record);
     return Optional.of(TaskViews.score(score, result.points(), result.grade().name()));
+  }
+
+  /** 任务结束时的大字评级：标题是评级，副标题是车次、终态与得分；完成时配音效。 */
+  private void showResult(
+      Player player, DriverTask task, TaskScore score, ScoreRules.Result result) {
+    LocaleManager locale = plugin.getLocaleManager();
+    Component subtitle =
+        locale.component(
+            "drive.task.result-subtitle",
+            Map.of(
+                "trip",
+                task.key().tripCode(),
+                "state",
+                locale.text("drive.task.state." + task.state().name().toLowerCase(Locale.ROOT)),
+                "points",
+                String.valueOf(result.points())));
+    player.showTitle(
+        Title.title(
+            locale.component("drive.grade." + result.grade().name().toLowerCase(Locale.ROOT)),
+            subtitle,
+            Title.Times.times(
+                Duration.ofMillis(250), Duration.ofSeconds(3), Duration.ofMillis(750))));
+    if (task.state() == DriverTask.State.COMPLETED) {
+      sounds.play(player, DriveCue.TASK_COMPLETE);
+    }
+  }
+
+  /** 停妥那一刻：动作栏停留显示对标结果，并配对应的音效。 */
+  private void reportStop(DriveSession session, DriverStationStop stop) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    StopScore score = StopScore.of(stop);
+    if (player == null || score == null) {
+      return;
+    }
+    DriverReport.stopResult(score)
+        .ifPresent(
+            line -> {
+              player.sendActionBar(DriverReport.render(plugin.getLocaleManager(), line));
+              session.holdActionBar(Bukkit.getCurrentTick() + NOTICE_HOLD_TICKS);
+              sounds.play(player, DriverReport.stopCue(score.window()));
+            });
   }
 
   /** 重载时存储连接池会被换掉：写入失败隔这么久用新的连接池再试一次。 */

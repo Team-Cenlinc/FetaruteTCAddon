@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
@@ -13,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
@@ -432,6 +434,35 @@ public final class DriverLink {
         vigilanceTrips,
         lateDepartures);
     return score;
+  }
+
+  /**
+   * 到此刻为止的成绩估算：已停过的站（含正在停的这一站）、到此刻的介入与确认计数、此刻的晚点，按开到终点给评级。与结束时同一套规则。
+   *
+   * @param delayNowSeconds 此刻的晚点（秒）；查不到时为空
+   */
+  public ScoreRules.Result liveResult(OptionalLong delayNowSeconds) {
+    TaskScore live = new TaskScore();
+    for (StopScore stop : score.stops()) {
+      live.addStop(stop);
+    }
+    if (stationStop != null
+        && stationStop.active()
+        && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
+      live.addStop(StopScore.of(stationStop));
+    }
+    live.setCounts(
+        serviceInterventions,
+        emergencyInterventions,
+        forcedStops,
+        signalConfirm.confirmations(),
+        signalConfirm.misses(),
+        signalConfirm.averageReactionSeconds(),
+        vigilanceTrips,
+        lateDepartures);
+    live.setDelayAtStart(score.delayAtStartSeconds());
+    live.setDelayAtEnd(delayNowSeconds);
+    return ScoreRules.evaluate(live, true);
   }
 
   /** 最近一次已结束的停站；还没停过时为空。 */

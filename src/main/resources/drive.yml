@@ -148,3 +148,97 @@ driver:
   breaker-held-trains: 5
   breaker-held-seconds: 60
   breaker-cooldown-minutes: 15
+  # 行车引导：Boss 栏显示前方最要紧的目标（停车信号、车站停车点、限速降低处）、距离与建议速度，该刹车时提示“开始制动”。
+  # 只对调度列车生效（非调度列车没有行车许可数据）
+  guidance:
+    boss-bar: true
+    # Boss 栏满格对应的距离（格），更远的目标不显示
+    range-blocks: 400
+    # 建议速度按“舒适制动”反推：常用全制动（B4）减速度乘这个比例，0.8 约相当于 B3
+    advice-brake-ratio: 0.8
+    # 建议速度比此刻容许速度低多少（格/秒），免得贴着防护线开
+    advice-margin-bps: 0.5
+    # 车速超过建议速度多少（格/秒）提示开始制动
+    brake-advice-tolerance-bps: 0.3
+
+# 驾驶提示音。声音不会被别的插件的动作栏消息顶掉，要紧的提醒都配了声音。
+# 每项有 key（音效）、volume（音量）、pitch（音高，0.5–2）；key 留空（""）即关闭该项。
+# 材质包里的自定义音效（如 fetarute:drive.horn）也可以填
+sounds:
+  enabled: true
+  # 两次鸣笛（驾驶中按 Space）至少间隔多少秒
+  horn-cooldown-seconds: 3
+  # 鸣笛：在列车所在位置播放，附近的玩家都听得到
+  horn:
+    key: "minecraft:item.goat_horn.sound.0"
+    volume: 4.0
+    pitch: 1.0
+  # 信号变严、等待右键确认：每秒响一次直到确认
+  signal-restrictive:
+    key: "minecraft:block.note_block.bit"
+    volume: 1.0
+    pitch: 0.7
+  signal-confirmed:
+    key: "minecraft:ui.button.click"
+    volume: 0.6
+    pitch: 1.2
+  signal-clear:
+    key: "minecraft:block.note_block.bell"
+    volume: 0.8
+    pitch: 1.2
+  # 防护介入：ATP 制动；紧急制动或强制停车
+  atp-brake:
+    key: "minecraft:block.note_block.pling"
+    volume: 1.0
+    pitch: 0.5
+  emergency:
+    key: "minecraft:block.anvil.place"
+    volume: 0.8
+    pitch: 0.7
+  # 超速进入红区：每半秒响一次直到回落
+  overspeed:
+    key: "minecraft:block.note_block.bit"
+    volume: 0.8
+    pitch: 1.8
+  # 该开始制动了（每个目标一次）
+  brake-advice:
+    key: "minecraft:block.note_block.chime"
+    volume: 1.0
+    pitch: 1.0
+  doors-released:
+    key: "minecraft:block.note_block.chime"
+    volume: 0.8
+    pitch: 1.6
+  depart:
+    key: "minecraft:block.note_block.bell"
+    volume: 1.0
+    pitch: 1.4
+  ato-confirm:
+    key: "minecraft:block.note_block.bell"
+    volume: 0.8
+    pitch: 1.0
+  # 停妥时的对标结果：停准；可开门范围内；越过窗口或停短
+  stop-accurate:
+    key: "minecraft:entity.player.levelup"
+    volume: 0.6
+    pitch: 1.4
+  stop-accepted:
+    key: "minecraft:block.note_block.pling"
+    volume: 0.8
+    pitch: 1.2
+  stop-poor:
+    key: "minecraft:block.note_block.bass"
+    volume: 1.0
+    pitch: 0.8
+  task-complete:
+    key: "minecraft:ui.toast.challenge_complete"
+    volume: 0.8
+    pitch: 1.0
+  vigilance-warning:
+    key: "minecraft:block.note_block.bell"
+    volume: 1.0
+    pitch: 1.6
+  vigilance-tripped:
+    key: "minecraft:block.anvil.land"
+    volume: 0.6
+    pitch: 0.8

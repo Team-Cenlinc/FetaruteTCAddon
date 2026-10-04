@@ -1449,7 +1449,9 @@ drive:
     b4: "<gold>B4 常用制动 4 档</gold>"
     eb: "<red>EB 紧急制动</red>"
   hud:
-    line: "<gray>速度</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>限速</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    line: "<speed> <gray>/</gray> <limit> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
+    line-no-limit: "<speed> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
+    direction-tag: "<aqua><direction></aqua>"
     speed:
       ok: "<white><speed_kmh></white>"
       warn: "<yellow><speed_kmh></yellow>"
@@ -1471,10 +1473,10 @@ drive:
       wait-signal: "<red>停车信号</red>"
       confirm-signal: "<gold><bold>信号变严：右键确认</bold></gold>"
     station:
-      approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>格</gray>"
-      move-up: "<yellow>请前移 <white><distance></white> 格对标</yellow>"
+      approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>米</gray>"
+      move-up: "<yellow>请前移 <white><distance></white> 米对标</yellow>"
       on-mark: "<green>已对标</green>"
-      overrun: "<red>越过停车点 <white><distance></white> 格</red>"
+      overrun: "<red>越过停车点 <white><distance></white> 米</red>"
       skipped: "<red><bold>越站</bold></red> <gray>越过停车点太多，</gray><white><station></white><gray>未停站</gray>"
       open-doors:
         left: "<yellow>请开左侧车门</yellow>"
@@ -1506,6 +1508,42 @@ drive:
       forward: "前进"
       neutral: "空挡"
       reverse: "后退"
+    stop-result:
+      accurate: "<green><bold>停准</bold></green> <white><offset></white> <gray><station></gray>"
+      accepted: "<yellow><bold>可开门</bold></yellow> <white><offset></white> <gray><station></gray>"
+      overrun: "<red><bold>越出窗口</bold></red> <white><offset></white> <gray><station></gray>"
+      short: "<red><bold>欠标超时</bold></red> <white><offset></white> <gray><station></gray>"
+      skipped: "<red><bold>越站</bold></red> <gray><station></gray>"
+      over: "过标 <distance> 米"
+      under: "欠标 <distance> 米"
+  bossbar:
+    no-signal: "<yellow>无行车许可</yellow>"
+    clear: "<green>前方畅通</green> <gray>允许</gray> <white><limit_kmh></white> <gray>km/h</gray>"
+    ato-clear: "<green>前方畅通</green> <gray>下一站</gray> <white><station></white>"
+    stop-signal: "<red>停车信号</red> <white><distance></white> <gray>米</gray>"
+    station-approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>米</gray>"
+    limit: "<gold>限速 <limit_kmh></gold> <white><distance></white> <gray>米</gray>"
+    suggest: "<dark_gray>|</dark_gray> <gray>建议</gray> <white><speed_kmh></white> <gray>km/h</gray>"
+    brake-advice: "<red><bold>开始制动</bold></red>"
+    ato-prefix: "<aqua>ATO</aqua>"
+    station:
+      open-doors:
+        left: "<aqua><station></aqua> <yellow>请开左侧车门</yellow>"
+        right: "<aqua><station></aqua> <yellow>请开右侧车门</yellow>"
+        both: "<aqua><station></aqua> <yellow>请开两侧车门</yellow>"
+        any: "<aqua><station></aqua> <yellow>请开站台侧车门</yellow>"
+        none: "<aqua><station></aqua> <gray>本站不开门</gray>"
+      dwell: "<aqua><station></aqua> <gray>停站</gray> <white><seconds></white> <gray>秒</gray>"
+      close-doors: "<aqua><station></aqua> <yellow>停站时间已到，请关门</yellow>"
+      doors-closing: "<aqua><station></aqua> <gray>车门关闭中</gray>"
+      wait-departure: "<aqua><station></aqua> <gray>等待发车</gray>"
+      depart: "<green><bold>发车信号</bold></green>"
+  grade:
+    s: "<gold><bold>S</bold></gold>"
+    a: "<#ffaa00><bold>A</bold></#ffaa00>"
+    b: "<green><bold>B</bold></green>"
+    c: "<yellow><bold>C</bold></yellow>"
+    d: "<red><bold>D</bold></red>"
   cab:
     vigilance-tripped: "<prefix> <red>警惕装置超时未确认，已施加紧急制动。行车中请定期换档或按右键确认。</red>"
   setup:
@@ -1530,6 +1568,7 @@ drive:
       doors: "车门"
       air: "风压"
       vigilance: "警惕"
+      score: "评分"
     value:
       text: "<white><text></white>"
       signal:
@@ -1547,10 +1586,10 @@ drive:
         late: "<white><time></white> <red>晚点 <deviation></red>"
         early: "<white><time></white> <aqua>早点 <deviation></aqua>"
       stop:
-        approach: "<aqua><station></aqua> <white><distance></white> <gray>格</gray>"
+        approach: "<aqua><station></aqua> <white><distance></white> <gray>米</gray>"
         on-mark: "<green>已对标</green>"
-        move-up: "<yellow>请前移 <white><distance></white> 格</yellow>"
-        overrun: "<red>越过 <white><distance></white> 格</red>"
+        move-up: "<yellow>请前移 <white><distance></white> 米</yellow>"
+        overrun: "<red>越过 <white><distance></white> 米</red>"
         open-doors:
           left: "<yellow>请开左侧车门</yellow>"
           right: "<yellow>请开右侧车门</yellow>"
@@ -1577,6 +1616,7 @@ drive:
         counting: "<white><seconds></white> <gray>秒</gray>"
         warning: "<red><bold>报警 <seconds></bold></red>"
         tripped: "<red>紧急制动</red>"
+      score: "<yellow><points></yellow> <gold><bold><grade></bold></gold>"
   mode:
     mu: "动车组"
     loco: "机车牵引"
@@ -1740,6 +1780,26 @@ drive:
     started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
     started-interval: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到 <white><station></white></green>"
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
+    result-subtitle: "<white>车次 <aqua><trip></aqua> <state> · <yellow><points></yellow> 分</white>"
+    sheet:
+      stop: "  <gray><station></gray>  <result><flags>"
+      result:
+        accurate: "<green><offset> · 停准</green>"
+        accepted: "<yellow><offset> · 可开门</yellow>"
+        overrun: "<red><offset> · 越出窗口</red>"
+        short: "<red><offset> · 欠标超时</red>"
+        skipped: "<red>越站</red>"
+      flag:
+        wrong-door: " <red>开错侧门</red>"
+        doors-taken-over: " <red>站台代开门</red>"
+        both: " <red>开错侧门，站台代开门</red>"
+      protection: "  <gray>防护</gray> ATP 制动 <white><service></white> 次 · 紧急制动 <white><emergency></white> 次 · 强制停车 <white><forced></white> 次"
+      signal: "  <gray>信号</gray> 确认 <white><confirmed></white> 次 · 漏确认 <white><missed></white> 次 · 平均反应 <white><reaction></white> 秒"
+      vigilance: "  <gray>警惕</gray> 超时紧急制动 <white><trips></white> 次"
+      ato: "  <gray>ATO</gray> 迟确认发车 <white><late></white> 次"
+      delay: "  <gray>晚点</gray> 接班 <white><start></white> → 结束 <white><end></white>"
+      delta: "<value> 秒"
+      unknown: "-"
     abandoned: "<prefix> <yellow>已放弃任务</yellow>"
     none: "<prefix> <gray>你当前没有驾驶任务</gray>"
     status: "<prefix> <white><route></white> <aqua><trip></aqua> <gray>|</gray> <white><station></white> <time> <gray>|</gray> 列车 <white><train></white> <gray>|</gray> <mode> <gray>|</gray> <state>"

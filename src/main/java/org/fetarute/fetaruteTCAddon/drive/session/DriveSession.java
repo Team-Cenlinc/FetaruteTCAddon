@@ -4,26 +4,34 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.UUID;
 import org.bukkit.inventory.ItemStack;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.SignalConfirm;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveDynamics;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.NotchSelector;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
+import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
 
 /**
  * 一名驾驶员对一列车的手动驾驶会话。
@@ -118,6 +126,9 @@ public final class DriveSession {
   private DriverStationStop.Phase lastStationPhase;
   private DriverLink driverLink;
   private double odometerBlocks;
+  private boolean adviceBraking;
+  private ScoreRules.Result liveScore;
+  private DriverStationStop reportedStop;
 
   /** 不需要启动流程的会话（列车已就绪）。 */
   public DriveSession(
@@ -321,6 +332,120 @@ public final class DriveSession {
     if (blocks > 0.0 && Double.isFinite(blocks)) {
       odometerBlocks += blocks;
     }
+  }
+
+  /**
+   * 算此刻的行车引导：前方目标、距离、建议速度与是否提示开始制动（回差按上一次的结论）。
+   *
+   * <p>ATO 下调度不向驾驶员下发行车许可，只按前方停车点给目标与距离，不给建议速度、不提示制动。
+   *
+   * @return 驾驶非调度列车时为空
+   */
+  public Optional<DriverGuidance.Advice> updateGuidance(DriverGuidanceConfig guidance) {
+    DriverLink link = driverLink;
+    if (link == null) {
+      adviceBraking = false;
+      return Optional.empty();
+    }
+    boolean physically = link.controlsPhysically();
+    DriverDirective directive = physically ? link.directive() : null;
+    DriverProtection.Decision decision = physically ? link.lastDecision() : null;
+    double permitted =
+        decision != null
+            ? decision.permittedBps()
+            : directive != null ? directive.permittedBps() : speedBps();
+    double requested = directive == null ? Double.POSITIVE_INFINITY : directive.requestedBps();
+    double stopSignal =
+        directive != null && directive.isStop() && directive.distanceBlocks().isPresent()
+            ? link.authorityAheadBlocks()
+            : Double.NaN;
+    List<SignalLookahead.EdgeSpeedConstraint> edges =
+        directive == null || directive.envelope() == null
+            ? List.of()
+            : directive.envelope().edgeLimits();
+    DriverLink.StationTarget station = link.stationTarget().orElse(null);
+    double serviceDecel =
+        dynamics.params().decelBps2() * config.brakeFraction(Notch.B4) * cab.brakeScale();
+    DriverGuidance.Advice advice =
+        DriverGuidance.evaluate(
+            new DriverGuidance.Input(
+                speedBps(),
+                isStopped(),
+                requested,
+                permitted,
+                stopSignal,
+                station == null ? Double.NaN : station.remainingBlocks(),
+                edges,
+                link.travelledSinceDirective(),
+                serviceDecel,
+                1.0 / (2.0 * config.effortRatePerSecond()),
+                config.driver().stopMarginBlocks(),
+                adviceBraking),
+            guidance);
+    if (!physically && advice.brake()) {
+      advice = new DriverGuidance.Advice(advice.target(), advice.suggestedBps(), false);
+    }
+    adviceBraking = advice.brake();
+    return Optional.of(advice);
+  }
+
+  /**
+   * 这一帧给提示音用的驾驶状态。
+   *
+   * @param advice 这一帧的行车引导；驾驶非调度列车时为 {@code null}
+   */
+  public DriveCueTracker.Snapshot cueSnapshot(DriverGuidance.Advice advice) {
+    DriverLink link = driverLink;
+    boolean physically = link == null || link.controlsPhysically();
+    boolean overspeedRed =
+        physically
+            && OverspeedLevel.classify(speedBps(), displayLimitBps(), overspeedRedRatio())
+                == OverspeedLevel.OVER;
+    if (link == null) {
+      return new DriveCueTracker.Snapshot(
+          false, -1, DriverProtection.Intervention.NONE, overspeedRed, false, null, false);
+    }
+    DriverDirective directive = physically ? link.directive() : null;
+    int aspectRank =
+        directive == null
+            ? -1
+            : switch (directive.aspect()) {
+              case PROCEED -> 0;
+              case PROCEED_WITH_CAUTION -> 1;
+              case CAUTION -> 2;
+              case STOP -> 3;
+            };
+    DriverProtection.Decision decision = physically ? link.lastDecision() : null;
+    return new DriveCueTracker.Snapshot(
+        physically && link.signalConfirm().pending(),
+        aspectRank,
+        decision == null ? DriverProtection.Intervention.NONE : decision.intervention(),
+        overspeedRed,
+        advice != null && advice.brake(),
+        link.stationStop().map(DriverStationStop::phase).orElse(null),
+        link.departurePending());
+  }
+
+  /** 驾驶调度列车时到此刻为止的成绩估算（侧边栏显示）；还没算过时为空。 */
+  public Optional<ScoreRules.Result> liveScore() {
+    return Optional.ofNullable(liveScore);
+  }
+
+  public void setLiveScore(ScoreRules.Result result) {
+    this.liveScore = result;
+  }
+
+  /**
+   * 记下这一站已经报过对标结果。
+   *
+   * @return 这一站第一次报时为 {@code true}
+   */
+  public boolean markStopReported(DriverStationStop stop) {
+    if (stop == null || stop == reportedStop) {
+      return false;
+    }
+    reportedStop = stop;
+    return true;
   }
 
   /** 让正在运行的控车动作自行退出（转为 ATO 时由自动运行接着操纵）。 */

@@ -43,7 +43,9 @@ drive:
     b4: "<gold>B4 Service Brake 4</gold>"
     eb: "<red>EB Emergency Brake</red>"
   hud:
-    line: "<gray>Speed</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>Limit</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    line: "<speed> <gray>/</gray> <limit> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
+    line-no-limit: "<speed> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
+    direction-tag: "<aqua><direction></aqua>"
     speed:
       ok: "<white><speed_kmh></white>"
       warn: "<yellow><speed_kmh></yellow>"
@@ -65,10 +67,10 @@ drive:
       wait-signal: "<red>Stop signal</red>"
       confirm-signal: "<gold><bold>Signal restricted: right-click to confirm</bold></gold>"
     station:
-      approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>blocks</gray>"
-      move-up: "<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"
+      approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>m</gray>"
+      move-up: "<yellow>Move up <white><distance></white> m to the stop mark</yellow>"
       on-mark: "<green>On the mark</green>"
-      overrun: "<red>Past the stop mark by <white><distance></white> blocks</red>"
+      overrun: "<red>Past the stop mark by <white><distance></white> m</red>"
       skipped: "<red><bold>Station skipped</bold></red> <gray>overran too far, no stop at</gray> <white><station></white>"
       open-doors:
         left: "<yellow>Open the left doors</yellow>"
@@ -100,6 +102,42 @@ drive:
       forward: "Forward"
       neutral: "Neutral"
       reverse: "Reverse"
+    stop-result:
+      accurate: "<green><bold>On the mark</bold></green> <white><offset></white> <gray><station></gray>"
+      accepted: "<yellow><bold>Within door window</bold></yellow> <white><offset></white> <gray><station></gray>"
+      overrun: "<red><bold>Outside the window</bold></red> <white><offset></white> <gray><station></gray>"
+      short: "<red><bold>Short, timed out</bold></red> <white><offset></white> <gray><station></gray>"
+      skipped: "<red><bold>Station skipped</bold></red> <gray><station></gray>"
+      over: "<distance> m past"
+      under: "<distance> m short"
+  bossbar:
+    no-signal: "<yellow>No movement authority</yellow>"
+    clear: "<green>Line clear</green> <gray>permitted</gray> <white><limit_kmh></white> <gray>km/h</gray>"
+    ato-clear: "<green>Line clear</green> <gray>next</gray> <white><station></white>"
+    stop-signal: "<red>Stop signal</red> <white><distance></white> <gray>m</gray>"
+    station-approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>m</gray>"
+    limit: "<gold>Limit <limit_kmh></gold> <white><distance></white> <gray>m</gray>"
+    suggest: "<dark_gray>|</dark_gray> <gray>advised</gray> <white><speed_kmh></white> <gray>km/h</gray>"
+    brake-advice: "<red><bold>Brake now</bold></red>"
+    ato-prefix: "<aqua>ATO</aqua>"
+    station:
+      open-doors:
+        left: "<aqua><station></aqua> <yellow>Open the left doors</yellow>"
+        right: "<aqua><station></aqua> <yellow>Open the right doors</yellow>"
+        both: "<aqua><station></aqua> <yellow>Open the doors on both sides</yellow>"
+        any: "<aqua><station></aqua> <yellow>Open the platform-side doors</yellow>"
+        none: "<aqua><station></aqua> <gray>No doors at this stop</gray>"
+      dwell: "<aqua><station></aqua> <gray>dwell</gray> <white><seconds></white> <gray>s</gray>"
+      close-doors: "<aqua><station></aqua> <yellow>Dwell time is up, close the doors</yellow>"
+      doors-closing: "<aqua><station></aqua> <gray>Doors closing</gray>"
+      wait-departure: "<aqua><station></aqua> <gray>Waiting to depart</gray>"
+      depart: "<green><bold>Clear to depart</bold></green>"
+  grade:
+    s: "<gold><bold>S</bold></gold>"
+    a: "<#ffaa00><bold>A</bold></#ffaa00>"
+    b: "<green><bold>B</bold></green>"
+    c: "<yellow><bold>C</bold></yellow>"
+    d: "<red><bold>D</bold></red>"
   cab:
     vigilance-tripped: "<prefix> <red>The vigilance device was not acknowledged and applied the emergency brake. Change notch or right-click regularly while moving.</red>"
   setup:
@@ -124,6 +162,7 @@ drive:
       doors: "Doors"
       air: "Air"
       vigilance: "Vigilance"
+      score: "Score"
     value:
       text: "<white><text></white>"
       signal:
@@ -141,10 +180,10 @@ drive:
         late: "<white><time></white> <red>Late <deviation></red>"
         early: "<white><time></white> <aqua>Early <deviation></aqua>"
       stop:
-        approach: "<aqua><station></aqua> <white><distance></white> <gray>blocks</gray>"
+        approach: "<aqua><station></aqua> <white><distance></white> <gray>m</gray>"
         on-mark: "<green>On the mark</green>"
-        move-up: "<yellow>Move up <white><distance></white> blocks</yellow>"
-        overrun: "<red>Overran by <white><distance></white> blocks</red>"
+        move-up: "<yellow>Move up <white><distance></white> m</yellow>"
+        overrun: "<red>Overran by <white><distance></white> m</red>"
         open-doors:
           left: "<yellow>Open the left doors</yellow>"
           right: "<yellow>Open the right doors</yellow>"
@@ -171,6 +210,7 @@ drive:
         counting: "<white><seconds></white><gray>s</gray>"
         warning: "<red><bold>Alarm <seconds></bold></red>"
         tripped: "<red>Emergency brake</red>"
+      score: "<yellow><points></yellow> <gold><bold><grade></bold></gold>"
   mode:
     mu: "EMU"
     loco: "Locomotive"
@@ -334,6 +374,26 @@ drive:
     started: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to the terminus</green>"
     started-interval: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to <white><station></white></green>"
     result: "<prefix> <white>Trip <aqua><trip></aqua> <state></white> <gray>|</gray> score <yellow><points></yellow> <gray>grade</gray> <gold><bold><grade></bold></gold>"
+    result-subtitle: "<white>Trip <aqua><trip></aqua> <state> · <yellow><points></yellow> pts</white>"
+    sheet:
+      stop: "  <gray><station></gray>  <result><flags>"
+      result:
+        accurate: "<green><offset> · on the mark</green>"
+        accepted: "<yellow><offset> · within door window</yellow>"
+        overrun: "<red><offset> · outside the window</red>"
+        short: "<red><offset> · short, timed out</red>"
+        skipped: "<red>skipped</red>"
+      flag:
+        wrong-door: " <red>wrong-side doors</red>"
+        doors-taken-over: " <red>doors opened by the platform</red>"
+        both: " <red>wrong-side doors, doors opened by the platform</red>"
+      protection: "  <gray>Protection</gray> ATP <white><service></white> · emergency <white><emergency></white> · forced stops <white><forced></white>"
+      signal: "  <gray>Signals</gray> confirmed <white><confirmed></white> · missed <white><missed></white> · avg. reaction <white><reaction></white> s"
+      vigilance: "  <gray>Vigilance</gray> emergency brakes <white><trips></white>"
+      ato: "  <gray>ATO</gray> late departure confirmations <white><late></white>"
+      delay: "  <gray>Delay</gray> at takeover <white><start></white> → at end <white><end></white>"
+      delta: "<value> s"
+      unknown: "-"
     abandoned: "<prefix> <yellow>Task abandoned</yellow>"
     none: "<prefix> <gray>You have no driving task</gray>"
     status: "<prefix> <white><route></white> <aqua><trip></aqua> <gray>|</gray> <white><station></white> <time> <gray>|</gray> train <white><train></white> <gray>|</gray> <mode> <gray>|</gray> <state>"

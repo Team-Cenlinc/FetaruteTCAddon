@@ -4,7 +4,19 @@ drive:
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
   hud:
-    line: ["<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
+    line:
+      - "<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+      - "<gray>Speed</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>Limit</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    station:
+      approach: ["<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>blocks</gray>"]
+      move-up: ["<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"]
+      overrun: ["<red>Past the stop mark by <white><distance></white> blocks</red>"]
+  sidebar:
+    value:
+      stop:
+        approach: ["<aqua><station></aqua> <white><distance></white> <gray>blocks</gray>"]
+        move-up: ["<yellow>Move up <white><distance></white> blocks</yellow>"]
+        overrun: ["<red>Overran by <white><distance></white> blocks</red>"]
   command:
     help:
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]

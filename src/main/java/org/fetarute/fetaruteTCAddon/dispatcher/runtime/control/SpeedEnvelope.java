@@ -208,14 +208,39 @@ public final class SpeedEnvelope {
             originKey,
             originBlocks,
             Manual.NONE);
+    List<Constraint> rebuiltEdges = new ArrayList<>(manual.edges().size());
     for (SignalLookahead.EdgeSpeedConstraint edge : manual.edges()) {
-      rebuilt =
-          rebuilt.with(
-              curveBraking(
-                  edge.distanceBlocks(), edge.speedLimitBps(), cruise, manual.edgeCurve()));
+      Constraint braking =
+          curveBraking(edge.distanceBlocks(), edge.speedLimitBps(), cruise, manual.edgeCurve());
+      if (braking != null) {
+        rebuilt = rebuilt.with(braking);
+        rebuiltEdges.add(braking);
+      }
     }
+    // 前方限速边的原始输入留着（驾驶员显示前方限速用）；进站限速已去掉，再调 manual 原样返回。
+    rebuilt =
+        new SpeedEnvelope(
+            rebuilt.constraints,
+            rebuilt.holdConstraints,
+            originKey,
+            originBlocks,
+            new Manual(
+                List.of(),
+                Double.NaN,
+                manual.edges(),
+                manual.edgeCurve(),
+                List.copyOf(rebuiltEdges)));
     double target = Math.min(cruise, rebuilt.limitBps(0.0));
     return new ManualView(Math.max(0.0, target), rebuilt);
+  }
+
+  /**
+   * 前方限速边（距离从取样时的车头量起，限速已考虑覆盖值）：给驾驶员显示前方限速与建议速度用，不参与控车。
+   *
+   * @return 没有记下限速边时为空表
+   */
+  public List<SignalLookahead.EdgeSpeedConstraint> edgeLimits() {
+    return manual.edges();
   }
 
   private static List<Constraint> without(List<Constraint> list, Set<Constraint> dropped) {

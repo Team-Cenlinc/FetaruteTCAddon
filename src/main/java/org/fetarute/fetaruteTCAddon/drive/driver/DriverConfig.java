@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
  * @param pickupWaitSeconds 始发站待命车、车库出车等驾驶员上车接班最多等多久（秒），过时照常发车
  * @param pickupTeleport 等驾驶员接班时提供“前往列车”传送（送到车头驾驶室旁，不塞进座位）
  * @param recovery 驾驶任务与拥堵恢复的参数
+ * @param guidance 行车引导（Boss 栏、建议速度、开始制动提示）的参数
  */
 public record DriverConfig(
     boolean enabled,
@@ -40,7 +41,8 @@ public record DriverConfig(
     boolean stopMarker,
     int pickupWaitSeconds,
     boolean pickupTeleport,
-    DriverRecovery recovery) {
+    DriverRecovery recovery,
+    DriverGuidanceConfig guidance) {
 
   private static final int TICKS_PER_SECOND = 20;
 
@@ -49,6 +51,7 @@ public record DriverConfig(
 
   public DriverConfig {
     recovery = recovery == null ? DriverRecovery.defaults() : recovery;
+    guidance = guidance == null ? DriverGuidanceConfig.defaults() : guidance;
   }
 
   /** 内置默认值。 */
@@ -69,7 +72,8 @@ public record DriverConfig(
         true,
         90,
         true,
-        DriverRecovery.defaults());
+        DriverRecovery.defaults(),
+        DriverGuidanceConfig.defaults());
   }
 
   /**
@@ -133,7 +137,8 @@ public record DriverConfig(
         section.getBoolean("stop-marker", d.stopMarker),
         pickupWait(section, d.pickupWaitSeconds, sink),
         section.getBoolean("pickup-teleport", d.pickupTeleport),
-        DriverRecovery.from(section, sink));
+        DriverRecovery.from(section, sink),
+        DriverGuidanceConfig.from(section, sink));
   }
 
   /** 站停的停车窗口。 */

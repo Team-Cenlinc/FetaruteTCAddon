@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverConfig;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
 
 /**
  * 手动驾驶配置（{@code drive.yml}）。
@@ -41,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
  * @param cab simulation 级车上系统（气压、停放制动、制动试验、警惕装置）的参数
  * @param sidebar 是否在驾驶员的侧边栏（计分板）显示车上系统的详细状态
  * @param driver 驾驶调度列车（DRIVER 模式）的参数
+ * @param sounds 驾驶提示音与鸣笛
  */
 public record DriveConfig(
     boolean enabled,
@@ -67,7 +69,8 @@ public record DriveConfig(
     int coldAfterMinutes,
     CabConfig cab,
     boolean sidebar,
-    DriverConfig driver) {
+    DriverConfig driver,
+    DriveSoundConfig sounds) {
 
   private static final int TRACTION_STEPS = 3;
   private static final int BRAKE_STEPS = 4;
@@ -82,6 +85,7 @@ public record DriveConfig(
     Objects.requireNonNull(setupTimings, "setupTimings");
     Objects.requireNonNull(cab, "cab");
     Objects.requireNonNull(driver, "driver");
+    sounds = sounds == null ? DriveSoundConfig.defaults() : sounds;
     tractionFractions = List.copyOf(tractionFractions);
     brakeFractions = List.copyOf(brakeFractions);
     if (tractionFractions.size() != TRACTION_STEPS || brakeFractions.size() != BRAKE_STEPS) {
@@ -116,7 +120,8 @@ public record DriveConfig(
         10,
         CabConfig.defaults(),
         true,
-        DriverConfig.defaults());
+        DriverConfig.defaults(),
+        DriveSoundConfig.defaults());
   }
 
   /** 给定档位的牵引力比例（占满牵引）；非牵引档为 0。 */
@@ -181,7 +186,8 @@ public record DriveConfig(
         positiveInt(section, "cold-after-minutes", defaults.coldAfterMinutes, sink),
         cab(section.getConfigurationSection("simulation"), defaults.cab, sink),
         section.getBoolean("sidebar", defaults.sidebar),
-        DriverConfig.from(section.getConfigurationSection("driver"), sink));
+        DriverConfig.from(section.getConfigurationSection("driver"), sink),
+        DriveSoundConfig.from(section.getConfigurationSection("sounds"), sink));
   }
 
   private static CabConfig cab(

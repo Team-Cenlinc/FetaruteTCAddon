@@ -71,6 +71,16 @@ public final class TaskScore {
     this.delayAtEndSeconds = seconds == null ? OptionalLong.empty() : seconds;
   }
 
+  /** 接班时的晚点（秒，提前为负）；查不到时为空。 */
+  public OptionalLong delayAtStartSeconds() {
+    return delayAtStartSeconds;
+  }
+
+  /** 结束时的晚点（秒，提前为负）；查不到时为空。 */
+  public OptionalLong delayAtEndSeconds() {
+    return delayAtEndSeconds;
+  }
+
   /** 驾驶期间晚点增加了多少秒（提前为负）；接班或结束时查不到晚点时为空。 */
   public OptionalLong delayGainedSeconds() {
     if (delayAtStartSeconds.isEmpty() || delayAtEndSeconds.isEmpty()) {

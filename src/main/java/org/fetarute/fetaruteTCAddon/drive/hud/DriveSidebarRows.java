@@ -18,7 +18,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
- * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压与警惕装置；驾驶调度列车时最上面加车次、行车许可与车站。
+ * 驾驶员侧边栏的内容：只放持续变化、行车中要随时看的状态——车门，simulation 级再加风压与警惕装置；驾驶调度列车时最上面加车次、行车许可、车站、表定时刻与实时评分。
  *
  * <p>车站一行平时显示下一站，进站时换成离停车点的距离，停妥后显示停站阶段。计分板不会被别的插件的动作栏消息顶掉，所以车站信息以这里为准，动作栏只提示要动手的操作。
  *
@@ -70,6 +70,19 @@ public final class DriveSidebarRows {
               : signalRow(link));
       rows.add(stationRow(link, session.isStopped()));
       link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);
+      session
+          .liveScore()
+          .ifPresent(
+              score ->
+                  rows.add(
+                      new Row(
+                          "drive.sidebar.label.score",
+                          "drive.sidebar.value.score",
+                          Map.of(
+                              "points",
+                              String.valueOf(score.points()),
+                              "grade",
+                              score.grade().name()))));
     }
     rows.add(new Row("drive.sidebar.label.doors", doorsKey(session, nowTick), Map.of()));
     CabSystems cab = session.cab();

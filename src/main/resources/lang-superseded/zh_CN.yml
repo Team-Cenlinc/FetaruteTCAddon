@@ -33,7 +33,19 @@ drive:
     claim:
       claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
   hud:
-    line: ["<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
+    line:
+      - "<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+      - "<gray>速度</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>限速</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    station:
+      approach: ["<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>格</gray>"]
+      move-up: ["<yellow>请前移 <white><distance></white> 格对标</yellow>"]
+      overrun: ["<red>越过停车点 <white><distance></white> 格</red>"]
+  sidebar:
+    value:
+      stop:
+        approach: ["<aqua><station></aqua> <white><distance></white> <gray>格</gray>"]
+        move-up: ["<yellow>请前移 <white><distance></white> 格</yellow>"]
+        overrun: ["<red>越过 <white><distance></white> 格</red>"]
   command:
     help:
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
