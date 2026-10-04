@@ -14,7 +14,6 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
-import java.util.OptionalDouble;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
@@ -45,7 +44,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
-import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
@@ -85,7 +83,6 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskViews;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
-import org.fetarute.fetaruteTCAddon.drive.dynamics.MotorRatio;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveHud;
@@ -188,7 +185,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private static final int RESEAT_RETRY_TICKS = 5;
 
   private final FetaruteTCAddon plugin;
-  private final TrainConfigResolver trainConfigResolver = new TrainConfigResolver();
   private final ConcurrentHashMap<UUID, DriveSession> active = new ConcurrentHashMap<>();
   private final List<DriveSession> stopping = new ArrayList<>();
   private final ConcurrentHashMap<UUID, Boolean> refreshPending = new ConcurrentHashMap<>();
@@ -1189,28 +1185,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   private DriveParams resolveParams(MinecartGroup group, DriveConfig current) {
-    var properties = group.getProperties();
-    TrainConfig base = trainConfigResolver.resolve(properties, plugin.getConfigManager().current());
-    Optional<DriveMode> mode =
-        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MODE)
-            .flatMap(DriveMode::parse);
-    OptionalDouble motorFraction =
-        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MT)
-            .map(MotorRatio::parse)
-            .orElse(OptionalDouble.empty());
-    OptionalDouble maxSpeed =
-        TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_MAX_BPS)
-            .map(OptionalDouble::of)
-            .orElse(OptionalDouble.empty());
-    return DriveParams.resolve(
-        base.type(),
-        base.accelBps2(),
-        base.decelBps2(),
-        mode,
-        motorFraction,
-        maxSpeed,
-        group.size(),
-        current);
+    return DriveParamsResolver.resolve(
+        group.getProperties(), group.size(), plugin.getConfigManager().current(), current);
   }
 
   /**
