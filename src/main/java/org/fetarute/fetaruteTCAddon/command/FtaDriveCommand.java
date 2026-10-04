@@ -565,7 +565,11 @@ public final class FtaDriveCommand {
             station.get().stationCode(),
             station.get().name(),
             entries),
-        DrivePermissions.allowsMode(DrivingMode.ATO, player::hasPermission));
+        DrivePermissions.allowsMode(DrivingMode.ATO, player::hasPermission),
+        player.hasPermission(DrivePermissions.LEVEL)
+            ? Optional.of(drive.levels().effective(player, drive.config().level()))
+            : Optional.empty(),
+        drive.isDriving(player.getUniqueId()));
   }
 
   /** 新手教程：开始、退出、重置，或跳过当前一步。 */

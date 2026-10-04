@@ -50,6 +50,7 @@ permissions:
       fetarute.drive.driver.admin: true
       fetarute.drive.free: true
       fetarute.drive.ato: true
+      fetarute.drive.level: true
       fetarute.drive.records: true
       fetarute.drive.top: true
       fetarute.drive.tutorial: true
@@ -81,13 +82,14 @@ permissions:
     description: 编成、发布与删除时刻表（/fta timetable build|publish|delete）
     default: op
   fetarute.drive.player:
-    description: 打包授予全部玩家驾驶功能（基本命令、驾驶非调度列车、驾驶任务、ATO、驾驶记录、排行、新手教程）
+    description: 打包授予全部玩家驾驶功能（基本命令、驾驶非调度列车、驾驶任务、ATO、自选仿真等级、驾驶记录、排行、新手教程）
     default: op
     children:
       fetarute.drive: true
       fetarute.drive.free: true
       fetarute.drive.driver: true
       fetarute.drive.ato: true
+      fetarute.drive.level: true
       fetarute.drive.records: true
       fetarute.drive.top: true
       fetarute.drive.tutorial: true
@@ -107,15 +109,19 @@ permissions:
     description: 驾驶管理：查看与强制结束驾驶会话、收回任务、交还调度列车、拥堵熔断、驾驶诊断、查看他人驾驶记录、故障与救援（/fta drive list|stop|revoke|handback|breaker|probe|records <玩家>|fault|rescue）
     default: op
   fetarute.drive.driver:
-    description: 领取驾驶任务、驾驶调度列车（/fta drive tasks|task|mode）；子节点含手动驾驶的基本命令、ATO、驾驶记录与排行
+    description: 领取驾驶任务、驾驶调度列车（/fta drive tasks|task|mode）；子节点含手动驾驶的基本命令、ATO、自选仿真等级、驾驶记录与排行
     default: op
     children:
       fetarute.drive: true
       fetarute.drive.ato: true
+      fetarute.drive.level: true
       fetarute.drive.records: true
       fetarute.drive.top: true
   fetarute.drive.ato:
     description: 以 ATO 方式领取与驾驶调度列车（任务板右键、/fta drive mode ato）
+    default: op
+  fetarute.drive.level:
+    description: 在任务板上自选仿真等级（标准或仿真），选择记在玩家数据里；没有时一律用 drive.yml 的 level
     default: op
   fetarute.drive.records:
     description: 查看自己的驾驶记录（/fta drive records）

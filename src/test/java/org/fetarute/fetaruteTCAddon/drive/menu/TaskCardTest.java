@@ -6,6 +6,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
@@ -70,5 +71,15 @@ class TaskCardTest {
     assertEquals("drive.menu.card.vehicle.mu", card.lines().get(1).key());
     assertEquals(Map.of("accel", "1.10", "decel", "1.20"), card.lines().get(2).values());
     assertEquals(Map.of("kmh", "79"), card.lines().get(3).values());
+  }
+
+  @Test
+  @DisplayName("末尾写本次驾驶的仿真等级")
+  void levelLine() {
+    TaskCard.Card card =
+        TaskCard.free("debug-1", new DriveParams(DriveMode.MU, 1.1, 1.2, 22.0, 1.0))
+            .withLevel(SimulationLevel.SIMULATION);
+    assertEquals(5, card.lines().size());
+    assertEquals("drive.menu.card.level.simulation", card.lines().get(4).key());
   }
 }

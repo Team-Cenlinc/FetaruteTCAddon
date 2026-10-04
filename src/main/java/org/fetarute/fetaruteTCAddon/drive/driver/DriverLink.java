@@ -64,6 +64,15 @@ public final class DriverLink {
   private boolean departureConfirmed;
   private int lateDepartures;
 
+  /** 停站将尽、开始接受提前确认发车时的里程；没有开始时为 NaN。列车一动即失效。 */
+  private double departureArmOdometer = Double.NaN;
+
+  /** 提前确认发车时的里程；没有提前确认时为 NaN。列车一动即失效。 */
+  private double preConfirmOdometer = Double.NaN;
+
+  /** 站台放行时的里程：同一处不再开始接受确认（毫秒计的剩余停站与按 tick 计的停站可能差一秒）。 */
+  private double departureReleasedOdometer = Double.NaN;
+
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
   private String nextStopLabel = "";
@@ -128,6 +137,8 @@ public final class DriverLink {
     lastDecision = null;
     signalConfirm.reset();
     clearDepartureHold();
+    departureArmOdometer = Double.NaN;
+    preConfirmOdometer = Double.NaN;
     if (handbackReason == null) {
       serviceStopRequested = false;
     }
@@ -532,19 +543,27 @@ public final class DriverLink {
     long now = clock.getAsLong();
     if (departureHoldQueriedAt < 0L || now - departureHoldQueriedAt > DEPARTURE_QUERY_GAP_TICKS) {
       departureHoldSince = now;
-      departureConfirmed = false;
+      // 停站结束前已提前确认（之后列车没动过）：站台一问就放行，驾驶员的反应时间不算进停站。
+      departureConfirmed = stillAt(preConfirmOdometer);
+      preConfirmOdometer = Double.NaN;
     }
     departureHoldQueriedAt = now;
     if (departureConfirmed) {
-      clearDepartureHold();
+      releaseDeparture();
       return false;
     }
     if (now - departureHoldSince >= timeoutTicks) {
-      clearDepartureHold();
+      releaseDeparture();
       lateDepartures++;
       return false;
     }
     return true;
+  }
+
+  private void releaseDeparture() {
+    clearDepartureHold();
+    departureArmOdometer = Double.NaN;
+    departureReleasedOdometer = odometer.getAsDouble();
   }
 
   private void clearDepartureHold() {
@@ -559,16 +578,50 @@ public final class DriverLink {
         && clock.getAsLong() - departureHoldQueriedAt <= DEPARTURE_QUERY_GAP_TICKS;
   }
 
-  /**
-   * 驾驶员确认发车。
-   *
-   * @return 站台确实在等确认
-   */
-  public boolean confirmDeparture() {
-    if (!departurePending()) {
+  /** 列车停着没动：离提前确认的位置不到这么多格。 */
+  private static final double STILL_BLOCKS = 1.0;
+
+  private boolean stillAt(double mark) {
+    return !Double.isNaN(mark) && Math.abs(odometer.getAsDouble() - mark) < STILL_BLOCKS;
+  }
+
+  /** ATO 下停站将尽（剩余停站不超过提前确认的秒数）：从此刻到列车起步，驾驶员都可以提前确认发车。由驾驶会话每 tick 判断后调用。 */
+  public void openDepartureArm() {
+    if (mode == DrivingMode.ATO
+        && !stillAt(departureArmOdometer)
+        && !stillAt(departureReleasedOdometer)) {
+      departureArmOdometer = odometer.getAsDouble();
+    }
+  }
+
+  /** 驾驶员已确认发车，等站台放行（提前确认的或停站结束后确认的）。 */
+  public boolean departureConfirmed() {
+    return mode == DrivingMode.ATO
+        && (stillAt(preConfirmOdometer) || (departurePending() && departureConfirmed));
+  }
+
+  /** 要提示驾驶员确认发车：停站将尽或站台正在等，且还没确认。 */
+  public boolean departurePrompt() {
+    if (mode != DrivingMode.ATO || departureConfirmed()) {
       return false;
     }
-    departureConfirmed = true;
+    return departurePending() || stillAt(departureArmOdometer);
+  }
+
+  /**
+   * 驾驶员确认发车：站台正在等时立即放行；停站将尽时先记下，停站一结束就放行。
+   *
+   * @return 这次确认被接受（已确认过的不再算）
+   */
+  public boolean confirmDeparture() {
+    if (!departurePrompt()) {
+      return false;
+    }
+    if (departurePending()) {
+      departureConfirmed = true;
+    } else {
+      preConfirmOdometer = odometer.getAsDouble();
+    }
     return true;
   }
 

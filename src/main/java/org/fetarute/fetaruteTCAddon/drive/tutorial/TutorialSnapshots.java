@@ -43,7 +43,7 @@ public final class TutorialSnapshots {
             hint.filter(found -> found.kind() == DriverStationHint.Kind.OPEN_DOORS)
                 .map(found -> !"none".equals(found.variant()))
                 .orElse(false))
-        .departurePending(link != null && link.departurePending())
+        .departurePending(link != null && link.departurePrompt())
         .vigilanceWarning(cab.enabled() && cab.vigilance().warning(nowTick))
         .build();
   }

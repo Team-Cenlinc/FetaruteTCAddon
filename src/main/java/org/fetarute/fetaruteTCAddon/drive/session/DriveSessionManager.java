@@ -61,6 +61,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssign
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.DriveLevelPreference;
 import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
@@ -92,6 +93,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverPickups;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.PickupSpot;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
@@ -260,6 +262,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
   private final DriverTaskManager tasks;
   private final DriveTutorials tutorials;
+  private final DriveLevelPreference levels;
 
   private volatile DriveConfig config;
   private volatile boolean trace;
@@ -286,6 +289,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.tasks = new DriverTaskManager(plugin, this::traceTask);
     tasks.setListener(new TaskEvents());
     this.tutorials = new DriveTutorials(plugin, plugin::getLocaleManager);
+    this.levels = new DriveLevelPreference(plugin);
     applyDriverConfig(config);
   }
 
@@ -297,6 +301,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 新手教程与情境提示。 */
   public DriveTutorials tutorials() {
     return tutorials;
+  }
+
+  /** 玩家自选的仿真等级。 */
+  public DriveLevelPreference levels() {
+    return levels;
+  }
+
+  /** 在任务板上点了难度按钮：记下选择，就地换选中的按钮。从下一次开始驾驶起生效。 */
+  public void chooseLevel(Player player, TaskBoardHolder holder, SimulationLevel level) {
+    if (!player.hasPermission(DrivePermissions.LEVEL)) {
+      return;
+    }
+    levels.choose(player, level);
+    TaskBoard.showLevel(
+        holder, plugin.getLocaleManager(), level, active.containsKey(player.getUniqueId()));
+    sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
   }
 
   /** 开始新手教程：驾驶中立即开始，否则下一次开始驾驶时开始。返回给玩家的提示语言键，已直接给出第一步时为 {@code null}。 */
@@ -573,7 +593,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 让玩家开始驾驶他当前所坐的列车。 */
   public StartOutcome startSession(Player player) {
-    DriveConfig current = config;
+    // 仿真等级取玩家自选的（任务板上选择），没有选过时用 drive.yml 的；会话期间不再变。
+    DriveConfig current = config.withLevel(levels.effective(player, config.level()));
     if (!current.enabled()) {
       return StartOutcome.DISABLED;
     }
@@ -1809,6 +1830,20 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         current.cab(), cabVehicle(group, current, params), Bukkit.getCurrentTick());
   }
 
+  /** ATO 停站将尽：开始接受提前确认发车，停站一结束就放行，驾驶员的反应时间不算进停站。 */
+  private void openAtoDepartureArm(DriveSession session, MinecartGroup group, DriveConfig current) {
+    DriverLink link = session.driverLink();
+    int advance = current.driver().recovery().atoConfirmAdvanceSeconds();
+    if (link == null || advance <= 0) {
+      return;
+    }
+    plugin
+        .getDwellRegistry()
+        .flatMap(registry -> registry.remainingSeconds(group.getProperties().getTrainName()))
+        .filter(remaining -> remaining <= advance)
+        .ifPresent(remaining -> link.openDepartureArm());
+  }
+
   /** 这条控制链路所属的会话（驾驶中或制动停车中）。 */
   private DriveSession sessionOf(DriverLink link) {
     for (DriveSession session : active.values()) {
@@ -1964,6 +1999,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       double measured = measureSpeedBps(group);
       session.resetSpeed(measured);
       session.addOdometer(measured / 20.0);
+      openAtoDepartureArm(session, group, current);
     } else {
       ensureAction(group, session, now);
     }

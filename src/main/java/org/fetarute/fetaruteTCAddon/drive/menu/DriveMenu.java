@@ -94,14 +94,15 @@ public final class DriveMenu {
   }
 
   private TaskCard.Card card(DriveSession session) {
-    if (session.driverLink() == null) {
-      return TaskCard.free(session.trainName(), session.params());
-    }
-    return TaskCard.dispatch(
-        session.trainName(),
-        session.driverLink(),
-        tasks.apply(session.playerId()),
-        session.liveScore());
+    TaskCard.Card card =
+        session.driverLink() == null
+            ? TaskCard.free(session.trainName(), session.params())
+            : TaskCard.dispatch(
+                session.trainName(),
+                session.driverLink(),
+                tasks.apply(session.playerId()),
+                session.liveScore());
+    return card.withLevel(session.level());
   }
 
   /** 菜单是不是驾驶台菜单。 */

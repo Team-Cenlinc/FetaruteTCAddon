@@ -6,6 +6,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
@@ -40,6 +41,14 @@ public final class TaskCard {
    * @param lines 各行
    */
   public record Card(String titleKey, List<Line> lines) {
+
+    /** 末尾加一行本次驾驶的仿真等级。 */
+    public Card withLevel(SimulationLevel level) {
+      List<Line> all = new ArrayList<>(lines);
+      all.add(new Line("drive.menu.card.level." + level.name().toLowerCase(Locale.ROOT), Map.of()));
+      return new Card(titleKey, all);
+    }
+
     public Card {
       Objects.requireNonNull(titleKey, "titleKey");
       lines = lines == null ? List.of() : List.copyOf(lines);

@@ -469,7 +469,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
                         getLocaleManager()
                             .component(
                                 manager.claimTask(player, holder, row, mode),
-                                Map.of("trip", row.key().tripCode(), "route", row.routeCode())))),
+                                Map.of("trip", row.key().tripCode(), "route", row.routeCode()))),
+                manager::chooseLevel),
             this);
     driveSessionManager.start();
   }

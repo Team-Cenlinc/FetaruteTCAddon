@@ -35,6 +35,7 @@ drive:
       entry-time: ["<gray>计划发车</gray> <white><time></white>"]
       entry-platform: ["<gray>站台</gray> <white><platform></white>"]
       entry-train: ["<gray>列车</gray> <white><train></white>"]
+      entry-claimed-self: ["<gray>本人已领取</gray>"]
     claim:
       claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
     pickup:
@@ -51,6 +52,10 @@ drive:
       approach: ["<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>格</gray>"]
       move-up: ["<yellow>请前移 <white><distance></white> 格对标</yellow>"]
       overrun: ["<red>越过停车点 <white><distance></white> 格</red>"]
+  tutorial:
+    tips:
+      ato-confirm:
+        chat: ["<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"]
   sidebar:
     value:
       stop:

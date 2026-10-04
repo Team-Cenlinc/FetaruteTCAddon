@@ -147,6 +147,7 @@ class DrivePermissionsTest {
             DrivePermissions.FREE,
             DrivePermissions.DRIVER,
             DrivePermissions.ATO,
+            DrivePermissions.LEVEL,
             DrivePermissions.RECORDS,
             DrivePermissions.TOP,
             DrivePermissions.TUTORIAL,
@@ -182,6 +183,7 @@ class DrivePermissionsTest {
                 DrivePermissions.BASE,
                 DrivePermissions.FREE,
                 DrivePermissions.ATO,
+                DrivePermissions.LEVEL,
                 DrivePermissions.RECORDS,
                 DrivePermissions.TOP)),
         "只授予 fetarute.drive.driver 的服务器仍有原先的全部玩家功能: " + driver);

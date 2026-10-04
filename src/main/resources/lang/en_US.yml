@@ -87,6 +87,7 @@ drive:
       depart: "<green><bold>Clear to depart</bold></green>"
     ato:
       confirm: "<yellow><bold>ATO: right-click to confirm departure</bold></yellow>"
+      armed: "<green>ATO: departure confirmed, leaving when the dwell ends</green>"
     cab-change:
       active: "<gold><bold>Changing ends: <seconds> s left</bold></gold> <gray>take the cab in car</gray> <white><car></white>"
       announced: "<gold>Reversing here: go to the cab in car <white><car></white></gold>"
@@ -386,6 +387,9 @@ drive:
         loco: "<gray>Type: </gray><white>locomotive hauled</white>"
       motion: "<gray>Accel: </gray><white><accel></white> <gray>Decel: </gray><white><decel></white> <gray>m/s²</gray>"
       max-speed: "<gray>Max speed: </gray><white><kmh></white> <gray>km/h</gray>"
+      level:
+        standard: "<gray>Difficulty: </gray><white>Standard</white>"
+        simulation: "<gray>Difficulty: </gray><gold>Simulation</gold>"
     gauge:
       range: "<gray>Range 0–<white><range></white> kPa</gray>"
       main-reservoir:
@@ -490,7 +494,17 @@ drive:
       entry-stops: "<gray>Stops</gray> <white><stops></white> <gray>(incl. terminus)</gray>"
       entry-run-time: "<gray>Running time</gray> <white><run_time></white>"
       entry-claimed: "<gray>Taken by</gray> <white><player></white>"
-      entry-claimed-self: "<gray>Taken by you</gray>"
+      entry-claimed-self: "<green>Taken by you</green>"
+      level:
+        standard: "<green>Difficulty: Standard</green>"
+        simulation: "<gold>Difficulty: Simulation</gold>"
+        standard-desc: "<gray>One-click start-up; no air or brake test</gray>"
+        simulation-desc: "<gray>Switch-by-switch start-up; air, blended brake and brake test</gray>"
+        simulation-desc-2: "<gray>Random faults may occur if the server enables them</gray>"
+        selected: "<yellow>▶ Selected</yellow>"
+        select: "<gray>Click to select</gray>"
+        remember: "<gray>Remembered; applies to dispatched trains and free driving</gray>"
+        next-session: "<gray>Driving now: takes effect from your next session</gray>"
       run-time:
         seconds: "<seconds> s"
         minutes: "<minutes> min"
@@ -656,7 +670,7 @@ drive:
         chat: "<white>Departure signal:</white> <gray>When the action bar shows the departure signal you may start. Pull to P1–P3 and watch the signals and limits ahead.</gray>"
         subtitle: "<green>Departure signal: you may start</green>"
       ato-confirm:
-        chat: "<white>ATO departure:</white> <gray>When the action bar shows \"ATO: right-click to confirm departure\", right-click. If you do not, the train still leaves, but it counts against your score.</gray>"
+        chat: "<white>ATO departure:</white> <gray>About 10 seconds before the dwell ends the action bar shows \"ATO: right-click to confirm departure\"; right-click then to confirm in advance and the train leaves as soon as the dwell ends. If you do not, the train still leaves, but it counts against your score.</gray>"
         subtitle: "<yellow>Right-click to confirm departure</yellow>"
       vigilance:
         chat: "<white>Vigilance device:</white> <gray>While moving you must show you are alert. When it alarms, change notch or right-click; if you do not respond in time, the emergency brake is applied.</gray>"

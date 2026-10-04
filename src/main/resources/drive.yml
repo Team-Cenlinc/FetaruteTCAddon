@@ -8,6 +8,7 @@ config-version: 1
 enabled: true
 # 仿真等级：standard / simulation。两级都必须先启动才能牵引，紧急制动停稳后才能缓解，车门没关不能牵引。
 # standard 用驾驶台的启动按钮一键启动；simulation 在驾驶台逐项操作开关。
+# 持有 fetarute.drive.level 的玩家可在任务板最后一行自选等级（记在玩家数据里）；这里是没有选过的玩家与没有该节点的玩家用的等级。
 level: standard
 # 列车未设置 FTA_TRAIN_MAX_BPS 标签时的最高速度（格/秒）
 default-max-speed-bps: 22.0
@@ -215,6 +216,8 @@ driver:
   max-task-minutes: 90
   # ATO 下停站结束后等驾驶员右键确认发车的上限（秒），超时自动发车
   ato-confirm-seconds: 15
+  # ATO 下停站结束前多少秒起可以提前右键确认发车（停站一结束即放行，驾驶员的反应时间不算进停站）；0 表示只能在停站结束后确认
+  ato-confirm-advance-seconds: 10
   # 卡住的时间阶梯（秒，须依次递增）：列车能走却不走（表定停站、调度扣车不算）累计到各档时，
   # 依次告警、转 ATO、交还自动运行并判任务未完成、把驾驶员送到最近车站的站台
   rescue-warn-seconds: 60

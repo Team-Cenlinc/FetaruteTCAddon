@@ -115,8 +115,11 @@ public final class DriveHud {
     if (intervention != null) {
       return locale.component(intervention);
     }
-    if (link != null && link.departurePending()) {
+    if (link != null && link.departurePrompt()) {
       return locale.component("drive.hud.ato.confirm");
+    }
+    if (link != null && link.departureConfirmed()) {
+      return locale.component("drive.hud.ato.armed");
     }
     if (link != null && link.warnedBlockingSeconds() > 0L) {
       return locale.component(

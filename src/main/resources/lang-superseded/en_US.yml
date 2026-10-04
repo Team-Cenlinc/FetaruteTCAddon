@@ -3,6 +3,7 @@ drive:
   task:
     board:
       no-station: ["<prefix> <red>No station nearby; open the task board near a platform</red>"]
+      entry-claimed-self: ["<gray>Taken by you</gray>"]
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
     pickup:
@@ -19,6 +20,10 @@ drive:
       approach: ["<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>blocks</gray>"]
       move-up: ["<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"]
       overrun: ["<red>Past the stop mark by <white><distance></white> blocks</red>"]
+  tutorial:
+    tips:
+      ato-confirm:
+        chat: ["<white>ATO departure:</white> <gray>When the action bar shows \"ATO: right-click to confirm departure\", right-click. If you do not, the train still leaves, but it counts against your score.</gray>"]
   sidebar:
     value:
       stop:

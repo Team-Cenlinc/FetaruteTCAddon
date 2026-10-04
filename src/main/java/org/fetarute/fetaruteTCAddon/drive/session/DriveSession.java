@@ -443,7 +443,7 @@ public final class DriveSession {
         overspeedRed,
         advice != null && advice.brake(),
         link.stationStop().map(DriverStationStop::phase).orElse(null),
-        link.departurePending());
+        link.departurePrompt());
   }
 
   /** 驾驶调度列车时到此刻为止的成绩估算（侧边栏显示）；还没算过时为空。 */
@@ -529,6 +529,11 @@ public final class DriveSession {
     Vigilance.Event event = pendingVigilanceEvent;
     pendingVigilanceEvent = Vigilance.Event.NONE;
     return event;
+  }
+
+  /** 本会话的仿真等级（会话开始时定下，玩家自选的或 drive.yml 的）。 */
+  public SimulationLevel level() {
+    return config.level();
   }
 
   /** 本会话启动流程的操作方式（取会话开始时的仿真等级）。 */

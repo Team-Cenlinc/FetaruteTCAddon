@@ -6,7 +6,9 @@ import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Optional;
 import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.TextDecoration;
@@ -18,12 +20,15 @@ import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
+import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
  * 任务板：一个车站即将发出的车次，一格一趟，写明终点站、停站数与按表的运行时长。左键领取人工驾驶，右键领取 ATO。 正在本站停站的车次用画着内容的地图，其余用空地图。
  *
  * <p>已被领走的车次照样列出，灰色显示领取人，点击不起作用。界面只读：所有点击都被取消，物品不会进出背包。
+ *
+ * <p>最后一行左侧是驾驶难度（仿真等级）的两个按钮，选中的发光；选择记在玩家数据里，从下一次开始驾驶起生效。玩家不能自选等级时不显示。
  */
 public final class TaskBoard {
 
@@ -36,6 +41,12 @@ public final class TaskBoard {
   /** 最后一行中间放说明。 */
   static final int INFO_SLOT = 49;
 
+  /** 最后一行左侧：驾驶难度“标准”。 */
+  static final int STANDARD_SLOT = 45;
+
+  /** 最后一行左侧：驾驶难度“仿真”。 */
+  static final int SIMULATION_SLOT = 46;
+
   private static final DateTimeFormatter TIME = DateTimeFormatter.ofPattern("HH:mm");
 
   private TaskBoard() {}
@@ -44,10 +55,17 @@ public final class TaskBoard {
    * 打开任务板。
    *
    * @param atoAllowed 玩家能否以 ATO 方式领取；不能时不显示右键的说明
+   * @param level 玩家此刻选定的仿真等级；玩家不能自选等级时为空，界面上不显示难度按钮
+   * @param driving 玩家是否正在驾驶（选择要到下一次开始驾驶才生效，按钮上注明）
    * @return 是否打开（别的插件可能取消）
    */
   public static boolean open(
-      Player player, LocaleManager locale, TaskBoardHolder holder, boolean atoAllowed) {
+      Player player,
+      LocaleManager locale,
+      TaskBoardHolder holder,
+      boolean atoAllowed,
+      Optional<SimulationLevel> level,
+      boolean driving) {
     Inventory inventory =
         Bukkit.createInventory(
             holder,
@@ -74,7 +92,68 @@ public final class TaskBoard {
     info.add("drive.task.board.info-claimed");
     inventory.setItem(
         INFO_SLOT, item(Material.BOOK, locale, "drive.task.board.info", Map.of(), info));
+    level.ifPresent(chosen -> showLevel(holder, locale, chosen, driving));
     return player.openInventory(inventory) != null;
+  }
+
+  /** 在已打开的任务板上换选中的难度按钮。 */
+  public static void showLevel(
+      TaskBoardHolder holder, LocaleManager locale, SimulationLevel chosen, boolean driving) {
+    holder.setLevel(chosen);
+    Inventory inventory = holder.getInventory();
+    for (SimulationLevel level : SimulationLevel.values()) {
+      inventory.setItem(slotOf(level), levelItem(locale, level, level == chosen, driving));
+    }
+  }
+
+  /** 难度按钮所在的格子。 */
+  static int slotOf(SimulationLevel level) {
+    return level == SimulationLevel.SIMULATION ? SIMULATION_SLOT : STANDARD_SLOT;
+  }
+
+  /** 这一格是哪个难度按钮；不是难度按钮时为空。 */
+  static Optional<SimulationLevel> levelOfSlot(int slot) {
+    for (SimulationLevel level : SimulationLevel.values()) {
+      if (slotOf(level) == slot) {
+        return Optional.of(level);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 难度按钮的图标：标准用拉杆（一键启动），仿真用比较器（逐项操作开关）。 */
+  static Material levelMaterial(SimulationLevel level) {
+    return level == SimulationLevel.SIMULATION ? Material.COMPARATOR : Material.LEVER;
+  }
+
+  /** 难度按钮的说明行。 */
+  static List<String> levelLore(SimulationLevel level, boolean selected, boolean driving) {
+    String prefix = "drive.task.board.level." + level.name().toLowerCase(Locale.ROOT);
+    List<String> lore = new ArrayList<>();
+    lore.add(prefix + "-desc");
+    if (level == SimulationLevel.SIMULATION) {
+      lore.add(prefix + "-desc-2");
+    }
+    lore.add(selected ? "drive.task.board.level.selected" : "drive.task.board.level.select");
+    lore.add(driving ? "drive.task.board.level.next-session" : "drive.task.board.level.remember");
+    return lore;
+  }
+
+  private static ItemStack levelItem(
+      LocaleManager locale, SimulationLevel level, boolean selected, boolean driving) {
+    ItemStack stack =
+        item(
+            levelMaterial(level),
+            locale,
+            "drive.task.board.level." + level.name().toLowerCase(Locale.ROOT),
+            Map.of(),
+            levelLore(level, selected, driving));
+    ItemMeta meta = stack.getItemMeta();
+    meta.setEnchantmentGlintOverride(selected);
+    if (!stack.setItemMeta(meta)) {
+      throw new IllegalStateException("无法为任务板难度按钮设置物品元数据");
+    }
+    return stack;
   }
 
   /** 是不是任务板。 */
@@ -108,11 +187,24 @@ public final class TaskBoard {
     }
     lore.add("drive.task.board.entry-platform");
     if (entry.claimed()) {
-      lore.add(
-          entry.claimedBy(viewer)
-              ? "drive.task.board.entry-claimed-self"
-              : "drive.task.board.entry-claimed");
-      return item(Material.GRAY_DYE, locale, "drive.task.board.entry-name-claimed", values, lore);
+      if (entry.claimedBy(viewer)) {
+        // 自己领的：图标照常、发光，一眼找得到；点击同样不起作用。
+        lore.add("drive.task.board.entry-claimed-self");
+        if (row.dwelling()) {
+          lore.add("drive.task.board.entry-dwelling");
+        }
+        ItemStack own =
+            item(
+                entryMaterial(row.dwelling()), locale, "drive.task.board.entry-name", values, lore);
+        ItemMeta meta = own.getItemMeta();
+        meta.setEnchantmentGlintOverride(true);
+        if (!own.setItemMeta(meta)) {
+          throw new IllegalStateException("无法为任务板条目设置物品元数据");
+        }
+        return own;
+      }
+      lore.add("drive.task.board.entry-claimed");
+      return item(claimedMaterial(), locale, "drive.task.board.entry-name-claimed", values, lore);
     }
     lore.add(
         row.trainName() == null
@@ -128,9 +220,14 @@ public final class TaskBoard {
     return item(entryMaterial(row.dwelling()), locale, "drive.task.board.entry-name", values, lore);
   }
 
-  /** 车次条目的图标：正在本站停站（马上能接班）的用画着内容的地图，其余用空地图。两者轮廓相同、一个有字一个没字，一眼分得清；已被领取的用灰色染料。 */
+  /** 车次条目的图标：正在本站停站（马上能接班）的用画着内容的地图，其余用空地图。两者轮廓相同、一个有字一个没字，一眼分得清。自己领的照常显示并发光。 */
   static Material entryMaterial(boolean dwelling) {
     return dwelling ? Material.FILLED_MAP : Material.MAP;
+  }
+
+  /** 别人已领走的车次：原版物品没有“不可用”样式，用灰色染料表示不能再领。 */
+  static Material claimedMaterial() {
+    return Material.GRAY_DYE;
   }
 
   private static ItemStack item(

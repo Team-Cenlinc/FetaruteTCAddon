@@ -1493,6 +1493,7 @@ drive:
       depart: "<green><bold>发车信号</bold></green>"
     ato:
       confirm: "<yellow><bold>ATO：右键确认发车</bold></yellow>"
+      armed: "<green>ATO：已确认发车，停站结束即出发</green>"
     cab-change:
       active: "<gold><bold>换端准备：剩余 <seconds> 秒</bold></gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座</gray>"
       announced: "<gold>本站折返：请到第 <white><car></white> 节驾驶室</gold>"
@@ -1792,6 +1793,9 @@ drive:
         loco: "<gray>车种：</gray><white>机车牵引</white>"
       motion: "<gray>加速度：</gray><white><accel></white> <gray>减速度：</gray><white><decel></white> <gray>米/秒²</gray>"
       max-speed: "<gray>最高速度：</gray><white><kmh></white> <gray>km/h</gray>"
+      level:
+        standard: "<gray>驾驶难度：</gray><white>标准</white>"
+        simulation: "<gray>驾驶难度：</gray><gold>仿真</gold>"
     gauge:
       range: "<gray>量程 0–<white><range></white> kPa</gray>"
       main-reservoir:
@@ -1896,7 +1900,17 @@ drive:
       entry-stops: "<gray>停站：</gray><white><stops></white> <gray>站（含终点站）</gray>"
       entry-run-time: "<gray>预计运行：</gray><white><run_time></white>"
       entry-claimed: "<gray>已被</gray> <white><player></white> <gray>领取</gray>"
-      entry-claimed-self: "<gray>本人已领取</gray>"
+      entry-claimed-self: "<green>本人已领取</green>"
+      level:
+        standard: "<green>驾驶难度：标准</green>"
+        simulation: "<gold>驾驶难度：仿真</gold>"
+        standard-desc: "<gray>驾驶台一键启动，不模拟风压与制动试验</gray>"
+        simulation-desc: "<gray>驾驶台逐项操作启动开关，模拟风压、电空制动与制动试验</gray>"
+        simulation-desc-2: "<gray>服务器开启随机故障时可能发生故障</gray>"
+        selected: "<yellow>▶ 当前选择</yellow>"
+        select: "<gray>点击选择</gray>"
+        remember: "<gray>选择将被记住，驾驶调度列车与自由驾驶均适用</gray>"
+        next-session: "<gray>正在驾驶：本次不变，下次开始驾驶时生效</gray>"
       run-time:
         seconds: "<seconds> 秒"
         minutes: "<minutes> 分钟"
@@ -2062,7 +2076,7 @@ drive:
         chat: "<white>发车信号：</white><gray>动作栏显示「发车信号」即可起步。请拉到 P1–P3 出站，并留意前方信号与限速。</gray>"
         subtitle: "<green>发车信号：可以起步</green>"
       ato-confirm:
-        chat: "<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"
+        chat: "<white>ATO 确认发车：</white><gray>停站结束前约 10 秒起，动作栏提示「ATO：右键确认发车」，此时即可按右键提前确认，停站一结束列车即出发；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"
         subtitle: "<yellow>右键确认发车</yellow>"
       vigilance:
         chat: "<white>警惕装置：</white><gray>行车中须定期操作以示驾驶员保持警惕。报警时请换档或按右键确认，超时未确认将施加紧急制动。</gray>"

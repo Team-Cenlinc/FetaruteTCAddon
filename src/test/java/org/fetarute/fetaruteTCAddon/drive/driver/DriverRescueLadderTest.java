@@ -83,4 +83,38 @@ class DriverRescueLadderTest {
     assertEquals(15, checks, "等满 300 tick 自动放行");
     assertEquals(1, link.lateDepartures());
   }
+
+  @Test
+  @DisplayName("ATO 提前确认：停站将尽时确认，停站一结束站台一问就放行；列车动过即作废")
+  void atoDepartureConfirmedInAdvance() {
+    long[] clock = {1000L};
+    double[] odometer = {0.0};
+    DriverLink link =
+        new DriverLink(UUID.randomUUID(), "T", null, () -> odometer[0], () -> clock[0]);
+    link.setMode(DrivingMode.ATO);
+    assertEquals(false, link.departurePrompt(), "停站将尽之前不提示");
+    assertEquals(false, link.confirmDeparture());
+
+    link.openDepartureArm();
+    assertEquals(true, link.departurePrompt());
+    assertEquals(true, link.confirmDeparture());
+    assertEquals(false, link.departurePrompt());
+    assertEquals(true, link.departureConfirmed());
+    assertEquals(false, link.confirmDeparture(), "已确认的不再算");
+
+    clock[0] += 200;
+    assertEquals(false, link.holdDeparture(300), "停站一结束就放行");
+    assertEquals(0, link.lateDepartures());
+    link.openDepartureArm();
+    assertEquals(false, link.departurePrompt(), "放行后原地不再提示");
+
+    odometer[0] = 500.0;
+    clock[0] += 2000;
+    link.openDepartureArm();
+    assertEquals(true, link.confirmDeparture());
+    odometer[0] = 503.0;
+    assertEquals(false, link.departureConfirmed(), "确认后列车动过：作废");
+    clock[0] += 200;
+    assertEquals(true, link.holdDeparture(300), "下一站照常等确认");
+  }
 }

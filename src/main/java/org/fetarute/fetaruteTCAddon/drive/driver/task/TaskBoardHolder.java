@@ -5,8 +5,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
+import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 
-/** 任务板箱子界面的持有者：记住是哪名玩家、哪个车站、每格对应的车次。 */
+/** 任务板箱子界面的持有者：记住是哪名玩家、哪个车站、每格对应的车次，以及玩家此刻选定的仿真等级。 */
 public final class TaskBoardHolder implements InventoryHolder {
 
   private final UUID playerId;
@@ -15,6 +16,7 @@ public final class TaskBoardHolder implements InventoryHolder {
   private final String stationName;
   private final List<TaskBoardEntries.Entry> entries;
   private Inventory inventory;
+  private SimulationLevel level;
 
   public TaskBoardHolder(
       UUID playerId,
@@ -60,6 +62,20 @@ public final class TaskBoardHolder implements InventoryHolder {
       return Optional.empty();
     }
     return Optional.of(entries.get(slot));
+  }
+
+  /** 玩家此刻选定的仿真等级；玩家不能自选等级（界面上没有难度按钮）时为空。 */
+  public Optional<SimulationLevel> level() {
+    return Optional.ofNullable(level);
+  }
+
+  void setLevel(SimulationLevel level) {
+    this.level = level;
+  }
+
+  /** 这一格是不是难度按钮、对应哪个等级；界面上没有难度按钮时为空。 */
+  public Optional<SimulationLevel> levelAt(int slot) {
+    return level == null ? Optional.empty() : TaskBoard.levelOfSlot(slot);
   }
 
   /** 这一格可领取的车次；空格或已被领走时为空。 */

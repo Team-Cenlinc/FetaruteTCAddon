@@ -97,6 +97,42 @@ public record DriveConfig(
     }
   }
 
+  /** 只换仿真等级的副本（玩家自选等级时用）；等级相同时返回自身。 */
+  public DriveConfig withLevel(SimulationLevel value) {
+    Objects.requireNonNull(value, "value");
+    if (value == level) {
+      return this;
+    }
+    return new DriveConfig(
+        enabled,
+        value,
+        defaultMaxSpeedBps,
+        coastDragBps2,
+        emergencyMultiplier,
+        effortRatePerSecond,
+        emergencyRatePerSecond,
+        tractionFractions,
+        brakeFractions,
+        muReferenceMotorFraction,
+        locoReferenceCars,
+        stoppedSpeedBps,
+        reseatTimeoutTicks,
+        exitSneakWindowTicks,
+        hudIntervalTicks,
+        allowCreativeMode,
+        startMaxSpeedBps,
+        speedLimitOverride,
+        overspeedRedRatio,
+        defaultPower,
+        setupTimings,
+        coldAfterMinutes,
+        cab,
+        sidebar,
+        driver,
+        sounds,
+        ebGraceTicks);
+  }
+
   /** 内置默认值。 */
   public static DriveConfig defaults() {
     return new DriveConfig(

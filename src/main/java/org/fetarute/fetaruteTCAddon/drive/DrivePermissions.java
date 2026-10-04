@@ -12,8 +12,8 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
  * 手动驾驶的权限节点，以及 {@code /fta drive} 各子命令要求的节点。命令注册、帮助、补全与运行时检查都从这里取，不各写一份。本类不依赖服务器对象。
  *
  * <p>节点之间的包含关系写在 {@code plugin.yml} 的 {@code children} 里：{@link #BASE} 含 {@link #FREE} 与 {@link
- * #TUTORIAL}，{@link #DRIVER} 含 {@link #BASE}、{@link #ATO}、{@link #RECORDS} 与 {@link #TOP}，{@link
- * #PLAYER} 含全部玩家功能。单独把某个子节点设为 false 即可收回那一项。
+ * #TUTORIAL}，{@link #DRIVER} 含 {@link #BASE}、{@link #ATO}、{@link #LEVEL}、{@link #RECORDS} 与 {@link
+ * #TOP}，{@link #PLAYER} 含全部玩家功能。单独把某个子节点设为 false 即可收回那一项。
  */
 public final class DrivePermissions {
 
@@ -28,6 +28,9 @@ public final class DrivePermissions {
 
   /** 以 ATO 方式领取与驾驶调度列车。 */
   public static final String ATO = "fetarute.drive.ato";
+
+  /** 在任务板上自选仿真等级（标准或仿真）；没有时一律用 {@code drive.yml} 的 {@code level}。 */
+  public static final String LEVEL = "fetarute.drive.level";
 
   /** 查看自己的驾驶记录。 */
   public static final String RECORDS = "fetarute.drive.records";
@@ -49,7 +52,7 @@ public final class DrivePermissions {
 
   /** 打包节点包含的玩家功能节点。 */
   public static final List<String> PLAYER_NODES =
-      List.of(BASE, FREE, DRIVER, ATO, RECORDS, TOP, TUTORIAL);
+      List.of(BASE, FREE, DRIVER, ATO, LEVEL, RECORDS, TOP, TUTORIAL);
 
   /**
    * 一个子命令。
