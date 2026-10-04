@@ -94,6 +94,7 @@ drive:
     cab-change:
       active: "<gold><bold>Changing ends: <seconds> s left</bold></gold> <gray>take the cab in car</gray> <white><car></white>"
       announced: "<gold>Reversing here: go to the cab in car <white><car></white></gold>"
+      confirm: "<yellow>Seated: once sure this is the cab, enter</yellow> <white>/fta drive on</white>"
     cab:
       vigilance-warning: "<red><bold>Vigilance <seconds></bold></red>"
       vigilance-tripped: "<red><bold>Vigilance emergency brake</bold></red>"
@@ -201,6 +202,7 @@ drive:
       scheduled-arrival: "Sched. arr."
       scheduled-departure: "Sched. dep."
       next-pass: "Next pass"
+      next-trip: "Next trip"
       doors: "Doors"
       air: "Air"
       vigilance: "Vigilance"
@@ -219,6 +221,9 @@ drive:
       cab-change:
         active: "<yellow>car <car></yellow> <white><seconds></white> <gray>s left</gray>"
         announced: "<yellow>cab in car <car></yellow>"
+        confirm: "<yellow>confirm seat</yellow> <gray>/fta drive on</gray>"
+      next-trip: "<white>to <destination></white> <gray><time></gray>"
+      next-trip-code: "<white><trip></white> <gray><time></gray>"
       signal:
         proceed: "<green>Proceed</green> <white><limit_kmh></white> <gray>km/h</gray>"
         proceed-with-caution: "<yellow>Caution</yellow> <white><limit_kmh></white> <gray>km/h</gray>"
@@ -570,9 +575,12 @@ drive:
       train-missing: "<prefix> <red>The train to take over cannot be found</red>"
       no-spot: "<prefix> <red>There is nowhere to stand next to the train; please go there yourself</red>"
     cab-changed: "<prefix> <green>Ends changed: you are seated in the cab in car <car></green>"
+    next-trip: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
+    next-trip-no-destination: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua>, departing at <white><time></white></white>"
     cab-change-failed: "<prefix> <red>You did not reach the leading cab within <seconds> s; the train departed under automatic operation and the task failed</red>"
     cab-change:
-      announce: "<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; leaving your seat on the way does not end driving</white>"
+      announce: "<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; the doors may stay open and be closed from the other end; leaving your seat on the way does not end driving</white>"
+      confirm-seat: "<prefix> <white>You are seated in car <yellow><car></yellow> of <cars>.</white><gray> This train has no marked driver seats; once you are sure this is the cab,</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive on</white>'><green>[Confirm seat]</green></hover></click>"
       go-to: "<yellow>Walk to the cab in car <white><car></white> and right-click to board</yellow>"
       start: "<prefix> <yellow>Changing ends: take the cab in car <white><car></white> (the other end) within <white><seconds></white> s. Leaving your seat on the way does not end driving and the train stays stopped</yellow>"
       short: "<prefix> <red>Not enough time: changing ends takes about <white><need></white> s but departure is due in <white><left></white> s, the train will leave late</red>"
@@ -745,6 +753,7 @@ drive:
       disabled: "<prefix> <red>Manual driving is disabled</red>"
       bad-game-mode: "<prefix> <red>Driving is not allowed in the current game mode</red>"
       already-driving: "<prefix> <yellow>You are already driving</yellow>"
+      cab-seat-confirmed: "<prefix> <green>Driver seat confirmed</green>"
       not-seated: "<prefix> <red>Sit in a train seat first</red>"
       managed-train: "<prefix> <red>This train is run by the dispatcher and driver takeover is not enabled</red>"
       no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"

@@ -14,14 +14,17 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  *
  * <ul>
  *   <li>{@link Stage#IDLE}：不需要换端；
- *   <li>{@link Stage#ANNOUNCED}：列车停在尽头式终点站待命、派车还没放行，已知下一趟由此刻的车尾端驾驶，提前告诉驾驶员。
- *       这时没有时限，驾驶员离座不结束驾驶；坐进车尾端驾驶室即完成，放行调头后那一端就是车头；
+ *   <li>{@link Stage#ANNOUNCED}：列车停在尽头式终点站（车门已开，或已转入待命）、派车还没放行，已知下一趟由此刻的车尾端驾驶，提前告诉驾驶员。
+ *       这时没有时限，驾驶员离座不结束驾驶，车门可以开着；坐进车尾端驾驶室即完成，放行调头后那一端就是车头；
  *   <li>{@link Stage#ACTIVE}：派车已放行（发车方向已定、该调头的已调头），驾驶员不在车头端驾驶室：牵引封锁、列车保持停车，
  *       离座不结束驾驶；在换端时间预留内坐进车头端驾驶室即完成，超时交还自动运行。
  * </ul>
  *
  * <p>换端开始时（提前告知或放行时）定下完成后要不要重做制动试验：simulation 级、距计划发车不少于换端时间预留加制动试验所需时间才要求重做，
  * 否则视为已做；距计划发车不到换端时间预留时报准备时间不足。每次待命只提前告知一次：驾驶员坐进车尾端之后再离座就按离岗处理。
+ *
+ * <p>驾驶座没有标记的列车（见 {@link CabSeats}）按车厢位置认端，坐进那一端的客室座位也会被当成驾驶室：坐进要换到的那一端后，还要驾驶员确认座位才算完成（见 {@link
+ * #awaitsSeatConfirm}）。
  *
  * <p>本类不依赖服务器对象，只在服务器主线程使用。
  */
@@ -111,6 +114,35 @@ public final class CabChange {
     return simulation
         && remainingSeconds.isPresent()
         && remainingSeconds.getAsLong() >= reserveSeconds + brakeTestSeconds;
+  }
+
+  /**
+   * 是否按“放行前”处理：列车在终点站待命，或停在终点站、车门已开而派车还没放行。开门后就能去换端，不必等关门转入待命。
+   *
+   * @param turnbackPending 列车已转入终点站待命
+   * @param released 调度已给出行车许可
+   * @param atTerminalStop 列车停在终点站、车门已开（见 {@link DriverLink#atTerminalStop()}）
+   */
+  public static boolean preRelease(
+      boolean turnbackPending, boolean released, boolean atTerminalStop) {
+    return turnbackPending || (atTerminalStop && !released);
+  }
+
+  /**
+   * 驾驶座没有标记的列车：驾驶员坐进了要换到的那一端（放行前是车尾端，放行后是车头端），但还没确认这个座位是驾驶室。
+   *
+   * @param marked 列车有标记的驾驶座（有标记时座位本身就能认定，不用确认）
+   * @param changing 换端正在进行（已告知或计时中）
+   * @param preRelease 放行前（见 {@link #preRelease}）
+   * @param seat 座位在哪一端
+   * @param confirmed 驾驶员已确认过此刻所坐的座位
+   */
+  public static boolean awaitsSeatConfirm(
+      boolean marked, boolean changing, boolean preRelease, CabSeats.End seat, boolean confirmed) {
+    if (marked || confirmed || !(changing || preRelease)) {
+      return false;
+    }
+    return seat == (preRelease ? CabSeats.End.TAIL : CabSeats.End.HEAD);
   }
 
   /** 准备时间不足：距计划发车已不到换端时间预留，按时走过去也会晚点。 */

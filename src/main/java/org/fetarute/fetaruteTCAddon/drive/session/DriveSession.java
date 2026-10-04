@@ -33,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
 import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
@@ -149,6 +150,8 @@ public final class DriveSession {
   private ScoreRules.Result liveScore;
   private long endArmedUntilTick = Long.MIN_VALUE;
   private final CabChange cabChange = new CabChange();
+  private CabSeatKey pendingCabSeat;
+  private CabSeatKey confirmedCabSeat;
 
   /** 超级电容车的储能；别的受电方式为空。 */
   private final SuperCapacitor supercap;
@@ -310,6 +313,24 @@ public final class DriveSession {
   /** 折返换端的进度。 */
   public CabChange cabChange() {
     return cabChange;
+  }
+
+  /** 驾驶座没有标记的列车上，等驾驶员确认的座位（换端时坐进了要换到的那一端）；不在等确认时为空。 */
+  public Optional<CabSeatKey> pendingCabSeat() {
+    return Optional.ofNullable(pendingCabSeat);
+  }
+
+  public void setPendingCabSeat(CabSeatKey seat) {
+    this.pendingCabSeat = seat;
+  }
+
+  /** 驾驶员确认过的驾驶座。 */
+  public Optional<CabSeatKey> confirmedCabSeat() {
+    return Optional.ofNullable(confirmedCabSeat);
+  }
+
+  public void setConfirmedCabSeat(CabSeatKey seat) {
+    this.confirmedCabSeat = seat;
   }
 
   /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（故障、停放制动、制动管、风压、制动试验）。 */

@@ -13,6 +13,8 @@ drive:
       teleported: ["<prefix> <green>You are next to the train's leading cab; board, sit down and confirm your seat</green>"]
     cab-changed: ["<prefix> <white>Changed ends: you are now in the leading cab (car <car>)</white>"]
     cab-change-failed: ["<prefix> <red>Could not change ends: no free seat in the leading cab, the train returns to automatic operation</red>"]
+    cab-change:
+      announce: ["<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; leaving your seat on the way does not end driving</white>"]
   hud:
     line:
       - "<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"

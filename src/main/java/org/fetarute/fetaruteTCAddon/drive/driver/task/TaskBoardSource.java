@@ -91,21 +91,30 @@ public final class TaskBoardSource {
     }
     List<TaskBoardEntries.Entry> result = new ArrayList<>(entries.size());
     for (TaskBoardEntries.Entry entry : entries) {
-      TaskKey key = entry.row().key();
       Optional<TaskBoardEntries.Trip> trip =
-          timetables
-              .get()
-              .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
-              .flatMap(plan -> TaskTripSummary.of(stopsOf(plan), entry.row().stopSequence()))
-              .map(
-                  summary ->
-                      new TaskBoardEntries.Trip(
-                          stationName(plugin, summary.terminusCode(), summary.terminusNodeId()),
-                          summary.stopCount(),
-                          summary.runSeconds()));
+          tripOf(plugin, timetables.get(), entry.row().key(), entry.row().stopSequence());
       result.add(trip.map(entry::withTrip).orElse(entry));
     }
     return result;
+  }
+
+  /**
+   * 一个车次从某一站起的行程概要：终点站、停站数与按表的运行时长。
+   *
+   * @param fromSequence 从哪一站（停靠序号）起算
+   * @return 查不到停靠表时为空
+   */
+  public static Optional<TaskBoardEntries.Trip> tripOf(
+      FetaruteTCAddon plugin, TimetableService timetables, TaskKey key, int fromSequence) {
+    return timetables
+        .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+        .flatMap(plan -> TaskTripSummary.of(stopsOf(plan), fromSequence))
+        .map(
+            summary ->
+                new TaskBoardEntries.Trip(
+                    stationName(plugin, summary.terminusCode(), summary.terminusNodeId()),
+                    summary.stopCount(),
+                    summary.runSeconds()));
   }
 
   private static List<TaskTripSummary.Stop> stopsOf(TimetableService.TripPlan plan) {

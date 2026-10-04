@@ -1500,6 +1500,7 @@ drive:
     cab-change:
       active: "<gold><bold>换端准备：剩余 <seconds> 秒</bold></gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座</gray>"
       announced: "<gold>本站折返：请到第 <white><car></white> 节驾驶室</gold>"
+      confirm: "<yellow>已就座：确认是驾驶室后输入</yellow> <white>/fta drive on</white>"
     cab:
       vigilance-warning: "<red><bold>警惕 <seconds></bold></red>"
       vigilance-tripped: "<red><bold>警惕紧急制动</bold></red>"
@@ -1607,6 +1608,7 @@ drive:
       scheduled-arrival: "表定到站"
       scheduled-departure: "表定发车"
       next-pass: "下一通过"
+      next-trip: "下一趟"
       doors: "车门"
       air: "风压"
       vigilance: "警惕"
@@ -1625,6 +1627,9 @@ drive:
       cab-change:
         active: "<yellow>第 <car> 节</yellow> <gray>剩余</gray> <white><seconds></white> <gray>秒</gray>"
         announced: "<yellow>第 <car> 节驾驶室</yellow>"
+        confirm: "<yellow>请确认座位</yellow> <gray>/fta drive on</gray>"
+      next-trip: "<white>开往 <destination></white> <gray><time></gray>"
+      next-trip-code: "<white><trip></white> <gray><time></gray>"
       signal:
         proceed: "<green>允许</green> <white><limit_kmh></white> <gray>km/h</gray>"
         proceed-with-caution: "<yellow>注意</yellow> <white><limit_kmh></white> <gray>km/h</gray>"
@@ -1976,9 +1981,12 @@ drive:
       train-missing: "<prefix> <red>找不到要接班的列车</red>"
       no-spot: "<prefix> <red>列车旁没有可落脚的位置，请自行前往</red>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
+    next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
+    next-trip-no-destination: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
     cab-change-failed: "<prefix> <red>未能在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车，任务记为未完成</red>"
     cab-change:
-      announce: "<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；换端途中离座不结束驾驶</white>"
+      announce: "<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；车门可保持开启，到另一端后再关门；换端途中离座不结束驾驶</white>"
+      confirm-seat: "<prefix> <white>你已坐在第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>本列车的驾驶座未作标记，确认是驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认座位]</green></hover></click>"
       go-to: "<yellow>请到第 <white><car></white> 节驾驶室旁再右键上车</yellow>"
       start: "<prefix> <yellow>折返换端：请在 <white><seconds></white> 秒内到第 <white><car></white> 节（另一端）驾驶室就座；换端途中离座不结束驾驶，列车保持停车</yellow>"
       short: "<prefix> <red>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，发车将晚点</red>"
@@ -2151,6 +2159,7 @@ drive:
       disabled: "<prefix> <red>手动驾驶功能已关闭</red>"
       bad-game-mode: "<prefix> <red>当前游戏模式不允许驾驶</red>"
       already-driving: "<prefix> <yellow>你已经在驾驶中</yellow>"
+      cab-seat-confirmed: "<prefix> <green>已确认驾驶座</green>"
       not-seated: "<prefix> <red>请先坐在列车的座位上</red>"
       managed-train: "<prefix> <red>该列车由调度系统运行，当前未开放驾驶员接管</red>"
       no-task: "<prefix> <red>该列车由调度系统运行，需要领取驾驶任务才能接管</red>"

@@ -99,7 +99,8 @@ public final class DriveHud {
    */
   private static Component statusToken(
       LocaleManager locale, DriveSession session, boolean sidebarShown) {
-    Component cabChange = cabChangeToken(locale, session.cabChange());
+    Component cabChange =
+        cabChangeToken(locale, session.cabChange(), session.pendingCabSeat().isPresent());
     if (cabChange != null) {
       return cabChange;
     }
@@ -177,8 +178,16 @@ public final class DriveHud {
     return null;
   }
 
-  /** 折返换端的提示：计时中显示要去第几节与剩余秒数，提前告知时只显示第几节；不换端时为 {@code null}。 */
-  static Component cabChangeToken(LocaleManager locale, CabChange change) {
+  /**
+   * 折返换端的提示：计时中显示要去第几节与剩余秒数，提前告知时只显示第几节，坐进驾驶座没有标记的那一端时请确认座位；不换端时为 {@code null}。
+   *
+   * @param confirmSeat 正在等驾驶员确认座位
+   */
+  static Component cabChangeToken(LocaleManager locale, CabChange change, boolean confirmSeat) {
+    if (confirmSeat) {
+      // 坐进了驾驶座没有标记的那一端：先确认座位（计时中照样计时）。
+      return locale.component("drive.hud.cab-change.confirm");
+    }
     return switch (change.stage()) {
       case ACTIVE -> locale.component(
           "drive.hud.cab-change.active",

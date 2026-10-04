@@ -88,6 +88,9 @@ public final class DriverLink {
   private DriverSchedule schedule;
   private DriverPass nextPass;
   private boolean terminalAhead;
+  private DriverStationStop terminalStop;
+  private DriverNextTrip nextTrip;
+  private UUID announcedNextTrip;
 
   private int serviceInterventions;
   private int emergencyInterventions;
@@ -739,6 +742,54 @@ public final class DriverLink {
 
   public void setNextPass(DriverPass pass) {
     this.nextPass = pass;
+  }
+
+  /** 认定这次停站是本交路的终点站停站（停站期间认定一次即可，之后不随显示层的判定闪动）。 */
+  public void markTerminalStop(DriverStationStop stop) {
+    this.terminalStop = stop;
+  }
+
+  /**
+   * 列车停在终点站、车门已开（不开门的站台停稳即算）：从这时起驾驶员就可以去换端。
+   *
+   * @return 不在终点站停站，或还在进站、等开门时为 {@code false}
+   */
+  public boolean atTerminalStop() {
+    return terminalStopNow()
+        .map(
+            stop ->
+                switch (stop.phase()) {
+                  case DWELL, CLOSE_DOORS, WAIT_DEPARTURE -> true;
+                  default -> false;
+                })
+        .orElse(false);
+  }
+
+  /** 此刻的终点站停站；不在终点站停站时为空。 */
+  public Optional<DriverStationStop> terminalStopNow() {
+    return stationStop().filter(stop -> stop == terminalStop);
+  }
+
+  /** 列车本趟终到后接续担当的下一趟；不在终点站附近或查不到时为空。 */
+  public Optional<DriverNextTrip> nextTrip() {
+    return Optional.ofNullable(nextTrip);
+  }
+
+  public void setNextTrip(DriverNextTrip trip) {
+    this.nextTrip = trip;
+  }
+
+  /**
+   * 取走还没告诉过驾驶员的下一趟：同一趟只告诉一次。
+   *
+   * @return 已告诉过或没有下一趟时为空
+   */
+  public Optional<DriverNextTrip> takeNextTripAnnouncement() {
+    if (nextTrip == null || nextTrip.tripId().equals(announcedNextTrip)) {
+      return Optional.empty();
+    }
+    announcedNextTrip = nextTrip.tripId();
+    return Optional.of(nextTrip);
   }
 
   /**

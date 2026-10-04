@@ -16,8 +16,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 
 /**
- * 终点站待命车下一趟由哪一端驾驶：从待命登记取所在节点，找出下一趟离开时的出口——尽头式站台就是唯一那条区间的另一端，其余按列车下一趟车次 （交路绑定）的下一个途经点沿线路图找——再交给
- * {@link CabSeats#terminalDeparture} 按车头、车尾哪一端离出口近判定。查不到的一律当作要到派车才知道。只在服务器主线程调用。
+ * 终点站待命车下一趟由哪一端驾驶：从待命登记取所在节点（还在终点站停站、没转入待命时用停站的车站节点），找出下一趟离开时的出口——尽头式站台就是唯一那条区间的另一端，其余按列车下一趟车次
+ * （交路绑定）的下一个途经点沿线路图找——再交给 {@link CabSeats#terminalDeparture}
+ * 按车头、车尾哪一端离出口近判定。查不到的一律当作要到派车才知道。只在服务器主线程调用。
  */
 final class TerminalCabEnd {
 
@@ -29,6 +30,14 @@ final class TerminalCabEnd {
    * @return 列车不在待命、图里查不到、或分不出时为 {@link CabSeats.Departure#EITHER}
    */
   static CabSeats.Departure of(FetaruteTCAddon plugin, MinecartGroup group) {
+    return of(plugin, group, null);
+  }
+
+  /**
+   * @param stationNode 列车停站所在的车站节点（终点站开门后、还没转入待命时用）；可为 {@code null}
+   * @return 列车不在待命也不在终点站停站、图里查不到、或分不出时为 {@link CabSeats.Departure#EITHER}
+   */
+  static CabSeats.Departure of(FetaruteTCAddon plugin, MinecartGroup group, NodeId stationNode) {
     if (group == null || !group.isValid() || group.isEmpty() || group.getWorld() == null) {
       return CabSeats.Departure.EITHER;
     }
@@ -37,7 +46,8 @@ final class TerminalCabEnd {
         plugin
             .getLayoverRegistry()
             .flatMap(registry -> registry.get(trainName))
-            .map(LayoverRegistry.LayoverCandidate::locationNodeId);
+            .map(LayoverRegistry.LayoverCandidate::locationNodeId)
+            .or(() -> Optional.ofNullable(stationNode));
     RailGraphService graphs = plugin.getRailGraphService();
     if (node.isEmpty() || graphs == null) {
       return CabSeats.Departure.EITHER;

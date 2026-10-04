@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverNextTrip;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverPass;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
@@ -72,7 +73,7 @@ public final class DriveSidebarRows {
               "drive.sidebar.label.train",
               "drive.sidebar.value.text",
               Map.of("text", session.trainName())));
-      cabChangeRow(session.cabChange()).ifPresent(rows::add);
+      cabChangeRow(session.cabChange(), session.pendingCabSeat().isPresent()).ifPresent(rows::add);
       rows.add(
           session.isAto()
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
@@ -80,6 +81,7 @@ public final class DriveSidebarRows {
       rows.add(stationRow(link, session.isStopped()));
       link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);
       link.nextPass().map(DriveSidebarRows::passRow).ifPresent(rows::add);
+      link.nextTrip().map(DriveSidebarRows::nextTripRow).ifPresent(rows::add);
       session
           .liveScore()
           .ifPresent(
@@ -105,9 +107,16 @@ public final class DriveSidebarRows {
     return rows;
   }
 
-  /** 折返换端一行：要去第几节，计时中再加剩余秒数；不换端时没有这一行。 */
-  static Optional<Row> cabChangeRow(CabChange change) {
+  /**
+   * 折返换端一行：要去第几节，计时中再加剩余秒数；坐进了驾驶座没有标记的那一端时改为请确认座位；不换端时没有这一行。
+   *
+   * @param confirmSeat 正在等驾驶员确认座位
+   */
+  static Optional<Row> cabChangeRow(CabChange change, boolean confirmSeat) {
     String label = "drive.sidebar.label.cab-change";
+    if (confirmSeat) {
+      return Optional.of(new Row(label, "drive.sidebar.value.cab-change.confirm", Map.of()));
+    }
     return switch (change.stage()) {
       case ACTIVE -> Optional.of(
           new Row(
@@ -193,7 +202,6 @@ public final class DriveSidebarRows {
         Map.of("time", CLOCK.format(schedule.planned()), "deviation", schedule.deviationText()));
   }
 
-  /** 下一通过站一行：站名、表定通过时刻，后面跟晚点或早点多少。 */
   /** 超级电容：电量百分比；充电中、偏低、耗尽另有颜色。 */
   static Row supercapRow(SuperCapacitor supercap) {
     String state =
@@ -210,6 +218,7 @@ public final class DriveSidebarRows {
         Map.of("percent", String.valueOf((int) Math.round(supercap.fraction() * 100.0))));
   }
 
+  /** 下一通过站一行：站名、表定通过时刻，后面跟晚点或早点多少。 */
   static Row passRow(DriverPass pass) {
     return new Row(
         "drive.sidebar.label.next-pass",
@@ -221,6 +230,22 @@ public final class DriveSidebarRows {
             CLOCK.format(pass.planned()),
             "deviation",
             pass.deviationText()));
+  }
+
+  /** 接续的下一趟一行：开往哪里、几点发车；查不到终点站时只写车次。 */
+  static Row nextTripRow(DriverNextTrip trip) {
+    return new Row(
+        "drive.sidebar.label.next-trip",
+        trip.destination().isEmpty()
+            ? "drive.sidebar.value.next-trip-code"
+            : "drive.sidebar.value.next-trip",
+        Map.of(
+            "trip",
+            trip.tripCode(),
+            "destination",
+            trip.destination(),
+            "time",
+            CLOCK.format(trip.departure())));
   }
 
   private static String doorsKey(DriveSession session, long nowTick) {
