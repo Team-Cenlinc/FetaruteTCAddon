@@ -22,8 +22,9 @@ import org.bukkit.entity.Player;
  *
  * <p>派任务不受任务板时间窗限制，也不要求玩家在车站附近；其余规则与任务板相同：驾驶功能开启、没有熔断、每名玩家一个未结束的任务、每个车次一名驾驶员。
  *
- * <p>线程：{@link #assign}、{@link #abandon} 只能在服务器主线程调用；查询方法返回不可变快照，建议在主线程调用；{@link #records} 与 {@link
- * #stats} 读数据库，返回的 future 在异步线程完成。
+ * <p>线程：{@link #assign}、{@link #abandon} 只能在服务器主线程调用；{@link #offersAt} 读时刻表与列车，应在主线程调用；{@link
+ * #taskOf}、{@link #sessionOf} 可在任意线程调用，非主线程读到的是最多半秒前的快照；{@link #records} 与 {@link #stats} 读数据库，返回的
+ * future 在异步线程完成。所有返回值都是不可变快照。
  *
  * <p>驾驶功能未启用（{@code drive.yml} 关闭或模块未加载）时 {@link #enabled()} 为 {@code false}，查询返回空，派任务返回 {@link
  * AssignResult#DISABLED}。
