@@ -147,7 +147,8 @@ public final class FtaTrainCommand {
             .withComponent(
                 CommandComponent.builder("power", StringParser.stringParser())
                     .suggestionProvider(
-                        SuggestionProvider.suggestingStrings("ptg5", "ptg6", "shoe", "diesel"))
+                        SuggestionProvider.suggestingStrings(
+                            "ptg5", "ptg6", "shoe", "diesel", "supercap"))
                     .build())
             .build();
     var maxSpeedFlag =

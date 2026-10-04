@@ -35,6 +35,24 @@ public final class SetupAnimations {
     return group.playNamedAnimation(options);
   }
 
+  /**
+   * 超级电容充电时升降受电弓：先找 {@code ptg5}，没有再找 {@code ptg6}；车模型都没有时什么也不做（第三轨充电）。
+   *
+   * @param raise {@code true} 为升弓，{@code false} 为降弓
+   * @return 是否触发了动画
+   */
+  public static boolean playCharging(MinecartGroup group, boolean raise) {
+    if (group == null) {
+      return false;
+    }
+    for (PowerSupply pantograph : new PowerSupply[] {PowerSupply.PTG5, PowerSupply.PTG6}) {
+      if (findName(group.getAnimationNames(), pantograph.animation().orElseThrow()) != null) {
+        return playPower(group, pantograph, raise);
+      }
+    }
+    return false;
+  }
+
   private static String findName(Collection<String> names, String wanted) {
     if (names == null) {
       return null;

@@ -54,12 +54,13 @@ speed-limit-override: true
 overspeed-red-ratio: 0.1
 
 # 列车未设置 FTA_TRAIN_POWER 标签时的受电方式：
-# ptg5（受电弓，5 米接触网）/ ptg6（受电弓，6 米接触网）/ shoe（集电靴，第三轨）/ diesel（内燃）
+# ptg5（受电弓，5 米接触网）/ ptg6（受电弓，6 米接触网）/ shoe（集电靴，第三轨）/ diesel（内燃）/ supercap（超级电容，见 supercap 段）
 default-power: ptg5
 # 启动流程各步骤耗时（秒）。standard 级用驾驶台的启动按钮一键完成，simulation 级逐项操作
 setup-seconds:
   key: 1
   pantograph: 8
+  # 集电靴受电；超级电容的“投入电容”一步也用这个时长
   shoe: 2
   engine: 25
   breaker: 3
@@ -250,6 +251,26 @@ driver:
 # 驾驶提示音。声音不会被别的插件的动作栏消息顶掉，要紧的提醒都配了声音。
 # 每项有 key（音效）、volume（音量）、pitch（音高，0.5–2）；key 留空（""）即关闭该项。
 # 材质包里的自定义音效（如 fetarute:drive.horn）也可以填
+# 超级电容（受电方式 supercap）：站间靠车上储能行驶，停稳且开着车门时自动充电（所有车站都可充）。
+# 充电时试着升弓（车模型有 ptg5 或 ptg6 动画时播放），第三轨充电的车没有受电弓动画也不影响。
+# standard 与 simulation 两级都生效；电量耗尽时切断牵引，制动不受影响。ATO 下由调度控车，不耗电。
+# 调度列车接管时按满电；非调度列车的电量记在列车上，下次驾驶接着用。
+supercap:
+  # 每吨车重的可用电量（kWh/t）：0.2 约等于满电从静止加速到 80 km/h 两次半（不计再生），实际约够三个站间
+  capacity-kwh-per-ton: 0.2
+  # 从空到满的充电时间（秒）
+  full-charge-seconds: 30
+  # 牵引效率：电容放出的电能有多少变成动能（0–1）
+  traction-efficiency: 0.85
+  # 再生制动：常用制动在退出速度以上回收的制动能量比例（0–1）；紧急制动不再生
+  regen-efficiency: 0.5
+  # 电制动退出速度（km/h），低于它没有再生
+  regen-cutoff-kmh: 15
+  # 辅助负载（空调、照明）每分钟耗掉满电的百分之几
+  aux-drain-percent-per-minute: 1.0
+  # 电量低于这个百分比时预警
+  low-percent: 20
+
 sounds:
   enabled: true
   # 两次鸣笛（驾驶中按 Space）至少间隔多少秒

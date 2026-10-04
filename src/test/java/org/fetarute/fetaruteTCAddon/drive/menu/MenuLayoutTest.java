@@ -80,6 +80,8 @@ class MenuLayoutTest {
     assertEquals("panel/ptg6_off", MenuLayout.modelKey(MenuAction.POWER, false, PowerSupply.PTG6));
     assertEquals("panel/shoe_on", MenuLayout.modelKey(MenuAction.POWER, true, PowerSupply.SHOE));
     assertEquals(
+        "panel/supercap_off", MenuLayout.modelKey(MenuAction.POWER, false, PowerSupply.SUPERCAP));
+    assertEquals(
         "panel/engine_off", MenuLayout.modelKey(MenuAction.POWER, false, PowerSupply.DIESEL));
     assertEquals("panel/start_on", MenuLayout.modelKey(MenuAction.START, true, PTG5));
     assertEquals("panel/aux_off", MenuLayout.modelKey(MenuAction.AUX, false, PTG5));

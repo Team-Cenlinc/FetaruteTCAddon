@@ -1494,6 +1494,8 @@ drive:
     ato:
       confirm: "<yellow><bold>ATO：右键确认发车</bold></yellow>"
       armed: "<green>ATO：已确认发车，停站结束即出发</green>"
+    supercap:
+      depleted: "<red><bold>电容电量耗尽：牵引切除</bold></red> <gray>请惰行进站开门充电</gray>"
     cab-change:
       active: "<gold><bold>换端准备：剩余 <seconds> 秒</bold></gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座</gray>"
       announced: "<gold>本站折返：请到第 <white><car></white> 节驾驶室</gold>"
@@ -1564,6 +1566,10 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+  supercap:
+    low: "<yellow>超级电容电量偏低（<white><percent>%</white>），请在下一站开门充电</yellow>"
+    depleted: "<red>超级电容电量耗尽，牵引已切除，制动不受影响</red>"
+    charged: "<green>超级电容已充满</green>"
   cab:
     vigilance-tripped: "<prefix> <red>警惕装置超时未确认，已施加紧急制动。行车中请定期换档或按右键确认。</red>"
     brake-pipe-loss: "<prefix> <red>制动管失压，已自动施加紧急制动。请检查主风缸压力，停稳后将手柄置于 N 重新充风。</red>"
@@ -1585,6 +1591,7 @@ drive:
       pantograph: "升弓"
       shoe: "集电靴受电"
       engine: "启动发动机"
+      supercap: "投入超级电容"
       breaker: "闭合主断路器"
       aux: "启动辅助电源"
   sidebar:
@@ -1606,8 +1613,14 @@ drive:
       cab-change: "换端"
       fault: "故障"
       door-bypass: "门旁路"
+      supercap: "电容"
     value:
       text: "<white><text></white>"
+      supercap:
+        normal: "<green><percent>%</green>"
+        low: "<yellow><percent>%</yellow> <gray>电量偏低</gray>"
+        depleted: "<red>0%</red> <red>牵引切除</red>"
+        charging: "<aqua><percent>%</aqua> <gray>充电中</gray>"
       cab-change:
         active: "<yellow>第 <car> 节</yellow> <gray>剩余</gray> <white><seconds></white> <gray>秒</gray>"
         announced: "<yellow>第 <car> 节驾驶室</yellow>"
@@ -1716,6 +1729,9 @@ drive:
       engine-on: "<green>发动机：运转中</green>"
       engine-off: "<gray>发动机：已停机</gray>"
       engine-busy: "<yellow>发动机：启动中</yellow>"
+      supercap-on: "<green>超级电容：已投入</green>"
+      supercap-off: "<gray>超级电容：已切除</gray>"
+      supercap-busy: "<yellow>超级电容：投入中</yellow>"
       breaker-on: "<green>主断路器：已闭合</green>"
       breaker-off: "<gray>主断路器：已断开</gray>"
       breaker-busy: "<yellow>主断路器：闭合中</yellow>"

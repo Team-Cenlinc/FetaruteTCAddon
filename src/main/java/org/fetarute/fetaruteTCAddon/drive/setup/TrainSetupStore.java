@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.drive.setup;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.EnumSet;
+import java.util.Locale;
 import java.util.Optional;
 import java.util.Set;
 import java.util.StringJoiner;
@@ -28,6 +29,9 @@ public final class TrainSetupStore {
 
   /** 主风缸压力的保存时刻（Unix 毫秒），用来计算漏泄；与已接通系统的时刻分开，各自清除互不影响。 */
   public static final String TAG_MAIN_RESERVOIR_AT = "FTA_DRIVE_MR_AT";
+
+  /** 超级电容的电量（0–1），超级电容车使用。 */
+  public static final String TAG_SUPERCAP = "FTA_DRIVE_SUPERCAP";
 
   /**
    * 列车上保存的气压状态。
@@ -85,6 +89,20 @@ public final class TrainSetupStore {
         properties, TAG_MAIN_RESERVOIR, String.valueOf(Math.round(air.mainReservoirKpa())));
     TrainTagHelper.writeTag(properties, TAG_COMPRESSOR, air.compressorSwitch() ? "on" : "off");
     TrainTagHelper.writeTag(properties, TAG_MAIN_RESERVOIR_AT, String.valueOf(nowMillis));
+  }
+
+  /** 读取列车上保存的超级电容电量（0–1）；没有记录时按满电。 */
+  public static double loadSupercap(TrainProperties properties) {
+    double saved = TrainTagHelper.readDoubleTag(properties, TAG_SUPERCAP).orElse(1.0);
+    return Double.isFinite(saved) ? Math.max(0.0, Math.min(1.0, saved)) : 1.0;
+  }
+
+  /** 保存超级电容电量（0–1）。 */
+  public static void saveSupercap(TrainProperties properties, double fraction) {
+    TrainTagHelper.writeTag(
+        properties,
+        TAG_SUPERCAP,
+        String.format(Locale.ROOT, "%.3f", Math.max(0.0, Math.min(1.0, fraction))));
   }
 
   /** 无人驾驶一段时间后剩余的压力。 */

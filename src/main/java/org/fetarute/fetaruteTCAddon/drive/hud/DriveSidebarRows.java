@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverPass;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 
 /**
@@ -94,6 +95,7 @@ public final class DriveSidebarRows {
                               score.grade().name()))));
     }
     rows.add(new Row("drive.sidebar.label.doors", doorsKey(session, nowTick), Map.of()));
+    session.supercap().map(DriveSidebarRows::supercapRow).ifPresent(rows::add);
     CabSystems cab = session.cab();
     if (cab.enabled()) {
       rows.add(airRow(cab));
@@ -192,6 +194,22 @@ public final class DriveSidebarRows {
   }
 
   /** 下一通过站一行：站名、表定通过时刻，后面跟晚点或早点多少。 */
+  /** 超级电容：电量百分比；充电中、偏低、耗尽另有颜色。 */
+  static Row supercapRow(SuperCapacitor supercap) {
+    String state =
+        supercap.charging()
+            ? "charging"
+            : switch (supercap.level()) {
+              case NORMAL -> "normal";
+              case LOW -> "low";
+              case DEPLETED -> "depleted";
+            };
+    return new Row(
+        "drive.sidebar.label.supercap",
+        "drive.sidebar.value.supercap." + state,
+        Map.of("percent", String.valueOf((int) Math.round(supercap.fraction() * 100.0))));
+  }
+
   static Row passRow(DriverPass pass) {
     return new Row(
         "drive.sidebar.label.next-pass",

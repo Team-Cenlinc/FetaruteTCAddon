@@ -88,6 +88,8 @@ drive:
     ato:
       confirm: "<yellow><bold>ATO: right-click to confirm departure</bold></yellow>"
       armed: "<green>ATO: departure confirmed, leaving when the dwell ends</green>"
+    supercap:
+      depleted: "<red><bold>Supercapacitor empty: traction cut</bold></red> <gray>coast in and open the doors to charge</gray>"
     cab-change:
       active: "<gold><bold>Changing ends: <seconds> s left</bold></gold> <gray>take the cab in car</gray> <white><car></white>"
       announced: "<gold>Reversing here: go to the cab in car <white><car></white></gold>"
@@ -158,6 +160,10 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+  supercap:
+    low: "<yellow>Supercapacitor low (<white><percent>%</white>): open the doors at the next station to charge</yellow>"
+    depleted: "<red>Supercapacitor empty: traction cut, brakes still work</red>"
+    charged: "<green>Supercapacitor fully charged</green>"
   cab:
     vigilance-tripped: "<prefix> <red>The vigilance device was not acknowledged and applied the emergency brake. Change notch or right-click regularly while moving.</red>"
     brake-pipe-loss: "<prefix> <red>Brake pipe pressure lost; the emergency brake has been applied. Check the main reservoir, then move the handle to N once stopped to recharge.</red>"
@@ -179,6 +185,7 @@ drive:
       pantograph: "Raising pantograph"
       shoe: "Connecting shoe"
       engine: "Starting engine"
+      supercap: "Connecting supercapacitor"
       breaker: "Closing breaker"
       aux: "Starting auxiliary power"
   sidebar:
@@ -200,8 +207,14 @@ drive:
       cab-change: "Change ends"
       fault: "Fault"
       door-bypass: "Door bypass"
+      supercap: "Supercap"
     value:
       text: "<white><text></white>"
+      supercap:
+        normal: "<green><percent>%</green>"
+        low: "<yellow><percent>%</yellow> <gray>low</gray>"
+        depleted: "<red>0%</red> <red>traction cut</red>"
+        charging: "<aqua><percent>%</aqua> <gray>charging</gray>"
       cab-change:
         active: "<yellow>car <car></yellow> <white><seconds></white> <gray>s left</gray>"
         announced: "<yellow>cab in car <car></yellow>"
@@ -310,6 +323,9 @@ drive:
       engine-on: "<green>Engine: running</green>"
       engine-off: "<gray>Engine: stopped</gray>"
       engine-busy: "<yellow>Engine: starting</yellow>"
+      supercap-on: "<green>Supercapacitor: connected</green>"
+      supercap-off: "<gray>Supercapacitor: disconnected</gray>"
+      supercap-busy: "<yellow>Supercapacitor: connecting</yellow>"
       breaker-on: "<green>Main breaker: closed</green>"
       breaker-off: "<gray>Main breaker: open</gray>"
       breaker-busy: "<yellow>Main breaker: closing</yellow>"

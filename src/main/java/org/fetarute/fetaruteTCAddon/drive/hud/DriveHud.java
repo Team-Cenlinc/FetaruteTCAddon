@@ -129,6 +129,9 @@ public final class DriveHud {
     if (!session.setup().ready()) {
       return setupSegment(locale, session);
     }
+    if (session.supercap().filter(sc -> sc.depleted() && !sc.charging()).isPresent()) {
+      return locale.component("drive.hud.supercap.depleted");
+    }
     CabSystems cab = session.cab();
     Optional<CabSystems.TractionBlock> block = cab.tractionBlock();
     if (block.isPresent()) {

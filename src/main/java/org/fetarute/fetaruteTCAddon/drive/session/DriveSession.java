@@ -30,9 +30,11 @@ import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.NotchSelector;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
 import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.setup.SetupAnimations;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
@@ -149,6 +151,28 @@ public final class DriveSession {
   private long endArmedUntilTick = Long.MIN_VALUE;
   private final CabChange cabChange = new CabChange();
 
+  /** 超级电容车的储能；别的受电方式为空。 */
+  private final SuperCapacitor supercap;
+
+  /** 受电弓是否为充电升起着（只用于升降动画成对）。 */
+  private boolean chargingPantographUp;
+
+  /** 上一次报过的电量状态（跨越时提示一次）。 */
+  private SuperCapacitor.Level reportedSupercapLevel = SuperCapacitor.Level.NORMAL;
+
+  /** 待报的电量事件，见 {@link #takeSupercapEvent()}。 */
+  private SupercapEvent pendingSupercapEvent;
+
+  /** 超级电容要提示驾驶员的事件。 */
+  public enum SupercapEvent {
+    /** 电量低于预警线。 */
+    LOW,
+    /** 电量耗尽，牵引切除。 */
+    DEPLETED,
+    /** 停站充满。 */
+    CHARGED
+  }
+
   /** 不需要启动流程的会话（列车已就绪）。 */
   public DriveSession(
       UUID playerId,
@@ -191,6 +215,20 @@ public final class DriveSession {
     this.hotbar = List.copyOf(hotbar);
     this.rewriter = new HotbarRewriter<>(this.hotbar, () -> menuTopSize);
     this.speedLimit = new SpeedLimitTracker(config.speedLimitOverride());
+    this.supercap =
+        setup.supply().storesEnergy() ? new SuperCapacitor(config.supercap(), 1.0) : null;
+  }
+
+  /** 超级电容车的储能；别的受电方式为空。 */
+  public Optional<SuperCapacitor> supercap() {
+    return Optional.ofNullable(supercap);
+  }
+
+  /** 取出并清除待报的电量事件；没有时为空。 */
+  public Optional<SupercapEvent> takeSupercapEvent() {
+    SupercapEvent event = pendingSupercapEvent;
+    pendingSupercapEvent = null;
+    return Optional.ofNullable(event);
   }
 
   public UUID playerId() {
@@ -282,6 +320,7 @@ public final class DriveSession {
   public boolean tractionBlocked() {
     return !setup.ready()
         || cab.tractionBlock().isPresent()
+        || (supercap != null && supercap.depleted())
         || reverser == ReverserPosition.NEUTRAL
         || anyDoorOpen()
         || doorsClosing(lastAdvanceTick);
@@ -351,6 +390,79 @@ public final class DriveSession {
       properties.setSpeedLimit(wanted);
       speedLimit.guard(wanted);
     }
+  }
+
+  /**
+   * 超级电容：停稳且开着车门时充电（试着升弓），否则按本步的牵引与常用制动耗电、再生。电量跨越预警线、耗尽、充满时记一个事件。
+   *
+   * @param failSafe 本步是失效导向安全的制动（紧急、停放、无人）：不再生
+   * @param mainCircuit 主电路是否接通：断开时没有电制动，不再生
+   */
+  private void tickSupercap(
+      MinecartGroup group,
+      boolean failSafe,
+      boolean mainCircuit,
+      double tractionScale,
+      double speedBefore) {
+    if (supercap == null) {
+      return;
+    }
+    boolean wasFull = supercap.full();
+    if (isStopped() && anyDoorOpen()) {
+      supercap.charge(STEP_SECONDS);
+      if (!chargingPantographUp && supercap.charging()) {
+        chargingPantographUp = true;
+        SetupAnimations.playCharging(group, true);
+      }
+      if (!wasFull && supercap.full()) {
+        pendingSupercapEvent = SupercapEvent.CHARGED;
+      }
+    } else {
+      supercap.stopCharging();
+      double effort = dynamics.effort();
+      double traction =
+          effort > 0.0 ? effort * dynamics.params().accelBps2() * clampScale(tractionScale) : 0.0;
+      double brake =
+          effort < 0.0 && !failSafe && mainCircuit ? -effort * dynamics.params().decelBps2() : 0.0;
+      supercap.drive(traction, brake, speedBefore, STEP_SECONDS);
+    }
+    if (chargingPantographUp && (!isStopped() || !anyDoorOpen() || supercap.full())) {
+      chargingPantographUp = false;
+      SetupAnimations.playCharging(group, false);
+    }
+    SuperCapacitor.Level level = supercap.level();
+    if (level != reportedSupercapLevel) {
+      if (level == SuperCapacitor.Level.DEPLETED) {
+        pendingSupercapEvent = SupercapEvent.DEPLETED;
+      } else if (level == SuperCapacitor.Level.LOW
+          && reportedSupercapLevel == SuperCapacitor.Level.NORMAL) {
+        pendingSupercapEvent = SupercapEvent.LOW;
+      }
+      reportedSupercapLevel = level;
+    }
+  }
+
+  /** 会话结束：为充电升起的受电弓降下。 */
+  public void lowerChargingPantograph(MinecartGroup group) {
+    if (chargingPantographUp) {
+      chargingPantographUp = false;
+      SetupAnimations.playCharging(group, false);
+    }
+    if (supercap != null) {
+      supercap.stopCharging();
+    }
+  }
+
+  /** 接管时按列车上保存的电量开始，并按它定下已报过的状态（不在上车时补报“电量低”）。 */
+  public void restoreSupercap(double fraction) {
+    if (supercap != null) {
+      supercap.reset(fraction);
+      reportedSupercapLevel = supercap.level();
+    }
+  }
+
+  private static double clampScale(double scale) {
+    return Double.isNaN(scale) ? 1.0 : Math.max(0.0, Math.min(1.0, scale));
   }
 
   /** 上一次记进诊断日志的停站阶段（只用于在阶段变化时记一条）。 */
@@ -824,13 +936,15 @@ public final class DriveSession {
     boolean failSafe = effective == Notch.EB || parkingBraking || !attended();
     boolean mainCircuit = setup.mainCircuitPowered();
     double speedBefore = dynamics.speedBps();
+    double tractionScale = cab.tractionScale(speedBefore);
     dynamics.step(
         STEP_SECONDS,
         effective,
         lastCapBps,
-        cab.tractionScale(speedBefore),
+        tractionScale,
         failSafe ? FULL_BRAKE : demand -> cab.serviceBrakeScale(demand, speedBefore, mainCircuit));
     odometerBlocks += dynamics.speedBps() * STEP_SECONDS;
+    tickSupercap(group, failSafe, mainCircuit, tractionScale, speedBefore);
     boolean attended = attended();
     Vigilance.Event event =
         cab.tick(

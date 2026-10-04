@@ -654,6 +654,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               dispatchTrain
                   ? handoverCab(group, current, params)
                   : loadCab(group, current, params));
+      if (!dispatchTrain) {
+        session.restoreSupercap(TrainSetupStore.loadSupercap(group.getProperties()));
+      }
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("开始驾驶失败: " + ex);
       return StartOutcome.FAILED;
@@ -1455,6 +1458,27 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
   }
 
+  /** 超级电容的电量事件：低于预警线、耗尽（切断牵引）时提示并响一声，停站充满时提示。两级都有。 */
+  private void handleSupercapEvents(Player player, DriveSession session) {
+    session
+        .takeSupercapEvent()
+        .ifPresent(
+            event -> {
+              int percent =
+                  session.supercap().map(sc -> (int) Math.round(sc.fraction() * 100.0)).orElse(0);
+              traceSession(session, "超级电容 " + event + " 电量=" + percent + "%");
+              switch (event) {
+                case LOW -> sounds.play(player, DriveCue.FAULT);
+                case DEPLETED -> sounds.play(player, DriveCue.BREAKER_TRIP);
+                case CHARGED -> sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
+              }
+              notice(
+                  player,
+                  "drive.supercap." + event.name().toLowerCase(Locale.ROOT),
+                  Map.of("percent", String.valueOf(percent)));
+            });
+  }
+
   /** 车上故障出现、清除或恢复：提示驾驶员并写诊断日志。出现时响一声，主断跳闸另有跳闸声。 */
   private void announceFault(Player player, DriveSession session, CabFaults.Event event) {
     CabFault fault = event.fault();
@@ -1739,6 +1763,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         new DriveSessionEndedEvent(
             session.playerId(), session.trainName(), link != null, reason.name(), endedView));
     Optional<MinecartGroup> groupOpt = findSessionGroup(session);
+    groupOpt.ifPresent(
+        group -> {
+          session.lowerChargingPantograph(group);
+          // 调度列车接管时按热车满电，电量只为非调度列车记在列车上。
+          if (!session.isDispatchDriving()) {
+            session
+                .supercap()
+                .ifPresent(
+                    sc -> TrainSetupStore.saveSupercap(group.getProperties(), sc.fraction()));
+          }
+        });
     groupOpt.ifPresent(
         group ->
             TrainPropertyGuard.restore(group.getProperties(), session.observedSpeedLimitBpt()));
@@ -2077,6 +2112,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       onSetupChanged(session, powerBefore);
     }
     handleCabEvents(player, session);
+    handleSupercapEvents(player, session);
     boolean liveValues =
         session.setup().busy()
             || session.cab().enabled()

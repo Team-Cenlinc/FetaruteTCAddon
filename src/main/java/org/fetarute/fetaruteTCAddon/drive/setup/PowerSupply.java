@@ -16,7 +16,12 @@ public enum PowerSupply {
   /** 集电靴，第三轨受电，没有模型动画。 */
   SHOE("shoe", null, true),
   /** 内燃动力：受电一步改为启动发动机，没有主断路器。 */
-  DIESEL("diesel", null, false);
+  DIESEL("diesel", null, false),
+  /**
+   * 超级电容：站间靠车上储能行驶，停站开门时充电。受电一步改为投入电容（没有动画）；充电时试着升弓（{@code ptg5}，没有就 {@code ptg6}），
+   * 第三轨充电的车没有受电弓动画也不影响。
+   */
+  SUPERCAP("supercap", null, true);
 
   private final String key;
   private final String animation;
@@ -36,6 +41,11 @@ public enum PowerSupply {
   /** 受电时播放的模型动画名；没有动画时为空。 */
   public Optional<String> animation() {
     return Optional.ofNullable(animation);
+  }
+
+  /** 是否靠车上储能行驶、要到站充电。 */
+  public boolean storesEnergy() {
+    return this == SUPERCAP;
   }
 
   /** 是否为电力牵引（有主断路器）。 */
@@ -61,6 +71,8 @@ public enum PowerSupply {
     return switch (normalized) {
       case "third-rail", "third_rail", "thirdrail" -> Optional.of(SHOE);
       case "engine" -> Optional.of(DIESEL);
+      case "super-capacitor", "super_capacitor", "supercapacitor", "capacitor" -> Optional.of(
+          SUPERCAP);
       default -> Optional.empty();
     };
   }

@@ -9,6 +9,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfigSections;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverConfig;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitorConfig;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
@@ -45,6 +46,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
  * @param driver 驾驶调度列车（DRIVER 模式）的参数
  * @param sounds 驾驶提示音与鸣笛
  * @param ebGraceTicks 驾驶员自己选到紧急制动后，多少 tick 内回拨可撤销（防误触）；0 表示立即锁定
+ * @param supercap 超级电容车的储能与充电
  */
 public record DriveConfig(
     boolean enabled,
@@ -73,7 +75,8 @@ public record DriveConfig(
     boolean sidebar,
     DriverConfig driver,
     DriveSoundConfig sounds,
-    int ebGraceTicks) {
+    int ebGraceTicks,
+    SuperCapacitorConfig supercap) {
 
   private static final int TRACTION_STEPS = 3;
   private static final int BRAKE_STEPS = 4;
@@ -90,6 +93,7 @@ public record DriveConfig(
     Objects.requireNonNull(driver, "driver");
     sounds = sounds == null ? DriveSoundConfig.defaults() : sounds;
     ebGraceTicks = Math.max(0, ebGraceTicks);
+    supercap = supercap == null ? SuperCapacitorConfig.defaults() : supercap;
     tractionFractions = List.copyOf(tractionFractions);
     brakeFractions = List.copyOf(brakeFractions);
     if (tractionFractions.size() != TRACTION_STEPS || brakeFractions.size() != BRAKE_STEPS) {
@@ -130,7 +134,8 @@ public record DriveConfig(
         sidebar,
         driver,
         sounds,
-        ebGraceTicks);
+        ebGraceTicks,
+        supercap);
   }
 
   /** 内置默认值。 */
@@ -162,7 +167,8 @@ public record DriveConfig(
         true,
         DriverConfig.defaults(),
         DriveSoundConfig.defaults(),
-        TICKS_PER_SECOND);
+        TICKS_PER_SECOND,
+        SuperCapacitorConfig.defaults());
   }
 
   /** 给定档位的牵引力比例（占满牵引）；非牵引档为 0。 */
@@ -236,7 +242,8 @@ public record DriveConfig(
                         "eb-grace-seconds",
                         defaults.ebGraceTicks / (double) TICKS_PER_SECOND,
                         sink)
-                    * TICKS_PER_SECOND));
+                    * TICKS_PER_SECOND),
+        SuperCapacitorConfig.from(section.getConfigurationSection("supercap"), sink));
   }
 
   private static CabConfig cab(
