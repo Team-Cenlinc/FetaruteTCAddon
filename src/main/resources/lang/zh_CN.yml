@@ -1472,6 +1472,7 @@ drive:
       no-signal: "<yellow>无行车许可</yellow>"
       wait-signal: "<red>停车信号</red>"
       confirm-signal: "<gold><bold>信号变严：右键确认</bold></gold>"
+      blocking: "<gold>后方列车已被挡 <white><seconds></white> 秒，请尽快运行</gold>"
     station:
       approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>米</gray>"
       move-up: "<yellow>请前移 <white><distance></white> 米对标</yellow>"
@@ -1745,6 +1746,9 @@ drive:
       ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
       rescued: "<prefix> <yellow>列车 <white><train></white> 长时间无法运行，已将你送至最近车站的站台</yellow>"
       no-target: "<prefix> <red>列车 <white><train></white> 长时间无法运行，且找不到可送达的站台，请联系管理员</red>"
+    congestion:
+      warn: "<prefix> <gold>后方列车被本列车挡住已有 <white><seconds></white> 秒，请尽快恢复运行；继续阻挡将转为 ATO</gold>"
+      ato: "<prefix> <yellow>后方列车被挡住过久，本列车已转为 ATO 运行</yellow>"
     breaker:
       tripped: "<prefix> <red>线路拥堵熔断：<white><reason></white>；已交还 <white><count></white> 列驾驶员列车并暂停接班</red>"
   task:
@@ -1859,6 +1863,7 @@ drive:
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"
       entry-handback: "  <gray>•</gray> <white>/fta drive handback <玩家|all></white> <gray>- 把驾驶员控制的调度列车交还自动运行</gray>"
+      entry-rescue: "  <gray>•</gray> <white>/fta drive rescue <列车> [destroy]</white> <gray>- 结束列车上的驾驶并把车上的玩家送到站台，可随后销毁列车</gray>"
       entry-tasks: "  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- 查看或放弃当前任务、前往要接的列车、改为从车库接车</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- 停稳后切换人工驾驶与 ATO</gray>"
@@ -1926,6 +1931,11 @@ drive:
       requested: "<prefix> <yellow>已要求 <player> 把列车交还自动运行</yellow>"
       not-driving: "<prefix> <red><player> 当前没有驾驶调度列车</red>"
       all: "<prefix> <yellow>已要求全部 <count> 列驾驶员控制的列车交还自动运行</yellow>"
+    rescue:
+      done: "<prefix> <yellow>已救援列车 <white><train></white>：<white><players></white> 名玩家已下车并送至站台</yellow>"
+      no-target: "<prefix> <yellow>已救援列车 <white><train></white>：<white><players></white> 名玩家已下车，但找不到可送达的站台，未传送</yellow>"
+      destroyed: "<prefix> <yellow>列车 <white><train></white> 已销毁，交路将由替补列车接续</yellow>"
+      not-found: "<prefix> <red>找不到列车 <white><train></white></red>"
     probe:
       "on": "<prefix> <yellow>驾驶输入诊断已开启，数据包事件会写入控制台</yellow>"
       "off": "<prefix> <yellow>驾驶输入诊断已关闭</yellow>"

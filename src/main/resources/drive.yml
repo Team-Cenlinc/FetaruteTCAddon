@@ -148,6 +148,10 @@ driver:
   breaker-held-trains: 5
   breaker-held-seconds: 60
   breaker-cooldown-minutes: 15
+  # 挡住后车：后方被驾驶员列车直接挡住的车被扣超过 congestion-warn-seconds 秒时提醒驾驶员，
+  # 超过 congestion-ato-seconds 秒且驾驶员列车停着、不在表定停站时强制转 ATO
+  congestion-warn-seconds: 60
+  congestion-ato-seconds: 120
   # 行车引导：Boss 栏显示前方最要紧的目标（停车信号、车站停车点、限速降低处）、距离与建议速度，该刹车时提示“开始制动”。
   # 只对调度列车生效（非调度列车没有行车许可数据）
   guidance:

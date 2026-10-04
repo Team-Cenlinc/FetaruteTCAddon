@@ -24,6 +24,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
+import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
 import org.bukkit.event.inventory.InventoryType;
@@ -62,6 +63,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
 import org.fetarute.fetaruteTCAddon.drive.cab.BrakeTest;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
@@ -2094,7 +2096,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       for (DriverLink link : driverRegistry.links()) {
         drivers.add(link.currentTrainName());
       }
-      if (tasks.tickBreaker(drivers, current.driver().recovery(), Instant.now())) {
+      boolean tripped = tasks.tickBreaker(drivers, current.driver().recovery(), Instant.now());
+      superviseCongestion(current.driver().recovery());
+      if (tripped) {
         int count = handbackAll("breaker");
         for (Player online : Bukkit.getOnlinePlayers()) {
           if (online.hasPermission("fetarute.drive.admin")) {
@@ -2110,6 +2114,107 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                             tasks.breaker().lastReason())));
           }
         }
+      }
+    }
+  }
+
+  /**
+   * 管理员救援的结果。
+   *
+   * @param found 找到了这列车
+   * @param moved 送下车的玩家数
+   * @param relocated 是否找到了可送达的站台（找不到时只让玩家下车，不传送）
+   * @param destroyed 是否销毁了列车
+   */
+  public record RescueResult(boolean found, int moved, boolean relocated, boolean destroyed) {}
+
+  /** 管理员救援一列车：结束车上的驾驶（驾驶任务判未完成），让车上的玩家下车并送到最近停过的车站站台；{@code destroy} 时随后销毁列车， 交路换车机制会补车。 */
+  public RescueResult rescueTrain(String trainName, boolean destroy) {
+    Optional<MinecartGroup> groupOpt = SeatLocator.findGroup(trainName);
+    if (groupOpt.isEmpty()) {
+      return new RescueResult(false, 0, false, false);
+    }
+    MinecartGroup group = groupOpt.get();
+    String name = group.getProperties().getTrainName();
+    UUID driverId = null;
+    DriverStationStop lastStop = null;
+    for (DriveSession session : new ArrayList<>(active.values())) {
+      DriverLink link = session.driverLink();
+      boolean onThisTrain =
+          session.trainName().equalsIgnoreCase(name)
+              || (link != null && link.currentTrainName().equalsIgnoreCase(name));
+      if (!onThisTrain) {
+        continue;
+      }
+      driverId = session.playerId();
+      if (link != null) {
+        lastStop = link.lastStop().orElse(null);
+        tasks
+            .activeTaskOf(driverId)
+            .filter(task -> task.state() == DriverTask.State.DRIVING)
+            .ifPresent(task -> tasks.fail(session.playerId(), "rescue"));
+      }
+      traceSession(session, "管理员救援，结束驾驶");
+      endNow(session, DriveSession.EndReason.ADMIN);
+    }
+    Optional<Location> target = tasks.rescueLocation(driverId, lastStop);
+    int moved = 0;
+    for (MinecartMember<?> member : group) {
+      for (Player rider : member.getEntity().getPlayerPassengers()) {
+        rider.leaveVehicle();
+        target.ifPresent(rider::teleport);
+        moved++;
+      }
+    }
+    plugin
+        .getLogger()
+        .warning("管理员救援列车 " + name + "：送下车 " + moved + " 名玩家" + (destroy ? "，并销毁列车" : ""));
+    if (destroy) {
+      group.destroy();
+    }
+    return new RescueResult(true, moved, target.isPresent(), destroy);
+  }
+
+  /** 驾驶员列车挡住后车：超过告警线提醒驾驶员（聊天栏一次，动作栏持续显示被挡秒数），超过强制线且列车停着、不在表定停站时转 ATO。 在行进中到达强制线的，等停下再转。 */
+  private void superviseCongestion(DriverRecovery recovery) {
+    for (DriveSession session : new ArrayList<>(active.values())) {
+      DriverLink link = session.driverLink();
+      if (link == null) {
+        continue;
+      }
+      DriverCongestion.Stage stage =
+          link.updateBlocking(tasks.blockedBehindSeconds(link.currentTrainName()), recovery);
+      Player player = Bukkit.getPlayer(session.playerId());
+      switch (stage) {
+        case WARN -> {
+          traceSession(session, "后车被挡 " + link.warnedBlockingSeconds() + " 秒，提醒驾驶员");
+          if (player != null) {
+            player.sendMessage(
+                plugin
+                    .getLocaleManager()
+                    .component(
+                        "drive.driver.congestion.warn",
+                        Map.of("seconds", String.valueOf(link.warnedBlockingSeconds()))));
+            sounds.play(player, DriveCue.ATP_BRAKE);
+          }
+        }
+        case ATO -> {
+          boolean dwelling =
+              link.stationStop()
+                  .map(stop -> stop.phase() == DriverStationStop.Phase.DWELL)
+                  .orElse(false);
+          Optional<MinecartGroup> group = findSessionGroup(session);
+          if (session.isAto() || dwelling || !session.isStopped() || group.isEmpty()) {
+            link.deferCongestionStage();
+            continue;
+          }
+          switchToAto(session, group.get(), "congestion");
+          tasks.activeTaskOf(session.playerId()).ifPresent(task -> task.setMode(DrivingMode.ATO));
+          if (player != null) {
+            player.sendMessage(plugin.getLocaleManager().component("drive.driver.congestion.ato"));
+          }
+        }
+        default -> {}
       }
     }
   }

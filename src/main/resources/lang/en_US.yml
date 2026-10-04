@@ -66,6 +66,7 @@ drive:
       no-signal: "<yellow>No movement authority</yellow>"
       wait-signal: "<red>Stop signal</red>"
       confirm-signal: "<gold><bold>Signal restricted: right-click to confirm</bold></gold>"
+      blocking: "<gold>A following train has been held for <white><seconds></white> s, please move on</gold>"
     station:
       approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>m</gray>"
       move-up: "<yellow>Move up <white><distance></white> m to the stop mark</yellow>"
@@ -339,6 +340,9 @@ drive:
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
       rescued: "<prefix> <yellow>Train <white><train></white> could not move for a long time; you were taken to the nearest platform</yellow>"
       no-target: "<prefix> <red>Train <white><train></white> cannot move and no platform to take you to was found; contact an administrator</red>"
+    congestion:
+      warn: "<prefix> <gold>A following train has been held behind this train for <white><seconds></white> s. Please move on; continuing to block will switch to ATO</gold>"
+      ato: "<prefix> <yellow>The following train was held too long; this train has switched to ATO</yellow>"
     breaker:
       tripped: "<prefix> <red>Congestion breaker: <white><reason></white>; handed back <white><count></white> driver train(s) and paused new shifts</red>"
   task:
@@ -453,6 +457,7 @@ drive:
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"
       entry-handback: "  <gray>•</gray> <white>/fta drive handback <player|all></white> <gray>- Hand driver-controlled dispatched trains back to automatic operation</gray>"
+      entry-rescue: "  <gray>•</gray> <white>/fta drive rescue <train> [destroy]</white> <gray>- End driving on a train and move everyone aboard to a platform, optionally destroying the train</gray>"
       entry-tasks: "  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- Show or abandon your task, go to the train to pick up, or pick it up at the depot</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- Switch between manual and ATO while stopped</gray>"
@@ -520,6 +525,11 @@ drive:
       requested: "<prefix> <yellow>Asked <player> to hand the train back to automatic operation</yellow>"
       not-driving: "<prefix> <red><player> is not driving a dispatched train</red>"
       all: "<prefix> <yellow>Asked all <count> driver-controlled train(s) to hand back to automatic operation</yellow>"
+    rescue:
+      done: "<prefix> <yellow>Rescued train <white><train></white>: <white><players></white> players got off and were moved to a platform</yellow>"
+      no-target: "<prefix> <yellow>Rescued train <white><train></white>: <white><players></white> players got off, but no platform was found to move them to</yellow>"
+      destroyed: "<prefix> <yellow>Train <white><train></white> destroyed; a replacement train will continue its duty</yellow>"
+      not-found: "<prefix> <red>Train <white><train></white> not found</red>"
     probe:
       "on": "<prefix> <yellow>Driving input diagnostics enabled, packet events go to the console</yellow>"
       "off": "<prefix> <yellow>Driving input diagnostics disabled</yellow>"

@@ -102,6 +102,11 @@ public final class DriveHud {
     if (link != null && link.departurePending()) {
       return locale.component("drive.hud.ato.confirm");
     }
+    if (link != null && link.warnedBlockingSeconds() > 0L) {
+      return locale.component(
+          "drive.hud.driver.blocking",
+          Map.of("seconds", String.valueOf(link.warnedBlockingSeconds())));
+    }
     if (!session.setup().ready()) {
       return setupSegment(locale, session);
     }

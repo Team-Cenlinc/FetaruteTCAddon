@@ -76,6 +76,8 @@ public final class DriverLink {
   private int serviceInterventions;
   private int emergencyInterventions;
   private int forcedStops;
+  private long blockingSeconds;
+  private DriverCongestion.Stage congestionStage = DriverCongestion.Stage.NONE;
 
   /**
    * @param odometer 驾驶会话累计走过的距离（格）
@@ -652,6 +654,37 @@ public final class DriverLink {
 
   public void setSchedule(DriverSchedule schedule) {
     this.schedule = schedule;
+  }
+
+  /**
+   * 记下后车被这列车直接挡住的时长，返回新到达的处置档位（每档只返回一次；不再挡住时清零）。
+   *
+   * @return 这一次新到达的档位；没有新档位时为 {@link DriverCongestion.Stage#NONE}
+   */
+  public DriverCongestion.Stage updateBlocking(long seconds, DriverRecovery recovery) {
+    blockingSeconds = Math.max(0L, seconds);
+    DriverCongestion.Stage stage = DriverCongestion.stage(blockingSeconds, recovery);
+    if (stage == DriverCongestion.Stage.NONE) {
+      congestionStage = DriverCongestion.Stage.NONE;
+      return DriverCongestion.Stage.NONE;
+    }
+    if (stage.ordinal() <= congestionStage.ordinal()) {
+      return DriverCongestion.Stage.NONE;
+    }
+    congestionStage = stage;
+    return stage;
+  }
+
+  /** 后车被这列车挡住、已经提醒过驾驶员时，被挡了多少秒；没有提醒时为 0。 */
+  public long warnedBlockingSeconds() {
+    return congestionStage == DriverCongestion.Stage.NONE ? 0L : blockingSeconds;
+  }
+
+  /** 已到达的处置档位要等列车停着才能执行（转 ATO）时，退回上一档，下一次评估再试。 */
+  public void deferCongestionStage() {
+    if (congestionStage == DriverCongestion.Stage.ATO) {
+      congestionStage = DriverCongestion.Stage.WARN;
+    }
   }
 
   public int serviceInterventions() {

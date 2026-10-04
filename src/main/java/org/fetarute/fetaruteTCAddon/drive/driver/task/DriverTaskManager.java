@@ -33,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.TrainHold;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCircuitBreaker;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
@@ -139,6 +140,9 @@ public final class DriverTaskManager {
   private final Map<TaskKey, UUID> byKey = new HashMap<>();
   private final List<RescueWatch> rescues = new ArrayList<>();
   private final DriverCircuitBreaker breaker = new DriverCircuitBreaker();
+
+  /** 最近一次熔断评估时每列被扣住的车（挡住后车的提醒复用）。 */
+  private Map<String, DriverCircuitBreaker.Hold> lastHolds = Map.of();
 
   public DriverTaskManager(FetaruteTCAddon plugin, Consumer<String> trace) {
     this.plugin = plugin;
@@ -652,6 +656,21 @@ public final class DriverTaskManager {
             player.getUniqueId(), group.getProperties().getTrainName(), head, dueTick, target));
   }
 
+  /**
+   * 把人从列车上送到哪里：最近停过的车站的站台，其次是驾驶员任务的接班站；都没有时为空。
+   *
+   * @param playerId 驾驶员；没有驾驶员时为 {@code null}
+   * @param lastStop 最近停过的站；没有时为 {@code null}
+   */
+  public Optional<Location> rescueLocation(UUID playerId, DriverStationStop lastStop) {
+    return rescueTarget(lastStop)
+        .or(
+            () ->
+                playerId == null
+                    ? Optional.empty()
+                    : activeOrLastTask(playerId).flatMap(this::boardStation));
+  }
+
   /** 推进救援：到时仍卡着就送驾驶员去站台。 */
   public void tickRescues(long nowTick, Notifier notify) {
     Iterator<RescueWatch> it = rescues.iterator();
@@ -776,6 +795,7 @@ public final class DriverTaskManager {
   public boolean tickBreaker(Set<String> driverTrains, DriverRecovery recovery, Instant now) {
     EtaService eta = plugin.getEtaService();
     if (eta == null || driverTrains.isEmpty()) {
+      lastHolds = Map.of();
       return false;
     }
     Map<String, DriverCircuitBreaker.Hold> holds = new HashMap<>();
@@ -798,11 +818,17 @@ public final class DriverTaskManager {
       holds.put(
           name, new DriverCircuitBreaker.Hold(Duration.between(hold.get().since(), now), blockers));
     }
+    lastHolds = Map.copyOf(holds);
     boolean tripped = breaker.evaluate(holds, driverTrains, recovery, now);
     if (tripped) {
       plugin.getLogger().warning("驾驶员接班熔断：" + breaker.lastReason());
     }
     return tripped;
+  }
+
+  /** 后方被这列驾驶员列车直接挡住的车里，被扣最久的秒数（按最近一次熔断评估时的扣车情况）。 */
+  public long blockedBehindSeconds(String driverTrain) {
+    return DriverCongestion.blockedBehindSeconds(lastHolds, driverTrain);
   }
 
   /** 给运营人员看的熔断状态。 */

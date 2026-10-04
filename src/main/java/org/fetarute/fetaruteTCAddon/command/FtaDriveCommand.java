@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -80,6 +82,18 @@ public final class FtaDriveCommand {
                   if (session.isDispatchDriving()) {
                     names.add(session.playerName());
                   }
+                }
+              }
+              return names;
+            });
+
+    SuggestionProvider<CommandSender> trainSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> {
+              List<String> names = new ArrayList<>();
+              for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+                if (group != null && group.isValid()) {
+                  names.add(group.getProperties().getTrainName());
                 }
               }
               return names;
@@ -245,6 +259,27 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("rescue")
+            .permission(PERMISSION_ADMIN)
+            .required("train", StringParser.stringParser(), trainSuggestions)
+            .optional(
+                "action",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("destroy"))
+            .handler(
+                ctx ->
+                    handleRescue(
+                        ctx.sender(),
+                        ((String) ctx.get("train")).trim(),
+                        ctx.optional("action")
+                            .map(String.class::cast)
+                            .map(action -> action.equalsIgnoreCase("destroy"))
+                            .orElse(false))));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("probe")
             .permission(PERMISSION_ADMIN)
             .optional("state", StringParser.stringParser(), toggleSuggestions)
@@ -270,6 +305,7 @@ public final class FtaDriveCommand {
             "list",
             "stop",
             "handback",
+            "rescue",
             "breaker",
             "probe")) {
       sender.sendMessage(locale.component("drive.command.help.entry-" + entry));
@@ -729,6 +765,30 @@ public final class FtaDriveCommand {
         locale.component(
             requested ? "drive.command.handback.requested" : "drive.command.handback.not-driving",
             Map.of("player", target)));
+  }
+
+  private void handleRescue(CommandSender sender, String train, boolean destroy) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    DriveSessionManager.RescueResult result = drive.rescueTrain(train, destroy);
+    LocaleManager locale = plugin.getLocaleManager();
+    if (!result.found()) {
+      sender.sendMessage(
+          locale.component("drive.command.rescue.not-found", Map.of("train", train)));
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            result.relocated() || result.moved() == 0
+                ? "drive.command.rescue.done"
+                : "drive.command.rescue.no-target",
+            Map.of("train", train, "players", String.valueOf(result.moved()))));
+    if (result.destroyed()) {
+      sender.sendMessage(
+          locale.component("drive.command.rescue.destroyed", Map.of("train", train)));
+    }
   }
 
   private void handleProbe(CommandSender sender, Optional<String> state) {
