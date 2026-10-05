@@ -1797,7 +1797,7 @@ drive:
     title: "<gold><bold>驾驶台</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
-      train: "车次"
+      train: "列车"
       signal: "信号"
       next-station: "下一站"
       stop-mark: "停车点"

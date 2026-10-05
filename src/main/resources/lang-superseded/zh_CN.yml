@@ -1,6 +1,8 @@
 # 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
 # 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
 command:
+  consist:
+    max-speed: ["，最高 <value> 格/秒"]
   pids:
     help:
       give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
@@ -60,6 +62,8 @@ drive:
       ato-confirm:
         chat: ["<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"]
   sidebar:
+    label:
+      train: ["车次"]
     value:
       stop:
         approach: ["<aqua><station></aqua> <white><distance></white> <gray>格</gray>"]
