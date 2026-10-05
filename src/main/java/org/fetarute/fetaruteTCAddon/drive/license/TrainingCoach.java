@@ -194,8 +194,16 @@ final class TrainingCoach {
 
   /** 列车此刻的晚点（秒）；查不到时为空。 */
   static OptionalLong delayOf(DriveSession session) {
+    return delayOf(session.trainName());
+  }
+
+  /** 按列车名查此刻的晚点（秒）；没绑车次、没有时刻表时为空。派车过滤与行车中的延误保护共用。 */
+  static OptionalLong delayOf(String trainName) {
+    if (trainName == null || trainName.isBlank()) {
+      return OptionalLong.empty();
+    }
     return DriverTaskManager.timetables()
-        .flatMap(api -> api.getAssignment(session.trainName()))
+        .flatMap(api -> api.getAssignment(trainName))
         .map(assignment -> assignment.currentDelaySeconds())
         .orElse(OptionalLong.empty());
   }

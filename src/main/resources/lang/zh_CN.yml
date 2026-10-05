@@ -966,7 +966,7 @@ command:
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"
+      batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运营运行图：</dark_aqua><white><codes></white> <gray>（出库与回送运行图不在批量范围内）</gray>"
       batch-partial: "<prefix> <yellow>批量更新中途停止，以下运行图已经更新：</yellow><white><codes></white>"
       wildcard-flags: "<prefix> <red>运行图写成通配（*）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
       noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
@@ -2183,6 +2183,7 @@ drive:
       no-spot: "<prefix> <red>列车旁没有可落脚的位置，请自行前往</red>"
       station: "<prefix> <green>已到达接班站台，请等候列车进站，坐进车头驾驶室并确认座位后接班</green>"
       station-missing: "<prefix> <red>找不到接班站台的位置，请自行前往</red>"
+      station-pending: "<prefix> <gray>正在前往接班站台……</gray>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
     next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
     continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"

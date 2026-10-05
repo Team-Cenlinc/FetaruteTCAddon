@@ -5994,6 +5994,10 @@ public final class FtaGraphCommand {
   private void syncSignNodeRegistry(World world, List<RailNodeRecord> nodes) {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(nodes, "nodes");
+    // 建图、刷新与增补都会重扫牌子：顺带作废停车位置标缓存，WorldEdit 等不触发建牌事件放下的标志随之生效。
+    if (plugin.getStopMarkIndex() != null) {
+      plugin.getStopMarkIndex().invalidate();
+    }
     SignNodeRegistry registry = plugin.getSignNodeRegistry();
     if (registry == null) {
       return;
@@ -6400,31 +6404,30 @@ public final class FtaGraphCommand {
     scheduler.runTaskAsynchronously(
         plugin,
         () -> {
-          ExtendPlan plan;
+          Runnable back;
           try {
-            plan = ExtendPlan.compute(worldId, base, newRailNodes, verified, cautionKeys);
+            ExtendPlan plan =
+                ExtendPlan.compute(worldId, base, newRailNodes, verified, cautionKeys);
+            back = () -> completeExtend(sender, world, base, plan, explorer, startNanos, locale);
           } catch (RuntimeException ex) {
             plugin.getLogger().warning("调度图增补收尾失败: " + ex);
+            back = () -> sendExtendRefusal(sender, locale, "增补收尾出错：" + ex.getMessage());
+          }
+          Runnable finish = back;
+          try {
             scheduler.runTask(
                 plugin,
                 () -> {
                   try {
-                    sendExtendRefusal(sender, locale, "增补收尾出错：" + ex.getMessage());
+                    finish.run();
                   } finally {
                     release.run();
                   }
                 });
-            return;
+          } catch (RuntimeException ex) {
+            // 插件已停用：回不到主线程，直接解锁，免得本世界的建图任务一直显示在进行中。
+            release.run();
           }
-          scheduler.runTask(
-              plugin,
-              () -> {
-                try {
-                  completeExtend(sender, world, base, plan, explorer, startNanos, locale);
-                } finally {
-                  release.run();
-                }
-              });
         });
     return true;
   }

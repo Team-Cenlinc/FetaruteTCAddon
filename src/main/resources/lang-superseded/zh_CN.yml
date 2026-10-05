@@ -1,6 +1,9 @@
 # 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
 # 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
 command:
+  route:
+    set:
+      batch-success: ["<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"]
   consist:
     max-speed: ["，最高 <value> 格/秒"]
   pids:

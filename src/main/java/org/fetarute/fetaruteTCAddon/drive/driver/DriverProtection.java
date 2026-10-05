@@ -11,7 +11,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
  *   <li>超过容许速度一个容差：常用制动（至少 B4），降到容许速度以下一段回差才松开；
  *   <li>超出容许速度一个容差再加“超速比例”与容差中较大的一档，或闭塞硬停：紧急制动；调度要求停车只用常用制动；
  *   <li>停车信号下按紧急制动也停不到停车点前：立即停住（调度层的防撞保证优先于真实感）。中途站停过头不强制停车：越过越站阈值时由站台按越站处理； 终点站没有越站可言，最远只许越过停车点
- *       {@link DriverConfig#terminalOverrunBlocks()}，按紧急制动也停不进时同样立即停住；
+ *       {@link DriverConfig#terminalOverrunBlocks()}：按紧急制动也停不进时紧急制动，到界限仍在动就立即停住；
  *   <li>行驶中达到容许速度、停稳时遇到停车信号或不允许起步：切断牵引。
  * </ul>
  *
@@ -146,7 +146,9 @@ public final class DriverProtection {
       double distance;
       if (in.stationTerminal()) {
         terminalLeft = in.stationRemainingBlocks() + config.terminalOverrunBlocks();
-        distance = Math.max(0.0, terminalLeft - config.stopMarginBlocks());
+        // 停车余量不超过界限的一半：界限配得比余量还小时，曲线也不能在停车点之前就降到 0。
+        double margin = Math.min(config.stopMarginBlocks(), config.terminalOverrunBlocks() / 2.0);
+        distance = Math.max(0.0, terminalLeft - margin);
       } else {
         distance = Math.max(0.0, in.stationRemainingBlocks()) + config.stopSkipBlocks();
       }
@@ -186,9 +188,12 @@ public final class DriverProtection {
         double ebDistance =
             v * v / (2.0 * Math.max(0.01, in.emergencyDecelBps2()))
                 + v * in.reactionSeconds() * 0.5;
-        if (in.stationPrecise() && (terminalLeft <= 0.0 || ebDistance > terminalLeft)) {
-          // 终点站：紧急制动也停不进界限，或到了界限还在动——立即停住，保证不越过界限。
+        if (in.stationPrecise() && terminalLeft <= 0.0) {
+          // 终点站：到了界限还在动——立即停住，保证不越过界限。
           iv = Intervention.CLAMP;
+        } else if (in.stationPrecise() && ebDistance > terminalLeft) {
+          // 紧急制动也停不进界限：先紧急制动（估计距离切到实测时可能突然变短，不直接把速度归零），到界限仍在动再立即停住。
+          iv = Intervention.EMERGENCY;
         } else if (terminalLeft <= 0.0) {
           // 估计距离已到界限：不论多慢都制动，容差内的低速也不能再往前溜。
           iv = Intervention.SERVICE;

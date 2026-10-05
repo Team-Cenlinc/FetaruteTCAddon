@@ -1727,9 +1727,13 @@ public final class FtaRouteCommand {
                               Map.of("flags", String.join(" ", perRoute))));
                       return;
                     }
+                    // 只改运营运行图：出库、回送运行图在交路组里固定按权重 1 分节拍，批量编进组或关掉会改变运营车的间隔、停掉回库。
                     targets =
                         matchingRoutes(
-                            provider.routes().listByLine(resolvedLine.line().id()), routeArg);
+                                provider.routes().listByLine(resolvedLine.line().id()), routeArg)
+                            .stream()
+                            .filter(route -> route.operationType() == RouteOperationType.OPERATION)
+                            .toList();
                   } else {
                     targets = query.findRoute(resolvedLine.line().id(), routeArg).stream().toList();
                   }
@@ -1738,6 +1742,25 @@ public final class FtaRouteCommand {
                         locale.component("command.route.not-found", Map.of("route", routeArg)));
                     return;
                   }
+                  // 编组方案与运行图无关：先查一次，方案不存在时在写任何一条之前就失败。
+                  Optional<ConsistPlan> consistPlan = Optional.empty();
+                  if (flags.hasFlag(consistPlanFlag)) {
+                    String rawPlanName = flags.getValue(consistPlanFlag, "");
+                    String planName = rawPlanName == null ? "" : rawPlanName.trim();
+                    consistPlan =
+                        provider
+                            .consistPlans()
+                            .findByOperatorAndName(resolvedLine.operator().id(), planName);
+                    if (consistPlan.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.route.consist-plan.not-found",
+                              Map.of(
+                                  "operator", resolvedLine.operator().code(), "name", planName)));
+                      return;
+                    }
+                  }
+                  Optional<ConsistPlan> plan = consistPlan;
 
                   java.util.function.Predicate<ResolvedRoute> apply =
                       resolved -> {
@@ -1801,21 +1824,7 @@ public final class FtaRouteCommand {
                         if (flags.hasFlag(consistPlanClearFlag)) {
                           metadata.remove(ConsistPlanService.ROUTE_METADATA_KEY);
                         }
-                        if (flags.hasFlag(consistPlanFlag)) {
-                          String rawPlanName = flags.getValue(consistPlanFlag, "");
-                          String planName = rawPlanName == null ? "" : rawPlanName.trim();
-                          Optional<ConsistPlan> plan =
-                              provider
-                                  .consistPlans()
-                                  .findByOperatorAndName(resolved.operator().id(), planName);
-                          if (plan.isEmpty()) {
-                            sender.sendMessage(
-                                locale.component(
-                                    "command.route.consist-plan.not-found",
-                                    Map.of(
-                                        "operator", resolved.operator().code(), "name", planName)));
-                            return false;
-                          }
+                        if (plan.isPresent()) {
                           metadata.put(ConsistPlanService.ROUTE_METADATA_KEY, plan.get().name());
                         }
                         if (flags.hasFlag(spawnEnabledFlag)) {

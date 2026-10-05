@@ -231,6 +231,53 @@ class DriverProtectionTest {
   }
 
   @Test
+  @DisplayName("终点站：界限配得比停车余量还小时，曲线余量取界限的一半，停车点处容许速度不为 0")
+  void terminalMarginNeverExceedsHalfTheLimit() {
+    DriverConfig tight =
+        new DriverConfig(
+            CONFIG.enabled(),
+            CONFIG.hotHandover(),
+            CONFIG.overspeedToleranceBps(),
+            CONFIG.serviceReleaseHysteresisBps(),
+            CONFIG.emergencyOverspeedRatio(),
+            CONFIG.restrictedSpeedBps(),
+            CONFIG.directiveStaleTicks(),
+            CONFIG.staleHandbackTicks(),
+            1.0,
+            CONFIG.stopAccurateBlocks(),
+            CONFIG.stopAcceptBlocks(),
+            CONFIG.stopSkipBlocks(),
+            CONFIG.stopMarker(),
+            CONFIG.pickupWaitSeconds(),
+            CONFIG.pickupTeleport(),
+            CONFIG.recovery(),
+            CONFIG.guidance(),
+            CONFIG.cabSeatNames(),
+            CONFIG.cabChange(),
+            CONFIG.pickupAdvanceSeconds(),
+            CONFIG.recordRetentionDays(),
+            0.5);
+    Decision atStopPoint =
+        DriverProtection.evaluate(
+            new Input(
+                0.5,
+                false,
+                proceed(20.0),
+                0L,
+                0.0,
+                SERVICE,
+                EMERGENCY,
+                REACTION,
+                false,
+                false,
+                0.0,
+                true,
+                true),
+            tight);
+    assertTrue(atStopPoint.permittedBps() > 0.0, "停车点处还能对标");
+  }
+
+  @Test
   @DisplayName("终点站：最远只许越过停车点 terminal-overrun-blocks，曲线再留停车余量")
   void terminalCurveEndsShortOfTheOverrunLimit() {
     double limit = CONFIG.terminalOverrunBlocks();
@@ -247,13 +294,13 @@ class DriverProtectionTest {
   }
 
   @Test
-  @DisplayName("终点站：紧急制动也停不进界限、或到界限还在动时强制停车")
+  @DisplayName("终点站：紧急制动也停不进界限时紧急制动，到界限还在动时强制停车")
   void terminalClampsBeforeTheOverrunLimit() {
     double limit = CONFIG.terminalOverrunBlocks();
     assertEquals(
         Intervention.CLAMP, evalStation(0.3, -limit, true, true).intervention(), "到了界限还在动");
     assertEquals(
-        Intervention.CLAMP,
+        Intervention.EMERGENCY,
         evalStation(15.0, 2.0, true, true).intervention(),
         "离界限 5 格还有 54 km/h，紧急制动也停不进");
     double permitted = evalStation(5.0, 30.0, true, true).permittedBps();

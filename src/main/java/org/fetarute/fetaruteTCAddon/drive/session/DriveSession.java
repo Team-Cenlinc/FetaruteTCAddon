@@ -314,8 +314,9 @@ public final class DriveSession {
   /** 换端判定读到的驾驶室座位（要逐节看座位附件的名字），连同读时的编组、节数与 tick：尽头式待命可能持续几分钟，不必每 tick 重读。 */
   public record CabSeatsMemo(MinecartGroup group, int size, long tick, CabSeats seats) {}
 
-  /** 换端判定查到的计划发车（终点待命时要查下一趟），连同查时的 tick 与是否待命；查不到时为 {@code null}。 */
-  public record PlannedDepartureMemo(long tick, boolean layover, java.time.Instant planned) {}
+  /** 换端判定查到的计划发车（终点待命时要查下一趟），连同查时的 tick、是否待命、列车名与驾驶任务；查不到时为 {@code null}。列车改名或任务换了（接续下一趟）都要重查。 */
+  public record PlannedDepartureMemo(
+      long tick, boolean layover, String trainName, Object taskKey, java.time.Instant planned) {}
 
   private CabSeatsMemo cabSeatsMemo;
   private PlannedDepartureMemo plannedDepartureMemo;

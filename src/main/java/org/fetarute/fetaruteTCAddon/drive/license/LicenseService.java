@@ -492,14 +492,8 @@ public final class LicenseService implements Listener {
 
   /** 这列车此刻晚点是否超过阈值；查不到（还没出车、没有时刻表）时不算。 */
   private static boolean lateTrain(String trainName, int maxDelaySeconds) {
-    if (trainName == null || trainName.isBlank()) {
-      return false;
-    }
-    return DriverTaskManager.timetables()
-        .flatMap(api -> api.getAssignment(trainName))
-        .map(assignment -> assignment.currentDelaySeconds())
-        .filter(delay -> delay.isPresent() && delay.getAsLong() > maxDelaySeconds)
-        .isPresent();
+    java.util.OptionalLong delay = TrainingCoach.delayOf(trainName);
+    return delay.isPresent() && delay.getAsLong() > maxDelaySeconds;
   }
 
   /**
@@ -827,7 +821,8 @@ public final class LicenseService implements Listener {
     }
     if (drill.isPresent()) {
       coach.review(player, drill.get());
-    } else if (config.training().drill()) {
+    } else if (config.training().drill() && !"not-started".equals(result.reason())) {
+      // 没接班就作废的练习谈不上安排演练，只在练习确实开过时说明这一次没有演练。
       tell(player, "drive.license.practice.review.no-drill", values);
     }
     if (!completed) {

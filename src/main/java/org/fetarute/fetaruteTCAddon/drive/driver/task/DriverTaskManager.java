@@ -27,7 +27,6 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
-import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.TrainHold;
@@ -589,21 +588,15 @@ public final class DriverTaskManager {
       if (plan.isEmpty()) {
         return false;
       }
-      List<TimetableStop> stops = plan.get().stops();
-      int lastStopping = -1;
-      for (int i = 0; i < stops.size(); i++) {
-        if (stops.get(i).stops()) {
-          lastStopping = i;
-        }
+      // 车次终点的口径以交路计划为准（第一个终点站，没有时为最后一个停车点）。
+      if (plan.get().terminatingSequence().orElse(-1) != stopSequence) {
+        return false;
       }
-      for (int i = 0; i < stops.size(); i++) {
-        TimetableStop stop = stops.get(i);
+      for (TimetableStop stop : plan.get().stops()) {
         if (stop.stopSequence() != stopSequence) {
           continue;
         }
-        if (!stop.stops()
-            || stop.stationCode().filter(stationCode::equalsIgnoreCase).isEmpty()
-            || !(i == lastStopping || stop.passType() == RouteStopPassType.TERMINATE)) {
+        if (!stop.stops() || stop.stationCode().filter(stationCode::equalsIgnoreCase).isEmpty()) {
           return false;
         }
         Instant departure =
@@ -894,13 +887,41 @@ public final class DriverTaskManager {
     return Optional.ofNullable(byPlayer.get(playerId));
   }
 
+  /** 前往接班站时车站设置的位置；车站没设置位置时为空，改用 {@link #boardPlatformLocation}。 */
+  public Optional<Location> boardStationConfigured(DriverTask task) {
+    return boardStation(task);
+  }
+
   /**
-   * 前往接班站时送到哪里：车站设置了位置时用它；否则在接班站台牌子所在的轨道旁找一处站得住的地方（区块未加载时先加载）。
+   * 接班站台牌子所在的轨道旁一处站得住的地方。站台区块未加载时先在后台加载（不卡主线程），结果在主线程回调。
    *
-   * @return 都找不到时为空
+   * @param done 主线程回调；找不到站台或落脚处时为空
    */
-  public Optional<Location> boardStationLocation(DriverTask task) {
-    return boardStation(task).or(() -> boardPlatform(task));
+  public void boardPlatformLocation(
+      DriverTask task, java.util.function.Consumer<Optional<Location>> done) {
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo> info =
+        boardPlatformSign(task);
+    World world = info.map(found -> Bukkit.getWorld(found.worldId())).orElse(null);
+    if (info.isEmpty() || world == null) {
+      done.accept(Optional.empty());
+      return;
+    }
+    int x = info.get().x();
+    int y = info.get().y();
+    int z = info.get().z();
+    world
+        .getChunkAtAsync(x >> 4, z >> 4)
+        .whenComplete(
+            (chunk, error) -> {
+              Runnable finish =
+                  () ->
+                      done.accept(error != null ? Optional.empty() : platformSpot(world, x, y, z));
+              if (Bukkit.isPrimaryThread()) {
+                finish.run();
+              } else {
+                Bukkit.getScheduler().runTask(plugin, finish);
+              }
+            });
   }
 
   /** 列车已停在这趟任务的接班站：时刻表绑定显示刚停过接班站，且站台还在停站或等发车。 */
@@ -925,8 +946,9 @@ public final class DriverTaskManager {
     return atBoard && dwelling(train);
   }
 
-  /** 接班站台牌子旁的落脚处：先认任务记下的站台节点，找不到时取同一车站的任一站台。 */
-  private Optional<Location> boardPlatform(DriverTask task) {
+  /** 接班站台牌子：先认任务记下的站台节点，找不到时取同一车站的任一站台。 */
+  private Optional<org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo>
+      boardPlatformSign(DriverTask task) {
     var registry = plugin.getSignNodeRegistry();
     if (registry == null) {
       return Optional.empty();
@@ -953,18 +975,11 @@ public final class DriverTaskManager {
                           .startsWith(prefix))
               .findFirst();
     }
-    if (info.isEmpty()) {
-      return Optional.empty();
-    }
-    World world = Bukkit.getWorld(info.get().worldId());
-    if (world == null) {
-      return Optional.empty();
-    }
-    int x = info.get().x();
-    int y = info.get().y();
-    int z = info.get().z();
-    // 驾驶员多半不在附近：先加载站台所在区块，才能找轨道与落脚处（只在命令里用，同步加载可以接受）。
-    world.getChunkAt(x >> 4, z >> 4);
+    return info;
+  }
+
+  /** 站台牌子所在轨道旁的落脚处（区块须已加载）；朝向轨道。 */
+  private static Optional<Location> platformSpot(World world, int x, int y, int z) {
     Vector base =
         org.fetarute
             .fetaruteTCAddon
@@ -975,13 +990,7 @@ public final class DriverTaskManager {
             .stationRailOf(world, x, y, z)
             .map(piece -> piece.block().getLocation().toVector().add(new Vector(0.5, 0.0, 0.5)))
             .orElse(new Vector(x + 0.5, y, z + 0.5));
-    return PickupSpot.find(
-            base,
-            null,
-            (bx, by, bz) ->
-                world.getBlockAt(bx, by - 1, bz).getType().isSolid()
-                    && world.getBlockAt(bx, by, bz).isPassable()
-                    && world.getBlockAt(bx, by + 1, bz).isPassable())
+    return PickupSpot.find(base, null, PickupSpot.standable(world))
         .map(
             spot -> {
               Location target = new Location(world, spot.getX(), spot.getY(), spot.getZ());

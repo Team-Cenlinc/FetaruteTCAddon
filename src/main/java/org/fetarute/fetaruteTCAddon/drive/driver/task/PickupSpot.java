@@ -24,6 +24,14 @@ public final class PickupSpot {
 
   private PickupSpot() {}
 
+  /** 世界里的落脚判定：脚下实心，脚和头所在的两格可以通过。前往接车与前往接班站共用。 */
+  public static Standable standable(org.bukkit.World world) {
+    return (x, y, z) ->
+        world.getBlockAt(x, y - 1, z).getType().isSolid()
+            && world.getBlockAt(x, y, z).isPassable()
+            && world.getBlockAt(x, y + 1, z).isPassable();
+  }
+
   /**
    * 车头两侧找落脚处。
    *

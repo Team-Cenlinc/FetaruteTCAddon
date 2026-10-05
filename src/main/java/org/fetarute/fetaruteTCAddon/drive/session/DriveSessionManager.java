@@ -18,6 +18,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
@@ -3492,9 +3493,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       // 送到要坐的那一端：尽头式终点站是车尾端，其余是车头端。
       return teleportBesideCab(player, pickup.get().trainName(), pickup.get().departure());
     }
-    // 中途站接班（含驾驶证路考与练习）：列车已停在接班站时送到车头驾驶室旁，否则送到接班站台等车。
+    // 驾驶证路考与练习在中途站接班：列车已停在接班站时送到车头驾驶室旁，否则送到接班站台等车。
+    // 只给这两种：普通车次的任务能用站码领远处车站，开放了就成了全图快速传送。
     Optional<DriverTask> claimed =
-        tasks.taskOf(player.getUniqueId()).filter(task -> task.state() == DriverTask.State.CLAIMED);
+        tasks
+            .taskOf(player.getUniqueId())
+            .filter(task -> task.state() == DriverTask.State.CLAIMED)
+            .filter(
+                task ->
+                    DriverTask.SOURCE_EXAM.equals(task.source())
+                        || DriverTask.SOURCE_TRAINING.equals(task.source()));
     if (claimed.isEmpty()) {
       return "drive.task.goto.none";
     }
@@ -3505,16 +3513,37 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         return key;
       }
     }
-    Optional<org.bukkit.Location> station = tasks.boardStationLocation(task);
-    if (station.isEmpty()) {
-      return "drive.task.goto.station-missing";
+    Optional<org.bukkit.Location> configured = tasks.boardStationConfigured(task);
+    if (configured.isPresent()) {
+      sendToBoardStation(player, task, configured.get());
+      return "drive.task.goto.station";
     }
+    // 站台区块多半没加载：后台加载完再找落脚处，到了再告诉玩家。
+    UUID playerId = player.getUniqueId();
+    tasks.boardPlatformLocation(
+        task,
+        spot -> {
+          Player online = Bukkit.getPlayer(playerId);
+          if (online == null || !online.isOnline() || active.containsKey(playerId)) {
+            return;
+          }
+          if (spot.isEmpty()) {
+            online.sendMessage(
+                plugin.getLocaleManager().component("drive.task.goto.station-missing"));
+            return;
+          }
+          sendToBoardStation(online, task, spot.get());
+          online.sendMessage(plugin.getLocaleManager().component("drive.task.goto.station"));
+        });
+    return "drive.task.goto.station-pending";
+  }
+
+  private void sendToBoardStation(Player player, DriverTask task, org.bukkit.Location target) {
     if (player.isInsideVehicle()) {
       player.leaveVehicle();
     }
-    player.teleport(station.get());
+    player.teleportAsync(target);
     traceTask("前往接班站 " + player.getName() + " -> " + task.stationName());
-    return "drive.task.goto.station";
   }
 
   /** 送到列车车头（或车尾）驾驶室旁一处站得住的地方，不直接塞进座位。 */
@@ -3534,12 +3563,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     Optional<Vector> spot =
         PickupSpot.find(
-            at.toVector(),
-            StopAlignment.travel(group.get()),
-            (x, y, z) ->
-                world.getBlockAt(x, y - 1, z).getType().isSolid()
-                    && world.getBlockAt(x, y, z).isPassable()
-                    && world.getBlockAt(x, y + 1, z).isPassable());
+            at.toVector(), StopAlignment.travel(group.get()), PickupSpot.standable(world));
     if (spot.isEmpty()) {
       return "drive.task.goto.no-spot";
     }
@@ -3817,18 +3841,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return seats;
   }
 
-  /** 计划发车：每秒最多查一次（待命与否变了马上重查）。 */
+  /** 计划发车：每秒最多查一次（待命与否、列车改名或驾驶任务换了都马上重查）。 */
   private Instant cachedPlannedDeparture(
       DriveSession session, DriverLink link, boolean layover, long nowTick) {
     DriveSession.PlannedDepartureMemo memo = session.plannedDepartureMemo();
+    String trainName = session.trainName();
+    Object taskKey = tasks.activeTaskOf(session.playerId()).map(DriverTask::key).orElse(null);
     if (memo != null
         && memo.layover() == layover
+        && Objects.equals(memo.trainName(), trainName)
+        && Objects.equals(memo.taskKey(), taskKey)
         && nowTick - memo.tick() < CAB_CHANGE_REFRESH_TICKS) {
       return memo.planned();
     }
-    Instant planned = plannedDepartureOf(session.playerId(), link, session.trainName(), layover);
+    Instant planned = plannedDepartureOf(session.playerId(), link, trainName, layover);
     session.setPlannedDepartureMemo(
-        new DriveSession.PlannedDepartureMemo(nowTick, layover, planned));
+        new DriveSession.PlannedDepartureMemo(nowTick, layover, trainName, taskKey, planned));
     return planned;
   }
 
