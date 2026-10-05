@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
@@ -277,7 +278,547 @@ final class RailNodeIncrementalSyncTest {
     Block block = mock(Block.class);
     when(block.getWorld()).thenReturn(world);
     when(block.getLocation()).thenReturn(location);
+    when(block.getX()).thenReturn(x);
+    when(block.getY()).thenReturn(y);
+    when(block.getZ()).thenReturn(z);
     return block;
+  }
+
+  /** 单节点、单快照的存储桩：库里只有 {@code definition} 这一个节点，快照签名为 {@code snapshotSignature}。 */
+  private StorageManager storageWith(
+      UUID worldId, SignNodeDefinition definition, String snapshotSignature) {
+    RailNodeRecord node =
+        new RailNodeRecord(
+            worldId,
+            definition.nodeId(),
+            definition.nodeType(),
+            1,
+            64,
+            2,
+            definition.trainCartsDestination(),
+            Optional.empty());
+    return storageWith(worldId, List.of(node), snapshotSignature);
+  }
+
+  private StorageManager storageWith(
+      UUID worldId, List<RailNodeRecord> nodes, String snapshotSignature) {
+    RailNodeRepository nodeRepo = mock(RailNodeRepository.class);
+    when(nodeRepo.listByWorld(worldId)).thenReturn(nodes);
+    when(nodeRepo.listByPosition(eq(worldId), anyInt(), anyInt(), anyInt()))
+        .thenAnswer(
+            invocation ->
+                nodes.stream()
+                    .filter(
+                        node ->
+                            node.x() == invocation.<Integer>getArgument(1)
+                                && node.y() == invocation.<Integer>getArgument(2)
+                                && node.z() == invocation.<Integer>getArgument(3))
+                    .toList());
+    when(nodeRepo.delete(eq(worldId), any()))
+        .thenAnswer(
+            invocation ->
+                (int)
+                    nodes.stream()
+                        .filter(node -> node.nodeId().equals(invocation.getArgument(1)))
+                        .count());
+    RailGraphSnapshotRepository snapshotRepo = mock(RailGraphSnapshotRepository.class);
+    when(snapshotRepo.findByWorld(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphSnapshotRecord(worldId, Instant.EPOCH, 1, 0, snapshotSignature)));
+    StorageProvider provider = mock(StorageProvider.class);
+    when(provider.railNodes()).thenReturn(nodeRepo);
+    when(provider.railGraphSnapshots()).thenReturn(snapshotRepo);
+    when(provider.transactionManager()).thenReturn(directTransactionManager());
+    StorageManager storageManager = mock(StorageManager.class);
+    when(storageManager.isReady()).thenReturn(true);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    return storageManager;
+  }
+
+  private static SignNodeDefinition waypoint() {
+    return new SignNodeDefinition(
+        NodeId.of("SURN:PTK:GPT:1:00"),
+        NodeType.WAYPOINT,
+        Optional.of("SURN:PTK:GPT:1:00"),
+        Optional.empty());
+  }
+
+  private static RailGraphService.RailGraphStaleState staleState() {
+    return new RailGraphService.RailGraphStaleState(Instant.EPOCH, "a", "b", 1, 0, 1);
+  }
+
+  @Test
+  void usedAdditionRemovesServedGraph() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world);
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), definition, "deadbeef"),
+            service,
+            null,
+            listener,
+            (w, def) -> Optional.of("交路 X 第 1 站"));
+
+    sync.upsert(mockBlock(world, 1, 64, 2), definition);
+
+    assertTrue(service.getSnapshot(world).isEmpty());
+    verify(listener)
+        .onStale(
+            world,
+            new GraphStaleListener.NodeChange(
+                definition, 1, 64, 2, false, Optional.of("交路 X 第 1 站")),
+            GraphStaleListener.Level.NONE,
+            GraphStaleListener.Level.EVICTED);
+    verify(listener, never()).onRecovered(any());
+  }
+
+  @Test
+  void unusedRemovalKeepsServingTheOldGraph() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world, definition.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), definition, "deadbeef"),
+            service,
+            null,
+            listener,
+            (w, def) -> Optional.empty());
+
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    assertTrue(service.getSnapshot(world).isPresent());
+    assertTrue(service.isServingRetainedStaleSnapshot(world.getUID()));
+    verify(listener)
+        .onStale(
+            world,
+            new GraphStaleListener.NodeChange(definition, 1, 64, 2, true),
+            GraphStaleListener.Level.NONE,
+            GraphStaleListener.Level.RETAINED);
+  }
+
+  @Test
+  void usedChangeOnRetainedWorldEscalatesToEviction() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world, definition.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    java.util.concurrent.atomic.AtomicReference<Optional<String>> usage =
+        new java.util.concurrent.atomic.AtomicReference<>(Optional.empty());
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), definition, "deadbeef"),
+            service,
+            null,
+            listener,
+            (w, def) -> usage.get());
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    usage.set(Optional.of("交路 X 第 2 站"));
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    assertTrue(service.getSnapshot(world).isEmpty());
+    verify(listener)
+        .onStale(
+            eq(world),
+            any(),
+            eq(GraphStaleListener.Level.RETAINED),
+            eq(GraphStaleListener.Level.EVICTED));
+  }
+
+  @Test
+  void evictedWorldStaysEvictedWithoutConsultingUsage() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world);
+    service.markStale(world, staleState());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    GraphNodeUsage usage = mock(GraphNodeUsage.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), definition, "deadbeef"), service, null, listener, usage);
+
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    verifyNoInteractions(usage);
+    assertTrue(service.getSnapshot(world).isEmpty());
+    verify(listener)
+        .onStale(
+            world,
+            new GraphStaleListener.NodeChange(definition, 1, 64, 2, true),
+            GraphStaleListener.Level.EVICTED,
+            GraphStaleListener.Level.EVICTED);
+  }
+
+  @Test
+  void additionWhoseIdIsAlreadyInTheServedGraphCountsAsUsed() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world, definition.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), List.of(), "deadbeef"),
+            service,
+            null,
+            listener,
+            (w, def) -> Optional.empty());
+
+    // 拆掉后换了个地方放回：旧图里这个节点还在原位置。
+    sync.upsert(mockBlock(world, 9, 64, 9), definition);
+
+    assertTrue(service.getSnapshot(world).isEmpty());
+    verify(listener)
+        .onStale(
+            world,
+            new GraphStaleListener.NodeChange(
+                definition, 9, 64, 9, false, Optional.of("旧图里已有同名节点")),
+            GraphStaleListener.Level.NONE,
+            GraphStaleListener.Level.EVICTED);
+  }
+
+  @Test
+  void nodeReplacedAtTheSamePositionIsJudgedToo() {
+    World world = world();
+    SignNodeDefinition replacement =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:01"), NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+    RailNodeRecord old =
+        new RailNodeRecord(
+            world.getUID(),
+            NodeId.of("SURN:PTK:GPT:1:00"),
+            NodeType.WAYPOINT,
+            1,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    RailGraphService service = servedService(world, old.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), List.of(old), "deadbeef"),
+            service,
+            null,
+            listener,
+            (w, def) ->
+                def.nodeId().equals(old.nodeId())
+                    ? Optional.of("交路 X 第 1 个途经点")
+                    : Optional.empty());
+
+    sync.upsert(mockBlock(world, 1, 64, 2), replacement);
+
+    assertTrue(service.getSnapshot(world).isEmpty());
+    verify(listener)
+        .onStale(
+            eq(world),
+            eq(
+                new GraphStaleListener.NodeChange(
+                    new SignNodeDefinition(
+                        old.nodeId(), NodeType.WAYPOINT, Optional.empty(), Optional.empty()),
+                    1,
+                    64,
+                    2,
+                    true,
+                    Optional.of("交路 X 第 1 个途经点"))),
+            eq(GraphStaleListener.Level.NONE),
+            eq(GraphStaleListener.Level.EVICTED));
+    verify(listener)
+        .onStale(
+            eq(world),
+            eq(new GraphStaleListener.NodeChange(replacement, 1, 64, 2, false)),
+            eq(GraphStaleListener.Level.NONE),
+            eq(GraphStaleListener.Level.EVICTED));
+  }
+
+  @Test
+  void usageFailureCountsAsInUse() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world, definition.nodeId());
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(world.getUID(), definition, "deadbeef"),
+            service,
+            null,
+            GraphStaleListener.noop(),
+            (w, def) -> {
+              throw new IllegalStateException("cache gone");
+            });
+
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    assertTrue(service.getSnapshot(world).isEmpty());
+  }
+
+  @Test
+  void deleteOnAlreadyStaleWorldReportsNoTransition() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition definition = waypoint();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(worldId, definition, "deadbeef"), railGraphService, null, listener);
+
+    sync.delete(mockBlock(world, 7, 70, -3), definition);
+
+    verify(listener)
+        .onStale(
+            world,
+            new GraphStaleListener.NodeChange(definition, 7, 70, -3, true),
+            GraphStaleListener.Level.EVICTED,
+            GraphStaleListener.Level.EVICTED);
+  }
+
+  @Test
+  void recoveryIsReportedOnlyWhenReloadClearsStale() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition definition = waypoint();
+    String matching =
+        RailGraphSignature.signatureForNodes(
+            List.of(
+                new RailNodeRecord(
+                    worldId,
+                    definition.nodeId(),
+                    definition.nodeType(),
+                    1,
+                    64,
+                    2,
+                    definition.trainCartsDestination(),
+                    Optional.empty())));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getStaleState(world))
+        .thenReturn(Optional.of(staleState()), Optional.empty());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(worldId, definition, matching), railGraphService, null, listener);
+
+    sync.upsert(mockBlock(world, 1, 64, 2), definition);
+
+    verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
+    verify(listener).onRecovered(world);
+    verify(listener, never()).onStale(any(), any(), any(), any());
+  }
+
+  @Test
+  void recoveryIsNotReportedWhenReloadLeavesGraphStale() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition definition = waypoint();
+    String matching =
+        RailGraphSignature.signatureForNodes(
+            List.of(
+                new RailNodeRecord(
+                    worldId,
+                    definition.nodeId(),
+                    definition.nodeType(),
+                    1,
+                    64,
+                    2,
+                    definition.trainCartsDestination(),
+                    Optional.empty())));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(worldId, definition, matching), railGraphService, null, listener);
+
+    sync.upsert(mockBlock(world, 1, 64, 2), definition);
+
+    verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
+    verify(listener, never()).onRecovered(any());
+  }
+
+  @Test
+  void deleteOfAlreadyRemovedNodeOnStaleWorldChangesNothing() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition definition = waypoint();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(worldId, List.of(), "deadbeef"), railGraphService, null, listener);
+
+    // 拆牌监听已经删过一次；TC 下一 tick 的 destroy 再删同一个节点。
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    verify(railGraphService, never()).markStale(any(), any());
+    verify(listener, never()).onStale(any(), any(), any(), any());
+  }
+
+  @Test
+  void sameTickChangesShareOneSignatureCheck() {
+    World world = world();
+    SignNodeDefinition first = waypoint();
+    SignNodeDefinition second =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:01"), NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+    RailNodeRecord secondRecord =
+        new RailNodeRecord(
+            world.getUID(),
+            second.nodeId(),
+            NodeType.WAYPOINT,
+            5,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    RailNodeRecord firstRecord =
+        new RailNodeRecord(
+            world.getUID(),
+            first.nodeId(),
+            NodeType.WAYPOINT,
+            1,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    StorageManager storage =
+        storageWith(world.getUID(), List.of(firstRecord, secondRecord), "deadbeef");
+    RailGraphService service = servedService(world, first.nodeId(), second.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    List<Runnable> nextTick = new java.util.ArrayList<>();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storage, service, null, listener, (w, def) -> Optional.empty(), nextTick::add);
+
+    sync.delete(mockBlock(world, 1, 64, 2), first);
+    sync.delete(mockBlock(world, 5, 64, 2), second);
+    assertEquals(1, nextTick.size(), "同一世界同一 tick 只排一次比对");
+    verify(listener, never()).onStale(any(), any(), any(), any());
+    nextTick.forEach(Runnable::run);
+
+    StorageProvider provider = storage.provider().orElseThrow();
+    verify(provider.railNodes(), times(1)).listByWorld(world.getUID());
+    verify(listener, times(2))
+        .onStale(
+            eq(world),
+            any(),
+            eq(GraphStaleListener.Level.NONE),
+            eq(GraphStaleListener.Level.RETAINED));
+  }
+
+  @Test
+  void noOpDeleteInTheSameTickAsARealChangeIsNotReported() {
+    World world = world();
+    SignNodeDefinition real = waypoint();
+    SignNodeDefinition ghost =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:02"), NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+    RailNodeRecord realRecord =
+        new RailNodeRecord(
+            world.getUID(),
+            real.nodeId(),
+            NodeType.WAYPOINT,
+            1,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    StorageManager storage = storageWith(world.getUID(), List.of(realRecord), "deadbeef");
+    RailGraphService service = servedService(world, real.nodeId(), ghost.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    List<Runnable> nextTick = new java.util.ArrayList<>();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storage, service, null, listener, (w, def) -> Optional.empty(), nextTick::add);
+
+    // 拆牌监听已经删过 ghost；同一 tick 里 TC 的 destroy 再删一次（0 行），另有一块真实拆除。
+    sync.delete(mockBlock(world, 1, 64, 2), real);
+    sync.delete(mockBlock(world, 9, 64, 2), ghost);
+    nextTick.forEach(Runnable::run);
+
+    verify(listener, times(1)).onStale(eq(world), any(), any(), any());
+    verify(listener)
+        .onStale(
+            eq(world),
+            org.mockito.ArgumentMatchers.argThat(
+                change -> change.definition().nodeId().equals(real.nodeId())),
+            any(),
+            any());
+  }
+
+  @Test
+  void listenerFailureDoesNotUndoStaleMarking() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition definition = waypoint();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    doThrow(new IllegalStateException("boom")).when(listener).onStale(any(), any(), any(), any());
+    java.util.List<String> debug = new java.util.ArrayList<>();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(worldId, definition, "deadbeef"), railGraphService, debug::add, listener);
+
+    sync.delete(mockBlock(world, 1, 64, 2), definition);
+
+    verify(railGraphService).markStale(eq(world), any());
+    assertEquals(1, debug.size());
+    assertTrue(debug.get(0).startsWith("调度图失效告警失败"), debug.get(0));
+  }
+
+  private static World world() {
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(UUID.randomUUID());
+    when(world.getName()).thenReturn("surn");
+    return world;
+  }
+
+  /** 真实的图服务，内存里供着一张只有这些节点的图。 */
+  private static RailGraphService servedService(World world, NodeId... nodes) {
+    java.util.Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> byId =
+        new java.util.HashMap<>();
+    for (NodeId id : nodes) {
+      byId.put(id, node(id));
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph graph =
+        new org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph(
+            byId, java.util.Map.of(), java.util.Set.of());
+    RailGraphService service = new RailGraphService(ignored -> graph);
+    service.putSnapshot(world, graph, Instant.EPOCH);
+    return service;
+  }
+
+  private static org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node(NodeId id) {
+    return new org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode() {
+      @Override
+      public NodeId id() {
+        return id;
+      }
+
+      @Override
+      public NodeType type() {
+        return NodeType.WAYPOINT;
+      }
+
+      @Override
+      public org.bukkit.util.Vector worldPosition() {
+        return new org.bukkit.util.Vector(0, 0, 0);
+      }
+
+      @Override
+      public Optional<String> trainCartsDestination() {
+        return Optional.empty();
+      }
+    };
   }
 
   private StorageTransactionManager directTransactionManager() {

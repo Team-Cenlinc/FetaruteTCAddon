@@ -28,6 +28,7 @@ permissions:
       fetarute.graph.delete: true
       fetarute.graph.info: true
       fetarute.graph.sign: true
+      fetarute.graph.alert: true
       fetarute.graph.query: true
       fetarute.graph.edge: true
       fetarute.speed: true
@@ -190,6 +191,9 @@ permissions:
     default: op
   fetarute.graph.sign:
     description: 快速设置节点牌子内容（/fta graph sign ...）
+    default: op
+  fetarute.graph.alert:
+    description: 接收调度图失效告警（节点牌子被拆除或新增导致图快照失效时）
     default: op
   fetarute.depot.spawn:
     description: 手动触发车库生成列车（/fta depot spawn）

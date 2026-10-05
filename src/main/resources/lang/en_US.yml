@@ -1048,6 +1048,28 @@ sign:
     created-doors: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here; only car(s) <white><doors></white>, counted from the head, open their doors"
     invalid: "<prefix> <red>Invalid stop mark</red> <gray>Line 3: car:N (or carriage:N), e.g. car:4, car:4,6, car:3-5, car:*. Optional line 4: door: the cars that open their doors, counted from the head in the same format (e.g. door:1); even the shortest matching train must have at least one of them</gray>"
     no-permission: "<prefix> <red>You do not have permission to build stop marks</red>"
+  type:
+    depot: "depot"
+    depot_throat: "depot throat"
+    station: "station"
+    station_throat: "station throat"
+    waypoint: "waypoint"
+    destination: "destination"
+    switcher: "switcher"
+
+graph:
+  alert:
+    stale: "<prefix> <red>Rail graph invalidated</red> <gray>in world</gray> <white><world></white><gray>: <white><removed></white> node sign(s) removed, <white><added></white> added. Dispatch in this world, and cross-world routes through it when cross-world is on, cannot use the graph until it is rebuilt.</gray>"
+    retained: "<prefix> <yellow>Rail graph out of date</yellow> <gray>in world</gray> <white><world></white><gray>: <white><removed></white> node sign(s) removed, <white><added></white> added, none used by any route. Dispatch keeps using the existing graph; added nodes join dispatch after a rebuild.</gray>"
+    entry: "<gray>  - <action></gray> <white><type></white> <white><node></white> <gray>@ <x>, <y>, <z></gray>"
+    entry-used: "<gray>  - <action></gray> <white><type></white> <white><node></white> <gray>@ <x>, <y>, <z></gray> <red>(<usage>)</red>"
+    action-removed: "removed"
+    action-added: "added"
+    more: "<gray>  … and</gray> <white><count></white> <gray>more</gray>"
+    hint: "<gray>Run</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>Click to fill in the command</gray>'><white>/fta graph build</white></hover></click> <gray>in that world. If a sign was removed by mistake, placing it back by hand with the same text at the same spot also restores the graph.</gray>"
+    recovered: "<prefix> <green>Rail graph restored</green> <gray>in world</gray> <white><world></white><gray>: node signs match the snapshot again and the graph was reloaded.</gray>"
+    join-retained: "<prefix> <yellow>The rail graph of world</yellow> <white><world></white> <yellow>is out of date; dispatch still uses the existing graph. A rebuild is recommended.</yellow>"
+    join: "<prefix> <yellow>The rail graph of world</yellow> <white><world></white> <yellow>is invalid; dispatch there, and cross-world routes through it when cross-world is on, cannot use the graph until it is rebuilt.</yellow>"
 
 command:
   graph:

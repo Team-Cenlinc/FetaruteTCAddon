@@ -90,7 +90,32 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
   }
 
   @Override
-  public void delete(UUID worldId, NodeId nodeId) {
+  public List<RailNodeRecord> listByPosition(UUID worldId, int x, int y, int z) {
+    Objects.requireNonNull(worldId, "worldId");
+    String sql =
+        "SELECT world_id, node_id, node_type, x, y, z, tc_destination, waypoint_operator, waypoint_origin, waypoint_destination, waypoint_track, waypoint_sequence, waypoint_kind FROM "
+            + table("rail_nodes")
+            + " WHERE world_id = ? AND x = ? AND y = ? AND z = ?";
+    List<RailNodeRecord> results = new ArrayList<>();
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, worldId);
+      statement.setInt(2, x);
+      statement.setInt(3, y);
+      statement.setInt(4, z);
+      try (var rs = statement.executeQuery()) {
+        while (rs.next()) {
+          results.add(mapRow(rs));
+        }
+      }
+      return results;
+    } catch (SQLException ex) {
+      throw new StorageException("读取 rail_nodes 失败", ex);
+    }
+  }
+
+  @Override
+  public int delete(UUID worldId, NodeId nodeId) {
     Objects.requireNonNull(worldId, "worldId");
     Objects.requireNonNull(nodeId, "nodeId");
     String sql = "DELETE FROM " + table("rail_nodes") + " WHERE world_id = ? AND node_id = ?";
@@ -98,8 +123,9 @@ public final class JdbcRailNodeRepository extends JdbcRepositorySupport
         var statement = connection.prepareStatement(sql)) {
       setUuid(statement, 1, worldId);
       statement.setString(2, nodeId.value());
-      statement.executeUpdate();
+      int removed = statement.executeUpdate();
       connection.commitIfNecessary();
+      return removed;
     } catch (SQLException ex) {
       throw new StorageException("删除 rail_nodes 失败", ex);
     }

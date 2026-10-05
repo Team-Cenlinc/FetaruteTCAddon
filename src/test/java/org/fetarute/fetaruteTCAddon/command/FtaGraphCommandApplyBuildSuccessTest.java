@@ -369,7 +369,8 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     assertTrue(state.available());
     assertEquals(expectedEdges, state.expectedEdges());
     assertFalse(state.coverage().complete());
-    assertEquals(0, state.coverage().participatingEdgeCount());
+    // 按不完整发布，但已测到的足迹留在索引里，写库时不会被抹掉。
+    assertEquals(expectedEdges, state.participatingFootprints().keySet());
     for (EdgeId edgeId : expectedEdges) {
       assertEquals(Set.of("interlocking:incomplete:" + worldId), state.zoneKeysForEdge(edgeId));
     }

@@ -59,11 +59,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickLi
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.GraphStaleNotifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteNodeUsage;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
@@ -148,6 +150,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private LoggerManager loggerManager;
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
+  private GraphStaleNotifier graphStaleNotifier;
   private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
@@ -161,6 +164,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SignalEvaluator signalEvaluator;
   private RuntimeSignalReevaluationScheduler signalReevaluationScheduler;
   private RouteDefinitionCache routeDefinitionCache;
+
+  /** 交路在用节点的索引，带建索引时的交路缓存版本；版本对不上就重建。 */
+  private volatile VersionedRouteNodeUsage routeNodeUsage;
+
+  /** 交路缓存每变一次加一。 */
+  private final java.util.concurrent.atomic.AtomicLong routeNodeUsageVersion =
+      new java.util.concurrent.atomic.AtomicLong();
+
   private StationDirectory stationDirectory;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
@@ -585,6 +596,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** 返回调度图失效告警器（若未初始化则为 null）。 */
+  public GraphStaleNotifier getGraphStaleNotifier() {
+    return graphStaleNotifier;
+  }
+
   /** 返回限速设置棍监听器；插件未完成初始化时为空。 */
   public Optional<SpeedSettingStickListener> getSpeedSettingStickListener() {
     return Optional.ofNullable(speedSettingStickListener);
@@ -691,6 +707,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     storageManager
         .provider()
         .ifPresent(provider -> service.loadFromStorage(provider, getServer().getWorlds()));
+    if (graphStaleNotifier != null) {
+      graphStaleNotifier.logStaleWorlds();
+    }
     storageManager
         .provider()
         .ifPresent(
@@ -779,8 +798,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
             loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
+    this.graphStaleNotifier =
+        GraphStaleNotifier.forPlugin(this, railGraphService, localeManager, loggerManager);
+    getServer().getPluginManager().registerEvents(graphStaleNotifier, this);
     SignNodeStorageSynchronizer storageSync =
-        new RailNodeIncrementalSync(storageManager, railGraphService, loggerManager::debug);
+        new RailNodeIncrementalSync(
+            storageManager,
+            railGraphService,
+            loggerManager::debug,
+            graphStaleNotifier,
+            this::findRouteNodeUsage,
+            task -> getServer().getScheduler().runTask(this, task));
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
@@ -860,9 +888,29 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return loggerManager == null ? message -> {} : loggerManager.debugSink();
   }
 
+  /** 节点牌子增删时判断旧图能否继续用：交路缓存没就绪就按在用处理。 */
+  private Optional<String> findRouteNodeUsage(
+      org.bukkit.World world, SignNodeDefinition definition) {
+    RouteDefinitionCache cache = routeDefinitionCache;
+    if (cache == null) {
+      return Optional.of("交路缓存未就绪");
+    }
+    // 先取版本再读条目：建索引期间交路缓存又变了，存下的索引版本就是旧的，下次会重建。
+    long version = routeNodeUsageVersion.get();
+    VersionedRouteNodeUsage cached = routeNodeUsage;
+    if (cached == null || cached.version() != version) {
+      cached = new VersionedRouteNodeUsage(version, RouteNodeUsage.index(cache.entries()));
+      routeNodeUsage = cached;
+    }
+    return cached.usage().findUse(definition.nodeId());
+  }
+
+  private record VersionedRouteNodeUsage(long version, RouteNodeUsage usage) {}
+
   private void initRouteDefinitionCache() {
     if (this.routeDefinitionCache == null) {
       this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
+      routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
     }
     if (this.stationDirectory == null) {
       // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
@@ -1057,7 +1105,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(
             // 联挂否决是异常证据，走 WARN 而不是受 debug 开关和观察预算约束的诊断通道；监听器已按列车对限流。
-            RuntimeDispatchListener.withDiagnostics(runtimeDispatchService, loggerManager::warn),
+            RuntimeDispatchListener.withDiagnostics(
+                runtimeDispatchService,
+                loggerManager::warn,
+                railGraphService::isOutsideRetainedStaleSnapshot),
             this);
     initEtaService();
     if (etaService != null) {

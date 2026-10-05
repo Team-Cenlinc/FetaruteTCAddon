@@ -5,7 +5,10 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
@@ -13,12 +16,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 /**
  * RailGraph 合并工具：用于把一次 build 的结果合并进已有快照。
  *
- * <p>策略：默认“追加 + 覆盖重扫分量”：
+ * <p>两种合并都不删除节点：
  *
  * <ul>
- *   <li>若 update 与 base 没有节点 ID 交集：直接追加（支持多个 Connected Components）
- *   <li>若 update 与 base 存在交集：认为重扫到了已有分量，先删除 base 中对应连通分量，再写入 update
+ *   <li>{@link #appendOrReplaceComponents}（完整 build）：两端都在本次结果里的旧边被本次的边替换，其余旧边保留
+ *   <li>{@link #upsert}（局部 build）：只增改，不删边
  * </ul>
+ *
+ * <p>同一区间两边都有时：完整 build 以本次为准（重新走过的轨道才是现状），局部 build 取较短的。联锁足迹逐边取：重扫到的区间只认本次的证据，没重扫的沿用旧图； 缺证据的区间让整体
+ * coverage 不完整。局部合并无法证明完整 Edge universe，即使足迹齐全也按不完整发布，但已测到的足迹保留下来。
  *
  * <p>注意：该合并仅基于节点 ID 与 base 图的连通性判断，不会主动访问世界轨道或加载区块。
  */
@@ -55,8 +61,7 @@ public final class RailGraphMerger {
     }
     for (RailEdge edge : update.edges()) {
       if (nodesById.containsKey(edge.from()) && nodesById.containsKey(edge.to())) {
-        RailEdge existing = edgesById.get(edge.id());
-        edgesById.put(edge.id(), existing == null ? edge : mergeUpsertEdge(existing, edge));
+        edgesById.put(edge.id(), preferShorter(edgesById.get(edge.id()), edge));
       }
     }
 
@@ -70,50 +75,160 @@ public final class RailGraphMerger {
 
     RailGraph merged =
         new SimpleRailGraph(
-            nodesById, edgesById, blockedEdges, mergeInterlockingState(base, update, edgesById));
+            nodesById,
+            edgesById,
+            blockedEdges,
+            mergeInterlockingState(base, update, edgesById, false));
     return new MergeResult(
-        merged, MergeAction.UPSERT, 0, 0, 0, merged.nodes().size(), merged.edges().size());
+        merged, MergeAction.UPSERT, 0, merged.nodes().size(), merged.edges().size());
   }
 
   /**
-   * 保留图拓扑，但把稀疏联锁目录统一降级为不完整。
+   * 只增不改地把新节点与新区间加进旧图：旧节点、旧区间原样保留。
    *
-   * <p>该变换用于局部刷新无法证明完整 Edge universe 的场景。降级后的世界级联锁状态会对全部区间发布同一个 fail-closed sentinel，禁止旧的精确 Zone
-   * 继续授权放行。
+   * <p>联锁按旧图足迹加新区间足迹整体重算；旧图 coverage 完整且新区间都带完整足迹时结果仍完整。Zone 键按区间确定性生成，
+   * 只有新区间与旧区间真的重叠时旧区间才会多出键——调用方据此逐键核验能否切换。
    *
-   * @param graph 待降级的不可变图快照
-   * @return 带有不完整联锁目录的新图快照
+   * @throws IllegalArgumentException 新节点已在旧图里、新区间已存在或端点不在合并后的图里
+   */
+  public static RailGraph append(
+      RailGraph base,
+      java.util.Collection<RailNode> newNodes,
+      java.util.Collection<RailEdge> newEdges,
+      Map<EdgeId, RailEdgeFootprint> newFootprints) {
+    Objects.requireNonNull(base, "base");
+    Objects.requireNonNull(newNodes, "newNodes");
+    Objects.requireNonNull(newEdges, "newEdges");
+    Objects.requireNonNull(newFootprints, "newFootprints");
+    Map<NodeId, RailNode> nodesById = nodeMap(base.nodes());
+    for (RailNode node : newNodes) {
+      if (nodesById.putIfAbsent(node.id(), node) != null) {
+        throw new IllegalArgumentException("增补节点已在旧图里: " + node.id().value());
+      }
+    }
+    Map<EdgeId, RailEdge> edgesById = edgeMap(base.edges());
+    for (RailEdge edge : newEdges) {
+      if (!nodesById.containsKey(edge.from()) || !nodesById.containsKey(edge.to())) {
+        throw new IllegalArgumentException("增补区间的端点不在图里: " + edge.id());
+      }
+      if (edgesById.putIfAbsent(edge.id(), edge) != null) {
+        throw new IllegalArgumentException("增补区间已在旧图里: " + edge.id());
+      }
+    }
+    RailInterlockingState baseState = interlockingState(base);
+    RailInterlockingState state = RailInterlockingState.unavailable();
+    if (baseState.available()) {
+      Map<EdgeId, RailEdgeFootprint> footprints =
+          new HashMap<>(baseState.participatingFootprints());
+      footprints.putAll(newFootprints);
+      state =
+          RailInterlockingState.from(
+              baseState.worldId().orElseThrow(), edgesById.keySet(), footprints);
+      if (!baseState.coverage().complete()) {
+        state = state.withCoverageMarkedIncomplete();
+      }
+    }
+    return copyWith(base, nodesById, edgesById, state);
+  }
+
+  /**
+   * 保留拓扑与足迹，但联锁整体按不完整发布。
+   *
+   * <p>用于无法证明完整 Edge universe 的刷新：世界 sentinel 照旧禁止旧的精确 Zone 授权放行，已测到的足迹留在索引里，写库时不会被抹掉。
    */
   public static RailGraph markInterlockingCatalogIncomplete(RailGraph graph) {
     Objects.requireNonNull(graph, "graph");
-    Map<NodeId, RailNode> nodesById = new HashMap<>();
-    for (RailNode node : graph.nodes()) {
-      nodesById.put(node.id(), node);
+    RailInterlockingState state = interlockingState(graph);
+    if (!state.available() || !state.coverage().complete()) {
+      return graph;
     }
-    Map<EdgeId, RailEdge> edgesById = new HashMap<>();
-    Set<EdgeId> blockedEdges = new HashSet<>();
-    for (RailEdge edge : graph.edges()) {
-      edgesById.put(edge.id(), edge);
-      if (graph.isBlocked(edge.id())) {
-        blockedEdges.add(edge.id());
-      }
-    }
-    RailInterlockingState oldState = interlockingState(graph);
-    RailInterlockingState incomplete =
-        oldState
-            .worldId()
-            .map(worldId -> RailInterlockingState.incomplete(worldId, edgesById.keySet()))
-            .orElseGet(RailInterlockingState::unavailable);
-    return new SimpleRailGraph(nodesById, edgesById, blockedEdges, incomplete);
+    return copyWith(
+        graph,
+        nodeMap(graph.nodes()),
+        edgeMap(graph.edges()),
+        state.withCoverageMarkedIncomplete());
   }
 
   /**
-   * 合并 partial build 对同一区间观察到的纯拓扑结果。
+   * 只保留指定节点，以及两端都在其中的边。
    *
-   * <p>边长继续取最短路径。稀疏联锁目录不能从两个分别验证的局部快照推断，因此由外层按最终 Edge universe 选择完整 update 或 fail-closed 状态。
+   * <p>用于刷新：库里已经删掉的节点（牌子拆了）不应被旧图带回来。剩下区间的足迹保留，旧状态不完整时继续不完整。
    */
-  private static RailEdge mergeUpsertEdge(RailEdge existing, RailEdge update) {
-    return update.lengthBlocks() < existing.lengthBlocks() ? update : existing;
+  public static RailGraph retainNodes(RailGraph base, Set<NodeId> keep) {
+    Objects.requireNonNull(base, "base");
+    Objects.requireNonNull(keep, "keep");
+    Map<NodeId, RailNode> nodesById = new HashMap<>();
+    for (RailNode node : base.nodes()) {
+      if (keep.contains(node.id())) {
+        nodesById.put(node.id(), node);
+      }
+    }
+    if (nodesById.size() == base.nodes().size()) {
+      return base;
+    }
+    Map<EdgeId, RailEdge> edgesById = new HashMap<>();
+    for (RailEdge edge : base.edges()) {
+      if (nodesById.containsKey(edge.from()) && nodesById.containsKey(edge.to())) {
+        edgesById.put(edge.id(), edge);
+      }
+    }
+    return copyWith(base, nodesById, edgesById, retainInterlockingState(base, edgesById));
+  }
+
+  private static RailGraph copyWith(
+      RailGraph source,
+      Map<NodeId, RailNode> nodesById,
+      Map<EdgeId, RailEdge> edgesById,
+      RailInterlockingState state) {
+    Set<EdgeId> blockedEdges = new HashSet<>();
+    for (EdgeId edgeId : edgesById.keySet()) {
+      if (source.isBlocked(edgeId)) {
+        blockedEdges.add(edgeId);
+      }
+    }
+    return new SimpleRailGraph(nodesById, edgesById, blockedEdges, state);
+  }
+
+  private static Map<NodeId, RailNode> nodeMap(java.util.Collection<RailNode> nodes) {
+    Map<NodeId, RailNode> byId = new HashMap<>();
+    nodes.forEach(node -> byId.put(node.id(), node));
+    return byId;
+  }
+
+  private static Map<EdgeId, RailEdge> edgeMap(java.util.Collection<RailEdge> edges) {
+    Map<EdgeId, RailEdge> byId = new HashMap<>();
+    edges.forEach(edge -> byId.put(edge.id(), edge));
+    return byId;
+  }
+
+  /** 完整 build：同一区间取本次的——整个连通分量都重新走过，改道后边长变长也要跟上。本次没有元数据时沿用旧的。 */
+  private static RailEdge preferUpdate(RailEdge existing, RailEdge update) {
+    return withMetadataFrom(update, existing);
+  }
+
+  /** 局部 build 与刷新：同一区间取较短的。walker 遇到没挂牌子的道岔时跟着当时的扳向走，一次局部探索可能绕远；局部证据不足以推翻较短的旧长度。 */
+  private static RailEdge preferShorter(RailEdge existing, RailEdge update) {
+    if (existing == null) {
+      return update;
+    }
+    return update.lengthBlocks() < existing.lengthBlocks()
+        ? withMetadataFrom(update, existing)
+        : withMetadataFrom(existing, update);
+  }
+
+  /** 选中的区间没有元数据时沿用另一边的。 */
+  private static RailEdge withMetadataFrom(RailEdge chosen, RailEdge other) {
+    if (other == null || chosen.metadata().isPresent() || other.metadata().isEmpty()) {
+      return chosen;
+    }
+    return new RailEdge(
+        chosen.id(),
+        chosen.from(),
+        chosen.to(),
+        chosen.lengthBlocks(),
+        chosen.baseSpeedLimit(),
+        chosen.bidirectional(),
+        other.metadata());
   }
 
   /**
@@ -123,7 +238,7 @@ public final class RailGraphMerger {
    *
    * <ul>
    *   <li>节点：update 中的节点会覆盖 base 中同 ID 的节点，但保留 base 中"update 未覆盖"的节点
-   *   <li>边：取最短长度；只删除"两端节点都在 update 中"的旧边，保留"跨越 update 边界"的边
+   *   <li>边：只删除"两端节点都在 update 中"的旧边（由本次重扫的边取代），保留"跨越 update 边界"的边
    *   <li>元数据：合并节点时保留旧节点的运维元数据（如果新节点没有）
    * </ul>
    *
@@ -177,13 +292,9 @@ public final class RailGraphMerger {
       edgesById.put(edge.id(), edge);
     }
 
-    // 加入 update 的边（取最短）
     for (RailEdge edge : update.edges()) {
       if (nodesById.containsKey(edge.from()) && nodesById.containsKey(edge.to())) {
-        RailEdge existing = edgesById.get(edge.id());
-        if (existing == null || edge.lengthBlocks() < existing.lengthBlocks()) {
-          edgesById.put(edge.id(), edge);
-        }
+        edgesById.put(edge.id(), preferUpdate(edgesById.get(edge.id()), edge));
       }
     }
 
@@ -196,19 +307,16 @@ public final class RailGraphMerger {
       }
     }
 
-    MergeAction action = overlappedNodes > 0 ? MergeAction.REPLACE_COMPONENTS : MergeAction.APPEND;
+    MergeAction action = overlappedNodes > 0 ? MergeAction.REPLACE_EDGES : MergeAction.APPEND;
 
     RailGraph merged =
         new SimpleRailGraph(
-            nodesById, edgesById, blockedEdges, mergeInterlockingState(base, update, edgesById));
+            nodesById,
+            edgesById,
+            blockedEdges,
+            mergeInterlockingState(base, update, edgesById, true));
     return new MergeResult(
-        merged,
-        action,
-        0, // 不再删除整个连通分量
-        0, // 不删除节点，只覆盖
-        removedEdges,
-        merged.nodes().size(),
-        merged.edges().size());
+        merged, action, removedEdges, merged.nodes().size(), merged.edges().size());
   }
 
   /**
@@ -316,26 +424,59 @@ public final class RailGraphMerger {
         next.edges().size());
   }
 
+  /**
+   * 合并后的联锁状态：逐边取足迹——重扫到的区间只认本次的证据，没重扫的沿用旧图；缺证据的区间让整体 coverage 不完整。
+   *
+   * <p>由 {@link RailInterlockingState#from} 按全部足迹重算，重扫区间与旧区间之间的重叠也会生成 Zone；Zone 键按区间确定性生成，
+   * 没变的区间键不变。
+   *
+   * @param universeProven 本次 build 是否覆盖了所涉连通分量；否则即使足迹齐全也按不完整发布
+   */
   private static RailInterlockingState mergeInterlockingState(
-      RailGraph base, RailGraph update, Map<EdgeId, RailEdge> edgesById) {
+      RailGraph base, RailGraph update, Map<EdgeId, RailEdge> edgesById, boolean universeProven) {
     RailInterlockingState updateState = interlockingState(update);
     if (updateState.available() && updateState.expectedEdges().equals(edgesById.keySet())) {
-      return updateState;
+      return universeProven ? updateState : updateState.withCoverageMarkedIncomplete();
     }
-    return updateState
-        .worldId()
-        .or(() -> interlockingState(base).worldId())
-        .map(worldId -> RailInterlockingState.incomplete(worldId, edgesById.keySet()))
-        .orElseGet(RailInterlockingState::unavailable);
+    RailInterlockingState baseState = interlockingState(base);
+    Optional<UUID> worldId = updateState.worldId().or(baseState::worldId);
+    if (worldId.isEmpty()) {
+      return RailInterlockingState.unavailable();
+    }
+    Set<EdgeId> rediscovered = new HashSet<>();
+    for (RailEdge edge : update.edges()) {
+      rediscovered.add(edge.id());
+    }
+    Map<EdgeId, RailEdgeFootprint> baseFootprints = baseState.participatingFootprints();
+    Map<EdgeId, RailEdgeFootprint> updateFootprints = updateState.participatingFootprints();
+    Map<EdgeId, RailEdgeFootprint> footprints = new HashMap<>();
+    for (EdgeId edge : edgesById.keySet()) {
+      RailEdgeFootprint footprint =
+          (rediscovered.contains(edge) ? updateFootprints : baseFootprints).get(edge);
+      if (footprint != null) {
+        footprints.put(edge, footprint);
+      }
+    }
+    RailInterlockingState merged =
+        RailInterlockingState.from(worldId.get(), edgesById.keySet(), footprints);
+    return universeProven ? merged : merged.withCoverageMarkedIncomplete();
   }
 
+  /** 删掉部分区间后的联锁状态：保留剩下区间的足迹；旧状态本就不完整时继续不完整。 */
   private static RailInterlockingState retainInterlockingState(
       RailGraph base, Map<EdgeId, RailEdge> edgesById) {
     RailInterlockingState state = interlockingState(base);
     if (!state.available()) {
       return RailInterlockingState.unavailable();
     }
-    return state.retainEdges(edgesById.keySet());
+    if (!state.cellCoverageAvailable()) {
+      return state.retainEdges(edgesById.keySet());
+    }
+    Map<EdgeId, RailEdgeFootprint> footprints = new HashMap<>(state.participatingFootprints());
+    footprints.keySet().retainAll(edgesById.keySet());
+    RailInterlockingState retained =
+        RailInterlockingState.from(state.worldId().orElseThrow(), edgesById.keySet(), footprints);
+    return state.coverage().complete() ? retained : retained.withCoverageMarkedIncomplete();
   }
 
   private static RailInterlockingState interlockingState(RailGraph graph) {
@@ -401,29 +542,19 @@ public final class RailGraphMerger {
   public enum MergeAction {
     /** update 与 base 不重叠，直接追加。 */
     APPEND,
-    /** update 覆盖 base 中同 ID 的节点/边，不做删除。 */
+    /** 局部 build：update 覆盖 base 中同 ID 的节点/边，不做删除。 */
     UPSERT,
-    /** update 与 base 有重叠，替换对应连通分量后再追加。 */
-    REPLACE_COMPONENTS
+    /** 完整 build 与 base 有重叠：两端都在 update 里的旧边由本次的边取代，节点不删。 */
+    REPLACE_EDGES
   }
 
   /** 合并结果：包含最终图与统计信息（用于命令回显与诊断）。 */
   public record MergeResult(
-      RailGraph graph,
-      MergeAction action,
-      int replacedComponentCount,
-      int removedNodes,
-      int removedEdges,
-      int totalNodes,
-      int totalEdges) {
+      RailGraph graph, MergeAction action, int removedEdges, int totalNodes, int totalEdges) {
     public MergeResult {
       Objects.requireNonNull(graph, "graph");
       Objects.requireNonNull(action, "action");
-      if (replacedComponentCount < 0
-          || removedNodes < 0
-          || removedEdges < 0
-          || totalNodes < 0
-          || totalEdges < 0) {
+      if (removedEdges < 0 || totalNodes < 0 || totalEdges < 0) {
         throw new IllegalArgumentException("merge 计数不能为负数");
       }
     }

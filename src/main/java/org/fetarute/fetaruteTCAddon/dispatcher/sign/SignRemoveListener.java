@@ -19,7 +19,6 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /** 监听牌子拆除，发送提示并清理注册表。 */
@@ -78,7 +77,10 @@ public final class SignRemoveListener implements Listener {
             locale.component(
                 "sign.removed",
                 Map.of(
-                    "node", definition.nodeId().value(), "type", localizedTypeName(definition))));
+                    "node",
+                    definition.nodeId().value(),
+                    "type",
+                    SignNodeTypeNames.localized(locale, definition))));
       }
       debugLogger.accept(
           logPrefix
@@ -104,7 +106,11 @@ public final class SignRemoveListener implements Listener {
       player.sendMessage(
           locale.component(
               "sign.removed",
-              Map.of("node", definition.nodeId().value(), "type", localizedTypeName(definition))));
+              Map.of(
+                  "node",
+                  definition.nodeId().value(),
+                  "type",
+                  SignNodeTypeNames.localized(locale, definition))));
     }
     debugLogger.accept(
         logPrefix
@@ -205,24 +211,5 @@ public final class SignRemoveListener implements Listener {
                 def.waypointMetadata()
                     .map(metadata -> expectedKinds.contains(metadata.kind()))
                     .orElse(false));
-  }
-
-  private String localizedTypeName(SignNodeDefinition definition) {
-    if (definition == null) {
-      return "";
-    }
-    WaypointKind kind = definition.waypointMetadata().map(metadata -> metadata.kind()).orElse(null);
-    String key =
-        kind == WaypointKind.STATION_THROAT
-            ? "sign.type.station_throat"
-            : kind == WaypointKind.DEPOT_THROAT
-                ? "sign.type.depot_throat"
-                : kind == WaypointKind.STATION
-                    ? "sign.type.station"
-                    : kind == WaypointKind.DEPOT
-                        ? "sign.type.depot"
-                        : "sign.type."
-                            + definition.nodeType().name().toLowerCase(java.util.Locale.ROOT);
-    return PLAIN_TEXT.serialize(locale.component(key));
   }
 }

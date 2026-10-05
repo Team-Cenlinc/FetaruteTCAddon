@@ -261,6 +261,19 @@ public final class RailInterlockingZoneIndex {
     return Map.copyOf(immutable);
   }
 
+  /** 同一份索引，但 coverage 记为不完整：保留逐边足迹供写库与后续合并，同时让联锁按不完整处理。 */
+  RailInterlockingZoneIndex withCoverageIncomplete() {
+    if (!coverage.complete()) {
+      return this;
+    }
+    return new RailInterlockingZoneIndex(
+        zoneKeysByEdge,
+        zoneInfoByKey,
+        edgeIdsByCell,
+        new RailInterlockingCoverage(
+            coverage.inputEdgeCount(), coverage.participatingEdgeCount(), false));
+  }
+
   /** 返回指定区间参与的全部联锁区键；未知区间返回空集合。 */
   public Set<String> zoneKeysForEdge(EdgeId edgeId) {
     if (edgeId == null) {

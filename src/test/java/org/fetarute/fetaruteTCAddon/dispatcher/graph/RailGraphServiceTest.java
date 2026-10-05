@@ -139,6 +139,24 @@ class RailGraphServiceTest {
   }
 
   @Test
+  void verifiedAppendSnapshotBypassesTheGlobalClaimGuard() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    RailGraph oldGraph =
+        interlockingGraph(
+            worldId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 8))));
+    RailGraph changedGraph = interlockingGraph(worldId, new RailEdgeFootprint(0, false, Set.of()));
+    RailGraphService service = new RailGraphService(ignored -> oldGraph);
+    service.putSnapshot(world, oldGraph, Instant.parse("2026-01-01T00:00:00Z"));
+    service.setSnapshotActivationGuard(() -> false);
+
+    service.putVerifiedAppendSnapshot(world, changedGraph, Instant.parse("2026-01-02T00:00:00Z"));
+
+    assertSame(changedGraph, service.getSnapshot(world).orElseThrow().graph());
+  }
+
+  @Test
   void staleSnapshotStillGuardsItsLastActivatedInterlockingProjection() {
     UUID worldId = UUID.randomUUID();
     World world = mock(World.class);
@@ -161,6 +179,39 @@ class RailGraphServiceTest {
 
     assertTrue(service.getSnapshot(world).isEmpty());
     assertTrue(service.getStaleState(world).isPresent());
+  }
+
+  @Test
+  void retainedStaleKeepsTheSnapshotUntilAnEvictingChange() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    RailGraph graph = graphWithEdges(edge(a, b));
+    RailGraphService service = new RailGraphService(ignored -> graph);
+    World world = mock(World.class);
+    UUID worldId = UUID.randomUUID();
+    when(world.getUID()).thenReturn(worldId);
+    when(world.getName()).thenReturn("world");
+    service.putSnapshot(world, graph, Instant.now());
+
+    service.markStale(
+        world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "x", "y", 2, 1, 3, true));
+
+    assertTrue(service.getSnapshot(world).isPresent());
+    assertTrue(service.isServingRetainedStaleSnapshot(worldId));
+    assertFalse(service.isOutsideRetainedStaleSnapshot(worldId, a));
+    assertTrue(service.isOutsideRetainedStaleSnapshot(worldId, NodeId.of("NEW")));
+
+    service.markStale(
+        world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "x", "z", 2, 1, 2));
+    assertTrue(service.getSnapshot(world).isEmpty());
+    assertFalse(service.isServingRetainedStaleSnapshot(worldId));
+    assertFalse(service.isOutsideRetainedStaleSnapshot(worldId, NodeId.of("NEW")));
+
+    // 已经移出的旧图不会因为后一次"可保留"而回来。
+    service.markStale(
+        world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "x", "w", 2, 1, 2, true));
+    assertTrue(service.getSnapshot(world).isEmpty());
+    assertFalse(service.getStaleState(world).orElseThrow().snapshotRetained());
   }
 
   private static RailEdge edge(NodeId a, NodeId b) {
@@ -358,6 +409,51 @@ class RailGraphServiceTest {
         withState.cellCoverageAvailable(),
         withoutState.cellCoverageAvailable(),
         "带足迹与不带足迹必须得到相反的覆盖可用性");
+  }
+
+  /** 局部合并、刷新会带着全部足迹写库但记为不完整：重启后完整与否只认持久化快照，不能因为足迹齐全就升成完整。 */
+  @Test
+  void footprintsRestoreAsCompleteOnlyWhenThePersistedSnapshotSaysSo() {
+    UUID worldId = UUID.randomUUID();
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    EdgeId edgeId = EdgeId.undirected(a, b);
+    List<RailNodeRecord> nodes = List.of(nodeRecord(worldId, a, 0), nodeRecord(worldId, b, 10));
+    RailFootprintCell cell = new RailFootprintCell(2, 64, 8);
+    List<RailEdgeRecord> edges =
+        List.of(new RailEdgeRecord(worldId, edgeId, 10, 0.0, true, Set.of(cell)));
+
+    RailInterlockingState missing =
+        stateOf(RailGraphService.buildGraphFromRecords(nodes, edges, Optional.empty()));
+    RailInterlockingState incomplete =
+        stateOf(
+            RailGraphService.buildGraphFromRecords(
+                nodes, edges, Optional.of(snapshotRecord(worldId, edgeId, false))));
+    RailInterlockingState complete =
+        stateOf(
+            RailGraphService.buildGraphFromRecords(
+                nodes, edges, Optional.of(snapshotRecord(worldId, edgeId, true))));
+
+    assertFalse(missing.coverage().complete());
+    assertFalse(incomplete.coverage().complete());
+    assertTrue(complete.coverage().complete());
+    // 不完整时足迹仍留在索引里。
+    assertTrue(incomplete.edgesForCell(cell).contains(edgeId));
+  }
+
+  private static RailInterlockingSnapshotRecord snapshotRecord(
+      UUID worldId, EdgeId edgeId, boolean complete) {
+    return new RailInterlockingSnapshotRecord(
+        worldId,
+        RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION,
+        RailInterlockingEdgeSignature.of(Set.of(edgeId)),
+        new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingCoverage(
+            1, complete ? 1 : 0, complete),
+        Map.of());
+  }
+
+  private static RailInterlockingState stateOf(RailGraph graph) {
+    return ((RailGraphInterlockingSupport) graph).interlockingState();
   }
 
   /** 足迹编解码必须往返一致；坏数据一律 fail-closed 成空集合，绝不抛出。 */

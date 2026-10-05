@@ -6,8 +6,10 @@
 
 ## 构建命令
 
-- `/fta graph build [--tickBudgetMs <ms>] [--sync] [--all|--here] [--tcc] [--loadChunks] [--bfs] [--maxChunks <n>] [--maxConcurrentLoads <n>]`
-- `/fta graph continue [--tickBudgetMs <ms>] [--maxChunks <n>] [--maxConcurrentLoads <n>]`
+- `/fta graph build [--tickBudgetMs <ms>] [--maxChunks <n>] [--all] [--tcc]`
+- `/fta graph continue [--tickBudgetMs <ms>] [--maxChunks <n>]`
+- `/fta graph refresh [--tickBudgetMs <ms>]`
+- `/fta graph extend [--tickBudgetMs <ms>]`
 - `/fta graph status`
 - `/fta graph cancel`
 - `/fta graph info`
@@ -48,12 +50,13 @@
   1) 若指定 `--tcc`：读取 TCC 编辑器中“当前选中”的轨道方块作为起点
   2) 否则：尝试读取玩家附近的节点牌子（waypoint/autostation/depot）
   3) 再否则：使用玩家脚下附近轨道作为起点
-- 发现节点方式：从起点轨道锚点沿轨道连通性扩展，触达区块后扫描 tile entity 中的牌子。
+- 发现节点方式：从起点轨道锚点沿轨道连通性扩展，按需异步加载相邻区块，触达区块后扫描 tile entity 中的牌子。
+- 只有 HERE 能得到覆盖整个连通分量的完整结果（精确联锁）。
 
-**ALL（控制台默认）**
+**ALL（控制台默认，或玩家加 `--all`）**
 
-- 仅扫描当前已加载区块内的 tile entity 牌子，不做“沿轨道扩展”。
-- 该模式不会加载区块，也不会生成续跑状态（continue）。
+- 仅扫描当前已加载区块内的 tile entity 牌子，不做“沿轨道扩展”，不加载区块，也不会生成续跑状态（continue）。
+- 结果永远是局部的，联锁按不完整发布；适合诊断。`--tcc` 不能与 `--all` 同用。
 
 ### 时间预算（tickBudgetMs）
 
@@ -62,23 +65,30 @@
 - 值越小：对主线程影响更小，但构建耗时更长
 - 值越大：构建更快，但更可能造成卡顿
 
-默认值为 `10`。轨道发现与 Edge 探索受该预算分片；图组装、分量合并、桥接边检查、sparse Zone 编译与 SQL 快照替换仍发生在收尾阶段。普通轨道方块不会写库或常驻，但大图首次完整 build 仍应在低峰期执行并观察 tick/heap 峰值。该限制只影响离线构图，不改变运行期按 `edge -> zone` 和 `zone cell -> zone` 查询的复杂度。
+默认值为 `10`。轨道发现与 Edge 探索受该预算分片；图组装、分量合并、sparse Zone 编译与 SQL 快照替换仍发生在收尾阶段。普通轨道方块不会写库或常驻，但大图首次完整 build 仍应在低峰期执行并观察 tick/heap 峰值。该限制只影响离线构图，不改变运行期按 `edge -> zone` 和 `zone cell -> zone` 查询的复杂度。
 
-### 同步模式（--sync）
+### 区块上限（--maxChunks）
 
-`--sync` 会在主线程一次性跑完 discovery + explore（可能卡服），仅用于调试/维护。生产环境建议用默认分段模式。
+HERE 构建沿轨道按需加载区块，`--maxChunks <n>`（默认 256）是本次允许触发加载的区块上限，达到上限会暂停；可用 `/fta graph continue` 续跑。暂停时持有的区块票在续跑完成、取消、删图或被新的构建取代时释放。
 
-### 可选：沿轨道加载区块（--loadChunks）
+激活被拒（仍有列车占用）或写库失败时，续跑状态照样保留，`continue` 会重新尝试激活；任务不会卡在“构建中”。
 
-默认 build 不会主动加载区块：未加载区块会被视为不可达（见下文“区块加载约束”）。
+### 快速刷新（refresh）
 
-若希望在 HERE 模式沿轨道“按需扩张并加载相邻区块”，可加：
+`/fta graph refresh` 跳过节点发现，按库里当前的节点重新探索区间，适合“节点牌子没变、轨道改了”。库里已经删掉的节点不会被旧图带回来。刷新不沿轨道做连通发现，不能证明 Edge universe 完整，联锁按不完整发布（已测到的足迹保留）；需要精确联锁时用 build。
 
-- `--loadChunks`：启用按需异步加载（仅 HERE 支持）
-- `--maxChunks <n>`：本次 build 允许触发加载的区块上限（达到上限会暂停）
-- `--maxConcurrentLoads <n>`：并发加载上限（超过会排队）
+### 增量增补（extend）
 
-当触发 `maxChunks` 暂停后，可用 `/fta graph continue` 续跑；续跑同样受 `maxChunks/maxConcurrentLoads` 约束。
+`/fta graph extend` 把库里有、图里还没有的节点牌子补进图：只从新节点出发，往从未探索过的轨道方向走，不改动任何已有区间。适合在线网边缘延伸新线。以下情况拒绝并提示用 build：
+
+- 当前图没有完整足迹（无法判断哪里探索过）
+- 有节点被拆、换了位置（增补只加不改）
+- 新牌子的锚点落在已有区间上（需要拆分区间）
+- 新轨道接进已有区间中间（那里需要道岔节点），或新轨道上有没挂牌子的道岔
+- 新区间足迹不完整（多半是区块未加载——新轨道附近要有人）
+- 增补会改变的旧占用资源（区段键、分量键、联锁区）当前正被占用或排队；连通分量键变化会让旧键上的运维限速失效时也拒绝
+
+只要变化的旧资源都空闲，增补可以在运行中执行，不需要全网停车。
 
 ## 图构建流水线
 
@@ -95,37 +105,20 @@
 2) `explore_edges`：计算区间距离与临时物理采样
    - **默认（节点到节点探索）**：使用 TrainCarts 的 `TrackWalkingPoint` 从每个节点出发，沿轨道走到下一个节点就停止；每次移动都从 `currentRailPath` 栅格化实际三维轨迹
    - TCCoasters 的曲线、坡道与多段路径通过 TrainCarts 暴露的实际 `RailPath.Segment` 逐方块遍历；不会把两个 NodeId 端点用直线插值。`--tcc` 只负责从编辑器选择解析 seed，后续探索与普通轨道共用同一适配层
-   - **`--bfs`（BFS 多源）**：使用多源 Dijkstra 一次遍历整张轨道网络；波前相遇时沿 predecessor chain 还原候选路径。TrainCarts/TCC junction 可能一步跨越长曲线，因此 BFS 结果只用于边长，物理足迹保持不完整并触发 fail-closed sentinel
    - 节点到节点模式以最短候选写入 `Edge.lengthBlocks`，同时在构建期合并全部成功 walker 候选的实际 RailPath 采样，避免较长的并行候选因不是最短路而从联锁发现中消失
    - 完成探索后，系统只编译“不同 Edge 真实重合”的稀疏联锁 Zone，并立即丢弃普通轨道方块；全轨道采样不会进入 `RailEdge`、SQL 或运行时常驻索引
    - 只有全部探索任务正常完成时 sparse catalog 才标记为完整；暂停、缺失 anchor 或无法完整还原的结果保持不完整并触发保守联锁
    - 超距方向不算"无法完整还原"：某方向走满上限仍未遇到任何节点时，按尽头线处理——另一侧视为没有 FTA 节点（非 FTA 轨道或施工中），不产生区间，也不降级 catalog。构建结束时控制台输出一行 `WARN` 清单（`节点@停止坐标`），玩家执行时聊天栏另列出前 10 条并可点击传送；若其中本应是一条真实区间，说明它已从图中缺失，需在停止坐标附近补节点牌子或截断轨道后重建
    - 同一步既超过上限又踏上节点锚点时按"到达"处理，区间照常记录
-   - 升级自旧数据库或缺少 `rail_interlocking_snapshots` 时，不会把空目录解释成“无交叉”。必须用当前 Jar 完成一次默认节点到节点 build，使 `/fta graph info` 的 captured/expected coverage 完整后才能恢复物理联锁吞吐；`--bfs` 不能完成这一步
-   - 节点到节点模式单方向探索上限默认为 `4096` blocks（`--bfs` 仍为 `512`）。上限只会被无节点的延伸线走满，取得远大于正常区间长度，是为了让"很长但确实接回线网"的区间仍被发现：否则它会被误当成尽头线从图中消失，而 TrainCarts 仍可能按物理最短路把列车引上这段不受占用与联锁保护的图外轨道
+   - 升级自旧数据库或缺少 `rail_interlocking_snapshots` 时，不会把空目录解释成“无交叉”。必须用当前 Jar 完成一次 HERE build，使 `/fta graph info` 的 captured/expected coverage 完整后才能恢复物理联锁吞吐
+   - 节点到节点模式单方向探索上限默认为 `4096` blocks。上限只会被无节点的延伸线走满，取得远大于正常区间长度，是为了让"很长但确实接回线网"的区间仍被发现：否则它会被误当成尽头线从图中消失，而 TrainCarts 仍可能按物理最短路把列车引上这段不受占用与联锁保护的图外轨道
 
-### 边探索模式对比
-
-| 模式 | 命令参数 | 优势 | 劣势 |
-|------|---------|------|------|
-| 节点到节点 | （默认） | 只探索节点之间的轨道段，并能编译稀疏物理联锁 | 需要节点牌子先被扫描到 |
-| BFS 多源 | `--bfs` | 一次遍历计算所有边长 | 可能扫描到大量无关轨道，且不能签发完整稀疏物理联锁目录 |
-
-**说明**：默认使用节点到节点探索模式（使用 TrainCarts 的 `TrackWalkingPoint`），这样不会扫描到无关轨道。如果需要使用旧版 BFS 多源探索，可以加 `--bfs` 参数。
-达到 chunk 上限后的 `/fta graph continue` 会继续 discovery，并在完成后统一使用节点到节点模式重新取得真实 RailPath 足迹。
+边一律按节点到节点探索（TrainCarts 的 `TrackWalkingPoint`），只走节点之间的轨道段，并能编译稀疏物理联锁。
 
 ## 区块加载约束（重要）
 
-构建过程默认不会主动加载区块：未加载区块会被视为不可达。
-
-- 这意味着：同一条线网如果跨越未加载区域，HERE/ALL 都可能漏扫节点与边
-- 运维建议：先预加载线路区域（例如飞行巡检、第三方预加载工具）再执行 `/fta graph build`
-
-若你启用了 `--loadChunks`：
-
-- HERE 模式会沿轨道连通性“按需”异步加载相邻区块，以扩大可达范围（不会无脑全图加载）
-- 仍建议设置合理的 `--maxChunks/--maxConcurrentLoads`，避免误加载过多区域
-- 若达到 `maxChunks`，build 会暂停并提示 pending chunk 数量；此时可用 `/fta graph continue` 分批续跑
+- HERE 构建沿轨道连通性“按需”异步加载相邻区块（不会无脑全图加载）；达到 `maxChunks` 会暂停并提示 pending chunk 数量，用 `/fta graph continue` 分批续跑
+- ALL、refresh、extend 不加载区块：未加载区块视为不可达，可能漏扫节点与边；extend 遇到这种情况会因足迹不完整而拒绝
 
 ## Switcher 牌子提示
 
@@ -151,9 +144,11 @@
 
 启动/重载时，TrainCarts 当前完整车体只与 sparse Zone 局部方块匹配。普通轨道 cell 没有进入目录是正常 clear 结果；普通 EDGE/NODE 保护来自 Route/Node 与真实车长，不靠坐标反查。旧图或不完整 catalog 仍不足以证明不存在隐藏平交，恢复会保持 `STOP_FIRST`。升级后必须先安全停车，再从目标连通分量执行 `/fta graph build --here --loadChunks --maxChunks <足够覆盖整个连通分量的数量>`。不得使用 `--bfs`；全部节点 anchor 必须可解析，构建过程不得有 chunk 加载失败。若命中 chunk 上限，需按提示执行 `/fta graph continue`，直到状态明确报告完整完成。
 
-快速刷新会无条件把最终图中的 sparse catalog 降级为不完整；它只适合保守更新拓扑，不能恢复精确 pair-zone，也不能解除启动现场恢复的 `STOP_FIRST`。要恢复完整 coverage，必须使用上述 `HERE + --loadChunks` 的完整构建流程，不能使用 `refresh`。
+快速刷新会把最终图中的 sparse catalog 按不完整发布（已测到的足迹保留，写库时不会被抹掉）；它只适合保守更新拓扑，不能恢复精确 pair-zone，也不能解除启动现场恢复的 `STOP_FIRST`。要恢复完整 coverage，必须使用上述 HERE 完整构建流程，不能使用 `refresh`。
 
-若新旧快照会改变列车实际申请的联锁资源投影，而占用管理器仍存在 active claims，服务会拒绝激活新快照并继续保留旧快照。请先安全停车并清空占用后再重试；系统不会在热切换时对 old/new 资源静默双写。
+合并规则：完整 build（覆盖整个连通分量）合并进旧图时逐边取足迹——本次重扫到的区间只认本次的证据，没重扫的沿用旧图；所有区间都有完整足迹才发布完整目录。同一区间两边都有时，完整 build 以本次为准（改道后边长变长也会跟上），局部 build 与 refresh 取较短的（walker 会跟着未挂牌道岔当时的扳向绕远，局部证据不足以推翻较短的旧长度）。局部 build、refresh 无法证明完整 Edge universe，即使足迹齐全也按不完整发布，但已测到的足迹保留在索引里、写库时不会被清空；`delete here` 同样保留剩余区间的足迹。重启时完整与否以持久化的联锁快照为准，不会因为足迹齐全被升成完整。refresh 与 extend 写库前会重新读节点表，期间有牌子增删或移动就放弃写入。
+
+若新旧快照会改变列车实际申请的联锁资源投影，而占用管理器仍存在 active claims，build/refresh/delete here 会拒绝激活新快照并继续保留旧快照。请先安全停车并清空占用后再重试；系统不会在热切换时对 old/new 资源静默双写。extend 例外：它逐键核验受影响的旧资源，只要这些资源空闲就可以切换。
 
 节点牌子的注册表、冲突检测、拆牌清理与 `rail_nodes` 增量同步细节，见：`docs/dev/node-sign-registry.md`。
 
@@ -165,7 +160,11 @@
 
 - `/fta graph build` 时会把节点集合签名写入 `rail_graph_snapshots.node_signature`
 - 建牌/拆牌时插件会对 `rail_nodes` 做增量同步（仅 waypoint/autostation/depot），并据此计算“当前节点签名”
-- 若当前签名与快照签名不一致：旧图会被标记为失效，启动预热会跳过加载，`/fta graph info` 会提示需要重建
+- 若当前签名与快照签名不一致：旧图会被标记为失效，`/fta graph info` 会提示需要重建
+  - 变化的节点都没有交路在用（途经点、停靠、DYNAMIC 范围、CRET/DSTY 目标、线路出车车库）时，旧图继续供调度使用，只告警“建议重建”；期间列车经过旧图里没有的新节点牌子时不参与推进
+  - 任一变化的节点有交路在用、判不了、或节点换了位置时，旧图移出内存，该世界调度在重建前拿不到图
+  - 启动预热时签名不一致仍直接移出旧图
+- 有 `fetarute.graph.alert` 权限的玩家会收到失效与恢复告警，上线时也会被提醒；控制台记 WARN
 
 当图处于 stale 状态时（内存快照被清空），如果你在 HERE 模式只重建某一个联通分量，命令会在需要时从 SQL 加载旧图作为 merge base，避免误删其他联通分量的数据。
 
