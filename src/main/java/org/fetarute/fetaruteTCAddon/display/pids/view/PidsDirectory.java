@@ -143,6 +143,15 @@ public interface PidsDirectory {
   }
 
   /**
+   * 运营商代码所属的公司（公告按公司显示）。
+   *
+   * @return 代码不存在或属于多家公司时为空
+   */
+  default Optional<UUID> companyOfOperator(String operatorCode) {
+    return Optional.empty();
+  }
+
+  /**
    * 交路的阶段（出库、运营、回库）。
    *
    * @param routeId {@code 运营商:线路:交路}

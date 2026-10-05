@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaPidsBulletinCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaPidsCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
@@ -738,6 +739,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaHealthCommand(this).register(commandManager);
     new FtaTimetableCommand(this).register(commandManager);
     new FtaPidsCommand(this).register(commandManager);
+    new FtaPidsBulletinCommand(this).register(commandManager);
     new FtaTripCommand(this).register(commandManager);
     new FtaAnnounceCommand(this).register(commandManager);
     infoCommand.register(commandManager);

@@ -22,6 +22,9 @@ import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.api.line.LineApi;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletinBoard;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletinFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsFonts;
@@ -30,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsFacing;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsBulletinView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
@@ -68,6 +72,7 @@ class PidsComposerTest {
   private PidsSettings settings = withSlides(12, 0);
 
   private PidsComposer composer;
+  private final PidsBulletinBoard bulletins = new PidsBulletinBoard();
 
   @BeforeEach
   void setUp() throws Exception {
@@ -98,7 +103,8 @@ class PidsComposerTest {
             () -> settings,
             () -> now,
             ZoneOffset.UTC,
-            (line, at) -> statuses.apply(line));
+            (line, at) -> statuses.apply(line),
+            bulletins);
   }
 
   @Test
@@ -400,6 +406,111 @@ class PidsComposerTest {
         "下一班进站时留在停站表");
   }
 
+  /** HHU 的一般公告：隔段与宣传页交替，公告那一段主页让出 8 秒；标签与色带同主页。 */
+  @Test
+  void platformScreensRotateBulletinsWithCourtesyPages() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    PidsBulletin bulletin = hhuBulletin(Set.of(), PidsBulletin.Level.NORMAL);
+    bulletins.put(bulletin);
+    now = roundStart();
+    composer.content(Optional.of(screen.id()), 384, 128);
+
+    now = roundStart().plusSeconds(9);
+    PidsContent content = composer.content(Optional.of(screen.id()), 384, 128).orElseThrow();
+
+    PidsBulletinView view = assertInstanceOf(PidsComposer.BulletinKey.class, content.key()).view();
+    assertEquals("公告", view.label().primary());
+    assertEquals("2 号出入口临时关闭", view.title().primary());
+    assertEquals(1, view.pages());
+    assertEquals(384, content.image().get().getWidth());
+    now = roundStart().plusSeconds(28);
+    assertEquals(PidsNotice.ORDER, noticeOn(screen, 384, 128), "下一段是宣传页");
+  }
+
+  /** 限定了线路的公告只上显示这些线路的屏幕。 */
+  @Test
+  void bulletinsForOtherLinesStayOff() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of("WS"));
+    bulletins.put(hhuBulletin(Set.of("MT"), PidsBulletin.Level.IMPORTANT));
+    now = roundStart().plusSeconds(13);
+
+    assertFalse(noticeOn(screen, 384, 128).warning(), "副页照常放宣传页，主页也不让出时间");
+    now = roundStart().plusSeconds(11);
+    assertInstanceOf(
+        PidsComposer.LiveKey.class,
+        composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key());
+  }
+
+  /** 只放车站所属公司的公告：别家公司（运营商代码相同）发的公告不上本站的屏。 */
+  @Test
+  void bulletinsOfOtherCompaniesStayOff() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    PidsBulletin ours = hhuBulletin(Set.of(), PidsBulletin.Level.IMPORTANT);
+    bulletins.put(
+        new PidsBulletin(
+            ours.id(),
+            UUID.randomUUID(),
+            ours.operatorCode(),
+            ours.stations(),
+            ours.lines(),
+            ours.level(),
+            ours.title(),
+            ours.body(),
+            ours.startsAt(),
+            ours.endsAt(),
+            ours.createdBy(),
+            ours.createdAt(),
+            ours.updatedAt()));
+    now = roundStart().plusSeconds(13);
+
+    assertFalse(noticeOn(screen, 384, 128).warning(), "放的是宣传页");
+  }
+
+  /** 2×1 停站屏：后续列车页之后是公告，分两页（中文、英文）各 8 秒。 */
+  @Test
+  void stopListScreensTurnToBulletinPages() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    rows = List.of(row("MT", 120), row("WS", 300));
+    bulletins.put(hhuBulletin(Set.of(), PidsBulletin.Level.IMPORTANT));
+    now = NOW;
+    composer.content(Optional.of(screen.id()), 128, 256);
+    now = NOW.plusSeconds(8);
+    composer.content(Optional.of(screen.id()), 128, 256);
+
+    now = NOW.plusSeconds(16);
+    PidsBulletinView first =
+        assertInstanceOf(
+                PidsComposer.BulletinKey.class,
+                composer.content(Optional.of(screen.id()), 128, 256).orElseThrow().key())
+            .view();
+    now = NOW.plusSeconds(24);
+    PidsBulletinView second =
+        assertInstanceOf(
+                PidsComposer.BulletinKey.class,
+                composer.content(Optional.of(screen.id()), 128, 256).orElseThrow().key())
+            .view();
+
+    assertEquals("重要公告", first.label().primary());
+    assertEquals("1/2", first.pageLabel());
+    assertEquals("2/2", second.pageLabel());
+  }
+
+  private static PidsBulletin hhuBulletin(Set<String> lines, PidsBulletin.Level level) {
+    PidsBulletin sample = PidsBulletinFixtures.exitClosed();
+    return PidsBulletinFixtures.bulletin(
+        Set.of("HHU"),
+        lines,
+        level,
+        sample.title(),
+        sample.body(),
+        Optional.empty(),
+        Optional.empty());
+  }
+
   private PidsNotice noticeOn(PidsScreen screen, int width, int height) {
     return assertInstanceOf(
             PidsNoticeView.class,
@@ -571,6 +682,13 @@ class PidsComposerTest {
     @Override
     public List<PidsView.LineChip> linesServing(PidsStationKey station) {
       return List.of();
+    }
+
+    @Override
+    public Optional<UUID> companyOfOperator(String operatorCode) {
+      return "SURC".equals(operatorCode)
+          ? Optional.of(PidsBulletinFixtures.COMPANY)
+          : Optional.empty();
     }
 
     @Override

@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
@@ -39,6 +40,7 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepos
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPortalLinkRepository;
@@ -89,6 +91,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final ConsistPlanRepository consistPlanRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
   private final PidsScreenRepository pidsScreenRepository;
+  private final PidsBulletinRepository pidsBulletinRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -141,6 +144,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcHudLineBindingRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.pidsScreenRepository =
         new JdbcPidsScreenRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.pidsBulletinRepository =
+        new JdbcPidsBulletinRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -269,6 +274,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public PidsScreenRepository pidsScreens() {
     return pidsScreenRepository;
+  }
+
+  @Override
+  public PidsBulletinRepository pidsBulletins() {
+    return pidsBulletinRepository;
   }
 
   @Override

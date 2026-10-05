@@ -201,7 +201,7 @@ public final class FtaPidsCommand {
 
   private void help(CommandSender sender) {
     LocaleManager locale = locale();
-    for (String key : List.of("header", "give", "stick", "list", "info")) {
+    for (String key : List.of("header", "give", "stick", "list", "info", "bulletin")) {
       sender.sendMessage(locale.component("command.pids.help." + key));
     }
   }
@@ -622,7 +622,8 @@ public final class FtaPidsCommand {
                     .map(screen -> new ScreenRef(service, screen)));
   }
 
-  private static String prefix(CommandInput input) {
+  /** 补全时正在输入的那一段（小写、去空白），站台屏与公告命令共用。 */
+  static String prefix(CommandInput input) {
     return input == null ? "" : input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
   }
 }
