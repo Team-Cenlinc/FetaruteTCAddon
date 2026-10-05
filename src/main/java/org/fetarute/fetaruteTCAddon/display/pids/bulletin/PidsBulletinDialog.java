@@ -109,7 +109,16 @@ public final class PidsBulletinDialog {
     for (Component problem : problems) {
       body.add(DialogBody.plainMessage(problem, WIDTH));
     }
-    body.add(DialogBody.plainMessage(locale.component("pids.bulletin.dialog.hint"), WIDTH));
+    // 对话框的输入框没有占位提示：写法示例放在各项标题里，这里再给出服务器此刻的时间，时间按服务器时区填。
+    body.add(
+        DialogBody.plainMessage(
+            locale.component(
+                "pids.bulletin.dialog.hint",
+                Map.of(
+                    "now",
+                    PidsBulletinForm.TIME.format(
+                        java.time.ZonedDateTime.now(java.time.ZoneId.systemDefault())))),
+            WIDTH));
 
     List<DialogInput> inputs = new ArrayList<>();
     inputs.add(

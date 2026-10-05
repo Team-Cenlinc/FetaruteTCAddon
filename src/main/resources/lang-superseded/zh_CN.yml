@@ -15,6 +15,14 @@ command:
       drive-set: ["<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新: mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white>"]
       drive-list: ["  <gray>驾驶:</gray> mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> <gray>bps</gray>"]
 pids:
+  bulletin:
+    dialog:
+      hint: ["<gray>公告在本运营商车站的站台屏上轮播。车站、线路填代码，多个以逗号分隔，留空为不限；时间按服务器时区，如 2026-10-05 22:00，开始留空为立即生效，结束留空为长期有效。</gray>"]
+      field:
+        stations: ["车站（留空为全部车站）"]
+        lines: ["线路（留空为全部线路）"]
+        starts: ["开始时间（留空为立即）"]
+        ends: ["结束时间（留空为长期）"]
   board:
     notice:
       order:
