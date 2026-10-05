@@ -57,6 +57,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickLi
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.GraphStaleNotifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
@@ -144,6 +145,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private LoggerManager loggerManager;
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
+  private GraphStaleNotifier graphStaleNotifier;
   private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
@@ -631,6 +633,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     storageManager
         .provider()
         .ifPresent(provider -> service.loadFromStorage(provider, getServer().getWorlds()));
+    if (graphStaleNotifier != null) {
+      graphStaleNotifier.logStaleWorlds();
+    }
     storageManager
         .provider()
         .ifPresent(
@@ -716,8 +721,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
             loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
+    this.graphStaleNotifier =
+        GraphStaleNotifier.forPlugin(this, railGraphService, localeManager, loggerManager);
+    getServer().getPluginManager().registerEvents(graphStaleNotifier, this);
     SignNodeStorageSynchronizer storageSync =
-        new RailNodeIncrementalSync(storageManager, railGraphService, loggerManager::debug);
+        new RailNodeIncrementalSync(
+            storageManager, railGraphService, loggerManager::debug, graphStaleNotifier);
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =

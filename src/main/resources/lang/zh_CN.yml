@@ -125,6 +125,17 @@ sign:
     destination: "目的地"
     switcher: "道岔"
 
+graph:
+  alert:
+    stale: "<prefix> <red>调度图已失效</red> <gray>世界</gray> <white><world></white><gray>：节点牌子移除</gray> <white><removed></white> <gray>处、新增</gray> <white><added></white> <gray>处。重建前该世界的调度无法使用调度图，开启跨世界时经过该世界的交路也受影响。</gray>"
+    entry: "<gray>  - <action></gray> <white><type></white> <white><node></white> <gray>@ <x>, <y>, <z></gray>"
+    action-removed: "移除"
+    action-added: "新增"
+    more: "<gray>  …另有</gray> <white><count></white> <gray>处</gray>"
+    hint: "<gray>请到该世界执行</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>点击填入命令</gray>'><white>/fta graph build</white></hover></click><gray>；若属误删，在原位置按原文字手动放回牌子也可恢复。</gray>"
+    recovered: "<prefix> <green>调度图已恢复</green> <gray>世界</gray> <white><world></white><gray>：节点牌子与快照重新一致，已重新载入调度图。</gray>"
+    join: "<prefix> <yellow>世界</yellow> <white><world></white> <yellow>的调度图处于失效状态，重建前该世界的调度无法使用调度图，开启跨世界时经过该世界的交路也受影响。</yellow>"
+
 command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
