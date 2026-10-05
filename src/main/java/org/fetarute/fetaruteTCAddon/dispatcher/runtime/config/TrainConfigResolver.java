@@ -52,7 +52,8 @@ public final class TrainConfigResolver {
   /**
    * 解析列车配置，优先读取 TrainProperties tags，缺失时回退到配置默认值。
    *
-   * <p>出车写入的加减速标签（{@link #isSpawnStamped}）不参与解析，按车种配置取值：写下时两者本就相同，配置重载后则以当下配置为准。
+   * <p>出车写入的加减速标签（{@link
+   * #isSpawnStamped}）不参与解析，按车种配置取值：写下时两者本就相同，配置重载后则以当下配置为准。车型最高速度标签不是出车写入的，照常读取。
    *
    * <p>巡航速度不在 tags 中维护，运行时使用图默认速度与边限速作为基准。
    */
@@ -60,8 +61,14 @@ public final class TrainConfigResolver {
     Objects.requireNonNull(config, "config");
     TrainType type = readType(properties).orElse(config.trainConfigSettings().defaultTrainType());
     ConfigManager.TrainTypeSettings defaults = config.trainConfigSettings().forType(type);
+    // 车型最高速度不是出车写入的（来自编组方案或用户），出车写过加减速的列车同样要按它封顶。
+    OptionalDouble maxSpeed =
+        TrainTagHelper.readDoubleTag(properties, TAG_TRAIN_MAX_BPS)
+            .filter(value -> value > 0.0)
+            .map(OptionalDouble::of)
+            .orElse(OptionalDouble.empty());
     if (isSpawnStamped(properties)) {
-      return new TrainConfig(type, defaults.accelBps2(), defaults.decelBps2());
+      return new TrainConfig(type, defaults.accelBps2(), defaults.decelBps2(), maxSpeed);
     }
     double accel =
         TrainTagHelper.readDoubleTag(properties, TAG_TRAIN_ACCEL_BPS2)
@@ -71,11 +78,6 @@ public final class TrainConfigResolver {
         TrainTagHelper.readDoubleTag(properties, TAG_TRAIN_DECEL_BPS2)
             .filter(value -> value > 0.0)
             .orElse(defaults.decelBps2());
-    OptionalDouble maxSpeed =
-        TrainTagHelper.readDoubleTag(properties, TAG_TRAIN_MAX_BPS)
-            .filter(value -> value > 0.0)
-            .map(OptionalDouble::of)
-            .orElse(OptionalDouble.empty());
     return new TrainConfig(type, accel, decel, maxSpeed);
   }
 

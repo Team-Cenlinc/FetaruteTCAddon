@@ -239,6 +239,28 @@ class SpawnMotionTagsTest {
   }
 
   @Test
+  // 编组方案只覆盖最高速度：加减速照常按车种写出车值，最高速度仍要封顶自动控车
+  void consistMaxSpeedSurvivesSpawnStamping() {
+    ConfigManager.ConfigView config = config(null, null, null);
+    TagStore train = new TagStore();
+
+    SpawnMotionTags.stampWithConsist(
+        train.properties(),
+        config,
+        Map.of(
+            TrainConfigResolver.TAG_TRAIN_TYPE,
+            "EMU",
+            TrainConfigResolver.TAG_TRAIN_MAX_BPS,
+            "22"));
+
+    assertTrue(resolver.isSpawnStamped(train.properties()));
+    TrainConfig resolved = resolver.resolve(train.properties(), config);
+    assertEquals(TrainType.EMU.presetAccelBps2(), resolved.accelBps2(), 1e-9);
+    assertTrue(resolved.maxSpeedBps().isPresent(), "出车标记不得吞掉车型最高速度");
+    assertEquals(22.0, resolved.maxSpeedBps().getAsDouble(), 1e-9);
+  }
+
+  @Test
   // 编组方案覆盖了加速度：归方案所有，撤掉模板带来的出车标记与出车减速度，解析取方案的值、减速度按车种
   void consistMotionOverrideOwnsTheTags() {
     ConfigManager.ConfigView config = config(null, null, null);
