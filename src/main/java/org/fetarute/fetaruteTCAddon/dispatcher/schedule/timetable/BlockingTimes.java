@@ -277,24 +277,25 @@ final class BlockingTimes {
       TimetableBuildOptions.Following rules,
       Front front) {
     int last = trajectory.samples() - 1;
+    double[] distances = trajectory.distance();
+    double[] seconds = trajectory.seconds();
+    double[] speeds = trajectory.speed();
     double length = path.x[to] - path.x[from];
     double duration = path.arrival[to] - path.departure[from];
-    double distanceScale =
-        trajectory.distance()[last] > 0.0D ? length / trajectory.distance()[last] : 0.0D;
-    double timeScale =
-        trajectory.seconds()[last] > 0.0D ? duration / trajectory.seconds()[last] : 0.0D;
+    double distanceScale = distances[last] > 0.0D ? length / distances[last] : 0.0D;
+    double timeScale = seconds[last] > 0.0D ? duration / seconds[last] : 0.0D;
     double cap = path.x[to];
     int edge = from;
     for (int s = 0; s <= last; s++) {
-      double x = path.x[from] + trajectory.distance()[s] * distanceScale;
-      double time = path.departure[from] + trajectory.seconds()[s] * timeScale;
+      double x = path.x[from] + distances[s] * distanceScale;
+      double time = path.departure[from] + seconds[s] * timeScale;
       while (edge + 1 < to && path.x[edge + 1] <= x) {
         edge++;
       }
       if (s == 0) {
         front.hold(time);
       }
-      double reach = Math.max(path.x[edge + 1], x + reach(trajectory.speed()[s], rules));
+      double reach = Math.max(path.x[edge + 1], x + reach(speeds[s], rules));
       front.advance(time, Math.min(cap, reach));
     }
   }
@@ -365,14 +366,17 @@ final class BlockingTimes {
   private static final class Path {
     final List<NodeId> nodes = new ArrayList<>();
     final List<RailEdge> edges = new ArrayList<>();
-    double[] x;
-    double[] arrival;
-    double[] departure;
-    boolean[] routeNode;
-    boolean[] stop;
+    final double[] x;
+    final double[] arrival;
+    final double[] departure;
+    final boolean[] routeNode;
+    final boolean[] stop;
 
     static Path of(TimetableConflictChecker.RouteProfile profile) {
-      Path path = new Path();
+      return new Path(profile);
+    }
+
+    private Path(TimetableConflictChecker.RouteProfile profile) {
       List<Double> x = new ArrayList<>();
       List<Double> arrival = new ArrayList<>();
       List<Double> departure = new ArrayList<>();
@@ -384,8 +388,8 @@ final class BlockingTimes {
         if (segmentNodes.isEmpty()) {
           continue;
         }
-        if (path.nodes.isEmpty()) {
-          path.nodes.add(segmentNodes.get(0));
+        if (nodes.isEmpty()) {
+          nodes.add(segmentNodes.get(0));
           x.add(0.0D);
           arrival.add((double) segment.nodeOffsets().get(0));
           departure.add((double) segment.nodeOffsets().get(0));
@@ -397,8 +401,8 @@ final class BlockingTimes {
         }
         for (int k = 0; k < segment.edges().size(); k++) {
           RailEdge edge = segment.edges().get(k);
-          path.edges.add(edge);
-          path.nodes.add(segmentNodes.get(k + 1));
+          edges.add(edge);
+          nodes.add(segmentNodes.get(k + 1));
           x.add(x.get(x.size() - 1) + Math.max(0, edge.lengthBlocks()));
           double at = segment.nodeOffsets().get(k + 1);
           arrival.add(at);
@@ -408,20 +412,19 @@ final class BlockingTimes {
           stop.add(end && stopsAt(stops, segment.toStop()));
         }
       }
-      int n = path.nodes.size();
-      path.x = new double[n];
-      path.arrival = new double[n];
-      path.departure = new double[n];
-      path.routeNode = new boolean[n];
-      path.stop = new boolean[n];
+      int n = nodes.size();
+      this.x = new double[n];
+      this.arrival = new double[n];
+      this.departure = new double[n];
+      this.routeNode = new boolean[n];
+      this.stop = new boolean[n];
       for (int k = 0; k < n; k++) {
-        path.x[k] = x.get(k);
-        path.arrival[k] = arrival.get(k);
-        path.departure[k] = departure.get(k);
-        path.routeNode[k] = routeNode.get(k);
-        path.stop[k] = stop.get(k);
+        this.x[k] = x.get(k);
+        this.arrival[k] = arrival.get(k);
+        this.departure[k] = departure.get(k);
+        this.routeNode[k] = routeNode.get(k);
+        this.stop[k] = stop.get(k);
       }
-      return path;
     }
 
     private static boolean stopsAt(List<TimetableStop> stops, int index) {

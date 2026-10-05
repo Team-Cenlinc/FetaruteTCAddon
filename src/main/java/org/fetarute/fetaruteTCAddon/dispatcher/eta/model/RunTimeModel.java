@@ -52,7 +52,7 @@ public interface RunTimeModel {
   }
 
   /**
-   * 逐点轨迹。
+   * 逐点轨迹的不可变快照；输入与读取结果均复制，避免外部修改影响闭塞时间计算。
    *
    * @param distance 各采样点距起点的里程（格），递增
    * @param seconds 到达各采样点的秒数，首项为 0
@@ -67,6 +67,27 @@ public interface RunTimeModel {
       if (distance.length != seconds.length || distance.length != speed.length) {
         throw new IllegalArgumentException("distance / seconds / speed 数量不匹配");
       }
+      distance = distance.clone();
+      seconds = seconds.clone();
+      speed = speed.clone();
+    }
+
+    /** 各采样点里程的副本。 */
+    @Override
+    public double[] distance() {
+      return distance.clone();
+    }
+
+    /** 各采样点到达秒数的副本。 */
+    @Override
+    public double[] seconds() {
+      return seconds.clone();
+    }
+
+    /** 各采样点速度的副本。 */
+    @Override
+    public double[] speed() {
+      return speed.clone();
     }
 
     /** 采样点数。 */
