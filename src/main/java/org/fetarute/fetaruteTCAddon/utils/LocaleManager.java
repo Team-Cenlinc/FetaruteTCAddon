@@ -102,7 +102,41 @@ public final class LocaleManager {
       return miniMessage.deserialize(fallback, buildResolvers(Map.of("key", key)));
     }
     TagResolver resolver = buildResolvers(placeholders);
-    return miniMessage.deserialize(raw, resolver);
+    return miniMessage.deserialize(expandClickArguments(raw, placeholders), resolver);
+  }
+
+  /** 点击事件的参数：MiniMessage 不在引号参数里解析占位符，这里先把它们换成实际值。 */
+  private static final java.util.regex.Pattern CLICK_ARGUMENT =
+      java.util.regex.Pattern.compile("(<click:[a-z_]+:)(['\"])(.*?)\\2>");
+
+  /**
+   * 把点击事件参数里的 {@code <占位符>} 换成实际值（例如 {@code <click:run_command:'/fta license exam <class>'>}）；
+   * 值里的引号与反斜杠按 MiniMessage 的规则转义。其余位置的占位符照常交给解析器。
+   */
+  static String expandClickArguments(String raw, Map<String, String> placeholders) {
+    if (raw == null || placeholders == null || placeholders.isEmpty() || !raw.contains("<click:")) {
+      return raw;
+    }
+    java.util.regex.Matcher matcher = CLICK_ARGUMENT.matcher(raw);
+    StringBuilder out = new StringBuilder(raw.length());
+    while (matcher.find()) {
+      String quote = matcher.group(2);
+      String argument = matcher.group(3);
+      for (Map.Entry<String, String> entry : placeholders.entrySet()) {
+        String token = "<" + entry.getKey() + ">";
+        if (argument.contains(token)) {
+          String value = entry.getValue() == null ? "" : entry.getValue();
+          argument =
+              argument.replace(token, value.replace("\\", "\\\\").replace(quote, "\\" + quote));
+        }
+      }
+      matcher.appendReplacement(
+          out,
+          java.util.regex.Matcher.quoteReplacement(
+              matcher.group(1) + quote + argument + quote + ">"));
+    }
+    matcher.appendTail(out);
+    return out.toString();
   }
 
   /**

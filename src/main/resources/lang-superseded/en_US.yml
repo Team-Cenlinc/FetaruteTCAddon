@@ -1,5 +1,13 @@
 # 内置文案改写前的旧值（见 zh_CN.yml 的说明）。服务器上的 lang/en_US.yml 里某个键仍是这里列出的旧值之一时，加载时换成新的内置文案。
 drive:
+  license:
+    exam:
+      brief:
+        dispatch:
+          how: ["<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport next to the train</gray>'><green>[Go to train]</green></hover></click>"]
+  handbook:
+    driver:
+      page-7: ["<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>"]
   task:
     board:
       no-station: ["<prefix> <red>No station nearby; open the task board near a platform</red>"]

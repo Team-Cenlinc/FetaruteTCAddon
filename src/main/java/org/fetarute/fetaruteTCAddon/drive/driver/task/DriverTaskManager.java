@@ -894,6 +894,105 @@ public final class DriverTaskManager {
     return Optional.ofNullable(byPlayer.get(playerId));
   }
 
+  /**
+   * 前往接班站时送到哪里：车站设置了位置时用它；否则在接班站台牌子所在的轨道旁找一处站得住的地方（区块未加载时先加载）。
+   *
+   * @return 都找不到时为空
+   */
+  public Optional<Location> boardStationLocation(DriverTask task) {
+    return boardStation(task).or(() -> boardPlatform(task));
+  }
+
+  /** 列车已停在这趟任务的接班站：时刻表绑定显示刚停过接班站，且站台还在停站或等发车。 */
+  public boolean dwellingAtBoard(DriverTask task) {
+    String train = task.trainName();
+    if (train == null || train.isBlank()) {
+      return false;
+    }
+    boolean atBoard =
+        timetables()
+            .flatMap(api -> api.getAssignment(train))
+            .filter(
+                assignment ->
+                    task.key()
+                        .matches(
+                            assignment.timetableId(),
+                            assignment.tripCode(),
+                            assignment.serviceDate()))
+            .filter(
+                assignment -> assignment.lastStopSequence().orElse(-1) == task.boardStopSequence())
+            .isPresent();
+    return atBoard && dwelling(train);
+  }
+
+  /** 接班站台牌子旁的落脚处：先认任务记下的站台节点，找不到时取同一车站的任一站台。 */
+  private Optional<Location> boardPlatform(DriverTask task) {
+    var registry = plugin.getSignNodeRegistry();
+    if (registry == null) {
+      return Optional.empty();
+    }
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo> info =
+        Optional.ofNullable(task.boardNodeId())
+            .filter(id -> !id.isBlank())
+            .flatMap(
+                id ->
+                    registry.findByNodeId(
+                        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId.of(id), null));
+    if (info.isEmpty() && task.operatorCode() != null && task.stationCode() != null) {
+      String prefix =
+          (task.operatorCode() + ":S:" + task.stationCode() + ":").toLowerCase(Locale.ROOT);
+      info =
+          registry.snapshotInfos().values().stream()
+              .filter(
+                  candidate ->
+                      candidate
+                          .definition()
+                          .nodeId()
+                          .value()
+                          .toLowerCase(Locale.ROOT)
+                          .startsWith(prefix))
+              .findFirst();
+    }
+    if (info.isEmpty()) {
+      return Optional.empty();
+    }
+    World world = Bukkit.getWorld(info.get().worldId());
+    if (world == null) {
+      return Optional.empty();
+    }
+    int x = info.get().x();
+    int y = info.get().y();
+    int z = info.get().z();
+    // 驾驶员多半不在附近：先加载站台所在区块，才能找轨道与落脚处（只在命令里用，同步加载可以接受）。
+    world.getChunkAt(x >> 4, z >> 4);
+    Vector base =
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .runtime
+            .control
+            .StopMarkIndex
+            .stationRailOf(world, x, y, z)
+            .map(piece -> piece.block().getLocation().toVector().add(new Vector(0.5, 0.0, 0.5)))
+            .orElse(new Vector(x + 0.5, y, z + 0.5));
+    return PickupSpot.find(
+            base,
+            null,
+            (bx, by, bz) ->
+                world.getBlockAt(bx, by - 1, bz).getType().isSolid()
+                    && world.getBlockAt(bx, by, bz).isPassable()
+                    && world.getBlockAt(bx, by + 1, bz).isPassable())
+        .map(
+            spot -> {
+              Location target = new Location(world, spot.getX(), spot.getY(), spot.getZ());
+              Vector facing = base.clone().subtract(spot);
+              if (facing.lengthSquared() > 1.0e-6) {
+                target.setDirection(facing);
+              }
+              return target;
+            });
+  }
+
   /** 任务接班站的位置（车站设置了位置时）。 */
   private Optional<Location> boardStation(DriverTask task) {
     return plugin

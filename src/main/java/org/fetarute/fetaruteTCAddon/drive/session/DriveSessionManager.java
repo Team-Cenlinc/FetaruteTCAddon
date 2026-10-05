@@ -3488,18 +3488,41 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         pickups
             .ofPlayer(player.getUniqueId())
             .filter(waiting -> waiting.stage() == DriverPickups.Stage.WAITING);
-    if (pickup.isEmpty()) {
+    if (pickup.isPresent()) {
+      // 送到要坐的那一端：尽头式终点站是车尾端，其余是车头端。
+      return teleportBesideCab(player, pickup.get().trainName(), pickup.get().departure());
+    }
+    // 中途站接班（含驾驶证路考与练习）：列车已停在接班站时送到车头驾驶室旁，否则送到接班站台等车。
+    Optional<DriverTask> claimed =
+        tasks.taskOf(player.getUniqueId()).filter(task -> task.state() == DriverTask.State.CLAIMED);
+    if (claimed.isEmpty()) {
       return "drive.task.goto.none";
     }
-    Optional<MinecartGroup> group = SeatLocator.findGroup(pickup.get().trainName());
-    // 送到要坐的那一端：尽头式终点站是车尾端，其余是车头端。
+    DriverTask task = claimed.get();
+    if (tasks.dwellingAtBoard(task)) {
+      String key = teleportBesideCab(player, task.trainName(), CabSeats.Departure.HEAD);
+      if (key.equals("drive.task.goto.teleported")) {
+        return key;
+      }
+    }
+    Optional<org.bukkit.Location> station = tasks.boardStationLocation(task);
+    if (station.isEmpty()) {
+      return "drive.task.goto.station-missing";
+    }
+    if (player.isInsideVehicle()) {
+      player.leaveVehicle();
+    }
+    player.teleport(station.get());
+    traceTask("前往接班站 " + player.getName() + " -> " + task.stationName());
+    return "drive.task.goto.station";
+  }
+
+  /** 送到列车车头（或车尾）驾驶室旁一处站得住的地方，不直接塞进座位。 */
+  private String teleportBesideCab(Player player, String trainName, CabSeats.Departure departure) {
+    Optional<MinecartGroup> group = SeatLocator.findGroup(trainName);
     MinecartMember<?> cab =
         group
-            .map(
-                found ->
-                    pickup.get().departure() == CabSeats.Departure.TAIL
-                        ? found.tail()
-                        : found.head())
+            .map(found -> departure == CabSeats.Departure.TAIL ? found.tail() : found.head())
             .orElse(null);
     if (cab == null || cab.getEntity() == null) {
       return "drive.task.goto.train-missing";
@@ -3530,7 +3553,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       player.leaveVehicle();
     }
     player.teleport(target);
-    traceTask("前往接车 " + player.getName() + " -> " + pickup.get().trainName());
+    traceTask("前往接车 " + player.getName() + " -> " + trainName);
     return "drive.task.goto.teleported";
   }
 

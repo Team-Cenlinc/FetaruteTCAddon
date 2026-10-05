@@ -105,4 +105,52 @@ public final class LocaleManagerTest {
         Files.readString(langDir.resolve("zh_CN.yml"), StandardCharsets.UTF_8).contains("请在车门两侧等候"),
         "写回服务器的语言文件");
   }
+
+  /** 点击命令参数里的占位符换成实际值：MiniMessage 本身不在引号参数里解析占位符。 */
+  @Test
+  void clickCommandArgumentsGetPlaceholderValues(@TempDir Path tempDir) throws Exception {
+    assertEquals(
+        "<click:run_command:'/fta license exam dispatch'>x</click> <class>",
+        LocaleManager.expandClickArguments(
+            "<click:run_command:'/fta license exam <class>'>x</click> <class>",
+            java.util.Map.of("class", "dispatch")));
+    assertEquals(
+        "<click:suggest_command:\"/say it's\">y</click>",
+        LocaleManager.expandClickArguments(
+            "<click:suggest_command:\"/say <text>\">y</click>", java.util.Map.of("text", "it's")),
+        "双引号参数里的单引号不用转义");
+    assertEquals(
+        "<click:run_command:'/say it\\'s'>z</click>",
+        LocaleManager.expandClickArguments(
+            "<click:run_command:'/say <text>'>z</click>", java.util.Map.of("text", "it's")));
+
+    Path langDir = tempDir.resolve("lang");
+    Files.createDirectories(langDir);
+    Files.writeString(langDir.resolve("zh_CN.yml"), "prefix: \"\"\n", StandardCharsets.UTF_8);
+    LoggerManager logger = new LoggerManager(Logger.getLogger("LocaleManagerTest"));
+    logger.setDebugEnabled(false);
+    LocaleManager locale =
+        new LocaleManager(
+            new LocaleManager.LocaleAccess(tempDir.toFile(), logger, (path, replace) -> {}),
+            "zh_CN",
+            logger);
+    locale.reload();
+    net.kyori.adventure.text.Component line =
+        locale.component(
+            "drive.license.exam.retry-now", java.util.Map.of("class", "dispatch", "minutes", "10"));
+    java.util.List<String> commands = new java.util.ArrayList<>();
+    collectClicks(line, commands);
+    assertEquals(java.util.List.of("/fta license exam dispatch"), commands);
+  }
+
+  private static void collectClicks(
+      net.kyori.adventure.text.Component component, java.util.List<String> out) {
+    net.kyori.adventure.text.event.ClickEvent click = component.clickEvent();
+    if (click != null && !out.contains(click.value())) {
+      out.add(click.value());
+    }
+    for (net.kyori.adventure.text.Component child : component.children()) {
+      collectClicks(child, out);
+    }
+  }
 }

@@ -575,6 +575,8 @@ drive:
       driving: "<prefix> <red>You cannot go to another train while driving</red>"
       train-missing: "<prefix> <red>The train to take over cannot be found</red>"
       no-spot: "<prefix> <red>There is nowhere to stand next to the train; please go there yourself</red>"
+      station: "<prefix> <green>You are at the boarding platform. Wait for the train, sit in the front cab and confirm your seat to take over</green>"
+      station-missing: "<prefix> <red>Cannot find the boarding platform; please go there yourself</red>"
     cab-changed: "<prefix> <green>Ends changed: you are seated in the cab in car <car></green>"
     next-trip: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
     continue-offer: "<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
@@ -794,7 +796,7 @@ drive:
           no-emergency: "<prefix> <gray>· no protective emergency braking (speeding, passing a stop signal)</gray>"
           no-overrun: "<prefix> <gray>· stop within the door range at every station; no overruns or skips</gray>"
           no-wrong-door: "<prefix> <gray>· only open the platform-side doors</gray>"
-          how: "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport next to the train</gray>'><green>[Go to train]</green></hover></click>"
+          how: "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the boarding platform; if the train is already in, right beside the front cab</gray>'><green>[Go to boarding]</green></hover></click>"
           handbook: "<prefix> <white>Study: </white><gray>the FTCA driver handbook is in your inventory; read it before taking over, the road test is judged on its points.</gray>"
           feedback: "<prefix> <gray>Each stop is reviewed as you go, and anything that fails the test is reported immediately.</gray>"
     practice:

@@ -68,6 +68,9 @@ public final class LicenseService implements Listener {
   /** 路考挑车次时最多看几班。 */
   private static final int EXAM_CANDIDATES = 64;
 
+  /** 路考与练习只派这么久以后才从接班站发车的车次：考生要看完考前说明、前往接班站、坐进驾驶室接班。 */
+  static final Duration EXAM_BOARDING_LEAD = Duration.ofSeconds(60);
+
   /**
    * 一次进行中的考试或路考练习。
    *
@@ -430,6 +433,10 @@ public final class LicenseService implements Listener {
     for (TaskBoardEntries.Row row :
         TaskBoardEntries.select(rows, manager.tasks().takenKeys(), now, EXAM_CANDIDATES)) {
       if (practice && !trainingConfig.allowsRoute(row.routeCode())) {
+        continue;
+      }
+      // 马上就要开走的车（多半正在停站）赶不上：任务会在考生到站前作废。
+      if (row.plannedDeparture().isBefore(now.plus(EXAM_BOARDING_LEAD))) {
         continue;
       }
       // 已经晚点的车不派给考生：练习、路考都可能再慢一些，调度会救不过来。

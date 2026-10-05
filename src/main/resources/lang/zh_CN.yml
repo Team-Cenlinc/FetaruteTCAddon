@@ -2178,6 +2178,8 @@ drive:
       driving: "<prefix> <red>驾驶中不能前往其他列车</red>"
       train-missing: "<prefix> <red>找不到要接班的列车</red>"
       no-spot: "<prefix> <red>列车旁没有可落脚的位置，请自行前往</red>"
+      station: "<prefix> <green>已到达接班站台，请等候列车进站，坐进车头驾驶室并确认座位后接班</green>"
+      station-missing: "<prefix> <red>找不到接班站台的位置，请自行前往</red>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
     next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
     continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
@@ -2397,7 +2399,7 @@ drive:
           no-emergency: "<prefix> <gray>· 不得触发防护紧急制动（超速、冒进停车信号）</gray>"
           no-overrun: "<prefix> <gray>· 每站停在可开门范围内，不得停过头或越站</gray>"
           no-wrong-door: "<prefix> <gray>· 只开站台一侧的车门</gray>"
-          how: "<prefix> <white>开始方式：</white><gray>列车进站后坐进车头驾驶室，按提示确认座位并输入 <aqua>/fta drive on</aqua>。</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>传送到列车旁</gray>'><green>[前往列车]</green></hover></click>"
+          how: "<prefix> <white>开始方式：</white><gray>列车进站后坐进车头驾驶室，按提示确认座位并输入 <aqua>/fta drive on</aqua>。</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>传送到接班站台；列车已在站时直接送到车头驾驶室旁</gray>'><green>[前往接班]</green></hover></click>"
           handbook: "<prefix> <white>学习：</white><gray>《FTCA 驾驶员手册》已放进背包，接班前请先读一遍，路考按手册中的要点评判。</gray>"
           feedback: "<prefix> <gray>每到一站会点评停车结果，出现不及格项会马上提示。</gray>"
     practice:
