@@ -10,7 +10,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
  *   <li>容许速度：指令的容许速度、随距离收紧的包络、到停车点的常用制动曲线、进站曲线（最远停到越站阈值处）、指令过期时的限制速度，取最小；
  *   <li>超过容许速度一个容差：常用制动（至少 B4），降到容许速度以下一段回差才松开；
  *   <li>超出容许速度一个容差再加“超速比例”与容差中较大的一档，或闭塞硬停：紧急制动；调度要求停车只用常用制动；
- *   <li>停车信号下按紧急制动也停不到停车点前：立即停住（调度层的防撞保证优先于真实感）。进站停过头不强制停车：越过越站阈值时由站台按越站处理；
+ *   <li>停车信号下按紧急制动也停不到停车点前：立即停住（调度层的防撞保证优先于真实感）。中途站停过头不强制停车：越过越站阈值时由站台按越站处理； 终点站没有越站可言，最远只许越过停车点
+ *       {@link DriverConfig#terminalOverrunBlocks()}，按紧急制动也停不进时同样立即停住；
  *   <li>行驶中达到容许速度、停稳时遇到停车信号或不允许起步：切断牵引。
  * </ul>
  *
@@ -137,16 +138,15 @@ public final class DriverProtection {
       }
     }
     // 进站曲线。中途站：最远只许冲到越站阈值处，过了停车点不再收紧——冲过阈值就是越站，由站台处理，列车继续开（用户定的越站行为，
-    // 防护不在阈值前把车刹停）。终点站：没有越站可言，最远只许冲到可开门范围，越过停车点后余量随之缩短，冲到界限还在动就制动
-    // （尽头线再往前就出轨）。
+    // 防护不在阈值前把车刹停）。终点站：没有越站可言，界限是停车点后 terminalOverrunBlocks，曲线再留停车余量；
+    // 站台量出实际距离后，按紧急制动也停不进界限就立即停住（尽头线再往前就出轨），估计距离只用常用制动。
     boolean station = Double.isFinite(in.stationRemainingBlocks());
-    boolean terminalLimitReached = false;
+    double terminalLeft = Double.NaN;
     if (station) {
       double distance;
       if (in.stationTerminal()) {
-        double left = in.stationRemainingBlocks() + config.stopAcceptBlocks();
-        terminalLimitReached = left <= 0.0;
-        distance = Math.max(0.0, left);
+        terminalLeft = in.stationRemainingBlocks() + config.terminalOverrunBlocks();
+        distance = Math.max(0.0, terminalLeft - config.stopMarginBlocks());
       } else {
         distance = Math.max(0.0, in.stationRemainingBlocks()) + config.stopSkipBlocks();
       }
@@ -182,9 +182,17 @@ public final class DriverProtection {
       if (iv == Intervention.NONE && d.isStop() && d.stopMode() == StopControlMode.HARD_STOP) {
         iv = Intervention.EMERGENCY;
       }
-      if (iv == Intervention.NONE && terminalLimitReached) {
-        // 终点站冲到可开门范围末端还在动：不论多慢都制动，容差内的低速也不能再往前溜。
-        iv = Intervention.SERVICE;
+      if (iv == Intervention.NONE && !Double.isNaN(terminalLeft)) {
+        double ebDistance =
+            v * v / (2.0 * Math.max(0.01, in.emergencyDecelBps2()))
+                + v * in.reactionSeconds() * 0.5;
+        if (in.stationPrecise() && (terminalLeft <= 0.0 || ebDistance > terminalLeft)) {
+          // 终点站：紧急制动也停不进界限，或到了界限还在动——立即停住，保证不越过界限。
+          iv = Intervention.CLAMP;
+        } else if (terminalLeft <= 0.0) {
+          // 估计距离已到界限：不论多慢都制动，容差内的低速也不能再往前溜。
+          iv = Intervention.SERVICE;
+        }
       }
       if (iv == Intervention.NONE) {
         double tolerance = config.overspeedToleranceBps();

@@ -231,19 +231,43 @@ class DriverProtectionTest {
   }
 
   @Test
-  @DisplayName("终点站：最远只许冲到可开门范围，越过即介入")
-  void terminalStopsWithinTheAcceptWindow() {
-    double expected =
-        DriverProtection.brakingCurveBps(20.0 + CONFIG.stopAcceptBlocks(), SERVICE, REACTION);
-    assertEquals(expected, evalStation(3.0, 20.0, true, true).permittedBps(), 1.0e-9);
+  @DisplayName("终点站：最远只许越过停车点 terminal-overrun-blocks，曲线再留停车余量")
+  void terminalCurveEndsShortOfTheOverrunLimit() {
+    double limit = CONFIG.terminalOverrunBlocks();
+    double margin = CONFIG.stopMarginBlocks();
     assertEquals(
-        DriverProtection.brakingCurveBps(2.0, SERVICE, REACTION),
-        evalStation(1.0, -(CONFIG.stopAcceptBlocks() - 2.0), true, true).permittedBps(),
+        DriverProtection.brakingCurveBps(20.0 + limit - margin, SERVICE, REACTION),
+        evalStation(3.0, 20.0, true, true).permittedBps(),
+        1.0e-9);
+    assertEquals(
+        0.0,
+        evalStation(0.5, -(limit - margin), true, true).permittedBps(),
         1.0e-9,
-        "越过停车点后余量随之缩短");
-    double past = -CONFIG.stopAcceptBlocks();
-    assertEquals(0.0, evalStation(1.0, past, true, true).permittedBps(), 1.0e-9);
-    assertTrue(
-        evalStation(1.0, past, true, true).intervention() != Intervention.NONE, "冲到可开门范围末端还在动");
+        "越过停车点后余量随之缩短，到界限前一个停车余量处为 0");
+  }
+
+  @Test
+  @DisplayName("终点站：紧急制动也停不进界限、或到界限还在动时强制停车")
+  void terminalClampsBeforeTheOverrunLimit() {
+    double limit = CONFIG.terminalOverrunBlocks();
+    assertEquals(
+        Intervention.CLAMP, evalStation(0.3, -limit, true, true).intervention(), "到了界限还在动");
+    assertEquals(
+        Intervention.CLAMP,
+        evalStation(15.0, 2.0, true, true).intervention(),
+        "离界限 5 格还有 54 km/h，紧急制动也停不进");
+    double permitted = evalStation(5.0, 30.0, true, true).permittedBps();
+    assertEquals(
+        Intervention.NONE,
+        evalStation(permitted - 0.1, 30.0, true, true).intervention(),
+        "按曲线进站不介入");
+  }
+
+  @Test
+  @DisplayName("终点站：距离只是估计时不强制停车，到界限只用常用制动")
+  void terminalEstimateNeverClamps() {
+    double limit = CONFIG.terminalOverrunBlocks();
+    assertEquals(Intervention.SERVICE, evalStation(0.3, -limit, false, true).intervention());
+    assertTrue(evalStation(15.0, 2.0, false, true).intervention() != Intervention.CLAMP);
   }
 }

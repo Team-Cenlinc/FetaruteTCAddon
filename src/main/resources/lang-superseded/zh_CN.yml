@@ -61,6 +61,9 @@ drive:
     tips:
       ato-confirm:
         chat: ["<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"]
+  handbook:
+    driver:
+      page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
   sidebar:
     label:
       train: ["车次"]

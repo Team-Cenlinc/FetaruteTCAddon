@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  * @param cabChange 折返换端的时间参数
  * @param pickupAdvanceSeconds 领了从终点站出发的车次后，提前多少秒按交路认出担当的待命车、通知驾驶员并留车（驾驶员可提前上车准备）
  * @param recordRetentionDays 驾驶记录保留多少天，超过的定时删除；0 表示一直保留
+ * @param terminalOverrunBlocks 终点站最多越过停车点多少格：防护保证列车停在这以内，不超过可开门范围
  */
 public record DriverConfig(
     boolean enabled,
@@ -53,12 +54,16 @@ public record DriverConfig(
     List<String> cabSeatNames,
     CabChangeConfig cabChange,
     int pickupAdvanceSeconds,
-    int recordRetentionDays) {
+    int recordRetentionDays,
+    double terminalOverrunBlocks) {
 
   private static final int TICKS_PER_SECOND = 20;
 
   /** 默认的驾驶座名单。 */
   static final List<String> DEFAULT_CAB_SEAT_NAMES = List.of("driver", "cab", "驾驶", "驾驶座", "驾驶室");
+
+  /** 终点站默认最多越过停车点多少格。 */
+  static final double DEFAULT_TERMINAL_OVERRUN_BLOCKS = 3.0;
 
   /** 接车最多等多久（秒）：车库扣车的发车门控 180 秒后自动失效，留出余量。 */
   static final int MAX_PICKUP_WAIT_SECONDS = 150;
@@ -71,6 +76,7 @@ public record DriverConfig(
     cabChange = cabChange == null ? CabChangeConfig.defaults() : cabChange;
     pickupAdvanceSeconds = Math.max(0, pickupAdvanceSeconds);
     recordRetentionDays = Math.max(0, recordRetentionDays);
+    terminalOverrunBlocks = Math.max(0.5, Math.min(terminalOverrunBlocks, stopAcceptBlocks));
   }
 
   /** 内置默认值。 */
@@ -96,7 +102,8 @@ public record DriverConfig(
         DEFAULT_CAB_SEAT_NAMES,
         CabChangeConfig.defaults(),
         300,
-        30);
+        30,
+        DEFAULT_TERMINAL_OVERRUN_BLOCKS);
   }
 
   /**
@@ -168,7 +175,22 @@ public record DriverConfig(
             Math.round(
                 nonNegative(section, "pickup-advance-seconds", d.pickupAdvanceSeconds, sink)),
         (int)
-            Math.round(nonNegative(section, "record-retention-days", d.recordRetentionDays, sink)));
+            Math.round(nonNegative(section, "record-retention-days", d.recordRetentionDays, sink)),
+        terminalOverrun(section, d.terminalOverrunBlocks, stopAccept, sink));
+  }
+
+  /** 终点站越过停车点的上限：须为正且不超过可开门范围（停在界限上也要能开门），否则提示并取两者中较小的。 */
+  private static double terminalOverrun(
+      ConfigurationSection section, double fallback, double stopAccept, Consumer<String> warn) {
+    double value = positive(section, "terminal-overrun-blocks", fallback, warn);
+    if (value > stopAccept) {
+      warn.accept(
+          "drive.yml 的 driver.terminal-overrun-blocks 不能大于 stop-accept-blocks，按 "
+              + stopAccept
+              + " 处理");
+      return stopAccept;
+    }
+    return value;
   }
 
   /** 驾驶座名单：须是字符串列表；写成别的形式时提示并用默认名单，写成空列表表示不认标记。 */

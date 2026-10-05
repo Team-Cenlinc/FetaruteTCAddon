@@ -93,4 +93,20 @@ class DriverConfigTest {
     assertEquals(DriverConfig.MAX_PICKUP_WAIT_SECONDS, config.pickupWaitSeconds());
     assertEquals(1, warnings.size(), warnings::toString);
   }
+
+  @Test
+  @DisplayName("终点站越过停车点的上限默认 3 格，不能大于可开门范围")
+  void terminalOverrunIsCappedByTheAcceptWindow() throws Exception {
+    assertEquals(3.0, DriverConfig.defaults().terminalOverrunBlocks(), 1.0e-9);
+
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString(String.join("\n", "stop-accept-blocks: 5", "terminal-overrun-blocks: 8"));
+    List<String> warnings = new ArrayList<>();
+    DriverConfig config = DriverConfig.from(yaml, warnings::add);
+    assertEquals(5.0, config.terminalOverrunBlocks(), 1.0e-9);
+    assertTrue(warnings.stream().anyMatch(w -> w.contains("terminal-overrun-blocks")));
+
+    yaml.loadFromString("terminal-overrun-blocks: 2");
+    assertEquals(2.0, DriverConfig.from(yaml, message -> {}).terminalOverrunBlocks(), 1.0e-9);
+  }
 }
