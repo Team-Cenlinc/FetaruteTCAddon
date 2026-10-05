@@ -1,13 +1,42 @@
 # 内置文案改写前的旧值（见 zh_CN.yml 的说明）。服务器上的 lang/en_US.yml 里某个键仍是这里列出的旧值之一时，加载时换成新的内置文案。
 drive:
   task:
+    board:
+      no-station: ["<prefix> <red>No station nearby; open the task board near a platform</red>"]
+      entry-claimed-self: ["<gray>Taken by you</gray>"]
+      info-claimed: ["<gray>Grey trips are already taken by a driver</gray>"]
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
+    pickup:
+      terminal: ["<prefix> <white>Trip <aqua><trip></aqua> runs with train <aqua><train></aqua>, standing at <location>. Board within <yellow><seconds></yellow> s, sit in the cab at either end and confirm your seat; if the train reverses you will be moved to the leading cab</white>"]
+    goto:
+      teleported: ["<prefix> <green>You are next to the train's leading cab; board, sit down and confirm your seat</green>"]
+    cab-changed: ["<prefix> <white>Changed ends: you are now in the leading cab (car <car>)</white>"]
+    cab-change-failed: ["<prefix> <red>Could not change ends: no free seat in the leading cab, the train returns to automatic operation</red>"]
+    cab-change:
+      announce: ["<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; leaving your seat on the way does not end driving</white>"]
   hud:
-    line: ["<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
+    line:
+      - "<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+      - "<gray>Speed</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>Limit</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    station:
+      approach: ["<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>blocks</gray>"]
+      move-up: ["<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"]
+      overrun: ["<red>Past the stop mark by <white><distance></white> blocks</red>"]
+  tutorial:
+    tips:
+      ato-confirm:
+        chat: ["<white>ATO departure:</white> <gray>When the action bar shows \"ATO: right-click to confirm departure\", right-click. If you do not, the train still leaves, but it counts against your score.</gray>"]
+  sidebar:
+    value:
+      stop:
+        approach: ["<aqua><station></aqua> <white><distance></white> <gray>blocks</gray>"]
+        move-up: ["<yellow>Move up <white><distance></white> blocks</yellow>"]
+        overrun: ["<red>Overran by <white><distance></white> blocks</red>"]
   command:
     help:
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]
+      entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
       managed-train: ["<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"]

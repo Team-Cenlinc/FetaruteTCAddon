@@ -160,6 +160,38 @@ public final class RailInterlockingState {
         retainedZones);
   }
 
+  /**
+   * 参与联锁计算的逐边足迹（完整、当前格式），供合并图时沿用没有重扫的区间。
+   *
+   * <p>cell 索引不可用（由持久化 Zone 恢复、或 {@link #incomplete}）时为空：此时没有可沿用的足迹。
+   */
+  public Map<EdgeId, RailEdgeFootprint> participatingFootprints() {
+    Map<EdgeId, RailEdgeFootprint> footprints = new java.util.HashMap<>();
+    footprintCellsByEdge()
+        .forEach(
+            (edge, cells) ->
+                footprints.put(
+                    edge,
+                    new RailEdgeFootprint(RailEdgeFootprint.CURRENT_FORMAT_VERSION, true, cells)));
+    return footprints;
+  }
+
+  /**
+   * 同样的足迹与 Zone，但整体按不完整发布。
+   *
+   * <p>用于无法证明完整 Edge universe 的局部合并：联锁照旧走世界 sentinel，但已经测到的足迹留在索引里，写库时不会被抹掉。
+   */
+  public RailInterlockingState withCoverageMarkedIncomplete() {
+    if (worldId.isEmpty() || incompleteSentinel != null) {
+      return this;
+    }
+    return new RailInterlockingState(
+        worldId,
+        expectedEdges,
+        index.withCoverageIncomplete(),
+        INCOMPLETE_PREFIX + worldId.orElseThrow());
+  }
+
   /** 返回状态所属世界；旧兼容态没有可安全推断的世界。 */
   public Optional<UUID> worldId() {
     return worldId;

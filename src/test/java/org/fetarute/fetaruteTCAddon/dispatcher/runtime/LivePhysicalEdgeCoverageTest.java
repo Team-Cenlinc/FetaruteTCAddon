@@ -107,6 +107,26 @@ class LivePhysicalEdgeCoverageTest {
     assertTrue(coverage.covers(SOME_EDGE), "无从判断时一律当作压着");
   }
 
+  /**
+   * 只有部分区间带足迹时，其余区间在 cell 索引里看不见：车压在它们上面也查不出来，不能当"没覆盖"。
+   *
+   * <p>局部合并与刷新会保留已测足迹、同时把 coverage 记为不完整，正是这种状态。
+   */
+  @Test
+  void partialFootprintCoverageIsIncompleteEvenWhenACellIsFound() {
+    RuntimeDispatchService service = TestServices.minimal(new ArrayList<>());
+    RuntimeTrainHandle train = trainOn(CELL_ON_EDGE);
+    RailGraph graph =
+        org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphMerger
+            .markInterlockingCatalogIncomplete(interlockingGraph());
+
+    RuntimeDispatchService.LivePhysicalEdgeCoverage coverage =
+        service.livePhysicalEdgeCoverage(train, graph);
+
+    assertFalse(coverage.complete(), "coverage 不完整时没足迹的区间看不见，必须无从判断");
+    assertTrue(coverage.covers(OccupancyResource.forNode(NodeId.of("OP:S:CHARLIE:1"))));
+  }
+
   private static RuntimeTrainHandle trainOn(
       org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell cell) {
     RuntimeTrainHandle train = Mockito.mock(RuntimeTrainHandle.class);

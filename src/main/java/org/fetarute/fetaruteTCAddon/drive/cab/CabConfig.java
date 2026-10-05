@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.cab;
 
+import java.util.Objects;
+
 /**
  * simulation 级车上系统的参数（{@code drive.yml} 的 {@code simulation} 段）。压力单位为 kPa。
  *
@@ -17,6 +19,10 @@ package org.fetarute.fetaruteTCAddon.drive.cab;
  * @param brakeTestReleaseKpa 制动试验中缓解后制动缸要降到的压力
  * @param vigilanceIntervalTicks 警惕装置：行车中多久没有操作就报警（tick）
  * @param vigilanceWarningTicks 警惕装置：报警后多久不确认就紧急制动（tick）
+ * @param blendedBrake 电空复合制动
+ * @param constantPower 牵引的恒功率段
+ * @param brakePipe 机车牵引的制动管
+ * @param faults 车上故障
  */
 public record CabConfig(
     double mainReservoirMaxKpa,
@@ -32,7 +38,55 @@ public record CabConfig(
     double brakeTestApplyKpa,
     double brakeTestReleaseKpa,
     int vigilanceIntervalTicks,
-    int vigilanceWarningTicks) {
+    int vigilanceWarningTicks,
+    BlendedBrakeConfig blendedBrake,
+    ConstantPowerConfig constantPower,
+    BrakePipeConfig brakePipe,
+    FaultConfig faults) {
+
+  public CabConfig {
+    Objects.requireNonNull(blendedBrake, "blendedBrake");
+    Objects.requireNonNull(constantPower, "constantPower");
+    Objects.requireNonNull(brakePipe, "brakePipe");
+    Objects.requireNonNull(faults, "faults");
+  }
+
+  /** 只给出气压、制动试验与警惕装置的参数，电空制动、恒功率、制动管与故障取默认值。 */
+  public CabConfig(
+      double mainReservoirMaxKpa,
+      double compressorCutInKpa,
+      double compressorFillSeconds,
+      double tractionLockoutKpa,
+      double fullBrakeKpa,
+      double parkingReleaseKpa,
+      double parkingAutoApplyKpa,
+      double brakeCylinderMaxKpa,
+      double brakeCylinderConsumption,
+      double leakKpaPerMinute,
+      double brakeTestApplyKpa,
+      double brakeTestReleaseKpa,
+      int vigilanceIntervalTicks,
+      int vigilanceWarningTicks) {
+    this(
+        mainReservoirMaxKpa,
+        compressorCutInKpa,
+        compressorFillSeconds,
+        tractionLockoutKpa,
+        fullBrakeKpa,
+        parkingReleaseKpa,
+        parkingAutoApplyKpa,
+        brakeCylinderMaxKpa,
+        brakeCylinderConsumption,
+        leakKpaPerMinute,
+        brakeTestApplyKpa,
+        brakeTestReleaseKpa,
+        vigilanceIntervalTicks,
+        vigilanceWarningTicks,
+        BlendedBrakeConfig.defaults(),
+        ConstantPowerConfig.defaults(),
+        BrakePipeConfig.defaults(),
+        FaultConfig.defaults());
+  }
 
   /** 内置默认值。 */
   public static CabConfig defaults() {

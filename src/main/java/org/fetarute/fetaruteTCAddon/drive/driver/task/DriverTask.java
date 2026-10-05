@@ -12,6 +12,18 @@ public final class DriverTask {
   /** 在任务板领取的任务的来源标记。 */
   public static final String SOURCE_BOARD = "board";
 
+  /** 没领任务直接接管调度列车（运营人员）：按列车此刻跑的车次当场记成任务。 */
+  public static final String SOURCE_TAKEOVER = "takeover";
+
+  /** 终点站结算后接着开同一列车的下一趟：开出时当场记成任务。 */
+  public static final String SOURCE_CONTINUATION = "continuation";
+
+  /** 驾驶证路考：给考生派的一段区间任务。 */
+  public static final String SOURCE_EXAM = "exam";
+
+  /** 驾驶证路考练习：与路考相同的区间任务，有教练提示与应急演练，不发证、不记入驾驶记录。 */
+  public static final String SOURCE_TRAINING = "training";
+
   /** 任务状态。 */
   public enum State {
     /** 已领取，等列车到站。 */

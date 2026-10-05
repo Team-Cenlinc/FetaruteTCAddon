@@ -7,8 +7,10 @@ import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.IntPredicate;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
@@ -109,6 +111,57 @@ public final class SeatLocator {
     return seat.get().enter(player);
   }
 
+  /**
+   * 让玩家坐进这节车厢里离他最近的空座位。驾驶会话期间玩家的右键交互被拦下（保护背包），右键自己驾驶的列车时由这里代为入座。
+   *
+   * @return 是否已坐进去；这节车厢没有空座位或入座被拒绝时为 false
+   */
+  public static boolean enterNearestFreeSeat(Player player, MinecartMember<?> member) {
+    return enterNearestFreeSeat(player, member, seatIndex -> true);
+  }
+
+  /**
+   * 让玩家坐进这节车厢里离他最近、且符合条件的空座位。
+   *
+   * @param acceptSeat 按座位在这节车厢里的序号判断能不能坐（例如只坐驾驶座）
+   * @return 是否已坐进去
+   */
+  public static boolean enterNearestFreeSeat(
+      Player player, MinecartMember<?> member, IntPredicate acceptSeat) {
+    if (member == null || member.isUnloaded()) {
+      return false;
+    }
+    Vector eye = player.getEyeLocation().toVector();
+    CartAttachmentSeat best = null;
+    double bestDistance = Double.POSITIVE_INFINITY;
+    List<CartAttachmentSeat> seats = seatsOf(member);
+    for (int index = 0; index < seats.size(); index++) {
+      CartAttachmentSeat seat = seats.get(index);
+      if (seat.getEntity() != null || !acceptSeat.test(index)) {
+        continue;
+      }
+      double distance = distanceSquared(seat, player, eye);
+      if (best == null || distance < bestDistance) {
+        best = seat;
+        bestDistance = distance;
+      }
+    }
+    return best != null && best.enter(player);
+  }
+
+  /** 座位到玩家眼睛的距离；取不到座位位置时排在最后。 */
+  private static double distanceSquared(CartAttachmentSeat seat, Player player, Vector eye) {
+    try {
+      Location at = seat.getPosition(player);
+      if (at == null || at.getWorld() == null || !at.getWorld().equals(player.getWorld())) {
+        return Double.MAX_VALUE;
+      }
+      return at.toVector().distanceSquared(eye);
+    } catch (RuntimeException ex) {
+      return Double.MAX_VALUE;
+    }
+  }
+
   /** 离座的玩家是否应当被送回座位：跨世界传送把玩家落在原世界，或玩家仍在车旁（被挤出座位）时送回； 玩家在同一世界里走远了（自己传送离开、被管理员带走）就不再强拉。 */
   public static boolean canReseat(Player player, MinecartGroup group) {
     MinecartMember<?> head = group.head();
@@ -148,6 +201,32 @@ public final class SeatLocator {
       return Optional.empty();
     }
     return Optional.of(seats.get(binding.seatIndex()));
+  }
+
+  /**
+   * 读出列车上哪些座位被标记为驾驶座：座位附件的名字（TrainCarts 附件配置的 {@code names}，附件编辑器里可设）在名单里即是。
+   *
+   * @param cabNames 驾驶座名单（已转小写）；为空时不读标记，按车厢位置认定
+   */
+  public static CabSeats cabSeats(MinecartGroup group, Collection<String> cabNames) {
+    int members = group == null ? 0 : group.size();
+    if (members == 0 || cabNames == null || cabNames.isEmpty()) {
+      return CabSeats.unmarked(members);
+    }
+    List<List<Integer>> marked = new ArrayList<>(members);
+    for (MinecartMember<?> member : group) {
+      List<Integer> seats = new ArrayList<>();
+      if (member != null) {
+        List<CartAttachmentSeat> all = seatsOf(member);
+        for (int i = 0; i < all.size(); i++) {
+          if (CabSeats.nameMatches(all.get(i).getNames(), cabNames)) {
+            seats.add(i);
+          }
+        }
+      }
+      marked.add(seats);
+    }
+    return CabSeats.of(marked);
   }
 
   /** 一节车厢的全部座位，按模型里的出现顺序排列。 */

@@ -124,4 +124,16 @@ class DriverPickupsTest {
     pickups.start(driver, TRIP, DriverPickups.Kind.TERMINAL, "T-3", "终点站", NOW.plusSeconds(90));
     assertEquals(DriverPickups.DepotVerdict.SKIP, pickups.depot(driver, TRIP, "T-4"));
   }
+
+  @Test
+  @DisplayName("终点站待命车的发车端每隔几秒才重新判定一次（要查线路图、可能要寻路）")
+  void departureRecheckIsThrottled() {
+    DriverPickups.Pickup pickup =
+        pickups.start(driver, TRIP, DriverPickups.Kind.TERMINAL, "T-1", "终点站", NOW.plusSeconds(90));
+
+    assertTrue(pickup.departureCheckDue(NOW), "第一次马上判定");
+    assertFalse(pickup.departureCheckDue(NOW.plusSeconds(1)));
+    assertFalse(pickup.departureCheckDue(NOW.plus(DriverPickups.DEPARTURE_RECHECK).minusMillis(1)));
+    assertTrue(pickup.departureCheckDue(NOW.plus(DriverPickups.DEPARTURE_RECHECK)));
+  }
 }

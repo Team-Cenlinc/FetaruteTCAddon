@@ -25,8 +25,6 @@ final class RailGraphMergerTest {
     RailGraphMerger.MergeResult merged = RailGraphMerger.appendOrReplaceComponents(base, update);
 
     assertEquals(RailGraphMerger.MergeAction.APPEND, merged.action());
-    assertEquals(0, merged.replacedComponentCount());
-    assertEquals(0, merged.removedNodes());
     assertEquals(0, merged.removedEdges());
     assertEquals(4, merged.totalNodes());
     assertEquals(2, merged.totalEdges());
@@ -50,10 +48,8 @@ final class RailGraphMergerTest {
     RailGraphMerger.MergeResult merged = RailGraphMerger.appendOrReplaceComponents(base, update);
 
     // 新行为：保守合并不会删除分量外的节点，只会替换"两端都在 update 中"的边
-    assertEquals(RailGraphMerger.MergeAction.REPLACE_COMPONENTS, merged.action());
+    assertEquals(RailGraphMerger.MergeAction.REPLACE_EDGES, merged.action());
     // 不再删除整个分量，所以 replacedComponentCount/removedNodes 为 0
-    assertEquals(0, merged.replacedComponentCount());
-    assertEquals(0, merged.removedNodes());
     // X-Y 边会被删除（因为 X、Y 都在 update 中）
     assertEquals(1, merged.removedEdges());
     // 所有 5 个节点都保留
@@ -101,15 +97,13 @@ final class RailGraphMergerTest {
     RailGraphMerger.MergeResult merged = RailGraphMerger.upsert(base, update);
 
     assertEquals(RailGraphMerger.MergeAction.UPSERT, merged.action());
-    assertEquals(0, merged.replacedComponentCount());
-    assertEquals(0, merged.removedNodes());
     assertEquals(0, merged.removedEdges());
     assertEquals(5, merged.totalNodes());
     assertEquals(3, merged.totalEdges());
     assertTrue(merged.graph().findNode(NodeId.of("A")).isPresent());
     assertTrue(merged.graph().findNode(NodeId.of("B")).isPresent());
     assertTrue(merged.graph().isBlocked(blocked));
-    // 边合并时取最短长度：base X-Y=7, update X-Y=9 -> 合并后应为 7
+    // 局部合并取最短长度：base X-Y=7, update X-Y=9 -> 合并后应为 7
     assertTrue(
         merged.graph().edges().stream()
             .anyMatch(
@@ -236,6 +230,186 @@ final class RailGraphMergerTest {
     assertTrue(removed.graph().isBlocked(blocked));
   }
 
+  @Test
+  void completeBuildMergeKeepsExactInterlockingAcrossBothBuilds() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base = footprintGraph(worldId, Map.of(edge("A", "B", 2), cells(0, 1)), Set.of());
+    RailGraph update = footprintGraph(worldId, Map.of(edge("X", "Y", 2), cells(10, 11)), Set.of());
+
+    RailGraph merged = RailGraphMerger.appendOrReplaceComponents(base, update).graph();
+
+    RailInterlockingState state = stateOf(merged);
+    assertTrue(state.coverage().complete());
+    assertEquals(
+        Set.of(edgeId("A", "B"), edgeId("X", "Y")), state.participatingFootprints().keySet());
+  }
+
+  @Test
+  void overlapBetweenKeptAndRediscoveredEdgesBecomesAZone() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base = footprintGraph(worldId, Map.of(edge("A", "B", 3), cells(4, 5, 6)), Set.of());
+    RailGraph update =
+        footprintGraph(worldId, Map.of(edge("X", "Y", 3), cells(5, 20, 21)), Set.of());
+
+    RailInterlockingState state =
+        stateOf(RailGraphMerger.appendOrReplaceComponents(base, update).graph());
+
+    Set<String> abZones = state.zoneKeysForEdge(edgeId("A", "B"));
+    assertEquals(1, abZones.size());
+    assertEquals(abZones, state.zoneKeysForEdge(edgeId("X", "Y")));
+  }
+
+  @Test
+  void partialMergeKeepsFootprintsButPublishesIncomplete() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base = footprintGraph(worldId, Map.of(edge("A", "B", 2), cells(0, 1)), Set.of());
+    RailGraph update = footprintGraph(worldId, Map.of(edge("X", "Y", 2), cells(10, 11)), Set.of());
+
+    RailInterlockingState state = stateOf(RailGraphMerger.upsert(base, update).graph());
+
+    assertFalse(state.coverage().complete());
+    assertTrue(state.cellCoverageAvailable());
+    assertEquals(
+        Set.of(edgeId("A", "B"), edgeId("X", "Y")), state.participatingFootprints().keySet());
+  }
+
+  @Test
+  void rediscoveredEdgeWithoutEvidenceDropsTheOldFootprint() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base =
+        footprintGraph(
+            worldId,
+            Map.of(edge("A", "B", 2), cells(0, 1), edge("X", "Y", 2), cells(10, 11)),
+            Set.of());
+    RailGraph update = footprintGraph(worldId, Map.of(edge("A", "B", 4), Set.of()), Set.of());
+
+    RailInterlockingState state =
+        stateOf(RailGraphMerger.appendOrReplaceComponents(base, update).graph());
+
+    assertFalse(state.coverage().complete());
+    assertEquals(Set.of(edgeId("X", "Y")), state.participatingFootprints().keySet());
+  }
+
+  @Test
+  void removingAComponentKeepsTheRemainingFootprints() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base =
+        footprintGraph(
+            worldId,
+            Map.of(edge("A", "B", 2), cells(0, 1), edge("X", "Y", 2), cells(10, 11)),
+            Set.of());
+
+    RailGraph remaining = RailGraphMerger.removeComponents(base, Set.of(NodeId.of("A"))).graph();
+
+    RailInterlockingState state = stateOf(remaining);
+    assertTrue(state.coverage().complete());
+    assertEquals(Set.of(edgeId("X", "Y")), state.participatingFootprints().keySet());
+  }
+
+  @Test
+  void retainNodesDropsDeletedNodesWithTheirEdges() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base =
+        footprintGraph(
+            worldId,
+            Map.of(edge("A", "B", 2), cells(0, 1), edge("B", "C", 2), cells(1, 2)),
+            Set.of());
+
+    RailGraph kept = RailGraphMerger.retainNodes(base, Set.of(NodeId.of("A"), NodeId.of("B")));
+
+    assertEquals(2, kept.nodes().size());
+    assertEquals(Set.of(edgeId("A", "B")), stateOf(kept).participatingFootprints().keySet());
+    assertTrue(kept.findNode(NodeId.of("C")).isEmpty());
+  }
+
+  @Test
+  void rediscoveredEdgeKeepsOldMetadataWhenUpdateHasNone() {
+    EdgeId id = edgeId("X", "Y");
+    RailEdgeMetadata metadata = new RailEdgeMetadata(Optional.empty(), Optional.empty());
+    RailGraph base =
+        graph(
+            Set.of(node("X"), node("Y")),
+            Set.of(new RailEdge(id, id.a(), id.b(), 9, 0.0, true, Optional.of(metadata))),
+            Set.of());
+    RailGraph update = graph(Set.of(node("X"), node("Y")), Set.of(edge("X", "Y", 7)), Set.of());
+
+    RailEdge merged = RailGraphMerger.upsert(base, update).graph().edges().iterator().next();
+
+    assertEquals(7, merged.lengthBlocks());
+    assertEquals(Optional.of(metadata), merged.metadata());
+  }
+
+  @Test
+  void completeBuildTakesRediscoveredLengthEvenWhenLonger() {
+    RailGraph base = graph(Set.of(node("X"), node("Y")), Set.of(edge("X", "Y", 7)), Set.of());
+    RailGraph update = graph(Set.of(node("X"), node("Y")), Set.of(edge("X", "Y", 9)), Set.of());
+
+    RailEdge merged =
+        RailGraphMerger.appendOrReplaceComponents(base, update).graph().edges().iterator().next();
+
+    assertEquals(9, merged.lengthBlocks());
+  }
+
+  @Test
+  void upsertNeverPublishesCompleteCatalogEvenWhenUpdateCoversEveryEdge() {
+    UUID worldId = UUID.randomUUID();
+    RailGraph base = footprintGraph(worldId, Map.of(edge("A", "B", 2), cells(0, 1)), Set.of());
+    RailGraph update = footprintGraph(worldId, Map.of(edge("A", "B", 2), cells(0, 1)), Set.of());
+
+    RailInterlockingState state = stateOf(RailGraphMerger.upsert(base, update).graph());
+
+    assertFalse(state.coverage().complete());
+    assertEquals(Set.of(edgeId("A", "B")), state.participatingFootprints().keySet());
+  }
+
+  private static RailGraph footprintGraph(
+      UUID worldId,
+      Map<
+              RailEdge,
+              Set<org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell>>
+          edges,
+      Set<EdgeId> blockedEdges) {
+    Map<NodeId, org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodesById = new HashMap<>();
+    Map<EdgeId, RailEdge> edgesById = new HashMap<>();
+    Map<EdgeId, org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint>
+        footprints = new HashMap<>();
+    edges.forEach(
+        (edge, edgeCells) -> {
+          nodesById.put(edge.from(), node(edge.from().value()));
+          nodesById.put(edge.to(), node(edge.to().value()));
+          edgesById.put(edge.id(), edge);
+          footprints.put(
+              edge.id(),
+              new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint(
+                  1, true, edgeCells));
+        });
+    return new SimpleRailGraph(
+        nodesById,
+        edgesById,
+        blockedEdges,
+        RailInterlockingState.from(worldId, edgesById.keySet(), footprints));
+  }
+
+  private static Set<org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell>
+      cells(int... xs) {
+    Set<org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell> out =
+        new java.util.HashSet<>();
+    for (int x : xs) {
+      out.add(
+          new org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell(
+              x, 64, 0));
+    }
+    return out;
+  }
+
+  private static RailInterlockingState stateOf(RailGraph graph) {
+    return ((RailGraphInterlockingSupport) graph).interlockingState();
+  }
+
+  private static EdgeId edgeId(String a, String b) {
+    return EdgeId.undirected(NodeId.of(a), NodeId.of(b));
+  }
+
   private static SimpleRailGraph graph(
       Set<org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode> nodes,
       Set<RailEdge> edges,
@@ -312,9 +486,7 @@ final class RailGraphMergerTest {
         RailGraphMerger.appendOrReplaceComponents(regionA, regionB);
 
     // 新行为验证
-    assertEquals(RailGraphMerger.MergeAction.REPLACE_COMPONENTS, merged.action());
-    // 不应删除任何节点
-    assertEquals(0, merged.removedNodes());
+    assertEquals(RailGraphMerger.MergeAction.REPLACE_EDGES, merged.action());
     // A 区域的 3 个节点 + B 区域的 2 个新节点（S 重复）= 5
     assertEquals(5, merged.totalNodes());
     // 所有节点都应该存在
@@ -346,7 +518,7 @@ final class RailGraphMergerTest {
 
     RailGraphMerger.MergeResult merged = RailGraphMerger.appendOrReplaceComponents(base, update);
 
-    assertEquals(RailGraphMerger.MergeAction.REPLACE_COMPONENTS, merged.action());
+    assertEquals(RailGraphMerger.MergeAction.REPLACE_EDGES, merged.action());
     // [X, Y] 分量完整保留
     assertTrue(merged.graph().findNode(NodeId.of("X")).isPresent());
     assertTrue(merged.graph().findNode(NodeId.of("Y")).isPresent());

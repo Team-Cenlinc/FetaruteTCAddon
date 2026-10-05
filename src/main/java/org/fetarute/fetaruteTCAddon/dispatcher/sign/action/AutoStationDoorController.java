@@ -257,6 +257,11 @@ public final class AutoStationDoorController {
     public long closeDurationTicks() {
       return session.estimatedCloseDurationTicks();
     }
+
+    /** 关门动画还排在附件的队里没轮到（前面有别的动画在播）：车门其实还开着。 */
+    public boolean closePending() {
+      return !open && session.closePending();
+    }
   }
 
   /**
@@ -1446,6 +1451,11 @@ public final class AutoStationDoorController {
       return closed;
     }
 
+    /** 关门动画还排在附件的队里没轮到：车门其实还开着，不能放行发车。 */
+    boolean closePending() {
+      return (openLeft && leftAction.closePending()) || (openRight && rightAction.closePending());
+    }
+
     /** 播放关门提示音（不触发关门动画）。 */
     void playCloseSound() {
       if (group == null || !openSucceeded) {
@@ -1879,6 +1889,11 @@ public final class AutoStationDoorController {
 
     long closeDurationTicks();
 
+    /** 最近一次关门动画还排在附件的队里没轮到（前面有别的动画在播）：车门其实还开着。 */
+    default boolean closePending() {
+      return false;
+    }
+
     static DoorAction named(String name, List<Attachment> targets) {
       return new DoorAction.Named(name, targets);
     }
@@ -1912,12 +1927,14 @@ public final class AutoStationDoorController {
         this.targets = targets == null ? List.of() : List.copyOf(targets);
       }
 
+      private QueuedAnimations.Ticket closing = QueuedAnimations.Ticket.empty();
+
       @Override
       public boolean open(MinecartGroup group) {
         if (group == null || name == null || !hasAttachedTargets(targets)) {
           return false;
         }
-        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, 1.0));
+        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, 1.0)).played();
       }
 
       @Override
@@ -1925,12 +1942,18 @@ public final class AutoStationDoorController {
         if (group == null || name == null || !hasAttachedTargets(targets)) {
           return false;
         }
-        return playNamedAnimationOnTargets(targets, doorAnimationOptions(name, -1.0));
+        closing = playNamedAnimationOnTargets(targets, doorAnimationOptions(name, -1.0));
+        return closing.played();
       }
 
       @Override
       public long closeDurationTicks() {
         return namedAnimationTicks(targets, name);
+      }
+
+      @Override
+      public boolean closePending() {
+        return closing.stuck() > 0;
       }
     }
 
@@ -1943,20 +1966,28 @@ public final class AutoStationDoorController {
         this.targets = targets == null ? List.of() : List.copyOf(targets);
       }
 
+      private QueuedAnimations.Ticket closing = QueuedAnimations.Ticket.empty();
+
       @Override
       public boolean open(MinecartGroup group) {
         if (targets.isEmpty()) {
-          return startAnimationOnGroup(group, pair.open());
+          return startAnimationOnGroup(group, pair.open()).played();
         }
-        return startAnimation(targets, pair.open());
+        return startAnimation(targets, pair.open()).played();
       }
 
       @Override
       public boolean close(MinecartGroup group) {
-        if (targets.isEmpty()) {
-          return startAnimationOnGroup(group, pair.close());
-        }
-        return startAnimation(targets, pair.close());
+        closing =
+            targets.isEmpty()
+                ? startAnimationOnGroup(group, pair.close())
+                : startAnimation(targets, pair.close());
+        return closing.played();
+      }
+
+      @Override
+      public boolean closePending() {
+        return closing.stuck() > 0;
       }
 
       @Override
@@ -1997,9 +2028,11 @@ public final class AutoStationDoorController {
         this.closeDurationTicks = estimateCloseDurationTicks(this.targets);
       }
 
+      private QueuedAnimations.Ticket closing = QueuedAnimations.Ticket.empty();
+
       @Override
       public boolean open(MinecartGroup group) {
-        boolean opened = startLegacyTargets(targets, true);
+        boolean opened = startLegacyTargets(targets, true).played();
         if (opened) {
           fallbackUsed = false;
           return true;
@@ -2007,7 +2040,10 @@ public final class AutoStationDoorController {
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        boolean played = playNamedAnimationOnCars(group, cars, doorAnimationOptions(name, 1.0));
+        boolean played =
+            QueuedAnimations.withFallback(
+                    playNamedAnimationOnCars(group, cars, doorAnimationOptions(name, 1.0)))
+                .played();
         if (played) {
           fallbackUsed = true;
         }
@@ -2019,19 +2055,27 @@ public final class AutoStationDoorController {
         if (fallbackUsed) {
           return false;
         }
-        boolean closed = startLegacyTargets(targets, false);
-        if (closed) {
+        closing = startLegacyTargets(targets, false);
+        if (closing.played()) {
           return true;
         }
         if (!fallbackAllowed || group == null || name == null) {
           return false;
         }
-        return playNamedAnimationOnCars(group, cars, doorAnimationOptions(name, -1.0));
+        closing =
+            QueuedAnimations.withFallback(
+                playNamedAnimationOnCars(group, cars, doorAnimationOptions(name, -1.0)));
+        return closing.played();
       }
 
       @Override
       public long closeDurationTicks() {
         return closeDurationTicks;
+      }
+
+      @Override
+      public boolean closePending() {
+        return closing.stuck() > 0;
       }
     }
 
@@ -2061,51 +2105,39 @@ public final class AutoStationDoorController {
   private record LegacyTarget(Attachment target, AnimationPair pair) {}
 
   /**
-   * 生成门动画播放选项。
+   * 生成门动画播放选项：只排队、不 {@code reset}（见 {@link QueuedAnimations}）。
    *
-   * <p>注意 {@code reset=true} 与 {@code queue=true} 同时置位时，TrainCarts 的 {@code
-   * Attachment#startAnimation} 先判 reset：直接顶掉附件上当前的动画并清空队列，{@code queue}
-   * 分支根本走不到。也就是说开/关门<b>总会打断</b>同一附件上正在执行的其它模型动画（升弓、 受电弓复位等），并不会排队等它们播完；{@code queue}
-   * 只是保留的标志位。要真正排队必须去掉 reset，那样门动画不再从头开始，行为会变，需单独评估。
+   * <p>TrainCarts 的 {@code Attachment#startAnimation} 遇到 {@code reset} 会顶掉当前动画并清空排队列表，TC 牌子 {@code
+   * animate queue} 排进去的动画就被清掉了；只排队时等附件上正在播的放完再播，轮到时从头（关门倒放时从末尾）开始，不需要 {@code reset}。
    */
   static AnimationOptions doorAnimationOptions(String name, double speed) {
     AnimationOptions options = new AnimationOptions(name);
-    options.setReset(true);
     options.setSpeed(speed);
     options.setQueue(true);
     return options;
   }
 
-  private static boolean playNamedAnimationOnTargets(
+  private static QueuedAnimations.Ticket playNamedAnimationOnTargets(
       List<Attachment> targets, AnimationOptions options) {
     if (targets == null || targets.isEmpty() || options == null) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    boolean played = false;
-    for (Attachment target : targets) {
-      if (target == null || !target.isAttached()) {
-        continue;
-      }
-      if (target.playNamedAnimation(options.clone())) {
-        played = true;
-      }
-    }
-    return played;
+    return QueuedAnimations.withFallback(QueuedAnimations.playNamed(targets, options));
   }
 
-  /** 在整列车（或只在 {@code cars} 里那几节车厢）上按名字播放动画。 */
-  private static boolean playNamedAnimationOnCars(
+  /** 在整列车（或只在 {@code cars} 里那几节车厢）上按名字排队播放动画，不清掉 TC animate 牌子排的动画。 */
+  private static QueuedAnimations.Ticket playNamedAnimationOnCars(
       MinecartGroup group, DoorCars cars, AnimationOptions options) {
     if (cars == null || cars.all()) {
-      return group.playNamedAnimation(options);
+      return QueuedAnimations.playNamed(group, options);
     }
-    boolean played = false;
+    List<MinecartMember<?>> members = new ArrayList<>();
     for (MinecartMember<?> member : group) {
       if (member != null && opensDoors(cars, member)) {
-        played |= member.playNamedAnimation(options.clone());
+        members.add(member);
       }
     }
-    return played;
+    return QueuedAnimations.playNamed(members, options);
   }
 
   /**
@@ -2113,26 +2145,20 @@ public final class AutoStationDoorController {
    *
    * <p>仅对已绑定附件的成员生效，避免空指针和未加载模型时误触发。
    */
-  private static boolean startAnimation(List<Attachment> targets, Animation animation) {
+  private static QueuedAnimations.Ticket startAnimation(
+      List<Attachment> targets, Animation animation) {
     if (targets == null || targets.isEmpty() || animation == null) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    boolean started = false;
-    for (Attachment target : targets) {
-      if (target == null || !target.isAttached()) {
-        continue;
-      }
-      target.startAnimation(queuedAnimation(animation));
-      started = true;
-    }
-    return started;
+    return QueuedAnimations.withFallback(QueuedAnimations.play(targets, animation));
   }
 
-  private static boolean startLegacyTargets(List<LegacyTarget> targets, boolean open) {
+  private static QueuedAnimations.Ticket startLegacyTargets(
+      List<LegacyTarget> targets, boolean open) {
     if (targets == null || targets.isEmpty()) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    boolean started = false;
+    List<QueuedAnimations.Ticket> tickets = new ArrayList<>();
     for (LegacyTarget entry : targets) {
       if (entry == null || entry.target() == null) {
         continue;
@@ -2144,18 +2170,19 @@ public final class AutoStationDoorController {
       if (animation == null) {
         continue;
       }
-      entry.target().startAnimation(queuedAnimation(animation));
-      started = true;
+      tickets.add(
+          QueuedAnimations.withFallback(QueuedAnimations.play(List.of(entry.target()), animation)));
     }
-    return started;
+    return QueuedAnimations.Ticket.combine(tickets);
   }
 
   /** 在每节车厢的根附件上播放动画（缺少门附件时的兜底）。 */
-  private static boolean startAnimationOnGroup(MinecartGroup group, Animation animation) {
+  private static QueuedAnimations.Ticket startAnimationOnGroup(
+      MinecartGroup group, Animation animation) {
     if (group == null || animation == null) {
-      return false;
+      return QueuedAnimations.Ticket.empty();
     }
-    boolean started = false;
+    List<Attachment> roots = new ArrayList<>();
     for (MinecartMember<?> member : group) {
       if (member == null) {
         continue;
@@ -2164,19 +2191,11 @@ public final class AutoStationDoorController {
         continue;
       }
       Attachment root = member.getAttachments().getRootAttachment();
-      if (root == null) {
-        continue;
+      if (root != null) {
+        roots.add(root);
       }
-      root.startAnimation(queuedAnimation(animation));
-      started = true;
     }
-    return started;
-  }
-
-  private static Animation queuedAnimation(Animation animation) {
-    Animation copy = animation.clone();
-    copy.getOptions().setQueue(true);
-    return copy;
+    return QueuedAnimations.withFallback(QueuedAnimations.play(roots, animation));
   }
 
   private static boolean hasAttachedTargets(List<Attachment> targets) {

@@ -104,7 +104,9 @@ class PidsConfigManagerTest {
     String migrated =
         Files.readString(tempDir.resolve(PidsConfigManager.FILE_NAME), StandardCharsets.UTF_8);
     assertTrue(migrated.contains("slide-notice-seconds: 5 # 旧注释"), migrated);
-    assertTrue(migrated.contains("config-version: 2"), migrated);
+    assertTrue(
+        migrated.contains("config-version: " + PidsSettings.EXPECTED_CONFIG_VERSION), migrated);
+    assertTrue(migrated.contains("bulletin-seconds: 8"), "公告页停留时间照常补进");
     assertTrue(migrated.contains("english-seconds: 6"), "新键照常补进");
   }
 
@@ -157,7 +159,7 @@ class PidsConfigManagerTest {
       String template = new String(in.readAllBytes(), StandardCharsets.UTF_8);
       String old =
           template
-              .replace("config-version: 2", "config-version: 1")
+              .replaceFirst("config-version: \\d+", "config-version: 1")
               .replace("slide-main-seconds: 20", "slide-main-seconds: " + mainSeconds)
               .replace("slide-notice-seconds: 5", "slide-notice-seconds: " + noticeSeconds)
               .replace("  english-seconds: 6\n", "");

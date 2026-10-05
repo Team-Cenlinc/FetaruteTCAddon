@@ -17,7 +17,10 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param breakerHeldSeconds 熔断统计的扣车时长下限
  * @param breakerCooldownMinutes 熔断后多少分钟内暂停接班
  * @param atoConfirmSeconds ATO 下停站结束后等驾驶员确认发车的上限，超时自动发车
+ * @param atoConfirmAdvanceSeconds ATO 下停站结束前多少秒起可提前确认发车（停站一结束即放行）；0 表示只能在停站结束后确认
  * @param taskWindowMinutes 任务板列出多少分钟内的发车
+ * @param congestionWarnSeconds 后方列车被驾驶员列车直接挡住超过这么久（秒）时提醒驾驶员
+ * @param congestionAtoSeconds 后方列车被挡住超过这么久（秒）、驾驶员列车停着且不在表定停站时强制转 ATO
  */
 public record DriverRecovery(
     int warnSeconds,
@@ -29,11 +32,14 @@ public record DriverRecovery(
     int breakerHeldSeconds,
     int breakerCooldownMinutes,
     int atoConfirmSeconds,
-    int taskWindowMinutes) {
+    int atoConfirmAdvanceSeconds,
+    int taskWindowMinutes,
+    int congestionWarnSeconds,
+    int congestionAtoSeconds) {
 
   /** 内置默认值。 */
   public static DriverRecovery defaults() {
-    return new DriverRecovery(60, 120, 180, 300, 90, 5, 60, 15, 15, 20);
+    return new DriverRecovery(60, 120, 180, 300, 90, 5, 60, 15, 15, 10, 20, 60, 120);
   }
 
   /** 解析；缺失或非法的项回退默认值，阶梯不递增时整组回退默认值。 */
@@ -54,6 +60,14 @@ public record DriverRecovery(
       handbackAt = d.handbackSeconds;
       rescueAt = d.rescueSeconds;
     }
+    int congestionWarn =
+        positive(section, "congestion-warn-seconds", d.congestionWarnSeconds, sink);
+    int congestionAto = positive(section, "congestion-ato-seconds", d.congestionAtoSeconds, sink);
+    if (congestionWarn >= congestionAto) {
+      sink.accept("drive.yml 的 driver.congestion-warn-seconds 须小于 congestion-ato-seconds，使用默认值");
+      congestionWarn = d.congestionWarnSeconds;
+      congestionAto = d.congestionAtoSeconds;
+    }
     return new DriverRecovery(
         warnAt,
         atoAt,
@@ -64,7 +78,23 @@ public record DriverRecovery(
         positive(section, "breaker-held-seconds", d.breakerHeldSeconds, sink),
         positive(section, "breaker-cooldown-minutes", d.breakerCooldownMinutes, sink),
         positive(section, "ato-confirm-seconds", d.atoConfirmSeconds, sink),
-        positive(section, "task-window-minutes", d.taskWindowMinutes, sink));
+        nonNegative(section, "ato-confirm-advance-seconds", d.atoConfirmAdvanceSeconds, sink),
+        positive(section, "task-window-minutes", d.taskWindowMinutes, sink),
+        congestionWarn,
+        congestionAto);
+  }
+
+  private static int nonNegative(
+      ConfigurationSection section, String key, int fallback, Consumer<String> warn) {
+    if (!section.contains(key)) {
+      return fallback;
+    }
+    int value = section.getInt(key, Integer.MIN_VALUE);
+    if (value < 0) {
+      warn.accept("drive.yml 的 driver." + key + " 不能为负数，使用默认值 " + fallback);
+      return fallback;
+    }
+    return value;
   }
 
   private static int positive(

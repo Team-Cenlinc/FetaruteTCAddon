@@ -70,8 +70,11 @@ public final class StorageSchema {
     ddl.add(hudLineBindings(dialect));
     ddl.add(consistPlans(dialect));
     ddl.add(pidsScreens(dialect));
+    ddl.add(pidsBulletins(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
+    // 拆牌、建牌同步按坐标查删节点（主线程同步执行），不能扫整个世界。
+    ddl.add(index("rail_nodes_position", "rail_nodes", "world_id, x, y, z"));
     ddl.add(railEdges(dialect));
     ddl.add(index("rail_edges_world", "rail_edges", "world_id"));
     ddl.add(railInterlockingSnapshots(dialect));
@@ -84,6 +87,8 @@ public final class StorageSchema {
     ddl.add(driveTaskRecords(dialect));
     ddl.add(index("drive_task_records_player", "drive_task_records", "player_uuid, finished_at"));
     ddl.add(index("drive_task_records_finished", "drive_task_records", "finished_at"));
+    ddl.add(driveLicenses(dialect));
+    ddl.add(driveLicenseTraining(dialect));
     return Collections.unmodifiableList(ddl);
   }
 
@@ -729,6 +734,50 @@ public final class StorageSchema {
         dialect.timestampType());
   }
 
+  /**
+   * 站台屏公告。运营商按代码记录（与站台屏绑定的车站一致），公司记编号用于权限；车站与线路清单各存为 JSON 字符串数组。
+   *
+   * <p>开始、结束时刻可空（立即、长期）；正文用长文本类型。
+   */
+  private String pidsBulletins(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    operator_code %s NOT NULL,
+                    station_codes %s,
+                    line_codes %s,
+                    level %s NOT NULL,
+                    title %s NOT NULL,
+                    title_secondary %s,
+                    body %s,
+                    body_secondary %s,
+                    starts_at %s,
+                    ends_at %s,
+                    created_by %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL
+                );
+                """,
+        table("pids_bulletins"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.jsonType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        dialect.uuidType(),
+        dialect.timestampType(),
+        dialect.timestampType());
+  }
+
   private String railNodes(SqlDialect dialect) {
     return formatDdl(
         """
@@ -928,6 +977,46 @@ public final class StorageSchema {
         dialect.timestampType(),
         dialect.timestampType(),
         dialect.textType());
+  }
+
+  private String driveLicenses(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    class_id %s NOT NULL,
+                    granted_at %s NOT NULL,
+                    granted_by %s NOT NULL,
+                    PRIMARY KEY (player_uuid, class_id)
+                );
+                """,
+        table("drive_licenses"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.stringType());
+  }
+
+  private String driveLicenseTraining(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    class_id %s NOT NULL,
+                    runs %s NOT NULL,
+                    last_at %s NOT NULL,
+                    PRIMARY KEY (player_uuid, class_id)
+                );
+                """,
+        table("drive_license_training"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.timestampType());
   }
 
   private String formatDdl(String template, Object... args) {

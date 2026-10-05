@@ -1,6 +1,8 @@
 # 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
 # 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
 command:
+  consist:
+    max-speed: ["，最高 <value> 格/秒"]
   pids:
     help:
       give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
@@ -30,13 +32,47 @@ pids:
         body-secondary: ["Stand clear of the platform edge"]
 drive:
   task:
+    board:
+      no-station: ["<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"]
+      entry-time: ["<gray>计划发车</gray> <white><time></white>"]
+      entry-platform: ["<gray>站台</gray> <white><platform></white>"]
+      entry-train: ["<gray>列车</gray> <white><train></white>"]
+      entry-claimed-self: ["<gray>本人已领取</gray>"]
+      info-claimed: ["<gray>灰色车次已有驾驶员领取，不可再领取</gray>"]
     claim:
       claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
+    pickup:
+      terminal: ["<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进任一端驾驶室并确认座位；发车时如需换端，将自动换到前端驾驶室</white>"]
+    goto:
+      teleported: ["<prefix> <green>已到达列车车头驾驶室旁，请上车坐下并确认座位</green>"]
+    cab-changed: ["<prefix> <white>折返换端：已换到前端驾驶室（第 <car> 节）</white>"]
+    cab-change-failed: ["<prefix> <red>折返换端失败：前端驾驶室没有可用座位，列车交还自动运行</red>"]
+    cab-change:
+      announce: ["<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；换端途中离座不结束驾驶</white>"]
   hud:
-    line: ["<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"]
+    line:
+      - "<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+      - "<gray>速度</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>限速</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    station:
+      approach: ["<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>格</gray>"]
+      move-up: ["<yellow>请前移 <white><distance></white> 格对标</yellow>"]
+      overrun: ["<red>越过停车点 <white><distance></white> 格</red>"]
+  tutorial:
+    tips:
+      ato-confirm:
+        chat: ["<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"]
+  sidebar:
+    label:
+      train: ["车次"]
+    value:
+      stop:
+        approach: ["<aqua><station></aqua> <white><distance></white> <gray>格</gray>"]
+        move-up: ["<yellow>请前移 <white><distance></white> 格</yellow>"]
+        overrun: ["<red>越过 <white><distance></white> 格</red>"]
   command:
     help:
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
+      entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
       managed-train: ["<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"]

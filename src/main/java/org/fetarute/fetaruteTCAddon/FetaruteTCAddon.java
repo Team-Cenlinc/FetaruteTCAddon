@@ -26,9 +26,11 @@ import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaPidsBulletinCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaPidsCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
@@ -57,11 +59,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickLi
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.GraphStaleNotifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.RailNodeIncrementalSync;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteNodeUsage;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
@@ -77,6 +81,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserverHub;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopMarkIndex;
@@ -119,6 +124,7 @@ import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfigFile;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseService;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -144,6 +150,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private LoggerManager loggerManager;
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
+  private GraphStaleNotifier graphStaleNotifier;
   private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
@@ -157,6 +164,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SignalEvaluator signalEvaluator;
   private RuntimeSignalReevaluationScheduler signalReevaluationScheduler;
   private RouteDefinitionCache routeDefinitionCache;
+
+  /** 交路在用节点的索引，带建索引时的交路缓存版本；版本对不上就重建。 */
+  private volatile VersionedRouteNodeUsage routeNodeUsage;
+
+  /** 交路缓存每变一次加一。 */
+  private final java.util.concurrent.atomic.AtomicLong routeNodeUsageVersion =
+      new java.util.concurrent.atomic.AtomicLong();
+
   private StationDirectory stationDirectory;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
@@ -199,6 +214,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private PidsService pidsService;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
   private DriveSessionManager driveSessionManager;
+  private LicenseService licenseService;
 
   @Override
   public void onEnable() {
@@ -266,6 +282,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   @Override
   public void onDisable() {
+    if (licenseService != null) {
+      licenseService.shutdown();
+      licenseService = null;
+    }
     if (driveSessionManager != null) {
       driveSessionManager.shutdown();
       driveSessionManager = null;
@@ -366,6 +386,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
     ServerIdentity.configure(getConfig().getString("server-id", ""));
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
+    refreshSpawnMotionTags(configManager.current());
     if (railGraphService != null) {
       railGraphService.configureCrossWorld(
           configManager.current().graphSettings().crossWorld(), portalLinks);
@@ -379,6 +400,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.localeManager.reload(configManager.current().locale());
     if (driveSessionManager != null) {
       driveSessionManager.reload(readDriveConfig());
+      if (licenseService != null) {
+        licenseService.reload(driveSessionManager.config().license());
+      }
     }
     this.storageManager.apply(configManager.current());
     if (hudTemplateService != null) {
@@ -405,6 +429,34 @@ public final class FetaruteTCAddon extends JavaPlugin {
     sender.sendMessage(localeManager.component("command.reload.success"));
   }
 
+  /**
+   * 配置重载后，按新的车种配置刷新现场列车上出车写入的加减速标签（{@link SpawnMotionTags}）；用户设定的标签不动。
+   *
+   * <p>控车本就按车种配置解析，不依赖这一步；这里只让标签上看到的数与实际控车一致。未加载的列车在下次折返复用时刷新。
+   *
+   * @param config 重载后的配置
+   */
+  private void refreshSpawnMotionTags(ConfigManager.ConfigView config) {
+    try {
+      List<com.bergerkiller.bukkit.tc.properties.TrainProperties> trains = new ArrayList<>();
+      for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+        if (group != null && group.isValid() && group.getProperties() != null) {
+          trains.add(group.getProperties());
+        }
+      }
+      int refreshed = SpawnMotionTags.refreshStamped(trains, config);
+      if (refreshed > 0) {
+        debug("已按重载后的车种配置刷新出车写入的加减速标签: trains=" + refreshed);
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      debug(
+          "刷新出车写入的加减速标签失败: error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(ex.getMessage()));
+    }
+  }
+
   public LocaleManager getLocaleManager() {
     return localeManager;
   }
@@ -426,6 +478,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   }
 
   private void initDrive() {
+    if (licenseService != null) {
+      licenseService.shutdown();
+    }
     if (driveSessionManager != null) {
       driveSessionManager.shutdown();
     }
@@ -443,9 +498,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
                         getLocaleManager()
                             .component(
                                 manager.claimTask(player, holder, row, mode),
-                                Map.of("trip", row.key().tripCode(), "route", row.routeCode())))),
+                                Map.of("trip", row.key().tripCode(), "route", row.routeCode()))),
+                manager::chooseLevel),
             this);
     driveSessionManager.start();
+    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试。
+    this.licenseService =
+        new LicenseService(this, () -> driveSessionManager, driveSessionManager.config().license());
+    getServer().getPluginManager().registerEvents(licenseService, this);
+    driveSessionManager.tutorials().onFinished(licenseService::onTutorialFinished);
+    licenseService.start();
+  }
+
+  /** 驾驶证服务（插件启用期间存在）。 */
+  public LicenseService getLicenseService() {
+    return licenseService;
   }
 
   public LoggerManager getLoggerManager() {
@@ -527,6 +594,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public RailGraphService getRailGraphService() {
     return railGraphService;
+  }
+
+  /** 返回调度图失效告警器（若未初始化则为 null）。 */
+  public GraphStaleNotifier getGraphStaleNotifier() {
+    return graphStaleNotifier;
   }
 
   /** 返回限速设置棍监听器；插件未完成初始化时为空。 */
@@ -635,6 +707,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     storageManager
         .provider()
         .ifPresent(provider -> service.loadFromStorage(provider, getServer().getWorlds()));
+    if (graphStaleNotifier != null) {
+      graphStaleNotifier.logStaleWorlds();
+    }
     storageManager
         .provider()
         .ifPresent(
@@ -675,6 +750,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaDriveCommand(this).register(commandManager);
+    new FtaLicenseCommand(this).register(commandManager);
     new FtaGraphPortalCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
@@ -682,6 +758,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaHealthCommand(this).register(commandManager);
     new FtaTimetableCommand(this).register(commandManager);
     new FtaPidsCommand(this).register(commandManager);
+    new FtaPidsBulletinCommand(this).register(commandManager);
     new FtaTripCommand(this).register(commandManager);
     new FtaAnnounceCommand(this).register(commandManager);
     infoCommand.register(commandManager);
@@ -721,8 +798,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
             loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
+    this.graphStaleNotifier =
+        GraphStaleNotifier.forPlugin(this, railGraphService, localeManager, loggerManager);
+    getServer().getPluginManager().registerEvents(graphStaleNotifier, this);
     SignNodeStorageSynchronizer storageSync =
-        new RailNodeIncrementalSync(storageManager, railGraphService, loggerManager::debug);
+        new RailNodeIncrementalSync(
+            storageManager,
+            railGraphService,
+            loggerManager::debug,
+            graphStaleNotifier,
+            this::findRouteNodeUsage,
+            task -> getServer().getScheduler().runTask(this, task));
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
@@ -802,9 +888,29 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return loggerManager == null ? message -> {} : loggerManager.debugSink();
   }
 
+  /** 节点牌子增删时判断旧图能否继续用：交路缓存没就绪就按在用处理。 */
+  private Optional<String> findRouteNodeUsage(
+      org.bukkit.World world, SignNodeDefinition definition) {
+    RouteDefinitionCache cache = routeDefinitionCache;
+    if (cache == null) {
+      return Optional.of("交路缓存未就绪");
+    }
+    // 先取版本再读条目：建索引期间交路缓存又变了，存下的索引版本就是旧的，下次会重建。
+    long version = routeNodeUsageVersion.get();
+    VersionedRouteNodeUsage cached = routeNodeUsage;
+    if (cached == null || cached.version() != version) {
+      cached = new VersionedRouteNodeUsage(version, RouteNodeUsage.index(cache.entries()));
+      routeNodeUsage = cached;
+    }
+    return cached.usage().findUse(definition.nodeId());
+  }
+
+  private record VersionedRouteNodeUsage(long version, RouteNodeUsage usage) {}
+
   private void initRouteDefinitionCache() {
     if (this.routeDefinitionCache == null) {
       this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
+      routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
     }
     if (this.stationDirectory == null) {
       // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
@@ -999,7 +1105,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(
             // 联挂否决是异常证据，走 WARN 而不是受 debug 开关和观察预算约束的诊断通道；监听器已按列车对限流。
-            RuntimeDispatchListener.withDiagnostics(runtimeDispatchService, loggerManager::warn),
+            RuntimeDispatchListener.withDiagnostics(
+                runtimeDispatchService,
+                loggerManager::warn,
+                railGraphService::isOutsideRetainedStaleSnapshot),
             this);
     initEtaService();
     if (etaService != null) {

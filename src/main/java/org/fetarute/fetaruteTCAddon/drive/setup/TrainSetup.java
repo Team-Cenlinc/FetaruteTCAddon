@@ -116,6 +116,16 @@ public final class TrainSetup {
     return true;
   }
 
+  /** 主电路是否得电：受电、主断路器（仅电力）与辅助电源都已接通。不看钥匙，驾驶员离开后列车仍可保持得电。 */
+  public boolean mainCircuitPowered() {
+    for (SetupSystem system : sequence) {
+      if (system != SetupSystem.KEY && state(system) != State.ON) {
+        return false;
+      }
+    }
+    return true;
+  }
+
   /** 按启动顺序第一个还没接通的系统；全部接通时为空。 */
   public Optional<SetupSystem> nextStep() {
     for (SetupSystem system : sequence) {

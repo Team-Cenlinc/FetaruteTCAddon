@@ -6,7 +6,7 @@ public final class SetupText {
   private SetupText() {}
 
   /**
-   * 一个步骤名称的语言键（纯文本，用作占位符）。受电一步按受电方式区分：升弓、集电靴受电、启动发动机。
+   * 一个步骤名称的语言键（纯文本，用作占位符）。受电一步按受电方式区分：升弓、集电靴受电、启动发动机、投入超级电容。
    *
    * @return 如 {@code drive.setup.step.pantograph}
    */
@@ -18,6 +18,7 @@ public final class SetupText {
             case PTG5, PTG6 -> "pantograph";
             case SHOE -> "shoe";
             case DIESEL -> "engine";
+            case SUPERCAP -> "supercap";
           };
           case BREAKER -> "breaker";
           case AUX -> "aux";

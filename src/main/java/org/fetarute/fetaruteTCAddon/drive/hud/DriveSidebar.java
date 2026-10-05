@@ -54,15 +54,31 @@ public final class DriveSidebar {
     } else if (player.getScoreboard() != state.scoreboard) {
       return false;
     }
-    Component title = locale.component("drive.sidebar.title", Map.of("train", session.trainName()));
-    if (!title.equals(state.title)) {
-      state.objective.displayName(title);
-      state.title = title;
+    // 每次刷新都解析 MiniMessage 很贵：行的内容（语言键与占位符）没变、语言文件也没重载时，沿用上次渲染的结果。
+    long generation = locale.generation();
+    boolean reloaded = generation != state.localeGeneration;
+    state.localeGeneration = generation;
+    String train = session.trainName();
+    if (reloaded || state.title == null || !train.equals(state.titleTrain)) {
+      Component title = locale.component("drive.sidebar.title", Map.of("train", train));
+      if (!title.equals(state.title)) {
+        state.objective.displayName(title);
+        state.title = title;
+      }
+      state.titleTrain = train;
     }
-    List<Component> lines = new ArrayList<>();
-    for (DriveSidebarRows.Row row : DriveSidebarRows.build(session, Bukkit.getCurrentTick())) {
-      lines.add(render(row));
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, Bukkit.getCurrentTick());
+    List<Component> lines = new ArrayList<>(rows.size());
+    for (int i = 0; i < rows.size(); i++) {
+      DriveSidebarRows.Row row = rows.get(i);
+      boolean unchanged =
+          !reloaded
+              && i < state.rows.size()
+              && i < state.lines.size()
+              && row.equals(state.rows.get(i));
+      lines.add(unchanged ? state.lines.get(i) : render(row));
     }
+    state.rows = rows;
     for (int i = 0; i < lines.size(); i++) {
       Component line = lines.get(i);
       if (i < state.lines.size() && line.equals(state.lines.get(i))) {
@@ -144,6 +160,9 @@ public final class DriveSidebar {
     private final Objective objective;
     private final Scoreboard previous;
     private Component title;
+    private String titleTrain;
+    private long localeGeneration = -1L;
+    private List<DriveSidebarRows.Row> rows = List.of();
     private List<Component> lines = List.of();
 
     private State(Scoreboard scoreboard, Objective objective, Scoreboard previous) {

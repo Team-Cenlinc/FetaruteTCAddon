@@ -102,6 +102,11 @@ public final class RailGraphService {
     return graph;
   }
 
+  /** 图快照版本：任何世界的快照切换、移出都会让它变；按它判断按旧图算的缓存是否作废。 */
+  public long snapshotVersion() {
+    return snapshotVersion.get();
+  }
+
   public void putSnapshot(World world, RailGraph graph, Instant builtAt) {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(graph, "graph");
@@ -133,8 +138,28 @@ public final class RailGraphService {
     validateSnapshotActivation(world.getUID(), graph);
   }
 
+  /**
+   * 激活一张在旧图上只增不改的增补图，跳过"仍有任何占用就拒绝切换联锁投影"的全局闸。
+   *
+   * <p>调用方必须已经逐键核验：受影响的旧区间（资源键会变的那些）当前没有任何占用与排队。全局闸只看"有没有占用"，运行中几乎总是有，
+   * 增补便永远做不了；逐键核验覆盖的正是它要防的事——旧键被持有时换图，新旧申请会互相看不见。
+   */
+  public void putVerifiedAppendSnapshot(World world, RailGraph graph, Instant builtAt) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(builtAt, "builtAt");
+    activateSnapshot(world.getUID(), graph, builtAt, false);
+  }
+
   private void activateSnapshot(UUID worldId, RailGraph graph, Instant builtAt) {
-    validateSnapshotActivation(worldId, graph);
+    activateSnapshot(worldId, graph, builtAt, true);
+  }
+
+  private void activateSnapshot(
+      UUID worldId, RailGraph graph, Instant builtAt, boolean enforceProjectionGuard) {
+    if (enforceProjectionGuard) {
+      validateSnapshotActivation(worldId, graph);
+    }
     RailInterlockingState nextState = interlockingState(graph);
     RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
@@ -437,14 +462,57 @@ public final class RailGraphService {
         || (edge.from().equals(b) && edge.to().equals(a));
   }
 
+  /**
+   * 记录快照失效。
+   *
+   * <p>{@link RailGraphStaleState#snapshotRetained()} 为 true 时只打标记、继续供旧图（变化的节点没有交路在用）；
+   * 否则移出内存快照，该世界在重建或恢复前拿不到图。已经移出的快照不会因为后一次"可保留"而回来。
+   */
   public void markStale(World world, RailGraphStaleState state) {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(state, "state");
     UUID worldId = world.getUID();
+    if (state.snapshotRetained() && snapshots.containsKey(worldId)) {
+      staleStates.put(worldId, state);
+      return;
+    }
     snapshots.remove(worldId);
     snapshotVersion.incrementAndGet();
     componentIndexes.remove(worldId);
-    staleStates.put(worldId, state);
+    staleStates.put(worldId, state.withSnapshotRetained(false));
+  }
+
+  /**
+   * 保留旧图期间节点牌子恢复原样（签名与快照重新一致）：内存里的旧图本就与库里的快照相同，只撤掉失效标记，不重载、不让各级缓存作废。
+   *
+   * @return 是否撤掉了标记；不在供保留旧图时为 false，调用方照旧从库重载
+   */
+  public boolean clearRetainedStale(World world) {
+    Objects.requireNonNull(world, "world");
+    UUID worldId = world.getUID();
+    if (!isServingRetainedStaleSnapshot(worldId)) {
+      return false;
+    }
+    staleStates.remove(worldId);
+    return true;
+  }
+
+  /** 正在供保留下来的旧图，而旧图里没有这个节点（失效后新放的节点牌子）。 */
+  public boolean isOutsideRetainedStaleSnapshot(UUID worldId, NodeId nodeId) {
+    if (nodeId == null || !isServingRetainedStaleSnapshot(worldId)) {
+      return false;
+    }
+    RailGraphSnapshot snapshot = snapshots.get(worldId);
+    return snapshot != null && snapshot.graph().findNode(nodeId).isEmpty();
+  }
+
+  /** 是否正在供一张已失效但保留下来的旧图。 */
+  public boolean isServingRetainedStaleSnapshot(UUID worldId) {
+    if (worldId == null) {
+      return false;
+    }
+    RailGraphStaleState state = staleStates.get(worldId);
+    return state != null && state.snapshotRetained() && snapshots.containsKey(worldId);
   }
 
   /**
@@ -872,9 +940,37 @@ public final class RailGraphService {
                     footprintsByEdge.isEmpty()
                         ? restoreInterlockingState(
                             worldId, edgesById.keySet(), interlockingSnapshot)
-                        : RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge))
+                        : restoreFromFootprints(
+                            worldId, edgesById.keySet(), footprintsByEdge, interlockingSnapshot))
             .orElseGet(RailInterlockingState::unavailable);
     return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of(), interlockingState);
+  }
+
+  /**
+   * 带逐边足迹的还原：足迹齐全也不能自己证明完整——局部合并、刷新、局部删除会保留全部足迹但按不完整发布。完整与否以持久化快照为准，
+   * 快照缺失、不匹配或记为不完整时按不完整发布（足迹仍留在索引里）。
+   */
+  private static RailInterlockingState restoreFromFootprints(
+      UUID worldId,
+      java.util.Set<EdgeId> expectedEdges,
+      Map<EdgeId, RailEdgeFootprint> footprintsByEdge,
+      Optional<RailInterlockingSnapshotRecord> snapshotOpt) {
+    RailInterlockingState state =
+        RailInterlockingState.from(worldId, expectedEdges, footprintsByEdge);
+    boolean persistedComplete =
+        snapshotOpt
+            .filter(snapshot -> worldId.equals(snapshot.worldId()))
+            .filter(
+                snapshot ->
+                    snapshot.formatVersion()
+                        == RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION)
+            .filter(
+                snapshot ->
+                    RailInterlockingEdgeSignature.of(expectedEdges)
+                        .equals(snapshot.edgeSignature()))
+            .map(snapshot -> snapshot.coverage().complete())
+            .orElse(false);
+    return persistedComplete ? state : state.withCoverageMarkedIncomplete();
   }
 
   private static RailInterlockingState restoreInterlockingState(
@@ -917,18 +1013,54 @@ public final class RailGraphService {
     }
   }
 
-  /** 快照已失效：节点集合（签名）与当前 rail_nodes 不一致，旧图应提示重建。 */
+  /**
+   * 快照已失效：节点集合（签名）与当前 rail_nodes 不一致，旧图应提示重建。
+   *
+   * @param snapshotRetained 旧图是否继续在用（变化的节点没有交路在用时保留）
+   */
   public record RailGraphStaleState(
       Instant builtAt,
       String snapshotSignature,
       String currentSignature,
       int snapshotNodeCount,
       int snapshotEdgeCount,
-      int currentNodeCount) {
+      int currentNodeCount,
+      boolean snapshotRetained) {
     public RailGraphStaleState {
       Objects.requireNonNull(builtAt, "builtAt");
       snapshotSignature = snapshotSignature == null ? "" : snapshotSignature;
       currentSignature = currentSignature == null ? "" : currentSignature;
+    }
+
+    /** 旧图已移出内存的失效状态。 */
+    public RailGraphStaleState(
+        Instant builtAt,
+        String snapshotSignature,
+        String currentSignature,
+        int snapshotNodeCount,
+        int snapshotEdgeCount,
+        int currentNodeCount) {
+      this(
+          builtAt,
+          snapshotSignature,
+          currentSignature,
+          snapshotNodeCount,
+          snapshotEdgeCount,
+          currentNodeCount,
+          false);
+    }
+
+    RailGraphStaleState withSnapshotRetained(boolean retained) {
+      return retained == snapshotRetained
+          ? this
+          : new RailGraphStaleState(
+              builtAt,
+              snapshotSignature,
+              currentSignature,
+              snapshotNodeCount,
+              snapshotEdgeCount,
+              currentNodeCount,
+              retained);
     }
   }
 }

@@ -1,8 +1,11 @@
 package org.fetarute.fetaruteTCAddon.drive.driver;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 
 /**
  * 驾驶调度列车（DRIVER 模式）的参数（{@code drive.yml} 的 {@code driver} 段）。速度单位为格/秒。
@@ -23,6 +26,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
  * @param pickupWaitSeconds 始发站待命车、车库出车等驾驶员上车接班最多等多久（秒），过时照常发车
  * @param pickupTeleport 等驾驶员接班时提供“前往列车”传送（送到车头驾驶室旁，不塞进座位）
  * @param recovery 驾驶任务与拥堵恢复的参数
+ * @param guidance 行车引导（Boss 栏、建议速度、开始制动提示）的参数
+ * @param cabSeatNames 驾驶座名单：座位附件的名字（TrainCarts 附件编辑器里设置）在名单里即为驾驶座，已转为小写；为空时不认标记
+ * @param cabChange 折返换端的时间参数
+ * @param pickupAdvanceSeconds 领了从终点站出发的车次后，提前多少秒按交路认出担当的待命车、通知驾驶员并留车（驾驶员可提前上车准备）
+ * @param recordRetentionDays 驾驶记录保留多少天，超过的定时删除；0 表示一直保留
  */
 public record DriverConfig(
     boolean enabled,
@@ -40,15 +48,29 @@ public record DriverConfig(
     boolean stopMarker,
     int pickupWaitSeconds,
     boolean pickupTeleport,
-    DriverRecovery recovery) {
+    DriverRecovery recovery,
+    DriverGuidanceConfig guidance,
+    List<String> cabSeatNames,
+    CabChangeConfig cabChange,
+    int pickupAdvanceSeconds,
+    int recordRetentionDays) {
 
   private static final int TICKS_PER_SECOND = 20;
+
+  /** 默认的驾驶座名单。 */
+  static final List<String> DEFAULT_CAB_SEAT_NAMES = List.of("driver", "cab", "驾驶", "驾驶座", "驾驶室");
 
   /** 接车最多等多久（秒）：车库扣车的发车门控 180 秒后自动失效，留出余量。 */
   static final int MAX_PICKUP_WAIT_SECONDS = 150;
 
   public DriverConfig {
     recovery = recovery == null ? DriverRecovery.defaults() : recovery;
+    guidance = guidance == null ? DriverGuidanceConfig.defaults() : guidance;
+    cabSeatNames =
+        List.copyOf(cabSeatNames == null ? DEFAULT_CAB_SEAT_NAMES : normalizeNames(cabSeatNames));
+    cabChange = cabChange == null ? CabChangeConfig.defaults() : cabChange;
+    pickupAdvanceSeconds = Math.max(0, pickupAdvanceSeconds);
+    recordRetentionDays = Math.max(0, recordRetentionDays);
   }
 
   /** 内置默认值。 */
@@ -69,7 +91,12 @@ public record DriverConfig(
         true,
         90,
         true,
-        DriverRecovery.defaults());
+        DriverRecovery.defaults(),
+        DriverGuidanceConfig.defaults(),
+        DEFAULT_CAB_SEAT_NAMES,
+        CabChangeConfig.defaults(),
+        300,
+        30);
   }
 
   /**
@@ -133,7 +160,40 @@ public record DriverConfig(
         section.getBoolean("stop-marker", d.stopMarker),
         pickupWait(section, d.pickupWaitSeconds, sink),
         section.getBoolean("pickup-teleport", d.pickupTeleport),
-        DriverRecovery.from(section, sink));
+        DriverRecovery.from(section, sink),
+        DriverGuidanceConfig.from(section, sink),
+        cabSeatNames(section, d.cabSeatNames, sink),
+        CabChangeConfig.from(section, sink),
+        (int)
+            Math.round(
+                nonNegative(section, "pickup-advance-seconds", d.pickupAdvanceSeconds, sink)),
+        (int)
+            Math.round(nonNegative(section, "record-retention-days", d.recordRetentionDays, sink)));
+  }
+
+  /** 驾驶座名单：须是字符串列表；写成别的形式时提示并用默认名单，写成空列表表示不认标记。 */
+  private static List<String> cabSeatNames(
+      ConfigurationSection section, List<String> fallback, Consumer<String> warn) {
+    if (!section.contains("cab-seat-names")) {
+      return fallback;
+    }
+    if (!section.isList("cab-seat-names")) {
+      warn.accept("drive.yml 的 driver.cab-seat-names 须是名字列表，使用默认值 " + fallback);
+      return fallback;
+    }
+    return section.getStringList("cab-seat-names");
+  }
+
+  /** 名单去空白、转小写、去重，保持原顺序。 */
+  private static List<String> normalizeNames(List<String> names) {
+    List<String> normalized = new ArrayList<>(names.size());
+    for (String name : names) {
+      String key = CabSeats.normalize(name);
+      if (!key.isEmpty() && !normalized.contains(key)) {
+        normalized.add(key);
+      }
+    }
+    return normalized;
   }
 
   /** 站停的停车窗口。 */

@@ -20,10 +20,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransaction;
@@ -139,6 +141,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   }
 
   @Override
+  public LicenseRepository licenses() {
+    return unsupported(LicenseRepository.class);
+  }
+
+  @Override
   public PortalLinkRepository portalLinks() {
     return unsupported(PortalLinkRepository.class);
   }
@@ -161,6 +168,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public PidsScreenRepository pidsScreens() {
     return unsupported(PidsScreenRepository.class);
+  }
+
+  @Override
+  public PidsBulletinRepository pidsBulletins() {
+    return unsupported(PidsBulletinRepository.class);
   }
 
   @Override

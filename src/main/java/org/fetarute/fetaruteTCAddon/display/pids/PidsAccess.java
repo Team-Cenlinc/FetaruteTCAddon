@@ -9,6 +9,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import org.bukkit.command.CommandSender;
@@ -70,6 +71,31 @@ public final class PidsAccess {
     return company.isPresent()
         && memberships(player).stream()
             .anyMatch(member -> member.companyId().equals(company.get()) && managing(member));
+  }
+
+  /** 能否发布、修改、撤下某公司的站台屏公告：有管理权限，或是这家公司里有管理类角色的成员。 */
+  public boolean canManageCompany(CommandSender sender, UUID companyId) {
+    return manageableCompanies(sender).test(companyId);
+  }
+
+  /**
+   * 能管理哪些公司的站台屏公告：成员身份只查一次，列表与补全逐条判断时不再读库。
+   *
+   * @return 有管理权限时对任何公司都为真
+   */
+  public Predicate<UUID> manageableCompanies(CommandSender sender) {
+    if (sender.hasPermission(MANAGE_PERMISSION)) {
+      return company -> true;
+    }
+    if (!(sender instanceof Player player)) {
+      return company -> false;
+    }
+    Set<UUID> companies =
+        memberships(player).stream()
+            .filter(PidsAccess::managing)
+            .map(CompanyMember::companyId)
+            .collect(Collectors.toSet());
+    return companies::contains;
   }
 
   /** 能否领取安装纸与配置棍：有管理权限，或在至少一家公司里有管理类角色。 */

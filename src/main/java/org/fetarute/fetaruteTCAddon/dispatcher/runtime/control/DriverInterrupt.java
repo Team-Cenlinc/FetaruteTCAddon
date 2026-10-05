@@ -10,6 +10,8 @@ public enum DriverInterrupt {
   EMERGENCY_INSTANT,
   /** 列车即将被销毁：先结束驾驶。 */
   RELEASE_FOR_DESTROY,
+  /** 列车按交路开到收车地点（DSTY，通常是车库），即将正常销毁：驾驶正常结束。 */
+  END_OF_SERVICE,
   /** 需要交还自动运行（调头等只有自动运行能做的动作）。 */
   HANDBACK_REQUIRED
 }

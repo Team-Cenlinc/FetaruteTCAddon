@@ -40,7 +40,8 @@ public record SetupTimings(
       case KEY -> keyTicks;
       case POWER -> switch (supply) {
         case PTG5, PTG6 -> pantographTicks;
-        case SHOE -> shoeTicks;
+          // 投入超级电容与集电靴受电一样只是合上开关。
+        case SHOE, SUPERCAP -> shoeTicks;
         case DIESEL -> engineTicks;
       };
       case BREAKER -> breakerTicks;

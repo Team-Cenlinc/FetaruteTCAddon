@@ -10,12 +10,15 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
 
 /**
- * 站台屏轮播：主页（到发）与副页（宣传页、空位页）轮换，通过列车临近时锁定安全提示页。
+ * 站台屏轮播：主页（到发）与副页（宣传页、公告、空位页）轮换，通过列车临近时锁定安全提示页。
  *
  * <ul>
  *   <li>每一段依次为：主页 {@code slide-main-seconds} → 副页 {@code
- *       slide-notice-seconds}。副页隔段轮换：本屏下一班列车有空位信息时，偶数段是空位页、奇数段是宣传页；没有空位信息时每段都是宣传页。宣传页按 {@link
- *       Signals#courtesy()} 的顺序轮流。一段副页放什么在这一段开始时定下，段内列车状况变了也不换（进站、通过除外）。副页停留时间为 0 时不轮播（空位页也不出现）。
+ *       slide-notice-seconds}。副页隔段轮换：本屏下一班列车有空位信息时，偶数段是空位页、奇数段是宣传页或公告；没有空位信息时每段都是宣传页或公告。宣传页按 {@link
+ *       Signals#courtesy()} 的顺序轮流。一段副页放什么在副页开始时定下，之后段内列车状况变了也不换（进站、通过除外）；轮到公告的段在段首就定下（要从主页借时间）。
+ *       副页停留时间为 0 时不轮播（空位页、公告页也不出现）。
+ *   <li>公告（{@link Signals#bulletins()}）：有重要公告时轮到宣传页的段都放公告（全部公告依次轮流），宣传页暂停；只有一般公告时公告与宣传页隔次交替。 公告页每页停
+ *       {@code bulletin-seconds}，两页的连着放；这些时间从本段主页里扣，一段的总长不变，同站各屏照样同时翻页。
  *   <li>本屏的下一班正在进站或停靠时不翻到宣传页：乘客这时抬头确认终点与站台。副页时段有空位信息就放空位页，没有就留在主页。
  *   <li>轮换按时钟计算，不依赖屏幕何时开始显示：同一车站的屏幕同时翻页，不同车站按站名错开，免得全服同一秒整页重发。
  *   <li>通过列车即将通过本屏的站台时显示安全提示页，并从最后一次看到它起锁定 {@code notice-pin-seconds}， 列车状态在两次检查之间变化也不会提早翻回主页。
@@ -48,6 +51,34 @@ public final class PidsCarousel {
 
     /** 下一班列车的空位页。 */
     record Vacancy() implements Slide {}
+
+    /**
+     * 公告的一页（停站屏也用）。
+     *
+     * @param key 公告的标识（{@link BulletinInfo#key()}）
+     * @param page 第几页（0 起）
+     */
+    record Bulletin(Object key, int page) implements Slide, StopListSlide {
+
+      public Bulletin {
+        Objects.requireNonNull(key, "key");
+      }
+    }
+  }
+
+  /**
+   * 本屏可轮播的一条公告。
+   *
+   * @param key 标识：内容改过就不相等
+   * @param important 重要公告
+   * @param pages 在本屏布局上排成几页（至少 1）
+   */
+  public record BulletinInfo(Object key, boolean important, int pages) {
+
+    public BulletinInfo {
+      Objects.requireNonNull(key, "key");
+      pages = Math.max(1, pages);
+    }
   }
 
   /** 2×1 停站屏的一页：停站表、后续列车或宣传页（含安全提示页 {@link Slide.Notice}）。 */
@@ -71,12 +102,33 @@ public final class PidsCarousel {
    * @param vacancy 本屏下一班列车有空位信息（空位页可以出现；停站屏不用）
    * @param arriving 本屏的下一班正在进站或停靠（不翻到宣传页）
    * @param courtesy 本屏轮换的宣传页，按顺序；为空时不放宣传页
+   * @param bulletins 本屏可轮播的公告，按轮播顺序（重要的在前）
    */
   public record Signals(
-      boolean passingSoon, boolean vacancy, boolean arriving, List<PidsNotice> courtesy) {
+      boolean passingSoon,
+      boolean vacancy,
+      boolean arriving,
+      List<PidsNotice> courtesy,
+      List<BulletinInfo> bulletins) {
 
     public Signals {
       courtesy = List.copyOf(courtesy);
+      bulletins = List.copyOf(bulletins);
+    }
+
+    /** 没有公告。 */
+    public Signals(
+        boolean passingSoon, boolean vacancy, boolean arriving, List<PidsNotice> courtesy) {
+      this(passingSoon, vacancy, arriving, courtesy, List.of());
+    }
+
+    /** 公告排成几页；不在清单里（已撤下）时为 0。 */
+    int pagesOf(Object key) {
+      return bulletins.stream()
+          .filter(bulletin -> bulletin.key().equals(key))
+          .mapToInt(BulletinInfo::pages)
+          .findFirst()
+          .orElse(0);
     }
   }
 
@@ -118,47 +170,107 @@ public final class PidsCarousel {
     }
     long period = period(render);
     long position = position(station, now, render);
-    if (Math.floorMod(position, period) < render.slideMainSeconds()) {
+    long segment = Math.floorDiv(position, period);
+    SideSlot slot =
+        sideSlots.compute(
+            screenId,
+            (id, old) ->
+                old != null && old.segment() == segment
+                    ? old
+                    : side(segment, signals, render, period));
+    long main = period - slot.seconds();
+    long elapsed = Math.floorMod(position, period);
+    if (elapsed < main) {
       return Optional.empty();
     }
     if (signals.arriving()) {
       return signals.vacancy() ? Optional.of(new Slide.Vacancy()) : Optional.empty();
     }
-    long segment = Math.floorDiv(position, period);
-    return sideSlots
-        .compute(
-            screenId,
-            (id, old) ->
-                old != null && old.segment() == segment
-                    ? old
-                    : new SideSlot(segment, side(segment, signals)))
-        .slide();
+    if (slot.provisional()) {
+      SideSlot decided = side(segment, signals, render, period);
+      slot = new SideSlot(segment, decided.slide(), slot.seconds(), decided.pages(), false);
+      sideSlots.put(screenId, slot);
+    }
+    SideSlot shown = slot;
+    return shown
+        .slide()
+        .map(
+            slide ->
+                slide instanceof Slide.Bulletin bulletin
+                    ? new Slide.Bulletin(
+                        bulletin.key(),
+                        (int)
+                            Math.min(
+                                shown.pages() - 1L, (elapsed - main) / render.bulletinSeconds()))
+                    : slide);
   }
 
-  /** 第 {@code segment} 段副页放什么：有空位信息时偶数段放空位页；宣传页按段号轮流（有空位页时只数奇数段）。 */
-  private static Optional<Slide> side(long segment, Signals signals) {
+  /**
+   * 第 {@code segment} 段副页放什么、停多久：有空位信息时偶数段放空位页；其余段按段号轮到宣传页或公告（有空位页时只数奇数段）。 公告停“页数 × {@code
+   * bulletin-seconds}”，至多占到这一段只剩 1 秒主页。
+   *
+   * <p>公告要从主页借时间，段首就定下；其余为暂定，只决定主页多长，到副页开始时再按当时的状况重定（段内空位信息出现等照旧生效）。
+   */
+  private static SideSlot side(
+      long segment, Signals signals, PidsSettings.RenderSettings render, long period) {
     if (signals.vacancy() && segment % 2 == 0) {
-      return Optional.of(new Slide.Vacancy());
+      return new SideSlot(
+          segment, Optional.of(new Slide.Vacancy()), render.slideNoticeSeconds(), 1, true);
     }
+    long turn = signals.vacancy() ? segment / 2 : segment;
+    Optional<Slide> slide = courtesyOrBulletin(turn, signals);
+    if (slide.isPresent() && slide.get() instanceof Slide.Bulletin bulletin) {
+      int pages = Math.max(1, signals.pagesOf(bulletin.key()));
+      long seconds = Math.min((long) pages * render.bulletinSeconds(), period - 1);
+      return new SideSlot(segment, slide, seconds, pages, false);
+    }
+    return new SideSlot(segment, slide, render.slideNoticeSeconds(), 1, true);
+  }
+
+  /**
+   * 第 {@code turn} 次轮到宣传页或公告时放什么：有重要公告时只放公告（全部公告依次轮流），只有一般公告时公告与宣传页交替， 没有宣传页可放时只放公告；没有公告时宣传页依次轮流。
+   *
+   * @return 公告时为第 1 页；什么都没有时为空
+   */
+  private static Optional<Slide> courtesyOrBulletin(long turn, Signals signals) {
+    List<BulletinInfo> bulletins = signals.bulletins();
     List<PidsNotice> courtesy = signals.courtesy();
+    if (!bulletins.isEmpty()) {
+      boolean important = bulletins.stream().anyMatch(BulletinInfo::important);
+      if (important || courtesy.isEmpty()) {
+        return Optional.of(firstPage(bulletins.get((int) Math.floorMod(turn, bulletins.size()))));
+      }
+      long round = Math.floorDiv(turn, 2);
+      return Optional.of(
+          Math.floorMod(turn, 2) == 0
+              ? firstPage(bulletins.get((int) Math.floorMod(round, bulletins.size())))
+              : new Slide.Notice(courtesy.get((int) Math.floorMod(round, courtesy.size()))));
+    }
     if (courtesy.isEmpty()) {
       return Optional.empty();
     }
-    long turn = signals.vacancy() ? segment / 2 : segment;
-    return Optional.of(new Slide.Notice(courtesy.get((int) (turn % courtesy.size()))));
+    return Optional.of(new Slide.Notice(courtesy.get((int) Math.floorMod(turn, courtesy.size()))));
+  }
+
+  private static Slide.Bulletin firstPage(BulletinInfo bulletin) {
+    return new Slide.Bulletin(bulletin.key(), 0);
   }
 
   /**
    * 站台屏这一段副页放什么。
    *
    * @param segment 段号
-   * @param slide 这一段的副页；为空表示留在主页
+   * @param slide 这一段的副页；为空表示留在主页；公告时为第 1 页
+   * @param seconds 副页停多久（本段主页为一段的秒数减去它）
+   * @param pages 公告的页数；其余为 1
+   * @param provisional 暂定：副页开始时再按当时的状况重定（停留时间不变）
    */
-  private record SideSlot(long segment, Optional<Slide> slide) {}
+  private record SideSlot(
+      long segment, Optional<Slide> slide, long seconds, int pages, boolean provisional) {}
 
   /**
-   * 2×1 停站屏此刻显示哪一页：停站表每页、后续列车页各停 {@code stop-page-seconds}，宣传页停 {@code
-   * slide-notice-seconds}，一页一页往下翻。
+   * 2×1 停站屏此刻显示哪一页：停站表每页、后续列车页各停 {@code stop-page-seconds}，宣传页停 {@code slide-notice-seconds}，公告每页停
+   * {@code bulletin-seconds}，一页一页往下翻。宣传页与公告的轮换规则同站台屏（{@link #courtesyOrBulletin}），一轮放一张（公告的几页连着放）。
    *
    * <p>换了一班车从停站表第 1 页起，乘客先看到近处的站。同站几块屏在一次检查间隔（默认 1 秒）内看到同一班车，翻页最多差这么多。
    * 下一页是什么在翻页时按当时的状况定：有后续列车才放后续列车页，有可放的宣传页才放宣传页，列车状况中途变了不会让正在显示的一页跳走。 下一班进站或停靠时立即回到停站表第 1
@@ -226,20 +338,32 @@ public final class PidsCarousel {
     if (slide instanceof StopListSlide.Stops && extras && pages.following()) {
       return state.showing(new StopListSlide.Following(), since);
     }
-    List<PidsNotice> courtesy = signals.courtesy();
-    if (!(slide instanceof Slide.Notice)
+    if (slide instanceof Slide.Bulletin bulletin
         && extras
-        && render.slideNoticeSeconds() > 0
-        && !courtesy.isEmpty()) {
-      PidsNotice notice = courtesy.get(Math.floorMod(state.turn(), courtesy.size()));
-      return new StopListState(state.train(), new Slide.Notice(notice), since, state.turn() + 1);
+        && bulletin.page() + 1 < signals.pagesOf(bulletin.key())) {
+      return state.showing(new Slide.Bulletin(bulletin.key(), bulletin.page() + 1), since);
+    }
+    if (!(slide instanceof Slide.Notice || slide instanceof Slide.Bulletin)
+        && extras
+        && render.slideNoticeSeconds() > 0) {
+      Optional<Slide> side = courtesyOrBulletin(state.turn(), signals);
+      if (side.isPresent() && side.get() instanceof StopListSlide next) {
+        return new StopListState(state.train(), next, since, state.turn() + 1);
+      }
     }
     return state.showing(FIRST_PAGE, since);
   }
 
-  /** 一页停多久：宣传页停 {@code slide-notice-seconds}，停站表与后续列车页停 {@code stop-page-seconds}。 */
+  /**
+   * 一页停多久：宣传页停 {@code slide-notice-seconds}，公告每页停 {@code bulletin-seconds}，停站表与后续列车页停 {@code
+   * stop-page-seconds}。
+   */
   private static long seconds(StopListSlide slide, PidsSettings.RenderSettings render) {
-    return slide instanceof Slide.Notice ? render.slideNoticeSeconds() : render.stopPageSeconds();
+    return switch (slide) {
+      case Slide.Notice ignored -> render.slideNoticeSeconds();
+      case Slide.Bulletin ignored -> render.bulletinSeconds();
+      default -> render.stopPageSeconds();
+    };
   }
 
   /** 此刻是否锁定在安全提示页：通过列车即将通过本屏的站台时锁定，从最后一次看到它起保持 {@code notice-pin-seconds}。 */

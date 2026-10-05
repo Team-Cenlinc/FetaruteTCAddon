@@ -6,10 +6,14 @@ import java.util.Objects;
 import java.util.function.Consumer;
 import org.bukkit.configuration.ConfigurationSection;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabConfig;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabConfigSections;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverConfig;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitorConfig;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseConfig;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
 
 /**
  * 手动驾驶配置（{@code drive.yml}）。
@@ -38,9 +42,13 @@ import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
  * @param defaultPower 列车未设 {@code FTA_TRAIN_POWER} 标签时的受电方式
  * @param setupTimings 启动流程各步骤的耗时
  * @param coldAfterMinutes 列车无人驾驶超过多少分钟后按冷车处理（受电、主断路器、辅助电源全部断开）
- * @param cab simulation 级车上系统（气压、停放制动、制动试验、警惕装置）的参数
+ * @param cab simulation 级车上系统（气压、停放制动、电空制动、制动管、制动试验、警惕装置、恒功率、故障）的参数
  * @param sidebar 是否在驾驶员的侧边栏（计分板）显示车上系统的详细状态
  * @param driver 驾驶调度列车（DRIVER 模式）的参数
+ * @param sounds 驾驶提示音与鸣笛
+ * @param ebGraceTicks 驾驶员自己选到紧急制动后，多少 tick 内回拨可撤销（防误触）；0 表示立即锁定
+ * @param supercap 超级电容车的储能与充电
+ * @param license 驾驶证与考试
  */
 public record DriveConfig(
     boolean enabled,
@@ -67,7 +75,11 @@ public record DriveConfig(
     int coldAfterMinutes,
     CabConfig cab,
     boolean sidebar,
-    DriverConfig driver) {
+    DriverConfig driver,
+    DriveSoundConfig sounds,
+    int ebGraceTicks,
+    SuperCapacitorConfig supercap,
+    LicenseConfig license) {
 
   private static final int TRACTION_STEPS = 3;
   private static final int BRAKE_STEPS = 4;
@@ -82,11 +94,53 @@ public record DriveConfig(
     Objects.requireNonNull(setupTimings, "setupTimings");
     Objects.requireNonNull(cab, "cab");
     Objects.requireNonNull(driver, "driver");
+    sounds = sounds == null ? DriveSoundConfig.defaults() : sounds;
+    ebGraceTicks = Math.max(0, ebGraceTicks);
+    supercap = supercap == null ? SuperCapacitorConfig.defaults() : supercap;
+    license = license == null ? LicenseConfig.defaults() : license;
     tractionFractions = List.copyOf(tractionFractions);
     brakeFractions = List.copyOf(brakeFractions);
     if (tractionFractions.size() != TRACTION_STEPS || brakeFractions.size() != BRAKE_STEPS) {
       throw new IllegalArgumentException("牵引档需要 3 个比例，制动档需要 4 个比例");
     }
+  }
+
+  /** 只换仿真等级的副本（玩家自选等级时用）；等级相同时返回自身。 */
+  public DriveConfig withLevel(SimulationLevel value) {
+    Objects.requireNonNull(value, "value");
+    if (value == level) {
+      return this;
+    }
+    return new DriveConfig(
+        enabled,
+        value,
+        defaultMaxSpeedBps,
+        coastDragBps2,
+        emergencyMultiplier,
+        effortRatePerSecond,
+        emergencyRatePerSecond,
+        tractionFractions,
+        brakeFractions,
+        muReferenceMotorFraction,
+        locoReferenceCars,
+        stoppedSpeedBps,
+        reseatTimeoutTicks,
+        exitSneakWindowTicks,
+        hudIntervalTicks,
+        allowCreativeMode,
+        startMaxSpeedBps,
+        speedLimitOverride,
+        overspeedRedRatio,
+        defaultPower,
+        setupTimings,
+        coldAfterMinutes,
+        cab,
+        sidebar,
+        driver,
+        sounds,
+        ebGraceTicks,
+        supercap,
+        license);
   }
 
   /** 内置默认值。 */
@@ -116,7 +170,11 @@ public record DriveConfig(
         10,
         CabConfig.defaults(),
         true,
-        DriverConfig.defaults());
+        DriverConfig.defaults(),
+        DriveSoundConfig.defaults(),
+        TICKS_PER_SECOND,
+        SuperCapacitorConfig.defaults(),
+        LicenseConfig.defaults());
   }
 
   /** 给定档位的牵引力比例（占满牵引）；非牵引档为 0。 */
@@ -181,7 +239,18 @@ public record DriveConfig(
         positiveInt(section, "cold-after-minutes", defaults.coldAfterMinutes, sink),
         cab(section.getConfigurationSection("simulation"), defaults.cab, sink),
         section.getBoolean("sidebar", defaults.sidebar),
-        DriverConfig.from(section.getConfigurationSection("driver"), sink));
+        DriverConfig.from(section.getConfigurationSection("driver"), sink),
+        DriveSoundConfig.from(section.getConfigurationSection("sounds"), sink),
+        (int)
+            Math.round(
+                nonNegative(
+                        section,
+                        "eb-grace-seconds",
+                        defaults.ebGraceTicks / (double) TICKS_PER_SECOND,
+                        sink)
+                    * TICKS_PER_SECOND),
+        SuperCapacitorConfig.from(section.getConfigurationSection("supercap"), sink),
+        LicenseConfig.from(section.getConfigurationSection("license"), sink));
   }
 
   private static CabConfig cab(
@@ -223,14 +292,23 @@ public record DriveConfig(
                             "vigilance-warning-seconds",
                             fallback.vigilanceWarningTicks() / (double) TICKS_PER_SECOND,
                             scoped)
-                        * TICKS_PER_SECOND));
+                        * TICKS_PER_SECOND),
+            CabConfigSections.blendedBrake(
+                section.getConfigurationSection("blended-brake"), fallback.blendedBrake(), warn),
+            CabConfigSections.constantPower(
+                section.getConfigurationSection("constant-power"), fallback.constantPower(), warn),
+            CabConfigSections.brakePipe(
+                section.getConfigurationSection("brake-pipe"), fallback.brakePipe(), warn),
+            CabConfigSections.faults(
+                section.getConfigurationSection("faults"), fallback.faults(), warn));
     if (parsed.compressorCutInKpa() >= max
         || parsed.tractionLockoutKpa() > max
         || parsed.parkingReleaseKpa() > max
         || parsed.parkingAutoApplyKpa() > parsed.parkingReleaseKpa()
-        || parsed.brakeTestApplyKpa() <= parsed.brakeTestReleaseKpa()) {
+        || parsed.brakeTestApplyKpa() <= parsed.brakeTestReleaseKpa()
+        || parsed.brakePipe().nominalKpa() > max) {
       warn.accept(
-          "drive.yml 的 simulation 段压力关系不合理（启动压力须低于满压，停放制动自动施加压力不能高于缓解压力，试验施加压力须高于缓解压力），整段使用默认值");
+          "drive.yml 的 simulation 段压力关系不合理（启动压力须低于满压，停放制动自动施加压力不能高于缓解压力，试验施加压力须高于缓解压力，制动管定压不能高于主风缸满压），整段使用默认值");
       return fallback;
     }
     return parsed;

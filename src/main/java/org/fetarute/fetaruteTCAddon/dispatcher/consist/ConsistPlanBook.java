@@ -8,6 +8,7 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.Set;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailControlParsers;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 
 /**
@@ -20,7 +21,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
  * # 6 节为主，8 节补充
  * 3 SH_A6
  * 1 SH_A8 | name=8 节编组 | type=emu
- * 1 loco_df4 6*coach_25g | max-bps=22
+ * 1 loco_df4 6*coach_25g | max-speed=80kmh
  * </pre>
  *
  * <p>只做文本层面的检查；编组能不能在 TrainCarts 里解析出来，由车型档案在主线程另行检查。
@@ -42,8 +43,11 @@ public final class ConsistPlanBook {
   /** 覆盖项：减速度。 */
   public static final String KEY_DECEL = "decel";
 
-  /** 覆盖项：最高速度。 */
-  public static final String KEY_MAX_SPEED = "max-bps";
+  /** 覆盖项：最高速度，可写单位（{@code 80kmh}、{@code 22bps}、{@code 1.1bpt}），不写单位时按格/秒。 */
+  public static final String KEY_MAX_SPEED = "max-speed";
+
+  /** 覆盖项：最高速度的旧写法，与 {@link #KEY_MAX_SPEED} 相同。 */
+  public static final String KEY_MAX_BPS = "max-bps";
 
   private ConsistPlanBook() {}
 
@@ -205,6 +209,9 @@ public final class ConsistPlanBook {
         continue;
       }
       String key = segment.substring(0, eq).trim().toLowerCase(Locale.ROOT);
+      if (key.equals(KEY_MAX_BPS)) {
+        key = KEY_MAX_SPEED;
+      }
       String value = segment.substring(eq + 1).trim();
       if (!keys.add(key)) {
         problems.add(new Problem(lineNo, ProblemKind.BAD_VALUE, segment));
@@ -228,7 +235,8 @@ public final class ConsistPlanBook {
           }
         }
         case KEY_ACCEL, KEY_DECEL, KEY_MAX_SPEED -> {
-          OptionalDouble parsed = parsePositive(value);
+          OptionalDouble parsed =
+              key.equals(KEY_MAX_SPEED) ? parseMaxSpeed(value) : parsePositive(value);
           if (parsed.isEmpty()) {
             problems.add(new Problem(lineNo, ProblemKind.BAD_VALUE, segment));
             failed = true;
@@ -267,6 +275,13 @@ public final class ConsistPlanBook {
     } catch (NumberFormatException ex) {
       return Optional.empty();
     }
+  }
+
+  /** 最高速度：可写单位，不写单位时按格/秒（与旧写法 {@code max-bps} 一致）。 */
+  private static OptionalDouble parseMaxSpeed(String token) {
+    return RailControlParsers.parseSpeed(token, "bps")
+        .map(speed -> OptionalDouble.of(speed.blocksPerSecond()))
+        .orElse(OptionalDouble.empty());
   }
 
   private static OptionalDouble parsePositive(String token) {

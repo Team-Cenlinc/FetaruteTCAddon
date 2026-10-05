@@ -13,6 +13,7 @@ import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsNearby;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
@@ -63,6 +64,187 @@ public final class TaskBoardSource {
             .map(StationDirectory.StationEntry::name)
             .orElse(key.stationCode());
     return Optional.of(new Station(key.operatorCode(), key.stationCode(), name));
+  }
+
+  /** 车站目录里的全部车站；目录未就绪时为空。 */
+  public static List<Station> stations(FetaruteTCAddon plugin) {
+    return plugin
+        .getStationDirectory()
+        .map(
+            directory ->
+                directory.snapshot().stations().stream()
+                    .map(entry -> new Station(entry.operator().code(), entry.code(), entry.name()))
+                    .toList())
+        .orElse(List.of());
+  }
+
+  /**
+   * 给任务板上的车次补上行程概要：终点站、停站数与按表的运行时长。查不到停靠表的保持原样。
+   *
+   * @param entries 已筛选好的任务板条目（只为要显示的这些查停靠表）
+   */
+  public static List<TaskBoardEntries.Entry> withTrips(
+      FetaruteTCAddon plugin, List<TaskBoardEntries.Entry> entries) {
+    Optional<TimetableService> timetables = plugin.getTimetableService();
+    if (timetables.isEmpty()) {
+      return entries;
+    }
+    List<TaskBoardEntries.Entry> result = new ArrayList<>(entries.size());
+    for (TaskBoardEntries.Entry entry : entries) {
+      Optional<TaskBoardEntries.Trip> trip =
+          tripOf(plugin, timetables.get(), entry.row().key(), entry.row().stopSequence());
+      result.add(trip.map(entry::withTrip).orElse(entry));
+    }
+    return result;
+  }
+
+  /**
+   * 一个车次从某一站起的行程概要：终点站、停站数与按表的运行时长。
+   *
+   * @param fromSequence 从哪一站（停靠序号）起算
+   * @return 查不到停靠表时为空
+   */
+  public static Optional<TaskBoardEntries.Trip> tripOf(
+      FetaruteTCAddon plugin, TimetableService timetables, TaskKey key, int fromSequence) {
+    return timetables
+        .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+        .flatMap(plan -> TaskTripSummary.of(stopsOf(plan), fromSequence))
+        .map(
+            summary ->
+                new TaskBoardEntries.Trip(
+                    stationName(plugin, summary.terminusCode(), summary.terminusNodeId()),
+                    summary.stopCount(),
+                    summary.runSeconds()));
+  }
+
+  /**
+   * 列车跑的车次当作驾驶员当场接下的任务：从停靠序号 {@code boardSequence} 起（不停的站往后顺延到第一个停车站）开到终点站。
+   *
+   * @param trainName 担当的列车
+   * @param source 来源标记（见 {@link DriverTask#SOURCE_TAKEOVER}、{@link DriverTask#SOURCE_CONTINUATION}）
+   * @return 查不到停靠表、或从这一站起已没有停车站时为空
+   */
+  public static Optional<DriverTaskManager.TaskSpec> tripSpec(
+      FetaruteTCAddon plugin,
+      TimetableService timetables,
+      TaskKey key,
+      int boardSequence,
+      String trainName,
+      String source) {
+    return timetables
+        .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+        .flatMap(
+            plan ->
+                plan.stops().stream()
+                    .filter(stop -> stop.stops() && stop.stopSequence() >= boardSequence)
+                    .findFirst()
+                    .map(
+                        board -> {
+                          String code = board.stationCode().orElse("");
+                          String operator =
+                              board
+                                  .nodeId()
+                                  .flatMap(RouteTerminals::stationIdentityOfNode)
+                                  .map(RouteTerminals.StationRef::operatorCode)
+                                  .orElse("");
+                          return new DriverTaskManager.TaskSpec(
+                              key,
+                              plan.routeCode(),
+                              operator,
+                              code,
+                              stationName(plugin, code, board.nodeId()),
+                              board.nodeId().orElse(null),
+                              board.stopSequence(),
+                              board.departure().or(board::arrival).orElseGet(Instant::now),
+                              trainName,
+                              -1,
+                              null,
+                              null,
+                              false,
+                              source,
+                              java.util.Map.of());
+                        }));
+  }
+
+  /**
+   * 驾驶证路考或练习的区间任务：从任务板上这一班的接班站起，开过 {@code stops} 个停车站后下车。
+   *
+   * @param station 接班站
+   * @param stops 要开过几个停车站
+   * @param source 来源（路考 {@link DriverTask#SOURCE_EXAM}，练习 {@link DriverTask#SOURCE_TRAINING}）
+   * @param metadata 附加数据（考的是哪一级）
+   * @return 查不到停靠表、或这一班后面的停车站不够时为空
+   */
+  public static Optional<DriverTaskManager.TaskSpec> examSpec(
+      FetaruteTCAddon plugin,
+      TimetableService timetables,
+      TaskBoardEntries.Row row,
+      Station station,
+      int stops,
+      String source,
+      java.util.Map<String, String> metadata) {
+    TaskKey key = row.key();
+    return timetables
+        .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+        .flatMap(
+            plan -> {
+              List<TimetableService.PlannedStop> ahead =
+                  plan.stops().stream()
+                      .filter(stop -> stop.stops() && stop.stopSequence() > row.stopSequence())
+                      .toList();
+              if (stops < 1 || ahead.size() < stops) {
+                return Optional.empty();
+              }
+              TimetableService.PlannedStop alight = ahead.get(stops - 1);
+              String code = alight.stationCode().orElse("");
+              return Optional.of(
+                  new DriverTaskManager.TaskSpec(
+                      key,
+                      plan.routeCode(),
+                      station.operatorCode(),
+                      station.stationCode(),
+                      station.name(),
+                      row.nodeId(),
+                      row.stopSequence(),
+                      row.plannedDeparture(),
+                      row.trainName(),
+                      alight.stopSequence(),
+                      code,
+                      stationName(plugin, code, alight.nodeId()),
+                      false,
+                      source,
+                      metadata));
+            });
+  }
+
+  private static List<TaskTripSummary.Stop> stopsOf(TimetableService.TripPlan plan) {
+    List<TaskTripSummary.Stop> stops = new ArrayList<>(plan.stops().size());
+    for (TimetableService.PlannedStop stop : plan.stops()) {
+      stops.add(
+          new TaskTripSummary.Stop(
+              stop.stopSequence(),
+              stop.stationCode(),
+              stop.nodeId(),
+              stop.stops(),
+              stop.arrival(),
+              stop.departure()));
+    }
+    return stops;
+  }
+
+  /** 站码对应的站名：运营商按节点确定；查不到时用站码。 */
+  private static String stationName(
+      FetaruteTCAddon plugin, String stationCode, Optional<String> nodeId) {
+    String operator =
+        nodeId
+            .flatMap(RouteTerminals::stationIdentityOfNode)
+            .map(RouteTerminals.StationRef::operatorCode)
+            .orElse("");
+    return plugin
+        .getStationDirectory()
+        .flatMap(directory -> directory.snapshot().findStation(operator, stationCode))
+        .map(StationDirectory.StationEntry::name)
+        .orElse(stationCode);
   }
 
   /**

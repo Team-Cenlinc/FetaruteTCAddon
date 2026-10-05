@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalDouble;
+import java.util.OptionalLong;
 import java.util.UUID;
 import java.util.function.DoubleSupplier;
 import java.util.function.LongSupplier;
@@ -13,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
@@ -51,7 +53,11 @@ public final class DriverLink {
 
   private DriverStationStop lastStop;
   private final SignalConfirm signalConfirm = new SignalConfirm();
-  private final TaskScore score = new TaskScore();
+  private TaskScore score = new TaskScore();
+
+  /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
+  private DriverStationStop settledStop;
+
   private int vigilanceTrips;
   private long stuckTicks;
   private long heldTicks;
@@ -62,6 +68,20 @@ public final class DriverLink {
   private boolean departureConfirmed;
   private int lateDepartures;
 
+  /** 停站将尽、开始接受提前确认发车时的里程；没有开始时为 NaN。列车一动即失效。 */
+  private double departureArmOdometer = Double.NaN;
+
+  /** 提前确认发车时的里程；没有提前确认时为 NaN。列车一动即失效。 */
+  private double preConfirmOdometer = Double.NaN;
+
+  /** 站台放行时的里程与 tick：刚放行的一小段时间里同一处不再开始接受确认（毫秒计的剩余停站与按 tick 计的停站可能差一秒）。 */
+  private double departureReleasedOdometer = Double.NaN;
+
+  private long departureReleasedTick = Long.MIN_VALUE;
+
+  /** 放行后多久（tick）内原地不再开始接受确认；之后原地再停站（终点原地折返）照常接受。 */
+  private static final long RELEASE_REARM_GUARD_TICKS = 100L;
+
   private DriverDoorSide requiredDoorSide = DriverDoorSide.NONE;
   private String targetLabel = "";
   private String nextStopLabel = "";
@@ -70,10 +90,17 @@ public final class DriverLink {
   private boolean turnbackPending;
   private int announcedStops;
   private DriverSchedule schedule;
+  private DriverPass nextPass;
+  private boolean terminalAhead;
+  private DriverStationStop terminalStop;
+  private DriverNextTrip nextTrip;
+  private UUID announcedNextTrip;
 
   private int serviceInterventions;
   private int emergencyInterventions;
   private int forcedStops;
+  private long blockingSeconds;
+  private DriverCongestion.Stage congestionStage = DriverCongestion.Stage.NONE;
 
   /**
    * @param odometer 驾驶会话累计走过的距离（格）
@@ -123,6 +150,8 @@ public final class DriverLink {
     lastDecision = null;
     signalConfirm.reset();
     clearDepartureHold();
+    departureArmOdometer = Double.NaN;
+    preConfirmOdometer = Double.NaN;
     if (handbackReason == null) {
       serviceStopRequested = false;
     }
@@ -290,7 +319,9 @@ public final class DriverLink {
         approachRemainingAtSample = Double.NaN;
       }
       lastStop = stationStop;
-      score.addStop(StopScore.of(stationStop));
+      if (stationStop != settledStop) {
+        score.addStop(StopScore.of(stationStop));
+      }
       if (stationStop.skipped()) {
         skippedStation = stationStop.stationName();
       }
@@ -323,6 +354,11 @@ public final class DriverLink {
         sampledAt,
         station ? Math.max(0.0, halfLengthBlocks) : 0.0,
         station ? StopAlignment.Reference.CENTER : StopAlignment.Reference.HEAD);
+  }
+
+  /** 这份诊断采样还没处理过：同一份采样每 tick 都会送来，调用方可以先用它省掉停车点查询。 */
+  public boolean isNewApproachSample(Instant sampledAt) {
+    return sampledAt != null && !sampledAt.equals(approachSampledAt);
   }
 
   /**
@@ -419,7 +455,9 @@ public final class DriverLink {
     if (stationStop != null && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
       // 停在站内就结束驾驶（到终点站、到下车站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
       lastStop = stationStop;
-      score.addStop(StopScore.of(stationStop));
+      if (stationStop != settledStop) {
+        score.addStop(StopScore.of(stationStop));
+      }
       stationStop = null;
     }
     score.setCounts(
@@ -432,6 +470,71 @@ public final class DriverLink {
         vigilanceTrips,
         lateDepartures);
     return score;
+  }
+
+  /**
+   * 终点站结算这一趟、接着开下一趟：把正在停的这一站记进本趟成绩（停站本身照常进行，不结束），写上计数后交出本趟成绩，再把成绩、计数与已报的停站数清零给下一趟。
+   *
+   * @return 本趟的成绩明细
+   */
+  public TaskScore settleTrip() {
+    stationStop();
+    if (stationStop != null
+        && stationStop != settledStop
+        && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
+      score.addStop(StopScore.of(stationStop));
+      settledStop = stationStop;
+    }
+    // 不走 finalizeScore：那会把正在停的这一站从链路上摘掉，终点站的停站显示与换端还要用它。
+    score.setCounts(
+        serviceInterventions,
+        emergencyInterventions,
+        forcedStops,
+        signalConfirm.confirmations(),
+        signalConfirm.misses(),
+        signalConfirm.averageReactionSeconds(),
+        vigilanceTrips,
+        lateDepartures);
+    TaskScore settled = score;
+    score = new TaskScore();
+    serviceInterventions = 0;
+    emergencyInterventions = 0;
+    forcedStops = 0;
+    vigilanceTrips = 0;
+    lateDepartures = 0;
+    signalConfirm.resetCounts();
+    announcedStops = 0;
+    return settled;
+  }
+
+  /**
+   * 到此刻为止的成绩估算：已停过的站（含正在停的这一站）、到此刻的介入与确认计数、此刻的晚点，按开到终点给评级。与结束时同一套规则。
+   *
+   * @param delayNowSeconds 此刻的晚点（秒）；查不到时为空
+   */
+  public ScoreRules.Result liveResult(OptionalLong delayNowSeconds) {
+    TaskScore live = new TaskScore();
+    for (StopScore stop : score.stops()) {
+      live.addStop(stop);
+    }
+    if (stationStop != null
+        && stationStop != settledStop
+        && stationStop.active()
+        && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
+      live.addStop(StopScore.of(stationStop));
+    }
+    live.setCounts(
+        serviceInterventions,
+        emergencyInterventions,
+        forcedStops,
+        signalConfirm.confirmations(),
+        signalConfirm.misses(),
+        signalConfirm.averageReactionSeconds(),
+        vigilanceTrips,
+        lateDepartures);
+    live.setDelayAtStart(score.delayAtStartSeconds());
+    live.setDelayAtEnd(delayNowSeconds);
+    return ScoreRules.evaluate(live, true);
   }
 
   /** 最近一次已结束的停站；还没停过时为空。 */
@@ -498,19 +601,28 @@ public final class DriverLink {
     long now = clock.getAsLong();
     if (departureHoldQueriedAt < 0L || now - departureHoldQueriedAt > DEPARTURE_QUERY_GAP_TICKS) {
       departureHoldSince = now;
-      departureConfirmed = false;
+      // 停站结束前已提前确认（之后列车没动过）：站台一问就放行，驾驶员的反应时间不算进停站。
+      departureConfirmed = stillAt(preConfirmOdometer);
+      preConfirmOdometer = Double.NaN;
     }
     departureHoldQueriedAt = now;
     if (departureConfirmed) {
-      clearDepartureHold();
+      releaseDeparture();
       return false;
     }
     if (now - departureHoldSince >= timeoutTicks) {
-      clearDepartureHold();
+      releaseDeparture();
       lateDepartures++;
       return false;
     }
     return true;
+  }
+
+  private void releaseDeparture() {
+    clearDepartureHold();
+    departureArmOdometer = Double.NaN;
+    departureReleasedOdometer = odometer.getAsDouble();
+    departureReleasedTick = clock.getAsLong();
   }
 
   private void clearDepartureHold() {
@@ -525,16 +637,51 @@ public final class DriverLink {
         && clock.getAsLong() - departureHoldQueriedAt <= DEPARTURE_QUERY_GAP_TICKS;
   }
 
-  /**
-   * 驾驶员确认发车。
-   *
-   * @return 站台确实在等确认
-   */
-  public boolean confirmDeparture() {
-    if (!departurePending()) {
+  /** 列车停着没动：离提前确认的位置不到这么多格。 */
+  private static final double STILL_BLOCKS = 1.0;
+
+  private boolean stillAt(double mark) {
+    return !Double.isNaN(mark) && Math.abs(odometer.getAsDouble() - mark) < STILL_BLOCKS;
+  }
+
+  /** ATO 下停站将尽（剩余停站不超过提前确认的秒数）：从此刻到列车起步，驾驶员都可以提前确认发车。由驾驶会话每 tick 判断后调用。 */
+  public void openDepartureArm() {
+    boolean justReleased =
+        stillAt(departureReleasedOdometer)
+            && clock.getAsLong() - departureReleasedTick < RELEASE_REARM_GUARD_TICKS;
+    if (mode == DrivingMode.ATO && !stillAt(departureArmOdometer) && !justReleased) {
+      departureArmOdometer = odometer.getAsDouble();
+    }
+  }
+
+  /** 驾驶员已确认发车，等站台放行（提前确认的或停站结束后确认的）。 */
+  public boolean departureConfirmed() {
+    return mode == DrivingMode.ATO
+        && (stillAt(preConfirmOdometer) || (departurePending() && departureConfirmed));
+  }
+
+  /** 要提示驾驶员确认发车：停站将尽或站台正在等，且还没确认。 */
+  public boolean departurePrompt() {
+    if (mode != DrivingMode.ATO || departureConfirmed()) {
       return false;
     }
-    departureConfirmed = true;
+    return departurePending() || stillAt(departureArmOdometer);
+  }
+
+  /**
+   * 驾驶员确认发车：站台正在等时立即放行；停站将尽时先记下，停站一结束就放行。
+   *
+   * @return 这次确认被接受（已确认过的不再算）
+   */
+  public boolean confirmDeparture() {
+    if (!departurePrompt()) {
+      return false;
+    }
+    if (departurePending()) {
+      departureConfirmed = true;
+    } else {
+      preConfirmOdometer = odometer.getAsDouble();
+    }
     return true;
   }
 
@@ -550,6 +697,15 @@ public final class DriverLink {
 
   public void setRequiredDoorSide(DriverDoorSide side) {
     this.requiredDoorSide = side == null ? DriverDoorSide.NONE : side;
+  }
+
+  /** 前方的停车站是本交路的终点站（或列车已停在终点站）：防护不许冲过可开门范围。 */
+  public boolean terminalAhead() {
+    return terminalAhead;
+  }
+
+  public void setTerminalAhead(boolean terminalAhead) {
+    this.terminalAhead = terminalAhead;
   }
 
   /** 前方停车点的站名（显示用）；没有时为空串。 */
@@ -591,6 +747,11 @@ public final class DriverLink {
     this.turnbackPending = pending;
   }
 
+  /** 列车停在终点站待命、派车还没放行（放行那一拍取走调头标记）。 */
+  public boolean turnbackPending() {
+    return turnbackPending;
+  }
+
   /** 取走调头标记：有标记时返回 true 并清除。 */
   public boolean takeTurnback() {
     boolean pending = turnbackPending;
@@ -621,6 +782,87 @@ public final class DriverLink {
 
   public void setSchedule(DriverSchedule schedule) {
     this.schedule = schedule;
+  }
+
+  /** 到下一个停车站之前的通过站与表定通过时刻；没有通过站或不按表运行时为空。 */
+  public Optional<DriverPass> nextPass() {
+    return Optional.ofNullable(nextPass);
+  }
+
+  public void setNextPass(DriverPass pass) {
+    this.nextPass = pass;
+  }
+
+  /** 认定这次停站是本交路的终点站停站（停站期间认定一次即可，之后不随显示层的判定闪动）。 */
+  public void markTerminalStop(DriverStationStop stop) {
+    this.terminalStop = stop;
+  }
+
+  /**
+   * 列车停在终点站、车门已开（不开门的站台停稳即算）：从这时起驾驶员就可以去换端。
+   *
+   * @return 不在终点站停站，或还在进站、等开门时为 {@code false}
+   */
+  public boolean atTerminalStop() {
+    return terminalStopNow().map(stop -> stop.phase().doorsOpened()).orElse(false);
+  }
+
+  /** 此刻的终点站停站；不在终点站停站时为空。 */
+  public Optional<DriverStationStop> terminalStopNow() {
+    return stationStop().filter(stop -> stop == terminalStop);
+  }
+
+  /** 列车本趟终到后接续担当的下一趟；不在终点站附近或查不到时为空。 */
+  public Optional<DriverNextTrip> nextTrip() {
+    return Optional.ofNullable(nextTrip);
+  }
+
+  public void setNextTrip(DriverNextTrip trip) {
+    this.nextTrip = trip;
+  }
+
+  /**
+   * 取走还没告诉过驾驶员的下一趟：同一趟只告诉一次。
+   *
+   * @return 已告诉过或没有下一趟时为空
+   */
+  public Optional<DriverNextTrip> takeNextTripAnnouncement() {
+    if (nextTrip == null || nextTrip.tripId().equals(announcedNextTrip)) {
+      return Optional.empty();
+    }
+    announcedNextTrip = nextTrip.tripId();
+    return Optional.of(nextTrip);
+  }
+
+  /**
+   * 记下后车被这列车直接挡住的时长，返回新到达的处置档位（每档只返回一次；不再挡住时清零）。
+   *
+   * @return 这一次新到达的档位；没有新档位时为 {@link DriverCongestion.Stage#NONE}
+   */
+  public DriverCongestion.Stage updateBlocking(long seconds, DriverRecovery recovery) {
+    blockingSeconds = Math.max(0L, seconds);
+    DriverCongestion.Stage stage = DriverCongestion.stage(blockingSeconds, recovery);
+    if (stage == DriverCongestion.Stage.NONE) {
+      congestionStage = DriverCongestion.Stage.NONE;
+      return DriverCongestion.Stage.NONE;
+    }
+    if (stage.ordinal() <= congestionStage.ordinal()) {
+      return DriverCongestion.Stage.NONE;
+    }
+    congestionStage = stage;
+    return stage;
+  }
+
+  /** 后车被这列车挡住、已经提醒过驾驶员时，被挡了多少秒；没有提醒时为 0。 */
+  public long warnedBlockingSeconds() {
+    return congestionStage == DriverCongestion.Stage.NONE ? 0L : blockingSeconds;
+  }
+
+  /** 已到达的处置档位要等列车停着才能执行（转 ATO）时，退回上一档，下一次评估再试。 */
+  public void deferCongestionStage() {
+    if (congestionStage == DriverCongestion.Stage.ATO) {
+      congestionStage = DriverCongestion.Stage.WARN;
+    }
   }
 
   public int serviceInterventions() {

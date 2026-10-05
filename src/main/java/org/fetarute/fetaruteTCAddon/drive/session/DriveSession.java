@@ -2,28 +2,43 @@ package org.fetarute.fetaruteTCAddon.drive.session;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.List;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.UUID;
+import java.util.function.DoubleUnaryOperator;
 import org.bukkit.inventory.ItemStack;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabTick;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.SignalConfirm;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveDynamics;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.NotchSelector;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
+import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
+import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
 
 /**
  * 一名驾驶员对一列车的手动驾驶会话。
@@ -61,11 +76,18 @@ public final class DriveSession {
     /** 驾驶调度列车：任务完成。 */
     TASK_COMPLETE,
     /** 驾驶调度列车：卡住太久，被看门狗收回。 */
-    WATCHDOG
+    WATCHDOG,
+    /** 驾驶调度列车：折返换端没能在时限内坐进前端驾驶室，交还自动运行发车。 */
+    CAB_CHANGE_TIMEOUT,
+    /** 驾驶调度列车：列车按交路开到收车地点（通常是车库）正常收车，驾驶正常结束。 */
+    SERVICE_END
   }
 
   private static final double TICKS_PER_SECOND = 20.0;
   private static final double STEP_SECONDS = 1.0 / TICKS_PER_SECOND;
+
+  /** 最高速度的变化小于它（格/秒）视为没变。 */
+  private static final double TOP_SPEED_EPS_BPS = 0.01;
 
   /** 车厢实际速度低于它（blocks/tick）视为停住，与 TrainCarts 的 launch 判定相同。 */
   private static final double STALLED_BPT = 0.001;
@@ -78,6 +100,9 @@ public final class DriveSession {
 
   /** 驾驶员离座或已离开时列车自动使用的常用制动档。 */
   private static final Notch UNATTENDED_NOTCH = Notch.B3;
+
+  /** 失效导向安全的制动：制动力不打折。 */
+  private static final DoubleUnaryOperator FULL_BRAKE = demand -> 1.0;
 
   /** 两次调头之间至少间隔的 tick，防止座位序号判断异常时来回调头。 */
   private static final int MIN_REVERSE_INTERVAL_TICKS = 10;
@@ -108,6 +133,10 @@ public final class DriveSession {
   private long seatLostSinceTick = -1;
   private long groupMissingSinceTick = -1;
   private double lastCapBps;
+
+  /** 最近一次为跟随信号抬高到的最高速度（格/秒）。 */
+  private double raisedTopBps;
+
   private final SpeedLimitTracker speedLimit;
   private final TrainSetup setup;
   private final CabSystems cab;
@@ -118,6 +147,31 @@ public final class DriveSession {
   private DriverStationStop.Phase lastStationPhase;
   private DriverLink driverLink;
   private double odometerBlocks;
+  private boolean adviceBraking;
+  private ScoreRules.Result liveScore;
+  private long endArmedUntilTick = Long.MIN_VALUE;
+  private final CabChange cabChange = new CabChange();
+  private CabSeatKey pendingCabSeat;
+  private CabSeatKey confirmedCabSeat;
+
+  /** 超级电容车的储能；别的受电方式为空。 */
+  private final SuperCapacitor supercap;
+
+  /** 上一次报过的电量状态（跨越时提示一次）。 */
+  private SuperCapacitor.Level reportedSupercapLevel = SuperCapacitor.Level.NORMAL;
+
+  /** 待报的电量事件，见 {@link #takeSupercapEvent()}。 */
+  private SupercapEvent pendingSupercapEvent;
+
+  /** 超级电容要提示驾驶员的事件。 */
+  public enum SupercapEvent {
+    /** 电量低于预警线。 */
+    LOW,
+    /** 电量耗尽，牵引切除。 */
+    DEPLETED,
+    /** 停站充满。 */
+    CHARGED
+  }
 
   /** 不需要启动流程的会话（列车已就绪）。 */
   public DriveSession(
@@ -161,6 +215,20 @@ public final class DriveSession {
     this.hotbar = List.copyOf(hotbar);
     this.rewriter = new HotbarRewriter<>(this.hotbar, () -> menuTopSize);
     this.speedLimit = new SpeedLimitTracker(config.speedLimitOverride());
+    this.supercap =
+        setup.supply().storesEnergy() ? new SuperCapacitor(config.supercap(), 1.0) : null;
+  }
+
+  /** 超级电容车的储能；别的受电方式为空。 */
+  public Optional<SuperCapacitor> supercap() {
+    return Optional.ofNullable(supercap);
+  }
+
+  /** 取出并清除待报的电量事件；没有时为空。 */
+  public Optional<SupercapEvent> takeSupercapEvent() {
+    SupercapEvent event = pendingSupercapEvent;
+    pendingSupercapEvent = null;
+    return Optional.ofNullable(event);
   }
 
   public UUID playerId() {
@@ -228,20 +296,85 @@ public final class DriveSession {
   /**
    * 当前生效的档位。
    *
-   * <p>驾驶员在座时取手柄档位；制动停车阶段或驾驶员暂时离座时取自动制动档。牵引档在{@link #tractionBlocked() 牵引被封锁}时按惰行处理， 制动不受影响。
+   * <p>驾驶员在座时取手柄档位；制动停车阶段、驾驶员暂时离座或正在折返换端时取自动制动档。牵引档在{@link #tractionBlocked() 牵引被封锁}时按惰行处理， 制动不受影响。
    */
   public Notch notch() {
-    if (phase != Phase.ACTIVE || !seated) {
+    if (!attended()) {
       return UNATTENDED_NOTCH;
     }
     Notch current = selector.current();
     return current.isTraction() && tractionBlocked() ? Notch.N : current;
   }
 
-  /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（停放制动、风压、制动试验）。 */
+  /** 驾驶员在驾驶室操纵：会话驾驶中、在座，且不在折返换端途中（换端时坐在原来那一端也不算在岗）。 */
+  private boolean attended() {
+    return phase == Phase.ACTIVE && seated && !cabChange.holding();
+  }
+
+  /** 换端判定读到的驾驶室座位（要逐节看座位附件的名字），连同读时的编组、节数与 tick：尽头式待命可能持续几分钟，不必每 tick 重读。 */
+  public record CabSeatsMemo(MinecartGroup group, int size, long tick, CabSeats seats) {}
+
+  /** 换端判定查到的计划发车（终点待命时要查下一趟），连同查时的 tick 与是否待命；查不到时为 {@code null}。 */
+  public record PlannedDepartureMemo(long tick, boolean layover, java.time.Instant planned) {}
+
+  private CabSeatsMemo cabSeatsMemo;
+  private PlannedDepartureMemo plannedDepartureMemo;
+
+  /** 上次找到的编组：按列车名找要遍历全服编组，每 tick 都找时先看它还在不在、名字对不对。 */
+  private MinecartGroup lastGroup;
+
+  public MinecartGroup lastGroup() {
+    return lastGroup;
+  }
+
+  public void setLastGroup(MinecartGroup group) {
+    this.lastGroup = group;
+  }
+
+  public CabSeatsMemo cabSeatsMemo() {
+    return cabSeatsMemo;
+  }
+
+  public void setCabSeatsMemo(CabSeatsMemo memo) {
+    this.cabSeatsMemo = memo;
+  }
+
+  public PlannedDepartureMemo plannedDepartureMemo() {
+    return plannedDepartureMemo;
+  }
+
+  public void setPlannedDepartureMemo(PlannedDepartureMemo memo) {
+    this.plannedDepartureMemo = memo;
+  }
+
+  /** 折返换端的进度。 */
+  public CabChange cabChange() {
+    return cabChange;
+  }
+
+  /** 驾驶座没有标记的列车上，等驾驶员确认的座位（换端时坐进了要换到的那一端）；不在等确认时为空。 */
+  public Optional<CabSeatKey> pendingCabSeat() {
+    return Optional.ofNullable(pendingCabSeat);
+  }
+
+  public void setPendingCabSeat(CabSeatKey seat) {
+    this.pendingCabSeat = seat;
+  }
+
+  /** 驾驶员确认过的驾驶座。 */
+  public Optional<CabSeatKey> confirmedCabSeat() {
+    return Optional.ofNullable(confirmedCabSeat);
+  }
+
+  public void setConfirmedCabSeat(CabSeatKey seat) {
+    this.confirmedCabSeat = seat;
+  }
+
+  /** 牵引是否被封锁：列车尚未启动、换向手柄在空挡、有车门没关（含关门动画还没放完），或 simulation 级的车上系统不允许（故障、停放制动、制动管、风压、制动试验）。 */
   public boolean tractionBlocked() {
     return !setup.ready()
         || cab.tractionBlock().isPresent()
+        || (supercap != null && supercap.depleted())
         || reverser == ReverserPosition.NEUTRAL
         || anyDoorOpen()
         || doorsClosing(lastAdvanceTick);
@@ -287,6 +420,89 @@ public final class DriveSession {
     return speedLimit.displayLimitBps(lastCapBps);
   }
 
+  /**
+   * 驾驶调度列车时，信号允许的速度高于车辆最高速度就跟上去：编表与自动运行都只受线路与信号限制，人工驾驶也不该比它们慢。 超速仍由车载防护按信号管着。抬高时一并抬高 TrainCarts
+   * 的限速属性（它是硬上限）；只在允许速度升高时抬，不跟牌子改的限速来回争。
+   */
+  private void raiseTopSpeed(TrainProperties properties) {
+    double top = dynamics.params().maxSpeedBps();
+    DriverLink link = driverLink;
+    if (link != null && link.controlsPhysically() && link.directive() != null) {
+      double permitted = link.directive().permittedBps();
+      if (Double.isFinite(permitted) && permitted > top) {
+        top = permitted;
+      }
+    }
+    dynamics.setTopSpeedBps(top);
+    if (!(top > raisedTopBps + TOP_SPEED_EPS_BPS)) {
+      raisedTopBps = Math.min(raisedTopBps, top);
+      return;
+    }
+    raisedTopBps = top;
+    double wanted = top / TICKS_PER_SECOND;
+    if (properties.getSpeedLimit() < wanted) {
+      properties.setSpeedLimit(wanted);
+      speedLimit.guard(wanted);
+    }
+  }
+
+  /**
+   * 超级电容：停稳且开着车门时充电（升降弓由站台上的 TC 牌子负责），否则按本步的牵引与常用制动耗电、再生。电量跨越预警线、耗尽、充满时记一个事件。
+   *
+   * @param failSafe 本步是失效导向安全的制动（紧急、停放、无人）：不再生
+   * @param mainCircuit 主电路是否接通：断开时没有电制动，不再生
+   */
+  private void tickSupercap(
+      boolean failSafe, boolean mainCircuit, double tractionScale, double speedBefore) {
+    if (supercap == null) {
+      return;
+    }
+    boolean wasFull = supercap.full();
+    if (isStopped() && anyDoorOpen()) {
+      supercap.charge(STEP_SECONDS);
+      if (!wasFull && supercap.full()) {
+        pendingSupercapEvent = SupercapEvent.CHARGED;
+      }
+    } else {
+      supercap.stopCharging();
+      double effort = dynamics.effort();
+      double traction =
+          effort > 0.0 ? effort * dynamics.params().accelBps2() * clampScale(tractionScale) : 0.0;
+      double brake =
+          effort < 0.0 && !failSafe && mainCircuit ? -effort * dynamics.params().decelBps2() : 0.0;
+      supercap.drive(traction, brake, speedBefore, STEP_SECONDS);
+    }
+    SuperCapacitor.Level level = supercap.level();
+    if (level != reportedSupercapLevel) {
+      if (level == SuperCapacitor.Level.DEPLETED) {
+        pendingSupercapEvent = SupercapEvent.DEPLETED;
+      } else if (level == SuperCapacitor.Level.LOW
+          && reportedSupercapLevel == SuperCapacitor.Level.NORMAL) {
+        pendingSupercapEvent = SupercapEvent.LOW;
+      }
+      reportedSupercapLevel = level;
+    }
+  }
+
+  /** 会话结束：不再充电。 */
+  public void stopCharging() {
+    if (supercap != null) {
+      supercap.stopCharging();
+    }
+  }
+
+  /** 接管时按列车上保存的电量开始，并按它定下已报过的状态（不在上车时补报“电量低”）。 */
+  public void restoreSupercap(double fraction) {
+    if (supercap != null) {
+      supercap.reset(fraction);
+      reportedSupercapLevel = supercap.level();
+    }
+  }
+
+  private static double clampScale(double scale) {
+    return Double.isNaN(scale) ? 1.0 : Math.max(0.0, Math.min(1.0, scale));
+  }
+
   /** 上一次记进诊断日志的停站阶段（只用于在阶段变化时记一条）。 */
   public DriverStationStop.Phase lastStationPhase() {
     return lastStationPhase;
@@ -321,6 +537,118 @@ public final class DriveSession {
     if (blocks > 0.0 && Double.isFinite(blocks)) {
       odometerBlocks += blocks;
     }
+  }
+
+  /**
+   * 算此刻的行车引导：前方目标、距离、建议速度与是否提示开始制动（回差按上一次的结论）。
+   *
+   * <p>ATO 下调度不向驾驶员下发行车许可，只按前方停车点给目标与距离，不给建议速度、不提示制动。
+   *
+   * @return 驾驶非调度列车时为空
+   */
+  public Optional<DriverGuidance.Advice> updateGuidance(DriverGuidanceConfig guidance) {
+    DriverLink link = driverLink;
+    if (link == null) {
+      adviceBraking = false;
+      return Optional.empty();
+    }
+    boolean physically = link.controlsPhysically();
+    DriverDirective directive = physically ? link.directive() : null;
+    DriverProtection.Decision decision = physically ? link.lastDecision() : null;
+    double permitted =
+        decision != null
+            ? decision.permittedBps()
+            : directive != null ? directive.permittedBps() : speedBps();
+    double requested = directive == null ? Double.POSITIVE_INFINITY : directive.requestedBps();
+    // 停车信号没给距离（就地停车）按停车点就在车头处。
+    double stopSignal =
+        directive != null && directive.isStop()
+            ? directive.distanceBlocks().isPresent() ? link.authorityAheadBlocks() : 0.0
+            : Double.NaN;
+    List<SignalLookahead.EdgeSpeedConstraint> edges =
+        directive == null || directive.envelope() == null
+            ? List.of()
+            : directive.envelope().edgeLimits();
+    DriverLink.StationTarget station = link.stationTarget().orElse(null);
+    double serviceDecel =
+        dynamics.params().decelBps2() * config.brakeFraction(Notch.B4) * cab.brakeScale();
+    DriverGuidance.Advice advice =
+        DriverGuidance.evaluate(
+            new DriverGuidance.Input(
+                speedBps(),
+                isStopped(),
+                requested,
+                permitted,
+                stopSignal,
+                station == null ? Double.NaN : station.remainingBlocks(),
+                edges,
+                link.travelledSinceDirective(),
+                serviceDecel,
+                1.0 / (2.0 * config.effortRatePerSecond()),
+                config.driver().stopMarginBlocks(),
+                adviceBraking),
+            guidance);
+    if (!physically && advice.brake()) {
+      advice = new DriverGuidance.Advice(advice.target(), advice.suggestedBps(), false);
+    }
+    adviceBraking = advice.brake();
+    return Optional.of(advice);
+  }
+
+  /**
+   * 这一帧给提示音用的驾驶状态。
+   *
+   * @param advice 这一帧的行车引导；驾驶非调度列车时为 {@code null}
+   */
+  public DriveCueTracker.Snapshot cueSnapshot(DriverGuidance.Advice advice) {
+    DriverLink link = driverLink;
+    boolean physically = link == null || link.controlsPhysically();
+    boolean overspeedRed =
+        physically
+            && OverspeedLevel.classify(speedBps(), displayLimitBps(), overspeedRedRatio())
+                == OverspeedLevel.OVER;
+    if (link == null) {
+      return new DriveCueTracker.Snapshot(
+          false, -1, DriverProtection.Intervention.NONE, overspeedRed, false, null, false);
+    }
+    DriverDirective directive = physically ? link.directive() : null;
+    int aspectRank =
+        directive == null
+            ? -1
+            : switch (directive.aspect()) {
+              case PROCEED -> 0;
+              case PROCEED_WITH_CAUTION -> 1;
+              case CAUTION -> 2;
+              case STOP -> 3;
+            };
+    DriverProtection.Decision decision = physically ? link.lastDecision() : null;
+    return new DriveCueTracker.Snapshot(
+        physically && link.signalConfirm().pending(),
+        aspectRank,
+        decision == null ? DriverProtection.Intervention.NONE : decision.intervention(),
+        overspeedRed,
+        advice != null && advice.brake(),
+        link.stationStop().map(DriverStationStop::phase).orElse(null),
+        link.departurePrompt());
+  }
+
+  /** 驾驶调度列车时到此刻为止的成绩估算（侧边栏显示）；还没算过时为空。 */
+  public Optional<ScoreRules.Result> liveScore() {
+    return Optional.ofNullable(liveScore);
+  }
+
+  public void setLiveScore(ScoreRules.Result result) {
+    this.liveScore = result;
+  }
+
+  /** 驾驶台的“结束驾驶”按钮点过一次，等再次点击确认，直到 {@code untilTick}。 */
+  public void armEnd(long untilTick) {
+    this.endArmedUntilTick = untilTick;
+  }
+
+  /** “结束驾驶”是否在等再次点击确认。 */
+  public boolean endArmed(long nowTick) {
+    return nowTick < endArmedUntilTick;
   }
 
   /** 让正在运行的控车动作自行退出（转为 ATO 时由自动运行接着操纵）。 */
@@ -387,6 +715,11 @@ public final class DriveSession {
     Vigilance.Event event = pendingVigilanceEvent;
     pendingVigilanceEvent = Vigilance.Event.NONE;
     return event;
+  }
+
+  /** 本会话的仿真等级（会话开始时定下，玩家自选的或 drive.yml 的）。 */
+  public SimulationLevel level() {
+    return config.level();
   }
 
   /** 本会话启动流程的操作方式（取会话开始时的仿真等级）。 */
@@ -623,9 +956,10 @@ public final class DriveSession {
     }
     lastAdvanceTick = nowTick;
     var properties = group.getProperties();
+    raiseTopSpeed(properties);
     lastCapBps =
         speedLimit.onTick(
-            properties.getSpeedLimit(), dynamics.params().maxSpeedBps(), properties::setSpeedLimit);
+            properties.getSpeedLimit(), dynamics.topSpeedBps(), properties::setSpeedLimit);
     detectStall(group);
     Notch effective = notch();
     boolean parkingBraking = cab.enabled() && cab.air().parkingApplied() && !isStopped();
@@ -636,18 +970,38 @@ public final class DriveSession {
     if (driverLink != null && driverLink.controlsPhysically()) {
       effective = superviseDriver(effective, nowTick);
     }
-    // 失效导向安全：紧急制动、无人驾驶时的自动制动与停放制动不靠主风缸，不随风压打折。
-    boolean failSafe = effective == Notch.EB || parkingBraking || phase != Phase.ACTIVE || !seated;
-    dynamics.step(STEP_SECONDS, effective, lastCapBps, failSafe ? 1.0 : cab.brakeScale());
+    // 失效导向安全：紧急制动、无人驾驶时（含折返换端途中）的自动制动与停放制动不靠主风缸，不随风压打折，也不用电制动。
+    boolean failSafe = effective == Notch.EB || parkingBraking || !attended();
+    boolean mainCircuit = setup.mainCircuitPowered();
+    double speedBefore = dynamics.speedBps();
+    double tractionScale = cab.tractionScale(speedBefore);
+    dynamics.step(
+        STEP_SECONDS,
+        effective,
+        lastCapBps,
+        tractionScale,
+        failSafe ? FULL_BRAKE : demand -> cab.serviceBrakeScale(demand, speedBefore, mainCircuit));
     odometerBlocks += dynamics.speedBps() * STEP_SECONDS;
+    tickSupercap(failSafe, mainCircuit, tractionScale, speedBefore);
+    boolean attended = attended();
     Vigilance.Event event =
         cab.tick(
             nowTick,
             STEP_SECONDS,
-            setup.state(SetupSystem.AUX) == TrainSetup.State.ON,
-            Math.max(0.0, -dynamics.effort()),
-            isStopped(),
-            phase == Phase.ACTIVE && seated);
+            new CabTick(
+                setup.state(SetupSystem.AUX) == TrainSetup.State.ON,
+                mainCircuit,
+                Math.max(0.0, -dynamics.effort()),
+                failSafe,
+                effective == Notch.EB,
+                speedBefore,
+                isStopped(),
+                attended,
+                setup.ready()));
+    if (cab.takeEmergencyRequest()) {
+      // 制动管失压：紧急制动，停稳前不能缓解。
+      selector.force(Notch.EB);
+    }
     if (event == Vigilance.Event.TRIPPED && driverLink != null) {
       driverLink.countVigilanceTrip();
     }
@@ -704,11 +1058,12 @@ public final class DriveSession {
                 link.travelledSinceDirective(),
                 serviceDecel,
                 emergencyDecel,
-                1.0 / (2.0 * config.effortRatePerSecond()),
+                1.0 / (2.0 * config.effortRatePerSecond()) + cab.serviceApplyLagSeconds(),
                 link.serviceStopRequested(),
                 link.serviceLatched(),
                 station == null ? Double.NaN : station.remainingBlocks(),
-                station != null && station.precise()),
+                station != null && station.precise(),
+                station != null && link.terminalAhead()),
             config.driver());
     link.recordDecision(decision);
     if (decision.handbackRequested()) {

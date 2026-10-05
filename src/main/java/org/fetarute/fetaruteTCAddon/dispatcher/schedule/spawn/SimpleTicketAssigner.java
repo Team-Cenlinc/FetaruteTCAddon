@@ -44,6 +44,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -2843,6 +2844,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *   <li>CREATE/RETURN 发车成功：{@code FTA_OP_TRIPS=0}
    *   <li>若 route 绑定了交路组，写入 {@code FTA_SPAWN_GROUP}
    *   <li>若交路组配置了 {@code maxOperationTrips}，写入 {@code FTA_OP_MAX}
+   *   <li>按当前车种配置刷新出车写入的加减速标签（{@link SpawnMotionTags}；用户设定的不动）
    * </ul>
    */
   private void applyDispatchLifecycleTags(
@@ -2867,6 +2869,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     TrainProperties properties = TrainPropertiesStore.get(trainName);
     if (properties == null) {
       return;
+    }
+    // 折返复用接下一趟：驾驶员接管时同样按调度控车同一组加减速开车；配置重载后出车写下的值也在这里跟上。
+    if (SpawnMotionTags.stamp(properties, configManager.current())
+        == SpawnMotionTags.Outcome.FAILED) {
+      debugLogger.accept("复用写入加减速标签失败 train=" + trainName);
     }
 
     int currentTrips = TrainTagHelper.readIntTag(properties, TAG_OPERATION_TRIPS).orElse(0);

@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.command;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
+import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
@@ -9,10 +11,17 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
@@ -21,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardStations;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
@@ -28,18 +38,18 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.parser.standard.StringParser;
+import org.incendo.cloud.permission.Permission;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
  * /fta drive 命令注册。
  *
- * <p>玩家坐在列车座位上执行 {@code /fta drive on} 开始手动驾驶，{@code /fta drive off} 结束。
+ * <p>玩家坐在列车座位上执行 {@code /fta drive on} 开始手动驾驶，{@code /fta drive off} 结束。各子命令要求的权限节点见 {@link
+ * DrivePermissions}：命令注册、Tab 补全与帮助都按它过滤。
  */
 public final class FtaDriveCommand {
 
-  private static final String PERMISSION = "fetarute.drive";
-  private static final String PERMISSION_ADMIN = "fetarute.drive.admin";
-  private static final String PERMISSION_DRIVER = DriveSessionManager.PERMISSION_DRIVER;
+  private static final String PERMISSION_ADMIN = DrivePermissions.ADMIN;
   private static final double KMH_PER_BPS = 3.6;
   private static final int RECORD_LINES = 10;
   private static final java.time.format.DateTimeFormatter TIME =
@@ -85,11 +95,26 @@ public final class FtaDriveCommand {
               return names;
             });
 
+    SuggestionProvider<CommandSender> trainSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> {
+              List<String> names = new ArrayList<>();
+              for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+                if (group != null && group.isValid()) {
+                  names.add(group.getProperties().getTrainName());
+                }
+              }
+              return names;
+            });
+    SuggestionProvider<CommandSender> stationSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)));
+
     manager.command(
         manager
             .commandBuilder("fta")
             .literal("drive")
-            .permission(PERMISSION)
+            .permission(anyOf(DrivePermissions.anyCommand()))
             .handler(ctx -> sendHelp(ctx.sender())));
 
     manager.command(
@@ -97,7 +122,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("on")
-            .permission(PERMISSION)
+            .permission(permissionOf("on"))
             .handler(ctx -> handleOn(ctx.sender())));
 
     manager.command(
@@ -105,7 +130,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("off")
-            .permission(PERMISSION)
+            .permission(permissionOf("off"))
             .handler(ctx -> handleOff(ctx.sender())));
 
     manager.command(
@@ -113,7 +138,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("status")
-            .permission(PERMISSION)
+            .permission(permissionOf("status"))
             .handler(ctx -> handleStatus(ctx.sender())));
 
     manager.command(
@@ -121,7 +146,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("reverser")
-            .permission(PERMISSION)
+            .permission(permissionOf("reverser"))
             .required("direction", StringParser.stringParser(), directionSuggestions)
             .handler(ctx -> handleReverser(ctx.sender(), ((String) ctx.get("direction")).trim())));
 
@@ -130,7 +155,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("list")
-            .permission(PERMISSION_ADMIN)
+            .permission(permissionOf("list"))
             .handler(ctx -> handleList(ctx.sender())));
 
     manager.command(
@@ -138,7 +163,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("stop")
-            .permission(PERMISSION_ADMIN)
+            .permission(permissionOf("stop"))
             .required("player", StringParser.stringParser(), driverSuggestions)
             .handler(ctx -> handleStop(ctx.sender(), ((String) ctx.get("player")).trim())));
 
@@ -147,15 +172,33 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("tasks")
-            .permission(PERMISSION_DRIVER)
-            .handler(ctx -> handleTasks(ctx.sender())));
+            .permission(permissionOf("tasks"))
+            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .handler(
+                ctx -> handleTasks(ctx.sender(), ctx.optional("station").map(String.class::cast))));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("tutorial")
+            .permission(permissionOf("tutorial"))
+            .optional(
+                "action",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("start", "stop", "reset", "skip"))
+            .handler(
+                ctx ->
+                    handleTutorial(
+                        ctx.sender(),
+                        ctx.optional("action").map(String.class::cast).orElse("start"))));
 
     manager.command(
         manager
             .commandBuilder("fta")
             .literal("drive")
             .literal("task")
-            .permission(PERMISSION_DRIVER)
+            .permission(permissionOf("task"))
             .optional(
                 "action",
                 StringParser.stringParser(),
@@ -171,7 +214,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("records")
-            .permission(PERMISSION_DRIVER)
+            .permission(permissionOf("records"))
             .optional("player", StringParser.stringParser())
             .handler(
                 ctx ->
@@ -184,7 +227,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("top")
-            .permission(PERMISSION_DRIVER)
+            .permission(permissionOf("top"))
             .optional(
                 "period",
                 StringParser.stringParser(),
@@ -200,7 +243,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("revoke")
-            .permission(PERMISSION_ADMIN)
+            .permission(permissionOf("revoke"))
             .required("player", StringParser.stringParser(), driverSuggestions)
             .handler(ctx -> handleRevoke(ctx.sender(), ((String) ctx.get("player")).trim())));
 
@@ -209,7 +252,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("mode")
-            .permission(PERMISSION_DRIVER)
+            .permission(permissionOf("mode"))
             .required(
                 "mode",
                 StringParser.stringParser(),
@@ -221,7 +264,7 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("breaker")
-            .permission(PERMISSION_ADMIN)
+            .permission(permissionOf("breaker"))
             .optional(
                 "action",
                 StringParser.stringParser(),
@@ -237,41 +280,86 @@ public final class FtaDriveCommand {
             .commandBuilder("fta")
             .literal("drive")
             .literal("handback")
-            .permission(PERMISSION_ADMIN)
+            .permission(permissionOf("handback"))
             .required("target", StringParser.stringParser(), handbackSuggestions)
             .handler(ctx -> handleHandback(ctx.sender(), ((String) ctx.get("target")).trim())));
+
+    List<String> faultTypes = new ArrayList<>();
+    for (CabFault fault : CabFault.values()) {
+      faultTypes.add(fault.key());
+    }
+    faultTypes.add("clear");
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("fault")
+            .permission(PERMISSION_ADMIN)
+            .required("player", StringParser.stringParser(), driverSuggestions)
+            .required(
+                "type",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings(faultTypes))
+            .handler(
+                ctx ->
+                    handleFault(
+                        ctx.sender(),
+                        ((String) ctx.get("player")).trim(),
+                        ((String) ctx.get("type")).trim())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("rescue")
+            .permission(PERMISSION_ADMIN)
+            .required("train", StringParser.stringParser(), trainSuggestions)
+            .optional(
+                "action",
+                StringParser.stringParser(),
+                SuggestionProvider.suggestingStrings("destroy"))
+            .handler(
+                ctx ->
+                    handleRescue(
+                        ctx.sender(),
+                        ((String) ctx.get("train")).trim(),
+                        ctx.optional("action")
+                            .map(String.class::cast)
+                            .map(action -> action.equalsIgnoreCase("destroy"))
+                            .orElse(false))));
 
     manager.command(
         manager
             .commandBuilder("fta")
             .literal("drive")
             .literal("probe")
-            .permission(PERMISSION_ADMIN)
+            .permission(permissionOf("probe"))
             .optional("state", StringParser.stringParser(), toggleSuggestions)
             .handler(
                 ctx -> handleProbe(ctx.sender(), ctx.optional("state").map(String.class::cast))));
   }
 
+  /** 子命令要求的节点（满足任一即可）。 */
+  private static Permission permissionOf(String subcommand) {
+    return anyOf(DrivePermissions.of(subcommand));
+  }
+
+  private static Permission anyOf(List<String> nodes) {
+    if (nodes.size() == 1) {
+      return Permission.of(nodes.get(0));
+    }
+    List<Permission> permissions = new ArrayList<>(nodes.size());
+    for (String node : nodes) {
+      permissions.add(Permission.of(node));
+    }
+    return Permission.anyOf(permissions);
+  }
+
+  /** 帮助只列出有权限使用的子命令。 */
   private void sendHelp(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("drive.command.help.header"));
-    for (String entry :
-        List.of(
-            "on",
-            "off",
-            "status",
-            "reverser",
-            "tasks",
-            "task",
-            "mode",
-            "records",
-            "top",
-            "revoke",
-            "list",
-            "stop",
-            "handback",
-            "breaker",
-            "probe")) {
+    for (String entry : DrivePermissions.visibleSubcommands(sender::hasPermission)) {
       sender.sendMessage(locale.component("drive.command.help.entry-" + entry));
     }
   }
@@ -410,8 +498,8 @@ public final class FtaDriveCommand {
             Map.of("player", playerName)));
   }
 
-  /** 打开最近车站的任务板。 */
-  private void handleTasks(CommandSender sender) {
+  /** 打开任务板：给了车站代码就是那一站，否则是玩家附近最近的车站。 */
+  private void handleTasks(CommandSender sender, Optional<String> stationArg) {
     Player player = requirePlayer(sender);
     if (player == null) {
       return;
@@ -434,19 +522,45 @@ public final class FtaDriveCommand {
       sender.sendMessage(locale.component("drive.task.claim.breaker-open"));
       return;
     }
-    Optional<TaskBoardSource.Station> station =
-        TaskBoardSource.nearestStation(plugin, player.getLocation());
-    if (station.isEmpty()) {
-      sender.sendMessage(locale.component("drive.task.board.no-station"));
-      return;
+    Optional<TaskBoardSource.Station> station;
+    if (stationArg.filter(arg -> !arg.isBlank()).isPresent()) {
+      String code = stationArg.get().trim();
+      TaskBoardStations.Lookup lookup =
+          TaskBoardStations.find(TaskBoardSource.stations(plugin), code);
+      if (lookup.outcome() == TaskBoardStations.Outcome.AMBIGUOUS) {
+        sender.sendMessage(
+            locale.component(
+                "drive.task.board.station-ambiguous",
+                Map.of("station", code, "candidates", String.join(", ", lookup.candidates()))));
+        return;
+      }
+      if (lookup.outcome() == TaskBoardStations.Outcome.NOT_FOUND) {
+        sender.sendMessage(
+            locale.component("drive.task.board.station-not-found", Map.of("station", code)));
+        sendStationChoices(sender, locale);
+        return;
+      }
+      station = lookup.station();
+    } else {
+      station = TaskBoardSource.nearestStation(plugin, player.getLocation());
+      if (station.isEmpty()) {
+        sender.sendMessage(locale.component("drive.task.board.no-station"));
+        sendStationChoices(sender, locale);
+        return;
+      }
     }
-    List<TaskBoardEntries.Row> rows =
-        TaskBoardEntries.select(
-            TaskBoardSource.departures(
-                plugin, station.get(), now, drive.config().driver().recovery().taskWindowMinutes()),
-            drive.tasks().takenKeys(),
-            now,
-            TaskBoard.ENTRY_SLOTS);
+    List<TaskBoardEntries.Entry> entries =
+        TaskBoardSource.withTrips(
+            plugin,
+            TaskBoardEntries.board(
+                TaskBoardSource.departures(
+                    plugin,
+                    station.get(),
+                    now,
+                    drive.config().driver().recovery().taskWindowMinutes()),
+                drive.tasks().claimants(),
+                now,
+                TaskBoard.ENTRY_SLOTS));
     TaskBoard.open(
         player,
         locale,
@@ -455,7 +569,60 @@ public final class FtaDriveCommand {
             station.get().operatorCode(),
             station.get().stationCode(),
             station.get().name(),
-            rows));
+            entries),
+        DrivePermissions.allowsMode(DrivingMode.ATO, player::hasPermission),
+        player.hasPermission(DrivePermissions.LEVEL)
+            ? Optional.of(drive.levels().effective(player, drive.config().level()))
+            : Optional.empty());
+  }
+
+  /** 列出全部车站，点站码即打开那一站的任务板（悬停显示站名）。 */
+  private void sendStationChoices(CommandSender sender, LocaleManager locale) {
+    List<TaskBoardStations.Choice> choices =
+        TaskBoardStations.choices(TaskBoardSource.stations(plugin));
+    if (choices.isEmpty()) {
+      return;
+    }
+    Component line = locale.component("drive.task.board.station-list");
+    for (TaskBoardStations.Choice choice : choices) {
+      line =
+          line.append(Component.space())
+              .append(
+                  locale
+                      .component(
+                          "drive.task.board.station-choice",
+                          Map.of("code", choice.argument(), "station", choice.name()))
+                      .clickEvent(ClickEvent.runCommand("/fta drive tasks " + choice.argument()))
+                      .hoverEvent(
+                          HoverEvent.showText(
+                              locale.component(
+                                  "drive.task.board.station-choice-hover",
+                                  Map.of("code", choice.argument(), "station", choice.name())))));
+    }
+    sender.sendMessage(line);
+  }
+
+  /** 新手教程：开始、退出、重置，或跳过当前一步。 */
+  private void handleTutorial(CommandSender sender, String action) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    String key =
+        switch (action.toLowerCase(Locale.ROOT)) {
+          case "start" -> drive.startTutorial(player);
+          case "stop" -> drive.tutorials().stop(player);
+          case "reset" -> drive.tutorials().reset(player);
+          case "skip" -> drive.skipTutorialStep(player);
+          default -> "drive.tutorial.command.invalid";
+        };
+    if (key != null) {
+      sender.sendMessage(plugin.getLocaleManager().component(key));
+    }
   }
 
   /** 查看或放弃自己的任务。 */
@@ -530,10 +697,14 @@ public final class FtaDriveCommand {
       sender.sendMessage(plugin.getLocaleManager().component("drive.command.mode.invalid"));
       return;
     }
+    if (!DrivePermissions.allowsMode(mode, player::hasPermission)) {
+      sender.sendMessage(plugin.getLocaleManager().component("drive.command.mode.no-permission"));
+      return;
+    }
     sender.sendMessage(plugin.getLocaleManager().component(drive.setDrivingMode(player, mode)));
   }
 
-  /** 驾驶记录：自己的，或（管理员）别人的。 */
+  /** 驾驶记录：自己的（命令本身已要求记录或管理节点之一），或（管理员）别人的。 */
   private void handleRecords(CommandSender sender, String playerName) {
     LocaleManager locale = plugin.getLocaleManager();
     UUID target;
@@ -729,6 +900,76 @@ public final class FtaDriveCommand {
         locale.component(
             requested ? "drive.command.handback.requested" : "drive.command.handback.not-driving",
             Map.of("player", target)));
+  }
+
+  private void handleRescue(CommandSender sender, String train, boolean destroy) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    DriveSessionManager.RescueResult result = drive.rescueTrain(train, destroy);
+    LocaleManager locale = plugin.getLocaleManager();
+    if (!result.found()) {
+      sender.sendMessage(
+          locale.component("drive.command.rescue.not-found", Map.of("train", train)));
+      return;
+    }
+    sender.sendMessage(
+        locale.component(
+            result.relocated() || result.moved() == 0
+                ? "drive.command.rescue.done"
+                : "drive.command.rescue.no-target",
+            Map.of("train", train, "players", String.valueOf(result.moved()))));
+    if (result.destroyed()) {
+      sender.sendMessage(
+          locale.component("drive.command.rescue.destroyed", Map.of("train", train)));
+    }
+  }
+
+  /** 管理员给某名驾驶员的列车注入或清除车上故障（仅 simulation 级）。 */
+  private void handleFault(CommandSender sender, String playerName, String type) {
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    LocaleManager locale = plugin.getLocaleManager();
+    Map<String, String> values = Map.of("player", playerName, "type", type);
+    Player target = Bukkit.getPlayerExact(playerName);
+    Optional<DriveSession> session =
+        target == null ? Optional.empty() : drive.sessionOf(target.getUniqueId());
+    if (session.isEmpty() || session.get().phase() != DriveSession.Phase.ACTIVE) {
+      sender.sendMessage(locale.component("drive.command.fault.not-driving", values));
+      return;
+    }
+    CabSystems cab = session.get().cab();
+    if (!cab.enabled()) {
+      sender.sendMessage(locale.component("drive.command.fault.not-simulation", values));
+      return;
+    }
+    if (type.equalsIgnoreCase("clear")) {
+      int cleared = cab.faults().clearAll();
+      sender.sendMessage(
+          locale.component(
+              cleared > 0 ? "drive.command.fault.cleared" : "drive.command.fault.none",
+              Map.of("player", playerName, "count", String.valueOf(cleared))));
+      return;
+    }
+    Optional<CabFault> fault = CabFault.parse(type);
+    if (fault.isEmpty()) {
+      sender.sendMessage(locale.component("drive.command.fault.invalid", values));
+      return;
+    }
+    CabFaults.Outcome outcome = cab.faults().inject(fault.get(), Bukkit.getCurrentTick());
+    String key =
+        switch (outcome) {
+          case INJECTED -> "drive.command.fault.injected";
+          case ALREADY_ACTIVE -> "drive.command.fault.already-active";
+          case NOT_APPLICABLE -> "drive.command.fault.not-applicable";
+        };
+    sender.sendMessage(
+        locale.component(
+            key,
+            Map.of("player", playerName, "type", locale.text("drive.fault." + fault.get().key()))));
   }
 
   private void handleProbe(CommandSender sender, Optional<String> state) {

@@ -37,6 +37,7 @@ import org.bukkit.event.player.PlayerItemDamageEvent;
 import org.bukkit.event.player.PlayerItemHeldEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveMenu;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
@@ -85,6 +86,7 @@ public final class DriveListener implements Listener {
     if (event.getInput().isSneak()) {
       manager.noteSneak(event.getPlayer().getUniqueId());
     }
+    manager.onHornInput(event.getPlayer(), event.getInput().isJump());
   }
 
   @EventHandler(priority = EventPriority.MONITOR)
@@ -128,7 +130,10 @@ public final class DriveListener implements Listener {
 
   @EventHandler(priority = EventPriority.HIGHEST)
   public void onInteractEntity(PlayerInteractEntityEvent event) {
-    guard(event.getPlayer(), event);
+    if (guard(event.getPlayer(), event) && event.getHand() == EquipmentSlot.HAND) {
+      // 拦下的右键若是点在自己驾驶的列车上，由会话代为入座（换端时走到另一端、被挤下座位后回座）。
+      manager.onGuardedEntityClick(event.getPlayer(), event.getRightClicked());
+    }
   }
 
   @EventHandler(priority = EventPriority.HIGHEST)

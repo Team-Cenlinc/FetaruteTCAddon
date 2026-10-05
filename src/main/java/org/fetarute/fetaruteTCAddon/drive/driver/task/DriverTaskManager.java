@@ -27,14 +27,23 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.TrainHold;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCircuitBreaker;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
 
@@ -137,8 +146,15 @@ public final class DriverTaskManager {
   private final Consumer<String> trace;
   private final Map<UUID, DriverTask> byPlayer = new HashMap<>();
   private final Map<TaskKey, UUID> byKey = new HashMap<>();
+
+  /** 终点站结算后等着接续下一趟的驾驶员：那一班先替他留着，任务板上显示为他所领，别人领不走。 */
+  private final Map<TaskKey, TaskBoardEntries.Claimant> reserved = new HashMap<>();
+
   private final List<RescueWatch> rescues = new ArrayList<>();
   private final DriverCircuitBreaker breaker = new DriverCircuitBreaker();
+
+  /** 最近一次熔断评估时每列被扣住的车（挡住后车的提醒复用）。 */
+  private Map<String, DriverCircuitBreaker.Hold> lastHolds = Map.of();
 
   public DriverTaskManager(FetaruteTCAddon plugin, Consumer<String> trace) {
     this.plugin = plugin;
@@ -168,7 +184,90 @@ public final class DriverTaskManager {
         keys.add(entry.getKey());
       }
     }
+    keys.addAll(reserved.keySet());
     return keys;
+  }
+
+  /** 已被领走（未结束）的车次与领取人，任务板据此标明谁领了哪一班。 */
+  public Map<TaskKey, TaskBoardEntries.Claimant> claimants() {
+    Map<TaskKey, TaskBoardEntries.Claimant> claimants = new HashMap<>();
+    for (TaskKey key : takenKeys()) {
+      DriverTask task = byPlayer.get(byKey.get(key));
+      if (task != null) {
+        claimants.put(key, new TaskBoardEntries.Claimant(task.playerId(), task.playerName()));
+      }
+    }
+    reserved.forEach(claimants::putIfAbsent);
+    return claimants;
+  }
+
+  /**
+   * 替终点站结算后等着接续的驾驶员留下一班。
+   *
+   * @return 那一班已被别人领走或留下时为 {@code false}
+   */
+  public boolean reserve(UUID playerId, String playerName, TaskKey key) {
+    TaskBoardEntries.Claimant holder = reserved.get(key);
+    if (holder != null) {
+      return holder.playerId().equals(playerId);
+    }
+    if (takenKeys().contains(key)) {
+      return false;
+    }
+    reserved.put(key, new TaskBoardEntries.Claimant(playerId, playerName));
+    return true;
+  }
+
+  /** 替这名驾驶员留着的班次；没有时为空。 */
+  public Optional<TaskKey> reservationOf(UUID playerId) {
+    for (Map.Entry<TaskKey, TaskBoardEntries.Claimant> entry : reserved.entrySet()) {
+      if (entry.getValue().playerId().equals(playerId)) {
+        return Optional.of(entry.getKey());
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 放掉替这名驾驶员留着的班次（不继续了，或已开出记成任务）。 */
+  public void releaseReservation(UUID playerId) {
+    reserved.values().removeIf(holder -> holder.playerId().equals(playerId));
+  }
+
+  /**
+   * 驾驶员已经在开这列车：把它此刻跑的（或刚开出的）车次直接记成驾驶中的任务。不看任务板的时间窗与熔断，替他留着的班次先放掉；其余规则与领取相同。
+   *
+   * @param nowTick 开始驾驶的服务器 tick
+   */
+  public ClaimOutcome adopt(
+      Player player, TaskSpec spec, DrivingMode mode, Instant now, long nowTick) {
+    releaseReservation(player.getUniqueId());
+    if (activeTaskOf(player.getUniqueId()).isPresent()) {
+      return ClaimOutcome.ALREADY_HAS_TASK;
+    }
+    if (takenKeys().contains(spec.key())) {
+      return ClaimOutcome.TAKEN;
+    }
+    DriverTask task =
+        new DriverTask(
+            player.getUniqueId(),
+            player.getName(),
+            spec.key(),
+            spec.routeCode(),
+            spec.operatorCode(),
+            spec.stationCode(),
+            spec.stationName(),
+            spec.boardNodeId(),
+            spec.boardStopSequence(),
+            spec.plannedDeparture(),
+            mode,
+            now);
+    task.setTrainName(spec.trainName());
+    task.setSource(spec.source(), spec.metadata());
+    ClaimOutcome outcome = register(player, task);
+    if (outcome == ClaimOutcome.CLAIMED) {
+      task.start(spec.trainName(), nowTick);
+    }
+    return outcome;
   }
 
   /** 领了这一班、还没结束的任务；没人领时为空。 */
@@ -446,9 +545,15 @@ public final class DriverTaskManager {
                 assignment.get().serviceDate())) {
       return false;
     }
-    // “没有下一站”在推算信息缺失时也会出现：再用这一站的发车记录核对它确实是本车次的终到站。
+    // “没有下一站”在推算信息缺失时也会出现：再核对这一站确实是本车次的终到站。
     int stopSequence = assignment.get().lastStopSequence().get();
     Instant now = Instant.now();
+    Optional<TimetableService> service =
+        plugin == null ? Optional.empty() : plugin.getTimetableService();
+    if (service.isPresent()) {
+      return terminatesAt(
+          service.get(), task.key(), stopSequence, assignment.get().lastStationCode().get(), now);
+    }
     return api
         .get()
         .departuresAt(
@@ -467,6 +572,50 @@ public final class DriverTaskManager {
                             departure.timetableId(),
                             departure.tripCode(),
                             departure.serviceDate()));
+  }
+
+  /**
+   * 这一站是不是这个车次的终到站：只查车次自己的交路计划，口径与站牌发车记录的“终到”相同（在这一站停车，且是最后一个停车点或写成终点），
+   * 表定时刻也在核对窗口里。不扫整个车站的发车表——核对没通过时每秒都要再查一次。
+   */
+  static boolean terminatesAt(
+      TimetableService service, TaskKey key, int stopSequence, String stationCode, Instant now) {
+    for (Timetable timetable : service.publishedTimetables()) {
+      if (!timetable.id().equals(key.timetableId())) {
+        continue;
+      }
+      Optional<TimetableTrip> trip = timetable.tripByCode(key.tripCode());
+      Optional<TimetableRoutePlan> plan = trip.flatMap(timetable::tripPlan);
+      if (plan.isEmpty()) {
+        return false;
+      }
+      List<TimetableStop> stops = plan.get().stops();
+      int lastStopping = -1;
+      for (int i = 0; i < stops.size(); i++) {
+        if (stops.get(i).stops()) {
+          lastStopping = i;
+        }
+      }
+      for (int i = 0; i < stops.size(); i++) {
+        TimetableStop stop = stops.get(i);
+        if (stop.stopSequence() != stopSequence) {
+          continue;
+        }
+        if (!stop.stops()
+            || stop.stationCode().filter(stationCode::equalsIgnoreCase).isEmpty()
+            || !(i == lastStopping || stop.passType() == RouteStopPassType.TERMINATE)) {
+          return false;
+        }
+        Instant departure =
+            trip.get()
+                .departureAt(key.serviceDate(), timetable.zoneId())
+                .plusSeconds(stop.departureOffsetSeconds());
+        return !departure.isBefore(now.minus(TERMINAL_LOOKBACK))
+            && departure.isBefore(now.plus(TERMINAL_LOOKBACK));
+      }
+      return false;
+    }
+    return false;
   }
 
   /**
@@ -504,9 +653,9 @@ public final class DriverTaskManager {
   public enum SeatCheck {
     /** 没坐在任务列车上。 */
     NOT_ON_TRAIN,
-    /** 坐在任务列车上，但不在前进方向的车头一端。 */
+    /** 坐在任务列车上，但不是下一趟要驾驶的那一端的驾驶室。 */
     WRONG_SEAT,
-    /** 坐在车头一端：等驾驶员确认座位无误再接班。 */
+    /** 坐在要驾驶的那一端的驾驶室：等驾驶员确认座位无误再接班。 */
     CONFIRM
   }
 
@@ -515,26 +664,15 @@ public final class DriverTaskManager {
    *
    * @param seat 玩家的座位；没坐下时为 {@code null}
    * @param trainName 任务列车名
-   * @param memberCount 任务列车节数
-   */
-  public static SeatCheck checkSeat(SeatBinding seat, String trainName, int memberCount) {
-    return checkSeat(seat, trainName, memberCount, false);
-  }
-
-  /**
-   * 判定座位能不能接班。
-   *
-   * @param eitherEnd 终点站折返接车：发车方向要到派车时才定，两端车厢都可以坐，发车时按需换端
+   * @param end 座位在哪一端（见 {@link CabSeats#endOf}）
+   * @param expected 下一趟由哪一端驾驶：一般是车头端；终点站折返接车时方向未定为两端都可以，尽头式终点站为车尾端
    */
   public static SeatCheck checkSeat(
-      SeatBinding seat, String trainName, int memberCount, boolean eitherEnd) {
+      SeatBinding seat, String trainName, CabSeats.End end, CabSeats.Departure expected) {
     if (seat == null || trainName == null || !seat.trainName().equalsIgnoreCase(trainName)) {
       return SeatCheck.NOT_ON_TRAIN;
     }
-    if (eitherEnd && seat.memberIndex() == memberCount - 1) {
-      return SeatCheck.CONFIRM;
-    }
-    return seat.cabSign(memberCount) < 0 ? SeatCheck.WRONG_SEAT : SeatCheck.CONFIRM;
+    return CabSeats.accepts(end, expected) ? SeatCheck.CONFIRM : SeatCheck.WRONG_SEAT;
   }
 
   /**
@@ -553,9 +691,7 @@ public final class DriverTaskManager {
     if (!anyClaimed) {
       return;
     }
-    Optional<TimetableApi> api = timetables();
-    Collection<TimetableApi.TrainAssignment> assignments =
-        api.map(TimetableApi::listAssignments).orElse(List.of());
+    Collection<TimetableApi.TrainAssignment> assignments = claimedAssignments(timetables());
     for (DriverTask task : new ArrayList<>(byPlayer.values())) {
       if (task.state() != DriverTask.State.CLAIMED) {
         continue;
@@ -606,6 +742,41 @@ public final class DriverTaskManager {
     }
   }
 
+  /**
+   * 已领取任务的车次绑定。完整绑定要换算到发记录与预计晚点（含一次 ETA），先在时刻表服务的原始绑定里按车次对上，只换算对上的那几列车，不把全网列车都算一遍； 拿不到时刻表服务时退回整份列表。
+   */
+  private Collection<TimetableApi.TrainAssignment> claimedAssignments(Optional<TimetableApi> api) {
+    if (api.isEmpty()) {
+      return List.of();
+    }
+    Optional<TimetableService> service =
+        plugin == null ? Optional.empty() : plugin.getTimetableService();
+    if (service.isEmpty()) {
+      return api.get().listAssignments();
+    }
+    List<TaskKey> claimed = new ArrayList<>();
+    for (DriverTask task : byPlayer.values()) {
+      if (task.state() == DriverTask.State.CLAIMED) {
+        claimed.add(task.key());
+      }
+    }
+    List<TimetableApi.TrainAssignment> matched = new ArrayList<>();
+    for (TimetableAssignment raw : service.get().assignments()) {
+      boolean wanted = false;
+      for (TaskKey key : claimed) {
+        if (key.matches(raw.timetableId(), raw.tripCode(), raw.serviceDate())) {
+          wanted = true;
+          break;
+        }
+      }
+      if (!wanted) {
+        continue;
+      }
+      api.get().getAssignment(raw.trainName()).ifPresent(matched::add);
+    }
+    return matched;
+  }
+
   /** 给玩家发提示。 */
   public interface Notifier {
     void send(Player player, String key, Map<String, String> values);
@@ -650,6 +821,21 @@ public final class DriverTaskManager {
     rescues.add(
         new RescueWatch(
             player.getUniqueId(), group.getProperties().getTrainName(), head, dueTick, target));
+  }
+
+  /**
+   * 把人从列车上送到哪里：最近停过的车站的站台，其次是驾驶员任务的接班站；都没有时为空。
+   *
+   * @param playerId 驾驶员；没有驾驶员时为 {@code null}
+   * @param lastStop 最近停过的站；没有时为 {@code null}
+   */
+  public Optional<Location> rescueLocation(UUID playerId, DriverStationStop lastStop) {
+    return rescueTarget(lastStop)
+        .or(
+            () ->
+                playerId == null
+                    ? Optional.empty()
+                    : activeOrLastTask(playerId).flatMap(this::boardStation));
   }
 
   /** 推进救援：到时仍卡着就送驾驶员去站台。 */
@@ -776,6 +962,7 @@ public final class DriverTaskManager {
   public boolean tickBreaker(Set<String> driverTrains, DriverRecovery recovery, Instant now) {
     EtaService eta = plugin.getEtaService();
     if (eta == null || driverTrains.isEmpty()) {
+      lastHolds = Map.of();
       return false;
     }
     Map<String, DriverCircuitBreaker.Hold> holds = new HashMap<>();
@@ -798,11 +985,17 @@ public final class DriverTaskManager {
       holds.put(
           name, new DriverCircuitBreaker.Hold(Duration.between(hold.get().since(), now), blockers));
     }
+    lastHolds = Map.copyOf(holds);
     boolean tripped = breaker.evaluate(holds, driverTrains, recovery, now);
     if (tripped) {
       plugin.getLogger().warning("驾驶员接班熔断：" + breaker.lastReason());
     }
     return tripped;
+  }
+
+  /** 后方被这列驾驶员列车直接挡住的车里，被扣最久的秒数（按最近一次熔断评估时的扣车情况）。 */
+  public long blockedBehindSeconds(String driverTrain) {
+    return DriverCongestion.blockedBehindSeconds(lastHolds, driverTrain);
   }
 
   /** 给运营人员看的熔断状态。 */

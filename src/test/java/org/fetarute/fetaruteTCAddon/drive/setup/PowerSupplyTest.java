@@ -15,6 +15,8 @@ class PowerSupplyTest {
     assertEquals(Optional.of(PowerSupply.PTG6), PowerSupply.parse(" ptg6 "));
     assertEquals(Optional.of(PowerSupply.SHOE), PowerSupply.parse("third-rail"));
     assertEquals(Optional.of(PowerSupply.DIESEL), PowerSupply.parse("engine"));
+    assertEquals(Optional.of(PowerSupply.SUPERCAP), PowerSupply.parse("SuperCap"));
+    assertEquals(Optional.of(PowerSupply.SUPERCAP), PowerSupply.parse("super-capacitor"));
     assertTrue(PowerSupply.parse("steam").isEmpty());
     assertTrue(PowerSupply.parse(null).isEmpty());
   }
@@ -24,6 +26,14 @@ class PowerSupplyTest {
     assertEquals(Optional.of("ptg5"), PowerSupply.PTG5.animation());
     assertEquals(Optional.of("ptg6"), PowerSupply.PTG6.animation());
     assertTrue(PowerSupply.SHOE.animation().isEmpty());
+    assertTrue(PowerSupply.SUPERCAP.animation().isEmpty(), "超级电容投入时不升弓，充电时才试着升弓");
+  }
+
+  @Test
+  void onlySupercapStoresEnergy() {
+    assertTrue(PowerSupply.SUPERCAP.storesEnergy());
+    assertTrue(PowerSupply.SUPERCAP.electric());
+    assertFalse(PowerSupply.SHOE.storesEnergy());
   }
 
   @Test
@@ -39,6 +49,7 @@ class PowerSupplyTest {
     assertEquals(160, timings.ticksOf(SetupSystem.POWER, PowerSupply.PTG6));
     assertEquals(40, timings.ticksOf(SetupSystem.POWER, PowerSupply.SHOE));
     assertEquals(500, timings.ticksOf(SetupSystem.POWER, PowerSupply.DIESEL));
+    assertEquals(40, timings.ticksOf(SetupSystem.POWER, PowerSupply.SUPERCAP));
     assertEquals(60, timings.ticksOf(SetupSystem.BREAKER, PowerSupply.PTG5));
   }
 
@@ -50,5 +61,7 @@ class PowerSupplyTest {
     assertEquals(
         "drive.setup.step.engine", SetupText.stepKey(SetupSystem.POWER, PowerSupply.DIESEL));
     assertEquals("drive.setup.step.aux", SetupText.stepKey(SetupSystem.AUX, PowerSupply.DIESEL));
+    assertEquals(
+        "drive.setup.step.supercap", SetupText.stepKey(SetupSystem.POWER, PowerSupply.SUPERCAP));
   }
 }

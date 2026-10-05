@@ -1,15 +1,19 @@
 package org.fetarute.fetaruteTCAddon.drive.menu;
 
-import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.UUID;
+import java.util.function.Function;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.ItemStack;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.AirSystem;
 import org.fetarute.fetaruteTCAddon.drive.cab.BrakeTest;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
+import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
@@ -27,9 +31,14 @@ public final class DriveMenu {
   private static final long TICKS_PER_SECOND = 20L;
 
   private final LocaleManager locale;
+  private final Function<UUID, Optional<TaskCard.TaskSummary>> tasks;
 
-  public DriveMenu(LocaleManager locale) {
+  /**
+   * @param tasks 按驾驶员查驾驶任务的摘要（任务卡用）
+   */
+  public DriveMenu(LocaleManager locale, Function<UUID, Optional<TaskCard.TaskSummary>> tasks) {
     this.locale = Objects.requireNonNull(locale, "locale");
+    this.tasks = Objects.requireNonNull(tasks, "tasks");
   }
 
   /**
@@ -52,7 +61,7 @@ public final class DriveMenu {
     return true;
   }
 
-  /** 按会话状态刷新全部按钮。 */
+  /** 按会话状态刷新全部按钮与表计。 */
   public void render(Inventory inventory, DriveSession session) {
     long now = Bukkit.getCurrentTick();
     for (MenuAction action : MenuAction.values()) {
@@ -60,6 +69,40 @@ public final class DriveMenu {
       inventory.setItem(
           MenuLayout.slotOf(action), view == null ? null : DriveMenuItems.build(locale, view));
     }
+    CabSystems cab = session.cab();
+    for (MenuIndicator indicator : MenuIndicator.values()) {
+      ItemStack item = null;
+      if (cab.enabled()) {
+        if (indicator == MenuIndicator.FAULTS) {
+          item = DriveGaugeItems.faults(locale, FaultPanelView.of(cab.faults()));
+        } else {
+          GaugeView gauge = CabGauges.of(indicator, cab);
+          item = gauge == null ? null : DriveGaugeItems.gauge(locale, gauge);
+        }
+      }
+      inventory.setItem(MenuLayout.indicatorSlot(indicator), item);
+    }
+    inventory.setItem(
+        MenuLayout.slotOf(MenuAction.TASK_CARD), DriveMenuItems.taskCard(locale, card(session)));
+    for (int slot : MenuLayout.dividers()) {
+      inventory.setItem(slot, DriveMenuItems.divider());
+    }
+    if (!session.isDispatchDriving()) {
+      // 非调度列车没有驾驶方式可切换：这一格也是玻璃板。
+      inventory.setItem(MenuLayout.slotOf(MenuAction.DRIVING_MODE), DriveMenuItems.divider());
+    }
+  }
+
+  private TaskCard.Card card(DriveSession session) {
+    TaskCard.Card card =
+        session.driverLink() == null
+            ? TaskCard.free(session.trainName(), session.params())
+            : TaskCard.dispatch(
+                session.trainName(),
+                session.driverLink(),
+                tasks.apply(session.playerId()),
+                session.liveScore());
+    return card.withLevel(session.level());
   }
 
   /** 菜单是不是驾驶台菜单。 */
@@ -76,6 +119,12 @@ public final class DriveMenu {
       if (!setup.applies(system.get())) {
         return null;
       }
+      if (system.get() == SetupSystem.BREAKER && session.cab().enabled()) {
+        ButtonView tripped = breakerFaultView(session.cab().faults(), setup, now);
+        if (tripped != null) {
+          return tripped;
+        }
+      }
       TrainSetup.State state = setup.state(system.get());
       boolean busy = state == TrainSetup.State.STARTING;
       return new ButtonView(
@@ -90,6 +139,31 @@ public final class DriveMenu {
     switch (action) {
       case COMPRESSOR, PARKING_BRAKE, BRAKE_TEST -> {
         return cab.enabled() ? cabView(action, cab, setup) : null;
+      }
+      case DOOR_BYPASS -> {
+        // standard 级只在应急演练的车门故障期间（或旁路还接通着时）出现。
+        return cab.enabled() || doorDrill(cab) ? cabView(action, cab, setup) : null;
+      }
+      default -> {}
+    }
+    switch (action) {
+      case DRIVING_MODE -> {
+        return session.isDispatchDriving() ? ButtonView.simple(action, session.isAto()) : null;
+      }
+      case END_DRIVING -> {
+        return new ButtonView(
+            action,
+            session.endArmed(now),
+            false,
+            setup.supply(),
+            -1,
+            true,
+            session.isDispatchDriving() ? "drive.menu.detail.end-dispatch" : null,
+            Map.of());
+      }
+      case TASK_CARD -> {
+        // 任务卡另由 render 按会话写入。
+        return null;
       }
       default -> {}
     }
@@ -109,7 +183,43 @@ public final class DriveMenu {
     return ButtonView.simple(action, isActive(action, session));
   }
 
-  /** simulation 级的压缩机、停放制动与制动试验按钮。 */
+  /** 主断跳闸后的主断开关：按复位进度显示；主断没有跳闸时为 {@code null}。 */
+  private static ButtonView breakerFaultView(CabFaults faults, TrainSetup setup, long now) {
+    Optional<CabFaults.BreakerStage> stage = faults.breakerStage();
+    if (stage.isEmpty()) {
+      return null;
+    }
+    return switch (stage.get()) {
+      case TRIPPED -> new ButtonView(
+          MenuAction.BREAKER,
+          false,
+          false,
+          setup.supply(),
+          -1,
+          true,
+          "drive.menu.detail.breaker-tripped",
+          Map.of(),
+          true);
+      case OPENED -> new ButtonView(
+          MenuAction.BREAKER,
+          false,
+          false,
+          setup.supply(),
+          -1,
+          true,
+          "drive.menu.detail.breaker-opened",
+          Map.of());
+      case CLOSING -> new ButtonView(
+          MenuAction.BREAKER,
+          false,
+          true,
+          setup.supply(),
+          (faults.breakerRemainingTicks(now) + TICKS_PER_SECOND - 1) / TICKS_PER_SECOND,
+          true);
+    };
+  }
+
+  /** simulation 级的压缩机、停放制动、制动试验与门旁路按钮。 */
   private static ButtonView cabView(MenuAction action, CabSystems cab, TrainSetup setup) {
     AirSystem air = cab.air();
     String reservoir = String.valueOf(Math.round(air.mainReservoirKpa()));
@@ -121,8 +231,20 @@ public final class DriveMenu {
           setup.supply(),
           -1,
           air.manualCompressor(),
-          "drive.menu.detail.reservoir",
-          Map.of("mr", reservoir));
+          air.compressorFailed()
+              ? "drive.menu.detail.compressor-failed"
+              : "drive.menu.detail.reservoir",
+          Map.of("mr", reservoir),
+          air.compressorFailed());
+      case DOOR_BYPASS -> new ButtonView(
+          action,
+          cab.faults().doorBypassed(),
+          false,
+          setup.supply(),
+          -1,
+          true,
+          cab.faults().active(CabFault.DOOR) ? "drive.menu.detail.door-circuit-open" : null,
+          Map.of());
       case PARKING_BRAKE -> new ButtonView(
           action,
           !air.parkingApplied(),
@@ -145,9 +267,8 @@ public final class DriveMenu {
             setup.supply(),
             -1,
             true,
-            "drive.menu.detail.brake-test-"
-                + test.stage().name().toLowerCase(Locale.ROOT).replace('_', '-'),
-            Map.of("bc", String.valueOf(Math.round(air.brakeCylinderKpa()))));
+            "drive.menu.detail.brake-test-" + test.stageKey(),
+            CabGauges.brakeTestValues(cab));
       }
     };
   }
@@ -168,5 +289,10 @@ public final class DriveMenu {
       case DOOR_RIGHT -> session.isRightDoorOpen();
       default -> false;
     };
+  }
+
+  /** 门旁路此刻有没有意义：有车门故障，或旁路还接通着。 */
+  public static boolean doorDrill(CabSystems cab) {
+    return cab.faults().active(CabFault.DOOR) || cab.faults().doorBypassed();
   }
 }

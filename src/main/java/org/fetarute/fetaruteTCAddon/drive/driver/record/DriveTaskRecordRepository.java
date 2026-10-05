@@ -20,6 +20,13 @@ public interface DriveTaskRecordRepository {
    */
   List<DriveLeaderboardRow> leaderboard(Instant since, int limit);
 
+  /**
+   * 删掉结束时刻早于 {@code cutoff} 的记录（驾驶记录只保留一段时间）。
+   *
+   * @return 删掉的条数
+   */
+  int deleteFinishedBefore(Instant cutoff);
+
   /** 一名驾驶员的累计成绩（在库里汇总，不读明细）。 */
   PlayerTotals totalsByPlayer(UUID playerId);
 

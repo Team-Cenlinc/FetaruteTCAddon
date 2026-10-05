@@ -20,10 +20,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
@@ -35,8 +37,10 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcConsistPlanRepos
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPortalLinkRepository;
@@ -80,12 +84,14 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
   private final RailInterlockingSnapshotRepository railInterlockingSnapshotRepository;
   private final DriveTaskRecordRepository driveTaskRecordRepository;
+  private final LicenseRepository licenseRepository;
   private final PortalLinkRepository portalLinkRepository;
   private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
   private final ConsistPlanRepository consistPlanRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
   private final PidsScreenRepository pidsScreenRepository;
+  private final PidsBulletinRepository pidsBulletinRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -124,6 +130,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcRailInterlockingSnapshotRepository(dataSource, dialect, tablePrefix, logger::warn);
     this.driveTaskRecordRepository =
         new JdbcDriveTaskRecordRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.licenseRepository =
+        new JdbcLicenseRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.portalLinkRepository =
         new JdbcPortalLinkRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.timetableRepository =
@@ -136,6 +144,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcHudLineBindingRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.pidsScreenRepository =
         new JdbcPidsScreenRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.pidsBulletinRepository =
+        new JdbcPidsBulletinRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -232,6 +242,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   }
 
   @Override
+  public LicenseRepository licenses() {
+    return licenseRepository;
+  }
+
+  @Override
   public PortalLinkRepository portalLinks() {
     return portalLinkRepository;
   }
@@ -259,6 +274,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public PidsScreenRepository pidsScreens() {
     return pidsScreenRepository;
+  }
+
+  @Override
+  public PidsBulletinRepository pidsBulletins() {
+    return pidsBulletinRepository;
   }
 
   @Override

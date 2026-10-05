@@ -27,6 +27,8 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverSchedule;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
+import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitorConfig;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
@@ -144,6 +146,23 @@ class DriveSidebarRowsTest {
     assertEquals(
         "drive.sidebar.value.schedule.plain",
         row(DriveSidebarRows.build(session, 0), "scheduled-departure").valueKey());
+  }
+
+  @Test
+  void supercapRowShowsPercentAndState() {
+    SuperCapacitor cap = new SuperCapacitor(SuperCapacitorConfig.defaults(), 0.62);
+    DriveSidebarRows.Row normal = DriveSidebarRows.supercapRow(cap);
+    assertEquals("drive.sidebar.label.supercap", normal.labelKey());
+    assertEquals("drive.sidebar.value.supercap.normal", normal.valueKey());
+    assertEquals("62", normal.values().get("percent"));
+    cap.reset(0.1);
+    assertEquals("drive.sidebar.value.supercap.low", DriveSidebarRows.supercapRow(cap).valueKey());
+    cap.charge(0.05);
+    assertEquals(
+        "drive.sidebar.value.supercap.charging", DriveSidebarRows.supercapRow(cap).valueKey());
+    cap.reset(0.0);
+    assertEquals(
+        "drive.sidebar.value.supercap.depleted", DriveSidebarRows.supercapRow(cap).valueKey());
   }
 
   @Test

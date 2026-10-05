@@ -10,8 +10,11 @@ import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Bukkit;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
+import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
+import org.fetarute.fetaruteTCAddon.drive.menu.CabGauges;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupText;
@@ -19,10 +22,10 @@ import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 驾驶员的动作栏显示：速度、档位、限速与行驶方向。
+ * 驾驶员的动作栏显示：车速与限速、档位与力度、非前进时的行驶方向，以及一条最要紧的提示。
  *
- * <p>速度与限速同时给出 km/h（1 格/秒按 1 米/秒计）。超速时速度与限速按 {@link OverspeedLevel} 标黄、标红。文案走语言文件的 {@code
- * drive.hud.*} 键。
+ * <p>车速与限速写 km/h（1 格/秒按 1 米/秒计），去掉了“速度、档位、限速”标签，一眼读完。超速时车速与限速按 {@link OverspeedLevel} 标黄、标红。
+ * 文案走语言文件的 {@code drive.hud.*} 键。
  */
 public final class DriveHud {
 
@@ -57,8 +60,6 @@ public final class DriveHud {
     Component limit =
         locale.component(
             "drive.hud.limit." + level.key(), Map.of("limit_kmh", format(limitBps * KMH_PER_BPS)));
-    String directionKey =
-        "drive.hud.direction." + session.reverser().name().toLowerCase(Locale.ROOT);
     TagResolver resolver =
         TagResolver.builder()
             .resolver(Placeholder.component("speed", speed))
@@ -66,9 +67,12 @@ public final class DriveHud {
             .resolver(
                 Placeholder.unparsed("notch", session.isAto() ? "ATO" : session.notch().name()))
             .resolver(Placeholder.component("force", forceBar(session.effort())))
-            .resolver(Placeholder.unparsed("direction", locale.text(directionKey)))
+            .resolver(Placeholder.component("direction", direction(locale, session)))
             .build();
-    Component line = locale.component("drive.hud.line", resolver);
+    // 没有限速信息时只写车速，不显示“-”。
+    Component line =
+        locale.component(
+            level == OverspeedLevel.NONE ? "drive.hud.line-no-limit" : "drive.hud.line", resolver);
     CabSystems cab = session.cab();
     long now = Bukkit.getCurrentTick();
     if (cab.enabled() && cab.vigilance().tripped()) {
@@ -89,29 +93,61 @@ public final class DriveHud {
     return line;
   }
 
-  /** 动作栏末尾最要紧的一条提示：为什么现在不能牵引。按启动流程、停放制动、风压、制动试验、车门的顺序取第一条；都没有时为 {@code null}。 各系统的完整状态在侧边栏里。 */
+  /**
+   * 动作栏末尾最要紧的一条提示：为什么现在不能牵引。放行后的换端计时最先，其次按防护介入、启动流程、车上故障（主断跳闸、受电中断、门关好回路）、停放制动、
+   * 制动管、风压、制动试验、车门的顺序取第一条；都没有而门旁路接通着时提示旁路；否则为 {@code null}。各系统的完整状态在侧边栏里。
+   *
+   * <p>停站要驾驶员操作时（开门、停站倒计时、关门），提前告知的换端与等确认座位排在停站提示之后：停站信息优先；等待发车（含终点站待命）时换端提示照旧在前。
+   */
   private static Component statusToken(
       LocaleManager locale, DriveSession session, boolean sidebarShown) {
+    Component cabChange =
+        cabChangeToken(locale, session.cabChange(), session.pendingCabSeat().isPresent());
     DriverLink link = session.driverLink();
+    if (cabChange != null && (session.cabChange().holding() || !stationBusy(link))) {
+      return cabChange;
+    }
+    long ebGrace = session.selector().ebGraceRemaining(Bukkit.getCurrentTick());
+    if (ebGrace > 0L) {
+      return locale.component(
+          "drive.hud.eb-grace",
+          Map.of(
+              "seconds", String.format(Locale.ROOT, "%.1f", ebGrace / (double) TICKS_PER_SECOND)));
+    }
     String intervention = link == null ? null : interventionKey(link);
     if (intervention != null) {
       return locale.component(intervention);
     }
-    if (link != null && link.departurePending()) {
+    if (link != null && link.departurePrompt()) {
       return locale.component("drive.hud.ato.confirm");
+    }
+    if (link != null && link.departureConfirmed()) {
+      return locale.component("drive.hud.ato.armed");
+    }
+    if (link != null && link.warnedBlockingSeconds() > 0L) {
+      return locale.component(
+          "drive.hud.driver.blocking",
+          Map.of("seconds", String.valueOf(link.warnedBlockingSeconds())));
     }
     if (!session.setup().ready()) {
       return setupSegment(locale, session);
+    }
+    if (session.supercap().filter(sc -> sc.depleted() && !sc.charging()).isPresent()) {
+      return locale.component("drive.hud.supercap.depleted");
     }
     CabSystems cab = session.cab();
     Optional<CabSystems.TractionBlock> block = cab.tractionBlock();
     if (block.isPresent()) {
       return switch (block.get()) {
+        case BREAKER_TRIPPED -> locale.component("drive.hud.cab.fault.breaker-trip");
+        case LINE_LOSS -> locale.component("drive.hud.cab.fault.line-loss");
+        case DOOR_CIRCUIT -> locale.component("drive.hud.cab.fault.door");
         case PARKING_BRAKE -> locale.component("drive.hud.cab.parking");
+        case BRAKE_PIPE -> locale.component("drive.hud.cab.brake-pipe");
         case LOW_AIR -> locale.component("drive.hud.cab.low-air");
         case BRAKE_TEST -> locale.component(
-            "drive.hud.cab.brake-test."
-                + cab.brakeTest().stage().name().toLowerCase(Locale.ROOT).replace('_', '-'));
+            "drive.hud.cab.brake-test." + cab.brakeTest().stageKey(),
+            CabGauges.brakeTestValues(cab));
       };
     }
     if (link != null) {
@@ -121,10 +157,13 @@ public final class DriveHud {
           return locale.component(station.get().key(), station.get().values());
         }
         case SUPPRESS -> {
-          return null;
+          return cabChange;
         }
         case NONE -> {}
       }
+    }
+    if (cabChange != null) {
+      return cabChange;
     }
     if (session.anyDoorOpen()) {
       return locale.component("drive.hud.doors-open");
@@ -138,7 +177,39 @@ public final class DriveHud {
         && link.directive().isStop()) {
       return locale.component("drive.hud.driver.wait-signal");
     }
+    if (cab.enabled() && cab.faults().doorBypassed()) {
+      return locale.component("drive.hud.cab.door-bypass");
+    }
     return null;
+  }
+
+  /**
+   * 折返换端的提示：计时中显示要去第几节与剩余秒数，提前告知时只显示第几节，坐进驾驶座没有标记的那一端时请确认座位；不换端时为 {@code null}。
+   *
+   * @param confirmSeat 正在等驾驶员确认座位
+   */
+  static Component cabChangeToken(LocaleManager locale, CabChange change, boolean confirmSeat) {
+    if (confirmSeat) {
+      // 坐进了驾驶座没有标记的那一端：先确认座位（计时中照样计时）。
+      return locale.component("drive.hud.cab-change.confirm");
+    }
+    return switch (change.stage()) {
+      case ACTIVE -> locale.component(
+          "drive.hud.cab-change.active",
+          Map.of(
+              "car",
+              String.valueOf(change.targetCar()),
+              "seconds",
+              String.valueOf(Math.max(0L, change.secondsLeft()))));
+      case ANNOUNCED -> locale.component(
+          "drive.hud.cab-change.announced", Map.of("car", String.valueOf(change.targetCar())));
+      case IDLE -> null;
+    };
+  }
+
+  /** 停站正要驾驶员操作：等开门、停站计时、等关门。 */
+  static boolean stationBusy(DriverLink link) {
+    return link != null && link.stationStop().map(stop -> stop.phase().needsDriver()).orElse(false);
   }
 
   /** 车站提示在动作栏里怎么处理。 */
@@ -195,6 +266,16 @@ public final class DriveHud {
       return "drive.hud.driver.no-signal";
     }
     return null;
+  }
+
+  /** 行驶方向：前进是常态，不占位置；空挡与后退才显示，前面带一个空格。 */
+  static Component direction(LocaleManager locale, DriveSession session) {
+    if (session.reverser() == ReverserPosition.FORWARD) {
+      return Component.empty();
+    }
+    String key = "drive.hud.direction." + session.reverser().name().toLowerCase(Locale.ROOT);
+    return SPACE.append(
+        locale.component("drive.hud.direction-tag", Map.of("direction", locale.text(key))));
   }
 
   /** 十格力度条：点亮的格按种类着色，其余暗灰。 */

@@ -859,6 +859,15 @@ public final class TrainCartsRuntimeHandle implements RuntimeTrainHandle {
   }
 
   @Override
+  public void retire() {
+    if (group.isValid() && hasDriver()) {
+      // 驾驶员把车开到了收车地点：先按正常结束交还，之后的销毁就不再当作调度收回。
+      authority.interrupt(group.getProperties(), DriverInterrupt.END_OF_SERVICE);
+    }
+    destroy();
+  }
+
+  @Override
   public void destroy() {
     if (!group.isValid()) {
       return;
