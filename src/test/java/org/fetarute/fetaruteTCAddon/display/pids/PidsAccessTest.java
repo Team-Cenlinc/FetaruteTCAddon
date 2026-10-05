@@ -4,6 +4,8 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Instant;
@@ -13,6 +15,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Predicate;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.api.operator.OperatorApi;
@@ -115,6 +118,24 @@ class PidsAccessTest {
     assertFalse(access.canManage(player, Optional.of(HHU)));
     assertFalse(
         new PidsAccess(Optional.empty(), () -> operators, warnings::add).canUseTools(player));
+  }
+
+  /** 公告：按公司授权（不经运营商代码）；管理类角色才算，成员身份一条命令只查一次。 */
+  @Test
+  void bulletinsAreManagedPerCompany() {
+    memberOf(SURC_COMPANY, MemberRole.STAFF);
+
+    Predicate<UUID> manageable = access.manageableCompanies(player);
+    assertTrue(manageable.test(SURC_COMPANY));
+    assertFalse(manageable.test(OTHER_COMPANY));
+    assertTrue(manageable.test(SURC_COMPANY));
+    verify(members, times(1)).listMemberships(identity);
+
+    memberOf(SURC_COMPANY, MemberRole.VIEWER);
+    assertFalse(access.canManageCompany(player, SURC_COMPANY), "只读角色不能发公告");
+    when(player.hasPermission(PidsAccess.MANAGE_PERMISSION)).thenReturn(true);
+    assertTrue(access.canManageCompany(player, OTHER_COMPANY));
+    assertFalse(access.canManageCompany(mock(CommandSender.class), SURC_COMPANY));
   }
 
   private void memberOf(UUID company, MemberRole... roles) {

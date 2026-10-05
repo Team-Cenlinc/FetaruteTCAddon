@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.sign.action;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import com.bergerkiller.bukkit.tc.attachments.animation.AnimationOptions;
@@ -157,15 +159,53 @@ class AutoStationDoorControllerTest {
             thirtyDegreesEastOfNorth, BlockFace.WEST));
   }
 
-  /**
-   * 同时置 reset 与 queue；TrainCarts 先判 reset，queue 实际不生效，见 {@code TrainCartsAnimationSemanticsTest}。
-   */
+  /** 只排队、不 reset：reset 会清空附件上 TC 牌子排进去的动画，见 {@code TrainCartsAnimationSemanticsTest}。 */
   @Test
-  void doorAnimationOptionsRestartTheAnimationAndCarryTheQueueFlag() {
+  void doorAnimationOptionsQueueWithoutReset() {
     AnimationOptions options = AutoStationDoorController.doorAnimationOptions("doorL", 1.0);
 
     assertTrue(options.getQueue());
-    assertTrue(options.getReset());
+    assertFalse(options.getReset());
     assertEquals(1.0, options.getSpeed());
+  }
+
+  @Test
+  void driverLateralFaceFollowsTheFacingDirection() {
+    // 面朝东（+X）时，左手边是北，右手边是南。
+    assertEquals(
+        BlockFace.NORTH, AutoStationDoorController.lateralCompassFace(new Vector(1, 0, 0), true));
+    assertEquals(
+        BlockFace.SOUTH, AutoStationDoorController.lateralCompassFace(new Vector(1, 0, 0), false));
+    // 面朝北（-Z）时，左手边是西。
+    assertEquals(
+        BlockFace.WEST, AutoStationDoorController.lateralCompassFace(new Vector(0, 0, -1), true));
+    assertEquals(
+        BlockFace.EAST, AutoStationDoorController.lateralCompassFace(new Vector(0, 0, -1), false));
+    // 面朝南、西同理。
+    assertEquals(
+        BlockFace.EAST, AutoStationDoorController.lateralCompassFace(new Vector(0, 0, 1), true));
+    assertEquals(
+        BlockFace.SOUTH, AutoStationDoorController.lateralCompassFace(new Vector(-1, 0, 0), true));
+  }
+
+  @Test
+  void driverLateralFaceSnapsDiagonalAndCurvedHeadingsToTheNearestCompassPoint() {
+    // 面朝东北，左手边指向西北。
+    assertEquals(
+        BlockFace.NORTH_WEST,
+        AutoStationDoorController.lateralCompassFace(new Vector(1, 0, -1), true));
+    // 稍偏离正东（弯道上）仍取最近的方位。
+    assertEquals(
+        BlockFace.NORTH,
+        AutoStationDoorController.lateralCompassFace(new Vector(1, 0.3, 0.2), true));
+  }
+
+  @Test
+  void driverLateralFaceIgnoresVerticalAndRejectsDegenerateFacing() {
+    assertEquals(
+        BlockFace.NORTH, AutoStationDoorController.lateralCompassFace(new Vector(1, 5, 0), true));
+    assertNull(AutoStationDoorController.lateralCompassFace(new Vector(0, 1, 0), true));
+    assertNull(AutoStationDoorController.lateralCompassFace(null, true));
+    assertNull(AutoStationDoorController.lateralCompassFace(new Vector(Double.NaN, 0, 1), true));
   }
 }

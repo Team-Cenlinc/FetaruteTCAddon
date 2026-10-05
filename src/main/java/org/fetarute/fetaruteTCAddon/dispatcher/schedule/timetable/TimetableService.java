@@ -21,9 +21,11 @@ import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ScheduledDeparturePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver;
@@ -83,6 +85,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 车次取消登记：站牌与公开事件读这里。 */
   private final TripCancellations cancellations = new TripCancellations();
 
+  private final SkippedStops skippedStops = new SkippedStops();
+
   /** 各车在当前车次上已停完的最后一站；车半途离开时据此判断哪些站不再停。 */
   private final ConcurrentMap<String, ServedStops> servedStops = new ConcurrentHashMap<>();
 
@@ -98,8 +102,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
   private volatile Consumer<TripCancellations.Cancellation> cancellationListener =
       cancellation -> {};
 
+  private volatile Runnable stopSkipListener = () -> {};
+
   /** 出票侧还有没有某个交路意图的票在等车；由时刻表出票时由出票层装上。默认恒否。 */
   private volatile Predicate<TicketIntent> pendingTicket = intent -> false;
+
+  /** 列车名 → 车型（出车编组标签归一后的键）：区分车型的交路只让同车型的车接。 */
+  private volatile Function<String, Optional<String>> consistOfTrain = name -> Optional.empty();
 
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
@@ -115,6 +124,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (!resolved.enabled()) {
       clearAssignments("settings-disabled");
       cancellations.clear();
+      skippedStops.clear();
     }
   }
 
@@ -130,6 +140,52 @@ public final class TimetableService implements ScheduledDeparturePlan {
    */
   public void setCancellationListener(Consumer<TripCancellations.Cancellation> listener) {
     this.cancellationListener = listener == null ? cancellation -> {} : listener;
+  }
+
+  /** 设置越站的监听者（站台屏据此立即刷新取消行）；传 {@code null} 取消监听。回调发生在主线程的车站处理里，只能做轻量操作。 */
+  public void setStopSkipListener(Runnable listener) {
+    this.stopSkipListener = listener == null ? () -> {} : listener;
+  }
+
+  /**
+   * 列车在当前车次的这一站越站（驾驶员停过头太多，本站不停）：这趟车的这一站在站台屏上显示为取消，其余各站照常。
+   *
+   * @param trainName 列车
+   * @param stopSequence 停靠序号（与交路进度下标同一口径）
+   * @return 是否记下（列车没有绑定车次、找不到车次时为 false）
+   */
+  public boolean skipStop(String trainName, int stopSequence) {
+    String key = keyOf(trainName);
+    TimetableAssignment assignment = key == null ? null : matcher.get(key).orElse(null);
+    if (assignment == null || stopSequence < 0) {
+      return false;
+    }
+    Optional<Timetable> timetable = resolveTimetable(assignment);
+    Optional<TimetableTrip> trip =
+        timetable.flatMap(table -> table.tripByCode(assignment.tripCode()));
+    if (timetable.isEmpty() || trip.isEmpty()) {
+      return false;
+    }
+    boolean added =
+        skippedStops.record(
+            timetable.get().id(), trip.get().id(), assignment.serviceDate(), stopSequence);
+    if (added) {
+      debugLogger.accept(
+          "TIMETABLE_STOP_SKIPPED train="
+              + trainName
+              + " trip="
+              + assignment.tripCode()
+              + " seq="
+              + stopSequence);
+      stopSkipListener.run();
+    }
+    return true;
+  }
+
+  /** 这趟车的这一站是否越站。 */
+  public boolean stopSkipped(
+      UUID timetableId, UUID tripId, LocalDate serviceDate, int stopSequence) {
+    return skippedStops.contains(timetableId, tripId, serviceDate, stopSequence);
   }
 
   /**
@@ -293,6 +349,126 @@ public final class TimetableService implements ScheduledDeparturePlan {
           .flatMap(due -> plannedPlatform(due.trip().id(), stopIndex));
       case CREATE -> createLegPlan(intent.key(), Optional.empty(), stopIndex);
     };
+  }
+
+  /**
+   * 交路意图要开的运营车次：运营票是它自己那一班；出库走行票是它要去接的那一班（交路首班，替补出库是替补的那一班）； 回库票没有。只读，供驾驶员接车核对“这张票是不是我领的那一班”。
+   *
+   * @param intent 票据的交路意图
+   * @return 车次；回库票、时刻表或交路已不存在时为空
+   */
+  public Optional<DueTrip> tripOfIntent(TicketIntent intent) {
+    if (intent == null || intent.kind() == RouteOperationType.RETURN) {
+      return Optional.empty();
+    }
+    Timetable timetable = snapshot.byId().get(intent.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(intent.dutyId())
+        .filter(duty -> intent.tripIndex() < duty.tripIds().size())
+        .flatMap(duty -> timetable.trip(duty.tripIds().get(intent.tripIndex())))
+        .map(trip -> dueTrip(timetable, trip, intent.key()));
+  }
+
+  /**
+   * 一个停靠点的计划。
+   *
+   * @param stopSequence 停靠序号
+   * @param stationCode 站码（只有车站本体节点才有）
+   * @param nodeId 调度图节点
+   * @param stops 是否停车（不是通过）
+   * @param arrival 计划到达
+   * @param departure 计划发车
+   */
+  public record PlannedStop(
+      int stopSequence,
+      Optional<String> stationCode,
+      Optional<String> nodeId,
+      boolean stops,
+      Optional<Instant> arrival,
+      Optional<Instant> departure) {}
+
+  /**
+   * 一趟车次某一天的停靠表。
+   *
+   * @param tripId 车次 ID
+   * @param tripCode 车次号（表里的写法）
+   * @param routeId 交路
+   * @param routeCode 交路代码
+   * @param stops 各停靠点
+   */
+  public record TripPlan(
+      UUID tripId, String tripCode, UUID routeId, String routeCode, List<PlannedStop> stops) {
+    public TripPlan {
+      stops = stops == null ? List.of() : List.copyOf(stops);
+    }
+  }
+
+  /**
+   * 一趟车次某一天的停靠表与各站计划时刻（只读，不看时间窗）；时刻表未发布或没有这个车次时为空。
+   *
+   * @param tripCode 车次号（不分大小写）
+   */
+  public Optional<TripPlan> tripPlan(UUID timetableId, String tripCode, LocalDate serviceDate) {
+    Timetable timetable = timetableId == null ? null : snapshot.byId().get(timetableId);
+    if (timetable == null || tripCode == null || serviceDate == null) {
+      return Optional.empty();
+    }
+    Optional<TimetableTrip> tripOpt = timetable.tripByCode(tripCode.trim());
+    if (tripOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    TimetableTrip trip = tripOpt.get();
+    Optional<TimetableRoutePlan> plan = timetable.tripPlan(trip);
+    if (plan.isEmpty()) {
+      return Optional.empty();
+    }
+    List<PlannedStop> stops = new ArrayList<>();
+    for (TimetableStop stop : plan.get().stops()) {
+      stops.add(
+          new PlannedStop(
+              stop.stopSequence(),
+              stop.stationCode(),
+              stop.nodeId(),
+              stop.passType() != RouteStopPassType.PASS,
+              timetable.scheduledArrival(trip, stop.stopSequence(), serviceDate),
+              timetable.scheduledDeparture(trip, stop.stopSequence(), serviceDate)));
+    }
+    return Optional.of(
+        new TripPlan(trip.id(), trip.tripCode(), trip.routeId(), plan.get().routeCode(), stops));
+  }
+
+  /**
+   * 这一车次的列车从哪个车库出车：线路首站就是车库，或它是某个交路的首班、交路有出库走行。只读。
+   *
+   * @return 车库节点；车次由终点站待命车接班、或查不到时为空
+   */
+  public Optional<String> depotOriginOf(UUID timetableId, String tripCode) {
+    Timetable timetable = timetableId == null ? null : snapshot.byId().get(timetableId);
+    if (timetable == null || tripCode == null) {
+      return Optional.empty();
+    }
+    Optional<TimetableTrip> trip = timetable.tripByCode(tripCode);
+    if (trip.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<TimetableRoutePlan> plan = timetable.tripPlan(trip.get());
+    if (plan.isPresent() && startsAtDepot(plan.get())) {
+      return Optional.of(plan.get().depotNodeId().orElse(plan.get().originNodeId()));
+    }
+    UUID tripId = trip.get().id();
+    return trip.get()
+        .dutyId()
+        .flatMap(timetable::duty)
+        .filter(
+            duty ->
+                duty.createRouteId().isPresent()
+                    && !duty.tripIds().isEmpty()
+                    && duty.tripIds().get(0).equals(tripId))
+        .map(VehicleDuty::startDepotNodeId)
+        .filter(depot -> !depot.isBlank());
   }
 
   /**
@@ -461,7 +637,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return ledger
         .progressOf(key)
         .flatMap(progress -> returnLegAhead(key, progress, current, false))
-        .flatMap(due -> due.timetable().routePlan(due.trip().routeId()))
+        .flatMap(due -> due.timetable().tripPlan(due.trip()))
         .filter(
             plan -> here.equalsIgnoreCase(TimetableConflictChecker.groupOf(plan.originNodeId())))
         .isPresent();
@@ -752,8 +928,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     List<UUID> ids = duty.tripIds();
     for (int j = Math.max(0, fromIndex); j < ids.size(); j++) {
       Optional<TimetableTrip> tripOpt = timetable.trip(ids.get(j));
-      Optional<TimetableRoutePlan> planOpt =
-          tripOpt.flatMap(trip -> timetable.routePlan(trip.routeId()));
+      Optional<TimetableRoutePlan> planOpt = tripOpt.flatMap(timetable::tripPlan);
       if (tripOpt.isEmpty() || planOpt.isEmpty()) {
         continue;
       }
@@ -763,7 +938,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
       if (!deadline.isAfter(now) || startsAtDepot(planOpt.get())) {
         continue;
       }
-      Optional<TimetableRoutePlan> create = positioningRoute(timetable, planOpt.get());
+      Optional<TimetableRoutePlan> create =
+          positioningRoute(timetable, planOpt.get(), duty.consist());
       if (create.isEmpty()) {
         continue;
       }
@@ -794,16 +970,23 @@ public final class TimetableService implements ScheduledDeparturePlan {
         || TimetableConflictChecker.groupOf(plan.originNodeId()).contains(":D:");
   }
 
-  /** 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。 */
+  /**
+   * 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。
+   *
+   * <p>交路带车型时替补车出的是这个车型，只在编表时允许这个车型的出库线路里选（表里有它的变体计划），时分也按这个车型； 一条都没有时派不出替补。交路不带车型时只比不分车型的那份计划。
+   *
+   * @param consist 交路的车型
+   */
   private static Optional<TimetableRoutePlan> positioningRoute(
-      Timetable timetable, TimetableRoutePlan target) {
+      Timetable timetable, TimetableRoutePlan target, Optional<String> consist) {
     String origin = TimetableConflictChecker.groupOf(target.originNodeId());
     if (origin.isBlank()) {
       return Optional.empty();
     }
     TimetableRoutePlan best = null;
     for (TimetableRoutePlan plan : timetable.routePlans()) {
-      if (plan.kind() == RouteOperationType.CREATE
+      if (plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)
+          && plan.kind() == RouteOperationType.CREATE
           && !plan.external()
           && origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))
           && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {
@@ -819,18 +1002,23 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * <p>编表时它来自出库线路终到站的 dwell；表里没存这个数，从已经排好的交路反推，与原计划同一口径。没有交路用它时按 0 计——判定本身还有发车容差兜底。
    */
   private long readySeconds(Timetable timetable, TimetableRoutePlan create) {
+    Optional<String> consist = create.consist().map(TimetableRoutePlan.ConsistVariant::key);
     return readyByCreateRoute.computeIfAbsent(
-        new ReadyKey(timetable.id(), timetable.updatedAt(), create.routeId()),
-        ignored -> computeReadySeconds(timetable, create));
+        new ReadyKey(timetable.id(), timetable.updatedAt(), create.routeId(), consist),
+        ignored -> computeReadySeconds(timetable, create, consist));
   }
 
-  /** 就绪时间缓存的键：同一份表（按更新时刻区分重新 build）里的一条出库线路。 */
-  private record ReadyKey(UUID timetableId, Instant updatedAt, UUID createRouteId) {}
+  /** 就绪时间缓存的键：同一份表（按更新时刻区分重新 build）里的一条出库线路，区分车型时再按车型。 */
+  private record ReadyKey(
+      UUID timetableId, Instant updatedAt, UUID createRouteId, Optional<String> consist) {}
 
-  private static long computeReadySeconds(Timetable timetable, TimetableRoutePlan create) {
+  /** 只看同一车型的交路：各车型的出库时刻按各自的走行倒推，混在一起反推出来的就绪时间不对。 */
+  private static long computeReadySeconds(
+      Timetable timetable, TimetableRoutePlan create, Optional<String> consist) {
     long ready = 0L;
     for (VehicleDuty duty : timetable.duties()) {
       if (duty.createRouteId().filter(create.routeId()::equals).isEmpty()
+          || !duty.consist().equals(consist)
           || duty.tripIds().isEmpty()) {
         continue;
       }
@@ -1003,7 +1191,64 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return true;
     }
     String key = keyOf(trainName);
-    return key == null || ledger.acceptsVehicle(intent, key, trainName);
+    if (key == null) {
+      return true;
+    }
+    if (!ledger.acceptsVehicle(intent, key, trainName)) {
+      return false;
+    }
+    // 已绑交路的车 ledger 只放它自己交路的票；没绑交路的车接首班时车型还得对上。
+    return ledger.bindingOf(key).isPresent() || consistAccepts(intent, trainName);
+  }
+
+  /**
+   * 没绑交路的车接交路的首班：交路带车型时车型须相同；读不出车型的车不接带车型的交路（宁可少绑）。
+   *
+   * @return 交路不带车型、或车型相同时为 true
+   */
+  private boolean consistAccepts(TicketIntent intent, String trainName) {
+    Timetable timetable = snapshot.byId().get(intent.key().timetableId());
+    Optional<String> required =
+        timetable == null
+            ? Optional.empty()
+            : timetable.duty(intent.key().dutyId()).flatMap(VehicleDuty::consist);
+    if (required.isEmpty()) {
+      return true;
+    }
+    Optional<String> actual = consistOfVehicle(trainName);
+    if (required.equals(actual)) {
+      return true;
+    }
+    debugLogger.accept(
+        "TIMETABLE_CANDIDATE_REJECT train="
+            + trainName
+            + " ticketDuty="
+            + intent.key().describe()
+            + " dutyConsist="
+            + required.get()
+            + " trainConsist="
+            + actual.orElse("-")
+            + " reason=consist-mismatch");
+    return false;
+  }
+
+  /** 列车的车型（出车时写的编组标签，归一后的键）；读不出时为空。 */
+  private Optional<String> consistOfVehicle(String trainName) {
+    try {
+      Optional<String> consist = consistOfTrain.apply(trainName);
+      return consist == null ? Optional.empty() : consist;
+    } catch (RuntimeException ex) {
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * 接入列车车型的读取（列车名 → 车上编组标签归一后的键）。未接入时一律读不出，带车型的交路只由出库票实体化的车跑。
+   *
+   * @param reader 读取函数；null 恢复默认
+   */
+  public void setConsistOfTrain(Function<String, Optional<String>> reader) {
+    this.consistOfTrain = reader == null ? name -> Optional.empty() : reader;
   }
 
   /**
@@ -1396,8 +1641,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
                 .orElse(" no-replacement");
     for (int j = Math.max(0, vacancy.fromIndex()); j < coveredFrom; j++) {
       TimetableTrip trip = timetable.trip(ids.get(j)).orElse(null);
-      TimetableRoutePlan plan =
-          trip == null ? null : timetable.routePlan(trip.routeId()).orElse(null);
+      TimetableRoutePlan plan = trip == null ? null : timetable.tripPlan(trip).orElse(null);
       if (plan == null || startsAtDepot(plan)) {
         continue;
       }
@@ -1563,8 +1807,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     Timetable timetable = resolveTimetable(assignment).orElse(null);
     TimetableTrip trip =
         timetable == null ? null : timetable.trip(assignment.tripId()).orElse(null);
-    TimetableRoutePlan plan =
-        trip == null ? null : timetable.routePlan(trip.routeId()).orElse(null);
+    TimetableRoutePlan plan = trip == null ? null : timetable.tripPlan(trip).orElse(null);
     if (plan == null) {
       return;
     }
@@ -1790,6 +2033,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
       List<Timetable> timetables,
       StationStopEvent event,
       Settings current) {
+    Optional<DutyKey> bound = ledger.bindingOf(key);
+    // 车型只在就近匹配时用（没绑交路的车）；已绑交路的车门控每秒都问，不必每次读车上标签。
     Optional<TripMatcher.Match> matched =
         matcher.match(
             key,
@@ -1797,8 +2042,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
             timetables,
             event,
             current,
-            ledger.bindingOf(key),
-            duty -> ledger.heldByOther(duty, key));
+            bound,
+            duty -> ledger.heldByOther(duty, key),
+            bound.isPresent() ? Optional.empty() : consistOfVehicle(event.trainName()));
     if (matched.isEmpty()) {
       return Optional.empty();
     }
@@ -1842,6 +2088,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     ledger.dropOutside(next.byId().keySet(), released);
     released.forEach(key -> closeDelays(key, key, "timetable-unpublished"));
     cancellations.retainTimetables(next.byId().keySet());
+    skippedStops.retainTimetables(next.byId().keySet());
   }
 
   private static String keyOf(String trainName) {

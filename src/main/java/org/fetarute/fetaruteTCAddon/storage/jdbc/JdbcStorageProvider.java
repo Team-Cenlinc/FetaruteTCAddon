@@ -11,6 +11,8 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
@@ -18,9 +20,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
@@ -28,12 +33,17 @@ import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcConsistPlanRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcRailEdgeRepository;
@@ -73,10 +83,15 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RailComponentCautionRepository railComponentCautionRepository;
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
   private final RailInterlockingSnapshotRepository railInterlockingSnapshotRepository;
+  private final DriveTaskRecordRepository driveTaskRecordRepository;
+  private final LicenseRepository licenseRepository;
+  private final PortalLinkRepository portalLinkRepository;
   private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
+  private final ConsistPlanRepository consistPlanRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
   private final PidsScreenRepository pidsScreenRepository;
+  private final PidsBulletinRepository pidsBulletinRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -113,14 +128,24 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcRailGraphSnapshotRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.railInterlockingSnapshotRepository =
         new JdbcRailInterlockingSnapshotRepository(dataSource, dialect, tablePrefix, logger::warn);
+    this.driveTaskRecordRepository =
+        new JdbcDriveTaskRecordRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.licenseRepository =
+        new JdbcLicenseRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.portalLinkRepository =
+        new JdbcPortalLinkRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.timetableRepository =
         new JdbcTimetableRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudTemplateRepository =
         new JdbcHudTemplateRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.consistPlanRepository =
+        new JdbcConsistPlanRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudLineBindingRepository =
         new JdbcHudLineBindingRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.pidsScreenRepository =
         new JdbcPidsScreenRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.pidsBulletinRepository =
+        new JdbcPidsBulletinRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -212,6 +237,21 @@ public final class JdbcStorageProvider implements StorageProvider {
   }
 
   @Override
+  public DriveTaskRecordRepository driveTaskRecords() {
+    return driveTaskRecordRepository;
+  }
+
+  @Override
+  public LicenseRepository licenses() {
+    return licenseRepository;
+  }
+
+  @Override
+  public PortalLinkRepository portalLinks() {
+    return portalLinkRepository;
+  }
+
+  @Override
   public TimetableRepository timetables() {
     return timetableRepository;
   }
@@ -222,6 +262,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   }
 
   @Override
+  public ConsistPlanRepository consistPlans() {
+    return consistPlanRepository;
+  }
+
+  @Override
   public HudLineBindingRepository hudLineBindings() {
     return hudLineBindingRepository;
   }
@@ -229,6 +274,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public PidsScreenRepository pidsScreens() {
     return pidsScreenRepository;
+  }
+
+  @Override
+  public PidsBulletinRepository pidsBulletins() {
+    return pidsBulletinRepository;
   }
 
   @Override

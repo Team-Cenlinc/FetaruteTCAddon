@@ -51,7 +51,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
 /**
- * 终点待命车只保持车身实际压着的轨道：双站台终点的另一个站台不再被它挡住。
+ * 终点停车（待命或终到停站）只保持车身实际压着的轨道：双站台终点的另一个站台不再被它挡住。
  *
  * <p>夹具照实服 PPK：RVS —21— SW650 —18— SW630 —25— PPK1，SW650 另有一支 —7— SW643 —36— PPK2。去两个站台都要过 SW650。
  * MT 保守车长 34，停在 PPK1：从站台节点往回量 25 + 18 ≥ 34，再留 1 条边，尾部保护一路盖到 RVS，SW650 被占； 实际车体以站牌为中心，只压着 SW630—PPK1
@@ -175,6 +175,33 @@ class LayoverBodyRetainTest {
     assertTrue(scenario.heldByTrain(OccupancyResource.forEdge(SW630_PPK1)));
   }
 
+  /** 终到停站期间（停站计时还没走完、还没登记成待命车）：停在交路最后一个路径点，同样只保持车身，后车能过共用道岔。 */
+  @Test
+  void aTrainStillInItsTerminalDwellAlsoKeepsOnlyItsBody() {
+    Scenario scenario = new Scenario(false);
+
+    scenario.tick(false, Optional.of(Set.of(cellOf(SW630_PPK1))));
+
+    assertTrue(scenario.heldByTrain(OccupancyResource.forEdge(SW630_PPK1)), "车身区间照旧保持");
+    assertTrue(scenario.heldByTrain(OccupancyResource.forNode(SW630)), "车身区间的端点照旧保持");
+    assertFalse(scenario.heldByTrain(OccupancyResource.forNode(SW650)));
+    assertFalse(scenario.heldByTrain(SWITCHER_650));
+    assertTrue(scenario.followerCanReachPpk2(), "去另一个站台的后车能过共用道岔");
+  }
+
+  /** 收窄只给停在交路最后一个路径点的车：中途站的车还要往前走，不收窄。 */
+  @Test
+  void onlyTheFinalWaypointCountsAsAFinalStop() {
+    RouteDefinition route =
+        new RouteDefinition(RouteId.of("MT-2F_Short"), List.of(RVS, SW650, PPK1), Optional.empty());
+
+    assertTrue(LayoverBodyRetain.atFinalStop(route, 2));
+    assertFalse(LayoverBodyRetain.atFinalStop(route, 1));
+    assertFalse(LayoverBodyRetain.atFinalStop(route, 0));
+    assertFalse(LayoverBodyRetain.atFinalStop(route, 3));
+    assertFalse(LayoverBodyRetain.atFinalStop(null, 0));
+  }
+
   /** 没停稳或读不到车身位置：保持原有的整条尾部保护，后车照旧等。 */
   @Test
   void withoutStationaryCompleteBodyEvidenceTheApproachStaysHeld() {
@@ -204,13 +231,21 @@ class LayoverBodyRetainTest {
             "FTA_ROUTE_INDEX=1");
     private final RouteProgressRegistry registry = new RouteProgressRegistry();
     private final LayoverRegistry layoverRegistry = new LayoverRegistry();
+    private final DwellRegistry dwellRegistry = new DwellRegistry();
     private final RuntimeDispatchService service;
 
     private Scenario() {
+      this(true);
+    }
+
+    /**
+     * @param registered 已登记成待命车；为 false 时车还在终到停站（停站计时进行中）
+     */
+    private Scenario(boolean registered) {
       RouteDefinition route =
           new RouteDefinition(RouteId.of("MT-2F_Short"), List.of(RVS, PPK1), Optional.empty());
       registry.initFromTags(TRAIN, tags.properties(), route);
-      service = service(manager, worldId, route, registry, layoverRegistry);
+      service = service(manager, worldId, route, registry, layoverRegistry, dwellRegistry);
       List<OccupancyResource> arrival =
           List.of(
               OccupancyResource.forNode(RVS),
@@ -239,7 +274,11 @@ class LayoverBodyRetainTest {
                       Map.of(),
                       intents))
               .allowed());
-      layoverRegistry.register(TRAIN, "surc:s:ppk:1", PPK1, Instant.now(), Map.of());
+      if (registered) {
+        layoverRegistry.register(TRAIN, "surc:s:ppk:1", PPK1, Instant.now(), Map.of());
+      } else {
+        dwellRegistry.start(TRAIN, 20);
+      }
     }
 
     private void tick(boolean moving, Optional<Set<RailFootprintCell>> cells) {
@@ -293,7 +332,8 @@ class LayoverBodyRetainTest {
       UUID worldId,
       RouteDefinition route,
       RouteProgressRegistry registry,
-      LayoverRegistry layoverRegistry) {
+      LayoverRegistry layoverRegistry,
+      DwellRegistry dwellRegistry) {
     ConfigManager configManager = mock(ConfigManager.class);
     when(configManager.current()).thenReturn(testConfigView(20, 20.0));
     RailGraphService railGraphService = mock(RailGraphService.class);
@@ -314,7 +354,7 @@ class LayoverBodyRetainTest {
         registry,
         mock(SignNodeRegistry.class),
         layoverRegistry,
-        new DwellRegistry(),
+        dwellRegistry,
         configManager,
         null,
         new TrainConfigResolver(),

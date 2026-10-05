@@ -4,6 +4,9 @@ config-version: 38
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
 
+# 本服的服务器 ID（跨服预留）。单服留空；多服时每台服务器不同，跨边界的引用写成“服务器 ID + 节点 ID”
+server-id: ""
+
 debug:
   # 是否输出调试日志
   enabled: false
@@ -88,6 +91,9 @@ graph:
   sign-anchor-search-radius: 6
   # 道岔（switcher）牌子寻找所属轨道的搜索半径（格）
   switcher-anchor-search-radius: 2
+  # 跨世界（实验）：把 TrainCarts 的 [portal] 牌子（MyWorlds 传送门）建成图节点，并可用 /fta graph portal 把两边的门连起来。
+  # 关闭时传送门牌子不进图，与旧版行为一致；改动后需重建调度图
+  cross-world: false
 
 autostation:
   # 关门提示音（Bukkit Sound 名称或自定义声音键）

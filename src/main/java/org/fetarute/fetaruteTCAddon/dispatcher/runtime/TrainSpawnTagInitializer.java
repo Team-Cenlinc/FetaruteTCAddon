@@ -20,9 +20,13 @@ public final class TrainSpawnTagInitializer {
   public static final String TAG_MATERIALIZED_ROLLBACK_PENDING =
       "FTA_MATERIALIZED_ROLLBACK_PENDING";
 
+  /** 列车全局 ID：跨服后车名可能重复，跨边界的引用都用它。取值与本次运行 ID 相同。 */
+  public static final String TAG_TRAIN_UID = "FTA_TRAIN_UID";
+
   private static final List<String> LIFECYCLE_TAG_KEYS =
       List.of(
           "FTA_RUN_ID",
+          TAG_TRAIN_UID,
           RouteProgressRegistry.TAG_ROUTE_ID,
           RouteProgressRegistry.TAG_ROUTE_CODE,
           RouteProgressRegistry.TAG_LINE_CODE,
@@ -45,6 +49,8 @@ public final class TrainSpawnTagInitializer {
   private static final List<String> TRANSIENT_CONTROL_TAG_KEYS =
       List.of(
           "FTA_LAST_LAUNCH_AT",
+          "FTA_PENDING_LAUNCH_COMMAND",
+          "FTA_LAUNCH_OWED",
           "FTA_LAST_SPEED_CMD_BPS",
           "FTA_LAST_SPEED_CMD_AT",
           "FTA_DOOR_FIRST_STOP_DONE",
@@ -53,7 +59,10 @@ public final class TrainSpawnTagInitializer {
           "FTA_MAINTENANCE_HOLD",
           "FTA_OPERATOR",
           "FTA_LINE",
-          "FTA_ROUTE");
+          "FTA_ROUTE",
+          DriverControlTags.TAG_DRIVER,
+          "FTA_DRIVE_SLOWDOWN_ORIG",
+          "FTA_DRIVE_SPEEDLIMIT_ORIG");
 
   private TrainSpawnTagInitializer() {}
 

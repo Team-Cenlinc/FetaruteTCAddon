@@ -107,6 +107,8 @@ final class RapidStagger {
    * @param profiles 交路投影
    * @param index 图索引
    * @param separation 裕量
+   * @param following 跟车规则：启用时被拖住按闭塞时间算（与运行时放行同一口径），否则按占用区间
+   * @param trajectories 闭塞时间用的逐点轨迹
    * @param zeroSecondOfDay 计划窗口起点（日内秒）
    * @param fastRoutes 快车交路（{@link #fastRoutes}）
    * @param yields 表里写的让车（量快车自己的等待）
@@ -116,10 +118,13 @@ final class RapidStagger {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       TimetableConflictChecker.GraphIndex index,
       int separation,
+      TimetableBuildOptions.Following following,
+      BlockingTimes.Trajectories trajectories,
       int zeroSecondOfDay,
       Set<UUID> fastRoutes,
       List<ResourceRepair.Yield> yields) {
-    CorridorCatchUp corridors = new CorridorCatchUp(profiles, index, separation);
+    CorridorCatchUp corridors =
+        new CorridorCatchUp(profiles, index, separation, following, trajectories);
     List<CorridorCatchUp.Caught> caught =
         corridors
             .caught(
@@ -192,9 +197,16 @@ final class RapidStagger {
     SEARCH
   }
 
-  /** 开了错峰、快车有损失（被卡或在表里让车等待）时才搜；原表已放宽时只试加长折返。 */
-  static Plan plan(boolean enabled, Measure measure, boolean relaxed) {
-    if (!enabled || measure.lost() == 0L) {
+  /**
+   * 开了错峰、快车有损失（被卡或在表里让车等待）时才搜；原表已放宽时只试加长折返。
+   *
+   * <p>两个口径任一量出损失就搜：占用区间口径看不出跟车减速，只有闭塞时间口径量出来的被卡（快车跟在停站车后面那种）也要搜。
+   *
+   * @param measure 搜索口径的实测
+   * @param reported 报告口径的实测
+   */
+  static Plan plan(boolean enabled, Measure measure, Measure reported, boolean relaxed) {
+    if (!enabled || (measure.lost() == 0L && reported.lost() == 0L)) {
       return Plan.MEASURE_ONLY;
     }
     return relaxed ? Plan.TURNBACK_ONLY : Plan.SEARCH;
@@ -239,6 +251,7 @@ final class RapidStagger {
    * @param absorbable 留给运行时去让的残余冲突数
    * @param yields 写进表的让车数
    * @param waited 班次在表里的让车等待秒数合计（所有班次，含快车自己；见 {@link #tripWaitSeconds}）
+   * @param coreTrips 首末两头各一个"最长一趟车的来回"之外的班次数（{@link #tripsAwayFromEdges}）
    */
   record Outcome(
       boolean success,
@@ -247,7 +260,20 @@ final class RapidStagger {
       int peak,
       int absorbable,
       int yields,
-      long waited) {
+      long waited,
+      int coreTrips) {
+
+    /** 全部班次都算中间时段。 */
+    Outcome(
+        boolean success,
+        boolean relaxed,
+        int trips,
+        int peak,
+        int absorbable,
+        int yields,
+        long waited) {
+      this(success, relaxed, trips, peak, absorbable, yields, waited, trips);
+    }
 
     static Outcome of(TimetableBuildResult result) {
       return new Outcome(
@@ -257,7 +283,13 @@ final class RapidStagger {
           result.peakConcurrentVehicles(),
           result.absorbable().size(),
           result.yields().size(),
-          tripWaitSeconds(result));
+          tripWaitSeconds(result),
+          tripsAwayFromEdges(result));
+    }
+
+    /** 首末两头的班次数。 */
+    int edgeTrips() {
+      return trips - coreTrips;
     }
   }
 
@@ -279,14 +311,42 @@ final class RapidStagger {
   }
 
   /**
-   * 候选可用：目标间隔下排得开（不放宽）、班次不少、高峰最多多用 {@value #MAX_EXTRA_VEHICLES} 列车。
+   * 中间时段的班次：发车离计划窗口的起点与终点都超过最长一趟车全程时分的两倍。
+   *
+   * <p>首班车从车库出来、末班车回库，最多要走一个来回；这段时间里哪几班接得上、网格里能放进几班，随相位与折返时长变，
+   * 平移相位或加长折返常常让首末差一两班。这是相位在首末边缘的副作用，不是运营时段少了班次，所以候选的班次只比中间时段的。
+   */
+  static int tripsAwayFromEdges(TimetableBuildResult result) {
+    if (result.timetable().isEmpty()) {
+      return 0;
+    }
+    Timetable table = result.timetable().get();
+    int edge = 2 * Math.max(0, result.longestTripSeconds());
+    int horizon = table.serviceEndSecondOfDay() - table.serviceStartSecondOfDay();
+    int count = 0;
+    for (TimetableTrip trip : table.trips()) {
+      int at =
+          TimetableOccupancyProjector.relativeDeparture(
+              table, trip, table.serviceStartSecondOfDay());
+      if (at >= edge && at <= horizon - edge) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * 候选可用：目标间隔下排得开（不放宽）、排进网格的班次不少、高峰最多多用 {@value #MAX_EXTRA_VEHICLES} 列车。
    *
    * <p>加长折返让车在端点多停，交路周转变长，有时要多一列车才排得下；为了快车一路不被拖住，值得多这一列。
+   *
+   * <p>班次只比中间时段的（{@link #tripsAwayFromEdges}）：首末一个来回里差的那一两班随相位变，不能拿它否掉一张全天快车都不被拖的表；
+   * 首末少了多少照样写进错峰那一行（{@link #describeSearch}）。
    */
   static boolean acceptable(Outcome base, Outcome candidate) {
     return candidate.success()
         && !candidate.relaxed()
-        && candidate.trips() >= base.trips()
+        && candidate.coreTrips() >= base.coreTrips()
         && candidate.peak() <= base.peak() + MAX_EXTRA_VEHICLES;
   }
 
@@ -297,16 +357,34 @@ final class RapidStagger {
    * @param dwell 快车中途加停或终到折返加长（没有时为空）
    * @param result 编表结果
    * @param outcome 结果里挑选要看的几个数
-   * @param measure 实测
+   * @param measure 搜索用的实测：搜索里的取舍与早停看它（按占用区间量，见 {@link Picks}）
+   * @param reported 报告与最终挑选用的实测（按闭塞时间量）；没有跟车规则时与 {@code measure} 相同
    */
   record Candidate(
       Map<String, Integer> shift,
       Optional<Dwell> dwell,
       TimetableBuildResult result,
       Outcome outcome,
-      Measure measure) {
+      Measure measure,
+      Measure reported) {
     Candidate {
       shift = Collections.unmodifiableSortedMap(new TreeMap<>(shift));
+      reported = reported == null ? measure : reported;
+    }
+
+    /** 搜索与报告同一口径。 */
+    Candidate(
+        Map<String, Integer> shift,
+        Optional<Dwell> dwell,
+        TimetableBuildResult result,
+        Outcome outcome,
+        Measure measure) {
+      this(shift, dwell, result, outcome, measure, measure);
+    }
+
+    /** 按报告口径看这个候选：挑最终答案、写报告用。 */
+    Candidate asReported() {
+      return new Candidate(shift, dwell, result, outcome, reported, reported);
     }
 
     /** 改动大小：平移秒数与加停秒数之和，并列时取改得少的。 */
@@ -602,9 +680,15 @@ final class RapidStagger {
    */
   record Search(Optional<Candidate> improved, int tried) {}
 
-  /** 最终答案：只从比原表好（{@link Candidate#betterThan}）的候选里取 {@link #ORDER} 最前的。 */
+  /**
+   * 最终答案：只从比原表好（{@link Candidate#betterThan}）的候选里取 {@link #ORDER} 最前的。
+   *
+   * <p>两个口径分开用。搜索里的早停按搜索口径（占用区间）：闭塞时间口径下，慢车间隔比快车所需的小几秒就是结构缺口，被卡到不了 0， 按它早停会把候选全编一遍。
+   * 最终答案在编过的候选里按报告口径（闭塞时间）重新挑：编一个候选要整张表重排，量一遍只是在成品表上逐段比，几乎不花时间。
+   */
   private static final class Picks {
     private final Candidate base;
+    private boolean clear;
     private Candidate chosen;
 
     Picks(Candidate base) {
@@ -612,14 +696,24 @@ final class RapidStagger {
     }
 
     void offer(Candidate candidate) {
-      if (candidate.betterThan(base) && (chosen == null || ORDER.compare(candidate, chosen) < 0)) {
+      if (candidate.betterThan(base) && candidate.measure().seconds() == 0L) {
+        clear = true;
+      }
+      Candidate reported = candidate.asReported();
+      if (reported.betterThan(base.asReported())
+          && (chosen == null || ORDER.compare(reported, chosen.asReported()) < 0)) {
         chosen = candidate;
       }
     }
 
-    /** 已经选到一个快车完全不被卡的：再找只可能在次要指标上略好。 */
+    /**
+     * 按搜索口径已经有一个比原表好、快车完全不被卡的候选：再找只可能在次要指标上略好。
+     *
+     * <p>看的是"有没有"，不是 {@link #ORDER} 最前的那个：最前的按全网损失排，可能是快车仍被卡、但表里等待更少的一个，
+     * 拿它判就会在已经错开之后把余下的位置全编一遍（每个都是整张表重排）。
+     */
     boolean settled() {
-      return chosen != null && chosen.measure().seconds() == 0L;
+      return clear;
     }
 
     Search finish(int tried) {
@@ -639,7 +733,7 @@ final class RapidStagger {
    *   <li>平移没能完全错开时，在前 {@value #DWELL_SHORTLIST} 个最好的平移与原表上给仍被拖住的快车加停。
    * </ol>
    *
-   * <p>已经选到快车完全不被卡的候选（{@link Picks#settled}）就不再往下一步。
+   * <p>按搜索口径已经有一个比原表好、快车完全不被卡的候选（{@link Picks#settled}）就不再往下一步；最终答案在编过的候选里按报告口径挑。
    *
    * @param periods 快车组 → 平移的相对周期
    * @param base 原表
@@ -775,7 +869,7 @@ final class RapidStagger {
                       tried)
               : String.format(
                   Locale.ROOT,
-                  "试了 %d 个位置（目标间隔排得开、班次不少、最多多用 %d 列车），没有快车损失更少、且不增加全网让车等待的",
+                  "试了 %d 个位置（目标间隔排得开、中间时段班次不少、最多多用 %d 列车），没有快车损失更少、且不增加全网让车等待的",
                   tried,
                   MAX_EXTRA_VEHICLES);
       return String.format(
@@ -807,6 +901,10 @@ final class RapidStagger {
     int basePeak = base.outcome().peak();
     int peak = best.outcome().peak();
     String vehicles = peak > basePeak ? "，高峰 " + basePeak + " → " + peak + " 列车" : "";
+    int edgeLost = base.outcome().edgeTrips() - best.outcome().edgeTrips();
+    if (edgeLost > 0) {
+      vehicles += "，首末一个来回内少 " + edgeLost + " 班";
+    }
     return String.format(
         Locale.ROOT,
         "快车错峰：%s，快车被卡 %ds → %ds（%d → %d 班），快车让车等待 %ds → %ds，全网让车等待 %ds → %ds%s，试了 %d 个位置，用时 %ds",

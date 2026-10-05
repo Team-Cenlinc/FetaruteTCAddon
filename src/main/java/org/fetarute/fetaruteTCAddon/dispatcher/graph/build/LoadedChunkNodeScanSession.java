@@ -17,9 +17,7 @@ import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.GraphSignParsers;
 
 /**
  * 从已加载区块增量扫描节点牌子，用于控制台 build all 或兜底扫描。
@@ -118,8 +116,7 @@ public final class LoadedChunkNodeScanSession {
         continue;
       }
       scannedSigns++;
-      NodeSignDefinitionParser.parse(tracked)
-          .or(() -> SwitcherSignDefinitionParser.parse(tracked))
+      GraphSignParsers.parse(tracked)
           .ifPresent(
               def -> {
                 RailBlockPos anchorPos =
@@ -132,9 +129,8 @@ public final class LoadedChunkNodeScanSession {
                 int x = anchorPos.x();
                 int y = anchorPos.y();
                 int z = anchorPos.z();
-                if (def.nodeType() == NodeType.SWITCHER) {
-                  Optional<RailBlockPos> parsed =
-                      SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
+                {
+                  Optional<RailBlockPos> parsed = GraphSignParsers.railPosOf(def);
                   if (parsed.isPresent()) {
                     RailBlockPos pos = parsed.get();
                     x = pos.x();

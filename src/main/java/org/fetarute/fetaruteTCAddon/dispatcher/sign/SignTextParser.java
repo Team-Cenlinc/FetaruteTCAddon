@@ -47,6 +47,11 @@ public final class SignTextParser {
       return Optional.empty();
     }
     String[] segments = trimmed.split(":");
+    // 传送门的自动 ID（PORTAL:<world>:x:y:z）也是 5 段，不能当成区间点解析（y 为负时还会抛异常）。
+    // 道岔的自动 ID 沿用旧行为（咽喉路线把它当区间点终止），不在这里拦。
+    if (segments.length > 0 && "PORTAL".equalsIgnoreCase(segments[0].trim())) {
+      return Optional.empty();
+    }
     if (segments.length == SEGMENTS_TYPED) {
       // 4 段格式：强制要求第二段为 S/D，用于区分 Station/Depot，避免同名冲突。
       String operator = segments[0].trim();

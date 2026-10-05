@@ -89,7 +89,7 @@ public final class ResourcePhasePlanner {
    * @param index 图索引
    * @param separationSeconds 裕量
    * @param maxWaitSeconds 可吸收判据用的单步上限
-   * @param maxIdleSeconds 反向 δ 的上限（端点多等不能超过运行时的闲置回收）
+   * @param maxIdleSeconds 反向 δ 的上限（端点多等不能超过运行时的闲置回收）；另外不超过一个间隔
    * @param inPlaceTurnbackRoutes 终到原地折返端的 route：含它们的往返对锚在这一端，只能整对平移
    * @return 带 {@code deltaByDirection} 与 {@code resourceNotes} 的新 {@code Phases}
    */
@@ -117,7 +117,9 @@ public final class ResourcePhasePlanner {
     List<String> notes = new ArrayList<>();
     int horizonSeconds = horizonOf(order);
     for (Unit unit : unitsOf(order, groups, phases.connections(), inPlaceTurnbackRoutes)) {
-      int limit = unit.reverse() ? Math.max(0, maxIdleSeconds) : unit.interval();
+      // 多等超过一个间隔与减去一个间隔后的周期完全相同，只会多等；回收关着时闲置上限是一整天，不夹住就要扫上千次。
+      int limit =
+          unit.reverse() ? Math.max(0, Math.min(maxIdleSeconds, unit.interval())) : unit.interval();
       Score best = null;
       int bestDelta = 0;
       for (int candidate = 0; candidate <= limit; candidate += SCAN_STEP_SECONDS) {

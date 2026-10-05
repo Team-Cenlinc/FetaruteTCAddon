@@ -24,9 +24,7 @@ import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.GraphSignParsers;
 
 /**
  * 从一组起始轨道锚点出发，沿轨道连通性扩展，并在触达的区块内增量扫描节点牌子。
@@ -571,17 +569,15 @@ public final class ConnectedRailNodeDiscoverySession {
         continue;
       }
       scannedSigns++;
-      NodeSignDefinitionParser.parse(tracked)
-          .or(() -> SwitcherSignDefinitionParser.parse(tracked))
+      GraphSignParsers.parse(tracked)
           .ifPresent(
               def -> {
                 RailBlockPos anchorPos = resolveRailPosFromTrackedSign(tracked, railPos);
                 int x = anchorPos.x();
                 int y = anchorPos.y();
                 int z = anchorPos.z();
-                if (def.nodeType() == NodeType.SWITCHER) {
-                  Optional<RailBlockPos> parsed =
-                      SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
+                {
+                  Optional<RailBlockPos> parsed = GraphSignParsers.railPosOf(def);
                   if (parsed.isPresent()) {
                     RailBlockPos pos = parsed.get();
                     x = pos.x();
@@ -649,8 +645,7 @@ public final class ConnectedRailNodeDiscoverySession {
         continue;
       }
       scannedSigns++;
-      NodeSignDefinitionParser.parse(tracked)
-          .or(() -> SwitcherSignDefinitionParser.parse(tracked))
+      GraphSignParsers.parse(tracked)
           .ifPresent(
               def -> {
                 RailBlockPos anchorPos =
@@ -663,9 +658,8 @@ public final class ConnectedRailNodeDiscoverySession {
                 int x = anchorPos.x();
                 int y = anchorPos.y();
                 int z = anchorPos.z();
-                if (def.nodeType() == NodeType.SWITCHER) {
-                  Optional<RailBlockPos> parsed =
-                      SwitcherSignDefinitionParser.tryParseRailPos(def.nodeId());
+                {
+                  Optional<RailBlockPos> parsed = GraphSignParsers.railPosOf(def);
                   if (parsed.isPresent()) {
                     RailBlockPos pos = parsed.get();
                     x = pos.x();

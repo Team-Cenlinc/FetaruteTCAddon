@@ -3,7 +3,7 @@ package org.fetarute.fetaruteTCAddon.api;
 import java.util.Optional;
 import java.util.function.LongSupplier;
 import org.bukkit.plugin.Plugin;
-import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.line.LineApi;
@@ -58,12 +58,13 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
  * @see LineApi
  * @see EtaApi
  * @see TimetableApi
+ * @see DriveApi
  * @see org.fetarute.fetaruteTCAddon.api.event
  */
 public final class FetaruteApi {
 
   /** 当前 API 版本（语义版本）。 */
-  public static final String API_VERSION = "1.9.0";
+  public static final String API_VERSION = "1.11.0";
 
   private static volatile FetaruteApi instance;
 
@@ -77,6 +78,7 @@ public final class FetaruteApi {
   private final EtaApi etaApi;
   private final TimetableApi timetableApi;
   private final LongSupplier dataRevision;
+  private volatile DriveApi driveApi = DriveApi.UNAVAILABLE;
 
   private FetaruteApi(
       GraphApi graphApi,
@@ -222,6 +224,13 @@ public final class FetaruteApi {
   }
 
   /**
+   * 驾驶任务 API（1.10.0）：派任务、查任务与驾驶状态、读成绩。驾驶功能未加载时返回占位实现，{@link DriveApi#enabled()} 为 {@code false}。
+   */
+  public DriveApi drive() {
+    return driveApi;
+  }
+
+  /**
    * 当前 API 版本。
    *
    * @return 语义版本字符串
@@ -246,7 +255,7 @@ public final class FetaruteApi {
   // ─────────────────────────────────────────────────────────────────────────────
 
   /**
-   * 初始化 API 实例（仅供 {@link FetaruteTCAddon} 调用）。
+   * 初始化 API 实例（仅供 {@code FetaruteTCAddon} 调用）。
    *
    * @param graphApi 调度图 API 实现
    * @param trainApi 列车 API 实现
@@ -331,7 +340,19 @@ public final class FetaruteApi {
         null);
   }
 
-  /** 销毁 API 实例（仅供 {@link FetaruteTCAddon} 调用）。 */
+  /**
+   * 装上或换掉驾驶任务 API 的实现（仅供 {@code FetaruteTCAddon} 调用）：驾驶模块与其余模块分开加载、可以单独重载。
+   *
+   * @param drive 实现；{@code null} 恢复为占位实现
+   */
+  public static void installDrive(DriveApi drive) {
+    FetaruteApi current = instance;
+    if (current != null) {
+      current.driveApi = drive == null ? DriveApi.UNAVAILABLE : drive;
+    }
+  }
+
+  /** 销毁 API 实例（仅供 {@code FetaruteTCAddon} 调用）。 */
   public static void shutdown() {
     instance = null;
   }

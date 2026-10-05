@@ -26,6 +26,7 @@ import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -35,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
@@ -55,6 +57,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   private volatile org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager
       occupancyManager;
   private final Set<String> keepChunksLoadedWarnedPatterns = ConcurrentHashMap.newKeySet();
+  private volatile ConsistArbiter consistArbiter = ConsistArbiter.NONE;
 
   /** 每个车库上次探测离线编组的时间；键是车库节点，数量受车库数限制。 */
   private final Map<String, Long> offlineProbeAtMillis = new ConcurrentHashMap<>();
@@ -80,6 +83,15 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   public void setOccupancyManager(
       org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager manager) {
     this.occupancyManager = manager;
+  }
+
+  /**
+   * 注入车型裁决：route 绑了编组方案时按方案选编组，并把车种等标签写到新车上。
+   *
+   * @param arbiter 车型裁决；为 null 时恢复旧规则
+   */
+  public void setConsistArbiter(ConsistArbiter arbiter) {
+    this.consistArbiter = arbiter == null ? ConsistArbiter.NONE : arbiter;
   }
 
   @Override
@@ -117,8 +129,17 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       return Optional.empty();
     }
 
+    ConsistArbiter.SpawnChoice choice = chooseConsist(ticket);
+    if (choice.kind() == ConsistArbiter.SpawnChoice.Kind.BLOCKED) {
+      debugLogger.accept("自动发车失败: 编组方案里没有能出的车型 route=" + route.code() + " " + choice.reason());
+      return Optional.empty();
+    }
+    // 编组来源：票上按编组方案选定的车型 > route 的 spawn_train_pattern > 车库牌子第 4 行（兜底）
     Optional<String> patternOpt =
-        DepotSpawnPattern.fromRoute(route).or(() -> DepotSpawnPattern.fromSign(sign));
+        choice
+            .pattern()
+            .or(() -> DepotSpawnPattern.fromRoute(route))
+            .or(() -> DepotSpawnPattern.fromSign(sign));
     if (patternOpt.isEmpty()) {
       debugLogger.accept(
           "自动发车失败: 缺少 spawn pattern route=" + route.code() + " depot=" + depotId.value());
@@ -157,7 +178,30 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
             group,
             () ->
                 initializeMaterializedSpawn(
-                    group, ticket, service, depotId, pattern, route, provider, trainName, now)));
+                    group,
+                    ticket,
+                    service,
+                    depotId,
+                    pattern,
+                    route,
+                    provider,
+                    trainName,
+                    now,
+                    choice.tags())));
+  }
+
+  /** 问车型裁决；裁决本身出错时按旧规则取编组，不因为它停发。票上指定了车型的除外：改出别的车型就对不上表了。 */
+  ConsistArbiter.SpawnChoice chooseConsist(SpawnTicket ticket) {
+    try {
+      return consistArbiter.chooseSpawn(ticket);
+    } catch (RuntimeException | LinkageError ex) {
+      if (ticket.consist().isPresent()) {
+        debugLogger.accept("车型裁决异常，指定车型的票不出车: ticket=" + ticket.id() + " error=" + ex);
+        return ConsistArbiter.SpawnChoice.blocked("consist-arbiter-error");
+      }
+      debugLogger.accept("车型裁决异常，按旧规则取编组: ticket=" + ticket.id() + " error=" + ex);
+      return ConsistArbiter.SpawnChoice.legacy();
+    }
   }
 
   private void initializeMaterializedSpawn(
@@ -169,17 +213,32 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       Route route,
       StorageProvider provider,
       String trainName,
-      Instant now) {
+      Instant now,
+      Map<String, String> consistTags) {
     if (group.getProperties() != null) {
       initializeSpawnOwner(group.getProperties(), trainName);
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
       addTags(group.getProperties(), ticket.id(), service, depotId, pattern, route, provider, now);
+      stampMotion(group.getProperties(), consistTags);
       TrainTagHelper.writeTag(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX, "0");
       TrainTagHelper.writeTag(
           group.getProperties(),
           RouteProgressRegistry.TAG_ROUTE_UPDATED_AT,
           String.valueOf((now == null ? Instant.now() : now).toEpochMilli()));
+    }
+  }
+
+  /** 先写编组方案的车型标签，再按车型写加减速标签（{@link SpawnMotionTags}）：驾驶员接管时按调度控车同一组加减速开车。只读写标签、不会抛出，失败只留调试日志。 */
+  private void stampMotion(
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
+      Map<String, String> consistTags) {
+    ConfigManager configManager = plugin.getConfigManager();
+    SpawnMotionTags.Outcome outcome =
+        SpawnMotionTags.stampWithConsist(
+            properties, configManager == null ? null : configManager.current(), consistTags);
+    if (outcome == SpawnMotionTags.Outcome.FAILED) {
+      debugLogger.accept("出车写入加减速标签失败 train=" + properties.getTrainName());
     }
   }
 
@@ -506,6 +565,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
             stops, 0, new RouteLineChanges.LineRef(service.operatorCode(), service.lineCode()));
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
+    tags.put(TrainSpawnTagInitializer.TAG_TRAIN_UID, runId.toString());
     tags.put("FTA_ROUTE_ID", service.routeId().toString());
     tags.put("FTA_ROUTE_CODE", service.routeCode());
     tags.put("FTA_LINE_CODE", line.lineCode());

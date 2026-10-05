@@ -23,7 +23,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailGraphMultiSourceExplorerSession;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailEdgeFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
@@ -39,15 +38,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  *
  * <p>当启用 {@link ChunkLoadOptions} 时，会在 HERE 模式沿轨道按需异步加载相邻区块（不会随便扩张）。
  *
- * <p>节点来源（按优先级合并去重）：
- *
- * <ul>
- *   <li>{@code preseedNodes}：预置节点列表（用于 TCC 无牌子线网，把 coaster 节点注入为 Node）
- *   <li>{@code seedNode}：HERE 模式下玩家附近的节点牌子（可选）
- *   <li>扫描到的节点牌子：waypoint/autostation/depot + TC 的 switcher
- * </ul>
+ * <p>节点来源：扫描到的节点牌子（waypoint/autostation/depot + TC 的 switcher）。边一律按节点到节点探索，以取得真实 RailPath 足迹。
  */
-public final class RailGraphBuildJob implements Runnable {
+public final class RailGraphBuildJob implements Runnable, RailGraphBuildTask {
 
   public enum BuildMode {
     HERE,
@@ -59,22 +52,12 @@ public final class RailGraphBuildJob implements Runnable {
     EXPLORE_EDGES
   }
 
-  private static final int DEFAULT_SWITCHER_ANCHOR_SEARCH_RADIUS = 2;
-  private static final int DEFAULT_SIGN_ANCHOR_SEARCH_RADIUS = 6;
-  private static final int DEFAULT_MAX_DISTANCE_BLOCKS = 512;
-
-  /** 边探索阶段每次调用的批量大小。减小该值可降低单帧卡顿但会延长总构建时间。 */
-  private static final int DEFAULT_STEP_BATCH = 64;
-
   private final JavaPlugin plugin;
   private final World world;
   private final BuildMode mode;
-  private final EdgeExploreMode edgeExploreMode;
   private final int signAnchorSearchRadius;
   private final int switcherAnchorSearchRadius;
-  private final RailNodeRecord seedNode;
   private final Set<RailBlockPos> seedRails;
-  private final List<RailNodeRecord> preseedNodes;
   private final Optional<RailGraphBuildContinuation> continuation;
   private final ChunkLoadOptions chunkLoadOptions;
   private final long tickBudgetNanos;
@@ -89,7 +72,6 @@ public final class RailGraphBuildJob implements Runnable {
   private TrainCartsRailBlockAccess access;
   private ConnectedRailNodeDiscoverySession connectedDiscovery;
   private LoadedChunkNodeScanSession loadedChunkDiscovery;
-  private RailGraphMultiSourceExplorerSession edgeSession;
   private NodeToNodeEdgeExplorer nodeToNodeExplorer;
   private List<RailNodeRecord> finalNodes = List.of();
   private List<DuplicateNodeId> duplicateNodeIds = List.of();
@@ -97,21 +79,16 @@ public final class RailGraphBuildJob implements Runnable {
 
   /**
    * @param seedRails HERE 模式的起始轨道锚点集合（优先来自 TCC 编辑器选中位置，其次来自牌子/脚下轨道）
-   * @param preseedNodes 预置节点列表（用于把 TCC TrackNode 注入为 Node）
    * @param tickBudgetMs 每 tick 可消耗的时间预算（毫秒）；越小越不易卡服但构建更慢
-   * @param chunkLoadOptions 是否启用沿轨道异步加载区块（用于无需手动预加载的运维模式）
-   * @param edgeExploreMode 边探索模式（BFS 或节点到节点）
+   * @param chunkLoadOptions 是否启用沿轨道异步加载区块（HERE 模式默认开启）
    */
   public RailGraphBuildJob(
       JavaPlugin plugin,
       World world,
       BuildMode mode,
-      RailNodeRecord seedNode,
       Set<RailBlockPos> seedRails,
-      List<RailNodeRecord> preseedNodes,
       int tickBudgetMs,
       ChunkLoadOptions chunkLoadOptions,
-      EdgeExploreMode edgeExploreMode,
       int signAnchorSearchRadius,
       int switcherAnchorSearchRadius,
       Consumer<RailGraphBuildOutcome> onFinish,
@@ -120,16 +97,12 @@ public final class RailGraphBuildJob implements Runnable {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.world = Objects.requireNonNull(world, "world");
     this.mode = Objects.requireNonNull(mode, "mode");
-    this.edgeExploreMode =
-        edgeExploreMode != null ? edgeExploreMode : EdgeExploreMode.bfsMultiSource();
     if (signAnchorSearchRadius < 0 || switcherAnchorSearchRadius < 0) {
       throw new IllegalArgumentException("anchorSearchRadius 不能为负");
     }
     this.signAnchorSearchRadius = signAnchorSearchRadius;
     this.switcherAnchorSearchRadius = switcherAnchorSearchRadius;
-    this.seedNode = seedNode;
     this.seedRails = seedRails != null ? Set.copyOf(seedRails) : Set.of();
-    this.preseedNodes = preseedNodes != null ? List.copyOf(preseedNodes) : List.of();
     this.continuation = Optional.empty();
     this.chunkLoadOptions =
         chunkLoadOptions != null ? chunkLoadOptions : ChunkLoadOptions.disabled();
@@ -150,7 +123,6 @@ public final class RailGraphBuildJob implements Runnable {
    * @param continuation 续跑状态快照
    * @param tickBudgetMs 每 tick 可消耗的时间预算（毫秒）
    * @param chunkLoadOptions 本次续跑允许加载的 chunk 配额
-   * @param edgeExploreMode 边探索模式
    */
   public RailGraphBuildJob(
       JavaPlugin plugin,
@@ -158,7 +130,6 @@ public final class RailGraphBuildJob implements Runnable {
       RailGraphBuildContinuation continuation,
       int tickBudgetMs,
       ChunkLoadOptions chunkLoadOptions,
-      EdgeExploreMode edgeExploreMode,
       int signAnchorSearchRadius,
       int switcherAnchorSearchRadius,
       Consumer<RailGraphBuildOutcome> onFinish,
@@ -167,16 +138,12 @@ public final class RailGraphBuildJob implements Runnable {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.world = Objects.requireNonNull(world, "world");
     this.mode = BuildMode.HERE;
-    this.edgeExploreMode =
-        edgeExploreMode != null ? edgeExploreMode : EdgeExploreMode.bfsMultiSource();
     if (signAnchorSearchRadius < 0 || switcherAnchorSearchRadius < 0) {
       throw new IllegalArgumentException("anchorSearchRadius 不能为负");
     }
     this.signAnchorSearchRadius = signAnchorSearchRadius;
     this.switcherAnchorSearchRadius = switcherAnchorSearchRadius;
-    this.seedNode = null;
     this.seedRails = Set.of();
-    this.preseedNodes = List.of();
     this.continuation = Optional.ofNullable(continuation);
     this.chunkLoadOptions =
         chunkLoadOptions != null ? chunkLoadOptions : ChunkLoadOptions.disabled();
@@ -214,30 +181,13 @@ public final class RailGraphBuildJob implements Runnable {
       this.connectedDiscovery = cached.discoverySession();
       this.connectedDiscovery.beginChunkLoading(chunkLoadOptions);
     } else {
-      for (RailNodeRecord preseed : preseedNodes) {
-        if (preseed == null) {
-          continue;
-        }
-        nodesById.putIfAbsent(preseed.nodeId().value(), preseed);
-      }
-
       if (mode == BuildMode.HERE) {
-        if (seedNode != null) {
-          nodesById.put(seedNode.nodeId().value(), seedNode);
-        }
-        Set<RailBlockPos> anchors = seedRails;
-        if (anchors.isEmpty() && seedNode != null) {
-          anchors =
-              access.findNearestRailBlocks(
-                  new RailBlockPos(seedNode.x(), seedNode.y(), seedNode.z()),
-                  resolveAnchorRadius(seedNode.nodeType()));
-        }
-        if (anchors.isEmpty()) {
+        if (seedRails.isEmpty()) {
           throw new IllegalStateException("HERE 模式缺少起始轨道锚点");
         }
         this.connectedDiscovery =
             new ConnectedRailNodeDiscoverySession(
-                world, anchors, access, debugLogger, chunkLoadOptions, plugin);
+                world, seedRails, access, debugLogger, chunkLoadOptions, plugin);
       } else {
         this.loadedChunkDiscovery = new LoadedChunkNodeScanSession(world, debugLogger);
       }
@@ -266,10 +216,12 @@ public final class RailGraphBuildJob implements Runnable {
     return true;
   }
 
+  @Override
   public synchronized Optional<RailGraphBuildStatus> getStatus() {
     return Optional.ofNullable(status);
   }
 
+  @Override
   public synchronized boolean cancel() {
     if (task == null) {
       return false;
@@ -290,7 +242,6 @@ public final class RailGraphBuildJob implements Runnable {
       TrainCartsRailBlockAccess currentAccess;
       ConnectedRailNodeDiscoverySession currentConnectedDiscovery;
       LoadedChunkNodeScanSession currentLoadedDiscovery;
-      RailGraphMultiSourceExplorerSession currentEdgeSession;
       NodeToNodeEdgeExplorer currentNodeExplorer;
       List<RailNodeRecord> currentFinalNodes;
       List<DuplicateNodeId> currentDuplicateNodeIds;
@@ -299,7 +250,6 @@ public final class RailGraphBuildJob implements Runnable {
         currentAccess = this.access;
         currentConnectedDiscovery = this.connectedDiscovery;
         currentLoadedDiscovery = this.loadedChunkDiscovery;
-        currentEdgeSession = this.edgeSession;
         currentNodeExplorer = this.nodeToNodeExplorer;
         currentFinalNodes = this.finalNodes;
         currentDuplicateNodeIds = this.duplicateNodeIds;
@@ -319,23 +269,11 @@ public final class RailGraphBuildJob implements Runnable {
         return;
       }
 
-      // 根据模式执行边探索
-      Map<EdgeId, ExploredRailEdge> exploredEdges;
-      if (edgeExploreMode.isNodeToNode()) {
-        if (currentNodeExplorer == null) {
-          return;
-        }
-        exploredEdges =
-            runNodeToNodeEdgeExplore(
-                deadline, currentNodeExplorer, currentFinalNodes, currentDuplicateNodeIds);
-      } else {
-        if (currentEdgeSession == null) {
-          return;
-        }
-        exploredEdges =
-            runBfsEdgeExplore(
-                deadline, currentEdgeSession, currentFinalNodes, currentDuplicateNodeIds);
+      if (currentNodeExplorer == null) {
+        return;
       }
+      Map<EdgeId, ExploredRailEdge> exploredEdges =
+          runNodeToNodeEdgeExplore(deadline, currentNodeExplorer, currentFinalNodes);
 
       if (exploredEdges == null) {
         // 还没完成
@@ -368,61 +306,13 @@ public final class RailGraphBuildJob implements Runnable {
         connectedDiscovery.releaseChunkTickets();
       }
       List<UnterminatedDirection> unterminatedDirections =
-          currentNodeExplorer != null ? currentNodeExplorer.unterminatedDirections() : List.of();
+          currentNodeExplorer.unterminatedDirections();
       onFinish.accept(
           new RailGraphBuildOutcome(result, completion, nextContinuation, unterminatedDirections));
     } catch (Throwable ex) {
       cancel();
       onFailure.accept(ex);
     }
-  }
-
-  /**
-   * 使用 BFS 多源探索执行边探索。
-   *
-   * @return 边长映射（如果完成），或 null（如果还在进行中）
-   */
-  private Map<EdgeId, ExploredRailEdge> runBfsEdgeExplore(
-      long deadline,
-      RailGraphMultiSourceExplorerSession currentEdgeSession,
-      List<RailNodeRecord> currentFinalNodes,
-      List<DuplicateNodeId> currentDuplicateNodeIds) {
-
-    // 限制每 tick 最大步数，确保即使单步操作慢也不会卡住太久
-    int maxStepsPerTick = 128;
-    int stepsThisTick = 0;
-    while (System.nanoTime() < deadline
-        && !currentEdgeSession.isDone()
-        && stepsThisTick < maxStepsPerTick) {
-      // 每次只处理一小批，然后检查时间预算
-      int stepped = currentEdgeSession.step(DEFAULT_STEP_BATCH);
-      stepsThisTick += stepped;
-      // 如果时间紧张就提前退出，避免超出预算
-      if (System.nanoTime() >= deadline) {
-        break;
-      }
-    }
-    synchronized (this) {
-      if (status != null) {
-        status =
-            new RailGraphBuildStatus(
-                status.startedAt(),
-                Phase.EXPLORE_EDGES.name().toLowerCase(java.util.Locale.ROOT),
-                currentFinalNodes.size(),
-                status.nodesWithAnchors(),
-                status.nodesMissingAnchors(),
-                status.scannedChunks(),
-                status.scannedSigns(),
-                currentEdgeSession.visitedRailBlocks(),
-                currentEdgeSession.queueSize(),
-                currentEdgeSession.processedSteps());
-      }
-    }
-    if (!currentEdgeSession.isDone()) {
-      return null;
-    }
-
-    return currentEdgeSession.exploredEdges();
   }
 
   /**
@@ -433,8 +323,7 @@ public final class RailGraphBuildJob implements Runnable {
   private Map<EdgeId, ExploredRailEdge> runNodeToNodeEdgeExplore(
       long deadline,
       NodeToNodeEdgeExplorer currentNodeExplorer,
-      List<RailNodeRecord> currentFinalNodes,
-      List<DuplicateNodeId> currentDuplicateNodeIds) {
+      List<RailNodeRecord> currentFinalNodes) {
 
     int stepsThisTick = currentNodeExplorer.step(deadline);
     synchronized (this) {
@@ -586,10 +475,16 @@ public final class RailGraphBuildJob implements Runnable {
   }
 
   private int resolveAnchorRadius(NodeType nodeType) {
-    if (nodeType == NodeType.SWITCHER) {
-      return switcherAnchorSearchRadius;
+    return anchorRadius(nodeType, signAnchorSearchRadius, switcherAnchorSearchRadius);
+  }
+
+  /** 节点找锚点轨道的搜索半径；build、refresh、extend 共用。 */
+  public static int anchorRadius(NodeType nodeType, int signRadius, int switcherRadius) {
+    if (nodeType == NodeType.SWITCHER || nodeType == NodeType.PORTAL) {
+      // 道岔与传送门节点的坐标就是轨道方块本身，锚点只在附近找。
+      return switcherRadius;
     }
-    return signAnchorSearchRadius;
+    return signRadius;
   }
 
   private void initEdgeSession(
@@ -612,38 +507,7 @@ public final class RailGraphBuildJob implements Runnable {
       anchorsByNode.put(node.nodeId(), anchors);
     }
 
-    if (edgeExploreMode.isNodeToNode()) {
-      initNodeToNodeExplorer(nodes, anchorsByNode, missingAnchors);
-      return;
-    }
-    initBfsEdgeSession(nodes, anchorsByNode, missingAnchors, currentAccess);
-  }
-
-  private void initBfsEdgeSession(
-      List<RailNodeRecord> nodes,
-      Map<NodeId, Set<RailBlockPos>> anchorsByNode,
-      int missingAnchors,
-      TrainCartsRailBlockAccess currentAccess) {
-    RailGraphMultiSourceExplorerSession newSession =
-        new RailGraphMultiSourceExplorerSession(
-            anchorsByNode, currentAccess, edgeExploreMode.maxDistanceBlocks());
-    synchronized (this) {
-      this.edgeSession = newSession;
-      if (status != null) {
-        status =
-            new RailGraphBuildStatus(
-                status.startedAt(),
-                Phase.EXPLORE_EDGES.name().toLowerCase(java.util.Locale.ROOT),
-                nodes.size(),
-                anchorsByNode.size(),
-                missingAnchors,
-                status.scannedChunks(),
-                status.scannedSigns(),
-                newSession.visitedRailBlocks(),
-                newSession.queueSize(),
-                newSession.processedSteps());
-      }
-    }
+    initNodeToNodeExplorer(nodes, anchorsByNode, missingAnchors);
   }
 
   private void initNodeToNodeExplorer(
@@ -670,7 +534,11 @@ public final class RailGraphBuildJob implements Runnable {
 
     NodeToNodeEdgeExplorer explorer =
         new NodeToNodeEdgeExplorer(
-            world, anchorIndex, switcherNodes, edgeExploreMode.maxDistanceBlocks(), debugLogger);
+            world,
+            anchorIndex,
+            switcherNodes,
+            EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
+            debugLogger);
 
     // 添加所有节点作为探索起点
     for (Map.Entry<NodeId, Set<RailBlockPos>> entry : anchorsByNode.entrySet()) {
@@ -742,7 +610,8 @@ public final class RailGraphBuildJob implements Runnable {
     }
   }
 
-  static RailGraph buildGraph(
+  /** 由节点记录与探索到的区间组装图：过滤跨股道直连边，按足迹建联锁状态。 */
+  public static RailGraph buildGraph(
       java.util.UUID worldId,
       List<RailNodeRecord> nodeRecords,
       Map<EdgeId, ExploredRailEdge> exploredEdges) {

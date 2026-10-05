@@ -2815,6 +2815,40 @@ public final class SimpleOccupancyManager
     }
   }
 
+  /** {@link #previewSelfOwnedPhysicalEdgeRetainRelease} 的只读结果：本会释放哪些尾部保护、其余为何不放；账本未被改动。 */
+  public record PhysicalEdgeRetainPreview(
+      String reason,
+      List<OccupancyResource> releasable,
+      int releasableEdges,
+      int releasableNodes,
+      int skippedStillCovered,
+      int skippedExternalClaim,
+      int releasableDespiteQueue) {
+
+    public PhysicalEdgeRetainPreview {
+      releasable = releasable == null ? List.of() : List.copyOf(releasable);
+      reason = reason == null || reason.isBlank() ? "-" : reason;
+    }
+
+    private static PhysicalEdgeRetainPreview none(String reason) {
+      return new PhysicalEdgeRetainPreview(reason, List.of(), 0, 0, 0, 0, 0);
+    }
+
+    public int releasableCount() {
+      return releasable.size();
+    }
+
+    /** 逐原因的跳过计数，格式与 {@link PhysicalEdgeRetainReleaseResult#skipBreakdown()} 一致。 */
+    public String skipBreakdown() {
+      return "stillCovered="
+          + skippedStillCovered
+          + " externalClaim="
+          + skippedExternalClaim
+          + " despiteQueue="
+          + releasableDespiteQueue;
+    }
+  }
+
   /**
    * Phase 4：用**车体实测覆盖**证明列车已经离开某条 EDGE，才释放它身后的尾部保护。
    *
@@ -2848,13 +2882,26 @@ public final class SimpleOccupancyManager
    */
   public synchronized PhysicalEdgeRetainReleaseResult releaseSelfOwnedPhysicalEdgeRetain(
       String trainName, boolean coverageComplete, Set<OccupancyResource> coveredResources) {
+    return releasePreviewedPhysicalEdgeRetain(
+        trainName,
+        coveredResources,
+        previewSelfOwnedPhysicalEdgeRetainRelease(trainName, coverageComplete, coveredResources));
+  }
+
+  /**
+   * {@link #releaseSelfOwnedPhysicalEdgeRetain} 的只读预判：判据完全相同，但不改账本。
+   *
+   * <p>供调用方在模式闸之前确认"确有可释放的尾部保护"——没有候选时不该报告"被模式压下"， 否则观察日志会把"无事可做"读成"本会释放"。
+   */
+  public synchronized PhysicalEdgeRetainPreview previewSelfOwnedPhysicalEdgeRetainRelease(
+      String trainName, boolean coverageComplete, Set<OccupancyResource> coveredResources) {
     String key = TrainNameNormalizer.normalizeKey(trainName);
     if (key.isEmpty()) {
-      return new PhysicalEdgeRetainReleaseResult(0, "missing-train", List.of());
+      return PhysicalEdgeRetainPreview.none("missing-train");
     }
     if (!coverageComplete) {
       // 缺证据 ⇒ 无从判断 ⇒ 一个都不放。绝不把"看不见"当成"已离开"。
-      return new PhysicalEdgeRetainReleaseResult(0, "coverage-incomplete", List.of());
+      return PhysicalEdgeRetainPreview.none("coverage-incomplete");
     }
     Set<OccupancyResource> covered = coveredResources == null ? Set.of() : coveredResources;
     List<OccupancyResource> releasable = new ArrayList<>();
@@ -2862,47 +2909,20 @@ public final class SimpleOccupancyManager
     int releasableNodes = 0;
     int skippedStillCovered = 0;
     int skippedExternalClaim = 0;
-    int releasedDespiteQueue = 0;
+    int releasableDespiteQueue = 0;
     for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
       OccupancyResource resource = entry.getKey();
-      if (resource == null) {
-        continue;
-      }
-      // NODE 与 EDGE 都处理。挡路的 blocker 以 NODE 为主：只释放 EDGE 时，
-      // 车会因为身后仍留着的 NODE 继续卡住，并把后车一起堵住。
-      //
-      // 安全性来自覆盖集合的构造方向：节点是由「已覆盖 EDGE 的端点」**加进**覆盖集合的，
-      // 只会让这里更难放行。判据本身没有放宽，仍然是「资源不在覆盖集合里」。
-      if (resource.kind() != ResourceKind.EDGE && resource.kind() != ResourceKind.NODE) {
-        continue;
-      }
-      List<OccupancyClaim> holders = entry.getValue();
-      if (holders == null || holders.isEmpty()) {
-        continue;
-      }
-      boolean selfProtectiveRetain = false;
-      boolean externalPresent = false;
-      for (OccupancyClaim claim : holders) {
-        if (claim == null) {
-          continue;
-        }
-        if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
-          if (claim.role() == ClaimRole.PROTECTIVE_RETAIN) {
-            selfProtectiveRetain = true;
-          }
-        } else {
-          externalPresent = true;
-        }
-      }
-      if (!selfProtectiveRetain) {
-        continue;
-      }
-      if (covered.contains(resource)) {
+      PhysicalRetainVerdict verdict =
+          physicalRetainVerdict(trainName, resource, entry.getValue(), covered);
+      if (verdict == PhysicalRetainVerdict.STILL_COVERED) {
         skippedStillCovered++;
-        continue; // 车体仍压在上面。
+        continue;
       }
-      if (externalPresent) {
+      if (verdict == PhysicalRetainVerdict.EXTERNAL_CLAIM) {
         skippedExternalClaim++;
+        continue;
+      }
+      if (verdict != PhysicalRetainVerdict.RELEASABLE) {
         continue;
       }
       ConflictQueue queue = queues.get(resource);
@@ -2919,7 +2939,45 @@ public final class SimpleOccupancyManager
         // 其二，即便将来可达，也不该据此拒绝。这条路径的前提是**实测覆盖已证明车不在上面**，
         // 此时"有别人在排队等它"正是应该释放的理由。共占风险不因排队而增加：
         // 放行条件仍然只有"车体实测不在该资源上"。
-        releasedDespiteQueue++;
+        releasableDespiteQueue++;
+      }
+      releasable.add(resource);
+      if (resource.kind() == ResourceKind.NODE) {
+        releasableNodes++;
+      } else {
+        releasableEdges++;
+      }
+    }
+    return new PhysicalEdgeRetainPreview(
+        releasable.isEmpty() ? "no-departed-edge-retain" : "releasable",
+        releasable,
+        releasableEdges,
+        releasableNodes,
+        skippedStillCovered,
+        skippedExternalClaim,
+        releasableDespiteQueue);
+  }
+
+  /**
+   * 释放 {@link #previewSelfOwnedPhysicalEdgeRetainRelease} 列出的尾部保护。
+   *
+   * <p>只复核预判列出的资源，不再扫全表；但每一条都在锁内按同一判据重新核对——预判之后账本可能已变， 复核不过的一律不放（fail-closed）。
+   */
+  public synchronized PhysicalEdgeRetainReleaseResult releasePreviewedPhysicalEdgeRetain(
+      String trainName,
+      Set<OccupancyResource> coveredResources,
+      PhysicalEdgeRetainPreview preview) {
+    if (preview == null) {
+      return new PhysicalEdgeRetainReleaseResult(0, "missing-preview", List.of());
+    }
+    Set<OccupancyResource> covered = coveredResources == null ? Set.of() : coveredResources;
+    List<OccupancyResource> releasable = new ArrayList<>();
+    int releasableEdges = 0;
+    int releasableNodes = 0;
+    for (OccupancyResource resource : preview.releasable()) {
+      if (physicalRetainVerdict(trainName, resource, claims.get(resource), covered)
+          != PhysicalRetainVerdict.RELEASABLE) {
+        continue;
       }
       releasable.add(resource);
       if (resource.kind() == ResourceKind.NODE) {
@@ -2931,13 +2989,13 @@ public final class SimpleOccupancyManager
     if (releasable.isEmpty()) {
       return new PhysicalEdgeRetainReleaseResult(
           0,
-          "no-departed-edge-retain",
+          preview.releasable().isEmpty() ? preview.reason() : "preview-stale",
           List.of(),
           0,
           0,
-          skippedStillCovered,
-          skippedExternalClaim,
-          releasedDespiteQueue);
+          preview.skippedStillCovered(),
+          preview.skippedExternalClaim(),
+          preview.releasableDespiteQueue());
     }
     int released =
         releaseResourcesByTrainAndRole(trainName, releasable, ClaimRole.PROTECTIVE_RETAIN);
@@ -2947,9 +3005,61 @@ public final class SimpleOccupancyManager
         List.copyOf(releasable),
         releasableEdges,
         releasableNodes,
-        skippedStillCovered,
-        skippedExternalClaim,
-        releasedDespiteQueue);
+        preview.skippedStillCovered(),
+        preview.skippedExternalClaim(),
+        preview.releasableDespiteQueue());
+  }
+
+  /** 实测覆盖释放对单条资源的判定。 */
+  private enum PhysicalRetainVerdict {
+    NOT_SELF_RETAIN,
+    STILL_COVERED,
+    EXTERNAL_CLAIM,
+    RELEASABLE
+  }
+
+  /** 单条资源上本车的尾部保护能否按实测覆盖释放；预判与释放共用这一判据。 */
+  private static PhysicalRetainVerdict physicalRetainVerdict(
+      String trainName,
+      OccupancyResource resource,
+      List<OccupancyClaim> holders,
+      Set<OccupancyResource> covered) {
+    // NODE 与 EDGE 都处理。挡路的 blocker 以 NODE 为主：只释放 EDGE 时，
+    // 车会因为身后仍留着的 NODE 继续卡住，并把后车一起堵住。
+    //
+    // 安全性来自覆盖集合的构造方向：节点是由「已覆盖 EDGE 的端点」**加进**覆盖集合的，
+    // 只会让这里更难放行。判据本身没有放宽，仍然是「资源不在覆盖集合里」。
+    if (resource == null
+        || (resource.kind() != ResourceKind.EDGE && resource.kind() != ResourceKind.NODE)) {
+      return PhysicalRetainVerdict.NOT_SELF_RETAIN;
+    }
+    if (holders == null || holders.isEmpty()) {
+      return PhysicalRetainVerdict.NOT_SELF_RETAIN;
+    }
+    boolean selfProtectiveRetain = false;
+    boolean externalPresent = false;
+    for (OccupancyClaim claim : holders) {
+      if (claim == null) {
+        continue;
+      }
+      if (TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        if (claim.role() == ClaimRole.PROTECTIVE_RETAIN) {
+          selfProtectiveRetain = true;
+        }
+      } else {
+        externalPresent = true;
+      }
+    }
+    if (!selfProtectiveRetain) {
+      return PhysicalRetainVerdict.NOT_SELF_RETAIN;
+    }
+    if (covered.contains(resource)) {
+      return PhysicalRetainVerdict.STILL_COVERED; // 车体仍压在上面。
+    }
+    if (externalPresent) {
+      return PhysicalRetainVerdict.EXTERNAL_CLAIM;
+    }
+    return PhysicalRetainVerdict.RELEASABLE;
   }
 
   /**

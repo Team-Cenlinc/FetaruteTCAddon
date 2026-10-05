@@ -84,6 +84,33 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.manager.acceptsCandidate(mock(SpawnTicket.class), "anyone"), "不是本层的票一律放行");
   }
 
+  /** 驾驶员接车按票找车次：出库票是交路首班，运营票是自己那一班，回库票与别层的票没有。 */
+  @Test
+  void pickupTripFollowsTheTicketIntent() {
+    Fixture fixture = fixture();
+    List<SpawnTicket> tickets = fixture.pollAll();
+
+    TimetableService.DueTrip viaCreate = fixture.manager.pickupTripOf(tickets.get(0)).orElseThrow();
+    TimetableService.DueTrip first = fixture.manager.pickupTripOf(tickets.get(1)).orElseThrow();
+    assertEquals("R1-001", viaCreate.trip().tripCode());
+    assertEquals("R1-001", first.trip().tripCode());
+    assertEquals(first.serviceDate(), viaCreate.serviceDate(), "出库票找到的车次与运营票同一天");
+    assertEquals(
+        "R1-002", fixture.manager.pickupTripOf(tickets.get(2)).orElseThrow().trip().tripCode());
+    assertTrue(fixture.manager.pickupTripOf(tickets.get(3)).isEmpty());
+    assertTrue(fixture.manager.pickupTripOf(mock(SpawnTicket.class)).isEmpty());
+  }
+
+  /** 交路首班有出库走行：列车从交路的车库出车；续班由终点站待命车接，不从车库出车。 */
+  @Test
+  void depotOriginIsTheDutysStartDepotForItsFirstTrip() {
+    Fixture fixture = fixture();
+
+    assertEquals(Optional.of("OP:D:DEP:1"), fixture.service().depotOriginOf(TIMETABLE, "R1-001"));
+    assertTrue(fixture.service().depotOriginOf(TIMETABLE, "R1-002").isEmpty());
+    assertTrue(fixture.service().depotOriginOf(UUID.randomUUID(), "R1-001").isEmpty());
+  }
+
   /** 重试队列里的票同样到期作废：被 requeue 的出库票过了容差不会再被放出来。 */
   @Test
   void requeuedTicketsExpireToo() {
@@ -419,6 +446,48 @@ class TimetableSpawnManagerTest {
       String train, int index, Instant at) {
     return new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent(
         train, Optional.of(ROUTE), "R1", index, 2, index == 0 ? "OP:S:AAA:1" : "OP:S:CCC:1", at);
+  }
+
+  /** 区分车型的表：出库票与运营票带交路的车型，回库票不出车、不带；没绑交路的车接首班要车型相同。 */
+  @Test
+  void ticketsCarryTheDutyConsist() {
+    Fixture fixture = fixture(withDutyConsist(timetable(), "m8"));
+    fixture
+        .service()
+        .setConsistOfTrain(name -> Optional.of(name.startsWith("eight") ? "m8" : "m6"));
+
+    List<SpawnTicket> tickets = fixture.pollAll();
+
+    assertEquals(Optional.of("m8"), tickets.get(0).consist(), "出库票出交路的车型");
+    assertEquals(Optional.of("m8"), tickets.get(1).consist());
+    assertEquals(Optional.of("m8"), tickets.get(2).consist());
+    assertEquals(Optional.empty(), tickets.get(3).consist(), "回库票不出车");
+    assertTrue(fixture.manager.acceptsCandidate(tickets.get(1), "eight-1"));
+    assertFalse(fixture.manager.acceptsCandidate(tickets.get(1), "six-1"), "别的车型接不了首班");
+    assertEquals(Optional.of("m8"), tickets.get(0).withRetry(DAY, "retry").consist(), "重试票保留车型");
+  }
+
+  private static Timetable withDutyConsist(Timetable source, String consist) {
+    List<VehicleDuty> duties = new ArrayList<>();
+    for (VehicleDuty duty : source.duties()) {
+      duties.add(
+          new VehicleDuty(
+              duty.id(),
+              duty.timetableId(),
+              duty.sequence(),
+              duty.dutyCode(),
+              duty.startDepotNodeId(),
+              duty.endDepotNodeId(),
+              duty.createRouteId(),
+              duty.returnRouteId(),
+              duty.tripIds(),
+              duty.plannedStartSecondOfDay(),
+              duty.returnSecondOfDay(),
+              duty.plannedEndSecondOfDay(),
+              duty.closeReason(),
+              Optional.of(consist)));
+    }
+    return source.withTripsAndDuties(source.trips(), duties);
   }
 
   private static Fixture fixture() {

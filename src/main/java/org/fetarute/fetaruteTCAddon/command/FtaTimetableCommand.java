@@ -28,6 +28,10 @@ import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfiles;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ResolvedConsistPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
@@ -35,14 +39,20 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.StopApproach;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPatternLength;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CapacityReport;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ConsistFleet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildProgress;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
@@ -66,6 +76,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Neighbor
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableBaseline;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableFootprint;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.TimetableNeighborhoodLoader;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.TransactionCallback;
@@ -100,6 +111,7 @@ public final class FtaTimetableCommand {
   private static final double FALLBACK_SPEED_BPS = 8.0D;
 
   private final FetaruteTCAddon plugin;
+  private final TimetableBuildJobs buildJobs = new TimetableBuildJobs();
 
   public FtaTimetableCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -327,6 +339,15 @@ public final class FtaTimetableCommand {
             .literal("status")
             .permission("fetarute.timetable")
             .handler(ctx -> handleRuntimeStatus(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("timetable")
+            .literal("cancel")
+            .permission("fetarute.timetable.manage")
+            .required("job", StringParser.quotedStringParser(), buildJobSuggestions())
+            .handler(ctx -> handleCancelBuild(ctx.sender(), ctx.get("job"))));
   }
 
   // ---------------------------------------------------------------- handlers
@@ -348,7 +369,8 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("投入运行", "/fta timetable publish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("撤出运行", "/fta timetable unpublish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
-    sender.sendMessage(hint("运行态", "/fta timetable status"));
+    sender.sendMessage(hint("运行态与编表进度", "/fta timetable status"));
+    sender.sendMessage(hint("取消编表", "/fta timetable cancel <任务号|线路/code>"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
     sender.sendMessage(
         Component.text(
@@ -489,6 +511,33 @@ public final class FtaTimetableCommand {
               + TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS
               + "s 复算，两次判据可能不一致。要长期生效得改默认值，不能只靠这个 flag。");
     }
+    // 快车被卡与错峰按闭塞时间量：跟车规则取运行时配置，车长按出车编组。
+    Map<UUID, Long> trainLengths = new java.util.HashMap<>();
+    java.util.Set<String> unknownLength = new java.util.TreeSet<>();
+    for (LineRoutes member : members) {
+      member
+          .trainLengths()
+          .forEach((route, length) -> trainLengths.merge(route, length, Math::max));
+    }
+    for (LineRoutes member : members) {
+      if (!member.consistPlans().byRoute().isEmpty()) {
+        // 绑了编组方案的线由编表器按车型档案补车长，不看出车编组。
+        continue;
+      }
+      for (TimetableBuilder.RouteInput route : member.inputs()) {
+        if (!trainLengths.containsKey(route.routeId())) {
+          unknownLength.add(route.routeCode());
+        }
+      }
+    }
+    TimetableBuildOptions.Following following =
+        followingRules(
+                plugin.getConfigManager() == null ? null : plugin.getConfigManager().current())
+            .withTrainLengths(trainLengths);
+    if (!unknownLength.isEmpty()) {
+      buildWarnings.add(
+          "读不到出车编组、车长未知：" + String.join("、", unknownLength) + "。快车跟在它们后面时，被卡按占用区间量，不按闭塞时间。");
+    }
     TimetableBuildOptions options =
         new TimetableBuildOptions(
             serviceStart,
@@ -509,7 +558,8 @@ public final class FtaTimetableCommand {
             flags.strict(),
             groupIntervals,
             repairOptions(sender, flags.maxWaitSeconds()),
-            flags.rapidStagger());
+            flags.rapidStagger(),
+            following);
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -537,16 +587,17 @@ public final class FtaTimetableCommand {
       setMembers.add(
           new TimetableSetBuilder.Member(
               new TimetableBuilder.BuildInput(
-                  member.timetableId(),
-                  member.line().company().id(),
-                  member.line().operator().id(),
-                  member.line().line().id(),
-                  code,
-                  timetableName,
-                  member.inputs(),
-                  graphSnapshot,
-                  model,
-                  Optional.empty()),
+                      member.timetableId(),
+                      member.line().company().id(),
+                      member.line().operator().id(),
+                      member.line().line().id(),
+                      code,
+                      timetableName,
+                      member.inputs(),
+                      graphSnapshot,
+                      model,
+                      Optional.empty())
+                  .withFleet(fleetOf(member.consistPlans(), graph.worldId())),
               member.line().line().code(),
               display,
               member.ownRouteIds()));
@@ -556,9 +607,27 @@ public final class FtaTimetableCommand {
 
     // 构建是纯 CPU 运算：时分积分、SWRR、派车、串行、让车、冲突扫描，目标间隔有真冲突时还要向上搜索几十次。
     // 输入全是不可变快照，放到异步线程跑；报告回到主线程，落库再交给异步事务（writeAsync）。
+    String scope = lineArgumentOf(lines) + "/" + code;
+    Optional<TimetableBuildJobs.Job> started =
+        buildJobs.start(scope, sender.getName(), new java.util.HashSet<>(lineIds), code);
+    if (started.isEmpty()) {
+      String running =
+          buildJobs
+              .conflicting(new java.util.HashSet<>(lineIds), code)
+              .map(job -> job.scope() + "（" + job.requester() + " 发起）")
+              .orElse(scope);
+      sender.sendMessage(
+          Component.text("同一张表正在编：" + running + "，请等它编完。", NamedTextColor.RED)
+              .append(Component.text(" "))
+              .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
+      return;
+    }
+    TimetableBuildJobs.Job job = started.get();
+    TimetableBuildProgress progress = job.progress();
     sender.sendMessage(
-        Component.text(
-            joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY));
+        Component.text(joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY)
+            .append(Component.text(" "))
+            .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
     if (flags.rapidStagger()) {
       sender.sendMessage(
           Component.text("已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟；在后台线程运行，不阻塞服务器主线程。", NamedTextColor.GRAY));
@@ -575,6 +644,7 @@ public final class FtaTimetableCommand {
               NeighborReport neighborReport;
               TimetablePlatformPlanner.Result platformPlans;
               try {
+                progress.stage(TimetableBuildProgress.Stage.NEIGHBORS);
                 NeighborInputs neighborInputs =
                     collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
                 TimetableConflictChecker.GraphIndex index =
@@ -584,15 +654,37 @@ public final class FtaTimetableCommand {
                 neighborReport = neighborInputs.report(graphSnapshot, index, footprint);
                 List<NeighborTimetable> neighbors =
                     neighborInputs.project(graphSnapshot, index, footprint, options);
+                progress.checkpoint();
                 result =
-                    new TimetableSetBuilder()
+                    new TimetableSetBuilder(progress)
                         .build(
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
                             builtAt);
+                progress.checkpoint();
+                progress.stage(TimetableBuildProgress.Stage.PLATFORMS);
+                Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> tableProfiles =
+                    tableProfiles(result, neighborInputs, graphSnapshot, index);
                 platformPlans =
-                    planPlatforms(result, neighborInputs, graphSnapshot, index, neighbors, options);
+                    planPlatforms(
+                        result,
+                        tableProfiles,
+                        neighborInputs,
+                        graphSnapshot,
+                        index,
+                        neighbors,
+                        options);
+                result =
+                    withCapacity(
+                        result, tableProfiles, platformPlans, index, options, model, graphSnapshot);
+              } catch (TimetableBuildProgress.Cancelled cancelled) {
+                plugin
+                    .getServer()
+                    .getScheduler()
+                    .runTask(plugin, () -> sendBuildStopped(sender, scope));
+                return;
               } catch (RuntimeException ex) {
+                buildJobs.finish(job.id());
                 plugin
                     .getServer()
                     .getScheduler()
@@ -602,7 +694,11 @@ public final class FtaTimetableCommand {
                             sender.sendMessage(
                                 Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
                 return;
+              } catch (Error error) {
+                buildJobs.finish(job.id());
+                throw error;
               }
+              progress.stage(TimetableBuildProgress.Stage.REPORT);
               TimetableSetBuilder.SetResult built = result;
               NeighborReport neighbors = neighborReport;
               TimetablePlatformPlanner.Result platforms = platformPlans;
@@ -611,20 +707,38 @@ public final class FtaTimetableCommand {
                   .getScheduler()
                   .runTask(
                       plugin,
-                      () ->
-                          finishBuild(
-                              sender,
-                              provider,
-                              lines,
-                              built,
-                              platforms,
-                              options,
-                              model.settings(),
-                              headwayChoice,
-                              neighbors,
-                              groupSources,
-                              maxTripsSource,
-                              buildWarnings));
+                      () -> {
+                        // 编完到回主线程之间被取消：锁已经放掉，可能已有新的 build 在编同一张表，这份不能再落库。
+                        // 抢到了就开始保存，此后取消不了。
+                        if (!progress.beginSaving()) {
+                          sendBuildStopped(sender, scope);
+                          return;
+                        }
+                        Runnable release = () -> buildJobs.finish(job.id());
+                        boolean saving = false;
+                        try {
+                          saving =
+                              finishBuild(
+                                  sender,
+                                  provider,
+                                  lines,
+                                  built,
+                                  platforms,
+                                  options,
+                                  model.settings(),
+                                  headwayChoice,
+                                  neighbors,
+                                  groupSources,
+                                  maxTripsSource,
+                                  buildWarnings,
+                                  release);
+                        } finally {
+                          // 交给了落库就等事务结束再解锁；没走到落库（编表失败、拆表出错）当场解锁。
+                          if (!saving) {
+                            release.run();
+                          }
+                        }
+                      });
             });
   }
 
@@ -636,13 +750,29 @@ public final class FtaTimetableCommand {
    * @param ownRouteIds 属于这条线的 route（车池与拆表归属）
    * @param graph 覆盖这条线的图快照
    * @param timetableId 这条线这份表的 id（已有草稿则沿用）
+   * @param trainLengths 各 route 的保守车长（{@link #trainLengthsOf}）；读不到出车编组的不在里面
+   * @param consistPlans 各 route 绑定的编组方案
    */
   private record LineRoutes(
       ResolvedLine line,
       List<TimetableBuilder.RouteInput> inputs,
       java.util.Set<UUID> ownRouteIds,
       WorldGraph graph,
-      UUID timetableId) {}
+      UUID timetableId,
+      Map<UUID, Long> trainLengths,
+      ConsistPlans consistPlans) {}
+
+  /**
+   * 一条线各 route 绑定的编组方案。
+   *
+   * @param byRoute route → 解析好的方案
+   * @param routeCodes route → 代码（报告用）
+   * @param issues 绑定了却查不到的方案等提示：这些 route 按没绑方案编表，与运行时一致
+   */
+  private record ConsistPlans(
+      Map<UUID, ResolvedConsistPlan> byRoute, Map<UUID, String> routeCodes, List<String> issues) {
+    static final ConsistPlans NONE = new ConsistPlans(Map.of(), Map.of(), List.of());
+  }
 
   /** 收集一条线参与 build 的 route；没有可编表的班次或缺定义时提示并返回 null。 */
   private LineRoutes collectRouteInputs(
@@ -734,7 +864,135 @@ public final class FtaTimetableCommand {
       return null;
     }
     return new LineRoutes(
-        resolved, routeInputs, own, graph, existingId.orElseGet(UUID::randomUUID));
+        resolved,
+        routeInputs,
+        own,
+        graph,
+        existingId.orElseGet(UUID::randomUUID),
+        trainLengthsOf(routes, routeInputs),
+        consistPlansOf(provider, routes));
+  }
+
+  /**
+   * 各 route 绑定的编组方案（在 route 所属运营商下查）。没绑或编组方案服务未就绪的 route 不在其中；绑了却查不到方案的 route
+   * 也不在其中（运行时同样按没绑方案出车），只记一条提示。
+   *
+   * <p>方案与车型档案取编组方案服务的快照（主线程解析好的），构建线程只读它。
+   */
+  private ConsistPlans consistPlansOf(StorageProvider provider, List<Route> routes) {
+    Optional<ConsistPlanService> service = plugin.getConsistPlanService();
+    if (service.isEmpty()) {
+      return ConsistPlans.NONE;
+    }
+    Map<UUID, ResolvedConsistPlan> out = new java.util.LinkedHashMap<>();
+    Map<UUID, String> codes = new java.util.LinkedHashMap<>();
+    List<String> issues = new ArrayList<>();
+    Map<UUID, Optional<UUID>> operatorByLine = new java.util.HashMap<>();
+    for (Route route : routes) {
+      Optional<String> name = ConsistPlanService.planNameOf(route.metadata());
+      if (name.isEmpty()) {
+        continue;
+      }
+      Optional<ResolvedConsistPlan> plan =
+          operatorByLine
+              .computeIfAbsent(
+                  route.lineId(),
+                  lineId -> provider.lines().findById(lineId).map(line -> line.operatorId()))
+              .flatMap(operatorId -> service.get().plan(operatorId, name.get()));
+      if (plan.isEmpty()) {
+        issues.add(
+            "route " + route.code() + " 绑定的编组方案 " + name.get() + " 不存在，按没绑方案编表（运行时同样按车库牌子出车）");
+        continue;
+      }
+      out.put(route.id(), plan.get());
+      codes.put(route.id(), route.code());
+    }
+    return new ConsistPlans(out, codes, issues);
+  }
+
+  /**
+   * 编表用的车型：各方案里档案可用的车型各配一个走行模型（加减速取车型档案，限速再按车型最高速度封顶），以及各 route 的配比。 一条线都没绑方案时为空，编表与从前相同。
+   *
+   * <p>档案读不到的车型不参与编表，记一条提示；方案里一个可用车型都没有的 route 不能编表（运行时同样出不了车）。
+   */
+  private ConsistFleet fleetOf(ConsistPlans plans, UUID worldId) {
+    if (plans.byRoute().isEmpty()) {
+      return plans.issues().isEmpty()
+          ? ConsistFleet.none()
+          : new ConsistFleet(Map.of(), Map.of(), java.util.Set.of(), Map.of(), plans.issues());
+    }
+    RunCurveModel.Settings base =
+        runCurveSettings(
+            plugin.getConfigManager() == null ? null : plugin.getConfigManager().current());
+    RunCurveModel.EdgeSpeedResolver edges =
+        TimetableEdgeSpeeds.resolver(
+            worldId == null ? Map.of() : plugin.getRailGraphService().edgeOverrides(worldId));
+    Map<String, ConsistFleet.Consist> consists = new java.util.TreeMap<>();
+    Map<UUID, List<ConsistFleet.Share>> shares = new java.util.LinkedHashMap<>();
+    Map<UUID, String> blocked = new java.util.LinkedHashMap<>();
+    List<String> issues = new ArrayList<>(plans.issues());
+    plans
+        .byRoute()
+        .forEach(
+            (routeId, plan) -> {
+              String routeCode = plans.routeCodes().getOrDefault(routeId, routeId.toString());
+              List<ConsistFleet.Share> routeShares = new ArrayList<>();
+              for (ResolvedConsistPlan.Member member : plan.members()) {
+                if (member.profile().isEmpty()) {
+                  issues.add(
+                      "route "
+                          + routeCode
+                          + " 的编组方案 "
+                          + plan.plan().name()
+                          + "：车型 "
+                          + member.entry().pattern()
+                          + " 读不到档案"
+                          + describeIssues(member.resolution().issues())
+                          + "，不参与编表");
+                  continue;
+                }
+                ConsistProfile profile = member.profile().get();
+                consists.computeIfAbsent(
+                    member.key(),
+                    key ->
+                        new ConsistFleet.Consist(
+                            key,
+                            profile.pattern(),
+                            new RunCurveModel(
+                                base.withMotion(
+                                    new SpeedCurve(profile.accelBps2(), profile.decelBps2())),
+                                capped(edges, profile.maxSpeedBps())),
+                            profile.lengthBlocks(),
+                            profile.spawnLimit()));
+                routeShares.add(new ConsistFleet.Share(member.key(), member.weight()));
+              }
+              if (routeShares.isEmpty()) {
+                blocked.put(routeId, "编组方案 " + plan.plan().name() + " 里没有读得到档案的车型");
+              } else {
+                shares.put(routeId, routeShares);
+              }
+            });
+    return new ConsistFleet(consists, shares, java.util.Set.of(), blocked, issues);
+  }
+
+  private static String describeIssues(List<ConsistProfiles.Issue> issues) {
+    List<String> parts = new ArrayList<>();
+    for (ConsistProfiles.Issue issue : issues) {
+      if (issue.blocking()) {
+        parts.add(issue.kind().name() + (issue.detail().isBlank() ? "" : " " + issue.detail()));
+      }
+    }
+    return parts.isEmpty() ? "" : "（" + String.join("；", parts) + "）";
+  }
+
+  /** 边限速按车型最高速度封顶；车型不限速时原样返回。 */
+  private static RunCurveModel.EdgeSpeedResolver capped(
+      RunCurveModel.EdgeSpeedResolver edges, java.util.OptionalDouble maxSpeedBps) {
+    if (maxSpeedBps.isEmpty()) {
+      return edges;
+    }
+    double max = maxSpeedBps.getAsDouble();
+    return (graph, edge, fallback) -> Math.min(edges.resolve(graph, edge, fallback), max);
   }
 
   /**
@@ -747,12 +1005,67 @@ public final class FtaTimetableCommand {
   }
 
   /**
+   * 各 route 的保守车长，编表按它估前车何时把身后的线路放出来（与运行时尾部保护量车身同一口径，见 {@link SpawnPatternLength}）。
+   *
+   * <p>route 自己读得到出车编组（metadata 写明的，其次首站 CRET 指向的车库牌子，与出库同一来源）就用自己的； 读不到的（运营、回库 route 上的车是别的 route
+   * 出的）取同一交路组里最长的，组里也没有就取这批 route 里最长的。都读不到时不放进结果，由编表报告车长未知。
+   */
+  private Map<UUID, Long> trainLengthsOf(
+      List<Route> routes, List<TimetableBuilder.RouteInput> inputs) {
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    Map<String, java.util.OptionalLong> byPattern = new java.util.HashMap<>();
+    Map<UUID, Long> own = new java.util.HashMap<>();
+    Map<String, Long> byGroup = new java.util.HashMap<>();
+    long longest = 0L;
+    for (TimetableBuilder.RouteInput input : inputs) {
+      Optional<Route> route =
+          routes.stream().filter(candidate -> candidate.id().equals(input.routeId())).findFirst();
+      Optional<String> pattern =
+          route
+              .flatMap(DepotSpawnPattern::fromRoute)
+              .or(
+                  () ->
+                      registry == null
+                          ? Optional.empty()
+                          : SpawnDirectiveParser.findDirectiveTarget(input.stops(), "CRET")
+                              .map(NodeId::of)
+                              .flatMap(depot -> DepotSpawnPattern.read(registry, depot)));
+      java.util.OptionalLong length =
+          pattern
+              .map(text -> byPattern.computeIfAbsent(text, SpawnPatternLength::of))
+              .orElse(java.util.OptionalLong.empty());
+      if (length.isEmpty()) {
+        continue;
+      }
+      long blocks = length.getAsLong();
+      own.put(input.routeId(), blocks);
+      input.spawnGroup().ifPresent(group -> byGroup.merge(group, blocks, Math::max));
+      longest = Math.max(longest, blocks);
+    }
+    Map<UUID, Long> out = new java.util.HashMap<>();
+    for (TimetableBuilder.RouteInput input : inputs) {
+      Long length = own.get(input.routeId());
+      if (length == null) {
+        length = input.spawnGroup().map(byGroup::get).orElse(null);
+      }
+      if (length == null && longest > 0L) {
+        length = longest;
+      }
+      if (length != null) {
+        out.put(input.routeId(), length);
+      }
+    }
+    return Map.copyOf(out);
+  }
+
+  /**
    * 给编出来的表排计划站台（异步线程）：时刻用表上落库的时刻（{@link NeighborInputs#myProfiles}），与运行时、邻表同一口径。 编表失败时不排。
    *
    * <p>计划站台只是选台偏好与站牌显示：排程出错时记下原因、不给计划，时刻表照常落库。
    */
   private static TimetablePlatformPlanner.Result planPlatforms(
       TimetableSetBuilder.SetResult result,
+      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles,
       NeighborInputs inputs,
       RailGraph graph,
       TimetableConflictChecker.GraphIndex index,
@@ -763,11 +1076,6 @@ public final class FtaTimetableCommand {
     }
     try {
       List<Timetable> tables = List.copyOf(result.tables().values());
-      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles =
-          new java.util.HashMap<>();
-      for (Timetable table : tables) {
-        profiles.put(table.id(), inputs.myProfiles(table, graph, index));
-      }
       return TimetablePlatformPlanner.plan(
           new TimetablePlatformPlanner.Input(
               tables,
@@ -784,8 +1092,65 @@ public final class FtaTimetableCommand {
     }
   }
 
-  /** 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。 */
-  private void finishBuild(
+  /** 各张成品表的 route 投影（异步线程），时刻用表上落库的时刻：排计划站台与量瓶颈共用。编表失败时为空。 */
+  private static Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> tableProfiles(
+      TimetableSetBuilder.SetResult result,
+      NeighborInputs inputs,
+      RailGraph graph,
+      TimetableConflictChecker.GraphIndex index) {
+    Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> out = new java.util.HashMap<>();
+    if (!result.success()) {
+      return out;
+    }
+    for (Timetable table : result.tables().values()) {
+      out.put(table.id(), inputs.myProfiles(table, graph, index));
+    }
+    return out;
+  }
+
+  /**
+   * 给联编结果补上瓶颈报告（异步线程）：排完计划站台之后量，动态站台的停靠才有具体股道（{@link CapacityReport}）。
+   *
+   * <p>瓶颈只是报告：量的时候出错就不报这一节，表照常落库。
+   */
+  private TimetableSetBuilder.SetResult withCapacity(
+      TimetableSetBuilder.SetResult result,
+      Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> profiles,
+      TimetablePlatformPlanner.Result platforms,
+      TimetableConflictChecker.GraphIndex index,
+      TimetableBuildOptions options,
+      RunCurveModel model,
+      RailGraph graph) {
+    if (!result.success()) {
+      return result;
+    }
+    try {
+      CapacityReport.Report report =
+          CapacityReport.measure(
+              List.copyOf(result.tables().values()),
+              profiles,
+              platforms.plans(),
+              index,
+              options.following(),
+              model,
+              graph,
+              options.serviceStartSecondOfDay(),
+              CapacityReport.LIMIT);
+      return new TimetableSetBuilder.SetResult(
+          result.joint().withCapacity(report), result.tables(), result.baselines());
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("瓶颈报告计算失败：" + ex);
+      return result;
+    }
+  }
+
+  /**
+   * 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。落库交给异步事务。
+   *
+   * @param saved 落库事务结束（成功、被拒或出错）后在主线程调用；返回 false 时不会被调用
+   * @return 交给了落库为 true
+   */
+  private boolean finishBuild(
       CommandSender sender,
       StorageProvider provider,
       List<ResolvedLine> lines,
@@ -797,7 +1162,8 @@ public final class FtaTimetableCommand {
       NeighborReport neighbors,
       Map<String, String> groupSources,
       String maxTripsSource,
-      List<String> warnings) {
+      List<String> warnings,
+      Runnable saved) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(
@@ -811,7 +1177,7 @@ public final class FtaTimetableCommand {
         options.serviceStartSecondOfDay(),
         result.headwayRelaxed());
     if (!set.success()) {
-      return;
+      return false;
     }
     platforms
         .failure()
@@ -839,7 +1205,7 @@ public final class FtaTimetableCommand {
       if (timetable == null) {
         sender.sendMessage(
             Component.text(line.line().code() + " 没有拆出表来，这是一个不应发生的状态。", NamedTextColor.RED));
-        return;
+        return false;
       }
       tables.add(timetable);
     }
@@ -849,6 +1215,18 @@ public final class FtaTimetableCommand {
         provider,
         "保存时刻表失败",
         () -> {
+          // 编表要几分钟，build 时查过的库况可能已经变了：先全部查完再写，有一张不行就都不写。
+          for (int i = 0; i < tables.size(); i++) {
+            Timetable timetable = tables.get(i);
+            Optional<String> stale =
+                staleSaveReason(
+                    lines.get(i).line().code(),
+                    timetable,
+                    provider.timetables().findByLineAndCode(timetable.lineId(), timetable.code()));
+            if (stale.isPresent()) {
+              return stale;
+            }
+          }
           for (Timetable timetable : tables) {
             provider.timetables().save(timetable);
             provider
@@ -863,7 +1241,32 @@ public final class FtaTimetableCommand {
           return Optional.empty();
         },
         false,
-        () -> report.sendSavedActions(lines, tables, lineArgumentOf(lines), options, result));
+        () -> report.sendSavedActions(lines, tables, lineArgumentOf(lines), options, result),
+        saved);
+    return true;
+  }
+
+  /**
+   * 编完准备落库时，库里同线同 code 的表已经不是 build 开始时的样子：编表期间被投入运行（存草稿会把它改回未发布），或者冒出了另一张（存进去会撞同线同 code 的唯一约束）。
+   *
+   * @param lineCode 线路 code，用于提示
+   * @param built 编出来的表
+   * @param current 库里现在的同线同 code 表
+   * @return 不能保存的理由
+   */
+  static Optional<String> staleSaveReason(
+      String lineCode, Timetable built, Optional<Timetable> current) {
+    if (current.isEmpty()) {
+      return Optional.empty();
+    }
+    String table = lineCode + "/" + built.code();
+    if (current.get().published()) {
+      return Optional.of(table + " 在编表期间已投入运行，这次编表结果没有保存；如需替换，请先 unpublish 再重新 build。");
+    }
+    if (!current.get().id().equals(built.id())) {
+      return Optional.of(table + " 在编表期间另有一份草稿存入，这次编表结果没有保存；请重新 build。");
+    }
+    return Optional.empty();
   }
 
   /**
@@ -885,6 +1288,20 @@ public final class FtaTimetableCommand {
       TransactionCallback<Optional<String>> write,
       boolean reloadPublished,
       Runnable onWritten) {
+    writeAsync(sender, provider, failurePrefix, write, reloadPublished, onWritten, () -> {});
+  }
+
+  /**
+   * @param onSettled 事务结束后在主线程调用，不论写成、被拒还是出错；在 {@code onWritten} 之后
+   */
+  private void writeAsync(
+      CommandSender sender,
+      StorageProvider provider,
+      String failurePrefix,
+      TransactionCallback<Optional<String>> write,
+      boolean reloadPublished,
+      Runnable onWritten,
+      Runnable onSettled) {
     plugin
         .getServer()
         .getScheduler()
@@ -904,8 +1321,18 @@ public final class FtaTimetableCommand {
                     .getScheduler()
                     .runTask(
                         plugin,
-                        () -> sender.sendMessage(Component.text(reason, NamedTextColor.RED)));
+                        () -> {
+                          try {
+                            sender.sendMessage(Component.text(reason, NamedTextColor.RED));
+                          } finally {
+                            onSettled.run();
+                          }
+                        });
                 return;
+              } catch (RuntimeException | Error ex) {
+                // 不是存储层的异常：照常抛出去留下堆栈，但事务已经结束，收尾不能漏。
+                plugin.getServer().getScheduler().runTask(plugin, onSettled);
+                throw ex;
               }
               Optional<String> outcome = rejected;
               plugin
@@ -914,11 +1341,15 @@ public final class FtaTimetableCommand {
                   .runTask(
                       plugin,
                       () -> {
-                        if (outcome.isPresent()) {
-                          sender.sendMessage(Component.text(outcome.get(), NamedTextColor.RED));
-                          return;
+                        try {
+                          if (outcome.isPresent()) {
+                            sender.sendMessage(Component.text(outcome.get(), NamedTextColor.RED));
+                            return;
+                          }
+                          onWritten.run();
+                        } finally {
+                          onSettled.run();
                         }
-                        onWritten.run();
                       });
             });
   }
@@ -1229,6 +1660,10 @@ public final class FtaTimetableCommand {
       Timetable timetable, String displayCode) {
     List<TimetableNeighborhoodLoader.RouteCandidate> out = new ArrayList<>();
     for (TimetableRoutePlan plan : timetable.routePlans()) {
+      if (plan.consist().isPresent()) {
+        // 车型变体与基础 route 是同一条 route。
+        continue;
+      }
       out.add(
           new TimetableNeighborhoodLoader.RouteCandidate(
               plan.routeId(), plan.routeCode(), displayCode));
@@ -1542,7 +1977,7 @@ public final class FtaTimetableCommand {
                   + "  班次="
                   + timetable.trips().size()
                   + "  route="
-                  + timetable.routePlans().size()
+                  + timetable.routeIds().size()
                   + "  交路="
                   + timetable.duties().size(),
               color));
@@ -1580,13 +2015,30 @@ public final class FtaTimetableCommand {
                 ? "无"
                 : baselines.size() + " 份（用 /fta timetable neighbors 查看是否仍一致）"));
     sender.sendMessage(Component.text("  各 route 计划:", NamedTextColor.GRAY));
+    // 区分车型时同一条 route 有基础计划与各车型的变体：基础计划数全部班次，变体只数这个车型跑的班次。
+    Map<UUID, String> consistByDuty = new java.util.HashMap<>();
+    for (VehicleDuty duty : timetable.duties()) {
+      duty.consist().ifPresent(key -> consistByDuty.put(duty.id(), key));
+    }
+    Map<UUID, Integer> tripsByRoute = new java.util.HashMap<>();
+    Map<String, Integer> tripsByRouteConsist = new java.util.HashMap<>();
+    for (TimetableTrip trip : timetable.trips()) {
+      tripsByRoute.merge(trip.routeId(), 1, Integer::sum);
+      trip.dutyId()
+          .map(consistByDuty::get)
+          .ifPresent(key -> tripsByRouteConsist.merge(trip.routeId() + "|" + key, 1, Integer::sum));
+    }
     for (TimetableRoutePlan plan : timetable.routePlans()) {
+      Optional<String> consist = plan.consist().map(TimetableRoutePlan.ConsistVariant::key);
       long tripCount =
-          timetable.trips().stream().filter(trip -> trip.routeId().equals(plan.routeId())).count();
+          consist
+              .map(key -> tripsByRouteConsist.getOrDefault(plan.routeId() + "|" + key, 0))
+              .orElseGet(() -> tripsByRoute.getOrDefault(plan.routeId(), 0));
       sender.sendMessage(
           Component.text(
               "    "
                   + plan.routeCode()
+                  + consist.map(key -> " <" + key + ">").orElse("")
                   + (plan.operation() ? "  w=" + plan.weight() : "  [" + plan.kind().name() + "]")
                   + "  停靠="
                   + plan.stops().size()
@@ -1688,7 +2140,8 @@ public final class FtaTimetableCommand {
                   + "  在线="
                   + duty.plannedDurationSeconds()
                   + "s  收尾="
-                  + duty.closeReason().name(),
+                  + duty.closeReason().name()
+                  + duty.consist().map(consist -> "  车型=" + consist).orElse(""),
               NamedTextColor.WHITE));
       String createLeg =
           duty.createRouteId()
@@ -2158,6 +2611,101 @@ public final class FtaTimetableCommand {
   }
 
   private void handleRuntimeStatus(CommandSender sender) {
+    sendRuntimeStatus(sender);
+    sendBuildJobs(sender);
+  }
+
+  /** 正在进行的编表：阶段、正在试什么、完整构建了几次。次数在涨就是在干活，不是卡死。 */
+  private void sendBuildJobs(CommandSender sender) {
+    describeBuildJobs(buildJobs.list()).forEach(sender::sendMessage);
+  }
+
+  static List<Component> describeBuildJobs(List<TimetableBuildJobs.Job> jobs) {
+    List<Component> lines = new ArrayList<>();
+    lines.add(Component.text("===== 编表 =====", NamedTextColor.DARK_AQUA));
+    if (jobs.isEmpty()) {
+      lines.add(Component.text("  当前没有正在进行的编表。", NamedTextColor.GRAY));
+      return lines;
+    }
+    for (TimetableBuildJobs.Job job : jobs) {
+      TimetableBuildProgress.Snapshot snapshot = job.progress().snapshot();
+      Component header =
+          Component.text("  " + job.scope(), NamedTextColor.WHITE)
+              .append(
+                  Component.text(
+                      "  " + job.requester() + " 发起，已用 " + elapsed(snapshot.elapsed()) + " ",
+                      NamedTextColor.GRAY));
+      lines.add(
+          job.progress().saving()
+              ? header.append(Component.text("（正在保存，不能取消）", NamedTextColor.GRAY))
+              : header.append(
+                  CommandUx.runAction(
+                      "[取消]",
+                      "/fta timetable cancel " + job.shortId(),
+                      "停止这次编表，不保存；等完当前这一次完整构建就停")));
+      lines.add(
+          field(
+              "  阶段", snapshot.stage().label() + "（本阶段 " + elapsed(snapshot.stageElapsed()) + "）"));
+      if (!snapshot.detail().isBlank()) {
+        lines.add(field("  正在", snapshot.detail()));
+      }
+      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次"));
+    }
+    return lines;
+  }
+
+  private void handleCancelBuild(CommandSender sender, String ref) {
+    Optional<TimetableBuildJobs.Cancellation> cancelled = buildJobs.cancel(ref);
+    if (cancelled.isEmpty()) {
+      sender.sendMessage(
+          Component.text("找不到唯一对应的编表任务：" + ref + "。", NamedTextColor.RED)
+              .append(Component.text(" "))
+              .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与任务号")));
+      return;
+    }
+    TimetableBuildJobs.Job job = cancelled.get().job();
+    if (!cancelled.get().stopped()) {
+      sender.sendMessage(
+          Component.text(
+              job.scope() + " 已编完、正在保存，取消不了；保存完成后可以 unpublish 或重新 build。", NamedTextColor.RED));
+      return;
+    }
+    sender.sendMessage(
+        Component.text(
+            "已取消 " + job.scope() + "：不会保存，同一张表现在就可以重新 build。编表线程会在当前这一次完整构建结束后停下。",
+            NamedTextColor.YELLOW));
+  }
+
+  /** 编表线程已因取消停下：告诉发起者。 */
+  private static void sendBuildStopped(CommandSender sender, String scope) {
+    sender.sendMessage(Component.text("编表 " + scope + " 已取消，没有保存。", NamedTextColor.YELLOW));
+  }
+
+  private SuggestionProvider<CommandSender> buildJobSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> out = new ArrayList<>();
+          for (TimetableBuildJobs.Job job : buildJobs.list()) {
+            if (matches(job.shortId(), prefix)) {
+              out.add(job.shortId());
+            }
+          }
+          if (out.isEmpty() && prefix.isBlank()) {
+            out.add("<job>");
+          }
+          return out;
+        });
+  }
+
+  private static String elapsed(Duration duration) {
+    long seconds = duration.toSeconds();
+    return seconds >= 60
+        ? String.format(Locale.ROOT, "%d 分 %02d 秒", seconds / 60, seconds % 60)
+        : seconds + " 秒";
+  }
+
+  private void sendRuntimeStatus(CommandSender sender) {
     Optional<TimetableService> serviceOpt = plugin.getTimetableService();
     if (serviceOpt.isEmpty()) {
       sender.sendMessage(Component.text("按表运行服务尚未初始化。", NamedTextColor.RED));
@@ -2230,6 +2778,29 @@ public final class FtaTimetableCommand {
   }
 
   /**
+   * 编表的跟车规则：与运行时控车读同一组配置，快车被卡与错峰都按它算闭塞时间。减速度按默认车种（与 {@link #runCurveSettings} 同一来源）。 车长不在配置里，由
+   * build 按出车编组补上（{@link #trainLengthsOf}）。
+   *
+   * @param config 当前配置；为空时（插件未加载配置）不按闭塞时间算
+   */
+  static TimetableBuildOptions.Following followingRules(ConfigManager.ConfigView config) {
+    if (config == null) {
+      return TimetableBuildOptions.Following.NONE;
+    }
+    ConfigManager.RuntimeSettings runtime = config.runtimeSettings();
+    double margin =
+        Math.max(
+            runtime.followingMinClearBlocks(),
+            runtime.followingStopMarginBlocks() + runtime.movementAuthorityCautionMarginBlocks());
+    return new TimetableBuildOptions.Following(
+        runCurveSettings(config).motion().decelBps2(),
+        margin,
+        runtime.rearGuardEdges(),
+        runtime.dispatchTickIntervalTicks() / 20.0D,
+        Map.of());
+  }
+
+  /**
    * 编表的走行参数：与运行时控车、ETA 读同一组配置（{@link RunCurveModel.Settings#fromConfig}）。参数面板、构建报告与 build
    * 共用这一个方法，面板上显示的就是 build 用的。
    *
@@ -2251,12 +2822,12 @@ public final class FtaTimetableCommand {
     List<NodeId> waypoints = definition.waypoints();
     return plugin
         .getRailGraphService()
-        .findWorldIdForPath(waypoints)
+        .findNetworkWorldForPath(waypoints)
         .flatMap(
             worldId ->
                 plugin
                     .getRailGraphService()
-                    .getSnapshot(worldId)
+                    .getNetworkSnapshot(worldId)
                     .map(snapshot -> new WorldGraph(worldId, snapshot.graph())));
   }
 

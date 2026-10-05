@@ -14,8 +14,10 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
+import java.util.TreeMap;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Predicate;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
@@ -36,12 +38,15 @@ import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletinBoard;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrameCache;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrames;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsMapPalette;
+import org.fetarute.fetaruteTCAddon.display.pids.render.PidsBulletinTypesetter;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsFonts;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsRenderer;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsFacing;
@@ -102,6 +107,7 @@ public final class PidsService {
   private final FetaruteApi api;
   private final InstantSource clock = InstantSource.system();
   private final PidsScreenRegistry registry = new PidsScreenRegistry();
+  private final PidsBulletinBoard bulletins = new PidsBulletinBoard();
   private final ApiPidsDirectory directory;
   private final PidsSnapshotProvider snapshots;
 
@@ -175,7 +181,8 @@ public final class PidsService {
             () -> settings,
             clock,
             ZoneId.systemDefault(),
-            lineStatuses);
+            lineStatuses,
+            bulletins);
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
@@ -206,6 +213,14 @@ public final class PidsService {
       } catch (RuntimeException ex) {
         logger.warn("读取站台屏失败，本次不判定未登记屏幕: " + ex);
       }
+      try {
+        bulletins.replaceAll(storage.pidsBulletins().listAll());
+        if (bulletins.size() > 0) {
+          logger.info("站台屏公告已加载: " + bulletins.size() + " 条");
+        }
+      } catch (RuntimeException ex) {
+        logger.warn("读取站台屏公告失败，本次不显示公告: " + ex);
+      }
     }
     directoryTask =
         Bukkit.getScheduler()
@@ -223,6 +238,12 @@ public final class PidsService {
   public void continueFrom(PidsService previous) {
     announcer.continueFrom(previous.announcer);
     platformChanges.absorb(previous.platformChanges);
+  }
+
+  /** 作废取消行缓存：车次取消、重新绑定或越站之后调用，站台屏、站台广播与线路运行状况屏下一次取数即可看到。 */
+  public void invalidateCancellations() {
+    snapshots.invalidateCancellations();
+    lineStatuses.invalidateCancellations();
   }
 
   public void stop() {
@@ -552,6 +573,86 @@ public final class PidsService {
   /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */
   public OptionalInt platformLimit(PidsScreen screen) {
     return layoutOf(screen).map(PidsPlatformSelection::limit).orElse(OptionalInt.empty());
+  }
+
+  /** 公告表。 */
+  public PidsBulletinBoard bulletins() {
+    return bulletins;
+  }
+
+  /**
+   * 写库并更新公告表，站台屏下一次检查即按新内容显示。
+   *
+   * @return 存储不可用或写库失败时为 false（公告表不变）
+   */
+  public boolean saveBulletin(PidsBulletin bulletin) {
+    if (storage == null) {
+      return false;
+    }
+    try {
+      storage.pidsBulletins().save(bulletin);
+    } catch (StorageException ex) {
+      logger.warn("保存站台屏公告失败: " + ex.getMessage());
+      return false;
+    }
+    bulletins.put(bulletin);
+    return true;
+  }
+
+  /** 删库并移出公告表，站台屏下一次检查即不再显示。 */
+  public boolean removeBulletin(PidsBulletin bulletin) {
+    if (storage == null) {
+      return false;
+    }
+    try {
+      storage.pidsBulletins().delete(bulletin.id());
+    } catch (StorageException ex) {
+      logger.warn("删除站台屏公告失败: " + ex.getMessage());
+      return false;
+    }
+    bulletins.remove(bulletin.id());
+    return true;
+  }
+
+  /**
+   * 公告在一种布局上的排版。
+   *
+   * @param layout 布局
+   * @param result 排版结果
+   */
+  public record BulletinFit(PidsLayout layout, PidsBulletinTypesetter.Result result) {}
+
+  /** 公告在会显示它的布局上各排成几页：取本运营商在用的、会轮播公告的布局；本运营商还没有这样的屏幕时取会轮播公告的内置布局 （不拿别人的自定义布局卡住发布）。按布局编号排序。 */
+  public List<BulletinFit> bulletinFits(PidsBulletin bulletin) {
+    Map<String, PidsLayout> used = new TreeMap<>();
+    for (PidsScreen screen : registry.all()) {
+      boolean ours =
+          screen.station().map(s -> s.operatorCode().equals(bulletin.operatorCode())).orElse(false);
+      if (ours) {
+        layoutOf(screen)
+            .filter(PidsComposer::showsBulletins)
+            .ifPresent(layout -> used.put(layout.id(), layout));
+      }
+    }
+    if (used.isEmpty()) {
+      layouts.all().stream()
+          .filter(layout -> PidsLayoutRegistry.BUILT_IN.contains(layout.id()))
+          .filter(PidsComposer::showsBulletins)
+          .forEach(layout -> used.put(layout.id(), layout));
+    }
+    return used.values().stream()
+        .map(layout -> new BulletinFit(layout, composer.typeset(layout, bulletin)))
+        .toList();
+  }
+
+  /** 见 {@link PidsAccess#canManageCompany}。 */
+  public boolean canManageCompany(CommandSender sender, UUID companyId) {
+    return access.canManageCompany(sender, companyId);
+  }
+
+  /** 见 {@link PidsAccess#manageableCompanies}。 */
+  public Predicate<UUID> manageableCompanies(CommandSender sender) {
+    return access.manageableCompanies(sender);
   }
 
   /** 见 {@link PidsAccess#canManage}。 */

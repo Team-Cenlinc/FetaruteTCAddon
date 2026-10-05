@@ -14,7 +14,26 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getPortalLinks"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService"/>
+        <Method name="configureCrossWorld"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getSignNodeRegistry"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getStopMarkIndex"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
     <Match>
@@ -25,6 +44,11 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getHudTemplateService"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getDriveSessionManager"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
 
@@ -102,6 +126,90 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaDriveCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.menu.DriveMenuHolder"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession"/>
+        <Method name="rewriter"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- 驾驶调度列车的控制链路：会话、注册表与调度层共用同一个对象，列车属性对象本就由 TrainCarts 持有 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.driver.DriverLink"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession"/>
+        <Or>
+            <Method name="driverLink"/>
+            <Method name="attachDriverLink"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <!-- 会话记住的编组句柄：编组对象由 TrainCarts 持有，只用来省掉按列车名遍历全服编组 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession"/>
+        <Or>
+            <Method name="lastGroup"/>
+            <Method name="setLastGroup"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession$CabSeatsMemo"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Method name="controlAuthority"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- simulation 级车上系统：气压与故障对象由会话、驾驶台菜单与管理员命令共用，按引用交出 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.cab.CabSystems"/>
+        <Or>
+            <Method name="air"/>
+            <Method name="faults"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <!-- 驾驶任务：持有插件实例；任务板持有者按 Bukkit 约定交出自己的箱子界面 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Method name="tutorials"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
+        <Method name="tasks"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
@@ -172,6 +280,12 @@
         <Method name="announcer"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 站台屏公告：命令通过站台屏服务读写同一张内存公告表（生命周期随站台屏服务） -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.pids.PidsService"/>
+        <Method name="bulletins"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Or>
             <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet"/>
@@ -199,6 +313,14 @@
     </Match>
 
     <!-- 使用表前缀动态组装 SQL，表名来自白名单，安全性由代码保证 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPortalLinkRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
@@ -264,6 +386,10 @@
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcConsistPlanRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
@@ -273,6 +399,10 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsBulletinRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>
@@ -336,6 +466,10 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaConsistCommand"/>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
     </Match>
     <Match>
@@ -431,6 +565,11 @@
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.TrainPositionResolver"/>
         <Method name="resolveFromGroup"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment"/>
+        <Method name="travel"/>
         <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
     </Match>
     <Match>
@@ -641,6 +780,19 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRunRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <!-- 驾驶证：命令与服务持有插件引用，生命周期由主类管理；仓库的表名来自白名单 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.license.LicenseService"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
 </FindBugsFilter>

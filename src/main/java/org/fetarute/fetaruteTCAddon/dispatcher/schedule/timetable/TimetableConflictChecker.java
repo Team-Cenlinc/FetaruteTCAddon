@@ -487,13 +487,25 @@ public final class TimetableConflictChecker {
     }
   }
 
-  /** 一条 route 的足迹：边互斥、穿越的道岔与车站、单线区段、中间停靠的站台，顺序与投影一致。 */
+  /**
+   * 一条 route 的足迹：边互斥、穿越的道岔与车站、单线区段、中间停靠的站台，顺序与投影一致。
+   *
+   * <p>档案带车尾出清（{@link RouteProfile#tailBlocks()}）时，每个资源的离开时刻改用车尾离开它的时刻（{@link TailClock}）。
+   */
   private static Footprint footprintOf(RouteProfile profile, GraphIndex index) {
     List<Slot> slots = new ArrayList<>();
     SingleLineSectionIndex sections = index.sections();
     Map<NodeId, NodeType> nodeTypes = index.nodeTypes();
+    TailClock tail = TailClock.of(profile);
+    double segmentStart = 0.0;
     for (TimetableTimingCalculator.SegmentTiming segment : profile.segments()) {
       List<RailEdge> edges = segment.edges();
+      double[] nodePosition = new double[segment.nodes().size()];
+      nodePosition[0] = segmentStart;
+      for (int k = 0; k < edges.size(); k++) {
+        nodePosition[k + 1] = nodePosition[k] + edges.get(k).lengthBlocks();
+      }
+      segmentStart = nodePosition[nodePosition.length - 1];
       // 边：互斥。
       for (int k = 0; k < edges.size(); k++) {
         slots.add(
@@ -502,7 +514,7 @@ public final class TimetableConflictChecker {
                 Kind.TRACK,
                 1,
                 segment.enterOffset(k),
-                segment.exitOffset(k),
+                tail.leaves(nodePosition[k + 1], segment.exitOffset(k)),
                 0));
       }
       // 路径中间穿越的节点：道岔两次通过之间要留间隔；不停靠而经过的车站股道也是一次占用——
@@ -512,11 +524,12 @@ public final class TimetableConflictChecker {
         NodeId node = nodes.get(k);
         NodeType type = nodeTypes.get(node);
         int at = segment.nodeOffsets().get(k);
+        int clear = tail.leaves(nodePosition[k], at);
         if (type == NodeType.SWITCHER) {
-          slots.add(new Slot(junctionKey(node), Kind.JUNCTION, 1, at, at, 0));
+          slots.add(new Slot(junctionKey(node), Kind.JUNCTION, 1, at, clear, 0));
         } else if (type == NodeType.STATION) {
           addPlatformSlots(
-              slots, new Platform(node.value(), groupOf(node.value()), false), at, at, index);
+              slots, new Platform(node.value(), groupOf(node.value()), false), at, clear, index);
         }
       }
       // 单线区段：连续落在同一 section 的边合并成一个带方向的占用区间。
@@ -530,7 +543,7 @@ public final class TimetableConflictChecker {
           Optional<SingleLineSectionInfo> info = sections.sectionInfoForEdge(edges.get(k).id());
           String key = info.map(SingleLineSectionInfo::key).orElse(null);
           if (key != null && key.equals(currentKey)) {
-            exit = segment.exitOffset(k);
+            exit = tail.leaves(nodePosition[k + 1], segment.exitOffset(k));
             continue;
           }
           if (currentKey != null) {
@@ -541,7 +554,7 @@ public final class TimetableConflictChecker {
           current = info.orElse(null);
           if (key != null) {
             enter = segment.enterOffset(k);
-            exit = segment.exitOffset(k);
+            exit = tail.leaves(nodePosition[k + 1], segment.exitOffset(k));
             direction = directionOf(current, nodes.get(k), nodes.get(k + 1));
           }
         }
@@ -557,9 +570,103 @@ public final class TimetableConflictChecker {
       TimetableStop stop = stops.get(i);
       Platform platform = i < profile.platforms().size() ? profile.platforms().get(i) : null;
       addPlatformSlots(
-          slots, platform, stop.arrivalOffsetSeconds(), stop.departureOffsetSeconds(), index);
+          slots,
+          platform,
+          stop.arrivalOffsetSeconds(),
+          tail.leavesStop(i, stop.departureOffsetSeconds()),
+          index);
     }
     return new Footprint(slots);
+  }
+
+  /**
+   * 车尾时钟：车尾经过里程 {@code p} 的时刻 = 车头走到 {@code p + L} 的时刻（{@code L} 为车尾出清长度）。
+   *
+   * <p>车头的"里程—时刻"由各段节点时刻连成一条折线，停站时里程不动、时刻前进（到站 → 发车）；两节点之间按里程线性插值。 车头走到 {@code p + L}
+   * 之前就到了终点的，取终点到达时刻：终点待命（Stay）只占站台，离终点不足 {@code L} 的道岔在待命期间不算占用，编表报告对这种布置单独警告。 {@code L} 为 0
+   * 时一律返回原时刻。
+   */
+  private static final class TailClock {
+    private static final TailClock NONE = new TailClock(new double[0], new int[0], 0.0, Map.of());
+
+    private final double[] positions;
+    private final int[] times;
+    private final double tail;
+    private final Map<Integer, Double> stopPositions;
+
+    private TailClock(
+        double[] positions, int[] times, double tail, Map<Integer, Double> stopPositions) {
+      this.positions = positions;
+      this.times = times;
+      this.tail = tail;
+      this.stopPositions = stopPositions;
+    }
+
+    static TailClock of(RouteProfile profile) {
+      if (profile.tailBlocks() <= 0.0 || profile.segments().isEmpty()) {
+        return NONE;
+      }
+      List<Double> positions = new ArrayList<>();
+      List<Integer> times = new ArrayList<>();
+      Map<Integer, Double> stopPositions = new java.util.HashMap<>();
+      double start = 0.0;
+      for (TimetableTimingCalculator.SegmentTiming segment : profile.segments()) {
+        double position = start;
+        stopPositions.putIfAbsent(segment.fromStop(), position);
+        for (int k = 0; k < segment.nodes().size(); k++) {
+          if (k > 0) {
+            position += segment.edges().get(k - 1).lengthBlocks();
+          }
+          positions.add(position);
+          times.add(segment.nodeOffsets().get(k));
+        }
+        stopPositions.put(segment.toStop(), position);
+        start = position;
+      }
+      double[] p = new double[positions.size()];
+      int[] t = new int[times.size()];
+      for (int i = 0; i < p.length; i++) {
+        p[i] = positions.get(i);
+        t[i] = times.get(i);
+      }
+      return new TailClock(p, t, profile.tailBlocks(), Map.copyOf(stopPositions));
+    }
+
+    /**
+     * 车尾离开里程 {@code position} 的时刻，不早于车头离开的时刻。
+     *
+     * @param position 资源所在里程（从首站起算）
+     * @param headLeaves 车头离开的时刻
+     */
+    int leaves(double position, int headLeaves) {
+      if (tail <= 0.0) {
+        return headLeaves;
+      }
+      return Math.max(headLeaves, headReaches(position + tail));
+    }
+
+    /** 途中第 {@code stopIndex} 个停靠点：车尾在车头发车后再走完车尾出清长度才离开站台。 */
+    int leavesStop(int stopIndex, int headDeparts) {
+      Double position = stopPositions.get(stopIndex);
+      return position == null ? headDeparts : leaves(position, headDeparts);
+    }
+
+    private int headReaches(double target) {
+      for (int i = 0; i < positions.length; i++) {
+        if (positions[i] >= target) {
+          if (i == 0) {
+            return times[0];
+          }
+          double span = positions[i] - positions[i - 1];
+          if (span <= 0.0) {
+            return times[i];
+          }
+          double fraction = (target - positions[i - 1]) / span;
+          return (int) Math.ceil(times[i - 1] + fraction * (times[i] - times[i - 1]));
+        }
+      }
+      return times[times.length - 1];
+    }
   }
 
   private static void addPlatformSlots(
@@ -709,13 +816,25 @@ public final class TimetableConflictChecker {
    * @param stops 站间时分档案
    * @param segments 逐边时分
    * @param platforms 每个停靠点的站台资源，与 {@code stops} 对齐
+   * @param tailBlocks 车尾出清多算的长度（格）：区间、道岔、途中站台的离开时刻推迟到车头再走这么远之后。 只跑一种车型时为 0，足迹与从前逐字相同
    */
   public record RouteProfile(
       UUID routeId,
       String routeCode,
       List<TimetableStop> stops,
       List<TimetableTimingCalculator.SegmentTiming> segments,
-      List<Platform> platforms) {
+      List<Platform> platforms,
+      double tailBlocks) {
+
+    /** 不算车尾出清的档案。 */
+    public RouteProfile(
+        UUID routeId,
+        String routeCode,
+        List<TimetableStop> stops,
+        List<TimetableTimingCalculator.SegmentTiming> segments,
+        List<Platform> platforms) {
+      this(routeId, routeCode, stops, segments, platforms, 0.0);
+    }
 
     public RouteProfile {
       Objects.requireNonNull(routeId, "routeId");
@@ -723,6 +842,12 @@ public final class TimetableConflictChecker {
       stops = stops == null ? List.of() : List.copyOf(stops);
       segments = segments == null ? List.of() : List.copyOf(segments);
       platforms = platforms == null ? List.of() : List.copyOf(platforms);
+      tailBlocks = Double.isFinite(tailBlocks) && tailBlocks > 0.0 ? tailBlocks : 0.0;
+    }
+
+    /** 换一个 route ID 与车尾出清，时分不变（车型变体登记用）。 */
+    public RouteProfile asVariant(UUID variantId, double variantTailBlocks) {
+      return new RouteProfile(variantId, routeCode, stops, segments, platforms, variantTailBlocks);
     }
 
     /** 首站站台；首站不是站台节点时为空。 */

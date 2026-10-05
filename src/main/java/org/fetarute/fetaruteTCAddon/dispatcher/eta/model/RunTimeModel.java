@@ -39,6 +39,64 @@ public interface RunTimeModel {
   }
 
   /**
+   * 一段走行的逐点轨迹，与 {@link #nodeTimes} 同一条曲线。
+   *
+   * <p>编表的闭塞时间要知道列车在每一处的速度来算制动距离：只按节点到达秒数推平均速度，长边上会把进站前的减速当成线路速度。
+   *
+   * @param graph 调度图
+   * @param run 这一段走行
+   * @return 轨迹；不建模加减速（逐边相加的模型）或算不出时为空
+   */
+  default Optional<Trajectory> trajectory(RailGraph graph, Run run) {
+    return Optional.empty();
+  }
+
+  /**
+   * 逐点轨迹的不可变快照；输入与读取结果均复制，避免外部修改影响闭塞时间计算。
+   *
+   * @param distance 各采样点距起点的里程（格），递增
+   * @param seconds 到达各采样点的秒数，首项为 0
+   * @param speed 各采样点的速度（格/秒）
+   */
+  record Trajectory(double[] distance, double[] seconds, double[] speed) {
+
+    public Trajectory {
+      Objects.requireNonNull(distance, "distance");
+      Objects.requireNonNull(seconds, "seconds");
+      Objects.requireNonNull(speed, "speed");
+      if (distance.length != seconds.length || distance.length != speed.length) {
+        throw new IllegalArgumentException("distance / seconds / speed 数量不匹配");
+      }
+      distance = distance.clone();
+      seconds = seconds.clone();
+      speed = speed.clone();
+    }
+
+    /** 各采样点里程的副本。 */
+    @Override
+    public double[] distance() {
+      return distance.clone();
+    }
+
+    /** 各采样点到达秒数的副本。 */
+    @Override
+    public double[] seconds() {
+      return seconds.clone();
+    }
+
+    /** 各采样点速度的副本。 */
+    @Override
+    public double[] speed() {
+      return speed.clone();
+    }
+
+    /** 采样点数。 */
+    public int samples() {
+      return distance.length;
+    }
+  }
+
+  /**
    * 一段走行。
    *
    * @param nodes 展开路径的节点，至少两个

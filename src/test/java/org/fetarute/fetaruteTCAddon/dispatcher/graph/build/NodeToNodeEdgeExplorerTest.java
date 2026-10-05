@@ -59,7 +59,6 @@ final class NodeToNodeEdgeExplorerTest {
   @Test
   void defaultLimitIsFarAboveOrdinarySectionLength() {
     assertEquals(4096, EdgeExploreMode.nodeToNode().maxDistanceBlocks());
-    assertEquals(512, EdgeExploreMode.bfsMultiSource().maxDistanceBlocks());
   }
 
   @Test

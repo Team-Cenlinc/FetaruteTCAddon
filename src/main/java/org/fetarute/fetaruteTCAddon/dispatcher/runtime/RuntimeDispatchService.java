@@ -119,6 +119,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalFootprintHydrationSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalInterlockingBerthPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PositionZoneEvidence;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.RearGuardWindow;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -1643,6 +1644,7 @@ public final class RuntimeDispatchService {
             Duration.ofSeconds(resolveDistanceCacheRefreshSeconds()),
             resolvePathCacheMaxSize(),
             this.debugLogger);
+    this.shortestPathDistanceCache.setGraphVersion(this.railGraphService::snapshotVersion);
   }
 
   private int resolveDistanceCacheRefreshSeconds() {
@@ -10800,79 +10802,16 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 执行 Smart self-owned stale retain release。
+   * 回收自持尾部保护，分 CONFLICT 与实测覆盖两条分支。
    *
-   * <p>该入口只释放占用层已识别的自持 stale/protective CONFLICT retain。它不会清理 destination、不会 invalidate movement
-   * token，也不会释放车体 NODE/EDGE claim；真实 mutation 必须先通过 OCCUPANCY_MUTATION effect gate。
+   * <p>CONFLICT 分支释放占用层已识别的自持 stale/protective CONFLICT retain；CONFLICT 没有候选时，实测覆盖分支释放车体已驶离的
+   * NODE/EDGE 上的 {@code PROTECTIVE_RETAIN}。两者都不清理 destination，也不 invalidate movement token。
+   *
+   * <p>两条分支都先只读取证，再过同一道 OCCUPANCY_MUTATION 模式闸，闸后才改账本；闸门不放行时返回 {@code suppressed-by-mode}，一条 claim
+   * 都不动。任何分支都不得在闸前返回一个已落地的结果。
+   *
+   * <p>实测覆盖分支 fail-closed：覆盖缺项（观测不可用 / cell 索引不可用 / 图拿不到）一律不放行。 该缺项**绝不可**被当成"没覆盖"——那正是"缺证据当证据"的红线。
    */
-  /**
-   * Phase 4：用车体实测覆盖释放已驶离区间上的尾部保护。
-   *
-   * <p>返回 {@code null} 表示"这条路径没做任何事"，让调用方继续走原来的 not-found 分支—— 于是既有行为在证据不足时一字不变。
-   *
-   * <p>fail-closed：覆盖缺项（观测不可用 / cell 索引不可用 / 图拿不到）一律不放行。 该缺项**绝不可**被当成"没覆盖"——那正是"缺证据当证据"的红线。
-   */
-  private SmartRecoveryActionResult applyPhysicalEdgeRetainRelease(
-      SimpleOccupancyManager manager, SmartRecoveryInput input) {
-    LivePhysicalEdgeCoverage coverage =
-        livePhysicalEdgeCoverages.get(normalizeTrainKey(input.train()));
-    if (coverage == null) {
-      debugLogger.accept(
-          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
-              + input.train()
-              + " reason=coverage-not-sampled");
-      return null;
-    }
-    if (!coverage.complete()) {
-      debugLogger.accept(
-          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
-              + input.train()
-              + " reason=coverage-incomplete:"
-              + coverage.incompleteReason());
-      return null;
-    }
-    SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult result =
-        manager.releaseSelfOwnedPhysicalEdgeRetain(input.train(), true, coverage.resources());
-    if (result.releasedCount() <= 0) {
-      debugLogger.accept(
-          "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
-              + input.train()
-              + " reason="
-              + result.reason()
-              + " covered="
-              + coverage.resources().size()
-              + " "
-              + result.skipBreakdown());
-      return null;
-    }
-    // 这条路径**唯一**的生效证据：一旦这条非零，就说明实测覆盖释放确实生效——归因干净。
-    //
-    // edges/nodes 分开报：只有分开数才知道 NODE 半边有没有在出力；
-    // despiteQueue 是"按排队规则本会被拦下、此处放行了"的条数，用来单独衡量那条规则的影响。
-    debugLogger.accept(
-        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
-            + input.train()
-            + " source=recovery"
-            + " releasedCount="
-            + result.releasedCount()
-            + " edges="
-            + result.releasedEdges()
-            + " nodes="
-            + result.releasedNodes()
-            + " despiteQueue="
-            + result.releasedDespiteQueue()
-            + " resources="
-            + result.released()
-            + " covered="
-            + coverage.resources().size());
-    return new SmartRecoveryActionResult(
-        true,
-        true,
-        "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
-        "physical-edge-retain-released:" + result.releasedCount(),
-        DispatchEffectClass.OCCUPANCY_MUTATION);
-  }
-
   public SmartRecoveryActionResult applySmartSelfOwnedStaleRetainRelease(SmartRecoveryInput input) {
     if (input == null || input.train().isBlank()) {
       return SmartRecoveryActionResult.skipped("missing-input");
@@ -10882,58 +10821,108 @@ public final class RuntimeDispatchService {
     }
     Optional<BoundedSelfOwnedRetainCandidate> boundedCandidateOpt =
         boundedSelfOwnedRetainCandidate(manager, input);
+    SimpleOccupancyManager.PhysicalEdgeRetainPreview physicalPreview = null;
+    Set<OccupancyResource> coveredResources = Set.of();
     if (boundedCandidateOpt.isEmpty()) {
       // Phase 4：既有 CONFLICT 路径没有候选时，再试**实测覆盖**这条平行路径。
       //
       // 既有路径开头就 `kind != CONFLICT` 返回，而实际的 blocker 几乎全是
       // NODE / EDGE、极少是 CONFLICT —— 只走既有路径时判据与现实不相交，候选永远为空；
       // 而 `PROTECTIVE_RETAIN_HOLD` 是全网滞留的主要来源之一。
-      SmartRecoveryActionResult physical = applyPhysicalEdgeRetainRelease(manager, input);
-      if (physical != null) {
-        return physical;
+      LivePhysicalEdgeCoverage coverage =
+          livePhysicalEdgeCoverages.get(normalizeTrainKey(input.train()));
+      String physicalSkipReason;
+      if (coverage == null) {
+        physicalSkipReason = "coverage-not-sampled";
+      } else if (!coverage.complete()) {
+        physicalSkipReason = "coverage-incomplete:" + coverage.incompleteReason();
+      } else {
+        coveredResources = coverage.resources();
+        // 只读预判：没有可释放的尾保时走 not-found，不报告"被模式压下"——
+        // 否则观察日志会把"无事可做"读成"本会释放"。
+        physicalPreview =
+            manager.previewSelfOwnedPhysicalEdgeRetainRelease(
+                input.train(), true, coveredResources);
+        physicalSkipReason =
+            physicalPreview.releasableCount() > 0
+                ? null
+                : physicalPreview.reason()
+                    + " covered="
+                    + coveredResources.size()
+                    + " "
+                    + physicalPreview.skipBreakdown();
       }
-      debugLogger.accept(
-          "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
-              + input.train()
-              + " reason=self-owned-stale-retain-not-found");
-      return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+      if (physicalSkipReason != null) {
+        debugLogger.accept(
+            "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+                + input.train()
+                + " reason="
+                + physicalSkipReason);
+        debugLogger.accept(
+            "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+                + input.train()
+                + " reason=self-owned-stale-retain-not-found");
+        return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+      }
     }
-    BoundedSelfOwnedRetainCandidate boundedCandidate = boundedCandidateOpt.get();
-    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = boundedCandidate.candidate();
+    // 两条分支的决策名分开：被压下或落地的是哪条分支，只看返回值就能分清，不依赖会被预算丢弃的观察行。
+    String recoveryDecision =
+        physicalPreview != null
+            ? "SMART_RELEASE_PHYSICAL_EDGE_RETAIN"
+            : "SMART_RELEASE_SELF_OWNED_STALE_RETAIN";
     DispatchEffectClass effectClass = DispatchEffectClass.OCCUPANCY_MUTATION;
-    debugLogger.accept(
-        "SMART_STALE_SELF_RETAIN_RELEASE_CANDIDATE train="
-            + input.train()
-            + " resource="
-            + candidate.resource()
-            + " claimRole="
-            + candidate.claimRole()
-            + " requestIntent="
-            + candidate.requestIntent()
-            + " heldDirection="
-            + candidate.heldDirection()
-            + " requestedDirection="
-            + candidate.requestedDirection()
-            + " reason="
-            + candidate.reason()
-            + " effectClass="
-            + effectClass);
-    debugLogger.accept(
-        "SMART_UNLOCK_ATTEMPTED train="
-            + input.train()
-            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
-            + " effectClass="
-            + effectClass);
+    // 候选 / 尝试 / 放行三行只给 CONFLICT 分支：实测覆盖分支每轮恢复都可能重复释放同一组尾保，
+    // 频率远高于 CONFLICT 分支，它的落地证据是必留的 SMART_PHYSICAL_EDGE_RETAIN_RELEASED，
+    // 再加这几行只会占满观察预算、把别的 trace 挤掉。
+    if (physicalPreview == null) {
+      SimpleOccupancyManager.SelfOwnedStaleRetainCandidate conflictCandidate =
+          boundedCandidateOpt.get().candidate();
+      debugLogger.accept(
+          "SMART_STALE_SELF_RETAIN_RELEASE_CANDIDATE train="
+              + input.train()
+              + " resource="
+              + conflictCandidate.resource()
+              + " claimRole="
+              + conflictCandidate.claimRole()
+              + " requestIntent="
+              + conflictCandidate.requestIntent()
+              + " heldDirection="
+              + conflictCandidate.heldDirection()
+              + " requestedDirection="
+              + conflictCandidate.requestedDirection()
+              + " reason="
+              + conflictCandidate.reason()
+              + " effectClass="
+              + effectClass);
+      debugLogger.accept(
+          "SMART_UNLOCK_ATTEMPTED train="
+              + input.train()
+              + " recoveryDecision="
+              + recoveryDecision
+              + " effectClass="
+              + effectClass);
+    }
     if (!smartDispatcherRegisteredActionAllowed(
         input.train(),
         "health-progress-stuck",
         DispatchAction.RELEASE_SELF_OWNED_STALE_PROTECTIVE_RETAIN)) {
+      String traceKind =
+          physicalPreview != null ? "SMART_PHYSICAL_EDGE_RETAIN" : "SMART_STALE_SELF_RETAIN";
       if (smartDispatcherMode() == SmartDispatcherMode.OBSERVE_ONLY) {
+        String subject =
+            physicalPreview != null
+                ? " releasableCount="
+                    + physicalPreview.releasableCount()
+                    + " resources="
+                    + physicalPreview.releasable()
+                    + " covered="
+                    + coveredResources.size()
+                : " resource=" + boundedCandidateOpt.get().candidate().resource();
         debugLogger.accept(
-            "SMART_STALE_SELF_RETAIN_WOULD_RELEASE train="
+            traceKind
+                + "_WOULD_RELEASE train="
                 + input.train()
-                + " resource="
-                + candidate.resource()
+                + subject
                 + " mode="
                 + smartDispatcherMode()
                 + " effectClass="
@@ -10941,7 +10930,8 @@ public final class RuntimeDispatchService {
                 + " occupancyMutated=false");
       } else {
         debugLogger.accept(
-            "SMART_STALE_SELF_RETAIN_RELEASE_SUPPRESSED_BY_MODE train="
+            traceKind
+                + "_RELEASE_SUPPRESSED_BY_MODE train="
                 + input.train()
                 + " mode="
                 + smartDispatcherMode()
@@ -10953,20 +10943,72 @@ public final class RuntimeDispatchService {
               + input.train()
               + " mode="
               + smartDispatcherMode()
-              + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+              + " recoveryDecision="
+              + recoveryDecision
               + " effectClass="
               + effectClass);
       return new SmartRecoveryActionResult(
-          true, false, "SMART_RELEASE_SELF_OWNED_STALE_RETAIN", "suppressed-by-mode", effectClass);
+          true, false, recoveryDecision, "suppressed-by-mode", effectClass);
+    }
+    if (physicalPreview != null) {
+      // 只复核预判列出的资源，不再扫全表；复核不过（预判之后账本已变）的一律不放。
+      SimpleOccupancyManager.PhysicalEdgeRetainReleaseResult result =
+          manager.releasePreviewedPhysicalEdgeRetain(
+              input.train(), coveredResources, physicalPreview);
+      if (result.releasedCount() <= 0) {
+        debugLogger.accept(
+            "SMART_PHYSICAL_EDGE_RETAIN_SKIPPED train="
+                + input.train()
+                + " reason="
+                + result.reason()
+                + " covered="
+                + coveredResources.size()
+                + " "
+                + result.skipBreakdown());
+        debugLogger.accept(
+            "SMART_STALE_SELF_RETAIN_RELEASE_SKIPPED train="
+                + input.train()
+                + " reason=self-owned-stale-retain-not-found");
+        return SmartRecoveryActionResult.skipped("self-owned-stale-retain-not-found");
+      }
+      // 这条路径**唯一**的生效证据：一旦这条非零，就说明实测覆盖释放确实生效——归因干净。
+      //
+      // edges/nodes 分开报：只有分开数才知道 NODE 半边有没有在出力；
+      // despiteQueue 是"按排队规则本会被拦下、此处放行了"的条数，用来单独衡量那条规则的影响。
+      debugLogger.accept(
+          "SMART_PHYSICAL_EDGE_RETAIN_RELEASED train="
+              + input.train()
+              + " source=recovery"
+              + " releasedCount="
+              + result.releasedCount()
+              + " edges="
+              + result.releasedEdges()
+              + " nodes="
+              + result.releasedNodes()
+              + " despiteQueue="
+              + result.releasedDespiteQueue()
+              + " resources="
+              + result.released()
+              + " covered="
+              + coveredResources.size());
+      return new SmartRecoveryActionResult(
+          true,
+          true,
+          recoveryDecision,
+          "physical-edge-retain-released:" + result.releasedCount(),
+          effectClass);
     }
     debugLogger.accept(
         "SMART_RECOVERY_ALLOWED_BY_EFFECT_GATE train="
             + input.train()
-            + " recoveryDecision=SMART_RELEASE_SELF_OWNED_STALE_RETAIN"
+            + " recoveryDecision="
+            + recoveryDecision
             + " effectClass="
             + effectClass
             + " mode="
             + smartDispatcherMode());
+    BoundedSelfOwnedRetainCandidate boundedCandidate = boundedCandidateOpt.get();
+    SimpleOccupancyManager.SelfOwnedStaleRetainCandidate candidate = boundedCandidate.candidate();
     SimpleOccupancyManager.SelfOwnedStaleRetainReleaseResult release =
         manager.releaseSelfOwnedStaleRetain(input.train(), candidate);
     if (!release.released()) {
@@ -12334,7 +12376,8 @@ public final class RuntimeDispatchService {
     boolean nearRouteEnd = routeSize > 0 && entry.currentIndex() >= Math.max(0, routeSize - 2);
     boolean manualHold =
         TrainTagHelper.readTagValue(properties, "FTA_MANUAL_HOLD").isPresent()
-            || TrainTagHelper.readTagValue(properties, "FTA_MAINTENANCE_HOLD").isPresent();
+            || TrainTagHelper.readTagValue(properties, "FTA_MAINTENANCE_HOLD").isPresent()
+            || runtimeTrainController.hasDriver(entry.trainName());
     return Optional.of(
         new DeadlockTrainContext(
             entry.trainName(),
@@ -14039,7 +14082,9 @@ public final class RuntimeDispatchService {
       return Optional.empty();
     }
     UUID worldId = group.getWorld().getUID();
-    return railGraphService.getSnapshot(worldId).map(s -> s.graph());
+    return railGraphService
+        .getSnapshot(worldId)
+        .map(s -> RailGraphService.runtimeGraph(railGraphService, worldId, s.graph()));
   }
 
   /**
@@ -14210,10 +14255,7 @@ public final class RuntimeDispatchService {
   }
 
   private static boolean shouldTrackIntermediateGraphNode(SignNodeDefinition definition) {
-    if (definition == null || definition.nodeType() == null) {
-      return false;
-    }
-    return definition.nodeType() == NodeType.WAYPOINT || definition.nodeType() == NodeType.SWITCHER;
+    return definition != null && RearGuardWindow.tracksIntermediateNode(definition.nodeType());
   }
 
   /**
@@ -16510,6 +16552,11 @@ public final class RuntimeDispatchService {
             trainHandle, properties, previousTrainName, null, "authority-owner-rename-rejected");
         return LayoverDispatchResult.failed(previousTrainName, "authority-owner-rename-rejected");
       }
+      // 占用账本的属主已经迁到新名，按 owner 名记的恢复身份必须跟着迁：信号 tick 按新名查水合 marker，
+      // 查不到就把这辆车当成迟加载的陌生实体，硬停后重新水合，硬停会清掉复用随后挂上的发车动作。
+      // 与 migrateRuntimeOwner 的手动改名共用同一个迁移；marker 只认物理 identity，换了编组照样隔离。
+      migrateStartupPhysicalHydrationOwner(
+          normalizeTrainKey(previousTrainName), normalizeTrainKey(regeneratedTrainName));
       trainName = regeneratedTrainName;
       request = request.withTrainName(trainName);
       // 旧名的停因必须随改名一并退休。
@@ -16528,6 +16575,8 @@ public final class RuntimeDispatchService {
       if (!previousTrainName.equals(trainName)
           && occupancyManager instanceof AuthorityHandoffSupport rollbackSupport
           && rollbackSupport.migrateAuthorityOwner(trainName, previousTrainName)) {
+        migrateStartupPhysicalHydrationOwner(
+            normalizeTrainKey(trainName), normalizeTrainKey(previousTrainName));
         turnbackFootprintGuards.rename(trainName, previousTrainName);
         migrateEffectiveNodeOverrides(trainName, previousTrainName);
         layoverRegistry.rename(trainName, previousTrainName);
@@ -17636,8 +17685,23 @@ public final class RuntimeDispatchService {
   private void clearDepartureGate(String trainName) {
     String key = normalizeTrainKey(trainName);
     if (!key.isEmpty()) {
-      departureGates.remove(key);
+      DepartureGate removed = departureGates.remove(key);
       departureGateBlockers.remove(key);
+      if (removed != null) {
+        // 门控被别处静默清掉时（不是持有者按会话号释放）记下调用处，便于追查谁放走了扣着的车。
+        StackTraceElement[] stack = Thread.currentThread().getStackTrace();
+        debugLogger.accept(
+            "SMART_DEPARTURE_GATE_CLEARED train="
+                + key
+                + " session="
+                + removed.sessionId()
+                + " reason="
+                + removed.reason()
+                + " caller="
+                + (stack.length > 2
+                    ? stack[2].getMethodName() + ":" + stack[2].getLineNumber()
+                    : "-"));
+      }
     }
   }
 
@@ -17828,6 +17892,12 @@ public final class RuntimeDispatchService {
           false,
           OptionalLong.empty());
     } else {
+      // 交路最后一个路径点（终到停站）：同样刷新停车保持，停稳且车身完整时只保持车身（见 LayoverBodyRetain）——
+      // 否则进站那一拍按站台节点往回量的尾部保护要一直压到终到停站结束、登记成待命车为止。
+      if (occupancyManager != null && currentNode != null) {
+        RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
+        retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now, train);
+      }
       runtimeTrainController.stopNow(train);
     }
   }
@@ -19285,6 +19355,14 @@ public final class RuntimeDispatchService {
     if (approach.distanceBlocks().isPresent()) {
       builder.distanceToApproach(approach.distanceBlocks());
     }
+    // 前方停车节点不论是否已进入进站限速区都给出：驾驶员要据此提前对标（最后一个限速区就是停车节点本身）。
+    ApproachControl nextStop = overrides.approachControl();
+    if (nextStop.stopNode().isPresent() && !nextStop.zones().isEmpty()) {
+      builder.stopNode(
+          nextStop.stopNode().get(),
+          nextStop.kind(),
+          nextStop.zones().get(nextStop.zones().size() - 1).fromBlocks());
+    }
 
     diagnosticsCache.put(builder.build(), now);
   }
@@ -19517,10 +19595,14 @@ public final class RuntimeDispatchService {
 
       // 关键：强制按 group 语义执行 centerTrain，避免某些事件上下文被识别为 cart sign 后只按单车居中。
       SignActionEvent centerEvent = adaptForGroupCenter(event, group);
-      com.bergerkiller.bukkit.tc.Station station =
-          new com.bergerkiller.bukkit.tc.Station(centerEvent);
-      group.getActions().launchReset();
-      station.centerTrain();
+      // 驾驶员控车时由驾驶员停车：不对位、不清控车动作，也不加等待动作（停站由驻站计时把住）。
+      boolean driverControlled = props != null && runtimeTrainController.isDriverControlled(props);
+      if (!driverControlled) {
+        com.bergerkiller.bukkit.tc.Station station =
+            new com.bergerkiller.bukkit.tc.Station(centerEvent);
+        group.getActions().launchReset();
+        station.centerTrain();
+      }
 
       debugLogger.accept(
           "Waypoint 居中: train="
@@ -19539,7 +19621,9 @@ public final class RuntimeDispatchService {
       if (dwellSeconds > 0 && dwellRegistry != null) {
         scheduleWaypointDwellAfterCenter(group, trainName, dwellSeconds, key, sessionId);
       } else {
-        group.getActions().addActionWaitState();
+        if (!driverControlled) {
+          group.getActions().addActionWaitState();
+        }
         clearWaypointStopState(key, sessionId);
       }
     } catch (Throwable ex) {
@@ -19703,7 +19787,9 @@ public final class RuntimeDispatchService {
             if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
               dwellRegistry.start(trainName, dwellSeconds);
             }
-            group.getActions().addActionWaitState();
+            if (!runtimeTrainController.isDriverControlled(group.getProperties())) {
+              group.getActions().addActionWaitState();
+            }
             // dwell 启动后，清理 waypointStopState，由 dwellRegistry 接管
             clearWaypointStopState(waypointKey, sessionId);
             return;
@@ -19717,7 +19803,9 @@ public final class RuntimeDispatchService {
           if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isEmpty()) {
             dwellRegistry.start(trainName, dwellSeconds);
           }
-          group.getActions().addActionWaitState();
+          if (!runtimeTrainController.isDriverControlled(group.getProperties())) {
+            group.getActions().addActionWaitState();
+          }
           clearWaypointStopState(waypointKey, sessionId);
         }
       }
@@ -19862,7 +19950,11 @@ public final class RuntimeDispatchService {
     layoverRegistry.unregister(trainName);
     if (train != null) {
       rememberDispatchDestroyedIdentity(train);
-      train.destroy();
+      if ("DSTY".equals(reason)) {
+        train.retire();
+      } else {
+        train.destroy();
+      }
     }
     progressRegistry.remove(trainName);
     clearRuntimeCachesForTrain(trainName);
@@ -21239,7 +21331,14 @@ public final class RuntimeDispatchService {
     }
   }
 
-  /** 在占用 owner 原子迁移成功后同步启动物理保护与水合 marker。 */
+  /**
+   * 在占用 owner 原子迁移成功后，同步迁移按 owner 名记的恢复身份：启动物理保护、水合 marker、关门时的物理主人。
+   *
+   * <p>手动改名（{@link #migrateRuntimeOwner}）与折返复用改名都调用这里，恢复相关的按名状态只在这一处列举；
+   * 漏掉任一张，改名后按新名查不到，同一辆车会被当成陌生实体隔离，或先停期间的到达补记认不出它。
+   *
+   * <p>先写新名、再删旧名：不持锁的读者任何时刻都至少能在一个名下找到这辆车。新名下已有别的编组时保留原值、 只删旧名，后续按重复属主处理（失效关闭）。
+   */
   private void migrateStartupPhysicalHydrationOwner(String previousKey, String currentKey) {
     if (previousKey == null
         || previousKey.isBlank()
@@ -21248,27 +21347,40 @@ public final class RuntimeDispatchService {
         || previousKey.equals(currentKey)) {
       return;
     }
-    Set<OccupancyResource> previousGuard = startupPhysicalFootprintGuards.remove(previousKey);
-    if (previousGuard != null && !previousGuard.isEmpty()) {
-      startupPhysicalFootprintGuards.merge(
-          currentKey,
-          Set.copyOf(previousGuard),
-          (existing, incoming) -> {
-            Set<OccupancyResource> merged = new LinkedHashSet<>(existing);
-            merged.addAll(incoming);
-            return Set.copyOf(merged);
-          });
-    }
-    Object previousIdentity = hydratedPhysicalOwnerIdentities.remove(previousKey);
-    if (previousIdentity != null) {
-      Object existingIdentity =
-          hydratedPhysicalOwnerIdentities.putIfAbsent(currentKey, previousIdentity);
-      if (existingIdentity != null && existingIdentity != previousIdentity) {
-        debugLogger.accept(
-            "SMART_PHYSICAL_HYDRATION_MIGRATION_CONFLICT from="
-                + previousKey
-                + " to="
-                + currentKey);
+    synchronized (runtimeOwnerMigrationLock) {
+      Set<OccupancyResource> previousGuard = startupPhysicalFootprintGuards.get(previousKey);
+      if (previousGuard != null && !previousGuard.isEmpty()) {
+        startupPhysicalFootprintGuards.merge(
+            currentKey,
+            Set.copyOf(previousGuard),
+            (existing, incoming) -> {
+              Set<OccupancyResource> merged = new LinkedHashSet<>(existing);
+              merged.addAll(incoming);
+              return Set.copyOf(merged);
+            });
+      }
+      startupPhysicalFootprintGuards.remove(previousKey);
+      Object previousIdentity = hydratedPhysicalOwnerIdentities.get(previousKey);
+      if (previousIdentity != null) {
+        Object existingIdentity =
+            hydratedPhysicalOwnerIdentities.putIfAbsent(currentKey, previousIdentity);
+        hydratedPhysicalOwnerIdentities.remove(previousKey, previousIdentity);
+        if (existingIdentity != null && existingIdentity != previousIdentity) {
+          debugLogger.accept(
+              "SMART_PHYSICAL_HYDRATION_MIGRATION_CONFLICT from="
+                  + previousKey
+                  + " to="
+                  + currentKey);
+        }
+      }
+      Object frozenIdentity = freezeOwnerIdentities.get(previousKey);
+      if (frozenIdentity != null) {
+        Object existingFrozen = freezeOwnerIdentities.putIfAbsent(currentKey, frozenIdentity);
+        freezeOwnerIdentities.remove(previousKey, frozenIdentity);
+        if (existingFrozen != null && existingFrozen != frozenIdentity) {
+          debugLogger.accept(
+              "SMART_FREEZE_OWNER_MIGRATION_CONFLICT from=" + previousKey + " to=" + currentKey);
+        }
       }
     }
   }
@@ -27701,7 +27813,12 @@ public final class RuntimeDispatchService {
     if (aspect != SignalAspect.STOP && approach.ceiling().isPresent()) {
       // 速度天花板与编表运行曲线同一个：进站限速区、沿途慢速边与到站速度都在内，随列车前进一直有效，登记为保持约束，
       // 过节点的推进放行也不得越过它。
-      envelope = envelope.withHold(approach::ceilingLimitBps);
+      // 人工驾驶不受进站限速（驾驶员自己掌握停车，越过停车点另有防护），另记一份给驾驶员（见 SpeedEnvelope#manual）；
+      // 车库没有驾驶员停车防护，进库限速对人工驾驶照样有效。
+      envelope =
+          "depot".equals(approach.kind())
+              ? envelope.withHold(approach::ceilingLimitBps)
+              : envelope.withApproachHold(approach::ceilingLimitBps, target);
       double atHead = approach.ceilingLimitBps(0.0);
       OptionalDouble override = overrides.approachLimitBps();
       if (override.isPresent() && (approach.engaged() || atHead < target)) {
@@ -28999,6 +29116,8 @@ public final class RuntimeDispatchService {
       RailGraph graph,
       Instant now,
       RuntimeTrainHandle train) {
+    LivePhysicalReleaseEvidence evidence =
+        resolveLivePhysicalReleaseEvidence(trainName, train, graph);
     return retainStopOccupancy(
         trainName,
         route,
@@ -29008,7 +29127,9 @@ public final class RuntimeDispatchService {
         graph,
         now,
         resolveRearGuardDistanceBlocks(train),
-        resolveLivePhysicalReleaseEvidence(trainName, train, graph),
+        LayoverBodyRetain.atFinalStop(route, currentIndex) && graph != null
+            ? evidence.withLayoverBody(livePhysicalEdgeCoverage(train, graph))
+            : evidence,
         Set.of());
   }
 
@@ -29194,7 +29315,7 @@ public final class RuntimeDispatchService {
     DispatchPriorityResolution priorityResolution = plan.priorityResolution();
     int priority = plan.schedulingPriority();
     Optional<OccupancyRequest> canonicalRequest = plan.canonicalRequest();
-    // 终点待命车停稳、车身覆盖完整时只保持车身；实时联锁区在收窄之后并入。
+    // 终点停车（终到停站或待命）停稳、车身覆盖完整时只保持车身；实时联锁区在收窄之后并入。
     OccupancyRequest request =
         mergeStopPhysicalEvidence(
             LayoverBodyRetain.narrow(
@@ -29401,6 +29522,10 @@ public final class RuntimeDispatchService {
     if (interlocking == null || !interlocking.cellCoverageAvailable()) {
       return LivePhysicalEdgeCoverage.incomplete("cell-coverage-index-unavailable");
     }
+    // 只有部分区间带足迹时，没足迹的区间在索引里看不见：车压在上面也查不出来，不能当"没覆盖"。
+    if (!interlocking.coverage().complete()) {
+      return LivePhysicalEdgeCoverage.incomplete("cell-coverage-partial");
+    }
     Set<OccupancyResource> covered = new LinkedHashSet<>();
     int coveredEdges = 0;
     for (var cell : observation.cells().orElse(java.util.Set.of())) {
@@ -29536,7 +29661,7 @@ public final class RuntimeDispatchService {
    * 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。
    *
    * @param stationary 读取足迹时列车已停稳；制动中车头仍可能压进前方联锁区
-   * @param layoverBody 终点待命车的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
+   * @param layoverBody 终点停车（终到停站或待命）的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
    */
   private record LivePhysicalReleaseEvidence(
       boolean required,
@@ -29559,7 +29684,7 @@ public final class RuntimeDispatchService {
       return new LivePhysicalReleaseEvidence(true, true, stationary, resources, Optional.empty());
     }
 
-    /** 标记为终点待命车，附上整列车身覆盖。 */
+    /** 标记为终点停车（终到停站或待命），附上整列车身覆盖。 */
     private LivePhysicalReleaseEvidence withLayoverBody(LivePhysicalEdgeCoverage body) {
       return new LivePhysicalReleaseEvidence(
           required, complete, stationary, resources, Optional.ofNullable(body));
@@ -30521,7 +30646,9 @@ public final class RuntimeDispatchService {
         .getSnapshot(worldId)
         .map(
             snapshot -> {
-              RailGraph graph = snapshot.graph();
+              // 跨世界开启时换成站在本世界看的全网，关闭时就是本世界的图。
+              RailGraph graph =
+                  RailGraphService.runtimeGraph(railGraphService, worldId, snapshot.graph());
               java.util.Map<
                       org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId, RailEdgeOverrideRecord>
                   overrides = railGraphService.edgeOverrides(worldId);

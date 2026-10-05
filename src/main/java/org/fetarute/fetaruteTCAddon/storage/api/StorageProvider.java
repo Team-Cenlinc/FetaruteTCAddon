@@ -10,6 +10,8 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
@@ -17,9 +19,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 
 /** 汇总所有仓库实例，供服务层注入。 */
 public interface StorageProvider extends AutoCloseable {
@@ -56,13 +61,28 @@ public interface StorageProvider extends AutoCloseable {
 
   RailInterlockingSnapshotRepository railInterlockingSnapshots();
 
+  /** 驾驶任务记录。 */
+  DriveTaskRecordRepository driveTaskRecords();
+
+  /** 驾驶证（等级与证号）。 */
+  LicenseRepository licenses();
+
+  /** 传送门连接。 */
+  PortalLinkRepository portalLinks();
+
   TimetableRepository timetables();
 
   HudTemplateRepository hudTemplates();
 
+  /** 编组方案。 */
+  ConsistPlanRepository consistPlans();
+
   HudLineBindingRepository hudLineBindings();
 
   PidsScreenRepository pidsScreens();
+
+  /** 站台屏公告。 */
+  PidsBulletinRepository pidsBulletins();
 
   StorageTransactionManager transactionManager();
 

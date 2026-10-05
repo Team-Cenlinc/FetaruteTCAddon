@@ -1,0 +1,277 @@
+package org.fetarute.fetaruteTCAddon.drive.driver.task;
+
+import java.time.Instant;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+
+/** 一名玩家领取的一趟驾驶任务：从领取的车站开到这趟车次的终点站。只在服务器主线程使用。 */
+public final class DriverTask {
+
+  /** 在任务板领取的任务的来源标记。 */
+  public static final String SOURCE_BOARD = "board";
+
+  /** 没领任务直接接管调度列车（运营人员）：按列车此刻跑的车次当场记成任务。 */
+  public static final String SOURCE_TAKEOVER = "takeover";
+
+  /** 终点站结算后接着开同一列车的下一趟：开出时当场记成任务。 */
+  public static final String SOURCE_CONTINUATION = "continuation";
+
+  /** 驾驶证路考：给考生派的一段区间任务。 */
+  public static final String SOURCE_EXAM = "exam";
+
+  /** 驾驶证路考练习：与路考相同的区间任务，有教练提示与应急演练，不发证、不记入驾驶记录。 */
+  public static final String SOURCE_TRAINING = "training";
+
+  /** 任务状态。 */
+  public enum State {
+    /** 已领取，等列车到站。 */
+    CLAIMED,
+    /** 驾驶中。 */
+    DRIVING,
+    /** 开到终点站。 */
+    COMPLETED,
+    /** 驾驶员放弃或离开。 */
+    ABANDONED,
+    /** 列车没等到或已开走。 */
+    EXPIRED,
+    /** 卡住太久或超过任务时限，被收回。 */
+    FAILED,
+    /** 调度、管理员或熔断收回，不怪驾驶员。 */
+    INTERRUPTED;
+
+    /** 是否已结束。 */
+    public boolean finished() {
+      return this != CLAIMED && this != DRIVING;
+    }
+  }
+
+  private final UUID playerId;
+  private final String playerName;
+  private final TaskKey key;
+  private final String routeCode;
+  private final String operatorCode;
+  private final String stationCode;
+  private final String stationName;
+  private final String boardNodeId;
+  private final int boardStopSequence;
+  private final Instant plannedDeparture;
+  private final Instant claimedAt;
+  private DrivingMode mode;
+  private State state = State.CLAIMED;
+  private final UUID taskId = UUID.randomUUID();
+  private String trainName;
+  private boolean depotPickup;
+  private int alightStopSequence = -1;
+  private String alightStationCode = "";
+  private String alightStationName = "";
+  private String source = SOURCE_BOARD;
+  private Map<String, String> metadata = Map.of();
+  private boolean finishAnnounced;
+  private long startedTick = -1L;
+  private Instant startedAt;
+  private int points = -1;
+  private String grade = "";
+  private String endReason = "";
+
+  public DriverTask(
+      UUID playerId,
+      String playerName,
+      TaskKey key,
+      String routeCode,
+      String operatorCode,
+      String stationCode,
+      String stationName,
+      String boardNodeId,
+      int boardStopSequence,
+      Instant plannedDeparture,
+      DrivingMode mode,
+      Instant claimedAt) {
+    this.playerId = Objects.requireNonNull(playerId, "playerId");
+    this.playerName = playerName == null ? "" : playerName;
+    this.key = Objects.requireNonNull(key, "key");
+    this.routeCode = routeCode == null ? "" : routeCode;
+    this.operatorCode = operatorCode == null ? "" : operatorCode;
+    this.stationCode = stationCode == null ? "" : stationCode;
+    this.stationName =
+        stationName == null || stationName.isBlank() ? this.stationCode : stationName;
+    this.boardNodeId = boardNodeId;
+    this.boardStopSequence = boardStopSequence;
+    this.plannedDeparture = Objects.requireNonNull(plannedDeparture, "plannedDeparture");
+    this.mode = Objects.requireNonNull(mode, "mode");
+    this.claimedAt = Objects.requireNonNull(claimedAt, "claimedAt");
+  }
+
+  public UUID playerId() {
+    return playerId;
+  }
+
+  public String playerName() {
+    return playerName;
+  }
+
+  public TaskKey key() {
+    return key;
+  }
+
+  public String routeCode() {
+    return routeCode;
+  }
+
+  public String operatorCode() {
+    return operatorCode;
+  }
+
+  public String stationCode() {
+    return stationCode;
+  }
+
+  public String stationName() {
+    return stationName;
+  }
+
+  /** 接班站台的节点；没有时为 {@code null}。 */
+  public String boardNodeId() {
+    return boardNodeId;
+  }
+
+  /** 接班站在交路里的停靠序号。 */
+  public int boardStopSequence() {
+    return boardStopSequence;
+  }
+
+  public Instant plannedDeparture() {
+    return plannedDeparture;
+  }
+
+  public Instant claimedAt() {
+    return claimedAt;
+  }
+
+  public DrivingMode mode() {
+    return mode;
+  }
+
+  public void setMode(DrivingMode mode) {
+    this.mode = Objects.requireNonNull(mode, "mode");
+  }
+
+  public State state() {
+    return state;
+  }
+
+  /** 担当这趟车次的列车；还没对上时为 {@code null}。 */
+  public String trainName() {
+    return trainName;
+  }
+
+  public void setTrainName(String trainName) {
+    this.trainName = trainName;
+  }
+
+  /** 任务 ID：每次领取或派出都不同，供外部插件辨认。 */
+  public UUID taskId() {
+    return taskId;
+  }
+
+  /** 下车站的停靠序号；开到终点站的任务为 -1。 */
+  public int alightStopSequence() {
+    return alightStopSequence;
+  }
+
+  public String alightStationCode() {
+    return alightStationCode;
+  }
+
+  public String alightStationName() {
+    return alightStationName;
+  }
+
+  /** 开到这一站就结束（区间任务）。 */
+  public void setAlight(int stopSequence, String stationCode, String stationName) {
+    this.alightStopSequence = stopSequence;
+    this.alightStationCode = stationCode == null ? "" : stationCode;
+    this.alightStationName =
+        stationName == null || stationName.isBlank() ? this.alightStationCode : stationName;
+  }
+
+  /** 来源：任务板为 {@link #SOURCE_BOARD}，插件派出的为调用方给的标记。 */
+  public String source() {
+    return source;
+  }
+
+  /** 调用方给的附加数据。 */
+  public Map<String, String> metadata() {
+    return metadata;
+  }
+
+  public void setSource(String source, Map<String, String> metadata) {
+    this.source = source == null || source.isBlank() ? SOURCE_BOARD : source;
+    this.metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+  }
+
+  /** 任务结束只对外报一次：第一次调用返回 true。 */
+  public boolean announceFinish() {
+    if (finishAnnounced || !state.finished()) {
+      return false;
+    }
+    finishAnnounced = true;
+    return true;
+  }
+
+  /** 是否要从车库接车：车库出车时扣在股道上等驾驶员，等不到再在接班站接班。 */
+  public boolean depotPickup() {
+    return depotPickup;
+  }
+
+  public void setDepotPickup(boolean depotPickup) {
+    this.depotPickup = depotPickup;
+  }
+
+  /** 开始驾驶。 */
+  public void start(String train, long nowTick) {
+    this.trainName = train;
+    this.startedTick = nowTick;
+    this.startedAt = Instant.now();
+    this.state = State.DRIVING;
+  }
+
+  /** 开始驾驶的时刻；还没开始时为 {@code null}。 */
+  public Instant startedAt() {
+    return startedAt;
+  }
+
+  /** 记下成绩。 */
+  public void setResult(int points, String grade) {
+    this.points = points;
+    this.grade = grade == null ? "" : grade;
+  }
+
+  /** 得分；还没评分时为 -1。 */
+  public int points() {
+    return points;
+  }
+
+  public String grade() {
+    return grade;
+  }
+
+  /** 开始驾驶的 tick；还没开始时为 -1。 */
+  public long startedTick() {
+    return startedTick;
+  }
+
+  /** 结束任务；已结束的不再改变。 */
+  public void finish(State finalState, String reason) {
+    if (state.finished() || finalState == null || !finalState.finished()) {
+      return;
+    }
+    this.state = finalState;
+    this.endReason = reason == null ? "" : reason;
+  }
+
+  public String endReason() {
+    return endReason;
+  }
+}

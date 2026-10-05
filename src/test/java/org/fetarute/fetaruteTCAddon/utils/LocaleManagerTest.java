@@ -14,6 +14,8 @@ import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 public final class LocaleManagerTest {
 
@@ -45,10 +47,11 @@ public final class LocaleManagerTest {
   }
 
   /** 旧文案清单里的每个键都还在内置语言文件里，且旧值与现在的文案不同（否则换了也白换）。 */
-  @Test
-  void supersededListMatchesTheBundledLocale() throws Exception {
-    YamlConfiguration bundled = bundled("lang/zh_CN.yml");
-    YamlConfiguration superseded = bundled("lang-superseded/zh_CN.yml");
+  @ParameterizedTest
+  @ValueSource(strings = {"zh_CN", "en_US"})
+  void supersededListMatchesTheBundledLocale(String localeTag) throws Exception {
+    YamlConfiguration bundled = bundled("lang/" + localeTag + ".yml");
+    YamlConfiguration superseded = bundled("lang-superseded/" + localeTag + ".yml");
 
     for (String key : superseded.getKeys(true)) {
       if (superseded.isConfigurationSection(key)) {
@@ -101,5 +104,53 @@ public final class LocaleManagerTest {
     assertTrue(
         Files.readString(langDir.resolve("zh_CN.yml"), StandardCharsets.UTF_8).contains("请在车门两侧等候"),
         "写回服务器的语言文件");
+  }
+
+  /** 点击命令参数里的占位符换成实际值：MiniMessage 本身不在引号参数里解析占位符。 */
+  @Test
+  void clickCommandArgumentsGetPlaceholderValues(@TempDir Path tempDir) throws Exception {
+    assertEquals(
+        "<click:run_command:'/fta license exam dispatch'>x</click> <class>",
+        LocaleManager.expandClickArguments(
+            "<click:run_command:'/fta license exam <class>'>x</click> <class>",
+            java.util.Map.of("class", "dispatch")));
+    assertEquals(
+        "<click:suggest_command:\"/say it's\">y</click>",
+        LocaleManager.expandClickArguments(
+            "<click:suggest_command:\"/say <text>\">y</click>", java.util.Map.of("text", "it's")),
+        "双引号参数里的单引号不用转义");
+    assertEquals(
+        "<click:run_command:'/say it\\'s'>z</click>",
+        LocaleManager.expandClickArguments(
+            "<click:run_command:'/say <text>'>z</click>", java.util.Map.of("text", "it's")));
+
+    Path langDir = tempDir.resolve("lang");
+    Files.createDirectories(langDir);
+    Files.writeString(langDir.resolve("zh_CN.yml"), "prefix: \"\"\n", StandardCharsets.UTF_8);
+    LoggerManager logger = new LoggerManager(Logger.getLogger("LocaleManagerTest"));
+    logger.setDebugEnabled(false);
+    LocaleManager locale =
+        new LocaleManager(
+            new LocaleManager.LocaleAccess(tempDir.toFile(), logger, (path, replace) -> {}),
+            "zh_CN",
+            logger);
+    locale.reload();
+    net.kyori.adventure.text.Component line =
+        locale.component(
+            "drive.license.exam.retry-now", java.util.Map.of("class", "dispatch", "minutes", "10"));
+    java.util.List<String> commands = new java.util.ArrayList<>();
+    collectClicks(line, commands);
+    assertEquals(java.util.List.of("/fta license exam dispatch"), commands);
+  }
+
+  private static void collectClicks(
+      net.kyori.adventure.text.Component component, java.util.List<String> out) {
+    net.kyori.adventure.text.event.ClickEvent click = component.clickEvent();
+    if (click != null && !out.contains(click.value())) {
+      out.add(click.value());
+    }
+    for (net.kyori.adventure.text.Component child : component.children()) {
+      collectClicks(child, out);
+    }
   }
 }

@@ -9,20 +9,25 @@ import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.ArrayDeque;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.RecordingControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -333,6 +338,330 @@ class TrainLaunchManagerTest {
     }
 
     assertEquals(1, attempts.get(), "同一静止授权不能在每次重评估中重新写入 launch action");
+  }
+
+  /**
+   * 硬停清空了 TrainCarts 动作队列，冷却保护的那次 launch 已不存在：冷却期内重新放行必须当拍发车。
+   *
+   * <p>否则这一拍发不了车，而之后信号不再变化、不会再请求发车，静止列车就停在 PROCEED 下等健康监控补发。
+   */
+  @Test
+  void hardStopClearsLaunchCooldownSoTheNextAuthorizationLaunches() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-hard-stop-relaunch");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return true;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    // 冷却取 60 秒：断言不受两次调用之间的墙钟间隔影响。
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0, 20 * 60);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        8.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime);
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.STOP,
+        0.0,
+        config,
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime,
+        StopControlMode.HARD_STOP);
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.empty(),
+            runtime);
+
+    assertTrue(result.launchCommandAccepted(), "硬停后冷却期内的放行没有发车");
+    assertEquals(2, attempts.get());
+  }
+
+  /** 没有硬停时冷却照旧生效：静止列车在冷却期内收到另一条放行，不重写 launch。 */
+  @Test
+  void launchCooldownStillAppliesWithoutHardStop() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-cooldown-kept");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        new FakeTrain(tags.properties(), false, 0.0) {
+          @Override
+          public boolean requestLaunchWithFallback(
+              Optional<org.bukkit.block.BlockFace> fallbackDirection,
+              double targetBlocksPerTick,
+              double accelBlocksPerTickSquared) {
+            attempts.incrementAndGet();
+            return true;
+          }
+        };
+    TrainConfig config = new TrainConfig(TrainType.EMU, 0.8, 1.0);
+    // 冷却取 60 秒：断言不受两次调用之间的墙钟间隔影响。
+    ConfigManager.RuntimeSettings runtime = runtimeSettings(0.0, 1.0, 1.0, 20 * 60);
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.PROCEED,
+        8.0,
+        config,
+        true,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtime);
+    // 兜底方向不同 → 命令签名不同，不会被"相同授权已接受"的去重吸收，只能由冷却挡住。
+    TrainLaunchManager.ControlApplicationResult result =
+        manager.applyControl(
+            train,
+            tags.properties(),
+            SignalAspect.PROCEED,
+            8.0,
+            config,
+            true,
+            OptionalLong.empty(),
+            Optional.of(org.bukkit.block.BlockFace.NORTH),
+            runtime);
+
+    assertFalse(result.launchCommandAccepted());
+    assertEquals(1, attempts.get(), "冷却期内不应再写 launch");
+  }
+
+  /** 静止列车的可脚本化句柄：是否在动、TrainCarts 是否接受每一次 launch 都由测试指定。 */
+  private static RuntimeTrainHandle scriptedTrain(
+      TrainProperties properties,
+      AtomicBoolean moving,
+      AtomicInteger attempts,
+      Deque<Boolean> responses) {
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.properties()).thenReturn(properties);
+    when(train.isValid()).thenReturn(true);
+    when(train.isMoving()).thenAnswer(inv -> moving.get());
+    when(train.currentSpeedBlocksPerTick()).thenAnswer(inv -> moving.get() ? 0.4 : 0.0);
+    when(train.requestLaunchWithFallback(any(), anyDouble(), anyDouble()))
+        .thenAnswer(
+            inv -> {
+              attempts.incrementAndGet();
+              Boolean response = responses.poll();
+              return response == null || response;
+            });
+    return train;
+  }
+
+  private static TrainLaunchManager.ControlApplicationResult proceed(
+      TrainLaunchManager manager,
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      boolean allowLaunch) {
+    return manager.applyControl(
+        train,
+        properties,
+        SignalAspect.PROCEED,
+        8.0,
+        new TrainConfig(TrainType.EMU, 0.8, 1.0),
+        allowLaunch,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0, 20 * 60));
+  }
+
+  private static void softStop(
+      TrainLaunchManager manager, RuntimeTrainHandle train, TrainProperties properties) {
+    manager.applyControl(
+        train,
+        properties,
+        SignalAspect.STOP,
+        0.0,
+        new TrainConfig(TrainType.EMU, 0.8, 1.0),
+        false,
+        OptionalLong.of(0L),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0, 20 * 60));
+  }
+
+  private static boolean launchOwed(TrainProperties properties) {
+    return TrainTagHelper.readTagValue(properties, "FTA_LAUNCH_OWED").isPresent();
+  }
+
+  /**
+   * 普通 STOP 停到 0 会清掉正在执行的 launch，但冷却还在：冷却期内的放行发不出去，记欠账；冷却过后即使信号不再变化也补发。
+   *
+   * <p>否则调度层只在信号变化那一拍要求发车，之后再也不会要求，车停在 PROCEED 下等健康监控补发。
+   */
+  @Test
+  void cooldownRefusedLaunchIsRetriedOnceTheCooldownExpires() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-owed-cooldown");
+    AtomicBoolean moving = new AtomicBoolean(false);
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        scriptedTrain(tags.properties(), moving, attempts, new ArrayDeque<>());
+
+    assertTrue(proceed(manager, train, tags.properties(), true).launchCommandAccepted());
+    softStop(manager, train, tags.properties());
+    TrainLaunchManager.ControlApplicationResult refused =
+        proceed(manager, train, tags.properties(), true);
+
+    assertFalse(refused.launchCommandAccepted());
+    assertEquals(1, attempts.get());
+    assertTrue(launchOwed(tags.properties()), "冷却挡住的发车应记欠账");
+
+    // 冷却期内信号不变：仍不发。
+    proceed(manager, train, tags.properties(), false);
+    assertEquals(1, attempts.get());
+
+    TrainTagHelper.writeTag(tags.properties(), "FTA_LAST_LAUNCH_AT", "1");
+    TrainLaunchManager.ControlApplicationResult retried =
+        proceed(manager, train, tags.properties(), false);
+
+    assertTrue(retried.launchCommandAccepted(), "冷却过后信号不变也应补发");
+    assertEquals(2, attempts.get());
+    assertFalse(launchOwed(tags.properties()), "发车被接受后应销账");
+  }
+
+  /** TrainCarts 拒绝的 launch 不耗冷却，下一拍接着补发。 */
+  @Test
+  void rejectedLaunchIsRetriedOnTheNextCycle() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-owed-rejected");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        scriptedTrain(
+            tags.properties(),
+            new AtomicBoolean(false),
+            attempts,
+            new ArrayDeque<>(List.of(false, true)));
+
+    assertFalse(proceed(manager, train, tags.properties(), true).launchCommandAccepted());
+    assertTrue(launchOwed(tags.properties()));
+
+    assertTrue(proceed(manager, train, tags.properties(), false).launchCommandAccepted());
+    assertEquals(2, attempts.get());
+    assertFalse(launchOwed(tags.properties()));
+  }
+
+  /** 欠账之后来了 STOP：调度层已撤销放行，之后信号不变时不得替它补发。 */
+  @Test
+  void stopCancelsAnOwedLaunch() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-owed-stop");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        scriptedTrain(
+            tags.properties(),
+            new AtomicBoolean(false),
+            attempts,
+            new ArrayDeque<>(List.of(false)));
+
+    proceed(manager, train, tags.properties(), true);
+    assertTrue(launchOwed(tags.properties()));
+    softStop(manager, train, tags.properties());
+
+    assertFalse(launchOwed(tags.properties()), "STOP 应销账");
+    proceed(manager, train, tags.properties(), false);
+    assertEquals(1, attempts.get(), "STOP 之后信号不变不应补发");
+  }
+
+  /** 车已经动起来（别的路径发了车）：欠账作废。 */
+  @Test
+  void physicalMovementCancelsAnOwedLaunch() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags = new TagStore("train-owed-moving");
+    AtomicBoolean moving = new AtomicBoolean(false);
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        scriptedTrain(tags.properties(), moving, attempts, new ArrayDeque<>(List.of(false)));
+
+    proceed(manager, train, tags.properties(), true);
+    assertTrue(launchOwed(tags.properties()));
+    moving.set(true);
+    proceed(manager, train, tags.properties(), false);
+
+    assertFalse(launchOwed(tags.properties()), "物理移动应销账");
+    moving.set(false);
+    proceed(manager, train, tags.properties(), false);
+    assertEquals(1, attempts.get(), "销账后静止下来不应再补发");
+  }
+
+  /** 驾驶员接管后起步归驾驶员：交还自动运行时不能拿接管前的欠账替他发车。 */
+  @Test
+  void driverTakeoverCancelsAnOwedLaunch() {
+    TagStore tags = new TagStore("train-owed-driver");
+    AtomicInteger attempts = new AtomicInteger();
+    RuntimeTrainHandle train =
+        scriptedTrain(
+            tags.properties(),
+            new AtomicBoolean(false),
+            attempts,
+            new ArrayDeque<>(List.of(false)));
+    TrainLaunchManager automatic = new TrainLaunchManager();
+    TrainLaunchManager driven =
+        new TrainLaunchManager(
+            new SpeedLimitRamp(), new RecordingControlAuthority().control(tags.properties()));
+
+    proceed(automatic, train, tags.properties(), true);
+    assertTrue(launchOwed(tags.properties()));
+    proceed(driven, train, tags.properties(), false);
+
+    assertFalse(launchOwed(tags.properties()), "驾驶员接管应销账");
+    proceed(automatic, train, tags.properties(), false);
+    assertEquals(1, attempts.get(), "交还自动运行后不应补发接管前的欠账");
+  }
+
+  /** 硬停一次遍历清掉待发车标记、欠账与冷却，不逐项扫 tag。 */
+  @Test
+  void hardStopClearsLaunchBookkeepingInOneTagPass() {
+    TrainLaunchManager manager = new TrainLaunchManager();
+    TagStore tags =
+        new TagStore(
+            "train-hard-stop-bookkeeping",
+            "FTA_PENDING_LAUNCH_COMMAND=sig",
+            "FTA_LAUNCH_OWED=true",
+            "FTA_LAST_LAUNCH_AT=" + System.currentTimeMillis());
+    RuntimeTrainHandle train =
+        scriptedTrain(
+            tags.properties(), new AtomicBoolean(false), new AtomicInteger(), new ArrayDeque<>());
+
+    manager.applyControl(
+        train,
+        tags.properties(),
+        SignalAspect.STOP,
+        0.0,
+        new TrainConfig(TrainType.EMU, 0.8, 1.0),
+        false,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings(0.0, 1.0, 1.0, 20 * 60),
+        StopControlMode.HARD_STOP);
+
+    verify(tags.properties(), times(1)).removeTags(any(String[].class));
+    assertFalse(
+        TrainTagHelper.readTagValue(tags.properties(), "FTA_PENDING_LAUNCH_COMMAND").isPresent());
+    assertFalse(launchOwed(tags.properties()));
+    assertFalse(TrainTagHelper.readTagValue(tags.properties(), "FTA_LAST_LAUNCH_AT").isPresent());
   }
 
   @Test

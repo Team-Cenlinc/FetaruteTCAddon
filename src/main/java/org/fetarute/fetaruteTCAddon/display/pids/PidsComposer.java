@@ -9,17 +9,24 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalLong;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import java.util.stream.Collectors;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletinBoard;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayoutRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsContent;
+import org.fetarute.fetaruteTCAddon.display.pids.render.PidsBulletinTypesetter;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsRenderer;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsBulletinView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusSource;
@@ -47,6 +54,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *       不放空位页；通过列车临近时同样锁定安全提示页
  *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页； 所有到发页的英文与备注按 {@link
  *       PidsCarousel#remarks} 轮换
+ *   <li>公告：站台屏、多站台屏与停站屏轮播本屏适用的公告（{@link PidsBulletinBoard#active}），按本屏布局排版分页； 车站统屏与线路运行状况屏不放公告
  * </ul>
  *
  * <p>不碰 Bukkit：世界时间、文案、快照都由调用方注入，单元测试可直接驱动。
@@ -72,6 +80,13 @@ public final class PidsComposer {
   private final PidsLineStatusSource lineStatuses;
   private final PidsLineStatusViews lineStatusViews;
   private final PidsCarousel carousel = new PidsCarousel();
+  private final PidsBulletinBoard bulletins;
+
+  /** 公告按布局排好的版：同一条公告、同一布局只排一次。 */
+  private final Map<TypesetKey, PidsBulletinTypesetter.Result> typeset = new ConcurrentHashMap<>();
+
+  /** 排版缓存的上限：超过时整个清空（公告改过、布局重载后旧条目不再用到）。 */
+  private static final int TYPESET_CACHE_LIMIT = 512;
 
   /**
    * @param registry 屏幕表
@@ -87,6 +102,7 @@ public final class PidsComposer {
    * @param clock 时钟
    * @param zone 时钟时区
    * @param lineStatuses 线路运行状况
+   * @param bulletins 公告表
    */
   public PidsComposer(
       PidsScreenRegistry registry,
@@ -101,7 +117,8 @@ public final class PidsComposer {
       Supplier<PidsSettings> settings,
       InstantSource clock,
       ZoneId zone,
-      PidsLineStatusSource lineStatuses) {
+      PidsLineStatusSource lineStatuses,
+      PidsBulletinBoard bulletins) {
     this.registry = Objects.requireNonNull(registry, "registry");
     this.registryLoaded = Objects.requireNonNull(registryLoaded, "registryLoaded");
     this.layouts = Objects.requireNonNull(layouts, "layouts");
@@ -117,6 +134,39 @@ public final class PidsComposer {
     this.vocabulary = new PidsVocabulary(texts);
     this.lineStatuses = Objects.requireNonNull(lineStatuses, "lineStatuses");
     this.lineStatusViews = new PidsLineStatusViews(directory, vocabulary);
+    this.bulletins = Objects.requireNonNull(bulletins, "bulletins");
+  }
+
+  /** 没有公告。 */
+  public PidsComposer(
+      PidsScreenRegistry registry,
+      BooleanSupplier registryLoaded,
+      PidsLayoutRegistry layouts,
+      Function<PidsStationKey, PidsSnapshot> snapshots,
+      PidsViewBuilder views,
+      PidsDirectory directory,
+      PidsRenderer renderer,
+      Function<String, String> texts,
+      Function<UUID, OptionalLong> worldTime,
+      Supplier<PidsSettings> settings,
+      InstantSource clock,
+      ZoneId zone,
+      PidsLineStatusSource lineStatuses) {
+    this(
+        registry,
+        registryLoaded,
+        layouts,
+        snapshots,
+        views,
+        directory,
+        renderer,
+        texts,
+        worldTime,
+        settings,
+        clock,
+        zone,
+        lineStatuses,
+        new PidsBulletinBoard());
   }
 
   /** 到发页的内容标识：布局与视图都相同才算没变。 */
@@ -133,6 +183,26 @@ public final class PidsComposer {
 
   /** 线路运行状况屏的内容标识：视图含当前页号。 */
   record LineStatusKey(PidsLayout layout, PidsLineStatusView view) {}
+
+  /** 公告页的内容标识：视图含当前页的排版。 */
+  record BulletinKey(PidsLayout layout, PidsBulletinView view) {}
+
+  /** 排版缓存的键：公告内容版本与布局编号、尺寸（重要与否已含在内容版本里）。布局与文案随站台屏服务一起重建，不必比较整个布局。 */
+  private record TypesetKey(String revision, String layoutId, int tileRows, int tileCols) {}
+
+  /**
+   * 本屏可轮播的一条公告与它在本屏布局上的排版。
+   *
+   * @param bulletin 公告
+   * @param layout 排版结果
+   */
+  private record Posting(PidsBulletin bulletin, PidsBulletinTypesetter.Result layout) {
+
+    PidsCarousel.BulletinInfo info() {
+      return new PidsCarousel.BulletinInfo(
+          bulletin.revision(), bulletin.important(), layout.pages().size());
+    }
+  }
 
   /**
    * @param screenId 地图物品上记的屏幕 ID
@@ -260,6 +330,7 @@ public final class PidsComposer {
     }
     PidsView view = views.build(request);
     if (rotating) {
+      List<Posting> postings = postings(screen, layout, station, now);
       Optional<PidsCarousel.Slide> slide =
           carousel.page(
               screen.id(),
@@ -268,11 +339,20 @@ public final class PidsComposer {
                   passingSoon(screen, snapshot),
                   views.hasVacancy(request),
                   arrivingHere(screen, snapshot),
-                  courtesy(request)),
+                  courtesy(request),
+                  postings.stream().map(Posting::info).toList()),
               now,
               settings.get().render());
       if (slide.isPresent() && slide.get() instanceof PidsCarousel.Slide.Notice page) {
         return notice(layout, view.theme(), view.bandColors(), page.notice());
+      }
+      if (slide.isPresent() && slide.get() instanceof PidsCarousel.Slide.Bulletin page) {
+        Optional<PidsContent> bulletin =
+            bulletin(layout, view.theme(), view.bandColors(), postings, page);
+        if (bulletin.isPresent()) {
+          return bulletin.get();
+        }
+        return new PidsContent(new LiveKey(layout, view), () -> renderer.render(layout, view));
       }
       Optional<PidsVacancyView> vacancy =
           slide.isPresent() ? views.vacancy(request) : Optional.empty();
@@ -309,6 +389,8 @@ public final class PidsComposer {
             .orElse(1);
     Object train =
         full.train().<Object>map(found -> List.of(found.id(), found.stops())).orElse(List.of());
+    PidsStationKey station = screen.station().orElseThrow();
+    List<Posting> postings = postings(screen, layout, station, now);
     PidsCarousel.StopListSlide slide =
         carousel.stopList(
             screen.id(),
@@ -316,11 +398,20 @@ public final class PidsComposer {
                 passingSoon(screen, snapshot),
                 false,
                 arrivingHere(screen, snapshot),
-                courtesy(request)),
+                courtesy(request),
+                postings.stream().map(Posting::info).toList()),
             new PidsCarousel.StopListPages(
                 train, pages, widget.followingRows() > 0 && views.hasFollowing(request)),
             now,
             settings.get().render());
+    if (slide instanceof PidsCarousel.Slide.Bulletin page) {
+      Optional<PidsContent> bulletin =
+          bulletin(layout, full.theme(), full.bandColors(), postings, page);
+      if (bulletin.isPresent()) {
+        return bulletin.get();
+      }
+      slide = new PidsCarousel.StopListSlide.Stops(0);
+    }
     return switch (slide) {
       case PidsCarousel.StopListSlide.Stops stops -> {
         PidsStopListView view = full.withPage(stops.page());
@@ -334,7 +425,111 @@ public final class PidsComposer {
       }
       case PidsCarousel.Slide.Notice page -> notice(
           layout, full.theme(), full.bandColors(), page.notice());
+      case PidsCarousel.Slide.Bulletin ignored -> throw new IllegalStateException("公告页已在上面处理");
     };
+  }
+
+  /**
+   * 本屏可轮播的公告：本屏车站、线路适用且生效中的，按轮播顺序，各自按本屏布局排好版。
+   *
+   * <p>屏幕显示的线路：设了线路过滤取过滤清单，否则取停靠所选站台的线路（未选站台时取停靠本站的线路）；只在有公告限定了线路时才去查。
+   *
+   * <p>只放车站所属公司发布的公告：运营商代码按名称目录认公司，代码属于多家公司（或目录还没建好）时一律不放，免得别家公司的公告上了本站的屏。 副页停留为
+   * 0（不轮播）时不放公告，也就不必排版。
+   */
+  private List<Posting> postings(
+      PidsScreen screen, PidsLayout layout, PidsStationKey station, Instant now) {
+    if (settings.get().render().slideNoticeSeconds() <= 0) {
+      return List.of();
+    }
+    List<PidsBulletin> active = bulletins.active(station, () -> screenLines(screen, station), now);
+    if (active.isEmpty()) {
+      return List.of();
+    }
+    Optional<UUID> company = directory.companyOfOperator(station.operatorCode());
+    if (company.isEmpty()) {
+      return List.of();
+    }
+    return active.stream()
+        .filter(bulletin -> bulletin.companyId().equals(company.get()))
+        .map(bulletin -> new Posting(bulletin, typeset(layout, bulletin)))
+        .toList();
+  }
+
+  /**
+   * 公告在某布局上的排版；发布时检查长度也用它，与站台屏显示同一份缓存。
+   *
+   * @param layout 布局
+   * @param bulletin 公告
+   */
+  public PidsBulletinTypesetter.Result typeset(PidsLayout layout, PidsBulletin bulletin) {
+    if (typeset.size() > TYPESET_CACHE_LIMIT) {
+      typeset.clear();
+    }
+    return typeset.computeIfAbsent(
+        new TypesetKey(bulletin.revision(), layout.id(), layout.tileRows(), layout.tileCols()),
+        key ->
+            renderer.typesetBulletin(
+                layout,
+                vocabulary.bulletinLabel(bulletin.important()),
+                new Names(bulletin.title().primary(), bulletin.title().secondary()),
+                new Names(bulletin.body().primary(), bulletin.body().secondary())));
+  }
+
+  /** 布局轮播公告：站台屏、多站台屏与停站屏（带站台号组件）；车站统屏与线路运行状况屏不放。 */
+  public static boolean showsBulletins(PidsLayout layout) {
+    return PidsPlatformSelection.limit(layout).isPresent();
+  }
+
+  /** 屏幕显示的线路代码（大写）。 */
+  private Set<String> screenLines(PidsScreen screen, PidsStationKey station) {
+    if (!screen.lines().isEmpty()) {
+      return screen.lines();
+    }
+    List<PidsView.LineChip> chips =
+        screen.platforms().isEmpty()
+            ? directory.linesServing(station)
+            : screen.platforms().stream()
+                .flatMap(platform -> directory.linesServingPlatform(station, platform).stream())
+                .toList();
+    return chips.stream()
+        .map(chip -> chip.code().toUpperCase(Locale.ROOT))
+        .collect(Collectors.toSet());
+  }
+
+  /**
+   * 公告的一页。
+   *
+   * @return 公告已撤下（本屏清单里没有）时为空，调用方改回主页
+   */
+  private Optional<PidsContent> bulletin(
+      PidsLayout layout,
+      PidsTheme theme,
+      List<Integer> bandColors,
+      List<Posting> postings,
+      PidsCarousel.Slide.Bulletin page) {
+    Optional<Posting> found =
+        postings.stream().filter(p -> p.bulletin().revision().equals(page.key())).findFirst();
+    if (found.isEmpty()) {
+      return Optional.empty();
+    }
+    Posting posting = found.get();
+    List<PidsBulletinTypesetter.Page> pages = posting.layout().pages();
+    int index = Math.min(page.page(), pages.size() - 1);
+    PidsBulletin bulletin = posting.bulletin();
+    PidsBulletinView view =
+        new PidsBulletinView(
+            theme,
+            bulletin.important(),
+            vocabulary.bulletinLabel(bulletin.important()),
+            new Names(bulletin.title().primary(), bulletin.title().secondary()),
+            pages.get(index),
+            index,
+            pages.size(),
+            bandColors);
+    return Optional.of(
+        new PidsContent(
+            new BulletinKey(layout, view), () -> renderer.renderBulletin(layout, view)));
   }
 
   /** 本屏轮换的宣传页：按配置的顺序；“确认终点”只在本屏站台有不同停站方式（多条线路、快慢车）时放。 */

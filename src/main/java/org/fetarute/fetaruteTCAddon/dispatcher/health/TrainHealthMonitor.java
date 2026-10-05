@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchEffectClass;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatcherController;
@@ -320,6 +321,9 @@ public final class TrainHealthMonitor {
   private final Map<String, DeadlockFallbackEvidence> deadlockFallbackEvidence =
       new ConcurrentHashMap<>();
 
+  /** 列车的物理控制权：有驾驶员在岗的车不做恢复动作，死锁里有它时先请它交还。 */
+  private ControlAuthority controlAuthority = ControlAuthority.pluginLookup();
+
   /** 健康诊断 trace 限频。 */
   private final Map<String, String> traceFingerprints = new ConcurrentHashMap<>();
 
@@ -351,8 +355,53 @@ public final class TrainHealthMonitor {
     if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent()) {
       return true;
     }
+    // 有驾驶员在岗：静止和进度不变由驾驶员负责，不能替他重发车、改目的地或销毁；卡太久由驾驶侧的阶梯交还。
+    if (controlAuthority.isDriverControlledName(trainName)) {
+      return true;
+    }
+    // 停着等驾驶员上车接班：有时限，到时限由驾驶侧放行，期间不派恢复动作。
+    if (controlAuthority.awaitingDriver(trainName)) {
+      return true;
+    }
     StationStopCoordinator stationStops = dispatchService.stationStops();
     return stationStops != null && stationStops.holdingForSchedule(trainName);
+  }
+
+  /** 替换控制权（测试用）。 */
+  void setControlAuthority(ControlAuthority authority) {
+    this.controlAuthority = authority == null ? ControlAuthority.NONE : authority;
+  }
+
+  /** 阻挡者里有没有驾驶员在岗的车（含 ATO）。 */
+  private boolean blockedByDriver(java.util.Collection<String> trainNames) {
+    if (trainNames == null) {
+      return false;
+    }
+    for (String name : trainNames) {
+      if (name != null && controlAuthority.hasDriver(name)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 列车中有驾驶员控制的车时，请它们交还自动运行。
+   *
+   * @return 是否有驾驶员控制的车（此时本轮不做销毁类处理）
+   */
+  private boolean requestDriverHandback(java.util.Collection<String> trainNames) {
+    boolean found = false;
+    if (trainNames == null) {
+      return false;
+    }
+    for (String name : trainNames) {
+      if (name != null && controlAuthority.hasDriver(name)) {
+        controlAuthority.requestHandback(name, "deadlock");
+        found = true;
+      }
+    }
+    return found;
   }
 
   /** 设置静止阈值。 */
@@ -694,6 +743,12 @@ public final class TrainHealthMonitor {
                   && progressDuration.compareTo(deadlockMinStopDuration) >= 0
               ? findConfirmedMutualDeadlock(trainName, activeKeys, current, progressDuration, now)
               : Optional.empty();
+      if (deadlockObservation.isPresent()
+          && requestDriverHandback(
+              List.of(deadlockObservation.get().trainA(), deadlockObservation.get().trainB()))) {
+        recovery.resetDeadlock();
+        continue;
+      }
       if (deadlockObservation.isPresent()) {
         DeadlockObservation observation = deadlockObservation.get();
         if (!Objects.equals(keyOf(trainName), keyOf(observation.trainA()))) {
@@ -739,6 +794,16 @@ public final class TrainHealthMonitor {
           && currentSignal == SignalAspect.STOP
           && progressDuration.compareTo(deadlockMinStopDuration) >= 0) {
         traceDeadlockSkipped(trainName, current, progressDuration, activeKeys, now);
+        Set<String> blockers =
+            dispatchService.recentBlockerTrains(trainName, blockerSnapshotMaxAge);
+        if (blockedByDriver(blockers)) {
+          // 阻挡者是有驾驶员的车：绝不因它销毁别的车。在它后面短暂排队（例如它在站里停站）是正常的，
+          // 等到了本来会动用销毁兜底的时限才请它交还自动运行。
+          if (autoFixEnabled && progressDuration.compareTo(deadlockDestroyThreshold) >= 0) {
+            requestDriverHandback(blockers);
+          }
+          continue;
+        }
         if (autoFixEnabled
             && tryDestroyDeadlockFallback(trainName, current, progressDuration, activeKeys, now)) {
           fixedCount++;
@@ -881,8 +946,8 @@ public final class TrainHealthMonitor {
             // 只列出实际实现的动作。宣告并不存在的动作（如 SMART_HOLD_FOLLOWERS、
             // SMART_DESTROY_CANDIDATE；destroy 走的是另一条 fallback 路径）会让日志宣告的恢复能力
             // 大于实际，读日志时会据此误判"该动作试过了"。
-            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
-            + "SMART_FORWARD_UNLOCK,SMART_QUEUE_POSITION_YIELD");
+            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_RELEASE_PHYSICAL_EDGE_RETAIN,"
+            + "SMART_DRAIN_UNLOCK,SMART_FORWARD_UNLOCK,SMART_QUEUE_POSITION_YIELD");
     RuntimeDispatchService.SmartRecoveryActionResult selfRetainRelease =
         safeSmartRecoveryResult(dispatchService.applySmartSelfOwnedStaleRetainRelease(input));
     if (selfRetainRelease.candidate()) {
@@ -1238,6 +1303,12 @@ public final class TrainHealthMonitor {
 
   private boolean reviewedForCleanup(CleanupTarget target) {
     RuntimeDispatchService.DeadlockTrainContext context = target.candidate().context();
+    if (requestDriverHandback(
+        dispatchService.recentBlockerTrains(context.trainName(), blockerSnapshotMaxAge))) {
+      // 挡住它的是驾驶员控制的车：先请那列车交还自动运行，不清掉被挡的车。
+      debugLogger.accept("STUCK_CLEANUP_DRIVER_HANDBACK train=" + context.trainName());
+      return false;
+    }
     if (!target.waitCycle().isEmpty()) {
       debugLogger.accept(
           "STUCK_CLEANUP_WAIT_CYCLE train="
@@ -2359,8 +2430,8 @@ public final class TrainHealthMonitor {
             + emptyDash(followerTrain)
             + " evidenceGroup="
             + emptyDash(evidenceGroup)
-            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_DRAIN_UNLOCK,"
-            + "SMART_FORWARD_UNLOCK");
+            + " order=SMART_RELEASE_SELF_OWNED_STALE_RETAIN,SMART_RELEASE_PHYSICAL_EDGE_RETAIN,"
+            + "SMART_DRAIN_UNLOCK,SMART_FORWARD_UNLOCK");
 
     FallbackRecoveryAttempt selfRetainRelease =
         fallbackRecoveryCandidate(

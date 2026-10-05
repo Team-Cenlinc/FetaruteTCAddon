@@ -52,7 +52,6 @@ public final class OccupancyResourceResolver {
       }
       if (graph instanceof RailGraphInterlockingSupport interlockingSupport) {
         interlockingSupport
-            .interlockingState()
             .zoneKeysForEdge(edge.id())
             .forEach(key -> resources.add(OccupancyResource.forConflict(key)));
       }

@@ -1333,6 +1333,91 @@ final class JdbcRepositoryTest {
     assertEquals(original.trips(), reloaded.trips(), "失败的保存不能把上一版的车次删掉");
   }
 
+  /** 区分车型的表：同一条 route 的基础计划与车型变体都落库，交路的车型读回原样。 */
+  @Test
+  void timetableKeepsConsistVariantsAndDutyConsist() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    TimetableFixture fixture = seedRoute(provider);
+    Instant now = Instant.parse("2026-03-01T00:00:00Z");
+    UUID timetableId = UUID.randomUUID();
+    UUID routeId = fixture.routeId();
+    List<TimetableStop> slow =
+        List.of(
+            new TimetableStop(
+                0, Optional.of("A"), Optional.of("OP:S:A:1"), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.of("B"), Optional.of("OP:S:B:1"), 90, 90, RouteStopPassType.TERMINATE));
+    List<TimetableStop> fast =
+        List.of(
+            new TimetableStop(
+                0, Optional.of("A"), Optional.of("OP:S:A:1"), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.of("B"), Optional.of("OP:S:B:1"), 70, 70, RouteStopPassType.TERMINATE));
+    TimetableRoutePlan base =
+        new TimetableRoutePlan(
+            routeId, "R1", 1, slow, "OP:S:A:1", "OP:S:B:1", Optional.empty(), Optional.empty());
+    TimetableRoutePlan six =
+        base.asVariant(
+                UUID.randomUUID(),
+                new TimetableRoutePlan.ConsistVariant("sh_a6", routeId, 70.5, 0.0),
+                fast)
+            .withRouteId(routeId);
+    TimetableTrip trip = trip(timetableId, routeId, "TTR-001", 8 * 3600);
+    UUID dutyId = UUID.randomUUID();
+    trip =
+        new TimetableTrip(
+            trip.id(),
+            timetableId,
+            routeId,
+            0,
+            trip.tripCode(),
+            trip.departureSecondOfDay(),
+            Optional.of(dutyId));
+    VehicleDuty duty =
+        new VehicleDuty(
+            dutyId,
+            timetableId,
+            0,
+            "D001",
+            "OP:D:DEP:1",
+            "OP:D:DEP:1",
+            Optional.empty(),
+            Optional.empty(),
+            List.of(trip.id()),
+            8 * 3600 - 60,
+            8 * 3600 + 90,
+            8 * 3600 + 150,
+            VehicleDuty.CloseReason.MAX_TRIPS,
+            Optional.of("sh_a6"));
+    Timetable timetable =
+        new Timetable(
+            timetableId,
+            fixture.companyId(),
+            fixture.operatorId(),
+            fixture.lineId(),
+            "TT5",
+            "车型表",
+            TimetableStatus.DRAFT,
+            java.time.ZoneId.of("UTC"),
+            5 * 3600,
+            23 * 3600,
+            List.of(base, six),
+            List.of(trip),
+            List.of(duty),
+            Optional.empty(),
+            now,
+            now);
+    provider.timetables().save(timetable);
+
+    Timetable reloaded = provider.timetables().findById(timetableId).orElseThrow();
+    assertEquals(List.of(base, six), reloaded.routePlans());
+    assertEquals(List.of(duty), reloaded.duties());
+    assertEquals(90, reloaded.routePlan(routeId).orElseThrow().totalRunSeconds());
+    assertEquals(
+        70, reloaded.routePlan(routeId, Optional.of("sh_a6")).orElseThrow().totalRunSeconds());
+    assertEquals(Optional.of("sh_a6"), reloaded.consistOf(reloaded.trips().get(0)));
+  }
+
   private static TimetableTrip trip(UUID timetableId, UUID routeId, String code, int departure) {
     return new TimetableTrip(
         UUID.randomUUID(), timetableId, routeId, 0, code, departure, Optional.empty());

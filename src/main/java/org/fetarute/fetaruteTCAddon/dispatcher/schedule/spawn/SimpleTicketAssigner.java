@@ -44,6 +44,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -129,6 +130,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** 派发成功回调：票据最终派给了哪辆车。默认什么都不做。 */
   private volatile java.util.function.BiConsumer<SpawnTicket, String> dispatchListener =
       (ticket, trainName) -> {};
+
+  /** 车型裁决：route 绑了编组方案时，复用只接方案里的车型、按份额挑车，派发后按车型记账。默认不裁决。 */
+  private volatile ConsistArbiter consistArbiter = ConsistArbiter.NONE;
+
+  /** 车库出车、第一拍信号之前问：这列车要不要先扣在车库股道上等驾驶员。默认不扣。 */
+  private volatile java.util.function.BiPredicate<SpawnTicket, String> depotSpawnHold =
+      (ticket, trainName) -> false;
+
+  /** 等驾驶员接车时挂的发车门控会话号：驾驶员上车或等到时限后按它放行。 */
+  public static final String DRIVER_PICKUP_GATE = "driver-pickup";
 
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
@@ -519,6 +530,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     LayoverRegistry.LayoverCandidate candidate = candidateOpt.get();
+    if (!acceptsConsist(ticket.routeId(), candidate)) {
+      debugLogger.accept("强制分配跳过: 车型不在线路的编组方案里 train=" + trainName + " route=" + ticket.routeId());
+      return false;
+    }
     SpawnControl.Lease lease =
         tryAcquireSpawnControlForLayover(
                 Optional.ofNullable(provider),
@@ -550,6 +565,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     lease.release();
     debugLogger.accept("强制分配失败: dispatchLayover 拒绝 " + trainName);
     return false;
+  }
+
+  /** 回收派 RETURN：车库只收方案里的车型。裁决出错时放行，不让车滞留在终点。 */
+  private boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
+    try {
+      return consistArbiter.acceptsForRoute(routeId, candidate);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "车型裁决异常，放行回收: train=" + candidate.trainName() + " error=" + failure.getMessage());
+      return true;
+    }
   }
 
   /**
@@ -2519,12 +2545,47 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
+   * 注册车型裁决。传入 {@code null} 恢复"不裁决"。
+   *
+   * <p>出车选编组在 {@link DepotSpawner} 一侧，这里只管复用挑车、回收派车与派发后的记账。
+   */
+  public void setConsistArbiter(ConsistArbiter arbiter) {
+    this.consistArbiter = arbiter == null ? ConsistArbiter.NONE : arbiter;
+  }
+
+  /**
    * 注册派发成功回调。
    *
    * <p>在票据向 SpawnManager 报完成之前调用，带最终的列车名（复用时是改名后的名字）。传入 {@code null} 恢复空回调。
    */
   public void setDispatchListener(java.util.function.BiConsumer<SpawnTicket, String> listener) {
     this.dispatchListener = listener == null ? (ticket, trainName) -> {} : listener;
+  }
+
+  /**
+   * 注册车库出车扣车：返回 true 时，列车在第一拍信号之前挂上发车门控（{@link #DRIVER_PICKUP_GATE}），停在车库股道上， 直到有人按这个会话号放行或门控超时。传入
+   * {@code null} 恢复"不扣"。
+   */
+  public void setDepotSpawnHold(java.util.function.BiPredicate<SpawnTicket, String> hold) {
+    this.depotSpawnHold = hold == null ? (ticket, trainName) -> false : hold;
+  }
+
+  /** 驾驶员要从车库接车：先挂发车门控，第一拍信号就把车按在股道上。 */
+  private void holdDepotSpawnIfRequested(SpawnTicket ticket, String trainName) {
+    try {
+      if (depotSpawnHold.test(ticket, trainName)) {
+        runtimeDispatchService.acquireDepartureGate(trainName, DRIVER_PICKUP_GATE, "driver_pickup");
+        debugLogger.accept("车库出车等驾驶员接车: train=" + trainName + " ticket=" + ticket.id());
+      }
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "车库出车扣车回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
   }
 
   private void notifyDispatched(SpawnTicket ticket, String trainName) {
@@ -2536,6 +2597,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     } catch (RuntimeException failure) {
       debugLogger.accept(
           "派发回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+    try {
+      consistArbiter.onDispatched(ticket, trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "车型记账异常: ticket="
               + ticket.id()
               + " train="
               + trainName
@@ -2677,6 +2749,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       return false;
     }
+    if (attemptOwner.isEmpty()) {
+      // 已认领的折返事务不重新挑车：那辆车当初就是按车型挑出来的，中途换车会留下两个事务。
+      readyCandidates = orderByConsist(ticket, readyCandidates);
+      if (readyCandidates.isEmpty()) {
+        // 到站的车车型都不在方案里：等方案里的车型到站，不新出库。
+        if (!pendingAttempt) {
+          putPendingLayoverTicket(ticket, now);
+        }
+        return false;
+      }
+    }
     ServiceTicket serviceTicket =
         new ServiceTicket(
             ticketId,
@@ -2723,6 +2806,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return false;
   }
 
+  /** 交给车型裁决过滤与排序；裁决本身出错时按原顺序放行，不因为它停发。 */
+  private List<LayoverRegistry.LayoverCandidate> orderByConsist(
+      SpawnTicket ticket, List<LayoverRegistry.LayoverCandidate> candidates) {
+    try {
+      List<LayoverRegistry.LayoverCandidate> ordered =
+          consistArbiter.orderReuseCandidates(ticket, candidates);
+      return ordered == null ? candidates : ordered;
+    } catch (RuntimeException failure) {
+      debugLogger.accept("车型裁决异常，按原顺序复用: ticket=" + ticket.id() + " error=" + failure.getMessage());
+      return candidates;
+    }
+  }
+
   private static ServiceTicket.TicketMode toTicketMode(RouteOperationType operationType) {
     if (operationType == RouteOperationType.RETURN) {
       return ServiceTicket.TicketMode.RETURN;
@@ -2748,6 +2844,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *   <li>CREATE/RETURN 发车成功：{@code FTA_OP_TRIPS=0}
    *   <li>若 route 绑定了交路组，写入 {@code FTA_SPAWN_GROUP}
    *   <li>若交路组配置了 {@code maxOperationTrips}，写入 {@code FTA_OP_MAX}
+   *   <li>按当前车种配置刷新出车写入的加减速标签（{@link SpawnMotionTags}；用户设定的不动）
    * </ul>
    */
   private void applyDispatchLifecycleTags(
@@ -2772,6 +2869,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     TrainProperties properties = TrainPropertiesStore.get(trainName);
     if (properties == null) {
       return;
+    }
+    // 折返复用接下一趟：驾驶员接管时同样按调度控车同一组加减速开车；配置重载后出车写下的值也在这里跟上。
+    if (SpawnMotionTags.stamp(properties, configManager.current())
+        == SpawnMotionTags.Outcome.FAILED) {
+      debugLogger.accept("复用写入加减速标签失败 train=" + trainName);
     }
 
     int currentTrips = TrainTagHelper.readIntTag(properties, TAG_OPERATION_TRIPS).orElse(0);
@@ -3020,7 +3122,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     Optional<RailGraph> graphOpt =
-        railGraphService.getSnapshot(worldIdOpt.get()).map(s -> s.graph());
+        railGraphService
+            .getSnapshot(worldIdOpt.get())
+            .map(s -> RailGraphService.runtimeGraph(railGraphService, worldIdOpt.get(), s.graph()));
     if (graphOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, reasonPrefix + "graph-missing");
@@ -3291,6 +3395,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             context.operationType());
       }
       TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
+      holdDepotSpawnIfRequested(context.ticket(), context.trainName());
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,

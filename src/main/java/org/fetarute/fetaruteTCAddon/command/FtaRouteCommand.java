@@ -45,6 +45,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteViaMetadata;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -197,6 +199,15 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("\"<pattern>\"")))
             .build();
     var spawnClearFlag = CommandFlag.builder("spawn-clear").build();
+    // 编组方案：route 引用运营商下的方案名，出车按方案的比例选车型，复用只接方案里的车型。
+    var consistPlanFlag =
+        CommandFlag.<CommandSender>builder("consist-plan")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "consist-plan", StringParser.quotedStringParser())
+                    .suggestionProvider(consistPlanSuggestions()))
+            .build();
+    var consistPlanClearFlag = CommandFlag.builder("consist-plan-clear").build();
     // 直通运转：运营 route 显式指定从外方哪条线路出库/回库（timetable_create_route / timetable_return_route）。
     var timetableCreateRouteFlag =
         CommandFlag.<CommandSender>builder("timetable-create-route")
@@ -708,6 +719,12 @@ public final class FtaRouteCommand {
                   sender.sendMessage(
                       locale.component(
                           "command.route.info.spawn-pattern", Map.of("pattern", spawnPattern)));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.info.consist-plan",
+                          Map.of(
+                              "plan",
+                              ConsistPlanService.planNameOf(route.metadata()).orElse("-"))));
                   String spawnGroup = readSpawnGroup(route.metadata()).orElse("-");
                   String spawnGroupBaseline =
                       resolveSpawnGroupBaselineSeconds(resolved.line(), route)
@@ -1607,6 +1624,8 @@ public final class FtaRouteCommand {
             .flag(distanceFlag)
             .flag(spawnFlag)
             .flag(spawnClearFlag)
+            .flag(consistPlanFlag)
+            .flag(consistPlanClearFlag)
             .flag(timetableCreateRouteFlag)
             .flag(timetableCreateRouteClearFlag)
             .flag(timetableReturnRouteFlag)
@@ -1630,11 +1649,11 @@ public final class FtaRouteCommand {
                   LocaleManager locale = plugin.getLocaleManager();
                   CompanyQueryService query = new CompanyQueryService(provider);
 
-                  ResolvedRoute resolved = resolveRoute(ctx, provider, locale, query, true);
-                  if (resolved == null) {
+                  String routeArg = ((String) ctx.get("route")).trim();
+                  ResolvedLine resolvedLine = resolveLine(ctx, provider, locale, query, true);
+                  if (resolvedLine == null) {
                     return;
                   }
-                  Route route = resolved.route();
 
                   var flags = ctx.flags();
                   boolean any =
@@ -1646,6 +1665,8 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(distanceFlag)
                           || flags.hasFlag(spawnFlag)
                           || flags.hasFlag(spawnClearFlag)
+                          || flags.hasFlag(consistPlanFlag)
+                          || flags.hasFlag(consistPlanClearFlag)
                           || flags.hasFlag(timetableCreateRouteFlag)
                           || flags.hasFlag(timetableCreateRouteClearFlag)
                           || flags.hasFlag(timetableReturnRouteFlag)
@@ -1663,235 +1684,363 @@ public final class FtaRouteCommand {
                     return;
                   }
 
-                  String name = flags.getValue(nameFlag, route.name());
-                  if (name != null) {
-                    name = name.trim();
-                  }
-                  if (name == null || name.isBlank()) {
-                    name = route.name();
-                  }
-                  String secondary =
-                      flags.getValue(secondaryFlag, route.secondaryName().orElse(null));
-                  if (secondary != null) {
-                    secondary = secondary.trim();
-                  }
-
-                  String patternRaw = flags.getValue(patternFlag, route.patternType().name());
-                  Optional<RoutePatternType> patternOpt = RoutePatternType.fromToken(patternRaw);
-                  if (patternOpt.isEmpty()) {
-                    sender.sendMessage(
-                        locale.component(
-                            "command.route.enum-invalid",
-                            Map.of("field", "pattern", "value", String.valueOf(patternRaw))));
-                    return;
-                  }
-                  String operationRaw = flags.getValue(operationFlag, route.operationType().name());
-                  Optional<RouteOperationType> operationOpt =
-                      RouteOperationType.fromToken(operationRaw);
-                  if (operationOpt.isEmpty()) {
-                    sender.sendMessage(
-                        locale.component(
-                            "command.route.enum-invalid",
-                            Map.of("field", "operation", "value", String.valueOf(operationRaw))));
-                    return;
-                  }
-                  Integer runtime =
-                      flags.getValue(runtimeFlag, route.runtimeSeconds().orElse(null));
-                  Integer distance =
-                      flags.getValue(distanceFlag, route.distanceMeters().orElse(null));
-                  Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
-                  if (flags.hasFlag(spawnClearFlag)) {
-                    metadata.remove(DepotSpawnPattern.ROUTE_METADATA_KEY);
-                  }
-                  if (flags.hasFlag(spawnFlag)) {
-                    String spawnPattern = normalizeSpawnPattern(flags.getValue(spawnFlag, null));
-                    if (spawnPattern == null) {
-                      metadata.remove(DepotSpawnPattern.ROUTE_METADATA_KEY);
-                    } else {
-                      metadata.put(DepotSpawnPattern.ROUTE_METADATA_KEY, spawnPattern);
+                  // 交路写成通配（* 代表任意个字符）时批量设置本线路匹配的各条交路，只许改出车相关、各条交路取同一个值才有意义的项。
+                  boolean wildcard = routeArg.contains("*");
+                  List<Route> targets;
+                  if (wildcard) {
+                    List<String> perRoute = new ArrayList<>();
+                    if (flags.hasFlag(nameFlag)) {
+                      perRoute.add("--name");
                     }
-                  }
-                  if (flags.hasFlag(spawnEnabledFlag)) {
-                    Optional<Boolean> enabled =
-                        parseBooleanToken(flags.getValue(spawnEnabledFlag, null));
-                    if (enabled.isPresent()) {
-                      metadata.put("spawn_enabled", enabled.get());
-                    } else {
+                    if (flags.hasFlag(secondaryFlag)) {
+                      perRoute.add("--secondary");
+                    }
+                    if (flags.hasFlag(patternFlag)) {
+                      perRoute.add("--pattern");
+                    }
+                    if (flags.hasFlag(operationFlag)) {
+                      perRoute.add("--operation");
+                    }
+                    if (flags.hasFlag(runtimeFlag)) {
+                      perRoute.add("--runtime");
+                    }
+                    if (flags.hasFlag(distanceFlag)) {
+                      perRoute.add("--distance");
+                    }
+                    if (flags.hasFlag(viaFlag) || flags.hasFlag(viaClearFlag)) {
+                      perRoute.add("--via");
+                    }
+                    if (flags.hasFlag(timetableCreateRouteFlag)
+                        || flags.hasFlag(timetableCreateRouteClearFlag)
+                        || flags.hasFlag(timetableReturnRouteFlag)
+                        || flags.hasFlag(timetableReturnRouteClearFlag)) {
+                      perRoute.add("--timetable-*-route");
+                    }
+                    if (flags.hasFlag(spawnGroupBaselineFlag)
+                        || flags.hasFlag(spawnGroupBaselineClearFlag)) {
+                      perRoute.add("--spawn-group-baseline");
+                    }
+                    if (!perRoute.isEmpty()) {
                       sender.sendMessage(
                           locale.component(
-                              "command.common.invalid-boolean",
-                              Map.of(
-                                  "value",
-                                  String.valueOf(flags.getValue(spawnEnabledFlag, null)))));
+                              "command.route.set.wildcard-flags",
+                              Map.of("flags", String.join(" ", perRoute))));
                       return;
                     }
-                  }
-                  if (flags.hasFlag(spawnWeightFlag)) {
-                    Integer weight = flags.getValue(spawnWeightFlag, null);
-                    if (weight == null || weight <= 0) {
-                      metadata.remove("spawn_weight");
-                    } else {
-                      metadata.put("spawn_weight", weight);
-                    }
-                  }
-                  if (flags.hasFlag(viaClearFlag)) {
-                    metadata.remove(RouteViaMetadata.KEY);
-                  }
-                  if (flags.hasFlag(viaFlag)) {
-                    List<String> via =
-                        RouteViaMetadata.parse(flags.getValue(viaFlag, null)).stream()
-                            .map(code -> code.toUpperCase(Locale.ROOT))
+                    // 只改运营运行图：出库、回送运行图在交路组里固定按权重 1 分节拍，批量编进组或关掉会改变运营车的间隔、停掉回库。
+                    targets =
+                        matchingRoutes(
+                                provider.routes().listByLine(resolvedLine.line().id()), routeArg)
+                            .stream()
+                            .filter(route -> route.operationType() == RouteOperationType.OPERATION)
                             .toList();
-                    List<String> stopping = stoppingStationCodes(provider, route);
-                    List<String> unknown =
-                        via.stream().filter(code -> !stopping.contains(code)).toList();
-                    if (!unknown.isEmpty()) {
+                  } else {
+                    targets = query.findRoute(resolvedLine.line().id(), routeArg).stream().toList();
+                  }
+                  if (targets.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component("command.route.not-found", Map.of("route", routeArg)));
+                    return;
+                  }
+                  // 编组方案与运行图无关：先查一次，方案不存在时在写任何一条之前就失败。
+                  Optional<ConsistPlan> consistPlan = Optional.empty();
+                  if (flags.hasFlag(consistPlanFlag)) {
+                    String rawPlanName = flags.getValue(consistPlanFlag, "");
+                    String planName = rawPlanName == null ? "" : rawPlanName.trim();
+                    consistPlan =
+                        provider
+                            .consistPlans()
+                            .findByOperatorAndName(resolvedLine.operator().id(), planName);
+                    if (consistPlan.isEmpty()) {
                       sender.sendMessage(
                           locale.component(
-                              "command.route.via.not-on-route",
+                              "command.route.consist-plan.not-found",
                               Map.of(
-                                  "codes",
-                                  String.join("、", unknown),
-                                  "stations",
-                                  stopping.isEmpty() ? "-" : String.join("、", stopping))));
+                                  "operator", resolvedLine.operator().code(), "name", planName)));
                       return;
                     }
-                    if (via.isEmpty()) {
-                      metadata.remove(RouteViaMetadata.KEY);
-                    } else {
-                      metadata.put(RouteViaMetadata.KEY, via);
-                    }
                   }
-                  if (flags.hasFlag(timetableCreateRouteClearFlag)) {
-                    metadata.remove(TimetableRouteMetadata.KEY_CREATE_ROUTE);
-                  }
-                  if (flags.hasFlag(timetableReturnRouteClearFlag)) {
-                    metadata.remove(TimetableRouteMetadata.KEY_RETURN_ROUTE);
-                  }
-                  if (flags.hasFlag(timetableCreateRouteFlag)
-                      && !putTimetableRouteRef(
-                          sender,
-                          locale,
-                          metadata,
-                          TimetableRouteMetadata.KEY_CREATE_ROUTE,
-                          flags.getValue(timetableCreateRouteFlag, null))) {
-                    return;
-                  }
-                  if (flags.hasFlag(timetableReturnRouteFlag)
-                      && !putTimetableRouteRef(
-                          sender,
-                          locale,
-                          metadata,
-                          TimetableRouteMetadata.KEY_RETURN_ROUTE,
-                          flags.getValue(timetableReturnRouteFlag, null))) {
-                    return;
-                  }
-                  List<SpawnGroup> lineGroups =
-                      new ArrayList<>(LineSpawnMetadata.parseGroups(resolved.line().metadata()));
-                  String targetGroup = readSpawnGroup(route.metadata()).orElse(null);
-                  if (flags.hasFlag(spawnGroupClearFlag)) {
-                    targetGroup = null;
-                  }
-                  if (flags.hasFlag(spawnGroupFlag)) {
-                    String group = normalizeSpawnGroup(flags.getValue(spawnGroupFlag, null));
-                    if (group == null) {
-                      targetGroup = null;
-                    } else {
-                      Optional<SpawnGroup> configured =
-                          LineSpawnMetadata.findGroup(lineGroups, group);
-                      if (configured.isEmpty()) {
+                  Optional<ConsistPlan> plan = consistPlan;
+
+                  java.util.function.Predicate<ResolvedRoute> apply =
+                      resolved -> {
+                        Route route = resolved.route();
+
+                        String name = flags.getValue(nameFlag, route.name());
+                        if (name != null) {
+                          name = name.trim();
+                        }
+                        if (name == null || name.isBlank()) {
+                          name = route.name();
+                        }
+                        String secondary =
+                            flags.getValue(secondaryFlag, route.secondaryName().orElse(null));
+                        if (secondary != null) {
+                          secondary = secondary.trim();
+                        }
+
+                        String patternRaw = flags.getValue(patternFlag, route.patternType().name());
+                        Optional<RoutePatternType> patternOpt =
+                            RoutePatternType.fromToken(patternRaw);
+                        if (patternOpt.isEmpty()) {
+                          sender.sendMessage(
+                              locale.component(
+                                  "command.route.enum-invalid",
+                                  Map.of("field", "pattern", "value", String.valueOf(patternRaw))));
+                          return false;
+                        }
+                        String operationRaw =
+                            flags.getValue(operationFlag, route.operationType().name());
+                        Optional<RouteOperationType> operationOpt =
+                            RouteOperationType.fromToken(operationRaw);
+                        if (operationOpt.isEmpty()) {
+                          sender.sendMessage(
+                              locale.component(
+                                  "command.route.enum-invalid",
+                                  Map.of(
+                                      "field",
+                                      "operation",
+                                      "value",
+                                      String.valueOf(operationRaw))));
+                          return false;
+                        }
+                        Integer runtime =
+                            flags.getValue(runtimeFlag, route.runtimeSeconds().orElse(null));
+                        Integer distance =
+                            flags.getValue(distanceFlag, route.distanceMeters().orElse(null));
+                        Map<String, Object> metadata = new java.util.HashMap<>(route.metadata());
+                        if (flags.hasFlag(spawnClearFlag)) {
+                          metadata.remove(DepotSpawnPattern.ROUTE_METADATA_KEY);
+                        }
+                        if (flags.hasFlag(spawnFlag)) {
+                          String spawnPattern =
+                              normalizeSpawnPattern(flags.getValue(spawnFlag, null));
+                          if (spawnPattern == null) {
+                            metadata.remove(DepotSpawnPattern.ROUTE_METADATA_KEY);
+                          } else {
+                            metadata.put(DepotSpawnPattern.ROUTE_METADATA_KEY, spawnPattern);
+                          }
+                        }
+                        if (flags.hasFlag(consistPlanClearFlag)) {
+                          metadata.remove(ConsistPlanService.ROUTE_METADATA_KEY);
+                        }
+                        if (plan.isPresent()) {
+                          metadata.put(ConsistPlanService.ROUTE_METADATA_KEY, plan.get().name());
+                        }
+                        if (flags.hasFlag(spawnEnabledFlag)) {
+                          Optional<Boolean> enabled =
+                              parseBooleanToken(flags.getValue(spawnEnabledFlag, null));
+                          if (enabled.isPresent()) {
+                            metadata.put("spawn_enabled", enabled.get());
+                          } else {
+                            sender.sendMessage(
+                                locale.component(
+                                    "command.common.invalid-boolean",
+                                    Map.of(
+                                        "value",
+                                        String.valueOf(flags.getValue(spawnEnabledFlag, null)))));
+                            return false;
+                          }
+                        }
+                        if (flags.hasFlag(spawnWeightFlag)) {
+                          Integer weight = flags.getValue(spawnWeightFlag, null);
+                          if (weight == null || weight <= 0) {
+                            metadata.remove("spawn_weight");
+                          } else {
+                            metadata.put("spawn_weight", weight);
+                          }
+                        }
+                        if (flags.hasFlag(viaClearFlag)) {
+                          metadata.remove(RouteViaMetadata.KEY);
+                        }
+                        if (flags.hasFlag(viaFlag)) {
+                          List<String> via =
+                              RouteViaMetadata.parse(flags.getValue(viaFlag, null)).stream()
+                                  .map(code -> code.toUpperCase(Locale.ROOT))
+                                  .toList();
+                          List<String> stopping = stoppingStationCodes(provider, route);
+                          List<String> unknown =
+                              via.stream().filter(code -> !stopping.contains(code)).toList();
+                          if (!unknown.isEmpty()) {
+                            sender.sendMessage(
+                                locale.component(
+                                    "command.route.via.not-on-route",
+                                    Map.of(
+                                        "codes",
+                                        String.join("、", unknown),
+                                        "stations",
+                                        stopping.isEmpty() ? "-" : String.join("、", stopping))));
+                            return false;
+                          }
+                          if (via.isEmpty()) {
+                            metadata.remove(RouteViaMetadata.KEY);
+                          } else {
+                            metadata.put(RouteViaMetadata.KEY, via);
+                          }
+                        }
+                        if (flags.hasFlag(timetableCreateRouteClearFlag)) {
+                          metadata.remove(TimetableRouteMetadata.KEY_CREATE_ROUTE);
+                        }
+                        if (flags.hasFlag(timetableReturnRouteClearFlag)) {
+                          metadata.remove(TimetableRouteMetadata.KEY_RETURN_ROUTE);
+                        }
+                        if (flags.hasFlag(timetableCreateRouteFlag)
+                            && !putTimetableRouteRef(
+                                sender,
+                                locale,
+                                metadata,
+                                TimetableRouteMetadata.KEY_CREATE_ROUTE,
+                                flags.getValue(timetableCreateRouteFlag, null))) {
+                          return false;
+                        }
+                        if (flags.hasFlag(timetableReturnRouteFlag)
+                            && !putTimetableRouteRef(
+                                sender,
+                                locale,
+                                metadata,
+                                TimetableRouteMetadata.KEY_RETURN_ROUTE,
+                                flags.getValue(timetableReturnRouteFlag, null))) {
+                          return false;
+                        }
+                        List<SpawnGroup> lineGroups =
+                            new ArrayList<>(
+                                LineSpawnMetadata.parseGroups(resolved.line().metadata()));
+                        String targetGroup = readSpawnGroup(route.metadata()).orElse(null);
+                        if (flags.hasFlag(spawnGroupClearFlag)) {
+                          targetGroup = null;
+                        }
+                        if (flags.hasFlag(spawnGroupFlag)) {
+                          String group = normalizeSpawnGroup(flags.getValue(spawnGroupFlag, null));
+                          if (group == null) {
+                            targetGroup = null;
+                          } else {
+                            Optional<SpawnGroup> configured =
+                                LineSpawnMetadata.findGroup(lineGroups, group);
+                            if (configured.isEmpty()) {
+                              sender.sendMessage(
+                                  locale.component(
+                                      "command.route.group.not-found", Map.of("group", group)));
+                              return false;
+                            }
+                            targetGroup = configured.get().name();
+                          }
+                        }
+                        if (targetGroup == null || targetGroup.isBlank()) {
+                          metadata.remove("spawn_group");
+                        } else {
+                          metadata.put("spawn_group", targetGroup);
+                        }
+
+                        Optional<Line> updatedLineOpt = Optional.empty();
+                        boolean baselineMutated =
+                            flags.hasFlag(spawnGroupBaselineFlag)
+                                || flags.hasFlag(spawnGroupBaselineClearFlag);
+                        if (baselineMutated) {
+                          if (targetGroup == null || targetGroup.isBlank()) {
+                            sender.sendMessage(
+                                locale.component("command.route.group.baseline-requires-group"));
+                            return false;
+                          }
+                          Optional<SpawnGroup> configured =
+                              LineSpawnMetadata.findGroup(lineGroups, targetGroup);
+                          if (configured.isEmpty()) {
+                            sender.sendMessage(
+                                locale.component(
+                                    "command.route.group.not-found", Map.of("group", targetGroup)));
+                            return false;
+                          }
+                          Optional<Integer> baselineSeconds = configured.get().baselineSeconds();
+                          if (flags.hasFlag(spawnGroupBaselineClearFlag)) {
+                            baselineSeconds = Optional.empty();
+                          }
+                          if (flags.hasFlag(spawnGroupBaselineFlag)) {
+                            Integer seconds = flags.getValue(spawnGroupBaselineFlag, null);
+                            if (seconds == null || seconds <= 0) {
+                              baselineSeconds = Optional.empty();
+                            } else {
+                              baselineSeconds = Optional.of(seconds);
+                            }
+                          }
+                          lineGroups =
+                              new ArrayList<>(
+                                  LineSpawnMetadata.upsertGroup(
+                                      lineGroups,
+                                      new SpawnGroup(
+                                          configured.get().name(),
+                                          baselineSeconds,
+                                          configured.get().maxOperationTrips())));
+                          updatedLineOpt =
+                              Optional.of(withSpawnGroups(resolved.line(), lineGroups));
+                          // 迁移到 line-level baseline 后，route metadata 中不再保留该字段。
+                          metadata.remove("spawn_group_baseline_sec");
+                          metadata.remove("spawn_group_baseline");
+                          metadata.remove("spawn_group_weight");
+                        }
+
+                        Route updated =
+                            new Route(
+                                route.id(),
+                                route.code(),
+                                route.lineId(),
+                                name,
+                                Optional.ofNullable(secondary),
+                                patternOpt.get(),
+                                operationOpt.get(),
+                                Optional.ofNullable(distance),
+                                Optional.ofNullable(runtime),
+                                metadata,
+                                route.createdAt(),
+                                Instant.now());
+                        if (updatedLineOpt.isPresent()) {
+                          Line updatedLine = updatedLineOpt.get();
+                          provider
+                              .transactionManager()
+                              .execute(
+                                  () -> {
+                                    provider.lines().save(updatedLine);
+                                    provider.routes().save(updated);
+                                    return null;
+                                  });
+                          plugin.refreshRouteDefinition(
+                              provider, resolved.operator(), updatedLine, updated);
+                        } else {
+                          provider.routes().save(updated);
+                          plugin.refreshRouteDefinition(
+                              provider, resolved.operator(), resolved.line(), updated);
+                        }
+                        return true;
+                      };
+                  List<String> done = new ArrayList<>();
+                  for (Route target : targets) {
+                    boolean ok =
+                        apply.test(
+                            new ResolvedRoute(
+                                resolvedLine.company(),
+                                resolvedLine.operator(),
+                                resolvedLine.line(),
+                                target));
+                    if (!ok) {
+                      if (!done.isEmpty()) {
                         sender.sendMessage(
                             locale.component(
-                                "command.route.group.not-found", Map.of("group", group)));
-                        return;
+                                "command.route.set.batch-partial",
+                                Map.of("codes", String.join("、", done))));
                       }
-                      targetGroup = configured.get().name();
-                    }
-                  }
-                  if (targetGroup == null || targetGroup.isBlank()) {
-                    metadata.remove("spawn_group");
-                  } else {
-                    metadata.put("spawn_group", targetGroup);
-                  }
-
-                  Optional<Line> updatedLineOpt = Optional.empty();
-                  boolean baselineMutated =
-                      flags.hasFlag(spawnGroupBaselineFlag)
-                          || flags.hasFlag(spawnGroupBaselineClearFlag);
-                  if (baselineMutated) {
-                    if (targetGroup == null || targetGroup.isBlank()) {
-                      sender.sendMessage(
-                          locale.component("command.route.group.baseline-requires-group"));
                       return;
                     }
-                    Optional<SpawnGroup> configured =
-                        LineSpawnMetadata.findGroup(lineGroups, targetGroup);
-                    if (configured.isEmpty()) {
-                      sender.sendMessage(
-                          locale.component(
-                              "command.route.group.not-found", Map.of("group", targetGroup)));
-                      return;
-                    }
-                    Optional<Integer> baselineSeconds = configured.get().baselineSeconds();
-                    if (flags.hasFlag(spawnGroupBaselineClearFlag)) {
-                      baselineSeconds = Optional.empty();
-                    }
-                    if (flags.hasFlag(spawnGroupBaselineFlag)) {
-                      Integer seconds = flags.getValue(spawnGroupBaselineFlag, null);
-                      if (seconds == null || seconds <= 0) {
-                        baselineSeconds = Optional.empty();
-                      } else {
-                        baselineSeconds = Optional.of(seconds);
-                      }
-                    }
-                    lineGroups =
-                        new ArrayList<>(
-                            LineSpawnMetadata.upsertGroup(
-                                lineGroups,
-                                new SpawnGroup(
-                                    configured.get().name(),
-                                    baselineSeconds,
-                                    configured.get().maxOperationTrips())));
-                    updatedLineOpt = Optional.of(withSpawnGroups(resolved.line(), lineGroups));
-                    // 迁移到 line-level baseline 后，route metadata 中不再保留该字段。
-                    metadata.remove("spawn_group_baseline_sec");
-                    metadata.remove("spawn_group_baseline");
-                    metadata.remove("spawn_group_weight");
+                    done.add(target.code());
                   }
-
-                  Route updated =
-                      new Route(
-                          route.id(),
-                          route.code(),
-                          route.lineId(),
-                          name,
-                          Optional.ofNullable(secondary),
-                          patternOpt.get(),
-                          operationOpt.get(),
-                          Optional.ofNullable(distance),
-                          Optional.ofNullable(runtime),
-                          metadata,
-                          route.createdAt(),
-                          Instant.now());
-                  if (updatedLineOpt.isPresent()) {
-                    Line updatedLine = updatedLineOpt.get();
-                    provider
-                        .transactionManager()
-                        .execute(
-                            () -> {
-                              provider.lines().save(updatedLine);
-                              provider.routes().save(updated);
-                              return null;
-                            });
-                    plugin.refreshRouteDefinition(
-                        provider, resolved.operator(), updatedLine, updated);
-                  } else {
-                    provider.routes().save(updated);
-                    plugin.refreshRouteDefinition(
-                        provider, resolved.operator(), resolved.line(), updated);
+                  if (wildcard) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.route.set.batch-success",
+                            Map.of(
+                                "count", String.valueOf(done.size()),
+                                "codes", String.join("、", done))));
+                    return;
                   }
                   sender.sendMessage(
-                      locale.component("command.route.set.success", Map.of("code", route.code())));
+                      locale.component("command.route.set.success", Map.of("code", done.get(0))));
                 }));
 
     manager.command(
@@ -2466,6 +2615,44 @@ public final class FtaRouteCommand {
         });
   }
 
+  /** {@code --consist-plan} 的补全：运营商下已保存的编组方案名。 */
+  private SuggestionProvider<CommandSender> consistPlanSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          if (prefix.startsWith("\"") || prefix.startsWith("'")) {
+            prefix = prefix.substring(1);
+          }
+          final String matchPrefix = prefix;
+          List<String> suggestions = new ArrayList<>();
+          if (matchPrefix.isBlank()) {
+            suggestions.add("<plan>");
+          }
+          Optional<StorageProvider> providerOpt = providerIfReady();
+          Optional<String> companyArg = ctx.optional("company").map(String.class::cast);
+          Optional<String> operatorArg = ctx.optional("operator").map(String.class::cast);
+          if (providerOpt.isEmpty() || companyArg.isEmpty() || operatorArg.isEmpty()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          query
+              .findCompany(companyArg.get().trim())
+              .filter(
+                  company -> canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id()))
+              .flatMap(company -> query.findOperator(company.id(), operatorArg.get().trim()))
+              .ifPresent(
+                  operator ->
+                      provider.consistPlans().listByOperator(operator.id()).stream()
+                          .map(ConsistPlan::name)
+                          .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(matchPrefix))
+                          .map(FtaRouteCommand::suggestCommandArgument)
+                          .limit(SUGGESTION_LIMIT)
+                          .forEach(suggestions::add));
+          return suggestions;
+        });
+  }
+
   /**
    * {@code --via} 的补全：本运行图停车的站码，逗号分隔、已写下的站不再提示。
    *
@@ -2638,6 +2825,21 @@ public final class FtaRouteCommand {
       return null;
     }
     return new ResolvedLine(company, operator, lineOpt.get());
+  }
+
+  /** 交路代码按通配匹配：{@code *} 代表任意个字符，不分大小写；按代码排序。 */
+  static List<Route> matchingRoutes(List<Route> routes, String pattern) {
+    String regex =
+        java.util.Arrays.stream(pattern.trim().split("\\*", -1))
+            .map(java.util.regex.Pattern::quote)
+            .collect(java.util.stream.Collectors.joining(".*"));
+    java.util.regex.Pattern compiled =
+        java.util.regex.Pattern.compile(
+            regex, java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+    return routes.stream()
+        .filter(route -> route.code() != null && compiled.matcher(route.code()).matches())
+        .sorted(java.util.Comparator.comparing(Route::code, String.CASE_INSENSITIVE_ORDER))
+        .toList();
   }
 
   private ResolvedRoute resolveRoute(
@@ -3492,7 +3694,10 @@ public final class FtaRouteCommand {
           boolean anyReachable = false;
           for (NodeId from : fromNodes) {
             for (NodeId to : toNodes) {
-              if (plugin.getRailGraphService().findWorldIdForConnectedPair(from, to).isPresent()) {
+              if (plugin
+                  .getRailGraphService()
+                  .findNetworkWorldForConnectedPair(from, to)
+                  .isPresent()) {
                 anyReachable = true;
                 break;
               }
@@ -4591,12 +4796,13 @@ public final class FtaRouteCommand {
     if (plugin.getRailGraphService() == null || pathFinder == null) {
       return Optional.empty();
     }
-    Optional<UUID> worldOpt = plugin.getRailGraphService().findWorldIdForConnectedPair(from, to);
+    Optional<UUID> worldOpt =
+        plugin.getRailGraphService().findNetworkWorldForConnectedPair(from, to);
     if (worldOpt.isEmpty()) {
       return Optional.empty();
     }
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService.RailGraphSnapshot>
-        snapshotOpt = plugin.getRailGraphService().getSnapshot(worldOpt.get());
+        snapshotOpt = plugin.getRailGraphService().getNetworkSnapshot(worldOpt.get());
     if (snapshotOpt.isEmpty() || snapshotOpt.get().graph() == null) {
       return Optional.empty();
     }
@@ -4954,7 +5160,7 @@ public final class FtaRouteCommand {
       return;
     }
     Optional<RailGraphService.RailGraphSnapshot> snapshotOpt =
-        graphService.findWorldIdForPath(waypoints).flatMap(graphService::getSnapshot);
+        graphService.findNetworkWorldForPath(waypoints).flatMap(graphService::getNetworkSnapshot);
     if (snapshotOpt.isEmpty()) {
       sender.sendMessage(
           locale.component(

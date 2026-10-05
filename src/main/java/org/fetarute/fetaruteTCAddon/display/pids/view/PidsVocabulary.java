@@ -132,6 +132,11 @@ public final class PidsVocabulary {
     return names("notice." + notice.key() + ".body");
   }
 
+  /** 公告页右上角的标签：“公告 / Notice”或“重要公告 / Important”。 */
+  public Names bulletinLabel(boolean important) {
+    return names(important ? "bulletin.important" : "bulletin.label");
+  }
+
   /** 备注标签：末班车。 */
   public String lastTrainTag() {
     return primary("remark.last-train");

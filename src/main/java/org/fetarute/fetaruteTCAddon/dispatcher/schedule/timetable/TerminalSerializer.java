@@ -353,7 +353,8 @@ public final class TerminalSerializer {
             truncated,
             input.routesEndingAtDepot(),
             input.legs(),
-            table);
+            table,
+            duty.consist());
         if (stat != null) {
           stat[3] = stat[3] + (chain.size() - i);
         }
@@ -589,7 +590,8 @@ public final class TerminalSerializer {
       VehicleDutyPlanner.Leg leg =
           lastPlan == null
               ? null
-              : legs.returnLegAt(lastPlan.terminalNodeId(), duty.startDepotNodeId()).orElse(null);
+              : legs.returnLegAt(lastPlan.terminalNodeId(), duty.startDepotNodeId(), duty.consist())
+                  .orElse(null);
       if (leg == null) {
         return null; // truncateFrom 已保证可回库；到这里是防御
       }
@@ -613,7 +615,8 @@ public final class TerminalSerializer {
             duty.plannedStartSecondOfDay() + firstDelta + returnDelayOf(startDelay, d),
             zero + returnAt,
             zero + end,
-            truncatedDuty ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT : duty.closeReason()),
+            truncatedDuty ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT : duty.closeReason(),
+            duty.consist()),
         rows);
   }
 
@@ -660,6 +663,13 @@ public final class TerminalSerializer {
     List<UUID> operationRoutes = new ArrayList<>();
     for (TimetableRoutePlan plan : input.operationPlans()) {
       operationRoutes.add(plan.routeId());
+    }
+    // 区分车型时，运营 route 的各车型变体按各自的时分占用咽喉：班次挂的是变体。
+    Set<UUID> bases = new HashSet<>(operationRoutes);
+    for (TimetableRoutePlan plan : input.provisional().routePlans()) {
+      if (plan.consist().isPresent() && bases.contains(plan.baseRouteId())) {
+        operationRoutes.add(plan.routeId());
+      }
     }
     return DepotThroats.of(input.profiles(), operationRoutes, input.legs());
   }
@@ -794,7 +804,7 @@ public final class TerminalSerializer {
       tail = 0;
     } else {
       tail =
-          legs.returnLegAt(plan.terminalNodeId())
+          legs.returnLegAt(plan.terminalNodeId(), null, duty.consist())
               .map(leg -> turnaroundSeconds + leg.runSeconds())
               .orElse(turnaroundSeconds);
     }
@@ -812,7 +822,8 @@ public final class TerminalSerializer {
       Set<UUID> truncated,
       Set<UUID> routesEndingAtDepot,
       VehicleDutyPlanner.Legs legs,
-      Timetable table) {
+      Timetable table,
+      Optional<String> consist) {
     int keep = i;
     while (keep > 0) {
       TimetableTrip last = chain.get(keep - 1);
@@ -820,7 +831,7 @@ public final class TerminalSerializer {
       boolean closable =
           plan != null
               && (routesEndingAtDepot.contains(last.routeId())
-                  || legs.returnLegAt(plan.terminalNodeId()).isPresent());
+                  || legs.returnLegAt(plan.terminalNodeId(), null, consist).isPresent());
       if (closable) {
         break;
       }

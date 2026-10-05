@@ -165,6 +165,14 @@ public final class FtaSpawnCommand {
         manager
             .commandBuilder("fta")
             .literal("spawn")
+            .literal("consist")
+            .permission("fetarute.spawn")
+            .handler(ctx -> listConsistShares(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("spawn")
             .literal("reset")
             .permission("fetarute.spawn")
             .handler(ctx -> resetQueue(ctx.sender())));
@@ -214,6 +222,11 @@ public final class FtaSpawnCommand {
         "/fta spawn pending ");
     sendHelpEntry(
         sender,
+        locale.component("command.spawn.help.entry-consist"),
+        locale.component("command.spawn.help.hover-consist"),
+        "/fta spawn consist");
+    sendHelpEntry(
+        sender,
         locale.component("command.spawn.help.entry-reset"),
         locale.component("command.spawn.help.hover-reset"),
         "/fta spawn reset");
@@ -222,6 +235,75 @@ public final class FtaSpawnCommand {
         locale.component("command.spawn.help.entry-export-csv"),
         locale.component("command.spawn.help.hover-export-csv"),
         "/fta spawn export csv ");
+  }
+
+  /**
+   * 绑了编组方案的可发车 route：各车型已跑的班次与目标份额。
+   *
+   * <p>班次只在内存里记，重启或方案改动后从零开始。
+   */
+  private void listConsistShares(CommandSender sender) {
+    LocaleManager locale = plugin.getLocaleManager();
+    var mgrOpt = plugin.getSpawnManager();
+    var consistOpt = plugin.getConsistPlanService();
+    if (mgrOpt.isEmpty() || consistOpt.isEmpty()) {
+      sender.sendMessage(locale.component("command.spawn.not-ready"));
+      return;
+    }
+    List<SpawnService> services =
+        mgrOpt.get().snapshotPlan().services().stream()
+            .sorted(
+                java.util.Comparator.comparing(SpawnService::lineCode)
+                    .thenComparing(SpawnService::routeCode))
+            .toList();
+    int shown = 0;
+    for (SpawnService service : services) {
+      var planOpt = consistOpt.get().planForRoute(service.routeId());
+      if (planOpt.isEmpty()) {
+        continue;
+      }
+      if (shown == 0) {
+        sender.sendMessage(locale.component("command.spawn.consist.header"));
+      }
+      shown++;
+      var plan = planOpt.get();
+      Map<String, Long> counts = consistOpt.get().counts(service.routeId());
+      long totalTrips = 0L;
+      int totalWeight = 0;
+      for (var member : plan.members()) {
+        totalTrips += counts.getOrDefault(member.key(), 0L);
+        totalWeight += member.weight();
+      }
+      List<String> parts = new ArrayList<>();
+      for (var member : plan.members()) {
+        long trips = counts.getOrDefault(member.key(), 0L);
+        parts.add(
+            locale
+                .text("command.spawn.consist.part")
+                .replace("<consist>", member.entry().pattern())
+                .replace("<trips>", String.valueOf(trips))
+                .replace(
+                    "<actual>",
+                    totalTrips == 0L ? "-" : String.valueOf(Math.round(100.0 * trips / totalTrips)))
+                .replace(
+                    "<target>", String.valueOf(Math.round(100.0 * member.weight() / totalWeight))));
+      }
+      sender.sendMessage(
+          locale.component(
+              "command.spawn.consist.entry",
+              Map.of(
+                  "line",
+                  service.lineCode(),
+                  "route",
+                  service.routeCode(),
+                  "plan",
+                  plan.plan().name(),
+                  "parts",
+                  String.join("；", parts))));
+    }
+    if (shown == 0) {
+      sender.sendMessage(locale.component("command.spawn.consist.empty"));
+    }
   }
 
   private void sendHelpEntry(

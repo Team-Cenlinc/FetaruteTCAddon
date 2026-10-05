@@ -75,6 +75,27 @@ class ResourcePhasePlannerTest {
         "反向 δ 是端点多等，必须不超过 --max-idle");
   }
 
+  /** 闲置上限很大（回收关着时是一整天）时，反向 δ 也只扫一个间隔：再往后与减去一个间隔的周期相同。 */
+  @Test
+  void reverseDeltaIsAlsoBoundedByInterval() {
+    Fixture fixture = opposingPair(600);
+
+    PhasePlanner.Phases after =
+        ResourcePhasePlanner.refine(
+            fixture.phases(),
+            fixture.groups(),
+            fixture.intervals(),
+            fixture.templates(),
+            fixture.profiles(),
+            index(),
+            SEPARATION,
+            MAX_WAIT,
+            86_400,
+            java.util.Set.of());
+
+    assertTrue(after.deltaByDirection().getOrDefault(fixture.reverseKey(), 0) <= 600);
+  }
+
   /** 同一份输入跑两次，δ 与说明逐字段相同——第三层不能引入任何不确定性。 */
   @Test
   void refineIsDeterministic() {

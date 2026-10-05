@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
@@ -56,7 +57,7 @@ public final class RailGraphPathFinder {
    * <p>运行时每个信号周期都要把交路相邻途经点展开成路径，同一对节点每辆车每轮都重跑一遍搜索。图快照不可变（重建即换新实例）， 运维覆盖视图只在其上加封锁，所以“快照 + 此刻被覆盖封锁的边
    * + 起讫点”相同，结果就相同。快照不再被引用时整张表随之回收。 只记 {@link Options#shortestDistance()}：其他代价模型可能读运行时状态。
    */
-  private static final Map<SimpleRailGraph, Map<MemoKey, Optional<RailGraphPath>>> MEMO =
+  private static final Map<RailGraph, Map<MemoKey, Optional<RailGraphPath>>> MEMO =
       Collections.synchronizedMap(new WeakHashMap<>());
 
   /** 最短路查询选项。 */
@@ -92,14 +93,16 @@ public final class RailGraphPathFinder {
     if (options != SHORTEST_DISTANCE) {
       return search(graph, from, to, options);
     }
-    SimpleRailGraph snapshot;
+    // 跨世界路网的视图同样不可变（路网重建即换新视图），按视图记忆。
+    RailGraph snapshot;
     Set<EdgeId> overrideBlocked;
-    if (graph instanceof SimpleRailGraph simple) {
-      snapshot = simple;
+    if (graph instanceof SimpleRailGraph || graph instanceof RailNetwork.View) {
+      snapshot = graph;
       overrideBlocked = Set.of();
     } else if (graph instanceof EdgeOverrideRailGraph view
-        && view.delegate() instanceof SimpleRailGraph simple) {
-      snapshot = simple;
+        && (view.delegate() instanceof SimpleRailGraph
+            || view.delegate() instanceof RailNetwork.View)) {
+      snapshot = view.delegate();
       overrideBlocked = view.overrideBlockedEdges();
     } else {
       return search(graph, from, to, options);

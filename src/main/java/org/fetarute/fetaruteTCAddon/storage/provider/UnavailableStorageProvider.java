@@ -11,6 +11,8 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
@@ -18,9 +20,12 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailGraphSnapsho
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailInterlockingSnapshotRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.display.pids.bulletin.repository.PidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransaction;
@@ -131,6 +136,21 @@ public final class UnavailableStorageProvider implements StorageProvider {
   }
 
   @Override
+  public DriveTaskRecordRepository driveTaskRecords() {
+    return unsupported(DriveTaskRecordRepository.class);
+  }
+
+  @Override
+  public LicenseRepository licenses() {
+    return unsupported(LicenseRepository.class);
+  }
+
+  @Override
+  public PortalLinkRepository portalLinks() {
+    return unsupported(PortalLinkRepository.class);
+  }
+
+  @Override
   public TimetableRepository timetables() {
     return unsupported(TimetableRepository.class);
   }
@@ -141,8 +161,18 @@ public final class UnavailableStorageProvider implements StorageProvider {
   }
 
   @Override
+  public ConsistPlanRepository consistPlans() {
+    return unsupported(ConsistPlanRepository.class);
+  }
+
+  @Override
   public PidsScreenRepository pidsScreens() {
     return unsupported(PidsScreenRepository.class);
+  }
+
+  @Override
+  public PidsBulletinRepository pidsBulletins() {
+    return unsupported(PidsBulletinRepository.class);
   }
 
   @Override

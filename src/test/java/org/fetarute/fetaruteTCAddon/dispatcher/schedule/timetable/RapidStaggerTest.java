@@ -30,7 +30,7 @@ class RapidStaggerTest {
     assertEquals(List.of(), RapidStagger.shifts(10));
   }
 
-  /** 候选可用：排得开、不放宽、班次不少、高峰最多多用一列车。 */
+  /** 候选可用：排得开、不放宽、中间时段班次不少、高峰最多多用一列车。 */
   @Test
   void aCandidateMustKeepTripsVehiclesAndTheTargetInterval() {
     RapidStagger.Outcome base = outcome(true, false, 100, 10);
@@ -190,6 +190,50 @@ class RapidStaggerTest {
     assertEquals(7, search.tried());
   }
 
+  /**
+   * 两个口径：搜索里的早停按搜索口径（同上一例，30、40 两档被卡 0，扫到 50 停、细试 25、35），最终答案在编过的候选里按报告口径挑。 报告口径下 40 只被卡 5 秒、30 被卡
+   * 8 秒，选 40；没编过的位置不补。
+   */
+  @Test
+  void theSearchStopsByItsOwnMeasureAndTheAnswerIsPickedByTheReportedOne() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L)
+            .reporting(shift -> shift.get("G") == 40 ? 5L : shift.get("G") == 30 ? 8L : 106L);
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L, 110L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator);
+
+    assertEquals(List.of(10, 20, 30, 40, 50, 25, 35), evaluator.shifts, "早停与只看搜索口径时一样");
+    RapidStagger.Candidate best = search.improved().orElseThrow();
+    assertEquals(Map.of("G", 40), best.shift());
+    assertEquals(0L, best.measure().seconds());
+    assertEquals(5L, best.reported().seconds());
+  }
+
+  /** 搜索口径下错开了，报告口径下却没有一个比原表好：保持原表。 */
+  @Test
+  void noCandidateBetterByTheReportedMeasureKeepsTheOriginal() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.get("G") == 30 ? 0L : 100L).reporting(shift -> 50L);
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L, 40L),
+            measure -> List.of(),
+            measure -> List.of(),
+            false,
+            evaluator);
+
+    assertTrue(search.improved().isEmpty(), search::toString);
+  }
+
   /** 平移错不开时，在最好的几个平移上试快车加停；加停把被卡降到 0 的就选它。 */
   @Test
   void whenShiftingIsNotEnoughTheRapidDwells() {
@@ -266,14 +310,41 @@ class RapidStaggerTest {
     RapidStagger.Measure caught = measure(10L, 1, List.of());
     RapidStagger.Measure clear = measure(0L, 0, List.of());
 
-    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, caught, false));
-    assertEquals(RapidStagger.Plan.TURNBACK_ONLY, RapidStagger.plan(true, caught, true));
-    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, caught, false));
-    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(true, clear, false));
+    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, caught, caught, false));
+    assertEquals(RapidStagger.Plan.TURNBACK_ONLY, RapidStagger.plan(true, caught, caught, true));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, caught, caught, false));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(true, clear, clear, false));
     assertEquals(
         RapidStagger.Plan.SEARCH,
-        RapidStagger.plan(true, measure(0L, 0, List.of(), 40L), false),
+        RapidStagger.plan(
+            true, measure(0L, 0, List.of(), 40L), measure(0L, 0, List.of(), 40L), false),
         "共线不被卡、却在表里让车等待，也是快车损失");
+  }
+
+  /** 占用区间口径量不出、只有闭塞时间口径量出被卡（快车跟在停站车后面减速）也要搜。 */
+  @Test
+  void aLossSeenOnlyByTheReportedMeasureAlsoTriggersTheSearch() {
+    RapidStagger.Measure clear = measure(0L, 0, List.of());
+    RapidStagger.Measure slowed = measure(1872L, 117, List.of());
+
+    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, clear, slowed, false));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, clear, slowed, false));
+  }
+
+  /**
+   * 班次只比中间时段：候选少的几班若都在首末一个来回之内，照样可用；中间时段少了仍不可用。
+   *
+   * <p>原表 100 班、中间时段 90 班；候选 96 班，中间时段同样 90 班可用，中间时段 89 班不可用。
+   */
+  @Test
+  void tripsLostOnlyAtTheServiceEdgesDoNotDisqualifyACandidate() {
+    RapidStagger.Outcome base = new RapidStagger.Outcome(true, false, 100, 10, 0, 0, 0L, 90);
+
+    assertTrue(
+        RapidStagger.acceptable(base, new RapidStagger.Outcome(true, false, 96, 10, 0, 0, 0L, 90)));
+    assertFalse(
+        RapidStagger.acceptable(base, new RapidStagger.Outcome(true, false, 99, 10, 0, 0, 0L, 89)),
+        "中间时段少了一班");
   }
 
   /** 实测写进构建结果：结构化合计（报告据此给按钮）与一行说明。 */
@@ -368,6 +439,36 @@ class RapidStaggerTest {
         List.of(120, 150), evaluator.dwells.stream().map(RapidStagger.Dwell::seconds).toList());
     assertTrue(evaluator.history.isEmpty(), "错开了就不再平移");
     assertEquals(2, search.tried());
+  }
+
+  /**
+   * 加长折返里已经有一档快车完全不被卡（150 秒）、却不是全网损失最小的那档（更长的几档快车仍被卡 30 秒、但表里不等）：
+   * 搜索照样在这一步收工，不再去扫平移——收不收工看的是"有没有错开的"，不是排第一的那个。
+   */
+  @Test
+  void theSearchStopsOnceAnyBetterCandidateIsClearEvenIfAnotherRanksFirst() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> 500L)
+            .detailing(
+                (shift, dwell) ->
+                    dwell.seconds() == 120
+                        ? new long[] {80L, 0L, 0L}
+                        : dwell.seconds() == 150
+                            ? new long[] {0L, 0L, 90L}
+                            : new long[] {30L, 0L, 0L});
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(turnbackPoint(120)),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator);
+
+    assertTrue(evaluator.history.isEmpty(), "已经有错开的，不再平移");
+    assertEquals(RapidStagger.TURNBACK_MARGINS.size(), search.tried());
+    assertTrue(search.improved().isPresent());
   }
 
   /** 加长折返错不开时照常往下：平移、中途加停接着试，几样里取最好的。 */
@@ -798,12 +899,18 @@ class RapidStaggerTest {
   }
 
   private static RapidStagger.Candidate base(long caught) {
+    return base(caught, caught);
+  }
+
+  /** 原表：搜索口径被卡 {@code caught}，报告口径被卡 {@code reported}。 */
+  private static RapidStagger.Candidate base(long caught, long reported) {
     return new RapidStagger.Candidate(
         Map.of(),
         Optional.empty(),
         TimetableBuildResult.failure("原表", List.of()),
         outcome(true, false, 100, 10, 0, 0),
-        measure(caught, caught > 0 ? 1 : 0, List.of()));
+        measure(caught, caught > 0 ? 1 : 0, List.of()),
+        measure(reported, reported > 0 ? 1 : 0, List.of()));
   }
 
   private static RapidStagger.Dwell dwellPoint() {
@@ -814,7 +921,8 @@ class RapidStaggerTest {
   /**
    * 假的编表：按平移（与加停）给出被卡秒数；负数表示这个候选不可用。
    *
-   * <p>要细到快车等待与全网等待时用 {@code detailing}/{@code shiftDetailing}，给出 {被卡, 快车等待, 全网等待}。
+   * <p>要细到快车等待与全网等待时用 {@code detailing}/{@code shiftDetailing}，给出 {被卡, 快车等待, 全网等待}。报告口径另给时用 {@code
+   * reporting}（只管平移），否则与搜索口径相同。
    */
   private static final class FakeEvaluator implements RapidStagger.Evaluator {
     private final java.util.function.ToLongFunction<Map<String, Integer>> caughtByShift;
@@ -823,6 +931,7 @@ class RapidStaggerTest {
     private java.util.function.BiFunction<Map<String, Integer>, RapidStagger.Dwell, long[]>
         dwellDetail;
     private java.util.function.Function<Map<String, Integer>, long[]> shiftDetail;
+    private java.util.function.ToLongFunction<Map<String, Integer>> reportedByShift;
     private final List<Integer> shifts = new java.util.ArrayList<>();
     private final List<Map<String, Integer>> history = new java.util.ArrayList<>();
     private final List<RapidStagger.Dwell> dwells = new java.util.ArrayList<>();
@@ -848,6 +957,11 @@ class RapidStaggerTest {
       return this;
     }
 
+    FakeEvaluator reporting(java.util.function.ToLongFunction<Map<String, Integer>> reported) {
+      this.reportedByShift = reported;
+      return this;
+    }
+
     @Override
     public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
       history.add(Map.copyOf(shift));
@@ -855,7 +969,21 @@ class RapidStaggerTest {
       if (shiftDetail != null) {
         return candidate(shift, Optional.empty(), shiftDetail.apply(shift));
       }
-      return candidate(shift, Optional.empty(), caughtByShift.applyAsLong(shift));
+      Optional<RapidStagger.Candidate> candidate =
+          candidate(shift, Optional.empty(), caughtByShift.applyAsLong(shift));
+      if (reportedByShift == null) {
+        return candidate;
+      }
+      long reported = reportedByShift.applyAsLong(shift);
+      return candidate.map(
+          one ->
+              new RapidStagger.Candidate(
+                  one.shift(),
+                  one.dwell(),
+                  one.result(),
+                  one.outcome(),
+                  one.measure(),
+                  measure(reported, reported > 0 ? 1 : 0, List.of())));
     }
 
     @Override

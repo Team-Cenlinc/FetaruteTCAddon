@@ -1231,7 +1231,8 @@ public final class ResourceRepair {
               truncated,
               input.routesEndingAtDepot(),
               input.legs(),
-              table);
+              table,
+              duty.consist());
           return true;
         }
         actual.put(trip.id(), dep);

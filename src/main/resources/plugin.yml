@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids>
+    usage: /fta <info|help|reload|company|operator|line|route|consist|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids|drive|license>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
@@ -23,9 +23,12 @@ permissions:
       fetarute.graph.continue: true
       fetarute.graph.status: true
       fetarute.graph.cancel: true
+      fetarute.graph.portal: true
+      fetarute.sign.stopmark: true
       fetarute.graph.delete: true
       fetarute.graph.info: true
       fetarute.graph.sign: true
+      fetarute.graph.alert: true
       fetarute.graph.query: true
       fetarute.graph.edge: true
       fetarute.speed: true
@@ -42,6 +45,19 @@ permissions:
       fetarute.eta: true
       fetarute.train.config: true
       fetarute.train.debug: true
+      fetarute.drive: true
+      fetarute.drive.admin: true
+      fetarute.drive.driver: true
+      fetarute.drive.driver.admin: true
+      fetarute.drive.free: true
+      fetarute.drive.ato: true
+      fetarute.drive.level: true
+      fetarute.drive.records: true
+      fetarute.drive.top: true
+      fetarute.drive.tutorial: true
+      fetarute.drive.player: true
+      fetarute.license: true
+      fetarute.license.admin: true
       fetarute.template: true
       fetarute.timetable: true
       fetarute.timetable.record: true
@@ -67,6 +83,69 @@ permissions:
     default: op
   fetarute.timetable.manage:
     description: 编成、发布与删除时刻表（/fta timetable build|publish|delete）
+    default: op
+  fetarute.drive.player:
+    description: 打包授予全部玩家驾驶功能（基本命令、驾驶非调度列车、驾驶任务、ATO、自选仿真等级、驾驶记录、排行、新手教程）
+    default: op
+    children:
+      fetarute.drive: true
+      fetarute.drive.free: true
+      fetarute.drive.driver: true
+      fetarute.drive.ato: true
+      fetarute.drive.level: true
+      fetarute.drive.records: true
+      fetarute.drive.top: true
+      fetarute.drive.tutorial: true
+  fetarute.drive:
+    description: 手动驾驶的基本命令（/fta drive on|off|status|reverser）；子节点含驾驶非调度列车与新手教程
+    default: op
+    children:
+      fetarute.drive.free: true
+      fetarute.drive.tutorial: true
+  fetarute.drive.free:
+    description: 驾驶非调度列车（自由驾驶）；单独设为 false 时只能驾驶领取了任务的调度列车
+    default: op
+  fetarute.drive.tutorial:
+    description: 新手教程与驾驶情境提示（/fta drive tutorial）
+    default: op
+  fetarute.drive.admin:
+    description: 驾驶管理：查看与强制结束驾驶会话、收回任务、交还调度列车、拥堵熔断、驾驶诊断、查看他人驾驶记录、故障与救援（/fta drive list|stop|revoke|handback|breaker|probe|records <玩家>|fault|rescue）
+    default: op
+  fetarute.drive.driver:
+    description: 领取驾驶任务、驾驶调度列车（/fta drive tasks|task|mode）；子节点含手动驾驶的基本命令、ATO、自选仿真等级、驾驶记录与排行
+    default: op
+    children:
+      fetarute.drive: true
+      fetarute.drive.ato: true
+      fetarute.drive.level: true
+      fetarute.drive.records: true
+      fetarute.drive.top: true
+  fetarute.drive.ato:
+    description: 以 ATO 方式领取与驾驶调度列车（任务板右键、/fta drive mode ato）
+    default: op
+  fetarute.drive.level:
+    description: 在任务板上自选仿真等级（标准或仿真），选择记在玩家数据里；没有时一律用 drive.yml 的 level
+    default: op
+  fetarute.drive.records:
+    description: 查看自己的驾驶记录（/fta drive records）
+    default: op
+  fetarute.drive.top:
+    description: 查看驾驶排行（/fta drive top）
+    default: op
+  fetarute.drive.driver.admin:
+    description: 不领任务直接接管停站中的调度列车
+    default: op
+  fetarute.license:
+    description: 驾驶证：查看自己的驾驶证、报名考试、补发（/fta license）；考过后插件按驾驶证替玩家挂上驾驶权限
+    default: true
+  fetarute.license.admin:
+    description: 驾驶证管理：发证、吊销、查询他人的驾驶证（/fta license grant|revoke|list）
+    default: op
+  fetarute.graph.portal:
+    description: 查看与管理跨世界传送门连接（/fta graph portal）
+    default: op
+  fetarute.sign.stopmark:
+    description: 建停车位置标牌子（stopmark）
     default: op
   fetarute.reload:
     description: 重新加载 FetaruteTCAddon 配置
@@ -112,6 +191,9 @@ permissions:
     default: op
   fetarute.graph.sign:
     description: 快速设置节点牌子内容（/fta graph sign ...）
+    default: op
+  fetarute.graph.alert:
+    description: 接收调度图失效告警（节点牌子被拆除或新增导致图快照失效时）
     default: op
   fetarute.depot.spawn:
     description: 手动触发车库生成列车（/fta depot spawn）

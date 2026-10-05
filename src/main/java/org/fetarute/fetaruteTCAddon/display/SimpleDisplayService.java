@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import java.util.Objects;
 import java.util.Optional;
 import org.bukkit.Bukkit;
@@ -11,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.display.hud.HudLanguageRotation;
+import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContextResolver;
 import org.fetarute.fetaruteTCAddon.display.hud.actionbar.ActionBarTrainHudManager;
 import org.fetarute.fetaruteTCAddon.display.hud.bossbar.BossBarTrainHudManager;
@@ -32,6 +34,7 @@ public final class SimpleDisplayService implements DisplayService {
   private final ActionBarTrainHudManager actionBarHud;
   private final ScoreboardTrainHudManager scoreboardHud;
   private final TripDialogService tripDialog;
+  private final TrainHudContextResolver resolver;
 
   private BukkitTask bossBarTask;
   private BukkitTask actionBarTask;
@@ -49,7 +52,7 @@ public final class SimpleDisplayService implements DisplayService {
     this.configManager = Objects.requireNonNull(configManager, "configManager");
     HudDefaultTemplateService defaultTemplateService = plugin.getHudDefaultTemplateService();
     // 三块 HUD 与后续站点对话框共用一个解析器：同一 tick 内同一列车的上下文、占位符与前方各站只算一次。
-    TrainHudContextResolver resolver =
+    this.resolver =
         new TrainHudContextResolver(
             plugin,
             plugin.getLocaleManager(),
@@ -164,6 +167,11 @@ public final class SimpleDisplayService implements DisplayService {
     scoreboardHud.shutdown();
     scoreboardHud.unregister();
     tripDialog.unregister();
+  }
+
+  @Override
+  public Optional<TrainHudContext> hudContext(MinecartGroup group) {
+    return resolver.resolveContext(group);
   }
 
   @Override

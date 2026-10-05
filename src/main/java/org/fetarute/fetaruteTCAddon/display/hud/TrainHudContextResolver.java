@@ -23,6 +23,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
@@ -333,7 +334,11 @@ public final class TrainHudContextResolver {
             throughService,
             outOfService,
             nextStopTransfers,
-            nextStopDelay);
+            nextStopDelay,
+            nextStopOpt
+                .filter(NextStop::ahead)
+                .map(next -> OptionalInt.of(next.stopIndex()))
+                .orElse(OptionalInt.empty()));
     return Optional.of(context);
   }
 

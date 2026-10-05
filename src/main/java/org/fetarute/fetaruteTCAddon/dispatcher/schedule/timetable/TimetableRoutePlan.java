@@ -32,6 +32,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
  * @param notes 构建期说明（例如为什么这条 route 被降级）
  * @param external <b>不受本表管辖的走行线路</b>：别的线的，或别的 operator 的（直通运转里显式指定的外方出库/回库）。 它进冲突足迹、进交路，但它所在线路自己的
  *     headway 票照常发
+ * @param consist 这份时分是哪个车型的：区分车型编表时，同一条 route 每个允许的车型各有一份（见 {@link ConsistFleet}）； 不区分车型的 route
+ *     与基础时分（允许车型里最慢的那份）为空
  */
 public record TimetableRoutePlan(
     UUID routeId,
@@ -43,7 +45,55 @@ public record TimetableRoutePlan(
     String terminalNodeId,
     Optional<String> depotNodeId,
     Optional<String> notes,
-    boolean external) {
+    boolean external,
+    Optional<ConsistVariant> consist) {
+
+  /**
+   * 车型变体：某条 route 按某个车型跑的时分。
+   *
+   * <p>编表内部变体用自己的 ID（{@link ConsistFleet#variantId}）登记，各环节按它查时分与足迹；落库前折回基础 route 的 ID，
+   * 车次的车型由它所在交路的车型决定。
+   *
+   * @param key 车型键
+   * @param baseRouteId 基础 route
+   * @param lengthBlocks 车长（格）
+   * @param tailBlocks 车尾出清多算的长度（格），见 {@link ConsistFleet#tailBlocks}
+   */
+  public record ConsistVariant(
+      String key, UUID baseRouteId, double lengthBlocks, double tailBlocks) {
+    public ConsistVariant {
+      Objects.requireNonNull(key, "key");
+      Objects.requireNonNull(baseRouteId, "baseRouteId");
+      lengthBlocks = Double.isFinite(lengthBlocks) && lengthBlocks > 0.0 ? lengthBlocks : 0.0;
+      tailBlocks = Double.isFinite(tailBlocks) && tailBlocks > 0.0 ? tailBlocks : 0.0;
+    }
+  }
+
+  /** 不分车型的计划。 */
+  public TimetableRoutePlan(
+      UUID routeId,
+      String routeCode,
+      RouteOperationType kind,
+      int weight,
+      List<TimetableStop> stops,
+      String originNodeId,
+      String terminalNodeId,
+      Optional<String> depotNodeId,
+      Optional<String> notes,
+      boolean external) {
+    this(
+        routeId,
+        routeCode,
+        kind,
+        weight,
+        stops,
+        originNodeId,
+        terminalNodeId,
+        depotNodeId,
+        notes,
+        external,
+        Optional.empty());
+  }
 
   /** 本 operator 自己的线路。 */
   public TimetableRoutePlan(
@@ -96,6 +146,51 @@ public record TimetableRoutePlan(
             ? Optional.empty()
             : depotNodeId.map(String::trim).filter(s -> !s.isBlank());
     notes = notes == null ? Optional.empty() : notes.map(String::trim).filter(s -> !s.isBlank());
+    consist = consist == null ? Optional.empty() : consist;
+  }
+
+  /** 这份计划所属的 route：车型变体返回基础 route，其余就是 {@code routeId}。 */
+  public UUID baseRouteId() {
+    return consist.map(ConsistVariant::baseRouteId).orElse(routeId);
+  }
+
+  /**
+   * 同一条 route 按某个车型跑的变体计划：route 的其余信息照抄，时分换成这个车型的。
+   *
+   * @param variantId 变体 ID
+   * @param variant 车型
+   * @param variantStops 这个车型的站间时分
+   */
+  public TimetableRoutePlan asVariant(
+      UUID variantId, ConsistVariant variant, List<TimetableStop> variantStops) {
+    return new TimetableRoutePlan(
+        variantId,
+        routeCode,
+        kind,
+        weight,
+        variantStops,
+        originNodeId,
+        terminalNodeId,
+        depotNodeId,
+        notes,
+        external,
+        Optional.of(variant));
+  }
+
+  /** 换一个 route ID，其余不变（变体折回基础 route 时用）。 */
+  public TimetableRoutePlan withRouteId(UUID nextRouteId) {
+    return new TimetableRoutePlan(
+        nextRouteId,
+        routeCode,
+        kind,
+        weight,
+        stops,
+        originNodeId,
+        terminalNodeId,
+        depotNodeId,
+        notes,
+        external,
+        consist);
   }
 
   /** 运营 route 的便捷构造。 */

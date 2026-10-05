@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.display;
 
+import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.display.hud.TrainHudContext;
 import org.fetarute.fetaruteTCAddon.display.hud.trip.TripDialogService;
 
 /**
@@ -15,6 +17,11 @@ public interface DisplayService {
 
   /** 停止展示层（取消任务并释放资源）。 */
   void stop();
+
+  /** 列车的车内 HUD 上下文（下一站、终点等，与乘客看到的一致）；不是 FTA 管控列车或展示层未启用时为空。 */
+  default Optional<TrainHudContext> hudContext(MinecartGroup group) {
+    return Optional.empty();
+  }
 
   /** 后续站点对话框；展示层未启用时为空。 */
   default Optional<TripDialogService> tripDialog() {

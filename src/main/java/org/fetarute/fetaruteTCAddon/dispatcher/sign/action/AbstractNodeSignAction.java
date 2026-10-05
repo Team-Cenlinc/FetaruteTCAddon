@@ -16,18 +16,17 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
-import net.kyori.adventure.text.serializer.plain.PlainTextComponentSerializer;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
 import org.bukkit.block.Sign;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
-import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeTypeNames;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignTextParser;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
@@ -38,9 +37,6 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * TrainCarts destination 名称供 TC 清缓存与诊断使用。
  */
 abstract class AbstractNodeSignAction extends SignAction {
-
-  private static final PlainTextComponentSerializer PLAIN_TEXT =
-      PlainTextComponentSerializer.plainText();
 
   private final String header;
   protected final SignNodeRegistry registry;
@@ -135,7 +131,8 @@ abstract class AbstractNodeSignAction extends SignAction {
               TagResolver.builder()
                   .resolver(Placeholder.unparsed("node", definition.get().nodeId().value()))
                   .resolver(
-                      Placeholder.unparsed("type", localizedTypeName(conflictInfo.definition())))
+                      Placeholder.unparsed(
+                          "type", SignNodeTypeNames.localized(locale, conflictInfo.definition())))
                   .resolver(Placeholder.component("location", location))
                   .build();
           event.getPlayer().sendMessage(locale.component("sign.conflict", resolver));
@@ -167,7 +164,7 @@ abstract class AbstractNodeSignAction extends SignAction {
                         "node",
                         definition.get().nodeId().value(),
                         "type",
-                        localizedTypeName(definition.get()))));
+                        SignNodeTypeNames.localized(locale, definition.get()))));
       }
     } else if (event.getPlayer() != null && locale != null) {
       String invalidKey = "sign.invalid." + header.toLowerCase(java.util.Locale.ROOT);
@@ -413,35 +410,5 @@ abstract class AbstractNodeSignAction extends SignAction {
         + ","
         + location.getBlockZ()
         + ")";
-  }
-
-  /**
-   * 将节点类型翻译为人类可读文本，用于 sign.created / sign.conflict 等提示。
-   *
-   * <p>语言文件中的 sign.type.* 是文本值而不是语言键；因此需要在这里解析为组件后再转为纯文本字符串填入占位符。
-   */
-  private String localizedTypeName(SignNodeDefinition definition) {
-    if (definition == null) {
-      return "";
-    }
-    if (locale == null) {
-      return definition.nodeType().name();
-    }
-
-    String key;
-    // 节点的“显示类型”优先使用 WaypointKind（更细粒度，例如站咽喉/车库咽喉）；缺失时回退到 NodeType。
-    WaypointKind kind = definition.waypointMetadata().map(metadata -> metadata.kind()).orElse(null);
-    if (kind == WaypointKind.STATION_THROAT) {
-      key = "sign.type.station_throat";
-    } else if (kind == WaypointKind.DEPOT_THROAT) {
-      key = "sign.type.depot_throat";
-    } else if (kind == WaypointKind.STATION) {
-      key = "sign.type.station";
-    } else if (kind == WaypointKind.DEPOT) {
-      key = "sign.type.depot";
-    } else {
-      key = "sign.type." + definition.nodeType().name().toLowerCase(java.util.Locale.ROOT);
-    }
-    return PLAIN_TEXT.serialize(locale.component(key));
   }
 }

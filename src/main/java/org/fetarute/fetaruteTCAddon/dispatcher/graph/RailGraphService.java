@@ -58,6 +58,25 @@ public final class RailGraphService {
       new ConcurrentHashMap<>();
 
   private final Object edgeOverrideLock = new Object();
+
+  /** 快照每次增删递增，跨世界路网据此判断要不要重建。 */
+  private final java.util.concurrent.atomic.AtomicLong snapshotVersion =
+      new java.util.concurrent.atomic.AtomicLong();
+
+  private volatile boolean crossWorld;
+  private volatile org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry
+      portalLinks;
+  private volatile CachedNetwork cachedNetwork;
+
+  private record CachedNetwork(
+      long snapshotVersion,
+      long linkRevision,
+      Instant builtAt,
+      org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network) {}
+
+  /** 路网里各世界的运维封锁可能带时限：路网至少每隔这么久按当时的封锁重建一次。 */
+  private static final java.time.Duration NETWORK_MAX_AGE = java.time.Duration.ofSeconds(30);
+
   private final ConcurrentMap<UUID, ConcurrentMap<String, RailComponentCautionRecord>>
       componentCautions = new ConcurrentHashMap<>();
   private volatile BooleanSupplier snapshotActivationGuard = () -> true;
@@ -81,6 +100,11 @@ public final class RailGraphService {
     UUID worldId = world.getUID();
     activateSnapshot(worldId, graph, Instant.now());
     return graph;
+  }
+
+  /** 图快照版本：任何世界的快照切换、移出都会让它变；按它判断按旧图算的缓存是否作废。 */
+  public long snapshotVersion() {
+    return snapshotVersion.get();
   }
 
   public void putSnapshot(World world, RailGraph graph, Instant builtAt) {
@@ -114,11 +138,32 @@ public final class RailGraphService {
     validateSnapshotActivation(world.getUID(), graph);
   }
 
+  /**
+   * 激活一张在旧图上只增不改的增补图，跳过"仍有任何占用就拒绝切换联锁投影"的全局闸。
+   *
+   * <p>调用方必须已经逐键核验：受影响的旧区间（资源键会变的那些）当前没有任何占用与排队。全局闸只看"有没有占用"，运行中几乎总是有，
+   * 增补便永远做不了；逐键核验覆盖的正是它要防的事——旧键被持有时换图，新旧申请会互相看不见。
+   */
+  public void putVerifiedAppendSnapshot(World world, RailGraph graph, Instant builtAt) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(builtAt, "builtAt");
+    activateSnapshot(world.getUID(), graph, builtAt, false);
+  }
+
   private void activateSnapshot(UUID worldId, RailGraph graph, Instant builtAt) {
-    validateSnapshotActivation(worldId, graph);
+    activateSnapshot(worldId, graph, builtAt, true);
+  }
+
+  private void activateSnapshot(
+      UUID worldId, RailGraph graph, Instant builtAt, boolean enforceProjectionGuard) {
+    if (enforceProjectionGuard) {
+      validateSnapshotActivation(worldId, graph);
+    }
     RailInterlockingState nextState = interlockingState(graph);
     RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
+    snapshotVersion.incrementAndGet();
     componentIndexes.put(worldId, nextComponentIndex);
     lastActivatedInterlockingStates.put(worldId, nextState);
     staleStates.remove(worldId);
@@ -191,6 +236,116 @@ public final class RailGraphService {
   public Optional<RailGraphSnapshot> getSnapshot(UUID worldId) {
     Objects.requireNonNull(worldId, "worldId");
     return Optional.ofNullable(snapshots.get(worldId));
+  }
+
+  /**
+   * 跨世界设置（{@code graph.cross-world}）与传送门连接。关闭时 {@link #getNetworkSnapshot} 与 {@link #getSnapshot}
+   * 完全相同。
+   */
+  public void configureCrossWorld(
+      boolean enabled,
+      org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links) {
+    this.crossWorld = enabled;
+    this.portalLinks = links;
+    this.cachedNetwork = null;
+  }
+
+  /**
+   * 运行时用的图快照：跨世界开启且有传送门连接时，图是站在这个世界看的全网（节点、边全网，物理联锁本世界）；否则与 {@link #getSnapshot} 相同。
+   *
+   * <p>只给运行时控车、ETA、出车、编表与交路校验用；建图、持久化、联锁目录等按世界处理的流程仍用 {@link #getSnapshot}， 免得把别的世界的节点写进本世界。
+   */
+  public Optional<RailGraphSnapshot> getNetworkSnapshot(UUID worldId) {
+    return getSnapshot(worldId)
+        .map(own -> new RailGraphSnapshot(runtimeGraph(this, worldId, own.graph()), own.builtAt()));
+  }
+
+  /**
+   * 站在这个世界看的路网；跨世界未开启、没有传送门连接或本世界还没有图时为 {@code null}。
+   *
+   * <p>调用方一般用 {@link #runtimeGraph}，它在这里返回 {@code null} 时退回本世界的图。
+   */
+  public RailGraph networkGraph(UUID worldId) {
+    if (worldId == null || getSnapshot(worldId).isEmpty()) {
+      return null;
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network = network();
+    // 没有传送门的世界里的列车出不了本世界，仍用本世界的图（最短路记忆、封锁都与原来一致）。
+    return network == null || !network.hasPortalIn(worldId) ? null : network.view(worldId);
+  }
+
+  /** 运行时用的图：跨世界开启时换成站在本世界看的路网，否则就是本世界的图。 */
+  public static RailGraph runtimeGraph(RailGraphService service, UUID worldId, RailGraph own) {
+    RailGraph network = service == null ? null : service.networkGraph(worldId);
+    return network != null ? network : own;
+  }
+
+  /** 交路途经节点所在的世界：先按单个世界找，找不到再看跨世界路网（见 {@link #findCrossWorldPath}）。 */
+  public Optional<UUID> findNetworkWorldForPath(List<NodeId> nodes) {
+    return findWorldIdForPath(nodes).or(() -> findCrossWorldPath(nodes));
+  }
+
+  /**
+   * 跨世界开启时，途经节点在路网里是否依次连通；连通则返回起点所在世界（再用 {@link #runtimeGraph} 取路网）。只在单个世界里连通的路径由 {@link
+   * #findWorldIdForPath} 负责。
+   */
+  public Optional<UUID> findCrossWorldPath(List<NodeId> nodes) {
+    if (nodes == null || nodes.isEmpty()) {
+      return Optional.empty();
+    }
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network = network();
+    if (network == null) {
+      return Optional.empty();
+    }
+    for (int i = 0; i + 1 < nodes.size(); i++) {
+      if (!network.connected(nodes.get(i), nodes.get(i + 1))) {
+        return Optional.empty();
+      }
+    }
+    return network.worldOf(nodes.get(0));
+  }
+
+  /** 两个相邻停靠点之间：单个世界连通，或跨世界路网连通（交路校验用）。 */
+  public Optional<UUID> findNetworkWorldForConnectedPair(NodeId from, NodeId to) {
+    return findWorldIdForConnectedPair(from, to).or(() -> findCrossWorldPath(List.of(from, to)));
+  }
+
+  /** 当前的跨世界路网；未开启或没有可用的传送门连接时为 {@code null}。 */
+  private org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork network() {
+    org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRegistry links = portalLinks;
+    if (!crossWorld || links == null || links.links().isEmpty()) {
+      return null;
+    }
+    long version = snapshotVersion.get();
+    long revision = links.revision();
+    Instant now = Instant.now();
+    CachedNetwork cached = cachedNetwork;
+    if (cached == null
+        || cached.snapshotVersion() != version
+        || cached.linkRevision() != revision
+        || now.isAfter(cached.builtAt().plus(NETWORK_MAX_AGE))) {
+      Map<UUID, RailGraph> graphs = new HashMap<>();
+      for (Map.Entry<UUID, RailGraphSnapshot> entry : snapshots.entrySet()) {
+        // 各世界叠加自己的运维封锁：从本世界规划跨到别的世界时，也要绕开那边封锁的边。
+        Map<EdgeId, RailEdgeOverrideRecord> overrides = edgeOverrides(entry.getKey());
+        RailGraph graph = entry.getValue().graph();
+        graphs.put(
+            entry.getKey(),
+            overrides.isEmpty()
+                ? graph
+                : new org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph(
+                    graph, overrides, now));
+      }
+      cached =
+          new CachedNetwork(
+              version,
+              revision,
+              now,
+              org.fetarute.fetaruteTCAddon.dispatcher.graph.network.RailNetwork.build(
+                  graphs, links.links()));
+      cachedNetwork = cached;
+    }
+    return cached.network().hasPortalEdges() ? cached.network() : null;
   }
 
   /** 返回已加载的图快照数量，用于命令校验/诊断。 */
@@ -307,13 +462,57 @@ public final class RailGraphService {
         || (edge.from().equals(b) && edge.to().equals(a));
   }
 
+  /**
+   * 记录快照失效。
+   *
+   * <p>{@link RailGraphStaleState#snapshotRetained()} 为 true 时只打标记、继续供旧图（变化的节点没有交路在用）；
+   * 否则移出内存快照，该世界在重建或恢复前拿不到图。已经移出的快照不会因为后一次"可保留"而回来。
+   */
   public void markStale(World world, RailGraphStaleState state) {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(state, "state");
     UUID worldId = world.getUID();
+    if (state.snapshotRetained() && snapshots.containsKey(worldId)) {
+      staleStates.put(worldId, state);
+      return;
+    }
     snapshots.remove(worldId);
+    snapshotVersion.incrementAndGet();
     componentIndexes.remove(worldId);
-    staleStates.put(worldId, state);
+    staleStates.put(worldId, state.withSnapshotRetained(false));
+  }
+
+  /**
+   * 保留旧图期间节点牌子恢复原样（签名与快照重新一致）：内存里的旧图本就与库里的快照相同，只撤掉失效标记，不重载、不让各级缓存作废。
+   *
+   * @return 是否撤掉了标记；不在供保留旧图时为 false，调用方照旧从库重载
+   */
+  public boolean clearRetainedStale(World world) {
+    Objects.requireNonNull(world, "world");
+    UUID worldId = world.getUID();
+    if (!isServingRetainedStaleSnapshot(worldId)) {
+      return false;
+    }
+    staleStates.remove(worldId);
+    return true;
+  }
+
+  /** 正在供保留下来的旧图，而旧图里没有这个节点（失效后新放的节点牌子）。 */
+  public boolean isOutsideRetainedStaleSnapshot(UUID worldId, NodeId nodeId) {
+    if (nodeId == null || !isServingRetainedStaleSnapshot(worldId)) {
+      return false;
+    }
+    RailGraphSnapshot snapshot = snapshots.get(worldId);
+    return snapshot != null && snapshot.graph().findNode(nodeId).isEmpty();
+  }
+
+  /** 是否正在供一张已失效但保留下来的旧图。 */
+  public boolean isServingRetainedStaleSnapshot(UUID worldId) {
+    if (worldId == null) {
+      return false;
+    }
+    RailGraphStaleState state = staleStates.get(worldId);
+    return state != null && state.snapshotRetained() && snapshots.containsKey(worldId);
   }
 
   /**
@@ -328,7 +527,9 @@ public final class RailGraphService {
     UUID worldId = world.getUID();
     staleStates.remove(worldId);
     componentIndexes.remove(worldId);
-    return snapshots.remove(worldId) != null;
+    boolean removed = snapshots.remove(worldId) != null;
+    snapshotVersion.incrementAndGet();
+    return removed;
   }
 
   /** 返回节点所属连通分量的 key（不存在则 empty）。 */
@@ -427,6 +628,7 @@ public final class RailGraphService {
           .computeIfAbsent(override.worldId(), ignored -> new ConcurrentHashMap<>())
           .put(normalized, override);
       edgeOverrideSnapshots.remove(override.worldId());
+      snapshotVersion.incrementAndGet();
     }
   }
 
@@ -445,6 +647,7 @@ public final class RailGraphService {
         edgeOverrides.remove(worldId, byWorld);
       }
       edgeOverrideSnapshots.remove(worldId);
+      snapshotVersion.incrementAndGet();
     }
   }
 
@@ -553,6 +756,7 @@ public final class RailGraphService {
             edgeOverrides.remove(worldId);
           }
           edgeOverrideSnapshots.remove(worldId);
+          snapshotVersion.incrementAndGet();
         }
       } catch (Exception ex) {
         debugLogger.accept(
@@ -597,6 +801,7 @@ public final class RailGraphService {
                 snapshot.edgeCount(),
                 nodeRecords.size()));
         snapshots.remove(worldId);
+        snapshotVersion.incrementAndGet();
         continue;
       }
 
@@ -613,6 +818,7 @@ public final class RailGraphService {
                 snapshot.edgeCount(),
                 nodeRecords.size()));
         snapshots.remove(worldId);
+        snapshotVersion.incrementAndGet();
         continue;
       }
 
@@ -734,9 +940,37 @@ public final class RailGraphService {
                     footprintsByEdge.isEmpty()
                         ? restoreInterlockingState(
                             worldId, edgesById.keySet(), interlockingSnapshot)
-                        : RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge))
+                        : restoreFromFootprints(
+                            worldId, edgesById.keySet(), footprintsByEdge, interlockingSnapshot))
             .orElseGet(RailInterlockingState::unavailable);
     return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of(), interlockingState);
+  }
+
+  /**
+   * 带逐边足迹的还原：足迹齐全也不能自己证明完整——局部合并、刷新、局部删除会保留全部足迹但按不完整发布。完整与否以持久化快照为准，
+   * 快照缺失、不匹配或记为不完整时按不完整发布（足迹仍留在索引里）。
+   */
+  private static RailInterlockingState restoreFromFootprints(
+      UUID worldId,
+      java.util.Set<EdgeId> expectedEdges,
+      Map<EdgeId, RailEdgeFootprint> footprintsByEdge,
+      Optional<RailInterlockingSnapshotRecord> snapshotOpt) {
+    RailInterlockingState state =
+        RailInterlockingState.from(worldId, expectedEdges, footprintsByEdge);
+    boolean persistedComplete =
+        snapshotOpt
+            .filter(snapshot -> worldId.equals(snapshot.worldId()))
+            .filter(
+                snapshot ->
+                    snapshot.formatVersion()
+                        == RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION)
+            .filter(
+                snapshot ->
+                    RailInterlockingEdgeSignature.of(expectedEdges)
+                        .equals(snapshot.edgeSignature()))
+            .map(snapshot -> snapshot.coverage().complete())
+            .orElse(false);
+    return persistedComplete ? state : state.withCoverageMarkedIncomplete();
   }
 
   private static RailInterlockingState restoreInterlockingState(
@@ -779,18 +1013,54 @@ public final class RailGraphService {
     }
   }
 
-  /** 快照已失效：节点集合（签名）与当前 rail_nodes 不一致，旧图应提示重建。 */
+  /**
+   * 快照已失效：节点集合（签名）与当前 rail_nodes 不一致，旧图应提示重建。
+   *
+   * @param snapshotRetained 旧图是否继续在用（变化的节点没有交路在用时保留）
+   */
   public record RailGraphStaleState(
       Instant builtAt,
       String snapshotSignature,
       String currentSignature,
       int snapshotNodeCount,
       int snapshotEdgeCount,
-      int currentNodeCount) {
+      int currentNodeCount,
+      boolean snapshotRetained) {
     public RailGraphStaleState {
       Objects.requireNonNull(builtAt, "builtAt");
       snapshotSignature = snapshotSignature == null ? "" : snapshotSignature;
       currentSignature = currentSignature == null ? "" : currentSignature;
+    }
+
+    /** 旧图已移出内存的失效状态。 */
+    public RailGraphStaleState(
+        Instant builtAt,
+        String snapshotSignature,
+        String currentSignature,
+        int snapshotNodeCount,
+        int snapshotEdgeCount,
+        int currentNodeCount) {
+      this(
+          builtAt,
+          snapshotSignature,
+          currentSignature,
+          snapshotNodeCount,
+          snapshotEdgeCount,
+          currentNodeCount,
+          false);
+    }
+
+    RailGraphStaleState withSnapshotRetained(boolean retained) {
+      return retained == snapshotRetained
+          ? this
+          : new RailGraphStaleState(
+              builtAt,
+              snapshotSignature,
+              currentSignature,
+              snapshotNodeCount,
+              snapshotEdgeCount,
+              currentNodeCount,
+              retained);
     }
   }
 }

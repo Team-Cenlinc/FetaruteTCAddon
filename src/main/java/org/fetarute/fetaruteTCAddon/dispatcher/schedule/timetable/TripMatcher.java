@@ -107,8 +107,11 @@ final class TripMatcher {
    *
    * <p>车手上已有绑定时（回到起点重新匹配），结果还是那一班就原样保留；换了班才解绑旧的，找不到也解绑旧的。
    *
+   * <p>区分车型的表：没绑交路的车只就近匹配本车型交路的车次——时刻按交路的车型排，别的车型跑不出这份时刻。 读不出车型的车不匹配带车型的交路（宁可少绑）。
+   *
    * @param boundDuty 这辆车已经绑定的交路
    * @param heldByOthers 某个交路是否已经归别的车
+   * @param vehicleConsist 这辆车的车型；读不出时为空
    */
   Optional<Match> match(
       String key,
@@ -117,7 +120,8 @@ final class TripMatcher {
       StationStopEvent event,
       TimetableService.Settings current,
       Optional<TimetableService.DutyKey> boundDuty,
-      Predicate<TimetableService.DutyKey> heldByOthers) {
+      Predicate<TimetableService.DutyKey> heldByOthers,
+      Optional<String> vehicleConsist) {
     if (assignments.size() >= MAX_ASSIGNMENTS) {
       debugLogger.accept(
           "TIMETABLE_ASSIGN_SKIP reason=assignment-limit train=" + event.trainName());
@@ -131,10 +135,18 @@ final class TripMatcher {
     long nearestDeviation = Long.MAX_VALUE;
     int candidates = 0;
     int claimedByOthers = 0;
+    int otherConsist = 0;
     for (Timetable timetable : timetables) {
       for (TimetableTrip trip : timetable.trips()) {
         if (!trip.routeId().equals(routeId)) {
           continue;
+        }
+        if (boundDuty.isEmpty()) {
+          Optional<String> tripConsist = timetable.consistOf(trip);
+          if (tripConsist.isPresent() && !tripConsist.equals(vehicleConsist)) {
+            otherConsist++;
+            continue;
+          }
         }
         for (int offset : SERVICE_DATE_OFFSETS) {
           LocalDate date = LocalDate.ofInstant(now, timetable.zoneId()).plusDays(offset);
@@ -175,7 +187,9 @@ final class TripMatcher {
       }
       String reason =
           candidates == 0
-              ? boundDuty.isPresent() ? "duty-has-no-trip" : "no-trips"
+              ? boundDuty.isPresent()
+                  ? "duty-has-no-trip"
+                  : otherConsist > 0 ? "other-consist" : "no-trips"
               : claimedByOthers > 0 ? "all-claimed" : "out-of-tolerance";
       recordMiss(key, event, routeId, reason, nearestCode, nearestDeviation, tolerance, candidates);
       return Optional.empty();

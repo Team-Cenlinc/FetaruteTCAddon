@@ -1,0 +1,448 @@
+# 配置版本，由插件维护，请勿修改
+config-version: 1
+
+# 手动驾驶配置（/fta drive）。
+# 缺失或非法的项会回退为内置默认值并在控制台提示；修改后执行 /fta reload 生效，已在进行的驾驶会话保持开始时的参数。
+
+# 是否允许玩家手动驾驶列车（/fta drive）
+enabled: true
+# 仿真等级：standard / simulation。两级都必须先启动才能牵引，紧急制动停稳后才能缓解，车门没关不能牵引。
+# standard 用驾驶台的启动按钮一键启动；simulation 在驾驶台逐项操作开关。
+# 持有 fetarute.drive.level 的玩家可在任务板最后一行自选等级（记在玩家数据里）；这里是没有选过的玩家与没有该节点的玩家用的等级。
+level: standard
+# 列车未设置 FTA_TRAIN_MAX_BPS 标签时的最高速度（格/秒）
+default-max-speed-bps: 22.0
+# 惰行阻力（格/秒²）：列车在动时始终叠加的减速度
+coast-drag-bps2: 0.03
+# 紧急制动力相对常用制动的倍数（不小于 1）
+emergency-multiplier: 1.4
+# 紧急制动防误触（秒）：自己选到 EB（滚轮滚过头、误按数字键 9）时紧急制动力立即施加，但这段时间内回拨到 N 或制动档即撤销、
+# 不必停稳；在 EB 上停满这段时间才锁定（停稳后才能缓解）。车载防护与警惕装置施加的紧急制动立即锁定。0 表示立即锁定
+eb-grace-seconds: 1.0
+# 牵引/制动力每秒的最大变化量（满力为 1），越小换档越柔和
+effort-rate-per-second: 1.5
+# 施加紧急制动时牵引/制动力每秒的最大变化量
+emergency-rate-per-second: 8.0
+# P1、P2、P3 的牵引力占满牵引的比例（递增，不超过 1）
+traction-fractions: [0.33, 0.67, 1.0]
+# B1–B4 的制动力占常用制动的比例（递增，不超过 1）
+brake-fractions: [0.25, 0.5, 0.75, 1.0]
+# 动车组加速度预设对应的动车占比；FTA_TRAIN_MT 给出的动车占比低于它时按比例降低加速度
+mu-reference-motor-fraction: 0.5
+# 机车牵引的加速度预设对应的牵引车厢数；车厢多于它时按比例降低加速度
+loco-reference-cars: 6
+# 低于该速度（格/秒）视为停稳
+stopped-speed-bps: 0.05
+# 驾驶员脱离座位后尝试重新入座的时限（tick）
+reseat-timeout-ticks: 100
+# 按下潜行之后多少 tick 内离座视为主动离座
+exit-sneak-window-ticks: 10
+# 动作栏刷新间隔（tick）
+hud-interval-ticks: 5
+# 是否在驾驶员的侧边栏（计分板）显示启动流程、气压、停放制动、制动试验与警惕装置的详细状态。
+# 动作栏只保留速度、档位、限速、方向和最要紧的一条提示
+sidebar: true
+# 创造模式下是否允许驾驶（旁观模式始终不允许）。驾驶期间背包同样只读：创造模式的取物、丢弃都会被截获
+allow-creative-mode: true
+# 低于该速度（格/秒）的列车视为停着，接管时清掉残余速度；更快的列车视为在溜：
+# 顺着驾驶员前进方向溜就沿用当前车速直接接管，朝驾驶室后方溜则提示先停稳
+start-max-speed-bps: 0.2
+# 是否允许超过限速：true 时 TrainCarts 的限速（牌子或 /train speedlimit 设定）只作提示，
+# 超速时动作栏的速度与限速标黄，超出比例达到下面的值则标红；false 时限速是硬上限
+speed-limit-override: true
+# 超出限速的比例达到该值时标红（0.1 即超出 10%），未达到则标黄
+overspeed-red-ratio: 0.1
+
+# 列车未设置 FTA_TRAIN_POWER 标签时的受电方式：
+# ptg5（受电弓，5 米接触网）/ ptg6（受电弓，6 米接触网）/ shoe（集电靴，第三轨）/ diesel（内燃）/ supercap（超级电容，见 supercap 段）
+default-power: ptg5
+# 启动流程各步骤耗时（秒）。standard 级用驾驶台的启动按钮一键完成，simulation 级逐项操作
+setup-seconds:
+  key: 1
+  pantograph: 8
+  # 集电靴受电；超级电容的“投入电容”一步也用这个时长
+  shoe: 2
+  engine: 25
+  breaker: 3
+  aux: 5
+# 列车无人驾驶超过多少分钟后按冷车处理（下次上车需重新升弓、合主断）
+cold-after-minutes: 10
+
+# simulation 级的车上系统。压力单位为 kPa，standard 级不使用这一段
+simulation:
+  # 主风缸满压；压缩机充到它就停
+  main-reservoir-max-kpa: 900
+  # 主风缸低于该压力时压缩机自动启动（动车组自动，机车需打开压缩机开关）
+  compressor-cut-in-kpa: 750
+  # 压缩机把主风缸从空充到满压所需的秒数
+  compressor-fill-seconds: 90
+  # 主风缸低于该压力时封锁牵引
+  traction-lockout-kpa: 550
+  # 主风缸至少要有该压力才能发挥全部常用制动力，低于时按比例下降（紧急制动与停放制动不受影响）
+  full-brake-kpa: 450
+  # 缓解停放制动所需的主风缸压力
+  parking-release-kpa: 450
+  # 主风缸跌到该压力以下时停放制动（弹簧制动）自动施加，失风时列车总能停下；不能高于缓解压力
+  parking-auto-apply-kpa: 300
+  # 常用全制动时的制动缸压力
+  brake-cylinder-max-kpa: 350
+  # 制动缸每升高 1 kPa 消耗的主风缸压力
+  brake-cylinder-consumption: 0.1
+  # 无人驾驶时主风缸每分钟的漏泄
+  leak-kpa-per-minute: 30
+  # 制动试验：制动缸须升到该压力，再缓解到下面的压力以下
+  brake-test-apply-kpa: 300
+  brake-test-release-kpa: 20
+  # 警惕装置：行车中多少秒没有操作（换档或右键）就报警，报警后多少秒不确认就紧急制动
+  vigilance-interval-seconds: 60
+  vigilance-warning-seconds: 5
+  # 电空复合制动：电力牵引的列车在受电、主断、辅助电源都正常时优先用电制动（再生制动），不足部分由空气制动补足。
+  # 只有空气制动的部分消耗主风缸；电制动出力时侧边栏风压一行显示“再生”。内燃车没有电制动。
+  # 紧急制动、停放制动与无人驾驶时的自动制动全部由空气制动承担，不受这一段影响
+  blended-brake:
+    # 电制动能承担的制动力占常用全制动的比例（0–1）
+    electric-fraction: 0.7
+    # 电制动退出速度（km/h）：低于它电制动完全退出；高于它 5 km/h 起全额可用，之间线性过渡
+    electric-exit-kmh: 15
+    # 只靠空气制动时能发挥的制动力占常用全制动的比例（0–1）：低速电制动退出后，或失电时，最大常用减速度略低
+    air-fraction: 0.85
+  # 恒功率：速度高于拐点速度后牵引功率不再增加，牵引加速度按“拐点速度 ÷ 当前速度”下降
+  constant-power:
+    # 拐点速度（km/h），未在下面按车种覆盖的车种使用它
+    knee-kmh: 40
+    # 按车种覆盖拐点速度（km/h）；车种写法同 config.yml 的 train.types（emu、dmu、metro、electric-loco、diesel-push-pull）
+    knee-kmh-by-type:
+      emu: 50
+      dmu: 30
+      electric-loco: 45
+      diesel-push-pull: 25
+  # 机车牵引（FTA_TRAIN_MODE 为 loco，或机车车种）的制动管。动车组仍按主风缸/制动缸的电空制动处理。
+  # 手柄在 N 或牵引位时主风缸向制动管充风到定压，制动位按力度减压，制动缸压力与减压量成比例；紧急制动时制动管排空。
+  # 上车时制动管未充风，须先充风并完成制动试验（充风 → 减压 → 保压 → 缓解）
+  brake-pipe:
+    # 制动管定压（kPa），不能高于主风缸满压
+    nominal-kpa: 500
+    # 常用全制动（B4）的减压量（kPa）；制动管低于“定压 − 该值”时不能牵引（紧急制动后须充回）
+    full-service-reduction-kpa: 150
+    # 制动管从 0 充到定压的秒数 = 基础秒数 + 每节车厢秒数 × 编组节数
+    charge-base-seconds: 10
+    charge-seconds-per-car: 4
+    # 常用制动的减压速率（kPa/秒）
+    service-rate-kpa-per-second: 40
+    # 制动管压力跌破该值（不是驾驶员拉紧急制动造成的，例如主风缸失风）时自动紧急制动；须低于常用全制动后的压力
+    emergency-kpa: 250
+    # 制动管每升高 1 kPa、每节车厢消耗的主风缸压力（kPa）
+    consumption-per-car: 0.04
+    # 制动试验：减压量至少达到该值后保压，保压期间制动缸下降不得超过 test-max-leak-kpa
+    test-reduction-kpa: 100
+    test-hold-seconds: 10
+    test-max-leak-kpa: 10
+  # 车上故障。管理员可用 /fta drive fault <玩家> <类型> 注入、/fta drive fault <玩家> clear 清除，不受下面的开关影响。
+  # 故障只存在驾驶会话的内存里，会话结束即消失，不写入列车
+  faults:
+    # 是否在驾驶中随机发生故障（驾驶员在座、列车已启动时才会发生，同一时刻最多一个随机故障）
+    enabled: false
+    # 驾驶一小时内至少发生一次随机故障的概率（0 到 1，不含 1）
+    chance-per-hour: 0.5
+    # 随机故障从这些类型里挑：line-loss（受电中断）、breaker-trip（主断跳闸）、compressor（压缩机故障）、
+    # brake-leak（制动缸漏泄）、door（车门故障）。内燃车不会发生受电中断与主断跳闸
+    types: [line-loss, breaker-trip, compressor, brake-leak, door]
+    # 受电中断多少秒后自动恢复
+    line-loss-seconds: 30
+    # 制动缸漏泄时制动缸每秒下降的压力（kPa）
+    brake-leak-kpa-per-second: 6
+
+# 驾驶调度列车（驾驶员接管带交路、时刻表的列车）。调度照常计算信号与行车许可，驾驶员在许可范围内操纵，
+# 超出时车载防护自动制动。任何故障都交还自动运行，不会把列车冻结在原地
+driver:
+  # 是否允许接管调度列车。改为 false 并执行 /fta reload 后，正在驾驶的调度列车全部在停稳后交还自动运行
+  enabled: true
+  # 热车交接：接管时受电、主断、辅助电源保持接通，simulation 级的风压满、停放制动已缓解、制动试验视为已做
+  hot-handover: true
+  # 超过容许速度多少（格/秒）开始自动常用制动
+  overspeed-tolerance-bps: 1.0
+  # 常用制动介入后，速度降到容许速度以下多少（格/秒）才缓解
+  service-release-hysteresis-bps: 0.5
+  # 紧急制动线：在常用制动线（容许速度 + 容差）之上再超出容许速度的该比例（不少于容差）时自动紧急制动。
+  # 0.15 即再超出 15%。调度要求停车或交还时只用常用制动
+  emergency-overspeed-ratio: 0.15
+  # 行车许可过期时的限制速度（格/秒）
+  restricted-speed-bps: 5.0
+  # 调度层多少秒没有发来新的行车许可就按限制速度运行
+  directive-stale-seconds: 2
+  # 调度层多少秒没有发来新的行车许可就停车并交还自动运行（须大于上一项）
+  stale-handback-seconds: 10
+  # 停车点前预留的余量（格）：防护按“停车点 − 余量”计算制动曲线
+  stop-margin-blocks: 1.0
+  # 站停窗口（格）：列车离停车点多近算停准、多近可以开门。停车点是车站牌子的轨道中心（列车中心对准），
+  # 股道上有对应节数的停车位置标（stopmark 牌子）时是标志的轨道中心（车头对准）。
+  # 网络延迟与服务器 tick 会让同样的操作停偏零点几格，窗口留有余量；停短超出可开门范围须前移。
+  # 可开门范围不要超过站台两端富余的长度：列车偏出多少，两端的车门就伸出站台多少
+  stop-accurate-blocks: 2.5
+  stop-accept-blocks: 6.0
+  # 越站：越过停车点超过这么远（格）就算越站——本站不停、不开门，记一次越站，列车继续开往下一站，站台屏显示本站取消。
+  # 越过不超过这个距离仍停站开门，按停过头计分。防护的进站曲线最远只许冲到这里（终点站除外，见下一项）
+  skip-station-blocks: 12.0
+  # 终点站（所有运营终点，含尽头式站台）最多越过停车点多少格：终点站没有越站可言，防护按这里画制动曲线（再留 stop-margin-blocks），
+  # 按紧急制动也停不进时施加紧急制动，到了这里还在动就强制停车（速度归零），保证列车停在这以内。不能大于 stop-accept-blocks
+  terminal-overrun-blocks: 3.0
+  # 发光停车标：进站时在驾驶员座位该停的地方显示一道发光标线（按停车点、车长与座位位置算出），
+  # 只发给驾驶员本人的客户端，其他玩家看不见，不存档；停妥或离开驾驶时撤掉
+  stop-marker: true
+  # 始发站与车库接班：领了从终点站或车库出发的车次时，派车那一刻先不发车，等驾驶员上车坐进驾驶室并确认座位。
+  # 最多等这么久（秒），过时照常按自动运行发车（车库出车的车次仍可在第一个车站接班）
+  pickup-wait-seconds: 90
+  # 等驾驶员接班时提供“前往列车”：点击后传送到车头驾驶室旁边（不直接坐进座位），只能去自己要接的那列车
+  pickup-teleport: true
+  # 提前接车：领了从终点站出发的车次后，在计划发车前这么多秒内，一旦按交路认出担当的待命车，就通知驾驶员是哪列车、坐哪一节，
+  # 并留车等驾驶员——可以提前上车确认接班、做启动与制动试验，派车时直接交给驾驶员。留车期间调度不会动这列车，所以不宜太早。
+  # 0 表示不提前（仍可自己坐进那列待命车提前开始接车）
+  pickup-advance-seconds: 300
+  # 驾驶座名单：座位附件的名字（在 TrainCarts 附件编辑器里给座位命名）与名单中任一项相同（不区分大小写）即视为驾驶座。
+  # 一列车只要有被标记的座位，就只有第一节、最后一节车上被标记的座位算驾驶室；完全没有标记时按车厢位置认定：
+  # 前半列车算车头端驾驶室，最后一节算车尾端驾驶室。接管、接车上车与折返换端都按这一判定。写成空列表 [] 表示不认标记
+  cab-seat-names: [driver, cab, 驾驶, 驾驶座, 驾驶室]
+  # 折返换端：发车方向与驾驶员所坐的一端相反时（终点站折返），驾驶员须自己下车走到另一端的驾驶室坐下，期间列车保持停车、
+  # 离座不结束驾驶。时限 = base-seconds + 车身长度 ÷ walk-speed-bps，超时交还自动运行发车，任务记为未完成。
+  # 尽头式终点站能提前知道下一趟由车尾端驾驶，接车时直接提示坐哪一节。
+  # 这段时间只约束驾驶员，不计入编表的折返停留：自动运行的列车不需要有人走过去
+  cab-change:
+    # 基础余量（秒）：离座、上车、坐下的时间
+    base-seconds: 15
+    # 步行速度（格/秒，1 格/秒 = 3.6 km/h）
+    walk-speed-bps: 4.0
+    # simulation 级：换端开始时距计划发车不少于“换端时限 + 该秒数”时，换端后须重做制动试验；不足时视为已做（热车）。
+    # standard 级不做制动试验
+    brake-test-seconds: 30
+  # 驾驶任务：任务板列出多少分钟内的发车（/fta drive tasks）
+  task-window-minutes: 20
+  # 一次任务的绝对上限（分钟），超过即停车交还并判未完成
+  max-task-minutes: 90
+  # ATO 下停站结束后等驾驶员右键确认发车的上限（秒），超时自动发车
+  ato-confirm-seconds: 15
+  # ATO 下停站结束前多少秒起可以提前右键确认发车（停站一结束即放行，驾驶员的反应时间不算进停站）；0 表示只能在停站结束后确认
+  ato-confirm-advance-seconds: 10
+  # 卡住的时间阶梯（秒，须依次递增）：列车能走却不走（表定停站、调度扣车不算）累计到各档时，
+  # 依次告警、转 ATO、交还自动运行并判任务未完成、把驾驶员送到最近车站的站台
+  rescue-warn-seconds: 60
+  rescue-ato-seconds: 120
+  rescue-handback-seconds: 180
+  rescue-teleport-seconds: 300
+  # 拥堵熔断：全网被扣住超过 breaker-held-seconds 秒的车达到 breaker-held-trains 列、且阻挡链里有驾驶员列车时，
+  # 交还全部驾驶员列车，并在 breaker-cooldown-minutes 分钟内暂停接班（/fta drive breaker reset 可提前解除）
+  breaker-held-trains: 5
+  breaker-held-seconds: 60
+  breaker-cooldown-minutes: 15
+  # 驾驶记录（/fta drive records、top）保留多少天，超过的每小时清理一次；0 表示一直保留
+  record-retention-days: 30
+  # 挡住后车：后方被驾驶员列车直接挡住的车被扣超过 congestion-warn-seconds 秒时提醒驾驶员，
+  # 超过 congestion-ato-seconds 秒且驾驶员列车停着、不在表定停站时强制转 ATO
+  congestion-warn-seconds: 60
+  congestion-ato-seconds: 120
+  # 行车引导：Boss 栏显示前方最要紧的目标（停车信号、车站停车点、限速降低处）、距离与建议速度，该刹车时提示“开始制动”。
+  # 建议速度与编表运行曲线同一条：巡航贴着容许速度，到点按常用制动（S 形）刹下来，照着开就能正点。只对调度列车生效（非调度列车没有行车许可数据）
+  guidance:
+    boss-bar: true
+    # Boss 栏满格对应的距离（格），更远的目标不显示
+    range-blocks: 400
+    # 建议速度按常用全制动（B4）的这个比例反推，余下的制动力留给驾驶员修正反应迟滞（0.5–1）。
+    # 0.85 经逐 tick 模拟验证：反应 0.2–0.5 秒都能停准，且不比时刻表慢；1 即与编表完全相同，人跟不住会冲标
+    advice-brake-fraction: 0.85
+    # 车速超过建议速度多少（格/秒）提示开始制动
+    brake-advice-tolerance-bps: 0.3
+
+# 驾驶提示音。声音不会被别的插件的动作栏消息顶掉，要紧的提醒都配了声音。
+# 每项有 key（音效）、volume（音量）、pitch（音高，0.5–2）；key 留空（""）即关闭该项。
+# 材质包里的自定义音效（如 fetarute:drive.horn）也可以填
+# 超级电容（受电方式 supercap）：站间靠车上储能行驶，停稳且开着车门时自动充电（所有车站都可充）。
+# 升降弓由站台上的 TC animate 牌子负责（建议写 queue，不写 reset），插件不播；第三轨充电的站不放牌子即可。
+# standard 与 simulation 两级都生效；电量耗尽时切断牵引，制动不受影响。ATO 下由调度控车，不耗电。
+# 调度列车接管时按满电；非调度列车的电量记在列车上，下次驾驶接着用。
+supercap:
+  # 每吨车重的可用电量（kWh/t）：0.2 约等于满电从静止加速到 80 km/h 两次半（不计再生），实际约够三个站间
+  capacity-kwh-per-ton: 0.2
+  # 从空到满的充电时间（秒）
+  full-charge-seconds: 30
+  # 牵引效率：电容放出的电能有多少变成动能（0–1）
+  traction-efficiency: 0.85
+  # 再生制动：常用制动在退出速度以上回收的制动能量比例（0–1）；紧急制动不再生
+  regen-efficiency: 0.5
+  # 电制动退出速度（km/h），低于它没有再生
+  regen-cutoff-kmh: 15
+  # 辅助负载（空调、照明）每分钟耗掉满电的百分之几
+  aux-drain-percent-per-minute: 1.0
+  # 电量低于这个百分比时预警
+  low-percent: 20
+
+# 驾驶证：玩家自己考试拿驾驶权限，不必等管理员授权。持证时插件替玩家挂上下面 grants 里的权限节点（子节点随之生效）。
+# 考试与补发：/fta license；管理员发放、吊销与查询：/fta license grant|revoke|list
+license:
+  enabled: true
+  # 报名后多久内要考完（分钟）：教程考试按它计；路考以派出的区间任务为准
+  exam-window-minutes: 30
+  # 路考不及格后多久才能再考（分钟）
+  retry-cooldown-minutes: 10
+  # 两次补发驾驶证之间至少隔多久（分钟）
+  reissue-cooldown-minutes: 10
+  # 路考练习（/fta license practice）：和路考一样派一段区间任务，有教练逐步提示与一次应急演练，不发证、不记入驾驶记录。
+  # 练习与路考都跑在正式车次上，下面的晚点阈值用来保护调度：已经晚点的车次不派给考生，跑着跑着晚点过大先撤演练，再大就交还自动运行。
+  training:
+    # 是否安排应急演练（受电中断、车门故障、紧急停车；仿真级另有主断跳闸），开过第一站后随机一次，只讲评不影响计次
+    drill: true
+    # 晚点超过多少秒就不派这趟车、不开始演练
+    drill-max-delay-seconds: 30
+    # 晚点超过多少秒撤掉进行中的演练，提示驾驶员先恢复正点
+    max-delay-seconds: 120
+    # 晚点超过多少秒交还自动运行，结束这次练习或路考
+    handback-delay-seconds: 240
+    # 受电中断演练多少秒后恢复供电
+    line-loss-seconds: 15
+    # 紧急停车演练：从提示到拨到 EB 的合格反应时间（秒）
+    emergency-reaction-seconds: 3
+    # 只用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时用正式车次
+    routes: []
+  # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
+  # 或 dispatch（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
+  # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
+  classes:
+    free:
+      name: "自由驾驶证"
+      description: "驾驶非调度列车，使用新手教程与驾驶提示"
+      enabled: true
+      requires: []
+      exam: tutorial
+      grants:
+        - fetarute.drive
+    dispatch:
+      name: "调度驾驶证"
+      description: "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行"
+      enabled: true
+      requires:
+        - free
+      exam: dispatch
+      # 报名路考前要完整开完几次路考练习；0 表示不要求
+      training-runs: 1
+      # 路考区间要开过几个停车站（练习相同）
+      exam-stops: 3
+      # 及格分（0–100）
+      min-points: 70
+      # 以下三项为 false 时，路考中出现即不及格
+      allow-emergency: false
+      allow-overrun: false
+      allow-wrong-door: false
+      grants:
+        - fetarute.drive.driver
+
+sounds:
+  enabled: true
+  # 两次鸣笛（驾驶中按 Space）至少间隔多少秒
+  horn-cooldown-seconds: 1
+  # 按住 Space 时持续鸣响的最长秒数；0 表示每按一次只响一声
+  horn-hold-seconds: 3
+  # 鸣笛：在列车所在位置播放，附近的玩家都听得到。原版没有铜管乐器，默认用长笛压低音高、叠一个小三度和音，近似汽笛；
+  # 长笛的音短，按住 Space 持续鸣响时接得上。也可以换成：minecraft:block.note_block.didgeridoo（迪吉里杜管，低沉，音高 0.6/0.714）、
+  # minecraft:event.raid.horn（袭击号角，很响很长）、minecraft:item.goat_horn.sound.0～7（各种山羊角，音长，建议 horn-hold-seconds 设 0），
+  # 或材质包里的自定义列车笛声（如 fetarute:drive.horn，此时把 horn-chord 的 key 留空）
+  horn:
+    key: "minecraft:block.note_block.flute"
+    volume: 4.0
+    pitch: 0.5
+  horn-chord:
+    key: "minecraft:block.note_block.flute"
+    volume: 4.0
+    pitch: 0.595
+  # 信号变严、等待右键确认：每秒响一次直到确认
+  signal-restrictive:
+    key: "minecraft:block.note_block.bit"
+    volume: 1.0
+    pitch: 0.7
+  signal-confirmed:
+    key: "minecraft:ui.button.click"
+    volume: 0.6
+    pitch: 1.2
+  signal-clear:
+    key: "minecraft:block.note_block.bell"
+    volume: 0.8
+    pitch: 1.2
+  # 防护介入：ATP 制动；紧急制动或强制停车
+  atp-brake:
+    key: "minecraft:block.note_block.pling"
+    volume: 1.0
+    pitch: 0.5
+  emergency:
+    key: "minecraft:block.anvil.place"
+    volume: 0.8
+    pitch: 0.7
+  # 超速进入红区：每半秒响一次直到回落
+  overspeed:
+    key: "minecraft:block.note_block.bit"
+    volume: 0.8
+    pitch: 1.8
+  # 该开始制动了（每个目标一次）
+  brake-advice:
+    key: "minecraft:block.note_block.chime"
+    volume: 1.0
+    pitch: 1.0
+  doors-released:
+    key: "minecraft:block.note_block.chime"
+    volume: 0.8
+    pitch: 1.6
+  depart:
+    key: "minecraft:block.note_block.bell"
+    volume: 1.0
+    pitch: 1.4
+  ato-confirm:
+    key: "minecraft:block.note_block.bell"
+    volume: 0.8
+    pitch: 1.0
+  # 停妥时的对标结果：停准；可开门范围内；越过窗口或停短
+  stop-accurate:
+    key: "minecraft:entity.player.levelup"
+    volume: 0.6
+    pitch: 1.4
+  stop-accepted:
+    key: "minecraft:block.note_block.pling"
+    volume: 0.8
+    pitch: 1.2
+  stop-poor:
+    key: "minecraft:block.note_block.bass"
+    volume: 1.0
+    pitch: 0.8
+  task-complete:
+    key: "minecraft:ui.toast.challenge_complete"
+    volume: 0.8
+    pitch: 1.0
+  vigilance-warning:
+    key: "minecraft:block.note_block.bell"
+    volume: 1.0
+    pitch: 1.6
+  vigilance-tripped:
+    key: "minecraft:block.anvil.land"
+    volume: 0.6
+    pitch: 0.8
+  # simulation 级：出现车上故障；主断路器跳闸（与故障声一起响）；机车制动管失压自动紧急制动
+  fault:
+    key: "minecraft:block.note_block.bass"
+    volume: 1.0
+    pitch: 0.6
+  breaker-trip:
+    key: "minecraft:block.iron_trapdoor.close"
+    volume: 1.0
+    pitch: 0.7
+  brake-pipe-loss:
+    key: "minecraft:block.anvil.land"
+    volume: 0.6
+    pitch: 0.8
+  # 新手教程：完成一步、全部完成；驾驶情境提示
+  tutorial-step:
+    key: "minecraft:entity.experience_orb.pickup"
+    volume: 0.6
+    pitch: 1.2
+  tutorial-finish:
+    key: "minecraft:ui.toast.challenge_complete"
+    volume: 0.5
+    pitch: 1.0
+  tutorial-tip:
+    key: "minecraft:block.note_block.chime"
+    volume: 0.6
+    pitch: 1.4

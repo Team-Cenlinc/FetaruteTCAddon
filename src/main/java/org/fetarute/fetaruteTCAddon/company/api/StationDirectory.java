@@ -774,6 +774,15 @@ public final class StationDirectory {
       return catalog.station(stationId);
     }
 
+    /** 全部车站，按运营商代码、站码排序；主数据未加载时为空。 */
+    public List<StationEntry> stations() {
+      List<StationEntry> all = new ArrayList<>(catalog.stationsById.values());
+      all.sort(
+          Comparator.comparing((StationEntry entry) -> lower(entry.operator().code()))
+              .thenComparing(entry -> lower(entry.code())));
+      return List.copyOf(all);
+    }
+
     /**
      * 运营商代码（不区分大小写）所属的公司；HUD 的公司占位符用它，与车站、线路查找同一套运营商代码口径。
      *

@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.graph.control;
 
 import java.time.Duration;
 import java.util.Locale;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -28,6 +29,14 @@ public final class RailControlParsers {
    * <p>支持：{@code 80kmh} / {@code 8bps} / {@code 0.4bpt}；省略单位时默认视为 {@code kmh}。
    */
   public static Optional<RailSpeed> parseSpeed(String raw) {
+    return parseSpeed(raw, "kmh");
+  }
+
+  /**
+   * 同 {@link #parseSpeed(String)}，但省略单位时按 {@code defaultUnit} 理解（{@code kmh}、{@code bps} 或 {@code
+   * bpt}）。车型最高速度沿用以前只认格/秒的写法：不写单位时仍是格/秒。
+   */
+  public static Optional<RailSpeed> parseSpeed(String raw, String defaultUnit) {
     if (raw == null || raw.isBlank()) {
       return Optional.empty();
     }
@@ -50,7 +59,10 @@ public final class RailControlParsers {
       return Optional.empty();
     }
 
-    String normalizedUnit = unit != null ? unit.trim().toLowerCase(Locale.ROOT) : "kmh";
+    String normalizedUnit =
+        (unit != null ? unit : Objects.requireNonNull(defaultUnit, "defaultUnit"))
+            .trim()
+            .toLowerCase(Locale.ROOT);
     try {
       return switch (normalizedUnit) {
         case "kmh", "km/h", "kph" -> Optional.of(RailSpeed.ofKilometersPerHour(value));

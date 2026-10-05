@@ -28,6 +28,7 @@ public final class ShortestPathDistanceCache {
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<DistanceKey, CacheEntry> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<DistanceKey, Boolean> refreshing = new ConcurrentHashMap<>();
+  private volatile java.util.function.LongSupplier graphVersion = () -> 0L;
   private final LongAdder cacheHits = new LongAdder();
   private final LongAdder cacheMisses = new LongAdder();
 
@@ -56,6 +57,15 @@ public final class ShortestPathDistanceCache {
     this.refreshAfterMillis = normalizeRefreshMillis(refreshAfter);
     this.maxCacheSize = normalizeMaxCacheSize(maxCacheSize);
     this.debugLogger = debugLogger != null ? debugLogger : unused -> {};
+  }
+
+  /**
+   * 图快照版本：缓存键只有起止节点，换图后旧图上算的距离（含"不可达"）必须作废，不能等过期再异步刷新。
+   *
+   * @param graphVersion 每次图快照切换都会变的版本号
+   */
+  public void setGraphVersion(java.util.function.LongSupplier graphVersion) {
+    this.graphVersion = Objects.requireNonNull(graphVersion, "graphVersion");
   }
 
   /** 动态调整异步刷新间隔。 */
@@ -91,22 +101,24 @@ public final class ShortestPathDistanceCache {
     }
     DistanceKey key = new DistanceKey(from.value(), to.value());
     long nowMs = System.currentTimeMillis();
+    long version = graphVersion.getAsLong();
     CacheEntry cached = cache.get(key);
-    if (cached != null) {
+    if (cached != null && cached.graphVersion() == version) {
       cacheHits.increment();
       if (nowMs - cached.sampledAtMs() >= refreshAfterMillis) {
-        refreshAsync(key, graph, from, to);
+        refreshAsync(key, graph, from, to, version);
       }
       return cached.distance();
     }
     cacheMisses.increment();
     OptionalLong computed = computeDistance(graph, from, to);
-    cache.put(key, new CacheEntry(computed, nowMs));
+    cache.put(key, new CacheEntry(computed, nowMs, version));
     pruneIfNeeded(nowMs);
     return computed;
   }
 
-  private void refreshAsync(DistanceKey key, RailGraph graph, NodeId from, NodeId to) {
+  private void refreshAsync(
+      DistanceKey key, RailGraph graph, NodeId from, NodeId to, long version) {
     if (refreshing.putIfAbsent(key, Boolean.TRUE) != null) {
       return;
     }
@@ -114,7 +126,8 @@ public final class ShortestPathDistanceCache {
         () -> {
           try {
             OptionalLong refreshed = computeDistance(graph, from, to);
-            cache.put(key, new CacheEntry(refreshed, System.currentTimeMillis()));
+            // 带上算它时的图版本：刷新期间换了图，这条结果下次读到时按未命中处理。
+            cache.put(key, new CacheEntry(refreshed, System.currentTimeMillis(), version));
           } catch (RuntimeException ex) {
             debugLogger.accept(
                 "最短路异步刷新失败: from="
@@ -151,7 +164,7 @@ public final class ShortestPathDistanceCache {
     }
   }
 
-  private record CacheEntry(OptionalLong distance, long sampledAtMs) {
+  private record CacheEntry(OptionalLong distance, long sampledAtMs, long graphVersion) {
     private CacheEntry {
       Objects.requireNonNull(distance, "distance");
     }

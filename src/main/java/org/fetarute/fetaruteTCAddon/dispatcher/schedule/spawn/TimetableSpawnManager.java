@@ -259,6 +259,28 @@ public final class TimetableSpawnManager
   }
 
   /**
+   * 这张票要开的运营车次：运营票是它自己那一班，出库走行票是它要去接的那一班；回库票、别层的票为空。
+   *
+   * <p>驾驶员接车据此判断这张票是不是自己领的那一班：终点站待命车派车前、车库出车时。
+   */
+  public Optional<TimetableService.DueTrip> pickupTripOf(SpawnTicket ticket) {
+    if (ticket == null || ticket.id() == null || timetableService == null) {
+      return Optional.empty();
+    }
+    OwnedTicket owned = ownedTickets.get(ticket.id());
+    if (owned == null) {
+      return Optional.empty();
+    }
+    if (owned.trip().isPresent()) {
+      return owned.trip();
+    }
+    return owned
+        .intent()
+        .filter(intent -> intent.kind() == RouteOperationType.CREATE)
+        .flatMap(timetableService::tripOfIntent);
+  }
+
+  /**
    * 发车侧问：这张票等到什么时候就该放弃。不是本层的票没有到期时刻。
    *
    * <p>到期 = 计划时刻 + assign-tolerance：超过容差还没车，这一班就开天窗，再等下去只会让后面的班次跟着乱。
@@ -598,19 +620,23 @@ public final class TimetableSpawnManager
       return Optional.empty();
     }
     String tripId = legTicketId(due.timetable().code(), due.code(), due.serviceDate());
+    // 出库票出的是交路的车型（替补车同样）；回库票不出车。
+    Optional<String> consist =
+        due.kind() == RouteOperationType.CREATE ? due.duty().consist() : Optional.empty();
     return Optional.of(
         new SpawnTicket(
-            UUID.randomUUID(),
-            service.get(),
-            due.departure(),
-            due.departure(),
-            0,
-            sequence.incrementAndGet(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(tripId),
-            TripSource.SCHEDULED,
-            0));
+                UUID.randomUUID(),
+                service.get(),
+                due.departure(),
+                due.departure(),
+                0,
+                sequence.incrementAndGet(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of(tripId),
+                TripSource.SCHEDULED,
+                0)
+            .withConsist(consist));
   }
 
   /**
@@ -632,21 +658,23 @@ public final class TimetableSpawnManager
       return Optional.empty();
     }
     Optional<String> depotOverride =
-        due.timetable().routePlan(routeId).flatMap(plan -> plan.depotNodeId());
+        due.timetable().tripPlan(due.trip()).flatMap(plan -> plan.depotNodeId());
     String tripId = tripTicketId(due.timetable().code(), due.trip().tripCode(), due.serviceDate());
+    // 车次的车型即交路的车型：从车库始发的车次（首站 CRET）按它出车。
     return Optional.of(
         new SpawnTicket(
-            UUID.randomUUID(),
-            depotOverride.map(node -> withDepot(service.get(), node)).orElse(service.get()),
-            due.departure(),
-            due.departure(),
-            0,
-            sequence.incrementAndGet(),
-            depotOverride,
-            Optional.empty(),
-            Optional.of(tripId),
-            TripSource.SCHEDULED,
-            0));
+                UUID.randomUUID(),
+                depotOverride.map(node -> withDepot(service.get(), node)).orElse(service.get()),
+                due.departure(),
+                due.departure(),
+                0,
+                sequence.incrementAndGet(),
+                depotOverride,
+                Optional.empty(),
+                Optional.of(tripId),
+                TripSource.SCHEDULED,
+                0)
+            .withConsist(due.timetable().consistOf(due.trip())));
   }
 
   /** 车次指定了出库点时覆盖服务默认 depot；其余字段保持不变。 */

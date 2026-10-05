@@ -68,9 +68,13 @@ public final class StorageSchema {
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
+    ddl.add(consistPlans(dialect));
     ddl.add(pidsScreens(dialect));
+    ddl.add(pidsBulletins(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
+    // 拆牌、建牌同步按坐标查删节点（主线程同步执行），不能扫整个世界。
+    ddl.add(index("rail_nodes_position", "rail_nodes", "world_id, x, y, z"));
     ddl.add(railEdges(dialect));
     ddl.add(index("rail_edges_world", "rail_edges", "world_id"));
     ddl.add(railInterlockingSnapshots(dialect));
@@ -79,6 +83,12 @@ public final class StorageSchema {
     ddl.add(railComponentCautions(dialect));
     ddl.add(index("rail_component_cautions_world", "rail_component_cautions", "world_id"));
     ddl.add(railGraphSnapshots(dialect));
+    ddl.add(railPortalLinks(dialect));
+    ddl.add(driveTaskRecords(dialect));
+    ddl.add(index("drive_task_records_player", "drive_task_records", "player_uuid, finished_at"));
+    ddl.add(index("drive_task_records_finished", "drive_task_records", "finished_at"));
+    ddl.add(driveLicenses(dialect));
+    ddl.add(driveLicenseTraining(dialect));
     return Collections.unmodifiableList(ddl);
   }
 
@@ -576,6 +586,7 @@ public final class StorageSchema {
                     return_second %s NOT NULL,
                     planned_end_second %s NOT NULL,
                     close_reason %s NOT NULL,
+                    consist_key %s,
                     FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
                 """,
@@ -592,6 +603,7 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.intType(),
+        dialect.stringType(),
         dialect.stringType(),
         table("timetables"));
   }
@@ -619,6 +631,36 @@ public final class StorageSchema {
         dialect.timestampType(),
         dialect.timestampType(),
         table("companies"));
+  }
+
+  /**
+   * 编组方案：挂在运营商下，按名字引用。{@code name_key} 是小写的方案名，唯一约束写在表内（MySQL 不支持 {@code CREATE INDEX IF NOT
+   * EXISTS}）。
+   */
+  private String consistPlans(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    operator_id %s NOT NULL,
+                    name %s NOT NULL,
+                    name_key %s NOT NULL,
+                    body %s NOT NULL,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (operator_id, name_key),
+                    FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("consist_plans"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("operators"));
   }
 
   private String hudLineBindings(SqlDialect dialect) {
@@ -688,6 +730,50 @@ public final class StorageSchema {
         dialect.jsonType(),
         dialect.stringType(),
         dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType());
+  }
+
+  /**
+   * 站台屏公告。运营商按代码记录（与站台屏绑定的车站一致），公司记编号用于权限；车站与线路清单各存为 JSON 字符串数组。
+   *
+   * <p>开始、结束时刻可空（立即、长期）；正文用长文本类型。
+   */
+  private String pidsBulletins(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    operator_code %s NOT NULL,
+                    station_codes %s,
+                    line_codes %s,
+                    level %s NOT NULL,
+                    title %s NOT NULL,
+                    title_secondary %s,
+                    body %s,
+                    body_secondary %s,
+                    starts_at %s,
+                    ends_at %s,
+                    created_by %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL
+                );
+                """,
+        table("pids_bulletins"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.jsonType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        dialect.uuidType(),
         dialect.timestampType(),
         dialect.timestampType());
   }
@@ -826,6 +912,111 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.stringType());
+  }
+
+  private String railPortalLinks(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    from_world %s NOT NULL,
+                    from_node %s NOT NULL,
+                    to_world %s NOT NULL,
+                    to_node %s NOT NULL,
+                    source %s NOT NULL,
+                    transit_blocks %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    PRIMARY KEY (from_world, from_node)
+                );
+                """,
+        table("rail_portal_links"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.doubleType(),
+        dialect.timestampType());
+  }
+
+  private String driveTaskRecords(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    server_id %s,
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    timetable_id %s NOT NULL,
+                    trip_code %s NOT NULL,
+                    service_date %s NOT NULL,
+                    route_code %s NOT NULL,
+                    train_name %s NOT NULL,
+                    mode %s NOT NULL,
+                    state %s NOT NULL,
+                    points %s NOT NULL,
+                    grade %s NOT NULL,
+                    started_at %s NOT NULL,
+                    finished_at %s NOT NULL,
+                    detail_json %s NOT NULL
+                );
+                """,
+        table("drive_task_records"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        dialect.textType());
+  }
+
+  private String driveLicenses(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    class_id %s NOT NULL,
+                    granted_at %s NOT NULL,
+                    granted_by %s NOT NULL,
+                    PRIMARY KEY (player_uuid, class_id)
+                );
+                """,
+        table("drive_licenses"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.stringType());
+  }
+
+  private String driveLicenseTraining(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    class_id %s NOT NULL,
+                    runs %s NOT NULL,
+                    last_at %s NOT NULL,
+                    PRIMARY KEY (player_uuid, class_id)
+                );
+                """,
+        table("drive_license_training"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        dialect.timestampType());
   }
 
   private String formatDdl(String template, Object... args) {

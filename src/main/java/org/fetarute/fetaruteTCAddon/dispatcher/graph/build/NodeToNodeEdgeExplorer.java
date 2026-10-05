@@ -74,9 +74,6 @@ public final class NodeToNodeEdgeExplorer {
   private final Queue<EdgeExplorationTask> pendingTasks = new ArrayDeque<>();
   private final Map<EdgeId, ExploredRailEdgeAccumulator> discoveredEdges = new HashMap<>();
 
-  /** 已探索过的节点对（无向），用于跳过重复探索 */
-  private final Set<EdgeId> exploredPairs = new HashSet<>();
-
   private EdgeExplorationTask currentTask;
   private boolean done = false;
   private boolean footprintEvidenceComplete = true;
@@ -336,7 +333,11 @@ public final class NodeToNodeEdgeExplorer {
   private boolean stepWalker(WalkerState ws, NodeId startNodeId) {
     TrackWalkingPoint walker = ws.walker;
 
-    captureCurrentPath(ws);
+    // 起点那段轨道只在第一步取一次；之后每步移动后取新的一段，上一步的终点就是这一步的起点，不必重复光栅化。
+    if (!ws.startCaptured) {
+      captureCurrentPath(ws);
+      ws.startCaptured = true;
+    }
 
     // 移动一个轨道块
     if (!walker.moveFull()) {
@@ -382,9 +383,6 @@ public final class NodeToNodeEdgeExplorer {
     if (step == WalkerStep.ARRIVED) {
       int distance = (int) Math.round(walker.movedTotal);
       EdgeId edgeId = EdgeId.undirected(startNodeId, targetNodeId);
-
-      // 标记为已探索（从两个方向都算同一条边）
-      exploredPairs.add(edgeId);
 
       discoveredEdges
           .computeIfAbsent(edgeId, ignored -> new ExploredRailEdgeAccumulator())
@@ -439,19 +437,8 @@ public final class NodeToNodeEdgeExplorer {
     walkerState.footprintCells.addAll(cells);
   }
 
-  /** 检查从 fromNode 到 toNode 的边是否已经被探索过。 用于跳过反向探索（如果 A→B 已完成，则 B→A 可以跳过） */
-  public boolean isEdgeExplored(NodeId fromNode, NodeId toNode) {
-    return exploredPairs.contains(EdgeId.undirected(fromNode, toNode));
-  }
-
   public boolean isDone() {
     return done && currentTask == null && pendingTasks.isEmpty();
-  }
-
-  public Map<EdgeId, Integer> getDiscoveredEdges() {
-    Map<EdgeId, Integer> lengths = new HashMap<>();
-    getExploredEdges().forEach((edgeId, edge) -> lengths.put(edgeId, edge.lengthBlocks()));
-    return Map.copyOf(lengths);
   }
 
   /**
@@ -519,6 +506,7 @@ public final class NodeToNodeEdgeExplorer {
     final TrackWalkingPoint walker;
     final Set<RailFootprintCell> footprintCells = new TreeSet<>();
     boolean footprintCaptured = true;
+    boolean startCaptured;
 
     WalkerState(TrackWalkingPoint walker) {
       this.walker = walker;

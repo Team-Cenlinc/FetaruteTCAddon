@@ -9,6 +9,8 @@ import java.util.OptionalLong;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SpeedEnvelope;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
@@ -40,6 +42,15 @@ public final class TrainLaunchManager {
 
   private static final String TAG_LAST_LAUNCH_AT = "FTA_LAST_LAUNCH_AT";
   private static final String TAG_PENDING_LAUNCH_COMMAND = "FTA_PENDING_LAUNCH_COMMAND";
+
+  /**
+   * 静止列车被要求发车、却没发出去（冷却未过、TrainCarts 拒绝 launch）时记下的欠账。
+   *
+   * <p>调度层只在信号变化或强制刷新的那一拍要求发车；那一拍发不出去，之后信号不变就再也不会要求，车停在 PROCEED 下等健康监控补发。 有欠账时后续非 STOP 周期照常补发；任何
+   * STOP、物理移动、发车被接受或驾驶员接管都销账。补发仍走同一套冷却与幂等判定， 不比冷却为 0 时更激进。
+   */
+  private static final String TAG_LAUNCH_OWED = "FTA_LAUNCH_OWED";
+
   private static final String TAG_LAST_SPEED_CMD_BPS = "FTA_LAST_SPEED_CMD_BPS";
   private static final String TAG_LAST_SPEED_CMD_AT = "FTA_LAST_SPEED_CMD_AT";
 
@@ -54,6 +65,9 @@ public final class TrainLaunchManager {
 
   private final SpeedLimitRamp speedLimitRamp;
 
+  /** 列车的物理控制权：驾驶员控制的列车不写限速、不发车，只把决定交给驾驶员。 */
+  private final ControlAuthority authority;
+
   /**
    * 每列车上一次下发的速度命令：限幅与迟滞的参照。
    *
@@ -64,16 +78,32 @@ public final class TrainLaunchManager {
 
   private int speedCommandsSincePrune;
 
-  /** 使用 Bukkit 调度器驱动的逐 tick 限速斜坡。 */
+  /** 使用 Bukkit 调度器驱动的逐 tick 限速斜坡；控制权经插件实例查找。 */
   public TrainLaunchManager() {
-    this(new SpeedLimitRamp());
+    this(new SpeedLimitRamp(), ControlAuthority.pluginLookup());
+  }
+
+  /**
+   * 全部按自动运行控车。
+   *
+   * @param speedLimitRamp 逐 tick 限速斜坡
+   */
+  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp) {
+    this(speedLimitRamp, ControlAuthority.NONE);
   }
 
   /**
    * @param speedLimitRamp 逐 tick 限速斜坡
+   * @param authority 列车的物理控制权
    */
-  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp) {
+  public TrainLaunchManager(SpeedLimitRamp speedLimitRamp, ControlAuthority authority) {
     this.speedLimitRamp = java.util.Objects.requireNonNull(speedLimitRamp, "speedLimitRamp");
+    this.authority = java.util.Objects.requireNonNull(authority, "authority");
+  }
+
+  /** 列车的物理控制权。 */
+  ControlAuthority authority() {
+    return authority;
   }
 
   /**
@@ -86,8 +116,8 @@ public final class TrainLaunchManager {
    * @param speedCurveLimitBps 执行层速度曲线限制后的速度；未触发时为空
    * @param finalTargetBps 最终写入 TrainCarts 前的速度
    * @param finalLimiterSource 执行层最终限制来源
-   * @param launchCommandAccepted 允许发车时，底层已接受 launch action、已有待执行 action 或列车已经移动；非发车控制为 {@code
-   *     false}
+   * @param launchCommandAccepted 允许发车（或补发先前没发出去的发车）时，底层已接受 launch action、已有待执行 action
+   *     或列车已经移动；非发车控制为 {@code false}
    */
   public record ControlApplicationResult(
       double requestedTargetBps,
@@ -206,6 +236,20 @@ public final class TrainLaunchManager {
       return new ControlApplicationResult(
           targetBps, OptionalDouble.empty(), Math.max(0.0, targetBps), "none");
     }
+    if (authority.isDriverControlled(properties)) {
+      return publishDriverDirective(
+          train,
+          properties,
+          aspect,
+          targetBps,
+          config,
+          allowLaunch,
+          distanceOpt,
+          launchFallbackDirection,
+          runtimeSettings,
+          stopMode,
+          speedEnvelope);
+    }
     disableSlowdown(properties);
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
     double decelBpt2 = toBlocksPerTickSquared(config.decelBps2());
@@ -215,17 +259,26 @@ public final class TrainLaunchManager {
 
     if (aspect == SignalAspect.STOP) {
       speedLimitRamp.release(train);
-      clearPendingLaunchCommand(properties);
       StopControlMode resolvedStopMode =
           stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
       if (resolvedStopMode == StopControlMode.HARD_STOP) {
         rememberSpeedCommand(properties, 0.0);
         properties.setSpeedLimit(0.0);
-        if (train != null) {
-          train.stopHard();
+        if (train == null) {
+          clearLaunchBookkeeping(properties);
+        } else {
+          try {
+            train.stopHard();
+          } finally {
+            // 冷却保护的是已交给 TrainCarts、尚在执行的 launch；硬停把动作队列整个清空，它已不存在。
+            // 不清掉的话，冷却期内重新放行的那一拍发不了车。与待发车标记、发车欠账一起删，只扫一遍 tag。
+            TrainTagHelper.removeTagKeys(
+                properties, TAG_PENDING_LAUNCH_COMMAND, TAG_LAUNCH_OWED, TAG_LAST_LAUNCH_AT);
+          }
         }
         return new ControlApplicationResult(targetBps, OptionalDouble.empty(), 0.0, "hard_stop");
       }
+      clearLaunchBookkeeping(properties);
       // STOP 是闭塞硬约束，但控车仍按剩余授权距离做制动曲线；距离缺失或已到停车点时才硬停。
       double curveSpeed =
           Math.max(0.0, resolveStopSpeed(train, config, distanceOpt, runtimeSettings));
@@ -247,9 +300,11 @@ public final class TrainLaunchManager {
           targetBps, curveLimit, curveSpeed, curveSpeed > 0.0 ? "stop_curve" : "stop");
     }
 
-    double curveAdjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+    // 车型最高速度是最后一道上限：晚点追赶放宽的线路限速、调度给的目标速度都不越过它。
+    double cappedBps = config.capped(targetBps);
+    double curveAdjustedBps = applySpeedCurve(cappedBps, config, distanceOpt, runtimeSettings);
     OptionalDouble speedCurveLimit =
-        curveAdjustedBps < Math.max(0.0, targetBps) - 1.0e-6
+        curveAdjustedBps < Math.max(0.0, cappedBps) - 1.0e-6
             ? OptionalDouble.of(curveAdjustedBps)
             : OptionalDouble.empty();
     double heldBps = curveAdjustedBps;
@@ -260,9 +315,12 @@ public final class TrainLaunchManager {
       }
     }
     boolean resumeTraction = !allowLaunch && shouldResumeTraction(train, toBlocksPerTick(heldBps));
+    // 先前要求过发车却没发出去：这一拍信号虽未变化，仍按发车处理（见 TAG_LAUNCH_OWED）。
+    boolean launchOwed = train != null && !train.isMoving() && hasLaunchOwed(properties);
+    boolean launchRequested = allowLaunch || launchOwed;
     // 发车/信号放行/运行中补牵引都由 launch 动作按加速度爬升：速度上限不再“上行限幅”二次压速，也不按迟滞留在旧命令上——
     // 牵引目标就是限速本身，迟滞会让车一直比限速（编表曲线）慢一截。
-    boolean tractionIssued = allowLaunch || resumeTraction;
+    boolean tractionIssued = launchRequested || resumeTraction;
     double adjustedBps =
         applySpeedCommandRateLimit(
             properties, heldBps, config, runtimeSettings, tractionIssued, tractionIssued);
@@ -285,8 +343,8 @@ public final class TrainLaunchManager {
     // 非 STOP 信号：允许发车或对运动中列车补充能量
     if (train != null) {
       if (train.isMoving()) {
-        // 物理运动是唯一能消费待发车命令的正向证据；此后相同授权无需保留发车去重标记。
-        clearPendingLaunchCommand(properties);
+        // 物理运动是唯一能消费待发车命令的正向证据；此后相同授权无需保留发车去重标记，欠账也随之销掉。
+        clearLaunchBookkeeping(properties);
         if (allowLaunch) {
           launchCommandAccepted = true;
         }
@@ -300,21 +358,28 @@ public final class TrainLaunchManager {
           train.accelerateTo(targetBpt, controlAcceleration);
         }
       } else {
-        // 静止时需要发车：受 allowLaunch 和冷却时间限制
+        // 静止时需要发车：受 allowLaunch（或欠账）和冷却时间限制
         String commandSignature =
             pendingLaunchCommandSignature(aspect, targetBpt, accelBpt2, launchFallbackDirection);
-        if (!allowLaunch) {
+        if (!launchRequested) {
           clearPendingLaunchCommand(properties);
-        } else if (hasPendingLaunchCommand(properties, commandSignature)) {
-          // 相同授权已由 TrainCarts 接受。不能以“仍静止”作为重置 action 队列的理由；必须等待
-          // 物理进度、STOP/撤销或新的授权参数，才能再次向执行层写入命令。
-          launchCommandAccepted = true;
-        } else if (canIssueLaunch(properties, runtimeSettings)) {
-          launchCommandAccepted =
-              train.requestLaunchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
-          if (launchCommandAccepted) {
-            markLaunchIssued(properties, runtimeSettings);
-            rememberPendingLaunchCommand(properties, commandSignature);
+        } else {
+          if (hasPendingLaunchCommand(properties, commandSignature)) {
+            // 相同授权已由 TrainCarts 接受。不能以“仍静止”作为重置 action 队列的理由；必须等待
+            // 物理进度、STOP/撤销或新的授权参数，才能再次向执行层写入命令。
+            launchCommandAccepted = true;
+          } else if (canIssueLaunch(properties, runtimeSettings)) {
+            launchCommandAccepted =
+                train.requestLaunchWithFallback(launchFallbackDirection, targetBpt, accelBpt2);
+            if (launchCommandAccepted) {
+              markLaunchIssued(properties, runtimeSettings);
+              rememberPendingLaunchCommand(properties, commandSignature);
+            }
+          }
+          if (launchCommandAccepted && launchOwed) {
+            TrainTagHelper.removeTagKey(properties, TAG_LAUNCH_OWED);
+          } else if (!launchCommandAccepted && !launchOwed) {
+            TrainTagHelper.writeTag(properties, TAG_LAUNCH_OWED, "true");
           }
         }
       }
@@ -326,9 +391,81 @@ public final class TrainLaunchManager {
       limiterSource = "speed_ceiling_hold";
     } else if (speedCurveLimit.isPresent()) {
       limiterSource = "speed_curve";
+    } else if (cappedBps < targetBps - 1.0e-6) {
+      limiterSource = "consist_max";
     }
     return new ControlApplicationResult(
         targetBps, speedCurveLimit, adjustedBps, limiterSource, launchCommandAccepted);
+  }
+
+  /**
+   * 驾驶员控制的列车：照常算出自动运行下会写入的速度，但不写限速、不发车、不挂斜坡，只把决定交给驾驶员。
+   *
+   * <p>自动运行的 {@code allowLaunch} 只在信号变化或强制刷新的那一拍为真（是否下发发车动作）；驾驶员能否起步只看是不是停车信号。 “发车已接受”仍按 {@code
+   * allowLaunch} 报告：起步由驾驶员完成，调度层不应因为没看到发车动作而反复重试。
+   */
+  private ControlApplicationResult publishDriverDirective(
+      RuntimeTrainHandle train,
+      TrainProperties properties,
+      SignalAspect aspect,
+      double targetBps,
+      TrainConfig config,
+      boolean allowLaunch,
+      OptionalLong distanceOpt,
+      java.util.Optional<org.bukkit.block.BlockFace> launchFallbackDirection,
+      ConfigManager.RuntimeSettings runtimeSettings,
+      StopControlMode stopMode,
+      SpeedEnvelope speedEnvelope) {
+    speedLimitRamp.release(train);
+    // 驾驶员接管后起步归驾驶员；交还自动运行时不能再拿接管前的欠账替他发车。
+    clearLaunchBookkeeping(properties);
+    if (allowLaunch
+        && aspect != SignalAspect.STOP
+        && train != null
+        && !train.isMoving()
+        && authority.takeTurnback(properties)) {
+      // 终点站折返由驾驶员接班：按自动发车同一套寻路判定方向，车头朝反了先调头（车不动），再把发车交给驾驶员。
+      train.faceDepartureDirection(
+          launchFallbackDirection == null ? java.util.Optional.empty() : launchFallbackDirection);
+    }
+    // 人工驾驶不受进站限速：停车由驾驶员自己掌握，越过停车点另有防护。
+    if (speedEnvelope != null) {
+      SpeedEnvelope.ManualView manual = speedEnvelope.manual(targetBps);
+      targetBps = manual.targetBps();
+      speedEnvelope = manual.envelope();
+    }
+    StopControlMode resolvedStopMode =
+        stopMode == null ? StopControlMode.BRAKING_TO_PLANNED_STOP : stopMode;
+    double permittedBps;
+    OptionalDouble curveLimit = OptionalDouble.empty();
+    String source;
+    if (aspect == SignalAspect.STOP) {
+      if (resolvedStopMode == StopControlMode.HARD_STOP) {
+        permittedBps = 0.0;
+        source = "driver_hard_stop";
+      } else {
+        permittedBps = Math.max(0.0, resolveStopSpeed(train, config, distanceOpt, runtimeSettings));
+        source = "driver_stop_curve";
+      }
+    } else {
+      permittedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+      if (permittedBps < Math.max(0.0, targetBps) - 1.0e-6) {
+        curveLimit = OptionalDouble.of(permittedBps);
+      }
+      source = "driver";
+    }
+    authority.publish(
+        properties,
+        new DriverDirective(
+            aspect,
+            resolvedStopMode,
+            targetBps,
+            permittedBps,
+            aspect != SignalAspect.STOP,
+            distanceOpt == null ? OptionalLong.empty() : distanceOpt,
+            speedEnvelope));
+    return new ControlApplicationResult(
+        targetBps, curveLimit, permittedBps, source, allowLaunch && aspect != SignalAspect.STOP);
   }
 
   /**
@@ -447,6 +584,16 @@ public final class TrainLaunchManager {
   /** 清除当前列车的待发车幂等标记。 */
   private static void clearPendingLaunchCommand(TrainProperties properties) {
     TrainTagHelper.removeTagKey(properties, TAG_PENDING_LAUNCH_COMMAND);
+  }
+
+  /** 是否欠着一次没发出去的发车。 */
+  private static boolean hasLaunchOwed(TrainProperties properties) {
+    return TrainTagHelper.readTagValue(properties, TAG_LAUNCH_OWED).isPresent();
+  }
+
+  /** 一并清除待发车幂等标记与发车欠账（一次遍历 tag）。 */
+  private static void clearLaunchBookkeeping(TrainProperties properties) {
+    TrainTagHelper.removeTagKeys(properties, TAG_PENDING_LAUNCH_COMMAND, TAG_LAUNCH_OWED);
   }
 
   /**

@@ -631,6 +631,104 @@ class TimetableApiImplTest {
     assertEquals(RouteOperationType.OPERATION.name(), detail.routePlans().get(0).kind());
   }
 
+  /** 区分车型的表（1.11.0）：交路是 6 节，6 节比基础计划（最慢车型）快，BBB 70 秒到、100 秒发。 */
+  private static TimetableService mixedService() {
+    Timetable base = timetable(planStops());
+    TimetableRoutePlan plan = base.routePlan(ROUTE).orElseThrow();
+    List<TimetableStop> fast =
+        List.of(
+            new TimetableStop(
+                0, Optional.of("AAA"), Optional.of("OP:S:AAA:1"), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.of("PPP"), Optional.of("OP:S:PPP:1"), 35, 35, RouteStopPassType.PASS),
+            new TimetableStop(
+                2, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 70, 100, RouteStopPassType.STOP),
+            new TimetableStop(
+                3, Optional.of("QQQ"), Optional.of("OP:S:QQQ:1"), 140, 140, RouteStopPassType.STOP),
+            new TimetableStop(
+                4,
+                Optional.of("CCC"),
+                Optional.of("OP:S:CCC:1"),
+                180,
+                180,
+                RouteStopPassType.TERMINATE));
+    VehicleDuty duty = base.duties().get(0);
+    Timetable mixed =
+        new Timetable(
+            base.id(),
+            base.companyId(),
+            base.operatorId(),
+            base.lineId(),
+            base.code(),
+            base.name(),
+            base.status(),
+            base.zoneId(),
+            base.serviceStartSecondOfDay(),
+            base.serviceEndSecondOfDay(),
+            List.of(
+                plan,
+                plan.asVariant(
+                    ROUTE, new TimetableRoutePlan.ConsistVariant("m6", ROUTE, 60.0, 0.0), fast)),
+            base.trips(),
+            List.of(
+                new VehicleDuty(
+                    duty.id(),
+                    duty.timetableId(),
+                    duty.sequence(),
+                    duty.dutyCode(),
+                    duty.startDepotNodeId(),
+                    duty.endDepotNodeId(),
+                    duty.createRouteId(),
+                    duty.returnRouteId(),
+                    duty.tripIds(),
+                    duty.plannedStartSecondOfDay(),
+                    duty.returnSecondOfDay(),
+                    duty.plannedEndSecondOfDay(),
+                    duty.closeReason(),
+                    Optional.of("m6"))),
+            base.notes(),
+            base.createdAt(),
+            base.updatedAt());
+    TimetableService service = new TimetableService(Instant::now, message -> {});
+    service.applySettings(
+        new TimetableService.Settings(
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
+    StorageProvider provider = mock(StorageProvider.class);
+    TimetableRepository repository = mock(TimetableRepository.class);
+    when(provider.timetables()).thenReturn(repository);
+    when(repository.listPublished()).thenReturn(List.of(mixed));
+    service.reload(provider);
+    service.setConsistOfTrain(name -> Optional.of("m6"));
+    return service;
+  }
+
+  @Test
+  void consistsAreExposedAndStopTimesFollowTheTripsConsist() {
+    TimetableService service = mixedService();
+    TimetableApiImpl api = api(service, null, null);
+
+    TimetableApi.TimetableDetail detail = api.getTimetable(TIMETABLE).orElseThrow();
+    assertEquals(1, detail.routePlans().size(), "每条交路仍只有一份计划");
+    TimetableApi.RoutePlan plan = detail.routePlans().get(0);
+    TimetableApi.Trip first = detail.trips().get(0);
+    assertEquals(Optional.of("m6"), first.consist());
+    assertEquals(Optional.of("m6"), detail.duties().get(0).consist());
+    assertEquals(130, plan.stops().get(2).departureOffsetSeconds(), "stops 仍是最慢车型的那份");
+    assertEquals(100, plan.stopsFor(first.consist()).get(2).departureOffsetSeconds());
+    assertEquals(plan.stops(), plan.stopsFor(Optional.of("m8")), "没有这个车型时退回 stops");
+
+    TimetableApi.Departure atB =
+        api.departuresAt(
+                OPERATOR, "BBB", Instant.parse("2026-03-02T07:59:00Z"), Duration.ofMinutes(5), 1)
+            .get(0);
+    assertEquals(Optional.of("m6"), atB.consist());
+    assertEquals(Instant.parse("2026-03-02T08:01:10Z"), atB.plannedArrival());
+    assertEquals(Instant.parse("2026-03-02T08:01:40Z"), atB.plannedDeparture());
+
+    bindTripOne(service, 5);
+    assertEquals(Optional.of("m6"), api.getAssignment("train-A").orElseThrow().consist());
+  }
+
   @Test
   void disabledTimetableHidesAssignmentsButKeepsPublishedQueries() {
     TimetableApiImpl api = api(service(false), null, null);

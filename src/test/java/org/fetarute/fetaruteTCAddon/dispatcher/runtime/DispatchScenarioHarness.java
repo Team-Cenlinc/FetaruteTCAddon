@@ -184,9 +184,9 @@ final class DispatchScenarioHarness {
    * 生产的健康监控器——恢复动作（含 Phase 4 的尾部保护回收）**唯一**的发起方。
    *
    * <p>此前 {@code smartRecoveryLayer(true)} 只调了一次 {@code traceSmartDispatchGlobalSnapshot}，
-   * 并不驱动任何恢复动作，于是 {@code applySmartSelfOwnedStaleRetainRelease} → {@code
-   * applyPhysicalEdgeRetainRelease} 这条链在骨架里从未执行过一次 （实测：整场 {@code SMART_PHYSICAL_EDGE_RETAIN_*} 与
-   * {@code SMART_RECOVERY_ACTION_ORDER} 均为 0）。 不接上它，Phase 4 的任何改动都只能靠实服 70 分钟一轮来验证。
+   * 并不驱动任何恢复动作，于是 {@code applySmartSelfOwnedStaleRetainRelease} 的实测覆盖分支在骨架里从未执行过一次 （实测：整场 {@code
+   * SMART_PHYSICAL_EDGE_RETAIN_*} 与 {@code SMART_RECOVERY_ACTION_ORDER} 均为 0）。 不接上它，Phase 4
+   * 的任何改动都只能靠实服 70 分钟一轮来验证。
    */
   private final org.fetarute.fetaruteTCAddon.dispatcher.health.TrainHealthMonitor healthMonitor;
 

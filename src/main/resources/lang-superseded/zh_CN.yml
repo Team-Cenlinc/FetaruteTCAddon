@@ -1,10 +1,31 @@
 # 内置文案改写前的旧值。服务器上的 lang/zh_CN.yml 里某个键仍是这里列出的旧值之一（没有改过）时，
 # 加载时换成新的内置文案；改过的保留。只列改写过的键：新增的键会自动补上，不用列。
 command:
+  route:
+    set:
+      batch-success: ["<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"]
+  consist:
+    max-speed: ["，最高 <value> 格/秒"]
   pids:
     help:
       give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
+  train:
+    help:
+      entry-config-set:
+        - "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel</white> <gray>- 设置配置</gray>"
+        - "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel/--mode/--mt/--max-speed</white> <gray>- 设置配置</gray>"
+    config:
+      drive-set: ["<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新: mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white>"]
+      drive-list: ["  <gray>驾驶:</gray> mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> <gray>bps</gray>"]
 pids:
+  bulletin:
+    dialog:
+      hint: ["<gray>公告在本运营商车站的站台屏上轮播。车站、线路填代码，多个以逗号分隔，留空为不限；时间按服务器时区，如 2026-10-05 22:00，开始留空为立即生效，结束留空为长期有效。</gray>"]
+      field:
+        stations: ["车站（留空为全部车站）"]
+        lines: ["线路（留空为全部线路）"]
+        starts: ["开始时间（留空为立即）"]
+        ends: ["结束时间（留空为长期）"]
   board:
     notice:
       order:
@@ -20,3 +41,63 @@ pids:
       passing:
         body: ["请勿靠近站台边缘"]
         body-secondary: ["Stand clear of the platform edge"]
+drive:
+  task:
+    board:
+      no-station: ["<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"]
+      entry-time: ["<gray>计划发车</gray> <white><time></white>"]
+      entry-platform: ["<gray>站台</gray> <white><platform></white>"]
+      entry-train: ["<gray>列车</gray> <white><train></white>"]
+      entry-claimed-self: ["<gray>本人已领取</gray>"]
+      info-claimed: ["<gray>灰色车次已有驾驶员领取，不可再领取</gray>"]
+    claim:
+      claimed: ["<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室即可接班</green>"]
+    pickup:
+      terminal: ["<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进任一端驾驶室并确认座位；发车时如需换端，将自动换到前端驾驶室</white>"]
+    goto:
+      teleported: ["<prefix> <green>已到达列车车头驾驶室旁，请上车坐下并确认座位</green>"]
+    cab-changed: ["<prefix> <white>折返换端：已换到前端驾驶室（第 <car> 节）</white>"]
+    cab-change-failed: ["<prefix> <red>折返换端失败：前端驾驶室没有可用座位，列车交还自动运行</red>"]
+    cab-change:
+      announce: ["<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；换端途中离座不结束驾驶</white>"]
+  hud:
+    line:
+      - "<gray>速度</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>限速</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+      - "<gray>速度</gray> <speed> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>档位</gray> <yellow><notch></yellow> <force> <dark_gray>|</dark_gray> <gray>限速</gray> <limit> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
+    station:
+      approach: ["<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>格</gray>"]
+      move-up: ["<yellow>请前移 <white><distance></white> 格对标</yellow>"]
+      overrun: ["<red>越过停车点 <white><distance></white> 格</red>"]
+  tutorial:
+    tips:
+      ato-confirm:
+        chat: ["<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"]
+  license:
+    exam:
+      brief:
+        dispatch:
+          how: ["<prefix> <white>开始方式：</white><gray>列车进站后坐进车头驾驶室，按提示确认座位并输入 <aqua>/fta drive on</aqua>。</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>传送到列车旁</gray>'><green>[前往列车]</green></hover></click>"]
+  handbook:
+    driver:
+      page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
+  sidebar:
+    label:
+      train: ["车次"]
+    value:
+      stop:
+        approach: ["<aqua><station></aqua> <white><distance></white> <gray>格</gray>"]
+        move-up: ["<yellow>请前移 <white><distance></white> 格</yellow>"]
+        overrun: ["<red>越过 <white><distance></white> 格</red>"]
+  command:
+    help:
+      entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
+      entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]
+    start:
+      bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
+      managed-train: ["<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"]
+      train-moving:
+        - "<prefix> <red>列车正在行驶，停稳后才能开始驾驶</red>"
+        - "<prefix> <red>列车尚未停稳（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"
+sign:
+  stopmark:
+    invalid: ["<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"]

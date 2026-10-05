@@ -35,6 +35,8 @@ import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager.SpawnSettings;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ResolvedConsistPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -47,6 +49,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.export.ScheduleCsvExporter;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ScheduleWindow;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
@@ -195,9 +198,32 @@ public final class FtaDepotCommand {
                     return;
                   }
 
+                  // 编组来源与自动出库一致：--pattern > route 绑定的编组方案 > spawn_train_pattern > 车库牌子第 4 行
+                  String flagPattern =
+                      normalizeSpawnPattern(ctx.flags().getValue(patternFlag, null));
+                  Optional<ResolvedConsistPlan> consistPlan =
+                      plugin
+                          .getConsistPlanService()
+                          .flatMap(service -> service.planForRoute(resolved.route().id()));
+                  Optional<ResolvedConsistPlan.Member> consist =
+                      flagPattern != null
+                          ? consistPlan.flatMap(plan -> plan.member(flagPattern))
+                          : consistPlan.flatMap(
+                              plan -> firstSpawnable(resolved.route().id(), plan));
+                  if (flagPattern != null && consistPlan.isPresent() && consist.isEmpty()) {
+                    sender.sendMessage(
+                        locale.component(
+                            "command.depot.spawn.consist-not-in-plan",
+                            Map.of(
+                                "pattern", flagPattern, "plan", consistPlan.get().plan().name())));
+                  }
                   Optional<String> patternOpt =
-                      Optional.ofNullable(
-                              normalizeSpawnPattern(ctx.flags().getValue(patternFlag, null)))
+                      Optional.ofNullable(flagPattern)
+                          .or(
+                              () ->
+                                  consist
+                                      .flatMap(ResolvedConsistPlan.Member::profile)
+                                      .map(ConsistProfile::pattern))
                           .or(() -> DepotSpawnPattern.fromRoute(resolved.route()))
                           .or(() -> DepotSpawnPattern.fromSign(sign));
                   if (patternOpt.isEmpty()) {
@@ -268,6 +294,11 @@ public final class FtaDepotCommand {
                             new RouteLineChanges.LineRef(
                                 resolved.operator().code(), resolved.line().code()));
                     addTags(properties, runId, resolved, startLine, depotId, pattern, destInfo);
+                    // 与自动出库一致：先写编组方案的车型标签，再按车型写加减速标签，驾驶员接管时按调度控车同一组加减速开车。
+                    SpawnMotionTags.stampWithConsist(
+                        properties,
+                        plugin.getConfigManager().current(),
+                        consist.map(ResolvedConsistPlan.Member::spawnTags).orElse(Map.of()));
                     initializeRouteIndex(
                         properties,
                         provider,
@@ -293,6 +324,15 @@ public final class FtaDepotCommand {
                               "run_id",
                               runId.toString())));
                 }));
+  }
+
+  /** 手动出车不记份额，只取方案里此刻排在最前、档案可用的车型。 */
+  private Optional<ResolvedConsistPlan.Member> firstSpawnable(
+      UUID routeId, ResolvedConsistPlan plan) {
+    return plugin.getConsistPlanService().stream()
+        .flatMap(service -> service.rank(routeId, plan).stream())
+        .filter(member -> member.profile().isPresent())
+        .findFirst();
   }
 
   /**
@@ -1025,6 +1065,7 @@ public final class FtaDepotCommand {
     Instant now = Instant.now();
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
+    tags.put(TrainSpawnTagInitializer.TAG_TRAIN_UID, runId.toString());
     tags.put("FTA_ROUTE_ID", resolved.route().id().toString());
     tags.put("FTA_ROUTE_CODE", resolved.route().code());
     tags.put("FTA_LINE_CODE", startLine.lineCode());

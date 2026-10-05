@@ -116,15 +116,31 @@ public final class TrainTagHelper {
 
   /** 删除指定 key 的 tag。 */
   public static void removeTagKey(TrainProperties properties, String key) {
-    if (properties == null || key == null || key.isBlank() || !properties.hasTags()) {
+    removeTagKeys(properties, key);
+  }
+
+  /** 一次遍历删除多个 key 的 tag；控车每个周期都会清几项标记，逐个删要把 tag 列表扫好几遍。 */
+  public static void removeTagKeys(TrainProperties properties, String... keys) {
+    if (properties == null || keys == null || keys.length == 0 || !properties.hasTags()) {
       return;
     }
-    String target = key.trim().toLowerCase(Locale.ROOT);
+    List<String> targets = new ArrayList<>(keys.length);
+    for (String key : keys) {
+      if (key != null && !key.isBlank()) {
+        targets.add(key.trim().toLowerCase(Locale.ROOT));
+      }
+    }
+    if (targets.isEmpty()) {
+      return;
+    }
     List<String> removals = new ArrayList<>();
     for (String tag : properties.getTags()) {
-      if (matchesKey(tag, target)) {
-        // TrainCarts 按 tag 原始字符串执行删除；匹配时可以 trim，但删除值必须保留原样。
-        removals.add(tag);
+      for (String target : targets) {
+        if (matchesKey(tag, target)) {
+          // TrainCarts 按 tag 原始字符串执行删除；匹配时可以 trim，但删除值必须保留原样。
+          removals.add(tag);
+          break;
+        }
       }
     }
     if (!removals.isEmpty()) {

@@ -3366,6 +3366,92 @@ class SimpleTicketAssignerLayoverTest {
         "票据成功提交后必须清除实体化事务墓碑");
   }
 
+  /** 驾驶员要从车库接车：出车后在第一拍信号之前挂上发车门控，车停在车库股道上；不要求时不挂。 */
+  @Test
+  void depotSpawnHoldAcquiresTheDriverPickupGateBeforeTheFirstSignalRefresh() {
+    for (boolean hold : new boolean[] {true, false}) {
+      UUID routeId = UUID.randomUUID();
+      NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+      NodeId nextNode = NodeId.of("B");
+      SpawnTicket ticket = buildTicket(routeId);
+      StorageProvider provider = mockProvider(routeId, true);
+      SpawnManager spawnManager = mock(SpawnManager.class);
+      Instant spawnedAt = Instant.parse("2026-07-31T00:00:00Z");
+      when(spawnManager.pollDueTickets(eq(provider), eq(spawnedAt))).thenReturn(List.of(ticket));
+      when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+      UUID worldId = UUID.randomUUID();
+      RailGraphService railGraphService = mock(RailGraphService.class);
+      when(railGraphService.getSnapshot(worldId))
+          .thenReturn(
+              Optional.of(
+                  new RailGraphService.RailGraphSnapshot(
+                      graphWithSingleEdge(depotNode, nextNode), spawnedAt)));
+      PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+      when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+      org.mockito.stubbing.Answer<OccupancyDecision> allow =
+          invocation -> {
+            OccupancyRequest request = invocation.getArgument(0);
+            return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+          };
+      when(occupancyManager.canEnterPreview(any(OccupancyRequest.class))).thenAnswer(allow);
+      when(occupancyManager.canEnter(any(OccupancyRequest.class))).thenAnswer(allow);
+      when(occupancyManager.acquire(any(OccupancyRequest.class))).thenAnswer(allow);
+
+      MutableTrainTags trainTags = new MutableTrainTags();
+      RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+      when(train.isValid()).thenReturn(true);
+      when(train.properties()).thenReturn(trainTags.properties());
+      DepotSpawner depotSpawner = mock(DepotSpawner.class);
+      when(depotSpawner.spawn(eq(provider), eq(ticket), anyString(), eq(spawnedAt)))
+          .thenReturn(Optional.of(new DepotSpawner.MaterializedSpawn(train, () -> {})));
+      RuntimeDispatchService runtimeDispatchService =
+          mockRuntimeDispatchServiceAllowingSmartAdmission();
+
+      SimpleTicketAssigner assigner =
+          new SimpleTicketAssigner(
+              spawnManager,
+              depotSpawner,
+              occupancyManager,
+              railGraphService,
+              mockRouteDefinitions(
+                  Map.of(
+                      routeId,
+                      new RouteDefinition(
+                          RouteId.of("OP:L1:R1"), List.of(depotNode, nextNode), Optional.empty()))),
+              runtimeDispatchService,
+              mockConfigManager(),
+              registryWithDepot(worldId, depotNode),
+              mock(LayoverRegistry.class),
+              null,
+              Duration.ofSeconds(1),
+              1,
+              10);
+      List<String> asked = new ArrayList<>();
+      assigner.setDepotSpawnHold(
+          (heldTicket, trainName) -> {
+            asked.add(trainName);
+            return hold;
+          });
+
+      assigner.tick(provider, spawnedAt);
+
+      assertEquals(1, asked.size(), "每次出车问一次");
+      verify(runtimeDispatchService).refreshSignal(train);
+      if (hold) {
+        InOrder order = inOrder(runtimeDispatchService);
+        order
+            .verify(runtimeDispatchService)
+            .acquireDepartureGate(
+                eq(asked.get(0)), eq(SimpleTicketAssigner.DRIVER_PICKUP_GATE), anyString());
+        order.verify(runtimeDispatchService).refreshSignal(train);
+      } else {
+        verify(runtimeDispatchService, never())
+            .acquireDepartureGate(anyString(), anyString(), anyString());
+      }
+    }
+  }
+
   @Test
   void depotSpawnRegistersExpectedPhysicalGroupAfterAcquireBeforeSignalRefresh() {
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);

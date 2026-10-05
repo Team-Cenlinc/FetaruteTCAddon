@@ -240,6 +240,7 @@ public final class TimetableBuildReportText {
       case NO_RETURN_ACCESS -> "终点没有 RETURN 线路，后面也接不上能回库的班次";
       case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
       case STUB_SATURATED -> "端点排队或让车累计超限，等到能发车时交路已超上限或越过计划窗口";
+      case CONSIST_MISMATCH -> "起点有车在等，但车型都不许跑这一班，也没有能出许可车型的出库线路";
     };
   }
 
@@ -434,6 +435,92 @@ public final class TimetableBuildReportText {
               throat.inboundOverlaps()));
     }
     return out;
+  }
+
+  /**
+   * 「瓶颈」一节：最忙一小时里闭塞时间占用最高的几个资源，每次占用的组成，以及最紧的一个要省多少才轮到下一个。
+   *
+   * <p>占用率是按现有班次结构等比压缩的余地（见 {@link CapacityReport}）：最紧的资源占 U，所有间隔最多压到现在的 U 倍；超过 100% 是表上已有闭塞时间重叠。
+   *
+   * @param report 瓶颈报告
+   * @param serviceStartSecondOfDay 计划窗口起点（日内秒），把相对时刻换成钟点
+   * @return 报告行；没有可报的资源时为空
+   */
+  public static List<String> describeBottlenecks(
+      CapacityReport.Report report, int serviceStartSecondOfDay) {
+    List<String> out = new ArrayList<>();
+    if (report == null || report.top().isEmpty()) {
+      return out;
+    }
+    List<CapacityReport.Bottleneck> bottlenecks = report.top();
+    out.add("瓶颈（最忙一小时的闭塞时间占用，各小时一样忙时取最早；按现有班次结构等比压缩，最紧的资源先占满）:");
+    for (CapacityReport.Bottleneck one : bottlenecks) {
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "  %s  %.0f%%（%s 起 %d 次，每次 %.0fs：%s）%s",
+              resourceLabel(one),
+              one.utilization() * 100.0D,
+              TimetableCsvExporter.clock(serviceStartSecondOfDay + one.peakStartSeconds()),
+              one.passes(),
+              one.perPassSeconds(),
+              composition(one),
+              one.occupationOnly() ? "（有一部分按占用区间）" : ""));
+    }
+    CapacityReport.Bottleneck top = bottlenecks.get(0);
+    StringBuilder verdict = new StringBuilder("  最紧的是 ").append(resourceLabel(top)).append("：");
+    if (top.utilization() > 1.0D) {
+      verdict.append("超过 100%，表上已有车次的闭塞时间重叠，运行时会在这里减速或等待");
+    } else {
+      verdict.append(String.format(Locale.ROOT, "所有间隔最多压到现在的 %.0f%%", top.utilization() * 100.0D));
+    }
+    if (bottlenecks.size() > 1 && top.passes() > 0) {
+      CapacityReport.Bottleneck next = bottlenecks.get(1);
+      double perPass =
+          (top.utilization() - next.utilization()) * CapacityReport.WINDOW_SECONDS / top.passes();
+      verdict.append(
+          String.format(
+              Locale.ROOT,
+              "；要降到第二紧（%s，%.0f%%），每次得少占 %.0fs",
+              resourceLabel(next),
+              next.utilization() * 100.0D,
+              perPass));
+    }
+    out.add(verdict.toString());
+    if (report.unplaced() > 0) {
+      out.add("  另有 " + report.unplaced() + " 段动态站台停留定不下股道（没有计划股道），没有计入");
+    }
+    return out;
+  }
+
+  /** 资源键换成"种类 名称"：区间写两端节点。 */
+  static String resourceLabel(CapacityReport.Bottleneck one) {
+    String key = one.key();
+    int colon = key.indexOf(':');
+    String name = colon < 0 ? key : key.substring(colon + 1);
+    if (key.startsWith("edge:")) {
+      name = name.replace("~", " – ");
+    }
+    return describe(one.kind()) + " " + name;
+  }
+
+  /** 每次占用的组成，只列不为零的几项。 */
+  private static String composition(CapacityReport.Bottleneck one) {
+    List<String> parts = new ArrayList<>();
+    addPart(parts, "进入前", one.approachSeconds());
+    addPart(
+        parts,
+        one.kind() == TimetableConflictChecker.Kind.PLATFORM ? "占用（含停站）" : "占用",
+        one.occupySeconds());
+    addPart(parts, "出清", one.clearSeconds());
+    addPart(parts, "折返与待命", one.standSeconds());
+    return String.join(" + ", parts);
+  }
+
+  private static void addPart(List<String> parts, String label, double seconds) {
+    if (seconds >= 0.5D) {
+      parts.add(String.format(Locale.ROOT, "%s %.0f", label, seconds));
+    }
   }
 
   /** 从端点占用成本里反推本端点用的折返秒数：成本 = 进站 + 折返 + 出站 + 裕量。 */

@@ -6,5 +6,7 @@ public enum NodeType {
   STATION,
   WAYPOINT,
   DESTINATION,
-  SWITCHER
+  SWITCHER,
+  /** TrainCarts 的 {@code [portal]} 牌子（MyWorlds 传送门）所在的轨道：图在这里断开，经传送门连接接到另一个世界。 */
+  PORTAL
 }

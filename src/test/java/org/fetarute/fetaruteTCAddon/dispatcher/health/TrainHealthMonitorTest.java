@@ -626,7 +626,7 @@ class TrainHealthMonitorTest {
             new RuntimeDispatchService.SmartRecoveryActionResult(
                 true,
                 true,
-                "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+                "SMART_RELEASE_PHYSICAL_EDGE_RETAIN",
                 "physical-edge-retain-released:2",
                 org.fetarute
                     .fetaruteTCAddon
@@ -2163,7 +2163,7 @@ class TrainHealthMonitorTest {
   void mutualChainMovesPastAssumedEffectiveActionsToQueuePositionYield() {
     MutualChainFixture fixture = new MutualChainFixture();
     when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
-        .thenReturn(assumedEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+        .thenReturn(assumedEffective("SMART_RELEASE_PHYSICAL_EDGE_RETAIN"));
     when(dispatchService.applySmartQueuePositionYield(fixture.inputB))
         .thenReturn(measuredEffective("SMART_QUEUE_POSITION_YIELD"));
 
@@ -2178,12 +2178,12 @@ class TrainHealthMonitorTest {
   void mutualChainReportsFixedOnlyForMeasuredEffectiveness() {
     MutualChainFixture fixture = new MutualChainFixture();
     when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
-        .thenReturn(assumedEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+        .thenReturn(assumedEffective("SMART_RELEASE_PHYSICAL_EDGE_RETAIN"));
 
     assertEquals(0, fixture.runUntil(125), "假定有效只是派发了动作，车没动就不算修好");
 
     when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
-        .thenReturn(measuredEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+        .thenReturn(measuredEffective("SMART_RELEASE_PHYSICAL_EDGE_RETAIN"));
     assertTrue(fixture.checkAt(140).fixedCount() > 0);
   }
 
@@ -2194,7 +2194,7 @@ class TrainHealthMonitorTest {
     MutualChainFixture fixture = new MutualChainFixture();
     monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(40));
     when(dispatchService.applySmartSelfOwnedStaleRetainRelease(any()))
-        .thenReturn(assumedEffective("SMART_PHYSICAL_EDGE_RETAIN_RELEASED"));
+        .thenReturn(assumedEffective("SMART_RELEASE_PHYSICAL_EDGE_RETAIN"));
 
     fixture.runUntil(305);
 
@@ -3462,7 +3462,7 @@ class TrainHealthMonitorTest {
             new RuntimeDispatchService.SmartRecoveryActionResult(
                 true,
                 true,
-                "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+                "SMART_RELEASE_PHYSICAL_EDGE_RETAIN",
                 "physical-edge-retain-released:2",
                 org.fetarute
                     .fetaruteTCAddon
