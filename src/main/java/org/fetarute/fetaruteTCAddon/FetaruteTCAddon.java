@@ -63,6 +63,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteNodeUsage;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.CurveLaunchAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
@@ -726,7 +727,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     getServer().getPluginManager().registerEvents(graphStaleNotifier, this);
     SignNodeStorageSynchronizer storageSync =
         new RailNodeIncrementalSync(
-            storageManager, railGraphService, loggerManager::debug, graphStaleNotifier);
+            storageManager,
+            railGraphService,
+            loggerManager::debug,
+            graphStaleNotifier,
+            this::findRouteNodeUsage);
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
@@ -804,6 +809,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
       return runtimeDispatchDiagnosticGate;
     }
     return loggerManager == null ? message -> {} : loggerManager.debugSink();
+  }
+
+  /** 节点牌子增删时判断旧图能否继续用：交路缓存没就绪就按在用处理。 */
+  private Optional<String> findRouteNodeUsage(
+      org.bukkit.World world, SignNodeDefinition definition) {
+    RouteDefinitionCache cache = routeDefinitionCache;
+    if (cache == null) {
+      return Optional.of("交路缓存未就绪");
+    }
+    return RouteNodeUsage.findUse(cache.entries(), definition.nodeId());
   }
 
   private void initRouteDefinitionCache() {
@@ -951,7 +966,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(
             // 联挂否决是异常证据，走 WARN 而不是受 debug 开关和观察预算约束的诊断通道；监听器已按列车对限流。
-            RuntimeDispatchListener.withDiagnostics(runtimeDispatchService, loggerManager::warn),
+            RuntimeDispatchListener.withDiagnostics(
+                runtimeDispatchService,
+                loggerManager::warn,
+                railGraphService::isOutsideRetainedStaleSnapshot),
             this);
     initEtaService();
     if (etaService != null) {

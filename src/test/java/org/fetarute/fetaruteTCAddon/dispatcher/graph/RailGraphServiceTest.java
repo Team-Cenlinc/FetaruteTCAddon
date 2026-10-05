@@ -163,6 +163,39 @@ class RailGraphServiceTest {
     assertTrue(service.getStaleState(world).isPresent());
   }
 
+  @Test
+  void retainedStaleKeepsTheSnapshotUntilAnEvictingChange() {
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    RailGraph graph = graphWithEdges(edge(a, b));
+    RailGraphService service = new RailGraphService(ignored -> graph);
+    World world = mock(World.class);
+    UUID worldId = UUID.randomUUID();
+    when(world.getUID()).thenReturn(worldId);
+    when(world.getName()).thenReturn("world");
+    service.putSnapshot(world, graph, Instant.now());
+
+    service.markStale(
+        world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "x", "y", 2, 1, 3, true));
+
+    assertTrue(service.getSnapshot(world).isPresent());
+    assertTrue(service.isServingRetainedStaleSnapshot(worldId));
+    assertFalse(service.isOutsideRetainedStaleSnapshot(worldId, a));
+    assertTrue(service.isOutsideRetainedStaleSnapshot(worldId, NodeId.of("NEW")));
+
+    service.markStale(
+        world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "x", "z", 2, 1, 2));
+    assertTrue(service.getSnapshot(world).isEmpty());
+    assertFalse(service.isServingRetainedStaleSnapshot(worldId));
+    assertFalse(service.isOutsideRetainedStaleSnapshot(worldId, NodeId.of("NEW")));
+
+    // 已经移出的旧图不会因为后一次"可保留"而回来。
+    service.markStale(
+        world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "x", "w", 2, 1, 2, true));
+    assertTrue(service.getSnapshot(world).isEmpty());
+    assertFalse(service.getStaleState(world).orElseThrow().snapshotRetained());
+  }
+
   private static RailEdge edge(NodeId a, NodeId b) {
     return new RailEdge(EdgeId.undirected(a, b), a, b, 10, -1.0, true, Optional.empty());
   }

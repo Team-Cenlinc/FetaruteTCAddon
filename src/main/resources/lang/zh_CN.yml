@@ -128,12 +128,15 @@ sign:
 graph:
   alert:
     stale: "<prefix> <red>调度图已失效</red> <gray>世界</gray> <white><world></white><gray>：节点牌子移除</gray> <white><removed></white> <gray>处、新增</gray> <white><added></white> <gray>处。重建前该世界的调度无法使用调度图，开启跨世界时经过该世界的交路也受影响。</gray>"
+    retained: "<prefix> <yellow>调度图与节点牌子不一致</yellow> <gray>世界</gray> <white><world></white><gray>：节点牌子移除</gray> <white><removed></white> <gray>处、新增</gray> <white><added></white> <gray>处，均无交路使用，调度继续使用原图。新增的节点要重建后才会纳入调度。</gray>"
     entry: "<gray>  - <action></gray> <white><type></white> <white><node></white> <gray>@ <x>, <y>, <z></gray>"
+    entry-used: "<gray>  - <action></gray> <white><type></white> <white><node></white> <gray>@ <x>, <y>, <z></gray> <red>（<usage>）</red>"
     action-removed: "移除"
     action-added: "新增"
     more: "<gray>  …另有</gray> <white><count></white> <gray>处</gray>"
     hint: "<gray>请到该世界执行</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>点击填入命令</gray>'><white>/fta graph build</white></hover></click><gray>；若属误删，在原位置按原文字手动放回牌子也可恢复。</gray>"
     recovered: "<prefix> <green>调度图已恢复</green> <gray>世界</gray> <white><world></white><gray>：节点牌子与快照重新一致，已重新载入调度图。</gray>"
+    join-retained: "<prefix> <yellow>世界</yellow> <white><world></white> <yellow>的调度图与节点牌子不一致，调度仍在使用原图，建议重建。</yellow>"
     join: "<prefix> <yellow>世界</yellow> <white><world></white> <yellow>的调度图处于失效状态，重建前该世界的调度无法使用调度图，开启跨世界时经过该世界的交路也受影响。</yellow>"
 
 command:
@@ -685,6 +688,7 @@ command:
         success: "<prefix> <dark_aqua>已删除局部调度图</dark_aqua> <gray>(seed=<white><seed></white>, removed_components=<white><removed_components></white>, removed_nodes=<white><removed_nodes></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
     info:
       missing: "<prefix> <gray>该世界尚未构建调度图</gray> <dark_aqua>请先执行</dark_aqua> <white>/fta graph build</white>"
+      stale-retained: "<prefix> <yellow>节点牌子与调度图不一致，变化的节点均无交路使用，调度仍在使用此图</yellow> <gray>(nodes=<white><snapshot_nodes></white>→<white><current_nodes></white>)</gray> <dark_aqua>建议执行</dark_aqua> <white>/fta graph build</white>"
       stale: "<prefix> <yellow>调度图快照已失效</yellow> <gray>(builtAt=<white><built_at></white>, nodes=<white><snapshot_nodes></white>→<white><current_nodes></white>, sig=<white><snapshot_sig></white>→<white><current_sig></white>)</gray> <dark_aqua>请执行</dark_aqua> <white>/fta graph build</white>"
       header: "<prefix> <dark_aqua>调度图</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>)</gray>"
       meta: "<gray>-</gray> <dark_aqua>builtAt</dark_aqua>=<white><built_at></white> <dark_aqua>components</dark_aqua>=<white><components></white> <dark_aqua>blocked</dark_aqua>=<white><blocked_edges></white> <dark_aqua>isolated</dark_aqua>=<white><isolated_nodes></white>"

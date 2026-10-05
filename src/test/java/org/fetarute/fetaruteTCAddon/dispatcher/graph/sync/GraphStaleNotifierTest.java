@@ -22,6 +22,7 @@ import org.bukkit.World;
 import org.bukkit.entity.Player;
 import org.bukkit.event.player.PlayerJoinEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.sync.GraphStaleListener.Level;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
@@ -68,8 +69,8 @@ final class GraphStaleNotifierTest {
   void sameTickChangesBecomeOneAdminAlert() {
     markStale(true);
 
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), false);
-    notifier.onStale(world, change("SURC:S:DPB:1", 5, 64, 2, true), true);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), Level.NONE, Level.EVICTED);
+    notifier.onStale(world, change("SURC:S:DPB:1", 5, 64, 2, true), Level.EVICTED, Level.EVICTED);
     assertEquals(1, host.nextTick.size(), "同一 tick 只排一次 flush");
     host.runNextTick();
 
@@ -88,7 +89,7 @@ final class GraphStaleNotifierTest {
   void changesOnAlreadyStaleWorldOnlyLogToConsole() {
     markStale(true);
 
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, false), true);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, false), Level.EVICTED, Level.EVICTED);
     host.runNextTick();
 
     verify(admin, never()).sendMessage(org.mockito.ArgumentMatchers.any(Component.class));
@@ -102,7 +103,7 @@ final class GraphStaleNotifierTest {
 
     int total = GraphStaleNotifier.MAX_LISTED_CHANGES + 3;
     for (int i = 0; i < total; i++) {
-      notifier.onStale(world, change("SURC:W:" + i, i, 64, 0, true), false);
+      notifier.onStale(world, change("SURC:W:" + i, i, 64, 0, true), Level.NONE, Level.EVICTED);
     }
     host.runNextTick();
 
@@ -116,7 +117,7 @@ final class GraphStaleNotifierTest {
   void graphFixedBeforeFlushIsNotBroadcast() {
     markStale(false);
 
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), false);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), Level.NONE, Level.EVICTED);
     host.runNextTick();
 
     verify(admin, never()).sendMessage(org.mockito.ArgumentMatchers.any(Component.class));
@@ -125,7 +126,7 @@ final class GraphStaleNotifierTest {
   @Test
   void recoveryAfterAnnouncedFailureIsBroadcast() {
     markStale(true);
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), false);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), Level.NONE, Level.EVICTED);
     host.runNextTick();
     markStale(false);
     notifier.onRecovered(world);
@@ -146,12 +147,12 @@ final class GraphStaleNotifierTest {
   @Test
   void newFailureRecoveredInSameTickStaysSilentAfterEarlierAnnouncement() {
     markStale(true);
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), false);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), Level.NONE, Level.EVICTED);
     host.runNextTick();
     int announced = messages(admin).size();
 
     // 期间图被重建过：下一次失效又从"正常"开始，并在同一 tick 内恢复。
-    notifier.onStale(world, change("SURC:S:DPB:1", 5, 64, 2, true), false);
+    notifier.onStale(world, change("SURC:S:DPB:1", 5, 64, 2, true), Level.NONE, Level.EVICTED);
     markStale(false);
     notifier.onRecovered(world);
     host.runNextTick();
@@ -162,7 +163,7 @@ final class GraphStaleNotifierTest {
   @Test
   void recoveryInSameTickCancelsPendingAlert() {
     markStale(true);
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), false);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), Level.NONE, Level.EVICTED);
     markStale(false);
     notifier.onRecovered(world);
     host.runNextTick();
@@ -176,7 +177,7 @@ final class GraphStaleNotifierTest {
     markStale(true);
     host.rejectTasks = true;
 
-    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), false);
+    notifier.onStale(world, change("SURC:S:DPB:2", 1, 64, 2, true), Level.NONE, Level.EVICTED);
 
     List<String> lines = messages(admin);
     assertTrue(lines.get(0).startsWith("graph.alert.stale"), lines.toString());
@@ -218,6 +219,65 @@ final class GraphStaleNotifierTest {
     notifier.logStaleWorlds();
 
     verify(logger).warn(contains("world=surc"));
+  }
+
+  @Test
+  void unusedChangesAnnounceThatTheOldGraphStaysInUse() {
+    markRetained();
+
+    notifier.onStale(world, change("SURC:W:1", 1, 64, 2, true), Level.NONE, Level.RETAINED);
+    host.runNextTick();
+
+    List<String> lines = messages(admin);
+    assertTrue(lines.get(0).startsWith("graph.alert.retained"), lines.toString());
+    verify(logger, never()).warn(anyString());
+  }
+
+  @Test
+  void escalationFromRetainedToEvictedIsBroadcastAsFailure() {
+    markStale(true);
+
+    notifier.onStale(
+        world, used(change("SURC:S:DPB:2", 1, 64, 2, true)), Level.RETAINED, Level.EVICTED);
+    host.runNextTick();
+
+    List<String> lines = messages(admin);
+    assertTrue(lines.get(0).startsWith("graph.alert.stale"), lines.toString());
+    assertTrue(lines.get(1).startsWith("graph.alert.entry-used"), lines.get(1));
+    assertTrue(lines.get(1).contains("交路 MT-3 第 5 站"), lines.get(1));
+  }
+
+  @Test
+  void furtherUnusedChangesOnRetainedWorldOnlyLogToConsole() {
+    markRetained();
+
+    notifier.onStale(world, change("SURC:W:2", 1, 64, 2, false), Level.RETAINED, Level.RETAINED);
+    host.runNextTick();
+
+    verify(admin, never()).sendMessage(org.mockito.ArgumentMatchers.any(Component.class));
+    verify(logger).info(contains("继续使用原图"));
+  }
+
+  @Test
+  void adminJoiningWhileOldGraphIsRetainedGetsTheSofterReminder() {
+    markRetained();
+
+    notifier.remind(admin);
+
+    List<String> lines = messages(admin);
+    assertTrue(lines.get(0).startsWith("graph.alert.join-retained"), lines.toString());
+  }
+
+  private void markRetained() {
+    when(graph.getStaleState(world))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphStaleState(Instant.EPOCH, "a", "b", 1, 0, 1, true)));
+    when(graph.isServingRetainedStaleSnapshot(world.getUID())).thenReturn(true);
+  }
+
+  private static GraphStaleListener.NodeChange used(GraphStaleListener.NodeChange change) {
+    return change.withUsage(Optional.of("交路 MT-3 第 5 站"));
   }
 
   private void markStale(boolean stale) {

@@ -1069,6 +1069,21 @@ public final class FtaGraphCommand {
                                   String.valueOf(graph.nodes().size()),
                                   "edges",
                                   String.valueOf(graph.edges().size()))));
+                  if (service.isServingRetainedStaleSnapshot(world.getUID())) {
+                    service
+                        .getStaleState(world)
+                        .ifPresent(
+                            stale ->
+                                ctx.sender()
+                                    .sendMessage(
+                                        locale.component(
+                                            "command.graph.info.stale-retained",
+                                            Map.of(
+                                                "snapshot_nodes",
+                                                String.valueOf(stale.snapshotNodeCount()),
+                                                "current_nodes",
+                                                String.valueOf(stale.currentNodeCount())))));
+                  }
                   ctx.sender()
                       .sendMessage(
                           locale.component(

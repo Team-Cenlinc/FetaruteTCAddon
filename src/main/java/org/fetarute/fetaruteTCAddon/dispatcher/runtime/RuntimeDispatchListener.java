@@ -17,6 +17,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.UUID;
+import java.util.function.BiPredicate;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.LongSupplier;
@@ -28,6 +30,7 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.NodeSignDefinitionParser;
@@ -61,6 +64,7 @@ public final class RuntimeDispatchListener implements Listener {
   private final Consumer<Runnable> nextTickScheduler;
   private final Consumer<String> diagnostics;
   private final LongSupplier clockMillis;
+  private final BiPredicate<UUID, NodeId> ignoredNode;
   private final LinkVetoTraceLimiter linkVetoTraceLimiter =
       new LinkVetoTraceLimiter(
           LINK_VETO_TRACE_WINDOW_MILLIS,
@@ -81,6 +85,19 @@ public final class RuntimeDispatchListener implements Listener {
   public static RuntimeDispatchListener withDiagnostics(
       RuntimeDispatchService dispatchService, Consumer<String> diagnostics) {
     return new RuntimeDispatchListener(dispatchService, bukkitNextTick(), diagnostics);
+  }
+
+  /**
+   * 创建带诊断出口、并按 {@code ignoredNode} 跳过部分节点牌子的监听器。
+   *
+   * @param ignoredNode 返回 true 的节点牌子不参与推进（如保留旧图期间新放、旧图里没有的节点）
+   */
+  public static RuntimeDispatchListener withDiagnostics(
+      RuntimeDispatchService dispatchService,
+      Consumer<String> diagnostics,
+      BiPredicate<UUID, NodeId> ignoredNode) {
+    return new RuntimeDispatchListener(
+        dispatchService, bukkitNextTick(), diagnostics, System::currentTimeMillis, ignoredNode);
   }
 
   private static Consumer<Runnable> bukkitNextTick() {
@@ -113,10 +130,21 @@ public final class RuntimeDispatchListener implements Listener {
       Consumer<Runnable> nextTickScheduler,
       Consumer<String> diagnostics,
       LongSupplier clockMillis) {
+    this(dispatchService, nextTickScheduler, diagnostics, clockMillis, (world, node) -> false);
+  }
+
+  /** 同包测试入口：再注入要跳过的节点牌子。 */
+  RuntimeDispatchListener(
+      RuntimeDispatchService dispatchService,
+      Consumer<Runnable> nextTickScheduler,
+      Consumer<String> diagnostics,
+      LongSupplier clockMillis,
+      BiPredicate<UUID, NodeId> ignoredNode) {
     this.dispatchService = dispatchService;
     this.nextTickScheduler = nextTickScheduler;
     this.diagnostics = diagnostics != null ? diagnostics : message -> {};
     this.clockMillis = clockMillis;
+    this.ignoredNode = ignoredNode != null ? ignoredNode : (world, node) -> false;
     this.pendingUnexpectedSplits =
         new DeferredIdentityBatch<>(nextTickScheduler, this::classifyUnexpectedSplit);
   }
@@ -141,6 +169,11 @@ public final class RuntimeDispatchListener implements Listener {
       return;
     }
     SignNodeDefinition definition = definitionOpt.get();
+    // 保留旧图期间新放的节点牌子不在旧图里：推进到它只会让信号起点回退、占用释放停摆，等重建后再纳入。
+    if (event.getWorld() != null
+        && ignoredNode.test(event.getWorld().getUID(), definition.nodeId())) {
+      return;
+    }
     // 车头先于编组进入牌子时，已声明的普通经过点必须立即推进；STOP/TERM 与未声明中间点仍等待原有边界。
     if (action == SignActionType.MEMBER_ENTER && definition.nodeType() == NodeType.WAYPOINT) {
       dispatchService.handleWaypointMemberEnter(event, definition);

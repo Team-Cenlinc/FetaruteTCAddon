@@ -23,8 +23,8 @@ import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 /**
  * 调度图失效告警：控制台记日志，在线且有 {@value #ALERT_PERMISSION} 权限的玩家收到提示，有权限的玩家上线时补一次提醒。
  *
- * <p>节点牌子可能被 WorldEdit 等批量编辑一次拆掉多块，同一 tick 内的变更合并成一条。只有"正常 → 失效"的那一批向玩家广播；
- * 已失效的世界里继续增删牌子只记控制台，建线时连续放牌子不会刷屏。
+ * <p>节点牌子可能被 WorldEdit 等批量编辑一次拆掉多块，同一 tick 内的变更合并成一条。只有失效程度上升的那一批向玩家广播 （正常 → 保留旧图、正常或保留旧图 →
+ * 移出旧图）；程度不变时继续增删牌子只记控制台，建线时连续放牌子不会刷屏。
  */
 public final class GraphStaleNotifier implements GraphStaleListener, Listener {
 
@@ -93,7 +93,7 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
   }
 
   @Override
-  public void onStale(World world, NodeChange change, boolean wasStale) {
+  public void onStale(World world, NodeChange change, Level before, Level after) {
     if (world == null || change == null) {
       return;
     }
@@ -104,7 +104,7 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
       batch = new PendingBatch(world);
       pending.put(worldId, batch);
     }
-    batch.add(change, !wasStale);
+    batch.add(change, before);
     if (firstInTick) {
       try {
         host.runNextTick(() -> flush(worldId));
@@ -125,7 +125,7 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
     String detail = batch != null ? "；同一 tick 内的变更: " + batch.consoleSummary() : "";
     logger.info("调度图已恢复: world=" + world.getName() + "，节点牌子与快照重新一致" + detail);
     // 失效就发生在这一批里、告警还没发出：恢复也不用广播。其余情况（含开服时就失效、上线时提醒过的）都要告诉管理员。
-    if (batch == null || !batch.transitioned) {
+    if (batch == null || batch.startLevel != Level.NONE) {
       broadcast(
           List.of(locale.component("graph.alert.recovered", Map.of("world", world.getName()))));
     }
@@ -134,7 +134,7 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
   /** 启动载入图之后调用：控制台报告已经处于失效状态的世界。 */
   public void logStaleWorlds() {
     for (World world : host.worlds()) {
-      if (isStale(world)) {
+      if (level(world) == Level.EVICTED) {
         logger.warn(
             "调度图快照已失效: world="
                 + world.getName()
@@ -160,8 +160,12 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
     }
     boolean any = false;
     for (World world : host.worlds()) {
-      if (isStale(world)) {
-        player.sendMessage(locale.component("graph.alert.join", Map.of("world", world.getName())));
+      Level level = level(world);
+      if (level != Level.NONE) {
+        player.sendMessage(
+            locale.component(
+                level == Level.EVICTED ? "graph.alert.join" : "graph.alert.join-retained",
+                Map.of("world", world.getName())));
         any = true;
       }
     }
@@ -176,23 +180,29 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
       return;
     }
     String summary = "world=" + batch.world.getName() + " " + batch.consoleSummary();
-    if (!isStale(batch.world)) {
+    Level now = level(batch.world);
+    if (now == Level.NONE) {
       logger.info("节点牌子变更后调度图已重新有效: " + summary);
       return;
     }
-    if (!batch.transitioned) {
-      logger.info("调度图仍处于失效状态，又有节点牌子变更: " + summary);
+    if (now.compareTo(batch.startLevel) <= 0) {
+      logger.info(
+          (now == Level.EVICTED ? "调度图仍处于失效状态" : "调度图仍与节点牌子不一致、继续使用原图") + "，又有节点牌子变更: " + summary);
       return;
     }
-    logger.warn("调度图已失效: " + summary + "；" + IMPACT + "，请执行 /fta graph build");
-    broadcast(adminMessage(batch));
+    if (now == Level.EVICTED) {
+      logger.warn("调度图已失效: " + summary + "；" + IMPACT + "，请执行 /fta graph build");
+    } else {
+      logger.info("调度图与节点牌子不一致，变化的节点均无交路使用，继续使用原图: " + summary);
+    }
+    broadcast(adminMessage(batch, now));
   }
 
-  private List<Component> adminMessage(PendingBatch batch) {
+  private List<Component> adminMessage(PendingBatch batch, Level now) {
     List<Component> lines = new ArrayList<>();
     lines.add(
         locale.component(
-            "graph.alert.stale",
+            now == Level.EVICTED ? "graph.alert.stale" : "graph.alert.retained",
             Map.of(
                 "world", batch.world.getName(),
                 "removed", String.valueOf(batch.count(true)),
@@ -202,8 +212,10 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
       NodeChange change = batch.changes.get(i);
       lines.add(
           locale.component(
-              "graph.alert.entry",
+              change.usage().isPresent() ? "graph.alert.entry-used" : "graph.alert.entry",
               Map.of(
+                  "usage",
+                  change.usage().orElse(""),
                   "action",
                   locale.text(
                       change.removed() ? "graph.alert.action-removed" : "graph.alert.action-added"),
@@ -235,23 +247,30 @@ public final class GraphStaleNotifier implements GraphStaleListener, Listener {
     }
   }
 
-  private boolean isStale(World world) {
-    return world != null && railGraphService.getStaleState(world).isPresent();
+  private Level level(World world) {
+    if (world == null || railGraphService.getStaleState(world).isEmpty()) {
+      return Level.NONE;
+    }
+    return railGraphService.isServingRetainedStaleSnapshot(world.getUID())
+        ? Level.RETAINED
+        : Level.EVICTED;
   }
 
   /** 同一世界在同一 tick 内的节点变更。 */
   private static final class PendingBatch {
     private final World world;
     private final List<NodeChange> changes = new ArrayList<>();
-    private boolean transitioned;
+    private Level startLevel;
 
     private PendingBatch(World world) {
       this.world = world;
     }
 
-    private void add(NodeChange change, boolean causedTransition) {
+    private void add(NodeChange change, Level before) {
+      if (startLevel == null) {
+        startLevel = before;
+      }
       changes.add(change);
-      transitioned |= causedTransition;
     }
 
     private long count(boolean removed) {
