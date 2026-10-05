@@ -271,6 +271,46 @@ supercap:
   # 电量低于这个百分比时预警
   low-percent: 20
 
+# 驾驶证：玩家自己考试拿驾驶权限，不必等管理员授权。持证时插件替玩家挂上下面 grants 里的权限节点（子节点随之生效）。
+# 考试与补发：/fta license；管理员发放、吊销与查询：/fta license grant|revoke|list
+license:
+  enabled: true
+  # 报名后多久内要考完（分钟）：教程考试按它计；路考以派出的区间任务为准
+  exam-window-minutes: 30
+  # 路考不及格后多久才能再考（分钟）
+  retry-cooldown-minutes: 10
+  # 两次补发驾驶证之间至少隔多久（分钟）
+  reissue-cooldown-minutes: 10
+  # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
+  # 或 dispatch（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
+  # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
+  classes:
+    free:
+      name: "自由驾驶证"
+      description: "驾驶非调度列车，使用新手教程与驾驶提示"
+      enabled: true
+      requires: []
+      exam: tutorial
+      grants:
+        - fetarute.drive
+    dispatch:
+      name: "调度驾驶证"
+      description: "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行"
+      enabled: true
+      requires:
+        - free
+      exam: dispatch
+      # 路考区间要开过几个停车站
+      exam-stops: 3
+      # 及格分（0–100）
+      min-points: 70
+      # 以下三项为 false 时，路考中出现即不及格
+      allow-emergency: false
+      allow-overrun: false
+      allow-wrong-door: false
+      grants:
+        - fetarute.drive.driver
+
 sounds:
   enabled: true
   # 两次鸣笛（驾驶中按 Space）至少间隔多少秒

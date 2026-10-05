@@ -18,6 +18,9 @@ public final class DriverTask {
   /** 终点站结算后接着开同一列车的下一趟：开出时当场记成任务。 */
   public static final String SOURCE_CONTINUATION = "continuation";
 
+  /** 驾驶证路考：给考生派的一段区间任务。 */
+  public static final String SOURCE_EXAM = "exam";
+
   /** 任务状态。 */
   public enum State {
     /** 已领取，等列车到站。 */

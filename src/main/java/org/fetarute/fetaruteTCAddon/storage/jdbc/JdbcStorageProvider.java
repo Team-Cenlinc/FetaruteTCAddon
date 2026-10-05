@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRep
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
@@ -33,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepositor
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository;
@@ -78,6 +80,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final RailGraphSnapshotRepository railGraphSnapshotRepository;
   private final RailInterlockingSnapshotRepository railInterlockingSnapshotRepository;
   private final DriveTaskRecordRepository driveTaskRecordRepository;
+  private final LicenseRepository licenseRepository;
   private final PortalLinkRepository portalLinkRepository;
   private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
@@ -121,6 +124,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcRailInterlockingSnapshotRepository(dataSource, dialect, tablePrefix, logger::warn);
     this.driveTaskRecordRepository =
         new JdbcDriveTaskRecordRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.licenseRepository =
+        new JdbcLicenseRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.portalLinkRepository =
         new JdbcPortalLinkRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.timetableRepository =
@@ -224,6 +229,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public DriveTaskRecordRepository driveTaskRecords() {
     return driveTaskRecordRepository;
+  }
+
+  @Override
+  public LicenseRepository licenses() {
+    return licenseRepository;
   }
 
   @Override

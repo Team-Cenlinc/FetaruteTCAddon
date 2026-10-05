@@ -26,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLineCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOccupancyCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaOperatorCommand;
@@ -120,6 +121,7 @@ import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfigFile;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardListener;
 import org.fetarute.fetaruteTCAddon.drive.inventory.DriveListener;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseService;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -198,6 +200,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private PidsService pidsService;
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthMonitor healthMonitor;
   private DriveSessionManager driveSessionManager;
+  private LicenseService licenseService;
 
   @Override
   public void onEnable() {
@@ -264,6 +267,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
    */
   @Override
   public void onDisable() {
+    if (licenseService != null) {
+      licenseService.shutdown();
+      licenseService = null;
+    }
     if (driveSessionManager != null) {
       driveSessionManager.shutdown();
       driveSessionManager = null;
@@ -378,6 +385,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.localeManager.reload(configManager.current().locale());
     if (driveSessionManager != null) {
       driveSessionManager.reload(readDriveConfig());
+      if (licenseService != null) {
+        licenseService.reload(driveSessionManager.config().license());
+      }
     }
     this.storageManager.apply(configManager.current());
     if (hudTemplateService != null) {
@@ -452,6 +462,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
   }
 
   private void initDrive() {
+    if (licenseService != null) {
+      licenseService.shutdown();
+    }
     if (driveSessionManager != null) {
       driveSessionManager.shutdown();
     }
@@ -473,6 +486,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 manager::chooseLevel),
             this);
     driveSessionManager.start();
+    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试。
+    this.licenseService =
+        new LicenseService(this, () -> driveSessionManager, driveSessionManager.config().license());
+    getServer().getPluginManager().registerEvents(licenseService, this);
+    driveSessionManager.tutorials().onFinished(licenseService::onTutorialFinished);
+    licenseService.start();
+  }
+
+  /** 驾驶证服务（插件启用期间存在）。 */
+  public LicenseService getLicenseService() {
+    return licenseService;
   }
 
   public LoggerManager getLoggerManager() {
@@ -702,6 +726,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaDriveCommand(this).register(commandManager);
+    new FtaLicenseCommand(this).register(commandManager);
     new FtaGraphPortalCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);

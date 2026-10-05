@@ -12,7 +12,7 @@ softdepend:
 commands:
   fta:
     description: FetaruteTCAddon 主命令
-    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids|drive>
+    usage: /fta <info|help|reload|company|operator|line|route|station|depot|graph|occupancy|spawn|speed|eta|train|template|health|pids|drive|license>
 permissions:
   fetarute.admin:
     description: 全局管理员权限
@@ -55,6 +55,8 @@ permissions:
       fetarute.drive.top: true
       fetarute.drive.tutorial: true
       fetarute.drive.player: true
+      fetarute.license: true
+      fetarute.license.admin: true
       fetarute.template: true
       fetarute.timetable: true
       fetarute.timetable.record: true
@@ -131,6 +133,12 @@ permissions:
     default: op
   fetarute.drive.driver.admin:
     description: 不领任务直接接管停站中的调度列车
+    default: op
+  fetarute.license:
+    description: 驾驶证：查看自己的驾驶证、报名考试、补发（/fta license）；考过后插件按驾驶证替玩家挂上驾驶权限
+    default: true
+  fetarute.license.admin:
+    description: 驾驶证管理：发证、吊销、查询他人的驾驶证（/fta license grant|revoke|list）
     default: op
   fetarute.graph.portal:
     description: 查看与管理跨世界传送门连接（/fta graph portal）

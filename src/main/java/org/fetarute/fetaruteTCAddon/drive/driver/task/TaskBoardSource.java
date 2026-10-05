@@ -166,6 +166,55 @@ public final class TaskBoardSource {
                         }));
   }
 
+  /**
+   * 驾驶证路考的区间任务：从任务板上这一班的接班站起，开过 {@code stops} 个停车站后下车。
+   *
+   * @param station 接班站
+   * @param stops 要开过几个停车站
+   * @param metadata 附加数据（考的是哪一级）
+   * @return 查不到停靠表、或这一班后面的停车站不够时为空
+   */
+  public static Optional<DriverTaskManager.TaskSpec> examSpec(
+      FetaruteTCAddon plugin,
+      TimetableService timetables,
+      TaskBoardEntries.Row row,
+      Station station,
+      int stops,
+      java.util.Map<String, String> metadata) {
+    TaskKey key = row.key();
+    return timetables
+        .tripPlan(key.timetableId(), key.tripCode(), key.serviceDate())
+        .flatMap(
+            plan -> {
+              List<TimetableService.PlannedStop> ahead =
+                  plan.stops().stream()
+                      .filter(stop -> stop.stops() && stop.stopSequence() > row.stopSequence())
+                      .toList();
+              if (stops < 1 || ahead.size() < stops) {
+                return Optional.empty();
+              }
+              TimetableService.PlannedStop alight = ahead.get(stops - 1);
+              String code = alight.stationCode().orElse("");
+              return Optional.of(
+                  new DriverTaskManager.TaskSpec(
+                      key,
+                      plan.routeCode(),
+                      station.operatorCode(),
+                      station.stationCode(),
+                      station.name(),
+                      row.nodeId(),
+                      row.stopSequence(),
+                      row.plannedDeparture(),
+                      row.trainName(),
+                      alight.stopSequence(),
+                      code,
+                      stationName(plugin, code, alight.nodeId()),
+                      false,
+                      DriverTask.SOURCE_EXAM,
+                      metadata));
+            });
+  }
+
   private static List<TaskTripSummary.Stop> stopsOf(TimetableService.TripPlan plan) {
     List<TaskTripSummary.Stop> stops = new ArrayList<>(plan.stops().size());
     for (TimetableService.PlannedStop stop : plan.stops()) {

@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRep
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransaction;
@@ -135,6 +136,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public DriveTaskRecordRepository driveTaskRecords() {
     return unsupported(DriveTaskRecordRepository.class);
+  }
+
+  @Override
+  public LicenseRepository licenses() {
+    return unsupported(LicenseRepository.class);
   }
 
   @Override

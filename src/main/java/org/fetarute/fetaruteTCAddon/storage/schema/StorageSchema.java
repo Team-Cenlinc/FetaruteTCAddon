@@ -83,6 +83,7 @@ public final class StorageSchema {
     ddl.add(driveTaskRecords(dialect));
     ddl.add(index("drive_task_records_player", "drive_task_records", "player_uuid, finished_at"));
     ddl.add(index("drive_task_records_finished", "drive_task_records", "finished_at"));
+    ddl.add(driveLicenses(dialect));
     return Collections.unmodifiableList(ddl);
   }
 
@@ -895,6 +896,26 @@ public final class StorageSchema {
         dialect.timestampType(),
         dialect.timestampType(),
         dialect.textType());
+  }
+
+  private String driveLicenses(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    player_uuid %s NOT NULL,
+                    player_name %s NOT NULL,
+                    class_id %s NOT NULL,
+                    granted_at %s NOT NULL,
+                    granted_by %s NOT NULL,
+                    PRIMARY KEY (player_uuid, class_id)
+                );
+                """,
+        table("drive_licenses"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.timestampType(),
+        dialect.stringType());
   }
 
   private String formatDdl(String template, Object... args) {

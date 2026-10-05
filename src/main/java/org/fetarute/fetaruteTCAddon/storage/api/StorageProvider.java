@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.repository.PidsScreenRep
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.display.template.repository.HudTemplateRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
 
 /** 汇总所有仓库实例，供服务层注入。 */
 public interface StorageProvider extends AutoCloseable {
@@ -60,6 +61,9 @@ public interface StorageProvider extends AutoCloseable {
 
   /** 驾驶任务记录。 */
   DriveTaskRecordRepository driveTaskRecords();
+
+  /** 驾驶证（等级与证号）。 */
+  LicenseRepository licenses();
 
   /** 传送门连接。 */
   PortalLinkRepository portalLinks();

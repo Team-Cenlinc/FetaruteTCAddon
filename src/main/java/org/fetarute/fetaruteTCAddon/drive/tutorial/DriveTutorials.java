@@ -10,6 +10,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.BiConsumer;
 import java.util.function.Supplier;
 import java.util.logging.Logger;
 import net.kyori.adventure.text.Component;
@@ -65,6 +66,12 @@ public final class DriveTutorials {
   /** 驾驶中的玩家已经出过的情境提示；没有教程权限的玩家不在其中。 */
   private final Map<UUID, Set<DriveTip>> tipsShown = new HashMap<>();
 
+  /** 本次教程里跳过了练习步骤（说明类步骤点「继续」不算）的玩家。 */
+  private final Set<UUID> skippedPractice = new HashSet<>();
+
+  /** 教程做完时的通知：玩家与是否完整做完（没有跳过练习步骤）。驾驶证的教程考试据此判定。 */
+  private BiConsumer<Player, Boolean> finishListener = (player, complete) -> {};
+
   /**
    * @param sounds 驾驶提示音（教程的音效也按 drive.yml 的 sounds 段配置与开关）
    */
@@ -79,6 +86,11 @@ public final class DriveTutorials {
           new NamespacedKey(
               plugin, "drive_tip_" + tip.key().replace('-', '_').toLowerCase(Locale.ROOT)));
     }
+  }
+
+  /** 设置教程做完时的通知；传入 {@code null} 恢复空通知。 */
+  public void onFinished(BiConsumer<Player, Boolean> listener) {
+    this.finishListener = listener == null ? (player, complete) -> {} : listener;
   }
 
   // ---- 驾驶会话管理器喂数据 ----
@@ -259,6 +271,7 @@ public final class DriveTutorials {
 
   private void begin(Player player) {
     running.put(player.getUniqueId(), new TutorialEngine());
+    skippedPractice.remove(player.getUniqueId());
     player.sendMessage(locale.get().component("drive.tutorial.started"));
   }
 
@@ -270,6 +283,8 @@ public final class DriveTutorials {
       } else if (event instanceof TutorialEvent.StepCompleted completed) {
         if (!completed.skipped()) {
           sounds.play(player, DriveCue.TUTORIAL_STEP);
+        } else if (!completed.step().info()) {
+          skippedPractice.add(player.getUniqueId());
         }
       } else if (event instanceof TutorialEvent.Reminder reminder) {
         subtitle(
@@ -282,8 +297,11 @@ public final class DriveTutorials {
         player.sendMessage(messages.component("drive.tutorial.finished"));
         subtitle(player, messages.component("drive.tutorial.finished-subtitle"));
         sounds.play(player, DriveCue.TUTORIAL_FINISH);
+        boolean complete = !skippedPractice.remove(player.getUniqueId());
+        guard("完成通知", () -> finishListener.accept(player, complete));
       } else if (event instanceof TutorialEvent.Interrupted) {
         running.remove(player.getUniqueId());
+        skippedPractice.remove(player.getUniqueId());
         player.sendMessage(messages.component("drive.tutorial.interrupted"));
       }
     }

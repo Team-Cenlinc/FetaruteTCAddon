@@ -2521,6 +2521,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       // 转 ATO 会让自动运行立即发车，驾驶员却还在去另一端的路上。
       return "drive.command.mode.cab-change";
     }
+    if (tasks
+        .activeTaskOf(player.getUniqueId())
+        .filter(task -> DriverTask.SOURCE_EXAM.equals(task.source()))
+        .isPresent()) {
+      // 驾驶证路考要全程人工驾驶。
+      return "drive.command.mode.exam";
+    }
     Optional<MinecartGroup> group = findSessionGroup(session);
     if (group.isEmpty()) {
       return "drive.command.unavailable";

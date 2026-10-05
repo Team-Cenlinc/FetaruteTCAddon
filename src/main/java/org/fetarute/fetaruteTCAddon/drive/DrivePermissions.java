@@ -47,6 +47,12 @@ public final class DrivePermissions {
   /** 驾驶管理命令：查看与结束会话、收回任务、交还列车、熔断、诊断、查看他人记录。 */
   public static final String ADMIN = "fetarute.drive.admin";
 
+  /** 驾驶证：查看自己的驾驶证、报名考试、补发（默认人人都有）。 */
+  public static final String LICENSE = "fetarute.license";
+
+  /** 驾驶证管理：给玩家发证、吊销、查询他人的驾驶证。 */
+  public static final String LICENSE_ADMIN = "fetarute.license.admin";
+
   /** 打包节点：一次授予全部玩家驾驶功能。 */
   public static final String PLAYER = "fetarute.drive.player";
 

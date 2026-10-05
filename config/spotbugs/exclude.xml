@@ -751,4 +751,17 @@
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcTimetableRunRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
+    <!-- 驾驶证：命令与服务持有插件引用，生命周期由主类管理；仓库的表名来自白名单 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.license.LicenseService"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
 </FindBugsFilter>
