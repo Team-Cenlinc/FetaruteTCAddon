@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -180,6 +181,31 @@ class TimetableBuilderRapidStaggerTest {
     assertTrue(result.success(), () -> result.warnings().toString());
     assertTrue(result.phaseNotes().contains("快车被卡（成品表实测）：无"), result.phaseNotes()::toString);
     assertTrue(result.phaseNotes().stream().noneMatch(note -> note.startsWith("快车错峰：")));
+  }
+
+  /** 错峰候选与发起的编表器共用进度：候选的完整构建一起数、取消了也停，但阶段由错峰搜索报，候选自己不改。 */
+  @Test
+  void candidateBuildsShareTheProgress() {
+    TimetableBuildProgress progress = new TimetableBuildProgress();
+    build(
+        new TimetableBuilder(
+            new TimetableTimingCalculator(), Map.of("rapid", 100), false, progress),
+        0,
+        false);
+
+    TimetableBuildProgress.Snapshot snapshot = progress.snapshot();
+    assertTrue(snapshot.fullBuilds() > 0, snapshot::toString);
+    assertEquals(TimetableBuildProgress.Stage.QUEUED, snapshot.stage());
+
+    progress.cancel();
+    assertThrows(
+        TimetableBuildProgress.Cancelled.class,
+        () ->
+            build(
+                new TimetableBuilder(
+                    new TimetableTimingCalculator(), Map.of("rapid", 100), false, progress),
+                0,
+                false));
   }
 
   private TimetableBuildResult build(TimetableBuilder builder, int localDwell, boolean stagger) {

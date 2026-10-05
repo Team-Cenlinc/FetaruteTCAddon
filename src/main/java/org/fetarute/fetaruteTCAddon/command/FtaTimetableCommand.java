@@ -47,6 +47,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimet
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildOptions;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildProgress;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuildResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableConflictChecker;
@@ -105,6 +106,7 @@ public final class FtaTimetableCommand {
   private static final double FALLBACK_SPEED_BPS = 8.0D;
 
   private final FetaruteTCAddon plugin;
+  private final TimetableBuildJobs buildJobs = new TimetableBuildJobs();
 
   public FtaTimetableCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
@@ -332,6 +334,15 @@ public final class FtaTimetableCommand {
             .literal("status")
             .permission("fetarute.timetable")
             .handler(ctx -> handleRuntimeStatus(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("timetable")
+            .literal("cancel")
+            .permission("fetarute.timetable.manage")
+            .required("job", StringParser.quotedStringParser(), buildJobSuggestions())
+            .handler(ctx -> handleCancelBuild(ctx.sender(), ctx.get("job"))));
   }
 
   // ---------------------------------------------------------------- handlers
@@ -353,7 +364,8 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("投入运行", "/fta timetable publish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("撤出运行", "/fta timetable unpublish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
-    sender.sendMessage(hint("运行态", "/fta timetable status"));
+    sender.sendMessage(hint("运行态与编表进度", "/fta timetable status"));
+    sender.sendMessage(hint("取消编表", "/fta timetable cancel <任务号|线路/code>"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
     sender.sendMessage(
         Component.text(
@@ -585,9 +597,27 @@ public final class FtaTimetableCommand {
 
     // 构建是纯 CPU 运算：时分积分、SWRR、派车、串行、让车、冲突扫描，目标间隔有真冲突时还要向上搜索几十次。
     // 输入全是不可变快照，放到异步线程跑；报告回到主线程，落库再交给异步事务（writeAsync）。
+    String scope = lineArgumentOf(lines) + "/" + code;
+    Optional<TimetableBuildJobs.Job> started =
+        buildJobs.start(scope, sender.getName(), new java.util.HashSet<>(lineIds), code);
+    if (started.isEmpty()) {
+      String running =
+          buildJobs
+              .conflicting(new java.util.HashSet<>(lineIds), code)
+              .map(job -> job.scope() + "（" + job.requester() + " 发起）")
+              .orElse(scope);
+      sender.sendMessage(
+          Component.text("同一张表正在编：" + running + "，请等它编完。", NamedTextColor.RED)
+              .append(Component.text(" "))
+              .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
+      return;
+    }
+    TimetableBuildJobs.Job job = started.get();
+    TimetableBuildProgress progress = job.progress();
     sender.sendMessage(
-        Component.text(
-            joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY));
+        Component.text(joint ? "正在按路网联编 " + lines.size() + " 条线…" : "正在按路网编表…", NamedTextColor.GRAY)
+            .append(Component.text(" "))
+            .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
     if (flags.rapidStagger()) {
       sender.sendMessage(
           Component.text("已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟；在后台线程运行，不阻塞服务器主线程。", NamedTextColor.GRAY));
@@ -604,6 +634,7 @@ public final class FtaTimetableCommand {
               NeighborReport neighborReport;
               TimetablePlatformPlanner.Result platformPlans;
               try {
+                progress.stage(TimetableBuildProgress.Stage.NEIGHBORS);
                 NeighborInputs neighborInputs =
                     collectNeighborInputs(provider, lines, myRoutes, myStops, myDefinitions, model);
                 TimetableConflictChecker.GraphIndex index =
@@ -613,12 +644,15 @@ public final class FtaTimetableCommand {
                 neighborReport = neighborInputs.report(graphSnapshot, index, footprint);
                 List<NeighborTimetable> neighbors =
                     neighborInputs.project(graphSnapshot, index, footprint, options);
+                progress.checkpoint();
                 result =
-                    new TimetableSetBuilder()
+                    new TimetableSetBuilder(progress)
                         .build(
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
                             builtAt);
+                progress.checkpoint();
+                progress.stage(TimetableBuildProgress.Stage.PLATFORMS);
                 Map<UUID, Map<UUID, TimetableConflictChecker.RouteProfile>> tableProfiles =
                     tableProfiles(result, neighborInputs, graphSnapshot, index);
                 platformPlans =
@@ -633,7 +667,14 @@ public final class FtaTimetableCommand {
                 result =
                     withCapacity(
                         result, tableProfiles, platformPlans, index, options, model, graphSnapshot);
+              } catch (TimetableBuildProgress.Cancelled cancelled) {
+                plugin
+                    .getServer()
+                    .getScheduler()
+                    .runTask(plugin, () -> sendBuildStopped(sender, scope));
+                return;
               } catch (RuntimeException ex) {
+                buildJobs.finish(job.id());
                 plugin
                     .getServer()
                     .getScheduler()
@@ -643,7 +684,11 @@ public final class FtaTimetableCommand {
                             sender.sendMessage(
                                 Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
                 return;
+              } catch (Error error) {
+                buildJobs.finish(job.id());
+                throw error;
               }
+              progress.stage(TimetableBuildProgress.Stage.REPORT);
               TimetableSetBuilder.SetResult built = result;
               NeighborReport neighbors = neighborReport;
               TimetablePlatformPlanner.Result platforms = platformPlans;
@@ -652,20 +697,38 @@ public final class FtaTimetableCommand {
                   .getScheduler()
                   .runTask(
                       plugin,
-                      () ->
-                          finishBuild(
-                              sender,
-                              provider,
-                              lines,
-                              built,
-                              platforms,
-                              options,
-                              model.settings(),
-                              headwayChoice,
-                              neighbors,
-                              groupSources,
-                              maxTripsSource,
-                              buildWarnings));
+                      () -> {
+                        // 编完到回主线程之间被取消：锁已经放掉，可能已有新的 build 在编同一张表，这份不能再落库。
+                        // 抢到了就开始保存，此后取消不了。
+                        if (!progress.beginSaving()) {
+                          sendBuildStopped(sender, scope);
+                          return;
+                        }
+                        Runnable release = () -> buildJobs.finish(job.id());
+                        boolean saving = false;
+                        try {
+                          saving =
+                              finishBuild(
+                                  sender,
+                                  provider,
+                                  lines,
+                                  built,
+                                  platforms,
+                                  options,
+                                  model.settings(),
+                                  headwayChoice,
+                                  neighbors,
+                                  groupSources,
+                                  maxTripsSource,
+                                  buildWarnings,
+                                  release);
+                        } finally {
+                          // 交给了落库就等事务结束再解锁；没走到落库（编表失败、拆表出错）当场解锁。
+                          if (!saving) {
+                            release.run();
+                          }
+                        }
+                      });
             });
   }
 
@@ -934,8 +997,13 @@ public final class FtaTimetableCommand {
     }
   }
 
-  /** 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。 */
-  private void finishBuild(
+  /**
+   * 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。落库交给异步事务。
+   *
+   * @param saved 落库事务结束（成功、被拒或出错）后在主线程调用；返回 false 时不会被调用
+   * @return 交给了落库为 true
+   */
+  private boolean finishBuild(
       CommandSender sender,
       StorageProvider provider,
       List<ResolvedLine> lines,
@@ -947,7 +1015,8 @@ public final class FtaTimetableCommand {
       NeighborReport neighbors,
       Map<String, String> groupSources,
       String maxTripsSource,
-      List<String> warnings) {
+      List<String> warnings,
+      Runnable saved) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(
@@ -961,7 +1030,7 @@ public final class FtaTimetableCommand {
         options.serviceStartSecondOfDay(),
         result.headwayRelaxed());
     if (!set.success()) {
-      return;
+      return false;
     }
     platforms
         .failure()
@@ -989,7 +1058,7 @@ public final class FtaTimetableCommand {
       if (timetable == null) {
         sender.sendMessage(
             Component.text(line.line().code() + " 没有拆出表来，这是一个不应发生的状态。", NamedTextColor.RED));
-        return;
+        return false;
       }
       tables.add(timetable);
     }
@@ -999,6 +1068,18 @@ public final class FtaTimetableCommand {
         provider,
         "保存时刻表失败",
         () -> {
+          // 编表要几分钟，build 时查过的库况可能已经变了：先全部查完再写，有一张不行就都不写。
+          for (int i = 0; i < tables.size(); i++) {
+            Timetable timetable = tables.get(i);
+            Optional<String> stale =
+                staleSaveReason(
+                    lines.get(i).line().code(),
+                    timetable,
+                    provider.timetables().findByLineAndCode(timetable.lineId(), timetable.code()));
+            if (stale.isPresent()) {
+              return stale;
+            }
+          }
           for (Timetable timetable : tables) {
             provider.timetables().save(timetable);
             provider
@@ -1013,7 +1094,32 @@ public final class FtaTimetableCommand {
           return Optional.empty();
         },
         false,
-        () -> report.sendSavedActions(lines, tables, lineArgumentOf(lines), options, result));
+        () -> report.sendSavedActions(lines, tables, lineArgumentOf(lines), options, result),
+        saved);
+    return true;
+  }
+
+  /**
+   * 编完准备落库时，库里同线同 code 的表已经不是 build 开始时的样子：编表期间被投入运行（存草稿会把它改回未发布），或者冒出了另一张（存进去会撞同线同 code 的唯一约束）。
+   *
+   * @param lineCode 线路 code，用于提示
+   * @param built 编出来的表
+   * @param current 库里现在的同线同 code 表
+   * @return 不能保存的理由
+   */
+  static Optional<String> staleSaveReason(
+      String lineCode, Timetable built, Optional<Timetable> current) {
+    if (current.isEmpty()) {
+      return Optional.empty();
+    }
+    String table = lineCode + "/" + built.code();
+    if (current.get().published()) {
+      return Optional.of(table + " 在编表期间已投入运行，这次编表结果没有保存；如需替换，请先 unpublish 再重新 build。");
+    }
+    if (!current.get().id().equals(built.id())) {
+      return Optional.of(table + " 在编表期间另有一份草稿存入，这次编表结果没有保存；请重新 build。");
+    }
+    return Optional.empty();
   }
 
   /**
@@ -1035,6 +1141,20 @@ public final class FtaTimetableCommand {
       TransactionCallback<Optional<String>> write,
       boolean reloadPublished,
       Runnable onWritten) {
+    writeAsync(sender, provider, failurePrefix, write, reloadPublished, onWritten, () -> {});
+  }
+
+  /**
+   * @param onSettled 事务结束后在主线程调用，不论写成、被拒还是出错；在 {@code onWritten} 之后
+   */
+  private void writeAsync(
+      CommandSender sender,
+      StorageProvider provider,
+      String failurePrefix,
+      TransactionCallback<Optional<String>> write,
+      boolean reloadPublished,
+      Runnable onWritten,
+      Runnable onSettled) {
     plugin
         .getServer()
         .getScheduler()
@@ -1054,8 +1174,18 @@ public final class FtaTimetableCommand {
                     .getScheduler()
                     .runTask(
                         plugin,
-                        () -> sender.sendMessage(Component.text(reason, NamedTextColor.RED)));
+                        () -> {
+                          try {
+                            sender.sendMessage(Component.text(reason, NamedTextColor.RED));
+                          } finally {
+                            onSettled.run();
+                          }
+                        });
                 return;
+              } catch (RuntimeException | Error ex) {
+                // 不是存储层的异常：照常抛出去留下堆栈，但事务已经结束，收尾不能漏。
+                plugin.getServer().getScheduler().runTask(plugin, onSettled);
+                throw ex;
               }
               Optional<String> outcome = rejected;
               plugin
@@ -1064,11 +1194,15 @@ public final class FtaTimetableCommand {
                   .runTask(
                       plugin,
                       () -> {
-                        if (outcome.isPresent()) {
-                          sender.sendMessage(Component.text(outcome.get(), NamedTextColor.RED));
-                          return;
+                        try {
+                          if (outcome.isPresent()) {
+                            sender.sendMessage(Component.text(outcome.get(), NamedTextColor.RED));
+                            return;
+                          }
+                          onWritten.run();
+                        } finally {
+                          onSettled.run();
                         }
-                        onWritten.run();
                       });
             });
   }
@@ -2308,6 +2442,101 @@ public final class FtaTimetableCommand {
   }
 
   private void handleRuntimeStatus(CommandSender sender) {
+    sendRuntimeStatus(sender);
+    sendBuildJobs(sender);
+  }
+
+  /** 正在进行的编表：阶段、正在试什么、完整构建了几次。次数在涨就是在干活，不是卡死。 */
+  private void sendBuildJobs(CommandSender sender) {
+    describeBuildJobs(buildJobs.list()).forEach(sender::sendMessage);
+  }
+
+  static List<Component> describeBuildJobs(List<TimetableBuildJobs.Job> jobs) {
+    List<Component> lines = new ArrayList<>();
+    lines.add(Component.text("===== 编表 =====", NamedTextColor.DARK_AQUA));
+    if (jobs.isEmpty()) {
+      lines.add(Component.text("  当前没有正在进行的编表。", NamedTextColor.GRAY));
+      return lines;
+    }
+    for (TimetableBuildJobs.Job job : jobs) {
+      TimetableBuildProgress.Snapshot snapshot = job.progress().snapshot();
+      Component header =
+          Component.text("  " + job.scope(), NamedTextColor.WHITE)
+              .append(
+                  Component.text(
+                      "  " + job.requester() + " 发起，已用 " + elapsed(snapshot.elapsed()) + " ",
+                      NamedTextColor.GRAY));
+      lines.add(
+          job.progress().saving()
+              ? header.append(Component.text("（正在保存，不能取消）", NamedTextColor.GRAY))
+              : header.append(
+                  CommandUx.runAction(
+                      "[取消]",
+                      "/fta timetable cancel " + job.shortId(),
+                      "停止这次编表，不保存；等完当前这一次完整构建就停")));
+      lines.add(
+          field(
+              "  阶段", snapshot.stage().label() + "（本阶段 " + elapsed(snapshot.stageElapsed()) + "）"));
+      if (!snapshot.detail().isBlank()) {
+        lines.add(field("  正在", snapshot.detail()));
+      }
+      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次"));
+    }
+    return lines;
+  }
+
+  private void handleCancelBuild(CommandSender sender, String ref) {
+    Optional<TimetableBuildJobs.Cancellation> cancelled = buildJobs.cancel(ref);
+    if (cancelled.isEmpty()) {
+      sender.sendMessage(
+          Component.text("找不到唯一对应的编表任务：" + ref + "。", NamedTextColor.RED)
+              .append(Component.text(" "))
+              .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与任务号")));
+      return;
+    }
+    TimetableBuildJobs.Job job = cancelled.get().job();
+    if (!cancelled.get().stopped()) {
+      sender.sendMessage(
+          Component.text(
+              job.scope() + " 已编完、正在保存，取消不了；保存完成后可以 unpublish 或重新 build。", NamedTextColor.RED));
+      return;
+    }
+    sender.sendMessage(
+        Component.text(
+            "已取消 " + job.scope() + "：不会保存，同一张表现在就可以重新 build。编表线程会在当前这一次完整构建结束后停下。",
+            NamedTextColor.YELLOW));
+  }
+
+  /** 编表线程已因取消停下：告诉发起者。 */
+  private static void sendBuildStopped(CommandSender sender, String scope) {
+    sender.sendMessage(Component.text("编表 " + scope + " 已取消，没有保存。", NamedTextColor.YELLOW));
+  }
+
+  private SuggestionProvider<CommandSender> buildJobSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> out = new ArrayList<>();
+          for (TimetableBuildJobs.Job job : buildJobs.list()) {
+            if (matches(job.shortId(), prefix)) {
+              out.add(job.shortId());
+            }
+          }
+          if (out.isEmpty() && prefix.isBlank()) {
+            out.add("<job>");
+          }
+          return out;
+        });
+  }
+
+  private static String elapsed(Duration duration) {
+    long seconds = duration.toSeconds();
+    return seconds >= 60
+        ? String.format(Locale.ROOT, "%d 分 %02d 秒", seconds / 60, seconds % 60)
+        : seconds + " 秒";
+  }
+
+  private void sendRuntimeStatus(CommandSender sender) {
     Optional<TimetableService> serviceOpt = plugin.getTimetableService();
     if (serviceOpt.isEmpty()) {
       sender.sendMessage(Component.text("按表运行服务尚未初始化。", NamedTextColor.RED));
