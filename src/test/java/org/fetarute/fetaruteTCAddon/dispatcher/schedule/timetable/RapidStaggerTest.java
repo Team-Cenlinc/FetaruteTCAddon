@@ -30,7 +30,7 @@ class RapidStaggerTest {
     assertEquals(List.of(), RapidStagger.shifts(10));
   }
 
-  /** 候选可用：排得开、不放宽、班次不少、高峰最多多用一列车。 */
+  /** 候选可用：排得开、不放宽、中间时段班次不少、高峰最多多用一列车。 */
   @Test
   void aCandidateMustKeepTripsVehiclesAndTheTargetInterval() {
     RapidStagger.Outcome base = outcome(true, false, 100, 10);
@@ -310,14 +310,41 @@ class RapidStaggerTest {
     RapidStagger.Measure caught = measure(10L, 1, List.of());
     RapidStagger.Measure clear = measure(0L, 0, List.of());
 
-    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, caught, false));
-    assertEquals(RapidStagger.Plan.TURNBACK_ONLY, RapidStagger.plan(true, caught, true));
-    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, caught, false));
-    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(true, clear, false));
+    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, caught, caught, false));
+    assertEquals(RapidStagger.Plan.TURNBACK_ONLY, RapidStagger.plan(true, caught, caught, true));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, caught, caught, false));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(true, clear, clear, false));
     assertEquals(
         RapidStagger.Plan.SEARCH,
-        RapidStagger.plan(true, measure(0L, 0, List.of(), 40L), false),
+        RapidStagger.plan(
+            true, measure(0L, 0, List.of(), 40L), measure(0L, 0, List.of(), 40L), false),
         "共线不被卡、却在表里让车等待，也是快车损失");
+  }
+
+  /** 占用区间口径量不出、只有闭塞时间口径量出被卡（快车跟在停站车后面减速）也要搜。 */
+  @Test
+  void aLossSeenOnlyByTheReportedMeasureAlsoTriggersTheSearch() {
+    RapidStagger.Measure clear = measure(0L, 0, List.of());
+    RapidStagger.Measure slowed = measure(1872L, 117, List.of());
+
+    assertEquals(RapidStagger.Plan.SEARCH, RapidStagger.plan(true, clear, slowed, false));
+    assertEquals(RapidStagger.Plan.MEASURE_ONLY, RapidStagger.plan(false, clear, slowed, false));
+  }
+
+  /**
+   * 班次只比中间时段：候选少的几班若都在首末一个来回之内，照样可用；中间时段少了仍不可用。
+   *
+   * <p>原表 100 班、中间时段 90 班；候选 96 班，中间时段同样 90 班可用，中间时段 89 班不可用。
+   */
+  @Test
+  void tripsLostOnlyAtTheServiceEdgesDoNotDisqualifyACandidate() {
+    RapidStagger.Outcome base = new RapidStagger.Outcome(true, false, 100, 10, 0, 0, 0L, 90);
+
+    assertTrue(
+        RapidStagger.acceptable(base, new RapidStagger.Outcome(true, false, 96, 10, 0, 0, 0L, 90)));
+    assertFalse(
+        RapidStagger.acceptable(base, new RapidStagger.Outcome(true, false, 99, 10, 0, 0, 0L, 89)),
+        "中间时段少了一班");
   }
 
   /** 实测写进构建结果：结构化合计（报告据此给按钮）与一行说明。 */

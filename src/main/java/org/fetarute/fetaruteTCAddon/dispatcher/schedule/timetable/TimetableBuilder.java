@@ -155,7 +155,7 @@ public final class TimetableBuilder {
         measureRapids(base, fastRoutes, TimetableBuildOptions.Following.NONE);
     RapidStagger.Measure reported = reportedRapids(base, fastRoutes, measure);
     return switch (RapidStagger.plan(
-        requested.rapidStagger(), measure, base.result().headwayRelaxed())) {
+        requested.rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
       case MEASURE_ONLY -> RapidStagger.annotate(base.result(), reported, routeCodes(chosen));
       case TURNBACK_ONLY -> staggerRapids(
           input, requested, builtAt, base, measure, reported, fastRoutes, true);
