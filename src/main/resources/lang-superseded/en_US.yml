@@ -14,3 +14,6 @@ drive:
       train-moving:
         - "<prefix> <red>The train is moving, wait until it has stopped</red>"
         - "<prefix> <red>The train has not stopped (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
+sign:
+  stopmark:
+    invalid: ["<prefix> <red>Invalid stop mark</red> <gray>Line 3: carriage:N, e.g. carriage:4, carriage:4,6, carriage:3-5, carriage:*</gray>"]
