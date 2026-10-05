@@ -90,6 +90,20 @@ public final class FtaLicenseCommand {
     manager.command(
         manager
             .commandBuilder("fta")
+            .literal("license")
+            .literal("practice")
+            .permission(player)
+            .required("class", StringParser.stringParser(), classSuggestions)
+            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .handler(
+                ctx ->
+                    handlePractice(
+                        ctx.sender(),
+                        ((String) ctx.get("class")).trim(),
+                        ctx.optional("station").map(String.class::cast))));
+    manager.command(
+        manager
+            .commandBuilder("fta")
             .literal("handbook")
             .literal("driver")
             .permission(player)
@@ -139,7 +153,7 @@ public final class FtaLicenseCommand {
             .handler(ctx -> handleList(ctx.sender(), ((String) ctx.get("player")).trim())));
   }
 
-  /** 我的驾驶证：按级别从低到高列出整条阶梯——已取得、考试中、可报名（带按钮）、尚未解锁。 */
+  /** 我的驾驶证：按级别从低到高列出整条阶梯——已取得、考试或练习中、须先练习、可报名（带按钮）、尚未解锁。 */
   private void handleInfo(CommandSender sender) {
     Player player = requirePlayer(sender);
     LicenseService licenses = requireService(sender);
@@ -163,7 +177,7 @@ public final class FtaLicenseCommand {
     for (LicenseRecord record : licenses.held(id)) {
       held.put(record.classId(), record);
     }
-    Optional<String> examining = licenses.exam(id).map(LicenseService.Exam::classId);
+    Optional<LicenseService.Exam> examining = licenses.exam(id);
     for (LicenseClass license : licenses.config().classes()) {
       Map<String, String> values = new java.util.HashMap<>();
       values.put("level", String.valueOf(licenses.config().levelOf(license.id())));
@@ -172,6 +186,8 @@ public final class FtaLicenseCommand {
       values.put("description", license.description());
       values.put("stops", String.valueOf(license.examStops()));
       values.put("min", String.valueOf(license.minPoints()));
+      values.put("done", String.valueOf(licenses.trainingRuns(id, license.id())));
+      values.put("required", String.valueOf(license.trainingRuns()));
       LicenseRecord record = held.get(license.id());
       if (record != null) {
         values.put("date", DATE.format(record.grantedAt()));
@@ -188,8 +204,13 @@ public final class FtaLicenseCommand {
         sender.sendMessage(locale.component("drive.license.info.level-closed", values));
         continue;
       }
-      if (examining.filter(license.id()::equals).isPresent()) {
-        sender.sendMessage(locale.component("drive.license.info.level-exam-running", values));
+      if (examining.filter(exam -> license.id().equals(exam.classId())).isPresent()) {
+        sender.sendMessage(
+            locale.component(
+                examining.get().training()
+                    ? "drive.license.info.level-practice-running"
+                    : "drive.license.info.level-exam-running",
+                values));
         continue;
       }
       List<String> missing = new ArrayList<>();
@@ -203,12 +224,15 @@ public final class FtaLicenseCommand {
         sender.sendMessage(locale.component("drive.license.info.level-locked", values));
         continue;
       }
-      sender.sendMessage(
-          locale.component(
-              license.exam() == LicenseClass.Exam.TUTORIAL
-                  ? "drive.license.info.level-open-tutorial"
-                  : "drive.license.info.level-open-dispatch",
-              values));
+      String key;
+      if (license.exam() == LicenseClass.Exam.TUTORIAL) {
+        key = "drive.license.info.level-open-tutorial";
+      } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
+        key = "drive.license.info.level-need-practice";
+      } else {
+        key = "drive.license.info.level-open-dispatch";
+      }
+      sender.sendMessage(locale.component(key, values));
     }
     sender.sendMessage(locale.component("drive.license.info.footer"));
   }
@@ -231,6 +255,15 @@ public final class FtaLicenseCommand {
       return;
     }
     send(sender, licenses.startExam(player, classId, station));
+  }
+
+  private void handlePractice(CommandSender sender, String classId, Optional<String> station) {
+    Player player = requirePlayer(sender);
+    LicenseService licenses = requireService(sender);
+    if (player == null || licenses == null) {
+      return;
+    }
+    send(sender, licenses.startPractice(player, classId, station));
   }
 
   private void handleReissue(CommandSender sender) {

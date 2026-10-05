@@ -281,6 +281,23 @@ license:
   retry-cooldown-minutes: 10
   # 两次补发驾驶证之间至少隔多久（分钟）
   reissue-cooldown-minutes: 10
+  # 路考练习（/fta license practice）：和路考一样派一段区间任务，有教练逐步提示与一次应急演练，不发证、不记入驾驶记录。
+  # 练习与路考都跑在正式车次上，下面的晚点阈值用来保护调度：已经晚点的车次不派给考生，跑着跑着晚点过大先撤演练，再大就交还自动运行。
+  training:
+    # 是否安排应急演练（受电中断、车门故障、紧急停车；仿真级另有主断跳闸），开过第一站后随机一次，只讲评不影响计次
+    drill: true
+    # 晚点超过多少秒就不派这趟车、不开始演练
+    drill-max-delay-seconds: 30
+    # 晚点超过多少秒撤掉进行中的演练，提示驾驶员先恢复正点
+    max-delay-seconds: 120
+    # 晚点超过多少秒交还自动运行，结束这次练习或路考
+    handback-delay-seconds: 240
+    # 受电中断演练多少秒后恢复供电
+    line-loss-seconds: 15
+    # 紧急停车演练：从提示到拨到 EB 的合格反应时间（秒）
+    emergency-reaction-seconds: 3
+    # 只用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时用正式车次
+    routes: []
   # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
   # 或 dispatch（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
@@ -300,7 +317,9 @@ license:
       requires:
         - free
       exam: dispatch
-      # 路考区间要开过几个停车站
+      # 报名路考前要完整开完几次路考练习；0 表示不要求
+      training-runs: 1
+      # 路考区间要开过几个停车站（练习相同）
       exam-stops: 3
       # 及格分（0–100）
       min-points: 70

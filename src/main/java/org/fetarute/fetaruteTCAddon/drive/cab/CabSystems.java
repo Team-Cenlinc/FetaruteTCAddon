@@ -198,6 +198,13 @@ public final class CabSystems {
   /** 牵引被封锁的首要原因；没有封锁时为空。 */
   public Optional<TractionBlock> tractionBlock() {
     if (!enabled) {
+      // standard 级没有车上系统，只有驾驶证练习的应急演练会注入简化故障：受电中断与车门故障照样封锁牵引。
+      if (faults.active(CabFault.LINE_LOSS)) {
+        return Optional.of(TractionBlock.LINE_LOSS);
+      }
+      if (faults.doorCircuitOpen()) {
+        return Optional.of(TractionBlock.DOOR_CIRCUIT);
+      }
       return Optional.empty();
     }
     if (faults.active(CabFault.BREAKER_TRIP)) {

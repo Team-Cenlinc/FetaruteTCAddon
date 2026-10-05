@@ -167,10 +167,11 @@ public final class TaskBoardSource {
   }
 
   /**
-   * 驾驶证路考的区间任务：从任务板上这一班的接班站起，开过 {@code stops} 个停车站后下车。
+   * 驾驶证路考或练习的区间任务：从任务板上这一班的接班站起，开过 {@code stops} 个停车站后下车。
    *
    * @param station 接班站
    * @param stops 要开过几个停车站
+   * @param source 来源（路考 {@link DriverTask#SOURCE_EXAM}，练习 {@link DriverTask#SOURCE_TRAINING}）
    * @param metadata 附加数据（考的是哪一级）
    * @return 查不到停靠表、或这一班后面的停车站不够时为空
    */
@@ -180,6 +181,7 @@ public final class TaskBoardSource {
       TaskBoardEntries.Row row,
       Station station,
       int stops,
+      String source,
       java.util.Map<String, String> metadata) {
     TaskKey key = row.key();
     return timetables
@@ -210,7 +212,7 @@ public final class TaskBoardSource {
                       code,
                       stationName(plugin, code, alight.nodeId()),
                       false,
-                      DriverTask.SOURCE_EXAM,
+                      source,
                       metadata));
             });
   }

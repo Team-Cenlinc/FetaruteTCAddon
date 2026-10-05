@@ -18,6 +18,7 @@ import java.util.Objects;
  * @param allowEmergency 路考中触发紧急制动是否仍可及格
  * @param allowOverrun 路考中停过头、越站是否仍可及格
  * @param allowWrongDoor 路考中开错门是否仍可及格
+ * @param trainingRuns 报名路考前至少要完整开完几次练习（0 为不强制）
  * @param grants 持证时给的权限节点（子节点随之生效）
  */
 public record LicenseClass(
@@ -32,6 +33,7 @@ public record LicenseClass(
     boolean allowEmergency,
     boolean allowOverrun,
     boolean allowWrongDoor,
+    int trainingRuns,
     List<String> grants) {
 
   /** 考试方式。 */
@@ -63,6 +65,7 @@ public record LicenseClass(
     Objects.requireNonNull(exam, "exam");
     examStops = Math.max(1, examStops);
     minPoints = Math.max(0, Math.min(100, minPoints));
+    trainingRuns = Math.max(0, trainingRuns);
     grants = grants == null ? List.of() : List.copyOf(grants);
   }
 }

@@ -137,8 +137,12 @@ public final class DriveMenu {
     }
     CabSystems cab = session.cab();
     switch (action) {
-      case COMPRESSOR, PARKING_BRAKE, BRAKE_TEST, DOOR_BYPASS -> {
+      case COMPRESSOR, PARKING_BRAKE, BRAKE_TEST -> {
         return cab.enabled() ? cabView(action, cab, setup) : null;
+      }
+      case DOOR_BYPASS -> {
+        // standard 级只在应急演练的车门故障期间（或旁路还接通着时）出现。
+        return cab.enabled() || doorDrill(cab) ? cabView(action, cab, setup) : null;
       }
       default -> {}
     }
@@ -285,5 +289,10 @@ public final class DriveMenu {
       case DOOR_RIGHT -> session.isRightDoorOpen();
       default -> false;
     };
+  }
+
+  /** 门旁路此刻有没有意义：有车门故障，或旁路还接通着。 */
+  public static boolean doorDrill(CabSystems cab) {
+    return cab.faults().active(CabFault.DOOR) || cab.faults().doorBypassed();
   }
 }

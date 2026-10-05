@@ -9,6 +9,7 @@ import java.util.function.Consumer;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseRecord;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.TrainingRecord;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 
@@ -17,6 +18,7 @@ public final class JdbcLicenseRepository extends JdbcRepositorySupport
     implements LicenseRepository {
 
   private static final String LICENSES = "drive_licenses";
+  private static final String TRAINING = "drive_license_training";
 
   public JdbcLicenseRepository(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, Consumer<String> debugLogger) {
@@ -91,6 +93,58 @@ public final class JdbcLicenseRepository extends JdbcRepositorySupport
       return removed > 0;
     } catch (SQLException ex) {
       throw new StorageException("吊销 drive_licenses 失败", ex);
+    }
+  }
+
+  @Override
+  public List<TrainingRecord> trainingByPlayer(UUID playerId) {
+    Objects.requireNonNull(playerId, "playerId");
+    String sql =
+        "SELECT player_uuid, player_name, class_id, runs, last_at FROM "
+            + table(TRAINING)
+            + " WHERE player_uuid = ?";
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, playerId);
+      List<TrainingRecord> records = new ArrayList<>();
+      try (var rs = statement.executeQuery()) {
+        while (rs.next()) {
+          records.add(
+              new TrainingRecord(
+                  requireUuid(rs, "player_uuid"),
+                  rs.getString("player_name"),
+                  rs.getString("class_id"),
+                  rs.getInt("runs"),
+                  readInstant(rs, "last_at")));
+        }
+      }
+      return records;
+    } catch (SQLException ex) {
+      throw new StorageException("读取 drive_license_training 失败", ex);
+    }
+  }
+
+  @Override
+  public void saveTraining(TrainingRecord record) {
+    Objects.requireNonNull(record, "record");
+    String insert =
+        "INSERT INTO "
+            + table(TRAINING)
+            + " (player_uuid, player_name, class_id, runs, last_at) VALUES (?, ?, ?, ?, ?)";
+    String sql =
+        dialect.applyUpsert(
+            insert, List.of("player_uuid", "class_id"), List.of("player_name", "runs", "last_at"));
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, record.playerId());
+      statement.setString(2, record.playerName());
+      statement.setString(3, record.classId());
+      statement.setInt(4, record.runs());
+      setInstant(statement, 5, record.lastAt());
+      statement.executeUpdate();
+      connection.commitIfNecessary();
+    } catch (SQLException ex) {
+      throw new StorageException("保存 drive_license_training 失败", ex);
     }
   }
 }

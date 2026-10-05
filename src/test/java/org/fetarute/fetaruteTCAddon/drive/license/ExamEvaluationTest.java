@@ -122,6 +122,7 @@ class ExamEvaluationTest {
             true,
             true,
             true,
+            0,
             List.of());
     assertEquals(
         ExamEvaluation.Verdict.PASSED,

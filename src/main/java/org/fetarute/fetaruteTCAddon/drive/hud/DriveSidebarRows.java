@@ -103,6 +103,9 @@ public final class DriveSidebarRows {
       rows.add(airRow(cab));
       rows.add(vigilanceRow(cab.vigilance(), nowTick, session.isStopped()));
       addFaultRows(rows, cab.faults());
+    } else if (cab.faults().any() || cab.faults().doorBypassed()) {
+      // standard 级的应急演练：只列出故障与门旁路。
+      addFaultRows(rows, cab.faults());
     }
     return rows;
   }

@@ -21,6 +21,9 @@ public final class DriverTask {
   /** 驾驶证路考：给考生派的一段区间任务。 */
   public static final String SOURCE_EXAM = "exam";
 
+  /** 驾驶证路考练习：与路考相同的区间任务，有教练提示与应急演练，不发证、不记入驾驶记录。 */
+  public static final String SOURCE_TRAINING = "training";
+
   /** 任务状态。 */
   public enum State {
     /** 已领取，等列车到站。 */

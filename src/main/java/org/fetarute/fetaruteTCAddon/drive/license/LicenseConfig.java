@@ -18,19 +18,22 @@ import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
  * @param retryCooldownMinutes 路考不及格后多久才能再考
  * @param reissueCooldownMinutes 两次补发之间至少隔多久
  * @param classes 各级驾驶证，按声明顺序
+ * @param training 路考练习与应急演练
  */
 public record LicenseConfig(
     boolean enabled,
     int examWindowMinutes,
     int retryCooldownMinutes,
     int reissueCooldownMinutes,
-    List<LicenseClass> classes) {
+    List<LicenseClass> classes,
+    TrainingConfig training) {
 
   public LicenseConfig {
     examWindowMinutes = Math.max(1, examWindowMinutes);
     retryCooldownMinutes = Math.max(0, retryCooldownMinutes);
     reissueCooldownMinutes = Math.max(0, reissueCooldownMinutes);
     classes = classes == null ? List.of() : List.copyOf(classes);
+    training = training == null ? TrainingConfig.defaults() : training;
   }
 
   /** 默认两级：自由驾驶证考新手教程；调度驾驶证要先有自由驾驶证，再路考。 */
@@ -53,6 +56,7 @@ public record LicenseConfig(
                 true,
                 true,
                 true,
+                0,
                 List.of(DrivePermissions.BASE)),
             new LicenseClass(
                 "dispatch",
@@ -66,7 +70,9 @@ public record LicenseConfig(
                 false,
                 false,
                 false,
-                List.of(DrivePermissions.DRIVER))));
+                1,
+                List.of(DrivePermissions.DRIVER))),
+        TrainingConfig.defaults());
   }
 
   /** 第几级：按配置里的先后，从 1 起；没有这一级时为 0。 */
@@ -124,6 +130,7 @@ public record LicenseConfig(
                 entry.getBoolean("allow-emergency", false),
                 entry.getBoolean("allow-overrun", false),
                 entry.getBoolean("allow-wrong-door", false),
+                entry.getInt("training-runs", exam == LicenseClass.Exam.DISPATCH ? 1 : 0),
                 entry.getStringList("grants")));
       }
     }
@@ -144,6 +151,7 @@ public record LicenseConfig(
         section.getInt("exam-window-minutes", d.examWindowMinutes()),
         section.getInt("retry-cooldown-minutes", d.retryCooldownMinutes()),
         section.getInt("reissue-cooldown-minutes", d.reissueCooldownMinutes()),
-        classes);
+        classes,
+        TrainingConfig.from(section.getConfigurationSection("training")));
   }
 }

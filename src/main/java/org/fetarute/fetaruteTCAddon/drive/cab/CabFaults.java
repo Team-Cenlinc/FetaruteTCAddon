@@ -186,6 +186,17 @@ public final class CabFaults {
     }
   }
 
+  /**
+   * 结束一个故障（应急演练到时恢复）：和自然恢复一样发出恢复事件。
+   *
+   * @return 原来是否有这个故障
+   */
+  public boolean resolve(CabFault fault) {
+    boolean had = active.contains(fault);
+    recover(fault);
+    return had;
+  }
+
   private void recover(CabFault fault) {
     if (active.remove(fault)) {
       events.add(new Event(fault, Kind.RECOVERED));

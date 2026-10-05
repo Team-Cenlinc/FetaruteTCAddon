@@ -11,12 +11,13 @@ import java.util.List;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseRecord;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseRepository;
+import org.fetarute.fetaruteTCAddon.drive.license.TrainingRecord;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
-/** 驾驶证表：发证往返、重复发证只更新、吊销。 */
+/** 驾驶证表：发证往返、重复发证只更新、吊销；练习次数往返。 */
 class LicenseRepositoryTest {
 
   private static final Instant NOW = Instant.now().truncatedTo(ChronoUnit.MILLIS);
@@ -61,5 +62,22 @@ class LicenseRepositoryTest {
     assertEquals(
         List.of("free"), licenses.listByPlayer(alex).stream().map(LicenseRecord::classId).toList());
     assertEquals(1, licenses.listByPlayer(other).size());
+  }
+
+  @Test
+  void trainingRuns() {
+    UUID alex = UUID.randomUUID();
+    assertTrue(licenses.trainingByPlayer(alex).isEmpty());
+    licenses.saveTraining(new TrainingRecord(alex, "Alex", "dispatch", 1, NOW));
+    licenses.saveTraining(new TrainingRecord(alex, "Alex", "dispatch", 2, NOW.plusSeconds(30)));
+    licenses.saveTraining(new TrainingRecord(alex, "Alex", "pro", 1, NOW));
+
+    List<TrainingRecord> runs = licenses.trainingByPlayer(alex);
+    assertEquals(2, runs.size(), "同一级只留一行");
+    TrainingRecord dispatch =
+        runs.stream().filter(r -> r.classId().equals("dispatch")).findFirst().orElseThrow();
+    assertEquals(2, dispatch.runs());
+    assertEquals(NOW.plusSeconds(30), dispatch.lastAt());
+    assertTrue(licenses.trainingByPlayer(UUID.randomUUID()).isEmpty());
   }
 }

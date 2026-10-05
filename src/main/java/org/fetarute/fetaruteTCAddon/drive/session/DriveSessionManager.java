@@ -1589,7 +1589,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** simulation 级：切换门旁路。 */
   private void toggleDoorBypass(Player player, DriveSession session) {
     CabSystems cab = session.cab();
-    if (!cab.enabled()) {
+    if (!cab.enabled() && !DriveMenu.doorDrill(cab)) {
       return;
     }
     boolean bypassed = cab.faults().toggleDoorBypass();
@@ -2523,9 +2523,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     if (tasks
         .activeTaskOf(player.getUniqueId())
-        .filter(task -> DriverTask.SOURCE_EXAM.equals(task.source()))
+        .filter(
+            task ->
+                DriverTask.SOURCE_EXAM.equals(task.source())
+                    || DriverTask.SOURCE_TRAINING.equals(task.source()))
         .isPresent()) {
-      // 驾驶证路考要全程人工驾驶。
+      // 驾驶证路考与路考练习要全程人工驾驶。
       return "drive.command.mode.exam";
     }
     Optional<MinecartGroup> group = findSessionGroup(session);
@@ -4163,7 +4166,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             task.startedAt(),
             Instant.now(),
             DriveTaskRecordCodec.encode(score));
-    saveRecord(record);
+    if (!DriverTask.SOURCE_TRAINING.equals(task.source())) {
+      // 路考练习不进驾驶记录与排行。
+      saveRecord(record);
+    }
     return Optional.of(TaskViews.score(score, result.points(), result.grade().name()));
   }
 

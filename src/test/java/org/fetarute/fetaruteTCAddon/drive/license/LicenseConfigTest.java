@@ -29,6 +29,9 @@ class LicenseConfigTest {
     assertEquals(1, config.levelOf("free"));
     assertEquals(2, config.levelOf("dispatch"));
     assertEquals(0, config.levelOf("nope"));
+    assertEquals(0, free.trainingRuns());
+    assertEquals(1, dispatch.trainingRuns());
+    assertEquals(TrainingConfig.defaults(), config.training());
   }
 
   @Test
@@ -41,6 +44,12 @@ class LicenseConfigTest {
           enabled: true
           exam-window-minutes: 20
           retry-cooldown-minutes: 5
+          training:
+            drill: false
+            drill-max-delay-seconds: 60
+            max-delay-seconds: 30
+            handback-delay-seconds: 300
+            routes: [" prac-1 ", ""]
           classes:
             basic:
               name: 见习证
@@ -52,6 +61,7 @@ class LicenseConfigTest {
               name: 正式证
               requires: [basic, ghost]
               exam: dispatch
+              training-runs: 3
               exam-stops: 5
               min-points: 80
               allow-overrun: true
@@ -69,6 +79,18 @@ class LicenseConfigTest {
     assertTrue(pro.allowOverrun());
     assertFalse(pro.allowEmergency());
     assertEquals(2, config.levelOf("pro"));
+    assertEquals(3, pro.trainingRuns());
+    assertEquals(0, config.find("basic").orElseThrow().trainingRuns());
+    TrainingConfig training = config.training();
+    assertFalse(training.drill());
+    assertEquals(60, training.drillMaxDelaySeconds());
+    assertEquals(60, training.maxDelaySeconds(), "撤演练的阈值不低于不安排演练的阈值");
+    assertEquals(300, training.handbackDelaySeconds());
+    assertEquals(List.of("PRAC-1"), training.routes());
+    assertTrue(training.allowsRoute("prac-1"));
+    assertFalse(training.allowsRoute("MT-3"));
+    assertFalse(training.allowsRoute(null));
+    assertTrue(TrainingConfig.defaults().allowsRoute("MT-3"), "没配练习线路时用正式车次");
     assertTrue(warnings.stream().anyMatch(w -> w.contains("broken")));
     assertTrue(warnings.stream().anyMatch(w -> w.contains("ghost")));
   }
