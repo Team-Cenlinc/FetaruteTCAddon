@@ -49,6 +49,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlDiagnostics;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
@@ -878,7 +879,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     DriveDoors.Result result =
         doors
             .computeIfAbsent(session.playerId(), id -> new DriveDoors())
-            .toggle(group.get(), session, left, settings);
+            .toggle(group.get(), session, left, settings, stationDoorCars(session));
     traceSession(
         session,
         (left ? "左" : "右")
@@ -3020,6 +3021,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         .flatMap(directory -> directory.snapshot().stationOfNode(node.value()))
         .map(StationDirectory.StationEntry::name)
         .orElse(node.value());
+  }
+
+  /** 停站时开门的车厢（停车位置标写了 {@code door:} 时只是其中几节）；不在停站时全车。 */
+  private static DoorCars stationDoorCars(DriveSession session) {
+    DriverLink link = session.driverLink();
+    if (link == null) {
+      return DoorCars.ALL;
+    }
+    return link.stationStop().map(DriverStationStop::doorCars).orElse(DoorCars.ALL);
   }
 
   /** 调度列车上，车门只在停站的开门、停站阶段才能打开（站台放行车门）。 */
