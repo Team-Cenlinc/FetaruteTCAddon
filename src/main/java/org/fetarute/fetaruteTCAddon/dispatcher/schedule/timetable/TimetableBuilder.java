@@ -104,12 +104,26 @@ public final class TimetableBuilder {
   /** 目标间隔排不开时能不能放宽：快车错峰的候选只在目标间隔下比，排不开（多停也不行）的直接淘汰。 */
   private final boolean relaxAllowed;
 
+  /** 进度：错峰候选与发起的编表器共用一份，完整构建次数一起数。 */
+  private final TimetableBuildProgress progress;
+
   public TimetableBuilder() {
-    this(new TimetableTimingCalculator());
+    this(TimetableBuildProgress.untracked());
+  }
+
+  public TimetableBuilder(TimetableBuildProgress progress) {
+    this(new TimetableTimingCalculator(), Map.of(), true, progress);
   }
 
   public TimetableBuilder(TimetableTimingCalculator timingCalculator) {
     this(timingCalculator, Map.of(), true);
+  }
+
+  TimetableBuilder(
+      TimetableTimingCalculator timingCalculator,
+      Map<String, Integer> groupShift,
+      boolean relaxAllowed) {
+    this(timingCalculator, groupShift, relaxAllowed, TimetableBuildProgress.untracked());
   }
 
   /**
@@ -117,14 +131,17 @@ public final class TimetableBuilder {
    *
    * @param groupShift 交路组 → 相位额外平移的秒数
    * @param relaxAllowed 目标间隔排不开时能不能放宽；候选不能
+   * @param progress 进度
    */
   TimetableBuilder(
       TimetableTimingCalculator timingCalculator,
       Map<String, Integer> groupShift,
-      boolean relaxAllowed) {
+      boolean relaxAllowed,
+      TimetableBuildProgress progress) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
     this.groupShift = Map.copyOf(groupShift);
     this.relaxAllowed = relaxAllowed;
+    this.progress = Objects.requireNonNull(progress, "progress");
   }
 
   /**
@@ -232,6 +249,7 @@ public final class TimetableBuilder {
     if (known.isPresent()) {
       prepared = known.get();
     } else {
+      stage(TimetableBuildProgress.Stage.PREPARE);
       try {
         prepared = prepare(input, options, infeasible, knownIndex.orElse(null));
       } catch (BuildFailure failure) {
@@ -241,6 +259,7 @@ public final class TimetableBuilder {
     }
 
     // ---- 2–4. 按目标间隔排一次 --------------------------------------
+    stage(TimetableBuildProgress.Stage.TARGET);
     Attempt target;
     try {
       target = attempt(prepared, options, input, builtAt);
@@ -456,6 +475,8 @@ public final class TimetableBuilder {
       Set<UUID> fastRoutes,
       boolean turnbackOnly) {
     long started = System.nanoTime();
+    stage(TimetableBuildProgress.Stage.STAGGER);
+    int[] candidatesTried = {0};
     Prepared prepared = base.prepared().orElseThrow();
     TimetableBuildOptions candidateOptions = requested.withRapidStagger(false);
     Map<UUID, String> codes = routeCodes(prepared);
@@ -498,6 +519,7 @@ public final class TimetableBuilder {
             new RapidStagger.Evaluator() {
               @Override
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
+                detail("第 " + ++candidatesTried[0] + " 个候选：平移 " + shift);
                 return stagger(
                     input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.empty());
               }
@@ -505,6 +527,14 @@ public final class TimetableBuilder {
               @Override
               public Optional<RapidStagger.Candidate> dwell(
                   Map<String, Integer> shift, RapidStagger.Dwell dwell) {
+                detail(
+                    "第 "
+                        + ++candidatesTried[0]
+                        + " 个候选："
+                        + dwell.routeCode()
+                        + " 加停 "
+                        + dwell.seconds()
+                        + "s");
                 return stagger(
                     input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.of(dwell));
               }
@@ -554,7 +584,7 @@ public final class TimetableBuilder {
                 })
             .orElse(input);
     Built built =
-        new TimetableBuilder(timingCalculator, shift, false)
+        new TimetableBuilder(timingCalculator, shift, false, progress)
             .buildOnce(variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
     RapidStagger.Outcome outcome = RapidStagger.Outcome.of(built.result());
     if (built.chosen().isEmpty()
@@ -571,6 +601,19 @@ public final class TimetableBuilder {
             outcome,
             searched,
             reportedRapids(built, fastRoutes, searched)));
+  }
+
+  /** 错峰候选（不许放宽）的阶段由发起它的错峰搜索报，自己不改阶段。 */
+  private void stage(TimetableBuildProgress.Stage stage) {
+    if (relaxAllowed) {
+      progress.stage(stage);
+    }
+  }
+
+  private void detail(String text) {
+    if (relaxAllowed) {
+      progress.detail(text);
+    }
   }
 
   private static int separationOf(TimetableBuildOptions options) {
@@ -817,6 +860,7 @@ public final class TimetableBuilder {
   /** 每组每方向铺子网格、选相位、派车、串行、编号、查冲突。排不出任何班次时抛 {@link BuildFailure}。 */
   private Attempt attempt(
       Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
+    progress.fullBuild();
     UUID timetableId = prepared.timetableId();
     int horizon = options.horizonSeconds();
     int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
@@ -1262,12 +1306,14 @@ public final class TimetableBuilder {
       List<String> searchNotes,
       List<Failure> failed) {
     int targetHeadway = target.headwaySeconds();
+    stage(TimetableBuildProgress.Stage.RELAX);
     HoldSearch holds = new HoldSearch(prepared, options, input);
     // 目标间隔不多停已经试过；结构上排不开时先看喂车方向中途多停能不能错开，再往上放宽。
     for (FeederHold hold : holds.feasible(options)) {
       if (hold.isNone()) {
         continue;
       }
+      detail("目标间隔 " + targetHeadway + "s，试喂车中途多停");
       Optional<Found> found = tryAt(holds, hold, options, builtAt, failed);
       if (found.isPresent()) {
         searchNotes.add(holds.describe(hold));
@@ -1288,6 +1334,14 @@ public final class TimetableBuilder {
                 : null);
     for (OptionalInt next = candidates.next(); next.isPresent(); next = candidates.next()) {
       TimetableBuildOptions relaxed = relaxedOptions(options, target, next.getAsInt());
+      detail(
+          "试 "
+              + next.getAsInt()
+              + "s（目标 "
+              + targetHeadway
+              + "s，上限 "
+              + targetHeadway * HEADWAY_SEARCH_MAX_MULTIPLIER
+              + "s）");
       List<FeederHold> tries = structural ? holds.feasible(relaxed) : List.of(FeederHold.NONE);
       for (FeederHold hold : tries) {
         Optional<Found> found = tryAt(holds, hold, relaxed, builtAt, failed);
@@ -1369,6 +1423,7 @@ public final class TimetableBuilder {
       List<Failure> failed,
       FeederHold hold) {
     Attempt current = relaxed;
+    stage(TimetableBuildProgress.Stage.TIGHTEN);
     List<Set<String>> units = tighteningUnits(prepared, options, target, relaxed);
     for (int pass = 0; pass < TIGHTEN_PASSES; pass++) {
       boolean changed = false;
@@ -1379,6 +1434,7 @@ public final class TimetableBuilder {
           continue;
         }
         Attempt base = current;
+        String unitName = String.join("+", unit);
         IntPredicate structuralPass =
             structuralClearance(prepared, options).isPresent()
                 ? headway -> {
@@ -1390,6 +1446,7 @@ public final class TimetableBuilder {
                 : null;
         Optional<Attempt> tightened = Optional.empty();
         if (structuralPass == null || structuralPass.test(targetMin)) {
+          detail(unitName + " 试 " + targetMin + "s（目标）");
           tightened =
               tryTightening(
                   prepared,
@@ -1406,6 +1463,7 @@ public final class TimetableBuilder {
         for (OptionalInt next = candidates.next();
             tightened.isEmpty() && next.isPresent();
             next = candidates.next()) {
+          detail(unitName + " 试 " + next.getAsInt() + "s（当前 " + currentMin + "s）");
           tightened =
               tryTightening(
                   prepared,

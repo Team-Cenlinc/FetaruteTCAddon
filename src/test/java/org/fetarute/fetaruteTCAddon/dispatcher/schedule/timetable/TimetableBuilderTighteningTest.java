@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
@@ -153,8 +154,37 @@ class TimetableBuilderTighteningTest {
                 TimetableBuildResult.GroupInterval::effectiveSeconds));
   }
 
+  /** 放宽搜索与逐组收紧都要反复完整构建：进度里能看到走到了收紧、构建了不止一次。 */
+  @Test
+  void progressReportsStagesAndFullBuilds() {
+    TimetableBuildProgress progress = new TimetableBuildProgress();
+    TimetableBuildResult result = build(options(Map.of("tight", 120, "free", 600)), progress);
+
+    assertTrue(result.success(), () -> result.warnings().toString());
+    TimetableBuildProgress.Snapshot snapshot = progress.snapshot();
+    assertEquals(TimetableBuildProgress.Stage.TIGHTEN, snapshot.stage());
+    assertTrue(snapshot.fullBuilds() > 2, () -> "目标一次、放宽至少一次、收紧至少一次: " + snapshot);
+  }
+
+  /** 取消后编表在下一次完整构建前停下，不当作失败返回结果。 */
+  @Test
+  void cancelledBuildStopsWithoutResult() {
+    TimetableBuildProgress progress = new TimetableBuildProgress();
+    progress.cancel();
+
+    assertThrows(
+        TimetableBuildProgress.Cancelled.class,
+        () -> build(options(Map.of("tight", 120, "free", 600)), progress));
+    assertEquals(0, progress.snapshot().fullBuilds());
+  }
+
   private TimetableBuildResult build(TimetableBuildOptions options) {
-    return new TimetableBuilder()
+    return build(options, TimetableBuildProgress.untracked());
+  }
+
+  private TimetableBuildResult build(
+      TimetableBuildOptions options, TimetableBuildProgress progress) {
+    return new TimetableBuilder(progress)
         .build(
             new TimetableBuilder.BuildInput(
                 UUID.randomUUID(),
