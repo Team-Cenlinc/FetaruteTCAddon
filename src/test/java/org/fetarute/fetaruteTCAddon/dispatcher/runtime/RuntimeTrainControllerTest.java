@@ -69,6 +69,19 @@ class RuntimeTrainControllerTest {
   }
 
   @Test
+  void forceRelaunchIsCappedByTheConsistMaxSpeed() {
+    RuntimeTrainController controller = new RuntimeTrainController();
+    TrainProperties properties = mock(TrainProperties.class);
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    TrainConfig config = new TrainConfig(TrainType.EMU, 2.0, 1.0, java.util.OptionalDouble.of(6.0));
+
+    controller.forceRelaunch(train, properties, BlockFace.NORTH, 10.0, config);
+
+    verify(properties).setSpeedLimit(6.0 / 20.0);
+    verify(train).forceRelaunch(BlockFace.NORTH, 6.0 / 20.0, 2.0 / 400.0);
+  }
+
+  @Test
   void runtimeTrainControllerDoesNotOwnDispatcherState() {
     Set<String> dispatcherOwners =
         Set.of(

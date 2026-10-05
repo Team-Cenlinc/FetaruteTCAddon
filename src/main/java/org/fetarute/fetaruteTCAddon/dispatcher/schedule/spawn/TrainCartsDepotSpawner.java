@@ -187,7 +187,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   }
 
   /** 问车型裁决；裁决本身出错时按旧规则取编组，不因为它停发。票上指定了车型的除外：改出别的车型就对不上表了。 */
-  private ConsistArbiter.SpawnChoice chooseConsist(SpawnTicket ticket) {
+  ConsistArbiter.SpawnChoice chooseConsist(SpawnTicket ticket) {
     try {
       return consistArbiter.chooseSpawn(ticket);
     } catch (RuntimeException | LinkageError ex) {
