@@ -966,7 +966,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
         || TimetableConflictChecker.groupOf(plan.originNodeId()).contains(":D:");
   }
 
-  /** 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。 */
+  /**
+   * 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。
+   *
+   * <p>区分车型的表里同一条 CREATE 线路还有各车型的变体计划：只比不分车型的那份（允许车型里最慢的），不拿快车型的时分去判慢车型赶不赶得上。
+   */
   private static Optional<TimetableRoutePlan> positioningRoute(
       Timetable timetable, TimetableRoutePlan target) {
     String origin = TimetableConflictChecker.groupOf(target.originNodeId());
@@ -975,7 +979,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     TimetableRoutePlan best = null;
     for (TimetableRoutePlan plan : timetable.routePlans()) {
-      if (plan.kind() == RouteOperationType.CREATE
+      if (plan.consist().isEmpty()
+          && plan.kind() == RouteOperationType.CREATE
           && !plan.external()
           && origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))
           && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {

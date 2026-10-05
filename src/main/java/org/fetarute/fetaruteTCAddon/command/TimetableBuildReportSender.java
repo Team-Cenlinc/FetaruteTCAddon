@@ -76,15 +76,12 @@ final class TimetableBuildReportSender {
       return;
     }
     Timetable timetable = result.timetable().orElseThrow();
-    long operations = timetable.routePlans().stream().filter(TimetableRoutePlan::operation).count();
-    long creates =
-        timetable.routePlans().stream()
-            .filter(plan -> plan.kind() == RouteOperationType.CREATE)
-            .count();
-    long returns =
-        timetable.routePlans().stream()
-            .filter(plan -> plan.kind() == RouteOperationType.RETURN)
-            .count();
+    // 区分车型的表里同一条 route 还有各车型的变体计划，只数不分车型的那份。
+    List<TimetableRoutePlan> routes =
+        timetable.routePlans().stream().filter(plan -> plan.consist().isEmpty()).toList();
+    long operations = routes.stream().filter(TimetableRoutePlan::operation).count();
+    long creates = routes.stream().filter(plan -> plan.kind() == RouteOperationType.CREATE).count();
+    long returns = routes.stream().filter(plan -> plan.kind() == RouteOperationType.RETURN).count();
     sender.sendMessage(FtaTimetableCommand.field("班次", String.valueOf(result.tripCount())));
     sender.sendMessage(
         FtaTimetableCommand.field(
@@ -211,6 +208,13 @@ final class TimetableBuildReportSender {
                   share.achievedShare() * 100.0D,
                   share.assignedTrips()),
               color));
+    }
+
+    if (!result.consistNotes().isEmpty()) {
+      sender.sendMessage(Component.text("  车型:", NamedTextColor.GRAY));
+      for (String line : result.consistNotes()) {
+        sender.sendMessage(Component.text("    " + line, NamedTextColor.WHITE));
+      }
     }
 
     sender.sendMessage(FtaTimetableCommand.field("最长一趟车", result.longestTripSeconds() + "s"));

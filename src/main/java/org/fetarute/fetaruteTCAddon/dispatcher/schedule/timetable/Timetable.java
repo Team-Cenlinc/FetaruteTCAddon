@@ -117,7 +117,7 @@ public record Timetable(
 
   /** 本时刻表覆盖的 route 集合（含外方走行线路）。 */
   public List<UUID> routeIds() {
-    return routePlans.stream().map(TimetableRoutePlan::routeId).toList();
+    return routePlans.stream().map(TimetableRoutePlan::routeId).distinct().toList();
   }
 
   /** 受本表管辖的 route：发布后它们的 headway 票会被拦下改按表发车。外方的走行线路不在其中——那是别人线路的资源， 我只是借它出库/回库，不能把人家自己的发车也拦掉。 */
@@ -125,20 +125,45 @@ public record Timetable(
     return routePlans.stream()
         .filter(plan -> !plan.external())
         .map(TimetableRoutePlan::routeId)
+        .distinct()
         .toList();
   }
 
-  /** 按 route 查计划。 */
+  /** 按 route 查计划。区分车型的表里同一条 route 有几份（每个车型一份变体）时，返回不分车型的基础计划（允许车型里最慢的那份）。 */
   public Optional<TimetableRoutePlan> routePlan(UUID routeId) {
     if (routeId == null) {
       return Optional.empty();
     }
+    TimetableRoutePlan first = null;
     for (TimetableRoutePlan plan : routePlans) {
       if (plan.routeId().equals(routeId)) {
-        return Optional.of(plan);
+        if (plan.consist().isEmpty()) {
+          return Optional.of(plan);
+        }
+        if (first == null) {
+          first = plan;
+        }
       }
     }
-    return Optional.empty();
+    return Optional.ofNullable(first);
+  }
+
+  /**
+   * 按 route 与车型查计划：有这个车型的变体就用它，否则退回 {@link #routePlan(UUID)}。
+   *
+   * @param routeId route
+   * @param consist 车型；为空时等同 {@link #routePlan(UUID)}
+   */
+  public Optional<TimetableRoutePlan> routePlan(UUID routeId, Optional<String> consist) {
+    if (routeId != null && consist != null && consist.isPresent()) {
+      for (TimetableRoutePlan plan : routePlans) {
+        if (plan.routeId().equals(routeId)
+            && plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)) {
+          return Optional.of(plan);
+        }
+      }
+    }
+    return routePlan(routeId);
   }
 
   /** 按车次号查发车记录。 */
@@ -244,6 +269,41 @@ public record Timetable(
     LocalDate calendarDate =
         trip.departureSecondOfDay() < serviceStartSecondOfDay ? serviceDay.plusDays(1) : serviceDay;
     return trip.departureAt(calendarDate, zoneId);
+  }
+
+  /** 换一份 route 计划、发车表与交路，其余不变（车型变体折回基础 route 时用）。 */
+  public Timetable withPlansTripsAndDuties(
+      List<TimetableRoutePlan> nextPlans,
+      List<TimetableTrip> nextTrips,
+      List<VehicleDuty> nextDuties) {
+    return new Timetable(
+        id,
+        companyId,
+        operatorId,
+        lineId,
+        code,
+        name,
+        status,
+        zoneId,
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        nextPlans,
+        nextTrips,
+        nextDuties,
+        notes,
+        createdAt,
+        updatedAt);
+  }
+
+  /**
+   * 车次的车型：它所在交路的车型。不区分车型的表、或车次不挂交路时为空。
+   *
+   * @param trip 车次
+   */
+  public Optional<String> consistOf(TimetableTrip trip) {
+    return trip == null
+        ? Optional.empty()
+        : trip.dutyId().flatMap(this::duty).flatMap(VehicleDuty::consist);
   }
 
   /** 返回替换了发车表与 duty 的新实例，供加载后回填。 */

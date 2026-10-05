@@ -437,8 +437,10 @@ public final class TimetableApiImpl implements TimetableApi {
     Map<UUID, String> tripCodeById =
         t.trips().stream()
             .collect(Collectors.toMap(TimetableTrip::id, TimetableTrip::tripCode, (x, y) -> x));
+    // 区分车型的表里同一条 route 还有各车型的变体计划：对外每条 route 只给一份（不分车型的那份）。
     List<RoutePlan> plans =
         t.routePlans().stream()
+            .filter(plan -> plan.consist().isEmpty())
             .map(
                 plan ->
                     new RoutePlan(

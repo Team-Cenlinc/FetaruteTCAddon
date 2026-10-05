@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.Timetabl
  * @param phaseNotes 相位选择的说明
  * @param warnings 构建过程中的提示
  * @param rapidCatchUp 成品表上快车在共线段被慢车拖住、以及在表里让车等待的合计（{@link RapidStagger}）；报告据此提示用快车错峰重建
+ * @param consistNotes 区分车型时的报告：各车型车长、各车型时分、车型配比、按车型的交路与峰值；不区分车型时为空
  */
 public record TimetableBuildResult(
     Optional<Timetable> timetable,
@@ -76,7 +77,74 @@ public record TimetableBuildResult(
     List<String> resourcePhaseNotes,
     List<PhasePlanner.Residue> residues,
     List<String> warnings,
-    CatchUp rapidCatchUp) {
+    CatchUp rapidCatchUp,
+    List<String> consistNotes) {
+
+  /** 不区分车型的结果。 */
+  public TimetableBuildResult(
+      Optional<Timetable> timetable,
+      List<WeightedTripAllocator.ShareReport> shares,
+      List<InfeasibleRoute> infeasibleRoutes,
+      List<DroppedTrip> droppedTrips,
+      int dutyCount,
+      int plannedVehicles,
+      int peakConcurrentVehicles,
+      int maxTripsInAnyDuty,
+      int maxDutyDurationSeconds,
+      boolean allDutiesReturnToStorage,
+      int longestTripSeconds,
+      int targetHeadwaySeconds,
+      int effectiveHeadwaySeconds,
+      List<TimetableConflictChecker.Conflict> conflictsAtTarget,
+      List<NeighborSummary> neighbors,
+      List<TimetableBaseline> baselines,
+      List<TripShift> shifts,
+      List<ResourceRepair.Yield> yields,
+      List<TerminalSerializer.TerminalReport> terminals,
+      List<TerminalSerializer.ThroatReport> throats,
+      List<GroupInterval> groupIntervals,
+      List<PhasePlanner.Interleave> interleaves,
+      List<DutyShape> dutyShapes,
+      List<String> phaseNotes,
+      List<ConflictAbsorption.Residual> absorbable,
+      List<ConflictAbsorption.Residual> unabsorbable,
+      List<String> resourcePhaseNotes,
+      List<PhasePlanner.Residue> residues,
+      List<String> warnings,
+      CatchUp rapidCatchUp) {
+    this(
+        timetable,
+        shares,
+        infeasibleRoutes,
+        droppedTrips,
+        dutyCount,
+        plannedVehicles,
+        peakConcurrentVehicles,
+        maxTripsInAnyDuty,
+        maxDutyDurationSeconds,
+        allDutiesReturnToStorage,
+        longestTripSeconds,
+        targetHeadwaySeconds,
+        effectiveHeadwaySeconds,
+        conflictsAtTarget,
+        neighbors,
+        baselines,
+        shifts,
+        yields,
+        terminals,
+        throats,
+        groupIntervals,
+        interleaves,
+        dutyShapes,
+        phaseNotes,
+        absorbable,
+        unabsorbable,
+        resourcePhaseNotes,
+        residues,
+        warnings,
+        rapidCatchUp,
+        List.of());
+  }
 
   /** 报告里最多展开多少条冲突明细。 */
   public static final int CONFLICT_DETAIL_LIMIT = 8;
@@ -102,6 +170,7 @@ public record TimetableBuildResult(
     phaseNotes = phaseNotes == null ? List.of() : List.copyOf(phaseNotes);
     warnings = warnings == null ? List.of() : List.copyOf(warnings);
     rapidCatchUp = rapidCatchUp == null ? CatchUp.NONE : rapidCatchUp;
+    consistNotes = consistNotes == null ? List.of() : List.copyOf(consistNotes);
   }
 
   /**
@@ -125,17 +194,31 @@ public record TimetableBuildResult(
   public TimetableBuildResult withPhaseNote(String note) {
     List<String> notes = new ArrayList<>(phaseNotes);
     notes.add(note);
-    return copy(List.copyOf(notes), rapidCatchUp);
+    return copy(timetable, List.copyOf(notes), rapidCatchUp, consistNotes);
   }
 
   /** 同一份结果，换上成品表的快车被卡合计。 */
   public TimetableBuildResult withRapidCatchUp(CatchUp catchUp) {
-    return copy(phaseNotes, catchUp);
+    return copy(timetable, phaseNotes, catchUp, consistNotes);
   }
 
-  private TimetableBuildResult copy(List<String> nextPhaseNotes, CatchUp nextCatchUp) {
+  /** 同一份结果，换一张表（车型变体折回基础 route 时用）。 */
+  public TimetableBuildResult withTimetable(Optional<Timetable> nextTimetable) {
+    return copy(nextTimetable, phaseNotes, rapidCatchUp, consistNotes);
+  }
+
+  /** 同一份结果，换上车型报告。 */
+  public TimetableBuildResult withConsistNotes(List<String> notes) {
+    return copy(timetable, phaseNotes, rapidCatchUp, notes);
+  }
+
+  private TimetableBuildResult copy(
+      Optional<Timetable> nextTimetable,
+      List<String> nextPhaseNotes,
+      CatchUp nextCatchUp,
+      List<String> nextConsistNotes) {
     return new TimetableBuildResult(
-        timetable,
+        nextTimetable,
         shares,
         infeasibleRoutes,
         droppedTrips,
@@ -164,7 +247,8 @@ public record TimetableBuildResult(
         resourcePhaseNotes,
         residues,
         warnings,
-        nextCatchUp);
+        nextCatchUp,
+        nextConsistNotes);
   }
 
   /** 目标 headway 下与邻表撞上的冲突。 */

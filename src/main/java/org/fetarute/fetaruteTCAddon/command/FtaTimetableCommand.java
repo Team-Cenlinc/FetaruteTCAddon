@@ -28,6 +28,10 @@ import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfiles;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ResolvedConsistPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunCurveModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.SpeedCurve;
@@ -39,6 +43,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ConsistFleet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ServiceGroupClassifier;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
@@ -537,16 +542,17 @@ public final class FtaTimetableCommand {
       setMembers.add(
           new TimetableSetBuilder.Member(
               new TimetableBuilder.BuildInput(
-                  member.timetableId(),
-                  member.line().company().id(),
-                  member.line().operator().id(),
-                  member.line().line().id(),
-                  code,
-                  timetableName,
-                  member.inputs(),
-                  graphSnapshot,
-                  model,
-                  Optional.empty()),
+                      member.timetableId(),
+                      member.line().company().id(),
+                      member.line().operator().id(),
+                      member.line().line().id(),
+                      code,
+                      timetableName,
+                      member.inputs(),
+                      graphSnapshot,
+                      model,
+                      Optional.empty())
+                  .withFleet(fleetOf(member.consistPlans(), graph.worldId())),
               member.line().line().code(),
               display,
               member.ownRouteIds()));
@@ -642,7 +648,20 @@ public final class FtaTimetableCommand {
       List<TimetableBuilder.RouteInput> inputs,
       java.util.Set<UUID> ownRouteIds,
       WorldGraph graph,
-      UUID timetableId) {}
+      UUID timetableId,
+      ConsistPlans consistPlans) {}
+
+  /**
+   * 一条线各 route 绑定的编组方案。
+   *
+   * @param byRoute route → 解析好的方案
+   * @param routeCodes route → 代码（报告用）
+   * @param issues 绑定了却查不到的方案等提示：这些 route 按没绑方案编表，与运行时一致
+   */
+  private record ConsistPlans(
+      Map<UUID, ResolvedConsistPlan> byRoute, Map<UUID, String> routeCodes, List<String> issues) {
+    static final ConsistPlans NONE = new ConsistPlans(Map.of(), Map.of(), List.of());
+  }
 
   /** 收集一条线参与 build 的 route；没有可编表的班次或缺定义时提示并返回 null。 */
   private LineRoutes collectRouteInputs(
@@ -734,7 +753,134 @@ public final class FtaTimetableCommand {
       return null;
     }
     return new LineRoutes(
-        resolved, routeInputs, own, graph, existingId.orElseGet(UUID::randomUUID));
+        resolved,
+        routeInputs,
+        own,
+        graph,
+        existingId.orElseGet(UUID::randomUUID),
+        consistPlansOf(provider, routes));
+  }
+
+  /**
+   * 各 route 绑定的编组方案（在 route 所属运营商下查）。没绑或编组方案服务未就绪的 route 不在其中；绑了却查不到方案的 route
+   * 也不在其中（运行时同样按没绑方案出车），只记一条提示。
+   *
+   * <p>方案与车型档案取编组方案服务的快照（主线程解析好的），构建线程只读它。
+   */
+  private ConsistPlans consistPlansOf(StorageProvider provider, List<Route> routes) {
+    Optional<ConsistPlanService> service = plugin.getConsistPlanService();
+    if (service.isEmpty()) {
+      return ConsistPlans.NONE;
+    }
+    Map<UUID, ResolvedConsistPlan> out = new java.util.LinkedHashMap<>();
+    Map<UUID, String> codes = new java.util.LinkedHashMap<>();
+    List<String> issues = new ArrayList<>();
+    Map<UUID, Optional<UUID>> operatorByLine = new java.util.HashMap<>();
+    for (Route route : routes) {
+      Optional<String> name = ConsistPlanService.planNameOf(route.metadata());
+      if (name.isEmpty()) {
+        continue;
+      }
+      Optional<ResolvedConsistPlan> plan =
+          operatorByLine
+              .computeIfAbsent(
+                  route.lineId(),
+                  lineId -> provider.lines().findById(lineId).map(line -> line.operatorId()))
+              .flatMap(operatorId -> service.get().plan(operatorId, name.get()));
+      if (plan.isEmpty()) {
+        issues.add(
+            "route " + route.code() + " 绑定的编组方案 " + name.get() + " 不存在，按没绑方案编表（运行时同样按车库牌子出车）");
+        continue;
+      }
+      out.put(route.id(), plan.get());
+      codes.put(route.id(), route.code());
+    }
+    return new ConsistPlans(out, codes, issues);
+  }
+
+  /**
+   * 编表用的车型：各方案里档案可用的车型各配一个走行模型（加减速取车型档案，限速再按车型最高速度封顶），以及各 route 的配比。 一条线都没绑方案时为空，编表与从前相同。
+   *
+   * <p>档案读不到的车型不参与编表，记一条提示；方案里一个可用车型都没有的 route 不能编表（运行时同样出不了车）。
+   */
+  private ConsistFleet fleetOf(ConsistPlans plans, UUID worldId) {
+    if (plans.byRoute().isEmpty()) {
+      return plans.issues().isEmpty()
+          ? ConsistFleet.none()
+          : new ConsistFleet(Map.of(), Map.of(), java.util.Set.of(), Map.of(), plans.issues());
+    }
+    RunCurveModel.Settings base =
+        runCurveSettings(
+            plugin.getConfigManager() == null ? null : plugin.getConfigManager().current());
+    RunCurveModel.EdgeSpeedResolver edges =
+        TimetableEdgeSpeeds.resolver(
+            worldId == null ? Map.of() : plugin.getRailGraphService().edgeOverrides(worldId));
+    Map<String, ConsistFleet.Consist> consists = new java.util.TreeMap<>();
+    Map<UUID, List<ConsistFleet.Share>> shares = new java.util.LinkedHashMap<>();
+    Map<UUID, String> blocked = new java.util.LinkedHashMap<>();
+    List<String> issues = new ArrayList<>(plans.issues());
+    plans
+        .byRoute()
+        .forEach(
+            (routeId, plan) -> {
+              String routeCode = plans.routeCodes().getOrDefault(routeId, routeId.toString());
+              List<ConsistFleet.Share> routeShares = new ArrayList<>();
+              for (ResolvedConsistPlan.Member member : plan.members()) {
+                if (member.profile().isEmpty()) {
+                  issues.add(
+                      "route "
+                          + routeCode
+                          + " 的编组方案 "
+                          + plan.plan().name()
+                          + "：车型 "
+                          + member.entry().pattern()
+                          + " 读不到档案"
+                          + describeIssues(member.resolution().issues())
+                          + "，不参与编表");
+                  continue;
+                }
+                ConsistProfile profile = member.profile().get();
+                consists.computeIfAbsent(
+                    member.key(),
+                    key ->
+                        new ConsistFleet.Consist(
+                            key,
+                            profile.pattern(),
+                            new RunCurveModel(
+                                base.withMotion(
+                                    new SpeedCurve(profile.accelBps2(), profile.decelBps2())),
+                                capped(edges, profile.maxSpeedBps())),
+                            profile.lengthBlocks(),
+                            profile.spawnLimit()));
+                routeShares.add(new ConsistFleet.Share(member.key(), member.weight()));
+              }
+              if (routeShares.isEmpty()) {
+                blocked.put(routeId, "编组方案 " + plan.plan().name() + " 里没有读得到档案的车型");
+              } else {
+                shares.put(routeId, routeShares);
+              }
+            });
+    return new ConsistFleet(consists, shares, java.util.Set.of(), blocked, issues);
+  }
+
+  private static String describeIssues(List<ConsistProfiles.Issue> issues) {
+    List<String> parts = new ArrayList<>();
+    for (ConsistProfiles.Issue issue : issues) {
+      if (issue.blocking()) {
+        parts.add(issue.kind().name() + (issue.detail().isBlank() ? "" : " " + issue.detail()));
+      }
+    }
+    return parts.isEmpty() ? "" : "（" + String.join("；", parts) + "）";
+  }
+
+  /** 边限速按车型最高速度封顶；车型不限速时原样返回。 */
+  private static RunCurveModel.EdgeSpeedResolver capped(
+      RunCurveModel.EdgeSpeedResolver edges, java.util.OptionalDouble maxSpeedBps) {
+    if (maxSpeedBps.isEmpty()) {
+      return edges;
+    }
+    double max = maxSpeedBps.getAsDouble();
+    return (graph, edge, fallback) -> Math.min(edges.resolve(graph, edge, fallback), max);
   }
 
   /**
@@ -1229,6 +1375,10 @@ public final class FtaTimetableCommand {
       Timetable timetable, String displayCode) {
     List<TimetableNeighborhoodLoader.RouteCandidate> out = new ArrayList<>();
     for (TimetableRoutePlan plan : timetable.routePlans()) {
+      if (plan.consist().isPresent()) {
+        // 车型变体与基础 route 是同一条 route。
+        continue;
+      }
       out.add(
           new TimetableNeighborhoodLoader.RouteCandidate(
               plan.routeId(), plan.routeCode(), displayCode));
@@ -1542,7 +1692,7 @@ public final class FtaTimetableCommand {
                   + "  班次="
                   + timetable.trips().size()
                   + "  route="
-                  + timetable.routePlans().size()
+                  + timetable.routeIds().size()
                   + "  交路="
                   + timetable.duties().size(),
               color));
@@ -1580,13 +1730,30 @@ public final class FtaTimetableCommand {
                 ? "无"
                 : baselines.size() + " 份（用 /fta timetable neighbors 查看是否仍一致）"));
     sender.sendMessage(Component.text("  各 route 计划:", NamedTextColor.GRAY));
+    // 区分车型时同一条 route 有基础计划与各车型的变体：基础计划数全部班次，变体只数这个车型跑的班次。
+    Map<UUID, String> consistByDuty = new java.util.HashMap<>();
+    for (VehicleDuty duty : timetable.duties()) {
+      duty.consist().ifPresent(key -> consistByDuty.put(duty.id(), key));
+    }
+    Map<UUID, Integer> tripsByRoute = new java.util.HashMap<>();
+    Map<String, Integer> tripsByRouteConsist = new java.util.HashMap<>();
+    for (TimetableTrip trip : timetable.trips()) {
+      tripsByRoute.merge(trip.routeId(), 1, Integer::sum);
+      trip.dutyId()
+          .map(consistByDuty::get)
+          .ifPresent(key -> tripsByRouteConsist.merge(trip.routeId() + "|" + key, 1, Integer::sum));
+    }
     for (TimetableRoutePlan plan : timetable.routePlans()) {
+      Optional<String> consist = plan.consist().map(TimetableRoutePlan.ConsistVariant::key);
       long tripCount =
-          timetable.trips().stream().filter(trip -> trip.routeId().equals(plan.routeId())).count();
+          consist
+              .map(key -> tripsByRouteConsist.getOrDefault(plan.routeId() + "|" + key, 0))
+              .orElseGet(() -> tripsByRoute.getOrDefault(plan.routeId(), 0));
       sender.sendMessage(
           Component.text(
               "    "
                   + plan.routeCode()
+                  + consist.map(key -> " <" + key + ">").orElse("")
                   + (plan.operation() ? "  w=" + plan.weight() : "  [" + plan.kind().name() + "]")
                   + "  停靠="
                   + plan.stops().size()
@@ -1688,7 +1855,8 @@ public final class FtaTimetableCommand {
                   + "  在线="
                   + duty.plannedDurationSeconds()
                   + "s  收尾="
-                  + duty.closeReason().name(),
+                  + duty.closeReason().name()
+                  + duty.consist().map(consist -> "  车型=" + consist).orElse(""),
               NamedTextColor.WHITE));
       String createLeg =
           duty.createRouteId()
