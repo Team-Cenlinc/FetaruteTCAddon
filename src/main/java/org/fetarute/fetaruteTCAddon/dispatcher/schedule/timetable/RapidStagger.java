@@ -688,7 +688,7 @@ final class RapidStagger {
    */
   private static final class Picks {
     private final Candidate base;
-    private Candidate searchBest;
+    private boolean clear;
     private Candidate chosen;
 
     Picks(Candidate base) {
@@ -696,9 +696,8 @@ final class RapidStagger {
     }
 
     void offer(Candidate candidate) {
-      if (candidate.betterThan(base)
-          && (searchBest == null || ORDER.compare(candidate, searchBest) < 0)) {
-        searchBest = candidate;
+      if (candidate.betterThan(base) && candidate.measure().seconds() == 0L) {
+        clear = true;
       }
       Candidate reported = candidate.asReported();
       if (reported.betterThan(base.asReported())
@@ -707,9 +706,14 @@ final class RapidStagger {
       }
     }
 
-    /** 按搜索口径已经选到一个快车完全不被卡的：再找只可能在次要指标上略好。 */
+    /**
+     * 按搜索口径已经有一个比原表好、快车完全不被卡的候选：再找只可能在次要指标上略好。
+     *
+     * <p>看的是"有没有"，不是 {@link #ORDER} 最前的那个：最前的按全网损失排，可能是快车仍被卡、但表里等待更少的一个，
+     * 拿它判就会在已经错开之后把余下的位置全编一遍（每个都是整张表重排）。
+     */
     boolean settled() {
-      return searchBest != null && searchBest.measure().seconds() == 0L;
+      return clear;
     }
 
     Search finish(int tried) {
@@ -729,7 +733,7 @@ final class RapidStagger {
    *   <li>平移没能完全错开时，在前 {@value #DWELL_SHORTLIST} 个最好的平移与原表上给仍被拖住的快车加停。
    * </ol>
    *
-   * <p>按搜索口径已经选到快车完全不被卡的候选（{@link Picks#settled}）就不再往下一步；最终答案在编过的候选里按报告口径挑。
+   * <p>按搜索口径已经有一个比原表好、快车完全不被卡的候选（{@link Picks#settled}）就不再往下一步；最终答案在编过的候选里按报告口径挑。
    *
    * @param periods 快车组 → 平移的相对周期
    * @param base 原表

@@ -441,6 +441,36 @@ class RapidStaggerTest {
     assertEquals(2, search.tried());
   }
 
+  /**
+   * 加长折返里已经有一档快车完全不被卡（150 秒）、却不是全网损失最小的那档（更长的几档快车仍被卡 30 秒、但表里不等）：
+   * 搜索照样在这一步收工，不再去扫平移——收不收工看的是"有没有错开的"，不是排第一的那个。
+   */
+  @Test
+  void theSearchStopsOnceAnyBetterCandidateIsClearEvenIfAnotherRanksFirst() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> 500L)
+            .detailing(
+                (shift, dwell) ->
+                    dwell.seconds() == 120
+                        ? new long[] {80L, 0L, 0L}
+                        : dwell.seconds() == 150
+                            ? new long[] {0L, 0L, 90L}
+                            : new long[] {30L, 0L, 0L});
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(turnbackPoint(120)),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator);
+
+    assertTrue(evaluator.history.isEmpty(), "已经有错开的，不再平移");
+    assertEquals(RapidStagger.TURNBACK_MARGINS.size(), search.tried());
+    assertTrue(search.improved().isPresent());
+  }
+
   /** 加长折返错不开时照常往下：平移、中途加停接着试，几样里取最好的。 */
   @Test
   void aTurnbackThatIsNotEnoughFallsThroughToShifting() {
