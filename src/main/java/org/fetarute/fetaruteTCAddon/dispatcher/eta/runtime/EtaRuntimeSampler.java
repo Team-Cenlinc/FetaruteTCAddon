@@ -11,6 +11,7 @@ import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.function.Function;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
@@ -175,7 +176,9 @@ public final class EtaRuntimeSampler {
             timeline,
             sampleLineTag(group),
             sampleLoad(group),
-            sampleMotion(group)));
+            sampleMotion(group),
+            TrainTagHelper.readTagValue(group.getProperties(), ConsistKey.TRAIN_TAG)
+                .flatMap(ConsistKey::of)));
   }
 
   /** 车上的车种、加减速与最高速度标签；只读标签，按配置补齐留给估算时做（配置可能已重载）。 */

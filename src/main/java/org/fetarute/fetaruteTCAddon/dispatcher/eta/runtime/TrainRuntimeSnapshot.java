@@ -37,6 +37,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * <p>{@code load} 是采样时各节车的座位与在座乘客（{@link TrainLoad}），同样只能在主线程读、随快照带出；读不到车辆模型时为空。
  *
  * <p>{@code motion} 是采样时车上的车种与加减速标签（{@link Motion}）。走行估算按它取本车的加减速，与控车同一个车种；没有标签时按默认车种。
+ *
+ * <p>{@code consist} 是采样时车上的车型键（出车写的 {@code FTA_SPAWN_PATTERN}，归一后）；没有这个标签时为空。
  */
 public record TrainRuntimeSnapshot(
     long updatedTick,
@@ -57,7 +59,8 @@ public record TrainRuntimeSnapshot(
     HoldTimeline holdTimeline,
     Optional<RouteLineChanges.LineRef> lineTag,
     Optional<TrainLoad> load,
-    Motion motion) {
+    Motion motion,
+    Optional<String> consist) {
 
   /**
    * 车上的车种与加减速标签，与 {@link TrainConfigResolver#resolve} 读的是同一组。
@@ -140,6 +143,51 @@ public record TrainRuntimeSnapshot(
     lineTag = lineTag == null ? Optional.empty() : lineTag;
     load = load == null ? Optional.empty() : load;
     motion = motion == null ? Motion.NONE : motion;
+    consist = consist == null ? Optional.empty() : consist;
+  }
+
+  /** 兼容调用：不带车型。 */
+  public TrainRuntimeSnapshot(
+      long updatedTick,
+      Instant updatedAt,
+      UUID worldId,
+      UUID routeUuid,
+      RouteId routeId,
+      int routeIndex,
+      Optional<NodeId> currentNodeId,
+      Optional<NodeId> lastPassedNodeId,
+      Optional<Integer> dwellRemainingSec,
+      Optional<SignalAspect> signalAspect,
+      Optional<String> ticketId,
+      OptionalDouble currentSpeedBps,
+      OptionalInt distanceToNextBlocks,
+      OptionalInt edgeLengthBlocks,
+      OptionalDouble traveledSinceLastPassedBlocks,
+      HoldTimeline holdTimeline,
+      Optional<RouteLineChanges.LineRef> lineTag,
+      Optional<TrainLoad> load,
+      Motion motion) {
+    this(
+        updatedTick,
+        updatedAt,
+        worldId,
+        routeUuid,
+        routeId,
+        routeIndex,
+        currentNodeId,
+        lastPassedNodeId,
+        dwellRemainingSec,
+        signalAspect,
+        ticketId,
+        currentSpeedBps,
+        distanceToNextBlocks,
+        edgeLengthBlocks,
+        traveledSinceLastPassedBlocks,
+        holdTimeline,
+        lineTag,
+        load,
+        motion,
+        Optional.empty());
   }
 
   /** 兼容调用：不带车种标签。 */
