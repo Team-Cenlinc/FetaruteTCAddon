@@ -6313,19 +6313,25 @@ public final class FtaGraphCommand {
             0,
             tickBudgetMs,
             done -> {
+              // 收尾的合并与资源核算交给后台线程时，由收尾回到主线程后再解锁本世界的建图任务。
+              boolean handedOff = false;
               try {
-                finishExtend(
-                    sender,
-                    world,
-                    base,
-                    planned.newNodes(),
-                    done,
-                    lookup,
-                    access,
-                    startNanos,
-                    locale);
+                handedOff =
+                    finishExtend(
+                        sender,
+                        world,
+                        base,
+                        planned.newNodes(),
+                        done,
+                        lookup,
+                        access,
+                        startNanos,
+                        locale,
+                        () -> jobs.remove(worldId));
               } finally {
-                jobs.remove(worldId);
+                if (!handedOff) {
+                  jobs.remove(worldId);
+                }
               }
             },
             exploreFailed(sender, worldId, locale));
@@ -6340,7 +6346,14 @@ public final class FtaGraphCommand {
             Map.of("nodes", String.valueOf(planned.newNodes().size()))));
   }
 
-  private void finishExtend(
+  /**
+   * 增补收尾（主线程）：核验新区间（要读世界里的道岔），再把合并、受影响资源与运维限速的核算交给后台线程——它们只读不可变的图，大网上要算全网足迹；
+   * 算完回到主线程核验占用、写库、激活（{@link #completeExtend}）。
+   *
+   * @param release 收尾结束时解锁本世界的建图任务
+   * @return 是否已交给后台线程（此时由后续步骤调用 {@code release}）
+   */
+  private boolean finishExtend(
       CommandSender sender,
       World world,
       RailGraph base,
@@ -6349,13 +6362,14 @@ public final class FtaGraphCommand {
       RailGraphExtension.AnchorLookup lookup,
       TrainCartsRailBlockAccess access,
       long startNanos,
-      LocaleManager locale) {
+      LocaleManager locale,
+      Runnable release) {
     UUID worldId = world.getUID();
     RailGraphService service = plugin.getRailGraphService();
     if (service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph).orElse(null)
         != base) {
       sendExtendRefusal(sender, locale, "增补期间调度图被更新过；请重试");
-      return;
+      return false;
     }
     Map<NodeId, RailNode> nodesById = new HashMap<>();
     base.nodes().forEach(node -> nodesById.put(node.id(), node));
@@ -6379,30 +6393,109 @@ public final class FtaGraphCommand {
             nodesById);
     if (verified.refusal().isPresent()) {
       sendExtendRefusal(sender, locale, verified.refusal().get());
+      return false;
+    }
+    Set<String> cautionKeys = Set.copyOf(service.componentCautions(worldId).keySet());
+    var scheduler = plugin.getServer().getScheduler();
+    scheduler.runTaskAsynchronously(
+        plugin,
+        () -> {
+          ExtendPlan plan;
+          try {
+            plan = ExtendPlan.compute(worldId, base, newRailNodes, verified, cautionKeys);
+          } catch (RuntimeException ex) {
+            plugin.getLogger().warning("调度图增补收尾失败: " + ex);
+            scheduler.runTask(
+                plugin,
+                () -> {
+                  try {
+                    sendExtendRefusal(sender, locale, "增补收尾出错：" + ex.getMessage());
+                  } finally {
+                    release.run();
+                  }
+                });
+            return;
+          }
+          scheduler.runTask(
+              plugin,
+              () -> {
+                try {
+                  completeExtend(sender, world, base, plan, explorer, startNanos, locale);
+                } finally {
+                  release.run();
+                }
+              });
+        });
+    return true;
+  }
+
+  /**
+   * 增补的纯计算部分（后台线程）：只读不可变的旧图与新区间。
+   *
+   * @param appended 合并后的新图
+   * @param changed 键会变的旧占用资源
+   * @param lostCautions 会因分量键变化而失效的运维限速所在分量
+   * @param finalNodes 新图的全部节点记录（写库与核对用）
+   */
+  private record ExtendPlan(
+      RailGraph appended,
+      int addedNodes,
+      int addedEdges,
+      Set<OccupancyResource> changed,
+      Set<String> lostCautions,
+      List<RailNodeRecord> finalNodes) {
+
+    static ExtendPlan compute(
+        UUID worldId,
+        RailGraph base,
+        List<RailNode> newRailNodes,
+        RailGraphExtension.Verified verified,
+        Set<String> cautionKeys) {
+      RailGraph appended =
+          RailGraphMerger.append(base, newRailNodes, verified.edges(), verified.footprints());
+      List<NodeId> newIds = newRailNodes.stream().map(RailNode::id).toList();
+      return new ExtendPlan(
+          appended,
+          newRailNodes.size(),
+          verified.edges().size(),
+          RailGraphExtension.changedResources(base, appended, newIds),
+          RailGraphExtension.componentKeysLosingCautions(base, appended, newIds, cautionKeys),
+          nodeRecordsFromGraph(worldId, appended));
+    }
+  }
+
+  /** 增补收尾的后半（主线程）：核验期间图与牌子没变、受影响资源空闲，然后写库、激活。 */
+  private void completeExtend(
+      CommandSender sender,
+      World world,
+      RailGraph base,
+      ExtendPlan plan,
+      NodeToNodeEdgeExplorer explorer,
+      long startNanos,
+      LocaleManager locale) {
+    UUID worldId = world.getUID();
+    RailGraphService service = plugin.getRailGraphService();
+    if (service.getSnapshot(world).map(RailGraphService.RailGraphSnapshot::graph).orElse(null)
+        != base) {
+      sendExtendRefusal(sender, locale, "增补期间调度图被更新过；请重试");
       return;
     }
-    RailGraph appended =
-        RailGraphMerger.append(base, newRailNodes, verified.edges(), verified.footprints());
-
-    List<NodeId> newIds = newRailNodes.stream().map(RailNode::id).toList();
-    Set<OccupancyResource> changed = RailGraphExtension.changedResources(base, appended, newIds);
-    Optional<String> busy = findHeldResource(changed);
+    Optional<String> busy = findHeldResource(plan.changed());
     if (busy.isPresent()) {
       sendExtendRefusal(sender, locale, busy.get());
       return;
     }
-    Set<String> lostCautions =
-        RailGraphExtension.componentKeysLosingCautions(
-            base, appended, newIds, service.componentCautions(worldId).keySet());
-    if (!lostCautions.isEmpty()) {
+    if (!plan.lostCautions().isEmpty()) {
       sendExtendRefusal(
           sender,
           locale,
-          "连通分量 " + String.join("、", lostCautions) + " 上的运维限速会因分量键变化而失效；请先清除这些限速或用 build 重建");
+          "连通分量 "
+              + String.join("、", plan.lostCautions())
+              + " 上的运维限速会因分量键变化而失效；请先清除这些限速或用 build 重建");
       return;
     }
-
-    List<RailNodeRecord> finalNodes = nodeRecordsFromGraph(worldId, appended);
+    RailGraph appended = plan.appended();
+    List<RailNodeRecord> finalNodes = plan.finalNodes();
     // 写库会按世界覆盖 rail_nodes：探索期间放下或拆掉的牌子会被抹掉。
     if (storedNodesDiffer(worldId, finalNodes)) {
       sendExtendRefusal(sender, locale, "增补期间节点牌子有增删或移动；请重试");
@@ -6435,9 +6528,9 @@ public final class FtaGraphCommand {
                 "world",
                 world.getName(),
                 "added_nodes",
-                String.valueOf(newRailNodes.size()),
+                String.valueOf(plan.addedNodes()),
                 "added_edges",
-                String.valueOf(verified.edges().size()),
+                String.valueOf(plan.addedEdges()),
                 "nodes",
                 String.valueOf(appended.nodes().size()),
                 "edges",

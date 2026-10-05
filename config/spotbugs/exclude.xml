@@ -163,6 +163,19 @@
         </Or>
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
+    <!-- 会话记住的编组句柄：编组对象由 TrainCarts 持有，只用来省掉按列车名遍历全服编组 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession"/>
+        <Or>
+            <Method name="lastGroup"/>
+            <Method name="setLastGroup"/>
+        </Or>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSession$CabSeatsMemo"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager"/>
         <Method name="controlAuthority"/>

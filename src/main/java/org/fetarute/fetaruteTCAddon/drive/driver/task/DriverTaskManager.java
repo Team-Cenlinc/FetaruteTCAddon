@@ -27,11 +27,18 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.FetaruteApi;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.StationLocation;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.TrainHold;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCircuitBreaker;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
@@ -538,9 +545,15 @@ public final class DriverTaskManager {
                 assignment.get().serviceDate())) {
       return false;
     }
-    // “没有下一站”在推算信息缺失时也会出现：再用这一站的发车记录核对它确实是本车次的终到站。
+    // “没有下一站”在推算信息缺失时也会出现：再核对这一站确实是本车次的终到站。
     int stopSequence = assignment.get().lastStopSequence().get();
     Instant now = Instant.now();
+    Optional<TimetableService> service =
+        plugin == null ? Optional.empty() : plugin.getTimetableService();
+    if (service.isPresent()) {
+      return terminatesAt(
+          service.get(), task.key(), stopSequence, assignment.get().lastStationCode().get(), now);
+    }
     return api
         .get()
         .departuresAt(
@@ -559,6 +572,50 @@ public final class DriverTaskManager {
                             departure.timetableId(),
                             departure.tripCode(),
                             departure.serviceDate()));
+  }
+
+  /**
+   * 这一站是不是这个车次的终到站：只查车次自己的交路计划，口径与站牌发车记录的“终到”相同（在这一站停车，且是最后一个停车点或写成终点），
+   * 表定时刻也在核对窗口里。不扫整个车站的发车表——核对没通过时每秒都要再查一次。
+   */
+  static boolean terminatesAt(
+      TimetableService service, TaskKey key, int stopSequence, String stationCode, Instant now) {
+    for (Timetable timetable : service.publishedTimetables()) {
+      if (!timetable.id().equals(key.timetableId())) {
+        continue;
+      }
+      Optional<TimetableTrip> trip = timetable.tripByCode(key.tripCode());
+      Optional<TimetableRoutePlan> plan = trip.flatMap(timetable::tripPlan);
+      if (plan.isEmpty()) {
+        return false;
+      }
+      List<TimetableStop> stops = plan.get().stops();
+      int lastStopping = -1;
+      for (int i = 0; i < stops.size(); i++) {
+        if (stops.get(i).stops()) {
+          lastStopping = i;
+        }
+      }
+      for (int i = 0; i < stops.size(); i++) {
+        TimetableStop stop = stops.get(i);
+        if (stop.stopSequence() != stopSequence) {
+          continue;
+        }
+        if (!stop.stops()
+            || stop.stationCode().filter(stationCode::equalsIgnoreCase).isEmpty()
+            || !(i == lastStopping || stop.passType() == RouteStopPassType.TERMINATE)) {
+          return false;
+        }
+        Instant departure =
+            trip.get()
+                .departureAt(key.serviceDate(), timetable.zoneId())
+                .plusSeconds(stop.departureOffsetSeconds());
+        return !departure.isBefore(now.minus(TERMINAL_LOOKBACK))
+            && departure.isBefore(now.plus(TERMINAL_LOOKBACK));
+      }
+      return false;
+    }
+    return false;
   }
 
   /**
@@ -634,9 +691,7 @@ public final class DriverTaskManager {
     if (!anyClaimed) {
       return;
     }
-    Optional<TimetableApi> api = timetables();
-    Collection<TimetableApi.TrainAssignment> assignments =
-        api.map(TimetableApi::listAssignments).orElse(List.of());
+    Collection<TimetableApi.TrainAssignment> assignments = claimedAssignments(timetables());
     for (DriverTask task : new ArrayList<>(byPlayer.values())) {
       if (task.state() != DriverTask.State.CLAIMED) {
         continue;
@@ -685,6 +740,41 @@ public final class DriverTaskManager {
                 task.stationName()));
       }
     }
+  }
+
+  /**
+   * 已领取任务的车次绑定。完整绑定要换算到发记录与预计晚点（含一次 ETA），先在时刻表服务的原始绑定里按车次对上，只换算对上的那几列车，不把全网列车都算一遍； 拿不到时刻表服务时退回整份列表。
+   */
+  private Collection<TimetableApi.TrainAssignment> claimedAssignments(Optional<TimetableApi> api) {
+    if (api.isEmpty()) {
+      return List.of();
+    }
+    Optional<TimetableService> service =
+        plugin == null ? Optional.empty() : plugin.getTimetableService();
+    if (service.isEmpty()) {
+      return api.get().listAssignments();
+    }
+    List<TaskKey> claimed = new ArrayList<>();
+    for (DriverTask task : byPlayer.values()) {
+      if (task.state() == DriverTask.State.CLAIMED) {
+        claimed.add(task.key());
+      }
+    }
+    List<TimetableApi.TrainAssignment> matched = new ArrayList<>();
+    for (TimetableAssignment raw : service.get().assignments()) {
+      boolean wanted = false;
+      for (TaskKey key : claimed) {
+        if (key.matches(raw.timetableId(), raw.tripCode(), raw.serviceDate())) {
+          wanted = true;
+          break;
+        }
+      }
+      if (!wanted) {
+        continue;
+      }
+      api.get().getAssignment(raw.trainName()).ifPresent(matched::add);
+    }
+    return matched;
   }
 
   /** 给玩家发提示。 */

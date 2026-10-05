@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.sync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -14,6 +15,7 @@ import java.util.UUID;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
@@ -609,6 +611,46 @@ final class RailNodeIncrementalSyncTest {
     verify(railGraphService).loadFromStorage(any(), eq(List.of(world)));
     verify(listener).onRecovered(world);
     verify(listener, never()).onStale(any(), any(), any(), any());
+  }
+
+  @Test
+  void restoredSignaturesOnRetainedWorldClearTheMarkWithoutReloading() {
+    World world = world();
+    UUID worldId = world.getUID();
+    SignNodeDefinition definition = waypoint();
+    String matching =
+        RailGraphSignature.signatureForNodes(
+            List.of(
+                new RailNodeRecord(
+                    worldId,
+                    definition.nodeId(),
+                    definition.nodeType(),
+                    1,
+                    64,
+                    2,
+                    definition.trainCartsDestination(),
+                    Optional.empty())));
+    RailGraphService service = servedService(world, definition.nodeId());
+    service.markStale(
+        world,
+        new RailGraphService.RailGraphStaleState(Instant.EPOCH, matching, "b", 1, 0, 2, true));
+    RailGraph served = service.getSnapshot(world).orElseThrow().graph();
+    long version = service.snapshotVersion();
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storageWith(worldId, definition, matching),
+            service,
+            null,
+            listener,
+            (w, def) -> Optional.empty());
+
+    sync.upsert(mockBlock(world, 1, 64, 2), definition);
+
+    assertTrue(service.getStaleState(world).isEmpty(), "撤掉失效标记");
+    assertSame(served, service.getSnapshot(world).orElseThrow().graph(), "旧图原样继续供，不从库重载");
+    assertEquals(version, service.snapshotVersion(), "缓存不作废");
+    verify(listener).onRecovered(world);
   }
 
   @Test

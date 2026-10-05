@@ -73,6 +73,8 @@ public final class StorageSchema {
     ddl.add(pidsBulletins(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
+    // 拆牌、建牌同步按坐标查删节点（主线程同步执行），不能扫整个世界。
+    ddl.add(index("rail_nodes_position", "rail_nodes", "world_id, x, y, z"));
     ddl.add(railEdges(dialect));
     ddl.add(index("rail_edges_world", "rail_edges", "world_id"));
     ddl.add(railInterlockingSnapshots(dialect));

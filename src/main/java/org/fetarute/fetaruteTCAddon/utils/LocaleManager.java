@@ -43,6 +43,10 @@ public final class LocaleManager {
   private Component prefix = Component.empty();
   private List<String> availableLocales = List.of();
 
+  /** 每次重新加载语言文件加一：缓存了渲染结果的调用方据此作废。 */
+  private final java.util.concurrent.atomic.AtomicLong generation =
+      new java.util.concurrent.atomic.AtomicLong();
+
   public LocaleManager(JavaPlugin plugin, String localeTag, LoggerManager loggerManager) {
     this(
         new LocaleAccess(plugin.getDataFolder(), loggerManager, plugin::saveResource),
@@ -53,6 +57,11 @@ public final class LocaleManager {
   LocaleManager(LocaleAccess access, String localeTag, LoggerManager logger) {
     this.access = access;
     this.currentLocale = normalizeLocale(localeTag);
+  }
+
+  /** 语言文件加载过几次；缓存渲染结果的调用方比对它来判断是否要重新渲染。 */
+  public long generation() {
+    return generation.get();
   }
 
   /** 重新加载当前语言。 */
@@ -235,6 +244,7 @@ public final class LocaleManager {
     LocaleFile localeFile = prepareLocaleFile(localeTag);
     messages = YamlConfiguration.loadConfiguration(localeFile.file());
     currentLocale = localeFile.locale();
+    generation.incrementAndGet();
     warnedMissingKeys.clear();
     prefix = parsePrefix(messages);
     refreshAvailableLocales();

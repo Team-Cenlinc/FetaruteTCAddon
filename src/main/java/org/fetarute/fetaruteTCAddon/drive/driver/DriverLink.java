@@ -356,6 +356,11 @@ public final class DriverLink {
         station ? StopAlignment.Reference.CENTER : StopAlignment.Reference.HEAD);
   }
 
+  /** 这份诊断采样还没处理过：同一份采样每 tick 都会送来，调用方可以先用它省掉停车点查询。 */
+  public boolean isNewApproachSample(Instant sampledAt) {
+    return sampledAt != null && !sampledAt.equals(approachSampledAt);
+  }
+
   /**
    * 用调度层的诊断采样更新前方停车点的估计，停车点相对停车节点另有偏移时用这个（例如停车位置标）。
    *

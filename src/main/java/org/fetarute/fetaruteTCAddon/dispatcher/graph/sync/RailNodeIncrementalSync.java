@@ -288,8 +288,12 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
       return;
     }
 
-    // 若此前处于 stale 状态，且当前签名已恢复一致，则尝试重新加载快照到内存。
+    // 若此前处于 stale 状态，且当前签名已恢复一致：还在供的旧图就是库里那份，撤标记即可；已移出的从库重新加载。
     boolean wasStale = before != GraphStaleListener.Level.NONE;
+    if (before == GraphStaleListener.Level.RETAINED && railGraphService.clearRetainedStale(world)) {
+      notifyListener(() -> staleListener.onRecovered(world));
+      return;
+    }
     if (railGraphService.getSnapshot(world).isEmpty() || wasStale) {
       railGraphService.loadFromStorage(provider, List.of(world));
       if (wasStale && railGraphService.getStaleState(world).isEmpty()) {

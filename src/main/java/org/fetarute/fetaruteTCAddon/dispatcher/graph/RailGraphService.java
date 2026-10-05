@@ -482,6 +482,21 @@ public final class RailGraphService {
     staleStates.put(worldId, state.withSnapshotRetained(false));
   }
 
+  /**
+   * 保留旧图期间节点牌子恢复原样（签名与快照重新一致）：内存里的旧图本就与库里的快照相同，只撤掉失效标记，不重载、不让各级缓存作废。
+   *
+   * @return 是否撤掉了标记；不在供保留旧图时为 false，调用方照旧从库重载
+   */
+  public boolean clearRetainedStale(World world) {
+    Objects.requireNonNull(world, "world");
+    UUID worldId = world.getUID();
+    if (!isServingRetainedStaleSnapshot(worldId)) {
+      return false;
+    }
+    staleStates.remove(worldId);
+    return true;
+  }
+
   /** 正在供保留下来的旧图，而旧图里没有这个节点（失效后新放的节点牌子）。 */
   public boolean isOutsideRetainedStaleSnapshot(UUID worldId, NodeId nodeId) {
     if (nodeId == null || !isServingRetainedStaleSnapshot(worldId)) {

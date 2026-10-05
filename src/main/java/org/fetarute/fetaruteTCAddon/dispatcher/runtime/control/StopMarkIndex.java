@@ -43,6 +43,12 @@ public final class StopMarkIndex {
   /** 结果用了这么久（毫秒）就在后台提前重走，正常运行时不会等到过期。 */
   static final long REFRESH_MILLIS = 240_000L;
 
+  /** 走完了、一块标志也没有的股道（大多数车站）：结果用这么久（毫秒）才重走。建、拆停车位置标或节点牌子会作废全部缓存，期间要防的只有改轨道。 */
+  static final long EMPTY_CACHE_MILLIS = 1_200_000L;
+
+  /** 没有标志的股道提前重走的时机（毫秒）。 */
+  static final long EMPTY_REFRESH_MILLIS = 1_140_000L;
+
   /** 沿途还有区块没加载时，结果只用这么久（毫秒）：区块加载后很快就能找全。 */
   static final long INCOMPLETE_CACHE_MILLIS = 5_000L;
 
@@ -118,10 +124,10 @@ public final class StopMarkIndex {
     if (entry != null) {
       long age = now - entry.atMillis();
       if (entry.scan().complete()) {
-        if (age >= REFRESH_MILLIS) {
+        if (age >= refreshMillis(entry.scan())) {
           enqueue(key, stationRail);
         }
-        if (age < CACHE_MILLIS) {
+        if (age < cacheMillis(entry.scan())) {
           return entry.scan().marks();
         }
       } else if (age < INCOMPLETE_CACHE_MILLIS) {
@@ -236,7 +242,17 @@ public final class StopMarkIndex {
 
   private static boolean stale(Entry entry, long now) {
     long age = now - entry.atMillis();
-    return entry.scan().complete() ? age >= REFRESH_MILLIS : age >= INCOMPLETE_CACHE_MILLIS;
+    return entry.scan().complete()
+        ? age >= refreshMillis(entry.scan())
+        : age >= INCOMPLETE_CACHE_MILLIS;
+  }
+
+  private static long refreshMillis(StopMarks.Scan scan) {
+    return scan.marks().isEmpty() ? EMPTY_REFRESH_MILLIS : REFRESH_MILLIS;
+  }
+
+  private static long cacheMillis(StopMarks.Scan scan) {
+    return scan.marks().isEmpty() ? EMPTY_CACHE_MILLIS : CACHE_MILLIS;
   }
 
   /** 推进一次；出错（TrainCarts 版本不同或轨道正在变化）时当作走完、没有标志。 */

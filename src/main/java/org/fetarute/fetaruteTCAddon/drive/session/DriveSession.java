@@ -34,6 +34,7 @@ import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
 import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
@@ -308,6 +309,42 @@ public final class DriveSession {
   /** 驾驶员在驾驶室操纵：会话驾驶中、在座，且不在折返换端途中（换端时坐在原来那一端也不算在岗）。 */
   private boolean attended() {
     return phase == Phase.ACTIVE && seated && !cabChange.holding();
+  }
+
+  /** 换端判定读到的驾驶室座位（要逐节看座位附件的名字），连同读时的编组、节数与 tick：尽头式待命可能持续几分钟，不必每 tick 重读。 */
+  public record CabSeatsMemo(MinecartGroup group, int size, long tick, CabSeats seats) {}
+
+  /** 换端判定查到的计划发车（终点待命时要查下一趟），连同查时的 tick 与是否待命；查不到时为 {@code null}。 */
+  public record PlannedDepartureMemo(long tick, boolean layover, java.time.Instant planned) {}
+
+  private CabSeatsMemo cabSeatsMemo;
+  private PlannedDepartureMemo plannedDepartureMemo;
+
+  /** 上次找到的编组：按列车名找要遍历全服编组，每 tick 都找时先看它还在不在、名字对不对。 */
+  private MinecartGroup lastGroup;
+
+  public MinecartGroup lastGroup() {
+    return lastGroup;
+  }
+
+  public void setLastGroup(MinecartGroup group) {
+    this.lastGroup = group;
+  }
+
+  public CabSeatsMemo cabSeatsMemo() {
+    return cabSeatsMemo;
+  }
+
+  public void setCabSeatsMemo(CabSeatsMemo memo) {
+    this.cabSeatsMemo = memo;
+  }
+
+  public PlannedDepartureMemo plannedDepartureMemo() {
+    return plannedDepartureMemo;
+  }
+
+  public void setPlannedDepartureMemo(PlannedDepartureMemo memo) {
+    this.plannedDepartureMemo = memo;
   }
 
   /** 折返换端的进度。 */

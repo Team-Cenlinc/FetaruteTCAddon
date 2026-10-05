@@ -2065,6 +2065,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("停车标沿轨道采样失败: " + ex);
     }
+    if (active.isEmpty() && stopping.isEmpty()) {
+      return;
+    }
     for (DriveSession session : new ArrayList<>(active.values())) {
       try {
         tickActive(session, now, current);
@@ -3587,8 +3590,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 ? predicted == CabSeats.Departure.TAIL
                 : change.stage() != CabChange.Stage.IDLE || released);
     CabSeats.End end = CabSeats.End.NONE;
+    long nowTick = Bukkit.getCurrentTick();
     if (seatMatters) {
-      CabSeats seats = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
+      CabSeats seats = cabSeatsOf(session, group, current, nowTick);
       end = seats.endOf(seat);
       end = gateUnconfirmedSeat(session, group, player, seat, seats, end, preRelease);
     } else {
@@ -3600,7 +3604,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       reserve = current.driver().cabChange().reserveSeconds(StopAlignment.bodyLengthBlocks(group));
       // 计划发车只在换端开始那一拍用到：换端进行中不再每拍查表。
       if (change.stage() != CabChange.Stage.ACTIVE) {
-        planned = plannedDepartureOf(session.playerId(), link, session.trainName(), preRelease);
+        planned = cachedPlannedDeparture(session, link, preRelease, nowTick);
       }
     }
     CabChange.Event event =
@@ -3772,6 +3776,39 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /** 计划发车时刻，见 {@link #cabDeparture}。 */
+  /** 换端判定多久重读一次驾驶室座位与计划发车（tick）：尽头式待命可能持续几分钟，每 tick 都读是白费。 */
+  private static final long CAB_CHANGE_REFRESH_TICKS = 20L;
+
+  /** 驾驶室座位：同一编组、同样节数时每秒最多重读一次（挂上或摘下车厢时马上重读）。 */
+  private static CabSeats cabSeatsOf(
+      DriveSession session, MinecartGroup group, DriveConfig current, long nowTick) {
+    DriveSession.CabSeatsMemo memo = session.cabSeatsMemo();
+    if (memo != null
+        && memo.group() == group
+        && memo.size() == group.size()
+        && nowTick - memo.tick() < CAB_CHANGE_REFRESH_TICKS) {
+      return memo.seats();
+    }
+    CabSeats seats = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
+    session.setCabSeatsMemo(new DriveSession.CabSeatsMemo(group, group.size(), nowTick, seats));
+    return seats;
+  }
+
+  /** 计划发车：每秒最多查一次（待命与否变了马上重查）。 */
+  private Instant cachedPlannedDeparture(
+      DriveSession session, DriverLink link, boolean layover, long nowTick) {
+    DriveSession.PlannedDepartureMemo memo = session.plannedDepartureMemo();
+    if (memo != null
+        && memo.layover() == layover
+        && nowTick - memo.tick() < CAB_CHANGE_REFRESH_TICKS) {
+      return memo.planned();
+    }
+    Instant planned = plannedDepartureOf(session.playerId(), link, session.trainName(), layover);
+    session.setPlannedDepartureMemo(
+        new DriveSession.PlannedDepartureMemo(nowTick, layover, planned));
+    return planned;
+  }
+
   private Instant plannedDepartureOf(
       UUID playerId, DriverLink link, String trainName, boolean layover) {
     return cabDeparture(
@@ -4299,12 +4336,26 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         return Optional.of(holder);
       }
     }
-    return SeatLocator.findGroup(session.trainName());
+    // 自由驾驶与制动停车的会话没有调度句柄：先认上次找到的编组，换了名或失效才遍历全服编组。
+    MinecartGroup last = session.lastGroup();
+    if (last != null
+        && last.isValid()
+        && last.getProperties() != null
+        && session.trainName().equals(last.getProperties().getTrainName())) {
+      return Optional.of(last);
+    }
+    Optional<MinecartGroup> found = SeatLocator.findGroup(session.trainName());
+    session.setLastGroup(found.orElse(null));
+    return found;
   }
 
   /** 用调度采样更新前方停车点的估计：车站股道上有对应节数的停车位置标时按车头对准标志，否则按列车中心对准车站牌子。 */
   private void updateApproach(
       DriverLink link, MinecartGroup group, ControlDiagnostics diagnostics) {
+    if (!link.isNewApproachSample(diagnostics.sampledAt())) {
+      // 调度层的采样没更新：停车点查询（停车位置标要沿轨道找方向）的结果反正会被丢掉。
+      return;
+    }
     NodeId node = diagnostics.stopNode();
     if (node != null && "station".equals(diagnostics.stopKind()) && group.getWorld() != null) {
       Optional<StationStopPoints.StopPoint> point =

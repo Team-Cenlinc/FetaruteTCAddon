@@ -140,4 +140,27 @@ class StopMarkIndexTest {
     assertEquals(before, inspected.get(), "这一刻不阻塞重走");
     assertEquals(1, index.pendingCount());
   }
+
+  @Test
+  @DisplayName("没有标志的股道隔得更久才重走（建、拆牌子另会作废缓存）")
+  void emptyTracksRefreshLessOften() {
+    StopMarkIndex empty =
+        new StopMarkIndex(
+            ignored ->
+                new StopMarks.ScanJob(
+                    new Line(),
+                    new RailBlockPos(0, 64, 0),
+                    StopMarks.SEARCH_BLOCKS,
+                    pos -> StopMarks.RailSigns.NONE,
+                    pos -> true),
+            millis::get,
+            nanos::get);
+    assertTrue(empty.around(rail).isEmpty());
+    millis.addAndGet(StopMarkIndex.CACHE_MILLIS);
+    assertTrue(empty.cached(rail).orElseThrow().isEmpty());
+    assertEquals(0, empty.pendingCount(), "有标志的股道这时早该重走了，空的还不用");
+    millis.addAndGet(StopMarkIndex.EMPTY_REFRESH_MILLIS - StopMarkIndex.CACHE_MILLIS);
+    empty.cached(rail);
+    assertEquals(1, empty.pendingCount());
+  }
 }
