@@ -82,12 +82,13 @@ public record Timetable(
       throw new IllegalArgumentException("计划窗口终点不能早于起点");
     }
     routePlans =
-        routePlans == null
-            ? List.of()
-            : routePlans.stream()
-                .filter(Objects::nonNull)
-                .sorted(Comparator.comparing(TimetableRoutePlan::routeCode))
-                .toList();
+        new IndexedPlans(
+            routePlans == null
+                ? List.of()
+                : routePlans.stream()
+                    .filter(Objects::nonNull)
+                    .sorted(Comparator.comparing(TimetableRoutePlan::routeCode))
+                    .toList());
     trips =
         new IndexedTrips(
             trips == null
@@ -99,14 +100,15 @@ public record Timetable(
                             .thenComparing(TimetableTrip::tripCode))
                     .toList());
     duties =
-        duties == null
-            ? List.of()
-            : duties.stream()
-                .filter(Objects::nonNull)
-                .sorted(
-                    Comparator.comparingInt(VehicleDuty::plannedStartSecondOfDay)
-                        .thenComparing(VehicleDuty::dutyCode))
-                .toList();
+        new IndexedDuties(
+            duties == null
+                ? List.of()
+                : duties.stream()
+                    .filter(Objects::nonNull)
+                    .sorted(
+                        Comparator.comparingInt(VehicleDuty::plannedStartSecondOfDay)
+                            .thenComparing(VehicleDuty::dutyCode))
+                    .toList());
     notes = notes == null ? Optional.empty() : notes.map(String::trim).filter(s -> !s.isBlank());
   }
 
@@ -134,18 +136,7 @@ public record Timetable(
     if (routeId == null) {
       return Optional.empty();
     }
-    TimetableRoutePlan first = null;
-    for (TimetableRoutePlan plan : routePlans) {
-      if (plan.routeId().equals(routeId)) {
-        if (plan.consist().isEmpty()) {
-          return Optional.of(plan);
-        }
-        if (first == null) {
-          first = plan;
-        }
-      }
-    }
-    return Optional.ofNullable(first);
+    return Optional.ofNullable(((IndexedPlans) routePlans).base.get(routeId));
   }
 
   /**
@@ -156,11 +147,10 @@ public record Timetable(
    */
   public Optional<TimetableRoutePlan> routePlan(UUID routeId, Optional<String> consist) {
     if (routeId != null && consist != null && consist.isPresent()) {
-      for (TimetableRoutePlan plan : routePlans) {
-        if (plan.routeId().equals(routeId)
-            && plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)) {
-          return Optional.of(plan);
-        }
+      TimetableRoutePlan variant =
+          ((IndexedPlans) routePlans).byConsist.getOrDefault(routeId, Map.of()).get(consist.get());
+      if (variant != null) {
+        return Optional.of(variant);
       }
     }
     return routePlan(routeId);
@@ -187,12 +177,7 @@ public record Timetable(
     if (dutyId == null) {
       return Optional.empty();
     }
-    for (VehicleDuty duty : duties) {
-      if (duty.id().equals(dutyId)) {
-        return Optional.of(duty);
-      }
-    }
-    return Optional.empty();
+    return ((IndexedDuties) duties).byId(dutyId);
   }
 
   /**
@@ -210,7 +195,7 @@ public record Timetable(
     if (trip == null || serviceDate == null) {
       return Optional.empty();
     }
-    return routePlan(trip.routeId())
+    return tripPlan(trip)
         .flatMap(plan -> plan.stopAt(stopSequence))
         .map(
             stop ->
@@ -230,7 +215,7 @@ public record Timetable(
     if (trip == null || serviceDate == null) {
       return Optional.empty();
     }
-    return routePlan(trip.routeId())
+    return tripPlan(trip)
         .flatMap(plan -> plan.stopAt(stopSequence))
         .map(
             stop -> trip.departureAt(serviceDate, zoneId).plusSeconds(stop.arrivalOffsetSeconds()));
@@ -296,6 +281,18 @@ public record Timetable(
   }
 
   /**
+   * 车次按它那辆车的车型跑的计划：交路带车型且表里有这个车型的变体时取变体，否则取基础计划。
+   *
+   * <p>按表运行里凡是要用某一班的各站时刻（扣车、晚点账、站牌、ETA），都走这里，而不是 {@link #routePlan(UUID)}。
+   *
+   * @param trip 车次
+   * @return 计划；route 不在表内时为空
+   */
+  public Optional<TimetableRoutePlan> tripPlan(TimetableTrip trip) {
+    return trip == null ? Optional.empty() : routePlan(trip.routeId(), consistOf(trip));
+  }
+
+  /**
    * 车次的车型：它所在交路的车型。不区分车型的表、或车次不挂交路时为空。
    *
    * @param trip 车次
@@ -325,6 +322,80 @@ public record Timetable(
         notes,
         createdAt,
         updatedAt);
+  }
+
+  /**
+   * route 计划表：只读列表，附带按 route（基础计划）与按 route × 车型（变体计划）的索引。
+   *
+   * <p>门控每秒按车次逐班取计划，区分车型的表里计划数是 route 数的几倍，线性扫描会成为热点。基础计划取不分车型的那份，没有时取顺序在前的一份； 同一 route
+   * 同一车型重复时取顺序在前的一份，与逐条查找结果相同。
+   */
+  private static final class IndexedPlans extends AbstractList<TimetableRoutePlan>
+      implements RandomAccess {
+
+    private final List<TimetableRoutePlan> plans;
+    private final Map<UUID, TimetableRoutePlan> base;
+    private final Map<UUID, Map<String, TimetableRoutePlan>> byConsist;
+
+    private IndexedPlans(List<TimetableRoutePlan> plans) {
+      this.plans = plans;
+      Map<UUID, TimetableRoutePlan> plain = new HashMap<>();
+      Map<UUID, TimetableRoutePlan> first = new HashMap<>();
+      Map<UUID, Map<String, TimetableRoutePlan>> variants = new HashMap<>();
+      for (TimetableRoutePlan plan : plans) {
+        first.putIfAbsent(plan.routeId(), plan);
+        if (plan.consist().isEmpty()) {
+          plain.putIfAbsent(plan.routeId(), plan);
+        } else {
+          variants
+              .computeIfAbsent(plan.routeId(), id -> new HashMap<>())
+              .putIfAbsent(plan.consist().get().key(), plan);
+        }
+      }
+      first.putAll(plain);
+      this.base = first;
+      this.byConsist = variants;
+    }
+
+    @Override
+    public TimetableRoutePlan get(int index) {
+      return plans.get(index);
+    }
+
+    @Override
+    public int size() {
+      return plans.size();
+    }
+  }
+
+  /** 交路表：只读列表，附带按 UUID 的索引（按表运行每次取车次的车型都要查它所在的交路）。 */
+  private static final class IndexedDuties extends AbstractList<VehicleDuty>
+      implements RandomAccess {
+
+    private final List<VehicleDuty> duties;
+    private final Map<UUID, VehicleDuty> byId;
+
+    private IndexedDuties(List<VehicleDuty> duties) {
+      this.duties = duties;
+      this.byId = new HashMap<>(duties.size() * 2);
+      for (VehicleDuty duty : duties) {
+        byId.putIfAbsent(duty.id(), duty);
+      }
+    }
+
+    @Override
+    public VehicleDuty get(int index) {
+      return duties.get(index);
+    }
+
+    @Override
+    public int size() {
+      return duties.size();
+    }
+
+    private Optional<VehicleDuty> byId(UUID dutyId) {
+      return Optional.ofNullable(byId.get(dutyId));
+    }
   }
 
   /**

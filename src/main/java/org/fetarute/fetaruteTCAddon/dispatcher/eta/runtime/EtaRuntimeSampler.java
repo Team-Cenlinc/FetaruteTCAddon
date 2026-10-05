@@ -178,7 +178,7 @@ public final class EtaRuntimeSampler {
             sampleMotion(group)));
   }
 
-  /** 车上的车种与加减速标签；只读标签，按配置补齐留给估算时做（配置可能已重载）。 */
+  /** 车上的车种、加减速与最高速度标签；只读标签，按配置补齐留给估算时做（配置可能已重载）。 */
   private static TrainRuntimeSnapshot.Motion sampleMotion(MinecartGroup group) {
     TrainProperties properties = group.getProperties();
     if (properties == null) {
@@ -190,7 +190,9 @@ public final class EtaRuntimeSampler {
         toOptional(
             TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_ACCEL_BPS2)),
         toOptional(
-            TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_DECEL_BPS2)));
+            TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_DECEL_BPS2)),
+        toOptional(
+            TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_MAX_BPS)));
   }
 
   private static OptionalDouble toOptional(Optional<Double> value) {

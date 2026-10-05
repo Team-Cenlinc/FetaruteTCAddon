@@ -821,6 +821,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
   }
 
+  /** 列车上的车型标签（出车时写的编组写法，原样）；列车不存在或没有这个标签时为空。只在主线程调用。 */
+  private static Optional<String> consistTagOf(String trainName) {
+    return Optional.ofNullable(
+            com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore.get(trainName))
+        .flatMap(
+            properties ->
+                org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper.readTagValue(
+                    properties,
+                    org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey.TRAIN_TAG));
+  }
+
   /**
    * 编组方案：route 绑了哪份方案、各车型档案、按班次份额的记账。重载时只重读方案与档案，记账保留（与交路缓存同寿命）。
    *
@@ -844,23 +855,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
               loggerManager::debug);
       consistArbiter =
           new org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter(
-              consistPlanService,
-              inspector,
-              trainName ->
-                  Optional.ofNullable(
-                          com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore.get(trainName))
-                      .flatMap(
-                          properties ->
-                              org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper
-                                  .readTagValue(
-                                      properties,
-                                      org.fetarute
-                                          .fetaruteTCAddon
-                                          .dispatcher
-                                          .consist
-                                          .ConsistKey
-                                          .TRAIN_TAG)),
-              loggerManager::debug);
+              consistPlanService, inspector, FetaruteTCAddon::consistTagOf, loggerManager::debug);
     }
     RouteDefinitionCache routes = routeDefinitionCache;
     consistPlanService.attachRoutes(
@@ -1372,16 +1367,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 走行参数（车种加减速、进站规则、默认速度、停站开销）与编表读同一组配置；每次估算现读，重载即生效。
     etaService.attachConfigSources(
         signNodeRegistry, () -> configManager == null ? null : configManager.current());
-    // route 绑了编组方案时，未发车票据按方案下一班预计的车型估算走行。
+    // 未发车票据的车型：票上指定了车型（按表出的票）按它，否则 route 绑了编组方案时按方案下一班预计的车型。
     etaService.attachPlannedConsist(
-        routeId ->
-            consistPlanService == null
-                ? Optional.empty()
-                : consistPlanService
-                    .predictedProfile(routeId)
-                    .map(
-                        org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile
-                            ::trainConfig));
+        (routeId, consist) -> {
+          if (consistPlanService == null) {
+            return Optional.empty();
+          }
+          Optional<org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile> profile =
+              consist.isPresent()
+                  ? consistPlanService
+                      .member(routeId, consist.get())
+                      .flatMap(member -> member.profile())
+                  : consistPlanService.predictedProfile(routeId);
+          return profile.map(
+              org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile::trainConfig);
+        });
   }
 
   private void restartRuntimeMonitor() {
@@ -1779,6 +1779,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
       }
     } else if (timetableService != null) {
       timetableService.setPendingTicketProbe(null);
+    }
+    if (timetableService != null) {
+      // 区分车型的交路只让同车型的车接：接首班与门控就近绑定都读车上的编组标签。
+      timetableService.setConsistOfTrain(
+          trainName ->
+              consistTagOf(trainName)
+                  .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey::of));
     }
     if (etaService != null) {
       etaService.attachTicketSources(spawnManager, spawnTicketAssigner);

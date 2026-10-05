@@ -620,19 +620,23 @@ public final class TimetableSpawnManager
       return Optional.empty();
     }
     String tripId = legTicketId(due.timetable().code(), due.code(), due.serviceDate());
+    // 出库票出的是交路的车型（替补车同样）；回库票不出车。
+    Optional<String> consist =
+        due.kind() == RouteOperationType.CREATE ? due.duty().consist() : Optional.empty();
     return Optional.of(
         new SpawnTicket(
-            UUID.randomUUID(),
-            service.get(),
-            due.departure(),
-            due.departure(),
-            0,
-            sequence.incrementAndGet(),
-            Optional.empty(),
-            Optional.empty(),
-            Optional.of(tripId),
-            TripSource.SCHEDULED,
-            0));
+                UUID.randomUUID(),
+                service.get(),
+                due.departure(),
+                due.departure(),
+                0,
+                sequence.incrementAndGet(),
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of(tripId),
+                TripSource.SCHEDULED,
+                0)
+            .withConsist(consist));
   }
 
   /**
@@ -654,21 +658,23 @@ public final class TimetableSpawnManager
       return Optional.empty();
     }
     Optional<String> depotOverride =
-        due.timetable().routePlan(routeId).flatMap(plan -> plan.depotNodeId());
+        due.timetable().tripPlan(due.trip()).flatMap(plan -> plan.depotNodeId());
     String tripId = tripTicketId(due.timetable().code(), due.trip().tripCode(), due.serviceDate());
+    // 车次的车型即交路的车型：从车库始发的车次（首站 CRET）按它出车。
     return Optional.of(
         new SpawnTicket(
-            UUID.randomUUID(),
-            depotOverride.map(node -> withDepot(service.get(), node)).orElse(service.get()),
-            due.departure(),
-            due.departure(),
-            0,
-            sequence.incrementAndGet(),
-            depotOverride,
-            Optional.empty(),
-            Optional.of(tripId),
-            TripSource.SCHEDULED,
-            0));
+                UUID.randomUUID(),
+                depotOverride.map(node -> withDepot(service.get(), node)).orElse(service.get()),
+                due.departure(),
+                due.departure(),
+                0,
+                sequence.incrementAndGet(),
+                depotOverride,
+                Optional.empty(),
+                Optional.of(tripId),
+                TripSource.SCHEDULED,
+                0)
+            .withConsist(due.timetable().consistOf(due.trip())));
   }
 
   /** 车次指定了出库点时覆盖服务默认 depot；其余字段保持不变。 */

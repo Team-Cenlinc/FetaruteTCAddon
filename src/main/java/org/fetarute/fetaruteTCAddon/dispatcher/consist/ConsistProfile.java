@@ -64,8 +64,8 @@ public record ConsistProfile(
     return ConsistKey.of(pattern).orElseThrow();
   }
 
-  /** 控车与估算用的加减速。 */
+  /** 控车与估算用的加减速与最高速度。 */
   public TrainConfig trainConfig() {
-    return new TrainConfig(type, accelBps2, decelBps2);
+    return new TrainConfig(type, accelBps2, decelBps2, maxSpeedBps);
   }
 }

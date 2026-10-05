@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.consist;
 
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -10,6 +11,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
+import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -32,8 +34,22 @@ public final class ConsistPlanService {
   private final Consumer<String> debugLogger;
   private final ConsistSelector selector = new ConsistSelector();
 
-  /** 运营商 → 方案名键 → 方案。 */
-  private volatile Map<UUID, Map<String, ResolvedConsistPlan>> catalog = Map.of();
+  /** 方案与按车型键的索引；重载时整份替换。 */
+  private volatile Catalog catalog = Catalog.EMPTY;
+
+  /**
+   * 方案目录的一份快照。
+   *
+   * @param plans 运营商 → 方案名键 → 方案
+   * @param membersByOperator 运营商 → 车型键 → 档案可用的方案车型（按方案 ID 取第一份）
+   * @param membersByCompany 公司 → 车型键 → 档案可用的方案车型（按方案 ID 取第一份）
+   */
+  private record Catalog(
+      Map<UUID, Map<String, ResolvedConsistPlan>> plans,
+      Map<UUID, Map<String, ResolvedConsistPlan.Member>> membersByOperator,
+      Map<UUID, Map<String, ResolvedConsistPlan.Member>> membersByCompany) {
+    static final Catalog EMPTY = new Catalog(Map.of(), Map.of(), Map.of());
+  }
 
   private volatile Function<UUID, Optional<RouteDefinitionCache.RouteRecord>> routes =
       routeId -> Optional.empty();
@@ -96,8 +112,58 @@ public final class ConsistPlanService {
     }
     Map<UUID, Map<String, ResolvedConsistPlan>> frozen = new HashMap<>();
     next.forEach((operator, byName) -> frozen.put(operator, Map.copyOf(byName)));
-    this.catalog = Map.copyOf(frozen);
+    this.catalog =
+        new Catalog(
+            Map.copyOf(frozen),
+            membersBy(next, id -> Optional.of(id)),
+            companyIndex(provider.get(), next));
     debugLogger.accept("CONSIST_PLAN_RELOAD plans=" + plans.size());
+  }
+
+  /** 按公司建车型索引：方案只挂在运营商下，公司从运营商查。查不到公司的运营商不进索引。 */
+  private Map<UUID, Map<String, ResolvedConsistPlan.Member>> companyIndex(
+      StorageProvider provider, Map<UUID, Map<String, ResolvedConsistPlan>> plans) {
+    Map<UUID, Optional<UUID>> companyByOperator = new HashMap<>();
+    for (UUID operatorId : plans.keySet()) {
+      Optional<UUID> company;
+      try {
+        company = provider.operators().findById(operatorId).map(Operator::companyId);
+      } catch (RuntimeException ex) {
+        debugLogger.accept(
+            "CONSIST_PLAN_OPERATOR_LOOKUP_FAILED operator=" + operatorId + " error=" + ex);
+        company = Optional.empty();
+      }
+      companyByOperator.put(operatorId, company);
+    }
+    return membersBy(
+        plans, operatorId -> companyByOperator.getOrDefault(operatorId, Optional.empty()));
+  }
+
+  /**
+   * 车型键索引：各分组里每个车型键取方案 ID 最小、档案可用的那一份（同一公司内同一写法的覆盖项一致，取哪一份都一样；按 ID 取是为了确定）。
+   *
+   * @param groupOf 运营商 → 分组（运营商本身或它的公司）
+   */
+  private static Map<UUID, Map<String, ResolvedConsistPlan.Member>> membersBy(
+      Map<UUID, Map<String, ResolvedConsistPlan>> plans, Function<UUID, Optional<UUID>> groupOf) {
+    List<ResolvedConsistPlan> sorted = new ArrayList<>();
+    plans.values().forEach(byName -> sorted.addAll(byName.values()));
+    sorted.sort(Comparator.comparing(plan -> plan.plan().id()));
+    Map<UUID, Map<String, ResolvedConsistPlan.Member>> out = new HashMap<>();
+    for (ResolvedConsistPlan plan : sorted) {
+      Optional<UUID> group = groupOf.apply(plan.plan().operatorId());
+      if (group.isEmpty()) {
+        continue;
+      }
+      for (ResolvedConsistPlan.Member member : plan.members()) {
+        if (member.profile().isPresent()) {
+          out.computeIfAbsent(group.get(), id -> new HashMap<>()).putIfAbsent(member.key(), member);
+        }
+      }
+    }
+    Map<UUID, Map<String, ResolvedConsistPlan.Member>> frozen = new HashMap<>();
+    out.forEach((group, byKey) -> frozen.put(group, Map.copyOf(byKey)));
+    return Map.copyOf(frozen);
   }
 
   /**
@@ -134,7 +200,36 @@ public final class ConsistPlanService {
       return Optional.empty();
     }
     return Optional.ofNullable(
-        catalog.getOrDefault(operatorId, Map.of()).get(ConsistPlan.nameKey(name)));
+        catalog.plans().getOrDefault(operatorId, Map.of()).get(ConsistPlan.nameKey(name)));
+  }
+
+  /**
+   * 按车型键找一个档案可用的方案车型（按表出车用：交路只记车型键，编组写法与出车标签从方案里取）。
+   *
+   * <p>先在 route 所属运营商的方案里找，找不到再看同一公司其他运营商的：同一写法在同一公司内的覆盖项一致（方案保存时已拦下冲突），取哪一份都一样。
+   * 不跨公司找——别的公司同一写法的覆盖项可以不同，出出来的车会和编表用的车型对不上。
+   *
+   * @param routeId 出车的 route（定运营商与公司）
+   * @param key 车型键（{@link ConsistKey#of} 归一后）
+   * @return 车型；route 不在交路缓存里、本公司没有方案列出这个车型、或档案都不可用时为空
+   */
+  public Optional<ResolvedConsistPlan.Member> member(UUID routeId, String key) {
+    if (routeId == null || key == null || key.isBlank()) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinitionCache.RouteRecord> record = routes.apply(routeId);
+    if (record.isEmpty()) {
+      return Optional.empty();
+    }
+    Catalog snapshot = catalog;
+    Operator operator = record.get().operator();
+    ResolvedConsistPlan.Member own =
+        snapshot.membersByOperator().getOrDefault(operator.id(), Map.of()).get(key);
+    if (own != null) {
+      return Optional.of(own);
+    }
+    return Optional.ofNullable(
+        snapshot.membersByCompany().getOrDefault(operator.companyId(), Map.of()).get(key));
   }
 
   /**

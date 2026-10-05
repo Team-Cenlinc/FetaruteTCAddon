@@ -164,6 +164,9 @@ public interface TimetableApi {
   /**
    * 交路时分：各站相对起点发车的到发偏移。
    *
+   * <p>多车型混跑的时刻表里，每个车次按它那辆车的车型跑，各车型的时分不同；这里给的是允许车型里最慢的那份。 要某一班在某站的计划时刻，用 {@link #departuresAt} 或
+   * {@link #getAssignment}，它们按车次的车型算。
+   *
    * @param routeId 交路 ID
    * @param routeCode 交路代码
    * @param kind 交路类型（OPERATION / CREATE / RETURN）

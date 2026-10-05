@@ -54,6 +54,20 @@ class TrainConfigResolverTest {
             .isPresent());
   }
 
+  @Test
+  void readsTheConsistMaxSpeedTag() {
+    TrainConfigResolver resolver = new TrainConfigResolver();
+    TrainConfig capped =
+        resolver.resolve(new TagStore("FTA_TRAIN_MAX_BPS=18.5").properties(), defaultConfig());
+    assertEquals(java.util.OptionalDouble.of(18.5), capped.maxSpeedBps());
+    assertEquals(18.5, capped.capped(22.0));
+    assertEquals(10.0, capped.capped(10.0));
+
+    TrainConfig free = resolver.resolve(new TagStore().properties(), defaultConfig());
+    assertTrue(free.maxSpeedBps().isEmpty());
+    assertEquals(22.0, free.capped(22.0));
+  }
+
   private static ConfigManager.ConfigView defaultConfig() {
     return new ConfigManager.ConfigView(
         10,

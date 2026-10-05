@@ -175,6 +175,118 @@ class ConsistDispatchArbiterTest {
     assertEquals(Map.of(), plans.counts(boundRoute));
   }
 
+  @Test
+  void timetableTicketSpawnsExactlyItsDutyConsist() {
+    SpawnTicket eight = ticket(freeRoute, true).withConsist(Optional.of("sh_a8"));
+    for (int i = 0; i < 3; i++) {
+      SpawnChoice choice = arbiter.chooseSpawn(eight);
+      assertEquals(Optional.of("SH_A8"), choice.pattern(), "票上指定的车型，不按份额现排、不看 route 有没有绑方案");
+      assertEquals(Map.of("FTA_TRAIN_TYPE", "EMU"), choice.tags());
+      consistOfTrain.put("E" + i, "SH_A8");
+      arbiter.onDispatched(eight, "E" + i);
+    }
+    assertTrue(plans.counts(freeRoute).isEmpty(), "表定车型不进间隔发车的份额账");
+
+    overLimit.add("SH_A8");
+    SpawnChoice limited = arbiter.chooseSpawn(eight);
+    assertEquals(SpawnChoice.Kind.BLOCKED, limited.kind(), "到了出车上限也不改出别的车型");
+
+    SpawnChoice unknown =
+        arbiter.chooseSpawn(ticket(boundRoute, true).withConsist(Optional.of("x9")));
+    assertEquals(SpawnChoice.Kind.BLOCKED, unknown.kind(), "方案里已经没有这个车型：不出车");
+  }
+
+  @Test
+  void withoutConsistPlansADesignatedTicketCannotSpawn() {
+    SpawnTicket eight = ticket(freeRoute, true).withConsist(Optional.of("sh_a8"));
+    assertEquals(
+        SpawnChoice.Kind.BLOCKED,
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .schedule
+            .spawn
+            .ConsistArbiter
+            .NONE
+            .chooseSpawn(eight)
+            .kind(),
+        "没有编组方案可查：出不了指定车型，也不改出别的");
+    assertEquals(
+        SpawnChoice.legacy(),
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.ConsistArbiter.NONE.chooseSpawn(
+            ticket(freeRoute, true)));
+  }
+
+  @Test
+  void designatedConsistIsLookedUpWithinTheRoutesCompanyOnly() {
+    Operator own = operator();
+    Operator sibling =
+        new Operator(
+            UUID.randomUUID(),
+            "SURC2",
+            own.companyId(),
+            "SURC2",
+            Optional.empty(),
+            Optional.empty(),
+            0,
+            Optional.empty(),
+            Map.of(),
+            NOW,
+            NOW);
+    Operator foreign = operator();
+    // 别的公司那份方案 ID 更小：不限公司按 ID 取就会取到它（最高速度 15，与本公司的 20 不同）。
+    ConsistPlan foreignPlan =
+        new ConsistPlan(new UUID(0L, 1L), foreign.id(), "X", "1 SH_A8 | max-bps=15", NOW, NOW);
+    ConsistPlan siblingPlan =
+        new ConsistPlan(new UUID(0L, 2L), sibling.id(), "Y", "1 SH_A8 | max-bps=20", NOW, NOW);
+    StorageProvider provider = mock(StorageProvider.class);
+    ConsistPlanRepository repository = mock(ConsistPlanRepository.class);
+    when(provider.consistPlans()).thenReturn(repository);
+    when(repository.listAll()).thenReturn(List.of(foreignPlan, siblingPlan));
+    org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository operators =
+        mock(org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository.class);
+    when(provider.operators()).thenReturn(operators);
+    for (Operator operator : List.of(own, sibling, foreign)) {
+      when(operators.findById(operator.id())).thenReturn(Optional.of(operator));
+    }
+    ConsistPlanService service =
+        new ConsistPlanService(
+            () -> Optional.of(provider),
+            new ConsistInspector() {
+              @Override
+              public ConsistInspection inspect(String pattern) {
+                return new ConsistInspection(true, 8, 96.0, Map.of(), OptionalInt.empty());
+              }
+
+              @Override
+              public boolean exceedsSpawnLimit(String pattern) {
+                return false;
+              }
+            },
+            () -> new ConfigManager.TrainConfigSettings("metro", Map.of()),
+            message -> {});
+    UUID ownRoute = UUID.randomUUID();
+    UUID strangerRoute = UUID.randomUUID();
+    Map<UUID, RouteDefinitionCache.RouteRecord> records =
+        Map.of(
+            ownRoute,
+            new RouteDefinitionCache.RouteRecord(
+                own, record(ownRoute, Map.of()).line(), record(ownRoute, Map.of()).route()),
+            strangerRoute,
+            new RouteDefinitionCache.RouteRecord(
+                operator(),
+                record(strangerRoute, Map.of()).line(),
+                record(strangerRoute, Map.of()).route()));
+    service.attachRoutes(id -> Optional.ofNullable(records.get(id)));
+    service.reload();
+
+    assertEquals(
+        java.util.OptionalDouble.of(20.0),
+        service.member(ownRoute, "sh_a8").orElseThrow().profile().orElseThrow().maxSpeedBps(),
+        "本运营商没有，就取同一公司别的运营商的那份");
+    assertTrue(service.member(strangerRoute, "sh_a8").isEmpty(), "不跨公司取：别的公司的覆盖项可以不同");
+  }
+
   private SpawnTicket ticket(UUID routeId, boolean timetable) {
     SpawnService service =
         new SpawnService(

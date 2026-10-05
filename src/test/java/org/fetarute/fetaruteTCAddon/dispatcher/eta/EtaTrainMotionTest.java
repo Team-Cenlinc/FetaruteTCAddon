@@ -70,6 +70,44 @@ class EtaTrainMotionTest {
   }
 
   @Test
+  void runningTrainIsCappedByItsMaxSpeed() {
+    int free =
+        travelSec(
+            new TrainRuntimeSnapshot.Motion(
+                Optional.of(TrainType.METRO), OptionalDouble.empty(), OptionalDouble.empty()));
+    int capped =
+        travelSec(
+            new TrainRuntimeSnapshot.Motion(
+                Optional.of(TrainType.METRO),
+                OptionalDouble.empty(),
+                OptionalDouble.empty(),
+                OptionalDouble.of(2.0)));
+
+    assertTrue(capped > free, () -> "车型最高速度封顶边限速: capped=" + capped + " free=" + free);
+  }
+
+  @Test
+  void pendingTicketEstimatesWithItsOwnConsist() {
+    EtaService service =
+        new EtaService(
+            new TrainSnapshotStore(),
+            mock(RailGraphService.class),
+            mock(RouteDefinitionCache.class));
+    service.attachConfigSources(new SignNodeRegistry(), () -> CONFIG);
+    List<Optional<String>> asked = new java.util.ArrayList<>();
+    service.attachPlannedConsist(
+        (id, consist) -> {
+          asked.add(consist);
+          return Optional.of(new TrainConfig(TrainType.DMU, 0.6, 0.9));
+        });
+
+    service.resolveTravelTimeModelForRoute(routeUuid, Optional.of("m8"), worldId, Instant.now());
+    service.resolveTravelTimeModelForRoute(routeUuid, worldId, Instant.now());
+
+    assertEquals(List.of(Optional.of("m8"), Optional.empty()), asked, "表定票按票上的车型，间隔票按方案预计");
+  }
+
+  @Test
   void motionResolvesLikeTheController() {
     ConfigManager.TrainConfigSettings settings = CONFIG.trainConfigSettings();
     assertEquals(
@@ -89,7 +127,8 @@ class EtaTrainMotionTest {
     EtaService service =
         new EtaService(new TrainSnapshotStore(), mock(RailGraphService.class), definitions);
     service.attachConfigSources(new SignNodeRegistry(), () -> CONFIG);
-    service.attachPlannedConsist(id -> Optional.of(new TrainConfig(TrainType.DMU, 0.6, 0.9)));
+    service.attachPlannedConsist(
+        (id, consist) -> Optional.of(new TrainConfig(TrainType.DMU, 0.6, 0.9)));
 
     service.resolveTravelTimeModelForRoute(routeUuid, worldId, Instant.now());
 
@@ -100,6 +139,10 @@ class EtaTrainMotionTest {
     RailGraphService railGraphService = mock(RailGraphService.class);
     when(railGraphService.getSnapshot(worldId))
         .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(graph(), Instant.now())));
+    // 与实服一致：边没写限速时有效限速就是默认速度（不是 0）。
+    when(railGraphService.effectiveSpeedLimitBlocksPerSecond(
+            any(), any(), any(), org.mockito.ArgumentMatchers.anyDouble()))
+        .thenAnswer(invocation -> invocation.getArgument(3));
     RouteDefinitionCache definitions = mock(RouteDefinitionCache.class);
     when(definitions.findById(routeUuid)).thenReturn(Optional.of(route));
     OccupancyManager occupancy = mock(OccupancyManager.class);

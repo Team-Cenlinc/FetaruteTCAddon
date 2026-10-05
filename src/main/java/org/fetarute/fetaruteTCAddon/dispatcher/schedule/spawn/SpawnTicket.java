@@ -18,6 +18,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
  *
  * <p>{@code serviceTripId/source/priority} 是 schedule backbone 接入后的轻量扩展：旧的 headway 票据默认视为 {@link
  * TripSource#SCHEDULED}，优先级为 0；由 ServiceTrip 派生的票据可以携带更明确的计划来源和仲裁优先级。
+ *
+ * <p>{@code consist} 是按表出的票指定的车型（交路的车型，{@link
+ * org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey#of} 归一后的键）：出车只能出这个车型。间隔发车与不区分车型的表为空，
+ * 出车按 route 的编组方案现排。
  */
 public record SpawnTicket(
     UUID id,
@@ -31,7 +35,38 @@ public record SpawnTicket(
     Optional<String> lastError,
     Optional<String> serviceTripId,
     TripSource source,
-    int priority) {
+    int priority,
+    Optional<String> consist) {
+  /** 不指定车型的票据。 */
+  public SpawnTicket(
+      UUID id,
+      SpawnService service,
+      Instant dueAt,
+      Instant notBefore,
+      Instant firstDueAt,
+      int attempts,
+      long sequenceNumber,
+      Optional<String> selectedDepotNodeId,
+      Optional<String> lastError,
+      Optional<String> serviceTripId,
+      TripSource source,
+      int priority) {
+    this(
+        id,
+        service,
+        dueAt,
+        notBefore,
+        firstDueAt,
+        attempts,
+        sequenceNumber,
+        selectedDepotNodeId,
+        lastError,
+        serviceTripId,
+        source,
+        priority,
+        Optional.empty());
+  }
+
   /** 使用 {@code dueAt} 作为首次计划时间创建票据。 */
   public SpawnTicket(
       UUID id,
@@ -126,6 +161,7 @@ public record SpawnTicket(
             ? Optional.empty()
             : serviceTripId.map(String::trim).filter(s -> !s.isBlank());
     source = source == null ? TripSource.SCHEDULED : source;
+    consist = consist == null ? Optional.empty() : consist.filter(key -> !key.isBlank());
   }
 
   /** 表定车次票据的 {@code serviceTripId} 前缀（{@link TimetableSpawnManager} 出的票）。 */
@@ -184,7 +220,8 @@ public record SpawnTicket(
         Optional.ofNullable(reason),
         serviceTripId,
         source,
-        priority);
+        priority,
+        consist);
   }
 
   /** 返回带有 depot 选择结果的新票据（不会修改 attempts/notBefore）。 */
@@ -201,6 +238,25 @@ public record SpawnTicket(
         lastError,
         serviceTripId,
         source,
-        priority);
+        priority,
+        consist);
+  }
+
+  /** 返回指定了车型的新票据（其余不变）。 */
+  public SpawnTicket withConsist(Optional<String> nextConsist) {
+    return new SpawnTicket(
+        id,
+        service,
+        dueAt,
+        notBefore,
+        firstDueAt,
+        attempts,
+        sequenceNumber,
+        selectedDepotNodeId,
+        lastError,
+        serviceTripId,
+        source,
+        priority,
+        nextConsist);
   }
 }

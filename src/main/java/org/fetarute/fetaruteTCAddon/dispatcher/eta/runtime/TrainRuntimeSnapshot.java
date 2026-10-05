@@ -67,16 +67,29 @@ public record TrainRuntimeSnapshot(
    * @param decelBps2 {@code FTA_TRAIN_DECEL_BPS2}
    */
   public record Motion(
-      Optional<TrainType> type, OptionalDouble accelBps2, OptionalDouble decelBps2) {
+      Optional<TrainType> type,
+      OptionalDouble accelBps2,
+      OptionalDouble decelBps2,
+      OptionalDouble maxSpeedBps) {
 
     /** 没有任何标签：按默认车种。 */
     public static final Motion NONE =
-        new Motion(Optional.empty(), OptionalDouble.empty(), OptionalDouble.empty());
+        new Motion(
+            Optional.empty(),
+            OptionalDouble.empty(),
+            OptionalDouble.empty(),
+            OptionalDouble.empty());
+
+    /** 不限最高速度。 */
+    public Motion(Optional<TrainType> type, OptionalDouble accelBps2, OptionalDouble decelBps2) {
+      this(type, accelBps2, decelBps2, OptionalDouble.empty());
+    }
 
     public Motion {
       type = type == null ? Optional.empty() : type;
       accelBps2 = positiveOrEmpty(accelBps2);
       decelBps2 = positiveOrEmpty(decelBps2);
+      maxSpeedBps = positiveOrEmpty(maxSpeedBps);
     }
 
     /**
@@ -89,7 +102,10 @@ public record TrainRuntimeSnapshot(
       TrainType resolved = type.orElse(settings.defaultTrainType());
       ConfigManager.TrainTypeSettings preset = settings.forType(resolved);
       return new TrainConfig(
-          resolved, accelBps2.orElse(preset.accelBps2()), decelBps2.orElse(preset.decelBps2()));
+          resolved,
+          accelBps2.orElse(preset.accelBps2()),
+          decelBps2.orElse(preset.decelBps2()),
+          maxSpeedBps);
     }
 
     private static OptionalDouble positiveOrEmpty(OptionalDouble value) {

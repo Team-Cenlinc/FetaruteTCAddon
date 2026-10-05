@@ -24,7 +24,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
  *   <li>记账：票派出去之后，按车上实际的车型记一班。
  * </ul>
  *
- * <p>按表出的票不重排复用候选：交路已经决定了哪辆车接哪一班。出车仍按方案选车型（route 绑了方案，旧的编组来源可能已经没有）。
+ * <p>按表出的票不重排复用候选：交路已经决定了哪辆车接哪一班。票上指定了车型（区分车型的表，交路的车型）时只出这个车型、不进份额账； 没指定时出车仍按方案选车型（route
+ * 绑了方案，旧的编组来源可能已经没有）。
  */
 public final class ConsistDispatchArbiter implements ConsistArbiter {
 
@@ -93,6 +94,9 @@ public final class ConsistDispatchArbiter implements ConsistArbiter {
       return SpawnChoice.legacy();
     }
     UUID routeId = ticket.service().routeId();
+    if (ticket.consist().isPresent()) {
+      return designated(routeId, ticket.consist().get());
+    }
     Optional<ResolvedConsistPlan> plan = plans.planForRoute(routeId);
     if (plan.isEmpty()) {
       return SpawnChoice.legacy();
@@ -114,6 +118,21 @@ public final class ConsistDispatchArbiter implements ConsistArbiter {
         "plan=" + plan.get().plan().name() + " " + String.join(",", skipped));
   }
 
+  /**
+   * 票上指定了车型：只能出这个车型。档案不可用、方案里已经没有它、或到了出车上限，都不改出别的车型—— 时刻表按这个车型排的时分，换车型就对不上表了。票留着重试，到期由时刻表按出不了车处理。
+   */
+  private SpawnChoice designated(UUID routeId, String key) {
+    Optional<ResolvedConsistPlan.Member> member = plans.member(routeId, key);
+    if (member.isEmpty()) {
+      return SpawnChoice.blocked("consist=" + key + ":not-in-any-plan");
+    }
+    ConsistProfile profile = member.get().profile().orElseThrow();
+    if (inspector.exceedsSpawnLimit(profile.pattern())) {
+      return SpawnChoice.blocked("consist=" + key + ":spawn-limit");
+    }
+    return SpawnChoice.chosen(profile.pattern(), member.get().spawnTags());
+  }
+
   @Override
   public boolean acceptsForRoute(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
     if (candidate == null) {
@@ -128,7 +147,8 @@ public final class ConsistDispatchArbiter implements ConsistArbiter {
 
   @Override
   public void onDispatched(SpawnTicket ticket, String trainName) {
-    if (ticket == null || trainName == null) {
+    if (ticket == null || trainName == null || ticket.consist().isPresent()) {
+      // 票上指定车型的是时刻表排定的，不进间隔发车的份额账。
       return;
     }
     UUID routeId = ticket.service().routeId();

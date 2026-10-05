@@ -224,7 +224,8 @@ public final class TimetableApiImpl implements TimetableApi {
     LocalDate firstDate = from.atZone(timetable.zoneId()).toLocalDate().minusDays(1);
     LocalDate lastDate = to.atZone(timetable.zoneId()).toLocalDate();
     for (TimetableTrip trip : timetable.trips()) {
-      Optional<TimetableRoutePlan> planOpt = timetable.routePlan(trip.routeId());
+      // 区分车型的表：各站时刻按这一班那辆车的车型。
+      Optional<TimetableRoutePlan> planOpt = timetable.tripPlan(trip);
       if (planOpt.isEmpty()) {
         continue;
       }

@@ -11,7 +11,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
  * 发车时的车型裁决：出什么车、到站的车里接哪辆、车跑完一班怎么记账。
  *
  * <p>route 绑了编组方案才生效；没绑的 route 一切按旧规则（出车读 route 的 {@code spawn_train_pattern}，再兜底车库牌子第 4 行；复用不看车型）。
- * 默认实现 {@link #NONE} 对所有 route 都按旧规则。
+ * 默认实现 {@link #NONE} 对所有 route 都按旧规则；票上指定了车型的出不了车。
  */
 public interface ConsistArbiter {
 
@@ -26,7 +26,10 @@ public interface ConsistArbiter {
 
         @Override
         public SpawnChoice chooseSpawn(SpawnTicket ticket) {
-          return SpawnChoice.legacy();
+          // 票上指定了车型却没有编组方案可查：出不了那个车型，也不能改出别的。
+          return ticket != null && ticket.consist().isPresent()
+              ? SpawnChoice.blocked("consist=" + ticket.consist().get() + ":no-consist-plans")
+              : SpawnChoice.legacy();
         }
 
         @Override

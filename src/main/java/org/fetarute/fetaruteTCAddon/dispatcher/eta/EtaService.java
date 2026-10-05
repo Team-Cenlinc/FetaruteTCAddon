@@ -16,7 +16,6 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
-import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -173,8 +172,8 @@ public final class EtaService {
   /** 未发车票据的车种推断，按交路缓存。 */
   private final SpawnTrainConfigResolver spawnTrainConfigs;
 
-  private volatile Function<UUID, Optional<TrainConfig>> plannedConsist =
-      routeId -> Optional.empty();
+  private volatile java.util.function.BiFunction<UUID, Optional<String>, Optional<TrainConfig>>
+      plannedConsist = (routeId, consist) -> Optional.empty();
 
   private volatile SpawnManager spawnManager;
   private volatile java.util.function.Supplier<List<SpawnTicket>> pendingTicketSupplier;
@@ -338,12 +337,14 @@ public final class EtaService {
   }
 
   /**
-   * 接入编组方案：route 绑了方案时，未发车票据按方案下一班预计的车型估算走行，不再读车库牌子推断。
+   * 接入编组方案：票上指定了车型（按表出的票，交路的车型）时按这个车型估算走行；没指定、route 绑了方案时按方案下一班预计的车型， 不再读车库牌子推断。
    *
-   * @param plannedConsist routeId → 下一班预计车型的加减速；route 没绑方案时为空
+   * @param plannedConsist (routeId, 票上的车型) → 车型的加减速与最高速度；都没有时为空
    */
-  public void attachPlannedConsist(Function<UUID, Optional<TrainConfig>> plannedConsist) {
-    this.plannedConsist = plannedConsist == null ? routeId -> Optional.empty() : plannedConsist;
+  public void attachPlannedConsist(
+      java.util.function.BiFunction<UUID, Optional<String>, Optional<TrainConfig>> plannedConsist) {
+    this.plannedConsist =
+        plannedConsist == null ? (routeId, consist) -> Optional.empty() : plannedConsist;
   }
 
   /**
@@ -2091,7 +2092,8 @@ public final class EtaService {
       }
       // 按车库推断的车种估算，边限速与运行中列车读同一个有效限速入口。
       TravelTimeModel routeTravelTimeModel =
-          resolveTravelTimeModelForRoute(ticket.service().routeId(), worldOpt.get(), now);
+          resolveTravelTimeModelForRoute(
+              ticket.service().routeId(), ticket.consist(), worldOpt.get(), now);
       // 从起点静止出发；途中停车点与运行中列车同样拆段、同样累加停站——票据漏了停站，站牌上离起点越远的班次越早。
       Optional<RoutedTarget> routedOpt =
           routeToTarget(
@@ -2802,18 +2804,32 @@ public final class EtaService {
    * @param now 当前时刻（临时限速按它判断是否生效）
    */
   TravelTimeModel resolveTravelTimeModelForRoute(UUID routeUuid, UUID worldId, Instant now) {
+    return resolveTravelTimeModelForRoute(routeUuid, Optional.empty(), worldId, now);
+  }
+
+  /**
+   * 同 {@link #resolveTravelTimeModelForRoute(UUID, UUID, Instant)}，票上指定了车型时按这个车型（加减速与最高速度）。
+   *
+   * @param consist 票上的车型
+   */
+  TravelTimeModel resolveTravelTimeModelForRoute(
+      UUID routeUuid, Optional<String> consist, UUID worldId, Instant now) {
     RunCurveModel.Settings settings = runSettings();
     ConfigManager.ConfigView config = currentConfig();
+    OptionalDouble maxSpeed = OptionalDouble.empty();
     if (routeUuid != null && config != null) {
-      Optional<TrainConfig> planned = plannedConsist.apply(routeUuid);
+      Optional<TrainConfig> planned =
+          plannedConsist.apply(routeUuid, consist == null ? Optional.empty() : consist);
       TrainConfig trainConfig =
           planned.isPresent()
               ? planned.get()
               : spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
       settings =
           settings.withMotion(new SpeedCurve(trainConfig.accelBps2(), trainConfig.decelBps2()));
+      maxSpeed = trainConfig.maxSpeedBps();
     }
-    return new TravelTimeModel(new RunCurveModel(settings, effectiveSpeeds(worldId, now)));
+    return new TravelTimeModel(
+        new RunCurveModel(settings, effectiveSpeeds(worldId, now, maxSpeed)));
   }
 
   private Optional<Route> readRoute(UUID routeUuid) {
@@ -2847,7 +2863,9 @@ public final class EtaService {
       TrainConfig train = snap.motion().resolve(config.trainConfigSettings());
       settings = settings.withMotion(new SpeedCurve(train.accelBps2(), train.decelBps2()));
     }
-    return new TravelTimeModel(new RunCurveModel(settings, effectiveSpeeds(snap.worldId(), now)));
+    return new TravelTimeModel(
+        new RunCurveModel(
+            settings, effectiveSpeeds(snap.worldId(), now, snap.motion().maxSpeedBps())));
   }
 
   /**
@@ -2855,11 +2873,20 @@ public final class EtaService {
    *
    * <p>编表只接永久覆盖（临时限速带截止时刻，进表会破坏确定性）；ETA 要回答"现在开过去多久"，所以连临时限速一起算。
    */
-  private RunCurveModel.EdgeSpeedResolver effectiveSpeeds(UUID worldId, Instant now) {
+  private RunCurveModel.EdgeSpeedResolver effectiveSpeeds(
+      UUID worldId, Instant now, OptionalDouble maxSpeedBps) {
     if (worldId == null) {
       return null;
     }
     Instant at = now != null ? now : Instant.now();
+    if (maxSpeedBps != null && maxSpeedBps.isPresent()) {
+      // 车型最高速度封顶边限速：与控车、编表同一口径。
+      double max = maxSpeedBps.getAsDouble();
+      return (graph, edge, fallbackSpeed) ->
+          Math.min(
+              railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, at, fallbackSpeed),
+              max);
+    }
     return (graph, edge, fallbackSpeed) ->
         railGraphService.effectiveSpeedLimitBlocksPerSecond(worldId, edge, at, fallbackSpeed);
   }
