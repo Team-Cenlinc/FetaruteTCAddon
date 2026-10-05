@@ -182,6 +182,13 @@ final class TimetableBuildReportSender {
           Component.text(
               "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
     }
+    for (String line :
+        TimetableBuildReportText.describeBottlenecks(
+            result.capacity(), options.serviceStartSecondOfDay())) {
+      sender.sendMessage(
+          Component.text(
+              "  " + line, line.contains("超过 100%") ? NamedTextColor.YELLOW : NamedTextColor.GRAY));
+    }
     sender.sendMessage(FtaTimetableCommand.field("车辆交路", String.valueOf(result.dutyCount())));
     sender.sendMessage(
         FtaTimetableCommand.field(

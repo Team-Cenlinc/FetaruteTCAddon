@@ -148,6 +148,8 @@ class TimetableBuilderRapidStaggerTest {
             profiles,
             index,
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
+            TimetableBuildOptions.Following.NONE,
+            BlockingTimes.Trajectories.NONE,
             5 * 3600,
             java.util.Set.of(rapid),
             yields);
@@ -157,6 +159,8 @@ class TimetableBuilderRapidStaggerTest {
             profiles,
             index,
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS,
+            TimetableBuildOptions.Following.NONE,
+            BlockingTimes.Trajectories.NONE,
             5 * 3600,
             java.util.Set.of(),
             yields);

@@ -151,27 +151,44 @@ public final class TimetableBuilder {
             chosen.profiles(),
             chosen.graphIndex(),
             separationOf(base.options()));
-    RapidStagger.Measure measure = measureRapids(base, fastRoutes);
+    RapidStagger.Measure measure =
+        measureRapids(base, fastRoutes, TimetableBuildOptions.Following.NONE);
+    RapidStagger.Measure reported = reportedRapids(base, fastRoutes, measure);
     return switch (RapidStagger.plan(
-        requested.rapidStagger(), measure, base.result().headwayRelaxed())) {
-      case MEASURE_ONLY -> RapidStagger.annotate(base.result(), measure, routeCodes(chosen));
+        requested.rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
+      case MEASURE_ONLY -> RapidStagger.annotate(base.result(), reported, routeCodes(chosen));
       case TURNBACK_ONLY -> staggerRapids(
-          input, requested, builtAt, base, measure, fastRoutes, true);
-      case SEARCH -> staggerRapids(input, requested, builtAt, base, measure, fastRoutes, false);
+          input, requested, builtAt, base, measure, reported, fastRoutes, true);
+      case SEARCH -> staggerRapids(
+          input, requested, builtAt, base, measure, reported, fastRoutes, false);
     };
   }
 
-  /** 量一次构建的成品表（用选中那份表自己的准备：多停改过的停站也算在内）。 */
-  private static RapidStagger.Measure measureRapids(Built built, Set<UUID> fastRoutes) {
+  /**
+   * 量一次构建的成品表（用选中那份表自己的准备：多停改过的停站也算在内）。
+   *
+   * @param following 跟车规则；未启用时按占用区间量（错峰搜索的口径）
+   */
+  private static RapidStagger.Measure measureRapids(
+      Built built, Set<UUID> fastRoutes, TimetableBuildOptions.Following following) {
     Prepared chosen = built.chosen().orElseThrow();
     return RapidStagger.measure(
         built.result().timetable().orElseThrow(),
         chosen.profiles(),
         chosen.graphIndex(),
         separationOf(built.options()),
+        following,
+        chosen.trajectories(),
         built.options().serviceStartSecondOfDay(),
         fastRoutes,
         built.result().yields());
+  }
+
+  /** 报告口径：有跟车规则时按闭塞时间再量一遍，没有时就是搜索口径那一份。 */
+  private static RapidStagger.Measure reportedRapids(
+      Built built, Set<UUID> fastRoutes, RapidStagger.Measure searched) {
+    TimetableBuildOptions.Following following = built.options().following();
+    return following.enabled() ? measureRapids(built, fastRoutes, following) : searched;
   }
 
   /**
@@ -412,7 +429,8 @@ public final class TimetableBuilder {
             chosen.resourceNotes(),
             chosen.residues(),
             List.copyOf(warnings),
-            TimetableBuildResult.CatchUp.NONE);
+            TimetableBuildResult.CatchUp.NONE,
+            CapacityReport.Report.NONE);
     return new Built(result, Optional.of(prepared), Optional.of(chosenPrepared), options);
   }
 
@@ -422,6 +440,10 @@ public final class TimetableBuilder {
    *
    * <p>原表已放宽时，候选仍按目标间隔编：选中的候选把间隔排回了目标，班次更多，全网损失不更多这一条因此偏保守。
    *
+   * <p>快车被卡量两遍：搜索里的取舍与早停按占用区间，最终在编过的候选里按闭塞时间挑、报告也写闭塞时间的数（见 {@link RapidStagger}）。
+   *
+   * @param baseMeasure 原表按占用区间量的被卡
+   * @param baseReported 原表按闭塞时间量的被卡（没有跟车规则时同 {@code baseMeasure}）
    * @param turnbackOnly 原表已放宽：只试加长折返（它可能正好让目标间隔排得开），不平移、不中途加停
    */
   private TimetableBuildResult staggerRapids(
@@ -430,6 +452,7 @@ public final class TimetableBuilder {
       Instant builtAt,
       Built base,
       RapidStagger.Measure baseMeasure,
+      RapidStagger.Measure baseReported,
       Set<UUID> fastRoutes,
       boolean turnbackOnly) {
     long started = System.nanoTime();
@@ -458,7 +481,8 @@ public final class TimetableBuilder {
             Optional.empty(),
             base.result(),
             RapidStagger.Outcome.of(base.result()),
-            baseMeasure);
+            baseMeasure,
+            baseReported);
     RapidStagger.Search search =
         RapidStagger.search(
             periods,
@@ -489,11 +513,15 @@ public final class TimetableBuilder {
     TimetableBuildResult chosen =
         search.improved().map(RapidStagger.Candidate::result).orElse(base.result());
     RapidStagger.Measure chosenMeasure =
-        search.improved().map(RapidStagger.Candidate::measure).orElse(baseMeasure);
+        search.improved().map(RapidStagger.Candidate::reported).orElse(baseReported);
     return RapidStagger.annotate(chosen, chosenMeasure, codes)
         .withPhaseNote(
             RapidStagger.describeSearch(
-                original, search.improved(), search.tried(), millis, turnbackOnly));
+                original.asReported(),
+                search.improved().map(RapidStagger.Candidate::asReported),
+                search.tried(),
+                millis,
+                turnbackOnly));
   }
 
   /**
@@ -533,9 +561,16 @@ public final class TimetableBuilder {
         || !RapidStagger.acceptable(RapidStagger.Outcome.of(base.result()), outcome)) {
       return Optional.empty();
     }
+    RapidStagger.Measure searched =
+        measureRapids(built, fastRoutes, TimetableBuildOptions.Following.NONE);
     return Optional.of(
         new RapidStagger.Candidate(
-            shift, dwell, built.result(), outcome, measureRapids(built, fastRoutes)));
+            shift,
+            dwell,
+            built.result(),
+            outcome,
+            searched,
+            reportedRapids(built, fastRoutes, searched)));
   }
 
   private static int separationOf(TimetableBuildOptions options) {
@@ -773,7 +808,8 @@ public final class TimetableBuilder {
         List.copyOf(infeasible),
         classification,
         Set.copyOf(passengerReturns),
-        Map.copyOf(runByRoute));
+        Map.copyOf(runByRoute),
+        run -> input.runTimeModel().trajectory(input.graph(), run));
   }
 
   // ------------------------------------------------------------ 第 2–4 步
@@ -1980,7 +2016,8 @@ public final class TimetableBuilder {
       List<TimetableBuildResult.InfeasibleRoute> infeasible,
       ServiceGroupClassifier.Classification classification,
       Set<UUID> passengerReturns,
-      Map<UUID, Integer> runByRoute) {
+      Map<UUID, Integer> runByRoute,
+      BlockingTimes.Trajectories trajectories) {
 
     /** 这几条 route 的全程走行各加 {@code seconds}，其余不变：结构预筛估喂车多停的效果，只有走行进相位层。 */
     Prepared withExtraRun(Collection<UUID> routeIds, int seconds) {
@@ -2000,7 +2037,8 @@ public final class TimetableBuilder {
           infeasible,
           classification,
           passengerReturns,
-          Map.copyOf(run));
+          Map.copyOf(run),
+          trajectories);
     }
   }
 

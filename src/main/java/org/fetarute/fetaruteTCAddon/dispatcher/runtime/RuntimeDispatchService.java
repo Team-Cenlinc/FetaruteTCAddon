@@ -119,6 +119,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalFootprintHydrationSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PhysicalInterlockingBerthPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.PositionZoneEvidence;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.RearGuardWindow;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
@@ -14253,10 +14254,7 @@ public final class RuntimeDispatchService {
   }
 
   private static boolean shouldTrackIntermediateGraphNode(SignNodeDefinition definition) {
-    if (definition == null || definition.nodeType() == null) {
-      return false;
-    }
-    return definition.nodeType() == NodeType.WAYPOINT || definition.nodeType() == NodeType.SWITCHER;
+    return definition != null && RearGuardWindow.tracksIntermediateNode(definition.nodeType());
   }
 
   /**
@@ -17893,6 +17891,12 @@ public final class RuntimeDispatchService {
           false,
           OptionalLong.empty());
     } else {
+      // 交路最后一个路径点（终到停站）：同样刷新停车保持，停稳且车身完整时只保持车身（见 LayoverBodyRetain）——
+      // 否则进站那一拍按站台节点往回量的尾部保护要一直压到终到停站结束、登记成待命车为止。
+      if (occupancyManager != null && currentNode != null) {
+        RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
+        retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now, train);
+      }
       runtimeTrainController.stopNow(train);
     }
   }
@@ -29107,6 +29111,8 @@ public final class RuntimeDispatchService {
       RailGraph graph,
       Instant now,
       RuntimeTrainHandle train) {
+    LivePhysicalReleaseEvidence evidence =
+        resolveLivePhysicalReleaseEvidence(trainName, train, graph);
     return retainStopOccupancy(
         trainName,
         route,
@@ -29116,7 +29122,9 @@ public final class RuntimeDispatchService {
         graph,
         now,
         resolveRearGuardDistanceBlocks(train),
-        resolveLivePhysicalReleaseEvidence(trainName, train, graph),
+        LayoverBodyRetain.atFinalStop(route, currentIndex) && graph != null
+            ? evidence.withLayoverBody(livePhysicalEdgeCoverage(train, graph))
+            : evidence,
         Set.of());
   }
 
@@ -29302,7 +29310,7 @@ public final class RuntimeDispatchService {
     DispatchPriorityResolution priorityResolution = plan.priorityResolution();
     int priority = plan.schedulingPriority();
     Optional<OccupancyRequest> canonicalRequest = plan.canonicalRequest();
-    // 终点待命车停稳、车身覆盖完整时只保持车身；实时联锁区在收窄之后并入。
+    // 终点停车（终到停站或待命）停稳、车身覆盖完整时只保持车身；实时联锁区在收窄之后并入。
     OccupancyRequest request =
         mergeStopPhysicalEvidence(
             LayoverBodyRetain.narrow(
@@ -29644,7 +29652,7 @@ public final class RuntimeDispatchService {
    * 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。
    *
    * @param stationary 读取足迹时列车已停稳；制动中车头仍可能压进前方联锁区
-   * @param layoverBody 终点待命车的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
+   * @param layoverBody 终点停车（终到停站或待命）的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
    */
   private record LivePhysicalReleaseEvidence(
       boolean required,
@@ -29667,7 +29675,7 @@ public final class RuntimeDispatchService {
       return new LivePhysicalReleaseEvidence(true, true, stationary, resources, Optional.empty());
     }
 
-    /** 标记为终点待命车，附上整列车身覆盖。 */
+    /** 标记为终点停车（终到停站或待命），附上整列车身覆盖。 */
     private LivePhysicalReleaseEvidence withLayoverBody(LivePhysicalEdgeCoverage body) {
       return new LivePhysicalReleaseEvidence(
           required, complete, stationary, resources, Optional.ofNullable(body));
