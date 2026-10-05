@@ -307,7 +307,9 @@ command:
           - "# 3 SH_A6"
           - "# 1 SH_A8 | name=8 节编组 | type=emu"
           - "# 可用的键：name type accel"
-          - "# decel max-bps"
+          - "# decel max-speed"
+          - "# max-speed 可写单位，如 80kmh"
+          - "# 22bps；不写单位按格/秒"
           - "# 以 # 开头的行不生效"
     define:
       book:
@@ -321,7 +323,7 @@ command:
       success: "<prefix> <dark_aqua>已保存编组方案</dark_aqua> <white><name></white> <gray>（共 <count> 个车型）</gray>"
     member: "<gray>-</gray> <white><weight></white> <dark_aqua><consist></dark_aqua> <gray><cars> 节，车长 <length> 格，<type>（<source>），加速 <accel>，减速 <decel><extra></gray>"
     member-unresolved: "<gray>-</gray> <white><weight></white> <red><consist></red> <gray>档案不可用，不会以此车型出车</gray>"
-    max-speed: "，最高 <value> 格/秒"
+    max-speed: "，最高 <kmh> km/h（<value> 格/秒）"
     spawn-limit: "，出车上限 <value> 列"
     info:
       header: "<prefix> <dark_aqua>编组方案</dark_aqua> <white><name></white> <gray>(<operator>，更新于 <updated>)</gray>"

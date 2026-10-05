@@ -30,6 +30,8 @@ import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailControlParsers;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.RailSpeed;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
@@ -154,8 +156,9 @@ public final class FtaTrainCommand {
     var maxSpeedFlag =
         CommandFlag.builder("max-speed")
             .withComponent(
-                CommandComponent.builder("max-speed", DoubleParser.doubleParser())
-                    .suggestionProvider(CommandSuggestionProviders.placeholder("<bps>"))
+                CommandComponent.builder("max-speed", StringParser.stringParser())
+                    .suggestionProvider(
+                        SuggestionProvider.suggestingStrings("80kmh", "22bps", "1.1bpt"))
                     .build())
             .build();
 
@@ -205,7 +208,14 @@ public final class FtaTrainCommand {
                   Double decel = ctx.flags().getValue(decelFlag, null);
                   String modeRaw = ctx.flags().getValue(modeFlag, null);
                   String mtRaw = ctx.flags().getValue(mtFlag, null);
-                  Double maxSpeed = ctx.flags().getValue(maxSpeedFlag, null);
+                  // 可写单位（80kmh、22bps、1.1bpt）；不写单位时按格/秒，与以前的写法一致。
+                  String maxSpeedRaw = ctx.flags().getValue(maxSpeedFlag, null);
+                  Double maxSpeed =
+                      maxSpeedRaw == null
+                          ? null
+                          : RailControlParsers.parseSpeed(maxSpeedRaw, "bps")
+                              .map(RailSpeed::blocksPerSecond)
+                              .orElse(Double.NaN);
                   String powerRaw = ctx.flags().getValue(powerFlag, null);
                   Optional<PowerSupply> power =
                       Optional.ofNullable(powerRaw).flatMap(PowerSupply::parse);
@@ -217,7 +227,7 @@ public final class FtaTrainCommand {
                   } else if (mtRaw != null && MotorRatio.parse(mtRaw).isEmpty()) {
                     invalidDrive = "--mt " + mtRaw;
                   } else if (maxSpeed != null && !(Double.isFinite(maxSpeed) && maxSpeed > 0.0)) {
-                    invalidDrive = "--max-speed " + maxSpeed;
+                    invalidDrive = "--max-speed " + maxSpeedRaw;
                   } else if (powerRaw != null && power.isEmpty()) {
                     invalidDrive = "--power " + powerRaw;
                   }

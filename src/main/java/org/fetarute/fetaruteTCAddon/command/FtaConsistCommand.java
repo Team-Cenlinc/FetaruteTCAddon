@@ -477,7 +477,10 @@ public final class FtaConsistCommand {
         .ifPresent(
             value ->
                 extra.append(
-                    locale.text("command.consist.max-speed").replace("<value>", format(value))));
+                    locale
+                        .text("command.consist.max-speed")
+                        .replace("<kmh>", format(value * 3.6))
+                        .replace("<value>", format(value))));
     profile
         .spawnLimit()
         .ifPresent(

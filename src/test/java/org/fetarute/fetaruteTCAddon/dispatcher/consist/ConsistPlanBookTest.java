@@ -94,4 +94,29 @@ class ConsistPlanBookTest {
         List.of("SH_A6", "SH_A8"),
         parsed.entries().stream().map(ConsistPlanBook.Entry::pattern).toList());
   }
+
+  @Test
+  void maxSpeedAcceptsUnitsAndKeepsTheOldKey() {
+    ConsistPlanBook.Parsed parsed =
+        ConsistPlanBook.parse(
+            List.of(
+                "1 A | max-speed=72kmh",
+                "1 B | max-speed=0.5bpt",
+                "1 C | max-speed=22",
+                "1 D | max-bps=80km/h",
+                "1 E | max-bps=22 | max-speed=80kmh",
+                "1 F | max-speed=80mph"));
+
+    assertEquals(20.0, parsed.entries().get(0).overrides().maxSpeedBps().getAsDouble(), 1e-9);
+    assertEquals(10.0, parsed.entries().get(1).overrides().maxSpeedBps().getAsDouble(), 1e-9);
+    assertEquals(
+        22.0, parsed.entries().get(2).overrides().maxSpeedBps().getAsDouble(), 1e-9, "不写单位按格/秒");
+    assertEquals(80.0 / 3.6, parsed.entries().get(3).overrides().maxSpeedBps().getAsDouble(), 1e-9);
+    assertEquals(
+        List.of(
+            new ConsistPlanBook.Problem(5, ProblemKind.BAD_VALUE, "max-speed=80kmh"),
+            new ConsistPlanBook.Problem(6, ProblemKind.BAD_VALUE, "max-speed=80mph")),
+        parsed.problems(),
+        "新旧两种写法同时写算重复；不认识的单位报错");
+  }
 }
