@@ -33,5 +33,7 @@ class DriveHudStationBusyTest {
     assertTrue(DriveHud.stationBusy(link));
     stop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
     assertFalse(DriveHud.stationBusy(link), "等待发车时换端提示在前");
+    assertFalse(DriverStationStop.Phase.DEPART.needsDriver());
+    assertFalse(DriverStationStop.Phase.ENDED.needsDriver());
   }
 }

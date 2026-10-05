@@ -799,14 +799,7 @@ public final class DriverLink {
    * @return 不在终点站停站，或还在进站、等开门时为 {@code false}
    */
   public boolean atTerminalStop() {
-    return terminalStopNow()
-        .map(
-            stop ->
-                switch (stop.phase()) {
-                  case DWELL, CLOSE_DOORS, WAIT_DEPARTURE -> true;
-                  default -> false;
-                })
-        .orElse(false);
+    return terminalStopNow().map(stop -> stop.phase().doorsOpened()).orElse(false);
   }
 
   /** 此刻的终点站停站；不在终点站停站时为空。 */

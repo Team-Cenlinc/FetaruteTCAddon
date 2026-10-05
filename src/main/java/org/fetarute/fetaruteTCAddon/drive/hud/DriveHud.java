@@ -209,15 +209,7 @@ public final class DriveHud {
 
   /** 停站正要驾驶员操作：等开门、停站计时、等关门。 */
   static boolean stationBusy(DriverLink link) {
-    return link != null
-        && link.stationStop()
-            .map(
-                stop ->
-                    switch (stop.phase()) {
-                      case OPEN_DOORS, DWELL, CLOSE_DOORS -> true;
-                      default -> false;
-                    })
-            .orElse(false);
+    return link != null && link.stationStop().map(stop -> stop.phase().needsDriver()).orElse(false);
   }
 
   /** 车站提示在动作栏里怎么处理。 */

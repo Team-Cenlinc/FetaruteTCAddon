@@ -67,6 +67,25 @@ class CabChangeTerminalTest {
   }
 
   @Test
+  @DisplayName("发车端预测：开门时算一次，转入待命时再算一次，其余沿用")
+  void predictionRecomputedOnLayover() {
+    CabChange change = new CabChange();
+    int[] calls = {0};
+    java.util.function.Supplier<CabSeats.Departure> either =
+        () -> {
+          calls[0]++;
+          return CabSeats.Departure.EITHER;
+        };
+    assertEquals(CabSeats.Departure.EITHER, change.prediction(true, false, either));
+    change.prediction(true, false, either);
+    assertEquals(1, calls[0], "停站期间沿用");
+    assertEquals(
+        CabSeats.Departure.TAIL, change.prediction(true, true, () -> CabSeats.Departure.TAIL));
+    assertEquals(CabSeats.Departure.TAIL, change.prediction(true, true, either), "待命期间沿用转入待命时算的");
+    assertEquals(1, calls[0]);
+  }
+
+  @Test
   @DisplayName("没确认前坐在车尾也不算完成，确认后才完成")
   void completesOnlyAfterConfirm() {
     CabChange change = new CabChange();

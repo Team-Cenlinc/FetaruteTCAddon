@@ -264,8 +264,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final StopMarker stopMarker;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
 
-  /** 终点站已结算、等着接续下一趟的驾驶员与刚结算的那一趟：这期间取消、离座、换端超时都按正常结束，列车开出下一趟时才记成新任务。 */
-  private final Map<UUID, TaskKey> settledTrips = new HashMap<>();
+  /**
+   * 等着接续下一趟的驾驶员：列车开出下一趟时才记成新任务。
+   *
+   * @param after 刚跑完的那一趟（列车绑上别的车次才算开出下一趟）
+   * @param scored 那一趟已在本次驾驶里结算：这期间取消、离座、换端超时都按正常结束说；停在终点站接管（一站没开）时为 {@code false}
+   */
+  private record Continuation(TaskKey after, boolean scored) {}
+
+  private final Map<UUID, Continuation> continuations = new HashMap<>();
+
+  /** 没领任务直接接管调度列车的驾驶员（运营人员）：到终点站结算后没有接续车次也不交还，照旧可以开到回库。 */
+  private final Set<UUID> takeovers = new HashSet<>();
 
   /** 已提示过确认接班的座位：换了座位才再在聊天栏提示一次。 */
   private final Map<UUID, SeatBinding> seatPrompts = new HashMap<>();
@@ -753,6 +763,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     active.put(player.getUniqueId(), session);
     seatPrompts.remove(player.getUniqueId());
+    // 开始驾驶就是确认了这个座位（接车时已确认过座位）：之后换端只对新坐的座位要确认。
+    CabSeatKey.of(group, binding).ifPresent(session::setConfirmedCabSeat);
     if (driverLink != null) {
       onPickupBoarded(session, group.getProperties().getTrainName());
     }
@@ -1735,7 +1747,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 告诉玩家驾驶为什么结束；玩家主动结束、下线、死亡等不需要提示。终点站已结算、等着接续时离座或交还都按正常结束说。 */
   private void notifyEnd(Player player, DriveSession session, DriveSession.EndReason reason) {
-    if (settledTrips.containsKey(session.playerId())
+    if (scoredWindow(session.playerId())
         && EnumSet.of(
                 DriveSession.EndReason.LEFT_SEAT,
                 DriveSession.EndReason.SEAT_LOST,
@@ -1766,7 +1778,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 立即结束会话并还原列车属性。 */
   private void endNow(DriveSession session, DriveSession.EndReason reason) {
     session.finish(reason);
-    settledTrips.remove(session.playerId());
+    continuations.remove(session.playerId());
+    takeovers.remove(session.playerId());
     tasks.releaseReservation(session.playerId());
     closeDoors(session);
     releaseCab(session);
@@ -2248,7 +2261,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     // 停在终点站待命：派车放行那一拍按发车方向调头（自动运行由发车动作自己调头）。
     link.setTurnbackPending(layover);
     // 终点站结算后、开出下一趟之前：评分停在刚结算的那一趟，下一趟的起始晚点等开出记成任务后再记。
-    boolean settled = settledTrips.containsKey(session.playerId());
+    boolean settled = continuations.containsKey(session.playerId());
     if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0 && !settled && !link.score().hasDelayAtStart()) {
       // 接班时还查不到晚点（车库出车、终点站发车前）：等第一次查得到时再记，回送与等驾驶员的时间不算驾驶员的晚点。
       link.score().setDelayAtStart(taskDelayOf(session.playerId(), trainName));
@@ -2337,7 +2350,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (task.isPresent()
         && tickCounter % TERMINAL_CHECK_TICKS == 0
         && session.isStopped()
-        && link.stationStop().map(stop -> doorsDone(stop.phase())).orElse(true)
+        && link.stationStop().map(stop -> stop.phase().doorsOpened()).orElse(true)
         && tasks.atTerminal(task.get(), trainName)) {
       traceSession(session, "到达终点站，任务完成");
       tasks.complete(session.playerId());
@@ -2345,13 +2358,21 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (offerContinuation(session, link, task.get(), trainName)) {
         return false;
       }
+      if (takeovers.contains(session.playerId()) && task.get().alightStopSequence() < 0) {
+        // 运营人员直接接管：没有接续车次也接着开（例如开到回库），像以前一样，直到收车或自己结束。
+        continuations.put(session.playerId(), new Continuation(task.get().key(), true));
+        return false;
+      }
       handback(session, DriveSession.EndReason.TASK_COMPLETE);
       return true;
     }
-    if (settledTrips.containsKey(session.playerId())
-        && !session.isStopped()
-        && tickCounter % TASK_TICKS == 0) {
-      continueWithNextTrip(session, trainName);
+    Continuation waiting = continuations.get(session.playerId());
+    if (waiting != null && tickCounter % TASK_TICKS == 0) {
+      if (!session.isStopped()) {
+        continueWithNextTrip(session, trainName);
+      } else if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0) {
+        refreshReservation(session, trainName, waiting);
+      }
     }
     if (task.isPresent()
         && task.get().startedTick() >= 0L
@@ -2527,14 +2548,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             });
   }
 
-  /** 停站已过开门这一步：车门已开（或本站不开门），正在停站、等关门、等发车或已放行。 */
-  static boolean doorsDone(DriverStationStop.Phase phase) {
-    return switch (phase) {
-      case DWELL, CLOSE_DOORS, WAIT_DEPARTURE, DEPART -> true;
-      default -> false;
-    };
-  }
-
   /** 终点站开门后结算这一趟：评分、显示成绩、写记录、报出还没报的停站与任务结束事件；正在停的终点站记进这一趟，链路上的成绩随即清零给下一趟。 */
   private void settleTrip(
       DriveSession session, DriverLink link, DriverTask task, String trainName) {
@@ -2559,20 +2572,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (task.alightStopSequence() >= 0 || player == null || !player.isOnline()) {
       return false;
     }
-    Optional<TimetableService> timetables = plugin.getTimetableService();
-    Optional<TimetableService.DueTrip> due =
-        timetables.flatMap(service -> service.nextDepartureOf(trainName));
+    Optional<TimetableService.DueTrip> due = reserveNextTrip(session, player, trainName);
     if (due.isEmpty()) {
       return false;
     }
     TimetableService.DueTrip next = due.get();
-    TaskKey key = new TaskKey(next.timetable().id(), next.trip().tripCode(), next.serviceDate());
-    if (!tasks.reserve(player.getUniqueId(), player.getName(), key)) {
-      traceSession(session, "接续车次 " + key.tripCode() + " 已被别人领走，不再继续");
-      return false;
-    }
-    settledTrips.put(session.playerId(), task.key());
-    refreshViews();
+    TaskKey key = keyOf(next);
+    Optional<TimetableService> timetables = plugin.getTimetableService();
+    continuations.put(session.playerId(), new Continuation(task.key(), true));
     String destination =
         link.nextTrip()
             .filter(trip -> trip.tripId().equals(next.trip().id()))
@@ -2598,28 +2605,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 终点站结算后列车开出了下一趟：把这一趟记成新的驾驶中任务，单独计分。 */
   private void continueWithNextTrip(DriveSession session, String trainName) {
-    TaskKey settled = settledTrips.get(session.playerId());
+    Continuation waiting = continuations.get(session.playerId());
     Optional<TimetableApi.TrainAssignment> assignment =
         DriverTaskManager.timetables().flatMap(api -> api.getAssignment(trainName));
-    if (settled == null
-        || assignment.isEmpty()
-        || settled.matches(
-            assignment.get().timetableId(),
-            assignment.get().tripCode(),
-            assignment.get().serviceDate())) {
+    if (waiting == null || assignment.isEmpty() || sameTrip(waiting.after(), assignment.get())) {
       return;
     }
-    settledTrips.remove(session.playerId());
+    continuations.remove(session.playerId());
     TimetableApi.TrainAssignment current = assignment.get();
     TaskKey key = new TaskKey(current.timetableId(), current.tripCode(), current.serviceDate());
+    // 从起点站记起：车次绑定晚于起步时，停靠进度可能已推进，但这一趟的发车仍是驾驶员开出的。adopt 同时放掉留着的班次。
     DriverTaskManager.ClaimOutcome outcome =
-        adoptTrip(
-            session,
-            trainName,
-            key,
-            current.lastStopSequence().orElse(0),
-            DriverTask.SOURCE_CONTINUATION);
-    tasks.releaseReservation(session.playerId());
+        adoptTrip(session, trainName, key, 0, DriverTask.SOURCE_CONTINUATION);
     refreshViews();
     traceSession(session, "接续驾驶 " + key.tripCode() + ": " + outcome);
     if (outcome != DriverTaskManager.ClaimOutcome.CLAIMED) {
@@ -2642,6 +2639,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (tasks.activeTaskOf(player.getUniqueId()).isPresent()) {
       return;
     }
+    takeovers.add(player.getUniqueId());
     Optional<TimetableApi.TrainAssignment> assignment =
         DriverTaskManager.timetables().flatMap(api -> api.getAssignment(trainName));
     if (assignment.isEmpty()) {
@@ -2650,19 +2648,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     TimetableApi.TrainAssignment current = assignment.get();
     TaskKey key = new TaskKey(current.timetableId(), current.tripCode(), current.serviceDate());
     if (current.nextStopSequence().isEmpty()) {
-      // 这一趟已到终点：当作刚结算过，列车开出下一趟时记成任务。
-      settledTrips.put(session.playerId(), key);
-      plugin
-          .getTimetableService()
-          .flatMap(service -> service.nextDepartureOf(trainName))
-          .ifPresent(
-              next ->
-                  tasks.reserve(
-                      player.getUniqueId(),
-                      player.getName(),
-                      new TaskKey(
-                          next.timetable().id(), next.trip().tripCode(), next.serviceDate())));
-      refreshViews();
+      // 这一趟已到终点：等列车开出下一趟时再记成任务。本次驾驶没结算过任何一趟，离开时不说“已结算”。
+      continuations.put(session.playerId(), new Continuation(key, false));
+      reserveNextTrip(session, player, trainName);
       return;
     }
     DriverTaskManager.ClaimOutcome outcome =
@@ -2674,6 +2662,54 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             DriverTask.SOURCE_TAKEOVER);
     refreshViews();
     traceSession(session, "接管车次 " + key.tripCode() + " 记为任务: " + outcome);
+  }
+
+  /** 驾驶员在等接续下一趟，且上一趟已在本次驾驶里结算。 */
+  private boolean scoredWindow(UUID playerId) {
+    Continuation waiting = continuations.get(playerId);
+    return waiting != null && waiting.scored();
+  }
+
+  /**
+   * 替驾驶员留下这列车按交路接续的下一班：先放掉他原来留着的，再留此刻查到的那一班。
+   *
+   * @return 留下的那一班；没有下一班或已被别人领走时为空
+   */
+  private Optional<TimetableService.DueTrip> reserveNextTrip(
+      DriveSession session, Player player, String trainName) {
+    Optional<TimetableService.DueTrip> due =
+        plugin.getTimetableService().flatMap(service -> service.nextDepartureOf(trainName));
+    Optional<TaskKey> held = tasks.reservationOf(player.getUniqueId());
+    if (held.isPresent() && due.isPresent() && held.get().equals(keyOf(due.get()))) {
+      return due;
+    }
+    tasks.releaseReservation(player.getUniqueId());
+    if (due.isPresent()
+        && !tasks.reserve(player.getUniqueId(), player.getName(), keyOf(due.get()))) {
+      traceSession(session, "接续车次 " + due.get().trip().tripCode() + " 已被别人领走");
+      due = Optional.empty();
+    }
+    refreshViews();
+    return due;
+  }
+
+  /** 等接续期间（列车还绑着刚跑完的那一趟）重新核对留着的班次：接续车次被取消或换车担当时，放掉旧的、改留现在的那一班。 */
+  private void refreshReservation(DriveSession session, String trainName, Continuation waiting) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    Optional<TimetableApi.TrainAssignment> assignment =
+        DriverTaskManager.timetables().flatMap(api -> api.getAssignment(trainName));
+    if (player == null || assignment.isEmpty() || !sameTrip(waiting.after(), assignment.get())) {
+      return;
+    }
+    reserveNextTrip(session, player, trainName);
+  }
+
+  private static boolean sameTrip(TaskKey key, TimetableApi.TrainAssignment assignment) {
+    return key.matches(assignment.timetableId(), assignment.tripCode(), assignment.serviceDate());
+  }
+
+  private static TaskKey keyOf(TimetableService.DueTrip trip) {
+    return new TaskKey(trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate());
   }
 
   /** 把列车跑的车次从停靠序号 {@code boardSequence} 起记成这名驾驶员驾驶中的任务。 */
@@ -3528,7 +3564,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     NodeId stationNode = link.terminalStopNow().map(DriverStationStop::node).orElse(null);
     CabSeats.Departure predicted =
         applicable
-            ? change.prediction(preRelease, () -> TerminalCabEnd.of(plugin, group, stationNode))
+            ? change.prediction(
+                preRelease,
+                link.turnbackPending(),
+                () -> TerminalCabEnd.of(plugin, group, stationNode))
             : CabSeats.Departure.EITHER;
     // 座位在哪一端只在可能要换端时才读（要逐个看座位附件的名字）：尽头式待命、换端途中、停着拿到行车许可时。
     boolean seatMatters =
@@ -3605,7 +3644,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         // 终点站已结算、还没开出下一趟：换端超时只是不继续，按正常结束。
         sendTaskChat(
             player,
-            settledTrips.containsKey(session.playerId())
+            scoredWindow(session.playerId())
                 ? "drive.task.cab-change-timeout-settled"
                 : "drive.task.cab-change-failed",
             values);
@@ -3639,10 +3678,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     Optional<CabSeatKey> key = CabSeatKey.of(group, seat);
     boolean confirmed = key.isPresent() && key.equals(session.confirmedCabSeat());
     boolean changing = session.cabChange().stage() != CabChange.Stage.IDLE;
-    if (key.isEmpty()
-        || !CabChange.awaitsSeatConfirm(seats.marked(), changing, preRelease, end, confirmed)) {
+    if (!CabChange.awaitsSeatConfirm(seats.marked(), changing, preRelease, end, confirmed)) {
       session.setPendingCabSeat(null);
       return end;
+    }
+    if (key.isEmpty()) {
+      // 认不出具体座位（编组刚变动）：先不算坐好，下一拍再看。
+      session.setPendingCabSeat(null);
+      return CabSeats.End.NONE;
     }
     if (!key.equals(session.pendingCabSeat())) {
       session.setPendingCabSeat(key.get());
@@ -3844,6 +3887,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   public DriverTaskManager.ClaimOutcome assignTask(
       Player player, DriverTaskManager.TaskSpec spec, DrivingMode mode, boolean notify) {
+    if (continuations.containsKey(player.getUniqueId())) {
+      return DriverTaskManager.ClaimOutcome.ALREADY_HAS_TASK;
+    }
     DriverTaskManager.ClaimOutcome outcome =
         tasks.assign(player, spec, mode, pickupOpen(config), Instant.now());
     if (outcome == DriverTaskManager.ClaimOutcome.CLAIMED) {
@@ -3988,6 +4034,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     if (!DrivePermissions.allowsMode(mode, player::hasPermission)) {
       return "drive.task.claim.no-mode-permission";
+    }
+    if (continuations.containsKey(player.getUniqueId())) {
+      // 正在等接续本车的下一趟：先结束驾驶再领别的车次，免得开出后这一趟记不成任务。
+      return "drive.task.claim.continuing";
     }
     DriveConfig current = config;
     DriverTaskManager.ClaimOutcome outcome =

@@ -29,7 +29,23 @@ public final class DriverStationStop {
     /** 已有出站许可，等列车起步。 */
     DEPART,
     /** 已发车、已交还自动运行或作废。 */
-    ENDED
+    ENDED;
+
+    /** 已过开门这一步：车门已开（或本站不开门），正在停站、等关门、等发车或已放行。终点站据此结算、开始换端。 */
+    public boolean doorsOpened() {
+      return switch (this) {
+        case DWELL, CLOSE_DOORS, WAIT_DEPARTURE, DEPART -> true;
+        default -> false;
+      };
+    }
+
+    /** 正要驾驶员操作车门或等停站计时：等开门、停站、等关门。这时停站提示优先于换端提示。 */
+    public boolean needsDriver() {
+      return switch (this) {
+        case OPEN_DOORS, DWELL, CLOSE_DOORS -> true;
+        default -> false;
+      };
+    }
   }
 
   private final NodeId node;

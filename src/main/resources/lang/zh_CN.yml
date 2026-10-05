@@ -1944,6 +1944,7 @@ drive:
       disabled: "<prefix> <red>驾驶调度列车当前未开放</red>"
       breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
       cancelled: "<prefix> <red>当前不能领取该车次</red>"
+      continuing: "<prefix> <red>你正在等待接续驾驶本车的下一趟，结束驾驶后才能领取其他车次</red>"
       assigned: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到终点站</green>"
       assigned-interval: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到 <white><alight></white></green>"
       already-has-task: "<prefix> <red>你已有未完成的任务，请先完成或放弃（/fta drive task abandon）</red>"

@@ -211,6 +211,16 @@ public final class DriverTaskManager {
     return true;
   }
 
+  /** 替这名驾驶员留着的班次；没有时为空。 */
+  public Optional<TaskKey> reservationOf(UUID playerId) {
+    for (Map.Entry<TaskKey, TaskBoardEntries.Claimant> entry : reserved.entrySet()) {
+      if (entry.getValue().playerId().equals(playerId)) {
+        return Optional.of(entry.getKey());
+      }
+    }
+    return Optional.empty();
+  }
+
   /** 放掉替这名驾驶员留着的班次（不继续了，或已开出记成任务）。 */
   public void releaseReservation(UUID playerId) {
     reserved.values().removeIf(holder -> holder.playerId().equals(playerId));

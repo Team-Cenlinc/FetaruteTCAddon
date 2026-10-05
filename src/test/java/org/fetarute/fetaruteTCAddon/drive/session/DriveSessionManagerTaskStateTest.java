@@ -37,11 +37,11 @@ class DriveSessionManagerTaskStateTest {
   @Test
   @DisplayName("终点站开门后才结算：等开门、进站不算")
   void settlesOnlyAfterDoorsOpen() {
-    assertFalse(DriveSessionManager.doorsDone(DriverStationStop.Phase.APPROACH));
-    assertFalse(DriveSessionManager.doorsDone(DriverStationStop.Phase.OPEN_DOORS));
-    assertTrue(DriveSessionManager.doorsDone(DriverStationStop.Phase.DWELL));
-    assertTrue(DriveSessionManager.doorsDone(DriverStationStop.Phase.CLOSE_DOORS));
-    assertTrue(DriveSessionManager.doorsDone(DriverStationStop.Phase.WAIT_DEPARTURE));
-    assertTrue(DriveSessionManager.doorsDone(DriverStationStop.Phase.DEPART));
+    assertFalse(DriverStationStop.Phase.APPROACH.doorsOpened());
+    assertFalse(DriverStationStop.Phase.OPEN_DOORS.doorsOpened());
+    assertTrue(DriverStationStop.Phase.DWELL.doorsOpened());
+    assertTrue(DriverStationStop.Phase.CLOSE_DOORS.doorsOpened());
+    assertTrue(DriverStationStop.Phase.WAIT_DEPARTURE.doorsOpened());
+    assertTrue(DriverStationStop.Phase.DEPART.doorsOpened());
   }
 }

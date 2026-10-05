@@ -100,6 +100,7 @@ public final class CabChange {
   private int memberCount;
   private boolean announcedThisLayover;
   private CabSeats.Departure cachedPrediction;
+  private boolean cachedFromLayover;
 
   /**
    * 换端后要不要重做制动试验：simulation 级，且距计划发车的时间够走过去再做一次试验。计划发车不明时不要求（不为它拖晚发车）。
@@ -156,13 +157,25 @@ public final class CabChange {
    * @param compute 计算预计发车端
    */
   public CabSeats.Departure prediction(boolean preRelease, Supplier<CabSeats.Departure> compute) {
+    return prediction(preRelease, true, compute);
+  }
+
+  /**
+   * 放行前预计的发车端：终点站开门后先按停站车站算一次，转入待命（有了待命登记、交路也已推进）时再算一次，其余时候沿用；放行后清掉。
+   *
+   * @param layover 列车已转入终点站待命
+   * @param compute 计算预计发车端
+   */
+  public CabSeats.Departure prediction(
+      boolean preRelease, boolean layover, Supplier<CabSeats.Departure> compute) {
     if (!preRelease) {
       cachedPrediction = null;
       return CabSeats.Departure.EITHER;
     }
-    if (cachedPrediction == null) {
+    if (cachedPrediction == null || cachedFromLayover != layover) {
       CabSeats.Departure computed = compute.get();
       cachedPrediction = computed == null ? CabSeats.Departure.EITHER : computed;
+      cachedFromLayover = layover;
     }
     return cachedPrediction;
   }

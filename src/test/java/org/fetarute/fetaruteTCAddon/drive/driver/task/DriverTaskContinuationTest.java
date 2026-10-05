@@ -73,7 +73,11 @@ class DriverTaskContinuationTest {
         DriverTaskManager.ClaimOutcome.TAKEN,
         tasks.claim(b, row("N1"), "OP", "STA", "站", DrivingMode.MANUAL, true, NOW));
 
+    assertEquals(java.util.Optional.of(key("N1")), tasks.reservationOf(a.getUniqueId()));
+    assertTrue(tasks.reservationOf(b.getUniqueId()).isEmpty());
+
     tasks.releaseReservation(a.getUniqueId());
+    assertTrue(tasks.reservationOf(a.getUniqueId()).isEmpty());
     assertFalse(tasks.takenKeys().contains(key("N1")));
     assertEquals(
         DriverTaskManager.ClaimOutcome.CLAIMED,

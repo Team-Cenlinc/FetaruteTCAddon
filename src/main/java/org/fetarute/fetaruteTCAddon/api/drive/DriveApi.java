@@ -173,7 +173,8 @@ public interface DriveApi {
    * @param state 状态
    * @param trainName 担当的列车；还没对上时为空
    * @param depotPickup 是否从车库接车
-   * @param source 来源：任务板为 {@code "board"}，插件派出的为调用方给的来源标记
+   * @param source 来源：任务板为 {@code "board"}；没领任务直接接管调度列车、按列车所跑车次当场记成的为 {@code
+   *     "takeover"}；终点站结算后接着开同一列车的下一趟为 {@code "continuation"}；插件派出的为调用方给的来源标记
    * @param metadata 调用方给的附加数据，事件里原样带回
    * @param endReason 结束原因；未结束时为空串
    * @param points 得分（0–100）；没有开过车或尚未评分时为空

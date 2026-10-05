@@ -538,6 +538,7 @@ drive:
       disabled: "<prefix> <red>Driving dispatched trains is not enabled</red>"
       breaker-open: "<prefix> <red>The line is congested; new shifts are paused</red>"
       cancelled: "<prefix> <red>This trip cannot be taken right now</red>"
+      continuing: "<prefix> <red>You are waiting to continue with this train's next trip; end driving before taking another trip</red>"
       assigned: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to the terminus</green>"
       assigned-interval: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to <white><alight></white></green>"
       already-has-task: "<prefix> <red>You already have a task; finish or abandon it first (/fta drive task abandon)</red>"
