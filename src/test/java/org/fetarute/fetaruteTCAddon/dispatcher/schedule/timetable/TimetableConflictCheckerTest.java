@@ -60,6 +60,42 @@ class TimetableConflictCheckerTest {
     assertTrue(separated.clean(), () -> separated.conflicts().toString());
   }
 
+  /**
+   * 车尾出清：长车的车尾要等车头再走车尾出清长度才离开。A→B→C 各 100 格、10 格/秒，前车车尾多算 50 格时 A–B 要到 15 秒才腾空， 后车 12 秒进入就撞上；不算车尾时
+   * 10 秒腾空，不撞。
+   */
+  @Test
+  void tailClearanceHoldsTheEdgeUntilTheTailLeaves() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(A, B, C), new int[] {100, 100}, new double[] {10.0, 10.0});
+    Profiles profiles = new Profiles(graph);
+    UUID shortTrain = profiles.add("R1", List.of(A, B, C));
+    UUID longTrain = UUID.randomUUID();
+    profiles.map.put(longTrain, profiles.map.get(shortTrain).asVariant(longTrain, 50.0));
+
+    TimetableConflictChecker.Report headOnly =
+        TimetableConflictChecker.check(
+            graph,
+            profiles.map,
+            List.of(move("T1", shortTrain, 0), move("T2", shortTrain, 12)),
+            List.of(),
+            0);
+    TimetableConflictChecker.Report withTail =
+        TimetableConflictChecker.check(
+            graph,
+            profiles.map,
+            List.of(move("T1", longTrain, 0), move("T2", shortTrain, 12)),
+            List.of(),
+            0);
+
+    assertTrue(headOnly.clean(), () -> headOnly.conflicts().toString());
+    assertEquals(
+        1,
+        withTail.countByKind().getOrDefault(TimetableConflictChecker.Kind.TRACK, 0),
+        () -> withTail.conflicts().toString());
+  }
+
   /** 间隔裕量算数：边上前车 10 秒离开，后车 45 秒进入，裕量 30 就够、裕量 60 就不够。 */
   @Test
   void separationMarginIsEnforcedBetweenSuccessiveOccupations() {

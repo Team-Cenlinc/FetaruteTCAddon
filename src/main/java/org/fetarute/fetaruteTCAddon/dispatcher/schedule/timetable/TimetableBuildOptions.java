@@ -445,6 +445,24 @@ public record TimetableBuildOptions(
         following);
   }
 
+  /** 换一组跟车规则，其余不变。 */
+  public TimetableBuildOptions withFollowing(Following nextFollowing) {
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        rapidStagger,
+        nextFollowing);
+  }
+
   /** 计划窗口长度（秒）：首班发车到运营结束。 */
   public int horizonSeconds() {
     return serviceEndSecondOfDay - serviceStartSecondOfDay;

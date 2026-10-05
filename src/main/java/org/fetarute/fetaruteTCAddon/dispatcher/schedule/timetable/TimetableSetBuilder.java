@@ -196,7 +196,8 @@ public final class TimetableSetBuilder {
             first.input().runTimeModel(),
             first.input().notes(),
             input.neighbors(),
-            lineByRoute);
+            lineByRoute,
+            mergedFleet(members));
     TimetableBuildResult result = new TimetableBuilder(progress).build(joint, options, builtAt);
     if (result.timetable().isEmpty()) {
       return new SetResult(result, Map.of(), Map.of());
@@ -321,7 +322,8 @@ public final class TimetableSetBuilder {
               duty.plannedStartSecondOfDay(),
               duty.returnSecondOfDay(),
               duty.plannedEndSecondOfDay(),
-              duty.closeReason()));
+              duty.closeReason(),
+              duty.consist()));
     }
     for (TimetableTrip trip : trips) {
       referencedRoutes.add(trip.routeId());
@@ -367,7 +369,49 @@ public final class TimetableSetBuilder {
         input.runTimeModel(),
         input.notes(),
         neighbors.isEmpty() ? input.neighbors() : neighbors,
-        lineByRoute);
+        lineByRoute,
+        input.fleet());
+  }
+
+  /**
+   * 各线的车型合在一起：车型按键去重（同一车型在各线是同一份档案），各 route 的方案各归各。
+   *
+   * <p>"没绑方案的 route 不限车型"只在本线的车型里不限：没有任何可用车型的线，它的 route 不区分车型（运行时按车库牌子出车）， 有车型的线，它没绑方案的 route
+   * 只许本线方案里出现过的车型等权跑，不会借到别的线的车型。
+   */
+  static ConsistFleet mergedFleet(List<Member> members) {
+    Map<String, ConsistFleet.Consist> consists = new LinkedHashMap<>();
+    Map<UUID, List<ConsistFleet.Share>> plans = new LinkedHashMap<>();
+    Set<UUID> plain = new LinkedHashSet<>();
+    Map<UUID, String> blocked = new LinkedHashMap<>();
+    List<String> issues = new ArrayList<>();
+    for (Member member : members) {
+      ConsistFleet fleet = member.input().fleet();
+      fleet.consists().forEach(consists::putIfAbsent);
+      fleet.planByRoute().forEach(plans::putIfAbsent);
+      fleet.blockedRoutes().forEach(blocked::putIfAbsent);
+      plain.addAll(fleet.plainRoutes());
+      issues.addAll(fleet.issues());
+    }
+    for (Member member : members) {
+      ConsistFleet fleet = member.input().fleet();
+      List<String> keys = fleet.keys();
+      for (UUID routeId : member.ownRouteIds()) {
+        if (plans.containsKey(routeId) || blocked.containsKey(routeId)) {
+          continue;
+        }
+        if (keys.isEmpty()) {
+          plain.add(routeId);
+          continue;
+        }
+        List<ConsistFleet.Share> all = new ArrayList<>(keys.size());
+        for (String key : keys) {
+          all.add(new ConsistFleet.Share(key, 1));
+        }
+        plans.put(routeId, List.copyOf(all));
+      }
+    }
+    return new ConsistFleet(consists, plans, plain, blocked, issues);
   }
 
   private static TimetableBuilder.RouteInput withGroup(

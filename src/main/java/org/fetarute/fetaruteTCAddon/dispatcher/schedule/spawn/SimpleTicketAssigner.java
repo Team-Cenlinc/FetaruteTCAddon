@@ -130,6 +130,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private volatile java.util.function.BiConsumer<SpawnTicket, String> dispatchListener =
       (ticket, trainName) -> {};
 
+  /** 车型裁决：route 绑了编组方案时，复用只接方案里的车型、按份额挑车，派发后按车型记账。默认不裁决。 */
+  private volatile ConsistArbiter consistArbiter = ConsistArbiter.NONE;
+
   /** 车库出车、第一拍信号之前问：这列车要不要先扣在车库股道上等驾驶员。默认不扣。 */
   private volatile java.util.function.BiPredicate<SpawnTicket, String> depotSpawnHold =
       (ticket, trainName) -> false;
@@ -526,6 +529,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     LayoverRegistry.LayoverCandidate candidate = candidateOpt.get();
+    if (!acceptsConsist(ticket.routeId(), candidate)) {
+      debugLogger.accept("强制分配跳过: 车型不在线路的编组方案里 train=" + trainName + " route=" + ticket.routeId());
+      return false;
+    }
     SpawnControl.Lease lease =
         tryAcquireSpawnControlForLayover(
                 Optional.ofNullable(provider),
@@ -557,6 +564,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     lease.release();
     debugLogger.accept("强制分配失败: dispatchLayover 拒绝 " + trainName);
     return false;
+  }
+
+  /** 回收派 RETURN：车库只收方案里的车型。裁决出错时放行，不让车滞留在终点。 */
+  private boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
+    try {
+      return consistArbiter.acceptsForRoute(routeId, candidate);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "车型裁决异常，放行回收: train=" + candidate.trainName() + " error=" + failure.getMessage());
+      return true;
+    }
   }
 
   /**
@@ -2526,6 +2544,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
+   * 注册车型裁决。传入 {@code null} 恢复"不裁决"。
+   *
+   * <p>出车选编组在 {@link DepotSpawner} 一侧，这里只管复用挑车、回收派车与派发后的记账。
+   */
+  public void setConsistArbiter(ConsistArbiter arbiter) {
+    this.consistArbiter = arbiter == null ? ConsistArbiter.NONE : arbiter;
+  }
+
+  /**
    * 注册派发成功回调。
    *
    * <p>在票据向 SpawnManager 报完成之前调用，带最终的列车名（复用时是改名后的名字）。传入 {@code null} 恢复空回调。
@@ -2569,6 +2596,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     } catch (RuntimeException failure) {
       debugLogger.accept(
           "派发回调异常: ticket="
+              + ticket.id()
+              + " train="
+              + trainName
+              + " error="
+              + failure.getMessage());
+    }
+    try {
+      consistArbiter.onDispatched(ticket, trainName);
+    } catch (RuntimeException failure) {
+      debugLogger.accept(
+          "车型记账异常: ticket="
               + ticket.id()
               + " train="
               + trainName
@@ -2710,6 +2748,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       return false;
     }
+    if (attemptOwner.isEmpty()) {
+      // 已认领的折返事务不重新挑车：那辆车当初就是按车型挑出来的，中途换车会留下两个事务。
+      readyCandidates = orderByConsist(ticket, readyCandidates);
+      if (readyCandidates.isEmpty()) {
+        // 到站的车车型都不在方案里：等方案里的车型到站，不新出库。
+        if (!pendingAttempt) {
+          putPendingLayoverTicket(ticket, now);
+        }
+        return false;
+      }
+    }
     ServiceTicket serviceTicket =
         new ServiceTicket(
             ticketId,
@@ -2754,6 +2803,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             + " readyCandidates="
             + readyCandidates.size());
     return false;
+  }
+
+  /** 交给车型裁决过滤与排序；裁决本身出错时按原顺序放行，不因为它停发。 */
+  private List<LayoverRegistry.LayoverCandidate> orderByConsist(
+      SpawnTicket ticket, List<LayoverRegistry.LayoverCandidate> candidates) {
+    try {
+      List<LayoverRegistry.LayoverCandidate> ordered =
+          consistArbiter.orderReuseCandidates(ticket, candidates);
+      return ordered == null ? candidates : ordered;
+    } catch (RuntimeException failure) {
+      debugLogger.accept("车型裁决异常，按原顺序复用: ticket=" + ticket.id() + " error=" + failure.getMessage());
+      return candidates;
+    }
   }
 
   private static ServiceTicket.TicketMode toTicketMode(RouteOperationType operationType) {

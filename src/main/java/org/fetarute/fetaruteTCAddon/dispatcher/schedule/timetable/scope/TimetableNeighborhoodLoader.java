@@ -106,6 +106,10 @@ public final class TimetableNeighborhoodLoader {
       List<String> warnings = new ArrayList<>();
       List<TimetableConflictChecker.RouteProfile> profiles = new ArrayList<>();
       for (TimetableRoutePlan plan : timetable.routePlans()) {
+        if (plan.consist().isPresent()) {
+          // 车型变体与基础 route 走同一条路径，足迹相同。
+          continue;
+        }
         rebasedProfileOf(timetable.id(), plan, graph, index)
             .ifPresentOrElse(
                 rebased -> profiles.add(rebased.profile()),
@@ -244,6 +248,10 @@ public final class TimetableNeighborhoodLoader {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new LinkedHashMap<>();
       boolean stale = false;
       for (TimetableRoutePlan plan : timetable.routePlans()) {
+        if (plan.consist().isPresent()) {
+          // 车型变体：邻表按每条 route 的基础时分（允许车型里最慢的那份）投影，不分车型。
+          continue;
+        }
         Optional<Rebased> rebased = rebasedProfileOf(timetable.id(), plan, graph, index);
         if (rebased.isEmpty()) {
           warnings.add("route " + plan.routeCode() + " 在当前图上不可达或未加载，足迹按空计");
@@ -405,6 +413,10 @@ public final class TimetableNeighborhoodLoader {
     Objects.requireNonNull(timetable, "timetable");
     Map<UUID, TimetableConflictChecker.RouteProfile> out = new LinkedHashMap<>();
     for (TimetableRoutePlan plan : timetable.routePlans()) {
+      if (plan.consist().isPresent()) {
+        // 车型变体按基础时分投影（见上）。
+        continue;
+      }
       rebasedProfileOf(timetable.id(), plan, graph, index)
           .ifPresent(rebased -> out.put(plan.routeId(), rebased.profile()));
     }

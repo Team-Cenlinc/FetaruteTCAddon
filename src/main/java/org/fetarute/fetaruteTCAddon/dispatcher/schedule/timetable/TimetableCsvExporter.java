@@ -37,7 +37,7 @@ public final class TimetableCsvExporter {
       return out.toString();
     }
     for (TimetableTrip trip : timetable.trips()) {
-      Optional<TimetableRoutePlan> planOpt = timetable.routePlan(trip.routeId());
+      Optional<TimetableRoutePlan> planOpt = timetable.tripPlan(trip);
       if (planOpt.isEmpty()) {
         continue;
       }

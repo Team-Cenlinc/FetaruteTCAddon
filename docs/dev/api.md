@@ -71,14 +71,14 @@ FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6
 | 模块 | 方法 | 功能 |
 |------|------|------|
 | `graph()` | `GraphApi` | 调度图：节点、边、路径查询 |
-| `trains()` | `TrainApi` | 列车状态：位置、速度、ETA；当前所属线路与回库判定（1.7.0） |
+| `trains()` | `TrainApi` | 列车状态：位置、速度、ETA；当前所属线路与回库判定（1.7.0）；车型（1.11.0） |
 | `routes()` | `RouteApi` | 路线定义：站点、停靠表；直通运转换线站（1.7.0） |
 | `occupancy()` | `OccupancyApi` | 占用状态：信号、队列 |
 | `stations()` | `StationApi` | 站点信息：位置、名称、关联节点；车站组与停靠线路（1.6.0） |
 | `operators()` | `OperatorApi` | 运营商信息：名称、颜色、优先级 |
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表（1.9.0 站牌行结构化） |
-| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消） |
+| `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消；1.11.0 车型） |
 
 ---
 
@@ -218,6 +218,11 @@ api.trains().getTrainSnapshot("SURC-WS-LC-1037").ifPresent(train -> {
 
 用 1.6.0 签名构造 `TrainSnapshot` 的代码仍可编译运行：当前线路为空、`outOfService` 为 false。
 列车进度下标与交路 UUID 仍按原方式取：`EtaApi#getRuntimeSnapshot` 的 `routeIndex`，`RouteApi#findByCode` 拆 `routeId`。
+
+### 车型（1.11.0）
+
+`TrainSnapshot#consist` 是车上的车型键：出车编组写法（通常是 TrainCarts 存车名）归一后的形式，与 `TimetableApi` 的车型同一口径
+（见“TimetableApi - 车型”）。间隔发车与按表运行都有；编组方案启用前出的车、手工生成的车没有车型标签，为空。
 
 ### 统计数量
 
@@ -692,7 +697,7 @@ api.eta().getRuntimeSnapshot("train-1").ifPresent(snap -> {
 
 ---
 
-## TimetableApi - 时刻表（1.4.0，1.5.0 修订，1.8.0 车次取消）
+## TimetableApi - 时刻表（1.4.0，1.5.0 修订，1.8.0 车次取消，1.11.0 车型）
 
 只读，数据来自内存中已发布时刻表的快照，查询不访问数据库。返回的 `Instant` 已按时刻表自身时区与服务日换算好。
 
@@ -782,6 +787,36 @@ tt.getAssignment("SURC-WS-LC-1037").ifPresent(a -> {
 `listPublished()` / `listByLine(lineId)` 返回概要，`getTimetable(id)` 返回交路时分（各站相对起点发车的到发偏移与停车方式 `passType`）、
 按发车时刻排序的车次、车辆交路（出库→依次运行的车次→回库）。`StopTime#stationCode` 只有车站本体节点才有，区间点、咽喉、车库为空。
 1.5.0 之前发布的时刻表没有记录停车方式，读出时按“首末站或停站大于 0 秒”回推，重新构建并发布后即按交路定义。
+
+### 车型（1.11.0）
+
+多车型混跑的线路（交路绑了编组方案）编表时，每辆车（车辆交路）定一个车型，它跑的每一班都按这个车型的时分排：快的车型各站时刻更早。
+车型键是出车编组写法（通常是 TrainCarts 存车名）归一后的形式：去掉首尾空白、连续空白压成一个、转小写。
+
+| 字段 | 口径 |
+|------|------|
+| `Trip#consist` / `Duty#consist` | 车辆交路的车型；车次跟它所在的交路 |
+| `Departure#consist` | 这一班那辆车的车型；`plannedArrival` / `plannedDeparture` 已按它算 |
+| `TrainAssignment#consist` | 列车当前车次所属交路的车型；`currentDelaySeconds`、`projectedDelaySeconds` 按它的计划时刻算 |
+| `RoutePlan#stops` | 允许车型里最慢的那份时分（每条交路仍只有一份 `RoutePlan`） |
+| `RoutePlan#consistStops` | 车型键 → 这个车型的时分 |
+
+自己用“起点发车 + 偏移”推算某一班的时刻时，按车次的车型取时分：
+
+```java
+TimetableApi.TimetableDetail detail = tt.getTimetable(timetableId).orElseThrow();
+Map<UUID, TimetableApi.RoutePlan> plans = detail.routePlans().stream()
+    .collect(Collectors.toMap(TimetableApi.RoutePlan::routeId, plan -> plan));
+for (TimetableApi.Trip trip : detail.trips()) {
+    List<TimetableApi.StopTime> stops = plans.get(trip.routeId()).stopsFor(trip.consist());
+    // stops.get(n).departureOffsetSeconds() + trip.departureSecondOfDay() 即第 n 站的计划发车（当日秒数）
+}
+```
+
+不区分车型的时刻表：`consist` 都为空，`consistStops` 为空，`stopsFor` 返回 `stops`。
+
+兼容：1.10.0 及以前的构造器与访问方法照旧可用（车型为空）；`Trip`、`Duty`、`RoutePlan`、`Departure`、`TrainAssignment`、
+`TrainSnapshot` 多了一个组件，用记录模式（record pattern）按组件解构这些类型的代码需要按新的组件数改写。
 
 ---
 

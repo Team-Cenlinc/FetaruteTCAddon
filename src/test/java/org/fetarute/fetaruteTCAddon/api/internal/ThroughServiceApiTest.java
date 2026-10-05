@@ -162,6 +162,38 @@ class ThroughServiceApiTest {
   }
 
   @Test
+  void trainSnapshotCarriesTheTrainsConsist() {
+    snapshots.update(
+        "t-consist",
+        new TrainRuntimeSnapshot(
+            1L,
+            Instant.parse("2026-09-27T00:00:00Z"),
+            UUID.randomUUID(),
+            wsThrough.id(),
+            routes.findById(wsThrough.id()).orElseThrow().id(),
+            2,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            OptionalDouble.empty(),
+            OptionalInt.empty(),
+            OptionalInt.empty(),
+            OptionalDouble.empty(),
+            TrainRuntimeSnapshot.HoldTimeline.EMPTY,
+            Optional.empty(),
+            Optional.empty(),
+            TrainRuntimeSnapshot.Motion.NONE,
+            Optional.of("sh_a8")));
+    assertEquals(
+        Optional.of("sh_a8"), trains.getTrainSnapshot("t-consist").orElseThrow().consist());
+
+    sample("t-plain", wsThrough, 2, null, null);
+    assertTrue(trains.getTrainSnapshot("t-plain").orElseThrow().consist().isEmpty(), "车上没有车型标签");
+  }
+
+  @Test
   void trainSnapshotFollowsLineTagsThenTheRouteLine() {
     sample("t-tag", wsThrough, 2, "surc", "ds");
     TrainSnapshot tagged = trains.getTrainSnapshot("t-tag").orElseThrow();

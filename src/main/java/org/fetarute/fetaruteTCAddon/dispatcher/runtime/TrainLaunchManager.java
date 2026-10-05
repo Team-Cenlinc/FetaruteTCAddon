@@ -300,9 +300,11 @@ public final class TrainLaunchManager {
           targetBps, curveLimit, curveSpeed, curveSpeed > 0.0 ? "stop_curve" : "stop");
     }
 
-    double curveAdjustedBps = applySpeedCurve(targetBps, config, distanceOpt, runtimeSettings);
+    // 车型最高速度是最后一道上限：晚点追赶放宽的线路限速、调度给的目标速度都不越过它。
+    double cappedBps = config.capped(targetBps);
+    double curveAdjustedBps = applySpeedCurve(cappedBps, config, distanceOpt, runtimeSettings);
     OptionalDouble speedCurveLimit =
-        curveAdjustedBps < Math.max(0.0, targetBps) - 1.0e-6
+        curveAdjustedBps < Math.max(0.0, cappedBps) - 1.0e-6
             ? OptionalDouble.of(curveAdjustedBps)
             : OptionalDouble.empty();
     double heldBps = curveAdjustedBps;
@@ -389,6 +391,8 @@ public final class TrainLaunchManager {
       limiterSource = "speed_ceiling_hold";
     } else if (speedCurveLimit.isPresent()) {
       limiterSource = "speed_curve";
+    } else if (cappedBps < targetBps - 1.0e-6) {
+      limiterSource = "consist_max";
     }
     return new ControlApplicationResult(
         targetBps, speedCurveLimit, adjustedBps, limiterSource, launchCommandAccepted);

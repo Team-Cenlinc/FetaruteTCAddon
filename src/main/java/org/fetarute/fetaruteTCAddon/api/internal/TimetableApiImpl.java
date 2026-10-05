@@ -6,6 +6,7 @@ import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -224,11 +225,13 @@ public final class TimetableApiImpl implements TimetableApi {
     LocalDate firstDate = from.atZone(timetable.zoneId()).toLocalDate().minusDays(1);
     LocalDate lastDate = to.atZone(timetable.zoneId()).toLocalDate();
     for (TimetableTrip trip : timetable.trips()) {
-      Optional<TimetableRoutePlan> planOpt = timetable.routePlan(trip.routeId());
+      // 区分车型的表：各站时刻按这一班那辆车的车型。
+      Optional<TimetableRoutePlan> planOpt = timetable.tripPlan(trip);
       if (planOpt.isEmpty()) {
         continue;
       }
       TimetableRoutePlan plan = planOpt.get();
+      Optional<String> consist = timetable.consistOf(trip);
       List<TimetableStop> planStops = plan.stops();
       int lastStopping = lastStoppingIndex(planStops);
       for (int i = 0; i < planStops.size(); i++) {
@@ -268,7 +271,8 @@ public final class TimetableApiImpl implements TimetableApi {
                   terminating,
                   date,
                   cancelled,
-                  svc.flatMap(s -> s.plannedPlatform(trip.id(), stop.stopSequence()))));
+                  svc.flatMap(s -> s.plannedPlatform(trip.id(), stop.stopSequence())),
+                  consist));
         }
       }
     }
@@ -287,8 +291,8 @@ public final class TimetableApiImpl implements TimetableApi {
   private TrainAssignment assignment(TimetableService svc, TimetableAssignment a) {
     Optional<Timetable> timetable =
         svc.publishedTimetables().stream().filter(t -> t.id().equals(a.timetableId())).findFirst();
-    Optional<String> dutyCode =
-        a.dutyId().flatMap(id -> timetable.flatMap(t -> t.duty(id))).map(VehicleDuty::dutyCode);
+    Optional<VehicleDuty> duty = a.dutyId().flatMap(id -> timetable.flatMap(t -> t.duty(id)));
+    Optional<String> dutyCode = duty.map(VehicleDuty::dutyCode);
     Optional<StationPresenceTracker.StopRecord> last =
         stops
             .get()
@@ -325,7 +329,8 @@ public final class TimetableApiImpl implements TimetableApi {
         next.map(NextStop::stopSequence),
         next.flatMap(NextStop::nodeId),
         next.flatMap(NextStop::stationCode),
-        next.map(NextStop::projectedDelaySeconds).orElse(OptionalLong.empty()));
+        next.map(NextStop::projectedDelaySeconds).orElse(OptionalLong.empty()),
+        duty.flatMap(VehicleDuty::consist));
   }
 
   /** 到发记录是否属于这个车次：同一交路，且发生在绑定之后，或正是促成绑定的那次到站。 */
@@ -437,25 +442,27 @@ public final class TimetableApiImpl implements TimetableApi {
     Map<UUID, String> tripCodeById =
         t.trips().stream()
             .collect(Collectors.toMap(TimetableTrip::id, TimetableTrip::tripCode, (x, y) -> x));
+    // 区分车型的表里同一条 route 还有各车型的变体计划：对外每条 route 一份，各车型的时分挂在它的 consistStops 里。
+    Map<UUID, Map<String, List<StopTime>>> consistStops = new LinkedHashMap<>();
+    for (TimetableRoutePlan plan : t.routePlans()) {
+      plan.consist()
+          .ifPresent(
+              variant ->
+                  consistStops
+                      .computeIfAbsent(plan.routeId(), id -> new LinkedHashMap<>())
+                      .put(variant.key(), stopTimes(plan)));
+    }
     List<RoutePlan> plans =
         t.routePlans().stream()
+            .filter(plan -> plan.consist().isEmpty())
             .map(
                 plan ->
                     new RoutePlan(
                         plan.routeId(),
                         plan.routeCode(),
                         plan.kind().name(),
-                        plan.stops().stream()
-                            .map(
-                                s ->
-                                    new StopTime(
-                                        s.stopSequence(),
-                                        s.stationCode(),
-                                        s.nodeId(),
-                                        s.arrivalOffsetSeconds(),
-                                        s.departureOffsetSeconds(),
-                                        RouteApi.PassType.valueOf(s.passType().name())))
-                            .toList()))
+                        stopTimes(plan),
+                        consistStops.getOrDefault(plan.routeId(), Map.of())))
             .toList();
     List<Trip> trips =
         t.trips().stream()
@@ -469,7 +476,8 @@ public final class TimetableApiImpl implements TimetableApi {
                         trip.routeId(),
                         trip.tripCode(),
                         trip.departureSecondOfDay(),
-                        Optional.ofNullable(dutyByTrip.get(trip.id()))))
+                        Optional.ofNullable(dutyByTrip.get(trip.id())),
+                        t.consistOf(trip)))
             .toList();
     List<Duty> duties =
         t.duties().stream()
@@ -485,8 +493,23 @@ public final class TimetableApiImpl implements TimetableApi {
                             .filter(Objects::nonNull)
                             .toList(),
                         d.plannedStartSecondOfDay(),
-                        d.plannedEndSecondOfDay()))
+                        d.plannedEndSecondOfDay(),
+                        d.consist()))
             .toList();
     return new TimetableDetail(info(t), plans, trips, duties);
+  }
+
+  private static List<StopTime> stopTimes(TimetableRoutePlan plan) {
+    return plan.stops().stream()
+        .map(
+            s ->
+                new StopTime(
+                    s.stopSequence(),
+                    s.stationCode(),
+                    s.nodeId(),
+                    s.arrivalOffsetSeconds(),
+                    s.departureOffsetSeconds(),
+                    RouteApi.PassType.valueOf(s.passType().name())))
+        .toList();
   }
 }

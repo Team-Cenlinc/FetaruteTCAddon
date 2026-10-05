@@ -55,6 +55,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   private volatile org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager
       occupancyManager;
   private final Set<String> keepChunksLoadedWarnedPatterns = ConcurrentHashMap.newKeySet();
+  private volatile ConsistArbiter consistArbiter = ConsistArbiter.NONE;
 
   /** 每个车库上次探测离线编组的时间；键是车库节点，数量受车库数限制。 */
   private final Map<String, Long> offlineProbeAtMillis = new ConcurrentHashMap<>();
@@ -80,6 +81,15 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
   public void setOccupancyManager(
       org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager manager) {
     this.occupancyManager = manager;
+  }
+
+  /**
+   * 注入车型裁决：route 绑了编组方案时按方案选编组，并把车种等标签写到新车上。
+   *
+   * @param arbiter 车型裁决；为 null 时恢复旧规则
+   */
+  public void setConsistArbiter(ConsistArbiter arbiter) {
+    this.consistArbiter = arbiter == null ? ConsistArbiter.NONE : arbiter;
   }
 
   @Override
@@ -117,8 +127,17 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       return Optional.empty();
     }
 
+    ConsistArbiter.SpawnChoice choice = chooseConsist(ticket);
+    if (choice.kind() == ConsistArbiter.SpawnChoice.Kind.BLOCKED) {
+      debugLogger.accept("自动发车失败: 编组方案里没有能出的车型 route=" + route.code() + " " + choice.reason());
+      return Optional.empty();
+    }
+    // 编组来源：票上按编组方案选定的车型 > route 的 spawn_train_pattern > 车库牌子第 4 行（兜底）
     Optional<String> patternOpt =
-        DepotSpawnPattern.fromRoute(route).or(() -> DepotSpawnPattern.fromSign(sign));
+        choice
+            .pattern()
+            .or(() -> DepotSpawnPattern.fromRoute(route))
+            .or(() -> DepotSpawnPattern.fromSign(sign));
     if (patternOpt.isEmpty()) {
       debugLogger.accept(
           "自动发车失败: 缺少 spawn pattern route=" + route.code() + " depot=" + depotId.value());
@@ -155,9 +174,30 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     return Optional.of(
         new DepotSpawner.MaterializedSpawn(
             group,
-            () ->
-                initializeMaterializedSpawn(
-                    group, ticket, service, depotId, pattern, route, provider, trainName, now)));
+            () -> {
+              initializeMaterializedSpawn(
+                  group, ticket, service, depotId, pattern, route, provider, trainName, now);
+              if (group.getProperties() != null) {
+                choice
+                    .tags()
+                    .forEach(
+                        (key, value) -> TrainTagHelper.writeTag(group.getProperties(), key, value));
+              }
+            }));
+  }
+
+  /** 问车型裁决；裁决本身出错时按旧规则取编组，不因为它停发。票上指定了车型的除外：改出别的车型就对不上表了。 */
+  ConsistArbiter.SpawnChoice chooseConsist(SpawnTicket ticket) {
+    try {
+      return consistArbiter.chooseSpawn(ticket);
+    } catch (RuntimeException | LinkageError ex) {
+      if (ticket.consist().isPresent()) {
+        debugLogger.accept("车型裁决异常，指定车型的票不出车: ticket=" + ticket.id() + " error=" + ex);
+        return ConsistArbiter.SpawnChoice.blocked("consist-arbiter-error");
+      }
+      debugLogger.accept("车型裁决异常，按旧规则取编组: ticket=" + ticket.id() + " error=" + ex);
+      return ConsistArbiter.SpawnChoice.legacy();
+    }
   }
 
   private void initializeMaterializedSpawn(

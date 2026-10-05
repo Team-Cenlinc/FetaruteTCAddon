@@ -156,29 +156,121 @@ public final class TimetableBuilder {
       BuildInput input, TimetableBuildOptions requested, Instant now) {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(requested, "requested");
+    requested = withConsistLengths(input, requested);
     Instant builtAt = now == null ? Instant.now() : now;
     Built base = buildOnce(input, requested, builtAt, Optional.empty(), Optional.empty());
     if (base.chosen().isEmpty()) {
-      return base.result();
+      return collapsed(base.result());
     }
     Prepared chosen = base.chosen().get();
+    // 快车按基础 route 判定；区分车型时班次挂的是变体，变体随它的基础 route 算快车。
     Set<UUID> fastRoutes =
-        RapidStagger.fastRoutes(
-            chosen.classification().groups(),
-            chosen.profiles(),
-            chosen.graphIndex(),
-            separationOf(base.options()));
+        withVariants(
+            RapidStagger.fastRoutes(
+                chosen.classification().groups(),
+                chosen.profiles(),
+                chosen.graphIndex(),
+                separationOf(base.options())),
+            chosen);
     RapidStagger.Measure measure =
         measureRapids(base, fastRoutes, TimetableBuildOptions.Following.NONE);
     RapidStagger.Measure reported = reportedRapids(base, fastRoutes, measure);
-    return switch (RapidStagger.plan(
-        requested.rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
-      case MEASURE_ONLY -> RapidStagger.annotate(base.result(), reported, routeCodes(chosen));
-      case TURNBACK_ONLY -> staggerRapids(
-          input, requested, builtAt, base, measure, reported, fastRoutes, true);
-      case SEARCH -> staggerRapids(
-          input, requested, builtAt, base, measure, reported, fastRoutes, false);
-    };
+    TimetableBuildResult result =
+        switch (RapidStagger.plan(
+            requested.rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
+          case MEASURE_ONLY -> RapidStagger.annotate(base.result(), reported, routeCodes(chosen));
+          case TURNBACK_ONLY -> staggerRapids(
+              input, requested, builtAt, base, measure, reported, fastRoutes, true);
+          case SEARCH -> staggerRapids(
+              input, requested, builtAt, base, measure, reported, fastRoutes, false);
+        };
+    return collapsed(result);
+  }
+
+  /** 快车型被卡：同一段共线上，快的车型跟在慢的车型后面追上前车（与快车被卡同一套实测，{@link CorridorCatchUp}）。只报告，不改表； 不区分车型或没有快慢之分时为空。 */
+  private static Optional<String> consistCatchUp(
+      Prepared prepared,
+      Timetable table,
+      List<ResourceRepair.Yield> yields,
+      TimetableBuildOptions options) {
+    if (prepared.variants().isEmpty()) {
+      return Optional.empty();
+    }
+    Set<UUID> variantIds = new TreeSet<>();
+    for (TimetableRoutePlan plan : prepared.operationPlans()) {
+      variantIds.addAll(prepared.variants().getOrDefault(plan.routeId(), Map.of()).values());
+    }
+    int separation = separationOf(options);
+    Set<UUID> faster =
+        new CorridorCatchUp(prepared.profiles(), prepared.graphIndex(), separation)
+            .fasterRoutes(variantIds);
+    if (faster.isEmpty()) {
+      return Optional.empty();
+    }
+    RapidStagger.Measure measure =
+        RapidStagger.measure(
+            table,
+            prepared.profiles(),
+            prepared.graphIndex(),
+            separation,
+            options.following(),
+            prepared.trajectories(),
+            options.serviceStartSecondOfDay(),
+            faster,
+            yields);
+    return Optional.of(
+        "快车型被卡（成品表实测）："
+            + (measure.trips() == 0 ? "无" : measure.trips() + " 班、共 " + measure.seconds() + " s")
+            + (measure.held() > 0 ? "；表里另有快车型让车等待共 " + measure.held() + " s" : ""));
+  }
+
+  /**
+   * 跟车规则的车长按车型补上：车型变体用自己车型的车长，基础 route 取允许车型里最长的（保守）。不区分车型、或跟车规则未启用时原样返回。
+   *
+   * <p>命令层只知道出车编组（车库牌子、route 的编组写法）的车长；区分车型时出的是方案里的车型，车长以车型档案为准。
+   */
+  private static TimetableBuildOptions withConsistLengths(
+      BuildInput input, TimetableBuildOptions options) {
+    ConsistFleet fleet = input.fleet();
+    if (!fleet.active() || !options.following().enabled()) {
+      return options;
+    }
+    Map<UUID, Long> lengths = new HashMap<>(options.following().trainLengthBlocks());
+    for (RouteInput route : input.routes()) {
+      long longest = 0L;
+      for (ConsistFleet.Share share : fleet.sharesFor(route.routeId())) {
+        double blocks = fleet.consists().get(share.key()).lengthBlocks();
+        if (blocks <= 0.0D) {
+          continue;
+        }
+        long length = (long) Math.ceil(blocks);
+        lengths.put(ConsistFleet.variantId(route.routeId(), share.key()), length);
+        longest = Math.max(longest, length);
+      }
+      if (longest > 0L) {
+        lengths.put(route.routeId(), longest);
+      }
+    }
+    return options.withFollowing(options.following().withTrainLengths(lengths));
+  }
+
+  /** 编表内部的车型变体折回基础 route（{@link ConsistVariants#collapse}）；不区分车型时原样返回。 */
+  private static TimetableBuildResult collapsed(TimetableBuildResult result) {
+    return result.timetable().isEmpty()
+        ? result
+        : result.withTimetable(result.timetable().map(ConsistVariants::collapse));
+  }
+
+  /** 基础 route 集合加上它们的车型变体。 */
+  private static Set<UUID> withVariants(Set<UUID> routes, Prepared prepared) {
+    if (prepared.variants().isEmpty()) {
+      return routes;
+    }
+    Set<UUID> out = new HashSet<>(routes);
+    for (UUID routeId : routes) {
+      out.addAll(prepared.variants().getOrDefault(routeId, Map.of()).values());
+    }
+    return Set.copyOf(out);
   }
 
   /**
@@ -416,6 +508,17 @@ public final class TimetableBuilder {
         warnings.add("邻表 " + neighbor.displayCode() + "：" + warning);
       }
     }
+    List<String> consistNotes =
+        new ArrayList<>(
+            ConsistReport.notes(
+                input.fleet(),
+                chosenPrepared.operationPlans(),
+                timetable,
+                chosenPrepared.profiles(),
+                chosenPrepared.graphIndex().nodeTypes(),
+                warnings));
+    consistCatchUp(chosenPrepared, timetable, chosen.yields(), options)
+        .ifPresent(consistNotes::add);
     TimetableBuildResult result =
         new TimetableBuildResult(
             Optional.of(timetable),
@@ -449,7 +552,8 @@ public final class TimetableBuilder {
             chosen.residues(),
             List.copyOf(warnings),
             TimetableBuildResult.CatchUp.NONE,
-            CapacityReport.Report.NONE);
+            CapacityReport.Report.NONE,
+            consistNotes);
     return new Built(result, Optional.of(prepared), Optional.of(chosenPrepared), options);
   }
 
@@ -573,10 +677,12 @@ public final class TimetableBuilder {
         dwell
             .map(
                 d -> {
+                  // 加停点可能落在车型变体上：停站是 route 的属性，加在它的基础 route 上，各车型一起多停。
+                  UUID target = base.prepared().map(p -> p.baseOf(d.routeId())).orElse(d.routeId());
                   List<RouteInput> routes = new ArrayList<>(input.routes().size());
                   for (RouteInput route : input.routes()) {
                     routes.add(
-                        route.routeId().equals(d.routeId())
+                        route.routeId().equals(target)
                             ? heldAt(route, d.stopIndex(), d.seconds(), options.defaultDwell())
                             : route);
                   }
@@ -707,14 +813,34 @@ public final class TimetableBuilder {
     Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new HashMap<>();
     Set<UUID> passengerReturns = new HashSet<>();
     Map<UUID, Integer> runByRoute = new HashMap<>();
+    // 车型变体：基础 route → 车型键 → 变体 ID。不区分车型时为空。
+    Map<UUID, Map<String, UUID>> variants = new HashMap<>();
+    // 区分车型时各 route 用哪个走行模型出逐点轨迹：变体用自己的车型，基础 route 用最慢的那个车型（与它的时分一致）。
+    Map<UUID, RunTimeModel> modelByRoute = new HashMap<>();
     for (RouteInput route : input.sortedRoutes()) {
+      Optional<String> blocked = input.fleet().blockedReason(route.routeId());
+      if (blocked.isPresent()) {
+        infeasible.add(new TimetableBuildResult.InfeasibleRoute(route.routeCode(), blocked.get()));
+        continue;
+      }
+      // 区分车型时，每个允许的车型各算一份时分；基础时分取其中最慢的那份（相位锚定、网格可行性按它）。
+      Map<String, TimetableTimingCalculator.TimingResult> variantTimings =
+          variantTimings(input, route, options);
+      if (variantTimings.isEmpty() && !input.fleet().sharesFor(route.routeId()).isEmpty()) {
+        // 允许的车型一个都跑不了：不能退回基础走行模型，那等于让方案之外的车跑这条 route。
+        infeasible.add(
+            new TimetableBuildResult.InfeasibleRoute(route.routeCode(), "允许的车型都算不出这条 route 的时分"));
+        continue;
+      }
       TimetableTimingCalculator.TimingResult timing =
-          timingCalculator.compute(
-              input.graph(),
-              input.runTimeModel(),
-              route.definition(),
-              route.stops(),
-              options.defaultDwell());
+          variantTimings.isEmpty()
+              ? timingCalculator.compute(
+                  input.graph(),
+                  input.runTimeModel(),
+                  route.definition(),
+                  route.stops(),
+                  options.defaultDwell())
+              : slowest(variantTimings);
       if (!timing.ok()) {
         infeasible.add(
             new TimetableBuildResult.InfeasibleRoute(
@@ -739,6 +865,21 @@ public final class TimetableBuilder {
       // 归属决定它是"我的班次"还是"我借来的走行"：别的线的带客 CREATE/RETURN 只做交路两头。
       boolean owned = input.owns(route.routeId());
       runByRoute.put(route.routeId(), timing.totalRunSeconds());
+      Map<String, UUID> variantIds = new LinkedHashMap<>();
+      for (Map.Entry<String, TimetableTimingCalculator.TimingResult> variant :
+          variantTimings.entrySet()) {
+        UUID variantId = ConsistFleet.variantId(route.routeId(), variant.getKey());
+        variantIds.put(variant.getKey(), variantId);
+        runByRoute.put(variantId, variant.getValue().totalRunSeconds());
+      }
+      if (!variantIds.isEmpty()) {
+        variants.put(route.routeId(), Map.copyOf(variantIds));
+        modelByRoute.put(
+            route.routeId(), input.fleet().consists().get(slowestKey(variantTimings)).model());
+        variantIds.forEach(
+            (key, variantId) ->
+                modelByRoute.put(variantId, input.fleet().consists().get(key).model()));
+      }
       switch (route.operationType()) {
         case CREATE -> {
           if (!startsAtDepot(route.stops())) {
@@ -758,9 +899,22 @@ public final class TimetableBuilder {
               new VehicleDutyPlanner.Leg(
                   route.routeId(), route.routeCode(), origin, timing.totalRunSeconds(), declared));
           legStation.put(route.routeId(), terminal);
+          variantIds.forEach(
+              (key, variantId) -> {
+                createLegs.add(
+                    new VehicleDutyPlanner.Leg(
+                        variantId,
+                        route.routeCode(),
+                        origin,
+                        runByRoute.get(variantId),
+                        declared,
+                        Optional.of(key)));
+                legStation.put(variantId, terminal);
+              });
         }
         case RETURN -> {
-          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
+          boolean passenger = owned && ServiceGroupClassifier.carriesPassengers(route);
+          if (passenger) {
             // 带客的回库班：仍由派车器在交路收尾处生成（到达 + 折返），但落 trip 行给 PIDS 与导出。
             passengerReturns.add(route.routeId());
           }
@@ -772,6 +926,21 @@ public final class TimetableBuilder {
                   timing.totalRunSeconds(),
                   declared));
           legStation.put(route.routeId(), origin);
+          variantIds.forEach(
+              (key, variantId) -> {
+                if (passenger) {
+                  passengerReturns.add(variantId);
+                }
+                returnLegs.add(
+                    new VehicleDutyPlanner.Leg(
+                        variantId,
+                        route.routeCode(),
+                        terminal,
+                        runByRoute.get(variantId),
+                        declared,
+                        Optional.of(key)));
+                legStation.put(variantId, origin);
+              });
         }
         case OPERATION -> {
           if (!owned) {
@@ -808,6 +977,30 @@ public final class TimetableBuilder {
               timing.segments(),
               TimetableConflictChecker.platformsOf(
                   timing.stops(), route.stops(), waypoints, graphIndex.nodeTypes())));
+      // 车型变体：时分与足迹按各自的车型；车尾出清只多算比最短车型长出来的那一截。
+      for (Map.Entry<String, UUID> variant : variantIds.entrySet()) {
+        String key = variant.getKey();
+        UUID variantId = variant.getValue();
+        TimetableTimingCalculator.TimingResult variantTiming = variantTimings.get(key);
+        ConsistFleet.Consist consist = input.fleet().consists().get(key);
+        double tail = input.fleet().tailBlocks(key);
+        plans.add(
+            plan.asVariant(
+                variantId,
+                new TimetableRoutePlan.ConsistVariant(
+                    key, route.routeId(), consist.lengthBlocks(), tail),
+                variantTiming.stops()));
+        profiles.put(
+            variantId,
+            new TimetableConflictChecker.RouteProfile(
+                variantId,
+                route.routeCode(),
+                variantTiming.stops(),
+                variantTiming.segments(),
+                TimetableConflictChecker.platformsOf(
+                    variantTiming.stops(), route.stops(), waypoints, graphIndex.nodeTypes()),
+                tail));
+      }
     }
     if (operations.isEmpty()) {
       throw new BuildFailure("没有任何运营 route 能算出计划时分");
@@ -852,7 +1045,89 @@ public final class TimetableBuilder {
         classification,
         Set.copyOf(passengerReturns),
         Map.copyOf(runByRoute),
-        run -> input.runTimeModel().trajectory(input.graph(), run));
+        trajectoriesOf(input, modelByRoute),
+        Map.copyOf(variants),
+        baseByVariant(variants));
+  }
+
+  /**
+   * 闭塞时间用的逐点轨迹：每条 route 用它自己的走行模型（区分车型时见 {@code modelByRoute}），其余用编表的走行模型。
+   *
+   * @param modelByRoute route（含车型变体）→ 走行模型；不区分车型时为空
+   */
+  private static BlockingTimes.Trajectories trajectoriesOf(
+      BuildInput input, Map<UUID, RunTimeModel> modelByRoute) {
+    RunTimeModel base = input.runTimeModel();
+    RailGraph graph = input.graph();
+    Map<UUID, RunTimeModel> models = Map.copyOf(modelByRoute);
+    return new BlockingTimes.Trajectories() {
+      @Override
+      public Optional<RunTimeModel.Trajectory> of(RunTimeModel.Run run) {
+        return base.trajectory(graph, run);
+      }
+
+      @Override
+      public BlockingTimes.Trajectories forRoute(UUID routeId) {
+        RunTimeModel model = models.get(routeId);
+        return model == null ? this : run -> model.trajectory(graph, run);
+      }
+    };
+  }
+
+  /** 全程最慢的那份时分是哪个车型的；并列时取车型键最小的（与 {@link #slowest} 同一份）。 */
+  private static String slowestKey(Map<String, TimetableTimingCalculator.TimingResult> timings) {
+    String slowest = null;
+    int run = -1;
+    for (Map.Entry<String, TimetableTimingCalculator.TimingResult> entry : timings.entrySet()) {
+      if (slowest == null || entry.getValue().totalRunSeconds() > run) {
+        slowest = entry.getKey();
+        run = entry.getValue().totalRunSeconds();
+      }
+    }
+    return slowest;
+  }
+
+  /** 变体 → 基础 route 的反查表。 */
+  private static Map<UUID, UUID> baseByVariant(Map<UUID, Map<String, UUID>> variants) {
+    Map<UUID, UUID> out = new HashMap<>();
+    variants.forEach((base, byKey) -> byKey.values().forEach(variant -> out.put(variant, base)));
+    return Map.copyOf(out);
+  }
+
+  /**
+   * 一条 route 按它允许的每个车型各算一份时分；某个车型算不出来就不进变体（它不能跑这条 route）。不区分车型时为空。
+   *
+   * <p>车型键按方案里的顺序；算出来的变体之间按键排序，结果与 Map 的遍历顺序无关。
+   */
+  private Map<String, TimetableTimingCalculator.TimingResult> variantTimings(
+      BuildInput input, RouteInput route, TimetableBuildOptions options) {
+    Map<String, TimetableTimingCalculator.TimingResult> out = new TreeMap<>();
+    for (ConsistFleet.Share share : input.fleet().sharesFor(route.routeId())) {
+      ConsistFleet.Consist consist = input.fleet().consists().get(share.key());
+      TimetableTimingCalculator.TimingResult timing =
+          timingCalculator.compute(
+              input.graph(),
+              consist.model(),
+              route.definition(),
+              route.stops(),
+              options.defaultDwell());
+      if (timing.ok()) {
+        out.put(share.key(), timing);
+      }
+    }
+    return out;
+  }
+
+  /** 全程最慢的那份时分；并列时取车型键最小的，确定。 */
+  private static TimetableTimingCalculator.TimingResult slowest(
+      Map<String, TimetableTimingCalculator.TimingResult> timings) {
+    TimetableTimingCalculator.TimingResult slowest = null;
+    for (TimetableTimingCalculator.TimingResult timing : timings.values()) {
+      if (slowest == null || timing.totalRunSeconds() > slowest.totalRunSeconds()) {
+        slowest = timing;
+      }
+    }
+    return slowest;
   }
 
   // ------------------------------------------------------------ 第 2–4 步
@@ -961,17 +1236,31 @@ public final class TimetableBuilder {
               plan.totalRunSeconds(),
               op.startsAtDepot(),
               op.endsAtDepot(),
-              input.poolOf(plan.routeId()));
+              input.poolOf(plan.routeId()),
+              consistOptions(input, prepared, plan.routeId()));
       plannedTrips.add(trip);
     }
 
     // 各起点上的名义发车时刻：派车器用它回答"这辆车在终点还要等多久才有下一班"，
-    // 等过头的按 IDLE_LIMIT 回库，与运行时的闲置回收同一条规则。
+    // 等过头的按 IDLE_LIMIT 回库，与运行时的闲置回收同一条规则。区分车型时另按车型记一份：车等的是自己车型能跑的下一班
+    // ——列了车型的班次记进这些车型，不分车型的班次谁都能跑，记进每个车型。
     Map<String, NavigableSet<Integer>> nextSlotByOrigin = new HashMap<>();
+    List<String> fleetKeys = input.fleet().keys();
     for (VehicleDutyPlanner.PlannedTrip trip : plannedTrips) {
       nextSlotByOrigin
           .computeIfAbsent(trip.originNodeId(), key -> new TreeSet<>())
           .add(trip.departureSeconds());
+      List<String> runnableBy =
+          trip.consists().isEmpty()
+              ? fleetKeys
+              : trip.consists().stream().map(VehicleDutyPlanner.ConsistOption::key).toList();
+      for (String consist : runnableBy) {
+        nextSlotByOrigin
+            .computeIfAbsent(
+                VehicleDutyPlanner.slotKey(trip.originNodeId(), Optional.of(consist)),
+                key -> new TreeSet<>())
+            .add(trip.departureSeconds());
+      }
     }
     VehicleDutyPlanner.Result planned =
         VehicleDutyPlanner.plan(
@@ -986,7 +1275,9 @@ public final class TimetableBuilder {
       unassigned.put(trip.tripId(), trip);
     }
     Map<UUID, UUID> dutyByProvisional = new HashMap<>();
+    Map<UUID, Optional<String>> consistByDuty = new HashMap<>();
     for (VehicleDuty duty : planned.duties()) {
+      consistByDuty.put(duty.id(), duty.consist());
       for (UUID tripId : duty.tripIds()) {
         dutyByProvisional.put(tripId, duty.id());
       }
@@ -1012,12 +1303,16 @@ public final class TimetableBuilder {
         continue;
       }
       nominalByProvisional.put(provisional.tripId(), provisional.departureSeconds());
+      // 区分车型时，班次改挂它那辆车的车型对应的变体：之后的串行、让车、冲突检查都按这个车型的时分与足迹算。
+      UUID dutyId = dutyByProvisional.get(provisional.tripId());
+      UUID runRoute =
+          prepared.variantOf(plan.routeId(), consistByDuty.getOrDefault(dutyId, Optional.empty()));
       // 临时表的时刻约定：零点 + 相对秒，不取模；串行只在相对秒上算，取模留给编号。
       provisionalTrips.add(
           new TimetableTrip(
               provisional.tripId(),
               timetableId,
-              plan.routeId(),
+              runRoute,
               provisionalTrips.size(),
               provisional.tripCode(),
               shiftToServiceDay(provisional.departureSeconds(), options),
@@ -1042,7 +1337,8 @@ public final class TimetableBuilder {
               shiftToServiceDay(duty.plannedStartSecondOfDay(), options),
               shiftToServiceDay(duty.returnSecondOfDay(), options),
               shiftToServiceDay(duty.plannedEndSecondOfDay(), options),
-              duty.closeReason()));
+              duty.closeReason(),
+              duty.consist()));
     }
     Timetable provisionalTable =
         timetableOf(input, options, prepared, provisionalTrips, provisionalDuties, builtAt);
@@ -1052,6 +1348,8 @@ public final class TimetableBuilder {
     for (OperationPlan op : prepared.operations()) {
       if (op.endsAtDepot()) {
         endingAtDepot.add(op.route().routeId());
+        endingAtDepot.addAll(
+            prepared.variants().getOrDefault(op.route().routeId(), Map.of()).values());
       }
     }
     TerminalSerializer.Result serialized =
@@ -1238,6 +1536,25 @@ public final class TimetableBuilder {
             prepared.runByRoute(),
             options.dutyLimits().turnaround(),
             inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())));
+  }
+
+  /** 一班允许的车型、份额权重与按各车型跑的全程时分（按方案里的顺序）。不区分车型、或这条 route 一个车型的时分都算不出来时为空。 */
+  private static List<VehicleDutyPlanner.ConsistOption> consistOptions(
+      BuildInput input, Prepared prepared, UUID routeId) {
+    Map<String, UUID> variantIds = prepared.variants().getOrDefault(routeId, Map.of());
+    if (variantIds.isEmpty()) {
+      return List.of();
+    }
+    List<VehicleDutyPlanner.ConsistOption> options = new ArrayList<>();
+    for (ConsistFleet.Share share : input.fleet().sharesFor(routeId)) {
+      UUID variantId = variantIds.get(share.key());
+      if (variantId != null) {
+        options.add(
+            new VehicleDutyPlanner.ConsistOption(
+                share.key(), share.weight(), prepared.runByRoute().get(variantId)));
+      }
+    }
+    return List.copyOf(options);
   }
 
   /** 用同一份归属信息与计划组一张表；临时表与成品表只差 trips/duties。 */
@@ -1752,10 +2069,14 @@ public final class TimetableBuilder {
     int fallback = (int) options.defaultDwell().toSeconds();
     Map<UUID, Integer> secondsByRoute = new LinkedHashMap<>();
     for (RouteInput route : input.sortedRoutes()) {
-      secondsByRoute.put(
-          route.routeId(),
+      int seconds =
           TimetableTimingCalculator.terminalStopSeconds(
-              input.graph(), input.runTimeModel(), route.definition(), route.stops(), fallback));
+              input.graph(), input.runTimeModel(), route.definition(), route.stops(), fallback);
+      secondsByRoute.put(route.routeId(), seconds);
+      // 车型变体的折返与基础 route 相同：终到站 dwell 加车站停站开销，都与车型无关。
+      for (ConsistFleet.Share share : input.fleet().sharesFor(route.routeId())) {
+        secondsByRoute.put(ConsistFleet.variantId(route.routeId(), share.key()), seconds);
+      }
     }
     return TurnaroundTable.ofSeconds(secondsByRoute, fallback);
   }
@@ -2075,7 +2396,22 @@ public final class TimetableBuilder {
       ServiceGroupClassifier.Classification classification,
       Set<UUID> passengerReturns,
       Map<UUID, Integer> runByRoute,
-      BlockingTimes.Trajectories trajectories) {
+      BlockingTimes.Trajectories trajectories,
+      Map<UUID, Map<String, UUID>> variants,
+      Map<UUID, UUID> baseByVariant) {
+
+    /** route 按某个车型跑的变体 ID；不区分车型、或这个车型不能跑这条 route 时就是 route 本身。 */
+    UUID variantOf(UUID routeId, Optional<String> consist) {
+      if (consist.isEmpty()) {
+        return routeId;
+      }
+      return variants.getOrDefault(routeId, Map.of()).getOrDefault(consist.get(), routeId);
+    }
+
+    /** 变体 → 基础 route；不是变体时就是它自己。 */
+    UUID baseOf(UUID routeId) {
+      return baseByVariant.getOrDefault(routeId, routeId);
+    }
 
     /** 这几条 route 的全程走行各加 {@code seconds}，其余不变：结构预筛估喂车多停的效果，只有走行进相位层。 */
     Prepared withExtraRun(Collection<UUID> routeIds, int seconds) {
@@ -2096,7 +2432,9 @@ public final class TimetableBuilder {
           classification,
           passengerReturns,
           Map.copyOf(run),
-          trajectories);
+          trajectories,
+          variants,
+          baseByVariant);
     }
   }
 
@@ -2422,6 +2760,7 @@ public final class TimetableBuilder {
    * @param notes 备注
    * @param neighbors 已投影到我零点的邻表：它们的运行是不可移动的路权事实，只有我的运行会为了避让它们放宽 headway
    * @param lineByRoute 多线联编时每条 route 属于哪条线（车池）；没列出的按 {@code lineId}。单线为空
+   * @param fleet 车型：没有车型时编表与从前逐字相同（见 {@link ConsistFleet}）
    */
   public record BuildInput(
       UUID timetableId,
@@ -2435,7 +2774,38 @@ public final class TimetableBuilder {
       RunTimeModel runTimeModel,
       Optional<String> notes,
       List<NeighborTimetable> neighbors,
-      Map<UUID, UUID> lineByRoute) {
+      Map<UUID, UUID> lineByRoute,
+      ConsistFleet fleet) {
+
+    /** 不区分车型的构建。 */
+    public BuildInput(
+        UUID timetableId,
+        UUID companyId,
+        UUID operatorId,
+        UUID lineId,
+        String code,
+        String name,
+        List<RouteInput> routes,
+        RailGraph graph,
+        RunTimeModel runTimeModel,
+        Optional<String> notes,
+        List<NeighborTimetable> neighbors,
+        Map<UUID, UUID> lineByRoute) {
+      this(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute,
+          ConsistFleet.none());
+    }
 
     public BuildInput {
       Objects.requireNonNull(timetableId, "timetableId");
@@ -2446,6 +2816,7 @@ public final class TimetableBuilder {
       notes = notes == null ? Optional.empty() : notes;
       neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
       lineByRoute = lineByRoute == null ? Map.of() : Map.copyOf(lineByRoute);
+      fleet = fleet == null ? ConsistFleet.none() : fleet;
     }
 
     /** 换一份 route 列表，其余不变。 */
@@ -2462,7 +2833,26 @@ public final class TimetableBuilder {
           runTimeModel,
           notes,
           neighbors,
-          lineByRoute);
+          lineByRoute,
+          fleet);
+    }
+
+    /** 换一组车型，其余不变。 */
+    public BuildInput withFleet(ConsistFleet nextFleet) {
+      return new BuildInput(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute,
+          nextFleet);
     }
 
     /** 单线构建：所有 route 同一车池。 */

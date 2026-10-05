@@ -231,7 +231,7 @@ public final class RuntimeTrainController {
     if (launchManager.authority().isDriverControlled(properties)) {
       return;
     }
-    double targetBpt = toBlocksPerTick(targetBps);
+    double targetBpt = toBlocksPerTick(config.capped(targetBps));
     double accelBpt2 = toBlocksPerTickSquared(config.accelBps2());
     launchManager.releaseSpeedRamp(train);
     properties.setSpeedLimit(targetBpt);

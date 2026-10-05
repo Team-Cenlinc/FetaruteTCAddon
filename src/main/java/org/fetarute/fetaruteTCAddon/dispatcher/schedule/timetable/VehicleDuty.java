@@ -49,6 +49,7 @@ import java.util.UUID;
  * @param returnSecondOfDay 回库票的发出时刻（末班到达 + 折返）；无回库票时等于末班到达
  * @param plannedEndSecondOfDay 到达车库的时刻（相对同一服务日的秒数，可超过一天表示跨零点）
  * @param closeReason duty 为什么在这里结束
+ * @param consist 这条交路的车型（编组方案里的车型键）；编表不区分车型时为空，出车按 route 的编组
  */
 public record VehicleDuty(
     UUID id,
@@ -63,7 +64,40 @@ public record VehicleDuty(
     int plannedStartSecondOfDay,
     int returnSecondOfDay,
     int plannedEndSecondOfDay,
-    CloseReason closeReason) {
+    CloseReason closeReason,
+    Optional<String> consist) {
+
+  /** 不区分车型的交路（旧表与单元测试）。复制已有交路时用规范构造器，不要用它，否则车型会丢。 */
+  public VehicleDuty(
+      UUID id,
+      UUID timetableId,
+      int sequence,
+      String dutyCode,
+      String startDepotNodeId,
+      String endDepotNodeId,
+      Optional<UUID> createRouteId,
+      Optional<UUID> returnRouteId,
+      List<UUID> tripIds,
+      int plannedStartSecondOfDay,
+      int returnSecondOfDay,
+      int plannedEndSecondOfDay,
+      CloseReason closeReason) {
+    this(
+        id,
+        timetableId,
+        sequence,
+        dutyCode,
+        startDepotNodeId,
+        endDepotNodeId,
+        createRouteId,
+        returnRouteId,
+        tripIds,
+        plannedStartSecondOfDay,
+        returnSecondOfDay,
+        plannedEndSecondOfDay,
+        closeReason,
+        Optional.empty());
+  }
 
   public VehicleDuty {
     Objects.requireNonNull(id, "id");
@@ -94,6 +128,8 @@ public record VehicleDuty(
     if (plannedEndSecondOfDay < returnSecondOfDay) {
       throw new IllegalArgumentException("duty 结束时刻不能早于回库出发时刻");
     }
+    consist =
+        consist == null ? Optional.empty() : consist.map(String::trim).filter(c -> !c.isEmpty());
   }
 
   /** duty 的计划时长（秒），含出库走行、班次之间的折返与停留，以及最后回库那一段。 */

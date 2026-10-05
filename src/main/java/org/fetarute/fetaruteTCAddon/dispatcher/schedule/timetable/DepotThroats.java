@@ -61,6 +61,14 @@ final class DepotThroats {
     for (VehicleDutyPlanner.Leg leg : legs.createByStation().values()) {
       outbound.add(leg.routeId());
     }
+    // 区分车型时出库段每个车型各有一条变体，交路挂的是它，按它的时分占用咽喉。
+    for (List<VehicleDutyPlanner.Leg> candidates : legs.createCandidates().values()) {
+      for (VehicleDutyPlanner.Leg leg : candidates) {
+        if (leg.consist().isPresent()) {
+          outbound.add(leg.routeId());
+        }
+      }
+    }
     for (List<VehicleDutyPlanner.Leg> candidates : legs.returnCandidates().values()) {
       for (VehicleDutyPlanner.Leg leg : candidates) {
         inbound.add(leg.routeId());

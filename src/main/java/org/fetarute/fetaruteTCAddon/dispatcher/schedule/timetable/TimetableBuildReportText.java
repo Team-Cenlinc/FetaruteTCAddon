@@ -240,6 +240,7 @@ public final class TimetableBuildReportText {
       case NO_RETURN_ACCESS -> "终点没有 RETURN 线路，后面也接不上能回库的班次";
       case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
       case STUB_SATURATED -> "端点排队或让车累计超限，等到能发车时交路已超上限或越过计划窗口";
+      case CONSIST_MISMATCH -> "起点有车在等，但车型都不许跑这一班，也没有能出许可车型的出库线路";
     };
   }
 

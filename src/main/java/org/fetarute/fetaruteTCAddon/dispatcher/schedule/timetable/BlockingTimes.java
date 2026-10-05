@@ -7,6 +7,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.model.RunTimeModel;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
@@ -46,6 +47,15 @@ final class BlockingTimes {
     Trajectories NONE = run -> Optional.empty();
 
     Optional<RunTimeModel.Trajectory> of(RunTimeModel.Run run);
+
+    /**
+     * 这条交路用的轨迹。各交路的走行模型不同时（多车型混跑：每个车型一条曲线）按交路取；默认所有交路同一份。
+     *
+     * @param routeId 交路（编表内部可以是车型变体）
+     */
+    default Trajectories forRoute(UUID routeId) {
+      return this;
+    }
   }
 
   /** 作为后车，最晚什么时候要拿到；相对这条交路的发车。 */
@@ -122,7 +132,11 @@ final class BlockingTimes {
       return new BlockingTimes(Map.of(), Map.of());
     }
     Map<NodeId, NodeType> types = index.nodeTypes();
-    Front front = needTimes(path, rules, trajectories == null ? Trajectories.NONE : trajectories);
+    Front front =
+        needTimes(
+            path,
+            rules,
+            (trajectories == null ? Trajectories.NONE : trajectories).forRoute(profile.routeId()));
     OptionalLong length = rules.trainLength(profile.routeId());
     double[] release =
         length.isPresent() ? releaseTimes(path, types, rules, length.getAsLong()) : null;
