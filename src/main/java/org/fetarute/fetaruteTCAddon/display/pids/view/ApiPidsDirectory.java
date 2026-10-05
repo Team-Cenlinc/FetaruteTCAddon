@@ -185,6 +185,11 @@ public final class ApiPidsDirectory implements PidsDirectory {
   }
 
   @Override
+  public Optional<UUID> companyOfOperator(String operatorCode) {
+    return Optional.ofNullable(index.operatorCompanies.get(key(operatorCode)));
+  }
+
+  @Override
   public Optional<RouteApi.LineRef> lineOfRoute(UUID routeId) {
     return Optional.ofNullable(routeId).map(index.routeLines::get);
   }
@@ -211,13 +216,16 @@ public final class ApiPidsDirectory implements PidsDirectory {
         });
     operatorsById.values().removeIf(operator -> ambiguous.contains(key(operator.code())));
     Map<String, Names> operatorNames = new HashMap<>();
+    Map<String, UUID> operatorCompanies = new HashMap<>();
     operatorsById
         .values()
         .forEach(
-            operator ->
-                operatorNames.put(
-                    key(operator.code()),
-                    new Names(operator.name(), operator.secondaryName().orElse(""))));
+            operator -> {
+              operatorNames.put(
+                  key(operator.code()),
+                  new Names(operator.name(), operator.secondaryName().orElse("")));
+              operatorCompanies.put(key(operator.code()), operator.companyId());
+            });
     int failures = 0;
     Map<String, Line> lineIndex = new HashMap<>();
     List<LineDraft> drafts = new ArrayList<>();
@@ -341,7 +349,8 @@ public final class ApiPidsDirectory implements PidsDirectory {
         Map.copyOf(operatorNames),
         Map.copyOf(routeLines),
         Map.copyOf(stationLineRefs),
-        Map.copyOf(stages));
+        Map.copyOf(stages),
+        Map.copyOf(operatorCompanies));
   }
 
   /** 各运营商的线路，按代码排序；断开的区间按显示代码对上。 */
@@ -631,10 +640,11 @@ public final class ApiPidsDirectory implements PidsDirectory {
       Map<String, Names> operatorNames,
       Map<UUID, RouteApi.LineRef> routeLines,
       Map<String, List<RouteApi.LineRef>> stationLineRefs,
-      Map<String, RouteApi.RouteStage> stages) {
+      Map<String, RouteApi.RouteStage> stages,
+      Map<String, UUID> operatorCompanies) {
     static final Index EMPTY =
         new Index(
             Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(),
-            Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
+            Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of(), Map.of());
   }
 }

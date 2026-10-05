@@ -253,6 +253,12 @@
         <Method name="announcer"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 站台屏公告：命令通过站台屏服务读写同一张内存公告表（生命周期随站台屏服务） -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.pids.PidsService"/>
+        <Method name="bulletins"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Or>
             <Class name="org.fetarute.fetaruteTCAddon.display.hud.trip.TripSheet"/>
@@ -366,6 +372,10 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository"/>
+        <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsBulletinRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
     <Match>

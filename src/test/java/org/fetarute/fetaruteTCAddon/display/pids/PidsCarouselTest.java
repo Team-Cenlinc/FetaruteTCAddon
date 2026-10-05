@@ -11,6 +11,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsCarousel.BulletinInfo;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsCarousel.Signals;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsCarousel.Slide;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsCarousel.StopListPages;
@@ -420,6 +421,203 @@ class PidsCarouselTest {
         stops(0),
         carousel.stopList(
             screen, new Signals(false, false, false, ALL), pages, start.plusSeconds(15), RENDER));
+  }
+
+  // ---- 公告 ----
+
+  private static final BulletinInfo NORMAL = new BulletinInfo("N", false, 1);
+  private static final BulletinInfo URGENT = new BulletinInfo("U", true, 1);
+
+  private static Signals withBulletins(boolean vacancy, BulletinInfo... bulletins) {
+    return new Signals(false, vacancy, false, ALL, List.of(bulletins));
+  }
+
+  private static Optional<Slide> bulletin(BulletinInfo info, int page) {
+    return Optional.of(new Slide.Bulletin(info.key(), page));
+  }
+
+  /** 一般公告与宣传页隔段交替；公告那一段的主页让出 8 秒给公告页，一段仍是 16 秒。 */
+  @Test
+  void normalBulletinsAlternateWithCourtesyPagesAndBorrowFromTheMainPage() {
+    PidsCarousel carousel = new PidsCarousel();
+    Instant start = roundStart();
+    UUID screen = UUID.randomUUID();
+    Signals signals = withBulletins(false, NORMAL);
+
+    assertEquals(Optional.empty(), carousel.page(screen, HHU, signals, start, RENDER));
+    assertEquals(
+        Optional.empty(), carousel.page(screen, HHU, signals, start.plusSeconds(7), RENDER));
+    assertEquals(
+        bulletin(NORMAL, 0), carousel.page(screen, HHU, signals, start.plusSeconds(8), RENDER));
+    assertEquals(
+        bulletin(NORMAL, 0), carousel.page(screen, HHU, signals, start.plusSeconds(15), RENDER));
+    assertEquals(
+        Optional.empty(),
+        carousel.page(screen, HHU, signals, start.plusSeconds(16), RENDER),
+        "下一段主页照常从段首开始");
+    assertEquals(
+        notice(PidsNotice.ORDER),
+        carousel.page(screen, HHU, signals, start.plusSeconds(28), RENDER));
+    assertEquals(
+        bulletin(NORMAL, 0), carousel.page(screen, HHU, signals, start.plusSeconds(40), RENDER));
+    assertEquals(
+        notice(PidsNotice.QUEUE),
+        carousel.page(screen, HHU, signals, start.plusSeconds(60), RENDER));
+  }
+
+  /** 有重要公告时每段都放公告（全部公告依次轮流），宣传页暂停。 */
+  @Test
+  void importantBulletinsTakeEverySideSlot() {
+    PidsCarousel carousel = new PidsCarousel();
+    Instant start = roundStart();
+    UUID screen = UUID.randomUUID();
+    Signals signals = withBulletins(false, URGENT, NORMAL);
+    List<Optional<Slide>> shown = new ArrayList<>();
+
+    for (int segment = 0; segment < 4; segment++) {
+      shown.add(carousel.page(screen, HHU, signals, start.plusSeconds(16L * segment + 10), RENDER));
+    }
+
+    assertEquals(
+        List.of(bulletin(URGENT, 0), bulletin(NORMAL, 0), bulletin(URGENT, 0), bulletin(NORMAL, 0)),
+        shown);
+  }
+
+  /** 有空位信息时空位页仍占偶数段，公告与宣传页在奇数段交替（重要公告也不压空位页）。 */
+  @Test
+  void vacancyKeepsItsSegmentsBesideBulletins() {
+    PidsCarousel carousel = new PidsCarousel();
+    Instant start = roundStart();
+    UUID screen = UUID.randomUUID();
+    Signals signals = withBulletins(true, NORMAL);
+
+    assertEquals(
+        Optional.of(new Slide.Vacancy()),
+        carousel.page(screen, HHU, signals, start.plusSeconds(12), RENDER));
+    assertEquals(
+        bulletin(NORMAL, 0), carousel.page(screen, HHU, signals, start.plusSeconds(24), RENDER));
+    assertEquals(
+        Optional.of(new Slide.Vacancy()),
+        carousel.page(screen, HHU, signals, start.plusSeconds(44), RENDER));
+    assertEquals(
+        notice(PidsNotice.ORDER),
+        carousel.page(screen, HHU, signals, start.plusSeconds(60), RENDER));
+
+    PidsCarousel urgent = new PidsCarousel();
+    assertEquals(
+        Optional.of(new Slide.Vacancy()),
+        urgent.page(screen, HHU, withBulletins(true, URGENT), start.plusSeconds(12), RENDER));
+  }
+
+  /** 没有公告的段：副页放什么在副页开始时才定，主页期间出现的空位信息照旧生效。 */
+  @Test
+  void nonBulletinSidePagesAreDecidedWhenTheSidePageStarts() {
+    PidsCarousel carousel = new PidsCarousel();
+    Instant start = roundStart();
+    UUID screen = UUID.randomUUID();
+
+    carousel.page(screen, HHU, new Signals(false, false, false, ALL), start, RENDER);
+    assertEquals(
+        Optional.of(new Slide.Vacancy()),
+        carousel.page(
+            screen, HHU, new Signals(false, true, false, ALL), start.plusSeconds(12), RENDER));
+  }
+
+  /** 两页的公告连着放：默认一段 25 秒时主页留 9 秒，中文页、英文页各 8 秒。 */
+  @Test
+  void twoPageBulletinsShowBothPagesInOneSegment() {
+    PidsSettings.RenderSettings defaults = PidsSettings.RenderSettings.DEFAULT;
+    assertEquals(8, defaults.bulletinSeconds());
+    PidsCarousel carousel = new PidsCarousel();
+    Instant start = cycleStart(250);
+    UUID screen = UUID.randomUUID();
+    BulletinInfo twoPages = new BulletinInfo("T", false, 2);
+    Signals signals = withBulletins(false, twoPages);
+
+    assertEquals(Optional.empty(), carousel.page(screen, HHU, signals, start, defaults));
+    assertEquals(
+        Optional.empty(), carousel.page(screen, HHU, signals, start.plusSeconds(8), defaults));
+    assertEquals(
+        bulletin(twoPages, 0), carousel.page(screen, HHU, signals, start.plusSeconds(9), defaults));
+    assertEquals(
+        bulletin(twoPages, 0),
+        carousel.page(screen, HHU, signals, start.plusSeconds(16), defaults));
+    assertEquals(
+        bulletin(twoPages, 1),
+        carousel.page(screen, HHU, signals, start.plusSeconds(17), defaults));
+    assertEquals(
+        bulletin(twoPages, 1),
+        carousel.page(screen, HHU, signals, start.plusSeconds(24), defaults));
+    assertEquals(
+        Optional.empty(), carousel.page(screen, HHU, signals, start.plusSeconds(25), defaults));
+  }
+
+  /** 下一班进站或停靠时不翻到公告页，与宣传页同一口径；通过车仍锁安全提示页。 */
+  @Test
+  void anArrivingTrainKeepsBulletinsAway() {
+    PidsCarousel carousel = new PidsCarousel();
+    Instant start = roundStart();
+    UUID screen = UUID.randomUUID();
+    Signals arriving = new Signals(false, false, true, ALL, List.of(URGENT));
+
+    carousel.page(screen, HHU, arriving, start, RENDER);
+    assertEquals(
+        Optional.empty(), carousel.page(screen, HHU, arriving, start.plusSeconds(10), RENDER));
+    assertEquals(
+        notice(PidsNotice.PASSING),
+        carousel.page(
+            screen,
+            HHU,
+            new Signals(true, false, false, ALL, List.of(URGENT)),
+            start.plusSeconds(10),
+            RENDER));
+  }
+
+  /** 2×1：停站表 → 后续列车 → 公告（两页连着翻，每页 8 秒）→ 回到停站表；下一轮放宣传页。 */
+  @Test
+  void stopListScreensTurnToBulletinPages() {
+    PidsCarousel carousel = new PidsCarousel();
+    UUID screen = UUID.randomUUID();
+    Instant start = Instant.ofEpochSecond(1_790_000_002L);
+    BulletinInfo twoPages = new BulletinInfo("T", false, 2);
+    Signals signals = new Signals(false, false, false, List.of(PidsNotice.GAP), List.of(twoPages));
+    StopListPages pages = new StopListPages("A", 1, true);
+
+    assertEquals(stops(0), carousel.stopList(screen, signals, pages, start, RENDER));
+    assertEquals(
+        new StopListSlide.Following(),
+        carousel.stopList(screen, signals, pages, start.plusSeconds(6), RENDER));
+    assertEquals(
+        new Slide.Bulletin("T", 0),
+        carousel.stopList(screen, signals, pages, start.plusSeconds(12), RENDER));
+    assertEquals(
+        new Slide.Bulletin("T", 1),
+        carousel.stopList(screen, signals, pages, start.plusSeconds(20), RENDER));
+    assertEquals(
+        stops(0), carousel.stopList(screen, signals, pages, start.plusSeconds(28), RENDER));
+    assertEquals(
+        new Slide.Notice(PidsNotice.GAP),
+        carousel.stopList(screen, signals, pages, start.plusSeconds(40), RENDER),
+        "下一轮放宣传页");
+  }
+
+  /** 2×1：公告翻到一半被撤下，不再翻它的第 2 页，直接回到停站表。 */
+  @Test
+  void stopListScreensDropRemovedBulletins() {
+    PidsCarousel carousel = new PidsCarousel();
+    UUID screen = UUID.randomUUID();
+    Instant start = Instant.ofEpochSecond(1_790_000_002L);
+    BulletinInfo twoPages = new BulletinInfo("T", false, 2);
+    StopListPages pages = new StopListPages("A", 1, false);
+    Signals with = new Signals(false, false, false, List.of(), List.of(twoPages));
+    Signals without = new Signals(false, false, false, List.of(), List.of());
+
+    carousel.stopList(screen, with, pages, start, RENDER);
+    assertEquals(
+        new Slide.Bulletin("T", 0),
+        carousel.stopList(screen, with, pages, start.plusSeconds(6), RENDER));
+    assertEquals(
+        stops(0), carousel.stopList(screen, without, pages, start.plusSeconds(14), RENDER));
   }
 
   private static StopListSlide stops(int page) {

@@ -1105,6 +1105,7 @@ command:
       stick: "<gray>/fta pids stick</gray> <white>-</white> <dark_aqua>领取配置棍（右键菜单、左键信息、潜行左键拆除）</dark_aqua>"
       list: "<gray>/fta pids list <white>[页]</white></gray> <white>-</white> <dark_aqua>全部站台屏（需管理权限）</dark_aqua>"
       info: "<gray>/fta pids info|menu|remove <white><屏幕></white></gray> <white>-</white> <dark_aqua>按编号查看、配置或拆除</dark_aqua>"
+      bulletin: "<gray>/fta pids bulletin</gray> <white>-</white> <dark_aqua>站台屏公告（发布、修改、撤下）</dark_aqua>"
     unavailable: "<prefix> <red>站台屏未启用</red> <gray>请检查 pids.yml 的 enabled 与存储状态</gray>"
     no-tools-permission: "<prefix> <red>你没有领取站台屏工具的权限</red> <gray>需要 fetarute.pids.manage 或公司成员身份</gray>"
     not-found: "<prefix> <red>未找到站台屏</red> <gray>(screen=<white><screen></white>)</gray>"
@@ -1128,6 +1129,50 @@ command:
       need-platform: "<prefix> <red>站台屏须选定站台</red> <gray>站台号写在左上角，不能为空，也不能选全部；需要显示全部站台时请换用车站统屏布局</gray>"
       too-many-platforms: "<prefix> <red>这块屏幕最多显示 <white><max></white> 个站台</red> <gray>请先去掉一个，或换用车站统屏布局</gray>"
       invalid-value: "<prefix> <red>无效的取值</red> <gray>(<white><value></white>)</gray>"
+    bulletin:
+      help:
+        header: "<prefix> <dark_aqua>站台屏公告</dark_aqua> <gray>在本运营商车站的站台屏上轮播，不发送聊天</gray>"
+        new: "<gray>/fta pids bulletin new <white><公司> <运营商></white></gray> <white>-</white> <dark_aqua>打开对话框发布公告</dark_aqua>"
+        list: "<gray>/fta pids bulletin list <white>[页]</white></gray> <white>-</white> <dark_aqua>可管理的公告</dark_aqua>"
+        edit: "<gray>/fta pids bulletin info|edit|remove <white><公告></white></gray> <white>-</white> <dark_aqua>按编号查看、修改或撤下</dark_aqua>"
+      no-permission: "<prefix> <red>当前操作者不具备该公司的公告管理权限</red> <gray>需要 fetarute.pids.manage，或为该公司的所有者、经理、职员</gray>"
+      unknown-operator: "<prefix> <red>未找到运营商</red> <gray>(operator=<white><operator></white>，公司 <white><company></white>)</gray>"
+      not-found: "<prefix> <red>未找到公告</red> <gray>(bulletin=<white><bulletin></white>)</gray>"
+      ambiguous: "<prefix> <red>编号前缀对应多条公告</red> <gray>(bulletin=<white><bulletin></white>，共 <white><count></white> 条)，请多写几位</gray>"
+      gone: "<prefix> <red>该公告已被撤下，修改未保存</red>"
+      failed: "<prefix> <red>保存失败，请查看控制台日志</red>"
+      published: "<prefix> <dark_aqua>已发布公告 <white><id></white></dark_aqua> <gray>· <white><title></white></gray>"
+      updated: "<prefix> <dark_aqua>已更新公告 <white><id></white></dark_aqua> <gray>· <white><title></white></gray>"
+      all-stations: "全部车站"
+      all-lines: "全部线路"
+      period: "<from> 至 <until>"
+      from-now: "自发布起"
+      until-removed: "撤下为止"
+      one-page: "一页显示完整"
+      two-pages: "分两页显示（先中文、后英文）"
+      status:
+        scheduled: "未开始"
+        active: "生效中"
+        ended: "已结束"
+      list:
+        header: "<prefix> <dark_aqua>站台屏公告</dark_aqua> <gray>共 <white><count></white> 条 · 第 <white><page></white>/<white><pages></white> 页</gray>"
+        entry: "<gray>-</gray> <white><id></white> <gray>[<status>] <level> · <operator> ·</gray> <white><title></white> <gray>· <period></gray>"
+        empty: "<prefix> <gray>暂无可管理的公告</gray>"
+      info:
+        header: "<prefix> <dark_aqua>公告 <white><id></white></dark_aqua> <gray>· <level> · <status></gray>"
+        title: "<gray>标题：<white><title></white> · <secondary></gray>"
+        body: "<gray>正文：<white><body></white></gray>"
+        body-secondary: "<gray>英文正文：<white><body></white></gray>"
+        scope: "<gray>范围：<white><operator></white> · 车站：<white><stations></white> · 线路：<white><lines></white></gray>"
+        period: "<gray>时段：<white><period></white></gray>"
+        fit: "<gray>· <layout>：<pages></gray>"
+      button:
+        edit: "<aqua>[修改]</aqua>"
+        remove: "<red>[撤下]</red>"
+      remove:
+        confirm: "<prefix> <yellow>确认撤下公告 <white><id></white>（<title>）？</yellow><gray>撤下后即从站台屏消失，记录一并删除。</gray> "
+        confirm-button: "<red>[确认撤下]</red>"
+        done: "<prefix> <dark_aqua>已撤下公告 <white><id></white></dark_aqua> <gray>· <title></gray>"
   depot:
     spawn:
       coordinated-only: "<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"
@@ -1412,6 +1457,12 @@ pids:
         title-secondary: "Train passing"
         body: "请远离站台边缘"
         body-secondary: "Stand back from the platform edge"
+    # 公告页右上角的标签（/fta pids bulletin 发布的公告）
+    bulletin:
+      label: "公告"
+      label-secondary: "Notice"
+      important: "重要公告"
+      important-secondary: "Important"
   # 测试卡：白底说明页；按纯文本读取，不解析 MiniMessage
   test-card:
     title: "站台屏待配置"
@@ -1500,6 +1551,39 @@ pids:
     confirm-button: "<red>[确认拆除]</red>"
     done: "<prefix> <dark_aqua>已拆除站台屏 <white><id></white></dark_aqua>"
     failed: "<prefix> <red>拆除失败，请查看控制台日志</red>"
+  # 公告对话框与校验提示（MiniMessage）
+  bulletin:
+    level:
+      normal: "一般"
+      important: "重要"
+    dialog:
+      title-new: "发布公告"
+      title-edit: "修改公告"
+      subtitle: "<gray><company> · <operator>（<code>）</gray>"
+      hint: "<gray>公告在本运营商车站的站台屏上轮播。车站、线路填代码，多个以逗号分隔，留空为不限；时间按服务器时区，如 2026-10-05 22:00，开始留空为立即生效，结束留空为长期有效。</gray>"
+      level: "等级"
+      publish: "发布"
+      save: "保存"
+      cancel: "取消"
+      field:
+        title: "标题（中文）"
+        title-secondary: "标题（英文，可留空）"
+        body: "正文（中文）"
+        body-secondary: "正文（英文，可留空）"
+        stations: "车站（留空为全部车站）"
+        lines: "线路（留空为全部线路）"
+        starts: "开始时间（留空为立即）"
+        ends: "结束时间（留空为长期）"
+    error:
+      title-required: "<red>请填写中文标题</red>"
+      too-long: "<red><field>不得超过 <max> 字</red>"
+      unknown-station: "<red>本运营商没有车站 <code></red>"
+      unknown-line: "<red>本运营商没有线路 <code></red>"
+      bad-time: "<red>无法识别的时间“<value>”，请按 2026-10-05 22:00 的格式填写</red>"
+      ends-before-starts: "<red>结束时间须晚于开始时间</red>"
+      ended-already: "<red>结束时间已过</red>"
+      title-overflow: "<red>标题过长：<layout> 上放不下，请删减</red>"
+      body-overflow: "<red>正文过长：<layout> 上分两页仍放不下，请删减</red>"
   # 站台广播：全站播报，每条带站台号；<platform> 是“N 站台 ”（站台未知时为空），<line> 是线路色块加线路代码
   announce:
     platform: "<white><platform> 站台</white> "

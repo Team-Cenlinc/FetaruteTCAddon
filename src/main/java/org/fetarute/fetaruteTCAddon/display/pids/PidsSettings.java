@@ -36,7 +36,7 @@ public record PidsSettings(
     BroadcastSettings broadcast) {
 
   /** 内置模板的配置版本；模板升级时同步修改。 */
-  public static final int EXPECTED_CONFIG_VERSION = 2;
+  public static final int EXPECTED_CONFIG_VERSION = 3;
 
   /** 一个游戏日的刻数。 */
   private static final int TICKS_PER_DAY = 24000;
@@ -88,7 +88,8 @@ public record PidsSettings(
             reader.positiveInt("render.english-seconds", renderDefault.englishSeconds()),
             reader.nonNegativeInt("render.remark-seconds", renderDefault.remarkSeconds()),
             reader.positiveInt("render.stop-page-seconds", renderDefault.stopPageSeconds()),
-            reader.notices("render.notices", renderDefault.notices()));
+            reader.notices("render.notices", renderDefault.notices()),
+            reader.positiveInt("render.bulletin-seconds", renderDefault.bulletinSeconds()));
 
     LimitSettings limits =
         new LimitSettings(
@@ -189,7 +190,8 @@ public record PidsSettings(
    * @param englishSeconds 主页上终点下面写英文停留多少秒（与备注交替）
    * @param remarkSeconds 主页上终点下面写备注（末班车、直通、经由）停留多少秒；0 不显示备注
    * @param stopPageSeconds 2×1 停站屏停站多、分页时每页停留多少秒（后续列车页也停这么久）
-   * @param notices 轮换哪几张宣传页、按什么顺序；为空时不放宣传页（空位页与安全提示页照常）
+   * @param notices 轮换哪几张宣传页、按什么顺序；为空时不放宣传页（空位页、公告与安全提示页照常）
+   * @param bulletinSeconds 公告页每页停留多少秒；站台屏上从轮到公告那一段的主页时间里扣
    */
   public record RenderSettings(
       int checkIntervalTicks,
@@ -201,16 +203,49 @@ public record PidsSettings(
       int englishSeconds,
       int remarkSeconds,
       int stopPageSeconds,
-      List<PidsNotice> notices) {
+      List<PidsNotice> notices,
+      int bulletinSeconds) {
 
-    /** 内置默认值：主页（到发）占八成时间，副页停到读得完标题与一行英文；英文是常态、备注是补充，英文停得更久；2×1 每页 6～7 站按一站一秒多扫一遍；全部宣传页按声明顺序轮换。 */
+    /** 公告页每页的默认停留时间：读完三行中文与两行英文。 */
+    static final int DEFAULT_BULLETIN_SECONDS = 8;
+
+    /**
+     * 内置默认值：主页（到发）占八成时间，副页停到读得完标题与一行英文；英文是常态、备注是补充，英文停得更久；2×1 每页 6～7 站按一站一秒多扫一遍；全部宣传页按声明顺序轮换；公告每页 8
+     * 秒。
+     */
     public static final RenderSettings DEFAULT = new RenderSettings(20, 5, 30, 20, 5, 15, 6, 4, 8);
 
     public RenderSettings {
       notices = List.copyOf(notices);
     }
 
-    /** 宣传页取默认（全部，按声明顺序）。 */
+    /** 公告页停留取默认。 */
+    public RenderSettings(
+        int checkIntervalTicks,
+        int snapshotTtlSeconds,
+        int horizonMinutes,
+        int slideMainSeconds,
+        int slideNoticeSeconds,
+        int noticePinSeconds,
+        int englishSeconds,
+        int remarkSeconds,
+        int stopPageSeconds,
+        List<PidsNotice> notices) {
+      this(
+          checkIntervalTicks,
+          snapshotTtlSeconds,
+          horizonMinutes,
+          slideMainSeconds,
+          slideNoticeSeconds,
+          noticePinSeconds,
+          englishSeconds,
+          remarkSeconds,
+          stopPageSeconds,
+          notices,
+          DEFAULT_BULLETIN_SECONDS);
+    }
+
+    /** 宣传页取默认（全部，按声明顺序），公告页停留取默认。 */
     public RenderSettings(
         int checkIntervalTicks,
         int snapshotTtlSeconds,

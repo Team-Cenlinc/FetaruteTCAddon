@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.DestinationSt
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.PlatformStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsBulletinView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
@@ -275,6 +276,56 @@ public final class PidsRenderer {
               lineTop += CARD_SMALL + 2;
             }
           }
+          band.ifPresent(found -> drawLineBand(p, found, view.bandColors()));
+        });
+  }
+
+  /**
+   * 排一条公告：发布时检查长度与站台屏分页共用，量宽与画法一致。
+   *
+   * @param layout 屏幕布局
+   * @param label 标签（横屏标题要让出它的宽度）
+   * @param title 标题
+   * @param body 正文
+   */
+  public PidsBulletinTypesetter.Result typesetBulletin(
+      PidsLayout layout, Names label, Names title, Names body) {
+    Objects.requireNonNull(layout, "layout");
+    int boldFrom = layout.boldFrom();
+    PidsBulletinTypesetter.Measure measure =
+        (text, size, primary) -> {
+          if (text == null || text.isEmpty()) {
+            return 0;
+          }
+          int extra = primary && boldFrom > 0 && size >= boldFrom ? 1 : 0;
+          return fonts.width(fonts.fontFor(text, size), text) + extra;
+        };
+    int labelWidth =
+        Math.max(
+            measure.width(label.primary(), PidsBulletinPainter.LABEL, true),
+            measure.width(label.secondary(), PidsBulletinPainter.LABEL_SECONDARY, false));
+    return new PidsBulletinTypesetter(measure)
+        .typeset(
+            layout,
+            title.primary(),
+            title.secondary(),
+            body.primary(),
+            body.secondary(),
+            labelWidth);
+  }
+
+  /** 渲染公告页的一页（{@link PidsBulletinPainter}），色带取布局里的线路色带组件，与主页同一位置、同一配色。 */
+  public BufferedImage renderBulletin(PidsLayout layout, PidsBulletinView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    Optional<PidsLayout.LineBand> band = lineBand(layout);
+    return paint(
+        layout.width(),
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          new PidsBulletinPainter(p).draw(layout, view);
           band.ifPresent(found -> drawLineBand(p, found, view.bandColors()));
         });
   }

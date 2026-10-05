@@ -70,6 +70,7 @@ public final class StorageSchema {
     ddl.add(hudLineBindings(dialect));
     ddl.add(consistPlans(dialect));
     ddl.add(pidsScreens(dialect));
+    ddl.add(pidsBulletins(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     ddl.add(railEdges(dialect));
@@ -725,6 +726,50 @@ public final class StorageSchema {
         dialect.jsonType(),
         dialect.stringType(),
         dialect.stringType(),
+        dialect.timestampType(),
+        dialect.timestampType());
+  }
+
+  /**
+   * 站台屏公告。运营商按代码记录（与站台屏绑定的车站一致），公司记编号用于权限；车站与线路清单各存为 JSON 字符串数组。
+   *
+   * <p>开始、结束时刻可空（立即、长期）；正文用长文本类型。
+   */
+  private String pidsBulletins(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    company_id %s NOT NULL,
+                    operator_code %s NOT NULL,
+                    station_codes %s,
+                    line_codes %s,
+                    level %s NOT NULL,
+                    title %s NOT NULL,
+                    title_secondary %s,
+                    body %s,
+                    body_secondary %s,
+                    starts_at %s,
+                    ends_at %s,
+                    created_by %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL
+                );
+                """,
+        table("pids_bulletins"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.jsonType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        dialect.uuidType(),
         dialect.timestampType(),
         dialect.timestampType());
   }
