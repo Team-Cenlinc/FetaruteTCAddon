@@ -114,7 +114,8 @@ sign:
   removed: "<prefix> <dark_aqua>已移除</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
   stopmark:
     created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处</dark_aqua>"
-    invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"
+    created-doors: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"
+    invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 car:节数（亦可写 carriage:），例如 car:4、car:4,6、car:3-5、car:*；第四行可选写 door:开关门的车厢（自车头起算，写法同上），例如 door:1；适用的最短编组也须至少有一节开门车厢</gray>"
     no-permission: "<prefix> <red>没有建停车位置标的权限</red>"
   type:
     depot: "车库"
@@ -171,6 +172,8 @@ command:
     hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置与诊断</dark_aqua>"
     entry-template: "<gray>/fta template</gray> <white>-</white> <dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
     hover-template: "<gray>点击填充:</gray> <white>/fta template </white>\n<dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
+    entry-consist: "<gray>/fta consist</gray> <white>-</white> <dark_aqua>编组方案（车型与比例）</dark_aqua>"
+    hover-consist: "<gray>点击填充:</gray> <white>/fta consist </white>\n<dark_aqua>编组方案：用书编写车型与比例，route 用 --consist-plan 绑定</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
     hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
@@ -270,6 +273,56 @@ command:
     delete:
       success: "<prefix> <dark_aqua>已删除模板</dark_aqua> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
 
+  consist:
+    not-ready: "<prefix> <red>编组方案服务尚未就绪</red>"
+    invalid-name: "<prefix> <red>方案名不能为空，且不能含有引号或竖线</red>"
+    not-found: "<prefix> <red>未找到编组方案：</red><white><operator></white><gray>/</gray><white><name></white>"
+    create:
+      exists: "<prefix> <red>编组方案已存在，请使用 edit 修改：</red><white><name></white>"
+    editor:
+      give:
+        success: "<prefix> <dark_aqua>已发放编组方案书</dark_aqua> <gray>编写完成后手持此书执行 /fta consist define</gray>"
+        dropped: "<prefix> <gray>背包已满，编组方案书已掉落在脚下</gray>"
+      book:
+        name: "<dark_aqua>编组方案</dark_aqua> <gray>(<operator>/<name>)</gray>"
+        lore-1: "<gray>每行一个车型：权重 编组写法 | 键=值</gray>"
+        lore-2: "<gray>编写完成后执行 /fta consist define</gray>"
+        empty-template:
+          - "# 每行一个车型：权重 编组写法"
+          - "# 覆盖项写在 | 之后，例如："
+          - "# 3 SH_A6"
+          - "# 1 SH_A8 | name=8 节编组 | type=emu"
+          - "# 可用的键：name type accel"
+          - "# decel max-bps"
+          - "# 以 # 开头的行不生效"
+    define:
+      book:
+        missing: "<prefix> <red>请手持编组方案书</red>"
+        invalid: "<prefix> <red>这不是编组方案书</red>"
+      problem-header: "<prefix> <red>编组方案有误，未保存：</red>"
+      problem: "<gray>第 <white><line></white> 行：</gray><red><reason></red> <gray><detail></gray>"
+      profile-blocked: "<gray>车型</gray> <white><consist></white><gray>：</gray><red><reason></red> <gray><detail></gray>"
+      profile-warning: "<gray>车型</gray> <white><consist></white><gray>：</gray><yellow><reason></yellow> <gray><detail></gray>"
+      conflict: "<gray>车型</gray> <white><consist></white><gray>：覆盖项与方案</gray> <white><plan></white> <gray>中的写法不一致，同一车型在本公司各方案中须一致</gray>"
+      success: "<prefix> <dark_aqua>已保存编组方案</dark_aqua> <white><name></white> <gray>（共 <count> 个车型）</gray>"
+    member: "<gray>-</gray> <white><weight></white> <dark_aqua><consist></dark_aqua> <gray><cars> 节，车长 <length> 格，<type>（<source>），加速 <accel>，减速 <decel><extra></gray>"
+    member-unresolved: "<gray>-</gray> <white><weight></white> <red><consist></red> <gray>档案不可用，不会以此车型出车</gray>"
+    max-speed: "，最高 <value> 格/秒"
+    spawn-limit: "，出车上限 <value> 列"
+    info:
+      header: "<prefix> <dark_aqua>编组方案</dark_aqua> <white><name></white> <gray>(<operator>，更新于 <updated>)</gray>"
+      routes: "<gray>绑定的运行图：</gray><white><routes></white>"
+      routes-none: "<gray>尚无运行图绑定此方案</gray>"
+    list:
+      header: "<prefix> <dark_aqua>编组方案</dark_aqua> <gray>(<operator>，共 <count> 份)</gray>"
+      empty: "<prefix> <gray>暂无编组方案</gray>"
+      entry: "<gray>-</gray> <dark_aqua><name></dark_aqua> <gray>（<count> 个车型）</gray>"
+    delete:
+      bound: "<prefix> <red>仍有运行图绑定此方案，未删除：</red><white><routes></white>"
+      success: "<prefix> <dark_aqua>已删除编组方案</dark_aqua> <white><name></white>"
+    profile:
+      header: "<prefix> <dark_aqua>编组档案</dark_aqua>"
+
   occupancy:
     not-ready: "<prefix> <red>占用管理器未就绪</red>"
     invalid-kind: "<prefix> <red>未知资源类型:</red> <white><kind></white>"
@@ -330,6 +383,11 @@ command:
 
   spawn:
     not-ready: "<prefix> <red>发车管理器未就绪</red>"
+    consist:
+      header: "<prefix> <dark_aqua>车型份额</dark_aqua> <gray>（已发班次只记在内存，重启或方案修改后从零计）</gray>"
+      empty: "<prefix> <gray>没有运行图绑定编组方案</gray>"
+      entry: "<white><line></white><gray>/</gray><white><route></white> <gray>[<plan>]</gray> <dark_aqua><parts></dark_aqua>"
+      part: "<consist> <trips> 班（<actual>% / 目标 <target>%）"
     help:
       header: "<prefix> <dark_aqua>发车计划命令</dark_aqua>"
       entry-plan: "<gray>/fta spawn plan</gray> <white>-</white> <dark_aqua>查看发车计划（可发车服务）</dark_aqua>"
@@ -342,6 +400,8 @@ command:
       hover-queue: "<gray>点击填充:</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-pending: "<gray>/fta spawn pending</gray> <white>-</white> <dark_aqua>查看折返待发（含失败重试）</dark_aqua>"
       hover-pending: "<gray>点击填充:</gray> <white>/fta spawn pending </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      entry-consist: "<gray>/fta spawn consist</gray> <white>-</white> <dark_aqua>查看各运行图的车型份额</dark_aqua>"
+      hover-consist: "<gray>点击填充:</gray> <white>/fta spawn consist</white>\n<dark_aqua>绑定编组方案的运行图：各车型已发班次与目标份额（重启后从零计）</dark_aqua>"
       entry-reset: "<gray>/fta spawn reset</gray> <white>-</white> <dark_aqua>清空发车队列并重置计划</dark_aqua>"
       hover-reset: "<gray>点击执行:</gray> <white>/fta spawn reset</white>\n<dark_aqua>清空 queue/pending 并重置计划</dark_aqua>"
       entry-export-csv: "<gray>/fta spawn export csv</gray> <white>-</white> <dark_aqua>预览计划 CSV</dark_aqua>"
@@ -813,6 +873,8 @@ command:
         entry: "<gray>-</gray> <white><type></white> <dark_aqua><name></dark_aqua>"
 
   route:
+    consist-plan:
+      not-found: "<prefix> <red>运营商</red> <white><operator></white> <red>下没有这份编组方案：</red><white><name></white> <gray>（先用 /fta consist create 创建）</gray>"
     timetable-route:
       invalid: "<prefix> <red>走行线路引用格式不对，应为</red> <white><company>/<operator>/<line>/<route></white><gray>（收到 <white><value></white>）</gray>"
     create:
@@ -831,6 +893,7 @@ command:
       runtime: "<gray>运行时间(秒):</gray> <dark_aqua><runtime></dark_aqua>"
       distance: "<gray>距离(米):</gray> <dark_aqua><distance></dark_aqua>"
       spawn-pattern: "<gray>车型/编组:</gray> <dark_aqua><pattern></dark_aqua>"
+      consist-plan: "<gray>编组方案:</gray> <dark_aqua><plan></dark_aqua>"
       spawn-group: "<gray>交路组:</gray> <dark_aqua><group></dark_aqua>"
       spawn-group-baseline: "<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"
       via: "<gray>经由:</gray> <dark_aqua><via></dark_aqua>"
@@ -1069,6 +1132,7 @@ command:
     spawn:
       coordinated-only: "<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"
       not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"
+      consist-not-in-plan: "<prefix> <yellow>编组</yellow> <white><pattern></white> <yellow>不在运行图绑定的编组方案</yellow> <white><plan></white> <yellow>中：照常出车，但折返复用不会让它接这条运行图</yellow>"
       not-depot: "<prefix> <red>节点不是车库</red> <gray>(node=<white><node></white>)</gray>"
       world-missing: "<prefix> <red>车库所在世界未加载</red> <gray>(world=<white><world></white>)</gray>"
       sign-missing: "<prefix> <red>车库牌子不存在或未加载</red> <gray>(node=<white><node></white>)</gray>"
@@ -1181,6 +1245,24 @@ enum:
     dsty: "入库"
     change: "换线"
     action: "动作"
+  consist-type-source:
+    plan: "方案覆盖"
+    tag: "存车标签"
+    name: "按名称推断"
+    default: "默认车种"
+  consist-book-problem:
+    empty: "未写任何车型"
+    bad_weight: "行首须为 1–1000 的整数权重"
+    missing_pattern: "权重之后缺少编组写法"
+    random_pattern: "编组写法不能含 %（出车结果将随机）"
+    unknown_key: "无法识别的覆盖项"
+    bad_value: "覆盖项的值无效或重复"
+    duplicate_pattern: "同一编组写了两行"
+  consist-profile-issue:
+    unresolved: "TrainCarts 无法解析出任何车厢"
+    not_saved_train: "不是存车名，已按 TrainCarts 写法解析，请确认未拼错"
+    conflicting_tag: "各节车厢的标签取值不一致，请在方案中覆盖"
+    unreadable_tag: "标签取值无法识别，已忽略"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:

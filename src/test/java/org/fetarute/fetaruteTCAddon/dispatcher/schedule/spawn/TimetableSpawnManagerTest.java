@@ -448,6 +448,48 @@ class TimetableSpawnManagerTest {
         train, Optional.of(ROUTE), "R1", index, 2, index == 0 ? "OP:S:AAA:1" : "OP:S:CCC:1", at);
   }
 
+  /** 区分车型的表：出库票与运营票带交路的车型，回库票不出车、不带；没绑交路的车接首班要车型相同。 */
+  @Test
+  void ticketsCarryTheDutyConsist() {
+    Fixture fixture = fixture(withDutyConsist(timetable(), "m8"));
+    fixture
+        .service()
+        .setConsistOfTrain(name -> Optional.of(name.startsWith("eight") ? "m8" : "m6"));
+
+    List<SpawnTicket> tickets = fixture.pollAll();
+
+    assertEquals(Optional.of("m8"), tickets.get(0).consist(), "出库票出交路的车型");
+    assertEquals(Optional.of("m8"), tickets.get(1).consist());
+    assertEquals(Optional.of("m8"), tickets.get(2).consist());
+    assertEquals(Optional.empty(), tickets.get(3).consist(), "回库票不出车");
+    assertTrue(fixture.manager.acceptsCandidate(tickets.get(1), "eight-1"));
+    assertFalse(fixture.manager.acceptsCandidate(tickets.get(1), "six-1"), "别的车型接不了首班");
+    assertEquals(Optional.of("m8"), tickets.get(0).withRetry(DAY, "retry").consist(), "重试票保留车型");
+  }
+
+  private static Timetable withDutyConsist(Timetable source, String consist) {
+    List<VehicleDuty> duties = new ArrayList<>();
+    for (VehicleDuty duty : source.duties()) {
+      duties.add(
+          new VehicleDuty(
+              duty.id(),
+              duty.timetableId(),
+              duty.sequence(),
+              duty.dutyCode(),
+              duty.startDepotNodeId(),
+              duty.endDepotNodeId(),
+              duty.createRouteId(),
+              duty.returnRouteId(),
+              duty.tripIds(),
+              duty.plannedStartSecondOfDay(),
+              duty.returnSecondOfDay(),
+              duty.plannedEndSecondOfDay(),
+              duty.closeReason(),
+              Optional.of(consist)));
+    }
+    return source.withTripsAndDuties(source.trips(), duties);
+  }
+
   private static Fixture fixture() {
     return fixture(timetable());
   }

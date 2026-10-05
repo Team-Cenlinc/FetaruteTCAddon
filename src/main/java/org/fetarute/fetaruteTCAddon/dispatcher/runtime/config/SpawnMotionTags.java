@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime.config;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import java.util.Map;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 
@@ -84,6 +85,45 @@ public final class SpawnMotionTags {
       TrainTagHelper.writeTag(
           properties, TrainConfigResolver.TAG_TRAIN_DECEL_BPS2, format(motion.decelBps2()));
       return Outcome.STAMPED;
+    } catch (RuntimeException | LinkageError ex) {
+      return Outcome.FAILED;
+    }
+  }
+
+  /**
+   * 出车时先写编组方案给的标签（车型与覆盖项），再按车型写加减速。方案覆盖了加减速时这两项归方案所有：撤掉出车来源标记（从出车列车另存的模板会带着），
+   * 模板带来的、方案没覆盖的那一项出车值一并撤掉改按车种配置，之后出车、折返复用、配置重载都不再改写。
+   *
+   * @param consistTags 编组方案给这列车的标签；为空时等同 {@link #stamp(TrainProperties, ConfigManager.ConfigView)}
+   */
+  public static Outcome stampWithConsist(
+      TrainProperties properties,
+      ConfigManager.ConfigView config,
+      Map<String, String> consistTags) {
+    if (properties == null) {
+      return Outcome.SKIPPED;
+    }
+    if (consistTags == null || consistTags.isEmpty()) {
+      return stamp(properties, config);
+    }
+    try {
+      boolean wasStamped = RESOLVER.isSpawnStamped(properties);
+      consistTags.forEach((key, value) -> TrainTagHelper.writeTag(properties, key, value));
+      boolean accel = consistTags.containsKey(TrainConfigResolver.TAG_TRAIN_ACCEL_BPS2);
+      boolean decel = consistTags.containsKey(TrainConfigResolver.TAG_TRAIN_DECEL_BPS2);
+      if (!accel && !decel) {
+        return stamp(properties, config);
+      }
+      if (wasStamped) {
+        if (!accel) {
+          TrainTagHelper.removeTagKey(properties, TrainConfigResolver.TAG_TRAIN_ACCEL_BPS2);
+        }
+        if (!decel) {
+          TrainTagHelper.removeTagKey(properties, TrainConfigResolver.TAG_TRAIN_DECEL_BPS2);
+        }
+      }
+      TrainTagHelper.removeTagKey(properties, TrainConfigResolver.TAG_TRAIN_CONFIG_SOURCE);
+      return Outcome.USER_OWNED;
     } catch (RuntimeException | LinkageError ex) {
       return Outcome.FAILED;
     }

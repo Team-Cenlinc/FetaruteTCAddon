@@ -11,6 +11,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
@@ -31,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.storage.dialect.SqlDialect;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcCompanyRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcConsistPlanRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcDriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudLineBindingRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepository;
@@ -84,6 +86,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final PortalLinkRepository portalLinkRepository;
   private final TimetableRepository timetableRepository;
   private final HudTemplateRepository hudTemplateRepository;
+  private final ConsistPlanRepository consistPlanRepository;
   private final HudLineBindingRepository hudLineBindingRepository;
   private final PidsScreenRepository pidsScreenRepository;
 
@@ -132,6 +135,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcTimetableRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudTemplateRepository =
         new JdbcHudTemplateRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.consistPlanRepository =
+        new JdbcConsistPlanRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.hudLineBindingRepository =
         new JdbcHudLineBindingRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.pidsScreenRepository =
@@ -249,6 +254,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public HudTemplateRepository hudTemplates() {
     return hudTemplateRepository;
+  }
+
+  @Override
+  public ConsistPlanRepository consistPlans() {
+    return consistPlanRepository;
   }
 
   @Override

@@ -58,6 +58,7 @@ public final class DriverStationStop {
   private final boolean doorsRequired;
 
   private StopWindow window = StopWindow.DEFAULTS;
+  private DoorCars doorCars = DoorCars.ALL;
   private Phase phase = Phase.APPROACH;
   private double offsetBlocks = Double.NaN;
   private double stoppedOffsetBlocks = Double.NaN;
@@ -160,6 +161,15 @@ public final class DriverStationStop {
 
   public void setWindow(StopWindow window) {
     this.window = window == null ? StopWindow.DEFAULTS : window;
+  }
+
+  /** 本站开关门的车厢（停车位置标写了 {@code door:} 时只是其中几节）。 */
+  public DoorCars doorCars() {
+    return doorCars;
+  }
+
+  public void setDoorCars(DoorCars doorCars) {
+    this.doorCars = doorCars == null ? DoorCars.ALL : doorCars;
   }
 
   public Phase phase() {

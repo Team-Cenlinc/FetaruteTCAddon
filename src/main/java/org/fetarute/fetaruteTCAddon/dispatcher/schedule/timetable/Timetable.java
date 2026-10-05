@@ -82,12 +82,13 @@ public record Timetable(
       throw new IllegalArgumentException("计划窗口终点不能早于起点");
     }
     routePlans =
-        routePlans == null
-            ? List.of()
-            : routePlans.stream()
-                .filter(Objects::nonNull)
-                .sorted(Comparator.comparing(TimetableRoutePlan::routeCode))
-                .toList();
+        new IndexedPlans(
+            routePlans == null
+                ? List.of()
+                : routePlans.stream()
+                    .filter(Objects::nonNull)
+                    .sorted(Comparator.comparing(TimetableRoutePlan::routeCode))
+                    .toList());
     trips =
         new IndexedTrips(
             trips == null
@@ -99,14 +100,15 @@ public record Timetable(
                             .thenComparing(TimetableTrip::tripCode))
                     .toList());
     duties =
-        duties == null
-            ? List.of()
-            : duties.stream()
-                .filter(Objects::nonNull)
-                .sorted(
-                    Comparator.comparingInt(VehicleDuty::plannedStartSecondOfDay)
-                        .thenComparing(VehicleDuty::dutyCode))
-                .toList();
+        new IndexedDuties(
+            duties == null
+                ? List.of()
+                : duties.stream()
+                    .filter(Objects::nonNull)
+                    .sorted(
+                        Comparator.comparingInt(VehicleDuty::plannedStartSecondOfDay)
+                            .thenComparing(VehicleDuty::dutyCode))
+                    .toList());
     notes = notes == null ? Optional.empty() : notes.map(String::trim).filter(s -> !s.isBlank());
   }
 
@@ -117,7 +119,7 @@ public record Timetable(
 
   /** 本时刻表覆盖的 route 集合（含外方走行线路）。 */
   public List<UUID> routeIds() {
-    return routePlans.stream().map(TimetableRoutePlan::routeId).toList();
+    return routePlans.stream().map(TimetableRoutePlan::routeId).distinct().toList();
   }
 
   /** 受本表管辖的 route：发布后它们的 headway 票会被拦下改按表发车。外方的走行线路不在其中——那是别人线路的资源， 我只是借它出库/回库，不能把人家自己的发车也拦掉。 */
@@ -125,20 +127,33 @@ public record Timetable(
     return routePlans.stream()
         .filter(plan -> !plan.external())
         .map(TimetableRoutePlan::routeId)
+        .distinct()
         .toList();
   }
 
-  /** 按 route 查计划。 */
+  /** 按 route 查计划。区分车型的表里同一条 route 有几份（每个车型一份变体）时，返回不分车型的基础计划（允许车型里最慢的那份）。 */
   public Optional<TimetableRoutePlan> routePlan(UUID routeId) {
     if (routeId == null) {
       return Optional.empty();
     }
-    for (TimetableRoutePlan plan : routePlans) {
-      if (plan.routeId().equals(routeId)) {
-        return Optional.of(plan);
+    return Optional.ofNullable(((IndexedPlans) routePlans).base.get(routeId));
+  }
+
+  /**
+   * 按 route 与车型查计划：有这个车型的变体就用它，否则退回 {@link #routePlan(UUID)}。
+   *
+   * @param routeId route
+   * @param consist 车型；为空时等同 {@link #routePlan(UUID)}
+   */
+  public Optional<TimetableRoutePlan> routePlan(UUID routeId, Optional<String> consist) {
+    if (routeId != null && consist != null && consist.isPresent()) {
+      TimetableRoutePlan variant =
+          ((IndexedPlans) routePlans).byConsist.getOrDefault(routeId, Map.of()).get(consist.get());
+      if (variant != null) {
+        return Optional.of(variant);
       }
     }
-    return Optional.empty();
+    return routePlan(routeId);
   }
 
   /** 按车次号查发车记录。 */
@@ -162,12 +177,7 @@ public record Timetable(
     if (dutyId == null) {
       return Optional.empty();
     }
-    for (VehicleDuty duty : duties) {
-      if (duty.id().equals(dutyId)) {
-        return Optional.of(duty);
-      }
-    }
-    return Optional.empty();
+    return ((IndexedDuties) duties).byId(dutyId);
   }
 
   /**
@@ -185,7 +195,7 @@ public record Timetable(
     if (trip == null || serviceDate == null) {
       return Optional.empty();
     }
-    return routePlan(trip.routeId())
+    return tripPlan(trip)
         .flatMap(plan -> plan.stopAt(stopSequence))
         .map(
             stop ->
@@ -205,7 +215,7 @@ public record Timetable(
     if (trip == null || serviceDate == null) {
       return Optional.empty();
     }
-    return routePlan(trip.routeId())
+    return tripPlan(trip)
         .flatMap(plan -> plan.stopAt(stopSequence))
         .map(
             stop -> trip.departureAt(serviceDate, zoneId).plusSeconds(stop.arrivalOffsetSeconds()));
@@ -246,6 +256,53 @@ public record Timetable(
     return trip.departureAt(calendarDate, zoneId);
   }
 
+  /** 换一份 route 计划、发车表与交路，其余不变（车型变体折回基础 route 时用）。 */
+  public Timetable withPlansTripsAndDuties(
+      List<TimetableRoutePlan> nextPlans,
+      List<TimetableTrip> nextTrips,
+      List<VehicleDuty> nextDuties) {
+    return new Timetable(
+        id,
+        companyId,
+        operatorId,
+        lineId,
+        code,
+        name,
+        status,
+        zoneId,
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        nextPlans,
+        nextTrips,
+        nextDuties,
+        notes,
+        createdAt,
+        updatedAt);
+  }
+
+  /**
+   * 车次按它那辆车的车型跑的计划：交路带车型且表里有这个车型的变体时取变体，否则取基础计划。
+   *
+   * <p>按表运行里凡是要用某一班的各站时刻（扣车、晚点账、站牌、ETA），都走这里，而不是 {@link #routePlan(UUID)}。
+   *
+   * @param trip 车次
+   * @return 计划；route 不在表内时为空
+   */
+  public Optional<TimetableRoutePlan> tripPlan(TimetableTrip trip) {
+    return trip == null ? Optional.empty() : routePlan(trip.routeId(), consistOf(trip));
+  }
+
+  /**
+   * 车次的车型：它所在交路的车型。不区分车型的表、或车次不挂交路时为空。
+   *
+   * @param trip 车次
+   */
+  public Optional<String> consistOf(TimetableTrip trip) {
+    return trip == null
+        ? Optional.empty()
+        : trip.dutyId().flatMap(this::duty).flatMap(VehicleDuty::consist);
+  }
+
   /** 返回替换了发车表与 duty 的新实例，供加载后回填。 */
   public Timetable withTripsAndDuties(List<TimetableTrip> nextTrips, List<VehicleDuty> nextDuties) {
     return new Timetable(
@@ -265,6 +322,80 @@ public record Timetable(
         notes,
         createdAt,
         updatedAt);
+  }
+
+  /**
+   * route 计划表：只读列表，附带按 route（基础计划）与按 route × 车型（变体计划）的索引。
+   *
+   * <p>门控每秒按车次逐班取计划，区分车型的表里计划数是 route 数的几倍，线性扫描会成为热点。基础计划取不分车型的那份，没有时取顺序在前的一份； 同一 route
+   * 同一车型重复时取顺序在前的一份，与逐条查找结果相同。
+   */
+  private static final class IndexedPlans extends AbstractList<TimetableRoutePlan>
+      implements RandomAccess {
+
+    private final List<TimetableRoutePlan> plans;
+    private final Map<UUID, TimetableRoutePlan> base;
+    private final Map<UUID, Map<String, TimetableRoutePlan>> byConsist;
+
+    private IndexedPlans(List<TimetableRoutePlan> plans) {
+      this.plans = plans;
+      Map<UUID, TimetableRoutePlan> plain = new HashMap<>();
+      Map<UUID, TimetableRoutePlan> first = new HashMap<>();
+      Map<UUID, Map<String, TimetableRoutePlan>> variants = new HashMap<>();
+      for (TimetableRoutePlan plan : plans) {
+        first.putIfAbsent(plan.routeId(), plan);
+        if (plan.consist().isEmpty()) {
+          plain.putIfAbsent(plan.routeId(), plan);
+        } else {
+          variants
+              .computeIfAbsent(plan.routeId(), id -> new HashMap<>())
+              .putIfAbsent(plan.consist().get().key(), plan);
+        }
+      }
+      first.putAll(plain);
+      this.base = first;
+      this.byConsist = variants;
+    }
+
+    @Override
+    public TimetableRoutePlan get(int index) {
+      return plans.get(index);
+    }
+
+    @Override
+    public int size() {
+      return plans.size();
+    }
+  }
+
+  /** 交路表：只读列表，附带按 UUID 的索引（按表运行每次取车次的车型都要查它所在的交路）。 */
+  private static final class IndexedDuties extends AbstractList<VehicleDuty>
+      implements RandomAccess {
+
+    private final List<VehicleDuty> duties;
+    private final Map<UUID, VehicleDuty> byId;
+
+    private IndexedDuties(List<VehicleDuty> duties) {
+      this.duties = duties;
+      this.byId = new HashMap<>(duties.size() * 2);
+      for (VehicleDuty duty : duties) {
+        byId.putIfAbsent(duty.id(), duty);
+      }
+    }
+
+    @Override
+    public VehicleDuty get(int index) {
+      return duties.get(index);
+    }
+
+    @Override
+    public int size() {
+      return duties.size();
+    }
+
+    private Optional<VehicleDuty> byId(UUID dutyId) {
+      return Optional.ofNullable(byId.get(dutyId));
+    }
   }
 
   /**

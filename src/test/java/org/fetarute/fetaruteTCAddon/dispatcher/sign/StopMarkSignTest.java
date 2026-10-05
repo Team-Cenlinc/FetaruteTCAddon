@@ -47,6 +47,72 @@ class StopMarkSignTest {
 
     assertTrue(StopMarkSign.parse("carriage：8", "").isPresent(), "全角冒号也认");
     assertTrue(StopMarkSign.parse("", "carriage:2").isPresent(), "也可以写在第四行");
+    assertTrue(StopMarkSign.parse("note", "carriage:2").isPresent(), "别的文字不管");
+    assertEquals(
+        "4", StopMarkSign.parse("carriage:a", "carriage:4").orElseThrow().describe(), "写错的一行不管");
+    assertEquals(
+        "4", StopMarkSign.parse("carriage:4", "cars:6").orElseThrow().describe(), "两行都写时取第一行");
+    assertEquals("3-5", StopMarkSign.parse("car:3－5", "").orElseThrow().describe(), "全角减号也认");
+  }
+
+  @Test
+  @DisplayName("car: 是 carriage: 的简写")
+  void carAlias() {
+    StopMarkSign car = StopMarkSign.parse("car:4,6", "").orElseThrow();
+    assertEquals("4,6", car.describe());
+    assertTrue(StopMarkSign.parse("Cars: 3-5", "").orElseThrow().matches(4));
+    assertTrue(StopMarkSign.parse("CAR:*", "").orElseThrow().matches(12));
+  }
+
+  @Test
+  @DisplayName("door: 选哪几节车厢开门，写法与 car: 相同；不写或写 * 时全车开门")
+  void doors() {
+    StopMarkSign none = StopMarkSign.parse("car:4", "").orElseThrow();
+    assertTrue(none.allDoors());
+    assertTrue(none.opensDoorsAt(1));
+    assertTrue(none.opensDoorsAt(4));
+    assertEquals("*", none.describeDoors());
+    assertTrue(StopMarkSign.parse("car:4", "   ").orElseThrow().allDoors(), "第四行空着");
+    assertTrue(StopMarkSign.parse("car:4", "door:*").orElseThrow().allDoors());
+
+    StopMarkSign first = StopMarkSign.parse("car:4", "door:1").orElseThrow();
+    assertFalse(first.allDoors());
+    assertTrue(first.opensDoorsAt(1));
+    assertFalse(first.opensDoorsAt(2));
+    assertEquals("1", first.describeDoors());
+    assertTrue(first.matches(4), "door: 不影响适用节数");
+    assertEquals(1, first.breadth());
+
+    StopMarkSign several = StopMarkSign.parse("car:*", "doors: 1, 3-4").orElseThrow();
+    assertTrue(several.opensDoorsAt(1));
+    assertFalse(several.opensDoorsAt(2));
+    assertTrue(several.opensDoorsAt(3));
+    assertTrue(several.opensDoorsAt(4));
+    assertFalse(several.opensDoorsAt(5));
+    assertEquals("1,3-4", several.describeDoors());
+
+    StopMarkSign swapped = StopMarkSign.parse("door：2", "carriage:4").orElseThrow();
+    assertEquals("4", swapped.describe());
+    assertEquals("2", swapped.describeDoors());
+
+    assertEquals(
+        "1,3", StopMarkSign.parse("car:4", "door:1，3").orElseThrow().describeDoors(), "全角逗号也认");
+  }
+
+  @Test
+  @DisplayName("door: 写错，或适用的最短编组没有其中任何一节时整块不认")
+  void invalidDoors() {
+    assertTrue(StopMarkSign.parse("car:4", "door:").isEmpty());
+    assertTrue(StopMarkSign.parse("car:4", "door:0").isEmpty());
+    assertTrue(StopMarkSign.parse("car:4", "door:a").isEmpty());
+    assertTrue(StopMarkSign.parse("car:4", "door:3-1").isEmpty());
+    assertTrue(StopMarkSign.parse("door:1", "").isEmpty(), "car: 必填");
+    assertTrue(StopMarkSign.parse("door:1", "door:2").isEmpty());
+    assertTrue(StopMarkSign.parse("car:4", "door:5").isEmpty(), "四节车没有第五节");
+    assertTrue(StopMarkSign.parse("car:4,6", "door:5-6").isEmpty(), "四节车没有第五、六节");
+    assertTrue(StopMarkSign.parse("car:*", "door:2").isEmpty(), "单节车没有第二节");
+    assertTrue(StopMarkSign.parse("car:*", "door:1,3").isPresent());
+    assertTrue(StopMarkSign.parse("car:4-8", "door:3-6").isPresent(), "四节车有第三、四节");
   }
 
   @Test
@@ -56,7 +122,7 @@ class StopMarkSignTest {
     assertTrue(StopMarkSign.parse("carriage:0", "").isEmpty());
     assertTrue(StopMarkSign.parse("carriage:5-3", "").isEmpty());
     assertTrue(StopMarkSign.parse("carriage:a", "").isEmpty());
-    assertTrue(StopMarkSign.parse("cars:4", "").isEmpty());
+    assertTrue(StopMarkSign.parse("cart:4", "").isEmpty());
     assertTrue(StopMarkSign.parse("4", "").isEmpty());
   }
 

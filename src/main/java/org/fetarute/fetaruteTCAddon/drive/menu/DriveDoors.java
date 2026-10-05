@@ -6,6 +6,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController.ManualDoor;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController.ManualDoorSide;
@@ -45,12 +46,14 @@ public final class DriveDoors {
    *
    * @param physicalLeft 是否为驾驶员的左边；否则为右边
    * @param chime AutoStation 提示音配置，可为 {@code null}
+   * @param cars 开门时只开这几节车厢（停站时停车位置标写了 {@code door:}）；关门总是关开门时那几节
    */
   public Result toggle(
       MinecartGroup current,
       DriveSession session,
       boolean physicalLeft,
-      ConfigManager.AutoStationSettings chime) {
+      ConfigManager.AutoStationSettings chime,
+      DoorCars cars) {
     if (group != current) {
       // 编组对象重建（如跨世界）后旧句柄指向已失效的编组，门动画状态无从还原，只能清掉记录。
       forget(session);
@@ -81,7 +84,7 @@ public final class DriveDoors {
           AutoStationDoorController.resolveManualDoorSide(
               current, nowFacing, physicalLeft, physicalLeft == session.cabAtHead(current.size()));
     }
-    ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime);
+    ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime, cars);
     lastSummary = door.summary();
     if (!door.open()) {
       return Result.UNAVAILABLE;

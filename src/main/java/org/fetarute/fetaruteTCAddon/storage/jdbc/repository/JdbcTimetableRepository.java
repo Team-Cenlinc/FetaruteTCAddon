@@ -55,7 +55,7 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
   private static final String DUTY_COLUMNS =
       "id, timetable_id, sequence, duty_code, start_depot_node_id, end_depot_node_id,"
           + " create_route_id, return_route_id, trip_ids, planned_start_second, return_second,"
-          + " planned_end_second, close_reason";
+          + " planned_end_second, close_reason, consist_key";
 
   public JdbcTimetableRepository(
       DataSource dataSource,
@@ -233,7 +233,7 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               + table("timetable_duties")
               + " ("
               + DUTY_COLUMNS
-              + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+              + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
       try (var statement = connection.prepareStatement(sql)) {
         for (VehicleDuty duty : timetable.duties()) {
           setUuid(statement, 1, duty.id());
@@ -249,6 +249,7 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
           statement.setInt(11, duty.returnSecondOfDay());
           statement.setInt(12, duty.plannedEndSecondOfDay());
           statement.setString(13, duty.closeReason().name());
+          statement.setString(14, duty.consist().orElse(null));
           statement.addBatch();
         }
         statement.executeBatch();
@@ -542,7 +543,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
         readRequiredInt(rs, "planned_start_second"),
         readRequiredInt(rs, "return_second"),
         readRequiredInt(rs, "planned_end_second"),
-        reason);
+        reason,
+        Optional.ofNullable(rs.getString("consist_key")));
   }
 
   private int readRequiredInt(ResultSet rs, String column) throws SQLException {
@@ -589,7 +591,16 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               plan.terminalNodeId(),
               plan.depotNodeId().orElse(null),
               stops,
-              plan.external() ? Boolean.TRUE : null));
+              plan.external() ? Boolean.TRUE : null,
+              plan.consist()
+                  .map(
+                      variant ->
+                          new ConsistDto(
+                              variant.key(),
+                              variant.baseRouteId().toString(),
+                              variant.lengthBlocks(),
+                              variant.tailBlocks()))
+                  .orElse(null)));
     }
     return gson.toJson(dtos);
   }
@@ -636,9 +647,25 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               dto.terminal(),
               Optional.ofNullable(dto.depot()),
               Optional.empty(),
-              Boolean.TRUE.equals(dto.external())));
+              Boolean.TRUE.equals(dto.external()),
+              decodeConsist(dto)));
     }
     return List.copyOf(out);
+  }
+
+  /** 车型变体；不区分车型的计划（含旧数据）没有这一项。基础 route 缺失时按这份计划自己的 route 算。 */
+  private static Optional<TimetableRoutePlan.ConsistVariant> decodeConsist(RoutePlanDto dto) {
+    ConsistDto consist = dto.consist();
+    if (consist == null || consist.key() == null || consist.key().isBlank()) {
+      return Optional.empty();
+    }
+    UUID base =
+        consist.base() == null || consist.base().isBlank()
+            ? UUID.fromString(dto.routeId())
+            : UUID.fromString(consist.base());
+    return Optional.of(
+        new TimetableRoutePlan.ConsistVariant(
+            consist.key(), base, consist.length(), consist.tail()));
   }
 
   /**
@@ -674,7 +701,11 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
       String terminal,
       String depot,
       List<StopDto> stops,
-      Boolean external) {}
+      Boolean external,
+      ConsistDto consist) {}
+
+  /** 车型变体：车型键、基础 route、车长与车尾出清。 */
+  private record ConsistDto(String key, String base, double length, double tail) {}
 
   /** {@code pass} 为 {@link RouteStopPassType} 名；1.5.0 之前的行没有它（见 {@link #decodePassType}）。 */
   private record StopDto(int seq, String station, String node, int arr, int dep, String pass) {}

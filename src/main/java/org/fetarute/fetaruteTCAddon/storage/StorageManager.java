@@ -184,6 +184,26 @@ public final class StorageManager {
     ensureRailEdgeFootprintColumn(connection);
     ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);
+    ensureTimetableDutyConsistColumn(connection);
+  }
+
+  /** 兼容性迁移：为旧版 timetable_duties 补齐 consist_key 列（交路的车型；旧表为空，出车按 route 的编组）。 */
+  private void ensureTimetableDutyConsistColumn(java.sql.Connection connection) {
+    String dutiesTable = storageSchema.tablePrefix() + "timetable_duties";
+    String sql = "ALTER TABLE " + dutiesTable + " ADD COLUMN consist_key " + dialect.stringType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: timetable_duties.consist_key (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 timetable_duties.consist_key: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 timetable_duties.consist_key: " + ex.getMessage());
+    }
   }
 
   /** 兼容性迁移：为旧版 rail_graph_snapshots 补齐 node_signature 列。 */

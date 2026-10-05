@@ -11,6 +11,7 @@ import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
@@ -18,7 +19,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 
 /**
- * 终点折返待命车的停车保持：停稳且整列车身位置完整时，只保持车身实际压着的轨道。
+ * 终点停车的停车保持：停稳且整列车身位置完整时，只保持车身实际压着的轨道。适用于终点折返待命车，也适用于还在终到停站、尚未登记成待命车的列车。
  *
  * <p>停车保持沿用尾部保护——从站台节点往回按保守车长整边覆盖，再留 {@code rear-guard-edges} 条边。可列车以站牌为中心停车，
  * 车头越过站台节点约半个车长，从节点往回量会多盖约半个车长；双站台终点的两条进站路在身后不远就汇到同一个道岔上， 多盖的那一截正好压住它，
@@ -33,6 +34,20 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 final class LayoverBodyRetain {
 
   private LayoverBodyRetain() {}
+
+  /**
+   * 列车停在本交路最后一个路径点：终到停站期间就按车身收窄，不必等终到停站结束、登记成待命车。
+   *
+   * <p>终到停站与待命时车的位置一样，只会原地等票或折返；登记要等终到停站时间走完，这段时间里从站台节点往回多量的那截照样压着身后的道岔。 中途站不收窄：车还要沿进站方向往前走。
+   *
+   * @param route 列车当前交路
+   * @param currentIndex 列车当前路径点下标
+   */
+  static boolean atFinalStop(RouteDefinition route, int currentIndex) {
+    return route != null
+        && !route.waypoints().isEmpty()
+        && currentIndex == route.waypoints().size() - 1;
+  }
 
   /**
    * 把待命车的停车保持请求收窄到车身实际覆盖的轨道。

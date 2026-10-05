@@ -153,6 +153,32 @@ class TrainLaunchManagerSpeedRampTest {
     assertEquals(0, ramp.size(), "没有随距离收紧的约束时不登记");
   }
 
+  @Test
+  void consistMaxSpeedCapsTheCommand() {
+    // 车型最高速度 15 bps：线路 22.22 bps（含晚点追赶放宽后的限速）也只给到 15。
+    SpeedLimitRamp ramp = new SpeedLimitRamp(tick -> () -> {});
+    TrainLaunchManager manager = new TrainLaunchManager(ramp);
+    RampTestSupport.SpeedLimitStore limit = RampTestSupport.speedLimitStore(10.0 / TICKS);
+    RampTestSupport.MovingTrain train =
+        new RampTestSupport.MovingTrain(limit.properties(), 10.0 / TICKS);
+    TrainConfig capped =
+        new TrainConfig(TrainType.EMU, 0.8, 1.0, java.util.OptionalDouble.of(15.0));
+
+    manager.applyControl(
+        train,
+        limit.properties(),
+        SignalAspect.PROCEED,
+        22.22,
+        capped,
+        true,
+        OptionalLong.empty(),
+        Optional.empty(),
+        runtimeSettings());
+
+    assertEquals(15.0 / TICKS, limit.properties().getSpeedLimit(), 1.0e-9);
+    assertTrue(train.lastAccelerateTargetBpt <= 15.0 / TICKS + 1.0e-9, "牵引目标同样不超过车型最高速度");
+  }
+
   private static TrainLaunchManager.ControlApplicationResult signalTick(
       TrainLaunchManager manager,
       RampTestSupport.MovingTrain train,

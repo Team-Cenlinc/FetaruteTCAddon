@@ -11,9 +11,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 停车位置标牌子：{@code [train]} / {@code stopmark} / {@code carriage:4}。
+ * 停车位置标牌子：{@code [train]} / {@code stopmark} / {@code car:4} / {@code door:1}（第四行选填）。
  *
- * <p>牌子本身不对经过的列车做任何事：车站停站时沿股道找到它，让对应节数的列车车头停在这里（见 {@link StopMarkIndex}）。 建牌时只检查写法并清空缓存。
+ * <p>牌子本身不对经过的列车做任何事：车站停站时沿股道找到它，让对应节数的列车车头停在这里，并只开 {@code door:} 写的那几节车厢的门（见 {@link
+ * StopMarkIndex}）。 建牌时只检查写法并清空缓存。
  */
 public final class StopMarkSignAction extends SignAction {
 
@@ -57,8 +58,16 @@ public final class StopMarkSignAction extends SignAction {
           .sendMessage(
               sign.map(
                       parsed ->
-                          locale.component(
-                              "sign.stopmark.created", Map.of("carriages", parsed.describe())))
+                          parsed.allDoors()
+                              ? locale.component(
+                                  "sign.stopmark.created", Map.of("carriages", parsed.describe()))
+                              : locale.component(
+                                  "sign.stopmark.created-doors",
+                                  Map.of(
+                                      "carriages",
+                                      parsed.describe(),
+                                      "doors",
+                                      parsed.describeDoors())))
                   .orElseGet(() -> locale.component("sign.stopmark.invalid")));
     }
     return true;

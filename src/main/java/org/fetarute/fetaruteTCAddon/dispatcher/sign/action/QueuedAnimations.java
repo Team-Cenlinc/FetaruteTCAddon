@@ -166,12 +166,24 @@ public final class QueuedAnimations {
    * TrainCarts 的默认动画，播在每节车厢的根附件上。
    */
   public static Ticket playNamed(MinecartGroup group, AnimationOptions options) {
-    if (group == null || options == null || options.getName() == null) {
+    if (group == null) {
+      return Ticket.EMPTY;
+    }
+    List<MinecartMember<?>> members = new ArrayList<>();
+    for (MinecartMember<?> member : group) {
+      members.add(member);
+    }
+    return playNamed(members, options);
+  }
+
+  /** 只在这几节车厢上按名字排队播放，规则同 {@link #playNamed(MinecartGroup, AnimationOptions)}（停车位置标只开部分车厢的门）。 */
+  public static Ticket playNamed(List<MinecartMember<?>> members, AnimationOptions options) {
+    if (members == null || options == null || options.getName() == null) {
       return Ticket.EMPTY;
     }
     List<Attachment> all = new ArrayList<>();
     List<Attachment> roots = new ArrayList<>();
-    for (MinecartMember<?> member : group) {
+    for (MinecartMember<?> member : members) {
       if (member == null
           || member.getAttachments() == null
           || !member.getAttachments().isAttached()) {

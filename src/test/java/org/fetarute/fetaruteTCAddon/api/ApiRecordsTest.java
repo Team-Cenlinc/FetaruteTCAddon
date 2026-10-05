@@ -213,6 +213,7 @@ class ApiRecordsTest {
       assertFalse(snapshot.nextNode().isPresent());
       assertFalse(snapshot.routeCode().isPresent());
       assertFalse(snapshot.eta().isPresent());
+      assertFalse(snapshot.consist().isPresent(), "旧构造器不带车型");
     }
 
     @Test
@@ -663,6 +664,59 @@ class ApiRecordsTest {
       Optional<FetaruteApi> api = FetaruteApi.get();
       // 在测试环境中，API 可能已被其他测试初始化，所以不强制断言
       assertNotNull(api); // Optional 本身不应为 null
+    }
+  }
+
+  @Nested
+  @DisplayName("TimetableApi 数据模型（1.11.0 车型）")
+  class TimetableApiRecordsTest {
+
+    private final org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.StopTime slow =
+        new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.StopTime(
+            1, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 100, 130, PassType.STOP);
+    private final org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.StopTime fast =
+        new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.StopTime(
+            1, Optional.of("BBB"), Optional.of("OP:S:BBB:1"), 70, 100, PassType.STOP);
+
+    @Test
+    @DisplayName("1.10.0 的构造器不带车型，stopsFor 退回 stops")
+    void legacyConstructorsHaveNoConsist() {
+      UUID route = UUID.randomUUID();
+      var plan =
+          new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.RoutePlan(
+              route, "R1", "OPERATION", List.of(slow));
+      assertTrue(plan.consistStops().isEmpty());
+      assertEquals(List.of(slow), plan.stopsFor(Optional.of("m6")));
+      assertEquals(List.of(slow), plan.stopsFor(Optional.empty()));
+
+      var trip =
+          new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.Trip(
+              UUID.randomUUID(), route, "R1-001", 28800, Optional.of("D001"));
+      assertEquals(Optional.of("D001"), trip.dutyCode());
+      assertTrue(trip.consist().isEmpty());
+
+      var duty =
+          new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.Duty(
+              UUID.randomUUID(), "D001", "OP:D:DEP:1", "OP:D:DEP:2", List.of("R1-001"), 100, 900);
+      assertEquals("OP:D:DEP:2", duty.endDepotNodeId());
+      assertEquals(900, duty.plannedEndSecondOfDay());
+      assertTrue(duty.consist().isEmpty());
+    }
+
+    @Test
+    @DisplayName("stopsFor 按车型取时分，车型表不可改")
+    void stopsForPicksTheConsistsTimes() {
+      var plan =
+          new org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi.RoutePlan(
+              UUID.randomUUID(),
+              "R1",
+              "OPERATION",
+              List.of(slow),
+              java.util.Map.of("m6", List.of(fast)));
+      assertEquals(List.of(fast), plan.stopsFor(Optional.of("m6")));
+      assertEquals(List.of(slow), plan.stopsFor(Optional.of("m8")), "没有这个车型时退回 stops");
+      assertThrows(
+          UnsupportedOperationException.class, () -> plan.consistStops().put("m8", List.of()));
     }
   }
 }

@@ -4,7 +4,10 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.LocalDate;
 import java.util.Collection;
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.UUID;
@@ -12,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 
 /**
- * 时刻表 API：已发布时刻表、车次、站点计划到发与列车当前车次（1.4.0 新增）。
+ * 时刻表 API：已发布时刻表、车次、站点计划到发与列车当前车次（1.4.0 新增；1.11.0 车型）。
  *
  * <p>只读。数据来自内存中已发布时刻表的快照，查询不访问数据库，可在任意线程调用。草稿与归档时刻表不对外暴露。
  *
@@ -20,6 +23,14 @@ import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
  *
  * <p>时刻表是按服务日重复的模板：车次只记起点发车的“当日秒数”，各站时刻是相对起点发车的偏移。 本 API 返回的 {@link Instant}
  * 已按时刻表自身时区与服务日换算好，调用方无需自己做日期换算。
+ *
+ * <h2>车型（1.11.0）</h2>
+ *
+ * <p>多车型混跑的时刻表里，每辆车（车辆交路）有一个车型，它跑的每一班都按这个车型的时分排：快的车型各站时刻更早。车型键是出车编组写法（通常是 TrainCarts
+ * 存车名）归一后的形式：去掉首尾空白、连续空白压成一个、转小写。{@link Trip#consist()}、{@link Duty#consist()}、{@link
+ * Departure#consist()}、{@link TrainAssignment#consist()} 给出车型；某一班各站的计划时分用 {@link
+ * RoutePlan#stopsFor(Optional)} 按车型取。不区分车型的时刻表这些字段都为空，{@code stopsFor} 返回 {@link
+ * RoutePlan#stops()}。
  *
  * <h2>停靠序号</h2>
  *
@@ -164,14 +175,51 @@ public interface TimetableApi {
   /**
    * 交路时分：各站相对起点发车的到发偏移。
    *
+   * <p>多车型混跑的时刻表里，每个车次按它那辆车的车型跑，各车型的时分不同：{@code stops} 是允许车型里最慢的那份，各车型自己的那份在 {@code consistStops}
+   * 里。取某一班的时分用 {@link #stopsFor(Optional)}，传 {@link Trip#consist()}。
+   *
    * @param routeId 交路 ID
    * @param routeCode 交路代码
    * @param kind 交路类型（OPERATION / CREATE / RETURN）
-   * @param stops 各停靠点
+   * @param stops 各停靠点（区分车型时为允许车型里最慢的那份）
+   * @param consistStops 车型键 → 这个车型的各停靠点（1.11.0）；不区分车型时为空
    */
-  record RoutePlan(UUID routeId, String routeCode, String kind, List<StopTime> stops) {
+  record RoutePlan(
+      UUID routeId,
+      String routeCode,
+      String kind,
+      List<StopTime> stops,
+      Map<String, List<StopTime>> consistStops) {
     public RoutePlan {
       stops = stops == null ? List.of() : List.copyOf(stops);
+      Map<String, List<StopTime>> copied = new LinkedHashMap<>();
+      if (consistStops != null) {
+        consistStops.forEach(
+            (key, value) -> {
+              if (key != null && value != null) {
+                copied.put(key, List.copyOf(value));
+              }
+            });
+      }
+      consistStops = Collections.unmodifiableMap(copied);
+    }
+
+    /** 1.10.0 及以前的构造器（源码与二进制兼容）：不区分车型。 */
+    public RoutePlan(UUID routeId, String routeCode, String kind, List<StopTime> stops) {
+      this(routeId, routeCode, kind, stops, Map.of());
+    }
+
+    /**
+     * 某个车型跑这条交路的各停靠点（1.11.0）。
+     *
+     * @param consist 车型键（{@link Trip#consist()}）；为空时取 {@link #stops()}
+     * @return 这个车型的那份；不区分车型或没有这个车型时为 {@link #stops()}
+     */
+    public List<StopTime> stopsFor(Optional<String> consist) {
+      if (consist == null || consist.isEmpty()) {
+        return stops;
+      }
+      return consistStops.getOrDefault(consist.get(), stops);
     }
   }
 
@@ -209,13 +257,30 @@ public interface TimetableApi {
    * @param tripCode 车次号
    * @param departureSecondOfDay 起点发车（当日秒数）
    * @param dutyCode 所属车辆交路代码（未分配时为空）
+   * @param consist 车型键（1.11.0）：所属车辆交路的车型；不区分车型或未分配交路时为空
    */
   record Trip(
       UUID id,
       UUID routeId,
       String tripCode,
       int departureSecondOfDay,
-      Optional<String> dutyCode) {}
+      Optional<String> dutyCode,
+      Optional<String> consist) {
+
+    public Trip {
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    /** 1.10.0 及以前的构造器（源码与二进制兼容）：不区分车型。 */
+    public Trip(
+        UUID id,
+        UUID routeId,
+        String tripCode,
+        int departureSecondOfDay,
+        Optional<String> dutyCode) {
+      this(id, routeId, tripCode, departureSecondOfDay, dutyCode, Optional.empty());
+    }
+  }
 
   /**
    * 车辆交路：一辆车从出库到回库依次跑的车次。
@@ -227,6 +292,7 @@ public interface TimetableApi {
    * @param tripCodes 依次运行的车次号
    * @param plannedStartSecondOfDay 计划出库（当日秒数，可为负表示前一日）
    * @param plannedEndSecondOfDay 计划回库（当日秒数，可超过 86400）
+   * @param consist 车型键（1.11.0）：出库出的就是这个车型；不区分车型时为空
    */
   record Duty(
       UUID id,
@@ -235,9 +301,31 @@ public interface TimetableApi {
       String endDepotNodeId,
       List<String> tripCodes,
       int plannedStartSecondOfDay,
-      int plannedEndSecondOfDay) {
+      int plannedEndSecondOfDay,
+      Optional<String> consist) {
     public Duty {
       tripCodes = tripCodes == null ? List.of() : List.copyOf(tripCodes);
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    /** 1.10.0 及以前的构造器（源码与二进制兼容）：不区分车型。 */
+    public Duty(
+        UUID id,
+        String dutyCode,
+        String startDepotNodeId,
+        String endDepotNodeId,
+        List<String> tripCodes,
+        int plannedStartSecondOfDay,
+        int plannedEndSecondOfDay) {
+      this(
+          id,
+          dutyCode,
+          startDepotNodeId,
+          endDepotNodeId,
+          tripCodes,
+          plannedStartSecondOfDay,
+          plannedEndSecondOfDay,
+          Optional.empty());
     }
   }
 
@@ -260,6 +348,7 @@ public interface TimetableApi {
    *     TimetableTripCancelledEvent}；或驾驶员在本站越站（停过头太多，本站没停），这种情况没有事件
    * @param plannedNodeId 本站是动态站台（DYNAMIC）停靠时，编表排定的计划股道（1.9.0）。列车进站前选台，计划股道被占时会改停别的股道， 届时发 {@code
    *     TrainPlatformAssignedEvent}；固定站台、没有排上或在 1.9.0 之前编的表为空
+   * @param consist 车型键（1.11.0）：这一班那辆车的车型，计划到发按它算；不区分车型时为空
    */
   record Departure(
       UUID timetableId,
@@ -274,10 +363,44 @@ public interface TimetableApi {
       boolean terminating,
       LocalDate serviceDate,
       boolean cancelled,
-      Optional<String> plannedNodeId) {
+      Optional<String> plannedNodeId,
+      Optional<String> consist) {
 
     public Departure {
       plannedNodeId = plannedNodeId == null ? Optional.empty() : plannedNodeId;
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    /** 1.9.0 与 1.10.0 的构造器（源码与二进制兼容）：不区分车型。 */
+    public Departure(
+        UUID timetableId,
+        UUID lineId,
+        UUID routeId,
+        String routeCode,
+        String tripCode,
+        int stopSequence,
+        Optional<String> nodeId,
+        Instant plannedArrival,
+        Instant plannedDeparture,
+        boolean terminating,
+        LocalDate serviceDate,
+        boolean cancelled,
+        Optional<String> plannedNodeId) {
+      this(
+          timetableId,
+          lineId,
+          routeId,
+          routeCode,
+          tripCode,
+          stopSequence,
+          nodeId,
+          plannedArrival,
+          plannedDeparture,
+          terminating,
+          serviceDate,
+          cancelled,
+          plannedNodeId,
+          Optional.empty());
     }
 
     /** 1.8.0 的构造器（源码与二进制兼容）：没有计划股道。 */
@@ -363,6 +486,7 @@ public interface TimetableApi {
    * @param projectedDelaySeconds 按 ETA 预计到达 {@code nextStop*} 那一站相对计划的偏差（正数为晚点）。
    *     列车在区间被扣停时它会随扣停时长增长，而 {@code currentDelaySeconds} 要到下一次到发才更新；DYNAMIC 未选台时按到该站任一候选股道估算； ETA
    *     不可用时为空。同一 tick 内重复查询返回同一份结果
+   * @param consist 车型键（1.11.0）：车次所属车辆交路的车型，计划时刻按它算；不区分车型时为空
    */
   record TrainAssignment(
       String trainName,
@@ -380,7 +504,51 @@ public interface TimetableApi {
       Optional<Integer> nextStopSequence,
       Optional<String> nextStopNodeId,
       Optional<String> nextStationCode,
-      OptionalLong projectedDelaySeconds) {}
+      OptionalLong projectedDelaySeconds,
+      Optional<String> consist) {
+
+    public TrainAssignment {
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    /** 1.10.0 及以前的构造器（源码与二进制兼容）：不区分车型。 */
+    public TrainAssignment(
+        String trainName,
+        UUID timetableId,
+        String tripCode,
+        UUID routeId,
+        Optional<String> dutyCode,
+        LocalDate serviceDate,
+        Instant assignedAt,
+        long initialDeviationSeconds,
+        Optional<Integer> lastStopSequence,
+        Optional<String> lastStopNodeId,
+        Optional<String> lastStationCode,
+        OptionalLong currentDelaySeconds,
+        Optional<Integer> nextStopSequence,
+        Optional<String> nextStopNodeId,
+        Optional<String> nextStationCode,
+        OptionalLong projectedDelaySeconds) {
+      this(
+          trainName,
+          timetableId,
+          tripCode,
+          routeId,
+          dutyCode,
+          serviceDate,
+          assignedAt,
+          initialDeviationSeconds,
+          lastStopSequence,
+          lastStopNodeId,
+          lastStationCode,
+          currentDelaySeconds,
+          nextStopSequence,
+          nextStopNodeId,
+          nextStationCode,
+          projectedDelaySeconds,
+          Optional.empty());
+    }
+  }
 
   /**
    * 一趟已取消的车次（1.9.0），字段与 {@link TimetableTripCancelledEvent} 一致。

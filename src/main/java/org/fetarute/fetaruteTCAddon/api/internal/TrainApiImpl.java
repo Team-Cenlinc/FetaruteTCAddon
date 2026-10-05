@@ -171,7 +171,8 @@ public final class TrainApiImpl implements TrainApi {
         eta,
         currentLine.map(RouteLineChanges.LineRef::operatorCode),
         currentLine.map(RouteLineChanges.LineRef::lineCode),
-        outOfService);
+        outOfService,
+        snap.consist());
   }
 
   /** 列车当前对乘客显示的线路（{@link RouteLineChanges#current}：线路标签优先，否则为交路本身的线路），按主数据的写法给出。 */

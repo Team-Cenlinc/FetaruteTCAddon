@@ -4,6 +4,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 
@@ -45,7 +46,7 @@ public final class TrainConfigResolver {
   /** 受电方式：{@code ptg5} / {@code ptg6} 受电弓、{@code shoe} 集电靴、{@code diesel} 内燃；用于手动驾驶的启动流程。 */
   public static final String TAG_TRAIN_POWER = "FTA_TRAIN_POWER";
 
-  /** 最高速度上限（格/秒）；用于手动驾驶。 */
+  /** 最高速度上限（格/秒）：手动驾驶的动力学上限，也是自动控车目标速度的上限（编组方案按车型写入）。 */
   public static final String TAG_TRAIN_MAX_BPS = "FTA_TRAIN_MAX_BPS";
 
   /**
@@ -70,7 +71,12 @@ public final class TrainConfigResolver {
         TrainTagHelper.readDoubleTag(properties, TAG_TRAIN_DECEL_BPS2)
             .filter(value -> value > 0.0)
             .orElse(defaults.decelBps2());
-    return new TrainConfig(type, accel, decel);
+    OptionalDouble maxSpeed =
+        TrainTagHelper.readDoubleTag(properties, TAG_TRAIN_MAX_BPS)
+            .filter(value -> value > 0.0)
+            .map(OptionalDouble::of)
+            .orElse(OptionalDouble.empty());
+    return new TrainConfig(type, accel, decel, maxSpeed);
   }
 
   /** 加减速标签是否为出车时写入（带 {@link #TAG_TRAIN_CONFIG_SOURCE}{@code =}{@link #SOURCE_SPAWN}）。 */

@@ -13,6 +13,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.logging.Logger;
 import org.bukkit.configuration.file.YamlConfiguration;
@@ -219,6 +220,54 @@ class SpawnMotionTagsTest {
     when(broken.getTags()).thenThrow(new IllegalStateException("boom"));
     assertEquals(SpawnMotionTags.Outcome.FAILED, SpawnMotionTags.stamp(broken, config));
     assertEquals(0, SpawnMotionTags.refreshStamped(List.of(broken), config));
+  }
+
+  @Test
+  // 编组方案只给车型：先写车型再按该车型写出车值，与自动运行解析一致
+  void consistTypeIsWrittenBeforeStamping() {
+    ConfigManager.ConfigView config = config(null, null, null);
+    TagStore train = new TagStore();
+
+    assertEquals(
+        SpawnMotionTags.Outcome.STAMPED,
+        SpawnMotionTags.stampWithConsist(
+            train.properties(), config, Map.of(TrainConfigResolver.TAG_TRAIN_TYPE, "DMU")));
+
+    assertEquals(TrainType.DMU.presetAccelBps2(), tagValue(train, "FTA_TRAIN_ACCEL_BPS2"));
+    assertEquals(TrainType.DMU.presetDecelBps2(), tagValue(train, "FTA_TRAIN_DECEL_BPS2"));
+    assertTrue(resolver.isSpawnStamped(train.properties()));
+  }
+
+  @Test
+  // 编组方案覆盖了加速度：归方案所有，撤掉模板带来的出车标记与出车减速度，解析取方案的值、减速度按车种
+  void consistMotionOverrideOwnsTheTags() {
+    ConfigManager.ConfigView config = config(null, null, null);
+    TagStore train =
+        new TagStore(
+            "FTA_TRAIN_CONFIG_SOURCE=spawn",
+            "FTA_TRAIN_ACCEL_BPS2=0.9",
+            "FTA_TRAIN_DECEL_BPS2=1.1");
+
+    assertEquals(
+        SpawnMotionTags.Outcome.USER_OWNED,
+        SpawnMotionTags.stampWithConsist(
+            train.properties(),
+            config,
+            Map.of(
+                TrainConfigResolver.TAG_TRAIN_TYPE,
+                "EMU",
+                TrainConfigResolver.TAG_TRAIN_ACCEL_BPS2,
+                "0.6")));
+
+    assertFalse(resolver.isSpawnStamped(train.properties()));
+    assertEquals(0, countKey(train, "FTA_TRAIN_DECEL_BPS2"), "模板的出车减速度撤掉");
+    TrainConfig resolved = resolver.resolve(train.properties(), config);
+    assertEquals(0.6, resolved.accelBps2(), 1e-9);
+    assertEquals(TrainType.EMU.presetDecelBps2(), resolved.decelBps2(), 1e-9);
+    assertEquals(
+        SpawnMotionTags.Outcome.USER_OWNED,
+        SpawnMotionTags.stamp(train.properties(), config),
+        "之后折返复用不再改写");
   }
 
   /**

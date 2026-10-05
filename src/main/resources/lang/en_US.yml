@@ -1045,7 +1045,8 @@ drive:
 sign:
   stopmark:
     created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here"
-    invalid: "<prefix> <red>Invalid stop mark</red> <gray>Line 3: carriage:N, e.g. carriage:4, carriage:4,6, carriage:3-5, carriage:*</gray>"
+    created-doors: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here; only car(s) <white><doors></white>, counted from the head, open their doors"
+    invalid: "<prefix> <red>Invalid stop mark</red> <gray>Line 3: car:N (or carriage:N), e.g. car:4, car:4,6, car:3-5, car:*. Optional line 4: door: the cars that open their doors, counted from the head in the same format (e.g. door:1); even the shortest matching train must have at least one of them</gray>"
     no-permission: "<prefix> <red>You do not have permission to build stop marks</red>"
 
 command:

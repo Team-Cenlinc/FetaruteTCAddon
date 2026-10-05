@@ -68,6 +68,7 @@ public final class StorageSchema {
     ddl.add(hudTemplates(dialect));
     ddl.add(uniqueIndex("hud_templates_key", "hud_templates", "company_id, type, name"));
     ddl.add(hudLineBindings(dialect));
+    ddl.add(consistPlans(dialect));
     ddl.add(pidsScreens(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
@@ -582,6 +583,7 @@ public final class StorageSchema {
                     return_second %s NOT NULL,
                     planned_end_second %s NOT NULL,
                     close_reason %s NOT NULL,
+                    consist_key %s,
                     FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
                 """,
@@ -598,6 +600,7 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.intType(),
+        dialect.stringType(),
         dialect.stringType(),
         table("timetables"));
   }
@@ -625,6 +628,36 @@ public final class StorageSchema {
         dialect.timestampType(),
         dialect.timestampType(),
         table("companies"));
+  }
+
+  /**
+   * 编组方案：挂在运营商下，按名字引用。{@code name_key} 是小写的方案名，唯一约束写在表内（MySQL 不支持 {@code CREATE INDEX IF NOT
+   * EXISTS}）。
+   */
+  private String consistPlans(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    operator_id %s NOT NULL,
+                    name %s NOT NULL,
+                    name_key %s NOT NULL,
+                    body %s NOT NULL,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (operator_id, name_key),
+                    FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("consist_plans"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.textType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("operators"));
   }
 
   private String hudLineBindings(SqlDialect dialect) {

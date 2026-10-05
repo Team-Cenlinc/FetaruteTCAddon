@@ -100,7 +100,8 @@ final class TimetableTripNumbering {
               duty.plannedStartSecondOfDay(),
               duty.returnSecondOfDay(),
               duty.plannedEndSecondOfDay(),
-              duty.closeReason()));
+              duty.closeReason(),
+              duty.consist()));
     }
     // 交路引用换成正式主键后，班次的 dutyId 不变（duty 主键在派车时已按 dutyCode 派生）。
     return new Numbered(List.copyOf(trips), List.copyOf(duties), Map.copyOf(finalByProvisional));

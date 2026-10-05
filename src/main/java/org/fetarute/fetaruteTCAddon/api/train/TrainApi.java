@@ -127,6 +127,8 @@ public interface TrainApi {
    * @param lineCode 列车当前对乘客显示的线路代码（1.7.0），与 {@code operatorCode} 同时有值、同一口径
    * @param outOfService 是否已退出服务（1.7.0）：回库交路越过运营终点（EOP）之后，或整趟没有载客车站的回库交路。与 HUD、站牌的「回库 / Not in
    *     Service」同一判定；出库、运营交路恒为 false
+   * @param consist 车型键（1.11.0）：出车编组写法（通常是 TrainCarts 存车名）归一后的形式，与 {@code TimetableApi} 的车型同一口径；
+   *     车上没有车型标签（编组方案启用前出的车、手工生成的车）时为空
    */
   record TrainSnapshot(
       String trainName,
@@ -142,7 +144,8 @@ public interface TrainApi {
       Optional<EtaInfo> eta,
       Optional<String> operatorCode,
       Optional<String> lineCode,
-      boolean outOfService) {
+      boolean outOfService,
+      Optional<String> consist) {
 
     public TrainSnapshot {
       routeCode = routeCode == null ? Optional.empty() : routeCode;
@@ -151,6 +154,41 @@ public interface TrainApi {
       eta = eta == null ? Optional.empty() : eta;
       operatorCode = operatorCode == null ? Optional.empty() : operatorCode;
       lineCode = lineCode == null ? Optional.empty() : lineCode;
+      consist = consist == null ? Optional.empty() : consist;
+    }
+
+    /** 1.7.0 至 1.10.0 的构造器：车型为空。 */
+    public TrainSnapshot(
+        String trainName,
+        UUID worldId,
+        String routeId,
+        Optional<String> routeCode,
+        Optional<String> currentNode,
+        Optional<String> nextNode,
+        double speedBps,
+        Signal signal,
+        double edgeProgress,
+        Instant updatedAt,
+        Optional<EtaInfo> eta,
+        Optional<String> operatorCode,
+        Optional<String> lineCode,
+        boolean outOfService) {
+      this(
+          trainName,
+          worldId,
+          routeId,
+          routeCode,
+          currentNode,
+          nextNode,
+          speedBps,
+          signal,
+          edgeProgress,
+          updatedAt,
+          eta,
+          operatorCode,
+          lineCode,
+          outOfService,
+          Optional.empty());
     }
 
     /** 1.6.0 及以前的构造器（源码与二进制兼容）：当前线路为空、{@code outOfService} 为 false。 */
@@ -180,7 +218,8 @@ public interface TrainApi {
           eta,
           Optional.empty(),
           Optional.empty(),
-          false);
+          false,
+          Optional.empty());
     }
   }
 

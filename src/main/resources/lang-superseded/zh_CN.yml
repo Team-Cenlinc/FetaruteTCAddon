@@ -75,3 +75,6 @@ drive:
       train-moving:
         - "<prefix> <red>列车正在行驶，停稳后才能开始驾驶</red>"
         - "<prefix> <red>列车尚未停稳（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"
+sign:
+  stopmark:
+    invalid: ["<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"]

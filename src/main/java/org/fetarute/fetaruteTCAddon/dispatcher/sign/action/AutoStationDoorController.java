@@ -17,6 +17,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -27,6 +28,8 @@ import org.bukkit.World;
 import org.bukkit.block.BlockFace;
 import org.bukkit.entity.Player;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.StopMarkSign;
 
 /**
  * AutoStation 的开关门动画控制器。
@@ -119,26 +122,73 @@ public final class AutoStationDoorController {
       Vector facingVector,
       AutoStationDoorDirection doorDirection,
       DoorChimeSettings chimeSettings) {
+    return plan(group, facingDirection, facingVector, doorDirection, chimeSettings, DoorCars.ALL);
+  }
+
+  /**
+   * 同上，只开关 {@code cars} 里那几节车厢的门（停车位置标写了 {@code door:} 时）。门侧仍按整列车的门附件判定。
+   *
+   * @param cars 开关门的车厢；为 {@code null} 时全车
+   */
+  static DoorSession plan(
+      MinecartGroup group,
+      BlockFace facingDirection,
+      Vector facingVector,
+      AutoStationDoorDirection doorDirection,
+      DoorChimeSettings chimeSettings,
+      DoorCars cars) {
     DoorChimeSettings resolved = chimeSettings == null ? DoorChimeSettings.none() : chimeSettings;
+    DoorCars scope = cars == null ? DoorCars.ALL : cars;
     if (group == null || doorDirection == null || doorDirection == AutoStationDoorDirection.NONE) {
-      return DoorSession.empty(resolved, "door=none");
+      return DoorSession.empty(resolved, "door=none", scope);
     }
+    String carsSummary = scope.all() ? "" : ",cars=" + scope.summary();
     if (doorDirection == AutoStationDoorDirection.BOTH) {
-      return new DoorSession(group, true, true, resolved, "door=both");
+      return new DoorSession(group, true, true, resolved, "door=both" + carsSummary, scope);
     }
     Optional<BlockFace> desiredOpt = doorDirection.toBlockFace();
     if (desiredOpt.isEmpty()) {
-      return DoorSession.empty(resolved, "door=" + doorDirection + ",desired=unknown");
+      return DoorSession.empty(resolved, "door=" + doorDirection + ",desired=unknown", scope);
     }
     BlockFace worldDoorDirection = desiredOpt.get();
     DoorSideDecision decision = chooseDoorSideByWorldDecision(group, worldDoorDirection);
     if (decision.selection() == null) {
       return DoorSession.empty(
-          resolved, decision.summary() + ",fallback=worldDirectionPositionRequired");
+          resolved, decision.summary() + ",fallback=worldDirectionPositionRequired", scope);
     }
     DoorSideSelection selection = decision.selection();
     return new DoorSession(
-        group, selection.openLeft, selection.openRight, resolved, decision.summary());
+        group,
+        selection.openLeft,
+        selection.openRight,
+        resolved,
+        decision.summary() + carsSummary,
+        scope);
+  }
+
+  /**
+   * 按停车位置标的 {@code door:} 选出开关门的车厢：从车头（行进方向上的第一节）数起。
+   *
+   * @param sign 本站选中的停车位置标；没有标志时为 {@code null}（全车开门）
+   */
+  public static DoorCars doorCars(MinecartGroup group, StopMarkSign sign) {
+    if (group == null || sign == null || sign.allDoors()) {
+      return DoorCars.ALL;
+    }
+    List<UUID> carts = new ArrayList<>(group.size());
+    for (MinecartMember<?> member : group) {
+      carts.add(cartId(member));
+    }
+    return DoorCars.select(sign, carts);
+  }
+
+  private static UUID cartId(MinecartMember<?> member) {
+    return member == null || member.getEntity() == null ? null : member.getEntity().getUniqueId();
+  }
+
+  /** 这节车厢开不开门；{@code cars} 为 {@code null} 时全车开门。 */
+  static boolean opensDoors(DoorCars cars, MinecartMember<?> member) {
+    return cars == null || cars.includes(cartId(member));
   }
 
   /**
@@ -262,6 +312,19 @@ public final class AutoStationDoorController {
       MinecartGroup group,
       ManualDoorSide side,
       org.fetarute.fetaruteTCAddon.config.ConfigManager.AutoStationSettings settings) {
+    return manualDoor(group, side, settings, DoorCars.ALL);
+  }
+
+  /**
+   * 同上，只开关 {@code cars} 里那几节车厢的门（停站时停车位置标写了 {@code door:}）。
+   *
+   * @param cars 开关门的车厢；为 {@code null} 时全车
+   */
+  public static ManualDoor manualDoor(
+      MinecartGroup group,
+      ManualDoorSide side,
+      org.fetarute.fetaruteTCAddon.config.ConfigManager.AutoStationSettings settings,
+      DoorCars cars) {
     DoorChimeSettings chime =
         settings == null
             ? DoorChimeSettings.none()
@@ -270,7 +333,9 @@ public final class AutoStationDoorController {
                 settings.doorCloseSoundVolume(),
                 settings.doorCloseSoundPitch());
     boolean left = side.modelLeft();
-    return new ManualDoor(new DoorSession(group, left, !left, chime, side.summary()), side);
+    DoorCars scope = cars == null ? DoorCars.ALL : cars;
+    String summary = scope.all() ? side.summary() : side.summary() + ",cars=" + scope.summary();
+    return new ManualDoor(new DoorSession(group, left, !left, chime, summary, scope), side);
   }
 
   private static final BlockFace[] COMPASS_BY_BEARING = {
@@ -1240,6 +1305,7 @@ public final class AutoStationDoorController {
     private final DoorAction rightAction;
     private final DoorChimeSettings chimeSettings;
     private final String selectionSummary;
+    private final DoorCars cars;
     private boolean openSucceeded;
 
     private DoorSession(
@@ -1247,21 +1313,30 @@ public final class AutoStationDoorController {
         boolean openLeft,
         boolean openRight,
         DoorChimeSettings chimeSettings,
-        String selectionSummary) {
+        String selectionSummary,
+        DoorCars cars) {
       this.group = group;
       this.openLeft = openLeft;
       this.openRight = openRight;
       this.chimeSettings = chimeSettings == null ? DoorChimeSettings.none() : chimeSettings;
       this.selectionSummary = selectionSummary != null ? selectionSummary : "";
+      this.cars = cars == null ? DoorCars.ALL : cars;
       this.leftAction =
-          openLeft ? buildAction(group, DOOR_LEFT, DOOR_LEFT_LEGACY) : DoorAction.none();
+          openLeft ? buildAction(group, DOOR_LEFT, DOOR_LEFT_LEGACY, this.cars) : DoorAction.none();
       this.rightAction =
-          openRight ? buildAction(group, DOOR_RIGHT, DOOR_RIGHT_LEGACY) : DoorAction.none();
+          openRight
+              ? buildAction(group, DOOR_RIGHT, DOOR_RIGHT_LEGACY, this.cars)
+              : DoorAction.none();
     }
 
-    /** 返回空会话（无开关门动作）。 */
-    static DoorSession empty(DoorChimeSettings settings, String reason) {
-      return new DoorSession(null, false, false, settings, reason);
+    /** 返回空会话（无开关门动作）；记下开门车厢，之后按同样的车厢重新规划。 */
+    static DoorSession empty(DoorChimeSettings settings, String reason, DoorCars cars) {
+      return new DoorSession(null, false, false, settings, reason, cars);
+    }
+
+    /** 开关门的车厢。 */
+    DoorCars cars() {
+      return cars;
     }
 
     /** 是否存在任一侧的开关门动作。 */
@@ -1303,7 +1378,7 @@ public final class AutoStationDoorController {
       }
       if (opened) {
         openSucceeded = true;
-        playOpenChime(group, openLeft, openRight, chimeSettings);
+        playOpenChime(group, cars, openLeft, openRight, chimeSettings);
       }
       return opened;
     }
@@ -1386,7 +1461,7 @@ public final class AutoStationDoorController {
       if (group == null || !openSucceeded) {
         return;
       }
-      AutoStationDoorController.playCloseSound(group, openLeft, openRight, chimeSettings);
+      AutoStationDoorController.playCloseSound(group, cars, openLeft, openRight, chimeSettings);
     }
   }
 
@@ -1406,25 +1481,25 @@ public final class AutoStationDoorController {
    * <p>优先 doorL/doorR，缺失时尝试解析 doorL10/doorR10 的“开门片段”，再不行就直接播放 legacy 动画。
    */
   private static DoorAction buildAction(
-      MinecartGroup group, String primaryName, String legacyName) {
+      MinecartGroup group, String primaryName, String legacyName, DoorCars cars) {
     if (group == null) {
       return DoorAction.none();
     }
     Collection<String> names = group.getAnimationNames();
     String primary = findAnimationName(names, primaryName);
     if (primary != null) {
-      List<Attachment> targets = findAnimationTargets(group, primary);
+      List<Attachment> targets = findAnimationTargets(group, primary, cars);
       return DoorAction.named(primary, targets);
     }
     String legacy = findAnimationName(names, legacyName);
     if (legacy == null) {
       return DoorAction.none();
     }
-    List<Attachment> legacyTargets = findAnimationTargets(group, legacy);
+    List<Attachment> legacyTargets = findAnimationTargets(group, legacy, cars);
     if (legacyTargets.isEmpty()) {
       return DoorAction.none();
     }
-    return buildLegacyAction(group, legacy, legacyTargets);
+    return buildLegacyAction(group, legacy, legacyTargets, cars);
   }
 
   /** 在动画名列表中做不区分大小写匹配。 */
@@ -1446,12 +1521,18 @@ public final class AutoStationDoorController {
    * <p>用于只触发门附件，避免 legacy 动画影响整车。
    */
   private static List<Attachment> findAnimationTargets(MinecartGroup group, String name) {
+    return findAnimationTargets(group, name, DoorCars.ALL);
+  }
+
+  /** 同上，只收集 {@code cars} 里那几节车厢的附件。 */
+  private static List<Attachment> findAnimationTargets(
+      MinecartGroup group, String name, DoorCars cars) {
     if (group == null || name == null || name.isBlank()) {
       return List.of();
     }
     List<Attachment> targets = new ArrayList<>();
     for (MinecartMember<?> member : group) {
-      if (member == null) {
+      if (member == null || !opensDoors(cars, member)) {
         continue;
       }
       if (member.getAttachments() == null || !member.getAttachments().isAttached()) {
@@ -1542,7 +1623,7 @@ public final class AutoStationDoorController {
   }
 
   private static DoorAction buildLegacyAction(
-      MinecartGroup group, String legacyName, List<Attachment> targets) {
+      MinecartGroup group, String legacyName, List<Attachment> targets, DoorCars cars) {
     if (legacyName == null || targets == null) {
       return DoorAction.none();
     }
@@ -1567,7 +1648,8 @@ public final class AutoStationDoorController {
       }
     }
     boolean fallbackAllowed = pairs.isEmpty();
-    return DoorAction.legacy(legacyName, pairs, totalTargets, splitOk, splitFail, fallbackAllowed);
+    return DoorAction.legacy(
+        legacyName, pairs, totalTargets, splitOk, splitFail, fallbackAllowed, cars);
   }
 
   private static Optional<AnimationPair> buildLegacyModelFallback(
@@ -1826,9 +1908,10 @@ public final class AutoStationDoorController {
         int totalTargets,
         int splitOk,
         int splitFail,
-        boolean fallbackAllowed) {
+        boolean fallbackAllowed,
+        DoorCars cars) {
       return new DoorAction.Legacy(
-          name, targets, totalTargets, splitOk, splitFail, fallbackAllowed);
+          name, targets, totalTargets, splitOk, splitFail, fallbackAllowed, cars);
     }
 
     static DoorAction none() {
@@ -1923,6 +2006,7 @@ public final class AutoStationDoorController {
       private final int splitOk;
       private final int splitFail;
       private final boolean fallbackAllowed;
+      private final DoorCars cars;
       private boolean fallbackUsed;
       private final long closeDurationTicks;
 
@@ -1932,13 +2016,15 @@ public final class AutoStationDoorController {
           int totalTargets,
           int splitOk,
           int splitFail,
-          boolean fallbackAllowed) {
+          boolean fallbackAllowed,
+          DoorCars cars) {
         this.name = name;
         this.targets = targets == null ? List.of() : List.copyOf(targets);
         this.totalTargets = totalTargets;
         this.splitOk = splitOk;
         this.splitFail = splitFail;
         this.fallbackAllowed = fallbackAllowed;
+        this.cars = cars == null ? DoorCars.ALL : cars;
         this.closeDurationTicks = estimateCloseDurationTicks(this.targets);
       }
 
@@ -1956,7 +2042,7 @@ public final class AutoStationDoorController {
         }
         boolean played =
             QueuedAnimations.withFallback(
-                    QueuedAnimations.playNamed(group, doorAnimationOptions(name, 1.0)))
+                    playNamedAnimationOnCars(group, cars, doorAnimationOptions(name, 1.0)))
                 .played();
         if (played) {
           fallbackUsed = true;
@@ -1978,7 +2064,7 @@ public final class AutoStationDoorController {
         }
         closing =
             QueuedAnimations.withFallback(
-                QueuedAnimations.playNamed(group, doorAnimationOptions(name, -1.0)));
+                playNamedAnimationOnCars(group, cars, doorAnimationOptions(name, -1.0)));
         return closing.played();
       }
 
@@ -2037,6 +2123,21 @@ public final class AutoStationDoorController {
       return QueuedAnimations.Ticket.empty();
     }
     return QueuedAnimations.withFallback(QueuedAnimations.playNamed(targets, options));
+  }
+
+  /** 在整列车（或只在 {@code cars} 里那几节车厢）上按名字排队播放动画，不清掉 TC animate 牌子排的动画。 */
+  private static QueuedAnimations.Ticket playNamedAnimationOnCars(
+      MinecartGroup group, DoorCars cars, AnimationOptions options) {
+    if (cars == null || cars.all()) {
+      return QueuedAnimations.playNamed(group, options);
+    }
+    List<MinecartMember<?>> members = new ArrayList<>();
+    for (MinecartMember<?> member : group) {
+      if (member != null && opensDoors(cars, member)) {
+        members.add(member);
+      }
+    }
+    return QueuedAnimations.playNamed(members, options);
   }
 
   /**
@@ -2281,20 +2382,24 @@ public final class AutoStationDoorController {
    * <p>只有附近存在玩家时才播放，避免无观众时的额外计算。
    */
   private static void playCloseSound(
-      MinecartGroup group, boolean openLeft, boolean openRight, DoorChimeSettings settings) {
+      MinecartGroup group,
+      DoorCars cars,
+      boolean openLeft,
+      boolean openRight,
+      DoorChimeSettings settings) {
     if (group == null || (!openLeft && !openRight)) {
       return;
     }
     DoorChimeSettings resolved = settings == null ? DoorChimeSettings.none() : settings;
     boolean playedCustom =
-        playChimeFromAttachments(group, ChimeType.CLOSE, resolved, true /* allowDefault */);
+        playChimeFromAttachments(group, cars, ChimeType.CLOSE, resolved, true /* allowDefault */);
     if (playedCustom) {
       return;
     }
     if (!resolved.defaultCloseSound().isEnabled()) {
       return;
     }
-    playDefaultSoundAtDoors(group, openLeft, openRight, resolved);
+    playDefaultSoundAtDoors(group, cars, openLeft, openRight, resolved);
   }
 
   /**
@@ -2303,12 +2408,16 @@ public final class AutoStationDoorController {
    * <p>开门仅使用附件上的自定义提示音，不提供默认音。
    */
   private static void playOpenChime(
-      MinecartGroup group, boolean openLeft, boolean openRight, DoorChimeSettings settings) {
+      MinecartGroup group,
+      DoorCars cars,
+      boolean openLeft,
+      boolean openRight,
+      DoorChimeSettings settings) {
     if (group == null || (!openLeft && !openRight)) {
       return;
     }
     DoorChimeSettings resolved = settings == null ? DoorChimeSettings.none() : settings;
-    playChimeFromAttachments(group, ChimeType.OPEN, resolved, false /* allowDefault */);
+    playChimeFromAttachments(group, cars, ChimeType.OPEN, resolved, false /* allowDefault */);
   }
 
   /**
@@ -2317,9 +2426,13 @@ public final class AutoStationDoorController {
    * <p>若找不到门附件，则回退到车体位置播放。
    */
   private static void playDefaultSoundAtDoors(
-      MinecartGroup group, boolean openLeft, boolean openRight, DoorChimeSettings settings) {
+      MinecartGroup group,
+      DoorCars cars,
+      boolean openLeft,
+      boolean openRight,
+      DoorChimeSettings settings) {
     for (MinecartMember<?> member : group) {
-      if (member == null) {
+      if (member == null || !opensDoors(cars, member)) {
         continue;
       }
       if (member.getAttachments() == null || !member.getAttachments().isAttached()) {
@@ -2366,13 +2479,17 @@ public final class AutoStationDoorController {
    * <p>可选回退到默认关门声音（仅关门时启用）。
    */
   private static boolean playChimeFromAttachments(
-      MinecartGroup group, ChimeType type, DoorChimeSettings settings, boolean allowDefault) {
+      MinecartGroup group,
+      DoorCars cars,
+      ChimeType type,
+      DoorChimeSettings settings,
+      boolean allowDefault) {
     if (group == null) {
       return false;
     }
     boolean played = false;
     for (MinecartMember<?> member : group) {
-      if (member == null) {
+      if (member == null || !opensDoors(cars, member)) {
         continue;
       }
       if (member.getAttachments() == null || !member.getAttachments().isAttached()) {

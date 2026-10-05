@@ -1612,24 +1612,18 @@ public final class OccupancyRequestBuilder {
     if (nodes == null || nodes.isEmpty()) {
       return List.of();
     }
-    if (nodes.size() < 2 || (rearGuardEdges <= 0 && minRearGuardDistanceBlocks <= 0L)) {
-      return List.of(nodes.get(nodes.size() - 1));
-    }
     int availableEdges = nodes.size() - 1;
-    long bodyDistance = 0L;
-    int bodyEdges = 0;
-    while (bodyEdges < availableEdges && bodyDistance < minRearGuardDistanceBlocks) {
-      int edgeIndex = availableEdges - 1 - bodyEdges;
-      bodyDistance =
-          saturatingAdd(
-              bodyDistance,
-              findEdge(nodes.get(edgeIndex), nodes.get(edgeIndex + 1))
+    int includedEdges =
+        RearGuardWindow.retainedEdges(
+            availableEdges,
+            back -> {
+              int edgeIndex = availableEdges - 1 - back;
+              return findEdge(nodes.get(edgeIndex), nodes.get(edgeIndex + 1))
                   .map(RailEdge::lengthBlocks)
-                  .map(length -> Math.max(0, length))
-                  .orElse(0));
-      bodyEdges++;
-    }
-    int includedEdges = Math.min(availableEdges, bodyEdges + Math.max(0, rearGuardEdges));
+                  .orElse(0);
+            },
+            minRearGuardDistanceBlocks,
+            rearGuardEdges);
     return nodes.subList(nodes.size() - includedEdges - 1, nodes.size());
   }
 
