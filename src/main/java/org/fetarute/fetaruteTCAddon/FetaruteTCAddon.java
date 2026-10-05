@@ -191,6 +191,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private EtaService etaService;
   private DisplayService displayService;
   private HudTemplateService hudTemplateService;
+  private org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService consistPlanService;
+  private org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter consistArbiter;
   private HudDefaultTemplateService hudDefaultTemplateService;
   private PidsConfigManager pidsConfigManager;
   private PidsLayoutRegistry pidsLayoutRegistry;
@@ -230,6 +232,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     preloadRailGraphFromStorage();
     initOccupancyManager();
     initRouteDefinitionCache();
+    initConsistPlans();
     initRuntimeDispatch();
     initTimetable();
     initSpawnScheduler();
@@ -385,6 +388,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       hudDefaultTemplateService.reload();
     }
     initRouteDefinitionCache();
+    initConsistPlans();
     initHealthMonitor();
     initTimetable();
     initSpawnScheduler();
@@ -674,6 +678,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaGraphPortalCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
     new FtaTemplateCommand(this).register(commandManager);
+    new org.fetarute.fetaruteTCAddon.command.FtaConsistCommand(this).register(commandManager);
     new FtaHealthCommand(this).register(commandManager);
     new FtaTimetableCommand(this).register(commandManager);
     new FtaPidsCommand(this).register(commandManager);
@@ -814,6 +819,63 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 stationDirectory.reload(provider);
               });
     }
+  }
+
+  /**
+   * 编组方案：route 绑了哪份方案、各车型档案、按班次份额的记账。重载时只重读方案与档案，记账保留（与交路缓存同寿命）。
+   *
+   * <p>档案要读 TrainCarts 存车，只能在主线程解析；启动与 {@code /fta reload} 都在主线程。
+   */
+  private void initConsistPlans() {
+    if (consistPlanService == null) {
+      org.fetarute.fetaruteTCAddon.dispatcher.consist.TrainCartsConsistInspector inspector =
+          new org.fetarute.fetaruteTCAddon.dispatcher.consist.TrainCartsConsistInspector();
+      consistPlanService =
+          new org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService(
+              () ->
+                  storageManager != null && storageManager.isReady()
+                      ? storageManager.provider()
+                      : Optional.empty(),
+              inspector,
+              () ->
+                  configManager == null
+                      ? new ConfigManager.TrainConfigSettings(null, Map.of())
+                      : configManager.current().trainConfigSettings(),
+              loggerManager::debug);
+      consistArbiter =
+          new org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistDispatchArbiter(
+              consistPlanService,
+              inspector,
+              trainName ->
+                  Optional.ofNullable(
+                          com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore.get(trainName))
+                      .flatMap(
+                          properties ->
+                              org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper
+                                  .readTagValue(
+                                      properties,
+                                      org.fetarute
+                                          .fetaruteTCAddon
+                                          .dispatcher
+                                          .consist
+                                          .ConsistKey
+                                          .TRAIN_TAG)),
+              loggerManager::debug);
+    }
+    RouteDefinitionCache routes = routeDefinitionCache;
+    consistPlanService.attachRoutes(
+        routeId -> routes == null ? Optional.empty() : routes.findRecord(routeId));
+    try {
+      consistPlanService.reload();
+    } catch (RuntimeException | LinkageError ex) {
+      getLogger().warning("编组方案加载失败，绑了方案的线路按旧规则出车: " + ex);
+    }
+  }
+
+  /** 编组方案目录；插件未完成初始化时为空。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService>
+      getConsistPlanService() {
+    return Optional.ofNullable(consistPlanService);
   }
 
   /** 车站目录（车站、车站组、停靠线路的内存索引）；插件未完成初始化时为空。 */
@@ -1310,6 +1372,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 走行参数（车种加减速、进站规则、默认速度、停站开销）与编表读同一组配置；每次估算现读，重载即生效。
     etaService.attachConfigSources(
         signNodeRegistry, () -> configManager == null ? null : configManager.current());
+    // route 绑了编组方案时，未发车票据按方案下一班预计的车型估算走行。
+    etaService.attachPlannedConsist(
+        routeId ->
+            consistPlanService == null
+                ? Optional.empty()
+                : consistPlanService
+                    .predictedProfile(routeId)
+                    .map(
+                        org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile
+                            ::trainConfig));
   }
 
   private void restartRuntimeMonitor() {
@@ -1662,6 +1734,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     TrainCartsDepotSpawner depotSpawner =
         new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
     depotSpawner.setOccupancyManager(occupancyManager);
+    depotSpawner.setConsistArbiter(consistArbiter);
     SimpleTicketAssigner simpleAssigner =
         new SimpleTicketAssigner(
             spawnManager,
@@ -1678,6 +1751,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             spawnSettings.maxSpawnPerTick(),
             spawnSettings.maxAttempts());
     this.spawnTicketAssigner = simpleAssigner;
+    simpleAssigner.setConsistArbiter(consistArbiter);
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。

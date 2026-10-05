@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +20,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -171,7 +174,27 @@ public final class EtaRuntimeSampler {
             traveled,
             timeline,
             sampleLineTag(group),
-            sampleLoad(group)));
+            sampleLoad(group),
+            sampleMotion(group)));
+  }
+
+  /** 车上的车种与加减速标签；只读标签，按配置补齐留给估算时做（配置可能已重载）。 */
+  private static TrainRuntimeSnapshot.Motion sampleMotion(MinecartGroup group) {
+    TrainProperties properties = group.getProperties();
+    if (properties == null) {
+      return TrainRuntimeSnapshot.Motion.NONE;
+    }
+    return new TrainRuntimeSnapshot.Motion(
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_TYPE)
+            .flatMap(TrainType::parse),
+        toOptional(
+            TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_ACCEL_BPS2)),
+        toOptional(
+            TrainTagHelper.readDoubleTag(properties, TrainConfigResolver.TAG_TRAIN_DECEL_BPS2)));
+  }
+
+  private static OptionalDouble toOptional(Optional<Double> value) {
+    return value.map(OptionalDouble::of).orElse(OptionalDouble.empty());
   }
 
   /**

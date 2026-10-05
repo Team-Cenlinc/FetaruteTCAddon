@@ -45,6 +45,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteViaMetadata;
 import org.fetarute.fetaruteTCAddon.company.model.Station;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
@@ -197,6 +199,15 @@ public final class FtaRouteCommand {
                     .suggestionProvider(placeholderSuggestion("\"<pattern>\"")))
             .build();
     var spawnClearFlag = CommandFlag.builder("spawn-clear").build();
+    // 编组方案：route 引用运营商下的方案名，出车按方案的比例选车型，复用只接方案里的车型。
+    var consistPlanFlag =
+        CommandFlag.<CommandSender>builder("consist-plan")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "consist-plan", StringParser.quotedStringParser())
+                    .suggestionProvider(consistPlanSuggestions()))
+            .build();
+    var consistPlanClearFlag = CommandFlag.builder("consist-plan-clear").build();
     // 直通运转：运营 route 显式指定从外方哪条线路出库/回库（timetable_create_route / timetable_return_route）。
     var timetableCreateRouteFlag =
         CommandFlag.<CommandSender>builder("timetable-create-route")
@@ -708,6 +719,12 @@ public final class FtaRouteCommand {
                   sender.sendMessage(
                       locale.component(
                           "command.route.info.spawn-pattern", Map.of("pattern", spawnPattern)));
+                  sender.sendMessage(
+                      locale.component(
+                          "command.route.info.consist-plan",
+                          Map.of(
+                              "plan",
+                              ConsistPlanService.planNameOf(route.metadata()).orElse("-"))));
                   String spawnGroup = readSpawnGroup(route.metadata()).orElse("-");
                   String spawnGroupBaseline =
                       resolveSpawnGroupBaselineSeconds(resolved.line(), route)
@@ -1607,6 +1624,8 @@ public final class FtaRouteCommand {
             .flag(distanceFlag)
             .flag(spawnFlag)
             .flag(spawnClearFlag)
+            .flag(consistPlanFlag)
+            .flag(consistPlanClearFlag)
             .flag(timetableCreateRouteFlag)
             .flag(timetableCreateRouteClearFlag)
             .flag(timetableReturnRouteFlag)
@@ -1646,6 +1665,8 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(distanceFlag)
                           || flags.hasFlag(spawnFlag)
                           || flags.hasFlag(spawnClearFlag)
+                          || flags.hasFlag(consistPlanFlag)
+                          || flags.hasFlag(consistPlanClearFlag)
                           || flags.hasFlag(timetableCreateRouteFlag)
                           || flags.hasFlag(timetableCreateRouteClearFlag)
                           || flags.hasFlag(timetableReturnRouteFlag)
@@ -1710,6 +1731,25 @@ public final class FtaRouteCommand {
                     } else {
                       metadata.put(DepotSpawnPattern.ROUTE_METADATA_KEY, spawnPattern);
                     }
+                  }
+                  if (flags.hasFlag(consistPlanClearFlag)) {
+                    metadata.remove(ConsistPlanService.ROUTE_METADATA_KEY);
+                  }
+                  if (flags.hasFlag(consistPlanFlag)) {
+                    String rawPlanName = flags.getValue(consistPlanFlag, "");
+                    String planName = rawPlanName == null ? "" : rawPlanName.trim();
+                    Optional<ConsistPlan> plan =
+                        provider
+                            .consistPlans()
+                            .findByOperatorAndName(resolved.operator().id(), planName);
+                    if (plan.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.route.consist-plan.not-found",
+                              Map.of("operator", resolved.operator().code(), "name", planName)));
+                      return;
+                    }
+                    metadata.put(ConsistPlanService.ROUTE_METADATA_KEY, plan.get().name());
                   }
                   if (flags.hasFlag(spawnEnabledFlag)) {
                     Optional<Boolean> enabled =
@@ -2462,6 +2502,44 @@ public final class FtaRouteCommand {
               .distinct()
               .limit(SUGGESTION_LIMIT)
               .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /** {@code --consist-plan} 的补全：运营商下已保存的编组方案名。 */
+  private SuggestionProvider<CommandSender> consistPlanSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          if (prefix.startsWith("\"") || prefix.startsWith("'")) {
+            prefix = prefix.substring(1);
+          }
+          final String matchPrefix = prefix;
+          List<String> suggestions = new ArrayList<>();
+          if (matchPrefix.isBlank()) {
+            suggestions.add("<plan>");
+          }
+          Optional<StorageProvider> providerOpt = providerIfReady();
+          Optional<String> companyArg = ctx.optional("company").map(String.class::cast);
+          Optional<String> operatorArg = ctx.optional("operator").map(String.class::cast);
+          if (providerOpt.isEmpty() || companyArg.isEmpty() || operatorArg.isEmpty()) {
+            return suggestions;
+          }
+          StorageProvider provider = providerOpt.get();
+          CompanyQueryService query = new CompanyQueryService(provider);
+          query
+              .findCompany(companyArg.get().trim())
+              .filter(
+                  company -> canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id()))
+              .flatMap(company -> query.findOperator(company.id(), operatorArg.get().trim()))
+              .ifPresent(
+                  operator ->
+                      provider.consistPlans().listByOperator(operator.id()).stream()
+                          .map(ConsistPlan::name)
+                          .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(matchPrefix))
+                          .map(FtaRouteCommand::suggestCommandArgument)
+                          .limit(SUGGESTION_LIMIT)
+                          .forEach(suggestions::add));
           return suggestions;
         });
   }

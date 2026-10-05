@@ -16,6 +16,7 @@ import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -171,6 +172,9 @@ public final class EtaService {
 
   /** 未发车票据的车种推断，按交路缓存。 */
   private final SpawnTrainConfigResolver spawnTrainConfigs;
+
+  private volatile Function<UUID, Optional<TrainConfig>> plannedConsist =
+      routeId -> Optional.empty();
 
   private volatile SpawnManager spawnManager;
   private volatile java.util.function.Supplier<List<SpawnTicket>> pendingTicketSupplier;
@@ -331,6 +335,15 @@ public final class EtaService {
   public void attachStationLookup(
       java.util.function.Function<UUID, Optional<StationDirectory.StationEntry>> stationLookup) {
     this.stationLookup = stationLookup == null ? id -> Optional.empty() : stationLookup;
+  }
+
+  /**
+   * 接入编组方案：route 绑了方案时，未发车票据按方案下一班预计的车型估算走行，不再读车库牌子推断。
+   *
+   * @param plannedConsist routeId → 下一班预计车型的加减速；route 没绑方案时为空
+   */
+  public void attachPlannedConsist(Function<UUID, Optional<TrainConfig>> plannedConsist) {
+    this.plannedConsist = plannedConsist == null ? routeId -> Optional.empty() : plannedConsist;
   }
 
   /**
@@ -632,7 +645,7 @@ public final class EtaService {
 
     // 使用 lastPassedNodeId 从中间图节点开始计算剩余路径，优化 arriving 判定
     NodeId lastPassed = snap.lastPassedNodeId().orElse(null);
-    TravelTimeModel effectiveTravelTimeModel = travelTimeModelForWorld(snap.worldId(), now);
+    TravelTimeModel effectiveTravelTimeModel = travelTimeModelForTrain(snap, now);
     Optional<RoutedTarget> routedOpt =
         routeToTarget(
             graph,
@@ -2792,8 +2805,11 @@ public final class EtaService {
     RunCurveModel.Settings settings = runSettings();
     ConfigManager.ConfigView config = currentConfig();
     if (routeUuid != null && config != null) {
+      Optional<TrainConfig> planned = plannedConsist.apply(routeUuid);
       TrainConfig trainConfig =
-          spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
+          planned.isPresent()
+              ? planned.get()
+              : spawnTrainConfigs.resolve(routeUuid, config.trainConfigSettings(), now);
       settings =
           settings.withMotion(new SpeedCurve(trainConfig.accelBps2(), trainConfig.decelBps2()));
     }
@@ -2819,9 +2835,19 @@ public final class EtaService {
         : DepotSpawnPattern.readLoaded(registry, depotId);
   }
 
-  /** 运行中列车的走行模型：与编表同一条运行曲线，边限速读运行时的有效限速（含永久覆盖与临时限速）。 */
-  private TravelTimeModel travelTimeModelForWorld(UUID worldId, Instant now) {
-    return new TravelTimeModel(new RunCurveModel(runSettings(), effectiveSpeeds(worldId, now)));
+  /**
+   * 运行中列车的走行模型：与编表同一条运行曲线，边限速读运行时的有效限速（含永久覆盖与临时限速）。
+   *
+   * <p>加减速按本车标签的车种（与控车同一规则，{@link TrainRuntimeSnapshot.Motion#resolve}）；车上没有车种标签时按默认车种。
+   */
+  private TravelTimeModel travelTimeModelForTrain(TrainRuntimeSnapshot snap, Instant now) {
+    RunCurveModel.Settings settings = runSettings();
+    ConfigManager.ConfigView config = currentConfig();
+    if (config != null && !TrainRuntimeSnapshot.Motion.NONE.equals(snap.motion())) {
+      TrainConfig train = snap.motion().resolve(config.trainConfigSettings());
+      settings = settings.withMotion(new SpeedCurve(train.accelBps2(), train.decelBps2()));
+    }
+    return new TravelTimeModel(new RunCurveModel(settings, effectiveSpeeds(snap.worldId(), now)));
   }
 
   /**

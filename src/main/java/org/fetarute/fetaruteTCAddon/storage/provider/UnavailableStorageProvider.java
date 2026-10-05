@@ -11,6 +11,7 @@ import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteStopRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationGroupRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.StationRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistPlanRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.portal.PortalLinkRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailComponentCautionRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
@@ -150,6 +151,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public HudTemplateRepository hudTemplates() {
     return unsupported(HudTemplateRepository.class);
+  }
+
+  @Override
+  public ConsistPlanRepository consistPlans() {
+    return unsupported(ConsistPlanRepository.class);
   }
 
   @Override

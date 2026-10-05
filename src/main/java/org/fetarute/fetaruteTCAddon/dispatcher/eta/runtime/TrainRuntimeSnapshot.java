@@ -6,9 +6,13 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 
 /**
@@ -31,6 +35,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  * RouteLineChanges#current}）。
  *
  * <p>{@code load} 是采样时各节车的座位与在座乘客（{@link TrainLoad}），同样只能在主线程读、随快照带出；读不到车辆模型时为空。
+ *
+ * <p>{@code motion} 是采样时车上的车种与加减速标签（{@link Motion}）。走行估算按它取本车的加减速，与控车同一个车种；没有标签时按默认车种。
  */
 public record TrainRuntimeSnapshot(
     long updatedTick,
@@ -50,7 +56,51 @@ public record TrainRuntimeSnapshot(
     OptionalDouble traveledSinceLastPassedBlocks,
     HoldTimeline holdTimeline,
     Optional<RouteLineChanges.LineRef> lineTag,
-    Optional<TrainLoad> load) {
+    Optional<TrainLoad> load,
+    Motion motion) {
+
+  /**
+   * 车上的车种与加减速标签，与 {@link TrainConfigResolver#resolve} 读的是同一组。
+   *
+   * @param type {@code FTA_TRAIN_TYPE}
+   * @param accelBps2 {@code FTA_TRAIN_ACCEL_BPS2}
+   * @param decelBps2 {@code FTA_TRAIN_DECEL_BPS2}
+   */
+  public record Motion(
+      Optional<TrainType> type, OptionalDouble accelBps2, OptionalDouble decelBps2) {
+
+    /** 没有任何标签：按默认车种。 */
+    public static final Motion NONE =
+        new Motion(Optional.empty(), OptionalDouble.empty(), OptionalDouble.empty());
+
+    public Motion {
+      type = type == null ? Optional.empty() : type;
+      accelBps2 = positiveOrEmpty(accelBps2);
+      decelBps2 = positiveOrEmpty(decelBps2);
+    }
+
+    /**
+     * 按车种配置补齐：标签优先，缺失时取车种预设，车种缺失时取默认车种（与控车同一规则）。
+     *
+     * @param settings 车种配置
+     * @return 本车的加减速
+     */
+    public TrainConfig resolve(ConfigManager.TrainConfigSettings settings) {
+      TrainType resolved = type.orElse(settings.defaultTrainType());
+      ConfigManager.TrainTypeSettings preset = settings.forType(resolved);
+      return new TrainConfig(
+          resolved, accelBps2.orElse(preset.accelBps2()), decelBps2.orElse(preset.decelBps2()));
+    }
+
+    private static OptionalDouble positiveOrEmpty(OptionalDouble value) {
+      return value != null
+              && value.isPresent()
+              && Double.isFinite(value.getAsDouble())
+              && value.getAsDouble() > 0.0
+          ? value
+          : OptionalDouble.empty();
+    }
+  }
 
   public TrainRuntimeSnapshot {
     Objects.requireNonNull(updatedAt, "updatedAt");
@@ -73,6 +123,49 @@ public record TrainRuntimeSnapshot(
     holdTimeline = holdTimeline == null ? HoldTimeline.EMPTY : holdTimeline;
     lineTag = lineTag == null ? Optional.empty() : lineTag;
     load = load == null ? Optional.empty() : load;
+    motion = motion == null ? Motion.NONE : motion;
+  }
+
+  /** 兼容调用：不带车种标签。 */
+  public TrainRuntimeSnapshot(
+      long updatedTick,
+      Instant updatedAt,
+      UUID worldId,
+      UUID routeUuid,
+      RouteId routeId,
+      int routeIndex,
+      Optional<NodeId> currentNodeId,
+      Optional<NodeId> lastPassedNodeId,
+      Optional<Integer> dwellRemainingSec,
+      Optional<SignalAspect> signalAspect,
+      Optional<String> ticketId,
+      OptionalDouble currentSpeedBps,
+      OptionalInt distanceToNextBlocks,
+      OptionalInt edgeLengthBlocks,
+      OptionalDouble traveledSinceLastPassedBlocks,
+      HoldTimeline holdTimeline,
+      Optional<RouteLineChanges.LineRef> lineTag,
+      Optional<TrainLoad> load) {
+    this(
+        updatedTick,
+        updatedAt,
+        worldId,
+        routeUuid,
+        routeId,
+        routeIndex,
+        currentNodeId,
+        lastPassedNodeId,
+        dwellRemainingSec,
+        signalAspect,
+        ticketId,
+        currentSpeedBps,
+        distanceToNextBlocks,
+        edgeLengthBlocks,
+        traveledSinceLastPassedBlocks,
+        holdTimeline,
+        lineTag,
+        load,
+        Motion.NONE);
   }
 
   /** 兼容调用：不带载客。 */

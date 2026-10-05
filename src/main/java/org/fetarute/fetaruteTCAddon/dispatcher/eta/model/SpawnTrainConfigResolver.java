@@ -135,8 +135,10 @@ public final class SpawnTrainConfigResolver {
    *       metro/tram/light_rail 先于 emu 判定，{@code metro_emu} 这类名字归地铁型
    *   <li>否则返回 empty，由调用方使用默认类型
    * </ul>
+   *
+   * <p>编组方案的车型档案在存车没有车种标签时也用它推断，两处口径一致。
    */
-  static Optional<TrainType> inferTrainTypeFromPattern(String pattern) {
+  public static Optional<TrainType> inferTrainTypeFromPattern(String pattern) {
     if (pattern == null || pattern.isBlank()) {
       return Optional.empty();
     }
