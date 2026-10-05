@@ -1,7 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.graph.sync;
 
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
@@ -26,6 +28,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  *
  * <p>失效分两级：变化的节点都没有交路在用（{@link GraphNodeUsage}）时只打标记、旧图继续在用；任何一个在用或判不了， 旧图移出内存。两种都会通知 {@link
  * GraphStaleListener}。
+ *
+ * <p>每次增删只做单行读写；签名比对（整表读 + SHA）与在用判定按世界合并到下一 tick 做一次。WorldEdit 一次拆掉 K 块牌子时， 开销是 N log N + K 而不是 K
+ * 次整表比对。
  */
 public final class RailNodeIncrementalSync implements SignNodeStorageSynchronizer {
 
@@ -34,6 +39,8 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
   private final Consumer<String> debugLogger;
   private final GraphStaleListener staleListener;
   private final GraphNodeUsage nodeUsage;
+  private final Consumer<Runnable> checkScheduler;
+  private final Map<UUID, PendingCheck> pendingChecks = new LinkedHashMap<>();
 
   public RailNodeIncrementalSync(
       StorageManager storageManager,
@@ -57,11 +64,25 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
       Consumer<String> debugLogger,
       GraphStaleListener staleListener,
       GraphNodeUsage nodeUsage) {
+    this(storageManager, railGraphService, debugLogger, staleListener, nodeUsage, Runnable::run);
+  }
+
+  /**
+   * @param checkScheduler 签名比对的调度：生产环境排到下一 tick，把同一 tick 的变更合并成一次；测试可直接执行
+   */
+  public RailNodeIncrementalSync(
+      StorageManager storageManager,
+      RailGraphService railGraphService,
+      Consumer<String> debugLogger,
+      GraphStaleListener staleListener,
+      GraphNodeUsage nodeUsage,
+      Consumer<Runnable> checkScheduler) {
     this.storageManager = Objects.requireNonNull(storageManager, "storageManager");
     this.railGraphService = Objects.requireNonNull(railGraphService, "railGraphService");
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
     this.staleListener = staleListener != null ? staleListener : GraphStaleListener.noop();
     this.nodeUsage = nodeUsage != null ? nodeUsage : GraphNodeUsage.alwaysInUse();
+    this.checkScheduler = checkScheduler != null ? checkScheduler : Runnable::run;
   }
 
   @Override
@@ -86,7 +107,7 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
         .ifPresent(
             provider -> {
               try {
-                WriteResult result =
+                Written written =
                     provider
                         .transactionManager()
                         .execute(
@@ -94,10 +115,10 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
                               List<GraphStaleListener.NodeChange> changes = new ArrayList<>();
                               boolean unchanged = false;
                               for (RailNodeRecord existing :
-                                  provider.railNodes().listByWorld(worldId)) {
-                                if (!samePosition(existing, record)) {
-                                  continue;
-                                }
+                                  provider
+                                      .railNodes()
+                                      .listByPosition(
+                                          worldId, record.x(), record.y(), record.z())) {
                                 if (existing.nodeId().equals(record.nodeId())) {
                                   unchanged = true;
                                 } else {
@@ -112,12 +133,9 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
                                   .railNodes()
                                   .deleteByPosition(worldId, record.x(), record.y(), record.z());
                               provider.railNodes().upsert(record);
-                              return new WriteResult(
-                                  !unchanged || changes.size() > 1,
-                                  changes,
-                                  checkSignature(provider, worldId));
+                              return new Written(!unchanged || changes.size() > 1, changes);
                             });
-                applySignatureCheck(provider, world, result);
+                enqueueCheck(world, written);
               } catch (Exception ex) {
                 debugLogger.accept(
                     "rail_nodes 增量同步失败: op=upsert node="
@@ -142,25 +160,64 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
         .ifPresent(
             provider -> {
               try {
-                WriteResult result =
+                int removed =
                     provider
                         .transactionManager()
-                        .execute(
-                            () -> {
-                              boolean existed =
-                                  provider.railNodes().listByWorld(worldId).stream()
-                                      .anyMatch(node -> definition.nodeId().equals(node.nodeId()));
-                              provider.railNodes().delete(worldId, definition.nodeId());
-                              return new WriteResult(
-                                  existed, List.of(change), checkSignature(provider, worldId));
-                            });
-                applySignatureCheck(provider, world, result);
+                        .execute(() -> provider.railNodes().delete(worldId, definition.nodeId()));
+                enqueueCheck(world, new Written(removed > 0, List.of(change)));
               } catch (Exception ex) {
                 debugLogger.accept(
                     "rail_nodes 增量同步失败: op=delete node="
                         + definition.nodeId().value()
                         + " msg="
                         + ex.getMessage());
+              }
+            });
+  }
+
+  /** 同一世界的变更攒到一起，下一 tick 做一次签名比对。 */
+  private void enqueueCheck(World world, Written written) {
+    UUID worldId = world.getUID();
+    PendingCheck pending = pendingChecks.get(worldId);
+    boolean first = pending == null;
+    if (first) {
+      pending = new PendingCheck(world);
+      pendingChecks.put(worldId, pending);
+    }
+    pending.add(written);
+    if (!first) {
+      return;
+    }
+    try {
+      checkScheduler.accept(() -> runCheck(worldId));
+    } catch (RuntimeException ex) {
+      // 插件停用期间调度器拒绝新任务：就地比对。
+      runCheck(worldId);
+    }
+  }
+
+  private void runCheck(UUID worldId) {
+    PendingCheck pending = pendingChecks.remove(worldId);
+    if (pending == null) {
+      return;
+    }
+    provider()
+        .ifPresent(
+            provider -> {
+              try {
+                SignatureCheckResult check =
+                    provider.transactionManager().execute(() -> checkSignature(provider, worldId));
+                // 这一批里有真实变更时只报真实的那些；全是空操作（如重复删除）时才报它们，免得静默移出旧图。
+                applySignatureCheck(
+                    provider,
+                    pending.world,
+                    new WriteResult(
+                        pending.changed,
+                        List.copyOf(pending.changed ? pending.changes : pending.noopChanges),
+                        check));
+              } catch (Exception ex) {
+                debugLogger.accept(
+                    "rail_nodes 签名比对失败: world=" + worldId + " msg=" + ex.getMessage());
               }
             });
   }
@@ -279,10 +336,6 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
     }
   }
 
-  private static boolean samePosition(RailNodeRecord a, RailNodeRecord b) {
-    return a.x() == b.x() && a.y() == b.y() && a.z() == b.z();
-  }
-
   private static GraphStaleListener.NodeChange removalOf(RailNodeRecord record) {
     return new GraphStaleListener.NodeChange(
         new SignNodeDefinition(
@@ -297,9 +350,34 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
   }
 
   /**
-   * 一次写库的结果。
+   * 一次写库带回的变更。
    *
    * @param changed 库里是否真的变了（删掉了行、写入了新节点或顶掉了旧节点）
+   * @param changes 要判在不在用并报告的节点变更
+   */
+  private record Written(boolean changed, List<GraphStaleListener.NodeChange> changes) {}
+
+  /** 一个世界在同一 tick 内攒下的变更。 */
+  private static final class PendingCheck {
+    private final World world;
+    private final List<GraphStaleListener.NodeChange> changes = new ArrayList<>();
+    private final List<GraphStaleListener.NodeChange> noopChanges = new ArrayList<>();
+    private boolean changed;
+
+    private PendingCheck(World world) {
+      this.world = world;
+    }
+
+    private void add(Written written) {
+      changed |= written.changed();
+      (written.changed() ? changes : noopChanges).addAll(written.changes());
+    }
+  }
+
+  /**
+   * 合并后的一次签名比对输入。
+   *
+   * @param changed 这一批里库是否真的变了
    * @param changes 要判在不在用并报告的节点变更
    */
   private record WriteResult(

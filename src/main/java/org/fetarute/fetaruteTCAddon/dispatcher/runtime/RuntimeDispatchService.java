@@ -1643,6 +1643,7 @@ public final class RuntimeDispatchService {
             Duration.ofSeconds(resolveDistanceCacheRefreshSeconds()),
             resolvePathCacheMaxSize(),
             this.debugLogger);
+    this.shortestPathDistanceCache.setGraphVersion(this.railGraphService::snapshotVersion);
   }
 
   private int resolveDistanceCacheRefreshSeconds() {
@@ -29508,6 +29509,10 @@ public final class RuntimeDispatchService {
     var interlocking = support.interlockingState();
     if (interlocking == null || !interlocking.cellCoverageAvailable()) {
       return LivePhysicalEdgeCoverage.incomplete("cell-coverage-index-unavailable");
+    }
+    // 只有部分区间带足迹时，没足迹的区间在索引里看不见：车压在上面也查不出来，不能当"没覆盖"。
+    if (!interlocking.coverage().complete()) {
+      return LivePhysicalEdgeCoverage.incomplete("cell-coverage-partial");
     }
     Set<OccupancyResource> covered = new LinkedHashSet<>();
     int coveredEdges = 0;

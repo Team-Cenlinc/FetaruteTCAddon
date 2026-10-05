@@ -26,7 +26,8 @@ final class RouteNodeUsageTest {
   void declaredWaypointIsInUse() {
     var entry = entry(List.of("SURC:PTK:GPT:1:00", "SURC:S:GPT:1"), List.of(), Map.of());
 
-    Optional<String> use = RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:PTK:GPT:1:00"));
+    Optional<String> use =
+        RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:PTK:GPT:1:00"));
 
     assertEquals(Optional.of("交路 SURC:MT:MT-3 第 1 个途经点"), use);
   }
@@ -35,9 +36,10 @@ final class RouteNodeUsageTest {
   void otherTrackOfAServedStationIsInUseButThroatsAndIntervalsMatchExactly() {
     var entry = entry(List.of("SURC:S:GPT:1", "SURC:S:GPT:1:01"), List.of(), Map.of());
 
-    assertTrue(RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:S:GPT:3")).isPresent());
-    assertTrue(RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:S:GPT:1:02")).isEmpty());
-    assertTrue(RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:S:PTK:1")).isEmpty());
+    assertTrue(RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:S:GPT:3")).isPresent());
+    assertTrue(
+        RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:S:GPT:1:02")).isEmpty());
+    assertTrue(RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:S:PTK:1")).isEmpty());
   }
 
   @Test
@@ -47,7 +49,7 @@ final class RouteNodeUsageTest {
 
     assertEquals(
         Optional.of("交路 SURC:MT:MT-3 第 3 站"),
-        RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:S:OFL:2")));
+        RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:S:OFL:2")));
   }
 
   @Test
@@ -61,19 +63,30 @@ final class RouteNodeUsageTest {
 
     assertEquals(
         Optional.of("交路 SURC:MT:MT-3 的 DSTY 目标"),
-        RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:D:HHU:2")));
+        RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:D:HHU:2")));
     assertEquals(
         Optional.of("线路 MT 的出车车库"),
-        RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:D:OFL:1")));
-    assertTrue(RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:D:OFL:3")).isEmpty());
+        RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:D:OFL:1")));
+    assertTrue(RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:D:OFL:3")).isEmpty());
+  }
+
+  @Test
+  void stopThroatAcceptsOtherThroatsOfTheSameStationButNotItsBody() {
+    RouteStop throat = stop(0, Optional.of("SURC:S:GPT:1:01"), Optional.empty());
+    var entry = entry(List.of("SURC:S:GPT:1:01"), List.of(throat), Map.of());
+    RouteNodeUsage usage = RouteNodeUsage.index(List.of(entry));
+
+    assertTrue(usage.findUse(NodeId.of("SURC:S:GPT:2:03")).isPresent());
+    assertTrue(usage.findUse(NodeId.of("SURC:S:GPT:1")).isEmpty());
   }
 
   @Test
   void nodeNoRouteMentionsIsUnused() {
     var entry = entry(List.of("SURC:S:GPT:1"), List.of(), Map.of());
 
-    assertTrue(RouteNodeUsage.findUse(List.of(entry), NodeId.of("SURC:NEW:X:1:00")).isEmpty());
-    assertTrue(RouteNodeUsage.findUse(List.of(), NodeId.of("SURC:S:GPT:1")).isEmpty());
+    assertTrue(
+        RouteNodeUsage.index(List.of(entry)).findUse(NodeId.of("SURC:NEW:X:1:00")).isEmpty());
+    assertTrue(RouteNodeUsage.index(List.of()).findUse(NodeId.of("SURC:S:GPT:1")).isEmpty());
   }
 
   private static RouteDefinitionCache.RouteEntry entry(

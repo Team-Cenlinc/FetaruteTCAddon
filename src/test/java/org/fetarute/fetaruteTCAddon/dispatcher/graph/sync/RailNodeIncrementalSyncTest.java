@@ -304,6 +304,23 @@ final class RailNodeIncrementalSyncTest {
       UUID worldId, List<RailNodeRecord> nodes, String snapshotSignature) {
     RailNodeRepository nodeRepo = mock(RailNodeRepository.class);
     when(nodeRepo.listByWorld(worldId)).thenReturn(nodes);
+    when(nodeRepo.listByPosition(eq(worldId), anyInt(), anyInt(), anyInt()))
+        .thenAnswer(
+            invocation ->
+                nodes.stream()
+                    .filter(
+                        node ->
+                            node.x() == invocation.<Integer>getArgument(1)
+                                && node.y() == invocation.<Integer>getArgument(2)
+                                && node.z() == invocation.<Integer>getArgument(3))
+                    .toList());
+    when(nodeRepo.delete(eq(worldId), any()))
+        .thenAnswer(
+            invocation ->
+                (int)
+                    nodes.stream()
+                        .filter(node -> node.nodeId().equals(invocation.getArgument(1)))
+                        .count());
     RailGraphSnapshotRepository snapshotRepo = mock(RailGraphSnapshotRepository.class);
     when(snapshotRepo.findByWorld(worldId))
         .thenReturn(
@@ -643,6 +660,98 @@ final class RailNodeIncrementalSyncTest {
 
     verify(railGraphService, never()).markStale(any(), any());
     verify(listener, never()).onStale(any(), any(), any(), any());
+  }
+
+  @Test
+  void sameTickChangesShareOneSignatureCheck() {
+    World world = world();
+    SignNodeDefinition first = waypoint();
+    SignNodeDefinition second =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:01"), NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+    RailNodeRecord secondRecord =
+        new RailNodeRecord(
+            world.getUID(),
+            second.nodeId(),
+            NodeType.WAYPOINT,
+            5,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    RailNodeRecord firstRecord =
+        new RailNodeRecord(
+            world.getUID(),
+            first.nodeId(),
+            NodeType.WAYPOINT,
+            1,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    StorageManager storage =
+        storageWith(world.getUID(), List.of(firstRecord, secondRecord), "deadbeef");
+    RailGraphService service = servedService(world, first.nodeId(), second.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    List<Runnable> nextTick = new java.util.ArrayList<>();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storage, service, null, listener, (w, def) -> Optional.empty(), nextTick::add);
+
+    sync.delete(mockBlock(world, 1, 64, 2), first);
+    sync.delete(mockBlock(world, 5, 64, 2), second);
+    assertEquals(1, nextTick.size(), "同一世界同一 tick 只排一次比对");
+    verify(listener, never()).onStale(any(), any(), any(), any());
+    nextTick.forEach(Runnable::run);
+
+    StorageProvider provider = storage.provider().orElseThrow();
+    verify(provider.railNodes(), times(1)).listByWorld(world.getUID());
+    verify(listener, times(2))
+        .onStale(
+            eq(world),
+            any(),
+            eq(GraphStaleListener.Level.NONE),
+            eq(GraphStaleListener.Level.RETAINED));
+  }
+
+  @Test
+  void noOpDeleteInTheSameTickAsARealChangeIsNotReported() {
+    World world = world();
+    SignNodeDefinition real = waypoint();
+    SignNodeDefinition ghost =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:02"), NodeType.WAYPOINT, Optional.empty(), Optional.empty());
+    RailNodeRecord realRecord =
+        new RailNodeRecord(
+            world.getUID(),
+            real.nodeId(),
+            NodeType.WAYPOINT,
+            1,
+            64,
+            2,
+            Optional.empty(),
+            Optional.empty());
+    StorageManager storage = storageWith(world.getUID(), List.of(realRecord), "deadbeef");
+    RailGraphService service = servedService(world, real.nodeId(), ghost.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    List<Runnable> nextTick = new java.util.ArrayList<>();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            storage, service, null, listener, (w, def) -> Optional.empty(), nextTick::add);
+
+    // 拆牌监听已经删过 ghost；同一 tick 里 TC 的 destroy 再删一次（0 行），另有一块真实拆除。
+    sync.delete(mockBlock(world, 1, 64, 2), real);
+    sync.delete(mockBlock(world, 9, 64, 2), ghost);
+    nextTick.forEach(Runnable::run);
+
+    verify(listener, times(1)).onStale(eq(world), any(), any(), any());
+    verify(listener)
+        .onStale(
+            eq(world),
+            org.mockito.ArgumentMatchers.argThat(
+                change -> change.definition().nodeId().equals(real.nodeId())),
+            any(),
+            any());
   }
 
   @Test

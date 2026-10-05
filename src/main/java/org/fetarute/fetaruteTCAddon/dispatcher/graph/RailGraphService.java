@@ -102,6 +102,11 @@ public final class RailGraphService {
     return graph;
   }
 
+  /** 图快照版本：任何世界的快照切换、移出都会让它变；按它判断按旧图算的缓存是否作废。 */
+  public long snapshotVersion() {
+    return snapshotVersion.get();
+  }
+
   public void putSnapshot(World world, RailGraph graph, Instant builtAt) {
     Objects.requireNonNull(world, "world");
     Objects.requireNonNull(graph, "graph");
@@ -133,8 +138,28 @@ public final class RailGraphService {
     validateSnapshotActivation(world.getUID(), graph);
   }
 
+  /**
+   * 激活一张在旧图上只增不改的增补图，跳过"仍有任何占用就拒绝切换联锁投影"的全局闸。
+   *
+   * <p>调用方必须已经逐键核验：受影响的旧区间（资源键会变的那些）当前没有任何占用与排队。全局闸只看"有没有占用"，运行中几乎总是有，
+   * 增补便永远做不了；逐键核验覆盖的正是它要防的事——旧键被持有时换图，新旧申请会互相看不见。
+   */
+  public void putVerifiedAppendSnapshot(World world, RailGraph graph, Instant builtAt) {
+    Objects.requireNonNull(world, "world");
+    Objects.requireNonNull(graph, "graph");
+    Objects.requireNonNull(builtAt, "builtAt");
+    activateSnapshot(world.getUID(), graph, builtAt, false);
+  }
+
   private void activateSnapshot(UUID worldId, RailGraph graph, Instant builtAt) {
-    validateSnapshotActivation(worldId, graph);
+    activateSnapshot(worldId, graph, builtAt, true);
+  }
+
+  private void activateSnapshot(
+      UUID worldId, RailGraph graph, Instant builtAt, boolean enforceProjectionGuard) {
+    if (enforceProjectionGuard) {
+      validateSnapshotActivation(worldId, graph);
+    }
     RailInterlockingState nextState = interlockingState(graph);
     RailGraphComponentIndex nextComponentIndex = RailGraphComponentIndex.fromGraph(graph);
     snapshots.put(worldId, new RailGraphSnapshot(graph, builtAt));
@@ -900,9 +925,37 @@ public final class RailGraphService {
                     footprintsByEdge.isEmpty()
                         ? restoreInterlockingState(
                             worldId, edgesById.keySet(), interlockingSnapshot)
-                        : RailInterlockingState.from(worldId, edgesById.keySet(), footprintsByEdge))
+                        : restoreFromFootprints(
+                            worldId, edgesById.keySet(), footprintsByEdge, interlockingSnapshot))
             .orElseGet(RailInterlockingState::unavailable);
     return new SimpleRailGraph(nodesById, edgesById, java.util.Set.of(), interlockingState);
+  }
+
+  /**
+   * 带逐边足迹的还原：足迹齐全也不能自己证明完整——局部合并、刷新、局部删除会保留全部足迹但按不完整发布。完整与否以持久化快照为准，
+   * 快照缺失、不匹配或记为不完整时按不完整发布（足迹仍留在索引里）。
+   */
+  private static RailInterlockingState restoreFromFootprints(
+      UUID worldId,
+      java.util.Set<EdgeId> expectedEdges,
+      Map<EdgeId, RailEdgeFootprint> footprintsByEdge,
+      Optional<RailInterlockingSnapshotRecord> snapshotOpt) {
+    RailInterlockingState state =
+        RailInterlockingState.from(worldId, expectedEdges, footprintsByEdge);
+    boolean persistedComplete =
+        snapshotOpt
+            .filter(snapshot -> worldId.equals(snapshot.worldId()))
+            .filter(
+                snapshot ->
+                    snapshot.formatVersion()
+                        == RailInterlockingSnapshotRecord.CURRENT_FORMAT_VERSION)
+            .filter(
+                snapshot ->
+                    RailInterlockingEdgeSignature.of(expectedEdges)
+                        .equals(snapshot.edgeSignature()))
+            .map(snapshot -> snapshot.coverage().complete())
+            .orElse(false);
+    return persistedComplete ? state : state.withCoverageMarkedIncomplete();
   }
 
   private static RailInterlockingState restoreInterlockingState(

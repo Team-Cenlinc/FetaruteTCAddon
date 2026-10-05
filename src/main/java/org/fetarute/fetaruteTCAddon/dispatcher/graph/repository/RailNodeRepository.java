@@ -13,7 +13,15 @@ public interface RailNodeRepository {
 
   void upsert(RailNodeRecord node);
 
-  void delete(UUID worldId, NodeId nodeId);
+  /** 同一位置上的节点（正常至多一个）。 */
+  List<RailNodeRecord> listByPosition(UUID worldId, int x, int y, int z);
+
+  /**
+   * 删除指定节点。
+   *
+   * @return 删掉的行数；0 表示库里本来就没有
+   */
+  int delete(UUID worldId, NodeId nodeId);
 
   void deleteByPosition(UUID worldId, int x, int y, int z);
 

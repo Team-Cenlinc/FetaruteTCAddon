@@ -160,6 +160,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SignalEvaluator signalEvaluator;
   private RuntimeSignalReevaluationScheduler signalReevaluationScheduler;
   private RouteDefinitionCache routeDefinitionCache;
+
+  /** 交路在用节点的索引，带建索引时的交路缓存版本；版本对不上就重建。 */
+  private volatile VersionedRouteNodeUsage routeNodeUsage;
+
+  /** 交路缓存每变一次加一。 */
+  private final java.util.concurrent.atomic.AtomicLong routeNodeUsageVersion =
+      new java.util.concurrent.atomic.AtomicLong();
+
   private StationDirectory stationDirectory;
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
@@ -528,6 +536,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** 返回调度图失效告警器（若未初始化则为 null）。 */
+  public GraphStaleNotifier getGraphStaleNotifier() {
+    return graphStaleNotifier;
+  }
+
   /** 返回限速设置棍监听器；插件未完成初始化时为空。 */
   public Optional<SpeedSettingStickListener> getSpeedSettingStickListener() {
     return Optional.ofNullable(speedSettingStickListener);
@@ -731,7 +744,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
             railGraphService,
             loggerManager::debug,
             graphStaleNotifier,
-            this::findRouteNodeUsage);
+            this::findRouteNodeUsage,
+            task -> getServer().getScheduler().runTask(this, task));
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
@@ -818,12 +832,22 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (cache == null) {
       return Optional.of("交路缓存未就绪");
     }
-    return RouteNodeUsage.findUse(cache.entries(), definition.nodeId());
+    // 先取版本再读条目：建索引期间交路缓存又变了，存下的索引版本就是旧的，下次会重建。
+    long version = routeNodeUsageVersion.get();
+    VersionedRouteNodeUsage cached = routeNodeUsage;
+    if (cached == null || cached.version() != version) {
+      cached = new VersionedRouteNodeUsage(version, RouteNodeUsage.index(cache.entries()));
+      routeNodeUsage = cached;
+    }
+    return cached.usage().findUse(definition.nodeId());
   }
+
+  private record VersionedRouteNodeUsage(long version, RouteNodeUsage usage) {}
 
   private void initRouteDefinitionCache() {
     if (this.routeDefinitionCache == null) {
       this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
+      routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
     }
     if (this.stationDirectory == null) {
       // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
