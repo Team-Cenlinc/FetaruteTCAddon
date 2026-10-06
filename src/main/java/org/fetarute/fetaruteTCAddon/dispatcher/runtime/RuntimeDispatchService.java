@@ -15536,6 +15536,19 @@ public final class RuntimeDispatchService {
           priorityResolution,
           retainedDestination,
           rollbackBaseline);
+      // 本拍开头只按“硬窗口 + 当前位置”保留 claim，车身与列尾防护要到正常路径末尾才补回；这里提前返回，
+      // 不补的话车身压着的 NODE/EDGE 在下一次完整 tick 之前不归任何车，后车可以对它们取得硬授权。
+      // 只补不收缩（不用 retainStopOccupancy）：收缩会放掉之前已持有的前方授权并删掉其排队位次。
+      retainRearGuardOccupancyBestEffort(
+          trainName,
+          route,
+          currentIndex,
+          effectiveNodes,
+          authorizationRequest.movementPlanSnapshot(),
+          graph,
+          runtimeSettings,
+          now,
+          train);
       traceSmartSignalFinalDecision(
           trainName,
           "PERIODIC_TICK",

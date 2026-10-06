@@ -158,7 +158,9 @@
   记下本车全部 claim，回滚只释放快照之外的；之前已持有的原样留下，回滚随即照 `applyUnresolvableMovementPlanStop` 的先例调用停车保持
   （`retainStopOccupancy`）收缩到当前位置与列尾防护——回滚之后都是当拍硬停车，不走制动曲线，所以不留刹车段。列车压着的道岔因此没有任何
   一拍空档，停着的车前方多余的授权也照旧放掉（以前是回滚整段放掉顺带完成这件事）。可恢复回滚（`SMART_DISPATCH_RECOVERABLE_HOLD`）只加快照、
-  不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序。保下了资源时输出必留诊断
+  不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序。但它在返回前照样补回车身与列尾防护（与正常路径末尾同一个
+  `retainRearGuardOccupancyBestEffort`，只 acquire、不释放、不碰排队）：信号 tick 开头只按“硬窗口 + 当前位置”保留 claim，硬窗口不含车头身后的
+  区段，不补的话车身压着的 NODE/EDGE 要到本车下一次完整 tick 才重新归本车，其间后车可以对它们取得硬授权（`RecoverableHoldBodyRetainTest`）。保下了资源时输出必留诊断
   `SMART_AUTHORITY_ROLLBACK_KEPT_HELD train=… reason=<HardStopReason|RECOVERABLE_HOLD> kept=N resources=[…]`，按车去重。
 - Smart recovery 的 drain/forward unlock 仍默认尊重对向或未知方向 single barrier；只有当当前占用快照证明本车已持有 contested
   section、方向已知、下一跳朝出口前进、出口 edge/node 没有外部 claim，且 hard blocker 只对应同一 section 时，才允许进入最终 signal
