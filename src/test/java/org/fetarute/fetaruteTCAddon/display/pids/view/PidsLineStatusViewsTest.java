@@ -59,6 +59,17 @@ class PidsLineStatusViewsTest {
   }
 
   @Test
+  void operatorOnlyScreensListTheOperatorsLinesInTheirOwnOrder() {
+    PidsLineStatusView view =
+        views.build(
+            new PidsLineStatusViews.Request(
+                "SURC", Optional.empty(), Set.of(), PidsTheme.DARK, NOW, SHANGHAI, 3, 5),
+            good());
+
+    assertEquals(List.of("BS", "DS", "MT", "WS"), codes(view));
+  }
+
+  @Test
   void aSameCodeLineOfAnotherOperatorDoesNotPromoteThisOperatorsLine() {
     refs = List.of(new RouteApi.LineRef("SURN", "MT"), new RouteApi.LineRef("SURC", "WS"));
 
@@ -77,7 +88,8 @@ class PidsLineStatusViewsTest {
         views
             .build(
                 new PidsLineStatusViews.Request(
-                    new PidsStationKey("XYZ", "HHU"),
+                    "XYZ",
+                    Optional.of(new PidsStationKey("XYZ", "HHU")),
                     Set.of(),
                     PidsTheme.DARK,
                     NOW,
@@ -169,7 +181,14 @@ class PidsLineStatusViewsTest {
     PidsLineStatusView view =
         views.build(
             new PidsLineStatusViews.Request(
-                new PidsStationKey("XYZ", "HHU"), Set.of(), PidsTheme.DARK, NOW, SHANGHAI, 3, 5),
+                "XYZ",
+                Optional.of(new PidsStationKey("XYZ", "HHU")),
+                Set.of(),
+                PidsTheme.DARK,
+                NOW,
+                SHANGHAI,
+                3,
+                5),
             good());
 
     assertEquals(new Names("XYZ", ""), view.operator());
@@ -179,7 +198,8 @@ class PidsLineStatusViewsTest {
 
   private PidsLineStatusView build(Set<String> lines, Instant now, PidsLineStatusSource source) {
     return views.build(
-        new PidsLineStatusViews.Request(HHU, lines, PidsTheme.DARK, now, SHANGHAI, 3, 5),
+        new PidsLineStatusViews.Request(
+            HHU.operatorCode(), Optional.of(HHU), lines, PidsTheme.DARK, now, SHANGHAI, 3, 5),
         (line, at) -> {
           asked.add(line.chip().code());
           return source.statusOf(line, at);

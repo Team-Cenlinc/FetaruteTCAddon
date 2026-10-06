@@ -97,6 +97,19 @@ class PidsScreenRepositoryTest {
   }
 
   @Test
+  void operatorOnlyScreensRoundTrip() {
+    PidsScreen pending = screens.save(screen(5));
+    PidsScreen bound =
+        screens.save(pending.withOperator("surc", Set.of("MT"), pending.updatedAt()));
+
+    PidsScreen loaded = screens.findById(pending.id()).orElseThrow();
+    assertEquals(bound, loaded);
+    assertTrue(loaded.station().isEmpty());
+    assertEquals(Optional.of("SURC"), loaded.operatorCode());
+    assertEquals(Set.of("MT"), loaded.lines());
+  }
+
+  @Test
   void twoScreensCannotShareAnAnchor() {
     screens.save(screen(5));
 

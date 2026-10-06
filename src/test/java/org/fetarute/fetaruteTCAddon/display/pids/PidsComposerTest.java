@@ -608,6 +608,28 @@ class PidsComposerTest {
     assertEquals(640, delayed.image().get().getWidth());
   }
 
+  @Test
+  void lineStatusScreensCanBindOnlyAnOperator() {
+    PidsScreen stationBound = register(PidsScreen.Mode.LIVE, Set.of(), "status-3x5", 3, 5);
+    PidsScreen operatorOnly = stationBound.withOperator(HHU.operatorCode(), Set.of("WS"), NOW);
+    registry.put(operatorOnly);
+
+    PidsContent content = composer.content(Optional.of(operatorOnly.id()), 640, 384).orElseThrow();
+
+    PidsLineStatusView view =
+        assertInstanceOf(PidsComposer.LineStatusKey.class, content.key()).view();
+    assertEquals(List.of("WS"), view.rows().stream().map(row -> row.line().code()).toList());
+  }
+
+  @Test
+  void otherScreensWithOnlyAnOperatorShowTheTestCard() {
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    PidsScreen operatorOnly = screen.withOperator(HHU.operatorCode(), Set.of(), NOW);
+    registry.put(operatorOnly);
+
+    card(composer.content(Optional.of(operatorOnly.id()), 384, 128));
+  }
+
   private PidsScreen register(PidsScreen.Mode mode, Set<String> lines) {
     return register(mode, lines, "platform-1x3", 1, 3);
   }

@@ -48,8 +48,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  * <ul>
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
- *   <li>测试卡模式或未绑定车站：测试卡，列出布局、识别出的车站与屏幕编号
- *   <li>线路运行状况屏（布局带状况表组件）：本站所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页
+ *   <li>测试卡模式：测试卡，列出布局、识别出的车站（或运营商）与屏幕编号
+ *   <li>线路运行状况屏（布局带状况表组件）：屏幕所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页； 可以不绑车站、只绑运营商
+ *   <li>其余屏未绑定车站：测试卡
  *   <li>停站屏（布局带停站表组件）：本站台下一班的停站表（停站多时翻页）、后续列车页与宣传页依次轮换（{@link PidsCarousel#stopList}），
  *       不放空位页；通过列车临近时同样锁定安全提示页
  *   <li>其余：到发信息；站台屏与多站台屏按 {@link PidsCarousel} 轮播宣传页，通过列车临近时锁定安全提示页； 所有到发页的英文与备注按 {@link
@@ -235,23 +236,28 @@ public final class PidsComposer {
     if (layout.isEmpty()) {
       return Optional.of(card(notice("no-layout", Map.of("size", rows + "×" + cols), rows, cols)));
     }
-    if (screen.mode() == PidsScreen.Mode.TEST_CARD || screen.station().isEmpty()) {
+    if (screen.mode() == PidsScreen.Mode.TEST_CARD) {
       return Optional.of(card(testCard(screen, layout.get())));
     }
     Optional<PidsLayout.LineStatus> status = layout.get().lineStatus();
-    if (status.isPresent()) {
-      return Optional.of(lineStatus(screen, layout.get(), status.get(), screen.station().get()));
+    if (status.isPresent() && screen.operatorCode().isPresent()) {
+      return Optional.of(
+          lineStatus(screen, layout.get(), status.get(), screen.operatorCode().get()));
+    }
+    if (status.isPresent() || screen.station().isEmpty()) {
+      return Optional.of(card(testCard(screen, layout.get())));
     }
     return Optional.of(live(screen, layout.get(), screen.station().get()));
   }
 
   /** 线路运行状况屏：线路少时用大行，多了用小行并翻页。 */
   private PidsContent lineStatus(
-      PidsScreen screen, PidsLayout layout, PidsLayout.LineStatus widget, PidsStationKey station) {
+      PidsScreen screen, PidsLayout layout, PidsLayout.LineStatus widget, String operator) {
     PidsLineStatusView view =
         lineStatusViews.build(
             new PidsLineStatusViews.Request(
-                station,
+                operator,
+                screen.station(),
                 screen.lines(),
                 theme(screen),
                 clock.instant(),
@@ -276,6 +282,15 @@ public final class PidsComposer {
                             "station", stationName(key),
                             "code", key.stationCode(),
                             "platforms", platforms(screen))))
+            .or(
+                () ->
+                    screen
+                        .operatorCode()
+                        .map(
+                            operator ->
+                                format(
+                                    "pids.test-card.operator",
+                                    Map.of("operator", operatorName(operator), "code", operator))))
             .orElseGet(() -> text("pids.test-card.station-none"));
     return new PidsTestCard(
         new Names(text("pids.test-card.title"), text("pids.test-card.title-secondary")),
@@ -610,6 +625,10 @@ public final class PidsComposer {
 
   private String stationName(PidsStationKey key) {
     return directory.stationName(key.toString()).map(Names::primary).orElse(key.stationCode());
+  }
+
+  private String operatorName(String operatorCode) {
+    return directory.operatorName(operatorCode).map(Names::primary).orElse(operatorCode);
   }
 
   private String platforms(PidsScreen screen) {

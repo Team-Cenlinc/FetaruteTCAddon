@@ -10,6 +10,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.block.BlockFace;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen.Position;
 import org.junit.jupiter.api.Test;
 
@@ -81,5 +82,23 @@ class PidsScreenTest {
   @Test
   void rejectsEmptySizes() {
     assertThrows(IllegalArgumentException.class, () -> screen(PidsFacing.SOUTH, 0, 3));
+  }
+
+  @Test
+  void operatorOnlyBindingIsNormalisedAndYieldsToAStation() {
+    PidsScreen bare = screen(PidsFacing.SOUTH, 3, 5);
+    assertEquals(Optional.empty(), bare.operatorCode());
+
+    PidsScreen operatorOnly = bare.withOperator(" surc ", Set.of("MT"), Instant.EPOCH);
+    assertEquals(Optional.empty(), operatorOnly.station());
+    assertEquals(Optional.of("SURC"), operatorOnly.operator());
+    assertEquals(Optional.of("SURC"), operatorOnly.operatorCode());
+    assertTrue(operatorOnly.platforms().isEmpty());
+
+    PidsScreen stationBound =
+        operatorOnly.withBinding(
+            Optional.of(new PidsStationKey("OFL", "HHU")), Set.of("1"), Set.of(), Instant.EPOCH);
+    assertEquals(Optional.empty(), stationBound.operator(), "绑了车站就不再单独记运营商");
+    assertEquals(Optional.of("OFL"), stationBound.operatorCode());
   }
 }

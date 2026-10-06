@@ -30,6 +30,9 @@ public final class PidsStickMenu {
   /** 菜单里列出的附近车站个数（不含已绑定的）。 */
   private static final int NEARBY_STATIONS = 5;
 
+  /** 线路运行状况屏菜单里列出的运营商个数。 */
+  private static final int OPERATOR_CHOICES = 8;
+
   private final LocaleManager locale;
 
   public PidsStickMenu(LocaleManager locale) {
@@ -60,15 +63,39 @@ public final class PidsStickMenu {
     stations = stations.append(suggest(locale.text("pids.menu.station-manual"), set + "station "));
     sender.sendMessage(stations);
 
-    if (screen.station().isPresent()) {
-      PidsStationKey station = screen.station().get();
-      if (!service.isLineStatus(screen)) {
-        sender.sendMessage(platformRow(service, screen, station, set));
+    boolean lineStatus = service.isLineStatus(screen);
+    if (lineStatus) {
+      // 线路运行状况屏可以不绑车站、只绑运营商（例如挂在大厅里）。
+      Component operators = label("pids.menu.operator");
+      for (String operator : service.operatorChoices(sender, screen, OPERATOR_CHOICES)) {
+        operators =
+            operators.append(
+                button(
+                    service
+                        .directory()
+                        .operatorName(operator)
+                        .map(PidsView.Names::primary)
+                        .orElse(operator),
+                    screen.station().isEmpty()
+                        && screen.operatorCode().equals(Optional.of(operator)),
+                    null,
+                    set + "operator " + operator));
       }
+      operators =
+          operators.append(suggest(locale.text("pids.menu.station-manual"), set + "operator "));
+      sender.sendMessage(operators);
+    }
+    if (screen.station().isPresent() && !lineStatus) {
+      sender.sendMessage(platformRow(service, screen, screen.station().get(), set));
+      sender.sendMessage(lineRow(service, screen, set));
+    } else if (lineStatus && screen.operatorCode().isPresent()) {
       sender.sendMessage(lineRow(service, screen, set));
     } else {
       sender.sendMessage(
-          label("pids.menu.platform").append(locale.component("pids.menu.need-station")));
+          label(lineStatus ? "pids.menu.line" : "pids.menu.platform")
+              .append(
+                  locale.component(
+                      lineStatus ? "pids.menu.need-binding" : "pids.menu.need-station")));
     }
 
     Component layouts = label("pids.menu.layout");
@@ -124,10 +151,7 @@ public final class PidsStickMenu {
             "pids.info.binding",
             Map.of(
                 "station",
-                screen
-                    .station()
-                    .map(station -> stationName(service, station) + "（" + station + "）")
-                    .orElseGet(() -> locale.text("command.pids.list.unbound")),
+                bindingText(locale, service, screen),
                 "platforms",
                 platforms(screen),
                 "lines",
@@ -199,7 +223,30 @@ public final class PidsStickMenu {
     return row;
   }
 
-  /** 线路过滤：线路运行状况屏列本站所属运营商的线路，其余列停靠本站的线路。 */
+  /** 屏幕绑定的说明：“车站名（OP:CODE）”、“运营商名（OP，不绑车站）”或“未绑定”。 */
+  static String bindingText(LocaleManager locale, PidsService service, PidsScreen screen) {
+    if (screen.station().isPresent()) {
+      PidsStationKey station = screen.station().get();
+      return stationName(service, station) + "（" + station + "）";
+    }
+    return screen
+        .operatorCode()
+        .map(
+            operator ->
+                locale
+                    .text("command.pids.list.operator-only")
+                    .replace(
+                        "<operator>",
+                        service
+                            .directory()
+                            .operatorName(operator)
+                            .map(PidsView.Names::primary)
+                            .orElse(operator))
+                    .replace("<code>", operator))
+        .orElseGet(() -> locale.text("command.pids.list.unbound"));
+  }
+
+  /** 线路过滤：线路运行状况屏列屏幕所属运营商的线路，其余列停靠本站的线路。 */
   private Component lineRow(PidsService service, PidsScreen screen, String set) {
     Component row = label("pids.menu.line");
     List<PidsView.LineChip> lines = service.filterableLines(screen);

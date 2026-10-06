@@ -136,7 +136,8 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
     statement.setInt(i++, screen.tileRows());
     statement.setInt(i++, screen.tileCols());
     statement.setString(i++, screen.layoutId());
-    statement.setString(i++, screen.station().map(PidsStationKey::operatorCode).orElse(null));
+    // 只绑运营商的屏幕（线路运行状况屏）：operator_code 有值、station_code 为空。
+    statement.setString(i++, screen.operatorCode().orElse(null));
     statement.setString(i++, screen.station().map(PidsStationKey::stationCode).orElse(null));
     statement.setString(i++, gson.toJson(List.copyOf(screen.platforms())));
     statement.setString(i++, gson.toJson(List.copyOf(screen.lines())));
@@ -161,6 +162,9 @@ public final class JdbcPidsScreenRepository extends JdbcRepositorySupport
         rs.getInt("tile_cols"),
         rs.getString("layout_id"),
         key,
+        key.isEmpty() && operator != null && !operator.isBlank()
+            ? Optional.of(operator)
+            : Optional.empty(),
         strings(rs.getString("platforms")),
         strings(rs.getString("line_codes")),
         PidsScreen.Appearance.valueOf(rs.getString("appearance")),

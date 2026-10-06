@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
  * @param tileCols 地图列数
  * @param layoutId 布局 ID；不存在或尺寸不符时退回同尺寸的内置布局
  * @param station 绑定的车站；未绑定为空
+ * @param operator 不绑车站、只绑运营商（线路运行状况屏用）时的运营商代码，规整为大写；绑了车站时为空（运营商取车站的）
  * @param platforms 只显示这些站台；为空表示全部（车站统屏）
  * @param lines 只显示这些线路的代码；为空表示全部
  * @param appearance 外观
@@ -40,6 +41,7 @@ public record PidsScreen(
     int tileCols,
     String layoutId,
     Optional<PidsStationKey> station,
+    Optional<String> operator,
     Set<String> platforms,
     Set<String> lines,
     Appearance appearance,
@@ -60,12 +62,58 @@ public record PidsScreen(
     }
     Objects.requireNonNull(layoutId, "layoutId");
     station = station == null ? Optional.empty() : station;
+    operator =
+        station.isPresent() || operator == null
+            ? Optional.empty()
+            : operator
+                .map(String::trim)
+                .filter(code -> !code.isEmpty())
+                .map(code -> code.toUpperCase(java.util.Locale.ROOT));
     platforms = sorted(platforms);
     lines = sorted(lines);
     Objects.requireNonNull(appearance, "appearance");
     Objects.requireNonNull(mode, "mode");
     Objects.requireNonNull(createdAt, "createdAt");
     Objects.requireNonNull(updatedAt, "updatedAt");
+  }
+
+  /** 绑车站（或未绑定）的屏幕。 */
+  public PidsScreen(
+      UUID id,
+      UUID worldId,
+      Position anchor,
+      PidsFacing facing,
+      int tileRows,
+      int tileCols,
+      String layoutId,
+      Optional<PidsStationKey> station,
+      Set<String> platforms,
+      Set<String> lines,
+      Appearance appearance,
+      Mode mode,
+      Instant createdAt,
+      Instant updatedAt) {
+    this(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        layoutId,
+        station,
+        Optional.empty(),
+        platforms,
+        lines,
+        appearance,
+        mode,
+        createdAt,
+        updatedAt);
+  }
+
+  /** 屏幕所属的运营商：绑了车站时取车站的，只绑运营商时取它；都没绑时为空。 */
+  public Optional<String> operatorCode() {
+    return station.map(PidsStationKey::operatorCode).or(() -> operator);
   }
 
   /** 只显示的站台，按字典序；不可修改。 */
@@ -124,7 +172,7 @@ public record PidsScreen(
     return facing.offset(anchor, row, col);
   }
 
-  /** 改绑车站与过滤。 */
+  /** 改绑车站与过滤；绑了车站就不再单独记运营商。 */
   public PidsScreen withBinding(
       Optional<PidsStationKey> station, Set<String> platforms, Set<String> lines, Instant now) {
     return new PidsScreen(
@@ -136,7 +184,28 @@ public record PidsScreen(
         tileCols,
         layoutId,
         station,
+        operator,
         platforms,
+        lines,
+        appearance,
+        mode,
+        createdAt,
+        now);
+  }
+
+  /** 不绑车站、只绑运营商（线路运行状况屏）：清掉车站与站台，换上新的线路过滤。 */
+  public PidsScreen withOperator(String operatorCode, Set<String> lines, Instant now) {
+    return new PidsScreen(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        layoutId,
+        Optional.empty(),
+        Optional.of(operatorCode),
+        Set.of(),
         lines,
         appearance,
         mode,
@@ -155,6 +224,7 @@ public record PidsScreen(
         tileCols,
         layoutId,
         station,
+        operator,
         platforms,
         lines,
         appearance,
@@ -174,6 +244,7 @@ public record PidsScreen(
         tileCols,
         layoutId,
         station,
+        operator,
         platforms,
         lines,
         appearance,
@@ -193,6 +264,7 @@ public record PidsScreen(
         tileCols,
         layoutId,
         station,
+        operator,
         platforms,
         lines,
         appearance,

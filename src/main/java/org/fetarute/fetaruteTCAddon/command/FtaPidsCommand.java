@@ -131,6 +131,16 @@ public final class FtaPidsCommand {
                 StringParser.stringParser(),
                 CommandSuggestionProviders.placeholder("<station>"))
             .handler(this::setStation));
+    // 线路运行状况屏可以不绑车站、只绑运营商。
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("pids")
+            .literal("set")
+            .required("screen", StringParser.stringParser(), screens)
+            .literal("operator")
+            .required("operator", StringParser.stringParser(), operatorSuggestions())
+            .handler(this::setOperator));
     registerSet(manager, screens, "platform", platformSuggestions(), this::togglePlatform);
     registerSet(manager, screens, "line", lineSuggestions(), this::toggleLine);
     registerSet(manager, screens, "layout", layouts, this::changeLayout);
@@ -290,6 +300,16 @@ public final class FtaPidsCommand {
                       screen
                           .station()
                           .map(PidsStationKey::toString)
+                          .or(
+                              () ->
+                                  screen
+                                      .operatorCode()
+                                      .map(
+                                          operator ->
+                                              locale
+                                                  .text("command.pids.list.operator-only")
+                                                  .replace("<operator>", operator)
+                                                  .replace("<code>", operator)))
                           .orElseGet(() -> locale.text("command.pids.list.unbound")),
                       "mode",
                       locale.text(
@@ -352,6 +372,44 @@ public final class FtaPidsCommand {
               sender,
               service,
               screen.withBinding(Optional.of(station), boundPlatforms, Set.of(), service.now()));
+        });
+  }
+
+  /** 线路运行状况屏只绑运营商：清掉车站与站台，线路过滤恢复为全部。 */
+  private void setOperator(CommandContext<CommandSender> ctx) {
+    withScreen(
+        ctx,
+        (service, screen) -> {
+          CommandSender sender = ctx.sender();
+          String operator = ((String) ctx.get("operator")).trim().toUpperCase(Locale.ROOT);
+          if (!service.isLineStatus(screen)) {
+            sender.sendMessage(locale().component("command.pids.set.operator-line-status-only"));
+            return;
+          }
+          if (operator.isEmpty() || service.directory().operatorName(operator).isEmpty()) {
+            sender.sendMessage(
+                locale()
+                    .component("command.pids.set.unknown-operator", Map.of("operator", operator)));
+            return;
+          }
+          if (!service.canManageOperator(sender, operator)) {
+            sender.sendMessage(locale().component("pids.menu.no-permission"));
+            return;
+          }
+          save(sender, service, screen.withOperator(operator, Set.of(), service.now()));
+        });
+  }
+
+  /** 运营商代码补全：玩家能管理的公司的运营商。 */
+  private SuggestionProvider<CommandSender> operatorSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          Optional<PidsService> service = plugin.getPidsService();
+          if (service.isEmpty()) {
+            return List.of("<operator>");
+          }
+          List<String> codes = service.get().manageableOperators(ctx.sender());
+          return codes.isEmpty() ? List.of("<operator>") : codes;
         });
   }
 
@@ -436,8 +494,14 @@ public final class FtaPidsCommand {
           locale().component("command.pids.set.invalid-value", Map.of("value", value)));
       return Optional.empty();
     }
-    if (mode == PidsScreen.Mode.LIVE && screen.station().isEmpty()) {
-      sender.sendMessage(locale().component("command.pids.set.need-station"));
+    // 线路运行状况屏绑车站或运营商都行，其余屏要绑车站。
+    boolean lineStatus = service.isLineStatus(screen);
+    if (mode == PidsScreen.Mode.LIVE
+        && (lineStatus ? screen.operatorCode().isEmpty() : screen.station().isEmpty())) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  lineStatus ? "command.pids.set.need-binding" : "command.pids.set.need-station"));
       return Optional.empty();
     }
     if (mode == PidsScreen.Mode.LIVE
@@ -501,7 +565,7 @@ public final class FtaPidsCommand {
       return;
     }
     PidsScreen screen = matches.get(0);
-    if (!service.get().canManage(sender, screen.station())) {
+    if (!service.get().canManage(sender, screen)) {
       sender.sendMessage(locale().component("pids.menu.no-permission"));
       return;
     }

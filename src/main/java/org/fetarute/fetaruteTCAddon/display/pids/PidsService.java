@@ -418,7 +418,8 @@ public final class PidsService {
     List<PidsPlatformNode> nearby =
         nearby(worldId, center).platforms().stream().map(PidsNearby.Platform::node).toList();
     Optional<PidsStationKey> station = nearby.stream().findFirst().map(PidsPlatformNode::station);
-    if (!canManage(player, station)) {
+    // 附近没有车站（例如挂在大厅里的线路运行状况屏）：能领安装工具即可装，装好后再绑运营商。
+    if (station.isPresent() ? !canManage(player, station) : !access.canUseTools(player)) {
       return new InstallResult(Outcome.NO_PERMISSION, Optional.empty());
     }
     Set<String> platforms =
@@ -553,16 +554,44 @@ public final class PidsService {
   }
 
   /**
-   * 屏幕的线路过滤可选的线路：线路运行状况屏为本站所属运营商的线路，其余为停靠本站的线路。
+   * 屏幕的线路过滤可选的线路：线路运行状况屏为屏幕所属运营商的线路（绑车站或只绑运营商都行），其余为停靠本站的线路。
    *
-   * @param screen 已绑定车站的屏幕
-   * @return 未绑定车站时为空
+   * @return 线路运行状况屏没有运营商、其余屏没绑车站时为空
    */
   public List<PidsView.LineChip> filterableLines(PidsScreen screen) {
-    return screen
-        .station()
-        .map(station -> PidsLineStatusViews.filterOptions(directory, station, isLineStatus(screen)))
-        .orElse(List.of());
+    if (isLineStatus(screen)) {
+      return screen
+          .operatorCode()
+          .map(operator -> PidsLineStatusViews.operatorLineChips(directory, operator))
+          .orElse(List.of());
+    }
+    return screen.station().map(directory::linesServing).orElse(List.of());
+  }
+
+  /**
+   * 线路运行状况屏菜单里可选的运营商：当前的、附近车站的，以及玩家能管理的公司的运营商，按代码排序，最多 {@code limit} 个。
+   *
+   * @param sender 打开菜单的人
+   */
+  public List<String> operatorChoices(CommandSender sender, PidsScreen screen, int limit) {
+    java.util.LinkedHashSet<String> choices = new java.util.LinkedHashSet<>();
+    screen.operatorCode().ifPresent(choices::add);
+    nearby(screen.worldId(), screen.center()).stations().stream()
+        .map(PidsStationKey::operatorCode)
+        .forEach(choices::add);
+    choices.addAll(manageableOperators(sender));
+    return choices.stream().limit(limit).toList();
+  }
+
+  /** 玩家能管理的公司的运营商代码（大写），按代码排序；有管理权限时为全部运营商。 */
+  public List<String> manageableOperators(CommandSender sender) {
+    Predicate<UUID> manageable = access.manageableCompanies(sender);
+    return api.operators().listAllOperators().stream()
+        .filter(operator -> manageable.test(operator.companyId()))
+        .map(operator -> operator.code().toUpperCase(java.util.Locale.ROOT))
+        .sorted()
+        .distinct()
+        .toList();
   }
 
   /** 屏幕是线路运行状况屏（布局带状况表组件）：不按站台显示，站台选择不起作用。 */
@@ -658,6 +687,18 @@ public final class PidsService {
   /** 见 {@link PidsAccess#canManage}。 */
   public boolean canManage(CommandSender sender, Optional<PidsStationKey> station) {
     return access.canManage(sender, station);
+  }
+
+  /** 见 {@link PidsAccess#canManageOperator}。 */
+  public boolean canManageOperator(CommandSender sender, String operatorCode) {
+    return access.canManageOperator(sender, Optional.of(operatorCode));
+  }
+
+  /** 能否管理这块屏幕（配置、拆除、查看信息）：按屏幕所属运营商判断；车站与运营商都没绑的屏幕，能领安装工具的人都能配置。 */
+  public boolean canManage(CommandSender sender, PidsScreen screen) {
+    return screen.operatorCode().isPresent()
+        ? access.canManageOperator(sender, screen.operatorCode())
+        : access.canUseTools(sender);
   }
 
   /** 见 {@link PidsAccess#canUseTools}。 */

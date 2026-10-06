@@ -52,7 +52,8 @@ public final class PidsLineStatusViews {
    * @param compactRows 小行一页几条
    */
   public record Request(
-      PidsStationKey station,
+      String operatorCode,
+      Optional<PidsStationKey> station,
       Set<String> lines,
       PidsTheme theme,
       Instant now,
@@ -61,7 +62,8 @@ public final class PidsLineStatusViews {
       int compactRows) {
 
     public Request {
-      Objects.requireNonNull(station, "station");
+      Objects.requireNonNull(operatorCode, "operatorCode");
+      station = station == null ? Optional.empty() : station;
       lines = Set.copyOf(lines);
       Objects.requireNonNull(theme, "theme");
       Objects.requireNonNull(now, "now");
@@ -79,8 +81,14 @@ public final class PidsLineStatusViews {
   public static List<PidsView.LineChip> filterOptions(
       PidsDirectory directory, PidsStationKey station, boolean lineStatus) {
     return lineStatus
-        ? directory.operatorLines(station.operatorCode()).stream().map(OperatorLine::chip).toList()
+        ? operatorLineChips(directory, station.operatorCode())
         : directory.linesServing(station);
+  }
+
+  /** 运营商的全部线路（线路运行状况屏的线路过滤可选项）。 */
+  public static List<PidsView.LineChip> operatorLineChips(
+      PidsDirectory directory, String operatorCode) {
+    return directory.operatorLines(operatorCode).stream().map(OperatorLine::chip).toList();
   }
 
   /**
@@ -88,7 +96,7 @@ public final class PidsLineStatusViews {
    * @param statuses 线路状况来源
    */
   public PidsLineStatusView build(Request request, PidsLineStatusSource statuses) {
-    List<OperatorLine> all = directory.operatorLines(request.station().operatorCode());
+    List<OperatorLine> all = directory.operatorLines(request.operatorCode());
     List<OperatorLine> lines = lines(request, all);
     boolean roomy = lines.size() <= request.roomyRows();
     int perPage = Math.max(1, roomy ? request.roomyRows() : request.compactRows());
@@ -103,7 +111,7 @@ public final class PidsLineStatusViews {
             .stream()
             .map(line -> row(line, statuses.statusOf(line, request.now()), request.zone()))
             .toList();
-    String operator = request.station().operatorCode();
+    String operator = request.operatorCode();
     return new PidsLineStatusView(
         request.theme(),
         PidsViewBuilder.CLOCK.format(request.now().atZone(request.zone())),
@@ -117,8 +125,9 @@ public final class PidsLineStatusViews {
   }
 
   private List<OperatorLine> lines(Request request, List<OperatorLine> all) {
+    // 绑了车站时停靠本站的线路排前面；只绑运营商时按运营商的线路顺序。
     List<String> serving =
-        directory.lineRefsServing(request.station()).stream()
+        request.station().map(directory::lineRefsServing).orElse(List.of()).stream()
             .map(ref -> PidsDirectory.lineKey(ref.operatorCode(), ref.lineCode()))
             .toList();
     return all.stream()
