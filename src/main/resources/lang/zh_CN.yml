@@ -2568,7 +2568,7 @@ drive:
       given: "<prefix> <green>《FTCA 驾驶员手册》已放进背包</green>"
       page-1: "<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>"
       page-2: "<dark_blue><bold>一、FTCA 是什么</bold></dark_blue>\n<black>FTCA 按时刻表自动派车、排进路、控制信号。玩家可以接班驾驶这些列车：调度给出行车许可与停站要求，驾驶员负责平稳行车、停准、开关车门、准点到发。</black>"
-      page-3: "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"
+      page-3: "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"
       page-4: "<dark_blue><bold>三、领任务与接班</bold></dark_blue>\n<black>在车站输入 /fta drive tasks 打开任务板：左键人工驾驶，右键 ATO。列车到站后坐进车头驾驶室，确认座位后输入 /fta drive on 接班。</black>"
       page-5: "<dark_blue><bold>四、驾驶台</bold></dark_blue>\n<black>快捷栏 1–3 牵引 P3–P1，4 惰行 N，5–8 制动 B1–B4，9 紧急制动 EB。\n停稳后按 F 打开驾驶台菜单（开关车门、结束驾驶等）。\n动作栏：车速与限速。\n侧边栏：信号、停站、时刻、车门。</black>"
       page-6: "<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在前方停住。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"

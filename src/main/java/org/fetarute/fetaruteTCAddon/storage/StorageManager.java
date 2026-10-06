@@ -3,6 +3,8 @@ package org.fetarute.fetaruteTCAddon.storage;
 import java.io.File;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -186,6 +188,44 @@ public final class StorageManager {
     migrateRoutePatternTypeEnums(connection);
     ensureTimetableDutyConsistColumn(connection);
     ensurePidsScreenPagesColumn(connection);
+    migrateLicenseClassIds(connection);
+  }
+
+  /**
+   * 兼容性迁移：驾驶证等级改名（free → learner，dispatch → driver），驾驶证与练习次数两张表一起改。
+   *
+   * <p>幂等：已改过的没有旧 ID 可改。同一玩家已有新 ID 的记录时跳过那一行（主键冲突），旧行留着也不会被认出。
+   */
+  private void migrateLicenseClassIds(java.sql.Connection connection) {
+    for (String raw : List.of("drive_licenses", "drive_license_training")) {
+      String table = storageSchema.tablePrefix() + raw;
+      for (Map.Entry<String, String> rename :
+          org.fetarute.fetaruteTCAddon.drive.license.LicenseClassIdMigration.RENAMED.entrySet()) {
+        String sql =
+            org.fetarute.fetaruteTCAddon.drive.license.LicenseClassIdMigration.renameSql(table);
+        try (var statement = connection.prepareStatement(sql)) {
+          statement.setString(1, rename.getValue());
+          statement.setString(2, rename.getKey());
+          statement.setString(3, rename.getValue());
+          int updated = statement.executeUpdate();
+          if (updated > 0) {
+            logger.info(
+                "已应用兼容性迁移: "
+                    + raw
+                    + ".class_id "
+                    + rename.getKey()
+                    + " -> "
+                    + rename.getValue()
+                    + "（"
+                    + updated
+                    + " 行）");
+          }
+        } catch (Exception ex) {
+          logger.warn(
+              "应用兼容性迁移失败: " + raw + ".class_id " + rename.getKey() + ": " + ex.getMessage());
+        }
+      }
+    }
   }
 
   /** 兼容性迁移：为旧版 pids_screens 补齐 page_layouts 列（组合翻页的其余布局；旧表为空，只用主布局）。 */

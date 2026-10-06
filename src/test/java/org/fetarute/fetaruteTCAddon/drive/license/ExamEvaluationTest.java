@@ -17,8 +17,7 @@ import org.junit.jupiter.api.Test;
 @DisplayName("驾驶证路考判定")
 class ExamEvaluationTest {
 
-  private static final LicenseClass STRICT =
-      LicenseConfig.defaults().find("dispatch").orElseThrow();
+  private static final LicenseClass STRICT = LicenseConfig.defaults().find("driver").orElseThrow();
 
   private static DriveApi.TaskView task(DriveApi.TaskState state, DriveApi.Mode mode) {
     return new DriveApi.TaskView(

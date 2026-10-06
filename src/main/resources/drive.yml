@@ -305,20 +305,20 @@ license:
   # 或 dispatch（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
   classes:
-    free:
-      name: "自由驾驶证"
+    learner:
+      name: "见习驾驶证"
       description: "驾驶非调度列车，使用新手教程与驾驶提示"
       enabled: true
       requires: []
       exam: tutorial
       grants:
         - fetarute.drive
-    dispatch:
-      name: "调度驾驶证"
+    driver:
+      name: "正式驾驶证"
       description: "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行"
       enabled: true
       requires:
-        - free
+        - learner
       exam: dispatch
       # 报名路考前要完整开完几次路考练习；0 表示不要求
       training-runs: 1

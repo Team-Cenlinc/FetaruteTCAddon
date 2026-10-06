@@ -84,6 +84,7 @@ drive:
           how: ["<prefix> <white>开始方式：</white><gray>列车进站后坐进车头驾驶室，按提示确认座位并输入 <aqua>/fta drive on</aqua>。</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>传送到列车旁</gray>'><green>[前往列车]</green></hover></click>"]
   handbook:
     driver:
+      page-3: ["<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"]
       page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
   sidebar:
     label:

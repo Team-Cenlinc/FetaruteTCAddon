@@ -41,6 +41,54 @@ class DriveConfigFileTest {
   }
 
   @Test
+  void renamesOldLicenseClassesBeforeFillingInTemplateKeys(@TempDir Path dir) throws IOException {
+    Files.writeString(
+        dir.resolve(DriveConfigFile.FILE_NAME),
+        "config-version: 2\n"
+            + "license:\n"
+            + "  classes:\n"
+            + "    free:\n"
+            + "      name: \"自由驾驶证\"\n"
+            + "      exam: tutorial\n"
+            + "    dispatch:\n"
+            + "      name: \"调度驾驶证\"\n"
+            + "      requires:\n"
+            + "        - free\n"
+            + "      exam: dispatch\n"
+            + "      min-points: 80\n",
+        StandardCharsets.UTF_8);
+    String withLicense =
+        TEMPLATE
+            + "license:\n"
+            + "  classes:\n"
+            + "    learner:\n"
+            + "      name: \"见习驾驶证\"\n"
+            + "      exam: tutorial\n"
+            + "    driver:\n"
+            + "      name: \"正式驾驶证\"\n"
+            + "      requires:\n"
+            + "        - learner\n"
+            + "      exam: dispatch\n"
+            + "      min-points: 70\n";
+
+    DriveConfig config =
+        DriveConfigFile.load(
+            dir.toFile(),
+            () -> new ByteArrayInputStream(withLicense.getBytes(StandardCharsets.UTF_8)),
+            logger);
+
+    assertEquals(
+        java.util.List.of("learner", "driver"),
+        config.license().classes().stream()
+            .map(org.fetarute.fetaruteTCAddon.drive.license.LicenseClass::id)
+            .toList(),
+        "旧的两级改名后不与模板的新键并存");
+    assertEquals(80, config.license().find("driver").orElseThrow().minPoints(), "改过的值保留");
+    assertEquals("正式驾驶证", config.license().find("driver").orElseThrow().name());
+    assertTrue(Files.isRegularFile(dir.resolve(DriveConfigFile.FILE_NAME + ".bak")));
+  }
+
+  @Test
   void keepsUserValuesAndFillsInKeysTheTemplateAdded(@TempDir Path dir) throws IOException {
     Files.writeString(
         dir.resolve(DriveConfigFile.FILE_NAME),

@@ -36,7 +36,7 @@ public record LicenseConfig(
     training = training == null ? TrainingConfig.defaults() : training;
   }
 
-  /** 默认两级：自由驾驶证考新手教程；调度驾驶证要先有自由驾驶证，再路考。 */
+  /** 默认两级：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考。 */
   public static LicenseConfig defaults() {
     return new LicenseConfig(
         true,
@@ -45,8 +45,8 @@ public record LicenseConfig(
         10,
         List.of(
             new LicenseClass(
-                "free",
-                "自由驾驶证",
+                "learner",
+                "见习驾驶证",
                 "驾驶非调度列车，使用新手教程与驾驶提示",
                 true,
                 List.of(),
@@ -59,11 +59,11 @@ public record LicenseConfig(
                 0,
                 List.of(DrivePermissions.BASE)),
             new LicenseClass(
-                "dispatch",
-                "调度驾驶证",
+                "driver",
+                "正式驾驶证",
                 "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行",
                 true,
-                List.of("free"),
+                List.of("learner"),
                 LicenseClass.Exam.DISPATCH,
                 3,
                 70,
