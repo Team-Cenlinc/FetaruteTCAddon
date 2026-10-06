@@ -19,23 +19,23 @@ display:
     eta:
       status:
         arriving: "即将到达"
-        delayed: "延误 {minutes}分"
-        scheduled: "预计 {minutes}分"
-        minutes: "{minutes}分"
+        delayed: "晚点 {minutes} 分"
+        scheduled: "预计 {minutes} 分"
+        minutes: "{minutes} 分"
         unavailable: "-"
     bossbar:
       template: |-
         rotate_ticks: 60
         AT_STATION_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>本站 {current_station}，开往 {dest_eor}</white>
         AT_STATION_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}，开往 {dest_eor}</white>
-        AT_LAST_STATION: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>终点站 {current_station} 到达</white>
+        AT_LAST_STATION: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>已到达终点站 {current_station}</white>
         DEPARTING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将离站，前往 {next_station}</white>
         ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将到达 {next_station}</white>
-        TERM_ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>终点 {next_station} 到达</white>
+        TERM_ARRIVING: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将到达终点站 {next_station}</white>
         IN_TRIP_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>下一站 {next_station}</white><gray> | </gray><white>{eta_status}</white>
         IN_TRIP_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>车厢 {player_carriage_no}/{player_carriage_total}</white><gray> | </gray><white>速度 {speed}</white>
         ON_LAYOVER_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>折返待命中</white>
-        ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将换向，等待调度</white>
+        ON_LAYOVER_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>即将折返，等待发车</white>
         IDLE_1: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>临时停车</white>
         IDLE_2: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>等待信号中</white>
         OUT_OF_SERVICE: <{line_color_tag}>▋<white> {line}</white><gray> | </gray><white>回库，不再载客</white>
@@ -45,13 +45,13 @@ display:
       unit:
         kmh: "km/h"
       signal:
-        proceed: "通行"
+        proceed: "允许"
         proceed_with_caution: "注意"
-        caution: "注意"
+        caution: "减速"
         stop: "停车"
         unknown: "-"
       service:
-        in_service: "营运中"
+        in_service: "运营中"
         layover: "待命"
       tc_destination:
         empty: "暂无目的地"
@@ -59,17 +59,17 @@ display:
       template: |-
         rotate_ticks: 80
         AT_STATION_1: <white>欢迎乘坐 {operator} 列车，本站 {current_station}</white>
-        AT_STATION_2: <white>本线路 {line} 前往 {dest_eop}</white>
+        AT_STATION_2: <white>本次列车为 {line}，开往 {dest_eop}</white>
         AT_STATION_3: <white>Welcome aboard {operator} | Line {line} to {dest_eop_lang2}</white>
-        AT_LAST_STATION: <yellow>终点站 {current_station} 到达</yellow>
-        DEPARTING: <white>前往 {next_station}</white>
+        AT_LAST_STATION: <yellow>已到达终点站 {current_station}</yellow>
+        DEPARTING: <white>即将离站，下一站 {next_station}</white>
         ARRIVING: <yellow>即将到达 {next_station}</yellow>
-        TERM_ARRIVING: <yellow>终点 {next_station} 到达</yellow>
+        TERM_ARRIVING: <yellow>即将到达终点站 {next_station}</yellow>
         ON_LAYOVER: <white>折返待命中</white>
         IDLE: <white>临时停车</white>
         OUT_OF_SERVICE: <white>本列车回库，不再载客</white>
         <white>欢迎乘坐 {company}/{operator} 列车</white>
-        <white>本次列车为 {line} 列车，前往 {dest_eop}</white>
+        <white>本次列车为 {line}，开往 {dest_eop}</white>
         <white>下一站 {next_station}</white>
         <white>Welcome aboard {operator} train</white>
         <white>Line {line} to {dest_eop_lang2}</white>
@@ -82,7 +82,7 @@ display:
   # 另有 line_change：直通运转在这一站换到另一条线时为新线路名。
   trip:
     title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <gray>·</gray> <white>{route_pattern}</white> <gray>·</gray> <white>开往 {dest_eop}</white>"
-    summary: "<gray>列车 {train_name} · 共 {player_carriage_total} 节 · 您在第 {player_carriage_no} 节</gray>"
+    summary: "<gray>列车 {train_name} · 共 {player_carriage_total} 节 · 你在第 {player_carriage_no} 节</gray>"
     row:
       next: "<green>下一站</green> <yellow>{station}</yellow> <gray>{eta}</gray>"
       stop: "<white>{station}</white> <gray>{eta}</gray>"
@@ -98,8 +98,8 @@ display:
     unavailable: "<prefix> <red>后续站点暂不可用：</red><gray>展示服务未启动。</gray>"
     button:
       refresh: "刷新"
-      transfers-only: "只看换乘站"
-      show-all: "显示全部站"
+      transfers-only: "仅显示换乘站"
+      show-all: "显示全部车站"
       close: "关闭"
 
 sign:
@@ -108,15 +108,15 @@ sign:
     generic: "<prefix> <red>节点格式无效</red>"
     waypoint: "<prefix> <red>区间点格式无效</red> <gray>Waypoint: Operator:From:To:Track:Seq</gray>"
     autostation: "<prefix> <red>站点格式无效</red> <gray>AutoStation: Operator:S:Station:Track</gray>"
-    depot: "<prefix> <red>车库格式无效</red> <gray>Depot: Operator:D:Depot:Track</gray>"
-  conflict: "<prefix> <red>节点 ID 冲突：</red><white><node></white> <gray>(已被 <white><type></white> 使用)</gray>\n<gray>位置:</gray> <location>"
-  conflict-hover-teleport: "<gray>点击传送:</gray> <white><cmd></white>"
+    depot: "<prefix> <red>车库格式无效</red> <gray>写法：运营商:D:车库:股道</gray>"
+  conflict: "<prefix> <red>节点 ID 冲突：</red><white><node></white> <gray>(已被 <white><type></white> 使用)</gray>\n<gray>位置：</gray> <location>"
+  conflict-hover-teleport: "<gray>点击传送：</gray> <white><cmd></white>"
   removed: "<prefix> <dark_aqua>已移除</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
   stopmark:
-    created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处</dark_aqua>"
-    created-doors: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"
+    created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车</dark_aqua>"
+    created-doors: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"
     invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 car:节数（亦可写 carriage:），例如 car:4、car:4,6、car:3-5、car:*；第四行可选写 door:开关门的车厢（自车头起算，写法同上），例如 door:1；适用的最短编组也须至少有一节开门车厢</gray>"
-    no-permission: "<prefix> <red>没有建停车位置标的权限</red>"
+    no-permission: "<prefix> <red>你没有设置停车位置标的权限</red>"
   type:
     depot: "车库"
     depot_throat: "车库咽喉"
@@ -135,7 +135,7 @@ graph:
     action-removed: "移除"
     action-added: "新增"
     more: "<gray>  …另有</gray> <white><count></white> <gray>处</gray>"
-    hint: "<gray>请到该世界执行</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>点击填入命令</gray>'><white>/fta graph build</white></hover></click><gray>；若属误删，在原位置按原文字手动放回牌子也可恢复。</gray>"
+    hint: "<gray>请到该世界执行</gray> <click:suggest_command:'/fta graph build'><hover:show_text:'<gray>点击填入</gray>'><white>/fta graph build</white></hover></click><gray>；若属误删，在原位置按原文字手动放回牌子也可恢复。</gray>"
     recovered: "<prefix> <green>调度图已恢复</green> <gray>世界</gray> <white><world></white><gray>：节点牌子与快照重新一致，已重新载入调度图。</gray>"
     join-retained: "<prefix> <yellow>世界</yellow> <white><world></white> <yellow>的调度图与节点牌子不一致，调度仍在使用原图，建议重建。</yellow>"
     join: "<prefix> <yellow>世界</yellow> <white><world></white> <yellow>的调度图处于失效状态，重建前该世界的调度无法使用调度图，开启跨世界时经过该世界的交路也受影响。</yellow>"
@@ -143,7 +143,7 @@ graph:
 command:
   common:
     confirm-required: "<prefix> <red>危险操作需要确认：</red><gray>追加参数</gray> <white>--confirm</white>"
-    invalid-boolean: "<prefix> <red>无效布尔值：</red><white><value></white> <gray>(仅支持 true/false)</gray>"
+    invalid-boolean: "<prefix> <red>无效布尔值：</red><white><value></white> <gray>（仅支持 true/false）</gray>"
     yes: "是"
     no: "否"
   error:
@@ -151,49 +151,49 @@ command:
   help:
     header: "<prefix> <dark_aqua>可用子命令</dark_aqua>"
     entry-info: "<gray>/fta info</gray> <white>-</white> <dark_aqua>显示插件版本与构建信息</dark_aqua>"
-    hover-info: "<gray>点击执行:</gray> <white>/fta info</white>\n<dark_aqua>显示插件版本与构建信息</dark_aqua>"
+    hover-info: "<gray>点击执行：</gray> <white>/fta info</white>\n<dark_aqua>显示插件版本与构建信息</dark_aqua>"
     entry-help: "<gray>/fta help</gray> <white>-</white> <dark_aqua>显示此帮助</dark_aqua>"
-    hover-help: "<gray>点击执行:</gray> <white>/fta help</white>\n<dark_aqua>显示此帮助</dark_aqua>"
+    hover-help: "<gray>点击执行：</gray> <white>/fta help</white>\n<dark_aqua>显示此帮助</dark_aqua>"
     entry-trip: "<gray>/fta trip</gray> <white>-</white> <dark_aqua>查看所乘列车的后续站点（乘车时也可按副手交换键）</dark_aqua>"
-    hover-trip: "<gray>点击执行:</gray> <white>/fta trip</white>\n<dark_aqua>列出前方各站的到达时间、换乘与晚点</dark_aqua>"
+    hover-trip: "<gray>点击执行：</gray> <white>/fta trip</white>\n<dark_aqua>列出前方各站的到达时间、换乘与晚点</dark_aqua>"
     entry-announce: "<gray>/fta announce</gray> <white>-</white> <dark_aqua>开启或关闭站台广播</dark_aqua>"
-    hover-announce: "<gray>点击填充:</gray> <white>/fta announce </white>\n<dark_aqua>on 开启、off 关闭；不带参数查看当前状态</dark_aqua>"
+    hover-announce: "<gray>点击填入：</gray> <white>/fta announce </white>\n<dark_aqua>on 开启、off 关闭；不带参数查看当前状态</dark_aqua>"
     entry-company: "<gray>/fta company</gray> <white>-</white> <dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
-    hover-company: "<gray>点击填充:</gray> <white>/fta company </white>\n<dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
+    hover-company: "<gray>点击填入：</gray> <white>/fta company </white>\n<dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
     entry-operator: "<gray>/fta operator</gray> <white>-</white> <dark_aqua>运营商管理（如 SURN）</dark_aqua>"
-    hover-operator: "<gray>点击填充:</gray> <white>/fta operator </white>\n<dark_aqua>运营商管理（如 SURN）</dark_aqua>"
+    hover-operator: "<gray>点击填入：</gray> <white>/fta operator </white>\n<dark_aqua>运营商管理（如 SURN）</dark_aqua>"
     entry-line: "<gray>/fta line</gray> <white>-</white> <dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
-    hover-line: "<gray>点击填充:</gray> <white>/fta line </white>\n<dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
+    hover-line: "<gray>点击填入：</gray> <white>/fta line </white>\n<dark_aqua>线路管理（如 LT/NE）</dark_aqua>"
     entry-route: "<gray>/fta route</gray> <white>-</white> <dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
-    hover-route: "<gray>点击填充:</gray> <white>/fta route </white>\n<dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
+    hover-route: "<gray>点击填入：</gray> <white>/fta route </white>\n<dark_aqua>运行图管理（停靠表/动作标记）</dark_aqua>"
     entry-station: "<gray>/fta station</gray> <white>-</white> <dark_aqua>站点主数据管理（名称/位置/PIDS）</dark_aqua>"
-    hover-station: "<gray>点击填充:</gray> <white>/fta station </white>\n<dark_aqua>站点主数据管理（名称/位置/PIDS）</dark_aqua>"
+    hover-station: "<gray>点击填入：</gray> <white>/fta station </white>\n<dark_aqua>站点主数据管理（名称/位置/PIDS）</dark_aqua>"
     entry-depot: "<gray>/fta depot</gray> <white>-</white> <dark_aqua>车库指令（手动生成列车）</dark_aqua>"
-    hover-depot: "<gray>点击填充:</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
+    hover-depot: "<gray>点击填入：</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
     entry-pids: "<gray>/fta pids</gray> <white>-</white> <dark_aqua>站台屏（安装纸、配置棍、列表）</dark_aqua>"
-    hover-pids: "<gray>点击填充:</gray> <white>/fta pids </white>\n<dark_aqua>领取安装纸与配置棍，查看与管理站台屏</dark_aqua>"
+    hover-pids: "<gray>点击填入：</gray> <white>/fta pids </white>\n<dark_aqua>领取安装纸与配置棍，查看与管理站台屏</dark_aqua>"
     entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
-    hover-graph: "<gray>点击填充:</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
+    hover-graph: "<gray>点击填入：</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
-    hover-occupancy: "<gray>点击填充:</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
+    hover-occupancy: "<gray>点击填入：</gray> <white>/fta occupancy </white>\n<dark_aqua>调度占用诊断与清理</dark_aqua>"
     entry-spawn: "<gray>/fta spawn</gray> <white>-</white> <dark_aqua>发车计划与队列诊断</dark_aqua>"
-    hover-spawn: "<gray>点击填充:</gray> <white>/fta spawn </white>\n<dark_aqua>发车计划与队列诊断</dark_aqua>"
+    hover-spawn: "<gray>点击填入：</gray> <white>/fta spawn </white>\n<dark_aqua>发车计划与队列诊断</dark_aqua>"
     entry-speed: "<gray>/fta speed section</gray> <white>-</white> <dark_aqua>业务区间限速</dark_aqua>"
-    hover-speed: "<gray>点击填充:</gray> <white>/fta speed section </white>\n<dark_aqua>按车站/节点区间批量设置 rail_edge_overrides</dark_aqua>"
+    hover-speed: "<gray>点击填入：</gray> <white>/fta speed section </white>\n<dark_aqua>按车站/节点区间批量设置 rail_edge_overrides</dark_aqua>"
     entry-eta: "<gray>/fta eta</gray> <white>-</white> <dark_aqua>ETA 诊断输出</dark_aqua>"
-    hover-eta: "<gray>点击填充:</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
+    hover-eta: "<gray>点击填入：</gray> <white>/fta eta </white>\n<dark_aqua>ETA 诊断输出</dark_aqua>"
     entry-train: "<gray>/fta train</gray> <white>-</white> <dark_aqua>列车配置与诊断</dark_aqua>"
-    hover-train: "<gray>点击填充:</gray> <white>/fta train </white>\n<dark_aqua>列车配置与诊断</dark_aqua>"
+    hover-train: "<gray>点击填入：</gray> <white>/fta train </white>\n<dark_aqua>列车配置与诊断</dark_aqua>"
     entry-template: "<gray>/fta template</gray> <white>-</white> <dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
-    hover-template: "<gray>点击填充:</gray> <white>/fta template </white>\n<dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
+    hover-template: "<gray>点击填入：</gray> <white>/fta template </white>\n<dark_aqua>HUD 模板管理（编辑/绑定）</dark_aqua>"
     entry-consist: "<gray>/fta consist</gray> <white>-</white> <dark_aqua>编组方案（车型与比例）</dark_aqua>"
-    hover-consist: "<gray>点击填充:</gray> <white>/fta consist </white>\n<dark_aqua>编组方案：用书编写车型与比例，route 用 --consist-plan 绑定</dark_aqua>"
+    hover-consist: "<gray>点击填入：</gray> <white>/fta consist </white>\n<dark_aqua>编组方案：用书编写车型与比例，route 用 --consist-plan 绑定</dark_aqua>"
     entry-reload: "<gray>/fta reload</gray> <white>-</white> <dark_aqua>重载配置与语言文件</dark_aqua>"
-    hover-reload: "<gray>点击执行:</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
+    hover-reload: "<gray>点击执行：</gray> <white>/fta reload</white>\n<dark_aqua>重载配置与语言文件</dark_aqua>"
   info:
     header: "<prefix> <dark_aqua>插件信息</dark_aqua>"
-    version: "<gray>版本:</gray> <dark_aqua><version></dark_aqua>"
-    build: "<gray>构建:</gray> <dark_aqua><build></dark_aqua>"
+    version: "<gray>版本：</gray> <dark_aqua><version></dark_aqua>"
+    build: "<gray>构建：</gray> <dark_aqua><build></dark_aqua>"
     git: "<gray>Git:</gray> <dark_aqua><git></dark_aqua>"
   reload:
     success: "<prefix> <dark_aqua>配置与语言已重载</dark_aqua>"
@@ -204,17 +204,17 @@ command:
       help:
         header: "<prefix> <dark_aqua>业务区间限速</dark_aqua>"
         entry-preview: "<gray>/fta speed section preview</gray> <white>-</white> <dark_aqua>预览区间展开路径</dark_aqua>"
-        hover-preview: "<gray>点击填充:</gray> <white>/fta speed section preview </white>\n<dark_aqua>参数:</dark_aqua> <white>\"fromNode\" \"toNode\" [speed] [ttl]</white>"
+        hover-preview: "<gray>点击填入：</gray> <white>/fta speed section preview </white>\n<dark_aqua>参数：</dark_aqua> <white>\"fromNode\" \"toNode\" [speed] [ttl]</white>"
         entry-set: "<gray>/fta speed section set</gray> <white>-</white> <dark_aqua>按区间设置长期/临时限速</dark_aqua>"
-        hover-set: "<gray>点击填充:</gray> <white>/fta speed section set </white>\n<dark_aqua>参数:</dark_aqua> <white>\"fromNode\" \"toNode\" 80kmh [5m]</white>"
+        hover-set: "<gray>点击填入：</gray> <white>/fta speed section set </white>\n<dark_aqua>参数：</dark_aqua> <white>\"fromNode\" \"toNode\" 80kmh [5m]</white>"
         entry-clear: "<gray>/fta speed section clear</gray> <white>-</white> <dark_aqua>清除区间长期与临时限速</dark_aqua>"
-        hover-clear: "<gray>点击填充:</gray> <white>/fta speed section clear </white>\n<dark_aqua>参数:</dark_aqua> <white>\"fromNode\" \"toNode\"</white>"
+        hover-clear: "<gray>点击填入：</gray> <white>/fta speed section clear </white>\n<dark_aqua>参数：</dark_aqua> <white>\"fromNode\" \"toNode\"</white>"
         entry-list: "<gray>/fta speed section list</gray> <white>-</white> <dark_aqua>列出业务入口写入的区间限速覆盖</dark_aqua>"
-        hover-list: "<gray>点击填充:</gray> <white>/fta speed section list </white>\n<dark_aqua>可选:</dark_aqua> <white>node \"nodeId\" [page]</white>"
+        hover-list: "<gray>点击填入：</gray> <white>/fta speed section list </white>\n<dark_aqua>可选：</dark_aqua> <white>node \"nodeId\" [page]</white>"
         entry-stick: "<gray>/fta speed stick give</gray> <white>-</white> <dark_aqua>发放区间限速设置棍</dark_aqua>"
-        hover-stick: "<gray>点击填充:</gray> <white>/fta speed stick give </white>\n<dark_aqua>用法:</dark_aqua> <white>速度 [ttl]</white>\n<dark_aqua>左键两端节点后按最短路径直接应用</dark_aqua>"
-      invalid-speed: "<prefix> <red>速度参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
-      invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持:</dark_aqua> <white>90s/1m/2h/1h30m</white>"
+        hover-stick: "<gray>点击填入：</gray> <white>/fta speed stick give </white>\n<dark_aqua>用法：</dark_aqua> <white>速度 [ttl]</white>\n<dark_aqua>左键两端节点后按最短路径直接应用</dark_aqua>"
+      invalid-speed: "<prefix> <red>速度参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例：</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
+      invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持：</dark_aqua> <white>90s/1m/2h/1h30m</white>"
       no-world: "<prefix> <red>未找到可用世界</red>"
       unreachable: "<prefix> <red>区间不可达或节点缺失</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray> <dark_aqua>请先检查 /fta graph build</dark_aqua>"
       storage-failed: "<prefix> <red>写入区间限速失败</red> <gray><error></gray>"
@@ -239,7 +239,7 @@ command:
       no-sign: "<prefix> <gray>这里没有可识别的调度节点</gray> <gray>(x=<white><x></white>, y=<white><y></white>, z=<white><z></white>)</gray>"
       name: "<dark_aqua>FTA 限速设置棍</dark_aqua> <gray>(<speed>)</gray>"
       lore-1: "<gray>左键两个节点：按当前最短路径应用限速</gray>"
-      lore-2: "<gray>速度:</gray> <white><speed></white> <gray>TTL:</gray> <white><ttl></white>"
+      lore-2: "<gray>速度：</gray> <white><speed></white> <gray>TTL:</gray> <white><ttl></white>"
       lore-3: "<gray>右键可清除当前选点；不会改变调度核心行为</gray>"
       give:
         success: "<prefix> <dark_aqua>已获得限速设置棍</dark_aqua> <gray>(speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
@@ -252,7 +252,7 @@ command:
         temp-success: "<prefix> <yellow>已通过设置棍应用区间临时限速</yellow> <gray>(from=<white><from></white>, to=<white><to></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>, ttl=<white><ttl></white>)</gray>"
 
   template:
-    invalid-type: "<prefix> <red>未知模板类型:</red> <white><type></white>"
+    invalid-type: "<prefix> <red>未知模板类型：</red> <white><type></white>"
     invalid-name: "<prefix> <red>模板名称不能为空</red>"
     not-found: "<prefix> <red>未找到模板</red> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
     create:
@@ -265,7 +265,7 @@ command:
       book:
         name: "<dark_aqua>模板编辑器</dark_aqua> <gray>(<type>/<name>)</gray>"
         lore-1: "<gray>编辑模板内容并执行 /fta template define</gray>"
-        lore-2: "<gray>绑定:</gray> <white><company></white>/<white><name></white>"
+        lore-2: "<gray>绑定：</gray> <white><company></white>/<white><name></white>"
         empty-template:
           - "# FetaruteTCAddon HUD Template"
           - "# 每行一段文本或配置"
@@ -341,7 +341,7 @@ command:
 
   occupancy:
     not-ready: "<prefix> <red>占用管理器未就绪</red>"
-    invalid-kind: "<prefix> <red>未知资源类型:</red> <white><kind></white>"
+    invalid-kind: "<prefix> <red>未知资源类型：</red> <white><kind></white>"
     release:
       success: "<prefix> <dark_aqua>已释放列车占用</dark_aqua> <gray>(train=<white><train></white>, count=<white><count></white>)</gray>"
     release-resource:
@@ -381,21 +381,21 @@ command:
     help:
       header: "<prefix> <dark_aqua>调度占用命令</dark_aqua>"
       entry-dump: "<gray>/fta occupancy dump</gray> <white>-</white> <dark_aqua>查看占用快照</dark_aqua>"
-      hover-dump: "<gray>点击填充:</gray> <white>/fta occupancy dump </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      hover-dump: "<gray>点击填入：</gray> <white>/fta occupancy dump </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-queue: "<gray>/fta occupancy queue</gray> <white>-</white> <dark_aqua>查看排队快照</dark_aqua>"
-      hover-queue: "<gray>点击填充:</gray> <white>/fta occupancy queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      hover-queue: "<gray>点击填入：</gray> <white>/fta occupancy queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-release: "<gray>/fta occupancy release</gray> <white>-</white> <dark_aqua>按列车释放占用</dark_aqua>"
-      hover-release: "<gray>点击填充:</gray> <white>/fta occupancy release </white>\n<dark_aqua>按列车名称清理占用</dark_aqua>"
+      hover-release: "<gray>点击填入：</gray> <white>/fta occupancy release </white>\n<dark_aqua>按列车名称清理占用</dark_aqua>"
       entry-release-resource: "<gray>/fta occupancy release-resource</gray> <white>-</white> <dark_aqua>按资源释放占用</dark_aqua>"
-      hover-release-resource: "<gray>点击填充:</gray> <white>/fta occupancy release-resource </white>\n<dark_aqua>参数: EDGE/NODE/CONFLICT + key</dark_aqua>"
+      hover-release-resource: "<gray>点击填入：</gray> <white>/fta occupancy release-resource </white>\n<dark_aqua>参数： EDGE/NODE/CONFLICT + key</dark_aqua>"
       entry-stats: "<gray>/fta occupancy stats</gray> <white>-</white> <dark_aqua>查看自愈/异常统计</dark_aqua>"
-      hover-stats: "<gray>点击执行:</gray> <white>/fta occupancy stats</white>\n<dark_aqua>汇总占用/队列/出车异常等指标</dark_aqua>"
+      hover-stats: "<gray>点击执行：</gray> <white>/fta occupancy stats</white>\n<dark_aqua>汇总占用/队列/出车异常等指标</dark_aqua>"
       entry-heal: "<gray>/fta occupancy heal</gray> <white>-</white> <dark_aqua>手动触发自愈清理</dark_aqua>"
-      hover-heal: "<gray>点击执行:</gray> <white>/fta occupancy heal</white>\n<dark_aqua>清理孤儿占用/进度缓存并回显结果</dark_aqua>"
+      hover-heal: "<gray>点击执行：</gray> <white>/fta occupancy heal</white>\n<dark_aqua>清理孤儿占用/进度缓存并回显结果</dark_aqua>"
       entry-debug-edge: "<gray>/fta occupancy debug edge</gray> <white>-</white> <dark_aqua>调试区间占用</dark_aqua>"
-      hover-debug-edge: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数: \"nodeA\" \"nodeB\"</dark_aqua>"
+      hover-debug-edge: "<gray>点击填入：</gray> <white>/fta occupancy debug acquire edge </white>\n<dark_aqua>参数： \"nodeA\" \"nodeB\"</dark_aqua>"
       entry-debug-path: "<gray>/fta occupancy debug path</gray> <white>-</white> <dark_aqua>调试路径占用</dark_aqua>"
-      hover-debug-path: "<gray>点击填充:</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数: \"from\" \"to\"</dark_aqua>"
+      hover-debug-path: "<gray>点击填入：</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数： \"from\" \"to\"</dark_aqua>"
 
   spawn:
     not-ready: "<prefix> <red>发车管理器未就绪</red>"
@@ -407,21 +407,21 @@ command:
     help:
       header: "<prefix> <dark_aqua>发车计划命令</dark_aqua>"
       entry-plan: "<gray>/fta spawn plan</gray> <white>-</white> <dark_aqua>查看发车计划（可发车服务）</dark_aqua>"
-      hover-plan: "<gray>点击填充:</gray> <white>/fta spawn plan </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      hover-plan: "<gray>点击填入：</gray> <white>/fta spawn plan </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-diagnose: "<gray>/fta spawn diagnose</gray> <white>-</white> <dark_aqua>诊断发车配置与跳过原因</dark_aqua>"
-      hover-diagnose: "<gray>点击填充:</gray> <white>/fta spawn diagnose </white>\n<dark_aqua>显示 line/group/route 的 baseline、权重与跳过原因</dark_aqua>"
+      hover-diagnose: "<gray>点击填入：</gray> <white>/fta spawn diagnose </white>\n<dark_aqua>显示 line/group/route 的 baseline、权重与跳过原因</dark_aqua>"
       entry-debug: "<gray>/fta spawn debug</gray> <white>-</white> <dark_aqua>汇总运行时队列、pending 与重试原因</dark_aqua>"
-      hover-debug: "<gray>点击填充:</gray> <white>/fta spawn debug </white>\n<dark_aqua>用于排查已经出票但没有发车的原因</dark_aqua>"
+      hover-debug: "<gray>点击填入：</gray> <white>/fta spawn debug </white>\n<dark_aqua>用于排查已经出票但没有发车的原因</dark_aqua>"
       entry-queue: "<gray>/fta spawn queue</gray> <white>-</white> <dark_aqua>查看发车队列（待发票据）</dark_aqua>"
-      hover-queue: "<gray>点击填充:</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      hover-queue: "<gray>点击填入：</gray> <white>/fta spawn queue </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-pending: "<gray>/fta spawn pending</gray> <white>-</white> <dark_aqua>查看折返待发（含失败重试）</dark_aqua>"
-      hover-pending: "<gray>点击填充:</gray> <white>/fta spawn pending </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
+      hover-pending: "<gray>点击填入：</gray> <white>/fta spawn pending </white>\n<dark_aqua>可选 limit 参数</dark_aqua>"
       entry-consist: "<gray>/fta spawn consist</gray> <white>-</white> <dark_aqua>查看各运行图的车型份额</dark_aqua>"
-      hover-consist: "<gray>点击填充:</gray> <white>/fta spawn consist</white>\n<dark_aqua>绑定编组方案的运行图：各车型已发班次与目标份额（重启后从零计）</dark_aqua>"
+      hover-consist: "<gray>点击填入：</gray> <white>/fta spawn consist</white>\n<dark_aqua>绑定编组方案的运行图：各车型已发班次与目标份额（重启后从零计）</dark_aqua>"
       entry-reset: "<gray>/fta spawn reset</gray> <white>-</white> <dark_aqua>清空发车队列并重置计划</dark_aqua>"
-      hover-reset: "<gray>点击执行:</gray> <white>/fta spawn reset</white>\n<dark_aqua>清空 queue/pending 并重置计划</dark_aqua>"
+      hover-reset: "<gray>点击执行：</gray> <white>/fta spawn reset</white>\n<dark_aqua>清空 queue/pending 并重置计划</dark_aqua>"
       entry-export-csv: "<gray>/fta spawn export csv</gray> <white>-</white> <dark_aqua>预览计划 CSV</dark_aqua>"
-      hover-export-csv: "<gray>点击填充:</gray> <white>/fta spawn export csv </white>\n<dark_aqua>只在聊天中预览，不写文件、不改变队列</dark_aqua>"
+      hover-export-csv: "<gray>点击填入：</gray> <white>/fta spawn export csv </white>\n<dark_aqua>只在聊天中预览，不写文件、不改变队列</dark_aqua>"
     plan:
       header: "<prefix> <dark_aqua>发车计划</dark_aqua> <gray>(count=<white><count></white>, built=<white><built_at></white>)</gray>"
       empty: "<prefix> <gray>暂无可发车服务</gray>"
@@ -462,17 +462,17 @@ command:
     help:
       header: "<prefix> <dark_aqua>ETA 诊断命令</dark_aqua>"
       entry-train: "<gray>/fta eta train</gray> <white>-</white> <dark_aqua>查看列车 ETA</dark_aqua>"
-      hover-train: "<gray>点击填充:</gray> <white>/fta eta train </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;train&gt;</white>"
+      hover-train: "<gray>点击填入：</gray> <white>/fta eta train </white>\n<dark_aqua>参数：</dark_aqua> <white>&lt;train&gt;</white>"
       entry-train-station: "<gray>/fta eta train station</gray> <white>-</white> <dark_aqua>按站点估算 ETA</dark_aqua>"
-      hover-train-station: "<gray>点击填充:</gray> <white>/fta eta train station </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;train&gt; &lt;stationId&gt;</white>"
+      hover-train-station: "<gray>点击填入：</gray> <white>/fta eta train station </white>\n<dark_aqua>参数：</dark_aqua> <white>&lt;train&gt; &lt;stationId&gt;</white>"
       entry-train-platform: "<gray>/fta eta train platform</gray> <white>-</white> <dark_aqua>按站台节点估算 ETA</dark_aqua>"
-      hover-train-platform: "<gray>点击填充:</gray> <white>/fta eta train platform </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;train&gt; &lt;nodeId&gt;</white>"
+      hover-train-platform: "<gray>点击填入：</gray> <white>/fta eta train platform </white>\n<dark_aqua>参数：</dark_aqua> <white>&lt;train&gt; &lt;nodeId&gt;</white>"
       entry-ticket: "<gray>/fta eta ticket</gray> <white>-</white> <dark_aqua>查看票据 ETA</dark_aqua>"
-      hover-ticket: "<gray>点击填充:</gray> <white>/fta eta ticket </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;ticketId&gt;</white>"
+      hover-ticket: "<gray>点击填入：</gray> <white>/fta eta ticket </white>\n<dark_aqua>参数：</dark_aqua> <white>&lt;ticketId&gt;</white>"
       entry-board: "<gray>/fta eta board</gray> <white>-</white> <dark_aqua>查看站牌 ETA</dark_aqua>"
-      hover-board: "<gray>点击填充:</gray> <white>/fta eta board </white>\n<dark_aqua>参数:</dark_aqua> <white>&lt;operator&gt; &lt;stationCode&gt; [lineId] [sec]</white>"
+      hover-board: "<gray>点击填入：</gray> <white>/fta eta board </white>\n<dark_aqua>参数：</dark_aqua> <white>&lt;operator&gt; &lt;stationCode&gt; [lineId] [sec]</white>"
       entry-stats: "<gray>/fta eta stats</gray> <white>-</white> <dark_aqua>查看站牌查询统计</dark_aqua>"
-      hover-stats: "<gray>点击执行:</gray> <white>/fta eta stats</white>\n<dark_aqua>缓存命中与重算耗时</dark_aqua>\n<gray>清零:</gray> <white>/fta eta stats reset</white>"
+      hover-stats: "<gray>点击执行：</gray> <white>/fta eta stats</white>\n<dark_aqua>缓存命中与重算耗时</dark_aqua>\n<gray>清零：</gray> <white>/fta eta stats reset</white>"
     train:
       header: "<prefix> <dark_aqua>ETA 诊断</dark_aqua> <gray>(train=<white><train></white>, target=<white><target></white>)</gray>"
       summary: "<gray>-</gray> status=<white><status></white> arriving=<white><arriving></white> eta=<white><eta></white> at=<white><at></white> conf=<white><conf></white>"
@@ -512,46 +512,46 @@ command:
     help:
       header: "<prefix> <dark_aqua>调度图命令</dark_aqua>"
       entry-build: "<gray>/fta graph build</gray> <white>-</white> <dark_aqua>构建并持久化调度图</dark_aqua>"
-      hover-build: "<gray>点击填充:</gray> <white>/fta graph build </white>\n<dark_aqua>从脚下沿轨道扩张，自动加载区块，覆盖整个连通分量</dark_aqua>\n<gray>可选:</gray> <white>--maxChunks</white> <gray>区块上限</gray>、<white>--tcc</white> <gray>从 TCC 选中轨道开始</gray>、<white>--all</white> <gray>只扫已加载区块（结果为局部）</gray>"
+      hover-build: "<gray>点击填入：</gray> <white>/fta graph build </white>\n<dark_aqua>从脚下沿轨道扩张，自动加载区块，覆盖整个连通分量</dark_aqua>\n<gray>可选：</gray> <white>--maxChunks</white> <gray>区块上限</gray>、<white>--tcc</white> <gray>从 TCC 选中轨道开始</gray>、<white>--all</white> <gray>只扫已加载区块（结果为局部）</gray>"
       entry-refresh: "<gray>/fta graph refresh</gray> <white>-</white> <dark_aqua>按现有节点重新探索区间</dark_aqua>"
-      hover-refresh: "<gray>点击填充:</gray> <white>/fta graph refresh</white>\n<dark_aqua>节点牌子没变、轨道改了时使用</dark_aqua>\n<gray>结果的联锁按不完整发布，需要精确联锁时请执行 build</gray>"
+      hover-refresh: "<gray>点击填入：</gray> <white>/fta graph refresh</white>\n<dark_aqua>节点牌子没变、轨道改了时使用</dark_aqua>\n<gray>结果的联锁按不完整发布，需要精确联锁时请执行 build</gray>"
       entry-extend: "<gray>/fta graph extend</gray> <white>-</white> <dark_aqua>把新放的节点牌子增补进图</dark_aqua>"
-      hover-extend: "<gray>点击填充:</gray> <white>/fta graph extend</white>\n<dark_aqua>只往图里还没探索过的方向增补，不改已有区间</dark_aqua>\n<gray>新牌子落在已有区间中间时会拒绝，请改用 build</gray>"
+      hover-extend: "<gray>点击填入：</gray> <white>/fta graph extend</white>\n<dark_aqua>只往图里还没探索过的方向增补，不改已有区间</dark_aqua>\n<gray>新牌子落在已有区间中间时会拒绝，请改用 build</gray>"
       entry-continue: "<gray>/fta graph continue</gray> <white>-</white> <dark_aqua>续跑 here 扩张构建</dark_aqua>"
-      hover-continue: "<gray>点击填充:</gray> <white>/fta graph continue </white>\n<dark_aqua>继续 here 扩张构建</dark_aqua>"
+      hover-continue: "<gray>点击填入：</gray> <white>/fta graph continue </white>\n<dark_aqua>继续 here 扩张构建</dark_aqua>"
       entry-status: "<gray>/fta graph status</gray> <white>-</white> <dark_aqua>查看构建进度</dark_aqua>"
-      hover-status: "<gray>点击执行:</gray> <white>/fta graph status</white>\n<dark_aqua>查看构建进度</dark_aqua>"
+      hover-status: "<gray>点击执行：</gray> <white>/fta graph status</white>\n<dark_aqua>查看构建进度</dark_aqua>"
       entry-cancel: "<gray>/fta graph cancel</gray> <white>-</white> <dark_aqua>取消构建任务</dark_aqua>"
-      hover-cancel: "<gray>点击执行:</gray> <white>/fta graph cancel</white>\n<dark_aqua>取消构建任务</dark_aqua>"
+      hover-cancel: "<gray>点击执行：</gray> <white>/fta graph cancel</white>\n<dark_aqua>取消构建任务</dark_aqua>"
       entry-info: "<gray>/fta graph info</gray> <white>-</white> <dark_aqua>查看图摘要与 top edges</dark_aqua>"
-      hover-info: "<gray>点击执行:</gray> <white>/fta graph info</white>\n<dark_aqua>查看图摘要与 top edges</dark_aqua>"
+      hover-info: "<gray>点击执行：</gray> <white>/fta graph info</white>\n<dark_aqua>查看图摘要与 top edges</dark_aqua>"
       entry-delete: "<gray>/fta graph delete</gray> <white>-</white> <dark_aqua>删除整张调度图快照</dark_aqua>"
-      hover-delete: "<gray>点击填充:</gray> <white>/fta graph delete </white>\n<red>危险操作</red> <gray>会清空内存与 SQL 快照</gray>"
+      hover-delete: "<gray>点击填入：</gray> <white>/fta graph delete </white>\n<red>危险操作</red> <gray>会清空内存与 SQL 快照</gray>"
       entry-delete-here: "<gray>/fta graph delete here</gray> <white>-</white> <dark_aqua>删除附近连通分量</dark_aqua>"
-      hover-delete-here: "<gray>点击执行:</gray> <white>/fta graph delete here</white>\n<dark_aqua>删除附近连通分量</dark_aqua>"
+      hover-delete-here: "<gray>点击执行：</gray> <white>/fta graph delete here</white>\n<dark_aqua>删除附近连通分量</dark_aqua>"
       entry-sign-set: "<gray>/fta graph sign set</gray> <white>-</white> <dark_aqua>快速设置节点牌子</dark_aqua>"
-      hover-sign-set: "<gray>点击填充:</gray> <white>/fta graph sign set </white>\n<dark_aqua>支持:</dark_aqua> <white>waypoint/autostation/depot</white>\n<dark_aqua>对准牌子方块后执行</dark_aqua> <gray>(需要 nodeId 参数)</gray>"
+      hover-sign-set: "<gray>点击填入：</gray> <white>/fta graph sign set </white>\n<dark_aqua>支持：</dark_aqua> <white>waypoint/autostation/depot</white>\n<dark_aqua>对准牌子方块后执行</dark_aqua> <gray>（需要 nodeId 参数）</gray>"
       entry-edge-speed: "<gray>/fta graph edge speed</gray> <white>-</white> <dark_aqua>区间限速/临时限速</dark_aqua>"
-      hover-edge-speed: "<gray>点击填充:</gray> <white>/fta graph edge speed </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp/list</white>\n<dark_aqua>速度单位:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      hover-edge-speed: "<gray>点击填入：</gray> <white>/fta graph edge speed </white>\n<dark_aqua>子命令：</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp/list</white>\n<dark_aqua>速度单位：</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
       entry-edge-restrict: "<gray>/fta graph edge restrict</gray> <white>-</white> <dark_aqua>临时限速（restriction）</dark_aqua>"
-      hover-edge-restrict: "<gray>点击填充:</gray> <white>/fta graph edge restrict </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/path/list</white>\n<dark_aqua>说明:</dark_aqua> <gray>等价于</gray> <white>/fta graph edge speed temp</white> <gray>与</gray> <white>/fta graph edge speed path temp</white>\n<dark_aqua>速度单位:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      hover-edge-restrict: "<gray>点击填入：</gray> <white>/fta graph edge restrict </white>\n<dark_aqua>子命令：</dark_aqua> <white>set/clear/path/list</white>\n<dark_aqua>说明：</dark_aqua> <gray>等价于</gray> <white>/fta graph edge speed temp</white> <gray>与</gray> <white>/fta graph edge speed path temp</white>\n<dark_aqua>速度单位：</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
       entry-edge-block: "<gray>/fta graph edge block</gray> <white>-</white> <dark_aqua>区间封锁/解封</dark_aqua>"
-      hover-edge-block: "<gray>点击填充:</gray> <white>/fta graph edge block </white>\n<dark_aqua>子命令:</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp/list</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
+      hover-edge-block: "<gray>点击填入：</gray> <white>/fta graph edge block </white>\n<dark_aqua>子命令：</dark_aqua> <white>set/clear/temp/temp-clear/path/path temp/list</white>\n<dark_aqua>TTL:</dark_aqua> <white>90s</white>/<white>1m</white>/<white>1h30m</white>"
       entry-edge-overrides: "<gray>/fta graph edge overrides</gray> <white>-</white> <dark_aqua>overrides 管理（孤儿清理）</dark_aqua>"
-      hover-edge-overrides: "<gray>点击填充:</gray> <white>/fta graph edge overrides orphan </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/cleanup</white>\n<dark_aqua>说明:</dark_aqua> <gray>用于清理“库里有 override 但当前图不存在该边”的历史记录</gray>"
+      hover-edge-overrides: "<gray>点击填入：</gray> <white>/fta graph edge overrides orphan </white>\n<dark_aqua>子命令：</dark_aqua> <white>list/cleanup</white>\n<dark_aqua>说明：</dark_aqua> <gray>用于清理“库里有 override 但当前图不存在该边”的历史记录</gray>"
       entry-query: "<gray>/fta graph query</gray> <white>-</white> <dark_aqua>两点可达性/距离/ETA</dark_aqua>"
-      hover-query: "<gray>点击填充:</gray> <white>/fta graph query </white>\n<dark_aqua>输出 hops + distance + ETA(估算)</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>\n<gray>ETA:</gray> <white>按边限速(override/base)</white> <gray>缺失时回退</gray> <white>graph.default-speed-blocks-per-second</white>\n<gray>限速命令:</gray> <white>/fta graph edge speed ...</white>"
+      hover-query: "<gray>点击填入：</gray> <white>/fta graph query </white>\n<dark_aqua>输出 hops + distance + ETA（估算）</dark_aqua>\n<gray>玩家端：</gray> <white>nodeId 需用引号包裹</white> <gray>（例如 \\\"SURN:A:B:1:00\\\"）</gray>\n<gray>ETA:</gray> <white>按边限速(override/base)</white> <gray>缺失时回退</gray> <white>graph.default-speed-blocks-per-second</white>\n<gray>限速命令：</gray> <white>/fta graph edge speed ...</white>"
       entry-path: "<gray>/fta graph path</gray> <white>-</white> <dark_aqua>最短路径（分页）</dark_aqua>"
-      hover-path: "<gray>点击填充:</gray> <white>/fta graph path </white>\n<dark_aqua>支持 page 参数；节点坐标可点击 /tp</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
+      hover-path: "<gray>点击填入：</gray> <white>/fta graph path </white>\n<dark_aqua>支持 page 参数；节点坐标可点击 /tp</dark_aqua>\n<gray>玩家端：</gray> <white>nodeId 需用引号包裹</white> <gray>（例如 \\\"SURN:A:B:1:00\\\"）</gray>"
       entry-component: "<gray>/fta graph component list</gray> <white>-</white> <dark_aqua>连通分量统计</dark_aqua>"
-      hover-component: "<gray>点击填充:</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
+      hover-component: "<gray>点击填入：</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端：</gray> <white>nodeId 需用引号包裹</white> <gray>（例如 \\\"SURN:A:B:1:00\\\"）</gray>"
       entry-conflict: "<gray>/fta graph conflict</gray> <white>-</white> <dark_aqua>联合闭锁冲突组</dark_aqua>"
-      hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path/interlocking list/interlocking get</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
+      hover-conflict: "<gray>点击填入：</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令：</dark_aqua> <white>list/edge/path/interlocking list/interlocking get</white>\n<gray>可选：</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
       entry-portal: "<gray>/fta graph portal</gray> <white>-</white> <dark_aqua>跨世界传送门连接</dark_aqua>"
-      hover-portal: "<gray>点击填充:</gray> <white>/fta graph portal </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/scan/link/unlink</white>\n<dark_aqua>scan 按 MyWorlds 自动连接；link/unlink 手动连接或删除（节点 ID 可按 Tab 补全）</dark_aqua>"
+      hover-portal: "<gray>点击填入：</gray> <white>/fta graph portal </white>\n<dark_aqua>子命令：</dark_aqua> <white>list/scan/link/unlink</white>\n<dark_aqua>scan 按 MyWorlds 自动连接；link/unlink 手动连接或删除（节点 ID 可按 Tab 补全）</dark_aqua>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
-      started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
+      started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"
       running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
       no-nodes: "<prefix> <red>未在已加载区块中扫描到任何节点牌子</red> <gray>请加载线路区域后重试</gray>"
       no-start-node: "<prefix> <red>未找到附近的节点牌子或轨道</red> <gray>请站在 waypoint/autostation/depot 牌子旁，或站在轨道上重试</gray>"
@@ -566,7 +566,7 @@ command:
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
-      reroute-hint: "<prefix> <gray>建议执行 TrainCarts reroute 以同步寻路缓存:</gray> <click:run_command:'/train reroute'><hover:show_text:'<gray>点击执行:</gray> <white>/train reroute</white>'><dark_aqua>[/train reroute]</dark_aqua></hover></click>"
+      reroute-hint: "<prefix> <gray>建议执行 TrainCarts reroute 以同步寻路缓存：</gray> <click:run_command:'/train reroute'><hover:show_text:'<gray>点击执行：</gray> <white>/train reroute</white>'><dark_aqua>[/train reroute]</dark_aqua></hover></click>"
       missing-switcher:
         header: "<prefix> <red>发现 <white><count></white> 处道岔附近缺少 switcher 牌子</red> <gray>(world=<white><world></white>)</gray>"
         entry: "<gray>-</gray> <location>"
@@ -589,9 +589,9 @@ command:
       success: "<prefix> <dark_aqua>调度图已增补</dark_aqua> <gray>(world=<white><world></white>, 新节点 <white><added_nodes></white> 个、新区间 <white><added_edges></white> 条；共 nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
     continue:
       none: "<prefix> <gray>当前没有可续跑的图构建状态</gray> <dark_aqua>请先执行 /fta graph build</dark_aqua>"
-      started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
+      started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"
     query:
-      node-not-found: "<prefix> <red>未找到节点：</red><white><node></white> <gray>(请先 /fta graph build)</gray>"
+      node-not-found: "<prefix> <red>未找到节点：</red><white><node></white> <gray>（请先 /fta graph build）</gray>"
       unreachable: "<prefix> <red>两点不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       result: "<prefix> <dark_aqua>两点可达</dark_aqua> <gray>(from=<white><from></white>, to=<white><to></white>, hops=<white><hops></white>, len=<white><distance_blocks></white> blocks, speed=<white><speed></white>, eta=<white><eta></white>)</gray>"
 
@@ -627,8 +627,8 @@ command:
           active: "生效"
       speed:
         not-adjacent: "<prefix> <red>两节点不是直接相邻区间</red> <gray>(a=<white><a></white>, b=<white><b></white>)</gray>"
-        invalid-speed: "<prefix> <red>速度参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
-        invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持:</dark_aqua> <white>90s/1m/2h/1h30m</white>"
+        invalid-speed: "<prefix> <red>速度参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例：</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
+        invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持：</dark_aqua> <white>90s/1m/2h/1h30m</white>"
         storage-failed: "<prefix> <red>写入存储失败</red> <gray><error></gray>"
         set:
           success: "<prefix> <dark_aqua>已设置区间限速</dark_aqua> <gray>(<white><a></white> ↔ <white><b></white>, speed=<white><speed></white>)</gray>"
@@ -659,7 +659,7 @@ command:
           entry: "<gray>-</gray> <white><a></white> <gray>↔</gray> <white><b></white> <gray>(speed=<white><speed></white>, status=<white><status></white>, until=<white><until></white>, remaining=<white><remaining></white>, updatedAt=<white><updated_at></white>)</gray>"
       block:
         not-adjacent: "<prefix> <red>两节点不是直接相邻区间</red> <gray>(a=<white><a></white>, b=<white><b></white>)</gray>"
-        invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持:</dark_aqua> <white>90s/1m/2h/1h30m</white>"
+        invalid-ttl: "<prefix> <red>TTL 参数无效</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>支持：</dark_aqua> <white>90s/1m/2h/1h30m</white>"
         storage-failed: "<prefix> <red>写入存储失败</red> <gray><error></gray>"
         set:
           success: "<prefix> <red>已封锁区间</red> <gray>(<white><a></white> ↔ <white><b></white>)</gray>"
@@ -718,11 +718,11 @@ command:
         prev-disabled: "<gray>[上一页]</gray>"
         next: "<dark_aqua>[下一页]</dark_aqua>"
         next-disabled: "<gray>[下一页]</gray>"
-        hint: "<gray>(点击翻页)</gray>"
+        hint: "<gray>（点击翻页）</gray>"
     component:
       result: "<prefix> <dark_aqua>连通分量</dark_aqua> <gray>(seed=<white><seed></white>, key=<white><component_key></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, blocked=<white><blocked_edges></white>)</gray>"
       caution:
-        invalid-speed: "<prefix> <red>无效的 caution 速度</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例:</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
+        invalid-speed: "<prefix> <red>无效的 caution 速度</red> <gray>(raw=<white><raw></white>)</gray> <dark_aqua>示例：</dark_aqua> <white>80kmh</white>/<white>80km/h</white>/<white>0.4bpt</white>/<white>8bps</white>"
         get: "<prefix> <dark_aqua>分量 caution</dark_aqua> <gray>(seed=<white><seed></white>, key=<white><component_key></white>, default=<white><default_bps></white>, override=<white><override_bps></white>, effective=<white><effective_bps></white>)</gray>"
         set: "<prefix> <dark_aqua>已设置分量 caution</dark_aqua> <gray>(key=<white><component_key></white>, speed=<white><speed></white>, bps=<white><bps></white>)</gray>"
         clear: "<prefix> <dark_aqua>已清除分量 caution</dark_aqua> <gray>(key=<white><component_key></white>)</gray>"
@@ -747,7 +747,7 @@ command:
       lore-3: "<gray>提示：若点击轨道但无牌子，会提示“无牌子”</gray>"
       no-sign: "<prefix> <gray>无牌子</gray> <gray>(x=<white><x></white>, y=<white><y></white>, z=<white><z></white>)</gray>"
       select:
-        first: "<prefix> <dark_aqua>已选择节点 A：</dark_aqua><white><node></white> <gray>(请再点一次选择 B)</gray>"
+        first: "<prefix> <dark_aqua>已选择节点 A：</dark_aqua><white><node></white> <gray>（请再点一次选择 B）</gray>"
       node:
         header: "<prefix> <dark_aqua>节点信息</dark_aqua> <gray>(id=<white><node></white>, type=<white><type></white>, at=<white><x></white> <white><y></white> <white><z></white>, edges=<white><edges></white>, component=<white><component></white>)</gray>"
     status:
@@ -779,44 +779,44 @@ command:
   company:
     create:
       success: "<prefix> <dark_aqua>公司已创建：</dark_aqua><white><code></white>"
-      exists: "<prefix> <red>公司 code 已存在：</red><white><code></white>"
+      exists: "<prefix> <red>公司代码已存在：</red><white><code></white>"
     list:
       header: "<prefix> <dark_aqua>你的公司列表</dark_aqua>"
       empty: "<gray>（暂无加入任何公司）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>[<roles>]</gray>"
-      hover-entry: "<gray>公司:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>状态:</dark_aqua> <white><status></white>\n<dark_aqua>角色:</dark_aqua> <white><roles></white>"
+      hover-entry: "<gray>公司：</gray> <white><code></white>\n<dark_aqua>名称：</dark_aqua> <white><name></white>\n<dark_aqua>状态：</dark_aqua> <white><status></white>\n<dark_aqua>角色：</dark_aqua> <white><roles></white>"
     info:
       header: "<prefix> <dark_aqua>公司</dark_aqua> <white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
       not-found: "<prefix> <red>未找到公司：</red><white><company></white>"
-      status: "<gray>状态:</gray> <dark_aqua><status></dark_aqua>"
-      owner: "<gray>Owner:</gray> <dark_aqua><owner></dark_aqua>"
-      members: "<gray>成员:</gray> <dark_aqua><count></dark_aqua>"
-      operators: "<gray>运营商:</gray> <dark_aqua><count></dark_aqua>"
+      status: "<gray>状态：</gray> <dark_aqua><status></dark_aqua>"
+      owner: "<gray>所有者：</gray> <dark_aqua><owner></dark_aqua>"
+      members: "<gray>成员：</gray> <dark_aqua><count></dark_aqua>"
+      operators: "<gray>运营商：</gray> <dark_aqua><count></dark_aqua>"
     rename:
       success: "<prefix> <dark_aqua>公司名称已更新：</dark_aqua><white><code></white>"
     transfer:
-      success: "<prefix> <dark_aqua>公司 Owner 已转移：</dark_aqua><white><code></white> <gray>→</gray> <dark_aqua><player></dark_aqua>"
-      noop: "<prefix> <gray>Owner 未变化：</gray><white><code></white> <gray>→</gray> <dark_aqua><player></dark_aqua>"
+      success: "<prefix> <dark_aqua>公司 所有者 已转移：</dark_aqua><white><code></white> <gray>→</gray> <dark_aqua><player></dark_aqua>"
+      noop: "<prefix> <gray>所有者 未变化：</gray><white><code></white> <gray>→</gray> <dark_aqua><player></dark_aqua>"
     delete:
       success: "<prefix> <dark_aqua>公司已标记为已删除：</dark_aqua><white><code></white>"
     admin:
       list:
         header: "<prefix> <dark_aqua>所有公司</dark_aqua>"
         entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<status>)</gray>"
-        hover-entry: "<gray>公司:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>状态:</dark_aqua> <white><status></white>"
+        hover-entry: "<gray>公司：</gray> <white><code></white>\n<dark_aqua>名称：</dark_aqua> <white><name></white>\n<dark_aqua>状态：</dark_aqua> <white><status></white>"
       restore:
         success: "<prefix> <dark_aqua>公司已恢复：</dark_aqua><white><code></white>"
         not-deleted: "<prefix> <red>公司不在 DELETED 状态：</red><white><code></white> <gray>(<status>)</gray>"
       purge:
         success: "<prefix> <red>公司已永久删除：</red><white><code></white>"
       takeover:
-        success: "<prefix> <dark_aqua>已接管公司 Owner：</dark_aqua><white><code></white>"
+        success: "<prefix> <dark_aqua>已接管公司 所有者：</dark_aqua><white><code></white>"
     member:
       list:
         header: "<prefix> <dark_aqua>公司成员</dark_aqua> <white><code></white>"
         empty: "<gray>（暂无成员）</gray>"
         entry: "<dark_aqua><player></dark_aqua> <gray>[<roles>]</gray>"
-        hover-entry: "<gray>成员:</gray> <white><player></white>\n<dark_aqua>角色:</dark_aqua> <white><roles></white>"
+        hover-entry: "<gray>成员：</gray> <white><player></white>\n<dark_aqua>角色：</dark_aqua> <white><roles></white>"
       invite:
         sent: "<prefix> <dark_aqua>已发送邀请：</dark_aqua><dark_aqua><player></dark_aqua> <gray>←</gray> <white><code></white> <gray>[<roles>]</gray>"
         already-member: "<prefix> <red>玩家已是成员：</red><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white>"
@@ -837,7 +837,7 @@ command:
         success: "<prefix> <dark_aqua>成员角色已更新：</dark_aqua><dark_aqua><player></dark_aqua> <gray>→</gray> <white><code></white> <gray>[<roles>]</gray>"
       remove:
         success: "<prefix> <dark_aqua>成员已移除：</dark_aqua><dark_aqua><player></dark_aqua> <gray>←</gray> <white><code></white>"
-        owner: "<prefix> <red>不能移除 Owner；请先 transfer 或使用管理员权限</red>"
+        owner: "<prefix> <red>不能移除 所有者；请先 transfer 或使用管理员权限</red>"
       role-invalid: "<prefix> <red>无效角色：</red><white><role></white>"
       roles-empty: "<prefix> <red>角色列表不能为空</red>"
       not-found: "<prefix> <red>未找到成员：</red><dark_aqua><player></dark_aqua>"
@@ -845,12 +845,12 @@ command:
   operator:
     create:
       success: "<prefix> <dark_aqua>运营商已创建：</dark_aqua><white><company></white><gray>/</gray><white><code></white>"
-      exists: "<prefix> <red>运营商 code 已存在：</red><white><code></white>"
+      exists: "<prefix> <red>运营商代码已存在：</red><white><code></white>"
     list:
       header: "<prefix> <dark_aqua>运营商列表</dark_aqua> <white><company></white>"
       empty: "<gray>（暂无运营商）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(priority=<priority>)</gray>"
-      hover-entry: "<gray>运营商:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>主题:</dark_aqua> <white><color></white>\n<dark_aqua>优先级:</dark_aqua> <white><priority></white>\n<dark_aqua>描述:</dark_aqua> <white><desc></white>"
+      hover-entry: "<gray>运营商：</gray> <white><code></white>\n<dark_aqua>名称：</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称：</dark_aqua> <white><secondary></white>\n<dark_aqua>主题：</dark_aqua> <white><color></white>\n<dark_aqua>优先级：</dark_aqua> <white><priority></white>\n<dark_aqua>描述：</dark_aqua> <white><desc></white>"
     not-found: "<prefix> <red>未找到运营商：</red><white><operator></white>"
     set:
       success: "<prefix> <dark_aqua>运营商已更新：</dark_aqua><white><code></white>"
@@ -861,20 +861,20 @@ command:
   line:
     create:
       success: "<prefix> <dark_aqua>线路已创建：</dark_aqua><white><operator></white><gray>/</gray><white><code></white>"
-      exists: "<prefix> <red>线路 code 已存在：</red><white><code></white>"
+      exists: "<prefix> <red>线路代码已存在：</red><white><code></white>"
     list:
       header: "<prefix> <dark_aqua>线路列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white>"
       empty: "<gray>（暂无线路）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<status>)</gray>"
-      hover-entry: "<gray>线路:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>类型:</dark_aqua> <white><service></white>\n<dark_aqua>颜色:</dark_aqua> <white><color></white>\n<dark_aqua>状态:</dark_aqua> <white><status></white>\n<dark_aqua>发车基准(秒):</dark_aqua> <white><freq_baseline></white>"
+      hover-entry: "<gray>线路：</gray> <white><code></white>\n<dark_aqua>名称：</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称：</dark_aqua> <white><secondary></white>\n<dark_aqua>类型：</dark_aqua> <white><service></white>\n<dark_aqua>颜色：</dark_aqua> <white><color></white>\n<dark_aqua>状态：</dark_aqua> <white><status></white>\n<dark_aqua>发车基准（秒）:</dark_aqua> <white><freq_baseline></white>"
     info:
       header: "<prefix> <dark_aqua>线路</dark_aqua> <white><operator></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
-      service: "<gray>类型:</gray> <dark_aqua><service></dark_aqua>"
-      status: "<gray>状态:</gray> <dark_aqua><status></dark_aqua>"
-      color: "<gray>颜色:</gray> <dark_aqua><color></dark_aqua>"
-      spawn: "<gray>发车基准(秒):</gray> <dark_aqua><freq_baseline></dark_aqua>"
-      spawn-max: "<gray>最大车数:</gray> <dark_aqua><max_trains></dark_aqua>"
-      spawn-depots: "<gray>发车 Depot:</gray> <dark_aqua><depots></dark_aqua>"
+      service: "<gray>类型：</gray> <dark_aqua><service></dark_aqua>"
+      status: "<gray>状态：</gray> <dark_aqua><status></dark_aqua>"
+      color: "<gray>颜色：</gray> <dark_aqua><color></dark_aqua>"
+      spawn: "<gray>发车基线（秒）：</gray> <dark_aqua><freq_baseline></dark_aqua>"
+      spawn-max: "<gray>最大车数：</gray> <dark_aqua><max_trains></dark_aqua>"
+      spawn-depots: "<gray>出库车库：</gray> <dark_aqua><depots></dark_aqua>"
     not-found: "<prefix> <red>未找到线路：</red><white><line></white>"
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
@@ -884,17 +884,17 @@ command:
       success: "<prefix> <dark_aqua>线路已删除：</dark_aqua><white><code></white>"
     depot:
       list:
-        header: "<prefix> <dark_aqua>线路 Depot</dark_aqua> <gray>(line=<white><line></white>, count=<white><count></white>)</gray>"
-        empty: "<prefix> <gray>该线路尚未配置 Depot</gray>"
+        header: "<prefix> <dark_aqua>线路车库</dark_aqua> <gray>(line=<white><line></white>, count=<white><count></white>)</gray>"
+        empty: "<prefix> <gray>该线路尚未配置车库</gray>"
         entry: "<gray>-</gray> <white><node></white> <gray>(weight=<white><weight></white>)</gray>"
       add:
-        success: "<prefix> <dark_aqua>已添加 Depot</dark_aqua> <gray>(line=<white><line></white>, node=<white><node></white>)</gray>"
+        success: "<prefix> <dark_aqua>已添加车库</dark_aqua> <gray>(line=<white><line></white>, node=<white><node></white>)</gray>"
       remove:
-        success: "<prefix> <dark_aqua>已移除 Depot</dark_aqua> <gray>(line=<white><line></white>, node=<white><node></white>)</gray>"
-        not-found: "<prefix> <red>该线路未配置 Depot：</red><white><node></white>"
-      invalid: "<prefix> <red>无效 Depot 节点：</red><white><node></white>"
+        success: "<prefix> <dark_aqua>已移除车库</dark_aqua> <gray>(line=<white><line></white>, node=<white><node></white>)</gray>"
+        not-found: "<prefix> <red>该线路未配置车库：</red><white><node></white>"
+      invalid: "<prefix> <red>无效的车库节点：</red><white><node></white>"
     hud:
-      invalid-type: "<prefix> <red>无效模板类型:</red> <white><type></white>"
+      invalid-type: "<prefix> <red>无效模板类型：</red> <white><type></white>"
       template-not-found: "<prefix> <red>未找到模板</red> <gray>(type=<white><type></white>, name=<white><name></white>)</gray>"
       set:
         success: "<prefix> <dark_aqua>已绑定线路模板</dark_aqua> <gray>(line=<white><line></white>, type=<white><type></white>, name=<white><name></white>)</gray>"
@@ -912,26 +912,26 @@ command:
       invalid: "<prefix> <red>走行线路引用格式不对，应为</red> <white><company>/<operator>/<line>/<route></white><gray>（收到 <white><value></white>）</gray>"
     create:
       success: "<prefix> <dark_aqua>运行图已创建：</dark_aqua><white><line></white><gray>/</gray><white><code></white>"
-      exists: "<prefix> <red>运行图 code 已存在：</red><white><code></white>"
+      exists: "<prefix> <red>运行图代码已存在：</red><white><code></white>"
     list:
       header: "<prefix> <dark_aqua>运行图列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white>"
       empty: "<gray>（暂无运行图）</gray>"
       entry: "<white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua> <gray>(<pattern>/<operation>)</gray>"
-      hover-entry: "<gray>运行图:</gray> <white><code></white>\n<dark_aqua>名称:</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称:</dark_aqua> <white><secondary></white>\n<dark_aqua>模式:</dark_aqua> <white><pattern></white>\n<dark_aqua>运营属性:</dark_aqua> <white><operation></white>\n<dark_aqua>运行时间(秒):</dark_aqua> <white><runtime></white>\n<dark_aqua>距离(米):</dark_aqua> <white><distance></white>\n<dark_aqua>交路组:</dark_aqua> <white><spawn_group></white>\n<dark_aqua>交路基线(秒):</dark_aqua> <white><spawn_group_baseline></white>\n<gray><click_hint></gray>"
+      hover-entry: "<gray>运行图：</gray> <white><code></white>\n<dark_aqua>名称：</dark_aqua> <white><name></white>\n<dark_aqua>第二语言名称：</dark_aqua> <white><secondary></white>\n<dark_aqua>模式：</dark_aqua> <white><pattern></white>\n<dark_aqua>运营属性：</dark_aqua> <white><operation></white>\n<dark_aqua>运行时间（秒）:</dark_aqua> <white><runtime></white>\n<dark_aqua>距离（米）:</dark_aqua> <white><distance></white>\n<dark_aqua>交路组：</dark_aqua> <white><spawn_group></white>\n<dark_aqua>交路基线（秒）:</dark_aqua> <white><spawn_group_baseline></white>\n<gray><click_hint></gray>"
       click-hint: "点击查看详情"
     info:
       header: "<prefix> <dark_aqua>运行图</dark_aqua> <white><line></white><gray>/</gray><white><code></white> <gray>-</gray> <dark_aqua><name></dark_aqua>"
-      pattern: "<gray>模式:</gray> <dark_aqua><pattern></dark_aqua>"
-      operation: "<gray>运营属性:</gray> <dark_aqua><operation></dark_aqua>"
-      runtime: "<gray>运行时间(秒):</gray> <dark_aqua><runtime></dark_aqua>"
-      distance: "<gray>距离(米):</gray> <dark_aqua><distance></dark_aqua>"
-      spawn-pattern: "<gray>车型/编组:</gray> <dark_aqua><pattern></dark_aqua>"
-      consist-plan: "<gray>编组方案:</gray> <dark_aqua><plan></dark_aqua>"
-      spawn-group: "<gray>交路组:</gray> <dark_aqua><group></dark_aqua>"
-      spawn-group-baseline: "<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"
-      via: "<gray>经由:</gray> <dark_aqua><via></dark_aqua>"
+      pattern: "<gray>停站模式：</gray> <dark_aqua><pattern></dark_aqua>"
+      operation: "<gray>运营属性：</gray> <dark_aqua><operation></dark_aqua>"
+      runtime: "<gray>运行时间（秒）:</gray> <dark_aqua><runtime></dark_aqua>"
+      distance: "<gray>距离（米）:</gray> <dark_aqua><distance></dark_aqua>"
+      spawn-pattern: "<gray>车型/编组：</gray> <dark_aqua><pattern></dark_aqua>"
+      consist-plan: "<gray>编组方案：</gray> <dark_aqua><plan></dark_aqua>"
+      spawn-group: "<gray>交路组：</gray> <dark_aqua><group></dark_aqua>"
+      spawn-group-baseline: "<gray>发车基线（秒）：</gray> <dark_aqua><seconds></dark_aqua>"
+      via: "<gray>经由：</gray> <dark_aqua><via></dark_aqua>"
       via-auto: "未配置（站台屏按换乘站、大站与直通站推断）"
-      stops: "<gray>停靠点:</gray> <dark_aqua><count></dark_aqua>"
+      stops: "<gray>停靠点：</gray> <dark_aqua><count></dark_aqua>"
     via:
       not-on-route: "<prefix> <red>经由站必须是本运行图停车的车站：</red><white><codes></white> <gray>（可选：<white><stations></white>）</gray>"
     group:
@@ -939,12 +939,12 @@ command:
         header: "<prefix> <dark_aqua>交路组列表</dark_aqua> <white><company></white><gray>/</gray><white><operator></white><gray>/</gray><white><line></white> <gray>(count=<white><count></white>)</gray>"
         empty: "<gray>（当前线路尚未创建交路组）</gray>"
         entry: "<white><group></white> <gray>-</gray> <dark_aqua>baseline=<baseline>s</dark_aqua> <gray>/</gray> <dark_aqua>maxTrips=<max_trips></dark_aqua>"
-        hover-entry: "<gray>交路组:</gray> <white><group></white>\n<dark_aqua>基线(秒):</dark_aqua> <white><baseline></white>\n<dark_aqua>最大运营圈数:</dark_aqua> <white><max_trips></white>\n<gray><click_hint></gray>"
+        hover-entry: "<gray>交路组：</gray> <white><group></white>\n<dark_aqua>基线（秒）:</dark_aqua> <white><baseline></white>\n<dark_aqua>最大运营圈数：</dark_aqua> <white><max_trips></white>\n<gray><click_hint></gray>"
         click-hint: "点击查看组详情"
       info:
         header: "<prefix> <dark_aqua>交路组</dark_aqua> <white><line></white><gray>/</gray><white><group></white> <gray>(baseline=<white><baseline></white>, maxTrips=<white><max_trips></white>, routes=<white><routes></white>)</gray>"
-        baseline: "<gray>基线(秒):</gray> <dark_aqua><baseline></dark_aqua>"
-        max-trips: "<gray>最大运营圈数:</gray> <dark_aqua><max_trips></dark_aqua>"
+        baseline: "<gray>基线（秒）:</gray> <dark_aqua><baseline></dark_aqua>"
+        max-trips: "<gray>最大运营圈数：</gray> <dark_aqua><max_trips></dark_aqua>"
       create:
         success: "<prefix> <dark_aqua>已创建交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>)</gray>"
         updated: "<prefix> <dark_aqua>已更新交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>)</gray>"
@@ -963,7 +963,7 @@ command:
         success: "<prefix> <dark_aqua>已删除交路组：</dark_aqua><white><group></white> <gray>(line=<white><line></white>, clearedRoutes=<white><routes></white>)</gray>"
       not-found: "<prefix> <red>未找到交路组：</red><white><group></white>"
       invalid: "<prefix> <red>交路组名称不能为空</red>"
-      baseline-requires-group: "<prefix> <red>设置交路基线前需要先绑定交路组</red> <gray>(使用 --spawn-group)</gray>"
+      baseline-requires-group: "<prefix> <red>设置交路基线前需要先绑定交路组</red> <gray>（使用 --spawn-group）</gray>"
     not-found: "<prefix> <red>未找到运行图：</red><white><route></white>"
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
@@ -978,8 +978,8 @@ command:
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
-      success: "<prefix> <dark_aqua>停靠表已写入：</dark_aqua><white><code></white> <gray>(<count> stops)</gray>"
-      empty: "<prefix> <red>书中没有可用定义</red> <gray>请至少写入一行站点 code 或 nodeId</gray>"
+      success: "<prefix> <dark_aqua>停靠表已写入：</dark_aqua><white><code></white> <gray>（共 <count> 个停靠点）</gray>"
+      empty: "<prefix> <red>书中没有可用定义</red> <gray>请至少写入一行站码或节点 ID</gray>"
       book:
         missing: "<prefix> <red>请手持书与笔或成书</red>"
         invalid: "<prefix> <red>物品不是书与笔/成书</red>"
@@ -998,19 +998,19 @@ command:
       edge-unreachable: "<prefix> <red>停靠点之间不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       path-cross-world: "<prefix> <red>停靠点跨世界/跨图，未处于同一调度图内</red>"
       dynamic-no-valid-tracks: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点所有轨道均不存在</red> <gray>(<white><spec></white> <white><range></white>)</gray>"
-      dynamic-partial-tracks: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失: <white><missing></white>, 有效: <white><valid></white>)</gray>"
+      dynamic-partial-tracks: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失： <white><missing></white>, 有效： <white><valid></white>)</gray>"
       debug:
         start-line: "起步线路"
         header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
         page: "<gray>第 <white><page></white>/<white><pages></white> 页</gray>"
         entry: "<white>#<seq></white> <gray><pass></gray> <dark_aqua><target></dark_aqua><dwell_suffix>"
-        hover: "<gray>序号:</gray> <white><seq></white>\n<gray>类型:</gray> <white><pass></white>\n<gray>基准停车(秒):</gray> <white><dwell></white>\n<gray>站点:</gray> <white><station></white>\n<gray>节点:</gray> <white><node></white>\n<gray>调试:</gray> <white><tp></white>"
+        hover: "<gray>序号：</gray> <white><seq></white>\n<gray>类型：</gray> <white><pass></white>\n<gray>基准停车（秒）:</gray> <white><dwell></white>\n<gray>站点：</gray> <white><station></white>\n<gray>节点：</gray> <white><node></white>\n<gray>调试：</gray> <white><tp></white>"
         nav:
           prev: "<dark_aqua>[上一页]</dark_aqua>"
           prev-disabled: "<gray>[上一页]</gray>"
           next: "<dark_aqua>[下一页]</dark_aqua>"
           next-disabled: "<gray>[下一页]</gray>"
-          hint: "<gray>(点击翻页)</gray>"
+          hint: "<gray>（点击翻页）</gray>"
     debug:
       empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
 
@@ -1020,10 +1020,10 @@ command:
       summary: "<prefix> <red>发现问题</red> <gray>(routes=<routes>, issues=<issues>)</gray>"
       entry: "<prefix> <gray>[<route>]</gray> <error>"
       more: "<prefix> <gray>已省略 <white><count></white> 条问题</gray>"
-      spawn-group-missing: "<prefix> <red>route 绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"
+      spawn-group-missing: "<prefix> <red>运行图绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"
       spawn-baseline-missing: "<prefix> <red>交路组与线路都缺少发车基线</red> <gray>(group=<white><group></white>)</gray>"
-      spawn-weight-missing: "<prefix> <red>同一交路组存在多条 OPERATION route，但本 route 未配置 spawn_weight</red> <gray>(group=<white><group></white>)</gray>"
-      create-missing-cret: "<prefix> <red>CREATE route 首个停靠点必须配置 CRET</red>"
+      spawn-weight-missing: "<prefix> <red>同一交路组有多条运营运行图，但本运行图未设置出车权重（spawn_weight）</red> <gray>(group=<white><group></white>)</gray>"
+      create-missing-cret: "<prefix> <red>出库运行图的首个停靠点必须写 CRET</red>"
 
     editor:
       append:
@@ -1031,7 +1031,7 @@ command:
         no-sign: "<prefix> <gray>该位置附近未找到可解析的节点牌子</gray> <gray>(<x> <y> <z>)</gray>"
       give:
         success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>(<line>/<route>)</gray>"
-        empty-success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>(空模板)</gray>"
+        empty-success: "<prefix> <dark_aqua>已发放运行图编辑书</dark_aqua> <gray>（空模板）</gray>"
         dropped: "<prefix> <red>背包已满，编辑书已掉落在脚下</red>"
       edit:
         success: "<prefix> <dark_aqua>已将成书转换为可编辑的书与笔</dark_aqua>"
@@ -1039,8 +1039,8 @@ command:
         not-written: "<prefix> <red>当前不是成书</red> <gray>（书与笔本来就可编辑）</gray>"
       book:
         name: "<dark_aqua>运行图编辑器</dark_aqua> <gray>(<line>/<route>)</gray>"
-        name-empty: "<dark_aqua>运行图编辑器</dark_aqua> <gray>(空模板)</gray>"
-        lore-1: "<gray>每行一个 stop 或 action；编辑后用</gray>"
+        name-empty: "<dark_aqua>运行图编辑器</dark_aqua> <gray>（空模板）</gray>"
+        lore-1: "<gray>每行一个停靠点或动作；编辑后用</gray>"
         lore-2: "<white>/fta route define <company> <operator> <line> <route></white>"
         empty-template:
           - "# FetaruteTCAddon Route Editor"
@@ -1067,7 +1067,7 @@ command:
       archived:
         success: "<prefix> <dark_aqua>已将编辑书归档为成书</dark_aqua>"
         lore-1: "<gray>运行图已写入数据库，可用于存档</gray>"
-        lore-2: "<gray>写入时间:</gray> <white><when></white>"
+        lore-2: "<gray>写入时间：</gray> <white><when></white>"
     path:
       cache-unavailable: "<prefix> <red>RouteDefinition 缓存未加载</red>"
       no-definition: "<prefix> <red>未找到运行图定义：</red><white><route></white>"
@@ -1078,8 +1078,8 @@ command:
       direct: "<gray>→</gray> <white><from></white> <dark_aqua>━━━</dark_aqua> <white><to></white> <gray>(直连 <len> 格)</gray>"
       detour-header: "<yellow>⚠</yellow> <white><from></white> <dark_aqua>···</dark_aqua> <white><to></white> <yellow>(绕行 <len> 格, <hops> 跳)</yellow>"
       detour-step: "  <gray>└→</gray> <white><node></white>"
-      unreachable: "<red>✗</red> <white><from></white> <dark_aqua>───</dark_aqua> <white><to></white> <red>(不可达)</red>"
-      summary: "<prefix> <dark_aqua>总计:</dark_aqua> <white><total_blocks></white> <gray>格</gray> | <gray>原节点:</gray> <white><original_count></white> <gray>扩展后:</gray> <white><expanded_count></white> | <gray>绕行:</gray> <white><has_detour></white>"
+      unreachable: "<red>✗</red> <white><from></white> <dark_aqua>───</dark_aqua> <white><to></white> <red>（不可达）</red>"
+      summary: "<prefix> <dark_aqua>总计：</dark_aqua> <white><total_blocks></white> <gray>格</gray> | <gray>原节点：</gray> <white><original_count></white> <gray>扩展后：</gray> <white><expanded_count></white> | <gray>绕行：</gray> <white><has_detour></white>"
 
   station:
     not-found: "<prefix> <red>未找到站点：</red><white><operator></white><gray>/</gray><white><station></white>"
@@ -1117,7 +1117,7 @@ command:
         success: "<prefix> <dark_aqua>车站</dark_aqua> <white><station></white><gray>（<name>）</gray><dark_aqua>已加入车站组</dark_aqua> <white><group></white><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
         updated: "<prefix> <dark_aqua>车站组</dark_aqua> <white><group></white> <dark_aqua>的成员</dark_aqua> <white><station></white> <dark_aqua>已更新</dark_aqua><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
         in-other-group: "<prefix> <red>车站 <white><station></white> 已隶属于车站组 <white><other></white>。每个车站仅可隶属于一个车站组，请先将其从原车站组中移除</red>"
-        cross-company-denied: "<prefix> <red>车站 <white><station></white> 隶属于公司 <white><company></white>，当前操作者不具备该公司的管理权限。</red><gray>跨公司添加成员须同时具备双方公司的管理权限，请联系对方公司管理员办理（邀请与确认流程暂未开放）</gray>"
+        cross-company-denied: "<prefix> <red>车站 <white><station></white> 隶属于公司 <white><company></white>，你没有该公司的管理权限。</red><gray>跨公司添加成员须同时具备双方公司的管理权限，请联系对方公司管理员办理（邀请与确认流程暂未开放）</gray>"
         invalid-station: "<prefix> <red>车站 <white><station></white> 未关联有效的运营商，无法加入车站组</red>"
         invalid-type: "<prefix> <red>换乘方式无效：</red><white><type></white><gray>（可选值：SAME_PLATFORM、IN_STATION、OUT_OF_STATION）</gray>"
       remove:
@@ -1159,7 +1159,7 @@ command:
       entry: "<gray>-</gray> <white><id></white> <gray><layout>（<size>）· <station> · <mode> · <world> <x> <y> <z></gray>"
       empty: "<prefix> <gray>暂无站台屏</gray>"
       unbound: "未绑定"
-      operator-only: "<operator>（<code>，不绑车站）"
+      operator-only: "<operator>（<code>，未绑定车站）"
     set:
       saved: "<prefix> <dark_aqua>已更新站台屏 <white><id></white></dark_aqua>"
       failed: "<prefix> <red>保存失败，请查看控制台日志</red>"
@@ -1182,7 +1182,7 @@ command:
         new: "<gray>/fta pids bulletin new <white><公司> <运营商></white></gray> <white>-</white> <dark_aqua>打开对话框发布公告</dark_aqua>"
         list: "<gray>/fta pids bulletin list <white>[页]</white></gray> <white>-</white> <dark_aqua>可管理的公告</dark_aqua>"
         edit: "<gray>/fta pids bulletin info|edit|remove <white><公告></white></gray> <white>-</white> <dark_aqua>按编号查看、修改或撤下</dark_aqua>"
-      no-permission: "<prefix> <red>当前操作者不具备该公司的公告管理权限</red> <gray>需要 fetarute.pids.manage，或为该公司的所有者、经理、职员</gray>"
+      no-permission: "<prefix> <red>你没有该公司的公告管理权限</red> <gray>需要 fetarute.pids.manage，或为该公司的所有者、经理、职员</gray>"
       unknown-operator: "<prefix> <red>未找到运营商</red> <gray>(operator=<white><operator></white>，公司 <white><company></white>)</gray>"
       not-found: "<prefix> <red>未找到公告</red> <gray>(bulletin=<white><bulletin></white>)</gray>"
       ambiguous: "<prefix> <red>编号前缀对应多条公告</red> <gray>(bulletin=<white><bulletin></white>，共 <white><count></white> 条)，请多写几位</gray>"
@@ -1222,7 +1222,7 @@ command:
         done: "<prefix> <dark_aqua>已撤下公告 <white><id></white></dark_aqua> <gray>· <title></gray>"
   depot:
     spawn:
-      coordinated-only: "<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"
+      coordinated-only: "<prefix> <red>手动出车已停用：出车由调度统一管理</red> <gray>请通过发车计划或发车队列出车</gray>"
       not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"
       consist-not-in-plan: "<prefix> <yellow>编组</yellow> <white><pattern></white> <yellow>不在运行图绑定的编组方案</yellow> <white><plan></white> <yellow>中：照常出车，但折返复用不会让它接这条运行图</yellow>"
       not-depot: "<prefix> <red>节点不是车库</red> <gray>(node=<white><node></white>)</gray>"
@@ -1236,7 +1236,7 @@ command:
       route-mismatch: "<prefix> <red>首个 stop 与车库不匹配</red> <gray>(route=<white><route></white>, node=<white><node></white>)</gray>"
       success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
     schedule:
-      header: "<prefix> <dark_aqua>Depot 发车检查</dark_aqua> <gray>(node=<white><node></white>, trips=<white><trips></white>, services=<white><services></white>, queue=<white><queue></white>, pending=<white><pending></white>)</gray>"
+      header: "<prefix> <dark_aqua>车库出库检查</dark_aqua> <gray>(node=<white><node></white>, trips=<white><trips></white>, services=<white><services></white>, queue=<white><queue></white>, pending=<white><pending></white>)</gray>"
       settings: "<gray>-</gray> spawn.enabled=<white><enabled></white> tick=<white><tick></white> maxSpawn=<white><max_spawn></white> maxGenerate=<white><max_generate></white>"
       empty-trips: "<gray>-</gray> <yellow>未来 1 小时没有匹配该 depot 的计划车次</yellow>"
       empty-services: "<gray>-</gray> <yellow>当前 SpawnPlan 没有匹配该 depot 的服务</yellow>"
@@ -1256,7 +1256,7 @@ command:
       entry-attachment: "  <gray>•</gray> <white>/fta train attachment set|unset driver_seat</white> <gray>- 把所坐的座位标为驾驶座或取消标记</gray>"
       entry-debug: "  <gray>•</gray> <white>/fta train debug [列车]</white> <gray>- 查看控车诊断</gray>"
       entry-debug-list: "  <gray>•</gray> <white>/fta train debug list</white> <gray>- 列出缓存诊断</gray>"
-      entry-debug-set-route: "  <gray>•</gray> <white>/fta train debug set route <公司> <运营商> <线路> <班次> [index|nodeId]</white> <gray>|</gray> <white>/fta train debug set route <公司> <运营商> <线路> <班次> train <列车|@train[...] > [index|nodeId]</white> <gray>- 手动写入线路</gray>"
+      entry-debug-set-route: "  <gray>•</gray> <white>/fta train debug set route <公司> <运营商> <线路> <运行图> [index|nodeId]</white> <gray>|</gray> <white>/fta train debug set route <公司> <运营商> <线路> <运行图> train <列车|@train[...] > [index|nodeId]</white> <gray>- 手动写入线路</gray>"
       entry-train-edit: "  <gray>•</gray> <white>/train edit <列车名></white> <gray>- 选中列车以省略参数</gray>"
       entry-selector: "  <gray>•</gray> <white>@train[...]</white> <gray>- 使用选择器批量操作</gray>"
       hover-config-list: "<gray>查看列车的速度/加减速配置</gray>"
@@ -1276,21 +1276,21 @@ command:
       already-marked: "<prefix> <gray>第 <white><car></white>/<cars> 节车厢的座位 <white><seat></white> 已经是驾驶座（名字：<white><names></white>）</gray>"
       unmarked: "<prefix> <dark_aqua>已取消第 <white><car></white>/<cars> 节车厢座位 <white><seat></white> 的驾驶座标记</dark_aqua> <gray>（剩余名字：<white><names></white>）</gray>"
       not-marked: "<prefix> <gray>第 <white><car></white>/<cars> 节车厢的座位 <white><seat></white> 本来就不是驾驶座</gray>"
-      end-head: "<gray>此刻算</gray> <white>车头端</white> <gray>驾驶室。</gray>"
-      end-tail: "<gray>此刻算</gray> <white>车尾端</white> <gray>驾驶室。</gray>"
-      end-middle: "<yellow>这节车不在列车两端：有标记的列车只认第一节、最后一节上的驾驶座，中间车厢的驾驶座在编组变化、成为端车后才生效。</yellow>"
-      end-none: "<gray>列车上还有其他驾驶座标记，这个座位不算驾驶室。</gray>"
-      end-unmarked-train: "<gray>列车上已没有驾驶座标记，改按车厢位置认定驾驶室（前半列算车头端，最后一节算车尾端）。</gray>"
+      end-head: "<gray>当前为</gray> <white>车头端</white> <gray>驾驶室。</gray>"
+      end-tail: "<gray>当前为</gray> <white>车尾端</white> <gray>驾驶室。</gray>"
+      end-middle: "<yellow>本节车厢不在列车两端：已标记驾驶座的列车仅识别首节与末节车厢的驾驶座，中间车厢的驾驶座在编组变化、成为端车后才生效。</yellow>"
+      end-none: "<gray>列车上另有驾驶座标记，本座位不作为驾驶室。</gray>"
+      end-unmarked-train: "<gray>列车上已没有驾驶座标记，改按车厢位置判定驾驶室（前半列为车头端，末节为车尾端）。</gray>"
       save-hint: "<gray>只改了这列车；要让以后出库的车也带上标记，请把列车保存回存车</gray> <aqua>[/train save]</aqua>"
       save-hover: "<gray>点击填入 /train save，再写上存车名</gray>"
     config:
-      set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 配置已更新: type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
+      set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 配置已更新： type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
       list: "<prefix> 列车 <dark_aqua><train></dark_aqua>: type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
-      drive-set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新: mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> power=<white><power></white>"
-      drive-list: "  <gray>驾驶:</gray> mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> <gray>bps</gray> power=<white><power></white>"
-      drive-invalid: "<prefix> <red>无效的驾驶参数: <raw></red>"
-      not-found: "<prefix> <red>未找到列车: <train></red>"
-      invalid-selector: "<prefix> <red>无效的选择器语法: <raw></red>"
+      drive-set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新： mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> power=<white><power></white>"
+      drive-list: "  <gray>驾驶：</gray> mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> <gray>bps</gray> power=<white><power></white>"
+      drive-invalid: "<prefix> <red>无效的驾驶参数： <raw></red>"
+      not-found: "<prefix> <red>未找到列车： <train></red>"
+      invalid-selector: "<prefix> <red>无效的选择器语法： <raw></red>"
       no-selection: "<prefix> <yellow>未指定列车，请先选中列车或提供列车名/选择器</yellow>"
       no-selection-entry-train-edit: "  <gray>•</gray> <white>/train edit <列车名></white>"
       no-selection-hover-train-edit: "<gray>使用 TrainCarts 命令选中列车</gray>"
@@ -1301,27 +1301,27 @@ command:
       no-data: "<prefix> <yellow>列车 <train> 无诊断数据（可能未被调度接管）</yellow>"
       list-empty: "<prefix> <yellow>当前无缓存的诊断数据</yellow>"
       list-header: "<prefix> <dark_aqua>诊断数据 (<count> 条)</dark_aqua>"
-      header: "<prefix> <dark_aqua>━━━ 列车 <train> ━━━</dark_aqua> <gray>路线: <route></gray>"
-      nodes: "  <gray>节点:</gray> <white><current></white> <gray>→</gray> <white><next></white>"
-      state: "  <gray>状态:</gray> index=<white><index></white> gate=<white><gate></white> reason=<white><reason></white>"
-      speed: "  <gray>速度:</gray> 当前=<white><current></white> 目标=<white><target></white> 边限速=<white><edge_limit></white> 建议=<white><recommended></white> <gray>bps</gray>"
-      speed-limits: "  <gray>限速链:</gray> aspect=<white><aspect_base_speed></white> caution=<white><caution_source></white> approach=<white><approach_limit></white> ma=<white><movement_authority_limit></white> edgeAhead=<white><edge_speed_lookahead></white> curve=<white><speed_curve_limit></white> final=<white><final_target></white> limiter=<white><final_limiter></white> <gray>bps</gray>"
-      lookahead: "  <gray>前瞻:</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> 授权末端=<white><authority_end></white> resource=<white><authority_resource></white> edges=<white><authorized_edges></white> <gray>blocks</gray>"
+      header: "<prefix> <dark_aqua>━━━ 列车 <train> ━━━</dark_aqua> <gray>运行图： <route></gray>"
+      nodes: "  <gray>节点：</gray> <white><current></white> <gray>→</gray> <white><next></white>"
+      state: "  <gray>状态：</gray> index=<white><index></white> gate=<white><gate></white> reason=<white><reason></white>"
+      speed: "  <gray>速度：</gray> 当前=<white><current></white> 目标=<white><target></white> 边限速=<white><edge_limit></white> 建议=<white><recommended></white> <gray>bps</gray>"
+      speed-limits: "  <gray>限速链：</gray> aspect=<white><aspect_base_speed></white> caution=<white><caution_source></white> approach=<white><approach_limit></white> ma=<white><movement_authority_limit></white> edgeAhead=<white><edge_speed_lookahead></white> curve=<white><speed_curve_limit></white> final=<white><final_target></white> limiter=<white><final_limiter></white> <gray>bps</gray>"
+      lookahead: "  <gray>前瞻：</gray> 阻塞=<white><blocker></white> 限速=<white><caution></white> 进站=<white><approach></white> 授权末端=<white><authority_end></white> resource=<white><authority_resource></white> edges=<white><authorized_edges></white> <gray>blocks</gray>"
       approach: "  <gray>Approach:</gray> node=<white><node></white> kind=<white><kind></white> reason=<white><reason></white> distance=<white><distance></white> limit=<white><limit></white>"
-      occupancy: "  <gray>占用诊断:</gray> blockers=<white><blockers></white> request=<white><request></white> claims=<white><claims></white>"
-      signal: "  <gray>信号:</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white> destBlocked=<white><destination_blocked></white> retained=<white><retained_destination></white> reason=<white><blocked_reason></white>"
-      stop: "  <gray>STOP 生命周期:</gray> reason=<white><reason></white> detail=<white><detail></white> release=<white><release></white> retry=<white><retry></white> invalidatesAuthority=<white><invalidates_authority></white> blockers=<white><blockers></white>"
+      occupancy: "  <gray>占用诊断：</gray> blockers=<white><blockers></white> request=<white><request></white> claims=<white><claims></white>"
+      signal: "  <gray>信号：</gray> 当前=<white><current></white> 有效=<white><effective></white> 发车=<white><launch></white> destBlocked=<white><destination_blocked></white> retained=<white><retained_destination></white> reason=<white><blocked_reason></white>"
+      stop: "  <gray>STOP 生命周期：</gray> reason=<white><reason></white> detail=<white><detail></white> release=<white><release></white> retry=<white><retry></white> invalidatesAuthority=<white><invalidates_authority></white> blockers=<white><blockers></white>"
       set:
         route:
           storage-not-ready: "<prefix> <red>存储尚未就绪，无法解析公司/线路层级（请先 /fta reload 或检查数据库连接）</red>"
           company-not-found: "<prefix> <red>未找到公司</red> <gray>(company=<white><company></white>)</gray>"
           operator-not-found: "<prefix> <red>未找到运营商</red> <gray>(company=<white><company></white>, operator=<white><operator></white>)</gray>"
           line-not-found: "<prefix> <red>未找到线路</red> <gray>(operator=<white><operator></white>, line=<white><line></white>)</gray>"
-          route-not-found: "<prefix> <red>未找到班次</red> <gray>(line=<white><line></white>, route=<white><route></white>)</gray>"
+          route-not-found: "<prefix> <red>未找到运行图</red> <gray>(line=<white><line></white>, route=<white><route></white>)</gray>"
           definition-missing: "<prefix> <red>RouteDefinition 缓存缺失或节点不足（无法生成运行图）</red> <gray>(company=<white><company></white>, operator=<white><operator></white>, line=<white><line></white>, route=<white><route></white>)</gray>"
           invalid-index: "<prefix> <red>无效的 index/nodeId: <raw></red> <gray>(route=<white><route></white>)</gray>"
-          index-out-of-range: "<prefix> <red>index 越界: <index></red> <gray>(max=<white><max></white>, route=<white><route></white>)</gray>"
-          success: "<prefix> <dark_aqua>已写入线路调试标签</dark_aqua> <gray>(train=<white><train></white>, company=<white><company></white>, operator=<white><operator></white>, line=<white><line></white>, route=<white><route></white>, index=<white><index></white>, dest=<white><dest></white>)</gray>"
+          index-out-of-range: "<prefix> <red>index 越界： <index></red> <gray>(max=<white><max></white>, route=<white><route></white>)</gray>"
+          success: "<prefix> <dark_aqua>已写入运行图调试标签</dark_aqua> <gray>(train=<white><train></white>, company=<white><company></white>, operator=<white><operator></white>, line=<white><line></white>, route=<white><route></white>, index=<white><index></white>, dest=<white><dest></white>)</gray>"
           refresh-skipped: "<prefix> <yellow>未找到在线列车实例或调度服务未就绪：已写入 tags，但未执行 refreshSignal</yellow>"
 
 enum:
@@ -1342,7 +1342,7 @@ enum:
     express: "特快"
     limited_express: "特急"
   route-operation-type:
-    create: "补车"
+    create: "出库"
     operation: "运营"
     return: "回送"
   route-stop-pass-type:
@@ -1352,7 +1352,7 @@ enum:
   route-stop-directive:
     dynamic: "动态"
     cret: "出库"
-    dsty: "入库"
+    dsty: "回库"
     change: "换线"
     action: "动作"
   consist-type-source:
@@ -1401,7 +1401,7 @@ pids:
       arrival: "到站"
       arrival-secondary: "Arrival"
     status:
-      on-time: "准点"
+      on-time: "正点"
       on-time-secondary: "On time"
       late: "晚点 <minutes> 分"
       late-secondary: "Late <minutes> min"
@@ -1427,7 +1427,7 @@ pids:
       terminating: "本站终到"
       terminating-secondary: "Terminates here"
       out-of-service: "回库"
-      out-of-service-secondary: "Not in Service"
+      out-of-service-secondary: "Not in service"
     type:
       local: "各停"
       rapid: "快速"
@@ -1457,7 +1457,7 @@ pids:
         details-secondary: "Details"
       empty: "暂无线路信息"
       empty-secondary: "No line information"
-      filtered: "本屏线路过滤没有匹配的线路"
+      filtered: "没有符合本屏线路筛选条件的线路"
       filtered-secondary: "No lines match this screen's filter"
       condition:
         suspended: "全线停运"
@@ -1480,9 +1480,9 @@ pids:
         late: "晚点最多 <minutes> 分钟"
         late-secondary: "Up to <minutes> min late"
         cancelled: "近 1 小时取消 <count> 班"
-        cancelled-secondary: "<count> trips cancelled this hour"
+        cancelled-secondary: "<count> trips cancelled in the last hour"
         # 只取消一班时的英文
-        cancelled-one-secondary: "1 trip cancelled this hour"
+        cancelled-one-secondary: "1 trip cancelled in the last hour"
         closed: "<from>—<to> 暂停运营"
         closed-secondary: "No service <from> – <to>"
         maintenance: "线路检修"
@@ -1535,11 +1535,11 @@ pids:
     layout: "布局：<layout>（<size>）"
     station: "车站：<station>（<code>）· <platforms>"
     station-none: "车站：未识别"
-    operator: "运营商：<operator>（<code>）· 不绑车站"
+    operator: "运营商：<operator>（<code>）· 未绑定车站"
     platforms: "站台 <platforms>"
     all-platforms: "全部站台"
     screen: "屏幕编号：<id>"
-    hint: "手持配置棍右键屏幕进行配置"
+    hint: "手持配置棍右键屏幕以配置"
     unregistered:
       title: "屏幕未登记"
       title-secondary: "Screen not registered"
@@ -1709,13 +1709,13 @@ drive:
       no-signal: "<yellow>无行车许可</yellow>"
       wait-signal: "<red>停车信号</red>"
       confirm-signal: "<gold><bold>信号变严：右键确认</bold></gold>"
-      blocking: "<gold>后方列车已被挡 <white><seconds></white> 秒，请尽快运行</gold>"
+      blocking: "<gold>后方列车已受阻 <white><seconds></white> 秒，请尽快恢复运行</gold>"
     station:
       approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>米</gray>"
       move-up: "<yellow>请前移 <white><distance></white> 米对标</yellow>"
       on-mark: "<green>已对标</green>"
       overrun: "<red>越过停车点 <white><distance></white> 米</red>"
-      skipped: "<red><bold>越站</bold></red> <gray>越过停车点太多，</gray><white><station></white><gray>未停站</gray>"
+      skipped: "<red><bold>越站</bold></red> <gray>越过停车点过远，</gray><white><station></white><gray>未停车</gray>"
       open-doors:
         left: "<yellow>请开左侧车门</yellow>"
         right: "<yellow>请开右侧车门</yellow>"
@@ -1758,17 +1758,17 @@ drive:
         failed: "<red>制动试验未通过，请重新试验</red>"
     setup:
       not-ready: "<red>未启动</red>"
-      progress: "<yellow><step>中 <seconds> 秒</yellow>"
+      progress: "<yellow>正在<step>，剩余 <seconds> 秒</yellow>"
       next: "<red>下一步：<step></red>"
     direction:
       forward: "前进"
-      neutral: "空挡"
+      neutral: "零位"
       reverse: "后退"
     stop-result:
       accurate: "<green><bold>停准</bold></green> <white><offset></white> <gray><station></gray>"
-      accepted: "<yellow><bold>可开门</bold></yellow> <white><offset></white> <gray><station></gray>"
-      overrun: "<red><bold>越出窗口</bold></red> <white><offset></white> <gray><station></gray>"
-      short: "<red><bold>欠标超时</bold></red> <white><offset></white> <gray><station></gray>"
+      accepted: "<yellow><bold>停车合格</bold></yellow> <white><offset></white> <gray><station></gray>"
+      overrun: "<red><bold>过标超限</bold></red> <white><offset></white> <gray><station></gray>"
+      short: "<red><bold>欠标超限</bold></red> <white><offset></white> <gray><station></gray>"
       skipped: "<red><bold>越站</bold></red> <gray><station></gray>"
       over: "过标 <distance> 米"
       under: "欠标 <distance> 米"
@@ -1784,7 +1784,7 @@ drive:
     brake-advice: "<red><bold>开始制动</bold></red>"
     ato-prefix: "<aqua>ATO</aqua>"
     cab-change:
-      announced: "<gold>下一趟由第 <white><car></white> 节驾驶室开出</gold> <gray>请先到那一端就座</gray>"
+      announced: "<gold>下一趟由第 <white><car></white> 节驾驶室开出</gold> <gray>请提前到该端驾驶室就座</gray>"
       active: "<gold>换端</gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座，剩余</gray> <white><seconds></white> <gray>秒</gray>"
     station:
       open-doors:
@@ -1843,7 +1843,7 @@ drive:
       stop: "停站"
       scheduled-arrival: "表定到站"
       scheduled-departure: "表定发车"
-      next-pass: "下一通过"
+      next-pass: "下一通过站"
       next-trip: "下一趟"
       doors: "车门"
       air: "风压"
@@ -1950,7 +1950,7 @@ drive:
     title: "驾驶台"
     item:
       reverser-forward: "<green>换向手柄：前进</green>"
-      reverser-neutral: "<gray>换向手柄：空挡</gray>"
+      reverser-neutral: "<gray>换向手柄：零位</gray>"
       reverser-reverse: "<aqua>换向手柄：后退</aqua>"
       door-left-open: "<green>左车门：已打开</green>"
       door-left-closed: "<gray>左车门：已关闭</gray>"
@@ -1983,9 +1983,9 @@ drive:
       start-on: "<green>列车已启动</green>"
       start-off: "<red>列车未启动</red>"
       start-busy: "<yellow>列车启动中</yellow>"
-      compressor-on: "<green>压缩机：运转中</green>"
-      compressor-off: "<gray>压缩机：停止</gray>"
-      compressor-busy: "<yellow>压缩机：运转中</yellow>"
+      compressor-on: "<green>压缩机：已打开</green>"
+      compressor-off: "<gray>压缩机：已关闭</gray>"
+      compressor-busy: "<yellow>压缩机：打风中</yellow>"
       parking-released: "<green>停放制动：已缓解</green>"
       parking-applied: "<gold>停放制动：已施加</gold>"
       brake-test-on: "<green>制动试验：已通过</green>"
@@ -2007,7 +2007,7 @@ drive:
       stopped: "<gray>停稳后才能操作</gray>"
       current: "<yellow>当前方向</yellow>"
       remaining: "<yellow>剩余 <seconds> 秒</yellow>"
-      setup-switch: "<gray>点击接通或断开；须按顺序接通，断开时须先断开后一步</gray>"
+      setup-switch: "<gray>点击接通或断开；须按顺序接通、按相反顺序断开</gray>"
       setup-lamp: "<gray>状态指示灯，请使用右侧的启动按钮</gray>"
       start: "<gray>未启动时点击一键启动，已启动时点击关机</gray>"
       compressor-switch: "<gray>点击打开或关闭压缩机；打开后主风缸低于启动压力时自动运转</gray>"
@@ -2025,12 +2025,12 @@ drive:
       reservoir: "<gray>主风缸 <white><mr></white> kPa</gray>"
       parking-needs: "<gray>缓解需要主风缸 ≥ <white><need></white> kPa（当前 <white><mr></white>）</gray>"
       brake-test-not-done: "<gray>制动缸 <white><bc></white> kPa</gray>"
-      brake-test-apply: "<yellow>请把手柄拉到 B4 或以上（制动缸 <white><bc></white> kPa）</yellow>"
+      brake-test-apply: "<yellow>请将手柄置于 B4 或以上（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-release: "<yellow>请回到 N 缓解（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-passed: "<gray>制动缸 <white><bc></white> kPa</gray>"
       end-dispatch: "<gray>调度列车：放弃当前任务并交还自动运行</gray>"
-      brake-test-charge: "<yellow>请把手柄置于 N 充风（制动管 <white><bp></white> kPa）</yellow>"
-      brake-test-reduce: "<yellow>请把手柄拉到制动位，减压 <white><need></white> kPa 以上（制动管 <white><bp></white> kPa）</yellow>"
+      brake-test-charge: "<yellow>请将手柄置于 N 充风（制动管 <white><bp></white> kPa）</yellow>"
+      brake-test-reduce: "<yellow>请将手柄置于制动位，减压 <white><need></white> kPa 以上（制动管 <white><bp></white> kPa）</yellow>"
       brake-test-hold: "<yellow>请保持手柄位置，保压 <white><seconds></white> 秒（制动缸 <white><bc></white> kPa）</yellow>"
       brake-test-failed: "<red>保压时制动缸漏泄超标，试验未通过（制动缸 <white><bc></white> kPa）</red>"
       breaker-tripped: "<red>主断已跳闸：点击断开，再点击闭合即可复位</red>"
@@ -2047,13 +2047,13 @@ drive:
       next: "<gray>下一站：</gray><white><station></white>"
       score: "<gray>实时评分：</gray><yellow><points></yellow> <gold><bold><grade></bold></gold>"
       vehicle:
-        mu: "<gray>车种：</gray><white>动车组</white>"
-        loco: "<gray>车种：</gray><white>机车牵引</white>"
+        mu: "<gray>牵引方式：</gray><white>动车组</white>"
+        loco: "<gray>牵引方式：</gray><white>机车牵引</white>"
       motion: "<gray>加速度：</gray><white><accel></white> <gray>减速度：</gray><white><decel></white> <gray>米/秒²</gray>"
       max-speed: "<gray>最高速度：</gray><white><kmh></white> <gray>km/h</gray>"
       level:
-        standard: "<gray>驾驶难度：</gray><white>标准</white>"
-        simulation: "<gray>驾驶难度：</gray><gold>仿真</gold>"
+        standard: "<gray>驾驶难度：</gray><white>标准级</white>"
+        simulation: "<gray>驾驶难度：</gray><gold>仿真级</gold>"
     gauge:
       range: "<gray>量程 0–<white><range></white> kPa</gray>"
       main-reservoir:
@@ -2085,10 +2085,10 @@ drive:
       door: "<red>车门故障：确认车门已关好后使用门旁路</red>"
       door-bypass: "<gold>门旁路已接通：不检查车门状态</gold>"
     notice:
-      brake-test-started: "<yellow>制动试验开始：请关闭驾驶台，把手柄拉到 B4</yellow>"
+      brake-test-started: "<yellow>制动试验开始：请关闭驾驶台菜单，将手柄置于 B4</yellow>"
       brake-test-passed: "<green>制动试验通过</green>"
       parking-auto-applied: "<red>主风缸压力过低，停放制动已自动施加</red>"
-      brake-test-started-loco: "<yellow>制动试验开始：请关闭驾驶台，手柄置于 N 充风</yellow>"
+      brake-test-started-loco: "<yellow>制动试验开始：请关闭驾驶台菜单，将手柄置于 N 充风</yellow>"
       brake-test-failed: "<red>制动试验未通过：保压时制动缸漏泄超标</red>"
       fault-recovered:
         line-loss: "<green>网压已恢复</green>"
@@ -2104,13 +2104,13 @@ drive:
       doors-open: "<red>请先关闭车门</red>"
       use-start-button: "<red>请使用启动按钮启动列车</red>"
       setup-prerequisite: "<red>请先完成前一步</red>"
-      setup-interlocked: "<red>请先断开后一步（例如先断开主断路器再降弓）</red>"
+      setup-interlocked: "<red>请按相反顺序断开（例如先断开主断路器再降弓）</red>"
       setup-busy: "<red>启动步骤正在进行，请稍候</red>"
       compressor-auto: "<red>动车组的压缩机自动运转，不能手动开关</red>"
       parking-air: "<red>主风缸压力不足，无法缓解停放制动</red>"
       start-first: "<red>请先启动列车</red>"
       brake-test-air: "<red>主风缸压力不足（<white><mr></white> kPa），需要至少 <white><need></white> kPa 才能做制动试验</red>"
-      no-door-animation: "<red>这辆车没有对应的车门动画</red>"
+      no-door-animation: "<red>本列车没有对应的车门动画</red>"
       unavailable: "<red>驾驶台暂时无法打开</red>"
       reverser-locked: "<red>调度列车的运行方向由交路决定，不能操作换向手柄</red>"
       doors-not-released: "<red>车门未释放：只有在车站停妥后才能开门</red>"
@@ -2119,7 +2119,7 @@ drive:
       manual: "人工驾驶"
       ato: "ATO"
     ato:
-      notch-ignored: "<aqua>ATO 运行中：手柄不起作用，拉到 EB 立即转为人工驾驶</aqua>"
+      notch-ignored: "<aqua>ATO 运行中：手柄不起作用，将手柄置于 EB 即转为人工驾驶</aqua>"
       confirmed: "<green>已确认发车</green>"
     signal:
       confirmed: "<green>信号已确认</green>"
@@ -2129,10 +2129,10 @@ drive:
       rescued: "<prefix> <yellow>列车 <white><train></white> 长时间无法运行，已将你送至最近车站的站台</yellow>"
       no-target: "<prefix> <red>列车 <white><train></white> 长时间无法运行，且找不到可送达的站台，请联系管理员</red>"
     congestion:
-      warn: "<prefix> <gold>后方列车被本列车挡住已有 <white><seconds></white> 秒，请尽快恢复运行；继续阻挡将转为 ATO</gold>"
-      ato: "<prefix> <yellow>后方列车被挡住过久，本列车已转为 ATO 运行</yellow>"
+      warn: "<prefix> <gold>本列车已阻挡后方列车 <white><seconds></white> 秒，请尽快恢复运行；继续阻挡将转为 ATO</gold>"
+      ato: "<prefix> <yellow>本列车阻挡后方列车过久，已转为 ATO 运行</yellow>"
     breaker:
-      tripped: "<prefix> <red>线路拥堵熔断：<white><reason></white>；已交还 <white><count></white> 列驾驶员列车并暂停接班</red>"
+      tripped: "<prefix> <red>线路拥堵保护已启动：<white><reason></white>；已将 <white><count></white> 列人工驾驶的列车交还自动运行，暂停接班</red>"
   task:
     board:
       title: "<dark_gray>任务板 · </dark_gray><black><station></black>"
@@ -2145,7 +2145,7 @@ drive:
       entry-platform: "<gray>站台：</gray><white><platform></white>"
       entry-train: "<gray>列车：</gray><white><train></white>"
       entry-unbound: "<gray>列车尚未到达</gray>"
-      entry-dwelling: "<green>正在本站停站</green>"
+      entry-dwelling: "<green>列车正在本站停靠</green>"
       entry-left: "<yellow>左键</yellow> <gray>人工驾驶</gray>"
       entry-right: "<yellow>右键</yellow> <gray>ATO</gray>"
       driving: "<prefix> <red>驾驶中不能领取任务</red>"
@@ -2161,16 +2161,16 @@ drive:
       entry-stops: "<gray>停站：</gray><white><stops></white> <gray>站（含终点站）</gray>"
       entry-run-time: "<gray>预计运行：</gray><white><run_time></white>"
       entry-claimed: "<gray>已被</gray> <white><player></white> <gray>领取</gray>"
-      entry-claimed-self: "<green>本人已领取</green>"
+      entry-claimed-self: "<green>已由你领取</green>"
       level:
-        standard: "<green>驾驶难度：标准</green>"
-        simulation: "<gold>驾驶难度：仿真</gold>"
+        standard: "<green>驾驶难度：标准级</green>"
+        simulation: "<gold>驾驶难度：仿真级</gold>"
         standard-desc: "<gray>驾驶台一键启动，不模拟风压与制动试验</gray>"
         simulation-desc: "<gray>驾驶台逐项操作启动开关，模拟风压、电空制动与制动试验</gray>"
         simulation-desc-2: "<gray>服务器开启随机故障时可能发生故障</gray>"
         selected: "<yellow>▶ 当前选择</yellow>"
         select: "<gray>点击选择</gray>"
-        remember: "<gray>选择将被记住，驾驶调度列车与自由驾驶均适用</gray>"
+        remember: "<gray>选择将被记住，驾驶调度列车与非调度列车均适用</gray>"
       run-time:
         seconds: "<seconds> 秒"
         minutes: "<minutes> 分钟"
@@ -2194,21 +2194,21 @@ drive:
     go-to-rear-cab: "<yellow>本站折返：请坐进列车尾端（远离线路尽头一端）的驾驶室</yellow>"
     go-to-end-cab: "<yellow>请坐进列车任一端的驾驶室</yellow>"
     confirm-seat: "<white>已就座</white> <gray>确认座位无误后输入</gray> <yellow>/fta drive on</yellow> <gray>接班</gray>"
-    confirm-seat-chat: "<prefix> <white>你已坐在列车 <aqua><train></aqua> 第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>确认是前进方向的驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认接班]</green></hover></click>"
+    confirm-seat-chat: "<prefix> <white>你已坐在列车 <aqua><train></aqua> 第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>确认是前进方向的驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive on</white>'><green>[确认接班]</green></hover></click>"
     busy: "<red>你正在驾驶其他列车</red>"
     pickup:
       terminal: "<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进任一端驾驶室并确认座位；发车方向与所坐端相反时，须在发车前自行走到另一端驾驶室（约需 <reserve> 秒）</white>"
       terminal-cab: "<prefix> <white>车次 <aqua><trip></aqua> 由列车 <aqua><train></aqua> 担当，正在 <location> 待命。请在 <yellow><seconds></yellow> 秒内上车，坐进第 <yellow><car></yellow> 节驾驶室（共 <cars> 节，即下一趟的车头）并确认座位</white>"
-      depot: "<prefix> <white>车次 <aqua><trip></aqua> 的列车 <aqua><train></aqua> 已在车库 <location> 出车，停在股道上等候。请在 <yellow><seconds></yellow> 秒内坐进车头驾驶室并确认座位</white>"
-      goto-button: "<click:run_command:'/fta drive task goto'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive task goto</white>'><green>[前往列车]</green></hover></click>"
+      depot: "<prefix> <white>车次 <aqua><trip></aqua> 的列车 <aqua><train></aqua> 已从车库 <location> 出库，停在股道上等候。请在 <yellow><seconds></yellow> 秒内坐进车头驾驶室并确认座位</white>"
+      goto-button: "<click:run_command:'/fta drive task goto'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive task goto</white>'><green>[前往列车]</green></hover></click>"
       waiting: "<white>车次 <aqua><trip></aqua> 在 <location> 等候接班</white> <gray>剩余</gray> <yellow><seconds></yellow> <gray>秒</gray>"
       terminal-expired: "<prefix> <yellow>未能在时限内接班，车次 <aqua><trip></aqua> 已按自动运行发车，任务作废</yellow>"
       depot-expired: "<prefix> <yellow>未能在时限内到车库接车，列车已自动开出，请在 <white><station></white> 接班</yellow>"
-      depot-option: "<prefix> <gray>本车次的列车从车库</gray> <white><depot></white> <gray>出车。</gray> <click:run_command:'/fta drive task pickup'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive task pickup</white>'><green>[改为从车库接车]</green></hover></click>"
-      depot-on: "<prefix> <green>已改为从车库 <white><depot></white> 接车：出车时将通知你，届时可点击 [前往列车]</green>"
+      depot-option: "<prefix> <gray>本车次的列车从车库</gray> <white><depot></white> <gray>出库。</gray> <click:run_command:'/fta drive task pickup'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive task pickup</white>'><green>[改为从车库接车]</green></hover></click>"
+      depot-on: "<prefix> <green>已改为从车库 <white><depot></white> 接车：列车出库时将通知你，届时可点击 [前往列车]</green>"
       depot-off: "<prefix> <gray>已取消车库接车，列车到达 <white><station></white> 后再接班</gray>"
-      not-depot: "<prefix> <red>该车次的列车不从车库出车</red>"
-      reassigned: "<prefix> <yellow>车次 <aqua><trip></aqua> 已改由别的列车担当，列车 <aqua><train></aqua> 不再留给本人；担当列车确定后将重新通知</yellow>"
+      not-depot: "<prefix> <red>该车次的列车不从车库出库</red>"
+      reassigned: "<prefix> <yellow>车次 <aqua><trip></aqua> 已改由别的列车担当，列车 <aqua><train></aqua> 不再为你保留；担当列车确定后将重新通知</yellow>"
       started: "<prefix> <red>已开始驾驶，不能再更改接车方式</red>"
     goto:
       teleported: "<prefix> <green>已到达指定驾驶室旁，请上车就座并确认座位</green>"
@@ -2222,15 +2222,15 @@ drive:
       station-pending: "<prefix> <gray>正在前往接班站台……</gray>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
     next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
-    continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
-    continue-offer-code: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+    continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+    continue-offer-code: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
     continued: "<prefix> <green>已接续驾驶车次 <aqua><trip></aqua>，本趟单独计分，请开到终点站</green>"
     cab-change-timeout-settled: "<prefix> <yellow>未在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车；本趟成绩已结算，驾驶正常结束</yellow>"
     next-trip-no-destination: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
     cab-change-failed: "<prefix> <red>未能在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车，任务记为未完成</red>"
     cab-change:
       announce: "<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；车门可保持开启，到另一端后再关门；换端途中离座不结束驾驶</white>"
-      confirm-seat: "<prefix> <white>你已坐在第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>本列车的驾驶座未作标记，确认是驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认座位]</green></hover></click>"
+      confirm-seat: "<prefix> <white>你已坐在第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>本列车的驾驶座未作标记，确认是驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive on</white>'><green>[确认座位]</green></hover></click>"
       go-to: "<yellow>请到第 <white><car></white> 节驾驶室旁再右键上车</yellow>"
       start: "<prefix> <yellow>折返换端：请在 <white><seconds></white> 秒内到第 <white><car></white> 节（另一端）驾驶室就座；换端途中离座不结束驾驶，列车保持停车</yellow>"
       short: "<prefix> <red>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，发车将晚点</red>"
@@ -2243,9 +2243,9 @@ drive:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
         accurate: "<green><offset> · 停准</green>"
-        accepted: "<yellow><offset> · 可开门</yellow>"
-        overrun: "<red><offset> · 越出窗口</red>"
-        short: "<red><offset> · 欠标超时</red>"
+        accepted: "<yellow><offset> · 停车合格</yellow>"
+        overrun: "<red><offset> · 过标超限</red>"
+        short: "<red><offset> · 欠标超限</red>"
         skipped: "<red>越站</red>"
       flag:
         wrong-door: " <red>开错侧门</red>"
@@ -2288,23 +2288,23 @@ drive:
         chat: "<white>打开压缩机：</white><gray>机车牵引的压缩机须手动打开。请在驾驶台点击压缩机开关，此后主风缸压力不足时压缩机自动运转。</gray>"
         subtitle: "<yellow>在驾驶台打开压缩机</yellow>"
       brake-test:
-        chat: "<white>制动试验：</white><gray>在驾驶台点击制动试验，关闭驾驶台后把手柄拉到 B4（8 号位）或以上，制动缸升压后再回到 N（4 号位）缓解。试验通过前不能牵引。</gray>"
-        subtitle: "<yellow>点击制动试验，拉到 B4 再回到 N</yellow>"
+        chat: "<white>制动试验：</white><gray>在驾驶台点击制动试验，关闭驾驶台菜单后将手柄置于 B4（8 号位）或以上，制动缸升压后再将手柄置于 N（4 号位）缓解。试验通过前不能牵引。</gray>"
+        subtitle: "<yellow>点击制动试验，手柄置于 B4 再置于 N</yellow>"
       release-parking:
         chat: "<white>缓解停放制动：</white><gray>请在驾驶台点击停放制动将其缓解。停放制动施加时不能牵引，缓解需要足够的主风缸压力。</gray>"
         subtitle: "<yellow>在驾驶台缓解停放制动</yellow>"
       reverser:
-        chat: "<white>确认换向手柄：</white><gray>换向手柄决定行驶方向，须在前进位才能向前牵引，空挡时不能牵引。停稳且车门关闭时，可在驾驶台第一排切换，也可输入 /fta drive reverser forward。</gray>"
+        chat: "<white>确认换向手柄：</white><gray>换向手柄决定行驶方向，须在前进位才能向前牵引，零位时不能牵引。停稳且车门关闭时，可在驾驶台第一排切换，也可输入 /fta drive reverser forward。</gray>"
         subtitle: "<yellow>确认换向手柄在「前进」</yellow>"
       ato-overview:
-        chat: "<white>ATO 运行：</white><gray>列车由自动运行操纵，停车与开关门均自动完成。停站结束、动作栏提示确认发车时，请按右键确认；拉到 EB（9 号位）将立即转为人工驾驶并紧急制动。</gray>"
+        chat: "<white>ATO 运行：</white><gray>ATO 自动控制列车运行，停车与开关门均自动完成。停站结束、动作栏提示确认发车时，请按右键确认；将手柄置于 EB（9 号位）将立即转为人工驾驶并紧急制动。</gray>"
         subtitle: "<aqua>ATO：停站结束后右键确认发车</aqua>"
       traction:
-        chat: "<white>起步：</white><gray>快捷栏 1–3 号位依次为 P3、P2、P1，数字越大牵引力越大。请拉到 P1–P3 起步，动作栏显示车速与限速。</gray>"
-        subtitle: "<yellow>拉到 P1–P3（1–3 号位）起步</yellow>"
+        chat: "<white>起步：</white><gray>快捷栏 1–3 号位依次为 P3、P2、P1，数字越大牵引力越大。请将手柄置于 P1–P3 起步，动作栏显示车速与限速。</gray>"
+        subtitle: "<yellow>将手柄置于 P1–P3（1–3 号位）起步</yellow>"
       traction-dispatch:
-        chat: "<white>起步：</white><gray>调度列车须按信号行车。动作栏出现发车信号后，再拉到 P1–P3（1–3 号位）起步，车速不得超过动作栏显示的限速。</gray>"
-        subtitle: "<yellow>出现发车信号后拉到 P1–P3 起步</yellow>"
+        chat: "<white>起步：</white><gray>调度列车须按信号行车。动作栏出现发车信号后，再将手柄置于 P1–P3（1–3 号位）起步，车速不得超过动作栏显示的限速。</gray>"
+        subtitle: "<yellow>出现发车信号后将手柄置于 P1–P3 起步</yellow>"
       coast:
         chat: "<white>惰行：</white><gray>回到 N（4 号位）切断牵引，列车凭惯性滑行。行车中保持车速时常用惰行。</gray>"
         subtitle: "<yellow>回到 N（4 号位）惰行</yellow>"
@@ -2335,7 +2335,7 @@ drive:
         chat: "<white>信号变严：</white><gray>前方信号转为减速或停车时，动作栏提示「信号变严：右键确认」。请按右键确认，并按新的限速行车；约 4 秒内未确认将施加常用制动，再不确认将紧急制动。</gray>"
         subtitle: "<gold>信号变严：右键确认</gold>"
       stop-mark:
-        chat: "<white>进站对标：</white><gray>动作栏与侧边栏显示到停车点的距离，站台上发光的停车标指示停车位置。请用常用制动把列车停在停车点附近；停短须前移，越过停车点太多将越站。</gray>"
+        chat: "<white>进站对标：</white><gray>动作栏与侧边栏显示到停车点的距离，站台上发光的停车标指示停车位置。请用常用制动把列车停在停车点附近；欠标时须前移对标，越过停车点过远将越站。</gray>"
         subtitle: "<aqua>对准停车标停车</aqua>"
       open-doors:
         chat: "<white>开门：</white><gray>列车已停妥。请按</gray> <yellow>F</yellow> <gray>打开驾驶台，开启动作栏提示的站台侧车门；开门后开始停站计时。</gray>"
@@ -2344,10 +2344,10 @@ drive:
         chat: "<white>关门：</white><gray>停站时间已到。请按</gray> <yellow>F</yellow> <gray>打开驾驶台关闭车门，车门关好后方给出发车信号。</gray>"
         subtitle: "<yellow>按 F 关闭车门</yellow>"
       departure:
-        chat: "<white>发车信号：</white><gray>动作栏显示「发车信号」即可起步。请拉到 P1–P3 出站，并留意前方信号与限速。</gray>"
+        chat: "<white>发车信号：</white><gray>动作栏显示「发车信号」即可起步。请将手柄置于 P1–P3 出站，并留意前方信号与限速。</gray>"
         subtitle: "<green>发车信号：可以起步</green>"
       ato-confirm:
-        chat: "<white>ATO 确认发车：</white><gray>停站结束前约 10 秒起，动作栏提示「ATO：右键确认发车」，此时即可按右键提前确认，停站一结束列车即出发；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"
+        chat: "<white>ATO 确认发车：</white><gray>停站结束前约 10 秒起，动作栏提示「ATO：右键确认发车」，此时即可按右键提前确认，停站一结束列车即出发；超时未确认时列车照常发车，但将扣减驾驶成绩。</gray>"
         subtitle: "<yellow>右键确认发车</yellow>"
       vigilance:
         chat: "<white>警惕装置：</white><gray>行车中须定期操作以示驾驶员保持警惕。报警时请换档或按右键确认，超时未确认将施加紧急制动。</gray>"
@@ -2380,12 +2380,12 @@ drive:
       in-progress-dispatch: "<prefix> <yellow>你正在参加<white><name></white>路考，请先完成本次路考</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次路考：尚未开车时不计成绩，开车后放弃按未通过计</gray>'><gray>[放弃本次路考]</gray></hover></click>"
       cooldown: "<prefix> <yellow><white><name></white>路考未通过，<white><minutes></white> 分钟后可以再考</yellow>"
       driving: "<prefix> <red>请先结束驾驶再报名路考或练习</red>"
-      has-task: "<prefix> <red>你已领取了驾驶任务，请先完成或放弃（/fta drive task abandon）再报名路考或练习</red>"
+      has-task: "<prefix> <red>你已领取驾驶任务，请先完成或放弃（/fta drive task abandon）再报名路考或练习</red>"
       no-trip: "<prefix> <yellow><white><station></white> 近期没有适合路考或练习的车次，请稍后再试，或换一个车站报名</yellow>"
       assign-failed: "<prefix> <red>未能派出车次（<reason>），请稍后再试</red>"
-      need-training: "<prefix> <yellow>报考<white><name></white>路考前，须先完整开完 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"
+      need-training: "<prefix> <yellow>报考<white><name></white>路考前，须先完成 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"
       expired: "<prefix> <yellow><white><name></white>考试已超时，可以重新报名</yellow>"
-      tutorial-skipped: "<prefix> <yellow>本次教程跳过了练习步骤，不计为<white><name></white>考试成绩，请重新做一遍并自己完成练习步骤</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive tutorial start</white>'><aqua>[重新开始教程]</aqua></hover></click>"
+      tutorial-skipped: "<prefix> <yellow>本次教程跳过了练习步骤，不计入<white><name></white>考试，请重新开始教程并独立完成全部练习步骤</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive tutorial start</white>'><aqua>[重新开始教程]</aqua></hover></click>"
       tutorial-step-skipped: "<prefix> <yellow>已跳过练习步骤，本次教程不再计为<white><name></white>考试成绩。</yellow> <gray>考试仍然有效（截止还剩 <minutes> 分钟），可从第一步重做并自行完成每个练习步骤。</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>放弃本次教程，从第一步重新开始</gray>'><aqua>[重新开始教程]</aqua></hover></click>"
       tutorial-exited: "<prefix> <yellow>已退出新手教程，<white><name></white>考试仍然有效（截止还剩 <minutes> 分钟），到期未完成即作废。</yellow> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>从第一步重新开始教程</gray>'><aqua>[重新开始教程]</aqua></hover></click>"
       tutorial-restarted: "<prefix> <green>已从第一步重新开始<white><name></white>考试的新手教程。</green> <gray>考试截止还剩 <minutes> 分钟，请自行完成每个练习步骤。</gray>"
@@ -2395,30 +2395,30 @@ drive:
       failed: "<prefix> <red><bold>路考未通过</bold></red> <white><reason></white>"
       void: "<prefix> <yellow>本次路考不计成绩：<reason></yellow>"
       retry: "<prefix> <gray><minutes> 分钟后可以再考</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>冷却结束后点击报名</gray>'><yellow>[再考一次]</yellow></hover></click>"
-      retry-now: "<prefix> <gray>可以马上重新报名</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><yellow>[重新报名]</yellow></hover></click>"
+      retry-now: "<prefix> <gray>可以立即重新报名</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><yellow>[重新报名]</yellow></hover></click>"
       reason:
-        not-started: "列车还没接班，考试就已结束（车次作废或已放弃）"
+        not-started: "尚未接班考试即已结束（车次作废或已放弃）"
         interrupted: "列车被调度收回"
-        ato: "考试中转为了 ATO"
-        not-completed: "没有开到下车站"
+        ato: "考试中途转为 ATO"
+        not-completed: "未开到交班站"
         emergency: "触发了 <count> 次防护紧急制动"
-        overrun: "在 <station> 停过头或越站"
+        overrun: "在 <station> 过标超限或越站"
         wrong-door: "在 <station> 开错了车门"
         points: "得分 <points>，未达到及格线 <min> 分"
         passed: "得分 <points>"
       tip:
-        not-completed: "<prefix> <gray>要领：开到下车站停好并打开车门，考试才算完成；中途离座、放弃或长时间停滞都会结束考试。</gray>"
+        not-completed: "<prefix> <gray>要领：开到交班站停稳并打开车门，考试才算完成；中途离座、放弃或长时间停滞都会结束考试。</gray>"
         emergency: "<prefix> <gray>要领：防护紧急制动由超速或冒进停车信号触发。留意动作栏的限速与侧边栏的信号，信号转为停车时提早用 B1–B4 减速。</gray>"
-        overrun: "<prefix> <gray>要领：进站时看侧边栏的停车点距离，提早减速，越接近停车点制动越轻；停在可开门范围内即可，停短还可以前移对标。</gray>"
+        overrun: "<prefix> <gray>要领：进站时看侧边栏的停车点距离，提早减速，越接近停车点制动越轻；停在可开门范围内即为合格，欠标时可前移对标。</gray>"
         wrong-door: "<prefix> <gray>要领：停稳后看侧边栏提示的开门方向，只开站台一侧的车门。</gray>"
-        points: "<prefix> <gray>要领：得分看停车精度、防护介入、信号确认与正晚点。跟着 Boss 栏的建议速度驾驶，每站停准，信号变严时及时右键确认。</gray>"
+        points: "<prefix> <gray>要领：评分依据为停车精度、防护介入、信号确认与正晚点。请按 Boss 栏的建议速度驾驶，每站停准，信号变严时及时右键确认。</gray>"
       stop:
         line: "<prefix> <gray>路考 <done>/<total></gray> <white><station></white> <window><doors>"
         window:
           accurate: "<green>停准</green>"
-          accepted: "<green>停在可开门范围内</green>"
-          short: "<yellow>停短</yellow>"
-          overrun: "<red>停过头</red>"
+          accepted: "<green>停车合格</green>"
+          short: "<yellow>欠标超限</yellow>"
+          overrun: "<red>过标超限</red>"
           skipped: "<red>越站</red>"
         doors:
           ok: ""
@@ -2426,31 +2426,31 @@ drive:
           taken-over: " <yellow>· 未开门，由站台代开</yellow>"
       warn:
         emergency: "<prefix> <red>路考：触发了防护紧急制动，本次已不能及格</red>"
-        overrun: "<prefix> <red>路考：在 <station> 停过头或越站，本次已不能及格</red>"
+        overrun: "<prefix> <red>路考：在 <station> 过标超限或越站，本次已不能及格</red>"
         wrong-door: "<prefix> <red>路考：在 <station> 开错了车门，本次已不能及格</red>"
         ato: "<prefix> <yellow>路考：已转为 ATO，本次不计成绩</yellow>"
-        hint: "<prefix> <gray>可以继续开到下车站当作练习，也可以输入 /fta drive task abandon 结束考试。</gray>"
+        hint: "<prefix> <gray>可继续开到交班站作为练习，也可以输入 /fta drive task abandon 结束考试。</gray>"
       brief:
         tutorial:
           header: "<prefix> <gold><bold>第 <level> 级 · <name> 考试</bold></gold>"
-          content: "<prefix> <white>考试内容：</white><gray>完整做完新手教程。教程会一步步教你启动列车、换向、起步、惰行、制动停车、开关车门与紧急制动。</gray>"
-          how: "<prefix> <white>开始方式：</white><gray>在 <minutes> 分钟内坐上任意非调度列车，输入 <aqua>/fta drive on</aqua> 开始驾驶，教程随即开始；正在驾驶时教程马上开始。</gray>"
-          rule: "<prefix> <white>要求：</white><gray>练习步骤须自己完成，不能点「跳过」；说明类步骤读完点「继续」即可；最后一步结束驾驶，教程即告完成。</gray>"
+          content: "<prefix> <white>考试内容：</white><gray>完成全部新手教程。教程将逐步引导你完成启动列车、换向、起步、惰行、制动停车、开关车门与紧急制动。</gray>"
+          how: "<prefix> <white>开始方式：</white><gray>在 <minutes> 分钟内坐上任意非调度列车，输入 <aqua>/fta drive on</aqua> 开始驾驶，教程随即开始；正在驾驶时教程立即开始。</gray>"
+          rule: "<prefix> <white>要求：</white><gray>练习步骤须独立完成，不得点击「跳过此步」；说明类步骤读完点「继续」即可；最后一步结束驾驶，教程即告完成。</gray>"
           perm: "<prefix> <gray>考试期间临时开放驾驶非调度列车，考完或超时后收回。</gray> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click>"
         dispatch:
           header: "<prefix> <gold><bold>第 <level> 级 · <name> 路考</bold></gold>"
           route: "<prefix> <white>考试车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>"
           pass: "<prefix> <white>及格要求：</white><gray>得分不低于 <min> 分，全程人工驾驶。</gray>"
           no-emergency: "<prefix> <gray>· 不得触发防护紧急制动（超速、冒进停车信号）</gray>"
-          no-overrun: "<prefix> <gray>· 每站停在可开门范围内，不得停过头或越站</gray>"
+          no-overrun: "<prefix> <gray>· 每站停在可开门范围内，不得过标超限或越站</gray>"
           no-wrong-door: "<prefix> <gray>· 只开站台一侧的车门</gray>"
           how: "<prefix> <white>开始方式：</white><gray>列车进站后坐进车头驾驶室，按提示确认座位并输入 <aqua>/fta drive on</aqua>。</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>传送到接班站台；列车已在站时直接送到车头驾驶室旁</gray>'><green>[前往接班]</green></hover></click>"
           handbook: "<prefix> <white>学习：</white><gray>《FTCA 驾驶员手册》已放进背包，接班前请先读一遍，路考按手册中的要点评判。</gray>"
-          feedback: "<prefix> <gray>每到一站会点评停车结果，出现不及格项会马上提示。</gray>"
+          feedback: "<prefix> <gray>每到一站会点评停车结果，出现不及格项将立即提示。</gray>"
     practice:
       expired: "<prefix> <yellow><white><name></white>路考练习已超时，可以重新报名</yellow>"
       in-progress: "<prefix> <yellow>你正在进行<white><name></white>路考练习，请先完成本次练习</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次练习（不计练习次数）</gray>'><gray>[放弃本次练习]</gray></hover></click>"
-      not-road: "<prefix> <yellow><white><name></white>考的是新手教程，没有路考练习；可随时输入 /fta drive tutorial start 练习教程</yellow>"
+      not-road: "<prefix> <yellow><white><name></white>的考试内容为新手教程，没有路考练习；可随时输入 /fta drive tutorial start 练习教程</yellow>"
       no-trip-routes: "<prefix> <yellow><white><station></white> 近期没有练习线路（<white><routes></white>）的车次，请到练习线路的车站报名</yellow>"
       brief:
         header: "<prefix> <gold><bold>第 <level> 级 · <name> 路考练习</bold></gold>"
@@ -2459,29 +2459,29 @@ drive:
         drill: "<prefix> <white>应急演练：</white><gray>开过第一站后，将随机模拟一次突发状况（受电中断、车门故障、前方障碍等），按提示处置即可。演练结束时讲评，不影响练习计次。</gray>"
         pass: "<prefix> <white>评判标准：</white><gray>与路考相同，得分不低于 <min> 分，全程人工驾驶。</gray>"
         handbook: "<prefix> <white>学习：</white><gray>《FTCA 驾驶员手册》已放进背包，可对照手册练习。</gray>"
-        feedback: "<prefix> <gray>每到一站会点评停车结果。完整开到下车站计一次练习；本车次晚点较多时，系统将先取消演练，必要时交还自动运行。</gray>"
+        feedback: "<prefix> <gray>每到一站会点评停车结果。完整开到交班站计一次练习；本车次晚点较多时，系统将先取消演练，必要时交还自动运行。</gray>"
       stop:
         line: "<prefix> <gray>练习 <done>/<total></gray> <white><station></white> <window><doors>"
       warn:
         emergency: "<prefix> <red>练习：触发了防护紧急制动，路考中出现即不及格</red>"
-        overrun: "<prefix> <red>练习：在 <station> 停过头或越站，路考中出现即不及格</red>"
+        overrun: "<prefix> <red>练习：在 <station> 过标超限或越站，路考中出现即不及格</red>"
         wrong-door: "<prefix> <red>练习：在 <station> 开错了车门，路考中出现即不及格</red>"
         ato: "<prefix> <yellow>练习：已转为 ATO，本次练习无法评判</yellow>"
-        hint: "<prefix> <gray>请继续开到下车站完成练习，结束时给出讲评。</gray>"
+        hint: "<prefix> <gray>请继续开到交班站完成练习，结束时给出讲评。</gray>"
       review:
         header: "<prefix> <gold><bold>第 <level> 级 · <name> 路考练习讲评</bold></gold>"
         passed: "<prefix> <green>按路考标准评判：及格</green> <white>（<reason>）</white>"
         failed: "<prefix> <red>按路考标准评判：不及格</red> <white>（<reason>）</white>"
         void: "<prefix> <yellow>本次练习无法评判：<reason></yellow>"
         no-drill: "<prefix> <gray>本次练习未安排应急演练（车次晚点或时机不合适）。</gray>"
-        not-counted: "<prefix> <yellow>没有开到下车站，本次不计练习次数。</yellow>"
+        not-counted: "<prefix> <yellow>未开到交班站，本次不计练习次数。</yellow>"
         ready: "<prefix> <green>已完成路考练习 <done>/<required> 次，可以报名路考</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习</gray>'><aqua>[再练一次]</aqua></hover></click>"
         more: "<prefix> <yellow>已完成路考练习 <done>/<required> 次，请继续练习</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习</gray>'><aqua>[再练一次]</aqua></hover></click>"
         again: "<prefix> <gray>你已持有<name>，练习仅供熟悉操作。</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习</gray>'><aqua>[再练一次]</aqua></hover></click>"
     guard:
       late: "<prefix> <yellow>本车次已晚点 <white><delay></white> 秒，请在限速内平稳行车，尽快恢复正点；晚点继续扩大时将交还自动运行。</yellow>"
       drill-cancelled: "<prefix> <gray>应急演练已取消，故障已排除。</gray>"
-      handback: "<prefix> <red>本车次已晚点 <white><delay></white> 秒，为保证调度正常运行，列车将在停稳后交还自动运行，本次结束。</red>"
+      handback: "<prefix> <red>本车次已晚点 <white><delay></white> 秒，为保证调度正常运行，列车将在停稳后交还自动运行，本次驾驶结束。</red>"
     coach:
       signal: "<prefix> <aqua>教练：</aqua><gray>信号变严，请右键确认，并按新的信号降速。</gray>"
       overspeed: "<prefix> <aqua>教练：</aqua><gray>已超过限速 <white><limit></white> km/h，请用 B1–B4 降速。</gray>"
@@ -2491,7 +2491,7 @@ drive:
       dwell: "<prefix> <aqua>教练：</aqua><gray>停站中，请留意侧边栏的停站倒计时。</gray>"
       close-doors: "<prefix> <aqua>教练：</aqua><gray>停站时间已到，请按 F 关闭车门。</gray>"
       wait-departure: "<prefix> <aqua>教练：</aqua><gray>车门已关好，请等待出站信号变为允许。</gray>"
-      depart: "<prefix> <aqua>教练：</aqua><gray>可以发车。请拨到 P1 平稳起步，随后跟随 Boss 栏的建议速度行车。</gray>"
+      depart: "<prefix> <aqua>教练：</aqua><gray>可以发车。请将手柄置于 P1 平稳起步，随后跟随 Boss 栏的建议速度行车。</gray>"
       side:
         left: "左侧"
         right: "右侧"
@@ -2500,10 +2500,10 @@ drive:
     drill:
       announce: "<prefix> <gold><bold>应急演练</bold></gold> <gray>以下为模拟的突发状况，请按提示处置。</gray>"
       start:
-        line-loss: "<prefix> <red>受电中断：接触网失电，牵引失效。</red> <gray>请将手柄拨回 N 惰行或施加制动，不要反复牵引；约 <seconds> 秒后恢复供电。</gray>"
-        door: "<prefix> <red>车门故障：门关好信号不通，牵引被封锁。</red> <gray>请确认车门均已关好，然后按 F 打开驾驶台，接通门旁路。</gray>"
-        emergency: "<prefix> <red><bold>前方障碍！</bold></red> <gray>请立即拨到 EB（快捷栏 9）紧急制动，停稳后再继续。</gray>"
-        breaker-trip: "<prefix> <red>主断跳闸：牵引与电制动失效。</red> <gray>请将手柄拨回 N，按 F 打开驾驶台，先断开主断路器，再闭合，闭合完成后恢复牵引。</gray>"
+        line-loss: "<prefix> <red>受电中断：接触网失电，牵引失效。</red> <gray>请将手柄置于 N 惰行或施加制动，不要反复牵引；约 <seconds> 秒后恢复供电。</gray>"
+        door: "<prefix> <red>车门故障：门关好回路不通，牵引被封锁。</red> <gray>请确认车门均已关好，然后按 F 打开驾驶台，接通门旁路。</gray>"
+        emergency: "<prefix> <red><bold>前方障碍！</bold></red> <gray>请立即将手柄置于 EB（快捷栏 9）紧急制动，停稳后再继续。</gray>"
+        breaker-trip: "<prefix> <red>主断跳闸：牵引与电制动失效。</red> <gray>请将手柄置于 N，按 F 打开驾驶台，先断开主断路器，再闭合，闭合完成后恢复牵引。</gray>"
       done:
         line-loss: "<prefix> <green>已恢复供电，可以重新牵引。</green> <gray>反应用时 <seconds> 秒。</gray>"
         door: "<prefix> <green>门旁路已接通，牵引恢复，可以发车。</green> <gray>处置用时 <seconds> 秒。</gray>"
@@ -2516,10 +2516,10 @@ drive:
         slow: "<prefix> <yellow>应急演练（<name>）：已处置，但用时 <seconds> 秒，偏长。</yellow>"
         missed: "<prefix> <red>应急演练（<name>）：未完成处置。</red>"
       tip:
-        line-loss: "<prefix> <gray>要领：受电中断时应立即将手柄拨回 N 或施加制动，不要持续牵引；恢复供电后再起步。</gray>"
+        line-loss: "<prefix> <gray>要领：受电中断时应立即将手柄置于 N 或施加制动，不要持续牵引；恢复供电后再起步。</gray>"
         door: "<prefix> <gray>要领：牵引被封锁且侧边栏显示车门故障时，先确认车门均已关好，再接通门旁路；到站停稳后记得断开。</gray>"
-        emergency: "<prefix> <gray>要领：发现前方障碍应立即拨到 EB，反应越快，停车距离越短。</gray>"
-        breaker-trip: "<prefix> <gray>要领：主断跳闸时先将手柄拨回 N，在驾驶台菜单中依次断开、闭合主断路器，闭合完成后再牵引。</gray>"
+        emergency: "<prefix> <gray>要领：发现前方障碍应立即将手柄置于 EB，反应越快，停车距离越短。</gray>"
+        breaker-trip: "<prefix> <gray>要领：主断跳闸时先将手柄置于 N，在驾驶台菜单中依次断开、闭合主断路器，闭合完成后再牵引。</gray>"
       name:
         line-loss: "受电中断"
         door: "车门故障"
@@ -2527,7 +2527,7 @@ drive:
         breaker-trip: "主断跳闸"
     reissue:
       none: "<prefix> <yellow>你还没有驾驶证，输入 /fta license 查看可报名的考试</yellow>"
-      cooldown: "<prefix> <yellow>补发太频繁，<white><minutes></white> 分钟后再试</yellow>"
+      cooldown: "<prefix> <yellow>补发过于频繁，请 <white><minutes></white> 分钟后再试</yellow>"
       done: "<prefix> <green>已补发驾驶证（证号 <white><serial></white>），已放进背包</green>"
     info:
       header: "<prefix> <gold>我的驾驶证</gold> <gray>证号 <white><serial></white> · 全部 FTCA 列车通用</gray>"
@@ -2540,14 +2540,14 @@ drive:
       level-open-dispatch: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>路考 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（不发证）</gray>'><aqua>[练习]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click>"
       level-locked: "  <dark_gray>○ 第 <level> 级 · <name>（须先取得<required>）</dark_gray>"
       level-closed: "  <dark_gray>○ 第 <level> 级 · <name>（暂未开放）</dark_gray>"
-      footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证丢了？点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>"
+      footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证遗失时点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>"
       none: "  <gray>尚未持有驾驶证</gray>"
       held-exam: "  <green>✔</green> <white><name></white> <gray><date> 考试取得</gray>"
       held-admin: "  <green>✔</green> <white><name></white> <gray><date> 由 <by> 发放</gray>"
     admin:
       player-not-found: "<prefix> <red>找不到玩家 <white><player></white></red>"
-      granted: "<prefix> <green>已给 <white><player></white> 发放<white><name></white></green>"
-      granted-offline: "<prefix> <green>已给 <white><player></white> 发放<white><name></white></green> <gray>（玩家不在线，上线后生效，可用 /fta license reissue 领取驾驶证）</gray>"
+      granted: "<prefix> <green>已向 <white><player></white> 发放<white><name></white></green>"
+      granted-offline: "<prefix> <green>已向 <white><player></white> 发放<white><name></white></green> <gray>（玩家不在线，上线后生效，可用 /fta license reissue 领取驾驶证）</gray>"
       granted-notice: "<prefix> <green>管理员已为你发放<white><name></white></green>"
       revoked: "<prefix> <yellow>已吊销 <white><player></white> 的<white><name></white></yellow>"
       not-held: "<prefix> <gray><player> 未持有<name></gray>"
@@ -2566,16 +2566,16 @@ drive:
       title: "FTCA 驾驶员手册"
       author: "Fetarute"
       given: "<prefix> <green>《FTCA 驾驶员手册》已放进背包</green>"
-      page-1: "<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>"
+      page-1: "<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与正点\n八、终点与换端\n九、异常处置</black>"
       page-2: "<dark_blue><bold>一、FTCA 是什么</bold></dark_blue>\n<black>FTCA 按时刻表自动派车、排进路、控制信号。玩家可以接班驾驶这些列车：调度给出行车许可与停站要求，驾驶员负责平稳行车、停准、开关车门、准点到发。</black>"
       page-3: "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"
       page-4: "<dark_blue><bold>三、领任务与接班</bold></dark_blue>\n<black>在车站输入 /fta drive tasks 打开任务板：左键人工驾驶，右键 ATO。列车到站后坐进车头驾驶室，确认座位后输入 /fta drive on 接班。</black>"
       page-5: "<dark_blue><bold>四、驾驶台</bold></dark_blue>\n<black>快捷栏 1–3 牵引 P3–P1，4 惰行 N，5–8 制动 B1–B4，9 紧急制动 EB。\n停稳后按 F 打开驾驶台菜单（开关车门、结束驾驶等）。\n动作栏：车速与限速。\n侧边栏：信号、停站、时刻、车门。</black>"
-      page-6: "<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在前方停住。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"
-      page-7: "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。终点站最多越过停车点 3 米，超出会被强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"
-      page-8: "<dark_blue><bold>七、发车与准点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步会被拦下。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"
+      page-6: "<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在信号前停车。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"
+      page-7: "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准为佳；欠标可前移对标，过标后不得退行。终点站最多越过停车点 3 米，超出即强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"
+      page-8: "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"
       page-9: "<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。</black>"
-      page-10: "<dark_blue><bold>九、出了状况</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车卡住时可以交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
+      page-10: "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
   end:
     left-seat: "<prefix> <yellow>你已离开座位，驾驶结束</yellow>"
     seat-lost: "<prefix> <red>无法回到座位，驾驶已结束</red>"
@@ -2590,10 +2590,10 @@ drive:
     settled: "<prefix> <green>本趟成绩已结算，驾驶结束，列车交还自动运行</green>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
-    unavailable: "<prefix> <red>手动驾驶功能尚未就绪</red>"
+    unavailable: "<prefix> <red>驾驶功能尚未就绪</red>"
     help:
-      header: "<prefix> <dark_aqua>手动驾驶命令</dark_aqua>"
-      entry-on: "  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐在列车座位上后开始驾驶</gray>"
+      header: "<prefix> <dark_aqua>驾驶命令</dark_aqua>"
+      entry-on: "  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐上列车座位后开始驾驶</gray>"
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- 结束驾驶</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- 查看当前驾驶状态</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- 停稳后设置换向手柄</gray>"
@@ -2606,14 +2606,14 @@ drive:
       entry-tutorial: "  <gray>•</gray> <white>/fta drive tutorial [start|restart|stop|reset|skip]</white> <gray>- 开始、从头开始、退出或重置新手教程，跳过当前一步</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- 查看或放弃当前任务、前往要接的列车、改为从车库接车</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- 停稳后切换人工驾驶与 ATO</gray>"
-      entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>"
+      entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵保护</gray>"
       entry-records: "  <gray>•</gray> <white>/fta drive records [玩家]</white> <gray>- 查看驾驶记录</gray>"
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- 驾驶排行</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <玩家></white> <gray>- 收回某名玩家的驾驶任务</gray>"
-      entry-fault: "  <gray>•</gray> <white>/fta drive fault <玩家> <类型|clear></white> <gray>- 给 simulation 级驾驶中的列车注入或清除车上故障</gray>"
+      entry-fault: "  <gray>•</gray> <white>/fta drive fault <玩家> <类型|clear></white> <gray>- 给仿真级驾驶中的列车注入或清除车上故障</gray>"
     start:
       started: "<prefix> <green>已开始驾驶列车 <white><train></white></green> <gray>快捷栏 1–9 依次为 P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
-      disabled: "<prefix> <red>手动驾驶功能已关闭</red>"
+      disabled: "<prefix> <red>驾驶功能已关闭</red>"
       bad-game-mode: "<prefix> <red>当前游戏模式不允许驾驶</red>"
       already-driving: "<prefix> <yellow>你已经在驾驶中</yellow>"
       cab-seat-confirmed: "<prefix> <green>已确认驾驶座</green>"
@@ -2624,17 +2624,17 @@ drive:
       not-head-cab: "<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"
       breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
       cancelled: "<prefix> <red>当前无法开始驾驶</red>"
-      train-in-use: "<prefix> <red>该列车正在被驾驶或正在制动停车</red>"
+      train-in-use: "<prefix> <red>该列车已有人驾驶或正在制动停车</red>"
       train-moving: "<prefix> <red>列车正朝驾驶室后方溜行（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"
       cursor-not-empty: "<prefix> <red>光标上有物品，请先放回背包再开始驾驶</red>"
       inventory-busy: "<prefix> <red>请先关闭已打开的界面并清空合成格，再开始驾驶</red>"
-      unavailable: "<prefix> <red>手动驾驶当前不可用，请查看控制台日志</red>"
+      unavailable: "<prefix> <red>驾驶功能当前不可用，请查看控制台日志</red>"
       failed: "<prefix> <red>开始驾驶失败，请查看控制台日志</red>"
       no-permission: "<prefix> <red>当前没有驾驶非调度列车的权限，请领取驾驶任务后驾驶调度列车</red>"
     stop:
       stopped: "<prefix> <yellow>已结束驾驶</yellow>"
       not-driving: "<prefix> <red>你当前没有在驾驶</red>"
-    status: "<prefix> <white><train></white> <gray>|</gray> 档位 <yellow><notch></yellow> <gray>|</gray> 速度 <white><speed_kmh></white> km/h <gray>(限速 <limit_kmh>)</gray> <gray>|</gray> <mode> 加速 <accel> 减速 <decel> 格/秒² <gray>|</gray> <direction> <gray>|</gray> <phase>"
+    status: "<prefix> <white><train></white> <gray>|</gray> 档位 <yellow><notch></yellow> <gray>|</gray> 速度 <white><speed_kmh></white> km/h <gray>(限速 <limit_kmh>)</gray> <gray>|</gray> <mode> 加速 <accel> 减速 <decel> 米/秒² <gray>|</gray> <direction> <gray>|</gray> <phase>"
     reverser:
       set: "<prefix> 换向手柄：<aqua><direction></aqua>"
       need-stop: "<prefix> <red>列车停稳后才能操作换向手柄</red>"
@@ -2670,8 +2670,8 @@ drive:
       manual: "<prefix> <yellow>已转为人工驾驶</yellow>"
       ato: "<prefix> <aqua>已转为 ATO，停站结束后请右键确认发车</aqua>"
     breaker:
-      status: "<prefix> 拥堵熔断：<white><status></white>"
-      reset: "<prefix> <yellow>已解除拥堵熔断</yellow>"
+      status: "<prefix> 拥堵保护：<white><status></white>"
+      reset: "<prefix> <yellow>已解除拥堵保护</yellow>"
     handback:
       requested: "<prefix> <yellow>已要求 <player> 把列车交还自动运行</yellow>"
       not-driving: "<prefix> <red><player> 当前没有驾驶调度列车</red>"
@@ -2691,5 +2691,5 @@ drive:
       cleared: "<prefix> <green>已清除 <player> 的列车上的 <count> 项故障</green>"
       none: "<prefix> <gray><player> 的列车当前没有故障</gray>"
       not-driving: "<prefix> <red><player> 当前没有在驾驶</red>"
-      not-simulation: "<prefix> <red><player> 的驾驶会话不是 simulation 级，不能注入故障</red>"
+      not-simulation: "<prefix> <red><player> 的驾驶会话不是仿真级，不能注入故障</red>"
       invalid: "<prefix> <red>故障类型只能是 line-loss、breaker-trip、compressor、brake-leak、door 或 clear</red>"

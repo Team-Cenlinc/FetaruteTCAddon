@@ -82,7 +82,7 @@ class PidsLineStatusViewsTest {
 
     assertTrue(view.rows().isEmpty());
     assertEquals(
-        new Names("本屏线路过滤没有匹配的线路", "No lines match this screen's filter"), view.labels().empty());
+        new Names("没有符合本屏线路筛选条件的线路", "No lines match this screen's filter"), view.labels().empty());
     assertEquals(
         new Names("暂无线路信息", "No line information"),
         views

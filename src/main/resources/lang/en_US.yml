@@ -5,9 +5,9 @@ display:
     eta:
       status:
         arriving: "Arriving"
-        delayed: "Delayed {minutes}min"
-        scheduled: "Scheduled {minutes}min"
-        minutes: "{minutes}min"
+        delayed: "{minutes} min late"
+        scheduled: "Due in {minutes} min"
+        minutes: "{minutes} min"
         unavailable: "-"
 
 enum:
@@ -20,16 +20,17 @@ enum:
   route-pattern-type:
     local: "Local"
     rapid: "Rapid"
-    neo_rapid: "Neo Rapid"
+    neo_rapid: "Special Rapid"
     express: "Express"
     limited_express: "Ltd. Express"
   route-operation-type:
+    create: "Out of depot"
     operation: "Operation"
     return: "Not in Service"
   route-stop-pass-type:
     stop: "Stop"
     pass: "Pass"
-    terminate: "Terminate"
+    terminate: "Terminates"
 
 drive:
   notch:
@@ -63,10 +64,10 @@ drive:
       forced-stop: "<red><bold>Forced stop</bold></red>"
       emergency: "<red><bold>Emergency brake</bold></red>"
       service: "<gold><bold>ATP brake</bold></gold>"
-      handback: "<yellow>Handing back to automatic after stopping</yellow>"
+      handback: "<yellow>Handing back to automatic operation after stopping</yellow>"
       no-signal: "<yellow>No movement authority</yellow>"
       wait-signal: "<red>Stop signal</red>"
-      confirm-signal: "<gold><bold>Signal restricted: right-click to confirm</bold></gold>"
+      confirm-signal: "<gold><bold>Signal restricted: right-click to acknowledge</bold></gold>"
       blocking: "<gold>A following train has been held for <white><seconds></white> s, please move on</gold>"
     station:
       approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>m</gray>"
@@ -79,7 +80,7 @@ drive:
         right: "<yellow>Open the right doors</yellow>"
         both: "<yellow>Open the doors on both sides</yellow>"
         any: "<yellow>Open the platform-side doors</yellow>"
-        none: "<gray>No doors at this stop</gray>"
+        none: "<gray>Doors stay closed at this stop</gray>"
       dwell: "<gray>Dwell</gray> <white><seconds></white> <gray>s</gray>"
       close-doors: "<yellow>Dwell time is up, close the doors</yellow>"
       doors-closing: "<gray>Doors closing</gray>"
@@ -116,7 +117,7 @@ drive:
         failed: "<red>Brake test failed, start it again</red>"
     setup:
       not-ready: "<red>Not started</red>"
-      progress: "<yellow><step> <seconds>s</yellow>"
+      progress: "<yellow><step>: <seconds>s left</yellow>"
       next: "<red>Next: <step></red>"
     direction:
       forward: "Forward"
@@ -150,7 +151,7 @@ drive:
         right: "<aqua><station></aqua> <yellow>Open the right doors</yellow>"
         both: "<aqua><station></aqua> <yellow>Open the doors on both sides</yellow>"
         any: "<aqua><station></aqua> <yellow>Open the platform-side doors</yellow>"
-        none: "<aqua><station></aqua> <gray>No doors at this stop</gray>"
+        none: "<aqua><station></aqua> <gray>Doors stay closed at this stop</gray>"
       dwell: "<aqua><station></aqua> <gray>dwell</gray> <white><seconds></white> <gray>s</gray>"
       close-doors: "<aqua><station></aqua> <yellow>Dwell time is up, close the doors</yellow>"
       doors-closing: "<aqua><station></aqua> <gray>Doors closing</gray>"
@@ -171,10 +172,10 @@ drive:
     brake-pipe-loss: "<prefix> <red>Brake pipe pressure lost; the emergency brake has been applied. Check the main reservoir, then move the handle to N once stopped to recharge.</red>"
     fault:
       line-loss: "<prefix> <red>Line voltage lost: no traction and no electric brake. Stop with the air brake and wait for the supply to return.</red>"
-      breaker-trip: "<prefix> <red>Main breaker tripped: no traction and no electric brake. Once stopped, open the main breaker on the desk, then close it again to reset.</red>"
+      breaker-trip: "<prefix> <red>Main breaker tripped: no traction and no electric brake. Once stopped, open the main breaker on the cab panel, then close it again to reset.</red>"
       compressor: "<prefix> <red>Compressor failure: the main reservoir will no longer recharge. Use air sparingly and end the run soon.</red>"
       brake-leak: "<prefix> <red>Brake cylinder leak: the brake will not hold. Stop as soon as possible and apply the parking brake.</red>"
-      door: "<prefix> <red>Door fault: the door-closed loop is open and traction is cut. Make sure the doors are closed, then use the door bypass on the desk.</red>"
+      door: "<prefix> <red>Door fault: the door-closed loop is open and traction is cut. Make sure the doors are closed, then use the door bypass on the cab panel.</red>"
   fault:
     line-loss: "Line voltage loss"
     breaker-trip: "Main breaker trip"
@@ -183,15 +184,15 @@ drive:
     door: "Door fault"
   setup:
     step:
-      key: "Activating cab"
-      pantograph: "Raising pantograph"
-      shoe: "Connecting shoe"
-      engine: "Starting engine"
-      supercap: "Connecting supercapacitor"
-      breaker: "Closing breaker"
-      aux: "Starting auxiliary power"
+      key: "Activate cab"
+      pantograph: "Raise pantograph"
+      shoe: "Energise shoes"
+      engine: "Start engine"
+      supercap: "Connect supercapacitor"
+      breaker: "Close main breaker"
+      aux: "Start auxiliary power"
   sidebar:
-    title: "<gold><bold>Driver's Desk</bold></gold> <gray><train></gray>"
+    title: "<gold><bold>Cab Panel</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
       train: "Train"
@@ -251,9 +252,9 @@ drive:
         open-doors:
           left: "<yellow>Open the left doors</yellow>"
           right: "<yellow>Open the right doors</yellow>"
-          both: "<yellow>Open both doors</yellow>"
+          both: "<yellow>Open doors on both sides</yellow>"
           any: "<yellow>Open the platform-side doors</yellow>"
-          none: "<gray>No doors at this stop</gray>"
+          none: "<gray>Doors stay closed at this stop</gray>"
         dwell: "<white><seconds></white> <gray>s</gray>"
         close-doors: "<yellow>Close the doors</yellow>"
         doors-closing: "<gray>Doors closing</gray>"
@@ -298,14 +299,14 @@ drive:
         tripped: "<red>Emergency brake</red>"
       score: "<yellow><points></yellow> <gold><bold><grade></bold></gold>"
   mode:
-    mu: "EMU"
+    mu: "Multiple unit"
     loco: "Locomotive"
   phase:
     active: "Driving"
     stopping: "Braking to a stop"
     ended: "Ended"
   menu:
-    title: "Driver's Desk"
+    title: "Cab Panel"
     item:
       reverser-forward: "<green>Reverser: Forward</green>"
       reverser-neutral: "<gray>Reverser: Neutral</gray>"
@@ -365,7 +366,7 @@ drive:
       stopped: "<gray>Only while the train is stopped</gray>"
       current: "<yellow>Current direction</yellow>"
       remaining: "<yellow><seconds>s remaining</yellow>"
-      setup-switch: "<gray>Click to switch on or off; switch on in order, switch off the next step first</gray>"
+      setup-switch: "<gray>Click to switch on or off; switch on in order, off in reverse order</gray>"
       setup-lamp: "<gray>Status lamp, use the start button on the right</gray>"
       start: "<gray>Click to start the train, or to shut it down once started</gray>"
       compressor-switch: "<gray>Click to switch the compressor on or off; when on it runs whenever the main reservoir is low</gray>"
@@ -386,7 +387,7 @@ drive:
       brake-test-apply: "<yellow>Move the handle to B4 or beyond (brake cylinder <white><bc></white> kPa)</yellow>"
       brake-test-release: "<yellow>Release to N (brake cylinder <white><bc></white> kPa)</yellow>"
       brake-test-passed: "<gray>Brake cylinder <white><bc></white> kPa</gray>"
-      end-dispatch: "<gray>Dispatched train: abandons the task and hands back to automatic</gray>"
+      end-dispatch: "<gray>Dispatched train: abandons the task and hands back to automatic operation</gray>"
       brake-test-charge: "<yellow>Move the handle to N to charge (brake pipe <white><bp></white> kPa)</yellow>"
       brake-test-reduce: "<yellow>Move the handle to a brake notch and reduce by at least <white><need></white> kPa (brake pipe <white><bp></white> kPa)</yellow>"
       brake-test-hold: "<yellow>Keep the handle where it is and hold for <white><seconds></white>s (brake cylinder <white><bc></white> kPa)</yellow>"
@@ -397,7 +398,7 @@ drive:
       door-circuit-open: "<red>The door-closed loop is open; bypass it before traction</red>"
     card:
       train: "<gray>Train: </gray><white><train></white>"
-      task-terminal: "<gray>Task: </gray><white><route></white> <aqua><trip></aqua> <gray>to the terminal</gray>"
+      task-terminal: "<gray>Task: </gray><white><route></white> <aqua><trip></aqua> <gray>to the terminus</gray>"
       task-interval: "<gray>Task: </gray><white><route></white> <aqua><trip></aqua> <gray>to</gray> <white><station></white>"
       mode:
         manual: "<gray>Driving: </gray><white>manual</white>"
@@ -405,8 +406,8 @@ drive:
       next: "<gray>Next: </gray><white><station></white>"
       score: "<gray>Live score: </gray><yellow><points></yellow> <gold><bold><grade></bold></gold>"
       vehicle:
-        mu: "<gray>Type: </gray><white>multiple unit</white>"
-        loco: "<gray>Type: </gray><white>locomotive hauled</white>"
+        mu: "<gray>Type: </gray><white>Multiple unit</white>"
+        loco: "<gray>Type: </gray><white>locomotive-hauled</white>"
       motion: "<gray>Accel: </gray><white><accel></white> <gray>Decel: </gray><white><decel></white> <gray>m/s²</gray>"
       max-speed: "<gray>Max speed: </gray><white><kmh></white> <gray>km/h</gray>"
       level:
@@ -443,10 +444,10 @@ drive:
       door: "<red>Door fault: make sure the doors are closed, then use the door bypass</red>"
       door-bypass: "<gold>Door bypass on: door states are not checked</gold>"
     notice:
-      brake-test-started: "<yellow>Brake test started: close the desk and move the handle to B4</yellow>"
+      brake-test-started: "<yellow>Brake test started: close the cab panel and move the handle to B4</yellow>"
       brake-test-passed: "<green>Brake test passed</green>"
       parking-auto-applied: "<red>Main reservoir too low, the parking brake applied itself</red>"
-      brake-test-started-loco: "<yellow>Brake test started: close the desk and move the handle to N to charge</yellow>"
+      brake-test-started-loco: "<yellow>Brake test started: close the cab panel and move the handle to N to charge</yellow>"
       brake-test-failed: "<red>Brake test failed: the brake cylinder leaked too much while holding</red>"
       fault-recovered:
         line-loss: "<green>Line voltage restored</green>"
@@ -457,19 +458,19 @@ drive:
       door-bypass-on: "<gold>Door bypass on, make sure the doors are closed</gold>"
       door-bypass-off: "<green>Door bypass off</green>"
     deny:
-      moving: "<red>The desk can only be used while the train is stopped</red>"
-      traction: "<red>Return to coast or a brake notch before opening the desk</red>"
+      moving: "<red>The cab panel can only be used while the train is stopped</red>"
+      traction: "<red>Return to coast or a brake notch before opening the cab panel</red>"
       doors-open: "<red>Close the doors first</red>"
       use-start-button: "<red>Use the start button to start the train</red>"
       setup-prerequisite: "<red>Complete the previous step first</red>"
-      setup-interlocked: "<red>Switch off the next step first (e.g. open the main breaker before lowering)</red>"
+      setup-interlocked: "<red>Switch off in reverse order (e.g. open the main breaker before lowering the pantograph)</red>"
       setup-busy: "<red>A start-up step is in progress, please wait</red>"
       compressor-auto: "<red>Multiple-unit compressors run automatically and cannot be switched</red>"
       parking-air: "<red>Not enough main reservoir pressure to release the parking brake</red>"
       start-first: "<red>Start the train first</red>"
       brake-test-air: "<red>Main reservoir too low (<white><mr></white> kPa); the brake test needs at least <white><need></white> kPa</red>"
       no-door-animation: "<red>This train has no matching door animation</red>"
-      unavailable: "<red>The desk cannot be opened right now</red>"
+      unavailable: "<red>The cab panel cannot be opened right now</red>"
       reverser-locked: "<red>A dispatched train's direction follows its route; the reverser is locked</red>"
       doors-not-released: "<red>Doors are not released: they can only be opened once stopped at a station</red>"
   driver:
@@ -480,7 +481,7 @@ drive:
       notch-ignored: "<aqua>ATO is driving: the handle has no effect, pull to EB to take manual control</aqua>"
       confirmed: "<green>Departure confirmed</green>"
     signal:
-      confirmed: "<green>Signal confirmed</green>"
+      confirmed: "<green>Signal acknowledged</green>"
     rescue:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
@@ -490,7 +491,7 @@ drive:
       warn: "<prefix> <gold>A following train has been held behind this train for <white><seconds></white> s. Please move on; continuing to block will switch to ATO</gold>"
       ato: "<prefix> <yellow>The following train was held too long; this train has switched to ATO</yellow>"
     breaker:
-      tripped: "<prefix> <red>Congestion breaker: <white><reason></white>; handed back <white><count></white> driver train(s) and paused new shifts</red>"
+      tripped: "<prefix> <red>Congestion protection: <white><reason></white>; handed back <white><count></white> player-driven train(s); takeovers are paused</red>"
   task:
     board:
       title: "<dark_gray>Task board · </dark_gray><black><station></black>"
@@ -536,7 +537,7 @@ drive:
     claim:
       claimed: "<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives and confirm your seat</green>"
       disabled: "<prefix> <red>Driving dispatched trains is not enabled</red>"
-      breaker-open: "<prefix> <red>The line is congested; new shifts are paused</red>"
+      breaker-open: "<prefix> <red>The line is congested; takeovers are paused</red>"
       cancelled: "<prefix> <red>This trip cannot be taken right now</red>"
       continuing: "<prefix> <red>You are waiting to continue with this train's next trip; end driving before taking another trip</red>"
       assigned: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to the terminus</green>"
@@ -557,7 +558,7 @@ drive:
     pickup:
       terminal: "<prefix> <white>Trip <aqua><trip></aqua> runs with train <aqua><train></aqua>, standing at <location>. Board within <yellow><seconds></yellow> s, sit in the cab at either end and confirm your seat; if the train departs towards the other end, walk to that cab before departure (about <reserve> s)</white>"
       terminal-cab: "<prefix> <white>Trip <aqua><trip></aqua> runs with train <aqua><train></aqua>, standing at <location>. Board within <yellow><seconds></yellow> s, sit in the cab in car <yellow><car></yellow> of <cars> (the leading end for this trip) and confirm your seat</white>"
-      depot: "<prefix> <white>Train <aqua><train></aqua> for trip <aqua><trip></aqua> has left the depot shed at <location> and is waiting on its track. Sit in the leading cab and confirm your seat within <yellow><seconds></yellow> s</white>"
+      depot: "<prefix> <white>Train <aqua><train></aqua> for trip <aqua><trip></aqua> has come out of depot <location> and is waiting on its track. Sit in the leading cab and confirm your seat within <yellow><seconds></yellow> s</white>"
       goto-button: "<click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive task goto</white>'><green>[Go to train]</green></hover></click>"
       waiting: "<white>Trip <aqua><trip></aqua> is waiting for you at <location></white> <gray>remaining</gray> <yellow><seconds></yellow> <gray>s</gray>"
       terminal-expired: "<prefix> <yellow>You did not take over in time; trip <aqua><trip></aqua> left under automatic operation and the task is void</yellow>"
@@ -575,13 +576,13 @@ drive:
       driving: "<prefix> <red>You cannot go to another train while driving</red>"
       train-missing: "<prefix> <red>The train to take over cannot be found</red>"
       no-spot: "<prefix> <red>There is nowhere to stand next to the train; please go there yourself</red>"
-      station: "<prefix> <green>You are at the boarding platform. Wait for the train, sit in the front cab and confirm your seat to take over</green>"
-      station-missing: "<prefix> <red>Cannot find the boarding platform; please go there yourself</red>"
-      station-pending: "<prefix> <gray>Heading to the boarding platform…</gray>"
+      station: "<prefix> <green>You are at the takeover platform. Wait for the train, sit in the leading cab and confirm your seat to take over</green>"
+      station-missing: "<prefix> <red>Cannot find the takeover platform; please go there yourself</red>"
+      station-pending: "<prefix> <gray>Heading to the takeover platform…</gray>"
     cab-changed: "<prefix> <green>Ends changed: you are seated in the cab in car <car></green>"
     next-trip: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
-    continue-offer: "<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
-    continue-offer-code: "<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+    continue-offer: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+    continue-offer-code: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
     continued: "<prefix> <green>Now driving trip <aqua><trip></aqua>, scored on its own; drive it to the terminus</green>"
     cab-change-timeout-settled: "<prefix> <yellow>You did not reach the leading cab within <seconds> s; the train departed under automatic operation. This trip is already scored and driving ended normally</yellow>"
     next-trip-no-destination: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua>, departing at <white><time></white></white>"
@@ -628,7 +629,7 @@ drive:
       failed: "Failed"
       interrupted: "Taken back"
   tutorial:
-    offer: "<prefix> <gold>First time driving?</gold> <gray>The tutorial walks you through starting the train, pulling away, coasting, braking to a stop and the doors during this drive; each step moves on once you have done it.</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive tutorial start</white>'><green>[Start tutorial]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Stop asking; run /fta drive tutorial start any time</gray>'><gray>[Skip]</gray></hover></click>"
+    offer: "<prefix> <gold>First time driving?</gold> <gray>The tutorial walks you through starting the train, pulling away, coasting, braking to a stop, and opening and closing the doors during this drive; each step moves on once you have done it.</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive tutorial start</white>'><green>[Start tutorial]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Stop asking; run /fta drive tutorial start any time</gray>'><gray>[Skip]</gray></hover></click>"
     started: "<prefix> <gold>Tutorial started</gold> <gray>Follow the prompts; the action bar and sidebar keep showing the driving display.</gray>"
     step: "<prefix> <gold>Tutorial</gold> <gray>(<index>/<total>)</gray> <text> <buttons>"
     buttons:
@@ -646,7 +647,7 @@ drive:
         chat: "<white>Switch on the compressor:</white> <gray>Locomotive-hauled trains need the compressor switched on by hand. Click the compressor switch on the cab panel; it then runs whenever the main reservoir is low.</gray>"
         subtitle: "<yellow>Switch on the compressor</yellow>"
       brake-test:
-        chat: "<white>Brake test:</white> <gray>Click the brake test on the cab panel, close the panel, pull the handle to B4 (slot 8) or beyond, and once the brake cylinder has pressure, return to N (slot 4) to release. The train cannot take power until the test passes.</gray>"
+        chat: "<white>Brake test:</white> <gray>Click the brake test on the cab panel, close the cab panel, pull the handle to B4 (slot 8) or beyond, and once the brake cylinder has pressure, return to N (slot 4) to release. The train cannot take power until the test passes.</gray>"
         subtitle: "<yellow>Start the brake test, B4 then back to N</yellow>"
       release-parking:
         chat: "<white>Release the parking brake:</white> <gray>Click the parking brake on the cab panel to release it. The train cannot take power while it is applied, and releasing it needs enough main reservoir pressure.</gray>"
@@ -690,13 +691,13 @@ drive:
     tip: "<prefix> <aqua>Driving tip</aqua> <text>"
     tips:
       signal-confirm:
-        chat: "<white>Signal restricted:</white> <gray>When a signal ahead drops to caution or stop, the action bar asks you to right-click to confirm. Confirm and keep to the new limit; after about 4 seconds without confirming the service brake is applied, and then the emergency brake.</gray>"
+        chat: "<white>Signal restricted:</white> <gray>When a signal ahead drops to caution or stop, the action bar asks you to right-click to acknowledge. Acknowledge and keep to the new limit; after about 4 seconds without confirming the service brake is applied, and then the emergency brake.</gray>"
         subtitle: "<gold>Signal restricted: right-click</gold>"
       stop-mark:
-        chat: "<white>Stopping at the mark:</white> <gray>The action bar and sidebar show the distance to the stopping point, and a glowing stop mark on the platform shows where to stop. Use the service brake to stop close to it; if you stop short, move up, and if you overrun too far, the station is skipped.</gray>"
+        chat: "<white>Stopping at the mark:</white> <gray>The action bar and sidebar show the distance to the stop mark, and a glowing stop mark on the platform shows where to stop. Use the service brake to stop close to it; if you stop short, move up, and if you overrun too far, the station is skipped.</gray>"
         subtitle: "<aqua>Stop at the stop mark</aqua>"
       open-doors:
-        chat: "<white>Open the doors:</white> <gray>The train is berthed. Press</gray> <yellow>F</yellow> <gray>and open the platform-side doors shown on the action bar; the dwell timer starts once they are open.</gray>"
+        chat: "<white>Open the doors:</white> <gray>The train is stopped in the platform. Press</gray> <yellow>F</yellow> <gray>and open the platform-side doors shown on the action bar; the dwell timer starts once they are open.</gray>"
         subtitle: "<yellow>Press F, open the platform-side doors</yellow>"
       close-doors:
         chat: "<white>Close the doors:</white> <gray>The dwell time is up. Press</gray> <yellow>F</yellow> <gray>and close the doors; the departure signal comes only after they are shut.</gray>"
@@ -802,7 +803,7 @@ drive:
           no-emergency: "<prefix> <gray>· no protective emergency braking (speeding, passing a stop signal)</gray>"
           no-overrun: "<prefix> <gray>· stop within the door range at every station; no overruns or skips</gray>"
           no-wrong-door: "<prefix> <gray>· only open the platform-side doors</gray>"
-          how: "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the boarding platform; if the train is already in, right beside the front cab</gray>'><green>[Go to boarding]</green></hover></click>"
+          how: "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the takeover platform; if the train is already in, right beside the leading cab</gray>'><green>[Go to takeover]</green></hover></click>"
           handbook: "<prefix> <white>Study: </white><gray>the FTCA driver handbook is in your inventory; read it before taking over, the road test is judged on its points.</gray>"
           feedback: "<prefix> <gray>Each stop is reviewed as you go, and anything that fails the test is reported immediately.</gray>"
     practice:
@@ -814,7 +815,7 @@ drive:
         header: "<prefix> <gold><bold>Level <level> · <name> road-test practice</bold></gold>"
         route: "<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and finish at <yellow><alight></yellow>.</white>"
         what: "<prefix> <white>How it works:</white><gray> like the road test, with a coach riding along: each stop phase tells you the next step, and you are reminded about restrictive signals and speeding. Practice issues no licence and is not saved to your records or the leaderboard.</gray>"
-        drill: "<prefix> <white>Incident drill:</white><gray> after the first stop, one incident is simulated at random (line power loss, door fault, obstacle ahead…). Follow the prompts; it is reviewed at the end and does not affect the practice count.</gray>"
+        drill: "<prefix> <white>Incident drill:</white><gray> after the first stop, one incident is simulated at random (line voltage loss, door fault, obstacle ahead…). Follow the prompts; it is reviewed at the end and does not affect the practice count.</gray>"
         pass: "<prefix> <white>Judged like the road test:</white><gray> at least <min> points, driven manually throughout.</gray>"
         handbook: "<prefix> <white>Study:</white><gray> the FTCA Driver Handbook is in your inventory; practise alongside it.</gray>"
         feedback: "<prefix> <gray>Each stop is reviewed. Reaching the final station counts as one practice run; if the trip runs late, the drill is cancelled first and the train may be handed back to automatic operation.</gray>"
@@ -843,27 +844,27 @@ drive:
     coach:
       signal: "<prefix> <aqua>Coach:</aqua> <gray>Restrictive signal: right-click to acknowledge and slow down for it.</gray>"
       overspeed: "<prefix> <aqua>Coach:</aqua> <gray>You are over the <white><limit></white> km/h limit; brake with B1–B4.</gray>"
-      approach: "<prefix> <aqua>Coach:</aqua> <gray>Approaching <white><station></white>. Watch the stop-point distance in the sidebar, brake early and ease off as you get close.</gray>"
-      open-doors: "<prefix> <aqua>Coach:</aqua> <gray>Stopped. Press F for the cab menu and open the <white><side></white> doors.</gray>"
+      approach: "<prefix> <aqua>Coach:</aqua> <gray>Approaching <white><station></white>. Watch the stop-mark distance in the sidebar, brake early and ease off as you get close.</gray>"
+      open-doors: "<prefix> <aqua>Coach:</aqua> <gray>Stopped. Press F for the cab panel and open the <white><side></white> doors.</gray>"
       no-doors: "<prefix> <aqua>Coach:</aqua> <gray>Stopped. No doors to open here; wait for the dwell to finish.</gray>"
       dwell: "<prefix> <aqua>Coach:</aqua> <gray>Dwelling; watch the countdown in the sidebar.</gray>"
       close-doors: "<prefix> <aqua>Coach:</aqua> <gray>Dwell over; press F and close the doors.</gray>"
       wait-departure: "<prefix> <aqua>Coach:</aqua> <gray>Doors closed; wait for the departure signal to clear.</gray>"
-      depart: "<prefix> <aqua>Coach:</aqua> <gray>Clear to depart. Start smoothly in P1, then follow the advisory speed in the boss bar.</gray>"
+      depart: "<prefix> <aqua>Coach:</aqua> <gray>Clear to depart. Start smoothly in P1, then follow the advised speed in the boss bar.</gray>"
       side:
         left: "left"
         right: "right"
-        both: "both"
+        both: "left and right"
         platform: "platform-side"
     drill:
       announce: "<prefix> <gold><bold>Incident drill</bold></gold> <gray>The following incident is simulated; follow the prompts.</gray>"
       start:
-        line-loss: "<prefix> <red>Line power lost: traction is unavailable.</red> <gray>Return to N or brake, do not keep notching up; power returns in about <seconds> s.</gray>"
-        door: "<prefix> <red>Door fault: the doors-closed circuit is open and traction is blocked.</red> <gray>Make sure every door is closed, then press F and switch on the door bypass.</gray>"
+        line-loss: "<prefix> <red>Line voltage lost: traction is unavailable.</red> <gray>Return to N or brake, do not keep notching up; power returns in about <seconds> s.</gray>"
+        door: "<prefix> <red>Door fault: the door-closed loop is open and traction is blocked.</red> <gray>Make sure every door is closed, then press F and switch on the door bypass.</gray>"
         emergency: "<prefix> <red><bold>Obstacle ahead!</bold></red> <gray>Go to EB (hotbar 9) immediately and stop before continuing.</gray>"
         breaker-trip: "<prefix> <red>Main breaker tripped: traction and electric braking lost.</red> <gray>Return to N, press F, open the main breaker and then close it; resume once it has closed.</gray>"
       done:
-        line-loss: "<prefix> <green>Power restored; you may notch up again.</green> <gray>Reaction time <seconds> s.</gray>"
+        line-loss: "<prefix> <green>Line voltage restored; you may notch up again.</green> <gray>Reaction time <seconds> s.</gray>"
         door: "<prefix> <green>Door bypass on, traction restored; you may depart.</green> <gray>Handled in <seconds> s.</gray>"
         emergency: "<prefix> <green>The train has stopped.</green> <gray>Reaction time <seconds> s. Move off once the way is clear and the signal allows.</gray>"
         breaker-trip: "<prefix> <green>Main breaker reset, traction restored.</green> <gray>Handled in <seconds> s.</gray>"
@@ -874,12 +875,12 @@ drive:
         slow: "<prefix> <yellow>Incident drill (<name>): handled, but took <seconds> s.</yellow>"
         missed: "<prefix> <red>Incident drill (<name>): not handled.</red>"
       tip:
-        line-loss: "<prefix> <gray>Tip: on line power loss, return to N or brake at once instead of holding traction; move off again once power returns.</gray>"
+        line-loss: "<prefix> <gray>Tip: on line voltage loss, return to N or brake at once instead of holding traction; move off again once power returns.</gray>"
         door: "<prefix> <gray>Tip: when traction is blocked and the sidebar shows a door fault, confirm the doors are closed, then use the door bypass; switch it off at the next stop.</gray>"
         emergency: "<prefix> <gray>Tip: go to EB the moment you see an obstacle; the faster you react, the shorter the stopping distance.</gray>"
-        breaker-trip: "<prefix> <gray>Tip: on a breaker trip, return to N, then open and close the main breaker in the cab menu; notch up only once it has closed.</gray>"
+        breaker-trip: "<prefix> <gray>Tip: on a breaker trip, return to N, then open and close the main breaker in the cab panel; notch up only once it has closed.</gray>"
       name:
-        line-loss: "line power loss"
+        line-loss: "line voltage loss"
         door: "door fault"
         emergency: "emergency stop"
         breaker-trip: "main breaker trip"
@@ -897,7 +898,7 @@ drive:
       level-open-tutorial: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>exam: complete the tutorial</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
       level-open-dispatch: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>road test of <stops> stops, pass mark <min></gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice (no licence)</gray>'><aqua>[Practise]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the road test]</green></hover></click>"
       level-locked: "  <dark_gray>○ Level <level> · <name> (requires <required>)</dark_gray>"
-      level-closed: "  <dark_gray>○ Level <level> · <name> (not open)</dark_gray>"
+      level-closed: "  <dark_gray>○ Level <level> · <name> (not yet available)</dark_gray>"
       footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>Get the driver handbook</gray>'><aqua>[Driver handbook]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>Lost your licence? Click to reissue</gray>'><aqua>[Reissue licence]</aqua></hover></click>"
       none: "  <gray>No licence yet</gray>"
       held-exam: "  <green>✔</green> <white><name></white> <gray>passed <date></gray>"
@@ -918,7 +919,7 @@ drive:
       serial: "<dark_gray>No.</dark_gray> <black><serial></black>"
       classes: "<dark_gray>Levels</dark_gray>"
       class: "<black>· <name></black>\n  <dark_gray><date></dark_gray>"
-      notice: "<black>Valid on every server for every FTCA train.</black>\n\n<dark_gray>Driving permission follows the system record; this book is only a certificate. Lost it? Run /fta license reissue.\n\nLevels and exams: /fta license</dark_gray>"
+      notice: "<black>Valid across the server for every FTCA train.</black>\n\n<dark_gray>Driving permission follows the system record; this book is only a certificate. Lost it? Run /fta license reissue.\n\nLevels and exams: /fta license</dark_gray>"
   handbook:
     driver:
       title: "FTCA Driver Handbook"
@@ -928,24 +929,24 @@ drive:
       page-2: "<dark_blue><bold>1. What FTCA does</bold></dark_blue>\n<black>FTCA dispatches trains to the timetable, sets routes and controls signals. Players can take over these trains: dispatch gives movement authority and stops; the driver drives smoothly, stops accurately, works the doors and keeps time.</black>"
       page-3: "<dark_blue><bold>2. Licences</bold></dark_blue>\n<black>Level 1 learner licence: complete the tutorial; drive non-dispatched trains.\nLevel 2 driver licence: practise, then pass a road test; take tasks on dispatched trains.\nLicences are valid everywhere.</black>\n<dark_gray>See and sign up: /fta license</dark_gray>"
       page-4: "<dark_blue><bold>3. Tasks and taking over</bold></dark_blue>\n<black>At a station run /fta drive tasks: left-click for manual, right-click for ATO. When the train arrives, sit in the leading cab, confirm your seat and run /fta drive on.</black>"
-      page-5: "<dark_blue><bold>4. The cab</bold></dark_blue>\n<black>Hotbar 1–3 power P3–P1, 4 coast N, 5–8 brake B1–B4, 9 emergency EB.\nOnce stopped, F opens the cab menu (doors, end driving).\nAction bar: speed and limit.\nSidebar: signal, stop, times, doors.</black>"
+      page-5: "<dark_blue><bold>4. The cab</bold></dark_blue>\n<black>Hotbar 1–3 power P3–P1, 4 coast N, 5–8 brake B1–B4, 9 emergency EB.\nOnce stopped, F opens the cab panel (doors, end driving).\nAction bar: speed and limit.\nSidebar: signal, stop, times, doors.</black>"
       page-6: "<dark_blue><bold>5. Signals and speed</bold></dark_blue>\n<black>The sidebar signal is your authority: proceed at the limit; caution/slow means reduce speed; stop means stop ahead. Right-click to acknowledge a restrictive signal.\nThe advised speed in the boss bar follows the timetable curve; follow it to keep time.</black>"
-      page-7: "<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning. At terminals you may overrun the stop mark by 3 m at most, or the train is forcibly stopped.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>"
+      page-7: "<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning. At termini you may overrun the stop mark by 3 m at most, or the train is forcibly stopped.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>"
       page-8: "<dark_blue><bold>7. Departing on time</bold></dark_blue>\n<black>Depart once the doors are closed and the signal allows; early starts are blocked.\nThe sidebar shows scheduled times and the delay; recover lateness within the limit.\nStop and trip scores are shown at the end.</black>"
       page-9: "<dark_blue><bold>8. Termini and changing ends</bold></dark_blue>\n<black>At the terminus the trip is scored once the doors open; you may end driving or carry on with this train's next trip.\nTo change ends, leave the doors open and walk to the other cab; unmarked cab seats must be confirmed.</black>"
       page-10: "<dark_blue><bold>9. When things go wrong</bold></dark_blue>\n<black>If dispatch holds you, wait for the signal. Use the emergency brake only when you must stop at once. Leaving your seat ends driving; hand back to automatic operation if stuck.</black>\n<dark_gray>Full handbook: Fetarute Wiki.</dark_gray>"
   end:
-    left-seat: "<prefix> <yellow>You left the seat, driving ended</yellow>"
-    seat-lost: "<prefix> <red>Could not return to the seat, driving ended</red>"
-    train-gone: "<prefix> <red>The train no longer exists, driving ended</red>"
-    game-mode: "<prefix> <red>This game mode cannot drive, driving ended</red>"
+    left-seat: "<prefix> <yellow>You left the seat; driving has ended</yellow>"
+    seat-lost: "<prefix> <red>Could not return to the seat; driving has ended</red>"
+    train-gone: "<prefix> <red>The train no longer exists; driving has ended</red>"
+    game-mode: "<prefix> <red>Driving is not allowed in this game mode; driving has ended</red>"
     admin: "<prefix> <yellow>An administrator ended your driving</yellow>"
     handback: "<prefix> <yellow>The train was handed back to automatic operation</yellow>"
-    dispatch-abort: "<prefix> <red>The dispatcher took the train back, driving ended</red>"
+    dispatch-abort: "<prefix> <red>The dispatcher took the train back; driving has ended</red>"
     watchdog: "<prefix> <red>The train made no progress for too long and was handed back to automatic operation</red>"
     task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
-    service-end: "<prefix> <green>The train has reached the end of its run, driving ended</green>"
-    settled: "<prefix> <green>This trip is scored; driving ended and the train returns to automatic operation</green>"
+    service-end: "<prefix> <green>The train has reached the end of its run; driving has ended</green>"
+    settled: "<prefix> <green>This trip has been scored; driving has ended and the train returns to automatic operation</green>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"
@@ -980,7 +981,7 @@ drive:
       no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"
       not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"
       not-head-cab: "<prefix> <red>Sit in the leading cab to take over</red>"
-      breaker-open: "<prefix> <red>The line is congested; new shifts are paused</red>"
+      breaker-open: "<prefix> <red>The line is congested; takeovers are paused</red>"
       cancelled: "<prefix> <red>You cannot start driving right now</red>"
       train-in-use: "<prefix> <red>This train is being driven or is braking to a stop</red>"
       train-moving: "<prefix> <red>The train is rolling away from this cab (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
@@ -988,11 +989,11 @@ drive:
       inventory-busy: "<prefix> <red>Close any open screen and empty the crafting grid before driving</red>"
       unavailable: "<prefix> <red>Manual driving is unavailable, check the console log</red>"
       failed: "<prefix> <red>Could not start driving, check the console log</red>"
-      no-permission: "<prefix> <red>You are not allowed to drive trains outside dispatch; take a driving task to drive a dispatched train</red>"
+      no-permission: "<prefix> <red>You are not allowed to drive non-dispatched trains; take a driving task to drive a dispatched train</red>"
     stop:
       stopped: "<prefix> <yellow>Driving ended</yellow>"
       not-driving: "<prefix> <red>You are not driving</red>"
-    status: "<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> b/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"
+    status: "<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> m/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"
     reverser:
       set: "<prefix> Reverser: <aqua><direction></aqua>"
       need-stop: "<prefix> <red>The reverser can only be changed while stopped</red>"
