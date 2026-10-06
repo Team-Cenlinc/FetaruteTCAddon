@@ -12,6 +12,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockPlaceEvent;
+import org.bukkit.event.entity.EntityDismountEvent;
 import org.bukkit.event.entity.EntityPickupItemEvent;
 import org.bukkit.event.entity.EntityShootBowEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
@@ -95,6 +96,16 @@ public final class DriveListener implements Listener {
         && !event.isSeatChange()
         && event.getEntity() instanceof Player player
         && !manager.allowSeatExit(player)) {
+      event.setCancelled(true);
+    }
+  }
+
+  /** 原版下车事件上的第二道：TrainCarts 没把潜行下车交给它的离座事件时照样拦得住，同一 tick 里两道的判定一致。 */
+  @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+  public void onDismount(EntityDismountEvent event) {
+    if (event.isCancellable()
+        && event.getEntity() instanceof Player player
+        && !manager.allowDismount(player)) {
       event.setCancelled(true);
     }
   }

@@ -871,6 +871,24 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
   }
 
+  /** 离座是否会让一趟任务按放弃处理：只有驾驶调度列车时，会话结束才会结束任务。 */
+  static boolean exitAbandonsTask(DriveSession session, boolean activeTask) {
+    return session.driverLink() != null && activeTask;
+  }
+
+  /**
+   * 原版下车事件上的同一道判定，不依赖 TrainCarts 是否把潜行下车交给它的离座事件：只管潜行键此刻按着的驾驶员， 插件自己把人挪座位（送回座位、换端入座）不受影响。
+   *
+   * @return 是否放行
+   */
+  public boolean allowDismount(Player player) {
+    DriveSession session = active.get(player.getUniqueId());
+    if (session == null || !session.sneakHeld()) {
+      return true;
+    }
+    return allowSeatExit(player);
+  }
+
   /** 潜行键状态变化（输入事件）。 */
   public void noteSneakInput(UUID playerId, boolean sneaking) {
     DriveSession session = active.get(playerId);
@@ -890,20 +908,31 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return true;
     }
     long now = Bukkit.getCurrentTick();
+    // 按列车实测速度判断：卡住不动、编组找不到时指令速度可能一直不为零，驾驶员会下不了车。
+    boolean moving =
+        findSessionGroup(session)
+            .map(group -> measureSpeedBps(group) > config.stoppedSpeedBps())
+            .orElse(false);
     SeatExitGuard.Decision decision =
         session
             .exitGuard()
             .decide(
                 session.cabChange().allowsLeavingSeat(),
-                !session.isStopped(),
-                tasks.activeTaskOf(player.getUniqueId()).isPresent(),
+                moving,
+                exitAbandonsTask(session, tasks.activeTaskOf(player.getUniqueId()).isPresent()),
                 session.lastSneakTick(),
+                session.sneakEdges(),
                 now);
     switch (decision) {
       case ALLOW -> session.noteExitAllowed(now);
-      case MOVING -> notice(player, "drive.seat-exit.moving", Map.of());
+        // 行驶中的提示发到聊天栏：动作栏被占住会挡掉速度与限速显示。
+      case MOVING -> player.sendMessage(
+          plugin.getLocaleManager().component("drive.seat-exit.moving", Map.of()));
       case CONFIRM -> notice(player, "drive.seat-exit.confirm", Map.of());
       case QUIET -> {}
+    }
+    if (decision != SeatExitGuard.Decision.ALLOW) {
+      session.noteExitBlocked(now);
     }
     if (decision != SeatExitGuard.Decision.QUIET) {
       traceSession(session, "按 Shift 离座: " + decision);

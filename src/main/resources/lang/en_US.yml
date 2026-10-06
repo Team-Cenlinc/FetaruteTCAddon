@@ -1056,7 +1056,7 @@ drive:
       not-simulation: "<prefix> <red><player>'s session is not at the simulation level; faults cannot be injected</red>"
       invalid: "<prefix> <red>The fault type must be line-loss, breaker-trip, compressor, brake-leak, door or clear</red>"
   seat-exit:
-    moving: "<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift</yellow>"
+    moving: "<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift. To end driving at once, run /fta drive off</yellow>"
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
 sign:
   stopmark:

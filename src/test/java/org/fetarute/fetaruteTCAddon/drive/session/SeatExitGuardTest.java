@@ -12,45 +12,47 @@ class SeatExitGuardTest {
   private final SeatExitGuard guard = new SeatExitGuard();
 
   @Test
-  @DisplayName("行驶中一律拦下：按住不放只提示一次，松开再按再提示；折返换端途中照常放行")
+  @DisplayName("行驶中一律拦下：按住不放只提示一次，连续误按隔一段时间才再提示；折返换端途中照常放行")
   void blocksWhileMoving() {
-    assertEquals(Decision.MOVING, guard.decide(false, true, false, 100, 100));
-    assertEquals(Decision.QUIET, guard.decide(false, true, false, 100, 101), "按住不放");
-    assertEquals(Decision.QUIET, guard.decide(false, true, true, 100, 102));
-    assertEquals(Decision.MOVING, guard.decide(false, true, true, 110, 110), "重新按下");
-    assertEquals(Decision.ALLOW, guard.decide(true, true, true, 120, 120), "换端途中允许离座");
+    assertEquals(Decision.MOVING, guard.decide(false, true, false, 100, true, 100));
+    assertEquals(Decision.QUIET, guard.decide(false, true, false, 100, true, 101), "按住不放");
+    assertEquals(Decision.QUIET, guard.decide(false, true, true, 110, true, 110), "刚提示过");
+    assertEquals(Decision.MOVING, guard.decide(false, true, true, 300, true, 300), "隔了一段时间再按");
+    assertEquals(Decision.ALLOW, guard.decide(true, true, true, 320, true, 320), "换端途中允许离座");
   }
 
   @Test
   @DisplayName("停稳且没有任务：按一次就放行")
   void allowsAtOnceWithoutTask() {
-    assertEquals(Decision.ALLOW, guard.decide(false, false, false, 100, 100));
+    assertEquals(Decision.ALLOW, guard.decide(false, false, false, 100, true, 100));
   }
 
   @Test
-  @DisplayName("停稳且有任务：第一次提示，两秒内再按一次才放行；按住不放不算再按")
+  @DisplayName("停稳且有任务：第一次提示，两秒内再按一次才放行；按住不放不算再按，哪怕离座请求隔了几个 tick")
   void asksForSecondPressWithTask() {
-    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 100, 100));
-    assertEquals(Decision.QUIET, guard.decide(false, false, true, 100, 101), "按住不放");
-    assertEquals(Decision.QUIET, guard.decide(false, false, true, 100, 102));
-    assertEquals(Decision.ALLOW, guard.decide(false, false, true, 120, 120), "松开再按");
-    assertEquals(Decision.ALLOW, guard.decide(false, false, true, 120, 120), "同一 tick 重复来的请求");
+    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 100, true, 100));
+    assertEquals(Decision.QUIET, guard.decide(false, false, true, 100, true, 101), "按住不放");
+    assertEquals(
+        Decision.QUIET, guard.decide(false, false, true, 100, true, 105), "请求隔了几个 tick 也不算");
+    assertEquals(Decision.ALLOW, guard.decide(false, false, true, 120, true, 120), "松开再按");
+    assertEquals(
+        Decision.ALLOW, guard.decide(false, false, true, 120, true, 120), "同一 tick 重复来的请求");
   }
 
   @Test
   @DisplayName("超过两秒再按算重新开始；中途开车会取消上一次提示")
   void confirmationExpires() {
-    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 100, 100));
-    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 200, 200), "超时");
-    assertEquals(Decision.MOVING, guard.decide(false, true, true, 210, 210));
-    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 220, 220), "开过车要重新确认");
+    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 100, true, 100));
+    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 200, true, 200), "超时");
+    assertEquals(Decision.MOVING, guard.decide(false, true, true, 210, true, 210));
+    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 220, true, 220), "开过车要重新确认");
   }
 
   @Test
   @DisplayName("收不到潜行键事件时，按离座请求之间的间隔区分两次按键")
   void fallsBackToRequestGapWithoutSneakEvents() {
-    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 0, 100));
-    assertEquals(Decision.QUIET, guard.decide(false, false, true, 0, 101));
-    assertEquals(Decision.ALLOW, guard.decide(false, false, true, 0, 110));
+    assertEquals(Decision.CONFIRM, guard.decide(false, false, true, 0, false, 100));
+    assertEquals(Decision.QUIET, guard.decide(false, false, true, 0, false, 101));
+    assertEquals(Decision.ALLOW, guard.decide(false, false, true, 0, false, 110));
   }
 }

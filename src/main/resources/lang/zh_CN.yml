@@ -2697,5 +2697,5 @@ drive:
       not-simulation: "<prefix> <red><player> 的驾驶会话不是仿真级，不能注入故障</red>"
       invalid: "<prefix> <red>故障类型只能是 line-loss、breaker-trip、compressor、brake-leak、door 或 clear</red>"
   seat-exit:
-    moving: "<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座</yellow>"
+    moving: "<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座；需要立即结束驾驶时，输入 /fta drive off</yellow>"
     confirm: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后本趟任务按放弃处理</yellow>"

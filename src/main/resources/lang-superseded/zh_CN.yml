@@ -533,6 +533,8 @@ drive:
   bossbar:
     cab-change:
       announced: ["<gold>下一趟由第 <white><car></white> 节驾驶室开出</gold> <gray>请先到那一端就座</gray>"]
+  seat-exit:
+    moving: ["<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座</yellow>"]
 sign:
   stopmark:
     invalid: ["<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"]

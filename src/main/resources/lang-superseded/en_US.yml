@@ -203,6 +203,8 @@ drive:
     fault:
       breaker-trip: ["<prefix> <red>Main breaker tripped: no traction and no electric brake. Once stopped, open the main breaker on the desk, then close it again to reset.</red>"]
       door: ["<prefix> <red>Door fault: the door-closed loop is open and traction is cut. Make sure the doors are closed, then use the door bypass on the desk.</red>"]
+  seat-exit:
+    moving: ["<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift</yellow>"]
 sign:
   stopmark:
     invalid: ["<prefix> <red>Invalid stop mark</red> <gray>Line 3: carriage:N, e.g. carriage:4, carriage:4,6, carriage:3-5, carriage:*</gray>"]

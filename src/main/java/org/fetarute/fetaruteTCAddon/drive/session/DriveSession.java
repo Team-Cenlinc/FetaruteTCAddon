@@ -131,7 +131,9 @@ public final class DriveSession {
   private long lastAdvanceTick = Long.MIN_VALUE / 2;
   private long lastSneakTick = Long.MIN_VALUE / 2;
   private boolean sneakHeld;
+  private boolean sneakEdges;
   private long exitAllowedTick = Long.MIN_VALUE / 2;
+  private long exitBlockedTick = Long.MIN_VALUE / 2;
   private final SeatExitGuard exitGuard = new SeatExitGuard();
   private long seatLostSinceTick = -1;
   private long groupMissingSinceTick = -1;
@@ -897,6 +899,17 @@ public final class DriveSession {
       this.lastSneakTick = nowTick;
     }
     this.sneakHeld = sneaking;
+    this.sneakEdges = true;
+  }
+
+  /** 潜行键此刻是否按着（只在收得到输入事件时可靠）。 */
+  public boolean sneakHeld() {
+    return sneakHeld;
+  }
+
+  /** 是否收到过潜行键的输入事件：收到过时 {@link #lastSneakTick()} 只在重新按下时变。 */
+  public boolean sneakEdges() {
+    return sneakEdges;
   }
 
   /** 最近一次按下潜行键的 tick。 */
@@ -914,8 +927,16 @@ public final class DriveSession {
     this.exitAllowedTick = nowTick;
   }
 
-  /** 潜行或放行离座后多少 tick 内离座视为主动离座。 */
+  /** 拦下了一次玩家发起的离座：这次按键之后若仍掉出座位，按意外离座处理（送回座位），不算主动离座。 */
+  public void noteExitBlocked(long nowTick) {
+    this.exitBlockedTick = nowTick;
+  }
+
+  /** 潜行或放行离座后多少 tick 内离座视为主动离座；最近一次按键的离座请求被拦下时不算。 */
   public boolean sneakedRecently(long nowTick) {
+    if (exitBlockedTick >= lastSneakTick && exitBlockedTick > exitAllowedTick) {
+      return false;
+    }
     return nowTick - Math.max(lastSneakTick, exitAllowedTick) <= config.exitSneakWindowTicks();
   }
 
