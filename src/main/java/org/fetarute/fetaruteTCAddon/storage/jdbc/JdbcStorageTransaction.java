@@ -28,6 +28,10 @@ public final class JdbcStorageTransaction implements StorageTransaction {
     if (closed) {
       return;
     }
+    if (JdbcConnectionContext.isRollbackOnly(connection)) {
+      rollback();
+      throw new StorageException("嵌套的内层事务已回滚，整个事务一并回滚");
+    }
     try {
       connection.commit();
     } catch (SQLException ex) {

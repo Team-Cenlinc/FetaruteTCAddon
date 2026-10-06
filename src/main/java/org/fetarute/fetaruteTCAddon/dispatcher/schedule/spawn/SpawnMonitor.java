@@ -39,8 +39,9 @@ public final class SpawnMonitor implements Runnable {
     }
     try {
       ticketAssigner.tick(provider, Instant.now());
-    } catch (RuntimeException ex) {
-      LOGGER.log(Level.SEVERE, "SpawnMonitor tick 执行失败，本轮已跳过", ex);
+    } catch (RuntimeException | LinkageError ex) {
+      // 已取出的票据逐张处理：出错的已重新入队，其余照常派发，这里只是本轮未做完的部分留到下一轮。
+      LOGGER.log(Level.SEVERE, "SpawnMonitor tick 执行出错，出错的票据已重新入队，下一轮重试", ex);
     }
   }
 }

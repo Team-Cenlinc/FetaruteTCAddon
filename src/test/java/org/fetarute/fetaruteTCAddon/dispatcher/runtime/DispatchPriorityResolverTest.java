@@ -4,6 +4,9 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -14,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -29,8 +33,10 @@ import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.RouteRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 
@@ -135,6 +141,95 @@ class DispatchPriorityResolverTest {
                         && message.contains("manualPriorityPresent=false")
                         && message.contains("policyBasePriority=0")
                         && message.contains("policyAdjustment=0")));
+  }
+
+  /** 交路在缓存里：不查库就能解析，存储没就绪也一样。 */
+  @Test
+  void routeCacheResolvesPriorityWithoutStorage() {
+    Fixture fixture = fixture(RouteOperationType.CREATE, 5, "CREATE");
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findRecord(fixture.routeId()))
+        .thenReturn(
+            Optional.of(
+                new RouteDefinitionCache.RouteRecord(
+                    fixture.operator(), fixture.line(), fixture.route())));
+    DispatchPriorityResolver resolver =
+        new DispatchPriorityResolver(
+            null, routeDefinitions, new RouteProgressRegistry(), message -> {});
+
+    DispatchPriorityResolution resolution =
+        resolver.resolve(
+            "test",
+            "train-cached",
+            trainProperties(
+                "train-cached", "FTA_ROUTE_ID=" + fixture.routeId(), "FTA_ROUTE_INDEX=0"),
+            fixture.routeDefinition());
+
+    assertEquals(15, resolution.priority());
+    assertEquals(RouteOperationType.CREATE, resolution.operationType().orElseThrow());
+  }
+
+  /** 信号巡检路径上查库出错：按默认优先级处理、不往外抛（否则升级成全网停车恢复）；同一个键在重查间隔内不再查库。 */
+  @Test
+  void storageFailureFallsBackToDefaultPriorityAndBacksOff() {
+    Fixture fixture = fixture(RouteOperationType.RETURN, 7, "R1");
+    StorageManager storageManager = mock(StorageManager.class);
+    StorageProvider provider = mock(StorageProvider.class);
+    RouteRepository routes = mock(RouteRepository.class);
+    when(storageManager.isReady()).thenReturn(true);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    when(provider.routes()).thenReturn(routes);
+    when(routes.findById(fixture.routeId())).thenThrow(new StorageException("读库失败"));
+    AtomicLong clock = new AtomicLong();
+    List<String> debugMessages = new ArrayList<>();
+    DispatchPriorityResolver resolver =
+        new DispatchPriorityResolver(
+            storageManager, null, new RouteProgressRegistry(), debugMessages::add, clock::get);
+    TrainProperties properties =
+        trainProperties("train-db-down", "FTA_ROUTE_ID=" + fixture.routeId(), "FTA_ROUTE_INDEX=0");
+
+    DispatchPriorityResolution first =
+        resolver.resolve("test", "train-db-down", properties, fixture.routeDefinition());
+    DispatchPriorityResolution second =
+        resolver.resolve("test", "train-db-down", properties, fixture.routeDefinition());
+
+    assertEquals(0, first.priority());
+    assertTrue(first.operationType().isEmpty());
+    assertEquals("operation_type_missing", first.fallbackReason());
+    assertEquals(0, second.priority());
+    verify(routes, times(1)).findById(fixture.routeId());
+    assertTrue(
+        debugMessages.stream()
+            .anyMatch(message -> message.contains("SMART_PRIORITY_LOOKUP_FAILED")));
+
+    clock.addAndGet(DispatchPriorityResolver.LOOKUP_MISS_RETRY_NANOS);
+    resolver.resolve("test", "train-db-down", properties, fixture.routeDefinition());
+    verify(routes, times(2)).findById(fixture.routeId());
+  }
+
+  /** 库里没有的交路同样不在每次巡检都查库。 */
+  @Test
+  void missingRouteIsNotQueriedOnEveryResolve() {
+    Fixture fixture = fixture(RouteOperationType.OPERATION, 3, "GONE");
+    StorageManager storageManager = mock(StorageManager.class);
+    StorageProvider provider = mock(StorageProvider.class);
+    RouteRepository routes = mock(RouteRepository.class);
+    when(storageManager.isReady()).thenReturn(true);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    when(provider.routes()).thenReturn(routes);
+    when(routes.findById(fixture.routeId())).thenReturn(Optional.empty());
+    DispatchPriorityResolver resolver =
+        new DispatchPriorityResolver(
+            storageManager, null, new RouteProgressRegistry(), message -> {}, () -> 0L);
+    TrainProperties properties =
+        trainProperties("train-gone", "FTA_ROUTE_ID=" + fixture.routeId(), "FTA_ROUTE_INDEX=0");
+
+    for (int i = 0; i < 5; i++) {
+      resolver.resolve("test", "train-gone", properties, null);
+    }
+
+    verify(routes, times(1)).findById(fixture.routeId());
+    verify(provider, never()).companies();
   }
 
   private static Fixture fixture(

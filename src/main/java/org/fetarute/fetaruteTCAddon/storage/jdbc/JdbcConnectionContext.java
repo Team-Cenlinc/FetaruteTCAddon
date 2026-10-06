@@ -12,6 +12,9 @@ public final class JdbcConnectionContext {
 
   private static final ThreadLocal<Connection> CURRENT = new ThreadLocal<>();
 
+  /** 当前绑定的事务是否已被嵌套的内层事务回滚，只能整体回滚。 */
+  private static final ThreadLocal<Boolean> ROLLBACK_ONLY = new ThreadLocal<>();
+
   private JdbcConnectionContext() {}
 
   public static Connection current() {
@@ -24,11 +27,23 @@ public final class JdbcConnectionContext {
 
   static void bind(Connection connection) {
     CURRENT.set(connection);
+    ROLLBACK_ONLY.remove();
   }
 
   static void clear(Connection connection) {
     if (isCurrent(connection)) {
       CURRENT.remove();
+      ROLLBACK_ONLY.remove();
     }
+  }
+
+  static void markRollbackOnly(Connection connection) {
+    if (isCurrent(connection)) {
+      ROLLBACK_ONLY.set(Boolean.TRUE);
+    }
+  }
+
+  static boolean isRollbackOnly(Connection connection) {
+    return isCurrent(connection) && Boolean.TRUE.equals(ROLLBACK_ONLY.get());
   }
 }

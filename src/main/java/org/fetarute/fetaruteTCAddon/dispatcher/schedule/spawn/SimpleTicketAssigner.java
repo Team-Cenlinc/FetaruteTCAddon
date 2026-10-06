@@ -418,6 +418,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   // key 为 ticketId：避免同一 route 在 backlog>1 时覆盖导致“丢票据/永久卡 backlog”。
   private final java.util.Map<java.util.UUID, PendingLayoverEntry> pendingLayoverTickets =
       new java.util.concurrent.ConcurrentHashMap<>();
+
+  /** 本拍取出的票据里已经交还队列或已经完成的（按票据 ID）；处理出错时据此判断这张票还要不要入队。 */
+  private final Set<UUID> settledDueTickets = java.util.concurrent.ConcurrentHashMap.newKeySet();
+
   private final java.util.Map<MaterializedSpawnKey, PendingMaterializedSpawn>
       pendingMaterializedSpawns = new java.util.concurrent.ConcurrentHashMap<>();
   // key 为 "<lineId>|<terminal>"：记录下一次优先尝试的 route 游标，实现同组 route 轮转。
@@ -546,18 +550,27 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
 
-    // 尝试复用发车
-    LayoverDispatchResult dispatch = runtimeDispatchService.dispatchLayover(candidate, ticket);
-    if (dispatch.dispatched()) {
-      String committedTrainName = dispatch.trainName().orElseThrow();
+    DispatchLifecycleTagPlan tagPlan;
+    LayoverDispatchResult dispatch;
+    try {
+      Optional<Route> routeEntity = loadRoute(Optional.of(provider), ticket.routeId());
       RouteOperationType operationType =
-          resolveRouteOperationType(Optional.of(provider), ticket.routeId())
+          routeEntity
+              .map(Route::operationType)
               .orElse(
                   ticket.mode() == ServiceTicket.TicketMode.RETURN
                       ? RouteOperationType.RETURN
                       : RouteOperationType.OPERATION);
-      applyDispatchLifecycleTags(
-          Optional.of(provider), committedTrainName, ticket.routeId(), operationType);
+      tagPlan = resolveDispatchLifecycleTagPlan(provider, routeEntity, operationType);
+      // 尝试复用发车
+      dispatch = runtimeDispatchService.dispatchLayover(candidate, ticket);
+    } catch (RuntimeException | LinkageError failure) {
+      lease.release();
+      throw failure;
+    }
+    if (dispatch.dispatched()) {
+      String committedTrainName = dispatch.trainName().orElseThrow();
+      applyDispatchLifecycleTags(committedTrainName, tagPlan);
       debugLogger.accept("强制分配成功: " + trainName + " -> ticket " + ticket.ticketId());
       return true;
     }
@@ -721,14 +734,92 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (dueTickets.isEmpty()) {
       return;
     }
-    dueTickets = orderDueTicketsWithRouteRotation(dueTickets);
-    dueTickets = applyDepotDispatchCoordination(provider, dueTickets, selectedDepotsThisTick, now);
-    dueTickets = orderDepotTicketsByLineDepotLoad(provider, dueTickets);
-    // 每张票都试一次；实体化名额在 materializePreparedDepotSpawn 里扣，名额用完的出库票在那里延后。
-    for (SpawnTicket ticket : dueTickets) {
-      if (ticket != null) {
-        trySpawn(provider, now, ticket, selectedDepotsThisTick);
+    // 取出来的票已经不在队列里：处理途中抛异常而不给它去向，它就丢了，所属服务的 backlog 也永远降不回来。
+    settledDueTickets.clear();
+    try {
+      processDueTickets(provider, now, dueTickets, selectedDepotsThisTick);
+    } finally {
+      settledDueTickets.clear();
+    }
+  }
+
+  private void processDueTickets(
+      StorageProvider provider,
+      Instant now,
+      List<SpawnTicket> dueTickets,
+      Map<String, Integer> selectedDepotsThisTick) {
+    List<SpawnTicket> ordered;
+    try {
+      ordered = orderDueTicketsWithRouteRotation(dueTickets);
+      ordered = applyDepotDispatchCoordination(provider, ordered, selectedDepotsThisTick, now);
+      ordered = orderDepotTicketsByLineDepotLoad(provider, ordered);
+    } catch (RuntimeException | LinkageError failure) {
+      // 排序与车库仲裁出错时还没有哪张票被处理过：没有去向的原样放回队列，不计重试次数。
+      for (SpawnTicket ticket : dueTickets) {
+        if (ticket != null && !settledDueTickets.contains(ticket.id())) {
+          deferWithoutAttempt(
+              ticket, now, "due-ticket-ordering-failed:" + failure.getClass().getSimpleName());
+        }
       }
+      throw failure;
+    }
+    // 每张票都试一次；实体化名额在 materializePreparedDepotSpawn 里扣，名额用完的出库票在那里延后。
+    // 一张票出错不连累同一拍的其他票；第一个异常在全部处理完后再抛给调用方记录。
+    Throwable firstFailure = null;
+    for (SpawnTicket ticket : ordered) {
+      if (ticket == null) {
+        continue;
+      }
+      try {
+        trySpawn(provider, now, ticket, selectedDepotsThisTick);
+      } catch (RuntimeException | LinkageError failure) {
+        settleFailedDueTicket(ticket, now, failure);
+        if (firstFailure == null) {
+          firstFailure = failure;
+        } else {
+          firstFailure.addSuppressed(failure);
+        }
+      }
+    }
+    if (firstFailure instanceof RuntimeException runtimeFailure) {
+      throw runtimeFailure;
+    }
+    if (firstFailure instanceof LinkageError linkageFailure) {
+      throw linkageFailure;
+    }
+  }
+
+  /**
+   * 处理途中抛异常的票据：还没有去向的按出错重试入队（计重试次数，到上限即放弃并释放 backlog）。
+   *
+   * <p>已经交还队列或已经完成的、转入待复用的、由实体化发车事务持有的，都已有去向，不能再入队——否则同一张票会出两辆车。
+   */
+  private void settleFailedDueTicket(SpawnTicket ticket, Instant now, Throwable failure) {
+    UUID ticketId = ticket.id();
+    if (settledDueTickets.contains(ticketId)
+        || pendingLayoverTickets.containsKey(ticketId)
+        || hasMaterializedSpawnTransaction(ticketId)) {
+      return;
+    }
+    requeue(ticket, now, "exception:" + failure.getClass().getSimpleName());
+  }
+
+  /** 完成（或放弃）票据，并记下它在本拍已有去向。 */
+  private void completeTicket(SpawnTicket ticket) {
+    markDueTicketSettled(ticket);
+    spawnManager.complete(ticket);
+  }
+
+  /** 把票据交还队列，并记下它在本拍已有去向。 */
+  private void returnTicketToQueue(SpawnTicket ticket) {
+    markDueTicketSettled(ticket);
+    spawnManager.requeue(ticket);
+  }
+
+  /** 先记再交：交还或完成本身出错时，宁可不再入队，也不让同一张票出两辆车。 */
+  private void markDueTicketSettled(SpawnTicket ticket) {
+    if (ticket != null && ticket.id() != null) {
+      settledDueTickets.add(ticket.id());
     }
   }
 
@@ -840,7 +931,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     try {
       notifyDispatched(pending.ticket(), pending.trainName());
-      spawnManager.complete(pending.ticket());
+      completeTicket(pending.ticket());
     } catch (RuntimeException | LinkageError failure) {
       debugLogger.accept(
           "发车票据提交异常: train="
@@ -1153,7 +1244,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     DepotDispatchCoordinator.DispatchBatch batch =
         depotDispatchCoordinator.coordinate(depotTickets, now);
     for (SpawnTicket deferred : batch.deferred()) {
-      spawnManager.requeue(deferred);
+      returnTicketToQueue(deferred);
     }
     Map<UUID, SpawnTicket> readyDepotTickets =
         batch.ready().stream().collect(Collectors.toMap(SpawnTicket::id, ticket -> ticket));
@@ -1275,7 +1366,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         }
         removeIds.add(ticketId);
         hardExpired++;
-        spawnManager.complete(ticket);
+        completeTicket(ticket);
         debugLogger.accept(
             "票据到期作废: route="
                 + (service != null ? service.routeCode() : "?")
@@ -1294,7 +1385,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             java.time.Duration.between(pendingEntry.firstAddedAt(), now).getSeconds();
         removeIds.add(ticketId);
         hardExpired++;
-        spawnManager.complete(ticket);
+        completeTicket(ticket);
         HEALTH_LOGGER.warning(
             "[FTA] 折返票据超过最大等待时间，放弃并释放 backlog: route="
                 + (service != null ? service.routeCode() : "?")
@@ -2340,7 +2431,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           continue;
         }
         pendingLayoverTickets.remove(ticket.id());
-        spawnManager.complete(ticket);
+        completeTicket(ticket);
         debugLogger.accept(
             "Layover pending 清理: route 定义缺失 route="
                 + service.routeCode()
@@ -2354,7 +2445,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           continue;
         }
         pendingLayoverTickets.remove(ticket.id());
-        spawnManager.complete(ticket);
+        completeTicket(ticket);
         debugLogger.accept(
             "Layover pending 清理: route 无站点 route="
                 + service.routeCode()
@@ -2666,9 +2757,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       return false;
     }
+    Optional<Route> routeEntity = loadRoute(providerOpt, service.routeId());
     RouteOperationType operationType =
-        resolveRouteOperationType(providerOpt, service.routeId())
-            .orElse(RouteOperationType.OPERATION);
+        routeEntity.map(Route::operationType).orElse(RouteOperationType.OPERATION);
     if (operationType == RouteOperationType.OPERATION) {
       // 车辆交路额度用完的车不再接运营班次。这里只做否决，不改它的状态：
       // 它会留在 layover 闲置，由 ReclaimManager 在既有的回收窗口里派 RETURN 票送它回库。
@@ -2768,6 +2859,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             startNodeVal,
             0,
             toTicketMode(operationType));
+    DispatchLifecycleTagPlan tagPlan =
+        resolveDispatchLifecycleTagPlan(providerOpt.get(), routeEntity, operationType);
     for (LayoverRegistry.LayoverCandidate candidate : readyCandidates) {
       SpawnControl.Lease spawnLease =
           tryAcquireSpawnControlForLayover(
@@ -2780,13 +2873,18 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       if (spawnLease == null) {
         continue;
       }
-      LayoverDispatchResult dispatch =
-          runtimeDispatchService.dispatchLayover(candidate, serviceTicket);
+      LayoverDispatchResult dispatch;
+      try {
+        dispatch = runtimeDispatchService.dispatchLayover(candidate, serviceTicket);
+      } catch (RuntimeException | LinkageError failure) {
+        releaseSpawnLease(spawnLease);
+        throw failure;
+      }
       if (dispatch.dispatched()) {
         String committedTrainName = dispatch.trainName().orElseThrow();
-        applyDispatchLifecycleTags(providerOpt, committedTrainName, service, operationType);
+        applyDispatchLifecycleTags(committedTrainName, tagPlan);
         notifyDispatched(ticket, committedTrainName);
-        spawnManager.complete(ticket);
+        completeTicket(ticket);
         spawnSuccess.increment();
         pendingLayoverTickets.remove(ticket.id());
         debugLogger.accept("Layover 复用成功: " + committedTrainName + " -> " + service.routeCode());
@@ -2826,12 +2924,31 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return ServiceTicket.TicketMode.OPERATION;
   }
 
-  private Optional<RouteOperationType> resolveRouteOperationType(
-      Optional<StorageProvider> providerOpt, UUID routeId) {
+  private static Optional<Route> loadRoute(Optional<StorageProvider> providerOpt, UUID routeId) {
     if (providerOpt.isEmpty() || routeId == null) {
       return Optional.empty();
     }
-    return providerOpt.get().routes().findById(routeId).map(Route::operationType);
+    return providerOpt.get().routes().findById(routeId);
+  }
+
+  /**
+   * 复用发车要写的生命周期标签，在折返事务提交<b>之前</b>从库里读好。
+   *
+   * <p>提交之后列车已经改名开走：此时再查库失败，票据的完成与登记就会被跳过，票留在待派里，又被另一辆车派一次。
+   */
+  private record DispatchLifecycleTagPlan(
+      RouteOperationType operationType,
+      Optional<String> spawnGroup,
+      Optional<Integer> maxOperationTrips) {}
+
+  /** 交路组与圈数上限都从已读到的交路实体取，只有圈数要看线路配置时才再读一次线路。 */
+  private static DispatchLifecycleTagPlan resolveDispatchLifecycleTagPlan(
+      StorageProvider provider, Optional<Route> routeEntity, RouteOperationType operationType) {
+    Optional<String> groupOpt = routeEntity.flatMap(route -> readSpawnGroup(route.metadata()));
+    return new DispatchLifecycleTagPlan(
+        operationType,
+        groupOpt,
+        routeEntity.flatMap(route -> resolveMaxOperationTrips(provider, route, groupOpt)));
   }
 
   /**
@@ -2846,24 +2963,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *   <li>若交路组配置了 {@code maxOperationTrips}，写入 {@code FTA_OP_MAX}
    *   <li>按当前车种配置刷新出车写入的加减速标签（{@link SpawnMotionTags}；用户设定的不动）
    * </ul>
+   *
+   * <p>折返事务已经提交时调用：这里出错只记告警，不往外抛，调用方随后的票据完成与登记必须照常进行。
    */
-  private void applyDispatchLifecycleTags(
-      Optional<StorageProvider> providerOpt,
-      String trainName,
-      SpawnService service,
-      RouteOperationType operationType) {
-    if (service == null) {
-      return;
+  private void applyDispatchLifecycleTags(String trainName, DispatchLifecycleTagPlan plan) {
+    try {
+      writeDispatchLifecycleTags(trainName, plan);
+    } catch (RuntimeException | LinkageError failure) {
+      HEALTH_LOGGER.warning(
+          "[FTA] 复用发车后写入生命周期标签失败，票据照常完成: train="
+              + trainName
+              + " error="
+              + failure.getClass().getSimpleName()
+              + ":"
+              + String.valueOf(failure.getMessage()));
     }
-    applyDispatchLifecycleTags(providerOpt, trainName, service.routeId(), operationType);
   }
 
-  private void applyDispatchLifecycleTags(
-      Optional<StorageProvider> providerOpt,
-      String trainName,
-      UUID routeId,
-      RouteOperationType operationType) {
-    if (trainName == null || trainName.isBlank() || routeId == null || operationType == null) {
+  private void writeDispatchLifecycleTags(String trainName, DispatchLifecycleTagPlan plan) {
+    if (trainName == null || trainName.isBlank() || plan == null || plan.operationType() == null) {
       return;
     }
     TrainProperties properties = TrainPropertiesStore.get(trainName);
@@ -2878,23 +2996,21 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     int currentTrips = TrainTagHelper.readIntTag(properties, TAG_OPERATION_TRIPS).orElse(0);
     int nextTrips =
-        switch (operationType) {
+        switch (plan.operationType()) {
           case OPERATION -> Math.max(0, currentTrips + 1);
           case CREATE, RETURN -> 0;
         };
     TrainTagHelper.writeTag(properties, TAG_OPERATION_TRIPS, String.valueOf(nextTrips));
 
-    Optional<String> groupOpt = resolveServiceSpawnGroup(providerOpt, routeId);
-    if (groupOpt.isPresent()) {
-      TrainTagHelper.writeTag(properties, TAG_CIRCULATION_GROUP, groupOpt.get());
+    if (plan.spawnGroup().isPresent()) {
+      TrainTagHelper.writeTag(properties, TAG_CIRCULATION_GROUP, plan.spawnGroup().get());
     } else {
       TrainTagHelper.removeTagKey(properties, TAG_CIRCULATION_GROUP);
     }
 
-    Optional<Integer> maxTripsOpt = resolveServiceMaxOperationTrips(providerOpt, routeId, groupOpt);
-    if (maxTripsOpt.isPresent()) {
+    if (plan.maxOperationTrips().isPresent()) {
       TrainTagHelper.writeTag(
-          properties, TAG_MAX_OPERATION_TRIPS, String.valueOf(maxTripsOpt.get()));
+          properties, TAG_MAX_OPERATION_TRIPS, String.valueOf(plan.maxOperationTrips().get()));
     } else {
       TrainTagHelper.removeTagKey(properties, TAG_MAX_OPERATION_TRIPS);
     }
@@ -2918,11 +3034,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     StorageProvider provider = providerOpt.get();
-    Optional<Route> routeOpt = provider.routes().findById(routeId);
-    if (routeOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    Route route = routeOpt.get();
+    return provider
+        .routes()
+        .findById(routeId)
+        .flatMap(route -> resolveMaxOperationTrips(provider, route, groupOpt));
+  }
+
+  private static Optional<Integer> resolveMaxOperationTrips(
+      StorageProvider provider, Route route, Optional<String> groupOpt) {
     Optional<Integer> routeOverride =
         readPositiveInt(route.metadata(), "spawn_group_max_trips", "max_operation_trips");
     if (routeOverride.isPresent()) {
@@ -3438,7 +3557,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         return false;
       }
       notifyDispatched(context.ticket(), context.trainName());
-      spawnManager.complete(context.ticket());
+      completeTicket(context.ticket());
       clearCompletedMaterializedSpawnMarker(train, context.trainName());
     } catch (RuntimeException | LinkageError failure) {
       debugLogger.accept(
@@ -3598,7 +3717,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         ticket.attempts() + 1 >= maxRetryAttempts
             ? ticket.delayedUntil(retryAt, key)
             : ticket.withRetry(retryAt, key);
-    spawnManager.requeue(retry);
+    returnTicketToQueue(retry);
     try {
       debugLogger.accept(
           "已实体化发车回滚后保留票据: ticket="
@@ -3687,7 +3806,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         return;
       }
       pendingLayoverTickets.remove(ticket.id());
-      spawnManager.complete(ticket);
+      completeTicket(ticket);
       try {
         debugLogger.accept(
             "自动发车放弃: ticket="
@@ -3713,7 +3832,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
     Instant next = now.plus(retryDelay);
     SpawnTicket retry = ticket.withRetry(next, error);
-    spawnManager.requeue(retry);
+    returnTicketToQueue(retry);
     String routeCode = ticket.service().routeCode();
     try {
       debugLogger.accept(
@@ -3773,7 +3892,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         .computeIfAbsent(reason, ignored -> new java.util.concurrent.atomic.LongAdder())
         .increment();
     SpawnTicket retry = ticket.blockedUntil(now.plus(retryDelay), reason);
-    spawnManager.requeue(retry);
+    returnTicketToQueue(retry);
     debugLogger.accept(
         "自动发车重试入队: ticket="
             + ticket.id()
@@ -3794,7 +3913,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Instant base = now == null ? Instant.now() : now;
     Instant next = base.plus(retryDelay);
     SpawnTicket deferred = ticket.delayedUntil(next, reason);
-    spawnManager.requeue(deferred);
+    returnTicketToQueue(deferred);
     debugLogger.accept(
         "自动发车延后: ticket="
             + ticket.id()
