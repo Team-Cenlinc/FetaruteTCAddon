@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.drive.inventory;
 
+import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatExitEvent;
 import com.destroystokyo.paper.event.player.PlayerRecipeBookClickEvent;
 import io.papermc.paper.event.player.PlayerPickItemEvent;
 import org.bukkit.Bukkit;
@@ -49,7 +50,7 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
  * <p>分两类：
  *
  * <ul>
- *   <li>会话事件：选中槽位换算成档位、潜行离座、下线、死亡、游戏模式与世界变化；
+ *   <li>会话事件：选中槽位换算成档位、潜行离座（含防误离座）、下线、死亡、游戏模式与世界变化；
  *   <li>物品保护：驾驶员的快捷栏里是他的真实物品，客户端却以为是驾驶物品，所以一切会动用、转移、损耗物品的事件都要取消。
  *       数据包层已经截获了大部分按键，这里是第二道防线，并负责对方块的右键、挖掘与放置。
  * </ul>
@@ -83,10 +84,19 @@ public final class DriveListener implements Listener {
 
   @EventHandler
   public void onInput(PlayerInputEvent event) {
-    if (event.getInput().isSneak()) {
-      manager.noteSneak(event.getPlayer().getUniqueId());
-    }
+    manager.noteSneakInput(event.getPlayer().getUniqueId(), event.getInput().isSneak());
     manager.onHornInput(event.getPlayer(), event.getInput().isJump());
+  }
+
+  /** 驾驶员自己按 Shift 离座：行驶中拦下，停稳且有任务时须再按一次（中文输入法常用 Shift 切换，容易误按）。 */
+  @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+  public void onSeatExit(MemberBeforeSeatExitEvent event) {
+    if (event.isPlayerInitiated()
+        && !event.isSeatChange()
+        && event.getEntity() instanceof Player player
+        && !manager.allowSeatExit(player)) {
+      event.setCancelled(true);
+    }
   }
 
   @EventHandler(priority = EventPriority.MONITOR)

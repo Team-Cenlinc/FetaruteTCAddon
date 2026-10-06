@@ -2324,8 +2324,8 @@ drive:
         chat: "<white>关门：</white><gray>再次点击车门按钮关门。车门未关好时不能牵引，关门动画结束后才算关好。</gray>"
         subtitle: "<yellow>关闭车门</yellow>"
       finish:
-        chat: "<white>结束驾驶：</white><gray>按</gray> <yellow>Shift</yellow> <gray>离座，或输入 /fta drive off 结束驾驶；行驶中离座时列车自动制动停车。结束驾驶即完成教程。</gray>"
-        subtitle: "<yellow>按 Shift 离座结束驾驶</yellow>"
+        chat: "<white>结束驾驶：</white><gray>停车后按</gray> <yellow>Shift</yellow> <gray>离座，或输入 /fta drive off 结束驾驶；列车行驶中不能离座。结束驾驶即完成教程。</gray>"
+        subtitle: "<yellow>停车后按 Shift 离座结束驾驶</yellow>"
       finish-dispatch:
         chat: "<white>完成任务：</white><gray>请按信号开到终点站，停稳后列车自动交还自动运行，任务完成即完成教程。中途离座或输入 /fta drive off 将记为放弃任务。</gray>"
         subtitle: "<yellow>按信号开到终点站</yellow>"
@@ -2696,3 +2696,6 @@ drive:
       not-driving: "<prefix> <red><player> 当前没有在驾驶</red>"
       not-simulation: "<prefix> <red><player> 的驾驶会话不是仿真级，不能注入故障</red>"
       invalid: "<prefix> <red>故障类型只能是 line-loss、breaker-trip、compressor、brake-leak、door 或 clear</red>"
+  seat-exit:
+    moving: "<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座</yellow>"
+    confirm: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后本趟任务按放弃处理</yellow>"

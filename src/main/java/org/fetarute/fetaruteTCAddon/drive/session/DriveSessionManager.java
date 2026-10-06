@@ -871,6 +871,46 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
   }
 
+  /** 潜行键状态变化（输入事件）。 */
+  public void noteSneakInput(UUID playerId, boolean sneaking) {
+    DriveSession session = active.get(playerId);
+    if (session != null) {
+      session.noteSneakInput(sneaking, Bukkit.getCurrentTick());
+    }
+  }
+
+  /**
+   * 驾驶员自己按 Shift 离座前的判定：行驶中拦下；停稳且有未结束的任务时须在两秒内再按一次（离座即按放弃处理）；其余放行。
+   *
+   * @return 是否放行
+   */
+  public boolean allowSeatExit(Player player) {
+    DriveSession session = active.get(player.getUniqueId());
+    if (session == null) {
+      return true;
+    }
+    long now = Bukkit.getCurrentTick();
+    SeatExitGuard.Decision decision =
+        session
+            .exitGuard()
+            .decide(
+                session.cabChange().allowsLeavingSeat(),
+                !session.isStopped(),
+                tasks.activeTaskOf(player.getUniqueId()).isPresent(),
+                session.lastSneakTick(),
+                now);
+    switch (decision) {
+      case ALLOW -> session.noteExitAllowed(now);
+      case MOVING -> notice(player, "drive.seat-exit.moving", Map.of());
+      case CONFIRM -> notice(player, "drive.seat-exit.confirm", Map.of());
+      case QUIET -> {}
+    }
+    if (decision != SeatExitGuard.Decision.QUIET) {
+      traceSession(session, "按 Shift 离座: " + decision);
+    }
+    return decision == SeatExitGuard.Decision.ALLOW;
+  }
+
   /**
    * 玩家在快捷栏上选了另一个槽位。
    *

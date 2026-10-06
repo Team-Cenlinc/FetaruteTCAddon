@@ -130,6 +130,9 @@ public final class DriveSession {
   private int originalHeldSlot = -1;
   private long lastAdvanceTick = Long.MIN_VALUE / 2;
   private long lastSneakTick = Long.MIN_VALUE / 2;
+  private boolean sneakHeld;
+  private long exitAllowedTick = Long.MIN_VALUE / 2;
+  private final SeatExitGuard exitGuard = new SeatExitGuard();
   private long seatLostSinceTick = -1;
   private long groupMissingSinceTick = -1;
   private double lastCapBps;
@@ -888,9 +891,32 @@ public final class DriveSession {
     this.lastSneakTick = nowTick;
   }
 
-  /** 潜行后多少 tick 内离座视为主动离座。 */
+  /** 潜行键状态（输入事件）：按下的那一刻记为一次潜行，按住不放不重复记。 */
+  public void noteSneakInput(boolean sneaking, long nowTick) {
+    if (sneaking && !sneakHeld) {
+      this.lastSneakTick = nowTick;
+    }
+    this.sneakHeld = sneaking;
+  }
+
+  /** 最近一次按下潜行键的 tick。 */
+  public long lastSneakTick() {
+    return lastSneakTick;
+  }
+
+  /** 按 Shift 离座的防误操作。 */
+  public SeatExitGuard exitGuard() {
+    return exitGuard;
+  }
+
+  /** 放行了一次玩家发起的离座（按住 Shift 等到停车才离座时，离座时刻可能已远离按下的时刻）。 */
+  public void noteExitAllowed(long nowTick) {
+    this.exitAllowedTick = nowTick;
+  }
+
+  /** 潜行或放行离座后多少 tick 内离座视为主动离座。 */
   public boolean sneakedRecently(long nowTick) {
-    return nowTick - lastSneakTick <= config.exitSneakWindowTicks();
+    return nowTick - Math.max(lastSneakTick, exitAllowedTick) <= config.exitSneakWindowTicks();
   }
 
   /** 记录驾驶员离开座位，返回已离开多少 tick。 */

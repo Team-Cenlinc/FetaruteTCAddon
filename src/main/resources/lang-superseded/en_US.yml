@@ -120,6 +120,9 @@ drive:
     steps:
       brake-test:
         chat: ["<white>Brake test:</white> <gray>Click the brake test on the cab panel, close the panel, pull the handle to B4 (slot 8) or beyond, and once the brake cylinder has pressure, return to N (slot 4) to release. The train cannot take power until the test passes.</gray>"]
+      finish:
+        chat: ["<white>End the drive:</white> <gray>Press</gray> <yellow>Shift</yellow> <gray>to leave the seat, or run /fta drive off. If the train is moving it brakes to a stop by itself. Ending the drive completes the tutorial.</gray>"]
+        subtitle: ["<yellow>Press Shift to leave the seat</yellow>"]
   sidebar:
     value:
       stop:
