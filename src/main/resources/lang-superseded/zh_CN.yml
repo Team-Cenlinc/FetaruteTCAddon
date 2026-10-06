@@ -3,7 +3,8 @@
 command:
   route:
     set:
-      batch-success: ["<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"]
+      batch-success: ["<prefix> <dark_aqua>已批量更新 <white><count></white> 条运营运行图：</dark_aqua><white><codes></white> <gray>（出库与回送运行图不在批量范围内）</gray>"]
+      wildcard-flags: ["<prefix> <red>运行图写成通配（*）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"]
   consist:
     max-speed: ["，最高 <value> 格/秒"]
   pids:

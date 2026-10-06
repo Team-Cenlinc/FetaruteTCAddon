@@ -966,9 +966,9 @@ command:
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
-      batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运营运行图：</dark_aqua><white><codes></white> <gray>（出库与回送运行图不在批量范围内）</gray>"
+      batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"
       batch-partial: "<prefix> <yellow>批量更新中途停止，以下运行图已经更新：</yellow><white><codes></white>"
-      wildcard-flags: "<prefix> <red>运行图写成通配（*）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
+      wildcard-flags: "<prefix> <red>运行图写成通配（* 代表任意个字符，? 代表一个字符）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
       noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
