@@ -2341,6 +2341,7 @@ drive:
       already-held: "<prefix> <yellow>你已持有<white><name></white>，无需再考</yellow>"
       requires: "<prefix> <red>报考<white><name></white>须先取得：<white><required></white></red>"
       in-progress: "<prefix> <yellow>你正在参加<white><name></white>考试，请先完成本次考试</yellow>"
+      in-progress-dispatch: "<prefix> <yellow>你正在参加<white><name></white>路考，请先完成本次路考</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次路考：尚未开车时不计成绩，开车后放弃按未通过计</gray>'><gray>[放弃本次路考]</gray></hover></click>"
       cooldown: "<prefix> <yellow><white><name></white>路考未通过，<white><minutes></white> 分钟后可以再考</yellow>"
       driving: "<prefix> <red>请先结束驾驶再报名路考或练习</red>"
       has-task: "<prefix> <red>你已领取了驾驶任务，请先完成或放弃（/fta drive task abandon）再报名路考或练习</red>"
@@ -2411,6 +2412,7 @@ drive:
           feedback: "<prefix> <gray>每到一站会点评停车结果，出现不及格项会马上提示。</gray>"
     practice:
       expired: "<prefix> <yellow><white><name></white>路考练习已超时，可以重新报名</yellow>"
+      in-progress: "<prefix> <yellow>你正在进行<white><name></white>路考练习，请先完成本次练习</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次练习（不计练习次数）</gray>'><gray>[放弃本次练习]</gray></hover></click>"
       not-road: "<prefix> <yellow><white><name></white>考的是新手教程，没有路考练习；可随时输入 /fta drive tutorial start 练习教程</yellow>"
       no-trip-routes: "<prefix> <yellow><white><station></white> 近期没有练习线路（<white><routes></white>）的车次，请到练习线路的车站报名</yellow>"
       brief:

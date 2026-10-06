@@ -166,7 +166,7 @@ public final class FtaLicenseCommand {
       sender.sendMessage(locale.component("drive.license.disabled"));
       return;
     }
-    if (!licenses.loaded(id)) {
+    if (!licenses.ensureLoaded(player)) {
       sender.sendMessage(locale.component("drive.license.loading"));
       return;
     }

@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -124,6 +125,9 @@ public final class LicenseService implements Listener {
   /** 在线玩家各级的练习次数；还没读到时没有这一项。 */
   private final Map<UUID, Map<String, TrainingRecord>> training = new HashMap<>();
 
+  /** 正在从数据库读驾驶证的玩家：读完（成败都算）才移出，避免重复读。 */
+  private final Set<UUID> loadingNow = new HashSet<>();
+
   private final DriverHandbook handbook;
   private final TrainingCoach coach;
   private BukkitTask expiryTask;
@@ -209,6 +213,15 @@ public final class LicenseService implements Listener {
     return held.containsKey(playerId);
   }
 
+  /** 驾驶证已读到就返回 {@code true}；还没读到且没在读（例如加入时读失败了）时重新读一次，返回 {@code false}。 */
+  public boolean ensureLoaded(Player player) {
+    if (loaded(player.getUniqueId())) {
+      return true;
+    }
+    load(player);
+    return false;
+  }
+
   public boolean holds(UUID playerId, String classId) {
     Map<String, LicenseRecord> mine = held.get(playerId);
     return mine != null && mine.containsKey(classId);
@@ -254,7 +267,7 @@ public final class LicenseService implements Listener {
           "drive.license.exam.unknown-class", Map.of("class", String.valueOf(classId)));
     }
     LicenseClass license = found.get();
-    if (!loaded(id)) {
+    if (!ensureLoaded(player)) {
       return Reply.of("drive.license.loading");
     }
     if (holds(id, license.id())) {
@@ -278,7 +291,7 @@ public final class LicenseService implements Listener {
       return restartTutorialExam(player, license, running);
     }
     if (running != null) {
-      return new Reply("drive.license.exam.in-progress", Map.of("name", nameOf(running.classId())));
+      return inProgress(running);
     }
     Instant now = Instant.now();
     Instant until = retryAfter.get(retryKey(id, license.id()));
@@ -326,7 +339,7 @@ public final class LicenseService implements Listener {
     if (license.exam() != LicenseClass.Exam.DISPATCH) {
       return new Reply("drive.license.practice.not-road", Map.of("name", license.name()));
     }
-    if (!loaded(id)) {
+    if (!ensureLoaded(player)) {
       return Reply.of("drive.license.loading");
     }
     List<String> missing = new ArrayList<>();
@@ -342,7 +355,7 @@ public final class LicenseService implements Listener {
     }
     Exam running = exams.get(id);
     if (running != null) {
-      return new Reply("drive.license.exam.in-progress", Map.of("name", nameOf(running.classId())));
+      return inProgress(running);
     }
     return startDispatchRun(player, license, stationArg, Instant.now(), true);
   }
@@ -368,7 +381,8 @@ public final class LicenseService implements Listener {
             false));
     apply(player);
     // 正在驾驶时马上开始教程；不在驾驶时下一次开始驾驶时开始（考试期间临时有开车与教程的权限）。
-    manager.startTutorial(player);
+    // 报名前已在做的教程不算：从第一步重来，之前跳过的练习步骤也不带进考试。
+    manager.restartTutorial(player);
     Map<String, String> values =
         Map.of(
             "level",
@@ -381,6 +395,17 @@ public final class LicenseService implements Listener {
       tell(player, "drive.license.exam.brief.tutorial." + line, values);
     }
     return new Reply("drive.license.exam.brief.tutorial.perm", values);
+  }
+
+  /** 已有进行中的考试或练习时的回复：路考与练习可以放弃任务了结，提示里带放弃按钮。 */
+  private Reply inProgress(Exam running) {
+    String key =
+        running.kind() != LicenseClass.Exam.DISPATCH
+            ? "drive.license.exam.in-progress"
+            : running.training()
+                ? "drive.license.practice.in-progress"
+                : "drive.license.exam.in-progress-dispatch";
+    return new Reply(key, Map.of("name", nameOf(running.classId())));
   }
 
   /** 正在考教程时再报名同一级：放弃这一次教程，从第一步重来；考试截止时刻不变。 */
@@ -1016,7 +1041,7 @@ public final class LicenseService implements Listener {
     if (!config.enabled()) {
       return Reply.of("drive.license.disabled");
     }
-    if (!loaded(id)) {
+    if (!ensureLoaded(player)) {
       return Reply.of("drive.license.loading");
     }
     if (held(id).isEmpty()) {
@@ -1128,12 +1153,18 @@ public final class LicenseService implements Listener {
 
   private void load(Player player) {
     UUID id = player.getUniqueId();
+    if (!loadingNow.add(id)) {
+      return;
+    }
     async(
         provider ->
             new Loaded(
                 provider.licenses().listByPlayer(id), provider.licenses().trainingByPlayer(id)),
         loaded -> {
-          if (!player.isOnline()) {
+          loadingNow.remove(id);
+          // 按 UUID 取此刻在线的玩家：读的途中下线又上线时，加入时那次读被并入这一次，结果要给新的玩家对象。
+          Player online = Bukkit.getPlayer(id);
+          if (online == null) {
             return;
           }
           Map<String, LicenseRecord> mine = new LinkedHashMap<>();
@@ -1146,9 +1177,12 @@ public final class LicenseService implements Listener {
             runs.put(record.classId(), record);
           }
           training.put(id, runs);
-          apply(player);
+          apply(online);
         },
-        failure -> plugin.getLogger().warning("读取驾驶证失败（" + player.getName() + "）: " + failure));
+        failure -> {
+          loadingNow.remove(id);
+          plugin.getLogger().warning("读取驾驶证失败（" + player.getName() + "）: " + failure);
+        });
   }
 
   private record Loaded(List<LicenseRecord> records, List<TrainingRecord> training) {}

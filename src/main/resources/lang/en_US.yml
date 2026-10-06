@@ -735,6 +735,7 @@ drive:
       already-held: "<prefix> <yellow>You already hold the <white><name></white></yellow>"
       requires: "<prefix> <red>The <white><name></white> requires: <white><required></white></red>"
       in-progress: "<prefix> <yellow>You are taking the <white><name></white> exam; finish it first</yellow>"
+      in-progress-dispatch: "<prefix> <yellow>You are taking the <white><name></white> road test; finish it first</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>Abandon this road test: before you start driving it does not count; after that it counts as a fail</gray>'><gray>[Abandon road test]</gray></hover></click>"
       cooldown: "<prefix> <yellow>You did not pass the <white><name></white> road test; try again in <white><minutes></white> min</yellow>"
       driving: "<prefix> <red>End driving before signing up for the road test or practice</red>"
       has-task: "<prefix> <red>You already have a driving task; finish or abandon it (/fta drive task abandon) first</red>"
@@ -805,6 +806,7 @@ drive:
           feedback: "<prefix> <gray>Each stop is reviewed as you go, and anything that fails the test is reported immediately.</gray>"
     practice:
       expired: "<prefix> <yellow>The <white><name></white> practice run timed out; you can sign up again</yellow>"
+      in-progress: "<prefix> <yellow>You are on a <white><name></white> practice run; finish it first</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>Abandon this practice run (it does not count)</gray>'><gray>[Abandon practice]</gray></hover></click>"
       not-road: "<prefix> <yellow>The <white><name></white> is earned through the tutorial and has no road-test practice; run /fta drive tutorial start any time to practise</yellow>"
       no-trip-routes: "<prefix> <yellow>No practice-route trip (<white><routes></white>) at <white><station></white> soon; sign up at a station on a practice route</yellow>"
       brief:
