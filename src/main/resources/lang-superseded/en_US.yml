@@ -32,6 +32,10 @@ drive:
       move-up: ["<yellow>Move up <white><distance></white> blocks to the stop mark</yellow>"]
       overrun: ["<red>Past the stop mark by <white><distance></white> blocks</red>"]
   tutorial:
+    finished: ["<prefix> <green>Tutorial complete.</green> <gray>When driving dispatched trains you will also get one short tip the first time you meet a signal confirmation, a stop mark, the doors and a departure signal. Run /fta drive tutorial reset to start over.</gray>"]
+    command:
+      already-running: ["<prefix> <yellow>The tutorial is already running</yellow>"]
+      invalid: ["<prefix> <red>Action must be start, stop, reset or skip</red>"]
     tips:
       ato-confirm:
         chat: ["<white>ATO departure:</white> <gray>When the action bar shows \"ATO: right-click to confirm departure\", right-click. If you do not, the train still leaves, but it counts against your score.</gray>"]
@@ -43,6 +47,7 @@ drive:
         overrun: ["<red>Overran by <white><distance></white> blocks</red>"]
   command:
     help:
+      entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- Start, quit or reset the tutorial, or skip the current step</gray>"]
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"]
     start:

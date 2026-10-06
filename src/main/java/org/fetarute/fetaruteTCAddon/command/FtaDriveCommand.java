@@ -186,7 +186,7 @@ public final class FtaDriveCommand {
             .optional(
                 "action",
                 StringParser.stringParser(),
-                SuggestionProvider.suggestingStrings("start", "stop", "reset", "skip"))
+                SuggestionProvider.suggestingStrings("start", "restart", "stop", "reset", "skip"))
             .handler(
                 ctx ->
                     handleTutorial(
@@ -602,7 +602,7 @@ public final class FtaDriveCommand {
     sender.sendMessage(line);
   }
 
-  /** 新手教程：开始、退出、重置，或跳过当前一步。 */
+  /** 新手教程：开始、从头开始、退出、重置，或跳过当前一步。 */
   private void handleTutorial(CommandSender sender, String action) {
     Player player = requirePlayer(sender);
     if (player == null) {
@@ -615,6 +615,7 @@ public final class FtaDriveCommand {
     String key =
         switch (action.toLowerCase(Locale.ROOT)) {
           case "start" -> drive.startTutorial(player);
+          case "restart" -> drive.restartTutorial(player);
           case "stop" -> drive.tutorials().stop(player);
           case "reset" -> drive.tutorials().reset(player);
           case "skip" -> drive.skipTutorialStep(player);

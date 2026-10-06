@@ -354,6 +354,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return tutorials.start(player, active.get(player.getUniqueId()), Bukkit.getCurrentTick());
   }
 
+  /** 从第一步重新开始新手教程（放弃正在进行的这一次）。返回给玩家的提示语言键，已直接给出第一步时为 {@code null}。 */
+  public String restartTutorial(Player player) {
+    return tutorials.restart(player, active.get(player.getUniqueId()), Bukkit.getCurrentTick());
+  }
+
   /** 跳过新手教程的当前一步。返回给玩家的提示语言键，已推进时为 {@code null}。 */
   public String skipTutorialStep(Player player) {
     return tutorials.skip(player, active.get(player.getUniqueId()), Bukkit.getCurrentTick());

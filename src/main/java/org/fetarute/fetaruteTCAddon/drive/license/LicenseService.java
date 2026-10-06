@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardStations;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
+import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -238,7 +239,7 @@ public final class LicenseService implements Listener {
   // ---- 考试 ----
 
   /**
-   * 报名考一级驾驶证。
+   * 报名考一级驾驶证。正在考这一级的教程时再报名，是从第一步重做教程。
    *
    * @param stationArg 路考的接班站；为空时取玩家附近的车站
    */
@@ -271,6 +272,11 @@ public final class LicenseService implements Listener {
           Map.of("name", license.name(), "required", String.join("、", missing)));
     }
     Exam running = exams.get(id);
+    if (running != null
+        && running.kind() == LicenseClass.Exam.TUTORIAL
+        && running.classId().equals(license.id())) {
+      return restartTutorialExam(player, license, running);
+    }
     if (running != null) {
       return new Reply("drive.license.exam.in-progress", Map.of("name", nameOf(running.classId())));
     }
@@ -375,6 +381,25 @@ public final class LicenseService implements Listener {
       tell(player, "drive.license.exam.brief.tutorial." + line, values);
     }
     return new Reply("drive.license.exam.brief.tutorial.perm", values);
+  }
+
+  /** 正在考教程时再报名同一级：放弃这一次教程，从第一步重来；考试截止时刻不变。 */
+  private Reply restartTutorialExam(Player player, LicenseClass license, Exam exam) {
+    DriveSessionManager manager = drive.get();
+    if (manager == null) {
+      return Reply.of("drive.command.unavailable");
+    }
+    String key = manager.restartTutorial(player);
+    if (key != null) {
+      tell(player, key, Map.of());
+    }
+    return new Reply(
+        "drive.license.exam.tutorial-restarted",
+        Map.of(
+            "name",
+            license.name(),
+            "minutes",
+            String.valueOf(minutesUntil(Instant.now(), exam.deadline()))));
   }
 
   private Reply startDispatchRun(
@@ -525,6 +550,30 @@ public final class LicenseService implements Listener {
     tell(player, "drive.license.exam.tutorial-passed", passValues(license.get(), ""));
     tell(player, "drive.license.granted-desc", passValues(license.get(), ""));
     suggestNext(player);
+  }
+
+  /**
+   * 教程考试中这一次教程不能再算完整做完（跳过了练习步骤或退出了教程）：马上告诉考生考试仍然有效，可以从第一步重做。
+   *
+   * @param reason 原因
+   */
+  public void onTutorialForfeit(Player player, DriveTutorials.Forfeit reason) {
+    Exam exam = exams.get(player.getUniqueId());
+    if (exam == null || exam.kind() != LicenseClass.Exam.TUTORIAL) {
+      return;
+    }
+    tell(
+        player,
+        reason == DriveTutorials.Forfeit.EXITED
+            ? "drive.license.exam.tutorial-exited"
+            : "drive.license.exam.tutorial-step-skipped",
+        Map.of(
+            "name",
+            nameOf(exam.classId()),
+            "class",
+            exam.classId(),
+            "minutes",
+            String.valueOf(minutesUntil(Instant.now(), exam.deadline()))));
   }
 
   /** 路考任务结束（含没开车就作废）：按终态与成绩判定，及格发证，不及格进入冷却，不算成绩的可以马上重考。练习任务结束则讲评并计次。 */

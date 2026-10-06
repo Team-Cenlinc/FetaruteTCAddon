@@ -69,6 +69,10 @@ drive:
       move-up: ["<yellow>请前移 <white><distance></white> 格对标</yellow>"]
       overrun: ["<red>越过停车点 <white><distance></white> 格</red>"]
   tutorial:
+    finished: ["<prefix> <green>新手教程已完成。</green> <gray>驾驶调度列车时，第一次遇到信号确认、进站对标、开关门与发车信号时另有一次简短提示。输入 /fta drive tutorial reset 可重新开始。</gray>"]
+    command:
+      already-running: ["<prefix> <yellow>新手教程正在进行中</yellow>"]
+      invalid: ["<prefix> <red>操作只能是 start、stop、reset 或 skip</red>"]
     tips:
       ato-confirm:
         chat: ["<white>ATO 确认发车：</white><gray>动作栏提示「ATO：右键确认发车」时，请按右键确认；超时未确认时列车照常发车，但记入驾驶成绩。</gray>"]
@@ -90,6 +94,7 @@ drive:
         overrun: ["<red>越过 <white><distance></white> 格</red>"]
   command:
     help:
+      entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- 开始、退出或重置新手教程，跳过当前一步</gray>"]
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]
     start:
