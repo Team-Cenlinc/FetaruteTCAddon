@@ -107,15 +107,9 @@ class PidsLineStatusViewsTest {
 
     assertEquals(
         List.of("BS", "DS", "MT", "WS"),
-        PidsLineStatusViews.filterOptions(directory, HHU, true).stream()
+        PidsLineStatusViews.operatorLineChips(directory, HHU.operatorCode()).stream()
             .map(PidsView.LineChip::code)
             .toList());
-    assertEquals(
-        List.of("WS", "MT"),
-        PidsLineStatusViews.filterOptions(directory, HHU, false).stream()
-            .map(PidsView.LineChip::code)
-            .toList(),
-        "其余屏按停靠本站的线路");
   }
 
   @Test

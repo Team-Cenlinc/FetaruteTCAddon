@@ -253,11 +253,11 @@ public final class DriveTutorials {
   public String stop(Player player) {
     UUID id = player.getUniqueId();
     boolean wasRunning = running.remove(id) != null;
-    armed.remove(id);
-    startPending.remove(id);
+    // 报了教程考试、还没上车时教程只是“下次开车时开始”：取消它同样要告诉考试一方，否则考试悄悄挂到超时。
+    boolean wasPending = armed.remove(id) | startPending.remove(id);
     offerPending.remove(id);
     markCompleted(player);
-    if (wasRunning && !skippedPractice.remove(id)) {
+    if ((wasRunning || wasPending) && !skippedPractice.remove(id)) {
       guard("作废通知", () -> forfeitListener.accept(player, Forfeit.EXITED));
     }
     return wasRunning ? "drive.tutorial.command.stopped" : "drive.tutorial.command.dismissed";

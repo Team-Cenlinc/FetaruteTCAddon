@@ -71,21 +71,7 @@ public final class PidsLineStatusViews {
     }
   }
 
-  /**
-   * 屏幕线路过滤可选的线路：线路运行状况屏为本站所属运营商的线路，其余屏为停靠本站的线路。
-   *
-   * @param directory 名称目录
-   * @param station 屏幕绑定的车站
-   * @param lineStatus 是线路运行状况屏
-   */
-  public static List<PidsView.LineChip> filterOptions(
-      PidsDirectory directory, PidsStationKey station, boolean lineStatus) {
-    return lineStatus
-        ? operatorLineChips(directory, station.operatorCode())
-        : directory.linesServing(station);
-  }
-
-  /** 运营商的全部线路（线路运行状况屏的线路过滤可选项）。 */
+  /** 运营商的全部线路（线路运行状况屏的线路过滤可选项；其余屏的可选项见 {@code PidsService#filterableLines}）。 */
   public static List<PidsView.LineChip> operatorLineChips(
       PidsDirectory directory, String operatorCode) {
     return directory.operatorLines(operatorCode).stream().map(OperatorLine::chip).toList();

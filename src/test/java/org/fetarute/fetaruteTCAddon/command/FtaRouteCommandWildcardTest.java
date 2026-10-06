@@ -76,6 +76,10 @@ class FtaRouteCommandWildcardTest {
             "\"MT-1*\"", "\"MT-1N_*\"", "\"MT-1N_Short\"", "\"MT-1N_ShortR\"", "\"MT-1O_ShortR\""),
         FtaRouteCommand.routePatternSuggestions(codes, "\"MT-1"));
     assertEquals(List.of("MT-3N_DPExp"), FtaRouteCommand.routePatternSuggestions(codes, "mt-3"));
+    assertEquals(
+        List.of("\"i\u0307st-*\"", "\"\u0130ST-*\"", "\"\u0130ST-1\"", "\"\u0130ST-2\""),
+        FtaRouteCommand.routePatternSuggestions(List.of("\u0130ST-1", "\u0130ST-2"), "i\u0307st-"),
+        "转小写改变长度时用输入本身拼前缀，不越界");
     assertEquals(List.of(), FtaRouteCommand.routePatternSuggestions(codes, "\"mt-*"));
   }
 

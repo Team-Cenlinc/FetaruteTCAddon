@@ -970,6 +970,9 @@ command:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
       batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"
       batch-partial: "<prefix> <yellow>批量更新中途停止，以下运行图已经更新：</yellow><white><codes></white>"
+      batch-type:
+        create: "<code>（出库）"
+        return: "<code>（回送）"
       wildcard-flags: "<prefix> <red>运行图写成通配（* 代表任意个字符，? 代表一个字符）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
       noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
     delete:
@@ -2362,6 +2365,7 @@ drive:
       tutorial-step-skipped: "<prefix> <yellow>已跳过练习步骤，本次教程不再计为<white><name></white>考试成绩。</yellow> <gray>考试仍然有效（截止还剩 <minutes> 分钟），可从第一步重做并自行完成每个练习步骤。</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>放弃本次教程，从第一步重新开始</gray>'><aqua>[重新开始教程]</aqua></hover></click>"
       tutorial-exited: "<prefix> <yellow>已退出新手教程，<white><name></white>考试仍然有效（截止还剩 <minutes> 分钟），到期未完成即作废。</yellow> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>从第一步重新开始教程</gray>'><aqua>[重新开始教程]</aqua></hover></click>"
       tutorial-restarted: "<prefix> <green>已从第一步重新开始<white><name></white>考试的新手教程。</green> <gray>考试截止还剩 <minutes> 分钟，请自行完成每个练习步骤。</gray>"
+      tutorial-restart-pending: "<prefix> <green>已重置<white><name></white>考试的新手教程，下次开始驾驶时从第一步开始。</green> <gray>考试截止还剩 <minutes> 分钟，请自行完成每个练习步骤。</gray>"
       tutorial-passed: "<prefix> <green><bold>考试通过</bold></green> <white>已取得第 <level> 级 · <name></white>"
       passed: "<prefix> <green><bold>路考及格</bold></green> <white><reason>，已取得第 <level> 级 · <name></white>"
       failed: "<prefix> <red><bold>路考未通过</bold></red> <white><reason></white>"

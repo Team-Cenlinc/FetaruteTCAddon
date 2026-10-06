@@ -1686,8 +1686,10 @@ public final class FtaRouteCommand {
                   }
 
                   // 交路写成通配（* 代表任意个字符，? 代表一个字符）时批量设置本线路匹配的各条交路（出库、运营、回送都算），
-                  // 只许改出车相关、各条交路取同一个值才有意义的项。
-                  boolean wildcard = isRoutePattern(routeArg);
+                  // 只许改出车相关、各条交路取同一个值才有意义的项。代码本身就带 * 或 ? 的交路按单条处理。
+                  boolean wildcard =
+                      isRoutePattern(routeArg)
+                          && query.findRoute(resolvedLine.line().id(), routeArg).isEmpty();
                   List<Route> targets;
                   if (wildcard) {
                     List<String> perRoute = new ArrayList<>();
@@ -2026,7 +2028,15 @@ public final class FtaRouteCommand {
                       }
                       return;
                     }
-                    done.add(target.code());
+                    // 出库、回送运行图也在通配范围内：批量结果里标出来，误改了回库能一眼看到。
+                    done.add(
+                        target.operationType() == RouteOperationType.OPERATION
+                            ? target.code()
+                            : locale
+                                .text(
+                                    "command.route.set.batch-type."
+                                        + target.operationType().name().toLowerCase(Locale.ROOT))
+                                .replace("<code>", target.code()));
                   }
                   if (wildcard) {
                     sender.sendMessage(
@@ -2550,8 +2560,8 @@ public final class FtaRouteCommand {
     if (!lower.isEmpty()) {
       List<String> matched =
           codes.stream().filter(code -> code.toLowerCase(Locale.ROOT).startsWith(lower)).toList();
-      // 用交路代码原本的大小写拼出前缀，客户端按输入筛补全项时才对得上。
-      String typed = matched.isEmpty() ? "" : matched.get(0).substring(0, lower.length()) + "*";
+      // 用交路代码原本的大小写拼出前缀，客户端按输入筛补全项时才对得上；转小写会改变长度的字符（如 İ）退回用输入本身。
+      String typed = matched.isEmpty() ? "" : originalPrefix(matched.get(0), lower) + "*";
       if (matched.size() > 1 && !families.containsKey(typed)) {
         suggestions.add(CommandUx.quoteCommandArgument(typed));
       }
@@ -2567,6 +2577,15 @@ public final class FtaRouteCommand {
         .map(code -> CommandUx.suggestion(code, quoted))
         .forEach(suggestions::add);
     return suggestions.stream().limit(SUGGESTION_LIMIT).toList();
+  }
+
+  /** 代码开头与小写输入对应的那一段（保留原大小写）；转小写改变了长度时取输入本身。 */
+  private static String originalPrefix(String code, String lower) {
+    if (lower.length() <= code.length()
+        && code.substring(0, lower.length()).toLowerCase(Locale.ROOT).equals(lower)) {
+      return code.substring(0, lower.length());
+    }
+    return lower;
   }
 
   /** 补全上下文里公司、运营商、线路都已写出且可读时，这条线路的交路代码；否则为空列表。 */

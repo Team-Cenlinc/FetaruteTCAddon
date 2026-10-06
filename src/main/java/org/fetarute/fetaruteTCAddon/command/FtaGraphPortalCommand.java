@@ -32,7 +32,15 @@ public final class FtaGraphPortalCommand {
 
   private static final String PERMISSION = "fetarute.graph.portal";
 
+  /** 传送门节点补全列表的有效期：逐键补全时不每次遍历整张图。 */
+  private static final long PORTAL_IDS_TTL_MILLIS = 5_000L;
+
   private final FetaruteTCAddon plugin;
+
+  /** 最近一次算出的传送门节点 ID 与算出的时刻（见 {@link #portalNodeIds()}）。 */
+  private volatile List<String> portalIds = List.of();
+
+  private volatile long portalIdsAt;
 
   public FtaGraphPortalCommand(FetaruteTCAddon plugin) {
     this.plugin = plugin;
@@ -249,8 +257,12 @@ public final class FtaGraphPortalCommand {
 
   private record Located(UUID world, RailNode node) {}
 
-  /** 各世界路网里的传送门节点 ID，按字母序。 */
+  /** 各世界路网里的传送门节点 ID，按字母序；结果缓存几秒，逐键补全时不每次遍历全部节点。 */
   private List<String> portalNodeIds() {
+    long now = System.currentTimeMillis();
+    if (now - portalIdsAt < PORTAL_IDS_TTL_MILLIS) {
+      return portalIds;
+    }
     RailGraphService graphs = plugin.getRailGraphService();
     if (graphs == null) {
       return List.of();
@@ -263,7 +275,9 @@ public final class FtaGraphPortalCommand {
         }
       }
     }
-    return List.copyOf(ids);
+    portalIds = List.copyOf(ids);
+    portalIdsAt = now;
+    return portalIds;
   }
 
   /** 以输入开头（不分大小写、不计开头的引号）的节点 ID，加双引号。 */

@@ -53,11 +53,10 @@ public final class FtaLicenseCommand {
         classSuggestions(
             license -> license.enabled() && license.exam() == LicenseClass.Exam.DISPATCH);
     SuggestionProvider<CommandSender> adminClassSuggestions = classSuggestions(license -> true);
-    // 发证、吊销、查询接受服务器见过的离线玩家：在线的排前面，再补上以输入开头的离线玩家。
+    // 发证、吊销、查询接受服务器见过的离线玩家：补全在线玩家，输入的名字正好是见过的离线玩家时也列出它。
     SuggestionProvider<CommandSender> playerSuggestions =
         SuggestionProvider.blockingStrings(
-            (ctx, input) ->
-                knownPlayerNames(CommandUx.suggestionPrefix(input.lastRemainingToken())));
+            (ctx, input) -> knownPlayerNames(input.lastRemainingToken().trim()));
     // 车站可写“运营商:站码”区分重名站，冒号不加引号不合法：参数用 quotedString，需要时候选带引号。
     SuggestionProvider<CommandSender> stationSuggestions =
         SuggestionProvider.blockingStrings(
@@ -168,25 +167,26 @@ public final class FtaLicenseCommand {
                 .orElse(List.of()));
   }
 
-  /** 以输入开头的玩家名：在线的在前，再补服务器见过的离线玩家，最多 30 个。 */
-  private static List<String> knownPlayerNames(String prefix) {
+  /**
+   * 以输入开头的在线玩家名，最多 30 个；输入的名字正好是服务器见过的离线玩家时也列出它。
+   *
+   * <p>不遍历全部离线玩家：{@code getOfflinePlayers()} 每次都要为每个玩家文件建对象，逐键补全时太重。
+   */
+  private static List<String> knownPlayerNames(String typed) {
+    String prefix = typed.toLowerCase(java.util.Locale.ROOT);
     java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
     for (Player online : Bukkit.getOnlinePlayers()) {
-      names.add(online.getName());
-    }
-    for (OfflinePlayer offline : Bukkit.getOfflinePlayers()) {
-      if (names.size() >= 200) {
-        break;
-      }
-      String name = offline.getName();
-      if (name != null && name.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) {
-        names.add(name);
+      if (online.getName().toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) {
+        names.add(online.getName());
       }
     }
-    return names.stream()
-        .filter(name -> name.toLowerCase(java.util.Locale.ROOT).startsWith(prefix))
-        .limit(30)
-        .toList();
+    if (!typed.isEmpty()) {
+      OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(typed);
+      if (cached != null && cached.getName() != null) {
+        names.add(cached.getName());
+      }
+    }
+    return names.stream().limit(30).toList();
   }
 
   /** 我的驾驶证：按级别从低到高列出整条阶梯——已取得、考试或练习中、须先练习、可报名（带按钮）、尚未解锁。 */

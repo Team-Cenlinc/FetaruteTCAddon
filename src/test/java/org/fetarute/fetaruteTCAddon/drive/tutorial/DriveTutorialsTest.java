@@ -124,5 +124,10 @@ class DriveTutorialsTest {
     forfeits.clear();
     tutorials.stop(player);
     assertEquals(List.of(), forfeits);
+
+    // 不在驾驶时报名的考试：教程只是等下次开车时开始，取消它也要通知。
+    assertEquals("drive.tutorial.command.armed", tutorials.start(player, null, 3L));
+    tutorials.stop(player);
+    assertEquals(List.of(DriveTutorials.Forfeit.EXITED), forfeits);
   }
 }

@@ -72,8 +72,8 @@ public final class CommandUx {
   }
 
   /**
-   * 客户端按 Brigadier 规则解析参数时，这个值不加引号也合法：只含字母、数字与 {@code _ - . +}。冒号、逗号、{@code * ?}、中文与空格都不行，
-   * 不加引号时整条命令标红、发不出去。
+   * 客户端按 Brigadier 规则解析参数时，这个值不加引号也合法：只含字母、数字与 {@code _ - . +}。冒号、逗号、{@code * ?}、中文与空格不加引号时，
+   * 客户端把命令标红、其后的参数也不再补全；服务端仍能照常解析执行，所以只影响补全候选要不要加引号，不要据此拒绝不加引号的输入。
    */
   public static boolean unquotedSafe(String raw) {
     if (raw == null || raw.isEmpty()) {

@@ -128,6 +128,12 @@ public final class LicenseService implements Listener {
   /** 正在从数据库读驾驶证的玩家：读完（成败都算）才移出，避免重复读。 */
   private final Set<UUID> loadingNow = new HashSet<>();
 
+  /** 读驾驶证失败的时刻：此后一段时间内命令不再重读，存储故障时不刷屏。 */
+  private final Map<UUID, Instant> loadFailedAt = new HashMap<>();
+
+  /** 读驾驶证失败后，命令触发重读前至少等这么久。 */
+  private static final Duration LOAD_RETRY_BACKOFF = Duration.ofSeconds(30);
+
   private final DriverHandbook handbook;
   private final TrainingCoach coach;
   private BukkitTask expiryTask;
@@ -218,7 +224,10 @@ public final class LicenseService implements Listener {
     if (loaded(player.getUniqueId())) {
       return true;
     }
-    load(player);
+    Instant failed = loadFailedAt.get(player.getUniqueId());
+    if (failed == null || Instant.now().isAfter(failed.plus(LOAD_RETRY_BACKOFF))) {
+      load(player);
+    }
     return false;
   }
 
@@ -418,8 +427,11 @@ public final class LicenseService implements Listener {
     if (key != null) {
       tell(player, key, Map.of());
     }
+    // 不在驾驶时教程要等下次开车才从第一步开始，回复不能说“已重新开始”。
     return new Reply(
-        "drive.license.exam.tutorial-restarted",
+        key == null
+            ? "drive.license.exam.tutorial-restarted"
+            : "drive.license.exam.tutorial-restart-pending",
         Map.of(
             "name",
             license.name(),
@@ -1147,6 +1159,7 @@ public final class LicenseService implements Listener {
     UUID id = event.getPlayer().getUniqueId();
     held.remove(id);
     training.remove(id);
+    loadFailedAt.remove(id);
     attachments.remove(id);
     attached.remove(id);
   }
@@ -1162,6 +1175,7 @@ public final class LicenseService implements Listener {
                 provider.licenses().listByPlayer(id), provider.licenses().trainingByPlayer(id)),
         loaded -> {
           loadingNow.remove(id);
+          loadFailedAt.remove(id);
           // 按 UUID 取此刻在线的玩家：读的途中下线又上线时，加入时那次读被并入这一次，结果要给新的玩家对象。
           Player online = Bukkit.getPlayer(id);
           if (online == null) {
@@ -1181,6 +1195,7 @@ public final class LicenseService implements Listener {
         },
         failure -> {
           loadingNow.remove(id);
+          loadFailedAt.put(id, Instant.now());
           plugin.getLogger().warning("读取驾驶证失败（" + player.getName() + "）: " + failure);
         });
   }

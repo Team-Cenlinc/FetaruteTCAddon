@@ -106,6 +106,13 @@ public final class PidsService {
   private final StorageProvider storage;
   private final FetaruteApi api;
   private final InstantSource clock = InstantSource.system();
+
+  /** 运营商补全缓存的有效期。 */
+  private static final long OPERATOR_SUGGESTION_TTL_MILLIS = 30_000L;
+
+  /** 补全用的“能管理的运营商”，按玩家缓存（见 {@link #manageableOperatorsForSuggestions}）。 */
+  private final Map<UUID, CachedOperators> operatorSuggestions = new ConcurrentHashMap<>();
+
   private final PidsScreenRegistry registry = new PidsScreenRegistry();
   private final PidsBulletinBoard bulletins = new PidsBulletinBoard();
   private final ApiPidsDirectory directory;
@@ -418,8 +425,15 @@ public final class PidsService {
     List<PidsPlatformNode> nearby =
         nearby(worldId, center).platforms().stream().map(PidsNearby.Platform::node).toList();
     Optional<PidsStationKey> station = nearby.stream().findFirst().map(PidsPlatformNode::station);
-    // 附近没有车站（例如挂在大厅里的线路运行状况屏）：能领安装工具即可装，装好后再绑运营商。
-    if (station.isPresent() ? !canManage(player, station) : !access.canUseTools(player)) {
+    // 附近没有车站（例如挂在大厅里的线路运行状况屏）：装上时就绑安装者能管理的第一个运营商，屏幕从一开始就有归属，
+    // 别家公司的管理者配置不了、也拆不了；以后可在菜单里换成自己能管理的其他运营商。
+    Optional<String> operator =
+        station.isEmpty() && layout.lineStatus().isPresent()
+            ? manageableOperators(player).stream().findFirst()
+            : Optional.empty();
+    if (station.isPresent()
+        ? !canManage(player, station)
+        : !access.canManageOperator(player, operator)) {
       return new InstallResult(Outcome.NO_PERMISSION, Optional.empty());
     }
     Set<String> platforms =
@@ -448,6 +462,7 @@ public final class PidsService {
             layout.tileCols(),
             layout.id(),
             station,
+            operator,
             platforms,
             Set.of(),
             PidsScreen.Appearance.AUTO,
@@ -594,6 +609,24 @@ public final class PidsService {
         .toList();
   }
 
+  /** 补全用的“能管理的运营商”：按玩家缓存 30 秒，逐键补全时不每次读成员身份；授权判断仍走实时的 {@link #manageableOperators}。 */
+  public List<String> manageableOperatorsForSuggestions(CommandSender sender) {
+    if (!(sender instanceof Player player)) {
+      return manageableOperators(sender);
+    }
+    long now = clock.millis();
+    CachedOperators cached = operatorSuggestions.get(player.getUniqueId());
+    if (cached != null && cached.expiresAtMillis() > now) {
+      return cached.codes();
+    }
+    List<String> codes = manageableOperators(sender);
+    operatorSuggestions.put(
+        player.getUniqueId(), new CachedOperators(now + OPERATOR_SUGGESTION_TTL_MILLIS, codes));
+    return codes;
+  }
+
+  private record CachedOperators(long expiresAtMillis, List<String> codes) {}
+
   /** 屏幕是线路运行状况屏（布局带状况表组件）：不按站台显示，站台选择不起作用。 */
   public boolean isLineStatus(PidsScreen screen) {
     return layoutOf(screen).flatMap(PidsLayout::lineStatus).isPresent();
@@ -694,11 +727,9 @@ public final class PidsService {
     return access.canManageOperator(sender, Optional.of(operatorCode));
   }
 
-  /** 能否管理这块屏幕（配置、拆除、查看信息）：按屏幕所属运营商判断；车站与运营商都没绑的屏幕，能领安装工具的人都能配置。 */
+  /** 能否管理这块屏幕（配置、拆除、查看信息）：按屏幕所属运营商判断；车站与运营商都没绑的屏幕只有管理权限才能动。 */
   public boolean canManage(CommandSender sender, PidsScreen screen) {
-    return screen.operatorCode().isPresent()
-        ? access.canManageOperator(sender, screen.operatorCode())
-        : access.canUseTools(sender);
+    return access.canManageOperator(sender, screen.operatorCode());
   }
 
   /** 见 {@link PidsAccess#canUseTools}。 */

@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStickMenu;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.context.CommandContext;
@@ -308,7 +309,14 @@ public final class FtaPidsCommand {
                                           operator ->
                                               locale
                                                   .text("command.pids.list.operator-only")
-                                                  .replace("<operator>", operator)
+                                                  .replace(
+                                                      "<operator>",
+                                                      service
+                                                          .get()
+                                                          .directory()
+                                                          .operatorName(operator)
+                                                          .map(PidsView.Names::primary)
+                                                          .orElse(operator))
                                                   .replace("<code>", operator)))
                           .orElseGet(() -> locale.text("command.pids.list.unbound")),
                       "mode",
@@ -408,7 +416,7 @@ public final class FtaPidsCommand {
           if (service.isEmpty()) {
             return List.of("<operator>");
           }
-          List<String> codes = service.get().manageableOperators(ctx.sender());
+          List<String> codes = service.get().manageableOperatorsForSuggestions(ctx.sender());
           return codes.isEmpty() ? List.of("<operator>") : codes;
         });
   }
