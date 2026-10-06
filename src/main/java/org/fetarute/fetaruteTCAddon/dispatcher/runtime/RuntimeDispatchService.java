@@ -4760,17 +4760,25 @@ public final class RuntimeDispatchService {
    * <p>用**版本**而不是事件来驱动是有意的：本项目的事件流已被证明不完备 （{@code SMART_RESOURCE_LIFECYCLE} 在某些移除路径上不发 release），
    * 而版本号在任何 claim 变更时都会推进，不会漏。
    *
+   * <p>取的是占用账本的<b>净变化版本</b>（{@link SimpleOccupancyManager#netChangeVersion()}）：信号 tick
+   * 每拍先按硬窗口收缩、末尾再取回列尾防护， 原始版本因此每拍都推进，只要有一辆车在跑——包括这辆停着的车自己的每一拍——停着的车就每个周期都完整重算一次，兜底节拍形同虚设。
+   * 净变化版本只在一拍前后语义状态真正不同时前进。
+   *
    * <p>这里只回答「是否在停车态」与「当前版本」，节拍与去重留在巡检器侧： 判据不放宽任何门，只是让既有的门被执行到。
    *
    * @param trainName 列车名
-   * @return 在停车态时为当前占用版本，否则为空
+   * @return 在停车态时为当前占用净变化版本，否则为空
    */
   public java.util.OptionalLong heldTrainOccupancyVersion(String trainName) {
     String key = normalizeTrainKey(trainName);
     if (key.isEmpty() || !activeStopStates.containsKey(key)) {
       return java.util.OptionalLong.empty();
     }
-    return java.util.OptionalLong.of(occupancyVersion());
+    // 净变化版本：别的车（包括本车自己）一拍里放掉再取回同一份占用，不算“等的资源变了”。
+    return java.util.OptionalLong.of(
+        occupancyManager instanceof SimpleOccupancyManager manager
+            ? manager.netChangeVersion()
+            : -1L);
   }
 
   private Optional<String> activeOccupancyStopBlockerStillHeld(String trainName) {
@@ -14293,6 +14301,23 @@ public final class RuntimeDispatchService {
    * @param forceApply 是否强制刷新信号/状态（如停站结束/信号变化）
    */
   void handleSignalTick(RuntimeTrainHandle train, boolean forceApply) {
+    // 一拍里放掉再取回同一份占用不算账本变化：停着的车按净变化版本决定是否重评估（见 SimpleOccupancyManager#netChangeVersion）。
+    SimpleOccupancyManager ledger =
+        occupancyManager instanceof SimpleOccupancyManager manager ? manager : null;
+    if (ledger != null) {
+      ledger.beginNetChangeWindow();
+    }
+    try {
+      handleSignalTickInNetChangeWindow(train, forceApply);
+    } finally {
+      if (ledger != null) {
+        ledger.endNetChangeWindow();
+      }
+    }
+  }
+
+  /** {@link #handleSignalTick(RuntimeTrainHandle, boolean)} 的本体，在占用净变化统计窗口内执行。 */
+  private void handleSignalTickInNetChangeWindow(RuntimeTrainHandle train, boolean forceApply) {
     if (train == null || !train.isValid()) {
       return;
     }
@@ -15356,6 +15381,16 @@ public final class RuntimeDispatchService {
               + " reason=recoverable-hold-advisory-only");
       nextAspect = retainedAspect;
     }
+    // 本拍末尾与可恢复保持分支取回同一份列尾防护请求。
+    OccupancyRequest rearGuardRequest =
+        RearGuardRequest.build(
+            builder,
+            trainName,
+            Optional.ofNullable(route.id()),
+            effectiveNodes,
+            currentIndex,
+            now,
+            authorizationRequest.movementPlanSnapshot());
     if (nextAspect == SignalAspect.STOP && !stopAtNextWaypoint) {
       if (shouldInvalidateForAuthorityFailure(authorityEnd, smartDecision)) {
         debugLogger.accept(
@@ -15560,16 +15595,7 @@ public final class RuntimeDispatchService {
       // 本拍开头只按“硬窗口 + 当前位置”保留 claim，车身与列尾防护要到正常路径末尾才补回；这里提前返回，
       // 不补的话车身压着的 NODE/EDGE 在下一次完整 tick 之前不归任何车，后车可以对它们取得硬授权。
       // 只补不收缩（不用 retainStopOccupancy）：收缩会放掉之前已持有的前方授权并删掉其排队位次。
-      retainRearGuardOccupancyBestEffort(
-          trainName,
-          route,
-          currentIndex,
-          effectiveNodes,
-          authorizationRequest.movementPlanSnapshot(),
-          graph,
-          runtimeSettings,
-          now,
-          train);
+      occupancyManager.acquire(rearGuardRequest);
       traceSmartSignalFinalDecision(
           trainName,
           "PERIODIC_TICK",
@@ -15622,16 +15648,7 @@ public final class RuntimeDispatchService {
               + " blockers="
               + decision.blockers().size());
     }
-    retainRearGuardOccupancyBestEffort(
-        trainName,
-        route,
-        currentIndex,
-        effectiveNodes,
-        authorizationRequest.movementPlanSnapshot(),
-        graph,
-        runtimeSettings,
-        now,
-        train);
+    occupancyManager.acquire(rearGuardRequest);
     authorizationRequest =
         markDirectedRequest(authorizationRequest, SignalComputationTrace.Source.PERIODIC_TICK);
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
@@ -23075,42 +23092,16 @@ public final class RuntimeDispatchService {
         || effectiveNodes == null) {
       return;
     }
-    OccupancyRequestBuilder rearGuardBuilder =
-        new OccupancyRequestBuilder(
-                graph,
-                runtimeSettings.lookaheadEdges(),
-                runtimeSettings.minClearEdges(),
-                runtimeSettings.rearGuardEdges(),
-                runtimeSettings.switcherZoneEdges(),
-                runtimeLookaheadMinDistanceBlocks(runtimeSettings),
-                runtimeLookaheadMaxEdges(runtimeSettings),
-                resolveRearGuardDistanceBlocks(train),
-                debugLogger)
-            .withRearGuardAnchor(progressRegistry::arrivalNodeAt);
-    OccupancyRequest rearGuardRequest =
-        movementPlan
-            .map(
-                plan ->
-                    rearGuardBuilder.buildRearGuardRequestFromPlan(
-                        trainName,
-                        Optional.ofNullable(route.id()),
-                        effectiveNodes,
-                        currentIndex,
-                        now,
-                        0,
-                        AuthorizationPurpose.RUNTIME_MOVE,
-                        plan))
-            .orElseGet(
-                () ->
-                    rearGuardBuilder.buildRearGuardRequestFromNodes(
-                        trainName,
-                        Optional.ofNullable(route.id()),
-                        effectiveNodes,
-                        currentIndex,
-                        now,
-                        0,
-                        AuthorizationPurpose.RUNTIME_MOVE));
-    occupancyManager.acquire(rearGuardRequest);
+    occupancyManager.acquire(
+        RearGuardRequest.build(
+            runtimeLookaheadBuilder(
+                graph, runtimeSettings, runtimeSettings.rearGuardEdges(), train),
+            trainName,
+            Optional.ofNullable(route.id()),
+            effectiveNodes,
+            currentIndex,
+            now,
+            movementPlan));
   }
 
   private static OptionalLong minOptionalLong(OptionalLong first, OptionalLong second) {

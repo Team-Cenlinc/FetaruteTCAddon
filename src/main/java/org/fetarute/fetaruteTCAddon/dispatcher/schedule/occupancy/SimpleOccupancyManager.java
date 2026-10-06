@@ -73,6 +73,13 @@ public final class SimpleOccupancyManager
   private final Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature>
       switcherQueueSignatures = new LinkedHashMap<>();
   private final AtomicLong version = new AtomicLong();
+
+  /** 净变化统计（见 {@link #netChangeVersion()}）：窗口嵌套层数、开窗时的语义指纹、已计入的原始版本、净变化版本。 */
+  private int netChangeWindowDepth;
+
+  private String netChangeWindowStart;
+  private long netChangeAbsorbedVersion;
+  private long netChangeVersion;
   private final AtomicLong lifecycleSequence = new AtomicLong();
   private final AtomicLong staleQueueCleanupCount = new AtomicLong();
   private final Map<String, SelfOwnedStaleRetainCandidate> selfOwnedStaleRetainCandidates =
@@ -262,6 +269,98 @@ public final class SimpleOccupancyManager
   /** 返回占用/队列快照版本。claim 或 queue 发生真实变更时递增。 */
   public long version() {
     return version.get();
+  }
+
+  /**
+   * 开始一个净变化统计窗口；可嵌套，只在最外层结束时判定。
+   *
+   * <p>窗口内的改动照常生效、照常推进 {@link #version()} 与发布事件；只有 {@link #netChangeVersion()}
+   * 推迟到窗口结束、按语义状态前后比对决定是否前进。
+   */
+  public synchronized void beginNetChangeWindow() {
+    if (netChangeWindowDepth++ == 0) {
+      absorbChangesOutsideWindow();
+      netChangeWindowStart = semanticFingerprint();
+    }
+  }
+
+  /** 结束净变化统计窗口：最外层结束时，账本语义状态与开窗时不同，净变化版本前进一次。 */
+  public synchronized void endNetChangeWindow() {
+    if (netChangeWindowDepth <= 0) {
+      return;
+    }
+    if (--netChangeWindowDepth > 0) {
+      return;
+    }
+    String start = netChangeWindowStart;
+    netChangeWindowStart = null;
+    long raw = version.get();
+    if (raw == netChangeAbsorbedVersion) {
+      return;
+    }
+    if (start == null || !start.equals(semanticFingerprint())) {
+      netChangeVersion++;
+    }
+    netChangeAbsorbedVersion = raw;
+  }
+
+  /**
+   * 净变化版本：账本的语义状态（占用的主人、角色、方向、交路，排队，道岔签名，冲突区放行锁）真正变化时才前进。
+   *
+   * <p>窗口外的任何改动都计数；窗口内“放掉再取回同一份占用”、排队心跳、占用刷新时间不计。停着的车以它为重评估条件—— 它不放宽任何判据，只决定判据多久被执行一次；
+   * 漏计的后果是等到兜底节拍才重评估，不会放行任何东西。
+   */
+  public synchronized long netChangeVersion() {
+    if (netChangeWindowDepth == 0) {
+      absorbChangesOutsideWindow();
+    }
+    return netChangeVersion;
+  }
+
+  private void absorbChangesOutsideWindow() {
+    long raw = version.get();
+    if (raw != netChangeAbsorbedVersion) {
+      netChangeVersion++;
+      netChangeAbsorbedVersion = raw;
+    }
+  }
+
+  /** 账本语义状态的规范化文本；各部分按键排序，插入顺序不同的同一状态得到同一文本。 */
+  private String semanticFingerprint() {
+    java.util.TreeMap<String, String> sorted = new java.util.TreeMap<>();
+    for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
+      List<String> owners = new ArrayList<>();
+      for (OccupancyClaim claim : entry.getValue()) {
+        if (claim == null) {
+          continue;
+        }
+        owners.add(
+            TrainNameNormalizer.normalizeKey(claim.trainName())
+                + "|"
+                + claim.role()
+                + "|"
+                + claim.corridorDirection().map(Enum::name).orElse("-")
+                + "|"
+                + claim.routeId().map(Object::toString).orElse("-"));
+      }
+      if (!owners.isEmpty()) {
+        owners.sort(java.util.Comparator.naturalOrder());
+        sorted.put("claim:" + entry.getKey(), String.join(",", owners));
+      }
+    }
+    for (Map.Entry<OccupancyResource, ConflictQueue> entry : queues.entrySet()) {
+      String state = entry.getValue().semanticState();
+      if (!state.isEmpty()) {
+        sorted.put("queue:" + entry.getKey(), state);
+      }
+    }
+    switcherClaimSignatures.forEach(
+        (key, signature) -> sorted.put("switcher-claim:" + key, String.valueOf(signature)));
+    switcherQueueSignatures.forEach(
+        (key, signature) -> sorted.put("switcher-queue:" + key, String.valueOf(signature)));
+    deadlockReleaseLocks.forEach(
+        (key, lock) -> sorted.put("release-lock:" + key, String.valueOf(lock)));
+    return sorted.toString();
   }
 
   /** 返回因 TTL 清理的 queue entry 数量。 */
@@ -6337,6 +6436,37 @@ public final class SimpleOccupancyManager
     private final LinkedHashMap<String, OccupancyQueueEntry> backward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> neutral = new LinkedHashMap<>();
     private long nextEnqueueSequence;
+
+    /** 排队的语义状态：各方向桶里的车、方向、首次入队时间、优先级、进入次序与入队序号；最近一次心跳时间不计。 */
+    String semanticState() {
+      StringBuilder state = new StringBuilder();
+      appendSemanticState(state, "F", forward);
+      appendSemanticState(state, "B", backward);
+      appendSemanticState(state, "N", neutral);
+      return state.toString();
+    }
+
+    private static void appendSemanticState(
+        StringBuilder state, String bucket, LinkedHashMap<String, OccupancyQueueEntry> entries) {
+      for (Map.Entry<String, OccupancyQueueEntry> entry : entries.entrySet()) {
+        OccupancyQueueEntry queued = entry.getValue();
+        state
+            .append(bucket)
+            .append(':')
+            .append(entry.getKey())
+            .append('|')
+            .append(queued.direction())
+            .append('|')
+            .append(queued.firstSeen())
+            .append('|')
+            .append(queued.priority())
+            .append('|')
+            .append(queued.entryOrder())
+            .append('|')
+            .append(queued.enqueueSequence())
+            .append(';');
+      }
+    }
 
     boolean touch(
         String trainName, CorridorDirection direction, Instant now, int priority, int entryOrder) {

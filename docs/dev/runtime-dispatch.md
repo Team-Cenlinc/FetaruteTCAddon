@@ -159,17 +159,25 @@
   记下本车全部 claim，回滚只释放快照之外的；之前已持有的原样留下，回滚随即照 `applyUnresolvableMovementPlanStop` 的先例调用停车保持
   （`retainStopOccupancy`）收缩到当前位置与列尾防护——回滚之后都是当拍硬停车，不走制动曲线，所以不留刹车段。列车压着的道岔因此没有任何
   一拍空档，停着的车前方多余的授权也照旧放掉（以前是回滚整段放掉顺带完成这件事）。可恢复回滚（`SMART_DISPATCH_RECOVERABLE_HOLD`）只加快照、
-  不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序。但它在返回前照样补回车身与列尾防护（与正常路径末尾同一个
-  `retainRearGuardOccupancyBestEffort`，只 acquire、不释放、不碰排队）：信号 tick 开头只按“硬窗口 + 当前位置”保留 claim，硬窗口不含车头身后的
+  不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序。但它在返回前照样补回车身与列尾防护（与正常路径末尾取回的是本拍同一份
+  列尾防护请求 `RearGuardRequest`，只 acquire、不释放、不碰排队）：信号 tick 开头只按“硬窗口 + 当前位置”保留 claim，硬窗口不含车头身后的
   区段，不补的话车身压着的 NODE/EDGE 要到本车下一次完整 tick 才重新归本车，其间后车可以对它们取得硬授权（`RecoverableHoldBodyRetainTest`）。
+  保下了资源时输出必留诊断
+  `SMART_AUTHORITY_ROLLBACK_KEPT_HELD train=… reason=<HardStopReason|RECOVERABLE_HOLD> kept=N resources=[…]`，按车去重。
 - 车身释放下限（`LiveBodyReleaseFloor`）：信号 tick、推进点、发车门控与停车保持按本拍请求收缩本车 claim 之后，本拍放掉的资源里凡是车体现场方块仍压着的
   （车体所在区间，加上至少两条已覆盖区间共用的节点），在同一次同步调用里立即以 `PROTECTIVE_RETAIN` 取回。它不依赖逻辑窗口——交路进度、估算车长、
   每条分支是否记得补回——是列尾防护之外的独立一层。之所以“放掉再取回”而不是“不许放”：同车以保护性意图刷新会保留已有的 `MOVEMENT_REQUIRED`，
   车身区段只有经这一放一取才降为保护性占用，后车的停因分类、前瞻风险与 Phase 4 回收都依赖这一降级。只取回本拍刚放掉的，从不新拿本车原本没有持有的
   资源；车头前方、车尾后方那条区间的另一端节点不算，停在道岔前的车不会因此攥住道岔节点。逐边足迹索引不可用或车体定位不到时下限为空，行为与没有下限时
   相同（不全量保留，以免一处证据缺失冻住全线）；图层面的可用性看 `SMART_INTERLOCKING_COVERAGE` 的 `cellCoverageAvailable`。Phase 4 与终点待命收窄
-  判“车体是否已离开”用的是同一份覆盖（区间连同两端节点，只会更严）。保下了资源时输出必留诊断
-  `SMART_AUTHORITY_ROLLBACK_KEPT_HELD train=… reason=<HardStopReason|RECOVERABLE_HOLD> kept=N resources=[…]`，按车去重。
+  判“车体是否已离开”用的是同一份覆盖（区间连同两端节点，只会更严）。
+- 停着的车何时重评估（`RuntimeSignalMonitor#heldRecheckDue`）：占用变了，或兜底节拍 5 秒到期。“占用变了”看的是占用账本的**净变化版本**
+  （`SimpleOccupancyManager#netChangeVersion`），不是原始版本：信号 tick 每拍先按硬窗口收缩、末尾再取回列尾防护（停车时以停车保持取回），这一放一取
+  每拍都推进原始版本，于是只要有一辆车在跑——包括停着的车自己的每一拍——所有停着的车每个周期都要完整重算一次，兜底节拍形同虚设。每次信号 tick 包在一个
+  净变化窗口里，窗口结束时按语义指纹（占用的主人、角色、方向、交路；排队的方向、首次入队时间、优先级、次序与入队序号；道岔签名；冲突区放行锁）比对开窗时的
+  状态，不同才前进一次；占用刷新时间与排队心跳不计。窗口外的任何改动照常计数。占用、事件与原始版本一律不变，终局校验的快照新鲜度仍看原始版本。
+  这一放一取不能直接改成“保留”：周期 tick 开头那次收缩同时让停下的车只按停车保持占位，而停车保持的列尾范围可能比行驶时的列尾防护窄
+  （多车骨架里保留后，停在会让站的车会一直攥着身后单线区间，后车被挡在起点）。
 - Smart recovery 的 drain/forward unlock 仍默认尊重对向或未知方向 single barrier；只有当当前占用快照证明本车已持有 contested
   section、方向已知、下一跳朝出口前进、出口 edge/node 没有外部 claim，且 hard blocker 只对应同一 section 时，才允许进入最终 signal
   refresh 复判。该分支只输出 `SMART_*_UNLOCK_DRAIN_OUT_ALLOWED` 并触发既有复判，不创建 DRAIN_THROUGH authority、不 force-green、不改
