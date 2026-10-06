@@ -85,7 +85,10 @@ class DriveConfigFileTest {
         "旧的两级改名后不与模板的新键并存");
     assertEquals(80, config.license().find("driver").orElseThrow().minPoints(), "改过的值保留");
     assertEquals("正式驾驶证", config.license().find("driver").orElseThrow().name());
-    assertTrue(Files.isRegularFile(dir.resolve(DriveConfigFile.FILE_NAME + ".bak")));
+    String backup =
+        Files.readString(
+            dir.resolve(DriveConfigFile.LICENSE_MIGRATION_BACKUP), StandardCharsets.UTF_8);
+    assertTrue(backup.contains("    free:"), "迁移前的原件单独备份，不被补全新键时的备份盖掉");
   }
 
   @Test

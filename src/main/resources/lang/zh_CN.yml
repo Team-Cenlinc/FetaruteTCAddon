@@ -2397,7 +2397,7 @@ drive:
       retry: "<prefix> <gray><minutes> 分钟后可以再考</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>冷却结束后点击报名</gray>'><yellow>[再考一次]</yellow></hover></click>"
       retry-now: "<prefix> <gray>可以立即重新报名</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><yellow>[重新报名]</yellow></hover></click>"
       reason:
-        not-started: "尚未接班考试即已结束（车次作废或已放弃）"
+        not-started: "尚未接班，考试即已结束（车次作废或已放弃）"
         interrupted: "列车被调度收回"
         ato: "考试中途转为 ATO"
         not-completed: "未开到交班站"

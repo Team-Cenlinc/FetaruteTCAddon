@@ -554,15 +554,40 @@ public final class PidsService {
             .orElse(List.of()));
   }
 
-  /** 世界调度图里的全部车站，离屏幕由近到远（补全车站参数用）。 */
+  /** 世界调度图里的全部车站，离屏幕由近到远（补全车站参数用）。结果按世界与屏幕位置缓存几秒：补全逐键查询同一块屏幕，不必每次遍历全图排序。 */
   public List<PidsStationKey> stationsByDistance(UUID worldId, PidsScreen.Position center) {
-    return api.graph()
-        .getSnapshot(worldId)
-        .map(
-            snapshot ->
-                PidsNearby.of(snapshot.nodes(), center, Double.POSITIVE_INFINITY).stations())
-        .orElse(List.of());
+    long now = clock.millis();
+    StationsByDistance cached = stationsByDistance;
+    if (cached != null
+        && cached.worldId().equals(worldId)
+        && cached.center().equals(center)
+        && cached.expiresAtMillis() > now) {
+      return cached.stations();
+    }
+    List<PidsStationKey> stations =
+        api.graph()
+            .getSnapshot(worldId)
+            .map(
+                snapshot ->
+                    PidsNearby.of(snapshot.nodes(), center, Double.POSITIVE_INFINITY).stations())
+            .orElse(List.of());
+    stationsByDistance =
+        new StationsByDistance(
+            worldId, center, now + STATIONS_BY_DISTANCE_TTL_MILLIS, List.copyOf(stations));
+    return stations;
   }
+
+  /** 车站补全缓存的有效期。 */
+  private static final long STATIONS_BY_DISTANCE_TTL_MILLIS = 5_000L;
+
+  /** 最近一次按距离排好的车站（见 {@link #stationsByDistance}）。 */
+  private volatile StationsByDistance stationsByDistance;
+
+  private record StationsByDistance(
+      UUID worldId,
+      PidsScreen.Position center,
+      long expiresAtMillis,
+      List<PidsStationKey> stations) {}
 
   /** 调度图里某个车站的全部站台。 */
   public List<String> platformsOf(UUID worldId, PidsStationKey station) {

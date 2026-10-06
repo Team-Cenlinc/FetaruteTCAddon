@@ -99,6 +99,48 @@ class LicenseClassIdMigrationTest {
   }
 
   @Test
+  @DisplayName("目标键已存在时，对旧键的引用也不改；带引号的键照样改名")
+  void keepsReferencesToUnrenamedClassesAndHandlesQuotedKeys() {
+    List<String> migrated =
+        LicenseClassIdMigration.migrate(
+            lines(
+                """
+                license:
+                  classes:
+                    learner:
+                      exam: tutorial
+                    free:
+                      exam: tutorial
+                    "dispatch":
+                      requires: [free, dispatch]
+                      exam: dispatch
+                    extra:
+                      requires:
+                        - free
+                        - dispatch
+                """));
+
+    assertEquals(
+        lines(
+            """
+            license:
+              classes:
+                learner:
+                  exam: tutorial
+                free:
+                  exam: tutorial
+                "driver":
+                  requires: [free, driver]
+                  exam: dispatch
+                extra:
+                  requires:
+                    - free
+                    - driver
+            """),
+        migrated);
+  }
+
+  @Test
   @DisplayName("数据库改名：旧 ID 改成新 ID，同一玩家已有新 ID 时跳过那一行")
   void renamesDatabaseRowsWithoutPrimaryKeyConflicts() throws Exception {
     try (java.sql.Connection connection =
@@ -126,6 +168,17 @@ class LicenseClassIdMigrationTest {
         }
       }
       assertEquals(List.of("a:driver", "a:learner", "b:free", "b:learner"), rows);
+      try (java.sql.PreparedStatement migrated =
+          connection.prepareStatement(LicenseClassIdMigration.migratedSql("t"))) {
+        int i = 1;
+        for (String renamed : LicenseClassIdMigration.RENAMED.values()) {
+          migrated.setString(i++, renamed);
+        }
+        try (java.sql.ResultSet result = migrated.executeQuery()) {
+          result.next();
+          assertEquals(3, result.getLong(1), "已有新 ID 的记录：迁移过了，以后启动不再改");
+        }
+      }
     }
   }
 }

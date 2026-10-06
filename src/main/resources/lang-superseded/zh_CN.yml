@@ -402,7 +402,7 @@ drive:
       reason:
         overrun: ["在 <station> 停过头或越站"]
         not-completed: ["没有开到下车站"]
-        not-started: ["列车还没接班，考试就已结束（车次作废或已放弃）"]
+        not-started: ["列车还没接班，考试就已结束（车次作废或已放弃）", "尚未接班考试即已结束（车次作废或已放弃）"]
         ato: ["考试中转为了 ATO"]
       warn:
         overrun: ["<prefix> <red>路考：在 <station> 停过头或越站，本次已不能及格</red>"]

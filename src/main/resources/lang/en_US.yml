@@ -125,9 +125,9 @@ drive:
       reverse: "Reverse"
     stop-result:
       accurate: "<green><bold>On the mark</bold></green> <white><offset></white> <gray><station></gray>"
-      accepted: "<yellow><bold>Within door window</bold></yellow> <white><offset></white> <gray><station></gray>"
-      overrun: "<red><bold>Outside the window</bold></red> <white><offset></white> <gray><station></gray>"
-      short: "<red><bold>Short, timed out</bold></red> <white><offset></white> <gray><station></gray>"
+      accepted: "<yellow><bold>Stop accepted</bold></yellow> <white><offset></white> <gray><station></gray>"
+      overrun: "<red><bold>Overrun</bold></red> <white><offset></white> <gray><station></gray>"
+      short: "<red><bold>Stopped short</bold></red> <white><offset></white> <gray><station></gray>"
       skipped: "<red><bold>Station skipped</bold></red> <gray><station></gray>"
       over: "<distance> m past"
       under: "<distance> m short"
@@ -602,9 +602,9 @@ drive:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
         accurate: "<green><offset> · on the mark</green>"
-        accepted: "<yellow><offset> · within door window</yellow>"
-        overrun: "<red><offset> · outside the window</red>"
-        short: "<red><offset> · short, timed out</red>"
+        accepted: "<yellow><offset> · stop accepted</yellow>"
+        overrun: "<red><offset> · overrun</red>"
+        short: "<red><offset> · stopped short</red>"
         skipped: "<red>skipped</red>"
       flag:
         wrong-door: " <red>wrong-side doors</red>"
@@ -759,14 +759,14 @@ drive:
         not-started: "the exam ended before you took over the train (trip cancelled or abandoned)"
         interrupted: "the dispatcher took the train back"
         ato: "you switched to ATO during the exam"
-        not-completed: "you did not reach the final station"
+        not-completed: "you did not reach the hand-over station"
         emergency: "<count> protective emergency brake application(s)"
         overrun: "overran or skipped <station>"
         wrong-door: "opened the wrong doors at <station>"
         points: "score <points>, below the pass mark of <min>"
         passed: "score <points>"
       tip:
-        not-completed: "<prefix> <gray>Tip: the exam completes once you stop at the final station and open the doors; leaving your seat, abandoning or getting stuck ends it.</gray>"
+        not-completed: "<prefix> <gray>Tip: the exam completes once you stop at the hand-over station and open the doors; leaving your seat, abandoning or getting stuck ends it.</gray>"
         emergency: "<prefix> <gray>Tip: protective emergency braking is caused by speeding or passing a stop signal. Watch the speed limit and the signal; brake early with B1–B4 when it turns to stop.</gray>"
         overrun: "<prefix> <gray>Tip: watch the stop-mark distance in the sidebar, brake early and ease off near the mark; stopping within the door range is enough, and a short stop can be moved up.</gray>"
         wrong-door: "<prefix> <gray>Tip: once stopped, check the sidebar for which side to open and only open the platform side.</gray>"
@@ -775,9 +775,9 @@ drive:
         line: "<prefix> <gray>Road test <done>/<total></gray> <white><station></white> <window><doors>"
         window:
           accurate: "<green>accurate stop</green>"
-          accepted: "<green>within door range</green>"
-          short: "<yellow>short</yellow>"
-          overrun: "<red>overran</red>"
+          accepted: "<green>stop accepted</green>"
+          short: "<yellow>stopped short</yellow>"
+          overrun: "<red>overrun</red>"
           skipped: "<red>skipped</red>"
         doors:
           ok: ""
@@ -788,7 +788,7 @@ drive:
         overrun: "<prefix> <red>Road test: overran or skipped <station>, this attempt can no longer pass</red>"
         wrong-door: "<prefix> <red>Road test: wrong doors at <station>, this attempt can no longer pass</red>"
         ato: "<prefix> <yellow>Road test: switched to ATO, this attempt does not count</yellow>"
-        hint: "<prefix> <gray>You may keep driving to the final station for practice, or end the exam with /fta drive task abandon.</gray>"
+        hint: "<prefix> <gray>You may keep driving to the hand-over station for practice, or end the exam with /fta drive task abandon.</gray>"
       brief:
         tutorial:
           header: "<prefix> <gold><bold>Level <level> · <name> exam</bold></gold>"
@@ -798,7 +798,7 @@ drive:
           perm: "<prefix> <gray>Driving non-dispatched trains is enabled for the exam and withdrawn afterwards.</gray> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>Get the driver handbook</gray>'><aqua>[Driver handbook]</aqua></hover></click>"
         dispatch:
           header: "<prefix> <gold><bold>Level <level> · <name> road test</bold></gold>"
-          route: "<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and finish at <yellow><alight></yellow>.</white>"
+          route: "<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and hand over at <yellow><alight></yellow>.</white>"
           pass: "<prefix> <white>To pass: </white><gray>score at least <min>, drive manually throughout.</gray>"
           no-emergency: "<prefix> <gray>· no protective emergency braking (speeding, passing a stop signal)</gray>"
           no-overrun: "<prefix> <gray>· stop within the door range at every station; no overruns or skips</gray>"
@@ -813,12 +813,12 @@ drive:
       no-trip-routes: "<prefix> <yellow>No practice-route trip (<white><routes></white>) at <white><station></white> soon; sign up at a station on a practice route</yellow>"
       brief:
         header: "<prefix> <gold><bold>Level <level> · <name> road-test practice</bold></gold>"
-        route: "<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and finish at <yellow><alight></yellow>.</white>"
+        route: "<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and hand over at <yellow><alight></yellow>.</white>"
         what: "<prefix> <white>How it works:</white><gray> like the road test, with a coach riding along: each stop phase tells you the next step, and you are reminded about restrictive signals and speeding. Practice issues no licence and is not saved to your records or the leaderboard.</gray>"
         drill: "<prefix> <white>Incident drill:</white><gray> after the first stop, one incident is simulated at random (line voltage loss, door fault, obstacle ahead…). Follow the prompts; it is reviewed at the end and does not affect the practice count.</gray>"
         pass: "<prefix> <white>Judged like the road test:</white><gray> at least <min> points, driven manually throughout.</gray>"
         handbook: "<prefix> <white>Study:</white><gray> the FTCA Driver Handbook is in your inventory; practise alongside it.</gray>"
-        feedback: "<prefix> <gray>Each stop is reviewed. Reaching the final station counts as one practice run; if the trip runs late, the drill is cancelled first and the train may be handed back to automatic operation.</gray>"
+        feedback: "<prefix> <gray>Each stop is reviewed. Reaching the hand-over station counts as one practice run; if the trip runs late, the drill is cancelled first and the train may be handed back to automatic operation.</gray>"
       stop:
         line: "<prefix> <gray>Practice <done>/<total></gray> <white><station></white> <window><doors>"
       warn:
@@ -826,14 +826,14 @@ drive:
         overrun: "<prefix> <red>Practice: overran or skipped <station>; this fails a road test</red>"
         wrong-door: "<prefix> <red>Practice: wrong doors opened at <station>; this fails a road test</red>"
         ato: "<prefix> <yellow>Practice: switched to ATO; this run cannot be judged</yellow>"
-        hint: "<prefix> <gray>Keep driving to the final station; you will get a review at the end.</gray>"
+        hint: "<prefix> <gray>Keep driving to the hand-over station; you will get a review at the end.</gray>"
       review:
         header: "<prefix> <gold><bold>Level <level> · <name> practice review</bold></gold>"
         passed: "<prefix> <green>By road-test standards: pass</green> <white>(<reason>)</white>"
         failed: "<prefix> <red>By road-test standards: fail</red> <white>(<reason>)</white>"
         void: "<prefix> <yellow>This practice run cannot be judged: <reason></yellow>"
         no-drill: "<prefix> <gray>No incident drill this time (the trip was late or there was no suitable moment).</gray>"
-        not-counted: "<prefix> <yellow>You did not reach the final station, so this run does not count.</yellow>"
+        not-counted: "<prefix> <yellow>You did not reach the hand-over station, so this run does not count.</yellow>"
         ready: "<prefix> <green>Practice runs done: <done>/<required>. You can sign up for the road test</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the road test]</green></hover></click> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice</gray>'><aqua>[Practise again]</aqua></hover></click>"
         more: "<prefix> <yellow>Practice runs done: <done>/<required>; keep practising</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice</gray>'><aqua>[Practise again]</aqua></hover></click>"
         again: "<prefix> <gray>You already hold the <name>; practice is just for familiarisation.</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice</gray>'><aqua>[Practise again]</aqua></hover></click>"

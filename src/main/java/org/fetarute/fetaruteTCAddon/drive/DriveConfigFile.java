@@ -24,6 +24,9 @@ public final class DriveConfigFile {
   /** 配置文件名。 */
   public static final String FILE_NAME = "drive.yml";
 
+  /** 驾驶证等级改名前的原件备份。 */
+  static final String LICENSE_MIGRATION_BACKUP = FILE_NAME + ".license-ids.bak";
+
   private DriveConfigFile() {}
 
   /**
@@ -43,7 +46,12 @@ public final class DriveConfigFile {
     return DriveConfig.from(yaml, logger::warn);
   }
 
-  /** 把旧的驾驶证等级 ID 与名称改成新的（见 {@link LicenseClassIdMigration}）；改动前先备份为 {@code drive.yml.bak}。 */
+  /**
+   * 把旧的驾驶证等级 ID 与名称改成新的（见 {@link LicenseClassIdMigration}）；改动前先备份为 {@value
+   * #LICENSE_MIGRATION_BACKUP}。
+   *
+   * <p>备份另起文件名：随后补全新键时 {@code ConfigUpdater} 会把文件另存为 {@code drive.yml.bak}，同名就会把迁移前的原件盖掉。
+   */
   private static void migrateLicenseClassIds(File file, LoggerManager logger) {
     if (!file.isFile()) {
       return;
@@ -56,7 +64,7 @@ public final class DriveConfigFile {
       }
       Files.copy(
           file.toPath(),
-          file.toPath().resolveSibling(FILE_NAME + ".bak"),
+          file.toPath().resolveSibling(LICENSE_MIGRATION_BACKUP),
           StandardCopyOption.REPLACE_EXISTING);
       Files.write(file.toPath(), migrated, StandardCharsets.UTF_8);
       logger.info("drive.yml：驾驶证等级 free、dispatch 已改名为 learner（见习驾驶证）、driver（正式驾驶证）");

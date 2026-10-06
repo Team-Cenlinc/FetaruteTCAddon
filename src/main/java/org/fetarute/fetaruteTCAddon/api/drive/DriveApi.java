@@ -175,7 +175,9 @@ public interface DriveApi {
    * @param depotPickup 是否从车库接车
    * @param source 来源：任务板为 {@code "board"}；没领任务直接接管调度列车、按列车所跑车次当场记成的为 {@code
    *     "takeover"}；终点站结算后接着开同一列车的下一趟为 {@code "continuation"}；插件派出的为调用方给的来源标记
-   * @param metadata 调用方给的附加数据，事件里原样带回
+   * @param metadata 调用方给的附加数据，事件里原样带回。驾驶证路考与路考练习的任务（来源 {@code "exam"}、{@code "training"}）带 {@code
+   *     license}：所考等级的 ID，默认为 {@code learner}、{@code driver}（早先的版本为 {@code free}、{@code dispatch}，
+   *     判断是否路考请按来源，不要按等级 ID 写死）
    * @param endReason 结束原因；未结束时为空串
    * @param points 得分（0–100）；没有开过车或尚未评分时为空
    * @param grade 评级（S/A/B/C/D）；没有评分时为空

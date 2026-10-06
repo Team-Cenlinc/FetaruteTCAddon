@@ -5,6 +5,18 @@ drive:
       brief:
         dispatch:
           how: ["<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport next to the train</gray>'><green>[Go to train]</green></hover></click>", "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the boarding platform; if the train is already in, right beside the front cab</gray>'><green>[Go to boarding]</green></hover></click>", "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the boarding platform; if the train is already in, right beside the leading cab</gray>'><green>[Go to takeover]</green></hover></click>"]
+          route: ["<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and finish at <yellow><alight></yellow>.</white>"]
+      stop:
+        window:
+          accepted: ["<green>within door range</green>"]
+          short: ["<yellow>short</yellow>"]
+          overrun: ["<red>overran</red>"]
+      reason:
+        not-completed: ["you did not reach the final station"]
+      tip:
+        not-completed: ["<prefix> <gray>Tip: the exam completes once you stop at the final station and open the doors; leaving your seat, abandoning or getting stuck ends it.</gray>"]
+      warn:
+        hint: ["<prefix> <gray>You may keep driving to the final station for practice, or end the exam with /fta drive task abandon.</gray>"]
     coach:
       side:
         both: ["both"]
@@ -18,6 +30,12 @@ drive:
     practice:
       brief:
         drill: ["<prefix> <white>Incident drill:</white><gray> after the first stop, one incident is simulated at random (line power loss, door fault, obstacle ahead…). Follow the prompts; it is reviewed at the end and does not affect the practice count.</gray>"]
+        feedback: ["<prefix> <gray>Each stop is reviewed. Reaching the final station counts as one practice run; if the trip runs late, the drill is cancelled first and the train may be handed back to automatic operation.</gray>"]
+        route: ["<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and finish at <yellow><alight></yellow>.</white>"]
+      warn:
+        hint: ["<prefix> <gray>Keep driving to the final station; you will get a review at the end.</gray>"]
+      review:
+        not-counted: ["<prefix> <yellow>You did not reach the final station, so this run does not count.</yellow>"]
     drill:
       start:
         line-loss: ["<prefix> <red>Line power lost: traction is unavailable.</red> <gray>Return to N or brake, do not keep notching up; power returns in about <seconds> s.</gray>"]
@@ -56,6 +74,11 @@ drive:
       announce: ["<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; leaving your seat on the way does not end driving</white>"]
     continue-offer: ["<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"]
     continue-offer-code: ["<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"]
+    sheet:
+      result:
+        accepted: ["<yellow><offset> · within door window</yellow>"]
+        overrun: ["<red><offset> · outside the window</red>"]
+        short: ["<red><offset> · short, timed out</red>"]
   hud:
     line:
       - "<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"
@@ -71,6 +94,10 @@ drive:
       confirm-signal: ["<gold><bold>Signal restricted: right-click to confirm</bold></gold>"]
     setup:
       progress: ["<yellow><step> <seconds>s</yellow>"]
+    stop-result:
+      accepted: ["<yellow><bold>Within door window</bold></yellow> <white><offset></white> <gray><station></gray>"]
+      overrun: ["<red><bold>Outside the window</bold></red> <white><offset></white> <gray><station></gray>"]
+      short: ["<red><bold>Short, timed out</bold></red> <white><offset></white> <gray><station></gray>"]
   tutorial:
     finished: ["<prefix> <green>Tutorial complete.</green> <gray>When driving dispatched trains you will also get one short tip the first time you meet a signal confirmation, a stop mark, the doors and a departure signal. Run /fta drive tutorial reset to start over.</gray>"]
     command:

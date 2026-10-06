@@ -194,10 +194,32 @@ public final class StorageManager {
   /**
    * 兼容性迁移：驾驶证等级改名（free → learner，dispatch → driver），驾驶证与练习次数两张表一起改。
    *
-   * <p>幂等：已改过的没有旧 ID 可改。同一玩家已有新 ID 的记录时跳过那一行（主键冲突），旧行留着也不会被认出。
+   * <p>只做一次：两张表里已有新 ID 的记录就说明迁移过了，不再改——以后若有人自定义了叫 free、dispatch 的等级，它的记录不会被每次启动改名。 同一玩家已有新 ID
+   * 的记录时跳过那一行（主键冲突），旧行留着也不会被认出。
    */
   private void migrateLicenseClassIds(java.sql.Connection connection) {
-    for (String raw : List.of("drive_licenses", "drive_license_training")) {
+    List<String> tables = List.of("drive_licenses", "drive_license_training");
+    for (String raw : tables) {
+      String sql =
+          org.fetarute.fetaruteTCAddon.drive.license.LicenseClassIdMigration.migratedSql(
+              storageSchema.tablePrefix() + raw);
+      try (var statement = connection.prepareStatement(sql)) {
+        int i = 1;
+        for (String renamed :
+            org.fetarute.fetaruteTCAddon.drive.license.LicenseClassIdMigration.RENAMED.values()) {
+          statement.setString(i++, renamed);
+        }
+        try (var result = statement.executeQuery()) {
+          if (result.next() && result.getLong(1) > 0) {
+            return;
+          }
+        }
+      } catch (Exception ex) {
+        logger.warn("检查驾驶证等级迁移失败: " + raw + ": " + ex.getMessage());
+        return;
+      }
+    }
+    for (String raw : tables) {
       String table = storageSchema.tablePrefix() + raw;
       for (Map.Entry<String, String> rename :
           org.fetarute.fetaruteTCAddon.drive.license.LicenseClassIdMigration.RENAMED.entrySet()) {
