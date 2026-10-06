@@ -554,6 +554,16 @@ public final class PidsService {
             .orElse(List.of()));
   }
 
+  /** 世界调度图里的全部车站，离屏幕由近到远（补全车站参数用）。 */
+  public List<PidsStationKey> stationsByDistance(UUID worldId, PidsScreen.Position center) {
+    return api.graph()
+        .getSnapshot(worldId)
+        .map(
+            snapshot ->
+                PidsNearby.of(snapshot.nodes(), center, Double.POSITIVE_INFINITY).stations())
+        .orElse(List.of());
+  }
+
   /** 调度图里某个车站的全部站台。 */
   public List<String> platformsOf(UUID worldId, PidsStationKey station) {
     return api.graph()
@@ -563,13 +573,24 @@ public final class PidsService {
         .orElse(List.of());
   }
 
-  /** 屏幕所用的布局（不存在时退回同尺寸内置布局）。 */
+  /** 屏幕的主布局（不存在时退回同尺寸内置布局）。 */
   public Optional<PidsLayout> layoutOf(PidsScreen screen) {
     return layouts.resolve(screen.layoutId(), screen.tileRows(), screen.tileCols());
   }
 
+  /** 屏幕轮流显示的布局，主布局在前（见 {@link PidsScreenPages#resolve}）。 */
+  public List<PidsLayout> pagesOf(PidsScreen screen) {
+    return PidsScreenPages.resolve(screen, layouts);
+  }
+
+  /** 屏幕布局的名称，组合翻页时依次列出；布局都不存在时写主布局 ID。 */
+  public String layoutNames(PidsScreen screen) {
+    List<PidsLayout> pages = pagesOf(screen);
+    return pages.isEmpty() ? screen.layoutId() : PidsComposer.layoutNames(pages);
+  }
+
   /**
-   * 屏幕的线路过滤可选的线路：线路运行状况屏为屏幕所属运营商的线路（绑车站或只绑运营商都行），其余为停靠本站的线路。
+   * 屏幕的线路过滤可选的线路：只显示线路运行状况的屏为屏幕所属运营商的线路（绑车站或只绑运营商都行），其余（含与到发组合翻页的）为停靠本站的线路。
    *
    * @return 线路运行状况屏没有运营商、其余屏没绑车站时为空
    */
@@ -627,9 +648,10 @@ public final class PidsService {
 
   private record CachedOperators(long expiresAtMillis, List<String> codes) {}
 
-  /** 屏幕是线路运行状况屏（布局带状况表组件）：不按站台显示，站台选择不起作用。 */
+  /** 屏幕只显示线路运行状况（各布局都带状况表组件）：不按站台显示，站台选择不起作用。 */
   public boolean isLineStatus(PidsScreen screen) {
-    return layoutOf(screen).flatMap(PidsLayout::lineStatus).isPresent();
+    List<PidsLayout> pages = pagesOf(screen);
+    return !pages.isEmpty() && pages.stream().allMatch(layout -> layout.lineStatus().isPresent());
   }
 
   /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */

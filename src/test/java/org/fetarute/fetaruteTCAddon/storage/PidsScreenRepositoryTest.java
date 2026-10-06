@@ -88,6 +88,23 @@ class PidsScreenRepositoryTest {
   }
 
   @Test
+  void roundTripsCombinedPages() {
+    PidsScreen single = screens.save(screen(5));
+    assertTrue(screens.findById(single.id()).orElseThrow().pageLayoutIds().isEmpty());
+
+    PidsScreen combined =
+        single.withLayouts(List.of("station-3x5", "status-3x5", "custom-b"), now());
+    screens.save(combined);
+
+    PidsScreen loaded = screens.findById(single.id()).orElseThrow();
+    assertEquals(combined, loaded);
+    assertEquals(List.of("status-3x5", "custom-b"), loaded.pageLayoutIds(), "翻页按顺序");
+
+    screens.save(loaded.withLayout("station-3x5", now()));
+    assertTrue(screens.findById(single.id()).orElseThrow().pageLayoutIds().isEmpty());
+  }
+
+  @Test
   void unboundScreensKeepAnEmptyStation() {
     PidsScreen pending = screens.save(screen(5));
 

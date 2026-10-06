@@ -37,6 +37,44 @@ class PidsScreenTest {
   }
 
   @Test
+  void layoutsKeepTheirOrderWithoutBlanksOrRepeats() {
+    PidsScreen screen =
+        screen(PidsFacing.SOUTH, 3, 5)
+            .withLayouts(
+                List.of(" station-3x5", "status-3x5", "", "station-3x5", "custom"), Instant.EPOCH);
+
+    assertEquals(List.of("station-3x5", "status-3x5", "custom"), screen.layoutIds());
+    assertEquals("station-3x5", screen.layoutId());
+    assertEquals(List.of("status-3x5", "custom"), screen.pageLayoutIds());
+    assertEquals(List.of("status-3x5"), screen.withLayout("status-3x5", Instant.EPOCH).layoutIds());
+    assertTrue(screen(PidsFacing.SOUTH, 1, 3).pageLayoutIds().isEmpty());
+    assertEquals(
+        List.of("", "status-3x5"),
+        screen.withLayouts(List.of(" ", "status-3x5"), Instant.EPOCH).layoutIds(),
+        "主布局空白也保留（按不存在处理、退回内置布局），不让一行旧数据读不进来");
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new PidsScreen(
+                screen.id(),
+                screen.worldId(),
+                screen.anchor(),
+                screen.facing(),
+                3,
+                5,
+                List.of(),
+                Optional.empty(),
+                Optional.empty(),
+                Set.of(),
+                Set.of(),
+                PidsScreen.Appearance.AUTO,
+                PidsScreen.Mode.TEST_CARD,
+                Instant.EPOCH,
+                Instant.EPOCH),
+        "至少一个布局");
+  }
+
+  @Test
   void columnsRunToTheViewersRight() {
     // 面朝南的屏幕，观众面朝北站着，右手是东（+x）
     assertEquals(new Position(12, 64, 20), screen(PidsFacing.SOUTH, 1, 3).frameAt(0, 2));

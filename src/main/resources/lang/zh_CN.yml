@@ -1171,6 +1171,9 @@ command:
       operator-line-status-only: "<prefix> <red>只有线路运行状况屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"
       need-platform: "<prefix> <red>站台屏须选定站台</red> <gray>站台号写在左上角，不能为空，也不能选全部；需要显示全部站台时请换用车站统屏布局</gray>"
       too-many-platforms: "<prefix> <red>这块屏幕最多显示 <white><max></white> 个站台</red> <gray>请先去掉一个，或换用车站统屏布局</gray>"
+      page-is-primary: "<prefix> <red>该布局已是主布局</red> <gray>(layout=<white><layout></white>)，主布局请在“布局”一行改选</gray>"
+      page-primary-not-combinable: "<prefix> <red>该屏幕的主布局不能组合翻页</red> <gray>(主布局=<white><primary></white>)，站台屏、多站台屏与停站屏按站台轮播，只能单独使用；请先将主布局换成车站统屏、线路运行状况屏等不按站台显示的布局</gray>"
+      page-not-combinable: "<prefix> <red>该布局不能组合翻页</red> <gray>(layout=<white><layout></white>)，站台屏、多站台屏与停站屏按站台轮播，只能单独使用；车站统屏、线路运行状况屏等不按站台显示的布局方可组合</gray>"
       invalid-value: "<prefix> <red>无效的取值</red> <gray>(<white><value></white>)</gray>"
     bulletin:
       help:
@@ -1584,6 +1587,8 @@ pids:
     operator: "<gray>运营商</gray>"
     line: "<gray>线路</gray>"
     layout: "<gray>布局</gray>"
+    pages: "<gray>组合翻页</gray>"
+    pages-hint: "<dark_gray>与主布局轮流显示，再点一次取消</dark_gray>"
     appearance: "<gray>外观</gray>"
     actions: "<gray>操作</gray>"
     station-manual: "手动指定…"

@@ -113,7 +113,7 @@ class PidsLineStatusViewsTest {
   }
 
   @Test
-  void fewLinesUseRoomyRowsAndManyLinesPageEveryFifteenSeconds() {
+  void fewLinesUseRoomyRowsAndManyLinesArePaged() {
     codes = List.of("BS", "DS", "MT");
     PidsLineStatusView roomy = build(Set.of(), NOW, good());
     assertTrue(roomy.roomy());
@@ -121,9 +121,8 @@ class PidsLineStatusViewsTest {
 
     codes = List.of("A1", "A2", "A3", "A4", "A5", "A6", "A7");
     serving = List.of();
-    Instant pageStart = Instant.ofEpochSecond(NOW.getEpochSecond() / 30 * 30);
-    PidsLineStatusView first = build(Set.of(), pageStart.plusSeconds(14), good());
-    PidsLineStatusView second = build(Set.of(), pageStart.plusSeconds(15), good());
+    PidsLineStatusView first = build(request(Set.of(), NOW), good());
+    PidsLineStatusView second = build(request(Set.of(), NOW).withPage(1), good());
 
     assertFalse(first.roomy(), "4 条起用小行");
     assertEquals(2, first.pages());
@@ -131,7 +130,9 @@ class PidsLineStatusViewsTest {
     assertEquals(1, second.page());
     assertEquals(List.of("A6", "A7"), codes(second));
     assertEquals(List.of("A6", "A7"), asked.subList(asked.size() - 2, asked.size()), "只取当前页的状况");
-    assertEquals(0, build(Set.of(), pageStart.plusSeconds(30), good()).page());
+    assertEquals(0, build(request(Set.of(), NOW).withPage(2), good()).page(), "超出页数取余");
+    assertEquals(
+        1, build(request(Set.of(), NOW).withPage(9_000_000_001L), good()).page(), "可直接传轮次");
   }
 
   @Test
@@ -191,9 +192,18 @@ class PidsLineStatusViewsTest {
   }
 
   private PidsLineStatusView build(Set<String> lines, Instant now, PidsLineStatusSource source) {
+    return build(request(lines, now), source);
+  }
+
+  private static PidsLineStatusViews.Request request(Set<String> lines, Instant now) {
+    return new PidsLineStatusViews.Request(
+        HHU.operatorCode(), Optional.of(HHU), lines, PidsTheme.DARK, now, SHANGHAI, 3, 5);
+  }
+
+  private PidsLineStatusView build(
+      PidsLineStatusViews.Request request, PidsLineStatusSource source) {
     return views.build(
-        new PidsLineStatusViews.Request(
-            HHU.operatorCode(), Optional.of(HHU), lines, PidsTheme.DARK, now, SHANGHAI, 3, 5),
+        request,
         (line, at) -> {
           asked.add(line.chip().code());
           return source.statusOf(line, at);

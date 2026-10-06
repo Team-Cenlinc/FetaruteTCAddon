@@ -49,7 +49,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式：测试卡，列出布局、识别出的车站（或运营商）与屏幕编号
- *   <li>线路运行状况屏（布局带状况表组件）：屏幕所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页； 可以不绑车站、只绑运营商
+ *   <li>线路运行状况屏（布局带状况表组件）：屏幕所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页；线路多时分页； 可以不绑车站、只绑运营商
+ *   <li>组合翻页（屏幕除主布局外还选了布局，见 {@link PidsScreenPages}）：按时钟轮流显示各布局，每个布局照它自己的规则显示，
+ *       线路运行状况分页时每轮放一页、按轮轮换；线路运行状况屏单独用时也按这套时钟翻页。只绑运营商的屏幕只轮流显示线路运行状况
  *   <li>其余屏未绑定车站：测试卡
  *   <li>停站屏（布局带停站表组件）：本站台下一班的停站表（停站多时翻页）、后续列车页与宣传页依次轮换（{@link PidsCarousel#stopList}），
  *       不放空位页；通过列车临近时同样锁定安全提示页
@@ -232,45 +234,75 @@ public final class PidsComposer {
                   rows,
                   cols)));
     }
-    Optional<PidsLayout> layout = layouts.resolve(screen.layoutId(), rows, cols);
-    if (layout.isEmpty()) {
+    List<PidsLayout> pages = PidsScreenPages.resolve(screen, layouts);
+    if (pages.isEmpty()) {
       return Optional.of(card(notice("no-layout", Map.of("size", rows + "×" + cols), rows, cols)));
     }
     if (screen.mode() == PidsScreen.Mode.TEST_CARD) {
-      return Optional.of(card(testCard(screen, layout.get())));
+      return Optional.of(card(testCard(screen, pages)));
     }
-    Optional<PidsLayout.LineStatus> status = layout.get().lineStatus();
-    if (status.isPresent() && screen.operatorCode().isPresent()) {
-      return Optional.of(
-          lineStatus(screen, layout.get(), status.get(), screen.operatorCode().get()));
+    // 到发页要绑车站：只绑运营商的屏幕只显示其中的线路运行状况
+    List<PidsLayout> shown =
+        screen.station().isPresent()
+            ? pages
+            : pages.stream().filter(layout -> layout.lineStatus().isPresent()).toList();
+    if (shown.isEmpty() || screen.operatorCode().isEmpty()) {
+      return Optional.of(card(testCard(screen, pages)));
     }
-    if (status.isPresent() || screen.station().isEmpty()) {
-      return Optional.of(card(testCard(screen, layout.get())));
+    if (shown.size() == 1 && shown.get(0).lineStatus().isEmpty()) {
+      return Optional.of(live(screen, shown.get(0), screen.station().orElseThrow()));
     }
-    return Optional.of(live(screen, layout.get(), screen.station().get()));
+    return Optional.of(paged(screen, shown));
   }
 
-  /** 线路运行状况屏：线路少时用大行，多了用小行并翻页。 */
-  private PidsContent lineStatus(
-      PidsScreen screen, PidsLayout layout, PidsLayout.LineStatus widget, String operator) {
-    PidsLineStatusView view =
-        lineStatusViews.build(
-            new PidsLineStatusViews.Request(
-                operator,
-                screen.station(),
-                screen.lines(),
-                theme(screen),
-                clock.instant(),
-                zone,
-                widget.rowsPerPage(widget.roomy()),
-                widget.rowsPerPage(widget.compact())),
-            lineStatuses);
+  /**
+   * 按时钟轮流显示各布局（见 {@link PidsScreenPages#turn}）；线路运行状况分几页时第几轮放第几页。
+   *
+   * <p>同一车站的屏幕同时翻页；只绑运营商的屏幕按运营商代码错开。到发页只在绑了车站时出现。
+   */
+  private PidsContent paged(PidsScreen screen, List<PidsLayout> layouts) {
+    PidsSettings.PageSettings timing = settings.get().pages();
+    Instant now = clock.instant();
+    List<Integer> seconds =
+        layouts.stream()
+            .map(
+                layout ->
+                    layout.lineStatus().isPresent()
+                        ? timing.lineStatusSeconds()
+                        : timing.boardSeconds())
+            .toList();
+    String operator = screen.operatorCode().orElseThrow();
+    PidsScreenPages.Turn turn =
+        PidsScreenPages.turn(
+            seconds, screen.station().map(PidsStationKey::toString).orElse(operator), now);
+    PidsLayout shown = layouts.get(turn.page());
+    Optional<PidsLayout.LineStatus> widget = shown.lineStatus();
+    if (widget.isEmpty()) {
+      return live(screen, shown, screen.station().orElseThrow());
+    }
+    return lineStatus(
+        shown,
+        new PidsLineStatusViews.Request(
+            operator,
+            screen.station(),
+            screen.lines(),
+            theme(screen),
+            now,
+            zone,
+            widget.get().rowsPerPage(widget.get().roomy()),
+            widget.get().rowsPerPage(widget.get().compact()),
+            turn.round()));
+  }
+
+  /** 线路运行状况的一页：线路少时用大行，多了用小行并分页。 */
+  private PidsContent lineStatus(PidsLayout layout, PidsLineStatusViews.Request request) {
+    PidsLineStatusView view = lineStatusViews.build(request, lineStatuses);
     return new PidsContent(
         new LineStatusKey(layout, view), () -> renderer.renderLineStatus(layout, view));
   }
 
-  /** 屏幕的测试卡：布局、识别出的车站与站台、屏幕编号。 */
-  public PidsTestCard testCard(PidsScreen screen, PidsLayout layout) {
+  /** 屏幕的测试卡：布局（组合翻页时依次列出）、识别出的车站与站台、屏幕编号。 */
+  public PidsTestCard testCard(PidsScreen screen, List<PidsLayout> layouts) {
     String station =
         screen
             .station()
@@ -298,12 +330,20 @@ public final class PidsComposer {
             format(
                 "pids.test-card.layout",
                 Map.of(
-                    "layout", layout.name(), "size", screen.tileRows() + "×" + screen.tileCols())),
+                    "layout",
+                    layoutNames(layouts),
+                    "size",
+                    screen.tileRows() + "×" + screen.tileCols())),
             station,
             format("pids.test-card.screen", Map.of("id", shortId(screen.id())))),
         text("pids.test-card.hint"),
         screen.tileRows(),
         screen.tileCols());
+  }
+
+  /** 布局名称，组合翻页时按显示顺序以“ + ”相连。 */
+  public static String layoutNames(List<PidsLayout> layouts) {
+    return layouts.stream().map(PidsLayout::name).collect(Collectors.joining(" + "));
   }
 
   /** 屏幕编号的短写：UUID 前 8 位。 */
@@ -325,8 +365,7 @@ public final class PidsComposer {
     Instant now = clock.instant();
     List<String> platformLabels =
         screen.platforms().stream().sorted(PidsPlatformNode.PLATFORM_ORDER).toList();
-    boolean rotating =
-        layout.stopList().isEmpty() && PidsPlatformSelection.limit(layout).isPresent();
+    boolean rotating = layout.stopList().isEmpty() && PidsPlatformSelection.hasCarousel(layout);
     PidsViewBuilder.Request request =
         new PidsViewBuilder.Request(
             snapshot,
@@ -491,9 +530,9 @@ public final class PidsComposer {
                 new Names(bulletin.body().primary(), bulletin.body().secondary())));
   }
 
-  /** 布局轮播公告：站台屏、多站台屏与停站屏（带站台号组件）；车站统屏与线路运行状况屏不放。 */
+  /** 布局轮播公告：有自己轮播的站台屏、多站台屏与停站屏（{@link PidsPlatformSelection#hasCarousel}）；车站统屏与线路运行状况屏不放。 */
   public static boolean showsBulletins(PidsLayout layout) {
-    return PidsPlatformSelection.limit(layout).isPresent();
+    return PidsPlatformSelection.hasCarousel(layout);
   }
 
   /** 屏幕显示的线路代码（大写）。 */

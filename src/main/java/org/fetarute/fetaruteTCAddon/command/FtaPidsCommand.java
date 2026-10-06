@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsComposer;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsNearby;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsPlatformNode;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsPlatformSelection;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsScreenPages;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStickMenu;
@@ -40,8 +41,9 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *   <li>{@code give <布局>} 领取安装纸，{@code stick} 领取配置棍（需管理权限或公司成员身份）
  *   <li>{@code list [页]}（需 {@value PidsAccess#MANAGE_PERMISSION}）、{@code info <屏幕>}、{@code menu
  *       <屏幕>}
- *   <li>{@code set <屏幕> station|platform|line|layout|appearance|mode
- *       ...}：配置棍菜单点击执行的就是这些命令，执行后重新发送菜单
+ *   <li>{@code set <屏幕> station|platform|line|layout|page|appearance|mode
+ *       ...}：配置棍菜单点击执行的就是这些命令，执行后重新发送菜单；{@code layout} 换主布局，{@code page} 增删组合翻页的布局（见 {@link
+ *       PidsScreenPages}）
  *   <li>{@code remove <屏幕> [confirm]}：拆除；展示框还原为空，玩家拿回同布局的安装纸
  * </ul>
  *
@@ -123,14 +125,8 @@ public final class FtaPidsCommand {
             .literal("set")
             .required("screen", StringParser.stringParser(), screens)
             .literal("station")
-            .required(
-                "operator",
-                StringParser.stringParser(),
-                CommandSuggestionProviders.placeholder("<operator>"))
-            .required(
-                "station",
-                StringParser.stringParser(),
-                CommandSuggestionProviders.placeholder("<station>"))
+            .required("operator", StringParser.stringParser(), stationOperatorSuggestions())
+            .required("station", StringParser.stringParser(), stationSuggestions())
             .handler(this::setStation));
     // 线路运行状况屏可以不绑车站、只绑运营商。
     manager.command(
@@ -144,7 +140,8 @@ public final class FtaPidsCommand {
             .handler(this::setOperator));
     registerSet(manager, screens, "platform", platformSuggestions(), this::togglePlatform);
     registerSet(manager, screens, "line", lineSuggestions(), this::toggleLine);
-    registerSet(manager, screens, "layout", layouts, this::changeLayout);
+    registerSet(manager, screens, "layout", screenLayoutSuggestions(), this::changeLayout);
+    registerSet(manager, screens, "page", pageSuggestions(), this::togglePage);
     registerSet(
         manager,
         screens,
@@ -290,11 +287,7 @@ public final class FtaPidsCommand {
                       "id",
                       PidsComposer.shortId(screen.id()),
                       "layout",
-                      service
-                          .get()
-                          .layoutOf(screen)
-                          .map(PidsLayout::name)
-                          .orElse(screen.layoutId()),
+                      service.get().layoutNames(screen),
                       "size",
                       screen.tileRows() + "×" + screen.tileCols(),
                       "station",
@@ -466,12 +459,7 @@ public final class FtaPidsCommand {
   private Optional<PidsScreen> changeLayout(
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
     Optional<PidsLayout> layout =
-        service
-            .layouts()
-            .find(value)
-            .filter(
-                found ->
-                    found.tileRows() == screen.tileRows() && found.tileCols() == screen.tileCols());
+        service.layouts().find(value).filter(found -> PidsScreenPages.fits(screen, found));
     if (layout.isEmpty()) {
       sender.sendMessage(
           locale()
@@ -480,7 +468,38 @@ public final class FtaPidsCommand {
                   Map.of("layout", value, "size", screen.tileRows() + "×" + screen.tileCols())));
       return Optional.empty();
     }
-    return Optional.of(screen.withLayout(layout.get().id(), service.now()));
+    return Optional.of(
+        screen.withLayouts(
+            PidsScreenPages.withPrimary(screen, layout.get(), service.layouts()), service.now()));
+  }
+
+  /** 增删组合翻页的布局（见 {@link PidsScreenPages#togglePage}）。 */
+  private Optional<PidsScreen> togglePage(
+      CommandSender sender, PidsService service, PidsScreen screen, String value) {
+    PidsScreenPages.Edit edit = PidsScreenPages.togglePage(screen, value, service.layouts());
+    String key =
+        switch (edit.outcome()) {
+          case OK -> null;
+          case UNKNOWN_LAYOUT -> "command.pids.set.unknown-layout";
+          case PRIMARY -> "command.pids.set.page-is-primary";
+          case PRIMARY_NOT_COMBINABLE -> "command.pids.set.page-primary-not-combinable";
+          case NOT_COMBINABLE -> "command.pids.set.page-not-combinable";
+        };
+    if (key != null) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  key,
+                  Map.of(
+                      "layout",
+                      value,
+                      "primary",
+                      service.layoutOf(screen).map(PidsLayout::id).orElse(screen.layoutId()),
+                      "size",
+                      screen.tileRows() + "×" + screen.tileCols())));
+      return Optional.empty();
+    }
+    return Optional.of(screen.withLayouts(edit.layoutIds(), service.now()));
   }
 
   private Optional<PidsScreen> changeAppearance(
@@ -619,11 +638,21 @@ public final class FtaPidsCommand {
           if (prefix.isEmpty()) {
             suggestions.add("<screen>");
           }
-          if (!ctx.sender().hasPermission(PidsAccess.MANAGE_PERMISSION)) {
-            return suggestions;
-          }
+          boolean admin = ctx.sender().hasPermission(PidsAccess.MANAGE_PERMISSION);
           plugin.getPidsService().stream()
-              .flatMap(service -> service.screens().stream())
+              .flatMap(
+                  service -> {
+                    if (admin) {
+                      return service.screens().stream();
+                    }
+                    // 公司成员只补全本公司（车站或运营商所属）的屏幕；都没绑的只有管理员能管
+                    Set<String> manageable =
+                        Set.copyOf(service.manageableOperatorsForSuggestions(ctx.sender()));
+                    return service.screens().stream()
+                        .filter(
+                            screen ->
+                                screen.operatorCode().filter(manageable::contains).isPresent());
+                  })
               .map(screen -> PidsComposer.shortId(screen.id()))
               .filter(id -> id.startsWith(prefix))
               .limit(SUGGESTION_LIMIT)
@@ -648,6 +677,118 @@ public final class FtaPidsCommand {
               .forEach(suggestions::add);
           return suggestions;
         });
+  }
+
+  /** 换主布局：与屏幕同尺寸的布局；还没输入屏幕时列全部。 */
+  private SuggestionProvider<CommandSender> screenLayoutSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<layout>");
+          }
+          Optional<ScreenRef> ref = screenOf(ctx);
+          plugin.getPidsService().stream()
+              .flatMap(service -> service.layouts().all().stream())
+              .filter(
+                  layout ->
+                      ref.map(found -> PidsScreenPages.fits(found.screen(), layout)).orElse(true))
+              .map(PidsLayout::id)
+              .filter(id -> id.startsWith(prefix))
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /** 组合翻页：可与主布局组合的同尺寸布局。 */
+  private SuggestionProvider<CommandSender> pageSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<layout>");
+          }
+          screenOf(ctx).stream()
+              .flatMap(
+                  ref -> {
+                    List<String> ids = new ArrayList<>(ref.screen().pageLayoutIds());
+                    PidsScreenPages.candidates(ref.screen(), ref.service().layouts()).stream()
+                        .map(PidsLayout::id)
+                        .filter(id -> !ids.contains(id))
+                        .forEach(ids::add);
+                    return ids.stream();
+                  })
+              .filter(id -> id.startsWith(prefix))
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /** 绑定车站的运营商：屏幕所在世界调度图里的车站所属的、本人能管理的运营商，离屏幕近的优先。 */
+  private SuggestionProvider<CommandSender> stationOperatorSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<operator>");
+          }
+          screenOf(ctx)
+              .ifPresent(
+                  ref -> {
+                    Set<String> manageable =
+                        Set.copyOf(ref.service().manageableOperatorsForSuggestions(ctx.sender()));
+                    stationsNear(ref).stream()
+                        .map(PidsStationKey::operatorCode)
+                        .distinct()
+                        .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+                        .filter(manageable::contains)
+                        .limit(SUGGESTION_LIMIT)
+                        .forEach(suggestions::add);
+                  });
+          return suggestions;
+        });
+  }
+
+  /** 绑定车站的站码：屏幕所在世界调度图里这个运营商的车站，离屏幕近的优先；运营商须是本人能管理的。 */
+  private SuggestionProvider<CommandSender> stationSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<station>");
+          }
+          Optional<String> operator = ctx.<String>optional("operator").map(String::trim);
+          if (operator.isEmpty()) {
+            return suggestions;
+          }
+          screenOf(ctx)
+              .filter(
+                  ref ->
+                      ref.service()
+                          .manageableOperatorsForSuggestions(ctx.sender())
+                          .contains(operator.get().toUpperCase(Locale.ROOT)))
+              .ifPresent(
+                  ref ->
+                      stationsNear(ref).stream()
+                          .filter(
+                              station -> station.operatorCode().equalsIgnoreCase(operator.get()))
+                          .map(PidsStationKey::stationCode)
+                          .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+                          .limit(SUGGESTION_LIMIT)
+                          .forEach(suggestions::add));
+          return suggestions;
+        });
+  }
+
+  /** 屏幕所在世界调度图里的车站，离屏幕由近到远。 */
+  private static List<PidsStationKey> stationsNear(ScreenRef ref) {
+    return ref.service().stationsByDistance(ref.screen().worldId(), ref.screen().center());
   }
 
   private SuggestionProvider<CommandSender> platformSuggestions() {

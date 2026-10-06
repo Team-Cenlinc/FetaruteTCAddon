@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
  * @param configVersion 配置文件版本号（模板升级时由 {@code ConfigUpdater} 写入）
  * @param enabled 总开关；关闭后不加载站台屏、不播报
  * @param render 渲染与翻页节奏
+ * @param pages 组合翻页（一块屏幕轮流显示几个布局）各页的停留时间
  * @param limits 数量上限
  * @param font 字体
  * @param layout 默认布局预设
@@ -29,6 +30,7 @@ public record PidsSettings(
     int configVersion,
     boolean enabled,
     RenderSettings render,
+    PageSettings pages,
     LimitSettings limits,
     FontSettings font,
     LayoutSettings layout,
@@ -36,7 +38,7 @@ public record PidsSettings(
     BroadcastSettings broadcast) {
 
   /** 内置模板的配置版本；模板升级时同步修改。 */
-  public static final int EXPECTED_CONFIG_VERSION = 3;
+  public static final int EXPECTED_CONFIG_VERSION = 4;
 
   /** 一个游戏日的刻数。 */
   private static final int TICKS_PER_DAY = 24000;
@@ -44,6 +46,7 @@ public record PidsSettings(
   /** 校验并固化各分组，调用方不会拿到 {@code null} 分组。 */
   public PidsSettings {
     Objects.requireNonNull(render, "render");
+    Objects.requireNonNull(pages, "pages");
     Objects.requireNonNull(limits, "limits");
     Objects.requireNonNull(font, "font");
     Objects.requireNonNull(layout, "layout");
@@ -57,6 +60,7 @@ public record PidsSettings(
         EXPECTED_CONFIG_VERSION,
         true,
         RenderSettings.DEFAULT,
+        PageSettings.DEFAULT,
         LimitSettings.DEFAULT,
         FontSettings.DEFAULT,
         LayoutSettings.DEFAULT,
@@ -90,6 +94,12 @@ public record PidsSettings(
             reader.positiveInt("render.stop-page-seconds", renderDefault.stopPageSeconds()),
             reader.notices("render.notices", renderDefault.notices()),
             reader.positiveInt("render.bulletin-seconds", renderDefault.bulletinSeconds()));
+
+    PageSettings pages =
+        new PageSettings(
+            reader.positiveInt("pages.board-seconds", PageSettings.DEFAULT.boardSeconds()),
+            reader.positiveInt(
+                "pages.line-status-seconds", PageSettings.DEFAULT.lineStatusSeconds()));
 
     LimitSettings limits =
         new LimitSettings(
@@ -126,6 +136,7 @@ public record PidsSettings(
         config.getInt("config-version", EXPECTED_CONFIG_VERSION),
         reader.bool("enabled", true),
         render,
+        pages,
         limits,
         font,
         layout,
@@ -268,6 +279,18 @@ public record PidsSettings(
           stopPageSeconds,
           PidsNotice.courtesy());
     }
+  }
+
+  /**
+   * 组合翻页：一块屏幕选了几个布局（如车站统屏与线路运行状况）时按时钟轮流显示，同一车站的屏幕同时翻页。
+   *
+   * @param boardSeconds 到发页每轮停留多少秒
+   * @param lineStatusSeconds 线路运行状况每轮停留多少秒；线路多、分几页时每轮放其中一页、按轮轮换，单独的线路运行状况屏每页也停这么久
+   */
+  public record PageSettings(int boardSeconds, int lineStatusSeconds) {
+
+    /** 内置默认值：乘客走到屏前多半是来看到发的，到发占一轮的三分之二；状况一页 15 秒读得完五条线路。 */
+    public static final PageSettings DEFAULT = new PageSettings(30, 15);
   }
 
   /**

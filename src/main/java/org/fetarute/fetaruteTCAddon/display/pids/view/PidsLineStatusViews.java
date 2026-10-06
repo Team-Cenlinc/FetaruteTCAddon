@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  *
  * <ul>
  *   <li>范围：本站所属运营商的线路（名称目录已去掉筹建中的），按屏幕的线路过滤；停靠本站的排在前面（按换乘条的顺序，运营商与线路代码一起认），其余按线路代码
- *   <li>密度：大行一页放得下全部线路时用大行，否则用小行，放不下时每 {@value #PAGE_SECONDS} 秒翻一页（按时刻对齐，同站各屏同步）
+ *   <li>密度：大行一页放得下全部线路时用大行，否则用小行，放不下时分页；显示哪一页由调用方按时钟定（{@link Request#page()}，按页数取余）
  *   <li>说明：全线停运写“线路检修”，其余按 {@link PidsLineStatus.Detail}；运行正常、暂无列车不写
  *   <li>没有线路时写“暂无线路信息”；运营商有线路、只是屏幕的线路过滤一条也对不上时，改写过滤没有匹配的线路
  * </ul>
@@ -30,9 +30,6 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  * <p>只为当前页的线路取状况。
  */
 public final class PidsLineStatusViews {
-
-  /** 翻页间隔（秒）。 */
-  static final int PAGE_SECONDS = 15;
 
   private final PidsDirectory directory;
   private final PidsVocabulary vocabulary;
@@ -43,13 +40,15 @@ public final class PidsLineStatusViews {
   }
 
   /**
-   * @param station 屏幕绑定的车站
+   * @param operatorCode 屏幕所属的运营商
+   * @param station 屏幕绑定的车站；只绑运营商时为空
    * @param lines 屏幕的线路过滤（大写线路代码）；为空表示不过滤
    * @param theme 配色
    * @param now 当前时刻
    * @param zone 时钟时区
    * @param roomyRows 大行一页几条
    * @param compactRows 小行一页几条
+   * @param page 显示第几页（0 起），按页数取余：调用方可直接传按时钟数的轮次
    */
   public record Request(
       String operatorCode,
@@ -59,7 +58,8 @@ public final class PidsLineStatusViews {
       Instant now,
       ZoneId zone,
       int roomyRows,
-      int compactRows) {
+      int compactRows,
+      long page) {
 
     public Request {
       Objects.requireNonNull(operatorCode, "operatorCode");
@@ -69,12 +69,40 @@ public final class PidsLineStatusViews {
       Objects.requireNonNull(now, "now");
       Objects.requireNonNull(zone, "zone");
     }
+
+    /** 显示第 1 页。 */
+    public Request(
+        String operatorCode,
+        Optional<PidsStationKey> station,
+        Set<String> lines,
+        PidsTheme theme,
+        Instant now,
+        ZoneId zone,
+        int roomyRows,
+        int compactRows) {
+      this(operatorCode, station, lines, theme, now, zone, roomyRows, compactRows, 0);
+    }
+
+    /** 换成显示第 {@code page} 页（按页数取余）。 */
+    public Request withPage(long page) {
+      return new Request(
+          operatorCode, station, lines, theme, now, zone, roomyRows, compactRows, page);
+    }
   }
 
   /** 运营商的全部线路（线路运行状况屏的线路过滤可选项；其余屏的可选项见 {@code PidsService#filterableLines}）。 */
   public static List<PidsView.LineChip> operatorLineChips(
       PidsDirectory directory, String operatorCode) {
     return directory.operatorLines(operatorCode).stream().map(OperatorLine::chip).toList();
+  }
+
+  /** 线路数决定的密度与分页。 */
+  private record Paging(boolean roomy, int perPage, int pages) {}
+
+  private static Paging pages(List<OperatorLine> lines, Request request) {
+    boolean roomy = lines.size() <= request.roomyRows();
+    int perPage = Math.max(1, roomy ? request.roomyRows() : request.compactRows());
+    return new Paging(roomy, perPage, Math.max(1, (lines.size() + perPage - 1) / perPage));
   }
 
   /**
@@ -84,11 +112,11 @@ public final class PidsLineStatusViews {
   public PidsLineStatusView build(Request request, PidsLineStatusSource statuses) {
     List<OperatorLine> all = directory.operatorLines(request.operatorCode());
     List<OperatorLine> lines = lines(request, all);
-    boolean roomy = lines.size() <= request.roomyRows();
-    int perPage = Math.max(1, roomy ? request.roomyRows() : request.compactRows());
-    int pages = Math.max(1, (lines.size() + perPage - 1) / perPage);
-    int page =
-        (int) Math.floorMod(Math.floorDiv(request.now().getEpochSecond(), PAGE_SECONDS), pages);
+    Paging paging = pages(lines, request);
+    boolean roomy = paging.roomy();
+    int perPage = paging.perPage();
+    int pages = paging.pages();
+    int page = Math.floorMod(request.page(), pages);
     List<Row> rows =
         lines
             .subList(

@@ -100,7 +100,7 @@ public final class PidsStickMenu {
 
     Component layouts = label("pids.menu.layout");
     for (PidsLayout layout : service.layouts().all()) {
-      if (layout.tileRows() == screen.tileRows() && layout.tileCols() == screen.tileCols()) {
+      if (PidsScreenPages.fits(screen, layout)) {
         layouts =
             layouts.append(
                 button(
@@ -111,6 +111,7 @@ public final class PidsStickMenu {
       }
     }
     sender.sendMessage(layouts);
+    pageRow(service, screen, set).ifPresent(sender::sendMessage);
 
     Component appearance = label("pids.menu.appearance");
     for (PidsScreen.Appearance value : PidsScreen.Appearance.values()) {
@@ -246,6 +247,37 @@ public final class PidsStickMenu {
         .orElseGet(() -> locale.text("command.pids.list.unbound"));
   }
 
+  /**
+   * 组合翻页：可与主布局轮流显示的同尺寸布局，点一下加入、再点一下去掉；已选的按显示顺序排在前面。
+   *
+   * <p>只列可组合的布局：记录里留着、但已删改得不能显示的翻页布局不列，免得标成已选却从不显示（显示时本来就跳过）。
+   *
+   * @return 主布局不能组合（站台屏等）或没有可组合的布局时为空，不显示这一行
+   */
+  private Optional<Component> pageRow(PidsService service, PidsScreen screen, String set) {
+    List<String> selected = screen.pageLayoutIds();
+    List<PidsLayout> candidates = PidsScreenPages.candidates(screen, service.layouts());
+    if (candidates.isEmpty()) {
+      return Optional.empty();
+    }
+    Component row = label("pids.menu.pages");
+    List<PidsLayout> shown = new ArrayList<>();
+    selected.forEach(
+        id -> candidates.stream().filter(layout -> layout.id().equals(id)).forEach(shown::add));
+    candidates.stream().filter(layout -> !shown.contains(layout)).forEach(shown::add);
+    for (PidsLayout layout : shown) {
+      row =
+          row.append(
+              button(
+                  layout.name(),
+                  selected.contains(layout.id()),
+                  null,
+                  set + "page " + layout.id()));
+    }
+    return Optional.of(
+        row.append(Component.space()).append(locale.component("pids.menu.pages-hint")));
+  }
+
   /** 线路过滤：线路运行状况屏列屏幕所属运营商的线路，其余列停靠本站的线路。 */
   private Component lineRow(PidsService service, PidsScreen screen, String set) {
     Component row = label("pids.menu.line");
@@ -273,7 +305,7 @@ public final class PidsStickMenu {
         "id",
         PidsComposer.shortId(screen.id()),
         "layout",
-        service.layoutOf(screen).map(PidsLayout::name).orElse(screen.layoutId()),
+        service.layoutNames(screen),
         "size",
         screen.tileRows() + "×" + screen.tileCols(),
         "mode",

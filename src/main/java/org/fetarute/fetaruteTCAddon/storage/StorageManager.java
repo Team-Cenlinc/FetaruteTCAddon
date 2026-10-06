@@ -185,6 +185,26 @@ public final class StorageManager {
     ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);
     ensureTimetableDutyConsistColumn(connection);
+    ensurePidsScreenPagesColumn(connection);
+  }
+
+  /** 兼容性迁移：为旧版 pids_screens 补齐 page_layouts 列（组合翻页的其余布局；旧表为空，只用主布局）。 */
+  private void ensurePidsScreenPagesColumn(java.sql.Connection connection) {
+    String screensTable = storageSchema.tablePrefix() + "pids_screens";
+    String sql = "ALTER TABLE " + screensTable + " ADD COLUMN page_layouts " + dialect.jsonType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: pids_screens.page_layouts (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.page_layouts: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.page_layouts: " + ex.getMessage());
+    }
   }
 
   /** 兼容性迁移：为旧版 timetable_duties 补齐 consist_key 列（交路的车型；旧表为空，出车按 route 的编组）。 */
