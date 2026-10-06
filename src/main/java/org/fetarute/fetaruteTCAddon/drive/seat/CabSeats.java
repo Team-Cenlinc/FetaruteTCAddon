@@ -183,6 +183,38 @@ public final class CabSeats {
     return false;
   }
 
+  /**
+   * 把座位标为驾驶座后的名字：已经有名单上的名字就原样返回，否则在末尾加上名单的第一个名字。
+   *
+   * @param seatNames 座位附件现有的名字
+   * @param cabNames 驾驶座名单，已按 {@link #normalize} 处理；不能为空
+   */
+  public static List<String> withCabName(List<String> seatNames, List<String> cabNames) {
+    List<String> names = seatNames == null ? new ArrayList<>() : new ArrayList<>(seatNames);
+    if (!nameMatches(names, cabNames)) {
+      names.add(cabNames.get(0));
+    }
+    return List.copyOf(names);
+  }
+
+  /**
+   * 取消驾驶座标记后的名字：去掉名单上的名字，其余名字（动画、效果等用的）保留。
+   *
+   * @param seatNames 座位附件现有的名字
+   * @param cabNames 驾驶座名单，已按 {@link #normalize} 处理
+   */
+  public static List<String> withoutCabNames(List<String> seatNames, Collection<String> cabNames) {
+    List<String> names = new ArrayList<>();
+    if (seatNames != null) {
+      for (String name : seatNames) {
+        if (name != null && !cabNames.contains(normalize(name))) {
+          names.add(name);
+        }
+      }
+    }
+    return List.copyOf(names);
+  }
+
   /** 名字比较用的形式：去掉两端空白、转小写。 */
   public static String normalize(String name) {
     return name == null ? "" : name.trim().toLowerCase(Locale.ROOT);

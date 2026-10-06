@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.drive.seat;
 
+import com.bergerkiller.bukkit.common.config.ConfigurationNode;
 import com.bergerkiller.bukkit.tc.attachments.api.Attachment;
+import com.bergerkiller.bukkit.tc.attachments.config.AttachmentModel;
 import com.bergerkiller.bukkit.tc.attachments.control.CartAttachmentSeat;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
@@ -227,6 +229,101 @@ public final class SeatLocator {
       marked.add(seats);
     }
     return CabSeats.of(marked);
+  }
+
+  /** 标记驾驶座的结果。 */
+  public enum MarkOutcome {
+    /** 玩家没有坐在 TrainCarts 座位里。 */
+    NOT_SEATED,
+    /** 座位在共用模型（model 附件引用的存档模型）里：改它会波及用这个模型的所有列车，不改。 */
+    SHARED_MODEL,
+    /** 已改名。 */
+    CHANGED,
+    /** 本来就是要的状态，没有改。 */
+    UNCHANGED
+  }
+
+  /**
+   * 标记驾驶座的结果。
+   *
+   * @param outcome 结果
+   * @param seat 玩家所坐的座位；没坐在座位里时为空
+   * @param names 座位附件此刻的名字
+   * @param end 改名后这个座位在列车的哪一端（{@link CabSeats#endOf}）
+   * @param memberCount 编组节数
+   * @param trainMarked 改名后列车上还有没有被标记的驾驶座
+   */
+  public record MarkResult(
+      MarkOutcome outcome,
+      Optional<SeatBinding> seat,
+      List<String> names,
+      CabSeats.End end,
+      int memberCount,
+      boolean trainMarked) {
+
+    public MarkResult {
+      names = List.copyOf(names);
+    }
+
+    static MarkResult of(MarkOutcome outcome, SeatBinding seat, List<String> names, CabSeats cabs) {
+      return new MarkResult(
+          outcome, Optional.of(seat), names, cabs.endOf(seat), cabs.memberCount(), cabs.marked());
+    }
+  }
+
+  /**
+   * 把玩家所坐的座位标为驾驶座，或取消标记：改座位附件的名字（TrainCarts 附件配置的 {@code names}），随即同步到这节车厢的模型。
+   *
+   * <p>只改这列车（车厢属性里的模型）；以后出库的车用的是存车，要另行保存。座位在共用模型里时不改。
+   *
+   * @param mark {@code true} 标记，{@code false} 取消
+   * @param cabNames 驾驶座名单（已转小写）；标记时不能为空
+   */
+  public static MarkResult markCabSeat(Player player, boolean mark, List<String> cabNames) {
+    Optional<SeatBinding> binding = locate(player);
+    MinecartMember<?> member =
+        binding.isEmpty() ? null : MinecartMemberStore.getFromEntity(player.getVehicle());
+    CartAttachmentSeat seat =
+        member == null ? null : member.getAttachments().findSeatOfExistingPassenger(player);
+    if (binding.isEmpty() || seat == null) {
+      return new MarkResult(
+          MarkOutcome.NOT_SEATED, Optional.empty(), List.of(), CabSeats.End.NONE, 0, false);
+    }
+    MinecartGroup group = member.getGroup();
+    ConfigurationNode config = seat.getConfig();
+    List<String> current =
+        config.contains("names") ? List.copyOf(config.getList("names", String.class)) : List.of();
+    AttachmentModel model = member.getProperties().getModel();
+    if (!descendsFrom(config, model.getConfig())) {
+      return MarkResult.of(
+          MarkOutcome.SHARED_MODEL, binding.get(), current, cabSeats(group, cabNames));
+    }
+    List<String> next =
+        mark
+            ? CabSeats.withCabName(current, cabNames)
+            : CabSeats.withoutCabNames(current, cabNames);
+    if (next.equals(current)) {
+      return MarkResult.of(
+          MarkOutcome.UNCHANGED, binding.get(), current, cabSeats(group, cabNames));
+    }
+    if (next.isEmpty()) {
+      config.remove("names");
+    } else {
+      config.set("names", next);
+    }
+    // 改模型配置后立即同步：座位附件随之重新载入名字，下面的驾驶室认定读到的就是新名字。
+    model.sync();
+    return MarkResult.of(MarkOutcome.CHANGED, binding.get(), next, cabSeats(group, cabNames));
+  }
+
+  /** 配置节点是不是挂在给定的根节点下面（车厢自己的模型，而不是 model 附件引用的共用模型）。 */
+  static boolean descendsFrom(ConfigurationNode node, ConfigurationNode root) {
+    for (ConfigurationNode current = node; current != null; current = current.getParent()) {
+      if (current == root) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 一节车厢的全部座位，按模型里的出现顺序排列。 */

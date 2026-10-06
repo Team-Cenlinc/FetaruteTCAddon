@@ -117,4 +117,28 @@ class CabSeatsTest {
     assertFalse(CabSeats.nameMatches(Set.of("driver"), List.of()));
     assertEquals("cab", CabSeats.normalize("  CAB "));
   }
+
+  @Test
+  @DisplayName("AB 两组重联：中间两节的驾驶座不算，只认两头")
+  void coupledMarriedPairsOnlyUseTheOuterCabs() {
+    CabSeats seats = CabSeats.of(List.of(Set.of(0), Set.of(0), Set.of(0), Set.of(0)));
+
+    assertEquals(CabSeats.End.HEAD, seats.endOf(0, 0));
+    assertEquals(CabSeats.End.NONE, seats.endOf(1, 0));
+    assertEquals(CabSeats.End.NONE, seats.endOf(2, 0));
+    assertEquals(CabSeats.End.TAIL, seats.endOf(3, 0));
+  }
+
+  @Test
+  @DisplayName("标记驾驶座只加名单第一个名字，已有名单上的名字不重复加；取消时只去掉名单上的名字")
+  void markingEditsOnlyCabNames() {
+    List<String> cabNames = List.of("driver", "驾驶座");
+
+    assertEquals(List.of("door", "driver"), CabSeats.withCabName(List.of("door"), cabNames));
+    assertEquals(List.of("Driver "), CabSeats.withCabName(List.of("Driver "), cabNames));
+    assertEquals(List.of("driver"), CabSeats.withCabName(List.of(), cabNames));
+    assertEquals(
+        List.of("door"), CabSeats.withoutCabNames(List.of("door", "驾驶座", "DRIVER"), cabNames));
+    assertEquals(List.of(), CabSeats.withoutCabNames(List.of("driver"), cabNames));
+  }
 }
