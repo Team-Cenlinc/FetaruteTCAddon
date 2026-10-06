@@ -228,11 +228,11 @@ driver:
   rescue-ato-seconds: 120
   rescue-handback-seconds: 180
   rescue-teleport-seconds: 300
-  # 拥堵熔断：全网被扣住超过 breaker-held-seconds 秒的车达到 breaker-held-trains 列、且阻挡链里有驾驶员列车时，
-  # 交还全部驾驶员列车，并在 breaker-cooldown-minutes 分钟内暂停接班（/fta drive breaker reset 可提前解除）
-  breaker-held-trains: 5
-  breaker-held-seconds: 60
-  breaker-cooldown-minutes: 15
+  # 拥堵保护：全网被扣住超过 protection-held-seconds 秒的车达到 protection-held-trains 列、且阻挡链里有驾驶员列车时，
+  # 交还全部驾驶员列车，并在 protection-cooldown-minutes 分钟内暂停接班（/fta drive congestion reset 可提前解除）
+  protection-held-trains: 5
+  protection-held-seconds: 60
+  protection-cooldown-minutes: 15
   # 驾驶记录（/fta drive records、top）保留多少天，超过的每小时清理一次；0 表示一直保留
   record-retention-days: 30
   # 挡住后车：后方被驾驶员列车直接挡住的车被扣超过 congestion-warn-seconds 秒时提醒驾驶员，
@@ -302,7 +302,7 @@ license:
     # 只用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时用正式车次
     routes: []
   # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
-  # 或 dispatch（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
+  # 或 road-test（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
   classes:
     learner:
@@ -319,7 +319,7 @@ license:
       enabled: true
       requires:
         - learner
-      exam: dispatch
+      exam: road-test
       # 报名路考前要完整开完几次路考练习；0 表示不要求
       training-runs: 1
       # 路考区间要开过几个停车站（练习相同）
@@ -356,7 +356,7 @@ sounds:
     key: "minecraft:block.note_block.bit"
     volume: 1.0
     pitch: 0.7
-  signal-confirmed:
+  signal-acknowledged:
     key: "minecraft:ui.button.click"
     volume: 0.6
     pitch: 1.2

@@ -51,7 +51,7 @@ public final class FtaLicenseCommand {
     SuggestionProvider<CommandSender> classSuggestions = classSuggestions(LicenseClass::enabled);
     SuggestionProvider<CommandSender> practiceClassSuggestions =
         classSuggestions(
-            license -> license.enabled() && license.exam() == LicenseClass.Exam.DISPATCH);
+            license -> license.enabled() && license.exam() == LicenseClass.Exam.ROAD_TEST);
     SuggestionProvider<CommandSender> adminClassSuggestions = classSuggestions(license -> true);
     // 发证、吊销、查询接受服务器见过的离线玩家：补全在线玩家，输入的名字正好是见过的离线玩家时也列出它。
     SuggestionProvider<CommandSender> playerSuggestions =
@@ -266,7 +266,7 @@ public final class FtaLicenseCommand {
       } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
         key = "drive.license.info.level-need-practice";
       } else {
-        key = "drive.license.info.level-open-dispatch";
+        key = "drive.license.info.level-open-road-test";
       }
       sender.sendMessage(locale.component(key, values));
     }

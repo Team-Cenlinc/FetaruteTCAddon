@@ -6,8 +6,8 @@ import java.util.HashSet;
 import java.util.Map;
 import java.util.Set;
 
-/** 全网熔断：被扣住太久的车达到一定数量、且阻挡链里有驾驶员列车时，交还全部驾驶员列车，并在冷却期内暂停接班。本类不依赖服务器对象。 */
-public final class DriverCircuitBreaker {
+/** 拥堵保护：被扣住太久的车达到一定数量、且阻挡链里有驾驶员列车时，交还全部驾驶员列车，并在冷却期内暂停接班。本类不依赖服务器对象。 */
+public final class CongestionProtection {
 
   /** 沿阻挡链最多追几层。 */
   private static final int MAX_CHAIN_DEPTH = 8;
@@ -33,7 +33,7 @@ public final class DriverCircuitBreaker {
     return openUntil != null && now.isBefore(openUntil);
   }
 
-  /** 冷却结束的时刻；没有熔断时为 {@code null}。 */
+  /** 冷却结束的时刻；不在保护中时为 {@code null}。 */
   public Instant openUntil() {
     return openUntil;
   }
@@ -42,24 +42,24 @@ public final class DriverCircuitBreaker {
     return lastReason;
   }
 
-  /** 管理员解除熔断。 */
+  /** 管理员解除拥堵保护。 */
   public void reset() {
     openUntil = null;
   }
 
   /**
-   * 评估是否熔断；熔断时进入冷却期。
+   * 评估是否触发拥堵保护；触发时进入冷却期。
    *
    * @param holds 每列被扣住的车
    * @param driverTrains 驾驶员控制的列车
-   * @return 这一次是否触发了熔断（冷却期内不重复触发）
+   * @return 这一次是否触发了拥堵保护（冷却期内不重复触发）
    */
   public boolean evaluate(
       Map<String, Hold> holds, Set<String> driverTrains, DriverRecovery recovery, Instant now) {
     if (open(now) || driverTrains.isEmpty()) {
       return false;
     }
-    Duration threshold = Duration.ofSeconds(recovery.breakerHeldSeconds());
+    Duration threshold = Duration.ofSeconds(recovery.protectionHeldSeconds());
     int held = 0;
     boolean driverInChain = false;
     for (Map.Entry<String, Hold> entry : holds.entrySet()) {
@@ -71,11 +71,11 @@ public final class DriverCircuitBreaker {
         driverInChain = true;
       }
     }
-    if (held < recovery.breakerHeldTrains() || !driverInChain) {
+    if (held < recovery.protectionHeldTrains() || !driverInChain) {
       return false;
     }
-    openUntil = now.plus(Duration.ofMinutes(recovery.breakerCooldownMinutes()));
-    lastReason = held + " 列被扣住超过 " + recovery.breakerHeldSeconds() + " 秒，阻挡链里有驾驶员列车";
+    openUntil = now.plus(Duration.ofMinutes(recovery.protectionCooldownMinutes()));
+    lastReason = held + " 列被扣住超过 " + recovery.protectionHeldSeconds() + " 秒，阻挡链里有驾驶员列车";
     return true;
   }
 

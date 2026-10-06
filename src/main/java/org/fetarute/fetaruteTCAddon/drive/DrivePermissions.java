@@ -44,7 +44,7 @@ public final class DrivePermissions {
   /** 不领任务直接接管停站中的调度列车（运营人员、调试）。 */
   public static final String DRIVER_ADMIN = "fetarute.drive.driver.admin";
 
-  /** 驾驶管理命令：查看与结束会话、收回任务、交还列车、熔断、诊断、查看他人记录。 */
+  /** 驾驶管理命令：查看与结束会话、收回任务、交还列车、拥堵保护、诊断、查看他人记录。 */
   public static final String ADMIN = "fetarute.drive.admin";
 
   /** 驾驶证：查看自己的驾驶证、报名考试、补发（默认人人都有）。 */
@@ -105,7 +105,7 @@ public final class DrivePermissions {
           new Subcommand("handback", List.of(ADMIN)),
           new Subcommand("rescue", List.of(ADMIN)),
           new Subcommand("fault", List.of(ADMIN)),
-          new Subcommand("breaker", List.of(ADMIN)),
+          new Subcommand("congestion", List.of(ADMIN)),
           new Subcommand("probe", List.of(ADMIN)));
 
   private DrivePermissions() {}

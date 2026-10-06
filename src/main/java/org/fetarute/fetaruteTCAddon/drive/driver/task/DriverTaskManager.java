@@ -38,7 +38,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoute
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
-import org.fetarute.fetaruteTCAddon.drive.driver.DriverCircuitBreaker;
+import org.fetarute.fetaruteTCAddon.drive.driver.CongestionProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverRecovery;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
@@ -47,7 +47,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
 
 /**
- * 驾驶任务：领取、等车、驾驶中、结束；以及交还后的救援与全网熔断。任务只存在内存里，重启即清空。只在服务器主线程调用。
+ * 驾驶任务：领取、等车、驾驶中、结束；以及交还后的救援与拥堵保护。任务只存在内存里，重启即清空。只在服务器主线程调用。
  *
  * <p>一名玩家同时只有一个未结束的任务，一个车次同时只给一名玩家。车次与列车靠时刻表绑定（时刻表、车次号、运营日）对上；列车停在接班站、 玩家坐在它的车头驾驶室时由驾驶会话管理器接管。
  */
@@ -57,7 +57,7 @@ public final class DriverTaskManager {
   public enum ClaimOutcome {
     CLAIMED,
     DISABLED,
-    BREAKER_OPEN,
+    PROTECTION_ACTIVE,
     ALREADY_HAS_TASK,
     TAKEN,
     UNAVAILABLE,
@@ -93,13 +93,13 @@ public final class DriverTaskManager {
    * @param operatorCode 接班站的运营商
    * @param stationCode 接班站站码
    * @param stationName 接班站站名
-   * @param boardNodeId 接班站台节点
-   * @param boardStopSequence 接班站停靠序号
+   * @param takeoverNodeId 接班站台节点
+   * @param takeoverStopSequence 接班站停靠序号
    * @param plannedDeparture 接班站计划发车
    * @param trainName 担当的列车；还没对上时为 {@code null}
-   * @param alightStopSequence 下车站停靠序号；开到终点站为 -1
-   * @param alightStationCode 下车站站码
-   * @param alightStationName 下车站站名
+   * @param handoverStopSequence 交班站停靠序号；开到终点站为 -1
+   * @param handoverStationCode 交班站站码
+   * @param handoverStationName 交班站站名
    * @param depotPickup 是否从车库接车
    * @param source 来源标记
    * @param metadata 附加数据
@@ -110,13 +110,13 @@ public final class DriverTaskManager {
       String operatorCode,
       String stationCode,
       String stationName,
-      String boardNodeId,
-      int boardStopSequence,
+      String takeoverNodeId,
+      int takeoverStopSequence,
       Instant plannedDeparture,
       String trainName,
-      int alightStopSequence,
-      String alightStationCode,
-      String alightStationName,
+      int handoverStopSequence,
+      String handoverStationCode,
+      String handoverStationName,
       boolean depotPickup,
       String source,
       Map<String, String> metadata) {
@@ -150,18 +150,18 @@ public final class DriverTaskManager {
   private final Map<TaskKey, TaskBoardEntries.Claimant> reserved = new HashMap<>();
 
   private final List<RescueWatch> rescues = new ArrayList<>();
-  private final DriverCircuitBreaker breaker = new DriverCircuitBreaker();
+  private final CongestionProtection protection = new CongestionProtection();
 
-  /** 最近一次熔断评估时每列被扣住的车（挡住后车的提醒复用）。 */
-  private Map<String, DriverCircuitBreaker.Hold> lastHolds = Map.of();
+  /** 最近一次拥堵保护评估时每列被扣住的车（挡住后车的提醒复用）。 */
+  private Map<String, CongestionProtection.Hold> lastHolds = Map.of();
 
   public DriverTaskManager(FetaruteTCAddon plugin, Consumer<String> trace) {
     this.plugin = plugin;
     this.trace = trace == null ? message -> {} : trace;
   }
 
-  public DriverCircuitBreaker breaker() {
-    return breaker;
+  public CongestionProtection congestionProtection() {
+    return protection;
   }
 
   /** 玩家当前的任务（含刚结束、还没被新任务替换的）。 */
@@ -233,7 +233,7 @@ public final class DriverTaskManager {
   }
 
   /**
-   * 驾驶员已经在开这列车：把它此刻跑的（或刚开出的）车次直接记成驾驶中的任务。不看任务板的时间窗与熔断，替他留着的班次先放掉；其余规则与领取相同。
+   * 驾驶员已经在开这列车：把它此刻跑的（或刚开出的）车次直接记成驾驶中的任务。不看任务板的时间窗与拥堵保护，替他留着的班次先放掉；其余规则与领取相同。
    *
    * @param nowTick 开始驾驶的服务器 tick
    */
@@ -255,8 +255,8 @@ public final class DriverTaskManager {
             spec.operatorCode(),
             spec.stationCode(),
             spec.stationName(),
-            spec.boardNodeId(),
-            spec.boardStopSequence(),
+            spec.takeoverNodeId(),
+            spec.takeoverStopSequence(),
             spec.plannedDeparture(),
             mode,
             now);
@@ -363,8 +363,8 @@ public final class DriverTaskManager {
     if (!enabled) {
       return ClaimOutcome.DISABLED;
     }
-    if (breaker.open(now)) {
-      return ClaimOutcome.BREAKER_OPEN;
+    if (protection.open(now)) {
+      return ClaimOutcome.PROTECTION_ACTIVE;
     }
     if (activeTaskOf(player.getUniqueId()).isPresent()) {
       return ClaimOutcome.ALREADY_HAS_TASK;
@@ -403,8 +403,8 @@ public final class DriverTaskManager {
     if (!enabled) {
       return ClaimOutcome.DISABLED;
     }
-    if (breaker.open(now)) {
-      return ClaimOutcome.BREAKER_OPEN;
+    if (protection.open(now)) {
+      return ClaimOutcome.PROTECTION_ACTIVE;
     }
     if (activeTaskOf(player.getUniqueId()).isPresent()) {
       return ClaimOutcome.ALREADY_HAS_TASK;
@@ -421,15 +421,16 @@ public final class DriverTaskManager {
             spec.operatorCode(),
             spec.stationCode(),
             spec.stationName(),
-            spec.boardNodeId(),
-            spec.boardStopSequence(),
+            spec.takeoverNodeId(),
+            spec.takeoverStopSequence(),
             spec.plannedDeparture(),
             mode,
             now);
     task.setTrainName(spec.trainName());
     task.setDepotPickup(spec.depotPickup());
-    if (spec.alightStopSequence() >= 0) {
-      task.setAlight(spec.alightStopSequence(), spec.alightStationCode(), spec.alightStationName());
+    if (spec.handoverStopSequence() >= 0) {
+      task.setHandover(
+          spec.handoverStopSequence(), spec.handoverStationCode(), spec.handoverStationName());
     }
     task.setSource(spec.source(), spec.metadata());
     return register(player, task);
@@ -453,7 +454,7 @@ public final class DriverTaskManager {
             + task.key().tripCode()
             + " "
             + task.mode()
-            + (task.alightStopSequence() >= 0 ? " 下车站 " + task.alightStationName() : "")
+            + (task.handoverStopSequence() >= 0 ? " 交班站 " + task.handoverStationName() : "")
             + (DriverTask.SOURCE_BOARD.equals(task.source()) ? "" : " 来源 " + task.source()));
     return ClaimOutcome.CLAIMED;
   }
@@ -516,7 +517,9 @@ public final class DriverTaskManager {
     DriverTask task = byPlayer.get(playerId);
     if (task != null && task.state() == DriverTask.State.DRIVING) {
       finish(
-          task, DriverTask.State.COMPLETED, task.alightStopSequence() >= 0 ? "alight" : "terminal");
+          task,
+          DriverTask.State.COMPLETED,
+          task.handoverStopSequence() >= 0 ? "alight" : "terminal");
     }
   }
 
@@ -529,9 +532,9 @@ public final class DriverTaskManager {
     Optional<TimetableApi> api = timetables();
     Optional<TimetableApi.TrainAssignment> assignment =
         api.flatMap(timetables -> timetables.getAssignment(trainName));
-    if (task.alightStopSequence() >= 0) {
+    if (task.handoverStopSequence() >= 0) {
       return assignment.isPresent()
-          && reachedAlight(task.alightStopSequence(), task.key(), assignment.get());
+          && reachedHandover(task.handoverStopSequence(), task.key(), assignment.get());
     }
     if (assignment.isEmpty()
         || assignment.get().lastStopSequence().isEmpty()
@@ -612,14 +615,14 @@ public final class DriverTaskManager {
   }
 
   /**
-   * 区间任务是否已到下车站：列车跑的就是这一班，且已经停过（或越过）下车站。
+   * 区间任务是否已到交班站：列车跑的就是这一班，且已经停过（或越过）交班站。
    *
-   * <p>越站时站台照样记下“停过”这一站，所以越过下车站同样算到站，到下一次停稳时结束任务。
+   * <p>越站时站台照样记下“停过”这一站，所以越过交班站同样算到站，到下一次停稳时结束任务。
    */
-  static boolean reachedAlight(
-      int alightStopSequence, TaskKey key, TimetableApi.TrainAssignment assignment) {
+  static boolean reachedHandover(
+      int handoverStopSequence, TaskKey key, TimetableApi.TrainAssignment assignment) {
     return key.matches(assignment.timetableId(), assignment.tripCode(), assignment.serviceDate())
-        && assignment.lastStopSequence().filter(last -> last >= alightStopSequence).isPresent();
+        && assignment.lastStopSequence().filter(last -> last >= handoverStopSequence).isPresent();
   }
 
   /** 核对终到站时往前后各看多久的发车记录。 */
@@ -701,15 +704,15 @@ public final class DriverTaskManager {
         task.setTrainName(assignment.trainName());
       }
       int lastSeq = assignment == null ? -1 : assignment.lastStopSequence().orElse(-1);
-      boolean atBoard = assignment != null && lastSeq == task.boardStopSequence();
+      boolean atBoard = assignment != null && lastSeq == task.takeoverStopSequence();
       boolean dwelling = atBoard && dwelling(assignment.trainName());
-      if (assignment != null && lastSeq > task.boardStopSequence()) {
+      if (assignment != null && lastSeq > task.takeoverStopSequence()) {
         expire(task, notify, "departed");
         continue;
       }
       if (!dwelling) {
         // 已对上列车、它还没到接班站：晚点也等它来。还没对上列车（绑定在它停过一站后才有）时按时作废。
-        boolean approaching = assignment != null && lastSeq < task.boardStopSequence();
+        boolean approaching = assignment != null && lastSeq < task.takeoverStopSequence();
         if (!approaching && now.isAfter(task.plannedDeparture().plus(EXPIRE_AFTER))) {
           expire(task, notify, "timeout");
         }
@@ -808,7 +811,7 @@ public final class DriverTaskManager {
       Player player, MinecartGroup group, DriverStationStop lastStop, long dueTick) {
     Location target =
         rescueTarget(lastStop)
-            .or(() -> activeOrLastTask(player.getUniqueId()).flatMap(this::boardStation))
+            .or(() -> activeOrLastTask(player.getUniqueId()).flatMap(this::takeoverStation))
             .orElse(null);
     Vector head = group.head().getEntity().getLocation().toVector();
     rescues.add(
@@ -828,7 +831,7 @@ public final class DriverTaskManager {
             () ->
                 playerId == null
                     ? Optional.empty()
-                    : activeOrLastTask(playerId).flatMap(this::boardStation));
+                    : activeOrLastTask(playerId).flatMap(this::takeoverStation));
   }
 
   /** 推进救援：到时仍卡着就送驾驶员去站台。 */
@@ -888,8 +891,8 @@ public final class DriverTaskManager {
   }
 
   /** 前往接班站时车站设置的位置；车站没设置位置时为空，改用 {@link #boardPlatformLocation}。 */
-  public Optional<Location> boardStationConfigured(DriverTask task) {
-    return boardStation(task);
+  public Optional<Location> takeoverStationConfigured(DriverTask task) {
+    return takeoverStation(task);
   }
 
   /**
@@ -941,7 +944,8 @@ public final class DriverTaskManager {
                             assignment.tripCode(),
                             assignment.serviceDate()))
             .filter(
-                assignment -> assignment.lastStopSequence().orElse(-1) == task.boardStopSequence())
+                assignment ->
+                    assignment.lastStopSequence().orElse(-1) == task.takeoverStopSequence())
             .isPresent();
     return atBoard && dwelling(train);
   }
@@ -954,7 +958,7 @@ public final class DriverTaskManager {
       return Optional.empty();
     }
     Optional<org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo> info =
-        Optional.ofNullable(task.boardNodeId())
+        Optional.ofNullable(task.takeoverNodeId())
             .filter(id -> !id.isBlank())
             .flatMap(
                 id ->
@@ -1003,7 +1007,7 @@ public final class DriverTaskManager {
   }
 
   /** 任务接班站的位置（车站设置了位置时）。 */
-  private Optional<Location> boardStation(DriverTask task) {
+  private Optional<Location> takeoverStation(DriverTask task) {
     return plugin
         .getStationDirectory()
         .flatMap(
@@ -1059,21 +1063,22 @@ public final class DriverTaskManager {
         world, location.x(), location.y(), location.z(), location.yaw(), location.pitch());
   }
 
-  // ---- 熔断 ----
+  // ---- 拥堵保护 ----
 
   /**
-   * 评估全网熔断。
+   * 评估拥堵保护。
    *
    * @param driverTrains 有驾驶员在岗的列车
-   * @return 这一次是否触发熔断
+   * @return 这一次是否触发拥堵保护
    */
-  public boolean tickBreaker(Set<String> driverTrains, DriverRecovery recovery, Instant now) {
+  public boolean tickCongestionProtection(
+      Set<String> driverTrains, DriverRecovery recovery, Instant now) {
     EtaService eta = plugin.getEtaService();
     if (eta == null || driverTrains.isEmpty()) {
       lastHolds = Map.of();
       return false;
     }
-    Map<String, DriverCircuitBreaker.Hold> holds = new HashMap<>();
+    Map<String, CongestionProtection.Hold> holds = new HashMap<>();
     for (MinecartGroup group : MinecartGroupStore.getGroups()) {
       if (group == null || !group.isValid() || !ManagedTrains.isFtaManaged(group.getProperties())) {
         continue;
@@ -1091,30 +1096,18 @@ public final class DriverTaskManager {
         }
       }
       holds.put(
-          name, new DriverCircuitBreaker.Hold(Duration.between(hold.get().since(), now), blockers));
+          name, new CongestionProtection.Hold(Duration.between(hold.get().since(), now), blockers));
     }
     lastHolds = Map.copyOf(holds);
-    boolean tripped = breaker.evaluate(holds, driverTrains, recovery, now);
+    boolean tripped = protection.evaluate(holds, driverTrains, recovery, now);
     if (tripped) {
-      plugin.getLogger().warning("驾驶员接班熔断：" + breaker.lastReason());
+      plugin.getLogger().warning("拥堵保护，暂停接班：" + protection.lastReason());
     }
     return tripped;
   }
 
-  /** 后方被这列驾驶员列车直接挡住的车里，被扣最久的秒数（按最近一次熔断评估时的扣车情况）。 */
+  /** 后方被这列驾驶员列车直接挡住的车里，被扣最久的秒数（按最近一次拥堵保护评估时的扣车情况）。 */
   public long blockedBehindSeconds(String driverTrain) {
     return DriverCongestion.blockedBehindSeconds(lastHolds, driverTrain);
-  }
-
-  /** 给运营人员看的熔断状态。 */
-  public String breakerStatus(Instant now) {
-    if (!breaker.open(now)) {
-      return "closed";
-    }
-    return String.format(
-        Locale.ROOT,
-        "open %ds: %s",
-        Duration.between(now, breaker.openUntil()).toSeconds(),
-        breaker.lastReason());
   }
 }

@@ -42,7 +42,7 @@ class LicenseClassIdMigrationTest {
   }
 
   @Test
-  @DisplayName("改等级键、requires 引用与旧默认名称；考试方式、其他段与改过的值不动")
+  @DisplayName("改等级键、requires 引用、旧默认名称与考试方式的旧写法；其他段与改过的值不动")
   void renamesClassesInsideLicenseClassesOnly() {
     List<String> migrated = LicenseClassIdMigration.migrate(lines(OLD));
 
@@ -64,12 +64,12 @@ class LicenseClassIdMigrationTest {
                   name: "正式驾驶证"   # 第 2 级
                   requires:
                     - learner
-                  exam: dispatch
+                  exam: road-test
                   min-points: 80
                 extra:
                   name: 自定义
                   requires: [learner, "driver"]
-                  exam: dispatch
+                  exam: road-test
             sounds:
               free:
                 name: "自由驾驶证"
@@ -131,7 +131,7 @@ class LicenseClassIdMigrationTest {
                   exam: tutorial
                 "driver":
                   requires: [free, driver]
-                  exam: dispatch
+                  exam: road-test
                 extra:
                   requires:
                     - free

@@ -1708,7 +1708,7 @@ drive:
       handback: "<yellow>停车后交还自动运行</yellow>"
       no-signal: "<yellow>无行车许可</yellow>"
       wait-signal: "<red>停车信号</red>"
-      confirm-signal: "<gold><bold>信号变严：右键确认</bold></gold>"
+      acknowledge-signal: "<gold><bold>信号变严：右键确认</bold></gold>"
       blocking: "<gold>后方列车已受阻 <white><seconds></white> 秒，请尽快恢复运行</gold>"
     station:
       approach: "<aqua><station></aqua> <gray>停车点</gray> <white><distance></white> <gray>米</gray>"
@@ -2122,7 +2122,7 @@ drive:
       notch-ignored: "<aqua>ATO 运行中：手柄不起作用，将手柄置于 EB 即转为人工驾驶</aqua>"
       confirmed: "<green>已确认发车</green>"
     signal:
-      confirmed: "<green>信号已确认</green>"
+      acknowledged: "<green>信号已确认</green>"
     rescue:
       warn: "<prefix> <yellow>列车已停留 <white><seconds></white> 秒未能前进，请尽快恢复运行；继续停留将转为 ATO</yellow>"
       ato: "<prefix> <yellow>列车停留过久，已转为 ATO 运行</yellow>"
@@ -2131,7 +2131,7 @@ drive:
     congestion:
       warn: "<prefix> <gold>本列车已阻挡后方列车 <white><seconds></white> 秒，请尽快恢复运行；继续阻挡将转为 ATO</gold>"
       ato: "<prefix> <yellow>本列车阻挡后方列车过久，已转为 ATO 运行</yellow>"
-    breaker:
+    protection:
       tripped: "<prefix> <red>线路拥堵保护已启动：<white><reason></white>；已将 <white><count></white> 列人工驾驶的列车交还自动运行，暂停接班</red>"
   task:
     board:
@@ -2178,11 +2178,11 @@ drive:
     claim:
       claimed: "<prefix> <green>已领取车次 <white><route></white> <aqua><trip></aqua>：列车到站后坐进车头驾驶室，确认座位后接班</green>"
       disabled: "<prefix> <red>驾驶调度列车当前未开放</red>"
-      breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
+      protection-active: "<prefix> <red>线路拥堵，暂停接班</red>"
       cancelled: "<prefix> <red>当前不能领取该车次</red>"
       continuing: "<prefix> <red>你正在等待接续驾驶本车的下一趟，结束驾驶后才能领取其他车次</red>"
       assigned: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到终点站</green>"
-      assigned-interval: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到 <white><alight></white></green>"
+      assigned-interval: "<prefix> <green>你接到驾驶任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 接班，开到 <white><handover></white></green>"
       already-has-task: "<prefix> <red>你已有未完成的任务，请先完成或放弃（/fta drive task abandon）</red>"
       taken: "<prefix> <red>该车次已被其他驾驶员领取</red>"
       unavailable: "<prefix> <red>该车次不能领取</red>"
@@ -2331,7 +2331,7 @@ drive:
         subtitle: "<yellow>按信号开到终点站</yellow>"
     tip: "<prefix> <aqua>驾驶提示</aqua> <text>"
     tips:
-      signal-confirm:
+      signal-acknowledge:
         chat: "<white>信号变严：</white><gray>前方信号转为减速或停车时，动作栏提示「信号变严：右键确认」。请按右键确认，并按新的限速行车；约 4 秒内未确认将施加常用制动，再不确认将紧急制动。</gray>"
         subtitle: "<gold>信号变严：右键确认</gold>"
       stop-mark:
@@ -2377,7 +2377,7 @@ drive:
       already-held: "<prefix> <yellow>你已持有<white><name></white>，无需再考</yellow>"
       requires: "<prefix> <red>报考<white><name></white>须先取得：<white><required></white></red>"
       in-progress: "<prefix> <yellow>你正在参加<white><name></white>考试，请先完成本次考试</yellow>"
-      in-progress-dispatch: "<prefix> <yellow>你正在参加<white><name></white>路考，请先完成本次路考</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次路考：尚未开车时不计成绩，开车后放弃按未通过计</gray>'><gray>[放弃本次路考]</gray></hover></click>"
+      in-progress-road-test: "<prefix> <yellow>你正在参加<white><name></white>路考，请先完成本次路考</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次路考：尚未开车时不计成绩，开车后放弃按未通过计</gray>'><gray>[放弃本次路考]</gray></hover></click>"
       cooldown: "<prefix> <yellow><white><name></white>路考未通过，<white><minutes></white> 分钟后可以再考</yellow>"
       driving: "<prefix> <red>请先结束驾驶再报名路考或练习</red>"
       has-task: "<prefix> <red>你已领取驾驶任务，请先完成或放弃（/fta drive task abandon）再报名路考或练习</red>"
@@ -2413,8 +2413,8 @@ drive:
         wrong-door: "<prefix> <gray>要领：停稳后看侧边栏提示的开门方向，只开站台一侧的车门。</gray>"
         points: "<prefix> <gray>要领：评分依据为停车精度、防护介入、信号确认与正晚点。请按 Boss 栏的建议速度驾驶，每站停准，信号变严时及时右键确认。</gray>"
       stop:
-        line: "<prefix> <gray>路考 <done>/<total></gray> <white><station></white> <window><doors>"
-        window:
+        line: "<prefix> <gray>路考 <done>/<total></gray> <white><station></white> <outcome><doors>"
+        outcome:
           accurate: "<green>停准</green>"
           accepted: "<green>停车合格</green>"
           short: "<yellow>欠标超限</yellow>"
@@ -2437,9 +2437,9 @@ drive:
           how: "<prefix> <white>开始方式：</white><gray>在 <minutes> 分钟内坐上任意非调度列车，输入 <aqua>/fta drive on</aqua> 开始驾驶，教程随即开始；正在驾驶时教程立即开始。</gray>"
           rule: "<prefix> <white>要求：</white><gray>练习步骤须独立完成，不得点击「跳过此步」；说明类步骤读完点「继续」即可；最后一步结束驾驶，教程即告完成。</gray>"
           perm: "<prefix> <gray>考试期间临时开放驾驶非调度列车，考完或超时后收回。</gray> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click>"
-        dispatch:
+        road-test:
           header: "<prefix> <gold><bold>第 <level> 级 · <name> 路考</bold></gold>"
-          route: "<prefix> <white>考试车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>"
+          route: "<prefix> <white>考试车次 <aqua><trip></aqua>：在 <yellow><takeover></yellow> 接班，开过 <stops> 个停车站，到 <yellow><handover></yellow> 结束。</white>"
           pass: "<prefix> <white>及格要求：</white><gray>得分不低于 <min> 分，全程人工驾驶。</gray>"
           no-emergency: "<prefix> <gray>· 不得触发防护紧急制动（超速、冒进停车信号）</gray>"
           no-overrun: "<prefix> <gray>· 每站停在可开门范围内，不得过标超限或越站</gray>"
@@ -2454,14 +2454,14 @@ drive:
       no-trip-routes: "<prefix> <yellow><white><station></white> 近期没有练习线路（<white><routes></white>）的车次，请到练习线路的车站报名</yellow>"
       brief:
         header: "<prefix> <gold><bold>第 <level> 级 · <name> 路考练习</bold></gold>"
-        route: "<prefix> <white>练习车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>"
+        route: "<prefix> <white>练习车次 <aqua><trip></aqua>：在 <yellow><takeover></yellow> 接班，开过 <stops> 个停车站，到 <yellow><handover></yellow> 结束。</white>"
         what: "<prefix> <white>练习方式：</white><gray>与路考相同，另有教练随行：每个停站阶段提示下一步操作，信号变严或超速时提醒。练习不发证，不记入驾驶记录与排行。</gray>"
         drill: "<prefix> <white>应急演练：</white><gray>开过第一站后，将随机模拟一次突发状况（受电中断、车门故障、前方障碍等），按提示处置即可。演练结束时讲评，不影响练习计次。</gray>"
         pass: "<prefix> <white>评判标准：</white><gray>与路考相同，得分不低于 <min> 分，全程人工驾驶。</gray>"
         handbook: "<prefix> <white>学习：</white><gray>《FTCA 驾驶员手册》已放进背包，可对照手册练习。</gray>"
         feedback: "<prefix> <gray>每到一站会点评停车结果。完整开到交班站计一次练习；本车次晚点较多时，系统将先取消演练，必要时交还自动运行。</gray>"
       stop:
-        line: "<prefix> <gray>练习 <done>/<total></gray> <white><station></white> <window><doors>"
+        line: "<prefix> <gray>练习 <done>/<total></gray> <white><station></white> <outcome><doors>"
       warn:
         emergency: "<prefix> <red>练习：触发了防护紧急制动，路考中出现即不及格</red>"
         overrun: "<prefix> <red>练习：在 <station> 过标超限或越站，路考中出现即不及格</red>"
@@ -2537,7 +2537,7 @@ drive:
       level-practice-running: "  <yellow>…</yellow> <white>第 <level> 级 · <name></white> <yellow>路考练习中</yellow>"
       level-need-practice: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>报名路考前须完成路考练习（<done>/<required> 次）</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"
       level-open-tutorial: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>考试：完整做完新手教程</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><green>[报名考试]</green></hover></click>"
-      level-open-dispatch: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>路考 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（不发证）</gray>'><aqua>[练习]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click>"
+      level-open-road-test: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>路考 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（不发证）</gray>'><aqua>[练习]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click>"
       level-locked: "  <dark_gray>○ 第 <level> 级 · <name>（须先取得<required>）</dark_gray>"
       level-closed: "  <dark_gray>○ 第 <level> 级 · <name>（暂未开放）</dark_gray>"
       footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证遗失时点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>"
@@ -2606,7 +2606,7 @@ drive:
       entry-tutorial: "  <gray>•</gray> <white>/fta drive tutorial [start|restart|stop|reset|skip]</white> <gray>- 开始、从头开始、退出或重置新手教程，跳过当前一步</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- 查看或放弃当前任务、前往要接的列车、改为从车库接车</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- 停稳后切换人工驾驶与 ATO</gray>"
-      entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵保护</gray>"
+      entry-congestion: "  <gray>•</gray> <white>/fta drive congestion [status|reset]</white> <gray>- 查看或解除拥堵保护</gray>"
       entry-records: "  <gray>•</gray> <white>/fta drive records [玩家]</white> <gray>- 查看驾驶记录</gray>"
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- 驾驶排行</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <玩家></white> <gray>- 收回某名玩家的驾驶任务</gray>"
@@ -2622,7 +2622,7 @@ drive:
       no-task: "<prefix> <red>该列车由调度系统运行，需要领取驾驶任务才能接管</red>"
       not-stopped-at-station: "<prefix> <red>只能在列车停站期间接管调度列车</red>"
       not-head-cab: "<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"
-      breaker-open: "<prefix> <red>线路拥堵，暂停接班</red>"
+      protection-active: "<prefix> <red>线路拥堵，暂停接班</red>"
       cancelled: "<prefix> <red>当前无法开始驾驶</red>"
       train-in-use: "<prefix> <red>该列车已有人驾驶或正在制动停车</red>"
       train-moving: "<prefix> <red>列车正朝驾驶室后方溜行（当前 <white><speed_kmh></white> km/h），停稳后才能开始驾驶</red>"
@@ -2669,9 +2669,12 @@ drive:
       no-permission: "<prefix> <red>当前没有以 ATO 方式驾驶的权限</red>"
       manual: "<prefix> <yellow>已转为人工驾驶</yellow>"
       ato: "<prefix> <aqua>已转为 ATO，停站结束后请右键确认发车</aqua>"
-    breaker:
+    congestion:
       status: "<prefix> 拥堵保护：<white><status></white>"
       reset: "<prefix> <yellow>已解除拥堵保护</yellow>"
+      state:
+        inactive: "未启动"
+        active: "已启动，<seconds> 秒后自动解除（<reason>）"
     handback:
       requested: "<prefix> <yellow>已要求 <player> 把列车交还自动运行</yellow>"
       not-driving: "<prefix> <red><player> 当前没有驾驶调度列车</red>"

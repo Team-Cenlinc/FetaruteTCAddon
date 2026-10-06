@@ -118,7 +118,7 @@ public final class TaskBoardSource {
   }
 
   /**
-   * 列车跑的车次当作驾驶员当场接下的任务：从停靠序号 {@code boardSequence} 起（不停的站往后顺延到第一个停车站）开到终点站。
+   * 列车跑的车次当作驾驶员当场接下的任务：从停靠序号 {@code takeoverSequence} 起（不停的站往后顺延到第一个停车站）开到终点站。
    *
    * @param trainName 担当的列车
    * @param source 来源标记（见 {@link DriverTask#SOURCE_TAKEOVER}、{@link DriverTask#SOURCE_CONTINUATION}）
@@ -128,7 +128,7 @@ public final class TaskBoardSource {
       FetaruteTCAddon plugin,
       TimetableService timetables,
       TaskKey key,
-      int boardSequence,
+      int takeoverSequence,
       String trainName,
       String source) {
     return timetables
@@ -136,13 +136,13 @@ public final class TaskBoardSource {
         .flatMap(
             plan ->
                 plan.stops().stream()
-                    .filter(stop -> stop.stops() && stop.stopSequence() >= boardSequence)
+                    .filter(stop -> stop.stops() && stop.stopSequence() >= takeoverSequence)
                     .findFirst()
                     .map(
-                        board -> {
-                          String code = board.stationCode().orElse("");
+                        takeover -> {
+                          String code = takeover.stationCode().orElse("");
                           String operator =
-                              board
+                              takeover
                                   .nodeId()
                                   .flatMap(RouteTerminals::stationIdentityOfNode)
                                   .map(RouteTerminals.StationRef::operatorCode)
@@ -152,10 +152,10 @@ public final class TaskBoardSource {
                               plan.routeCode(),
                               operator,
                               code,
-                              stationName(plugin, code, board.nodeId()),
-                              board.nodeId().orElse(null),
-                              board.stopSequence(),
-                              board.departure().or(board::arrival).orElseGet(Instant::now),
+                              stationName(plugin, code, takeover.nodeId()),
+                              takeover.nodeId().orElse(null),
+                              takeover.stopSequence(),
+                              takeover.departure().or(takeover::arrival).orElseGet(Instant::now),
                               trainName,
                               -1,
                               null,
@@ -195,8 +195,8 @@ public final class TaskBoardSource {
               if (stops < 1 || ahead.size() < stops) {
                 return Optional.empty();
               }
-              TimetableService.PlannedStop alight = ahead.get(stops - 1);
-              String code = alight.stationCode().orElse("");
+              TimetableService.PlannedStop handover = ahead.get(stops - 1);
+              String code = handover.stationCode().orElse("");
               return Optional.of(
                   new DriverTaskManager.TaskSpec(
                       key,
@@ -208,9 +208,9 @@ public final class TaskBoardSource {
                       row.stopSequence(),
                       row.plannedDeparture(),
                       row.trainName(),
-                      alight.stopSequence(),
+                      handover.stopSequence(),
                       code,
-                      stationName(plugin, code, alight.nodeId()),
+                      stationName(plugin, code, handover.nodeId()),
                       false,
                       source,
                       metadata));

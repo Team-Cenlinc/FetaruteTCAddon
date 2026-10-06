@@ -132,7 +132,7 @@ class DriverLinkTest {
     link.enterManual();
     assertTrue(link.directive() == null, "旧许可的距离与包络早已过时");
     assertTrue(link.lastDecision() == null);
-    assertFalse(link.signalConfirm().pending());
+    assertFalse(link.signalAcknowledge().pending());
     assertTrue(link.controlsPhysically());
 
     link.recordDecision(new Decision(Intervention.EMERGENCY, 0.0, true, false));
@@ -252,8 +252,8 @@ class DriverLinkTest {
     assertEquals(java.util.Optional.of("测试站"), link.takeSkippedStation());
     assertTrue(link.takeSkippedStation().isEmpty());
     assertEquals(
-        org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Window.SKIPPED,
-        link.score().stops().get(0).window());
+        org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment.Outcome.SKIPPED,
+        link.score().stops().get(0).outcome());
   }
 
   @Test

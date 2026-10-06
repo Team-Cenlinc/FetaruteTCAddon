@@ -333,6 +333,8 @@ public final class LocaleManager {
           YamlConfiguration.loadConfiguration(
               new InputStreamReader(defaultStream, StandardCharsets.UTF_8));
       YamlConfiguration existing = YamlConfiguration.loadConfiguration(localeFile);
+      // 先搬改过名的键：否则下面按新键补上默认文案，旧键上改过的文案就丢了。
+      List<String> moved = LocaleKeyMoves.apply(existing);
       List<String> added = new ArrayList<>();
       for (String key : defaults.getKeys(true)) {
         if (defaults.isConfigurationSection(key)) {
@@ -344,8 +346,11 @@ public final class LocaleManager {
         }
       }
       List<String> replaced = upgradeSuperseded(localeTag, defaults, existing);
-      if (!added.isEmpty() || !replaced.isEmpty()) {
+      if (!moved.isEmpty() || !added.isEmpty() || !replaced.isEmpty()) {
         existing.save(localeFile);
+      }
+      if (!moved.isEmpty()) {
+        access.logger().info("已把改名前的语言键文案搬到新键: " + String.join(", ", moved));
       }
       if (!added.isEmpty()) {
         // 补全键属于诊断信息：默认不刷屏，仅在 debug.enabled=true 时输出。

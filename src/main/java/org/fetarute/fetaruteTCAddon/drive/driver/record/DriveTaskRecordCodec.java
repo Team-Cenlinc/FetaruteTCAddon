@@ -5,7 +5,10 @@ import com.google.gson.JsonObject;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
-/** 任务记录明细的 JSON：带 {@code formatVersion}，日后加字段只增不改。 */
+/**
+ * 任务记录明细的 JSON：带 {@code formatVersion}，日后加字段只增不改（字段改名时 JSON 键照旧，如 {@code window}、{@code
+ * signalConfirmations}）。
+ */
 public final class DriveTaskRecordCodec {
 
   /** 明细格式版本。 */
@@ -24,7 +27,7 @@ public final class DriveTaskRecordCodec {
       if (Double.isFinite(stop.offsetBlocks())) {
         item.addProperty("offsetBlocks", Math.round(stop.offsetBlocks() * 100.0) / 100.0);
       }
-      item.addProperty("window", stop.window().name());
+      item.addProperty("window", stop.outcome().name());
       item.addProperty("wrongDoor", stop.wrongDoor());
       item.addProperty("doorsTakenOver", stop.doorsTakenOver());
       stops.add(item);
@@ -33,7 +36,7 @@ public final class DriveTaskRecordCodec {
     root.addProperty("serviceInterventions", score.serviceInterventions());
     root.addProperty("emergencyInterventions", score.emergencyInterventions());
     root.addProperty("forcedStops", score.forcedStops());
-    root.addProperty("signalConfirmations", score.signalConfirmations());
+    root.addProperty("signalConfirmations", score.signalAcknowledgements());
     root.addProperty("signalMisses", score.signalMisses());
     root.addProperty(
         "signalReactionSeconds", Math.round(score.signalReactionSeconds() * 100.0) / 100.0);

@@ -12,10 +12,9 @@ import java.util.regex.Pattern;
  *
  * <p>改的是 {@code drive.yml} 里 {@code license.classes} 一段：等级的键、{@code requires}
  * 里的引用，以及仍是旧默认值的名称；用户改过的名称、 其余设置与注释原样保留。必须在补全新键之前做，否则补全会按模板加上 learner、driver 两级，与旧的 free、dispatch
- * 并存。
+ * 并存。考试方式的旧写法 {@code exam: dispatch} 同时改为 {@code exam: road-test}（这是考试方式，不是等级引用，与等级改名无关）。
  *
- * <p>按行处理、不经 YAML 往返，免得重写整个文件。只认出现在 {@code license:} 下 {@code classes:} 块里的行；目标键已存在时不改那一级。 {@code
- * exam: dispatch}（考试方式）不是等级引用，不动。
+ * <p>按行处理、不经 YAML 往返，免得重写整个文件。只认出现在 {@code license:} 下 {@code classes:} 块里的行；目标键已存在时不改那一级。
  */
 public final class LicenseClassIdMigration {
 
@@ -35,6 +34,8 @@ public final class LicenseClassIdMigration {
       Pattern.compile("^(\\s*requires:\\s*\\[)([^\\]]*)(\\].*)$");
   private static final Pattern NAME =
       Pattern.compile("^(\\s*name:\\s*)([\"']?)([^\"'#]*?)([\"']?)(\\s*(#.*)?)$");
+  private static final Pattern LEGACY_EXAM =
+      Pattern.compile("^(\\s*exam:\\s*)([\"']?)dispatch\\2(\\s*(#.*)?)$");
 
   private LicenseClassIdMigration() {}
 
@@ -156,6 +157,11 @@ public final class LicenseClassIdMigration {
       Matcher inline = INLINE_REQUIRES.matcher(line);
       if (inline.matches()) {
         out.set(i, inline.group(1) + renameInline(inline.group(2), renames) + inline.group(3));
+        continue;
+      }
+      Matcher exam = LEGACY_EXAM.matcher(line);
+      if (exam.matches()) {
+        out.set(i, exam.group(1) + exam.group(2) + "road-test" + exam.group(2) + exam.group(3));
         continue;
       }
       Matcher name = NAME.matcher(line);

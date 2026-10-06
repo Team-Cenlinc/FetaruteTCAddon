@@ -14,7 +14,8 @@ import org.fetarute.fetaruteTCAddon.drive.hud.DriverStationHint;
  */
 public enum DriveTip {
   /** 信号变严，要右键确认。 */
-  SIGNAL_CONFIRM("signal-confirm", s -> manual(s) && s.signalConfirmPending()),
+  SIGNAL_ACKNOWLEDGE(
+      "signal-acknowledge", "signal-confirm", s -> manual(s) && s.signalAcknowledgePending()),
   /** 第一次进站对标。 */
   STOP_MARK(
       "stop-mark",
@@ -39,16 +40,27 @@ public enum DriveTip {
   VIGILANCE("vigilance", s -> s.cab() && s.vigilanceWarning());
 
   private final String key;
+  private final String storageKey;
   private final Predicate<TutorialSnapshot> due;
 
   DriveTip(String key, Predicate<TutorialSnapshot> due) {
+    this(key, key, due);
+  }
+
+  DriveTip(String key, String storageKey, Predicate<TutorialSnapshot> due) {
     this.key = key;
+    this.storageKey = storageKey;
     this.due = due;
   }
 
-  /** 文案键的后缀（{@code drive.tutorial.tips.<键>}），也用作持久数据标记名的一部分。 */
+  /** 文案键的后缀（{@code drive.tutorial.tips.<键>}）。 */
   public String key() {
     return key;
+  }
+
+  /** 持久数据标记名的一部分：与文案键分开，文案键改名后已出过的提示不会再出一次。 */
+  public String storageKey() {
+    return storageKey;
   }
 
   /** 此刻的会话是否正处在这种情况。 */

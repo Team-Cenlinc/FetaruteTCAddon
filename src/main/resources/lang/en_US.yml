@@ -20,7 +20,7 @@ enum:
   route-pattern-type:
     local: "Local"
     rapid: "Rapid"
-    neo_rapid: "Special Rapid"
+    neo_rapid: "Neo Rapid"
     express: "Express"
     limited_express: "Ltd. Express"
   route-operation-type:
@@ -67,7 +67,7 @@ drive:
       handback: "<yellow>Handing back to automatic operation after stopping</yellow>"
       no-signal: "<yellow>No movement authority</yellow>"
       wait-signal: "<red>Stop signal</red>"
-      confirm-signal: "<gold><bold>Signal restricted: right-click to acknowledge</bold></gold>"
+      acknowledge-signal: "<gold><bold>Signal restricted: right-click to acknowledge</bold></gold>"
       blocking: "<gold>A following train has been held for <white><seconds></white> s, please move on</gold>"
     station:
       approach: "<aqua><station></aqua> <gray>stop mark</gray> <white><distance></white> <gray>m</gray>"
@@ -481,7 +481,7 @@ drive:
       notch-ignored: "<aqua>ATO is driving: the handle has no effect, pull to EB to take manual control</aqua>"
       confirmed: "<green>Departure confirmed</green>"
     signal:
-      confirmed: "<green>Signal acknowledged</green>"
+      acknowledged: "<green>Signal acknowledged</green>"
     rescue:
       warn: "<prefix> <yellow>The train has not moved for <white><seconds></white> s; resume running soon or it will switch to ATO</yellow>"
       ato: "<prefix> <yellow>The train stood too long and switched to ATO</yellow>"
@@ -490,7 +490,7 @@ drive:
     congestion:
       warn: "<prefix> <gold>A following train has been held behind this train for <white><seconds></white> s. Please move on; continuing to block will switch to ATO</gold>"
       ato: "<prefix> <yellow>The following train was held too long; this train has switched to ATO</yellow>"
-    breaker:
+    protection:
       tripped: "<prefix> <red>Congestion protection: <white><reason></white>; handed back <white><count></white> player-driven train(s); takeovers are paused</red>"
   task:
     board:
@@ -537,11 +537,11 @@ drive:
     claim:
       claimed: "<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives and confirm your seat</green>"
       disabled: "<prefix> <red>Driving dispatched trains is not enabled</red>"
-      breaker-open: "<prefix> <red>The line is congested; takeovers are paused</red>"
+      protection-active: "<prefix> <red>The line is congested; takeovers are paused</red>"
       cancelled: "<prefix> <red>This trip cannot be taken right now</red>"
       continuing: "<prefix> <red>You are waiting to continue with this train's next trip; end driving before taking another trip</red>"
       assigned: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to the terminus</green>"
-      assigned-interval: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to <white><alight></white></green>"
+      assigned-interval: "<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to <white><handover></white></green>"
       already-has-task: "<prefix> <red>You already have a task; finish or abandon it first (/fta drive task abandon)</red>"
       taken: "<prefix> <red>Another driver already took this trip</red>"
       unavailable: "<prefix> <red>This trip cannot be taken</red>"
@@ -690,7 +690,7 @@ drive:
         subtitle: "<yellow>Follow the signals to the terminus</yellow>"
     tip: "<prefix> <aqua>Driving tip</aqua> <text>"
     tips:
-      signal-confirm:
+      signal-acknowledge:
         chat: "<white>Signal restricted:</white> <gray>When a signal ahead drops to caution or stop, the action bar asks you to right-click to acknowledge. Acknowledge and keep to the new limit; after about 4 seconds without confirming the service brake is applied, and then the emergency brake.</gray>"
         subtitle: "<gold>Signal restricted: right-click</gold>"
       stop-mark:
@@ -736,7 +736,7 @@ drive:
       already-held: "<prefix> <yellow>You already hold the <white><name></white></yellow>"
       requires: "<prefix> <red>The <white><name></white> requires: <white><required></white></red>"
       in-progress: "<prefix> <yellow>You are taking the <white><name></white> exam; finish it first</yellow>"
-      in-progress-dispatch: "<prefix> <yellow>You are taking the <white><name></white> road test; finish it first</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>Abandon this road test: before you start driving it does not count; after that it counts as a fail</gray>'><gray>[Abandon road test]</gray></hover></click>"
+      in-progress-road-test: "<prefix> <yellow>You are taking the <white><name></white> road test; finish it first</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>Abandon this road test: before you start driving it does not count; after that it counts as a fail</gray>'><gray>[Abandon road test]</gray></hover></click>"
       cooldown: "<prefix> <yellow>You did not pass the <white><name></white> road test; try again in <white><minutes></white> min</yellow>"
       driving: "<prefix> <red>End driving before signing up for the road test or practice</red>"
       has-task: "<prefix> <red>You already have a driving task; finish or abandon it (/fta drive task abandon) first</red>"
@@ -772,8 +772,8 @@ drive:
         wrong-door: "<prefix> <gray>Tip: once stopped, check the sidebar for which side to open and only open the platform side.</gray>"
         points: "<prefix> <gray>Tip: the score reflects stopping accuracy, protective interventions, signal acknowledgements and punctuality. Follow the advised speed, stop accurately and right-click to acknowledge restrictive signals.</gray>"
       stop:
-        line: "<prefix> <gray>Road test <done>/<total></gray> <white><station></white> <window><doors>"
-        window:
+        line: "<prefix> <gray>Road test <done>/<total></gray> <white><station></white> <outcome><doors>"
+        outcome:
           accurate: "<green>accurate stop</green>"
           accepted: "<green>stop accepted</green>"
           short: "<yellow>stopped short</yellow>"
@@ -796,9 +796,9 @@ drive:
           how: "<prefix> <white>How: </white><gray>within <minutes> min, sit on any non-dispatched train and run <aqua>/fta drive on</aqua>; the tutorial starts with driving (immediately if you are already driving).</gray>"
           rule: "<prefix> <white>Rules: </white><gray>do the practice steps yourself without pressing Skip; press Continue on explanation steps; ending the drive on the last step completes the tutorial.</gray>"
           perm: "<prefix> <gray>Driving non-dispatched trains is enabled for the exam and withdrawn afterwards.</gray> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>Get the driver handbook</gray>'><aqua>[Driver handbook]</aqua></hover></click>"
-        dispatch:
+        road-test:
           header: "<prefix> <gold><bold>Level <level> · <name> road test</bold></gold>"
-          route: "<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and hand over at <yellow><alight></yellow>.</white>"
+          route: "<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><takeover></yellow>, drive <stops> stops and hand over at <yellow><handover></yellow>.</white>"
           pass: "<prefix> <white>To pass: </white><gray>score at least <min>, drive manually throughout.</gray>"
           no-emergency: "<prefix> <gray>· no protective emergency braking (speeding, passing a stop signal)</gray>"
           no-overrun: "<prefix> <gray>· stop within the door range at every station; no overruns or skips</gray>"
@@ -813,14 +813,14 @@ drive:
       no-trip-routes: "<prefix> <yellow>No practice-route trip (<white><routes></white>) at <white><station></white> soon; sign up at a station on a practice route</yellow>"
       brief:
         header: "<prefix> <gold><bold>Level <level> · <name> road-test practice</bold></gold>"
-        route: "<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and hand over at <yellow><alight></yellow>.</white>"
+        route: "<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><takeover></yellow>, drive through <stops> stops and hand over at <yellow><handover></yellow>.</white>"
         what: "<prefix> <white>How it works:</white><gray> like the road test, with a coach riding along: each stop phase tells you the next step, and you are reminded about restrictive signals and speeding. Practice issues no licence and is not saved to your records or the leaderboard.</gray>"
         drill: "<prefix> <white>Incident drill:</white><gray> after the first stop, one incident is simulated at random (line voltage loss, door fault, obstacle ahead…). Follow the prompts; it is reviewed at the end and does not affect the practice count.</gray>"
         pass: "<prefix> <white>Judged like the road test:</white><gray> at least <min> points, driven manually throughout.</gray>"
         handbook: "<prefix> <white>Study:</white><gray> the FTCA Driver Handbook is in your inventory; practise alongside it.</gray>"
         feedback: "<prefix> <gray>Each stop is reviewed. Reaching the hand-over station counts as one practice run; if the trip runs late, the drill is cancelled first and the train may be handed back to automatic operation.</gray>"
       stop:
-        line: "<prefix> <gray>Practice <done>/<total></gray> <white><station></white> <window><doors>"
+        line: "<prefix> <gray>Practice <done>/<total></gray> <white><station></white> <outcome><doors>"
       warn:
         emergency: "<prefix> <red>Practice: protective emergency braking was applied; this fails a road test</red>"
         overrun: "<prefix> <red>Practice: overran or skipped <station>; this fails a road test</red>"
@@ -896,7 +896,7 @@ drive:
       level-practice-running: "  <yellow>…</yellow> <white>Level <level> · <name></white> <yellow>practice in progress</yellow>"
       level-need-practice: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>complete road-test practice first (<done>/<required>)</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice (near a station)</gray>'><green>[Start practice]</green></hover></click>"
       level-open-tutorial: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>exam: complete the tutorial</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
-      level-open-dispatch: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>road test of <stops> stops, pass mark <min></gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice (no licence)</gray>'><aqua>[Practise]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the road test]</green></hover></click>"
+      level-open-road-test: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>road test of <stops> stops, pass mark <min></gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice (no licence)</gray>'><aqua>[Practise]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the road test]</green></hover></click>"
       level-locked: "  <dark_gray>○ Level <level> · <name> (requires <required>)</dark_gray>"
       level-closed: "  <dark_gray>○ Level <level> · <name> (not yet available)</dark_gray>"
       footer: "<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>Get the driver handbook</gray>'><aqua>[Driver handbook]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>Lost your licence? Click to reissue</gray>'><aqua>[Reissue licence]</aqua></hover></click>"
@@ -965,7 +965,7 @@ drive:
       entry-tutorial: "  <gray>•</gray> <white>/fta drive tutorial [start|restart|stop|reset|skip]</white> <gray>- Start, start over, quit or reset the tutorial, or skip the current step</gray>"
       entry-task: "  <gray>•</gray> <white>/fta drive task [status|abandon|goto|pickup]</white> <gray>- Show or abandon your task, go to the train to pick up, or pick it up at the depot</gray>"
       entry-mode: "  <gray>•</gray> <white>/fta drive mode <manual|ato></white> <gray>- Switch between manual and ATO while stopped</gray>"
-      entry-breaker: "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- Show or reset the congestion breaker</gray>"
+      entry-congestion: "  <gray>•</gray> <white>/fta drive congestion [status|reset]</white> <gray>- Show or lift congestion protection</gray>"
       entry-records: "  <gray>•</gray> <white>/fta drive records [player]</white> <gray>- Show driving records</gray>"
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- Driving leaderboard</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <player></white> <gray>- Revoke a player's driving task</gray>"
@@ -981,7 +981,7 @@ drive:
       no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"
       not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"
       not-head-cab: "<prefix> <red>Sit in the leading cab to take over</red>"
-      breaker-open: "<prefix> <red>The line is congested; takeovers are paused</red>"
+      protection-active: "<prefix> <red>The line is congested; takeovers are paused</red>"
       cancelled: "<prefix> <red>You cannot start driving right now</red>"
       train-in-use: "<prefix> <red>This train is being driven or is braking to a stop</red>"
       train-moving: "<prefix> <red>The train is rolling away from this cab (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
@@ -1028,9 +1028,12 @@ drive:
       no-permission: "<prefix> <red>You are not allowed to drive with ATO</red>"
       manual: "<prefix> <yellow>Switched to manual driving</yellow>"
       ato: "<prefix> <aqua>Switched to ATO; right-click to confirm each departure</aqua>"
-    breaker:
-      status: "<prefix> Congestion breaker: <white><status></white>"
-      reset: "<prefix> <yellow>Congestion breaker reset</yellow>"
+    congestion:
+      status: "<prefix> Congestion protection: <white><status></white>"
+      reset: "<prefix> <yellow>Congestion protection lifted</yellow>"
+      state:
+        inactive: "inactive"
+        active: "active, lifts in <seconds> s (<reason>)"
     handback:
       requested: "<prefix> <yellow>Asked <player> to hand the train back to automatic operation</yellow>"
       not-driving: "<prefix> <red><player> is not driving a dispatched train</red>"

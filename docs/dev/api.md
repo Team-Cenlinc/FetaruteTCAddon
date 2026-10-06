@@ -66,7 +66,7 @@ if (!FetaruteApi.isCompatible(this, "1.0.0")) {
 
 ## API 模块
 
-FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
+FetaruteApi 提供十个子模块、一个数据版本号 `dataRevision()`（1.6.0，见“车站组与停靠线路”一节），另有一组 Bukkit 事件（见“事件”一节）：
 
 | 模块 | 方法 | 功能 |
 |------|------|------|
@@ -79,6 +79,7 @@ FetaruteApi 提供九个子模块、一个数据版本号 `dataRevision()`（1.6
 | `lines()` | `LineApi` | 线路信息：服务类型、颜色、状态 |
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表（1.9.0 站牌行结构化） |
 | `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消；1.11.0 车型） |
+| `drive()` | `DriveApi` | 驾驶任务：派任务、查询任务与驾驶状态、成绩记录（1.10.0；1.12.0 接班站与交班站改称 `takeoverStation`/`handoverStation`、停车结果改为 `StopOutcome`，旧名 `board`/`alight`/`StopWindow` 标为弃用、照常可用） |
 
 ---
 

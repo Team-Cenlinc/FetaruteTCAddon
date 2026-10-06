@@ -16,11 +16,11 @@ import org.bukkit.entity.Player;
 /**
  * 驾驶任务 API（1.10.0）：给玩家派驾驶任务、查询任务与驾驶状态、读取成绩记录。
  *
- * <p>任务就是开一趟表定车次：从接班站接班，开到终点站或指定的下车站。任务插件（例如 Typewriter）通过 {@link #assign} 给玩家派任务， 通过 {@code
+ * <p>任务就是开一趟表定车次：从接班站接班，开到终点站或指定的交班站。任务插件（例如 Typewriter）通过 {@link #assign} 给玩家派任务， 通过 {@code
  * org.fetarute.fetaruteTCAddon.api.event} 里的 {@code Driver*}、{@code DriveSession*} 事件跟进：领取、开始、
  * 每站成绩、结束。
  *
- * <p>派任务不受任务板时间窗限制，也不要求玩家在车站附近；其余规则与任务板相同：驾驶功能开启、没有熔断、每名玩家一个未结束的任务、每个车次一名驾驶员。
+ * <p>派任务不受任务板时间窗限制，也不要求玩家在车站附近；其余规则与任务板相同：驾驶功能开启、不在拥堵保护中、每名玩家一个未结束的任务、每个车次一名驾驶员。
  *
  * <p>线程：{@link #offersAt}、{@link #assign}、{@link #abandon} 只能在服务器主线程调用，否则抛出 {@link
  * IllegalStateException}；{@link #taskOf}、{@link #sessionOf}
@@ -90,7 +90,7 @@ public interface DriveApi {
     CLAIMED,
     /** 驾驶中。 */
     DRIVING,
-    /** 开到终点站或下车站。 */
+    /** 开到终点站或交班站。 */
     COMPLETED,
     /** 驾驶员放弃或离开。 */
     ABANDONED,
@@ -98,7 +98,7 @@ public interface DriveApi {
     EXPIRED,
     /** 卡住太久或超过任务时限，被收回。 */
     FAILED,
-    /** 调度、管理员或熔断收回，不怪驾驶员。 */
+    /** 调度、管理员或拥堵保护收回，不怪驾驶员。 */
     INTERRUPTED;
 
     /** 是否已结束。 */
@@ -113,7 +113,7 @@ public interface DriveApi {
     ASSIGNED,
     /** 驾驶功能未启用。 */
     DISABLED,
-    /** 线路拥堵熔断中，暂停接班。 */
+    /** 拥堵保护中，暂停接班（常量名沿用早先的说法）。 */
     BREAKER_OPEN,
     /** 玩家已有未结束的任务。 */
     ALREADY_HAS_TASK,
@@ -121,7 +121,7 @@ public interface DriveApi {
     TAKEN,
     /** 找不到这个车次，或它在接班站已取消。 */
     UNAVAILABLE,
-    /** 接班站或下车站不是这趟车停车的车站，或下车站不在接班站之后。 */
+    /** 接班站或交班站不是这趟车停车的车站，或交班站不在接班站之后。 */
     INVALID_STATIONS,
     /** 列车已经开过接班站，或还没对上列车而接班站计划发车已过去 10 分钟以上（会立即作废）。 */
     DEPARTED,
@@ -129,17 +129,36 @@ public interface DriveApi {
     CANCELLED
   }
 
-  /** 每站的停车结果。 */
+  /** 每站的停车结果（1.12.0）。 */
+  enum StopOutcome {
+    /** 停准。 */
+    ACCURATE,
+    /** 停车合格：在可开门范围内。 */
+    ACCEPTED,
+    /** 欠标超限：停短（超出可开门范围、未前移到位）。 */
+    SHORT,
+    /** 过标超限：停过头（越过可开门范围，未到越站阈值）。 */
+    OVERRUN,
+    /** 越站：越过停车点太多，本站没停。 */
+    SKIPPED
+  }
+
+  /**
+   * 每站的停车结果。
+   *
+   * @deprecated 1.12.0 起改名为 {@link StopOutcome}，常量相同
+   */
+  @Deprecated(since = "1.12.0")
   enum StopWindow {
     /** 停准。 */
     ACCURATE,
-    /** 在可开门范围内。 */
+    /** 停车合格。 */
     ACCEPTED,
-    /** 停短（超出可开门范围、未前移到位）。 */
+    /** 欠标超限。 */
     SHORT,
-    /** 停过头（越过可开门范围，未到越站阈值）。 */
+    /** 过标超限。 */
     OVERRUN,
-    /** 越站：越过停车点太多，本站没停。 */
+    /** 越站。 */
     SKIPPED
   }
 
@@ -166,8 +185,8 @@ public interface DriveApi {
    * @param tripCode 车次号
    * @param serviceDate 服务日
    * @param routeCode 交路代码
-   * @param board 接班站
-   * @param alight 下车站；开到终点站的任务为空
+   * @param takeoverStation 接班站
+   * @param handoverStation 交班站；开到终点站的任务为空
    * @param plannedDeparture 接班站计划发车
    * @param mode 驾驶方式
    * @param state 状态
@@ -189,8 +208,8 @@ public interface DriveApi {
       String tripCode,
       LocalDate serviceDate,
       String routeCode,
-      StationRef board,
-      Optional<StationRef> alight,
+      StationRef takeoverStation,
+      Optional<StationRef> handoverStation,
       Instant plannedDeparture,
       Mode mode,
       TaskState state,
@@ -204,13 +223,33 @@ public interface DriveApi {
     public TaskView {
       Objects.requireNonNull(taskId, "taskId");
       Objects.requireNonNull(playerId, "playerId");
-      alight = alight == null ? Optional.empty() : alight;
+      handoverStation = handoverStation == null ? Optional.empty() : handoverStation;
       trainName = trainName == null ? Optional.empty() : trainName;
       source = source == null ? "" : source;
       metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
       endReason = endReason == null ? "" : endReason;
       points = points == null ? OptionalInt.empty() : points;
       grade = grade == null ? Optional.empty() : grade;
+    }
+
+    /**
+     * 接班站。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #takeoverStation()}
+     */
+    @Deprecated(since = "1.12.0")
+    public StationRef board() {
+      return takeoverStation;
+    }
+
+    /**
+     * 交班站。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #handoverStation()}
+     */
+    @Deprecated(since = "1.12.0")
+    public Optional<StationRef> alight() {
+      return handoverStation;
     }
   }
 
@@ -274,9 +313,9 @@ public interface DriveApi {
    * @param timetableId 时刻表
    * @param tripCode 车次号（不分大小写）
    * @param serviceDate 服务日
-   * @param boardStation 接班站站码；为空时从这趟车第一个停车的车站接班
-   * @param boardStopSequence 接班站的停靠序号（同一车次两次经过同一站时用它区分）；-1 时取该站码的第一次停靠
-   * @param alightStation 下车站站码；为空时开到终点站
+   * @param takeoverStation 接班站站码；为空时从这趟车第一个停车的车站接班
+   * @param takeoverStopSequence 接班站的停靠序号（同一车次两次经过同一站时用它区分）；-1 时取该站码的第一次停靠
+   * @param handoverStation 交班站站码；为空时开到终点站
    * @param mode 驾驶方式
    * @param depotPickup 列车从车库出车时是否从车库接车
    * @param source 来源标记（例如插件名），事件里原样带回
@@ -287,9 +326,9 @@ public interface DriveApi {
       UUID timetableId,
       String tripCode,
       LocalDate serviceDate,
-      Optional<String> boardStation,
-      int boardStopSequence,
-      Optional<String> alightStation,
+      Optional<String> takeoverStation,
+      int takeoverStopSequence,
+      Optional<String> handoverStation,
       Mode mode,
       boolean depotPickup,
       String source,
@@ -299,9 +338,9 @@ public interface DriveApi {
       Objects.requireNonNull(timetableId, "timetableId");
       Objects.requireNonNull(tripCode, "tripCode");
       Objects.requireNonNull(serviceDate, "serviceDate");
-      boardStation = boardStation == null ? Optional.empty() : boardStation;
-      boardStopSequence = Math.max(-1, boardStopSequence);
-      alightStation = alightStation == null ? Optional.empty() : alightStation;
+      takeoverStation = takeoverStation == null ? Optional.empty() : takeoverStation;
+      takeoverStopSequence = Math.max(-1, takeoverStopSequence);
+      handoverStation = handoverStation == null ? Optional.empty() : handoverStation;
       mode = mode == null ? Mode.MANUAL : mode;
       source = source == null || source.isBlank() ? "api" : source;
       metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
@@ -327,14 +366,14 @@ public interface DriveApi {
     public static TaskRequest of(TaskOffer offer, String stationCode) {
       Objects.requireNonNull(offer, "offer");
       TaskRequest request =
-          trip(offer.timetableId(), offer.tripCode(), offer.serviceDate()).boardAt(stationCode);
+          trip(offer.timetableId(), offer.tripCode(), offer.serviceDate()).takeoverAt(stationCode);
       return new TaskRequest(
           request.timetableId,
           request.tripCode,
           request.serviceDate,
-          request.boardStation,
+          request.takeoverStation,
           offer.stopSequence(),
-          request.alightStation,
+          request.handoverStation,
           request.mode,
           request.depotPickup,
           request.source,
@@ -343,14 +382,14 @@ public interface DriveApi {
     }
 
     /** 从这一站接班（该站码的第一次停靠）。 */
-    public TaskRequest boardAt(String stationCode) {
+    public TaskRequest takeoverAt(String stationCode) {
       return new TaskRequest(
           timetableId,
           tripCode,
           serviceDate,
           Optional.ofNullable(stationCode).filter(code -> !code.isBlank()),
           -1,
-          alightStation,
+          handoverStation,
           mode,
           depotPickup,
           source,
@@ -359,13 +398,13 @@ public interface DriveApi {
     }
 
     /** 开到这一站就结束（区间任务），交还自动运行。 */
-    public TaskRequest alightAt(String stationCode) {
+    public TaskRequest handoverAt(String stationCode) {
       return new TaskRequest(
           timetableId,
           tripCode,
           serviceDate,
-          boardStation,
-          boardStopSequence,
+          takeoverStation,
+          takeoverStopSequence,
           Optional.ofNullable(stationCode).filter(code -> !code.isBlank()),
           mode,
           depotPickup,
@@ -380,9 +419,9 @@ public interface DriveApi {
           timetableId,
           tripCode,
           serviceDate,
-          boardStation,
-          boardStopSequence,
-          alightStation,
+          takeoverStation,
+          takeoverStopSequence,
+          handoverStation,
           newMode,
           depotPickup,
           source,
@@ -396,9 +435,9 @@ public interface DriveApi {
           timetableId,
           tripCode,
           serviceDate,
-          boardStation,
-          boardStopSequence,
-          alightStation,
+          takeoverStation,
+          takeoverStopSequence,
+          handoverStation,
           mode,
           pickup,
           source,
@@ -412,9 +451,9 @@ public interface DriveApi {
           timetableId,
           tripCode,
           serviceDate,
-          boardStation,
-          boardStopSequence,
-          alightStation,
+          takeoverStation,
+          takeoverStopSequence,
+          handoverStation,
           mode,
           depotPickup,
           newSource,
@@ -428,14 +467,64 @@ public interface DriveApi {
           timetableId,
           tripCode,
           serviceDate,
-          boardStation,
-          boardStopSequence,
-          alightStation,
+          takeoverStation,
+          takeoverStopSequence,
+          handoverStation,
           mode,
           depotPickup,
           source,
           metadata,
           notify);
+    }
+
+    /**
+     * 接班站站码。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #takeoverStation()}
+     */
+    @Deprecated(since = "1.12.0")
+    public Optional<String> boardStation() {
+      return takeoverStation;
+    }
+
+    /**
+     * 接班站的停靠序号。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #takeoverStopSequence()}
+     */
+    @Deprecated(since = "1.12.0")
+    public int boardStopSequence() {
+      return takeoverStopSequence;
+    }
+
+    /**
+     * 交班站站码。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #handoverStation()}
+     */
+    @Deprecated(since = "1.12.0")
+    public Optional<String> alightStation() {
+      return handoverStation;
+    }
+
+    /**
+     * 从这一站接班。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #takeoverAt(String)}
+     */
+    @Deprecated(since = "1.12.0")
+    public TaskRequest boardAt(String stationCode) {
+      return takeoverAt(stationCode);
+    }
+
+    /**
+     * 开到这一站就结束。
+     *
+     * @deprecated 1.12.0 起改名为 {@link #handoverAt(String)}
+     */
+    @Deprecated(since = "1.12.0")
+    public TaskRequest alightAt(String stationCode) {
+      return handoverAt(stationCode);
     }
   }
 
@@ -444,16 +533,27 @@ public interface DriveApi {
    *
    * @param station 站名
    * @param offsetBlocks 停车误差（格，越过为正）；越站时为越过的距离
-   * @param window 停车结果
+   * @param outcome 停车结果
    * @param wrongDoor 是否开过非站台侧的门
    * @param doorsTakenOver 驾驶员迟迟不开门，由站台代为开关门
    */
   record StopResult(
       String station,
       double offsetBlocks,
-      StopWindow window,
+      StopOutcome outcome,
       boolean wrongDoor,
-      boolean doorsTakenOver) {}
+      boolean doorsTakenOver) {
+
+    /**
+     * 停车结果。
+     *
+     * @deprecated 1.12.0 起改为 {@link #outcome()}
+     */
+    @Deprecated(since = "1.12.0")
+    public StopWindow window() {
+      return StopWindow.valueOf(outcome.name());
+    }
+  }
 
   /**
    * 任务结束时的成绩。

@@ -3,14 +3,15 @@ drive:
   license:
     exam:
       brief:
-        dispatch:
+        road-test:
           how: ["<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport next to the train</gray>'><green>[Go to train]</green></hover></click>", "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the boarding platform; if the train is already in, right beside the front cab</gray>'><green>[Go to boarding]</green></hover></click>", "<prefix> <white>How: </white><gray>when the train arrives, sit in the leading cab, confirm your seat and run <aqua>/fta drive on</aqua>.</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>Teleport to the boarding platform; if the train is already in, right beside the leading cab</gray>'><green>[Go to takeover]</green></hover></click>"]
-          route: ["<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and finish at <yellow><alight></yellow>.</white>"]
+          route: ["<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and finish at <yellow><alight></yellow>.</white>", "<prefix> <white>Trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive <stops> stops and hand over at <yellow><alight></yellow>.</white>"]
       stop:
-        window:
+        outcome:
           accepted: ["<green>within door range</green>"]
           short: ["<yellow>short</yellow>"]
           overrun: ["<red>overran</red>"]
+        line: ["<prefix> <gray>Road test <done>/<total></gray> <white><station></white> <window><doors>"]
       reason:
         not-completed: ["you did not reach the final station"]
       tip:
@@ -31,11 +32,13 @@ drive:
       brief:
         drill: ["<prefix> <white>Incident drill:</white><gray> after the first stop, one incident is simulated at random (line power loss, door fault, obstacle ahead…). Follow the prompts; it is reviewed at the end and does not affect the practice count.</gray>"]
         feedback: ["<prefix> <gray>Each stop is reviewed. Reaching the final station counts as one practice run; if the trip runs late, the drill is cancelled first and the train may be handed back to automatic operation.</gray>"]
-        route: ["<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and finish at <yellow><alight></yellow>.</white>"]
+        route: ["<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and finish at <yellow><alight></yellow>.</white>", "<prefix> <white>Practice trip <aqua><trip></aqua>: take over at <yellow><board></yellow>, drive through <stops> stops and hand over at <yellow><alight></yellow>.</white>"]
       warn:
         hint: ["<prefix> <gray>Keep driving to the final station; you will get a review at the end.</gray>"]
       review:
         not-counted: ["<prefix> <yellow>You did not reach the final station, so this run does not count.</yellow>"]
+      stop:
+        line: ["<prefix> <gray>Practice <done>/<total></gray> <white><station></white> <window><doors>"]
     drill:
       start:
         line-loss: ["<prefix> <red>Line power lost: traction is unavailable.</red> <gray>Return to N or brake, do not keep notching up; power returns in about <seconds> s.</gray>"]
@@ -59,7 +62,8 @@ drive:
       info-claimed: ["<gray>Grey trips are already taken by a driver</gray>"]
     claim:
       claimed: ["<prefix> <green>Took trip <white><route></white> <aqua><trip></aqua>: sit in the leading cab when the train arrives</green>"]
-      breaker-open: ["<prefix> <red>The line is congested; new shifts are paused</red>"]
+      protection-active: ["<prefix> <red>The line is congested; new shifts are paused</red>"]
+      assigned-interval: ["<prefix> <green>New driving task: <white><route></white> <aqua><trip></aqua>; take over at <white><station></white> and drive to <white><alight></white></green>"]
     pickup:
       terminal: ["<prefix> <white>Trip <aqua><trip></aqua> runs with train <aqua><train></aqua>, standing at <location>. Board within <yellow><seconds></yellow> s, sit in the cab at either end and confirm your seat; if the train reverses you will be moved to the leading cab</white>"]
       depot: ["<prefix> <white>Train <aqua><train></aqua> for trip <aqua><trip></aqua> has left the depot shed at <location> and is waiting on its track. Sit in the leading cab and confirm your seat within <yellow><seconds></yellow> s</white>"]
@@ -91,7 +95,7 @@ drive:
         none: ["<gray>No doors at this stop</gray>"]
     driver:
       handback: ["<yellow>Handing back to automatic after stopping</yellow>"]
-      confirm-signal: ["<gold><bold>Signal restricted: right-click to confirm</bold></gold>"]
+      acknowledge-signal: ["<gold><bold>Signal restricted: right-click to confirm</bold></gold>"]
     setup:
       progress: ["<yellow><step> <seconds>s</yellow>"]
     stop-result:
@@ -106,7 +110,7 @@ drive:
     tips:
       ato-confirm:
         chat: ["<white>ATO departure:</white> <gray>When the action bar shows \"ATO: right-click to confirm departure\", right-click. If you do not, the train still leaves, but it counts against your score.</gray>"]
-      signal-confirm:
+      signal-acknowledge:
         chat: ["<white>Signal restricted:</white> <gray>When a signal ahead drops to caution or stop, the action bar asks you to right-click to confirm. Confirm and keep to the new limit; after about 4 seconds without confirming the service brake is applied, and then the emergency brake.</gray>"]
       open-doors:
         chat: ["<white>Open the doors:</white> <gray>The train is berthed. Press</gray> <yellow>F</yellow> <gray>and open the platform-side doors shown on the action bar; the dwell timer starts once they are open.</gray>"]
@@ -132,19 +136,23 @@ drive:
       entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- Start, quit or reset the tutorial, or skip the current step</gray>"]
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"]
+      entry-congestion: ["  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- Show or reset the congestion breaker</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
       managed-train: ["<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"]
       train-moving:
         - "<prefix> <red>The train is moving, wait until it has stopped</red>"
         - "<prefix> <red>The train has not stopped (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
-      breaker-open: ["<prefix> <red>The line is congested; new shifts are paused</red>"]
+      protection-active: ["<prefix> <red>The line is congested; new shifts are paused</red>"]
       no-permission: ["<prefix> <red>You are not allowed to drive trains outside dispatch; take a driving task to drive a dispatched train</red>"]
     status: ["<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> b/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"]
+    congestion:
+      status: ["<prefix> Congestion breaker: <white><status></white>"]
+      reset: ["<prefix> <yellow>Congestion breaker reset</yellow>"]
   driver:
     signal:
-      confirmed: ["<green>Signal confirmed</green>"]
-    breaker:
+      acknowledged: ["<green>Signal confirmed</green>"]
+    protection:
       tripped: ["<prefix> <red>Congestion breaker: <white><reason></white>; handed back <white><count></white> driver train(s) and paused new shifts</red>"]
   bossbar:
     station:
@@ -203,7 +211,5 @@ display:
         scheduled: ["Scheduled {minutes}min"]
         minutes: ["{minutes}min"]
 enum:
-  route-pattern-type:
-    neo_rapid: ["Neo Rapid"]
   route-stop-pass-type:
     terminate: ["Terminate"]

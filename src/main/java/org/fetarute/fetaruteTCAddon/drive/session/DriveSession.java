@@ -23,7 +23,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
-import org.fetarute.fetaruteTCAddon.drive.driver.SignalConfirm;
+import org.fetarute.fetaruteTCAddon.drive.driver.SignalAcknowledge;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveDynamics;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
@@ -624,7 +624,7 @@ public final class DriveSession {
             };
     DriverProtection.Decision decision = physically ? link.lastDecision() : null;
     return new DriveCueTracker.Snapshot(
-        physically && link.signalConfirm().pending(),
+        physically && link.signalAcknowledge().pending(),
         aspectRank,
         decision == null ? DriverProtection.Intervention.NONE : decision.intervention(),
         overspeedRed,
@@ -1027,7 +1027,7 @@ public final class DriveSession {
     DriverLink link = driverLink;
     boolean stopped = isStopped();
     // 信号变严要右键确认：行车中迟迟不确认先常用制动，再紧急制动。
-    SignalConfirm confirm = link.signalConfirm();
+    SignalAcknowledge confirm = link.signalAcknowledge();
     if (link.directive() != null) {
       confirm.observe(
           link.directive().aspect(),
@@ -1035,11 +1035,11 @@ public final class DriveSession {
           !stopped,
           config.level() == SimulationLevel.SIMULATION);
     }
-    SignalConfirm.Intervention unconfirmed = confirm.intervention(nowTick, !stopped);
-    if (unconfirmed == SignalConfirm.Intervention.EMERGENCY) {
+    SignalAcknowledge.Intervention unconfirmed = confirm.intervention(nowTick, !stopped);
+    if (unconfirmed == SignalAcknowledge.Intervention.EMERGENCY) {
       selector.force(Notch.EB);
       effective = Notch.EB;
-    } else if (unconfirmed == SignalConfirm.Intervention.SERVICE) {
+    } else if (unconfirmed == SignalAcknowledge.Intervention.SERVICE) {
       effective = atLeastServiceBrake(effective);
     }
     if (stopped && link.emergencyLatched()) {

@@ -13,9 +13,9 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param handbackSeconds 交还自动运行，任务失败
  * @param rescueSeconds 交还后列车仍不动：驾驶员下车送到站台
  * @param maxTaskMinutes 一次任务的绝对上限（分钟），超过即交还并判失败
- * @param breakerHeldTrains 全网被扣住超过 {@code breakerHeldSeconds} 的车达到这么多列、且阻挡链里有驾驶员列车时熔断
- * @param breakerHeldSeconds 熔断统计的扣车时长下限
- * @param breakerCooldownMinutes 熔断后多少分钟内暂停接班
+ * @param protectionHeldTrains 全网被扣住超过 {@code protectionHeldSeconds} 的车达到这么多列、且阻挡链里有驾驶员列车时触发拥堵保护
+ * @param protectionHeldSeconds 拥堵保护统计的扣车时长下限
+ * @param protectionCooldownMinutes 触发拥堵保护后多少分钟内暂停接班
  * @param atoConfirmSeconds ATO 下停站结束后等驾驶员确认发车的上限，超时自动发车
  * @param atoConfirmAdvanceSeconds ATO 下停站结束前多少秒起可提前确认发车（停站一结束即放行）；0 表示只能在停站结束后确认
  * @param taskWindowMinutes 任务板列出多少分钟内的发车
@@ -28,9 +28,9 @@ public record DriverRecovery(
     int handbackSeconds,
     int rescueSeconds,
     int maxTaskMinutes,
-    int breakerHeldTrains,
-    int breakerHeldSeconds,
-    int breakerCooldownMinutes,
+    int protectionHeldTrains,
+    int protectionHeldSeconds,
+    int protectionCooldownMinutes,
     int atoConfirmSeconds,
     int atoConfirmAdvanceSeconds,
     int taskWindowMinutes,
@@ -74,14 +74,31 @@ public record DriverRecovery(
         handbackAt,
         rescueAt,
         positive(section, "max-task-minutes", d.maxTaskMinutes, sink),
-        positive(section, "breaker-held-trains", d.breakerHeldTrains, sink),
-        positive(section, "breaker-held-seconds", d.breakerHeldSeconds, sink),
-        positive(section, "breaker-cooldown-minutes", d.breakerCooldownMinutes, sink),
+        positive(
+            section,
+            renamed(section, "protection-held-trains", "breaker-held-trains"),
+            d.protectionHeldTrains,
+            sink),
+        positive(
+            section,
+            renamed(section, "protection-held-seconds", "breaker-held-seconds"),
+            d.protectionHeldSeconds,
+            sink),
+        positive(
+            section,
+            renamed(section, "protection-cooldown-minutes", "breaker-cooldown-minutes"),
+            d.protectionCooldownMinutes,
+            sink),
         positive(section, "ato-confirm-seconds", d.atoConfirmSeconds, sink),
         nonNegative(section, "ato-confirm-advance-seconds", d.atoConfirmAdvanceSeconds, sink),
         positive(section, "task-window-minutes", d.taskWindowMinutes, sink),
         congestionWarn,
         congestionAto);
+  }
+
+  /** 新键没写而旧写法的键还在时读旧键。 */
+  private static String renamed(ConfigurationSection section, String key, String legacyKey) {
+    return !section.contains(key) && section.contains(legacyKey) ? legacyKey : key;
   }
 
   private static int nonNegative(

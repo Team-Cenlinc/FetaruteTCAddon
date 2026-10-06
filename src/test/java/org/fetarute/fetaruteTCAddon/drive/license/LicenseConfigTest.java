@@ -25,7 +25,7 @@ class LicenseConfigTest {
     assertEquals("正式驾驶证", driver.name());
     assertEquals(LicenseClass.Exam.TUTORIAL, learner.exam());
     assertEquals(List.of(DrivePermissions.BASE), learner.grants());
-    assertEquals(LicenseClass.Exam.DISPATCH, driver.exam());
+    assertEquals(LicenseClass.Exam.ROAD_TEST, driver.exam());
     assertEquals(List.of("learner"), driver.requires());
     assertEquals(List.of(DrivePermissions.DRIVER), driver.grants());
     assertEquals(1, config.levelOf("learner"));

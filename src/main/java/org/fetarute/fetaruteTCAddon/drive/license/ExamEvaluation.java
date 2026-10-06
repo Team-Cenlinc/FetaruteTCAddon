@@ -39,7 +39,7 @@ public final class ExamEvaluation {
    * @param task 考试任务结束时的快照
    * @param score 成绩；没开过车就结束时为空
    */
-  public static Result dispatch(
+  public static Result roadTest(
       LicenseClass license, DriveApi.TaskView task, Optional<DriveApi.TaskScore> score) {
     if (score.isEmpty()) {
       return new Result(Verdict.VOID, "not-started", Map.of());
@@ -62,8 +62,8 @@ public final class ExamEvaluation {
     }
     for (DriveApi.StopResult stop : result.stops()) {
       if (!license.allowOverrun()
-          && (stop.window() == DriveApi.StopWindow.OVERRUN
-              || stop.window() == DriveApi.StopWindow.SKIPPED)) {
+          && (stop.outcome() == DriveApi.StopOutcome.OVERRUN
+              || stop.outcome() == DriveApi.StopOutcome.SKIPPED)) {
         return new Result(Verdict.FAILED, "overrun", Map.of("station", stop.station()));
       }
       if (!license.allowWrongDoor() && stop.wrongDoor()) {

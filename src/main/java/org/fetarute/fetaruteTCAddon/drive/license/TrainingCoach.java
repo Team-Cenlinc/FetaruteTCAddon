@@ -223,7 +223,7 @@ final class TrainingCoach {
       run.lastStop = null;
       run.lastPhase = null;
     }
-    boolean pending = link.signalConfirm().pending();
+    boolean pending = link.signalAcknowledge().pending();
     if (pending && !run.signalPending) {
       tell(player, "drive.license.coach.signal", Map.of());
     }

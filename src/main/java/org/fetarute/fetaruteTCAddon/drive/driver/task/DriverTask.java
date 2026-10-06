@@ -38,7 +38,7 @@ public final class DriverTask {
     EXPIRED,
     /** 卡住太久或超过任务时限，被收回。 */
     FAILED,
-    /** 调度、管理员或熔断收回，不怪驾驶员。 */
+    /** 调度、管理员或拥堵保护收回，不怪驾驶员。 */
     INTERRUPTED;
 
     /** 是否已结束。 */
@@ -54,8 +54,8 @@ public final class DriverTask {
   private final String operatorCode;
   private final String stationCode;
   private final String stationName;
-  private final String boardNodeId;
-  private final int boardStopSequence;
+  private final String takeoverNodeId;
+  private final int takeoverStopSequence;
   private final Instant plannedDeparture;
   private final Instant claimedAt;
   private DrivingMode mode;
@@ -63,9 +63,9 @@ public final class DriverTask {
   private final UUID taskId = UUID.randomUUID();
   private String trainName;
   private boolean depotPickup;
-  private int alightStopSequence = -1;
-  private String alightStationCode = "";
-  private String alightStationName = "";
+  private int handoverStopSequence = -1;
+  private String handoverStationCode = "";
+  private String handoverStationName = "";
   private String source = SOURCE_BOARD;
   private Map<String, String> metadata = Map.of();
   private boolean finishAnnounced;
@@ -83,8 +83,8 @@ public final class DriverTask {
       String operatorCode,
       String stationCode,
       String stationName,
-      String boardNodeId,
-      int boardStopSequence,
+      String takeoverNodeId,
+      int takeoverStopSequence,
       Instant plannedDeparture,
       DrivingMode mode,
       Instant claimedAt) {
@@ -96,8 +96,8 @@ public final class DriverTask {
     this.stationCode = stationCode == null ? "" : stationCode;
     this.stationName =
         stationName == null || stationName.isBlank() ? this.stationCode : stationName;
-    this.boardNodeId = boardNodeId;
-    this.boardStopSequence = boardStopSequence;
+    this.takeoverNodeId = takeoverNodeId;
+    this.takeoverStopSequence = takeoverStopSequence;
     this.plannedDeparture = Objects.requireNonNull(plannedDeparture, "plannedDeparture");
     this.mode = Objects.requireNonNull(mode, "mode");
     this.claimedAt = Objects.requireNonNull(claimedAt, "claimedAt");
@@ -132,13 +132,13 @@ public final class DriverTask {
   }
 
   /** 接班站台的节点；没有时为 {@code null}。 */
-  public String boardNodeId() {
-    return boardNodeId;
+  public String takeoverNodeId() {
+    return takeoverNodeId;
   }
 
   /** 接班站在交路里的停靠序号。 */
-  public int boardStopSequence() {
-    return boardStopSequence;
+  public int takeoverStopSequence() {
+    return takeoverStopSequence;
   }
 
   public Instant plannedDeparture() {
@@ -175,25 +175,25 @@ public final class DriverTask {
     return taskId;
   }
 
-  /** 下车站的停靠序号；开到终点站的任务为 -1。 */
-  public int alightStopSequence() {
-    return alightStopSequence;
+  /** 交班站的停靠序号；开到终点站的任务为 -1。 */
+  public int handoverStopSequence() {
+    return handoverStopSequence;
   }
 
-  public String alightStationCode() {
-    return alightStationCode;
+  public String handoverStationCode() {
+    return handoverStationCode;
   }
 
-  public String alightStationName() {
-    return alightStationName;
+  public String handoverStationName() {
+    return handoverStationName;
   }
 
   /** 开到这一站就结束（区间任务）。 */
-  public void setAlight(int stopSequence, String stationCode, String stationName) {
-    this.alightStopSequence = stopSequence;
-    this.alightStationCode = stationCode == null ? "" : stationCode;
-    this.alightStationName =
-        stationName == null || stationName.isBlank() ? this.alightStationCode : stationName;
+  public void setHandover(int stopSequence, String stationCode, String stationName) {
+    this.handoverStopSequence = stopSequence;
+    this.handoverStationCode = stationCode == null ? "" : stationCode;
+    this.handoverStationName =
+        stationName == null || stationName.isBlank() ? this.handoverStationCode : stationName;
   }
 
   /** 来源：任务板为 {@link #SOURCE_BOARD}，插件派出的为调用方给的标记。 */

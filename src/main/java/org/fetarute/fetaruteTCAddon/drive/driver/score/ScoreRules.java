@@ -47,7 +47,7 @@ public final class ScoreRules {
     int penalty = 0;
     for (StopScore stop : score.stops()) {
       penalty +=
-          switch (stop.window()) {
+          switch (stop.outcome()) {
             case ACCURATE -> 0;
             case ACCEPTED -> 2;
             case OVERRUN, SHORT -> 5;

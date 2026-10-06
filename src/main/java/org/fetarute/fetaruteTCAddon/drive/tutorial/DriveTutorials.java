@@ -95,7 +95,7 @@ public final class DriveTutorials {
       tipKeys.put(
           tip,
           new NamespacedKey(
-              plugin, "drive_tip_" + tip.key().replace('-', '_').toLowerCase(Locale.ROOT)));
+              plugin, "drive_tip_" + tip.storageKey().replace('-', '_').toLowerCase(Locale.ROOT)));
     }
   }
 

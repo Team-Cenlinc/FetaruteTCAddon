@@ -52,7 +52,7 @@ public final class DriverLink {
   private Instant approachSampledAt;
 
   private DriverStationStop lastStop;
-  private final SignalConfirm signalConfirm = new SignalConfirm();
+  private final SignalAcknowledge signalAcknowledge = new SignalAcknowledge();
   private TaskScore score = new TaskScore();
 
   /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
@@ -148,7 +148,7 @@ public final class DriverLink {
     mode = DrivingMode.MANUAL;
     directive = null;
     lastDecision = null;
-    signalConfirm.reset();
+    signalAcknowledge.reset();
     clearDepartureHold();
     departureArmOdometer = Double.NaN;
     preConfirmOdometer = Double.NaN;
@@ -161,7 +161,7 @@ public final class DriverLink {
   public void enterAto() {
     mode = DrivingMode.ATO;
     lastDecision = null;
-    signalConfirm.reset();
+    signalAcknowledge.reset();
   }
 
   /** 驾驶员是否物理控车（ATO 下由自动运行代为操纵）。 */
@@ -435,8 +435,8 @@ public final class DriverLink {
   }
 
   /** 信号确认。 */
-  public SignalConfirm signalConfirm() {
-    return signalConfirm;
+  public SignalAcknowledge signalAcknowledge() {
+    return signalAcknowledge;
   }
 
   /** 本次驾驶的成绩明细（各站停站随停站结束记入）。 */
@@ -453,7 +453,7 @@ public final class DriverLink {
   public TaskScore finalizeScore() {
     stationStop();
     if (stationStop != null && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
-      // 停在站内就结束驾驶（到终点站、到下车站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
+      // 停在站内就结束驾驶（到终点站、到交班站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
       lastStop = stationStop;
       if (stationStop != settledStop) {
         score.addStop(StopScore.of(stationStop));
@@ -464,9 +464,9 @@ public final class DriverLink {
         serviceInterventions,
         emergencyInterventions,
         forcedStops,
-        signalConfirm.confirmations(),
-        signalConfirm.misses(),
-        signalConfirm.averageReactionSeconds(),
+        signalAcknowledge.acknowledgements(),
+        signalAcknowledge.misses(),
+        signalAcknowledge.averageReactionSeconds(),
         vigilanceTrips,
         lateDepartures);
     return score;
@@ -490,9 +490,9 @@ public final class DriverLink {
         serviceInterventions,
         emergencyInterventions,
         forcedStops,
-        signalConfirm.confirmations(),
-        signalConfirm.misses(),
-        signalConfirm.averageReactionSeconds(),
+        signalAcknowledge.acknowledgements(),
+        signalAcknowledge.misses(),
+        signalAcknowledge.averageReactionSeconds(),
         vigilanceTrips,
         lateDepartures);
     TaskScore settled = score;
@@ -502,7 +502,7 @@ public final class DriverLink {
     forcedStops = 0;
     vigilanceTrips = 0;
     lateDepartures = 0;
-    signalConfirm.resetCounts();
+    signalAcknowledge.resetCounts();
     announcedStops = 0;
     return settled;
   }
@@ -527,9 +527,9 @@ public final class DriverLink {
         serviceInterventions,
         emergencyInterventions,
         forcedStops,
-        signalConfirm.confirmations(),
-        signalConfirm.misses(),
-        signalConfirm.averageReactionSeconds(),
+        signalAcknowledge.acknowledgements(),
+        signalAcknowledge.misses(),
+        signalAcknowledge.averageReactionSeconds(),
         vigilanceTrips,
         lateDepartures);
     live.setDelayAtStart(score.delayAtStartSeconds());

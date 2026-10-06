@@ -14,7 +14,7 @@ import org.fetarute.fetaruteTCAddon.utils.ConfigUpdater;
 import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
- * 手动驾驶的独立配置文件 {@code drive.yml}。
+ * 驾驶功能的独立配置文件 {@code drive.yml}。
  *
  * <p>文件不存在时由内置模板创建；已存在时把模板里新增的键补进去（保留用户已改的值和注释），再解析成 {@link DriveConfig}。 与主配置 {@code config.yml}
  * 互不影响。
@@ -24,8 +24,8 @@ public final class DriveConfigFile {
   /** 配置文件名。 */
   public static final String FILE_NAME = "drive.yml";
 
-  /** 驾驶证等级改名前的原件备份。 */
-  static final String LICENSE_MIGRATION_BACKUP = FILE_NAME + ".license-ids.bak";
+  /** 旧写法改名前的原件备份。 */
+  static final String MIGRATION_BACKUP = FILE_NAME + ".before-rename.bak";
 
   private DriveConfigFile() {}
 
@@ -39,37 +39,48 @@ public final class DriveConfigFile {
   public static DriveConfig load(
       File dataFolder, Supplier<InputStream> template, LoggerManager logger) {
     File file = new File(dataFolder, FILE_NAME);
-    // 驾驶证等级改名要在补全新键之前做：否则补全按模板加上新的两级，与旧键并存。
-    migrateLicenseClassIds(file, logger);
+    // 改名要在补全新键之前做：否则补全按模板加上新键，与旧键并存。
+    migrateRenamed(file, logger);
     new ConfigUpdater(file, template, logger).update();
     YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
     return DriveConfig.from(yaml, logger::warn);
   }
 
   /**
-   * 把旧的驾驶证等级 ID 与名称改成新的（见 {@link LicenseClassIdMigration}）；改动前先备份为 {@value
-   * #LICENSE_MIGRATION_BACKUP}。
+   * 把旧写法改成新的：驾驶证等级 ID、名称与考试方式（见 {@link LicenseClassIdMigration}），以及改过名的键（见 {@link
+   * DriveConfigKeyRenames}）；改动前先备份为 {@value #MIGRATION_BACKUP}。
    *
    * <p>备份另起文件名：随后补全新键时 {@code ConfigUpdater} 会把文件另存为 {@code drive.yml.bak}，同名就会把迁移前的原件盖掉。
    */
-  private static void migrateLicenseClassIds(File file, LoggerManager logger) {
+  private static void migrateRenamed(File file, LoggerManager logger) {
     if (!file.isFile()) {
       return;
     }
     try {
       List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
-      List<String> migrated = LicenseClassIdMigration.migrate(lines);
+      List<String> licenses = LicenseClassIdMigration.migrate(lines);
+      List<String> migrated = DriveConfigKeyRenames.migrate(licenses);
       if (migrated.equals(lines)) {
         return;
       }
       Files.copy(
           file.toPath(),
-          file.toPath().resolveSibling(LICENSE_MIGRATION_BACKUP),
+          file.toPath().resolveSibling(MIGRATION_BACKUP),
           StandardCopyOption.REPLACE_EXISTING);
       Files.write(file.toPath(), migrated, StandardCharsets.UTF_8);
-      logger.info("drive.yml：驾驶证等级 free、dispatch 已改名为 learner（见习驾驶证）、driver（正式驾驶证）");
+      if (!licenses.equals(lines)) {
+        logger.info(
+            "drive.yml：驾驶证等级 free、dispatch 已改名为 learner（见习驾驶证）、driver（正式驾驶证），"
+                + "考试方式 dispatch 已改写为 road-test");
+      }
+      if (!migrated.equals(licenses)) {
+        logger.info(
+            "drive.yml：driver.breaker-* 已改名为 protection-*，sounds.signal-confirmed 已改名为"
+                + " signal-acknowledged");
+      }
+      logger.info("drive.yml 改名前的原件已另存为 " + MIGRATION_BACKUP);
     } catch (IOException ex) {
-      logger.warn("迁移 drive.yml 的驾驶证等级失败: " + ex.getMessage());
+      logger.warn("迁移 drive.yml 的旧写法失败: " + ex.getMessage());
     }
   }
 }

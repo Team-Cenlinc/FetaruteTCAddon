@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.drive.sound;
 
+import java.util.Optional;
+
 /**
  * 驾驶员听到的提示音。每种提示音在 {@code drive.yml} 的 {@code sounds} 段有同名的键，可改音效、音量与音高，音效留空即关闭。
  *
@@ -9,7 +11,8 @@ public enum DriveCue {
   /** 信号变严，等驾驶员右键确认：每秒响一次，直到确认。 */
   SIGNAL_RESTRICTIVE("signal-restrictive", "minecraft:block.note_block.bit", 1.0f, 0.7f),
   /** 信号已确认。 */
-  SIGNAL_CONFIRMED("signal-confirmed", "minecraft:ui.button.click", 0.6f, 1.2f),
+  SIGNAL_ACKNOWLEDGED(
+      "signal-acknowledged", "signal-confirmed", "minecraft:ui.button.click", 0.6f, 1.2f),
   /** 信号转宽。 */
   SIGNAL_CLEAR("signal-clear", "minecraft:block.note_block.bell", 0.8f, 1.2f),
   /** 防护开始常用制动（ATP 制动）。 */
@@ -56,12 +59,23 @@ public enum DriveCue {
   HORN_CHORD("horn-chord", "minecraft:block.note_block.flute", 4.0f, 0.595f);
 
   private final String configKey;
+  private final String legacyConfigKey;
   private final String defaultSound;
   private final float defaultVolume;
   private final float defaultPitch;
 
   DriveCue(String configKey, String defaultSound, float defaultVolume, float defaultPitch) {
+    this(configKey, null, defaultSound, defaultVolume, defaultPitch);
+  }
+
+  DriveCue(
+      String configKey,
+      String legacyConfigKey,
+      String defaultSound,
+      float defaultVolume,
+      float defaultPitch) {
     this.configKey = configKey;
+    this.legacyConfigKey = legacyConfigKey;
     this.defaultSound = defaultSound;
     this.defaultVolume = defaultVolume;
     this.defaultPitch = defaultPitch;
@@ -70,6 +84,11 @@ public enum DriveCue {
   /** {@code sounds} 段里的键。 */
   public String configKey() {
     return configKey;
+  }
+
+  /** 改名前的配置键：新键没写而旧键还在时读旧键；没改过名时为空。 */
+  public Optional<String> legacyConfigKey() {
+    return Optional.ofNullable(legacyConfigKey);
   }
 
   /** 内置默认音效。 */

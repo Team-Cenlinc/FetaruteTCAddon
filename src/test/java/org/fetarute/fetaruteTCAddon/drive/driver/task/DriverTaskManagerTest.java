@@ -46,7 +46,7 @@ class DriverTaskManagerTest {
   }
 
   @Test
-  @DisplayName("一人一个任务、一个车次一名驾驶员；总开关与熔断挡住领取")
+  @DisplayName("一人一个任务、一个车次一名驾驶员；总开关与拥堵保护挡住领取")
   void claimRules() {
     Player a = player("a");
     Player b = player("b");
@@ -180,7 +180,7 @@ class DriverTaskManagerTest {
         java.util.OptionalLong.empty());
   }
 
-  private static DriverTaskManager.TaskSpec spec(String trip, int alight) {
+  private static DriverTaskManager.TaskSpec spec(String trip, int handover) {
     return new DriverTaskManager.TaskSpec(
         new TaskKey(TT, trip, LocalDate.of(2026, 10, 3)),
         "R1",
@@ -191,16 +191,16 @@ class DriverTaskManagerTest {
         1,
         NOW.plusSeconds(3600),
         null,
-        alight,
-        alight >= 0 ? "CCC" : "",
-        alight >= 0 ? "C 站" : "",
+        handover,
+        handover >= 0 ? "CCC" : "",
+        handover >= 0 ? "C 站" : "",
         true,
         "typewriter",
         java.util.Map.of("quest", "q1"));
   }
 
   @Test
-  @DisplayName("插件派任务：带下车站、来源与附加数据；与任务板同一套占用规则")
+  @DisplayName("插件派任务：带交班站、来源与附加数据；与任务板同一套占用规则")
   void assignCarriesIntervalAndSource() {
     Player a = player("a");
     Player b = player("b");
@@ -209,8 +209,8 @@ class DriverTaskManagerTest {
         DriverTaskManager.ClaimOutcome.CLAIMED,
         tasks.assign(a, spec("R1-010", 4), DrivingMode.MANUAL, true, NOW));
     DriverTask task = tasks.taskOf(a.getUniqueId()).orElseThrow();
-    assertEquals(4, task.alightStopSequence());
-    assertEquals("C 站", task.alightStationName());
+    assertEquals(4, task.handoverStopSequence());
+    assertEquals("C 站", task.handoverStationName());
     assertEquals("typewriter", task.source());
     assertEquals(java.util.Map.of("quest", "q1"), task.metadata());
     assertTrue(task.depotPickup());

@@ -169,8 +169,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     NOT_STOPPED_AT_STATION,
     /** 调度列车：只能坐在车头驾驶室接管。 */
     NOT_HEAD_CAB,
-    /** 调度列车：线路拥堵熔断，暂停接班。 */
-    BREAKER_OPEN,
+    /** 调度列车：拥堵保护中，暂停接班。 */
+    PROTECTION_ACTIVE,
     /** 非调度列车：没有驾驶非调度列车的权限。 */
     NO_PERMISSION,
     /** 被外部插件拦下（{@code DriveSessionStartEvent} 取消）。 */
@@ -191,8 +191,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 终点站接车留出的余量（秒）：票据到 assign-tolerance 作废之前先放行。 */
   private static final long PICKUP_TOLERANCE_MARGIN_SECONDS = 30L;
 
-  /** 每隔多少 tick 评估一次全网熔断。 */
-  private static final int BREAKER_TICKS = 100;
+  /** 每隔多少 tick 评估一次拥堵保护。 */
+  private static final int PROTECTION_TICKS = 100;
 
   /** 一直被扣住这么久就交还自动运行（表定停站、按表扣车一般远短于它）。 */
   private static final long HELD_HANDBACK_SECONDS = 600L;
@@ -346,7 +346,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     levels.choose(player, level);
     TaskBoard.showLevel(holder, plugin.getLocaleManager(), level);
-    sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
+    sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
   }
 
   /** 开始新手教程：驾驶中立即开始，否则下一次开始驾驶时开始。返回给玩家的提示语言键，已直接给出第一步时为 {@code null}。 */
@@ -570,17 +570,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     if (session.isAto() && session.driverLink().confirmDeparture()) {
                       traceSession(session, "ATO 确认发车");
                       notice(player, "drive.driver.ato.confirmed", Map.of());
-                      sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
+                      sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
                     } else if (session.driverLink() != null
                         && !session.isAto()
                         && session
                             .driverLink()
-                            .signalConfirm()
+                            .signalAcknowledge()
                             .acknowledge(Bukkit.getCurrentTick())
                             .isPresent()) {
                       traceSession(session, "确认信号");
-                      notice(player, "drive.driver.signal.confirmed", Map.of());
-                      sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
+                      notice(player, "drive.driver.signal.acknowledged", Map.of());
+                      sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
                     }
                   }
                 });
@@ -791,14 +791,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     plugin
                         .getLocaleManager()
                         .component(
-                            task.alightStopSequence() >= 0
+                            task.handoverStopSequence() >= 0
                                 ? "drive.task.started-interval"
                                 : "drive.task.started",
                             Map.of(
                                 "trip",
                                 task.key().tripCode(),
                                 "station",
-                                task.alightStationName(),
+                                task.handoverStationName(),
                                 "mode",
                                 plugin
                                     .getLocaleManager()
@@ -1245,7 +1245,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 new TaskCard.TaskSummary(
                     task.routeCode(),
                     task.key().tripCode(),
-                    task.alightStopSequence() >= 0 ? task.alightStationName() : ""));
+                    task.handoverStopSequence() >= 0 ? task.handoverStationName() : ""));
   }
 
   private void setReverser(Player player, DriveSession session, ReverserPosition position) {
@@ -1532,7 +1532,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               switch (event) {
                 case LOW -> sounds.play(player, DriveCue.FAULT);
                 case DEPLETED -> sounds.play(player, DriveCue.BREAKER_TRIP);
-                case CHARGED -> sounds.play(player, DriveCue.SIGNAL_CONFIRMED);
+                case CHARGED -> sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
               }
               notice(
                   player,
@@ -1879,8 +1879,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return StartOutcome.MANAGED_TRAIN;
     }
     if (!player.hasPermission(PERMISSION_DRIVER_ADMIN)) {
-      if (tasks.breaker().open(Instant.now())) {
-        return StartOutcome.BREAKER_OPEN;
+      if (tasks.congestionProtection().open(Instant.now())) {
+        return StartOutcome.PROTECTION_ACTIVE;
       }
       if (!player.hasPermission(PERMISSION_DRIVER)
           || tasks.claimFor(player.getUniqueId(), group.getProperties().getTrainName()).isEmpty()) {
@@ -2368,7 +2368,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (offerContinuation(session, link, task.get(), trainName)) {
         return false;
       }
-      if (takeovers.contains(session.playerId()) && task.get().alightStopSequence() < 0) {
+      if (takeovers.contains(session.playerId()) && task.get().handoverStopSequence() < 0) {
         // 运营人员直接接管：没有接续车次也接着开（例如开到回库），像以前一样，直到收车或自己结束。
         continuations.put(session.playerId(), new Continuation(task.get().key(), true));
         return false;
@@ -2589,7 +2589,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private boolean offerContinuation(
       DriveSession session, DriverLink link, DriverTask task, String trainName) {
     Player player = Bukkit.getPlayer(session.playerId());
-    if (task.alightStopSequence() >= 0 || player == null || !player.isOnline()) {
+    if (task.handoverStopSequence() >= 0 || player == null || !player.isOnline()) {
       return false;
     }
     Optional<TimetableService.DueTrip> due = reserveNextTrip(session, player, trainName);
@@ -2732,9 +2732,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return new TaskKey(trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate());
   }
 
-  /** 把列车跑的车次从停靠序号 {@code boardSequence} 起记成这名驾驶员驾驶中的任务。 */
+  /** 把列车跑的车次从停靠序号 {@code takeoverSequence} 起记成这名驾驶员驾驶中的任务。 */
   private DriverTaskManager.ClaimOutcome adoptTrip(
-      DriveSession session, String trainName, TaskKey key, int boardSequence, String source) {
+      DriveSession session, String trainName, TaskKey key, int takeoverSequence, String source) {
     Player player = Bukkit.getPlayer(session.playerId());
     Optional<DriverTaskManager.TaskSpec> spec =
         plugin
@@ -2742,7 +2742,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             .flatMap(
                 service ->
                     TaskBoardSource.tripSpec(
-                        plugin, service, key, boardSequence, trainName, source));
+                        plugin, service, key, takeoverSequence, trainName, source));
     if (player == null || spec.isEmpty()) {
       return DriverTaskManager.ClaimOutcome.UNAVAILABLE;
     }
@@ -2764,7 +2764,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     };
   }
 
-  /** 推进驾驶任务：已领取的车次到站时接管，交还后的救援，全网熔断。 */
+  /** 推进驾驶任务：已领取的车次到站时接管，交还后的救援，拥堵保护。 */
   private void tickTasks(long now) {
     DriveConfig current = config;
     if (tickCounter % TASK_TICKS == 0) {
@@ -2773,27 +2773,28 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       tasks.tickClaims(this::tryStartTask, this::sendTaskHint, Instant.now());
       tasks.tickRescues(now, this::sendTaskChat);
     }
-    if (tickCounter % BREAKER_TICKS == 0 && !driverRegistry.isEmpty()) {
+    if (tickCounter % PROTECTION_TICKS == 0 && !driverRegistry.isEmpty()) {
       Set<String> drivers = new HashSet<>();
       for (DriverLink link : driverRegistry.links()) {
         drivers.add(link.currentTrainName());
       }
-      boolean tripped = tasks.tickBreaker(drivers, current.driver().recovery(), Instant.now());
+      boolean tripped =
+          tasks.tickCongestionProtection(drivers, current.driver().recovery(), Instant.now());
       superviseCongestion(current.driver().recovery());
       if (tripped) {
-        int count = handbackAll("breaker");
+        int count = handbackAll("congestion-protection");
         for (Player online : Bukkit.getOnlinePlayers()) {
           if (online.hasPermission("fetarute.drive.admin")) {
             online.sendMessage(
                 plugin
                     .getLocaleManager()
                     .component(
-                        "drive.driver.breaker.tripped",
+                        "drive.driver.protection.tripped",
                         Map.of(
                             "count",
                             String.valueOf(count),
                             "reason",
-                            tasks.breaker().lastReason())));
+                            tasks.congestionProtection().lastReason())));
           }
         }
       }
@@ -3000,7 +3001,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     DriveConfig current = config;
     // 驾驶员不在线就不等：留着车只会让这一班白白晚点。
     if (claimed.state() != DriverTask.State.CLAIMED
-        || claimed.boardStopSequence() != 0
+        || claimed.takeoverStopSequence() != 0
         || !pickupOpen(current)
         || !online(claimed.playerId())) {
       return true;
@@ -3256,7 +3257,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     long advance = current.driver().pickupAdvanceSeconds();
     for (DriverTask task : tasks.activeTasks()) {
       if (task.state() != DriverTask.State.CLAIMED
-          || task.boardStopSequence() != 0
+          || task.takeoverStopSequence() != 0
           || pickups.ofPlayer(task.playerId()).isPresent()) {
         continue;
       }
@@ -3368,7 +3369,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (pickup.kind() == DriverPickups.Kind.DEPOT) {
       releasePickup(pickup);
       // 出库走行接的是终点站发出的首班：改为在终点站接车。
-      if (task.filter(active -> active.boardStopSequence() == 0).isPresent()) {
+      if (task.filter(active -> active.takeoverStopSequence() == 0).isPresent()) {
         pickups.remove(pickup.playerId());
       }
       if (player != null && player.isOnline()) {
@@ -3433,7 +3434,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               boolean viaTerminal =
                   tasks
                       .activeTaskOf(session.playerId())
-                      .filter(task -> task.boardStopSequence() == 0)
+                      .filter(task -> task.takeoverStopSequence() == 0)
                       .isPresent();
               if (!viaTerminal) {
                 pickups.remove(session.playerId());
@@ -3518,9 +3519,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         return key;
       }
     }
-    Optional<org.bukkit.Location> configured = tasks.boardStationConfigured(task);
+    Optional<org.bukkit.Location> configured = tasks.takeoverStationConfigured(task);
     if (configured.isPresent()) {
-      sendToBoardStation(player, task, configured.get());
+      sendToTakeoverStation(player, task, configured.get());
       return "drive.task.goto.station";
     }
     // 站台区块多半没加载：后台加载完再找落脚处，到了再告诉玩家。
@@ -3537,13 +3538,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 plugin.getLocaleManager().component("drive.task.goto.station-missing"));
             return;
           }
-          sendToBoardStation(online, task, spot.get());
+          sendToTakeoverStation(online, task, spot.get());
           online.sendMessage(plugin.getLocaleManager().component("drive.task.goto.station"));
         });
     return "drive.task.goto.station-pending";
   }
 
-  private void sendToBoardStation(Player player, DriverTask task, org.bukkit.Location target) {
+  private void sendToTakeoverStation(Player player, DriverTask task, org.bukkit.Location target) {
     if (player.isInsideVehicle()) {
       player.leaveVehicle();
     }
@@ -3894,7 +3895,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       Supplier<Optional<Instant>> nextTrip,
       Optional<DriverTask> task,
       Optional<DriverSchedule> schedule) {
-    Optional<DriverTask> boarding = task.filter(t -> t.boardStopSequence() == 0);
+    Optional<DriverTask> boarding = task.filter(t -> t.takeoverStopSequence() == 0);
     if (layover) {
       return nextTrip
           .get()
@@ -4006,7 +4007,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         plugin
             .getLocaleManager()
             .component(
-                spec.alightStopSequence() >= 0
+                spec.handoverStopSequence() >= 0
                     ? "drive.task.claim.assigned-interval"
                     : "drive.task.claim.assigned",
                 Map.of(
@@ -4016,8 +4017,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     spec.key().tripCode(),
                     "station",
                     spec.stationName(),
+                    "handover",
+                    spec.handoverStationName(),
+                    // 改名前的占位符：服务器上改过的旧文案照常显示。
                     "alight",
-                    spec.alightStationName())));
+                    spec.handoverStationName())));
     if (!spec.depotPickup()) {
       tasks
           .activeTaskOf(player.getUniqueId())
@@ -4304,7 +4308,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             line -> {
               player.sendActionBar(DriverReport.render(plugin.getLocaleManager(), line));
               session.holdActionBar(Bukkit.getCurrentTick() + NOTICE_HOLD_TICKS);
-              sounds.play(player, DriverReport.stopCue(score.window()));
+              sounds.play(player, DriverReport.stopCue(score.outcome()));
             });
   }
 

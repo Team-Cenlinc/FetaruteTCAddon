@@ -20,12 +20,12 @@ class DriverCongestionTest {
   @Test
   @DisplayName("只算被驾驶员列车直接挡住的车，取被扣最久的")
   void longestDirectHold() {
-    Map<String, DriverCircuitBreaker.Hold> holds =
+    Map<String, CongestionProtection.Hold> holds =
         Map.of(
-            "B", new DriverCircuitBreaker.Hold(Duration.ofSeconds(70), Set.of("D")),
-            "C", new DriverCircuitBreaker.Hold(Duration.ofSeconds(200), Set.of("B")),
-            "E", new DriverCircuitBreaker.Hold(Duration.ofSeconds(40), Set.of("D", "X")),
-            "D", new DriverCircuitBreaker.Hold(Duration.ofSeconds(500), Set.of("D")));
+            "B", new CongestionProtection.Hold(Duration.ofSeconds(70), Set.of("D")),
+            "C", new CongestionProtection.Hold(Duration.ofSeconds(200), Set.of("B")),
+            "E", new CongestionProtection.Hold(Duration.ofSeconds(40), Set.of("D", "X")),
+            "D", new CongestionProtection.Hold(Duration.ofSeconds(500), Set.of("D")));
 
     assertEquals(70L, DriverCongestion.blockedBehindSeconds(holds, "D"));
     assertEquals(0L, DriverCongestion.blockedBehindSeconds(holds, "Z"));

@@ -60,9 +60,9 @@ public final class TaskCard {
    *
    * @param routeCode 线路（交路）代码
    * @param tripCode 车次号
-   * @param alightStation 区间任务的下车站；开到终点站时为空串
+   * @param handoverStation 区间任务的交班站；开到终点站时为空串
    */
-  public record TaskSummary(String routeCode, String tripCode, String alightStation) {}
+  public record TaskSummary(String routeCode, String tripCode, String handoverStation) {}
 
   private TaskCard() {}
 
@@ -84,7 +84,7 @@ public final class TaskCard {
     task.ifPresent(
         summary ->
             lines.add(
-                summary.alightStation().isBlank()
+                summary.handoverStation().isBlank()
                     ? new Line(
                         "drive.menu.card.task-terminal",
                         Map.of("route", summary.routeCode(), "trip", summary.tripCode()))
@@ -96,7 +96,7 @@ public final class TaskCard {
                             "trip",
                             summary.tripCode(),
                             "station",
-                            summary.alightStation()))));
+                            summary.handoverStation()))));
     lines.add(
         new Line(
             "drive.menu.card.mode." + (link.mode() == DrivingMode.ATO ? "ato" : "manual"),

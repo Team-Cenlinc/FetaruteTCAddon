@@ -86,17 +86,17 @@ public final class TaskTripSummary {
    * 从本站起的行程概要。
    *
    * @param stops 整趟车次的停靠表
-   * @param boardSequence 本站的停靠序号
+   * @param takeoverSequence 本站的停靠序号
    * @return 停靠表里找不到终点站，或本站就是终点站时为空
    */
-  public static Optional<Summary> of(List<Stop> stops, int boardSequence) {
+  public static Optional<Summary> of(List<Stop> stops, int takeoverSequence) {
     Objects.requireNonNull(stops, "stops");
-    Stop board = null;
+    Stop takeover = null;
     Stop terminus = null;
     int stopCount = 0;
     for (Stop stop : stops) {
-      if (stop.sequence() == boardSequence) {
-        board = stop;
+      if (stop.sequence() == takeoverSequence) {
+        takeover = stop;
       }
       if (!stop.isStation()) {
         continue;
@@ -104,15 +104,15 @@ public final class TaskTripSummary {
       if (terminus == null || stop.sequence() > terminus.sequence()) {
         terminus = stop;
       }
-      if (stop.sequence() > boardSequence) {
+      if (stop.sequence() > takeoverSequence) {
         stopCount++;
       }
     }
-    if (terminus == null || terminus.sequence() <= boardSequence) {
+    if (terminus == null || terminus.sequence() <= takeoverSequence) {
       return Optional.empty();
     }
     long runSeconds = -1L;
-    Optional<Instant> departure = board == null ? Optional.empty() : board.departure();
+    Optional<Instant> departure = takeover == null ? Optional.empty() : takeover.departure();
     Optional<Instant> arrival = terminus.arrival().or(terminus::departure);
     if (departure.isPresent() && arrival.isPresent()) {
       long seconds = Duration.between(departure.get(), arrival.get()).getSeconds();

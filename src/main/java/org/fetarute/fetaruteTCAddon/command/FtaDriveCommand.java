@@ -14,6 +14,8 @@ import java.util.UUID;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
+import net.kyori.adventure.text.minimessage.tag.resolver.Placeholder;
+import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
 import org.bukkit.Bukkit;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
@@ -22,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.DrivePermissions;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabFault;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabFaults;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
+import org.fetarute.fetaruteTCAddon.drive.driver.CongestionProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
@@ -299,15 +302,15 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
-            .literal("breaker")
-            .permission(permissionOf("breaker"))
+            .literal("congestion", "breaker")
+            .permission(permissionOf("congestion"))
             .optional(
                 "action",
                 StringParser.stringParser(),
                 SuggestionProvider.suggestingStrings("status", "reset"))
             .handler(
                 ctx ->
-                    handleBreaker(
+                    handleCongestion(
                         ctx.sender(),
                         ctx.optional("action").map(String.class::cast).orElse("status"))));
 
@@ -554,8 +557,8 @@ public final class FtaDriveCommand {
       return;
     }
     Instant now = Instant.now();
-    if (drive.tasks().breaker().open(now)) {
-      sender.sendMessage(locale.component("drive.task.claim.breaker-open"));
+    if (drive.tasks().congestionProtection().open(now)) {
+      sender.sendMessage(locale.component("drive.task.claim.protection-active"));
       return;
     }
     Optional<TaskBoardSource.Station> station;
@@ -902,22 +905,34 @@ public final class FtaDriveCommand {
             });
   }
 
-  /** 查看或解除全网熔断。 */
-  private void handleBreaker(CommandSender sender, String action) {
+  /** 查看或解除拥堵保护。 */
+  private void handleCongestion(CommandSender sender, String action) {
     DriveSessionManager drive = requireManager(sender);
     if (drive == null) {
       return;
     }
     LocaleManager locale = plugin.getLocaleManager();
+    CongestionProtection protection = drive.tasks().congestionProtection();
     if (action.equalsIgnoreCase("reset")) {
-      drive.tasks().breaker().reset();
-      sender.sendMessage(locale.component("drive.command.breaker.reset"));
+      protection.reset();
+      sender.sendMessage(locale.component("drive.command.congestion.reset"));
       return;
     }
+    Instant now = Instant.now();
+    Component status =
+        protection.open(now)
+            ? locale.component(
+                "drive.command.congestion.state.active",
+                Map.of(
+                    "seconds",
+                    String.valueOf(Duration.between(now, protection.openUntil()).toSeconds()),
+                    "reason",
+                    protection.lastReason()))
+            : locale.component("drive.command.congestion.state.inactive");
     sender.sendMessage(
         locale.component(
-            "drive.command.breaker.status",
-            Map.of("status", drive.tasks().breakerStatus(Instant.now()))));
+            "drive.command.congestion.status",
+            TagResolver.resolver(Placeholder.component("status", status))));
   }
 
   /** 管理员把某名玩家（或全部）驾驶的调度列车交还自动运行：停稳后交还，行驶中先常用制动停车。 */

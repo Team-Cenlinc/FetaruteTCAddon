@@ -64,7 +64,7 @@ public record LicenseConfig(
                 "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行",
                 true,
                 List.of("learner"),
-                LicenseClass.Exam.DISPATCH,
+                LicenseClass.Exam.ROAD_TEST,
                 3,
                 70,
                 false,
@@ -111,10 +111,10 @@ public record LicenseConfig(
         if (entry == null) {
           continue;
         }
-        LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "dispatch"));
+        LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "road-test"));
         if (exam == null) {
           sink.accept(
-              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial 或 dispatch，已跳过这一级");
+              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial 或 road-test，已跳过这一级");
           continue;
         }
         classes.add(
@@ -130,7 +130,7 @@ public record LicenseConfig(
                 entry.getBoolean("allow-emergency", false),
                 entry.getBoolean("allow-overrun", false),
                 entry.getBoolean("allow-wrong-door", false),
-                entry.getInt("training-runs", exam == LicenseClass.Exam.DISPATCH ? 1 : 0),
+                entry.getInt("training-runs", exam == LicenseClass.Exam.ROAD_TEST ? 1 : 0),
                 entry.getStringList("grants")));
       }
     }

@@ -15,7 +15,7 @@ public final class TaskScore {
   private int serviceInterventions;
   private int emergencyInterventions;
   private int forcedStops;
-  private int signalConfirmations;
+  private int signalAcknowledgements;
   private int signalMisses;
   private double signalReactionSeconds;
   private int vigilanceTrips;
@@ -43,7 +43,7 @@ public final class TaskScore {
       int service,
       int emergency,
       int forced,
-      int confirmations,
+      int acknowledgements,
       int misses,
       double reactionSeconds,
       int vigilance,
@@ -51,7 +51,7 @@ public final class TaskScore {
     this.serviceInterventions = service;
     this.emergencyInterventions = emergency;
     this.forcedStops = forced;
-    this.signalConfirmations = confirmations;
+    this.signalAcknowledgements = acknowledgements;
     this.signalMisses = misses;
     this.signalReactionSeconds = reactionSeconds;
     this.vigilanceTrips = vigilance;
@@ -101,8 +101,8 @@ public final class TaskScore {
     return forcedStops;
   }
 
-  public int signalConfirmations() {
-    return signalConfirmations;
+  public int signalAcknowledgements() {
+    return signalAcknowledgements;
   }
 
   public int signalMisses() {

@@ -87,24 +87,26 @@ public record DriveSoundConfig(
     EnumMap<DriveCue, Spec> specs = new EnumMap<>(DriveCue.class);
     for (DriveCue cue : DriveCue.values()) {
       Spec fallback = cue.defaultSpec();
-      ConfigurationSection entry = section.getConfigurationSection(cue.configKey());
+      String key =
+          cue.legacyConfigKey()
+              .filter(legacy -> !section.contains(cue.configKey()) && section.contains(legacy))
+              .orElse(cue.configKey());
+      ConfigurationSection entry = section.getConfigurationSection(key);
       if (entry == null) {
-        if (section.isString(cue.configKey())) {
+        if (section.isString(key)) {
           // 简写：只给音效键。
-          specs.put(
-              cue,
-              new Spec(section.getString(cue.configKey()), fallback.volume(), fallback.pitch()));
+          specs.put(cue, new Spec(section.getString(key), fallback.volume(), fallback.pitch()));
         }
         continue;
       }
       float volume = (float) entry.getDouble("volume", fallback.volume());
       float pitch = (float) entry.getDouble("pitch", fallback.pitch());
       if (!Float.isFinite(volume) || volume < 0.0f) {
-        sink.accept("drive.yml 的 sounds." + cue.configKey() + ".volume 不能为负数，使用默认值");
+        sink.accept("drive.yml 的 sounds." + key + ".volume 不能为负数，使用默认值");
         volume = fallback.volume();
       }
       if (!Float.isFinite(pitch) || pitch < 0.5f || pitch > 2.0f) {
-        sink.accept("drive.yml 的 sounds." + cue.configKey() + ".pitch 须在 0.5–2 之间，使用默认值");
+        sink.accept("drive.yml 的 sounds." + key + ".pitch 须在 0.5–2 之间，使用默认值");
         pitch = fallback.pitch();
       }
       specs.put(cue, new Spec(entry.getString("key", fallback.sound()), volume, pitch));

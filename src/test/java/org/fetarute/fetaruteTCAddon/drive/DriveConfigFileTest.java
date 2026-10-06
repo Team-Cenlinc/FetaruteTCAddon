@@ -41,7 +41,7 @@ class DriveConfigFileTest {
   }
 
   @Test
-  void renamesOldLicenseClassesBeforeFillingInTemplateKeys(@TempDir Path dir) throws IOException {
+  void renamesOldWritingsBeforeFillingInTemplateKeys(@TempDir Path dir) throws IOException {
     Files.writeString(
         dir.resolve(DriveConfigFile.FILE_NAME),
         "config-version: 2\n"
@@ -55,7 +55,12 @@ class DriveConfigFileTest {
             + "      requires:\n"
             + "        - free\n"
             + "      exam: dispatch\n"
-            + "      min-points: 80\n",
+            + "      min-points: 80\n"
+            + "driver:\n"
+            + "  breaker-held-trains: 9\n"
+            + "sounds:\n"
+            + "  signal-confirmed:\n"
+            + "    volume: 0.3\n",
         StandardCharsets.UTF_8);
     String withLicense =
         TEMPLATE
@@ -68,8 +73,13 @@ class DriveConfigFileTest {
             + "      name: \"正式驾驶证\"\n"
             + "      requires:\n"
             + "        - learner\n"
-            + "      exam: dispatch\n"
-            + "      min-points: 70\n";
+            + "      exam: road-test\n"
+            + "      min-points: 70\n"
+            + "driver:\n"
+            + "  protection-held-trains: 5\n"
+            + "sounds:\n"
+            + "  signal-acknowledged:\n"
+            + "    volume: 0.6\n";
 
     DriveConfig config =
         DriveConfigFile.load(
@@ -85,9 +95,26 @@ class DriveConfigFileTest {
         "旧的两级改名后不与模板的新键并存");
     assertEquals(80, config.license().find("driver").orElseThrow().minPoints(), "改过的值保留");
     assertEquals("正式驾驶证", config.license().find("driver").orElseThrow().name());
+    assertEquals(
+        org.fetarute.fetaruteTCAddon.drive.license.LicenseClass.Exam.ROAD_TEST,
+        config.license().find("driver").orElseThrow().exam());
+    assertEquals(9, config.driver().recovery().protectionHeldTrains(), "改名的键沿用旧键上改过的值");
+    assertEquals(
+        0.3f,
+        config
+            .sounds()
+            .spec(org.fetarute.fetaruteTCAddon.drive.sound.DriveCue.SIGNAL_ACKNOWLEDGED)
+            .orElseThrow()
+            .volume());
+    String migrated =
+        Files.readString(dir.resolve(DriveConfigFile.FILE_NAME), StandardCharsets.UTF_8);
+    assertTrue(migrated.contains("exam: road-test") && !migrated.contains("exam: dispatch"));
+    assertTrue(
+        migrated.contains("protection-held-trains: 9") && !migrated.contains("breaker-held"),
+        "旧键改名，不与补全的新键并存");
+    assertTrue(migrated.contains("signal-acknowledged:") && !migrated.contains("signal-confirmed"));
     String backup =
-        Files.readString(
-            dir.resolve(DriveConfigFile.LICENSE_MIGRATION_BACKUP), StandardCharsets.UTF_8);
+        Files.readString(dir.resolve(DriveConfigFile.MIGRATION_BACKUP), StandardCharsets.UTF_8);
     assertTrue(backup.contains("    free:"), "迁移前的原件单独备份，不被补全新键时的备份盖掉");
   }
 

@@ -662,7 +662,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         if (stop != null) {
           stop.updateOffset(
               StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint(), stop.reference()));
-          if (stop.window().classify(stop.offsetBlocks()) == StopAlignment.Window.SKIPPED) {
+          if (stop.window().classify(stop.offsetBlocks()) == StopAlignment.Outcome.SKIPPED) {
             // 越过停车点太多：越站，本站不停，列车继续开。
             cancel();
             skipStation(info, definition, trainName, group, stop);
@@ -674,7 +674,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           // 驾驶员停得太靠前时等他前移，不当作停妥。
           boolean aligned =
               stop == null
-                  || stop.window().classify(stop.offsetBlocks()) != StopAlignment.Window.SHORT;
+                  || stop.window().classify(stop.offsetBlocks()) != StopAlignment.Outcome.SHORT;
           if (stoppedTicks >= STOP_STABLE_TICKS && aligned) {
             cancel();
             handleStop(

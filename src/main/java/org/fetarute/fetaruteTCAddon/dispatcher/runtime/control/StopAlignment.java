@@ -22,8 +22,8 @@ public final class StopAlignment {
     HEAD
   }
 
-  /** 停车窗口。 */
-  public enum Window {
+  /** 停车结果：偏移落在停车窗口的哪一段。 */
+  public enum Outcome {
     /** 停准。 */
     ACCURATE,
     /** 可开门。 */
