@@ -484,6 +484,7 @@ public final class FtaPidsCommand {
           case PRIMARY -> "command.pids.set.page-is-primary";
           case PRIMARY_NOT_COMBINABLE -> "command.pids.set.page-primary-not-combinable";
           case NOT_COMBINABLE -> "command.pids.set.page-not-combinable";
+          case NEED_STATION -> "command.pids.set.page-need-station";
         };
     if (key != null) {
       sender.sendMessage(

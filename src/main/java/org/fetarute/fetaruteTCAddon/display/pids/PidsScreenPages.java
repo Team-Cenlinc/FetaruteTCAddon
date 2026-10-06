@@ -17,6 +17,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
  * <ul>
  *   <li>能组合的只有不按站台轮播的布局（没有站台号组件：车站统屏、线路运行状况屏）；站台屏、多站台屏与停站屏有自己的轮播，只能单独用。
  *   <li>翻页布局须与屏幕同尺寸。显示时跳过不存在、尺寸不符或不能组合的（布局文件改过、删过）；主布局不能组合时只显示主布局。
+ *   <li>到发要绑车站：没绑车站（只绑运营商或都没绑）的屏幕不能加入到发页，已存着的显示时跳过。
  *   <li>每一轮各布局依次显示一次，停留时间按布局种类取（{@link PidsSettings.PageSettings}）。线路运行状况分几页时每轮只放其中一页、
  *       各页按轮轮换，线路再多一轮的长度也不变，到发始终占同样的比例。
  *   <li>按时钟取当前布局：同一车站的屏幕同时翻页，不同车站按站名错开，免得全服同一秒整屏重发。
@@ -32,7 +33,7 @@ public final class PidsScreenPages {
   }
 
   /**
-   * 屏幕实际轮流显示的布局：主布局在前（不存在或尺寸不符时退回同尺寸的内置布局），其后是有效的翻页布局，按屏幕记录的顺序、不重复。
+   * 屏幕实际轮流显示的布局：主布局在前（不存在或尺寸不符时退回同尺寸的内置布局），其后是有效的翻页布局，按屏幕记录的顺序、不重复； 没绑车站时翻页里的到发页不算。
    *
    * @return 连主布局都没有（没有同尺寸的内置布局）时为空
    */
@@ -49,6 +50,7 @@ public final class PidsScreenPages {
         layouts
             .find(id)
             .filter(layout -> fits(screen, layout) && combinable(layout))
+            .filter(layout -> showable(screen, layout))
             .ifPresent(layout -> pages.putIfAbsent(layout.id(), layout));
       }
     }
@@ -88,7 +90,9 @@ public final class PidsScreenPages {
     /** 主布局有自己的轮播（站台屏、多站台屏、停站屏），这块屏幕不能组合翻页。 */
     PRIMARY_NOT_COMBINABLE,
     /** 点的布局有自己的轮播，不能加入组合翻页。 */
-    NOT_COMBINABLE
+    NOT_COMBINABLE,
+    /** 点的是到发布局，而屏幕没绑车站。 */
+    NEED_STATION
   }
 
   /**
@@ -132,13 +136,16 @@ public final class PidsScreenPages {
     if (!combinable(layout.get())) {
       return new Edit(Outcome.NOT_COMBINABLE, current);
     }
+    if (!showable(screen, layout.get())) {
+      return new Edit(Outcome.NEED_STATION, current);
+    }
     List<String> next = new ArrayList<>(current);
     next.add(id);
     return new Edit(Outcome.OK, next);
   }
 
   /**
-   * 菜单“组合翻页”一行可选的布局：与屏幕同尺寸、能组合、不是主布局的，按布局目录的顺序。
+   * 菜单“组合翻页”一行可选的布局：与屏幕同尺寸、能组合、不是主布局的，按布局目录的顺序；没绑车站时不列到发布局。
    *
    * @return 主布局不能组合时为空
    */
@@ -150,6 +157,7 @@ public final class PidsScreenPages {
     }
     return layouts.all().stream()
         .filter(layout -> fits(screen, layout) && combinable(layout))
+        .filter(layout -> showable(screen, layout))
         .filter(layout -> !layout.id().equals(primary.get().id()))
         .toList();
   }
@@ -188,6 +196,11 @@ public final class PidsScreenPages {
       position -= length;
     }
     throw new IllegalStateException("翻页位置超出一轮: " + position);
+  }
+
+  /** 布局能在这块屏幕上作翻页显示：到发布局（没有状况表组件）要绑车站。 */
+  private static boolean showable(PidsScreen screen, PidsLayout layout) {
+    return layout.lineStatus().isPresent() || screen.station().isPresent();
   }
 
   /** 布局与屏幕同尺寸。 */

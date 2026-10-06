@@ -126,6 +126,25 @@ class PidsScreenPagesTest {
   }
 
   @Test
+  void screensWithoutAStationGetNoDeparturePages() {
+    PidsScreen status = operatorOnly("status-3x5");
+
+    PidsScreenPages.Edit refused = PidsScreenPages.togglePage(status, "station-3x5", layouts);
+    assertEquals(Outcome.NEED_STATION, refused.outcome());
+    assertEquals(List.of("status-3x5"), refused.layoutIds(), "不成功时不变");
+    assertTrue(
+        PidsScreenPages.candidates(status, layouts).isEmpty(), "没绑车站时菜单不列到发布局（另一个可组合的只有到发布局）");
+    assertEquals(
+        List.of("status-3x5"),
+        ids(PidsScreenPages.resolve(operatorOnly("status-3x5", "station-3x5"), layouts)),
+        "已存着的到发翻页显示时跳过");
+    assertEquals(
+        List.of("status-3x5", "station-3x5"),
+        PidsScreenPages.togglePage(screen(3, 5, "status-3x5"), "station-3x5", layouts).layoutIds(),
+        "绑了车站就能加");
+  }
+
+  @Test
   void choosingAPrimaryKeepsTheOtherPages() {
     PidsScreen combined = screen(3, 5, "station-3x5", "status-3x5");
 
@@ -187,6 +206,27 @@ class PidsScreenPagesTest {
 
   private static List<String> ids(List<PidsLayout> pages) {
     return pages.stream().map(PidsLayout::id).toList();
+  }
+
+  /** 只绑运营商、不绑车站的 3×5 屏幕。 */
+  private static PidsScreen operatorOnly(String... layoutIds) {
+    Instant now = Instant.EPOCH;
+    return new PidsScreen(
+        UUID.randomUUID(),
+        UUID.randomUUID(),
+        new PidsScreen.Position(0, 64, 0),
+        PidsFacing.SOUTH,
+        3,
+        5,
+        List.of(layoutIds),
+        Optional.empty(),
+        Optional.of(HHU.operatorCode()),
+        Set.of(),
+        Set.of(),
+        PidsScreen.Appearance.AUTO,
+        PidsScreen.Mode.LIVE,
+        now,
+        now);
   }
 
   private static PidsScreen screen(int rows, int cols, String... layoutIds) {
