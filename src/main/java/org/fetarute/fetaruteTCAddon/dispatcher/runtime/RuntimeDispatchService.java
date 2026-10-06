@@ -15112,10 +15112,23 @@ public final class RuntimeDispatchService {
     boolean needsLookahead =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.movementAuthorityEnabled();
     if (needsLookahead) {
+      // 下一路径点是计划停车点时，停车点之后足够远的道岔冲突键不算进站前的停车约束：列车反正停在站台，
+      // 出站时硬授权窗口照样要这把冲突键（见 PlannedStopSwitcherClearance）。车长未知时不放宽。
+      long lookaheadTrainLength = resolveRearGuardDistanceBlocks(train);
+      OccupancyDecision lookaheadDecision =
+          PlannedStopSwitcherClearance.forLookahead(
+              advisoryDecision,
+              advisoryContext,
+              nextRouteStop,
+              nextNode.orElse(null),
+              lookaheadTrainLength == Long.MAX_VALUE
+                  ? Long.MAX_VALUE
+                  : lookaheadTrainLength
+                      + (long) Math.ceil(runtimeSettings.movementAuthorityStopMarginBlocks()));
       if (runtimeSettings.speedCurveEnabled()) {
         lookahead =
             SignalLookahead.computeWithEdgeSpeed(
-                advisoryDecision,
+                lookaheadDecision,
                 advisoryContext,
                 nextAspect,
                 approachControl::activeFor,
@@ -15123,7 +15136,7 @@ public final class RuntimeDispatchService {
       } else {
         lookahead =
             SignalLookahead.compute(
-                advisoryDecision, advisoryContext, nextAspect, approachControl::activeFor);
+                lookaheadDecision, advisoryContext, nextAspect, approachControl::activeFor);
       }
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
