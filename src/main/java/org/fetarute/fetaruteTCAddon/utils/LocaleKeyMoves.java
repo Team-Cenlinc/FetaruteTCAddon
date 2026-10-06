@@ -5,13 +5,14 @@ import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import org.bukkit.configuration.ConfigurationSection;
 
 /**
  * 改过名的语言键：服务器语言文件里旧键上的文案搬到新键，旧键删掉。
  *
- * <p>补全缺失键只按新键补默认文案，不搬的话服务器改过的旧键文案会被丢在原处、不再生效。新键已有值时保留新键，只删旧键。 搬过去的文案若仍是改名前的内置旧文案，随后按 {@code
- * lang-superseded} 换成新的内置文案（旧文案登记在新键下）。
+ * <p>补全缺失键只按新键补默认文案，不搬的话服务器改过的旧键文案会被丢在原处、不再生效。新键已有值时以新键为准；旧键文案与它不同时旧键原样留在文件里并报出来， 由管理员手动合并，不悄悄删掉。
+ * 搬过去的文案若仍是改名前的内置旧文案，随后按 {@code lang-superseded} 换成新的内置文案（旧文案登记在新键下）。
  */
 final class LocaleKeyMoves {
 
@@ -39,17 +40,26 @@ final class LocaleKeyMoves {
   }
 
   /**
-   * 把旧键搬到新键。
+   * 搬键的结果。
    *
-   * @return 从旧键搬来文案的新键
+   * @param moved 从旧键搬来文案的新键
+   * @param kept 新键已有不同文案、因而原样保留的旧键
    */
-  static List<String> apply(ConfigurationSection config) {
+  record Result(List<String> moved, List<String> kept) {
+    boolean changed() {
+      return !moved.isEmpty();
+    }
+  }
+
+  /** 把旧键搬到新键。 */
+  static Result apply(ConfigurationSection config) {
     List<String> moved = new ArrayList<>();
+    List<String> kept = new ArrayList<>();
     for (Map.Entry<String, String> entry : MOVED.entrySet()) {
       String from = entry.getKey();
       String to = entry.getValue();
       if (!from.endsWith(".")) {
-        move(config, from, to, moved);
+        move(config, from, to, moved, kept);
         continue;
       }
       String section = from.substring(0, from.length() - 1);
@@ -59,22 +69,25 @@ final class LocaleKeyMoves {
       }
       for (String key : List.copyOf(old.getKeys(true))) {
         if (!old.isConfigurationSection(key)) {
-          move(config, from + key, to + key, moved);
+          move(config, from + key, to + key, moved, kept);
         }
       }
       pruneEmpty(config, section);
     }
-    return moved;
+    return new Result(List.copyOf(moved), List.copyOf(kept));
   }
 
   private static void move(
-      ConfigurationSection config, String from, String to, List<String> moved) {
+      ConfigurationSection config, String from, String to, List<String> moved, List<String> kept) {
     if (!config.contains(from) || config.isConfigurationSection(from)) {
       return;
     }
     if (!config.contains(to)) {
       config.set(to, config.get(from));
       moved.add(to);
+    } else if (!Objects.equals(config.get(to), config.get(from))) {
+      kept.add(from);
+      return;
     }
     config.set(from, null);
     int dot = from.lastIndexOf('.');

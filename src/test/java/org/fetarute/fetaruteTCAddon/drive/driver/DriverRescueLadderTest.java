@@ -124,19 +124,4 @@ class DriverRescueLadderTest {
     clock[0] += 200;
     assertEquals(true, link.holdDeparture(300), "下一站照常等确认");
   }
-
-  @Test
-  @DisplayName("拥堵保护参数：新键没写时读改名前的 breaker-* 键")
-  void readsLegacyProtectionKeys() throws Exception {
-    YamlConfiguration legacy = new YamlConfiguration();
-    legacy.loadFromString("breaker-held-trains: 8\nbreaker-cooldown-minutes: 30");
-    DriverRecovery r = DriverRecovery.from(legacy, message -> {});
-    assertEquals(8, r.protectionHeldTrains());
-    assertEquals(30, r.protectionCooldownMinutes());
-    assertEquals(DriverRecovery.defaults().protectionHeldSeconds(), r.protectionHeldSeconds());
-
-    YamlConfiguration both = new YamlConfiguration();
-    both.loadFromString("breaker-held-trains: 8\nprotection-held-trains: 3");
-    assertEquals(3, DriverRecovery.from(both, message -> {}).protectionHeldTrains());
-  }
 }

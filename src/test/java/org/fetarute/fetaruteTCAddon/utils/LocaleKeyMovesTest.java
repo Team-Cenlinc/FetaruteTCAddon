@@ -17,7 +17,7 @@ import org.junit.jupiter.api.Test;
 class LocaleKeyMovesTest {
 
   @Test
-  @DisplayName("单个键与整段都搬；新键已有值时保留新键；搬空的段删掉")
+  @DisplayName("单个键与整段都搬；新键已有不同文案时两个都留着并报出旧键；搬空的段删掉")
   void movesKeysAndSections() {
     YamlConfiguration config = new YamlConfiguration();
     config.set("drive.command.breaker.status", "自定义状态");
@@ -26,8 +26,11 @@ class LocaleKeyMovesTest {
     config.set("drive.task.claim.claimed", "别的键");
     config.set("drive.hud.driver.confirm-signal", "旧文案");
     config.set("drive.hud.driver.acknowledge-signal", "新键上已有的");
+    config.set("drive.driver.signal.confirmed", "同一句");
+    config.set("drive.driver.signal.acknowledged", "同一句");
 
-    List<String> moved = LocaleKeyMoves.apply(config);
+    LocaleKeyMoves.Result result = LocaleKeyMoves.apply(config);
+    List<String> moved = result.moved();
 
     assertEquals("自定义状态", config.getString("drive.command.congestion.status"));
     assertEquals("自定义解除", config.getString("drive.command.congestion.reset"));
@@ -35,11 +38,13 @@ class LocaleKeyMovesTest {
     assertEquals("新键上已有的", config.getString("drive.hud.driver.acknowledge-signal"));
     assertFalse(config.contains("drive.command.breaker"), "搬空的段删掉");
     assertNull(config.get("drive.task.claim.breaker-open"));
-    assertNull(config.get("drive.hud.driver.confirm-signal"));
+    assertEquals("旧文案", config.getString("drive.hud.driver.confirm-signal"), "新旧文案不同时旧键不删");
+    assertEquals(List.of("drive.hud.driver.confirm-signal"), result.kept());
+    assertNull(config.get("drive.driver.signal.confirmed"), "新旧文案相同时旧键直接删掉");
     assertEquals("别的键", config.getString("drive.task.claim.claimed"));
     assertTrue(moved.contains("drive.command.congestion.status"));
     assertFalse(moved.contains("drive.hud.driver.acknowledge-signal"), "新键已有值时不算搬过");
-    assertEquals(List.of(), LocaleKeyMoves.apply(config), "再搬一次没有变化");
+    assertEquals(List.of(), LocaleKeyMoves.apply(config).moved(), "再搬一次没有变化");
   }
 
   @Test

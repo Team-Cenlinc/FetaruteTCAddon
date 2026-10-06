@@ -66,26 +66,4 @@ class DriveSoundConfigTest {
     assertEquals(DriveCue.DEPART.defaultSpec(), config.spec(DriveCue.DEPART).orElseThrow());
     assertEquals(2, warnings.size());
   }
-
-  @Test
-  @DisplayName("改过名的键：新键没写时读旧键，两个都写时以新键为准")
-  void readsLegacyKeyWhenNewOneIsMissing() throws Exception {
-    YamlConfiguration legacy = new YamlConfiguration();
-    legacy.loadFromString("signal-confirmed:\n  volume: 0.2\n");
-    assertEquals(
-        0.2f,
-        DriveSoundConfig.from(legacy, message -> {})
-            .spec(DriveCue.SIGNAL_ACKNOWLEDGED)
-            .orElseThrow()
-            .volume());
-
-    YamlConfiguration both = new YamlConfiguration();
-    both.loadFromString("signal-confirmed:\n  volume: 0.2\nsignal-acknowledged:\n  volume: 0.4\n");
-    assertEquals(
-        0.4f,
-        DriveSoundConfig.from(both, message -> {})
-            .spec(DriveCue.SIGNAL_ACKNOWLEDGED)
-            .orElseThrow()
-            .volume());
-  }
 }

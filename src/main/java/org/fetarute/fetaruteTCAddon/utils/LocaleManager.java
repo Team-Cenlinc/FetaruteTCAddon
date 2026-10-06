@@ -325,16 +325,25 @@ public final class LocaleManager {
   private void mergeLocaleDefaults(String localeTag, File localeFile) {
     try (InputStream defaultStream =
         LocaleManager.class.getClassLoader().getResourceAsStream("lang/" + localeTag + ".yml")) {
+      YamlConfiguration existing = YamlConfiguration.loadConfiguration(localeFile);
+      // 先搬改过名的键：否则下面按新键补上默认文案，旧键上改过的文案就丢了。没有内置模板的自定义语言也要搬。
+      LocaleKeyMoves.Result moves = LocaleKeyMoves.apply(existing);
+      if (!moves.kept().isEmpty()) {
+        access
+            .logger()
+            .warn("语言键已改名，但新键已有不同文案，旧键原样保留，请手动合并后删除: " + String.join(", ", moves.kept()));
+      }
       if (defaultStream == null) {
         access.logger().warn("未找到内置语言模板 lang/" + localeTag + ".yml");
+        if (moves.changed()) {
+          existing.save(localeFile);
+          access.logger().info("已把改名前的语言键文案搬到新键: " + String.join(", ", moves.moved()));
+        }
         return;
       }
       YamlConfiguration defaults =
           YamlConfiguration.loadConfiguration(
               new InputStreamReader(defaultStream, StandardCharsets.UTF_8));
-      YamlConfiguration existing = YamlConfiguration.loadConfiguration(localeFile);
-      // 先搬改过名的键：否则下面按新键补上默认文案，旧键上改过的文案就丢了。
-      List<String> moved = LocaleKeyMoves.apply(existing);
       List<String> added = new ArrayList<>();
       for (String key : defaults.getKeys(true)) {
         if (defaults.isConfigurationSection(key)) {
@@ -346,11 +355,11 @@ public final class LocaleManager {
         }
       }
       List<String> replaced = upgradeSuperseded(localeTag, defaults, existing);
-      if (!moved.isEmpty() || !added.isEmpty() || !replaced.isEmpty()) {
+      if (moves.changed() || !added.isEmpty() || !replaced.isEmpty()) {
         existing.save(localeFile);
       }
-      if (!moved.isEmpty()) {
-        access.logger().info("已把改名前的语言键文案搬到新键: " + String.join(", ", moved));
+      if (moves.changed()) {
+        access.logger().info("已把改名前的语言键文案搬到新键: " + String.join(", ", moves.moved()));
       }
       if (!added.isEmpty()) {
         // 补全键属于诊断信息：默认不刷屏，仅在 debug.enabled=true 时输出。

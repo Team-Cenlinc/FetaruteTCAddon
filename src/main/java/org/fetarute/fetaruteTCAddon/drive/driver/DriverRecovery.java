@@ -74,31 +74,14 @@ public record DriverRecovery(
         handbackAt,
         rescueAt,
         positive(section, "max-task-minutes", d.maxTaskMinutes, sink),
-        positive(
-            section,
-            renamed(section, "protection-held-trains", "breaker-held-trains"),
-            d.protectionHeldTrains,
-            sink),
-        positive(
-            section,
-            renamed(section, "protection-held-seconds", "breaker-held-seconds"),
-            d.protectionHeldSeconds,
-            sink),
-        positive(
-            section,
-            renamed(section, "protection-cooldown-minutes", "breaker-cooldown-minutes"),
-            d.protectionCooldownMinutes,
-            sink),
+        positive(section, "protection-held-trains", d.protectionHeldTrains, sink),
+        positive(section, "protection-held-seconds", d.protectionHeldSeconds, sink),
+        positive(section, "protection-cooldown-minutes", d.protectionCooldownMinutes, sink),
         positive(section, "ato-confirm-seconds", d.atoConfirmSeconds, sink),
         nonNegative(section, "ato-confirm-advance-seconds", d.atoConfirmAdvanceSeconds, sink),
         positive(section, "task-window-minutes", d.taskWindowMinutes, sink),
         congestionWarn,
         congestionAto);
-  }
-
-  /** 新键没写而旧写法的键还在时读旧键。 */
-  private static String renamed(ConfigurationSection section, String key, String legacyKey) {
-    return !section.contains(key) && section.contains(legacyKey) ? legacyKey : key;
   }
 
   private static int nonNegative(

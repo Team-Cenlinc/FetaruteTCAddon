@@ -87,10 +87,7 @@ public record DriveSoundConfig(
     EnumMap<DriveCue, Spec> specs = new EnumMap<>(DriveCue.class);
     for (DriveCue cue : DriveCue.values()) {
       Spec fallback = cue.defaultSpec();
-      String key =
-          cue.legacyConfigKey()
-              .filter(legacy -> !section.contains(cue.configKey()) && section.contains(legacy))
-              .orElse(cue.configKey());
+      String key = cue.configKey();
       ConfigurationSection entry = section.getConfigurationSection(key);
       if (entry == null) {
         if (section.isString(key)) {

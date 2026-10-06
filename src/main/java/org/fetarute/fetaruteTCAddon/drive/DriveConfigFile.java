@@ -7,6 +7,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.StandardCopyOption;
 import java.util.List;
+import java.util.Map;
 import java.util.function.Supplier;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseClassIdMigration;
@@ -41,8 +42,14 @@ public final class DriveConfigFile {
     File file = new File(dataFolder, FILE_NAME);
     // 改名要在补全新键之前做：否则补全按模板加上新键，与旧键并存。
     migrateRenamed(file, logger);
+    // 按行没改成名的旧键（如流式写法）：补全会按模板加上新键，读配置时改用旧键的值。
+    YamlConfiguration before = YamlConfiguration.loadConfiguration(file);
+    Map<String, String> unmigrated = DriveConfigKeyRenames.unmigrated(before);
     new ConfigUpdater(file, template, logger).update();
     YamlConfiguration yaml = YamlConfiguration.loadConfiguration(file);
+    DriveConfigKeyRenames.carryOver(before, unmigrated, yaml);
+    unmigrated.forEach(
+        (from, to) -> logger.warn("drive.yml 的 " + from + " 没能自动改名为 " + to + "，本次按旧键的值读取，请手动改名"));
     return DriveConfig.from(yaml, logger::warn);
   }
 
@@ -59,7 +66,8 @@ public final class DriveConfigFile {
     try {
       List<String> lines = Files.readAllLines(file.toPath(), StandardCharsets.UTF_8);
       List<String> licenses = LicenseClassIdMigration.migrate(lines);
-      List<String> migrated = DriveConfigKeyRenames.migrate(licenses);
+      DriveConfigKeyRenames.Result keys = DriveConfigKeyRenames.rename(licenses);
+      List<String> migrated = keys.lines();
       if (migrated.equals(lines)) {
         return;
       }
@@ -73,10 +81,8 @@ public final class DriveConfigFile {
             "drive.yml：驾驶证等级 free、dispatch 已改名为 learner（见习驾驶证）、driver（正式驾驶证），"
                 + "考试方式 dispatch 已改写为 road-test");
       }
-      if (!migrated.equals(licenses)) {
-        logger.info(
-            "drive.yml：driver.breaker-* 已改名为 protection-*，sounds.signal-confirmed 已改名为"
-                + " signal-acknowledged");
+      if (!keys.renamed().isEmpty()) {
+        logger.info("drive.yml：已改名的键 " + String.join("，", keys.renamed()));
       }
       logger.info("drive.yml 改名前的原件已另存为 " + MIGRATION_BACKUP);
     } catch (IOException ex) {

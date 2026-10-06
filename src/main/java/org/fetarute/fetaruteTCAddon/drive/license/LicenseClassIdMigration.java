@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.fetarute.fetaruteTCAddon.utils.YamlLines;
 
 /**
  * 驾驶证等级改名：{@code free}（自由驾驶证）改为 {@code learner}（见习驾驶证），{@code dispatch}（调度驾驶证）改为 {@code
@@ -14,7 +15,7 @@ import java.util.regex.Pattern;
  * 里的引用，以及仍是旧默认值的名称；用户改过的名称、 其余设置与注释原样保留。必须在补全新键之前做，否则补全会按模板加上 learner、driver 两级，与旧的 free、dispatch
  * 并存。考试方式的旧写法 {@code exam: dispatch} 同时改为 {@code exam: road-test}（这是考试方式，不是等级引用，与等级改名无关）。
  *
- * <p>按行处理、不经 YAML 往返，免得重写整个文件。只认出现在 {@code license:} 下 {@code classes:} 块里的行；目标键已存在时不改那一级。
+ * <p>按行处理（见 {@link YamlLines}）。只认出现在 {@code license:} 下 {@code classes:} 块里的行；目标键已存在时不改那一级。
  */
 public final class LicenseClassIdMigration {
 
@@ -23,10 +24,6 @@ public final class LicenseClassIdMigration {
 
   /** 旧默认名称 → 新默认名称。 */
   static final Map<String, String> RENAMED_NAMES = Map.of("自由驾驶证", "见习驾驶证", "调度驾驶证", "正式驾驶证");
-
-  /** 键行：缩进、可选的引号、键名、同一引号，冒号后可带值或注释（行内映射也认）。 */
-  private static final Pattern KEY =
-      Pattern.compile("^(\\s*)([\"']?)([A-Za-z0-9_-]+)\\2:(\\s.*)?$");
 
   private static final Pattern LIST_ITEM =
       Pattern.compile("^(\\s*-\\s*)([\"']?)([A-Za-z0-9_-]+)([\"']?)(\\s*(#.*)?)$");
@@ -85,8 +82,8 @@ public final class LicenseClassIdMigration {
     }
     int classes = -1;
     int classesIndent = -1;
-    for (int i = license + 1; i < out.size() && !endsBlock(out.get(i), 0); i++) {
-      Matcher key = KEY.matcher(out.get(i));
+    for (int i = license + 1; i < out.size() && !YamlLines.endsBlock(out.get(i), 0); i++) {
+      Matcher key = YamlLines.KEY.matcher(out.get(i));
       if (key.matches() && key.group(3).equals("classes")) {
         classes = i;
         classesIndent = key.group(1).length();
@@ -96,25 +93,10 @@ public final class LicenseClassIdMigration {
     if (classes < 0) {
       return out;
     }
-    int end = classes + 1;
-    while (end < out.size() && !endsBlock(out.get(end), classesIndent)) {
-      end++;
-    }
+    int end = YamlLines.blockEnd(out, classes, classesIndent);
     // 等级键所在的缩进：classes 下第一个键的缩进。
-    int classIndent = -1;
-    List<String> existingKeys = new ArrayList<>();
-    for (int i = classes + 1; i < end; i++) {
-      Matcher key = KEY.matcher(out.get(i));
-      if (!key.matches()) {
-        continue;
-      }
-      if (classIndent < 0) {
-        classIndent = key.group(1).length();
-      }
-      if (key.group(1).length() == classIndent) {
-        existingKeys.add(key.group(3));
-      }
-    }
+    YamlLines.Children children = YamlLines.children(out, classes + 1, end);
+    int classIndent = children.indent();
     if (classIndent < 0) {
       return out;
     }
@@ -122,24 +104,17 @@ public final class LicenseClassIdMigration {
     Map<String, String> renames = new java.util.HashMap<>();
     RENAMED.forEach(
         (from, to) -> {
-          if (!existingKeys.contains(to)) {
+          if (!children.keys().contains(to)) {
             renames.put(from, to);
           }
         });
     for (int i = classes + 1; i < end; i++) {
       String line = out.get(i);
-      Matcher key = KEY.matcher(line);
+      Matcher key = YamlLines.KEY.matcher(line);
       if (key.matches() && key.group(1).length() == classIndent) {
         String renamed = renames.get(key.group(3));
         if (renamed != null) {
-          out.set(
-              i,
-              key.group(1)
-                  + key.group(2)
-                  + renamed
-                  + key.group(2)
-                  + ":"
-                  + (key.group(4) == null ? "" : key.group(4)));
+          out.set(i, YamlLines.renamed(key, renamed));
         }
         continue;
       }
@@ -192,15 +167,5 @@ public final class LicenseClassIdMigration {
               : part);
     }
     return out.toString();
-  }
-
-  /** 这一行是否已离开缩进为 {@code indent} 的块：非空、非注释且缩进不超过它。 */
-  private static boolean endsBlock(String line, int indent) {
-    String trimmed = line.trim();
-    if (trimmed.isEmpty() || trimmed.startsWith("#")) {
-      return false;
-    }
-    int leading = line.length() - line.stripLeading().length();
-    return leading <= indent;
   }
 }
