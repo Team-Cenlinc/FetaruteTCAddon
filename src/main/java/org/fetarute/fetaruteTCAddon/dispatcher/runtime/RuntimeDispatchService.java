@@ -5342,13 +5342,15 @@ public final class RuntimeDispatchService {
     List<OccupancyResource> keepResources =
         mergeKeepResourcesWithCurrentPosition(
             authorizationRequest.resourceList(), Optional.of(definition.nodeId()), nextNode, graph);
-    releaseResourcesNotInRequest(
+    releaseOutsideRequestRetainingLiveBody(
         trainName,
+        Optional.ofNullable(route.id()),
+        train,
+        graph,
         keepResources,
-        mergeProtectedResources(
-            protectedSwitcherZoneClaims(
-                trainName, route, currentIndex, definition.nodeId(), graph, "DEPARTURE_GATE"),
-            livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)));
+        protectedSwitcherZoneClaims(
+            trainName, route, currentIndex, definition.nodeId(), graph, "DEPARTURE_GATE"),
+        now);
     releaseSpeculativeClaimsFromBehindOnSharedPath(
         trainName, route, currentIndex, definition.nodeId(), graph, authorizationRequest);
     releaseSpeculativeQueueEntriesFromBehindOnSharedPath(
@@ -6387,13 +6389,15 @@ public final class RuntimeDispatchService {
       }
       context = contextOpt.get();
       OccupancyRequest request = context.request();
-      releaseResourcesNotInRequest(
+      releaseOutsideRequestRetainingLiveBody(
           trainName,
+          Optional.ofNullable(route.id()),
+          train,
+          graph,
           request.resourceList(),
-          mergeProtectedResources(
-              protectedSwitcherZoneClaims(
-                  trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
-              livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)));
+          protectedSwitcherZoneClaims(
+              trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
+          now);
       releaseSpeculativeClaimsFromBehindOnSharedPath(
           trainName, route, currentIndex, currentNode, graph, request);
       releaseSpeculativeQueueEntriesFromBehindOnSharedPath(
@@ -6438,15 +6442,17 @@ public final class RuntimeDispatchService {
             hardAuthorityContext.isPresent(),
             HeldForwardAuthority.savedFromRelease(heldForwardAuthority, keepResources))
         .ifPresent(debugLogger);
-    releaseResourcesNotInRequest(
+    releaseOutsideRequestRetainingLiveBody(
         trainName,
+        Optional.ofNullable(route.id()),
+        train,
+        graph,
         keepResources,
         mergeProtectedResources(
-            mergeProtectedResources(
-                protectedSwitcherZoneClaims(
-                    trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
-                livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)),
-            heldForwardAuthority));
+            protectedSwitcherZoneClaims(
+                trainName, route, currentIndex, currentNode, graph, "PROGRESS_TRIGGER"),
+            heldForwardAuthority),
+        now);
     AuthorityRollbackBaseline rollbackBaseline =
         AuthorityRollbackBaseline.capture(snapshotSelfClaims(trainName));
     MovementAuthorizationCoordinator.AuthorizationResult authorization =
@@ -14716,15 +14722,17 @@ public final class RuntimeDispatchService {
             hardAuthorityContext.isPresent(),
             HeldForwardAuthority.savedFromRelease(heldForwardAuthority, keepResources))
         .ifPresent(debugLogger);
-    releaseResourcesNotInRequest(
+    releaseOutsideRequestRetainingLiveBody(
         trainName,
+        Optional.ofNullable(route.id()),
+        train,
+        graph,
         keepResources,
         mergeProtectedResources(
-            mergeProtectedResources(
-                protectedSwitcherZoneClaims(
-                    trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"),
-                livePhysicalReleaseGuardsOrFailRetain(trainName, train, graph)),
-            heldForwardAuthority));
+            protectedSwitcherZoneClaims(
+                trainName, route, currentIndex, currentNodeForSignal, graph, "SIGNAL_TICK"),
+            heldForwardAuthority),
+        now);
     retainCurrentPositionOccupancy(
         trainName,
         route.id(),
@@ -29413,10 +29421,20 @@ public final class RuntimeDispatchService {
         priorityResolution,
         oldSelfClaims,
         protectedResources);
+    // 停车保持请求里的列尾防护按估算车长计算；车体现场仍压着、却落在请求之外的区段，放掉后随即取回。
     List<OccupancyResource> releasedResources =
-        releaseResourcesNotInRequest(trainName, request.resourceList(), protectedResources);
+        LiveBodyReleaseFloor.reacquireBody(
+            occupancyManager,
+            trainName,
+            Optional.ofNullable(route.id()),
+            now,
+            releaseResourcesNotInRequest(trainName, request.resourceList(), protectedResources),
+            livePhysicalEvidence.bodyFloor());
     List<OccupancyResource> releaseEligibleAfterRelease =
-        resourcesEligibleForRelease(trainName, request.resourceList(), protectedResources);
+        resourcesEligibleForRelease(
+            trainName,
+            request.resourceList(),
+            mergeProtectedResources(protectedResources, livePhysicalEvidence.bodyFloor()));
     if (!releaseEligibleResources.isEmpty()
         || !releasedResources.isEmpty()
         || !releaseEligibleAfterRelease.isEmpty()) {
@@ -29488,7 +29506,10 @@ public final class RuntimeDispatchService {
                 + resolution.reason());
         return LivePhysicalReleaseEvidence.incomplete();
       }
-      return LivePhysicalReleaseEvidence.complete(resolution.resources(), !train.isMoving());
+      return LivePhysicalReleaseEvidence.complete(
+          resolution.resources(),
+          !train.isMoving(),
+          LiveBodyReleaseFloor.coverage(graph, observation.cells().orElseThrow()).releaseFloor());
     } catch (RuntimeException | LinkageError ex) {
       debugLogger.accept(
           "SMART_LIVE_FOOTPRINT_READ_FAILED train="
@@ -29525,43 +29546,13 @@ public final class RuntimeDispatchService {
     if (!observation.available()) {
       return LivePhysicalEdgeCoverage.incomplete("live-footprint-unavailable");
     }
-    if (!(graph
-        instanceof
-        org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport
-        support)) {
-      return LivePhysicalEdgeCoverage.incomplete("interlocking-unsupported-graph");
-    }
-    var interlocking = support.interlockingState();
-    if (interlocking == null || !interlocking.cellCoverageAvailable()) {
-      return LivePhysicalEdgeCoverage.incomplete("cell-coverage-index-unavailable");
-    }
-    // 只有部分区间带足迹时，没足迹的区间在索引里看不见：车压在上面也查不出来，不能当"没覆盖"。
-    if (!interlocking.coverage().complete()) {
-      return LivePhysicalEdgeCoverage.incomplete("cell-coverage-partial");
-    }
-    Set<OccupancyResource> covered = new LinkedHashSet<>();
-    int coveredEdges = 0;
-    for (var cell : observation.cells().orElse(java.util.Set.of())) {
-      for (var edgeId : interlocking.edgesForCell(cell)) {
-        if (covered.add(OccupancyResource.forEdge(edgeId))) {
-          coveredEdges++;
-        }
-        // 端点节点一并视为"车体可能压着"。
-        //
-        // 这是 NODE 侧唯一站得住的推导方向，而且方向很重要：它**放大**覆盖集合，
-        // 因此只会让释放判据更严、更少放行，不可能反过来把车压着的节点判成已空。
-        // 反向推导（"不是任何已覆盖区间的端点就算已离开"）依赖光栅化无缝隙这一未验证前提，
-        // 推错就是在车实际压着的节点上解除保护——共占红线。这里不走那条路：
-        // 判据仍然只有一个「资源不在覆盖集合里」，只是覆盖集合现在也含节点。
-        covered.add(OccupancyResource.forNode(edgeId.a()));
-        covered.add(OccupancyResource.forNode(edgeId.b()));
-      }
-    }
-    if (coveredEdges <= 0) {
-      // 一条边都定位不到 ⇒ 车在哪儿无从判断 ⇒ 不能把"看不见"当成"已离开"。
-      return LivePhysicalEdgeCoverage.incomplete("no-edge-located-for-live-cells");
-    }
-    return LivePhysicalEdgeCoverage.complete(covered);
+    // 判据与释放下限共用一份（见 LiveBodyReleaseFloor#coverage）：端点节点一并视为"车体可能压着"，
+    // 只会让释放判据更严。
+    LiveBodyReleaseFloor.Coverage coverage =
+        LiveBodyReleaseFloor.coverage(graph, observation.cells().orElse(java.util.Set.of()));
+    return coverage.complete()
+        ? LivePhysicalEdgeCoverage.complete(coverage.edgesWithEndpoints())
+        : LivePhysicalEdgeCoverage.incomplete(coverage.incompleteReason());
   }
 
   /** {@link #livePhysicalEdgeCoverage} 的结果；{@code complete=false} 表示无从判断，不是"没覆盖"。 */
@@ -29644,36 +29635,54 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 返回本次资源缩减必须保留的实时 sparse Zone；证据缺失时返回本车全部现存 claim。
+   * 按本拍请求收缩本车 claim：{@code keepResources} 与 {@code protectedResources} 之外的都放掉，车体现场仍压着的随即以保护性占用取回。
    *
-   * <p>该方法只约束物理 Zone 的 release，不凭现场坐标签发 Movement Authority。普通 Edge 的列尾保护由 Node-first Route
-   * 与真实车长负责；未知现场证据则保留全部既有 claim，不能成为扩大可执行授权的捷径。
+   * <p>实时车体证据完整时，车体压着的稀疏联锁区不在释放之列；车体压着的 NODE/EDGE 照常放掉再以 PROTECTIVE_RETAIN 取回（见 {@link
+   * LiveBodyReleaseFloor}）——已持有的 MOVEMENT_REQUIRED 要经这一放一取才降为保护性占用，而取回紧跟在释放后面，后续步骤无论从哪里返回，
+   * 车身下都不会空着。证据缺失时保留本车全部现存 claim。
+   *
+   * <p>只约束释放，不凭现场坐标签发 Movement Authority；未知现场证据不能成为扩大可执行授权的捷径。
+   *
+   * @return 取回之后仍然放掉的资源
    */
-  private Set<OccupancyResource> livePhysicalReleaseGuardsOrFailRetain(
-      String trainName, RuntimeTrainHandle train, RailGraph graph) {
+  private List<OccupancyResource> releaseOutsideRequestRetainingLiveBody(
+      String trainName,
+      Optional<RouteId> routeId,
+      RuntimeTrainHandle train,
+      RailGraph graph,
+      List<OccupancyResource> keepResources,
+      Set<OccupancyResource> protectedResources,
+      Instant now) {
     LivePhysicalReleaseEvidence evidence =
         resolveLivePhysicalReleaseEvidence(trainName, train, graph);
-    if (evidence.complete()) {
-      return evidence.resources();
-    }
-    Set<OccupancyResource> retained = new LinkedHashSet<>();
-    for (OccupancyClaim claim : snapshotSelfClaims(trainName)) {
-      if (claim != null && claim.resource() != null) {
-        retained.add(claim.resource());
+    Set<OccupancyResource> liveGuard = evidence.resources();
+    if (!evidence.complete()) {
+      Set<OccupancyResource> retained = new LinkedHashSet<>();
+      for (OccupancyClaim claim : snapshotSelfClaims(trainName)) {
+        if (claim != null && claim.resource() != null) {
+          retained.add(claim.resource());
+        }
       }
+      debugLogger.accept(
+          "SMART_LIVE_FOOTPRINT_RELEASE_GUARD train="
+              + diagnosticTrainName(trainName)
+              + " result=incomplete action=fail-retain-existing-claims retained="
+              + retained.size());
+      liveGuard = Set.copyOf(retained);
     }
-    debugLogger.accept(
-        "SMART_LIVE_FOOTPRINT_RELEASE_GUARD train="
-            + diagnosticTrainName(trainName)
-            + " result=incomplete action=fail-retain-existing-claims retained="
-            + retained.size());
-    return Set.copyOf(retained);
+    List<OccupancyResource> released =
+        releaseResourcesNotInRequest(
+            trainName, keepResources, mergeProtectedResources(protectedResources, liveGuard));
+    return LiveBodyReleaseFloor.reacquireBody(
+        occupancyManager, trainName, routeId, now, released, evidence.bodyFloor());
   }
 
   /**
    * 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。
    *
    * @param stationary 读取足迹时列车已停稳；制动中车头仍可能压进前方联锁区
+   * @param bodyFloor 车体压着的区间与跨过的节点（{@link
+   *     LiveBodyReleaseFloor.Coverage#releaseFloor()}）；本拍放掉其中任何一项都要随即取回。逐边足迹索引不可用时为空
    * @param layoverBody 终点停车（终到停站或待命）的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
    */
   private record LivePhysicalReleaseEvidence(
@@ -29681,26 +29690,30 @@ public final class RuntimeDispatchService {
       boolean complete,
       boolean stationary,
       Set<OccupancyResource> resources,
+      Set<OccupancyResource> bodyFloor,
       Optional<LivePhysicalEdgeCoverage> layoverBody) {
 
     private LivePhysicalReleaseEvidence {
       resources = resources == null ? Set.of() : Set.copyOf(resources);
+      bodyFloor = bodyFloor == null ? Set.of() : Set.copyOf(bodyFloor);
       layoverBody = layoverBody == null ? Optional.empty() : layoverBody;
     }
 
     private static LivePhysicalReleaseEvidence incomplete() {
-      return new LivePhysicalReleaseEvidence(true, false, false, Set.of(), Optional.empty());
+      return new LivePhysicalReleaseEvidence(
+          true, false, false, Set.of(), Set.of(), Optional.empty());
     }
 
     private static LivePhysicalReleaseEvidence complete(
-        Set<OccupancyResource> resources, boolean stationary) {
-      return new LivePhysicalReleaseEvidence(true, true, stationary, resources, Optional.empty());
+        Set<OccupancyResource> resources, boolean stationary, Set<OccupancyResource> bodyFloor) {
+      return new LivePhysicalReleaseEvidence(
+          true, true, stationary, resources, bodyFloor, Optional.empty());
     }
 
     /** 标记为终点停车（终到停站或待命），附上整列车身覆盖。 */
     private LivePhysicalReleaseEvidence withLayoverBody(LivePhysicalEdgeCoverage body) {
       return new LivePhysicalReleaseEvidence(
-          required, complete, stationary, resources, Optional.ofNullable(body));
+          required, complete, stationary, resources, bodyFloor, Optional.ofNullable(body));
     }
 
     /** 位置保持对当前边联锁区的依据：停稳且足迹完整才跟随现场，否则按当前边整体保持。 */

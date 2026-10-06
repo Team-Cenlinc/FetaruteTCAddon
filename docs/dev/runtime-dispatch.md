@@ -160,7 +160,14 @@
   一拍空档，停着的车前方多余的授权也照旧放掉（以前是回滚整段放掉顺带完成这件事）。可恢复回滚（`SMART_DISPATCH_RECOVERABLE_HOLD`）只加快照、
   不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序。但它在返回前照样补回车身与列尾防护（与正常路径末尾同一个
   `retainRearGuardOccupancyBestEffort`，只 acquire、不释放、不碰排队）：信号 tick 开头只按“硬窗口 + 当前位置”保留 claim，硬窗口不含车头身后的
-  区段，不补的话车身压着的 NODE/EDGE 要到本车下一次完整 tick 才重新归本车，其间后车可以对它们取得硬授权（`RecoverableHoldBodyRetainTest`）。保下了资源时输出必留诊断
+  区段，不补的话车身压着的 NODE/EDGE 要到本车下一次完整 tick 才重新归本车，其间后车可以对它们取得硬授权（`RecoverableHoldBodyRetainTest`）。
+- 车身释放下限（`LiveBodyReleaseFloor`）：信号 tick、推进点、发车门控与停车保持按本拍请求收缩本车 claim 之后，本拍放掉的资源里凡是车体现场方块仍压着的
+  （车体所在区间，加上至少两条已覆盖区间共用的节点），在同一次同步调用里立即以 `PROTECTIVE_RETAIN` 取回。它不依赖逻辑窗口——交路进度、估算车长、
+  每条分支是否记得补回——是列尾防护之外的独立一层。之所以“放掉再取回”而不是“不许放”：同车以保护性意图刷新会保留已有的 `MOVEMENT_REQUIRED`，
+  车身区段只有经这一放一取才降为保护性占用，后车的停因分类、前瞻风险与 Phase 4 回收都依赖这一降级。只取回本拍刚放掉的，从不新拿本车原本没有持有的
+  资源；车头前方、车尾后方那条区间的另一端节点不算，停在道岔前的车不会因此攥住道岔节点。逐边足迹索引不可用或车体定位不到时下限为空，行为与没有下限时
+  相同（不全量保留，以免一处证据缺失冻住全线）；图层面的可用性看 `SMART_INTERLOCKING_COVERAGE` 的 `cellCoverageAvailable`。Phase 4 与终点待命收窄
+  判“车体是否已离开”用的是同一份覆盖（区间连同两端节点，只会更严）。保下了资源时输出必留诊断
   `SMART_AUTHORITY_ROLLBACK_KEPT_HELD train=… reason=<HardStopReason|RECOVERABLE_HOLD> kept=N resources=[…]`，按车去重。
 - Smart recovery 的 drain/forward unlock 仍默认尊重对向或未知方向 single barrier；只有当当前占用快照证明本车已持有 contested
   section、方向已知、下一跳朝出口前进、出口 edge/node 没有外部 claim，且 hard blocker 只对应同一 section 时，才允许进入最终 signal
