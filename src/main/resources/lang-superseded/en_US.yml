@@ -47,6 +47,7 @@ drive:
         overrun: ["<red>Overran by <white><distance></white> blocks</red>"]
   command:
     help:
+      entry-reverser: ["  <gray>•</gray> <white>/fta drive reverser [forward|neutral|reverse]</white> <gray>- Set the reverser while stopped</gray>"]
       entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- Start, quit or reset the tutorial, or skip the current step</gray>"]
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"]

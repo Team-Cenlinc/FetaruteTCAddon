@@ -150,7 +150,10 @@ public final class FtaTrainCommand {
                 CommandComponent.builder("power", StringParser.stringParser())
                     .suggestionProvider(
                         SuggestionProvider.suggestingStrings(
-                            "ptg5", "ptg6", "shoe", "diesel", "supercap"))
+                            java.util.Arrays.stream(
+                                    org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.values())
+                                .map(org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply::key)
+                                .toList()))
                     .build())
             .build();
     var maxSpeedFlag =
@@ -158,7 +161,8 @@ public final class FtaTrainCommand {
             .withComponent(
                 CommandComponent.builder("max-speed", StringParser.stringParser())
                     .suggestionProvider(
-                        SuggestionProvider.suggestingStrings("80kmh", "22bps", "1.1bpt"))
+                        SuggestionProvider.blockingStrings(
+                            (ctx, input) -> maxSpeedSuggestions(input.lastRemainingToken())))
                     .build())
             .build();
 
@@ -1634,6 +1638,19 @@ public final class FtaTrainCommand {
       out = out.substring(0, out.length() - 1);
     }
     return out.trim();
+  }
+
+  /**
+   * 车型最高速度的补全：写了数字就给出这个数加各单位（kmh、bps、bpt），否则给示例；不写单位按格/秒理解，所以示例都带单位，并给出 {@code <speed>} 提示。
+   *
+   * @param token 已输入的文字
+   */
+  static List<String> maxSpeedSuggestions(String token) {
+    String text = token == null ? "" : token.trim();
+    if (text.matches("\\d+(\\.\\d+)?")) {
+      return List.of(text + "kmh", text + "bps", text + "bpt");
+    }
+    return List.of("<speed>", "80kmh", "22bps", "1.1bpt");
   }
 
   /**

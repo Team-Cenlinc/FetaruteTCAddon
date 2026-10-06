@@ -370,7 +370,7 @@ public final class FtaTimetableCommand {
     sender.sendMessage(hint("撤出运行", "/fta timetable unpublish <company> <operator> <line> <code>"));
     sender.sendMessage(hint("导出 CSV", "/fta timetable export <company> <operator> <line> <code>"));
     sender.sendMessage(hint("运行态与编表进度", "/fta timetable status"));
-    sender.sendMessage(hint("取消编表", "/fta timetable cancel <任务号|线路/code>"));
+    sender.sendMessage(hint("取消编表", "/fta timetable cancel <任务号|\"线路/code\">"));
     sender.sendMessage(Component.text("时刻表由 FTCA 按路网算出，不需要先去实服录制。", NamedTextColor.GRAY));
     sender.sendMessage(
         Component.text(
@@ -2684,11 +2684,15 @@ public final class FtaTimetableCommand {
   private SuggestionProvider<CommandSender> buildJobSuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
-          String prefix = normalizePrefix(input);
+          // 任务号与范围（线路/code，联编为“线路,线路/code”）都能取消；范围带 / 与逗号，候选加引号。
+          String prefix = CommandUx.suggestionPrefix(input.lastRemainingToken());
           List<String> out = new ArrayList<>();
           for (TimetableBuildJobs.Job job : buildJobs.list()) {
             if (matches(job.shortId(), prefix)) {
               out.add(job.shortId());
+            }
+            if (matches(job.scope(), prefix)) {
+              out.add(CommandUx.quoteCommandArgument(job.scope()));
             }
           }
           if (out.isEmpty() && prefix.isBlank()) {

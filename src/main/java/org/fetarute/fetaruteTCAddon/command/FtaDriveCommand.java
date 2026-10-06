@@ -95,6 +95,7 @@ public final class FtaDriveCommand {
               return names;
             });
 
+    // 列车名可能带中文终点字、? 或空格：参数用 quotedString，需要时候选带引号。
     SuggestionProvider<CommandSender> trainSuggestions =
         SuggestionProvider.blockingStrings(
             (ctx, input) -> {
@@ -104,11 +105,49 @@ public final class FtaDriveCommand {
                   names.add(group.getProperties().getTrainName());
                 }
               }
+              return CommandUx.suggestions(names, input.lastRemainingToken());
+            });
+    // 收回任务：领了任务的玩家，包括领完还没上车、已经下线的。
+    SuggestionProvider<CommandSender> taskHolderSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> {
+              java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+              DriveSessionManager drive = plugin.getDriveSessionManager();
+              if (drive != null) {
+                for (DriverTask task : drive.tasks().activeTasks()) {
+                  names.add(task.playerName());
+                }
+              }
+              return List.copyOf(names);
+            });
+    // 查别人的记录要管理权限：有权限时补全在线玩家。
+    SuggestionProvider<CommandSender> recordsSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> {
+              if (!ctx.sender().hasPermission(PERMISSION_ADMIN)) {
+                return List.of();
+              }
+              List<String> names = new ArrayList<>();
+              names.add("<player>");
+              for (Player online : Bukkit.getOnlinePlayers()) {
+                names.add(online.getName());
+              }
               return names;
             });
+    // 没有 ATO 权限的不补出 ato。
+    SuggestionProvider<CommandSender> modeSuggestions =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) ->
+                DrivePermissions.allowsMode(DrivingMode.ATO, ctx.sender()::hasPermission)
+                    ? List.of("manual", "ato")
+                    : List.of("manual"));
+    // 车站可写“运营商:站码”区分重名站，冒号不加引号不合法：参数用 quotedString，需要时候选带引号。
     SuggestionProvider<CommandSender> stationSuggestions =
         SuggestionProvider.blockingStrings(
-            (ctx, input) -> TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)));
+            (ctx, input) ->
+                CommandUx.suggestions(
+                    TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)),
+                    input.lastRemainingToken()));
 
     manager.command(
         manager
@@ -173,7 +212,7 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("tasks")
             .permission(permissionOf("tasks"))
-            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .optional("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx -> handleTasks(ctx.sender(), ctx.optional("station").map(String.class::cast))));
 
@@ -215,7 +254,7 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("records")
             .permission(permissionOf("records"))
-            .optional("player", StringParser.stringParser())
+            .optional("player", StringParser.stringParser(), recordsSuggestions)
             .handler(
                 ctx ->
                     handleRecords(
@@ -244,7 +283,7 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("revoke")
             .permission(permissionOf("revoke"))
-            .required("player", StringParser.stringParser(), driverSuggestions)
+            .required("player", StringParser.stringParser(), taskHolderSuggestions)
             .handler(ctx -> handleRevoke(ctx.sender(), ((String) ctx.get("player")).trim())));
 
     manager.command(
@@ -253,10 +292,7 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("mode")
             .permission(permissionOf("mode"))
-            .required(
-                "mode",
-                StringParser.stringParser(),
-                SuggestionProvider.suggestingStrings("manual", "ato"))
+            .required("mode", StringParser.stringParser(), modeSuggestions)
             .handler(ctx -> handleMode(ctx.sender(), ((String) ctx.get("mode")).trim())));
 
     manager.command(
@@ -313,7 +349,7 @@ public final class FtaDriveCommand {
             .literal("drive")
             .literal("rescue")
             .permission(PERMISSION_ADMIN)
-            .required("train", StringParser.stringParser(), trainSuggestions)
+            .required("train", StringParser.quotedStringParser(), trainSuggestions)
             .optional(
                 "action",
                 StringParser.stringParser(),
@@ -592,7 +628,9 @@ public final class FtaDriveCommand {
                       .component(
                           "drive.task.board.station-choice",
                           Map.of("code", choice.argument(), "station", choice.name()))
-                      .clickEvent(ClickEvent.runCommand("/fta drive tasks " + choice.argument()))
+                      .clickEvent(
+                          ClickEvent.runCommand(
+                              "/fta drive tasks " + CommandUx.suggestion(choice.argument(), false)))
                       .hoverEvent(
                           HoverEvent.showText(
                               locale.component(

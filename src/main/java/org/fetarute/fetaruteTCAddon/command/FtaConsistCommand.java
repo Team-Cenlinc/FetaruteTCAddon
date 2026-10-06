@@ -294,10 +294,7 @@ public final class FtaConsistCommand {
             .commandBuilder("fta")
             .literal("consist")
             .literal("profile")
-            .required(
-                "pattern",
-                StringParser.greedyStringParser(),
-                SuggestionProvider.suggestingStrings("<pattern>"))
+            .required("pattern", StringParser.greedyStringParser(), savedTrainSuggestions())
             .handler(
                 ctx -> {
                   CommandSender sender = ctx.sender();
@@ -714,7 +711,8 @@ public final class FtaConsistCommand {
   private SuggestionProvider<CommandSender> planSuggestions() {
     return SuggestionProvider.blockingStrings(
         (ctx, input) -> {
-          String prefix = input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
+          // 方案名常带中文或空格，玩家要先起引号：比较前去掉开头的引号，否则候选会消失。
+          String prefix = CommandUx.suggestionPrefix(input.lastRemainingToken());
           List<String> suggestions = new ArrayList<>();
           if (prefix.isBlank()) {
             suggestions.add("<name>");
@@ -735,6 +733,26 @@ public final class FtaConsistCommand {
                           .limit(SUGGESTION_LIMIT)
                           .forEach(suggestions::add));
           return suggestions;
+        });
+  }
+
+  /** 车型档案的补全：TrainCarts 的存车名（贪婪参数，不用加引号）；TrainCarts 不可用时给占位符。 */
+  private static SuggestionProvider<CommandSender> savedTrainSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = input.lastRemainingToken().trim().toLowerCase(Locale.ROOT);
+          com.bergerkiller.bukkit.tc.TrainCarts trainCarts =
+              com.bergerkiller.bukkit.tc.TrainCarts.plugin;
+          if (trainCarts == null) {
+            return List.of("<pattern>");
+          }
+          List<String> names =
+              trainCarts.getSavedTrains().getNames().stream()
+                  .filter(name -> name.toLowerCase(Locale.ROOT).startsWith(prefix))
+                  .sorted(String.CASE_INSENSITIVE_ORDER)
+                  .limit(SUGGESTION_LIMIT)
+                  .toList();
+          return names.isEmpty() && prefix.isBlank() ? List.of("<pattern>") : names;
         });
   }
 

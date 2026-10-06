@@ -95,6 +95,7 @@ drive:
         overrun: ["<red>越过 <white><distance></white> 格</red>"]
   command:
     help:
+      entry-reverser: ["  <gray>•</gray> <white>/fta drive reverser [forward|neutral|reverse]</white> <gray>- 停稳后设置换向手柄</gray>"]
       entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- 开始、退出或重置新手教程，跳过当前一步</gray>"]
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- 查看或放弃当前任务</gray>"]
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]

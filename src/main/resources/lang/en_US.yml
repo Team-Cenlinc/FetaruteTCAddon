@@ -953,7 +953,7 @@ drive:
       entry-on: "  <gray>•</gray> <white>/fta drive on</white> <gray>- Start driving from a train seat</gray>"
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- Stop driving</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- Show the current driving state</gray>"
-      entry-reverser: "  <gray>•</gray> <white>/fta drive reverser [forward|neutral|reverse]</white> <gray>- Set the reverser while stopped</gray>"
+      entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- Set the reverser while stopped</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- List all driving sessions</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"

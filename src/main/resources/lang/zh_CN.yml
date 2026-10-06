@@ -547,6 +547,8 @@ command:
       hover-component: "<gray>点击填充:</gray> <white>/fta graph component list </white>\n<dark_aqua>输出节点/边数量与封锁边数量</dark_aqua>\n<gray>玩家端:</gray> <white>nodeId 需用引号包裹</white> <gray>(例如 \\\"SURN:A:B:1:00\\\")</gray>"
       entry-conflict: "<gray>/fta graph conflict</gray> <white>-</white> <dark_aqua>联合闭锁冲突组</dark_aqua>"
       hover-conflict: "<gray>点击填充:</gray> <white>/fta graph conflict list </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/edge/path/interlocking list/interlocking get</white>\n<gray>可选:</gray> <white>--node \"&lt;nodeId&gt;\"</white>"
+      entry-portal: "<gray>/fta graph portal</gray> <white>-</white> <dark_aqua>跨世界传送门连接</dark_aqua>"
+      hover-portal: "<gray>点击填充:</gray> <white>/fta graph portal </white>\n<dark_aqua>子命令:</dark_aqua> <white>list/scan/link/unlink</white>\n<dark_aqua>scan 按 MyWorlds 自动连接；link/unlink 手动连接或删除（节点 ID 可按 Tab 补全）</dark_aqua>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>(分段执行，可用 /fta graph status 查看进度)</gray>"
@@ -2559,7 +2561,7 @@ drive:
       entry-on: "  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐在列车座位上后开始驾驶</gray>"
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- 结束驾驶</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- 查看当前驾驶状态</gray>"
-      entry-reverser: "  <gray>•</gray> <white>/fta drive reverser [forward|neutral|reverse]</white> <gray>- 停稳后设置换向手柄</gray>"
+      entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- 停稳后设置换向手柄</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- 列出全部驾驶会话</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"

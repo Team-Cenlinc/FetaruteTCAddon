@@ -53,26 +53,30 @@ class FtaRouteCommandWildcardTest {
   }
 
   @Test
-  @DisplayName("补全：空输入给 * 与前缀通配，输入前缀时给输入加 *，只列以输入开头的项")
+  @DisplayName("补全：空输入给 \"*\" 与前缀通配（通配一律带引号），输入前缀时给输入加 *，起了引号时代码也带引号")
   void patternSuggestions() {
     List<String> codes = List.of("MT-1N_Short", "MT-1N_ShortR", "MT-1O_ShortR", "MT-3N_DPExp");
 
     assertEquals(
         List.of(
             "<route>",
-            "*",
-            "MT-*",
-            "MT-1N_*",
+            "\"*\"",
+            "\"MT-*\"",
+            "\"MT-1N_*\"",
             "MT-1N_Short",
             "MT-1N_ShortR",
             "MT-1O_ShortR",
             "MT-3N_DPExp"),
         FtaRouteCommand.routePatternSuggestions(codes, ""));
     assertEquals(
-        List.of("MT-1*", "MT-1N_*", "MT-1N_Short", "MT-1N_ShortR", "MT-1O_ShortR"),
+        List.of("\"MT-1*\"", "\"MT-1N_*\"", "MT-1N_Short", "MT-1N_ShortR", "MT-1O_ShortR"),
         FtaRouteCommand.routePatternSuggestions(codes, "mt-1"));
+    assertEquals(
+        List.of(
+            "\"MT-1*\"", "\"MT-1N_*\"", "\"MT-1N_Short\"", "\"MT-1N_ShortR\"", "\"MT-1O_ShortR\""),
+        FtaRouteCommand.routePatternSuggestions(codes, "\"MT-1"));
     assertEquals(List.of("MT-3N_DPExp"), FtaRouteCommand.routePatternSuggestions(codes, "mt-3"));
-    assertEquals(List.of(), FtaRouteCommand.routePatternSuggestions(codes, "mt-*"));
+    assertEquals(List.of(), FtaRouteCommand.routePatternSuggestions(codes, "\"mt-*"));
   }
 
   private static List<String> codes(List<Route> routes, String pattern) {

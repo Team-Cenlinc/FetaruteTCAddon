@@ -2512,24 +2512,31 @@ public final class FtaRouteCommand {
   /** 可写通配的交路参数补全：除交路代码外，给出 {@code *} 与匹配两条以上交路的前缀通配。 */
   private SuggestionProvider<CommandSender> routePatternArgSuggestions() {
     return SuggestionProvider.blockingStrings(
-        (ctx, input) -> routePatternSuggestions(lineRouteCodes(ctx), normalizePrefix(input)));
+        (ctx, input) ->
+            routePatternSuggestions(
+                lineRouteCodes(ctx), input == null ? "" : input.lastRemainingToken()));
   }
 
   /**
-   * 交路参数的补全项：空输入时先给 {@code <route>} 与 {@code *}；再给按分隔符（{@code -}、{@code _}）截出、匹配两条以上交路的前缀通配，
+   * 交路参数的补全项：空输入时先给 {@code <route>} 与 {@code "*"}；再给按分隔符（{@code -}、{@code _}）截出、匹配两条以上交路的前缀通配，
    * 以及输入本身加 {@code *}（匹配两条以上时）；最后是交路代码。只列以输入开头的项，不分大小写。
+   *
+   * <p>通配候选一律带双引号：客户端按 Brigadier 规则解析，{@code * ?} 不加引号会让整条命令标红；交路代码只在需要时或玩家已起了引号时加。
+   *
+   * @param token 当前参数已输入的文字（可能以引号开头）
    */
-  static List<String> routePatternSuggestions(List<String> codes, String prefix) {
-    String lower = prefix == null ? "" : prefix.toLowerCase(Locale.ROOT);
+  static List<String> routePatternSuggestions(List<String> codes, String token) {
+    boolean quoted = CommandUx.startsQuoted(token);
+    String lower = CommandUx.suggestionPrefix(token);
     java.util.LinkedHashSet<String> suggestions = new java.util.LinkedHashSet<>();
-    if (lower.isEmpty()) {
+    if (lower.isEmpty() && !quoted) {
       suggestions.add("<route>");
     }
     if (isRoutePattern(lower)) {
       return List.copyOf(suggestions);
     }
     if (lower.isEmpty() && codes.size() > 1) {
-      suggestions.add("*");
+      suggestions.add(CommandUx.quoteCommandArgument("*"));
     }
     Map<String, Integer> families = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
     for (String code : codes) {
@@ -2546,17 +2553,18 @@ public final class FtaRouteCommand {
       // 用交路代码原本的大小写拼出前缀，客户端按输入筛补全项时才对得上。
       String typed = matched.isEmpty() ? "" : matched.get(0).substring(0, lower.length()) + "*";
       if (matched.size() > 1 && !families.containsKey(typed)) {
-        suggestions.add(typed);
+        suggestions.add(CommandUx.quoteCommandArgument(typed));
       }
     }
     families.forEach(
         (family, count) -> {
           if (count > 1 && family.toLowerCase(Locale.ROOT).startsWith(lower)) {
-            suggestions.add(family);
+            suggestions.add(CommandUx.quoteCommandArgument(family));
           }
         });
     codes.stream()
         .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(lower))
+        .map(code -> CommandUx.suggestion(code, quoted))
         .forEach(suggestions::add);
     return suggestions.stream().limit(SUGGESTION_LIMIT).toList();
   }

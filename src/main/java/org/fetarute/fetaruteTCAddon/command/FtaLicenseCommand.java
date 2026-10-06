@@ -47,23 +47,24 @@ public final class FtaLicenseCommand {
   }
 
   public void register(CommandManager<CommandSender> manager) {
-    SuggestionProvider<CommandSender> classSuggestions =
-        SuggestionProvider.blockingStrings(
-            (ctx, input) ->
-                service()
-                    .map(
-                        licenses ->
-                            licenses.config().classes().stream()
-                                .filter(LicenseClass::enabled)
-                                .map(LicenseClass::id)
-                                .toList())
-                    .orElse(List.of()));
+    // 报名：开放的等级；练习：开放的路考等级（教程级没有练习）；发证、吊销：配置里的全部等级（停用的也能处理）。
+    SuggestionProvider<CommandSender> classSuggestions = classSuggestions(LicenseClass::enabled);
+    SuggestionProvider<CommandSender> practiceClassSuggestions =
+        classSuggestions(
+            license -> license.enabled() && license.exam() == LicenseClass.Exam.DISPATCH);
+    SuggestionProvider<CommandSender> adminClassSuggestions = classSuggestions(license -> true);
+    // 发证、吊销、查询接受服务器见过的离线玩家：在线的排前面，再补上以输入开头的离线玩家。
     SuggestionProvider<CommandSender> playerSuggestions =
         SuggestionProvider.blockingStrings(
-            (ctx, input) -> Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+            (ctx, input) ->
+                knownPlayerNames(CommandUx.suggestionPrefix(input.lastRemainingToken())));
+    // 车站可写“运营商:站码”区分重名站，冒号不加引号不合法：参数用 quotedString，需要时候选带引号。
     SuggestionProvider<CommandSender> stationSuggestions =
         SuggestionProvider.blockingStrings(
-            (ctx, input) -> TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)));
+            (ctx, input) ->
+                CommandUx.suggestions(
+                    TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)),
+                    input.lastRemainingToken()));
     Permission player = Permission.of(DrivePermissions.LICENSE);
     Permission admin = Permission.of(DrivePermissions.LICENSE_ADMIN);
 
@@ -80,7 +81,7 @@ public final class FtaLicenseCommand {
             .literal("exam")
             .permission(player)
             .required("class", StringParser.stringParser(), classSuggestions)
-            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .optional("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx ->
                     handleExam(
@@ -93,8 +94,8 @@ public final class FtaLicenseCommand {
             .literal("license")
             .literal("practice")
             .permission(player)
-            .required("class", StringParser.stringParser(), classSuggestions)
-            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .required("class", StringParser.stringParser(), practiceClassSuggestions)
+            .optional("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx ->
                     handlePractice(
@@ -122,7 +123,7 @@ public final class FtaLicenseCommand {
             .literal("grant")
             .permission(admin)
             .required("player", StringParser.stringParser(), playerSuggestions)
-            .required("class", StringParser.stringParser(), classSuggestions)
+            .required("class", StringParser.stringParser(), adminClassSuggestions)
             .handler(
                 ctx ->
                     handleGrant(
@@ -136,7 +137,7 @@ public final class FtaLicenseCommand {
             .literal("revoke")
             .permission(admin)
             .required("player", StringParser.stringParser(), playerSuggestions)
-            .required("class", StringParser.stringParser(), classSuggestions)
+            .required("class", StringParser.stringParser(), adminClassSuggestions)
             .handler(
                 ctx ->
                     handleRevoke(
@@ -151,6 +152,41 @@ public final class FtaLicenseCommand {
             .permission(admin)
             .required("player", StringParser.stringParser(), playerSuggestions)
             .handler(ctx -> handleList(ctx.sender(), ((String) ctx.get("player")).trim())));
+  }
+
+  private SuggestionProvider<CommandSender> classSuggestions(
+      java.util.function.Predicate<LicenseClass> filter) {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) ->
+            service()
+                .map(
+                    licenses ->
+                        licenses.config().classes().stream()
+                            .filter(filter)
+                            .map(LicenseClass::id)
+                            .toList())
+                .orElse(List.of()));
+  }
+
+  /** 以输入开头的玩家名：在线的在前，再补服务器见过的离线玩家，最多 30 个。 */
+  private static List<String> knownPlayerNames(String prefix) {
+    java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+    for (Player online : Bukkit.getOnlinePlayers()) {
+      names.add(online.getName());
+    }
+    for (OfflinePlayer offline : Bukkit.getOfflinePlayers()) {
+      if (names.size() >= 200) {
+        break;
+      }
+      String name = offline.getName();
+      if (name != null && name.toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) {
+        names.add(name);
+      }
+    }
+    return names.stream()
+        .filter(name -> name.toLowerCase(java.util.Locale.ROOT).startsWith(prefix))
+        .limit(30)
+        .toList();
   }
 
   /** 我的驾驶证：按级别从低到高列出整条阶梯——已取得、考试或练习中、须先练习、可报名（带按钮）、尚未解锁。 */
