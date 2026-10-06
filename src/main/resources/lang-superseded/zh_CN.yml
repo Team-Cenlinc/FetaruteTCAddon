@@ -57,8 +57,6 @@ command:
       give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
     list:
       operator-only: ["<operator>（<code>，不绑车站）"]
-    bulletin:
-      no-permission: ["<prefix> <red>当前操作者不具备该公司的公告管理权限</red> <gray>需要 fetarute.pids.manage，或为该公司的所有者、经理、职员</gray>"]
   train:
     help:
       entry-config-set:
@@ -150,10 +148,6 @@ command:
       header: ["<prefix> <dark_aqua>Depot 发车检查</dark_aqua> <gray>(node=<white><node></white>, trips=<white><trips></white>, services=<white><services></white>, queue=<white><queue></white>, pending=<white><pending></white>)</gray>"]
     spawn:
       coordinated-only: ["<prefix> <red>运行时物理闭锁已接管物理出车</red> <gray>当前手动 spawn 旁路未经过 epoch、进路硬授权与真实足迹水合，已安全拒绝；请使用发车计划/队列触发正式出车</gray>"]
-  station:
-    group:
-      add:
-        cross-company-denied: ["<prefix> <red>车站 <white><station></white> 隶属于公司 <white><company></white>，当前操作者不具备该公司的管理权限。</red><gray>跨公司添加成员须同时具备双方公司的管理权限，请联系对方公司管理员办理（邀请与确认流程暂未开放）</gray>"]
   common:
     invalid-boolean: ["<prefix> <red>无效布尔值：</red><white><value></white> <gray>(仅支持 true/false)</gray>"]
   help:

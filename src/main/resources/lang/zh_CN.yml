@@ -82,7 +82,7 @@ display:
   # 另有 line_change：直通运转在这一站换到另一条线时为新线路名。
   trip:
     title: "<{line_color_tag}>█</{line_color_tag}> <white>{line}</white> <gray>·</gray> <white>{route_pattern}</white> <gray>·</gray> <white>开往 {dest_eop}</white>"
-    summary: "<gray>列车 {train_name} · 共 {player_carriage_total} 节 · 你在第 {player_carriage_no} 节</gray>"
+    summary: "<gray>列车 {train_name} · 共 {player_carriage_total} 节 · 所在第 {player_carriage_no} 节</gray>"
     row:
       next: "<green>下一站</green> <yellow>{station}</yellow> <gray>{eta}</gray>"
       stop: "<white>{station}</white> <gray>{eta}</gray>"
@@ -116,7 +116,7 @@ sign:
     created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车</dark_aqua>"
     created-doors: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"
     invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 car:节数（亦可写 carriage:），例如 car:4、car:4,6、car:3-5、car:*；第四行可选写 door:开关门的车厢（自车头起算，写法同上），例如 door:1；适用的最短编组也须至少有一节开门车厢</gray>"
-    no-permission: "<prefix> <red>你没有设置停车位置标的权限</red>"
+    no-permission: "<prefix> <red>无权设置停车位置标</red>"
   type:
     depot: "车库"
     depot_throat: "车库咽喉"
@@ -1117,7 +1117,7 @@ command:
         success: "<prefix> <dark_aqua>车站</dark_aqua> <white><station></white><gray>（<name>）</gray><dark_aqua>已加入车站组</dark_aqua> <white><group></white><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
         updated: "<prefix> <dark_aqua>车站组</dark_aqua> <white><group></white> <dark_aqua>的成员</dark_aqua> <white><station></white> <dark_aqua>已更新</dark_aqua><gray>（换乘方式：<white><type></white>；步行时间：<white><walk></white>）</gray>"
         in-other-group: "<prefix> <red>车站 <white><station></white> 已隶属于车站组 <white><other></white>。每个车站仅可隶属于一个车站组，请先将其从原车站组中移除</red>"
-        cross-company-denied: "<prefix> <red>车站 <white><station></white> 隶属于公司 <white><company></white>，你没有该公司的管理权限。</red><gray>跨公司添加成员须同时具备双方公司的管理权限，请联系对方公司管理员办理（邀请与确认流程暂未开放）</gray>"
+        cross-company-denied: "<prefix> <red>车站 <white><station></white> 隶属于公司 <white><company></white>，当前操作者不具备该公司的管理权限。</red><gray>跨公司添加成员须同时具备双方公司的管理权限，请联系对方公司管理员办理（邀请与确认流程暂未开放）</gray>"
         invalid-station: "<prefix> <red>车站 <white><station></white> 未关联有效的运营商，无法加入车站组</red>"
         invalid-type: "<prefix> <red>换乘方式无效：</red><white><type></white><gray>（可选值：SAME_PLATFORM、IN_STATION、OUT_OF_STATION）</gray>"
       remove:
@@ -1182,7 +1182,7 @@ command:
         new: "<gray>/fta pids bulletin new <white><公司> <运营商></white></gray> <white>-</white> <dark_aqua>打开对话框发布公告</dark_aqua>"
         list: "<gray>/fta pids bulletin list <white>[页]</white></gray> <white>-</white> <dark_aqua>可管理的公告</dark_aqua>"
         edit: "<gray>/fta pids bulletin info|edit|remove <white><公告></white></gray> <white>-</white> <dark_aqua>按编号查看、修改或撤下</dark_aqua>"
-      no-permission: "<prefix> <red>你没有该公司的公告管理权限</red> <gray>需要 fetarute.pids.manage，或为该公司的所有者、经理、职员</gray>"
+      no-permission: "<prefix> <red>当前操作者不具备该公司的公告管理权限</red> <gray>需要 fetarute.pids.manage，或为该公司的所有者、经理、职员</gray>"
       unknown-operator: "<prefix> <red>未找到运营商</red> <gray>(operator=<white><operator></white>，公司 <white><company></white>)</gray>"
       not-found: "<prefix> <red>未找到公告</red> <gray>(bulletin=<white><bulletin></white>)</gray>"
       ambiguous: "<prefix> <red>编号前缀对应多条公告</red> <gray>(bulletin=<white><bulletin></white>，共 <white><count></white> 条)，请多写几位</gray>"
@@ -2161,7 +2161,7 @@ drive:
       entry-stops: "<gray>停站：</gray><white><stops></white> <gray>站（含终点站）</gray>"
       entry-run-time: "<gray>预计运行：</gray><white><run_time></white>"
       entry-claimed: "<gray>已被</gray> <white><player></white> <gray>领取</gray>"
-      entry-claimed-self: "<green>已由你领取</green>"
+      entry-claimed-self: "<green>已领取</green>"
       level:
         standard: "<green>驾驶难度：标准级</green>"
         simulation: "<gold>驾驶难度：仿真级</gold>"
@@ -2208,7 +2208,7 @@ drive:
       depot-on: "<prefix> <green>已改为从车库 <white><depot></white> 接车：列车出库时将通知你，届时可点击 [前往列车]</green>"
       depot-off: "<prefix> <gray>已取消车库接车，列车到达 <white><station></white> 后再接班</gray>"
       not-depot: "<prefix> <red>该车次的列车不从车库出库</red>"
-      reassigned: "<prefix> <yellow>车次 <aqua><trip></aqua> 已改由别的列车担当，列车 <aqua><train></aqua> 不再为你保留；担当列车确定后将重新通知</yellow>"
+      reassigned: "<prefix> <yellow>车次 <aqua><trip></aqua> 已改由别的列车担当，原列车 <aqua><train></aqua> 不再保留；担当列车确定后将重新通知</yellow>"
       started: "<prefix> <red>已开始驾驶，不能再更改接车方式</red>"
     goto:
       teleported: "<prefix> <green>已到达指定驾驶室旁，请上车就座并确认座位</green>"
