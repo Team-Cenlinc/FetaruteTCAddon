@@ -628,6 +628,9 @@ drive:
       expired: "Dropped"
       failed: "Failed"
       interrupted: "Taken back"
+    next-trip-layover: "<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
+    next-trip-layover-no-destination: "<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua>, departing at <white><time></white></white>"
+    layover-no-next-trip: "<prefix> <yellow>This train is laying over; the timetable has no next trip for it yet</yellow>"
   tutorial:
     offer: "<prefix> <gold>First time driving?</gold> <gray>The tutorial walks you through starting the train, pulling away, coasting, braking to a stop, and opening and closing the doors during this drive; each step moves on once you have done it.</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive tutorial start</white>'><green>[Start tutorial]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Stop asking; run /fta drive tutorial start any time</gray>'><gray>[Skip]</gray></hover></click>"
     started: "<prefix> <gold>Tutorial started</gold> <gray>Follow the prompts; the action bar and sidebar keep showing the driving display.</gray>"
@@ -979,7 +982,7 @@ drive:
       not-seated: "<prefix> <red>Sit in a train seat first</red>"
       managed-train: "<prefix> <red>This train is run by the dispatcher and driver takeover is not enabled</red>"
       no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"
-      not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"
+      not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station or laying over</red>"
       not-head-cab: "<prefix> <red>Sit in the leading cab to take over</red>"
       protection-active: "<prefix> <red>The line is congested; takeovers are paused</red>"
       cancelled: "<prefix> <red>You cannot start driving right now</red>"

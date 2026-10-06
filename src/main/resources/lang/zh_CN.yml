@@ -2269,6 +2269,9 @@ drive:
       expired: "已作废"
       failed: "未完成"
       interrupted: "已收回"
+    next-trip-layover: "<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
+    next-trip-layover-no-destination: "<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
+    layover-no-next-trip: "<prefix> <yellow>本车正在待命，时刻表上暂无本车的下一趟</yellow>"
   tutorial:
     offer: "<prefix> <gold>初次驾驶</gold> <gray>新手教程将在本次驾驶中逐步引导启动列车、起步、惰行、制动停车与开关车门，每完成一步自动进入下一步。</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive tutorial start</white>'><green>[开始新手教程]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>此后不再自动提示；可随时输入 /fta drive tutorial start 开始</gray>'><gray>[跳过]</gray></hover></click>"
     started: "<prefix> <gold>新手教程已开始</gold> <gray>请按提示操作，动作栏与侧边栏照常显示驾驶信息。</gray>"
@@ -2620,7 +2623,7 @@ drive:
       not-seated: "<prefix> <red>请先坐在列车的座位上</red>"
       managed-train: "<prefix> <red>该列车由调度系统运行，当前未开放驾驶员接管</red>"
       no-task: "<prefix> <red>该列车由调度系统运行，需要领取驾驶任务才能接管</red>"
-      not-stopped-at-station: "<prefix> <red>只能在列车停站期间接管调度列车</red>"
+      not-stopped-at-station: "<prefix> <red>只能在列车停站或待命期间接管调度列车</red>"
       not-head-cab: "<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"
       protection-active: "<prefix> <red>线路拥堵，暂停接班</red>"
       cancelled: "<prefix> <red>当前无法开始驾驶</red>"

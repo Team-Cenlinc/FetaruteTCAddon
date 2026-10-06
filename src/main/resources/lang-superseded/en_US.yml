@@ -148,6 +148,7 @@ drive:
         - "<prefix> <red>The train has not stopped (<white><speed_kmh></white> km/h), wait until it has stopped</red>"
       protection-active: ["<prefix> <red>The line is congested; new shifts are paused</red>"]
       no-permission: ["<prefix> <red>You are not allowed to drive trains outside dispatch; take a driving task to drive a dispatched train</red>"]
+      not-stopped-at-station: ["<prefix> <red>A dispatched train can only be taken over while it is stopped at a station</red>"]
     status: ["<prefix> <white><train></white> <gray>|</gray> Notch <yellow><notch></yellow> <gray>|</gray> Speed <white><speed_kmh></white> km/h <gray>(limit <limit_kmh>)</gray> <gray>|</gray> <mode> accel <accel> decel <decel> b/s² <gray>|</gray> <direction> <gray>|</gray> <phase>"]
     congestion:
       status: ["<prefix> Congestion breaker: <white><status></white>"]

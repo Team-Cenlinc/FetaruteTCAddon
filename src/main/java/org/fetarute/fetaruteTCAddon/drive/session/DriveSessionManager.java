@@ -779,6 +779,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       tasks.onSessionStarted(
           player.getUniqueId(), group.getProperties().getTrainName(), Bukkit.getCurrentTick());
       adoptTakeover(player, session, group.getProperties().getTrainName());
+      tellLayoverWithoutNextTrip(player, group.getProperties().getTrainName());
       driverLink
           .score()
           .setDelayAtStart(taskDelayOf(player.getUniqueId(), group.getProperties().getTrainName()));
@@ -1971,17 +1972,29 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 waiting ->
                     waiting.playerId().equals(player.getUniqueId())
                         && waiting.stage() == DriverPickups.Stage.WAITING);
-    if (!dwelling && pickup.isEmpty()) {
+    // 终点站待命、等派下一趟的车：停着等派车，与驾驶员结算后留在车上等接续是同一个状态，也可以接管。
+    boolean layover = !dwelling && isLayover(name);
+    if (!dwelling && !layover && pickup.isEmpty()) {
       return StartOutcome.NOT_STOPPED_AT_STATION;
     }
-    // 一般坐车头端；终点站接车按接车时预计的发车端（尽头式站台是车尾端，方向未定时两端都可以，发车方向相反时再换端）。
+    // 一般坐车头端；终点站接车与待命车按预计的发车端（尽头式站台是车尾端，方向未定时两端都可以，发车方向相反时再换端）。
     CabSeats.Departure expected =
-        pickup.map(DriverPickups.Pickup::departure).orElse(CabSeats.Departure.HEAD);
+        pickup
+            .map(DriverPickups.Pickup::departure)
+            .orElseGet(() -> layover ? TerminalCabEnd.of(plugin, group) : CabSeats.Departure.HEAD);
     CabSeats.End end = SeatLocator.cabSeats(group, current.driver().cabSeatNames()).endOf(binding);
     if (!CabSeats.accepts(end, expected)) {
       return StartOutcome.NOT_HEAD_CAB;
     }
     return null;
+  }
+
+  /** 列车是否在终点站待命（等派下一趟）。 */
+  private boolean isLayover(String trainName) {
+    return plugin
+        .getLayoverRegistry()
+        .map(registry -> registry.get(trainName).isPresent())
+        .orElse(false);
   }
 
   /** 接管调度列车时的启动状态：热车交接时受电、主断、辅助电源都已接通，只差钥匙。 */
@@ -2329,11 +2342,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return true;
     }
     String trainName = group.getProperties().getTrainName();
-    boolean layover =
-        plugin
-            .getLayoverRegistry()
-            .map(registry -> registry.get(trainName).isPresent())
-            .orElse(false);
+    boolean layover = isLayover(trainName);
     if (superviseTask(session, link, group, trainName, layover)) {
       return true;
     }
@@ -4584,7 +4593,19 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             next.trip().id(), next.trip().tripCode(), destination, next.departure()));
   }
 
-  /** 接续的下一趟第一次查到时告诉驾驶员一次：车次、终点站与计划发车时刻。 */
+  /** 接管终点站待命车时，时刻表上还没有它的下一趟：当场说一声（有下一趟时由 {@link #announceNextTrip} 告诉开往哪里）。 */
+  private void tellLayoverWithoutNextTrip(Player player, String trainName) {
+    if (!isLayover(trainName)
+        || plugin
+            .getTimetableService()
+            .flatMap(service -> service.nextDepartureOf(trainName))
+            .isPresent()) {
+      return;
+    }
+    sendTaskChat(player, "drive.task.layover-no-next-trip", Map.of());
+  }
+
+  /** 接续的下一趟第一次查到时告诉驾驶员一次：车次、终点站与计划发车时刻。在终点站待命时（本趟已跑完）换成待命的说法。 */
   private void announceNextTrip(DriveSession session, DriverLink link) {
     Optional<DriverNextTrip> trip = link.takeNextTripAnnouncement();
     Player player = Bukkit.getPlayer(session.playerId());
@@ -4595,11 +4616,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     traceSession(
         session,
         "接续下一趟: " + next.tripCode() + " 开往 " + next.destination() + " 计划 " + next.departure());
+    String key = link.turnbackPending() ? "drive.task.next-trip-layover" : "drive.task.next-trip";
     sendTaskChat(
         player,
-        next.destination().isEmpty()
-            ? "drive.task.next-trip-no-destination"
-            : "drive.task.next-trip",
+        next.destination().isEmpty() ? key + "-no-destination" : key,
         Map.of(
             "trip",
             next.tripCode(),

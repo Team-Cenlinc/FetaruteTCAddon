@@ -490,6 +490,7 @@ drive:
       disabled: ["<prefix> <red>手动驾驶功能已关闭</red>"]
       unavailable: ["<prefix> <red>手动驾驶当前不可用，请查看控制台日志</red>"]
       train-in-use: ["<prefix> <red>该列车正在被驾驶或正在制动停车</red>"]
+      not-stopped-at-station: ["<prefix> <red>只能在列车停站期间接管调度列车</red>"]
     unavailable: ["<prefix> <red>手动驾驶功能尚未就绪</red>"]
     fault:
       not-simulation: ["<prefix> <red><player> 的驾驶会话不是 simulation 级，不能注入故障</red>"]
