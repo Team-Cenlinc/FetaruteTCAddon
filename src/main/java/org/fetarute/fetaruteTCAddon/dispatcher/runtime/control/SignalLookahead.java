@@ -339,8 +339,8 @@ public final class SignalLookahead {
     return constraints;
   }
 
-  /** 计算路径上每个节点到起点的累计距离。 */
-  private static List<Long> computeNodeDistances(List<NodeId> nodes, List<RailEdge> edges) {
+  /** 计算路径上每个节点到起点的累计距离；前瞻给阻塞者定位用的就是这张表，别处要与之对齐时复用它。 */
+  public static List<Long> computeNodeDistances(List<NodeId> nodes, List<RailEdge> edges) {
     List<Long> distances = new ArrayList<>(nodes.size());
     long distance = 0;
     distances.add(0L); // 起点距离为 0

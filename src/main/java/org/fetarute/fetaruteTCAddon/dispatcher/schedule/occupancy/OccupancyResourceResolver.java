@@ -10,6 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
@@ -83,6 +84,16 @@ public final class OccupancyResourceResolver {
   static String switcherConflictId(RailNode node) {
     Objects.requireNonNull(node, "node");
     return SWITCHER_CONFLICT_PREFIX + node.id().value();
+  }
+
+  /** 道岔冲突键对应的道岔节点；不是道岔冲突键时为空。 */
+  public static Optional<NodeId> switcherNodeOf(OccupancyResource resource) {
+    if (resource == null
+        || resource.kind() != ResourceKind.CONFLICT
+        || !resource.key().startsWith(SWITCHER_CONFLICT_PREFIX)) {
+      return Optional.empty();
+    }
+    return Optional.of(NodeId.of(resource.key().substring(SWITCHER_CONFLICT_PREFIX.length())));
   }
 
   /** 判断资源是否为物理足迹推导的严格联锁区。 */
