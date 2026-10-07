@@ -332,6 +332,7 @@ drive:
     cab-changed: ["<prefix> <white>折返换端：已换到前端驾驶室（第 <car> 节）</white>"]
     cab-change-failed: ["<prefix> <red>折返换端失败：前端驾驶室没有可用座位，列车交还自动运行</red>"]
     cab-change:
+      switch-not-needed: ["<prefix> <yellow>当前无需换端</yellow>"]
       announce: ["<prefix> <white>本站折返：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前前往就座；换端途中离座不结束驾驶</white>"]
       confirm-seat: ["<prefix> <white>你已坐在第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>本列车的驾驶座未作标记，确认是驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认座位]</green></hover></click>"]
     sheet:

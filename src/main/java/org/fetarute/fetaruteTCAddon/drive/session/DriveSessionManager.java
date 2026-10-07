@@ -280,8 +280,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    *
    * @param after 刚跑完的那一趟（列车绑上别的车次才算开出下一趟）
    * @param scored 那一趟已在本次驾驶里结算：这期间取消、离座、换端超时都按正常结束说；停在终点站接管（一站没开）时为 {@code false}
+   * @param odometer 结算（或接管）时会话的累计里程（格）：之后挪动过就不再算原地等下一趟
    */
-  private record Continuation(TaskKey after, boolean scored) {}
+  private record Continuation(TaskKey after, boolean scored, double odometer) {}
 
   private final Map<UUID, Continuation> continuations = new HashMap<>();
 
@@ -2662,8 +2663,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (superviseTask(session, link, group, trainName, layover)) {
       return true;
     }
-    // 停在终点站待命：派车放行那一拍按发车方向调头（自动运行由发车动作自己调头）。
-    link.setTurnbackPending(layover);
+    // 停在终点站等开出下一趟（待命，或结算后还在原地）：派车放行那一拍按发车方向调头（自动运行由发车动作自己调头）。
+    // 不能只看待命登记：车晚点时登记待命与派车复用在同一拍，会话根本看不到待命，车就不调头放行了。
+    Continuation waiting = continuations.get(session.playerId());
+    link.setTurnbackPending(
+        layover
+            || awaitingTurnback(
+                waiting != null,
+                session.isStopped(),
+                waiting == null ? 0.0 : Math.abs(session.odometerBlocks() - waiting.odometer()),
+                releasedToDriver(session, link)));
     // 终点站结算后、开出下一趟之前：评分停在刚结算的那一趟，下一趟的起始晚点等开出记成任务后再记。
     boolean settled = continuations.containsKey(session.playerId());
     if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0 && !settled && !link.score().hasDelayAtStart()) {
@@ -2770,7 +2779,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
       if (keepDriving) {
         // 运营人员直接接管：没有接续车次也接着开（例如开到回库），像以前一样，直到收车或自己结束。
-        continuations.put(session.playerId(), new Continuation(task.get().key(), true));
+        continuations.put(
+            session.playerId(), new Continuation(task.get().key(), true, session.odometerBlocks()));
         return false;
       }
       handback(session, DriveSession.EndReason.TASK_COMPLETE);
@@ -3002,7 +3012,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     TimetableService.DueTrip next = reservation.trip().get();
     TaskKey key = keyOf(next);
-    continuations.put(session.playerId(), new Continuation(task.key(), true));
+    continuations.put(
+        session.playerId(), new Continuation(task.key(), true, session.odometerBlocks()));
     String destination =
         link.nextTrip()
             .filter(trip -> trip.tripId().equals(next.trip().id()))
@@ -3083,7 +3094,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     TaskKey key = new TaskKey(current.timetableId(), current.tripCode(), current.serviceDate());
     if (current.nextStopSequence().isEmpty()) {
       // 这一趟已到终点：等列车开出下一趟时再记成任务。本次驾驶没结算过任何一趟，离开时不说“已结算”。
-      continuations.put(session.playerId(), new Continuation(key, false));
+      continuations.put(session.playerId(), new Continuation(key, false, session.odometerBlocks()));
       Reservation next = reserveNext(session, player, trainName);
       tellTripFinishedAtTakeover(player, session, trainName, key, next);
       return;
@@ -4268,20 +4279,30 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return turnbackPending || stage != CabChange.Stage.IDLE;
   }
 
+  /** 结算后原地等开出下一趟时允许的挪动（格）：超过就算已经开走。 */
+  private static final double TERMINAL_STILL_BLOCKS = 2.0;
+
   /**
-   * ATO 下终点站结算后、转入待命前（站台还在停站或刚停完）：列车不会开走，换端引导照常，离座走向发车端不结束驾驶。
+   * 列车停在终点站、结算后（或停在终点站接管）原地等开出下一趟，派车还没放行：放行那一拍要按发车方向调头，ATO 从此扣车等换端。
    *
-   * <p>此时不扣车：车门与停站仍归站台，扣车等转入待命再开始。
-   *
-   * @param waitingForNextTrip 驾驶员在等接续下一趟（终点站已结算，或停在终点站接管）
+   * @param waitingForNextTrip 驾驶员在等接续下一趟
+   * @param movedBlocks 结算（或接管）后列车挪动的距离（格）
+   * @param released 已收到放行的行车许可
    */
-  static boolean atoWaitingAtTerminal(
-      boolean ato, boolean held, boolean waitingForNextTrip, boolean stopped) {
-    return ato && !held && waitingForNextTrip && stopped;
+  static boolean awaitingTurnback(
+      boolean waitingForNextTrip, boolean stopped, double movedBlocks, boolean released) {
+    return waitingForNextTrip && stopped && movedBlocks < TERMINAL_STILL_BLOCKS && !released;
+  }
+
+  /** 已收到放行的行车许可（不是停车）。ATO 只在扣车期间按驾驶员控制收许可，其余时候手上的许可是转 ATO 前留下的，不算。 */
+  private static boolean releasedToDriver(DriveSession session, DriverLink link) {
+    return (!session.isAto() || link.cabHold())
+        && link.directive() != null
+        && !link.directive().isStop();
   }
 
   /**
-   * 推进一拍折返换端判定并处理它的事件。ATO 下只在终点站等接续下一趟时（结算后的停站、待命到放行）与换端进行中判定，其余时候 ATO 自己发车，不必换端。
+   * 推进一拍折返换端判定并处理它的事件。ATO 下只在扣车期间判定（终点站结算后原地等下一趟到放行、换端进行中），其余时候 ATO 自己发车，不必换端。
    *
    * @return 会话是否已经结束
    */
@@ -4293,18 +4314,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       DriveConfig current) {
     DriverLink link = session.driverLink();
     CabChange change = session.cabChange();
-    boolean ato = session.isAto();
-    boolean waitingAtTerminal =
-        atoWaitingAtTerminal(
-            ato,
-            link.cabHold(),
-            continuations.containsKey(session.playerId()),
-            session.isStopped());
     boolean applicable =
-        (!ato || link.cabHold() || waitingAtTerminal) && group.size() >= 2 && session.isStopped();
-    // ATO 只在扣车期间按驾驶员控制收行车许可：结算后停站中的引导不算放行。
-    boolean released =
-        (!ato || link.cabHold()) && link.directive() != null && !link.directive().isStop();
+        (!session.isAto() || link.cabHold()) && group.size() >= 2 && session.isStopped();
+    boolean released = releasedToDriver(session, link);
     // 终点站开门后就能去换端，不必等关门转入待命；车门可以开着，到另一端再关。
     // 还在开着一趟任务时先等终点站结算（开门后），结算后才提示换端，免得刚告知换端就因没有下一趟而结束驾驶。
     boolean drivingTask =
@@ -4314,9 +4326,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             .isPresent();
     boolean preRelease =
         CabChange.preRelease(
-            link.turnbackPending(),
-            released,
-            (link.atTerminalStop() || waitingAtTerminal) && !drivingTask);
+            link.turnbackPending(), released, link.atTerminalStop() && !drivingTask);
     boolean walkAllowed =
         walkAllowed(
             drivingTask, continuations.containsKey(session.playerId()), link.turnbackPending());
@@ -4325,7 +4335,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         applicable
             ? change.prediction(
                 preRelease,
-                link.turnbackPending(),
+                isLayover(group.getProperties().getTrainName()),
                 () -> TerminalCabEnd.of(plugin, group, stationNode))
             : CabSeats.Departure.EITHER;
     // 座位在哪一端只在可能要换端时才读（要逐个看座位附件的名字）：尽头式待命、换端途中、停着拿到行车许可时。

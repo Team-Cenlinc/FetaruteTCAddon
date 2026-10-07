@@ -603,7 +603,7 @@ drive:
       short-moved: "<prefix> <yellow>Not enough time: changing ends takes about <white><need></white> s with only <white><left></white> s to departure, so you have been moved to the cab in car <white><car></white></yellow>"
       timeout-moved: "<prefix> <yellow>The time to change ends ran out; you have been moved to the cab in car <white><car></white></yellow>"
       switch-not-driving: "<prefix> <red>You are not driving a dispatched train</red>"
-      switch-not-needed: "<prefix> <yellow>No change of ends is needed now</yellow>"
+      switch-not-needed: "<prefix> <yellow>No change of ends needed: you can depart from this cab. If the train is dispatched in the opposite direction, you will be told to change ends</yellow>"
       switch-direction-unknown: "<prefix> <yellow>The departure direction is not set yet; change ends after dispatch</yellow>"
       switch-failed: "<prefix> <red>Cannot move you directly: no free seat in that cab, or you are too far from the train; please walk there</red>"
       switched: "<prefix> <green>Moved to the cab at the departure end</green>"

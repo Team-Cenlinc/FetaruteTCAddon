@@ -37,13 +37,14 @@ class AtoCabHoldTest {
   }
 
   @Test
-  @DisplayName("终点站结算后、转入待命前：ATO 不扣车但照常引导；已扣车、正驾驶任务中或列车在动都不算")
-  void waitingAtTerminalBeforeLayover() {
-    assertTrue(DriveSessionManager.atoWaitingAtTerminal(true, false, true, true));
-    assertFalse(DriveSessionManager.atoWaitingAtTerminal(false, false, true, true), "人工驾驶另有停站对象");
-    assertFalse(DriveSessionManager.atoWaitingAtTerminal(true, true, true, true), "已在扣车：按扣车处理");
-    assertFalse(DriveSessionManager.atoWaitingAtTerminal(true, false, false, true), "还没结算");
-    assertFalse(DriveSessionManager.atoWaitingAtTerminal(true, false, true, false), "列车在动");
+  @DisplayName("终点站结算后原地等下一趟、还没放行：放行那一拍要调头（不必等看到待命登记）；放行后、开走后、没结算都不算")
+  void awaitsTurnbackFromSettlementUntilReleased() {
+    assertTrue(DriveSessionManager.awaitingTurnback(true, true, 0.0, false));
+    assertTrue(DriveSessionManager.awaitingTurnback(true, true, 1.5, false), "停站时对位挪动一点仍算原地");
+    assertFalse(DriveSessionManager.awaitingTurnback(true, true, 0.0, true), "已放行：调头标记已用掉");
+    assertFalse(DriveSessionManager.awaitingTurnback(true, true, 30.0, false), "已经开走（例如接管后继续开往车库）");
+    assertFalse(DriveSessionManager.awaitingTurnback(true, false, 0.0, false), "列车在动");
+    assertFalse(DriveSessionManager.awaitingTurnback(false, true, 0.0, false), "还没结算");
   }
 
   @Test

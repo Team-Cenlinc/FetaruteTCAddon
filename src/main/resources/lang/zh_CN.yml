@@ -2248,7 +2248,7 @@ drive:
       short-moved: "<prefix> <yellow>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，已直接送到第 <white><car></white> 节驾驶室</yellow>"
       timeout-moved: "<prefix> <yellow>换端时限已到，已直接送到第 <white><car></white> 节驾驶室</yellow>"
       switch-not-driving: "<prefix> <red>当前未在驾驶调度列车</red>"
-      switch-not-needed: "<prefix> <yellow>当前无需换端</yellow>"
+      switch-not-needed: "<prefix> <yellow>当前无需换端：所坐的驾驶室即可发车；派车后若发车方向与所坐端相反，会再提示换端</yellow>"
       switch-direction-unknown: "<prefix> <yellow>发车方向尚未确定，派车后再换端</yellow>"
       switch-failed: "<prefix> <red>无法直接换端：目标驾驶室没有空座位，或距离列车过远，请步行前往</red>"
       switched: "<prefix> <green>已换到发车端驾驶室</green>"

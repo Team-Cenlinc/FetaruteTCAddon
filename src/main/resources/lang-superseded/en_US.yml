@@ -78,6 +78,7 @@ drive:
     cab-changed: ["<prefix> <white>Changed ends: you are now in the leading cab (car <car>)</white>"]
     cab-change-failed: ["<prefix> <red>Could not change ends: no free seat in the leading cab, the train returns to automatic operation</red>"]
     cab-change:
+      switch-not-needed: ["<prefix> <yellow>No change of ends is needed now</yellow>"]
       announce: ["<prefix> <white>The train reverses here: the next trip is driven from the cab in car <yellow><car></yellow>. Take that seat before departure; leaving your seat on the way does not end driving</white>"]
     continue-offer: ["<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"]
     continue-offer-code: ["<prefix> <white>This trip is scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"]
