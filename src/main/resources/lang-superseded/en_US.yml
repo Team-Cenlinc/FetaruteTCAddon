@@ -144,6 +144,7 @@ drive:
     title: ["<gold><bold>Driver's Desk</bold></gold> <gray><train></gray>"]
   command:
     help:
+      entry-cab: ["  <gray>•</gray> <white>/fta drive cab</white> <gray>- Move straight to the departure-end cab when changing ends</gray>"]
       entry-on: ["  <gray>•</gray> <white>/fta drive on</white> <gray>- Start driving from a train seat</gray>"]
       entry-reverser: ["  <gray>•</gray> <white>/fta drive reverser [forward|neutral|reverse]</white> <gray>- Set the reverser while stopped</gray>"]
       entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- Start, quit or reset the tutorial, or skip the current step</gray>"]
@@ -151,6 +152,9 @@ drive:
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- Open the task board of the nearest station</gray>"]
       entry-congestion: ["  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- Show or reset the congestion breaker</gray>"]
     start:
+      not-head-cab: ["<prefix> <red>Sit in the leading cab to take over</red>"]
+      reserved-by-other: ["<prefix> <red>This train has been taken by <white><player></white>, who is due to take it over; you cannot take it over</red>"]
+      reserved-by-other-revoke: ["<prefix> <red>This train has been taken by <white><player></white>, who is due to take it over; revoke their task before taking it over</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>Click to fill in:</gray> <white>/fta drive revoke <player></white>'><yellow>[Revoke task]</yellow></hover></click>"]
       bad-game-mode: ["<prefix> <red>Only survival or adventure mode can drive</red>"]
       managed-train: ["<prefix> <red>This train is managed by the dispatcher and cannot be driven manually yet</red>"]
       train-moving:

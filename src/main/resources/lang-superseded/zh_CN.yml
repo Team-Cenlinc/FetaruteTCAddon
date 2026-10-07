@@ -59,6 +59,7 @@ command:
       operator-only: ["<operator>（<code>，不绑车站）"]
   train:
     help:
+      entry-attachment: ["  <gray>•</gray> <white>/fta train attachment set|unset driver_seat</white> <gray>- 把所坐的座位标为驾驶座或取消标记</gray>"]
       entry-config-set:
         - "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel</white> <gray>- 设置配置</gray>"
         - "  <gray>•</gray> <white>/fta train config set [列车] --type/--accel/--decel/--mode/--mt/--max-speed</white> <gray>- 设置配置</gray>"
@@ -71,6 +72,8 @@ command:
       not-found: ["<prefix> <red>未找到列车: <train></red>"]
       invalid-selector: ["<prefix> <red>无效的选择器语法: <raw></red>"]
     attachment:
+      car-full: ["<prefix> <red>第 <white><car></white>/<cars> 节车厢已有两个驾驶座（座位 <white><first></white>、<white><second></white>），每节车厢最多两个，对应车厢两端的驾驶室；请先坐到要取消的座位执行 /fta train attachment unset driver_seat</red>"]
+      also-marked: ["<prefix> <yellow>本节车厢的座位 <white><other></white> 也是驾驶座：每节车厢最多两个，对应车厢两端的驾驶室；如为误标，请坐到该座位执行 /fta train attachment unset driver_seat</yellow>"]
       end-head: ["<gray>此刻算</gray> <white>车头端</white> <gray>驾驶室。</gray>"]
       end-tail: ["<gray>此刻算</gray> <white>车尾端</white> <gray>驾驶室。</gray>"]
       end-middle: ["<yellow>这节车不在列车两端：有标记的列车只认第一节、最后一节上的驾驶座，中间车厢的驾驶座在编组变化、成为端车后才生效。</yellow>"]
@@ -487,9 +490,13 @@ drive:
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]
       header: ["<prefix> <dark_aqua>手动驾驶命令</dark_aqua>"]
       entry-fault: ["  <gray>•</gray> <white>/fta drive fault <玩家> <类型|clear></white> <gray>- 给 simulation 级驾驶中的列车注入或清除车上故障</gray>"]
+      entry-cab: ["  <gray>•</gray> <white>/fta drive cab</white> <gray>- 折返换端时直接换到发车端驾驶室</gray>"]
       entry-on: ["  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐在列车座位上后开始驾驶</gray>", "  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐上列车座位后开始驾驶</gray>"]
       entry-congestion: ["  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>", "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵保护</gray>"]
     start:
+      not-head-cab: ["<prefix> <red>请坐到列车前进方向的车头驾驶室再接管</red>"]
+      reserved-by-other: ["<prefix> <red>该列车已由 <white><player></white> 领取，正等候其接班，不能接管</red>"]
+      reserved-by-other-revoke: ["<prefix> <red>该列车已由 <white><player></white> 领取，正等候其接班；须先收回其任务才能接管</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>点击填入：</gray> <white>/fta drive revoke <player></white>'><yellow>[收回任务]</yellow></hover></click>"]
       bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]
       managed-train: ["<prefix> <red>该列车由调度系统管理，暂不支持手动驾驶</red>"]
       train-moving:

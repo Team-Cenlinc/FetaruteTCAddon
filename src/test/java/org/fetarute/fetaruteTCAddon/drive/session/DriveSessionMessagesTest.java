@@ -49,6 +49,24 @@ class DriveSessionMessagesTest {
 
   @ParameterizedTest
   @ValueSource(strings = {"zh_CN", "en_US"})
+  @DisplayName("标记驾驶座的每种结果都有提示")
+  void everySeatMarkOutcomeHasAMessage(String localeTag) throws Exception {
+    YamlConfiguration lang = lang(localeTag);
+    for (String key :
+        new String[] {
+          "player-only", "no-cab-names", "not-seated", "shared-model", "marked", "already-marked",
+          "car-full", "also-marked", "no-such-seat", "unmarked", "not-marked", "end-head",
+          "end-tail", "end-middle", "end-none", "end-inner", "end-unmarked-train", "save-hint",
+          "save-hover"
+        }) {
+      assertTrue(
+          lang.isString("command.train.attachment." + key),
+          localeTag + " 缺少 command.train.attachment." + key);
+    }
+  }
+
+  @ParameterizedTest
+  @ValueSource(strings = {"zh_CN", "en_US"})
   @DisplayName("接管时没记成任务、终点没有接续车次：每种原因都有说法")
   void everyReasonHasAMessage(String localeTag) throws Exception {
     YamlConfiguration lang = lang(localeTag);

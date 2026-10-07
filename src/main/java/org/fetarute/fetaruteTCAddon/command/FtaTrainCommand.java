@@ -19,6 +19,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -354,17 +355,33 @@ public final class FtaTrainCommand {
                 }));
 
     // attachment set|unset driver_seat：把自己所坐的座位标为（或取消）驾驶座，改的是座位附件的名字
-    for (boolean mark : new boolean[] {true, false}) {
-      manager.command(
-          manager
-              .commandBuilder("fta")
-              .literal("train")
-              .literal("attachment")
-              .literal(mark ? "set" : "unset")
-              .literal("driver_seat")
-              .permission("fetarute.train.config")
-              .handler(ctx -> handleDriverSeat(ctx.sender(), mark)));
-    }
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("attachment")
+            .literal("set")
+            .literal("driver_seat")
+            .permission("fetarute.train.config")
+            .handler(ctx -> handleDriverSeat(ctx.sender(), true, OptionalInt.empty())));
+    // unset 可带座位序号：取消所坐这节车厢里另一个座位的标记（标记提示里的按钮），不必坐过去。
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("attachment")
+            .literal("unset")
+            .literal("driver_seat")
+            .optional("seat", org.incendo.cloud.parser.standard.IntegerParser.integerParser(1))
+            .permission("fetarute.train.config")
+            .handler(
+                ctx ->
+                    handleDriverSeat(
+                        ctx.sender(),
+                        false,
+                        ctx.optional("seat")
+                            .map(seat -> OptionalInt.of((Integer) seat - 1))
+                            .orElse(OptionalInt.empty()))));
 
     // debug list 子命令：显示所有缓存的诊断数据
     manager.command(
@@ -1287,7 +1304,7 @@ public final class FtaTrainCommand {
   }
 
   /** 把玩家所坐的座位标为驾驶座或取消标记，并说明这个座位现在算不算驾驶室：一列车有标记时只认端车（第一节、最后一节）上的标记座位。 */
-  private void handleDriverSeat(CommandSender sender, boolean mark) {
+  private void handleDriverSeat(CommandSender sender, boolean mark, OptionalInt seatIndex) {
     LocaleManager locale = plugin.getLocaleManager();
     if (!(sender instanceof Player player)) {
       sender.sendMessage(locale.component("command.train.attachment.player-only"));
@@ -1299,7 +1316,7 @@ public final class FtaTrainCommand {
       sender.sendMessage(locale.component("command.train.attachment.no-cab-names"));
       return;
     }
-    SeatLocator.MarkResult result = SeatLocator.markCabSeat(player, mark, cabNames);
+    SeatLocator.MarkResult result = SeatLocator.markCabSeat(player, mark, cabNames, seatIndex);
     if (result.outcome() == SeatLocator.MarkOutcome.NOT_SEATED) {
       sender.sendMessage(locale.component("command.train.attachment.not-seated"));
       return;
@@ -1323,8 +1340,12 @@ public final class FtaTrainCommand {
         sender.sendMessage(locale.component(prefix + "shared-model", values));
         return;
       }
+      case NO_SUCH_SEAT -> {
+        sender.sendMessage(locale.component(prefix + "no-such-seat", values));
+        return;
+      }
       case CAR_FULL -> {
-        // 一节车厢两端各一个驾驶室：已有两个时要先取消一个，不替玩家决定取消哪个。
+        // 一节车厢两端各一个驾驶室：已满时要先取消一个，不替玩家决定取消哪个。
         sender.sendMessage(
             locale.component(
                 prefix + "car-full",
@@ -1333,10 +1354,10 @@ public final class FtaTrainCommand {
                     values.get("car"),
                     "cars",
                     values.get("cars"),
-                    "first",
-                    others.get(0),
-                    "second",
-                    others.get(others.size() - 1))));
+                    "count",
+                    String.valueOf(others.size()),
+                    "seats",
+                    String.join("、", others))));
         return;
       }
       case UNCHANGED -> sender.sendMessage(

@@ -166,6 +166,12 @@ class CabSeatsTest {
     assertEquals(List.of("door"), third.names(), "已满：不改名字");
     assertEquals(List.of(0, 2), third.otherCabSeats());
 
+    CabSeats.CarMarking crowded =
+        CabSeats.markInCar(
+            List.of(List.of("driver"), List.of(), List.of("driver"), List.of("驾驶座")), 1, cabNames);
+    assertTrue(crowded.full());
+    assertEquals(List.of(0, 2, 3), crowded.otherCabSeats(), "手工标过三个时如实列出全部");
+
     CabSeats.CarMarking again =
         CabSeats.markInCar(
             List.of(List.of("driver"), List.of("driver"), List.of("driver")), 1, cabNames);

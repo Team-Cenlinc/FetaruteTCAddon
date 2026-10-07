@@ -1009,7 +1009,7 @@ drive:
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- Driving leaderboard</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <player></white> <gray>- Revoke a player's driving task</gray>"
       entry-fault: "  <gray>•</gray> <white>/fta drive fault <player> <type|clear></white> <gray>- Inject or clear train faults on a simulation-level driving session</gray>"
-      entry-cab: "  <gray>•</gray> <white>/fta drive cab</white> <gray>- Move straight to the departure-end cab when changing ends</gray>"
+      entry-cab: "  <gray>•</gray> <white>/fta drive cab</white> <gray>- Go straight to the departure-end cab: when changing ends, or to start driving</gray>"
     start:
       started: "<prefix> <green>Now driving <white><train></white></green> <gray>Hotbar 1-9 is P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>Manual driving is disabled</red>"
@@ -1020,7 +1020,7 @@ drive:
       managed-train: "<prefix> <red>This train is run by the dispatcher and driver takeover is not enabled</red>"
       no-task: "<prefix> <red>This train is run by the dispatcher; take a driving task to drive it</red>"
       not-stopped-at-station: "<prefix> <red>A dispatched train can only be taken over while it is stopped at a station or laying over</red>"
-      not-head-cab: "<prefix> <red>Sit in the leading cab to take over</red>"
+      not-head-cab: "<prefix> <red>Sit in the cab at the departure end to take over</red>"
       protection-active: "<prefix> <red>The line is congested; takeovers are paused</red>"
       cancelled: "<prefix> <red>You cannot start driving right now</red>"
       train-in-use: "<prefix> <red>This train is being driven or is braking to a stop</red>"
@@ -1030,8 +1030,8 @@ drive:
       unavailable: "<prefix> <red>Manual driving is unavailable, check the console log</red>"
       failed: "<prefix> <red>Could not start driving, check the console log</red>"
       no-permission: "<prefix> <red>You are not allowed to drive non-dispatched trains; take a driving task to drive a dispatched train</red>"
-      reserved-by-other: "<prefix> <red>This train has been taken by <white><player></white>, who is due to take it over; you cannot take it over</red>"
-      reserved-by-other-revoke: "<prefix> <red>This train has been taken by <white><player></white>, who is due to take it over; revoke their task before taking it over</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>Click to fill in:</gray> <white>/fta drive revoke <player></white>'><yellow>[Revoke task]</yellow></hover></click>"
+      reserved-by-other: "<prefix> <red>A trip of this train has been taken by <white><player></white>, who is due to take it over; you cannot take it over</red>"
+      reserved-by-other-revoke: "<prefix> <red>A trip of this train has been taken by <white><player></white>, who is due to take it over; revoke their task before taking it over</red> <click:suggest_command:'/fta drive revoke <player>'><hover:show_text:'<gray>Click to fill in:</gray> <white>/fta drive revoke <player></white>'><yellow>[Revoke task]</yellow></hover></click>"
       cab-seat-unavailable: "<prefix> <red>Cannot move you to the driver's seat: it is taken, or you are too far from the train</red>"
       cab-offer: "<prefix> <click:run_command:'/fta drive on cab'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive on cab</white>'><aqua>[Move to the driver's seat and start driving]</aqua></hover></click>"
     stop:
@@ -1133,6 +1133,27 @@ graph:
     join: "<prefix> <yellow>The rail graph of world</yellow> <white><world></white> <yellow>is invalid; dispatch there, and cross-world routes through it when cross-world is on, cannot use the graph until it is rebuilt.</yellow>"
 
 command:
+  train:
+    attachment:
+      player-only: "<prefix> <red>Only a player can mark a driver's seat: sit in the seat and run it</red>"
+      no-cab-names: "<prefix> <red>driver.cab-seat-names in drive.yml is empty, so driver's seat marks are disabled</red>"
+      not-seated: "<prefix> <red>Sit in the seat to mark first</red> <gray>a seat attachment of a TrainCarts train</gray>"
+      shared-model: "<prefix> <red>This seat belongs to a shared model (a saved model referenced by a model attachment) and was not changed</red> <gray>Changing it would affect every train using that model; edit the model in the TrainCarts attachment editor</gray>"
+      marked: "<prefix> <dark_aqua>Marked seat <white><seat></white> in car <white><car></white>/<cars> as a driver's seat</dark_aqua> <gray>(names: <white><names></white>)</gray>"
+      already-marked: "<prefix> <gray>Seat <white><seat></white> in car <white><car></white>/<cars> is already a driver's seat (names: <white><names></white>)</gray>"
+      car-full: "<prefix> <red>Car <white><car></white>/<cars> already has <white><count></white> driver's seats (seats <white><seats></white>); each car can have at most two, one for each end. Unmark one of them first</red> <click:suggest_command:'/fta train attachment unset driver_seat '><hover:show_text:'<gray>Click to fill in, then add the seat number</gray>'><yellow>[Unmark]</yellow></hover></click>"
+      also-marked: "<prefix> <yellow>Seat <white><other></white> in this car is also a driver's seat; each car can have two, one for each end. If that is a mistake, unmark it</yellow> <click:run_command:'/fta train attachment unset driver_seat <other>'><hover:show_text:'<gray>Click to run:</gray> <white>/fta train attachment unset driver_seat <other></white>'><yellow>[Unmark seat <other>]</yellow></hover></click>"
+      no-such-seat: "<prefix> <red>This car has no seat <white><seat></white></red>"
+      unmarked: "<prefix> <dark_aqua>Removed the driver's seat mark from seat <white><seat></white> in car <white><car></white>/<cars></dark_aqua> <gray>(names left: <white><names></white>)</gray>"
+      not-marked: "<prefix> <gray>Seat <white><seat></white> in car <white><car></white>/<cars> is not a driver's seat</gray>"
+      end-head: "<gray>This is now the</gray> <white>head-end</white> <gray>cab.</gray>"
+      end-tail: "<gray>This is now the</gray> <white>tail-end</white> <gray>cab.</gray>"
+      end-middle: "<yellow>This car is not at either end of the train: on a train with marked driver's seats only the first and last cars count, so this seat takes effect once a change of formation puts the car at an end.</yellow>"
+      end-none: "<gray>The train has other driver's seat marks; this seat does not count as a cab.</gray>"
+      end-inner: "<yellow>This seat is at the inner end of an end car: when both ends of an end car have driver's seats only the outer one counts, so this seat does not count as a cab in the current formation and takes effect once it becomes the outer end.</yellow>"
+      end-unmarked-train: "<gray>The train has no driver's seat marks left, so cabs are judged by car position again (front half is the head end, the last car the tail end).</gray>"
+      save-hint: "<gray>Only this train was changed; save it back to its saved train so trains spawned later carry the mark too</gray> <aqua>[/train save]</aqua>"
+      save-hover: "<gray>Click to fill in /train save, then add the saved train name</gray>"
   graph:
     portal:
       disabled: "<prefix> <red>Cross-world is disabled (graph.cross-world in config.yml)</red>"

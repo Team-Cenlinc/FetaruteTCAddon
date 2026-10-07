@@ -516,7 +516,7 @@ public final class FtaDriveCommand {
     sender.sendMessage(locale.component("drive.command.status", describe(locale, session.get())));
   }
 
-  /** 折返换端：直接换到发车端的驾驶室（换端提示里的按钮）。 */
+  /** 直接坐到发车端的驾驶室：驾驶中是折返换端（换端提示里的按钮），还没驾驶时同 {@code /fta drive on cab}。 */
   private void handleCab(CommandSender sender) {
     Player player = requirePlayer(sender);
     if (player == null) {
@@ -524,6 +524,10 @@ public final class FtaDriveCommand {
     }
     DriveSessionManager drive = requireManager(sender);
     if (drive == null) {
+      return;
+    }
+    if (drive.sessionOf(player.getUniqueId()).isEmpty()) {
+      drive.startSessionInCab(player, outcome -> sendStartOutcome(player, drive, outcome));
       return;
     }
     sender.sendMessage(plugin.getLocaleManager().component(drive.switchCab(player)));
