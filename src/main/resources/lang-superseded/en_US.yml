@@ -52,6 +52,8 @@ drive:
         line-loss: ["line power loss"]
   handbook:
     driver:
+      page-4: ["<dark_blue><bold>3. Tasks and taking over</bold></dark_blue>\n<black>At a station run /fta drive tasks: left-click for manual, right-click for ATO. When the train arrives, sit in the leading cab, confirm your seat and run /fta drive on.</black>"]
+      page-9: ["<dark_blue><bold>8. Termini and changing ends</bold></dark_blue>\n<black>At the terminus the trip is scored once the doors open; you may end driving or carry on with this train's next trip.\nTo change ends, leave the doors open and walk to the other cab; unmarked cab seats must be confirmed.</black>"]
       page-3: ["<dark_blue><bold>2. Licences</bold></dark_blue>\n<black>Level 1 free licence: complete the tutorial; drive non-dispatched trains.\nLevel 2 dispatch licence: practise, then pass a road test; take tasks on dispatched trains.\nLicences are valid everywhere.</black>\n<dark_gray>See and sign up: /fta license</dark_gray>"]
       page-7: ["<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>", "<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning. At terminals you may overrun the stop mark by 3 m at most, or the train is forcibly stopped.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>"]
       page-5: ["<dark_blue><bold>4. The cab</bold></dark_blue>\n<black>Hotbar 1–3 power P3–P1, 4 coast N, 5–8 brake B1–B4, 9 emergency EB.\nOnce stopped, F opens the cab menu (doors, end driving).\nAction bar: speed and limit.\nSidebar: signal, stop, times, doors.</black>"]
@@ -142,6 +144,7 @@ drive:
     title: ["<gold><bold>Driver's Desk</bold></gold> <gray><train></gray>"]
   command:
     help:
+      entry-on: ["  <gray>•</gray> <white>/fta drive on</white> <gray>- Start driving from a train seat</gray>"]
       entry-reverser: ["  <gray>•</gray> <white>/fta drive reverser [forward|neutral|reverse]</white> <gray>- Set the reverser while stopped</gray>"]
       entry-tutorial: ["  <gray>•</gray> <white>/fta drive tutorial [start|stop|reset|skip]</white> <gray>- Start, quit or reset the tutorial, or skip the current step</gray>"]
       entry-task: ["  <gray>•</gray> <white>/fta drive task [status|abandon]</white> <gray>- Show or abandon your task</gray>"]

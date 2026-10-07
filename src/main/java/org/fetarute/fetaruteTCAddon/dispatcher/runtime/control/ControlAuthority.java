@@ -16,13 +16,13 @@ public interface ControlAuthority {
   /** 全部列车都由自动运行控制。 */
   ControlAuthority NONE = properties -> false;
 
-  /** 这列车当前是否由驾驶员物理控制（执行层不得写限速、发车或清空动作队列）。 */
+  /** 这列车当前是否由驾驶员控制（执行层不得写限速、发车或清空动作队列）：人工驾驶，或 ATO 下扣着等驾驶员换端。 */
   boolean isDriverControlled(TrainProperties properties);
 
   /**
    * 这列车是否由驾驶员物理操纵（按车名）。
    *
-   * <p>健康层据此不对它做重发车、改目的地等恢复动作；ATO 下由自动运行操纵，照常恢复。
+   * <p>健康层据此不对它做重发车、改目的地等恢复动作；ATO 下由自动运行操纵，照常恢复（扣着等驾驶员换端时除外）。
    */
   default boolean isDriverControlledName(String trainName) {
     return false;

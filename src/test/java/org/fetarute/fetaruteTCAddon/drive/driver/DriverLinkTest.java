@@ -85,6 +85,44 @@ class DriverLinkTest {
   }
 
   @Test
+  @DisplayName("换端扣车只在 ATO 下生效；开始与解除都清掉手上的行车许可，转人工驾驶时解除")
+  void cabHoldOnlyAppliesUnderAto() {
+    assertFalse(link.setCabHold(true), "人工驾驶本就由驾驶员控车");
+    assertFalse(link.cabHold());
+
+    link.setMode(DrivingMode.ATO);
+    link.acceptDirective(directive(SignalAspect.PROCEED));
+    assertTrue(link.setCabHold(true));
+    assertTrue(link.cabHold());
+    assertEquals(null, link.directive(), "扣车前的旧许可不算放行");
+    assertFalse(link.setCabHold(true), "没有变化");
+
+    link.acceptDirective(directive(SignalAspect.PROCEED));
+    assertTrue(link.setCabHold(false));
+    assertFalse(link.cabHold());
+    assertEquals(null, link.directive());
+
+    link.setCabHold(true);
+    link.enterManual();
+    assertFalse(link.cabHold());
+    link.setMode(DrivingMode.ATO);
+    assertFalse(link.cabHold(), "转回 ATO 不会自己恢复扣车");
+  }
+
+  @Test
+  @DisplayName("接管时已说过的下一趟，待命期间查到同一趟不再另说")
+  void nextTripAnnouncedElsewhereIsNotRepeated() {
+    UUID trip = UUID.randomUUID();
+    link.markNextTripAnnounced(trip);
+    link.setNextTrip(new DriverNextTrip(trip, "T1", "终点", java.time.Instant.EPOCH));
+    assertTrue(link.takeNextTripAnnouncement().isEmpty());
+
+    UUID other = UUID.randomUUID();
+    link.setNextTrip(new DriverNextTrip(other, "T2", "终点", java.time.Instant.EPOCH));
+    assertEquals("T2", link.takeNextTripAnnouncement().orElseThrow().tripCode());
+  }
+
+  @Test
   @DisplayName("进站估计：按采样后走过的里程推算；已停过的站在采样刷新前不再当作前方")
   void approachEstimate() {
     org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId node =

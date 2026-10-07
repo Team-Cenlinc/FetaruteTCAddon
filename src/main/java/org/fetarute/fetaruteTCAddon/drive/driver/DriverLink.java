@@ -88,6 +88,7 @@ public final class DriverLink {
   private String skippedStation;
   private boolean doorsClosing;
   private boolean turnbackPending;
+  private boolean cabHold;
   private int announcedStops;
   private DriverSchedule schedule;
   private DriverPass nextPass;
@@ -146,6 +147,7 @@ public final class DriverLink {
   /** 转为人工驾驶：ATO 期间调度层不向驾驶员下发行车许可，旧许可的距离与包络早已过时，清掉后由下一条指令重新开始 （没有指令时防护按限制速度、停着不许起步）。 */
   public void enterManual() {
     mode = DrivingMode.MANUAL;
+    cabHold = false;
     directive = null;
     lastDecision = null;
     signalAcknowledge.reset();
@@ -167,6 +169,26 @@ public final class DriverLink {
   /** 驾驶员是否物理控车（ATO 下由自动运行代为操纵）。 */
   public boolean controlsPhysically() {
     return mode == DrivingMode.MANUAL;
+  }
+
+  /** ATO 下扣着列车等驾驶员换端：终点站待命到派车放行、折返换端进行中。期间调度层按驾驶员控制处理，放行时只调头、不发车；驾驶员坐进发车端后解除，交回自动运行发车。 */
+  public boolean cabHold() {
+    return cabHold && mode == DrivingMode.ATO;
+  }
+
+  /**
+   * 设置 ATO 换端扣车。开始与解除时都清掉手上的行车许可：扣车期间只认放行后新收到的许可，解除后 ATO 不再收许可。
+   *
+   * @return 状态是否有变化
+   */
+  public boolean setCabHold(boolean hold) {
+    boolean effective = hold && mode == DrivingMode.ATO;
+    if (effective == cabHold) {
+      return false;
+    }
+    cabHold = effective;
+    directive = null;
+    return true;
   }
 
   /** 收到调度层的新指令。 */
@@ -819,6 +841,11 @@ public final class DriverLink {
 
   public void setNextTrip(DriverNextTrip trip) {
     this.nextTrip = trip;
+  }
+
+  /** 下一趟已经用别的方式告诉过驾驶员（例如接管时）：之后查到同一趟不再另说。 */
+  public void markNextTripAnnounced(UUID tripId) {
+    this.announcedNextTrip = tripId;
   }
 
   /**

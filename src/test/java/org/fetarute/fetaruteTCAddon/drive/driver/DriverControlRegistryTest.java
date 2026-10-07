@@ -121,6 +121,23 @@ class DriverControlRegistryTest {
   }
 
   @Test
+  @DisplayName("ATO 下扣着等驾驶员换端时按驾驶员控制处理：放行只调头、不发车，健康层不介入")
+  void atoCabHoldIsDriverControl() {
+    TrainProperties properties = properties("T-5");
+    DriverLink link = link("T-5", properties);
+    registry.bind(properties, link);
+    link.setMode(DrivingMode.ATO);
+
+    link.setCabHold(true);
+    assertTrue(registry.isDriverControlled(properties));
+    assertTrue(registry.isDriverControlledName("T-5"));
+
+    link.setCabHold(false);
+    assertFalse(registry.isDriverControlled(properties));
+    assertFalse(registry.isDriverControlledName("T-5"));
+  }
+
+  @Test
   @DisplayName("指令交给链路，中断与交还请求转给处理器")
   void routesDirectivesInterruptsAndHandbacks() {
     TrainProperties properties = properties("T-5");

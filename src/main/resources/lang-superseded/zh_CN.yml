@@ -462,6 +462,8 @@ drive:
       handback: ["<prefix> <red>本车次已晚点 <white><delay></white> 秒，为保证调度正常运行，列车将在停稳后交还自动运行，本次结束。</red>"]
   handbook:
     driver:
+      page-4: ["<dark_blue><bold>三、领任务与接班</bold></dark_blue>\n<black>在车站输入 /fta drive tasks 打开任务板：左键人工驾驶，右键 ATO。列车到站后坐进车头驾驶室，确认座位后输入 /fta drive on 接班。</black>"]
+      page-9: ["<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。</black>"]
       page-3: ["<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"]
       page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>", "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。终点站最多越过停车点 3 米，超出会被强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
       page-1: ["<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>"]
@@ -485,7 +487,7 @@ drive:
       entry-tasks: ["  <gray>•</gray> <white>/fta drive tasks</white> <gray>- 打开最近车站的任务板，领取车次</gray>"]
       header: ["<prefix> <dark_aqua>手动驾驶命令</dark_aqua>"]
       entry-fault: ["  <gray>•</gray> <white>/fta drive fault <玩家> <类型|clear></white> <gray>- 给 simulation 级驾驶中的列车注入或清除车上故障</gray>"]
-      entry-on: ["  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐在列车座位上后开始驾驶</gray>"]
+      entry-on: ["  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐在列车座位上后开始驾驶</gray>", "  <gray>•</gray> <white>/fta drive on</white> <gray>- 坐上列车座位后开始驾驶</gray>"]
       entry-congestion: ["  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵熔断</gray>", "  <gray>•</gray> <white>/fta drive breaker [status|reset]</white> <gray>- 查看或解除拥堵保护</gray>"]
     start:
       bad-game-mode: ["<prefix> <red>只有生存或冒险模式可以驾驶</red>"]

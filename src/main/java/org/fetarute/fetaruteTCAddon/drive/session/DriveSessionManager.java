@@ -139,6 +139,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
 import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
+import org.fetarute.fetaruteTCAddon.utils.LoggerManager;
 
 /**
  * 手动驾驶会话的生命周期：开始、逐 tick 维护、结束，以及网络线程与主线程之间的交接。
@@ -177,7 +178,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     /** 被外部插件拦下（{@code DriveSessionStartEvent} 取消）。 */
     CANCELLED,
     /** 已在驾驶：确认了折返换端后所坐的座位（驾驶座没有标记的列车）。 */
-    CAB_SEAT_CONFIRMED
+    CAB_SEAT_CONFIRMED,
+    /** 调度列车：已有其他驾驶员领了这列车的任务、正等他接班。 */
+    RESERVED_BY_OTHER,
+    /** {@code /fta drive on cab}：发车端驾驶室没有空座位，或离列车太远，没能送进去。 */
+    CAB_SEAT_UNAVAILABLE
   }
 
   /** 领取驾驶任务、驾驶调度列车。 */
@@ -634,28 +639,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   public StartOutcome startSession(Player player) {
     // 仿真等级取玩家自选的（任务板上选择），没有选过时用 drive.yml 的；会话期间不再变。
     DriveConfig current = config.withLevel(levels.effective(player, config.level()));
-    if (!current.enabled()) {
-      return StartOutcome.DISABLED;
-    }
-    if (!packetsReady) {
-      return StartOutcome.UNAVAILABLE;
-    }
-    if (!isGameModeAllowed(player.getGameMode())) {
-      return StartOutcome.BAD_GAME_MODE;
-    }
-    DriveSession running = active.get(player.getUniqueId());
-    if (running != null) {
-      // 换端坐进了驾驶座没有标记的那一端：同一个命令用来确认座位。
-      return confirmCabSeat(player, running)
-          ? StartOutcome.CAB_SEAT_CONFIRMED
-          : StartOutcome.ALREADY_DRIVING;
-    }
-    // 光标上有物品、或开着容器、合成格里有东西时，关闭界面会把它们塞回背包，违反“对背包只读”：拒绝开始。
-    if (!player.getItemOnCursor().getType().isAir()) {
-      return StartOutcome.CURSOR_NOT_EMPTY;
-    }
-    if (isInventoryBusy(player)) {
-      return StartOutcome.INVENTORY_BUSY;
+    StartOutcome notReady = checkCanStart(player, current);
+    if (notReady != null) {
+      return notReady;
     }
     Optional<SeatBinding> located = SeatLocator.locate(player);
     if (located.isEmpty()) {
@@ -734,6 +720,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               .claimFor(player.getUniqueId(), group.getProperties().getTrainName())
               .map(DriverTask::mode)
               .orElse(DrivingMode.MANUAL));
+      if (isLayover(binding.trainName())) {
+        // 在终点站待命时以 ATO 接班：登记控制权时就扣着，免得第一拍之前派车放行、不等换端就开走。
+        driverLink.setTurnbackPending(true);
+        driverLink.setCabHold(true);
+      }
       session.attachDriverLink(driverLink);
     }
     try {
@@ -783,7 +774,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       tasks.onSessionStarted(
           player.getUniqueId(), group.getProperties().getTrainName(), Bukkit.getCurrentTick());
       adoptTakeover(player, session, group.getProperties().getTrainName());
-      tellLayoverWithoutNextTrip(player, group.getProperties().getTrainName());
       driverLink
           .score()
           .setDelayAtStart(taskDelayOf(player.getUniqueId(), group.getProperties().getTrainName()));
@@ -828,6 +818,217 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     refreshInventory(player, session);
     tutorials.onSessionStarted(player);
     return StartOutcome.STARTED;
+  }
+
+  /**
+   * 与列车无关的开始条件：驾驶功能、游戏模式、背包与界面状态。已在驾驶时处理确认座位。
+   *
+   * @return 不能开始的原因；可以开始时为 {@code null}
+   */
+  private StartOutcome checkCanStart(Player player, DriveConfig current) {
+    if (!current.enabled()) {
+      return StartOutcome.DISABLED;
+    }
+    if (!packetsReady) {
+      return StartOutcome.UNAVAILABLE;
+    }
+    if (!isGameModeAllowed(player.getGameMode())) {
+      return StartOutcome.BAD_GAME_MODE;
+    }
+    DriveSession running = active.get(player.getUniqueId());
+    if (running != null) {
+      // 换端坐进了驾驶座没有标记的那一端：同一个命令用来确认座位。
+      return confirmCabSeat(player, running)
+          ? StartOutcome.CAB_SEAT_CONFIRMED
+          : StartOutcome.ALREADY_DRIVING;
+    }
+    // 光标上有物品、或开着容器、合成格里有东西时，关闭界面会把它们塞回背包，违反“对背包只读”：拒绝开始。
+    if (!player.getItemOnCursor().getType().isAir()) {
+      return StartOutcome.CURSOR_NOT_EMPTY;
+    }
+    if (isInventoryBusy(player)) {
+      return StartOutcome.INVENTORY_BUSY;
+    }
+    return null;
+  }
+
+  /** 送进驾驶室后最多等多少 tick 让 TrainCarts 把人放到座位上，再开始驾驶。 */
+  private static final int CAB_SEATING_WAIT_TICKS = 10;
+
+  /**
+   * {@code /fta drive on cab}：没坐在下一趟要驾驶的那一端驾驶室时，先送进去再开始驾驶。
+   *
+   * <p>坐在调度列车上时按这列车；没坐在列车上时按自己领的任务（或正等自己接班）的列车。其余接管条件都满足才送，送不了或不必送时按普通的开始驾驶处理并报它的结果。
+   *
+   * @param reply 开始驾驶的结果（送进驾驶室时要等 TrainCarts 让人坐下，结果晚几个 tick 才有）
+   */
+  public void startSessionInCab(Player player, java.util.function.Consumer<StartOutcome> reply) {
+    DriveConfig current = config.withLevel(levels.effective(player, config.level()));
+    if (checkCanStart(player, current) != null) {
+      reply.accept(startSession(player));
+      return;
+    }
+    Optional<CabTarget> target = cabTarget(player, current);
+    if (target.isEmpty()) {
+      reply.accept(startSession(player));
+      return;
+    }
+    MinecartGroup group = target.get().group();
+    OptionalInt car = enterCab(player, group, target.get().end(), current);
+    if (car.isEmpty()) {
+      reply.accept(StartOutcome.CAB_SEAT_UNAVAILABLE);
+      return;
+    }
+    traceTask("送进驾驶室后开始驾驶 " + player.getName() + " -> 第 " + (car.getAsInt() + 1) + " 节");
+    String trainName = group.getProperties().getTrainName();
+    int[] waited = {0};
+    Bukkit.getScheduler()
+        .runTaskTimer(
+            plugin,
+            task -> {
+              boolean seated =
+                  SeatLocator.locate(player)
+                      .filter(seat -> seat.trainName().equals(trainName))
+                      .filter(seat -> seat.memberIndex() == car.getAsInt())
+                      .isPresent();
+              if (!player.isOnline()) {
+                task.cancel();
+              } else if (seated || ++waited[0] >= CAB_SEATING_WAIT_TICKS) {
+                task.cancel();
+                reply.accept(startSession(player));
+              }
+            },
+            1L,
+            1L);
+  }
+
+  /** {@code /fta drive on cab} 要送进的驾驶室。 */
+  private record CabTarget(MinecartGroup group, CabSeats.End end) {}
+
+  /**
+   * {@code /fta drive on cab} 要送进哪列车的哪一端驾驶室。
+   *
+   * @return 不是调度列车、不能接管、或已坐在那一端时为空（交给普通的开始驾驶报原因）
+   */
+  private Optional<CabTarget> cabTarget(Player player, DriveConfig current) {
+    Optional<SeatBinding> seat = SeatLocator.locate(player);
+    Optional<MinecartGroup> groupOpt =
+        seat.flatMap(binding -> SeatLocator.findGroup(binding.trainName()))
+            .or(() -> taskTrainOf(player.getUniqueId()));
+    if (groupOpt.isEmpty() || !ManagedTrains.isFtaManaged(groupOpt.get().getProperties())) {
+      return Optional.empty();
+    }
+    MinecartGroup group = groupOpt.get();
+    String name = group.getProperties().getTrainName();
+    if (trainInUse(name)) {
+      return Optional.empty();
+    }
+    TakeoverCheck check = checkTakeoverExceptCab(player, group, current);
+    if (check.refusal() != null) {
+      return Optional.empty();
+    }
+    CabSeats cabs = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
+    if (seat.isPresent()
+        && seat.get().trainName().equals(name)
+        && CabSeats.accepts(cabs.endOf(seat.get()), check.expected())) {
+      return Optional.empty();
+    }
+    CabSeats.End end =
+        switch (check.expected()) {
+          case HEAD -> CabSeats.End.HEAD;
+          case TAIL -> CabSeats.End.TAIL;
+          case EITHER -> nearerEnd(group, player.getLocation().toVector());
+        };
+    return Optional.of(new CabTarget(group, end));
+  }
+
+  /** 玩家领了任务（或正等他接班）的列车。 */
+  private Optional<MinecartGroup> taskTrainOf(UUID playerId) {
+    Optional<String> name =
+        pickups
+            .ofPlayer(playerId)
+            .map(DriverPickups.Pickup::trainName)
+            .or(
+                () ->
+                    tasks
+                        .activeTaskOf(playerId)
+                        .map(DriverTask::trainName)
+                        .filter(train -> train != null && !train.isBlank()));
+    return name.flatMap(SeatLocator::findGroup);
+  }
+
+  /** {@code /fta drive on} 被拒（没坐在驾驶室）时能否提议直接送进驾驶室：能接管、且离那一端不太远。 */
+  public boolean canEnterCab(Player player) {
+    DriveConfig current = config.withLevel(levels.effective(player, config.level()));
+    return cabTarget(player, current)
+        .filter(target -> cabMember(player, target.group(), target.end()) != null)
+        .isPresent();
+  }
+
+  /** 某一端的端车：离玩家不超过 {@value #CAB_MOVE_RANGE_BLOCKS} 格、在同一世界时才返回。 */
+  private static MinecartMember<?> cabMember(Player player, MinecartGroup group, CabSeats.End end) {
+    MinecartMember<?> member = end == CabSeats.End.TAIL ? group.tail() : group.head();
+    if (member == null
+        || member.getEntity() == null
+        || group.getWorld() == null
+        || !group.getWorld().equals(player.getWorld())
+        || member.getEntity().getLocation().distanceSquared(player.getLocation())
+            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
+      return null;
+    }
+    return member;
+  }
+
+  /**
+   * 把玩家送进列车某一端的驾驶室（还没开始驾驶）。驾驶座有标记时坐标记的座位，没有标记时坐端车上离得最近的座位。
+   *
+   * @return 坐进去的车厢序号；离列车太远、不在同一世界、那一端没有空座位时为空
+   */
+  private OptionalInt enterCab(
+      Player player, MinecartGroup group, CabSeats.End end, DriveConfig current) {
+    MinecartMember<?> member = cabMember(player, group, end);
+    if (member == null) {
+      return OptionalInt.empty();
+    }
+    int memberIndex = group.indexOf(member);
+    CabSeats cabs = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
+    return SeatLocator.enterNearestFreeSeatIndex(
+                player, member, index -> cabs.endOf(memberIndex, index) == end)
+            .isPresent()
+        ? OptionalInt.of(memberIndex)
+        : OptionalInt.empty();
+  }
+
+  /**
+   * 正等别人接班的列车：其他驾驶员领了这列车的任务，或这列车正停着等其他驾驶员上车。
+   *
+   * @return 那名驾驶员的名字
+   */
+  public Optional<String> reservedBy(UUID playerId, String trainName) {
+    if (trainName == null) {
+      return Optional.empty();
+    }
+    for (DriverTask task : tasks.activeTasks()) {
+      if (!task.playerId().equals(playerId) && trainName.equalsIgnoreCase(task.trainName())) {
+        return Optional.of(task.playerName());
+      }
+    }
+    return pickups
+        .ofTrain(trainName)
+        .filter(pickup -> !pickup.playerId().equals(playerId))
+        .map(
+            pickup ->
+                tasks
+                    .activeTaskOf(pickup.playerId())
+                    .map(DriverTask::playerName)
+                    .filter(name -> !name.isEmpty())
+                    .orElse(pickup.playerId().toString()));
+  }
+
+  /** 玩家所坐列车正等别人接班时，那名驾驶员的名字（开始驾驶被拒时提示用）。 */
+  public Optional<String> reservedByForSeat(Player player) {
+    return SeatLocator.locate(player)
+        .flatMap(seat -> reservedBy(player.getUniqueId(), seat.trainName()));
   }
 
   /** 玩家所坐列车当前的实际速度（km/h）；没有坐在列车上时为空。 */
@@ -1995,22 +2196,49 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private StartOutcome checkDispatchTakeover(
       Player player, SeatBinding binding, MinecartGroup group, DriveConfig current) {
+    TakeoverCheck check = checkTakeoverExceptCab(player, group, current);
+    if (check.refusal() != null) {
+      return check.refusal();
+    }
+    CabSeats.End end = SeatLocator.cabSeats(group, current.driver().cabSeatNames()).endOf(binding);
+    return CabSeats.accepts(end, check.expected()) ? null : StartOutcome.NOT_HEAD_CAB;
+  }
+
+  /**
+   * 接管检查的结论。
+   *
+   * @param refusal 不能接管的原因；可以接管时为 {@code null}
+   * @param expected 下一趟由哪一端驾驶（可以接管时才有意义）
+   */
+  private record TakeoverCheck(StartOutcome refusal, CabSeats.Departure expected) {
+    static TakeoverCheck refused(StartOutcome refusal) {
+      return new TakeoverCheck(refusal, CabSeats.Departure.HEAD);
+    }
+  }
+
+  /** 除所坐的座位以外的接管条件，以及下一趟由哪一端驾驶。 */
+  private TakeoverCheck checkTakeoverExceptCab(
+      Player player, MinecartGroup group, DriveConfig current) {
     if (!current.driver().enabled()) {
-      return StartOutcome.MANAGED_TRAIN;
-    }
-    if (!player.hasPermission(PERMISSION_DRIVER_ADMIN)) {
-      if (tasks.congestionProtection().open(Instant.now())) {
-        return StartOutcome.PROTECTION_ACTIVE;
-      }
-      if (!player.hasPermission(PERMISSION_DRIVER)
-          || tasks.claimFor(player.getUniqueId(), group.getProperties().getTrainName()).isEmpty()) {
-        return StartOutcome.NO_TASK;
-      }
-    }
-    if (measureSpeedBps(group) > current.startMaxSpeedBps()) {
-      return StartOutcome.NOT_STOPPED_AT_STATION;
+      return TakeoverCheck.refused(StartOutcome.MANAGED_TRAIN);
     }
     String name = group.getProperties().getTrainName();
+    boolean ownClaim = tasks.claimFor(player.getUniqueId(), name).isPresent();
+    if (!player.hasPermission(PERMISSION_DRIVER_ADMIN)) {
+      if (tasks.congestionProtection().open(Instant.now())) {
+        return TakeoverCheck.refused(StartOutcome.PROTECTION_ACTIVE);
+      }
+      if (!player.hasPermission(PERMISSION_DRIVER) || !ownClaim) {
+        return TakeoverCheck.refused(StartOutcome.NO_TASK);
+      }
+    }
+    // 别人领了这列车、正等他接班：运营人员也要先收回他的任务，免得他赶到时车已被开走。
+    if (!ownClaim && reservedBy(player.getUniqueId(), name).isPresent()) {
+      return TakeoverCheck.refused(StartOutcome.RESERVED_BY_OTHER);
+    }
+    if (measureSpeedBps(group) > current.startMaxSpeedBps()) {
+      return TakeoverCheck.refused(StartOutcome.NOT_STOPPED_AT_STATION);
+    }
     boolean dwelling =
         plugin.getDwellRegistry().map(r -> r.remainingSeconds(name).isPresent()).orElse(false)
             || plugin.getRuntimeDispatchService().map(d -> d.hasDepartureGate(name)).orElse(false);
@@ -2025,7 +2253,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     // 终点站待命、等派下一趟的车：停着等派车，与驾驶员结算后留在车上等接续是同一个状态，也可以接管。
     boolean layover = !dwelling && isLayover(name);
     if (!dwelling && !layover && pickup.isEmpty()) {
-      return StartOutcome.NOT_STOPPED_AT_STATION;
+      return TakeoverCheck.refused(StartOutcome.NOT_STOPPED_AT_STATION);
     }
     // 一般坐车头端；终点站接车、终点站停站（这一趟已跑完）与待命车按预计的发车端（尽头式站台是车尾端，方向未定时两端都可以，
     // 放行后坐在后面那一端的按折返换端处理，不能从后端开车）。
@@ -2034,11 +2262,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         pickup
             .map(DriverPickups.Pickup::departure)
             .orElseGet(() -> terminal ? TerminalCabEnd.of(plugin, group) : CabSeats.Departure.HEAD);
-    CabSeats.End end = SeatLocator.cabSeats(group, current.driver().cabSeatNames()).endOf(binding);
-    if (!CabSeats.accepts(end, expected)) {
-      return StartOutcome.NOT_HEAD_CAB;
-    }
-    return null;
+    return new TakeoverCheck(null, expected);
   }
 
   /** 列车绑着的车次已经跑完（停在这一趟的终点站）。 */
@@ -2113,6 +2337,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     DriveSession session = sessionOf(link);
     if (session == null) {
       driverRegistry.unbind(link);
+      return;
+    }
+    boolean stopRequest =
+        interrupt == DriverInterrupt.SERVICE_STOP
+            || interrupt == DriverInterrupt.EMERGENCY
+            || interrupt == DriverInterrupt.EMERGENCY_INSTANT;
+    if (stopRequest && session.isAto()) {
+      // ATO 下只有扣着等换端时才按驾驶员控制处理，此时列车本就停着：不改手柄、不记强制停车，解除后由自动运行接着控车。
       return;
     }
     // 停站时调度每秒都会再要一次停车：已在停车要求中就不再记日志。
@@ -2517,7 +2749,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (offerContinuation(session, link, task.get(), trainName)) {
         return false;
       }
-      if (takeovers.contains(session.playerId()) && task.get().handoverStopSequence() < 0) {
+      boolean interval = task.get().handoverStopSequence() >= 0;
+      boolean keepDriving = takeovers.contains(session.playerId()) && !interval;
+      if (!interval) {
+        tellNoContinuation(session, task.get(), trainName, keepDriving);
+      }
+      if (keepDriving) {
         // 运营人员直接接管：没有接续车次也接着开（例如开到回库），像以前一样，直到收车或自己结束。
         continuations.put(session.playerId(), new Continuation(task.get().key(), true));
         return false;
@@ -2636,6 +2873,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     closeDoors(session);
     link.enterAto();
+    if (link.turnbackPending()) {
+      // 终点站待命中转 ATO：马上扣着，免得派车放行时自动运行不等换端就开走。
+      link.setCabHold(true);
+    }
     session.releaseAction();
     TrainPropertyGuard.restore(group.getProperties(), session.observedSpeedLimitBpt());
     traceSession(session, "转为 ATO: " + reason);
@@ -2759,6 +3000,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                         .map(TaskBoardEntries.Trip::destination))
             .orElse("");
     traceSession(session, "本趟已结算，可接续 " + key.tripCode());
+    debugLog(
+        "DRIVE_TERMINAL player="
+            + session.playerName()
+            + " train="
+            + trainName
+            + " trip="
+            + task.key().tripCode()
+            + " next="
+            + key.tripCode());
     sendTaskChat(
         player,
         destination.isEmpty() ? "drive.task.continue-offer-code" : "drive.task.continue-offer",
@@ -2803,7 +3053,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     new DriverTaskStartedEvent(task.playerId(), TaskViews.of(task), trainName)));
   }
 
-  /** 没领任务直接接管调度列车：按列车此刻跑的车次记成驾驶中的任务，到终点站同样结算。停在终点站（这一趟已跑完）接管时等开出下一趟再记。 */
+  /**
+   * 没领任务直接接管调度列车：按列车此刻跑的车次记成驾驶中的任务，到终点站同样结算。停在终点站（这一趟已跑完）接管时等开出下一趟再记。
+   *
+   * <p>记不成任务、或这一趟已跑完时当场说明：下一趟是哪一班、什么时候开，或为什么没有下一趟。
+   */
   private void adoptTakeover(Player player, DriveSession session, String trainName) {
     if (tasks.activeTaskOf(player.getUniqueId()).isPresent()) {
       return;
@@ -2812,6 +3066,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     Optional<TimetableApi.TrainAssignment> assignment =
         DriverTaskManager.timetables().flatMap(api -> api.getAssignment(trainName));
     if (assignment.isEmpty()) {
+      debugLog("DRIVE_TAKEOVER player=" + player.getName() + " train=" + trainName + " trip=-");
+      sendTaskChat(player, "drive.task.takeover.untracked", Map.of());
       return;
     }
     TimetableApi.TrainAssignment current = assignment.get();
@@ -2819,7 +3075,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (current.nextStopSequence().isEmpty()) {
       // 这一趟已到终点：等列车开出下一趟时再记成任务。本次驾驶没结算过任何一趟，离开时不说“已结算”。
       continuations.put(session.playerId(), new Continuation(key, false));
-      reserveNextTrip(session, player, trainName);
+      Optional<TimetableService.DueTrip> next = reserveNextTrip(session, player, trainName);
+      tellTripFinishedAtTakeover(player, session, trainName, key, next);
       return;
     }
     DriverTaskManager.ClaimOutcome outcome =
@@ -2831,6 +3088,174 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             DriverTask.SOURCE_TAKEOVER);
     refreshViews();
     traceSession(session, "接管车次 " + key.tripCode() + " 记为任务: " + outcome);
+    debugLog(
+        "DRIVE_TAKEOVER player="
+            + player.getName()
+            + " train="
+            + trainName
+            + " trip="
+            + key.tripCode()
+            + " outcome="
+            + outcome);
+    if (outcome != DriverTaskManager.ClaimOutcome.CLAIMED) {
+      sendWithReason(
+          player,
+          "drive.task.takeover.not-recorded",
+          Map.of("trip", key.tripCode()),
+          "drive.task.not-recorded." + outcome.name().toLowerCase(Locale.ROOT).replace('_', '-'),
+          Map.of());
+    }
+  }
+
+  /** 接管时这一趟已经跑完：告诉驾驶员下一趟（开出后才记成任务、开始计分），或为什么没有下一趟。 */
+  private void tellTripFinishedAtTakeover(
+      Player player,
+      DriveSession session,
+      String trainName,
+      TaskKey finished,
+      Optional<TimetableService.DueTrip> next) {
+    if (next.isEmpty()) {
+      NoContinuation why = whyNoContinuation(trainName);
+      debugLog(
+          "DRIVE_TAKEOVER player="
+              + player.getName()
+              + " train="
+              + trainName
+              + " trip="
+              + finished.tripCode()
+              + " finished=true next=- reason="
+              + why.code());
+      sendWithReason(
+          player, "drive.task.takeover.finished-no-next", Map.of(), why.key(), why.values());
+      return;
+    }
+    TimetableService.DueTrip due = next.get();
+    debugLog(
+        "DRIVE_TAKEOVER player="
+            + player.getName()
+            + " train="
+            + trainName
+            + " trip="
+            + finished.tripCode()
+            + " finished=true next="
+            + due.trip().tripCode());
+    String destination = destinationOf(due);
+    sendTaskChat(
+        player,
+        destination.isEmpty()
+            ? "drive.task.takeover.finished-next-code"
+            : "drive.task.takeover.finished-next",
+        Map.of(
+            "trip",
+            due.trip().tripCode(),
+            "destination",
+            destination,
+            "time",
+            NEXT_TRIP_CLOCK.format(due.departure())));
+    // 已经说过下一趟：待命期间查到同一趟时不再另说一遍。
+    session.driverLink().markNextTripAnnounced(due.trip().id());
+  }
+
+  /** 一班车次的终点站名；查不到时为空串。 */
+  private String destinationOf(TimetableService.DueTrip due) {
+    Optional<TimetableService> service = plugin.getTimetableService();
+    if (service.isEmpty()) {
+      return "";
+    }
+    return TaskBoardSource.tripOf(
+            plugin,
+            service.get(),
+            new TaskKey(due.timetable().id(), due.trip().tripCode(), due.serviceDate()),
+            0)
+        .map(TaskBoardEntries.Trip::destination)
+        .orElse("");
+  }
+
+  /** 终点站结算后没有接续车次：说明原因；接管的车可以接着开，领任务的车随后交还。 */
+  private void tellNoContinuation(
+      DriveSession session, DriverTask task, String trainName, boolean keepDriving) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player == null || !player.isOnline()) {
+      return;
+    }
+    NoContinuation why = whyNoContinuation(trainName);
+    traceSession(session, "本趟已结算，没有接续车次: " + why.code());
+    debugLog(
+        "DRIVE_TERMINAL player="
+            + session.playerName()
+            + " train="
+            + trainName
+            + " trip="
+            + task.key().tripCode()
+            + " next=- reason="
+            + why.code()
+            + " keepDriving="
+            + keepDriving);
+    sendWithReason(
+        player,
+        keepDriving ? "drive.task.settled-no-next-trip" : "drive.task.no-next-trip-line",
+        Map.of(),
+        why.key(),
+        why.values());
+  }
+
+  /**
+   * 没有接续车次的原因。
+   *
+   * @param code 写日志用的原因代号
+   * @param key 原因的语言键（一段话，嵌进别的提示里）
+   * @param values 原因里的占位符
+   */
+  private record NoContinuation(String code, String key, Map<String, String> values) {}
+
+  /** 这列车为什么没有可接续的下一趟：被别人领走，或时刻表上没有（见 {@link TimetableService#whyNoNextDeparture}）。 */
+  private NoContinuation whyNoContinuation(String trainName) {
+    Optional<TimetableService> service = plugin.getTimetableService();
+    Optional<TimetableService.DueTrip> due =
+        service.flatMap(timetables -> timetables.nextDepartureOf(trainName));
+    if (due.isPresent()) {
+      return new NoContinuation(
+          "TAKEN", "drive.task.no-next-trip.taken", Map.of("trip", due.get().trip().tripCode()));
+    }
+    TimetableService.NoNextTrip why =
+        service
+            .map(timetables -> timetables.whyNoNextDeparture(trainName))
+            .orElse(
+                new TimetableService.NoNextTrip(
+                    TimetableService.NoNextTripReason.NOT_TIMETABLED, ""));
+    return new NoContinuation(
+        why.reason().name(),
+        "drive.task.no-next-trip." + why.reason().name().toLowerCase(Locale.ROOT).replace('_', '-'),
+        Map.of("trip", why.tripCode()));
+  }
+
+  /** 带一段原因的提示：原因是另一条语言键渲染出的一段话，嵌在提示的 {@code <reason>} 处。 */
+  private void sendWithReason(
+      Player player,
+      String key,
+      Map<String, String> values,
+      String reasonKey,
+      Map<String, String> reasonValues) {
+    LocaleManager locale = plugin.getLocaleManager();
+    net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.Builder resolver =
+        net.kyori.adventure.text.minimessage.tag.resolver.TagResolver.builder()
+            .resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                    "reason", locale.component(reasonKey, reasonValues)));
+    values.forEach(
+        (name, value) ->
+            resolver.resolver(
+                net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.unparsed(
+                    name, value)));
+    player.sendMessage(locale.component(key, resolver.build()));
+  }
+
+  /** 驾驶侧的关键判断写进调试日志：不开驾驶诊断也写，便于事后对照驾驶员看到了什么。 */
+  private void debugLog(String message) {
+    LoggerManager logger = plugin.getLoggerManager();
+    if (logger != null) {
+      logger.debug(message);
+    }
   }
 
   /** 驾驶员在等接续下一趟，且上一趟已在本次驾驶里结算。 */
@@ -3764,9 +4189,38 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       SeatBinding seat,
       DriveConfig current) {
     DriverLink link = session.driverLink();
+    boolean ato = session.isAto();
+    if (ato && link.turnbackPending()) {
+      // ATO 下从终点站待命起扣着列车：派车放行时只调头、不发车，等驾驶员坐进发车端再交回自动运行。
+      link.setCabHold(true);
+    }
+    boolean ended = advanceCabChange(session, group, player, seat, current);
+    if (!ended && ato) {
+      boolean hold = link.turnbackPending() || session.cabChange().stage() != CabChange.Stage.IDLE;
+      if (link.setCabHold(hold) && !hold) {
+        traceSession(session, "换端扣车解除，交回 ATO 发车");
+        refreshSignalLater(group);
+      }
+    }
+    return ended;
+  }
+
+  /**
+   * 推进一拍折返换端判定并处理它的事件。ATO 下只在扣车期间判定（终点站待命到放行、换端进行中），其余时候 ATO 自己发车，不必换端。
+   *
+   * @return 会话是否已经结束
+   */
+  private boolean advanceCabChange(
+      DriveSession session,
+      MinecartGroup group,
+      Player player,
+      SeatBinding seat,
+      DriveConfig current) {
+    DriverLink link = session.driverLink();
     CabChange change = session.cabChange();
-    boolean applicable = !session.isAto() && group.size() >= 2 && session.isStopped();
-    boolean released = link.directive() != null && !link.directive().isStop();
+    boolean controlled = !session.isAto() || link.cabHold();
+    boolean applicable = controlled && group.size() >= 2 && session.isStopped();
+    boolean released = controlled && link.directive() != null && !link.directive().isStop();
     // 终点站开门后就能去换端，不必等关门转入待命；车门可以开着，到另一端再关。
     // 还在开着一趟任务时先等终点站结算（开门后），结算后才提示换端，免得刚告知换端就因没有下一趟而结束驾驶。
     boolean drivingTask =
@@ -3823,7 +4277,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 Instant.now(),
                 reserve,
                 planned,
-                session.cab().enabled(),
+                // ATO 下换端后由自动运行发车，不再要求制动试验。
+                session.cab().enabled() && !session.isAto(),
                 current.driver().cabChange().brakeTestWholeSeconds(),
                 group.size(),
                 walkAllowed));
@@ -3921,16 +4376,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private boolean moveToCab(
       DriveSession session, MinecartGroup group, Player player, CabSeats.End end) {
-    if (end == CabSeats.End.NONE) {
-      return false;
-    }
-    MinecartMember<?> member = end == CabSeats.End.TAIL ? group.tail() : group.head();
-    if (member == null
-        || member.getEntity() == null
-        || group.getWorld() == null
-        || !group.getWorld().equals(player.getWorld())
-        || member.getEntity().getLocation().distanceSquared(player.getLocation())
-            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
+    MinecartMember<?> member = end == CabSeats.End.NONE ? null : cabMember(player, group, end);
+    if (member == null) {
       return false;
     }
     int memberIndex = group.indexOf(member);
@@ -4760,20 +5207,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     link.setNextTrip(
         new DriverNextTrip(
             next.trip().id(), next.trip().tripCode(), destination, next.departure()));
-  }
-
-  /** 接管终点站待命车时，时刻表上还没有它的下一趟：当场说一声（有下一趟时由 {@link #announceNextTrip} 告诉开往哪里）。 */
-  private void tellLayoverWithoutNextTrip(Player player, String trainName) {
-    // 只对按时刻表跑的车说：按间隔发车的线路本来就没有“下一趟”。
-    if (!isLayover(trainName)
-        || DriverTaskManager.timetables().flatMap(api -> api.getAssignment(trainName)).isEmpty()
-        || plugin
-            .getTimetableService()
-            .flatMap(service -> service.nextDepartureOf(trainName))
-            .isPresent()) {
-      return;
-    }
-    sendTaskChat(player, "drive.task.layover-no-next-trip", Map.of());
   }
 
   /** 接续的下一趟第一次查到时告诉驾驶员一次：车次、终点站与计划发车时刻。在终点站待命时（本趟已跑完）换成待命的说法。 */

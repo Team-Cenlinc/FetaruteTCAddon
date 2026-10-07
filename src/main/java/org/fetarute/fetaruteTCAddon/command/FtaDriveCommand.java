@@ -172,6 +172,15 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("on")
+            .literal("cab")
+            .permission(permissionOf("on"))
+            .handler(ctx -> handleOnCab(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("off")
             .permission(permissionOf("off"))
             .handler(ctx -> handleOff(ctx.sender())));
@@ -422,6 +431,33 @@ public final class FtaDriveCommand {
       return;
     }
     DriveSessionManager.StartOutcome outcome = drive.startSession(player);
+    sendStartOutcome(player, drive, outcome);
+    // 没坐在要驾驶的那一端驾驶室：提议直接送过去再开始。
+    if ((outcome == DriveSessionManager.StartOutcome.NOT_HEAD_CAB
+            || outcome == DriveSessionManager.StartOutcome.NOT_SEATED)
+        && drive.canEnterCab(player)) {
+      sender.sendMessage(plugin.getLocaleManager().component("drive.command.start.cab-offer"));
+    }
+  }
+
+  /** 送进下一趟要驾驶的那一端驾驶室，再开始驾驶。 */
+  private void handleOnCab(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    drive.startSessionInCab(player, outcome -> sendStartOutcome(player, drive, outcome));
+  }
+
+  private void sendStartOutcome(
+      Player player, DriveSessionManager drive, DriveSessionManager.StartOutcome outcome) {
+    if (!player.isOnline()) {
+      return;
+    }
     String key = "drive.command.start." + outcome.name().toLowerCase(Locale.ROOT).replace('_', '-');
     Map<String, String> placeholders =
         drive
@@ -437,7 +473,13 @@ public final class FtaDriveCommand {
                   .map(speed -> String.format(Locale.ROOT, "%.1f", speed))
                   .orElse("-"));
     }
-    sender.sendMessage(plugin.getLocaleManager().component(key, placeholders));
+    if (outcome == DriveSessionManager.StartOutcome.RESERVED_BY_OTHER) {
+      placeholders = Map.of("player", drive.reservedByForSeat(player).orElse("-"));
+      if (DrivePermissions.of("revoke").stream().anyMatch(player::hasPermission)) {
+        key = key + "-revoke";
+      }
+    }
+    player.sendMessage(plugin.getLocaleManager().component(key, placeholders));
   }
 
   private void handleOff(CommandSender sender) {
