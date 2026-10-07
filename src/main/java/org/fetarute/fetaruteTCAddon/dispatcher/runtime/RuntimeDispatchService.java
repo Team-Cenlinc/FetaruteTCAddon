@@ -18051,6 +18051,20 @@ public final class RuntimeDispatchService {
         RailGraph graph = resolveGraph(train.worldId(), now).orElse(null);
         retainStopOccupancy(trainName, route, currentIndex, currentNode, graph, now, train);
       }
+      if (runtimeTrainController.isDriverControlled(properties)) {
+        // 驾驶员控车的车与中途站一样收到停车许可：否则他手上一直留着进站前的“允许前进”，会被当成已放行。
+        TrainConfig config = trainConfigResolver.resolve(properties, configManager.current());
+        runtimeTrainController.applyControl(
+            train,
+            properties,
+            SignalAspect.STOP,
+            0.0,
+            config,
+            false,
+            OptionalLong.empty(),
+            java.util.Optional.empty(),
+            configManager.current().runtimeSettings());
+      }
       runtimeTrainController.stopNow(train);
     }
   }

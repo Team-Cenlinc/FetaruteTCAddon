@@ -88,6 +88,7 @@ public final class DriverLink {
   private String skippedStation;
   private boolean doorsClosing;
   private boolean turnbackPending;
+  private boolean atLayover;
   private boolean cabHold;
   private int announcedStops;
   private DriverSchedule schedule;
@@ -772,6 +773,15 @@ public final class DriverLink {
   /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。 */
   public void setTurnbackPending(boolean pending) {
     this.turnbackPending = pending;
+  }
+
+  /** 列车登记为终点站待命（驾驶会话每拍按待命登记更新）。 */
+  public void setAtLayover(boolean layover) {
+    this.atLayover = layover;
+  }
+
+  public boolean atLayover() {
+    return atLayover;
   }
 
   /** 列车停在终点站待命、派车还没放行（放行那一拍取走调头标记）。 */

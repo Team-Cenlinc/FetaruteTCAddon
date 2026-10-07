@@ -263,6 +263,7 @@ drive:
         doors-closing: "<gray>Doors closing</gray>"
         wait-departure: "<gray>Waiting for departure</gray>"
         standby: "<gray>Standing by for the next trip</gray>"
+        standby-plain: "<gray>Standing by</gray>"
         depart: "<green>Clear to depart</green>"
       doors:
         closed: "<green>Closed</green>"

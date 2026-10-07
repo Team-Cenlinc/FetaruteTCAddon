@@ -119,9 +119,16 @@ public final class DriveDoors {
     if (nowFacing != null) {
       facing = nowFacing;
     }
+    ManualDoor other = physicalLeft ? right : left;
+    // 对侧已记成开着：这一侧必须是另一组动画，与 toggle 一致，免得两个句柄操纵同一扇门。
     ManualDoorSide side =
-        AutoStationDoorController.resolveManualDoorSide(
-            current, nowFacing, physicalLeft, physicalLeft == session.cabAtHead(current.size()));
+        other != null && other.isOpen()
+            ? new ManualDoorSide(!other.modelLeft(), "opposite-of-open-door")
+            : AutoStationDoorController.resolveManualDoorSide(
+                current,
+                nowFacing,
+                physicalLeft,
+                physicalLeft == session.cabAtHead(current.size()));
     ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime, cars);
     door.markOpenedByStation();
     lastSummary = door.summary();

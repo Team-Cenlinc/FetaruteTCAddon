@@ -147,6 +147,18 @@ class DriveSidebarRowsTest {
   }
 
   @Test
+  void waitingAtTheTerminalWithoutANextTripOnlySaysStandby() {
+    DriveSession session = session(CabSystems.disabled());
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);
+    session.attachDriverLink(link);
+    link.setTurnbackPending(true);
+
+    assertEquals(
+        "drive.sidebar.value.stop.standby-plain",
+        row(DriveSidebarRows.build(session, 0), "stop").valueKey());
+  }
+
+  @Test
   void theScheduleRowFollowsTheStationRowWhenTheTrainRunsToATimetable() {
     DriveSession session = session(CabSystems.disabled());
     DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);

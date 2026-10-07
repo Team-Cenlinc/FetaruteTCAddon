@@ -834,6 +834,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       /** 驾驶员停站；停站中途由驾驶员接管时换成新建的那一个。 */
       private DriverStationStop stationStop = driverStop;
 
+      /** 车门是停站中途由站台交给驾驶员的（站台开的门）。 */
+      private boolean doorsFromStation = false;
+
       private boolean departureReleased = false;
       private long ticksSinceStop = 0L;
       private long ticksSinceOpen = 0L;
@@ -861,6 +864,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
        */
       private boolean driverTick() {
         if (departureReleased) {
+          if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
+            // 已放行但列车被别的流程接手（终点待命复用改名开下一趟）：只收尾，不再按本站报发车。
+            if (stationStop != null) {
+              stationStop.end();
+            }
+            cancel();
+            return true;
+          }
           if (group.isMoving()) {
             plugin
                 .getRuntimeDispatchService()
@@ -879,6 +890,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           // 停站中交还了自动运行：剩下的开关门与发车按自动运行处理，驾驶员开着的门随驾驶结束关上。
           driverDoors = false;
           stationStop.end();
+          if (doorsFromStation) {
+            // 站台交出去的门已由驾驶员关上（或随驾驶结束关上）：不再按原计时重放关门动画。
+            closeStarted = true;
+          }
           return false;
         }
         if (!opened) {
@@ -964,12 +979,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
        * @return 本拍已交接
        */
       private boolean handOverDoorsToDriver() {
-        if (driverDoors
-            || departureReleased
-            || !opened
-            || closeStarted
-            || doorDirection == AutoStationDoorDirection.NONE
-            || !plugin.getControlAuthority().driverOperatesDoors(group.getProperties())) {
+        if (!shouldHandOverDoors(
+            driverDoors,
+            departureReleased,
+            opened,
+            closeStarted,
+            doorDirection != AutoStationDoorDirection.NONE,
+            plugin.getControlAuthority().driverOperatesDoors(group.getProperties()))) {
           return false;
         }
         DriverStationStop handed =
@@ -983,6 +999,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         handed.handOverOpenDoors();
         stationStop = handed;
         driverDoors = true;
+        doorsFromStation = true;
         debug(
             "AutoStation 停站中途由驾驶员接管，车门交给驾驶员: nodeId="
                 + definition.nodeId().value()
@@ -1142,8 +1159,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               canDepart =
                   plugin.getRuntimeDispatchService().get().checkDeparture(group, definition);
             }
-            if (canDepart && plugin.getControlAuthority().holdDeparture(group.getProperties())) {
-              // ATO 下车上的驾驶员要先确认发车（等太久自动放行）。
+            // ATO 下车上的驾驶员要先确认发车（等太久自动放行）；扣着等换端的车由驾驶侧放行，不在这里等确认。
+            if (canDepart
+                && !driverControlled(group.getProperties())
+                && plugin.getControlAuthority().holdDeparture(group.getProperties())) {
               canDepart = false;
             }
 
@@ -1552,6 +1571,31 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * @param current 列车当前属性
    * @return 已被接手时为 {@code true}
    */
+  /**
+   * 停站中途接管时要不要把站台开着的车门交给驾驶员：人工驾驶的驾驶员已接管、站台已开门且还没开始关门、还没放行、本站要开门。
+   *
+   * @param driverDoors 已经由驾驶员开关门
+   * @param departureReleased 已放出出站许可
+   * @param opened 站台已开门
+   * @param closeStarted 站台已开始关门
+   * @param doorsAtThisStop 本站要开门
+   * @param driverOperatesDoors 车上的驾驶员亲手开关车门（人工驾驶）
+   */
+  static boolean shouldHandOverDoors(
+      boolean driverDoors,
+      boolean departureReleased,
+      boolean opened,
+      boolean closeStarted,
+      boolean doorsAtThisStop,
+      boolean driverOperatesDoors) {
+    return !driverDoors
+        && !departureReleased
+        && opened
+        && !closeStarted
+        && doorsAtThisStop
+        && driverOperatesDoors;
+  }
+
   static boolean stopSessionSuperseded(
       String stoppedTrainName, UUID stoppedRouteId, TrainProperties current) {
     if (current == null) {

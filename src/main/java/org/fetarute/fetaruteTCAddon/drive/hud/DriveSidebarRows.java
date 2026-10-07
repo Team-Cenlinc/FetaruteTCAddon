@@ -82,7 +82,12 @@ public final class DriveSidebarRows {
       boolean awaitingNextTrip = link.turnbackPending();
       rows.add(
           awaitingNextTrip && DriverStationHint.of(link, session.isStopped()).isEmpty()
-              ? new Row("drive.sidebar.label.stop", "drive.sidebar.value.stop.standby", Map.of())
+              ? new Row(
+                  "drive.sidebar.label.stop",
+                  link.nextTrip().isPresent()
+                      ? "drive.sidebar.value.stop.standby"
+                      : "drive.sidebar.value.stop.standby-plain",
+                  Map.of())
               : stationRow(link, session.isStopped()));
       if (!awaitingNextTrip) {
         link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);

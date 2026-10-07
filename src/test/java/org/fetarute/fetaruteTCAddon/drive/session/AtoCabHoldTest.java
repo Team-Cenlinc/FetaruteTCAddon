@@ -48,6 +48,16 @@ class AtoCabHoldTest {
   }
 
   @Test
+  @DisplayName("终点站只认结算之后收到的放行许可：进站前留下的“允许前进”不算放行，停车许可也不算")
+  void onlyReleasesReceivedAfterSettlementCount() {
+    assertFalse(DriveSessionManager.releasedSince(true, 90L, 100L), "进站前收到的许可");
+    assertTrue(DriveSessionManager.releasedSince(true, 100L, 100L));
+    assertTrue(DriveSessionManager.releasedSince(true, 250L, 100L));
+    assertFalse(DriveSessionManager.releasedSince(false, 250L, 100L), "结算后收到的是停车许可");
+    assertFalse(DriveSessionManager.releasedSince(true, Long.MIN_VALUE, 100L), "还没收到过许可");
+  }
+
+  @Test
   @DisplayName("待命时坐在车头：放行调头后坐在车尾，计时换端期间一直扣着，坐进车头端才解除")
   void holdLastsUntilTheDriverSitsAtTheDepartureEnd() {
     CabChange change = new CabChange();

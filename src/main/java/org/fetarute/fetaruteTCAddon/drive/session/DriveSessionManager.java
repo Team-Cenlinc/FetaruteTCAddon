@@ -2667,16 +2667,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     // 停在终点站等开出下一趟（待命，或结算后还在原地）：派车放行那一拍按发车方向调头（自动运行由发车动作自己调头）。
     // 不能只看待命登记：车晚点时登记待命与派车复用在同一拍，会话根本看不到待命，车就不调头放行了。
     Continuation waiting = continuations.get(session.playerId());
+    link.setAtLayover(layover);
     link.setTurnbackPending(
         layover
             || awaitingTurnback(
                 waiting != null,
                 session.isStopped(),
                 waiting == null ? 0.0 : Math.abs(session.odometerBlocks() - waiting.odometer()),
-                // 终到停站时调度只发停车要求、不发停车许可：手上留着进站前的“允许前进”，只认结算之后新收到的许可。
+                // 只认结算之后新收到的许可：结算前手上的许可是进站前留下的。
                 waiting != null
-                    && releasedToDriver(session, link)
-                    && link.directiveTick() >= waiting.tick()));
+                    && releasedSince(
+                        releasedToDriver(session, link), link.directiveTick(), waiting.tick())));
     // 终点站结算后、开出下一趟之前：评分停在刚结算的那一趟，下一趟的起始晚点等开出记成任务后再记。
     boolean settled = continuations.containsKey(session.playerId());
     if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0 && !settled && !link.score().hasDelayAtStart()) {
@@ -4306,6 +4307,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return waitingForNextTrip && stopped && movedBlocks < TERMINAL_STILL_BLOCKS && !released;
   }
 
+  /**
+   * 结算（或接管）之后才收到的放行许可才算放行。
+   *
+   * @param released 手上的许可是放行（不是停车）
+   * @param directiveTick 收到那条许可的 tick
+   * @param sinceTick 结算（或接管）的 tick
+   */
+  static boolean releasedSince(boolean released, long directiveTick, long sinceTick) {
+    return released && directiveTick >= sinceTick;
+  }
+
   /** 已收到放行的行车许可（不是停车）。ATO 只在扣车期间按驾驶员控制收许可，其余时候手上的许可是转 ATO 前留下的，不算。 */
   private static boolean releasedToDriver(DriveSession session, DriverLink link) {
     return (!session.isAto() || link.cabHold())
@@ -4347,8 +4359,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         applicable
             ? change.prediction(
                 preRelease,
-                isLayover(group.getProperties().getTrainName()),
-                () -> TerminalCabEnd.of(plugin, group, stationNode))
+                link.atLayover(),
+                () ->
+                    TerminalCabEnd.of(
+                        plugin, group, stationNode != null ? stationNode : currentNodeOf(group)))
             : CabSeats.Departure.EITHER;
     // 座位在哪一端只在可能要换端时才读（要逐个看座位附件的名字）：尽头式待命、换端途中、停着拿到行车许可时。
     boolean seatMatters =
@@ -4634,13 +4648,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private void adoptStationDoors(
       DriveSession session, MinecartGroup group, DriverStationStop stop) {
     DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.cabFacing(group, session));
-    boolean left = side == DriverDoorSide.LEFT || side == DriverDoorSide.BOTH;
-    boolean right = side == DriverDoorSide.RIGHT || side == DriverDoorSide.BOTH;
-    if (!left && !right) {
-      // 站台侧判不出（驾驶员朝向未知）：不记，车门的实际状态以驾驶员下一次开关为准。
-      traceSession(session, "停站中途接管：站台侧判不出，车门未记为开着");
-      return;
-    }
+    // 站台侧判不出（驾驶员朝向未知、开门方向与股道平行）时两侧都记成开着：站台已不再关门，宁可让驾驶员多关一侧，也不能当成关着放行。
+    boolean unknown = side != DriverDoorSide.LEFT && side != DriverDoorSide.RIGHT;
+    boolean left = side == DriverDoorSide.LEFT || unknown;
+    boolean right = side == DriverDoorSide.RIGHT || unknown;
     var settings = plugin.getConfigManager().current().autoStationSettings();
     DriveDoors held = doors.computeIfAbsent(session.playerId(), id -> new DriveDoors());
     if (left) {
@@ -4654,6 +4665,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (player != null) {
       sendTaskChat(player, "drive.task.doors-handed-over", Map.of());
     }
+  }
+
+  /** 调度进度里列车此刻所在的节点（ATO 没有驾驶员停站对象，终点站用它找出口）；查不到时为 {@code null}。 */
+  private NodeId currentNodeOf(MinecartGroup group) {
+    return plugin
+        .getRuntimeDispatchService()
+        .flatMap(dispatch -> dispatch.getDiagnostics(group.getProperties().getTrainName()))
+        .map(ControlDiagnostics::currentNode)
+        .orElse(null);
   }
 
   /** 计划发车时刻，见 {@link #cabDeparture}。 */
