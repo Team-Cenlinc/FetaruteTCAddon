@@ -15635,7 +15635,8 @@ public final class RuntimeDispatchService {
           singleSafety,
           smartDecision,
           nextAspect,
-          tokenState(trainName, token),
+          // 刹车时生效的是放回的那张令牌，诊断照实报它。
+          tokenState(trainName, movementToken(trainName).orElse(null)),
           !retainedDestination.isBlank(),
           authorityEnd,
           "recoverable",
@@ -15959,10 +15960,12 @@ public final class RuntimeDispatchService {
         validateFinalSignalAuthorization(trainName, nextAspect, finalAuthorization, true);
     RuntimeStopState latchedStop = activeStopStates.get(normalizeTrainKey(trainName));
     if (!finalValidation.allowed()
+        && train.isMoving()
         && HeldAuthorityBraking.appliesToFinalValidationFailure(
             finalValidation.reason(), latchedStop)) {
       // 停车记下的阻挡还被别车占着：本拍不放行，但运行中的车照延伸被拒时一样沿本拍开始时已持有的授权刹车、不作废授权，
       // 停因留着仍被占的阻挡，放行要等它们释放。先放掉本拍新拿的（回滚基线不变），再判能不能刹；刹不了走下面的作废硬停。
+      // 静止的车刹不了，直接走作废硬停，不先放一遍。
       releaseMovementAuthorityResources(
           trainName,
           authorizationRequest,

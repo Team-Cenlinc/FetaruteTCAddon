@@ -4,6 +4,7 @@ import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTes
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.testConfigView;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -171,7 +172,7 @@ class HeldAuthorityBrakingSignalTickTest {
     scenario.manager.releaseResource(OccupancyResource.forNode(D), Optional.of(BLOCKER));
     scenario.tick(99.8, true, 0.3);
 
-    assertTrue(scenario.signal() != SignalAspect.STOP, "阻挡释放后恢复行车信号");
+    assertNotEquals(SignalAspect.STOP, scenario.signal(), "阻挡释放后恢复行车信号");
     assertTrue(scenario.service.getActiveStopState(TRAIN).isEmpty());
   }
 
