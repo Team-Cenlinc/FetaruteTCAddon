@@ -374,15 +374,20 @@ final class OccupancyClaimEvidence {
     return agreed == null ? CorridorDirection.UNKNOWN : agreed;
   }
 
-  static String describeLiveStopCause(
+  /**
+   * 停车时记下的阻挡里，此刻仍挡着本车的那些 claim（判据同 {@link #externalOccupancyStopResourceStillHeld}）。
+   *
+   * @param trainName 停着的本车
+   * @param recorded 停因记下的阻挡
+   * @param liveClaims 账本当前的全部 claim；为空时返回空
+   * @return 每个仍被占的阻挡取一条 claim，按记录顺序
+   */
+  static List<OccupancyClaim> stillHeldStopBlockers(
       String trainName,
       java.util.Collection<RuntimeStopState.Blocker> recorded,
       java.util.Collection<OccupancyClaim> liveClaims) {
-    if (recorded == null || recorded.isEmpty()) {
-      return "no-recorded-blockers";
-    }
-    if (liveClaims == null) {
-      return "claims-unavailable";
+    if (recorded == null || liveClaims == null) {
+      return List.of();
     }
     List<OccupancyClaim> stillHeld = new ArrayList<>();
     for (RuntimeStopState.Blocker blocker : recorded) {
@@ -396,6 +401,20 @@ final class OccupancyClaimEvidence {
         }
       }
     }
+    return List.copyOf(stillHeld);
+  }
+
+  static String describeLiveStopCause(
+      String trainName,
+      java.util.Collection<RuntimeStopState.Blocker> recorded,
+      java.util.Collection<OccupancyClaim> liveClaims) {
+    if (recorded == null || recorded.isEmpty()) {
+      return "no-recorded-blockers";
+    }
+    if (liveClaims == null) {
+      return "claims-unavailable";
+    }
+    List<OccupancyClaim> stillHeld = stillHeldStopBlockers(trainName, recorded, liveClaims);
     if (stillHeld.isEmpty()) {
       // 记下的阻塞者全没了，车却还停着——停因和现实脱钩，下一步该查授权链而不是查占用。
       return "recorded-blockers-all-cleared:0/" + recorded.size();

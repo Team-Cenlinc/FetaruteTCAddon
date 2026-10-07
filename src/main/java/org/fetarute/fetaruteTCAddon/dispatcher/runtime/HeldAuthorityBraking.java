@@ -38,7 +38,26 @@ final class HeldAuthorityBraking {
   /** 判定列车仍在运动的最低速度（blocks/tick），与 STOP 曲线把速度判为 0 的阈值一致。 */
   private static final double MOVING_SPEED_EPSILON_BPT = 0.001;
 
+  /** 信号最终校验的失败原因：停车时记下的阻挡仍归外车，本拍不放行。 */
+  static final String STOP_BLOCKER_STILL_HELD = "active-occupancy-stop-blocker-still-held";
+
   private HeldAuthorityBraking() {}
+
+  /**
+   * 信号最终校验失败时，能否改为沿已持有授权刹车（判据仍由 {@link #resolve} 给出）。
+   *
+   * <p>只限 {@link #STOP_BLOCKER_STILL_HELD}，且列车确有带阻挡的停因：本拍窗口已经取得，只是原停因还没解除。其余失败——单线硬屏障、快照过期、
+   * 硬授权不在手、令牌失效等——说明本拍授权本身有问题，照旧作废授权、当拍停车。
+   *
+   * @param reason 最终校验的失败原因
+   * @param activeStop 列车当前的停车状态
+   * @return 是否可以改为刹车
+   */
+  static boolean appliesToFinalValidationFailure(String reason, RuntimeStopState activeStop) {
+    return STOP_BLOCKER_STILL_HELD.equals(reason)
+        && activeStop != null
+        && !activeStop.blockers().isEmpty();
+  }
 
   /**
    * 刹车计划。

@@ -133,6 +133,65 @@ class HeldAuthorityBrakingSignalTickTest {
     assertTrue(stop.detail().endsWith(":braking=held-authority"), stop.detail());
   }
 
+  /**
+   * 刹车途中减速、窗口缩回 C 而取得成功，但停车时记下的阻挡 D 仍被占（最终校验 {@code active-occupancy-stop-blocker-still-held}）：
+   * 不作废授权、不当拍停车，继续沿已持有授权刹车，停因留着 D；D 释放之前每一拍都如此，释放后才恢复行车信号。
+   */
+  @Test
+  void aStopBlockerStillHeldKeepsTheMovingTrainBrakingUntilItIsReleased() {
+    Scenario scenario = new Scenario();
+    scenario.grantWindowToC(ResourceIntent.MOVEMENT_REQUIRED);
+    scenario.tick(95.0, true);
+
+    FakeTrain slower = scenario.tick(99.0, true, 0.4);
+
+    RuntimeStopState stop = scenario.service.getActiveStopState(TRAIN).orElseThrow();
+    assertEquals(0, slower.stopCalls, "停车记下的阻挡还在只说明不能放行，不说明要当拍停死");
+    assertEquals(0, slower.hardStopCalls);
+    assertEquals("BLOCKED_BY_OCCUPANCY", stop.reasonCode());
+    assertFalse(stop.invalidatesAuthority());
+    assertTrue(
+        stop.detail().startsWith("final-authorization:active-occupancy-stop-blocker-still-held"),
+        stop.detail());
+    assertTrue(stop.detail().endsWith(":braking=held-authority"), stop.detail());
+    assertEquals(
+        List.of(OccupancyResource.forNode(D).toString()),
+        stop.blockers().stream().map(RuntimeStopState.Blocker::resource).toList());
+    assertEquals(SignalAspect.STOP, scenario.signal());
+    assertHeldByTrain(scenario.manager, EDGE_BC);
+    assertHeldByTrain(scenario.manager, NODE_C);
+    assertTrue(scenario.service.movementAuthorityView(TRAIN).orElseThrow().active());
+
+    FakeTrain stillBraking = scenario.tick(99.5, true, 0.3);
+
+    assertEquals(0, stillBraking.stopCalls);
+    assertEquals(SignalAspect.STOP, scenario.signal(), "阻挡未释放，下一拍照样不放行");
+    assertHeldByTrain(scenario.manager, EDGE_BC);
+
+    scenario.manager.releaseResource(OccupancyResource.forNode(D), Optional.of(BLOCKER));
+    scenario.tick(99.8, true, 0.3);
+
+    assertTrue(scenario.signal() != SignalAspect.STOP, "阻挡释放后恢复行车信号");
+    assertTrue(scenario.service.getActiveStopState(TRAIN).isEmpty());
+  }
+
+  /** 同样的最终校验失败，但本拍开头已持有的授权不完整（C 前那条边已不在本车名下，本拍才重新拿到）：回滚照旧放掉本拍新拿的， 证明不了授权在手，退回作废授权的当拍停车。 */
+  @Test
+  void aStopBlockerStillHeldWithAnIncompleteHeldAuthorityStillStopsAtOnce() {
+    Scenario scenario = new Scenario();
+    scenario.grantWindowToC(ResourceIntent.MOVEMENT_REQUIRED);
+    scenario.tick(95.0, true);
+    scenario.manager.releaseResource(EDGE_BC, Optional.of(TRAIN));
+
+    FakeTrain slower = scenario.tick(99.0, true, 0.4);
+
+    RuntimeStopState stop = scenario.service.getActiveStopState(TRAIN).orElseThrow();
+    assertEquals(1, slower.stopCalls);
+    assertEquals("AUTHORIZATION_FAILURE", stop.reasonCode());
+    assertTrue(stop.invalidatesAuthority());
+    assertTrue(scenario.manager.getClaim(EDGE_BC).isEmpty(), "本拍新拿到的照旧随回滚放掉");
+  }
+
   private static void assertHeldByTrain(
       SimpleOccupancyManager manager, OccupancyResource resource) {
     OccupancyClaim claim =
@@ -187,7 +246,11 @@ class HeldAuthorityBrakingSignalTickTest {
     }
 
     private FakeTrain tick(double headX, boolean moving) {
-      FakeTrain train = new FakeTrain(worldId, tags.properties(), moving, moving ? 0.5 : 0.0);
+      return tick(headX, moving, moving ? 0.5 : 0.0);
+    }
+
+    private FakeTrain tick(double headX, boolean moving, double speedBlocksPerTick) {
+      FakeTrain train = new FakeTrain(worldId, tags.properties(), moving, speedBlocksPerTick);
       RailState railState = mock(RailState.class);
       when(railState.positionLocation()).thenReturn(new Location(null, headX, 64.0, 0.0));
       train.railState = Optional.of(railState);

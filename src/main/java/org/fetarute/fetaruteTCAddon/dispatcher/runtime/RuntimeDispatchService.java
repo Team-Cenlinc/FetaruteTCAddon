@@ -14752,11 +14752,14 @@ public final class RuntimeDispatchService {
           braking);
       return;
     }
+    // 本拍开始时生效的令牌。本拍 acquire 成功后会签新令牌，之后再回滚时要沿已持有授权刹车，依据只能是这一张。
+    MovementAuthorizationToken tickStartToken =
+        isMovementInhibited(trainName)
+            ? null
+            : movementAuthorizationTokens.get(normalizeTrainKey(trainName));
     Set<OccupancyResource> heldForwardAuthority =
         HeldForwardAuthority.resolve(
-            isMovementInhibited(trainName)
-                ? null
-                : movementAuthorizationTokens.get(normalizeTrainKey(trainName)),
+            tickStartToken,
             authorizationRequest.movementPlanSnapshot(),
             snapshotSelfClaims(trainName),
             graph);
@@ -15616,6 +15619,16 @@ public final class RuntimeDispatchService {
               currentIndex,
               now,
               authorizationRequest.movementPlanSnapshot()));
+      // 回滚没动之前已持有的那段授权：运行中照延伸被拒时一样沿它刹车。只判、不收缩，刹车段本来就留着。
+      HeldAuthorityBraking.Decision braking =
+          brakeAlongTickStartAuthority(
+              tickStartToken,
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.get());
       traceSmartSignalFinalDecision(
           trainName,
           "PERIODIC_TICK",
@@ -15647,7 +15660,7 @@ public final class RuntimeDispatchService {
           advisoryDecision != null ? advisoryDecision : decision,
           authorizationRequest,
           authorityEnd,
-          HeldAuthorityBraking.Decision.notApplicable());
+          braking);
       return;
     }
 
@@ -15944,6 +15957,64 @@ public final class RuntimeDispatchService {
     nextAspect = publication.visibleAspect();
     FinalSignalValidation finalValidation =
         validateFinalSignalAuthorization(trainName, nextAspect, finalAuthorization, true);
+    RuntimeStopState latchedStop = activeStopStates.get(normalizeTrainKey(trainName));
+    if (!finalValidation.allowed()
+        && HeldAuthorityBraking.appliesToFinalValidationFailure(
+            finalValidation.reason(), latchedStop)) {
+      // 停车记下的阻挡还被别车占着：本拍不放行，但运行中的车照延伸被拒时一样沿本拍开始时已持有的授权刹车、不作废授权，
+      // 停因留着仍被占的阻挡，放行要等它们释放。先放掉本拍新拿的（回滚基线不变），再判能不能刹；刹不了走下面的作废硬停。
+      releaseMovementAuthorityResources(
+          trainName,
+          authorizationRequest,
+          rollbackBaseline,
+          HardStopReason.AUTHORIZATION_FAILURE.name());
+      HeldAuthorityBraking.Decision braking =
+          brakeAlongTickStartAuthority(
+              tickStartToken,
+              trainName,
+              train,
+              graph,
+              authorizationRequest,
+              currentNodeForSignal,
+              nextNode.orElse(null));
+      if (braking.plan().isPresent()) {
+        retainStopOccupancy(
+            trainName,
+            route,
+            currentIndex,
+            currentNodeForSignal,
+            Optional.of(authorizationRequest),
+            graph,
+            now,
+            train,
+            braking.retainedResources());
+        String latchDetail = "final-authorization:" + finalValidation.detailedReason();
+        traceStructuredSignalFinalDecision(
+            trainName, finalAuthorization, SignalAspect.STOP, false, false, latchDetail);
+        applyNonInvalidatingBlockedStop(
+            train,
+            properties,
+            trainName,
+            latchedStop.reasonCode(),
+            latchDetail,
+            route,
+            currentNodeOpt.orElse(null),
+            nextNode.orElse(null),
+            graph,
+            new OccupancyDecision(
+                false,
+                now,
+                SignalAspect.STOP,
+                OccupancyClaimEvidence.stillHeldStopBlockers(
+                    trainName, latchedStop.blockers(), occupancyManager.snapshotClaims()),
+                false,
+                latchDetail),
+            authorizationRequest,
+            authorityEnd,
+            braking);
+        return;
+      }
+    }
     if (!finalValidation.allowed()) {
       rollbackMovementAuthorization(
           trainName,
@@ -17643,7 +17714,7 @@ public final class RuntimeDispatchService {
     Optional<String> retainedStopBlocker = activeOccupancyStopBlockerStillHeld(trainName);
     if (retainedStopBlocker.isPresent()) {
       return FinalSignalValidation.blocked(
-          "active-occupancy-stop-blocker-still-held", true, false, retainedStopBlocker.get());
+          HeldAuthorityBraking.STOP_BLOCKER_STILL_HELD, true, false, retainedStopBlocker.get());
     }
     boolean hardBarrierPresent = finalSignalHardBarrierPresent(trainName, request);
     String hardBarrierReason =
@@ -18421,6 +18492,37 @@ public final class RuntimeDispatchService {
         graph,
         train,
         configManager.current().runtimeSettings().movementAuthorityStopMarginBlocks());
+  }
+
+  /**
+   * 回滚之后能否沿本拍开始时已持有的授权刹停；能刹时把那张令牌重新作为本车生效的授权。
+   *
+   * <p>本拍 acquire 成功后签的新令牌描述本拍申请的窗口，其中本拍新拿的已被回滚放掉；可恢复保持还会把它转成未激活的待定令牌。回滚只放掉快照之外的资源，
+   * 本拍开始时那张令牌授予的那段仍归本车（判据照样逐项核对账本），所以刹车只能以它为依据。放回它，下一拍才能沿同一份授权继续刹车，
+   * 别的车读到的也是本车实际持有的授权。必须在回滚之后调用；列车此刻带 movement inhibitor 时按没有令牌处理。
+   */
+  private HeldAuthorityBraking.Decision brakeAlongTickStartAuthority(
+      MovementAuthorizationToken tickStartToken,
+      String trainName,
+      RuntimeTrainHandle train,
+      RailGraph graph,
+      OccupancyRequest refusedRequest,
+      NodeId currentNode,
+      NodeId nextRouteNode) {
+    HeldAuthorityBraking.Decision braking =
+        HeldAuthorityBraking.resolve(
+            isMovementInhibited(trainName) ? null : tickStartToken,
+            refusedRequest,
+            currentNode,
+            nextRouteNode,
+            snapshotSelfClaims(trainName),
+            graph,
+            train,
+            configManager.current().runtimeSettings().movementAuthorityStopMarginBlocks());
+    if (braking.plan().isPresent()) {
+      movementAuthorizationTokens.put(normalizeTrainKey(trainName), tickStartToken);
+    }
+    return braking;
   }
 
   /** 对在线列车重新下发硬 STOP，供健康监控在 STOP 互卡等待期间使用。 */

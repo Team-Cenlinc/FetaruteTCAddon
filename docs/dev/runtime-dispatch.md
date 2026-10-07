@@ -74,7 +74,7 @@
 - 出站门控、推进点、destination reissue 与周期信号 tick 统一采用“两层前瞻”：
   - `hardAuthorityWindow` 只覆盖当前 tick 真正要进入的短窗口，只有这里的 live hard blocker 才能直接 STOP 或触发 acquire failure。
   - `advisoryLookaheadWindow` 使用同一个 expanded path 的更远前瞻，只用于 station stop、真实 NODE/EDGE blocker、active opposite single conflict、switcher throat 等风险的 CAUTION / target speed 计算；其资源不得进入 `MOVEMENT_REQUIRED`。
-- `BLOCKED_BY_OCCUPANCY`、`WAITING_FOR_SINGLE_ZONE` 与 protective retain 等可恢复 STOP 会保存当时的外部 blocker 快照。最终 Signal 发布除了核验本次 `hardAuthorityWindow` 外，还必须复核这些 blocker 是否仍以 `MOVEMENT_REQUIRED`、`PHYSICAL_FOOTPRINT`、`PROTECTIVE_RETAIN` 或 `HOLD_ONLY` 存在；只要其中任一项仍归外车，短窗口的新 token 不得清除 STOP 或发布行驶信号。只有 claim 已释放、原子转移给本车，或降级为纯 `QUEUE_POSITION` / preview 诊断后，才允许完整授权链恢复信号；快照不可读时按 fail-closed 保持 STOP。
+- `BLOCKED_BY_OCCUPANCY`、`WAITING_FOR_SINGLE_ZONE` 与 protective retain 等可恢复 STOP 会保存当时的外部 blocker 快照。最终 Signal 发布除了核验本次 `hardAuthorityWindow` 外，还必须复核这些 blocker 是否仍以 `MOVEMENT_REQUIRED`、`PHYSICAL_FOOTPRINT`、`PROTECTIVE_RETAIN` 或 `HOLD_ONLY` 存在；只要其中任一项仍归外车，短窗口的新 token 不得清除 STOP 或发布行驶信号；运行中的车此时沿已持有授权刹车，闩锁随刹车停因延续（见“被拒时沿已持有授权刹车”）。只有 claim 已释放、原子转移给本车，或降级为纯 `QUEUE_POSITION` / preview 诊断后，才允许完整授权链恢复信号；快照不可读时按 fail-closed 保持 STOP。
 - 排查“绿灯后速度突然归零”时，按同一列车时间线关联 `SMART_STOP_LIFECYCLE`、`SMART_SIGNAL_FINAL` 与 `DIRECT_SIGNAL_UPDATE_SUPPRESSED`。若仍见 `reason=active-occupancy-stop-blocker-still-held`，`hardBarrierReason` 会给出 `资源@claim:owner:role`；应等待真实资源释放事件触发完整重评估，禁止手工释放 claim、清库或用队列位次替代物理清空证明。
 - `SMART_ROUTE_ARRIVAL`、`SMART_STOP_LIFECYCLE` 和 `SMART_RESOURCE_LIFECYCLE` 由生产端按实际变化去重后逐次保留，不消耗每分钟普通观察预算。稳定 STOP 与无语义变化的 claim refresh 不重复输出；blocker 按资源、owner 与角色去重排序，枚举顺序变化不算新停因。资源事件记录创建、释放与 owner/角色/方向变化；周期 signal/resource snapshot 仍受预算限制。账本事件不能单独证明现场车尾已清空。
 - 周期信号 tick 与推进点的 `hardAuthorityWindow` 会在列车移动时按“当前制动距离 + 跟驰/authority 安全余量”扩展，最多保留 8 条展开图边。这样短咽喉、站前折返与 PWC 前的小段不会因为固定 1-edge 授权而漏看可制动距离内的真实冲突。停着的车同样要求“车头 + 安全余量”（制动距离为 0），见下一条。
@@ -92,7 +92,10 @@
   - fail-closed，任一成立就当拍停车（与旧版相同）：列车静止；没有有效 token 或带 movement inhibitor；token 终点不在本拍行车计划前方；token 里前方任一资源不再以 `MOVEMENT_REQUIRED` 持有；车头到终点的路径不全在 token 内；边长或车头位置读不到（坐标插值被钳到边末端也算读不到）；车头已进停车余量。
   - 为什么安全：路径上的 NODE/EDGE 与冲突资源都由本车 `MOVEMENT_REQUIRED` 独占，别的车拿不到。TrainCarts 的限速是硬切（每个物理步把 maxSpeed 设为限速），每拍（实服 `dispatch-tick-interval-ticks: 20`，即 1 秒）把限速压在 √(2a·(d − `speed-curve-early-brake-blocks`)) 以下，两拍之间最多走一拍的距离，停车点前的剩余距离 d 不会穿过 0：early-brake 12、a ≤ 1 时至少还剩约 11.5 格；early-brake 为 0 时最多越过 a/2 格，由停车余量吸收。拍间隔拉长到 T 秒时下界变成 early-brake − aT²/2。
   - 停因明细：运行中被拒时追加 `:braking=held-authority` 或 `:braking=instant:<原因>`，写在必留的 `SMART_STOP_LIFECYCLE` 行里；停稳后明细不带后缀，算新的停车生命周期，所以一次运行中被拒会有两行 `event=enter`。
-  - 不在范围内：推进点在 route 节点处被拒仍是作废授权的硬停车。刹车不越过下一个 route 节点，正常刹车不会走到那里。
+  - 可恢复保持与停车阻挡闩锁同样沿已持有授权刹车。两者都在 acquire 成功、签了新令牌之后才回滚：新令牌描述的窗口里本拍新拿的已被放掉，可恢复保持还会把它转成未激活的待定令牌，所以刹车的依据是本拍开始时那张令牌（`brakeAlongTickStartAuthority`），判据与上面相同；刹得住就把它放回作为生效的授权，下一拍才能接着刹，别的车读到的也是本车实际持有的授权。
+    - 可恢复保持（`SMART_DISPATCH_RECOVERABLE_HOLD`）只判、不收缩，见“授权回滚”一条。以前这里当拍清零速度。
+    - 最终校验因停车记下的阻挡仍被占（`active-occupancy-stop-blocker-still-held`）失败时，先放掉本拍新拿的（回滚基线不变），刹得住就按停车保持收缩但留下刹车段、不作废授权；停因沿用原停因代码，明细为 `final-authorization:active-occupancy-stop-blocker-still-held:<资源@角色>:braking=held-authority`，仍被占的阻挡照旧记着，下一拍闩锁继续生效，直到它们释放。以前这里作废授权、当拍硬停车，停因换成不带阻挡的 `AUTHORIZATION_FAILURE`，下一拍闩锁就没了——这一下急停什么也没换来。刹不住（含静止、本拍开始时的授权已不完整）仍走作废授权的硬停车。其余最终校验失败（单线硬屏障、快照过期、硬授权不在手、令牌失效等）说明本拍授权本身有问题，不在此列，照旧作废硬停（`HeldAuthorityBraking#appliesToFinalValidationFailure`）。
+  - 不在范围内：推进点在 route 节点处被拒仍是作废授权的硬停车。刹车不越过下一个 route 节点，正常刹车不会走到那里。静止列车上的停车阻挡闩锁仍是作废硬停，停因随之换成不带阻挡的 `AUTHORIZATION_FAILURE`，下一拍即可放行，与上面“阻挡释放前不得恢复”并不一致，未改。
 - 若首个 `SWITCHER` 或显式咽喉已经进入普通 hard lookahead，`OccupancyRequestBuilder` 会把当前安全边界至冲突点、再到首个正常图边界/出清站点的 NODE、EDGE、CONFLICT 原子提升为硬进路窗口。更远的平交道口只保留在 advisory/完整 Movement Plan 中，不能从数百方块外提前锁闭；一旦联锁已进入硬窗口却找不到可证明出口，请求构造会失败，PERIODIC 与推进点入口都会立即撤销旧 Movement Authority、写入 movement inhibitor 并落地硬 STOP，禁止“入口已放行、列车却沿用上周期 PROCEED 停在道口中间”。
 - 前向授权请求中只有下一跳 NODE/EDGE/必要冲突资源标记为 `MOVEMENT_REQUIRED`，当前位置、尾部保护与 hold-only single claim 只作为 `PROTECTIVE_RETAIN` / `HOLD_ONLY` 保留。前向授权不得把 rear guard 或 advisory blocker 混入 fail-closed 请求。
 - 发车门控是 admission gate：它保留完整的选定前向路径与必要的原子联锁窗口来判断是否允许出发，但正式 acquire 只写 `MOVEMENT_REQUIRED` 资源，不覆盖 rear guard 或 hold retain claim。
@@ -157,9 +160,10 @@
   停车记下的阻挡仍被别车占着（`final-authorization:active-occupancy-stop-blocker-still-held`）而回滚，把它正压着的合流岔节点与道岔冲突资源
   放掉、当拍授给 JBS 来车，后车开上岔把前车尾车撞断，每次还触发一次全网 STOP_FIRST 重建。现在信号 tick、推进点与健康重发在 acquire 前
   记下本车全部 claim，回滚只释放快照之外的；之前已持有的原样留下，回滚随即照 `applyUnresolvableMovementPlanStop` 的先例调用停车保持
-  （`retainStopOccupancy`）收缩到当前位置与列尾防护——回滚之后都是当拍硬停车，不走制动曲线，所以不留刹车段。列车压着的道岔因此没有任何
+  （`retainStopOccupancy`）收缩到当前位置与列尾防护——回滚之后通常当拍硬停车，不走制动曲线，所以不留刹车段；例外是运行中因停车记下的阻挡
+  仍被占而回滚、且沿本拍开始时已持有的授权刹得住，收缩时留下刹车段（见“被拒时沿已持有授权刹车”）。列车压着的道岔因此没有任何
   一拍空档，停着的车前方多余的授权也照旧放掉（以前是回滚整段放掉顺带完成这件事）。可恢复回滚（`SMART_DISPATCH_RECOVERABLE_HOLD`）只加快照、
-  不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序。但它在返回前照样补回车身与列尾防护（与正常路径末尾取回的是本拍同一份
+  不收缩：它按队列位次释放，再收缩会打乱合流岔的排队顺序；运行中照样沿已持有授权刹车，只判、不收缩，刹车段本来就留着。它在返回前照样补回车身与列尾防护（与正常路径末尾取回的是本拍同一份
   列尾防护请求 `RearGuardRequest`，只 acquire、不释放、不碰排队）：信号 tick 开头只按“硬窗口 + 当前位置”保留 claim，硬窗口不含车头身后的
   区段，不补的话车身压着的 NODE/EDGE 要到本车下一次完整 tick 才重新归本车，其间后车可以对它们取得硬授权（`RecoverableHoldBodyRetainTest`）。
   保下了资源时输出必留诊断
@@ -380,7 +384,7 @@ TrainCarts 的 `GroupLinkEvent` 发生在成员搬移与旧组删除之前，事
 
 ## 类体积约束：不要再往 RuntimeDispatchService 里加方法
 
-`RuntimeDispatchService` 约三万行、995 个方法，已经贴着 SpotBugs 的单类分析上限。
+`RuntimeDispatchService` 约三万行、996 个方法，已经贴着 SpotBugs 的单类分析上限。
 越线之后整个类被标记 `SKIPPED_CLASS_TOO_BIG` 并**完全跳过静态分析**——而它恰恰是全项目最需要被覆盖的类。
 
 判据（SpotBugs 4.8.6 `AnalysisContext#isTooBig`）：类文件超过 1,000,000 字节，或方法数超过 1000，任一成立即跳过。
