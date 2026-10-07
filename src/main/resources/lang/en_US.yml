@@ -165,7 +165,6 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
-    none: "<gray><bold>Ungraded</bold></gray>"
   supercap:
     low: "<yellow>Supercapacitor low (<white><percent>%</white>): open the doors at the next station to charge</yellow>"
     depleted: "<red>Supercapacitor empty: traction cut, brakes still work</red>"
@@ -608,6 +607,7 @@ drive:
       switch-direction-unknown: "<prefix> <yellow>The departure direction is not set yet; change ends after dispatch</yellow>"
       switch-failed: "<prefix> <red>Cannot move you directly: no free seat in that cab, or you are too far from the train; please walk there</red>"
       switched: "<prefix> <green>Moved to the cab at the departure end</green>"
+      cancelled-off-seat: "<prefix> <yellow>This train no longer runs the next trip (cancelled or given to another train), so driving ended while you were away from the seat</yellow>"
     started: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to the terminus</green>"
     started-interval: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to <white><station></white></green>"
     result: "<prefix> <white>Trip <aqua><trip></aqua> <state></white> <gray>|</gray> score <yellow><points></yellow> <gray>grade</gray> <gold><bold><grade></bold></gold>"
@@ -638,12 +638,12 @@ drive:
       claimed: "Waiting for the train"
       driving: "Driving"
       completed: "Completed"
-      abandoned: "Abandoned"
+      abandoned: "Incomplete (ended early)"
       expired: "Dropped"
       failed: "Failed"
       interrupted: "Taken back"
-    next-trip-layover: "<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
-    next-trip-layover-no-destination: "<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua>, departing at <white><time></white></white>"
+    next-trip-layover: "<prefix> <white>This train next runs trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
+    next-trip-layover-no-destination: "<prefix> <white>This train next runs trip <aqua><trip></aqua>, departing at <white><time></white></white>"
     layover-no-next-trip: "<prefix> <yellow>This train is laying over; the timetable has no next trip for it yet</yellow>"
     ungraded: "ungraded"
   tutorial:
@@ -1077,6 +1077,7 @@ drive:
   seat-exit:
     moving: "<prefix> <yellow>You cannot leave the seat while the train is moving; stop first, then press Shift. To end driving at once, run /fta drive off</yellow>"
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
+    confirm-terminal: "<prefix> <yellow>You are at the terminus: open the doors first to score this trip, then leave the seat to change ends; leaving now abandons the trip. Press Shift again within 2 seconds to leave</yellow>"
 sign:
   stopmark:
     created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the head of a <white><carriages></white>-car train stops here"

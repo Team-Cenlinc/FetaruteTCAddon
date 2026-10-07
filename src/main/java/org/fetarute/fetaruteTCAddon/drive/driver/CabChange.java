@@ -44,7 +44,7 @@ public final class CabChange {
     NONE,
     /** 放行前提前告知要换到车尾端。 */
     ANNOUNCED,
-    /** 等接续下一趟期间驾驶员离座：引导到发车端（方向未定时任一端）。 */
+    /** 等接续下一趟期间驾驶员离座：引导到发车端（方向未定时任一端）；离座途中发车方向定下来时再来一次。 */
     WALK,
     /** 放行后开始计时换端。 */
     STARTED,
@@ -85,34 +85,6 @@ public final class CabChange {
       long brakeTestSeconds,
       int memberCount,
       boolean walkAllowed) {
-
-    /** 不在等接续下一趟（离座按离岗处理）。 */
-    public Input(
-        boolean applicable,
-        boolean preRelease,
-        CabSeats.Departure predicted,
-        CabSeats.End seat,
-        boolean released,
-        Instant now,
-        long reserveSeconds,
-        Instant plannedDeparture,
-        boolean simulation,
-        long brakeTestSeconds,
-        int memberCount) {
-      this(
-          applicable,
-          preRelease,
-          predicted,
-          seat,
-          released,
-          now,
-          reserveSeconds,
-          plannedDeparture,
-          simulation,
-          brakeTestSeconds,
-          memberCount,
-          false);
-    }
 
     public Input {
       Objects.requireNonNull(now, "now");
@@ -164,28 +136,13 @@ public final class CabChange {
   }
 
   /**
-   * 驾驶座没有标记的列车：驾驶员坐进了要换到的那一端（放行前是车尾端，放行后是车头端），但还没确认这个座位是驾驶室。
+   * 驾驶座没有标记的列车：驾驶员坐进了要换到的那一端，但还没确认这个座位是驾驶室。换端进行中按要坐的那一端判断；没在换端时放行前认车尾端、放行后认车头端。
    *
    * @param marked 列车有标记的驾驶座（有标记时座位本身就能认定，不用确认）
    * @param changing 换端正在进行（已告知或计时中）
    * @param preRelease 放行前（见 {@link #preRelease}）
    * @param seat 座位在哪一端
    * @param confirmed 驾驶员已确认过此刻所坐的座位
-   */
-  public static boolean awaitsSeatConfirm(
-      boolean marked, boolean changing, boolean preRelease, CabSeats.End seat, boolean confirmed) {
-    return awaitsSeatConfirm(
-        marked,
-        changing,
-        preRelease,
-        seat,
-        confirmed,
-        preRelease ? CabSeats.End.TAIL : CabSeats.End.HEAD);
-  }
-
-  /**
-   * 同 {@link #awaitsSeatConfirm(boolean, boolean, boolean, CabSeats.End, boolean)}，换端进行中按要坐的那一端判断。
-   *
    * @param target 换端进行中要坐的那一端；{@link CabSeats.End#NONE} 表示发车方向未定、任一端都算
    */
   public static boolean awaitsSeatConfirm(
@@ -305,10 +262,15 @@ public final class CabChange {
       return complete();
     }
     if (in.seat() == CabSeats.End.NONE) {
-      target = want;
       if (stage == Stage.IDLE) {
+        target = want;
         stage = Stage.ANNOUNCED;
         begin(in);
+        return Event.WALK;
+      }
+      if (target != want) {
+        // 离座途中发车方向定了（或变了）：重新告诉驾驶员去哪一端。
+        target = want;
         return Event.WALK;
       }
       return Event.NONE;

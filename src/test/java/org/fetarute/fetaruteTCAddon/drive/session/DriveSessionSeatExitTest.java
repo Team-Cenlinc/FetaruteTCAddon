@@ -88,4 +88,13 @@ class DriveSessionSeatExitTest {
     assertTrue(DriveSessionManager.exitAbandonsTask(dispatch, true));
     assertFalse(DriveSessionManager.exitAbandonsTask(dispatch, false));
   }
+
+  @Test
+  @DisplayName("终点站离座引导：等接续下一趟或列车在待命、且没有开着的一趟时才引导")
+  void walkIsAllowedOnlyWhileWaitingForTheNextTrip() {
+    assertTrue(DriveSessionManager.walkAllowed(false, true, false), "结算后等接续");
+    assertTrue(DriveSessionManager.walkAllowed(false, false, true), "接管待命车（含按间隔发车的线路）");
+    assertFalse(DriveSessionManager.walkAllowed(true, true, true), "还开着一趟：先结算");
+    assertFalse(DriveSessionManager.walkAllowed(false, false, false));
+  }
 }

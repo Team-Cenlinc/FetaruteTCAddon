@@ -84,6 +84,10 @@ drive:
         accepted: ["<yellow><offset> · within door window</yellow>"]
         overrun: ["<red><offset> · outside the window</red>"]
         short: ["<red><offset> · short, timed out</red>"]
+    state:
+      abandoned: ["Abandoned"]
+    next-trip-layover: ["<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"]
+    next-trip-layover-no-destination: ["<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua>, departing at <white><time></white></white>"]
   hud:
     line:
       - "<gray>Speed</gray> <white><speed_kmh></white> <gray>km/h</gray> <dark_gray>|</dark_gray> <gray>Notch</gray> <yellow><notch></yellow> <dark_gray>|</dark_gray> <gray>Limit</gray> <white><limit_kmh></white> <dark_gray>|</dark_gray> <aqua><direction></aqua>"

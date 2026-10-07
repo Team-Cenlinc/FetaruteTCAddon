@@ -79,12 +79,4 @@ class ScoreRulesTest {
     assertTrue(json.contains("\"formatVersion\":1"), json);
     assertTrue(json.contains("二站"), json);
   }
-
-  @org.junit.jupiter.api.Test
-  @org.junit.jupiter.api.DisplayName("只评开完的与卡住、超时被收回的；自己中途结束、非本人原因收回不评级")
-  void onlyCompletedOrFailedTripsAreGraded() {
-    org.junit.jupiter.api.Assertions.assertTrue(ScoreRules.graded(true, false));
-    org.junit.jupiter.api.Assertions.assertTrue(ScoreRules.graded(false, true));
-    org.junit.jupiter.api.Assertions.assertFalse(ScoreRules.graded(false, false));
-  }
 }

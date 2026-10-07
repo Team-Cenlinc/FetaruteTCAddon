@@ -1806,7 +1806,6 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
-    none: "<gray><bold>未评级</bold></gray>"
   supercap:
     low: "<yellow>超级电容电量偏低（<white><percent>%</white>），请在下一站开门充电</yellow>"
     depleted: "<red>超级电容电量耗尽，牵引已切除，制动不受影响</red>"
@@ -2249,6 +2248,7 @@ drive:
       switch-direction-unknown: "<prefix> <yellow>发车方向尚未确定，派车后再换端</yellow>"
       switch-failed: "<prefix> <red>无法直接换端：目标驾驶室没有空座位，或距离列车过远，请步行前往</red>"
       switched: "<prefix> <green>已换到发车端驾驶室</green>"
+      cancelled-off-seat: "<prefix> <yellow>本车已不再接续下一趟（车次取消或改由其他列车担当），离座期间驾驶结束</yellow>"
     started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
     started-interval: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到 <white><station></white></green>"
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
@@ -2279,12 +2279,12 @@ drive:
       claimed: "等待列车"
       driving: "驾驶中"
       completed: "已完成"
-      abandoned: "已放弃"
+      abandoned: "未完成（中途结束）"
       expired: "已作废"
       failed: "未完成"
       interrupted: "已收回"
-    next-trip-layover: "<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
-    next-trip-layover-no-destination: "<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
+    next-trip-layover: "<prefix> <white>本车下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
+    next-trip-layover-no-destination: "<prefix> <white>本车下一趟担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
     layover-no-next-trip: "<prefix> <yellow>本车正在待命，时刻表上暂无本车的下一趟</yellow>"
     ungraded: "未评级"
   tutorial:
@@ -2718,3 +2718,4 @@ drive:
   seat-exit:
     moving: "<prefix> <yellow>列车行驶中不能离座，请停车后再按 Shift 离座；需要立即结束驾驶时，输入 /fta drive off</yellow>"
     confirm: "<prefix> <yellow>两秒内再按一次 Shift 离座；离座后本趟任务按放弃处理</yellow>"
+    confirm-terminal: "<prefix> <yellow>已到终点站：请先开门结算本趟成绩，再离座换端；现在离座本趟按放弃处理，两秒内再按一次 Shift 离座</yellow>"

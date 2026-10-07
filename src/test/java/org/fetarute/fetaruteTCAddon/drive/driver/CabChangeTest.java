@@ -34,7 +34,8 @@ class CabChangeTest {
         planned,
         true,
         BRAKE_TEST,
-        6);
+        6,
+        false);
   }
 
   /** 尽头式待命、放行前的一拍。 */
@@ -50,7 +51,8 @@ class CabChangeTest {
         planned,
         true,
         BRAKE_TEST,
-        6);
+        6,
+        false);
   }
 
   @Test
@@ -197,7 +199,8 @@ class CabChangeTest {
             null,
             true,
             BRAKE_TEST,
-            6);
+            6,
+            false);
 
     assertEquals(CabChange.Event.NONE, change.tick(input));
     assertEquals(CabChange.Stage.IDLE, change.stage());
@@ -219,7 +222,8 @@ class CabChangeTest {
             null,
             false,
             0L,
-            6);
+            6,
+            false);
 
     assertEquals(CabChange.Event.CANCELLED, change.tick(moving));
     assertEquals(CabChange.Event.NONE, change.tick(moving));

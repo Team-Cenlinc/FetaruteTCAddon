@@ -29,7 +29,8 @@ class DriveSidebarCabChangeRowTest {
         null,
         false,
         0L,
-        8);
+        8,
+        false);
   }
 
   @Test

@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
@@ -262,8 +263,8 @@ public final class DriveApiImpl implements DriveApi {
         record.mode(),
         record.state(),
         record.points(),
-        // 不评级的记录库里记作“-”，对外为空串。
-        "-".equals(record.grade()) ? "" : record.grade(),
+        // 不评级的旧记录库里记作“-”，对外为空串。
+        ScoreRules.UNGRADED.equals(record.grade()) ? "" : record.grade(),
         record.startedAt(),
         record.finishedAt());
   }

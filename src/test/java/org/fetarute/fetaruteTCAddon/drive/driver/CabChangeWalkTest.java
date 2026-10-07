@@ -139,4 +139,25 @@ class CabChangeWalkTest {
         CabChange.awaitsSeatConfirm(false, true, true, CabSeats.End.TAIL, false, CabSeats.End.HEAD),
         "坐到了另一端：不是要坐的那一端，不问确认");
   }
+
+  @Test
+  @DisplayName("离座途中发车方向定下来：再提示一次要去的那一端")
+  void announcesWhenDirectionBecomesKnown() {
+    assertEquals(
+        CabChange.Event.WALK,
+        change.tick(waiting(CabSeats.Departure.EITHER, CabSeats.End.NONE, true, 0)));
+    assertEquals(
+        CabChange.Event.NONE,
+        change.tick(waiting(CabSeats.Departure.EITHER, CabSeats.End.NONE, true, 1)));
+    assertEquals(
+        CabChange.Event.WALK,
+        change.tick(waiting(CabSeats.Departure.TAIL, CabSeats.End.NONE, true, 2)),
+        "转入待命后算出由车尾端开出");
+    assertEquals(CabSeats.End.TAIL, change.target());
+    assertFalse(change.eitherEnd());
+    assertEquals(
+        CabChange.Event.NONE,
+        change.tick(waiting(CabSeats.Departure.TAIL, CabSeats.End.NONE, true, 3)),
+        "方向没再变就不重复提示");
+  }
 }

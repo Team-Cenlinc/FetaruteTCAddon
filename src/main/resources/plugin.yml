@@ -97,7 +97,7 @@ permissions:
       fetarute.drive.top: true
       fetarute.drive.tutorial: true
   fetarute.drive:
-    description: 手动驾驶的基本命令（/fta drive on|off|status|reverser）；子节点含驾驶非调度列车与新手教程
+    description: 驾驶的基本命令（/fta drive on|off|status|reverser|cab）；子节点含驾驶非调度列车与新手教程
     default: op
     children:
       fetarute.drive.free: true
