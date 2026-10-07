@@ -124,6 +124,29 @@ class DriveSidebarRowsTest {
   }
 
   @Test
+  void waitingAtTheTerminalShowsStandbyAndTheNextTripInsteadOfTheFinishedTripSchedule() {
+    DriveSession session = session(CabSystems.disabled());
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);
+    session.attachDriverLink(link);
+    link.setTargetLabel("终点站");
+    link.setSchedule(
+        new DriverSchedule(true, Instant.parse("2026-10-07T08:49:35Z"), OptionalLong.of(157L)));
+    link.setNextTrip(
+        new org.fetarute.fetaruteTCAddon.drive.driver.DriverNextTrip(
+            UUID.randomUUID(), "MT-1O-168", "绿洲农场", Instant.parse("2026-10-07T08:52:15Z")));
+    link.setTurnbackPending(true);
+
+    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, 0);
+    assertEquals("drive.sidebar.value.stop.standby", row(rows, "stop").valueKey());
+    assertTrue(
+        rows.stream().noneMatch(r -> r.labelKey().startsWith("drive.sidebar.label.scheduled-")),
+        "刚跑完那一趟的表定时刻不再显示");
+    assertTrue(
+        rows.stream().noneMatch(r -> r.labelKey().equals("drive.sidebar.label.next-station")));
+    assertEquals("绿洲农场", row(rows, "next-trip").values().get("destination"));
+  }
+
+  @Test
   void theScheduleRowFollowsTheStationRowWhenTheTrainRunsToATimetable() {
     DriveSession session = session(CabSystems.disabled());
     DriverLink link = new DriverLink(UUID.randomUUID(), "T1", null, () -> 0.0, () -> 0L);

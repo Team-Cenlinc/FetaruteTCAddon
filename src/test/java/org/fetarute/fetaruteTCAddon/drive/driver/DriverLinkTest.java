@@ -110,6 +110,15 @@ class DriverLinkTest {
   }
 
   @Test
+  @DisplayName("收到行车许可的 tick 可查：终点站据此只认结算之后新收到的许可")
+  void directiveTickIsKnown() {
+    assertEquals(Long.MIN_VALUE, link.directiveTick());
+    clock.set(500L);
+    link.acceptDirective(directive(SignalAspect.PROCEED));
+    assertEquals(500L, link.directiveTick());
+  }
+
+  @Test
   @DisplayName("接管时已说过的下一趟，待命期间查到同一趟不再另说")
   void nextTripAnnouncedElsewhereIsNotRepeated() {
     UUID trip = UUID.randomUUID();

@@ -205,6 +205,11 @@ public final class DriverLink {
     return directive;
   }
 
+  /** 收到最近一次指令时的 tick；还没收到时为 {@link Long#MIN_VALUE}。 */
+  public long directiveTick() {
+    return directive == null ? Long.MIN_VALUE : directiveTick;
+  }
+
   /** 收到最近一次指令后过了多少 tick；还没收到时为 {@link Long#MAX_VALUE}。 */
   public long ticksSinceDirective() {
     return directive == null ? Long.MAX_VALUE : Math.max(0L, clock.getAsLong() - directiveTick);

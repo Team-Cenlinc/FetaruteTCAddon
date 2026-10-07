@@ -1907,6 +1907,7 @@ drive:
         close-doors: "<yellow>请关门</yellow>"
         doors-closing: "<gray>车门关闭中</gray>"
         wait-departure: "<gray>等待发车</gray>"
+        standby: "<gray>待命，等候下一趟</gray>"
         depart: "<green>可以发车</green>"
       doors:
         closed: "<green>关闭</green>"

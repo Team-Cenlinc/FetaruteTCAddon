@@ -281,8 +281,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * @param after 刚跑完的那一趟（列车绑上别的车次才算开出下一趟）
    * @param scored 那一趟已在本次驾驶里结算：这期间取消、离座、换端超时都按正常结束说；停在终点站接管（一站没开）时为 {@code false}
    * @param odometer 结算（或接管）时会话的累计里程（格）：之后挪动过就不再算原地等下一趟
+   * @param tick 结算（或接管）时的服务器 tick：只有之后收到的行车许可才算放行
    */
-  private record Continuation(TaskKey after, boolean scored, double odometer) {}
+  private record Continuation(TaskKey after, boolean scored, double odometer, long tick) {}
 
   private final Map<UUID, Continuation> continuations = new HashMap<>();
 
@@ -2672,7 +2673,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 waiting != null,
                 session.isStopped(),
                 waiting == null ? 0.0 : Math.abs(session.odometerBlocks() - waiting.odometer()),
-                releasedToDriver(session, link)));
+                // 终到停站时调度只发停车要求、不发停车许可：手上留着进站前的“允许前进”，只认结算之后新收到的许可。
+                waiting != null
+                    && releasedToDriver(session, link)
+                    && link.directiveTick() >= waiting.tick()));
     // 终点站结算后、开出下一趟之前：评分停在刚结算的那一趟，下一趟的起始晚点等开出记成任务后再记。
     boolean settled = continuations.containsKey(session.playerId());
     if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0 && !settled && !link.score().hasDelayAtStart()) {
@@ -2780,7 +2784,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (keepDriving) {
         // 运营人员直接接管：没有接续车次也接着开（例如开到回库），像以前一样，直到收车或自己结束。
         continuations.put(
-            session.playerId(), new Continuation(task.get().key(), true, session.odometerBlocks()));
+            session.playerId(),
+            new Continuation(
+                task.get().key(), true, session.odometerBlocks(), Bukkit.getCurrentTick()));
         return false;
       }
       handback(session, DriveSession.EndReason.TASK_COMPLETE);
@@ -3013,7 +3019,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     TimetableService.DueTrip next = reservation.trip().get();
     TaskKey key = keyOf(next);
     continuations.put(
-        session.playerId(), new Continuation(task.key(), true, session.odometerBlocks()));
+        session.playerId(),
+        new Continuation(task.key(), true, session.odometerBlocks(), Bukkit.getCurrentTick()));
     String destination =
         link.nextTrip()
             .filter(trip -> trip.tripId().equals(next.trip().id()))
@@ -3094,7 +3101,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     TaskKey key = new TaskKey(current.timetableId(), current.tripCode(), current.serviceDate());
     if (current.nextStopSequence().isEmpty()) {
       // 这一趟已到终点：等列车开出下一趟时再记成任务。本次驾驶没结算过任何一趟，离开时不说“已结算”。
-      continuations.put(session.playerId(), new Continuation(key, false, session.odometerBlocks()));
+      continuations.put(
+          session.playerId(),
+          new Continuation(key, false, session.odometerBlocks(), Bukkit.getCurrentTick()));
       Reservation next = reserveNext(session, player, trainName);
       tellTripFinishedAtTakeover(player, session, trainName, key, next);
       return;

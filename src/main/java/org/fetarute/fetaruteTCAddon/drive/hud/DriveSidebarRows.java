@@ -78,9 +78,16 @@ public final class DriveSidebarRows {
           session.isAto()
               ? new Row("drive.sidebar.label.signal", "drive.sidebar.value.signal.ato", Map.of())
               : signalRow(link));
-      rows.add(stationRow(link, session.isStopped()));
-      link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);
-      link.nextPass().map(DriveSidebarRows::passRow).ifPresent(rows::add);
+      // 终点站等开出下一趟：刚跑完那一趟的下一站、表定时刻与通过站已无意义（晚点会一直往上涨），只留“下一趟”。终到停站的操作提示照常显示。
+      boolean awaitingNextTrip = link.turnbackPending();
+      rows.add(
+          awaitingNextTrip && DriverStationHint.of(link, session.isStopped()).isEmpty()
+              ? new Row("drive.sidebar.label.stop", "drive.sidebar.value.stop.standby", Map.of())
+              : stationRow(link, session.isStopped()));
+      if (!awaitingNextTrip) {
+        link.schedule().map(DriveSidebarRows::scheduleRow).ifPresent(rows::add);
+        link.nextPass().map(DriveSidebarRows::passRow).ifPresent(rows::add);
+      }
       link.nextTrip().map(DriveSidebarRows::nextTripRow).ifPresent(rows::add);
       session
           .liveScore()
