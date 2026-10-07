@@ -358,6 +358,8 @@ drive:
       blocking: ["<gold>后方列车已被挡 <white><seconds></white> 秒，请尽快运行</gold>"]
     setup:
       progress: ["<yellow><step>中 <seconds> 秒</yellow>"]
+    cab-change:
+      announced: ["<gold>本站折返：请到第 <white><car></white> 节驾驶室</gold>"]
   tutorial:
     finished: ["<prefix> <green>新手教程已完成。</green> <gray>驾驶调度列车时，第一次遇到信号确认、进站对标、开关门与发车信号时另有一次简短提示。输入 /fta drive tutorial reset 可重新开始。</gray>"]
     command:
@@ -460,7 +462,7 @@ drive:
       page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>", "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。终点站最多越过停车点 3 米，超出会被强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
       page-1: ["<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>"]
       page-8: ["<dark_blue><bold>七、发车与准点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步会被拦下。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"]
-      page-10: ["<dark_blue><bold>九、出了状况</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车卡住时可以交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"]
+      page-10: ["<dark_blue><bold>九、出了状况</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车卡住时可以交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>", "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"]
       page-6: ["<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在前方停住。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"]
   sidebar:
     label:

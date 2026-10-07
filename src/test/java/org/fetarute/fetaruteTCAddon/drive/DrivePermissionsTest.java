@@ -110,7 +110,7 @@ class DrivePermissionsTest {
   @DisplayName("帮助只列有权限的子命令")
   void helpIsFilteredByPermission() {
     assertEquals(
-        List.of("on", "off", "status", "reverser"),
+        List.of("on", "off", "status", "reverser", "cab"),
         DrivePermissions.visibleSubcommands(Set.of(DrivePermissions.BASE)::contains));
     assertEquals(
         List.of("records"),

@@ -94,8 +94,9 @@ drive:
       depleted: "<red><bold>Supercapacitor empty: traction cut</bold></red> <gray>coast in and open the doors to charge</gray>"
     cab-change:
       active: "<gold><bold>Changing ends: <seconds> s left</bold></gold> <gray>take the cab in car</gray> <white><car></white>"
-      announced: "<gold>Reversing here: go to the cab in car <white><car></white></gold>"
+      announced: "<gold>Take a seat in the cab in car <white><car></white></gold>"
       confirm: "<yellow>Seated: once sure this is the cab, enter</yellow> <white>/fta drive on</white>"
+      announced-either: "<gold>Direction not set: wait in the cab at either end</gold>"
     cab:
       vigilance-warning: "<red><bold>Vigilance <seconds></bold></red>"
       vigilance-tripped: "<red><bold>Vigilance emergency brake</bold></red>"
@@ -145,6 +146,7 @@ drive:
     cab-change:
       announced: "<gold>The next trip departs from the cab in car <white><car></white></gold> <gray>please take a seat at that end</gray>"
       active: "<gold>Change ends</gold> <gray>take the cab in car</gray> <white><car></white><gray>,</gray> <white><seconds></white> <gray>s left</gray>"
+      announced-either: "<gold>Departure direction not set</gold> <gray>wait in the cab at either end; drive from the leading end once dispatched</gray>"
     station:
       open-doors:
         left: "<aqua><station></aqua> <yellow>Open the left doors</yellow>"
@@ -163,6 +165,7 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+    none: "<gray><bold>Ungraded</bold></gray>"
   supercap:
     low: "<yellow>Supercapacitor low (<white><percent>%</white>): open the doors at the next station to charge</yellow>"
     depleted: "<red>Supercapacitor empty: traction cut, brakes still work</red>"
@@ -223,6 +226,7 @@ drive:
         active: "<yellow>car <car></yellow> <white><seconds></white> <gray>s left</gray>"
         announced: "<yellow>cab in car <car></yellow>"
         confirm: "<yellow>confirm seat</yellow> <gray>/fta drive on</gray>"
+        announced-either: "<yellow>cab at either end</yellow>"
       next-trip: "<white>to <destination></white> <gray><time></gray>"
       next-trip-code: "<white><trip></white> <gray><time></gray>"
       signal:
@@ -594,6 +598,16 @@ drive:
       start: "<prefix> <yellow>Changing ends: take the cab in car <white><car></white> (the other end) within <white><seconds></white> s. Leaving your seat on the way does not end driving and the train stays stopped</yellow>"
       short: "<prefix> <red>Not enough time: changing ends takes about <white><need></white> s but departure is due in <white><left></white> s, the train will leave late</red>"
       brake-test: "<prefix> <yellow>Departure is due in <white><seconds></white> s: redo the brake test before departing</yellow>"
+      walk: "<prefix> <white>Leaving the seat does not end the drive: the next trip departs from the cab in car <yellow><car></yellow>; take a seat there before departure</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+      walk-either: "<prefix> <white>Leaving the seat does not end the drive: the departure direction is not set yet, so you may wait in the cab at either end; once dispatched you must drive from the leading end, and if seated at the other end, change ends within the time limit</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+      switch-offer: "<prefix> <click:run_command:'/fta drive cab'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive cab</white>'><aqua>[Move to the cab in car <car>]</aqua></hover></click>"
+      short-moved: "<prefix> <yellow>Not enough time: changing ends takes about <white><need></white> s with only <white><left></white> s to departure, so you have been moved to the cab in car <white><car></white></yellow>"
+      timeout-moved: "<prefix> <yellow>The time to change ends ran out; you have been moved to the cab in car <white><car></white></yellow>"
+      switch-not-driving: "<prefix> <red>You are not driving a dispatched train</red>"
+      switch-not-needed: "<prefix> <yellow>No change of ends is needed now</yellow>"
+      switch-direction-unknown: "<prefix> <yellow>The departure direction is not set yet; change ends after dispatch</yellow>"
+      switch-failed: "<prefix> <red>Cannot move you directly: no free seat in that cab, or you are too far from the train; please walk there</red>"
+      switched: "<prefix> <green>Moved to the cab at the departure end</green>"
     started: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to the terminus</green>"
     started-interval: "<prefix> <green>Took over trip <aqua><trip></aqua> (<mode>); follow the signals to <white><station></white></green>"
     result: "<prefix> <white>Trip <aqua><trip></aqua> <state></white> <gray>|</gray> score <yellow><points></yellow> <gray>grade</gray> <gold><bold><grade></bold></gold>"
@@ -631,6 +645,7 @@ drive:
     next-trip-layover: "<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
     next-trip-layover-no-destination: "<prefix> <white>This train is laying over; its next trip is <aqua><trip></aqua>, departing at <white><time></white></white>"
     layover-no-next-trip: "<prefix> <yellow>This train is laying over; the timetable has no next trip for it yet</yellow>"
+    ungraded: "ungraded"
   tutorial:
     offer: "<prefix> <gold>First time driving?</gold> <gray>The tutorial walks you through starting the train, pulling away, coasting, braking to a stop, and opening and closing the doors during this drive; each step moves on once you have done it.</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive tutorial start</white>'><green>[Start tutorial]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>Stop asking; run /fta drive tutorial start any time</gray>'><gray>[Skip]</gray></hover></click>"
     started: "<prefix> <gold>Tutorial started</gold> <gray>Follow the prompts; the action bar and sidebar keep showing the driving display.</gray>"
@@ -937,7 +952,7 @@ drive:
       page-7: "<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning. At termini you may overrun the stop mark by 3 m at most, or the train is forcibly stopped.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>"
       page-8: "<dark_blue><bold>7. Departing on time</bold></dark_blue>\n<black>Depart once the doors are closed and the signal allows; early starts are blocked.\nThe sidebar shows scheduled times and the delay; recover lateness within the limit.\nStop and trip scores are shown at the end.</black>"
       page-9: "<dark_blue><bold>8. Termini and changing ends</bold></dark_blue>\n<black>At the terminus the trip is scored once the doors open; you may end driving or carry on with this train's next trip.\nTo change ends, leave the doors open and walk to the other cab; unmarked cab seats must be confirmed.</black>"
-      page-10: "<dark_blue><bold>9. When things go wrong</bold></dark_blue>\n<black>If dispatch holds you, wait for the signal. Use the emergency brake only when you must stop at once. Leaving your seat ends driving; hand back to automatic operation if stuck.</black>\n<dark_gray>Full handbook: Fetarute Wiki.</dark_gray>"
+      page-10: "<dark_blue><bold>9. When things go wrong</bold></dark_blue>\n<black>If dispatch holds you, wait for the signal. Use the emergency brake only when you must stop at once. Don't leave the seat while moving; at a terminus you may walk to the departure-end cab, elsewhere leaving ends driving. Hand back to automatic operation if stuck.</black>\n<dark_gray>Full handbook: Fetarute Wiki.</dark_gray>"
   end:
     left-seat: "<prefix> <yellow>You left the seat; driving has ended</yellow>"
     seat-lost: "<prefix> <red>Could not return to the seat; driving has ended</red>"
@@ -973,6 +988,7 @@ drive:
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- Driving leaderboard</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <player></white> <gray>- Revoke a player's driving task</gray>"
       entry-fault: "  <gray>•</gray> <white>/fta drive fault <player> <type|clear></white> <gray>- Inject or clear train faults on a simulation-level driving session</gray>"
+      entry-cab: "  <gray>•</gray> <white>/fta drive cab</white> <gray>- Move straight to the departure-end cab when changing ends</gray>"
     start:
       started: "<prefix> <green>Now driving <white><train></white></green> <gray>Hotbar 1-9 is P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>Manual driving is disabled</red>"

@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
@@ -41,7 +42,8 @@ public final class TaskViews {
         task.metadata(),
         task.endReason(),
         task.points() >= 0 ? OptionalInt.of(task.points()) : OptionalInt.empty(),
-        Optional.of(task.grade()).filter(grade -> !grade.isBlank()));
+        Optional.of(task.grade())
+            .filter(grade -> !grade.isBlank() && !ScoreRules.UNGRADED.equals(grade)));
   }
 
   public static DriveApi.Mode mode(DrivingMode mode) {

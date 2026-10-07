@@ -262,7 +262,8 @@ public final class DriveApiImpl implements DriveApi {
         record.mode(),
         record.state(),
         record.points(),
-        record.grade(),
+        // 不评级的记录库里记作“-”，对外为空串。
+        "-".equals(record.grade()) ? "" : record.grade(),
         record.startedAt(),
         record.finishedAt());
   }

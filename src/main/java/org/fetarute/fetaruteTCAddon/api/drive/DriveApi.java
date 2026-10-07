@@ -559,7 +559,7 @@ public interface DriveApi {
    * 任务结束时的成绩。
    *
    * @param points 得分（0–100）
-   * @param grade 评级（S/A/B/C/D）
+   * @param grade 评级（S/A/B/C/D）；驾驶员中途结束、因调度等非本人原因被收回时不评级（1.12.0），为空串
    * @param stops 各站成绩
    * @param serviceInterventions 防护常用制动介入次数
    * @param emergencyInterventions 紧急制动介入次数
@@ -594,7 +594,7 @@ public interface DriveApi {
    * @param mode 驾驶方式
    * @param state 终态
    * @param points 得分
-   * @param grade 评级
+   * @param grade 评级（S/A/B/C/D）；不评级时为空串（1.12.0）
    * @param startedAt 开始驾驶
    * @param finishedAt 结束
    */

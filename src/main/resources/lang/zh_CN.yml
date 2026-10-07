@@ -1735,8 +1735,9 @@ drive:
       depleted: "<red><bold>电容电量耗尽：牵引切除</bold></red> <gray>请惰行进站开门充电</gray>"
     cab-change:
       active: "<gold><bold>换端准备：剩余 <seconds> 秒</bold></gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座</gray>"
-      announced: "<gold>本站折返：请到第 <white><car></white> 节驾驶室</gold>"
+      announced: "<gold>请到第 <white><car></white> 节驾驶室就座</gold>"
       confirm: "<yellow>已就座：确认是驾驶室后输入</yellow> <white>/fta drive on</white>"
+      announced-either: "<gold>发车方向未定：可在任一端驾驶室坐下等候</gold>"
     cab:
       vigilance-warning: "<red><bold>警惕 <seconds></bold></red>"
       vigilance-tripped: "<red><bold>警惕紧急制动</bold></red>"
@@ -1786,6 +1787,7 @@ drive:
     cab-change:
       announced: "<gold>下一趟由第 <white><car></white> 节驾驶室开出</gold> <gray>请提前到该端驾驶室就座</gray>"
       active: "<gold>换端</gold> <gray>请到第</gray> <white><car></white> <gray>节驾驶室就座，剩余</gray> <white><seconds></white> <gray>秒</gray>"
+      announced-either: "<gold>发车方向尚未确定</gold> <gray>可在任一端驾驶室坐下等候，派车后须在车头一端驾驶</gray>"
     station:
       open-doors:
         left: "<aqua><station></aqua> <yellow>请开左侧车门</yellow>"
@@ -1804,6 +1806,7 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+    none: "<gray><bold>未评级</bold></gray>"
   supercap:
     low: "<yellow>超级电容电量偏低（<white><percent>%</white>），请在下一站开门充电</yellow>"
     depleted: "<red>超级电容电量耗尽，牵引已切除，制动不受影响</red>"
@@ -1864,6 +1867,7 @@ drive:
         active: "<yellow>第 <car> 节</yellow> <gray>剩余</gray> <white><seconds></white> <gray>秒</gray>"
         announced: "<yellow>第 <car> 节驾驶室</yellow>"
         confirm: "<yellow>请确认座位</yellow> <gray>/fta drive on</gray>"
+        announced-either: "<yellow>任一端驾驶室</yellow>"
       next-trip: "<white>开往 <destination></white> <gray><time></gray>"
       next-trip-code: "<white><trip></white> <gray><time></gray>"
       signal:
@@ -2235,6 +2239,16 @@ drive:
       start: "<prefix> <yellow>折返换端：请在 <white><seconds></white> 秒内到第 <white><car></white> 节（另一端）驾驶室就座；换端途中离座不结束驾驶，列车保持停车</yellow>"
       short: "<prefix> <red>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，发车将晚点</red>"
       brake-test: "<prefix> <yellow>距计划发车尚有 <white><seconds></white> 秒，请重做制动试验后再发车</yellow>"
+      walk: "<prefix> <white>离座不结束驾驶：下一趟由第 <yellow><car></yellow> 节驾驶室驾驶，请在发车前就座</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+      walk-either: "<prefix> <white>离座不结束驾驶：发车方向尚未确定，可在任一端驾驶室坐下等候；派车后须在车头一端驾驶，坐在另一端时须在限定时间内换过去</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+      switch-offer: "<prefix> <click:run_command:'/fta drive cab'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive cab</white>'><aqua>[直接换到第 <car> 节驾驶室]</aqua></hover></click>"
+      short-moved: "<prefix> <yellow>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，已直接送到第 <white><car></white> 节驾驶室</yellow>"
+      timeout-moved: "<prefix> <yellow>换端时限已到，已直接送到第 <white><car></white> 节驾驶室</yellow>"
+      switch-not-driving: "<prefix> <red>当前未在驾驶调度列车</red>"
+      switch-not-needed: "<prefix> <yellow>当前无需换端</yellow>"
+      switch-direction-unknown: "<prefix> <yellow>发车方向尚未确定，派车后再换端</yellow>"
+      switch-failed: "<prefix> <red>无法直接换端：目标驾驶室没有空座位，或距离列车过远，请步行前往</red>"
+      switched: "<prefix> <green>已换到发车端驾驶室</green>"
     started: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到终点站</green>"
     started-interval: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到 <white><station></white></green>"
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
@@ -2272,6 +2286,7 @@ drive:
     next-trip-layover: "<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
     next-trip-layover-no-destination: "<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
     layover-no-next-trip: "<prefix> <yellow>本车正在待命，时刻表上暂无本车的下一趟</yellow>"
+    ungraded: "未评级"
   tutorial:
     offer: "<prefix> <gold>初次驾驶</gold> <gray>新手教程将在本次驾驶中逐步引导启动列车、起步、惰行、制动停车与开关车门，每完成一步自动进入下一步。</gray> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive tutorial start</white>'><green>[开始新手教程]</green></hover></click> <click:run_command:'/fta drive tutorial stop'><hover:show_text:'<gray>此后不再自动提示；可随时输入 /fta drive tutorial start 开始</gray>'><gray>[跳过]</gray></hover></click>"
     started: "<prefix> <gold>新手教程已开始</gold> <gray>请按提示操作，动作栏与侧边栏照常显示驾驶信息。</gray>"
@@ -2578,7 +2593,7 @@ drive:
       page-7: "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准为佳；欠标可前移对标，过标后不得退行。终点站最多越过停车点 3 米，超出即强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"
       page-8: "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"
       page-9: "<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。</black>"
-      page-10: "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
+      page-10: "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。行驶中不能离座；终点站等下一趟时可离座走到发车端，其余情况离座即结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
   end:
     left-seat: "<prefix> <yellow>你已离开座位，驾驶结束</yellow>"
     seat-lost: "<prefix> <red>无法回到座位，驾驶已结束</red>"
@@ -2614,6 +2629,7 @@ drive:
       entry-top: "  <gray>•</gray> <white>/fta drive top [week|all]</white> <gray>- 驾驶排行</gray>"
       entry-revoke: "  <gray>•</gray> <white>/fta drive revoke <玩家></white> <gray>- 收回某名玩家的驾驶任务</gray>"
       entry-fault: "  <gray>•</gray> <white>/fta drive fault <玩家> <类型|clear></white> <gray>- 给仿真级驾驶中的列车注入或清除车上故障</gray>"
+      entry-cab: "  <gray>•</gray> <white>/fta drive cab</white> <gray>- 折返换端时直接换到发车端驾驶室</gray>"
     start:
       started: "<prefix> <green>已开始驾驶列车 <white><train></white></green> <gray>快捷栏 1–9 依次为 P3 P2 P1 N B1 B2 B3 B4 EB</gray>"
       disabled: "<prefix> <red>驾驶功能已关闭</red>"

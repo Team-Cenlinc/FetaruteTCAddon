@@ -131,10 +131,12 @@ public final class DriveSidebarRows {
                   "seconds",
                   String.valueOf(Math.max(0L, change.secondsLeft())))));
       case ANNOUNCED -> Optional.of(
-          new Row(
-              label,
-              "drive.sidebar.value.cab-change.announced",
-              Map.of("car", String.valueOf(change.targetCar()))));
+          change.eitherEnd()
+              ? new Row(label, "drive.sidebar.value.cab-change.announced-either", Map.of())
+              : new Row(
+                  label,
+                  "drive.sidebar.value.cab-change.announced",
+                  Map.of("car", String.valueOf(change.targetCar()))));
       case IDLE -> Optional.empty();
     };
   }

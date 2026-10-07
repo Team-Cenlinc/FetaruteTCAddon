@@ -93,6 +93,7 @@ public final class DrivePermissions {
           new Subcommand("off", List.of(BASE)),
           new Subcommand("status", List.of(BASE)),
           new Subcommand("reverser", List.of(BASE)),
+          new Subcommand("cab", List.of(BASE)),
           new Subcommand("tutorial", List.of(TUTORIAL)),
           new Subcommand("tasks", List.of(DRIVER)),
           new Subcommand("task", List.of(DRIVER)),

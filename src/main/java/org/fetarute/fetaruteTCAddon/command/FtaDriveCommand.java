@@ -28,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.CongestionProtection;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveLeaderboardRow;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
@@ -182,6 +183,14 @@ public final class FtaDriveCommand {
             .literal("status")
             .permission(permissionOf("status"))
             .handler(ctx -> handleStatus(ctx.sender())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
+            .literal("cab")
+            .permission(permissionOf("cab"))
+            .handler(ctx -> handleCab(ctx.sender())));
 
     manager.command(
         manager
@@ -463,6 +472,19 @@ public final class FtaDriveCommand {
       return;
     }
     sender.sendMessage(locale.component("drive.command.status", describe(locale, session.get())));
+  }
+
+  /** 折返换端：直接换到发车端的驾驶室（换端提示里的按钮）。 */
+  private void handleCab(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    sender.sendMessage(plugin.getLocaleManager().component(drive.switchCab(player)));
   }
 
   private void handleReverser(CommandSender sender, String direction) {
@@ -802,7 +824,9 @@ public final class FtaDriveCommand {
                         "points",
                         String.valueOf(record.points()),
                         "grade",
-                        record.grade())));
+                        ScoreRules.UNGRADED.equals(record.grade())
+                            ? locale.text("drive.task.ungraded")
+                            : record.grade())));
           }
         });
   }

@@ -14,14 +14,16 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  *
  * <ul>
  *   <li>{@link Stage#IDLE}：不需要换端；
- *   <li>{@link Stage#ANNOUNCED}：列车停在尽头式终点站（车门已开，或已转入待命）、派车还没放行，已知下一趟由此刻的车尾端驾驶，提前告诉驾驶员。
- *       这时没有时限，驾驶员离座不结束驾驶，车门可以开着；坐进车尾端驾驶室即完成，放行调头后那一端就是车头；
+ *   <li>{@link Stage#ANNOUNCED}：列车停在终点站（车门已开，或已转入待命）、派车还没放行，驾驶员要坐到下一趟的发车端：
+ *       已知下一趟由此刻的车尾端驾驶时提前告诉驾驶员；等接续下一趟期间驾驶员离座时，引导回发车端（发车方向未定时两端驾驶室都可以先坐下等候）。
+ *       这时没有时限，驾驶员离座不结束驾驶，车门可以开着；坐进要坐的那一端即完成，放行调头后发车端就是车头；
  *   <li>{@link Stage#ACTIVE}：派车已放行（发车方向已定、该调头的已调头），驾驶员不在车头端驾驶室：牵引封锁、列车保持停车，
  *       离座不结束驾驶；在换端时间预留内坐进车头端驾驶室即完成，超时交还自动运行。
  * </ul>
  *
  * <p>换端开始时（提前告知或放行时）定下完成后要不要重做制动试验：simulation 级、距计划发车不少于换端时间预留加制动试验所需时间才要求重做，
- * 否则视为已做；距计划发车不到换端时间预留时报准备时间不足。每次待命只提前告知一次：驾驶员坐进车尾端之后再离座就按离岗处理。
+ * 否则视为已做；距计划发车不到换端时间预留时报准备时间不足。每次待命只提前告知一次；等接续下一趟期间再离座，按离座重新引导（见 {@link
+ * Input#walkAllowed}），不等接续时离座按离岗处理。
  *
  * <p>驾驶座没有标记的列车（见 {@link CabSeats}）按车厢位置认端，坐进那一端的客室座位也会被当成驾驶室：坐进要换到的那一端后，还要驾驶员确认座位才算完成（见 {@link
  * #awaitsSeatConfirm}）。
@@ -42,6 +44,8 @@ public final class CabChange {
     NONE,
     /** 放行前提前告知要换到车尾端。 */
     ANNOUNCED,
+    /** 等接续下一趟期间驾驶员离座：引导到发车端（方向未定时任一端）。 */
+    WALK,
     /** 放行后开始计时换端。 */
     STARTED,
     /** 已坐进要坐的驾驶室。 */
@@ -66,6 +70,7 @@ public final class CabChange {
    * @param simulation simulation 级（有制动试验）
    * @param brakeTestSeconds 制动试验所需时间（秒）
    * @param memberCount 编组节数（提示第几节用）
+   * @param walkAllowed 驾驶员在终点站等接续下一趟：此时离座不结束驾驶，按离座引导到发车端
    */
   public record Input(
       boolean applicable,
@@ -78,7 +83,36 @@ public final class CabChange {
       Instant plannedDeparture,
       boolean simulation,
       long brakeTestSeconds,
-      int memberCount) {
+      int memberCount,
+      boolean walkAllowed) {
+
+    /** 不在等接续下一趟（离座按离岗处理）。 */
+    public Input(
+        boolean applicable,
+        boolean preRelease,
+        CabSeats.Departure predicted,
+        CabSeats.End seat,
+        boolean released,
+        Instant now,
+        long reserveSeconds,
+        Instant plannedDeparture,
+        boolean simulation,
+        long brakeTestSeconds,
+        int memberCount) {
+      this(
+          applicable,
+          preRelease,
+          predicted,
+          seat,
+          released,
+          now,
+          reserveSeconds,
+          plannedDeparture,
+          simulation,
+          brakeTestSeconds,
+          memberCount,
+          false);
+    }
 
     public Input {
       Objects.requireNonNull(now, "now");
@@ -140,10 +174,32 @@ public final class CabChange {
    */
   public static boolean awaitsSeatConfirm(
       boolean marked, boolean changing, boolean preRelease, CabSeats.End seat, boolean confirmed) {
+    return awaitsSeatConfirm(
+        marked,
+        changing,
+        preRelease,
+        seat,
+        confirmed,
+        preRelease ? CabSeats.End.TAIL : CabSeats.End.HEAD);
+  }
+
+  /**
+   * 同 {@link #awaitsSeatConfirm(boolean, boolean, boolean, CabSeats.End, boolean)}，换端进行中按要坐的那一端判断。
+   *
+   * @param target 换端进行中要坐的那一端；{@link CabSeats.End#NONE} 表示发车方向未定、任一端都算
+   */
+  public static boolean awaitsSeatConfirm(
+      boolean marked,
+      boolean changing,
+      boolean preRelease,
+      CabSeats.End seat,
+      boolean confirmed,
+      CabSeats.End target) {
     if (marked || confirmed || !(changing || preRelease)) {
       return false;
     }
-    return seat == (preRelease ? CabSeats.End.TAIL : CabSeats.End.HEAD);
+    CabSeats.End want = changing ? target : (preRelease ? CabSeats.End.TAIL : CabSeats.End.HEAD);
+    return want == CabSeats.End.NONE ? seat != CabSeats.End.NONE : seat == want;
   }
 
   /** 准备时间不足：距计划发车已不到换端时间预留，按时走过去也会晚点。 */
@@ -218,6 +274,9 @@ public final class CabChange {
   }
 
   private Event tickBeforeRelease(Input in) {
+    if (in.walkAllowed()) {
+      return tickWhileWaitingForNextTrip(in);
+    }
     if (in.predicted() != CabSeats.Departure.TAIL) {
       return cancel();
     }
@@ -226,6 +285,44 @@ public final class CabChange {
       announcedThisLayover = true;
       return complete();
     }
+    return announceTail(in);
+  }
+
+  /** 等接续下一趟期间（放行前）：离座不结束驾驶，引导到发车端；方向未定时两端驾驶室都可以先坐下等候。 */
+  private Event tickWhileWaitingForNextTrip(Input in) {
+    CabSeats.End want =
+        switch (in.predicted()) {
+          case HEAD -> CabSeats.End.HEAD;
+          case TAIL -> CabSeats.End.TAIL;
+          case EITHER -> CabSeats.End.NONE;
+        };
+    boolean seatedRight =
+        want == CabSeats.End.NONE ? in.seat() != CabSeats.End.NONE : in.seat() == want;
+    if (seatedRight) {
+      if (want == CabSeats.End.TAIL) {
+        announcedThisLayover = true;
+      }
+      return complete();
+    }
+    if (in.seat() == CabSeats.End.NONE) {
+      target = want;
+      if (stage == Stage.IDLE) {
+        stage = Stage.ANNOUNCED;
+        begin(in);
+        return Event.WALK;
+      }
+      return Event.NONE;
+    }
+    // 坐在了另一端：引导中的继续提示要坐的那一端（放行后照样要换过去）；没在引导时按尽头式提前告知。
+    if (stage != Stage.IDLE) {
+      target = want;
+      return Event.NONE;
+    }
+    return want == CabSeats.End.TAIL ? announceTail(in) : Event.NONE;
+  }
+
+  /** 尽头式终点站、坐在车头端：提前告知下一趟由车尾端驾驶（每次待命一次）。 */
+  private Event announceTail(Input in) {
     if (stage == Stage.IDLE && !announcedThisLayover) {
       stage = Stage.ANNOUNCED;
       target = CabSeats.End.TAIL;
@@ -277,14 +374,23 @@ public final class CabChange {
     return stage != Stage.IDLE;
   }
 
-  /** 要坐进哪一端的驾驶室（按此刻的编组次序）。 */
+  /** 要坐进哪一端的驾驶室（按此刻的编组次序）；发车方向未定、任一端都可以时为 {@link CabSeats.End#NONE}。 */
   public CabSeats.End target() {
     return target;
   }
 
-  /** 要坐的驾驶室在第几节（1 起）。 */
+  /** 发车方向未定：两端驾驶室都可以先坐下等候。 */
+  public boolean eitherEnd() {
+    return stage != Stage.IDLE && target == CabSeats.End.NONE;
+  }
+
+  /** 要坐的驾驶室在第几节（1 起）；任一端都可以时为 0。 */
   public int targetCar() {
-    return target == CabSeats.End.TAIL ? Math.max(1, memberCount) : 1;
+    return switch (target) {
+      case TAIL -> Math.max(1, memberCount);
+      case HEAD -> 1;
+      case NONE -> 0;
+    };
   }
 
   /** 换端计时还剩几秒（向上取整，不为负）；不在计时时为 -1。 */

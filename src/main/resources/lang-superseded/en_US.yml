@@ -55,6 +55,7 @@ drive:
       page-3: ["<dark_blue><bold>2. Licences</bold></dark_blue>\n<black>Level 1 free licence: complete the tutorial; drive non-dispatched trains.\nLevel 2 dispatch licence: practise, then pass a road test; take tasks on dispatched trains.\nLicences are valid everywhere.</black>\n<dark_gray>See and sign up: /fta license</dark_gray>"]
       page-7: ["<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>", "<dark_blue><bold>6. Stopping and doors</bold></dark_blue>\n<black>The sidebar shows metres to the stop mark. Brake early; stopping within the door range passes, an accurate stop is better; move up if short, you cannot reverse after overrunning. At terminals you may overrun the stop mark by 3 m at most, or the train is forcibly stopped.\nOnce stopped press F, open the platform side, close when the dwell ends.</black>"]
       page-5: ["<dark_blue><bold>4. The cab</bold></dark_blue>\n<black>Hotbar 1–3 power P3–P1, 4 coast N, 5–8 brake B1–B4, 9 emergency EB.\nOnce stopped, F opens the cab menu (doors, end driving).\nAction bar: speed and limit.\nSidebar: signal, stop, times, doors.</black>"]
+      page-10: ["<dark_blue><bold>9. When things go wrong</bold></dark_blue>\n<black>If dispatch holds you, wait for the signal. Use the emergency brake only when you must stop at once. Leaving your seat ends driving; hand back to automatic operation if stuck.</black>\n<dark_gray>Full handbook: Fetarute Wiki.</dark_gray>"]
   task:
     board:
       no-station: ["<prefix> <red>No station nearby; open the task board near a platform</red>"]
@@ -102,6 +103,8 @@ drive:
       accepted: ["<yellow><bold>Within door window</bold></yellow> <white><offset></white> <gray><station></gray>"]
       overrun: ["<red><bold>Outside the window</bold></red> <white><offset></white> <gray><station></gray>"]
       short: ["<red><bold>Short, timed out</bold></red> <white><offset></white> <gray><station></gray>"]
+    cab-change:
+      announced: ["<gold>Reversing here: go to the cab in car <white><car></white></gold>"]
   tutorial:
     finished: ["<prefix> <green>Tutorial complete.</green> <gray>When driving dispatched trains you will also get one short tip the first time you meet a signal confirmation, a stop mark, the doors and a departure signal. Run /fta drive tutorial reset to start over.</gray>"]
     command:
