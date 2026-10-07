@@ -51,6 +51,9 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
  */
 public final class DriveSession {
 
+  /** 直接送进驾驶室后，等 TrainCarts 让人坐下最多等几个 tick。 */
+  private static final long CAB_MOVE_SETTLE_TICKS = 5L;
+
   /** 会话阶段。 */
   public enum Phase {
     ACTIVE,
@@ -134,6 +137,7 @@ public final class DriveSession {
   private boolean sneakEdges;
   private long exitAllowedTick = Long.MIN_VALUE / 2;
   private long exitBlockedTick = Long.MIN_VALUE / 2;
+  private long cabMovedTick = Long.MIN_VALUE / 2;
   private final SeatExitGuard exitGuard = new SeatExitGuard();
   private long seatLostSinceTick = -1;
   private long groupMissingSinceTick = -1;
@@ -925,6 +929,16 @@ public final class DriveSession {
   /** 放行了一次玩家发起的离座（按住 Shift 等到停车才离座时，离座时刻可能已远离按下的时刻）。 */
   public void noteExitAllowed(long nowTick) {
     this.exitAllowedTick = nowTick;
+  }
+
+  /** 系统刚把驾驶员直接送进另一端驾驶室（折返换端）。 */
+  public void noteCabMove(long nowTick) {
+    this.cabMovedTick = nowTick;
+  }
+
+  /** 刚被直接送进驾驶室的几个 tick 内：TrainCarts 还没让人坐下时按送回座位处理，不当成走远了。 */
+  public boolean cabMovedRecently(long nowTick) {
+    return nowTick - cabMovedTick <= CAB_MOVE_SETTLE_TICKS;
   }
 
   /** 拦下了一次玩家发起的离座：这次按键之后若仍掉出座位，按意外离座处理（送回座位），不算主动离座。 */

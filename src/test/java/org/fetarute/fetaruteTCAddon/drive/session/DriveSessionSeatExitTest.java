@@ -97,4 +97,15 @@ class DriveSessionSeatExitTest {
     assertFalse(DriveSessionManager.walkAllowed(true, true, true), "还开着一趟：先结算");
     assertFalse(DriveSessionManager.walkAllowed(false, false, false));
   }
+
+  @Test
+  @DisplayName("刚被直接送进驾驶室的几个 tick 内不当成走远了")
+  void cabMoveSettleWindow() {
+    DriveSession session = session();
+    assertFalse(session.cabMovedRecently(100));
+    session.noteCabMove(100);
+    assertTrue(session.cabMovedRecently(100));
+    assertTrue(session.cabMovedRecently(105));
+    assertFalse(session.cabMovedRecently(106));
+  }
 }

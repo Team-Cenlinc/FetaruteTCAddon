@@ -2290,6 +2290,16 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         && tickCabChange(session, group, player, seat.orElse(null), current)) {
       return;
     }
+    if (seat.isEmpty() && session.driverLink() != null) {
+      // 换端可能刚把离座的驾驶员直接送进驾驶室（换端超时）：按此刻的座位判断，免得把刚坐下的人当成走远了结束驾驶。
+      seat =
+          SeatLocator.locate(player).filter(found -> found.trainName().equals(session.trainName()));
+      seat.ifPresent(
+          found -> {
+            session.rebind(found);
+            session.markSeated();
+          });
+    }
     if (seat.isEmpty() && session.cabChange().allowsLeavingSeat()) {
       // 折返换端途中：走向另一端驾驶室，不结束驾驶，也不送回原来的座位；列车由自动制动保持停车。
       if (session.markSeatLost(now) == 0) {
@@ -2311,7 +2321,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 + " 可重新入座="
                 + canReseat);
       }
-      if (sneaked || !canReseat) {
+      // 刚被直接送进另一端驾驶室、TrainCarts 还没让人坐下：按新座位送回，不当成主动离座或走远了。
+      if ((sneaked || !canReseat) && !session.cabMovedRecently(now)) {
         leave(session, DriveSession.EndReason.LEFT_SEAT);
         return;
       }
@@ -3936,6 +3947,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     // 按选中的座位记下：TrainCarts 晚一拍才让人坐下时，送回座位也送回这个座位；系统送进去的座位就是驾驶室，驾驶座没有标记的列车不用再确认。
     SeatBinding binding = new SeatBinding(session.trainName(), memberIndex, seatIndex.getAsInt());
     session.rebind(binding);
+    session.noteCabMove(Bukkit.getCurrentTick());
     CabSeatKey.of(group, binding).ifPresent(session::setConfirmedCabSeat);
     return true;
   }
