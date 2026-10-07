@@ -248,6 +248,11 @@ public final class AutoStationDoorController {
       return session.close();
     }
 
+    /** 这一侧的门已由站台打开（停站中途交给驾驶员）：记成开着，不再播开门动画，之后照常关门。 */
+    public void markOpenedByStation() {
+      open = true;
+    }
+
     /** 这一侧的门当前是否由本句柄打开着。 */
     public boolean isOpen() {
       return open;

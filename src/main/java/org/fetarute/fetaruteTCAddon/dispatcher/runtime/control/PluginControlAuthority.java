@@ -93,6 +93,15 @@ final class PluginControlAuthority implements ControlAuthority {
   }
 
   @Override
+  public boolean driverOperatesDoors(TrainProperties properties) {
+    try {
+      return properties != null && delegate().driverOperatesDoors(properties);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
   public boolean holdDeparture(TrainProperties properties) {
     try {
       return delegate().holdDeparture(properties);

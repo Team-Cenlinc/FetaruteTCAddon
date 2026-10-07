@@ -583,6 +583,7 @@ drive:
       station: "<prefix> <green>You are at the takeover platform. Wait for the train, sit in the leading cab and confirm your seat to take over</green>"
       station-missing: "<prefix> <red>Cannot find the takeover platform; please go there yourself</red>"
       station-pending: "<prefix> <gray>Heading to the takeover platform…</gray>"
+    doors-handed-over: "<prefix> <white>The platform opened the doors and they are now yours: close them when the dwell is over, then depart on the starting signal</white>"
     cab-changed: "<prefix> <green>Ends changed: you are seated in the cab in car <car></green>"
     next-trip: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
     continue-offer: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"

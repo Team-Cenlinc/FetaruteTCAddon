@@ -69,6 +69,7 @@ public final class DriverStationStop {
   private boolean anyDoorOpen;
   private boolean wrongDoorOpened;
   private boolean doorsTakenOver;
+  private boolean doorsHandedOver;
   private boolean skipped;
 
   /** 列车中心对准停车点（车站牌子的默认对位）。 */
@@ -287,5 +288,21 @@ public final class DriverStationStop {
 
   public boolean doorsTakenOver() {
     return doorsTakenOver;
+  }
+
+  /** 停站中途由驾驶员接管：站台开着的站台侧车门交给驾驶员，之后由驾驶员关门。 */
+  public void handOverOpenDoors() {
+    doorsHandedOver = true;
+  }
+
+  /**
+   * 取走“站台开着的车门已交给驾驶员”：驾驶侧据此把站台侧车门记成开着。
+   *
+   * @return 第一次取走且确有交接时为 {@code true}
+   */
+  public boolean takeHandedOverDoors() {
+    boolean handed = doorsHandedOver;
+    doorsHandedOver = false;
+    return handed;
   }
 }

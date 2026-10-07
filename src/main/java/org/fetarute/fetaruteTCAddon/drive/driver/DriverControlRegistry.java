@@ -121,6 +121,12 @@ public final class DriverControlRegistry implements ControlAuthority {
   }
 
   @Override
+  public boolean driverOperatesDoors(TrainProperties properties) {
+    DriverLink link = resolve(properties);
+    return link != null && link.controlsPhysically();
+  }
+
+  @Override
   public boolean isDriverControlledName(String trainName) {
     DriverLink link = byCurrentName(trainName);
     return link != null && (link.controlsPhysically() || link.cabHold());

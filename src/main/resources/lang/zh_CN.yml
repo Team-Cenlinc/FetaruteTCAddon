@@ -2228,6 +2228,7 @@ drive:
       station: "<prefix> <green>已到达接班站台，请等候列车进站，坐进车头驾驶室并确认座位后接班</green>"
       station-missing: "<prefix> <red>找不到接班站台的位置，请自行前往</red>"
       station-pending: "<prefix> <gray>正在前往接班站台……</gray>"
+    doors-handed-over: "<prefix> <white>车门已由站台打开，现由驾驶员负责：停站时间到后请关门，再等出站信号发车</white>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
     next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
     continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"

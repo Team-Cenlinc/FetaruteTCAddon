@@ -40,6 +40,11 @@ public interface ControlAuthority {
   /** 驾驶员控制的列车进站：站台交出停车点与站台侧，此后双方经这个对象推进停站。 */
   default void beginStationStop(TrainProperties properties, DriverStationStop stop) {}
 
+  /** 车上的驾驶员是否亲手开关车门（人工驾驶）：停站中途接管时站台据此把开着的车门交给他；ATO 仍由站台开关门。 */
+  default boolean driverOperatesDoors(TrainProperties properties) {
+    return false;
+  }
+
   /** 自动运行停站结束、出站许可就绪时，是否还要扣着等车上的驾驶员（ATO）确认发车。 */
   default boolean holdDeparture(TrainProperties properties) {
     return false;

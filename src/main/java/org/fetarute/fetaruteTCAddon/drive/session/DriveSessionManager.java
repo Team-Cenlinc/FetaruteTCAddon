@@ -2709,6 +2709,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     if (stop.isPresent()) {
       DriverStationStop current = stop.get();
+      if (current.takeHandedOverDoors()) {
+        adoptStationDoors(session, group, current);
+      }
       DriverDoorSide side = DriverDoorSide.required(current, DriveDoors.cabFacing(group, session));
       boolean left = session.isLeftDoorOpen();
       boolean right = session.isRightDoorOpen();
@@ -4624,6 +4627,32 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     refreshInventory(player, session);
     if (!preRelease) {
       refreshSignalLater(group);
+    }
+  }
+
+  /** 停站中途接管时站台开着的车门交给驾驶员：按站台侧记成开着，之后由驾驶员关门（播关门动画）再发车。 */
+  private void adoptStationDoors(
+      DriveSession session, MinecartGroup group, DriverStationStop stop) {
+    DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.cabFacing(group, session));
+    boolean left = side == DriverDoorSide.LEFT || side == DriverDoorSide.BOTH;
+    boolean right = side == DriverDoorSide.RIGHT || side == DriverDoorSide.BOTH;
+    if (!left && !right) {
+      // 站台侧判不出（驾驶员朝向未知）：不记，车门的实际状态以驾驶员下一次开关为准。
+      traceSession(session, "停站中途接管：站台侧判不出，车门未记为开着");
+      return;
+    }
+    var settings = plugin.getConfigManager().current().autoStationSettings();
+    DriveDoors held = doors.computeIfAbsent(session.playerId(), id -> new DriveDoors());
+    if (left) {
+      held.adoptOpen(group, session, true, settings, stop.doorCars());
+    }
+    if (right) {
+      held.adoptOpen(group, session, false, settings, stop.doorCars());
+    }
+    traceSession(session, "停站中途接管：站台开着的车门交给驾驶员 " + side);
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player != null) {
+      sendTaskChat(player, "drive.task.doors-handed-over", Map.of());
     }
   }
 
