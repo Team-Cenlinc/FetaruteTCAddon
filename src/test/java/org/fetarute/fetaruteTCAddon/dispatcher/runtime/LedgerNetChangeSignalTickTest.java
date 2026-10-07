@@ -4,6 +4,7 @@ import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTes
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.sectionlessGraph;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.testConfigView;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -51,6 +52,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
@@ -123,6 +125,36 @@ class LedgerNetChangeSignalTickTest {
     assertNotEquals(held, scenario.service.heldTrainOccupancyVersion(TRAIN).orElseThrow());
   }
 
+  /** 停在站台、出站被挡：发车门控每次轮询都按请求收缩再取回，什么都没变就不算账本变化。 */
+  @Test
+  void blockedDeparturePollIsNotANetChange() {
+    Scenario scenario = new Scenario(4);
+    scenario.occupy(BLOCKER, List.of(OccupancyResource.forNode(BEYOND)));
+    assertFalse(scenario.checkDeparture(), "站后被占，应不放行");
+    long rawBefore = scenario.manager.version();
+    long netBefore = scenario.manager.netChangeVersion();
+
+    assertFalse(scenario.checkDeparture());
+
+    assertTrue(scenario.manager.version() > rawBefore, "原始版本应照常推进，否则本用例是空的");
+    assertEquals(netBefore, scenario.manager.netChangeVersion());
+  }
+
+  /** 在冲突队列里排队的停车车，放行资格随排队时间变化而不随账本变化：它自己的每一拍都要算作该重评估。 */
+  @Test
+  void queuedStoppedTrainIsRecheckedEveryTick() {
+    Scenario scenario = new Scenario(0);
+    scenario.occupy(BLOCKER, List.of(SWITCH_CONFLICT));
+    scenario.tick(5.0, false);
+    assertTrue(scenario.service.getActiveStopState(TRAIN).isPresent(), "道岔被占，应停车");
+    assertTrue(scenario.queued(), "应已排进道岔冲突队列，否则本用例是空的");
+    long held = scenario.service.heldTrainOccupancyVersion(TRAIN).orElseThrow();
+
+    scenario.tick(5.0, false);
+
+    assertNotEquals(held, scenario.service.heldTrainOccupancyVersion(TRAIN).orElseThrow());
+  }
+
   /** 从硬窗口退到身后的区段（含道岔冲突键）仍是 MOVEMENT_REQUIRED：本拍照旧降为保护性占用。 */
   @Test
   void resourcesLeavingTheWindowAreStillDowngradedToProtective() {
@@ -153,22 +185,63 @@ class LedgerNetChangeSignalTickTest {
     private final SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    private final TagStore tags =
-        new TagStore(
-            TRAIN,
-            "FTA_OPERATOR_CODE=op",
-            "FTA_LINE_CODE=l1",
-            "FTA_ROUTE_CODE=r1",
-            "FTA_ROUTE_INDEX=3");
+    private final TagStore tags;
     private final RouteProgressRegistry registry = new RouteProgressRegistry();
     private final RuntimeDispatchService service;
 
     private Scenario() {
+      this(3);
+    }
+
+    private Scenario(int routeIndex) {
+      tags =
+          new TagStore(
+              TRAIN,
+              "FTA_OPERATOR_CODE=op",
+              "FTA_LINE_CODE=l1",
+              "FTA_ROUTE_CODE=r1",
+              "FTA_ROUTE_INDEX=" + routeIndex);
       RouteDefinition route =
           new RouteDefinition(
               ROUTE_ID, List.of(P4, SWITCH, P6, P7, WSD, BEYOND, SCC), Optional.empty());
       registry.initFromTags(TRAIN, tags.properties(), route);
       service = service(manager, worldId, route, registry);
+    }
+
+    /** 另一列车以硬授权占住这些资源。 */
+    private void occupy(String owner, List<OccupancyResource> resources) {
+      Map<OccupancyResource, ResourceIntent> intents = new LinkedHashMap<>();
+      resources.forEach(resource -> intents.put(resource, ResourceIntent.MOVEMENT_REQUIRED));
+      assertTrue(
+          manager
+              .acquire(
+                  new OccupancyRequest(
+                      owner,
+                      Optional.empty(),
+                      Instant.now(),
+                      resources,
+                      Map.of(),
+                      Map.of(),
+                      0,
+                      AuthorizationPurpose.RUNTIME_MOVE,
+                      Map.of(),
+                      intents))
+              .allowed());
+    }
+
+    /** 停在站台 {@code S:WSD:3} 上的一次发车门控轮询。 */
+    private boolean checkDeparture() {
+      FakeTrain train = new FakeTrain(worldId, tags.properties(), false, 0.0);
+      train.estimatedTrainLengthBlocks = OptionalDouble.of(34.0);
+      return service.checkDeparture(
+          train, new SignNodeDefinition(WSD, NodeType.STATION, Optional.empty(), Optional.empty()));
+    }
+
+    private boolean queued() {
+      return manager.snapshotQueues().stream()
+          .anyMatch(
+              snapshot ->
+                  snapshot.entries().stream().anyMatch(entry -> TRAIN.equals(entry.trainName())));
     }
 
     /** 另一列车以硬授权占着站台节点：本车的硬窗口到不了站台，停车保持。 */

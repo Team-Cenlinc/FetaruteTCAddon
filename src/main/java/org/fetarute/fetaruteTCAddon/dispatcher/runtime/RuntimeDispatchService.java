@@ -4774,11 +4774,13 @@ public final class RuntimeDispatchService {
     if (key.isEmpty() || !activeStopStates.containsKey(key)) {
       return java.util.OptionalLong.empty();
     }
+    if (!(occupancyManager instanceof SimpleOccupancyManager manager)) {
+      return java.util.OptionalLong.of(-1L);
+    }
     // 净变化版本：别的车（包括本车自己）一拍里放掉再取回同一份占用，不算“等的资源变了”。
+    // 排在冲突队列里的车例外：放行资格随排队时间与优先级变化、不随账本变化，仍按原始版本每拍重算。
     return java.util.OptionalLong.of(
-        occupancyManager instanceof SimpleOccupancyManager manager
-            ? manager.netChangeVersion()
-            : -1L);
+        manager.hasQueueEntry(trainName) ? manager.version() : manager.netChangeVersion());
   }
 
   private Optional<String> activeOccupancyStopBlockerStillHeld(String trainName) {
@@ -5160,6 +5162,24 @@ public final class RuntimeDispatchService {
    * <p>该重载用于把 TrainCarts 句柄适配与门控判定拆开，便于测试验证“先预判、后写占用”的安全边界。
    */
   boolean checkDeparture(RuntimeTrainHandle train, SignNodeDefinition definition) {
+    // 发车门控在停站结束后每秒轮询一次，被挡时每次都按请求收缩再取回；与信号 tick 一样算净变化。
+    SimpleOccupancyManager ledger =
+        occupancyManager instanceof SimpleOccupancyManager manager ? manager : null;
+    if (ledger != null) {
+      ledger.beginNetChangeWindow();
+    }
+    try {
+      return checkDepartureInNetChangeWindow(train, definition);
+    } finally {
+      if (ledger != null) {
+        ledger.endNetChangeWindow();
+      }
+    }
+  }
+
+  /** {@link #checkDeparture(RuntimeTrainHandle, SignNodeDefinition)} 的本体，在占用净变化统计窗口内执行。 */
+  private boolean checkDepartureInNetChangeWindow(
+      RuntimeTrainHandle train, SignNodeDefinition definition) {
     if (train == null || definition == null) {
       return true;
     }
@@ -15136,11 +15156,13 @@ public final class RuntimeDispatchService {
     SignalLookahead.LookaheadResult lookahead = null;
     boolean needsLookahead =
         runtimeSettings.speedCurveEnabled() || runtimeSettings.movementAuthorityEnabled();
+    // 前瞻测距与 Smart 风险读数用同一份判定，阻塞者与它的距离才对得上。
+    OccupancyDecision lookaheadDecision = advisoryDecision;
     if (needsLookahead) {
       // 下一路径点是计划停车点时，停车点之后足够远的道岔冲突键不算进站前的停车约束：列车反正停在站台，
       // 出站时硬授权窗口照样要这把冲突键（见 PlannedStopSwitcherClearance）。车长未知时不放宽。
       long lookaheadTrainLength = resolveRearGuardDistanceBlocks(train);
-      OccupancyDecision lookaheadDecision =
+      lookaheadDecision =
           PlannedStopSwitcherClearance.forLookahead(
               advisoryDecision,
               advisoryContext,
@@ -15332,7 +15354,7 @@ public final class RuntimeDispatchService {
             train,
             properties,
             authorizationRequest,
-            advisoryDecision,
+            lookaheadDecision,
             lookahead,
             plannedStopByApproach && nextAspect != SignalAspect.STOP
                 ? AuthorityEnd.none()
@@ -15381,16 +15403,6 @@ public final class RuntimeDispatchService {
               + " reason=recoverable-hold-advisory-only");
       nextAspect = retainedAspect;
     }
-    // 本拍末尾与可恢复保持分支取回同一份列尾防护请求。
-    OccupancyRequest rearGuardRequest =
-        RearGuardRequest.build(
-            builder,
-            trainName,
-            Optional.ofNullable(route.id()),
-            effectiveNodes,
-            currentIndex,
-            now,
-            authorizationRequest.movementPlanSnapshot());
     if (nextAspect == SignalAspect.STOP && !stopAtNextWaypoint) {
       if (shouldInvalidateForAuthorityFailure(authorityEnd, smartDecision)) {
         debugLogger.accept(
@@ -15595,7 +15607,15 @@ public final class RuntimeDispatchService {
       // 本拍开头只按“硬窗口 + 当前位置”保留 claim，车身与列尾防护要到正常路径末尾才补回；这里提前返回，
       // 不补的话车身压着的 NODE/EDGE 在下一次完整 tick 之前不归任何车，后车可以对它们取得硬授权。
       // 只补不收缩（不用 retainStopOccupancy）：收缩会放掉之前已持有的前方授权并删掉其排队位次。
-      occupancyManager.acquire(rearGuardRequest);
+      occupancyManager.acquire(
+          RearGuardRequest.build(
+              builder,
+              trainName,
+              Optional.ofNullable(route.id()),
+              effectiveNodes,
+              currentIndex,
+              now,
+              authorizationRequest.movementPlanSnapshot()));
       traceSmartSignalFinalDecision(
           trainName,
           "PERIODIC_TICK",
@@ -15648,7 +15668,15 @@ public final class RuntimeDispatchService {
               + " blockers="
               + decision.blockers().size());
     }
-    occupancyManager.acquire(rearGuardRequest);
+    occupancyManager.acquire(
+        RearGuardRequest.build(
+            builder,
+            trainName,
+            Optional.ofNullable(route.id()),
+            effectiveNodes,
+            currentIndex,
+            now,
+            authorizationRequest.movementPlanSnapshot()));
     authorizationRequest =
         markDirectedRequest(authorizationRequest, SignalComputationTrace.Source.PERIODIC_TICK);
     boolean allowLaunch = forceApply || lastAspect != nextAspect;
@@ -29426,6 +29454,7 @@ public final class RuntimeDispatchService {
         oldSelfClaims,
         protectedResources);
     // 停车保持请求里的列尾防护按估算车长计算；车体现场仍压着、却落在请求之外的区段，放掉后随即取回。
+    Set<OccupancyResource> bodyFloor = livePhysicalEvidence.bodyFloor(graph);
     List<OccupancyResource> releasedResources =
         LiveBodyReleaseFloor.reacquireBody(
             occupancyManager,
@@ -29433,12 +29462,12 @@ public final class RuntimeDispatchService {
             Optional.ofNullable(route.id()),
             now,
             releaseResourcesNotInRequest(trainName, request.resourceList(), protectedResources),
-            livePhysicalEvidence.bodyFloor());
+            bodyFloor);
     List<OccupancyResource> releaseEligibleAfterRelease =
         resourcesEligibleForRelease(
             trainName,
             request.resourceList(),
-            mergeProtectedResources(protectedResources, livePhysicalEvidence.bodyFloor()));
+            mergeProtectedResources(protectedResources, bodyFloor));
     if (!releaseEligibleResources.isEmpty()
         || !releasedResources.isEmpty()
         || !releaseEligibleAfterRelease.isEmpty()) {
@@ -29511,9 +29540,7 @@ public final class RuntimeDispatchService {
         return LivePhysicalReleaseEvidence.incomplete();
       }
       return LivePhysicalReleaseEvidence.complete(
-          resolution.resources(),
-          !train.isMoving(),
-          LiveBodyReleaseFloor.coverage(graph, observation.cells().orElseThrow()).releaseFloor());
+          resolution.resources(), !train.isMoving(), observation.cells().orElseThrow());
     } catch (RuntimeException | LinkageError ex) {
       debugLogger.accept(
           "SMART_LIVE_FOOTPRINT_READ_FAILED train="
@@ -29678,15 +29705,14 @@ public final class RuntimeDispatchService {
         releaseResourcesNotInRequest(
             trainName, keepResources, mergeProtectedResources(protectedResources, liveGuard));
     return LiveBodyReleaseFloor.reacquireBody(
-        occupancyManager, trainName, routeId, now, released, evidence.bodyFloor());
+        occupancyManager, trainName, routeId, now, released, evidence.bodyFloor(graph));
   }
 
   /**
    * 实时车体证据：生产控车入口必须完整解析后才可缩减旧 claim。
    *
    * @param stationary 读取足迹时列车已停稳；制动中车头仍可能压进前方联锁区
-   * @param bodyFloor 车体压着的区间与跨过的节点（{@link
-   *     LiveBodyReleaseFloor.Coverage#releaseFloor()}）；本拍放掉其中任何一项都要随即取回。逐边足迹索引不可用时为空
+   * @param liveCells 读取到的车体现场方块；只在需要车身释放下限时才拿去反查区间（见 {@link #bodyFloor(RailGraph)}）
    * @param layoverBody 终点停车（终到停站或待命）的整列车身区间覆盖，停车保持据此只保持车身（见 {@link LayoverBodyRetain}）；其余停车为空
    */
   private record LivePhysicalReleaseEvidence(
@@ -29694,12 +29720,12 @@ public final class RuntimeDispatchService {
       boolean complete,
       boolean stationary,
       Set<OccupancyResource> resources,
-      Set<OccupancyResource> bodyFloor,
+      Set<org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell> liveCells,
       Optional<LivePhysicalEdgeCoverage> layoverBody) {
 
     private LivePhysicalReleaseEvidence {
       resources = resources == null ? Set.of() : Set.copyOf(resources);
-      bodyFloor = bodyFloor == null ? Set.of() : Set.copyOf(bodyFloor);
+      liveCells = liveCells == null ? Set.of() : Set.copyOf(liveCells);
       layoverBody = layoverBody == null ? Optional.empty() : layoverBody;
     }
 
@@ -29709,15 +29735,26 @@ public final class RuntimeDispatchService {
     }
 
     private static LivePhysicalReleaseEvidence complete(
-        Set<OccupancyResource> resources, boolean stationary, Set<OccupancyResource> bodyFloor) {
+        Set<OccupancyResource> resources,
+        boolean stationary,
+        Set<org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell>
+            liveCells) {
       return new LivePhysicalReleaseEvidence(
-          true, true, stationary, resources, bodyFloor, Optional.empty());
+          true, true, stationary, resources, liveCells, Optional.empty());
     }
 
     /** 标记为终点停车（终到停站或待命），附上整列车身覆盖。 */
     private LivePhysicalReleaseEvidence withLayoverBody(LivePhysicalEdgeCoverage body) {
       return new LivePhysicalReleaseEvidence(
-          required, complete, stationary, resources, bodyFloor, Optional.ofNullable(body));
+          required, complete, stationary, resources, liveCells, Optional.ofNullable(body));
+    }
+
+    /**
+     * 车体压着的区间与跨过的节点（{@link LiveBodyReleaseFloor.Coverage#releaseFloor()}）：本拍放掉其中任何一项都要随即取回。
+     * 证据不完整或逐边足迹索引不可用时为空。只在收缩占用时调用，其它只看联锁区的调用方不付这笔反查。
+     */
+    private Set<OccupancyResource> bodyFloor(RailGraph graph) {
+      return complete ? LiveBodyReleaseFloor.coverage(graph, liveCells).releaseFloor() : Set.of();
     }
 
     /** 位置保持对当前边联锁区的依据：停稳且足迹完整才跟随现场，否则按当前边整体保持。 */

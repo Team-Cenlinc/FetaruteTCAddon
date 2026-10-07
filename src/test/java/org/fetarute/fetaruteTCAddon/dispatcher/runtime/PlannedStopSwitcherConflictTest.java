@@ -4,6 +4,7 @@ import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTes
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.sectionlessGraph;
 import static org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.testConfigView;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
@@ -90,6 +91,14 @@ class PlannedStopSwitcherConflictTest {
     assertTrue(scenario.signal() != SignalAspect.STOP, scenario::debugTail);
     assertEquals(0, train.stopCalls, scenario::debugTail);
     assertEquals(0, train.hardStopCalls, scenario::debugTail);
+    // Smart 的风险读数与前瞻测距用同一份判定：被去掉的道岔冲突键不能再挂着别的阻塞者的距离出现。
+    assertFalse(
+        scenario.debug.stream()
+            .filter(line -> line.startsWith("SMART_DISPATCH_FORWARD_RISK train=" + TRAIN))
+            .reduce((first, second) -> second)
+            .orElse("")
+            .contains("blockerResource=switcher:"),
+        scenario::debugTail);
   }
 
   /** 道岔离站台只有 28 格（不足车长 34 + 停车余量）：停站时车头可能压到道岔附近，照旧在站外停车。道岔节点本身在制动距离之外，挡车的只能是冲突键。 */

@@ -614,7 +614,7 @@ final class DispatchScenarioHarness {
             new RailEdge(edgeId, pair[0], pair[1], edgeLength, -1.0, true, Optional.empty()));
         // 每条边一格互不相交的足迹：目录因此是 complete，且不产生任何 interlocking zone。
         // 没有完整目录，LiveRailFootprintResolver 会返回 interlocking-catalog-incomplete，
-        // 于是 livePhysicalReleaseGuardsOrFailRetain 保留列车的<b>全部</b> claim——
+        // 于是 releaseOutsideRequestRetainingLiveBody 保留列车的<b>全部</b> claim——
         // 任何涉及释放的场景都会必然死锁，而那是骨架缺少现场目录，不是调度缺陷。
         RailFootprintCell cell = new RailFootprintCell(cellIndex++, 64, 0);
         footprintCellByEdge.put(edgeId, cell);

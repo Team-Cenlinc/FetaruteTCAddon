@@ -65,6 +65,8 @@ import org.junit.jupiter.api.Test;
  * <p>夹具：车头刚过区间节点 {@code 3:007}，下一路径点是车站 {@code S:WSD:3}（车站不算 stopAtNextWaypoint，硬窗口被计划停车点封顶在站台）；
  * 预览窗口越过站台，看到另一列车占着站后的节点，本拍降为 STOP 并进入可恢复保持。站后不被占时同一位置走正常路径、车身照常保持。车长 34， 车身压着 {@code 3:006~3:007}
  * 整条边并伸进 {@code 3:005~3:006}。
+ *
+ * <p>现场方块故意落在任何区间之外，车身释放下限因此不参与：本用例只钉可恢复保持分支自己补回列尾防护这一件事，下限若生效会把车身照样取回，用例就测不出分支是否补了。
  */
 class RecoverableHoldBodyRetainTest {
 
@@ -79,6 +81,8 @@ class RecoverableHoldBodyRetainTest {
   private static final NodeId BEYOND = NodeId.of("SURC:WSD:SCC:3:001");
   private static final NodeId SCC = NodeId.of("SURC:S:SCC:3");
   private static final RouteId ROUTE_ID = RouteId.of("MT-LH");
+  private static final Set<RailFootprintCell> OFF_TRACK_CELLS =
+      Set.of(new RailFootprintCell(0, 64, 0));
   private static final OccupancyResource EDGE_P6_P7 =
       OccupancyResource.forEdge(EdgeId.undirected(P6, P7));
   private static final OccupancyResource NODE_P6 = OccupancyResource.forNode(P6);
@@ -89,6 +93,9 @@ class RecoverableHoldBodyRetainTest {
   @Test
   void recoverableHoldKeepsTheBodyAndRearGuardClaimed() {
     Scenario scenario = new Scenario();
+    assertFalse(
+        LiveBodyReleaseFloor.coverage(chain(scenario.worldId), OFF_TRACK_CELLS).complete(),
+        "现场方块应落在区间之外，车身释放下限不参与，否则本用例测不出可恢复保持分支是否补回");
     scenario.tick(103.0);
     assertEquals(
         Optional.empty(),
@@ -205,6 +212,7 @@ class RecoverableHoldBodyRetainTest {
     private void tick(double headX) {
       FakeTrain train = new FakeTrain(worldId, tags.properties(), true, 0.75);
       train.estimatedTrainLengthBlocks = OptionalDouble.of(34.0);
+      train.liveRailFootprintCells = Optional.of(OFF_TRACK_CELLS);
       RailState railState = mock(RailState.class);
       when(railState.positionLocation()).thenReturn(new Location(null, headX, 64.0, 0.0));
       train.railState = Optional.of(railState);

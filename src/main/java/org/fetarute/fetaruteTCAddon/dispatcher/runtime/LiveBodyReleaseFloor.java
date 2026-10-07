@@ -8,6 +8,7 @@ import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeSet;
@@ -80,6 +81,7 @@ final class LiveBodyReleaseFloor {
   /**
    * 本拍放掉的资源里车体仍压着的，以 PROTECTIVE_RETAIN 立即取回。
    *
+   * @param now 本拍时刻，取自服务注入的时钟；不得为空（不在这里退回墙钟）
    * @param released 本拍释放掉的资源
    * @param floor {@link Coverage#releaseFloor()}；为空时不取回任何资源
    * @return 取回之后仍然放掉的资源
@@ -91,6 +93,7 @@ final class LiveBodyReleaseFloor {
       Instant now,
       List<OccupancyResource> released,
       Set<OccupancyResource> floor) {
+    Objects.requireNonNull(now, "now");
     if (occupancyManager == null
         || trainName == null
         || trainName.isBlank()
@@ -122,7 +125,7 @@ final class LiveBodyReleaseFloor {
         new OccupancyRequest(
             trainName,
             routeId == null ? Optional.empty() : routeId,
-            now == null ? Instant.now() : now,
+            now,
             ordered,
             Map.of(),
             Map.of(),

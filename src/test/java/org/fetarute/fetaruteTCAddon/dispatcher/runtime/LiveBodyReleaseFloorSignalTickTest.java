@@ -12,6 +12,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import com.bergerkiller.bukkit.tc.controller.components.RailState;
+import com.bergerkiller.bukkit.tc.events.SignActionEvent;
+import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -23,6 +25,7 @@ import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.Location;
+import org.bukkit.World;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
@@ -51,6 +54,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceIntent;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.junit.jupiter.api.Test;
 
@@ -75,6 +79,8 @@ class LiveBodyReleaseFloorSignalTickTest {
   private static final OccupancyResource EDGE_P4_P5 =
       OccupancyResource.forEdge(EdgeId.undirected(P4, P5));
   private static final OccupancyResource NODE_P5 = OccupancyResource.forNode(P5);
+  private static final OccupancyResource EDGE_P5_P6 =
+      OccupancyResource.forEdge(EdgeId.undirected(P5, P6));
   private static final OccupancyResource NODE_P6 = OccupancyResource.forNode(P6);
   private static final OccupancyResource EDGE_P6_P7 =
       OccupancyResource.forEdge(EdgeId.undirected(P6, P7));
@@ -123,6 +129,29 @@ class LiveBodyReleaseFloorSignalTickTest {
     assertHeldByTrain(scenario, NODE_P5, ClaimRole.PROTECTIVE_RETAIN);
   }
 
+  /** 停在站台的发车门控轮询：按发车请求收缩时，车体压着的后半段同样留在本车名下。 */
+  @Test
+  void departurePollKeepsTheLiveBodyBeyondTheEstimatedRearGuard() {
+    Scenario scenario = new Scenario(4);
+    scenario.acquire(TRAIN, List.of(EDGE_P5_P6), ResourceIntent.PROTECTIVE_RETAIN);
+
+    scenario.checkDeparture(135.0, 60);
+
+    assertHeldByTrain(scenario, EDGE_P5_P6, ClaimRole.PROTECTIVE_RETAIN);
+  }
+
+  /** 推进点（车头过节点）按新窗口收缩时，车体压着的后半段同样留在本车名下。 */
+  @Test
+  void progressTriggerKeepsTheLiveBodyBeyondTheEstimatedRearGuard() {
+    Scenario scenario = new Scenario(2);
+    scenario.acquire(TRAIN, List.of(EDGE_P4_P5, NODE_P5), ResourceIntent.PROTECTIVE_RETAIN);
+
+    scenario.memberEnter(P7, 101.0, 30);
+
+    assertEquals(3, scenario.registry.get(TRAIN).orElseThrow().currentIndex(), "应已推进到 3:007");
+    assertHeldByTrain(scenario, EDGE_P4_P5, ClaimRole.PROTECTIVE_RETAIN);
+  }
+
   private static void assertHeldByTrain(
       Scenario scenario, OccupancyResource resource, ClaimRole role) {
     OccupancyClaim claim =
@@ -139,17 +168,22 @@ class LiveBodyReleaseFloorSignalTickTest {
     private final SimpleOccupancyManager manager =
         new SimpleOccupancyManager(
             (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
-    private final TagStore tags =
-        new TagStore(
-            TRAIN,
-            "FTA_OPERATOR_CODE=op",
-            "FTA_LINE_CODE=l1",
-            "FTA_ROUTE_CODE=r1",
-            "FTA_ROUTE_INDEX=3");
+    private final TagStore tags;
     private final RouteProgressRegistry registry = new RouteProgressRegistry();
     private final RuntimeDispatchService service;
 
     private Scenario() {
+      this(3);
+    }
+
+    private Scenario(int routeIndex) {
+      tags =
+          new TagStore(
+              TRAIN,
+              "FTA_OPERATOR_CODE=op",
+              "FTA_LINE_CODE=l1",
+              "FTA_ROUTE_CODE=r1",
+              "FTA_ROUTE_INDEX=" + routeIndex);
       RouteDefinition route =
           new RouteDefinition(
               ROUTE_ID, List.of(P4, P5, P6, P7, WSD, BEYOND, SCC), Optional.empty());
@@ -189,6 +223,30 @@ class LiveBodyReleaseFloorSignalTickTest {
 
     /** 车长估算 10；现场方块从 {@code tailX} 铺到车头。 */
     private void tick(double headX, boolean moving, int tailX) {
+      service.handleSignalTick(train(headX, moving, tailX), false);
+    }
+
+    /** 停在站台 {@code S:WSD:3} 上的一次发车门控轮询。 */
+    private void checkDeparture(double headX, int tailX) {
+      service.checkDeparture(
+          train(headX, false, tailX),
+          new SignNodeDefinition(WSD, NodeType.STATION, Optional.empty(), Optional.empty()));
+    }
+
+    /** 车头驶过区间节点 {@code node} 的推进事件。 */
+    private void memberEnter(NodeId node, double headX, int tailX) {
+      SignActionEvent event = mock(SignActionEvent.class);
+      World world = mock(World.class);
+      when(world.getUID()).thenReturn(worldId);
+      when(event.getWorld()).thenReturn(world);
+      when(event.getAction()).thenReturn(SignActionType.MEMBER_ENTER);
+      service.handleWaypointMemberEnter(
+          train(headX, true, tailX),
+          event,
+          new SignNodeDefinition(node, NodeType.WAYPOINT, Optional.empty(), Optional.empty()));
+    }
+
+    private FakeTrain train(double headX, boolean moving, int tailX) {
       FakeTrain train = new FakeTrain(worldId, tags.properties(), moving, moving ? 0.5 : 0.0);
       train.estimatedTrainLengthBlocks = OptionalDouble.of(10.0);
       Set<RailFootprintCell> cells = new LinkedHashSet<>();
@@ -199,7 +257,7 @@ class LiveBodyReleaseFloorSignalTickTest {
       RailState railState = mock(RailState.class);
       when(railState.positionLocation()).thenReturn(new Location(null, headX, 64.0, 0.0));
       train.railState = Optional.of(railState);
-      service.handleSignalTick(train, false);
+      return train;
     }
 
     private List<String> claims() {

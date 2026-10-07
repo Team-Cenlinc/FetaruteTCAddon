@@ -2,12 +2,15 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 
+import java.time.Duration;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -25,6 +28,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspectPolicy;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SimpleOccupancyManager;
 import org.junit.jupiter.api.Test;
 
 /** 车身释放下限：只取车体压着的区间与车体跨过的节点，证据不全时为空。 */
@@ -128,6 +133,21 @@ class LiveBodyReleaseFloorTest {
     assertTrue(unsupported.releaseFloor().isEmpty());
     assertTrue(offTrack.releaseFloor().isEmpty());
     assertTrue(offTrack.edgesWithEndpoints().isEmpty());
+  }
+
+  /** 取回时刻必须由调用方给出（服务与回归骨架注入的时钟），不得自己去读墙钟。 */
+  @Test
+  void reacquireRequiresTheCallersClock() {
+    SimpleOccupancyManager manager =
+        new SimpleOccupancyManager(
+            (routeId, resource) -> Duration.ZERO, SignalAspectPolicy.defaultPolicy());
+    OccupancyResource body = edge(A, B);
+
+    assertThrows(
+        NullPointerException.class,
+        () ->
+            LiveBodyReleaseFloor.reacquireBody(
+                manager, "SURC-MT-LH-2689", Optional.empty(), null, List.of(body), Set.of(body)));
   }
 
   /** A —30— B —30— C —30— D —30— E，沿 x 轴，逐边足迹互不相交。 */

@@ -77,7 +77,7 @@ public final class SimpleOccupancyManager
   /** 净变化统计（见 {@link #netChangeVersion()}）：窗口嵌套层数、开窗时的语义指纹、已计入的原始版本、净变化版本。 */
   private int netChangeWindowDepth;
 
-  private String netChangeWindowStart;
+  private long netChangeWindowStart;
   private long netChangeAbsorbedVersion;
   private long netChangeVersion;
   private final AtomicLong lifecycleSequence = new AtomicLong();
@@ -278,10 +278,12 @@ public final class SimpleOccupancyManager
    * 推迟到窗口结束、按语义状态前后比对决定是否前进。
    */
   public synchronized void beginNetChangeWindow() {
-    if (netChangeWindowDepth++ == 0) {
+    // 先取指纹、成功后才计层：指纹出错时层数不变，调用方不会因此永远困在窗口里。
+    if (netChangeWindowDepth == 0) {
       absorbChangesOutsideWindow();
       netChangeWindowStart = semanticFingerprint();
     }
+    netChangeWindowDepth++;
   }
 
   /** 结束净变化统计窗口：最外层结束时，账本语义状态与开窗时不同，净变化版本前进一次。 */
@@ -292,13 +294,11 @@ public final class SimpleOccupancyManager
     if (--netChangeWindowDepth > 0) {
       return;
     }
-    String start = netChangeWindowStart;
-    netChangeWindowStart = null;
     long raw = version.get();
     if (raw == netChangeAbsorbedVersion) {
       return;
     }
-    if (start == null || !start.equals(semanticFingerprint())) {
+    if (netChangeWindowStart != semanticFingerprint()) {
       netChangeVersion++;
     }
     netChangeAbsorbedVersion = raw;
@@ -325,42 +325,67 @@ public final class SimpleOccupancyManager
     }
   }
 
-  /** 账本语义状态的规范化文本；各部分按键排序，插入顺序不同的同一状态得到同一文本。 */
-  private String semanticFingerprint() {
-    java.util.TreeMap<String, String> sorted = new java.util.TreeMap<>();
+  /**
+   * 账本语义状态的指纹：每项状态各自散列后求和，与插入顺序无关，不分配中间对象。
+   *
+   * <p>两份不同状态散列相同的概率可以忽略；万一相同，后果只是停着的车等到兜底节拍才重评估。
+   */
+  private long semanticFingerprint() {
+    long fingerprint = 0L;
     for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
-      List<String> owners = new ArrayList<>();
+      long resource = mixFingerprint(entry.getKey().hashCode(), 1L);
       for (OccupancyClaim claim : entry.getValue()) {
         if (claim == null) {
           continue;
         }
-        owners.add(
-            TrainNameNormalizer.normalizeKey(claim.trainName())
-                + "|"
-                + claim.role()
-                + "|"
-                + claim.corridorDirection().map(Enum::name).orElse("-")
-                + "|"
-                + claim.routeId().map(Object::toString).orElse("-"));
-      }
-      if (!owners.isEmpty()) {
-        owners.sort(java.util.Comparator.naturalOrder());
-        sorted.put("claim:" + entry.getKey(), String.join(",", owners));
+        long state =
+            mixFingerprint(
+                TrainNameNormalizer.normalizeKey(claim.trainName()).hashCode(), resource);
+        state = mixFingerprint(claim.role().ordinal(), state);
+        state = mixFingerprint(claim.corridorDirection().map(Enum::ordinal).orElse(-1), state);
+        fingerprint += mixFingerprint(claim.routeId().hashCode(), state);
       }
     }
     for (Map.Entry<OccupancyResource, ConflictQueue> entry : queues.entrySet()) {
-      String state = entry.getValue().semanticState();
-      if (!state.isEmpty()) {
-        sorted.put("queue:" + entry.getKey(), state);
+      fingerprint +=
+          entry.getValue().semanticFingerprint(mixFingerprint(entry.getKey().hashCode(), 2L));
+    }
+    for (Map.Entry<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> entry :
+        switcherClaimSignatures.entrySet()) {
+      fingerprint +=
+          mixFingerprint(
+              entry.getValue().hashCode(), mixFingerprint(entry.getKey().hashCode(), 3L));
+    }
+    for (Map.Entry<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> entry :
+        switcherQueueSignatures.entrySet()) {
+      fingerprint +=
+          mixFingerprint(
+              entry.getValue().hashCode(), mixFingerprint(entry.getKey().hashCode(), 4L));
+    }
+    for (Map.Entry<String, DeadlockReleaseLock> entry : deadlockReleaseLocks.entrySet()) {
+      fingerprint +=
+          mixFingerprint(
+              entry.getValue().hashCode(), mixFingerprint(entry.getKey().hashCode(), 5L));
+    }
+    return fingerprint;
+  }
+
+  /** 把一个 32 位分量混入 64 位状态（SplitMix64 末段），供 {@link #semanticFingerprint()} 逐项散列。 */
+  static long mixFingerprint(long value, long state) {
+    long mixed = state * 0x9E3779B97F4A7C15L + value;
+    mixed = (mixed ^ (mixed >>> 30)) * 0xBF58476D1CE4E5B9L;
+    mixed = (mixed ^ (mixed >>> 27)) * 0x94D049BB133111EBL;
+    return mixed ^ (mixed >>> 31);
+  }
+
+  /** 本车是否排在任一冲突队列里：排队放行资格随时间（首次入队与优先级）变化，不随账本变化。 */
+  public synchronized boolean hasQueueEntry(String trainName) {
+    for (ConflictQueue queue : queues.values()) {
+      if (queue.contains(trainName)) {
+        return true;
       }
     }
-    switcherClaimSignatures.forEach(
-        (key, signature) -> sorted.put("switcher-claim:" + key, String.valueOf(signature)));
-    switcherQueueSignatures.forEach(
-        (key, signature) -> sorted.put("switcher-queue:" + key, String.valueOf(signature)));
-    deadlockReleaseLocks.forEach(
-        (key, lock) -> sorted.put("release-lock:" + key, String.valueOf(lock)));
-    return sorted.toString();
+    return false;
   }
 
   /** 返回因 TTL 清理的 queue entry 数量。 */
@@ -6437,35 +6462,28 @@ public final class SimpleOccupancyManager
     private final LinkedHashMap<String, OccupancyQueueEntry> neutral = new LinkedHashMap<>();
     private long nextEnqueueSequence;
 
-    /** 排队的语义状态：各方向桶里的车、方向、首次入队时间、优先级、进入次序与入队序号；最近一次心跳时间不计。 */
-    String semanticState() {
-      StringBuilder state = new StringBuilder();
-      appendSemanticState(state, "F", forward);
-      appendSemanticState(state, "B", backward);
-      appendSemanticState(state, "N", neutral);
-      return state.toString();
+    /** 排队的语义指纹：各方向桶里的车与次序、方向、首次入队时间、优先级、进入次序与入队序号；最近一次心跳时间不计。 */
+    long semanticFingerprint(long seed) {
+      return bucketFingerprint(forward, mixFingerprint(1L, seed))
+          + bucketFingerprint(backward, mixFingerprint(2L, seed))
+          + bucketFingerprint(neutral, mixFingerprint(3L, seed));
     }
 
-    private static void appendSemanticState(
-        StringBuilder state, String bucket, LinkedHashMap<String, OccupancyQueueEntry> entries) {
+    private static long bucketFingerprint(
+        LinkedHashMap<String, OccupancyQueueEntry> entries, long seed) {
+      long fingerprint = 0L;
+      long position = 0L;
       for (Map.Entry<String, OccupancyQueueEntry> entry : entries.entrySet()) {
         OccupancyQueueEntry queued = entry.getValue();
-        state
-            .append(bucket)
-            .append(':')
-            .append(entry.getKey())
-            .append('|')
-            .append(queued.direction())
-            .append('|')
-            .append(queued.firstSeen())
-            .append('|')
-            .append(queued.priority())
-            .append('|')
-            .append(queued.entryOrder())
-            .append('|')
-            .append(queued.enqueueSequence())
-            .append(';');
+        long state = mixFingerprint(position++, seed);
+        state = mixFingerprint(entry.getKey().hashCode(), state);
+        state = mixFingerprint(queued.direction().ordinal(), state);
+        state = mixFingerprint(queued.firstSeen().hashCode(), state);
+        state = mixFingerprint(queued.priority(), state);
+        state = mixFingerprint(queued.entryOrder(), state);
+        fingerprint += mixFingerprint(queued.enqueueSequence(), state);
       }
+      return fingerprint;
     }
 
     boolean touch(

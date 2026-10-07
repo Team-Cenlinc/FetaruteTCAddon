@@ -5,13 +5,12 @@ import java.util.List;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.SignalLookahead;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestContext;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResourceResolver;
 
 /**
  * 计划停车点之后足够远的道岔：它的冲突键不作为进站前的停车约束。
@@ -23,8 +22,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
  * 道岔节点、区间等物理占用照常算距离。出站时硬授权窗口仍要取得这把冲突键，出站照样被挡。只作用于前瞻测距，不改准入。
  */
 final class PlannedStopSwitcherClearance {
-
-  private static final String SWITCHER_CONFLICT_PREFIX = "switcher:";
 
   private PlannedStopSwitcherClearance() {}
 
@@ -62,7 +59,7 @@ final class PlannedStopSwitcherClearance {
     if (stopIndex <= 0) {
       return decision;
     }
-    List<Long> distances = nodeDistances(nodes, context.edges());
+    List<Long> distances = SignalLookahead.computeNodeDistances(nodes, context.edges());
     if (stopIndex >= distances.size()) {
       return decision;
     }
@@ -91,35 +88,17 @@ final class PlannedStopSwitcherClearance {
       List<Long> distances,
       int stopIndex,
       long clearanceBlocks) {
-    if (claim == null || claim.resource() == null) {
+    Optional<NodeId> switcher =
+        claim == null
+            ? Optional.empty()
+            : OccupancyResourceResolver.switcherNodeOf(claim.resource());
+    if (switcher.isEmpty()) {
       return false;
     }
-    OccupancyResource resource = claim.resource();
-    if (resource.kind() != ResourceKind.CONFLICT
-        || !resource.key().startsWith(SWITCHER_CONFLICT_PREFIX)) {
-      return false;
-    }
-    NodeId switcher = NodeId.of(resource.key().substring(SWITCHER_CONFLICT_PREFIX.length()));
-    int switcherIndex = nodes.indexOf(switcher);
+    int switcherIndex = nodes.indexOf(switcher.get());
     if (switcherIndex <= stopIndex || switcherIndex >= distances.size()) {
       return false;
     }
     return distances.get(switcherIndex) - distances.get(stopIndex) >= clearanceBlocks;
-  }
-
-  /** 路径上每个节点到第一个节点的累计边长；边缺失时到此为止。 */
-  private static List<Long> nodeDistances(List<NodeId> nodes, List<RailEdge> edges) {
-    List<Long> distances = new ArrayList<>(nodes.size());
-    distances.add(0L);
-    long distance = 0L;
-    for (int index = 0; index < edges.size() && index + 1 < nodes.size(); index++) {
-      RailEdge edge = edges.get(index);
-      if (edge == null) {
-        break;
-      }
-      distance += Math.max(0L, edge.lengthBlocks());
-      distances.add(distance);
-    }
-    return distances;
   }
 }
