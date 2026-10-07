@@ -1316,15 +1316,37 @@ public final class FtaTrainCommand {
             "names",
             result.names().isEmpty() ? "-" : String.join("、", result.names()));
     String prefix = "command.train.attachment.";
+    List<String> others =
+        result.otherCabSeats().stream().map(index -> String.valueOf(index + 1)).toList();
     switch (result.outcome()) {
       case SHARED_MODEL -> {
         sender.sendMessage(locale.component(prefix + "shared-model", values));
+        return;
+      }
+      case CAR_FULL -> {
+        // 一节车厢两端各一个驾驶室：已有两个时要先取消一个，不替玩家决定取消哪个。
+        sender.sendMessage(
+            locale.component(
+                prefix + "car-full",
+                Map.of(
+                    "car",
+                    values.get("car"),
+                    "cars",
+                    values.get("cars"),
+                    "first",
+                    others.get(0),
+                    "second",
+                    others.get(others.size() - 1))));
         return;
       }
       case UNCHANGED -> sender.sendMessage(
           locale.component(prefix + (mark ? "already-marked" : "not-marked"), values));
       default -> sender.sendMessage(
           locale.component(prefix + (mark ? "marked" : "unmarked"), values));
+    }
+    if (mark && others.size() == 1) {
+      // 第二个驾驶座：可能是车厢另一端的驾驶室（单节车重连），也可能是误标，说一声另一个是哪个座位。
+      sender.sendMessage(locale.component(prefix + "also-marked", Map.of("other", others.get(0))));
     }
     // 取消后列车上已没有任何标记：驾驶室改按车厢位置认定，直接说明这一点。
     String end =
@@ -1333,7 +1355,11 @@ public final class FtaTrainCommand {
             : switch (result.end()) {
               case HEAD -> "end-head";
               case TAIL -> "end-tail";
-              case NONE -> mark ? "end-middle" : "end-none";
+              case NONE -> !mark
+                  ? "end-none"
+                  : seat.memberIndex() == 0 || seat.memberIndex() == result.memberCount() - 1
+                      ? "end-inner"
+                      : "end-middle";
             };
     sender.sendMessage(locale.component(prefix + end, values));
     if (result.outcome() == SeatLocator.MarkOutcome.CHANGED) {

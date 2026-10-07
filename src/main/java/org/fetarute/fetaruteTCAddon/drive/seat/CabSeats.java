@@ -10,7 +10,7 @@ import java.util.Set;
  * 驾驶室座位的认定：哪些座位算驾驶室、在列车的哪一端。接管、接车上车与折返换端都用这一个判定。
  *
  * <p>座位附件可以在 TrainCarts 的附件编辑器里命名；名字在驾驶座名单里的座位是被标记的驾驶座。一列车只要有被标记的座位，
- * 就只有端车（第一节、最后一节）上被标记的座位算驾驶室；完全没有标记时按车厢位置近似：前半列车算车头端，最后一节算车尾端。
+ * 就只有端车（第一节、最后一节）上被标记的座位算驾驶室，端车两头都有驾驶座时（单节车重连）只认外侧那个；完全没有标记时按车厢位置近似： 前半列车算车头端，最后一节算车尾端。
  *
  * <p>车头、车尾都按此刻的编组次序：TrainCarts 调头后车厢序号翻转，原来的车尾端就成了车头端。本类不依赖服务器对象。
  */
@@ -195,6 +195,81 @@ public final class CabSeats {
       names.add(cabNames.get(0));
     }
     return List.copyOf(names);
+  }
+
+  /** 端车上两个驾驶座到相邻车厢的距离至少差这么多（格）才分得出内外。 */
+  private static final double OUTER_MARGIN_BLOCKS = 1.0;
+
+  /**
+   * 端车上不止一个驾驶座时只认外侧那个：离相邻车厢最远的座位。单节车重连后，端车靠内一端的驾驶室不能用来驾驶。
+   *
+   * @param seats 端车上被标记的座位序号
+   * @param distanceToNeighbour 各座位到相邻车厢的距离（格）；量不出时为 NaN
+   * @return 算作驾驶室的座位；分不出内外（量不出、距离差不到 {@value #OUTER_MARGIN_BLOCKS} 格）时原样返回
+   */
+  public static List<Integer> outerCabSeats(
+      List<Integer> seats, java.util.function.IntToDoubleFunction distanceToNeighbour) {
+    if (seats.size() < 2) {
+      return List.copyOf(seats);
+    }
+    int farthest = -1;
+    double best = Double.NEGATIVE_INFINITY;
+    double second = Double.NEGATIVE_INFINITY;
+    for (int seat : seats) {
+      double distance = distanceToNeighbour.applyAsDouble(seat);
+      if (!Double.isFinite(distance)) {
+        return List.copyOf(seats);
+      }
+      if (distance > best) {
+        second = best;
+        best = distance;
+        farthest = seat;
+      } else if (distance > second) {
+        second = distance;
+      }
+    }
+    return best - second < OUTER_MARGIN_BLOCKS ? List.copyOf(seats) : List.of(farthest);
+  }
+
+  /** 一节车厢最多几个驾驶座：车厢两端各一个驾驶室（单节车重连后每节车两端都有驾驶室）。 */
+  public static final int MAX_CAB_SEATS_PER_CAR = 2;
+
+  /**
+   * 在一节车厢里把某个座位标为驾驶座。同一节里原有的驾驶座不动；已有 {@value #MAX_CAB_SEATS_PER_CAR} 个时不标。
+   *
+   * @param seatNames 这节车厢各座位此刻的名字，按座位序号（见 {@link SeatBinding#seatIndex()}）
+   * @param seat 要标的座位序号
+   * @param cabNames 驾驶座名单，已按 {@link #normalize} 处理；不能为空
+   */
+  public static CarMarking markInCar(
+      List<List<String>> seatNames, int seat, List<String> cabNames) {
+    List<Integer> others = new ArrayList<>();
+    for (int index = 0; index < seatNames.size(); index++) {
+      if (index != seat && nameMatches(seatNames.get(index), cabNames)) {
+        others.add(index);
+      }
+    }
+    List<String> current =
+        seat >= 0 && seat < seatNames.size() && seatNames.get(seat) != null
+            ? seatNames.get(seat)
+            : List.of();
+    boolean full = !nameMatches(current, cabNames) && others.size() >= MAX_CAB_SEATS_PER_CAR;
+    return new CarMarking(
+        full ? List.copyOf(current) : withCabName(current, cabNames), others, full);
+  }
+
+  /**
+   * 一节车厢标记驾驶座的结果。
+   *
+   * @param names 要标的座位标记后的名字（{@code full} 时不变）
+   * @param otherCabSeats 同一节里其余的驾驶座（座位序号）
+   * @param full 这节车厢已有 {@value #MAX_CAB_SEATS_PER_CAR} 个驾驶座，没有标
+   */
+  public record CarMarking(List<String> names, List<Integer> otherCabSeats, boolean full) {
+    public CarMarking {
+      names = List.copyOf(names);
+      otherCabSeats = List.copyOf(otherCabSeats);
+    }
   }
 
   /**

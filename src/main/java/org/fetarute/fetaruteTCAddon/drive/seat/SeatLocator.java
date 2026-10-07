@@ -229,7 +229,8 @@ public final class SeatLocator {
       return CabSeats.unmarked(members);
     }
     List<List<Integer>> marked = new ArrayList<>(members);
-    for (MinecartMember<?> member : group) {
+    for (int index = 0; index < members; index++) {
+      MinecartMember<?> member = group.get(index);
       List<Integer> seats = new ArrayList<>();
       if (member != null) {
         List<CartAttachmentSeat> all = seatsOf(member);
@@ -238,10 +239,30 @@ public final class SeatLocator {
             seats.add(i);
           }
         }
+        // 端车两头都标了驾驶座（单节车重连）：只认离相邻车厢最远的外侧那个。
+        if (members >= 2 && (index == 0 || index == members - 1) && seats.size() >= 2) {
+          MinecartMember<?> neighbour = group.get(index == 0 ? 1 : members - 2);
+          seats =
+              new ArrayList<>(
+                  CabSeats.outerCabSeats(seats, seat -> distanceTo(all.get(seat), neighbour)));
+        }
       }
       marked.add(seats);
     }
     return CabSeats.of(marked);
+  }
+
+  /** 座位到另一节车厢中心的距离（格）；车厢没加载、取不到位置时为 NaN。 */
+  private static double distanceTo(CartAttachmentSeat seat, MinecartMember<?> member) {
+    try {
+      if (member == null || member.isUnloaded() || member.getEntity() == null) {
+        return Double.NaN;
+      }
+      Vector at = seat.getTransform().toVector();
+      return at.distance(member.getEntity().getLocation().toVector());
+    } catch (RuntimeException ex) {
+      return Double.NaN;
+    }
   }
 
   /** 标记驾驶座的结果。 */
@@ -253,7 +274,9 @@ public final class SeatLocator {
     /** 已改名。 */
     CHANGED,
     /** 本来就是要的状态，没有改。 */
-    UNCHANGED
+    UNCHANGED,
+    /** 这节车厢已有两个驾驶座（两端各一个），没有标。 */
+    CAR_FULL
   }
 
   /**
@@ -265,6 +288,7 @@ public final class SeatLocator {
    * @param end 改名后这个座位在列车的哪一端（{@link CabSeats#endOf}）
    * @param memberCount 编组节数
    * @param trainMarked 改名后列车上还有没有被标记的驾驶座
+   * @param otherCabSeats 标记时同一节车厢里其余的驾驶座（座位序号）
    */
   public record MarkResult(
       MarkOutcome outcome,
@@ -272,15 +296,32 @@ public final class SeatLocator {
       List<String> names,
       CabSeats.End end,
       int memberCount,
-      boolean trainMarked) {
+      boolean trainMarked,
+      List<Integer> otherCabSeats) {
 
     public MarkResult {
       names = List.copyOf(names);
+      otherCabSeats = List.copyOf(otherCabSeats);
     }
 
     static MarkResult of(MarkOutcome outcome, SeatBinding seat, List<String> names, CabSeats cabs) {
+      return of(outcome, seat, names, cabs, List.of());
+    }
+
+    static MarkResult of(
+        MarkOutcome outcome,
+        SeatBinding seat,
+        List<String> names,
+        CabSeats cabs,
+        List<Integer> otherCabSeats) {
       return new MarkResult(
-          outcome, Optional.of(seat), names, cabs.endOf(seat), cabs.memberCount(), cabs.marked());
+          outcome,
+          Optional.of(seat),
+          names,
+          cabs.endOf(seat),
+          cabs.memberCount(),
+          cabs.marked(),
+          otherCabSeats);
     }
   }
 
@@ -300,7 +341,13 @@ public final class SeatLocator {
         member == null ? null : member.getAttachments().findSeatOfExistingPassenger(player);
     if (binding.isEmpty() || seat == null) {
       return new MarkResult(
-          MarkOutcome.NOT_SEATED, Optional.empty(), List.of(), CabSeats.End.NONE, 0, false);
+          MarkOutcome.NOT_SEATED,
+          Optional.empty(),
+          List.of(),
+          CabSeats.End.NONE,
+          0,
+          false,
+          List.of());
     }
     MinecartGroup group = member.getGroup();
     ConfigurationNode config = seat.getConfig();
@@ -311,22 +358,67 @@ public final class SeatLocator {
       return MarkResult.of(
           MarkOutcome.SHARED_MODEL, binding.get(), current, cabSeats(group, cabNames));
     }
-    List<String> next =
-        mark
-            ? CabSeats.withCabName(current, cabNames)
-            : CabSeats.withoutCabNames(current, cabNames);
+    if (mark) {
+      return markInCar(member, group, model, binding.get(), cabNames);
+    }
+    List<String> next = CabSeats.withoutCabNames(current, cabNames);
     if (next.equals(current)) {
       return MarkResult.of(
           MarkOutcome.UNCHANGED, binding.get(), current, cabSeats(group, cabNames));
     }
-    if (next.isEmpty()) {
-      config.remove("names");
-    } else {
-      config.set("names", next);
-    }
+    writeNames(seat.getConfig(), next);
     // 改模型配置后立即同步：座位附件随之重新载入名字，下面的驾驶室认定读到的就是新名字。
     model.sync();
     return MarkResult.of(MarkOutcome.CHANGED, binding.get(), next, cabSeats(group, cabNames));
+  }
+
+  /** 标记驾驶座：一节车厢最多两个（见 {@link CabSeats#markInCar}），同一节里原有的驾驶座不动。 */
+  private static MarkResult markInCar(
+      MinecartMember<?> member,
+      MinecartGroup group,
+      AttachmentModel model,
+      SeatBinding binding,
+      List<String> cabNames) {
+    List<CartAttachmentSeat> seats = seatsOf(member);
+    List<List<String>> before = new ArrayList<>(seats.size());
+    for (CartAttachmentSeat each : seats) {
+      before.add(List.copyOf(each.getNames()));
+    }
+    ConfigurationNode config = seats.get(binding.seatIndex()).getConfig();
+    List<String> current =
+        config.contains("names") ? List.copyOf(config.getList("names", String.class)) : List.of();
+    CabSeats.CarMarking marking = CabSeats.markInCar(before, binding.seatIndex(), cabNames);
+    if (marking.full()) {
+      return MarkResult.of(
+          MarkOutcome.CAR_FULL,
+          binding,
+          current,
+          cabSeats(group, cabNames),
+          marking.otherCabSeats());
+    }
+    List<String> next = CabSeats.withCabName(current, cabNames);
+    if (next.equals(current)) {
+      return MarkResult.of(
+          MarkOutcome.UNCHANGED,
+          binding,
+          current,
+          cabSeats(group, cabNames),
+          marking.otherCabSeats());
+    }
+    writeNames(config, next);
+    // 改模型配置后立即同步：座位附件随之重新载入名字，下面的驾驶室认定读到的就是新名字。
+    model.sync();
+    return MarkResult.of(
+        MarkOutcome.CHANGED, binding, next, cabSeats(group, cabNames), marking.otherCabSeats());
+  }
+
+  /** 写回座位附件的名字；没有名字时去掉这一项。 */
+  private static void writeNames(ConfigurationNode config, List<String> names) {
+    if (names.isEmpty()) {
+      config.remove("names");
+    } else {
+      config.set("names", names);
+    }
   }
 
   /** 配置节点是不是挂在给定的根节点下面（车厢自己的模型，而不是 model 附件引用的共用模型）。 */
