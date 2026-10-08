@@ -179,7 +179,8 @@ public final class DriveApiImpl implements DriveApi {
             handoverName.map(StationName::name).orElse(""),
             request.depotPickup(),
             request.source(),
-            request.metadata());
+            request.metadata(),
+            request.rewards());
     DriverTaskManager.ClaimOutcome outcome =
         drive
             .get()

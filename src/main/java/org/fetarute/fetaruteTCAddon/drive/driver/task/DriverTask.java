@@ -68,6 +68,7 @@ public final class DriverTask {
   private String handoverStationName = "";
   private String source = SOURCE_BOARD;
   private Map<String, String> metadata = Map.of();
+  private boolean rewards = true;
   private boolean finishAnnounced;
   private long startedTick = -1L;
   private Instant startedAt;
@@ -209,6 +210,15 @@ public final class DriverTask {
   public void setSource(String source, Map<String, String> metadata) {
     this.source = source == null || source.isBlank() ? SOURCE_BOARD : source;
     this.metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+  }
+
+  /** 是否发驾驶奖励：插件派任务时可关掉。 */
+  public boolean rewards() {
+    return rewards;
+  }
+
+  public void setRewards(boolean rewards) {
+    this.rewards = rewards;
   }
 
   /** 任务结束只对外报一次：第一次调用返回 true。 */

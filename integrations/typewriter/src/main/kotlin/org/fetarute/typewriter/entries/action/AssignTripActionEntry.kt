@@ -31,8 +31,11 @@ import java.time.Instant
  * The `Assign Trip` action gives the player a scheduled trip to drive.
  *
  * It takes the next departure from the given station (optionally only of one route, or one exact trip)
- * and assigns it to the player. The player then boards the train at that station, confirms the seat
- * and drives it to the terminus, or only up to the alight station when one is set.
+ * and assigns it to the player. The player then takes over the train at that station, confirms the seat
+ * and drives it to the terminus, or only up to the handover station when one is set.
+ *
+ * Driving rewards (experience and money, set in FetaruteTCAddon's `drive.yml`) are paid as for any other task
+ * unless turned off here, e.g. when the quest gives its own reward.
  *
  * The triggers of this action only fire when the task was actually assigned.
  * When no trip could be assigned (none departing in the window, already taken, the player already
@@ -54,8 +57,8 @@ class AssignTripActionEntry(
     val route: Var<String> = ConstVar(""),
     @Help("This exact trip code. Leave blank to take the next departure.")
     val trip: Var<String> = ConstVar(""),
-    @Help("Station code where the task ends. Leave blank to drive to the terminus.")
-    val alightStation: Var<String> = ConstVar(""),
+    @Help("Station code where the player hands the train back. Leave blank to drive to the terminus.")
+    val handoverStation: Var<String> = ConstVar(""),
     @Help("How far ahead to look for departures, in minutes.")
     @Default("20")
     val windowMinutes: Var<Int> = ConstVar(20),
@@ -65,6 +68,9 @@ class AssignTripActionEntry(
     val depotPickup: Boolean = false,
     @Help("Also take a train already standing at the station. It may leave before the player gets there.")
     val includeStanding: Boolean = false,
+    @Help("Pay FetaruteTCAddon's driving rewards (experience and money) for this task.")
+    @Default("true")
+    val builtInRewards: Boolean = true,
     @Help("Fired when no trip could be assigned.")
     val failedTriggers: List<Ref<TriggerableEntry>> = emptyList(),
 ) : ActionEntry {
@@ -72,7 +78,7 @@ class AssignTripActionEntry(
         val stationCode = station.get(player, context).trim()
         val routeCode = route.get(player, context).trim()
         val tripCode = trip.get(player, context).trim()
-        val alight = alightStation.get(player, context).trim()
+        val handover = handoverStation.get(player, context).trim()
         val window = windowMinutes.get(player, context).coerceIn(1, 24 * 60)
         // 派任务只能在主线程做：成败要等派完才知道，后续触发届时再手动放出
         disableAutomaticTriggering()
@@ -99,9 +105,10 @@ class AssignTripActionEntry(
                 return@launch
             }
             val request = DriveApi.TaskRequest.of(offer, stationCode)
-                .alightAt(alight)
+                .handoverAt(handover)
                 .mode(mode.api)
                 .depotPickup(depotPickup)
+                .rewards(builtInRewards)
                 .tagged(SOURCE, mapOf(ENTRY_KEY to id))
             val result = api.assign(player, request)
             if (result == DriveApi.AssignResult.ASSIGNED) {

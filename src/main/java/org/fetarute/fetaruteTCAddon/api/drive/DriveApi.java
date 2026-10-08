@@ -14,7 +14,7 @@ import java.util.concurrent.CompletableFuture;
 import org.bukkit.entity.Player;
 
 /**
- * 驾驶任务 API（1.10.0）：给玩家派驾驶任务、查询任务与驾驶状态、读取成绩记录。
+ * 驾驶任务 API（1.10.0；1.13.0 可不发驾驶奖励）：给玩家派驾驶任务、查询任务与驾驶状态、读取成绩记录。
  *
  * <p>任务就是开一趟表定车次：从接班站接班，开到终点站或指定的交班站。任务插件（例如 Typewriter）通过 {@link #assign} 给玩家派任务， 通过 {@code
  * org.fetarute.fetaruteTCAddon.api.event} 里的 {@code Driver*}、{@code DriveSession*} 事件跟进：领取、开始、
@@ -321,6 +321,7 @@ public interface DriveApi {
    * @param source 来源标记（例如插件名），事件里原样带回
    * @param metadata 附加数据（例如任务 ID），事件里原样带回
    * @param notifyPlayer 是否给玩家发领取提示
+   * @param rewards 是否按 {@code drive.yml} 的 rewards 段发驾驶奖励（1.13.0）；默认发，任务插件自己发奖、不想重复时可关掉
    */
   record TaskRequest(
       UUID timetableId,
@@ -333,7 +334,8 @@ public interface DriveApi {
       boolean depotPickup,
       String source,
       Map<String, String> metadata,
-      boolean notifyPlayer) {
+      boolean notifyPlayer,
+      boolean rewards) {
     public TaskRequest {
       Objects.requireNonNull(timetableId, "timetableId");
       Objects.requireNonNull(tripCode, "tripCode");
@@ -346,7 +348,35 @@ public interface DriveApi {
       metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
     }
 
-    /** 开这趟车次：从第一个停车的车站开到终点站、人工驾驶、给玩家发提示。 */
+    /** 1.12.0 及以前的构造器：发驾驶奖励。 */
+    public TaskRequest(
+        UUID timetableId,
+        String tripCode,
+        LocalDate serviceDate,
+        Optional<String> takeoverStation,
+        int takeoverStopSequence,
+        Optional<String> handoverStation,
+        Mode mode,
+        boolean depotPickup,
+        String source,
+        Map<String, String> metadata,
+        boolean notifyPlayer) {
+      this(
+          timetableId,
+          tripCode,
+          serviceDate,
+          takeoverStation,
+          takeoverStopSequence,
+          handoverStation,
+          mode,
+          depotPickup,
+          source,
+          metadata,
+          notifyPlayer,
+          true);
+    }
+
+    /** 开这趟车次：从第一个停车的车站开到终点站、人工驾驶、给玩家发提示、发驾驶奖励。 */
     public static TaskRequest trip(UUID timetableId, String tripCode, LocalDate serviceDate) {
       return new TaskRequest(
           timetableId,
@@ -359,6 +389,7 @@ public interface DriveApi {
           false,
           "api",
           Map.of(),
+          true,
           true);
     }
 
@@ -378,7 +409,8 @@ public interface DriveApi {
           request.depotPickup,
           request.source,
           request.metadata,
-          request.notifyPlayer);
+          request.notifyPlayer,
+          request.rewards);
     }
 
     /** 从这一站接班（该站码的第一次停靠）。 */
@@ -394,7 +426,8 @@ public interface DriveApi {
           depotPickup,
           source,
           metadata,
-          notifyPlayer);
+          notifyPlayer,
+          rewards);
     }
 
     /** 开到这一站就结束（区间任务），交还自动运行。 */
@@ -410,7 +443,8 @@ public interface DriveApi {
           depotPickup,
           source,
           metadata,
-          notifyPlayer);
+          notifyPlayer,
+          rewards);
     }
 
     /** 驾驶方式。 */
@@ -426,7 +460,8 @@ public interface DriveApi {
           depotPickup,
           source,
           metadata,
-          notifyPlayer);
+          notifyPlayer,
+          rewards);
     }
 
     /** 列车从车库出车时从车库接车。 */
@@ -442,7 +477,8 @@ public interface DriveApi {
           pickup,
           source,
           metadata,
-          notifyPlayer);
+          notifyPlayer,
+          rewards);
     }
 
     /** 来源标记与附加数据，事件里原样带回。 */
@@ -458,7 +494,8 @@ public interface DriveApi {
           depotPickup,
           newSource,
           newMetadata,
-          notifyPlayer);
+          notifyPlayer,
+          rewards);
     }
 
     /** 是否给玩家发领取提示。 */
@@ -474,7 +511,25 @@ public interface DriveApi {
           depotPickup,
           source,
           metadata,
-          notify);
+          notify,
+          rewards);
+    }
+
+    /** 是否发驾驶奖励（1.13.0）。 */
+    public TaskRequest rewards(boolean pay) {
+      return new TaskRequest(
+          timetableId,
+          tripCode,
+          serviceDate,
+          takeoverStation,
+          takeoverStopSequence,
+          handoverStation,
+          mode,
+          depotPickup,
+          source,
+          metadata,
+          notifyPlayer,
+          pay);
     }
 
     /**

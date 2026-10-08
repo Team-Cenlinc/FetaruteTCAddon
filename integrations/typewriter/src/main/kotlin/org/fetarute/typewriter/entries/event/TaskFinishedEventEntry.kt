@@ -15,6 +15,8 @@ import com.typewritermc.engine.paper.entry.entries.EventEntry
 import com.typewritermc.engine.paper.entry.triggerAllFor
 import org.fetarute.fetaruteTCAddon.api.event.DriverTaskFinishedEvent
 import org.fetarute.typewriter.TaskEndState
+import org.fetarute.typewriter.TaskSource
+import org.fetarute.typewriter.allows
 import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import java.util.Optional
@@ -27,6 +29,10 @@ import kotlin.reflect.KClass
  * expired before the player took over, or interrupted.
  *
  * Points and grade are only set when the player actually drove the train; otherwise they are 0 and empty.
+ *
+ * Besides tasks from the task board and from Typewriter, FetaruteTCAddon also records a task when a player
+ * takes over a scheduled train directly, drives on with the next trip at the terminus, or takes a road test
+ * or its practice run. Use the sources to tell them apart.
  *
  * ## How could this be used?
  * Reward the player when the trip was completed with grade A or better,
@@ -42,6 +48,8 @@ class TaskFinishedEventEntry(
     val route: String = "",
     @Help("Only tasks that ended this way. Leave empty for any end.")
     val state: Optional<TaskEndState> = Optional.empty(),
+    @Help("Only tasks from these sources. Leave empty for any source.")
+    val sources: List<TaskSource> = emptyList(),
 ) : EventEntry
 
 enum class TaskFinishedContextKeys(override val klass: KClass<*>) : EntryContextKey {
@@ -65,6 +73,9 @@ enum class TaskFinishedContextKeys(override val klass: KClass<*>) : EntryContext
 
     @KeyType(String::class)
     GRADE(String::class),
+
+    @KeyType(String::class)
+    SOURCE(String::class),
 }
 
 @EntryListener(TaskFinishedEventEntry::class)
@@ -76,7 +87,8 @@ fun onTaskFinished(event: DriverTaskFinishedEvent, query: Query<TaskFinishedEven
     query.findWhere {
         task.assignedBy(it.assignedBy) &&
             (it.route.isBlank() || it.route.equals(task.routeCode(), ignoreCase = true)) &&
-            it.state.map { wanted -> wanted.name == state }.orElse(true)
+            it.state.map { wanted -> wanted.name == state }.orElse(true) &&
+            it.sources.allows(task)
     }.triggerAllFor(player) {
         TaskFinishedContextKeys.TRIP += task.tripCode()
         TaskFinishedContextKeys.ROUTE += task.routeCode()
@@ -85,5 +97,6 @@ fun onTaskFinished(event: DriverTaskFinishedEvent, query: Query<TaskFinishedEven
         TaskFinishedContextKeys.REASON += task.endReason()
         TaskFinishedContextKeys.POINTS += (score?.points() ?: 0)
         TaskFinishedContextKeys.GRADE += (score?.grade() ?: "")
+        TaskFinishedContextKeys.SOURCE += task.source()
     }
 }

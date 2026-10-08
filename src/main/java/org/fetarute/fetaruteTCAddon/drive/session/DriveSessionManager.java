@@ -5109,7 +5109,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     String grade = result.grade().name();
     task.setResult(result.points(), grade);
     DriveRewardPayer.Paid paid =
-        earnsReward(task.state(), task.source())
+        earnsReward(task.state(), task.source(), task.rewards())
             ? rewardPayer.pay(
                 task.playerId(),
                 task.playerName(),
@@ -5142,6 +5142,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           player,
           paid,
           config.rewards().enabled()
+              && task.rewards()
               && rewardableSource(task.source())
               && task.state() == DriverTask.State.FAILED,
           config.rewards().currencyName());
@@ -5180,9 +5181,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         && task.points() < 0;
   }
 
-  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给。 */
-  static boolean earnsReward(DriverTask.State state, String source) {
-    return rewardableSource(source)
+  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给；插件派任务时关了奖励的不给。 */
+  static boolean earnsReward(DriverTask.State state, String source, boolean taskRewards) {
+    return taskRewards
+        && rewardableSource(source)
         && (state == DriverTask.State.COMPLETED
             || state == DriverTask.State.ABANDONED
             || state == DriverTask.State.INTERRUPTED);
@@ -5208,10 +5210,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return Optional.of("drive.task.reward.money");
   }
 
-  /** ATO 下连续超时未确认发车被判定离开、或确认发车恢复时提示一次（奖励关闭时不提示）。 */
+  /** ATO 下连续超时未确认发车被判定离开、或确认发车恢复时提示一次（奖励关闭、或这趟任务本就不发奖励时不提示）。 */
   private void tellAway(DriveSession session, boolean away) {
     Player player = Bukkit.getPlayer(session.playerId());
     if (player == null || !player.isOnline() || !config.rewards().enabled()) {
+      return;
+    }
+    boolean taskRewards =
+        tasks
+            .activeTaskOf(session.playerId())
+            .map(task -> task.rewards() && rewardableSource(task.source()))
+            .orElse(true);
+    if (!taskRewards) {
       return;
     }
     player.sendMessage(

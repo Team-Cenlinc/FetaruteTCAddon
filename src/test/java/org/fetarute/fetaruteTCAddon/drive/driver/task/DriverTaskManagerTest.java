@@ -196,7 +196,8 @@ class DriverTaskManagerTest {
         handover >= 0 ? "C 站" : "",
         true,
         "typewriter",
-        java.util.Map.of("quest", "q1"));
+        java.util.Map.of("quest", "q1"),
+        true);
   }
 
   @Test
@@ -214,6 +215,7 @@ class DriverTaskManagerTest {
     assertEquals("typewriter", task.source());
     assertEquals(java.util.Map.of("quest", "q1"), task.metadata());
     assertTrue(task.depotPickup());
+    assertTrue(task.rewards(), "默认发驾驶奖励");
 
     assertEquals(
         DriverTaskManager.ClaimOutcome.TAKEN,
@@ -224,6 +226,36 @@ class DriverTaskManagerTest {
     assertEquals(
         DriverTaskManager.ClaimOutcome.DISABLED,
         tasks.assign(b, spec("R1-011", -1), DrivingMode.MANUAL, false, NOW));
+  }
+
+  @Test
+  @DisplayName("插件派任务可以不发驾驶奖励")
+  void assignWithoutRewards() {
+    Player a = player("a");
+    DriverTaskManager.TaskSpec base = spec("R1-012", -1);
+    DriverTaskManager.TaskSpec spec =
+        new DriverTaskManager.TaskSpec(
+            base.key(),
+            base.routeCode(),
+            base.operatorCode(),
+            base.stationCode(),
+            base.stationName(),
+            base.takeoverNodeId(),
+            base.takeoverStopSequence(),
+            base.plannedDeparture(),
+            base.trainName(),
+            base.handoverStopSequence(),
+            base.handoverStationCode(),
+            base.handoverStationName(),
+            base.depotPickup(),
+            base.source(),
+            base.metadata(),
+            false);
+
+    assertEquals(
+        DriverTaskManager.ClaimOutcome.CLAIMED,
+        tasks.assign(a, spec, DrivingMode.MANUAL, true, NOW));
+    assertFalse(tasks.taskOf(a.getUniqueId()).orElseThrow().rewards());
   }
 
   @Test

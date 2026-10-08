@@ -13,8 +13,8 @@ internal const val SOURCE = "typewriter"
 /** 派任务的动作条目 ID 记在任务附加数据的这个键下。 */
 internal const val ENTRY_KEY = "entry"
 
-/** 需要的 FetaruteTCAddon 公开 API 最低版本（驾驶任务 API 自此版本起）。 */
-private const val REQUIRED_API = "1.10.0"
+/** 需要的 FetaruteTCAddon 公开 API 最低版本（派任务可不发驾驶奖励自此版本起）。 */
+private const val REQUIRED_API = "1.13.0"
 
 /** 版本不够时只告警一次。 */
 @Volatile
@@ -56,10 +56,34 @@ enum class TaskEndState {
 }
 
 /** 一站的停车结果。 */
-enum class StopWindow {
+enum class StopOutcome {
     ACCURATE,
     ACCEPTED,
     SHORT,
     OVERRUN,
     SKIPPED,
 }
+
+/** 任务从哪里来；与 FetaruteTCAddon 任务的来源标记一一对应，其他插件派的归为 [OTHER_PLUGIN]。 */
+enum class TaskSource(private val key: String?) {
+    TASK_BOARD("board"),
+    TYPEWRITER(SOURCE),
+    TAKEOVER("takeover"),
+    CONTINUATION("continuation"),
+    ROAD_TEST("exam"),
+    ROAD_TEST_PRACTICE("training"),
+    OTHER_PLUGIN(null),
+    ;
+
+    fun matches(source: String): Boolean =
+        if (key != null) key == source else TaskSource.entries.none { it.key == source }
+
+    companion object {
+        /** 路考练习的来源标记：不进驾驶记录。 */
+        internal const val PRACTICE = "training"
+    }
+}
+
+/** 没选来源时认所有任务（也认没有任务的驾驶）；选了只认这些来源的任务。 */
+internal fun List<TaskSource>.allows(task: DriveApi.TaskView?): Boolean =
+    isEmpty() || (task != null && any { it.matches(task.source()) })
