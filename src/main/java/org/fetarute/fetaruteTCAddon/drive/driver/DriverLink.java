@@ -55,6 +55,9 @@ public final class DriverLink {
   private final SignalAcknowledge signalAcknowledge = new SignalAcknowledge();
   private TaskScore score = new TaskScore();
 
+  /** 上次记里程时的里程表读数；还没记过时为 {@code NaN}。 */
+  private double distanceOdometer = Double.NaN;
+
   /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
   private DriverStationStop settledStop;
 
@@ -617,6 +620,15 @@ public final class DriverLink {
     this.ladderStage = Objects.requireNonNull(stage, "stage");
   }
 
+  /** 由驾驶会话每 tick 调用：把上次以来走过的距离记进本趟成绩，按此刻是 ATO 还是人工驾驶分开计。 */
+  public void trackDistance(boolean ato) {
+    double now = odometer.getAsDouble();
+    if (!Double.isNaN(distanceOdometer)) {
+      score.addDistance(now - distanceOdometer, ato);
+    }
+    distanceOdometer = now;
+  }
+
   /** 两次询问相隔超过这么久，算作新的一次停站。 */
   private static final long DEPARTURE_QUERY_GAP_TICKS = 60L;
 
@@ -632,6 +644,7 @@ public final class DriverLink {
     long now = clock.getAsLong();
     if (departureHoldQueriedAt < 0L || now - departureHoldQueriedAt > DEPARTURE_QUERY_GAP_TICKS) {
       departureHoldSince = now;
+      score.addAtoStop();
       // 停站结束前已提前确认（之后列车没动过）：站台一问就放行，驾驶员的反应时间不算进停站。
       departureConfirmed = stillAt(preConfirmOdometer);
       preConfirmOdometer = Double.NaN;

@@ -9,6 +9,7 @@ depend:
   - Train_Carts
 softdepend:
   - TCCoasters
+  - Vault
 commands:
   fta:
     description: FetaruteTCAddon 主命令

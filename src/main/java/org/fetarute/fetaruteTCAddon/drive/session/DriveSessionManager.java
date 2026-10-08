@@ -78,6 +78,7 @@ import org.fetarute.fetaruteTCAddon.drive.cab.CabSystems;
 import org.fetarute.fetaruteTCAddon.drive.cab.CabVehicle;
 import org.fetarute.fetaruteTCAddon.drive.cab.Vigilance;
 import org.fetarute.fetaruteTCAddon.drive.driver.CabChange;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverCongestion;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
@@ -273,6 +274,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   private final StationStopPoints stationStopPoints;
   private final StopMarker stopMarker;
+  private final DriveRewardPayer rewardPayer;
   private final Map<UUID, DriveDoors> doors = new HashMap<>();
 
   /**
@@ -316,6 +318,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   public DriveSessionManager(FetaruteTCAddon plugin, DriveConfig config) {
     this.plugin = plugin;
     this.config = config;
+    this.rewardPayer = new DriveRewardPayer(message -> plugin.getLogger().warning(message));
     this.menu = new DriveMenu(plugin.getLocaleManager(), this::taskSummary);
     this.sidebar = new DriveSidebar(plugin.getLocaleManager());
     this.stationStopPoints =
@@ -2655,6 +2658,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private boolean tickDriverLink(DriveSession session, MinecartGroup group) {
     DriverLink link = session.driverLink();
+    link.trackDistance(session.isAto());
     if (link.handbackRequested() && (session.isStopped() || session.isAto())) {
       traceSession(session, "停稳，交还原因: " + link.handbackReason());
       handback(session, DriveSession.EndReason.HANDBACK);
@@ -5105,6 +5109,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     ScoreRules.Result result = ScoreRules.evaluate(score, task.state() != DriverTask.State.FAILED);
     String grade = result.grade().name();
     task.setResult(result.points(), grade);
+    DriveRewardPayer.Paid paid =
+        earnsReward(task.state(), task.source())
+            ? rewardPayer.pay(
+                task.playerId(),
+                task.playerName(),
+                DriveRewards.of(config.rewards(), score, result.grade()),
+                config.rewards())
+            : new DriveRewardPayer.Paid(0, Optional.empty());
     Player player = Bukkit.getPlayer(session.playerId());
     if (player != null && player.isOnline()) {
       showResult(player, task, result);
@@ -5127,6 +5139,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       for (DriverReport.Line line : DriverReport.sheet(score)) {
         player.sendMessage(DriverReport.render(plugin.getLocaleManager(), line));
       }
+      tellReward(player, paid);
     }
     DriveTaskRecord record =
         new DriveTaskRecord(
@@ -5151,6 +5164,36 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       saveRecord(record);
     }
     return Optional.of(TaskViews.score(score, result.points(), grade));
+  }
+
+  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给。 */
+  static boolean earnsReward(DriverTask.State state, String source) {
+    return (state == DriverTask.State.COMPLETED
+            || state == DriverTask.State.ABANDONED
+            || state == DriverTask.State.INTERRUPTED)
+        && !DriverTask.SOURCE_EXAM.equals(source)
+        && !DriverTask.SOURCE_TRAINING.equals(source);
+  }
+
+  /** 成绩单后面一行说明本趟发了多少经验与钱币；什么也没发时不说。 */
+  private void tellReward(Player player, DriveRewardPayer.Paid paid) {
+    if (paid.empty()) {
+      return;
+    }
+    String key =
+        paid.experience() > 0
+            ? paid.money().isPresent() ? "drive.task.reward.both" : "drive.task.reward.experience"
+            : "drive.task.reward.money";
+    player.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(
+                key,
+                Map.of(
+                    "experience",
+                    String.valueOf(paid.experience()),
+                    "money",
+                    paid.money().orElse(""))));
   }
 
   /** 任务结束时的大字评级：标题是评级，副标题是车次、终态与得分；完成时配音效。 */

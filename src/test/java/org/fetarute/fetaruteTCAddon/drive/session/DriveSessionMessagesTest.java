@@ -90,7 +90,10 @@ class DriveSessionMessagesTest {
           "drive.task.takeover.finished-next-code",
           "drive.task.takeover.finished-no-next",
           "drive.task.settled-no-next-trip",
-          "drive.task.no-next-trip-line"
+          "drive.task.no-next-trip-line",
+          "drive.task.reward.both",
+          "drive.task.reward.experience",
+          "drive.task.reward.money"
         }) {
       assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
     }

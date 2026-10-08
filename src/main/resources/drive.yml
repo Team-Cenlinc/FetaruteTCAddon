@@ -336,6 +336,29 @@ license:
       grants:
         - fetarute.drive.driver
 
+# 驾驶奖励：驾驶调度列车的任务（领任务或接管时刻表车次）按驾驶距离与停站数给经验与服务器钱币。
+# 开到终点站全额；中途结束、被收回按已开的部分；卡住被收回、超过任务时限、越站交还不发；路考与练习不发。
+# 钱币装了 Vault 时经经济接口发（EssentialsX 等经济插件会挂在 Vault 上）；没有 Vault 时用 money-command 控制台命令发。经验只发给在线的玩家
+rewards:
+  enabled: true
+  # 每公里（1000 格）与每停一站给多少经验
+  experience-per-km: 10
+  experience-per-stop: 2
+  # 每公里与每停一站给多少钱币
+  money-per-km: 20.0
+  money-per-stop: 5.0
+  # ATO 运行的那段（里程与停站）按这个比例发
+  ato-multiplier: 0.5
+  # 按本趟评级再乘的系数
+  grade-multipliers:
+    S: 1.5
+    A: 1.2
+    B: 1.0
+    C: 0.8
+    D: 0.5
+  # 没有 Vault 时发钱币的控制台命令：{player} 玩家名，{amount} 数额；留空则只发经验
+  money-command: "eco give {player} {amount}"
+
 sounds:
   enabled: true
   # 两次鸣笛（驾驶中按 Space）至少间隔多少秒

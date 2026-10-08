@@ -22,6 +22,9 @@ public final class TaskScore {
   private int lateDepartureConfirmations;
   private OptionalLong delayAtStartSeconds = OptionalLong.empty();
   private OptionalLong delayAtEndSeconds = OptionalLong.empty();
+  private double manualBlocks;
+  private double atoBlocks;
+  private int atoStops;
 
   public void addStop(StopScore stop) {
     if (stop != null) {
@@ -36,6 +39,38 @@ public final class TaskScore {
   /** 已记下成绩的停站数。 */
   public int stopCount() {
     return stops.size();
+  }
+
+  /** 记下走过的距离（格），按当时是人工驾驶还是 ATO 分开计。 */
+  public void addDistance(double blocks, boolean ato) {
+    if (!(blocks > 0.0) || !Double.isFinite(blocks)) {
+      return;
+    }
+    if (ato) {
+      atoBlocks += blocks;
+    } else {
+      manualBlocks += blocks;
+    }
+  }
+
+  /** 人工驾驶走过的距离（格）。 */
+  public double manualBlocks() {
+    return manualBlocks;
+  }
+
+  /** ATO 运行走过的距离（格）。 */
+  public double atoBlocks() {
+    return atoBlocks;
+  }
+
+  /** ATO 下停了一站（站台由系统停，不计对标成绩，只计站数）。 */
+  public void addAtoStop() {
+    atoStops++;
+  }
+
+  /** ATO 下停的站数。 */
+  public int atoStops() {
+    return atoStops;
   }
 
   /** 记下防护介入与确认的计数（结束时一次写入）。 */

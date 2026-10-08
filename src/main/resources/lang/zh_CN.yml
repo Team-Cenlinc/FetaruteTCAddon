@@ -2261,6 +2261,10 @@ drive:
     started-interval: "<prefix> <green>已接班车次 <aqua><trip></aqua>（<mode>），请按信号行车，开到 <white><station></white></green>"
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
     result-subtitle: "<white>车次 <aqua><trip></aqua> <state> · <yellow><points></yellow> 分</white>"
+    reward:
+      both: "<prefix> <white>本趟奖励：经验</white> <green>+<experience></green> <gray>·</gray> <white>钱币</white> <gold>+<money></gold>"
+      experience: "<prefix> <white>本趟奖励：经验</white> <green>+<experience></green>"
+      money: "<prefix> <white>本趟奖励：钱币</white> <gold>+<money></gold>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:

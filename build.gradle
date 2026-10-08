@@ -39,6 +39,9 @@ dependencies {
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
     compileOnly("com.bergerkiller.bukkit:TCCoasters:${tccCoastersVersion}")
+    compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
+        exclude group: "org.bukkit", module: "bukkit"
+    }
     compileOnly("org.incendo:cloud-paper")
     compileOnly("org.incendo:cloud-minecraft-extras")
     testImplementation("org.incendo:cloud-paper")
