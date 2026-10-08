@@ -358,6 +358,11 @@ rewards:
     D: 0.5
   # 没有 Vault 时发钱币的控制台命令：{player} 玩家名，{amount} 数额；留空则只发经验
   money-command: "eco give {player} {amount}"
+  # 钱币的名称，用在奖励提示里
+  currency-name: "FRD"
+  # ATO 下连续多少站超时未确认发车就判定驾驶员离开：从第一次超时起的里程与停站不计奖励，确认一次发车即恢复；
+  # 不到这么多站就确认过（或本趟结束）的照常计。0 表示不判定
+  away-after-timeouts: 3
 
 sounds:
   enabled: true

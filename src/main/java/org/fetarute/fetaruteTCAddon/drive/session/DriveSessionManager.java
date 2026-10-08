@@ -384,6 +384,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     for (DriveSession session : active.values()) {
       if (session.driverLink() != null) {
         session.driverLink().setStopWindow(current.driver().stopWindow());
+        session.driverLink().setAwayAfterTimeouts(current.rewards().awayAfterTimeouts());
       }
     }
   }
@@ -720,6 +721,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               session::odometerBlocks,
               Bukkit::getCurrentTick);
       driverLink.setStopWindow(config.driver().stopWindow());
+      driverLink.setAwayAfterTimeouts(config.rewards().awayAfterTimeouts());
       driverLink.setMode(
           tasks
               .claimFor(player.getUniqueId(), group.getProperties().getTrainName())
@@ -2659,6 +2661,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private boolean tickDriverLink(DriveSession session, MinecartGroup group) {
     DriverLink link = session.driverLink();
     link.trackDistance(session.isAto());
+    link.takeAwayNotice().ifPresent(away -> tellAway(session, away));
     if (link.handbackRequested() && (session.isStopped() || session.isAto())) {
       traceSession(session, "停稳，交还原因: " + link.handbackReason());
       handback(session, DriveSession.EndReason.HANDBACK);
@@ -5139,7 +5142,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       for (DriverReport.Line line : DriverReport.sheet(score)) {
         player.sendMessage(DriverReport.render(plugin.getLocaleManager(), line));
       }
-      tellReward(player, paid);
+      tellReward(player, paid, config.rewards().currencyName());
     }
     DriveTaskRecord record =
         new DriveTaskRecord(
@@ -5175,8 +5178,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         && !DriverTask.SOURCE_TRAINING.equals(source);
   }
 
+  /** ATO 下连续超时未确认发车被判定离开、或确认发车恢复时提示一次（奖励关闭时不提示）。 */
+  private void tellAway(DriveSession session, boolean away) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player == null || !player.isOnline() || !config.rewards().enabled()) {
+      return;
+    }
+    player.sendMessage(
+        plugin
+            .getLocaleManager()
+            .component(
+                away ? "drive.task.reward.away" : "drive.task.reward.back",
+                Map.of("count", String.valueOf(config.rewards().awayAfterTimeouts()))));
+  }
+
   /** 成绩单后面一行说明本趟发了多少经验与钱币；什么也没发时不说。 */
-  private void tellReward(Player player, DriveRewardPayer.Paid paid) {
+  private void tellReward(Player player, DriveRewardPayer.Paid paid, String currency) {
     if (paid.empty()) {
       return;
     }
@@ -5193,7 +5210,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     "experience",
                     String.valueOf(paid.experience()),
                     "money",
-                    paid.money().orElse(""))));
+                    paid.money().orElse(""),
+                    "currency",
+                    currency)));
   }
 
   /** 任务结束时的大字评级：标题是评级，副标题是车次、终态与得分；完成时配音效。 */

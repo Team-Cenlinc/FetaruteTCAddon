@@ -617,9 +617,11 @@ drive:
     result: "<prefix> <white>Trip <aqua><trip></aqua> <state></white> <gray>|</gray> score <yellow><points></yellow> <gray>grade</gray> <gold><bold><grade></bold></gold>"
     result-subtitle: "<white>Trip <aqua><trip></aqua> <state> · <yellow><points></yellow> pts</white>"
     reward:
-      both: "<prefix> <white>Reward for this trip: experience</white> <green>+<experience></green> <gray>·</gray> <white>money</white> <gold>+<money></gold>"
+      both: "<prefix> <white>Reward for this trip: experience</white> <green>+<experience></green> <gray>·</gray> <white><currency></white> <gold>+<money></gold>"
       experience: "<prefix> <white>Reward for this trip: experience</white> <green>+<experience></green>"
-      money: "<prefix> <white>Reward for this trip: money</white> <gold>+<money></gold>"
+      money: "<prefix> <white>Reward for this trip: <currency></white> <gold>+<money></gold>"
+      away: "<prefix> <yellow>No departure confirmed for <count> stops in a row; you are treated as away and the distance and stops from here on earn no reward. Confirm a departure to resume</yellow>"
+      back: "<prefix> <green>Departure confirmed; rewards resume</green>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:

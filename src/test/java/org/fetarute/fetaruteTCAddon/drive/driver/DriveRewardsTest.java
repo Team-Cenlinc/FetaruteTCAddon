@@ -46,7 +46,8 @@ class DriveRewardsTest {
   @DisplayName("关闭时、没开过车时什么也不发")
   void nothingWhenDisabledOrIdle() {
     DriveRewardConfig off =
-        new DriveRewardConfig(false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}");
+        new DriveRewardConfig(
+            false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3);
     assertTrue(DriveRewards.of(off, score(), ScoreRules.Grade.S).empty());
     assertTrue(
         DriveRewards.of(DriveRewardConfig.defaults(), new TaskScore(), ScoreRules.Grade.S).empty());
@@ -67,6 +68,8 @@ class DriveRewardsTest {
     assertTrue(defaults.enabled());
     assertEquals(1.5, defaults.gradeMultiplier(ScoreRules.Grade.S), 1e-9);
     assertEquals("eco give {player} {amount}", defaults.moneyCommand());
+    assertEquals("FRD", defaults.currencyName());
+    assertEquals(3, defaults.awayAfterTimeouts());
 
     YamlConfiguration yaml = new YamlConfiguration();
     yaml.loadFromString(
@@ -79,7 +82,9 @@ class DriveRewardsTest {
             "grade-multipliers:",
             "  s: 3",
             "  X: 2",
-            "money-command: ''"));
+            "money-command: ''",
+            "currency-name: 金币",
+            "away-after-timeouts: 0"));
     List<String> warnings = new ArrayList<>();
     DriveRewardConfig config = DriveRewardConfig.from(yaml, warnings::add);
 
@@ -90,11 +95,13 @@ class DriveRewardsTest {
     assertEquals(3.0, config.gradeMultiplier(ScoreRules.Grade.S), 1e-9, "评级不区分大小写");
     assertEquals(1.2, config.gradeMultiplier(ScoreRules.Grade.A), 1e-9, "没写的评级保留默认");
     assertEquals("", config.moneyCommand());
+    assertEquals("金币", config.currencyName());
+    assertEquals(0, config.awayAfterTimeouts());
     assertEquals(2, warnings.size(), warnings::toString);
   }
 
   @Test
-  @DisplayName("里程按此刻是人工还是 ATO 分开记；ATO 下每停一站记一次")
+  @DisplayName("里程按此刻是人工还是 ATO 分开记；ATO 停站在放行发车时记一站，反复询问只算一站")
   void linkTracksDistanceAndAtoStops() {
     double[] odometer = {0.0};
     long[] clock = {0L};
@@ -109,12 +116,91 @@ class DriveRewardsTest {
     assertEquals(50.0, link.score().atoBlocks(), 1e-9);
 
     link.enterAto();
-    link.holdDeparture(400L);
+    assertTrue(link.holdDeparture(400L), "等驾驶员确认");
     clock[0] = 20L;
-    link.holdDeparture(400L);
-    assertEquals(1, link.score().atoStops(), "同一站反复询问只算一站");
-    clock[0] = 2000L;
-    link.holdDeparture(400L);
-    assertEquals(2, link.score().atoStops());
+    assertTrue(link.holdDeparture(400L));
+    assertEquals(0, link.score().atoStops(), "还没放行");
+    assertTrue(link.confirmDeparture());
+    assertFalse(link.holdDeparture(400L));
+    assertEquals(1, link.score().atoStops());
+  }
+
+  /** ATO 下这一站超时未确认：站台每秒问一次，等满时限后自动放行。 */
+  private static void timeoutStop(DriverLink link, long[] clock, long at) {
+    for (long t = at; t < at + 400L; t += 20L) {
+      clock[0] = t;
+      assertTrue(link.holdDeparture(400L));
+    }
+    clock[0] = at + 400L;
+    assertFalse(link.holdDeparture(400L));
+  }
+
+  /** ATO 下这一站驾驶员确认发车后放行。 */
+  private static void confirmedStop(DriverLink link, long[] clock, long at) {
+    clock[0] = at;
+    assertTrue(link.holdDeparture(400L));
+    assertTrue(link.confirmDeparture());
+    clock[0] = at + 10L;
+    assertFalse(link.holdDeparture(400L));
+  }
+
+  @Test
+  @DisplayName("ATO 连续 3 站超时未确认判定离开：第一次超时以来的里程与停站作废，确认一次发车恢复；不到 3 站就确认的照计")
+  void awayAfterThreeTimeouts() {
+    double[] odometer = {0.0};
+    long[] clock = {0L};
+    DriverLink link =
+        new DriverLink(UUID.randomUUID(), "T-1", null, () -> odometer[0], () -> clock[0]);
+    link.setAwayAfterTimeouts(3);
+    link.enterAto();
+    link.trackDistance(true);
+
+    timeoutStop(link, clock, 0L);
+    odometer[0] = 100.0;
+    link.trackDistance(true);
+    timeoutStop(link, clock, 1000L);
+    odometer[0] = 200.0;
+    link.trackDistance(true);
+    assertEquals(0, link.score().atoStops(), "超时后先挂起");
+    confirmedStop(link, clock, 2000L);
+    assertEquals(3, link.score().atoStops(), "两站超时后确认：挂起的照计");
+    assertEquals(200.0, link.score().atoBlocks(), 1e-9);
+    assertFalse(link.away());
+
+    for (long at : new long[] {3000L, 4000L, 5000L}) {
+      odometer[0] += 100.0;
+      link.trackDistance(true);
+      timeoutStop(link, clock, at);
+    }
+    assertTrue(link.away());
+    assertEquals(java.util.Optional.of(true), link.takeAwayNotice());
+    odometer[0] += 500.0;
+    link.trackDistance(true);
+    assertEquals(3, link.score().atoStops(), "判定离开：这几站作废");
+    assertEquals(300.0, link.score().atoBlocks(), 1e-9, "确认后到下一站的里程照计，第一次超时以来的作废");
+
+    confirmedStop(link, clock, 6000L);
+    assertFalse(link.away());
+    assertEquals(java.util.Optional.of(false), link.takeAwayNotice());
+    assertEquals(4, link.score().atoStops(), "确认后恢复计");
+  }
+
+  @Test
+  @DisplayName("超时不到 3 站就结算：挂起的照计入本趟；判定离开时作废")
+  void pendingIsSettledWithTheTrip() {
+    double[] odometer = {0.0};
+    long[] clock = {0L};
+    DriverLink link =
+        new DriverLink(UUID.randomUUID(), "T-1", null, () -> odometer[0], () -> clock[0]);
+    link.setAwayAfterTimeouts(3);
+    link.enterAto();
+    link.trackDistance(true);
+    timeoutStop(link, clock, 0L);
+    odometer[0] = 50.0;
+    link.trackDistance(true);
+
+    TaskScore settled = link.settleTrip();
+    assertEquals(1, settled.atoStops());
+    assertEquals(50.0, settled.atoBlocks(), 1e-9);
   }
 }

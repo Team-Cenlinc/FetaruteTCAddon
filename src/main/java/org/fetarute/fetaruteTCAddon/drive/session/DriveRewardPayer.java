@@ -23,7 +23,7 @@ final class DriveRewardPayer {
    * 实际发出去的奖励。
    *
    * @param experience 发出的经验；玩家不在线时为 0
-   * @param money 发出的钱币，按经济插件的格式写好；没发钱币时为空
+   * @param money 发出的钱币数额（两位小数、去掉末尾的 0）；没发钱币时为空
    */
   record Paid(int experience, Optional<String> money) {
     boolean empty() {
@@ -52,9 +52,8 @@ final class DriveRewardPayer {
       UUID playerId, String playerName, double amount, String command) {
     if (Bukkit.getPluginManager().isPluginEnabled("Vault")) {
       try {
-        Optional<String> paid = VaultMoney.deposit(Bukkit.getOfflinePlayer(playerId), amount);
-        if (paid.isPresent()) {
-          return paid;
+        if (VaultMoney.deposit(Bukkit.getOfflinePlayer(playerId), amount)) {
+          return Optional.of(DriveRewards.formatAmount(amount));
         }
       } catch (RuntimeException | LinkageError ex) {
         warn.accept("经 Vault 发驾驶奖励失败，改用配置的命令: " + ex);

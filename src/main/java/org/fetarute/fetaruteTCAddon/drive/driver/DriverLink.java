@@ -58,6 +58,21 @@ public final class DriverLink {
   /** 上次记里程时的里程表读数；还没记过时为 {@code NaN}。 */
   private double distanceOdometer = Double.NaN;
 
+  /** ATO 下连续多少站超时未确认发车就判定驾驶员不在；0 表示不判定。 */
+  private int awayAfterTimeouts;
+
+  /** ATO 下连续超时未确认发车的站数，确认一次即清零。 */
+  private int confirmTimeouts;
+
+  /** 第一次超时以后挂起的里程与停站：确认发车或结算时照计，判定不在时作废。 */
+  private double pendingManualBlocks;
+
+  private double pendingAtoBlocks;
+  private int pendingAtoStops;
+
+  /** 刚判定不在 / 刚恢复，等驾驶会话提示一次。 */
+  private Boolean awayNotice;
+
   /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
   private DriverStationStop settledStop;
 
@@ -152,6 +167,7 @@ public final class DriverLink {
   /** 转为人工驾驶：ATO 期间调度层不向驾驶员下发行车许可，旧许可的距离与包络早已过时，清掉后由下一条指令重新开始 （没有指令时防护按限制速度、停着不许起步）。 */
   public void enterManual() {
     mode = DrivingMode.MANUAL;
+    markPresent();
     cabHold = false;
     directive = null;
     lastDecision = null;
@@ -482,8 +498,18 @@ public final class DriverLink {
     vigilanceTrips++;
   }
 
+  /** 一趟结束：还没判定不在的挂起部分照计，已判定不在的作废。 */
+  private void settlePending() {
+    if (away()) {
+      clearPending();
+    } else {
+      creditPending();
+    }
+  }
+
   /** 把介入与确认的计数写进成绩明细。 */
   public TaskScore finalizeScore() {
+    settlePending();
     stationStop();
     if (stationStop != null && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
       // 停在站内就结束驾驶（到终点站、到交班站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
@@ -511,6 +537,7 @@ public final class DriverLink {
    * @return 本趟的成绩明细
    */
   public TaskScore settleTrip() {
+    settlePending();
     stationStop();
     if (stationStop != null
         && stationStop != settledStop
@@ -624,7 +651,17 @@ public final class DriverLink {
   public void trackDistance(boolean ato) {
     double now = odometer.getAsDouble();
     if (!Double.isNaN(distanceOdometer)) {
-      score.addDistance(now - distanceOdometer, ato);
+      double delta = Math.max(0.0, now - distanceOdometer);
+      // 判定不在时不计；第一次超时以后先挂起。
+      if (!away() && confirmTimeouts > 0) {
+        if (ato) {
+          pendingAtoBlocks += delta;
+        } else {
+          pendingManualBlocks += delta;
+        }
+      } else if (!away()) {
+        score.addDistance(delta, ato);
+      }
     }
     distanceOdometer = now;
   }
@@ -644,7 +681,6 @@ public final class DriverLink {
     long now = clock.getAsLong();
     if (departureHoldQueriedAt < 0L || now - departureHoldQueriedAt > DEPARTURE_QUERY_GAP_TICKS) {
       departureHoldSince = now;
-      score.addAtoStop();
       // 停站结束前已提前确认（之后列车没动过）：站台一问就放行，驾驶员的反应时间不算进停站。
       departureConfirmed = stillAt(preConfirmOdometer);
       preConfirmOdometer = Double.NaN;
@@ -652,14 +688,71 @@ public final class DriverLink {
     departureHoldQueriedAt = now;
     if (departureConfirmed) {
       releaseDeparture();
+      markPresent();
+      score.addAtoStop();
       return false;
     }
     if (now - departureHoldSince >= timeoutTicks) {
       releaseDeparture();
       lateDepartures++;
+      confirmTimeouts++;
+      if (away()) {
+        if (confirmTimeouts == awayAfterTimeouts) {
+          // 刚判定不在：第一次超时以来挂起的里程与停站作废。
+          clearPending();
+          awayNotice = Boolean.TRUE;
+        }
+      } else {
+        pendingAtoStops++;
+      }
       return false;
     }
     return true;
+  }
+
+  /**
+   * ATO 下连续多少站超时未确认发车就判定驾驶员不在：之后（含第一次超时以来）的里程与停站不计奖励，直到再确认一次发车。
+   *
+   * @param timeouts 站数；0 表示不判定
+   */
+  public void setAwayAfterTimeouts(int timeouts) {
+    this.awayAfterTimeouts = Math.max(0, timeouts);
+  }
+
+  /** 已判定驾驶员不在：ATO 下连续超时未确认发车达到设定站数。 */
+  public boolean away() {
+    return awayAfterTimeouts > 0 && confirmTimeouts >= awayAfterTimeouts;
+  }
+
+  /** 刚判定不在（true）或刚恢复（false）时取一次，取走后清空；没有变化时为空。 */
+  public Optional<Boolean> takeAwayNotice() {
+    Optional<Boolean> notice = Optional.ofNullable(awayNotice);
+    awayNotice = null;
+    return notice;
+  }
+
+  /** 驾驶员在：确认了发车或转人工驾驶。挂起的里程与停站照计；之前判定过不在的，提示恢复。 */
+  private void markPresent() {
+    if (away()) {
+      awayNotice = Boolean.FALSE;
+    }
+    confirmTimeouts = 0;
+    creditPending();
+  }
+
+  private void creditPending() {
+    score.addDistance(pendingManualBlocks, false);
+    score.addDistance(pendingAtoBlocks, true);
+    for (int i = 0; i < pendingAtoStops; i++) {
+      score.addAtoStop();
+    }
+    clearPending();
+  }
+
+  private void clearPending() {
+    pendingManualBlocks = 0.0;
+    pendingAtoBlocks = 0.0;
+    pendingAtoStops = 0;
   }
 
   private void releaseDeparture() {

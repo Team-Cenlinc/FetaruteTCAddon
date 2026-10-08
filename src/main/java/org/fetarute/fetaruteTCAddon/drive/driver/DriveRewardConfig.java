@@ -20,6 +20,8 @@ import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
  * @param atoMultiplier ATO 运行的那段（里程与停站）按这个比例发
  * @param gradeMultipliers 按评级乘的系数；没写的评级按 1
  * @param moneyCommand 没有 Vault 时发钱币的控制台命令（{@code {player}} 玩家名、{@code {amount}} 数额）；为空时不发钱币
+ * @param currencyName 钱币的名称，用在提示里（不传给经济插件）
+ * @param awayAfterTimeouts ATO 下连续多少站超时未确认发车就判定驾驶员不在，不在的那段不计奖励；0 表示不判定
  */
 public record DriveRewardConfig(
     boolean enabled,
@@ -29,7 +31,9 @@ public record DriveRewardConfig(
     double moneyPerStop,
     double atoMultiplier,
     Map<ScoreRules.Grade, Double> gradeMultipliers,
-    String moneyCommand) {
+    String moneyCommand,
+    String currencyName,
+    int awayAfterTimeouts) {
 
   public DriveRewardConfig {
     experiencePerKm = Math.max(0.0, experiencePerKm);
@@ -39,7 +43,13 @@ public record DriveRewardConfig(
     atoMultiplier = Math.max(0.0, atoMultiplier);
     gradeMultipliers = gradeMultipliers == null ? Map.of() : Map.copyOf(gradeMultipliers);
     moneyCommand = moneyCommand == null ? "" : moneyCommand.trim();
+    currencyName =
+        currencyName == null || currencyName.isBlank() ? DEFAULT_CURRENCY : currencyName.trim();
+    awayAfterTimeouts = Math.max(0, awayAfterTimeouts);
   }
+
+  /** 默认的钱币名称。 */
+  static final String DEFAULT_CURRENCY = "FRD";
 
   /** 内置默认值。 */
   public static DriveRewardConfig defaults() {
@@ -50,7 +60,7 @@ public record DriveRewardConfig(
     grades.put(ScoreRules.Grade.C, 0.8);
     grades.put(ScoreRules.Grade.D, 0.5);
     return new DriveRewardConfig(
-        true, 10.0, 2.0, 20.0, 5.0, 0.5, grades, "eco give {player} {amount}");
+        true, 10.0, 2.0, 20.0, 5.0, 0.5, grades, "eco give {player} {amount}", DEFAULT_CURRENCY, 3);
   }
 
   /** 这个评级乘的系数；没写的按 1。 */
@@ -97,7 +107,9 @@ public record DriveRewardConfig(
         nonNegative(section, "money-per-stop", d.moneyPerStop, sink),
         nonNegative(section, "ato-multiplier", d.atoMultiplier, sink),
         grades,
-        section.getString("money-command", d.moneyCommand));
+        section.getString("money-command", d.moneyCommand),
+        section.getString("currency-name", d.currencyName),
+        (int) Math.round(nonNegative(section, "away-after-timeouts", d.awayAfterTimeouts, sink)));
   }
 
   private static double nonNegative(

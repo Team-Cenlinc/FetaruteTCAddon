@@ -2262,9 +2262,11 @@ drive:
     result: "<prefix> <white>车次 <aqua><trip></aqua> <state></white> <gray>|</gray> 得分 <yellow><points></yellow> <gray>评级</gray> <gold><bold><grade></bold></gold>"
     result-subtitle: "<white>车次 <aqua><trip></aqua> <state> · <yellow><points></yellow> 分</white>"
     reward:
-      both: "<prefix> <white>本趟奖励：经验</white> <green>+<experience></green> <gray>·</gray> <white>钱币</white> <gold>+<money></gold>"
+      both: "<prefix> <white>本趟奖励：经验</white> <green>+<experience></green> <gray>·</gray> <white><currency></white> <gold>+<money></gold>"
       experience: "<prefix> <white>本趟奖励：经验</white> <green>+<experience></green>"
-      money: "<prefix> <white>本趟奖励：钱币</white> <gold>+<money></gold>"
+      money: "<prefix> <white>本趟奖励：<currency></white> <gold>+<money></gold>"
+      away: "<prefix> <yellow>已连续 <count> 站未确认发车，判定为离开：此后的里程与停站不计奖励，确认一次发车即恢复</yellow>"
+      back: "<prefix> <green>已确认发车，恢复计算奖励</green>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
