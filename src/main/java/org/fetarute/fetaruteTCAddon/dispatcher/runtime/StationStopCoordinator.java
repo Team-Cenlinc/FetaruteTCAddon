@@ -222,6 +222,19 @@ public final class StationStopCoordinator {
     return false;
   }
 
+  /**
+   * 登记一次车库扣车：手动提前出车的车在车库等到计划发车时刻。健康检查据此把它当成按表扣车（{@link #holdingForSchedule}），到点自动失效。
+   *
+   * @param trainName 列车名
+   * @param until 计划发车时刻
+   */
+  public void holdAtDepotUntil(String trainName, Instant until) {
+    String key = holdKey(trainName);
+    if (key != null && until != null) {
+      scheduledHolds.put(key, until);
+    }
+  }
+
   /** 扣留判定本体：要扣就返回扣到几点。 */
   private Optional<Instant> scheduledHoldTarget(
       String trainName,

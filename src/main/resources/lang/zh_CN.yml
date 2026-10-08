@@ -1223,6 +1223,10 @@ command:
   depot:
     spawn:
       coordinated-only: "<prefix> <red>手动出车已停用：出车由调度统一管理</red> <gray>请通过发车计划或发车队列出车</gray>"
+      early-issued: "<prefix> <dark_aqua>已提前出车</dark_aqua> <white><trip></white> <gray>：计划 <white><time></white> 自车库 <white><node></white> 发车，列车出库后在车库等候至计划时刻</gray>"
+      early-none: "<prefix> <yellow>未来 <white><minutes></white> 分钟内没有线路 <white><route></white> 自车库 <white><node></white> 开出且尚未出车的车次</yellow>"
+      early-no-service: "<prefix> <red>线路 <white><route></white> 未设为可发车服务，无法出车</red>"
+      early-pattern-ignored: "<prefix> <gray>按时刻表运行的线路按交路车型出车，已忽略 --pattern</gray>"
       not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"
       consist-not-in-plan: "<prefix> <yellow>编组</yellow> <white><pattern></white> <yellow>不在运行图绑定的编组方案</yellow> <white><plan></white> <yellow>中：照常出车，但折返复用不会让它接这条运行图</yellow>"
       not-depot: "<prefix> <red>节点不是车库</red> <gray>(node=<white><node></white>)</gray>"

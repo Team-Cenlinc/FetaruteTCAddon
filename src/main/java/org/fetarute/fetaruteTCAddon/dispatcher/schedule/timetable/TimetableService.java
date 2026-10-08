@@ -1403,6 +1403,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    *
    * <p>运营票带着车次；回库票对应交路的带客回库班。折返复用的车在起点不经过门控，不在这里绑就要到第一个中途站才按时间匹配上， 首段没有车次，站牌与车内都拿不到晚点。出库走行不是车次，不绑。
    *
+   * <p>手动提前出的车在计划时刻之前就派出、在车库等到点才走：绑定时的偏差按计划时刻算（不记成提前）。
+   *
    * @param trainName 派出的列车（折返改名后的新名字）
    * @param intent 票据的交路意图
    * @param trip 运营票的车次；回库票为空
@@ -1419,6 +1421,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
         trip.isPresent()
             ? trip
             : intent.kind() == RouteOperationType.RETURN ? returnTripOf(intent.key()) : trip;
+    Instant now = clock.get();
     due.ifPresent(
         dispatched ->
             matcher
@@ -1428,7 +1431,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
                     dispatched.timetable(),
                     dispatched.trip(),
                     dispatched.serviceDate(),
-                    clock.get())
+                    now.isBefore(dispatched.departure()) ? dispatched.departure() : now)
                 .ifPresent(
                     assignment -> {
                       cancellations.revoke(

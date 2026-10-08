@@ -3771,6 +3771,124 @@ class SimpleTicketAssignerLayoverTest {
     }
   }
 
+  /** 手动提前出车：出库后在第一拍信号之前挂上门控，停在车库等计划时刻；门控快到兜底失效时重挂，到点放行并刷新信号。 */
+  @Test
+  void earlySpawnWaitsAtTheDepotUntilItsPlannedDeparture() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId nextNode = NodeId.of("B");
+    Instant spawnedAt = Instant.parse("2026-07-31T00:00:00Z");
+    SpawnTicket planned = buildTicket(routeId);
+    SpawnTicket ticket =
+        new SpawnTicket(
+            planned.id(),
+            planned.service(),
+            spawnedAt.plusSeconds(300),
+            spawnedAt,
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of("TIMETABLE-TT1-R1-001-2026-07-31"),
+            TripSource.MANUAL,
+            0);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), eq(spawnedAt))).thenReturn(List.of(ticket));
+    when(spawnManager.pollDueTickets(
+            eq(provider),
+            org.mockito.ArgumentMatchers.argThat(at -> at != null && at.isAfter(spawnedAt))))
+        .thenReturn(List.of());
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(depotNode, nextNode), spawnedAt)));
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    org.mockito.stubbing.Answer<OccupancyDecision> allow =
+        invocation -> {
+          OccupancyRequest request = invocation.getArgument(0);
+          return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+        };
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class))).thenAnswer(allow);
+    when(occupancyManager.canEnter(any(OccupancyRequest.class))).thenAnswer(allow);
+    when(occupancyManager.acquire(any(OccupancyRequest.class))).thenAnswer(allow);
+
+    MutableTrainTags trainTags = new MutableTrainTags();
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isValid()).thenReturn(true);
+    when(train.properties()).thenReturn(trainTags.properties());
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), eq(ticket), anyString(), eq(spawnedAt)))
+        .thenReturn(Optional.of(new DepotSpawner.MaterializedSpawn(train, () -> {})));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(
+                Map.of(
+                    routeId,
+                    new RouteDefinition(
+                        RouteId.of("OP:L1:R1"), List.of(depotNode, nextNode), Optional.empty()))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            registryWithDepot(worldId, depotNode),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, spawnedAt);
+
+    org.mockito.ArgumentCaptor<String> name = org.mockito.ArgumentCaptor.forClass(String.class);
+    InOrder order = inOrder(runtimeDispatchService);
+    order
+        .verify(runtimeDispatchService)
+        .acquireDepartureGate(
+            name.capture(), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    order.verify(runtimeDispatchService).refreshSignal(train);
+    String trainName = name.getValue();
+    when(runtimeDispatchService.hasDepartureGate(trainName)).thenReturn(true);
+
+    assigner.tick(provider, spawnedAt.plusSeconds(30));
+    verify(runtimeDispatchService, times(1))
+        .acquireDepartureGate(
+            eq(trainName), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    assigner.tick(provider, spawnedAt.plusSeconds(61));
+    verify(runtimeDispatchService, times(2))
+        .acquireDepartureGate(
+            eq(trainName), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    verify(runtimeDispatchService, never()).releaseDepartureGate(anyString(), anyString());
+
+    when(runtimeDispatchService.releaseDepartureGate(
+            trainName, SimpleTicketAssigner.EARLY_SPAWN_GATE))
+        .thenReturn(true);
+    int refreshesBefore =
+        org.mockito.Mockito.mockingDetails(runtimeDispatchService).getInvocations().stream()
+            .filter(invocation -> invocation.getMethod().getName().equals("refreshSignal"))
+            .mapToInt(invocation -> 1)
+            .sum();
+    assigner.tick(provider, spawnedAt.plusSeconds(300));
+    verify(runtimeDispatchService)
+        .releaseDepartureGate(trainName, SimpleTicketAssigner.EARLY_SPAWN_GATE);
+    verify(runtimeDispatchService, times(refreshesBefore + 1)).refreshSignal(train);
+
+    assigner.tick(provider, spawnedAt.plusSeconds(400));
+    verify(runtimeDispatchService, times(1))
+        .releaseDepartureGate(trainName, SimpleTicketAssigner.EARLY_SPAWN_GATE);
+  }
+
   @Test
   void depotSpawnRegistersExpectedPhysicalGroupAfterAcquireBeforeSignalRefresh() {
     RuntimeDispatchService runtimeDispatchService = mock(RuntimeDispatchService.class);

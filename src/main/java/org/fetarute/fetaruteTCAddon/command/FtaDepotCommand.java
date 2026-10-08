@@ -141,13 +141,6 @@ public final class FtaDepotCommand {
                 ctx -> {
                   CommandSender sender = ctx.sender();
                   LocaleManager locale = plugin.getLocaleManager();
-                  if (plugin
-                      .getRuntimeDispatchService()
-                      .map(service -> service.requiresCoordinatedMaterializedSpawn())
-                      .orElse(false)) {
-                    sender.sendMessage(locale.component("command.depot.spawn.coordinated-only"));
-                    return;
-                  }
                   Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerOpt =
                       readyProvider(sender);
                   if (providerOpt.isEmpty()) {
@@ -182,6 +175,22 @@ public final class FtaDepotCommand {
                     sender.sendMessage(
                         locale.component(
                             "command.depot.spawn.not-depot", Map.of("node", depotId.value())));
+                    return;
+                  }
+                  // 有表线路：提前出这条线路从该车库开出的下一班，出车后在车库等到计划时刻再走。
+                  if (spawnTimetabledEarly(
+                      sender,
+                      locale,
+                      resolved,
+                      depotId,
+                      ctx.flags().getValue(patternFlag, null) != null)) {
+                    return;
+                  }
+                  if (plugin
+                      .getRuntimeDispatchService()
+                      .map(service -> service.requiresCoordinatedMaterializedSpawn())
+                      .orElse(false)) {
+                    sender.sendMessage(locale.component("command.depot.spawn.coordinated-only"));
                     return;
                   }
 
@@ -1300,4 +1309,87 @@ public final class FtaDepotCommand {
   }
 
   private record ResolvedRoute(Company company, Operator operator, Line line, Route route) {}
+
+  /** 有表线路提前出车往后找多远。 */
+  private static final Duration EARLY_SPAWN_HORIZON = Duration.ofMinutes(60);
+
+  private static final java.time.format.DateTimeFormatter EARLY_SPAWN_CLOCK =
+      java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+          .withZone(java.time.ZoneId.systemDefault());
+
+  /**
+   * 有表线路的手动出车：提前出这条线路从该车库开出的下一班，车型按交路，出车后在车库等到计划时刻再走。
+   *
+   * @return 线路归时刻表发车、已经回复过时为 true；否则交给原来的手动出车
+   */
+  private boolean spawnTimetabledEarly(
+      CommandSender sender,
+      LocaleManager locale,
+      ResolvedRoute resolved,
+      NodeId depotId,
+      boolean patternGiven) {
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager>
+        timetabled =
+            plugin
+                .getSpawnManager()
+                .filter(
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .schedule
+                            .spawn
+                            .TimetableSpawnManager
+                            .class
+                        ::isInstance)
+                .map(
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .schedule
+                            .spawn
+                            .TimetableSpawnManager
+                            .class
+                        ::cast);
+    if (timetabled.isEmpty()) {
+      return false;
+    }
+    var result =
+        timetabled
+            .get()
+            .issueEarly(resolved.route().id(), depotId.value(), Instant.now(), EARLY_SPAWN_HORIZON);
+    switch (result.outcome()) {
+      case NOT_TIMETABLED -> {
+        return false;
+      }
+      case NO_SERVICE -> sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.early-no-service", Map.of("route", resolved.route().code())));
+      case NONE_UPCOMING -> sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.early-none",
+              Map.of(
+                  "route",
+                  resolved.route().code(),
+                  "node",
+                  depotId.value(),
+                  "minutes",
+                  String.valueOf(EARLY_SPAWN_HORIZON.toMinutes()))));
+      case ISSUED -> {
+        if (patternGiven) {
+          sender.sendMessage(locale.component("command.depot.spawn.early-pattern-ignored"));
+        }
+        sender.sendMessage(
+            locale.component(
+                "command.depot.spawn.early-issued",
+                Map.of(
+                    "trip",
+                    result.tripCode(),
+                    "node",
+                    depotId.value(),
+                    "time",
+                    result.plannedDeparture().map(EARLY_SPAWN_CLOCK::format).orElse("-"))));
+      }
+    }
+    return true;
+  }
 }

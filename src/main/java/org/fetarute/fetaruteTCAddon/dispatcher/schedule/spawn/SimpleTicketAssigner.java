@@ -40,11 +40,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -140,6 +142,31 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   /** 等驾驶员接车时挂的发车门控会话号：驾驶员上车或等到时限后按它放行。 */
   public static final String DRIVER_PICKUP_GATE = "driver-pickup";
+
+  /** 手动提前出车的车在车库等计划时刻时挂的发车门控会话号。 */
+  public static final String EARLY_SPAWN_GATE = "early-spawn";
+
+  /** 发车门控 180 秒兜底失效：提前出车扣得更久时，隔这么久重挂一次。 */
+  private static final Duration EARLY_SPAWN_GATE_REARM = Duration.ofSeconds(60);
+
+  /**
+   * 手动提前出车、在车库等计划时刻的车。
+   *
+   * @param train 列车
+   * @param trainName 车名
+   * @param releaseAt 计划发车时刻，到点放行
+   * @param ours 门控是不是本类挂的（驾驶员接车的门控由驾驶侧放）
+   * @param armedAt 本类最近一次挂门控的时刻
+   */
+  private record EarlySpawnHold(
+      RuntimeTrainHandle train,
+      String trainName,
+      Instant releaseAt,
+      boolean ours,
+      Instant armedAt) {}
+
+  /** 只在服务器主线程读写。 */
+  private final Map<String, EarlySpawnHold> earlySpawnHolds = new LinkedHashMap<>();
 
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
@@ -725,6 +752,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
     advancePendingMaterializedSpawns(now);
+    advanceEarlySpawnHolds(now);
     Map<String, Integer> selectedDepotsThisTick = new HashMap<>();
     if (!pendingLayoverTickets.isEmpty()) {
       refreshExpiredPendingTickets(provider, now, selectedDepotsThisTick);
@@ -2679,6 +2707,79 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
   }
 
+  /**
+   * 手动提前出的车（{@link TripSource#MANUAL}，计划时刻还没到）：第一拍信号之前挂上发车门控，停在车库股道上等到计划时刻。 驾驶员接车已经扣着时不覆盖，接车放开后由
+   * {@link #advanceEarlySpawnHolds} 接着扣。
+   */
+  private void holdEarlySpawnUntilDue(
+      SpawnTicket ticket, String trainName, RuntimeTrainHandle train, Instant now) {
+    if (ticket.source() != TripSource.MANUAL || !ticket.dueAt().isAfter(now)) {
+      return;
+    }
+    boolean ours = !runtimeDispatchService.hasDepartureGate(trainName);
+    if (ours) {
+      runtimeDispatchService.acquireDepartureGate(trainName, EARLY_SPAWN_GATE, "early_spawn");
+    }
+    earlySpawnHolds.put(trainName, new EarlySpawnHold(train, trainName, ticket.dueAt(), ours, now));
+    markScheduledDepotHold(trainName, ticket.dueAt());
+    debugLogger.accept(
+        "提前出车在车库等计划时刻: train="
+            + trainName
+            + " plannedDeparture="
+            + ticket.dueAt()
+            + " ticket="
+            + ticket.id());
+  }
+
+  /** 健康检查把它当成按表扣车：静止、进度不变是计划内的，不派恢复动作；到点自动失效。 */
+  private void markScheduledDepotHold(String trainName, Instant until) {
+    StationStopCoordinator stationStops = runtimeDispatchService.stationStops();
+    if (stationStops != null) {
+      stationStops.holdAtDepotUntil(trainName, until);
+    }
+  }
+
+  /** 提前出车的车：到计划时刻放行；没到点时保持门控（接车放开了就重新扣上，门控快到兜底失效时重挂）。车没了或已经开走就不再管。 */
+  private void advanceEarlySpawnHolds(Instant now) {
+    if (earlySpawnHolds.isEmpty()) {
+      return;
+    }
+    java.util.Iterator<EarlySpawnHold> holds = earlySpawnHolds.values().iterator();
+    List<EarlySpawnHold> rearmed = new ArrayList<>();
+    while (holds.hasNext()) {
+      EarlySpawnHold hold = holds.next();
+      RuntimeTrainHandle train = hold.train();
+      if (train == null || !train.isValid() || train.isMoving()) {
+        holds.remove();
+        continue;
+      }
+      if (!now.isBefore(hold.releaseAt())) {
+        holds.remove();
+        if (hold.ours()
+            && runtimeDispatchService.releaseDepartureGate(hold.trainName(), EARLY_SPAWN_GATE)) {
+          runtimeDispatchService.refreshSignal(train);
+          debugLogger.accept("提前出车到点放行: train=" + hold.trainName());
+        }
+        continue;
+      }
+      boolean gated = runtimeDispatchService.hasDepartureGate(hold.trainName());
+      boolean rearm =
+          !gated
+              || (hold.ours()
+                  && Duration.between(hold.armedAt(), now).compareTo(EARLY_SPAWN_GATE_REARM) >= 0);
+      if (rearm) {
+        runtimeDispatchService.acquireDepartureGate(
+            hold.trainName(), EARLY_SPAWN_GATE, "early_spawn");
+        markScheduledDepotHold(hold.trainName(), hold.releaseAt());
+        holds.remove();
+        rearmed.add(new EarlySpawnHold(train, hold.trainName(), hold.releaseAt(), true, now));
+      }
+    }
+    for (EarlySpawnHold hold : rearmed) {
+      earlySpawnHolds.put(hold.trainName(), hold);
+    }
+  }
+
   private void notifyDispatched(SpawnTicket ticket, String trainName) {
     if (ticket == null || trainName == null) {
       return;
@@ -3515,6 +3616,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
       holdDepotSpawnIfRequested(context.ticket(), context.trainName());
+      holdEarlySpawnUntilDue(context.ticket(), context.trainName(), train, context.now());
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,

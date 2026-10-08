@@ -347,6 +347,188 @@ public final class TimetableSpawnManager
             + trainName);
   }
 
+  /** 手动提前出车的结果类别。 */
+  public enum EarlySpawnOutcome {
+    /** 已出票：车照常经发车侧出库，在车库等到计划时刻再走。 */
+    ISSUED,
+    /** 这条线路不归时刻表发车。 */
+    NOT_TIMETABLED,
+    /** 这条线路没有设成可发车服务，出不了票。 */
+    NO_SERVICE,
+    /** 时限内没有从这个车库按这条线路开出、还没出票的班次。 */
+    NONE_UPCOMING
+  }
+
+  /**
+   * 手动提前出车的结果。
+   *
+   * @param outcome 结果类别
+   * @param tripCode 要开的车次（出库走行为它要去接的那一班，查不到时为交路号）；没出票时为空串
+   * @param plannedDeparture 计划从车库发车的时刻；没出票时为空
+   */
+  public record EarlySpawn(
+      EarlySpawnOutcome outcome, String tripCode, Optional<Instant> plannedDeparture) {
+    private static EarlySpawn of(EarlySpawnOutcome outcome) {
+      return new EarlySpawn(outcome, "", Optional.empty());
+    }
+  }
+
+  /**
+   * 手动提前出车：这条线路从这个车库开出的下一班（交路的出库走行，或首站就是车库的车次）现在就出票，计划时刻不变。
+   *
+   * <p>票照常经发车侧实体化（闭塞、车队上限、启动恢复照查），出车后在车库扣到计划时刻再走（见 {@link
+   * SimpleTicketAssigner}）。已出票、交路已有车在跑、整趟取消的班次跳过；这一班到点时不再出第二张票。
+   *
+   * @param routeId 线路：出库走行线路、首班的载客线路，或首站就是车库的线路
+   * @param depotNodeId 出库的车库节点
+   * @param now 当前时刻
+   * @param horizon 往后找多远
+   */
+  public EarlySpawn issueEarly(UUID routeId, String depotNodeId, Instant now, Duration horizon) {
+    if (timetableService == null
+        || routeId == null
+        || depotNodeId == null
+        || now == null
+        || horizon == null
+        || !managedRoutes().contains(routeId)) {
+      return EarlySpawn.of(EarlySpawnOutcome.NOT_TIMETABLED);
+    }
+    Instant to = now.plus(horizon);
+    TimetableService.DueLeg nextLeg = null;
+    for (TimetableService.DueLeg leg : timetableService.legsBetween(now, to)) {
+      String plannedDepot = leg.duty().startDepotNodeId();
+      if (leg.kind() == RouteOperationType.CREATE
+          && (routeId.equals(leg.routeId()) || routeId.equals(firstTripRouteOf(leg)))
+          && (plannedDepot.isEmpty() || sameDepot(plannedDepot, depotNodeId))
+          && !alreadyIssued(legIntent(leg))
+          && (nextLeg == null || leg.departure().isBefore(nextLeg.departure()))) {
+        nextLeg = leg;
+      }
+    }
+    TimetableService.DueTrip nextTrip = null;
+    for (TimetableService.DueTrip trip : timetableService.tripsBetween(now, to)) {
+      boolean fromThisDepot =
+          depotStartOf(trip).filter(depot -> sameDepot(depot, depotNodeId)).isPresent();
+      if (fromThisDepot
+          && routeId.equals(trip.trip().routeId())
+          && !cancelledFromOrigin(trip)
+          && intentOf(trip).filter(this::alreadyIssued).isEmpty()
+          && (nextTrip == null || trip.departure().isBefore(nextTrip.departure()))) {
+        nextTrip = trip;
+      }
+    }
+    if (nextLeg != null
+        && (nextTrip == null || !nextTrip.departure().isBefore(nextLeg.departure()))) {
+      TicketIntent intent = legIntent(nextLeg);
+      String tripCode =
+          timetableService
+              .tripOfIntent(intent)
+              .map(due -> due.trip().tripCode())
+              .orElse(nextLeg.duty().dutyCode());
+      return issueEarly(
+          buildLegTicket(nextLeg),
+          Optional.of(intent),
+          Optional.empty(),
+          depotNodeId,
+          tripCode,
+          now);
+    }
+    if (nextTrip != null) {
+      return issueEarly(
+          buildTicket(nextTrip),
+          intentOf(nextTrip),
+          Optional.of(nextTrip),
+          depotNodeId,
+          nextTrip.trip().tripCode(),
+          now);
+    }
+    return EarlySpawn.of(EarlySpawnOutcome.NONE_UPCOMING);
+  }
+
+  /** 出库走行要去接的那一班的线路：命令里写的是首班的载客线路时，同样认成这条出库走行。 */
+  private UUID firstTripRouteOf(TimetableService.DueLeg leg) {
+    return timetableService
+        .tripOfIntent(legIntent(leg))
+        .map(due -> due.trip().routeId())
+        .orElse(null);
+  }
+
+  /** 车次从车库始发（线路首站就是车库）时的车库节点；由终点站待命车接班、或经出库走行接车的车次为空。 */
+  private static Optional<String> depotStartOf(TimetableService.DueTrip trip) {
+    return trip.timetable()
+        .tripPlan(trip.trip())
+        .flatMap(
+            plan ->
+                plan.depotNodeId()
+                    .or(
+                        () ->
+                            isDepotNode(plan.originNodeId())
+                                ? Optional.of(plan.originNodeId())
+                                : Optional.empty()));
+  }
+
+  /** 节点写法“运营商:D:车库:股道”。 */
+  private static boolean isDepotNode(String nodeId) {
+    return nodeId != null && nodeId.toUpperCase(java.util.Locale.ROOT).contains(":D:");
+  }
+
+  /** 同一个车库：节点相同，或只是股道不同。 */
+  private static boolean sameDepot(String a, String b) {
+    if (a.equalsIgnoreCase(b)) {
+      return true;
+    }
+    int ai = a.lastIndexOf(':');
+    int bi = b.lastIndexOf(':');
+    return ai > 0 && bi > 0 && a.substring(0, ai).equalsIgnoreCase(b.substring(0, bi));
+  }
+
+  /** 已出过票（还在等车），或交路已经有车在跑。 */
+  private boolean alreadyIssued(TicketIntent intent) {
+    return hasPendingTicket(intent) || timetableService.runningVehicleFor(intent).isPresent();
+  }
+
+  /** 把正点会出的票改成现在就放：计划时刻不变，出库点定为指定的车库，来源记为手动。 */
+  private EarlySpawn issueEarly(
+      Optional<SpawnTicket> built,
+      Optional<TicketIntent> intent,
+      Optional<TimetableService.DueTrip> trip,
+      String depotNodeId,
+      String tripCode,
+      Instant now) {
+    if (built.isEmpty()) {
+      return EarlySpawn.of(EarlySpawnOutcome.NO_SERVICE);
+    }
+    SpawnTicket planned = built.get();
+    SpawnTicket early =
+        new SpawnTicket(
+                planned.id(),
+                withDepot(planned.service(), depotNodeId),
+                planned.dueAt(),
+                now,
+                0,
+                planned.sequenceNumber(),
+                Optional.of(depotNodeId),
+                Optional.empty(),
+                planned.serviceTripId(),
+                TripSource.MANUAL,
+                planned.priority())
+            .withConsist(planned.consist());
+    track(early, intent, trip);
+    retryQueue.add(early);
+    debugLogger.accept(
+        "TIMETABLE_SPAWN_EARLY trip="
+            + tripCode
+            + " route="
+            + planned.service().routeId()
+            + " depot="
+            + depotNodeId
+            + " plannedDeparture="
+            + planned.dueAt()
+            + " ticket="
+            + early.id());
+    return new EarlySpawn(EarlySpawnOutcome.ISSUED, tripCode, Optional.of(planned.dueAt()));
+  }
+
   @Override
   public SpawnPlan snapshotPlan() {
     return delegate.snapshotPlan();
@@ -554,6 +736,10 @@ public final class TimetableSpawnManager
     List<SpawnTicket> out = new ArrayList<>(due.size() + legs.size());
     // 走行票先入队：同一秒里出库票排在运营票前面，首班才接得上刚到站的车。
     for (TimetableService.DueLeg leg : legs) {
+      if (hasPendingTicket(legIntent(leg))) {
+        // 已经手动提前出过票（见 issueEarly）：同一班不出第二张。
+        continue;
+      }
       buildLegTicket(leg)
           .ifPresent(
               built -> {
@@ -573,6 +759,9 @@ public final class TimetableSpawnManager
               });
     }
     for (TimetableService.DueTrip trip : due) {
+      if (intentOf(trip).filter(this::hasPendingTicket).isPresent()) {
+        continue;
+      }
       buildTicket(trip)
           .ifPresent(
               built -> {
