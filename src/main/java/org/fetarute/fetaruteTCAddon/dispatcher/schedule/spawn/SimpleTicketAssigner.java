@@ -10,6 +10,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -32,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchPriorityPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LaunchAuthorizationService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverDispatchResult;
@@ -167,6 +169,44 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   /** 只在服务器主线程读写。 */
   private final Map<String, EarlySpawnHold> earlySpawnHolds = new LinkedHashMap<>();
+
+  /** 在车库等计划时刻的提前出车写在列车上的标签：{@code 放行时刻(epoch 秒)[;交路意图]}。门控与扣车记录只在内存里，重启或重载后按它重新扣住、 重新绑回交路。 */
+  static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
+
+  /** 重启后找回提前出车的扫描间隔。 */
+  private static final Duration EARLY_SPAWN_RESTORE_SCAN = Duration.ofSeconds(10);
+
+  /** 下一次扫描找回提前出车的时刻；为空时下一拍就扫。 */
+  private Instant nextEarlySpawnRestoreScan;
+
+  /** 提前出车与交路的绑定：出车时记下交路意图写进列车标签，重启后据此绑回交路。默认不记、不绑（不按表运行时没有交路）。 */
+  public interface EarlySpawnBinding {
+    /** 不记交路意图。 */
+    EarlySpawnBinding NONE =
+        new EarlySpawnBinding() {
+          @Override
+          public Optional<String> tokenOf(SpawnTicket ticket) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean restore(String trainName, String token) {
+            return false;
+          }
+        };
+
+    /** 这张提前出车的票的交路意图写法；没有时为空。 */
+    Optional<String> tokenOf(SpawnTicket ticket);
+
+    /** 重启后把车绑回交路；绑上时为 true。 */
+    boolean restore(String trainName, String token);
+  }
+
+  private volatile EarlySpawnBinding earlySpawnBinding = EarlySpawnBinding.NONE;
+
+  /** 当前所有已加载的列车，用于重启后找回在车库等候的提前出车。默认没有。 */
+  private volatile java.util.function.Supplier<? extends java.util.Collection<RuntimeTrainHandle>>
+      liveTrains = List::of;
 
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
@@ -752,6 +792,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
     advancePendingMaterializedSpawns(now);
+    scanEarlySpawnHolds(now);
     advanceEarlySpawnHolds(now);
     Map<String, Integer> selectedDepotsThisTick = new HashMap<>();
     if (!pendingLayoverTickets.isEmpty()) {
@@ -2689,6 +2730,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     this.depotSpawnHold = hold == null ? (ticket, trainName) -> false : hold;
   }
 
+  /** 注册提前出车与交路的绑定（见 {@link EarlySpawnBinding}）。传入 {@code null} 恢复"不记、不绑"。 */
+  public void setEarlySpawnBinding(EarlySpawnBinding binding) {
+    this.earlySpawnBinding = binding == null ? EarlySpawnBinding.NONE : binding;
+  }
+
+  /** 注册已加载列车的来源，用于重启后找回在车库等候的提前出车。传入 {@code null} 恢复"没有"。 */
+  public void setLiveTrainSource(
+      java.util.function.Supplier<? extends java.util.Collection<RuntimeTrainHandle>> source) {
+    this.liveTrains = source == null ? List::of : source;
+  }
+
   /** 驾驶员要从车库接车：先挂发车门控，第一拍信号就把车按在股道上。 */
   private void holdDepotSpawnIfRequested(SpawnTicket ticket, String trainName) {
     try {
@@ -2709,7 +2761,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   /**
    * 手动提前出的车（{@link TripSource#MANUAL}，计划时刻还没到）：第一拍信号之前挂上发车门控，停在车库股道上等到计划时刻。 驾驶员接车已经扣着时不覆盖，接车放开后由
-   * {@link #advanceEarlySpawnHolds} 接着扣。
+   * {@link #advanceEarlySpawnHolds} 接着扣。放行时刻与交路意图写进列车标签，重启后据此找回（{@link #restoreEarlySpawnHolds}）。
    */
   private void holdEarlySpawnUntilDue(
       SpawnTicket ticket, String trainName, RuntimeTrainHandle train, Instant now) {
@@ -2722,6 +2774,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     earlySpawnHolds.put(trainName, new EarlySpawnHold(train, trainName, ticket.dueAt(), ours, now));
     markScheduledDepotHold(trainName, ticket.dueAt());
+    Optional<String> token = Optional.empty();
+    try {
+      token = earlySpawnBinding.tokenOf(ticket);
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车交路意图读取异常: ticket=" + ticket.id() + " error=" + failure.getMessage());
+    }
+    writeEarlySpawnHoldTag(train, ticket.dueAt(), token);
     debugLogger.accept(
         "提前出车在车库等计划时刻: train="
             + trainName
@@ -2751,10 +2810,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       RuntimeTrainHandle train = hold.train();
       if (train == null || !train.isValid() || train.isMoving()) {
         holds.remove();
+        clearEarlySpawnHoldTag(train);
         continue;
       }
       if (!now.isBefore(hold.releaseAt())) {
         holds.remove();
+        clearEarlySpawnHoldTag(train);
         if (hold.ours()
             && runtimeDispatchService.releaseDepartureGate(hold.trainName(), EARLY_SPAWN_GATE)) {
           runtimeDispatchService.refreshSignal(train);
@@ -2777,6 +2838,132 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     for (EarlySpawnHold hold : rearmed) {
       earlySpawnHolds.put(hold.trainName(), hold);
+    }
+  }
+
+  /**
+   * 重启或重载后找回在车库等候的提前出车：门控、扣车记录、交路绑定都只在内存里，不找回的话车会提前开走，
+   * 这一班到点时还会再出一辆。按列车标签重新扣到放行时刻、重新绑回交路；放行时刻已过的只清掉标签，按普通在线列车处理。
+   */
+  private void scanEarlySpawnHolds(Instant now) {
+    if (nextEarlySpawnRestoreScan != null && now.isBefore(nextEarlySpawnRestoreScan)) {
+      return;
+    }
+    nextEarlySpawnRestoreScan = now.plus(EARLY_SPAWN_RESTORE_SCAN);
+    java.util.Collection<? extends RuntimeTrainHandle> trains;
+    try {
+      trains = liveTrains.get();
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车找回：读取在线列车失败: " + failure.getMessage());
+      return;
+    }
+    restoreEarlySpawnHolds(trains, now);
+  }
+
+  /**
+   * 按列车标签找回在车库等候的提前出车（见 {@link #TAG_EARLY_SPAWN_HOLD}）。启动恢复在打开授权门之前调用一次，车不会抢先开走； 之后发车检查每 {@link
+   * #EARLY_SPAWN_RESTORE_SCAN} 再扫一次已加载的列车兜底。只在服务器主线程调用。
+   *
+   * @param trains 列车
+   * @param now 当前时刻
+   */
+  @Override
+  public void restoreEarlySpawnHolds(
+      java.util.Collection<? extends RuntimeTrainHandle> trains, Instant now) {
+    if (trains == null || now == null) {
+      return;
+    }
+    for (RuntimeTrainHandle train : trains) {
+      if (train == null || !train.isValid() || train.properties() == null) {
+        continue;
+      }
+      TrainProperties properties = train.properties();
+      Optional<String> raw = TrainTagHelper.readTagValue(properties, TAG_EARLY_SPAWN_HOLD);
+      if (raw.isEmpty()) {
+        continue;
+      }
+      String trainName = properties.getTrainName();
+      if (trainName == null || earlySpawnHolds.containsKey(trainName)) {
+        continue;
+      }
+      Optional<EarlySpawnHoldTag> tag = EarlySpawnHoldTag.parse(raw.get());
+      if (tag.isEmpty() || !now.isBefore(tag.get().releaseAt()) || train.isMoving()) {
+        TrainTagHelper.removeTagKey(properties, TAG_EARLY_SPAWN_HOLD);
+        continue;
+      }
+      Instant releaseAt = tag.get().releaseAt();
+      boolean ours = !runtimeDispatchService.hasDepartureGate(trainName);
+      if (ours) {
+        runtimeDispatchService.acquireDepartureGate(trainName, EARLY_SPAWN_GATE, "early_spawn");
+      }
+      earlySpawnHolds.put(trainName, new EarlySpawnHold(train, trainName, releaseAt, ours, now));
+      markScheduledDepotHold(trainName, releaseAt);
+      boolean bound = false;
+      if (tag.get().token().isPresent()) {
+        try {
+          bound = earlySpawnBinding.restore(trainName, tag.get().token().get());
+        } catch (RuntimeException failure) {
+          debugLogger.accept(
+              "提前出车找回：绑回交路异常: train=" + trainName + " error=" + failure.getMessage());
+        }
+      }
+      debugLogger.accept(
+          "提前出车找回: train="
+              + trainName
+              + " plannedDeparture="
+              + releaseAt
+              + " dutyRestored="
+              + bound);
+    }
+  }
+
+  private void writeEarlySpawnHoldTag(
+      RuntimeTrainHandle train, Instant releaseAt, Optional<String> token) {
+    if (train == null || train.properties() == null) {
+      return;
+    }
+    TrainTagHelper.writeTag(
+        train.properties(), TAG_EARLY_SPAWN_HOLD, new EarlySpawnHoldTag(releaseAt, token).format());
+  }
+
+  private static void clearEarlySpawnHoldTag(RuntimeTrainHandle train) {
+    if (train == null || !train.isValid() || train.properties() == null) {
+      return;
+    }
+    TrainTagHelper.removeTagKey(train.properties(), TAG_EARLY_SPAWN_HOLD);
+  }
+
+  /**
+   * 列车上的提前出车标签。
+   *
+   * @param releaseAt 放行时刻
+   * @param token 交路意图；不按表运行时为空
+   */
+  record EarlySpawnHoldTag(Instant releaseAt, Optional<String> token) {
+    EarlySpawnHoldTag {
+      Objects.requireNonNull(releaseAt, "releaseAt");
+      token = token == null ? Optional.empty() : token.filter(value -> !value.isBlank());
+    }
+
+    String format() {
+      return releaseAt.getEpochSecond() + token.map(value -> ";" + value).orElse("");
+    }
+
+    static Optional<EarlySpawnHoldTag> parse(String raw) {
+      if (raw == null || raw.isBlank()) {
+        return Optional.empty();
+      }
+      String value = raw.trim();
+      int split = value.indexOf(';');
+      String seconds = split < 0 ? value : value.substring(0, split);
+      Optional<String> token =
+          split < 0 ? Optional.empty() : Optional.of(value.substring(split + 1).trim());
+      try {
+        return Optional.of(
+            new EarlySpawnHoldTag(Instant.ofEpochSecond(Long.parseLong(seconds.trim())), token));
+      } catch (RuntimeException ex) {
+        return Optional.empty();
+      }
     }
   }
 
@@ -5325,6 +5512,224 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     return Optional.of(depotSpec.trim());
+  }
+
+  /**
+   * 手动提前出车挑股道：收集车库现场情况，交给 {@link EarlySpawnYard#choose} 判定。
+   *
+   * <p>本车可用的股道：出库点写成 DYNAMIC 时是该写法覆盖的全部股道，固定写法时是命令里指定的那条。别的车对车库的使用：
+   *
+   * <ul>
+   *   <li>计划发车之前要出库的票：只算首站带 CRET、真从车库出车的；票没指定出库点而线路配了车库池时按车库池算；
+   *   <li>按时刻表回库的交路：按回库线路 DSTY 的写法，查不到时按时刻表记下的回库点；
+   *   <li>正在回库的列车：线路以 DSTY 收尾，且剩下的只有不停车的途经点。
+   * </ul>
+   *
+   * 股道空不空按占用判断。
+   *
+   * @param provider 存储，用于读线路的车库池；为空时不考虑车库池
+   * @param plan 提前出车
+   */
+  public EarlySpawnYard.Decision chooseEarlySpawnTrack(
+      StorageProvider provider, EarlySpawnPlan plan) {
+    if (plan == null) {
+      return EarlySpawnYard.Decision.blocked(EarlySpawnYard.Reason.YARD_UNKNOWN, "");
+    }
+    List<String> candidates = earlySpawnCandidates(plan);
+    List<EarlySpawnYard.Use> uses = new ArrayList<>();
+    Map<UUID, List<SpawnDepot>> lineDepotsByRoute = new HashMap<>();
+    for (SpawnTicket ticket : plan.departures()) {
+      Set<String> tracks = departureTracksOf(provider, ticket, lineDepotsByRoute);
+      if (!tracks.isEmpty()) {
+        uses.add(
+            new EarlySpawnYard.Use(
+                EarlySpawnYard.UseKind.DEPARTURE,
+                ticket.service().routeCode(),
+                Optional.of(ticket.dueAt()),
+                tracks));
+      }
+    }
+    for (EarlySpawnPlan.DepotArrival arrival : plan.arrivals()) {
+      Set<String> tracks =
+          arrival
+              .routeId()
+              .flatMap(this::destroyTargetOf)
+              .map(this::depotTracksOf)
+              .filter(found -> !found.isEmpty())
+              .orElseGet(() -> depotTracksOf(arrival.depotNodeId()));
+      if (!tracks.isEmpty()) {
+        uses.add(
+            new EarlySpawnYard.Use(
+                EarlySpawnYard.UseKind.ARRIVAL,
+                arrival.subject(),
+                Optional.of(arrival.at()),
+                tracks));
+      }
+    }
+    for (RouteProgressRegistry.RouteProgressEntry entry :
+        runtimeDispatchService.snapshotProgressEntries().values()) {
+      inboundTargetOf(entry)
+          .map(this::depotTracksOf)
+          .filter(found -> !found.isEmpty())
+          .ifPresent(
+              tracks ->
+                  uses.add(
+                      new EarlySpawnYard.Use(
+                          EarlySpawnYard.UseKind.INBOUND,
+                          entry.trainName(),
+                          Optional.empty(),
+                          tracks)));
+    }
+    Set<String> involved = new LinkedHashSet<>(candidates);
+    for (EarlySpawnYard.Use use : uses) {
+      involved.addAll(use.tracks());
+    }
+    Set<String> free = new HashSet<>();
+    for (String track : involved) {
+      if (!occupancyManager.isNodeOccupied(NodeId.of(track))) {
+        free.add(track);
+      }
+    }
+    return EarlySpawnYard.choose(candidates, free, uses);
+  }
+
+  /** 提前出车可用的股道：出库点写成 DYNAMIC 时是指定车库里该写法覆盖的全部股道，否则是指定的那条。 */
+  private List<String> earlySpawnCandidates(EarlySpawnPlan plan) {
+    String spec = plan.ticket().service().depotNodeId();
+    if (!SpawnDirectiveParser.isDynamicTarget(spec)) {
+      return List.of(plan.requestedNode());
+    }
+    List<String> out = new ArrayList<>();
+    for (String track : depotTracksOf(spec)) {
+      if (sameDepotYard(track, plan.requestedNode())) {
+        out.add(track);
+      }
+    }
+    return out;
+  }
+
+  /** 一张票会从哪些股道出库；不从车库出车（首站没有 CRET）时为空。 */
+  private Set<String> departureTracksOf(
+      StorageProvider provider, SpawnTicket ticket, Map<UUID, List<SpawnDepot>> lineDepotsByRoute) {
+    if (ticket == null || ticket.service() == null) {
+      return Set.of();
+    }
+    UUID routeId = ticket.service().routeId();
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops = routeStopsOf(routeId);
+    if (stops.isEmpty()
+        || SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isEmpty()) {
+      return Set.of();
+    }
+    List<String> specs = new ArrayList<>();
+    if (ticket.selectedDepotNodeId().isPresent()) {
+      specs.add(ticket.selectedDepotNodeId().get());
+    } else {
+      List<SpawnDepot> lineDepots =
+          lineDepotsByRoute.computeIfAbsent(routeId, id -> lineDepotsOf(provider, id));
+      if (lineDepots.isEmpty()) {
+        specs.add(ticket.service().depotNodeId());
+      } else {
+        lineDepots.forEach(depot -> specs.add(depot.nodeId()));
+      }
+    }
+    Set<String> tracks = new LinkedHashSet<>();
+    for (String spec : specs) {
+      tracks.addAll(depotTracksOf(spec));
+    }
+    return tracks;
+  }
+
+  private List<SpawnDepot> lineDepotsOf(StorageProvider provider, UUID routeId) {
+    if (provider == null || routeId == null) {
+      return List.of();
+    }
+    try {
+      return provider
+          .routes()
+          .findById(routeId)
+          .flatMap(route -> provider.lines().findById(route.lineId()))
+          .map(line -> LineSpawnMetadata.parseDepots(line.metadata()))
+          .orElse(List.of());
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车：读取线路车库池失败: route=" + routeId + " error=" + failure.getMessage());
+      return List.of();
+    }
+  }
+
+  /** 车库写法覆盖的股道：DYNAMIC 写法展开成车库里匹配的股道节点，固定写法就是它自己。 */
+  private Set<String> depotTracksOf(String spec) {
+    if (spec == null || spec.isBlank()) {
+      return Set.of();
+    }
+    if (!SpawnDirectiveParser.isDynamicTarget(spec)) {
+      return Set.of(spec.trim());
+    }
+    if (!isDynamicDepotSpec(spec)) {
+      return Set.of();
+    }
+    Set<String> tracks = new LinkedHashSet<>();
+    for (SignNodeRegistry.SignNodeInfo info : findDynamicDepotNodeInfos(spec)) {
+      if (info.definition().nodeType() == NodeType.DEPOT) {
+        tracks.add(info.definition().nodeId().value());
+      }
+    }
+    return tracks;
+  }
+
+  /** 线路以 DSTY 收尾时它的目标写法。 */
+  private Optional<String> destroyTargetOf(UUID routeId) {
+    return SpawnDirectiveParser.findDirectiveTarget(routeStopsOf(routeId), "DSTY");
+  }
+
+  /** 正在回库的列车要去的车库写法：线路以 DSTY 收尾、还没到，且剩下的只有不停车的途经点。 */
+  private Optional<String> inboundTargetOf(RouteProgressRegistry.RouteProgressEntry entry) {
+    if (entry == null || entry.routeUuid() == null) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinition> definition = routeDefinitions.findById(entry.routeUuid());
+    if (definition.isEmpty()) {
+      return Optional.empty();
+    }
+    RouteId routeKey = definition.get().id();
+    int last = definition.get().waypoints().size() - 1;
+    if (last <= 0 || entry.currentIndex() >= last) {
+      return Optional.empty();
+    }
+    Optional<String> target =
+        routeDefinitions
+            .findStop(routeKey, last)
+            .flatMap(stop -> SpawnDirectiveParser.findDirectiveTarget(stop, "DSTY"));
+    if (target.isEmpty()) {
+      return Optional.empty();
+    }
+    for (int index = Math.max(0, entry.currentIndex() + 1); index < last; index++) {
+      Optional<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stop =
+          routeDefinitions.findStop(routeKey, index);
+      if (stop.isEmpty() || stop.get().stops()) {
+        return Optional.empty();
+      }
+    }
+    return target;
+  }
+
+  private List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> routeStopsOf(UUID routeId) {
+    if (routeId == null) {
+      return List.of();
+    }
+    return routeDefinitions
+        .findById(routeId)
+        .map(definition -> routeDefinitions.listStops(definition.id()))
+        .orElse(List.of());
+  }
+
+  /** 同一个车库：只是股道不同。 */
+  private static boolean sameDepotYard(String a, String b) {
+    if (a == null || b == null) {
+      return false;
+    }
+    int ai = a.lastIndexOf(':');
+    int bi = b.lastIndexOf(':');
+    return ai > 0 && bi > 0 && a.substring(0, ai).equalsIgnoreCase(b.substring(0, bi));
   }
 
   private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(String dynamicSpec) {

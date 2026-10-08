@@ -2076,6 +2076,43 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return List.copyOf(out);
   }
 
+  /**
+   * 取出计划到达车库时刻落在 {@code (from, to]} 内的交路，供手动提前出车判断车库股道会不会被占着挡住回库的车。
+   *
+   * @param from 窗口起点（不含）
+   * @param to 窗口终点（含）
+   * @return 回库，按计划到达时刻升序
+   */
+  public List<DueArrival> depotArrivalsBetween(Instant from, Instant to) {
+    if (from == null || to == null || !to.isAfter(from)) {
+      return List.of();
+    }
+    List<DueArrival> out = new ArrayList<>();
+    for (Timetable timetable : snapshot.timetables()) {
+      for (VehicleDuty duty : timetable.duties()) {
+        Optional<UUID> routeId =
+            duty.returnRouteId()
+                .or(
+                    () ->
+                        timetable
+                            .trip(duty.tripIds().get(duty.tripIds().size() - 1))
+                            .map(TimetableTrip::routeId));
+        for (int offset : SERVICE_DATE_OFFSETS) {
+          LocalDate date = LocalDate.ofInstant(to, timetable.zoneId()).plusDays(offset);
+          Instant at =
+              date.atStartOfDay(timetable.zoneId())
+                  .toInstant()
+                  .plusSeconds(duty.plannedEndSecondOfDay());
+          if (at.isAfter(from) && !at.isAfter(to)) {
+            out.add(new DueArrival(timetable, duty, date, routeId, at));
+          }
+        }
+      }
+    }
+    out.sort(Comparator.comparing(DueArrival::at).thenComparing(due -> due.duty().dutyCode()));
+    return List.copyOf(out);
+  }
+
   /** 运行态汇总，供 {@code /fta timetable status} 使用。 */
   public StatusSnapshot status() {
     Instant now = clock.get();
@@ -2310,6 +2347,22 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return duty.dutyCode() + "-" + kind.name();
     }
   }
+
+  /**
+   * 一个交路按时刻表到达车库。
+   *
+   * @param timetable 所属时刻表
+   * @param duty 交路
+   * @param serviceDate 服务日期
+   * @param routeId 回库所走的线路：回库走行，没有时为末班线路（以销毁收尾）
+   * @param at 计划到达车库的时刻
+   */
+  public record DueArrival(
+      Timetable timetable,
+      VehicleDuty duty,
+      LocalDate serviceDate,
+      Optional<UUID> routeId,
+      Instant at) {}
 
   /**
    * 一个交路在某一天的身份。

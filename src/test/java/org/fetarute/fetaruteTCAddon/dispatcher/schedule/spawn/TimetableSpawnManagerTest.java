@@ -367,26 +367,37 @@ class TimetableSpawnManagerTest {
         () -> fixture.logs.toString());
   }
 
-  /** 手动提前出车：下一班出库走行现在就出票（计划时刻不变、来源记为手动、出库点定为指定车库），正点时不再出第二张。 */
+  /** 最早提前量：测试统一 15 分钟。 */
+  private static final Duration MAX_LEAD = Duration.ofMinutes(15);
+
+  /** 挑股道：车库空着，用命令里指定的那条。 */
+  private static final EarlySpawnPlan.TrackChooser REQUESTED_TRACK =
+      plan -> EarlySpawnYard.Decision.use(plan.requestedNode());
+
+  /** 07:57 出库走行的计划时刻。 */
+  private static final Instant CREATE_DEPARTURE = DAY.plusSeconds(8 * 3600 - 180);
+
+  /** 手动提前出车：下一班出库走行现在就出票（计划时刻不变、来源记为手动、出库点为挑出的股道），正点时不再出第二张；再提前一次说下一班已出车，不往后找。 */
   @Test
   void anEarlySpawnIssuesTheNextDepotDepartureOnce() {
     Fixture fixture = fixture();
-    Instant now = DAY.plusSeconds(7 * 3600 + 1800);
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
     fixture.manager.pollDueTickets(fixture.provider, now);
 
     TimetableSpawnManager.EarlySpawn early =
-        fixture.manager.issueEarly(CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60));
+        fixture.manager.issueEarly(
+            CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK);
 
     assertEquals(TimetableSpawnManager.EarlySpawnOutcome.ISSUED, early.outcome());
     assertEquals("R1-001", early.tripCode(), "出库走行报它要去接的那一班");
-    Instant planned = DAY.plusSeconds(8 * 3600 - 180);
-    assertEquals(Optional.of(planned), early.plannedDeparture());
+    assertEquals(Optional.of(CREATE_DEPARTURE), early.plannedDeparture());
+    assertEquals(Optional.of("OP:D:DEP:1"), early.depotNode());
     List<SpawnTicket> released =
         fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1));
     assertEquals(1, released.size(), () -> released.toString());
     SpawnTicket ticket = released.get(0);
     assertEquals(CREATE_ROUTE, ticket.service().routeId());
-    assertEquals(planned, ticket.dueAt(), "计划时刻不变：出车后扣到这个时刻");
+    assertEquals(CREATE_DEPARTURE, ticket.dueAt(), "计划时刻不变：出车后扣到这个时刻");
     assertFalse(ticket.notBefore().isAfter(now.plusSeconds(1)), "现在就放出去出车");
     assertEquals(
         org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource.MANUAL, ticket.source());
@@ -394,53 +405,186 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.manager.pickupTripOf(ticket).isPresent(), "带着交路意图：派出即绑交路");
 
     List<SpawnTicket> atPlanned =
-        fixture.manager.pollDueTickets(fixture.provider, planned.plusSeconds(10));
+        fixture.manager.pollDueTickets(fixture.provider, CREATE_DEPARTURE.plusSeconds(10));
     assertTrue(
         atPlanned.stream().noneMatch(t -> CREATE_ROUTE.equals(t.service().routeId())),
         () -> "同一班不出第二张：" + atPlanned);
 
+    TimetableSpawnManager.EarlySpawn again =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK);
+    assertEquals(TimetableSpawnManager.EarlySpawnOutcome.ALREADY_OUT, again.outcome(), "只提前下一班");
+    assertEquals("R1-001", again.tripCode());
+    assertEquals(Optional.of(CREATE_DEPARTURE), again.plannedDeparture());
+  }
+
+  /** 交路已经有车在跑（例如提前出的车已经派出），下一班同样算已出车。 */
+  @Test
+  void anEarlySpawnRefusesWhenTheNextDutyAlreadyHasATrain() {
+    Fixture fixture = fixture();
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
+    fixture.service.bindDuty(
+        "train-A",
+        new TimetableService.DutyKey(TIMETABLE, DUTY, java.time.LocalDate.of(2026, 3, 2)),
+        "test");
+
+    TimetableSpawnManager.EarlySpawn early =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK);
+
+    assertEquals(TimetableSpawnManager.EarlySpawnOutcome.ALREADY_OUT, early.outcome());
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).isEmpty());
+  }
+
+  /** 离计划发车超过最早提前量：不出票，告诉最早什么时候可以提前出。 */
+  @Test
+  void anEarlySpawnRefusesBeforeTheLeadWindow() {
+    Fixture fixture = fixture();
+    Instant now = DAY.plusSeconds(7 * 3600 + 30 * 60);
+    fixture.manager.pollDueTickets(fixture.provider, now);
+    List<EarlySpawnPlan> asked = new ArrayList<>();
+
+    TimetableSpawnManager.EarlySpawn early =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE,
+            "OP:D:DEP:1",
+            now,
+            Duration.ofMinutes(60),
+            MAX_LEAD,
+            plan -> {
+              asked.add(plan);
+              return EarlySpawnYard.Decision.use(plan.requestedNode());
+            });
+
+    assertEquals(TimetableSpawnManager.EarlySpawnOutcome.TOO_EARLY, early.outcome());
+    assertEquals("R1-001", early.tripCode());
+    assertEquals(Optional.of(CREATE_DEPARTURE), early.plannedDeparture());
+    assertTrue(asked.isEmpty(), "还太早时不去挑股道");
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).isEmpty());
+  }
+
+  /** 选不出股道就不出票：原因原样交回；之后照常可以再提前（这一班没有被占住）。 */
+  @Test
+  void aBlockedEarlySpawnIssuesNothing() {
+    Fixture fixture = fixture();
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
+    fixture.manager.pollDueTickets(fixture.provider, now);
+    EarlySpawnYard.Blocker blocker =
+        new EarlySpawnYard.Blocker(
+            EarlySpawnYard.Reason.TRACK_OCCUPIED, "OP:D:DEP:1", Optional.empty());
+
+    TimetableSpawnManager.EarlySpawn early =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE,
+            "OP:D:DEP:1",
+            now,
+            Duration.ofMinutes(60),
+            MAX_LEAD,
+            plan -> EarlySpawnYard.Decision.blocked(blocker));
+
+    assertEquals(TimetableSpawnManager.EarlySpawnOutcome.BLOCKED, early.outcome());
+    assertEquals(Optional.of(blocker), early.blocker());
+    assertEquals(Optional.of(CREATE_DEPARTURE), early.plannedDeparture());
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).isEmpty());
     assertEquals(
-        TimetableSpawnManager.EarlySpawnOutcome.NONE_UPCOMING,
+        TimetableSpawnManager.EarlySpawnOutcome.ISSUED,
         fixture
             .manager
-            .issueEarly(CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60))
-            .outcome(),
-        "这一班已出票，时限内没有别的出库走行");
+            .issueEarly(
+                CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK)
+            .outcome());
+  }
+
+  /** 挑股道拿到的是还没定出库点的票（出库点规范是交路的 CRET 写法）与本车自己之外的计划使用；出库点按挑出的股道写进票。 */
+  @Test
+  void theTrackChooserSeesAnUnpinnedTicketAndPinsItsChoice() {
+    Fixture fixture = fixture();
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
+    fixture.manager.pollDueTickets(fixture.provider, now);
+    List<EarlySpawnPlan> asked = new ArrayList<>();
+
+    TimetableSpawnManager.EarlySpawn early =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE,
+            "OP:D:DEP:1",
+            now,
+            Duration.ofMinutes(60),
+            MAX_LEAD,
+            plan -> {
+              asked.add(plan);
+              return EarlySpawnYard.Decision.use("OP:D:DEP:3");
+            });
+
+    assertEquals(1, asked.size());
+    EarlySpawnPlan plan = asked.get(0);
+    assertEquals("OP:D:DEP:1", plan.requestedNode());
+    assertEquals(CREATE_DEPARTURE, plan.plannedDeparture());
+    assertEquals("R1-001", plan.tripCode());
+    assertEquals(Optional.empty(), plan.ticket().selectedDepotNodeId(), "出库点还没定");
+    assertEquals("OP:D:DEP:1", plan.ticket().service().depotNodeId());
+    assertTrue(
+        plan.departures().stream().noneMatch(t -> CREATE_ROUTE.equals(t.service().routeId())),
+        () -> "不把自己算成别的车：" + plan.departures());
+    assertTrue(plan.arrivals().isEmpty(), "自己的交路回库不算");
+    assertEquals(Optional.of("OP:D:DEP:3"), early.depotNode());
+    SpawnTicket ticket =
+        fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).get(0);
+    assertEquals(Optional.of("OP:D:DEP:3"), ticket.selectedDepotNodeId());
+    assertEquals("OP:D:DEP:3", ticket.service().depotNodeId());
   }
 
   /** 别的车库、不归时刻表发车的线路都不出票：前者说没有车次，后者交回原来的手动出车。 */
   @Test
   void anEarlySpawnOnlyTakesThisDepotsTimetabledDepartures() {
     Fixture fixture = fixture();
-    Instant now = DAY.plusSeconds(7 * 3600 + 1800);
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
 
     assertEquals(
         TimetableSpawnManager.EarlySpawnOutcome.NONE_UPCOMING,
         fixture
             .manager
-            .issueEarly(CREATE_ROUTE, "OP:D:OTHER:1", now, Duration.ofMinutes(60))
+            .issueEarly(
+                CREATE_ROUTE,
+                "OP:D:OTHER:1",
+                now,
+                Duration.ofMinutes(60),
+                MAX_LEAD,
+                REQUESTED_TRACK)
             .outcome());
     assertEquals(
         TimetableSpawnManager.EarlySpawnOutcome.NONE_UPCOMING,
         fixture
             .manager
-            .issueEarly(CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(10))
+            .issueEarly(
+                CREATE_ROUTE,
+                "OP:D:DEP:1",
+                DAY.plusSeconds(7 * 3600 + 30 * 60),
+                Duration.ofMinutes(10),
+                MAX_LEAD,
+                REQUESTED_TRACK)
             .outcome(),
         "07:57 的出库走行不在 10 分钟内");
     assertEquals(
         TimetableSpawnManager.EarlySpawnOutcome.NOT_TIMETABLED,
         fixture
             .manager
-            .issueEarly(UUID.randomUUID(), "OP:D:DEP:1", now, Duration.ofMinutes(60))
+            .issueEarly(
+                UUID.randomUUID(),
+                "OP:D:DEP:1",
+                now,
+                Duration.ofMinutes(60),
+                MAX_LEAD,
+                REQUESTED_TRACK)
             .outcome());
 
     TimetableSpawnManager.EarlySpawn byPassengerRoute =
-        fixture.manager.issueEarly(ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60));
+        fixture.manager.issueEarly(
+            ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK);
     assertEquals(
         TimetableSpawnManager.EarlySpawnOutcome.ISSUED,
         byPassengerRoute.outcome(),
         "写首班的载客线路也认成它的出库走行");
-    assertEquals(Optional.of(DAY.plusSeconds(8 * 3600 - 180)), byPassengerRoute.plannedDeparture());
+    assertEquals(Optional.of(CREATE_DEPARTURE), byPassengerRoute.plannedDeparture());
     assertEquals(
         CREATE_ROUTE,
         fixture
@@ -451,7 +595,7 @@ class TimetableSpawnManagerTest {
             .routeId());
   }
 
-  /** 首班线路本身从车库始发（首站就是车库、计划没写出库点）：提前出这一班；同一车库换条股道也认，出库点按指定的股道。 */
+  /** 首班线路本身从车库始发（首站就是车库、计划写了出库点）：提前出这一班；同一车库换条股道也认，出库点按指定的股道。 */
   @Test
   void anEarlySpawnTakesADepotStartTripOnAnyTrackOfThatDepot() {
     Timetable base = depotStartTimetable();
@@ -471,10 +615,11 @@ class TimetableSpawnManagerTest {
               : plan);
     }
     Fixture fixture = fixture(base.withPlansTripsAndDuties(plans, base.trips(), base.duties()));
-    Instant now = DAY.plusSeconds(7 * 3600 + 1800);
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
 
     TimetableSpawnManager.EarlySpawn early =
-        fixture.manager.issueEarly(ROUTE, "OP:D:DEP:2", now, Duration.ofMinutes(60));
+        fixture.manager.issueEarly(
+            ROUTE, "OP:D:DEP:2", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK);
 
     assertEquals(TimetableSpawnManager.EarlySpawnOutcome.ISSUED, early.outcome());
     assertEquals("R1-001", early.tripCode());
@@ -483,6 +628,53 @@ class TimetableSpawnManagerTest {
         fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).get(0);
     assertEquals(Optional.of("OP:D:DEP:2"), ticket.selectedDepotNodeId());
     assertEquals("OP:D:DEP:2", ticket.service().depotNodeId());
+  }
+
+  /** 按表回库：交路的计划到达车库时刻落在窗口里才算，回库线路取回库走行。 */
+  @Test
+  void depotArrivalsComeFromTheDutyEnd() {
+    Fixture fixture = fixture();
+    Instant end = DAY.plusSeconds(8 * 3600 + 600 + 230 + 120 + 90);
+
+    List<TimetableService.DueArrival> arrivals =
+        fixture.service.depotArrivalsBetween(DAY.plusSeconds(8 * 3600), end);
+
+    assertEquals(1, arrivals.size(), arrivals::toString);
+    assertEquals("D001", arrivals.get(0).duty().dutyCode());
+    assertEquals(end, arrivals.get(0).at());
+    assertEquals(Optional.of(RETURN_ROUTE), arrivals.get(0).routeId());
+    assertTrue(fixture.service.depotArrivalsBetween(end, end.plusSeconds(600)).isEmpty(), "窗口起点不含");
+  }
+
+  /** 重启找回：提前出车的票带着交路意图，写法读回来相同；按它绑回交路后，这一班到点不再出车。 */
+  @Test
+  void anEarlyHoldRebindsItsDutyAfterARestart() {
+    Fixture fixture = fixture();
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
+    fixture.manager.pollDueTickets(fixture.provider, now);
+    fixture.manager.issueEarly(
+        CREATE_ROUTE, "OP:D:DEP:1", now, Duration.ofMinutes(60), MAX_LEAD, REQUESTED_TRACK);
+    SpawnTicket ticket =
+        fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).get(0);
+    String token = fixture.manager.earlyHoldToken(ticket).orElseThrow();
+    assertEquals(
+        Optional.of(token),
+        TimetableSpawnManager.parseIntent(token).map(TimetableSpawnManager::formatIntent));
+
+    Fixture restarted = fixture();
+    restarted.manager.pollDueTickets(restarted.provider, now.plusSeconds(30));
+    assertTrue(restarted.manager.restoreEarlyHold("train-A", token));
+    assertEquals(
+        Optional.of(
+            new TimetableService.DutyKey(TIMETABLE, DUTY, java.time.LocalDate.of(2026, 3, 2))),
+        restarted.service.dutyBindingOf("train-A"));
+    List<SpawnTicket> atPlanned =
+        restarted.manager.pollDueTickets(restarted.provider, CREATE_DEPARTURE.plusSeconds(10));
+    assertTrue(
+        atPlanned.stream().noneMatch(t -> CREATE_ROUTE.equals(t.service().routeId())),
+        () -> "绑回交路后不再出第二辆：" + atPlanned);
+    assertFalse(restarted.manager.restoreEarlyHold("train-B", token), "交路已有车时不绑");
+    assertFalse(restarted.manager.restoreEarlyHold("train-C", "bad"), "写法不对时不绑");
   }
 
   // ------------------------------------------------------------------ 夹具

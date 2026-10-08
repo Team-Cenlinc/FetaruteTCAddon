@@ -69,4 +69,16 @@ public interface TicketAssigner {
 
   /** 清理出车诊断计数（成功/重试/错误分布）。 */
   default void resetDiagnostics() {}
+
+  /**
+   * 重启或重载后找回在车库等候的提前出车：启动恢复在打开授权门之前调用。默认不处理。
+   *
+   * @param trains 列车
+   * @param now 当前时刻
+   */
+  default void restoreEarlySpawnHolds(
+      java.util.Collection<
+              ? extends org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle>
+          trains,
+      Instant now) {}
 }

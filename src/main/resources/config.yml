@@ -215,9 +215,8 @@ runtime:
   following-stop-margin-blocks: 4
 
 spawn:
-  # 是否按线路的发车间隔（baseFrequency）自动发车
-  # - false：只能用 /fta depot spawn 手动发车
-  # - true：周期性生成发车票，在闭塞允许时从线路指定的车库自动发车
+  # 是否启用发车：周期性生成发车票，在闭塞允许时从线路指定的车库出车（按表运行的线路按时刻表出票）
+  # 关闭后不再出车；/fta depot spawn 的提前出车同样经发车流程出车，也需要开启
   enabled: false
   # 自动发车的检查间隔（ticks）
   tick-interval-ticks: 100
@@ -249,6 +248,8 @@ spawn:
   # 拥堵门控：拥堵评分（0~1）高于 hold 时暂停发车，回落到 release 以下时恢复；hold 应大于 release
   congestion-hold-threshold: 0.58
   congestion-release-threshold: 0.48
+  # 按表运行的线路用 /fta depot spawn 提前出下一班时，最多比计划发车提前多少分钟出车；提前出的车在车库股道等候至计划时刻
+  early-spawn-max-lead-minutes: 15
 
 # 闲置回收：把闲置过久、生命周期到期或超出全网上限的待命列车送回车库
 reclaim:

@@ -1266,6 +1266,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
       if (reclaimManager != null) {
         reclaimManager.start();
       }
+      // 在车库等候的提前出车先重新扣住、绑回交路，再打开授权门：门控与交路记录只在内存里，重启后不能让它抢先开走。
+      if (spawnTicketAssigner != null) {
+        spawnTicketAssigner.restoreEarlySpawnHolds(handles, java.time.Instant.now());
+      }
       if (!service.completeStartupOccupancyReconstruction(handles)) {
         runtimeDispatchRecoveryComplete = false;
         suspendRuntimeDispatchComponentsForRecovery();
@@ -1815,6 +1819,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(timetableService);
   }
 
+  /** 当前已加载的全部列车。 */
+  private static List<RuntimeTrainHandle> loadedTrainHandles() {
+    List<RuntimeTrainHandle> out = new ArrayList<>();
+    for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+      if (group != null && group.isValid()) {
+        out.add(new TrainCartsRuntimeHandle(group));
+      }
+    }
+    return out;
+  }
+
   private void initSpawnScheduler() {
     if (configManager == null
         || storageManager == null
@@ -1862,6 +1877,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             spawnSettings.maxAttempts());
     this.spawnTicketAssigner = simpleAssigner;
     simpleAssigner.setConsistArbiter(consistArbiter);
+    simpleAssigner.setLiveTrainSource(FetaruteTCAddon::loadedTrainHandles);
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
@@ -1884,6 +1900,26 @@ public final class FetaruteTCAddon extends JavaPlugin {
           (ticket, trainName) -> driverPickupHoldsDepotSpawn(scheduled, ticket, trainName));
       simpleAssigner.setTicketExpiry(scheduled::expiryOf);
       simpleAssigner.setDispatchListener(scheduled::onDispatched);
+      // 提前出车在车库等候：交路意图写进列车标签，重启后据此绑回交路，到点不会再出一辆。
+      simpleAssigner.setEarlySpawnBinding(
+          new org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .schedule
+              .spawn
+              .SimpleTicketAssigner
+              .EarlySpawnBinding() {
+            @Override
+            public Optional<String> tokenOf(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket) {
+              return scheduled.earlyHoldToken(ticket);
+            }
+
+            @Override
+            public boolean restore(String trainName, String token) {
+              return scheduled.restoreEarlyHold(trainName, token);
+            }
+          });
       if (timetableService != null) {
         timetableService.setPendingTicketProbe(scheduled::hasPendingTicket);
       }

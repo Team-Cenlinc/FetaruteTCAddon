@@ -1223,8 +1223,16 @@ command:
   depot:
     spawn:
       coordinated-only: "<prefix> <red>手动出车已停用：出车由调度统一管理</red> <gray>请通过发车计划或发车队列出车</gray>"
-      early-issued: "<prefix> <dark_aqua>已提前出车</dark_aqua> <white><trip></white> <gray>：计划 <white><time></white> 自车库 <white><node></white> 发车，列车出库后在车库等候至计划时刻</gray>"
-      early-none: "<prefix> <yellow>未来 <white><minutes></white> 分钟内没有线路 <white><route></white> 自车库 <white><node></white> 开出且尚未出车的车次</yellow>"
+      early-issued: "<prefix> <dark_aqua>已提前出车</dark_aqua> <white><trip></white> <gray>：计划 <white><time></white> 自股道 <white><node></white> 发车，列车出库后在车库等候至计划时刻</gray>"
+      early-none: "<prefix> <yellow>未来 <white><minutes></white> 分钟内没有线路 <white><route></white> 自车库 <white><node></white> 开出的车次</yellow>"
+      early-already-out: "<prefix> <yellow>下一班 <white><trip></white>（计划 <white><time></white> 发车）已安排出车；提前出车仅限下一班</yellow>"
+      early-too-early: "<prefix> <yellow>下一班 <white><trip></white> 计划 <white><time></white> 发车，最早可于 <white><earliest></white> 提前出车（最多提前 <white><minutes></white> 分钟）</yellow>"
+      early-blocked-occupied: "<prefix> <red>无法提前出车：股道 <white><track></white> 已被占用</red>"
+      early-blocked-no-track: "<prefix> <red>无法提前出车：车库 <white><node></white> 没有空闲股道</red>"
+      early-blocked-unknown: "<prefix> <red>无法提前出车：未能确定车库 <white><node></white> 的股道</red>"
+      early-blocked-departure: "<prefix> <red>无法提前出车：占用股道 <white><track></white> 后，交路 <white><subject></white> 计划 <white><time></white> 出库时将无空闲股道</red>"
+      early-blocked-arrival: "<prefix> <red>无法提前出车：占用股道 <white><track></white> 后，车辆交路 <white><subject></white> 计划 <white><time></white> 回库时将无空闲股道</red>"
+      early-blocked-inbound: "<prefix> <red>无法提前出车：占用股道 <white><track></white> 后，正在回库的列车 <white><subject></white> 将无空闲股道</red>"
       early-no-service: "<prefix> <red>线路 <white><route></white> 未设为可发车服务，无法出车</red>"
       early-pattern-ignored: "<prefix> <gray>按时刻表运行的线路按交路车型出车，已忽略 --pattern</gray>"
       not-found: "<prefix> <red>未找到车库节点</red> <gray>(node=<white><node></white>)</gray>"

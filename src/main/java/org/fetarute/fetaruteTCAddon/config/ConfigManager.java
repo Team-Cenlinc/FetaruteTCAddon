@@ -117,6 +117,7 @@ public final class ConfigManager {
 
   private static final double DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD = 0.58D;
   private static final double DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD = 0.48D;
+  private static final int DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES = 15;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -820,6 +821,7 @@ public final class ConfigManager {
     int congestionNetworkReferenceTrains = DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS;
     double congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
     double congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
+    int earlySpawnMaxLeadMinutes = DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES;
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
       tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
@@ -910,6 +912,12 @@ public final class ConfigManager {
         congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
         congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
       }
+      earlySpawnMaxLeadMinutes =
+          section.getInt("early-spawn-max-lead-minutes", earlySpawnMaxLeadMinutes);
+      if (earlySpawnMaxLeadMinutes < 1) {
+        logger.warning("spawn.early-spawn-max-lead-minutes 配置无效: " + earlySpawnMaxLeadMinutes);
+        earlySpawnMaxLeadMinutes = DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES;
+      }
     }
     return new SpawnSettings(
         enabled,
@@ -926,7 +934,8 @@ public final class ConfigManager {
         maxActiveTrains,
         congestionNetworkReferenceTrains,
         congestionHoldThreshold,
-        congestionReleaseThreshold);
+        congestionReleaseThreshold,
+        earlySpawnMaxLeadMinutes);
   }
 
   /** 解析 storage 配置段。 */
@@ -1799,7 +1808,44 @@ public final class ConfigManager {
       int maxActiveTrains,
       int congestionNetworkReferenceTrains,
       double congestionHoldThreshold,
-      double congestionReleaseThreshold) {
+      double congestionReleaseThreshold,
+      int earlySpawnMaxLeadMinutes) {
+
+    /** 兼容旧调用：未指定手动提前出车的最早提前量时取 15 分钟。 */
+    public SpawnSettings(
+        boolean enabled,
+        int tickIntervalTicks,
+        int planRefreshTicks,
+        int maxSpawnPerTick,
+        int maxGeneratePerTick,
+        int maxBacklogPerService,
+        int retryDelayTicks,
+        int maxAttempts,
+        double layoverFallbackMultiplier,
+        long queuedTicketMaxAgeSeconds,
+        long pendingLayoverMaxAgeSeconds,
+        int maxActiveTrains,
+        int congestionNetworkReferenceTrains,
+        double congestionHoldThreshold,
+        double congestionReleaseThreshold) {
+      this(
+          enabled,
+          tickIntervalTicks,
+          planRefreshTicks,
+          maxSpawnPerTick,
+          maxGeneratePerTick,
+          maxBacklogPerService,
+          retryDelayTicks,
+          maxAttempts,
+          layoverFallbackMultiplier,
+          queuedTicketMaxAgeSeconds,
+          pendingLayoverMaxAgeSeconds,
+          maxActiveTrains,
+          congestionNetworkReferenceTrains,
+          congestionHoldThreshold,
+          congestionReleaseThreshold,
+          DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES);
+    }
 
     /**
      * 兼容旧调用：未指定全网参考车数时，沿用在网列车上限。
