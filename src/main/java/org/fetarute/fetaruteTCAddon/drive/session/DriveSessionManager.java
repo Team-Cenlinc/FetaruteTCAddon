@@ -5097,11 +5097,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private Optional<DriveApi.TaskScore> recordTask(
       DriveSession session, Supplier<TaskScore> scoreSource) {
     Optional<DriverTask> taskOpt =
-        tasks
-            .taskOf(session.playerId())
-            .filter(task -> task.startedAt() != null && task.state().finished())
-            .filter(task -> session.trainName().equalsIgnoreCase(task.trainName()))
-            .filter(task -> task.points() < 0);
+        tasks.taskOf(session.playerId()).filter(task -> recordable(task, session.trainName()));
     if (taskOpt.isEmpty()) {
       return Optional.empty();
     }
@@ -5142,7 +5138,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       for (DriverReport.Line line : DriverReport.sheet(score)) {
         player.sendMessage(DriverReport.render(plugin.getLocaleManager(), line));
       }
-      tellReward(player, paid, config.rewards().currencyName());
+      tellReward(
+          player,
+          paid,
+          config.rewards().enabled()
+              && rewardableSource(task.source())
+              && task.state() == DriverTask.State.FAILED,
+          config.rewards().currencyName());
     }
     DriveTaskRecord record =
         new DriveTaskRecord(
@@ -5169,13 +5171,47 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return Optional.of(TaskViews.score(score, result.points(), grade));
   }
 
-  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给。 */
+  /** 任务该在这次评分、写记录、发奖励：开始过、已结束、是这列车，且还没评过。终点站结算时已经评过的，驾驶随后结束时不再评、不再发，一趟只发一次。 */
+  static boolean recordable(DriverTask task, String trainName) {
+    return task.startedAt() != null
+        && task.state().finished()
+        && trainName != null
+        && trainName.equalsIgnoreCase(task.trainName())
+        && task.points() < 0;
+  }
+
+  /**
+   * 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给。
+   *
+   * <p>只给本插件自己的任务（任务板领的、接管时记成的、接续的）：路考与练习不给；其他插件经 {@code DriveApi} 派的任务由派任务的插件自己发奖励，这里不重复发。
+   */
   static boolean earnsReward(DriverTask.State state, String source) {
-    return (state == DriverTask.State.COMPLETED
+    return rewardableSource(source)
+        && (state == DriverTask.State.COMPLETED
             || state == DriverTask.State.ABANDONED
-            || state == DriverTask.State.INTERRUPTED)
-        && !DriverTask.SOURCE_EXAM.equals(source)
-        && !DriverTask.SOURCE_TRAINING.equals(source);
+            || state == DriverTask.State.INTERRUPTED);
+  }
+
+  /** 本插件自己的任务来源：任务板、接管、接续。 */
+  static boolean rewardableSource(String source) {
+    return DriverTask.SOURCE_BOARD.equals(source)
+        || DriverTask.SOURCE_TAKEOVER.equals(source)
+        || DriverTask.SOURCE_CONTINUATION.equals(source);
+  }
+
+  /** 奖励提示用哪条文案：发了经验与钱币、只发了其一、判为未完成不发；什么也没发时为空。 */
+  static Optional<String> rewardMessageKey(DriveRewardPayer.Paid paid, boolean forfeited) {
+    if (forfeited) {
+      return Optional.of("drive.task.reward.forfeited");
+    }
+    if (paid.empty()) {
+      return Optional.empty();
+    }
+    if (paid.experience() > 0) {
+      return Optional.of(
+          paid.money().isPresent() ? "drive.task.reward.both" : "drive.task.reward.experience");
+    }
+    return Optional.of("drive.task.reward.money");
   }
 
   /** ATO 下连续超时未确认发车被判定离开、或确认发车恢复时提示一次（奖励关闭时不提示）。 */
@@ -5192,20 +5228,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 Map.of("count", String.valueOf(config.rewards().awayAfterTimeouts()))));
   }
 
-  /** 成绩单后面一行说明本趟发了多少经验与钱币；什么也没发时不说。 */
-  private void tellReward(Player player, DriveRewardPayer.Paid paid, String currency) {
-    if (paid.empty()) {
+  /** 成绩单后面一行说明本趟发了多少经验与钱币；判为未完成时说明不发；其余什么也没发时不说。 */
+  private void tellReward(
+      Player player, DriveRewardPayer.Paid paid, boolean forfeited, String currency) {
+    Optional<String> key = rewardMessageKey(paid, forfeited);
+    if (key.isEmpty()) {
       return;
     }
-    String key =
-        paid.experience() > 0
-            ? paid.money().isPresent() ? "drive.task.reward.both" : "drive.task.reward.experience"
-            : "drive.task.reward.money";
     player.sendMessage(
         plugin
             .getLocaleManager()
             .component(
-                key,
+                key.get(),
                 Map.of(
                     "experience",
                     String.valueOf(paid.experience()),

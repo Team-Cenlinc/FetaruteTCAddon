@@ -14,10 +14,59 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 final class DriveRewardPayer {
 
   private final Consumer<String> warn;
+  private final Hooks hooks;
 
   DriveRewardPayer(Consumer<String> warn) {
-    this.warn = warn == null ? message -> {} : warn;
+    this(warn, BUKKIT);
   }
+
+  DriveRewardPayer(Consumer<String> warn, Hooks hooks) {
+    this.warn = warn == null ? message -> {} : warn;
+    this.hooks = hooks;
+  }
+
+  /** 发奖励用到的服务器操作；用例里换成假的。 */
+  interface Hooks {
+    /** 给在线玩家经验；玩家不在线时返回 false。 */
+    boolean giveExperience(UUID playerId, int amount);
+
+    /** Vault 是否已启用。 */
+    boolean vaultEnabled();
+
+    /** 经 Vault 存入钱币，是否成功。 */
+    boolean vaultDeposit(UUID playerId, double amount);
+
+    /** 以控制台身份执行命令，是否找到并执行了。 */
+    boolean dispatch(String commandLine);
+  }
+
+  private static final Hooks BUKKIT =
+      new Hooks() {
+        @Override
+        public boolean giveExperience(UUID playerId, int amount) {
+          Player player = Bukkit.getPlayer(playerId);
+          if (player == null || !player.isOnline()) {
+            return false;
+          }
+          player.giveExp(amount);
+          return true;
+        }
+
+        @Override
+        public boolean vaultEnabled() {
+          return Bukkit.getPluginManager().isPluginEnabled("Vault");
+        }
+
+        @Override
+        public boolean vaultDeposit(UUID playerId, double amount) {
+          return VaultMoney.deposit(Bukkit.getOfflinePlayer(playerId), amount);
+        }
+
+        @Override
+        public boolean dispatch(String commandLine) {
+          return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), commandLine);
+        }
+      };
 
   /**
    * 实际发出去的奖励。
@@ -35,12 +84,10 @@ final class DriveRewardPayer {
     if (reward == null || reward.empty()) {
       return new Paid(0, Optional.empty());
     }
-    int experience = 0;
-    Player player = Bukkit.getPlayer(playerId);
-    if (reward.experience() > 0 && player != null && player.isOnline()) {
-      player.giveExp(reward.experience());
-      experience = reward.experience();
-    }
+    int experience =
+        reward.experience() > 0 && hooks.giveExperience(playerId, reward.experience())
+            ? reward.experience()
+            : 0;
     Optional<String> money =
         reward.money() > 0.0
             ? payMoney(playerId, playerName, reward.money(), config.moneyCommand())
@@ -50,9 +97,9 @@ final class DriveRewardPayer {
 
   private Optional<String> payMoney(
       UUID playerId, String playerName, double amount, String command) {
-    if (Bukkit.getPluginManager().isPluginEnabled("Vault")) {
+    if (hooks.vaultEnabled()) {
       try {
-        if (VaultMoney.deposit(Bukkit.getOfflinePlayer(playerId), amount)) {
+        if (hooks.vaultDeposit(playerId, amount)) {
           return Optional.of(DriveRewards.formatAmount(amount));
         }
       } catch (RuntimeException | LinkageError ex) {
@@ -64,7 +111,7 @@ final class DriveRewardPayer {
       return Optional.empty();
     }
     try {
-      return Bukkit.dispatchCommand(Bukkit.getConsoleSender(), line)
+      return hooks.dispatch(line)
           ? Optional.of(DriveRewards.formatAmount(amount))
           : Optional.empty();
     } catch (RuntimeException ex) {

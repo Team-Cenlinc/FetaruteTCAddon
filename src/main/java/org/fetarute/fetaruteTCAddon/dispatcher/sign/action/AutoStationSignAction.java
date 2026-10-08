@@ -432,7 +432,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
-   * 把车头沿轨道送到标志所在的轨道：保持进站速度开到标志前，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
+   * 把车头最前端沿轨道送到标志所在的轨道：从第一节车厢中心沿轨道量到标志，少走半个车体长度（{@link
+   * StopAlignment#frontOffsetBlocks}），保持进站速度开到标志前，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
    *
    * @return 预计还要多少 tick；前方沿轨道找不到这段轨道时为 -1（不倒车）
    */

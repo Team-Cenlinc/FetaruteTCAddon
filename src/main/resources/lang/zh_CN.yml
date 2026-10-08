@@ -2142,7 +2142,7 @@ drive:
       ato: "<prefix> <yellow>本列车阻挡后方列车过久，已转为 ATO 运行</yellow>"
     protection:
       tripped: "<prefix> <red>线路拥堵保护已启动：<white><reason></white>；已将 <white><count></white> 列人工驾驶的列车交还自动运行，暂停接班</red>"
-    skip-handback: "<prefix> <red>本趟已越站 <white><count></white> 次，列车停车后交还自动运行，本趟任务判为未完成</red>"
+    skip-handback: "<prefix> <red>本趟已越站 <white><count></white> 次，列车停车后交还自动运行，本趟任务判为未完成，不发奖励</red>"
   task:
     board:
       title: "<dark_gray>任务板 · </dark_gray><black><station></black>"
@@ -2233,8 +2233,8 @@ drive:
     doors-handed-over: "<prefix> <white>车门已由站台打开，现由驾驶员负责：停站时间到后请关门，再等出站信号发车</white>"
     cab-changed: "<prefix> <green>折返换端完成：已在第 <car> 节驾驶室就座</green>"
     next-trip: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
-    continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
-    continue-offer-code: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+    continue-offer: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分、单独发奖励</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
+    continue-offer-code: "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分、单独发奖励</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"
     continued: "<prefix> <green>已接续驾驶车次 <aqua><trip></aqua>，本趟单独计分，请开到终点站</green>"
     cab-change-timeout-settled: "<prefix> <yellow>未在 <seconds> 秒内换到前端驾驶室，列车已交还自动运行发车；本趟成绩已结算，驾驶正常结束</yellow>"
     next-trip-no-destination: "<prefix> <white>本趟终到后，本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
@@ -2267,6 +2267,7 @@ drive:
       money: "<prefix> <white>本趟奖励：<currency></white> <gold>+<money></gold>"
       away: "<prefix> <yellow>已连续 <count> 站未确认发车，判定为离开：此后的里程与停站不计奖励，确认一次发车即恢复</yellow>"
       back: "<prefix> <green>已确认发车，恢复计算奖励</green>"
+      forfeited: "<prefix> <gray>本趟判为未完成，不发奖励</gray>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
@@ -2300,8 +2301,8 @@ drive:
     next-trip-layover: "<prefix> <white>本车下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"
     next-trip-layover-no-destination: "<prefix> <white>本车下一趟担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车</white>"
     takeover:
-      untracked: "<prefix> <gray>本车当前未运行时刻表车次，本次驾驶不记为任务、不计分</gray>"
-      not-recorded: "<prefix> <yellow>车次 <aqua><trip></aqua> 未记为驾驶任务（<reason>），本趟不计分</yellow>"
+      untracked: "<prefix> <gray>本车当前未运行时刻表车次，本次驾驶不记为任务、不计分，也不发奖励</gray>"
+      not-recorded: "<prefix> <yellow>车次 <aqua><trip></aqua> 未记为驾驶任务（<reason>），本趟不计分，也不发奖励</yellow>"
       finished-next: "<prefix> <white>本趟已到终点。本车下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车，发车后开始计分</white>"
       finished-next-code: "<prefix> <white>本趟已到终点。本车下一趟担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车，发车后开始计分</white>"
       finished-no-next: "<prefix> <yellow>本趟已到终点，<reason></yellow>"

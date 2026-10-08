@@ -310,6 +310,8 @@ public interface DriveApi {
   /**
    * 派任务的请求。用 {@link #trip} 开始，按需链式设置。
    *
+   * <p>经本接口派的任务不发本插件内置的驾驶奖励（经验与服务器钱币），奖励由派任务的插件自己发。
+   *
    * @param timetableId 时刻表
    * @param tripCode 车次号（不分大小写）
    * @param serviceDate 服务日

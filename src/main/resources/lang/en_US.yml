@@ -497,7 +497,7 @@ drive:
       ato: "<prefix> <yellow>The following train was held too long; this train has switched to ATO</yellow>"
     protection:
       tripped: "<prefix> <red>Congestion protection: <white><reason></white>; handed back <white><count></white> player-driven train(s); takeovers are paused</red>"
-    skip-handback: "<prefix> <red>This trip has skipped <white><count></white> station(s); the train will stop and return to automatic operation, and the trip is marked incomplete</red>"
+    skip-handback: "<prefix> <red>This trip has skipped <white><count></white> station(s); the train will stop and return to automatic operation, and the trip is marked incomplete with no reward</red>"
   task:
     board:
       title: "<dark_gray>Task board · </dark_gray><black><station></black>"
@@ -588,8 +588,8 @@ drive:
     doors-handed-over: "<prefix> <white>The platform opened the doors and they are now yours: close them when the dwell is over, then depart on the starting signal</white>"
     cab-changed: "<prefix> <green>Ends changed: you are seated in the cab in car <car></green>"
     next-trip: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
-    continue-offer: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
-    continue-offer-code: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+    continue-offer: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; you may keep driving, and the next trip is scored and rewarded on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
+    continue-offer-code: "<prefix> <white>This trip has been scored. The train continues as trip <aqua><trip></aqua>, departing at <white><time></white>; you may keep driving, and the next trip is scored and rewarded on its own</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive off</white>'><red>[End driving]</red></hover></click>"
     continued: "<prefix> <green>Now driving trip <aqua><trip></aqua>, scored on its own; drive it to the terminus</green>"
     cab-change-timeout-settled: "<prefix> <yellow>You did not reach the leading cab within <seconds> s; the train departed under automatic operation. This trip is already scored and driving ended normally</yellow>"
     next-trip-no-destination: "<prefix> <white>After this trip terminates, the train continues as trip <aqua><trip></aqua>, departing at <white><time></white></white>"
@@ -622,6 +622,7 @@ drive:
       money: "<prefix> <white>Reward for this trip: <currency></white> <gold>+<money></gold>"
       away: "<prefix> <yellow>No departure confirmed for <count> stops in a row; you are treated as away and the distance and stops from here on earn no reward. Confirm a departure to resume</yellow>"
       back: "<prefix> <green>Departure confirmed; rewards resume</green>"
+      forfeited: "<prefix> <gray>This trip is marked incomplete; no reward is paid</gray>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:
@@ -655,8 +656,8 @@ drive:
     next-trip-layover: "<prefix> <white>This train next runs trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white></white>"
     next-trip-layover-no-destination: "<prefix> <white>This train next runs trip <aqua><trip></aqua>, departing at <white><time></white></white>"
     takeover:
-      untracked: "<prefix> <gray>This train is not running a timetabled trip; this drive is not recorded as a task or scored</gray>"
-      not-recorded: "<prefix> <yellow>Trip <aqua><trip></aqua> was not recorded as a driving task (<reason>); this trip is not scored</yellow>"
+      untracked: "<prefix> <gray>This train is not running a timetabled trip; this drive is not recorded as a task, scored or rewarded</gray>"
+      not-recorded: "<prefix> <yellow>Trip <aqua><trip></aqua> was not recorded as a driving task (<reason>); this trip is not scored or rewarded</yellow>"
       finished-next: "<prefix> <white>This trip has reached its terminus. The train next runs trip <aqua><trip></aqua> to <yellow><destination></yellow>, departing at <white><time></white>; scoring starts once it departs</white>"
       finished-next-code: "<prefix> <white>This trip has reached its terminus. The train next runs trip <aqua><trip></aqua>, departing at <white><time></white>; scoring starts once it departs</white>"
       finished-no-next: "<prefix> <yellow>This trip has reached its terminus; <reason></yellow>"

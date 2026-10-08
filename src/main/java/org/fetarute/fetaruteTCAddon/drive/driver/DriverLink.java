@@ -73,6 +73,9 @@ public final class DriverLink {
   /** 刚判定不在 / 刚恢复，等驾驶会话提示一次。 */
   private Boolean awayNotice;
 
+  /** ATO 下终点站结算时的里程表读数：这一站已记进刚结算的那一趟，从这里发车不再记一站；没有时为 {@code NaN}。 */
+  private double settledAtoStopOdometer = Double.NaN;
+
   /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
   private DriverStationStop settledStop;
 
@@ -538,6 +541,13 @@ public final class DriverLink {
    */
   public TaskScore settleTrip() {
     settlePending();
+    if (mode == DrivingMode.ATO) {
+      // ATO 停站在放行发车时才计，终点站的发车属于下一趟：这一站记进刚结算的这一趟，下一趟从这里发车时不再计。
+      if (!away()) {
+        score.addAtoStop();
+      }
+      settledAtoStopOdometer = odometer.getAsDouble();
+    }
     stationStop();
     if (stationStop != null
         && stationStop != settledStop
@@ -689,12 +699,15 @@ public final class DriverLink {
     if (departureConfirmed) {
       releaseDeparture();
       markPresent();
-      score.addAtoStop();
+      if (!takeSettledTerminal()) {
+        score.addAtoStop();
+      }
       return false;
     }
     if (now - departureHoldSince >= timeoutTicks) {
       releaseDeparture();
       lateDepartures++;
+      boolean settledTerminal = takeSettledTerminal();
       confirmTimeouts++;
       if (away()) {
         if (confirmTimeouts == awayAfterTimeouts) {
@@ -702,7 +715,7 @@ public final class DriverLink {
           clearPending();
           awayNotice = Boolean.TRUE;
         }
-      } else {
+      } else if (!settledTerminal) {
         pendingAtoStops++;
       }
       return false;
@@ -729,6 +742,13 @@ public final class DriverLink {
     Optional<Boolean> notice = Optional.ofNullable(awayNotice);
     awayNotice = null;
     return notice;
+  }
+
+  /** 这一站是刚结算那一趟的终点站（已记进那一趟）：从这里发车不再记一站。取一次即清掉。 */
+  private boolean takeSettledTerminal() {
+    boolean settled = stillAt(settledAtoStopOdometer);
+    settledAtoStopOdometer = Double.NaN;
+    return settled;
   }
 
   /** 驾驶员在：确认了发车或转人工驾驶。挂起的里程与停站照计；之前判定过不在的，提示恢复。 */

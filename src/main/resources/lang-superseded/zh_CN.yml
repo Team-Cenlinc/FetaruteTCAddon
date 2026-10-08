@@ -304,6 +304,9 @@ pids:
     operator: ["运营商：<operator>（<code>）· 不绑车站"]
 drive:
   task:
+    takeover:
+      untracked: ["<prefix> <gray>本车当前未运行时刻表车次，本次驾驶不记为任务、不计分</gray>"]
+      not-recorded: ["<prefix> <yellow>车次 <aqua><trip></aqua> 未记为驾驶任务（<reason>），本趟不计分</yellow>"]
     board:
       no-station: ["<prefix> <red>附近没有车站，请到车站站台附近再打开任务板</red>"]
       entry-time: ["<gray>计划发车</gray> <white><time></white>"]
@@ -341,8 +344,8 @@ drive:
         overrun: ["<red><offset> · 越出窗口</red>"]
         short: ["<red><offset> · 欠标超时</red>"]
     confirm-seat-chat: ["<prefix> <white>你已坐在列车 <aqua><train></aqua> 第 <yellow><car></yellow> 节（共 <cars> 节）。</white><gray>确认是前进方向的驾驶室后</gray> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive on</white>'><green>[确认接班]</green></hover></click>"]
-    continue-offer: ["<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"]
-    continue-offer-code: ["<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"]
+    continue-offer: ["<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>", "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"]
+    continue-offer-code: ["<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>", "<prefix> <white>本趟已结算。本车接续担当车次 <aqua><trip></aqua>，计划 <white><time></white> 发车；可继续驾驶，下一趟单独计分</white> <click:run_command:'/fta drive off'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive off</white>'><red>[结束驾驶]</red></hover></click>"]
     state:
       abandoned: ["已放弃"]
     next-trip-layover: ["<prefix> <white>本车正在待命，下一趟担当车次 <aqua><trip></aqua>，开往 <yellow><destination></yellow>，计划 <white><time></white> 发车</white>"]
@@ -540,6 +543,7 @@ drive:
       setup-interlocked: ["<red>请先断开后一步（例如先断开主断路器再降弓）</red>"]
       no-door-animation: ["<red>这辆车没有对应的车门动画</red>"]
   driver:
+    skip-handback: ["<prefix> <red>本趟已越站 <white><count></white> 次，列车停车后交还自动运行，本趟任务判为未完成</red>"]
     congestion:
       warn: ["<prefix> <gold>后方列车被本列车挡住已有 <white><seconds></white> 秒，请尽快恢复运行；继续阻挡将转为 ATO</gold>"]
       ato: ["<prefix> <yellow>后方列车被挡住过久，本列车已转为 ATO 运行</yellow>"]

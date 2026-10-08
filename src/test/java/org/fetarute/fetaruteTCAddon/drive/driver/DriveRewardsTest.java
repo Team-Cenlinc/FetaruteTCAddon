@@ -57,7 +57,7 @@ class DriveRewardsTest {
   @DisplayName("钱币数额两位小数、去掉末尾的 0")
   void amountFormatting() {
     assertEquals("78", DriveRewards.formatAmount(78.0));
-    assertEquals("12.34", DriveRewards.formatAmount(12.349));
+    assertEquals("12.35", DriveRewards.formatAmount(12.349));
     assertEquals("0.5", DriveRewards.formatAmount(0.5));
   }
 
@@ -200,7 +200,42 @@ class DriveRewardsTest {
     link.trackDistance(true);
 
     TaskScore settled = link.settleTrip();
-    assertEquals(1, settled.atoStops());
+    assertEquals(2, settled.atoStops(), "超时那站挂起后照计 + 终点站");
     assertEquals(50.0, settled.atoBlocks(), 1e-9);
+  }
+
+  @Test
+  @DisplayName("浮点误差不少发：4.35 公里 × 每公里 100 经验按 435 发，不是 434")
+  void roundingDoesNotUnderpay() {
+    TaskScore score = new TaskScore();
+    score.addDistance(4350.0, false);
+    DriveRewardConfig config =
+        new DriveRewardConfig(true, 100, 0, 0.1, 0, 0.5, java.util.Map.of(), "", "FRD", 3);
+
+    DriveRewards.Reward reward = DriveRewards.of(config, score, ScoreRules.Grade.B);
+
+    assertEquals(435, reward.experience());
+    assertEquals(0.44, reward.money(), 1e-9, "0.435 四舍五入到分");
+  }
+
+  @Test
+  @DisplayName("ATO 下终点站这一站记进刚结算的这一趟；下一趟从这里发车不再记，开到下一站照常记")
+  void atoTerminalStopBelongsToTheSettledTrip() {
+    double[] odometer = {0.0};
+    long[] clock = {0L};
+    DriverLink link =
+        new DriverLink(UUID.randomUUID(), "T-1", null, () -> odometer[0], () -> clock[0]);
+    link.enterAto();
+    confirmedStop(link, clock, 0L);
+    odometer[0] = 500.0;
+
+    TaskScore settled = link.settleTrip();
+    assertEquals(2, settled.atoStops(), "中途一站 + 终点站");
+
+    confirmedStop(link, clock, 1000L);
+    assertEquals(0, link.score().atoStops(), "从终点站发车：这一站已记进上一趟");
+    odometer[0] = 900.0;
+    confirmedStop(link, clock, 2000L);
+    assertEquals(1, link.score().atoStops());
   }
 }

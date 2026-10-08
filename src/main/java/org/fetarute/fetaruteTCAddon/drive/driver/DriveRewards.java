@@ -40,31 +40,45 @@ public final class DriveRewards {
         manualStops++;
       }
     }
-    double manualKm = score.manualBlocks() / BLOCKS_PER_KM;
-    double atoKm = score.atoBlocks() / BLOCKS_PER_KM;
-    double scale = config.gradeMultiplier(grade);
-    double experience =
-        scale
-            * (manualKm * config.experiencePerKm()
-                + manualStops * config.experiencePerStop()
-                + config.atoMultiplier()
-                    * (atoKm * config.experiencePerKm()
-                        + score.atoStops() * config.experiencePerStop()));
-    double money =
-        scale
-            * (manualKm * config.moneyPerKm()
-                + manualStops * config.moneyPerStop()
-                + config.atoMultiplier()
-                    * (atoKm * config.moneyPerKm() + score.atoStops() * config.moneyPerStop()));
+    Basis basis =
+        new Basis(
+            score.manualBlocks() / BLOCKS_PER_KM,
+            manualStops,
+            score.atoBlocks() / BLOCKS_PER_KM,
+            score.atoStops(),
+            config.atoMultiplier(),
+            config.gradeMultiplier(grade));
+    double experience = basis.amount(config.experiencePerKm(), config.experiencePerStop());
+    double money = basis.amount(config.moneyPerKm(), config.moneyPerStop());
+    // 浮点乘出来的整数常差一点点（35.99999999999999）：先补一个极小量再取整，钱币四舍五入到分。
     return new Reward(
-        (int) Math.floor(Math.max(0.0, experience)),
-        BigDecimal.valueOf(Math.max(0.0, money)).setScale(2, RoundingMode.DOWN).doubleValue());
+        (int) Math.floor(Math.max(0.0, experience) + ROUNDING_EPSILON),
+        BigDecimal.valueOf(Math.max(0.0, money)).setScale(2, RoundingMode.HALF_UP).doubleValue());
+  }
+
+  private static final double ROUNDING_EPSILON = 1.0e-9;
+
+  /** 一趟的里程、停站与系数：经验与钱币用同一个式子，只是每公里、每站的数不同。 */
+  private record Basis(
+      double manualKm,
+      int manualStops,
+      double atoKm,
+      int atoStops,
+      double atoMultiplier,
+      double gradeMultiplier) {
+
+    double amount(double perKm, double perStop) {
+      return gradeMultiplier
+          * (manualKm * perKm
+              + manualStops * perStop
+              + atoMultiplier * (atoKm * perKm + atoStops * perStop));
+    }
   }
 
   /** 钱币数额写进命令与提示：两位小数，去掉末尾的 0。 */
   public static String formatAmount(double amount) {
     return BigDecimal.valueOf(amount)
-        .setScale(2, RoundingMode.DOWN)
+        .setScale(2, RoundingMode.HALF_UP)
         .stripTrailingZeros()
         .toPlainString();
   }
