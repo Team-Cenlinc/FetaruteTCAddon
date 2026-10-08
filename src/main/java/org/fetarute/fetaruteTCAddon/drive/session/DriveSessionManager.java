@@ -5180,11 +5180,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         && task.points() < 0;
   }
 
-  /**
-   * 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给。
-   *
-   * <p>只给本插件自己的任务（任务板领的、接管时记成的、接续的）：路考与练习不给；其他插件经 {@code DriveApi} 派的任务由派任务的插件自己发奖励，这里不重复发。
-   */
+  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给。 */
   static boolean earnsReward(DriverTask.State state, String source) {
     return rewardableSource(source)
         && (state == DriverTask.State.COMPLETED
@@ -5192,11 +5188,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             || state == DriverTask.State.INTERRUPTED);
   }
 
-  /** 本插件自己的任务来源：任务板、接管、接续。 */
+  /** 发奖励的任务来源：路考与练习以外都发，其他插件经 {@code DriveApi} 派的任务也发。 */
   static boolean rewardableSource(String source) {
-    return DriverTask.SOURCE_BOARD.equals(source)
-        || DriverTask.SOURCE_TAKEOVER.equals(source)
-        || DriverTask.SOURCE_CONTINUATION.equals(source);
+    return !DriverTask.SOURCE_EXAM.equals(source) && !DriverTask.SOURCE_TRAINING.equals(source);
   }
 
   /** 奖励提示用哪条文案：发了经验与钱币、只发了其一、判为未完成不发；什么也没发时为空。 */

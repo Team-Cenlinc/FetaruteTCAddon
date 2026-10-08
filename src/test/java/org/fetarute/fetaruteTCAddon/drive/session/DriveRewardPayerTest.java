@@ -129,7 +129,7 @@ class DriveRewardPayerTest {
   }
 
   @Test
-  @DisplayName("开到终点、中途结束、被收回的给；卡住被收回、超时、越站交还的不给；只给本插件自己的任务")
+  @DisplayName("开到终点、中途结束、被收回的给；卡住被收回、超时、越站交还的不给；路考与练习不给")
   void whichTasksEarnRewards() {
     assertTrue(
         DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_BOARD));
@@ -143,9 +143,9 @@ class DriveRewardPayerTest {
         DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_EXAM));
     assertFalse(
         DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_TRAINING));
-    assertFalse(
+    assertTrue(
         DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, "typewriter"),
-        "其他插件经 DriveApi 派的任务由那个插件自己发奖励");
+        "其他插件经 DriveApi 派的任务照发");
   }
 
   @Test
