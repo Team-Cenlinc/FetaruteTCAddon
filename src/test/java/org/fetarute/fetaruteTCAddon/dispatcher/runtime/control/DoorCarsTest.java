@@ -66,4 +66,15 @@ class DoorCarsTest {
     assertFalse(cars.includes(null));
     assertFalse(cars.includes(fourth));
   }
+
+  @Test
+  @DisplayName("只含一节车厢：逐节开门时每节车单独播动画")
+  void onlyOneCar() {
+    DoorCars only = DoorCars.only(second);
+
+    assertFalse(only.all());
+    assertTrue(only.includes(second));
+    assertFalse(only.includes(first));
+    assertFalse(DoorCars.only(null).includes(first));
+  }
 }

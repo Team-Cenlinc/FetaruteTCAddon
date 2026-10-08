@@ -78,7 +78,7 @@ public final class DriveDoors {
     ManualDoorSide side;
     if (other != null && other.isOpen()) {
       // 对侧门已开：这一侧必须是另一组动画，否则两个按钮会操纵同一扇门而状态错乱。
-      side = new ManualDoorSide(!other.modelLeft(), "opposite-of-open-door");
+      side = other.side().opposite();
     } else {
       side =
           AutoStationDoorController.resolveManualDoorSide(
@@ -123,7 +123,7 @@ public final class DriveDoors {
     // 对侧已记成开着：这一侧必须是另一组动画，与 toggle 一致，免得两个句柄操纵同一扇门。
     ManualDoorSide side =
         other != null && other.isOpen()
-            ? new ManualDoorSide(!other.modelLeft(), "opposite-of-open-door")
+            ? other.side().opposite()
             : AutoStationDoorController.resolveManualDoorSide(
                 current,
                 nowFacing,

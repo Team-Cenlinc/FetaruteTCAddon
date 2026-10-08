@@ -126,7 +126,9 @@ public final class AutoStationDoorController {
   }
 
   /**
-   * 同上，只开关 {@code cars} 里那几节车厢的门（停车位置标写了 {@code door:} 时）。门侧仍按整列车的门附件判定。
+   * 同上，只开关 {@code cars} 里那几节车厢的门（停车位置标写了 {@code door:} 时）。
+   *
+   * <p>门侧逐节判定：每节车只看自己的门附件，反着挂的车厢开另一组动画，两种命名（{@code doorL} 与旧名 {@code doorL10}）混用的列车各播各的。
    *
    * @param cars 开关门的车厢；为 {@code null} 时全车
    */
@@ -151,19 +153,157 @@ public final class AutoStationDoorController {
       return DoorSession.empty(resolved, "door=" + doorDirection + ",desired=unknown", scope);
     }
     BlockFace worldDoorDirection = desiredOpt.get();
-    DoorSideDecision decision = chooseDoorSideByWorldDecision(group, worldDoorDirection);
-    if (decision.selection() == null) {
+    Optional<CarSides> sides = planCarSides(group, worldDoorDirection, scope);
+    if (sides.isEmpty()) {
+      DoorSideDecision decision = chooseDoorSideByWorldDecision(group, worldDoorDirection);
       return DoorSession.empty(
-          resolved, decision.summary() + ",fallback=worldDirectionPositionRequired", scope);
+          resolved,
+          "perCar=unavailable;" + decision.summary() + ",fallback=worldDirectionPositionRequired",
+          scope);
     }
-    DoorSideSelection selection = decision.selection();
-    return new DoorSession(
-        group,
-        selection.openLeft,
-        selection.openRight,
-        resolved,
-        decision.summary() + carsSummary,
-        scope);
+    return DoorSession.perCar(
+        group, sides.get().choices(), resolved, sides.get().summary() + carsSummary, scope);
+  }
+
+  /**
+   * 一节车厢开哪一组动画。
+   *
+   * @param member 车厢
+   * @param carNumber 在编组里的节数（从 1 起），仅用于诊断输出
+   * @param openLeft {@code true} 为 {@code doorL}（左右按这节车自己的模型定义）
+   * @param inferred 是否由相邻车厢的朝向推出（这节车的门附件判不出）
+   */
+  private record CarChoice(
+      MinecartMember<?> member, int carNumber, boolean openLeft, boolean inferred) {}
+
+  /**
+   * 逐节判定的结果。
+   *
+   * @param choices 每节有门动画的开门车厢
+   * @param summary 诊断输出
+   */
+  private record CarSides(List<CarChoice> choices, String summary) {}
+
+  /**
+   * 逐节判定开门侧：每节车只比较自己的 {@code doorL}/{@code doorR} 附件在世界方位上的投影。判不出的车厢（门附件没有位置信息、两侧重合） 按相邻已判定车厢的朝向推（见
+   * {@link #inferCarSides}）。
+   *
+   * @return 没有一节判得出时为空
+   */
+  private static Optional<CarSides> planCarSides(
+      MinecartGroup group, BlockFace worldDoorDirection, DoorCars cars) {
+    if (group == null || worldDoorDirection == null) {
+      return Optional.empty();
+    }
+    List<MinecartMember<?>> members = new ArrayList<>();
+    List<Integer> carNumbers = new ArrayList<>();
+    int number = 0;
+    for (MinecartMember<?> member : group) {
+      number++;
+      if (member != null && opensDoors(cars, member) && hasDoorAnimation(member)) {
+        members.add(member);
+        carNumbers.add(number);
+      }
+    }
+    if (members.isEmpty()) {
+      return Optional.empty();
+    }
+    List<Boolean> decided = new ArrayList<>(members.size());
+    List<Vector> forwards = new ArrayList<>(members.size());
+    for (MinecartMember<?> member : members) {
+      DoorSideSelection selection =
+          chooseDoorSideByWorldDecision(List.of(member), worldDoorDirection).selection();
+      decided.add(
+          selection == null || selection.openLeft == selection.openRight
+              ? null
+              : selection.openLeft);
+      forwards.add(orientationForward(member));
+    }
+    List<Boolean> resolved = inferCarSides(decided, forwards);
+    List<CarChoice> choices = new ArrayList<>(members.size());
+    StringBuilder summary = new StringBuilder("perCar(face=").append(worldDoorDirection);
+    for (int i = 0; i < members.size(); i++) {
+      Boolean left = resolved.get(i);
+      if (left == null) {
+        return Optional.empty();
+      }
+      boolean inferred = decided.get(i) == null;
+      choices.add(new CarChoice(members.get(i), carNumbers.get(i), left, inferred));
+      summary
+          .append(i == 0 ? ";" : ",")
+          .append(carNumbers.get(i))
+          .append(':')
+          .append(left ? "L" : "R")
+          .append(inferred ? "~" : "");
+    }
+    return Optional.of(new CarSides(List.copyOf(choices), summary.append(')').toString()));
+  }
+
+  /**
+   * 判不出开门侧的车厢按相邻已判定车厢推：两节车的朝向相同（前向量夹角不超过 90°）开同一组动画，相反开另一组。 先找最近的已判定车厢，前后一样近时取前面的；读不到朝向时按相同处理。
+   *
+   * @param decided 每节车厢判出的结果：{@code true} 为 {@code doorL}，{@code false} 为 {@code doorR}，{@code
+   *     null} 为判不出
+   * @param forwards 每节车厢模型的前向量；读不到时为 {@code null}
+   * @return 补齐后的结果；一节都没判出时原样返回
+   */
+  static List<Boolean> inferCarSides(List<Boolean> decided, List<Vector> forwards) {
+    List<Boolean> out = new ArrayList<>(decided);
+    for (int i = 0; i < decided.size(); i++) {
+      if (decided.get(i) != null) {
+        continue;
+      }
+      int source = nearestDecided(decided, i);
+      if (source < 0) {
+        continue;
+      }
+      boolean same = sameOrientation(forwards, i, source);
+      out.set(i, same ? decided.get(source) : !decided.get(source));
+    }
+    return out;
+  }
+
+  private static int nearestDecided(List<Boolean> decided, int index) {
+    for (int distance = 1; distance < decided.size(); distance++) {
+      int before = index - distance;
+      if (before >= 0 && decided.get(before) != null) {
+        return before;
+      }
+      int after = index + distance;
+      if (after < decided.size() && decided.get(after) != null) {
+        return after;
+      }
+    }
+    return -1;
+  }
+
+  private static boolean sameOrientation(List<Vector> forwards, int a, int b) {
+    Vector first = forwards == null || a >= forwards.size() ? null : forwards.get(a);
+    Vector second = forwards == null || b >= forwards.size() ? null : forwards.get(b);
+    if (first == null || second == null) {
+      return true;
+    }
+    return first.dot(second) >= 0.0;
+  }
+
+  private static Vector orientationForward(MinecartMember<?> member) {
+    try {
+      return member.getOrientationForward();
+    } catch (RuntimeException ex) {
+      return null;
+    }
+  }
+
+  /** 这节车有没有门动画（{@code doorL}/{@code doorR} 或旧名 {@code doorL10}/{@code doorR10}）。 */
+  private static boolean hasDoorAnimation(MinecartMember<?> member) {
+    Collection<String> names;
+    try {
+      names = member.getAnimationNames();
+    } catch (RuntimeException ex) {
+      return false;
+    }
+    return containsAnyAnimation(names, LEFT_ANIMATIONS)
+        || containsAnyAnimation(names, RIGHT_ANIMATIONS);
   }
 
   /**
@@ -207,9 +347,14 @@ public final class AutoStationDoorController {
       this.side = side;
     }
 
-    /** 这扇门播放的动画侧：{@code true} 为 {@code doorL}。 */
+    /** 这扇门播放的动画侧：{@code true} 为 {@code doorL}。逐节判定时是整列判定的结果，各节以 {@link #side()} 的世界方位为准。 */
     public boolean modelLeft() {
       return side.modelLeft();
+    }
+
+    /** 这扇门开的是哪一侧。 */
+    public ManualDoorSide side() {
+      return side;
     }
 
     /** 这扇门选用哪一侧动画的判定过程，仅用于诊断输出。 */
@@ -270,12 +415,29 @@ public final class AutoStationDoorController {
   }
 
   /**
-   * 手动开关门选用的动画侧。
+   * 手动开关门选用的一侧。
    *
-   * @param modelLeft {@code true} 为 {@code doorL}，{@code false} 为 {@code doorR}（左右按车模型的定义）
+   * @param modelLeft 整列判定的动画侧：{@code true} 为 {@code doorL}，{@code false} 为 {@code
+   *     doorR}（左右按车模型的定义）； 读不到世界方位、逐节也判不出时全车按它开
    * @param summary 判定过程，仅用于诊断输出
+   * @param worldFace 这一侧的世界方位；有时逐节按它判定每节车开哪组动画
    */
-  public record ManualDoorSide(boolean modelLeft, String summary) {}
+  public record ManualDoorSide(boolean modelLeft, String summary, Optional<BlockFace> worldFace) {
+    public ManualDoorSide {
+      worldFace = worldFace == null ? Optional.empty() : worldFace;
+    }
+
+    /** 只知道动画侧、不知道世界方位：全车按它开。 */
+    public ManualDoorSide(boolean modelLeft, String summary) {
+      this(modelLeft, summary, Optional.empty());
+    }
+
+    /** 对侧：另一组动画、相反的世界方位（逐节判定时每节车各自换到另一组）。 */
+    public ManualDoorSide opposite() {
+      return new ManualDoorSide(
+          !modelLeft, "opposite-of-open-door", worldFace.map(BlockFace::getOppositeFace));
+    }
+  }
 
   /**
    * 判定驾驶员左手边或右手边的车门对应哪一侧动画。
@@ -301,9 +463,11 @@ public final class AutoStationDoorController {
     DoorSideSelection selection = decision.selection();
     String prefix = "side=" + side + "->" + sideFace;
     if (selection != null && selection.openLeft != selection.openRight) {
-      return new ManualDoorSide(selection.openLeft, prefix + ";" + decision.summary());
+      return new ManualDoorSide(
+          selection.openLeft, prefix + ";" + decision.summary(), Optional.of(sideFace));
     }
-    return new ManualDoorSide(fallbackModelLeft, prefix + fallback + ";" + decision.summary());
+    return new ManualDoorSide(
+        fallbackModelLeft, prefix + fallback + ";" + decision.summary(), Optional.of(sideFace));
   }
 
   /**
@@ -340,6 +504,13 @@ public final class AutoStationDoorController {
     boolean left = side.modelLeft();
     DoorCars scope = cars == null ? DoorCars.ALL : cars;
     String summary = scope.all() ? side.summary() : side.summary() + ",cars=" + scope.summary();
+    Optional<CarSides> perCar = side.worldFace().flatMap(face -> planCarSides(group, face, scope));
+    if (perCar.isPresent()) {
+      return new ManualDoor(
+          DoorSession.perCar(
+              group, perCar.get().choices(), chime, perCar.get().summary() + ";" + summary, scope),
+          side);
+    }
     return new ManualDoor(new DoorSession(group, left, !left, chime, summary, scope), side);
   }
 
@@ -405,7 +576,7 @@ public final class AutoStationDoorController {
    * <p>当门附件尚未 attach 或无法计算位置时返回 null，让上层继续等待/重试。
    */
   private static DoorSideDecision chooseDoorSideByWorldDecision(
-      MinecartGroup group, BlockFace worldDoorDirection) {
+      Iterable<? extends MinecartMember<?>> group, BlockFace worldDoorDirection) {
     if (group == null || worldDoorDirection == null || !isHorizontalCompass(worldDoorDirection)) {
       return new DoorSideDecision(
           null, "worldSide=invalidInput(worldDoorDirection=" + worldDoorDirection + ")");
@@ -426,7 +597,7 @@ public final class AutoStationDoorController {
           null, "worldSide=noWorld(worldDoorDirection=" + worldDoorDirection + ")");
     }
 
-    Collection<String> animationNames = group.getAnimationNames();
+    Collection<String> animationNames = animationNamesOf(group);
     String leftName = findAnimationName(animationNames, DOOR_LEFT);
     leftName = leftName != null ? leftName : findAnimationName(animationNames, DOOR_LEFT_LEGACY);
     String rightName = findAnimationName(animationNames, DOOR_RIGHT);
@@ -1301,18 +1472,98 @@ public final class AutoStationDoorController {
     return face;
   }
 
-  /** 一次开关门会话，包含左右侧各自的动作策略。 */
+  /**
+   * 一节车厢的开关门动作。
+   *
+   * @param member 车厢
+   * @param carNumber 在编组里的节数（从 1 起），仅用于诊断输出
+   * @param openLeft 是否开 {@code doorL} 一组
+   * @param openRight 是否开 {@code doorR} 一组
+   * @param left {@code doorL} 一组的动作
+   * @param right {@code doorR} 一组的动作
+   */
+  private record CarDoors(
+      MinecartMember<?> member,
+      int carNumber,
+      boolean openLeft,
+      boolean openRight,
+      DoorAction left,
+      DoorAction right) {
+
+    /** 按这节车自己的动画名建动作：有 {@code doorL}/{@code doorR} 用它，没有再用旧名 {@code doorL10}/{@code doorR10}。 */
+    static CarDoors of(
+        MinecartMember<?> member, int carNumber, boolean openLeft, boolean openRight) {
+      return new CarDoors(
+          member,
+          carNumber,
+          openLeft,
+          openRight,
+          openLeft ? buildAction(member, DOOR_LEFT, DOOR_LEFT_LEGACY) : DoorAction.none(),
+          openRight ? buildAction(member, DOOR_RIGHT, DOOR_RIGHT_LEGACY) : DoorAction.none());
+    }
+
+    boolean opens() {
+      return openLeft || openRight;
+    }
+
+    boolean open(MinecartGroup group) {
+      boolean opened = false;
+      if (openLeft) {
+        opened |= left.open(group);
+      }
+      if (openRight) {
+        opened |= right.open(group);
+      }
+      return opened;
+    }
+
+    boolean close(MinecartGroup group) {
+      boolean closed = false;
+      if (openLeft) {
+        closed |= left.close(group);
+      }
+      if (openRight) {
+        closed |= right.close(group);
+      }
+      return closed;
+    }
+
+    boolean closePending() {
+      return (openLeft && left.closePending()) || (openRight && right.closePending());
+    }
+
+    long closeDurationTicks() {
+      return Math.max(
+          openLeft ? left.closeDurationTicks() : -1L, openRight ? right.closeDurationTicks() : -1L);
+    }
+
+    boolean usesLegacy() {
+      return (openLeft && left instanceof DoorAction.Legacy)
+          || (openRight && right instanceof DoorAction.Legacy);
+    }
+
+    String describe() {
+      StringBuilder out = new StringBuilder().append(carNumber).append(':');
+      if (openLeft) {
+        out.append("L=").append(describeAction(left, true));
+      }
+      if (openRight) {
+        out.append(openLeft ? "," : "").append("R=").append(describeAction(right, true));
+      }
+      return out.toString();
+    }
+  }
+
+  /** 一次开关门会话：每节开门车厢各自开哪一组门、用哪个动画。 */
   static final class DoorSession {
     private final MinecartGroup group;
-    private final boolean openLeft;
-    private final boolean openRight;
-    private final DoorAction leftAction;
-    private final DoorAction rightAction;
+    private final List<CarDoors> doors;
     private final DoorChimeSettings chimeSettings;
     private final String selectionSummary;
     private final DoorCars cars;
     private boolean openSucceeded;
 
+    /** 全部开门车厢开同一组：双侧开门，或手动开关门逐节判不出时。 */
     private DoorSession(
         MinecartGroup group,
         boolean openLeft,
@@ -1320,23 +1571,62 @@ public final class AutoStationDoorController {
         DoorChimeSettings chimeSettings,
         String selectionSummary,
         DoorCars cars) {
+      this(
+          group,
+          uniformDoors(group, cars, openLeft, openRight),
+          chimeSettings,
+          selectionSummary,
+          cars);
+    }
+
+    private DoorSession(
+        MinecartGroup group,
+        List<CarDoors> doors,
+        DoorChimeSettings chimeSettings,
+        String selectionSummary,
+        DoorCars cars) {
       this.group = group;
-      this.openLeft = openLeft;
-      this.openRight = openRight;
+      this.doors = doors == null ? List.of() : List.copyOf(doors);
       this.chimeSettings = chimeSettings == null ? DoorChimeSettings.none() : chimeSettings;
       this.selectionSummary = selectionSummary != null ? selectionSummary : "";
       this.cars = cars == null ? DoorCars.ALL : cars;
-      this.leftAction =
-          openLeft ? buildAction(group, DOOR_LEFT, DOOR_LEFT_LEGACY, this.cars) : DoorAction.none();
-      this.rightAction =
-          openRight
-              ? buildAction(group, DOOR_RIGHT, DOOR_RIGHT_LEGACY, this.cars)
-              : DoorAction.none();
+    }
+
+    /** 逐节判定的会话：每节车开它自己判出的那一组。 */
+    static DoorSession perCar(
+        MinecartGroup group,
+        List<CarChoice> choices,
+        DoorChimeSettings chimeSettings,
+        String selectionSummary,
+        DoorCars cars) {
+      List<CarDoors> doors = new ArrayList<>(choices.size());
+      for (CarChoice choice : choices) {
+        doors.add(
+            CarDoors.of(
+                choice.member(), choice.carNumber(), choice.openLeft(), !choice.openLeft()));
+      }
+      return new DoorSession(group, doors, chimeSettings, selectionSummary, cars);
+    }
+
+    private static List<CarDoors> uniformDoors(
+        MinecartGroup group, DoorCars cars, boolean openLeft, boolean openRight) {
+      if (group == null || (!openLeft && !openRight)) {
+        return List.of();
+      }
+      List<CarDoors> doors = new ArrayList<>();
+      int number = 0;
+      for (MinecartMember<?> member : group) {
+        number++;
+        if (member != null && opensDoors(cars, member)) {
+          doors.add(CarDoors.of(member, number, openLeft, openRight));
+        }
+      }
+      return doors;
     }
 
     /** 返回空会话（无开关门动作）；记下开门车厢，之后按同样的车厢重新规划。 */
     static DoorSession empty(DoorChimeSettings settings, String reason, DoorCars cars) {
-      return new DoorSession(null, false, false, settings, reason, cars);
+      return new DoorSession(null, List.of(), settings, reason, cars);
     }
 
     /** 开关门的车厢。 */
@@ -1346,44 +1636,66 @@ public final class AutoStationDoorController {
 
     /** 是否存在任一侧的开关门动作。 */
     boolean hasActions() {
-      return openLeft || openRight;
+      for (CarDoors car : doors) {
+        if (car.opens()) {
+          return true;
+        }
+      }
+      return false;
     }
 
+    /** 是否有车厢开 {@code doorL} 一组。 */
     boolean openLeft() {
-      return openLeft;
+      for (CarDoors car : doors) {
+        if (car.openLeft()) {
+          return true;
+        }
+      }
+      return false;
     }
 
+    /** 是否有车厢开 {@code doorR} 一组。 */
     boolean openRight() {
-      return openRight;
+      for (CarDoors car : doors) {
+        if (car.openRight()) {
+          return true;
+        }
+      }
+      return false;
     }
 
     String debugSummary() {
-      String leftSummary = describeAction(leftAction, openLeft);
-      String rightSummary = describeAction(rightAction, openRight);
       String select =
           selectionSummary == null || selectionSummary.isBlank() ? "-" : selectionSummary;
-      return "select=" + select + ", left=" + leftSummary + ", right=" + rightSummary;
+      StringBuilder out = new StringBuilder("select=").append(select).append(", doors=");
+      int described = 0;
+      for (CarDoors car : doors) {
+        if (car.opens()) {
+          out.append(described++ == 0 ? "" : ";").append(car.describe());
+        }
+      }
+      if (described == 0) {
+        out.append("none");
+      }
+      return out.toString();
     }
 
     /**
      * 执行开门动作。
      *
-     * @return 若至少一侧成功触发动画则返回 true
+     * @return 若至少一节车成功触发动画则返回 true
      */
     boolean open() {
       if (group == null) {
         return false;
       }
       boolean opened = false;
-      if (openLeft) {
-        opened |= leftAction.open(group);
-      }
-      if (openRight) {
-        opened |= rightAction.open(group);
+      for (CarDoors car : doors) {
+        opened |= car.open(group);
       }
       if (opened) {
         openSucceeded = true;
-        playOpenChime(group, cars, openLeft, openRight, chimeSettings);
+        playOpenChime(group, cars, openLeft(), openRight(), chimeSettings);
       }
       return opened;
     }
@@ -1391,7 +1703,7 @@ public final class AutoStationDoorController {
     /**
      * 执行关门动作（通常为反向播放/重置）。
      *
-     * @return 若至少一侧成功触发动画则返回 true
+     * @return 若至少一节车成功触发动画则返回 true
      */
     boolean close() {
       return close(true);
@@ -1422,10 +1734,12 @@ public final class AutoStationDoorController {
 
     /** 是否使用 legacy 门动画（doorL10/doorR10 或其他 legacy 片段）。 */
     boolean usesLegacyDoorAnimation() {
-      if (openLeft && leftAction instanceof DoorAction.Legacy) {
-        return true;
+      for (CarDoors car : doors) {
+        if (car.usesLegacy()) {
+          return true;
+        }
       }
-      return openRight && rightAction instanceof DoorAction.Legacy;
+      return false;
     }
 
     /** 是否曾成功触发开门动画。 */
@@ -1433,11 +1747,12 @@ public final class AutoStationDoorController {
       return openSucceeded;
     }
 
-    /** 估算关门动画时长（tick）；量不出时为 -1。 */
+    /** 估算关门动画时长（tick），取各节车里最长的；量不出时为 -1。 */
     long estimatedCloseDurationTicks() {
-      long left = leftAction.closeDurationTicks();
-      long right = rightAction.closeDurationTicks();
-      long max = Math.max(left, right);
+      long max = -1L;
+      for (CarDoors car : doors) {
+        max = Math.max(max, car.closeDurationTicks());
+      }
       return max > 0L ? max : -1L;
     }
 
@@ -1447,18 +1762,20 @@ public final class AutoStationDoorController {
         return false;
       }
       boolean closed = false;
-      if (openLeft) {
-        closed |= leftAction.close(group);
-      }
-      if (openRight) {
-        closed |= rightAction.close(group);
+      for (CarDoors car : doors) {
+        closed |= car.close(group);
       }
       return closed;
     }
 
     /** 关门动画还排在附件的队里没轮到：车门其实还开着，不能放行发车。 */
     boolean closePending() {
-      return (openLeft && leftAction.closePending()) || (openRight && rightAction.closePending());
+      for (CarDoors car : doors) {
+        if (car.closePending()) {
+          return true;
+        }
+      }
+      return false;
     }
 
     /** 播放关门提示音（不触发关门动画）。 */
@@ -1466,7 +1783,7 @@ public final class AutoStationDoorController {
       if (group == null || !openSucceeded) {
         return;
       }
-      AutoStationDoorController.playCloseSound(group, cars, openLeft, openRight, chimeSettings);
+      AutoStationDoorController.playCloseSound(group, cars, doors, chimeSettings);
     }
   }
 
@@ -1481,30 +1798,45 @@ public final class AutoStationDoorController {
   // 动画从第一次起就能动。去掉动画播放后剩下的 getTransform()/getChildren() 只是 getter，整个预热已删除。
 
   /**
-   * 构建门动画动作。
+   * 构建一节车厢的门动画动作。
    *
-   * <p>优先 doorL/doorR，缺失时尝试解析 doorL10/doorR10 的“开门片段”，再不行就直接播放 legacy 动画。
+   * <p>按这节车自己的动画名：优先 doorL/doorR，缺失时尝试解析 doorL10/doorR10 的“开门片段”，再不行就直接播放 legacy 动画。
    */
   private static DoorAction buildAction(
-      MinecartGroup group, String primaryName, String legacyName, DoorCars cars) {
-    if (group == null) {
+      MinecartMember<?> member, String primaryName, String legacyName) {
+    if (member == null) {
       return DoorAction.none();
     }
-    Collection<String> names = group.getAnimationNames();
+    List<MinecartMember<?>> car = List.of(member);
+    Collection<String> names = member.getAnimationNames();
     String primary = findAnimationName(names, primaryName);
     if (primary != null) {
-      List<Attachment> targets = findAnimationTargets(group, primary, cars);
-      return DoorAction.named(primary, targets);
+      return DoorAction.named(primary, findAnimationTargets(car, primary));
     }
     String legacy = findAnimationName(names, legacyName);
     if (legacy == null) {
       return DoorAction.none();
     }
-    List<Attachment> legacyTargets = findAnimationTargets(group, legacy, cars);
+    List<Attachment> legacyTargets = findAnimationTargets(car, legacy);
     if (legacyTargets.isEmpty()) {
       return DoorAction.none();
     }
-    return buildLegacyAction(group, legacy, legacyTargets, cars);
+    return buildLegacyAction(member, legacy, legacyTargets, DoorCars.only(cartId(member)));
+  }
+
+  /** 这些车厢上全部动画的名字。 */
+  private static Collection<String> animationNamesOf(
+      Iterable<? extends MinecartMember<?>> members) {
+    if (members instanceof MinecartGroup group) {
+      return group.getAnimationNames();
+    }
+    java.util.Set<String> names = new java.util.LinkedHashSet<>();
+    for (MinecartMember<?> member : members) {
+      if (member != null) {
+        names.addAll(member.getAnimationNames());
+      }
+    }
+    return names;
   }
 
   /** 在动画名列表中做不区分大小写匹配。 */
@@ -1525,13 +1857,14 @@ public final class AutoStationDoorController {
    *
    * <p>用于只触发门附件，避免 legacy 动画影响整车。
    */
-  private static List<Attachment> findAnimationTargets(MinecartGroup group, String name) {
+  private static List<Attachment> findAnimationTargets(
+      Iterable<? extends MinecartMember<?>> group, String name) {
     return findAnimationTargets(group, name, DoorCars.ALL);
   }
 
   /** 同上，只收集 {@code cars} 里那几节车厢的附件。 */
   private static List<Attachment> findAnimationTargets(
-      MinecartGroup group, String name, DoorCars cars) {
+      Iterable<? extends MinecartMember<?>> group, String name, DoorCars cars) {
     if (group == null || name == null || name.isBlank()) {
       return List.of();
     }
@@ -1628,11 +1961,11 @@ public final class AutoStationDoorController {
   }
 
   private static DoorAction buildLegacyAction(
-      MinecartGroup group, String legacyName, List<Attachment> targets, DoorCars cars) {
+      MinecartMember<?> member, String legacyName, List<Attachment> targets, DoorCars cars) {
     if (legacyName == null || targets == null) {
       return DoorAction.none();
     }
-    Optional<AnimationPair> modelFallback = buildLegacyModelFallback(group, legacyName);
+    Optional<AnimationPair> modelFallback = buildLegacyModelFallback(member, legacyName);
     List<LegacyTarget> pairs = new ArrayList<>();
     int totalTargets = targets.size();
     int splitOk = 0;
@@ -1658,11 +1991,10 @@ public final class AutoStationDoorController {
   }
 
   private static Optional<AnimationPair> buildLegacyModelFallback(
-      MinecartGroup group, String legacyName) {
-    if (group == null || legacyName == null) {
+      MinecartMember<?> member, String legacyName) {
+    if (legacyName == null) {
       return Optional.empty();
     }
-    MinecartMember<?> member = group.head();
     if (member == null || member.getProperties() == null) {
       return Optional.empty();
     }
@@ -2387,12 +2719,8 @@ public final class AutoStationDoorController {
    * <p>只有附近存在玩家时才播放，避免无观众时的额外计算。
    */
   private static void playCloseSound(
-      MinecartGroup group,
-      DoorCars cars,
-      boolean openLeft,
-      boolean openRight,
-      DoorChimeSettings settings) {
-    if (group == null || (!openLeft && !openRight)) {
+      MinecartGroup group, DoorCars cars, List<CarDoors> doors, DoorChimeSettings settings) {
+    if (group == null || doors == null || doors.stream().noneMatch(CarDoors::opens)) {
       return;
     }
     DoorChimeSettings resolved = settings == null ? DoorChimeSettings.none() : settings;
@@ -2404,7 +2732,7 @@ public final class AutoStationDoorController {
     if (!resolved.defaultCloseSound().isEnabled()) {
       return;
     }
-    playDefaultSoundAtDoors(group, cars, openLeft, openRight, resolved);
+    playDefaultSoundAtDoors(doors, resolved);
   }
 
   /**
@@ -2426,20 +2754,18 @@ public final class AutoStationDoorController {
   }
 
   /**
-   * 在门附件位置播放默认关门提示音。
+   * 在门附件位置播放默认关门提示音：每节车只在它开的那一组门附近响。
    *
    * <p>若找不到门附件，则回退到车体位置播放。
    */
-  private static void playDefaultSoundAtDoors(
-      MinecartGroup group,
-      DoorCars cars,
-      boolean openLeft,
-      boolean openRight,
-      DoorChimeSettings settings) {
-    for (MinecartMember<?> member : group) {
-      if (member == null || !opensDoors(cars, member)) {
+  private static void playDefaultSoundAtDoors(List<CarDoors> doors, DoorChimeSettings settings) {
+    for (CarDoors car : doors) {
+      MinecartMember<?> member = car.member();
+      if (member == null || !car.opens()) {
         continue;
       }
+      boolean openLeft = car.openLeft();
+      boolean openRight = car.openRight();
       if (member.getAttachments() == null || !member.getAttachments().isAttached()) {
         continue;
       }
