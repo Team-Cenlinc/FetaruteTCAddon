@@ -1,10 +1,10 @@
 plugins {
     id 'java'
     id 'checkstyle'
-    id("com.diffplug.spotless") version "8.2.1"
-    id("com.github.spotbugs") version "6.4.8"
-    id("xyz.jpenilla.run-paper") version "2.3.1"
-    id("com.gradleup.shadow") version "8.3.11"
+    id("com.diffplug.spotless") version "8.10.3"
+    id("com.github.spotbugs") version "6.5.12"
+    id("xyz.jpenilla.run-paper") version "3.1.0"
+    id("com.gradleup.shadow") version "9.6.1"
     id 'maven-publish'
 }
 
@@ -31,7 +31,7 @@ dependencies {
     implementation platform("com.bergerkiller.bukkit:BKCommonLib-bom:${bkCommonLibVersion}")
     implementation("net.kyori:adventure-platform-bukkit:${adventurePlatformVersion}")
     implementation("dev.triumphteam:triumph-gui:${triumphGuiVersion}")
-    implementation("com.google.code.gson:gson:2.13.2")
+    implementation("com.google.code.gson:gson:2.14.0")
     implementation("com.zaxxer:HikariCP:7.0.2")
     compileOnly("com.github.spotbugs:spotbugs-annotations:4.9.8")
     compileOnly("com.mojang:brigadier:1.0.500")
@@ -50,9 +50,12 @@ dependencies {
     testImplementation("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     testImplementation("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
     testImplementation("com.bergerkiller.bukkit:TCCoasters:${tccCoastersVersion}")
-    testImplementation("org.junit.jupiter:junit-jupiter:5.10.2")
-    testImplementation("org.mockito:mockito-core:5.21.0")
-    testImplementation("org.mockito:mockito-inline:5.2.0")
+    testImplementation(platform("org.junit:junit-bom:6.1.3"))
+    testImplementation("org.junit.jupiter:junit-jupiter")
+    // Gradle 9 不再替测试补 JUnit Platform 启动器，要自己声明
+    testRuntimeOnly("org.junit.platform:junit-platform-launcher")
+    // Mockito 5 起 mockito-core 默认就是 inline mock maker，不再需要 mockito-inline
+    testImplementation("org.mockito:mockito-core:5.24.0")
     testImplementation("org.xerial:sqlite-jdbc:3.51.2.0")
     // TrainCarts 的可选软依赖会在 Mockito 重转换具体 runtime 类型时被加载；仅补齐测试 JVM。
     testRuntimeOnly("org.apache.logging.log4j:log4j-core:2.24.1")
@@ -201,7 +204,7 @@ processResources {
             buildId: buildId
     ]
     inputs.properties props
-    filteringCharset 'UTF-8'
+    filteringCharset = 'UTF-8'
     filesMatching('plugin.yml') {
         expand props
     }
