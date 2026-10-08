@@ -14,6 +14,7 @@ import java.time.Duration;
 import java.time.Instant;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicReference;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
@@ -149,11 +150,76 @@ class TrainHealthMonitorDriverExemptionTest {
     monitor.setStuckCleanupCooldown(Duration.ZERO);
 
     Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
-    for (int i = 0; i <= 6; i++) {
+    for (int i = 0; i <= 8; i++) {
       monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
     }
 
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+    assertTrue(authority.handbacks().contains("drv:deadlock"), authority.handbacks()::toString);
+  }
+
+  @Test
+  @DisplayName("静止很久后才被驾驶员车挡住（例如终点待命车开出时）：从被挡起算满时限才请交还，不按本车自己的静止时长")
+  void driverBlockIsTimedFromWhenItStarted() {
+    AtomicReference<Set<String>> blockers = new AtomicReference<>(Set.of());
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.TrainRuntimeState("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any()))
+        .thenAnswer(invocation -> blockers.get());
+    monitor.setAutoFixEnabled(true);
+    monitor.setDeadlockMinStopDuration(Duration.ofSeconds(20));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 16; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    blockers.set(Set.of("drv"));
+    for (int i = 17; i <= 22; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().isEmpty(), "已静止 220 秒，但被驾驶员车挡住才 50 秒");
+    monitor.check(Set.of("train1"), t0.plusSeconds(230));
+    assertTrue(authority.handbacks().contains("drv:deadlock"), authority.handbacks()::toString);
+  }
+
+  @Test
+  @DisplayName("驾驶员车在站里停站、等发车门控时挡住后车不计时：停站结束、仍挡着才开始算")
+  void driverInPlannedStopIsNotTimed() {
+    AtomicReference<String> driverStop = new AtomicReference<>("dwell");
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dwellRegistry.remainingSeconds("drv"))
+        .thenAnswer(
+            invocation -> "dwell".equals(driverStop.get()) ? Optional.of(15) : Optional.empty());
+    when(dispatchService.hasDepartureGate("drv"))
+        .thenAnswer(invocation -> "gate".equals(driverStop.get()));
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.TrainRuntimeState("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any())).thenReturn(Set.of("drv"));
+    monitor.setAutoFixEnabled(true);
+    monitor.setDeadlockMinStopDuration(Duration.ofSeconds(20));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(60));
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 6; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    driverStop.set("gate");
+    for (int i = 7; i <= 12; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().isEmpty(), "驾驶员车停站、等发车门控共 120 秒：都是计划停车");
+    driverStop.set("none");
+    for (int i = 13; i <= 18; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().isEmpty(), "停站结束后才挡了 50 秒");
+    monitor.check(Set.of("train1"), t0.plusSeconds(190));
     assertTrue(authority.handbacks().contains("drv:deadlock"), authority.handbacks()::toString);
   }
 }
