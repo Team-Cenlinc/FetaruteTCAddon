@@ -12,8 +12,14 @@ repositories {
 }
 
 dependencies {
-    // FetaruteTCAddon 公开 API；运行时由服务器上的 FetaruteTCAddon 提供，不打进扩展
-    compileOnly("org.fetarute:fetarute-api:${property("fetaruteApiVersion")}")
+    // FetaruteTCAddon 公开 API；运行时由服务器上的 FetaruteTCAddon 提供，不打进扩展。
+    // 从主仓库构建时直接用主仓库刚打好的 API jar（-PfetaruteApiJar）；单独构建时从 mavenLocal 取。
+    val apiJar = providers.gradleProperty("fetaruteApiJar")
+    if (apiJar.isPresent) {
+        compileOnly(files(apiJar.get()))
+    } else {
+        compileOnly("org.fetarute:fetarute-api:${property("fetaruteApiVersion")}")
+    }
 }
 
 typewriter {
