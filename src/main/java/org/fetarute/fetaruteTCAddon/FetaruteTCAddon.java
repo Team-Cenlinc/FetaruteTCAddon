@@ -1919,6 +1919,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
             public boolean restore(String trainName, String token) {
               return scheduled.restoreEarlyHold(trainName, token);
             }
+
+            @Override
+            public Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.EarlySpawnPlan>
+                recheckPlan(
+                    org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket,
+                    java.time.Instant now) {
+              return scheduled.earlyRecheckPlan(ticket, now);
+            }
           });
       if (timetableService != null) {
         timetableService.setPendingTicketProbe(scheduled::hasPendingTicket);

@@ -1369,18 +1369,21 @@ public final class FtaDepotCommand {
     Duration maxLead =
         Duration.ofMinutes(
             plugin.getConfigManager().current().spawnSettings().earlySpawnMaxLeadMinutes());
+    // 往后找下一班至少找到最早提前量那么远，否则提前量配得比它大时永远找不到车次。
+    Duration horizon = maxLead.compareTo(EARLY_SPAWN_HORIZON) > 0 ? maxLead : EARLY_SPAWN_HORIZON;
+    Instant now = Instant.now();
     var result =
         timetabled
             .get()
             .issueEarly(
                 resolved.route().id(),
                 depotId.value(),
-                Instant.now(),
-                EARLY_SPAWN_HORIZON,
+                now,
+                horizon,
                 maxLead,
                 plan ->
                     assigner
-                        .map(found -> found.chooseEarlySpawnTrack(provider, plan))
+                        .map(found -> found.chooseEarlySpawnTrack(provider, plan, now))
                         .orElseGet(
                             () ->
                                 org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn
@@ -1411,7 +1414,7 @@ public final class FtaDepotCommand {
                   "node",
                   depotId.value(),
                   "minutes",
-                  String.valueOf(EARLY_SPAWN_HORIZON.toMinutes()))));
+                  String.valueOf(horizon.toMinutes()))));
       case ALREADY_OUT -> sender.sendMessage(
           locale.component(
               "command.depot.spawn.early-already-out",

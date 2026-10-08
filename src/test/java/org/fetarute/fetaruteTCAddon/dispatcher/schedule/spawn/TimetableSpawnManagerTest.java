@@ -630,6 +630,95 @@ class TimetableSpawnManagerTest {
     assertEquals("OP:D:DEP:2", ticket.service().depotNodeId());
   }
 
+  /** 计划时刻已过、票还在车库等出库的那一班仍是下一班：不往后提前出下下班。 */
+  @Test
+  void aDueDepartureStillWaitingAtTheDepotIsTheNextOne() {
+    Fixture fixture = fixture();
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(7 * 3600 + 50 * 60));
+    List<SpawnTicket> due =
+        fixture.manager.pollDueTickets(fixture.provider, CREATE_DEPARTURE.plusSeconds(10));
+    assertTrue(
+        due.stream().anyMatch(t -> CREATE_ROUTE.equals(t.service().routeId())), due::toString);
+
+    TimetableSpawnManager.EarlySpawn early =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE,
+            "OP:D:DEP:1",
+            CREATE_DEPARTURE.plusSeconds(60),
+            Duration.ofMinutes(60),
+            MAX_LEAD,
+            REQUESTED_TRACK);
+
+    assertEquals(TimetableSpawnManager.EarlySpawnOutcome.ALREADY_OUT, early.outcome());
+    assertEquals("R1-001", early.tripCode());
+    assertEquals(Optional.of(CREATE_DEPARTURE), early.plannedDeparture());
+  }
+
+  /** 找回：交路已不在现行时刻表里（重新发布过）不绑；已经绑在这个交路上算找回成功。 */
+  @Test
+  void anEarlyHoldIsNotRestoredOntoAGoneDuty() {
+    Fixture fixture = fixture();
+    java.time.LocalDate date = java.time.LocalDate.of(2026, 3, 2);
+    String gone =
+        TimetableSpawnManager.formatIntent(
+            new TimetableService.TicketIntent(
+                UUID.randomUUID(), UUID.randomUUID(), date, RouteOperationType.CREATE, 0));
+
+    assertFalse(fixture.manager.restoreEarlyHold("train-A", gone));
+    assertTrue(fixture.service.dutyBindingOf("train-A").isEmpty());
+
+    String token =
+        TimetableSpawnManager.formatIntent(
+            new TimetableService.TicketIntent(TIMETABLE, DUTY, date, RouteOperationType.CREATE, 0));
+    assertTrue(fixture.manager.restoreEarlyHold("train-B", token));
+    assertTrue(fixture.manager.restoreEarlyHold("train-B", token), "已经绑在这个交路上");
+  }
+
+  /** DYNAMIC 出库点：票上保留写法、股道只钉在 selectedDepot 上；重试丢掉股道后发车侧拿复查计划重新挑。 */
+  @Test
+  void aDynamicDepotKeepsItsSpecForTheRecheck() {
+    Fixture fixture = fixture(timetable(), dynamicPlan());
+    Instant now = DAY.plusSeconds(7 * 3600 + 50 * 60);
+    fixture.manager.pollDueTickets(fixture.provider, now);
+
+    TimetableSpawnManager.EarlySpawn early =
+        fixture.manager.issueEarly(
+            CREATE_ROUTE,
+            "OP:D:DEP:1",
+            now,
+            Duration.ofMinutes(60),
+            MAX_LEAD,
+            plan -> EarlySpawnYard.Decision.use("OP:D:DEP:2"));
+
+    assertEquals(Optional.of("OP:D:DEP:2"), early.depotNode());
+    SpawnTicket ticket =
+        fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).get(0);
+    assertEquals(Optional.of("OP:D:DEP:2"), ticket.selectedDepotNodeId());
+    assertEquals(DYNAMIC_DEPOT, ticket.service().depotNodeId(), "保留 DYNAMIC 写法");
+
+    SpawnTicket retried = ticket.blockedUntil(now.plusSeconds(5), "blocked");
+    EarlySpawnPlan recheck =
+        fixture.manager.earlyRecheckPlan(retried, now.plusSeconds(5)).orElseThrow();
+    assertEquals(CREATE_DEPARTURE, recheck.plannedDeparture());
+    assertEquals(DYNAMIC_DEPOT, recheck.ticket().service().depotNodeId());
+    assertTrue(
+        fixture
+            .manager
+            .earlyRecheckPlan(
+                new SpawnTicket(
+                    UUID.randomUUID(),
+                    ticket.service(),
+                    ticket.dueAt(),
+                    now,
+                    0,
+                    0L,
+                    Optional.empty(),
+                    Optional.empty()),
+                now)
+            .isEmpty(),
+        "不是本层的提前出车票，不复查");
+  }
+
   /** 按表回库：交路的计划到达车库时刻落在窗口里才算，回库线路取回库走行。 */
   @Test
   void depotArrivalsComeFromTheDutyEnd() {
@@ -805,6 +894,10 @@ class TimetableSpawnManagerTest {
   }
 
   private static Fixture fixture(Timetable published) {
+    return fixture(published, plan());
+  }
+
+  private static Fixture fixture(Timetable published, SpawnPlan spawnPlan) {
     List<String> logs = new ArrayList<>();
     TimetableService service = new TimetableService(Instant::now, logs::add);
     service.applySettings(
@@ -818,7 +911,7 @@ class TimetableSpawnManagerTest {
 
     SpawnManager delegate = mock(SpawnManager.class);
     when(delegate.pollDueTickets(any(), any())).thenReturn(List.of());
-    when(delegate.snapshotPlan()).thenReturn(plan());
+    when(delegate.snapshotPlan()).thenReturn(spawnPlan);
     TimetableSpawnManager manager = new TimetableSpawnManager(delegate, service, logs::add);
     return new Fixture(manager, service, provider, logs);
   }
@@ -839,6 +932,18 @@ class TimetableSpawnManagerTest {
               .thenComparingLong(SpawnTicket::sequenceNumber));
       return tickets;
     }
+  }
+
+  private static final String DYNAMIC_DEPOT = "DYNAMIC:OP:D:DEP:[1:3]";
+
+  /** 出库走行线路的出库点写成 DYNAMIC。 */
+  private static SpawnPlan dynamicPlan() {
+    return new SpawnPlan(
+        Instant.EPOCH,
+        List.of(
+            service(CREATE_ROUTE, "CRT", DYNAMIC_DEPOT),
+            service(ROUTE, "R1", "OP:D:DEP:1"),
+            service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
   }
 
   private static SpawnPlan plan() {
