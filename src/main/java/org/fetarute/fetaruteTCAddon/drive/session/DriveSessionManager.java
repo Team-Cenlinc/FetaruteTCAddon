@@ -5110,7 +5110,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     String grade = result.grade().name();
     task.setResult(result.points(), grade);
     DriveRewardPayer.Paid paid =
-        earnsReward(task.state(), task.source())
+        task.rewards() && earnsReward(task.state(), task.source())
             ? rewardPayer.pay(
                 task.playerId(),
                 task.playerName(),

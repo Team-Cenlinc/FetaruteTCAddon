@@ -103,6 +103,7 @@ public final class DriverTaskManager {
    * @param depotPickup 是否从车库接车
    * @param source 来源标记
    * @param metadata 附加数据
+   * @param rewards 是否发驾驶奖励
    */
   public record TaskSpec(
       TaskKey key,
@@ -119,9 +120,46 @@ public final class DriverTaskManager {
       String handoverStationName,
       boolean depotPickup,
       String source,
-      Map<String, String> metadata) {
+      Map<String, String> metadata,
+      boolean rewards) {
     public TaskSpec {
       metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
+    }
+
+    /** 发驾驶奖励的任务。 */
+    public TaskSpec(
+        TaskKey key,
+        String routeCode,
+        String operatorCode,
+        String stationCode,
+        String stationName,
+        String takeoverNodeId,
+        int takeoverStopSequence,
+        Instant plannedDeparture,
+        String trainName,
+        int handoverStopSequence,
+        String handoverStationCode,
+        String handoverStationName,
+        boolean depotPickup,
+        String source,
+        Map<String, String> metadata) {
+      this(
+          key,
+          routeCode,
+          operatorCode,
+          stationCode,
+          stationName,
+          takeoverNodeId,
+          takeoverStopSequence,
+          plannedDeparture,
+          trainName,
+          handoverStopSequence,
+          handoverStationCode,
+          handoverStationName,
+          depotPickup,
+          source,
+          metadata,
+          true);
     }
   }
 
@@ -264,6 +302,7 @@ public final class DriverTaskManager {
             now);
     task.setTrainName(spec.trainName());
     task.setSource(spec.source(), spec.metadata());
+    task.setRewards(spec.rewards());
     ClaimOutcome outcome = register(player, task);
     if (outcome == ClaimOutcome.CLAIMED) {
       task.start(spec.trainName(), nowTick);
@@ -435,6 +474,7 @@ public final class DriverTaskManager {
           spec.handoverStopSequence(), spec.handoverStationCode(), spec.handoverStationName());
     }
     task.setSource(spec.source(), spec.metadata());
+    task.setRewards(spec.rewards());
     return register(player, task);
   }
 

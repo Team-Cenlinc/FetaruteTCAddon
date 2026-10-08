@@ -29,6 +29,7 @@ class DriveApiTaskRequestTest {
     assertEquals(DriveApi.Mode.MANUAL, request.mode());
     assertFalse(request.depotPickup());
     assertTrue(request.notifyPlayer());
+    assertTrue(request.rewards());
     assertEquals("api", request.source());
   }
 
@@ -42,7 +43,8 @@ class DriveApiTaskRequestTest {
             .mode(DriveApi.Mode.ATO)
             .depotPickup(true)
             .tagged("typewriter", Map.of("quest", "tutorial"))
-            .notifyPlayer(false);
+            .notifyPlayer(false)
+            .rewards(false);
 
     assertEquals(Optional.of("AAA"), request.takeoverStation());
     assertEquals(Optional.of("CCC"), request.handoverStation());
@@ -51,6 +53,7 @@ class DriveApiTaskRequestTest {
     assertEquals("typewriter", request.source());
     assertEquals(Map.of("quest", "tutorial"), request.metadata());
     assertFalse(request.notifyPlayer());
+    assertFalse(request.rewards());
     assertTrue(request.handoverAt(" ").handoverStation().isEmpty(), "空白站码等于不写");
   }
 
