@@ -215,6 +215,41 @@ class PidsLayoutParserTest {
     assertEquals(PidsLayout.DEFAULT_BOLD_FROM, layout.boldFrom());
   }
 
+  /** 整格提示默认上下叠放；只写了 spread 的布局照旧，写了 stacked 时以它为准。 */
+  @Test
+  void highlightArrangementDefaultsToStackedAndHonoursSpread() throws Exception {
+    assertEquals(PidsLayout.HighlightArrangement.STACKED, highlightOf(MINIMAL), "未写时上下叠放");
+    assertEquals(
+        PidsLayout.HighlightArrangement.SPREAD, highlightOf(withHighlight("{spread: true}")));
+    assertEquals(
+        PidsLayout.HighlightArrangement.INLINE, highlightOf(withHighlight("{spread: false}")));
+    assertEquals(
+        PidsLayout.HighlightArrangement.STACKED,
+        highlightOf(withHighlight("{stacked: true, spread: true}")));
+    assertEquals(
+        PidsLayout.HighlightArrangement.SPREAD, highlightOf(withHighlight("{stacked: false}")));
+
+    for (String id :
+        List.of("platform-1x3", "platform-1x4", "platform-group-1x3", "platform-group-1x4")) {
+      PidsLayout.Departures departures = PidsFixtures.builtInLayout(id).departures().orElseThrow();
+      for (int row = 0; row < departures.rows().size(); row++) {
+        assertEquals(
+            PidsLayout.HighlightArrangement.STACKED,
+            departures.rows().get(row).arrival().highlightArrangement(),
+            id + " 第 " + row + " 种行样式");
+      }
+    }
+    assertEquals(
+        PidsLayout.HighlightArrangement.INLINE,
+        PidsFixtures.builtInLayout("station-3x5")
+            .departures()
+            .orElseThrow()
+            .styleOf(0)
+            .arrival()
+            .highlightArrangement(),
+        "统屏一行一格、英文紧跟中文");
+  }
+
   @Test
   void rightAlignedClockIsAnchoredAtItsRightEdge() throws Exception {
     PidsLayoutParser.Result atRightEdge =
@@ -280,6 +315,22 @@ class PidsLayoutParserTest {
     PidsLayoutParser.Result result = parse(MINIMAL.replace("x: 8", "x: left"));
 
     assertEquals(List.of("widgets[0].x: 应为整数，实际为 left"), result.problems());
+  }
+
+  private static String withHighlight(String highlight) {
+    return MINIMAL + "        arrival: {highlight: " + highlight + "}\n";
+  }
+
+  private static PidsLayout.HighlightArrangement highlightOf(String text)
+      throws InvalidConfigurationException {
+    return parse(text)
+        .layout()
+        .orElseThrow()
+        .departures()
+        .orElseThrow()
+        .styleOf(0)
+        .arrival()
+        .highlightArrangement();
   }
 
   private static PidsLayoutParser.Result parse(String text) throws InvalidConfigurationException {

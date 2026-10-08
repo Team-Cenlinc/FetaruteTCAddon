@@ -112,6 +112,35 @@ class PidsRendererTest {
     assertEquals(PidsTheme.DARK.inverseBackground(), rgb(image, 9, 6), "站台号方块");
   }
 
+  /** 整格提示：英文在中文下方、与中文同一左缘；到站格右半边不写字。 */
+  @Test
+  void highlightStacksTheEnglishUnderTheChinese() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");
+    PidsView view =
+        platformView(
+            PidsTheme.DARK,
+            List.of(
+                withArrival(
+                    countdown(),
+                    new Arrival(
+                        ArrivalMode.HIGHLIGHT,
+                        0,
+                        Tone.NORMAL,
+                        Optional.of(Label.of(new Names("进站", "Arriving"), Tone.NORMAL))))));
+
+    BufferedImage image = renderer.render(layout, view);
+
+    // 到站列 256–376、内缩 6，首行 4–56。
+    int primary = PidsTheme.DARK.inverseText();
+    int secondary = PidsTheme.DARK.inverseMuted();
+    int[] chinese = textRows(image, 256, 4, 120, 52, primary);
+    int[] english = textRows(image, 256, 4, 120, 52, secondary);
+    assertTrue(english[0] > chinese[1], "英文在中文下方");
+    assertTrue(countColor(image, 262, 4, 6, 52, primary) > 0, "中文从内缩处起");
+    assertTrue(countColor(image, 262, 4, 6, 52, secondary) > 0, "英文与中文左对齐");
+    assertEquals(0, countColor(image, 320, 4, 56, 52, secondary), "英文不再靠右");
+  }
+
   @Test
   void cancelledBadgeIsHollow() throws Exception {
     PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");

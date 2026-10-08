@@ -566,6 +566,16 @@ public record PidsLayout(
     RIGHT
   }
 
+  /** 整格提示（进站、停靠中等）的中英文排法。 */
+  public enum HighlightArrangement {
+    /** 英文在中文下方，两行左对齐，整块竖向居中。 */
+    STACKED,
+    /** 中文在左，英文靠右。 */
+    SPREAD,
+    /** 英文紧跟中文、基线对齐。 */
+    INLINE
+  }
+
   /**
    * 到站与状态。
    *
@@ -581,7 +591,7 @@ public record PidsLayout(
    * @param statusStacked 状态上下叠放
    * @param statusOffset 同行状态的起点（相对 {@code inset} 内缘）；数字与单位更宽时紧跟其后
    * @param highlight 进站、通过、停靠中与取消等整格提示
-   * @param highlightSpread 提示的英文靠右；否则紧跟中文、基线对齐
+   * @param highlightArrangement 提示的中英文排法
    * @param dash 取消、回库时在数字位置画“—”；否则状态按整格提示的位置画
    */
   public record ArrivalStyle(
@@ -597,6 +607,6 @@ public record PidsLayout(
       boolean statusStacked,
       int statusOffset,
       TextStyle highlight,
-      boolean highlightSpread,
+      HighlightArrangement highlightArrangement,
       boolean dash) {}
 }

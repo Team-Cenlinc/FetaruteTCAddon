@@ -17,6 +17,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.BadgeStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.Column;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.Departures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.DestinationStyle;
+import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.HighlightArrangement;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.PlatformStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
@@ -1478,7 +1479,7 @@ public final class PidsRenderer {
     p.text(text, size, x + BOX_PADDING, top + STROKE, textColor);
   }
 
-  /** 整格提示：中文在左；英文靠右（spread）或紧跟中文、基线对齐。 */
+  /** 整格提示：中文在左；英文在中文下方左对齐、靠右，或紧跟中文、基线对齐。 */
   private void drawHighlight(
       Painter p,
       Cell cell,
@@ -1490,8 +1491,12 @@ public final class PidsRenderer {
       int secondaryColor) {
     TextStyle text = style.highlight();
     Names names = label.text();
+    if (style.highlightArrangement() == HighlightArrangement.STACKED) {
+      p.stackedLeft(names, text, left, right - left, cell, primaryColor, secondaryColor);
+      return;
+    }
     int top = cell.top + (cell.height - text.size()) / 2;
-    if (!style.highlightSpread()) {
+    if (style.highlightArrangement() == HighlightArrangement.INLINE) {
       p.inline(names, text, left, top, right - left, primaryColor, secondaryColor);
       return;
     }
@@ -1833,6 +1838,34 @@ public final class PidsRenderer {
             right,
             top + style.size() + style.gap(),
             secondaryRgb);
+      }
+    }
+
+    /** 中英文上下叠放、左对齐，整块竖向居中；英文放不下（宽或高）时只写中文。 */
+    void stackedLeft(
+        Names names,
+        TextStyle style,
+        int left,
+        int maxWidth,
+        Cell cell,
+        int primaryRgb,
+        int secondaryRgb) {
+      boolean secondary =
+          style.hasSecondary()
+              && !names.secondary().isEmpty()
+              && style.size() + style.gap() + style.secondarySize() <= cell.height
+              && regularWidth(names.secondary(), style.secondarySize()) <= maxWidth;
+      int block = style.size() + (secondary ? style.gap() + style.secondarySize() : 0);
+      int top = cell.top + (cell.height - block) / 2;
+      text(names.primary(), style.size(), left, top, primaryRgb);
+      if (secondary) {
+        regular(
+            names.secondary(),
+            style.secondarySize(),
+            left,
+            top + style.size() + style.gap(),
+            secondaryRgb,
+            false);
       }
     }
 
