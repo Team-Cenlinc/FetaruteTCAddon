@@ -129,6 +129,15 @@ final class PluginControlAuthority implements ControlAuthority {
   }
 
   @Override
+  public boolean awaitingTurnback(String trainName) {
+    try {
+      return delegate().awaitingTurnback(trainName);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
   public boolean hasDriver(String trainName) {
     try {
       return delegate().hasDriver(trainName);

@@ -2701,7 +2701,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               if (player != null) {
                 notice(player, "drive.hud.station.skipped", Map.of("station", station));
               }
-              handBackIfSkippedTooOften(session, link, trainName, player);
+              handBackIfSkippedTooOften(session, link, player);
             });
     // 停站刚结束时（上一拍还在停站）立刻刷新，否则发车后会把刚停过的站显示成下一站。
     if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0
@@ -2867,19 +2867,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /** 同一趟越站累计到上限：停车后交还自动运行，本趟任务判未完成。 */
-  private void handBackIfSkippedTooOften(
-      DriveSession session, DriverLink link, String trainName, Player player) {
-    int skipped = link.score().skippedStops();
+  private void handBackIfSkippedTooOften(DriveSession session, DriverLink link, Player player) {
+    int skipped = link.tripSkippedStops();
     if (!skipHandbackDue(skipped, config.driver().skipStationHandback())
         || link.handbackRequested()) {
       return;
     }
     traceSession(session, "本趟越站 " + skipped + " 次，交还自动运行");
-    tasks
-        .activeTaskOf(session.playerId())
-        .filter(task -> task.state() == DriverTask.State.DRIVING)
-        .filter(task -> trainName.equalsIgnoreCase(task.trainName()))
-        .ifPresent(task -> tasks.fail(session.playerId(), "skipped-stations"));
+    tasks.fail(session.playerId(), "skipped-stations");
     if (player != null) {
       player.sendMessage(
           plugin
@@ -2892,6 +2887,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 越站次数是否到了交还的上限；上限为 0 表示不处置。 */
   static boolean skipHandbackDue(int skipped, int limit) {
     return limit > 0 && skipped >= limit;
+  }
+
+  /** 驾驶员此刻不必为挡住后车负责：表定停站、被调度扣住、终点站等开出下一趟（自动运行同样会停着等）。 */
+  private boolean blockingExcused(DriveSession session, DriverLink link) {
+    return link.turnbackPending() || heldByDispatch(session, link, link.currentTrainName());
   }
 
   /** 此刻是不是表定停站或被调度扣住（不算驾驶员卡住）；开关门、起步是驾驶员的事，照算。 */
@@ -3457,9 +3457,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       tasks.tickRescues(now, this::sendTaskChat);
     }
     if (tickCounter % PROTECTION_TICKS == 0 && !driverRegistry.isEmpty()) {
+      // 只有此刻要为挡车负责的驾驶员列车计时：表定停站、被调度扣住、终点站等开出下一趟时，自动运行同样会停着等。
       Set<String> drivers = new HashSet<>();
       for (DriverLink link : driverRegistry.links()) {
-        drivers.add(link.currentTrainName());
+        DriveSession session = sessionOf(link);
+        if (session == null || !blockingExcused(session, link)) {
+          drivers.add(link.currentTrainName());
+        }
       }
       boolean tripped =
           tasks.tickCongestionProtection(drivers, current.driver().recovery(), Instant.now());
@@ -3568,12 +3572,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           }
         }
         case ATO -> {
-          boolean dwelling =
-              link.stationStop()
-                  .map(stop -> stop.phase() == DriverStationStop.Phase.DWELL)
-                  .orElse(false);
           Optional<MinecartGroup> group = findSessionGroup(session);
-          if (session.isAto() || dwelling || !session.isStopped() || group.isEmpty()) {
+          if (session.isAto()
+              || blockingExcused(session, link)
+              || !session.isStopped()
+              || group.isEmpty()) {
             link.deferCongestionStage();
             continue;
           }

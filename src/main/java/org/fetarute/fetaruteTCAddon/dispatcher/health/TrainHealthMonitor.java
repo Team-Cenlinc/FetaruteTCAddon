@@ -100,33 +100,60 @@ public final class TrainHealthMonitor {
     private Instant pendingRecoveryAt = Instant.EPOCH;
 
     /**
-     * 开始被驾驶员列车（不在计划停车中的）挡住的时刻；{@link Instant#EPOCH} 表示此刻没被挡。
+     * 每列挡住本车的驾驶员列车（不在计划停车中的）从什么时候起挡着，按车分开计。
      *
-     * <p>请驾驶员交还按这段时间算，不按本车自己的静止时长：终点待命车开出前已静止几分钟，一被驾驶员车挡住就会立刻请交还。
+     * <p>请驾驶员交还按它自己挡车的时长算，不按本车自己的静止时长：终点待命车开出前已静止几分钟，一被驾驶员车挡住就会立刻请交还； 先被另一列驾驶员车挡着的时间也不算到后来那列头上。
      */
-    private Instant driverBlockedSince = Instant.EPOCH;
+    private final Map<String, DriverBlock> driverBlocks = new LinkedHashMap<>();
 
     private boolean hasPendingRecovery() {
       return !Instant.EPOCH.equals(pendingRecoveryAt);
     }
 
-    /** 记下这次采样是否被驾驶员列车挡住，返回已连续被挡多久。 */
-    private Duration trackDriverBlock(boolean blocked, Instant now) {
-      if (!blocked) {
-        driverBlockedSince = Instant.EPOCH;
-        return Duration.ZERO;
+    /**
+     * 记下这次采样挡住本车的驾驶员列车，返回其中已连续挡满 {@code threshold} 的。
+     *
+     * <p>一次采样没看到（信号重算、阻挡快照刚过期）不清零，连续两次没看到才重新起算，免得交还被闪动一直推后。
+     */
+    private List<String> trackDriverBlock(
+        java.util.Collection<String> drivers, Instant now, Duration threshold) {
+      Map<String, DriverBlock> next = new LinkedHashMap<>();
+      driverBlocks.forEach(
+          (driver, block) -> {
+            if (!drivers.contains(driver) && block.misses() < DRIVER_BLOCK_MISSES_TOLERATED) {
+              next.put(driver, new DriverBlock(block.since(), block.misses() + 1));
+            }
+          });
+      List<String> due = new ArrayList<>();
+      for (String driver : drivers) {
+        DriverBlock previous = driverBlocks.get(driver);
+        Instant since = previous == null ? now : previous.since();
+        next.put(driver, new DriverBlock(since, 0));
+        if (Duration.between(since, now).compareTo(threshold) >= 0) {
+          due.add(driver);
+        }
       }
-      if (Instant.EPOCH.equals(driverBlockedSince)) {
-        driverBlockedSince = now;
-      }
-      return Duration.between(driverBlockedSince, now);
+      driverBlocks.clear();
+      driverBlocks.putAll(next);
+      return due;
     }
 
-    /** 已连续被驾驶员列车挡住多久（不更新记录）。 */
-    private Duration driverBlockedFor(Instant now) {
-      return Instant.EPOCH.equals(driverBlockedSince)
-          ? Duration.ZERO
-          : Duration.between(driverBlockedSince, now);
+    /** 这次采样没有驾驶员列车挡住本车。 */
+    private void missDriverBlock(Instant now) {
+      trackDriverBlock(List.of(), now, Duration.ZERO);
+    }
+
+    /** 给出的驾驶员列车里已连续挡满 {@code threshold} 的（不更新记录）。 */
+    private List<String> driversBlockingAtLeast(
+        java.util.Collection<String> drivers, Instant now, Duration threshold) {
+      List<String> due = new ArrayList<>();
+      for (String driver : drivers) {
+        DriverBlock block = driverBlocks.get(driver);
+        if (block != null && Duration.between(block.since(), now).compareTo(threshold) >= 0) {
+          due.add(driver);
+        }
+      }
+      return due;
     }
 
     private void resetStall() {
@@ -144,9 +171,15 @@ public final class TrainHealthMonitor {
     private void resetDeadlock() {
       deadlockStage = 0;
       lastDeadlockAttemptAt = Instant.EPOCH;
-      driverBlockedSince = Instant.EPOCH;
+      driverBlocks.clear();
     }
   }
+
+  /** 一列驾驶员列车挡住本车的起始时刻与之后连续没看到的采样次数。 */
+  private record DriverBlock(Instant since, int misses) {}
+
+  /** 驾驶员列车挡车计时容忍连续几次采样没看到。 */
+  private static final int DRIVER_BLOCK_MISSES_TOLERATED = 1;
 
   /** destroy 前方向证据审计结果。 */
   private record DirectionDestroyAudit(boolean required, String reason) {
@@ -423,16 +456,28 @@ public final class TrainHealthMonitor {
     return drivers;
   }
 
-  /** 列车此刻在计划停车中：停站计时、发车门控、按表扣车。 */
+  /** 列车此刻在计划停车中：停站计时、发车门控、按表扣车、人工扣车、终点站待命或等开出下一趟（自动运行同样会停着等）。 */
   private boolean inPlannedStop(String trainName) {
     if (dwellRegistry != null && dwellRegistry.remainingSeconds(trainName).isPresent()) {
       return true;
     }
-    if (dispatchService.hasDepartureGate(trainName)) {
+    if (dispatchService.hasDepartureGate(trainName)
+        || controlAuthority.awaitingTurnback(trainName)) {
       return true;
     }
     StationStopCoordinator stationStops = dispatchService.stationStops();
-    return stationStops != null && stationStops.holdingForSchedule(trainName);
+    if (stationStops != null && stationStops.holdingForSchedule(trainName)) {
+      return true;
+    }
+    return dispatchService
+        .deadlockTrainContext(trainName)
+        .map(
+            context ->
+                context.dwelling()
+                    || context.departureGateHeld()
+                    || context.layoverReady()
+                    || context.manualHold())
+        .orElse(false);
   }
 
   /**
@@ -800,7 +845,7 @@ public final class TrainHealthMonitor {
         continue;
       }
       if (deadlockObservation.isPresent()) {
-        recovery.trackDriverBlock(false, now);
+        recovery.missDriverBlock(now);
         DeadlockObservation observation = deadlockObservation.get();
         if (!Objects.equals(keyOf(trainName), keyOf(observation.trainA()))) {
           recovery.resetDeadlock();
@@ -850,21 +895,21 @@ public final class TrainHealthMonitor {
         if (blockedByDriver(blockers)) {
           // 阻挡者是有驾驶员的车：绝不因它销毁别的车。在它后面短暂排队是正常的，它在站里停站、按表扣车时更不算；
           // 从它停站以外挡住本车起算，到了本来会动用销毁兜底的时限才请它交还自动运行。
-          List<String> drivers = driversHoldingUp(blockers);
-          Duration blockedFor = recovery.trackDriverBlock(!drivers.isEmpty(), now);
-          if (autoFixEnabled && blockedFor.compareTo(deadlockDestroyThreshold) >= 0) {
-            requestDriverHandback(drivers);
+          List<String> due =
+              recovery.trackDriverBlock(driversHoldingUp(blockers), now, deadlockDestroyThreshold);
+          if (autoFixEnabled && !due.isEmpty()) {
+            requestDriverHandback(due);
           }
           continue;
         }
-        recovery.trackDriverBlock(false, now);
+        recovery.missDriverBlock(now);
         if (autoFixEnabled
             && tryDestroyDeadlockFallback(trainName, current, progressDuration, activeKeys, now)) {
           fixedCount++;
           continue;
         }
       } else {
-        recovery.trackDriverBlock(false, now);
+        recovery.missDriverBlock(now);
       }
 
       boolean waitingOnFreshStopBlockersWithinGrace =
@@ -1366,8 +1411,9 @@ public final class TrainHealthMonitor {
       RecoveryState recovery = recoveryStates.get(keyOf(context.trainName()));
       boolean handback =
           recovery != null
-              && recovery.driverBlockedFor(now).compareTo(deadlockDestroyThreshold) >= 0
-              && requestDriverHandback(driversHoldingUp(blockers));
+              && requestDriverHandback(
+                  recovery.driversBlockingAtLeast(
+                      driversHoldingUp(blockers), now, deadlockDestroyThreshold));
       debugLogger.accept(
           "STUCK_CLEANUP_DRIVER_HANDBACK train=" + context.trainName() + " requested=" + handback);
       return false;

@@ -86,6 +86,7 @@ public final class DriverLink {
   private String targetLabel = "";
   private String nextStopLabel = "";
   private String skippedStation;
+  private int tripSkippedStops;
   private boolean doorsClosing;
   private boolean turnbackPending;
   private boolean atLayover;
@@ -352,6 +353,7 @@ public final class DriverLink {
       }
       if (stationStop.skipped()) {
         skippedStation = stationStop.stationName();
+        tripSkippedStops++;
       }
       stationStop = null;
     }
@@ -525,6 +527,7 @@ public final class DriverLink {
         lateDepartures);
     TaskScore settled = score;
     score = new TaskScore();
+    tripSkippedStops = 0;
     serviceInterventions = 0;
     emergencyInterventions = 0;
     forcedStops = 0;
@@ -770,9 +773,17 @@ public final class DriverLink {
     this.announcedStops = count;
   }
 
-  /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。 */
+  /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。到了终点站，下一趟的越站从零计。 */
   public void setTurnbackPending(boolean pending) {
     this.turnbackPending = pending;
+    if (pending) {
+      tripSkippedStops = 0;
+    }
+  }
+
+  /** 本趟越站次数：终点站结算、到终点站等开出下一趟时清零（不结算的接管，例如没有时刻表车次的，也按趟计）。 */
+  public int tripSkippedStops() {
+    return tripSkippedStops;
   }
 
   /** 列车登记为终点站待命（驾驶会话每拍按待命登记更新）。 */

@@ -51,7 +51,7 @@ public final class CongestionProtection {
    * 评估是否触发拥堵保护；触发时进入冷却期。
    *
    * @param holds 每列被扣住的车
-   * @param driverTrains 驾驶员控制的列车
+   * @param driverTrains 阻挡链要追到的驾驶员列车（只交已挡车满 {@code protectionHeldSeconds}、不在表定停站与待命中的）
    * @return 这一次是否触发了拥堵保护（冷却期内不重复触发）
    */
   public boolean evaluate(

@@ -137,6 +137,12 @@ public final class DriverControlRegistry implements ControlAuthority {
     return byCurrentName(trainName) != null;
   }
 
+  @Override
+  public boolean awaitingTurnback(String trainName) {
+    DriverLink link = byCurrentName(trainName);
+    return link != null && link.turnbackPending();
+  }
+
   /** 按车名找链路；调度改名（例如终点待命复用）后按列车属性上的当前车名也认。 */
   private DriverLink byCurrentName(String trainName) {
     if (trainName == null || byName.isEmpty()) {

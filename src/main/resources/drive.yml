@@ -230,14 +230,15 @@ driver:
   rescue-ato-seconds: 120
   rescue-handback-seconds: 180
   rescue-teleport-seconds: 300
-  # 拥堵保护：全网被扣住超过 protection-held-seconds 秒的车达到 protection-held-trains 列、且阻挡链里有驾驶员列车时，
+  # 拥堵保护：全网被扣住超过 protection-held-seconds 秒的车达到 protection-held-trains 列、且阻挡链里有驾驶员列车自己也已挡车超过这么久时
+  # （表定停站、被调度扣住、终点站等开出下一趟时不算挡车），
   # 交还全部驾驶员列车，并在 protection-cooldown-minutes 分钟内暂停接班（/fta drive congestion reset 可提前解除）
   protection-held-trains: 5
   protection-held-seconds: 60
   protection-cooldown-minutes: 15
   # 驾驶记录（/fta drive records、top）保留多少天，超过的每小时清理一次；0 表示一直保留
   record-retention-days: 30
-  # 挡住后车：后方被驾驶员列车直接挡住的车被扣超过 congestion-warn-seconds 秒时提醒驾驶员，
+  # 挡住后车：驾驶员列车直接挡住后车超过 congestion-warn-seconds 秒时提醒驾驶员（从挡上那一刻起算，表定停站、被调度扣住、终点站等开出下一趟时不算），
   # 超过 congestion-ato-seconds 秒且驾驶员列车停着、不在表定停站时强制转 ATO
   congestion-warn-seconds: 60
   congestion-ato-seconds: 120

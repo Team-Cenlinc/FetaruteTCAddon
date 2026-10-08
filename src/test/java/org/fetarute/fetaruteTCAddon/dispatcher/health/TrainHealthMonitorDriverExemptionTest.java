@@ -222,4 +222,98 @@ class TrainHealthMonitorDriverExemptionTest {
     monitor.check(Set.of("train1"), t0.plusSeconds(190));
     assertTrue(authority.handbacks().contains("drv:deadlock"), authority.handbacks()::toString);
   }
+
+  private void stoppedBehind(AtomicReference<Set<String>> blockers) {
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("train1"))
+        .thenReturn(
+            Optional.of(
+                new RuntimeDispatchService.TrainRuntimeState("train1", 3, SignalAspect.STOP, 0.0)));
+    when(dispatchService.recentBlockerTrains(eq("train1"), any()))
+        .thenAnswer(invocation -> blockers.get());
+    monitor.setAutoFixEnabled(true);
+    monitor.setDeadlockMinStopDuration(Duration.ofSeconds(20));
+    monitor.setDeadlockDestroyThreshold(Duration.ofSeconds(60));
+  }
+
+  private static RuntimeDispatchService.DeadlockTrainContext layoverContext(String trainName) {
+    return new RuntimeDispatchService.DeadlockTrainContext(
+        trainName,
+        10,
+        11,
+        SignalAspect.STOP,
+        0.0,
+        RouteOperationType.OPERATION,
+        0,
+        false,
+        false,
+        true,
+        false,
+        true,
+        false,
+        false);
+  }
+
+  @Test
+  @DisplayName("驾驶员车在终点站待命或结算后等开出下一趟时挡住后车：不计时，不请交还")
+  void driverWaitingAtTheTerminalIsNotTimed() {
+    stoppedBehind(new AtomicReference<>(Set.of("drv", "drv2")));
+    authority.controlName("drv2").awaitingTurnbackName("drv2");
+    when(dispatchService.deadlockTrainContext("drv"))
+        .thenReturn(Optional.of(layoverContext("drv")));
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 30; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().isEmpty(), authority.handbacks()::toString);
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  @Test
+  @DisplayName("先后被两列驾驶员车挡住：按各自挡车的时长算，后来那列不接前一列的时间")
+  void eachDriverIsTimedOnItsOwn() {
+    AtomicReference<Set<String>> blockers = new AtomicReference<>(Set.of("drvA"));
+    stoppedBehind(blockers);
+    authority.controlName("drvA").controlName("drvB");
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 7; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    blockers.set(Set.of("drvB"));
+    for (int i = 8; i <= 13; i++) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().isEmpty(), "drvA 挡了 50 秒就走了，drvB 才挡了 50 秒");
+    monitor.check(Set.of("train1"), t0.plusSeconds(140));
+    assertEquals(java.util.List.of("drvB:deadlock"), authority.handbacks());
+  }
+
+  @Test
+  @DisplayName("一次采样没看到阻挡者（快照刚过期、信号重算）不清零；连续两次没看到才重新起算")
+  void oneMissedSampleKeepsTheTimer() {
+    AtomicReference<Set<String>> blockers = new AtomicReference<>(Set.of("drv"));
+    stoppedBehind(blockers);
+
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i <= 8; i++) {
+      blockers.set(i == 5 ? Set.of() : Set.of("drv"));
+      monitor.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(authority.handbacks().contains("drv:deadlock"), "中间漏一次照样满 60 秒交还");
+
+    RecordingControlAuthority fresh = new RecordingControlAuthority().controlName("drv");
+    TrainHealthMonitor second =
+        new TrainHealthMonitor(dispatchService, dwellRegistry, new HealthAlertBus(), s -> {});
+    second.setControlAuthority(fresh);
+    second.setAutoFixEnabled(true);
+    second.setDeadlockMinStopDuration(Duration.ofSeconds(20));
+    second.setDeadlockDestroyThreshold(Duration.ofSeconds(60));
+    for (int i = 0; i <= 8; i++) {
+      blockers.set(i == 5 || i == 6 ? Set.of() : Set.of("drv"));
+      second.check(Set.of("train1"), t0.plusSeconds(10L * i));
+    }
+    assertTrue(fresh.handbacks().isEmpty(), "连续两次没看到：从 70 秒起重新计时");
+  }
 }

@@ -13,6 +13,7 @@ public final class RecordingControlAuthority implements ControlAuthority {
   private final List<DriverInterrupt> interrupts = new ArrayList<>();
   private final List<String> handbacks = new ArrayList<>();
   private final List<TrainProperties> turnbacks = new ArrayList<>();
+  private final List<String> awaitingTurnback = new ArrayList<>();
 
   /** 让这列车由驾驶员控制。 */
   public RecordingControlAuthority control(TrainProperties properties) {
@@ -30,6 +31,17 @@ public final class RecordingControlAuthority implements ControlAuthority {
   public RecordingControlAuthority turnback(TrainProperties properties) {
     turnbacks.add(properties);
     return this;
+  }
+
+  /** 这个车名停在终点站等开出下一趟。 */
+  public RecordingControlAuthority awaitingTurnbackName(String trainName) {
+    awaitingTurnback.add(trainName);
+    return this;
+  }
+
+  @Override
+  public boolean awaitingTurnback(String trainName) {
+    return awaitingTurnback.contains(trainName);
   }
 
   @Override

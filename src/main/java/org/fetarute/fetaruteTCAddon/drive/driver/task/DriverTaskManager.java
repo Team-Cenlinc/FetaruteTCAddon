@@ -153,7 +153,9 @@ public final class DriverTaskManager {
   private final CongestionProtection protection = new CongestionProtection();
 
   /** 最近一次拥堵保护评估时每列被扣住的车（挡住后车的提醒复用）。 */
-  private Map<String, CongestionProtection.Hold> lastHolds = Map.of();
+  private Map<DriverCongestion.Blocking, Instant> blockingSince = Map.of();
+
+  private Instant blockingEvaluatedAt = Instant.EPOCH;
 
   public DriverTaskManager(FetaruteTCAddon plugin, Consumer<String> trace) {
     this.plugin = plugin;
@@ -1066,16 +1068,17 @@ public final class DriverTaskManager {
   // ---- 拥堵保护 ----
 
   /**
-   * 评估拥堵保护。
+   * 评估拥堵保护，并记下每列驾驶员列车挡住后车的时长。
    *
-   * @param driverTrains 有驾驶员在岗的列车
+   * @param driverTrains 此刻要为挡车负责的驾驶员列车（表定停站、被调度扣住、终点站等开出下一趟的不在内）
    * @return 这一次是否触发拥堵保护
    */
   public boolean tickCongestionProtection(
       Set<String> driverTrains, DriverRecovery recovery, Instant now) {
     EtaService eta = plugin.getEtaService();
+    blockingEvaluatedAt = now;
     if (eta == null || driverTrains.isEmpty()) {
-      lastHolds = Map.of();
+      blockingSince = Map.of();
       return false;
     }
     Map<String, CongestionProtection.Hold> holds = new HashMap<>();
@@ -1098,16 +1101,23 @@ public final class DriverTaskManager {
       holds.put(
           name, new CongestionProtection.Hold(Duration.between(hold.get().since(), now), blockers));
     }
-    lastHolds = Map.copyOf(holds);
-    boolean tripped = protection.evaluate(holds, driverTrains, recovery, now);
+    blockingSince = DriverCongestion.trackBlocking(holds, driverTrains, blockingSince, now);
+    // 阻挡链只追到自己已挡车满统计时长的驾驶员列车：后车先被别的车扣了很久、刚转到驾驶员列车后面，不算驾驶员造成的拥堵。
+    Set<String> culprits = new HashSet<>();
+    for (String driver : driverTrains) {
+      if (blockedBehindSeconds(driver) >= recovery.protectionHeldSeconds()) {
+        culprits.add(driver);
+      }
+    }
+    boolean tripped = protection.evaluate(holds, culprits, recovery, now);
     if (tripped) {
       plugin.getLogger().warning("拥堵保护，暂停接班：" + protection.lastReason());
     }
     return tripped;
   }
 
-  /** 后方被这列驾驶员列车直接挡住的车里，被扣最久的秒数（按最近一次拥堵保护评估时的扣车情况）。 */
+  /** 后方被这列驾驶员列车直接挡住的车里，被它挡得最久的秒数（按最近一次拥堵保护评估时的扣车情况）。 */
   public long blockedBehindSeconds(String driverTrain) {
-    return DriverCongestion.blockedBehindSeconds(lastHolds, driverTrain);
+    return DriverCongestion.blockedBehindSeconds(blockingSince, driverTrain, blockingEvaluatedAt);
   }
 }

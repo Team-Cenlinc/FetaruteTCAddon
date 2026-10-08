@@ -69,6 +69,11 @@ public interface ControlAuthority {
     return false;
   }
 
+  /** 驾驶员控制的这列车停在终点站待命或结算后等开出下一趟（派车还没放行）。 */
+  default boolean awaitingTurnback(String trainName) {
+    return false;
+  }
+
   /** 通过插件实例查找当前的控制权；插件未加载（如单元测试）时等同 {@link #NONE}。 */
   static ControlAuthority pluginLookup() {
     return PluginControlAuthority.INSTANCE;
