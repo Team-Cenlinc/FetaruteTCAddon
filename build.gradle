@@ -9,7 +9,8 @@ plugins {
 }
 
 group = 'org.fetarute'
-version = '0.0.2'
+// 插件版本，也是公开 API 的版本：构建时写进 plugin.yml 与 FetaruteApi.API_VERSION（见下方 generateApiVersion），升版本只改这里
+version = '1.13.0'
 
 repositories {
     mavenCentral()
@@ -218,9 +219,34 @@ tasks.named("check") {
 }
 
 // ---- 公开 API 构件 ----
-// 只含 org.fetarute.fetaruteTCAddon.api 包（不含 internal 实现），供外部插件 compileOnly 依赖；
-// 版本取 FetaruteApi.API_VERSION，与插件版本分开。
-def apiVersion = (file("src/main/java/org/fetarute/fetaruteTCAddon/api/FetaruteApi.java").text =~ /API_VERSION = "([^"]+)"/)[0][1]
+// 只含 org.fetarute.fetaruteTCAddon.api 包（不含 internal 实现），供外部插件 compileOnly 依赖；版本与插件相同。
+def apiVersion = version.toString()
+
+// FetaruteApi.API_VERSION 引用的常量由插件版本生成，仍是编译期常量
+def generatedApiVersionDir = layout.buildDirectory.dir("generated/sources/apiVersion/java")
+def generateApiVersion = tasks.register("generateApiVersion") {
+    group = "build"
+    description = "由插件版本生成 FetaruteApiVersion"
+    inputs.property("version", apiVersion)
+    outputs.dir(generatedApiVersionDir)
+    doLast {
+        def source = generatedApiVersionDir.get()
+                .file("org/fetarute/fetaruteTCAddon/api/FetaruteApiVersion.java").asFile
+        source.parentFile.mkdirs()
+        source.setText("""package org.fetarute.fetaruteTCAddon.api;
+
+/** 公开 API 版本：构建时由插件版本生成，不要手改。 */
+final class FetaruteApiVersion {
+
+  static final String VALUE = "${apiVersion}";
+
+  private FetaruteApiVersion() {}
+}
+""", "UTF-8")
+    }
+}
+sourceSets.main.java.srcDir(generateApiVersion)
+
 def apiIncludes = { spec ->
     spec.include("org/fetarute/fetaruteTCAddon/api/**")
     spec.exclude("org/fetarute/fetaruteTCAddon/api/internal/**")

@@ -63,8 +63,8 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
  */
 public final class FetaruteApi {
 
-  /** 当前 API 版本（语义版本）。 */
-  public static final String API_VERSION = "1.13.0";
+  /** 当前 API 版本（语义版本），与插件版本相同。 */
+  public static final String API_VERSION = FetaruteApiVersion.VALUE;
 
   private static volatile FetaruteApi instance;
 

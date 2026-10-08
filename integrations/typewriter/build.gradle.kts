@@ -7,7 +7,7 @@ group = "org.fetarute"
 version = "0.2.0"
 
 base {
-    archivesName = "FetaruteTypewriter"
+    archivesName = "FetaruteTCAddonExtension"
 }
 
 repositories {
@@ -23,7 +23,7 @@ typewriter {
     namespace = "fetarute"
 
     extension {
-        name = "FetaruteTC"
+        name = "FetaruteTCAddon"
         shortDescription = "Give players FetaruteTC driving tasks from Typewriter."
         description = """
             |The FetaruteTC extension connects Typewriter to the FetaruteTCAddon dispatcher.
@@ -43,6 +43,6 @@ typewriter {
 kotlin {
     jvmToolchain(21)
     compilerOptions {
-        moduleName = "FetaruteTypewriter"
+        moduleName = "FetaruteTCAddonExtension"
     }
 }
