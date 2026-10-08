@@ -1,1 +1,16 @@
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+        // Typewriter 扩展的构建插件
+        maven { url = "https://maven.typewritermc.com/beta" }
+    }
+}
+
 rootProject.name = 'FetaruteTCAddon'
+
+// 官方 Typewriter 扩展作为子工程一起构建；不需要时加 -PskipTypewriter（构建插件要从 Typewriter 的仓库取）
+if (!providers.gradleProperty("skipTypewriter").isPresent()) {
+    include("typewriter")
+    project(":typewriter").projectDir = file("integrations/typewriter")
+}
