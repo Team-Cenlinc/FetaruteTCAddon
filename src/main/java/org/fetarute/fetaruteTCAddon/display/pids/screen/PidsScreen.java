@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.display.pids.screen;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -22,8 +23,10 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
  * @param facing 展示框朝向
  * @param tileRows 地图行数
  * @param tileCols 地图列数
- * @param layoutId 布局 ID；不存在或尺寸不符时退回同尺寸的内置布局
+ * @param layoutIds 布局 ID，至少一个、不重复。第一个是主布局：不存在（含空白）或尺寸不符时退回同尺寸的内置布局，拆除时按它退回安装纸；
+ *     其余是组合翻页时与主布局轮流显示的布局（见 {@code PidsScreenPages}），空白的去掉，不存在、尺寸不符或不能组合的显示时跳过
  * @param station 绑定的车站；未绑定为空
+ * @param operator 不绑车站、只绑运营商（线路运行状况屏用）时的运营商代码，规整为大写；绑了车站时为空（运营商取车站的）
  * @param platforms 只显示这些站台；为空表示全部（车站统屏）
  * @param lines 只显示这些线路的代码；为空表示全部
  * @param appearance 外观
@@ -38,8 +41,9 @@ public record PidsScreen(
     PidsFacing facing,
     int tileRows,
     int tileCols,
-    String layoutId,
+    List<String> layoutIds,
     Optional<PidsStationKey> station,
+    Optional<String> operator,
     Set<String> platforms,
     Set<String> lines,
     Appearance appearance,
@@ -58,14 +62,111 @@ public record PidsScreen(
     if (tileRows < 1 || tileCols < 1) {
       throw new IllegalArgumentException("屏幕尺寸无效: " + tileRows + "×" + tileCols);
     }
-    Objects.requireNonNull(layoutId, "layoutId");
+    layoutIds = normalizeLayoutIds(layoutIds);
     station = station == null ? Optional.empty() : station;
+    operator =
+        station.isPresent() || operator == null
+            ? Optional.empty()
+            : operator
+                .map(String::trim)
+                .filter(code -> !code.isEmpty())
+                .map(code -> code.toUpperCase(java.util.Locale.ROOT));
     platforms = sorted(platforms);
     lines = sorted(lines);
     Objects.requireNonNull(appearance, "appearance");
     Objects.requireNonNull(mode, "mode");
     Objects.requireNonNull(createdAt, "createdAt");
     Objects.requireNonNull(updatedAt, "updatedAt");
+  }
+
+  /** 绑车站（或未绑定）的屏幕。 */
+  public PidsScreen(
+      UUID id,
+      UUID worldId,
+      Position anchor,
+      PidsFacing facing,
+      int tileRows,
+      int tileCols,
+      String layoutId,
+      Optional<PidsStationKey> station,
+      Set<String> platforms,
+      Set<String> lines,
+      Appearance appearance,
+      Mode mode,
+      Instant createdAt,
+      Instant updatedAt) {
+    this(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        List.of(Objects.requireNonNull(layoutId, "layoutId")),
+        station,
+        Optional.empty(),
+        platforms,
+        lines,
+        appearance,
+        mode,
+        createdAt,
+        updatedAt);
+  }
+
+  /** 只用一个布局（不组合翻页）。 */
+  public PidsScreen(
+      UUID id,
+      UUID worldId,
+      Position anchor,
+      PidsFacing facing,
+      int tileRows,
+      int tileCols,
+      String layoutId,
+      Optional<PidsStationKey> station,
+      Optional<String> operator,
+      Set<String> platforms,
+      Set<String> lines,
+      Appearance appearance,
+      Mode mode,
+      Instant createdAt,
+      Instant updatedAt) {
+    this(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        List.of(Objects.requireNonNull(layoutId, "layoutId")),
+        station,
+        operator,
+        platforms,
+        lines,
+        appearance,
+        mode,
+        createdAt,
+        updatedAt);
+  }
+
+  /** 全部布局 ID，主布局在前；不可修改。 */
+  @Override
+  public List<String> layoutIds() {
+    return Collections.unmodifiableList(layoutIds);
+  }
+
+  /** 主布局 ID。 */
+  public String layoutId() {
+    return layoutIds.get(0);
+  }
+
+  /** 组合翻页时与主布局轮流显示的布局 ID，按显示顺序；不组合时为空。 */
+  public List<String> pageLayoutIds() {
+    return layoutIds.subList(1, layoutIds.size());
+  }
+
+  /** 屏幕所属的运营商：绑了车站时取车站的，只绑运营商时取它；都没绑时为空。 */
+  public Optional<String> operatorCode() {
+    return station.map(PidsStationKey::operatorCode).or(() -> operator);
   }
 
   /** 只显示的站台，按字典序；不可修改。 */
@@ -124,7 +225,7 @@ public record PidsScreen(
     return facing.offset(anchor, row, col);
   }
 
-  /** 改绑车站与过滤。 */
+  /** 改绑车站与过滤；绑了车站就不再单独记运营商。 */
   public PidsScreen withBinding(
       Optional<PidsStationKey> station, Set<String> platforms, Set<String> lines, Instant now) {
     return new PidsScreen(
@@ -134,8 +235,9 @@ public record PidsScreen(
         facing,
         tileRows,
         tileCols,
-        layoutId,
+        layoutIds,
         station,
+        operator,
         platforms,
         lines,
         appearance,
@@ -144,8 +246,8 @@ public record PidsScreen(
         now);
   }
 
-  /** 换布局。 */
-  public PidsScreen withLayout(String layoutId, Instant now) {
+  /** 不绑车站、只绑运营商（线路运行状况屏）：清掉车站与站台，换上新的线路过滤。 */
+  public PidsScreen withOperator(String operatorCode, Set<String> lines, Instant now) {
     return new PidsScreen(
         id,
         worldId,
@@ -153,8 +255,34 @@ public record PidsScreen(
         facing,
         tileRows,
         tileCols,
-        layoutId,
+        layoutIds,
+        Optional.empty(),
+        Optional.of(operatorCode),
+        Set.of(),
+        lines,
+        appearance,
+        mode,
+        createdAt,
+        now);
+  }
+
+  /** 只用一个布局（去掉组合翻页）。 */
+  public PidsScreen withLayout(String layoutId, Instant now) {
+    return withLayouts(List.of(layoutId), now);
+  }
+
+  /** 换布局：第一个为主布局，其余与主布局轮流显示。 */
+  public PidsScreen withLayouts(List<String> layoutIds, Instant now) {
+    return new PidsScreen(
+        id,
+        worldId,
+        anchor,
+        facing,
+        tileRows,
+        tileCols,
+        layoutIds,
         station,
+        operator,
         platforms,
         lines,
         appearance,
@@ -172,8 +300,9 @@ public record PidsScreen(
         facing,
         tileRows,
         tileCols,
-        layoutId,
+        layoutIds,
         station,
+        operator,
         platforms,
         lines,
         appearance,
@@ -191,8 +320,9 @@ public record PidsScreen(
         facing,
         tileRows,
         tileCols,
-        layoutId,
+        layoutIds,
         station,
+        operator,
         platforms,
         lines,
         appearance,
@@ -216,6 +346,23 @@ public record PidsScreen(
       next.add(value);
     }
     return next;
+  }
+
+  /** 去首尾空白、去重，保持顺序；至少一个。主布局空白也保留（按不存在处理），其余空白的去掉。 */
+  private static List<String> normalizeLayoutIds(List<String> values) {
+    Objects.requireNonNull(values, "layoutIds");
+    if (values.isEmpty()) {
+      throw new IllegalArgumentException("屏幕至少要有一个布局");
+    }
+    LinkedHashSet<String> ids = new LinkedHashSet<>();
+    ids.add(Objects.requireNonNull(values.get(0), "layoutId").trim());
+    for (String value : values.subList(1, values.size())) {
+      Objects.requireNonNull(value, "layoutId");
+      if (!value.isBlank()) {
+        ids.add(value.trim());
+      }
+    }
+    return List.copyOf(ids);
   }
 
   /** 私有的有序副本；对外只经访问器给只读视图。 */

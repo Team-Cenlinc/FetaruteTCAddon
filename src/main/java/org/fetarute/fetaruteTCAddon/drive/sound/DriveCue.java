@@ -9,7 +9,7 @@ public enum DriveCue {
   /** 信号变严，等驾驶员右键确认：每秒响一次，直到确认。 */
   SIGNAL_RESTRICTIVE("signal-restrictive", "minecraft:block.note_block.bit", 1.0f, 0.7f),
   /** 信号已确认。 */
-  SIGNAL_CONFIRMED("signal-confirmed", "minecraft:ui.button.click", 0.6f, 1.2f),
+  SIGNAL_ACKNOWLEDGED("signal-acknowledged", "minecraft:ui.button.click", 0.6f, 1.2f),
   /** 信号转宽。 */
   SIGNAL_CLEAR("signal-clear", "minecraft:block.note_block.bell", 0.8f, 1.2f),
   /** 防护开始常用制动（ATP 制动）。 */

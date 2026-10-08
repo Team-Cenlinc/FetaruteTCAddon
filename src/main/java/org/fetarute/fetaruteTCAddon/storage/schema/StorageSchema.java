@@ -689,6 +689,9 @@ public final class StorageSchema {
    * 站台屏。车站按运营商代码 + 站码记录（与公开 API 一致），不设外键：车站删掉后屏幕仍在墙上，显示为空表。
    *
    * <p>同一世界同一方块同一朝向只能有一块屏幕，唯一约束写在表内（MySQL 不支持 {@code CREATE INDEX IF NOT EXISTS}）。
+   *
+   * <p>{@code layout_id} 是主布局；组合翻页时连主布局在内的布局清单存在 {@code page_layouts}（JSON 字符串数组，可空）。
+   * 不认识这一列的旧版本照常按主布局显示；它改了主布局后清单第一项对不上，新版本就不再沿用旧的翻页。
    */
   private String pidsScreens(SqlDialect dialect) {
     return formatDdl(
@@ -703,6 +706,7 @@ public final class StorageSchema {
                     tile_rows %s NOT NULL,
                     tile_cols %s NOT NULL,
                     layout_id %s NOT NULL,
+                    page_layouts %s,
                     operator_code %s,
                     station_code %s,
                     platforms %s,
@@ -724,6 +728,7 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.intType(),
         dialect.stringType(),
+        dialect.jsonType(),
         dialect.stringType(),
         dialect.stringType(),
         dialect.jsonType(),

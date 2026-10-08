@@ -36,21 +36,23 @@ public record StopWindow(double accurateBlocks, double acceptBlocks, double skip
         && skipBlocks > acceptBlocks;
   }
 
-  /** 偏移所在的窗口。量不出偏移（{@code NaN}）时按可接受处理，不挡住停站。 */
-  public StopAlignment.Window classify(double offsetBlocks) {
+  /** 偏移对应的停车结果。量不出偏移（{@code NaN}）时按可接受处理，不挡住停站。 */
+  public StopAlignment.Outcome classify(double offsetBlocks) {
     if (Double.isNaN(offsetBlocks)) {
-      return StopAlignment.Window.ACCEPTED;
+      return StopAlignment.Outcome.ACCEPTED;
     }
     double abs = Math.abs(offsetBlocks);
     if (abs <= accurateBlocks) {
-      return StopAlignment.Window.ACCURATE;
+      return StopAlignment.Outcome.ACCURATE;
     }
     if (abs <= acceptBlocks) {
-      return StopAlignment.Window.ACCEPTED;
+      return StopAlignment.Outcome.ACCEPTED;
     }
     if (offsetBlocks < 0.0) {
-      return StopAlignment.Window.SHORT;
+      return StopAlignment.Outcome.SHORT;
     }
-    return offsetBlocks > skipBlocks ? StopAlignment.Window.SKIPPED : StopAlignment.Window.OVERRUN;
+    return offsetBlocks > skipBlocks
+        ? StopAlignment.Outcome.SKIPPED
+        : StopAlignment.Outcome.OVERRUN;
   }
 }

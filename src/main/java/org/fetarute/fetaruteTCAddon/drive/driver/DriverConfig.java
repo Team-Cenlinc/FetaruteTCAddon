@@ -32,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
  * @param pickupAdvanceSeconds 领了从终点站出发的车次后，提前多少秒按交路认出担当的待命车、通知驾驶员并留车（驾驶员可提前上车准备）
  * @param recordRetentionDays 驾驶记录保留多少天，超过的定时删除；0 表示一直保留
  * @param terminalOverrunBlocks 终点站最多越过停车点多少格：防护保证列车停在这以内，不超过可开门范围
+ * @param skipStationHandback 同一趟越站达到这么多次时停车交还自动运行、任务判未完成；0 表示不处置
  */
 public record DriverConfig(
     boolean enabled,
@@ -55,7 +56,8 @@ public record DriverConfig(
     CabChangeConfig cabChange,
     int pickupAdvanceSeconds,
     int recordRetentionDays,
-    double terminalOverrunBlocks) {
+    double terminalOverrunBlocks,
+    int skipStationHandback) {
 
   private static final int TICKS_PER_SECOND = 20;
 
@@ -64,6 +66,9 @@ public record DriverConfig(
 
   /** 终点站默认最多越过停车点多少格。 */
   static final double DEFAULT_TERMINAL_OVERRUN_BLOCKS = 3.0;
+
+  /** 同一趟默认越站几次就交还自动运行。 */
+  static final int DEFAULT_SKIP_STATION_HANDBACK = 2;
 
   /** 接车最多等多久（秒）：车库扣车的发车门控 180 秒后自动失效，留出余量。 */
   static final int MAX_PICKUP_WAIT_SECONDS = 150;
@@ -77,6 +82,7 @@ public record DriverConfig(
     pickupAdvanceSeconds = Math.max(0, pickupAdvanceSeconds);
     recordRetentionDays = Math.max(0, recordRetentionDays);
     terminalOverrunBlocks = Math.max(0.5, Math.min(terminalOverrunBlocks, stopAcceptBlocks));
+    skipStationHandback = Math.max(0, skipStationHandback);
   }
 
   /** 内置默认值。 */
@@ -103,7 +109,8 @@ public record DriverConfig(
         CabChangeConfig.defaults(),
         300,
         30,
-        DEFAULT_TERMINAL_OVERRUN_BLOCKS);
+        DEFAULT_TERMINAL_OVERRUN_BLOCKS,
+        DEFAULT_SKIP_STATION_HANDBACK);
   }
 
   /**
@@ -176,7 +183,9 @@ public record DriverConfig(
                 nonNegative(section, "pickup-advance-seconds", d.pickupAdvanceSeconds, sink)),
         (int)
             Math.round(nonNegative(section, "record-retention-days", d.recordRetentionDays, sink)),
-        terminalOverrun(section, d.terminalOverrunBlocks, stopAccept, sink));
+        terminalOverrun(section, d.terminalOverrunBlocks, stopAccept, sink),
+        (int)
+            Math.round(nonNegative(section, "skip-station-handback", d.skipStationHandback, sink)));
   }
 
   /** 终点站越过停车点的上限：须为正且不超过可开门范围（停在界限上也要能开门），否则提示并取两者中较小的。 */

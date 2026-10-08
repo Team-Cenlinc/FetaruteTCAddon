@@ -93,6 +93,15 @@ final class PluginControlAuthority implements ControlAuthority {
   }
 
   @Override
+  public boolean driverOperatesDoors(TrainProperties properties) {
+    try {
+      return properties != null && delegate().driverOperatesDoors(properties);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
   public boolean holdDeparture(TrainProperties properties) {
     try {
       return delegate().holdDeparture(properties);
@@ -114,6 +123,15 @@ final class PluginControlAuthority implements ControlAuthority {
   public boolean awaitingDriver(String trainName) {
     try {
       return delegate().awaitingDriver(trainName);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
+  public boolean awaitingTurnback(String trainName) {
+    try {
+      return delegate().awaitingTurnback(trainName);
     } catch (RuntimeException ex) {
       return false;
     }

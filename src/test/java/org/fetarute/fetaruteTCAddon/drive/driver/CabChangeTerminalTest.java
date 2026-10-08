@@ -31,7 +31,8 @@ class CabChangeTerminalTest {
         null,
         false,
         0L,
-        3);
+        3,
+        false);
   }
 
   private static DriverStationStop stop(String node) {
@@ -52,17 +53,29 @@ class CabChangeTerminalTest {
   @Test
   @DisplayName("确认座位：只对没有标记驾驶座的列车、换端中坐进要换到的那一端")
   void seatConfirmRule() {
-    assertTrue(CabChange.awaitsSeatConfirm(false, true, true, CabSeats.End.TAIL, false));
     assertTrue(
-        CabChange.awaitsSeatConfirm(false, false, true, CabSeats.End.TAIL, false), "告知前已坐到车尾");
-    assertTrue(CabChange.awaitsSeatConfirm(false, true, false, CabSeats.End.HEAD, false), "放行后计时中");
+        CabChange.awaitsSeatConfirm(
+            false, true, true, CabSeats.End.TAIL, false, CabSeats.End.TAIL));
+    assertTrue(
+        CabChange.awaitsSeatConfirm(
+            false, false, true, CabSeats.End.TAIL, false, CabSeats.End.TAIL),
+        "告知前已坐到车尾");
+    assertTrue(
+        CabChange.awaitsSeatConfirm(
+            false, true, false, CabSeats.End.HEAD, false, CabSeats.End.HEAD),
+        "放行后计时中");
     assertFalse(
-        CabChange.awaitsSeatConfirm(true, true, true, CabSeats.End.TAIL, false), "有标记的列车不用确认");
-    assertFalse(CabChange.awaitsSeatConfirm(false, true, true, CabSeats.End.TAIL, true), "已确认");
+        CabChange.awaitsSeatConfirm(true, true, true, CabSeats.End.TAIL, false, CabSeats.End.TAIL),
+        "有标记的列车不用确认");
     assertFalse(
-        CabChange.awaitsSeatConfirm(false, true, true, CabSeats.End.HEAD, false), "还坐在原来那一端");
+        CabChange.awaitsSeatConfirm(false, true, true, CabSeats.End.TAIL, true, CabSeats.End.TAIL),
+        "已确认");
     assertFalse(
-        CabChange.awaitsSeatConfirm(false, false, false, CabSeats.End.HEAD, false),
+        CabChange.awaitsSeatConfirm(false, true, true, CabSeats.End.HEAD, false, CabSeats.End.TAIL),
+        "还坐在原来那一端");
+    assertFalse(
+        CabChange.awaitsSeatConfirm(
+            false, false, false, CabSeats.End.HEAD, false, CabSeats.End.HEAD),
         "不换端时每站发车都不用确认");
   }
 

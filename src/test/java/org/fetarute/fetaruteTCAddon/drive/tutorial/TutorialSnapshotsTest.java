@@ -101,7 +101,7 @@ class TutorialSnapshotsTest {
     TutorialSnapshot snapshot = TutorialSnapshots.of(session, 0L);
     assertTrue(snapshot.dispatch());
     assertFalse(snapshot.ato());
-    assertFalse(snapshot.signalConfirmPending());
+    assertFalse(snapshot.signalAcknowledgePending());
     assertFalse(snapshot.departurePending());
   }
 

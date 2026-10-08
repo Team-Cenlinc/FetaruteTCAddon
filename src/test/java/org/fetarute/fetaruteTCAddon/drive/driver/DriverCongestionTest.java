@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.drive.driver;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -18,18 +19,33 @@ class DriverCongestionTest {
   private static final DriverRecovery RECOVERY = DriverRecovery.defaults();
 
   @Test
-  @DisplayName("只算被驾驶员列车直接挡住的车，取被扣最久的")
-  void longestDirectHold() {
-    Map<String, DriverCircuitBreaker.Hold> holds =
-        Map.of(
-            "B", new DriverCircuitBreaker.Hold(Duration.ofSeconds(70), Set.of("D")),
-            "C", new DriverCircuitBreaker.Hold(Duration.ofSeconds(200), Set.of("B")),
-            "E", new DriverCircuitBreaker.Hold(Duration.ofSeconds(40), Set.of("D", "X")),
-            "D", new DriverCircuitBreaker.Hold(Duration.ofSeconds(500), Set.of("D")));
+  @DisplayName("只算被驾驶员列车直接挡住的车，从它挡上那一刻起算，不按后车整段被扣的时长")
+  void timedFromWhenTheDriverStartedBlocking() {
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    Map<String, CongestionProtection.Hold> behindOthers =
+        Map.of("B", new CongestionProtection.Hold(Duration.ofSeconds(100), Set.of("X")));
+    Map<DriverCongestion.Blocking, Instant> since =
+        DriverCongestion.trackBlocking(behindOthers, Set.of("D"), Map.of(), t0);
+    assertEquals(0L, DriverCongestion.blockedBehindSeconds(since, "D", t0));
 
-    assertEquals(70L, DriverCongestion.blockedBehindSeconds(holds, "D"));
-    assertEquals(0L, DriverCongestion.blockedBehindSeconds(holds, "Z"));
-    assertEquals(0L, DriverCongestion.blockedBehindSeconds(holds, null));
+    // B 先被 X 扣了 100 秒，此刻转到驾驶员列车 D 后面；B 的扣车时刻不因换阻挡者重置
+    Map<String, CongestionProtection.Hold> behindDriver =
+        Map.of(
+            "B", new CongestionProtection.Hold(Duration.ofSeconds(110), Set.of("D")),
+            "C", new CongestionProtection.Hold(Duration.ofSeconds(200), Set.of("B")),
+            "E", new CongestionProtection.Hold(Duration.ofSeconds(140), Set.of("D", "X")),
+            "D", new CongestionProtection.Hold(Duration.ofSeconds(500), Set.of("D")));
+    since = DriverCongestion.trackBlocking(behindDriver, Set.of("D"), since, t0.plusSeconds(10));
+    assertEquals(0L, DriverCongestion.blockedBehindSeconds(since, "D", t0.plusSeconds(10)), "刚挡上");
+    since = DriverCongestion.trackBlocking(behindDriver, Set.of("D"), since, t0.plusSeconds(40));
+    assertEquals(30L, DriverCongestion.blockedBehindSeconds(since, "D", t0.plusSeconds(40)));
+    assertEquals(0L, DriverCongestion.blockedBehindSeconds(since, "Z", t0.plusSeconds(40)));
+    assertEquals(0L, DriverCongestion.blockedBehindSeconds(since, null, t0.plusSeconds(40)));
+
+    // 驾驶员列车停站、待命期间不计时：重新挡上从头算
+    since = DriverCongestion.trackBlocking(behindDriver, Set.of(), since, t0.plusSeconds(50));
+    since = DriverCongestion.trackBlocking(behindDriver, Set.of("D"), since, t0.plusSeconds(60));
+    assertEquals(0L, DriverCongestion.blockedBehindSeconds(since, "D", t0.plusSeconds(60)));
   }
 
   @Test

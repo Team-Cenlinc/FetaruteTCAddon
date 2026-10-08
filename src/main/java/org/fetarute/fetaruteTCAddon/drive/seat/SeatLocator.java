@@ -1,6 +1,8 @@
 package org.fetarute.fetaruteTCAddon.drive.seat;
 
+import com.bergerkiller.bukkit.common.config.ConfigurationNode;
 import com.bergerkiller.bukkit.tc.attachments.api.Attachment;
+import com.bergerkiller.bukkit.tc.attachments.config.AttachmentModel;
 import com.bergerkiller.bukkit.tc.attachments.control.CartAttachmentSeat;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
@@ -10,6 +12,7 @@ import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.function.IntPredicate;
 import org.bukkit.Location;
 import org.bukkit.entity.Entity;
@@ -128,11 +131,22 @@ public final class SeatLocator {
    */
   public static boolean enterNearestFreeSeat(
       Player player, MinecartMember<?> member, IntPredicate acceptSeat) {
+    return enterNearestFreeSeatIndex(player, member, acceptSeat).isPresent();
+  }
+
+  /**
+   * 同 {@link #enterNearestFreeSeat(Player, MinecartMember, IntPredicate)}，返回坐进去的座位在这节车厢里的序号。
+   *
+   * @return 坐进去的座位序号；没坐进去时为空
+   */
+  public static OptionalInt enterNearestFreeSeatIndex(
+      Player player, MinecartMember<?> member, IntPredicate acceptSeat) {
     if (member == null || member.isUnloaded()) {
-      return false;
+      return OptionalInt.empty();
     }
     Vector eye = player.getEyeLocation().toVector();
     CartAttachmentSeat best = null;
+    int bestIndex = -1;
     double bestDistance = Double.POSITIVE_INFINITY;
     List<CartAttachmentSeat> seats = seatsOf(member);
     for (int index = 0; index < seats.size(); index++) {
@@ -143,10 +157,11 @@ public final class SeatLocator {
       double distance = distanceSquared(seat, player, eye);
       if (best == null || distance < bestDistance) {
         best = seat;
+        bestIndex = index;
         bestDistance = distance;
       }
     }
-    return best != null && best.enter(player);
+    return best != null && best.enter(player) ? OptionalInt.of(bestIndex) : OptionalInt.empty();
   }
 
   /** 座位到玩家眼睛的距离；取不到座位位置时排在最后。 */
@@ -214,7 +229,8 @@ public final class SeatLocator {
       return CabSeats.unmarked(members);
     }
     List<List<Integer>> marked = new ArrayList<>(members);
-    for (MinecartMember<?> member : group) {
+    for (int index = 0; index < members; index++) {
+      MinecartMember<?> member = group.get(index);
       List<Integer> seats = new ArrayList<>();
       if (member != null) {
         List<CartAttachmentSeat> all = seatsOf(member);
@@ -223,10 +239,194 @@ public final class SeatLocator {
             seats.add(i);
           }
         }
+        // 端车两头都标了驾驶座（单节车重连）：只认离相邻车厢最远的外侧那个。
+        if (members >= 2 && (index == 0 || index == members - 1) && seats.size() >= 2) {
+          MinecartMember<?> neighbour = group.get(index == 0 ? 1 : members - 2);
+          seats =
+              new ArrayList<>(
+                  CabSeats.outerCabSeats(seats, seat -> distanceTo(all.get(seat), neighbour)));
+        }
       }
       marked.add(seats);
     }
     return CabSeats.of(marked);
+  }
+
+  /** 座位到另一节车厢中心的距离（格）；车厢没加载、取不到位置时为 NaN。 */
+  private static double distanceTo(CartAttachmentSeat seat, MinecartMember<?> member) {
+    try {
+      if (member == null || member.isUnloaded() || member.getEntity() == null) {
+        return Double.NaN;
+      }
+      Vector at = seat.getTransform().toVector();
+      return at.distance(member.getEntity().getLocation().toVector());
+    } catch (RuntimeException ex) {
+      return Double.NaN;
+    }
+  }
+
+  /** 标记驾驶座的结果。 */
+  public enum MarkOutcome {
+    /** 玩家没有坐在 TrainCarts 座位里。 */
+    NOT_SEATED,
+    /** 座位在共用模型（model 附件引用的存档模型）里：改它会波及用这个模型的所有列车，不改。 */
+    SHARED_MODEL,
+    /** 已改名。 */
+    CHANGED,
+    /** 本来就是要的状态，没有改。 */
+    UNCHANGED,
+    /** 这节车厢已有两个驾驶座（两端各一个），没有标。 */
+    CAR_FULL,
+    /** 指定的座位序号在玩家所坐的这节车厢里不存在。 */
+    NO_SUCH_SEAT
+  }
+
+  /**
+   * 标记驾驶座的结果。
+   *
+   * @param outcome 结果
+   * @param seat 改的座位（默认玩家所坐的座位）；没坐在座位里时为空
+   * @param names 座位附件此刻的名字
+   * @param end 改名后这个座位在列车的哪一端（{@link CabSeats#endOf}）
+   * @param memberCount 编组节数
+   * @param trainMarked 改名后列车上还有没有被标记的驾驶座
+   * @param otherCabSeats 标记时同一节车厢里其余的驾驶座（座位序号）
+   */
+  public record MarkResult(
+      MarkOutcome outcome,
+      Optional<SeatBinding> seat,
+      List<String> names,
+      CabSeats.End end,
+      int memberCount,
+      boolean trainMarked,
+      List<Integer> otherCabSeats) {
+
+    public MarkResult {
+      names = List.copyOf(names);
+      otherCabSeats = List.copyOf(otherCabSeats);
+    }
+
+    static MarkResult of(MarkOutcome outcome, SeatBinding seat, List<String> names, CabSeats cabs) {
+      return of(outcome, seat, names, cabs, List.of());
+    }
+
+    static MarkResult of(
+        MarkOutcome outcome,
+        SeatBinding seat,
+        List<String> names,
+        CabSeats cabs,
+        List<Integer> otherCabSeats) {
+      return new MarkResult(
+          outcome,
+          Optional.of(seat),
+          names,
+          cabs.endOf(seat),
+          cabs.memberCount(),
+          cabs.marked(),
+          otherCabSeats);
+    }
+  }
+
+  /**
+   * 把玩家所坐的座位标为驾驶座，或取消标记：改座位附件的名字（TrainCarts 附件配置的 {@code names}），随即同步到这节车厢的模型。
+   *
+   * <p>只改这列车（车厢属性里的模型）；以后出库的车用的是存车，要另行保存。座位在共用模型里时不改。
+   *
+   * @param mark {@code true} 标记，{@code false} 取消
+   * @param cabNames 驾驶座名单（已转小写）；标记时不能为空
+   */
+  public static MarkResult markCabSeat(Player player, boolean mark, List<String> cabNames) {
+    return markCabSeat(player, mark, cabNames, OptionalInt.empty());
+  }
+
+  /**
+   * 同 {@link #markCabSeat(Player, boolean, List)}，可改玩家所坐这节车厢里的另一个座位。
+   *
+   * @param seatIndex 要改的座位序号（0 起，见 {@link SeatBinding#seatIndex()}）；为空时改玩家所坐的座位
+   */
+  public static MarkResult markCabSeat(
+      Player player, boolean mark, List<String> cabNames, OptionalInt seatIndex) {
+    Optional<SeatBinding> located = locate(player);
+    MinecartMember<?> member =
+        located.isEmpty() ? null : MinecartMemberStore.getFromEntity(player.getVehicle());
+    CartAttachmentSeat sitting =
+        member == null ? null : member.getAttachments().findSeatOfExistingPassenger(player);
+    if (located.isEmpty() || sitting == null) {
+      return new MarkResult(
+          MarkOutcome.NOT_SEATED,
+          Optional.empty(),
+          List.of(),
+          CabSeats.End.NONE,
+          0,
+          false,
+          List.of());
+    }
+    MinecartGroup group = member.getGroup();
+    List<CartAttachmentSeat> seats = seatsOf(member);
+    int index = seatIndex.orElse(located.get().seatIndex());
+    SeatBinding binding =
+        new SeatBinding(located.get().trainName(), located.get().memberIndex(), index);
+    if (index < 0 || index >= seats.size()) {
+      return MarkResult.of(MarkOutcome.NO_SUCH_SEAT, binding, List.of(), cabSeats(group, cabNames));
+    }
+    List<List<String>> names = new ArrayList<>(seats.size());
+    for (CartAttachmentSeat each : seats) {
+      names.add(namesOf(each.getConfig()));
+    }
+    ConfigurationNode config = seats.get(index).getConfig();
+    List<String> current = names.get(index);
+    AttachmentModel model = member.getProperties().getModel();
+    if (!descendsFrom(config, model.getConfig())) {
+      return MarkResult.of(MarkOutcome.SHARED_MODEL, binding, current, cabSeats(group, cabNames));
+    }
+    List<Integer> others = List.of();
+    List<String> next;
+    if (mark) {
+      // 一节车厢最多两个驾驶座（见 CabSeats#markInCar），同一节里原有的驾驶座不动。
+      CabSeats.CarMarking marking = CabSeats.markInCar(names, index, cabNames);
+      others = marking.otherCabSeats();
+      if (marking.full()) {
+        return MarkResult.of(
+            MarkOutcome.CAR_FULL, binding, current, cabSeats(group, cabNames), others);
+      }
+      next = marking.names();
+    } else {
+      next = CabSeats.withoutCabNames(current, cabNames);
+    }
+    if (next.equals(current)) {
+      return MarkResult.of(
+          MarkOutcome.UNCHANGED, binding, current, cabSeats(group, cabNames), others);
+    }
+    writeNames(config, next);
+    // 改模型配置后立即同步：座位附件随之重新载入名字，下面的驾驶室认定读到的就是新名字。
+    model.sync();
+    return MarkResult.of(MarkOutcome.CHANGED, binding, next, cabSeats(group, cabNames), others);
+  }
+
+  /** 座位附件配置里的名字。 */
+  private static List<String> namesOf(ConfigurationNode config) {
+    return config.contains("names")
+        ? List.copyOf(config.getList("names", String.class))
+        : List.of();
+  }
+
+  /** 写回座位附件的名字；没有名字时去掉这一项。 */
+  private static void writeNames(ConfigurationNode config, List<String> names) {
+    if (names.isEmpty()) {
+      config.remove("names");
+    } else {
+      config.set("names", names);
+    }
+  }
+
+  /** 配置节点是不是挂在给定的根节点下面（车厢自己的模型，而不是 model 附件引用的共用模型）。 */
+  static boolean descendsFrom(ConfigurationNode node, ConfigurationNode root) {
+    for (ConfigurationNode current = node; current != null; current = current.getParent()) {
+      if (current == root) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 一节车厢的全部座位，按模型里的出现顺序排列。 */

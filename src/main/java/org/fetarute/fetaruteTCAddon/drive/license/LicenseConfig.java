@@ -36,7 +36,7 @@ public record LicenseConfig(
     training = training == null ? TrainingConfig.defaults() : training;
   }
 
-  /** 默认两级：自由驾驶证考新手教程；调度驾驶证要先有自由驾驶证，再路考。 */
+  /** 默认两级：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考。 */
   public static LicenseConfig defaults() {
     return new LicenseConfig(
         true,
@@ -45,8 +45,8 @@ public record LicenseConfig(
         10,
         List.of(
             new LicenseClass(
-                "free",
-                "自由驾驶证",
+                "learner",
+                "见习驾驶证",
                 "驾驶非调度列车，使用新手教程与驾驶提示",
                 true,
                 List.of(),
@@ -59,12 +59,12 @@ public record LicenseConfig(
                 0,
                 List.of(DrivePermissions.BASE)),
             new LicenseClass(
-                "dispatch",
-                "调度驾驶证",
+                "driver",
+                "正式驾驶证",
                 "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行",
                 true,
-                List.of("free"),
-                LicenseClass.Exam.DISPATCH,
+                List.of("learner"),
+                LicenseClass.Exam.ROAD_TEST,
                 3,
                 70,
                 false,
@@ -111,10 +111,10 @@ public record LicenseConfig(
         if (entry == null) {
           continue;
         }
-        LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "dispatch"));
+        LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "road-test"));
         if (exam == null) {
           sink.accept(
-              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial 或 dispatch，已跳过这一级");
+              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial 或 road-test，已跳过这一级");
           continue;
         }
         classes.add(
@@ -130,7 +130,7 @@ public record LicenseConfig(
                 entry.getBoolean("allow-emergency", false),
                 entry.getBoolean("allow-overrun", false),
                 entry.getBoolean("allow-wrong-door", false),
-                entry.getInt("training-runs", exam == LicenseClass.Exam.DISPATCH ? 1 : 0),
+                entry.getInt("training-runs", exam == LicenseClass.Exam.ROAD_TEST ? 1 : 0),
                 entry.getStringList("grants")));
       }
     }

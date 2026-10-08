@@ -90,7 +90,7 @@ class DrivePermissionsTest {
         List.of(DrivePermissions.RECORDS, DrivePermissions.ADMIN), DrivePermissions.of("records"));
     assertEquals(List.of(DrivePermissions.TOP), DrivePermissions.of("top"));
     assertEquals(List.of(DrivePermissions.TUTORIAL), DrivePermissions.of("tutorial"));
-    for (String admin : List.of("list", "stop", "revoke", "handback", "breaker", "probe")) {
+    for (String admin : List.of("list", "stop", "revoke", "handback", "congestion", "probe")) {
       assertEquals(List.of(DrivePermissions.ADMIN), DrivePermissions.of(admin), admin);
     }
     assertThrows(IllegalArgumentException.class, () -> DrivePermissions.of("unknown"));
@@ -110,7 +110,7 @@ class DrivePermissionsTest {
   @DisplayName("帮助只列有权限的子命令")
   void helpIsFilteredByPermission() {
     assertEquals(
-        List.of("on", "off", "status", "reverser"),
+        List.of("on", "off", "status", "reverser", "cab"),
         DrivePermissions.visibleSubcommands(Set.of(DrivePermissions.BASE)::contains));
     assertEquals(
         List.of("records"),

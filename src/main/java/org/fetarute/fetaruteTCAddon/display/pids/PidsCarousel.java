@@ -446,6 +446,11 @@ public final class PidsCarousel {
 
   /** 按车站错开的秒数：同站同时翻页，不同车站分散。 */
   static long offset(PidsStationKey station, long cycle) {
-    return Math.floorMod(station.toString().hashCode(), cycle);
+    return offset(station.toString(), cycle);
+  }
+
+  /** 按同步键错开：键相同的屏幕同一时刻翻页。 */
+  static long offset(String key, long cycle) {
+    return Math.floorMod(key.hashCode(), cycle);
   }
 }

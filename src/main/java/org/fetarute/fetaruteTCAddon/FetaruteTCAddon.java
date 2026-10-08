@@ -507,6 +507,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new LicenseService(this, () -> driveSessionManager, driveSessionManager.config().license());
     getServer().getPluginManager().registerEvents(licenseService, this);
     driveSessionManager.tutorials().onFinished(licenseService::onTutorialFinished);
+    driveSessionManager.tutorials().onForfeit(licenseService::onTutorialForfeit);
     licenseService.start();
   }
 

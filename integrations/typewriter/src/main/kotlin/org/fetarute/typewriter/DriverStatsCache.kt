@@ -71,6 +71,8 @@ class DriverStatsCache : Initializable, Listener {
 
     @EventHandler(priority = EventPriority.LOWEST)
     fun onTaskFinished(event: DriverTaskFinishedEvent) {
+        // 路考练习不进驾驶记录，这里也不累加，否则在线期间与库里对不上
+        if (event.task.source() == TaskSource.PRACTICE) return
         val score = event.score.orElse(null) ?: return
         val completed = event.task.state().name == TaskEndState.COMPLETED.name
         stats.compute(event.playerId) { _, current ->

@@ -114,21 +114,21 @@ import org.incendo.cloud.suggestion.Suggestion;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
- * 调度图诊断与运维命令：/fta graph build|continue|status|cancel|info|delete|query|path|component|sign。
+ * 调度图诊断与运维命令：/fta graph
+ * build|refresh|extend|continue|status|cancel|info|delete|query|path|component|sign|portal。
  *
  * <p>图构建分为两个阶段：
  *
  * <ul>
- *   <li>discover_nodes：发现节点（扫描牌子；HERE 模式会沿轨道连通性扩展触达更多区块）
+ *   <li>discover_nodes：发现节点（扫描牌子；默认从脚下沿轨道连通性扩展，按需加载区块）
  *   <li>explore_edges：在轨道方块图上用多源 Dijkstra 计算节点之间区间距离
  * </ul>
  *
- * <p>重要约束：默认不会主动加载区块；未加载区块会被视为不可达，因此线上运维应先预加载线路区域再执行 build。
+ * <p>{@code build} 默认从脚下（或 {@code --tcc} 选中的轨道）沿轨道扩张并自动加载区块，用 {@code --maxChunks} 控制加载范围；{@code
+ * --all} 只扫已加载区块，结果为局部。{@code refresh} 按现有节点重新探索区间，{@code extend} 只把新节点牌子往未探索方向增补。
  *
- * <p>如需“沿轨道自动加载区块”，可使用 {@code --loadChunks}（仅 HERE 支持；建议配合 {@code --maxChunks} 控制加载范围）。
- *
- * <p>续跑（continue）：当 HERE + {@code --loadChunks} 达到 {@code maxChunks} 限制时，build 会进入“暂停”并缓存 {@link
- * RailGraphBuildContinuation}，可用 {@code /fta graph continue} 继续扩张。该缓存仅在内存中保存，服务器重启/插件重载后会失效。
+ * <p>续跑（continue）：扩张达到 {@code maxChunks} 限制时，build 会进入“暂停”并缓存 {@link RailGraphBuildContinuation}，可用
+ * {@code /fta graph continue} 继续扩张。该缓存仅在内存中保存，服务器重启/插件重载后会失效。
  *
  * <p>清理（delete）：{@code /fta graph delete} 会清空内存快照与持久化快照（SQL），并移除该世界的续跑缓存； {@code /fta graph delete
  * here} 则只删除玩家附近所在的连通分量，便于局部重建。
@@ -4805,6 +4805,13 @@ public final class FtaGraphCommand {
           locale.component("command.graph.help.entry-conflict"),
           ClickEvent.suggestCommand("/fta graph conflict list "),
           locale.component("command.graph.help.hover-conflict"));
+    }
+    if (sender.hasPermission("fetarute.graph.portal")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-portal"),
+          ClickEvent.suggestCommand("/fta graph portal "),
+          locale.component("command.graph.help.hover-portal"));
     }
 
     sender.sendMessage(locale.component("command.graph.help.footer"));

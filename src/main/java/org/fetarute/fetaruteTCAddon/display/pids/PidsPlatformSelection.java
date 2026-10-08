@@ -49,6 +49,11 @@ public final class PidsPlatformSelection {
         .findFirst();
   }
 
+  /** 布局有自己的轮播：带站台号组件的（站台屏、多站台屏、停站屏）轮播宣传页、公告与空位页，不能与别的布局组合翻页； 车站统屏、线路运行状况屏没有。 */
+  public static boolean hasCarousel(PidsLayout layout) {
+    return limit(layout).isPresent();
+  }
+
   /**
    * 菜单点了一个站台（或 {@value PidsScreen#ALL}）之后的站台。
    *

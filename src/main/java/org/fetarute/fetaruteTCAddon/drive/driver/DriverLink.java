@@ -52,8 +52,29 @@ public final class DriverLink {
   private Instant approachSampledAt;
 
   private DriverStationStop lastStop;
-  private final SignalConfirm signalConfirm = new SignalConfirm();
+  private final SignalAcknowledge signalAcknowledge = new SignalAcknowledge();
   private TaskScore score = new TaskScore();
+
+  /** 上次记里程时的里程表读数；还没记过时为 {@code NaN}。 */
+  private double distanceOdometer = Double.NaN;
+
+  /** ATO 下连续多少站超时未确认发车就判定驾驶员不在；0 表示不判定。 */
+  private int awayAfterTimeouts;
+
+  /** ATO 下连续超时未确认发车的站数，确认一次即清零。 */
+  private int confirmTimeouts;
+
+  /** 第一次超时以后挂起的里程与停站：确认发车或结算时照计，判定不在时作废。 */
+  private double pendingManualBlocks;
+
+  private double pendingAtoBlocks;
+  private int pendingAtoStops;
+
+  /** 刚判定不在 / 刚恢复，等驾驶会话提示一次。 */
+  private Boolean awayNotice;
+
+  /** ATO 下终点站结算时的里程表读数：这一站已记进刚结算的那一趟，从这里发车不再记一站；没有时为 {@code NaN}。 */
+  private double settledAtoStopOdometer = Double.NaN;
 
   /** 已记进上一趟成绩的停站（终点站结算时正在停的那一站）：停站结束时不再记进下一趟。 */
   private DriverStationStop settledStop;
@@ -86,8 +107,11 @@ public final class DriverLink {
   private String targetLabel = "";
   private String nextStopLabel = "";
   private String skippedStation;
+  private int tripSkippedStops;
   private boolean doorsClosing;
   private boolean turnbackPending;
+  private boolean atLayover;
+  private boolean cabHold;
   private int announcedStops;
   private DriverSchedule schedule;
   private DriverPass nextPass;
@@ -146,9 +170,11 @@ public final class DriverLink {
   /** 转为人工驾驶：ATO 期间调度层不向驾驶员下发行车许可，旧许可的距离与包络早已过时，清掉后由下一条指令重新开始 （没有指令时防护按限制速度、停着不许起步）。 */
   public void enterManual() {
     mode = DrivingMode.MANUAL;
+    markPresent();
+    cabHold = false;
     directive = null;
     lastDecision = null;
-    signalConfirm.reset();
+    signalAcknowledge.reset();
     clearDepartureHold();
     departureArmOdometer = Double.NaN;
     preConfirmOdometer = Double.NaN;
@@ -161,12 +187,32 @@ public final class DriverLink {
   public void enterAto() {
     mode = DrivingMode.ATO;
     lastDecision = null;
-    signalConfirm.reset();
+    signalAcknowledge.reset();
   }
 
   /** 驾驶员是否物理控车（ATO 下由自动运行代为操纵）。 */
   public boolean controlsPhysically() {
     return mode == DrivingMode.MANUAL;
+  }
+
+  /** ATO 下扣着列车等驾驶员换端：终点站待命到派车放行、折返换端进行中。期间调度层按驾驶员控制处理，放行时只调头、不发车；驾驶员坐进发车端后解除，交回自动运行发车。 */
+  public boolean cabHold() {
+    return cabHold && mode == DrivingMode.ATO;
+  }
+
+  /**
+   * 设置 ATO 换端扣车。开始与解除时都清掉手上的行车许可：扣车期间只认放行后新收到的许可，解除后 ATO 不再收许可。
+   *
+   * @return 状态是否有变化
+   */
+  public boolean setCabHold(boolean hold) {
+    boolean effective = hold && mode == DrivingMode.ATO;
+    if (effective == cabHold) {
+      return false;
+    }
+    cabHold = effective;
+    directive = null;
+    return true;
   }
 
   /** 收到调度层的新指令。 */
@@ -181,6 +227,11 @@ public final class DriverLink {
 
   public DriverDirective directive() {
     return directive;
+  }
+
+  /** 收到最近一次指令时的 tick；还没收到时为 {@link Long#MIN_VALUE}。 */
+  public long directiveTick() {
+    return directive == null ? Long.MIN_VALUE : directiveTick;
   }
 
   /** 收到最近一次指令后过了多少 tick；还没收到时为 {@link Long#MAX_VALUE}。 */
@@ -324,6 +375,7 @@ public final class DriverLink {
       }
       if (stationStop.skipped()) {
         skippedStation = stationStop.stationName();
+        tripSkippedStops++;
       }
       stationStop = null;
     }
@@ -435,8 +487,8 @@ public final class DriverLink {
   }
 
   /** 信号确认。 */
-  public SignalConfirm signalConfirm() {
-    return signalConfirm;
+  public SignalAcknowledge signalAcknowledge() {
+    return signalAcknowledge;
   }
 
   /** 本次驾驶的成绩明细（各站停站随停站结束记入）。 */
@@ -449,11 +501,21 @@ public final class DriverLink {
     vigilanceTrips++;
   }
 
+  /** 一趟结束：还没判定不在的挂起部分照计，已判定不在的作废。 */
+  private void settlePending() {
+    if (away()) {
+      clearPending();
+    } else {
+      creditPending();
+    }
+  }
+
   /** 把介入与确认的计数写进成绩明细。 */
   public TaskScore finalizeScore() {
+    settlePending();
     stationStop();
     if (stationStop != null && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
-      // 停在站内就结束驾驶（到终点站、到下车站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
+      // 停在站内就结束驾驶（到终点站、到交班站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
       lastStop = stationStop;
       if (stationStop != settledStop) {
         score.addStop(StopScore.of(stationStop));
@@ -464,9 +526,9 @@ public final class DriverLink {
         serviceInterventions,
         emergencyInterventions,
         forcedStops,
-        signalConfirm.confirmations(),
-        signalConfirm.misses(),
-        signalConfirm.averageReactionSeconds(),
+        signalAcknowledge.acknowledgements(),
+        signalAcknowledge.misses(),
+        signalAcknowledge.averageReactionSeconds(),
         vigilanceTrips,
         lateDepartures);
     return score;
@@ -478,6 +540,14 @@ public final class DriverLink {
    * @return 本趟的成绩明细
    */
   public TaskScore settleTrip() {
+    settlePending();
+    if (mode == DrivingMode.ATO) {
+      // ATO 停站在放行发车时才计，终点站的发车属于下一趟：这一站记进刚结算的这一趟，下一趟从这里发车时不再计。
+      if (!away()) {
+        score.addAtoStop();
+      }
+      settledAtoStopOdometer = odometer.getAsDouble();
+    }
     stationStop();
     if (stationStop != null
         && stationStop != settledStop
@@ -490,19 +560,20 @@ public final class DriverLink {
         serviceInterventions,
         emergencyInterventions,
         forcedStops,
-        signalConfirm.confirmations(),
-        signalConfirm.misses(),
-        signalConfirm.averageReactionSeconds(),
+        signalAcknowledge.acknowledgements(),
+        signalAcknowledge.misses(),
+        signalAcknowledge.averageReactionSeconds(),
         vigilanceTrips,
         lateDepartures);
     TaskScore settled = score;
     score = new TaskScore();
+    tripSkippedStops = 0;
     serviceInterventions = 0;
     emergencyInterventions = 0;
     forcedStops = 0;
     vigilanceTrips = 0;
     lateDepartures = 0;
-    signalConfirm.resetCounts();
+    signalAcknowledge.resetCounts();
     announcedStops = 0;
     return settled;
   }
@@ -527,9 +598,9 @@ public final class DriverLink {
         serviceInterventions,
         emergencyInterventions,
         forcedStops,
-        signalConfirm.confirmations(),
-        signalConfirm.misses(),
-        signalConfirm.averageReactionSeconds(),
+        signalAcknowledge.acknowledgements(),
+        signalAcknowledge.misses(),
+        signalAcknowledge.averageReactionSeconds(),
         vigilanceTrips,
         lateDepartures);
     live.setDelayAtStart(score.delayAtStartSeconds());
@@ -586,6 +657,25 @@ public final class DriverLink {
     this.ladderStage = Objects.requireNonNull(stage, "stage");
   }
 
+  /** 由驾驶会话每 tick 调用：把上次以来走过的距离记进本趟成绩，按此刻是 ATO 还是人工驾驶分开计。 */
+  public void trackDistance(boolean ato) {
+    double now = odometer.getAsDouble();
+    if (!Double.isNaN(distanceOdometer)) {
+      double delta = Math.max(0.0, now - distanceOdometer);
+      // 判定不在时不计；第一次超时以后先挂起。
+      if (!away() && confirmTimeouts > 0) {
+        if (ato) {
+          pendingAtoBlocks += delta;
+        } else {
+          pendingManualBlocks += delta;
+        }
+      } else if (!away()) {
+        score.addDistance(delta, ato);
+      }
+    }
+    distanceOdometer = now;
+  }
+
   /** 两次询问相隔超过这么久，算作新的一次停站。 */
   private static final long DEPARTURE_QUERY_GAP_TICKS = 60L;
 
@@ -608,14 +698,81 @@ public final class DriverLink {
     departureHoldQueriedAt = now;
     if (departureConfirmed) {
       releaseDeparture();
+      markPresent();
+      if (!takeSettledTerminal()) {
+        score.addAtoStop();
+      }
       return false;
     }
     if (now - departureHoldSince >= timeoutTicks) {
       releaseDeparture();
       lateDepartures++;
+      boolean settledTerminal = takeSettledTerminal();
+      confirmTimeouts++;
+      if (away()) {
+        if (confirmTimeouts == awayAfterTimeouts) {
+          // 刚判定不在：第一次超时以来挂起的里程与停站作废。
+          clearPending();
+          awayNotice = Boolean.TRUE;
+        }
+      } else if (!settledTerminal) {
+        pendingAtoStops++;
+      }
       return false;
     }
     return true;
+  }
+
+  /**
+   * ATO 下连续多少站超时未确认发车就判定驾驶员不在：之后（含第一次超时以来）的里程与停站不计奖励，直到再确认一次发车。
+   *
+   * @param timeouts 站数；0 表示不判定
+   */
+  public void setAwayAfterTimeouts(int timeouts) {
+    this.awayAfterTimeouts = Math.max(0, timeouts);
+  }
+
+  /** 已判定驾驶员不在：ATO 下连续超时未确认发车达到设定站数。 */
+  public boolean away() {
+    return awayAfterTimeouts > 0 && confirmTimeouts >= awayAfterTimeouts;
+  }
+
+  /** 刚判定不在（true）或刚恢复（false）时取一次，取走后清空；没有变化时为空。 */
+  public Optional<Boolean> takeAwayNotice() {
+    Optional<Boolean> notice = Optional.ofNullable(awayNotice);
+    awayNotice = null;
+    return notice;
+  }
+
+  /** 这一站是刚结算那一趟的终点站（已记进那一趟）：从这里发车不再记一站。取一次即清掉。 */
+  private boolean takeSettledTerminal() {
+    boolean settled = stillAt(settledAtoStopOdometer);
+    settledAtoStopOdometer = Double.NaN;
+    return settled;
+  }
+
+  /** 驾驶员在：确认了发车或转人工驾驶。挂起的里程与停站照计；之前判定过不在的，提示恢复。 */
+  private void markPresent() {
+    if (away()) {
+      awayNotice = Boolean.FALSE;
+    }
+    confirmTimeouts = 0;
+    creditPending();
+  }
+
+  private void creditPending() {
+    score.addDistance(pendingManualBlocks, false);
+    score.addDistance(pendingAtoBlocks, true);
+    for (int i = 0; i < pendingAtoStops; i++) {
+      score.addAtoStop();
+    }
+    clearPending();
+  }
+
+  private void clearPending() {
+    pendingManualBlocks = 0.0;
+    pendingAtoBlocks = 0.0;
+    pendingAtoStops = 0;
   }
 
   private void releaseDeparture() {
@@ -742,9 +899,26 @@ public final class DriverLink {
     this.announcedStops = count;
   }
 
-  /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。 */
+  /** 列车停在终点站待命：派车放行那一拍要按发车方向调头。到了终点站，下一趟的越站从零计。 */
   public void setTurnbackPending(boolean pending) {
     this.turnbackPending = pending;
+    if (pending) {
+      tripSkippedStops = 0;
+    }
+  }
+
+  /** 本趟越站次数：终点站结算、到终点站等开出下一趟时清零（不结算的接管，例如没有时刻表车次的，也按趟计）。 */
+  public int tripSkippedStops() {
+    return tripSkippedStops;
+  }
+
+  /** 列车登记为终点站待命（驾驶会话每拍按待命登记更新）。 */
+  public void setAtLayover(boolean layover) {
+    this.atLayover = layover;
+  }
+
+  public boolean atLayover() {
+    return atLayover;
   }
 
   /** 列车停在终点站待命、派车还没放行（放行那一拍取走调头标记）。 */
@@ -819,6 +993,11 @@ public final class DriverLink {
 
   public void setNextTrip(DriverNextTrip trip) {
     this.nextTrip = trip;
+  }
+
+  /** 下一趟已经用别的方式告诉过驾驶员（例如接管时）：之后查到同一趟不再另说。 */
+  public void markNextTripAnnounced(UUID tripId) {
+    this.announcedNextTrip = tripId;
   }
 
   /**

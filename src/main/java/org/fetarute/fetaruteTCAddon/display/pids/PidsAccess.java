@@ -61,13 +61,18 @@ public final class PidsAccess {
 
   /** 能否管理绑定某车站的屏幕（安装、配置、拆除、查看信息）。 */
   public boolean canManage(CommandSender sender, Optional<PidsStationKey> station) {
+    return canManageOperator(sender, station.map(PidsStationKey::operatorCode));
+  }
+
+  /** 能否管理属于某运营商的屏幕：有管理权限，或是运营商所属公司里有管理类角色的成员。 */
+  public boolean canManageOperator(CommandSender sender, Optional<String> operatorCode) {
     if (sender.hasPermission(MANAGE_PERMISSION)) {
       return true;
     }
-    if (station.isEmpty() || !(sender instanceof Player player)) {
+    if (operatorCode.isEmpty() || !(sender instanceof Player player)) {
       return false;
     }
-    Optional<UUID> company = companyOf(station.get());
+    Optional<UUID> company = companyOf(operatorCode.get());
     return company.isPresent()
         && memberships(player).stream()
             .anyMatch(member -> member.companyId().equals(company.get()) && managing(member));
@@ -108,19 +113,14 @@ public final class PidsAccess {
   }
 
   /** 运营商代码唯一对应的公司；代码不存在或属于多家公司时为空。 */
-  Optional<UUID> companyOf(PidsStationKey station) {
+  Optional<UUID> companyOf(String operatorCode) {
     Set<UUID> companies =
         operators.get().stream()
-            .filter(operator -> operator.code().equalsIgnoreCase(station.operatorCode()))
+            .filter(operator -> operator.code().equalsIgnoreCase(operatorCode))
             .map(OperatorApi.OperatorInfo::companyId)
             .collect(Collectors.toSet());
-    if (companies.size() > 1 && warnedCodes.add(station.operatorCode().toUpperCase(Locale.ROOT))) {
-      warn.accept(
-          "运营商代码 "
-              + station.operatorCode()
-              + " 属于 "
-              + companies.size()
-              + " 家公司，站台屏不按公司成员授权；请改成唯一代码");
+    if (companies.size() > 1 && warnedCodes.add(operatorCode.toUpperCase(Locale.ROOT))) {
+      warn.accept("运营商代码 " + operatorCode + " 属于 " + companies.size() + " 家公司，站台屏不按公司成员授权；请改成唯一代码");
     }
     return companies.size() == 1 ? companies.stream().findFirst() : Optional.empty();
   }

@@ -1482,6 +1482,83 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return returnLegAhead(key, progress.get(), current, true);
   }
 
+  /** {@link #nextDepartureOf} 查不到下一趟的原因。 */
+  public enum NoNextTripReason {
+    /** 时刻表没开，或列车没有绑定交路（没按时刻表运行、重启后账本为空）。 */
+    NOT_TIMETABLED,
+    /** 列车已退出运营（换车、退役）。 */
+    RETIRED,
+    /** 交路的车次（含带客回库班）已全部跑完。 */
+    DUTY_COMPLETE,
+    /** 下一趟已过发车容差，不再由这辆车担当。 */
+    OVERDUE,
+    /** 下一趟已取消。 */
+    CANCELLED
+  }
+
+  /**
+   * 查不到下一趟的原因与相关车次。
+   *
+   * @param tripCode 过了发车容差或已取消的那一班；其余原因为空串
+   */
+  public record NoNextTrip(NoNextTripReason reason, String tripCode) {
+    public NoNextTrip {
+      Objects.requireNonNull(reason, "reason");
+      tripCode = tripCode == null ? "" : tripCode;
+    }
+  }
+
+  /**
+   * {@link #nextDepartureOf} 为空时的原因：按同一口径看交路里进度之后的第一班（最后是带客回库班）为什么开不成。
+   *
+   * <p>只读。{@link #nextDepartureOf} 查得到时返回值没有意义。
+   *
+   * @param trainName 列车名
+   */
+  public NoNextTrip whyNoNextDeparture(String trainName) {
+    Settings current = settings;
+    String key = current.enabled() ? keyOf(trainName) : null;
+    if (key == null) {
+      return new NoNextTrip(NoNextTripReason.NOT_TIMETABLED, "");
+    }
+    if (ledger.isRetired(key)) {
+      return new NoNextTrip(NoNextTripReason.RETIRED, "");
+    }
+    Optional<DutyProgress> progress = ledger.progressOf(key);
+    Optional<BoundDuty> bound = progress.flatMap(found -> boundDuty(key, found));
+    if (bound.isEmpty()) {
+      return new NoNextTrip(NoNextTripReason.NOT_TIMETABLED, "");
+    }
+    BoundDuty duty = bound.get();
+    for (int index = progress.get().assignedTrips(); index < duty.tripIds().size(); index++) {
+      Optional<TimetableTrip> trip = duty.trip(index);
+      if (trip.isEmpty()) {
+        continue;
+      }
+      DueTrip due = dueTrip(duty.timetable(), trip.get(), duty.key());
+      if (!notCancelled(due)) {
+        return new NoNextTrip(NoNextTripReason.CANCELLED, trip.get().tripCode());
+      }
+      if (!ticketWaiting(duty, index) && overdue(duty, trip.get(), current)) {
+        return new NoNextTrip(NoNextTripReason.OVERDUE, trip.get().tripCode());
+      }
+    }
+    Optional<DueTrip> returnLeg =
+        returnTripOf(duty.key())
+            .filter(due -> !due.trip().id().equals(progress.get().lastTripId()));
+    if (returnLeg.isPresent()) {
+      DueTrip due = returnLeg.get();
+      if (!notCancelled(due)) {
+        return new NoNextTrip(NoNextTripReason.CANCELLED, due.trip().tripCode());
+      }
+      if (!returnTicketWaiting(duty.key())
+          && !due.departure().plus(current.assignTolerance()).isAfter(clock.get())) {
+        return new NoNextTrip(NoNextTripReason.OVERDUE, due.trip().tripCode());
+      }
+    }
+    return new NoNextTrip(NoNextTripReason.DUTY_COMPLETE, "");
+  }
+
   /**
    * 交路的带客回库班还开得成：还没跑过、没取消、没过发车容差。
    *

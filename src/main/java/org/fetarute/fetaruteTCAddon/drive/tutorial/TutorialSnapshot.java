@@ -24,7 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.hud.DriverStationHint;
  * @param stopped 是否已停稳
  * @param doorsOpen 是否有车门开着
  * @param doorsClosing 关门动画是否还在放
- * @param signalConfirmPending 信号变严，正等驾驶员确认
+ * @param signalAcknowledgePending 信号变严，正等驾驶员确认
  * @param stationHint 此刻的车站提示种类；没有时为 {@code null}
  * @param doorsRequired 停妥待开门时本站是否要开门
  * @param departurePending ATO 下站台正等驾驶员确认发车
@@ -46,7 +46,7 @@ public record TutorialSnapshot(
     boolean stopped,
     boolean doorsOpen,
     boolean doorsClosing,
-    boolean signalConfirmPending,
+    boolean signalAcknowledgePending,
     DriverStationHint.Kind stationHint,
     boolean doorsRequired,
     boolean departurePending,
@@ -80,7 +80,7 @@ public record TutorialSnapshot(
     private boolean stopped = true;
     private boolean doorsOpen;
     private boolean doorsClosing;
-    private boolean signalConfirmPending;
+    private boolean signalAcknowledgePending;
     private DriverStationHint.Kind stationHint;
     private boolean doorsRequired;
     private boolean departurePending;
@@ -165,8 +165,8 @@ public record TutorialSnapshot(
       return this;
     }
 
-    public Builder signalConfirmPending(boolean value) {
-      this.signalConfirmPending = value;
+    public Builder signalAcknowledgePending(boolean value) {
+      this.signalAcknowledgePending = value;
       return this;
     }
 
@@ -207,7 +207,7 @@ public record TutorialSnapshot(
           stopped,
           doorsOpen,
           doorsClosing,
-          signalConfirmPending,
+          signalAcknowledgePending,
           stationHint,
           doorsRequired,
           departurePending,

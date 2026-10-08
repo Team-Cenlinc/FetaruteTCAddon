@@ -10,7 +10,7 @@ package org.fetarute.fetaruteTCAddon.drive.driver.score;
  *   <li>晚点：驾驶期间晚点增加超过 30 秒的部分每 10 秒 1 分，最多 30 分。
  * </ul>
  *
- * <p>未完成的任务（卡住被收回、超时）最高 D。
+ * <p>卡住被收回、超过任务时限的最高 D；驾驶员自己中途结束、因调度等非本人原因被收回的按已开的部分评级（状态记为未完成）。
  */
 public final class ScoreRules {
 
@@ -31,6 +31,9 @@ public final class ScoreRules {
    */
   public record Result(int points, Grade grade) {}
 
+  /** 不评级的记录里的评级（库里可能有这样的旧记录）。 */
+  public static final String UNGRADED = "-";
+
   static final long DELAY_ALLOWANCE_SECONDS = 30L;
 
   /** 越站：乘客没能上下车，按一次强制停车计。 */
@@ -41,13 +44,13 @@ public final class ScoreRules {
   /**
    * 计分。
    *
-   * @param completed 任务是否完成（开到终点站）
+   * @param completed 照常评级：开到了终点站，或中途结束、被收回（按已开的部分）；卡住被收回、超过任务时限时为 {@code false}，最高 D
    */
   public static Result evaluate(TaskScore score, boolean completed) {
     int penalty = 0;
     for (StopScore stop : score.stops()) {
       penalty +=
-          switch (stop.window()) {
+          switch (stop.outcome()) {
             case ACCURATE -> 0;
             case ACCEPTED -> 2;
             case OVERRUN, SHORT -> 5;

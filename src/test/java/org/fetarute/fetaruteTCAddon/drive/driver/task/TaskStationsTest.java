@@ -8,7 +8,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
-@DisplayName("派任务时找接班站与下车站")
+@DisplayName("派任务时找接班站与交班站")
 class TaskStationsTest {
 
   /** 车库 → AAA → 区间点 → BBB（通过） → CCC → DDD（终点）。 */
@@ -27,27 +27,27 @@ class TaskStationsTest {
     TaskStations.Resolved resolved =
         TaskStations.resolve(STOPS, Optional.empty(), Optional.empty()).orElseThrow();
 
-    assertEquals(1, resolved.board().sequence());
-    assertTrue(resolved.alight().isEmpty());
+    assertEquals(1, resolved.takeover().sequence());
+    assertTrue(resolved.handover().isEmpty());
   }
 
   @Test
-  @DisplayName("区间任务：下车站在接班站之后；写的是终点站时按开到终点站")
+  @DisplayName("区间任务：交班站在接班站之后；写的是终点站时按开到终点站")
   void intervalTasks() {
     TaskStations.Resolved resolved =
         TaskStations.resolve(STOPS, Optional.of("aaa"), Optional.of("CCC")).orElseThrow();
-    assertEquals(1, resolved.board().sequence());
-    assertEquals(4, resolved.alight().orElseThrow().sequence());
+    assertEquals(1, resolved.takeover().sequence());
+    assertEquals(4, resolved.handover().orElseThrow().sequence());
 
     assertTrue(
         TaskStations.resolve(STOPS, Optional.of("CCC"), Optional.of("DDD"))
             .orElseThrow()
-            .alight()
+            .handover()
             .isEmpty());
   }
 
   @Test
-  @DisplayName("通过的车站、终点站接班、下车站在接班站之前都不行")
+  @DisplayName("通过的车站、终点站接班、交班站在接班站之前都不行")
   void invalidCombinations() {
     assertTrue(TaskStations.resolve(STOPS, Optional.of("BBB"), Optional.empty()).isEmpty());
     assertTrue(TaskStations.resolve(STOPS, Optional.of("DDD"), Optional.empty()).isEmpty());
@@ -71,12 +71,12 @@ class TaskStationsTest {
         1,
         TaskStations.resolve(loop, Optional.of("BBB"), Optional.empty())
             .orElseThrow()
-            .board()
+            .takeover()
             .sequence());
     TaskStations.Resolved second =
         TaskStations.resolve(loop, Optional.of("BBB"), 3, Optional.of("AAA")).orElseThrow();
-    assertEquals(3, second.board().sequence());
-    assertTrue(second.alight().isEmpty(), "AAA 在第二次 BBB 之后只剩终点站");
+    assertEquals(3, second.takeover().sequence());
+    assertTrue(second.handover().isEmpty(), "AAA 在第二次 BBB 之后只剩终点站");
     assertTrue(
         TaskStations.resolve(loop, Optional.of("CCC"), 3, Optional.empty()).isEmpty(),
         "序号与站码不符时不接班");

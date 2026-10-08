@@ -19,6 +19,7 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.event.HoverEvent;
@@ -42,6 +43,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfigResolve
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainType;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveMode;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.MotorRatio;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
+import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -150,7 +154,9 @@ public final class FtaTrainCommand {
                 CommandComponent.builder("power", StringParser.stringParser())
                     .suggestionProvider(
                         SuggestionProvider.suggestingStrings(
-                            "ptg5", "ptg6", "shoe", "diesel", "supercap"))
+                            java.util.Arrays.stream(PowerSupply.values())
+                                .map(PowerSupply::key)
+                                .toList()))
                     .build())
             .build();
     var maxSpeedFlag =
@@ -158,7 +164,8 @@ public final class FtaTrainCommand {
             .withComponent(
                 CommandComponent.builder("max-speed", StringParser.stringParser())
                     .suggestionProvider(
-                        SuggestionProvider.suggestingStrings("80kmh", "22bps", "1.1bpt"))
+                        SuggestionProvider.blockingStrings(
+                            (ctx, input) -> maxSpeedSuggestions(input.lastRemainingToken())))
                     .build())
             .build();
 
@@ -346,6 +353,35 @@ public final class FtaTrainCommand {
                     }
                   }
                 }));
+
+    // attachment set|unset driver_seat：把自己所坐的座位标为（或取消）驾驶座，改的是座位附件的名字
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("attachment")
+            .literal("set")
+            .literal("driver_seat")
+            .permission("fetarute.train.config")
+            .handler(ctx -> handleDriverSeat(ctx.sender(), true, OptionalInt.empty())));
+    // unset 可带座位序号：取消所坐这节车厢里另一个座位的标记（标记提示里的按钮），不必坐过去。
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("train")
+            .literal("attachment")
+            .literal("unset")
+            .literal("driver_seat")
+            .optional("seat", org.incendo.cloud.parser.standard.IntegerParser.integerParser(1))
+            .permission("fetarute.train.config")
+            .handler(
+                ctx ->
+                    handleDriverSeat(
+                        ctx.sender(),
+                        false,
+                        ctx.optional("seat")
+                            .map(seat -> OptionalInt.of((Integer) seat - 1))
+                            .orElse(OptionalInt.empty()))));
 
     // debug list 子命令：显示所有缓存的诊断数据
     manager.command(
@@ -1267,6 +1303,95 @@ public final class FtaTrainCommand {
         TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_POWER).orElse("-"));
   }
 
+  /** 把玩家所坐的座位标为驾驶座或取消标记，并说明这个座位现在算不算驾驶室：一列车有标记时只认端车（第一节、最后一节）上的标记座位。 */
+  private void handleDriverSeat(CommandSender sender, boolean mark, OptionalInt seatIndex) {
+    LocaleManager locale = plugin.getLocaleManager();
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(locale.component("command.train.attachment.player-only"));
+      return;
+    }
+    DriveSessionManager drive = plugin.getDriveSessionManager();
+    List<String> cabNames = drive == null ? List.of() : drive.config().driver().cabSeatNames();
+    if (cabNames.isEmpty()) {
+      sender.sendMessage(locale.component("command.train.attachment.no-cab-names"));
+      return;
+    }
+    SeatLocator.MarkResult result = SeatLocator.markCabSeat(player, mark, cabNames, seatIndex);
+    if (result.outcome() == SeatLocator.MarkOutcome.NOT_SEATED) {
+      sender.sendMessage(locale.component("command.train.attachment.not-seated"));
+      return;
+    }
+    SeatBinding seat = result.seat().orElseThrow();
+    Map<String, String> values =
+        Map.of(
+            "car",
+            String.valueOf(seat.memberIndex() + 1),
+            "cars",
+            String.valueOf(result.memberCount()),
+            "seat",
+            String.valueOf(seat.seatIndex() + 1),
+            "names",
+            result.names().isEmpty() ? "-" : String.join("、", result.names()));
+    String prefix = "command.train.attachment.";
+    List<String> others =
+        result.otherCabSeats().stream().map(index -> String.valueOf(index + 1)).toList();
+    switch (result.outcome()) {
+      case SHARED_MODEL -> {
+        sender.sendMessage(locale.component(prefix + "shared-model", values));
+        return;
+      }
+      case NO_SUCH_SEAT -> {
+        sender.sendMessage(locale.component(prefix + "no-such-seat", values));
+        return;
+      }
+      case CAR_FULL -> {
+        // 一节车厢两端各一个驾驶室：已满时要先取消一个，不替玩家决定取消哪个。
+        sender.sendMessage(
+            locale.component(
+                prefix + "car-full",
+                Map.of(
+                    "car",
+                    values.get("car"),
+                    "cars",
+                    values.get("cars"),
+                    "count",
+                    String.valueOf(others.size()),
+                    "seats",
+                    String.join("、", others))));
+        return;
+      }
+      case UNCHANGED -> sender.sendMessage(
+          locale.component(prefix + (mark ? "already-marked" : "not-marked"), values));
+      default -> sender.sendMessage(
+          locale.component(prefix + (mark ? "marked" : "unmarked"), values));
+    }
+    if (mark && others.size() == 1) {
+      // 第二个驾驶座：可能是车厢另一端的驾驶室（单节车重连），也可能是误标，说一声另一个是哪个座位。
+      sender.sendMessage(locale.component(prefix + "also-marked", Map.of("other", others.get(0))));
+    }
+    // 取消后列车上已没有任何标记：驾驶室改按车厢位置认定，直接说明这一点。
+    String end =
+        !mark && !result.trainMarked()
+            ? "end-unmarked-train"
+            : switch (result.end()) {
+              case HEAD -> "end-head";
+              case TAIL -> "end-tail";
+              case NONE -> !mark
+                  ? "end-none"
+                  : seat.memberIndex() == 0 || seat.memberIndex() == result.memberCount() - 1
+                      ? "end-inner"
+                      : "end-middle";
+            };
+    sender.sendMessage(locale.component(prefix + end, values));
+    if (result.outcome() == SeatLocator.MarkOutcome.CHANGED) {
+      sender.sendMessage(
+          locale
+              .component(prefix + "save-hint")
+              .clickEvent(ClickEvent.suggestCommand("/train save "))
+              .hoverEvent(HoverEvent.showText(locale.component(prefix + "save-hover"))));
+    }
+  }
+
   private void sendHelp(CommandSender sender) {
     LocaleManager locale = plugin.getLocaleManager();
     sender.sendMessage(locale.component("command.train.help.header"));
@@ -1280,6 +1405,11 @@ public final class FtaTrainCommand {
         locale.component("command.train.help.entry-config-set"),
         ClickEvent.suggestCommand("/fta train config set "),
         locale.component("command.train.help.hover-config-set"));
+    sendHelpEntry(
+        sender,
+        locale.component("command.train.help.entry-attachment"),
+        ClickEvent.suggestCommand("/fta train attachment set driver_seat"),
+        locale.component("command.train.help.hover-attachment"));
     sendHelpEntry(
         sender,
         locale.component("command.train.help.entry-debug"),
@@ -1634,6 +1764,19 @@ public final class FtaTrainCommand {
       out = out.substring(0, out.length() - 1);
     }
     return out.trim();
+  }
+
+  /**
+   * 车型最高速度的补全：写了数字就给出这个数加各单位（kmh、bps、bpt），否则给示例；不写单位按格/秒理解，所以示例都带单位，并给出 {@code <speed>} 提示。
+   *
+   * @param token 已输入的文字
+   */
+  static List<String> maxSpeedSuggestions(String token) {
+    String text = token == null ? "" : token.trim();
+    if (text.matches("\\d+(\\.\\d+)?")) {
+      return List.of(text + "kmh", text + "bps", text + "bpt");
+    }
+    return List.of("<speed>", "80kmh", "22bps", "1.1bpt");
   }
 
   /**

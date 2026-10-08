@@ -125,6 +125,47 @@ class TimetableDispatchBindingTest {
     assertEquals("R1-003", service.nextDepartureOf("train-A").orElseThrow().trip().tripCode());
   }
 
+  /** 查不到下一趟时说得出原因：车没绑交路、交路跑完、下一班过了发车容差、下一班已取消。 */
+  @Test
+  void explainsWhyThereIsNoNextTrip() {
+    start();
+    assertEquals(
+        TimetableService.NoNextTripReason.NOT_TIMETABLED,
+        service.whyNoNextDeparture("train-A").reason());
+
+    service.bindDuty("train-A", duty, "ticket-operation");
+    service.bindDispatchedTrip("train-A", intent(0), Optional.of(trip(0)));
+    clock.set(Instant.parse("2026-03-02T08:25:01Z"));
+    assertEquals(Optional.empty(), service.nextDepartureOf("train-A"));
+    assertEquals(
+        new TimetableService.NoNextTrip(TimetableService.NoNextTripReason.OVERDUE, "R1-002"),
+        service.whyNoNextDeparture("train-A"),
+        "08:10 与 08:20 都过了 5 分钟容差：报最先的那一班");
+
+    clock.set(T0);
+    service.cancelUndispatched(trip(1), "ticket-abandoned");
+    service.cancelUndispatched(trip(2), "ticket-abandoned");
+    assertEquals(Optional.empty(), service.nextDepartureOf("train-A"));
+    assertEquals(
+        new TimetableService.NoNextTrip(TimetableService.NoNextTripReason.CANCELLED, "R1-002"),
+        service.whyNoNextDeparture("train-A"));
+  }
+
+  /** 跑完交路最后一班、没有带客回库班：原因是交路跑完。 */
+  @Test
+  void aCompletedDutyIsTheReason() {
+    start();
+    service.bindDuty("train-A", duty, "ticket-operation");
+    service.bindDispatchedTrip("train-A", intent(0), Optional.of(trip(0)));
+    clock.set(Instant.parse("2026-03-02T08:20:01Z"));
+    service.bindDispatchedTrip("train-A", intent(2), Optional.of(trip(2)));
+
+    assertEquals(Optional.empty(), service.nextDepartureOf("train-A"));
+    assertEquals(
+        new TimetableService.NoNextTrip(TimetableService.NoNextTripReason.DUTY_COMPLETE, ""),
+        service.whyNoNextDeparture("train-A"));
+  }
+
   /** 续班票等的是本交路的车；车接下那一班以后，那一班就不再等它。 */
   @Test
   void aContinuationTicketAwaitsTheDutyVehicleUntilItTakesTheTrip() {

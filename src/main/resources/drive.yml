@@ -175,7 +175,7 @@ driver:
   # 停车点前预留的余量（格）：防护按“停车点 − 余量”计算制动曲线
   stop-margin-blocks: 1.0
   # 站停窗口（格）：列车离停车点多近算停准、多近可以开门。停车点是车站牌子的轨道中心（列车中心对准），
-  # 股道上有对应节数的停车位置标（stopmark 牌子）时是标志的轨道中心（车头对准）。
+  # 股道上有对应节数的停车位置标（stopmark 牌子）时是标志的轨道中心（车头最前端对准，即第一节车厢的车体前端）。
   # 网络延迟与服务器 tick 会让同样的操作停偏零点几格，窗口留有余量；停短超出可开门范围须前移。
   # 可开门范围不要超过站台两端富余的长度：列车偏出多少，两端的车门就伸出站台多少
   stop-accurate-blocks: 2.5
@@ -183,6 +183,8 @@ driver:
   # 越站：越过停车点超过这么远（格）就算越站——本站不停、不开门，记一次越站，列车继续开往下一站，站台屏显示本站取消。
   # 越过不超过这个距离仍停站开门，按停过头计分。防护的进站曲线最远只许冲到这里（终点站除外，见下一项）
   skip-station-blocks: 12.0
+  # 越站处置：同一趟越站达到这么多次时停车交还自动运行，驾驶结束、本趟任务判未完成；0 表示不处置（越站只计入成绩）
+  skip-station-handback: 2
   # 终点站（所有运营终点，含尽头式站台）最多越过停车点多少格：终点站没有越站可言，防护按这里画制动曲线（再留 stop-margin-blocks），
   # 按紧急制动也停不进时施加紧急制动，到了这里还在动就强制停车（速度归零），保证列车停在这以内。不能大于 stop-accept-blocks
   terminal-overrun-blocks: 3.0
@@ -228,14 +230,15 @@ driver:
   rescue-ato-seconds: 120
   rescue-handback-seconds: 180
   rescue-teleport-seconds: 300
-  # 拥堵熔断：全网被扣住超过 breaker-held-seconds 秒的车达到 breaker-held-trains 列、且阻挡链里有驾驶员列车时，
-  # 交还全部驾驶员列车，并在 breaker-cooldown-minutes 分钟内暂停接班（/fta drive breaker reset 可提前解除）
-  breaker-held-trains: 5
-  breaker-held-seconds: 60
-  breaker-cooldown-minutes: 15
+  # 拥堵保护：全网被扣住超过 protection-held-seconds 秒的车达到 protection-held-trains 列、且阻挡链里有驾驶员列车自己也已挡车超过这么久时
+  # （表定停站、被调度扣住、终点站等开出下一趟时不算挡车），
+  # 交还全部驾驶员列车，并在 protection-cooldown-minutes 分钟内暂停接班（/fta drive congestion reset 可提前解除）
+  protection-held-trains: 5
+  protection-held-seconds: 60
+  protection-cooldown-minutes: 15
   # 驾驶记录（/fta drive records、top）保留多少天，超过的每小时清理一次；0 表示一直保留
   record-retention-days: 30
-  # 挡住后车：后方被驾驶员列车直接挡住的车被扣超过 congestion-warn-seconds 秒时提醒驾驶员，
+  # 挡住后车：驾驶员列车直接挡住后车超过 congestion-warn-seconds 秒时提醒驾驶员（从挡上那一刻起算，表定停站、被调度扣住、终点站等开出下一趟时不算），
   # 超过 congestion-ato-seconds 秒且驾驶员列车停着、不在表定停站时强制转 ATO
   congestion-warn-seconds: 60
   congestion-ato-seconds: 120
@@ -302,24 +305,24 @@ license:
     # 只用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时用正式车次
     routes: []
   # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
-  # 或 dispatch（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
+  # 或 road-test（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
   classes:
-    free:
-      name: "自由驾驶证"
+    learner:
+      name: "见习驾驶证"
       description: "驾驶非调度列车，使用新手教程与驾驶提示"
       enabled: true
       requires: []
       exam: tutorial
       grants:
         - fetarute.drive
-    dispatch:
-      name: "调度驾驶证"
+    driver:
+      name: "正式驾驶证"
       description: "领取驾驶任务、驾驶调度列车（人工与 ATO）、自选仿真等级、查看驾驶记录与排行"
       enabled: true
       requires:
-        - free
-      exam: dispatch
+        - learner
+      exam: road-test
       # 报名路考前要完整开完几次路考练习；0 表示不要求
       training-runs: 1
       # 路考区间要开过几个停车站（练习相同）
@@ -332,6 +335,34 @@ license:
       allow-wrong-door: false
       grants:
         - fetarute.drive.driver
+
+# 驾驶奖励：驾驶调度列车的任务（领任务或接管时刻表车次）按驾驶距离与停站数给经验与服务器钱币。
+# 开到终点站全额；中途结束、被收回按已开的部分；卡住被收回、超过任务时限、越站交还不发；路考与练习不发。
+# 钱币装了 Vault 时经经济接口发（EssentialsX 等经济插件会挂在 Vault 上）；没有 Vault 时用 money-command 控制台命令发。经验只发给在线的玩家
+rewards:
+  enabled: true
+  # 每公里（1000 格）与每停一站给多少经验
+  experience-per-km: 10
+  experience-per-stop: 2
+  # 每公里与每停一站给多少钱币
+  money-per-km: 20.0
+  money-per-stop: 5.0
+  # ATO 运行的那段（里程与停站）按这个比例发
+  ato-multiplier: 0.5
+  # 按本趟评级再乘的系数
+  grade-multipliers:
+    S: 1.5
+    A: 1.2
+    B: 1.0
+    C: 0.8
+    D: 0.5
+  # 没有 Vault 时发钱币的控制台命令：{player} 玩家名，{amount} 数额；留空则只发经验
+  money-command: "eco give {player} {amount}"
+  # 钱币的名称，用在奖励提示里
+  currency-name: "FRD"
+  # ATO 下连续多少站超时未确认发车就判定驾驶员离开：从第一次超时起的里程与停站不计奖励，确认一次发车即恢复；
+  # 不到这么多站就确认过（或本趟结束）的照常计。0 表示不判定
+  away-after-timeouts: 3
 
 sounds:
   enabled: true
@@ -356,7 +387,7 @@ sounds:
     key: "minecraft:block.note_block.bit"
     volume: 1.0
     pitch: 0.7
-  signal-confirmed:
+  signal-acknowledged:
     key: "minecraft:ui.button.click"
     volume: 0.6
     pitch: 1.2

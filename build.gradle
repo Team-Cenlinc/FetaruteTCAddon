@@ -39,6 +39,9 @@ dependencies {
     compileOnly("com.bergerkiller.bukkit:BKCommonLib:${bkCommonLibVersion}")
     compileOnly("com.bergerkiller.bukkit:TrainCarts:${trainCartsVersion}")
     compileOnly("com.bergerkiller.bukkit:TCCoasters:${tccCoastersVersion}")
+    compileOnly("com.github.MilkBowl:VaultAPI:1.7") {
+        exclude group: "org.bukkit", module: "bukkit"
+    }
     compileOnly("org.incendo:cloud-paper")
     compileOnly("org.incendo:cloud-minecraft-extras")
     testImplementation("org.incendo:cloud-paper")
@@ -61,6 +64,8 @@ dependencies {
 spotless {
     format("misc") {
         target("**/*.md", "**/.gitignore")
+        // 独立构建的扩展有自己的构建目录与缓存
+        targetExclude("integrations/*/build/**", "integrations/*/.gradle/**", "integrations/*/.kotlin/**")
         trimTrailingWhitespace()
         endWithNewline()
     }
@@ -253,4 +258,49 @@ publishing {
             }
         }
     }
+}
+
+// ---- 官方 Typewriter 扩展 ----
+// integrations/typewriter 是独立的 Gradle 工程（自带 wrapper、Kotlin 与 Typewriter 构建插件，Gradle 版本与主工程不同），
+// 不能并进主构建，这里调它自己的 gradlew，编译时直接用上面打好的 API jar；产物复制到 build/libs。
+// 首次构建要联网取 Typewriter 的构建插件；不需要扩展时加 -PskipTypewriter。
+def typewriterDir = file("integrations/typewriter")
+def typewriterOutput = new File(typewriterDir, "build/libs")
+
+def typewriterExtension = tasks.register("typewriterExtension", Exec) {
+    group = "build"
+    description = "构建官方 Typewriter 扩展"
+    onlyIf { !project.hasProperty("skipTypewriter") }
+    def apiJarFile = tasks.named("apiJar").flatMap { it.archiveFile }
+    inputs.file(apiJarFile)
+    inputs.files(fileTree(typewriterDir) {
+        exclude("build/**", ".gradle/**", ".kotlin/**")
+    })
+    outputs.dir(typewriterOutput)
+    workingDir(typewriterDir)
+    def wrapper = System.getProperty("os.name").toLowerCase(Locale.ROOT).contains("windows") ? "gradlew.bat" : "./gradlew"
+    def offline = gradle.startParameter.offline
+    doFirst {
+        // 扩展自己的构建不清理旧版本的 jar，先清掉，免得一起复制出去
+        delete(typewriterOutput)
+        def args = [wrapper, "build", "--console=plain", "-PfetaruteApiJar=${apiJarFile.get().asFile.absolutePath}"]
+        if (offline) {
+            args.add("--offline")
+        }
+        commandLine(args)
+    }
+}
+
+def typewriterExtensionJar = tasks.register("typewriterExtensionJar", Copy) {
+    group = "build"
+    description = "把官方 Typewriter 扩展复制到 build/libs"
+    onlyIf { !project.hasProperty("skipTypewriter") }
+    from(typewriterExtension) {
+        include("*.jar")
+    }
+    into(layout.buildDirectory.dir("libs"))
+}
+
+tasks.named("build") {
+    dependsOn(typewriterExtensionJar)
 }

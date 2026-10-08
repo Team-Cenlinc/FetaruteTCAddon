@@ -37,7 +37,7 @@ public final class TutorialSnapshots {
         .stopped(session.isStopped())
         .doorsOpen(session.anyDoorOpen())
         .doorsClosing(session.doorsClosing(nowTick))
-        .signalConfirmPending(link != null && link.signalConfirm().pending())
+        .signalAcknowledgePending(link != null && link.signalAcknowledge().pending())
         .stationHint(hint.map(DriverStationHint.Hint::kind).orElse(null))
         .doorsRequired(
             hint.filter(found -> found.kind() == DriverStationHint.Kind.OPEN_DOORS)

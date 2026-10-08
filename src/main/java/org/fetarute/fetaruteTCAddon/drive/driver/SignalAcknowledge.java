@@ -8,7 +8,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
  *
  * <p>standard 级只对“减速”和“停车”要求确认，simulation 级每次变严都要。信号放宽时不用确认，正在等的确认随之作废。本类不依赖服务器对象。
  */
-public final class SignalConfirm {
+public final class SignalAcknowledge {
 
   /** 信号变严后稳定这么久才要求确认（滤掉闪动）。 */
   static final long DEBOUNCE_TICKS = 10L;
@@ -33,7 +33,7 @@ public final class SignalConfirm {
   private long pendingSince = -1L;
   private boolean missCounted;
 
-  private int confirmations;
+  private int acknowledgements;
   private int misses;
   private long totalReactionTicks;
 
@@ -93,7 +93,7 @@ public final class SignalConfirm {
 
   /** 清掉确认次数、漏确认次数与反应时间（终点站结算后下一趟重新计）。等着的确认不动。 */
   public void resetCounts() {
-    confirmations = 0;
+    acknowledgements = 0;
     misses = 0;
     totalReactionTicks = 0L;
   }
@@ -118,7 +118,7 @@ public final class SignalConfirm {
       return OptionalLong.empty();
     }
     long reaction = Math.max(0L, nowTick - pendingSince);
-    confirmations++;
+    acknowledgements++;
     totalReactionTicks += reaction;
     accepted = pendingAspect;
     pendingSince = -1L;
@@ -142,8 +142,8 @@ public final class SignalConfirm {
     return age >= SERVICE_AFTER_TICKS ? Intervention.SERVICE : Intervention.NONE;
   }
 
-  public int confirmations() {
-    return confirmations;
+  public int acknowledgements() {
+    return acknowledgements;
   }
 
   public int misses() {
@@ -152,7 +152,7 @@ public final class SignalConfirm {
 
   /** 平均反应时间（秒）；没有确认过时为 0。 */
   public double averageReactionSeconds() {
-    return confirmations == 0 ? 0.0 : totalReactionTicks / 20.0 / confirmations;
+    return acknowledgements == 0 ? 0.0 : totalReactionTicks / 20.0 / acknowledgements;
   }
 
   private static int rank(SignalAspect aspect) {

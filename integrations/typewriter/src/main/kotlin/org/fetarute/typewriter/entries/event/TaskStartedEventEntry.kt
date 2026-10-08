@@ -14,6 +14,8 @@ import com.typewritermc.engine.paper.entry.TriggerableEntry
 import com.typewritermc.engine.paper.entry.entries.EventEntry
 import com.typewritermc.engine.paper.entry.triggerAllFor
 import org.fetarute.fetaruteTCAddon.api.event.DriverTaskStartedEvent
+import org.fetarute.typewriter.TaskSource
+import org.fetarute.typewriter.allows
 import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import kotlin.reflect.KClass
@@ -35,6 +37,8 @@ class TaskStartedEventEntry(
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
     @Help("Only trips of this route code. Leave blank for any route.")
     val route: String = "",
+    @Help("Only tasks from these sources. Leave empty for any source.")
+    val sources: List<TaskSource> = emptyList(),
 ) : EventEntry
 
 enum class TaskStartedContextKeys(override val klass: KClass<*>) : EntryContextKey {
@@ -48,10 +52,13 @@ enum class TaskStartedContextKeys(override val klass: KClass<*>) : EntryContextK
     TRAIN(String::class),
 
     @KeyType(String::class)
-    BOARD_STATION(String::class),
+    TAKEOVER_STATION(String::class),
 
     @KeyType(String::class)
-    ALIGHT_STATION(String::class),
+    HANDOVER_STATION(String::class),
+
+    @KeyType(String::class)
+    SOURCE(String::class),
 }
 
 @EntryListener(TaskStartedEventEntry::class)
@@ -59,12 +66,15 @@ fun onTaskStarted(event: DriverTaskStartedEvent, query: Query<TaskStartedEventEn
     val player = event.player.orElse(null) ?: return
     val task = event.task
     query.findWhere {
-        task.assignedBy(it.assignedBy) && (it.route.isBlank() || it.route.equals(task.routeCode(), ignoreCase = true))
+        task.assignedBy(it.assignedBy) &&
+            (it.route.isBlank() || it.route.equals(task.routeCode(), ignoreCase = true)) &&
+            it.sources.allows(task)
     }.triggerAllFor(player) {
         TaskStartedContextKeys.TRIP += task.tripCode()
         TaskStartedContextKeys.ROUTE += task.routeCode()
         TaskStartedContextKeys.TRAIN += event.trainName
-        TaskStartedContextKeys.BOARD_STATION += task.board().name()
-        TaskStartedContextKeys.ALIGHT_STATION += task.alight().map { it.name() }.orElse("")
+        TaskStartedContextKeys.TAKEOVER_STATION += task.takeoverStation().name()
+        TaskStartedContextKeys.HANDOVER_STATION += task.handoverStation().map { it.name() }.orElse("")
+        TaskStartedContextKeys.SOURCE += task.source()
     }
 }
