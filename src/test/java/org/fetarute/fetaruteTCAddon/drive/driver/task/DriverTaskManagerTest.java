@@ -196,7 +196,8 @@ class DriverTaskManagerTest {
         handover >= 0 ? "C 站" : "",
         true,
         "typewriter",
-        java.util.Map.of("quest", "q1"));
+        java.util.Map.of("quest", "q1"),
+        true);
   }
 
   @Test

@@ -51,7 +51,8 @@ class DriverTaskContinuationTest {
         null,
         false,
         source,
-        Map.of());
+        Map.of(),
+        true);
   }
 
   private static TaskBoardEntries.Row row(String trip) {

@@ -162,7 +162,8 @@ public final class TaskBoardSource {
                               null,
                               false,
                               source,
-                              java.util.Map.of());
+                              java.util.Map.of(),
+                              true);
                         }));
   }
 
@@ -213,7 +214,8 @@ public final class TaskBoardSource {
                       stationName(plugin, code, handover.nodeId()),
                       false,
                       source,
-                      metadata));
+                      metadata,
+                      true));
             });
   }
 

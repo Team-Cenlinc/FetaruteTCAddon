@@ -22,19 +22,25 @@ class DriveRewardPayerTest {
   }
 
   @Test
-  @DisplayName("开到终点、中途结束、被收回的给；卡住被收回、超时、越站交还的不给；路考与练习不给")
+  @DisplayName("开到终点、中途结束、被收回的给；卡住被收回、超时、越站交还的不给；路考与练习不给；插件关了奖励的不给")
   void whichTasksEarnRewards() {
     assertTrue(
-        DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_BOARD));
-    assertTrue(
-        DriveSessionManager.earnsReward(DriverTask.State.ABANDONED, DriverTask.SOURCE_TAKEOVER));
+        DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_BOARD, true));
     assertTrue(
         DriveSessionManager.earnsReward(
-            DriverTask.State.INTERRUPTED, DriverTask.SOURCE_CONTINUATION));
-    assertFalse(DriveSessionManager.earnsReward(DriverTask.State.FAILED, DriverTask.SOURCE_BOARD));
+            DriverTask.State.ABANDONED, DriverTask.SOURCE_TAKEOVER, true));
+    assertTrue(
+        DriveSessionManager.earnsReward(
+            DriverTask.State.INTERRUPTED, DriverTask.SOURCE_CONTINUATION, true));
     assertFalse(
-        DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_EXAM));
+        DriveSessionManager.earnsReward(DriverTask.State.FAILED, DriverTask.SOURCE_BOARD, true));
     assertFalse(
-        DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_TRAINING));
+        DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, DriverTask.SOURCE_EXAM, true));
+    assertFalse(
+        DriveSessionManager.earnsReward(
+            DriverTask.State.COMPLETED, DriverTask.SOURCE_TRAINING, true));
+    assertFalse(
+        DriveSessionManager.earnsReward(DriverTask.State.COMPLETED, "typewriter", false),
+        "插件派任务时关了奖励");
   }
 }

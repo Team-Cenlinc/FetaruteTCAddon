@@ -125,42 +125,6 @@ public final class DriverTaskManager {
     public TaskSpec {
       metadata = metadata == null ? Map.of() : Map.copyOf(metadata);
     }
-
-    /** 发驾驶奖励的任务。 */
-    public TaskSpec(
-        TaskKey key,
-        String routeCode,
-        String operatorCode,
-        String stationCode,
-        String stationName,
-        String takeoverNodeId,
-        int takeoverStopSequence,
-        Instant plannedDeparture,
-        String trainName,
-        int handoverStopSequence,
-        String handoverStationCode,
-        String handoverStationName,
-        boolean depotPickup,
-        String source,
-        Map<String, String> metadata) {
-      this(
-          key,
-          routeCode,
-          operatorCode,
-          stationCode,
-          stationName,
-          takeoverNodeId,
-          takeoverStopSequence,
-          plannedDeparture,
-          trainName,
-          handoverStopSequence,
-          handoverStationCode,
-          handoverStationName,
-          depotPickup,
-          source,
-          metadata,
-          true);
-    }
   }
 
   private Listener listener = NO_LISTENER;

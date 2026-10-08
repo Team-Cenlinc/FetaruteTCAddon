@@ -5110,7 +5110,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     String grade = result.grade().name();
     task.setResult(result.points(), grade);
     DriveRewardPayer.Paid paid =
-        task.rewards() && earnsReward(task.state(), task.source())
+        earnsReward(task.state(), task.source(), task.rewards())
             ? rewardPayer.pay(
                 task.playerId(),
                 task.playerName(),
@@ -5166,9 +5166,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return Optional.of(TaskViews.score(score, result.points(), grade));
   }
 
-  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给。 */
-  static boolean earnsReward(DriverTask.State state, String source) {
-    return (state == DriverTask.State.COMPLETED
+  /** 这趟任务给不给奖励：开到终点、中途结束、被收回的按已开的部分给；卡住被收回、超过任务时限、越站交还的不给；路考与练习不给；插件派任务时关了奖励的不给。 */
+  static boolean earnsReward(DriverTask.State state, String source, boolean taskRewards) {
+    return taskRewards
+        && (state == DriverTask.State.COMPLETED
             || state == DriverTask.State.ABANDONED
             || state == DriverTask.State.INTERRUPTED)
         && !DriverTask.SOURCE_EXAM.equals(source)
