@@ -267,6 +267,15 @@
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaCallCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.display.pids.PidsService"/>
+        <Method name="composer"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaTripCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>

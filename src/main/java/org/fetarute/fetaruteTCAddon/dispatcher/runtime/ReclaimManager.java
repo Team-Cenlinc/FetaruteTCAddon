@@ -503,6 +503,52 @@ public class ReclaimManager {
     }
   }
 
+  /** 叫来的车送回库的结果。 */
+  public enum CalledReturn {
+    /** 已派出回库交路。 */
+    ASSIGNED,
+    /** 这个终点没有回库交路：按滞留兜底处理（{@code reclaim.stranded-destroy-seconds} 为 0 时只记滞留）。 */
+    NO_ROUTE,
+    /** 这一拍没派出去：回库交路被拒、闭塞或交接进行中，下一拍再试；滞留计时照走。 */
+    BLOCKED,
+    /** 车已不在待命池里（被叫车票接走或已离开）。 */
+    NOT_WAITING
+  }
+
+  /**
+   * 叫来的车在终点等完：立即派回库，不看 {@code reclaim.enabled} 与闲置门槛。
+   *
+   * <p>叫来的车不属于任何交路、也不会再有班可跑，所以不过交路闸；没有回库交路时与时刻表放行的车同一条路（原地销毁，有乘客、 折返事务进行中不碰），派不出去时进滞留计时。
+   *
+   * @param trainName 列车名
+   * @param now 当前时刻
+   */
+  public CalledReturn returnCalledTrain(String trainName, Instant now) {
+    Optional<LayoverRegistry.LayoverCandidate> candidate = layoverRegistry.get(trainName);
+    if (candidate.isEmpty() || now == null) {
+      return CalledReturn.NOT_WAITING;
+    }
+    ConfigManager.ReclaimSettings settings = configManager.current().reclaimSettings();
+    ReturnOutcome outcome =
+        assignReturnTicket(candidate.get(), plugin.getStorageManager().provider());
+    switch (outcome) {
+      case ASSIGNED -> {
+        strandedSince.remove(trainName);
+        return CalledReturn.ASSIGNED;
+      }
+      case NO_ROUTE -> {
+        long idleSeconds = Math.max(0L, ChronoUnit.SECONDS.between(candidate.get().readyAt(), now));
+        destroyWithoutReturnRoute(
+            candidate.get(), now, idleSeconds, settings.strandedDestroySeconds(), false);
+        return CalledReturn.NO_ROUTE;
+      }
+      default -> {
+        destroyIfStranded(candidate.get(), now, settings.strandedDestroySeconds());
+        return CalledReturn.BLOCKED;
+      }
+    }
+  }
+
   /**
    * 车停在这里会不会挡住后车：正线折返点（挡同股道后车）或单股道车站（占住全站唯一股道）；都不是时为 {@code null}。
    *

@@ -96,7 +96,9 @@ public final class TimetableSpawnManager
     for (SpawnTicket ticket : delegated) {
       if (ticket != null
           && ticket.service() != null
+          && ticket.source() != TripSource.ON_DEMAND
           && managed.contains(ticket.service().routeId())) {
+        // 叫车的按需票照常放行：叫来的车不进时刻表，也不占表里的车次。
         // 拦下 headway 票，同时向 delegate 报完成：否则它的 backlog 会一直涨到上限然后停止生成，
         // 等到时刻表被下架时，这条 route 会静悄悄地一辆车都发不出来。
         delegate.complete(ticket);
@@ -206,6 +208,15 @@ public final class TimetableSpawnManager
       return;
     }
     delegate.requeue(ticket);
+  }
+
+  /** 只撤本层没有接管的票（叫车的按需票在 delegate 队列里）；按表票带着交路意图，不从这里撤。 */
+  @Override
+  public boolean withdraw(UUID ticketId) {
+    if (ticketId == null || ownedTickets.containsKey(ticketId)) {
+      return false;
+    }
+    return delegate.withdraw(ticketId);
   }
 
   @Override

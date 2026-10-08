@@ -445,6 +445,35 @@ class ConfigManagerTest {
         "负数回退缺省值");
   }
 
+  /** 叫车配置：模板与代码缺省一致，缺段用缺省，负数回退缺省。 */
+  @Test
+  void callSettingsParseWithDefaults() throws Exception {
+    YamlConfiguration template = new YamlConfiguration();
+    try (java.io.InputStream in = ConfigManager.class.getResourceAsStream("/config.yml")) {
+      template.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+    }
+    assertEquals(
+        ConfigManager.CallSettings.defaults(),
+        ConfigManager.parse(template, Logger.getLogger("config-test")).callSettings());
+
+    YamlConfiguration missing = new YamlConfiguration();
+    assertEquals(
+        ConfigManager.CallSettings.defaults(),
+        ConfigManager.parse(missing, Logger.getLogger("config-test")).callSettings());
+
+    YamlConfiguration explicit = new YamlConfiguration();
+    explicit.set("call.min-wait-minutes", 8);
+    explicit.set("call.cooldown-seconds", -3);
+    explicit.set("call.terminal-wait-seconds", 0);
+    explicit.set("call.default-max-trains", 4);
+    ConfigManager.CallSettings parsed =
+        ConfigManager.parse(explicit, Logger.getLogger("config-test")).callSettings();
+    assertEquals(8, parsed.minWaitMinutes());
+    assertEquals(60, parsed.cooldownSeconds(), "负数回退缺省");
+    assertEquals(0, parsed.terminalWaitSeconds(), "0 表示到终点就派回库");
+    assertEquals(4, parsed.defaultMaxTrains());
+  }
+
   /** 模板里的晚点追赶参数与代码缺省值一致。 */
   @Test
   void bundledTemplateRecoveryMatchesTheDefaults() throws Exception {

@@ -34,6 +34,16 @@ public interface SpawnManager {
   /** 标记票据已完成（成功出车），用于释放 backlog 容量。 */
   void complete(SpawnTicket ticket);
 
+  /**
+   * 撤回还在队列里的票据（叫车取消）。
+   *
+   * @param ticketId 票据 id
+   * @return 票据在队列里并已撤回时为 true
+   */
+  default boolean withdraw(java.util.UUID ticketId) {
+    return false;
+  }
+
   /** 返回当前计划快照（用于诊断输出）。 */
   SpawnPlan snapshotPlan();
 

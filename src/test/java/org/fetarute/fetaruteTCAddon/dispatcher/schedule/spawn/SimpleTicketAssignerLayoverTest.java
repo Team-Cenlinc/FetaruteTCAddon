@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1924,6 +1925,7 @@ class SimpleTicketAssignerLayoverTest {
             anyString(),
             any(RouteDefinition.class),
             any(),
+            anyInt(),
             any(RailGraph.class),
             any(Instant.class)))
         .thenAnswer(
@@ -2546,7 +2548,7 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            anyString(), any(RouteDefinition.class), any(), eq(graph), any(Instant.class)))
+            anyString(), any(RouteDefinition.class), any(), eq(0), eq(graph), any(Instant.class)))
         .thenReturn(Optional.empty());
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     RouteDefinition route =
@@ -2572,7 +2574,7 @@ class SimpleTicketAssignerLayoverTest {
 
     verify(runtimeDispatchService)
         .prepareDepotSpawnDynamicAuthority(
-            anyString(), eq(route), eq(route.waypoints()), eq(graph), any(Instant.class));
+            anyString(), eq(route), eq(route.waypoints()), eq(0), eq(graph), any(Instant.class));
     verify(runtimeDispatchService).cancelPreparedDepotSpawnDynamicAuthority(anyString());
     verify(occupancyManager, never()).canEnterPreview(any(OccupancyRequest.class));
     verify(occupancyManager, never()).canEnter(any(OccupancyRequest.class));
@@ -2613,7 +2615,7 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            anyString(), any(RouteDefinition.class), any(), eq(graph), eq(now)))
+            anyString(), any(RouteDefinition.class), any(), eq(0), eq(graph), eq(now)))
         .thenReturn(Optional.of(List.of(depotNode, actualPlatform)));
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     when(depotSpawner.spawn(eq(provider), any(), anyString(), eq(now)))

@@ -132,6 +132,8 @@ command:
       status: ["<gray>状态:</gray> <dark_aqua><status></dark_aqua>"]
       color: ["<gray>颜色:</gray> <dark_aqua><color></dark_aqua>"]
       spawn-max: ["<gray>最大车数:</gray> <dark_aqua><max_trains></dark_aqua>"]
+    set:
+      noop: ["<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline/--maxTrains）</gray>"]
     depot:
       list:
         header: ["<prefix> <dark_aqua>线路 Depot</dark_aqua> <gray>(line=<white><line></white>, count=<white><count></white>)</gray>"]

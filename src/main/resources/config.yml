@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 38
+config-version: 39
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -299,6 +299,18 @@ timetable:
     engage-delay-seconds: 10
   # 录制数据写入数据库的间隔（秒）
   recorder-flush-interval-seconds: 5
+
+# 叫车：线路打开叫车（/fta line set ... --allow-player-call true）后，玩家可右键站台屏或用 /fta call 叫一趟车。
+# 叫来的车不进时刻表，跑完全程后在终点等候片刻，随后回库
+call:
+  # 本站台该方向下一班超过该分钟数才能叫车；0 表示随时能叫
+  min-wait-minutes: 5
+  # 每位玩家两次叫车的最短间隔（秒）
+  cooldown-seconds: 60
+  # 叫来的车到终点后等候的秒数：期间沿途有人叫车且这趟经过就接着跑，否则派回库
+  terminal-wait-seconds: 60
+  # 线路未设 --call-max-trains 时，同时最多几辆叫来的车（含尚未派出的叫车）
+  default-max-trains: 2
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

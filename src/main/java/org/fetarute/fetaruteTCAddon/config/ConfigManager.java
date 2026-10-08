@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 38;
+  private static final int EXPECTED_CONFIG_VERSION = 39;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -178,6 +178,8 @@ public final class ConfigManager {
     SmartDispatcherSettings smartDispatcherSettings = parseSmartDispatcher(config, logger);
     ConfigurationSection timetableSection = config.getConfigurationSection("timetable");
     TimetableSettings timetableSettings = parseTimetable(timetableSection, logger);
+    ConfigurationSection callSection = config.getConfigurationSection("call");
+    CallSettings callSettings = parseCall(callSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -191,7 +193,24 @@ public final class ConfigManager {
         reclaimSettings,
         smartDispatcherSettings,
         healthSettings,
-        timetableSettings);
+        timetableSettings,
+        callSettings);
+  }
+
+  /** 解析叫车配置段；缺段或取值无效时用默认值。 */
+  private static CallSettings parseCall(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    CallSettings defaults = CallSettings.defaults();
+    if (section == null) {
+      return defaults;
+    }
+    return new CallSettings(
+        readNonNegativeInt(section, "min-wait-minutes", defaults.minWaitMinutes(), "call", logger),
+        readNonNegativeInt(section, "cooldown-seconds", defaults.cooldownSeconds(), "call", logger),
+        readNonNegativeInt(
+            section, "terminal-wait-seconds", defaults.terminalWaitSeconds(), "call", logger),
+        readNonNegativeInt(
+            section, "default-max-trains", defaults.defaultMaxTrains(), "call", logger));
   }
 
   /**
@@ -1471,7 +1490,8 @@ public final class ConfigManager {
       ReclaimSettings reclaimSettings,
       SmartDispatcherSettings smartDispatcherSettings,
       HealthSettings healthSettings,
-      TimetableSettings timetableSettings) {
+      TimetableSettings timetableSettings,
+      CallSettings callSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
@@ -1479,6 +1499,39 @@ public final class ConfigManager {
               : smartDispatcherSettings;
       timetableSettings =
           timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
+      callSettings = callSettings == null ? CallSettings.defaults() : callSettings;
+    }
+
+    /** 兼容尚未感知叫车配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings,
+        TimetableSettings timetableSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          timetableSettings,
+          CallSettings.defaults());
     }
 
     /** 兼容尚未感知时刻表配置的调用方与测试夹具。 */
@@ -1610,6 +1663,29 @@ public final class ConfigManager {
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
           DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
+    }
+  }
+
+  /**
+   * 叫车（玩家在站台屏或命令叫一趟车）配置。
+   *
+   * @param minWaitMinutes 本站台该方向下一班超过多少分钟才能叫车；0 表示随时能叫
+   * @param cooldownSeconds 每位玩家两次叫车的最短间隔
+   * @param terminalWaitSeconds 叫来的车到终点后等多久：期间沿途有人叫车、这趟经过就接着跑，否则派回库
+   * @param defaultMaxTrains 线路没写 {@code call_max_trains} 时同时最多几辆叫来的车（含排队的叫车票）
+   */
+  public record CallSettings(
+      int minWaitMinutes, int cooldownSeconds, int terminalWaitSeconds, int defaultMaxTrains) {
+
+    public CallSettings {
+      minWaitMinutes = Math.max(0, minWaitMinutes);
+      cooldownSeconds = Math.max(0, cooldownSeconds);
+      terminalWaitSeconds = Math.max(0, terminalWaitSeconds);
+      defaultMaxTrains = Math.max(1, defaultMaxTrains);
+    }
+
+    public static CallSettings defaults() {
+      return new CallSettings(5, 60, 60, 2);
     }
   }
 

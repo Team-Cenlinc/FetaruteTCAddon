@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  * @param page 第几页（0 起）
  * @param labels 固定文案
  * @param bandColors 线路色带
+ * @param callHint 能叫车时最下一行写的提示（“可右键本屏叫车”）；那一行有要提醒的状态时让给状态
  */
 public record PidsStopListView(
     PidsTheme theme,
@@ -31,7 +32,8 @@ public record PidsStopListView(
     Optional<Note> cancelled,
     int page,
     Labels labels,
-    List<Integer> bandColors) {
+    List<Integer> bandColors,
+    Optional<PidsView.Label> callHint) {
 
   public PidsStopListView {
     Objects.requireNonNull(theme, "theme");
@@ -41,12 +43,26 @@ public record PidsStopListView(
     cancelled = cancelled == null ? Optional.empty() : cancelled;
     Objects.requireNonNull(labels, "labels");
     bandColors = List.copyOf(bandColors);
+    callHint = callHint == null ? Optional.empty() : callHint;
+  }
+
+  /** 不写叫车提示。 */
+  public PidsStopListView(
+      PidsTheme theme,
+      String clock,
+      List<String> platforms,
+      Optional<Train> train,
+      Optional<Note> cancelled,
+      int page,
+      Labels labels,
+      List<Integer> bandColors) {
+    this(theme, clock, platforms, train, cancelled, page, labels, bandColors, Optional.empty());
   }
 
   /** 翻到另一页。 */
   public PidsStopListView withPage(int page) {
     return new PidsStopListView(
-        theme, clock, platforms, train, cancelled, page, labels, bandColors);
+        theme, clock, platforms, train, cancelled, page, labels, bandColors, callHint);
   }
 
   /** 终点下面一行写什么：取消的班次优先，其次是下一班的直通或经由。 */

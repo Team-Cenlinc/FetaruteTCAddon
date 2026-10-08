@@ -18,6 +18,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
  * @param bandColors 线路色带：本站台停靠线路的颜色，色带按条数等分；为空时用面板色
  * @param rows 到发行，按到站先后排列，条数不超过布局行数
  * @param labels 固定文案
+ * @param emptyMessages 到发表空行依次写的话：第一个空行写第一条，以此类推，写完为止；缺省只写“暂无后续列车”。 开放叫车时，没有车写“暂无后续列车”与叫车提示，
+ *     后面还有车可乘时空行只写叫车提示，只剩终到、通过的车时写“暂无后续列车，可右键本屏叫车”
  */
 public record PidsView(
     PidsTheme theme,
@@ -27,7 +29,8 @@ public record PidsView(
     List<LineChip> lines,
     List<Integer> bandColors,
     List<Row> rows,
-    Labels labels) {
+    Labels labels,
+    List<Names> emptyMessages) {
 
   public PidsView {
     Objects.requireNonNull(theme, "theme");
@@ -38,6 +41,23 @@ public record PidsView(
     bandColors = List.copyOf(bandColors);
     rows = List.copyOf(rows);
     Objects.requireNonNull(labels, "labels");
+    emptyMessages =
+        emptyMessages == null || emptyMessages.isEmpty()
+            ? List.of(labels.noMoreTrains())
+            : List.copyOf(emptyMessages);
+  }
+
+  /** 空行只写“暂无后续列车”。 */
+  public PidsView(
+      PidsTheme theme,
+      String clock,
+      List<String> platforms,
+      Optional<Names> station,
+      List<LineChip> lines,
+      List<Integer> bandColors,
+      List<Row> rows,
+      Labels labels) {
+    this(theme, clock, platforms, station, lines, bandColors, rows, labels, List.of());
   }
 
   /** 文字色调。 */

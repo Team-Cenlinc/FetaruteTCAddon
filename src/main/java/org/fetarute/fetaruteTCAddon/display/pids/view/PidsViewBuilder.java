@@ -96,6 +96,7 @@ public final class PidsViewBuilder {
    * @param platformColumn 到发表有站台列
    * @param placement 屏幕在世界里的朝向；不知道时为空，空位页车头画在左侧、不画前进方向
    * @param remarks 此刻轮到备注：有备注的行把英文那一格换成备注
+   * @param calls 叫车：本屏此刻能不能叫车、哪些车是叫来的
    */
   public record Request(
       PidsSnapshot snapshot,
@@ -107,7 +108,8 @@ public final class PidsViewBuilder {
       int capacity,
       boolean platformColumn,
       Optional<Placement> placement,
-      boolean remarks) {
+      boolean remarks,
+      Calls calls) {
 
     public Request {
       Objects.requireNonNull(snapshot, "snapshot");
@@ -117,6 +119,33 @@ public final class PidsViewBuilder {
       platforms = Set.copyOf(platforms);
       platformLabels = List.copyOf(platformLabels);
       placement = placement == null ? Optional.empty() : placement;
+      calls = calls == null ? Calls.NONE : calls;
+    }
+
+    /** 不看叫车。 */
+    public Request(
+        PidsSnapshot snapshot,
+        Instant now,
+        ZoneId zone,
+        PidsTheme theme,
+        Set<String> platforms,
+        List<String> platformLabels,
+        int capacity,
+        boolean platformColumn,
+        Optional<Placement> placement,
+        boolean remarks) {
+      this(
+          snapshot,
+          now,
+          zone,
+          theme,
+          platforms,
+          platformLabels,
+          capacity,
+          platformColumn,
+          placement,
+          remarks,
+          Calls.NONE);
     }
 
     /** 同一要求，但不轮到备注（只取色牌、终点、到站的页用，免得备注轮换让内容标识跟着变）。 */
@@ -131,7 +160,8 @@ public final class PidsViewBuilder {
           capacity,
           platformColumn,
           placement,
-          false);
+          false,
+          calls);
     }
 
     /** 不轮到备注。 */
@@ -183,6 +213,21 @@ public final class PidsViewBuilder {
   }
 
   /**
+   * 叫车相关的显示。
+   *
+   * @param callable 本屏此刻能叫车：空行写“可右键本屏叫车”
+   * @param calledTrains 叫来的车（列车名）：状态格写“叫车”
+   */
+  public record Calls(boolean callable, Set<String> calledTrains) {
+
+    public static final Calls NONE = new Calls(false, Set.of());
+
+    public Calls {
+      calledTrains = calledTrains == null ? Set.of() : Set.copyOf(calledTrains);
+    }
+  }
+
+  /**
    * 屏幕在世界里的朝向，用来让空位页的车头朝向对上现场。
    *
    * @param worldId 世界
@@ -198,7 +243,8 @@ public final class PidsViewBuilder {
 
   /** 构建视图。 */
   public PidsView build(Request request) {
-    List<PidsView.Row> rows = shown(request).stream().map(row -> row(row, request)).toList();
+    List<PidsRow> shownRows = shown(request);
+    List<PidsView.Row> rows = shownRows.stream().map(row -> row(row, request)).toList();
     return new PidsView(
         request.theme(),
         CLOCK.format(request.now().atZone(request.zone())),
@@ -210,7 +256,25 @@ public final class PidsViewBuilder {
         directory.linesServing(request.snapshot().station()),
         bandColors(request, rows),
         rows,
-        vocabulary.labels());
+        vocabulary.labels(),
+        emptyMessages(request, shownRows));
+  }
+
+  /**
+   * 到发表空行写的话：不开放叫车时只写“暂无后续列车”；能叫车时，一班车都没有写“暂无后续列车”与叫车提示，后面还有车可乘时只写叫车提示（不改动已有班次），
+   * 只剩终到、通过、回库的车时写“暂无后续列车，可右键本屏叫车”。
+   */
+  private List<Names> emptyMessages(Request request, List<PidsRow> shownRows) {
+    if (!request.calls().callable()) {
+      return List.of(vocabulary.labels().noMoreTrains());
+    }
+    if (shownRows.isEmpty()) {
+      return List.of(vocabulary.labels().noMoreTrains(), vocabulary.callHint());
+    }
+    if (shownRows.stream().anyMatch(PidsViewBuilder::rideable)) {
+      return List.of(vocabulary.callHint());
+    }
+    return List.of(vocabulary.noMoreTrainsCall());
   }
 
   /** 本屏显示的行：按站台过滤，至多布局行数。 */
@@ -291,7 +355,10 @@ public final class PidsViewBuilder {
         cancelled.map(row -> cancelledNote(row, request)),
         0,
         vocabulary.stopListLabels(),
-        bandColors(request, rows));
+        bandColors(request, rows),
+        request.calls().callable()
+            ? Optional.of(Label.of(vocabulary.callHint(), Tone.NORMAL))
+            : Optional.empty());
   }
 
   /**
@@ -624,6 +691,16 @@ public final class PidsViewBuilder {
   private PidsView.Row row(PidsRow row, Request request) {
     boolean cancelled = row.status() == PidsRow.Status.CANCELLED;
     Arrival arrival = arrival(row, cancelled, request.now());
+    if (arrival.mode() == ArrivalMode.COUNTDOWN
+        && row.trainName().filter(request.calls().calledTrains()::contains).isPresent()) {
+      // 叫来的车：状态格写“叫车”，与“正点”同一排法
+      arrival =
+          new Arrival(
+              arrival.mode(),
+              arrival.minutes(),
+              arrival.minutesTone(),
+              Optional.of(Label.of(vocabulary.onCall(), Tone.NORMAL)));
+    }
     if (row.platformPending() && !request.platformColumn()) {
       arrival = platformPending(arrival);
     }

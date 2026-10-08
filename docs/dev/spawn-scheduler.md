@@ -444,3 +444,7 @@ Route 首站可以是 DYNAMIC 类型（动态选择站台/轨道）：
 当前 `SchedulePlanner`、`ScheduleWindow`、`ServiceTrip` 与 `ScheduleCsvExporter` 只用于 `/fta spawn plan`、`/fta spawn export csv` 等预览/导出命令。它们会读取存储配置并生成只读未来窗口，但不会写入 runtime spawn queue，也不会改变 `StorageSpawnManager.pollDueTickets(...)` 的出票状态。
 
 `ServiceTripSpawnAdapter` 目前是预留适配层，提供 `ServiceTrip -> SpawnService/SpawnTicket` 的转换工具；主运行时 tick 与 `SimpleTicketAssigner` 尚未调用它。因此静态 schedule 预览/导出不会直接影响 depot spawn、selectedDepot、backoff 或 gate 结果。真正执行路径仍是 `StorageSpawnManager.pollDueTickets(...) -> SimpleTicketAssigner -> Depot spawn gate/occupancy -> TrainCartsDepotSpawner`。
+
+## 按需票（叫车）
+
+`TripSource.ON_DEMAND` 的票由叫车服务出，不由服务生成：不占服务 backlog，服务不在发车计划里也照留，按表运行的交路上照常放行；带入路下标的按需票在交路中途的区间点生成。详见 [player-call.md](player-call.md)。

@@ -185,6 +185,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
   private boolean runtimeDispatchRecoveryComplete;
   private ReclaimManager reclaimManager;
+  private org.fetarute.fetaruteTCAddon.call.CallService callService;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
 
@@ -253,6 +254,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initTimetable();
     initSpawnScheduler();
     initReclaimManager();
+    initCallService();
     initHudTemplateService();
     initHudDefaultTemplateService();
     initDisplayService();
@@ -313,6 +315,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (reclaimManager != null) {
       reclaimManager.stop();
       reclaimManager = null;
+    }
+    if (callService != null) {
+      callService.stop();
+      callService = null;
     }
     runtimeDispatchRecoveryComplete = false;
     if (timetableReloadTask != null) {
@@ -380,6 +386,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       reclaimManager.stop();
       reclaimManager = null;
     }
+    if (callService != null) {
+      callService.stop();
+    }
     ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), loggerManager)
         .update();
     this.configManager.reload();
@@ -421,6 +430,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
           spawnReplacementSnapshot, replacementPendingTickets, replacementAt);
     }
     initReclaimManager();
+    initCallService();
     initDisplayService();
     // 重新初始化公开 API，确保外部插件引用有效
     initApi();
@@ -761,6 +771,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaPidsCommand(this).register(commandManager);
     new FtaPidsBulletinCommand(this).register(commandManager);
     new FtaTripCommand(this).register(commandManager);
+    new org.fetarute.fetaruteTCAddon.command.FtaCallCommand(this).register(commandManager);
     new FtaAnnounceCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
@@ -912,6 +923,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (this.routeDefinitionCache == null) {
       this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
       routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
+      // 交路改了：叫车缓存的走行时分作废
+      routeDefinitionCache.addChangeListener(
+          () ->
+              getCallService()
+                  .ifPresent(org.fetarute.fetaruteTCAddon.call.CallService::invalidate));
     }
     if (this.stationDirectory == null) {
       // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
@@ -1266,6 +1282,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       if (reclaimManager != null) {
         reclaimManager.start();
       }
+      if (callService != null) {
+        callService.start();
+      }
       // 在车库等候的提前出车先重新扣住、绑回交路，再打开授权门：门控与交路记录只在内存里，重启后不能让它抢先开走。
       if (spawnTicketAssigner != null) {
         spawnTicketAssigner.restoreEarlySpawnHolds(handles, java.time.Instant.now());
@@ -1392,6 +1411,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (reclaimManager != null) {
       reclaimManager.stop();
+    }
+    if (callService != null) {
+      callService.stop();
     }
   }
 
@@ -1779,6 +1801,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(layoverRegistry);
   }
 
+  /** 交路定义缓存（若未初始化则为空）。 */
+  public Optional<RouteDefinitionCache> getRouteDefinitionCache() {
+    return Optional.ofNullable(routeDefinitionCache);
+  }
+
+  /** 闲置回收（若未初始化则为空）。 */
+  public Optional<ReclaimManager> getReclaimManager() {
+    return Optional.ofNullable(reclaimManager);
+  }
+
+  /** 叫车服务（若未初始化则为空）。 */
+  public Optional<org.fetarute.fetaruteTCAddon.call.CallService> getCallService() {
+    return Optional.ofNullable(callService);
+  }
+
   /** 终点站待命车派车前问驾驶会话；驾驶未启用或出错时照常派车。 */
   private boolean driverPickupAllowsDispatch(
       org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager scheduled,
@@ -1878,6 +1915,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.spawnTicketAssigner = simpleAssigner;
     simpleAssigner.setConsistArbiter(consistArbiter);
     simpleAssigner.setLiveTrainSource(FetaruteTCAddon::loadedTrainHandles);
+    // 叫车：派出的车写上叫车标签；叫车票不抢绑着时刻表交路的待命车
+    simpleAssigner.addDispatchObserver(
+        (ticket, trainName) ->
+            getCallService().ifPresent(calls -> calls.onDispatched(ticket, trainName)));
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService dutyTimetable =
+        timetableService;
+    simpleAssigner.setDutyBoundVehicle(
+        dutyTimetable == null
+            ? null
+            : trainName -> dutyTimetable.dutyBindingOf(trainName).isPresent());
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
@@ -1936,6 +1983,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (timetableService != null) {
       // 区分车型的交路只让同车型的车接：接首班与门控就近绑定都读车上的编组标签。
+      // 叫来的车不进时刻表：不匹配车次、不按表扣车
+      timetableService.setUnscheduledTrain(
+          trainName -> getCallService().map(calls -> calls.isCalledTrain(trainName)).orElse(false));
       timetableService.setConsistOfTrain(
           trainName ->
               consistTagOf(trainName)
@@ -2009,6 +2059,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
         timetable == null ? null : trainName -> timetable.dutyBindingOf(trainName).isPresent());
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
+    }
+  }
+
+  /** 叫车服务：同一实例跨重载保留（叫车记录在内存里，重载不丢）；周期扫描与回收同一个启动门，现场占用重建完成后才开始。 */
+  private void initCallService() {
+    if (callService == null) {
+      callService = new org.fetarute.fetaruteTCAddon.call.CallService(this);
+    } else {
+      callService.invalidate();
+    }
+    if (runtimeDispatchRecoveryComplete) {
+      callService.start();
     }
   }
 

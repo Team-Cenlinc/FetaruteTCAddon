@@ -219,6 +219,33 @@ class PidsRendererTest {
     assertEquals(0, countColor(image, 134, 88, 120, 28, PidsTheme.DARK.muted()));
   }
 
+  /** 空行依次写视图给的几句话：没车时首行写暂无后续列车、第二行写叫车提示，第三行空着。 */
+  @Test
+  void emptySlotsWriteEachMessageInTurn() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");
+    PidsView base = platformView(PidsTheme.DARK, List.of());
+    PidsView view =
+        new PidsView(
+            base.theme(),
+            base.clock(),
+            base.platforms(),
+            base.station(),
+            base.lines(),
+            base.bandColors(),
+            base.rows(),
+            base.labels(),
+            List.of(
+                new Names("暂无后续列车", "No further trains"),
+                new Names("可右键本屏叫车", "Right-click to call a train")));
+
+    BufferedImage image = renderer.render(layout, view);
+
+    // 首行 4–56、第 2 行 58–86 的终点列都有次要色文字，第 3 行（88–116）为空。
+    assertTrue(countColor(image, 134, 4, 120, 52, PidsTheme.DARK.muted()) > 0);
+    assertTrue(countColor(image, 134, 58, 120, 28, PidsTheme.DARK.muted()) > 0);
+    assertEquals(0, countColor(image, 134, 88, 120, 28, PidsTheme.DARK.muted()));
+  }
+
   @Test
   void stationScreenRendersHeaderAndLightTheme() throws Exception {
     PidsLayout layout = PidsFixtures.builtInLayout("station-3x5");

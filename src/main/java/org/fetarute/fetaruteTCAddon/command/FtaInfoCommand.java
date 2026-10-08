@@ -68,6 +68,11 @@ public final class FtaInfoCommand {
         locale.component("command.help.hover-trip"));
     sendHelpEntry(
         sender,
+        locale.component("command.help.entry-call"),
+        ClickEvent.suggestCommand("/fta call "),
+        locale.component("command.help.hover-call"));
+    sendHelpEntry(
+        sender,
         locale.component("command.help.entry-announce"),
         ClickEvent.suggestCommand("/fta announce "),
         locale.component("command.help.hover-announce"));

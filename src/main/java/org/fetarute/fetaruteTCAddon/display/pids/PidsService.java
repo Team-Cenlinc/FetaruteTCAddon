@@ -190,6 +190,24 @@ public final class PidsService {
             ZoneId.systemDefault(),
             lineStatuses,
             bulletins);
+    if (plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon) {
+      // 叫车：线路开放叫车、此刻能叫时空行写提示；叫来的车状态写“叫车”
+      composer.setCalls(
+          screen ->
+              addon
+                  .getCallService()
+                  .flatMap(
+                      calls ->
+                          screen
+                              .station()
+                              .map(
+                                  station ->
+                                      new PidsViewBuilder.Calls(
+                                          calls.callableAt(
+                                              station, screen.platforms(), screen.lines()),
+                                          calls.calledTrainNames())))
+                  .orElse(PidsViewBuilder.Calls.NONE));
+    }
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
@@ -332,6 +350,20 @@ public final class PidsService {
 
   public PidsSettings settings() {
     return settings;
+  }
+
+  /**
+   * 车站的到发快照：与站台屏同一份（按 {@code render.snapshot-ttl-seconds} 缓存）。
+   *
+   * @param station 车站
+   */
+  public PidsSnapshot snapshot(PidsStationKey station) {
+    return snapshots.snapshot(station);
+  }
+
+  /** 丢掉到发快照缓存：叫车之后站台屏尽快显示叫来的车。 */
+  public void invalidateSnapshots() {
+    snapshots.invalidateSnapshots();
   }
 
   public Optional<PidsScreen> find(UUID id) {

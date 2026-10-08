@@ -57,6 +57,7 @@ public final class TrainSpawnTagInitializer {
           "FTA_HAS_PASSENGERS",
           "FTA_MANUAL_HOLD",
           "FTA_MAINTENANCE_HOLD",
+          "FTA_CALL",
           "FTA_OPERATOR",
           "FTA_LINE",
           "FTA_ROUTE",

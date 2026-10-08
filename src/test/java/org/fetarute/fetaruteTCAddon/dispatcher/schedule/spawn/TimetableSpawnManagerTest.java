@@ -5,6 +5,8 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.time.Duration;
@@ -17,6 +19,7 @@ import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
@@ -839,6 +842,67 @@ class TimetableSpawnManagerTest {
         service.dutyBindingOf("train-B"));
     assertEquals(0, service.vacantDutyCount());
     assertTrue(manager.pollDueTickets(provider, clock.get().plusSeconds(10)).isEmpty(), "空缺已填上");
+  }
+
+  /** 叫车的按需票在按表运行的交路上照常放出（headway 票照旧拦下），也不向 delegate 报完成。 */
+  @Test
+  void onDemandTicketsPassThroughManagedRoutes() {
+    Fixture fixture = fixture();
+    SpawnManager delegate = mock(SpawnManager.class);
+    when(delegate.snapshotPlan()).thenReturn(plan());
+    TimetableSpawnManager manager = new TimetableSpawnManager(delegate, fixture.service, s -> {});
+    Instant now = DAY.plusSeconds(7 * 3600);
+    SpawnTicket call =
+        new SpawnTicket(
+            UUID.randomUUID(),
+            service(ROUTE, "R1", "OP:D:DEP:1"),
+            now,
+            now,
+            now,
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of("CALL-test"),
+            TripSource.ON_DEMAND,
+            0,
+            Optional.empty());
+    SpawnTicket headway =
+        new SpawnTicket(
+            UUID.randomUUID(),
+            service(ROUTE, "R1", "OP:D:DEP:1"),
+            now,
+            now,
+            0,
+            1L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            TripSource.SCHEDULED,
+            0);
+    when(delegate.pollDueTickets(any(), any())).thenReturn(List.of(call, headway));
+
+    List<SpawnTicket> released = manager.pollDueTickets(fixture.provider, now);
+
+    assertTrue(released.contains(call), "叫车票照常放出");
+    assertFalse(released.contains(headway), "按表运行的交路仍拦下 headway 票");
+    verify(delegate, never()).complete(call);
+    verify(delegate).complete(headway);
+  }
+
+  /** 叫来的车不进时刻表：在车站不匹配车次、不绑交路、不按表扣车。 */
+  @Test
+  void unscheduledTrainsAreNeverBoundToTrips() {
+    Fixture fixture = fixture();
+    fixture.service.setUnscheduledTrain(name -> name.startsWith("called"));
+    Instant departure = DAY.plusSeconds(8 * 3600 - 30);
+
+    Optional<Instant> called = fixture.service.scheduledDepartureAt(stop("called-1", 0, departure));
+    Optional<Instant> regular = fixture.service.scheduledDepartureAt(stop("train-1", 0, departure));
+
+    assertTrue(called.isEmpty(), "叫来的车不按表扣车");
+    assertTrue(fixture.service.dutyBindingOf("called-1").isEmpty(), "叫来的车不绑交路");
+    assertTrue(regular.isPresent(), "普通车照常按表");
   }
 
   private static org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent stop(

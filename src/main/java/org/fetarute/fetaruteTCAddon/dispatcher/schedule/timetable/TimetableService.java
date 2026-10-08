@@ -110,6 +110,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 列车名 → 车型（出车编组标签归一后的键）：区分车型的交路只让同车型的车接。 */
   private volatile Function<String, Optional<String>> consistOfTrain = name -> Optional.empty();
 
+  /** 不按表跑的列车（叫来的车）：不匹配车次、不绑交路、不按表扣车。 */
+  private volatile java.util.function.Predicate<String> unscheduledTrain = name -> false;
+
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
@@ -516,6 +519,14 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     String key = keyOf(event.trainName());
     if (key == null) {
+      return Optional.empty();
+    }
+    if (unscheduled(event.trainName())) {
+      // 叫来的车不进时刻表：此前（叫车前）留下的车次绑定一并解开，免得它按别人的时刻扣车。
+      if (matcher.get(key).isPresent()) {
+        matcher.release(key, "unscheduled-train");
+        closeDelays(key, event.trainName(), "unscheduled-train");
+      }
       return Optional.empty();
     }
     UUID routeId = event.routeUuid().orElse(null);
@@ -1249,6 +1260,23 @@ public final class TimetableService implements ScheduledDeparturePlan {
    */
   public void setConsistOfTrain(Function<String, Optional<String>> reader) {
     this.consistOfTrain = reader == null ? name -> Optional.empty() : reader;
+  }
+
+  /**
+   * 接入“不按表跑的列车”判定（叫来的车）：这些车在车站不匹配车次、不绑交路、不按表扣车。
+   *
+   * @param predicate 列车名 → 是否不按表跑；null 恢复默认（都按表）
+   */
+  public void setUnscheduledTrain(java.util.function.Predicate<String> predicate) {
+    this.unscheduledTrain = predicate == null ? name -> false : predicate;
+  }
+
+  private boolean unscheduled(String trainName) {
+    try {
+      return trainName != null && unscheduledTrain.test(trainName);
+    } catch (RuntimeException ex) {
+      return false;
+    }
   }
 
   /**

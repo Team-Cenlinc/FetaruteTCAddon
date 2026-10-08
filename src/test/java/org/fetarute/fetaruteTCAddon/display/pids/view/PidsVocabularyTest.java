@@ -48,6 +48,9 @@ class PidsVocabularyTest {
     vocabulary.planned();
     vocabulary.terminating();
     vocabulary.outOfService();
+    vocabulary.callHint();
+    vocabulary.noMoreTrainsCall();
+    vocabulary.onCall();
     for (RouteApi.OperationType type : RouteApi.OperationType.values()) {
       vocabulary.type(type);
     }

@@ -56,11 +56,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPhysicsProperties;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TrainCartsDepotSpawner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -281,8 +281,8 @@ public final class FtaDepotCommand {
 
                   MinecartGroup group = spawnedOpt.get();
                   TrainProperties properties = group.getProperties();
-                  // 与自动出库一致：出库车必须常驻加载，否则首个物理 tick 就会被 TrainCarts 卸载。
-                  TrainCartsDepotSpawner.ensureKeepChunksLoaded(properties);
+                  // 与自动出库一致：关摩擦、重力、碰撞，常驻加载（否则首个物理 tick 就会被 TrainCarts 卸载）。
+                  SpawnPhysicsProperties.apply(properties);
                   UUID runId = UUID.randomUUID();
                   Optional<RouteDestinationResolver.DestinationInfo> destInfoOpt =
                       RouteDestinationResolver.resolve(provider, resolved.route());

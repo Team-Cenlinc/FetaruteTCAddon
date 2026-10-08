@@ -156,6 +156,8 @@ command:
     hover-help: "<gray>点击执行：</gray> <white>/fta help</white>\n<dark_aqua>显示此帮助</dark_aqua>"
     entry-trip: "<gray>/fta trip</gray> <white>-</white> <dark_aqua>查看所乘列车的后续站点（乘车时也可按副手交换键）</dark_aqua>"
     hover-trip: "<gray>点击执行：</gray> <white>/fta trip</white>\n<dark_aqua>列出前方各站的到达时间、换乘与晚点</dark_aqua>"
+    entry-call: "<gray>/fta call</gray> <white>-</white> <dark_aqua>在开放叫车的线路上叫车（也可右键站台屏）</dark_aqua>"
+    hover-call: "<gray>点击填入：</gray> <white>/fta call </white>\n<dark_aqua>不写车站时取附近最近的车站</dark_aqua>"
     entry-announce: "<gray>/fta announce</gray> <white>-</white> <dark_aqua>开启或关闭站台广播</dark_aqua>"
     hover-announce: "<gray>点击填入：</gray> <white>/fta announce </white>\n<dark_aqua>on 开启、off 关闭；不带参数查看当前状态</dark_aqua>"
     entry-company: "<gray>/fta company</gray> <white>-</white> <dark_aqua>公司管理（创建/成员/管理）</dark_aqua>"
@@ -874,12 +876,15 @@ command:
       color: "<gray>颜色：</gray> <dark_aqua><color></dark_aqua>"
       spawn: "<gray>发车基线（秒）：</gray> <dark_aqua><freq_baseline></dark_aqua>"
       spawn-max: "<gray>最大车数：</gray> <dark_aqua><max_trains></dark_aqua>"
+      player-call-on: "<gray>玩家叫车：</gray> <dark_aqua>开放</dark_aqua> <gray>（同时最多 <dark_aqua><max_trains></dark_aqua> 辆）</gray>"
+      player-call-off: "<gray>玩家叫车：</gray> <dark_aqua>未开放</dark_aqua>"
+      player-call-default: "按配置默认值"
       spawn-depots: "<gray>出库车库：</gray> <dark_aqua><depots></dark_aqua>"
     not-found: "<prefix> <red>未找到线路：</red><white><line></white>"
     enum-invalid: "<prefix> <red>无效枚举值：</red><white><field></white><gray>=</gray><white><value></white>"
     set:
       success: "<prefix> <dark_aqua>线路已更新：</dark_aqua><white><code></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline/--maxTrains）</gray>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline/--maxTrains/--allow-player-call/--call-max-trains）</gray>"
     delete:
       success: "<prefix> <dark_aqua>线路已删除：</dark_aqua><white><code></white>"
     depot:
@@ -1389,6 +1394,40 @@ enum:
     not_saved_train: "不是存车名，已按 TrainCarts 写法解析，请确认未拼错"
     conflicting_tag: "各节车厢的标签取值不一致，请在方案中覆盖"
     unreadable_tag: "标签取值无法识别，已忽略"
+# 叫车：右键站台屏或 /fta call；回执只发给叫车的玩家
+call:
+  dialog:
+    title: "叫车 · <station>"
+    title-platforms: "叫车 · <station> <platforms> 站台"
+    body: "<gray>请选择要叫的列车。到站时间为估计值，请以站台屏为准。</gray>"
+    option: "<line> <type> 开往 <destination> · 约 <minutes> 分钟到站"
+    option-no-eta: "<line> <type> 开往 <destination>"
+    option-unavailable: "<gray><line> <type> 开往 <destination></gray>"
+    platform-prefix: "<platform> 站台 · "
+    close: "关闭"
+  reason:
+    next-train: "约 <minutes> 分钟后到站，无需叫车"
+    already-called: "已有叫来的列车开往本站，约 <minutes> 分钟后到站"
+    line-limit: "本线路叫车车辆已达上限，请稍候再试"
+    cooldown: "叫车过于频繁，请于 <seconds> 秒后再试"
+    no-source: "暂无可派的列车"
+  unavailable: "<prefix> <yellow><line> <type> 开往 <destination>：<reason></yellow>"
+  issued: "<prefix> <dark_aqua>已叫车</dark_aqua> <white><line> <type></white> 开往 <white><destination></white><gray>，约 <white><minutes></white> 分钟后到达 <white><platform></white> 站台</gray>"
+  issued-no-eta: "<prefix> <dark_aqua>已叫车</dark_aqua> <white><line> <type></white> 开往 <white><destination></white><gray>，请留意站台屏</gray>"
+  cancel-button: "<red>[取消]</red>"
+  cancel-hover: "<gray>列车出发前可取消</gray>"
+  cancelled: "<prefix> <gray>已取消叫车</gray>"
+  cancel-too-late: "<prefix> <yellow>列车已出发，无法取消</yellow>"
+  departed: "<prefix> <gray>叫来的列车已出发，请在</gray> <white><station></white> <gray>站候车</gray>"
+  failed: "<prefix> <red>叫车未能派出，请稍后再试</red>"
+  timeout: "<prefix> <yellow>叫来的列车长时间未能出发，已取消叫车</yellow>"
+  none: "<prefix> <yellow><station> 站暂无可叫车的线路</yellow>"
+  no-station: "<prefix> <yellow>附近没有车站，请在车站内使用或写明站名</yellow>"
+  station-not-found: "<prefix> <red>未找到车站</red> <white><station></white>"
+  station-ambiguous: "<prefix> <yellow>站名</yellow> <white><station></white> <yellow>对应多个车站：</yellow><white><candidates></white>"
+  not-found: "<prefix> <yellow>该方向已不能叫车，请重新打开叫车对话框</yellow>"
+  error: "<prefix> <red>叫车失败，请稍后再试</red>"
+
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:
@@ -1398,6 +1437,11 @@ pids:
     minutes-secondary: "min"
     no-more-trains: "暂无后续列车"
     no-more-trains-secondary: "No further trains"
+    # 开放叫车的线路：空行写叫车提示；只剩终到、通过的车时写合并的一句
+    call-hint: "可右键本屏叫车"
+    call-hint-secondary: "Right-click to call a train"
+    no-more-trains-call: "暂无后续列车，可右键本屏叫车"
+    no-more-trains-call-secondary: "No further trains. Right-click to call a train."
     vacancy:
       advice: "请优先考虑较空的车厢"
       advice-secondary: "Please use less crowded cars"
@@ -1419,6 +1463,8 @@ pids:
     status:
       on-time: "正点"
       on-time-secondary: "On time"
+      on-call: "叫车"
+      on-call-secondary: "On call"
       late: "晚点 <minutes> 分"
       late-secondary: "Late <minutes> min"
       severely-late: "严重晚点 <minutes> 分"

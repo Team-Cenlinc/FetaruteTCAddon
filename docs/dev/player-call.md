@@ -1,0 +1,73 @@
+# 叫车（玩家叫一趟车）
+
+线路打开叫车后，玩家可在站台右键站台屏、或用 `/fta call [车站]` 打开叫车对话框，按方向叫一趟车。叫车不加新的站台屏页面，也不改动已有班次的显示。
+
+## 开启
+
+- 线路：`/fta line set <公司> <运营商> <线路> --allow-player-call true`；`--call-max-trains <N>` 设同时最多几辆叫来的车（含尚未派出的叫车，`0` 清除、回到配置默认值）。两项写在线路 metadata 的 `allow_player_call` / `call_max_trains`，`/fta line info` 显示。
+- 权限：`fetarute.call`，默认所有玩家。
+- 配置 `call:`：
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `min-wait-minutes` | 5 | 本站台该方向下一班超过这么多分钟才能叫；`0` 表示随时能叫 |
+| `cooldown-seconds` | 60 | 每位玩家两次叫车的最短间隔 |
+| `terminal-wait-seconds` | 60 | 叫来的车到终点后等多久；期间沿途有人叫车、这趟经过就接着跑，否则派回库 |
+| `default-max-trains` | 2 | 线路未写 `--call-max-trains` 时的上限 |
+
+有表、无表的线路都能叫；叫来的车不进时刻表。
+
+## 方向与判定（`CallCatalog` / `CallRules`）
+
+- 方向 = 线路 + 运营类型（各停、快速等）+ 开往 + 本站站台。只收运营交路（`OPERATION`），在本站停车、本站不是终点。右键单站台屏只列本站台，多站台屏按屏幕站台过滤，统屏与 `/fta call` 列全站。
+- 判定顺序：没有车可派（不在对话框里列出）→ 同方向已有叫来的车在路上或叫车还没派出（“已有叫来的列车开往本站，约 N 分钟”）→ 下一班 ≤ `min-wait-minutes`（“约 N 分钟后到站，无需叫车”）→ 线路叫车车数已达上限 → 个人冷却。
+- “下一班”用站台屏同一份到发快照（`PidsService#snapshot`）：同线路、同终点、停这些站台、可以乘坐的车（不算取消、通过、本站终到、回库）。
+
+## 车源（`CallPlanner`）
+
+三种车源取预计最快到站的；待命车比最快的慢不到 2 分钟时仍用它：
+
+1. **首站的待命车**：交路首站不是车库时，接首站的待命车（折返复用）。绑着时刻表交路的待命车不接。
+2. **区间生成**：从本站往回走，取第一个轨道距离不少于 64 格、附近 48 格内没有玩家、车身那一段（到上一个节点）放得下整列车且没有道岔/咽喉/车站的区间点，在那里直接生成。
+3. **车库出车**：交路首站带 `CRET` 时从车库出车。
+
+预计到站时间用与编表同一个走行模型（`TimetableTimingCalculator` + `RunCurveModel`），按交路缓存 10 分钟；交路改了缓存作废。
+
+## 叫车票
+
+叫车出一张 `TripSource.ON_DEMAND` 发车票，经现有发车流程派车（闭塞、车队上限、拥堵闸门、线路车数照查）：
+
+- 车次标识（`serviceTripId`）写 `CALL-<叫车 id>@<运营商>:<站码>[#<入路下标>]`（`OnDemandTrip`）。带入路下标的票做区间生成，否则按交路本来的车源。
+- `StorageSpawnManager` 不让按需票占服务 backlog，发车计划刷新时服务不在计划里也照留；`TimetableSpawnManager` 在按表运行的交路上照常放行按需票。
+- 车未派出前可在聊天回执里点“取消”（`TicketAssigner#withdraw`）；已进入实体化或折返交接的票不撤。等候超过“预计到站 + 5 分钟”（至少 10 分钟）仍未派出的叫车撤票并告知玩家。
+
+### 区间生成
+
+区间生成复用车库出车的整套实体化事务（预检授权 → 生成 → 硬授权 → 物理登记 → 足迹水合），只把“第 0 个节点”换成入路下标：
+
+- `RuntimeDispatchService#prepareDepotSpawnDynamicAuthority` 与授权请求从入路下标起算（带上后方的尾部保护），首个 destination 是下一个节点，交路进度标签 `FTA_ROUTE_INDEX` 写入路下标，线路标签按到这个下标为止的有效 `CHANGE`。
+- `TrainCartsDepotSpawner#spawnAtEntry`：车头放在区间点、车身向后铺（TrainCarts `SpawnMode.REVERSE`），朝向按图上相邻节点定；编组取编组方案、交路的 `spawn_train_pattern`，都没有时借首站车库牌子的第 4 行。生成时附近有玩家就推迟。
+- 区间生成从首次到点起 60 秒内一直不成，就去掉入路下标、改走交路本来的车源。
+
+## 出车物理属性
+
+调度出的车（车库出车、区间生成、`/fta depot spawn`）一律写上（`SpawnPhysicsProperties`）：关摩擦、关重力、关碰撞（`CollisionOptions.CANCEL`），区块常驻加载用 `MINIMAL`。
+
+## 叫来的车
+
+- 派出时（`TicketAssigner#addDispatchObserver`）写列车标签 `FTA_CALL=<叫车 id>@<运营商>:<站码>`；标签随 TrainCarts 属性持久化、改名跟着车走。
+- 不进时刻表：`TimetableService#setUnscheduledTrain` 让它在车站不匹配车次、不绑交路、不按表扣车。
+- 待命车配对：带叫车标签的待命车只给叫车票接；叫车票不接绑着时刻表交路的车（`SimpleTicketAssigner#filterCalledTrains`）。
+- 本站没人上车也照常跑完全程。到终点进入待命池后等 `terminal-wait-seconds`，期间有叫车票从这里出发就接着跑；期满由 `ReclaimManager#returnCalledTrain` 派回库（不看 `reclaim.enabled`）。没有回库交路的终点按滞留兜底处理（与 `reclaim.stranded-destroy-seconds` 同一口径）。跑上回库交路的车摘掉叫车标签。
+- 叫车服务每秒扫一次：按标签重建叫来的车、收掉已派出或已作废的叫车、终点等候期满的车派回库。扫描与回收同一个启动门，现场占用重建完成后才开始。
+
+## 站台屏
+
+- 站台屏（单站台、多站台、2×1）在线路开放叫车、此刻能叫时（不算个人冷却）写提示，按 5 秒缓存：
+  - 一班车都没有：首行“暂无后续列车”，第二行“可右键本屏叫车 / Right-click to call a train”；
+  - 后面还有车可乘、有空行：空行写“可右键本屏叫车”，三行都有车就不写；
+  - 只剩本站终到、通过、回库的车：原来写“暂无后续列车”的那一行写“暂无后续列车，可右键本屏叫车”；
+  - 2×1 停站屏：最下一行没有要提醒的状态时写叫车提示。
+- 车站统屏不写提示，右键照样能叫；线路运行状况屏、测试卡不能叫。
+- 叫来的车照常显示，状态格写“叫车 / On call”（与“正点 / On time”同一排法）。
+- 文案在 `lang/zh_CN.yml` 的 `pids.board.call-hint`、`pids.board.no-more-trains-call`、`pids.board.status.on-call` 与 `call.*`。

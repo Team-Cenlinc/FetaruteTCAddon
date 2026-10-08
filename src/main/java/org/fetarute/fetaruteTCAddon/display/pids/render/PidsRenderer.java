@@ -996,7 +996,7 @@ public final class PidsRenderer {
   private void drawDepartures(Painter p, Departures departures, PidsView view) {
     departures.header().ifPresent(header -> drawHeader(p, departures, header, view.labels()));
     int y = departures.firstRowY();
-    boolean messageShown = false;
+    int messageIndex = 0;
     for (int i = 0; i < departures.rowCapacity(); i++) {
       RowStyle style = departures.styleOf(i);
       if (style.divider() > 0) {
@@ -1010,9 +1010,9 @@ public final class PidsRenderer {
       Cell cell = new Cell(departures, style, top, height);
       if (i < view.rows().size()) {
         drawRow(p, cell, view.rows().get(i), view.labels());
-      } else if (!messageShown) {
-        drawNoMoreTrains(p, cell, view.labels().noMoreTrains());
-        messageShown = true;
+      } else if (messageIndex < view.emptyMessages().size()) {
+        drawNoMoreTrains(p, cell, view.emptyMessages().get(messageIndex));
+        messageIndex++;
       }
       y += style.height() + style.gap();
     }
