@@ -379,7 +379,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private record Alignment(int ticks, StopMarkSign mark) {}
 
   /**
-   * 自动运行对位：股道上有对应节数的停车位置标时让车头停在标志处，否则按 TrainCarts 把列车中心停在牌子处。
+   * 自动运行对位：股道上有对应节数的停车位置标时让车头最前端停在标志处，否则按 TrainCarts 把列车中心停在牌子处。
    *
    * @return 开往标志预计还要多少 tick，以及车头对准了哪块标志
    */
@@ -400,7 +400,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       }
       Vector motion = group.head().getRailTracker().getMotionVector();
       double offset =
-          StopAlignment.signedOffset(StopAlignment.head(group), selected.point(), motion);
+          StopAlignment.signedOffset(StopAlignment.front(group), selected.point(), motion);
       if (!(offset < -StopMarks.BEHIND_TOLERANCE_BLOCKS)) {
         // 车头已到或已过标志（进站途中交还时可能如此）：就地停住，不退回去按车站牌子居中。
         group.getActions().launchReset();
@@ -445,7 +445,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return -1;
     }
     group.getActions().launchReset();
-    double distance = walk.movedTotal;
+    // 走的是第一节车厢中心到标志的距离；停的是车头最前端，少走半个车体长度。
+    double distance = walk.movedTotal - StopAlignment.frontOffsetBlocks(group);
     if (distance <= 0.01) {
       group.stop();
       return 0;

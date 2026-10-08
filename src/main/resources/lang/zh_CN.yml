@@ -113,8 +113,8 @@ sign:
   conflict-hover-teleport: "<gray>点击传送：</gray> <white><cmd></white>"
   removed: "<prefix> <dark_aqua>已移除</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
   stopmark:
-    created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车</dark_aqua>"
-    created-doors: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"
+    created: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头最前端在此停车</dark_aqua>"
+    created-doors: "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头最前端在此停车，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"
     invalid: "<prefix> <red>停车位置标格式无效</red> <gray>第三行写 car:节数（亦可写 carriage:），例如 car:4、car:4,6、car:3-5、car:*；第四行可选写 door:开关门的车厢（自车头起算，写法同上），例如 door:1；适用的最短编组也须至少有一节开门车厢</gray>"
     no-permission: "<prefix> <red>无权设置停车位置标</red>"
   type:

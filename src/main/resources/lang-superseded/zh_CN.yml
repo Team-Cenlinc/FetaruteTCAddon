@@ -555,8 +555,8 @@ drive:
 sign:
   stopmark:
     invalid: ["<prefix> <red>停车位置标格式无效</red> <gray>第三行写 carriage:节数，例如 carriage:4、carriage:4,6、carriage:3-5、carriage:*</gray>"]
-    created: ["<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处</dark_aqua>"]
-    created-doors: ["<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"]
+    created: ["<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处</dark_aqua>", "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车</dark_aqua>"]
+    created-doors: ["<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节列车车头停在此处，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>", "<prefix> <dark_aqua>已设置停车位置标：</dark_aqua><white><carriages></white> <dark_aqua>节编组列车的车头在此停车，仅自车头起第</dark_aqua> <white><doors></white> <dark_aqua>节车厢开关门</dark_aqua>"]
     no-permission: ["<prefix> <red>没有建停车位置标的权限</red>"]
   invalid:
     depot: ["<prefix> <red>车库格式无效</red> <gray>Depot: Operator:D:Depot:Track</gray>"]

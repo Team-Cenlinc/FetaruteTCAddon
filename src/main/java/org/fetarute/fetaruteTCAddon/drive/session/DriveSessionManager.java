@@ -2639,7 +2639,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 SeatLocator.seatEyePosition(player)
                     .orElseGet(() -> player.getLocation().toVector()),
                 StopAlignment.bodyLengthBlocks(group),
-                group.size()),
+                group.size(),
+                StopAlignment.frontOffsetBlocks(group)),
             now);
       } else {
         stopMarker.remove(player.getUniqueId());
@@ -5289,7 +5290,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return found;
   }
 
-  /** 用调度采样更新前方停车点的估计：车站股道上有对应节数的停车位置标时按车头对准标志，否则按列车中心对准车站牌子。 */
+  /** 用调度采样更新前方停车点的估计：车站股道上有对应节数的停车位置标时按车头最前端对准标志，否则按列车中心对准车站牌子。 */
   private void updateApproach(
       DriverLink link, MinecartGroup group, ControlDiagnostics diagnostics) {
     if (!link.isNewApproachSample(diagnostics.sampledAt())) {
@@ -5306,12 +5307,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               group.size(),
               Bukkit.getCurrentTick());
       if (point.isPresent() && point.get().reference() == StopAlignment.Reference.HEAD) {
+        // 调度量的是第一节车厢中心到车站节点的距离；停车位置标对的是车头最前端，少走半个车体长度。
         link.updateApproach(
             node,
             diagnostics.stopKind(),
             diagnostics.distanceToStopNode(),
             diagnostics.sampledAt(),
-            point.get().aheadBlocks(),
+            point.get().aheadBlocks() - StopAlignment.frontOffsetBlocks(group),
             StopAlignment.Reference.HEAD);
         return;
       }
