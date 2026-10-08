@@ -497,6 +497,7 @@ drive:
       ato: "<prefix> <yellow>The following train was held too long; this train has switched to ATO</yellow>"
     protection:
       tripped: "<prefix> <red>Congestion protection: <white><reason></white>; handed back <white><count></white> player-driven train(s); takeovers are paused</red>"
+    skip-handback: "<prefix> <red>This trip has skipped <white><count></white> station(s); the train will stop and return to automatic operation, and the trip is marked incomplete</red>"
   task:
     board:
       title: "<dark_gray>Task board · </dark_gray><black><station></black>"

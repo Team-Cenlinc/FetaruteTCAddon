@@ -2142,6 +2142,7 @@ drive:
       ato: "<prefix> <yellow>本列车阻挡后方列车过久，已转为 ATO 运行</yellow>"
     protection:
       tripped: "<prefix> <red>线路拥堵保护已启动：<white><reason></white>；已将 <white><count></white> 列人工驾驶的列车交还自动运行，暂停接班</red>"
+    skip-handback: "<prefix> <red>本趟已越站 <white><count></white> 次，列车停车后交还自动运行，本趟任务判为未完成</red>"
   task:
     board:
       title: "<dark_gray>任务板 · </dark_gray><black><station></black>"

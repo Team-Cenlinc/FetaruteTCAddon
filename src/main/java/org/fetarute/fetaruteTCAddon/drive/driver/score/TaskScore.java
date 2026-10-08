@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.drive.driver.score;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.OptionalLong;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 
 /**
  * 一趟任务的成绩明细：各站停站、介入与确认的计数、晚点变化。只在服务器主线程写入。
@@ -36,6 +37,17 @@ public final class TaskScore {
   /** 已记下成绩的停站数。 */
   public int stopCount() {
     return stops.size();
+  }
+
+  /** 越站的次数。 */
+  public int skippedStops() {
+    int count = 0;
+    for (StopScore stop : stops) {
+      if (stop.outcome() == StopAlignment.Outcome.SKIPPED) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** 记下防护介入与确认的计数（结束时一次写入）。 */

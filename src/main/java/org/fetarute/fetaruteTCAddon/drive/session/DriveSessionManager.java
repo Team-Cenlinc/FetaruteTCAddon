@@ -2701,6 +2701,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               if (player != null) {
                 notice(player, "drive.hud.station.skipped", Map.of("station", station));
               }
+              handBackIfSkippedTooOften(session, link, trainName, player);
             });
     // 停站刚结束时（上一拍还在停站）立刻刷新，否则发车后会把刚停过的站显示成下一站。
     if (tickCounter % NEXT_STOP_REFRESH_TICKS == 0
@@ -2863,6 +2864,34 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         return true;
       }
     }
+  }
+
+  /** 同一趟越站累计到上限：停车后交还自动运行，本趟任务判未完成。 */
+  private void handBackIfSkippedTooOften(
+      DriveSession session, DriverLink link, String trainName, Player player) {
+    int skipped = link.score().skippedStops();
+    if (!skipHandbackDue(skipped, config.driver().skipStationHandback())
+        || link.handbackRequested()) {
+      return;
+    }
+    traceSession(session, "本趟越站 " + skipped + " 次，交还自动运行");
+    tasks
+        .activeTaskOf(session.playerId())
+        .filter(task -> task.state() == DriverTask.State.DRIVING)
+        .filter(task -> trainName.equalsIgnoreCase(task.trainName()))
+        .ifPresent(task -> tasks.fail(session.playerId(), "skipped-stations"));
+    if (player != null) {
+      player.sendMessage(
+          plugin
+              .getLocaleManager()
+              .component("drive.driver.skip-handback", Map.of("count", String.valueOf(skipped))));
+    }
+    requestHandback(session, "skipped-stations");
+  }
+
+  /** 越站次数是否到了交还的上限；上限为 0 表示不处置。 */
+  static boolean skipHandbackDue(int skipped, int limit) {
+    return limit > 0 && skipped >= limit;
   }
 
   /** 此刻是不是表定停站或被调度扣住（不算驾驶员卡住）；开关门、起步是驾驶员的事，照算。 */
