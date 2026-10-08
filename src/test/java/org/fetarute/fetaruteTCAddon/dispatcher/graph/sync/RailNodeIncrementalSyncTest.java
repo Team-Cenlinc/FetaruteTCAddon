@@ -36,6 +36,10 @@ import org.mockito.ArgumentCaptor;
 
 final class RailNodeIncrementalSyncTest {
 
+  /** 插件日志：用字段持有，否则 Logger 只被弱引用，挂上的 Handler 可能随它一起被回收。 */
+  private static final java.util.logging.Logger PLUGIN_LOGGER =
+      java.util.logging.Logger.getLogger("FetaruteTCAddon");
+
   private static final class DirectTransactionManager implements StorageTransactionManager {
 
     @Override
@@ -815,6 +819,211 @@ final class RailNodeIncrementalSyncTest {
     verify(railGraphService).markStale(eq(world), any());
     assertEquals(1, debug.size());
     assertTrue(debug.get(0).startsWith("调度图失效告警失败"), debug.get(0));
+  }
+
+  /** 写库失败：控制台告警，图按在用规则标为失效（这里节点没有交路在用，只打标记）。 */
+  @Test
+  void failedWriteWarnsAndMarksServedGraphStale() {
+    World world = world();
+    SignNodeDefinition definition = waypoint();
+    RailGraphService service = servedService(world, definition.nodeId());
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    java.util.concurrent.atomic.AtomicBoolean failing =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            switchableStorage(
+                world.getUID(),
+                definition,
+                failing,
+                new java.util.concurrent.atomic.AtomicReference<>("deadbeef")),
+            service,
+            null,
+            listener,
+            (w, def) -> Optional.empty());
+    List<java.util.logging.LogRecord> warnings = new java.util.ArrayList<>();
+    java.util.logging.Handler capture = capturing(warnings);
+    PLUGIN_LOGGER.addHandler(capture);
+    try {
+      sync.delete(mockBlock(world, 1, 64, 2), definition);
+    } finally {
+      PLUGIN_LOGGER.removeHandler(capture);
+    }
+
+    assertTrue(
+        warnings.stream()
+            .anyMatch(
+                record ->
+                    record.getLevel() == java.util.logging.Level.WARNING
+                        && record.getMessage().contains("节点牌子写入存储失败")
+                        && record.getMessage().contains(definition.nodeId().value())));
+    assertTrue(service.isServingRetainedStaleSnapshot(world.getUID()));
+    assertEquals(
+        RailNodeIncrementalSync.UNSYNCED_SIGNATURE,
+        service.getStaleState(world).orElseThrow().currentSignature());
+    verify(listener)
+        .onStale(
+            world,
+            new GraphStaleListener.NodeChange(definition, 1, 64, 2, true),
+            GraphStaleListener.Level.NONE,
+            GraphStaleListener.Level.RETAINED);
+  }
+
+  /** 写库失败后库里签名仍与快照一致：库没跟上世界里的牌子，失效标记不能因此撤销；重建图之后恢复正常的撤销。 */
+  @Test
+  void staleMarkFromFailedWriteSurvivesMatchingSignatureUntilRebuild() {
+    World world = world();
+    UUID worldId = world.getUID();
+    SignNodeDefinition definition = waypoint();
+    String matching =
+        RailGraphSignature.signatureForNodes(
+            List.of(
+                new RailNodeRecord(
+                    worldId,
+                    definition.nodeId(),
+                    definition.nodeType(),
+                    1,
+                    64,
+                    2,
+                    definition.trainCartsDestination(),
+                    Optional.empty())));
+    RailGraphService service = servedService(world, definition.nodeId());
+    RailGraph served = service.getSnapshot(world).orElseThrow().graph();
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    java.util.concurrent.atomic.AtomicBoolean failing =
+        new java.util.concurrent.atomic.AtomicBoolean(true);
+    java.util.concurrent.atomic.AtomicReference<String> snapshotSignature =
+        new java.util.concurrent.atomic.AtomicReference<>(matching);
+    StorageManager storage = switchableStorage(worldId, definition, failing, snapshotSignature);
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(storage, service, null, listener, (w, def) -> Optional.empty());
+    Block block = mockBlock(world, 1, 64, 2);
+
+    sync.delete(block, definition);
+    failing.set(false);
+    sync.delete(block, definition);
+
+    assertTrue(service.getStaleState(world).isPresent(), "签名一致也不撤销写库失败标出的失效");
+    verify(listener, never()).onRecovered(any());
+    // 库恢复后补写：快照记录的签名改成"未同步"，重启后从库载入同样判为失效。
+    verify(storage.provider().orElseThrow().railGraphSnapshots())
+        .save(
+            org.mockito.ArgumentMatchers.argThat(
+                record ->
+                    RailNodeIncrementalSync.UNSYNCED_SIGNATURE.equals(record.nodeSignature())));
+
+    // 重建图：失效标记被撤掉，之后的签名比对照常工作。
+    service.putSnapshot(world, served, Instant.EPOCH);
+    snapshotSignature.set("deadbeef");
+    sync.delete(block, definition);
+    assertTrue(service.isServingRetainedStaleSnapshot(worldId));
+    snapshotSignature.set(matching);
+    sync.delete(block, definition);
+
+    assertTrue(service.getStaleState(world).isEmpty());
+    verify(listener).onRecovered(world);
+  }
+
+  /** 写库失败时同一位置原来的节点在世界里被顶掉了：它有交路在用，旧图就得移出，不能只看新节点。 */
+  @Test
+  void failedUpsertJudgesTheDisplacedNodeToo() {
+    World world = world();
+    SignNodeDefinition displaced = waypoint();
+    SignNodeDefinition replacement =
+        new SignNodeDefinition(
+            NodeId.of("SURN:PTK:GPT:1:01"),
+            NodeType.WAYPOINT,
+            Optional.of("SURN:PTK:GPT:1:01"),
+            Optional.empty());
+    RailGraphService service = servedService(world, displaced.nodeId());
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(
+            switchableStorage(
+                world.getUID(),
+                displaced,
+                new java.util.concurrent.atomic.AtomicBoolean(true),
+                new java.util.concurrent.atomic.AtomicReference<>("deadbeef")),
+            service,
+            null,
+            mock(GraphStaleListener.class),
+            (w, def) ->
+                def.nodeId().equals(displaced.nodeId())
+                    ? Optional.of("交路 X 第 1 站")
+                    : Optional.empty());
+
+    sync.upsert(mockBlock(world, 1, 64, 2), replacement);
+
+    assertTrue(service.getSnapshot(world).isEmpty(), "被顶掉的节点在用：旧图移出");
+    assertTrue(service.getStaleState(world).isPresent());
+  }
+
+  /** 写库可切换失败的存储桩：库里只有 {@code definition} 这一个节点，快照签名随时可改。 */
+  private StorageManager switchableStorage(
+      UUID worldId,
+      SignNodeDefinition definition,
+      java.util.concurrent.atomic.AtomicBoolean failing,
+      java.util.concurrent.atomic.AtomicReference<String> snapshotSignature) {
+    RailNodeRecord node =
+        new RailNodeRecord(
+            worldId,
+            definition.nodeId(),
+            definition.nodeType(),
+            1,
+            64,
+            2,
+            definition.trainCartsDestination(),
+            Optional.empty());
+    RailNodeRepository nodeRepo = mock(RailNodeRepository.class);
+    when(nodeRepo.listByWorld(worldId)).thenReturn(List.of(node));
+    when(nodeRepo.listByPosition(eq(worldId), anyInt(), anyInt(), anyInt()))
+        .thenReturn(List.of(node));
+    when(nodeRepo.delete(eq(worldId), any())).thenReturn(1);
+    RailGraphSnapshotRepository snapshotRepo = mock(RailGraphSnapshotRepository.class);
+    when(snapshotRepo.findByWorld(worldId))
+        .thenAnswer(
+            invocation ->
+                Optional.of(
+                    new RailGraphSnapshotRecord(
+                        worldId, Instant.EPOCH, 1, 0, snapshotSignature.get())));
+    StorageTransactionManager direct = directTransactionManager();
+    StorageTransactionManager switchable =
+        new StorageTransactionManager() {
+          @Override
+          public StorageTransaction begin() {
+            throw new UnsupportedOperationException("begin() 不应在该测试中被调用");
+          }
+
+          @Override
+          public <T> T execute(TransactionCallback<T> callback) {
+            if (failing.get()) {
+              throw new StorageException("写库失败");
+            }
+            return direct.execute(callback);
+          }
+        };
+    StorageProvider provider = mock(StorageProvider.class);
+    when(provider.railNodes()).thenReturn(nodeRepo);
+    when(provider.railGraphSnapshots()).thenReturn(snapshotRepo);
+    when(provider.transactionManager()).thenReturn(switchable);
+    StorageManager storageManager = mock(StorageManager.class);
+    when(storageManager.isReady()).thenReturn(true);
+    when(storageManager.provider()).thenReturn(Optional.of(provider));
+    return storageManager;
+  }
+
+  private static java.util.logging.Handler capturing(List<java.util.logging.LogRecord> records) {
+    return new java.util.logging.Handler() {
+      @Override
+      public void publish(java.util.logging.LogRecord record) {
+        records.add(record);
+      }
+
+      @Override
+      public void flush() {}
+
+      @Override
+      public void close() {}
+    };
   }
 
   private static World world() {

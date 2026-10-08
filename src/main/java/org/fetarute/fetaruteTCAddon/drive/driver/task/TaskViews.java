@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.StopScore;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.TaskScore;
 
@@ -23,11 +24,14 @@ public final class TaskViews {
         task.key().tripCode(),
         task.key().serviceDate(),
         task.routeCode(),
-        new DriveApi.StationRef(task.stationCode(), task.stationName(), task.boardStopSequence()),
-        task.alightStopSequence() >= 0
+        new DriveApi.StationRef(
+            task.stationCode(), task.stationName(), task.takeoverStopSequence()),
+        task.handoverStopSequence() >= 0
             ? Optional.of(
                 new DriveApi.StationRef(
-                    task.alightStationCode(), task.alightStationName(), task.alightStopSequence()))
+                    task.handoverStationCode(),
+                    task.handoverStationName(),
+                    task.handoverStopSequence()))
             : Optional.empty(),
         task.plannedDeparture(),
         mode(task.mode()),
@@ -38,7 +42,8 @@ public final class TaskViews {
         task.metadata(),
         task.endReason(),
         task.points() >= 0 ? OptionalInt.of(task.points()) : OptionalInt.empty(),
-        Optional.of(task.grade()).filter(grade -> !grade.isBlank()));
+        Optional.of(task.grade())
+            .filter(grade -> !grade.isBlank() && !ScoreRules.UNGRADED.equals(grade)));
   }
 
   public static DriveApi.Mode mode(DrivingMode mode) {
@@ -54,7 +59,7 @@ public final class TaskViews {
     return new DriveApi.StopResult(
         stop.station(),
         stop.offsetBlocks(),
-        DriveApi.StopWindow.valueOf(stop.window().name()),
+        DriveApi.StopOutcome.valueOf(stop.outcome().name()),
         stop.wrongDoor(),
         stop.doorsTakenOver());
   }

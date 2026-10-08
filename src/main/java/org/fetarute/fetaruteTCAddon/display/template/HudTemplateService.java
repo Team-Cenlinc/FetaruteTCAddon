@@ -23,34 +23,47 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  */
 public final class HudTemplateService {
 
+  private static final java.util.logging.Logger LOGGER =
+      java.util.logging.Logger.getLogger("FetaruteTCAddon");
+
   private final StorageManager storageManager;
   private final Consumer<String> debugLogger;
 
-  private final Map<TemplateKey, HudTemplate> templateByKey = new HashMap<>();
-  private final Map<UUID, HudTemplate> templateById = new HashMap<>();
-  private final Map<LineKey, UUID> lineByCode = new HashMap<>();
-  private final Map<LineKey, LineInfo> lineInfoByCode = new HashMap<>();
-  private final Map<LineBindingKey, UUID> lineBindings = new HashMap<>();
+  /** 当前缓存：重载时在旁边整份建好再替换，读到的永远是同一次载入的模板、绑定与线路。 */
+  private volatile Snapshot snapshot = Snapshot.EMPTY;
 
   public HudTemplateService(StorageManager storageManager, Consumer<String> debugLogger) {
     this.storageManager = storageManager;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
   }
 
-  /** 重载缓存（模板/绑定/线路映射）。 */
+  /**
+   * 重载缓存（模板/绑定/线路映射）。
+   *
+   * <p>先在旁边整份载入，成功后一次替换；读库中途出错时保留上一次的缓存，不会让 HUD 失去模板或只剩半份绑定。
+   */
   public void reload() {
-    clear();
     if (storageManager == null || !storageManager.isReady()) {
+      clear();
       return;
     }
-    storageManager
-        .provider()
-        .ifPresent(
-            provider -> {
-              loadLines(provider);
-              loadTemplates(provider);
-              loadBindings(provider);
-            });
+    Optional<StorageProvider> provider = storageManager.provider();
+    if (provider.isEmpty()) {
+      clear();
+      return;
+    }
+    Snapshot next = new Snapshot();
+    try {
+      next.loadLines(provider.get());
+      next.loadTemplates(provider.get());
+      next.loadBindings(provider.get());
+    } catch (RuntimeException ex) {
+      String message = "HUD 模板缓存重载失败，沿用上一次的缓存: " + ex.getMessage();
+      debugLogger.accept(message);
+      LOGGER.warning("[FTA] " + message);
+      return;
+    }
+    snapshot = next;
   }
 
   /**
@@ -67,15 +80,16 @@ public final class HudTemplateService {
     if (type == null || operator == null || operator.isBlank() || line == null || line.isBlank()) {
       return Optional.empty();
     }
-    UUID lineId = lineByCode.get(new LineKey(operator, line));
+    Snapshot current = snapshot;
+    UUID lineId = current.lineByCode.get(new LineKey(operator, line));
     if (lineId == null) {
       return Optional.empty();
     }
-    UUID templateId = lineBindings.get(new LineBindingKey(lineId, type));
+    UUID templateId = current.lineBindings.get(new LineBindingKey(lineId, type));
     if (templateId == null) {
       return Optional.empty();
     }
-    HudTemplate template = templateById.get(templateId);
+    HudTemplate template = current.templateById.get(templateId);
     if (template == null) {
       return Optional.empty();
     }
@@ -102,7 +116,7 @@ public final class HudTemplateService {
     if (companyId == null || type == null || name == null || name.isBlank()) {
       return Optional.empty();
     }
-    return Optional.ofNullable(templateByKey.get(new TemplateKey(companyId, type, name)));
+    return Optional.ofNullable(snapshot.templateByKey.get(new TemplateKey(companyId, type, name)));
   }
 
   /** 按模板 ID 检索模板。 */
@@ -110,20 +124,39 @@ public final class HudTemplateService {
     if (templateId == null) {
       return Optional.empty();
     }
-    return Optional.ofNullable(templateById.get(templateId));
+    return Optional.ofNullable(snapshot.templateById.get(templateId));
   }
 
   /** 清空本地缓存。 */
   public void clear() {
-    templateByKey.clear();
-    templateById.clear();
-    lineByCode.clear();
-    lineInfoByCode.clear();
-    lineBindings.clear();
+    snapshot = Snapshot.EMPTY;
   }
 
-  private void loadLines(StorageProvider provider) {
-    try {
+  /**
+   * 按运营商代码 + 线路代码解析线路元信息（代码不区分大小写）。
+   *
+   * @param operator 运营商代码
+   * @param line 线路代码
+   * @return 线路元信息；线路不存在时为空
+   */
+  public Optional<LineInfo> resolveLineInfo(String operator, String line) {
+    if (operator == null || operator.isBlank() || line == null || line.isBlank()) {
+      return Optional.empty();
+    }
+    return Optional.ofNullable(snapshot.lineInfoByCode.get(new LineKey(operator, line)));
+  }
+
+  /** 同一次载入得到的模板、绑定与线路映射；建好后只读。 */
+  private static final class Snapshot {
+    private static final Snapshot EMPTY = new Snapshot();
+
+    private final Map<TemplateKey, HudTemplate> templateByKey = new HashMap<>();
+    private final Map<UUID, HudTemplate> templateById = new HashMap<>();
+    private final Map<LineKey, UUID> lineByCode = new HashMap<>();
+    private final Map<LineKey, LineInfo> lineInfoByCode = new HashMap<>();
+    private final Map<LineBindingKey, UUID> lineBindings = new HashMap<>();
+
+    private void loadLines(StorageProvider provider) {
       for (Company company : provider.companies().listAll()) {
         if (company == null) {
           continue;
@@ -148,14 +181,10 @@ public final class HudTemplateService {
           }
         }
       }
-    } catch (Exception ex) {
-      debugLogger.accept("HUD 模板线路映射加载失败: " + ex.getMessage());
     }
-  }
 
-  private void loadTemplates(StorageProvider provider) {
-    HudTemplateRepository repo = provider.hudTemplates();
-    try {
+    private void loadTemplates(StorageProvider provider) {
+      HudTemplateRepository repo = provider.hudTemplates();
       for (Company company : provider.companies().listAll()) {
         if (company == null) {
           continue;
@@ -169,14 +198,10 @@ public final class HudTemplateService {
               new TemplateKey(template.companyId(), template.type(), template.name()), template);
         }
       }
-    } catch (Exception ex) {
-      debugLogger.accept("HUD 模板缓存加载失败: " + ex.getMessage());
     }
-  }
 
-  private void loadBindings(StorageProvider provider) {
-    HudLineBindingRepository repo = provider.hudLineBindings();
-    try {
+    private void loadBindings(StorageProvider provider) {
+      HudLineBindingRepository repo = provider.hudLineBindings();
       for (HudLineBindingRepository.LineBinding binding : repo.listAll()) {
         if (binding == null) {
           continue;
@@ -184,23 +209,7 @@ public final class HudTemplateService {
         lineBindings.put(
             new LineBindingKey(binding.lineId(), binding.type()), binding.templateId());
       }
-    } catch (Exception ex) {
-      debugLogger.accept("HUD 模板绑定加载失败: " + ex.getMessage());
     }
-  }
-
-  /**
-   * 按运营商代码 + 线路代码解析线路元信息（代码不区分大小写）。
-   *
-   * @param operator 运营商代码
-   * @param line 线路代码
-   * @return 线路元信息；线路不存在时为空
-   */
-  public Optional<LineInfo> resolveLineInfo(String operator, String line) {
-    if (operator == null || operator.isBlank() || line == null || line.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.ofNullable(lineInfoByCode.get(new LineKey(operator, line)));
   }
 
   private record TemplateKey(UUID companyId, HudTemplateType type, String name) {

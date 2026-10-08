@@ -2,13 +2,15 @@ package org.fetarute.fetaruteTCAddon.dispatcher.runtime.control;
 
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
+import com.bergerkiller.bukkit.tc.properties.CartProperties;
 import org.bukkit.block.BlockFace;
 import org.bukkit.util.Vector;
 
 /**
  * 驾驶员停车对位：列车中心相对停车点的偏移与停车窗口。
  *
- * <p>停车点与 TrainCarts 对位一致：列车中心停在车站牌子的轨道中心；车站股道上有对应节数的停车位置标时，改为车头停在标志的轨道中心。 偏移沿列车前进方向量，越过为正、未到为负。
+ * <p>停车点与 TrainCarts 对位一致：列车中心停在车站牌子的轨道中心；车站股道上有对应节数的停车位置标时，改为车头最前端（第一节车厢的车体前端）停在标志的轨道中心。
+ * 偏移沿列车前进方向量，越过为正、未到为负。
  *
  * <p>停车窗口的大小见 {@link StopWindow}。
  */
@@ -18,12 +20,12 @@ public final class StopAlignment {
   public enum Reference {
     /** 列车中心（车头与车尾的中点），车站牌子的默认对位。 */
     CENTER,
-    /** 车头（第一节车厢），停车位置标的对位。 */
+    /** 车头最前端（第一节车厢的车体前端），停车位置标的对位。 */
     HEAD
   }
 
-  /** 停车窗口。 */
-  public enum Window {
+  /** 停车结果：偏移落在停车窗口的哪一段。 */
+  public enum Outcome {
     /** 停准。 */
     ACCURATE,
     /** 可开门。 */
@@ -71,13 +73,52 @@ public final class StopAlignment {
     if (!group.getWorld().getUID().equals(worldId)) {
       return Double.NaN;
     }
-    Vector point = reference == Reference.HEAD ? head(group) : center(group);
+    Vector point = reference == Reference.HEAD ? front(group) : center(group);
     return signedOffset(point, stopPoint, travel(group));
   }
 
   /** 车头（第一节车厢）的位置。 */
   public static Vector head(MinecartGroup group) {
     return group.head().getEntity().getLocation().toVector();
+  }
+
+  /** 车头最前端：第一节车厢的车体前端（车厢中心沿前进方向前推半个车体长度，不含车钩）。 */
+  public static Vector front(MinecartGroup group) {
+    return front(head(group), travel(group), frontOffsetBlocks(group));
+  }
+
+  /** 从第一节车厢中心沿前进方向（只看水平面）前推 {@code aheadBlocks}；量不出方向或不前推时就是车厢中心。 */
+  static Vector front(Vector head, Vector travel, double aheadBlocks) {
+    if (travel == null || !(aheadBlocks > 0.0)) {
+      return head;
+    }
+    double length = Math.sqrt(travel.getX() * travel.getX() + travel.getZ() * travel.getZ());
+    if (!(length > 1.0e-6)) {
+      return head;
+    }
+    return head.clone()
+        .add(
+            new Vector(
+                travel.getX() / length * aheadBlocks, 0.0, travel.getZ() / length * aheadBlocks));
+  }
+
+  /** 车头最前端在第一节车厢中心前方多远（格）：车体长度的一半（TrainCarts 附件模型 Physical 里的 cart length）；量不出时为 0。 */
+  public static double frontOffsetBlocks(MinecartGroup group) {
+    try {
+      MinecartMember<?> head = group.head();
+      return head == null ? 0.0 : halfCartLength(head.getProperties());
+    } catch (RuntimeException ex) {
+      return 0.0;
+    }
+  }
+
+  /** 车厢车体长度的一半（格）；取不到时为 0。 */
+  static double halfCartLength(CartProperties properties) {
+    if (properties == null || properties.getModel() == null) {
+      return 0.0;
+    }
+    double length = properties.getModel().getCartLength();
+    return length > 0.0 ? length / 2.0 : 0.0;
   }
 
   /** 列车中心：车头与车尾的中点。 */

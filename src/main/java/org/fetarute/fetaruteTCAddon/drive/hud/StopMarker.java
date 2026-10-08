@@ -24,7 +24,7 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 /**
  * 发光停车标：进站时在驾驶员该停的地方画一道横跨轨道的发光标线。
  *
- * <p>停车点与 TrainCarts 对位一致：车站牌子所在的轨道（列车中心对准），股道上有对应节数的停车位置标时是标志所在的轨道（车头对准）。 站台交来停站后用它量出的停车点，之前按
+ * <p>停车点与 TrainCarts 对位一致：车站牌子所在的轨道（列车中心对准），股道上有对应节数的停车位置标时是标志所在的轨道（车头最前端对准）。 站台交来停站后用它量出的停车点，之前按
  * {@link StationStopPoints} 自己找。位置见 {@link StopMarkerGeometry}，从停车点前移时沿轨道走（{@link RailProbe}）。
  *
  * <p>标线只在驾驶员本人的客户端渲染（{@link ClientBlockDisplay}，纯数据包，服务器上没有实体）。发光轮廓能透过车体看见。只在服务器主线程使用。
@@ -75,8 +75,21 @@ public final class StopMarker {
    * @param seat 驾驶员座位的位置
    * @param bodyBlocks 车身沿轨道的长度（格，见 {@link StopAlignment#bodyLengthBlocks}）
    * @param carriages 节数
+   * @param frontBlocks 车头最前端在第一节车厢中心前方多远（格，见 {@link StopAlignment#frontOffsetBlocks}）
    */
-  public record Train(Vector travel, Vector head, Vector seat, double bodyBlocks, int carriages) {}
+  public record Train(
+      Vector travel,
+      Vector head,
+      Vector seat,
+      double bodyBlocks,
+      int carriages,
+      double frontBlocks) {
+
+    /** 量不出车体长度时：车头最前端按第一节车厢中心算。 */
+    public Train(Vector travel, Vector head, Vector seat, double bodyBlocks, int carriages) {
+      this(travel, head, seat, bodyBlocks, carriages, 0.0);
+    }
+  }
 
   private final StationStopPoints.Lookup stopPoints;
   private final Supplier<View> views;
@@ -149,7 +162,10 @@ public final class StopMarker {
             point,
             lookup.map(StationStopPoints.StopPoint::forward).orElse(null),
             train.travel(),
-            reference == StopAlignment.Reference.HEAD ? 0.0 : train.bodyBlocks() / 2.0,
+            // 车头对准时对的是车头最前端，第一节车厢中心在它后方。
+            reference == StopAlignment.Reference.HEAD
+                ? -train.frontBlocks()
+                : train.bodyBlocks() / 2.0,
             train.head(),
             train.seat(),
             probe.track(world, nowTick));

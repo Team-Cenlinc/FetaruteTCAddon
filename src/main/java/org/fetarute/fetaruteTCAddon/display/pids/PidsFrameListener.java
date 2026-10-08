@@ -141,7 +141,7 @@ public final class PidsFrameListener implements Listener {
       player.sendMessage(locale.component("pids.menu.orphan"));
       return;
     }
-    if (!service.canManage(player, screen.get().station())) {
+    if (!service.canManage(player, screen.get())) {
       player.sendMessage(locale.component("pids.menu.no-permission"));
       return;
     }
@@ -155,7 +155,7 @@ public final class PidsFrameListener implements Listener {
       player.sendMessage(locale.component("pids.menu.orphan"));
       return;
     }
-    if (!service.canManage(player, screen.get().station())) {
+    if (!service.canManage(player, screen.get())) {
       player.sendMessage(locale.component("pids.menu.no-permission"));
       return;
     }

@@ -23,7 +23,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidance;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverGuidanceConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverProtection;
-import org.fetarute.fetaruteTCAddon.drive.driver.SignalConfirm;
+import org.fetarute.fetaruteTCAddon.drive.driver.SignalAcknowledge;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveDynamics;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.DriveParams;
@@ -50,6 +50,9 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
  * 以免无人驾驶的列车一路冲出去；停稳后 {@link Phase#ENDED 结束}。
  */
 public final class DriveSession {
+
+  /** 直接送进驾驶室后，等 TrainCarts 让人坐下最多等几个 tick。 */
+  private static final long CAB_MOVE_SETTLE_TICKS = 5L;
 
   /** 会话阶段。 */
   public enum Phase {
@@ -130,6 +133,12 @@ public final class DriveSession {
   private int originalHeldSlot = -1;
   private long lastAdvanceTick = Long.MIN_VALUE / 2;
   private long lastSneakTick = Long.MIN_VALUE / 2;
+  private boolean sneakHeld;
+  private boolean sneakEdges;
+  private long exitAllowedTick = Long.MIN_VALUE / 2;
+  private long exitBlockedTick = Long.MIN_VALUE / 2;
+  private long cabMovedTick = Long.MIN_VALUE / 2;
+  private final SeatExitGuard exitGuard = new SeatExitGuard();
   private long seatLostSinceTick = -1;
   private long groupMissingSinceTick = -1;
   private double lastCapBps;
@@ -624,7 +633,7 @@ public final class DriveSession {
             };
     DriverProtection.Decision decision = physically ? link.lastDecision() : null;
     return new DriveCueTracker.Snapshot(
-        physically && link.signalConfirm().pending(),
+        physically && link.signalAcknowledge().pending(),
         aspectRank,
         decision == null ? DriverProtection.Intervention.NONE : decision.intervention(),
         overspeedRed,
@@ -888,9 +897,61 @@ public final class DriveSession {
     this.lastSneakTick = nowTick;
   }
 
-  /** 潜行后多少 tick 内离座视为主动离座。 */
+  /** 潜行键状态（输入事件）：按下的那一刻记为一次潜行，按住不放不重复记。 */
+  public void noteSneakInput(boolean sneaking, long nowTick) {
+    if (sneaking && !sneakHeld) {
+      this.lastSneakTick = nowTick;
+    }
+    this.sneakHeld = sneaking;
+    this.sneakEdges = true;
+  }
+
+  /** 潜行键此刻是否按着（只在收得到输入事件时可靠）。 */
+  public boolean sneakHeld() {
+    return sneakHeld;
+  }
+
+  /** 是否收到过潜行键的输入事件：收到过时 {@link #lastSneakTick()} 只在重新按下时变。 */
+  public boolean sneakEdges() {
+    return sneakEdges;
+  }
+
+  /** 最近一次按下潜行键的 tick。 */
+  public long lastSneakTick() {
+    return lastSneakTick;
+  }
+
+  /** 按 Shift 离座的防误操作。 */
+  public SeatExitGuard exitGuard() {
+    return exitGuard;
+  }
+
+  /** 放行了一次玩家发起的离座（按住 Shift 等到停车才离座时，离座时刻可能已远离按下的时刻）。 */
+  public void noteExitAllowed(long nowTick) {
+    this.exitAllowedTick = nowTick;
+  }
+
+  /** 系统刚把驾驶员直接送进另一端驾驶室（折返换端）。 */
+  public void noteCabMove(long nowTick) {
+    this.cabMovedTick = nowTick;
+  }
+
+  /** 刚被直接送进驾驶室的几个 tick 内：TrainCarts 还没让人坐下时按送回座位处理，不当成走远了。 */
+  public boolean cabMovedRecently(long nowTick) {
+    return nowTick - cabMovedTick <= CAB_MOVE_SETTLE_TICKS;
+  }
+
+  /** 拦下了一次玩家发起的离座：这次按键之后若仍掉出座位，按意外离座处理（送回座位），不算主动离座。 */
+  public void noteExitBlocked(long nowTick) {
+    this.exitBlockedTick = nowTick;
+  }
+
+  /** 潜行或放行离座后多少 tick 内离座视为主动离座；最近一次按键的离座请求被拦下时不算。 */
   public boolean sneakedRecently(long nowTick) {
-    return nowTick - lastSneakTick <= config.exitSneakWindowTicks();
+    if (exitBlockedTick >= lastSneakTick && exitBlockedTick > exitAllowedTick) {
+      return false;
+    }
+    return nowTick - Math.max(lastSneakTick, exitAllowedTick) <= config.exitSneakWindowTicks();
   }
 
   /** 记录驾驶员离开座位，返回已离开多少 tick。 */
@@ -1027,7 +1088,7 @@ public final class DriveSession {
     DriverLink link = driverLink;
     boolean stopped = isStopped();
     // 信号变严要右键确认：行车中迟迟不确认先常用制动，再紧急制动。
-    SignalConfirm confirm = link.signalConfirm();
+    SignalAcknowledge confirm = link.signalAcknowledge();
     if (link.directive() != null) {
       confirm.observe(
           link.directive().aspect(),
@@ -1035,11 +1096,11 @@ public final class DriveSession {
           !stopped,
           config.level() == SimulationLevel.SIMULATION);
     }
-    SignalConfirm.Intervention unconfirmed = confirm.intervention(nowTick, !stopped);
-    if (unconfirmed == SignalConfirm.Intervention.EMERGENCY) {
+    SignalAcknowledge.Intervention unconfirmed = confirm.intervention(nowTick, !stopped);
+    if (unconfirmed == SignalAcknowledge.Intervention.EMERGENCY) {
       selector.force(Notch.EB);
       effective = Notch.EB;
-    } else if (unconfirmed == SignalConfirm.Intervention.SERVICE) {
+    } else if (unconfirmed == SignalAcknowledge.Intervention.SERVICE) {
       effective = atLeastServiceBrake(effective);
     }
     if (stopped && link.emergencyLatched()) {

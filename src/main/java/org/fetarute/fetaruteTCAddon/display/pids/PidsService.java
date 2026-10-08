@@ -106,6 +106,13 @@ public final class PidsService {
   private final StorageProvider storage;
   private final FetaruteApi api;
   private final InstantSource clock = InstantSource.system();
+
+  /** 运营商补全缓存的有效期。 */
+  private static final long OPERATOR_SUGGESTION_TTL_MILLIS = 30_000L;
+
+  /** 补全用的“能管理的运营商”，按玩家缓存（见 {@link #manageableOperatorsForSuggestions}）。 */
+  private final Map<UUID, CachedOperators> operatorSuggestions = new ConcurrentHashMap<>();
+
   private final PidsScreenRegistry registry = new PidsScreenRegistry();
   private final PidsBulletinBoard bulletins = new PidsBulletinBoard();
   private final ApiPidsDirectory directory;
@@ -418,7 +425,15 @@ public final class PidsService {
     List<PidsPlatformNode> nearby =
         nearby(worldId, center).platforms().stream().map(PidsNearby.Platform::node).toList();
     Optional<PidsStationKey> station = nearby.stream().findFirst().map(PidsPlatformNode::station);
-    if (!canManage(player, station)) {
+    // 附近没有车站（例如挂在大厅里的线路运行状况屏）：装上时就绑安装者能管理的第一个运营商，屏幕从一开始就有归属，
+    // 别家公司的管理者配置不了、也拆不了；以后可在菜单里换成自己能管理的其他运营商。
+    Optional<String> operator =
+        station.isEmpty() && layout.lineStatus().isPresent()
+            ? manageableOperators(player).stream().findFirst()
+            : Optional.empty();
+    if (station.isPresent()
+        ? !canManage(player, station)
+        : !access.canManageOperator(player, operator)) {
       return new InstallResult(Outcome.NO_PERMISSION, Optional.empty());
     }
     Set<String> platforms =
@@ -447,6 +462,7 @@ public final class PidsService {
             layout.tileCols(),
             layout.id(),
             station,
+            operator,
             platforms,
             Set.of(),
             PidsScreen.Appearance.AUTO,
@@ -538,6 +554,41 @@ public final class PidsService {
             .orElse(List.of()));
   }
 
+  /** 世界调度图里的全部车站，离屏幕由近到远（补全车站参数用）。结果按世界与屏幕位置缓存几秒：补全逐键查询同一块屏幕，不必每次遍历全图排序。 */
+  public List<PidsStationKey> stationsByDistance(UUID worldId, PidsScreen.Position center) {
+    long now = clock.millis();
+    StationsByDistance cached = stationsByDistance;
+    if (cached != null
+        && cached.worldId().equals(worldId)
+        && cached.center().equals(center)
+        && cached.expiresAtMillis() > now) {
+      return cached.stations();
+    }
+    List<PidsStationKey> stations =
+        api.graph()
+            .getSnapshot(worldId)
+            .map(
+                snapshot ->
+                    PidsNearby.of(snapshot.nodes(), center, Double.POSITIVE_INFINITY).stations())
+            .orElse(List.of());
+    stationsByDistance =
+        new StationsByDistance(
+            worldId, center, now + STATIONS_BY_DISTANCE_TTL_MILLIS, List.copyOf(stations));
+    return stations;
+  }
+
+  /** 车站补全缓存的有效期。 */
+  private static final long STATIONS_BY_DISTANCE_TTL_MILLIS = 5_000L;
+
+  /** 最近一次按距离排好的车站（见 {@link #stationsByDistance}）。 */
+  private volatile StationsByDistance stationsByDistance;
+
+  private record StationsByDistance(
+      UUID worldId,
+      PidsScreen.Position center,
+      long expiresAtMillis,
+      List<PidsStationKey> stations) {}
+
   /** 调度图里某个车站的全部站台。 */
   public List<String> platformsOf(UUID worldId, PidsStationKey station) {
     return api.graph()
@@ -547,27 +598,85 @@ public final class PidsService {
         .orElse(List.of());
   }
 
-  /** 屏幕所用的布局（不存在时退回同尺寸内置布局）。 */
+  /** 屏幕的主布局（不存在时退回同尺寸内置布局）。 */
   public Optional<PidsLayout> layoutOf(PidsScreen screen) {
     return layouts.resolve(screen.layoutId(), screen.tileRows(), screen.tileCols());
   }
 
-  /**
-   * 屏幕的线路过滤可选的线路：线路运行状况屏为本站所属运营商的线路，其余为停靠本站的线路。
-   *
-   * @param screen 已绑定车站的屏幕
-   * @return 未绑定车站时为空
-   */
-  public List<PidsView.LineChip> filterableLines(PidsScreen screen) {
-    return screen
-        .station()
-        .map(station -> PidsLineStatusViews.filterOptions(directory, station, isLineStatus(screen)))
-        .orElse(List.of());
+  /** 屏幕轮流显示的布局，主布局在前（见 {@link PidsScreenPages#resolve}）。 */
+  public List<PidsLayout> pagesOf(PidsScreen screen) {
+    return PidsScreenPages.resolve(screen, layouts);
   }
 
-  /** 屏幕是线路运行状况屏（布局带状况表组件）：不按站台显示，站台选择不起作用。 */
+  /** 屏幕布局的名称，组合翻页时依次列出；布局都不存在时写主布局 ID。 */
+  public String layoutNames(PidsScreen screen) {
+    List<PidsLayout> pages = pagesOf(screen);
+    return pages.isEmpty() ? screen.layoutId() : PidsComposer.layoutNames(pages);
+  }
+
+  /**
+   * 屏幕的线路过滤可选的线路：只显示线路运行状况的屏为屏幕所属运营商的线路（绑车站或只绑运营商都行），其余（含与到发组合翻页的）为停靠本站的线路。
+   *
+   * @return 线路运行状况屏没有运营商、其余屏没绑车站时为空
+   */
+  public List<PidsView.LineChip> filterableLines(PidsScreen screen) {
+    if (isLineStatus(screen)) {
+      return screen
+          .operatorCode()
+          .map(operator -> PidsLineStatusViews.operatorLineChips(directory, operator))
+          .orElse(List.of());
+    }
+    return screen.station().map(directory::linesServing).orElse(List.of());
+  }
+
+  /**
+   * 线路运行状况屏菜单里可选的运营商：当前的、附近车站的，以及玩家能管理的公司的运营商，按代码排序，最多 {@code limit} 个。
+   *
+   * @param sender 打开菜单的人
+   */
+  public List<String> operatorChoices(CommandSender sender, PidsScreen screen, int limit) {
+    java.util.LinkedHashSet<String> choices = new java.util.LinkedHashSet<>();
+    screen.operatorCode().ifPresent(choices::add);
+    nearby(screen.worldId(), screen.center()).stations().stream()
+        .map(PidsStationKey::operatorCode)
+        .forEach(choices::add);
+    choices.addAll(manageableOperators(sender));
+    return choices.stream().limit(limit).toList();
+  }
+
+  /** 玩家能管理的公司的运营商代码（大写），按代码排序；有管理权限时为全部运营商。 */
+  public List<String> manageableOperators(CommandSender sender) {
+    Predicate<UUID> manageable = access.manageableCompanies(sender);
+    return api.operators().listAllOperators().stream()
+        .filter(operator -> manageable.test(operator.companyId()))
+        .map(operator -> operator.code().toUpperCase(java.util.Locale.ROOT))
+        .sorted()
+        .distinct()
+        .toList();
+  }
+
+  /** 补全用的“能管理的运营商”：按玩家缓存 30 秒，逐键补全时不每次读成员身份；授权判断仍走实时的 {@link #manageableOperators}。 */
+  public List<String> manageableOperatorsForSuggestions(CommandSender sender) {
+    if (!(sender instanceof Player player)) {
+      return manageableOperators(sender);
+    }
+    long now = clock.millis();
+    CachedOperators cached = operatorSuggestions.get(player.getUniqueId());
+    if (cached != null && cached.expiresAtMillis() > now) {
+      return cached.codes();
+    }
+    List<String> codes = manageableOperators(sender);
+    operatorSuggestions.put(
+        player.getUniqueId(), new CachedOperators(now + OPERATOR_SUGGESTION_TTL_MILLIS, codes));
+    return codes;
+  }
+
+  private record CachedOperators(long expiresAtMillis, List<String> codes) {}
+
+  /** 屏幕只显示线路运行状况（各布局都带状况表组件）：不按站台显示，站台选择不起作用。 */
   public boolean isLineStatus(PidsScreen screen) {
-    return layoutOf(screen).flatMap(PidsLayout::lineStatus).isPresent();
+    List<PidsLayout> pages = pagesOf(screen);
+    return !pages.isEmpty() && pages.stream().allMatch(layout -> layout.lineStatus().isPresent());
   }
 
   /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */
@@ -658,6 +767,16 @@ public final class PidsService {
   /** 见 {@link PidsAccess#canManage}。 */
   public boolean canManage(CommandSender sender, Optional<PidsStationKey> station) {
     return access.canManage(sender, station);
+  }
+
+  /** 见 {@link PidsAccess#canManageOperator}。 */
+  public boolean canManageOperator(CommandSender sender, String operatorCode) {
+    return access.canManageOperator(sender, Optional.of(operatorCode));
+  }
+
+  /** 能否管理这块屏幕（配置、拆除、查看信息）：按屏幕所属运营商判断；车站与运营商都没绑的屏幕只有管理权限才能动。 */
+  public boolean canManage(CommandSender sender, PidsScreen screen) {
+    return access.canManageOperator(sender, screen.operatorCode());
   }
 
   /** 见 {@link PidsAccess#canUseTools}。 */

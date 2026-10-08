@@ -29,6 +29,7 @@ import java.util.Optional;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
@@ -77,6 +78,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResou
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.SignalAspect;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -443,6 +445,323 @@ class SimpleTicketAssignerLayoverTest {
       trainPropertiesStore.verify(() -> TrainPropertiesStore.get("outbound-renamed"));
       verify(dispatchedProperties).addTags("FTA_OP_TRIPS=0");
     }
+  }
+
+  /** 折返事务提交后再读库会失败：生命周期标签必须在提交前读好，票据照常完成，不留在待派里被另一辆车再派一次。 */
+  @Test
+  void layoverTicketCompletesWhenStorageFailsAfterCommit() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    AtomicBoolean committed = failStorageAfterCommit(provider);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenAnswer(
+            invocation -> {
+              committed.set(true);
+              return LayoverDispatchResult.success("train-1-renamed");
+            });
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    List<String> dispatched = new ArrayList<>();
+    assigner.setDispatchListener((t, trainName) -> dispatched.add(trainName));
+    TrainProperties properties = mock(TrainProperties.class);
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      trainPropertiesStore
+          .when(() -> TrainPropertiesStore.get("train-1-renamed"))
+          .thenReturn(properties);
+      assigner.tick(provider, Instant.now());
+    }
+
+    verify(properties).addTags("FTA_OP_TRIPS=1");
+    assertEquals(List.of("train-1-renamed"), dispatched);
+    verify(spawnManager).complete(ticket);
+    verify(spawnManager, never()).requeue(any());
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+    assertEquals(1L, assigner.snapshotDiagnostics().success());
+  }
+
+  /** 写生命周期标签本身出错：折返已经提交，票据照常完成。 */
+  @Test
+  void layoverTicketCompletesWhenTagWritingFailsAfterCommit() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("train-1-renamed"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      trainPropertiesStore
+          .when(() -> TrainPropertiesStore.get("train-1-renamed"))
+          .thenThrow(new IllegalStateException("属性读取失败"));
+      assigner.tick(provider, Instant.now());
+    }
+
+    verify(spawnManager).complete(ticket);
+    verify(spawnManager, never()).requeue(any());
+    assertTrue(assigner.snapshotPendingTickets().isEmpty());
+  }
+
+  /** 强制分配同样在提交前读好交路阶段与交路组：提交后读库失败不影响结果与标签。 */
+  @Test
+  void forceAssignResolvesLifecycleTagsBeforeCommit() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeId = UUID.randomUUID();
+    StorageProvider provider =
+        mockProviderForRouteOperation(
+            lineId, routeId, "RET-1", RouteOperationType.RETURN, "A", "B");
+    AtomicBoolean committed = failStorageAfterCommit(provider);
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "inbound", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.get("inbound")).thenReturn(Optional.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenAnswer(
+            invocation -> {
+              committed.set(true);
+              return LayoverDispatchResult.success("outbound-renamed");
+            });
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            mock(SpawnManager.class),
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    ServiceTicket serviceTicket =
+        new ServiceTicket(
+            UUID.randomUUID().toString(),
+            Instant.now(),
+            routeId,
+            "A",
+            0,
+            ServiceTicket.TicketMode.OPERATION);
+    TrainProperties dispatchedProperties = mock(TrainProperties.class);
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      trainPropertiesStore
+          .when(() -> TrainPropertiesStore.get("outbound-renamed"))
+          .thenReturn(dispatchedProperties);
+
+      assertTrue(assigner.forceAssign(provider, "inbound", serviceTicket));
+    }
+
+    // 交路阶段取库里的 RETURN，而不是票据上写的 OPERATION：说明是提交前读到的。
+    verify(dispatchedProperties).addTags("FTA_OP_TRIPS=0");
+  }
+
+  /** 一张票处理途中读库出错：重新入队（计一次重试），同一拍的其他票照常处理，异常最后再抛出。 */
+  @Test
+  void dueTicketThatThrowsIsRequeuedAndOtherTicketsStillRun() {
+    UUID lineId = UUID.randomUUID();
+    UUID failingRoute = UUID.randomUUID();
+    UUID healthyRoute = UUID.randomUUID();
+    StorageProvider provider =
+        mockProviderForRoutes(lineId, Map.of(failingRoute, "RF", healthyRoute, "RH"), false);
+    LineRepository lines = provider.lines();
+    Line line = lines.findById(lineId).orElseThrow();
+    when(lines.findById(lineId))
+        .thenThrow(new StorageException("读库失败"))
+        .thenReturn(Optional.of(line));
+    SpawnTicket failing = buildTicket(failingRoute, lineId, "RF", 0L);
+    SpawnTicket healthy = buildTicket(healthyRoute, lineId, "RH", 1L);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(failing, healthy));
+    LayoverRegistry.LayoverCandidate candidate =
+        new LayoverRegistry.LayoverCandidate(
+            "train-1", "A", NodeId.of("A"), Instant.now(), Map.of());
+    LayoverRegistry layoverRegistry = mock(LayoverRegistry.class);
+    when(layoverRegistry.findCandidates("A")).thenReturn(List.of(candidate));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    when(runtimeDispatchService.dispatchLayover(eq(candidate), any(ServiceTicket.class)))
+        .thenReturn(LayoverDispatchResult.success("train-1-renamed"));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(
+                Map.of(
+                    failingRoute, routeDefinition("OP:L1:RF"),
+                    healthyRoute, routeDefinition("OP:L1:RH"))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            layoverRegistry,
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    try (MockedStatic<TrainPropertiesStore> trainPropertiesStore =
+        mockStatic(TrainPropertiesStore.class)) {
+      assertThrows(StorageException.class, () -> assigner.tick(provider, Instant.now()));
+    }
+
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
+    SpawnTicket first = requeued.getValue().id().equals(failing.id()) ? failing : healthy;
+    SpawnTicket second = first == failing ? healthy : failing;
+    assertEquals(first.id(), requeued.getValue().id());
+    assertEquals(1, requeued.getValue().attempts());
+    assertEquals(Optional.of("exception:StorageException"), requeued.getValue().lastError());
+    verify(spawnManager).complete(second);
+    verify(spawnManager, never()).complete(first);
+  }
+
+  /** 运行库版本不匹配之类的 LinkageError 同样不能让已取出的票丢掉。 */
+  @Test
+  void dueTicketThatThrowsLinkageErrorIsRequeued() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    LineRepository lines = provider.lines();
+    when(lines.findById(any())).thenThrow(new NoClassDefFoundError("com/example/Missing"));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mockRuntimeDispatchServiceAllowingSmartAdmission(),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assertThrows(NoClassDefFoundError.class, () -> assigner.tick(provider, Instant.now()));
+
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
+    assertEquals(ticket.id(), requeued.getValue().id());
+    assertEquals(Optional.of("exception:NoClassDefFoundError"), requeued.getValue().lastError());
+  }
+
+  /** 排序与车库仲裁读库出错：这一批票都还没处理，原样放回队列且不计重试。 */
+  @Test
+  void dueTicketsAreReturnedWhenOrderingFails() {
+    UUID routeId = UUID.randomUUID();
+    SpawnTicket ticket = buildTicket(routeId);
+    StorageProvider provider = mockProvider(routeId, false);
+    RouteRepository routes = provider.routes();
+    when(routes.findById(routeId)).thenThrow(new StorageException("读库失败"));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), any())).thenReturn(List.of(ticket));
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            mock(OccupancyManager.class),
+            mock(RailGraphService.class),
+            mockRouteDefinitions(routeId),
+            mockRuntimeDispatchServiceAllowingSmartAdmission(),
+            mockConfigManager(),
+            mock(SignNodeRegistry.class),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assertThrows(StorageException.class, () -> assigner.tick(provider, Instant.now()));
+
+    ArgumentCaptor<SpawnTicket> requeued = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(requeued.capture());
+    assertEquals(ticket.id(), requeued.getValue().id());
+    assertEquals(0, requeued.getValue().attempts());
+    verify(spawnManager, never()).complete(any());
+  }
+
+  /** 让 {@code provider} 在 {@code committed} 置位后，交路与线路读库一律抛错。 */
+  private static AtomicBoolean failStorageAfterCommit(StorageProvider provider) {
+    AtomicBoolean committed = new AtomicBoolean();
+    RouteRepository routes = provider.routes();
+    LineRepository lines = provider.lines();
+    when(provider.routes())
+        .thenAnswer(
+            invocation -> {
+              if (committed.get()) {
+                throw new StorageException("提交后读库失败");
+              }
+              return routes;
+            });
+    when(provider.lines())
+        .thenAnswer(
+            invocation -> {
+              if (committed.get()) {
+                throw new StorageException("提交后读库失败");
+              }
+              return lines;
+            });
+    return committed;
   }
 
   /** 折返复用不生成实体，不占 {@code max-spawn-per-tick} 的名额：名额为 1 时两张折返票也都要当拍试到。 */

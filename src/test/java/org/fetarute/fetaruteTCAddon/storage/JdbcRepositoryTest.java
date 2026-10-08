@@ -635,6 +635,60 @@ final class JdbcRepositoryTest {
   }
 
   @Test
+  void shouldMigratePidsScreensWithoutPageLayoutsColumn() throws Exception {
+    Path dbFile = Path.of("test/data/migration-pids-screens.sqlite").toAbsolutePath();
+    UUID screenId = UUID.randomUUID();
+
+    // 旧版站台屏表：缺少 page_layouts 列
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE IF NOT EXISTS fta_pids_screens ("
+              + "id TEXT PRIMARY KEY, world_id TEXT NOT NULL, x INTEGER NOT NULL,"
+              + " y INTEGER NOT NULL, z INTEGER NOT NULL, facing TEXT NOT NULL,"
+              + " tile_rows INTEGER NOT NULL, tile_cols INTEGER NOT NULL, layout_id TEXT NOT NULL,"
+              + " operator_code TEXT, station_code TEXT, platforms TEXT, line_codes TEXT,"
+              + " appearance TEXT NOT NULL, mode TEXT NOT NULL, created_at INTEGER NOT NULL,"
+              + " updated_at INTEGER NOT NULL, UNIQUE (world_id, x, y, z, facing));");
+      try (var ps =
+          connection.prepareStatement(
+              "INSERT INTO fta_pids_screens (id, world_id, x, y, z, facing, tile_rows,"
+                  + " tile_cols, layout_id, appearance, mode, created_at, updated_at)"
+                  + " VALUES (?, ?, 0, 64, 0, 'SOUTH', 3, 5, 'station-3x5', 'AUTO', 'LIVE', 0, 0)")) {
+        ps.setString(1, screenId.toString());
+        ps.setString(2, UUID.randomUUID().toString());
+        ps.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+    var screen = provider.pidsScreens().findById(screenId).orElseThrow();
+    assertEquals(List.of("station-3x5"), screen.layoutIds());
+
+    var combined = screen.withLayouts(List.of("station-3x5", "status-3x5"), Instant.EPOCH);
+    provider.pidsScreens().save(combined);
+    assertEquals(
+        List.of("status-3x5"),
+        provider.pidsScreens().findById(screenId).orElseThrow().pageLayoutIds());
+
+    // 不认识 page_layouts 的旧版本改了主布局：清单第一项对不上，不再沿用旧的翻页
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.executeUpdate("UPDATE fta_pids_screens SET layout_id = 'custom-3x5'");
+    }
+    assertEquals(
+        List.of("custom-3x5"), provider.pidsScreens().findById(screenId).orElseThrow().layoutIds());
+
+    // 手改坏的 JSON 与空白主布局只影响这一块，整表照常读入
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.executeUpdate(
+          "UPDATE fta_pids_screens SET layout_id = ' ', page_layouts = 'station-3x5'");
+    }
+    assertEquals(List.of(""), provider.pidsScreens().listAll().get(0).layoutIds());
+  }
+
+  @Test
   void shouldLoadLegacyRailEdgesWithoutFootprintColumn() throws Exception {
     Path dbFile = Path.of("test/data/migration-rail-edge-topology.sqlite").toAbsolutePath();
     UUID worldId = UUID.randomUUID();

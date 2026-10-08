@@ -379,7 +379,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private record Alignment(int ticks, StopMarkSign mark) {}
 
   /**
-   * 自动运行对位：股道上有对应节数的停车位置标时让车头停在标志处，否则按 TrainCarts 把列车中心停在牌子处。
+   * 自动运行对位：股道上有对应节数的停车位置标时让车头最前端停在标志处，否则按 TrainCarts 把列车中心停在牌子处。
    *
    * @return 开往标志预计还要多少 tick，以及车头对准了哪块标志
    */
@@ -400,7 +400,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       }
       Vector motion = group.head().getRailTracker().getMotionVector();
       double offset =
-          StopAlignment.signedOffset(StopAlignment.head(group), selected.point(), motion);
+          StopAlignment.signedOffset(StopAlignment.front(group), selected.point(), motion);
       if (!(offset < -StopMarks.BEHIND_TOLERANCE_BLOCKS)) {
         // 车头已到或已过标志（进站途中交还时可能如此）：就地停住，不退回去按车站牌子居中。
         group.getActions().launchReset();
@@ -432,7 +432,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
-   * 把车头沿轨道送到标志所在的轨道：保持进站速度开到标志前，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
+   * 把车头最前端沿轨道送到标志所在的轨道：从第一节车厢中心沿轨道量到标志，少走半个车体长度（{@link
+   * StopAlignment#frontOffsetBlocks}），保持进站速度开到标志前，再按本车的常用制动减速度停下（见 {@link StopMarks#approach}）。
    *
    * @return 预计还要多少 tick；前方沿轨道找不到这段轨道时为 -1（不倒车）
    */
@@ -445,7 +446,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return -1;
     }
     group.getActions().launchReset();
-    double distance = walk.movedTotal;
+    // 走的是第一节车厢中心到标志的距离；停的是车头最前端，少走半个车体长度。
+    double distance = walk.movedTotal - StopAlignment.frontOffsetBlocks(group);
     if (distance <= 0.01) {
       group.stop();
       return 0;
@@ -662,7 +664,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         if (stop != null) {
           stop.updateOffset(
               StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint(), stop.reference()));
-          if (stop.window().classify(stop.offsetBlocks()) == StopAlignment.Window.SKIPPED) {
+          if (stop.window().classify(stop.offsetBlocks()) == StopAlignment.Outcome.SKIPPED) {
             // 越过停车点太多：越站，本站不停，列车继续开。
             cancel();
             skipStation(info, definition, trainName, group, stop);
@@ -674,7 +676,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           // 驾驶员停得太靠前时等他前移，不当作停妥。
           boolean aligned =
               stop == null
-                  || stop.window().classify(stop.offsetBlocks()) != StopAlignment.Window.SHORT;
+                  || stop.window().classify(stop.offsetBlocks()) != StopAlignment.Outcome.SHORT;
           if (stoppedTicks >= STOP_STABLE_TICKS && aligned) {
             cancel();
             handleStop(
@@ -830,6 +832,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     }
     new org.bukkit.scheduler.BukkitRunnable() {
       private boolean driverDoors = driverDoorsAtStop;
+
+      /** 驾驶员停站；停站中途由驾驶员接管时换成新建的那一个。 */
+      private DriverStationStop stationStop = driverStop;
+
+      /** 车门是停站中途由站台交给驾驶员的（站台开的门）。 */
+      private boolean doorsFromStation = false;
+
       private boolean departureReleased = false;
       private long ticksSinceStop = 0L;
       private long ticksSinceOpen = 0L;
@@ -857,12 +866,20 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
        */
       private boolean driverTick() {
         if (departureReleased) {
+          if (stopSessionSuperseded(trainName, routeId, group.getProperties())) {
+            // 已放行但列车被别的流程接手（终点待命复用改名开下一趟）：只收尾，不再按本站报发车。
+            if (stationStop != null) {
+              stationStop.end();
+            }
+            cancel();
+            return true;
+          }
           if (group.isMoving()) {
             plugin
                 .getRuntimeDispatchService()
                 .ifPresent(dispatch -> dispatch.stationStops().handleDeparture(group, definition));
-            if (driverStop != null) {
-              driverStop.end();
+            if (stationStop != null) {
+              stationStop.end();
             }
             cancel();
           }
@@ -874,21 +891,25 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         if (!driverControlled(group.getProperties())) {
           // 停站中交还了自动运行：剩下的开关门与发车按自动运行处理，驾驶员开着的门随驾驶结束关上。
           driverDoors = false;
-          driverStop.end();
+          stationStop.end();
+          if (doorsFromStation) {
+            // 站台交出去的门已由驾驶员关上（或随驾驶结束关上）：不再按原计时重放关门动画。
+            closeStarted = true;
+          }
           return false;
         }
         if (!opened) {
-          if (!driverStop.doorsRequired() || driverStop.correctDoorsOpen()) {
+          if (!stationStop.doorsRequired() || stationStop.correctDoorsOpen()) {
             opened = true;
             ticksSinceOpen = 0L;
             closeStarted = true;
             applyExitOffset();
-            driverStop.setPhase(DriverStationStop.Phase.DWELL);
+            stationStop.setPhase(DriverStationStop.Phase.DWELL);
           } else if (ticksSinceStop >= DRIVER_DOOR_TIMEOUT_TICKS) {
             // 驾驶员迟迟不开门：由站台开关门，停站照常。
             driverDoors = false;
-            driverStop.markDoorsTakenOver();
-            driverStop.end();
+            stationStop.markDoorsTakenOver();
+            stationStop.end();
             debug(
                 "AutoStation 驾驶员未开门，改由站台开关门: nodeId="
                     + definition.nodeId().value()
@@ -902,15 +923,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           }
         }
         ticksSinceOpen++;
-        driverStop.setDwellRemainingTicks(dwellTicks - ticksSinceOpen);
+        stationStop.setDwellRemainingTicks(dwellTicks - ticksSinceOpen);
         if (ticksSinceOpen < dwellTicks) {
           return true;
         }
-        if (driverStop.anyDoorOpen()) {
-          driverStop.setPhase(DriverStationStop.Phase.CLOSE_DOORS);
+        if (stationStop.anyDoorOpen()) {
+          stationStop.setPhase(DriverStationStop.Phase.CLOSE_DOORS);
           return true;
         }
-        driverStop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
+        stationStop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
         if ((ticksSinceOpen - dwellTicks) % 20 != 0) {
           return true;
         }
@@ -922,7 +943,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           finalWaitState.run();
           plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
           lowerPantograph(group, trainName, stopSessionId);
-          driverStop.end();
+          stationStop.end();
           cancel();
           return true;
         }
@@ -949,7 +970,49 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                         .ifPresent(dispatch -> dispatch.refreshSignal(group)));
         departureReleased = true;
         lowerPantograph(group, trainName, stopSessionId);
-        driverStop.setPhase(DriverStationStop.Phase.DEPART);
+        stationStop.setPhase(DriverStationStop.Phase.DEPART);
+        return true;
+      }
+
+      /**
+       * 停站中途被人工驾驶的驾驶员接管、车门已由站台打开、还没开始关门：车门交给驾驶员。站台不再按时关门，改按驾驶员停站推进——停站计时照旧，
+       * 时间到等驾驶员关门，再放出出站许可。这一站不是驾驶员停的车，不计对标成绩。
+       *
+       * @return 本拍已交接
+       */
+      private boolean handOverDoorsToDriver() {
+        if (!shouldHandOverDoors(
+            driverDoors,
+            departureReleased,
+            opened,
+            closeStarted,
+            doorDirection != AutoStationDoorDirection.NONE,
+            plugin.getControlAuthority().driverOperatesDoors(group.getProperties()))) {
+          return false;
+        }
+        DriverStationStop handed =
+            beginDriverStop(
+                info, group.getProperties(), definition, doorDirection, Optional.empty(), doorCars);
+        if (handed == null) {
+          return false;
+        }
+        handed.setPhase(DriverStationStop.Phase.DWELL);
+        handed.setDwellRemainingTicks(dwellTicks - ticksSinceOpen);
+        handed.handOverOpenDoors();
+        stationStop = handed;
+        driverDoors = true;
+        doorsFromStation = true;
+        debug(
+            "AutoStation 停站中途由驾驶员接管，车门交给驾驶员: nodeId="
+                + definition.nodeId().value()
+                + ", train="
+                + trainName
+                + ", sid="
+                + stopSessionId
+                + ", t="
+                + ticksSinceOpen
+                + "/"
+                + dwellTicks);
         return true;
       }
 
@@ -974,14 +1037,17 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               .ifPresent(dispatch -> dispatch.releaseDepartureGate(trainName, stopSessionId));
           exitOffsetState.restore();
           finalWaitState.run();
-          if (driverStop != null) {
-            driverStop.end();
+          if (stationStop != null) {
+            stationStop.end();
           }
           cancel();
           return;
         }
         ticksSinceStop++;
         if (driverTick()) {
+          return;
+        }
+        if (handOverDoorsToDriver()) {
           return;
         }
         if (!opened && doorDirection == AutoStationDoorDirection.NONE) {
@@ -1095,8 +1161,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
               canDepart =
                   plugin.getRuntimeDispatchService().get().checkDeparture(group, definition);
             }
-            if (canDepart && plugin.getControlAuthority().holdDeparture(group.getProperties())) {
-              // ATO 下车上的驾驶员要先确认发车（等太久自动放行）。
+            // ATO 下车上的驾驶员要先确认发车（等太久自动放行）；扣着等换端的车由驾驶侧放行，不在这里等确认。
+            if (canDepart
+                && !driverControlled(group.getProperties())
+                && plugin.getControlAuthority().holdDeparture(group.getProperties())) {
               canDepart = false;
             }
 
@@ -1505,6 +1573,31 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * @param current 列车当前属性
    * @return 已被接手时为 {@code true}
    */
+  /**
+   * 停站中途接管时要不要把站台开着的车门交给驾驶员：人工驾驶的驾驶员已接管、站台已开门且还没开始关门、还没放行、本站要开门。
+   *
+   * @param driverDoors 已经由驾驶员开关门
+   * @param departureReleased 已放出出站许可
+   * @param opened 站台已开门
+   * @param closeStarted 站台已开始关门
+   * @param doorsAtThisStop 本站要开门
+   * @param driverOperatesDoors 车上的驾驶员亲手开关车门（人工驾驶）
+   */
+  static boolean shouldHandOverDoors(
+      boolean driverDoors,
+      boolean departureReleased,
+      boolean opened,
+      boolean closeStarted,
+      boolean doorsAtThisStop,
+      boolean driverOperatesDoors) {
+    return !driverDoors
+        && !departureReleased
+        && opened
+        && !closeStarted
+        && doorsAtThisStop
+        && driverOperatesDoors;
+  }
+
   static boolean stopSessionSuperseded(
       String stoppedTrainName, UUID stoppedRouteId, TrainProperties current) {
     if (current == null) {

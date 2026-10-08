@@ -109,4 +109,22 @@ class DriverConfigTest {
     yaml.loadFromString("terminal-overrun-blocks: 2");
     assertEquals(2.0, DriverConfig.from(yaml, message -> {}).terminalOverrunBlocks(), 1.0e-9);
   }
+
+  @Test
+  @DisplayName("越站处置默认同一趟 2 次交还，可改、可写 0 关闭，负数回退默认值")
+  void skipStationHandback() throws Exception {
+    assertEquals(2, DriverConfig.defaults().skipStationHandback());
+
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString("skip-station-handback: 0");
+    assertEquals(0, DriverConfig.from(yaml, message -> {}).skipStationHandback());
+
+    yaml.loadFromString("skip-station-handback: 3");
+    assertEquals(3, DriverConfig.from(yaml, message -> {}).skipStationHandback());
+
+    yaml.loadFromString("skip-station-handback: -1");
+    List<String> warnings = new ArrayList<>();
+    assertEquals(2, DriverConfig.from(yaml, warnings::add).skipStationHandback());
+    assertTrue(warnings.stream().anyMatch(w -> w.contains("skip-station-handback")));
+  }
 }

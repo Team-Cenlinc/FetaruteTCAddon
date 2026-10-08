@@ -149,6 +149,7 @@ public final class FtaRouteCommand {
     SuggestionProvider<CommandSender> operatorSuggestions = operatorSuggestions();
     SuggestionProvider<CommandSender> lineSuggestions = lineSuggestions();
     SuggestionProvider<CommandSender> routeSuggestions = routeSuggestions();
+    SuggestionProvider<CommandSender> routePatternArgSuggestions = routePatternArgSuggestions();
 
     SuggestionProvider<CommandSender> codeSuggestions = placeholderSuggestion("<code>");
     SuggestionProvider<CommandSender> nameSuggestions = placeholderSuggestion("\"<name>\"");
@@ -1615,7 +1616,7 @@ public final class FtaRouteCommand {
             .required("company", StringParser.quotedStringParser(), companySuggestions)
             .required("operator", StringParser.quotedStringParser(), operatorSuggestions)
             .required("line", StringParser.quotedStringParser(), lineSuggestions)
-            .required("route", StringParser.quotedStringParser(), routeSuggestions)
+            .required("route", StringParser.quotedStringParser(), routePatternArgSuggestions)
             .flag(nameFlag)
             .flag(secondaryFlag)
             .flag(patternFlag)
@@ -1684,8 +1685,11 @@ public final class FtaRouteCommand {
                     return;
                   }
 
-                  // 交路写成通配（* 代表任意个字符）时批量设置本线路匹配的各条交路，只许改出车相关、各条交路取同一个值才有意义的项。
-                  boolean wildcard = routeArg.contains("*");
+                  // 交路写成通配（* 代表任意个字符，? 代表一个字符）时批量设置本线路匹配的各条交路（出库、运营、回送都算），
+                  // 只许改出车相关、各条交路取同一个值才有意义的项。代码本身就带 * 或 ? 的交路按单条处理。
+                  boolean wildcard =
+                      isRoutePattern(routeArg)
+                          && query.findRoute(resolvedLine.line().id(), routeArg).isEmpty();
                   List<Route> targets;
                   if (wildcard) {
                     List<String> perRoute = new ArrayList<>();
@@ -1727,13 +1731,9 @@ public final class FtaRouteCommand {
                               Map.of("flags", String.join(" ", perRoute))));
                       return;
                     }
-                    // 只改运营运行图：出库、回送运行图在交路组里固定按权重 1 分节拍，批量编进组或关掉会改变运营车的间隔、停掉回库。
                     targets =
                         matchingRoutes(
-                                provider.routes().listByLine(resolvedLine.line().id()), routeArg)
-                            .stream()
-                            .filter(route -> route.operationType() == RouteOperationType.OPERATION)
-                            .toList();
+                            provider.routes().listByLine(resolvedLine.line().id()), routeArg);
                   } else {
                     targets = query.findRoute(resolvedLine.line().id(), routeArg).stream().toList();
                   }
@@ -2028,7 +2028,15 @@ public final class FtaRouteCommand {
                       }
                       return;
                     }
-                    done.add(target.code());
+                    // 出库、回送运行图也在通配范围内：批量结果里标出来，误改了回库能一眼看到。
+                    done.add(
+                        target.operationType() == RouteOperationType.OPERATION
+                            ? target.code()
+                            : locale
+                                .text(
+                                    "command.route.set.batch-type."
+                                        + target.operationType().name().toLowerCase(Locale.ROOT))
+                                .replace("<code>", target.code()));
                   }
                   if (wildcard) {
                     sender.sendMessage(
@@ -2503,51 +2511,127 @@ public final class FtaRouteCommand {
           if (prefix.isBlank()) {
             suggestions.add("<route>");
           }
-          Optional<StorageProvider> providerOpt = providerIfReady();
-          if (providerOpt.isEmpty()) {
-            return suggestions;
-          }
-          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
-          Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
-          Optional<String> lineArgOpt = ctx.optional("line").map(String.class::cast);
-          if (companyArgOpt.isEmpty() || operatorArgOpt.isEmpty() || lineArgOpt.isEmpty()) {
-            return suggestions;
-          }
-          String companyArg = companyArgOpt.get().trim();
-          String operatorArg = operatorArgOpt.get().trim();
-          String lineArg = lineArgOpt.get().trim();
-          if (companyArg.isBlank() || operatorArg.isBlank() || lineArg.isBlank()) {
-            return suggestions;
-          }
-          StorageProvider provider = providerOpt.get();
-          CompanyQueryService query = new CompanyQueryService(provider);
-          Optional<Company> companyOpt = query.findCompany(companyArg);
-          if (companyOpt.isEmpty()) {
-            return suggestions;
-          }
-          Company company = companyOpt.get();
-          if (!canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id())) {
-            return suggestions;
-          }
-          Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
-          if (operatorOpt.isEmpty()) {
-            return suggestions;
-          }
-          Optional<Line> lineOpt = query.findLine(operatorOpt.get().id(), lineArg);
-          if (lineOpt.isEmpty()) {
-            return suggestions;
-          }
-          provider.routes().listByLine(lineOpt.get().id()).stream()
-              .map(Route::code)
-              .filter(Objects::nonNull)
-              .map(String::trim)
-              .filter(code -> !code.isBlank())
+          lineRouteCodes(ctx).stream()
               .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
-              .distinct()
               .limit(SUGGESTION_LIMIT)
               .forEach(suggestions::add);
           return suggestions;
         });
+  }
+
+  /** 可写通配的交路参数补全：除交路代码外，给出 {@code *} 与匹配两条以上交路的前缀通配。 */
+  private SuggestionProvider<CommandSender> routePatternArgSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) ->
+            routePatternSuggestions(
+                lineRouteCodes(ctx), input == null ? "" : input.lastRemainingToken()));
+  }
+
+  /**
+   * 交路参数的补全项：空输入时先给 {@code <route>} 与 {@code "*"}；再给按分隔符（{@code -}、{@code _}）截出、匹配两条以上交路的前缀通配，
+   * 以及输入本身加 {@code *}（匹配两条以上时）；最后是交路代码。只列以输入开头的项，不分大小写。
+   *
+   * <p>通配候选一律带双引号：客户端按 Brigadier 规则解析，{@code * ?} 不加引号会让整条命令标红；交路代码只在需要时或玩家已起了引号时加。
+   *
+   * @param token 当前参数已输入的文字（可能以引号开头）
+   */
+  static List<String> routePatternSuggestions(List<String> codes, String token) {
+    boolean quoted = CommandUx.startsQuoted(token);
+    String lower = CommandUx.suggestionPrefix(token);
+    java.util.LinkedHashSet<String> suggestions = new java.util.LinkedHashSet<>();
+    if (lower.isEmpty() && !quoted) {
+      suggestions.add("<route>");
+    }
+    if (isRoutePattern(lower)) {
+      return List.copyOf(suggestions);
+    }
+    if (lower.isEmpty() && codes.size() > 1) {
+      suggestions.add(CommandUx.quoteCommandArgument("*"));
+    }
+    Map<String, Integer> families = new java.util.TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    for (String code : codes) {
+      for (int k = 0; k < code.length(); k++) {
+        char c = code.charAt(k);
+        if ((c == '-' || c == '_') && k > 0) {
+          families.merge(code.substring(0, k + 1) + "*", 1, Integer::sum);
+        }
+      }
+    }
+    if (!lower.isEmpty()) {
+      List<String> matched =
+          codes.stream().filter(code -> code.toLowerCase(Locale.ROOT).startsWith(lower)).toList();
+      // 用交路代码原本的大小写拼出前缀，客户端按输入筛补全项时才对得上；转小写会改变长度的字符（如 İ）退回用输入本身。
+      String typed = matched.isEmpty() ? "" : originalPrefix(matched.get(0), lower) + "*";
+      if (matched.size() > 1 && !families.containsKey(typed)) {
+        suggestions.add(CommandUx.quoteCommandArgument(typed));
+      }
+    }
+    families.forEach(
+        (family, count) -> {
+          if (count > 1 && family.toLowerCase(Locale.ROOT).startsWith(lower)) {
+            suggestions.add(CommandUx.quoteCommandArgument(family));
+          }
+        });
+    codes.stream()
+        .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(lower))
+        .map(code -> CommandUx.suggestion(code, quoted))
+        .forEach(suggestions::add);
+    return suggestions.stream().limit(SUGGESTION_LIMIT).toList();
+  }
+
+  /** 代码开头与小写输入对应的那一段（保留原大小写）；转小写改变了长度时取输入本身。 */
+  private static String originalPrefix(String code, String lower) {
+    if (lower.length() <= code.length()
+        && code.substring(0, lower.length()).toLowerCase(Locale.ROOT).equals(lower)) {
+      return code.substring(0, lower.length());
+    }
+    return lower;
+  }
+
+  /** 补全上下文里公司、运营商、线路都已写出且可读时，这条线路的交路代码；否则为空列表。 */
+  private List<String> lineRouteCodes(org.incendo.cloud.context.CommandContext<CommandSender> ctx) {
+    Optional<StorageProvider> providerOpt = providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return List.of();
+    }
+    Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
+    Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
+    Optional<String> lineArgOpt = ctx.optional("line").map(String.class::cast);
+    if (companyArgOpt.isEmpty() || operatorArgOpt.isEmpty() || lineArgOpt.isEmpty()) {
+      return List.of();
+    }
+    String companyArg = companyArgOpt.get().trim();
+    String operatorArg = operatorArgOpt.get().trim();
+    String lineArg = lineArgOpt.get().trim();
+    if (companyArg.isBlank() || operatorArg.isBlank() || lineArg.isBlank()) {
+      return List.of();
+    }
+    StorageProvider provider = providerOpt.get();
+    CompanyQueryService query = new CompanyQueryService(provider);
+    Optional<Company> companyOpt = query.findCompany(companyArg);
+    if (companyOpt.isEmpty()) {
+      return List.of();
+    }
+    Company company = companyOpt.get();
+    if (!canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id())) {
+      return List.of();
+    }
+    Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
+    if (operatorOpt.isEmpty()) {
+      return List.of();
+    }
+    Optional<Line> lineOpt = query.findLine(operatorOpt.get().id(), lineArg);
+    if (lineOpt.isEmpty()) {
+      return List.of();
+    }
+    return provider.routes().listByLine(lineOpt.get().id()).stream()
+        .map(Route::code)
+        .filter(Objects::nonNull)
+        .map(String::trim)
+        .filter(code -> !code.isBlank())
+        .distinct()
+        .sorted(String.CASE_INSENSITIVE_ORDER)
+        .toList();
   }
 
   /**
@@ -2827,15 +2911,33 @@ public final class FtaRouteCommand {
     return new ResolvedLine(company, operator, lineOpt.get());
   }
 
-  /** 交路代码按通配匹配：{@code *} 代表任意个字符，不分大小写；按代码排序。 */
+  /** 交路参数写成了通配（含 {@code *} 或 {@code ?}）。 */
+  static boolean isRoutePattern(String arg) {
+    return arg != null && (arg.indexOf('*') >= 0 || arg.indexOf('?') >= 0);
+  }
+
+  /** 交路代码按通配匹配：{@code *} 代表任意个字符，{@code ?} 代表一个字符，其余按字面，不分大小写；按代码排序。 */
   static List<Route> matchingRoutes(List<Route> routes, String pattern) {
-    String regex =
-        java.util.Arrays.stream(pattern.trim().split("\\*", -1))
-            .map(java.util.regex.Pattern::quote)
-            .collect(java.util.stream.Collectors.joining(".*"));
+    StringBuilder regex = new StringBuilder();
+    StringBuilder literal = new StringBuilder();
+    for (char c : pattern.trim().toCharArray()) {
+      if (c == '*' || c == '?') {
+        if (!literal.isEmpty()) {
+          regex.append(java.util.regex.Pattern.quote(literal.toString()));
+          literal.setLength(0);
+        }
+        regex.append(c == '*' ? ".*" : ".");
+      } else {
+        literal.append(c);
+      }
+    }
+    if (!literal.isEmpty()) {
+      regex.append(java.util.regex.Pattern.quote(literal.toString()));
+    }
     java.util.regex.Pattern compiled =
         java.util.regex.Pattern.compile(
-            regex, java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
+            regex.toString(),
+            java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE);
     return routes.stream()
         .filter(route -> route.code() != null && compiled.matcher(route.code()).matches())
         .sorted(java.util.Comparator.comparing(Route::code, String.CASE_INSENSITIVE_ORDER))

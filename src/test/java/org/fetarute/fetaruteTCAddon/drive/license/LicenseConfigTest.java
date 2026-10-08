@@ -16,21 +16,23 @@ import org.junit.jupiter.api.Test;
 class LicenseConfigTest {
 
   @Test
-  @DisplayName("默认两级：教程考自由驾驶证，路考调度驾驶证且要先有自由驾驶证")
+  @DisplayName("默认两级：教程考见习驾驶证，路考正式驾驶证且要先有见习驾驶证")
   void defaults() {
     LicenseConfig config = LicenseConfig.defaults();
-    LicenseClass free = config.find("free").orElseThrow();
-    LicenseClass dispatch = config.find("DISPATCH").orElseThrow();
-    assertEquals(LicenseClass.Exam.TUTORIAL, free.exam());
-    assertEquals(List.of(DrivePermissions.BASE), free.grants());
-    assertEquals(LicenseClass.Exam.DISPATCH, dispatch.exam());
-    assertEquals(List.of("free"), dispatch.requires());
-    assertEquals(List.of(DrivePermissions.DRIVER), dispatch.grants());
-    assertEquals(1, config.levelOf("free"));
-    assertEquals(2, config.levelOf("dispatch"));
-    assertEquals(0, config.levelOf("nope"));
-    assertEquals(0, free.trainingRuns());
-    assertEquals(1, dispatch.trainingRuns());
+    LicenseClass learner = config.find("learner").orElseThrow();
+    LicenseClass driver = config.find("DRIVER").orElseThrow();
+    assertEquals("见习驾驶证", learner.name());
+    assertEquals("正式驾驶证", driver.name());
+    assertEquals(LicenseClass.Exam.TUTORIAL, learner.exam());
+    assertEquals(List.of(DrivePermissions.BASE), learner.grants());
+    assertEquals(LicenseClass.Exam.ROAD_TEST, driver.exam());
+    assertEquals(List.of("learner"), driver.requires());
+    assertEquals(List.of(DrivePermissions.DRIVER), driver.grants());
+    assertEquals(1, config.levelOf("learner"));
+    assertEquals(2, config.levelOf("driver"));
+    assertEquals(0, config.levelOf("free"), "旧 ID 不再是等级");
+    assertEquals(0, learner.trainingRuns());
+    assertEquals(1, driver.trainingRuns());
     assertEquals(TrainingConfig.defaults(), config.training());
   }
 

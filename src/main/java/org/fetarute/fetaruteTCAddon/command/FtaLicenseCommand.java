@@ -47,23 +47,23 @@ public final class FtaLicenseCommand {
   }
 
   public void register(CommandManager<CommandSender> manager) {
-    SuggestionProvider<CommandSender> classSuggestions =
-        SuggestionProvider.blockingStrings(
-            (ctx, input) ->
-                service()
-                    .map(
-                        licenses ->
-                            licenses.config().classes().stream()
-                                .filter(LicenseClass::enabled)
-                                .map(LicenseClass::id)
-                                .toList())
-                    .orElse(List.of()));
+    // 报名：开放的等级；练习：开放的路考等级（教程级没有练习）；发证、吊销：配置里的全部等级（停用的也能处理）。
+    SuggestionProvider<CommandSender> classSuggestions = classSuggestions(LicenseClass::enabled);
+    SuggestionProvider<CommandSender> practiceClassSuggestions =
+        classSuggestions(
+            license -> license.enabled() && license.exam() == LicenseClass.Exam.ROAD_TEST);
+    SuggestionProvider<CommandSender> adminClassSuggestions = classSuggestions(license -> true);
+    // 发证、吊销、查询接受服务器见过的离线玩家：补全在线玩家，输入的名字正好是见过的离线玩家时也列出它。
     SuggestionProvider<CommandSender> playerSuggestions =
         SuggestionProvider.blockingStrings(
-            (ctx, input) -> Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+            (ctx, input) -> knownPlayerNames(input.lastRemainingToken().trim()));
+    // 车站可写“运营商:站码”区分重名站，冒号不加引号不合法：参数用 quotedString，需要时候选带引号。
     SuggestionProvider<CommandSender> stationSuggestions =
         SuggestionProvider.blockingStrings(
-            (ctx, input) -> TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)));
+            (ctx, input) ->
+                CommandUx.suggestions(
+                    TaskBoardStations.suggestions(TaskBoardSource.stations(plugin)),
+                    input.lastRemainingToken()));
     Permission player = Permission.of(DrivePermissions.LICENSE);
     Permission admin = Permission.of(DrivePermissions.LICENSE_ADMIN);
 
@@ -80,7 +80,7 @@ public final class FtaLicenseCommand {
             .literal("exam")
             .permission(player)
             .required("class", StringParser.stringParser(), classSuggestions)
-            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .optional("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx ->
                     handleExam(
@@ -93,8 +93,8 @@ public final class FtaLicenseCommand {
             .literal("license")
             .literal("practice")
             .permission(player)
-            .required("class", StringParser.stringParser(), classSuggestions)
-            .optional("station", StringParser.stringParser(), stationSuggestions)
+            .required("class", StringParser.stringParser(), practiceClassSuggestions)
+            .optional("station", StringParser.quotedStringParser(), stationSuggestions)
             .handler(
                 ctx ->
                     handlePractice(
@@ -122,7 +122,7 @@ public final class FtaLicenseCommand {
             .literal("grant")
             .permission(admin)
             .required("player", StringParser.stringParser(), playerSuggestions)
-            .required("class", StringParser.stringParser(), classSuggestions)
+            .required("class", StringParser.stringParser(), adminClassSuggestions)
             .handler(
                 ctx ->
                     handleGrant(
@@ -136,7 +136,7 @@ public final class FtaLicenseCommand {
             .literal("revoke")
             .permission(admin)
             .required("player", StringParser.stringParser(), playerSuggestions)
-            .required("class", StringParser.stringParser(), classSuggestions)
+            .required("class", StringParser.stringParser(), adminClassSuggestions)
             .handler(
                 ctx ->
                     handleRevoke(
@@ -153,6 +153,42 @@ public final class FtaLicenseCommand {
             .handler(ctx -> handleList(ctx.sender(), ((String) ctx.get("player")).trim())));
   }
 
+  private SuggestionProvider<CommandSender> classSuggestions(
+      java.util.function.Predicate<LicenseClass> filter) {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) ->
+            service()
+                .map(
+                    licenses ->
+                        licenses.config().classes().stream()
+                            .filter(filter)
+                            .map(LicenseClass::id)
+                            .toList())
+                .orElse(List.of()));
+  }
+
+  /**
+   * 以输入开头的在线玩家名，最多 30 个；输入的名字正好是服务器见过的离线玩家时也列出它。
+   *
+   * <p>不遍历全部离线玩家：{@code getOfflinePlayers()} 每次都要为每个玩家文件建对象，逐键补全时太重。
+   */
+  private static List<String> knownPlayerNames(String typed) {
+    String prefix = typed.toLowerCase(java.util.Locale.ROOT);
+    java.util.LinkedHashSet<String> names = new java.util.LinkedHashSet<>();
+    for (Player online : Bukkit.getOnlinePlayers()) {
+      if (online.getName().toLowerCase(java.util.Locale.ROOT).startsWith(prefix)) {
+        names.add(online.getName());
+      }
+    }
+    if (!typed.isEmpty()) {
+      OfflinePlayer cached = Bukkit.getOfflinePlayerIfCached(typed);
+      if (cached != null && cached.getName() != null) {
+        names.add(cached.getName());
+      }
+    }
+    return names.stream().limit(30).toList();
+  }
+
   /** 我的驾驶证：按级别从低到高列出整条阶梯——已取得、考试或练习中、须先练习、可报名（带按钮）、尚未解锁。 */
   private void handleInfo(CommandSender sender) {
     Player player = requirePlayer(sender);
@@ -166,7 +202,7 @@ public final class FtaLicenseCommand {
       sender.sendMessage(locale.component("drive.license.disabled"));
       return;
     }
-    if (!licenses.loaded(id)) {
+    if (!licenses.ensureLoaded(player)) {
       sender.sendMessage(locale.component("drive.license.loading"));
       return;
     }
@@ -230,7 +266,7 @@ public final class FtaLicenseCommand {
       } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
         key = "drive.license.info.level-need-practice";
       } else {
-        key = "drive.license.info.level-open-dispatch";
+        key = "drive.license.info.level-open-road-test";
       }
       sender.sendMessage(locale.component(key, values));
     }

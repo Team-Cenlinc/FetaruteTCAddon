@@ -121,6 +121,38 @@ class DriverControlRegistryTest {
   }
 
   @Test
+  @DisplayName("只有人工驾驶的驾驶员亲手开关车门：停站中途接管时站台把开着的门交给他；ATO（含扣车等换端）仍由站台开关门")
+  void onlyManualDriversOperateDoors() {
+    TrainProperties properties = properties("T-6");
+    DriverLink link = link("T-6", properties);
+    assertFalse(registry.driverOperatesDoors(properties), "没有登记");
+    registry.bind(properties, link);
+    assertTrue(registry.driverOperatesDoors(properties));
+
+    link.setMode(DrivingMode.ATO);
+    link.setCabHold(true);
+    assertTrue(registry.isDriverControlled(properties));
+    assertFalse(registry.driverOperatesDoors(properties));
+  }
+
+  @Test
+  @DisplayName("ATO 下扣着等驾驶员换端时按驾驶员控制处理：放行只调头、不发车，健康层不介入")
+  void atoCabHoldIsDriverControl() {
+    TrainProperties properties = properties("T-5");
+    DriverLink link = link("T-5", properties);
+    registry.bind(properties, link);
+    link.setMode(DrivingMode.ATO);
+
+    link.setCabHold(true);
+    assertTrue(registry.isDriverControlled(properties));
+    assertTrue(registry.isDriverControlledName("T-5"));
+
+    link.setCabHold(false);
+    assertFalse(registry.isDriverControlled(properties));
+    assertFalse(registry.isDriverControlledName("T-5"));
+  }
+
+  @Test
   @DisplayName("指令交给链路，中断与交还请求转给处理器")
   void routesDirectivesInterruptsAndHandbacks() {
     TrainProperties properties = properties("T-5");

@@ -21,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.parser.standard.StringParser;
+import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
  * {@code /fta graph portal}：传送门连接的查看、按 MyWorlds 自动连接、手动连接与删除。
@@ -31,7 +32,15 @@ public final class FtaGraphPortalCommand {
 
   private static final String PERMISSION = "fetarute.graph.portal";
 
+  /** 传送门节点补全列表的有效期：逐键补全时不每次遍历整张图。 */
+  private static final long PORTAL_IDS_TTL_MILLIS = 5_000L;
+
   private final FetaruteTCAddon plugin;
+
+  /** 最近一次算出的传送门节点 ID 与算出的时刻（见 {@link #portalNodeIds()}）。 */
+  private volatile List<String> portalIds = List.of();
+
+  private volatile long portalIdsAt;
 
   public FtaGraphPortalCommand(FetaruteTCAddon plugin) {
     this.plugin = plugin;
@@ -42,10 +51,22 @@ public final class FtaGraphPortalCommand {
         manager.commandBuilder("fta").literal("graph").literal("portal").permission(PERMISSION);
     manager.command(base.literal("list").handler(ctx -> list(ctx.sender())));
     manager.command(base.literal("scan").handler(ctx -> scan(ctx.sender())));
+    // 节点 ID 带冒号（PORTAL:<世界>:x:y:z），客户端按 Brigadier 规则必须加引号，所以用 quotedString 并补全带引号的候选。
+    SuggestionProvider<CommandSender> portals =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) -> candidates(portalNodeIds(), input.lastRemainingToken()));
+    SuggestionProvider<CommandSender> linked =
+        SuggestionProvider.blockingStrings(
+            (ctx, input) ->
+                candidates(
+                    plugin.getPortalLinks().links().stream()
+                        .map(link -> link.fromNode().value())
+                        .toList(),
+                    input.lastRemainingToken()));
     manager.command(
         base.literal("link")
-            .required("from", StringParser.stringParser())
-            .required("to", StringParser.stringParser())
+            .required("from", StringParser.quotedStringParser(), portals)
+            .required("to", StringParser.quotedStringParser(), portals)
             .handler(
                 ctx ->
                     link(
@@ -54,7 +75,7 @@ public final class FtaGraphPortalCommand {
                         ((String) ctx.get("to")).trim())));
     manager.command(
         base.literal("unlink")
-            .required("from", StringParser.stringParser())
+            .required("from", StringParser.quotedStringParser(), linked)
             .handler(ctx -> unlink(ctx.sender(), ((String) ctx.get("from")).trim())));
   }
 
@@ -235,6 +256,39 @@ public final class FtaGraphPortalCommand {
   }
 
   private record Located(UUID world, RailNode node) {}
+
+  /** 各世界路网里的传送门节点 ID，按字母序；结果缓存几秒，逐键补全时不每次遍历全部节点。 */
+  private List<String> portalNodeIds() {
+    long now = System.currentTimeMillis();
+    if (now - portalIdsAt < PORTAL_IDS_TTL_MILLIS) {
+      return portalIds;
+    }
+    RailGraphService graphs = plugin.getRailGraphService();
+    if (graphs == null) {
+      return List.of();
+    }
+    java.util.TreeSet<String> ids = new java.util.TreeSet<>();
+    for (RailGraphService.RailGraphSnapshot snapshot : graphs.snapshotAll().values()) {
+      for (RailNode node : snapshot.graph().nodes()) {
+        if (node.type() == NodeType.PORTAL) {
+          ids.add(node.id().value());
+        }
+      }
+    }
+    portalIds = List.copyOf(ids);
+    portalIdsAt = now;
+    return portalIds;
+  }
+
+  /** 以输入开头（不分大小写、不计开头的引号）的节点 ID，加双引号。 */
+  private static List<String> candidates(List<String> ids, String token) {
+    String prefix = CommandUx.suggestionPrefix(token);
+    return ids.stream()
+        .filter(id -> id.toLowerCase(java.util.Locale.ROOT).startsWith(prefix))
+        .limit(40)
+        .map(CommandUx::quoteCommandArgument)
+        .toList();
+  }
 
   private Optional<Located> findPortal(String id) {
     RailGraphService graphs = plugin.getRailGraphService();

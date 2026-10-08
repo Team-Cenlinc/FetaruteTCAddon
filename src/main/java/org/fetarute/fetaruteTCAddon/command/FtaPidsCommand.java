@@ -19,11 +19,13 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsComposer;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsNearby;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsPlatformNode;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsPlatformSelection;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsScreenPages;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStickMenu;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
 import org.incendo.cloud.context.CommandContext;
@@ -39,8 +41,9 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *   <li>{@code give <布局>} 领取安装纸，{@code stick} 领取配置棍（需管理权限或公司成员身份）
  *   <li>{@code list [页]}（需 {@value PidsAccess#MANAGE_PERMISSION}）、{@code info <屏幕>}、{@code menu
  *       <屏幕>}
- *   <li>{@code set <屏幕> station|platform|line|layout|appearance|mode
- *       ...}：配置棍菜单点击执行的就是这些命令，执行后重新发送菜单
+ *   <li>{@code set <屏幕> station|platform|line|layout|page|appearance|mode
+ *       ...}：配置棍菜单点击执行的就是这些命令，执行后重新发送菜单；{@code layout} 换主布局，{@code page} 增删组合翻页的布局（见 {@link
+ *       PidsScreenPages}）
  *   <li>{@code remove <屏幕> [confirm]}：拆除；展示框还原为空，玩家拿回同布局的安装纸
  * </ul>
  *
@@ -122,18 +125,23 @@ public final class FtaPidsCommand {
             .literal("set")
             .required("screen", StringParser.stringParser(), screens)
             .literal("station")
-            .required(
-                "operator",
-                StringParser.stringParser(),
-                CommandSuggestionProviders.placeholder("<operator>"))
-            .required(
-                "station",
-                StringParser.stringParser(),
-                CommandSuggestionProviders.placeholder("<station>"))
+            .required("operator", StringParser.stringParser(), stationOperatorSuggestions())
+            .required("station", StringParser.stringParser(), stationSuggestions())
             .handler(this::setStation));
+    // 线路运行状况屏可以不绑车站、只绑运营商。
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("pids")
+            .literal("set")
+            .required("screen", StringParser.stringParser(), screens)
+            .literal("operator")
+            .required("operator", StringParser.stringParser(), operatorSuggestions())
+            .handler(this::setOperator));
     registerSet(manager, screens, "platform", platformSuggestions(), this::togglePlatform);
     registerSet(manager, screens, "line", lineSuggestions(), this::toggleLine);
-    registerSet(manager, screens, "layout", layouts, this::changeLayout);
+    registerSet(manager, screens, "layout", screenLayoutSuggestions(), this::changeLayout);
+    registerSet(manager, screens, "page", pageSuggestions(), this::togglePage);
     registerSet(
         manager,
         screens,
@@ -279,17 +287,30 @@ public final class FtaPidsCommand {
                       "id",
                       PidsComposer.shortId(screen.id()),
                       "layout",
-                      service
-                          .get()
-                          .layoutOf(screen)
-                          .map(PidsLayout::name)
-                          .orElse(screen.layoutId()),
+                      service.get().layoutNames(screen),
                       "size",
                       screen.tileRows() + "×" + screen.tileCols(),
                       "station",
                       screen
                           .station()
                           .map(PidsStationKey::toString)
+                          .or(
+                              () ->
+                                  screen
+                                      .operatorCode()
+                                      .map(
+                                          operator ->
+                                              locale
+                                                  .text("command.pids.list.operator-only")
+                                                  .replace(
+                                                      "<operator>",
+                                                      service
+                                                          .get()
+                                                          .directory()
+                                                          .operatorName(operator)
+                                                          .map(PidsView.Names::primary)
+                                                          .orElse(operator))
+                                                  .replace("<code>", operator)))
                           .orElseGet(() -> locale.text("command.pids.list.unbound")),
                       "mode",
                       locale.text(
@@ -355,6 +376,44 @@ public final class FtaPidsCommand {
         });
   }
 
+  /** 线路运行状况屏只绑运营商：清掉车站与站台，线路过滤恢复为全部。 */
+  private void setOperator(CommandContext<CommandSender> ctx) {
+    withScreen(
+        ctx,
+        (service, screen) -> {
+          CommandSender sender = ctx.sender();
+          String operator = ((String) ctx.get("operator")).trim().toUpperCase(Locale.ROOT);
+          if (!service.isLineStatus(screen)) {
+            sender.sendMessage(locale().component("command.pids.set.operator-line-status-only"));
+            return;
+          }
+          if (operator.isEmpty() || service.directory().operatorName(operator).isEmpty()) {
+            sender.sendMessage(
+                locale()
+                    .component("command.pids.set.unknown-operator", Map.of("operator", operator)));
+            return;
+          }
+          if (!service.canManageOperator(sender, operator)) {
+            sender.sendMessage(locale().component("pids.menu.no-permission"));
+            return;
+          }
+          save(sender, service, screen.withOperator(operator, Set.of(), service.now()));
+        });
+  }
+
+  /** 运营商代码补全：玩家能管理的公司的运营商。 */
+  private SuggestionProvider<CommandSender> operatorSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          Optional<PidsService> service = plugin.getPidsService();
+          if (service.isEmpty()) {
+            return List.of("<operator>");
+          }
+          List<String> codes = service.get().manageableOperatorsForSuggestions(ctx.sender());
+          return codes.isEmpty() ? List.of("<operator>") : codes;
+        });
+  }
+
   /** 按布局规则换选或增删站台（见 {@link PidsPlatformSelection}）。 */
   private Optional<PidsScreen> togglePlatform(
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
@@ -400,12 +459,7 @@ public final class FtaPidsCommand {
   private Optional<PidsScreen> changeLayout(
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
     Optional<PidsLayout> layout =
-        service
-            .layouts()
-            .find(value)
-            .filter(
-                found ->
-                    found.tileRows() == screen.tileRows() && found.tileCols() == screen.tileCols());
+        service.layouts().find(value).filter(found -> PidsScreenPages.fits(screen, found));
     if (layout.isEmpty()) {
       sender.sendMessage(
           locale()
@@ -414,7 +468,39 @@ public final class FtaPidsCommand {
                   Map.of("layout", value, "size", screen.tileRows() + "×" + screen.tileCols())));
       return Optional.empty();
     }
-    return Optional.of(screen.withLayout(layout.get().id(), service.now()));
+    return Optional.of(
+        screen.withLayouts(
+            PidsScreenPages.withPrimary(screen, layout.get(), service.layouts()), service.now()));
+  }
+
+  /** 增删组合翻页的布局（见 {@link PidsScreenPages#togglePage}）。 */
+  private Optional<PidsScreen> togglePage(
+      CommandSender sender, PidsService service, PidsScreen screen, String value) {
+    PidsScreenPages.Edit edit = PidsScreenPages.togglePage(screen, value, service.layouts());
+    String key =
+        switch (edit.outcome()) {
+          case OK -> null;
+          case UNKNOWN_LAYOUT -> "command.pids.set.unknown-layout";
+          case PRIMARY -> "command.pids.set.page-is-primary";
+          case PRIMARY_NOT_COMBINABLE -> "command.pids.set.page-primary-not-combinable";
+          case NOT_COMBINABLE -> "command.pids.set.page-not-combinable";
+          case NEED_STATION -> "command.pids.set.page-need-station";
+        };
+    if (key != null) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  key,
+                  Map.of(
+                      "layout",
+                      value,
+                      "primary",
+                      service.layoutOf(screen).map(PidsLayout::id).orElse(screen.layoutId()),
+                      "size",
+                      screen.tileRows() + "×" + screen.tileCols())));
+      return Optional.empty();
+    }
+    return Optional.of(screen.withLayouts(edit.layoutIds(), service.now()));
   }
 
   private Optional<PidsScreen> changeAppearance(
@@ -436,8 +522,14 @@ public final class FtaPidsCommand {
           locale().component("command.pids.set.invalid-value", Map.of("value", value)));
       return Optional.empty();
     }
-    if (mode == PidsScreen.Mode.LIVE && screen.station().isEmpty()) {
-      sender.sendMessage(locale().component("command.pids.set.need-station"));
+    // 线路运行状况屏绑车站或运营商都行，其余屏要绑车站。
+    boolean lineStatus = service.isLineStatus(screen);
+    if (mode == PidsScreen.Mode.LIVE
+        && (lineStatus ? screen.operatorCode().isEmpty() : screen.station().isEmpty())) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  lineStatus ? "command.pids.set.need-binding" : "command.pids.set.need-station"));
       return Optional.empty();
     }
     if (mode == PidsScreen.Mode.LIVE
@@ -501,7 +593,7 @@ public final class FtaPidsCommand {
       return;
     }
     PidsScreen screen = matches.get(0);
-    if (!service.get().canManage(sender, screen.station())) {
+    if (!service.get().canManage(sender, screen)) {
       sender.sendMessage(locale().component("pids.menu.no-permission"));
       return;
     }
@@ -547,11 +639,21 @@ public final class FtaPidsCommand {
           if (prefix.isEmpty()) {
             suggestions.add("<screen>");
           }
-          if (!ctx.sender().hasPermission(PidsAccess.MANAGE_PERMISSION)) {
-            return suggestions;
-          }
+          boolean admin = ctx.sender().hasPermission(PidsAccess.MANAGE_PERMISSION);
           plugin.getPidsService().stream()
-              .flatMap(service -> service.screens().stream())
+              .flatMap(
+                  service -> {
+                    if (admin) {
+                      return service.screens().stream();
+                    }
+                    // 公司成员只补全本公司（车站或运营商所属）的屏幕；都没绑的只有管理员能管
+                    Set<String> manageable =
+                        Set.copyOf(service.manageableOperatorsForSuggestions(ctx.sender()));
+                    return service.screens().stream()
+                        .filter(
+                            screen ->
+                                screen.operatorCode().filter(manageable::contains).isPresent());
+                  })
               .map(screen -> PidsComposer.shortId(screen.id()))
               .filter(id -> id.startsWith(prefix))
               .limit(SUGGESTION_LIMIT)
@@ -576,6 +678,118 @@ public final class FtaPidsCommand {
               .forEach(suggestions::add);
           return suggestions;
         });
+  }
+
+  /** 换主布局：与屏幕同尺寸的布局；还没输入屏幕时列全部。 */
+  private SuggestionProvider<CommandSender> screenLayoutSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<layout>");
+          }
+          Optional<ScreenRef> ref = screenOf(ctx);
+          plugin.getPidsService().stream()
+              .flatMap(service -> service.layouts().all().stream())
+              .filter(
+                  layout ->
+                      ref.map(found -> PidsScreenPages.fits(found.screen(), layout)).orElse(true))
+              .map(PidsLayout::id)
+              .filter(id -> id.startsWith(prefix))
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /** 组合翻页：可与主布局组合的同尺寸布局。 */
+  private SuggestionProvider<CommandSender> pageSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<layout>");
+          }
+          screenOf(ctx).stream()
+              .flatMap(
+                  ref -> {
+                    List<String> ids = new ArrayList<>(ref.screen().pageLayoutIds());
+                    PidsScreenPages.candidates(ref.screen(), ref.service().layouts()).stream()
+                        .map(PidsLayout::id)
+                        .filter(id -> !ids.contains(id))
+                        .forEach(ids::add);
+                    return ids.stream();
+                  })
+              .filter(id -> id.startsWith(prefix))
+              .limit(SUGGESTION_LIMIT)
+              .forEach(suggestions::add);
+          return suggestions;
+        });
+  }
+
+  /** 绑定车站的运营商：屏幕所在世界调度图里的车站所属的、本人能管理的运营商，离屏幕近的优先。 */
+  private SuggestionProvider<CommandSender> stationOperatorSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<operator>");
+          }
+          screenOf(ctx)
+              .ifPresent(
+                  ref -> {
+                    Set<String> manageable =
+                        Set.copyOf(ref.service().manageableOperatorsForSuggestions(ctx.sender()));
+                    stationsNear(ref).stream()
+                        .map(PidsStationKey::operatorCode)
+                        .distinct()
+                        .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+                        .filter(manageable::contains)
+                        .limit(SUGGESTION_LIMIT)
+                        .forEach(suggestions::add);
+                  });
+          return suggestions;
+        });
+  }
+
+  /** 绑定车站的站码：屏幕所在世界调度图里这个运营商的车站，离屏幕近的优先；运营商须是本人能管理的。 */
+  private SuggestionProvider<CommandSender> stationSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = prefix(input);
+          List<String> suggestions = new ArrayList<>();
+          if (prefix.isEmpty()) {
+            suggestions.add("<station>");
+          }
+          Optional<String> operator = ctx.<String>optional("operator").map(String::trim);
+          if (operator.isEmpty()) {
+            return suggestions;
+          }
+          screenOf(ctx)
+              .filter(
+                  ref ->
+                      ref.service()
+                          .manageableOperatorsForSuggestions(ctx.sender())
+                          .contains(operator.get().toUpperCase(Locale.ROOT)))
+              .ifPresent(
+                  ref ->
+                      stationsNear(ref).stream()
+                          .filter(
+                              station -> station.operatorCode().equalsIgnoreCase(operator.get()))
+                          .map(PidsStationKey::stationCode)
+                          .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+                          .limit(SUGGESTION_LIMIT)
+                          .forEach(suggestions::add));
+          return suggestions;
+        });
+  }
+
+  /** 屏幕所在世界调度图里的车站，离屏幕由近到远。 */
+  private static List<PidsStationKey> stationsNear(ScreenRef ref) {
+    return ref.service().stationsByDistance(ref.screen().worldId(), ref.screen().center());
   }
 
   private SuggestionProvider<CommandSender> platformSuggestions() {

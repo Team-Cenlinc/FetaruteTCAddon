@@ -153,4 +153,65 @@ public final class LocaleManagerTest {
       collectClicks(child, out);
     }
   }
+
+  /** 改名的键先搬、再补全、再按旧文案清单换新：改过的旧键文案留在新键上，仍是旧内置文案的换成新文案。 */
+  @Test
+  void renamedKeysAreMovedBeforeFillingAndUpgrading(@TempDir Path tempDir) throws Exception {
+    Path langDir = tempDir.resolve("lang");
+    Files.createDirectories(langDir);
+    Files.writeString(
+        langDir.resolve("zh_CN.yml"),
+        String.join(
+            "\n",
+            "prefix: \"\"",
+            "drive:",
+            "  command:",
+            "    breaker:",
+            "      status: \"自定义状态 <status>\"",
+            "    help:",
+            "      entry-breaker: \"  <gray>•</gray> <white>/fta drive breaker [status|reset]</white>"
+                + " <gray>- 查看或解除拥堵熔断</gray>\"",
+            ""),
+        StandardCharsets.UTF_8);
+    LoggerManager logger = new LoggerManager(Logger.getLogger("LocaleManagerTest"));
+    LocaleManager locale =
+        new LocaleManager(
+            new LocaleManager.LocaleAccess(tempDir.toFile(), logger, (path, replace) -> {}),
+            "zh_CN",
+            logger);
+    locale.reload();
+
+    YamlConfiguration saved =
+        YamlConfiguration.loadConfiguration(langDir.resolve("zh_CN.yml").toFile());
+    assertEquals("自定义状态 <status>", saved.getString("drive.command.congestion.status"), "改过的文案随键搬走");
+    assertEquals(
+        bundled("lang/zh_CN.yml").getString("drive.command.help.entry-congestion"),
+        saved.getString("drive.command.help.entry-congestion"),
+        "搬过去仍是旧内置文案的换成新文案");
+    assertFalse(saved.contains("drive.command.breaker"));
+    assertFalse(saved.contains("drive.command.help.entry-breaker"));
+  }
+
+  /** 没有内置模板的自定义语言也搬改名的键，不然这些行会变成缺少语言键。 */
+  @Test
+  void renamedKeysAreMovedInCustomLocales(@TempDir Path tempDir) throws Exception {
+    Path langDir = tempDir.resolve("lang");
+    Files.createDirectories(langDir);
+    Files.writeString(
+        langDir.resolve("xx_XX.yml"),
+        "prefix: \"\"\ndrive:\n  task:\n    claim:\n      breaker-open: \"线路拥堵（自定义语言）\"\n",
+        StandardCharsets.UTF_8);
+    LoggerManager logger = new LoggerManager(Logger.getLogger("LocaleManagerTest"));
+    LocaleManager locale =
+        new LocaleManager(
+            new LocaleManager.LocaleAccess(tempDir.toFile(), logger, (path, replace) -> {}),
+            "xx_XX",
+            logger);
+    locale.reload();
+
+    assertEquals("线路拥堵（自定义语言）", locale.text("drive.task.claim.protection-active"));
+    YamlConfiguration saved =
+        YamlConfiguration.loadConfiguration(langDir.resolve("xx_XX.yml").toFile());
+    assertFalse(saved.contains("drive.task.claim.breaker-open"));
+  }
 }

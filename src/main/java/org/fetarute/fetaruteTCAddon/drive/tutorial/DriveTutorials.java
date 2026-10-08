@@ -38,6 +38,14 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  */
 public final class DriveTutorials {
 
+  /** 这一次教程不能再算完整做完的原因。 */
+  public enum Forfeit {
+    /** 跳过了练习步骤（说明类步骤点「继续」不算）。 */
+    SKIPPED_PRACTICE,
+    /** 退出了教程。 */
+    EXITED
+  }
+
   /** 每隔多少 tick 推进一次教程与情境提示。 */
   public static final int TICK_INTERVAL = 5;
 
@@ -72,6 +80,9 @@ public final class DriveTutorials {
   /** 教程做完时的通知：玩家与是否完整做完（没有跳过练习步骤）。驾驶证的教程考试据此判定。 */
   private BiConsumer<Player, Boolean> finishListener = (player, complete) -> {};
 
+  /** 这一次教程不能再算完整做完时的通知（每次教程至多一次）：教程考试据此马上告诉考生可以从头重做。 */
+  private BiConsumer<Player, Forfeit> forfeitListener = (player, reason) -> {};
+
   /**
    * @param sounds 驾驶提示音（教程的音效也按 drive.yml 的 sounds 段配置与开关）
    */
@@ -84,13 +95,18 @@ public final class DriveTutorials {
       tipKeys.put(
           tip,
           new NamespacedKey(
-              plugin, "drive_tip_" + tip.key().replace('-', '_').toLowerCase(Locale.ROOT)));
+              plugin, "drive_tip_" + tip.storageKey().replace('-', '_').toLowerCase(Locale.ROOT)));
     }
   }
 
   /** 设置教程做完时的通知；传入 {@code null} 恢复空通知。 */
   public void onFinished(BiConsumer<Player, Boolean> listener) {
     this.finishListener = listener == null ? (player, complete) -> {} : listener;
+  }
+
+  /** 设置这一次教程不能再算完整做完时的通知；传入 {@code null} 恢复空通知。 */
+  public void onForfeit(BiConsumer<Player, Forfeit> listener) {
+    this.forfeitListener = listener == null ? (player, reason) -> {} : listener;
   }
 
   // ---- 驾驶会话管理器喂数据 ----
@@ -217,6 +233,19 @@ public final class DriveTutorials {
   }
 
   /**
+   * 从第一步重新开始：放弃正在进行的这一次（不算做完），驾驶中立即开始，否则下一次开始驾驶时开始。
+   *
+   * @param session 玩家当前的驾驶会话；不在驾驶时为 {@code null}
+   * @return 给玩家的提示语言键；已直接给出第一步时为 {@code null}
+   */
+  public String restart(Player player, DriveSession session, long nowTick) {
+    UUID id = player.getUniqueId();
+    running.remove(id);
+    skippedPractice.remove(id);
+    return start(player, session, nowTick);
+  }
+
+  /**
    * 退出教程（或不做教程）：记为已完成，此后不再自动提示，可随时重新开始。
    *
    * @return 给玩家的提示语言键
@@ -224,10 +253,13 @@ public final class DriveTutorials {
   public String stop(Player player) {
     UUID id = player.getUniqueId();
     boolean wasRunning = running.remove(id) != null;
-    armed.remove(id);
-    startPending.remove(id);
+    // 报了教程考试、还没上车时教程只是“下次开车时开始”：取消它同样要告诉考试一方，否则考试悄悄挂到超时。
+    boolean wasPending = armed.remove(id) | startPending.remove(id);
     offerPending.remove(id);
     markCompleted(player);
+    if ((wasRunning || wasPending) && !skippedPractice.remove(id)) {
+      guard("作废通知", () -> forfeitListener.accept(player, Forfeit.EXITED));
+    }
     return wasRunning ? "drive.tutorial.command.stopped" : "drive.tutorial.command.dismissed";
   }
 
@@ -283,8 +315,8 @@ public final class DriveTutorials {
       } else if (event instanceof TutorialEvent.StepCompleted completed) {
         if (!completed.skipped()) {
           sounds.play(player, DriveCue.TUTORIAL_STEP);
-        } else if (!completed.step().info()) {
-          skippedPractice.add(player.getUniqueId());
+        } else if (!completed.step().info() && skippedPractice.add(player.getUniqueId())) {
+          guard("作废通知", () -> forfeitListener.accept(player, Forfeit.SKIPPED_PRACTICE));
         }
       } else if (event instanceof TutorialEvent.Reminder reminder) {
         subtitle(

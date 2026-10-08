@@ -11,7 +11,7 @@ import java.util.Set;
 /**
  * 停车位置标牌子：{@code [train]} / {@code stopmark} / {@code car:4} / {@code door:1}。
  *
- * <p>列车车头停在这块牌子的轨道上。第三、第四行各写一项：
+ * <p>列车车头最前端（第一节车厢的车体前端）停在这块牌子的轨道中心。第三、第四行各写一项：
  *
  * <ul>
  *   <li>{@code car:}（也可写 {@code carriage:}，必填）：适用的节数（TrainCarts 车厢数）。单个 {@code 4}、多个 {@code 4,6}、范围

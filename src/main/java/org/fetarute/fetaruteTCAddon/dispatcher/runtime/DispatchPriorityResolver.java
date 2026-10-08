@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
+import java.util.function.LongSupplier;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
@@ -29,6 +30,9 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
  * <p>该组件是 periodic runtime dispatch 与 event-driven signal re-evaluation 的共享入口。它只负责把人工 {@code
  * FTA_PRIORITY}、route 身份、route operation type 与 {@link DispatchPriorityPolicy} 组合为最终数值；不改变
  * Occupancy Queue 排序、不绕过 hard blockers，也不授予额外 movement authority。
+ *
+ * <p>交路、线路与运营商先从 {@link RouteDefinitionCache} 取，缓存里没有才查库。查库在周期信号巡检的路径上： 查不到的结果在 {@link
+ * #LOOKUP_MISS_RETRY_NANOS} 内不再重查，查库出错按查不到处理（默认优先级）——优先级只影响排队先后， 一次读库失败不能升级成全网停车恢复。
  */
 public final class DispatchPriorityResolver {
 
@@ -37,7 +41,15 @@ public final class DispatchPriorityResolver {
   private static final String TAG_LINE_LEGACY = "FTA_LINE";
   private static final String TAG_ROUTE_LEGACY = "FTA_ROUTE";
 
+  /** 查库未命中（含出错）后多久内不再为同一个键查库。 */
+  static final long LOOKUP_MISS_RETRY_NANOS = java.util.concurrent.TimeUnit.SECONDS.toNanos(30);
+
+  /** 未命中记录的上限：键来自列车标签里的交路身份，正常远小于此；超出时整体清掉重来。 */
+  private static final int MAX_LOOKUP_MISSES = 4096;
+
   private final StorageManager storageManager;
+  private final RouteDefinitionCache routeDefinitions;
+  private final LongSupplier nanoClock;
   private final Function<String, Optional<RouteProgressRegistry.RouteProgressEntry>> progressLookup;
   private final Consumer<String> debugLogger;
   private final ConcurrentMap<String, Integer> operatorPriorityCache = new ConcurrentHashMap<>();
@@ -54,12 +66,30 @@ public final class DispatchPriorityResolver {
   private final ConcurrentMap<UUID, RouteLookup> routeLookupByUuid = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, RouteLookup> routeLookupByCode = new ConcurrentHashMap<>();
 
+  /** 由交路缓存条目算出的归属：条目没被刷新（同一个实例）就直接复用，巡检每拍不必重新拼。 */
+  private final ConcurrentMap<UUID, CachedRouteLookup> routeLookupFromCache =
+      new ConcurrentHashMap<>();
+
+  /** 查库未命中的键 → 可以再查的时刻（{@link #nanoClock}）。 */
+  private final ConcurrentMap<String, Long> lookupMissRetryAt = new ConcurrentHashMap<>();
+
   public DispatchPriorityResolver(
       StorageManager storageManager,
       RouteDefinitionCache routeDefinitions,
       RouteProgressRegistry progressRegistry,
       Consumer<String> debugLogger) {
+    this(storageManager, routeDefinitions, progressRegistry, debugLogger, System::nanoTime);
+  }
+
+  DispatchPriorityResolver(
+      StorageManager storageManager,
+      RouteDefinitionCache routeDefinitions,
+      RouteProgressRegistry progressRegistry,
+      Consumer<String> debugLogger,
+      LongSupplier nanoClock) {
     this.storageManager = storageManager;
+    this.routeDefinitions = routeDefinitions;
+    this.nanoClock = nanoClock != null ? nanoClock : System::nanoTime;
     this.progressLookup =
         progressRegistry == null ? trainName -> Optional.empty() : progressRegistry::get;
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
@@ -216,20 +246,22 @@ public final class DispatchPriorityResolver {
     if (routeUuid == null) {
       return Optional.empty();
     }
+    Optional<RouteLookup> fromCache = lookupFromRouteCache(routeUuid);
+    if (fromCache.isPresent()) {
+      return fromCache;
+    }
     RouteLookup cached = routeLookupByUuid.get(routeUuid);
     if (cached != null) {
       return Optional.of(cached);
     }
-    Optional<StorageProvider> providerOpt = readyProvider();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    StorageProvider provider = providerOpt.get();
     Optional<RouteLookup> loaded =
-        provider
-            .routes()
-            .findById(routeUuid)
-            .flatMap(route -> lookupRouteWithLineAndOperator(provider, route));
+        loadFromStorage(
+            "uuid:" + routeUuid,
+            provider ->
+                provider
+                    .routes()
+                    .findById(routeUuid)
+                    .flatMap(route -> lookupRouteWithLineAndOperator(provider, route)));
     loaded.ifPresent(lookup -> routeLookupByUuid.putIfAbsent(routeUuid, lookup));
     return loaded;
   }
@@ -238,22 +270,91 @@ public final class DispatchPriorityResolver {
     if (routeCode == null) {
       return Optional.empty();
     }
+    if (routeDefinitions != null) {
+      Optional<RouteLookup> fromCache =
+          routeDefinitions
+              .findByCodes(routeCode.operator(), routeCode.line(), routeCode.route())
+              .flatMap(definition -> routeDefinitions.findUuid(definition.id()))
+              .flatMap(this::lookupFromRouteCache);
+      if (fromCache.isPresent()) {
+        return fromCache;
+      }
+    }
     String key = routeCode.cacheKey();
     RouteLookup cached = routeLookupByCode.get(key);
     if (cached != null) {
       return Optional.of(cached);
     }
-    Optional<StorageProvider> providerOpt = readyProvider();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    StorageProvider provider = providerOpt.get();
-    Optional<RouteLookup> loaded = findRouteByCode(provider, routeCode);
+    Optional<RouteLookup> loaded =
+        loadFromStorage("code:" + key, provider -> findRouteByCode(provider, routeCode));
     loaded.ifPresent(
         lookup -> {
           routeLookupByCode.putIfAbsent(key, lookup);
           routeLookupByUuid.putIfAbsent(lookup.routeUuid(), lookup);
         });
+    return loaded;
+  }
+
+  /** 从交路缓存取归属：交路刷新后跟着变，不像查库结果那样一直沿用第一次读到的。 */
+  private Optional<RouteLookup> lookupFromRouteCache(UUID routeUuid) {
+    if (routeDefinitions == null) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinitionCache.RouteRecord> record = routeDefinitions.findRecord(routeUuid);
+    if (record.isEmpty()) {
+      routeLookupFromCache.remove(routeUuid);
+      return Optional.empty();
+    }
+    CachedRouteLookup cached = routeLookupFromCache.get(routeUuid);
+    if (cached != null && cached.source() == record.get()) {
+      return Optional.of(cached.lookup());
+    }
+    Optional<RouteLookup> lookup =
+        lookupRoute(record.get().operator(), record.get().line(), record.get().route());
+    lookup.ifPresent(
+        value -> routeLookupFromCache.put(routeUuid, new CachedRouteLookup(record.get(), value)));
+    return lookup;
+  }
+
+  /**
+   * 缓存里没有时才查库。未命中与出错都记下来，{@link #LOOKUP_MISS_RETRY_NANOS} 内同一个键不再查。
+   *
+   * @param missKey 未命中记录的键
+   * @param loader 查库；返回空表示库里没有
+   */
+  private <T> Optional<T> loadFromStorage(
+      String missKey, Function<StorageProvider, Optional<T>> loader) {
+    long now = nanoClock.getAsLong();
+    Long retryAt = lookupMissRetryAt.get(missKey);
+    if (retryAt != null && now - retryAt < 0) {
+      return Optional.empty();
+    }
+    Optional<StorageProvider> providerOpt = readyProvider();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<T> loaded;
+    try {
+      loaded = loader.apply(providerOpt.get());
+    } catch (RuntimeException ex) {
+      debugLogger.accept(
+          "SMART_PRIORITY_LOOKUP_FAILED key="
+              + missKey
+              + " error="
+              + ex.getClass().getSimpleName()
+              + ":"
+              + ex.getMessage()
+              + " fallback=default-priority");
+      loaded = Optional.empty();
+    }
+    if (loaded == null || loaded.isEmpty()) {
+      if (lookupMissRetryAt.size() >= MAX_LOOKUP_MISSES) {
+        lookupMissRetryAt.clear();
+      }
+      lookupMissRetryAt.put(missKey, now + LOOKUP_MISS_RETRY_NANOS);
+      return Optional.empty();
+    }
+    lookupMissRetryAt.remove(missKey);
     return loaded;
   }
 
@@ -317,28 +418,38 @@ public final class DispatchPriorityResolver {
     if (operator == null) {
       return Optional.empty();
     }
-    Integer cached = operatorPriorityCache.get(operator.toLowerCase(Locale.ROOT));
+    String key = operator.toLowerCase(Locale.ROOT);
+    Integer cached = operatorPriorityCache.get(key);
     if (cached != null) {
       return Optional.of(cached);
     }
-    Optional<StorageProvider> providerOpt = readyProvider();
-    if (providerOpt.isEmpty()) {
-      return Optional.empty();
-    }
-    StorageProvider provider = providerOpt.get();
-    for (Company company : provider.companies().listAll()) {
-      if (company == null) {
-        continue;
-      }
-      Optional<Operator> operatorOpt =
-          provider.operators().findByCompanyAndCode(company.id(), operator);
-      if (operatorOpt.isPresent()) {
-        int priority = operatorOpt.get().priority();
-        operatorPriorityCache.putIfAbsent(operator.toLowerCase(Locale.ROOT), priority);
-        return Optional.of(priority);
+    if (routeDefinitions != null) {
+      for (RouteDefinitionCache.RouteEntry entry : routeDefinitions.entries()) {
+        Operator cachedOperator = entry.record().operator();
+        if (cachedOperator.code() != null && cachedOperator.code().equalsIgnoreCase(operator)) {
+          operatorPriorityCache.putIfAbsent(key, cachedOperator.priority());
+          return Optional.of(cachedOperator.priority());
+        }
       }
     }
-    return Optional.empty();
+    Optional<Integer> loaded =
+        loadFromStorage(
+            "operator:" + key,
+            provider -> {
+              for (Company company : provider.companies().listAll()) {
+                if (company == null) {
+                  continue;
+                }
+                Optional<Operator> operatorOpt =
+                    provider.operators().findByCompanyAndCode(company.id(), operator);
+                if (operatorOpt.isPresent()) {
+                  return Optional.of(operatorOpt.get().priority());
+                }
+              }
+              return Optional.empty();
+            });
+    loaded.ifPresent(priority -> operatorPriorityCache.putIfAbsent(key, priority));
+    return loaded;
   }
 
   private Optional<StorageProvider> readyProvider() {
@@ -544,6 +655,9 @@ public final class DispatchPriorityResolver {
       return trimmed.isEmpty() ? Optional.empty() : Optional.of(trimmed);
     }
   }
+
+  /** 交路缓存条目与由它算出的归属。 */
+  private record CachedRouteLookup(RouteDefinitionCache.RouteRecord source, RouteLookup lookup) {}
 
   private record RouteLookup(
       UUID routeUuid,

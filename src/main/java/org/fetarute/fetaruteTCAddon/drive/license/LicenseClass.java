@@ -13,7 +13,7 @@ import java.util.Objects;
  * @param enabled 是否开放考试与发证
  * @param requires 考这一级前要先持有的等级
  * @param exam 考试方式
- * @param examStops 路考区间要开过几个停车站（{@link Exam#DISPATCH}）
+ * @param examStops 路考区间要开过几个停车站（{@link Exam#ROAD_TEST}）
  * @param minPoints 路考及格分（0–100）
  * @param allowEmergency 路考中触发紧急制动是否仍可及格
  * @param allowOverrun 路考中停过头、越站是否仍可及格
@@ -41,16 +41,16 @@ public record LicenseClass(
     /** 在非调度列车上完整做完新手教程（不跳过练习步骤）。 */
     TUTORIAL,
     /** 路考：驾驶一段调度列车的区间任务，按成绩判定。 */
-    DISPATCH;
+    ROAD_TEST;
 
-    /** 按配置写法解析；认不出时为空。 */
+    /** 按配置写法解析（旧写法 {@code dispatch} 照认）；认不出时为空。 */
     public static Exam parse(String raw) {
       if (raw == null) {
         return null;
       }
       return switch (raw.trim().toLowerCase(Locale.ROOT)) {
         case "tutorial" -> TUTORIAL;
-        case "dispatch" -> DISPATCH;
+        case "road-test", "dispatch" -> ROAD_TEST;
         default -> null;
       };
     }

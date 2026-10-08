@@ -73,6 +73,13 @@ public final class SimpleOccupancyManager
   private final Map<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature>
       switcherQueueSignatures = new LinkedHashMap<>();
   private final AtomicLong version = new AtomicLong();
+
+  /** 净变化统计（见 {@link #netChangeVersion()}）：窗口嵌套层数、开窗时的语义指纹、已计入的原始版本、净变化版本。 */
+  private int netChangeWindowDepth;
+
+  private long netChangeWindowStart;
+  private long netChangeAbsorbedVersion;
+  private long netChangeVersion;
   private final AtomicLong lifecycleSequence = new AtomicLong();
   private final AtomicLong staleQueueCleanupCount = new AtomicLong();
   private final Map<String, SelfOwnedStaleRetainCandidate> selfOwnedStaleRetainCandidates =
@@ -262,6 +269,123 @@ public final class SimpleOccupancyManager
   /** 返回占用/队列快照版本。claim 或 queue 发生真实变更时递增。 */
   public long version() {
     return version.get();
+  }
+
+  /**
+   * 开始一个净变化统计窗口；可嵌套，只在最外层结束时判定。
+   *
+   * <p>窗口内的改动照常生效、照常推进 {@link #version()} 与发布事件；只有 {@link #netChangeVersion()}
+   * 推迟到窗口结束、按语义状态前后比对决定是否前进。
+   */
+  public synchronized void beginNetChangeWindow() {
+    // 先取指纹、成功后才计层：指纹出错时层数不变，调用方不会因此永远困在窗口里。
+    if (netChangeWindowDepth == 0) {
+      absorbChangesOutsideWindow();
+      netChangeWindowStart = semanticFingerprint();
+    }
+    netChangeWindowDepth++;
+  }
+
+  /** 结束净变化统计窗口：最外层结束时，账本语义状态与开窗时不同，净变化版本前进一次。 */
+  public synchronized void endNetChangeWindow() {
+    if (netChangeWindowDepth <= 0) {
+      return;
+    }
+    if (--netChangeWindowDepth > 0) {
+      return;
+    }
+    long raw = version.get();
+    if (raw == netChangeAbsorbedVersion) {
+      return;
+    }
+    if (netChangeWindowStart != semanticFingerprint()) {
+      netChangeVersion++;
+    }
+    netChangeAbsorbedVersion = raw;
+  }
+
+  /**
+   * 净变化版本：账本的语义状态（占用的主人、角色、方向、交路，排队，道岔签名，冲突区放行锁）真正变化时才前进。
+   *
+   * <p>窗口外的任何改动都计数；窗口内“放掉再取回同一份占用”、排队心跳、占用刷新时间不计。停着的车以它为重评估条件—— 它不放宽任何判据，只决定判据多久被执行一次；
+   * 漏计的后果是等到兜底节拍才重评估，不会放行任何东西。
+   */
+  public synchronized long netChangeVersion() {
+    if (netChangeWindowDepth == 0) {
+      absorbChangesOutsideWindow();
+    }
+    return netChangeVersion;
+  }
+
+  private void absorbChangesOutsideWindow() {
+    long raw = version.get();
+    if (raw != netChangeAbsorbedVersion) {
+      netChangeVersion++;
+      netChangeAbsorbedVersion = raw;
+    }
+  }
+
+  /**
+   * 账本语义状态的指纹：每项状态各自散列后求和，与插入顺序无关，不分配中间对象。
+   *
+   * <p>两份不同状态散列相同的概率可以忽略；万一相同，后果只是停着的车等到兜底节拍才重评估。
+   */
+  private long semanticFingerprint() {
+    long fingerprint = 0L;
+    for (Map.Entry<OccupancyResource, List<OccupancyClaim>> entry : claims.entrySet()) {
+      long resource = mixFingerprint(entry.getKey().hashCode(), 1L);
+      for (OccupancyClaim claim : entry.getValue()) {
+        if (claim == null) {
+          continue;
+        }
+        long state =
+            mixFingerprint(
+                TrainNameNormalizer.normalizeKey(claim.trainName()).hashCode(), resource);
+        state = mixFingerprint(claim.role().ordinal(), state);
+        state = mixFingerprint(claim.corridorDirection().map(Enum::ordinal).orElse(-1), state);
+        fingerprint += mixFingerprint(claim.routeId().hashCode(), state);
+      }
+    }
+    for (Map.Entry<OccupancyResource, ConflictQueue> entry : queues.entrySet()) {
+      fingerprint +=
+          entry.getValue().semanticFingerprint(mixFingerprint(entry.getKey().hashCode(), 2L));
+    }
+    for (Map.Entry<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> entry :
+        switcherClaimSignatures.entrySet()) {
+      fingerprint +=
+          mixFingerprint(
+              entry.getValue().hashCode(), mixFingerprint(entry.getKey().hashCode(), 3L));
+    }
+    for (Map.Entry<SwitcherClaimKey, DirectedTraversalContext.SwitcherPathSignature> entry :
+        switcherQueueSignatures.entrySet()) {
+      fingerprint +=
+          mixFingerprint(
+              entry.getValue().hashCode(), mixFingerprint(entry.getKey().hashCode(), 4L));
+    }
+    for (Map.Entry<String, DeadlockReleaseLock> entry : deadlockReleaseLocks.entrySet()) {
+      fingerprint +=
+          mixFingerprint(
+              entry.getValue().hashCode(), mixFingerprint(entry.getKey().hashCode(), 5L));
+    }
+    return fingerprint;
+  }
+
+  /** 把一个 32 位分量混入 64 位状态（SplitMix64 末段），供 {@link #semanticFingerprint()} 逐项散列。 */
+  static long mixFingerprint(long value, long state) {
+    long mixed = state * 0x9E3779B97F4A7C15L + value;
+    mixed = (mixed ^ (mixed >>> 30)) * 0xBF58476D1CE4E5B9L;
+    mixed = (mixed ^ (mixed >>> 27)) * 0x94D049BB133111EBL;
+    return mixed ^ (mixed >>> 31);
+  }
+
+  /** 本车是否排在任一冲突队列里：排队放行资格随时间（首次入队与优先级）变化，不随账本变化。 */
+  public synchronized boolean hasQueueEntry(String trainName) {
+    for (ConflictQueue queue : queues.values()) {
+      if (queue.contains(trainName)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 返回因 TTL 清理的 queue entry 数量。 */
@@ -6337,6 +6461,30 @@ public final class SimpleOccupancyManager
     private final LinkedHashMap<String, OccupancyQueueEntry> backward = new LinkedHashMap<>();
     private final LinkedHashMap<String, OccupancyQueueEntry> neutral = new LinkedHashMap<>();
     private long nextEnqueueSequence;
+
+    /** 排队的语义指纹：各方向桶里的车与次序、方向、首次入队时间、优先级、进入次序与入队序号；最近一次心跳时间不计。 */
+    long semanticFingerprint(long seed) {
+      return bucketFingerprint(forward, mixFingerprint(1L, seed))
+          + bucketFingerprint(backward, mixFingerprint(2L, seed))
+          + bucketFingerprint(neutral, mixFingerprint(3L, seed));
+    }
+
+    private static long bucketFingerprint(
+        LinkedHashMap<String, OccupancyQueueEntry> entries, long seed) {
+      long fingerprint = 0L;
+      long position = 0L;
+      for (Map.Entry<String, OccupancyQueueEntry> entry : entries.entrySet()) {
+        OccupancyQueueEntry queued = entry.getValue();
+        long state = mixFingerprint(position++, seed);
+        state = mixFingerprint(entry.getKey().hashCode(), state);
+        state = mixFingerprint(queued.direction().ordinal(), state);
+        state = mixFingerprint(queued.firstSeen().hashCode(), state);
+        state = mixFingerprint(queued.priority(), state);
+        state = mixFingerprint(queued.entryOrder(), state);
+        fingerprint += mixFingerprint(queued.enqueueSequence(), state);
+      }
+      return fingerprint;
+    }
 
     boolean touch(
         String trainName, CorridorDirection direction, Instant now, int priority, int entryOrder) {

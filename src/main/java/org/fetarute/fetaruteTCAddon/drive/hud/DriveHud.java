@@ -201,8 +201,10 @@ public final class DriveHud {
               String.valueOf(change.targetCar()),
               "seconds",
               String.valueOf(Math.max(0L, change.secondsLeft()))));
-      case ANNOUNCED -> locale.component(
-          "drive.hud.cab-change.announced", Map.of("car", String.valueOf(change.targetCar())));
+      case ANNOUNCED -> change.eitherEnd()
+          ? locale.component("drive.hud.cab-change.announced-either")
+          : locale.component(
+              "drive.hud.cab-change.announced", Map.of("car", String.valueOf(change.targetCar())));
       case IDLE -> null;
     };
   }
@@ -249,8 +251,8 @@ public final class DriveHud {
     if (intervention == DriverProtection.Intervention.EMERGENCY || link.emergencyLatched()) {
       return "drive.hud.driver.emergency";
     }
-    if (link.signalConfirm().pending()) {
-      return "drive.hud.driver.confirm-signal";
+    if (link.signalAcknowledge().pending()) {
+      return "drive.hud.driver.acknowledge-signal";
     }
     if (intervention == DriverProtection.Intervention.SERVICE) {
       return "drive.hud.driver.service";

@@ -117,4 +117,79 @@ class CabSeatsTest {
     assertFalse(CabSeats.nameMatches(Set.of("driver"), List.of()));
     assertEquals("cab", CabSeats.normalize("  CAB "));
   }
+
+  @Test
+  @DisplayName("AB 两组重联：中间两节的驾驶座不算，只认两头")
+  void coupledMarriedPairsOnlyUseTheOuterCabs() {
+    CabSeats seats = CabSeats.of(List.of(Set.of(0), Set.of(0), Set.of(0), Set.of(0)));
+
+    assertEquals(CabSeats.End.HEAD, seats.endOf(0, 0));
+    assertEquals(CabSeats.End.NONE, seats.endOf(1, 0));
+    assertEquals(CabSeats.End.NONE, seats.endOf(2, 0));
+    assertEquals(CabSeats.End.TAIL, seats.endOf(3, 0));
+  }
+
+  @Test
+  @DisplayName("标记驾驶座只加名单第一个名字，已有名单上的名字不重复加；取消时只去掉名单上的名字")
+  void markingEditsOnlyCabNames() {
+    List<String> cabNames = List.of("driver", "驾驶座");
+
+    assertEquals(List.of("door", "driver"), CabSeats.withCabName(List.of("door"), cabNames));
+    assertEquals(List.of("Driver "), CabSeats.withCabName(List.of("Driver "), cabNames));
+    assertEquals(List.of("driver"), CabSeats.withCabName(List.of(), cabNames));
+    assertEquals(
+        List.of("door"), CabSeats.withoutCabNames(List.of("door", "驾驶座", "DRIVER"), cabNames));
+    assertEquals(List.of(), CabSeats.withoutCabNames(List.of("driver"), cabNames));
+  }
+
+  @Test
+  @DisplayName("一节车厢最多两个驾驶座（两端各一个）：第二个照标并报出另一个；已有两个时不标；已标过的座位再标不算第三个")
+  void atMostTwoCabSeatsPerCar() {
+    List<String> cabNames = List.of("driver", "驾驶座");
+
+    CabSeats.CarMarking first =
+        CabSeats.markInCar(List.of(List.of(), List.of("door"), List.of()), 0, cabNames);
+    assertEquals(List.of("driver"), first.names());
+    assertEquals(List.of(), first.otherCabSeats());
+    assertFalse(first.full());
+
+    CabSeats.CarMarking second =
+        CabSeats.markInCar(List.of(List.of("driver"), List.of(), List.of()), 2, cabNames);
+    assertEquals(List.of("driver"), second.names());
+    assertEquals(List.of(0), second.otherCabSeats(), "车厢另一端的驾驶室");
+    assertFalse(second.full());
+
+    CabSeats.CarMarking third =
+        CabSeats.markInCar(
+            List.of(List.of("Driver"), List.of("door"), List.of("驾驶座")), 1, cabNames);
+    assertTrue(third.full());
+    assertEquals(List.of("door"), third.names(), "已满：不改名字");
+    assertEquals(List.of(0, 2), third.otherCabSeats());
+
+    CabSeats.CarMarking crowded =
+        CabSeats.markInCar(
+            List.of(List.of("driver"), List.of(), List.of("driver"), List.of("驾驶座")), 1, cabNames);
+    assertTrue(crowded.full());
+    assertEquals(List.of(0, 2, 3), crowded.otherCabSeats(), "手工标过三个时如实列出全部");
+
+    CabSeats.CarMarking again =
+        CabSeats.markInCar(
+            List.of(List.of("driver"), List.of("driver"), List.of("driver")), 1, cabNames);
+    assertFalse(again.full(), "本来就是驾驶座：不算新加");
+    assertEquals(List.of(0, 2), again.otherCabSeats());
+  }
+
+  @Test
+  @DisplayName("端车两头都有驾驶座（单节车重连）：只认离相邻车厢最远的外侧那个；量不出或差不到 1 格时都认")
+  void onlyTheOuterCabOfAnEndCarCounts() {
+    assertEquals(List.of(3), CabSeats.outerCabSeats(List.of(0, 3), seat -> seat == 3 ? 9.0 : 2.0));
+    assertEquals(List.of(0), CabSeats.outerCabSeats(List.of(0, 3), seat -> seat == 0 ? 9.0 : 2.0));
+    assertEquals(
+        List.of(0, 3), CabSeats.outerCabSeats(List.of(0, 3), seat -> seat == 0 ? 5.5 : 5.0));
+    assertEquals(
+        List.of(0, 3),
+        CabSeats.outerCabSeats(List.of(0, 3), seat -> seat == 0 ? Double.NaN : 5.0),
+        "车厢没加载：维持原来的认定");
+    assertEquals(List.of(2), CabSeats.outerCabSeats(List.of(2), seat -> Double.NaN));
+  }
 }

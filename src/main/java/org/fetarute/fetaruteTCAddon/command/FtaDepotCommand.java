@@ -65,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
+import org.incendo.cloud.component.CommandComponent;
 import org.incendo.cloud.context.CommandInput;
 import org.incendo.cloud.parser.flag.CommandFlag;
 import org.incendo.cloud.parser.standard.IntegerParser;
@@ -101,7 +102,13 @@ public final class FtaDepotCommand {
         CommandSuggestionProviders.placeholder("<limit>");
 
     var patternFlag =
-        CommandFlag.builder("pattern").withComponent(StringParser.greedyStringParser()).build();
+        CommandFlag.<CommandSender>builder("pattern")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "pattern", StringParser.greedyStringParser())
+                    .suggestionProvider(patternSuggestions())
+                    .build())
+            .build();
 
     manager.command(
         manager
@@ -791,53 +798,97 @@ public final class FtaDepotCommand {
           if (prefix.isBlank()) {
             suggestions.add("<route>");
           }
-          Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerOpt =
-              providerIfReady();
-          if (providerOpt.isEmpty()) {
-            return suggestions;
-          }
-          Optional<String> companyArgOpt = ctx.optional("company").map(String.class::cast);
-          Optional<String> operatorArgOpt = ctx.optional("operator").map(String.class::cast);
-          Optional<String> lineArgOpt = ctx.optional("line").map(String.class::cast);
-          if (companyArgOpt.isEmpty() || operatorArgOpt.isEmpty() || lineArgOpt.isEmpty()) {
-            return suggestions;
-          }
-          String companyArg = companyArgOpt.get().trim();
-          String operatorArg = operatorArgOpt.get().trim();
-          String lineArg = lineArgOpt.get().trim();
-          if (companyArg.isBlank() || operatorArg.isBlank() || lineArg.isBlank()) {
-            return suggestions;
-          }
-          var provider = providerOpt.get();
-          CompanyQueryService query = new CompanyQueryService(provider);
-          Optional<Company> companyOpt = query.findCompany(companyArg);
-          if (companyOpt.isEmpty()) {
-            return suggestions;
-          }
-          Company company = companyOpt.get();
-          if (!canReadCompanyNoCreateIdentity(ctx.sender(), provider, company.id())) {
-            return suggestions;
-          }
-          Optional<Operator> operatorOpt = query.findOperator(company.id(), operatorArg);
-          if (operatorOpt.isEmpty()) {
-            return suggestions;
-          }
-          Optional<Line> lineOpt = query.findLine(operatorOpt.get().id(), lineArg);
-          if (lineOpt.isEmpty()) {
-            return suggestions;
-          }
-          provider.routes().listByLine(lineOpt.get().id()).stream()
-              .map(Route::code)
-              .filter(Objects::nonNull)
-              .map(String::trim)
-              .filter(code -> !code.isBlank())
-              .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
-              .distinct()
-              .limit(SUGGESTION_LIMIT)
-              .forEach(suggestions::add);
+          suggestionLine(ctx)
+              .ifPresent(
+                  line ->
+                      line.provider().routes().listByLine(line.line().id()).stream()
+                          .map(Route::code)
+                          .filter(Objects::nonNull)
+                          .map(String::trim)
+                          .filter(code -> !code.isBlank())
+                          .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))
+                          .distinct()
+                          .limit(SUGGESTION_LIMIT)
+                          .forEach(suggestions::add));
           return suggestions;
         });
   }
+
+  /**
+   * {@code --pattern} 的补全：交路绑了编组方案时只能出方案里的车型，列出方案里各车型的出车编组；没有方案时给占位符。
+   *
+   * <p>值是贪婪参数（吃到行尾），不用加引号。
+   */
+  private SuggestionProvider<CommandSender> patternSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          String prefix = normalizePrefix(input);
+          List<String> patterns =
+              suggestionLine(ctx)
+                  .flatMap(
+                      line ->
+                          ctx.optional("route")
+                              .map(String.class::cast)
+                              .map(String::trim)
+                              .flatMap(
+                                  code ->
+                                      new CompanyQueryService(line.provider())
+                                          .findRoute(line.line().id(), code)))
+                  .flatMap(
+                      route ->
+                          plugin
+                              .getConsistPlanService()
+                              .flatMap(service -> service.planForRoute(route.id())))
+                  .map(
+                      plan ->
+                          plan.members().stream()
+                              .map(
+                                  member ->
+                                      member
+                                          .profile()
+                                          .map(ConsistProfile::pattern)
+                                          .orElse(member.entry().pattern()))
+                              .distinct()
+                              .toList())
+                  .orElse(List.of());
+          if (patterns.isEmpty()) {
+            return prefix.isBlank() ? List.of("<pattern>") : List.of();
+          }
+          return patterns.stream()
+              .filter(pattern -> pattern.toLowerCase(Locale.ROOT).startsWith(prefix))
+              .toList();
+        });
+  }
+
+  /** 补全上下文里已写出、可读的线路（连同存储）；任何一段没写或找不到时为空。 */
+  private Optional<SuggestionLine> suggestionLine(
+      org.incendo.cloud.context.CommandContext<CommandSender> ctx) {
+    Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerOpt =
+        providerIfReady();
+    if (providerOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    String companyArg = ctx.optional("company").map(String.class::cast).orElse("").trim();
+    String operatorArg = ctx.optional("operator").map(String.class::cast).orElse("").trim();
+    String lineArg = ctx.optional("line").map(String.class::cast).orElse("").trim();
+    if (companyArg.isBlank() || operatorArg.isBlank() || lineArg.isBlank()) {
+      return Optional.empty();
+    }
+    var provider = providerOpt.get();
+    CompanyQueryService query = new CompanyQueryService(provider);
+    Optional<Company> companyOpt = query.findCompany(companyArg);
+    if (companyOpt.isEmpty()
+        || !canReadCompanyNoCreateIdentity(ctx.sender(), provider, companyOpt.get().id())) {
+      return Optional.empty();
+    }
+    return query
+        .findOperator(companyOpt.get().id(), operatorArg)
+        .flatMap(operator -> query.findLine(operator.id(), lineArg))
+        .map(line -> new SuggestionLine(provider, line));
+  }
+
+  private record SuggestionLine(
+      org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider, Line line) {}
 
   private SuggestionProvider<CommandSender> depotSuggestions() {
     return SuggestionProvider.blockingStrings(

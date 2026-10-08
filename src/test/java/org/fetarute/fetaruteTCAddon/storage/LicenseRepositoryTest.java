@@ -41,26 +41,27 @@ class LicenseRepositoryTest {
   void grantListRevoke() {
     UUID alex = UUID.randomUUID();
     UUID other = UUID.randomUUID();
-    licenses.grant(new LicenseRecord(alex, "Alex", "free", NOW.minusSeconds(60), "exam"));
-    licenses.grant(new LicenseRecord(alex, "Alex", "dispatch", NOW, "exam"));
-    licenses.grant(new LicenseRecord(other, "Bo", "free", NOW, "Admin"));
+    licenses.grant(new LicenseRecord(alex, "Alex", "learner", NOW.minusSeconds(60), "exam"));
+    licenses.grant(new LicenseRecord(alex, "Alex", "driver", NOW, "exam"));
+    licenses.grant(new LicenseRecord(other, "Bo", "learner", NOW, "Admin"));
 
     List<LicenseRecord> held = licenses.listByPlayer(alex);
-    assertEquals(List.of("free", "dispatch"), held.stream().map(LicenseRecord::classId).toList());
+    assertEquals(List.of("learner", "driver"), held.stream().map(LicenseRecord::classId).toList());
     assertEquals(NOW.minusSeconds(60), held.get(0).grantedAt());
 
-    licenses.grant(new LicenseRecord(alex, "Alex2", "free", NOW.plusSeconds(5), "Admin"));
+    licenses.grant(new LicenseRecord(alex, "Alex2", "learner", NOW.plusSeconds(5), "Admin"));
     held = licenses.listByPlayer(alex);
     assertEquals(2, held.size(), "重复发证只更新，不重复记");
     LicenseRecord free =
-        held.stream().filter(r -> r.classId().equals("free")).findFirst().orElseThrow();
+        held.stream().filter(r -> r.classId().equals("learner")).findFirst().orElseThrow();
     assertEquals("Admin", free.grantedBy());
     assertEquals("Alex2", free.playerName());
 
-    assertTrue(licenses.revoke(alex, "dispatch"));
-    assertFalse(licenses.revoke(alex, "dispatch"));
+    assertTrue(licenses.revoke(alex, "driver"));
+    assertFalse(licenses.revoke(alex, "driver"));
     assertEquals(
-        List.of("free"), licenses.listByPlayer(alex).stream().map(LicenseRecord::classId).toList());
+        List.of("learner"),
+        licenses.listByPlayer(alex).stream().map(LicenseRecord::classId).toList());
     assertEquals(1, licenses.listByPlayer(other).size());
   }
 
@@ -68,14 +69,14 @@ class LicenseRepositoryTest {
   void trainingRuns() {
     UUID alex = UUID.randomUUID();
     assertTrue(licenses.trainingByPlayer(alex).isEmpty());
-    licenses.saveTraining(new TrainingRecord(alex, "Alex", "dispatch", 1, NOW));
-    licenses.saveTraining(new TrainingRecord(alex, "Alex", "dispatch", 2, NOW.plusSeconds(30)));
+    licenses.saveTraining(new TrainingRecord(alex, "Alex", "driver", 1, NOW));
+    licenses.saveTraining(new TrainingRecord(alex, "Alex", "driver", 2, NOW.plusSeconds(30)));
     licenses.saveTraining(new TrainingRecord(alex, "Alex", "pro", 1, NOW));
 
     List<TrainingRecord> runs = licenses.trainingByPlayer(alex);
     assertEquals(2, runs.size(), "同一级只留一行");
     TrainingRecord dispatch =
-        runs.stream().filter(r -> r.classId().equals("dispatch")).findFirst().orElseThrow();
+        runs.stream().filter(r -> r.classId().equals("driver")).findFirst().orElseThrow();
     assertEquals(2, dispatch.runs());
     assertEquals(NOW.plusSeconds(30), dispatch.lastAt());
     assertTrue(licenses.trainingByPlayer(UUID.randomUUID()).isEmpty());

@@ -10,6 +10,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.block.BlockFace;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen.Position;
 import org.junit.jupiter.api.Test;
 
@@ -33,6 +34,44 @@ class PidsScreenTest {
         PidsScreen.Mode.TEST_CARD,
         now,
         now);
+  }
+
+  @Test
+  void layoutsKeepTheirOrderWithoutBlanksOrRepeats() {
+    PidsScreen screen =
+        screen(PidsFacing.SOUTH, 3, 5)
+            .withLayouts(
+                List.of(" station-3x5", "status-3x5", "", "station-3x5", "custom"), Instant.EPOCH);
+
+    assertEquals(List.of("station-3x5", "status-3x5", "custom"), screen.layoutIds());
+    assertEquals("station-3x5", screen.layoutId());
+    assertEquals(List.of("status-3x5", "custom"), screen.pageLayoutIds());
+    assertEquals(List.of("status-3x5"), screen.withLayout("status-3x5", Instant.EPOCH).layoutIds());
+    assertTrue(screen(PidsFacing.SOUTH, 1, 3).pageLayoutIds().isEmpty());
+    assertEquals(
+        List.of("", "status-3x5"),
+        screen.withLayouts(List.of(" ", "status-3x5"), Instant.EPOCH).layoutIds(),
+        "主布局空白也保留（按不存在处理、退回内置布局），不让一行旧数据读不进来");
+    assertThrows(
+        IllegalArgumentException.class,
+        () ->
+            new PidsScreen(
+                screen.id(),
+                screen.worldId(),
+                screen.anchor(),
+                screen.facing(),
+                3,
+                5,
+                List.of(),
+                Optional.empty(),
+                Optional.empty(),
+                Set.of(),
+                Set.of(),
+                PidsScreen.Appearance.AUTO,
+                PidsScreen.Mode.TEST_CARD,
+                Instant.EPOCH,
+                Instant.EPOCH),
+        "至少一个布局");
   }
 
   @Test
@@ -81,5 +120,23 @@ class PidsScreenTest {
   @Test
   void rejectsEmptySizes() {
     assertThrows(IllegalArgumentException.class, () -> screen(PidsFacing.SOUTH, 0, 3));
+  }
+
+  @Test
+  void operatorOnlyBindingIsNormalisedAndYieldsToAStation() {
+    PidsScreen bare = screen(PidsFacing.SOUTH, 3, 5);
+    assertEquals(Optional.empty(), bare.operatorCode());
+
+    PidsScreen operatorOnly = bare.withOperator(" surc ", Set.of("MT"), Instant.EPOCH);
+    assertEquals(Optional.empty(), operatorOnly.station());
+    assertEquals(Optional.of("SURC"), operatorOnly.operator());
+    assertEquals(Optional.of("SURC"), operatorOnly.operatorCode());
+    assertTrue(operatorOnly.platforms().isEmpty());
+
+    PidsScreen stationBound =
+        operatorOnly.withBinding(
+            Optional.of(new PidsStationKey("OFL", "HHU")), Set.of("1"), Set.of(), Instant.EPOCH);
+    assertEquals(Optional.empty(), stationBound.operator(), "绑了车站就不再单独记运营商");
+    assertEquals(Optional.of("OFL"), stationBound.operatorCode());
   }
 }

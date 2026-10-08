@@ -14,7 +14,9 @@ import com.typewritermc.engine.paper.entry.TriggerableEntry
 import com.typewritermc.engine.paper.entry.entries.EventEntry
 import com.typewritermc.engine.paper.entry.triggerAllFor
 import org.fetarute.fetaruteTCAddon.api.event.DriverStopScoredEvent
-import org.fetarute.typewriter.StopWindow
+import org.fetarute.typewriter.StopOutcome
+import org.fetarute.typewriter.TaskSource
+import org.fetarute.typewriter.allows
 import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import java.util.Optional
@@ -38,7 +40,9 @@ class StopScoredEventEntry(
     @Help("Only this station name. Leave blank for any station.")
     val station: String = "",
     @Help("Only this stop result. Leave empty for any result.")
-    val window: Optional<StopWindow> = Optional.empty(),
+    val outcome: Optional<StopOutcome> = Optional.empty(),
+    @Help("Only stops of tasks from these sources. Leave empty for any stop, also without a task.")
+    val sources: List<TaskSource> = emptyList(),
 ) : EventEntry
 
 enum class StopScoredContextKeys(override val klass: KClass<*>) : EntryContextKey {
@@ -46,7 +50,7 @@ enum class StopScoredContextKeys(override val klass: KClass<*>) : EntryContextKe
     STATION(String::class),
 
     @KeyType(String::class)
-    WINDOW(String::class),
+    OUTCOME(String::class),
 
     @KeyType(Double::class)
     OFFSET(Double::class),
@@ -63,10 +67,11 @@ fun onStopScored(event: DriverStopScoredEvent, query: Query<StopScoredEventEntry
     query.findWhere {
         (!it.assignedBy.isSet || task?.assignedBy(it.assignedBy) == true) &&
             (it.station.isBlank() || it.station.equals(stop.station(), ignoreCase = true)) &&
-            it.window.map { wanted -> wanted.name == stop.window().name }.orElse(true)
+            it.outcome.map { wanted -> wanted.name == stop.outcome().name }.orElse(true) &&
+            it.sources.allows(task)
     }.triggerAllFor(player) {
         StopScoredContextKeys.STATION += stop.station()
-        StopScoredContextKeys.WINDOW += stop.window().name
+        StopScoredContextKeys.OUTCOME += stop.outcome().name
         StopScoredContextKeys.OFFSET += stop.offsetBlocks()
         StopScoredContextKeys.TRAIN += event.trainName
     }

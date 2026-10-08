@@ -15,13 +15,16 @@ public final class TaskScore {
   private int serviceInterventions;
   private int emergencyInterventions;
   private int forcedStops;
-  private int signalConfirmations;
+  private int signalAcknowledgements;
   private int signalMisses;
   private double signalReactionSeconds;
   private int vigilanceTrips;
   private int lateDepartureConfirmations;
   private OptionalLong delayAtStartSeconds = OptionalLong.empty();
   private OptionalLong delayAtEndSeconds = OptionalLong.empty();
+  private double manualBlocks;
+  private double atoBlocks;
+  private int atoStops;
 
   public void addStop(StopScore stop) {
     if (stop != null) {
@@ -38,12 +41,44 @@ public final class TaskScore {
     return stops.size();
   }
 
+  /** 记下走过的距离（格），按当时是人工驾驶还是 ATO 分开计。 */
+  public void addDistance(double blocks, boolean ato) {
+    if (!(blocks > 0.0) || !Double.isFinite(blocks)) {
+      return;
+    }
+    if (ato) {
+      atoBlocks += blocks;
+    } else {
+      manualBlocks += blocks;
+    }
+  }
+
+  /** 人工驾驶走过的距离（格）。 */
+  public double manualBlocks() {
+    return manualBlocks;
+  }
+
+  /** ATO 运行走过的距离（格）。 */
+  public double atoBlocks() {
+    return atoBlocks;
+  }
+
+  /** ATO 下停了一站（站台由系统停，不计对标成绩，只计站数）。 */
+  public void addAtoStop() {
+    atoStops++;
+  }
+
+  /** ATO 下停的站数。 */
+  public int atoStops() {
+    return atoStops;
+  }
+
   /** 记下防护介入与确认的计数（结束时一次写入）。 */
   public void setCounts(
       int service,
       int emergency,
       int forced,
-      int confirmations,
+      int acknowledgements,
       int misses,
       double reactionSeconds,
       int vigilance,
@@ -51,7 +86,7 @@ public final class TaskScore {
     this.serviceInterventions = service;
     this.emergencyInterventions = emergency;
     this.forcedStops = forced;
-    this.signalConfirmations = confirmations;
+    this.signalAcknowledgements = acknowledgements;
     this.signalMisses = misses;
     this.signalReactionSeconds = reactionSeconds;
     this.vigilanceTrips = vigilance;
@@ -101,8 +136,8 @@ public final class TaskScore {
     return forcedStops;
   }
 
-  public int signalConfirmations() {
-    return signalConfirmations;
+  public int signalAcknowledgements() {
+    return signalAcknowledgements;
   }
 
   public int signalMisses() {

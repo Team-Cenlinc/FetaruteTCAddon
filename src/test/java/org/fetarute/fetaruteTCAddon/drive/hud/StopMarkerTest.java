@@ -279,4 +279,37 @@ class StopMarkerTest {
     update();
     assertEquals(122.5, views.get(0).shownAt.get(1).getX(), 1.0e-9, "车站牌子按列车中心对准");
   }
+
+  @Test
+  @DisplayName("停车位置标对的是车头最前端：第一节车厢中心停在标志后方半个车体长度，标线跟着后退")
+  void headReferenceUsesTheFrontEnd() {
+    link.updateApproach(
+        NODE,
+        "station",
+        java.util.OptionalDouble.of(30.0),
+        java.time.Instant.EPOCH,
+        12.0,
+        StopAlignment.Reference.HEAD);
+    lookup =
+        Optional.of(
+            new StationStopPoints.StopPoint(
+                worldId,
+                new Vector(130.5, 64.0, 0.5),
+                new Vector(1.0, 0.0, 0.0),
+                StopAlignment.Reference.HEAD,
+                12.0));
+    // 车体长 6 格：车头最前端在第一节车厢中心（x=100.5）前方 3 格；驾驶员在车厢中心后方 1 格。
+    marker.update(
+        player,
+        session,
+        new StopMarker.Train(
+            new Vector(1.0, 0.0, 0.0),
+            new Vector(100.5, 64.0, 0.5),
+            new Vector(99.5, 65.0, 0.5),
+            10.0,
+            4,
+            3.0),
+        0L);
+    assertEquals(126.5, views.get(0).shownAt.get(0).getX(), 1.0e-9);
+  }
 }

@@ -113,7 +113,7 @@ public final class DriverControlRegistry implements ControlAuthority {
   public boolean isDriverControlled(TrainProperties properties) {
     DriverLink link = resolve(properties);
     if (link != null) {
-      return link.controlsPhysically();
+      return link.controlsPhysically() || link.cabHold();
     }
     // 停着等驾驶员上车接班的车：调度照常给许可，但任何发车路径都不替它起步；驾驶员上车后由他开走，
     // 等到时限由驾驶侧放行并强制刷新一次信号，交回自动运行。
@@ -121,14 +121,26 @@ public final class DriverControlRegistry implements ControlAuthority {
   }
 
   @Override
+  public boolean driverOperatesDoors(TrainProperties properties) {
+    DriverLink link = resolve(properties);
+    return link != null && link.controlsPhysically();
+  }
+
+  @Override
   public boolean isDriverControlledName(String trainName) {
     DriverLink link = byCurrentName(trainName);
-    return link != null && link.controlsPhysically();
+    return link != null && (link.controlsPhysically() || link.cabHold());
   }
 
   @Override
   public boolean hasDriver(String trainName) {
     return byCurrentName(trainName) != null;
+  }
+
+  @Override
+  public boolean awaitingTurnback(String trainName) {
+    DriverLink link = byCurrentName(trainName);
+    return link != null && link.turnbackPending();
   }
 
   /** 按车名找链路；调度改名（例如终点待命复用）后按列车属性上的当前车名也认。 */

@@ -50,19 +50,19 @@ public final class DriverReport {
 
   /** 停妥那一刻在动作栏显示的对标结果；越站或没停妥时为空。 */
   public static Optional<Line> stopResult(StopScore stop) {
-    if (stop == null || stop.window() == StopAlignment.Window.SKIPPED) {
+    if (stop == null || stop.outcome() == StopAlignment.Outcome.SKIPPED) {
       return Optional.empty();
     }
     return Optional.of(
         new Line(
-            "drive.hud.stop-result." + windowKey(stop.window()),
+            "drive.hud.stop-result." + outcomeKey(stop.outcome()),
             Map.of("station", stop.station()),
             Map.of("offset", offset(stop.offsetBlocks()))));
   }
 
   /** 对标结果配的提示音。 */
-  public static DriveCue stopCue(StopAlignment.Window window) {
-    return switch (window) {
+  public static DriveCue stopCue(StopAlignment.Outcome outcome) {
+    return switch (outcome) {
       case ACCURATE -> DriveCue.STOP_ACCURATE;
       case ACCEPTED -> DriveCue.STOP_ACCEPTED;
       default -> DriveCue.STOP_POOR;
@@ -83,10 +83,10 @@ public final class DriverReport {
     List<Line> lines = new ArrayList<>();
     for (StopScore stop : score.stops()) {
       Line result =
-          stop.window() == StopAlignment.Window.SKIPPED
+          stop.outcome() == StopAlignment.Outcome.SKIPPED
               ? Line.of("drive.task.sheet.result.skipped", Map.of())
               : new Line(
-                  "drive.task.sheet.result." + windowKey(stop.window()),
+                  "drive.task.sheet.result." + outcomeKey(stop.outcome()),
                   Map.of(),
                   Map.of("offset", offset(stop.offsetBlocks())));
       lines.add(
@@ -104,12 +104,12 @@ public final class DriverReport {
                   "emergency", String.valueOf(score.emergencyInterventions()),
                   "forced", String.valueOf(score.forcedStops()))));
     }
-    if (score.signalConfirmations() + score.signalMisses() > 0) {
+    if (score.signalAcknowledgements() + score.signalMisses() > 0) {
       lines.add(
           Line.of(
               "drive.task.sheet.signal",
               Map.of(
-                  "confirmed", String.valueOf(score.signalConfirmations()),
+                  "confirmed", String.valueOf(score.signalAcknowledgements()),
                   "missed", String.valueOf(score.signalMisses()),
                   "reaction", String.format(Locale.ROOT, "%.1f", score.signalReactionSeconds()))));
     }
@@ -175,7 +175,7 @@ public final class DriverReport {
         Map.of("value", value > 0L ? "+" + value : String.valueOf(value)));
   }
 
-  private static String windowKey(StopAlignment.Window window) {
-    return window.name().toLowerCase(Locale.ROOT);
+  private static String outcomeKey(StopAlignment.Outcome outcome) {
+    return outcome.name().toLowerCase(Locale.ROOT);
   }
 }

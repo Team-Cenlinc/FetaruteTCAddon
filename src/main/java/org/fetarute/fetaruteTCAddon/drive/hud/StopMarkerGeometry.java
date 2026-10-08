@@ -8,7 +8,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 /**
  * 发光停车标的位置与颜色。
  *
- * <p>车站牌子按列车中心对标，停车位置标按车头对标：对准部位停在停车点上算停准。驾驶员坐的位置离对准部位有一段距离
+ * <p>车站牌子按列车中心对标，停车位置标按车头最前端对标：对准部位停在停车点上算停准。驾驶员坐的位置离对准部位有一段距离
  * （按列车中心对标的长编组约为半个车长），所以停车标画在“停车点沿轨道前移这段距离”处：列车停准时，驾驶员正好在停车标上方。
  * 斜向、弯曲或带坡的站台不能按停车点处的走向直线外推，前移要沿轨道走（{@link Track}）。本类不依赖服务器对象，便于单测。
  */
@@ -83,7 +83,7 @@ public final class StopMarkerGeometry {
    * @param stopPoint 停车点：对准部位应停的位置
    * @param forward 停车点处轨道朝列车前进一侧的走向；为空或水平分量为零时按列车走向
    * @param trainTravel 列车前进方向（车尾指向车头）
-   * @param headAheadBlocks 车头在对准部位前方多远，沿车身量（格）：按车头对准为 0，按列车中心对准为车身长的一半
+   * @param headAheadBlocks 车头（第一节车厢中心）在对准部位前方多远，沿车身量（格）：按车头最前端对准为负的半个车体长度，按列车中心对准为车身长的一半
    * @param head 车头（第一节车厢）此刻的位置
    * @param seat 驾驶员的位置
    * @param track 从停车点沿轨道前移；走不通时按直线估计

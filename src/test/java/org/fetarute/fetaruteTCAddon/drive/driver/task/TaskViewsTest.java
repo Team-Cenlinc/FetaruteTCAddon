@@ -39,21 +39,21 @@ class TaskViewsTest {
             Instant.EPOCH,
             DrivingMode.ATO,
             Instant.EPOCH);
-    task.setAlight(4, "CCC", "C 站");
+    task.setHandover(4, "CCC", "C 站");
     task.setSource("typewriter", Map.of("quest", "q1"));
     task.setTrainName("T-1");
     return task;
   }
 
   @Test
-  @DisplayName("任务快照带接班站、下车站、来源与附加数据")
+  @DisplayName("任务快照带接班站、交班站、来源与附加数据")
   void taskView() {
     DriverTask task = task();
     DriveApi.TaskView view = TaskViews.of(task);
 
     assertEquals(task.taskId(), view.taskId());
-    assertEquals(new DriveApi.StationRef("AAA", "A 站", 1), view.board());
-    assertEquals(Optional.of(new DriveApi.StationRef("CCC", "C 站", 4)), view.alight());
+    assertEquals(new DriveApi.StationRef("AAA", "A 站", 1), view.takeoverStation());
+    assertEquals(Optional.of(new DriveApi.StationRef("CCC", "C 站", 4)), view.handoverStation());
     assertEquals(DriveApi.Mode.ATO, view.mode());
     assertEquals(DriveApi.TaskState.CLAIMED, view.state());
     assertEquals(Optional.of("T-1"), view.trainName());
@@ -74,9 +74,9 @@ class TaskViewsTest {
   @DisplayName("停站成绩与驾驶方式一一对应")
   void stopAndMode() {
     DriveApi.StopResult stop =
-        TaskViews.stop(new StopScore("B 站", 3.5, StopAlignment.Window.OVERRUN, true, false));
+        TaskViews.stop(new StopScore("B 站", 3.5, StopAlignment.Outcome.OVERRUN, true, false));
 
-    assertEquals(DriveApi.StopWindow.OVERRUN, stop.window());
+    assertEquals(DriveApi.StopOutcome.OVERRUN, stop.outcome());
     assertEquals(3.5, stop.offsetBlocks(), 1.0e-9);
     assertTrue(stop.wrongDoor());
     assertFalse(stop.doorsTakenOver());
@@ -85,14 +85,14 @@ class TaskViewsTest {
   }
 
   @Test
-  @DisplayName("区间任务：停过或越过下车站才算到站，且只认这一班")
-  void reachedAlight() {
+  @DisplayName("区间任务：停过或越过交班站才算到站，且只认这一班")
+  void reachedHandover() {
     TaskKey key = new TaskKey(TT, "R1-001", DAY);
 
-    assertFalse(DriverTaskManager.reachedAlight(4, key, assignment("R1-001", 3)));
-    assertTrue(DriverTaskManager.reachedAlight(4, key, assignment("R1-001", 4)));
-    assertTrue(DriverTaskManager.reachedAlight(4, key, assignment("R1-001", 5)));
-    assertFalse(DriverTaskManager.reachedAlight(4, key, assignment("R1-002", 5)));
+    assertFalse(DriverTaskManager.reachedHandover(4, key, assignment("R1-001", 3)));
+    assertTrue(DriverTaskManager.reachedHandover(4, key, assignment("R1-001", 4)));
+    assertTrue(DriverTaskManager.reachedHandover(4, key, assignment("R1-001", 5)));
+    assertFalse(DriverTaskManager.reachedHandover(4, key, assignment("R1-002", 5)));
   }
 
   private static TimetableApi.TrainAssignment assignment(String trip, int lastStop) {

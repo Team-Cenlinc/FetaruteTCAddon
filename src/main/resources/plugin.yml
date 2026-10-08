@@ -9,6 +9,8 @@ depend:
   - Train_Carts
 softdepend:
   - TCCoasters
+  - Vault
+  - Essentials
 commands:
   fta:
     description: FetaruteTCAddon 主命令
@@ -97,7 +99,7 @@ permissions:
       fetarute.drive.top: true
       fetarute.drive.tutorial: true
   fetarute.drive:
-    description: 手动驾驶的基本命令（/fta drive on|off|status|reverser）；子节点含驾驶非调度列车与新手教程
+    description: 驾驶的基本命令（/fta drive on|off|status|reverser|cab）；子节点含驾驶非调度列车与新手教程
     default: op
     children:
       fetarute.drive.free: true
@@ -109,7 +111,7 @@ permissions:
     description: 新手教程与驾驶情境提示（/fta drive tutorial）
     default: op
   fetarute.drive.admin:
-    description: 驾驶管理：查看与强制结束驾驶会话、收回任务、交还调度列车、拥堵熔断、驾驶诊断、查看他人驾驶记录、故障与救援（/fta drive list|stop|revoke|handback|breaker|probe|records <玩家>|fault|rescue）
+    description: 驾驶管理：查看与强制结束驾驶会话、收回任务、交还调度列车、拥堵保护、驾驶诊断、查看他人驾驶记录、故障与救援（/fta drive list|stop|revoke|handback|congestion|probe|records <玩家>|fault|rescue）
     default: op
   fetarute.drive.driver:
     description: 领取驾驶任务、驾驶调度列车（/fta drive tasks|task|mode）；子节点含手动驾驶的基本命令、ATO、自选仿真等级、驾驶记录与排行

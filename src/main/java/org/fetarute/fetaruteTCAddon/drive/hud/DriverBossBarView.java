@@ -163,8 +163,10 @@ public record DriverBossBarView(
     return switch (stage) {
       case ANNOUNCED -> Optional.of(
           new DriverBossBarView(
-              "drive.bossbar.cab-change.announced",
-              Map.of("car", String.valueOf(targetCar)),
+              targetCar > 0
+                  ? "drive.bossbar.cab-change.announced"
+                  : "drive.bossbar.cab-change.announced-either",
+              targetCar > 0 ? Map.of("car", String.valueOf(targetCar)) : Map.of(),
               OptionalInt.empty(),
               false,
               false,

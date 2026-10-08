@@ -5,7 +5,7 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * 一名玩家某一级的路考练习：完整开完了几次（开到下车站，成绩不限）。
+ * 一名玩家某一级的路考练习：完整开完了几次（开到交班站，成绩不限）。
  *
  * @param playerId 玩家
  * @param playerName 玩家名字（最近一次练习时）

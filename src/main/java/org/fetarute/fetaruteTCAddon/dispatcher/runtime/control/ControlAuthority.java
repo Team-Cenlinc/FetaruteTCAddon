@@ -16,13 +16,13 @@ public interface ControlAuthority {
   /** 全部列车都由自动运行控制。 */
   ControlAuthority NONE = properties -> false;
 
-  /** 这列车当前是否由驾驶员物理控制（执行层不得写限速、发车或清空动作队列）。 */
+  /** 这列车当前是否由驾驶员控制（执行层不得写限速、发车或清空动作队列）：人工驾驶，或 ATO 下扣着等驾驶员换端。 */
   boolean isDriverControlled(TrainProperties properties);
 
   /**
    * 这列车是否由驾驶员物理操纵（按车名）。
    *
-   * <p>健康层据此不对它做重发车、改目的地等恢复动作；ATO 下由自动运行操纵，照常恢复。
+   * <p>健康层据此不对它做重发车、改目的地等恢复动作；ATO 下由自动运行操纵，照常恢复（扣着等驾驶员换端时除外）。
    */
   default boolean isDriverControlledName(String trainName) {
     return false;
@@ -39,6 +39,11 @@ public interface ControlAuthority {
 
   /** 驾驶员控制的列车进站：站台交出停车点与站台侧，此后双方经这个对象推进停站。 */
   default void beginStationStop(TrainProperties properties, DriverStationStop stop) {}
+
+  /** 车上的驾驶员是否亲手开关车门（人工驾驶）：停站中途接管时站台据此把开着的车门交给他；ATO 仍由站台开关门。 */
+  default boolean driverOperatesDoors(TrainProperties properties) {
+    return false;
+  }
 
   /** 自动运行停站结束、出站许可就绪时，是否还要扣着等车上的驾驶员（ATO）确认发车。 */
   default boolean holdDeparture(TrainProperties properties) {
@@ -61,6 +66,11 @@ public interface ControlAuthority {
 
   /** 这列车是否正停着等驾驶员上车接班（始发站待命、车库出车）：健康层不当它停滞。 */
   default boolean awaitingDriver(String trainName) {
+    return false;
+  }
+
+  /** 驾驶员控制的这列车停在终点站待命或结算后等开出下一趟（派车还没放行）。 */
+  default boolean awaitingTurnback(String trainName) {
     return false;
   }
 

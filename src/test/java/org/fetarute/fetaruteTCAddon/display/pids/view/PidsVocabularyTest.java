@@ -73,9 +73,11 @@ class PidsVocabularyTest {
         new Names("部分班次取消", "Trips cancelled"),
         vocabulary.condition(PidsLineStatus.Condition.CANCELLATIONS));
     assertEquals(
-        new Names("近 1 小时取消 1 班", "1 trip cancelled this hour"), vocabulary.cancelledTrips(1));
+        new Names("近 1 小时取消 1 班", "1 trip cancelled in the last hour"),
+        vocabulary.cancelledTrips(1));
     assertEquals(
-        new Names("近 1 小时取消 2 班", "2 trips cancelled this hour"), vocabulary.cancelledTrips(2));
+        new Names("近 1 小时取消 2 班", "2 trips cancelled in the last hour"),
+        vocabulary.cancelledTrips(2));
     assertEquals(
         new Names("主城湾—海兴 暂停运营", "No service Spawn Bay – 海兴"),
         vocabulary.sectionClosed(new Names("主城湾", "Spawn Bay"), new Names("海兴", "")),

@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
@@ -118,12 +119,16 @@ public final class DriveApiImpl implements DriveApi {
     }
     Optional<TaskStations.Resolved> resolved =
         TaskStations.resolve(
-            stops, request.boardStation(), request.boardStopSequence(), request.alightStation());
+            stops,
+            request.takeoverStation(),
+            request.takeoverStopSequence(),
+            request.handoverStation());
     if (resolved.isEmpty()) {
       return AssignResult.INVALID_STATIONS;
     }
-    TimetableService.PlannedStop board = plannedStop(plan.get(), resolved.get().board().sequence());
-    if (board == null || board.departure().isEmpty()) {
+    TimetableService.PlannedStop takeover =
+        plannedStop(plan.get(), resolved.get().takeover().sequence());
+    if (takeover == null || takeover.departure().isEmpty()) {
       return AssignResult.UNAVAILABLE;
     }
     boolean cancelled =
@@ -132,7 +137,7 @@ public final class DriveApiImpl implements DriveApi {
                 service ->
                     service.cancellationOf(
                         request.timetableId(), plan.get().tripId(), request.serviceDate()))
-            .filter(cancellation -> cancellation.covers(board.stopSequence()))
+            .filter(cancellation -> cancellation.covers(takeover.stopSequence()))
             .isPresent();
     if (cancelled) {
       return AssignResult.UNAVAILABLE;
@@ -141,40 +146,41 @@ public final class DriveApiImpl implements DriveApi {
     Optional<TimetableApi.TrainAssignment> assignment = assignmentOf(key);
     if (assignment
         .flatMap(TimetableApi.TrainAssignment::lastStopSequence)
-        .filter(last -> last > board.stopSequence())
+        .filter(last -> last > takeover.stopSequence())
         .isPresent()) {
       return AssignResult.DEPARTED;
     }
     if (assignment.isEmpty()
-        && Instant.now().isAfter(board.departure().get().plus(DriverTaskManager.EXPIRE_AFTER))) {
+        && Instant.now().isAfter(takeover.departure().get().plus(DriverTaskManager.EXPIRE_AFTER))) {
       // 还没对上列车、计划发车又早已过去：这一班已经跑完或不会来了，派出去也会立即作废。
       return AssignResult.DEPARTED;
     }
-    Optional<TimetableService.PlannedStop> alight =
+    Optional<TimetableService.PlannedStop> handover =
         resolved
             .get()
-            .alight()
+            .handover()
             .map(stop -> plannedStop(plan.get(), stop.sequence()))
             .filter(Objects::nonNull);
-    StationName boardName = stationName(board);
-    Optional<StationName> alightName = alight.map(this::stationName);
+    StationName takeoverName = stationName(takeover);
+    Optional<StationName> handoverName = handover.map(this::stationName);
     DriverTaskManager.TaskSpec spec =
         new DriverTaskManager.TaskSpec(
             key,
             plan.get().routeCode(),
-            boardName.operatorCode(),
-            boardName.code(),
-            boardName.name(),
-            board.nodeId().orElse(null),
-            board.stopSequence(),
-            board.departure().get(),
+            takeoverName.operatorCode(),
+            takeoverName.code(),
+            takeoverName.name(),
+            takeover.nodeId().orElse(null),
+            takeover.stopSequence(),
+            takeover.departure().get(),
             assignment.map(TimetableApi.TrainAssignment::trainName).orElse(null),
-            alight.map(TimetableService.PlannedStop::stopSequence).orElse(-1),
-            alightName.map(StationName::code).orElse(""),
-            alightName.map(StationName::name).orElse(""),
+            handover.map(TimetableService.PlannedStop::stopSequence).orElse(-1),
+            handoverName.map(StationName::code).orElse(""),
+            handoverName.map(StationName::name).orElse(""),
             request.depotPickup(),
             request.source(),
-            request.metadata());
+            request.metadata(),
+            request.rewards());
     DriverTaskManager.ClaimOutcome outcome =
         drive
             .get()
@@ -182,7 +188,7 @@ public final class DriveApiImpl implements DriveApi {
     return switch (outcome) {
       case CLAIMED -> AssignResult.ASSIGNED;
       case DISABLED -> AssignResult.DISABLED;
-      case BREAKER_OPEN -> AssignResult.BREAKER_OPEN;
+      case PROTECTION_ACTIVE -> AssignResult.BREAKER_OPEN;
       case ALREADY_HAS_TASK -> AssignResult.ALREADY_HAS_TASK;
       case TAKEN -> AssignResult.TAKEN;
       case UNAVAILABLE -> AssignResult.UNAVAILABLE;
@@ -258,7 +264,8 @@ public final class DriveApiImpl implements DriveApi {
         record.mode(),
         record.state(),
         record.points(),
-        record.grade(),
+        // 不评级的旧记录库里记作“-”，对外为空串。
+        ScoreRules.UNGRADED.equals(record.grade()) ? "" : record.grade(),
         record.startedAt(),
         record.finishedAt());
   }

@@ -256,7 +256,8 @@ class DriverProtectionTest {
             CONFIG.cabChange(),
             CONFIG.pickupAdvanceSeconds(),
             CONFIG.recordRetentionDays(),
-            0.5);
+            0.5,
+            CONFIG.skipStationHandback());
     Decision atStopPoint =
         DriverProtection.evaluate(
             new Input(

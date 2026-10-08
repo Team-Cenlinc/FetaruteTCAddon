@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.time.Instant;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.OptionalLong;
@@ -64,6 +65,9 @@ class PidsComposerTest {
   private Instant now = NOW;
   private List<PidsRow> rows = rows();
   private int snapshotCalls;
+
+  /** 运营商在大都会线、浦蓝线之外另有几条线路。 */
+  private int extraLines;
 
   private Function<PidsDirectory.OperatorLine, PidsLineStatus> statuses =
       line -> PidsLineStatus.of(PidsLineStatus.Condition.GOOD);
@@ -535,6 +539,7 @@ class PidsComposerTest {
             render.englishSeconds(),
             render.remarkSeconds(),
             render.stopPageSeconds()),
+        defaults.pages(),
         defaults.limits(),
         defaults.font(),
         defaults.layout(),
@@ -608,6 +613,158 @@ class PidsComposerTest {
     assertEquals(640, delayed.image().get().getWidth());
   }
 
+  @Test
+  void lineStatusScreensCanBindOnlyAnOperator() {
+    PidsScreen stationBound = register(PidsScreen.Mode.LIVE, Set.of(), "status-3x5", 3, 5);
+    PidsScreen operatorOnly = stationBound.withOperator(HHU.operatorCode(), Set.of("WS"), NOW);
+    registry.put(operatorOnly);
+
+    PidsContent content = composer.content(Optional.of(operatorOnly.id()), 640, 384).orElseThrow();
+
+    PidsLineStatusView view =
+        assertInstanceOf(PidsComposer.LineStatusKey.class, content.key()).view();
+    assertEquals(List.of("WS"), view.rows().stream().map(row -> row.line().code()).toList());
+  }
+
+  @Test
+  void otherScreensWithOnlyAnOperatorShowTheTestCard() {
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    PidsScreen operatorOnly = screen.withOperator(HHU.operatorCode(), Set.of(), NOW);
+    registry.put(operatorOnly);
+
+    card(composer.content(Optional.of(operatorOnly.id()), 384, 128));
+  }
+
+  @Test
+  void combinedScreensAlternateDeparturesAndLineStatusByTheClock() {
+    PidsScreen screen = registerPaged(PidsScreen.Mode.LIVE, "station-3x5", "status-3x5");
+    // 到发 30 秒 + 线路运行状况 15 秒，一轮 45 秒，按站名错开
+    long start = roundStart(45);
+
+    now = Instant.ofEpochSecond(start + 29);
+    PidsContent board = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    assertInstanceOf(PidsComposer.LiveKey.class, board.key());
+
+    now = Instant.ofEpochSecond(start + 30);
+    PidsContent status = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    PidsLineStatusView view =
+        assertInstanceOf(PidsComposer.LineStatusKey.class, status.key()).view();
+    assertEquals(List.of("MT", "WS"), view.rows().stream().map(row -> row.line().code()).toList());
+    assertEquals(640, status.image().get().getWidth());
+
+    now = Instant.ofEpochSecond(start + 45);
+    assertInstanceOf(
+        PidsComposer.LiveKey.class,
+        composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key());
+  }
+
+  @Test
+  void manyLinesShowOneStatusPagePerRoundSoDeparturesKeepTheirShare() {
+    extraLines = 5;
+    PidsScreen screen = registerPaged(PidsScreen.Mode.LIVE, "station-3x5", "status-3x5");
+    long start = roundStart(45);
+
+    List<Integer> pages = new ArrayList<>();
+    for (int round = 0; round < 2; round++) {
+      long at = start + 45L * round;
+      now = Instant.ofEpochSecond(at + 29);
+      assertInstanceOf(
+          PidsComposer.LiveKey.class,
+          composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key(),
+          "每轮的到发时长不随线路数变");
+      now = Instant.ofEpochSecond(at + 30);
+      PidsLineStatusView view =
+          assertInstanceOf(
+                  PidsComposer.LineStatusKey.class,
+                  composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+              .view();
+      assertEquals(2, view.pages(), "7 条线路分两页");
+      pages.add(view.page());
+    }
+    assertEquals(Set.of(0, 1), Set.copyOf(pages), "两页按轮轮换");
+  }
+
+  @Test
+  void aStandaloneLineStatusScreenTurnsPagesByTheClock() {
+    extraLines = 5;
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of(), "status-3x5", 3, 5);
+    long start = roundStart(15);
+
+    now = Instant.ofEpochSecond(start);
+    int first = lineStatusPage(screen);
+    now = Instant.ofEpochSecond(start + 14);
+    assertEquals(first, lineStatusPage(screen), "每页停 15 秒");
+    now = Instant.ofEpochSecond(start + 15);
+    assertEquals(1 - first, lineStatusPage(screen), "7 条线路两页，到点翻页");
+    now = Instant.ofEpochSecond(start + 30);
+    assertEquals(first, lineStatusPage(screen));
+  }
+
+  private int lineStatusPage(PidsScreen screen) {
+    PidsLineStatusView view =
+        assertInstanceOf(
+                PidsComposer.LineStatusKey.class,
+                composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+            .view();
+    assertEquals(2, view.pages());
+    return view.page();
+  }
+
+  /** 这一刻 HHU 的组合屏所在一轮的起点。 */
+  private static long roundStart(long cycle) {
+    long base = NOW.getEpochSecond();
+    return base - Math.floorMod(base + PidsCarousel.offset(HHU, cycle), cycle);
+  }
+
+  @Test
+  void combinedTestCardsListEveryLayoutInOrder() {
+    PidsScreen screen = registerPaged(PidsScreen.Mode.TEST_CARD, "status-3x5", "station-3x5");
+
+    PidsTestCard card = card(composer.content(Optional.of(screen.id()), 640, 384));
+
+    assertEquals("布局：线路运行状况 3×5 + 车站统屏 3×5（3×5）", card.lines().get(0));
+  }
+
+  @Test
+  void operatorOnlyCombinedScreensShowOnlyTheLineStatus() {
+    PidsScreen screen =
+        registerPaged(PidsScreen.Mode.LIVE, "station-3x5", "status-3x5")
+            .withOperator(HHU.operatorCode(), Set.of(), NOW);
+    registry.put(screen);
+    long start = roundStart(15);
+
+    for (long at = start; at < start + 45; at += 5) {
+      now = Instant.ofEpochSecond(at);
+      assertInstanceOf(
+          PidsComposer.LineStatusKey.class,
+          composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key(),
+          "没绑车站时到发页不出现");
+    }
+    assertEquals(0, snapshotCalls, "不取到发快照");
+  }
+
+  private PidsScreen registerPaged(PidsScreen.Mode mode, String... layouts) {
+    PidsScreen screen =
+        new PidsScreen(
+            UUID.randomUUID(),
+            WORLD,
+            new PidsScreen.Position(0, 64, 0),
+            PidsFacing.SOUTH,
+            3,
+            5,
+            List.of(layouts),
+            Optional.of(HHU),
+            Optional.empty(),
+            Set.of(),
+            Set.of(),
+            PidsScreen.Appearance.AUTO,
+            mode,
+            NOW,
+            NOW);
+    registry.put(screen);
+    return screen;
+  }
+
   private PidsScreen register(PidsScreen.Mode mode, Set<String> lines) {
     return register(mode, lines, "platform-1x3", 1, 3);
   }
@@ -659,7 +816,7 @@ class PidsComposerTest {
         Optional.empty());
   }
 
-  private static final class Directory implements PidsDirectory {
+  private final class Directory implements PidsDirectory {
     @Override
     public Optional<Names> stationName(String stationId) {
       return switch (stationId) {
@@ -698,19 +855,31 @@ class PidsComposerTest {
 
     @Override
     public List<OperatorLine> operatorLines(String operatorCode) {
-      return List.of(
+      List<OperatorLine> lines = new ArrayList<>();
+      lines.add(
           new OperatorLine(
               UUID.randomUUID(),
               "SURC",
               new PidsView.LineChip("MT", 0xD920D9, new Names("大都会线", "Metropolitan Line")),
               LineApi.LineStatus.ACTIVE,
-              Optional.empty()),
+              Optional.empty()));
+      lines.add(
           new OperatorLine(
               UUID.randomUUID(),
               "SURC",
               new PidsView.LineChip("WS", 0x70DEEE, new Names("浦蓝线", "Waterside Line")),
               LineApi.LineStatus.ACTIVE,
               Optional.empty()));
+      for (int i = 1; i <= extraLines; i++) {
+        lines.add(
+            new OperatorLine(
+                UUID.randomUUID(),
+                "SURC",
+                new PidsView.LineChip("X" + i, 0x808080, new Names("线路 " + i, "Line " + i)),
+                LineApi.LineStatus.ACTIVE,
+                Optional.empty()));
+      }
+      return lines;
     }
   }
 }

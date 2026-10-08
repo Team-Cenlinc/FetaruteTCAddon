@@ -6,9 +6,9 @@ import java.util.Objects;
 import java.util.Optional;
 
 /**
- * 插件派任务时，在一趟车次的停靠表里找出接班站与下车站。本类不依赖服务器对象，便于单测。
+ * 插件派任务时，在一趟车次的停靠表里找出接班站与交班站。本类不依赖服务器对象，便于单测。
  *
- * <p>只认停车的车站（有站码、不是通过）。接班站不能是终点站；下车站必须在接班站之后，写的就是终点站时按开到终点站处理。
+ * <p>只认停车的车站（有站码、不是通过）。接班站不能是终点站；交班站必须在接班站之后，写的就是终点站时按开到终点站处理。
  */
 public final class TaskStations {
 
@@ -34,40 +34,40 @@ public final class TaskStations {
   }
 
   /**
-   * 找到的接班站与下车站。
+   * 找到的接班站与交班站。
    *
-   * @param board 接班站
-   * @param alight 下车站；开到终点站时为空
+   * @param takeover 接班站
+   * @param handover 交班站；开到终点站时为空
    */
-  public record Resolved(Stop board, Optional<Stop> alight) {}
+  public record Resolved(Stop takeover, Optional<Stop> handover) {}
 
   private TaskStations() {}
 
   /**
-   * 找接班站与下车站。
+   * 找接班站与交班站。
    *
-   * @param boardCode 接班站站码；为空时取第一个停车的车站
-   * @param alightCode 下车站站码；为空时开到终点站
-   * @return 找不到、接班站是终点站、或下车站不在接班站之后时为空
+   * @param takeoverCode 接班站站码；为空时取第一个停车的车站
+   * @param handoverCode 交班站站码；为空时开到终点站
+   * @return 找不到、接班站是终点站、或交班站不在接班站之后时为空
    */
   public static Optional<Resolved> resolve(
-      List<Stop> stops, Optional<String> boardCode, Optional<String> alightCode) {
-    return resolve(stops, boardCode, -1, alightCode);
+      List<Stop> stops, Optional<String> takeoverCode, Optional<String> handoverCode) {
+    return resolve(stops, takeoverCode, -1, handoverCode);
   }
 
   /**
-   * 找接班站与下车站。
+   * 找接班站与交班站。
    *
-   * @param boardCode 接班站站码；为空时取第一个停车的车站
-   * @param boardSequence 接班站的停靠序号（同一车次两次经过同一站时用它区分）；-1 时取该站码的第一次停靠
-   * @param alightCode 下车站站码；为空时开到终点站
-   * @return 找不到、接班站是终点站、或下车站不在接班站之后时为空
+   * @param takeoverCode 接班站站码；为空时取第一个停车的车站
+   * @param takeoverSequence 接班站的停靠序号（同一车次两次经过同一站时用它区分）；-1 时取该站码的第一次停靠
+   * @param handoverCode 交班站站码；为空时开到终点站
+   * @return 找不到、接班站是终点站、或交班站不在接班站之后时为空
    */
   public static Optional<Resolved> resolve(
       List<Stop> stops,
-      Optional<String> boardCode,
-      int boardSequence,
-      Optional<String> alightCode) {
+      Optional<String> takeoverCode,
+      int takeoverSequence,
+      Optional<String> handoverCode) {
     Objects.requireNonNull(stops, "stops");
     List<Stop> stations = new ArrayList<>();
     for (Stop stop : stops) {
@@ -79,29 +79,29 @@ public final class TaskStations {
       return Optional.empty();
     }
     Stop terminus = stations.get(stations.size() - 1);
-    Stop board = null;
+    Stop takeover = null;
     for (Stop station : stations) {
       if (station == terminus) {
         break;
       }
-      boolean codeMatches = boardCode.isEmpty() || station.isStation(boardCode.get());
-      if (codeMatches && (boardSequence < 0 || station.sequence() == boardSequence)) {
-        board = station;
+      boolean codeMatches = takeoverCode.isEmpty() || station.isStation(takeoverCode.get());
+      if (codeMatches && (takeoverSequence < 0 || station.sequence() == takeoverSequence)) {
+        takeover = station;
         break;
       }
     }
-    if (board == null) {
+    if (takeover == null) {
       return Optional.empty();
     }
-    if (alightCode.isEmpty()) {
-      return Optional.of(new Resolved(board, Optional.empty()));
+    if (handoverCode.isEmpty()) {
+      return Optional.of(new Resolved(takeover, Optional.empty()));
     }
     for (Stop station : stations) {
-      if (station.sequence() <= board.sequence() || !station.isStation(alightCode.get())) {
+      if (station.sequence() <= takeover.sequence() || !station.isStation(handoverCode.get())) {
         continue;
       }
       return Optional.of(
-          new Resolved(board, station == terminus ? Optional.empty() : Optional.of(station)));
+          new Resolved(takeover, station == terminus ? Optional.empty() : Optional.of(station)));
     }
     return Optional.empty();
   }

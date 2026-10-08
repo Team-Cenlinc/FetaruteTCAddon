@@ -17,7 +17,8 @@ import org.junit.jupiter.api.Test;
 @DisplayName("成绩规则")
 class ScoreRulesTest {
 
-  private static StopScore stop(StopAlignment.Window window, boolean wrongDoor, boolean takenOver) {
+  private static StopScore stop(
+      StopAlignment.Outcome window, boolean wrongDoor, boolean takenOver) {
     return new StopScore("站", 0.0, window, wrongDoor, takenOver);
   }
 
@@ -25,7 +26,7 @@ class ScoreRulesTest {
   @DisplayName("全部停准、无介入：满分 S")
   void perfect() {
     TaskScore score = new TaskScore();
-    score.addStop(stop(StopAlignment.Window.ACCURATE, false, false));
+    score.addStop(stop(StopAlignment.Outcome.ACCURATE, false, false));
     score.setDelayAtStart(OptionalLong.of(10));
     score.setDelayAtEnd(OptionalLong.of(35));
     assertEquals(new ScoreRules.Result(100, ScoreRules.Grade.S), ScoreRules.evaluate(score, true));
@@ -35,8 +36,8 @@ class ScoreRulesTest {
   @DisplayName("逐项扣分与评级")
   void penalties() {
     TaskScore score = new TaskScore();
-    score.addStop(stop(StopAlignment.Window.ACCEPTED, true, false));
-    score.addStop(stop(StopAlignment.Window.OVERRUN, false, true));
+    score.addStop(stop(StopAlignment.Outcome.ACCEPTED, true, false));
+    score.addStop(stop(StopAlignment.Outcome.OVERRUN, false, true));
     score.setCounts(2, 1, 0, 3, 1, 1.2, 0, 1);
     score.setDelayAtStart(OptionalLong.of(0));
     score.setDelayAtEnd(OptionalLong.of(95));
@@ -70,7 +71,7 @@ class ScoreRulesTest {
     stopped.markStopped();
     stopped.end();
     StopScore score = StopScore.of(stopped);
-    assertEquals(StopAlignment.Window.ACCEPTED, score.window());
+    assertEquals(StopAlignment.Outcome.ACCEPTED, score.outcome());
 
     TaskScore task = new TaskScore();
     task.addStop(score);

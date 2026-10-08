@@ -51,7 +51,8 @@ class DriveSessionCabChangeTest {
         null,
         false,
         0L,
-        6);
+        6,
+        false);
   }
 
   @Test

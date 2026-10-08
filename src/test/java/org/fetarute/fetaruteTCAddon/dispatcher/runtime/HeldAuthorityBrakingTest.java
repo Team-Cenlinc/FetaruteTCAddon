@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.runtime;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
@@ -27,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchTestFixtures.FakeTrain;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ClaimRole;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequest;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyRequestBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
@@ -156,6 +158,55 @@ class HeldAuthorityBrakingTest {
     assertInstant(
         resolve(activeToken(C, heldWindow), B, movementClaims(heldWindow), head(95.0)),
         "authority-end-reached");
+  }
+
+  /** 最终校验失败时，只有“停车记下的阻挡仍被占”、且确有那条带阻挡的停因，才改为沿已持有授权刹车；其余失败原因说明本拍授权本身有问题，照旧作废硬停。 */
+  @Test
+  void onlyAStillHeldStopBlockerTurnsAFinalValidationFailureIntoBraking() {
+    OccupancyClaim foreign =
+        new OccupancyClaim(
+            node(D),
+            "SURC-DS-LH-0368",
+            Optional.empty(),
+            Instant.now(),
+            Duration.ZERO,
+            Optional.empty(),
+            ClaimRole.MOVEMENT_REQUIRED);
+    RuntimeStopState latched =
+        RuntimeStopState.occupancyHold(
+            TRAIN,
+            "BLOCKED_BY_OCCUPANCY",
+            new OccupancyDecision(
+                false, Instant.now(), SignalAspect.STOP, List.of(foreign), false, "blocked"),
+            Instant.now());
+    RuntimeStopState withoutBlockers =
+        RuntimeStopState.occupancyHold(
+            TRAIN,
+            "BLOCKED_BY_OCCUPANCY",
+            new OccupancyDecision(false, Instant.now(), SignalAspect.STOP, List.of(), false, "-"),
+            Instant.now());
+
+    assertTrue(
+        HeldAuthorityBraking.appliesToFinalValidationFailure(
+            "active-occupancy-stop-blocker-still-held", latched));
+    for (String other :
+        List.of(
+            "single-region-hard-barrier",
+            "stale-final-snapshot",
+            "occupancy-not-allowed",
+            "hard-authority-not-held",
+            "movement-token-not-active",
+            "movement-token-invalid",
+            "destination-missing",
+            "final-authorization-missing")) {
+      assertFalse(HeldAuthorityBraking.appliesToFinalValidationFailure(other, latched), other);
+    }
+    assertFalse(
+        HeldAuthorityBraking.appliesToFinalValidationFailure(
+            "active-occupancy-stop-blocker-still-held", null));
+    assertFalse(
+        HeldAuthorityBraking.appliesToFinalValidationFailure(
+            "active-occupancy-stop-blocker-still-held", withoutBlockers));
   }
 
   private HeldAuthorityBraking.Decision resolve(

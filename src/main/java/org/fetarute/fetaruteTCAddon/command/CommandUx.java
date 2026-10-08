@@ -71,6 +71,73 @@ public final class CommandUx {
     return quoteCommandArgument(raw);
   }
 
+  /**
+   * 客户端按 Brigadier 规则解析参数时，这个值不加引号也合法：只含字母、数字与 {@code _ - . +}。冒号、逗号、{@code * ?}、中文与空格不加引号时，
+   * 客户端把命令标红、其后的参数也不再补全；服务端仍能照常解析执行，所以只影响补全候选要不要加引号，不要据此拒绝不加引号的输入。
+   */
+  public static boolean unquotedSafe(String raw) {
+    if (raw == null || raw.isEmpty()) {
+      return false;
+    }
+    for (int i = 0; i < raw.length(); i++) {
+      char c = raw.charAt(i);
+      boolean ok =
+          (c >= '0' && c <= '9')
+              || (c >= 'A' && c <= 'Z')
+              || (c >= 'a' && c <= 'z')
+              || c == '_'
+              || c == '-'
+              || c == '.'
+              || c == '+';
+      if (!ok) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /**
+   * 补全候选：不加引号也合法的值原样给出；否则，或玩家已经起了引号时，加双引号。
+   *
+   * @param quoted 当前参数的输入以双引号开头
+   */
+  public static String suggestion(String raw, boolean quoted) {
+    String text = raw == null ? "" : raw.trim();
+    return !quoted && unquotedSafe(text) ? text : quoteCommandArgument(text);
+  }
+
+  /** 补全时当前参数已输入的文字是否以双引号开头。 */
+  public static boolean startsQuoted(String token) {
+    return token != null && token.trim().startsWith("\"");
+  }
+
+  /** 补全时当前参数已输入的文字去掉开头（可能还没闭合）的引号与首尾空白，转小写，用来和候选值比较。 */
+  public static String suggestionPrefix(String token) {
+    String text = token == null ? "" : token.trim();
+    if (text.startsWith("\"") || text.startsWith("'")) {
+      text = text.substring(1);
+    }
+    if (text.endsWith("\"") || text.endsWith("'")) {
+      text = text.substring(0, text.length() - 1);
+    }
+    return text.trim().toLowerCase(java.util.Locale.ROOT);
+  }
+
+  /**
+   * 以输入开头（不分大小写、不计开头的引号）的候选值，按 {@link #suggestion(String, boolean)} 需要时加引号。
+   *
+   * @param token 当前参数已输入的文字
+   */
+  public static java.util.List<String> suggestions(java.util.List<String> values, String token) {
+    boolean quoted = startsQuoted(token);
+    String prefix = suggestionPrefix(token);
+    return values.stream()
+        .filter(
+            value -> value != null && value.toLowerCase(java.util.Locale.ROOT).startsWith(prefix))
+        .map(value -> suggestion(value, quoted))
+        .toList();
+  }
+
   /** 去掉由 {@link #quoteCommandArgument(String)} 生成的外层引号。 */
   public static String unquoteCommandArgument(String raw) {
     if (raw == null) {

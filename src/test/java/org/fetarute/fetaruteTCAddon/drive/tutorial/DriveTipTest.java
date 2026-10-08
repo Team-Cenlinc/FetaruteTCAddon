@@ -22,8 +22,8 @@ class DriveTipTest {
   @DisplayName("信号变严、进站对标、开关门、发车信号只对人工驾驶的调度列车")
   void stationAndSignalTips() {
     assertEquals(
-        Optional.of(DriveTip.SIGNAL_CONFIRM),
-        DriveTip.firstDue(manualDispatch().signalConfirmPending(true).build(), Set.of()));
+        Optional.of(DriveTip.SIGNAL_ACKNOWLEDGE),
+        DriveTip.firstDue(manualDispatch().signalAcknowledgePending(true).build(), Set.of()));
     for (DriverStationHint.Kind kind :
         new DriverStationHint.Kind[] {
           DriverStationHint.Kind.APPROACH,
@@ -55,14 +55,14 @@ class DriveTipTest {
 
     TutorialSnapshot freeTrain =
         TutorialSnapshot.builder()
-            .signalConfirmPending(true)
+            .signalAcknowledgePending(true)
             .stationHint(DriverStationHint.Kind.DEPART)
             .build();
     assertEquals(Optional.empty(), DriveTip.firstDue(freeTrain, Set.of()), "非调度列车没有这些提示");
     TutorialSnapshot ato =
         manualDispatch()
             .ato(true)
-            .signalConfirmPending(true)
+            .signalAcknowledgePending(true)
             .stationHint(DriverStationHint.Kind.APPROACH)
             .build();
     assertEquals(Optional.empty(), DriveTip.firstDue(ato, Set.of()), "ATO 自己停车，不提示对标与信号");
@@ -87,13 +87,13 @@ class DriveTipTest {
   void shownTipsAreSkipped() {
     TutorialSnapshot both =
         manualDispatch()
-            .signalConfirmPending(true)
+            .signalAcknowledgePending(true)
             .stationHint(DriverStationHint.Kind.APPROACH)
             .build();
-    assertEquals(Optional.of(DriveTip.SIGNAL_CONFIRM), DriveTip.firstDue(both, Set.of()));
+    assertEquals(Optional.of(DriveTip.SIGNAL_ACKNOWLEDGE), DriveTip.firstDue(both, Set.of()));
     assertEquals(
         Optional.of(DriveTip.STOP_MARK),
-        DriveTip.firstDue(both, EnumSet.of(DriveTip.SIGNAL_CONFIRM)));
+        DriveTip.firstDue(both, EnumSet.of(DriveTip.SIGNAL_ACKNOWLEDGE)));
     assertEquals(Optional.empty(), DriveTip.firstDue(both, DriveTip.all()));
   }
 
@@ -103,6 +103,17 @@ class DriveTipTest {
     Set<String> keys = new java.util.HashSet<>();
     for (DriveTip tip : DriveTip.values()) {
       assertTrue(keys.add(tip.key()), tip.name());
+    }
+  }
+
+  @Test
+  @DisplayName("持久数据标记名不随文案键改名：出过的信号确认提示不会再出一次")
+  void storageKeysStayStable() {
+    assertEquals("signal-acknowledge", DriveTip.SIGNAL_ACKNOWLEDGE.key());
+    assertEquals("signal-confirm", DriveTip.SIGNAL_ACKNOWLEDGE.storageKey());
+    Set<String> keys = new java.util.HashSet<>();
+    for (DriveTip tip : DriveTip.values()) {
+      assertTrue(keys.add(tip.storageKey()), tip.name());
     }
   }
 }
