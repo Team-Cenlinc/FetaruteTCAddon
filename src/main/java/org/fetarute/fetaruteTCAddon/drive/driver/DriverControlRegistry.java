@@ -117,7 +117,8 @@ public final class DriverControlRegistry implements ControlAuthority {
       return Optional.empty();
     }
     GuardLink guard = guardsByName.get(trainName);
-    if (guard != null) {
+    // 绑定时的车名只在那列车还叫这个名字时才算数：改名后别的车再用这个名字，不能把车掌挂过去。
+    if (guard != null && trainName.equals(guard.currentTrainName())) {
       return Optional.of(guard);
     }
     for (GuardLink candidate : guardsByName.values()) {

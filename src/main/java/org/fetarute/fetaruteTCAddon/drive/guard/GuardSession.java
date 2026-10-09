@@ -70,7 +70,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private final GuardCabChange cabChange = new GuardCabChange();
   private boolean moving;
   private CabSeats.Departure layoverDeparture;
-  private CabSeatsMemo cabSeatsMemo;
+  private org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo cabSeatsMemo;
   private GuardTrip trip = new GuardTrip(null, "", java.time.Instant.now());
   private WorkedStop pendingExamStop;
 
@@ -85,13 +85,6 @@ public final class GuardSession implements DriveDoors.Cab {
   private TaskKey trackedTrip;
   private org.bukkit.util.Vector lastHead;
   private java.util.UUID lastWorld;
-
-  /** 驾驶室座位的认定：同一编组、同样节数时每秒最多重读一次。 */
-  public record CabSeatsMemo(
-      com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
-      int size,
-      long tick,
-      CabSeats seats) {}
 
   /**
    * 进行中的出站监视：起步时车头的位置，走过多远、到哪个 tick 为止，站台在哪个方向，结果记进哪一站。
@@ -154,7 +147,7 @@ public final class GuardSession implements DriveDoors.Cab {
     return cabChange;
   }
 
-  /** 预留的座位此刻让出来了：在换端，或正被直接送进另一端。 */
+  /** 预留的座位此刻让给驾驶员（只让给驾驶员，乘客照样坐不进）：在换端，或正被直接送进另一端。 */
   public boolean seatReleased() {
     return moving || cabChange.changing();
   }
@@ -220,11 +213,11 @@ public final class GuardSession implements DriveDoors.Cab {
     return moved;
   }
 
-  public CabSeatsMemo cabSeatsMemo() {
+  public org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo cabSeatsMemo() {
     return cabSeatsMemo;
   }
 
-  public void setCabSeatsMemo(CabSeatsMemo memo) {
+  public void setCabSeatsMemo(org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo memo) {
     this.cabSeatsMemo = memo;
   }
 

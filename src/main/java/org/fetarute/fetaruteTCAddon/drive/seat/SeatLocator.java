@@ -429,6 +429,52 @@ public final class SeatLocator {
     return false;
   }
 
+  /** 直接送进驾驶室时，玩家离端车最远多少格（方块）。 */
+  public static final double CAB_MOVE_RANGE_BLOCKS = 64.0;
+
+  /**
+   * 某一端的端车：离玩家不超过 {@value #CAB_MOVE_RANGE_BLOCKS} 格、在同一世界时才返回。
+   *
+   * @return 不满足时为 {@code null}
+   */
+  public static MinecartMember<?> cabMember(Player player, MinecartGroup group, CabSeats.End end) {
+    MinecartMember<?> member =
+        switch (end) {
+          case HEAD -> group.head();
+          case TAIL -> group.tail();
+          case NONE -> null;
+        };
+    if (member == null
+        || member.getEntity() == null
+        || group.getWorld() == null
+        || !group.getWorld().equals(player.getWorld())
+        || member.getEntity().getLocation().distanceSquared(player.getLocation())
+            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
+      return null;
+    }
+    return member;
+  }
+
+  /**
+   * 让玩家坐进列车某一端驾驶室离他最近的空座位（驾驶员与车掌共用）：驾驶座有标记时坐标记的座位，没有标记时按车厢位置认端。
+   *
+   * @return 坐进去的座位；离列车太远、不在同一世界、那一端没有空的驾驶座时为空
+   */
+  public static Optional<SeatBinding> enterCab(
+      Player player, MinecartGroup group, CabSeats cabs, CabSeats.End end) {
+    MinecartMember<?> member = cabMember(player, group, end);
+    if (member == null) {
+      return Optional.empty();
+    }
+    int memberIndex = group.indexOf(member);
+    OptionalInt seat =
+        enterNearestFreeSeatIndex(player, member, index -> cabs.endOf(memberIndex, index) == end);
+    return seat.isEmpty()
+        ? Optional.empty()
+        : Optional.of(
+            new SeatBinding(group.getProperties().getTrainName(), memberIndex, seat.getAsInt()));
+  }
+
   /**
    * 座位在这节车厢里的序号（见 {@link SeatBinding#seatIndex()}）。
    *

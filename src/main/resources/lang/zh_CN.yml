@@ -2719,6 +2719,7 @@ drive:
     next: "<prefix> <white>下一级：第 <level> 级 · <aqua><name></aqua></white> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><green>[报名考试]</green></hover></click>"
     top: "<prefix> <gold>你已取得全部等级的驾驶证</gold>"
     exam:
+      guard-unavailable: "<prefix> <red>车掌功能当前未开放，暂不能报名<white><name></white>考试</red>"
       guard:
         stop: "<prefix> <gray>车掌考试 <done>/<total></gray> <white><station></white> <gray>开门</gray> <open> <gray>关门</gray> <close> <gray>关门监视</gray> <closing> <gray>发车信号</gray> <signal> <gray>出站监视</gray> <departure>"
         passed: "<prefix> <green><bold>车掌考试及格</bold></green> <white><reason>，已取得第 <level> 级 · <name></white>"

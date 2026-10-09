@@ -11,6 +11,18 @@ final class PendingAcks {
 
   private final Map<UUID, Long> deadlines = new HashMap<>();
 
+  /**
+   * 回一短的期限：时限之外再留出认出一短要等的时间（一短要等两短的间隔过了才认得出），时限最后一刻按下的照样算收到。
+   *
+   * @param nowTick 发出发车信号的 tick
+   */
+  static long deadline(long nowTick, GuardConfig guard) {
+    return nowTick
+        + guard.ackSeconds() * 20L
+        + Math.max(guard.buzzerDoubleTicks(), BuzzerPress.RELEASE_GAP_TICKS)
+        + 1L;
+  }
+
   /** 开始等这名驾驶员回一短（再发一次信号时重新计时）。 */
   void expect(UUID driverId, long deadlineTick) {
     deadlines.put(driverId, deadlineTick);

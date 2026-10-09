@@ -40,7 +40,13 @@ public final class GuardLink {
    * @param stop 站台的停站对象
    * @param work 这一站的作业
    */
-  public record Settled(DriverStationStop stop, GuardStopWork work) {}
+  public record Settled(DriverStationStop stop, GuardStopWork work) {
+
+    /** 记进成绩与奖励：没越站、做过作业（见 {@link GuardStopWork#worked()}）。 */
+    public boolean worked() {
+      return !stop.skipped() && work.worked();
+    }
+  }
 
   /**
    * @param clock 当前服务器 tick
@@ -65,6 +71,13 @@ public final class GuardLink {
   /** 绑定时的车名（调度改名后仍用它找回）。 */
   public String trainName() {
     return trainName;
+  }
+
+  /** 列车此刻的车名：终点待命复用会给列车改名，找驾驶员、提示与铃都按它；读不到时用绑定时的车名。 */
+  public String currentTrainName() {
+    TrainProperties current = properties;
+    String name = current == null ? null : current.getTrainName();
+    return name == null || name.isBlank() ? trainName : name;
   }
 
   public TrainProperties properties() {

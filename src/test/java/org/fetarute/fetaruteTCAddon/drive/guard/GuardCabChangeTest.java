@@ -186,33 +186,40 @@ class GuardCabChangeTest {
         GuardCabChange.fromDriver(CabChange.Stage.IDLE, false, End.NONE, false, 0, 4));
   }
 
-  /** 换端扣车：从终点站待命起扣，放行后到换端完成为止；人工驾驶不扣。 */
+  /** 换端扣车：从终点站待命起扣（或正线原地折返停着开始换端时扣），到换端完成为止；人工驾驶不扣。 */
   @Test
   void theHoldLastsFromLayoverUntilTheChangeIsDone() {
-    assertTrue(GuardSessionManager.keepCabHold(true, true, false, false), "待命起扣");
-    assertTrue(GuardSessionManager.keepCabHold(true, false, true, true), "放行后换端中");
-    assertFalse(GuardSessionManager.keepCabHold(true, false, true, false), "换好了");
-    assertFalse(GuardSessionManager.keepCabHold(true, false, false, true), "没在待命时扣过就不扣");
-    assertFalse(GuardSessionManager.keepCabHold(false, true, true, true), "人工驾驶不扣");
+    assertTrue(GuardSessionManager.keepCabHold(true, true, false, false, false), "待命起扣");
+    assertTrue(GuardSessionManager.keepCabHold(true, false, true, true, false), "放行后换端中");
+    assertFalse(GuardSessionManager.keepCabHold(true, false, true, false, false), "换好了");
+    assertFalse(
+        GuardSessionManager.keepCabHold(true, false, false, true, false), "开着车才开始换端：不扣，直接送过去");
+    assertTrue(GuardSessionManager.keepCabHold(true, false, false, true, true), "正线原地折返停着开始换端：扣住");
+    assertFalse(GuardSessionManager.keepCabHold(false, true, true, true, true), "人工驾驶不扣");
   }
 
-  /** 预留座位：别人坐不进来，车掌本人可以；换端时预留让出来，谁都能坐。 */
+  /** 预留座位：别人坐不进来，车掌本人可以；换端时只让给驾驶员，乘客照样坐不进。 */
   @Test
   void aReservedSeatTurnsAwayEveryoneButTheGuard() {
     UUID guard = UUID.randomUUID();
+    UUID driver = UUID.randomUUID();
     UUID other = UUID.randomUUID();
     UUID car = UUID.randomUUID();
     CabSeatKey reserved = new CabSeatKey(car, 1);
-    assertTrue(GuardSessionManager.blocksSeat(reserved, false, guard, reserved, other));
-    assertTrue(GuardSessionManager.blocksSeat(reserved, false, guard, reserved, null));
-    assertFalse(GuardSessionManager.blocksSeat(reserved, false, guard, reserved, guard));
-    assertFalse(GuardSessionManager.blocksSeat(reserved, true, guard, reserved, other), "换端中");
+    assertTrue(GuardSessionManager.blocksSeat(reserved, guard, null, reserved, other));
+    assertTrue(GuardSessionManager.blocksSeat(reserved, guard, null, reserved, null));
+    assertTrue(GuardSessionManager.blocksSeat(reserved, guard, null, reserved, driver), "没在换端");
+    assertFalse(GuardSessionManager.blocksSeat(reserved, guard, null, reserved, guard));
     assertFalse(
-        GuardSessionManager.blocksSeat(reserved, false, guard, new CabSeatKey(car, 0), other),
+        GuardSessionManager.blocksSeat(reserved, guard, driver, reserved, driver), "换端让给驾驶员");
+    assertTrue(
+        GuardSessionManager.blocksSeat(reserved, guard, driver, reserved, other), "换端时乘客照样坐不进");
+    assertFalse(
+        GuardSessionManager.blocksSeat(reserved, guard, null, new CabSeatKey(car, 0), other),
         "同一节车的别的座位");
     assertFalse(
         GuardSessionManager.blocksSeat(
-            reserved, false, guard, new CabSeatKey(UUID.randomUUID(), 1), other),
+            reserved, guard, null, new CabSeatKey(UUID.randomUUID(), 1), other),
         "别的车厢");
   }
 

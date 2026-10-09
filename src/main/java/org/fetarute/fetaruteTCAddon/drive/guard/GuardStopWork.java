@@ -80,6 +80,7 @@ public final class GuardStopWork {
 
   private boolean wrongDoor;
   private boolean closedEarly;
+  private boolean doorsReleased;
   private int closingSamples;
   private int closingWatched;
   private int departureSamples;
@@ -95,6 +96,9 @@ public final class GuardStopWork {
    * @return 时限到了要由站台代做的动作（每步只返回一次）
    */
   public Action tick(Phase phase) {
+    if (phase.doorsOpened()) {
+      doorsReleased = true;
+    }
     if (phase != lastPhase) {
       lastPhase = phase;
       stepTicks = 0L;
@@ -275,6 +279,11 @@ public final class GuardStopWork {
   /** 本站停站时间未到就关了门。 */
   public boolean closedEarly() {
     return closedEarly;
+  }
+
+  /** 这一站算做过作业：车门放行过（停站进到开门以后），或有超时由站台代做；越站、开门前就结束的不算。 */
+  public boolean worked() {
+    return doorsReleased || timedOut;
   }
 
   /** 本站报告过几次。 */

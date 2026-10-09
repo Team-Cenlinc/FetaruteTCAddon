@@ -126,6 +126,7 @@ import org.fetarute.fetaruteTCAddon.drive.menu.MenuLayout;
 import org.fetarute.fetaruteTCAddon.drive.menu.TaskCard;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
@@ -199,9 +200,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 终点站接车留出的余量（秒）：票据到 assign-tolerance 作废之前先放行。 */
   private static final long PICKUP_TOLERANCE_MARGIN_SECONDS = 30L;
-
-  /** 直接送进另一端驾驶室时，驾驶员离那一节车最远多少格（走远了不强拉回来）。 */
-  private static final double CAB_MOVE_RANGE_BLOCKS = 64.0;
 
   /** 每隔多少 tick 评估一次拥堵保护。 */
   private static final int PROTECTION_TICKS = 100;
@@ -1259,22 +1257,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   public boolean canEnterCab(Player player) {
     DriveConfig current = config.withLevel(levels.effective(player, config.level()));
     return cabTarget(player, current)
-        .filter(target -> cabMember(player, target.group(), target.end()) != null)
+        .filter(target -> SeatLocator.cabMember(player, target.group(), target.end()) != null)
         .isPresent();
-  }
-
-  /** 某一端的端车：离玩家不超过 {@value #CAB_MOVE_RANGE_BLOCKS} 格、在同一世界时才返回。 */
-  private static MinecartMember<?> cabMember(Player player, MinecartGroup group, CabSeats.End end) {
-    MinecartMember<?> member = end == CabSeats.End.TAIL ? group.tail() : group.head();
-    if (member == null
-        || member.getEntity() == null
-        || group.getWorld() == null
-        || !group.getWorld().equals(player.getWorld())
-        || member.getEntity().getLocation().distanceSquared(player.getLocation())
-            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
-      return null;
-    }
-    return member;
   }
 
   /**
@@ -1284,17 +1268,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private OptionalInt enterCab(
       Player player, MinecartGroup group, CabSeats.End end, DriveConfig current) {
-    MinecartMember<?> member = cabMember(player, group, end);
-    if (member == null) {
-      return OptionalInt.empty();
-    }
-    int memberIndex = group.indexOf(member);
     CabSeats cabs = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
-    return SeatLocator.enterNearestFreeSeatIndex(
-                player, member, index -> cabs.endOf(memberIndex, index) == end)
-            .isPresent()
-        ? OptionalInt.of(memberIndex)
-        : OptionalInt.empty();
+    return SeatLocator.enterCab(player, group, cabs, end)
+        .map(seat -> OptionalInt.of(seat.memberIndex()))
+        .orElse(OptionalInt.empty());
   }
 
   /**
@@ -1429,7 +1406,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (crew == null || !crew.anyOnDuty()) {
       return true;
     }
-    return crew.allowSeatEnter(entity, member, SeatLocator.seatIndexOf(member, seat));
+    return crew.allowSeatEnter(entity, member, () -> SeatLocator.seatIndexOf(member, seat));
   }
 
   /**
@@ -4879,23 +4856,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 让驾驶员坐进那一端驾驶室的空座位（见 {@link #moveToCab}）。 */
   private boolean seatInCab(
       DriveSession session, MinecartGroup group, Player player, CabSeats.End end) {
-    MinecartMember<?> member = end == CabSeats.End.NONE ? null : cabMember(player, group, end);
-    if (member == null) {
-      return false;
-    }
-    int memberIndex = group.indexOf(member);
     CabSeats cabs = SeatLocator.cabSeats(group, config.driver().cabSeatNames());
-    OptionalInt seatIndex =
-        SeatLocator.enterNearestFreeSeatIndex(
-            player, member, index -> cabs.endOf(memberIndex, index) == end);
-    traceSession(
-        session,
-        "直接送进第 " + (memberIndex + 1) + " 节驾驶室: " + (seatIndex.isPresent() ? "已入座" : "没有空的驾驶座"));
-    if (seatIndex.isEmpty()) {
+    Optional<SeatBinding> seat = SeatLocator.enterCab(player, group, cabs, end);
+    traceSession(session, "直接送进" + end + "端驾驶室: " + (seat.isPresent() ? "已入座" : "没有空的驾驶座或离列车太远"));
+    if (seat.isEmpty()) {
       return false;
     }
     // 按选中的座位记下：TrainCarts 晚一拍才让人坐下时，送回座位也送回这个座位；系统送进去的座位就是驾驶室，驾驶座没有标记的列车不用再确认。
-    SeatBinding binding = new SeatBinding(session.trainName(), memberIndex, seatIndex.getAsInt());
+    SeatBinding binding =
+        new SeatBinding(session.trainName(), seat.get().memberIndex(), seat.get().seatIndex());
     session.rebind(binding);
     session.noteCabMove(Bukkit.getCurrentTick());
     CabSeatKey.of(group, binding).ifPresent(session::setConfirmedCabSeat);
@@ -5064,16 +5033,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 驾驶室座位：同一编组、同样节数时每秒最多重读一次（挂上或摘下车厢时马上重读）。 */
   private static CabSeats cabSeatsOf(
       DriveSession session, MinecartGroup group, DriveConfig current, long nowTick) {
-    DriveSession.CabSeatsMemo memo = session.cabSeatsMemo();
-    if (memo != null
-        && memo.group() == group
-        && memo.size() == group.size()
-        && nowTick - memo.tick() < CAB_CHANGE_REFRESH_TICKS) {
-      return memo.seats();
-    }
-    CabSeats seats = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
-    session.setCabSeatsMemo(new DriveSession.CabSeatsMemo(group, group.size(), nowTick, seats));
-    return seats;
+    CabSeatsMemo memo =
+        CabSeatsMemo.refresh(
+            session.cabSeatsMemo(), group, current.driver().cabSeatNames(), nowTick);
+    session.setCabSeatsMemo(memo);
+    return memo.seats();
   }
 
   /** 计划发车：每秒最多查一次（待命与否、列车改名或驾驶任务换了都马上重查）。 */

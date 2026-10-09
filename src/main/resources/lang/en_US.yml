@@ -1015,6 +1015,7 @@ drive:
     next: "<prefix> <white>Next: Level <level> · <aqua><name></aqua></white> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
     top: "<prefix> <gold>You hold every licence level</gold>"
     exam:
+      guard-unavailable: "<prefix> <red>Guard duty is not available right now, so the <white><name></white> exam cannot be taken</red>"
       guard:
         stop: "<prefix> <gray>Guard exam <done>/<total></gray> <white><station></white> <gray>open</gray> <open> <gray>close</gray> <close> <gray>closing watch</gray> <closing> <gray>signal</gray> <signal> <gray>departure watch</gray> <departure>"
         passed: "<prefix> <green><bold>Guard exam passed</bold></green> <white><reason>; you now hold level <level> · <name></white>"

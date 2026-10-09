@@ -36,7 +36,7 @@
 
 - 快捷栏（数据包层改写，背包本身不动）：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃、9 紧急停车；5、8 空着。左右按车掌座位的朝向算（`DriveDoors` 与驾驶员共用，`DriveDoors.Cab`）。开门键对已开着的一侧无效，关门后再开门照样按开门键。选中格子后右键按下，按住右键时客户端连续发包只算一次；发车铃按住多久响多久。
 - 贴图键：车门沿用驾驶台的 `fetarute:drive/panel/door_l_*`、`door_r_*`；其余是 `fetarute:drive/guard/<键>`（`door_close[_on]`、`report[_used]`、`confirm_stop|go|done`、`buzzer[_on]`、`emergency[_on]`、菜单的 `seat`），结束值乘沿用 `panel/end|end_confirm`。没装材质包时按染料区分，“亮起”加附魔光效。
-- simulation 级人工驾驶的驾驶员收到发车信号后，要在 `ack-seconds`（默认 5）秒内按丢弃键回一短表示收到（`PendingAcks`），提示写在发车信号那一行（`drive.guard.driver.signal-ack`）；到时没回记一次漏确认（与漏确认信号同一项，扣 5 分）。车掌离岗时不再等。
+- simulation 级人工驾驶的驾驶员收到发车信号后，要在 `ack-seconds`（默认 5）秒内按丢弃键回一短表示收到（`PendingAcks`，期限另留出认出一短要等的时间；等的期间转成 ATO 的不记），提示写在发车信号那一行（`drive.guard.driver.signal-ack`）；到时没回记一次漏确认（与漏确认信号同一项，扣 5 分）。车掌离岗时不再等。
 - 铃（`BuzzerPress`）：按住约 0.8 秒（`buzzer-long-ticks`）为一长；一短之后 1 秒（`buzzer-double-ticks`）内再按一下为呼叫。车掌一长＝发车信号；一短＝收到；两短＝呼叫驾驶员。驾驶员的铃是丢弃键（Q，驾驶中本来不用）：一短收到、两短呼叫车掌。铃声（`sounds.buzzer`）只给这列车上的驾驶员与车掌听。
 - 车掌菜单（F，27 格）：传送入座、呼叫驾驶员、异常报告、结束值乘。
 - 离座：停稳且车门开着时 Shift 才放行（下到站台监视），行驶中、车门关着时拦下；在站台上右键自己的列车回到车掌座位。列车开走时车掌不在车上、离每节车厢都超过 48 格：漏乘，值乘结束（`LEFT_BEHIND`）。
@@ -54,11 +54,13 @@
 - 放行前已知下一趟由车掌这一端发车：聊天栏告知换到另一头（`drive.guard.cab-change.announce`），不计时。派车放行、列车调头后车掌预留的座位不在车尾端：在换端时间预留（与驾驶员相同，`driver.cab-change` 段按车长算）内坐进车尾端驾驶室；超时、或人工驾驶的驾驶员先开了车，直接送进去，送不了值乘结束（`CAB_CHANGE`）。
 - 换端途中车门关着也可以下车；在站台上右键要换到的那一端的车厢入座。菜单“传送入座”或 `/fta guard seat` 直接送过去（时间够时可选）。
 - 一起传送：驾驶员被直接送进发车端（准备时间不足、换端超时、点了直接换端）时，车掌一起送进另一头（`GuardSessionManager#moveWithDriver`）；车掌被直接送过去时，驾驶员也在换端就一起送（`DriverSide#moveWithGuard`）。同一拍里先请坐在对方要去那一端的人下车，再分别入座，两人不会抢同一个座位。
-- 座位预留：车掌值乘期间，别人（乘客、驾驶员）坐不进车掌预留的座位（TrainCarts `MemberBeforeSeatEnterEvent`，`GuardSessionManager#blocksSeat`）；换端开始时预留让出来，坐进另一头后预留改到新座位。左右车门的记录随车掌面朝的方向对调（`DriveDoors#followCab`）。
+- 座位预留：车掌值乘期间，别人（乘客、驾驶员）坐不进车掌预留的座位（TrainCarts `MemberBeforeSeatEnterEvent`，`GuardSessionManager#blocksSeat`）；换端时预留只让给这列车的驾驶员（乘客照样坐不进），坐进另一头后预留改到新座位。左右车门的记录随车掌面朝的方向对调（`DriveDoors#followCab`）。
+- 正线原地折返（没经过待命的调头）：开始换端时列车还停着，同样扣住（撤掉调头后排上的发车动作），车掌坐进车尾端后重算信号发车；已经开动了才开始换端的直接送进去。
 - 换端扣车：车上没有人工驾驶的驾驶员（只有车掌，或 ATO 驾驶员）时，从终点站待命起扣着列车（`GuardLink#cabHold`，按驾驶员控制处理）；派车放行时只调头、不发车（只有车掌时由 `GuardLink#takeTurnback` 取走调头标记），车掌坐进车尾端（或不必换）后解除并重算信号，交回自动运行发车。人工驾驶由驾驶员自己起步，驾驶员动作栏提示车掌换端与就位。
 
 ## 成绩、奖励与记录
 
+- 只有做过作业的站才记（`GuardLink.Settled#worked`）：车门放行过、或有超时由站台代做；越站、开门前就结束的停站不计成绩、奖励与考试站数。
 - 按车次分趟（`GuardTrip`）：每站作业结算后记进这一趟（站开始时列车跑的车次，按时刻表的列车分配查）；没在停站时每秒看一次车次，换了（终点站折返开下一趟）就把做过作业的这一趟按开完结算；值乘结束时按结束原因结算手上这一趟。站结算时先进 `GuardLink` 的队列，同一拍里下一站开始也不会丢；作业记录到结算时才折成成绩（出站监视离站后还在采样）。
 - 计分（`GuardScore`，满分 100，评级阈值与驾驶员共用 `ScoreRules#gradeOf`）：开门超时、关门超时、发车铃超时、开错一侧车门各 5 分；停站时间未到就关门、关门监视不合格、出站监视不合格各 2 分（没采到样的不判）；异常情况报告只记次数不扣分。成绩单每项扣分一行（`drive.guard.sheet.*`），全无扣分时一行说明。
 - 终态：开完一趟为完成；车掌自己结束、离线、死亡、游戏模式不允许为放弃；管理员撤下、列车不在了、功能关闭为中断；连续超时、漏乘、换端没坐进车尾为未完成（最高 D）。
@@ -69,7 +71,7 @@
 ## 车掌证（驾驶证的车掌考法）
 
 - `drive.yml` 的 `license.classes.guard`：考法 `exam: guard`（`LicenseClass.Exam.GUARD`），不要求先有驾驶证，考过给 `fetarute.drive.guard`。默认做满 `exam-stops`（3）站、及格 `min-points`（70），`allow-wrong-door: false`。
-- 报名（`/fta license exam guard`）后在 `exam-window-minutes` 内到调度列车车尾驾驶室上岗；考试期间临时挂上车掌权限，考完或超时后收回（值乘中不超时，等做满站数或值乘结束再判定）。报名时讲考试内容、讲评方式、及格条件、开始方式，并发一本《FTCA 车掌手册》（`DriverHandbook#guard`，`/fta handbook guard` 再领）。
+- 车掌功能关着或不可用时不能报名（`drive.license.exam.guard-unavailable`）。报名（`/fta license exam guard`）后在 `exam-window-minutes` 内到调度列车车尾驾驶室上岗；考试期间临时挂上车掌权限，考完或超时后收回（值乘中不超时，等做满站数或值乘结束再判定）。报名时讲考试内容、讲评方式、及格条件、开始方式，并发一本《FTCA 车掌手册》（`DriverHandbook#guard`，`/fta handbook guard` 再领）。
 - 考官（`GuardExaminer`，驾驶证服务实现）：车掌每做完一站作业（出站监视采完）交给它，逐站讲评开门、关门、关门监视、发车信号、出站监视（`GuardExam#review`）；哪一站超时当场不及格，开错车门按 `allow-wrong-door`，做满站数后按车掌成绩判定（`GuardExam#judge`）。值乘中途结束：连续超时、漏乘、换端没坐进车尾为不及格，其余不计成绩（`GuardExam#ended`）。不及格进入 `retry-cooldown-minutes` 冷却，并在下一拍结束这次值乘（`EXAM`）；及格当场发证，值乘照常继续。
 - 考试中做的这一趟不发奖励（`GuardTrip#examined`），记录照写。车掌证没有单独的练习（`/fta license practice guard` 提示读手册）。
 

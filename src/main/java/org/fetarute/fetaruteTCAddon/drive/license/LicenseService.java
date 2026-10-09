@@ -45,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardStations;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardExaminer;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardScore;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardSession;
+import org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -425,6 +426,11 @@ public final class LicenseService implements Listener, GuardExaminer {
 
   /** 车掌考试：报名后在截止时刻前到调度列车车尾驾驶室上岗，做满几站作业，逐站讲评，按车掌成绩判定。 */
   private Reply startGuardExam(Player player, LicenseClass license, Instant now) {
+    DriveSessionManager manager = drive.get();
+    if (manager == null || !manager.guards().map(GuardSessionManager::available).orElse(false)) {
+      // 车掌功能关着或不可用：报了名也上不了岗，不登记考试。
+      return new Reply("drive.license.exam.guard-unavailable", Map.of("name", license.name()));
+    }
     UUID id = player.getUniqueId();
     exams.put(
         id,

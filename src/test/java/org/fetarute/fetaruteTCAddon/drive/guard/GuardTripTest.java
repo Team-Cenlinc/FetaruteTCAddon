@@ -4,6 +4,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
@@ -92,6 +93,25 @@ class GuardTripTest {
     assertTrue(link.drainSettled().isEmpty());
     link.settle();
     assertEquals(second, link.drainSettled().get(0).stop());
+  }
+
+  /** 越站、开门前就结束的停站不算做过作业；车门放行过、或站台代开过的才算。 */
+  @Test
+  void onlyWorkedStopsCount() {
+    DriverStationStop stop = mock(DriverStationStop.class);
+    GuardStopWork work = new GuardStopWork(GuardConfig.defaults());
+    work.tick(DriverStationStop.Phase.APPROACH);
+    work.tick(DriverStationStop.Phase.OPEN_DOORS);
+    assertFalse(new GuardLink.Settled(stop, work).worked(), "开门前就结束");
+    work.tick(DriverStationStop.Phase.DWELL);
+    assertTrue(new GuardLink.Settled(stop, work).worked());
+    when(stop.skipped()).thenReturn(true);
+    assertFalse(new GuardLink.Settled(stop, work).worked(), "越站");
+    GuardStopWork forced = new GuardStopWork(GuardConfig.defaults());
+    for (long i = 0; i <= GuardConfig.defaults().openDoorsTicks(); i++) {
+      forced.tick(DriverStationStop.Phase.OPEN_DOORS);
+    }
+    assertTrue(new GuardLink.Settled(mock(DriverStationStop.class), forced).worked(), "站台代开也算一站");
   }
 
   @Test

@@ -9,7 +9,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
-import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.BooleanSupplier;
@@ -40,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
@@ -210,6 +210,11 @@ public final class GuardSessionManager {
 
   // ---- 查询 ----
 
+  /** 车掌功能此刻能用：配置开着、快捷栏数据包改写已就绪。 */
+  public boolean available() {
+    return config.get().guard().enabled() && drivers.hotbarReady();
+  }
+
   /** 玩家是否在当车掌。 */
   public boolean isOnDuty(UUID playerId) {
     return playerId != null && sessions.containsKey(playerId);
@@ -338,7 +343,7 @@ public final class GuardSessionManager {
     refreshHotbar(player, session, true);
     ensureTask();
     drivers
-        .driverOf(link.trainName())
+        .driverOf(link.currentTrainName())
         .ifPresent(
             driver ->
                 drivers.notifyDriver(
@@ -367,12 +372,7 @@ public final class GuardSessionManager {
       return;
     }
     lastUseTick.remove(playerId);
-    Player gone = Bukkit.getPlayer(playerId);
-    // 已做完的站按结束原因结算：中途离开、被撤下的按做过的站给，连续超时、漏乘、换端没坐进车尾的判为未完成。
-    recordSettled(gone, session);
-    flushExamStop(gone, session);
-    examiner.onDutyEnded(playerId, reason);
-    settleTrip(gone, session, session.trip(), GuardTrip.stateFor(reason));
+    // 先把列车交还：扣着的紧急停车与换端扣车解除、车掌登记撤下、开着的门关上，结算出错也不会把列车扣住。
     Optional<MinecartGroup> train = findGroup(session);
     boolean held = session.link().holdsTrain();
     session.link().releaseEmergency();
@@ -382,10 +382,18 @@ public final class GuardSessionManager {
     registry.unbindGuard(session.link());
     train.ifPresent(group -> session.doors().closeAll(session));
     if (held) {
-      // 车掌离岗时扣着的紧急停车与换端扣车一并解除，列车交还自动运行。
       train.ifPresent(drivers::refreshSignal);
     }
     Player player = Bukkit.getPlayer(playerId);
+    // 已做完的站按结束原因结算：中途离开、被撤下的按做过的站给，连续超时、漏乘、换端没坐进车尾的判为未完成。
+    try {
+      recordSettled(player, session);
+      flushExamStop(player, session);
+      examiner.onDutyEnded(playerId, reason);
+      settleTrip(player, session, session.trip(), GuardTrip.stateFor(reason));
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("车掌值乘结算出错 " + session.playerName() + ": " + ex);
+    }
     if (player != null) {
       sidebar.hide(player);
       if (session.menuTopSize() > 0) {
@@ -405,7 +413,7 @@ public final class GuardSessionManager {
       sidebar.forget(playerId);
     }
     drivers
-        .driverOf(session.link().trainName())
+        .driverOf(session.link().currentTrainName())
         .ifPresent(
             driver ->
                 drivers.notifyDriver(
@@ -414,7 +422,7 @@ public final class GuardSessionManager {
                     Map.of("guard", session.playerName()),
                     null));
     // 车掌离岗：驾驶员不必再回这一声。
-    drivers.driverOf(session.link().trainName()).ifPresent(pendingAcks::forget);
+    drivers.driverOf(session.link().currentTrainName()).ifPresent(pendingAcks::forget);
     if (sessions.isEmpty() && task != null) {
       task.cancel();
       task = null;
@@ -582,6 +590,8 @@ public final class GuardSessionManager {
     Optional<DriverStationStop> last = link.lastStop();
     if (last.isPresent() && !last.get().active() && session.lastSettledStop() != last.get()) {
       session.setLastSettledStop(last.get());
+      // 上一站的出站监视还没完（两站挨得很近）：先收尾、交给考官，再开始这一站的。
+      finishDepartureWatch(player, session);
       link.work()
           .filter(GuardStopWork::released)
           .filter(work -> group.isMoving())
@@ -596,7 +606,7 @@ public final class GuardSessionManager {
 
   private void announceDepartureSignal(Player player, GuardSession session, boolean forced) {
     sounds.play(player, DriveCue.DEPART);
-    Optional<UUID> driver = drivers.driverOf(session.link().trainName());
+    Optional<UUID> driver = drivers.driverOf(session.link().currentTrainName());
     if (driver.isEmpty()) {
       return;
     }
@@ -604,7 +614,7 @@ public final class GuardSessionManager {
     boolean ack = drivers.ackRequired(driver.get());
     if (ack) {
       pendingAcks.expect(
-          driver.get(), Bukkit.getCurrentTick() + config.get().guard().ackSeconds() * 20L);
+          driver.get(), PendingAcks.deadline(Bukkit.getCurrentTick(), config.get().guard()));
     }
     String key = forced ? "drive.guard.driver.signal-forced" : "drive.guard.driver.signal";
     drivers.notifyDriver(
@@ -624,8 +634,11 @@ public final class GuardSessionManager {
       return;
     }
     for (UUID driver : pendingAcks.expired(now)) {
-      drivers.missedAck(driver);
-      drivers.notifyDriver(driver, "drive.guard.driver.ack-missed", Map.of(), null);
+      // 等的期间转成了 ATO（或不再驾驶）：不再要求回应，不记漏确认。
+      if (drivers.ackRequired(driver)) {
+        drivers.missedAck(driver);
+        drivers.notifyDriver(driver, "drive.guard.driver.ack-missed", Map.of(), null);
+      }
     }
   }
 
@@ -685,7 +698,7 @@ public final class GuardSessionManager {
     long now = Bukkit.getCurrentTick();
     if (button.get() == GuardHotbar.Button.BUZZER) {
       session.buzzer().press(now);
-      ringBuzzer(player, session.link().trainName());
+      ringBuzzer(player, session.link().currentTrainName());
       return;
     }
     if (!fresh) {
@@ -768,7 +781,7 @@ public final class GuardSessionManager {
   /** 车掌的铃：一长发车、一短收到、两短呼叫。 */
   private void onGuardBuzzer(
       Player player, GuardSession session, BuzzerPress.Kind kind, boolean seated) {
-    String train = session.link().trainName();
+    String train = session.link().currentTrainName();
     switch (kind) {
       case LONG -> {
         if (session.link().emergencyHold()) {
@@ -866,7 +879,7 @@ public final class GuardSessionManager {
               .filter(
                   session ->
                       drivers
-                          .driverOf(session.link().trainName())
+                          .driverOf(session.link().currentTrainName())
                           .filter(entry.getKey()::equals)
                           .isPresent())
               .findFirst();
@@ -922,7 +935,7 @@ public final class GuardSessionManager {
             "seconds",
             String.valueOf(config.get().guard().incidentExtensionSeconds())));
     drivers
-        .driverOf(session.link().trainName())
+        .driverOf(session.link().currentTrainName())
         .ifPresent(
             driver ->
                 drivers.notifyDriver(
@@ -947,7 +960,7 @@ public final class GuardSessionManager {
       notice(player, session, "drive.guard.emergency.stopped", Map.of());
       return;
     }
-    String train = session.link().trainName();
+    String train = session.link().currentTrainName();
     Optional<UUID> driver = drivers.driverOf(train);
     if (!drivers.emergencyByGuard(train)) {
       session
@@ -973,7 +986,7 @@ public final class GuardSessionManager {
     drivers.refreshSignal(group);
     notice(player, session, key, Map.of());
     drivers
-        .driverOf(session.link().trainName())
+        .driverOf(session.link().currentTrainName())
         .ifPresent(
             id ->
                 drivers.notifyDriver(
@@ -1064,20 +1077,7 @@ public final class GuardSessionManager {
     }
     double travelled = group.head().getEntity().getLocation().toVector().distance(watch.origin());
     if (travelled >= watch.blocks() || now >= watch.untilTick()) {
-      session.setDepartureWatch(null);
-      flushExamStop(player, session);
-      watch
-          .work()
-          .departureWatchPassed()
-          .ifPresent(
-              passed ->
-                  notice(
-                      player,
-                      session,
-                      passed
-                          ? "drive.guard.watch.departure-ok"
-                          : "drive.guard.watch.departure-missed",
-                      Map.of()));
+      finishDepartureWatch(player, session);
       return;
     }
     watch
@@ -1088,6 +1088,28 @@ public final class GuardSessionManager {
                 player.getEyeLocation().getDirection(),
                 watch.platformSide(),
                 DriveDoors.cabFacing(group, session)));
+  }
+
+  /** 出站监视收尾：考试中的这一站交给考官，告诉车掌合格与否。没在监视时什么也不做。 */
+  private void finishDepartureWatch(Player player, GuardSession session) {
+    GuardSession.DepartureWatch watch = session.departureWatch();
+    if (watch == null) {
+      return;
+    }
+    session.setDepartureWatch(null);
+    flushExamStop(player, session);
+    watch
+        .work()
+        .departureWatchPassed()
+        .ifPresent(
+            passed ->
+                notice(
+                    player,
+                    session,
+                    passed
+                        ? "drive.guard.watch.departure-ok"
+                        : "drive.guard.watch.departure-missed",
+                    Map.of()));
   }
 
   // ---- 菜单 ----
@@ -1154,7 +1176,7 @@ public final class GuardSessionManager {
   }
 
   private void callDriver(Player player, GuardSession session) {
-    ringBuzzer(player, session.link().trainName());
+    ringBuzzer(player, session.link().currentTrainName());
     onGuardBuzzer(player, session, BuzzerPress.Kind.CALL, true);
   }
 
@@ -1234,6 +1256,10 @@ public final class GuardSessionManager {
   /** 结算过的站记进这一趟：站开始时列车跑的车次与这一趟不同，先把这一趟结算掉。 */
   private void recordSettled(Player player, GuardSession session) {
     for (GuardLink.Settled settled : session.link().drainSettled()) {
+      if (!settled.worked()) {
+        // 越站、开门前就结束的停站：没有作业可记，不计成绩、奖励与考试站数。
+        continue;
+      }
       TaskKey key =
           settled.stop() == session.trackedStop()
               ? session.trackedTrip()
@@ -1244,6 +1270,8 @@ public final class GuardSessionManager {
       if (examiner.examining(session.playerId())) {
         session.trip().markExamined();
         GuardSession.DepartureWatch watch = session.departureWatch();
+        // 还有一站在等交给考官：先交，免得被这一站顶掉。
+        flushExamStop(player, session);
         session.setPendingExamStop(new GuardSession.WorkedStop(station, settled.work()));
         if (watch == null || watch.work() != settled.work()) {
           flushExamStop(player, session);
@@ -1283,10 +1311,7 @@ public final class GuardSessionManager {
     GuardScore score = trip.score();
     ScoreRules.Result result = score.evaluate(state != DriverTask.State.FAILED);
     DriveConfig current = config.get();
-    String trainName =
-        session.link().properties() != null && session.link().properties().getTrainName() != null
-            ? session.link().properties().getTrainName()
-            : session.link().trainName();
+    String trainName = session.link().currentTrainName();
     Optional<TaskKey> key = trip.key();
     String tripCode = key.map(TaskKey::tripCode).orElse(trainName);
     Player online = player != null && player.isOnline() ? player : null;
@@ -1377,12 +1402,6 @@ public final class GuardSessionManager {
 
   // ---- 终点站换端 ----
 
-  /** 驾驶室座位的认定多久重读一次（tick）。 */
-  private static final long CAB_SEATS_REFRESH_TICKS = 20L;
-
-  /** 车掌离端车超过这么远（方块）就不直接送进去。 */
-  private static final double CAB_MOVE_RANGE_BLOCKS = 64.0;
-
   /**
    * 推进一拍终点站换端（判定见 {@link GuardCabChange}），并管换端扣车：车上没有人工驾驶的驾驶员时，从终点站待命起扣着列车，派车放行时只调头、不发车，
    * 车掌坐进车尾端（或不必换）后交回自动运行发车。人工驾驶的车由驾驶员自己起步，车掌没换好就开车时直接送进去。
@@ -1420,25 +1439,39 @@ public final class GuardSessionManager {
     }
     boolean holdable = multi && !manual;
     link.setTurnbackPending(holdable && driver.isEmpty() && outlook.predicted());
-    boolean hold = keepCabHold(holdable, outlook.predicted(), link.cabHold(), change.changing());
-    if (link.setCabHold(hold) && !hold) {
-      // 换好了（或不必换）：请调度层马上按自动运行发车。
-      drivers.refreshSignal(group);
+    boolean startedStopped = event == GuardCabChange.Event.STARTED && !group.isMoving();
+    boolean hold =
+        keepCabHold(
+            holdable, outlook.predicted(), link.cabHold(), change.changing(), startedStopped);
+    if (link.setCabHold(hold)) {
+      if (hold && !outlook.predicted()) {
+        // 没经过待命的调头（正线原地折返）：调头后排上的发车动作撤掉，扣着等车掌坐进车尾端。
+        group.getActions().clear();
+        group.stop();
+      } else if (!hold) {
+        // 换好了（或不必换）：请调度层马上按自动运行发车。
+        drivers.refreshSignal(group);
+      }
     }
     return false;
   }
 
   /**
-   * 换端扣车这一拍之后是否还扣着：从终点站待命（派车还没放行）起扣，已在扣的到换端完成为止。
+   * 换端扣车这一拍之后是否还扣着：从终点站待命（派车还没放行）起扣，或没经过待命的调头（正线原地折返）开始换端时列车还停着就扣，已在扣的到换端完成为止。
    *
    * @param holdable 车上没有人工驾驶的驾驶员、编组不止一节
    * @param predicted 派车还没放行
    * @param holding 此刻扣着
    * @param changing 车掌正在换端
+   * @param startedStopped 这一拍开始计时换端、列车还停着
    */
   static boolean keepCabHold(
-      boolean holdable, boolean predicted, boolean holding, boolean changing) {
-    return holdable && (predicted || (holding && changing));
+      boolean holdable,
+      boolean predicted,
+      boolean holding,
+      boolean changing,
+      boolean startedStopped) {
+    return holdable && (predicted || (changing && (holding || startedStopped)));
   }
 
   /** 车掌换端看的发车端：有驾驶员时跟驾驶员；只有车掌时终点站待命按线路图预计（待命期间只查一次），其余时候车头端发车。 */
@@ -1509,7 +1542,7 @@ public final class GuardSessionManager {
 
   private void notifyDriverOf(GuardSession session, String key, String car) {
     drivers
-        .driverOf(session.link().trainName())
+        .driverOf(session.link().currentTrainName())
         .ifPresent(
             driver ->
                 drivers.notifyDriver(
@@ -1537,16 +1570,11 @@ public final class GuardSessionManager {
 
   /** 驾驶室座位：同一编组、同样节数时每秒最多重读一次（挂上或摘下车厢时马上重读）。 */
   private CabSeats cabSeats(GuardSession session, MinecartGroup group, long now) {
-    GuardSession.CabSeatsMemo memo = session.cabSeatsMemo();
-    if (memo != null
-        && memo.group() == group
-        && memo.size() == group.size()
-        && now - memo.tick() < CAB_SEATS_REFRESH_TICKS) {
-      return memo.seats();
-    }
-    CabSeats seats = SeatLocator.cabSeats(group, config.get().driver().cabSeatNames());
-    session.setCabSeatsMemo(new GuardSession.CabSeatsMemo(group, group.size(), now, seats));
-    return seats;
+    CabSeatsMemo memo =
+        CabSeatsMemo.refresh(
+            session.cabSeatsMemo(), group, config.get().driver().cabSeatNames(), now);
+    session.setCabSeatsMemo(memo);
+    return memo.seats();
   }
 
   /** 直接把车掌送进要换到的那一端（换端超时、点了传送入座）；驾驶员也在换端时一起送（见 {@link DriverSide#moveWithGuard}）。 */
@@ -1570,31 +1598,13 @@ public final class GuardSessionManager {
    */
   private boolean moveGuardTo(
       Player player, GuardSession session, MinecartGroup group, CabSeats.End end) {
-    MinecartMember<?> member =
-        switch (end) {
-          case HEAD -> group.head();
-          case TAIL -> group.tail();
-          case NONE -> null;
-        };
-    if (member == null
-        || member.getEntity() == null
-        || group.getWorld() == null
-        || !group.getWorld().equals(player.getWorld())
-        || member.getEntity().getLocation().distanceSquared(player.getLocation())
-            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
-      return false;
-    }
-    int memberIndex = group.indexOf(member);
     CabSeats cabs = SeatLocator.cabSeats(group, config.get().driver().cabSeatNames());
-    OptionalInt seat =
-        SeatLocator.enterNearestFreeSeatIndex(
-            player, member, index -> cabs.endOf(memberIndex, index) == end);
-    if (seat.isEmpty()) {
+    Optional<SeatBinding> seat = SeatLocator.enterCab(player, group, cabs, end);
+    Optional<CabSeatKey> key = seat.flatMap(binding -> CabSeatKey.of(group, binding));
+    if (key.isEmpty()) {
       return false;
     }
-    session.moveSeat(
-        new CabSeatKey(member.getEntity().getUniqueId(), seat.getAsInt()),
-        new SeatBinding(group.getProperties().getTrainName(), memberIndex, seat.getAsInt()));
+    session.moveSeat(key.get(), seat.get());
     session.cabChange().finish();
     return true;
   }
@@ -1645,19 +1655,31 @@ public final class GuardSessionManager {
    *
    * @return 是否放行这次入座
    */
-  public boolean allowSeatEnter(Entity entity, MinecartMember<?> member, int seatIndex) {
-    if (sessions.isEmpty() || member == null || member.getEntity() == null || seatIndex < 0) {
+  public boolean allowSeatEnter(
+      Entity entity, MinecartMember<?> member, java.util.function.IntSupplier seatIndex) {
+    if (sessions.isEmpty() || member == null || member.getEntity() == null) {
       return true;
     }
     UUID car = member.getEntity().getUniqueId();
     UUID entering = entity == null ? null : entity.getUniqueId();
+    int index = -1;
     for (GuardSession session : sessions.values()) {
+      if (!session.seat().member().equals(car)) {
+        continue;
+      }
+      // 只在有预留座位的车厢才去数座位序号（要逐个看座位附件）。
+      if (index < 0) {
+        index = seatIndex.getAsInt();
+        if (index < 0) {
+          return true;
+        }
+      }
+      UUID yieldTo =
+          session.seatReleased()
+              ? drivers.driverOf(session.link().currentTrainName()).orElse(null)
+              : null;
       if (!blocksSeat(
-          session.seat(),
-          session.seatReleased(),
-          session.playerId(),
-          new CabSeatKey(car, seatIndex),
-          entering)) {
+          session.seat(), session.playerId(), yieldTo, new CabSeatKey(car, index), entering)) {
         continue;
       }
       if (entity instanceof Player player) {
@@ -1670,17 +1692,19 @@ public final class GuardSessionManager {
   }
 
   /**
-   * 车掌预留的座位拦不拦这次入座：预留没让出来、正是这个座位、进来的不是车掌本人。
+   * 车掌预留的座位拦不拦这次入座：正是这个座位、进来的不是车掌本人，也不是换端时预留让给的驾驶员。
    *
    * @param reserved 车掌预留的座位
-   * @param released 预留此刻让出来了（换端中）
    * @param guardId 车掌
+   * @param yieldTo 换端时预留让给的驾驶员；没在换端、或车上没有驾驶员时为 {@code null}
    * @param seat 要坐的座位
    * @param entering 要坐进来的实体；不明时为 {@code null}
    */
   static boolean blocksSeat(
-      CabSeatKey reserved, boolean released, UUID guardId, CabSeatKey seat, UUID entering) {
-    return !released && reserved.equals(seat) && !guardId.equals(entering);
+      CabSeatKey reserved, UUID guardId, UUID yieldTo, CabSeatKey seat, UUID entering) {
+    return reserved.equals(seat)
+        && !guardId.equals(entering)
+        && !(yieldTo != null && yieldTo.equals(entering));
   }
 
   // ---- 离座与入座 ----
@@ -1830,7 +1854,7 @@ public final class GuardSessionManager {
 
   private GuardDisplay.Snapshot snapshot(
       GuardSession session, MinecartGroup group, boolean seated, long now) {
-    Optional<UUID> driver = drivers.driverOf(session.link().trainName());
+    Optional<UUID> driver = drivers.driverOf(session.link().currentTrainName());
     boolean ato = driver.map(drivers::driverAto).orElse(false);
     Optional<String> driverName =
         driver.filter(id -> !drivers.driverAto(id)).map(Bukkit::getPlayer).map(Player::getName);

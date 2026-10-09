@@ -124,6 +124,23 @@ class DriverControlRegistryGuardTest {
     assertTrue(guard.turnbackPending(), "车掌的标记没被取走");
   }
 
+  /** 列车改名（终点待命复用）：按新名字找得到车掌；别的列车后来用了旧名字，不能把车掌挂过去。 */
+  @Test
+  void aRenamedTrainKeepsItsGuardAndTheOldNameDoesNot() {
+    GuardLink guard = guard();
+    when(properties.getTrainName()).thenReturn("T-9");
+    assertEquals("T-9", guard.currentTrainName());
+    assertSame(guard, registry.guardOfName("T-9").orElseThrow());
+    TrainProperties other = mock(TrainProperties.class);
+    when(other.getTrainName()).thenReturn("T-1");
+    assertTrue(registry.guardOf(other).isEmpty());
+    assertTrue(registry.guardOfName("T-1").isEmpty());
+    assertSame(properties, guard.properties(), "车掌仍挂在原来的列车上");
+    guard.setCabHold(true);
+    assertFalse(registry.isDriverControlledName("T-1"));
+    assertTrue(registry.isDriverControlledName("T-9"));
+  }
+
   /** 列车属性对象被换掉（区块重载）：按车名找回车掌。 */
   @Test
   void theGuardIsFoundAgainByName() {
