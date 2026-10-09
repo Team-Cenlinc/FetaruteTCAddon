@@ -688,6 +688,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
+      public Optional<String> nextStationOf(MinecartGroup group) {
+        return plugin
+            .getDisplayService()
+            .flatMap(display -> display.hudContext(group))
+            .map(TrainHudContext::nextStation)
+            .filter(station -> !station.isEmpty())
+            .map(TrainHudContext.StationDisplay::label)
+            .filter(label -> !label.isBlank());
+      }
+
+      @Override
       public void missedAck(UUID driverId) {
         DriveSession session = active.get(driverId);
         if (session != null && session.driverLink() != null) {

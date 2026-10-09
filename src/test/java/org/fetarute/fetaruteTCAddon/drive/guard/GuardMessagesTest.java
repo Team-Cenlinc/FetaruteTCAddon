@@ -82,7 +82,8 @@ class GuardMessagesTest {
                     1,
                     seated
                         ? Optional.of(new GuardDisplay.CabChangeState(3, flag ? 40L : -1L))
-                        : Optional.empty());
+                        : Optional.empty(),
+                    Optional.empty());
             keys.add(GuardDisplay.prompt(snapshot).key());
             for (DriveSidebarRows.Row row : GuardDisplay.rows(snapshot)) {
               keys.add(row.labelKey());
@@ -94,6 +95,21 @@ class GuardMessagesTest {
     }
     keys.add("drive.guard.prompt.running");
     keys.add("drive.guard.sidebar.title");
+    GuardDisplay.Snapshot between =
+        new GuardDisplay.Snapshot(
+            "T",
+            Optional.empty(),
+            false,
+            Optional.empty(),
+            true,
+            0,
+            Optional.empty(),
+            Optional.of("S"));
+    keys.add(GuardDisplay.prompt(between).key());
+    for (DriveSidebarRows.Row row : GuardDisplay.rows(between)) {
+      keys.add(row.labelKey());
+      keys.add(row.valueKey());
+    }
     GuardScore all = new GuardScore();
     all.add(
         new GuardScore.Stop(

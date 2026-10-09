@@ -31,7 +31,14 @@ class GuardDisplayTest {
 
   private static GuardDisplay.Snapshot snapshot(GuardDisplay.StopState stop, boolean seated) {
     return new GuardDisplay.Snapshot(
-        "T-1", Optional.empty(), true, Optional.of(stop), seated, 0, Optional.empty());
+        "T-1",
+        Optional.empty(),
+        true,
+        Optional.of(stop),
+        seated,
+        0,
+        Optional.empty(),
+        Optional.empty());
   }
 
   private static String prompt(GuardDisplay.StopState stop, boolean seated) {
@@ -44,7 +51,14 @@ class GuardDisplayTest {
         "drive.guard.prompt.running",
         GuardDisplay.prompt(
                 new GuardDisplay.Snapshot(
-                    "T-1", Optional.empty(), false, Optional.empty(), true, 0, Optional.empty()))
+                    "T-1",
+                    Optional.empty(),
+                    false,
+                    Optional.empty(),
+                    true,
+                    0,
+                    Optional.empty(),
+                    Optional.empty()))
             .key());
     GuardDisplay.Line open =
         GuardDisplay.prompt(snapshot(stop(Phase.OPEN_DOORS, false, false, false), true));
@@ -94,7 +108,14 @@ class GuardDisplayTest {
     GuardDisplay.Line running =
         GuardDisplay.prompt(
             new GuardDisplay.Snapshot(
-                "T-1", Optional.empty(), false, Optional.empty(), false, 0, active));
+                "T-1",
+                Optional.empty(),
+                false,
+                Optional.empty(),
+                false,
+                0,
+                active,
+                Optional.empty()));
     assertEquals("drive.guard.prompt.cab-change", running.key());
     assertEquals(Map.of("car", "4", "seconds", "10"), running.values());
     GuardDisplay.Snapshot dwell =
@@ -105,7 +126,8 @@ class GuardDisplayTest {
             Optional.of(stop(Phase.DWELL, false, false, false)),
             true,
             0,
-            Optional.of(new GuardDisplay.CabChangeState(1, -1L)));
+            Optional.of(new GuardDisplay.CabChangeState(1, -1L)),
+            Optional.empty());
     assertEquals("drive.guard.prompt.dwell", GuardDisplay.prompt(dwell).key());
     assertTrue(
         GuardDisplay.rows(dwell).stream()
@@ -119,7 +141,8 @@ class GuardDisplayTest {
             Optional.of(stop(Phase.WAIT_DEPARTURE, false, false, false)),
             true,
             0,
-            Optional.of(new GuardDisplay.CabChangeState(1, -1L)));
+            Optional.of(new GuardDisplay.CabChangeState(1, -1L)),
+            Optional.empty());
     assertEquals("drive.guard.prompt.cab-change-announced", GuardDisplay.prompt(waiting).key());
   }
 
@@ -146,6 +169,41 @@ class GuardDisplayTest {
             "drive.guard.sheet.incidents"),
         GuardDisplay.sheet(rough).stream().map(GuardDisplay.Line::key).toList());
     assertEquals(Map.of("station", "B"), GuardDisplay.sheet(rough).get(0).values());
+  }
+
+  /** 两站之间写下一站；进站起车站一行写开哪一侧，开门那一步也写哪一侧。 */
+  @Test
+  void theSidebarNamesTheNextStationAndTheDoorSide() {
+    GuardDisplay.Snapshot running =
+        new GuardDisplay.Snapshot(
+            "T-1",
+            Optional.empty(),
+            false,
+            Optional.empty(),
+            true,
+            0,
+            Optional.empty(),
+            Optional.of("西湖"));
+    assertEquals(
+        new GuardDisplay.Line("drive.guard.prompt.running-next", Map.of("station", "西湖")),
+        GuardDisplay.prompt(running));
+    assertTrue(
+        GuardDisplay.rows(running).stream()
+            .anyMatch(
+                row ->
+                    row.valueKey().equals("drive.guard.sidebar.value.next-station")
+                        && row.values().equals(Map.of("station", "西湖"))));
+    List<DriveSidebarRows.Row> open =
+        GuardDisplay.rows(snapshot(stop(Phase.OPEN_DOORS, false, false, false), true));
+    assertTrue(
+        open.stream()
+            .anyMatch(row -> row.valueKey().equals("drive.guard.sidebar.value.station-left")));
+    assertTrue(
+        open.stream()
+            .anyMatch(row -> row.valueKey().equals("drive.guard.sidebar.value.step-open-left")));
+    assertTrue(
+        open.stream().noneMatch(row -> row.labelKey().endsWith(".next-station")), "停站中不写下一站");
+    assertEquals("no-doors", GuardDisplay.stationSideSuffix(DriverDoorSide.NONE));
   }
 
   @Test

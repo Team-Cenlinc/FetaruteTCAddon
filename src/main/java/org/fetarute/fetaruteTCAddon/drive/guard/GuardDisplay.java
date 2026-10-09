@@ -22,6 +22,7 @@ public final class GuardDisplay {
    * @param seated 车掌坐在自己的座位上
    * @param timeoutStops 有超时的停站数
    * @param cabChange 进行中的终点站换端；没有时为空
+   * @param nextStation 两站之间时的下一站；停站中或查不到时为空
    */
   public record Snapshot(
       String train,
@@ -30,13 +31,15 @@ public final class GuardDisplay {
       Optional<StopState> stop,
       boolean seated,
       int timeoutStops,
-      Optional<CabChangeState> cabChange) {
+      Optional<CabChangeState> cabChange,
+      Optional<String> nextStation) {
 
     public Snapshot {
       Objects.requireNonNull(train, "train");
       driverName = driverName == null ? Optional.empty() : driverName;
       stop = stop == null ? Optional.empty() : stop;
       cabChange = cabChange == null ? Optional.empty() : cabChange;
+      nextStation = nextStation == null ? Optional.empty() : nextStation;
     }
   }
 
@@ -104,7 +107,10 @@ public final class GuardDisplay {
       return cabChangeLine(PROMPT, snapshot.cabChange().get());
     }
     if (snapshot.stop().isEmpty()) {
-      return new Line(PROMPT + "running", Map.of());
+      return snapshot
+          .nextStation()
+          .map(station -> new Line(PROMPT + "running-next", Map.of("station", station)))
+          .orElseGet(() -> new Line(PROMPT + "running", Map.of()));
     }
     StopState stop = snapshot.stop().get();
     String seconds = seconds(stop.remainingTicks());
@@ -154,11 +160,22 @@ public final class GuardDisplay {
     } else {
       rows.add(row("crew", snapshot.ato() ? "crew-ato" : "crew-auto", Map.of()));
     }
+    // 两站之间写下一站；进站起写本站与开哪一侧的门（开门侧要到站台交来停站才知道）。
+    if (snapshot.stop().isEmpty()) {
+      snapshot
+          .nextStation()
+          .ifPresent(
+              station -> rows.add(row("next-station", "next-station", Map.of("station", station))));
+    }
     snapshot
         .stop()
         .ifPresent(
             stop -> {
-              rows.add(row("station", "station", Map.of("station", stop.station())));
+              rows.add(
+                  row(
+                      "station",
+                      "station-" + stationSideSuffix(stop.required()),
+                      Map.of("station", stop.station())));
               rows.add(stepRow(snapshot, stop));
               if (stop.phase() == Phase.WAIT_DEPARTURE && !stop.released()) {
                 rows.add(row("exit", stop.exitOpen() ? "exit-open" : "exit-closed", Map.of()));
@@ -183,7 +200,8 @@ public final class GuardDisplay {
     String seconds = seconds(stop.remainingTicks());
     return switch (stop.phase()) {
       case APPROACH -> row("step", "step-approach", Map.of());
-      case OPEN_DOORS -> row("step", "step-open", Map.of("seconds", seconds));
+      case OPEN_DOORS -> row(
+          "step", "step-open-" + sideSuffix(stop.required()), Map.of("seconds", seconds));
       case DWELL -> row("step", "step-dwell", Map.of());
       case CLOSE_DOORS -> row("step", "step-close", Map.of("seconds", seconds));
       case WAIT_DEPARTURE -> stop.released()
@@ -244,6 +262,11 @@ public final class GuardDisplay {
       lines.add(new Line(SHEET + "incidents", Map.of("count", String.valueOf(score.incidents()))));
     }
     return lines;
+  }
+
+  /** 车站一行写开哪一侧的门：语言键的后缀；本站不开门时另写。 */
+  static String stationSideSuffix(DriverDoorSide side) {
+    return side == DriverDoorSide.NONE ? "no-doors" : sideSuffix(side);
   }
 
   /** 应开哪一侧：语言键的后缀。 */

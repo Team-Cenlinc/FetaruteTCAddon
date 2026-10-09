@@ -126,6 +126,9 @@ public final class GuardSessionManager {
 
     /** 驾驶员没在时限内回一短：记一次漏确认。 */
     void missedAck(UUID driverId);
+
+    /** 列车按交路进度的下一个停靠站（与乘客 HUD 同一口径）；展示层未启用或查不到时为空。 */
+    Optional<String> nextStationOf(MinecartGroup group);
   }
 
   /** 上岗的结果。 */
@@ -1896,7 +1899,8 @@ public final class GuardSessionManager {
         stop,
         seated,
         session.link().timeoutStops(),
-        cabChange);
+        cabChange,
+        stop.isEmpty() ? drivers.nextStationOf(group) : Optional.empty());
   }
 
   private void refreshHotbar(Player player, GuardSession session, boolean force) {
