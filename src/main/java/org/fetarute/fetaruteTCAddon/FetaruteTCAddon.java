@@ -1664,7 +1664,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     0,
                     settings.stationStopOverheadSeconds()
                         - org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
-                            .doorOpenDelaySeconds()))));
+                            .doorOpenDelaySeconds())),
+            java.time.Duration.ofSeconds(settings.maxDelaySeconds())));
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
     // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
     // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
@@ -2052,6 +2053,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 交路已换车的车再也没有班可跑：闲置一个短门槛就回收，不占着站台等闲置上限。
     reclaimManager.setRetiredVehicle(
         timetableService == null ? null : timetableService::retiredFromDuty);
+    // 按表再也没有班可跑的车（交路跑完又没有本站出发的回库班、剩下的班次这里都接不上）：同样立即回收，回不了库就原地销毁。
+    reclaimManager.setIdleForGood(
+        returns == null
+            ? null
+            : (trainName, location, routeId) ->
+                returns.idleForGoodAt(trainName, location.value(), routeId));
     // 绑着交路的车停在没有回库线路的车站（原地折返）：接不上本交路的下一班就再也走不了，与正线折返点同一条立即回收规则。
     org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetable =
         timetableService;

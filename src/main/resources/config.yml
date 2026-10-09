@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 39
+config-version: 40
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -281,6 +281,9 @@ timetable:
   assign-tolerance-seconds: 300
   # 发车侧一次最多补发多长时间内错过的车次（秒），避免服务器长时间停机后集中补发
   max-catch-up-seconds: 300
+  # 晚点上限（秒）：交路上的下一班晚过计划发车该秒数仍未开出，列车即从交路上解下，
+  # 后面的班次改由车库派替补车接，赶不上的取消；解下的列车跑完当前一趟后回库，没有回库线路时原地销毁。0 表示不限
+  max-delay-seconds: 900
   # 重新加载已发布时刻表的间隔（秒）；发布或下架后最多等待该时长生效
   reload-interval-seconds: 60
   # 编表时每次车站停车在停站时间（dwell）之外额外计入的秒数，涵盖列车对位刹停与开门延迟。

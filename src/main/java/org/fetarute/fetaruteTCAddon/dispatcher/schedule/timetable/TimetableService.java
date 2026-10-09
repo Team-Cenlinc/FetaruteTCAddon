@@ -654,6 +654,104 @@ public final class TimetableService implements ScheduledDeparturePlan {
         .isPresent();
   }
 
+  /** 没绑交路的车只能接交路的首班：往后看这么久之内有没有首班从它停的地方发车。 */
+  static final Duration UNBOUND_FIRST_TRIP_HORIZON = Duration.ofMinutes(10);
+
+  /**
+   * 停在这里的车按表再也没有活：回收据此立即带走它（回不了库就原地销毁），不等闲置上限，也不过回库闸。
+   *
+   * <p>只认时刻表确知的情形，查不清（表或交路找不到、进度与绑定对不上）一律当作还有活：
+   *
+   * <ul>
+   *   <li>被换下来的车；
+   *   <li>绑着交路：还没跑的班次里没有一班从这里发车、又还赶得上（没过发车容差，或票还在等它）；交路跑完了，也没有从这里出发、没过容差的带客回库班；
+   *   <li>没绑交路、刚跑完的是由时刻表出票的交路：{@link #UNBOUND_FIRST_TRIP_HORIZON} 之内（含过了计划还没过容差的）没有一个交路的首班从这里发车。
+   * </ul>
+   *
+   * <p>叫来的车不归时刻表管，不在这里判；只扣车不出票时没有“这辆车接哪一班”的对应关系，同样不判。
+   *
+   * @param trainName 列车名
+   * @param locationNodeId 车停的节点
+   * @param routeId 车刚跑完的交路（{@code FTA_ROUTE_ID}）；只用于没绑交路的车
+   * @return 确知没有活时为 true
+   */
+  public boolean idleForGoodAt(String trainName, String locationNodeId, Optional<UUID> routeId) {
+    Settings current = settings;
+    if (!current.enabled() || !current.spawnEnabled() || unscheduled(trainName)) {
+      return false;
+    }
+    String key = keyOf(trainName);
+    String here = TimetableConflictChecker.groupOf(locationNodeId);
+    if (key == null || here.isEmpty()) {
+      return false;
+    }
+    if (ledger.isRetired(key)) {
+      return true;
+    }
+    Optional<DutyKey> binding = ledger.bindingOf(key);
+    if (binding.isEmpty()) {
+      return routeId != null
+          && routeId.filter(this::managed).isPresent()
+          && !firstTripSoonAt(here, current);
+    }
+    return !dutyWorkAt(key, binding.get(), here, current);
+  }
+
+  /** 绑着交路的车在这里还有没有活；查不清时当作有。 */
+  private boolean dutyWorkAt(String key, DutyKey dutyKey, String here, Settings current) {
+    Timetable timetable = snapshot.byId().get(dutyKey.timetableId());
+    Optional<VehicleDuty> duty =
+        timetable == null ? Optional.empty() : timetable.duty(dutyKey.dutyId());
+    Optional<DutyProgress> progress = ledger.progressOf(key);
+    if (duty.isEmpty() || progress.filter(p -> !p.dutyId().equals(dutyKey.dutyId())).isPresent()) {
+      return true;
+    }
+    BoundDuty bound = new BoundDuty(dutyKey, timetable, duty.get().tripIds());
+    int next = progress.map(DutyProgress::assignedTrips).orElse(0);
+    for (int index = next; index < bound.tripIds().size(); index++) {
+      Optional<TimetableTrip> trip = bound.trip(index);
+      Optional<TimetableRoutePlan> plan = trip.flatMap(timetable::tripPlan);
+      if (plan.isEmpty()) {
+        return true;
+      }
+      // 跳过前面接不上的班次也行：交路进度按接到的那一班的位置推进，前面那几班的票随之不再等它。
+      if (startsAt(plan.get(), here)
+          && (!overdue(bound, trip.get(), current) || ticketWaiting(bound, index))) {
+        return true;
+      }
+    }
+    return progress
+        .flatMap(p -> returnLegAhead(key, p, current, false))
+        .flatMap(due -> due.timetable().tripPlan(due.trip()))
+        .filter(plan -> startsAt(plan, here))
+        .isPresent();
+  }
+
+  /** 前后一段时间内有没有哪个交路的首班从这个站台组发车（没归属交路的车次也算）。 */
+  private boolean firstTripSoonAt(String here, Settings current) {
+    Instant now = clock.get();
+    for (DueTrip due :
+        tripsBetween(now.minus(current.assignTolerance()), now.plus(UNBOUND_FIRST_TRIP_HORIZON))) {
+      boolean first =
+          due.trip()
+              .dutyId()
+              .flatMap(due.timetable()::duty)
+              .map(VehicleDuty::tripIds)
+              .map(ids -> !ids.isEmpty() && ids.get(0).equals(due.trip().id()))
+              .orElse(true);
+      if (first
+          && due.timetable().tripPlan(due.trip()).filter(p -> startsAt(p, here)).isPresent()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 这条线路的起点在不在这个站台组。 */
+  private static boolean startsAt(TimetableRoutePlan plan, String group) {
+    return group.equalsIgnoreCase(TimetableConflictChecker.groupOf(plan.originNodeId()));
+  }
+
   /**
    * 闲置回收把这辆车派走了。走的是它交路自己的回库线路时，就算跑了带客回库班（绑上那一班，站牌不再列它、回库票不再等它）； 走的是别的线路时，车离开了交路（解绑，回库票同样不再等它）。
    *
@@ -787,8 +885,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /**
    * 出票侧每轮问一次：该派哪些替补车。
    *
-   * <p>顺带做两件事：接不上下一班（过了容差、票也不在了）、而替补车赶得上它后面某一班的车，从交路上解下来；剩下的班次全都过了容差的空缺撤销。
-   * 每个空缺同时只派一辆（出库票在路上时不再派），替补车绑上交路即填上。
+   * <p>顺带做三件事：下一班晚过晚点上限（{@link Settings#maxDelay()}）还没开出的车，不论有没有替补，从交路上解下，替补赶不上的班次当场取消；
+   * 接不上下一班（过了容差、票也不在了）、而替补车赶得上它后面某一班的车，同样解下；剩下的班次全都过了容差的空缺撤销。 每个空缺同时只派一辆（出库票在路上时不再派），替补车绑上交路即填上。
    *
    * @param now 调度层当前时间
    * @return 这一轮要发出的替补出库票
@@ -799,18 +897,24 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return List.of();
     }
     for (Map.Entry<String, DutyKey> bound : ledger.bindings().entrySet()) {
-      ledger
-          .progressOf(bound.getKey())
-          .filter(progress -> !progress.exhausted())
-          .filter(progress -> nextTripMissed(bound.getKey(), progress, current))
-          .filter(
-              progress ->
-                  replacementFor(bound.getValue(), progress.assignedTrips(), now, current)
-                      .isPresent())
-          .ifPresent(
-              progress ->
-                  ledger.vacate(
-                      bound.getKey(), ledger.displayName(bound.getKey()), "next-trip-missed", now));
+      String key = bound.getKey();
+      Optional<DutyProgress> progress = ledger.progressOf(key).filter(p -> !p.exhausted());
+      if (progress.isEmpty()) {
+        continue;
+      }
+      OptionalLong late = lateBeyondCap(key, progress.get(), now, current);
+      if (late.isPresent()) {
+        // 续班票等本交路的车没有时限（awaitsOwnVehicle）：不设上限的话，一辆卡住的车会让这一班的票一直挂着、后面的班次一路拖晚。
+        String trainName = ledger.displayName(key);
+        String reason = "late-" + late.getAsLong() + "s";
+        ledger
+            .vacate(key, trainName, reason, now)
+            .ifPresent(vacancy -> cancelUncoverable(vacancy, trainName, reason, now, current));
+      } else if (nextTripMissed(key, progress.get(), current)
+          && replacementFor(bound.getValue(), progress.get().assignedTrips(), now, current)
+              .isPresent()) {
+        ledger.vacate(key, ledger.displayName(key), "next-trip-missed", now);
+      }
     }
     List<Replacement> out = new ArrayList<>();
     for (DutyLedger.Vacancy vacancy : ledger.vacancies()) {
@@ -871,6 +975,33 @@ public final class TimetableService implements ScheduledDeparturePlan {
    */
   public boolean retiredFromDuty(String trainName) {
     return settings.enabled() && ledger.isRetired(keyOf(trainName));
+  }
+
+  /**
+   * 交路下一班（进度之后的第一班）晚过计划发车的秒数，只在达到晚点上限时给出：车还没开出这一班（开出即推进进度）， 票在不在都算。
+   *
+   * @return 晚点秒数；没设上限、没到上限、查不到交路或下一班时为空
+   */
+  private OptionalLong lateBeyondCap(
+      String key, DutyProgress progress, Instant now, Settings current) {
+    if (current.maxDelay().isZero()) {
+      return OptionalLong.empty();
+    }
+    int next = progress.assignedTrips();
+    return boundDuty(key, progress)
+        .flatMap(
+            duty ->
+                duty.trip(next)
+                    .map(
+                        trip ->
+                            Duration.between(
+                                    duty.timetable()
+                                        .departureOnServiceDay(trip, duty.key().serviceDate()),
+                                    now)
+                                .getSeconds()))
+        .filter(late -> late >= current.maxDelay().getSeconds())
+        .map(OptionalLong::of)
+        .orElse(OptionalLong.empty());
   }
 
   /** 当前空缺的交路数（诊断用）。 */
@@ -2485,6 +2616,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param assignTolerance 匹配车次时允许的最大偏差
    * @param maxCatchUp 发车侧单次轮询最多回补多长时间窗口
    * @param arrivalSettle 压牌到停稳的时长：到站事件在停稳之后才发生，晚点账据此把表定到达换算到同一时刻
+   * @param maxDelay 晚点上限：交路上的下一班晚过计划发车这么久还没开出，车就从交路上解下（{@link #replacementsDue}）；0 表示不限
    */
   public record Settings(
       boolean enabled,
@@ -2492,7 +2624,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Duration maxHold,
       Duration assignTolerance,
       Duration maxCatchUp,
-      Duration arrivalSettle) {
+      Duration arrivalSettle,
+      Duration maxDelay) {
 
     public Settings {
       maxHold = maxHold == null || maxHold.isNegative() ? Duration.ZERO : maxHold;
@@ -2501,6 +2634,25 @@ public final class TimetableService implements ScheduledDeparturePlan {
       maxCatchUp = maxCatchUp == null || maxCatchUp.isNegative() ? Duration.ZERO : maxCatchUp;
       arrivalSettle =
           arrivalSettle == null || arrivalSettle.isNegative() ? Duration.ZERO : arrivalSettle;
+      maxDelay = maxDelay == null || maxDelay.isNegative() ? Duration.ZERO : maxDelay;
+    }
+
+    /** 不设晚点上限；测试与未接配置的调用方用。 */
+    public Settings(
+        boolean enabled,
+        boolean spawnEnabled,
+        Duration maxHold,
+        Duration assignTolerance,
+        Duration maxCatchUp,
+        Duration arrivalSettle) {
+      this(
+          enabled,
+          spawnEnabled,
+          maxHold,
+          assignTolerance,
+          maxCatchUp,
+          arrivalSettle,
+          Duration.ZERO);
     }
 
     /** 不区分压牌与停稳（{@code arrivalSettle} 为 0）；测试与未接配置的调用方用。 */

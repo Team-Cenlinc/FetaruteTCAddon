@@ -234,9 +234,7 @@ public record Timetable(
   public LocalDate serviceDayOf(TimetableTrip trip, LocalDate calendarDate) {
     Objects.requireNonNull(trip, "trip");
     Objects.requireNonNull(calendarDate, "calendarDate");
-    return trip.departureSecondOfDay() < serviceStartSecondOfDay
-        ? calendarDate.minusDays(1)
-        : calendarDate;
+    return departsNextCalendarDay(trip) ? calendarDate.minusDays(1) : calendarDate;
   }
 
   /**
@@ -251,9 +249,27 @@ public record Timetable(
   public Instant departureOnServiceDay(TimetableTrip trip, LocalDate serviceDay) {
     Objects.requireNonNull(trip, "trip");
     Objects.requireNonNull(serviceDay, "serviceDay");
-    LocalDate calendarDate =
-        trip.departureSecondOfDay() < serviceStartSecondOfDay ? serviceDay.plusDays(1) : serviceDay;
+    LocalDate calendarDate = departsNextCalendarDay(trip) ? serviceDay.plusDays(1) : serviceDay;
     return trip.departureAt(calendarDate, zoneId);
+  }
+
+  /**
+   * 车次是不是跨过零点、在服务日的下一个日历日发车。
+   *
+   * <p>两种情形：发车时刻早于计划窗口起点（窗口跨零点的表）；或者窗口从零点起、但交路的最后几班拖过了 24 点—— 发车时刻取模后成了凌晨，只认窗口起点就会把它算成服务日当天凌晨， 整整早
+   * 24 小时。后一种按所属交路判：交路的计划开始不取模，车次（取模后）比它早半天以上，只能是零点后开的。
+   */
+  private boolean departsNextCalendarDay(TimetableTrip trip) {
+    if (trip.departureSecondOfDay() < serviceStartSecondOfDay) {
+      return true;
+    }
+    return trip.dutyId()
+        .flatMap(this::duty)
+        .filter(
+            duty ->
+                duty.plannedStartSecondOfDay() - trip.departureSecondOfDay()
+                    > TimetableTrip.SECONDS_PER_DAY / 2)
+        .isPresent();
   }
 
   /** 换一份 route 计划、发车表与交路，其余不变（车型变体折回基础 route 时用）。 */

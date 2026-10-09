@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 39;
+  private static final int EXPECTED_CONFIG_VERSION = 40;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -265,6 +265,9 @@ public final class ConfigManager {
             defaults.stationStopOverheadSeconds(),
             "timetable",
             logger);
+    int maxDelaySeconds =
+        readNonNegativeInt(
+            section, "max-delay-seconds", defaults.maxDelaySeconds(), "timetable", logger);
     ConfigurationSection recovery = section.getConfigurationSection("recovery");
     int recoveryMinDwellSeconds = defaults.recoveryMinDwellSeconds();
     int recoveryOverspeedPercent = defaults.recoveryOverspeedPercent();
@@ -299,7 +302,8 @@ public final class ConfigManager {
         stationStopOverheadSeconds,
         recoveryMinDwellSeconds,
         recoveryOverspeedPercent,
-        recoveryEngageDelaySeconds);
+        recoveryEngageDelaySeconds,
+        maxDelaySeconds);
   }
 
   private static int readNonNegativeInt(
@@ -1607,6 +1611,7 @@ public final class ConfigManager {
    * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
    * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
+   * @param maxDelaySeconds 交路上的下一班晚过计划发车这么多秒还没开出，车就从交路上解下、后面的班次交给替补；0 表示不限
    */
   public record TimetableSettings(
       boolean enabled,
@@ -1619,7 +1624,8 @@ public final class ConfigManager {
       int stationStopOverheadSeconds,
       int recoveryMinDwellSeconds,
       int recoveryOverspeedPercent,
-      int recoveryEngageDelaySeconds) {
+      int recoveryEngageDelaySeconds,
+      int maxDelaySeconds) {
 
     /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
     public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
@@ -1637,6 +1643,9 @@ public final class ConfigManager {
     /** 晚点多少秒起放宽线路限速：再小的晚点靠停站压缩就追得回来。 */
     public static final int DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS = 10;
 
+    /** 晚点上限的缺省值：晚过这么久的车次，乘客早已改乘，再让原车接着跑只会把后面的班次一路拖晚。 */
+    public static final int DEFAULT_MAX_DELAY_SECONDS = 900;
+
     public TimetableSettings {
       holdMaxSeconds = Math.max(0, holdMaxSeconds);
       assignToleranceSeconds = Math.max(0, assignToleranceSeconds);
@@ -1647,6 +1656,7 @@ public final class ConfigManager {
       recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
       recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
       recoveryEngageDelaySeconds = Math.max(0, recoveryEngageDelaySeconds);
+      maxDelaySeconds = Math.max(0, maxDelaySeconds);
     }
 
     /** 全部关闭的默认值；晚点追赶的参数有缺省值，但按表运行关着时不起作用。 */
@@ -1662,7 +1672,8 @@ public final class ConfigManager {
           DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
-          DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
+          DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
+          DEFAULT_MAX_DELAY_SECONDS);
     }
   }
 
