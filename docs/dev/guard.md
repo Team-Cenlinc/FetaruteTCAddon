@@ -18,7 +18,7 @@
 
 ## 公开 API（1.14.0）
 
-- `FetaruteApi#guard()`（`GuardApi`，实现 `GuardApiImpl`）：`offersAt` 列可领车掌的车次、`assign` 派车掌任务（请求写法同驾驶任务，`TaskSpecResolver` 与驾驶任务共用车次与车站核对，可设交班站、关奖励）、`abandon`、`taskOf`/`dutyOf`/`guardOf`（任意线程读快照，`GuardSessionManager#refreshViews` 每 10 tick 与每次发事件前刷新）、`records`（`mode = GUARD` 的记录）。
+- `FetaruteApi#guard()`（`GuardApi`，实现 `GuardApiImpl`）：`offersAt` 列可领车掌的车次、`assign` 派车掌任务（请求写法同驾驶任务，`TaskSpecResolver` 与驾驶任务共用车次与车站核对，可设交班站、关奖励）、`abandon`、`taskOf`/`dutyOf`/`guardOf`（任意线程读快照，`GuardSessionManager#refreshViews` 每 10 tick 与每次发事件前刷新）、`records`/`stats`（`mode = GUARD` 的记录与累计成绩）。
 - 事件在车掌模块里当场发出（`GuardSessionManager#callEvent`）：领取（可取消，`GuardTasks#setBeforeClaim`）、上岗（可取消，新上岗结果 `CANCELLED`）、每站作业、发车信号（含站台代发）、紧急停车、异常报告、每趟成绩（只发按时刻表运行的）、任务结束（每个任务一次，`GuardTask#announceFinish`）、离岗。快照换算在 `GuardViews`。
 
 ## 站台与车掌

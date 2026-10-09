@@ -182,6 +182,16 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
 
   @Override
   public PlayerTotals totalsByPlayer(UUID playerId) {
+    return totals(playerId, "mode <> ?", DriveTaskRecord.MODE_GUARD);
+  }
+
+  @Override
+  public PlayerTotals totalsByPlayerAndMode(UUID playerId, String mode) {
+    return totals(playerId, "mode = ?", Objects.requireNonNull(mode, "mode"));
+  }
+
+  /** 按方式筛选后汇总：{@code modeClause} 是带一个参数的方式条件。 */
+  private PlayerTotals totals(UUID playerId, String modeClause, String mode) {
     Objects.requireNonNull(playerId, "playerId");
     String sql =
         "SELECT COUNT(*) AS tasks,"
@@ -190,13 +200,14 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
             + " MIN(CASE grade WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3"
             + " WHEN 'D' THEN 4 END) AS best_rank FROM "
             + table(TABLE)
-            + " WHERE player_uuid = ? AND mode <> ?";
+            + " WHERE player_uuid = ? AND "
+            + modeClause;
     try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       statement.setString(1, COMPLETED);
       statement.setString(2, COMPLETED);
       setUuid(statement, 3, playerId);
-      statement.setString(4, DriveTaskRecord.MODE_GUARD);
+      statement.setString(4, mode);
       try (ResultSet rs = statement.executeQuery()) {
         if (!rs.next()) {
           return new PlayerTotals(0, 0, 0L, "");

@@ -9,12 +9,14 @@ import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.Executor;
+import java.util.function.Supplier;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
 import org.fetarute.fetaruteTCAddon.api.drive.GuardApi;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecordRepository;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager;
@@ -137,28 +139,59 @@ public final class GuardApiImpl implements GuardApi {
     if (playerId == null || limit <= 0) {
       return CompletableFuture.completedFuture(List.of());
     }
+    return async(
+        () -> {
+          List<DriveApi.TaskRecord> records = new ArrayList<>();
+          repository()
+              .ifPresent(
+                  repository -> {
+                    for (DriveTaskRecord record :
+                        repository.listByPlayerAndMode(
+                            playerId, DriveTaskRecord.MODE_GUARD, limit)) {
+                      records.add(DriveApiImpl.record(record));
+                    }
+                  });
+          return records;
+        });
+  }
+
+  @Override
+  public CompletableFuture<DriveApi.TaskStats> stats(UUID playerId) {
+    DriveApi.TaskStats none = new DriveApi.TaskStats(0, 0, 0L, Optional.empty());
+    if (playerId == null) {
+      return CompletableFuture.completedFuture(none);
+    }
+    return async(
+        () ->
+            repository()
+                .map(
+                    repository ->
+                        repository.totalsByPlayerAndMode(playerId, DriveTaskRecord.MODE_GUARD))
+                .map(
+                    totals ->
+                        new DriveApi.TaskStats(
+                            totals.tasks(),
+                            totals.completed(),
+                            totals.completedPoints(),
+                            Optional.of(totals.bestGrade()).filter(grade -> !grade.isEmpty())))
+                .orElse(none));
+  }
+
+  /** 驾驶记录仓库；存储未就绪时为空。 */
+  private Optional<DriveTaskRecordRepository> repository() {
+    org.fetarute.fetaruteTCAddon.storage.StorageManager storage = plugin.getStorageManager();
+    if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
+      return Optional.empty();
+    }
+    return Optional.of(storage.provider().get().driveTaskRecords());
+  }
+
+  private <T> CompletableFuture<T> async(Supplier<T> work) {
     Executor executor =
         plugin.isEnabled()
             ? runnable -> Bukkit.getScheduler().runTaskAsynchronously(plugin, runnable)
             : Runnable::run;
-    return CompletableFuture.supplyAsync(
-        () -> {
-          org.fetarute.fetaruteTCAddon.storage.StorageManager storage = plugin.getStorageManager();
-          if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
-            return List.<DriveApi.TaskRecord>of();
-          }
-          List<DriveApi.TaskRecord> records = new ArrayList<>();
-          for (DriveTaskRecord record :
-              storage
-                  .provider()
-                  .get()
-                  .driveTaskRecords()
-                  .listByPlayerAndMode(playerId, DriveTaskRecord.MODE_GUARD, limit)) {
-            records.add(DriveApiImpl.record(record));
-          }
-          return records;
-        },
-        executor);
+    return CompletableFuture.supplyAsync(work, executor);
   }
 
   private static void requireMainThread(String action) {

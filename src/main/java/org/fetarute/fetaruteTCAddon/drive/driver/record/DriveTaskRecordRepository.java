@@ -38,6 +38,13 @@ public interface DriveTaskRecordRepository {
   PlayerTotals totalsByPlayer(UUID playerId);
 
   /**
+   * 一名玩家某种方式的累计成绩（例如车掌的 {@link DriveTaskRecord#MODE_GUARD}），口径同 {@link #totalsByPlayer}。
+   *
+   * @param mode 记录的方式
+   */
+  PlayerTotals totalsByPlayerAndMode(UUID playerId, String mode);
+
+  /**
    * 累计成绩。
    *
    * @param tasks 开过车的任务数

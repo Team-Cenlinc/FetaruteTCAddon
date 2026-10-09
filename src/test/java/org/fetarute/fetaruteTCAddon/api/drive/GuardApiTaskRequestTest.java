@@ -69,6 +69,7 @@ class GuardApiTaskRequestTest {
     assertEquals(List.of(), api.offersAt("HHU", Instant.EPOCH, java.time.Duration.ZERO, 5));
     assertFalse(api.abandon(UUID.randomUUID(), "x"));
     assertEquals(List.of(), api.records(UUID.randomUUID(), 5).join());
+    assertEquals(0, api.stats(UUID.randomUUID()).join().tasks());
     assertTrue(GuardApi.TaskState.ON_DUTY.finished() == false);
     assertTrue(GuardApi.TaskState.EXPIRED.finished());
   }

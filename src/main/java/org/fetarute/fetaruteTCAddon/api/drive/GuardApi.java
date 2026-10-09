@@ -76,6 +76,9 @@ public interface GuardApi {
    */
   CompletableFuture<List<DriveApi.TaskRecord>> records(UUID playerId, int limit);
 
+  /** 玩家的累计车掌成绩：值乘的趟数、其中开完的趟数、开完的趟的总得分、最好的评级（与车掌记录同一口径）。 */
+  CompletableFuture<DriveApi.TaskStats> stats(UUID playerId);
+
   /** 车掌任务状态。 */
   enum TaskState {
     /** 已领取，等列车到站。 */
@@ -447,6 +450,12 @@ public interface GuardApi {
         @Override
         public CompletableFuture<List<DriveApi.TaskRecord>> records(UUID playerId, int limit) {
           return CompletableFuture.completedFuture(List.of());
+        }
+
+        @Override
+        public CompletableFuture<DriveApi.TaskStats> stats(UUID playerId) {
+          return CompletableFuture.completedFuture(
+              new DriveApi.TaskStats(0, 0, 0L, Optional.empty()));
         }
       };
 }

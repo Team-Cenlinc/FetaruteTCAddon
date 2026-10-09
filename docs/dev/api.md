@@ -80,7 +80,7 @@ FetaruteApi 提供十个子模块、一个数据版本号 `dataRevision()`（1.6
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表（1.9.0 站牌行结构化） |
 | `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消；1.11.0 车型） |
 | `drive()` | `DriveApi` | 驾驶任务：派任务、查询任务与驾驶状态、成绩记录（1.10.0；1.12.0 接班站与交班站改称 `takeoverStation`/`handoverStation`、停车结果改为 `StopOutcome`，旧名 `board`/`alight`/`StopWindow` 标为弃用、照常可用；1.13.0 `TaskRequest.rewards(false)` 不发驾驶奖励） |
-| `guard()` | `GuardApi` | 车掌（1.14.0）：派车掌任务（`TaskRequest` 写法同驾驶任务，可设交班站、不发奖励）、查询任务与值乘、按车名找车掌、车掌记录；车掌功能未加载时为占位实现（`enabled()` 为 false） |
+| `guard()` | `GuardApi` | 车掌（1.14.0）：派车掌任务（`TaskRequest` 写法同驾驶任务，可设交班站、不发奖励）、查询任务与值乘、按车名找车掌、车掌记录与累计成绩；车掌功能未加载时为占位实现（`enabled()` 为 false） |
 
 ---
 
