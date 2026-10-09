@@ -5,7 +5,7 @@ import java.util.Locale;
 import java.util.Objects;
 
 /**
- * 一级驾驶证：叫什么、要先有哪几级、怎么考、考过给哪些权限节点。
+ * 一级驾驶证：叫什么、要先有哪几级、怎么考、考过给哪些权限节点。车掌考法的一项不是更高一级的驾驶资格，而是驾驶证上的附注（见 {@link #endorsement()}）。
  *
  * @param id 等级标识（配置里的键，小写）
  * @param name 显示名
@@ -76,6 +76,11 @@ public record LicenseClass(
     trainingRuns = Math.max(0, trainingRuns);
     grants = grants == null ? List.of() : List.copyOf(grants);
     drillSeconds = Math.max(0, drillSeconds);
+  }
+
+  /** 是驾驶证上的附注（车掌）：不排进准驾等级，驾驶证上单列“附注”一栏。 */
+  public boolean endorsement() {
+    return exam == Exam.GUARD;
   }
 
   /** 演练时限按考法取默认：车掌考试 {@link #DEFAULT_DRILL_SECONDS} 秒，其余不演练。 */

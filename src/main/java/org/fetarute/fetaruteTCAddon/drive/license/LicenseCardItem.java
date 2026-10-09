@@ -20,7 +20,7 @@ import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 实体驾驶证：一本成书，把插件里的记录印出来——持证人、证号、准驾等级与发证日期。只是凭证，驾驶权限按记录给；丢了再印一本即可。
+ * 实体驾驶证：一本成书，把插件里的记录印出来——持证人、证号、准驾等级与附注（车掌）及取得日期。只是凭证，驾驶权限按记录给；丢了再印一本即可。
  *
  * <p>证号由玩家 UUID 得出，固定不变，不另外存储。书上记下持证人，换发时认得出背包里哪几本是这名玩家的旧证。
  */
@@ -30,7 +30,7 @@ public final class LicenseCardItem {
   private static final DateTimeFormatter DATE =
       DateTimeFormatter.ofPattern("yyyy-MM-dd").withZone(ZoneId.systemDefault());
 
-  /** 一级准驾等级在证上的写法。 */
+  /** 一级准驾等级或一项附注在证上的写法。 */
   public record Entry(String name, Instant grantedAt) {}
 
   private final NamespacedKey holderKey;
@@ -44,9 +44,18 @@ public final class LicenseCardItem {
     return "FTA-" + playerId.toString().replace("-", "").substring(0, 8).toUpperCase(Locale.ROOT);
   }
 
-  /** 按持有的等级印一本驾驶证。 */
+  /**
+   * 按持有的等级与附注印一本驾驶证。
+   *
+   * @param entries 准驾等级
+   * @param endorsements 附注；没有时不印这一栏
+   */
   public ItemStack create(
-      LocaleManager locale, UUID playerId, String playerName, List<Entry> entries) {
+      LocaleManager locale,
+      UUID playerId,
+      String playerName,
+      List<Entry> entries,
+      List<Entry> endorsements) {
     ItemStack stack = new ItemStack(Material.WRITTEN_BOOK);
     BookMeta meta = (BookMeta) stack.getItemMeta();
     meta.title(locale.component("drive.license.card.title"));
@@ -58,11 +67,10 @@ public final class LicenseCardItem {
     lines.add(locale.component("drive.license.card.serial", Map.of("serial", number(playerId))));
     lines.add(Component.empty());
     lines.add(locale.component("drive.license.card.classes"));
-    for (Entry entry : entries) {
-      lines.add(
-          locale.component(
-              "drive.license.card.class",
-              Map.of("name", entry.name(), "date", DATE.format(entry.grantedAt()))));
+    addEntries(locale, lines, entries);
+    if (!endorsements.isEmpty()) {
+      lines.add(locale.component("drive.license.card.endorsements"));
+      addEntries(locale, lines, endorsements);
     }
     meta.addPages(Component.join(JoinConfiguration.newlines(), lines));
     meta.addPages(locale.component("drive.license.card.notice"));
@@ -72,6 +80,15 @@ public final class LicenseCardItem {
       throw new IllegalStateException("无法为驾驶证设置物品元数据");
     }
     return stack;
+  }
+
+  private static void addEntries(LocaleManager locale, List<Component> lines, List<Entry> entries) {
+    for (Entry entry : entries) {
+      lines.add(
+          locale.component(
+              "drive.license.card.class",
+              Map.of("name", entry.name(), "date", DATE.format(entry.grantedAt()))));
+    }
   }
 
   /** 这件物品是不是驾驶证；是的话读出持证人。 */

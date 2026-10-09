@@ -6,7 +6,7 @@
 
 - `/fta guard on`：坐在调度列车（`ManagedTrains.isFtaManaged`）车尾驾驶室的座位上执行。驾驶座的认定与驾驶员相同（`drive.yml` 的 `driver.cab-seat-names`，没有标记时按车厢位置）；车尾端（`CabSeats.End.TAIL`）才行，单节车坐另一头的驾驶室即可。一列车只有一名车掌；正在驾驶的玩家不能当车掌，车掌也不能同时驾驶（`drive.command.start.guard-on-duty`）。
 - `/fta guard off` 结束值乘，`/fta guard seat` 传送入座，`/fta guard status` 查看，管理员 `/fta guard stop <玩家>` 撤下。车掌菜单（F）里“结束值乘”点两次也结束。
-- 权限 `fetarute.drive.guard`（默认 OP，含在 `fetarute.drive.player` 打包节点里；考过车掌证也给这个节点）。
+- 权限 `fetarute.drive.guard`（默认 OP，含在 `fetarute.drive.player` 打包节点里；考过车掌附注也给这个节点）。
 - 值乘结束（含离线、死亡、列车不在了、漏乘、连续超时、换端没坐进车尾）时车掌开着的门随之关上，车门交还驾驶员或站台；站台的停站发现车门不归车掌了，剩下的开关门与发车按原来的方式进行。
 
 ## 车掌任务（`GuardTasks`、`GuardTask`）
@@ -80,7 +80,9 @@
 - 记录：写进 `drive_task_records`，`mode` 为 `GUARD`（`DriveTaskRecord#MODE_GUARD`），明细见 `GuardRecordCodec`；`/fta drive records` 照样列出，驾驶排行与驾驶员的汇总（`/fta drive top`、API 的统计）不算车掌的记录。
 - 不按时刻表运行的列车没有车次：整段值乘算一趟，只给成绩，不记录、不发奖励（与驾驶员接管不按表运行的列车不记任务一致）。
 
-## 车掌证（驾驶证的车掌考法）
+## 车掌附注（驾驶证的车掌考法）
+
+- 车掌不是更高一级的驾驶资格，是驾驶证上的附注（`LicenseClass#endorsement`，即 `exam: guard` 的一项）：不占准驾等级的级数（`LicenseConfig#levelOf` 为 0），驾驶证成书与 `/fta license` 里在“准驾等级”之后单列“附注”一栏，只写名字（“车掌”）；提示句子里称“车掌附注”（`LicenseService#displayName`，`drive.license.endorsement-name`）。考过后的下一步提示用 `drive.license.next-endorsement`。
 
 - `drive.yml` 的 `license.classes.guard`：考法 `exam: guard`（`LicenseClass.Exam.GUARD`），不要求先有驾驶证，考过给 `fetarute.drive.guard`。默认做满 `exam-stops`（3）站、及格 `min-points`（70），`allow-wrong-door: false`，报名前要做完 `training-runs`（1）次练习。
 - 车掌功能关着或不可用时不能报名考试或练习（`drive.license.exam.guard-unavailable`）；正在驾驶、值乘、领着驾驶或车掌任务时也不能（`LicenseService#crewBusy`）。

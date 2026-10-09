@@ -36,7 +36,7 @@ public record LicenseConfig(
     training = training == null ? TrainingConfig.defaults() : training;
   }
 
-  /** 默认三级：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考；车掌证不要求驾驶证，在调度列车上值乘考。 */
+  /** 默认两级准驾等级与一项附注：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考；车掌附注不要求驾驶证，在调度列车上值乘考。 */
   public static LicenseConfig defaults() {
     return new LicenseConfig(
         true,
@@ -74,7 +74,7 @@ public record LicenseConfig(
                 List.of(DrivePermissions.DRIVER)),
             new LicenseClass(
                 "guard",
-                "车掌证",
+                "车掌",
                 "在调度列车上当车掌：开关车门、站台监视、确认出站信号、按发车铃",
                 true,
                 List.of(),
@@ -89,10 +89,22 @@ public record LicenseConfig(
         TrainingConfig.defaults());
   }
 
-  /** 第几级：按配置里的先后，从 1 起；没有这一级时为 0。 */
+  /** 第几级：按配置里的先后数准驾等级，从 1 起；附注（车掌）不占级数，与没有这一级一样为 0。 */
   public int levelOf(String id) {
     Optional<LicenseClass> found = find(id);
-    return found.map(c -> classes.indexOf(c) + 1).orElse(0);
+    if (found.isEmpty() || found.get().endorsement()) {
+      return 0;
+    }
+    int level = 0;
+    for (LicenseClass license : classes) {
+      if (!license.endorsement()) {
+        level++;
+      }
+      if (license == found.get()) {
+        return level;
+      }
+    }
+    return 0;
   }
 
   /** 按标识找一级（不分大小写）。 */

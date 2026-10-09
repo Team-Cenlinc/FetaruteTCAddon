@@ -64,6 +64,32 @@ class LicenseMessagesTest {
       keys.add("drive.license.exam.brief.road-test." + line);
     }
     keys.add("drive.guard.result-practice");
+    // /fta license 每一行的键按“前缀 + 状态”拼出。
+    for (String state :
+        List.of(
+            "held-exam",
+            "held-admin",
+            "closed",
+            "exam-running",
+            "practice-running",
+            "locked",
+            "open-tutorial",
+            "need-practice",
+            "open-road-test")) {
+      keys.add("drive.license.info.level-" + state);
+    }
+    for (String state :
+        List.of(
+            "held-exam",
+            "held-admin",
+            "closed",
+            "exam-running",
+            "practice-running",
+            "locked",
+            "need-practice",
+            "open")) {
+      keys.add("drive.license.info.endorsement." + state);
+    }
     for (String key : keys) {
       // 拼键用的前缀（如“drive.license.practice”后接“.warn.…”）是一段，不是文案。
       assertTrue(lang.isString(key) || lang.isConfigurationSection(key), localeTag + " 缺少 " + key);

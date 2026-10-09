@@ -65,7 +65,7 @@ class GuardExamTest {
     LicenseClass strict =
         new LicenseClass(
             "guard",
-            "车掌证",
+            "车掌",
             "",
             true,
             List.of(),
@@ -84,7 +84,7 @@ class GuardExamTest {
     LicenseClass exact =
         new LicenseClass(
             "guard",
-            "车掌证",
+            "车掌",
             "",
             true,
             List.of(),
@@ -118,7 +118,7 @@ class GuardExamTest {
     LicenseClass lenient =
         new LicenseClass(
             "guard",
-            "车掌证",
+            "车掌",
             "",
             true,
             List.of(),
@@ -174,7 +174,7 @@ class GuardExamTest {
     LicenseClass oneStop =
         new LicenseClass(
             "guard",
-            "车掌证",
+            "车掌",
             "",
             true,
             List.of(),
@@ -190,7 +190,7 @@ class GuardExamTest {
     LicenseClass noDrill =
         new LicenseClass(
             "guard",
-            "车掌证",
+            "车掌",
             "",
             true,
             List.of(),
@@ -285,7 +285,22 @@ class GuardExamTest {
     keys.add("drive.license.exam.guard.reason.points");
     keys.add("drive.license.exam.guard.tip.points");
     keys.add("drive.license.exam.guard-unavailable");
-    keys.add("drive.license.info.level-open-guard");
+    for (String line :
+        List.of(
+            "header",
+            "held-exam",
+            "held-admin",
+            "exam-running",
+            "practice-running",
+            "need-practice",
+            "open",
+            "locked",
+            "closed")) {
+      keys.add("drive.license.info.endorsement." + line);
+    }
+    keys.add("drive.license.endorsement-name");
+    keys.add("drive.license.next-endorsement");
+    keys.add("drive.license.card.endorsements");
     for (String part : List.of("title", "author", "given")) {
       keys.add("drive.handbook.guard." + part);
     }

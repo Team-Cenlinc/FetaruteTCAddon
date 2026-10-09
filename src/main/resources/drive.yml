@@ -307,6 +307,7 @@ license:
     routes: []
   # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）、
   # road-test（路考：驾驶一段调度列车的区间任务）或 guard（车掌：在调度列车上值乘，做满几站作业）；grants：持证时给的权限节点。
+  # exam: guard 的一项不占级数，是驾驶证上的附注（驾驶证与 /fta license 里单列“附注”一栏，提示里称“<名称>附注”）。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
   classes:
     learner:
@@ -337,7 +338,7 @@ license:
       grants:
         - fetarute.drive.driver
     guard:
-      name: "车掌证"
+      name: "车掌"
       description: "在调度列车上当车掌：开关车门、站台监视、确认出站信号、按发车铃"
       enabled: true
       requires: []

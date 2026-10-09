@@ -98,7 +98,7 @@ class LicenseConfigTest {
   }
 
   @Test
-  @DisplayName("车掌证：不要求驾驶证，先练习一次再在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
+  @DisplayName("车掌附注：不占准驾等级，不要求驾驶证，先练习一次再在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
   void guardClass() throws Exception {
     LicenseClass guard = LicenseConfig.defaults().find("guard").orElseThrow();
     assertEquals(LicenseClass.Exam.GUARD, guard.exam());
@@ -118,7 +118,9 @@ class LicenseConfigTest {
         LicenseConfig.from(bundled.getConfigurationSection("license"), warnings::add);
     assertEquals(List.of(), warnings);
     assertEquals(guard, parsed.find("guard").orElseThrow());
-    assertEquals(3, parsed.levelOf("guard"));
+    assertTrue(guard.endorsement(), "车掌是驾驶证附注，不是更高一级");
+    assertEquals(0, parsed.levelOf("guard"), "附注不占级数");
+    assertEquals(2, parsed.levelOf("driver"));
 
     YamlConfiguration custom = new YamlConfiguration();
     custom.loadFromString(
@@ -138,6 +140,28 @@ class LicenseConfigTest {
     assertEquals(20, drills.find("guard").orElseThrow().drillSeconds());
     assertEquals(0, drills.find("quiet").orElseThrow().drillSeconds(), "0 为不演练");
     assertEquals(0, drills.find("driver").orElseThrow().drillSeconds(), "演练只用于车掌考试");
+  }
+
+  @Test
+  @DisplayName("附注不论排在哪里都不占级数，准驾等级照顺序编号")
+  void endorsementsDoNotCountAsLevels() throws Exception {
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString(
+        """
+        classes:
+          guard:
+            exam: guard
+          learner:
+            exam: tutorial
+          driver:
+            exam: road-test
+            requires: [learner]
+        """);
+    LicenseConfig config = LicenseConfig.from(yaml, message -> {});
+    assertEquals(0, config.levelOf("guard"));
+    assertEquals(1, config.levelOf("learner"));
+    assertEquals(2, config.levelOf("driver"));
+    assertEquals(0, config.levelOf("missing"));
   }
 
   @Test

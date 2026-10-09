@@ -215,70 +215,86 @@ public final class FtaLicenseCommand {
       held.put(record.classId(), record);
     }
     Optional<LicenseService.Exam> examining = licenses.exam(id);
-    for (LicenseClass license : licenses.config().classes()) {
-      Map<String, String> values = new java.util.HashMap<>();
-      values.put("level", String.valueOf(licenses.config().levelOf(license.id())));
-      values.put("name", license.name());
-      values.put("class", license.id());
-      values.put("description", license.description());
-      values.put("stops", String.valueOf(license.examStops()));
-      values.put("min", String.valueOf(license.minPoints()));
-      values.put("done", String.valueOf(licenses.trainingRuns(id, license.id())));
-      values.put("required", String.valueOf(license.trainingRuns()));
-      LicenseRecord record = held.get(license.id());
-      if (record != null) {
-        values.put("date", DATE.format(record.grantedAt()));
-        values.put("by", record.grantedBy());
-        sender.sendMessage(
-            locale.component(
-                "exam".equals(record.grantedBy())
-                    ? "drive.license.info.level-held-exam"
-                    : "drive.license.info.level-held-admin",
-                values));
-        continue;
-      }
-      if (!license.enabled()) {
-        sender.sendMessage(locale.component("drive.license.info.level-closed", values));
-        continue;
-      }
-      if (examining.filter(exam -> license.id().equals(exam.classId())).isPresent()) {
-        sender.sendMessage(
-            locale.component(
-                !examining.get().training()
-                    ? "drive.license.info.level-exam-running"
-                    : license.exam() == LicenseClass.Exam.GUARD
-                        ? "drive.license.info.level-practice-running-guard"
-                        : "drive.license.info.level-practice-running",
-                values));
-        continue;
-      }
-      List<String> missing = new ArrayList<>();
-      for (String required : license.requires()) {
-        if (!held.containsKey(required)) {
-          missing.add(licenses.levelName(required));
+    // 先列准驾等级的阶梯，再单列“附注”（车掌）。
+    boolean endorsementHeader = false;
+    for (boolean endorsements : new boolean[] {false, true}) {
+      for (LicenseClass license : licenses.config().classes()) {
+        if (license.endorsement() != endorsements) {
+          continue;
         }
+        if (endorsements && !endorsementHeader) {
+          sender.sendMessage(locale.component("drive.license.info.endorsement.header"));
+          endorsementHeader = true;
+        }
+        sender.sendMessage(
+            locale.component(
+                infoKey(licenses, license, id, held, examining),
+                infoValues(licenses, license, id, held)));
       }
-      if (!missing.isEmpty()) {
-        values.put("required", String.join("、", missing));
-        sender.sendMessage(locale.component("drive.license.info.level-locked", values));
-        continue;
-      }
-      String key;
-      if (license.exam() == LicenseClass.Exam.TUTORIAL) {
-        key = "drive.license.info.level-open-tutorial";
-      } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
-        key =
-            license.exam() == LicenseClass.Exam.GUARD
-                ? "drive.license.info.level-need-practice-guard"
-                : "drive.license.info.level-need-practice";
-      } else if (license.exam() == LicenseClass.Exam.GUARD) {
-        key = "drive.license.info.level-open-guard";
-      } else {
-        key = "drive.license.info.level-open-road-test";
-      }
-      sender.sendMessage(locale.component(key, values));
     }
     sender.sendMessage(locale.component("drive.license.info.footer"));
+  }
+
+  /** /fta license 里一级（或一项附注）的那一行：已取得、关闭、考试或练习中、未解锁、须先练习、可报名。 */
+  private static String infoKey(
+      LicenseService licenses,
+      LicenseClass license,
+      UUID id,
+      Map<String, LicenseRecord> held,
+      Optional<LicenseService.Exam> examining) {
+    String prefix =
+        license.endorsement() ? "drive.license.info.endorsement." : "drive.license.info.level-";
+    LicenseRecord record = held.get(license.id());
+    if (record != null) {
+      return prefix + ("exam".equals(record.grantedBy()) ? "held-exam" : "held-admin");
+    }
+    if (!license.enabled()) {
+      return prefix + "closed";
+    }
+    if (examining.filter(exam -> license.id().equals(exam.classId())).isPresent()) {
+      return prefix + (examining.get().training() ? "practice-running" : "exam-running");
+    }
+    for (String required : license.requires()) {
+      if (!held.containsKey(required)) {
+        return prefix + "locked";
+      }
+    }
+    if (license.exam() == LicenseClass.Exam.TUTORIAL) {
+      return prefix + "open-tutorial";
+    }
+    if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
+      return prefix + "need-practice";
+    }
+    return prefix + (license.endorsement() ? "open" : "open-road-test");
+  }
+
+  /** 那一行的占位符：附注单列在“附注”下，只写名字（如“车掌”）。 */
+  private static Map<String, String> infoValues(
+      LicenseService licenses, LicenseClass license, UUID id, Map<String, LicenseRecord> held) {
+    Map<String, String> values = new java.util.HashMap<>();
+    values.put("level", String.valueOf(licenses.config().levelOf(license.id())));
+    values.put("name", license.name());
+    values.put("class", license.id());
+    values.put("description", license.description());
+    values.put("stops", String.valueOf(license.examStops()));
+    values.put("min", String.valueOf(license.minPoints()));
+    values.put("done", String.valueOf(licenses.trainingRuns(id, license.id())));
+    values.put("required", String.valueOf(license.trainingRuns()));
+    LicenseRecord record = held.get(license.id());
+    if (record != null) {
+      values.put("date", DATE.format(record.grantedAt()));
+      values.put("by", record.grantedBy());
+    }
+    List<String> missing = new ArrayList<>();
+    for (String required : license.requires()) {
+      if (!held.containsKey(required)) {
+        missing.add(licenses.levelName(required));
+      }
+    }
+    if (!missing.isEmpty()) {
+      values.put("required", String.join("、", missing));
+    }
+    return values;
   }
 
   /** 领一本《FTCA 驾驶员手册》。 */
@@ -356,12 +372,13 @@ public final class FtaLicenseCommand {
             target.get().isOnline()
                 ? "drive.license.admin.granted"
                 : "drive.license.admin.granted-offline",
-            Map.of("player", playerName, "name", license.get().name())));
+            Map.of("player", playerName, "name", licenses.displayName(license.get()))));
     Player online = target.get().getPlayer();
     if (online != null && online != sender) {
       online.sendMessage(
           locale.component(
-              "drive.license.admin.granted-notice", Map.of("name", license.get().name())));
+              "drive.license.admin.granted-notice",
+              Map.of("name", licenses.displayName(license.get()))));
     }
   }
 

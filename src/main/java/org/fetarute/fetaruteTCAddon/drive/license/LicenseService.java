@@ -272,12 +272,22 @@ public final class LicenseService implements Listener, GuardExaminer {
     return Optional.ofNullable(exams.get(playerId));
   }
 
-  /** 等级的显示名；配置里已没有这一级时用标识。 */
+  /** 写在提示句子里的名称；配置里已没有这一级时用标识。 */
   public String nameOf(String classId) {
-    return config.find(classId).map(LicenseClass::name).orElse(classId);
+    return config.find(classId).map(this::displayName).orElse(classId);
   }
 
-  /** 带级别的显示名：“第 N 级 · 名称”；配置里已没有这一级时只写名称。 */
+  /** 写在提示句子里的名称：准驾等级就是它的名字，附注在名字后加“附注”（如“车掌附注”）。 */
+  public String displayName(LicenseClass license) {
+    return license.endorsement()
+        ? plugin
+            .getLocaleManager()
+            .text("drive.license.endorsement-name")
+            .replace("<name>", license.name())
+        : license.name();
+  }
+
+  /** 带级别的显示名：“第 N 级 · 名称”；附注与配置里已没有的只写名称。 */
   public String levelName(String classId) {
     int level = config.levelOf(classId);
     if (level <= 0) {
@@ -312,7 +322,7 @@ public final class LicenseService implements Listener, GuardExaminer {
       return Reply.of("drive.license.loading");
     }
     if (holds(id, license.id())) {
-      return new Reply("drive.license.exam.already-held", Map.of("name", license.name()));
+      return new Reply("drive.license.exam.already-held", Map.of("name", displayName(license)));
     }
     List<String> missing = new ArrayList<>();
     for (String required : license.requires()) {
@@ -323,7 +333,7 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (!missing.isEmpty()) {
       return new Reply(
           "drive.license.exam.requires",
-          Map.of("name", license.name(), "required", String.join("、", missing)));
+          Map.of("name", displayName(license), "required", String.join("、", missing)));
     }
     Exam running = exams.get(id);
     if (running != null
@@ -339,7 +349,8 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (until != null && now.isBefore(until)) {
       return new Reply(
           "drive.license.exam.cooldown",
-          Map.of("name", license.name(), "minutes", String.valueOf(minutesUntil(now, until))));
+          Map.of(
+              "name", displayName(license), "minutes", String.valueOf(minutesUntil(now, until))));
     }
     if (license.exam() != LicenseClass.Exam.TUTORIAL
         && trainingRuns(id, license.id()) < license.trainingRuns()) {
@@ -349,7 +360,7 @@ public final class LicenseService implements Listener, GuardExaminer {
               : "drive.license.exam.need-training",
           Map.of(
               "name",
-              license.name(),
+              displayName(license),
               "class",
               license.id(),
               "done",
@@ -380,7 +391,7 @@ public final class LicenseService implements Listener, GuardExaminer {
     }
     LicenseClass license = found.get();
     if (license.exam() == LicenseClass.Exam.TUTORIAL) {
-      return new Reply("drive.license.practice.not-road", Map.of("name", license.name()));
+      return new Reply("drive.license.practice.not-road", Map.of("name", displayName(license)));
     }
     if (!ensureLoaded(player)) {
       return Reply.of("drive.license.loading");
@@ -394,7 +405,7 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (!missing.isEmpty()) {
       return new Reply(
           "drive.license.exam.requires",
-          Map.of("name", license.name(), "required", String.join("、", missing)));
+          Map.of("name", displayName(license), "required", String.join("、", missing)));
     }
     Exam running = exams.get(id);
     if (running != null) {
@@ -407,7 +418,8 @@ public final class LicenseService implements Listener, GuardExaminer {
     boolean guard = license.exam() == LicenseClass.Exam.GUARD;
     Optional<GuardSessionManager> guards = manager.guards().filter(GuardSessionManager::available);
     if (guard && guards.isEmpty()) {
-      return new Reply("drive.license.exam.guard-unavailable", Map.of("name", license.name()));
+      return new Reply(
+          "drive.license.exam.guard-unavailable", Map.of("name", displayName(license)));
     }
     Reply busy = crewBusy(manager, id);
     if (busy != null) {
@@ -604,7 +616,8 @@ public final class LicenseService implements Listener, GuardExaminer {
             : manager.guards().filter(GuardSessionManager::available);
     if (guards.isEmpty()) {
       // 车掌功能关着或不可用：报了名也上不了岗，不登记考试。
-      return new Reply("drive.license.exam.guard-unavailable", Map.of("name", license.name()));
+      return new Reply(
+          "drive.license.exam.guard-unavailable", Map.of("name", displayName(license)));
     }
     Reply busy = crewBusy(manager, player.getUniqueId());
     if (busy != null) {
@@ -1423,7 +1436,10 @@ public final class LicenseService implements Listener, GuardExaminer {
         continue;
       }
       if (license.requires().stream().allMatch(required -> holds(id, required))) {
-        tell(player, "drive.license.next", passValues(license, ""));
+        tell(
+            player,
+            license.endorsement() ? "drive.license.next-endorsement" : "drive.license.next",
+            passValues(license, ""));
         any = true;
       }
     }
@@ -1474,7 +1490,7 @@ public final class LicenseService implements Listener, GuardExaminer {
   private Map<String, String> passValues(LicenseClass license, String points) {
     Map<String, String> values = new LinkedHashMap<>();
     values.put("level", String.valueOf(config.levelOf(license.id())));
-    values.put("name", license.name());
+    values.put("name", displayName(license));
     values.put("class", license.id());
     values.put("description", license.description());
     values.put("points", points);
@@ -1719,8 +1735,15 @@ public final class LicenseService implements Listener, GuardExaminer {
   /** 按记录印一本驾驶证放进背包：先收走背包里这名玩家的旧证，放不下的掉在脚边。 */
   private void giveCard(Player player) {
     List<LicenseCardItem.Entry> entries = new ArrayList<>();
+    List<LicenseCardItem.Entry> endorsements = new ArrayList<>();
     for (LicenseRecord record : held(player.getUniqueId())) {
-      entries.add(new LicenseCardItem.Entry(levelName(record.classId()), record.grantedAt()));
+      Optional<LicenseClass> license = config.find(record.classId());
+      if (license.filter(LicenseClass::endorsement).isPresent()) {
+        // 印在“附注”一栏下，只写名字（如“车掌”）。
+        endorsements.add(new LicenseCardItem.Entry(license.get().name(), record.grantedAt()));
+      } else {
+        entries.add(new LicenseCardItem.Entry(levelName(record.classId()), record.grantedAt()));
+      }
     }
     PlayerInventory inventory = player.getInventory();
     for (int slot = 0; slot < inventory.getSize(); slot++) {
@@ -1732,7 +1755,12 @@ public final class LicenseService implements Listener, GuardExaminer {
       }
     }
     ItemStack item =
-        cards.create(plugin.getLocaleManager(), player.getUniqueId(), player.getName(), entries);
+        cards.create(
+            plugin.getLocaleManager(),
+            player.getUniqueId(),
+            player.getName(),
+            entries,
+            endorsements);
     for (ItemStack left : inventory.addItem(item).values()) {
       player.getWorld().dropItemNaturally(player.getLocation(), left);
     }
