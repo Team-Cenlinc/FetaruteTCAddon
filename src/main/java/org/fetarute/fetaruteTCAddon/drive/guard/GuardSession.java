@@ -4,6 +4,7 @@ import java.util.Objects;
 import java.util.UUID;
 import org.bukkit.inventory.ItemStack;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
@@ -68,6 +69,10 @@ public final class GuardSession implements DriveDoors.Cab {
   private boolean moving;
   private CabSeats.Departure layoverDeparture;
   private CabSeatsMemo cabSeatsMemo;
+  private GuardTrip trip = new GuardTrip(null, "", java.time.Instant.now());
+  private TaskKey trackedTrip;
+  private org.bukkit.util.Vector lastHead;
+  private java.util.UUID lastWorld;
 
   /** 驾驶室座位的认定：同一编组、同样节数时每秒最多重读一次。 */
   public record CabSeatsMemo(
@@ -154,6 +159,42 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setLayoverDeparture(CabSeats.Departure departure) {
     this.layoverDeparture = departure;
+  }
+
+  /** 正在做的这一趟（车次换了或值乘结束时结算）。 */
+  public GuardTrip trip() {
+    return trip;
+  }
+
+  public void setTrip(GuardTrip trip) {
+    this.trip = Objects.requireNonNull(trip, "trip");
+  }
+
+  /** 正在跟着的那一站开始时列车跑的车次；不按时刻表运行时为 {@code null}。 */
+  public TaskKey trackedTrip() {
+    return trackedTrip;
+  }
+
+  public void setTrackedTrip(TaskKey key) {
+    this.trackedTrip = key;
+  }
+
+  /**
+   * 列车车头又挪到了这里：返回比上一拍走了多远（格）。换了世界、第一次量时为 0。
+   *
+   * @param maxStep 一拍走的超过这么远不算（调头时车头换到另一端、传送）
+   */
+  public double moveHead(java.util.UUID world, org.bukkit.util.Vector head, double maxStep) {
+    double moved = 0.0;
+    if (lastHead != null && world != null && world.equals(lastWorld)) {
+      double distance = lastHead.distance(head);
+      if (distance <= maxStep) {
+        moved = distance;
+      }
+    }
+    lastHead = head.clone();
+    lastWorld = world;
+    return moved;
   }
 
   public CabSeatsMemo cabSeatsMemo() {

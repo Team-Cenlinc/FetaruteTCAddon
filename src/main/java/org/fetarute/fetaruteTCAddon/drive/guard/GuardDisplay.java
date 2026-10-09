@@ -93,6 +93,7 @@ public final class GuardDisplay {
   private static final String PROMPT = "drive.guard.prompt.";
   private static final String LABEL = "drive.guard.sidebar.label.";
   private static final String VALUE = "drive.guard.sidebar.value.";
+  private static final String SHEET = "drive.guard.sheet.";
 
   private GuardDisplay() {}
 
@@ -207,6 +208,42 @@ public final class GuardDisplay {
       return "doors-right";
     }
     return stop.closing() ? "doors-closing" : "doors-closed";
+  }
+
+  /** 一趟的成绩单：每一项扣分一行（站名与原因）；全无扣分时一行说明；有异常报告时再一行。 */
+  public static List<Line> sheet(GuardScore score) {
+    List<Line> lines = new ArrayList<>();
+    for (GuardScore.Stop stop : score.stops()) {
+      Map<String, String> station = Map.of("station", stop.station());
+      if (stop.forcedOpen()) {
+        lines.add(new Line(SHEET + "forced-open", station));
+      }
+      if (stop.forcedClose()) {
+        lines.add(new Line(SHEET + "forced-close", station));
+      }
+      if (stop.forcedSignal()) {
+        lines.add(new Line(SHEET + "forced-signal", station));
+      }
+      if (stop.wrongDoor()) {
+        lines.add(new Line(SHEET + "wrong-door", station));
+      }
+      if (stop.closedEarly()) {
+        lines.add(new Line(SHEET + "closed-early", station));
+      }
+      if (stop.closingWatch().filter(passed -> !passed).isPresent()) {
+        lines.add(new Line(SHEET + "closing-watch", station));
+      }
+      if (stop.departureWatch().filter(passed -> !passed).isPresent()) {
+        lines.add(new Line(SHEET + "departure-watch", station));
+      }
+    }
+    if (lines.isEmpty()) {
+      lines.add(new Line(SHEET + "clean", Map.of("count", String.valueOf(score.stopCount()))));
+    }
+    if (score.incidents() > 0) {
+      lines.add(new Line(SHEET + "incidents", Map.of("count", String.valueOf(score.incidents()))));
+    }
+    return lines;
   }
 
   /** 应开哪一侧：语言键的后缀。 */

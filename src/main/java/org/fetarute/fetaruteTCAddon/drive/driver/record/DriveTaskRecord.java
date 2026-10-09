@@ -17,7 +17,7 @@ import java.util.UUID;
  * @param serviceDate 运营日
  * @param routeCode 交路代码
  * @param trainName 列车
- * @param mode 驾驶方式（MANUAL / ATO）
+ * @param mode 驾驶方式（MANUAL / ATO），车掌值乘为 {@link #MODE_GUARD}
  * @param state 任务终态
  * @param points 得分 0–100
  * @param grade 评级
@@ -42,6 +42,9 @@ public record DriveTaskRecord(
     Instant startedAt,
     Instant finishedAt,
     String detailJson) {
+
+  /** 车掌值乘的记录：不进驾驶排行与驾驶员的汇总。 */
+  public static final String MODE_GUARD = "GUARD";
 
   public DriveTaskRecord {
     Objects.requireNonNull(id, "id");

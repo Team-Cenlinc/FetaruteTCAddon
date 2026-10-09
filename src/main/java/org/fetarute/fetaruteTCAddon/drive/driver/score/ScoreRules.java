@@ -74,14 +74,20 @@ public final class ScoreRules {
       penalty += (int) Math.min(30L, gained / 10L);
     }
     int points = Math.max(0, 100 - penalty);
-    Grade grade =
-        !completed
-            ? Grade.D
-            : points >= 95
-                ? Grade.S
-                : points >= 85
-                    ? Grade.A
-                    : points >= 70 ? Grade.B : points >= 50 ? Grade.C : Grade.D;
-    return new Result(points, grade);
+    return new Result(points, gradeOf(points, completed));
+  }
+
+  /**
+   * 分数折成评级（驾驶员与车掌共用）。
+   *
+   * @param completed 照常评级；为 {@code false} 时最高 D
+   */
+  public static Grade gradeOf(int points, boolean completed) {
+    if (!completed) {
+      return Grade.D;
+    }
+    return points >= 95
+        ? Grade.S
+        : points >= 85 ? Grade.A : points >= 70 ? Grade.B : points >= 50 ? Grade.C : Grade.D;
   }
 }

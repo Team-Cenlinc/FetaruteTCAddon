@@ -3,6 +3,7 @@ package org.fetarute.fetaruteTCAddon.drive.guard;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.controller.MinecartMemberStore;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -26,8 +27,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
+import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewards;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
+import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
+import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
@@ -39,6 +45,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
+import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
@@ -97,6 +104,22 @@ public final class GuardSessionManager {
      * @return 车掌是否已入座
      */
     boolean moveWithGuard(String trainName, CabSeats.End guardEnd, BooleanSupplier seatGuard);
+
+    /** 列车此刻跑的车次（按时刻表的列车分配）；不按时刻表运行时为空。 */
+    Optional<TaskKey> tripOf(String trainName);
+
+    /** 车次的交路代码；查不到时为空串。 */
+    String routeCodeOf(TaskKey key);
+
+    /**
+     * 发车掌一趟的奖励，并在成绩单后说明发了多少（玩家不在线时只发钱币、不说明）。
+     *
+     * @param forfeited 判为未完成：不发，只说明不发
+     */
+    void payGuard(UUID playerId, String playerName, DriveRewards.Reward reward, boolean forfeited);
+
+    /** 写一条驾驶记录（后台写库）。 */
+    void saveRecord(DriveTaskRecord record);
   }
 
   /** 上岗的结果。 */
@@ -295,6 +318,9 @@ public final class GuardSessionManager {
             seat.get(),
             new BuzzerPress(current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()),
             Bukkit.getCurrentTick());
+    TaskKey trip = drivers.tripOf(seat.get().trainName()).orElse(null);
+    session.setTrip(
+        new GuardTrip(trip, trip == null ? "" : drivers.routeCodeOf(trip), Instant.now()));
     sessions.put(id, session);
     refreshHotbar(player, session, true);
     ensureTask();
@@ -328,6 +354,10 @@ public final class GuardSessionManager {
       return;
     }
     lastUseTick.remove(playerId);
+    Player gone = Bukkit.getPlayer(playerId);
+    // 已做完的站按结束原因结算：中途离开、被撤下的按做过的站给，连续超时、漏乘、换端没坐进车尾的判为未完成。
+    recordSettled(gone, session);
+    settleTrip(gone, session, session.trip(), GuardTrip.stateFor(reason));
     Optional<MinecartGroup> train = findGroup(session);
     boolean held = session.link().holdsTrain();
     session.link().releaseEmergency();
@@ -436,14 +466,13 @@ public final class GuardSessionManager {
       stop(session.playerId(), GuardSession.EndReason.LEFT_BEHIND);
       return;
     }
-    if (seated) {
-      // 开着门换到另一端：车掌面朝的方向反了，左右车门的记录跟着对调。
-      session.doors().followCab(group, session);
-    }
+    // 开着门换到另一端：预留座位改了，车掌面朝的方向反了，左右车门的记录跟着对调（TrainCarts 晚一拍才让人坐下也照样对调）。
+    session.doors().followCab(group, session);
     stationWork(player, session, group, seated, now);
     if (!sessions.containsKey(session.playerId())) {
       return;
     }
+    trackTrip(player, session, group, now);
     if (session.link().emergencyExpired()) {
       releaseEmergency(player, session, group, "drive.guard.emergency.expired");
     }
@@ -473,6 +502,7 @@ public final class GuardSessionManager {
       if (stop != session.trackedStop()) {
         // 新的一站：这一站的提示与超时处理从头来。
         session.setTrackedStop(stop);
+        session.setTrackedTrip(drivers.tripOf(group.getProperties().getTrainName()).orElse(null));
         session.setLastPhase(null);
         session.setSignalAnnounced(false);
         session.setForcedSignalHandled(false);
@@ -489,6 +519,9 @@ public final class GuardSessionManager {
           side.satisfied(left, right), left || right || closing, side.wrong(left, right));
       session.doors().holdClosingWhilePending(session, now);
       GuardStopWork work = link.work().orElseThrow();
+      if (side.wrong(left, right)) {
+        work.markWrongDoor();
+      }
       sampleClosingWatch(player, session, group, work, closing, seated, now);
       switch (work.tick(stop.phase())) {
         case FORCE_OPEN -> {
@@ -533,6 +566,7 @@ public final class GuardSessionManager {
           .filter(work -> group.isMoving())
           .ifPresent(work -> startDepartureWatch(session, group, last.get(), work, now));
       link.settle();
+      recordSettled(player, session);
       if (link.tooManyTimeouts()) {
         stop(session.playerId(), GuardSession.EndReason.TIMEOUTS);
       }
@@ -664,6 +698,7 @@ public final class GuardSessionManager {
       notice(player, session, "drive.guard.deny.no-door-open", Map.of());
       return;
     }
+    session.link().work().ifPresent(work -> work.noteClosed(stop.get().phase()));
     closeAll(group, session, stop.get());
   }
 
@@ -1116,6 +1151,160 @@ public final class GuardSessionManager {
     }
     if (!SeatLocator.reseat(player, group.get(), session.binding())) {
       notice(player, session, "drive.guard.seat.unavailable", Map.of());
+    }
+  }
+
+  // ---- 成绩、奖励与记录 ----
+
+  /** 一拍车头挪动超过这么远（格）不算里程：调头时车头换到另一端、传送。 */
+  private static final double MAX_HEAD_STEP_BLOCKS = 4.0;
+
+  /** 多久看一次列车换没换车次（tick）。 */
+  private static final long TRIP_POLL_TICKS = 20L;
+
+  /** 记里程；没在停站时看列车换没换车次，换了就把做过作业的这一趟结算掉（终点站折返开下一趟）。 */
+  private void trackTrip(Player player, GuardSession session, MinecartGroup group, long now) {
+    MinecartMember<?> head = group.head();
+    if (head != null && head.getEntity() != null) {
+      org.bukkit.Location at = head.getEntity().getLocation();
+      session
+          .trip()
+          .addBlocks(
+              session.moveHead(
+                  at.getWorld() == null ? null : at.getWorld().getUID(),
+                  at.toVector(),
+                  MAX_HEAD_STEP_BLOCKS));
+    }
+    if (now % TRIP_POLL_TICKS != 0 || session.link().stationStop().isPresent()) {
+      return;
+    }
+    TaskKey current = drivers.tripOf(group.getProperties().getTrainName()).orElse(null);
+    if (session.trip().endedBy(current)) {
+      switchTrip(player, session, current);
+    }
+  }
+
+  /** 结算过的站记进这一趟：站开始时列车跑的车次与这一趟不同，先把这一趟结算掉。 */
+  private void recordSettled(Player player, GuardSession session) {
+    for (GuardLink.Settled settled : session.link().drainSettled()) {
+      TaskKey key =
+          settled.stop() == session.trackedStop()
+              ? session.trackedTrip()
+              : session.trip().key().orElse(null);
+      switchTrip(player, session, key);
+      session.trip().addStop(settled.stop().stationName(), settled.work());
+    }
+  }
+
+  /** 列车换了车次：做过作业的这一趟按开完结算，换成新的一趟。 */
+  private void switchTrip(Player player, GuardSession session, TaskKey key) {
+    GuardTrip trip = session.trip();
+    if (Objects.equals(trip.key().orElse(null), key)) {
+      return;
+    }
+    settleTrip(player, session, trip, DriverTask.State.COMPLETED);
+    session.setTrip(new GuardTrip(key, key == null ? "" : drivers.routeCodeOf(key), Instant.now()));
+  }
+
+  /**
+   * 结算一趟：评级、成绩单、发奖励、写记录（mode GUARD）。没做过作业的不结算；不按时刻表运行的只给成绩，不记录、不发奖励。
+   *
+   * @param player 车掌；不在线时为 {@code null}（照常发钱币、写记录）
+   */
+  private void settleTrip(
+      Player player, GuardSession session, GuardTrip trip, DriverTask.State state) {
+    if (!trip.hasStops()) {
+      return;
+    }
+    GuardScore score = trip.score();
+    ScoreRules.Result result = score.evaluate(state != DriverTask.State.FAILED);
+    DriveConfig current = config.get();
+    String trainName =
+        session.link().properties() != null && session.link().properties().getTrainName() != null
+            ? session.link().properties().getTrainName()
+            : session.link().trainName();
+    Optional<TaskKey> key = trip.key();
+    String tripCode = key.map(TaskKey::tripCode).orElse(trainName);
+    Player online = player != null && player.isOnline() ? player : null;
+    if (online != null) {
+      showResult(online, tripCode, state, result, score, key.isPresent());
+    }
+    if (key.isEmpty()) {
+      return;
+    }
+    DriveRewards.Reward reward =
+        GuardTrip.rewarded(state)
+            ? DriveRewards.guard(
+                current.rewards(),
+                current.guard().rewardStopRatio(),
+                current.guard().rewardKmRatio(),
+                score.stopCount(),
+                trip.blocks(),
+                result.grade())
+            : DriveRewards.Reward.NONE;
+    drivers.payGuard(
+        session.playerId(),
+        session.playerName(),
+        reward,
+        current.rewards().enabled() && state == DriverTask.State.FAILED);
+    drivers.saveRecord(
+        new DriveTaskRecord(
+            UUID.randomUUID(),
+            ServerIdentity.id().orElse(null),
+            session.playerId(),
+            session.playerName(),
+            key.get().timetableId(),
+            tripCode,
+            key.get().serviceDate(),
+            trip.routeCode(),
+            trainName,
+            DriveTaskRecord.MODE_GUARD,
+            state.name(),
+            result.points(),
+            result.grade().name(),
+            trip.startedAt(),
+            Instant.now(),
+            GuardRecordCodec.encode(score, trip.blocks())));
+  }
+
+  /** 一趟的大字评级与成绩单。 */
+  private void showResult(
+      Player player,
+      String tripCode,
+      DriverTask.State state,
+      ScoreRules.Result result,
+      GuardScore score,
+      boolean tracked) {
+    String stateText =
+        locale.text("drive.task.state." + state.name().toLowerCase(java.util.Locale.ROOT));
+    Map<String, String> values =
+        Map.of(
+            "trip",
+            tripCode,
+            "state",
+            stateText,
+            "points",
+            String.valueOf(result.points()),
+            "grade",
+            result.grade().name());
+    player.showTitle(
+        net.kyori.adventure.title.Title.title(
+            locale.component(
+                "drive.grade." + result.grade().name().toLowerCase(java.util.Locale.ROOT)),
+            locale.component("drive.guard.result-subtitle", values),
+            net.kyori.adventure.title.Title.Times.times(
+                java.time.Duration.ofMillis(250),
+                java.time.Duration.ofSeconds(3),
+                java.time.Duration.ofMillis(750))));
+    if (state == DriverTask.State.COMPLETED) {
+      sounds.play(player, DriveCue.TASK_COMPLETE);
+    }
+    player.sendMessage(locale.component("drive.guard.result", values));
+    for (GuardDisplay.Line line : GuardDisplay.sheet(score)) {
+      player.sendMessage(locale.component(line.key(), line.values()));
+    }
+    if (!tracked) {
+      player.sendMessage(locale.component("drive.guard.result-untracked"));
     }
   }
 

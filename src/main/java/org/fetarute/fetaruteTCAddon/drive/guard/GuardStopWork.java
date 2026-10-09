@@ -78,6 +78,8 @@ public final class GuardStopWork {
   /** 站台上次问时出站是否放行：两次都放行着，中间那段才算。 */
   private boolean lastQueryOpen;
 
+  private boolean wrongDoor;
+  private boolean closedEarly;
   private int closingSamples;
   private int closingWatched;
   private int departureSamples;
@@ -247,6 +249,32 @@ public final class GuardStopWork {
       return java.util.Optional.empty();
     }
     return java.util.Optional.of(watched >= Math.ceil(samples * config.watchRatio()));
+  }
+
+  /** 开着不该开的一侧（站台判的车门回报）。 */
+  public void markWrongDoor() {
+    wrongDoor = true;
+  }
+
+  /** 本站开过不该开的一侧。 */
+  public boolean wrongDoor() {
+    return wrongDoor;
+  }
+
+  /**
+   * 车掌关门：停站时间还没到（站台还在停站计时）就关了算提前关门。
+   *
+   * @param phase 关门时站台推进到的阶段
+   */
+  public void noteClosed(Phase phase) {
+    if (phase == Phase.DWELL) {
+      closedEarly = true;
+    }
+  }
+
+  /** 本站停站时间未到就关了门。 */
+  public boolean closedEarly() {
+    return closedEarly;
   }
 
   /** 本站报告过几次。 */

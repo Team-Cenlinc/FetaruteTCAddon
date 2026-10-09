@@ -106,15 +106,16 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
         "SELECT player_uuid, MAX(player_name) AS player_name, COUNT(*) AS tasks,"
             + " SUM(points) AS total FROM "
             + table(TABLE)
-            + " WHERE state = ?"
+            + " WHERE state = ? AND mode <> ?"
             + (since == null ? "" : " AND finished_at >= ?")
             + " GROUP BY player_uuid ORDER BY total DESC, tasks DESC LIMIT "
             + Math.max(1, limit);
     try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       statement.setString(1, COMPLETED);
+      statement.setString(2, DriveTaskRecord.MODE_GUARD);
       if (since != null) {
-        setInstant(statement, 2, since);
+        setInstant(statement, 3, since);
       }
       List<DriveLeaderboardRow> rows = new ArrayList<>();
       try (ResultSet rs = statement.executeQuery()) {
@@ -164,12 +165,13 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
             + " MIN(CASE grade WHEN 'S' THEN 0 WHEN 'A' THEN 1 WHEN 'B' THEN 2 WHEN 'C' THEN 3"
             + " WHEN 'D' THEN 4 END) AS best_rank FROM "
             + table(TABLE)
-            + " WHERE player_uuid = ?";
+            + " WHERE player_uuid = ? AND mode <> ?";
     try (var connection = openConnection();
         var statement = connection.prepareStatement(sql)) {
       statement.setString(1, COMPLETED);
       statement.setString(2, COMPLETED);
       setUuid(statement, 3, playerId);
+      statement.setString(4, DriveTaskRecord.MODE_GUARD);
       try (ResultSet rs = statement.executeQuery()) {
         if (!rs.next()) {
           return new PlayerTotals(0, 0, 0L, "");

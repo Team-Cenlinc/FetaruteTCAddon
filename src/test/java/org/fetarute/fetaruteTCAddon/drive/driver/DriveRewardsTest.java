@@ -43,6 +43,28 @@ class DriveRewardsTest {
   }
 
   @Test
+  @DisplayName("车掌：每站按人工停站单价、里程按每公里单价的一半，再乘评级系数，不分 ATO")
+  void guardStopsFirstHalfDistance() {
+    DriveRewards.Reward reward =
+        DriveRewards.guard(DriveRewardConfig.defaults(), 1.0, 0.5, 4, 3000.0, ScoreRules.Grade.A);
+
+    // 经验 1.2 × (4 站 × 2 + 3 km × 10 × 0.5) = 27.6
+    assertEquals(27, reward.experience());
+    // 钱币 1.2 × (4 × 5 + 3 × 20 × 0.5) = 60
+    assertEquals(60.0, reward.money(), 1e-9);
+    assertEquals(
+        DriveRewards.Reward.NONE,
+        DriveRewards.guard(
+            new DriveRewardConfig(
+                false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3),
+            1.0,
+            0.5,
+            4,
+            3000.0,
+            ScoreRules.Grade.A));
+  }
+
+  @Test
   @DisplayName("关闭时、没开过车时什么也不发")
   void nothingWhenDisabledOrIdle() {
     DriveRewardConfig off =

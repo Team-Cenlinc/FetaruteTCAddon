@@ -24,6 +24,8 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param buzzerDoubleTicks 两次短按相隔多久（tick）以内算呼叫
  * @param ackSeconds simulation 级驾驶员收到发车信号后多久内要回一短
  * @param emergencyHoldSeconds 自动运行的车被车掌拉下紧急停车后最多扣多久，到时自动解除（免得车掌离开后列车一直停着）
+ * @param rewardStopRatio 每完成一站作业的奖励是驾驶员人工停站单价（{@code rewards} 段）的几倍
+ * @param rewardKmRatio 每公里的奖励是驾驶员每公里单价的几倍
  */
 public record GuardConfig(
     boolean enabled,
@@ -41,7 +43,9 @@ public record GuardConfig(
     int buzzerLongTicks,
     int buzzerDoubleTicks,
     int ackSeconds,
-    int emergencyHoldSeconds) {
+    int emergencyHoldSeconds,
+    double rewardStopRatio,
+    double rewardKmRatio) {
 
   public GuardConfig {
     openDoorsSeconds = Math.max(1, openDoorsSeconds);
@@ -59,11 +63,14 @@ public record GuardConfig(
     buzzerDoubleTicks = Math.max(4, buzzerDoubleTicks);
     ackSeconds = Math.max(1, ackSeconds);
     emergencyHoldSeconds = Math.max(1, emergencyHoldSeconds);
+    rewardStopRatio = Math.max(0.0, rewardStopRatio);
+    rewardKmRatio = Math.max(0.0, rewardKmRatio);
   }
 
   /** 内置默认值。 */
   public static GuardConfig defaults() {
-    return new GuardConfig(true, 30, 15, 15, 30, 2, 3, 8.0, 45.0, 0.7, 24.0, 20, 16, 20, 5, 120);
+    return new GuardConfig(
+        true, 30, 15, 15, 30, 2, 3, 8.0, 45.0, 0.7, 24.0, 20, 16, 20, 5, 120, 1.0, 0.5);
   }
 
   public long openDoorsTicks() {
@@ -113,7 +120,9 @@ public record GuardConfig(
         (int) number(section, "buzzer-long-ticks", d.buzzerLongTicks, 4.0, sink),
         (int) number(section, "buzzer-double-ticks", d.buzzerDoubleTicks, 4.0, sink),
         (int) number(section, "ack-seconds", d.ackSeconds, 1.0, sink),
-        (int) number(section, "emergency-hold-seconds", d.emergencyHoldSeconds, 1.0, sink));
+        (int) number(section, "emergency-hold-seconds", d.emergencyHoldSeconds, 1.0, sink),
+        number(section, "reward-per-stop-ratio", d.rewardStopRatio, 0.0, sink),
+        number(section, "reward-per-km-ratio", d.rewardKmRatio, 0.0, sink));
   }
 
   private static double number(

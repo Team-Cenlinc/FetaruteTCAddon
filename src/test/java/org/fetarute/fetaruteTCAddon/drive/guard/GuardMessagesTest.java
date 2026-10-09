@@ -94,6 +94,18 @@ class GuardMessagesTest {
     }
     keys.add("drive.guard.prompt.running");
     keys.add("drive.guard.sidebar.title");
+    GuardScore all = new GuardScore();
+    all.add(
+        new GuardScore.Stop(
+            "S", true, true, true, true, true, Optional.of(false), Optional.of(false), 1));
+    for (GuardDisplay.Line line : GuardDisplay.sheet(all)) {
+      keys.add(line.key());
+    }
+    keys.add(GuardDisplay.sheet(new GuardScore()).get(0).key());
+    for (org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask.State state :
+        org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask.State.values()) {
+      keys.add("drive.task.state." + state.name().toLowerCase(Locale.ROOT));
+    }
     for (String key : keys) {
       assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
     }

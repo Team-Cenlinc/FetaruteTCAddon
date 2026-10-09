@@ -393,6 +393,9 @@ guard:
   ack-seconds: 5
   # 自动运行（含 ATO）的车被车掌拉下紧急停车后最多扣多久（秒），到时自动解除；车掌停稳后按住发车铃一长声可提前解除
   emergency-hold-seconds: 120
+  # 奖励（单价、评级系数与货币沿用 rewards 段）：每完成一站作业按驾驶员人工停站单价的几倍、每公里按驾驶员每公里单价的几倍；车掌搭 ATO 也全额
+  reward-per-stop-ratio: 1.0
+  reward-per-km-ratio: 0.5
 
 sounds:
   enabled: true

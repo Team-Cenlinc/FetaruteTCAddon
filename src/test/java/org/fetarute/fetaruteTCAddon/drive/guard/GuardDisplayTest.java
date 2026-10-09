@@ -123,6 +123,31 @@ class GuardDisplayTest {
     assertEquals("drive.guard.prompt.cab-change-announced", GuardDisplay.prompt(waiting).key());
   }
 
+  /** 成绩单：每项扣分一行，全无扣分一行说明，异常报告另起一行。 */
+  @Test
+  void theSheetListsEachDeduction() {
+    GuardScore clean = new GuardScore();
+    clean.add(
+        new GuardScore.Stop(
+            "A", false, false, false, false, false, Optional.of(true), Optional.empty(), 0));
+    assertEquals(
+        List.of(new GuardDisplay.Line("drive.guard.sheet.clean", Map.of("count", "1"))),
+        GuardDisplay.sheet(clean));
+    GuardScore rough = new GuardScore();
+    rough.add(
+        new GuardScore.Stop(
+            "B", true, false, true, false, true, Optional.of(false), Optional.of(true), 2));
+    assertEquals(
+        List.of(
+            "drive.guard.sheet.forced-open",
+            "drive.guard.sheet.forced-signal",
+            "drive.guard.sheet.closed-early",
+            "drive.guard.sheet.closing-watch",
+            "drive.guard.sheet.incidents"),
+        GuardDisplay.sheet(rough).stream().map(GuardDisplay.Line::key).toList());
+    assertEquals(Map.of("station", "B"), GuardDisplay.sheet(rough).get(0).values());
+  }
+
   @Test
   void secondsRoundUp() {
     assertEquals("1", GuardDisplay.seconds(1L));

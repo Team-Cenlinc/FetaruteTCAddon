@@ -641,6 +641,44 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           String trainName, CabSeats.End guardEnd, java.util.function.BooleanSupplier seatGuard) {
         return moveDriverWithGuard(trainName, guardEnd, seatGuard);
       }
+
+      @Override
+      public Optional<TaskKey> tripOf(String trainName) {
+        return DriverTaskManager.timetables()
+            .flatMap(api -> api.getAssignment(trainName))
+            .map(
+                assignment ->
+                    new TaskKey(
+                        assignment.timetableId(), assignment.tripCode(), assignment.serviceDate()));
+      }
+
+      @Override
+      public String routeCodeOf(TaskKey key) {
+        return plugin
+            .getTimetableService()
+            .flatMap(
+                service -> service.tripPlan(key.timetableId(), key.tripCode(), key.serviceDate()))
+            .map(plan -> plan.routeCode())
+            .orElse("");
+      }
+
+      @Override
+      public void payGuard(
+          UUID playerId, String playerName, DriveRewards.Reward reward, boolean forfeited) {
+        DriveRewardPayer.Paid paid =
+            forfeited || reward.empty()
+                ? new DriveRewardPayer.Paid(0, Optional.empty())
+                : rewardPayer.pay(playerId, playerName, reward, config.rewards());
+        Player player = Bukkit.getPlayer(playerId);
+        if (player != null && player.isOnline()) {
+          tellReward(player, paid, forfeited, config.rewards().currencyName());
+        }
+      }
+
+      @Override
+      public void saveRecord(DriveTaskRecord record) {
+        DriveSessionManager.this.saveRecord(record);
+      }
     };
   }
 

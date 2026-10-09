@@ -43,6 +43,17 @@ class DriveTaskRecordRepositoryTest {
 
   private static DriveTaskRecord record(
       UUID player, String name, String state, int points, String grade, Instant finishedAt) {
+    return record(player, name, "MANUAL", state, points, grade, finishedAt);
+  }
+
+  private static DriveTaskRecord record(
+      UUID player,
+      String name,
+      String mode,
+      String state,
+      int points,
+      String grade,
+      Instant finishedAt) {
     return new DriveTaskRecord(
         UUID.randomUUID(),
         null,
@@ -53,7 +64,7 @@ class DriveTaskRecordRepositoryTest {
         LocalDate.of(2026, 10, 3),
         "L1-A",
         "OP-L1-A01-0042",
-        "MANUAL",
+        mode,
         state,
         points,
         grade,
@@ -101,5 +112,17 @@ class DriveTaskRecordRepositoryTest {
         new DriveTaskRecordRepository.PlayerTotals(4, 2, 160L, "S"),
         records.totalsByPlayer(carol),
         "总分只算开完的任务；最好评级不看终态，空评级不算");
+  }
+
+  /** 车掌值乘的记录照样能按玩家列出，但不进驾驶排行与驾驶员的汇总。 */
+  @Test
+  void guardRecordsStayOutOfTheDriverTotals() {
+    UUID erin = UUID.randomUUID();
+    records.save(record(erin, "erin", "COMPLETED", 80, "B", NOW));
+    records.save(record(erin, "erin", DriveTaskRecord.MODE_GUARD, "COMPLETED", 100, "S", NOW));
+    assertEquals(2, records.listByPlayer(erin, 10).size());
+    assertEquals(
+        new DriveTaskRecordRepository.PlayerTotals(1, 1, 80L, "B"), records.totalsByPlayer(erin));
+    assertEquals(80L, records.leaderboard(null, 10).get(0).totalPoints());
   }
 }

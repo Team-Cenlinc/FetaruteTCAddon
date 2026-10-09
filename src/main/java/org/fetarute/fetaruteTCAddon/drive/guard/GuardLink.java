@@ -32,6 +32,15 @@ public final class GuardLink {
 
   private boolean cabHold;
   private boolean turnbackPending;
+  private final java.util.ArrayDeque<Settled> settledStops = new java.util.ArrayDeque<>();
+
+  /**
+   * 结算过的一站，等车掌会话记进这一趟的成绩。
+   *
+   * @param stop 站台的停站对象
+   * @param work 这一站的作业
+   */
+  public record Settled(DriverStationStop stop, GuardStopWork work) {}
 
   /**
    * @param clock 当前服务器 tick
@@ -192,6 +201,7 @@ public final class GuardLink {
       return Optional.empty();
     }
     settled = true;
+    settledStops.add(new Settled(stop, work));
     boolean timedOut = work.timedOut();
     if (timedOut) {
       consecutiveTimeoutStops++;
@@ -201,6 +211,13 @@ public final class GuardLink {
     }
     completedStops++;
     return Optional.of(timedOut);
+  }
+
+  /** 取走结算过、还没记进成绩的站（按结算顺序）。 */
+  public java.util.List<Settled> drainSettled() {
+    java.util.List<Settled> drained = new java.util.ArrayList<>(settledStops);
+    settledStops.clear();
+    return drained;
   }
 
   /** 连续几站有超时（完成一站不超时即清零）。 */
