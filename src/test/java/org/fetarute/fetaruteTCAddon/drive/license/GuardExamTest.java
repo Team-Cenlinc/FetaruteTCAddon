@@ -165,6 +165,61 @@ class GuardExamTest {
         "停站时间未到就关门");
   }
 
+  @Test
+  @DisplayName("夹人夹物演练排在第二站到最后一站之间；只考一站时就在这一站；时限为 0 不演练")
+  void drillStopIsNeverTheFirst() {
+    assertEquals(15, GUARD.drillSeconds(), "车掌考试默认 15 秒");
+    assertEquals(2, GuardExam.drillStop(GUARD, bound -> 0));
+    assertEquals(3, GuardExam.drillStop(GUARD, bound -> bound - 1));
+    LicenseClass oneStop =
+        new LicenseClass(
+            "guard",
+            "车掌证",
+            "",
+            true,
+            List.of(),
+            LicenseClass.Exam.GUARD,
+            1,
+            70,
+            false,
+            false,
+            false,
+            0,
+            List.of());
+    assertEquals(1, GuardExam.drillStop(oneStop, bound -> 0));
+    LicenseClass noDrill =
+        new LicenseClass(
+            "guard",
+            "车掌证",
+            "",
+            true,
+            List.of(),
+            LicenseClass.Exam.GUARD,
+            3,
+            70,
+            false,
+            false,
+            false,
+            0,
+            List.of(),
+            0);
+    assertEquals(0, GuardExam.drillStop(noDrill, bound -> 0));
+    assertEquals(
+        0, LicenseConfig.defaults().find("driver").orElseThrow().drillSeconds(), "路考没有车掌演练");
+  }
+
+  @Test
+  @DisplayName("到了排定的那一站开始演练；晚点顺延过来的下一站照样开始；不演练时从不开始")
+  void drillDueAtOrAfterThePlannedStop() {
+    assertEquals(false, GuardExam.drillDue(2, 0), "第一站");
+    assertTrue(GuardExam.drillDue(2, 1), "第二站");
+    assertTrue(GuardExam.drillDue(2, 2), "顺延到第三站");
+    assertEquals(false, GuardExam.drillDue(0, 2));
+    ExamEvaluation.Result missed = GuardExam.drillMissed("B");
+    assertEquals(Verdict.FAILED, missed.verdict());
+    assertEquals(Map.of("station", "B"), missed.values());
+  }
+
   /** 车掌考试的提示、讲评、原因与要领，以及车掌手册各页都有文案。 */
   @ParameterizedTest
   @ValueSource(strings = {"zh_CN", "en_US"})
@@ -175,7 +230,8 @@ class GuardExamTest {
       lang.loadFromString(new String(stream.readAllBytes(), StandardCharsets.UTF_8));
     }
     List<String> keys = new ArrayList<>();
-    for (String line : List.of("header", "duties", "watch", "pass", "how", "no-wrong-door")) {
+    for (String line :
+        List.of("header", "duties", "watch", "pass", "how", "no-wrong-door", "drill")) {
       keys.add("drive.license.exam.brief.guard." + line);
     }
     keys.add("drive.license.exam.brief.guard.handbook");
@@ -218,6 +274,8 @@ class GuardExamTest {
                         0)))
             .orElseThrow());
     results.add(GuardExam.judge(GUARD, List.of(clean("A"), clean("B"), clean("C"))).orElseThrow());
+    results.add(GuardExam.drillMissed("A"));
+    keys.add("drive.license.exam.guard.drill-ok");
     for (ExamEvaluation.Result result : results) {
       keys.add("drive.license.exam.guard.reason." + result.reason());
       if (result.verdict() == Verdict.FAILED) {

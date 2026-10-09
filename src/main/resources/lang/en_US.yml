@@ -660,6 +660,10 @@ drive:
         title: "Incident report"
         body: "Pick a reason to extend the current step once; at most two reports per stop, no penalty."
         cancel: "Cancel"
+    drill:
+      alert: "<prefix> <red><bold>Platform report: someone or something is caught in a door at <white><station></white>!</bold></red> <yellow>Within <white><seconds></white> s, reopen the doors and report \"Person or object caught\", then close again once clear</yellow>"
+      todo: "<red>Caught in door · <white><seconds></white> s left</red> <gray>Reopen <white><reopen></white> Report <white><report></white></gray>"
+      handled: "<green>Caught-in-door handled in <white><seconds></white> s</green> <gray>close again once clear</gray>"
     seat:
       moving: "<red>You can only return to your seat while the train is stopped</red>"
       already: "<gray>You are already in the guard's seat</gray>"
@@ -1031,6 +1035,7 @@ drive:
         passed: "<prefix> <green><bold>Guard exam passed</bold></green> <white><reason>; you now hold level <level> · <name></white>"
         failed: "<prefix> <red><bold>Guard exam failed</bold></red> <white><reason></white>"
         void: "<prefix> <yellow>This guard exam does not count: <reason></yellow>"
+        drill-ok: "<prefix> <gray>Guard exam</gray> <white><station></white> <gray>caught-in-door drill</gray> ✔ <gray>handled in <seconds> s</gray>"
         reason:
           timeout: "timed out at <station>; the station did it for you"
           wrong-door: "opened the wrong doors at <station>"
@@ -1040,6 +1045,7 @@ drive:
           left-behind: "the train left without you"
           cab-change: "did not reach the rear cab when changing ends"
           ended: "duty ended early"
+          drill: "did not handle the caught-in-door report at <station> in time"
         tip:
           timeout: "<prefix> <gray>Tip: open the platform-side doors soon after stopping, close them as soon as the dwell ends, then return to your seat, confirm once the starting signal clears and hold the buzzer. The action bar always shows the next step and the seconds left.</gray>"
           wrong-door: "<prefix> <gray>Tip: check the door side on the action bar before opening; left and right follow the way you face.</gray>"
@@ -1047,6 +1053,7 @@ drive:
           timeouts: "<prefix> <gray>Tip: every step has a time limit and the station steps in when it runs out; report an incident to get more time when something holds you up.</gray>"
           left-behind: "<prefix> <gray>Tip: return to your guard seat after closing the doors and stay aboard until the signal is given.</gray>"
           cab-change: "<prefix> <gray>Tip: when the train reverses at a terminal, walk to the cab at the other end as prompted, or use Back to seat in the guard menu.</gray>"
+          drill: "<prefix> <gray>Tip: when the platform reports someone or something caught in a door, reopen the doors at once and file an incident report for \"Person or object caught\"; close again once clear.</gray>"
       unknown-class: "<prefix> <red>No such licence level: <white><class></white></red>"
       already-held: "<prefix> <yellow>You already hold the <white><name></white></yellow>"
       requires: "<prefix> <red>The <white><name></white> requires: <white><required></white></red>"
@@ -1111,6 +1118,7 @@ drive:
           watch: "<prefix> <white>Review:</white><gray> each stop is reviewed item by item: opening, closing, closing watch, starting signal, departure watch.</gray>"
           pass: "<prefix> <white>To pass:</white><gray> work <stops> stops and score at least <min>; any timeout (doors opened or closed by the station, or the signal given for you) fails the exam.</gray>"
           no-wrong-door: "<prefix> <white>Note:</white><gray> opening the wrong side fails the exam.</gray>"
+          drill: "<prefix> <white>Emergency drill:</white><gray> at one stop the platform will report someone or something caught in a door as you close: within <seconds> s reopen the doors and file an incident report for \"Person or object caught\", then close again once clear. Missing it fails the exam.</gray>"
           how: "<prefix> <white>How to start:</white><gray> within <minutes> minutes sit in the rear cab of any dispatched train and run <aqua>/fta guard on</aqua>; you have guard permission for the exam only.</gray>"
           handbook: "<prefix> <white>Study:</white><gray> the FTCA Guard Handbook is in your inventory; read it before you start.</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>Get another copy</gray>'><aqua>[Guard Handbook]</aqua></hover></click>"
         tutorial:
@@ -1255,7 +1263,7 @@ drive:
       page-3: "<dark_blue><bold>2. Station work</bold></dark_blue>\n<black>Once stopped, open the platform-side doors (1 left, 2 right, as you face) and step onto the platform. When the dwell ends press 3 to close. Opening has 30 s and closing 15 s; on timeout the station does it and it counts as a timeout. Report incidents with 4 for 30 s more.</black>"
       page-4: "<dark_blue><bold>3. Closing and watching</bold></dark_blue>\n<black>While the doors close, stand on the platform near your car and watch along the train until they are shut. Then return to your seat. After departure look at the platform or behind until the rear has left. Both watches count.</black>"
       page-5: "<dark_blue><bold>4. Buzzer and emergency</bold></dark_blue>\n<black>Back in your seat, press 6 to confirm once the starting signal clears, then hold 7 for about a second (one long) to give the signal. One short means received, two shorts call the driver. Press 9 for an emergency stop; release it with one long when stopped.</black>"
-      page-6: "<dark_blue><bold>5. Terminals and scores</bold></dark_blue>\n<black>At a terminal move to the cab at the other end; you and the driver swap together, and are moved for you when time is short. Timeouts and wrong doors cost 5 points, early closing and missed watches 2. Exam: /fta license exam guard</black>"
+      page-6: "<dark_blue><bold>5. Terminals and scores</bold></dark_blue>\n<black>At a terminal move to the cab at the other end; you and the driver swap together, and are moved for you when time is short. Timeouts and wrong doors cost 5 points, early closing and missed watches 2. Exam: /fta license exam guard; one stop has a caught-in-door drill: reopen and report it.</black>"
     driver:
       title: "FTCA Driver Handbook"
       author: "Fetarute"

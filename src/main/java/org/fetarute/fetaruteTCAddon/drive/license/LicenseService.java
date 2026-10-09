@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -125,6 +126,11 @@ public final class LicenseService implements Listener, GuardExaminer {
 
   /** 车掌考试中做完的站。 */
   private final Map<UUID, List<GuardScore.Stop>> guardExamStops = new HashMap<>();
+
+  /** 车掌考试的夹人夹物演练：排在第几站（从 1 起，0 为不演练）、是否已开始。 */
+  private record GuardDrillPlan(int stop, boolean started) {}
+
+  private final Map<UUID, GuardDrillPlan> guardDrills = new HashMap<>();
 
   /** 路考中已经提醒过的不及格项（每项只提醒一次）。 */
   private final Map<UUID, Set<String>> examWarned = new HashMap<>();
@@ -440,15 +446,24 @@ public final class LicenseService implements Listener, GuardExaminer {
             now.plus(Duration.ofMinutes(config.examWindowMinutes())),
             false));
     guardExamStops.remove(id);
+    guardDrills.put(
+        id,
+        new GuardDrillPlan(
+            GuardExam.drillStop(license, bound -> ThreadLocalRandom.current().nextInt(bound)),
+            false));
     // 考试期间临时有车掌权限（考完或超时后收回）。
     apply(player);
     Map<String, String> values = new LinkedHashMap<>(passValues(license, ""));
     values.put("minutes", String.valueOf(config.examWindowMinutes()));
+    values.put("seconds", String.valueOf(license.drillSeconds()));
     for (String line : List.of("header", "duties", "watch", "pass", "how")) {
       tell(player, "drive.license.exam.brief.guard." + line, values);
     }
     if (!license.allowWrongDoor()) {
       tell(player, "drive.license.exam.brief.guard.no-wrong-door", values);
+    }
+    if (license.drillSeconds() > 0) {
+      tell(player, "drive.license.exam.brief.guard.drill", values);
     }
     guardHandbook.give(player, plugin.getLocaleManager(), true);
     return new Reply("drive.license.exam.brief.guard.handbook", values);
@@ -485,20 +500,66 @@ public final class LicenseService implements Listener, GuardExaminer {
             result -> {
               finishGuardExam(id, player, exam, license.get(), result);
               if (result.verdict() != ExamEvaluation.Verdict.PASSED) {
-                // 考试期间临时的车掌权限已收回：下一拍结束这次值乘（不在车掌会话的处理中途结束它）。
-                Bukkit.getScheduler()
-                    .runTask(
-                        plugin,
-                        () -> {
-                          DriveSessionManager manager = drive.get();
-                          if (manager != null && !holds(id, exam.classId())) {
-                            manager
-                                .guards()
-                                .ifPresent(guards -> guards.stop(id, GuardSession.EndReason.EXAM));
-                          }
-                        });
+                endGuardDutyLater(id, exam);
               }
             });
+  }
+
+  /** 考试期间临时的车掌权限已收回：下一拍结束这次值乘（不在车掌会话的处理中途结束它）。 */
+  private void endGuardDutyLater(UUID id, Exam exam) {
+    Bukkit.getScheduler()
+        .runTask(
+            plugin,
+            () -> {
+              DriveSessionManager manager = drive.get();
+              if (manager != null && !holds(id, exam.classId())) {
+                manager.guards().ifPresent(guards -> guards.stop(id, GuardSession.EndReason.EXAM));
+              }
+            });
+  }
+
+  /** 车掌考试中按下关门：到了排定的那一站、列车不太晚点就演练夹人夹物（只一次），晚点过大顺延到下一站。 */
+  @Override
+  public int drillDue(UUID playerId, String trainName) {
+    Exam exam = exams.get(playerId);
+    GuardDrillPlan plan = guardDrills.get(playerId);
+    if (exam == null || exam.kind() != LicenseClass.Exam.GUARD || plan == null || plan.started()) {
+      return 0;
+    }
+    Optional<LicenseClass> license = config.find(exam.classId());
+    int worked = guardExamStops.getOrDefault(playerId, List.of()).size();
+    if (license.isEmpty()
+        || !GuardExam.drillDue(plan.stop(), worked)
+        || lateTrain(trainName, config.training().drillMaxDelaySeconds())) {
+      return 0;
+    }
+    guardDrills.put(playerId, new GuardDrillPlan(plan.stop(), true));
+    return license.get().drillSeconds();
+  }
+
+  /** 演练结束：处置完成告诉考生用时；没按时处置当场不及格。 */
+  @Override
+  public void onDrillDone(Player player, String station, boolean handled, double seconds) {
+    UUID id = player.getUniqueId();
+    Exam exam = exams.get(id);
+    if (exam == null || exam.kind() != LicenseClass.Exam.GUARD) {
+      return;
+    }
+    if (handled) {
+      tell(
+          player,
+          "drive.license.exam.guard.drill-ok",
+          Map.of("station", station, "seconds", String.format(Locale.ROOT, "%.1f", seconds)));
+      return;
+    }
+    Optional<LicenseClass> license = config.find(exam.classId());
+    if (license.isEmpty()) {
+      endExam(id);
+      apply(player);
+      return;
+    }
+    finishGuardExam(id, player, exam, license.get(), GuardExam.drillMissed(station));
+    endGuardDutyLater(id, exam);
   }
 
   /** 车掌考试中值乘结束（还没判定）：连续超时、漏乘、换端没坐进车尾为不及格，其余不计成绩。 */
@@ -1028,6 +1089,7 @@ public final class LicenseService implements Listener, GuardExaminer {
     exams.remove(playerId);
     examStopsDone.remove(playerId);
     guardExamStops.remove(playerId);
+    guardDrills.remove(playerId);
     examWarned.remove(playerId);
     return coach.end(playerId);
   }

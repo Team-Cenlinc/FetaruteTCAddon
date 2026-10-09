@@ -4,6 +4,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.IntUnaryOperator;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardScore;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardSession;
 import org.fetarute.fetaruteTCAddon.drive.license.ExamEvaluation.Result;
@@ -60,6 +61,35 @@ public final class GuardExam {
     }
     return Optional.of(
         new Result(Verdict.PASSED, "passed", Map.of("points", String.valueOf(points))));
+  }
+
+  /**
+   * 夹人夹物演练排在第几站（从 1 起）：第二站到最后一站里随机一站；只考一站时就在这一站。
+   *
+   * @param random 给定上界 n，返回 [0, n) 里的随机数
+   * @return 不演练时为 0
+   */
+  public static int drillStop(LicenseClass license, IntUnaryOperator random) {
+    if (license.drillSeconds() <= 0) {
+      return 0;
+    }
+    int stops = license.examStops();
+    return stops <= 1 ? 1 : 2 + random.applyAsInt(stops - 1);
+  }
+
+  /**
+   * 车掌在这一站按下关门时该不该开始演练：到了排定的那一站，或排定的那一站因晚点顺延到了这一站。
+   *
+   * @param plannedStop 排定的站（从 1 起）；0 为不演练
+   * @param workedStops 考试中已做完的站数
+   */
+  public static boolean drillDue(int plannedStop, int workedStops) {
+    return plannedStop > 0 && workedStops + 1 >= plannedStop;
+  }
+
+  /** 演练没按时处置：当场不及格。 */
+  public static Result drillMissed(String station) {
+    return new Result(Verdict.FAILED, "drill", Map.of("station", station == null ? "" : station));
   }
 
   /** 值乘在做满站数前结束。 */

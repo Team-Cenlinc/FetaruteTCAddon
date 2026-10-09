@@ -347,6 +347,9 @@ license:
       min-points: 70
       # 为 false 时开错车门即不及格
       allow-wrong-door: false
+      # 夹人夹物演练：考试中随机一站（不是第一站）关门时站台报告夹人夹物，须在这么多秒内再开车门并报告“夹人夹物”，
+      # 未按时处置即不及格；列车晚点超过 training.drill-max-delay-seconds 时顺延到下一站。0 为不演练
+      drill-seconds: 15
       grants:
         - fetarute.drive.guard
 

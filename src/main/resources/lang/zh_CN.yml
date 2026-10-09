@@ -2364,6 +2364,10 @@ drive:
         title: "异常情况报告"
         body: "选择原因后，当前作业的时限延长一次；每站最多报告两次，不扣分。"
         cancel: "取消"
+    drill:
+      alert: "<prefix> <red><bold>站台报告：<white><station></white> 站车门夹人夹物！</bold></red> <yellow>请在 <white><seconds></white> 秒内再开车门，并报告“夹人夹物”，确认无误后重新关门</yellow>"
+      todo: "<red>夹人夹物 · 剩 <white><seconds></white> 秒</red> <gray>再开车门 <white><reopen></white> 报告 <white><report></white></gray>"
+      handled: "<green>夹人夹物处置完成，用时 <white><seconds></white> 秒</green> <gray>确认无误后重新关门</gray>"
     seat:
       moving: "<red>列车停稳后才能传送入座</red>"
       already: "<gray>你已在车掌座位上</gray>"
@@ -2735,6 +2739,7 @@ drive:
         passed: "<prefix> <green><bold>车掌考试及格</bold></green> <white><reason>，已取得第 <level> 级 · <name></white>"
         failed: "<prefix> <red><bold>车掌考试未通过</bold></red> <white><reason></white>"
         void: "<prefix> <yellow>本次车掌考试不计成绩：<reason></yellow>"
+        drill-ok: "<prefix> <gray>车掌考试</gray> <white><station></white> <gray>夹人夹物处置</gray> ✔ <gray>用时 <seconds> 秒</gray>"
         reason:
           timeout: "在 <station> 超时，由站台代做"
           wrong-door: "在 <station> 开错了车门"
@@ -2744,6 +2749,7 @@ drive:
           left-behind: "列车开走时未在车上（漏乘）"
           cab-change: "终点站换端时未能坐进车尾驾驶室"
           ended: "值乘提前结束"
+          drill: "在 <station> 未按时处置夹人夹物"
         tip:
           timeout: "<prefix> <gray>要领：停妥后尽快开站台一侧的车门，停站时间到即关门；门全关后回座，出站信号开放时确认并按住发车铃。动作栏随时提示下一步与剩余秒数。</gray>"
           wrong-door: "<prefix> <gray>要领：开门前看动作栏提示的开门方向，左右以你面朝的方向为准。</gray>"
@@ -2751,6 +2757,7 @@ drive:
           timeouts: "<prefix> <gray>要领：每一步都有时限，超时由站台代做；遇夹人夹物等情况可按异常报告延长时限。</gray>"
           left-behind: "<prefix> <gray>要领：关门后及时回到车掌座位，发车信号发出前不要离开列车。</gray>"
           cab-change: "<prefix> <gray>要领：终点站折返时按提示走到另一头的驾驶室，或在车掌菜单点“传送入座”。</gray>"
+          drill: "<prefix> <gray>要领：站台报告夹人夹物时，立即按开门键再开车门，并在异常报告中选“夹人夹物”；确认无误后重新关门。</gray>"
       unknown-class: "<prefix> <red>没有这一级驾驶证：<white><class></white></red>"
       already-held: "<prefix> <yellow>你已持有<white><name></white>，无需再考</yellow>"
       requires: "<prefix> <red>报考<white><name></white>须先取得：<white><required></white></red>"
@@ -2815,6 +2822,7 @@ drive:
           watch: "<prefix> <white>讲评：</white><gray>每做完一站逐项讲评：开门、关门、关门监视、发车信号、出站监视。</gray>"
           pass: "<prefix> <white>及格：</white><gray>做满 <stops> 站且得分不低于 <min> 分；任何一站超时（站台代开、代关或代发发车信号）即不及格。</gray>"
           no-wrong-door: "<prefix> <white>注意：</white><gray>开错车门即不及格。</gray>"
+          drill: "<prefix> <white>应急演练：</white><gray>考试中某一站关门时，站台会报告夹人夹物：须在 <seconds> 秒内再开车门，并在异常报告中选“夹人夹物”，确认无误后重新关门；未按时处置即不及格。</gray>"
           how: "<prefix> <white>开始方式：</white><gray>在 <minutes> 分钟内坐进任一调度列车车尾的驾驶室，输入 <aqua>/fta guard on</aqua> 上岗；考试期间临时开放车掌权限，考完或超时后收回。</gray>"
           handbook: "<prefix> <white>学习：</white><gray>《FTCA 车掌手册》已放进背包，上岗前请先读一遍。</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>再领一本车掌手册</gray>'><aqua>[车掌手册]</aqua></hover></click>"
         tutorial:
@@ -2959,7 +2967,7 @@ drive:
       page-3: "<dark_blue><bold>二、站停作业</bold></dark_blue>\n<black>停妥后按开门键开站台一侧的车门（1 左、2 右，以你面朝的方向为准），随后可下车到站台。停站时间到后按 3 关门。开门限 30 秒、关门限 15 秒，超时由站台代做并记一次超时；连续 3 站超时，值乘结束。夹人夹物等情况按 4 报告，时限延长 30 秒。</black>"
       page-4: "<dark_blue><bold>三、关门与监视</bold></dark_blue>\n<black>关门时站在站台上、靠近自己那节车门，视线沿车身注视车门，直到车门关好。门全关后回到车掌座位。列车起步后朝站台一侧或车后看，直到车尾离开站台。两项监视计入成绩。</black>"
       page-5: "<dark_blue><bold>四、发车铃与紧急停车</bold></dark_blue>\n<black>回座后，出站信号开放时按 6 确认，再按住 7 约一秒（一长声）发出发车信号；一短为收到，连按两下为呼叫驾驶员。出站信号未开放时不计时。行驶中遇危险按 9 紧急停车，停稳后按住发车铃一长声解除。</black>"
-      page-6: "<dark_blue><bold>五、终点、成绩与考试</bold></dark_blue>\n<black>终点站折返时换到另一头的驾驶室；驾驶员换端时两人一同换座，时间不足时直接送入。每站作业计分：超时、开错门各扣 5 分，提前关门、监视不合格各扣 2 分。考车掌证：/fta license exam guard</black>"
+      page-6: "<dark_blue><bold>五、终点、成绩与考试</bold></dark_blue>\n<black>终点站折返时换到另一头的驾驶室；驾驶员换端时两人一同换座，时间不足时直接送入。每站作业计分：超时、开错门各扣 5 分，提前关门、监视不合格各扣 2 分。考车掌证：/fta license exam guard；考试中有一站会演练夹人夹物：再开车门并报告“夹人夹物”。</black>"
     driver:
       title: "FTCA 驾驶员手册"
       author: "Fetarute"

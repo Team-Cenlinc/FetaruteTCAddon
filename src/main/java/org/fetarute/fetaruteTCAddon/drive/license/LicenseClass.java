@@ -20,6 +20,7 @@ import java.util.Objects;
  * @param allowWrongDoor 路考、车掌考试中开错门是否仍可及格
  * @param trainingRuns 报名路考前至少要完整开完几次练习（0 为不强制）
  * @param grants 持证时给的权限节点（子节点随之生效）
+ * @param drillSeconds 车掌考试中夹人夹物演练的处置时限（秒）；0 为不安排演练（{@link Exam#GUARD}）
  */
 public record LicenseClass(
     String id,
@@ -34,7 +35,11 @@ public record LicenseClass(
     boolean allowOverrun,
     boolean allowWrongDoor,
     int trainingRuns,
-    List<String> grants) {
+    List<String> grants,
+    int drillSeconds) {
+
+  /** 车掌考试夹人夹物演练的默认处置时限（秒）。 */
+  public static final int DEFAULT_DRILL_SECONDS = 15;
 
   /** 考试方式。 */
   public enum Exam {
@@ -70,5 +75,38 @@ public record LicenseClass(
     minPoints = Math.max(0, Math.min(100, minPoints));
     trainingRuns = Math.max(0, trainingRuns);
     grants = grants == null ? List.of() : List.copyOf(grants);
+    drillSeconds = Math.max(0, drillSeconds);
+  }
+
+  /** 演练时限按考法取默认：车掌考试 {@link #DEFAULT_DRILL_SECONDS} 秒，其余不演练。 */
+  public LicenseClass(
+      String id,
+      String name,
+      String description,
+      boolean enabled,
+      List<String> requires,
+      Exam exam,
+      int examStops,
+      int minPoints,
+      boolean allowEmergency,
+      boolean allowOverrun,
+      boolean allowWrongDoor,
+      int trainingRuns,
+      List<String> grants) {
+    this(
+        id,
+        name,
+        description,
+        enabled,
+        requires,
+        exam,
+        examStops,
+        minPoints,
+        allowEmergency,
+        allowOverrun,
+        allowWrongDoor,
+        trainingRuns,
+        grants,
+        exam == Exam.GUARD ? DEFAULT_DRILL_SECONDS : 0);
   }
 }

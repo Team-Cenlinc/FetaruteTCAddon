@@ -73,6 +73,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo cabSeatsMemo;
   private GuardTrip trip = new GuardTrip(null, "", java.time.Instant.now());
   private WorkedStop pendingExamStop;
+  private GuardDrill drill;
 
   /**
    * 考试中做完、还在采出站监视的一站：采完再交给考官。
@@ -184,6 +185,15 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setPendingExamStop(WorkedStop stop) {
     this.pendingExamStop = stop;
+  }
+
+  /** 正在进行的夹人夹物演练；没有时为 {@code null}。 */
+  GuardDrill drill() {
+    return drill;
+  }
+
+  void setDrill(GuardDrill drill) {
+    this.drill = drill;
   }
 
   /** 正在跟着的那一站开始时列车跑的车次；不按时刻表运行时为 {@code null}。 */

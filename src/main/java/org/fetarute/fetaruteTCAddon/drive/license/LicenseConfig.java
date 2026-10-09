@@ -145,7 +145,10 @@ public record LicenseConfig(
                 entry.getBoolean("allow-overrun", false),
                 entry.getBoolean("allow-wrong-door", false),
                 entry.getInt("training-runs", exam == LicenseClass.Exam.ROAD_TEST ? 1 : 0),
-                entry.getStringList("grants")));
+                entry.getStringList("grants"),
+                exam == LicenseClass.Exam.GUARD
+                    ? entry.getInt("drill-seconds", LicenseClass.DEFAULT_DRILL_SECONDS)
+                    : 0));
       }
     }
     Set<String> ids = new LinkedHashSet<>();

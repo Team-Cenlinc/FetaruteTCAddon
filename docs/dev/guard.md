@@ -73,6 +73,7 @@
 - `drive.yml` 的 `license.classes.guard`：考法 `exam: guard`（`LicenseClass.Exam.GUARD`），不要求先有驾驶证，考过给 `fetarute.drive.guard`。默认做满 `exam-stops`（3）站、及格 `min-points`（70），`allow-wrong-door: false`。
 - 车掌功能关着或不可用时不能报名（`drive.license.exam.guard-unavailable`）。报名（`/fta license exam guard`）后在 `exam-window-minutes` 内到调度列车车尾驾驶室上岗；考试期间临时挂上车掌权限，考完或超时后收回（值乘中不超时，等做满站数或值乘结束再判定）。报名时讲考试内容、讲评方式、及格条件、开始方式，并发一本《FTCA 车掌手册》（`DriverHandbook#guard`，`/fta handbook guard` 再领）。
 - 考官（`GuardExaminer`，驾驶证服务实现）：车掌每做完一站作业（出站监视采完）交给它，逐站讲评开门、关门、关门监视、发车信号、出站监视（`GuardExam#review`）；哪一站超时当场不及格，开错车门按 `allow-wrong-door`，做满站数后按车掌成绩判定（`GuardExam#judge`）。值乘中途结束：连续超时、漏乘、换端没坐进车尾为不及格，其余不计成绩（`GuardExam#ended`）。不及格进入 `retry-cooldown-minutes` 冷却，并在下一拍结束这次值乘（`EXAM`）；及格当场发证，值乘照常继续。
+- 夹人夹物演练（`license.classes.<id>.drill-seconds`，车掌考法默认 15，0 为不演练）：报名时在第二站到最后一站里随机排一站（只考一站时就在这一站，`GuardExam#drillStop`）；车掌在那一站按下关门时考官（`GuardExaminer#drillDue`）让站台报告夹人夹物，车掌要在时限内再开车门并报告“夹人夹物”（先后不限，`GuardDrill`），处置完成告知用时，没按时处置当场不及格（`GuardExam#drillMissed`，下一拍结束值乘）。列车晚点超过 `training.drill-max-delay-seconds` 时顺延到下一站，顺延到考完也没演练就不演练；考试中只演练一次。
 - 考试中做的这一趟不发奖励（`GuardTrip#examined`），记录照写。车掌证没有单独的练习（`/fta license practice guard` 提示读手册）。
 
 ## 显示

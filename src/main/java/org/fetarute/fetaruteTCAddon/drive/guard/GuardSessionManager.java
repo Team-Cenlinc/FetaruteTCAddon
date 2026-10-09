@@ -502,6 +502,10 @@ public final class GuardSessionManager {
       return;
     }
     trackTrip(player, session, group, now);
+    tickDrill(player, session, now);
+    if (!sessions.containsKey(session.playerId())) {
+      return;
+    }
     if (session.link().emergencyExpired()) {
       releaseEmergency(player, session, group, "drive.guard.emergency.expired");
     }
@@ -740,6 +744,10 @@ public final class GuardSessionManager {
         session.doors().toggle(group, session, left, chime.get(), stop.get().doorCars());
     if (result == DriveDoors.Result.UNAVAILABLE) {
       notice(player, session, "drive.guard.deny.no-door-animation", Map.of());
+      return;
+    }
+    if (session.drill() != null) {
+      session.drill().noteReopened();
     }
   }
 
@@ -759,6 +767,66 @@ public final class GuardSessionManager {
     }
     session.link().work().ifPresent(work -> work.noteClosed(stop.get().phase()));
     closeAll(group, session, stop.get());
+    maybeStartDrill(player, session, stop.get());
+  }
+
+  // ---- 考试演练 ----
+
+  /** 车掌按下关门后问考官：这一站要演练就报告夹人夹物，开始计时。 */
+  private void maybeStartDrill(Player player, GuardSession session, DriverStationStop stop) {
+    if (session.drill() != null) {
+      return;
+    }
+    int seconds = examiner.drillDue(session.playerId(), session.link().currentTrainName());
+    if (seconds <= 0) {
+      return;
+    }
+    session.setDrill(new GuardDrill(stop.stationName(), Bukkit.getCurrentTick(), seconds));
+    player.sendMessage(
+        locale.component(
+            "drive.guard.drill.alert",
+            Map.of("station", stop.stationName(), "seconds", String.valueOf(seconds))));
+    sounds.play(player, DriveCue.FAULT);
+    showDrill(player, session, Bukkit.getCurrentTick());
+  }
+
+  /** 演练计时：再开门与报告都做了算处置完成，过了时限算没处置；进行中动作栏一直提示还差哪一项。 */
+  private void tickDrill(Player player, GuardSession session, long now) {
+    GuardDrill drill = session.drill();
+    if (drill == null) {
+      return;
+    }
+    if (drill.handled() || drill.expired(now)) {
+      session.setDrill(null);
+      if (drill.handled()) {
+        notice(
+            player,
+            session,
+            "drive.guard.drill.handled",
+            Map.of("seconds", String.format(java.util.Locale.ROOT, "%.1f", drill.seconds(now))));
+        sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
+      }
+      examiner.onDrillDone(player, drill.station(), drill.handled(), drill.seconds(now));
+      return;
+    }
+    if (now >= session.noticeUntilTick()) {
+      showDrill(player, session, now);
+    }
+  }
+
+  private void showDrill(Player player, GuardSession session, long now) {
+    GuardDrill drill = session.drill();
+    notice(
+        player,
+        session,
+        "drive.guard.drill.todo",
+        Map.of(
+            "seconds",
+            String.valueOf(drill.secondsLeft(now)),
+            "reopen",
+            drill.reopened() ? GuardDrill.DONE : GuardDrill.PENDING,
+            "report",
+            drill.reported() ? GuardDrill.DONE : GuardDrill.PENDING));
   }
 
   private void confirm(Player player, GuardSession session) {
@@ -924,6 +992,9 @@ public final class GuardSessionManager {
     if (!work.get().report()) {
       notice(player, session, "drive.guard.report.used-up", Map.of());
       return;
+    }
+    if (reason == IncidentReason.CAUGHT && session.drill() != null) {
+      session.drill().noteReported();
     }
     String reasonKey =
         "drive.guard.report.reason." + reason.name().toLowerCase(java.util.Locale.ROOT);

@@ -119,6 +119,25 @@ class LicenseConfigTest {
     assertEquals(List.of(), warnings);
     assertEquals(guard, parsed.find("guard").orElseThrow());
     assertEquals(3, parsed.levelOf("guard"));
+
+    YamlConfiguration custom = new YamlConfiguration();
+    custom.loadFromString(
+        """
+        classes:
+          guard:
+            exam: guard
+            drill-seconds: 20
+          quiet:
+            exam: guard
+            drill-seconds: 0
+          driver:
+            exam: road-test
+            drill-seconds: 20
+        """);
+    LicenseConfig drills = LicenseConfig.from(custom, warnings::add);
+    assertEquals(20, drills.find("guard").orElseThrow().drillSeconds());
+    assertEquals(0, drills.find("quiet").orElseThrow().drillSeconds(), "0 为不演练");
+    assertEquals(0, drills.find("driver").orElseThrow().drillSeconds(), "演练只用于车掌考试");
   }
 
   @Test
