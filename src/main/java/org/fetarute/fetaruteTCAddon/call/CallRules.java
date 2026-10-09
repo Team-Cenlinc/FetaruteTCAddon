@@ -19,7 +19,7 @@ public final class CallRules {
     NO_SOURCE,
     /** 同方向已有叫来的车在路上或叫车还没派出。 */
     ALREADY_CALLED,
-    /** 下一班很快就到，不用叫。 */
+    /** 下一班很快就到，不用叫；或叫来的车比下一班早不了多少（见 {@link Input#minLeadMinutes()}）。 */
     NEXT_TRAIN_SOON,
     /** 线路上叫来的车已达上限。 */
     LINE_LIMIT,
@@ -38,6 +38,7 @@ public final class CallRules {
    * @param maxCalls 线路叫车车数上限
    * @param cooldownSeconds 玩家还要等几秒才能再叫
    * @param estimateMinutes 叫车后约几分钟到站；估不出时为空
+   * @param minLeadMinutes 叫来的车至少要比下一班早到几分钟；早得不够多时只会把下一班压在后面晚点
    */
   public record Input(
       boolean sourceAvailable,
@@ -47,7 +48,8 @@ public final class CallRules {
       int activeCalls,
       int maxCalls,
       long cooldownSeconds,
-      OptionalInt estimateMinutes) {}
+      OptionalInt estimateMinutes,
+      int minLeadMinutes) {}
 
   /**
    * 判定结果与要告诉玩家的数。
@@ -73,6 +75,12 @@ public final class CallRules {
     }
     OptionalInt next = input.nextTrainMinutes();
     if (next.isPresent() && next.getAsInt() <= input.minWaitMinutes()) {
+      return new Verdict(Outcome.NEXT_TRAIN_SOON, next, 0L);
+    }
+    OptionalInt estimate = input.estimateMinutes();
+    if (next.isPresent()
+        && estimate.isPresent()
+        && estimate.getAsInt() + Math.max(0, input.minLeadMinutes()) > next.getAsInt()) {
       return new Verdict(Outcome.NEXT_TRAIN_SOON, next, 0L);
     }
     if (input.activeCalls() >= input.maxCalls()) {

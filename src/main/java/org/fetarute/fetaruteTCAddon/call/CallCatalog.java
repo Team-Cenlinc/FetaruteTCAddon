@@ -28,11 +28,25 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 /**
  * 一个车站（及屏幕绑定的站台）上能叫的车：按“线路 + 运营类型 + 开往 + 站台”分方向，每个方向列出能跑这一趟的交路。
  *
- * <p>只收运营交路（{@code OPERATION}）、在本站停车、本站不是终点的；首站带 {@code CRET} 的交路从车库出车，其余只能接首站的待命车。
+ * <p>收载客的交路：运营交路（{@code OPERATION}）、首站是车库的出库交路（{@code CREATE}）与沿途停站的回库交路（{@code RETURN}），
+ * 在本站停车、本站不是运营终点的。车从哪里来见 {@link Origin}；不论哪种，本站上游有合适的区间点时都可以在那里生成。
  */
 public final class CallCatalog {
 
   private CallCatalog() {}
+
+  /** 只能区间生成的方向，本站在交路节点表里的下标至少是这个数：生成点要落在首节点之后的区段里（{@code CallPlanner.RouteGeometry}）、 又在本站之前。 */
+  static final int MIN_ENTRY_STOP_INDEX = 2;
+
+  /** 交路本来的车源（区间生成不在此列，各种交路都可以）。 */
+  public enum Origin {
+    /** 首站带 {@code CRET}：从车库出车。 */
+    DEPOT,
+    /** 运营交路、首站不是车库：接首站的待命车。 */
+    STANDBY,
+    /** 载客回库交路：只能区间生成，跑完直接进库。 */
+    ENTRY
+  }
 
   /**
    * 能跑这一趟的一条交路。
@@ -40,14 +54,20 @@ public final class CallCatalog {
    * @param routeId 交路 UUID
    * @param routeCode 交路代码
    * @param stopIndex 本站在交路停靠表里的下标
-   * @param fromDepot 首站带 {@code CRET}：从车库出车；否则接首站的待命车
+   * @param origin 交路本来的车源
    * @param startNode 交路首个节点（待命车按它找）
    */
   public record CallRoute(
-      UUID routeId, String routeCode, int stopIndex, boolean fromDepot, String startNode) {
+      UUID routeId, String routeCode, int stopIndex, Origin origin, String startNode) {
     public CallRoute {
       Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(origin, "origin");
       Objects.requireNonNull(startNode, "startNode");
+    }
+
+    /** 首站带 {@code CRET}，从车库出车。 */
+    public boolean fromDepot() {
+      return origin == Origin.DEPOT;
     }
   }
 
@@ -105,13 +125,15 @@ public final class CallCatalog {
     Set<String> screen = normalizePlatforms(screenPlatforms);
     Map<String, Builder> byKey = new LinkedHashMap<>();
     for (RouteDefinitionCache.RouteEntry entry : entries) {
-      if (entry == null
-          || entry.record().route().operationType() != RouteOperationType.OPERATION
-          || !callable.test(entry.record().line())) {
+      if (entry == null || !callable.test(entry.record().line())) {
         continue;
       }
       List<RouteStop> stops = entry.stops();
       if (stops.size() != entry.definition().waypoints().size() || stops.size() < 2) {
+        continue;
+      }
+      Optional<Origin> origin = originOf(entry.record().route().operationType(), stops.get(0));
+      if (origin.isEmpty()) {
         continue;
       }
       List<StationDirectory.StopStation> stations =
@@ -127,8 +149,6 @@ public final class CallCatalog {
       if (destination.isEmpty()) {
         continue;
       }
-      boolean fromDepot =
-          SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isPresent();
       String startNode = entry.definition().waypoints().get(0).value();
       for (int i = 0; i < end.getAsInt(); i++) {
         RouteStop stop = stops.get(i);
@@ -137,6 +157,10 @@ public final class CallCatalog {
         }
         if (!stationKeyAt(entry, stops, stations, i).filter(station::equals).isPresent()) {
           continue;
+        }
+        if (origin.get() == Origin.ENTRY && i < MIN_ENTRY_STOP_INDEX) {
+          // 只能区间生成的交路在前两站按构造就没有车源（生成点要在首节点之后的区段里、又在本站之前），不列
+          break;
         }
         Set<String> platforms = platformsOf(stop, entry.definition().waypoints().get(i).value());
         Set<String> shown = platforms;
@@ -173,7 +197,7 @@ public final class CallCatalog {
             .routes
             .add(
                 new CallRoute(
-                    entry.routeId(), entry.record().route().code(), i, fromDepot, startNode));
+                    entry.routeId(), entry.record().route().code(), i, origin.get(), startNode));
         // 同一条交路在本站只停一次；环线再经过本站算另一趟，不在这里重复列
         break;
       }
@@ -191,7 +215,7 @@ public final class CallCatalog {
   }
 
   /**
-   * 一条线路的运营交路停车的车站（不含终点），按交路顺序去重。
+   * 一条线路的载客交路（见 {@link #originOf}）停车的车站（不含终点），按交路顺序去重。
    *
    * @param entries 交路缓存的全部交路
    * @param directory 车站目录快照
@@ -206,13 +230,13 @@ public final class CallCatalog {
     }
     Set<PidsStationKey> out = new java.util.LinkedHashSet<>();
     for (RouteDefinitionCache.RouteEntry entry : entries) {
-      if (entry == null
-          || entry.record().route().operationType() != RouteOperationType.OPERATION
-          || !lineId.equals(entry.record().line().id())) {
+      if (entry == null || !lineId.equals(entry.record().line().id())) {
         continue;
       }
       List<RouteStop> stops = entry.stops();
-      if (stops.size() != entry.definition().waypoints().size() || stops.size() < 2) {
+      if (stops.size() != entry.definition().waypoints().size()
+          || stops.size() < 2
+          || originOf(entry.record().route().operationType(), stops.get(0)).isEmpty()) {
         continue;
       }
       OptionalInt end = RouteTerminals.endOfOperationIndex(stops);
@@ -234,8 +258,34 @@ public final class CallCatalog {
     return List.copyOf(out);
   }
 
+  /**
+   * 交路本来的车源；不收的交路为空。
+   *
+   * <p>回库交路只区间生成（首站的车多半还要接着跑运营班，车库在它的终点那头）；出库交路首站不是车库时出不了车，不收。
+   *
+   * @param operationType 交路运营类型
+   * @param firstStop 首站
+   */
+  static Optional<Origin> originOf(RouteOperationType operationType, RouteStop firstStop) {
+    if (operationType == null) {
+      return Optional.empty();
+    }
+    if (operationType == RouteOperationType.RETURN) {
+      return Optional.of(Origin.ENTRY);
+    }
+    boolean depot =
+        firstStop != null
+            && SpawnDirectiveParser.findDirectiveTarget(firstStop, "CRET").isPresent();
+    if (depot) {
+      return Optional.of(Origin.DEPOT);
+    }
+    return operationType == RouteOperationType.OPERATION
+        ? Optional.of(Origin.STANDBY)
+        : Optional.empty();
+  }
+
   /** 停靠点所在车站：站台节点、DYNAMIC 车站规范直接读，只绑定 stationId 的经车站目录查。 */
-  private static Optional<PidsStationKey> stationKeyAt(
+  static Optional<PidsStationKey> stationKeyAt(
       RouteDefinitionCache.RouteEntry entry,
       List<RouteStop> stops,
       List<StationDirectory.StopStation> stations,

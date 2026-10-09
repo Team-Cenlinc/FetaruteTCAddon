@@ -155,7 +155,12 @@ class EtaCallTicketEntryTest {
         0L,
         Optional.empty(),
         Optional.empty(),
-        Optional.of(OnDemandTrip.format(UUID.randomUUID() + "@SURN:BBB", entry)),
+        Optional.of(
+            OnDemandTrip.format(
+                UUID.randomUUID() + "@SURN:BBB",
+                entry.isPresent()
+                    ? Optional.of(new OnDemandTrip.Entry(entry.getAsInt(), Optional.empty()))
+                    : Optional.empty())),
         TripSource.ON_DEMAND,
         0);
   }

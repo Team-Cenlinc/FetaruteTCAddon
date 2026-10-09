@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 40
+config-version: 41
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -304,16 +304,22 @@ timetable:
   recorder-flush-interval-seconds: 5
 
 # 叫车：线路打开叫车（/fta line set ... --allow-player-call true）后，玩家可右键站台屏或用 /fta call 叫一趟车。
-# 叫来的车不进时刻表，跑完全程后在终点等候片刻，随后回库
+# 叫来的车不进时刻表，跑完全程后回库：按表运行的线路到终点即回库，其余线路在终点等候片刻再回库
 call:
   # 本站台该方向下一班超过该分钟数才能叫车；0 表示随时能叫
   min-wait-minutes: 5
+  # 叫来的车至少要比同方向下一班早到该分钟数才能叫，否则只会把下一班压在后面晚点；0 表示不比
+  min-lead-minutes: 2
   # 每位玩家两次叫车的最短间隔（秒）
   cooldown-seconds: 60
-  # 叫来的车到终点后等候的秒数：期间沿途有人叫车且这趟经过就接着跑，否则派回库
+  # 叫来的车到终点后等候的秒数：期间沿途有人叫车且这趟经过就接着跑，否则派回库。
+  # 按表运行的线路不等（终点股道要留给表定列车），到终点即回库，没有回库交路的终点即销毁
   terminal-wait-seconds: 60
   # 线路未设 --call-max-trains 时，同时最多几辆叫来的车（含尚未派出的叫车）
   default-max-trains: 2
+  # 叫来的车离前车不到该秒数时按需降速（最低到线路限速的七成，再近交给信号），后车追到 min-lead-minutes 以内时不降；0 表示不降速。
+  # 叫来的车在合流、进路排队时排在所有列车之后
+  follow-gap-seconds: 60
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

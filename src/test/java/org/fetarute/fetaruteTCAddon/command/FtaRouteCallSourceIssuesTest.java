@@ -64,7 +64,11 @@ class FtaRouteCallSourceIssuesTest {
     for (int i = 0; i < routes.length; i += 2) {
       list.add(
           new CallCatalog.CallRoute(
-              (UUID) routes[i], (String) routes[i + 1], 1, false, "SURC:S:AAA:1"));
+              (UUID) routes[i],
+              (String) routes[i + 1],
+              1,
+              CallCatalog.Origin.STANDBY,
+              "SURC:S:AAA:1"));
     }
     return new CallService.UnsourcedDirection(
         new PidsStationKey("SURC", "PPK"),

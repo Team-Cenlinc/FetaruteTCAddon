@@ -172,6 +172,64 @@ class RouteProgressRegistryTest {
     assertEquals("train-a", registry.get("train-a").orElseThrow().trainName());
   }
 
+  /**
+   * 交路中途生成的车：生成点在两个交路节点之间（交路节点表里没有它）时，最后经过的图节点记为生成点，运行时据此从生成点起算授权； 生成点就是交路节点、生成位置标记已不是
+   * pending、在首节点出车时都照常按交路节点认位置。
+   */
+  @Test
+  void entrySpawnedTrainIsAnchoredAtItsSpawnNode() {
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("route"),
+            List.of(
+                NodeId.of("OP:D:DEP:1"),
+                NodeId.of("OP:S:A:1"),
+                NodeId.of("OP:S:B:1"),
+                NodeId.of("OP:S:C:1")),
+            Optional.empty());
+    RouteProgressRegistry registry = new RouteProgressRegistry();
+    TagStore between =
+        new TagStore(
+            "FTA_ROUTE_INDEX=1", "FTA_DEPOT_ID=OP:A:B:1:003", "FTA_SPAWN_ORIGIN_PENDING=true");
+
+    registry.initFromTags("entry-1", between.properties(), route);
+
+    assertEquals(
+        Optional.of(NodeId.of("OP:A:B:1:003")),
+        registry.get("entry-1").orElseThrow().lastPassedGraphNode());
+    assertEquals(1, registry.get("entry-1").orElseThrow().currentIndex());
+
+    assertEquals(
+        Optional.empty(),
+        RouteProgressRegistry.entrySpawnNode(
+            new TagStore(
+                    "FTA_ROUTE_INDEX=1", "FTA_DEPOT_ID=OP:S:A:1", "FTA_SPAWN_ORIGIN_PENDING=true")
+                .properties(),
+            route,
+            1),
+        "生成点就是交路节点");
+    assertEquals(
+        Optional.empty(),
+        RouteProgressRegistry.entrySpawnNode(
+            new TagStore(
+                    "FTA_ROUTE_INDEX=1",
+                    "FTA_DEPOT_ID=OP:A:B:1:003",
+                    "FTA_SPAWN_ORIGIN_PENDING=false")
+                .properties(),
+            route,
+            1),
+        "车已离开生成点");
+    assertEquals(
+        Optional.empty(),
+        RouteProgressRegistry.entrySpawnNode(
+            new TagStore(
+                    "FTA_ROUTE_INDEX=0", "FTA_DEPOT_ID=OP:D:DEP:2", "FTA_SPAWN_ORIGIN_PENDING=true")
+                .properties(),
+            route,
+            0),
+        "车库出车照旧由 CRET 位置恢复处理");
+  }
+
   private static final class TagStore {
     private final TrainProperties properties;
     private final List<String> tags;

@@ -15191,6 +15191,13 @@ public final class RuntimeDispatchService {
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
     }
+    // 叫来的车按需降速：前车间隔由这里的阻塞距离折算，下一拍起作用；挡着别的车时记为后车追近。
+    stationStopCoordinator.observeLookahead(
+        trainName,
+        properties,
+        lookaheadDecision,
+        blockerDistanceOpt,
+        train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND);
     nextAspect =
         stageSignalAspectForAuthorityAndAdvisory(
             trainName, nextAspect, decision, advisoryDecision, advisoryPreview.risks());

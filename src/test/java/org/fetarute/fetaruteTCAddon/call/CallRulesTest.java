@@ -48,9 +48,38 @@ class CallRulesTest {
     assertEquals(30L, cooldown.seconds());
   }
 
+  /** 叫来的车要比下一班早到 min-lead 分钟：早得不够多就显示下一班，不让叫。 */
+  @Test
+  void calledTrainMustArriveWellBeforeTheNextTrain() {
+    CallRules.Verdict tooClose =
+        CallRules.evaluate(
+            new CallRules.Input(
+                true, none(), OptionalInt.of(7), 5, 0, 2, 0L, OptionalInt.of(6), 2));
+    assertEquals(CallRules.Outcome.NEXT_TRAIN_SOON, tooClose.outcome(), "只早 1 分钟");
+    assertEquals(OptionalInt.of(7), tooClose.minutes(), "显示下一班几分钟到");
+
+    assertTrue(
+        CallRules.evaluate(
+                new CallRules.Input(
+                    true, none(), OptionalInt.of(7), 5, 0, 2, 0L, OptionalInt.of(5), 2))
+            .callable(),
+        "正好早 2 分钟可以叫");
+    assertTrue(
+        CallRules.evaluate(
+                new CallRules.Input(
+                    true, none(), OptionalInt.of(7), 5, 0, 2, 0L, OptionalInt.of(6), 0))
+            .callable(),
+        "min-lead 为 0 时不比");
+    assertTrue(
+        CallRules.evaluate(
+                new CallRules.Input(true, none(), OptionalInt.of(7), 5, 0, 2, 0L, none(), 2))
+            .callable(),
+        "估不出到站时间时不比");
+  }
+
   private static CallRules.Input input(
       boolean source, OptionalInt called, OptionalInt next, int active, long cooldown) {
-    return new CallRules.Input(source, called, next, 5, active, 2, cooldown, OptionalInt.of(3));
+    return new CallRules.Input(source, called, next, 5, active, 2, cooldown, OptionalInt.of(3), 2);
   }
 
   private static OptionalInt none() {

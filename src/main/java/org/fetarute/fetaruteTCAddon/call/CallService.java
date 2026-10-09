@@ -9,10 +9,12 @@ import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.OptionalLong;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
@@ -34,12 +36,14 @@ import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
@@ -65,8 +69,9 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * 叫车：玩家在站台屏或命令里叫一趟车，按需出一张发车票。
  *
  * <p>叫车票（{@link TripSource#ON_DEMAND}）经现有发车流程派车（闭塞、车队上限照查）；派出的车带 {@link
- * SimpleTicketAssigner#TAG_CALLED_TRAIN} 标签：不进时刻表、按表或按间隔的票都不接它，跑完全程到终点后等 {@code
- * call.terminal-wait-seconds}，期间沿途又有人叫车、这趟经过就接着跑，否则派回库。
+ * SimpleTicketAssigner#TAG_CALLED_TRAIN} 标签：不进时刻表、按表或按间隔的票都不接它、进路排队排在所有车之后，
+ * 跑完全程到终点后派回库——按表运行的交路到终点即回库（终点股道留给表定列车）， 其余等 {@code
+ * call.terminal-wait-seconds}，期间沿途又有人叫车、这趟经过就接着跑。回库途中仍带着叫车标签（时刻表照样不管它）， 只是不再算进线路的叫车车数。
  *
  * <p>只在服务器主线程调用。
  */
@@ -76,6 +81,18 @@ public final class CallService {
 
   /** 叫来的车预先指定的站台（{@link PlatformPin#format()}）；随车走，重启、改名后照样认得。 */
   public static final String TAG_CALL_PLATFORM = "FTA_CALL_PLATFORM";
+
+  /** 叫来的车这一趟叫车跑的交路：车跑上别的回库交路就是在回库途中（{@link #refreshCalledTrains}）。 */
+  public static final String TAG_CALL_ROUTE = "FTA_CALL_ROUTE";
+
+  /** 车库在表定出库前后多久之内不给叫车出车（那条股道或车库池留给表定列车）。 */
+  static final Duration DEPOT_YIELD_AHEAD = Duration.ofMinutes(3);
+
+  /** 已过计划时刻还没出库的表定车也算：晚一分钟以内的照样让。 */
+  static final Duration DEPOT_YIELD_BEHIND = Duration.ofMinutes(1);
+
+  /** 表定出库的车库清单缓存多久：站台屏每次判定都要问。 */
+  private static final Duration DEPOT_YIELD_TTL = Duration.ofSeconds(5);
 
   private static final long SWEEP_PERIOD_TICKS = 20L;
   private static final Duration HINT_TTL = Duration.ofSeconds(5);
@@ -198,9 +215,20 @@ public final class CallService {
     }
   }
 
-  /** 叫来的车：车名、标签、跑的交路所属线路、预先指定的站台。 */
+  /**
+   * 叫来的车：车名、标签、跑的交路所属线路、预先指定的站台、是否在回库途中。
+   *
+   * @param returning 跑完叫车、正在回库交路上（不算线路的叫车车数）
+   */
   private record CalledTrain(
-      String name, CallTag tag, Optional<UUID> lineId, Optional<PlatformPin> pin) {}
+      String name,
+      CallTag tag,
+      Optional<UUID> lineId,
+      Optional<PlatformPin> pin,
+      boolean returning) {}
+
+  /** 此后一段时间里按表从车库出车的出库点（CRET 写法），按计算时刻缓存。 */
+  private record DepotDepartures(Instant computedAt, List<String> depots) {}
 
   private record HintKey(PidsStationKey station, Set<String> platforms, Set<String> lines) {}
 
@@ -215,6 +243,11 @@ public final class CallService {
   private final Map<HintKey, CachedHint> hints = new ConcurrentHashMap<>();
   private volatile Map<String, CalledTrain> calledTrains = Map.of();
   private volatile Map<UUID, Line> lines = Map.of();
+  private volatile DepotDepartures depotDepartures = new DepotDepartures(Instant.EPOCH, List.of());
+
+  /** 身后有车追近（到下一站的预计间隔不到 min-lead）的叫来的车，列车名小写；每秒扫描时重算。 */
+  private volatile Set<String> closeBehind = Set.of();
+
   private volatile Instant linesLoadedAt = Instant.EPOCH;
 
   /** 正在后台重读线路开关。 */
@@ -289,7 +322,7 @@ public final class CallService {
     List<CallOption> out = new ArrayList<>(directions.size());
     for (CallCatalog.CallDirection direction : directions) {
       CallRules.Input assumingSource = withoutPlan(direction, scene);
-      Optional<CallPlanner.Plan> plan = planner.plan(direction, scene.dutyBound(), now);
+      Optional<CallPlanner.Plan> plan = planner.plan(direction, scene.constraints(), now);
       out.add(withPlan(direction, assumingSource, plan));
     }
     return List.copyOf(out);
@@ -351,7 +384,7 @@ public final class CallService {
     }
     for (int i = 0; i < candidates.size(); i++) {
       CallCatalog.CallDirection direction = candidates.get(i);
-      Optional<CallPlanner.Plan> plan = planner.plan(direction, scene.dutyBound(), now);
+      Optional<CallPlanner.Plan> plan = planner.plan(direction, scene.constraints(), now);
       if (withPlan(direction, inputs.get(i), plan).verdict().callable()) {
         return true;
       }
@@ -360,7 +393,7 @@ public final class CallService {
   }
 
   /**
-   * 判定要用的现场：站台屏的行、各线路的叫车数、列车是否绑着时刻表交路、个人冷却。一次判定只取一次。
+   * 判定要用的现场：站台屏的行、各线路的叫车数、排车源的约束（待命车能不能接、车库让不让）、个人冷却。一次判定只取一次。
    *
    * @param cooldownSeconds 叫车玩家的个人冷却还剩几秒；不算玩家时为 0
    */
@@ -368,7 +401,7 @@ public final class CallService {
       PidsStationKey station,
       List<PidsRow> rows,
       Map<UUID, Integer> activeCalls,
-      Predicate<String> dutyBound,
+      CallPlanner.Constraints constraints,
       long cooldownSeconds,
       Instant now) {}
 
@@ -377,9 +410,55 @@ public final class CallService {
         station,
         rowsAt(station),
         activeCallsByLine(),
-        dutyBoundPredicate(),
+        constraints(),
         playerId.map(id -> cooldownSeconds(id, now)).orElse(0L),
         now);
+  }
+
+  /**
+   * 排车源的约束。
+   *
+   * <ul>
+   *   <li>首站待命车：叫来的车都能接；交路按表运行时只接叫来的车（没绑交路的车可能正等着跑首班或等回收）， 否则不接绑着时刻表交路的车；
+   *   <li>车库：同一出库点（DYNAMIC 写法按整个车库池）在表定出库前后（{@link #DEPOT_YIELD_AHEAD}、{@link
+   *       #DEPOT_YIELD_BEHIND}）不给叫车出车。
+   * </ul>
+   */
+  private CallPlanner.Constraints constraints() {
+    return constraints(false);
+  }
+
+  /**
+   * 同 {@link #constraints()}。
+   *
+   * @param restoring 找回重启前的叫车：按表运行打开时首站待命车只接叫来的车——刚重启时交路账本是空的，别的车看着没绑交路， 其实多半还担着时刻表的班（共用终点的线路也一样）
+   */
+  private CallPlanner.Constraints constraints(boolean restoring) {
+    Predicate<String> dutyBound = dutyBoundPredicate();
+    Predicate<UUID> managed = restoring && timetableEnabled() ? routeId -> true : timetableRoutes();
+    return new CallPlanner.Constraints() {
+      @Override
+      public boolean acceptsStandby(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
+        return CallService.acceptsStandby(candidate, managed.test(routeId), dutyBound);
+      }
+
+      @Override
+      public boolean depotYields(UUID routeId, Instant now) {
+        return depotYieldsToTimetable(routeId, now);
+      }
+    };
+  }
+
+  /**
+   * 首站待命车能不能接叫车：叫来的车都能接；交路按表运行时只接叫来的车，否则不接绑着时刻表交路的车。
+   *
+   * @param managedRoute 叫车跑的交路按表运行
+   */
+  static boolean acceptsStandby(
+      LayoverRegistry.LayoverCandidate candidate,
+      boolean managedRoute,
+      Predicate<String> dutyBound) {
+    return SimpleTicketAssigner.callMayTake(candidate, managedRoute, dutyBound);
   }
 
   /** 先当作有车可派：只看下一班多久到、同方向已叫的车、车数上限与个人冷却。 */
@@ -392,7 +471,8 @@ public final class CallService {
         scene.activeCalls().getOrDefault(direction.lineId(), 0),
         maxCalls(direction.lineId()),
         scene.cooldownSeconds(),
-        OptionalInt.empty());
+        OptionalInt.empty(),
+        settings().minLeadMinutes());
   }
 
   /** 加上车源安排后的判定。 */
@@ -410,7 +490,8 @@ public final class CallService {
                 assumingSource.activeCalls(),
                 assumingSource.maxCalls(),
                 assumingSource.cooldownSeconds(),
-                plan.map(CallPlanner.Plan::etaMinutes).orElse(OptionalInt.empty())));
+                plan.map(CallPlanner.Plan::etaMinutes).orElse(OptionalInt.empty()),
+                assumingSource.minLeadMinutes()));
     return new CallOption(direction, verdict, plan.map(p -> new CallPlan(p.etaMinutes())));
   }
 
@@ -485,8 +566,7 @@ public final class CallService {
     if (!option.get().verdict().callable()) {
       return new CallResult(Outcome.UNAVAILABLE, option, Optional.empty());
     }
-    Optional<CallPlanner.Plan> plan =
-        planner.plan(option.get().direction(), dutyBoundPredicate(), now);
+    Optional<CallPlanner.Plan> plan = planner.plan(option.get().direction(), constraints(), now);
     if (plan.isEmpty()) {
       return new CallResult(Outcome.UNAVAILABLE, option, Optional.empty());
     }
@@ -519,7 +599,10 @@ public final class CallService {
             + " source="
             + plan.get().source()
             + " entry="
-            + (plan.get().entryIndex().isPresent() ? plan.get().entryIndex().getAsInt() : "-")
+            + plan.get()
+                .entry()
+                .map(entry -> entry.index() + "/" + entry.node().value())
+                .orElse("-")
             + " eta="
             + (plan.get().etaSeconds().isPresent() ? plan.get().etaSeconds().getAsInt() : "-"));
     return new CallResult(Outcome.ISSUED, option, callId);
@@ -578,7 +661,9 @@ public final class CallService {
     if (service.isEmpty()) {
       return Optional.empty();
     }
-    String trip = OnDemandTrip.format(new CallTag(id, station).format(), plan.entryIndex());
+    String trip =
+        OnDemandTrip.format(
+            new CallTag(id, station).format(), plan.entry().map(CallPlanner.Entry::ticketEntry));
     SpawnTicket ticket =
         new SpawnTicket(
             id,
@@ -730,7 +815,8 @@ public final class CallService {
   // ---------------------------------------------------------------- 交路校验
 
   /**
-   * 一条线路上没有车源的叫车方向：每条能跑这一趟的交路都是首站不是车库、没有交路在首站终到（不会有待命车）、本站上游也没有能生成车的区间点。 这样的方向不会出现在叫车对话框里。
+   * 一条线路上没有车源的叫车方向：每条能跑这一趟的交路都是首站不是车库、首站等不来能接的待命车（没有不按表的交路在首站终到， 按表运行的交路又只接叫来的车）、本站上游也没有能生成车的区间点。
+   * 这样的方向不会出现在叫车对话框里。
    *
    * @param lineId 线路
    */
@@ -747,7 +833,8 @@ public final class CallService {
         entries.stream()
             .filter(entry -> entry != null && lineId.equals(entry.record().line().id()))
             .toList();
-    List<String> standbyTerminals = standbyTerminals(entries, timetableRoutes());
+    Predicate<UUID> timetableRoutes = timetableRoutes();
+    List<String> standbyTerminals = standbyTerminals(entries, timetableRoutes);
     Map<String, Boolean> sourcedRoutes = new HashMap<>();
     List<UnsourcedDirection> out = new ArrayList<>();
     for (PidsStationKey station : CallCatalog.stationsServed(lineEntries, directory, lineId)) {
@@ -766,7 +853,9 @@ public final class CallService {
                             route.routeId() + "#" + route.stopIndex(),
                             ignored ->
                                 route.fromDepot()
-                                    || standbyAt(standbyTerminals, route.startNode())
+                                    || (route.origin() == CallCatalog.Origin.STANDBY
+                                        && !timetableRoutes.test(route.routeId())
+                                        && standbyAt(standbyTerminals, route.startNode()))
                                     || planner.entryPossible(route.routeId(), route.stopIndex())));
         if (!sourced) {
           out.add(new UnsourcedDirection(station, direction));
@@ -824,17 +913,17 @@ public final class CallService {
     return false;
   }
 
+  /** 按表运行打开着。 */
+  private boolean timetableEnabled() {
+    return plugin.getTimetableService().map(service -> service.settings().enabled()).orElse(false);
+  }
+
   /** 由时刻表管辖的交路（按表运行打开时）。 */
   private Predicate<UUID> timetableRoutes() {
     return plugin
         .getTimetableService()
         .<Predicate<UUID>>map(service -> service::managed)
         .orElse(routeId -> false);
-  }
-
-  /** 按表运行打开着：刚重启时交路账本是空的，首站的待命车看着都没绑交路，其实多半还担着时刻表的班。 */
-  private boolean timetableEnabled() {
-    return plugin.getTimetableService().map(service -> service.settings().enabled()).orElse(false);
   }
 
   // ---------------------------------------------------------------- 存库与找回
@@ -955,10 +1044,8 @@ public final class CallService {
     if (direction.isEmpty()) {
       return false;
     }
-    // 按表运行打开时找回不接待命车（账本刚重启是空的，看不出哪辆还担着时刻表的班），只从车库出车或区间生成。
-    Predicate<String> standbyExcluded =
-        timetableEnabled() ? trainName -> true : dutyBoundPredicate();
-    Optional<CallPlanner.Plan> plan = planner.plan(direction.get(), standbyExcluded, now);
+    // 按表运行打开时找回只接叫来的车（认车上的标签，刚重启也认得）：账本刚重启是空的，看不出别的车是否还担着时刻表的班。
+    Optional<CallPlanner.Plan> plan = planner.plan(direction.get(), constraints(true), now);
     if (plan.isEmpty()) {
       return false;
     }
@@ -1077,6 +1164,10 @@ public final class CallService {
         TrainProperties properties = TrainPropertiesStore.get(trainName);
         TrainTagHelper.writeTag(
             properties, SimpleTicketAssigner.TAG_CALLED_TRAIN, tag.get().format());
+        if (ticket.service() != null) {
+          TrainTagHelper.writeTag(
+              properties, TAG_CALL_ROUTE, ticket.service().routeId().toString());
+        }
         // 接着跑下一趟叫车时上一趟的站台不再算数：没有指定站台就摘掉旧的。
         if (pin.isPresent()) {
           TrainTagHelper.writeTag(properties, TAG_CALL_PLATFORM, pin.get().format());
@@ -1088,7 +1179,7 @@ public final class CallService {
       debug("叫车标签写入失败 train=" + trainName + " error=" + ex);
     }
     Map<String, CalledTrain> updated = new HashMap<>(calledTrains);
-    updated.put(trainName, new CalledTrain(trainName, tag.get(), lineIdOf(ticket), pin));
+    updated.put(trainName, new CalledTrain(trainName, tag.get(), lineIdOf(ticket), pin, false));
     calledTrains = Map.copyOf(updated);
     forget(tag.get().callId());
     hints.clear();
@@ -1122,6 +1213,7 @@ public final class CallService {
         sweepPending(now);
       }
       returnFinishedTrains(now);
+      refreshCloseBehind();
       forgetIdlePlayers(now);
     } catch (RuntimeException ex) {
       debug("叫车扫描异常 error=" + ex);
@@ -1136,7 +1228,10 @@ public final class CallService {
     lastDialogByPlayer.values().removeIf(at -> at.isBefore(dialogsDone));
   }
 
-  /** 按车上的叫车标签重建叫来的车：正在跑回库交路的车摘掉标签（已经不算叫来的车）。 */
+  /**
+   * 按车上的叫车标签重建叫来的车。跑上回库交路、又不是这一趟叫车跑的交路（{@link #TAG_CALL_ROUTE}）的车在回库途中：
+   * 标签留着（时刻表照样不管它，免得被就近匹配成表里的车次、抢走别人的交路），只是不再算进线路的叫车车数。
+   */
   private void refreshCalledTrains() {
     Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
     Map<String, CalledTrain> found = new HashMap<>();
@@ -1156,16 +1251,16 @@ public final class CallService {
       if (tag.isEmpty()) {
         continue;
       }
+      Optional<UUID> routeId =
+          TrainTagHelper.readTagValue(properties, "FTA_ROUTE_ID").flatMap(CallService::parseUuid);
       Optional<RouteDefinitionCache.RouteRecord> record =
-          TrainTagHelper.readTagValue(properties, "FTA_ROUTE_ID")
-              .flatMap(CallService::parseUuid)
-              .flatMap(routeId -> cache.flatMap(c -> c.findRecord(routeId)));
-      if (record.isPresent() && record.get().route().operationType() == RouteOperationType.RETURN) {
-        TrainTagHelper.removeTagKeys(
-            properties, SimpleTicketAssigner.TAG_CALLED_TRAIN, TAG_CALL_PLATFORM);
-        debug("叫来的车已派回库，摘掉叫车标签 train=" + properties.getTrainName());
-        continue;
-      }
+          routeId.flatMap(id -> cache.flatMap(c -> c.findRecord(id)));
+      boolean returning =
+          returning(
+              record.map(r -> r.route().operationType()),
+              routeId,
+              TrainTagHelper.readTagValue(properties, TAG_CALL_ROUTE)
+                  .flatMap(CallService::parseUuid));
       String name = properties.getTrainName();
       found.put(
           name,
@@ -1174,9 +1269,27 @@ public final class CallService {
               tag.get(),
               record.map(r -> r.line().id()),
               TrainTagHelper.readTagValue(properties, TAG_CALL_PLATFORM)
-                  .flatMap(PlatformPin::parse)));
+                  .flatMap(PlatformPin::parse),
+              returning));
     }
     calledTrains = Map.copyOf(found);
+  }
+
+  /**
+   * 叫来的车是不是在回库途中：跑的是回库交路，又不是这一趟叫车跑的交路（叫车方向本身就是回库交路时，那一趟照常算叫来的车）。
+   *
+   * @param operationType 车正在跑的交路的运营类型；查不到时为空
+   * @param routeId 车正在跑的交路
+   * @param callRoute 这一趟叫车跑的交路；没有记录（旧车）时为空，跑在回库交路上就算回库途中
+   */
+  static boolean returning(
+      Optional<RouteOperationType> operationType,
+      Optional<UUID> routeId,
+      Optional<UUID> callRoute) {
+    if (operationType.isEmpty() || operationType.get() != RouteOperationType.RETURN) {
+      return false;
+    }
+    return callRoute.isEmpty() || !callRoute.equals(routeId);
   }
 
   /** 没派出去的叫车：已派出的收掉；票没了的作废；等太久的撤票。 */
@@ -1204,7 +1317,10 @@ public final class CallService {
     }
   }
 
-  /** 叫来的车在终点等完 {@code call.terminal-wait-seconds}：派回库。期间被叫车票接走的车不在待命池里，不会走到这里。 */
+  /**
+   * 叫来的车在终点等完：派回库。按表运行的交路不等（终点股道要留给表定列车），其余等 {@code call.terminal-wait-seconds}。
+   * 期间被叫车票接走的车不在待命池里，不会走到这里。
+   */
   private void returnFinishedTrains(Instant now) {
     Optional<LayoverRegistry> registry = plugin.getLayoverRegistry();
     Optional<ReclaimManager> reclaim = plugin.getReclaimManager();
@@ -1212,6 +1328,7 @@ public final class CallService {
       return;
     }
     Duration wait = Duration.ofSeconds(settings().terminalWaitSeconds());
+    Predicate<UUID> timetableRoutes = timetableRoutes();
     for (LayoverRegistry.LayoverCandidate candidate : registry.get().snapshot()) {
       if (candidate == null
           || candidate.tags() == null
@@ -1220,7 +1337,7 @@ public final class CallService {
         continue;
       }
       Instant readyAt = candidate.readyAt() == null ? now : candidate.readyAt();
-      if (now.isBefore(readyAt.plus(wait))) {
+      if (now.isBefore(readyAt.plus(terminalWait(candidate, timetableRoutes, wait)))) {
         continue;
       }
       Instant retryAt = returnRetryAt.get(candidate.trainName());
@@ -1238,6 +1355,344 @@ public final class CallService {
       }
     }
     returnRetryAt.keySet().retainAll(calledTrains.keySet());
+  }
+
+  /**
+   * 叫来的车身后有没有车追近：到它下一站的预计间隔不到 {@code min-lead-minutes}（按需降速据此不降，免得把后车也压慢）。 每秒扫描时算好，这里只查。
+   *
+   * @param trainName 列车名
+   */
+  public boolean trainCloseBehind(String trainName) {
+    return trainName != null && closeBehind.contains(trainName.trim().toLowerCase(Locale.ROOT));
+  }
+
+  /** 重算身后有车追近的叫来的车：下一站查不到、本车不在那一站的站台屏上时也算追近（宁可不降速）。 */
+  private void refreshCloseBehind() {
+    ConfigManager.CallSettings current = settings();
+    long leadSeconds = current.minLeadMinutes() * 60L;
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService> runtime =
+        plugin.getRuntimeDispatchService();
+    if (leadSeconds <= 0L
+        || current.followGapSeconds() <= 0
+        || calledTrains.isEmpty()
+        || cache.isEmpty()
+        || runtime.isEmpty()) {
+      closeBehind = Set.of();
+      return;
+    }
+    Map<
+            String,
+            org.fetarute
+                .fetaruteTCAddon
+                .dispatcher
+                .runtime
+                .RouteProgressRegistry
+                .RouteProgressEntry>
+        progress = runtime.get().snapshotProgressEntries();
+    StationDirectory.Snapshot directory =
+        plugin.getStationDirectory().map(StationDirectory::snapshot).orElse(null);
+    Set<String> out = new HashSet<>();
+    for (CalledTrain train : calledTrains.values()) {
+      OptionalLong gap =
+          nextStationOf(train.name(), progress, cache.get(), directory)
+              .map(station -> rearGapSeconds(rowsAt(station), train.name()))
+              .orElse(OptionalLong.empty());
+      if (gap.isEmpty() || gap.getAsLong() < leadSeconds) {
+        out.add(train.name().trim().toLowerCase(Locale.ROOT));
+      }
+    }
+    closeBehind = Set.copyOf(out);
+  }
+
+  /** 列车下一个停车的车站（含终点）；进度或交路查不到时为空。 */
+  private static Optional<PidsStationKey> nextStationOf(
+      String trainName,
+      Map<
+              String,
+              org.fetarute
+                  .fetaruteTCAddon
+                  .dispatcher
+                  .runtime
+                  .RouteProgressRegistry
+                  .RouteProgressEntry>
+          progress,
+      RouteDefinitionCache cache,
+      StationDirectory.Snapshot directory) {
+    var entry =
+        progress.get(
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer
+                .normalizeKey(trainName));
+    if (entry == null || entry.routeUuid() == null) {
+      return Optional.empty();
+    }
+    RouteDefinitionCache.RouteEntry route = null;
+    for (RouteDefinitionCache.RouteEntry candidate : cache.entries()) {
+      if (candidate != null && entry.routeUuid().equals(candidate.routeId())) {
+        route = candidate;
+        break;
+      }
+    }
+    if (route == null) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = route.stops();
+    List<StationDirectory.StopStation> stations =
+        directory == null
+            ? List.of()
+            : directory.stopStations(
+                route.routeId(), stops, Optional.of(route.record().operator()));
+    for (int i = Math.max(0, entry.currentIndex() + 1); i < stops.size(); i++) {
+      RouteStop stop = stops.get(i);
+      if ((stop.stops() || stop.passType() == RouteStopPassType.TERMINATE)
+          && RouteTerminals.isStationStop(stop)) {
+        return CallCatalog.stationKeyAt(route, stops, stations, i);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /**
+   * 到站预计的后车间隔：本车之后、同一站台（或同线路同终点）最早到的那一班离本车几秒（取消的不算）。本车不在这些行里时为空；身后没有车时为 {@link Long#MAX_VALUE}。
+   *
+   * @param rows 下一站的站台屏行
+   * @param trainName 本车
+   */
+  static OptionalLong rearGapSeconds(List<PidsRow> rows, String trainName) {
+    PidsRow own = null;
+    for (PidsRow row : rows) {
+      if (row.trainName().filter(name -> name.equalsIgnoreCase(trainName)).isPresent()) {
+        own = row;
+        break;
+      }
+    }
+    if (own == null) {
+      return OptionalLong.empty();
+    }
+    long best = Long.MAX_VALUE;
+    for (PidsRow row : rows) {
+      if (row == own
+          || row.status() == PidsRow.Status.CANCELLED
+          || !row.expectedAt().isAfter(own.expectedAt())
+          || !sameTrack(own, row)) {
+        continue;
+      }
+      best = Math.min(best, Duration.between(own.expectedAt(), row.expectedAt()).getSeconds());
+    }
+    return OptionalLong.of(best);
+  }
+
+  /** 两行是同一条路上的车：同一站台，或站台未定时同线路同终点。 */
+  private static boolean sameTrack(PidsRow own, PidsRow row) {
+    if (!own.platformPending() && !row.platformPending()) {
+      return own.platform().equalsIgnoreCase(row.platform());
+    }
+    return own.lineName().equalsIgnoreCase(row.lineName())
+        && own.destinationId().isPresent()
+        && own.destinationId().equals(row.destinationId());
+  }
+
+  /** 叫来的车在终点等多久：刚跑完的交路按表运行时不等。 */
+  static Duration terminalWait(
+      LayoverRegistry.LayoverCandidate candidate, Predicate<UUID> timetableRoutes, Duration wait) {
+    Optional<UUID> routeId =
+        Optional.ofNullable(candidate.tags())
+            .map(tags -> tags.get("FTA_ROUTE_ID"))
+            .flatMap(CallService::parseUuid);
+    return routeId.filter(timetableRoutes).isPresent() ? Duration.ZERO : wait;
+  }
+
+  /**
+   * 叫来的车回库先走哪条回库交路：与这一趟叫车跑的交路同一交路组（{@code spawn_group}）、同一线路、从车所在终点出发的回库交路—— 车从哪个车库来就回哪个车库。
+   * 不是叫来的车、查不到时为空（回收照常挑）。
+   *
+   * @param trainName 列车名
+   */
+  public Optional<UUID> preferredReturnRoute(String trainName) {
+    CalledTrain train = trainName == null ? null : calledTrain(trainName);
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (train == null || cache.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<UUID> callRoute;
+    try {
+      callRoute =
+          TrainPropertiesStore.exists(train.name())
+              ? Optional.ofNullable(TrainPropertiesStore.get(train.name()))
+                  .flatMap(
+                      properties ->
+                          TrainTagHelper.readTagValue(properties, TAG_CALL_ROUTE)
+                              .or(() -> TrainTagHelper.readTagValue(properties, "FTA_ROUTE_ID")))
+                  .flatMap(CallService::parseUuid)
+              : Optional.empty();
+    } catch (RuntimeException | LinkageError ex) {
+      return Optional.empty();
+    }
+    Optional<NodeId> location =
+        plugin
+            .getLayoverRegistry()
+            .flatMap(registry -> registry.get(train.name()))
+            .map(LayoverRegistry.LayoverCandidate::locationNodeId);
+    return callRoute.flatMap(id -> sameGroupReturnRoute(cache.get().entries(), id, location));
+  }
+
+  /**
+   * 与这条交路同一线路、同一交路组、从车所在终点出发的回库交路；交路没写交路组时为空。
+   *
+   * @param location 车停的节点；不知道时不按出发终点筛
+   */
+  static Optional<UUID> sameGroupReturnRoute(
+      Collection<RouteDefinitionCache.RouteEntry> entries,
+      UUID routeId,
+      Optional<NodeId> location) {
+    if (entries == null || routeId == null) {
+      return Optional.empty();
+    }
+    RouteDefinitionCache.RouteEntry own = null;
+    for (RouteDefinitionCache.RouteEntry entry : entries) {
+      if (entry != null && routeId.equals(entry.routeId())) {
+        own = entry;
+        break;
+      }
+    }
+    Optional<String> group = own == null ? Optional.empty() : spawnGroupOf(own);
+    if (group.isEmpty()) {
+      return Optional.empty();
+    }
+    for (RouteDefinitionCache.RouteEntry entry : entries) {
+      if (entry != null
+          && !routeId.equals(entry.routeId())
+          && entry.record().route().operationType() == RouteOperationType.RETURN
+          && entry.record().line().id().equals(own.record().line().id())
+          && spawnGroupOf(entry).filter(group.get()::equalsIgnoreCase).isPresent()
+          && location.map(node -> startsAt(entry, node)).orElse(true)) {
+        return Optional.of(entry.routeId());
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 交路从这个节点所在的终点出发（同站不同站台、DYNAMIC 首站都算）。 */
+  private static boolean startsAt(RouteDefinitionCache.RouteEntry entry, NodeId location) {
+    if (!entry.stops().isEmpty()
+        && DynamicStopMatcher.matchesStop(location, entry.stops().get(0))) {
+      return true;
+    }
+    List<NodeId> waypoints = entry.definition().waypoints();
+    return !waypoints.isEmpty()
+        && TerminalKeyResolver.matches(
+            TerminalKeyResolver.toTerminalKey(location),
+            TerminalKeyResolver.toTerminalKey(waypoints.get(0)));
+  }
+
+  private static Optional<String> spawnGroupOf(RouteDefinitionCache.RouteEntry entry) {
+    return SimpleTicketAssigner.readSpawnGroup(entry.record().route().metadata());
+  }
+
+  // ---------------------------------------------------------------- 车库让表定
+
+  /**
+   * 叫车票此刻能不能从车库出车：首站是车库、车库此刻又要让给表定出库时不能（{@link #depotYieldsToTimetable}）。
+   * 发车侧在真正从车库出车前、放弃区间生成改走车库前都问（{@code SimpleTicketAssigner#setOnDemandDepotGate}）：
+   * 排车源时判过一次，可票在队列里可能被闸门拖到表定出库的时候。
+   *
+   * @param ticket 叫车票
+   */
+  public boolean allowsDepotSpawn(SpawnTicket ticket) {
+    if (ticket == null || ticket.service() == null) {
+      return true;
+    }
+    UUID routeId = ticket.service().routeId();
+    return depotOf(routeId).isEmpty() || !depotYieldsToTimetable(routeId, Instant.now());
+  }
+
+  /**
+   * 这条交路的车库此刻要让给按表出库的车：同一出库点（DYNAMIC 写法按整个车库池）在 {@link #DEPOT_YIELD_BEHIND} 之前到 {@link
+   * #DEPOT_YIELD_AHEAD} 之后有表定出库。叫来的车先出库、在库里被闭塞扣住时，表定那一班就生成不了。
+   */
+  private boolean depotYieldsToTimetable(UUID routeId, Instant now) {
+    List<String> departures = timetableDepotDepartures(now);
+    if (departures.isEmpty()) {
+      return false;
+    }
+    Optional<String> own = depotOf(routeId);
+    if (own.isEmpty()) {
+      return false;
+    }
+    for (String depot : departures) {
+      if (sameDepot(own.get(), depot)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 交路首站的出库点（CRET 写法）；首站不是车库时为空。 */
+  private Optional<String> depotOf(UUID routeId) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    Optional<RouteDefinition> definition = cache.flatMap(c -> c.findById(routeId));
+    if (definition.isEmpty()) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = cache.get().listStops(definition.get().id());
+    return stops.isEmpty()
+        ? Optional.empty()
+        : SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET");
+  }
+
+  /** 此后一段时间里按表从车库出车的出库点：首站是车库的车次与出库走行。缓存 {@link #DEPOT_YIELD_TTL}。 */
+  private List<String> timetableDepotDepartures(Instant now) {
+    DepotDepartures cached = depotDepartures;
+    if (!now.isBefore(cached.computedAt())
+        && now.isBefore(cached.computedAt().plus(DEPOT_YIELD_TTL))) {
+      return cached.depots();
+    }
+    List<String> depots = new ArrayList<>();
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService>
+        timetable = plugin.getTimetableService().filter(service -> service.settings().enabled());
+    if (timetable.isPresent()) {
+      Instant from = now.minus(DEPOT_YIELD_BEHIND);
+      Instant to = now.plus(DEPOT_YIELD_AHEAD);
+      for (var trip : timetable.get().tripsBetween(from, to)) {
+        depotOf(trip.trip().routeId()).ifPresent(depots::add);
+      }
+      for (var leg : timetable.get().legsBetween(from, to)) {
+        if (leg.kind() == RouteOperationType.CREATE) {
+          depotOf(leg.routeId()).ifPresent(depots::add);
+        }
+      }
+    }
+    List<String> out = List.copyOf(depots);
+    depotDepartures = new DepotDepartures(now, out);
+    return out;
+  }
+
+  /**
+   * 两个出库点是不是同一处：都是固定股道时比股道，有一个是 DYNAMIC 写法（车库池）时比车库。
+   *
+   * @param a 出库点（CRET 写法）
+   * @param b 出库点（CRET 写法）
+   */
+  static boolean sameDepot(String a, String b) {
+    if (a == null || b == null || a.isBlank() || b.isBlank()) {
+      return false;
+    }
+    boolean dynamic =
+        SpawnDirectiveParser.isDynamicTarget(a) || SpawnDirectiveParser.isDynamicTarget(b);
+    if (!dynamic) {
+      return a.trim().equalsIgnoreCase(b.trim());
+    }
+    Optional<String> depotA = depotKey(a);
+    return depotA.isPresent() && depotA.equals(depotKey(b));
+  }
+
+  /** 出库点所在的车库（{@code 运营商:类型:名称}，小写）。 */
+  private static Optional<String> depotKey(String spec) {
+    if (SpawnDirectiveParser.isDynamicTarget(spec)) {
+      return DynamicStopMatcher.parseDynamicSpec(spec.trim())
+          .map(DynamicStopMatcher::specToStationKey);
+    }
+    return DynamicStopMatcher.extractStationKey(spec.trim());
   }
 
   // ---------------------------------------------------------------- 判定用的数
@@ -1344,11 +1799,13 @@ public final class CallService {
     return line == null ? fallback : LineCallMetadata.maxTrains(line.metadata()).orElse(fallback);
   }
 
-  /** 线路上叫来的车（不含已派回库的）与还没派出的叫车。 */
+  /** 线路上叫来的车（不含回库途中的）与还没派出的叫车。 */
   private Map<UUID, Integer> activeCallsByLine() {
     Map<UUID, Integer> out = new HashMap<>();
     for (CalledTrain train : calledTrains.values()) {
-      train.lineId().ifPresent(lineId -> out.merge(lineId, 1, Integer::sum));
+      if (!train.returning()) {
+        train.lineId().ifPresent(lineId -> out.merge(lineId, 1, Integer::sum));
+      }
     }
     for (PendingCall call : pending.values()) {
       out.merge(call.lineId(), 1, Integer::sum);
