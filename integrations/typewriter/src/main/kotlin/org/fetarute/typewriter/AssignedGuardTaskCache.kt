@@ -24,7 +24,7 @@ class AssignedGuardTaskCache : Initializable, Listener {
     private val finished = ConcurrentHashMap<UUID, ConcurrentHashMap<String, GuardApi.TaskState>>()
 
     override suspend fun initialize() {
-        plugin.registerEvents(this)
+        if (guardEventsAvailable()) plugin.registerEvents(this)
     }
 
     override suspend fun shutdown() {

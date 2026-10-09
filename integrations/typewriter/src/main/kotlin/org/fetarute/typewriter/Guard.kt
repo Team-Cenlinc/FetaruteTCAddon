@@ -1,8 +1,17 @@
 package org.fetarute.typewriter
 
 import com.typewritermc.core.entries.Ref
+import org.fetarute.fetaruteTCAddon.api.FetaruteApi
 import org.fetarute.fetaruteTCAddon.api.drive.GuardApi
 import org.fetarute.typewriter.entries.action.AssignGuardDutyActionEntry
+
+/**
+ * 服务器上的 FetaruteTCAddon 带不带车掌事件（1.14.0 起）。旧版本上注册监听车掌事件的 Bukkit 监听器会因找不到事件类而出错，
+ * 车掌的缓存据此决定注册不注册。按类是否存在判断，不靠 API 实例（扩展初始化时它可能还没就绪）。
+ */
+internal fun guardEventsAvailable(): Boolean = runCatching {
+    Class.forName("org.fetarute.fetaruteTCAddon.api.event.GuardEvent", false, FetaruteApi::class.java.classLoader)
+}.isSuccess
 
 /** 没指定动作条目时认所有车掌任务；指定了只认这个条目派出的任务。 */
 internal fun GuardApi.TaskView.assignedBy(entry: Ref<AssignGuardDutyActionEntry>): Boolean =

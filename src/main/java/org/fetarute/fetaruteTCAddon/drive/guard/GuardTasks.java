@@ -176,14 +176,6 @@ public final class GuardTasks {
     return task;
   }
 
-  /** 忘掉已结束的任务（玩家离线后清理）。 */
-  public void forgetFinished(UUID playerId) {
-    GuardTask task = byPlayer.get(playerId);
-    if (task != null && task.state().finished()) {
-      byPlayer.remove(playerId);
-    }
-  }
-
   /**
    * 判定已领取的任务。
    *
@@ -211,14 +203,31 @@ public final class GuardTasks {
     return Step.WAIT;
   }
 
+  /** 派车侧要不要问车掌：有等着上岗的任务，或始发站扣着的车上车掌已上岗、还没到时限（派车放行前别的候选车不能顶替）。 */
+  public boolean pickupInterest(Instant now) {
+    for (GuardTask task : byPlayer.values()) {
+      if (task.state() == GuardTask.State.CLAIMED || holding(task, now)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 车掌已坐进始发站扣着的车上岗、还没到扣车时限（这一班还没派出）。 */
+  private static boolean holding(GuardTask task, Instant now) {
+    return task.state() == GuardTask.State.ON_DUTY
+        && task.heldTrain() != null
+        && now.isBefore(task.holdDeadline());
+  }
+
   /**
-   * 这列车正被别的车次的车掌扣着（始发站等车掌上岗、还没到时限）：不能派去跑别的车次。
+   * 这列车正被别的车次的车掌扣着（始发站等车掌上岗、或车掌已坐进去上岗，还没到时限）：不能派去跑别的车次。
    *
-   * @param key 要派的车次
+   * @param key 要派的车次；不是表定车次时为 {@code null}
    */
   public boolean heldForOther(String trainName, TaskKey key, Instant now) {
     for (GuardTask task : byPlayer.values()) {
-      if (task.state() == GuardTask.State.CLAIMED
+      if ((task.state() == GuardTask.State.CLAIMED || holding(task, now))
           && task.heldTrain() != null
           && task.heldTrain().equalsIgnoreCase(trainName)
           && !task.key().equals(key)

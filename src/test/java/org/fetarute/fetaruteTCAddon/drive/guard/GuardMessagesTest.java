@@ -54,13 +54,15 @@ class GuardMessagesTest {
     }
     keys.add("drive.command.start.guard-on-duty");
     keys.add("drive.menu.deny.guard-doors");
+    keys.add("drive.task.claim.guard-busy");
     for (GuardTasks.ClaimOutcome outcome : GuardTasks.ClaimOutcome.values()) {
       keys.add("drive.guard.task.claim." + keyOf(outcome));
     }
     for (GuardTask.State state : GuardTask.State.values()) {
       keys.add("drive.guard.task.state." + keyOf(state));
     }
-    for (String reason : List.of("departed", "timeout", "pickup-timeout", "disabled")) {
+    for (String reason :
+        List.of("departed", "timeout", "pickup-timeout", "disabled", "cancelled")) {
       keys.add("drive.guard.task.ended." + reason);
     }
     for (String key : List.of("arrived", "wrong-cab", "hold")) {

@@ -98,7 +98,7 @@ final class TaskSpecResolver {
       return new Result(null, Failure.UNAVAILABLE);
     }
     TaskKey key = new TaskKey(request.timetableId(), plan.get().tripCode(), request.serviceDate());
-    Optional<TimetableApi.TrainAssignment> assignment = assignmentOf(key);
+    Optional<TimetableApi.TrainAssignment> assignment = assignmentOf(plugin, key);
     if (assignment
         .flatMap(TimetableApi.TrainAssignment::lastStopSequence)
         .filter(last -> last > takeover.stopSequence())
@@ -139,7 +139,14 @@ final class TaskSpecResolver {
         null);
   }
 
-  private static Optional<TimetableApi.TrainAssignment> assignmentOf(TaskKey key) {
+  /** 担当这一班的列车绑定：驾驶模块在时先按原始绑定对上再换算这一列（不把全网列车都算一遍），否则查整份列表。 */
+  private static Optional<TimetableApi.TrainAssignment> assignmentOf(
+      FetaruteTCAddon plugin, TaskKey key) {
+    org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager drive =
+        plugin.getDriveSessionManager();
+    if (drive != null) {
+      return drive.tasks().assignmentOf(key);
+    }
     return DriverTaskManager.timetables()
         .flatMap(
             api ->

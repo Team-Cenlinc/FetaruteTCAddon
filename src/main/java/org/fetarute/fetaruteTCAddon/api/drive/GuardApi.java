@@ -110,7 +110,7 @@ public interface GuardApi {
     DISABLED,
     /** 玩家正在值乘。 */
     ON_DUTY,
-    /** 玩家正在驾驶。 */
+    /** 玩家正在驾驶，或领了还没结束的驾驶任务。 */
     DRIVING,
     /** 玩家已有未结束的车掌任务。 */
     ALREADY_HAS_TASK,

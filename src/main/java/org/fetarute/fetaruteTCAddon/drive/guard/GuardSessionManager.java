@@ -87,6 +87,9 @@ public final class GuardSessionManager {
     /** 玩家是否在驾驶（驾驶员不能同时当车掌）。 */
     boolean isDriving(UUID playerId);
 
+    /** 玩家是否领了还没结束的驾驶任务（同一时间只能当一个角色）。 */
+    boolean hasDriverTask(UUID playerId);
+
     /** 快捷栏数据包改写已就绪（BKCommonLib 监听注册成功）。 */
     boolean hotbarReady();
 
@@ -875,6 +878,11 @@ public final class GuardSessionManager {
   }
 
   private void openSide(Player player, GuardSession session, MinecartGroup group, boolean left) {
+    if (handoverReached(session)) {
+      // 到了交班站：车门交还站台开，不由车掌开了再在交班时关上。
+      stop(session.playerId(), GuardSession.EndReason.HANDOVER);
+      return;
+    }
     Optional<DriverStationStop> stop = session.link().stationStop();
     if (stop.isEmpty() || group.isMoving() || !doorsReleasable(stop.get().phase())) {
       notice(player, session, "drive.guard.deny.doors-not-released", Map.of());
@@ -1139,12 +1147,13 @@ public final class GuardSessionManager {
       notice(player, session, "drive.guard.report.not-at-station", Map.of());
       return;
     }
+    if (reason == IncidentReason.CAUGHT && session.drill() != null) {
+      // 演练要的是报告这个动作：本站报告次数用完也算报告了。
+      session.drill().noteReported();
+    }
     if (!work.get().report()) {
       notice(player, session, "drive.guard.report.used-up", Map.of());
       return;
-    }
-    if (reason == IncidentReason.CAUGHT && session.drill() != null) {
-      session.drill().noteReported();
     }
     callEvent(
         new GuardIncidentReportEvent(
@@ -1533,6 +1542,11 @@ public final class GuardSessionManager {
     }
     settleTrip(player, session, trip, DriverTask.State.COMPLETED);
     session.setTrip(new GuardTrip(key, key == null ? "" : drivers.routeCodeOf(key), Instant.now()));
+    GuardTask duty = session.task();
+    if (duty != null && duty.key().equals(key)) {
+      // 列车已在跑任务这一班：始发站的扣车记录用完了，不再拦它去跑别的车次。
+      duty.clearHold();
+    }
   }
 
   /**
@@ -2232,7 +2246,7 @@ public final class GuardSessionManager {
     if (sessions.containsKey(id)) {
       return GuardTasks.ClaimOutcome.ON_DUTY;
     }
-    if (drivers.isDriving(id)) {
+    if (drivers.isDriving(id) || drivers.hasDriverTask(id)) {
       return GuardTasks.ClaimOutcome.DRIVING;
     }
     GuardTasks.ClaimOutcome outcome =
@@ -2327,6 +2341,11 @@ public final class GuardSessionManager {
       if (outcome == StartOutcome.STARTED) {
         return;
       }
+      if (outcome == StartOutcome.CANCELLED) {
+        // 别的插件不让这名玩家上岗：不再每秒重试，这一班车掌作废。
+        endClaim(task, GuardTask.State.INTERRUPTED, "cancelled");
+        return;
+      }
       player.sendActionBar(
           locale.component(
               outcome == StartOutcome.NOT_TAIL_CAB
@@ -2412,7 +2431,7 @@ public final class GuardSessionManager {
 
   /** 有没有已领取、等着上岗的车掌任务：没有时派车侧不必逐张票去问。 */
   public boolean hasPickupInterest() {
-    return !tasks.claimed().isEmpty();
+    return tasks.pickupInterest(Instant.now());
   }
 
   /**
@@ -2435,7 +2454,13 @@ public final class GuardSessionManager {
     }
     GuardTask task = found.get();
     Player player = Bukkit.getPlayer(task.playerId());
-    boolean online = player != null && player.isOnline() && available();
+    // 车掌正在别的车上值乘或在驾驶：上不了这列车，扣着只会让这一班白白晚点。
+    boolean online =
+        player != null
+            && player.isOnline()
+            && available()
+            && (task.state() != GuardTask.State.CLAIMED
+                || (!sessions.containsKey(task.playerId()) && !drivers.isDriving(task.playerId())));
     switch (GuardTasks.layover(task, trainName, online, now)) {
       case HOLD -> {
         return false;
@@ -2672,7 +2697,12 @@ public final class GuardSessionManager {
       return Optional.empty();
     }
     if (Bukkit.isPrimaryThread()) {
-      return guardOfTrain(trainName).map(GuardSession::playerId);
+      for (GuardSession session : sessions.values()) {
+        if (session.link().currentTrainName().equalsIgnoreCase(trainName)) {
+          return Optional.of(session.playerId());
+        }
+      }
+      return Optional.empty();
     }
     return Optional.ofNullable(guardByTrain.get(trainName.toLowerCase(java.util.Locale.ROOT)));
   }

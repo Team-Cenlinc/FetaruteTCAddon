@@ -34,6 +34,7 @@ class GuardStatsCache : Initializable, Listener {
     private val stats = ConcurrentHashMap<UUID, GuardStats>()
 
     override suspend fun initialize() {
+        if (!guardEventsAvailable()) return
         plugin.registerEvents(this)
         server.onlinePlayers.forEach { load(it.uniqueId) }
     }
@@ -73,8 +74,8 @@ class GuardStatsCache : Initializable, Listener {
     fun onTripScored(event: GuardTripScoredEvent) {
         val score = event.score
         val completed = event.state == GuardTripState.COMPLETED.name
-        stats.compute(event.playerId) { _, current ->
-            val base = current ?: GuardStats()
+        // 只累加在线、已读过库的玩家：下线时结算的那一趟由下次进服读库带上，不在这里另起一份从 0 算的
+        stats.computeIfPresent(event.playerId) { _, base ->
             base.copy(
                 trips = base.trips + 1,
                 completed = base.completed + if (completed) 1 else 0,

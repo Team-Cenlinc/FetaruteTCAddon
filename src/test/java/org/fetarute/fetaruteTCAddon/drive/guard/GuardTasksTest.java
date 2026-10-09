@@ -116,20 +116,29 @@ class GuardTasksTest {
   }
 
   @Test
-  @DisplayName("扣着等车掌的列车不派去跑别的车次；到时限或已上岗后不再拦")
+  @DisplayName("扣着等车掌的列车不派去跑别的车次（车掌已坐进去上岗也一样，非表定的票也拦）；到时限或这一班已开出后不再拦")
   void aHeldTrainIsNotGivenToAnotherTrip() {
     GuardTasks tasks = new GuardTasks();
     UUID a = UUID.randomUUID();
+    assertFalse(tasks.pickupInterest(T0));
     tasks.register(a, "A", spec("1001", 0), false, T0);
+    assertTrue(tasks.pickupInterest(T0), "等着上岗");
     GuardTask task = tasks.activeTaskOf(a).orElseThrow();
     Instant deadline = T0.plus(Duration.ofSeconds(90));
     task.hold("T-1", deadline, CabSeats.Departure.HEAD);
     assertTrue(tasks.heldForOther("t-1", key("2002"), T0));
+    assertTrue(tasks.heldForOther("T-1", null, T0), "非表定的票");
     assertFalse(tasks.heldForOther("T-1", key("1001"), T0), "自己这一班");
     assertFalse(tasks.heldForOther("T-9", key("2002"), T0));
     assertFalse(tasks.heldForOther("T-1", key("2002"), deadline));
+
     task.start("T-1");
-    assertFalse(tasks.heldForOther("T-1", key("2002"), T0));
+    assertTrue(tasks.heldForOther("T-1", key("2002"), T0), "已上岗、还没派出");
+    assertTrue(tasks.pickupInterest(T0), "已上岗、还没派出：派车侧照样要问");
+    assertFalse(tasks.pickupInterest(deadline));
+    task.clearHold();
+    assertFalse(tasks.heldForOther("T-1", key("2002"), T0), "这一班已开出");
+    assertFalse(tasks.pickupInterest(T0));
   }
 
   @Test

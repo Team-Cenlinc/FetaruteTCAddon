@@ -699,6 +699,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
+      public boolean hasDriverTask(UUID playerId) {
+        return tasks.activeTaskOf(playerId).isPresent();
+      }
+
+      @Override
       public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.TripTrain>
           trainForTrip(TaskKey key) {
         return tasks
@@ -4009,6 +4014,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   // ---- 始发站与车库接班 ----
 
+  /** 玩家在当车掌、或领了还没结束的车掌任务：同一时间只能当一个角色。 */
+  private boolean guardBusy(UUID playerId) {
+    return guards != null
+        && (guards.isOnDuty(playerId) || guards.tasks().activeTaskOf(playerId).isPresent());
+  }
+
   /** 有没有可能要等驾驶员或车掌接车：没有驾驶任务、也没有等着上岗的车掌任务时派车侧不必逐张票去查车次。 */
   public boolean hasDriverPickupInterest() {
     return tasks.hasActiveTasks()
@@ -4028,11 +4039,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     boolean driver = driverAllowsLayoverDispatch(trip, trainName);
     boolean guard =
         guards == null
-            || trip == null
             || guards.allowLayoverDispatch(
-                new TaskKey(trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate()),
+                trip == null
+                    ? null
+                    : new TaskKey(
+                        trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate()),
                 trainName,
-                trip.departure());
+                trip == null ? null : trip.departure());
     return driver && guard;
   }
 
@@ -5240,7 +5253,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   public DriverTaskManager.ClaimOutcome assignTask(
       Player player, DriverTaskManager.TaskSpec spec, DrivingMode mode, boolean notify) {
-    if (continuations.containsKey(player.getUniqueId())) {
+    if (continuations.containsKey(player.getUniqueId()) || guardBusy(player.getUniqueId())) {
       return DriverTaskManager.ClaimOutcome.ALREADY_HAS_TASK;
     }
     DriverTaskManager.ClaimOutcome outcome =
@@ -5394,6 +5407,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (continuations.containsKey(player.getUniqueId())) {
       // 正在等接续本车的下一趟：先结束驾驶再领别的车次，免得开出后这一趟记不成任务。
       return "drive.task.claim.continuing";
+    }
+    if (guardBusy(player.getUniqueId())) {
+      return "drive.task.claim.guard-busy";
     }
     DriveConfig current = config;
     DriverTaskManager.ClaimOutcome outcome =
