@@ -47,11 +47,11 @@ public final class FtaLicenseCommand {
   }
 
   public void register(CommandManager<CommandSender> manager) {
-    // 报名：开放的等级；练习：开放的路考等级（教程级没有练习）；发证、吊销：配置里的全部等级（停用的也能处理）。
+    // 报名：开放的等级；练习：开放的路考与车掌等级（教程级没有练习）；发证、吊销：配置里的全部等级（停用的也能处理）。
     SuggestionProvider<CommandSender> classSuggestions = classSuggestions(LicenseClass::enabled);
     SuggestionProvider<CommandSender> practiceClassSuggestions =
         classSuggestions(
-            license -> license.enabled() && license.exam() == LicenseClass.Exam.ROAD_TEST);
+            license -> license.enabled() && license.exam() != LicenseClass.Exam.TUTORIAL);
     SuggestionProvider<CommandSender> adminClassSuggestions = classSuggestions(license -> true);
     // 发证、吊销、查询接受服务器见过的离线玩家：补全在线玩家，输入的名字正好是见过的离线玩家时也列出它。
     SuggestionProvider<CommandSender> playerSuggestions =
@@ -94,13 +94,7 @@ public final class FtaLicenseCommand {
             .literal("practice")
             .permission(player)
             .required("class", StringParser.stringParser(), practiceClassSuggestions)
-            .optional("station", StringParser.quotedStringParser(), stationSuggestions)
-            .handler(
-                ctx ->
-                    handlePractice(
-                        ctx.sender(),
-                        ((String) ctx.get("class")).trim(),
-                        ctx.optional("station").map(String.class::cast))));
+            .handler(ctx -> handlePractice(ctx.sender(), ((String) ctx.get("class")).trim())));
     manager.command(
         manager
             .commandBuilder("fta")
@@ -250,9 +244,11 @@ public final class FtaLicenseCommand {
       if (examining.filter(exam -> license.id().equals(exam.classId())).isPresent()) {
         sender.sendMessage(
             locale.component(
-                examining.get().training()
-                    ? "drive.license.info.level-practice-running"
-                    : "drive.license.info.level-exam-running",
+                !examining.get().training()
+                    ? "drive.license.info.level-exam-running"
+                    : license.exam() == LicenseClass.Exam.GUARD
+                        ? "drive.license.info.level-practice-running-guard"
+                        : "drive.license.info.level-practice-running",
                 values));
         continue;
       }
@@ -270,10 +266,13 @@ public final class FtaLicenseCommand {
       String key;
       if (license.exam() == LicenseClass.Exam.TUTORIAL) {
         key = "drive.license.info.level-open-tutorial";
+      } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
+        key =
+            license.exam() == LicenseClass.Exam.GUARD
+                ? "drive.license.info.level-need-practice-guard"
+                : "drive.license.info.level-need-practice";
       } else if (license.exam() == LicenseClass.Exam.GUARD) {
         key = "drive.license.info.level-open-guard";
-      } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
-        key = "drive.license.info.level-need-practice";
       } else {
         key = "drive.license.info.level-open-road-test";
       }
@@ -313,13 +312,14 @@ public final class FtaLicenseCommand {
     send(sender, licenses.startExam(player, classId, station));
   }
 
-  private void handlePractice(CommandSender sender, String classId, Optional<String> station) {
+  /** 报名练习：玩家先坐上要练的那列调度列车，再报名。 */
+  private void handlePractice(CommandSender sender, String classId) {
     Player player = requirePlayer(sender);
     LicenseService licenses = requireService(sender);
     if (player == null || licenses == null) {
       return;
     }
-    send(sender, licenses.startPractice(player, classId, station));
+    send(sender, licenses.startPractice(player, classId));
   }
 
   private void handleReissue(CommandSender sender) {

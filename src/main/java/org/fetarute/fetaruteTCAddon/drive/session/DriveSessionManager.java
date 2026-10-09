@@ -548,6 +548,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return Optional.ofNullable(guards);
   }
 
+  /** 这列车此刻有没有玩家在驾驶。 */
+  public boolean trainDriven(String trainName) {
+    return driverSessionOfTrain(trainName).isPresent();
+  }
+
   /** 驾驶员那边给车掌用的接口：找这列车的驾驶员、给他提示。 */
   public org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.DriverSide driverSide() {
     return new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.DriverSide() {

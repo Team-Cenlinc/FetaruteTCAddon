@@ -29,8 +29,13 @@ public interface GuardExaminer {
         public void onDrillDone(Player player, String station, boolean handled, double seconds) {}
       };
 
-  /** 这名玩家正在考车掌：考试中做的这一趟不发奖励。 */
+  /** 这名玩家正在考车掌（含练习）：考试中做的这一趟不发奖励。 */
   boolean examining(UUID playerId);
+
+  /** 这名玩家正在做车掌练习：练习中做的这一趟也不写进车掌记录。 */
+  default boolean practicing(UUID playerId) {
+    return false;
+  }
 
   /** 做完一站作业（出站监视也采完了）。 */
   void onStopWorked(Player player, GuardScore.Stop stop);

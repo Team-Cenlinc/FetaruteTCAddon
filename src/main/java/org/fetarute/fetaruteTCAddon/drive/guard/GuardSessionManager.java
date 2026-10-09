@@ -1525,6 +1525,9 @@ public final class GuardSessionManager {
               GuardViews.work(GuardScore.Stop.of(station, settled.work()))));
       if (examiner.examining(session.playerId())) {
         session.trip().markExamined();
+        if (examiner.practicing(session.playerId())) {
+          session.trip().markPracticed();
+        }
         GuardSession.DepartureWatch watch = session.departureWatch();
         // 还有一站在等交给考官：先交，免得被这一站顶掉。
         flushExamStop(player, session);
@@ -1583,7 +1586,9 @@ public final class GuardSessionManager {
       return;
     }
     if (trip.examined() && online != null) {
-      online.sendMessage(locale.component("drive.guard.result-exam"));
+      online.sendMessage(
+          locale.component(
+              trip.practiced() ? "drive.guard.result-practice" : "drive.guard.result-exam"));
     }
     GuardTask task = session.task();
     boolean taskTrip = task != null && !task.state().finished() && key.get().equals(task.key());
@@ -1602,24 +1607,9 @@ public final class GuardSessionManager {
         session.playerName(),
         reward,
         current.rewards().enabled() && state == DriverTask.State.FAILED);
-    drivers.saveRecord(
-        new DriveTaskRecord(
-            UUID.randomUUID(),
-            ServerIdentity.id().orElse(null),
-            session.playerId(),
-            session.playerName(),
-            key.get().timetableId(),
-            tripCode,
-            key.get().serviceDate(),
-            trip.routeCode(),
-            trainName,
-            DriveTaskRecord.MODE_GUARD,
-            state.name(),
-            result.points(),
-            result.grade().name(),
-            trip.startedAt(),
-            Instant.now(),
-            GuardRecordCodec.encode(score, trip.blocks())));
+    if (!trip.practiced()) {
+      saveRecord(session, trip, key.get(), tripCode, trainName, state, result, score);
+    }
     if (taskTrip) {
       task.setResult(result.points(), result.grade().name());
     }
@@ -1637,6 +1627,36 @@ public final class GuardSessionManager {
     if (taskTrip) {
       finishTask(online, session, state, state.name());
     }
+  }
+
+  /** 写一趟车掌记录（练习的不写）。 */
+  private void saveRecord(
+      GuardSession session,
+      GuardTrip trip,
+      TaskKey key,
+      String tripCode,
+      String trainName,
+      DriverTask.State state,
+      ScoreRules.Result result,
+      GuardScore score) {
+    drivers.saveRecord(
+        new DriveTaskRecord(
+            UUID.randomUUID(),
+            ServerIdentity.id().orElse(null),
+            session.playerId(),
+            session.playerName(),
+            key.timetableId(),
+            tripCode,
+            key.serviceDate(),
+            trip.routeCode(),
+            trainName,
+            DriveTaskRecord.MODE_GUARD,
+            state.name(),
+            result.points(),
+            result.grade().name(),
+            trip.startedAt(),
+            Instant.now(),
+            GuardRecordCodec.encode(score, trip.blocks())));
   }
 
   /** 一趟的大字评级与成绩单。 */

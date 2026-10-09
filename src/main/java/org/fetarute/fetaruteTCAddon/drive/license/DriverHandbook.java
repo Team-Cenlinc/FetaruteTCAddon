@@ -23,7 +23,7 @@ public final class DriverHandbook {
   public static final int PAGES = 10;
 
   /** 车掌手册页数。 */
-  public static final int GUARD_PAGES = 6;
+  public static final int GUARD_PAGES = 7;
 
   private final NamespacedKey markKey;
   private final String prefix;

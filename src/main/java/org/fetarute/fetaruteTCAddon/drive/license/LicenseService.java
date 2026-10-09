@@ -33,8 +33,11 @@ import org.bukkit.permissions.PermissionAttachment;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
+import org.fetarute.fetaruteTCAddon.api.drive.GuardApi;
 import org.fetarute.fetaruteTCAddon.api.event.DriverStopScoredEvent;
 import org.fetarute.fetaruteTCAddon.api.event.DriverTaskFinishedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardTaskFinishedEvent;
+import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
@@ -43,10 +46,15 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardSource;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardStations;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardExaminer;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardScore;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardSession;
 import org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager;
+import org.fetarute.fetaruteTCAddon.drive.guard.GuardTask;
+import org.fetarute.fetaruteTCAddon.drive.guard.GuardTasks;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
 import org.fetarute.fetaruteTCAddon.drive.tutorial.DriveTutorials;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -59,7 +67,8 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
  * <p>持有哪些等级记在插件的数据库里（多服共用一个库时一起生效）；玩家在线时，插件按持有的等级替他挂上配置里的权限节点（Bukkit 权限附件，子节点随之生效），
  * 不改任何权限插件的数据。考试期间临时挂上所考那一级的节点，考完撤下。
  *
- * <p>两种考试：完整做完新手教程（练习步骤不能跳过）；路考——给考生派一段调度列车的区间任务，按终态与成绩判定。考过发一本驾驶证（成书，把记录印出来，只是凭证），丢了可以补发。只在服务器主线程调用（数据库读写在异步线程，结果回到主线程）。
+ * <p>三种考试：完整做完新手教程（练习步骤不能跳过）；路考——给考生派一段调度列车的区间任务，按终态与成绩判定；车掌——给考生派一段调度列车的车掌区间任务，逐站讲评，做满站数后按车掌成绩判定。
+ * 路考与车掌考试前要先练习：练习不派车，玩家自己坐上要练的那列调度列车再报名。考过发一本驾驶证（成书，把记录印出来，只是凭证），丢了可以补发。只在服务器主线程调用（数据库读写在异步线程，结果回到主线程）。
  */
 public final class LicenseService implements Listener, GuardExaminer {
 
@@ -131,6 +140,9 @@ public final class LicenseService implements Listener, GuardExaminer {
   private record GuardDrillPlan(int stop, boolean started) {}
 
   private final Map<UUID, GuardDrillPlan> guardDrills = new HashMap<>();
+
+  /** 车掌练习已做满站数、讲评过，还在值乘到交班站：练习的临时权限留到这一班结束。 */
+  private final Set<UUID> guardPracticeJudged = new HashSet<>();
 
   /** 路考中已经提醒过的不及格项（每项只提醒一次）。 */
   private final Map<UUID, Set<String>> examWarned = new HashMap<>();
@@ -329,10 +341,12 @@ public final class LicenseService implements Listener, GuardExaminer {
           "drive.license.exam.cooldown",
           Map.of("name", license.name(), "minutes", String.valueOf(minutesUntil(now, until))));
     }
-    if (license.exam() == LicenseClass.Exam.ROAD_TEST
+    if (license.exam() != LicenseClass.Exam.TUTORIAL
         && trainingRuns(id, license.id()) < license.trainingRuns()) {
       return new Reply(
-          "drive.license.exam.need-training",
+          license.exam() == LicenseClass.Exam.GUARD
+              ? "drive.license.exam.need-training-guard"
+              : "drive.license.exam.need-training",
           Map.of(
               "name",
               license.name(),
@@ -345,17 +359,16 @@ public final class LicenseService implements Listener, GuardExaminer {
     }
     return switch (license.exam()) {
       case TUTORIAL -> startTutorialExam(player, license, now);
-      case ROAD_TEST -> startRoadTest(player, license, stationArg, now, false);
-      case GUARD -> startGuardExam(player, license, now);
+      case ROAD_TEST -> startRoadTest(player, license, stationArg, now);
+      case GUARD -> startGuardExam(player, license, stationArg, now);
     };
   }
 
   /**
-   * 报名路考练习：和路考一样派一段区间任务，有教练提示与一次应急演练，不发证、不冷却、不记入驾驶记录。完整开完（到交班站）计一次练习。
-   *
-   * @param stationArg 接班站；为空时取玩家附近的车站
+   * 报名练习：不派车，玩家先坐上要练的那列调度列车（中途站停站中，或在终点站待命），再报名。驾驶员练习从这一站起开过几个停车站，有教练提示与一次应急演练；
+   * 车掌练习从这一站起值乘几站，逐站讲评，考试中的夹人夹物演练也会安排。练习不发证、不冷却、不记入记录，做满站数计一次练习。
    */
-  public Reply startPractice(Player player, String classId, Optional<String> stationArg) {
+  public Reply startPractice(Player player, String classId) {
     UUID id = player.getUniqueId();
     if (!config.enabled()) {
       return Reply.of("drive.license.disabled");
@@ -366,10 +379,7 @@ public final class LicenseService implements Listener, GuardExaminer {
           "drive.license.exam.unknown-class", Map.of("class", String.valueOf(classId)));
     }
     LicenseClass license = found.get();
-    if (license.exam() == LicenseClass.Exam.GUARD) {
-      return new Reply("drive.license.practice.not-guard", Map.of("name", license.name()));
-    }
-    if (license.exam() != LicenseClass.Exam.ROAD_TEST) {
+    if (license.exam() == LicenseClass.Exam.TUTORIAL) {
       return new Reply("drive.license.practice.not-road", Map.of("name", license.name()));
     }
     if (!ensureLoaded(player)) {
@@ -390,7 +400,161 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (running != null) {
       return inProgress(running);
     }
-    return startRoadTest(player, license, stationArg, Instant.now(), true);
+    DriveSessionManager manager = drive.get();
+    if (manager == null) {
+      return Reply.of("drive.command.unavailable");
+    }
+    boolean guard = license.exam() == LicenseClass.Exam.GUARD;
+    Optional<GuardSessionManager> guards = manager.guards().filter(GuardSessionManager::available);
+    if (guard && guards.isEmpty()) {
+      return new Reply("drive.license.exam.guard-unavailable", Map.of("name", license.name()));
+    }
+    Reply busy = crewBusy(manager, id);
+    if (busy != null) {
+      return busy;
+    }
+    Optional<TimetableService> timetables = plugin.getTimetableService();
+    Optional<String> seated = SeatLocator.locate(player).map(SeatBinding::trainName);
+    Map<String, String> values = new LinkedHashMap<>(passValues(license, ""));
+    // 配置了练习线路时附一句说明，没配置时留空。
+    values.put(
+        "routes",
+        config.training().routes().isEmpty()
+            ? ""
+            : plugin
+                .getLocaleManager()
+                .text("drive.license.practice.routes")
+                .replace("<routes>", String.join("、", config.training().routes())));
+    if (seated.isEmpty() || timetables.isEmpty()) {
+      return new Reply(
+          guard ? "drive.license.practice.guard.choose" : "drive.license.practice.choose", values);
+    }
+    String train = seated.get();
+    values.put("train", train);
+    Optional<ChosenTrain> chosen = chosenTrain(manager, train);
+    if (chosen.isEmpty()) {
+      return new Reply("drive.license.practice.not-at-station", values);
+    }
+    // 车掌在交班站停妥即交班、不做那一站的作业：要做满几站，交班站排在其后一站。
+    int stops = guard ? license.examStops() + 1 : license.examStops();
+    Optional<DriverTaskManager.TaskSpec> spec =
+        TaskBoardSource.intervalSpec(
+            plugin,
+            timetables.get(),
+            chosen.get().key(),
+            chosen.get().fromSequence(),
+            train,
+            stops,
+            DriverTask.SOURCE_TRAINING,
+            Map.of("license", license.id()));
+    if (spec.isEmpty()) {
+      values.put("need", String.valueOf(stops));
+      values.put(
+          "left",
+          String.valueOf(
+              TaskBoardSource.stopsAhead(
+                      timetables.get(), chosen.get().key(), chosen.get().fromSequence())
+                  .orElse(0)));
+      return new Reply("drive.license.practice.short", values);
+    }
+    if (!config.training().allowsRoute(spec.get().routeCode())) {
+      return new Reply("drive.license.practice.route-not-allowed", values);
+    }
+    // 已经晚点的车不拿来练习：练习可能再慢一些，调度会救不过来。
+    if (lateTrain(train, config.training().drillMaxDelaySeconds())) {
+      return new Reply("drive.license.practice.late", values);
+    }
+    Instant now = Instant.now();
+    if (guard) {
+      if (guards.get().tasks().taskForTrip(chosen.get().key()).isPresent()
+          || guards.get().guardOfTrain(train).isPresent()) {
+        return new Reply("drive.license.practice.guard.taken", values);
+      }
+      return startGuardTask(player, license, guards.get(), spec.get(), now, true);
+    }
+    DriveConfig current = manager.config();
+    if (!current.enabled() || !current.driver().enabled()) {
+      return Reply.of("drive.task.claim.disabled");
+    }
+    if (manager.tasks().congestionProtection().open(now)) {
+      return Reply.of("drive.task.claim.protection-active");
+    }
+    if (manager.tasks().takenKeys().contains(chosen.get().key()) || manager.trainDriven(train)) {
+      return new Reply("drive.license.practice.taken", values);
+    }
+    exams.put(
+        id,
+        new Exam(license.id(), LicenseClass.Exam.ROAD_TEST, now.plus(ROAD_TEST_FALLBACK), true));
+    coach.begin(id, true);
+    apply(player);
+    DriverTaskManager.ClaimOutcome outcome =
+        manager.assignTask(player, spec.get(), DrivingMode.MANUAL, false);
+    if (outcome != DriverTaskManager.ClaimOutcome.CLAIMED) {
+      endExam(id);
+      apply(player);
+      return new Reply("drive.license.exam.assign-failed", Map.of("reason", outcome.name()));
+    }
+    briefRoadTest(player, license, spec.get(), true);
+    return Reply.of("drive.license.practice.brief.feedback");
+  }
+
+  /**
+   * 练习选的车：从它此刻所在的车站起要跑的那一趟。
+   *
+   * @param trainName 列车
+   * @param key 车次
+   * @param fromSequence 从哪个停靠序号起接班
+   */
+  private record ChosenTrain(String trainName, TaskKey key, int fromSequence) {}
+
+  /**
+   * 玩家坐着的这列车能不能拿来练习、跑哪一趟：中途站停站中的车跑它此刻的车次，从这一站起；终点站待命的车跑它的下一趟，从始发站起。
+   *
+   * @return 车不在车站停着、或不按时刻表运行时为空
+   */
+  private Optional<ChosenTrain> chosenTrain(DriveSessionManager manager, String train) {
+    Optional<TimetableApi.TrainAssignment> assignment =
+        DriverTaskManager.timetables().flatMap(api -> api.getAssignment(train));
+    if (assignment.isPresent()
+        && assignment.get().nextStopSequence().isPresent()
+        && manager.tasks().isDwelling(train)) {
+      TimetableApi.TrainAssignment current = assignment.get();
+      return Optional.of(
+          new ChosenTrain(
+              train,
+              new TaskKey(current.timetableId(), current.tripCode(), current.serviceDate()),
+              current.lastStopSequence().orElse(0)));
+    }
+    if (plugin.getLayoverRegistry().flatMap(layovers -> layovers.get(train)).isEmpty()) {
+      return Optional.empty();
+    }
+    return plugin
+        .getTimetableService()
+        .flatMap(service -> service.nextDepartureOf(train))
+        .map(
+            next ->
+                new ChosenTrain(
+                    train,
+                    new TaskKey(next.timetable().id(), next.trip().tripCode(), next.serviceDate()),
+                    0));
+  }
+
+  /** 报名路考、车掌考试或练习前：不能正在驾驶、值乘，也不能领着驾驶或车掌任务。 */
+  private static Reply crewBusy(DriveSessionManager manager, UUID id) {
+    if (manager.sessionOf(id).isPresent()) {
+      return Reply.of("drive.license.exam.driving");
+    }
+    if (manager.tasks().activeTaskOf(id).isPresent()) {
+      return Reply.of("drive.license.exam.has-task");
+    }
+    Optional<GuardSessionManager> guards = manager.guards();
+    if (guards.map(found -> found.isOnDuty(id)).orElse(false)) {
+      return Reply.of("drive.license.exam.guard-on-duty");
+    }
+    if (guards.flatMap(found -> found.tasks().activeTaskOf(id)).isPresent()) {
+      return Reply.of("drive.license.exam.has-guard-task");
+    }
+    return null;
   }
 
   /** 这名在线玩家这一级完整开完了几次练习。 */
@@ -430,57 +594,209 @@ public final class LicenseService implements Listener, GuardExaminer {
     return new Reply("drive.license.exam.brief.tutorial.perm", values);
   }
 
-  /** 车掌考试：报名后在截止时刻前到调度列车车尾驾驶室上岗，做满几站作业，逐站讲评，按车掌成绩判定。 */
-  private Reply startGuardExam(Player player, LicenseClass license, Instant now) {
+  /** 车掌考试：和路考一样在报名的车站派一段区间任务，列车到站后坐进车尾驾驶室即上岗，做满几站作业，逐站讲评，按车掌成绩判定。 */
+  private Reply startGuardExam(
+      Player player, LicenseClass license, Optional<String> stationArg, Instant now) {
     DriveSessionManager manager = drive.get();
-    if (manager == null || !manager.guards().map(GuardSessionManager::available).orElse(false)) {
+    Optional<GuardSessionManager> guards =
+        manager == null
+            ? Optional.empty()
+            : manager.guards().filter(GuardSessionManager::available);
+    if (guards.isEmpty()) {
       // 车掌功能关着或不可用：报了名也上不了岗，不登记考试。
       return new Reply("drive.license.exam.guard-unavailable", Map.of("name", license.name()));
     }
+    Reply busy = crewBusy(manager, player.getUniqueId());
+    if (busy != null) {
+      return busy;
+    }
+    StationPick pick = examStation(player, stationArg);
+    if (pick.problem() != null) {
+      return pick.problem();
+    }
+    TaskBoardSource.Station station = pick.station();
+    Optional<TimetableService> timetables = plugin.getTimetableService();
+    if (timetables.isEmpty()) {
+      return new Reply("drive.license.exam.no-trip", Map.of("station", station.name()));
+    }
+    GuardTasks tasks = guards.get().tasks();
+    List<TaskBoardEntries.Row> rows =
+        TaskBoardSource.departures(
+            plugin, station, now, manager.config().driver().recovery().taskWindowMinutes());
+    for (TaskBoardEntries.Row row :
+        TaskBoardEntries.select(rows, tasks.claimants().keySet(), now, EXAM_CANDIDATES)) {
+      if (row.plannedDeparture().isBefore(now.plus(EXAM_BOARDING_LEAD))
+          || lateTrain(row.trainName(), config.training().drillMaxDelaySeconds())
+          || (row.trainName() != null && guards.get().guardOfTrain(row.trainName()).isPresent())) {
+        continue;
+      }
+      // 车掌在交班站停妥即交班、不做那一站的作业：要做满几站，交班站排在其后一站。
+      Optional<DriverTaskManager.TaskSpec> spec =
+          TaskBoardSource.examSpec(
+              plugin,
+              timetables.get(),
+              row,
+              station,
+              license.examStops() + 1,
+              DriverTask.SOURCE_EXAM,
+              Map.of("license", license.id()));
+      if (spec.isPresent()) {
+        return startGuardTask(player, license, guards.get(), spec.get(), now, false);
+      }
+    }
+    return new Reply("drive.license.exam.no-trip", Map.of("station", station.name()));
+  }
+
+  /** 登记车掌考试或练习、派出车掌任务，并说明考（练）哪一班、怎么上岗。 */
+  private Reply startGuardTask(
+      Player player,
+      LicenseClass license,
+      GuardSessionManager guards,
+      DriverTaskManager.TaskSpec spec,
+      Instant now,
+      boolean practice) {
     UUID id = player.getUniqueId();
     exams.put(
         id,
-        new Exam(
-            license.id(),
-            LicenseClass.Exam.GUARD,
-            now.plus(Duration.ofMinutes(config.examWindowMinutes())),
-            false));
+        new Exam(license.id(), LicenseClass.Exam.GUARD, now.plus(ROAD_TEST_FALLBACK), practice));
     guardExamStops.remove(id);
+    guardPracticeJudged.remove(id);
+    boolean drill = !practice || config.training().drill();
     guardDrills.put(
         id,
         new GuardDrillPlan(
-            GuardExam.drillStop(license, bound -> ThreadLocalRandom.current().nextInt(bound)),
+            drill
+                ? GuardExam.drillStop(license, bound -> ThreadLocalRandom.current().nextInt(bound))
+                : 0,
             false));
-    // 考试期间临时有车掌权限（考完或超时后收回）。
+    // 考试与练习期间临时有车掌权限（考完、练完或作废后收回）。
     apply(player);
+    GuardTasks.ClaimOutcome outcome = guards.assign(player, spec, false);
+    if (outcome != GuardTasks.ClaimOutcome.CLAIMED) {
+      endExam(id);
+      apply(player);
+      return new Reply("drive.license.exam.assign-failed", Map.of("reason", outcome.name()));
+    }
     Map<String, String> values = new LinkedHashMap<>(passValues(license, ""));
-    values.put("minutes", String.valueOf(config.examWindowMinutes()));
+    values.putAll(tripValues(spec));
     values.put("seconds", String.valueOf(license.drillSeconds()));
-    for (String line : List.of("header", "duties", "watch", "pass", "how")) {
+    String brief =
+        practice ? "drive.license.practice.guard.brief." : "drive.license.exam.brief.guard.";
+    tell(player, brief + "header", values);
+    tell(player, brief + "route", values);
+    if (practice) {
+      tell(player, "drive.license.practice.guard.brief.what", values);
+    }
+    for (String line : List.of("duties", "watch", "pass")) {
       tell(player, "drive.license.exam.brief.guard." + line, values);
     }
     if (!license.allowWrongDoor()) {
       tell(player, "drive.license.exam.brief.guard.no-wrong-door", values);
     }
-    if (license.drillSeconds() > 0) {
+    if (drill && license.drillSeconds() > 0) {
       tell(player, "drive.license.exam.brief.guard.drill", values);
     }
+    tell(player, brief + "how", values);
     guardHandbook.give(player, plugin.getLocaleManager(), true);
-    return new Reply("drive.license.exam.brief.guard.handbook", values);
+    return new Reply(brief + "handbook", values);
+  }
+
+  /** 考试与练习派的那一班车，给玩家看的说明：线路、开往、站台、发车时刻、接班站与交班站，车次号只作附注。 */
+  private Map<String, String> tripValues(DriverTaskManager.TaskSpec spec) {
+    Map<String, String> values = new LinkedHashMap<>();
+    values.put("trip", spec.key().tripCode());
+    values.put("train", spec.trainName() == null ? "" : spec.trainName());
+    values.put("takeover", spec.stationName());
+    values.put("handover", spec.handoverStationName());
+    // 改名前的占位符：服务器上改过的旧文案照常显示。
+    values.put("board", spec.stationName());
+    values.put("alight", spec.handoverStationName());
+    TaskBoardSource.TripLabel label =
+        plugin
+            .getTimetableService()
+            .map(timetables -> TaskBoardSource.label(plugin, timetables, spec))
+            .orElse(new TaskBoardSource.TripLabel(spec.routeCode(), "", "-", ""));
+    values.put("line", label.line());
+    values.put("destination", label.destination());
+    values.put(
+        "platform",
+        "-".equals(label.platform())
+            ? ""
+            : plugin
+                .getLocaleManager()
+                .text("drive.license.exam.platform")
+                .replace("<platform>", label.platform()));
+    values.put("time", label.time());
+    return values;
+  }
+
+  /**
+   * 路考与车掌考试的接班站：写了站码按站码找，否则取玩家附近的车站。
+   *
+   * @param station 找到的车站
+   * @param problem 找不到时给玩家的回复
+   */
+  private record StationPick(TaskBoardSource.Station station, Reply problem) {}
+
+  private StationPick examStation(Player player, Optional<String> stationArg) {
+    if (stationArg.filter(arg -> !arg.isBlank()).isPresent()) {
+      String code = stationArg.get().trim();
+      TaskBoardStations.Lookup lookup =
+          TaskBoardStations.find(TaskBoardSource.stations(plugin), code);
+      if (lookup.outcome() == TaskBoardStations.Outcome.AMBIGUOUS) {
+        return new StationPick(
+            null,
+            new Reply(
+                "drive.task.board.station-ambiguous",
+                Map.of("station", code, "candidates", String.join(", ", lookup.candidates()))));
+      }
+      if (lookup.outcome() == TaskBoardStations.Outcome.NOT_FOUND) {
+        return new StationPick(
+            null, new Reply("drive.task.board.station-not-found", Map.of("station", code)));
+      }
+      return lookup
+          .station()
+          .map(found -> new StationPick(found, null))
+          .orElseGet(() -> new StationPick(null, Reply.of("drive.task.board.no-station")));
+    }
+    return TaskBoardSource.nearestStation(plugin, player.getLocation())
+        .map(found -> new StationPick(found, null))
+        .orElseGet(() -> new StationPick(null, Reply.of("drive.task.board.no-station")));
   }
 
   @Override
   public boolean examining(UUID playerId) {
     Exam exam = exams.get(playerId);
-    return exam != null && exam.kind() == LicenseClass.Exam.GUARD;
+    return exam != null && exam.kind() == LicenseClass.Exam.GUARD && onExamDuty(playerId, exam);
   }
 
-  /** 车掌考试中做完一站：讲评这一站，有不及格项或做满站数就判定。 */
+  @Override
+  public boolean practicing(UUID playerId) {
+    Exam exam = exams.get(playerId);
+    return exam != null && exam.training() && examining(playerId);
+  }
+
+  /** 正在值乘车掌考试或练习派的那一班：考官只认这一班上做的站，玩家另上别的车做的不算。 */
+  private boolean onExamDuty(UUID playerId, Exam exam) {
+    String source = exam.training() ? DriverTask.SOURCE_TRAINING : DriverTask.SOURCE_EXAM;
+    DriveSessionManager manager = drive.get();
+    return manager != null
+        && manager
+            .guards()
+            .flatMap(guards -> guards.tasks().activeTaskOf(playerId))
+            .filter(task -> task.state() == GuardTask.State.ON_DUTY && source.equals(task.source()))
+            .isPresent();
+  }
+
+  /** 车掌考试或练习中做完一站：讲评这一站。考试有不及格项或做满站数就判定；练习做满站数才按考试标准讲评并计次。 */
   @Override
   public void onStopWorked(Player player, GuardScore.Stop stop) {
     UUID id = player.getUniqueId();
     Exam exam = exams.get(id);
-    if (exam == null || exam.kind() != LicenseClass.Exam.GUARD) {
+    if (exam == null
+        || exam.kind() != LicenseClass.Exam.GUARD
+        || guardPracticeJudged.contains(id)
+        || !onExamDuty(id, exam)) {
       return;
     }
     Optional<LicenseClass> license = config.find(exam.classId());
@@ -494,7 +810,17 @@ public final class LicenseService implements Listener, GuardExaminer {
     Map<String, String> values = new LinkedHashMap<>(GuardExam.review(stop));
     values.put("done", String.valueOf(stops.size()));
     values.put("total", String.valueOf(license.get().examStops()));
-    tell(player, "drive.license.exam.guard.stop", values);
+    tell(
+        player,
+        exam.training() ? "drive.license.practice.guard.stop" : "drive.license.exam.guard.stop",
+        values);
+    if (exam.training()) {
+      if (stops.size() >= license.get().examStops()) {
+        GuardExam.judge(license.get(), stops)
+            .ifPresent(result -> finishGuardPractice(id, player, license.get(), result, true));
+      }
+      return;
+    }
     GuardExam.judge(license.get(), stops)
         .ifPresent(
             result -> {
@@ -518,12 +844,17 @@ public final class LicenseService implements Listener, GuardExaminer {
             });
   }
 
-  /** 车掌考试中按下关门：到了排定的那一站、列车不太晚点就演练夹人夹物（只一次），晚点过大顺延到下一站。 */
+  /** 车掌考试或练习中按下关门：到了排定的那一站、列车不太晚点就演练夹人夹物（只一次），晚点过大顺延到下一站。 */
   @Override
   public int drillDue(UUID playerId, String trainName) {
     Exam exam = exams.get(playerId);
     GuardDrillPlan plan = guardDrills.get(playerId);
-    if (exam == null || exam.kind() != LicenseClass.Exam.GUARD || plan == null || plan.started()) {
+    if (exam == null
+        || exam.kind() != LicenseClass.Exam.GUARD
+        || plan == null
+        || plan.started()
+        || guardPracticeJudged.contains(playerId)
+        || !onExamDuty(playerId, exam)) {
       return 0;
     }
     Optional<LicenseClass> license = config.find(exam.classId());
@@ -537,7 +868,7 @@ public final class LicenseService implements Listener, GuardExaminer {
     return license.get().drillSeconds();
   }
 
-  /** 演练结束：处置完成告诉考生用时；没按时处置当场不及格。 */
+  /** 演练结束：处置完成告诉考生用时；考试中没按时处置当场不及格，练习中只提醒。 */
   @Override
   public void onDrillDone(Player player, String station, boolean handled, double seconds) {
     UUID id = player.getUniqueId();
@@ -545,11 +876,19 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (exam == null || exam.kind() != LicenseClass.Exam.GUARD) {
       return;
     }
+    Map<String, String> values =
+        Map.of("station", station, "seconds", String.format(Locale.ROOT, "%.1f", seconds));
     if (handled) {
       tell(
           player,
-          "drive.license.exam.guard.drill-ok",
-          Map.of("station", station, "seconds", String.format(Locale.ROOT, "%.1f", seconds)));
+          exam.training()
+              ? "drive.license.practice.guard.drill-ok"
+              : "drive.license.exam.guard.drill-ok",
+          values);
+      return;
+    }
+    if (exam.training()) {
+      tell(player, "drive.license.practice.guard.drill-missed", values);
       return;
     }
     Optional<LicenseClass> license = config.find(exam.classId());
@@ -562,18 +901,27 @@ public final class LicenseService implements Listener, GuardExaminer {
     endGuardDutyLater(id, exam);
   }
 
-  /** 车掌考试中值乘结束（还没判定）：连续超时、漏乘、换端没坐进车尾为不及格，其余不计成绩。 */
+  /** 车掌考试或练习派的那一班值乘结束（还没判定）：考试中连续超时、漏乘、换端没坐进车尾为不及格，其余不计成绩；练习中途结束不计次。练习讲评过、还在值乘到交班站的，这时收回临时权限。 */
   @Override
   public void onDutyEnded(UUID playerId, GuardSession.EndReason reason) {
     Exam exam = exams.get(playerId);
     if (exam == null
         || exam.kind() != LicenseClass.Exam.GUARD
-        || reason == GuardSession.EndReason.EXAM) {
+        || reason == GuardSession.EndReason.EXAM
+        || !onExamDuty(playerId, exam)) {
       return;
     }
     Optional<LicenseClass> license = config.find(exam.classId());
     Player player = Bukkit.getPlayer(playerId);
-    if (license.isEmpty()) {
+    if (license.isEmpty() || guardPracticeJudged.contains(playerId)) {
+      endExam(playerId);
+      if (player != null) {
+        apply(player);
+      }
+      return;
+    }
+    if (exam.training()) {
+      finishGuardPractice(playerId, player, license.get(), GuardExam.ended(reason), false);
       endExam(playerId);
       if (player != null) {
         apply(player);
@@ -581,6 +929,97 @@ public final class LicenseService implements Listener, GuardExaminer {
       return;
     }
     finishGuardExam(playerId, player, exam, license.get(), GuardExam.ended(reason));
+  }
+
+  /** 车掌考试或练习派的任务没上岗就了结（列车没等到、已开走、放弃）：考试不计成绩、可以马上重考；练习不计次。 */
+  @EventHandler
+  public void onGuardTaskFinished(GuardTaskFinishedEvent event) {
+    GuardApi.TaskView task = event.getTask();
+    boolean practice = DriverTask.SOURCE_TRAINING.equals(task.source());
+    if (!practice && !DriverTask.SOURCE_EXAM.equals(task.source())) {
+      return;
+    }
+    UUID id = task.playerId();
+    Exam exam = exams.get(id);
+    if (exam == null || exam.kind() != LicenseClass.Exam.GUARD || exam.training() != practice) {
+      return;
+    }
+    DriveSessionManager manager = drive.get();
+    if (manager != null && manager.guards().map(guards -> guards.isOnDuty(id)).orElse(false)) {
+      // 上岗后的结束由值乘结束与逐站判定处理。
+      return;
+    }
+    boolean judged = guardPracticeJudged.contains(id);
+    endExam(id);
+    Player player = Bukkit.getPlayer(id);
+    if (player == null) {
+      return;
+    }
+    apply(player);
+    if (judged) {
+      return;
+    }
+    Map<String, String> values = new LinkedHashMap<>();
+    values.put("name", nameOf(exam.classId()));
+    values.put("class", exam.classId());
+    values.put("trip", task.tripCode());
+    tell(
+        player,
+        practice
+            ? "drive.license.practice.guard.not-started"
+            : "drive.license.exam.guard.not-started",
+        values);
+  }
+
+  /** 车掌练习讲评：按考试标准评判；做满站数计一次练习，告诉玩家还差几次或可以报名考试。 */
+  private void finishGuardPractice(
+      UUID id, Player player, LicenseClass license, ExamEvaluation.Result result, boolean done) {
+    int runs = trainingRuns(id, license.id()) + (done ? 1 : 0);
+    if (done) {
+      // 讲评过的练习还要值乘到交班站：临时权限留到这一班结束。
+      guardPracticeJudged.add(id);
+      if (training.containsKey(id)) {
+        // 还没读到练习次数时不写：按 0 次加一会覆盖库里的累计。
+        recordTraining(id, player, license.id(), runs);
+      }
+    }
+    if (player == null) {
+      return;
+    }
+    Map<String, String> values = new LinkedHashMap<>(result.values());
+    values.putAll(passValues(license, values.getOrDefault("points", "")));
+    values.put("done", String.valueOf(runs));
+    values.put("required", String.valueOf(license.trainingRuns()));
+    LocaleManager locale = plugin.getLocaleManager();
+    TagResolver.Builder resolver =
+        TagResolver.builder()
+            .resolver(
+                Placeholder.component(
+                    "reason",
+                    locale.component(
+                        "drive.license.exam.guard.reason." + result.reason(), values)));
+    values.forEach((key, value) -> resolver.resolver(Placeholder.unparsed(key, value)));
+    tell(player, "drive.license.practice.guard.review.header", values);
+    player.sendMessage(
+        locale.component(
+            "drive.license.practice.guard.review."
+                + result.verdict().name().toLowerCase(Locale.ROOT),
+            resolver.build()));
+    if (result.verdict() == ExamEvaluation.Verdict.FAILED) {
+      tell(player, "drive.license.exam.guard.tip." + result.reason(), values);
+    }
+    if (!done) {
+      tell(player, "drive.license.practice.guard.review.not-counted", values);
+    }
+    String next;
+    if (holds(id, license.id())) {
+      next = "drive.license.practice.review.again";
+    } else if (runs >= license.trainingRuns()) {
+      next = "drive.license.practice.guard.review.ready";
+    } else {
+      next = "drive.license.practice.guard.review.more";
+    }
+    tell(player, next, values);
   }
 
   /** 车掌考试判定：及格发证，不及格进入冷却，不计成绩的可以马上重考。 */
@@ -634,14 +1073,18 @@ public final class LicenseService implements Listener, GuardExaminer {
     }
   }
 
-  /** 已有进行中的考试或练习时的回复：路考与练习可以放弃任务了结，提示里带放弃按钮。 */
+  /** 已有进行中的考试或练习时的回复：路考、车掌考试与练习可以放弃任务了结，提示里带放弃按钮。 */
   private Reply inProgress(Exam running) {
     String key =
-        running.kind() != LicenseClass.Exam.ROAD_TEST
-            ? "drive.license.exam.in-progress"
-            : running.training()
-                ? "drive.license.practice.in-progress"
-                : "drive.license.exam.in-progress-road-test";
+        switch (running.kind()) {
+          case TUTORIAL -> "drive.license.exam.in-progress";
+          case ROAD_TEST -> running.training()
+              ? "drive.license.practice.in-progress"
+              : "drive.license.exam.in-progress-road-test";
+          case GUARD -> running.training()
+              ? "drive.license.practice.guard.in-progress"
+              : "drive.license.exam.in-progress-guard";
+        };
     return new Reply(key, Map.of("name", nameOf(running.classId())));
   }
 
@@ -667,22 +1110,17 @@ public final class LicenseService implements Listener, GuardExaminer {
             String.valueOf(minutesUntil(Instant.now(), exam.deadline()))));
   }
 
+  /** 路考：在报名的车站派一段区间任务，列车到站后坐进车头驾驶室接班，按终态与成绩判定。 */
   private Reply startRoadTest(
-      Player player,
-      LicenseClass license,
-      Optional<String> stationArg,
-      Instant now,
-      boolean practice) {
+      Player player, LicenseClass license, Optional<String> stationArg, Instant now) {
     UUID id = player.getUniqueId();
     DriveSessionManager manager = drive.get();
     if (manager == null) {
       return Reply.of("drive.command.unavailable");
     }
-    if (manager.sessionOf(id).isPresent()) {
-      return Reply.of("drive.license.exam.driving");
-    }
-    if (manager.tasks().activeTaskOf(id).isPresent()) {
-      return Reply.of("drive.license.exam.has-task");
+    Reply busy = crewBusy(manager, id);
+    if (busy != null) {
+      return busy;
     }
     DriveConfig current = manager.config();
     if (!current.enabled() || !current.driver().enabled()) {
@@ -692,45 +1130,26 @@ public final class LicenseService implements Listener, GuardExaminer {
       // 拥堵保护中：不再往正式车次上放考生。
       return Reply.of("drive.task.claim.protection-active");
     }
-    Optional<TaskBoardSource.Station> station;
-    if (stationArg.filter(arg -> !arg.isBlank()).isPresent()) {
-      String code = stationArg.get().trim();
-      TaskBoardStations.Lookup lookup =
-          TaskBoardStations.find(TaskBoardSource.stations(plugin), code);
-      if (lookup.outcome() == TaskBoardStations.Outcome.AMBIGUOUS) {
-        return new Reply(
-            "drive.task.board.station-ambiguous",
-            Map.of("station", code, "candidates", String.join(", ", lookup.candidates())));
-      }
-      if (lookup.outcome() == TaskBoardStations.Outcome.NOT_FOUND) {
-        return new Reply("drive.task.board.station-not-found", Map.of("station", code));
-      }
-      station = lookup.station();
-    } else {
-      station = TaskBoardSource.nearestStation(plugin, player.getLocation());
+    StationPick pick = examStation(player, stationArg);
+    if (pick.problem() != null) {
+      return pick.problem();
     }
-    if (station.isEmpty()) {
-      return Reply.of("drive.task.board.no-station");
-    }
+    TaskBoardSource.Station station = pick.station();
     Optional<TimetableService> timetables = plugin.getTimetableService();
     if (timetables.isEmpty()) {
-      return new Reply("drive.license.exam.no-trip", Map.of("station", station.get().name()));
+      return new Reply("drive.license.exam.no-trip", Map.of("station", station.name()));
     }
     List<TaskBoardEntries.Row> rows =
         TaskBoardSource.departures(
-            plugin, station.get(), now, current.driver().recovery().taskWindowMinutes());
-    TrainingConfig trainingConfig = config.training();
+            plugin, station, now, current.driver().recovery().taskWindowMinutes());
     for (TaskBoardEntries.Row row :
         TaskBoardEntries.select(rows, manager.tasks().takenKeys(), now, EXAM_CANDIDATES)) {
-      if (practice && !trainingConfig.allowsRoute(row.routeCode())) {
-        continue;
-      }
       // 马上就要开走的车（多半正在停站）赶不上：任务会在考生到站前作废。
       if (row.plannedDeparture().isBefore(now.plus(EXAM_BOARDING_LEAD))) {
         continue;
       }
-      // 已经晚点的车不派给考生：练习、路考都可能再慢一些，调度会救不过来。
-      if (lateTrain(row.trainName(), trainingConfig.drillMaxDelaySeconds())) {
+      // 已经晚点的车不派给考生：路考可能再慢一些，调度会救不过来。
+      if (lateTrain(row.trainName(), config.training().drillMaxDelaySeconds())) {
         continue;
       }
       Optional<DriverTaskManager.TaskSpec> spec =
@@ -738,9 +1157,9 @@ public final class LicenseService implements Listener, GuardExaminer {
               plugin,
               timetables.get(),
               row,
-              station.get(),
+              station,
               license.examStops(),
-              practice ? DriverTask.SOURCE_TRAINING : DriverTask.SOURCE_EXAM,
+              DriverTask.SOURCE_EXAM,
               Map.of("license", license.id()));
       if (spec.isEmpty()) {
         continue;
@@ -748,9 +1167,8 @@ public final class LicenseService implements Listener, GuardExaminer {
       // 先挂上所考那一级的权限：领取通知里的接班、开车命令要能用。
       exams.put(
           id,
-          new Exam(
-              license.id(), LicenseClass.Exam.ROAD_TEST, now.plus(ROAD_TEST_FALLBACK), practice));
-      coach.begin(id, practice);
+          new Exam(license.id(), LicenseClass.Exam.ROAD_TEST, now.plus(ROAD_TEST_FALLBACK), false));
+      coach.begin(id, false);
       apply(player);
       DriverTaskManager.ClaimOutcome outcome =
           manager.assignTask(player, spec.get(), DrivingMode.MANUAL, false);
@@ -759,22 +1177,10 @@ public final class LicenseService implements Listener, GuardExaminer {
         apply(player);
         return new Reply("drive.license.exam.assign-failed", Map.of("reason", outcome.name()));
       }
-      briefRoadTest(player, license, spec.get(), practice);
-      return Reply.of(
-          practice
-              ? "drive.license.practice.brief.feedback"
-              : "drive.license.exam.brief.road-test.feedback");
+      briefRoadTest(player, license, spec.get(), false);
+      return Reply.of("drive.license.exam.brief.road-test.feedback");
     }
-    if (practice && !trainingConfig.routes().isEmpty()) {
-      return new Reply(
-          "drive.license.practice.no-trip-routes",
-          Map.of(
-              "station",
-              station.get().name(),
-              "routes",
-              String.join("、", trainingConfig.routes())));
-    }
-    return new Reply("drive.license.exam.no-trip", Map.of("station", station.get().name()));
+    return new Reply("drive.license.exam.no-trip", Map.of("station", station.name()));
   }
 
   /** 这列车此刻晚点是否超过阈值；查不到（还没出车、没有时刻表）时不算。 */
@@ -1029,16 +1435,11 @@ public final class LicenseService implements Listener, GuardExaminer {
     }
   }
 
-  /** 路考开考说明：考哪一趟、及格要求、怎么开始，并发一本驾驶员手册。 */
+  /** 路考与练习的说明：考（练）哪一班车、及格要求、怎么开始，并发一本驾驶员手册。 */
   private void briefRoadTest(
       Player player, LicenseClass license, DriverTaskManager.TaskSpec spec, boolean practice) {
     Map<String, String> values = new LinkedHashMap<>(passValues(license, ""));
-    values.put("trip", spec.key().tripCode());
-    values.put("takeover", spec.stationName());
-    values.put("handover", spec.handoverStationName());
-    // 改名前的占位符：服务器上改过的旧文案照常显示。
-    values.put("board", spec.stationName());
-    values.put("alight", spec.handoverStationName());
+    values.putAll(tripValues(spec));
     values.put("stops", String.valueOf(license.examStops()));
     values.put("min", String.valueOf(license.minPoints()));
     String brief =
@@ -1061,7 +1462,10 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (!license.allowWrongDoor()) {
       tell(player, "drive.license.exam.brief.road-test.no-wrong-door", values);
     }
-    tell(player, "drive.license.exam.brief.road-test.how", values);
+    tell(
+        player,
+        practice ? "drive.license.practice.brief.how" : "drive.license.exam.brief.road-test.how",
+        values);
     handbook.give(player, plugin.getLocaleManager(), true);
     tell(player, brief + "handbook", values);
   }
@@ -1090,6 +1494,7 @@ public final class LicenseService implements Listener, GuardExaminer {
     examStopsDone.remove(playerId);
     guardExamStops.remove(playerId);
     guardDrills.remove(playerId);
+    guardPracticeJudged.remove(playerId);
     examWarned.remove(playerId);
     return coach.end(playerId);
   }

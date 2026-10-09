@@ -21,6 +21,7 @@ public final class GuardTrip {
   private final List<Worked> stops = new ArrayList<>();
   private double blocks;
   private boolean examined;
+  private boolean practiced;
 
   /** 做过作业的一站：作业记录到结算时才折成成绩（出站监视在离站后还要采样一会儿）。 */
   private record Worked(String station, GuardStopWork work) {}
@@ -81,6 +82,15 @@ public final class GuardTrip {
 
   public void markExamined() {
     this.examined = true;
+  }
+
+  /** 这一趟有车掌练习中做的站：不发奖励，也不写进车掌记录。 */
+  public boolean practiced() {
+    return practiced;
+  }
+
+  public void markPracticed() {
+    this.practiced = true;
   }
 
   /** 做过停站作业：值得结算。 */

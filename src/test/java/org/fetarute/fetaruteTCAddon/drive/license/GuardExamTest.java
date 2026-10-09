@@ -284,7 +284,6 @@ class GuardExamTest {
     }
     keys.add("drive.license.exam.guard.reason.points");
     keys.add("drive.license.exam.guard.tip.points");
-    keys.add("drive.license.practice.not-guard");
     keys.add("drive.license.exam.guard-unavailable");
     keys.add("drive.license.info.level-open-guard");
     for (String part : List.of("title", "author", "given")) {

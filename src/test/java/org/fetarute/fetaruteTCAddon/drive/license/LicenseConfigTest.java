@@ -98,13 +98,13 @@ class LicenseConfigTest {
   }
 
   @Test
-  @DisplayName("车掌证：不要求驾驶证，在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
+  @DisplayName("车掌证：不要求驾驶证，先练习一次再在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
   void guardClass() throws Exception {
     LicenseClass guard = LicenseConfig.defaults().find("guard").orElseThrow();
     assertEquals(LicenseClass.Exam.GUARD, guard.exam());
     assertEquals(List.of(), guard.requires());
     assertEquals(List.of(DrivePermissions.GUARD), guard.grants());
-    assertEquals(0, guard.trainingRuns());
+    assertEquals(1, guard.trainingRuns(), "报名车掌考试前也要先练习一次");
     assertEquals(3, guard.examStops());
     assertEquals(LicenseClass.Exam.GUARD, LicenseClass.Exam.parse(" Guard "));
 

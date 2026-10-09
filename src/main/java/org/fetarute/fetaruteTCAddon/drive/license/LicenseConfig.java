@@ -84,7 +84,7 @@ public record LicenseConfig(
                 false,
                 false,
                 false,
-                0,
+                1,
                 List.of(DrivePermissions.GUARD))),
         TrainingConfig.defaults());
   }
@@ -144,7 +144,7 @@ public record LicenseConfig(
                 entry.getBoolean("allow-emergency", false),
                 entry.getBoolean("allow-overrun", false),
                 entry.getBoolean("allow-wrong-door", false),
-                entry.getInt("training-runs", exam == LicenseClass.Exam.ROAD_TEST ? 1 : 0),
+                entry.getInt("training-runs", exam == LicenseClass.Exam.TUTORIAL ? 0 : 1),
                 entry.getStringList("grants"),
                 exam == LicenseClass.Exam.GUARD
                     ? entry.getInt("drill-seconds", LicenseClass.DEFAULT_DRILL_SECONDS)
