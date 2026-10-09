@@ -132,6 +132,9 @@ class GuardMessagesTest {
       }
     }
     assertTrue(keys.contains("drive.guard.cab-change.moved-with-driver"));
+    // 发车信号要驾驶员回一短时，在原键后加 -ack。
+    keys.add("drive.guard.driver.signal-ack");
+    keys.add("drive.guard.driver.signal-forced-ack");
     for (String key : keys) {
       assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
     }

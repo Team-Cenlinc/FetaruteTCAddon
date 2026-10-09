@@ -679,6 +679,24 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       public void saveRecord(DriveTaskRecord record) {
         DriveSessionManager.this.saveRecord(record);
       }
+
+      @Override
+      public boolean ackRequired(UUID driverId) {
+        DriveSession session = active.get(driverId);
+        return session != null
+            && session.driverLink() != null
+            && !session.isAto()
+            && session.level() == SimulationLevel.SIMULATION;
+      }
+
+      @Override
+      public void missedAck(UUID driverId) {
+        DriveSession session = active.get(driverId);
+        if (session != null && session.driverLink() != null) {
+          session.driverLink().signalAcknowledge().recordMiss();
+          traceSession(session, "未应答车掌的发车信号");
+        }
+      }
     };
   }
 

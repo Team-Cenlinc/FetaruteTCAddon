@@ -120,6 +120,12 @@ public final class GuardSessionManager {
 
     /** 写一条驾驶记录（后台写库）。 */
     void saveRecord(DriveTaskRecord record);
+
+    /** 这名驾驶员收到发车信号后要不要回一短：simulation 级人工驾驶。 */
+    boolean ackRequired(UUID driverId);
+
+    /** 驾驶员没在时限内回一短：记一次漏确认。 */
+    void missedAck(UUID driverId);
   }
 
   /** 上岗的结果。 */
@@ -174,6 +180,7 @@ public final class GuardSessionManager {
   private final Map<UUID, GuardSession> sessions = new ConcurrentHashMap<>();
   private final Map<UUID, Long> lastUseTick = new ConcurrentHashMap<>();
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
+  private final PendingAcks pendingAcks = new PendingAcks();
   private BukkitTask task;
   private long tickCounter;
   private GuardExaminer examiner = GuardExaminer.NONE;
@@ -406,6 +413,8 @@ public final class GuardSessionManager {
                     "drive.guard.driver.off-duty",
                     Map.of("guard", session.playerName()),
                     null));
+    // 车掌离岗：驾驶员不必再回这一声。
+    drivers.driverOf(session.link().trainName()).ifPresent(pendingAcks::forget);
     if (sessions.isEmpty() && task != null) {
       task.cancel();
       task = null;
@@ -451,6 +460,7 @@ public final class GuardSessionManager {
       }
     }
     tickDriverPresses(now);
+    tickAcks(now);
   }
 
   private void tick(GuardSession session, long now) {
@@ -586,15 +596,37 @@ public final class GuardSessionManager {
 
   private void announceDepartureSignal(Player player, GuardSession session, boolean forced) {
     sounds.play(player, DriveCue.DEPART);
-    drivers
-        .driverOf(session.link().trainName())
-        .ifPresent(
-            driver ->
-                drivers.notifyDriver(
-                    driver,
-                    forced ? "drive.guard.driver.signal-forced" : "drive.guard.driver.signal",
-                    Map.of("guard", session.playerName()),
-                    DriveCue.BUZZER));
+    Optional<UUID> driver = drivers.driverOf(session.link().trainName());
+    if (driver.isEmpty()) {
+      return;
+    }
+    // simulation 级人工驾驶：驾驶员要在时限内回一短表示收到，到时没回记一次漏确认。
+    boolean ack = drivers.ackRequired(driver.get());
+    if (ack) {
+      pendingAcks.expect(
+          driver.get(), Bukkit.getCurrentTick() + config.get().guard().ackSeconds() * 20L);
+    }
+    String key = forced ? "drive.guard.driver.signal-forced" : "drive.guard.driver.signal";
+    drivers.notifyDriver(
+        driver.get(),
+        ack ? key + "-ack" : key,
+        Map.of(
+            "guard",
+            session.playerName(),
+            "seconds",
+            String.valueOf(config.get().guard().ackSeconds())),
+        DriveCue.BUZZER);
+  }
+
+  /** 到时还没回一短的驾驶员：记一次漏确认并提示。 */
+  private void tickAcks(long now) {
+    if (pendingAcks.isEmpty()) {
+      return;
+    }
+    for (UUID driver : pendingAcks.expired(now)) {
+      drivers.missedAck(driver);
+      drivers.notifyDriver(driver, "drive.guard.driver.ack-missed", Map.of(), null);
+    }
   }
 
   /** 站台开着的车门交给车掌（停站中途上岗）：站台侧记成开着，之后按这一侧关门。 */
@@ -841,6 +873,9 @@ public final class GuardSessionManager {
       if (driver == null || guard.isEmpty()) {
         driverPresses.remove(entry.getKey());
         continue;
+      }
+      if (kind.get() == BuzzerPress.Kind.SHORT) {
+        pendingAcks.acknowledge(entry.getKey());
       }
       Player guardPlayer = Bukkit.getPlayer(guard.get().playerId());
       if (guardPlayer == null) {

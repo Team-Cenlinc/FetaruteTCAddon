@@ -91,6 +91,11 @@ public final class SignalAcknowledge {
     pendingSince = -1L;
   }
 
+  /** 别的须应答的信号漏答了（车掌的发车信号没有回一短）：同样记一次漏确认。 */
+  public void recordMiss() {
+    misses++;
+  }
+
   /** 清掉确认次数、漏确认次数与反应时间（终点站结算后下一趟重新计）。等着的确认不动。 */
   public void resetCounts() {
     acknowledgements = 0;

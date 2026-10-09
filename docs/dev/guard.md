@@ -36,6 +36,7 @@
 
 - 快捷栏（数据包层改写，背包本身不动）：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃、9 紧急停车；5、8 空着。左右按车掌座位的朝向算（`DriveDoors` 与驾驶员共用，`DriveDoors.Cab`）。开门键对已开着的一侧无效，关门后再开门照样按开门键。选中格子后右键按下，按住右键时客户端连续发包只算一次；发车铃按住多久响多久。
 - 贴图键：车门沿用驾驶台的 `fetarute:drive/panel/door_l_*`、`door_r_*`；其余是 `fetarute:drive/guard/<键>`（`door_close[_on]`、`report[_used]`、`confirm_stop|go|done`、`buzzer[_on]`、`emergency[_on]`、菜单的 `seat`），结束值乘沿用 `panel/end|end_confirm`。没装材质包时按染料区分，“亮起”加附魔光效。
+- simulation 级人工驾驶的驾驶员收到发车信号后，要在 `ack-seconds`（默认 5）秒内按丢弃键回一短表示收到（`PendingAcks`），提示写在发车信号那一行（`drive.guard.driver.signal-ack`）；到时没回记一次漏确认（与漏确认信号同一项，扣 5 分）。车掌离岗时不再等。
 - 铃（`BuzzerPress`）：按住约 0.8 秒（`buzzer-long-ticks`）为一长；一短之后 1 秒（`buzzer-double-ticks`）内再按一下为呼叫。车掌一长＝发车信号；一短＝收到；两短＝呼叫驾驶员。驾驶员的铃是丢弃键（Q，驾驶中本来不用）：一短收到、两短呼叫车掌。铃声（`sounds.buzzer`）只给这列车上的驾驶员与车掌听。
 - 车掌菜单（F，27 格）：传送入座、呼叫驾驶员、异常报告、结束值乘。
 - 离座：停稳且车门开着时 Shift 才放行（下到站台监视），行驶中、车门关着时拦下；在站台上右键自己的列车回到车掌座位。列车开走时车掌不在车上、离每节车厢都超过 48 格：漏乘，值乘结束（`LEFT_BEHIND`）。
