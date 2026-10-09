@@ -16,6 +16,11 @@
 - 始发站（接班站序号 0）的终点站待命车：派车前（`DriveSessionManager#allowLayoverDispatch`，驾驶员与车掌各自判定，都放行才派）先扣着一列车等车掌（`GuardTasks#layover`），时限与驾驶员接车相同；通知车掌坐下一趟发车端另一头的驾驶室（分不出发车端时两头都行，`layoverCab`），坐好上岗后只派这一列；扣车期间这一班的其他候选车也不派，被扣的车不派去跑别的车次（`heldForOther`）；到时限没上岗照常派车，任务作废。开着接车传送时，离得远可用 `goto` 送到驾驶室旁。
 - 任务那一趟结算时（终点站换车次、或值乘结束）任务随之结束，记下成绩；没做过作业就结束的按结束原因了结。带交班站的任务（插件派出）在列车到交班站停妥、车门还没开时交班（`EndReason.HANDOVER`，算开完），车门交还站台。插件派任务可关掉奖励（`TaskSpec#rewards`）。
 
+## 公开 API（1.14.0）
+
+- `FetaruteApi#guard()`（`GuardApi`，实现 `GuardApiImpl`）：`offersAt` 列可领车掌的车次、`assign` 派车掌任务（请求写法同驾驶任务，`TaskSpecResolver` 与驾驶任务共用车次与车站核对，可设交班站、关奖励）、`abandon`、`taskOf`/`dutyOf`/`guardOf`（任意线程读快照，`GuardSessionManager#refreshViews` 每 10 tick 与每次发事件前刷新）、`records`（`mode = GUARD` 的记录）。
+- 事件在车掌模块里当场发出（`GuardSessionManager#callEvent`）：领取（可取消，`GuardTasks#setBeforeClaim`）、上岗（可取消，新上岗结果 `CANCELLED`）、每站作业、发车信号（含站台代发）、紧急停车、异常报告、每趟成绩（只发按时刻表运行的）、任务结束（每个任务一次，`GuardTask#announceFinish`）、离岗。快照换算在 `GuardViews`。
+
 ## 站台与车掌
 
 站台把停站交给车掌：与驾驶员控车时同一个 `DriverStationStop`，经 `ControlAuthority#beginStationStop` 交给车上的 `GuardLink`（`DriverControlRegistry` 里与驾驶员链路并列登记，按列车属性对象，换掉时按车名找回）。

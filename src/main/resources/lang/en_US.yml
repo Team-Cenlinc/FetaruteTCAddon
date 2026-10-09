@@ -501,6 +501,8 @@ drive:
         taken: "<prefix> <red>This trip already has a guard</red>"
         unavailable: "<prefix> <red>This trip is cancelled or terminates here</red>"
         cancelled: "<prefix> <red>You cannot take guard duty on this trip right now</red>"
+        assigned: "<prefix> <green>You have a guard duty: <white><route></white> <aqua><trip></aqua>, on duty from <white><station></white> to the terminus</green>"
+        assigned-interval: "<prefix> <green>You have a guard duty: <white><route></white> <aqua><trip></aqua>, on duty from <white><station></white> to <white><handover></white></green>"
       on-duty: "<prefix> <green>Guard duty on <aqua><trip></aqua> started from <white><station></white></green>"
       arrived: "<yellow>Train <white><train></white> has arrived: sit in the rear cab of car <white><car></white> to go on duty</yellow> <gray>/fta guard task goto</gray>"
       arrived-either: "<yellow>Train <white><train></white> has arrived: sit in the cab of car 1 or car <white><cars></white> to go on duty</yellow> <gray>/fta guard task goto</gray>"
@@ -780,6 +782,7 @@ drive:
         guard-present: "<prefix> <red>This train already has a guard</red>"
         cursor-not-empty: "<prefix> <red>Put down the item on your cursor first</red>"
         driver-doors-open: "<prefix> <red>The driver has the doors open; go on duty once they are closed</red>"
+        cancelled: "<prefix> <red>You cannot go on duty right now</red>"
       stop:
         not-found: "<prefix> <red><player> is not on guard duty</red>"
         done: "<prefix> <yellow>Took <white><player></white> off guard duty</yellow>"

@@ -101,6 +101,31 @@ public final class JdbcDriveTaskRecordRepository extends JdbcRepositorySupport
   }
 
   @Override
+  public List<DriveTaskRecord> listByPlayerAndMode(UUID playerId, String mode, int limit) {
+    Objects.requireNonNull(playerId, "playerId");
+    Objects.requireNonNull(mode, "mode");
+    String sql =
+        "SELECT * FROM "
+            + table(TABLE)
+            + " WHERE player_uuid = ? AND mode = ? ORDER BY finished_at DESC LIMIT "
+            + Math.max(1, limit);
+    try (var connection = openConnection();
+        var statement = connection.prepareStatement(sql)) {
+      setUuid(statement, 1, playerId);
+      statement.setString(2, mode);
+      try (ResultSet rs = statement.executeQuery()) {
+        List<DriveTaskRecord> records = new ArrayList<>();
+        while (rs.next()) {
+          records.add(read(rs));
+        }
+        return records;
+      }
+    } catch (SQLException ex) {
+      throw new StorageException("读取 drive_task_records 失败", ex);
+    }
+  }
+
+  @Override
   public List<DriveLeaderboardRow> leaderboard(Instant since, int limit) {
     String sql =
         "SELECT player_uuid, MAX(player_name) AS player_name, COUNT(*) AS tasks,"

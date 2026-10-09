@@ -14,6 +14,13 @@ public interface DriveTaskRecordRepository {
   List<DriveTaskRecord> listByPlayer(UUID playerId, int limit);
 
   /**
+   * 一名玩家某种方式最近的记录，新的在前（例如车掌的 {@link DriveTaskRecord#MODE_GUARD}）。
+   *
+   * @param mode 记录的方式
+   */
+  List<DriveTaskRecord> listByPlayerAndMode(UUID playerId, String mode, int limit);
+
+  /**
    * 排行：统计期内完成的任务按驾驶员汇总，总分高的在前。
    *
    * @param since 统计期开始；为 {@code null} 时统计全部

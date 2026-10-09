@@ -2205,6 +2205,8 @@ drive:
         taken: "<prefix> <red>该车次的车掌已被领取</red>"
         unavailable: "<prefix> <red>该车次已取消或在本站终到，不能领取</red>"
         cancelled: "<prefix> <red>当前不能领取该车次的车掌</red>"
+        assigned: "<prefix> <green>你接到车掌任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 上岗，值乘到终点站</green>"
+        assigned-interval: "<prefix> <green>你接到车掌任务：<white><route></white> <aqua><trip></aqua>，在 <white><station></white> 上岗，值乘到 <white><handover></white></green>"
       on-duty: "<prefix> <green>已接上 <aqua><trip></aqua> 的车掌任务，自 <white><station></white> 起值乘</green>"
       arrived: "<yellow>列车 <white><train></white> 已到站，请坐进第 <white><car></white> 节车尾驾驶室上岗</yellow> <gray>/fta guard task goto</gray>"
       arrived-either: "<yellow>列车 <white><train></white> 已到站，请坐进第 1 节或第 <white><cars></white> 节的驾驶室上岗</yellow> <gray>/fta guard task goto</gray>"
@@ -2484,6 +2486,7 @@ drive:
         guard-present: "<prefix> <red>这列车上已有车掌</red>"
         cursor-not-empty: "<prefix> <red>请先放下光标上的物品</red>"
         driver-doors-open: "<prefix> <red>驾驶员正开着车门，请待车门关好后再上岗</red>"
+        cancelled: "<prefix> <red>当前不能上岗</red>"
       stop:
         not-found: "<prefix> <red><player> 当前没有在值乘</red>"
         done: "<prefix> <yellow>已撤下车掌 <white><player></white></yellow>"

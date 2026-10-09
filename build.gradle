@@ -10,7 +10,7 @@ plugins {
 
 group = 'org.fetarute'
 // 插件版本，也是公开 API 的版本：构建时写进 plugin.yml 与 FetaruteApi.API_VERSION（见下方 generateApiVersion），升版本只改这里
-version = '1.13.0'
+version = '1.14.0'
 
 repositories {
     mavenCentral()

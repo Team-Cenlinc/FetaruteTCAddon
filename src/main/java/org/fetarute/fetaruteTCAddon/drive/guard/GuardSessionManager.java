@@ -17,10 +17,22 @@ import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
+import org.bukkit.event.Cancellable;
+import org.bukkit.event.Event;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
+import org.fetarute.fetaruteTCAddon.api.drive.GuardApi;
+import org.fetarute.fetaruteTCAddon.api.event.GuardDepartureSignalEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardDutyEndedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardDutyStartEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardEmergencyStopEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardIncidentReportEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardStopWorkedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardTaskClaimEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardTaskFinishedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.GuardTripScoredEvent;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
@@ -173,7 +185,9 @@ public final class GuardSessionManager {
     GUARD_PRESENT,
     CURSOR_NOT_EMPTY,
     /** 驾驶员亲手开着车门：等他关好再上岗，否则车门由谁回报会乱。 */
-    DRIVER_DOORS_OPEN
+    DRIVER_DOORS_OPEN,
+    /** 被 {@link GuardDutyStartEvent} 取消。 */
+    CANCELLED
   }
 
   /** 异常情况报告的原因。 */
@@ -213,6 +227,12 @@ public final class GuardSessionManager {
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
   private final PendingAcks pendingAcks = new PendingAcks();
   private final GuardTasks tasks = new GuardTasks();
+
+  /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
+  private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
+
+  private volatile Map<UUID, GuardApi.DutyView> dutyViews = Map.of();
+  private volatile Map<String, UUID> guardByTrain = Map.of();
   private BukkitTask task;
   private long tickCounter;
   private GuardExaminer examiner = GuardExaminer.NONE;
@@ -233,6 +253,7 @@ public final class GuardSessionManager {
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
     this.sidebar = new DriveSidebar(locale);
+    tasks.setBeforeClaim(task -> callEvent(new GuardTaskClaimEvent(GuardViews.of(task))));
   }
 
   /** 接上车掌考法的考官（驾驶证服务）。 */
@@ -368,6 +389,13 @@ public final class GuardSessionManager {
     if (key.isEmpty()) {
       return StartOutcome.NOT_SEATED;
     }
+    if (!callEvent(
+        new GuardDutyStartEvent(
+            id,
+            seat.get().trainName(),
+            matchingClaim(id, seat.get().trainName()).map(GuardViews::of)))) {
+      return StartOutcome.CANCELLED;
+    }
     GuardLink link =
         new GuardLink(
             id,
@@ -412,23 +440,25 @@ public final class GuardSessionManager {
     return end == GuardCabChange.guardEnd(departure);
   }
 
-  /** 上岗时接上自己领的这一班车掌：列车就是任务的那一列（始发站扣着的、或对上这一班的），或正跑着这一班。 */
+  /** 玩家已领、还没上岗、列车就是这一列（始发站扣着的、或对上这一班的）或它正跑着这一班的车掌任务。 */
+  private Optional<GuardTask> matchingClaim(UUID playerId, String trainName) {
+    return tasks
+        .activeTaskOf(playerId)
+        .filter(task -> task.state() == GuardTask.State.CLAIMED)
+        .filter(
+            task ->
+                trainName.equalsIgnoreCase(Objects.requireNonNullElse(task.heldTrain(), ""))
+                    || trainName.equalsIgnoreCase(Objects.requireNonNullElse(task.trainName(), ""))
+                    || drivers.tripOf(trainName).filter(task.key()::equals).isPresent());
+  }
+
+  /** 上岗时接上自己领的这一班车掌（见 {@link #matchingClaim}）。 */
   private void attachTask(Player player, GuardSession session, String trainName) {
-    Optional<GuardTask> claimed =
-        tasks
-            .activeTaskOf(session.playerId())
-            .filter(task -> task.state() == GuardTask.State.CLAIMED);
+    Optional<GuardTask> claimed = matchingClaim(session.playerId(), trainName);
     if (claimed.isEmpty()) {
       return;
     }
     GuardTask task = claimed.get();
-    boolean sameTrain =
-        trainName.equalsIgnoreCase(Objects.requireNonNullElse(task.heldTrain(), ""))
-            || trainName.equalsIgnoreCase(Objects.requireNonNullElse(task.trainName(), ""))
-            || drivers.tripOf(trainName).filter(task.key()::equals).isPresent();
-    if (!sameTrain) {
-      return;
-    }
     task.start(trainName);
     session.setTask(task);
     player.sendMessage(
@@ -455,6 +485,7 @@ public final class GuardSessionManager {
       return;
     }
     lastUseTick.remove(playerId);
+    GuardTask dutyTask = session.task();
     // 先把列车交还：扣着的紧急停车与换端扣车解除、车掌登记撤下、开着的门关上，结算出错也不会把列车扣住。
     Optional<MinecartGroup> train = findGroup(session);
     boolean held = session.link().holdsTrain();
@@ -508,7 +539,14 @@ public final class GuardSessionManager {
                     null));
     // 车掌离岗：驾驶员不必再回这一声。
     drivers.driverOf(session.link().currentTrainName()).ifPresent(pendingAcks::forget);
-    if (sessions.isEmpty() && task != null) {
+    callEvent(
+        new GuardDutyEndedEvent(
+            playerId,
+            session.link().currentTrainName(),
+            reason.name(),
+            Optional.ofNullable(dutyTask).map(GuardViews::of)));
+    // 还有领了没上岗的任务时照常推进（等车、作废）。
+    if (sessions.isEmpty() && !tasks.hasActive() && task != null) {
       task.cancel();
       task = null;
     }
@@ -563,6 +601,14 @@ public final class GuardSessionManager {
       } catch (RuntimeException ex) {
         plugin.getLogger().warning("车掌任务处理出错: " + ex);
       }
+    }
+    if (tickCounter % DISPLAY_INTERVAL_TICKS == 0) {
+      refreshViews();
+    }
+    // 没有人在值乘、也没有领了等着上岗的任务：停掉每 tick 的推进，下次上岗或领取时再开。
+    if (sessions.isEmpty() && !tasks.hasActive() && task != null) {
+      task.cancel();
+      task = null;
     }
   }
 
@@ -709,6 +755,12 @@ public final class GuardSessionManager {
 
   private void announceDepartureSignal(Player player, GuardSession session, boolean forced) {
     sounds.play(player, DriveCue.DEPART);
+    callEvent(
+        new GuardDepartureSignalEvent(
+            session.playerId(),
+            session.link().currentTrainName(),
+            session.link().stationStop().map(DriverStationStop::stationName).orElse(""),
+            forced));
     Optional<UUID> driver = drivers.driverOf(session.link().currentTrainName());
     if (driver.isEmpty()) {
       return;
@@ -1094,6 +1146,12 @@ public final class GuardSessionManager {
     if (reason == IncidentReason.CAUGHT && session.drill() != null) {
       session.drill().noteReported();
     }
+    callEvent(
+        new GuardIncidentReportEvent(
+            session.playerId(),
+            session.link().currentTrainName(),
+            session.link().stationStop().map(DriverStationStop::stationName).orElse(""),
+            GuardViews.incident(reason)));
     String reasonKey =
         "drive.guard.report.reason." + reason.name().toLowerCase(java.util.Locale.ROOT);
     String reasonText = locale.text(reasonKey);
@@ -1143,6 +1201,7 @@ public final class GuardSessionManager {
     }
     sounds.play(player, DriveCue.EMERGENCY);
     notice(player, session, "drive.guard.emergency.pulled", Map.of());
+    callEvent(new GuardEmergencyStopEvent(session.playerId(), train));
     driver.ifPresent(
         id ->
             drivers.notifyDriver(
@@ -1439,6 +1498,12 @@ public final class GuardSessionManager {
       switchTrip(player, session, key);
       String station = settled.stop().stationName();
       session.trip().addStop(station, settled.work());
+      callEvent(
+          new GuardStopWorkedEvent(
+              session.playerId(),
+              session.link().currentTrainName(),
+              Optional.ofNullable(session.task()).map(GuardViews::of),
+              GuardViews.work(GuardScore.Stop.of(station, settled.work()))));
       if (examiner.examining(session.playerId())) {
         session.trip().markExamined();
         GuardSession.DepartureWatch watch = session.departureWatch();
@@ -1533,6 +1598,19 @@ public final class GuardSessionManager {
             GuardRecordCodec.encode(score, trip.blocks())));
     if (taskTrip) {
       task.setResult(result.points(), result.grade().name());
+    }
+    callEvent(
+        new GuardTripScoredEvent(
+            session.playerId(),
+            trainName,
+            taskTrip ? Optional.of(GuardViews.of(task)) : Optional.empty(),
+            key.get().timetableId(),
+            tripCode,
+            key.get().serviceDate(),
+            trip.routeCode(),
+            state.name(),
+            GuardViews.score(score, result, trip.blocks())));
+    if (taskTrip) {
       finishTask(online, session, state, state.name());
     }
   }
@@ -2165,6 +2243,30 @@ public final class GuardSessionManager {
     return outcome;
   }
 
+  /**
+   * 插件派一个车掌任务（不看任务板的时间窗、不要求玩家在车站附近），成功时按需告诉玩家去哪里接班。
+   *
+   * @param notify 是否给玩家发领取提示
+   */
+  public GuardTasks.ClaimOutcome assign(
+      Player player, DriverTaskManager.TaskSpec spec, boolean notify) {
+    GuardTasks.ClaimOutcome outcome = claim(player, spec, false);
+    if (outcome == GuardTasks.ClaimOutcome.CLAIMED && notify) {
+      Map<String, String> values = new java.util.HashMap<>();
+      values.put("route", spec.routeCode() == null ? "" : spec.routeCode());
+      values.put("trip", spec.key().tripCode());
+      values.put("station", spec.stationName() == null ? "" : spec.stationName());
+      values.put("handover", spec.handoverStationName() == null ? "" : spec.handoverStationName());
+      player.sendMessage(
+          locale.component(
+              spec.handoverStopSequence() >= 0
+                  ? "drive.guard.task.claim.assigned-interval"
+                  : "drive.guard.task.claim.assigned",
+              values));
+    }
+    return outcome;
+  }
+
   /** 推进已领取的任务：对上列车、到接班站时提示上车并在坐进车掌那一端后上岗、过时作废。 */
   private void tickClaims() {
     List<GuardTask> claimed = tasks.claimed();
@@ -2252,6 +2354,7 @@ public final class GuardSessionManager {
     if (!task.finish(state, reason)) {
       return;
     }
+    announceFinished(task);
     Player player = Bukkit.getPlayer(task.playerId());
     if (player != null && player.isOnline()) {
       player.sendMessage(
@@ -2272,6 +2375,7 @@ public final class GuardSessionManager {
     if (!task.finish(taskState(state), reason)) {
       return;
     }
+    announceFinished(task);
     if (player != null && player.isOnline() && task.state() == GuardTask.State.COMPLETED) {
       player.sendMessage(
           locale.component("drive.guard.task.complete", Map.of("trip", task.key().tripCode())));
@@ -2387,17 +2491,29 @@ public final class GuardSessionManager {
    * @return 给玩家的提示语言键
    */
   public String abandonTask(Player player) {
-    UUID id = player.getUniqueId();
-    Optional<GuardTask> task = tasks.activeTaskOf(id);
+    return abandonTask(player.getUniqueId(), "command")
+        ? "drive.guard.task.abandoned"
+        : "drive.guard.task.none";
+  }
+
+  /**
+   * 放弃车掌任务（命令与插件共用）。
+   *
+   * @param reason 写进还没上岗的任务的结束原因
+   * @return 玩家是否有未结束的任务
+   */
+  public boolean abandonTask(UUID playerId, String reason) {
+    Optional<GuardTask> task = tasks.activeTaskOf(playerId);
     if (task.isEmpty()) {
-      return "drive.guard.task.none";
+      return false;
     }
     if (task.get().state() == GuardTask.State.CLAIMED) {
-      task.get().finish(GuardTask.State.ABANDONED, "command");
+      task.get().finish(GuardTask.State.ABANDONED, reason == null ? "" : reason);
+      announceFinished(task.get());
     } else {
-      stop(id, GuardSession.EndReason.COMMAND);
+      stop(playerId, GuardSession.EndReason.COMMAND);
     }
-    return "drive.guard.task.abandoned";
+    return true;
   }
 
   /**
@@ -2473,6 +2589,73 @@ public final class GuardSessionManager {
           locale.component(
               "drive.guard.task.status-handover", Map.of("station", task.handoverStationName())));
     }
+  }
+
+  // ---- 公开 API ----
+
+  /** 任务结束只对外报一次。 */
+  private void announceFinished(GuardTask task) {
+    if (task.announceFinish()) {
+      callEvent(new GuardTaskFinishedEvent(GuardViews.of(task)));
+    }
+  }
+
+  /**
+   * 发出车掌事件：先刷新快照（监听方可能转到其他线程读），监听器出错只记日志。
+   *
+   * @return 可取消的事件没有被取消
+   */
+  private boolean callEvent(Event event) {
+    refreshViews();
+    try {
+      Bukkit.getPluginManager().callEvent(event);
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("车掌事件处理失败: " + event.getEventName() + " " + ex);
+    }
+    return !(event instanceof Cancellable cancellable) || !cancellable.isCancelled();
+  }
+
+  /** 刷新给公开 API 的快照（主线程）。 */
+  void refreshViews() {
+    Map<UUID, GuardApi.TaskView> nextTasks = new java.util.HashMap<>();
+    for (GuardTask found : tasks.all()) {
+      nextTasks.put(found.playerId(), GuardViews.of(found));
+    }
+    Map<UUID, GuardApi.DutyView> nextDuties = new java.util.HashMap<>();
+    Map<String, UUID> nextTrains = new java.util.HashMap<>();
+    for (GuardSession session : sessions.values()) {
+      String trainName = session.link().currentTrainName();
+      nextDuties.put(
+          session.playerId(),
+          new GuardApi.DutyView(
+              session.playerId(),
+              trainName,
+              Optional.ofNullable(session.task()).map(GuardTask::taskId),
+              session.link().stationStop().map(DriverStationStop::stationName),
+              session.link().completedStops(),
+              session.link().timeoutStops(),
+              session.link().emergencyHold()));
+      nextTrains.put(trainName.toLowerCase(java.util.Locale.ROOT), session.playerId());
+    }
+    taskViews = Map.copyOf(nextTasks);
+    dutyViews = Map.copyOf(nextDuties);
+    guardByTrain = Map.copyOf(nextTrains);
+  }
+
+  /** 玩家的车掌任务快照（任意线程）。 */
+  public Optional<GuardApi.TaskView> taskView(UUID playerId) {
+    return Optional.ofNullable(playerId == null ? null : taskViews.get(playerId));
+  }
+
+  /** 玩家的值乘快照（任意线程）。 */
+  public Optional<GuardApi.DutyView> dutyView(UUID playerId) {
+    return Optional.ofNullable(playerId == null ? null : dutyViews.get(playerId));
+  }
+
+  /** 这列车上的车掌（按快照，任意线程）。 */
+  public Optional<UUID> guardOfTrainName(String trainName) {
+    return Optional.ofNullable(
+        trainName == null ? null : guardByTrain.get(trainName.toLowerCase(java.util.Locale.ROOT)));
   }
 
   private void notice(Player player, GuardSession session, String key, Map<String, String> values) {
