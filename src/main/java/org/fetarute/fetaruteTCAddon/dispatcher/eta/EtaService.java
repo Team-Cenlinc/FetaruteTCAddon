@@ -1853,6 +1853,15 @@ public final class EtaService {
     }
   }
 
+  /** 区间生成的叫车票，生成点在目标站上或目标站之后：车不会经过目标站。 */
+  static boolean spawnsDownstreamOf(SpawnTicket ticket, int targetIndex) {
+    if (ticket == null || ticket.source() != TripSource.ON_DEMAND) {
+      return false;
+    }
+    java.util.OptionalInt entry = OnDemandTrip.entryIndexOf(ticket.serviceTripId());
+    return entry.isPresent() && entry.getAsInt() > 0 && entry.getAsInt() >= targetIndex;
+  }
+
   /**
    * 票据的车从交路哪个节点出发：区间生成的叫车票从生成点起（{@link OnDemandTrip#entryIndexOf}），其余从首站起。
    *
@@ -2129,6 +2138,10 @@ public final class EtaService {
     }
     TargetSelection targetSel = targetSelOpt.get();
     NodeId targetNode = targetSel.nodeId();
+    if (spawnsDownstreamOf(ticket, targetSel.index())) {
+      // 区间生成的车在生成点才出现，不经过它之前（含生成点本身）的车站：这些站的站牌不列它。
+      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_TARGET));
+    }
     // 区间生成的叫车票：车在生成点出现，从那里起算，不从交路首站起算。
     int startIndex = ticketStartIndex(ticket, targetSel.index());
     int remainingEdgeCount = 0;

@@ -3851,25 +3851,49 @@ public final class FtaRouteCommand {
     for (Route route : routes) {
       validated.add(route.id());
     }
-    for (org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection unsourced :
-        calls.get().unsourcedDirections(line.id())) {
+    org.fetarute.fetaruteTCAddon.call.CallService service = calls.get();
+    addCallSourceIssues(
+        service.unsourcedDirections(line.id()),
+        validated,
+        unsourced -> {
+          Map<String, String> params =
+              new HashMap<>(service.directionPlaceholders(unsourced.direction()));
+          params.put("station", service.stationName(unsourced.station()));
+          return params;
+        },
+        issueRoutes,
+        entries);
+  }
+
+  /**
+   * 把没有车源的方向挂到本次校验范围里、能跑这一趟的交路上（几条交路用 “/” 连起来）；一条都不在范围里的方向不报。被挂上的交路记进 {@code issueRoutes}。
+   *
+   * @param validated 本次校验的交路
+   * @param params 方向的文案占位符
+   */
+  static void addCallSourceIssues(
+      List<org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection> unsourced,
+      Set<UUID> validated,
+      java.util.function.Function<
+              org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection, Map<String, String>>
+          params,
+      Set<String> issueRoutes,
+      List<RouteValidationEntry> entries) {
+    for (org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection direction : unsourced) {
       List<String> codes =
-          unsourced.direction().routes().stream()
+          direction.direction().routes().stream()
               .filter(route -> validated.contains(route.routeId()))
               .map(org.fetarute.fetaruteTCAddon.call.CallCatalog.CallRoute::routeCode)
               .toList();
       if (codes.isEmpty()) {
         continue;
       }
-      Map<String, String> params =
-          new HashMap<>(calls.get().directionPlaceholders(unsourced.direction()));
-      params.put("station", calls.get().stationName(unsourced.station()));
-      String routeCodes = String.join("/", codes);
       issueRoutes.addAll(codes);
       entries.add(
           new RouteValidationEntry(
-              routeCodes,
-              new RouteValidationIssue("command.route.validate.call-no-source", params)));
+              String.join("/", codes),
+              new RouteValidationIssue(
+                  "command.route.validate.call-no-source", params.apply(direction))));
     }
   }
 
@@ -4165,12 +4189,12 @@ public final class FtaRouteCommand {
     return lines;
   }
 
-  private record RouteValidationIssue(String key, Map<String, String> params) {}
+  record RouteValidationIssue(String key, Map<String, String> params) {}
 
   private record RouteValidationResult(
       List<RouteValidationIssue> issues, boolean reachabilitySkipped) {}
 
-  private record RouteValidationEntry(String routeCode, RouteValidationIssue issue) {}
+  record RouteValidationEntry(String routeCode, RouteValidationIssue issue) {}
 
   private record ResolvedLine(Company company, Operator operator, Line line) {}
 

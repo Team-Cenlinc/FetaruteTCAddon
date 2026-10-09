@@ -3,12 +3,15 @@ package org.fetarute.fetaruteTCAddon.call;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.mockStatic;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -19,6 +22,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.Bukkit;
+import org.bukkit.scheduler.BukkitScheduler;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -35,6 +39,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
@@ -43,8 +48,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnServiceKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
@@ -236,6 +244,205 @@ class CallRestoreTest {
     verify(stored, org.mockito.Mockito.times(1)).listAll();
   }
 
+  /** 找回推迟到启动后 {@link CallService#RESTORE_DELAY}：现场占用重建、待命池登记做完再排车；这之前也不撤票。 */
+  @Test
+  void restoreWaitsForTheStartupDelay() {
+    bukkit.when(Bukkit::getScheduler).thenReturn(mock(BukkitScheduler.class));
+    storedCall(Instant.now().minusSeconds(30));
+    CallService service = new CallService(plugin);
+    service.start();
+    Instant now = Instant.now();
+
+    service.sweep(now);
+    verify(spawnManager, never()).requeue(any());
+    verify(stored, never()).delete(any());
+
+    service.sweep(now.plus(CallService.RESTORE_DELAY).plusSeconds(1));
+    verify(spawnManager).requeue(any());
+  }
+
+  /** 按表运行打开时找回不接待命车：刚重启时账本是空的，首站那辆车看着没绑交路，其实多半还担着时刻表的班。 */
+  @Test
+  void restoreDoesNotTakeAStandbyTrainWhenTheTimetableIsOn() {
+    PendingCallRecord call = standbyOnlyRoute();
+    TimetableService timetable = mock(TimetableService.class);
+    when(timetable.settings())
+        .thenReturn(
+            new TimetableService.Settings(
+                true, true, Duration.ZERO, Duration.ofSeconds(300), Duration.ZERO));
+    when(timetable.dutyBindingOf(any())).thenReturn(Optional.empty());
+    when(plugin.getTimetableService()).thenReturn(Optional.of(timetable));
+
+    new CallService(plugin).restorePending(T);
+
+    verify(spawnManager, never()).requeue(any());
+    verify(stored).delete(call.id());
+  }
+
+  /** 不按表运行的线路：首站的待命车照常可接（对照）。 */
+  @Test
+  void withoutATimetableRestoreMayUseTheStandbyTrain() {
+    PendingCallRecord call = standbyOnlyRoute();
+
+    new CallService(plugin).restorePending(T);
+
+    ArgumentCaptor<SpawnTicket> ticket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(ticket.capture());
+    assertEquals(call.id(), ticket.getValue().id());
+  }
+
+  /** 读库失败（存储一时不可用）不算读过：下一次找回再读。 */
+  @Test
+  void aFailedReadIsRetriedOnTheNextRestore() {
+    storedCall(T.minusSeconds(30));
+    when(stored.listAll())
+        .thenThrow(new StorageException("db down"))
+        .thenAnswer(invocation -> List.copyOf(rows));
+    CallService service = new CallService(plugin);
+
+    service.restorePending(T);
+    verify(spawnManager, never()).requeue(any());
+
+    service.restorePending(T.plusSeconds(1));
+    verify(spawnManager).requeue(any());
+  }
+
+  /** 找回改了叫车（重新出票或作废）：站台屏快照作废，立刻按新的叫车显示。 */
+  @Test
+  void restoreInvalidatesTheBoards() {
+    PidsService pids = mock(PidsService.class);
+    when(plugin.getPidsService()).thenReturn(Optional.of(pids));
+    storedCall(T.minusSeconds(30));
+
+    new CallService(plugin).restorePending(T);
+
+    verify(pids).invalidateSnapshots();
+  }
+
+  /** 插件运行时存库交给后台、按提交顺序执行，不占主线程。 */
+  @Test
+  void storageWritesRunInTheBackground() {
+    when(plugin.isEnabled()).thenReturn(true);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    List<Runnable> queued = new ArrayList<>();
+    when(scheduler.runTaskAsynchronously(eq(plugin), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              queued.add(invocation.getArgument(1));
+              return null;
+            });
+    bukkit.when(Bukkit::getScheduler).thenReturn(scheduler);
+    storedCall(T.minusSeconds(30));
+
+    new CallService(plugin).restorePending(T);
+
+    verify(stored, never()).save(any());
+    assertEquals(1, queued.size());
+    queued.remove(0).run();
+    verify(stored).save(any());
+  }
+
+  /** 派出时把指定的站台写进列车标签；查指定站台不分列车名大小写。 */
+  @Test
+  void dispatchWritesThePinTag() {
+    useDynamicPpk();
+    storedCall(T.minusSeconds(30), Set.of("2"));
+    CallService service = new CallService(plugin);
+    service.restorePending(T);
+    ArgumentCaptor<SpawnTicket> ticket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(ticket.capture());
+    TrainProperties properties = mock(TrainProperties.class);
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.exists("Train-1")).thenReturn(true);
+      store.when(() -> TrainPropertiesStore.get("Train-1")).thenReturn(properties);
+      service.onDispatched(ticket.getValue(), "Train-1");
+    }
+
+    verify(properties).addTags(CallService.TAG_CALL_PLATFORM + "=" + routeId + "|1|SURC:S:PPK:2");
+    assertEquals(Optional.of("SURC:S:PPK:2"), service.pinnedPlatformOf("train-1", routeId, 1));
+  }
+
+  /** 接着跑一趟没有指定站台的叫车：上一趟留下的站台标签摘掉。 */
+  @Test
+  void dispatchWithoutAPinRemovesTheOldTag() {
+    storedCall(T.minusSeconds(30));
+    CallService service = new CallService(plugin);
+    service.restorePending(T);
+    ArgumentCaptor<SpawnTicket> ticket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(ticket.capture());
+    String old = CallService.TAG_CALL_PLATFORM + "=" + UUID.randomUUID() + "|1|SURC:S:PPK:1";
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.hasTags()).thenReturn(true);
+    when(properties.getTags()).thenReturn(List.of(old));
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.exists("Train-1")).thenReturn(true);
+      store.when(() -> TrainPropertiesStore.get("Train-1")).thenReturn(properties);
+      service.onDispatched(ticket.getValue(), "Train-1");
+    }
+
+    verify(properties).removeTags(old);
+    assertTrue(service.pinnedPlatformOf("Train-1", routeId, 1).isEmpty());
+  }
+
+  /** 重启后按列车标签认出叫来的车，指定的站台一并读回。 */
+  @Test
+  void theRestartReadsThePinBackFromTheTag() {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.hasTags()).thenReturn(true);
+    when(properties.getTags())
+        .thenReturn(
+            List.of(
+                "FTA_CALL=" + new CallTag(UUID.randomUUID(), PPK).format(),
+                CallService.TAG_CALL_PLATFORM + "=" + routeId + "|1|SURC:S:PPK:2"));
+    when(properties.getTrainName()).thenReturn("Train-9");
+    CallService service = new CallService(plugin);
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(TrainPropertiesStore::getAll).thenReturn(List.of(properties));
+      service.restorePending(T);
+    }
+
+    assertEquals(Optional.of("SURC:S:PPK:2"), service.pinnedPlatformOf("Train-9", routeId, 1));
+  }
+
+  /** 交路改成首站 AAA（不是车库），首站有一辆待命车；返回这一方向的叫车。 */
+  private PendingCallRecord standbyOnlyRoute() {
+    useRoute(
+        List.of(
+            stop(0, "SURC:S:AAA:1", RouteStopPassType.STOP, null),
+            stop(1, "SURC:S:PPK:1", RouteStopPassType.STOP, null),
+            stop(2, "SURC:S:NTA:1", RouteStopPassType.TERMINATE, null)));
+    LayoverRegistry registry = new LayoverRegistry();
+    registry.register(
+        "standby-1", "surc:s:aaa:1", NodeId.of("SURC:S:AAA:1"), T.minusSeconds(60), Map.of());
+    when(plugin.getLayoverRegistry()).thenReturn(Optional.of(registry));
+    return storedCall(T.minusSeconds(30));
+  }
+
+  /** PPK 改成 DYNAMIC 停靠（1、2 道）。 */
+  private void useDynamicPpk() {
+    useRoute(
+        List.of(
+            stop(0, "SURC:D:DEP:1", RouteStopPassType.PASS, "CRET SURC:D:DEP:1"),
+            stop(1, "SURC:S:PPK:1", RouteStopPassType.STOP, "DYNAMIC:SURC:S:PPK:[1:2]"),
+            stop(2, "SURC:S:NTA:1", RouteStopPassType.TERMINATE, null)));
+  }
+
+  private void useRoute(List<RouteStop> stops) {
+    List<NodeId> nodes =
+        stops.stream().map(stop -> NodeId.of(stop.waypointNodeId().orElseThrow())).toList();
+    RouteDefinition definition =
+        new RouteDefinition(new RouteId("SURC:WS:WS-N"), nodes, Optional.empty());
+    RouteDefinitionCache.RouteRecord record = cache.findRecord(routeId).orElseThrow();
+    when(cache.entries())
+        .thenReturn(
+            List.of(new RouteDefinitionCache.RouteEntry(routeId, definition, record, stops)));
+    when(cache.findById(routeId)).thenReturn(Optional.of(definition));
+    when(cache.listStops(definition.id())).thenReturn(stops);
+  }
+
   /** 首站是车库：有车源，不报。 */
   @Test
   void aDepotRouteHasASource() {
@@ -327,26 +534,34 @@ class CallRestoreTest {
   }
 
   private PendingCallRecord storedCall(Instant createdAt) {
-    PendingCallRecord call = storedCallRecord(createdAt);
+    return storedCall(createdAt, Set.of());
+  }
+
+  private PendingCallRecord storedCall(Instant createdAt, Set<String> screenPlatforms) {
+    PendingCallRecord call = storedCallRecord(createdAt, screenPlatforms);
     rows.add(call);
     return call;
   }
 
   private PendingCallRecord storedCallRecord(Instant createdAt) {
+    return storedCallRecord(createdAt, Set.of());
+  }
+
+  private PendingCallRecord storedCallRecord(Instant createdAt, Set<String> screenPlatforms) {
     String key =
         CallCatalog.directions(
                 List.of(plugin.getRouteDefinitionCache().orElseThrow().entries().iterator().next()),
                 null,
                 candidate -> true,
                 PPK,
-                Set.of())
+                screenPlatforms)
             .get(0)
             .key();
     return new PendingCallRecord(
         UUID.randomUUID(),
         UUID.randomUUID(),
         PPK,
-        Set.of(),
+        screenPlatforms,
         key,
         line.id(),
         createdAt,

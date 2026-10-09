@@ -65,7 +65,7 @@ class CallPinAndSourceTest {
     assertTrue(CallService.PlatformPin.parse("x|1|SURC:S:PPK:2").isEmpty());
   }
 
-  /** 有交路在首站终到、并留在待命池（终点复用）时，首站才可能有待命车；终到即销毁的不算。 */
+  /** 有交路在首站终到、并留在待命池（终点复用）时，首站才可能有待命车；终到即销毁的、由时刻表管辖的（留下的车还担着班）不算。 */
   @Test
   void standbyNeedsARouteThatEndsAndStaysAtTheStart() {
     RouteDefinitionCache.RouteEntry staysAtAaa =
@@ -73,9 +73,16 @@ class CallPinAndSourceTest {
     RouteDefinitionCache.RouteEntry destroyedAtBbb =
         entry(RouteLifecycleMode.DESTROY_AFTER_TERM, "SURC:S:NTA:1", "SURC:S:BBB:1");
 
-    assertTrue(CallService.standbyPossible(List.of(staysAtAaa), "SURC:S:AAA:1"), "同站别的站台也算");
-    assertFalse(CallService.standbyPossible(List.of(destroyedAtBbb), "SURC:S:BBB:1"));
-    assertFalse(CallService.standbyPossible(List.of(staysAtAaa), "SURC:S:CCC:1"));
+    assertTrue(
+        CallService.standbyPossible(List.of(staysAtAaa), "SURC:S:AAA:1", routeId -> false),
+        "同站别的站台也算");
+    assertFalse(
+        CallService.standbyPossible(List.of(destroyedAtBbb), "SURC:S:BBB:1", routeId -> false));
+    assertFalse(CallService.standbyPossible(List.of(staysAtAaa), "SURC:S:CCC:1", routeId -> false));
+    assertFalse(
+        CallService.standbyPossible(
+            List.of(staysAtAaa), "SURC:S:AAA:1", routeId -> routeId.equals(staysAtAaa.routeId())),
+        "时刻表交路留下的车叫车不接");
   }
 
   private static RouteStop stop(String notes) {

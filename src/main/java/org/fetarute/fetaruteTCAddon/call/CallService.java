@@ -15,13 +15,17 @@ import java.util.Optional;
 import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Bukkit;
 import org.bukkit.entity.Player;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
@@ -76,6 +80,9 @@ public final class CallService {
   private static final Duration LINE_CACHE_TTL = Duration.ofSeconds(10);
   private static final Duration PENDING_MIN_TIMEOUT = Duration.ofMinutes(10);
   private static final Duration RETURN_RETRY = Duration.ofSeconds(10);
+
+  /** 启动后多久才找回还没派出的叫车：等启动时的现场占用重建、待命池登记做完，车源按真实现场排；这之前不撤还没回到发车侧的票。 */
+  static final Duration RESTORE_DELAY = Duration.ofSeconds(30);
 
   /**
    * 一个方向能不能叫、叫了派哪辆车。
@@ -204,6 +211,13 @@ public final class CallService {
   private volatile Map<UUID, Line> lines = Map.of();
   private volatile Instant linesLoadedAt = Instant.EPOCH;
   private boolean storedCallsLoaded;
+
+  /** 下一次找回还没派出的叫车的时刻；为空表示不必找回（已找回，或还没启动）。 */
+  private Instant restoreDueAt;
+
+  /** 存库写入排成一条链：后台执行、按提交顺序一条接一条，同一条叫车先存后删不会颠倒。 */
+  private CompletableFuture<Void> storageWrites = CompletableFuture.completedFuture(null);
+
   private BukkitTask task;
 
   public CallService(FetaruteTCAddon plugin) {
@@ -213,14 +227,10 @@ public final class CallService {
 
   // ---------------------------------------------------------------- 生命周期
 
-  /** 开始周期扫描（叫来的车登记、终点回库、叫车超时）；先找回还没派出的叫车。 */
+  /** 开始周期扫描（叫来的车登记、终点回库、叫车超时）；{@link #RESTORE_DELAY} 后找回还没派出的叫车。 */
   public void start() {
     stop();
-    try {
-      restorePending(Instant.now());
-    } catch (RuntimeException ex) {
-      debug("找回未派出的叫车失败 error=" + ex);
-    }
+    restoreDueAt = Instant.now().plus(RESTORE_DELAY);
     task =
         Bukkit.getScheduler()
             .runTaskTimer(
@@ -591,15 +601,7 @@ public final class CallService {
         || (!dynamic.unbounded() && (track < dynamic.fromTrack() || track > dynamic.toTrack()))) {
       return Optional.empty();
     }
-    String node =
-        dynamic.operatorCode().trim()
-            + ":"
-            + dynamic.nodeType().trim()
-            + ":"
-            + dynamic.nodeName().trim()
-            + ":"
-            + track;
-    return Optional.of(new PlatformPin(routeId, stopIndex, node));
+    return Optional.of(new PlatformPin(routeId, stopIndex, dynamic.nodeIdForTrack(track).value()));
   }
 
   /**
@@ -613,10 +615,26 @@ public final class CallService {
     if (trainName == null || routeId == null) {
       return Optional.empty();
     }
-    CalledTrain train = calledTrains.get(trainName);
+    CalledTrain train = calledTrain(trainName);
     return train == null
         ? Optional.empty()
         : train.pin().flatMap(pin -> pin.at(routeId, stopIndex));
+  }
+
+  /** 按列车名找叫来的车：先按原样，找不到再不分大小写（运行时有的路径传的是规范化的小写名）。 */
+  private CalledTrain calledTrain(String trainName) {
+    Map<String, CalledTrain> current = calledTrains;
+    CalledTrain exact = current.get(trainName);
+    if (exact != null || current.isEmpty()) {
+      return exact;
+    }
+    String wanted = trainName.trim();
+    for (CalledTrain train : current.values()) {
+      if (train.name().equalsIgnoreCase(wanted)) {
+        return train;
+      }
+    }
+    return null;
   }
 
   /**
@@ -650,11 +668,18 @@ public final class CallService {
     StationDirectory.Snapshot directory =
         plugin.getStationDirectory().map(StationDirectory::snapshot).orElse(null);
     Collection<RouteDefinitionCache.RouteEntry> entries = cache.get().entries();
+    // 只看本线的交路列方向；能留下待命车的终点、各交路有没有车源都只算一次。
+    List<RouteDefinitionCache.RouteEntry> lineEntries =
+        entries.stream()
+            .filter(entry -> entry != null && lineId.equals(entry.record().line().id()))
+            .toList();
+    List<String> standbyTerminals = standbyTerminals(entries, timetableRoutes());
+    Map<String, Boolean> sourcedRoutes = new HashMap<>();
     List<UnsourcedDirection> out = new ArrayList<>();
-    for (PidsStationKey station : CallCatalog.stationsServed(entries, directory, lineId)) {
+    for (PidsStationKey station : CallCatalog.stationsServed(lineEntries, directory, lineId)) {
       for (CallCatalog.CallDirection direction :
           CallCatalog.directions(
-              entries,
+              lineEntries,
               directory,
               line -> line != null && lineId.equals(line.id()),
               station,
@@ -663,9 +688,12 @@ public final class CallService {
             direction.routes().stream()
                 .anyMatch(
                     route ->
-                        route.fromDepot()
-                            || standbyPossible(entries, route.startNode())
-                            || planner.entryPossible(route.routeId(), route.stopIndex()));
+                        sourcedRoutes.computeIfAbsent(
+                            route.routeId() + "#" + route.stopIndex(),
+                            ignored ->
+                                route.fromDepot()
+                                    || standbyAt(standbyTerminals, route.startNode())
+                                    || planner.entryPossible(route.routeId(), route.stopIndex())));
         if (!sourced) {
           out.add(new UnsourcedDirection(station, direction));
         }
@@ -674,15 +702,27 @@ public final class CallService {
     return List.copyOf(out);
   }
 
-  /** 有没有交路在这个首站终到并留在待命池（终点复用）：没有的话首站永远等不来待命车。 */
+  /**
+   * 有没有交路在这个首站终到并留在待命池（终点复用），留下的车又不是时刻表的车：没有的话首站永远等不来可接的待命车。
+   *
+   * @param timetableRoutes 由时刻表管辖的交路：跑完它的车多半还绑着时刻表交路，叫车不接
+   */
   static boolean standbyPossible(
-      Collection<RouteDefinitionCache.RouteEntry> entries, String startNode) {
-    if (entries == null || startNode == null || startNode.isBlank()) {
-      return false;
+      Collection<RouteDefinitionCache.RouteEntry> entries,
+      String startNode,
+      Predicate<UUID> timetableRoutes) {
+    return standbyAt(standbyTerminals(entries, timetableRoutes), startNode);
+  }
+
+  /** 能留下可接的待命车的终点（终点复用、不由时刻表管辖的交路的末节点）。 */
+  private static List<String> standbyTerminals(
+      Collection<RouteDefinitionCache.RouteEntry> entries, Predicate<UUID> timetableRoutes) {
+    if (entries == null) {
+      return List.of();
     }
-    String start = TerminalKeyResolver.toTerminalKey(NodeId.of(startNode));
+    List<String> out = new ArrayList<>();
     for (RouteDefinitionCache.RouteEntry entry : entries) {
-      if (entry == null) {
+      if (entry == null || timetableRoutes.test(entry.routeId())) {
         continue;
       }
       RouteDefinition definition = entry.definition();
@@ -690,38 +730,79 @@ public final class CallService {
           || definition.waypoints().isEmpty()) {
         continue;
       }
-      NodeId last = definition.waypoints().get(definition.waypoints().size() - 1);
-      if (TerminalKeyResolver.matches(TerminalKeyResolver.toTerminalKey(last), start)) {
+      out.add(
+          TerminalKeyResolver.toTerminalKey(
+              definition.waypoints().get(definition.waypoints().size() - 1)));
+    }
+    return out;
+  }
+
+  private static boolean standbyAt(List<String> terminals, String startNode) {
+    if (startNode == null || startNode.isBlank()) {
+      return false;
+    }
+    String start = TerminalKeyResolver.toTerminalKey(NodeId.of(startNode));
+    for (String terminal : terminals) {
+      if (TerminalKeyResolver.matches(terminal, start)) {
         return true;
       }
     }
     return false;
   }
 
+  /** 由时刻表管辖的交路（按表运行打开时）。 */
+  private Predicate<UUID> timetableRoutes() {
+    return plugin
+        .getTimetableService()
+        .<Predicate<UUID>>map(service -> service::managed)
+        .orElse(routeId -> false);
+  }
+
+  /** 按表运行打开着：刚重启时交路账本是空的，首站的待命车看着都没绑交路，其实多半还担着时刻表的班。 */
+  private boolean timetableEnabled() {
+    return plugin.getTimetableService().map(service -> service.settings().enabled()).orElse(false);
+  }
+
   // ---------------------------------------------------------------- 存库与找回
 
   /** 记进库里：重启后据此找回。存储不可用时只在内存里，照常派车。 */
   private void remember(PendingCall call) {
-    try {
-      plugin
-          .getStorageManager()
-          .provider()
-          .ifPresent(provider -> provider.pendingCalls().save(call.record()));
-    } catch (StorageException | UnsupportedOperationException ex) {
-      debug("叫车写库失败 call=" + call.id() + " error=" + ex.getMessage());
-    }
+    PendingCallRecord record = call.record();
+    writeLater("叫车写库失败 call=" + call.id(), calls -> calls.save(record));
   }
 
   /** 从库里删掉：派出、取消、超时或作废了。 */
   private void forget(UUID callId) {
+    writeLater("叫车删库失败 call=" + callId, calls -> calls.delete(callId));
+  }
+
+  /** 存库在后台做，不占主线程（派车回调、每秒扫描都会写）；写入排成一条链，按提交顺序执行。这张表只在下次启动时读，晚几毫秒写入无妨。 插件未启用（停服、测试）时当场写。 */
+  private void writeLater(String failure, Consumer<PendingCallRepository> work) {
+    Optional<StorageProvider> provider;
     try {
-      plugin
-          .getStorageManager()
-          .provider()
-          .ifPresent(provider -> provider.pendingCalls().delete(callId));
-    } catch (StorageException | UnsupportedOperationException ex) {
-      debug("叫车删库失败 call=" + callId + " error=" + ex.getMessage());
+      provider = plugin.getStorageManager().provider();
+    } catch (RuntimeException ex) {
+      debug(failure + " error=" + ex);
+      return;
     }
+    if (provider.isEmpty()) {
+      return;
+    }
+    Executor executor =
+        plugin.isEnabled()
+            ? runnable -> Bukkit.getScheduler().runTaskAsynchronously(plugin, runnable)
+            : Runnable::run;
+    storageWrites =
+        storageWrites.thenRunAsync(
+            () -> {
+              try {
+                work.accept(provider.get().pendingCalls());
+              } catch (RuntimeException ex) {
+                // 失败不断链：后面的写入照常排队执行。
+                debug(failure + " error=" + ex.getMessage());
+              }
+            },
+            executor);
   }
 
   /**
@@ -732,8 +813,10 @@ public final class CallService {
   void restorePending(Instant now) {
     refreshCalledTrains();
     if (!storedCallsLoaded) {
-      storedCallsLoaded = true;
-      for (PendingCallRecord record : storedCalls()) {
+      // 读库失败（存储一时不可用）时不记“已读过”：下次启动或重载再读。
+      Optional<List<PendingCallRecord>> stored = storedCalls();
+      storedCallsLoaded = stored.isPresent();
+      for (PendingCallRecord record : stored.orElse(List.of())) {
         pending.putIfAbsent(
             record.id(),
             new PendingCall(
@@ -773,18 +856,19 @@ public final class CallService {
       debug("叫车已找回并重新出票 call=" + call.id());
     }
     hints.clear();
+    plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
   }
 
-  private List<PendingCallRecord> storedCalls() {
+  /** 库里还没派出的叫车；存储不可用或读失败时为空（不是“没有”）。 */
+  private Optional<List<PendingCallRecord>> storedCalls() {
     try {
       return plugin
           .getStorageManager()
           .provider()
-          .map(provider -> provider.pendingCalls().listAll())
-          .orElse(List.of());
+          .map(provider -> provider.pendingCalls().listAll());
     } catch (StorageException | UnsupportedOperationException ex) {
       debug("读取未派出的叫车失败 error=" + ex.getMessage());
-      return List.of();
+      return Optional.empty();
     }
   }
 
@@ -797,7 +881,10 @@ public final class CallService {
     if (direction.isEmpty()) {
       return false;
     }
-    Optional<CallPlanner.Plan> plan = planner.plan(direction.get(), dutyBoundPredicate(), now);
+    // 按表运行打开时找回不接待命车（账本刚重启是空的，看不出哪辆还担着时刻表的班），只从车库出车或区间生成。
+    Predicate<String> standbyExcluded =
+        timetableEnabled() ? trainName -> true : dutyBoundPredicate();
+    Optional<CallPlanner.Plan> plan = planner.plan(direction.get(), standbyExcluded, now);
     if (plan.isEmpty()) {
       return false;
     }
@@ -951,7 +1038,15 @@ public final class CallService {
   void sweep(Instant now) {
     try {
       refreshCalledTrains();
-      sweepPending(now);
+      if (restoreDueAt != null) {
+        // 找回之前不撤票：重启后票还没回到发车侧，撤了就找不回了。
+        if (!now.isBefore(restoreDueAt)) {
+          restoreDueAt = null;
+          restorePending(now);
+        }
+      } else {
+        sweepPending(now);
+      }
       returnFinishedTrains(now);
     } catch (RuntimeException ex) {
       debug("叫车扫描异常 error=" + ex);

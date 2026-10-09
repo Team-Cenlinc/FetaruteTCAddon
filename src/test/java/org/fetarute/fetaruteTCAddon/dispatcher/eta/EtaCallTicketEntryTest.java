@@ -70,6 +70,20 @@ class EtaCallTicketEntryTest {
         fromEntry.isBefore(fromStart), "生成点离本站近，应早于从首站起算: " + fromEntry + " vs " + fromStart);
   }
 
+  /** 生成点在本站或本站之后：车不经过本站，站牌不列它（不能从交路首站起算列一班不会来的车）。 */
+  @Test
+  void aStationAtOrBeforeTheEntryDoesNotListTheCall() {
+    List<BoardResult.BoardRow> rows =
+        board(callTicket(OptionalInt.of(2)))
+            .getBoard("SURN", "BBB", null, Duration.ofMinutes(30))
+            .rows();
+
+    assertTrue(rows.isEmpty(), rows::toString);
+    assertTrue(EtaService.spawnsDownstreamOf(callTicket(OptionalInt.of(2)), 2));
+    assertTrue(!EtaService.spawnsDownstreamOf(callTicket(OptionalInt.of(1)), 2));
+    assertTrue(!EtaService.spawnsDownstreamOf(callTicket(OptionalInt.empty()), 2));
+  }
+
   @Test
   void onlyCallTicketsWithAnUpstreamEntryStartElsewhere() {
     SpawnTicket entry = callTicket(OptionalInt.of(1));
