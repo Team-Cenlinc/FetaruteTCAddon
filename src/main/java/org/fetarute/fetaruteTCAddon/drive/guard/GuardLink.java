@@ -27,6 +27,9 @@ public final class GuardLink {
   private int completedStops;
   private int timeoutStops;
 
+  /** 紧急停车扣到这个 tick 自动解除；没扣着时为 -1。 */
+  private long emergencyUntilTick = -1L;
+
   /**
    * @param clock 当前服务器 tick
    */
@@ -109,6 +112,30 @@ public final class GuardLink {
   /** 当前服务器 tick。 */
   public long now() {
     return clock.getAsLong();
+  }
+
+  /** 紧急停车扣着：自动运行（含 ATO）的车停住后调度不替它起步（按驾驶员控制处理），直到车掌解除或到时限。人工驾驶的车由驾驶员制动，不在这里扣。 */
+  public boolean emergencyHold() {
+    return emergencyUntilTick >= 0L;
+  }
+
+  /**
+   * 拉下紧急停车并扣住。
+   *
+   * @param untilTick 到这个 tick 自动解除
+   */
+  public void latchEmergency(long untilTick) {
+    this.emergencyUntilTick = Math.max(0L, untilTick);
+  }
+
+  /** 扣着的紧急停车已到时限。 */
+  public boolean emergencyExpired() {
+    return emergencyUntilTick >= 0L && clock.getAsLong() >= emergencyUntilTick;
+  }
+
+  /** 解除紧急停车。 */
+  public void releaseEmergency() {
+    this.emergencyUntilTick = -1L;
   }
 
   /**

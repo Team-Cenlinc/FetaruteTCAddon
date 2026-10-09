@@ -66,6 +66,16 @@ public final class GuardSessionManager {
 
     /** 这列车的驾驶员亲手开着车门（人工驾驶）。 */
     boolean driverDoorsOpen(String trainName);
+
+    /** 让调度立即重算这列车的信号（解除紧急停车后起步）。 */
+    void refreshSignal(MinecartGroup group);
+
+    /**
+     * 车掌拉下紧急停车：人工驾驶的驾驶员的手柄拨到 EB（等同驾驶员自己拉 EB，不记防护介入），停稳后由驾驶员缓解。
+     *
+     * @return 这列车由人工驾驶的驾驶员控车、已拨到 EB
+     */
+    boolean emergencyByGuard(String trainName);
   }
 
   /** 上岗的结果。 */
@@ -292,8 +302,15 @@ public final class GuardSessionManager {
       return;
     }
     lastUseTick.remove(playerId);
+    Optional<MinecartGroup> train = findGroup(session);
+    boolean held = session.link().emergencyHold();
+    session.link().releaseEmergency();
     registry.unbindGuard(session.link());
-    findGroup(session).ifPresent(group -> session.doors().closeAll(session));
+    train.ifPresent(group -> session.doors().closeAll(session));
+    if (held) {
+      // 车掌离岗时扣着的紧急停车一并解除，列车交还自动运行。
+      train.ifPresent(drivers::refreshSignal);
+    }
     Player player = Bukkit.getPlayer(playerId);
     if (player != null) {
       sidebar.hide(player);
@@ -391,6 +408,12 @@ public final class GuardSessionManager {
     if (!sessions.containsKey(session.playerId())) {
       return;
     }
+    if (session.link().emergencyExpired()) {
+      releaseEmergency(player, session, group, "drive.guard.emergency.expired");
+    }
+    if (now % WATCH_SAMPLE_TICKS == 0) {
+      sampleDepartureWatch(player, session, group, seated, now);
+    }
     session.buzzer().tick(now).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
     refreshHotbar(player, session, false);
     if (tickCounter % DISPLAY_INTERVAL_TICKS == 0) {
@@ -430,6 +453,7 @@ public final class GuardSessionManager {
           side.satisfied(left, right), left || right || closing, side.wrong(left, right));
       session.doors().holdClosingWhilePending(session, now);
       GuardStopWork work = link.work().orElseThrow();
+      sampleClosingWatch(player, session, group, work, closing, seated, now);
       switch (work.tick(stop.phase())) {
         case FORCE_OPEN -> {
           openRequired(group, session, stop, side);
@@ -468,6 +492,10 @@ public final class GuardSessionManager {
     Optional<DriverStationStop> last = link.lastStop();
     if (last.isPresent() && !last.get().active() && session.lastSettledStop() != last.get()) {
       session.setLastSettledStop(last.get());
+      link.work()
+          .filter(GuardStopWork::released)
+          .filter(work -> group.isMoving())
+          .ifPresent(work -> startDepartureWatch(session, group, last.get(), work, now));
       link.settle();
       if (link.tooManyTimeouts()) {
         stop(session.playerId(), GuardSession.EndReason.TIMEOUTS);
@@ -560,7 +588,7 @@ public final class GuardSessionManager {
       case DOOR_CLOSE -> closeDoors(player, session, group.get());
       case REPORT -> GuardReportDialog.open(plugin, locale, player, this);
       case CONFIRM -> confirm(player, session);
-      case EMERGENCY -> notice(player, session, "drive.guard.deny.emergency-unavailable", Map.of());
+      case EMERGENCY -> emergency(player, session, group.get());
       case BUZZER -> {}
     }
   }
@@ -629,6 +657,15 @@ public final class GuardSessionManager {
     String train = session.link().trainName();
     switch (kind) {
       case LONG -> {
+        if (session.link().emergencyHold()) {
+          Optional<MinecartGroup> group = findGroup(session);
+          if (group.isPresent() && !group.get().isMoving()) {
+            releaseEmergency(player, session, group.get(), "drive.guard.emergency.released");
+          } else {
+            notice(player, session, "drive.guard.emergency.still-moving", Map.of());
+          }
+          return;
+        }
         Optional<DriverStationStop> stop = session.link().stationStop();
         Optional<GuardStopWork> work = session.link().work();
         if (stop.isEmpty() || work.isEmpty()) {
@@ -776,6 +813,163 @@ public final class GuardSessionManager {
                     "drive.guard.driver.report",
                     Map.of("guard", session.playerName(), "reason", reasonText),
                     DriveCue.BUZZER));
+  }
+
+  // ---- 紧急停车与监视 ----
+
+  /** 监视每隔这么多 tick 采样一次。 */
+  private static final long WATCH_SAMPLE_TICKS = 5L;
+
+  /** 紧急停车（车掌阀）：人工驾驶的车按调度要求紧急制动处理，由驾驶员停稳后缓解；自动运行（含 ATO）的车立即停住并扣着，车掌停稳后按住发车铃一长声或到时限才解除。 */
+  private void emergency(Player player, GuardSession session, MinecartGroup group) {
+    if (session.link().emergencyHold()) {
+      notice(player, session, "drive.guard.emergency.already", Map.of());
+      return;
+    }
+    if (!group.isMoving()) {
+      notice(player, session, "drive.guard.emergency.stopped", Map.of());
+      return;
+    }
+    String train = session.link().trainName();
+    Optional<UUID> driver = drivers.driverOf(train);
+    if (!drivers.emergencyByGuard(train)) {
+      session
+          .link()
+          .latchEmergency(Bukkit.getCurrentTick() + config.get().guard().emergencyHoldTicks());
+      group.getActions().clear();
+      group.stop();
+    }
+    sounds.play(player, DriveCue.EMERGENCY);
+    notice(player, session, "drive.guard.emergency.pulled", Map.of());
+    driver.ifPresent(
+        id ->
+            drivers.notifyDriver(
+                id,
+                "drive.guard.driver.emergency",
+                Map.of("guard", session.playerName()),
+                DriveCue.EMERGENCY));
+  }
+
+  private void releaseEmergency(
+      Player player, GuardSession session, MinecartGroup group, String key) {
+    session.link().releaseEmergency();
+    drivers.refreshSignal(group);
+    notice(player, session, key, Map.of());
+    drivers
+        .driverOf(session.link().trainName())
+        .ifPresent(
+            id ->
+                drivers.notifyDriver(
+                    id,
+                    "drive.guard.driver.emergency-released",
+                    Map.of("guard", session.playerName()),
+                    null));
+  }
+
+  /** 关门监视：关门动画放着时每 {@link #WATCH_SAMPLE_TICKS} 采样一次，动画放完时告诉车掌合格与否。 */
+  private void sampleClosingWatch(
+      Player player,
+      GuardSession session,
+      MinecartGroup group,
+      GuardStopWork work,
+      boolean closing,
+      boolean seated,
+      long now) {
+    if (closing) {
+      session.setClosingWatchActive(true);
+      if (now % WATCH_SAMPLE_TICKS == 0) {
+        work.sampleClosing(closingWatching(player, session, group, seated));
+      }
+      return;
+    }
+    if (session.closingWatchActive()) {
+      session.setClosingWatchActive(false);
+      work.closingWatchPassed()
+          .ifPresent(
+              passed ->
+                  notice(
+                      player,
+                      session,
+                      passed ? "drive.guard.watch.closing-ok" : "drive.guard.watch.closing-missed",
+                      Map.of()));
+    }
+  }
+
+  private boolean closingWatching(
+      Player player, GuardSession session, MinecartGroup group, boolean seated) {
+    int index = session.binding().memberIndex();
+    if (index < 0 || index >= group.size()) {
+      return false;
+    }
+    org.bukkit.Location car = group.get(index).getEntity().getLocation();
+    org.bukkit.Location eye = player.getEyeLocation();
+    double distance =
+        car.getWorld() != null && car.getWorld().equals(eye.getWorld())
+            ? car.distance(eye)
+            : Double.POSITIVE_INFINITY;
+    GuardConfig guard = config.get().guard();
+    return GuardWatch.closingWatch(
+        seated || player.getVehicle() != null,
+        distance,
+        guard.watchRadiusBlocks(),
+        eye.getDirection(),
+        DriveDoors.cabFacing(group, session),
+        guard.watchAngleDegrees());
+  }
+
+  /** 列车从站台开出：开始出站监视，直到车尾离开站台（走过车长加余量）或到时限。 */
+  private void startDepartureWatch(
+      GuardSession session,
+      MinecartGroup group,
+      DriverStationStop stop,
+      GuardStopWork work,
+      long now) {
+    org.bukkit.Location head = group.head().getEntity().getLocation();
+    org.bukkit.Location tail = group.tail().getEntity().getLocation();
+    double length = head.getWorld() == tail.getWorld() ? head.distance(tail) + 2.0 : 0.0;
+    GuardConfig guard = config.get().guard();
+    org.bukkit.util.Vector platformSide =
+        stop.platformFace().map(face -> face.getDirection()).orElse(null);
+    session.setDepartureWatch(
+        new GuardSession.DepartureWatch(
+            work,
+            head.toVector(),
+            length + guard.departureWatchExtraBlocks(),
+            now + guard.departureWatchMaxSeconds() * 20L,
+            platformSide));
+  }
+
+  private void sampleDepartureWatch(
+      Player player, GuardSession session, MinecartGroup group, boolean seated, long now) {
+    GuardSession.DepartureWatch watch = session.departureWatch();
+    if (watch == null) {
+      return;
+    }
+    double travelled = group.head().getEntity().getLocation().toVector().distance(watch.origin());
+    if (travelled >= watch.blocks() || now >= watch.untilTick()) {
+      session.setDepartureWatch(null);
+      watch
+          .work()
+          .departureWatchPassed()
+          .ifPresent(
+              passed ->
+                  notice(
+                      player,
+                      session,
+                      passed
+                          ? "drive.guard.watch.departure-ok"
+                          : "drive.guard.watch.departure-missed",
+                      Map.of()));
+      return;
+    }
+    watch
+        .work()
+        .sampleDeparture(
+            GuardWatch.departureWatch(
+                seated,
+                player.getEyeLocation().getDirection(),
+                watch.platformSide(),
+                DriveDoors.cabFacing(group, session)));
   }
 
   // ---- 菜单 ----
@@ -1051,7 +1245,7 @@ public final class GuardSessionManager {
             work.map(w -> !w.canReport()).orElse(false),
             lamp,
             session.buzzer().ringing(now),
-            false);
+            session.link().emergencyHold());
     if (!force && view.equals(session.view())) {
       return;
     }

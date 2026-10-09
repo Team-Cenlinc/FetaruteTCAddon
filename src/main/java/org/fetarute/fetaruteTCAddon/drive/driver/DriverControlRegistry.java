@@ -186,6 +186,11 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean isDriverControlled(TrainProperties properties) {
     DriverLink link = resolve(properties);
+    // 车掌拉下了紧急停车：车停住后不替它起步，直到车掌解除或到时限。
+    GuardLink guard = resolveGuard(properties);
+    if (guard != null && guard.emergencyHold()) {
+      return true;
+    }
     if (link != null) {
       return link.controlsPhysically() || link.cabHold();
     }
@@ -204,7 +209,8 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean isDriverControlledName(String trainName) {
     DriverLink link = byCurrentName(trainName);
-    return link != null && (link.controlsPhysically() || link.cabHold());
+    return (link != null && (link.controlsPhysically() || link.cabHold()))
+        || guardOfName(trainName).map(GuardLink::emergencyHold).orElse(false);
   }
 
   @Override

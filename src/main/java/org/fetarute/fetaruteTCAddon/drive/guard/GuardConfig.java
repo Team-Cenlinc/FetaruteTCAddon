@@ -23,6 +23,7 @@ import org.bukkit.configuration.ConfigurationSection;
  * @param buzzerLongTicks 发车铃按住多久（tick）算一长
  * @param buzzerDoubleTicks 两次短按相隔多久（tick）以内算呼叫
  * @param ackSeconds simulation 级驾驶员收到发车信号后多久内要回一短
+ * @param emergencyHoldSeconds 自动运行的车被车掌拉下紧急停车后最多扣多久，到时自动解除（免得车掌离开后列车一直停着）
  */
 public record GuardConfig(
     boolean enabled,
@@ -39,7 +40,8 @@ public record GuardConfig(
     int departureWatchMaxSeconds,
     int buzzerLongTicks,
     int buzzerDoubleTicks,
-    int ackSeconds) {
+    int ackSeconds,
+    int emergencyHoldSeconds) {
 
   public GuardConfig {
     openDoorsSeconds = Math.max(1, openDoorsSeconds);
@@ -56,11 +58,12 @@ public record GuardConfig(
     buzzerLongTicks = Math.max(4, buzzerLongTicks);
     buzzerDoubleTicks = Math.max(4, buzzerDoubleTicks);
     ackSeconds = Math.max(1, ackSeconds);
+    emergencyHoldSeconds = Math.max(1, emergencyHoldSeconds);
   }
 
   /** 内置默认值。 */
   public static GuardConfig defaults() {
-    return new GuardConfig(true, 30, 15, 15, 30, 2, 3, 8.0, 45.0, 0.7, 24.0, 20, 16, 20, 5);
+    return new GuardConfig(true, 30, 15, 15, 30, 2, 3, 8.0, 45.0, 0.7, 24.0, 20, 16, 20, 5, 120);
   }
 
   public long openDoorsTicks() {
@@ -73,6 +76,10 @@ public record GuardConfig(
 
   public long departSignalTicks() {
     return departSignalSeconds * 20L;
+  }
+
+  public long emergencyHoldTicks() {
+    return emergencyHoldSeconds * 20L;
   }
 
   public long incidentExtensionTicks() {
@@ -105,7 +112,8 @@ public record GuardConfig(
         (int) number(section, "departure-watch-max-seconds", d.departureWatchMaxSeconds, 1.0, sink),
         (int) number(section, "buzzer-long-ticks", d.buzzerLongTicks, 4.0, sink),
         (int) number(section, "buzzer-double-ticks", d.buzzerDoubleTicks, 4.0, sink),
-        (int) number(section, "ack-seconds", d.ackSeconds, 1.0, sink));
+        (int) number(section, "ack-seconds", d.ackSeconds, 1.0, sink),
+        (int) number(section, "emergency-hold-seconds", d.emergencyHoldSeconds, 1.0, sink));
   }
 
   private static double number(

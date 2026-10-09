@@ -78,6 +78,11 @@ public final class GuardStopWork {
   /** 站台上次问时出站是否放行：两次都放行着，中间那段才算。 */
   private boolean lastQueryOpen;
 
+  private int closingSamples;
+  private int closingWatched;
+  private int departureSamples;
+  private int departureWatched;
+
   public GuardStopWork(GuardConfig config) {
     this.config = Objects.requireNonNull(config, "config");
   }
@@ -209,6 +214,39 @@ public final class GuardStopWork {
 
   private long extensionForStep(Phase phase) {
     return lastPhase == phase ? extensionTicks : 0L;
+  }
+
+  /** 关门监视的一次采样：关门动画放着时，车掌在站台上、离自己那节车门够近、视线沿着车身。 */
+  public void sampleClosing(boolean watching) {
+    closingSamples++;
+    if (watching) {
+      closingWatched++;
+    }
+  }
+
+  /** 出站监视的一次采样：起步后车尾离开站台前，车掌在座位上朝站台一侧或朝后看。 */
+  public void sampleDeparture(boolean watching) {
+    departureSamples++;
+    if (watching) {
+      departureWatched++;
+    }
+  }
+
+  /** 关门监视是否合格；没关过门（没有采样）时为空。 */
+  public java.util.Optional<Boolean> closingWatchPassed() {
+    return passed(closingSamples, closingWatched);
+  }
+
+  /** 出站监视是否合格；没有采样时为空。 */
+  public java.util.Optional<Boolean> departureWatchPassed() {
+    return passed(departureSamples, departureWatched);
+  }
+
+  private java.util.Optional<Boolean> passed(int samples, int watched) {
+    if (samples == 0) {
+      return java.util.Optional.empty();
+    }
+    return java.util.Optional.of(watched >= Math.ceil(samples * config.watchRatio()));
   }
 
   /** 本站报告过几次。 */

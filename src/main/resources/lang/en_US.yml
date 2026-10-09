@@ -572,6 +572,8 @@ drive:
       ack: "<gray>Guard <white><guard></white>: understood</gray>"
       call: "<yellow>Guard <white><guard></white> is calling</yellow>"
       report: "<light_purple>Guard reports: <white><reason></white></light_purple>"
+      emergency: "<red>Guard <white><guard></white> applied the emergency stop</red>"
+      emergency-released: "<green>Guard <white><guard></white> released the emergency stop</green>"
     from-driver:
       ack: "<gray>Driver <white><driver></white>: understood</gray>"
       call: "<yellow>Driver <white><driver></white> is calling</yellow>"
@@ -595,7 +597,18 @@ drive:
       already-open: "<gray>The doors on this side are already open</gray>"
       no-door-animation: "<red>This train has no matching door animation</red>"
       no-door-open: "<gray>No doors are open</gray>"
-      emergency-unavailable: "<gray>The emergency stop is not available yet</gray>"
+    emergency:
+      pulled: "<red>Emergency stop applied</red>"
+      already: "<gray>The emergency stop is already applied</gray>"
+      stopped: "<gray>The train is stopped; no emergency stop needed. It will not leave until you give the buzzer</gray>"
+      still-moving: "<red>The emergency stop can only be released once the train has stopped</red>"
+      released: "<green>Emergency stop released; the train resumes</green>"
+      expired: "<yellow>The emergency stop timed out and was released; the train resumes</yellow>"
+    watch:
+      closing-ok: "<green>Door watch: good</green>"
+      closing-missed: "<red>Door watch: you were not on the platform watching the doors</red>"
+      departure-ok: "<green>Departure watch: good</green>"
+      departure-missed: "<red>Departure watch: you did not watch the platform</red>"
     confirm:
       not-at-station: "<gray>You are not stopped at a station</gray>"
       confirmed: "<green>Starting signal checked; hold the buzzer for about a second</green>"

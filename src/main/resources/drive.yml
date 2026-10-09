@@ -391,6 +391,8 @@ guard:
   buzzer-double-ticks: 20
   # simulation 级：驾驶员收到发车信号后多久（秒）内要回一短
   ack-seconds: 5
+  # 自动运行（含 ATO）的车被车掌拉下紧急停车后最多扣多久（秒），到时自动解除；车掌停稳后按住发车铃一长声可提前解除
+  emergency-hold-seconds: 120
 
 sounds:
   enabled: true

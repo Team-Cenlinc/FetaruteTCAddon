@@ -2276,6 +2276,8 @@ drive:
       ack: "<gray>车掌 <white><guard></white>：收到</gray>"
       call: "<yellow>车掌 <white><guard></white> 呼叫</yellow>"
       report: "<light_purple>车掌报告：<white><reason></white></light_purple>"
+      emergency: "<red>车掌 <white><guard></white> 拉下了紧急停车</red>"
+      emergency-released: "<green>车掌 <white><guard></white> 已解除紧急停车</green>"
     from-driver:
       ack: "<gray>驾驶员 <white><driver></white>：收到</gray>"
       call: "<yellow>驾驶员 <white><driver></white> 呼叫</yellow>"
@@ -2299,7 +2301,18 @@ drive:
       already-open: "<gray>这一侧的车门已开着</gray>"
       no-door-animation: "<red>本列车没有对应的车门动画</red>"
       no-door-open: "<gray>没有开着的车门</gray>"
-      emergency-unavailable: "<gray>紧急停车尚未开放</gray>"
+    emergency:
+      pulled: "<red>已拉下紧急停车</red>"
+      already: "<gray>紧急停车已拉下</gray>"
+      stopped: "<gray>列车停着，无需紧急停车；不按发车铃列车就不会开</gray>"
+      still-moving: "<red>列车停稳后才能解除紧急停车</red>"
+      released: "<green>已解除紧急停车，列车恢复运行</green>"
+      expired: "<yellow>紧急停车已到时限，自动解除，列车恢复运行</yellow>"
+    watch:
+      closing-ok: "<green>关门监视：合格</green>"
+      closing-missed: "<red>关门监视：未在站台注视车门</red>"
+      departure-ok: "<green>出站监视：合格</green>"
+      departure-missed: "<red>出站监视：未朝站台监视</red>"
     confirm:
       not-at-station: "<gray>当前不在车站停站</gray>"
       confirmed: "<green>出发信号已确认，请按住发车铃约一秒</green>"

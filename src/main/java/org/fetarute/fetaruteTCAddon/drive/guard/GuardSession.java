@@ -59,6 +59,24 @@ public final class GuardSession implements DriveDoors.Cab {
   private boolean forcedSignalHandled;
   private boolean sneakHeld;
   private com.bergerkiller.bukkit.tc.controller.MinecartGroup lastGroup;
+  private boolean closingWatchActive;
+  private DepartureWatch departureWatch;
+
+  /**
+   * 进行中的出站监视：起步时车头的位置，走过多远、到哪个 tick 为止，站台在哪个方向，结果记进哪一站。
+   *
+   * @param work 刚开出的那一站
+   * @param origin 起步时车头的位置
+   * @param blocks 走过这么远算车尾离开站台
+   * @param untilTick 最长到这个 tick
+   * @param platformSide 站台在哪个方向；两侧开门或判定不出时为 {@code null}
+   */
+  public record DepartureWatch(
+      GuardStopWork work,
+      org.bukkit.util.Vector origin,
+      double blocks,
+      long untilTick,
+      org.bukkit.util.Vector platformSide) {}
 
   public GuardSession(
       UUID playerId,
@@ -235,6 +253,24 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setSignalAnnounced(boolean announced) {
     this.signalAnnounced = announced;
+  }
+
+  /** 关门动画正在放（关门监视在采样）。 */
+  public boolean closingWatchActive() {
+    return closingWatchActive;
+  }
+
+  public void setClosingWatchActive(boolean active) {
+    this.closingWatchActive = active;
+  }
+
+  /** 进行中的出站监视；没有时为 {@code null}。 */
+  public DepartureWatch departureWatch() {
+    return departureWatch;
+  }
+
+  public void setDepartureWatch(DepartureWatch watch) {
+    this.departureWatch = watch;
   }
 
   /** 上一拍找到的编组（还有效时直接用）。 */

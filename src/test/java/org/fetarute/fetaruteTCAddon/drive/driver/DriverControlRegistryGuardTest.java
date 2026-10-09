@@ -80,6 +80,19 @@ class DriverControlRegistryGuardTest {
     assertTrue(registry.holdForGuard(properties, false));
   }
 
+  /** 车掌拉下紧急停车（自动运行的车）：按驾驶员控制处理，调度不替它起步，解除后照常。 */
+  @Test
+  void anEmergencyHoldStopsAutomaticDeparture() {
+    GuardLink guard = guard();
+    assertFalse(registry.isDriverControlled(properties));
+    guard.latchEmergency(1000L);
+    assertTrue(registry.isDriverControlled(properties));
+    assertTrue(registry.isDriverControlledName("T-1"), "健康层按车名也认");
+    guard.releaseEmergency();
+    assertFalse(registry.isDriverControlled(properties));
+    assertFalse(registry.isDriverControlledName("T-1"));
+  }
+
   /** 列车属性对象被换掉（区块重载）：按车名找回车掌。 */
   @Test
   void theGuardIsFoundAgainByName() {

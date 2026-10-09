@@ -591,6 +591,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       public boolean driverDoorsOpen(String trainName) {
         return driverSessionOfTrain(trainName).map(DriveSession::anyDoorOpen).orElse(false);
       }
+
+      @Override
+      public void refreshSignal(MinecartGroup group) {
+        plugin.getRuntimeDispatchService().ifPresent(dispatch -> dispatch.refreshSignal(group));
+      }
+
+      @Override
+      public boolean emergencyByGuard(String trainName) {
+        Optional<DriveSession> session = driverSessionOfTrain(trainName);
+        if (session.isEmpty() || session.get().isAto()) {
+          return false;
+        }
+        session.get().forceEmergency();
+        traceSession(session.get(), "车掌拉下紧急停车");
+        return true;
+      }
     };
   }
 
