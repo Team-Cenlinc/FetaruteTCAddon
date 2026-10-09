@@ -2624,38 +2624,57 @@ public final class GuardSessionManager {
     Map<UUID, GuardApi.DutyView> nextDuties = new java.util.HashMap<>();
     Map<String, UUID> nextTrains = new java.util.HashMap<>();
     for (GuardSession session : sessions.values()) {
-      String trainName = session.link().currentTrainName();
-      nextDuties.put(
-          session.playerId(),
-          new GuardApi.DutyView(
-              session.playerId(),
-              trainName,
-              Optional.ofNullable(session.task()).map(GuardTask::taskId),
-              session.link().stationStop().map(DriverStationStop::stationName),
-              session.link().completedStops(),
-              session.link().timeoutStops(),
-              session.link().emergencyHold()));
-      nextTrains.put(trainName.toLowerCase(java.util.Locale.ROOT), session.playerId());
+      GuardApi.DutyView duty = dutyViewOf(session);
+      nextDuties.put(session.playerId(), duty);
+      nextTrains.put(duty.trainName().toLowerCase(java.util.Locale.ROOT), session.playerId());
     }
     taskViews = Map.copyOf(nextTasks);
     dutyViews = Map.copyOf(nextDuties);
     guardByTrain = Map.copyOf(nextTrains);
   }
 
-  /** 玩家的车掌任务快照（任意线程）。 */
+  private static GuardApi.DutyView dutyViewOf(GuardSession session) {
+    return new GuardApi.DutyView(
+        session.playerId(),
+        session.link().currentTrainName(),
+        Optional.ofNullable(session.task()).map(GuardTask::taskId),
+        session.link().stationStop().map(DriverStationStop::stationName),
+        session.link().completedStops(),
+        session.link().timeoutStops(),
+        session.link().emergencyHold());
+  }
+
+  /** 玩家的车掌任务：主线程上读当场的，其他线程读快照。 */
   public Optional<GuardApi.TaskView> taskView(UUID playerId) {
-    return Optional.ofNullable(playerId == null ? null : taskViews.get(playerId));
+    if (playerId == null) {
+      return Optional.empty();
+    }
+    if (Bukkit.isPrimaryThread()) {
+      return tasks.taskOf(playerId).map(GuardViews::of);
+    }
+    return Optional.ofNullable(taskViews.get(playerId));
   }
 
-  /** 玩家的值乘快照（任意线程）。 */
+  /** 玩家的值乘：主线程上读当场的，其他线程读快照。 */
   public Optional<GuardApi.DutyView> dutyView(UUID playerId) {
-    return Optional.ofNullable(playerId == null ? null : dutyViews.get(playerId));
+    if (playerId == null) {
+      return Optional.empty();
+    }
+    if (Bukkit.isPrimaryThread()) {
+      return Optional.ofNullable(sessions.get(playerId)).map(GuardSessionManager::dutyViewOf);
+    }
+    return Optional.ofNullable(dutyViews.get(playerId));
   }
 
-  /** 这列车上的车掌（按快照，任意线程）。 */
+  /** 这列车上的车掌：主线程上按当前车名当场找，其他线程读快照。 */
   public Optional<UUID> guardOfTrainName(String trainName) {
-    return Optional.ofNullable(
-        trainName == null ? null : guardByTrain.get(trainName.toLowerCase(java.util.Locale.ROOT)));
+    if (trainName == null) {
+      return Optional.empty();
+    }
+    if (Bukkit.isPrimaryThread()) {
+      return guardOfTrain(trainName).map(GuardSession::playerId);
+    }
+    return Optional.ofNullable(guardByTrain.get(trainName.toLowerCase(java.util.Locale.ROOT)));
   }
 
   private void notice(Player player, GuardSession session, String key, Map<String, String> values) {
