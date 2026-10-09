@@ -29,10 +29,14 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
@@ -47,6 +51,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSnapshot;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
@@ -62,6 +67,9 @@ import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 public final class CallService {
 
   public static final String PERMISSION = "fetarute.call";
+
+  /** 叫来的车预先指定的站台（{@link PlatformPin#format()}）；随车走，重启、改名后照样认得。 */
+  public static final String TAG_CALL_PLATFORM = "FTA_CALL_PLATFORM";
 
   private static final long SWEEP_PERIOD_TICKS = 20L;
   private static final Duration HINT_TTL = Duration.ofSeconds(5);
@@ -110,18 +118,77 @@ public final class CallService {
     NOT_FOUND
   }
 
+  /**
+   * 叫车预先指定的站台：本站是 DYNAMIC 停靠、玩家右键的是单站台的屏时，这一趟停那条股道；到站时被占才由选台改选，站台屏照常显示站台变更。
+   *
+   * @param routeId 叫车跑的交路
+   * @param stopIndex 本站在交路节点表里的下标
+   * @param nodeId 股道节点
+   */
+  public record PlatformPin(UUID routeId, int stopIndex, String nodeId) {
+
+    public PlatformPin {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(nodeId, "nodeId");
+    }
+
+    /** {@code 交路|下标|股道}：节点名里有冒号，用竖线分隔。 */
+    public String format() {
+      return routeId + "|" + stopIndex + "|" + nodeId;
+    }
+
+    /** 解析 {@link #format()} 的写法；不认得时为空。 */
+    public static Optional<PlatformPin> parse(String raw) {
+      if (raw == null) {
+        return Optional.empty();
+      }
+      String[] parts = raw.trim().split("\\|", -1);
+      if (parts.length != 3 || parts[2].isBlank()) {
+        return Optional.empty();
+      }
+      try {
+        return Optional.of(
+            new PlatformPin(
+                UUID.fromString(parts[0]), Integer.parseInt(parts[1]), parts[2].trim()));
+      } catch (IllegalArgumentException ex) {
+        return Optional.empty();
+      }
+    }
+
+    Optional<String> at(UUID route, int index) {
+      return routeId.equals(route) && stopIndex == index ? Optional.of(nodeId) : Optional.empty();
+    }
+  }
+
+  /**
+   * 一条线路上没有车源的叫车方向（交路校验用）。
+   *
+   * @param station 车站
+   * @param direction 方向
+   */
+  public record UnsourcedDirection(PidsStationKey station, CallCatalog.CallDirection direction) {}
+
   /** 还没派出的叫车。 */
   private record PendingCall(
       UUID id,
       UUID playerId,
       PidsStationKey station,
+      Set<String> screenPlatforms,
       String directionKey,
       UUID lineId,
       Instant createdAt,
-      OptionalInt etaSeconds) {}
+      OptionalInt etaSeconds,
+      Optional<PlatformPin> pin) {
 
-  /** 叫来的车：车名、标签、跑的交路所属线路。 */
-  private record CalledTrain(String name, CallTag tag, Optional<UUID> lineId) {}
+    PendingCallRecord record() {
+      return new PendingCallRecord(
+          id, playerId, station, screenPlatforms, directionKey, lineId, createdAt, etaSeconds);
+    }
+  }
+
+  /** 叫来的车：车名、标签、跑的交路所属线路、预先指定的站台。 */
+  private record CalledTrain(
+      String name, CallTag tag, Optional<UUID> lineId, Optional<PlatformPin> pin) {}
 
   private record HintKey(PidsStationKey station, Set<String> platforms, Set<String> lines) {}
 
@@ -136,6 +203,7 @@ public final class CallService {
   private volatile Map<String, CalledTrain> calledTrains = Map.of();
   private volatile Map<UUID, Line> lines = Map.of();
   private volatile Instant linesLoadedAt = Instant.EPOCH;
+  private boolean storedCallsLoaded;
   private BukkitTask task;
 
   public CallService(FetaruteTCAddon plugin) {
@@ -145,9 +213,14 @@ public final class CallService {
 
   // ---------------------------------------------------------------- 生命周期
 
-  /** 开始周期扫描（叫来的车登记、终点回库、叫车超时）。 */
+  /** 开始周期扫描（叫来的车登记、终点回库、叫车超时）；先找回还没派出的叫车。 */
   public void start() {
     stop();
+    try {
+      restorePending(Instant.now());
+    } catch (RuntimeException ex) {
+      debug("找回未派出的叫车失败 error=" + ex);
+    }
     task =
         Bukkit.getScheduler()
             .runTaskTimer(
@@ -333,7 +406,17 @@ public final class CallService {
     if (plan.isEmpty()) {
       return new CallResult(Outcome.UNAVAILABLE, option, Optional.empty());
     }
-    Optional<UUID> callId = issue(station, option.get().direction(), plan.get(), playerId, now);
+    Optional<UUID> callId =
+        issue(
+            station,
+            platforms == null ? Set.of() : platforms,
+            option.get().direction(),
+            plan.get(),
+            playerId,
+            UUID.randomUUID(),
+            now,
+            plan.get().etaSeconds(),
+            now);
     if (callId.isEmpty()) {
       return new CallResult(Outcome.FAILED, option, Optional.empty());
     }
@@ -374,6 +457,7 @@ public final class CallService {
       return CancelOutcome.ALREADY_DEPARTED;
     }
     pending.remove(callId);
+    forget(callId);
     hints.clear();
     plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
     debug("叫车取消 call=" + callId);
@@ -384,12 +468,22 @@ public final class CallService {
     return calledTrains.values().stream().anyMatch(train -> train.tag().callId().equals(callId));
   }
 
-  /** 出叫车票。 */
+  /**
+   * 出叫车票并记进库里。
+   *
+   * @param id 叫车编号（也是票的编号）：新叫的车给新编号，找回的叫车沿用原编号——玩家手里的“取消”与车上的标签都认它
+   * @param createdAt 叫车时刻（超时从它算）
+   * @param etaSeconds 从叫车时刻算的预计到站秒数
+   */
   private Optional<UUID> issue(
       PidsStationKey station,
+      Set<String> screenPlatforms,
       CallCatalog.CallDirection direction,
       CallPlanner.Plan plan,
       UUID playerId,
+      UUID id,
+      Instant createdAt,
+      OptionalInt etaSeconds,
       Instant now) {
     Optional<SpawnManager> spawnManager = plugin.getSpawnManager();
     Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
@@ -400,7 +494,6 @@ public final class CallService {
     if (service.isEmpty()) {
       return Optional.empty();
     }
-    UUID id = UUID.randomUUID();
     String trip = OnDemandTrip.format(new CallTag(id, station).format(), plan.entryIndex());
     SpawnTicket ticket =
         new SpawnTicket(
@@ -417,12 +510,339 @@ public final class CallService {
             TripSource.ON_DEMAND,
             0,
             Optional.empty());
-    pending.put(
-        id,
+    PendingCall call =
         new PendingCall(
-            id, playerId, station, direction.key(), direction.lineId(), now, plan.etaSeconds()));
+            id,
+            playerId,
+            station,
+            Set.copyOf(screenPlatforms),
+            direction.key(),
+            direction.lineId(),
+            createdAt,
+            etaSeconds,
+            pinFor(direction, screenPlatforms, plan));
+    pending.put(id, call);
     spawnManager.get().requeue(ticket);
+    remember(call);
     return Optional.of(id);
+  }
+
+  /**
+   * 叫车的站台：本站是 DYNAMIC 停靠、玩家右键的是单站台的屏时，指定那条股道；否则不指定（选台照常）。
+   *
+   * @param screenPlatforms 屏幕绑定的站台；空表示全站（统屏、命令）
+   */
+  private Optional<PlatformPin> pinFor(
+      CallCatalog.CallDirection direction, Set<String> screenPlatforms, CallPlanner.Plan plan) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (cache.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinition> definition = cache.get().findById(plan.routeId());
+    if (definition.isEmpty()) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = cache.get().listStops(definition.get().id());
+    if (plan.stopIndex() < 0 || plan.stopIndex() >= stops.size()) {
+      return Optional.empty();
+    }
+    return pinFor(
+        direction.platforms(),
+        screenPlatforms,
+        plan.routeId(),
+        plan.stopIndex(),
+        stops.get(plan.stopIndex()));
+  }
+
+  /**
+   * {@link #pinFor(CallCatalog.CallDirection, Set, CallPlanner.Plan)} 的判定部分。
+   *
+   * @param directionPlatforms 方向在本站的站台（屏幕筛过的 DYNAMIC 股道范围；不限股道时为空）
+   * @param stop 本站的停靠
+   */
+  static Optional<PlatformPin> pinFor(
+      Set<String> directionPlatforms,
+      Set<String> screenPlatforms,
+      UUID routeId,
+      int stopIndex,
+      RouteStop stop) {
+    if (screenPlatforms == null || screenPlatforms.isEmpty() || stop == null) {
+      return Optional.empty();
+    }
+    Optional<DynamicStopMatcher.DynamicSpec> spec = DynamicStopMatcher.parseDynamicSpec(stop);
+    if (spec.isEmpty() || !spec.get().isStation()) {
+      return Optional.empty();
+    }
+    Set<String> candidates =
+        directionPlatforms == null || directionPlatforms.isEmpty()
+            ? CallCatalog.normalizePlatforms(screenPlatforms)
+            : directionPlatforms;
+    if (candidates.size() != 1) {
+      return Optional.empty();
+    }
+    int track;
+    try {
+      track = Integer.parseInt(candidates.iterator().next());
+    } catch (NumberFormatException ex) {
+      return Optional.empty();
+    }
+    DynamicStopMatcher.DynamicSpec dynamic = spec.get();
+    if (track < 1
+        || (!dynamic.unbounded() && (track < dynamic.fromTrack() || track > dynamic.toTrack()))) {
+      return Optional.empty();
+    }
+    String node =
+        dynamic.operatorCode().trim()
+            + ":"
+            + dynamic.nodeType().trim()
+            + ":"
+            + dynamic.nodeName().trim()
+            + ":"
+            + track;
+    return Optional.of(new PlatformPin(routeId, stopIndex, node));
+  }
+
+  /**
+   * 叫来的车在这个停靠预先指定的站台（选台偏好与站台屏读同一份）。
+   *
+   * @param trainName 列车名
+   * @param routeId 列车当前交路
+   * @param stopIndex 交路节点下标
+   */
+  public Optional<String> pinnedPlatformOf(String trainName, UUID routeId, int stopIndex) {
+    if (trainName == null || routeId == null) {
+      return Optional.empty();
+    }
+    CalledTrain train = calledTrains.get(trainName);
+    return train == null
+        ? Optional.empty()
+        : train.pin().flatMap(pin -> pin.at(routeId, stopIndex));
+  }
+
+  /**
+   * 还没派出的叫车票在这个停靠预先指定的站台（站台屏排队行用）。
+   *
+   * @param ticket 发车票
+   * @param stopIndex 交路节点下标
+   */
+  public Optional<NodeId> pinnedPlatformOf(SpawnTicket ticket, int stopIndex) {
+    if (ticket == null || ticket.source() != TripSource.ON_DEMAND || ticket.service() == null) {
+      return Optional.empty();
+    }
+    PendingCall call = pending.get(ticket.id());
+    return call == null
+        ? Optional.empty()
+        : call.pin().flatMap(pin -> pin.at(ticket.service().routeId(), stopIndex)).map(NodeId::of);
+  }
+
+  // ---------------------------------------------------------------- 交路校验
+
+  /**
+   * 一条线路上没有车源的叫车方向：每条能跑这一趟的交路都是首站不是车库、没有交路在首站终到（不会有待命车）、本站上游也没有能生成车的区间点。 这样的方向不会出现在叫车对话框里。
+   *
+   * @param lineId 线路
+   */
+  public List<UnsourcedDirection> unsourcedDirections(UUID lineId) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (cache.isEmpty() || lineId == null) {
+      return List.of();
+    }
+    StationDirectory.Snapshot directory =
+        plugin.getStationDirectory().map(StationDirectory::snapshot).orElse(null);
+    Collection<RouteDefinitionCache.RouteEntry> entries = cache.get().entries();
+    List<UnsourcedDirection> out = new ArrayList<>();
+    for (PidsStationKey station : CallCatalog.stationsServed(entries, directory, lineId)) {
+      for (CallCatalog.CallDirection direction :
+          CallCatalog.directions(
+              entries,
+              directory,
+              line -> line != null && lineId.equals(line.id()),
+              station,
+              Set.of())) {
+        boolean sourced =
+            direction.routes().stream()
+                .anyMatch(
+                    route ->
+                        route.fromDepot()
+                            || standbyPossible(entries, route.startNode())
+                            || planner.entryPossible(route.routeId(), route.stopIndex()));
+        if (!sourced) {
+          out.add(new UnsourcedDirection(station, direction));
+        }
+      }
+    }
+    return List.copyOf(out);
+  }
+
+  /** 有没有交路在这个首站终到并留在待命池（终点复用）：没有的话首站永远等不来待命车。 */
+  static boolean standbyPossible(
+      Collection<RouteDefinitionCache.RouteEntry> entries, String startNode) {
+    if (entries == null || startNode == null || startNode.isBlank()) {
+      return false;
+    }
+    String start = TerminalKeyResolver.toTerminalKey(NodeId.of(startNode));
+    for (RouteDefinitionCache.RouteEntry entry : entries) {
+      if (entry == null) {
+        continue;
+      }
+      RouteDefinition definition = entry.definition();
+      if (definition.lifecycleMode() != RouteLifecycleMode.REUSE_AT_TERM
+          || definition.waypoints().isEmpty()) {
+        continue;
+      }
+      NodeId last = definition.waypoints().get(definition.waypoints().size() - 1);
+      if (TerminalKeyResolver.matches(TerminalKeyResolver.toTerminalKey(last), start)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ---------------------------------------------------------------- 存库与找回
+
+  /** 记进库里：重启后据此找回。存储不可用时只在内存里，照常派车。 */
+  private void remember(PendingCall call) {
+    try {
+      plugin
+          .getStorageManager()
+          .provider()
+          .ifPresent(provider -> provider.pendingCalls().save(call.record()));
+    } catch (StorageException | UnsupportedOperationException ex) {
+      debug("叫车写库失败 call=" + call.id() + " error=" + ex.getMessage());
+    }
+  }
+
+  /** 从库里删掉：派出、取消、超时或作废了。 */
+  private void forget(UUID callId) {
+    try {
+      plugin
+          .getStorageManager()
+          .provider()
+          .ifPresent(provider -> provider.pendingCalls().delete(callId));
+    } catch (StorageException | UnsupportedOperationException ex) {
+      debug("叫车删库失败 call=" + callId + " error=" + ex.getMessage());
+    }
+  }
+
+  /**
+   * 找回还没派出的叫车：首次启动时读库；票已经不在发车侧的（重启、发车侧重建）按原编号重新排车出票。
+   *
+   * <p>车源重新安排：重启前排的待命车或区间点此刻未必还在。已经派出（有车带着这个编号的叫车标签）的收掉；超时的撤掉；方向没了或排不出车的作废，告知玩家。
+   */
+  void restorePending(Instant now) {
+    refreshCalledTrains();
+    if (!storedCallsLoaded) {
+      storedCallsLoaded = true;
+      for (PendingCallRecord record : storedCalls()) {
+        pending.putIfAbsent(
+            record.id(),
+            new PendingCall(
+                record.id(),
+                record.playerId(),
+                record.station(),
+                record.screenPlatforms(),
+                record.directionKey(),
+                record.lineId(),
+                record.createdAt(),
+                record.etaSeconds(),
+                Optional.empty()));
+      }
+    }
+    if (pending.isEmpty()) {
+      return;
+    }
+    Set<UUID> dispatched = dispatchedCallIds();
+    Optional<TicketAssigner> assigner = plugin.getSpawnTicketAssigner();
+    for (PendingCall call : List.copyOf(pending.values())) {
+      if (dispatched.contains(call.id())) {
+        pending.remove(call.id());
+        forget(call.id());
+        continue;
+      }
+      if (assigner.map(a -> a.isTicketLive(call.id())).orElse(false)) {
+        continue;
+      }
+      if (now.isAfter(call.createdAt().plus(timeoutOf(call)))) {
+        dropPending(call, "call.timeout", "叫车找回时已超时");
+        continue;
+      }
+      if (!reissue(call, now)) {
+        dropPending(call, "call.failed", "叫车找回后排不出车");
+        continue;
+      }
+      debug("叫车已找回并重新出票 call=" + call.id());
+    }
+    hints.clear();
+  }
+
+  private List<PendingCallRecord> storedCalls() {
+    try {
+      return plugin
+          .getStorageManager()
+          .provider()
+          .map(provider -> provider.pendingCalls().listAll())
+          .orElse(List.of());
+    } catch (StorageException | UnsupportedOperationException ex) {
+      debug("读取未派出的叫车失败 error=" + ex.getMessage());
+      return List.of();
+    }
+  }
+
+  /** 按原编号重新排车出票；方向没了（线路关了叫车、交路改了）或排不出车时为 false。 */
+  private boolean reissue(PendingCall call, Instant now) {
+    Optional<CallCatalog.CallDirection> direction =
+        directions(call.station(), call.screenPlatforms()).stream()
+            .filter(candidate -> candidate.key().equals(call.directionKey()))
+            .findFirst();
+    if (direction.isEmpty()) {
+      return false;
+    }
+    Optional<CallPlanner.Plan> plan = planner.plan(direction.get(), dutyBoundPredicate(), now);
+    if (plan.isEmpty()) {
+      return false;
+    }
+    long waited = Math.max(0L, Duration.between(call.createdAt(), now).toSeconds());
+    OptionalInt eta =
+        plan.get().etaSeconds().isPresent()
+            ? OptionalInt.of(
+                (int) Math.min(Integer.MAX_VALUE, waited + plan.get().etaSeconds().getAsInt()))
+            : OptionalInt.empty();
+    return issue(
+            call.station(),
+            call.screenPlatforms(),
+            direction.get(),
+            plan.get(),
+            call.playerId(),
+            call.id(),
+            call.createdAt(),
+            eta,
+            now)
+        .isPresent();
+  }
+
+  private void dropPending(PendingCall call, String messageKey, String reason) {
+    pending.remove(call.id());
+    forget(call.id());
+    hints.clear();
+    debug(reason + " call=" + call.id());
+    notifyPlayer(call.playerId(), messageKey, Map.of());
+  }
+
+  /** 叫车等多久没派出就撤：预计到站再加 5 分钟，至少 {@link #PENDING_MIN_TIMEOUT}。 */
+  private static Duration timeoutOf(PendingCall call) {
+    Duration timeout =
+        call.etaSeconds().isPresent()
+            ? Duration.ofSeconds(call.etaSeconds().getAsInt()).plusMinutes(5)
+            : PENDING_MIN_TIMEOUT;
+    return timeout.compareTo(PENDING_MIN_TIMEOUT) < 0 ? PENDING_MIN_TIMEOUT : timeout;
+  }
+
+  private Set<UUID> dispatchedCallIds() {
+    Set<UUID> dispatched = new HashSet<>();
+    for (CalledTrain train : calledTrains.values()) {
+      dispatched.add(train.tag().callId());
+    }
+    return dispatched;
   }
 
   /** 交路的发车服务：发车计划里有就用它（车库规范一致），否则按交路现拼一份（叫车不靠发车间隔，间隔只是占位）。 */
@@ -489,20 +909,27 @@ public final class CallService {
     if (tag.isEmpty()) {
       return;
     }
+    PendingCall call = pending.remove(tag.get().callId());
+    Optional<PlatformPin> pin = call == null ? Optional.empty() : call.pin();
     try {
       if (TrainPropertiesStore.exists(trainName)) {
+        TrainProperties properties = TrainPropertiesStore.get(trainName);
         TrainTagHelper.writeTag(
-            TrainPropertiesStore.get(trainName),
-            SimpleTicketAssigner.TAG_CALLED_TRAIN,
-            tag.get().format());
+            properties, SimpleTicketAssigner.TAG_CALLED_TRAIN, tag.get().format());
+        // 接着跑下一趟叫车时上一趟的站台不再算数：没有指定站台就摘掉旧的。
+        if (pin.isPresent()) {
+          TrainTagHelper.writeTag(properties, TAG_CALL_PLATFORM, pin.get().format());
+        } else {
+          TrainTagHelper.removeTagKey(properties, TAG_CALL_PLATFORM);
+        }
       }
     } catch (RuntimeException | LinkageError ex) {
       debug("叫车标签写入失败 train=" + trainName + " error=" + ex);
     }
     Map<String, CalledTrain> updated = new HashMap<>(calledTrains);
-    updated.put(trainName, new CalledTrain(trainName, tag.get(), lineIdOf(ticket)));
+    updated.put(trainName, new CalledTrain(trainName, tag.get(), lineIdOf(ticket), pin));
     calledTrains = Map.copyOf(updated);
-    PendingCall call = pending.remove(tag.get().callId());
+    forget(tag.get().callId());
     hints.clear();
     plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
     debug("叫车派出 call=" + tag.get().callId() + " train=" + trainName);
@@ -556,12 +983,20 @@ public final class CallService {
               .flatMap(CallService::parseUuid)
               .flatMap(routeId -> cache.flatMap(c -> c.findRecord(routeId)));
       if (record.isPresent() && record.get().route().operationType() == RouteOperationType.RETURN) {
-        TrainTagHelper.removeTagKey(properties, SimpleTicketAssigner.TAG_CALLED_TRAIN);
+        TrainTagHelper.removeTagKeys(
+            properties, SimpleTicketAssigner.TAG_CALLED_TRAIN, TAG_CALL_PLATFORM);
         debug("叫来的车已派回库，摘掉叫车标签 train=" + properties.getTrainName());
         continue;
       }
       String name = properties.getTrainName();
-      found.put(name, new CalledTrain(name, tag.get(), record.map(r -> r.line().id())));
+      found.put(
+          name,
+          new CalledTrain(
+              name,
+              tag.get(),
+              record.map(r -> r.line().id()),
+              TrainTagHelper.readTagValue(properties, TAG_CALL_PLATFORM)
+                  .flatMap(PlatformPin::parse)));
     }
     calledTrains = Map.copyOf(found);
   }
@@ -571,37 +1006,22 @@ public final class CallService {
     if (pending.isEmpty()) {
       return;
     }
-    Set<UUID> dispatched = new HashSet<>();
-    for (CalledTrain train : calledTrains.values()) {
-      dispatched.add(train.tag().callId());
-    }
+    Set<UUID> dispatched = dispatchedCallIds();
     Optional<TicketAssigner> assigner = plugin.getSpawnTicketAssigner();
     for (PendingCall call : List.copyOf(pending.values())) {
       if (dispatched.contains(call.id())) {
         pending.remove(call.id());
+        forget(call.id());
         continue;
       }
       boolean live = assigner.map(a -> a.isTicketLive(call.id())).orElse(false);
       if (!live) {
-        pending.remove(call.id());
-        hints.clear();
-        debug("叫车未能派出 call=" + call.id());
-        notifyPlayer(call.playerId(), "call.failed", Map.of());
+        dropPending(call, "call.failed", "叫车未能派出");
         continue;
       }
-      Duration timeout =
-          call.etaSeconds().isPresent()
-              ? Duration.ofSeconds(call.etaSeconds().getAsInt()).plusMinutes(5)
-              : PENDING_MIN_TIMEOUT;
-      if (timeout.compareTo(PENDING_MIN_TIMEOUT) < 0) {
-        timeout = PENDING_MIN_TIMEOUT;
-      }
-      if (now.isAfter(call.createdAt().plus(timeout))
+      if (now.isAfter(call.createdAt().plus(timeoutOf(call)))
           && assigner.map(a -> a.withdraw(call.id())).orElse(false)) {
-        pending.remove(call.id());
-        hints.clear();
-        debug("叫车等候超时撤票 call=" + call.id());
-        notifyPlayer(call.playerId(), "call.timeout", Map.of());
+        dropPending(call, "call.timeout", "叫车等候超时撤票");
       }
     }
   }

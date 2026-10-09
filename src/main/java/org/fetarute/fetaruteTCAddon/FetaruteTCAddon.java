@@ -1490,6 +1490,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
       etaService.attachPlacedStops(runtimeDispatchService::hasEffectiveNode);
       // 选台前站牌写计划站台（时刻表排定）或下一个停车站的暂定站台，与选台偏好同一份。
       etaService.attachPlannedPlatforms(runtimeDispatchService.stationStops()::displayPlatform);
+      // 还没派出的叫车票：站牌排队行写叫车指定的站台（右键的那条）。
+      etaService.attachTicketPlatforms(
+          (ticket, index) ->
+              getCallService().flatMap(calls -> calls.pinnedPlatformOf(ticket, index)));
     }
     // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
     etaService.attachStationPresence(this::getStationPresence);
@@ -1667,6 +1671,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
                             .doorOpenDelaySeconds())),
             java.time.Duration.ofSeconds(settings.maxDelaySeconds())));
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
+    // 叫来的车不归时刻表排站台：DYNAMIC 停靠停右键的那条，选台与站牌读同一份。
+    runtimeDispatchService
+        .stationStops()
+        .setPinnedPlatforms(
+            (trainName, routeId, stopIndex) ->
+                getCallService()
+                    .flatMap(calls -> calls.pinnedPlatformOf(trainName, routeId, stopIndex)));
     // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
     // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
     stationStopHub.register(

@@ -1029,6 +1029,7 @@ command:
       spawn-baseline-missing: "<prefix> <red>交路组与线路都缺少发车基线</red> <gray>(group=<white><group></white>)</gray>"
       spawn-weight-missing: "<prefix> <red>同一交路组有多条运营运行图，但本运行图未设置出车权重（spawn_weight）</red> <gray>(group=<white><group></white>)</gray>"
       create-missing-cret: "<prefix> <red>出库运行图的首个停靠点必须写 CRET</red>"
+      call-no-source: "<prefix> <red>叫车方向没有车源</red> <gray>（<white><station></white> 站开往 <white><destination></white>，<line> <type>）：首站不是车库，没有运行图在首站终到，本站上游也没有可生成列车的区间点；该方向不会出现在叫车对话框中</gray>"
 
     editor:
       append:

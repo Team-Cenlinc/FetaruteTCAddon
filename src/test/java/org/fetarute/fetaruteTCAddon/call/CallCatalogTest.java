@@ -161,6 +161,25 @@ class CallCatalogTest {
     assertTrue(directions.get(0).routes().get(0).fromDepot());
   }
 
+  /** 线路停车的车站：只算本线运营交路、在终点之前停车的站，按交路顺序去重。 */
+  @Test
+  void stationsServedListsEveryStopBeforeTheTerminal() {
+    List<RouteDefinitionCache.RouteEntry> entries =
+        List.of(
+            route(
+                WS, "WS-N", RoutePatternType.LOCAL, "SURC:S:AAA:1", "SURC:S:PPK:2", "SURC:S:NTA:1"),
+            route(
+                WS, "WS-S", RoutePatternType.LOCAL, "SURC:S:NTA:1", "SURC:S:PPK:1", "SURC:S:AAA:1"),
+            route(MT, "MT-N", RoutePatternType.LOCAL, "SURC:S:CCC:1", "SURC:S:DDD:1"));
+
+    assertEquals(
+        List.of(
+            new PidsStationKey("SURC", "AAA"),
+            new PidsStationKey("SURC", "PPK"),
+            new PidsStationKey("SURC", "NTA")),
+        CallCatalog.stationsServed(entries, null, WS.id()));
+  }
+
   private static RouteDefinitionCache.RouteEntry route(
       Line line, String code, RoutePatternType pattern, String... nodes) {
     UUID routeId = UUID.randomUUID();

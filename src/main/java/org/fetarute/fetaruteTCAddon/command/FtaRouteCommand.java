@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -1532,7 +1533,7 @@ public final class FtaRouteCommand {
                   }
 
                   List<RouteValidationEntry> entries = new ArrayList<>();
-                  int routeIssueCount = 0;
+                  Set<String> issueRoutes = new LinkedHashSet<>();
                   boolean reachabilitySkipped = false;
                   List<Route> allLineRoutes = provider.routes().listByLine(resolved.line().id());
                   Map<UUID, List<RouteStop>> stopsByRoute = new HashMap<>();
@@ -1556,7 +1557,7 @@ public final class FtaRouteCommand {
                     if (result.issues().isEmpty() && spawnIssues.isEmpty()) {
                       continue;
                     }
-                    routeIssueCount++;
+                    issueRoutes.add(route.code());
                     for (RouteValidationIssue issue : result.issues()) {
                       entries.add(new RouteValidationEntry(route.code(), issue));
                     }
@@ -1564,6 +1565,8 @@ public final class FtaRouteCommand {
                       entries.add(new RouteValidationEntry(route.code(), issue));
                     }
                   }
+                  callSourceIssues(resolved.line(), routes, issueRoutes, entries);
+                  int routeIssueCount = issueRoutes.size();
 
                   sender.sendMessage(
                       locale.component(
@@ -3827,6 +3830,47 @@ public final class FtaRouteCommand {
       }
     }
     return new RouteValidationResult(List.copyOf(issues), reachabilitySkipped);
+  }
+
+  /**
+   * 线路开了叫车时，列出没有车源的叫车方向：每条能跑这一趟的交路都是首站不是车库、没有交路在首站终到、本站上游也没有能生成车的区间点。 这样的方向不会出现在叫车对话框里。
+   *
+   * <p>挂在能跑这一趟、又在本次校验范围里的交路上（几条交路用 “/” 连起来）。
+   */
+  private void callSourceIssues(
+      Line line, List<Route> routes, Set<String> issueRoutes, List<RouteValidationEntry> entries) {
+    if (line == null
+        || !org.fetarute.fetaruteTCAddon.call.LineCallMetadata.allowsPlayerCall(line.metadata())) {
+      return;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.call.CallService> calls = plugin.getCallService();
+    if (calls.isEmpty()) {
+      return;
+    }
+    Set<UUID> validated = new HashSet<>();
+    for (Route route : routes) {
+      validated.add(route.id());
+    }
+    for (org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection unsourced :
+        calls.get().unsourcedDirections(line.id())) {
+      List<String> codes =
+          unsourced.direction().routes().stream()
+              .filter(route -> validated.contains(route.routeId()))
+              .map(org.fetarute.fetaruteTCAddon.call.CallCatalog.CallRoute::routeCode)
+              .toList();
+      if (codes.isEmpty()) {
+        continue;
+      }
+      Map<String, String> params =
+          new HashMap<>(calls.get().directionPlaceholders(unsourced.direction()));
+      params.put("station", calls.get().stationName(unsourced.station()));
+      String routeCodes = String.join("/", codes);
+      issueRoutes.addAll(codes);
+      entries.add(
+          new RouteValidationEntry(
+              routeCodes,
+              new RouteValidationIssue("command.route.validate.call-no-source", params)));
+    }
   }
 
   /**

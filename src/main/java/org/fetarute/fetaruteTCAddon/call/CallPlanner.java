@@ -259,6 +259,34 @@ final class CallPlanner {
   }
 
   /**
+   * 本站上游有没有能生成车的区间点：只看轨道几何（离本站够远、车身那一段放得下又没有道岔），不看此刻的占用与附近玩家（交路校验用）。
+   *
+   * @return 交路或调度图查不到时为 false
+   */
+  boolean entryPossible(UUID routeId, int stopIndex) {
+    Optional<RouteDefinition> definition =
+        plugin.getRouteDefinitionCache().flatMap(cache -> cache.findById(routeId));
+    Optional<WorldGraph> graph = definition.flatMap(this::graphOf);
+    if (definition.isEmpty() || graph.isEmpty()) {
+      return false;
+    }
+    RouteGeometry geometry =
+        geometryOf(routeId, definition.get(), graph.get(), trainLengthBlocks(routeId));
+    long distance = 0L;
+    for (int j = stopIndex - 1; j >= 1; j--) {
+      long leg = geometry.legBlocks()[j];
+      if (leg < 0L) {
+        return false;
+      }
+      distance += leg;
+      if (distance >= ENTRY_MIN_DISTANCE_BLOCKS && geometry.entryOk()[j]) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
    * 交路的轨道几何：{@code legBlocks[i]} 是节点 i 到 i+1 的轨道长度（不可达为 -1）；{@code entryOk[j]} 表示节点 j 是区间点、
    * 它后方那一段放得下整列车且没有道岔、咽喉、车站。
    */

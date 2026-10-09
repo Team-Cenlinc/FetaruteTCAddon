@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.storage.api;
 
+import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
@@ -83,6 +84,9 @@ public interface StorageProvider extends AutoCloseable {
 
   /** 站台屏公告。 */
   PidsBulletinRepository pidsBulletins();
+
+  /** 还没派出的叫车。 */
+  PendingCallRepository pendingCalls();
 
   StorageTransactionManager transactionManager();
 

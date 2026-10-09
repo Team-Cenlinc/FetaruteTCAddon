@@ -71,6 +71,7 @@ public final class StorageSchema {
     ddl.add(consistPlans(dialect));
     ddl.add(pidsScreens(dialect));
     ddl.add(pidsBulletins(dialect));
+    ddl.add(pendingCalls(dialect));
     ddl.add(railNodes(dialect));
     ddl.add(index("rail_nodes_world", "rail_nodes", "world_id"));
     // 拆牌、建牌同步按坐标查删节点（主线程同步执行），不能扫整个世界。
@@ -781,6 +782,34 @@ public final class StorageSchema {
         dialect.uuidType(),
         dialect.timestampType(),
         dialect.timestampType());
+  }
+
+  /** 还没派出的叫车：重启后按它重新排车出票。车站按运营商代码与站码记录（与站台屏一致），屏幕站台存为 JSON 字符串数组；派出、取消、超时即删除，行数很少。 */
+  private String pendingCalls(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    player_uuid %s NOT NULL,
+                    operator_code %s NOT NULL,
+                    station_code %s NOT NULL,
+                    screen_platforms %s,
+                    direction_key %s NOT NULL,
+                    line_id %s NOT NULL,
+                    created_at %s NOT NULL,
+                    eta_seconds %s
+                );
+                """,
+        table("pending_calls"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.textType(),
+        dialect.uuidType(),
+        dialect.timestampType(),
+        dialect.intType());
   }
 
   private String railNodes(SqlDialect dialect) {

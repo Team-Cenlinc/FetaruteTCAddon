@@ -53,6 +53,9 @@ public final class StationStopCoordinator {
   private volatile StationStopObserver observer;
   private volatile ScheduledDeparturePlan plan;
 
+  /** 预先指定的站台（叫来的车）；时刻表没有排定站台时才看它。 */
+  private volatile PinnedPlatforms pinnedPlatforms = PinnedPlatforms.NONE;
+
   /** 选台器：站牌经本类读暂定站台，站台落定事件经本类读原计划。调度服务构造时接上。 */
   private volatile DynamicPlatformAllocator platforms;
 
@@ -115,17 +118,58 @@ public final class StationStopCoordinator {
   }
 
   /**
-   * 计划站台（{@link DynamicPlatformAllocator.PlatformPreference}）：按当前计划源查这辆车在该停靠点排定的股道。 没有计划源或没有计划时为空。
+   * 计划站台（{@link DynamicPlatformAllocator.PlatformPreference}）：按当前计划源查这辆车在该停靠点排定的股道；时刻表没有排定时，
+   * 看这辆车有没有预先指定的站台（叫来的车停右键的那条）。都没有时为空。
    */
   Optional<NodeId> plannedPlatform(String trainName, RouteDefinition route, int stopIndex) {
-    ScheduledDeparturePlan current = plan;
-    if (current == null || route == null || routeDefinitions == null) {
+    if (route == null || routeDefinitions == null) {
       return Optional.empty();
     }
-    return routeDefinitions
-        .findUuid(route.id())
-        .flatMap(routeId -> current.plannedPlatformOf(trainName, routeId, stopIndex))
-        .map(NodeId::of);
+    Optional<UUID> routeId = routeDefinitions.findUuid(route.id());
+    if (routeId.isEmpty()) {
+      return Optional.empty();
+    }
+    ScheduledDeparturePlan current = plan;
+    Optional<String> planned =
+        current == null
+            ? Optional.empty()
+            : current.plannedPlatformOf(trainName, routeId.get(), stopIndex);
+    if (planned.isEmpty()) {
+      try {
+        Optional<String> pinned =
+            pinnedPlatforms.pinnedPlatformOf(trainName, routeId.get(), stopIndex);
+        planned = pinned == null ? Optional.empty() : pinned;
+      } catch (RuntimeException ex) {
+        debugLogger.accept(
+            "PINNED_PLATFORM_READ_FAILED train="
+                + trainName
+                + " stopIndex="
+                + stopIndex
+                + " error="
+                + ex);
+      }
+    }
+    return planned.map(NodeId::of);
+  }
+
+  /** 预先指定的站台：不归时刻表排、但这一趟要停某条股道的车（叫来的车停右键的那条）。只读、廉价，信号 tick 里每车可能问一次。 */
+  @FunctionalInterface
+  public interface PinnedPlatforms {
+
+    PinnedPlatforms NONE = (trainName, routeId, stopIndex) -> Optional.empty();
+
+    /**
+     * @param trainName 列车名
+     * @param routeId 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 指定的股道节点；没有时为空
+     */
+    Optional<String> pinnedPlatformOf(String trainName, UUID routeId, int stopIndex);
+  }
+
+  /** 接上预先指定站台的来源；{@code null} 表示没有。 */
+  public void setPinnedPlatforms(PinnedPlatforms next) {
+    this.pinnedPlatforms = next == null ? PinnedPlatforms.NONE : next;
   }
 
   /** 接上选台器（调度服务构造时）。 */

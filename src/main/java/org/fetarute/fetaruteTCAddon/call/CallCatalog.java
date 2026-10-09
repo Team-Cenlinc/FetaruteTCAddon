@@ -102,7 +102,7 @@ public final class CallCatalog {
     if (entries == null || station == null) {
       return List.of();
     }
-    Set<String> screen = normalize(screenPlatforms);
+    Set<String> screen = normalizePlatforms(screenPlatforms);
     Map<String, Builder> byKey = new LinkedHashMap<>();
     for (RouteDefinitionCache.RouteEntry entry : entries) {
       if (entry == null
@@ -190,6 +190,50 @@ public final class CallCatalog {
     return List.copyOf(out);
   }
 
+  /**
+   * 一条线路的运营交路停车的车站（不含终点），按交路顺序去重。
+   *
+   * @param entries 交路缓存的全部交路
+   * @param directory 车站目录快照
+   * @param lineId 线路
+   */
+  public static List<PidsStationKey> stationsServed(
+      Collection<RouteDefinitionCache.RouteEntry> entries,
+      StationDirectory.Snapshot directory,
+      UUID lineId) {
+    if (entries == null || lineId == null) {
+      return List.of();
+    }
+    Set<PidsStationKey> out = new java.util.LinkedHashSet<>();
+    for (RouteDefinitionCache.RouteEntry entry : entries) {
+      if (entry == null
+          || entry.record().route().operationType() != RouteOperationType.OPERATION
+          || !lineId.equals(entry.record().line().id())) {
+        continue;
+      }
+      List<RouteStop> stops = entry.stops();
+      if (stops.size() != entry.definition().waypoints().size() || stops.size() < 2) {
+        continue;
+      }
+      OptionalInt end = RouteTerminals.endOfOperationIndex(stops);
+      if (end.isEmpty()) {
+        continue;
+      }
+      List<StationDirectory.StopStation> stations =
+          directory == null
+              ? List.of()
+              : directory.stopStations(
+                  entry.routeId(), stops, Optional.of(entry.record().operator()));
+      for (int i = 0; i < end.getAsInt(); i++) {
+        RouteStop stop = stops.get(i);
+        if (stop.stops() && RouteTerminals.isStationStop(stop)) {
+          stationKeyAt(entry, stops, stations, i).ifPresent(out::add);
+        }
+      }
+    }
+    return List.copyOf(out);
+  }
+
   /** 停靠点所在车站：站台节点、DYNAMIC 车站规范直接读，只绑定 stationId 的经车站目录查。 */
   private static Optional<PidsStationKey> stationKeyAt(
       RouteDefinitionCache.RouteEntry entry,
@@ -237,7 +281,8 @@ public final class CallCatalog {
     return "-".equals(platform) ? Set.of() : Set.of(platform);
   }
 
-  private static Set<String> normalize(Set<String> platforms) {
+  /** 站台号统一写法：数字去掉前导零，其余转大写。 */
+  static Set<String> normalizePlatforms(Set<String> platforms) {
     if (platforms == null || platforms.isEmpty()) {
       return Set.of();
     }
