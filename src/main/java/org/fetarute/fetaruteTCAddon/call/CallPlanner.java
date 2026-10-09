@@ -98,6 +98,10 @@ final class CallPlanner {
   private final FetaruteTCAddon plugin;
   private final Map<UUID, CachedTiming> timings = new ConcurrentHashMap<>();
   private final Map<UUID, RouteGeometry> geometries = new ConcurrentHashMap<>();
+
+  /** 各交路的车长（格）：量车长要把编组方案连同各车厢的存档整个解析一遍，站台屏每次判定都要用，按交路记住。 */
+  private final Map<UUID, Long> trainLengths = new ConcurrentHashMap<>();
+
   private final TimetableTimingCalculator timingCalculator = new TimetableTimingCalculator();
   private final RailGraphPathFinder pathFinder = new RailGraphPathFinder();
 
@@ -369,16 +373,26 @@ final class CallPlanner {
     return false;
   }
 
-  /** 交路编组的车长（交路写了 spawn_train_pattern 时按它算），否则取保守的默认值。 */
-  private long trainLengthBlocks(UUID routeId) {
-    return plugin
-        .getRouteDefinitionCache()
-        .flatMap(cache -> cache.findRecord(routeId))
-        .flatMap(record -> DepotSpawnPattern.fromRoute(record.route()))
-        .map(SpawnPatternLength::of)
-        .filter(OptionalLong::isPresent)
-        .map(OptionalLong::getAsLong)
-        .orElse(DEFAULT_TRAIN_LENGTH_BLOCKS);
+  /**
+   * 交路编组的车长（交路写了 spawn_train_pattern 时按它算），否则取保守的默认值。按交路记住，交路改了随 {@link #clearTimings} 作废；
+   * 写了编组却量不出来（TrainCarts 还没读入存档车）时不记，下次再量。
+   */
+  long trainLengthBlocks(UUID routeId) {
+    Long known = trainLengths.get(routeId);
+    if (known != null) {
+      return known;
+    }
+    Optional<String> pattern =
+        plugin
+            .getRouteDefinitionCache()
+            .flatMap(cache -> cache.findRecord(routeId))
+            .flatMap(record -> DepotSpawnPattern.fromRoute(record.route()));
+    OptionalLong measured = pattern.map(SpawnPatternLength::of).orElse(OptionalLong.empty());
+    long length = measured.orElse(DEFAULT_TRAIN_LENGTH_BLOCKS);
+    if (pattern.isEmpty() || measured.isPresent()) {
+      trainLengths.put(routeId, length);
+    }
+    return length;
   }
 
   Optional<WorldGraph> graphOf(RouteDefinition definition) {
@@ -438,10 +452,11 @@ final class CallPlanner {
     }
   }
 
-  /** 交路改了以后旧的时分与几何不能再用。 */
+  /** 交路改了以后旧的时分、几何与车长不能再用。 */
   void clearTimings() {
     timings.clear();
     geometries.clear();
+    trainLengths.clear();
   }
 
   /** 交路所在世界与该世界的调度图。 */

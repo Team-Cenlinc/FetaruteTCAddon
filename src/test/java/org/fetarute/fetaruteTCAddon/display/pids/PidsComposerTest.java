@@ -220,6 +220,36 @@ class PidsComposerTest {
     assertEquals(256, content.image().get().getHeight());
   }
 
+  /** 各种屏幕什么时候判定能不能叫车（要排车源）：站台屏排满了班次不问、有空行才问；停站屏最下一行写提示，每次都问；车站统屏不写提示，从不问。 */
+  @Test
+  void eachKindOfScreenAsksForTheCallHintOnlyWhenItCanShowIt() {
+    int[] asked = {0};
+    composer.setCalls(
+        screen ->
+            new PidsViewBuilder.Calls(
+                () -> {
+                  asked[0]++;
+                  return true;
+                },
+                Set.of()));
+    PidsScreen platform = register(PidsScreen.Mode.LIVE, Set.of());
+    PidsScreen stopList = register(PidsScreen.Mode.LIVE, Set.of(), "platform-2x1", 2, 1);
+    PidsScreen station = registerPaged(PidsScreen.Mode.LIVE, "station-3x5");
+
+    composer.content(Optional.of(platform.id()), 384, 128);
+    assertEquals(0, asked[0], "站台屏三行都有车");
+
+    rows = List.of(row("WS", 60));
+    composer.content(Optional.of(platform.id()), 384, 128);
+    assertEquals(1, asked[0], "站台屏有空行");
+
+    composer.content(Optional.of(station.id()), 640, 384);
+    assertEquals(1, asked[0], "车站统屏");
+
+    composer.content(Optional.of(stopList.id()), 128, 256);
+    assertEquals(2, asked[0], "停站屏");
+  }
+
   /** 本站台第一班在本站终到：乘客不能上，照常翻到宣传页。 */
   @Test
   void aTerminatingTrainDoesNotHoldTheMainPage() {

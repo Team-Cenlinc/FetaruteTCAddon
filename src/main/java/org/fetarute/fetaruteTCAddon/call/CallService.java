@@ -18,6 +18,8 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 import java.util.function.Predicate;
 import net.kyori.adventure.text.Component;
@@ -80,6 +82,9 @@ public final class CallService {
   private static final Duration LINE_CACHE_TTL = Duration.ofSeconds(10);
   private static final Duration PENDING_MIN_TIMEOUT = Duration.ofMinutes(10);
   private static final Duration RETURN_RETRY = Duration.ofSeconds(10);
+
+  /** 同一玩家右键站台屏开叫车对话框的最短间隔。 */
+  static final Duration DIALOG_INTERVAL = Duration.ofSeconds(1);
 
   /** 启动后多久才找回还没派出的叫车：等启动时的现场占用重建、待命池登记做完，车源按真实现场排；这之前不撤还没回到发车侧的票。 */
   static final Duration RESTORE_DELAY = Duration.ofSeconds(30);
@@ -205,11 +210,22 @@ public final class CallService {
   private final CallPlanner planner;
   private final Map<UUID, PendingCall> pending = new ConcurrentHashMap<>();
   private final Map<UUID, Instant> lastCallByPlayer = new ConcurrentHashMap<>();
+  private final Map<UUID, Instant> lastDialogByPlayer = new ConcurrentHashMap<>();
   private final Map<String, Instant> returnRetryAt = new ConcurrentHashMap<>();
   private final Map<HintKey, CachedHint> hints = new ConcurrentHashMap<>();
   private volatile Map<String, CalledTrain> calledTrains = Map.of();
   private volatile Map<UUID, Line> lines = Map.of();
   private volatile Instant linesLoadedAt = Instant.EPOCH;
+
+  /** 正在后台重读线路开关。 */
+  private final AtomicBoolean linesLoading = new AtomicBoolean();
+
+  /** 线路开关至少成功读到过一次。 */
+  private volatile boolean linesLoaded;
+
+  /** 线路开关作废的次数：读到一半被作废的那一份读完后不算新鲜，下次用到时再读。 */
+  private final AtomicLong linesGeneration = new AtomicLong();
+
   private boolean storedCallsLoaded;
 
   /** 下一次找回还没派出的叫车的时刻；为空表示不必找回（已找回，或还没启动）。 */
@@ -231,6 +247,7 @@ public final class CallService {
   public void start() {
     stop();
     restoreDueAt = Instant.now().plus(RESTORE_DELAY);
+    reloadLines();
     task =
         Bukkit.getScheduler()
             .runTaskTimer(
@@ -247,6 +264,7 @@ public final class CallService {
   /** 交路或线路改了：丢掉缓存的走行时分与线路开关。 */
   public void invalidate() {
     planner.clearTimings();
+    linesGeneration.incrementAndGet();
     linesLoadedAt = Instant.EPOCH;
     hints.clear();
   }
@@ -254,7 +272,7 @@ public final class CallService {
   // ---------------------------------------------------------------- 查询
 
   /**
-   * 车站上能叫的车（按方向）。
+   * 车站上能叫的车（按方向）。每个方向都排车源：对话框要据此隐去没有车可派的方向。
    *
    * @param station 车站
    * @param platforms 屏幕绑定的站台；空表示全站
@@ -263,62 +281,24 @@ public final class CallService {
    */
   public List<CallOption> options(
       PidsStationKey station, Set<String> platforms, Optional<UUID> playerId, Instant now) {
-    return options(station, platforms, playerId, now, true);
-  }
-
-  /**
-   * @param planAll 每个方向都排车源（对话框要据此隐去没有车可派的方向）；为假时只给“除车源外都能叫”的方向排（站台屏提示只关心能不能叫）
-   */
-  private List<CallOption> options(
-      PidsStationKey station,
-      Set<String> platforms,
-      Optional<UUID> playerId,
-      Instant now,
-      boolean planAll) {
     List<CallCatalog.CallDirection> directions = directions(station, platforms);
     if (directions.isEmpty()) {
       return List.of();
     }
-    List<PidsRow> rows = rowsAt(station);
-    Map<UUID, Integer> active = activeCallsByLine();
-    Predicate<String> dutyBound = dutyBoundPredicate();
-    long cooldown = playerId.map(id -> cooldownSeconds(id, now)).orElse(0L);
+    Scene scene = scene(station, playerId, now);
     List<CallOption> out = new ArrayList<>(directions.size());
     for (CallCatalog.CallDirection direction : directions) {
-      CallRules.Input assumingSource =
-          new CallRules.Input(
-              true,
-              calledMinutes(direction, station, rows, now),
-              nextTrainMinutes(direction, rows, now),
-              settings().minWaitMinutes(),
-              active.getOrDefault(direction.lineId(), 0),
-              maxCalls(direction.lineId()),
-              cooldown,
-              OptionalInt.empty());
-      CallRules.Verdict withoutPlan = CallRules.evaluate(assumingSource);
-      if (!planAll && !withoutPlan.callable()) {
-        out.add(new CallOption(direction, withoutPlan, Optional.empty()));
-        continue;
-      }
-      Optional<CallPlanner.Plan> plan = planner.plan(direction, dutyBound, now);
-      CallRules.Verdict verdict =
-          CallRules.evaluate(
-              new CallRules.Input(
-                  plan.isPresent(),
-                  assumingSource.calledTrainMinutes(),
-                  assumingSource.nextTrainMinutes(),
-                  assumingSource.minWaitMinutes(),
-                  assumingSource.activeCalls(),
-                  assumingSource.maxCalls(),
-                  assumingSource.cooldownSeconds(),
-                  plan.map(CallPlanner.Plan::etaMinutes).orElse(OptionalInt.empty())));
-      out.add(new CallOption(direction, verdict, plan.map(p -> new CallPlan(p.etaMinutes()))));
+      CallRules.Input assumingSource = withoutPlan(direction, scene);
+      Optional<CallPlanner.Plan> plan = planner.plan(direction, scene.dutyBound(), now);
+      out.add(withPlan(direction, assumingSource, plan));
     }
     return List.copyOf(out);
   }
 
   /**
    * 站台屏要不要写“可右键本屏叫车”：屏幕上有一个方向此刻能叫（不算个人冷却）。按 {@link #HINT_TTL} 缓存。
+   *
+   * <p>先按屏幕的线路筛选、看除车源以外的条件（下一班多久到、车数上限），过了的方向才排车源，排到一个就停。
    *
    * @param station 车站
    * @param platforms 屏幕绑定的站台；空表示全站
@@ -340,22 +320,116 @@ public final class CallService {
     }
     boolean callable = false;
     try {
-      for (CallOption option : options(station, key.platforms(), Optional.empty(), now, false)) {
-        if (!key.lines().isEmpty()
-            && key.lines().stream()
-                .noneMatch(line -> line.equalsIgnoreCase(option.direction().lineCode()))) {
-          continue;
-        }
-        if (option.verdict().callable()) {
-          callable = true;
-          break;
-        }
-      }
+      callable = anyCallable(key, now);
     } catch (RuntimeException ex) {
       debug("叫车提示计算失败 station=" + station + " error=" + ex);
     }
     hints.put(key, new CachedHint(now, callable));
     return callable;
+  }
+
+  private boolean anyCallable(HintKey key, Instant now) {
+    List<CallCatalog.CallDirection> directions = new ArrayList<>();
+    for (CallCatalog.CallDirection direction : directions(key.station(), key.platforms())) {
+      if (key.lines().isEmpty()
+          || key.lines().stream().anyMatch(line -> line.equalsIgnoreCase(direction.lineCode()))) {
+        directions.add(direction);
+      }
+    }
+    if (directions.isEmpty()) {
+      return false;
+    }
+    Scene scene = scene(key.station(), Optional.empty(), now);
+    List<CallCatalog.CallDirection> candidates = new ArrayList<>();
+    List<CallRules.Input> inputs = new ArrayList<>();
+    for (CallCatalog.CallDirection direction : directions) {
+      CallRules.Input assumingSource = withoutPlan(direction, scene);
+      if (CallRules.evaluate(assumingSource).callable()) {
+        candidates.add(direction);
+        inputs.add(assumingSource);
+      }
+    }
+    for (int i = 0; i < candidates.size(); i++) {
+      CallCatalog.CallDirection direction = candidates.get(i);
+      Optional<CallPlanner.Plan> plan = planner.plan(direction, scene.dutyBound(), now);
+      if (withPlan(direction, inputs.get(i), plan).verdict().callable()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * 判定要用的现场：站台屏的行、各线路的叫车数、列车是否绑着时刻表交路、个人冷却。一次判定只取一次。
+   *
+   * @param cooldownSeconds 叫车玩家的个人冷却还剩几秒；不算玩家时为 0
+   */
+  private record Scene(
+      PidsStationKey station,
+      List<PidsRow> rows,
+      Map<UUID, Integer> activeCalls,
+      Predicate<String> dutyBound,
+      long cooldownSeconds,
+      Instant now) {}
+
+  private Scene scene(PidsStationKey station, Optional<UUID> playerId, Instant now) {
+    return new Scene(
+        station,
+        rowsAt(station),
+        activeCallsByLine(),
+        dutyBoundPredicate(),
+        playerId.map(id -> cooldownSeconds(id, now)).orElse(0L),
+        now);
+  }
+
+  /** 先当作有车可派：只看下一班多久到、同方向已叫的车、车数上限与个人冷却。 */
+  private CallRules.Input withoutPlan(CallCatalog.CallDirection direction, Scene scene) {
+    return new CallRules.Input(
+        true,
+        calledMinutes(direction, scene.station(), scene.rows(), scene.now()),
+        nextTrainMinutes(direction, scene.rows(), scene.now()),
+        settings().minWaitMinutes(),
+        scene.activeCalls().getOrDefault(direction.lineId(), 0),
+        maxCalls(direction.lineId()),
+        scene.cooldownSeconds(),
+        OptionalInt.empty());
+  }
+
+  /** 加上车源安排后的判定。 */
+  private static CallOption withPlan(
+      CallCatalog.CallDirection direction,
+      CallRules.Input assumingSource,
+      Optional<CallPlanner.Plan> plan) {
+    CallRules.Verdict verdict =
+        CallRules.evaluate(
+            new CallRules.Input(
+                plan.isPresent(),
+                assumingSource.calledTrainMinutes(),
+                assumingSource.nextTrainMinutes(),
+                assumingSource.minWaitMinutes(),
+                assumingSource.activeCalls(),
+                assumingSource.maxCalls(),
+                assumingSource.cooldownSeconds(),
+                plan.map(CallPlanner.Plan::etaMinutes).orElse(OptionalInt.empty())));
+    return new CallOption(direction, verdict, plan.map(p -> new CallPlan(p.etaMinutes())));
+  }
+
+  /**
+   * 玩家这次右键站台屏能不能开叫车对话框：同一玩家 {@link #DIALOG_INTERVAL} 内只开一次。按住右键每秒会触发好几次，每次开对话框都要把各方向的车源排一遍。
+   *
+   * @param playerId 玩家
+   * @param now 当前时刻
+   */
+  public boolean dialogAllowed(UUID playerId, Instant now) {
+    if (playerId == null) {
+      return false;
+    }
+    Instant last = lastDialogByPlayer.get(playerId);
+    if (last != null && now.isBefore(last.plus(DIALOG_INTERVAL)) && !now.isBefore(last)) {
+      return false;
+    }
+    lastDialogByPlayer.put(playerId, now);
+    return true;
   }
 
   /** 叫来的车（列车名）。 */
@@ -1039,8 +1113,8 @@ public final class CallService {
     try {
       refreshCalledTrains();
       if (restoreDueAt != null) {
-        // 找回之前不撤票：重启后票还没回到发车侧，撤了就找不回了。
-        if (!now.isBefore(restoreDueAt)) {
+        // 找回之前不撤票：重启后票还没回到发车侧，撤了就找不回了。线路开关还没读到时也等：读不到就当方向没了，叫车会被作废。
+        if (!now.isBefore(restoreDueAt) && linesReady()) {
           restoreDueAt = null;
           restorePending(now);
         }
@@ -1048,9 +1122,18 @@ public final class CallService {
         sweepPending(now);
       }
       returnFinishedTrains(now);
+      forgetIdlePlayers(now);
     } catch (RuntimeException ex) {
       debug("叫车扫描异常 error=" + ex);
     }
+  }
+
+  /** 个人冷却已过、对话框间隔已过的玩家不再记着。 */
+  private void forgetIdlePlayers(Instant now) {
+    Instant cooledDown = now.minusSeconds(Math.max(0L, settings().cooldownSeconds()));
+    lastCallByPlayer.values().removeIf(at -> at.isBefore(cooledDown));
+    Instant dialogsDone = now.minus(DIALOG_INTERVAL);
+    lastDialogByPlayer.values().removeIf(at -> at.isBefore(dialogsDone));
   }
 
   /** 按车上的叫车标签重建叫来的车：正在跑回库交路的车摘掉标签（已经不算叫来的车）。 */
@@ -1179,34 +1262,80 @@ public final class CallService {
         platforms);
   }
 
-  /** 开放叫车、在运营的线路（按线路 id），按 {@link #LINE_CACHE_TTL} 重读存储：改了线路开关很快就生效。 */
+  /**
+   * 开放叫车、在运营的线路（按线路 id）。过了 {@link #LINE_CACHE_TTL}
+   * 就在后台重读存储（改了线路开关很快就生效），读完之前沿用上一份：站台屏每秒都要用它，不能在主线程等数据库。
+   */
   private Map<UUID, Line> callableLines() {
-    Instant now = Instant.now();
-    if (now.isBefore(linesLoadedAt.plus(LINE_CACHE_TTL))) {
-      return lines;
+    if (!Instant.now().isBefore(linesLoadedAt.plus(LINE_CACHE_TTL))) {
+      reloadLines();
     }
+    return lines;
+  }
+
+  /** 后台重读线路开关，同一时刻只读一份；读失败也记下时刻，过一个 {@link #LINE_CACHE_TTL} 再试。插件未启用时当场读。 */
+  private void reloadLines() {
+    if (!linesLoading.compareAndSet(false, true)) {
+      return;
+    }
+    long generation = linesGeneration.get();
+    Runnable read =
+        () -> {
+          try {
+            readCallableLines()
+                .ifPresent(
+                    loaded -> {
+                      if (!loaded.equals(lines)) {
+                        lines = loaded;
+                        hints.clear();
+                      }
+                      linesLoaded = true;
+                    });
+          } finally {
+            if (linesGeneration.get() == generation) {
+              linesLoadedAt = Instant.now();
+            }
+            linesLoading.set(false);
+          }
+        };
+    try {
+      if (plugin.isEnabled()) {
+        Bukkit.getScheduler().runTaskAsynchronously(plugin, read);
+        return;
+      }
+    } catch (RuntimeException ex) {
+      debug("后台读取叫车线路排不上 error=" + ex);
+    }
+    read.run();
+  }
+
+  /** 线路开关至少成功读到过一次；还没有时发起读取。 */
+  private boolean linesReady() {
+    if (!linesLoaded) {
+      reloadLines();
+    }
+    return linesLoaded;
+  }
+
+  private Optional<Map<UUID, Line>> readCallableLines() {
     Map<UUID, Line> loaded = new HashMap<>();
     try {
-      plugin
-          .getStorageManager()
-          .provider()
-          .ifPresent(
-              provider -> {
-                for (Line line : provider.lines().listAll()) {
-                  if (line != null
-                      && line.status() == LineStatus.ACTIVE
-                      && LineCallMetadata.allowsPlayerCall(line.metadata())) {
-                    loaded.put(line.id(), line);
-                  }
-                }
-              });
+      Optional<StorageProvider> provider = plugin.getStorageManager().provider();
+      if (provider.isEmpty()) {
+        return Optional.empty();
+      }
+      for (Line line : provider.get().lines().listAll()) {
+        if (line != null
+            && line.status() == LineStatus.ACTIVE
+            && LineCallMetadata.allowsPlayerCall(line.metadata())) {
+          loaded.put(line.id(), line);
+        }
+      }
     } catch (RuntimeException ex) {
       debug("读取叫车线路失败 error=" + ex);
-      return lines;
+      return Optional.empty();
     }
-    lines = Map.copyOf(loaded);
-    linesLoadedAt = now;
-    return lines;
+    return Optional.of(Map.copyOf(loaded));
   }
 
   private int maxCalls(UUID lineId) {

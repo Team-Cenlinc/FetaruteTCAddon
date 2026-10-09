@@ -49,6 +49,12 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
 
   private static final long DEPOT_CHUNK_TICKET_TICKS = 200L;
 
+  /** 区间生成前在后台加载好的区块挂票保留多久：够发车侧再试几次。 */
+  private static final long ENTRY_PRELOAD_TICKET_TICKS = 600L;
+
+  /** TrainCarts 生成时每节车周围加载几圈区块（{@code SpawnLocationList#loadChunks}）。 */
+  static final int TC_SPAWN_CHUNK_RADIUS = 2;
+
   /** 区间生成点附近这么多格内有玩家就不生成：车不能凭空出现在玩家眼前。 */
   public static final double ENTRY_PLAYER_RADIUS_BLOCKS = 48.0D;
 
@@ -68,6 +74,11 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
 
   /** 每个车库上次就离线编组告警的时间。 */
   private final Map<String, Long> offlineWarnAtMillis = new ConcurrentHashMap<>();
+
+  /** 为区间生成正在后台加载的区块：不重复请求。 */
+  private final Set<EntryChunk> entryChunkLoads = ConcurrentHashMap.newKeySet();
+
+  private record EntryChunk(UUID worldId, int x, int z) {}
 
   public TrainCartsDepotSpawner(
       FetaruteTCAddon plugin, SignNodeRegistry signNodeRegistry, Consumer<String> debugLogger) {
@@ -263,8 +274,16 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       debugLogger.accept("区间生成失败: pattern 无效 pattern=" + pattern);
       return Optional.empty();
     }
-    int bodyRadius = (int) Math.ceil(spawnable.getTotalLength()) + 8;
-    loadNearbyChunks(world, info.x(), info.z(), bodyRadius, plugin, DEPOT_CHUNK_TICKET_TICKS);
+    // 区间点离玩家远，车身那一带常常没加载；TrainCarts 生成时会在主线程把每节车周围的区块同步读进来，几十个区块会卡服。
+    // 还有没加载的就先在后台加载并挂票，这一次不生成，发车侧稍后再试。
+    if (preloadEntryChunks(
+        world,
+        entryBodyChunks(
+            info.x(), info.z(), entry.towardX(), entry.towardZ(), spawnable.getTotalLength()))) {
+      debugLogger.accept("区间生成推迟: 车身一带的区块在后台加载 node=" + entry.node().value());
+      return Optional.empty();
+    }
+    loadNearbyChunks(world, info.x(), info.z(), 4, plugin, DEPOT_CHUNK_TICKET_TICKS);
     TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     Set<RailBlockPos> anchors =
         findAnchorRails(
@@ -669,7 +688,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
         }
         if (plugin != null && holdTicks > 0L) {
           if (world.addPluginChunkTicket(cx, cz, plugin)) {
-            ticketed.add((((long) cx) << 32) ^ (cz & 0xffffffffL));
+            ticketed.add(chunkKey(cx, cz));
           }
         }
       }
@@ -687,6 +706,108 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
               },
               holdTicks);
     }
+  }
+
+  /**
+   * 区间生成时 TrainCarts 要加载的区块：车头在区间点、车身沿来车方向（{@code toward} 的反方向）铺开，每节车周围 {@link
+   * #TC_SPAWN_CHUNK_RADIUS} 圈。车身按直线估计，弯道上偏出去的少数区块仍由 TrainCarts 当场加载。
+   *
+   * @param x 区间点方块 X
+   * @param z 区间点方块 Z
+   * @param towardX 去下一个节点的水平方向 X 分量（不必是单位向量）；与 Z 都为 0 时按区间点周围一个车长估计
+   * @param towardZ 同上，Z 分量
+   * @param bodyLength 车长（格）
+   * @return 区块键（见 {@link #chunkKey}）
+   */
+  static Set<Long> entryBodyChunks(
+      int x, int z, double towardX, double towardZ, double bodyLength) {
+    double length = Double.isFinite(bodyLength) ? Math.max(0.0, bodyLength) : 0.0;
+    Set<Long> chunks = new java.util.HashSet<>();
+    double norm = Math.hypot(towardX, towardZ);
+    if (!(norm > 1.0E-6)) {
+      int radius = (((int) Math.ceil(length) + 15) >> 4) + TC_SPAWN_CHUNK_RADIUS;
+      addChunkSquare(chunks, x >> 4, z >> 4, radius);
+      return chunks;
+    }
+    double backX = -towardX / norm;
+    double backZ = -towardZ / norm;
+    for (double along = 0.0; ; along += 8.0) {
+      double at = Math.min(along, length);
+      int cx = ((int) Math.floor(x + 0.5 + backX * at)) >> 4;
+      int cz = ((int) Math.floor(z + 0.5 + backZ * at)) >> 4;
+      addChunkSquare(chunks, cx, cz, TC_SPAWN_CHUNK_RADIUS);
+      if (at >= length) {
+        return chunks;
+      }
+    }
+  }
+
+  private static void addChunkSquare(Set<Long> chunks, int cx, int cz, int radius) {
+    for (int dx = -radius; dx <= radius; dx++) {
+      for (int dz = -radius; dz <= radius; dz++) {
+        chunks.add(chunkKey(cx + dx, cz + dz));
+      }
+    }
+  }
+
+  static long chunkKey(int cx, int cz) {
+    return (((long) cx) << 32) ^ (cz & 0xffffffffL);
+  }
+
+  /**
+   * 还没加载的区块在后台加载，加载好后挂插件票保留 {@link #ENTRY_PRELOAD_TICKET_TICKS}，免得发车侧再试之前又被卸掉。
+   *
+   * @return 还有区块没加载（这一次先不生成）
+   */
+  boolean preloadEntryChunks(World world, Set<Long> chunks) {
+    boolean missing = false;
+    for (long key : chunks) {
+      int cx = (int) (key >> 32);
+      int cz = (int) key;
+      if (world.isChunkLoaded(cx, cz)) {
+        continue;
+      }
+      missing = true;
+      EntryChunk chunk = new EntryChunk(world.getUID(), cx, cz);
+      if (!entryChunkLoads.add(chunk)) {
+        continue;
+      }
+      java.util.concurrent.CompletableFuture<org.bukkit.Chunk> loading;
+      try {
+        loading = world.getChunkAtAsync(cx, cz);
+      } catch (RuntimeException ex) {
+        loading = null;
+      }
+      if (loading == null) {
+        entryChunkLoads.remove(chunk);
+        continue;
+      }
+      loading.whenComplete(
+          (loaded, error) -> {
+            if (error == null && loaded != null) {
+              runOnMainThread(() -> holdChunk(world, cx, cz, ENTRY_PRELOAD_TICKET_TICKS));
+            }
+            entryChunkLoads.remove(chunk);
+          });
+    }
+    return missing;
+  }
+
+  private void runOnMainThread(Runnable task) {
+    if (Bukkit.isPrimaryThread() || !plugin.isEnabled()) {
+      task.run();
+    } else {
+      Bukkit.getScheduler().runTask(plugin, task);
+    }
+  }
+
+  /** 给已加载的区块挂插件票，到时摘掉；已经挂着本插件的票就不动（摘票归挂票的那一方）。 */
+  private void holdChunk(World world, int cx, int cz, long holdTicks) {
+    if (!world.isChunkLoaded(cx, cz) || !world.addPluginChunkTicket(cx, cz, plugin)) {
+      return;
+    }
+    Bukkit.getScheduler()
+        .runTaskLater(plugin, () -> world.removePluginChunkTicket(cx, cz, plugin), holdTicks);
   }
 
   private static SpawnLocationList findSpawnLocations(

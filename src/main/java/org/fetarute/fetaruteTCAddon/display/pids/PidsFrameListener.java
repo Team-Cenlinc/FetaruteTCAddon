@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
 import io.papermc.paper.event.player.PlayerPickEntityEvent;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -131,7 +132,13 @@ public final class PidsFrameListener implements Listener {
         || service.isLineStatus(screen.get())) {
       return;
     }
-    CallDialog.open(plugin, player, screen.get().station().get(), screen.get().platforms(), true);
+    // 按住右键每秒触发好几次：同一玩家间隔太短的不再开，免得每次都把各方向的车源排一遍。
+    if (plugin
+        .getCallService()
+        .map(calls -> calls.dialogAllowed(player.getUniqueId(), Instant.now()))
+        .orElse(true)) {
+      CallDialog.open(plugin, player, screen.get().station().get(), screen.get().platforms(), true);
+    }
   }
 
   /** 展示框属于哪块屏幕；服务不可用时只看框里的地图物品。 */

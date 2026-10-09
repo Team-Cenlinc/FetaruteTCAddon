@@ -191,7 +191,7 @@ public final class PidsService {
             lineStatuses,
             bulletins);
     if (plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon) {
-      // 叫车：线路开放叫车、此刻能叫时空行写提示；叫来的车状态写“叫车”
+      // 叫车：线路开放叫车、此刻能叫时空行写提示（要写空行时才判定）；叫来的车状态写“叫车”
       composer.setCalls(
           screen ->
               addon
@@ -203,8 +203,9 @@ public final class PidsService {
                               .map(
                                   station ->
                                       new PidsViewBuilder.Calls(
-                                          calls.callableAt(
-                                              station, screen.platforms(), screen.lines()),
+                                          () ->
+                                              calls.callableAt(
+                                                  station, screen.platforms(), screen.lines()),
                                           calls.calledTrainNames())))
                   .orElse(PidsViewBuilder.Calls.NONE));
     }

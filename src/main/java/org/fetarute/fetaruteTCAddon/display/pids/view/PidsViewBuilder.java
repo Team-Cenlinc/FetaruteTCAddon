@@ -14,6 +14,7 @@ import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
@@ -215,15 +216,28 @@ public final class PidsViewBuilder {
   /**
    * 叫车相关的显示。
    *
-   * @param callable 本屏此刻能叫车：空行写“可右键本屏叫车”
+   * @param hint 本屏此刻能不能叫车（能叫时空行写“可右键本屏叫车”）：要写空行时才问，屏上排满了班次就不问——判定要排车源，不便宜
    * @param calledTrains 叫来的车（列车名）：状态格写“叫车”
    */
-  public record Calls(boolean callable, Set<String> calledTrains) {
+  public record Calls(BooleanSupplier hint, Set<String> calledTrains) {
 
     public static final Calls NONE = new Calls(false, Set.of());
 
     public Calls {
+      hint = hint == null ? () -> false : hint;
       calledTrains = calledTrains == null ? Set.of() : Set.copyOf(calledTrains);
+    }
+
+    /**
+     * @param callable 本屏此刻能叫车
+     */
+    public Calls(boolean callable, Set<String> calledTrains) {
+      this(() -> callable, calledTrains);
+    }
+
+    /** 本屏此刻能叫车。 */
+    public boolean callable() {
+      return hint.getAsBoolean();
     }
   }
 
@@ -265,7 +279,8 @@ public final class PidsViewBuilder {
    * 只剩终到、通过、回库的车时写“暂无后续列车，可右键本屏叫车”。
    */
   private List<Names> emptyMessages(Request request, List<PidsRow> shownRows) {
-    if (!request.calls().callable()) {
+    // 屏上排满了班次：空行的话写不出来，不必问能不能叫车。
+    if (shownRows.size() >= request.capacity() || !request.calls().callable()) {
       return List.of(vocabulary.labels().noMoreTrains());
     }
     if (shownRows.isEmpty()) {

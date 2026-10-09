@@ -447,6 +447,30 @@ class PidsViewBuilderTest {
         "不开放叫车：照旧只写暂无后续列车");
   }
 
+  /** 能不能叫车要排车源、不便宜：屏上三行都排满了班次时不问（空行的话写不出来），有空行才问一次。 */
+  @Test
+  void theCallHintIsOnlyAskedWhenARowIsFree() {
+    int[] asked = {0};
+    PidsViewBuilder.Calls counting =
+        new PidsViewBuilder.Calls(
+            () -> {
+              asked[0]++;
+              return true;
+            },
+            Set.of());
+    PidsRow first = row(PidsRow.Status.EN_ROUTE, 120, OptionalLong.of(0));
+    PidsRow second = row(PidsRow.Status.EN_ROUTE, 420, OptionalLong.of(0));
+    PidsRow third = row(PidsRow.Status.EN_ROUTE, 720, OptionalLong.of(0));
+
+    builder.build(withCalls(counting, first, second, third));
+    assertEquals(0, asked[0], "排满了不问");
+
+    assertEquals(
+        List.of(names("call-hint")),
+        builder.build(withCalls(counting, first, second)).emptyMessages());
+    assertEquals(1, asked[0], "有空行问一次");
+  }
+
   /** 叫来的车：状态格写“叫车”，与“准点”同一排法。 */
   @Test
   void calledTrainsShowOnCall() {

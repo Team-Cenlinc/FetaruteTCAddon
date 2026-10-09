@@ -261,6 +261,33 @@ class CallRestoreTest {
     verify(spawnManager).requeue(any());
   }
 
+  /** 线路开关还没读到（后台读还没完成或读失败）时不找回：读不到就当方向没了，叫车会被作废。 */
+  @Test
+  void restoreWaitsForTheCallLines() {
+    when(plugin.isEnabled()).thenReturn(true);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    List<Runnable> queued = new ArrayList<>();
+    when(scheduler.runTaskAsynchronously(eq(plugin), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              queued.add(invocation.getArgument(1));
+              return null;
+            });
+    bukkit.when(Bukkit::getScheduler).thenReturn(scheduler);
+    storedCall(Instant.now().minusSeconds(30));
+    CallService service = new CallService(plugin);
+    service.start();
+    Instant due = Instant.now().plus(CallService.RESTORE_DELAY).plusSeconds(1);
+
+    service.sweep(due);
+    verify(spawnManager, never()).requeue(any());
+    verify(stored, never()).delete(any());
+
+    queued.remove(0).run();
+    service.sweep(due.plusSeconds(1));
+    verify(spawnManager).requeue(any());
+  }
+
   /** 按表运行打开时找回不接待命车：刚重启时账本是空的，首站那辆车看着没绑交路，其实多半还担着时刻表的班。 */
   @Test
   void restoreDoesNotTakeAStandbyTrainWhenTheTimetableIsOn() {
@@ -322,6 +349,9 @@ class CallRestoreTest {
   /** 插件运行时存库交给后台、按提交顺序执行，不占主线程。 */
   @Test
   void storageWritesRunInTheBackground() {
+    CallService service = new CallService(plugin);
+    // 线路开关先读好（插件未启用时当场读），下面只排存库这一件后台任务。
+    service.callableAt(PPK, Set.of(), Set.of());
     when(plugin.isEnabled()).thenReturn(true);
     BukkitScheduler scheduler = mock(BukkitScheduler.class);
     List<Runnable> queued = new ArrayList<>();
@@ -334,7 +364,7 @@ class CallRestoreTest {
     bukkit.when(Bukkit::getScheduler).thenReturn(scheduler);
     storedCall(T.minusSeconds(30));
 
-    new CallService(plugin).restorePending(T);
+    service.restorePending(T);
 
     verify(stored, never()).save(any());
     assertEquals(1, queued.size());
