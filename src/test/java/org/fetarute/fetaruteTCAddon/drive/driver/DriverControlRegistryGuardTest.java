@@ -93,6 +93,37 @@ class DriverControlRegistryGuardTest {
     assertFalse(registry.isDriverControlledName("T-1"));
   }
 
+  /** 只有车掌的列车停在终点站待命：扣着等车掌换端，派车放行时由车掌这边取走调头标记。 */
+  @Test
+  void aGuardOnlyTrainHoldsForTheCabChange() {
+    GuardLink guard = guard();
+    guard.setCabHold(true);
+    guard.setTurnbackPending(true);
+    assertTrue(registry.isDriverControlled(properties));
+    assertTrue(registry.isDriverControlledName("T-1"));
+    assertTrue(registry.awaitingTurnback("T-1"));
+    assertTrue(registry.takeTurnback(properties));
+    assertFalse(registry.takeTurnback(properties), "只取一次");
+    assertFalse(registry.awaitingTurnback("T-1"));
+    guard.setCabHold(false);
+    assertFalse(registry.isDriverControlled(properties));
+  }
+
+  /** 有驾驶员时调头标记归驾驶员：车掌这边的标记不替他取。 */
+  @Test
+  void theDriverOwnsTheTurnbackWhenAboard() {
+    GuardLink guard = guard();
+    guard.setTurnbackPending(true);
+    DriverLink driver = new DriverLink(UUID.randomUUID(), "T-1", null, () -> 0.0, () -> 0L);
+    registry.bind(properties, driver);
+    driver.enterAto();
+    assertFalse(registry.awaitingTurnback("T-1"));
+    assertFalse(registry.takeTurnback(properties));
+    driver.setTurnbackPending(true);
+    assertTrue(registry.takeTurnback(properties));
+    assertTrue(guard.turnbackPending(), "车掌的标记没被取走");
+  }
+
   /** 列车属性对象被换掉（区块重载）：按车名找回车掌。 */
   @Test
   void theGuardIsFoundAgainByName() {

@@ -30,6 +30,9 @@ public final class GuardLink {
   /** 紧急停车扣到这个 tick 自动解除；没扣着时为 -1。 */
   private long emergencyUntilTick = -1L;
 
+  private boolean cabHold;
+  private boolean turnbackPending;
+
   /**
    * @param clock 当前服务器 tick
    */
@@ -136,6 +139,47 @@ public final class GuardLink {
   /** 解除紧急停车。 */
   public void releaseEmergency() {
     this.emergencyUntilTick = -1L;
+  }
+
+  /** 车掌扣着列车（紧急停车或换端扣车）：调度层按驾驶员控制处理，不替它起步。 */
+  public boolean holdsTrain() {
+    return emergencyHold() || cabHold;
+  }
+
+  /** 换端扣车：没有人工驾驶的驾驶员时，从终点站待命起扣着列车，派车放行时只调头、不发车，车掌坐进车尾端后解除，交回自动运行发车。 期间调度层按驾驶员控制处理。 */
+  public boolean cabHold() {
+    return cabHold;
+  }
+
+  /**
+   * @return 状态是否有变化
+   */
+  public boolean setCabHold(boolean hold) {
+    if (cabHold == hold) {
+      return false;
+    }
+    cabHold = hold;
+    return true;
+  }
+
+  /** 只有车掌的列车停在终点站待命、派车还没放行：放行那一拍要按发车方向调头。 */
+  public boolean turnbackPending() {
+    return turnbackPending;
+  }
+
+  public void setTurnbackPending(boolean pending) {
+    this.turnbackPending = pending;
+  }
+
+  /**
+   * 派车放行：取走待调头标记。
+   *
+   * @return 放行前是否在等调头
+   */
+  public boolean takeTurnback() {
+    boolean pending = turnbackPending;
+    turnbackPending = false;
+    return pending;
   }
 
   /**

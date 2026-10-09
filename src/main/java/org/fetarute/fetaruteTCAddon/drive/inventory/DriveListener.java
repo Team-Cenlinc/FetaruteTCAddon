@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.drive.inventory;
 
+import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatEnterEvent;
 import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatExitEvent;
 import com.destroystokyo.paper.event.player.PlayerRecipeBookClickEvent;
 import io.papermc.paper.event.player.PlayerPickItemEvent;
@@ -97,6 +98,14 @@ public final class DriveListener implements Listener {
         && !event.isSeatChange()
         && event.getEntity() instanceof Player player
         && !manager.allowSeatExit(player)) {
+      event.setCancelled(true);
+    }
+  }
+
+  /** 车掌预留的座位：别人不能坐进去（车掌换端时先让出来）。 */
+  @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+  public void onSeatEnter(MemberBeforeSeatEnterEvent event) {
+    if (!manager.allowSeatEnter(event.getEntity(), event.getMember(), event.getSeat())) {
       event.setCancelled(true);
     }
   }

@@ -513,7 +513,7 @@ drive:
         end: "<red>End duty</red>"
         end-confirm: "<red>Click again to end duty</red>"
       hint:
-        seat: "<gray>Teleports you to the guard's seat while the train is stopped</gray>"
+        seat: "<gray>Teleports you to the guard's seat while the train is stopped; when changing ends, to the cab you are moving to</gray>"
         call: "<gray>Rings twice to call the driver</gray>"
         report: "<gray>Pick a reason; extends the current step once</gray>"
         end: "<gray>Click twice to end duty; the doors go back to the driver or the station</gray>"
@@ -532,6 +532,8 @@ drive:
       confirm: "<yellow>Check the starting signal</yellow> <gray>(<seconds> s left)</gray>"
       buzzer: "<yellow>Hold the buzzer for about a second</yellow> <gray>(<seconds> s left)</gray>"
       released: "<green>Ready-to-start signal given</green>"
+      cab-change: "<gold>Change ends: go to the guard's seat in car <white><car></white></gold> <gray>(<seconds> s left)</gray>"
+      cab-change-announced: "<gold>The next trip leaves from the other end: go to the guard's seat in car <white><car></white></gold>"
     sidebar:
       title: "<gold><bold>Guard</bold></gold> <gray><train></gray>"
       label:
@@ -542,6 +544,7 @@ drive:
         exit: "Starter"
         doors: "Doors"
         timeouts: "Timeouts"
+        cab-change: "Change ends"
       value:
         train: "<white><train></white>"
         crew-driver: "<white>Driver <driver></white>"
@@ -564,6 +567,8 @@ drive:
         doors-closing: "<gold>Closing</gold>"
         doors-closed: "<gray>Closed</gray>"
         timeouts: "<red><count> stops</red>"
+        cab-change: "<gold>Car <car>, <seconds> s</gold>"
+        cab-change-announced: "<gold>Car <car></gold>"
     driver:
       on-duty: "<aqua>Guard <white><guard></white> is on duty: the guard works the doors and you depart on the guard's signal</aqua>"
       off-duty: "<gray>Guard <white><guard></white> went off duty; the doors are yours again</gray>"
@@ -574,6 +579,8 @@ drive:
       report: "<light_purple>Guard reports: <white><reason></white></light_purple>"
       emergency: "<red>Guard <white><guard></white> applied the emergency stop</red>"
       emergency-released: "<green>Guard <white><guard></white> released the emergency stop</green>"
+      cab-change: "<yellow>Guard <white><guard></white> is moving to car <white><car></white>; wait for the guard before starting</yellow>"
+      cab-changed: "<green>Guard <white><guard></white> is in place in car <white><car></white></green>"
     from-driver:
       ack: "<gray>Driver <white><driver></white>: understood</gray>"
       call: "<yellow>Driver <white><driver></white> is calling</yellow>"
@@ -587,6 +594,7 @@ drive:
       left-behind: "<prefix> <red>The train left without you (left behind); duty ended (incomplete)</red> <gray><stops> stops worked</gray>"
       disabled: "<prefix> <yellow>Guard duty has been disabled; duty ended</yellow>"
       admin: "<prefix> <yellow>An administrator ended your duty</yellow>"
+      cab-change: "<prefix> <red>Could not get into the rear cab when changing ends; duty ended (incomplete)</red> <gray><stops> stops worked</gray>"
     timeout:
       open: "<red>Too slow to open: the station opened the doors</red>"
       close: "<red>Too slow to close: the station closed the doors</red>"
@@ -642,6 +650,18 @@ drive:
       moving: "<red>You can only return to your seat while the train is stopped</red>"
       already: "<gray>You are already in the guard's seat</gray>"
       unavailable: "<red>Cannot return to the guard's seat: it is taken, or you are too far from the train</red>"
+      reserved: "<red>This seat is reserved for guard <white><guard></white></red>"
+    cab-change:
+      announce: "<prefix> <gold>The next trip leaves from the other end; move to the guard's seat in car <white><car></white></gold> <gray>No time limit before departure is cleared; when the driver changes ends you both swap together</gray>"
+      start: "<prefix> <gold>The train has reversed; take the guard's seat in car <white><car></white> within <white><seconds></white> s</gold> <gray>or you will be moved there</gray>"
+      offer: "<prefix> <click:run_command:'/fta guard seat'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard seat</white>'><aqua>[Move to the guard's seat in car <car>]</aqua></hover></click>"
+      done: "<green>Now in the guard's seat in car <white><car></white></green>"
+      moved: "<green>Moved to the guard's seat in car <white><car></white></green>"
+      moved-with-driver: "<prefix> <yellow>The driver changed ends; you have been moved to the guard's seat in car <white><car></white> as well</yellow>"
+      timeout-moved: "<prefix> <yellow>The time to change ends ran out; you have been moved to the guard's seat in car <white><car></white></yellow>"
+      cancelled: "<gray>No need to change ends; stay in your guard's seat</gray>"
+      go-to: "<yellow>Go to car <white><car></white> to change ends</yellow>"
+      unavailable: "<red>Cannot move to car <white><car></white>: no free cab seat, or too far from the train</red>"
     seat-exit:
       moving: "<prefix> <red>You cannot get off while moving</red>"
       doors-closed: "<red>You can only step out to watch while the doors are open</red>"
@@ -653,6 +673,7 @@ drive:
         header: "<gold>Guard commands</gold>"
         "on": "<yellow>/fta guard on</yellow> <gray>Go on duty while seated in the rear cab of a dispatched train</gray>"
         "off": "<yellow>/fta guard off</yellow> <gray>End duty</gray>"
+        seat: "<yellow>/fta guard seat</yellow> <gray>Back to your seat; when changing ends, to the cab you are moving to</gray>"
         status: "<yellow>/fta guard status</yellow> <gray>Show your duty</gray>"
         stop: "<yellow>/fta guard stop <player></yellow> <gray>Take a guard off duty</gray>"
       start:
@@ -799,6 +820,7 @@ drive:
       switch-offer: "<prefix> <click:run_command:'/fta drive cab'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive cab</white>'><aqua>[Move to the cab in car <car>]</aqua></hover></click>"
       short-moved: "<prefix> <yellow>Not enough time: changing ends takes about <white><need></white> s with only <white><left></white> s to departure, so you have been moved to the cab in car <white><car></white></yellow>"
       timeout-moved: "<prefix> <yellow>The time to change ends ran out; you have been moved to the cab in car <white><car></white></yellow>"
+      moved-with-guard: "<prefix> <yellow>The guard changed ends; you have been moved to the cab in car <white><car></white> as well</yellow>"
       switch-not-driving: "<prefix> <red>You are not driving a dispatched train</red>"
       switch-not-needed: "<prefix> <yellow>No change of ends needed: you can depart from this cab. If the train is dispatched in the opposite direction, you will be told to change ends</yellow>"
       switch-direction-unknown: "<prefix> <yellow>The departure direction is not set yet; change ends after dispatch</yellow>"

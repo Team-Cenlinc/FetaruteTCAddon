@@ -607,7 +607,84 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         traceSession(session.get(), "车掌拉下紧急停车");
         return true;
       }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.Outlook>
+          driverOutlook(MinecartGroup group) {
+        return driverSessionOfTrain(group.getProperties().getTrainName())
+            .map(
+                session -> {
+                  CabChange change = session.cabChange();
+                  DriverLink link = session.driverLink();
+                  return org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.fromDriver(
+                      change.stage(),
+                      change.eitherEnd(),
+                      change.target(),
+                      link != null && link.turnbackPending(),
+                      session.binding().memberIndex(),
+                      group.size());
+                });
+      }
+
+      @Override
+      public boolean atLayover(String trainName) {
+        return isLayover(trainName);
+      }
+
+      @Override
+      public CabSeats.Departure layoverDeparture(MinecartGroup group) {
+        return TerminalCabEnd.of(plugin, group);
+      }
+
+      @Override
+      public boolean moveWithGuard(
+          String trainName, CabSeats.End guardEnd, java.util.function.BooleanSupplier seatGuard) {
+        return moveDriverWithGuard(trainName, guardEnd, seatGuard);
+      }
     };
+  }
+
+  /**
+   * 车掌被直接送进要换到的那一端：驾驶员也在换端、要去另一头时一起送进发车端。驾驶员还坐在车掌要去的那一端时先请下来，车掌入座后再送驾驶员。
+   *
+   * @return 车掌是否已入座
+   */
+  private boolean moveDriverWithGuard(
+      String trainName, CabSeats.End guardEnd, java.util.function.BooleanSupplier seatGuard) {
+    Optional<DriveSession> found = driverSessionOfTrain(trainName);
+    if (found.isEmpty()) {
+      return seatGuard.getAsBoolean();
+    }
+    DriveSession session = found.get();
+    CabChange change = session.cabChange();
+    Player driver = Bukkit.getPlayer(session.playerId());
+    Optional<MinecartGroup> groupOpt = findSessionGroup(session);
+    if (driver == null
+        || groupOpt.isEmpty()
+        || change.stage() == CabChange.Stage.IDLE
+        || change.eitherEnd()
+        || change.target()
+            != org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.opposite(guardEnd)) {
+      return seatGuard.getAsBoolean();
+    }
+    MinecartGroup group = groupOpt.get();
+    CabSeats cabs = SeatLocator.cabSeats(group, config.driver().cabSeatNames());
+    boolean atGuardEnd =
+        SeatLocator.locate(driver)
+            .filter(seat -> seat.trainName().equals(group.getProperties().getTrainName()))
+            .filter(seat -> cabs.endOf(seat) == guardEnd)
+            .isPresent();
+    if (atGuardEnd) {
+      driver.leaveVehicle();
+    }
+    boolean guardSeated = seatGuard.getAsBoolean();
+    if (seatInCab(session, group, driver, change.target())) {
+      sendTaskChat(
+          driver,
+          "drive.task.cab-change.moved-with-guard",
+          Map.of("car", String.valueOf(change.targetCar())));
+    }
+    return guardSeated;
   }
 
   /** 驾驶这列车的会话（按会话的车名，调度改名后按列车属性上的当前车名也认）。 */
@@ -1281,6 +1358,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 离座是否会让一趟任务按放弃处理：只有驾驶调度列车时，会话结束才会结束任务。 */
   static boolean exitAbandonsTask(DriveSession session, boolean activeTask) {
     return session.driverLink() != null && activeTask;
+  }
+
+  /**
+   * TrainCarts 入座前：车掌预留的座位别人（乘客、驾驶员）不能坐。
+   *
+   * @return 是否放行这次入座
+   */
+  public boolean allowSeatEnter(
+      org.bukkit.entity.Entity entity,
+      MinecartMember<?> member,
+      com.bergerkiller.bukkit.tc.attachments.control.CartAttachmentSeat seat) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew == null || !crew.anyOnDuty()) {
+      return true;
+    }
+    return crew.allowSeatEnter(entity, member, SeatLocator.seatIndexOf(member, seat));
   }
 
   /**
@@ -4718,6 +4811,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * @return 是否已坐进去；发车方向未定、驾驶员离列车太远或不在同一世界、那一端没有空座位时为 {@code false}
    */
   private boolean moveToCab(
+      DriveSession session, MinecartGroup group, Player player, CabSeats.End end) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew == null || end == CabSeats.End.NONE) {
+      return seatInCab(session, group, player, end);
+    }
+    // 车上有车掌：车掌坐在这一端时先请下来，驾驶员入座后车掌一起换到另一头。
+    return crew.moveWithDriver(group, end, () -> seatInCab(session, group, player, end));
+  }
+
+  /** 让驾驶员坐进那一端驾驶室的空座位（见 {@link #moveToCab}）。 */
+  private boolean seatInCab(
       DriveSession session, MinecartGroup group, Player player, CabSeats.End end) {
     MinecartMember<?> member = end == CabSeats.End.NONE ? null : cabMember(player, group, end);
     if (member == null) {

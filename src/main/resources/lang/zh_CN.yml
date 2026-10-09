@@ -2217,7 +2217,7 @@ drive:
         end: "<red>结束值乘</red>"
         end-confirm: "<red>再次点击确认结束值乘</red>"
       hint:
-        seat: "<gray>列车停稳时传送回车掌座位</gray>"
+        seat: "<gray>列车停稳时传送回车掌座位；终点站换端时送入要换到的那一端</gray>"
         call: "<gray>铃响两声，通知驾驶员</gray>"
         report: "<gray>选择原因，当前作业的时限延长一次</gray>"
         end: "<gray>点击两次结束值乘，车门交还驾驶员或站台</gray>"
@@ -2236,6 +2236,8 @@ drive:
       confirm: "<yellow>请确认出发信号</yellow> <gray>（剩余 <seconds> 秒）</gray>"
       buzzer: "<yellow>请按住发车铃约一秒</yellow> <gray>（剩余 <seconds> 秒）</gray>"
       released: "<green>已发出发车信号</green>"
+      cab-change: "<gold>换端：请到第 <white><car></white> 节车掌座位</gold> <gray>（剩余 <seconds> 秒）</gray>"
+      cab-change-announced: "<gold>下一趟由另一端发车：请到第 <white><car></white> 节车掌座位</gold>"
     sidebar:
       title: "<gold><bold>车掌</bold></gold> <gray><train></gray>"
       label:
@@ -2246,6 +2248,7 @@ drive:
         exit: "出站"
         doors: "车门"
         timeouts: "超时"
+        cab-change: "换端"
       value:
         train: "<white><train></white>"
         crew-driver: "<white>驾驶员 <driver></white>"
@@ -2268,6 +2271,8 @@ drive:
         doors-closing: "<gold>关闭中</gold>"
         doors-closed: "<gray>关闭</gray>"
         timeouts: "<red><count> 站</red>"
+        cab-change: "<gold>到第 <car> 节 <seconds> 秒</gold>"
+        cab-change-announced: "<gold>到第 <car> 节</gold>"
     driver:
       on-duty: "<aqua>车掌 <white><guard></white> 已上岗：车门由车掌开关，发车须等车掌的发车信号</aqua>"
       off-duty: "<gray>车掌 <white><guard></white> 已离岗，车门交还驾驶员</gray>"
@@ -2278,6 +2283,8 @@ drive:
       report: "<light_purple>车掌报告：<white><reason></white></light_purple>"
       emergency: "<red>车掌 <white><guard></white> 拉下了紧急停车</red>"
       emergency-released: "<green>车掌 <white><guard></white> 已解除紧急停车</green>"
+      cab-change: "<yellow>车掌 <white><guard></white> 正在换到第 <white><car></white> 节，请待车掌就位后再发车</yellow>"
+      cab-changed: "<green>车掌 <white><guard></white> 已在第 <white><car></white> 节就位</green>"
     from-driver:
       ack: "<gray>驾驶员 <white><driver></white>：收到</gray>"
       call: "<yellow>驾驶员 <white><driver></white> 呼叫</yellow>"
@@ -2291,6 +2298,7 @@ drive:
       left-behind: "<prefix> <red>列车已开走，你未在车上（漏乘），值乘已结束（未完成）</red> <gray>完成 <stops> 站</gray>"
       disabled: "<prefix> <yellow>车掌功能已关闭，值乘已结束</yellow>"
       admin: "<prefix> <yellow>管理员已结束你的值乘</yellow>"
+      cab-change: "<prefix> <red>换端时未能坐进车尾驾驶室，值乘已结束（未完成）</red> <gray>完成 <stops> 站</gray>"
     timeout:
       open: "<red>开门超时，已由站台代开车门</red>"
       close: "<red>关门超时，已由站台代关车门</red>"
@@ -2346,6 +2354,18 @@ drive:
       moving: "<red>列车停稳后才能传送入座</red>"
       already: "<gray>你已在车掌座位上</gray>"
       unavailable: "<red>无法回到车掌座位：座位已被占用，或距离列车过远</red>"
+      reserved: "<red>此座位为车掌 <white><guard></white> 预留</red>"
+    cab-change:
+      announce: "<prefix> <gold>下一趟由另一端发车，请换到第 <white><car></white> 节的车掌座位</gold> <gray>派车放行前不计时；驾驶员换端时两人一同换座</gray>"
+      start: "<prefix> <gold>列车已调头，请在 <white><seconds></white> 秒内坐进第 <white><car></white> 节的车掌座位</gold> <gray>超时将直接送入</gray>"
+      offer: "<prefix> <click:run_command:'/fta guard seat'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard seat</white>'><aqua>[直接换到第 <car> 节车掌座位]</aqua></hover></click>"
+      done: "<green>已换到第 <white><car></white> 节车掌座位</green>"
+      moved: "<green>已送入第 <white><car></white> 节车掌座位</green>"
+      moved-with-driver: "<prefix> <yellow>驾驶员换端，已一同送到第 <white><car></white> 节车掌座位</yellow>"
+      timeout-moved: "<prefix> <yellow>换端时限已到，已直接送到第 <white><car></white> 节车掌座位</yellow>"
+      cancelled: "<gray>无需换端，请留在原来的车掌座位</gray>"
+      go-to: "<yellow>请到第 <white><car></white> 节换端</yellow>"
+      unavailable: "<red>无法送入第 <white><car></white> 节：没有空的驾驶室座位，或距离列车过远</red>"
     seat-exit:
       moving: "<prefix> <red>行驶中不能下车</red>"
       doors-closed: "<red>车门开着时才能下车监视</red>"
@@ -2357,6 +2377,7 @@ drive:
         header: "<gold>车掌命令</gold>"
         "on": "<yellow>/fta guard on</yellow> <gray>坐在调度列车车尾驾驶室时上岗</gray>"
         "off": "<yellow>/fta guard off</yellow> <gray>结束值乘</gray>"
+        seat: "<yellow>/fta guard seat</yellow> <gray>传送入座；终点站换端时送入要换到的那一端</gray>"
         status: "<yellow>/fta guard status</yellow> <gray>查看值乘情况</gray>"
         stop: "<yellow>/fta guard stop <玩家></yellow> <gray>撤下车掌</gray>"
       start:
@@ -2503,6 +2524,7 @@ drive:
       switch-offer: "<prefix> <click:run_command:'/fta drive cab'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive cab</white>'><aqua>[直接换到第 <car> 节驾驶室]</aqua></hover></click>"
       short-moved: "<prefix> <yellow>准备时间不足：换端约需 <white><need></white> 秒，距计划发车仅剩 <white><left></white> 秒，已直接送到第 <white><car></white> 节驾驶室</yellow>"
       timeout-moved: "<prefix> <yellow>换端时限已到，已直接送到第 <white><car></white> 节驾驶室</yellow>"
+      moved-with-guard: "<prefix> <yellow>车掌换端，已一同送到第 <white><car></white> 节驾驶室</yellow>"
       switch-not-driving: "<prefix> <red>当前未在驾驶调度列车</red>"
       switch-not-needed: "<prefix> <yellow>当前无需换端：所坐的驾驶室即可发车；派车后若发车方向与所坐端相反，会再提示换端</yellow>"
       switch-direction-unknown: "<prefix> <yellow>发车方向尚未确定，派车后再换端</yellow>"

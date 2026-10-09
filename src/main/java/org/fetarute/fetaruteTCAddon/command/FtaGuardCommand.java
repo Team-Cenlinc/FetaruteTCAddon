@@ -20,8 +20,8 @@ import org.incendo.cloud.permission.Permission;
 import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
- * /fta guard 命令注册：坐在调度列车车尾驾驶室的玩家 {@code /fta guard on} 上岗当车掌，{@code off} 离岗，{@code status} 查看；管理员
- * {@code stop <玩家>} 撤下车掌。
+ * /fta guard 命令注册：坐在调度列车车尾驾驶室的玩家 {@code /fta guard on} 上岗当车掌，{@code off} 离岗，{@code seat}
+ * 传送入座（终点站换端时送进要换到的那一端）， {@code status} 查看；管理员 {@code stop <玩家>} 撤下车掌。
  */
 public final class FtaGuardCommand {
 
@@ -72,6 +72,13 @@ public final class FtaGuardCommand {
         manager
             .commandBuilder("fta")
             .literal("guard")
+            .literal("seat")
+            .permission(player)
+            .handler(ctx -> handleSeat(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("guard")
             .literal("status")
             .permission(player)
             .handler(ctx -> handleStatus(ctx.sender())));
@@ -97,7 +104,7 @@ public final class FtaGuardCommand {
   private void sendHelp(CommandSender sender) {
     sender.sendMessage(locale().component("drive.guard.command.help.header"));
     if (sender.hasPermission(DrivePermissions.GUARD)) {
-      for (String sub : List.of("on", "off", "status")) {
+      for (String sub : List.of("on", "off", "seat", "status")) {
         sender.sendMessage(locale().component("drive.guard.command.help." + sub));
       }
     }
@@ -135,6 +142,19 @@ public final class FtaGuardCommand {
       return;
     }
     guards.get().stop(player.getUniqueId(), GuardSession.EndReason.COMMAND);
+  }
+
+  private void handleSeat(CommandSender sender) {
+    if (!(sender instanceof Player player)) {
+      sender.sendMessage(locale().component("drive.guard.command.player-only"));
+      return;
+    }
+    Optional<GuardSessionManager> guards = guards();
+    if (guards.isEmpty()) {
+      player.sendMessage(locale().component("drive.guard.command.not-on-duty"));
+      return;
+    }
+    guards.get().seat(player);
   }
 
   private void handleStatus(CommandSender sender) {

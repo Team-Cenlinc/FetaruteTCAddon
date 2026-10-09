@@ -186,9 +186,9 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean isDriverControlled(TrainProperties properties) {
     DriverLink link = resolve(properties);
-    // 车掌拉下了紧急停车：车停住后不替它起步，直到车掌解除或到时限。
+    // 车掌扣着：拉下了紧急停车（车停住后不替它起步，直到车掌解除或到时限），或终点站折返等车掌换到车尾端。
     GuardLink guard = resolveGuard(properties);
-    if (guard != null && guard.emergencyHold()) {
+    if (guard != null && guard.holdsTrain()) {
       return true;
     }
     if (link != null) {
@@ -210,7 +210,7 @@ public final class DriverControlRegistry implements ControlAuthority {
   public boolean isDriverControlledName(String trainName) {
     DriverLink link = byCurrentName(trainName);
     return (link != null && (link.controlsPhysically() || link.cabHold()))
-        || guardOfName(trainName).map(GuardLink::emergencyHold).orElse(false);
+        || guardOfName(trainName).map(GuardLink::holdsTrain).orElse(false);
   }
 
   @Override
@@ -221,7 +221,10 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean awaitingTurnback(String trainName) {
     DriverLink link = byCurrentName(trainName);
-    return link != null && link.turnbackPending();
+    if (link != null) {
+      return link.turnbackPending();
+    }
+    return guardOfName(trainName).map(GuardLink::turnbackPending).orElse(false);
   }
 
   /** 按车名找链路；调度改名（例如终点待命复用）后按列车属性上的当前车名也认。 */
@@ -256,7 +259,12 @@ public final class DriverControlRegistry implements ControlAuthority {
   @Override
   public boolean takeTurnback(TrainProperties properties) {
     DriverLink link = resolve(properties);
-    return link != null && link.takeTurnback();
+    if (link != null) {
+      return link.takeTurnback();
+    }
+    // 只有车掌的列车：放行那一拍同样只调头，等车掌换到车尾端再交回自动运行发车。
+    GuardLink guard = resolveGuard(properties);
+    return guard != null && guard.takeTurnback();
   }
 
   @Override

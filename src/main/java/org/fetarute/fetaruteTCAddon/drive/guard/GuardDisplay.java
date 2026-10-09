@@ -21,6 +21,7 @@ public final class GuardDisplay {
    * @param stop 进行中的停站；没有时为空
    * @param seated 车掌坐在自己的座位上
    * @param timeoutStops 有超时的停站数
+   * @param cabChange 进行中的终点站换端；没有时为空
    */
   public record Snapshot(
       String train,
@@ -28,14 +29,24 @@ public final class GuardDisplay {
       boolean ato,
       Optional<StopState> stop,
       boolean seated,
-      int timeoutStops) {
+      int timeoutStops,
+      Optional<CabChangeState> cabChange) {
 
     public Snapshot {
       Objects.requireNonNull(train, "train");
       driverName = driverName == null ? Optional.empty() : driverName;
       stop = stop == null ? Optional.empty() : stop;
+      cabChange = cabChange == null ? Optional.empty() : cabChange;
     }
   }
+
+  /**
+   * 进行中的终点站换端。
+   *
+   * @param car 要换到第几节（1 起）
+   * @param remainingTicks 还剩多少 tick；放行前告知、不计时为 -1
+   */
+  public record CabChangeState(int car, long remainingTicks) {}
 
   /**
    * 进行中的停站。
@@ -85,8 +96,12 @@ public final class GuardDisplay {
 
   private GuardDisplay() {}
 
-  /** 动作栏上要车掌做的事。 */
+  /** 动作栏上要车掌做的事。换端时除了开门、停站、关门这几步，都先提示换端。 */
   public static Line prompt(Snapshot snapshot) {
+    if (snapshot.cabChange().isPresent()
+        && snapshot.stop().map(stop -> !stop.phase().needsDriver()).orElse(true)) {
+      return cabChangeLine(PROMPT, snapshot.cabChange().get());
+    }
     if (snapshot.stop().isEmpty()) {
       return new Line(PROMPT + "running", Map.of());
     }
@@ -103,6 +118,14 @@ public final class GuardDisplay {
       case WAIT_DEPARTURE -> departurePrompt(snapshot, stop, seconds);
       case DEPART, ENDED -> new Line(PROMPT + "released", Map.of());
     };
+  }
+
+  private static Line cabChangeLine(String prefix, CabChangeState change) {
+    String car = String.valueOf(change.car());
+    return change.remainingTicks() < 0L
+        ? new Line(prefix + "cab-change-announced", Map.of("car", car))
+        : new Line(
+            prefix + "cab-change", Map.of("car", car, "seconds", seconds(change.remainingTicks())));
   }
 
   private static Line departurePrompt(Snapshot snapshot, StopState stop, String seconds) {
@@ -140,6 +163,13 @@ public final class GuardDisplay {
                 rows.add(row("exit", stop.exitOpen() ? "exit-open" : "exit-closed", Map.of()));
               }
               rows.add(row("doors", doorsValue(stop), Map.of()));
+            });
+    snapshot
+        .cabChange()
+        .ifPresent(
+            change -> {
+              Line value = cabChangeLine(VALUE, change);
+              rows.add(new DriveSidebarRows.Row(LABEL + "cab-change", value.key(), value.values()));
             });
     if (snapshot.timeoutStops() > 0) {
       rows.add(

@@ -429,6 +429,18 @@ public final class SeatLocator {
     return false;
   }
 
+  /**
+   * 座位在这节车厢里的序号（见 {@link SeatBinding#seatIndex()}）。
+   *
+   * @return 不是这节车厢的座位时为 -1
+   */
+  public static int seatIndexOf(MinecartMember<?> member, CartAttachmentSeat seat) {
+    if (member == null || seat == null || member.isUnloaded()) {
+      return -1;
+    }
+    return seatsOf(member).indexOf(seat);
+  }
+
   /** 一节车厢的全部座位，按模型里的出现顺序排列。 */
   private static List<CartAttachmentSeat> seatsOf(MinecartMember<?> member) {
     List<CartAttachmentSeat> seats = new ArrayList<>();

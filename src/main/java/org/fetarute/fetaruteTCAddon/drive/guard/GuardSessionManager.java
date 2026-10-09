@@ -8,8 +8,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.BooleanSupplier;
 import java.util.function.Supplier;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
@@ -22,6 +24,7 @@ import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
 import org.fetarute.fetaruteTCAddon.drive.DriveConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverControlRegistry;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
@@ -76,6 +79,24 @@ public final class GuardSessionManager {
      * @return 这列车由人工驾驶的驾驶员控车、已拨到 EB
      */
     boolean emergencyByGuard(String trainName);
+
+    /** 这列车有驾驶员（人工或 ATO）时车掌换端看的发车端（见 {@link GuardCabChange#fromDriver}）；没有驾驶员时为空。 */
+    Optional<GuardCabChange.Outlook> driverOutlook(MinecartGroup group);
+
+    /** 列车停在终点站待命（登记了待命、派车还没放行）。 */
+    boolean atLayover(String trainName);
+
+    /** 终点站待命的列车下一趟由哪一端发车（要查线路图）；分不出时为 {@link CabSeats.Departure#EITHER}。 */
+    CabSeats.Departure layoverDeparture(MinecartGroup group);
+
+    /**
+     * 车掌被直接送进要换到的那一端（换端超时、点了传送入座）：驾驶员也在换端、要去另一头时一起送进发车端。驾驶员坐在车掌要去的那一端时先请下来，车掌入座后再送驾驶员。
+     *
+     * @param guardEnd 车掌要换到的那一端
+     * @param seatGuard 送车掌入座
+     * @return 车掌是否已入座
+     */
+    boolean moveWithGuard(String trainName, CabSeats.End guardEnd, BooleanSupplier seatGuard);
   }
 
   /** 上岗的结果。 */
@@ -160,6 +181,11 @@ public final class GuardSessionManager {
 
   public Optional<GuardSession> sessionOf(UUID playerId) {
     return Optional.ofNullable(playerId == null ? null : sessions.get(playerId));
+  }
+
+  /** 有车掌在值乘。 */
+  public boolean anyOnDuty() {
+    return !sessions.isEmpty();
   }
 
   /** 全部值乘中的车掌。 */
@@ -303,12 +329,15 @@ public final class GuardSessionManager {
     }
     lastUseTick.remove(playerId);
     Optional<MinecartGroup> train = findGroup(session);
-    boolean held = session.link().emergencyHold();
+    boolean held = session.link().holdsTrain();
     session.link().releaseEmergency();
+    session.link().setCabHold(false);
+    session.link().setTurnbackPending(false);
+    session.cabChange().cancel();
     registry.unbindGuard(session.link());
     train.ifPresent(group -> session.doors().closeAll(session));
     if (held) {
-      // 车掌离岗时扣着的紧急停车一并解除，列车交还自动运行。
+      // 车掌离岗时扣着的紧急停车与换端扣车一并解除，列车交还自动运行。
       train.ifPresent(drivers::refreshSignal);
     }
     Player player = Bukkit.getPlayer(playerId);
@@ -398,11 +427,18 @@ public final class GuardSessionManager {
       return;
     }
     MinecartGroup group = groupOpt.get();
+    if (tickCabChange(player, session, group, now)) {
+      return;
+    }
     boolean seated = seated(player, session, group);
     if (!seated && player.getVehicle() == null && group.isMoving() && leftBehind(player, group)) {
       // 车开走了车掌还在站台上（传送回座没成）：值乘结束，车门交还驾驶员或站台。
       stop(session.playerId(), GuardSession.EndReason.LEFT_BEHIND);
       return;
+    }
+    if (seated) {
+      // 开着门换到另一端：车掌面朝的方向反了，左右车门的记录跟着对调。
+      session.doors().followCab(group, session);
     }
     stationWork(player, session, group, seated, now);
     if (!sessions.containsKey(session.playerId())) {
@@ -1040,11 +1076,34 @@ public final class GuardSessionManager {
     onGuardBuzzer(player, session, BuzzerPress.Kind.CALL, true);
   }
 
-  /** 传送回自己的车掌座位：列车停着、座位空着时。 */
+  /** {@code /fta guard seat}：传送入座（换端途中送进要换到的那一端）。 */
+  public void seat(Player player) {
+    GuardSession session = sessions.get(player.getUniqueId());
+    if (session == null) {
+      player.sendMessage(locale.component("drive.guard.command.not-on-duty"));
+      return;
+    }
+    teleportToSeat(player, session);
+  }
+
+  /** 传送回自己的车掌座位：列车停着、座位空着时；换端途中送进要换到的那一端。 */
   private void teleportToSeat(Player player, GuardSession session) {
     Optional<MinecartGroup> group = findGroup(session);
     if (group.isEmpty() || group.get().isMoving()) {
       notice(player, session, "drive.guard.seat.moving", Map.of());
+      return;
+    }
+    GuardCabChange change = session.cabChange();
+    if (change.changing()) {
+      // 换端途中：直接送进要换到的那一端，驾驶员也在换端时一起送。
+      player.closeInventory();
+      String car = String.valueOf(GuardCabChange.targetCar(change.target(), group.get().size()));
+      if (moveGuard(player, session, group.get(), change.target())) {
+        notice(player, session, "drive.guard.cab-change.moved", Map.of("car", car));
+        notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
+      } else {
+        notice(player, session, "drive.guard.cab-change.unavailable", Map.of("car", car));
+      }
       return;
     }
     if (seated(player, session, group.get())) {
@@ -1058,6 +1117,314 @@ public final class GuardSessionManager {
     if (!SeatLocator.reseat(player, group.get(), session.binding())) {
       notice(player, session, "drive.guard.seat.unavailable", Map.of());
     }
+  }
+
+  // ---- 终点站换端 ----
+
+  /** 驾驶室座位的认定多久重读一次（tick）。 */
+  private static final long CAB_SEATS_REFRESH_TICKS = 20L;
+
+  /** 车掌离端车超过这么远（方块）就不直接送进去。 */
+  private static final double CAB_MOVE_RANGE_BLOCKS = 64.0;
+
+  /**
+   * 推进一拍终点站换端（判定见 {@link GuardCabChange}），并管换端扣车：车上没有人工驾驶的驾驶员时，从终点站待命起扣着列车，派车放行时只调头、不发车，
+   * 车掌坐进车尾端（或不必换）后交回自动运行发车。人工驾驶的车由驾驶员自己起步，车掌没换好就开车时直接送进去。
+   *
+   * @return 值乘是否已经结束
+   */
+  private boolean tickCabChange(
+      Player player, GuardSession session, MinecartGroup group, long now) {
+    GuardLink link = session.link();
+    String trainName = group.getProperties().getTrainName();
+    int size = group.size();
+    boolean multi = size >= 2;
+    Optional<UUID> driver = drivers.driverOf(trainName);
+    boolean manual = driver.filter(id -> !drivers.driverAto(id)).isPresent();
+    GuardCabChange.Outlook outlook =
+        multi ? outlook(session, group, trainName) : GuardCabChange.Outlook.RUNNING;
+    GuardCabChange change = session.cabChange();
+    CabSeats.End reservedEnd = GuardCabChange.endOfCar(session.binding().memberIndex(), size);
+    CabSeats.End wanted = GuardCabChange.guardEnd(outlook.departure());
+    CabSeats.End seatedEnd = CabSeats.End.NONE;
+    long reserveTicks = 0L;
+    // 座位在哪一端要逐个看座位附件的名字：只在可能要换端时才读。
+    if (multi && (change.changing() || (wanted != CabSeats.End.NONE && wanted != reservedEnd))) {
+      seatedEnd = seatedEnd(player, session, group, now);
+      reserveTicks =
+          config.get().driver().cabChange().reserveSeconds(StopAlignment.bodyLengthBlocks(group))
+              * 20L;
+    }
+    GuardCabChange.Event event =
+        change.tick(
+            new GuardCabChange.Input(
+                multi, !group.isMoving(), outlook, reservedEnd, seatedEnd, now, reserveTicks));
+    if (handleCabChange(player, session, group, event, now)) {
+      return true;
+    }
+    boolean holdable = multi && !manual;
+    link.setTurnbackPending(holdable && driver.isEmpty() && outlook.predicted());
+    boolean hold = keepCabHold(holdable, outlook.predicted(), link.cabHold(), change.changing());
+    if (link.setCabHold(hold) && !hold) {
+      // 换好了（或不必换）：请调度层马上按自动运行发车。
+      drivers.refreshSignal(group);
+    }
+    return false;
+  }
+
+  /**
+   * 换端扣车这一拍之后是否还扣着：从终点站待命（派车还没放行）起扣，已在扣的到换端完成为止。
+   *
+   * @param holdable 车上没有人工驾驶的驾驶员、编组不止一节
+   * @param predicted 派车还没放行
+   * @param holding 此刻扣着
+   * @param changing 车掌正在换端
+   */
+  static boolean keepCabHold(
+      boolean holdable, boolean predicted, boolean holding, boolean changing) {
+    return holdable && (predicted || (holding && changing));
+  }
+
+  /** 车掌换端看的发车端：有驾驶员时跟驾驶员；只有车掌时终点站待命按线路图预计（待命期间只查一次），其余时候车头端发车。 */
+  private GuardCabChange.Outlook outlook(
+      GuardSession session, MinecartGroup group, String trainName) {
+    Optional<GuardCabChange.Outlook> fromDriver = drivers.driverOutlook(group);
+    if (fromDriver.isPresent()) {
+      session.setLayoverDeparture(null);
+      return fromDriver.get();
+    }
+    if (!drivers.atLayover(trainName)) {
+      session.setLayoverDeparture(null);
+      return GuardCabChange.Outlook.RUNNING;
+    }
+    CabSeats.Departure departure = session.layoverDeparture();
+    if (departure == null) {
+      departure = drivers.layoverDeparture(group);
+      session.setLayoverDeparture(departure);
+    }
+    return new GuardCabChange.Outlook(departure, true);
+  }
+
+  /**
+   * 处理一拍换端的结果。
+   *
+   * @return 值乘是否已经结束
+   */
+  private boolean handleCabChange(
+      Player player,
+      GuardSession session,
+      MinecartGroup group,
+      GuardCabChange.Event event,
+      long now) {
+    GuardCabChange change = session.cabChange();
+    String car = String.valueOf(GuardCabChange.targetCar(change.target(), group.size()));
+    switch (event) {
+      case ANNOUNCED -> {
+        player.sendMessage(locale.component("drive.guard.cab-change.announce", Map.of("car", car)));
+        player.sendMessage(locale.component("drive.guard.cab-change.offer", Map.of("car", car)));
+      }
+      case STARTED -> {
+        player.sendMessage(
+            locale.component(
+                "drive.guard.cab-change.start",
+                Map.of("car", car, "seconds", GuardDisplay.seconds(change.remainingTicks(now)))));
+        player.sendMessage(locale.component("drive.guard.cab-change.offer", Map.of("car", car)));
+        notifyDriverOf(session, "drive.guard.driver.cab-change", car);
+      }
+      case COMPLETED -> {
+        adoptSeat(player, session, group);
+        notice(player, session, "drive.guard.cab-change.done", Map.of("car", car));
+        notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
+      }
+      case TIMED_OUT -> {
+        if (!moveGuard(player, session, group, change.target())) {
+          stop(session.playerId(), GuardSession.EndReason.CAB_CHANGE);
+          return true;
+        }
+        player.sendMessage(
+            locale.component("drive.guard.cab-change.timeout-moved", Map.of("car", car)));
+        notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
+      }
+      case CANCELLED -> notice(player, session, "drive.guard.cab-change.cancelled", Map.of());
+      case NONE -> {}
+    }
+    return false;
+  }
+
+  private void notifyDriverOf(GuardSession session, String key, String car) {
+    drivers
+        .driverOf(session.link().trainName())
+        .ifPresent(
+            driver ->
+                drivers.notifyDriver(
+                    driver, key, Map.of("guard", session.playerName(), "car", car), null));
+  }
+
+  /** 坐进了要换到的那一端：预留改到此刻所坐的座位。 */
+  private static void adoptSeat(Player player, GuardSession session, MinecartGroup group) {
+    String trainName = group.getProperties().getTrainName();
+    SeatLocator.locate(player)
+        .filter(found -> found.trainName().equals(trainName))
+        .ifPresent(
+            found -> CabSeatKey.of(group, found).ifPresent(key -> session.moveSeat(key, found)));
+  }
+
+  /** 车掌此刻所坐的座位在这列车的哪一端；不在这列车的驾驶室里时为 {@link CabSeats.End#NONE}。 */
+  private CabSeats.End seatedEnd(
+      Player player, GuardSession session, MinecartGroup group, long now) {
+    String trainName = group.getProperties().getTrainName();
+    return SeatLocator.locate(player)
+        .filter(found -> found.trainName().equals(trainName))
+        .map(found -> cabSeats(session, group, now).endOf(found))
+        .orElse(CabSeats.End.NONE);
+  }
+
+  /** 驾驶室座位：同一编组、同样节数时每秒最多重读一次（挂上或摘下车厢时马上重读）。 */
+  private CabSeats cabSeats(GuardSession session, MinecartGroup group, long now) {
+    GuardSession.CabSeatsMemo memo = session.cabSeatsMemo();
+    if (memo != null
+        && memo.group() == group
+        && memo.size() == group.size()
+        && now - memo.tick() < CAB_SEATS_REFRESH_TICKS) {
+      return memo.seats();
+    }
+    CabSeats seats = SeatLocator.cabSeats(group, config.get().driver().cabSeatNames());
+    session.setCabSeatsMemo(new GuardSession.CabSeatsMemo(group, group.size(), now, seats));
+    return seats;
+  }
+
+  /** 直接把车掌送进要换到的那一端（换端超时、点了传送入座）；驾驶员也在换端时一起送（见 {@link DriverSide#moveWithGuard}）。 */
+  private boolean moveGuard(
+      Player player, GuardSession session, MinecartGroup group, CabSeats.End end) {
+    session.setMoving(true);
+    try {
+      return drivers.moveWithGuard(
+          group.getProperties().getTrainName(),
+          end,
+          () -> moveGuardTo(player, session, group, end));
+    } finally {
+      session.setMoving(false);
+    }
+  }
+
+  /**
+   * 让车掌坐进某一端驾驶室的空座位，预留改到这个座位，换端完成。
+   *
+   * @return 是否已坐进去；离列车太远、不在同一世界、那一端没有空的驾驶座时为 {@code false}
+   */
+  private boolean moveGuardTo(
+      Player player, GuardSession session, MinecartGroup group, CabSeats.End end) {
+    MinecartMember<?> member =
+        switch (end) {
+          case HEAD -> group.head();
+          case TAIL -> group.tail();
+          case NONE -> null;
+        };
+    if (member == null
+        || member.getEntity() == null
+        || group.getWorld() == null
+        || !group.getWorld().equals(player.getWorld())
+        || member.getEntity().getLocation().distanceSquared(player.getLocation())
+            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
+      return false;
+    }
+    int memberIndex = group.indexOf(member);
+    CabSeats cabs = SeatLocator.cabSeats(group, config.get().driver().cabSeatNames());
+    OptionalInt seat =
+        SeatLocator.enterNearestFreeSeatIndex(
+            player, member, index -> cabs.endOf(memberIndex, index) == end);
+    if (seat.isEmpty()) {
+      return false;
+    }
+    session.moveSeat(
+        new CabSeatKey(member.getEntity().getUniqueId(), seat.getAsInt()),
+        new SeatBinding(group.getProperties().getTrainName(), memberIndex, seat.getAsInt()));
+    session.cabChange().finish();
+    return true;
+  }
+
+  /**
+   * 驾驶员被直接送进发车端驾驶室（准备时间不足、换端超时、点了直接换端）：车上的车掌预留的座位不在另一头时一起送过去。车掌坐在驾驶员要去的那一端时先请下来，
+   * 驾驶员入座后再送车掌，两人不会抢同一个座位。
+   *
+   * @param driverEnd 驾驶员要去的那一端
+   * @param seatDriver 送驾驶员入座
+   * @return 驾驶员是否已入座
+   */
+  public boolean moveWithDriver(
+      MinecartGroup group, CabSeats.End driverEnd, BooleanSupplier seatDriver) {
+    CabSeats.End guardEnd = GuardCabChange.opposite(driverEnd);
+    GuardSession session =
+        group.size() < 2 || guardEnd == CabSeats.End.NONE
+            ? null
+            : guardOfTrain(group.getProperties().getTrainName()).orElse(null);
+    Player player = session == null ? null : Bukkit.getPlayer(session.playerId());
+    if (player == null
+        || !updateBinding(session, group)
+        || GuardCabChange.endOfCar(session.binding().memberIndex(), group.size()) == guardEnd) {
+      return seatDriver.getAsBoolean();
+    }
+    session.setMoving(true);
+    try {
+      if (seatedEnd(player, session, group, Bukkit.getCurrentTick()) == driverEnd) {
+        player.leaveVehicle();
+      }
+      boolean driverSeated = seatDriver.getAsBoolean();
+      if (moveGuardTo(player, session, group, guardEnd)) {
+        player.sendMessage(
+            locale.component(
+                "drive.guard.cab-change.moved-with-driver",
+                Map.of("car", String.valueOf(GuardCabChange.targetCar(guardEnd, group.size())))));
+      } else if (player.getVehicle() == null) {
+        SeatLocator.reseat(player, group, session.binding());
+      }
+      return driverSeated;
+    } finally {
+      session.setMoving(false);
+    }
+  }
+
+  /**
+   * 预留座位：车掌值乘期间，别人（乘客、驾驶员）不能坐进车掌预留的座位；车掌换端时预留先让出来。
+   *
+   * @return 是否放行这次入座
+   */
+  public boolean allowSeatEnter(Entity entity, MinecartMember<?> member, int seatIndex) {
+    if (sessions.isEmpty() || member == null || member.getEntity() == null || seatIndex < 0) {
+      return true;
+    }
+    UUID car = member.getEntity().getUniqueId();
+    UUID entering = entity == null ? null : entity.getUniqueId();
+    for (GuardSession session : sessions.values()) {
+      if (!blocksSeat(
+          session.seat(),
+          session.seatReleased(),
+          session.playerId(),
+          new CabSeatKey(car, seatIndex),
+          entering)) {
+        continue;
+      }
+      if (entity instanceof Player player) {
+        player.sendActionBar(
+            locale.component("drive.guard.seat.reserved", Map.of("guard", session.playerName())));
+      }
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * 车掌预留的座位拦不拦这次入座：预留没让出来、正是这个座位、进来的不是车掌本人。
+   *
+   * @param reserved 车掌预留的座位
+   * @param released 预留此刻让出来了（换端中）
+   * @param guardId 车掌
+   * @param seat 要坐的座位
+   * @param entering 要坐进来的实体；不明时为 {@code null}
+   */
+  static boolean blocksSeat(
+      CabSeatKey reserved, boolean released, UUID guardId, CabSeatKey seat, UUID entering) {
+    return !released && reserved.equals(seat) && !guardId.equals(entering);
   }
 
   // ---- 离座与入座 ----
@@ -1087,7 +1454,8 @@ public final class GuardSessionManager {
       player.sendMessage(locale.component("drive.guard.seat-exit.moving"));
       return false;
     }
-    if (!session.anyDoorOpen()) {
+    // 换端途中：车门关着也可以下车走到另一端。
+    if (!session.anyDoorOpen() && !session.cabChange().changing()) {
       notice(player, session, "drive.guard.seat-exit.doors-closed", Map.of());
       return false;
     }
@@ -1114,10 +1482,26 @@ public final class GuardSessionManager {
         .runTask(
             plugin,
             () -> {
-              if (sessions.get(player.getUniqueId()) == session && player.getVehicle() == null) {
-                if (!SeatLocator.reseat(player, group, session.binding())) {
-                  notice(player, session, "drive.guard.seat.unavailable", Map.of());
+              if (sessions.get(player.getUniqueId()) != session || player.getVehicle() != null) {
+                return;
+              }
+              GuardCabChange change = session.cabChange();
+              if (change.changing()) {
+                // 换端途中：点的是要换到的那一端的车厢才坐进去，否则提示去第几节。
+                MinecartMember<?> target =
+                    change.target() == CabSeats.End.TAIL ? group.tail() : group.head();
+                String car =
+                    String.valueOf(GuardCabChange.targetCar(change.target(), group.size()));
+                if (target == member && moveGuardTo(player, session, group, change.target())) {
+                  notice(player, session, "drive.guard.cab-change.done", Map.of("car", car));
+                  notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
+                } else {
+                  notice(player, session, "drive.guard.cab-change.go-to", Map.of("car", car));
                 }
+                return;
+              }
+              if (!SeatLocator.reseat(player, group, session.binding())) {
+                notice(player, session, "drive.guard.seat.unavailable", Map.of());
               }
             });
     return true;
@@ -1217,13 +1601,22 @@ public final class GuardSessionManager {
                                     work.exitOpen(),
                                     work.confirmed(),
                                     work.released())));
+    GuardCabChange change = session.cabChange();
+    Optional<GuardDisplay.CabChangeState> cabChange =
+        change.changing()
+            ? Optional.of(
+                new GuardDisplay.CabChangeState(
+                    GuardCabChange.targetCar(change.target(), group.size()),
+                    change.remainingTicks(now)))
+            : Optional.empty();
     return new GuardDisplay.Snapshot(
         group.getProperties().getTrainName(),
         driverName,
         ato,
         stop,
         seated,
-        session.link().timeoutStops());
+        session.link().timeoutStops(),
+        cabChange);
   }
 
   private void refreshHotbar(Player player, GuardSession session, boolean force) {

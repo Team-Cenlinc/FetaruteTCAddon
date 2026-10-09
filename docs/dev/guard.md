@@ -5,9 +5,9 @@
 ## 上岗与离岗
 
 - `/fta guard on`：坐在调度列车（`ManagedTrains.isFtaManaged`）车尾驾驶室的座位上执行。驾驶座的认定与驾驶员相同（`drive.yml` 的 `driver.cab-seat-names`，没有标记时按车厢位置）；车尾端（`CabSeats.End.TAIL`）才行，单节车坐另一头的驾驶室即可。一列车只有一名车掌；正在驾驶的玩家不能当车掌，车掌也不能同时驾驶（`drive.command.start.guard-on-duty`）。
-- `/fta guard off` 结束值乘，`/fta guard status` 查看，管理员 `/fta guard stop <玩家>` 撤下。车掌菜单（F）里“结束值乘”点两次也结束。
+- `/fta guard off` 结束值乘，`/fta guard seat` 传送入座，`/fta guard status` 查看，管理员 `/fta guard stop <玩家>` 撤下。车掌菜单（F）里“结束值乘”点两次也结束。
 - 权限 `fetarute.drive.guard`（默认 OP，含在 `fetarute.drive.player` 打包节点里）。
-- 值乘结束（含离线、死亡、列车不在了、漏乘、连续超时）时车掌开着的门随之关上，车门交还驾驶员或站台；站台的停站发现车门不归车掌了，剩下的开关门与发车按原来的方式进行。
+- 值乘结束（含离线、死亡、列车不在了、漏乘、连续超时、换端没坐进车尾）时车掌开着的门随之关上，车门交还驾驶员或站台；站台的停站发现车门不归车掌了，剩下的开关门与发车按原来的方式进行。
 
 ## 站台与车掌
 
@@ -46,6 +46,15 @@
 - 关门监视：关门动画放着时每 5 tick 采样一次（`GuardWatch#closingWatch`）：不在车上、离自己那节车厢不超过 `watch-radius-blocks`、视线水平方向与车身夹角不超过 `watch-angle-degrees`（朝车头或车尾都行）。合格的采样不少于 `watch-ratio` 算合格；动画放完时动作栏告知结果。
 - 出站监视：车掌放行、列车开出这一站时开始，到车头走过“车长 + `departure-watch-extra-blocks`”（直线距离）或 `departure-watch-max-seconds` 为止，每 5 tick 采样一次（`GuardWatch#departureWatch`）：坐在车掌座位上，视线朝站台一侧或朝车后（车掌驾驶室面朝的方向），夹角不超过 60°。结束时告知结果。
 - 两种监视的结果记在这一站的 `GuardStopWork` 里，供成绩使用。
+
+## 终点站换端与座位预留
+
+- 车掌坐在发车端的另一头（`GuardCabChange`）。发车端：有驾驶员（人工或 ATO）时跟驾驶员的换端判定（`GuardCabChange#fromDriver`：换端时按他要换到的那一端，不换端时按他坐的车厢）；只有车掌时，终点站待命按线路图预计（`TerminalCabEnd`，待命期间只查一次），其余时候车头端发车。单节车不换端。
+- 放行前已知下一趟由车掌这一端发车：聊天栏告知换到另一头（`drive.guard.cab-change.announce`），不计时。派车放行、列车调头后车掌预留的座位不在车尾端：在换端时间预留（与驾驶员相同，`driver.cab-change` 段按车长算）内坐进车尾端驾驶室；超时、或人工驾驶的驾驶员先开了车，直接送进去，送不了值乘结束（`CAB_CHANGE`）。
+- 换端途中车门关着也可以下车；在站台上右键要换到的那一端的车厢入座。菜单“传送入座”或 `/fta guard seat` 直接送过去（时间够时可选）。
+- 一起传送：驾驶员被直接送进发车端（准备时间不足、换端超时、点了直接换端）时，车掌一起送进另一头（`GuardSessionManager#moveWithDriver`）；车掌被直接送过去时，驾驶员也在换端就一起送（`DriverSide#moveWithGuard`）。同一拍里先请坐在对方要去那一端的人下车，再分别入座，两人不会抢同一个座位。
+- 座位预留：车掌值乘期间，别人（乘客、驾驶员）坐不进车掌预留的座位（TrainCarts `MemberBeforeSeatEnterEvent`，`GuardSessionManager#blocksSeat`）；换端开始时预留让出来，坐进另一头后预留改到新座位。左右车门的记录随车掌面朝的方向对调（`DriveDoors#followCab`）。
+- 换端扣车：车上没有人工驾驶的驾驶员（只有车掌，或 ATO 驾驶员）时，从终点站待命起扣着列车（`GuardLink#cabHold`，按驾驶员控制处理）；派车放行时只调头、不发车（只有车掌时由 `GuardLink#takeTurnback` 取走调头标记），车掌坐进车尾端（或不必换）后解除并重算信号，交回自动运行发车。人工驾驶由驾驶员自己起步，驾驶员动作栏提示车掌换端与就位。
 
 ## 显示
 

@@ -827,6 +827,10 @@
         <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
     <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSession$CabSeatsMemo"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
         <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>

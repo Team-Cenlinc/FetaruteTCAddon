@@ -7,6 +7,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 
 /**
@@ -32,13 +33,15 @@ public final class GuardSession implements DriveDoors.Cab {
     /** 车掌功能被关掉或插件停用。 */
     DISABLED,
     /** 管理员撤下。 */
-    ADMIN
+    ADMIN,
+    /** 终点站换端时没能坐进车尾端驾驶室。 */
+    CAB_CHANGE
   }
 
   private final UUID playerId;
   private final String playerName;
   private final GuardLink link;
-  private final CabSeatKey seat;
+  private CabSeatKey seat;
   private final DriveDoors doors = new DriveDoors();
   private final BuzzerPress buzzer;
   private final long startedTick;
@@ -61,6 +64,17 @@ public final class GuardSession implements DriveDoors.Cab {
   private com.bergerkiller.bukkit.tc.controller.MinecartGroup lastGroup;
   private boolean closingWatchActive;
   private DepartureWatch departureWatch;
+  private final GuardCabChange cabChange = new GuardCabChange();
+  private boolean moving;
+  private CabSeats.Departure layoverDeparture;
+  private CabSeatsMemo cabSeatsMemo;
+
+  /** 驾驶室座位的认定：同一编组、同样节数时每秒最多重读一次。 */
+  public record CabSeatsMemo(
+      com.bergerkiller.bukkit.tc.controller.MinecartGroup group,
+      int size,
+      long tick,
+      CabSeats seats) {}
 
   /**
    * 进行中的出站监视：起步时车头的位置，走过多远、到哪个 tick 为止，站台在哪个方向，结果记进哪一站。
@@ -110,6 +124,44 @@ public final class GuardSession implements DriveDoors.Cab {
   /** 预留的车掌座位（车厢实体 + 座位序号）。 */
   public CabSeatKey seat() {
     return seat;
+  }
+
+  /** 换端后预留改到新坐的座位。 */
+  public void moveSeat(CabSeatKey seat, SeatBinding binding) {
+    this.seat = Objects.requireNonNull(seat, "seat");
+    this.binding = Objects.requireNonNull(binding, "binding");
+  }
+
+  /** 终点站换端。 */
+  public GuardCabChange cabChange() {
+    return cabChange;
+  }
+
+  /** 预留的座位此刻让出来了：在换端，或正被直接送进另一端。 */
+  public boolean seatReleased() {
+    return moving || cabChange.changing();
+  }
+
+  /** 正在把车掌直接送进另一端（同一拍里先请下、再分别入座）。 */
+  public void setMoving(boolean moving) {
+    this.moving = moving;
+  }
+
+  /** 只有车掌的列车这次待命预计的发车端（要查线路图，待命期间只查一次）；没在待命时为 {@code null}。 */
+  public CabSeats.Departure layoverDeparture() {
+    return layoverDeparture;
+  }
+
+  public void setLayoverDeparture(CabSeats.Departure departure) {
+    this.layoverDeparture = departure;
+  }
+
+  public CabSeatsMemo cabSeatsMemo() {
+    return cabSeatsMemo;
+  }
+
+  public void setCabSeatsMemo(CabSeatsMemo memo) {
+    this.cabSeatsMemo = memo;
   }
 
   public DriveDoors doors() {

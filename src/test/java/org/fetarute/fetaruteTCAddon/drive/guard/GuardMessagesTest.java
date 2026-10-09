@@ -4,10 +4,15 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
@@ -74,7 +79,10 @@ class GuardMessagesTest {
                     flag,
                     Optional.of(stop),
                     seated,
-                    1);
+                    1,
+                    seated
+                        ? Optional.of(new GuardDisplay.CabChangeState(3, flag ? 40L : -1L))
+                        : Optional.empty());
             keys.add(GuardDisplay.prompt(snapshot).key());
             for (DriveSidebarRows.Row row : GuardDisplay.rows(snapshot)) {
               keys.add(row.labelKey());
@@ -90,4 +98,32 @@ class GuardMessagesTest {
       assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
     }
   }
+
+  /** 车掌代码里写死的语言键（含驾驶员那边换端一起送的提示）都有文案。 */
+  @ParameterizedTest
+  @ValueSource(strings = {"zh_CN", "en_US"})
+  void everyLiteralKeyInTheGuardCodeHasAMessage(String localeTag) throws Exception {
+    YamlConfiguration lang = lang(localeTag);
+    Pattern literal =
+        Pattern.compile("\"(drive\\.(?:guard|task\\.cab-change)\\.[a-z0-9.-]*[a-z0-9])\"");
+    List<Path> sources = new ArrayList<>();
+    try (Stream<Path> files = Files.list(Path.of(SOURCE_ROOT, "drive/guard"))) {
+      files.filter(path -> path.toString().endsWith(".java")).forEach(sources::add);
+    }
+    sources.add(Path.of(SOURCE_ROOT, "drive/session/DriveSessionManager.java"));
+    sources.add(Path.of(SOURCE_ROOT, "command/FtaGuardCommand.java"));
+    List<String> keys = new ArrayList<>();
+    for (Path source : sources) {
+      Matcher matcher = literal.matcher(Files.readString(source, StandardCharsets.UTF_8));
+      while (matcher.find()) {
+        keys.add(matcher.group(1));
+      }
+    }
+    assertTrue(keys.contains("drive.guard.cab-change.moved-with-driver"));
+    for (String key : keys) {
+      assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
+    }
+  }
+
+  private static final String SOURCE_ROOT = "src/main/java/org/fetarute/fetaruteTCAddon";
 }

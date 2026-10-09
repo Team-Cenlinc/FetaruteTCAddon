@@ -30,7 +30,8 @@ class GuardDisplayTest {
   }
 
   private static GuardDisplay.Snapshot snapshot(GuardDisplay.StopState stop, boolean seated) {
-    return new GuardDisplay.Snapshot("T-1", Optional.empty(), true, Optional.of(stop), seated, 0);
+    return new GuardDisplay.Snapshot(
+        "T-1", Optional.empty(), true, Optional.of(stop), seated, 0, Optional.empty());
   }
 
   private static String prompt(GuardDisplay.StopState stop, boolean seated) {
@@ -43,7 +44,7 @@ class GuardDisplayTest {
         "drive.guard.prompt.running",
         GuardDisplay.prompt(
                 new GuardDisplay.Snapshot(
-                    "T-1", Optional.empty(), false, Optional.empty(), true, 0))
+                    "T-1", Optional.empty(), false, Optional.empty(), true, 0, Optional.empty()))
             .key());
     GuardDisplay.Line open =
         GuardDisplay.prompt(snapshot(stop(Phase.OPEN_DOORS, false, false, false), true));
@@ -83,6 +84,43 @@ class GuardDisplayTest {
         GuardDisplay.rows(snapshot(stop(Phase.DWELL, true, false, false), true));
     assertTrue(dwell.stream().noneMatch(row -> row.labelKey().endsWith(".exit")));
     assertEquals("drive.guard.sidebar.value.crew-ato", dwell.get(1).valueKey());
+  }
+
+  /** 换端：开门、停站、关门这几步仍先提示停站作业，其余时候提示换端；放行前告知不显示秒数。 */
+  @Test
+  void cabChangeComesAfterTheDoorWork() {
+    Optional<GuardDisplay.CabChangeState> active =
+        Optional.of(new GuardDisplay.CabChangeState(4, 200L));
+    GuardDisplay.Line running =
+        GuardDisplay.prompt(
+            new GuardDisplay.Snapshot(
+                "T-1", Optional.empty(), false, Optional.empty(), false, 0, active));
+    assertEquals("drive.guard.prompt.cab-change", running.key());
+    assertEquals(Map.of("car", "4", "seconds", "10"), running.values());
+    GuardDisplay.Snapshot dwell =
+        new GuardDisplay.Snapshot(
+            "T-1",
+            Optional.empty(),
+            false,
+            Optional.of(stop(Phase.DWELL, false, false, false)),
+            true,
+            0,
+            Optional.of(new GuardDisplay.CabChangeState(1, -1L)));
+    assertEquals("drive.guard.prompt.dwell", GuardDisplay.prompt(dwell).key());
+    assertTrue(
+        GuardDisplay.rows(dwell).stream()
+            .anyMatch(
+                row -> row.valueKey().equals("drive.guard.sidebar.value.cab-change-announced")));
+    GuardDisplay.Snapshot waiting =
+        new GuardDisplay.Snapshot(
+            "T-1",
+            Optional.empty(),
+            false,
+            Optional.of(stop(Phase.WAIT_DEPARTURE, false, false, false)),
+            true,
+            0,
+            Optional.of(new GuardDisplay.CabChangeState(1, -1L)));
+    assertEquals("drive.guard.prompt.cab-change-announced", GuardDisplay.prompt(waiting).key());
   }
 
   @Test
