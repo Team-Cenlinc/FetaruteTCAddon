@@ -311,7 +311,7 @@ public final class TaskBoardSource {
   /**
    * 给玩家看的一班车，与站台屏同一口径：哪条线、开往哪里、从几号站台、几点发车。车次号是内部编号，玩家认不出，只作附注。
    *
-   * @param line 线路名；查不到时为交路代码
+   * @param line 线路名；查不到时为空
    * @param destination 终点站名；查不到时为空
    * @param platform 接班站的站台号；不是股道节点时为 {@code -}
    * @param time 接班站计划发车时刻（服务器时区，时:分）
@@ -325,40 +325,62 @@ public final class TaskBoardSource {
   /** 一个任务所派的那一班车的说明。 */
   public static TripLabel label(
       FetaruteTCAddon plugin, TimetableService timetables, DriverTaskManager.TaskSpec spec) {
+    Optional<TimetableService.TripPlan> plan =
+        timetables.tripPlan(
+            spec.key().timetableId(), spec.key().tripCode(), spec.key().serviceDate());
+    // 查不到终点站时写交班站：玩家至少知道车往哪个方向开。
     String destination =
         tripOf(plugin, timetables, spec.key(), spec.takeoverStopSequence())
             .map(TaskBoardEntries.Trip::destination)
-            .orElse("");
-    String platform = RouteTerminals.platformOf(spec.takeoverNodeId());
+            .filter(name -> !name.isBlank())
+            .orElse(spec.handoverStationName() == null ? "" : spec.handoverStationName());
     return new TripLabel(
-        lineName(plugin, timetables, spec).orElse(spec.routeCode()),
+        lineName(plugin, plan).orElse(""),
         destination,
-        platform,
+        platformOf(plugin, timetables, plan, spec),
         LABEL_CLOCK.format(spec.plannedDeparture()));
   }
 
-  /** 车次所属线路的名称：按时刻表的线路，在接班站停靠的线路里找。 */
+  /** 车次所属线路的名称（按交路所属的线路）；查不到时为空，不拿内部的交路代码顶替。 */
   private static Optional<String> lineName(
-      FetaruteTCAddon plugin, TimetableService timetables, DriverTaskManager.TaskSpec spec) {
-    Optional<java.util.UUID> lineId =
-        timetables.publishedTimetables().stream()
-            .filter(timetable -> timetable.id().equals(spec.key().timetableId()))
-            .map(org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable::lineId)
-            .findFirst();
-    if (lineId.isEmpty() || spec.takeoverNodeId() == null) {
-      return Optional.empty();
+      FetaruteTCAddon plugin, Optional<TimetableService.TripPlan> plan) {
+    return plan.flatMap(
+        found ->
+            plugin
+                .getRouteDefinitionCache()
+                .flatMap(cache -> cache.findRecord(found.routeId()))
+                .map(record -> record.line().name())
+                .filter(name -> !name.isBlank()));
+  }
+
+  /** 接班站的站台号：动态站台按编表排定的计划股道；动态站台没排上时不写（任务里的节点只是范围内第一条股道的占位，不是要停的站台）；固定站台按任务的节点。 */
+  private static String platformOf(
+      FetaruteTCAddon plugin,
+      TimetableService timetables,
+      Optional<TimetableService.TripPlan> plan,
+      DriverTaskManager.TaskSpec spec) {
+    Optional<String> planned =
+        plan.flatMap(
+            found -> timetables.plannedPlatform(found.tripId(), spec.takeoverStopSequence()));
+    if (planned.isPresent()) {
+      return RouteTerminals.platformOf(planned.get());
     }
-    return plugin
-        .getStationDirectory()
-        .map(StationDirectory::snapshot)
-        .flatMap(
-            snapshot ->
-                snapshot.stationIdOfNode(spec.takeoverNodeId()).stream()
-                    .flatMap(station -> snapshot.linesAt(station).stream())
-                    .filter(found -> found.line().id().equals(lineId.get()))
-                    .map(found -> found.line().name())
-                    .filter(name -> !name.isBlank())
-                    .findFirst());
+    boolean dynamic =
+        plan.flatMap(
+                found ->
+                    plugin
+                        .getRouteDefinitionCache()
+                        .flatMap(
+                            cache ->
+                                cache
+                                    .findById(found.routeId())
+                                    .flatMap(
+                                        route ->
+                                            cache.findStop(
+                                                route.id(), spec.takeoverStopSequence()))))
+            .map(org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher::isDynamicStop)
+            .orElse(false);
+    return dynamic ? "-" : RouteTerminals.platformOf(spec.takeoverNodeId());
   }
 
   private static List<TaskTripSummary.Stop> stopsOf(TimetableService.TripPlan plan) {

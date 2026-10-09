@@ -532,6 +532,25 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return active.containsKey(playerId);
   }
 
+  /** 玩家领了驾驶或车掌任务、还没开始：坐在车上等接班时，接班提示（坐第几节驾驶室）发在动作栏，乘客的动作栏要让位，不然提示被盖掉。 */
+  public boolean awaitingCrewDuty(UUID playerId) {
+    if (tasks
+        .taskOf(playerId)
+        .filter(task -> task.state() == DriverTask.State.CLAIMED)
+        .isPresent()) {
+      return true;
+    }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return crew != null
+        && crew.tasks()
+            .activeTaskOf(playerId)
+            .filter(
+                task ->
+                    task.state()
+                        == org.fetarute.fetaruteTCAddon.drive.guard.GuardTask.State.CLAIMED)
+            .isPresent();
+  }
+
   /** 玩家正在驾驶或值乘车掌：用的是驾驶员侧边栏，乘客的计分板要让位。 */
   public boolean usesCrewSidebar(UUID playerId) {
     org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;

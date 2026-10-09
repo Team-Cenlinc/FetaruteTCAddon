@@ -437,12 +437,15 @@ public final class LicenseService implements Listener, GuardExaminer {
                 .getLocaleManager()
                 .text("drive.license.practice.routes")
                 .replace("<routes>", String.join("、", config.training().routes())));
-    if (seated.isEmpty() || timetables.isEmpty()) {
+    if (seated.isEmpty()) {
       return new Reply(
           guard ? "drive.license.practice.guard.choose" : "drive.license.practice.choose", values);
     }
     String train = seated.get();
     values.put("train", train);
+    if (timetables.isEmpty()) {
+      return new Reply("drive.license.practice.not-at-station", values);
+    }
     Optional<ChosenTrain> chosen = chosenTrain(manager, train);
     if (chosen.isEmpty()) {
       return new Reply("drive.license.practice.not-at-station", values);
@@ -467,13 +470,14 @@ public final class LicenseService implements Listener, GuardExaminer {
               TaskBoardSource.stopsAhead(
                       timetables.get(), chosen.get().key(), chosen.get().fromSequence())
                   .orElse(0)));
-      return new Reply("drive.license.practice.short", values);
+      return new Reply(
+          guard ? "drive.license.practice.guard.short" : "drive.license.practice.short", values);
     }
     if (!config.training().allowsRoute(spec.get().routeCode())) {
       return new Reply("drive.license.practice.route-not-allowed", values);
     }
-    // 已经晚点的车不拿来练习：练习可能再慢一些，调度会救不过来。
-    if (lateTrain(train, config.training().drillMaxDelaySeconds())) {
+    // 已经晚点的车不拿来练习：练习可能再慢一些，调度会救不过来。终点站待命车的晚点是到达的那一趟的，不代表要练的下一趟，不看。
+    if (!chosen.get().layover() && lateTrain(train, config.training().drillMaxDelaySeconds())) {
       return new Reply("drive.license.practice.late", values);
     }
     Instant now = Instant.now();
@@ -513,11 +517,11 @@ public final class LicenseService implements Listener, GuardExaminer {
   /**
    * 练习选的车：从它此刻所在的车站起要跑的那一趟。
    *
-   * @param trainName 列车
    * @param key 车次
    * @param fromSequence 从哪个停靠序号起接班
+   * @param layover 终点站待命车（跑的是它的下一趟）
    */
-  private record ChosenTrain(String trainName, TaskKey key, int fromSequence) {}
+  private record ChosenTrain(TaskKey key, int fromSequence, boolean layover) {}
 
   /**
    * 玩家坐着的这列车能不能拿来练习、跑哪一趟：中途站停站中的车跑它此刻的车次，从这一站起；终点站待命的车跑它的下一趟，从始发站起。
@@ -529,13 +533,15 @@ public final class LicenseService implements Listener, GuardExaminer {
         DriverTaskManager.timetables().flatMap(api -> api.getAssignment(train));
     if (assignment.isPresent()
         && assignment.get().nextStopSequence().isPresent()
+        && assignment.get().lastStopSequence().isPresent()
         && manager.tasks().isDwelling(train)) {
+      // 停在哪一站看绑定记下的最近一站；还没记下时不知道停在哪一站，不拿来练习。
       TimetableApi.TrainAssignment current = assignment.get();
       return Optional.of(
           new ChosenTrain(
-              train,
               new TaskKey(current.timetableId(), current.tripCode(), current.serviceDate()),
-              current.lastStopSequence().orElse(0)));
+              current.lastStopSequence().get(),
+              false));
     }
     if (plugin.getLayoverRegistry().flatMap(layovers -> layovers.get(train)).isEmpty()) {
       return Optional.empty();
@@ -546,9 +552,9 @@ public final class LicenseService implements Listener, GuardExaminer {
         .map(
             next ->
                 new ChosenTrain(
-                    train,
                     new TaskKey(next.timetable().id(), next.trip().tripCode(), next.serviceDate()),
-                    0));
+                    0,
+                    true));
   }
 
   /** 报名路考、车掌考试或练习前：不能正在驾驶、值乘，也不能领着驾驶或车掌任务。 */
@@ -728,7 +734,12 @@ public final class LicenseService implements Listener, GuardExaminer {
         plugin
             .getTimetableService()
             .map(timetables -> TaskBoardSource.label(plugin, timetables, spec))
-            .orElse(new TaskBoardSource.TripLabel(spec.routeCode(), "", "-", ""));
+            .orElse(
+                new TaskBoardSource.TripLabel(
+                    "",
+                    spec.handoverStationName() == null ? "" : spec.handoverStationName(),
+                    "-",
+                    ""));
     values.put("line", label.line());
     values.put("destination", label.destination());
     values.put(
@@ -944,7 +955,10 @@ public final class LicenseService implements Listener, GuardExaminer {
     finishGuardExam(playerId, player, exam, license.get(), GuardExam.ended(reason));
   }
 
-  /** 车掌考试或练习派的任务没上岗就了结（列车没等到、已开走、放弃）：考试不计成绩、可以马上重考；练习不计次。 */
+  /**
+   * 车掌考试或练习派的任务了结时考试还登记着：没上岗就了结（列车没等到、已开走、放弃）时考试不计成绩、可以马上重考，练习不计次；
+   * 上岗做过作业、却在值乘中先了结了（列车换了车次）时按值乘提前结束判。这一班值乘结束时，值乘结束已经了结了考试，这里不再管。玩家另在别的车上值乘不影响这里。
+   */
   @EventHandler
   public void onGuardTaskFinished(GuardTaskFinishedEvent event) {
     GuardApi.TaskView task = event.getTask();
@@ -957,14 +971,24 @@ public final class LicenseService implements Listener, GuardExaminer {
     if (exam == null || exam.kind() != LicenseClass.Exam.GUARD || exam.training() != practice) {
       return;
     }
-    DriveSessionManager manager = drive.get();
-    if (manager != null && manager.guards().map(guards -> guards.isOnDuty(id)).orElse(false)) {
-      // 上岗后的结束由值乘结束与逐站判定处理。
+    boolean judged = guardPracticeJudged.contains(id);
+    Player player = Bukkit.getPlayer(id);
+    Optional<LicenseClass> license = config.find(exam.classId());
+    if (task.points().isPresent() && !judged && license.isPresent()) {
+      ExamEvaluation.Result ended =
+          new ExamEvaluation.Result(ExamEvaluation.Verdict.VOID, "ended", Map.of());
+      if (practice) {
+        finishGuardPractice(id, player, license.get(), ended, false);
+        endExam(id);
+        if (player != null) {
+          apply(player);
+        }
+      } else {
+        finishGuardExam(id, player, exam, license.get(), ended);
+      }
       return;
     }
-    boolean judged = guardPracticeJudged.contains(id);
     endExam(id);
-    Player player = Bukkit.getPlayer(id);
     if (player == null) {
       return;
     }
@@ -1615,10 +1639,8 @@ public final class LicenseService implements Listener, GuardExaminer {
         // 正在开车做教程：等这次驾驶结束再说，不中途收走开车的权限。
         continue;
       }
-      if (exam.kind() == LicenseClass.Exam.GUARD
-          && manager != null
-          && manager.guards().map(guards -> guards.isOnDuty(id)).orElse(false)) {
-        // 正在值乘：等做满站数或值乘结束再判定。
+      if (exam.kind() == LicenseClass.Exam.GUARD && onExamDuty(id, exam)) {
+        // 正在值乘考试或练习派的那一班：等做满站数或值乘结束再判定。
         continue;
       }
       endExam(id);

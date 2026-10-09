@@ -2981,6 +2981,7 @@ drive:
       guard:
         choose: "<prefix> <yellow>练习不派车：请先坐上要练习的调度列车（在车站停站中，或在终点站待命），再输入 <white>/fta license practice <class></white>；从这一站起值乘 <stops> 站。</yellow><gray><routes></gray>"
         taken: "<prefix> <yellow>列车 <white><train></white> 的这一趟已有车掌，请换一列车。</yellow>"
+        short: "<prefix> <yellow>列车 <white><train></white> 的这一趟在本站之后只剩 <white><left></white> 个停车站：车掌练习要值乘 <white><stops></white> 站，再在下一站交班（共 <white><need></white> 站），请换一列车。</yellow>"
         in-progress: "<prefix> <yellow>你正在进行<white><name></white>练习，请先完成本次练习</yellow> <click:run_command:'/fta guard task abandon'><hover:show_text:'<gray>放弃本次练习（不计练习次数）</gray>'><gray>[放弃本次练习]</gray></hover></click>"
         not-started: "<prefix> <yellow>未能上岗，本次<white><name></white>练习已作废，不计练习次数</yellow>"
         stop: "<prefix> <gray>车掌练习 <done>/<total></gray> <white><station></white> <gray>开门</gray> <open> <gray>关门</gray> <close> <gray>关门监视</gray> <closing> <gray>发车信号</gray> <signal> <gray>出站监视</gray> <departure>"
@@ -2998,7 +2999,7 @@ drive:
           failed: "<prefix> <red>按考试标准评判：不及格</red> <white>（<reason>）</white>"
           void: "<prefix> <yellow>本次练习无法评判：<reason></yellow>"
           not-counted: "<prefix> <yellow>未做满站数，本次不计练习次数。</yellow>"
-          ready: "<prefix> <green>已完成车掌练习 <done>/<required> 次，可以报名考试</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名考试]</green></hover></click>"
+          ready: "<prefix> <green>已完成车掌练习 <done>/<required> 次：值乘到下一站交班后，即可报名考试</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>交班后在车站附近点击报名</gray>'><green>[报名考试]</green></hover></click>"
           more: "<prefix> <yellow>已完成车掌练习 <done>/<required> 次，请继续练习：坐上要练习的调度列车后输入 <white>/fta license practice <class></white></yellow>"
     guard:
       late: "<prefix> <yellow>本车次已晚点 <white><delay></white> 秒，请在限速内平稳行车，尽快恢复正点；晚点继续扩大时将交还自动运行。</yellow>"

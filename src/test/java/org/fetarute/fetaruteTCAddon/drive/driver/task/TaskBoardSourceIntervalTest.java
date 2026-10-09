@@ -96,15 +96,15 @@ class TaskBoardSourceIntervalTest {
     assertTrue(TaskBoardSource.stopsAhead(timetables, KEY, 5).isEmpty());
   }
 
-  /** 查不到线路名时写交路代码；终点站与发车时刻照常给出。 */
+  /** 查不到线路名时留空（不拿内部的交路代码顶替）；终点站与发车时刻照常给出，查不到站台时写“-”。 */
   @Test
-  void labelFallsBackToTheRouteCode() {
+  void labelWithoutLineName() {
     DriverTaskManager.TaskSpec spec =
         TaskBoardSource.intervalSpec(
                 plugin, timetables, KEY, 0, "T-1", 2, DriverTask.SOURCE_TRAINING, Map.of())
             .orElseThrow();
     TaskBoardSource.TripLabel label = TaskBoardSource.label(plugin, timetables, spec);
-    assertEquals("WS-2", label.line());
+    assertEquals("", label.line());
     assertEquals("D", label.destination());
     assertEquals("-", label.platform());
     assertEquals(5, label.time().length());

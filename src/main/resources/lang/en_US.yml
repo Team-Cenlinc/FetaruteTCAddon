@@ -1277,6 +1277,7 @@ drive:
       guard:
         choose: "<prefix> <yellow>Practice does not assign a train: first board the dispatched train you want to practise on (stopped at a station, or laying over at a terminal), then run <white>/fta license practice <class></white>; you work <stops> stops from there.</yellow><gray><routes></gray>"
         taken: "<prefix> <yellow>This trip of train <white><train></white> already has a guard; pick another train.</yellow>"
+        short: "<prefix> <yellow>Train <white><train></white> has only <white><left></white> stops left on this trip after here: guard practice works <white><stops></white> stops and hands over at the next one (<white><need></white> in all); pick another train.</yellow>"
         in-progress: "<prefix> <yellow>You are on a <white><name></white> practice run; finish it first</yellow> <click:run_command:'/fta guard task abandon'><hover:show_text:'<gray>Abandon this practice run (it does not count)</gray>'><gray>[Abandon practice]</gray></hover></click>"
         not-started: "<prefix> <yellow>You did not go on duty; this <white><name></white> practice run was cancelled and does not count</yellow>"
         stop: "<prefix> <gray>Guard practice <done>/<total></gray> <white><station></white> <gray>open</gray> <open> <gray>close</gray> <close> <gray>closing watch</gray> <closing> <gray>signal</gray> <signal> <gray>departure watch</gray> <departure>"
@@ -1294,7 +1295,7 @@ drive:
           failed: "<prefix> <red>By exam standards: fail</red> <white>(<reason>)</white>"
           void: "<prefix> <yellow>This practice run cannot be judged: <reason></yellow>"
           not-counted: "<prefix> <yellow>You did not work all the stops; this run does not count.</yellow>"
-          ready: "<prefix> <green>Guard practice done <done>/<required>; you can take the exam</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the exam]</green></hover></click>"
+          ready: "<prefix> <green>Guard practice done <done>/<required>; once you hand over at the next stop you can take the exam</green> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>After handing over, click near a station to sign up</gray>'><green>[Take the exam]</green></hover></click>"
           more: "<prefix> <yellow>Guard practice done <done>/<required>; keep practising: board the dispatched train you want and run <white>/fta license practice <class></white></yellow>"
     guard:
       late: "<prefix> <yellow>This trip is <white><delay></white> s late. Drive smoothly within the limit and recover time; if the delay keeps growing, the train will be handed back to automatic operation.</yellow>"

@@ -98,7 +98,7 @@ class DriveTipTest {
   }
 
   @Test
-  @DisplayName("第一次与车掌同车时说明一次（人工与 ATO 都出），车上有车掌时不出开关门的提示")
+  @DisplayName("人工驾驶第一次与车掌同车时说明一次（ATO 自己起步，不出），车上有车掌时不出开关门的提示")
   void guardAboard() {
     for (DriverStationHint.Kind kind :
         new DriverStationHint.Kind[] {
@@ -108,7 +108,7 @@ class DriveTipTest {
           Optional.of(DriveTip.GUARD_ABOARD),
           DriveTip.firstDue(manualDispatch().stationHint(kind).build(), Set.of()),
           kind.name());
-      assertTrue(DriveTip.GUARD_ABOARD.due(manualDispatch().ato(true).stationHint(kind).build()));
+      assertFalse(DriveTip.GUARD_ABOARD.due(manualDispatch().ato(true).stationHint(kind).build()));
     }
     assertEquals(
         Optional.empty(),

@@ -66,8 +66,11 @@ public final class LicenseCardItem {
     lines.add(locale.component("drive.license.card.holder", Map.of("player", playerName)));
     lines.add(locale.component("drive.license.card.serial", Map.of("serial", number(playerId))));
     lines.add(Component.empty());
-    lines.add(locale.component("drive.license.card.classes"));
-    addEntries(locale, lines, entries);
+    // 只持有附注（例如只考了车掌）时不印空着的“准驾等级”一栏。
+    if (!entries.isEmpty()) {
+      lines.add(locale.component("drive.license.card.classes"));
+      addEntries(locale, lines, entries);
+    }
     if (!endorsements.isEmpty()) {
       lines.add(locale.component("drive.license.card.endorsements"));
       addEntries(locale, lines, endorsements);

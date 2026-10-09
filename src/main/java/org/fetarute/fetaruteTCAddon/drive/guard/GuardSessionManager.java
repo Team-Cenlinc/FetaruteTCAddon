@@ -1624,17 +1624,20 @@ public final class GuardSessionManager {
     if (taskTrip) {
       task.setResult(result.points(), result.grade().name());
     }
-    callEvent(
-        new GuardTripScoredEvent(
-            session.playerId(),
-            trainName,
-            taskTrip ? Optional.of(GuardViews.of(task)) : Optional.empty(),
-            key.get().timetableId(),
-            tripCode,
-            key.get().serviceDate(),
-            trip.routeCode(),
-            state.name(),
-            GuardViews.score(score, result, trip.blocks())));
+    // 练习的这一趟不写记录，也不发一趟成绩的事件（与车掌记录同一口径）。
+    if (!trip.practiced()) {
+      callEvent(
+          new GuardTripScoredEvent(
+              session.playerId(),
+              trainName,
+              taskTrip ? Optional.of(GuardViews.of(task)) : Optional.empty(),
+              key.get().timetableId(),
+              tripCode,
+              key.get().serviceDate(),
+              trip.routeCode(),
+              state.name(),
+              GuardViews.score(score, result, trip.blocks())));
+    }
     if (taskTrip) {
       finishTask(online, session, state, state.name());
     }
