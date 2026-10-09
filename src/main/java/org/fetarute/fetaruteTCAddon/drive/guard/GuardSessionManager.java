@@ -782,6 +782,8 @@ public final class GuardSessionManager {
       return;
     }
     session.setDrill(new GuardDrill(stop.stationName(), Bukkit.getCurrentTick(), seconds));
+    // 演练占用的时间不算车掌慢：本站余下各步的时限都加上演练时限，免得站台代做记成超时。
+    session.link().work().ifPresent(work -> work.credit(seconds * 20L));
     player.sendMessage(
         locale.component(
             "drive.guard.drill.alert",

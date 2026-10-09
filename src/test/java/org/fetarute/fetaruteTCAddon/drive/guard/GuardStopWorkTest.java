@@ -68,6 +68,33 @@ class GuardStopWorkTest {
     assertEquals(GuardStopWork.Action.FORCE_CLOSE, work.tick(Phase.CLOSE_DOORS));
   }
 
+  /** 演练占用的时间：本站余下各步都加上，换步不清零、不占报告次数。 */
+  @Test
+  void aDrillCreditCoversTheRestOfTheStop() {
+    GuardStopWork work = new GuardStopWork(config);
+    run(work, Phase.CLOSE_DOORS, 10);
+    work.credit(300L);
+    assertTrue(work.canReport(), "不占报告次数");
+    run(work, Phase.CLOSE_DOORS, config.closeDoorsTicks() + 300L - 10);
+    assertFalse(work.timedOut());
+    assertEquals(GuardStopWork.Action.FORCE_CLOSE, work.tick(Phase.CLOSE_DOORS));
+
+    GuardStopWork departing = new GuardStopWork(config);
+    departing.tick(Phase.CLOSE_DOORS);
+    departing.credit(300L);
+    departing.tick(Phase.WAIT_DEPARTURE);
+    assertEquals(config.departSignalTicks() + 300L, departing.remainingTicks(Phase.WAIT_DEPARTURE));
+    long now = 1000L;
+    assertTrue(departing.holdDeparture(true, now));
+    for (int i = 0; i < 29; i++) {
+      now += 20;
+      assertTrue(departing.holdDeparture(true, now), "换到等发车这一步仍有演练的时间");
+    }
+    now += 20;
+    assertFalse(departing.holdDeparture(true, now), "放行着累计满 15 + 15 秒");
+    assertTrue(departing.forcedSignal());
+  }
+
   /** 出站不放行时一直扣着且不计时；放行着累计满 15 秒才代发发车信号。 */
   @Test
   void onlyTimeWithTheExitOpenCountsTowardTheSignalLimit() {

@@ -63,6 +63,10 @@ public final class GuardStopWork {
   private Phase lastPhase;
   private long stepTicks;
   private long extensionTicks;
+
+  /** 演练占用的时间：本站余下各步的时限都加上这么多，换步不清零。 */
+  private long creditTicks;
+
   private int incidents;
   private boolean timedOut;
   private boolean forcedOpen;
@@ -106,14 +110,14 @@ public final class GuardStopWork {
     }
     if (phase == Phase.OPEN_DOORS) {
       stepTicks++;
-      if (!forcedOpen && stepTicks > config.openDoorsTicks() + extensionTicks) {
+      if (!forcedOpen && stepTicks > config.openDoorsTicks() + extensionTicks + creditTicks) {
         forcedOpen = true;
         timedOut = true;
         return Action.FORCE_OPEN;
       }
     } else if (phase == Phase.CLOSE_DOORS) {
       stepTicks++;
-      if (!forcedClose && stepTicks > config.closeDoorsTicks() + extensionTicks) {
+      if (!forcedClose && stepTicks > config.closeDoorsTicks() + extensionTicks + creditTicks) {
         forcedClose = true;
         timedOut = true;
         return Action.FORCE_CLOSE;
@@ -150,7 +154,8 @@ public final class GuardStopWork {
       released = true;
       return false;
     }
-    if (departOpenTicks >= config.departSignalTicks() + extensionForStep(Phase.WAIT_DEPARTURE)) {
+    if (departOpenTicks
+        >= config.departSignalTicks() + extensionForStep(Phase.WAIT_DEPARTURE) + creditTicks) {
       forcedSignal = true;
       timedOut = true;
       released = true;
@@ -216,6 +221,15 @@ public final class GuardStopWork {
     incidents++;
     extensionTicks += config.incidentExtensionTicks();
     return true;
+  }
+
+  /**
+   * 演练占用了车掌的时间：本站余下各步（等关门、等发车信号）的时限都加上这么多，换步不清零，不占报告次数。
+   *
+   * @param ticks 演练的处置时限
+   */
+  public void credit(long ticks) {
+    creditTicks += Math.max(0L, ticks);
   }
 
   private long extensionForStep(Phase phase) {
@@ -342,11 +356,14 @@ public final class GuardStopWork {
       return -1L;
     }
     return switch (phase) {
-      case OPEN_DOORS -> Math.max(0L, config.openDoorsTicks() + extensionTicks - stepTicks);
-      case CLOSE_DOORS -> Math.max(0L, config.closeDoorsTicks() + extensionTicks - stepTicks);
+      case OPEN_DOORS -> Math.max(
+          0L, config.openDoorsTicks() + extensionTicks + creditTicks - stepTicks);
+      case CLOSE_DOORS -> Math.max(
+          0L, config.closeDoorsTicks() + extensionTicks + creditTicks - stepTicks);
       case WAIT_DEPARTURE -> released
           ? -1L
-          : Math.max(0L, config.departSignalTicks() + extensionTicks - departOpenTicks);
+          : Math.max(
+              0L, config.departSignalTicks() + extensionTicks + creditTicks - departOpenTicks);
       default -> -1L;
     };
   }
