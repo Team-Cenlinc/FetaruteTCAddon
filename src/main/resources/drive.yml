@@ -364,6 +364,34 @@ rewards:
   # 不到这么多站就确认过（或本趟结束）的照常计。0 表示不判定
   away-after-timeouts: 3
 
+# 车掌：坐车尾驾驶室，停站时开关门、下站台监视，门全关后回座确认出站信号、按发车铃；驾驶员（或 ATO）收到发车信号才起步。
+# 有车掌时车门归车掌。各步时限按秒；发车铃那一步只累计出站放行着的时间（闭塞、按表扣车时不计）。
+guard:
+  enabled: true
+  # 停妥后多久不开门，由站台代开（记一次超时）
+  open-doors-seconds: 30
+  # 停站时间到后多久不关门，由站台代关（记一次超时）
+  close-doors-seconds: 15
+  # 门全关后、出站放行着累计多久还没按发车铃：传送回车掌座位、代发发车信号（记一次超时）
+  depart-signal-seconds: 15
+  # 异常情况报告：当前这一步的时限延长多久；每站最多报告几次
+  incident-extension-seconds: 30
+  incident-max-per-stop: 2
+  # 连续多少站有超时就结束车掌任务（判未完成）；0 表示不处置
+  end-after-timeouts: 3
+  # 关门监视：离自己那节车门最远几格、视线与车身夹角最大几度（朝车头或车尾都行）、合格采样至少几成
+  watch-radius-blocks: 8.0
+  watch-angle-degrees: 45
+  watch-ratio: 0.7
+  # 出站监视：列车走过“车长 + 这么多格”算车尾离开站台；最长几秒
+  departure-watch-extra-blocks: 24
+  departure-watch-max-seconds: 20
+  # 发车铃：按住多久（tick）算一长；两次短按相隔多久（tick）以内算呼叫
+  buzzer-long-ticks: 16
+  buzzer-double-ticks: 20
+  # simulation 级：驾驶员收到发车信号后多久（秒）内要回一短
+  ack-seconds: 5
+
 sounds:
   enabled: true
   # 两次鸣笛（驾驶中按 Space）至少间隔多少秒
@@ -426,6 +454,12 @@ sounds:
     key: "minecraft:block.note_block.bell"
     volume: 0.8
     pitch: 1.0
+  # 车掌与驾驶员之间的铃（驾驶室里的蜂鸣器）：只给这列车上的驾驶员与车掌听，按住时每 4 tick 补一次形成连续的“嗡”声。
+  # 可换成材质包里的 fetarute:drive.buzzer
+  buzzer:
+    key: "minecraft:block.note_block.bit"
+    volume: 1.0
+    pitch: 0.5
   # 停妥时的对标结果：停准；可开门范围内；越过窗口或停短
   stop-accurate:
     key: "minecraft:entity.player.levelup"

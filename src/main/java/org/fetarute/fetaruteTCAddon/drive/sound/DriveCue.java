@@ -50,6 +50,8 @@ public enum DriveCue {
   TUTORIAL_FINISH("tutorial-finish", "minecraft:ui.toast.challenge_complete", 0.5f, 1.0f),
   /** 驾驶情境提示。 */
   TUTORIAL_TIP("tutorial-tip", "minecraft:block.note_block.chime", 0.6f, 1.4f),
+  /** 车掌与驾驶员之间的铃（驾驶室里的蜂鸣器）：只给这列车上的驾驶员与车掌听，按住时每 4 tick 补一次。 */
+  BUZZER("buzzer", "minecraft:block.note_block.bit", 1.0f, 0.5f),
   /** 鸣笛的主音：附近的玩家都听得到；按住 Space 持续鸣响。 */
   HORN("horn", "minecraft:block.note_block.flute", 4.0f, 0.5f),
   /** 鸣笛的和音（与主音同时响，构成双音笛）；留空即只有主音。 */

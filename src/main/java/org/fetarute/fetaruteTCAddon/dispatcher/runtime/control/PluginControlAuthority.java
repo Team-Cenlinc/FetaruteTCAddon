@@ -147,6 +147,25 @@ final class PluginControlAuthority implements ControlAuthority {
   }
 
   @Override
+  public boolean guardOperatesDoors(TrainProperties properties) {
+    try {
+      return delegate().guardOperatesDoors(properties);
+    } catch (RuntimeException ex) {
+      return false;
+    }
+  }
+
+  @Override
+  public boolean holdForGuard(TrainProperties properties, boolean exitOpen) {
+    try {
+      return delegate().holdForGuard(properties, exitOpen);
+    } catch (RuntimeException ex) {
+      // 问不到车掌时不扣车：车掌那边的时限本来也会放行。
+      return false;
+    }
+  }
+
+  @Override
   public void stationStopStarted(TrainProperties properties) {
     try {
       delegate().stationStopStarted(properties);

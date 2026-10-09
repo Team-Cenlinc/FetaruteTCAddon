@@ -817,4 +817,21 @@
         <Class name="org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository"/>
         <Bug pattern="SQL_PREPARED_STATEMENT_GENERATED_FROM_NONCONSTANT_STRING"/>
     </Match>
+    <!-- 车掌：链路与会话和驾驶员同一套写法——注册表、站台与会话共用同一个链路与停站对象，列车属性与编组由 TrainCarts 持有 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardLink"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSession"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaGuardCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
 </FindBugsFilter>

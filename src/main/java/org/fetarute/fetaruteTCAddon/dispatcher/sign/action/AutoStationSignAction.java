@@ -93,6 +93,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /** 驾驶员停妥后迟迟不开门，过这么久由站台代为开关门。 */
   private static final long DRIVER_DOOR_TIMEOUT_TICKS = 600L;
 
+  /** 车掌开关门时站台的兜底：车掌那边的时限（含报告延长）到了会代开门，这么久还没开说明这列车开不了门，由站台接手。 */
+  private static final long GUARD_DOOR_BACKSTOP_TICKS = 2400L;
+
   private static final int STOP_STABLE_TICKS = 1;
   private static final int DOOR_OPEN_RETRY_INTERVAL_TICKS = 5;
   private static final long DOOR_CLOSE_EARLY_TICKS = 100L;
@@ -273,6 +276,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     String trainName = safeTrainName(info);
     String stopSessionId = shortUuid(UUID.randomUUID());
     boolean driverControlled = driverControlled(properties);
+    // 车上有车掌：车门归车掌。自动运行的车照样由站台对位停车，只把停站与站台侧交给车掌。
+    boolean guardDoors = !driverControlled && guardOperatesDoors(properties);
     Optional<StopMarks.Selected> mark = stopMarkFor(info);
     AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(info.getLine(3));
     DriverStationStop driverStop = null;
@@ -289,6 +294,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       Alignment alignment = alignTrain(info, mark);
       alignTicks = alignment.ticks();
       doorCars = AutoStationDoorController.doorCars(group, alignment.mark());
+      if (guardDoors) {
+        driverStop =
+            beginDriverStop(
+                info, properties, definition, doorDirection, Optional.empty(), doorCars);
+      }
     }
 
     FacingResult facingResult = resolveFacingDirectionResult(info);
@@ -367,7 +377,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         session,
         firstStop,
         driverControlled ? DRIVER_STOP_WAIT_TIMEOUT_TICKS : STOP_WAIT_TIMEOUT_TICKS + alignTicks,
-        driverStop);
+        driverStop,
+        driverControlled);
   }
 
   /**
@@ -555,6 +566,51 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     return stop;
   }
 
+  /** 驾驶员或车掌开关门的停站，等发车那一步这一拍怎么办。 */
+  enum CrewDeparture {
+    /** 还扣着。 */
+    HOLD,
+    /** 放出出站许可，等驾驶员起步（驾驶员控车）。 */
+    RELEASE_TO_DRIVER,
+    /** 与自动运行同一放行动作，列车立即开走（车掌开关门的自动运行列车）。 */
+    RELEASE_AUTOMATIC
+  }
+
+  /**
+   * 驾驶员或车掌开关门的停站，等发车那一步依次过三道：出站门控、车掌的发车信号、ATO 驾驶员的确认发车。
+   *
+   * <p>车上有车掌时，出站门控不放行也要问车掌（他据此暂停计时）；ATO 驾驶员只在车掌放行之后才问，提示与计时从那时开始。
+   *
+   * @param canDepart 出站门控此刻是否放行
+   * @param guardDoors 车上有车掌
+   * @param guardHolds 问车掌是否还扣着（参数为出站门控此刻是否放行）
+   * @param driverControlled 驾驶员在控车
+   * @param atoHolds 问 ATO 驾驶员是否还扣着
+   */
+  static CrewDeparture crewDeparture(
+      boolean canDepart,
+      boolean guardDoors,
+      java.util.function.Predicate<Boolean> guardHolds,
+      boolean driverControlled,
+      java.util.function.BooleanSupplier atoHolds) {
+    if (guardDoors && guardHolds.test(canDepart)) {
+      return CrewDeparture.HOLD;
+    }
+    if (!canDepart) {
+      return CrewDeparture.HOLD;
+    }
+    if (driverControlled) {
+      return CrewDeparture.RELEASE_TO_DRIVER;
+    }
+    return atoHolds.getAsBoolean() ? CrewDeparture.HOLD : CrewDeparture.RELEASE_AUTOMATIC;
+  }
+
+  /** 车上是否有车掌在岗（车门归车掌）。 */
+  private boolean guardOperatesDoors(TrainProperties properties) {
+    ControlAuthority authority = plugin == null ? null : plugin.getControlAuthority();
+    return authority != null && authority.guardOperatesDoors(properties);
+  }
+
   /** 列车此刻是否由驾驶员控制（驾驶员控车时站台不替它停车、对位、加等待动作）。 */
   private boolean driverControlled(TrainProperties properties) {
     ControlAuthority authority = plugin == null ? null : plugin.getControlAuthority();
@@ -618,7 +674,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       AutoStationDoorController.DoorSession session,
       boolean firstStop,
       int stopWaitTimeoutTicks,
-      DriverStationStop driverStop) {
+      DriverStationStop driverStop,
+      boolean driverControlledAtEntry) {
     if (plugin == null || info == null || !info.hasGroup()) {
       return;
     }
@@ -628,6 +685,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     }
     new org.bukkit.scheduler.BukkitRunnable() {
       private int waitedTicks = 0;
+
+      /** 进站时是驾驶员在停车（停站对象跟踪对标与越站）；车掌开关门的自动运行列车由站台对位，不跟踪。 */
+      private boolean driverStopping = driverControlledAtEntry;
 
       private int stoppedTicks = 0;
 
@@ -646,10 +706,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           cancel();
           return;
         }
-        if (stop != null && !driverControlled(group.getProperties())) {
-          // 进站途中交还了自动运行：按自动运行对位停车，开关门的车厢按这次对位重新选。
-          stop.end();
-          stop = null;
+        if (stop != null && driverStopping && !driverControlled(group.getProperties())) {
+          // 进站途中交还了自动运行：按自动运行对位停车，开关门的车厢按这次对位重新选。车上有车掌时停站仍交给车掌开关门。
+          driverStopping = false;
+          if (!guardOperatesDoors(group.getProperties())) {
+            stop.end();
+            stop = null;
+          }
           Alignment alignment = alignTrain(info);
           timeoutTicks = waitedTicks + STOP_WAIT_TIMEOUT_TICKS + alignment.ticks();
           doorSession =
@@ -661,7 +724,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                   chimeSettings,
                   AutoStationDoorController.doorCars(group, alignment.mark()));
         }
-        if (stop != null) {
+        if (stop != null && driverStopping) {
           stop.updateOffset(
               StopAlignment.groupOffset(group, stop.worldId(), stop.stopPoint(), stop.reference()));
           if (stop.window().classify(stop.offsetBlocks()) == StopAlignment.Outcome.SKIPPED) {
@@ -676,6 +739,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
           // 驾驶员停得太靠前时等他前移，不当作停妥。
           boolean aligned =
               stop == null
+                  || !driverStopping
                   || stop.window().classify(stop.offsetBlocks()) != StopAlignment.Outcome.SHORT;
           if (stoppedTicks >= STOP_STABLE_TICKS && aligned) {
             cancel();
@@ -826,8 +890,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     long dwellTicks = Math.max(0L, effectiveDwellSeconds * 20L);
     String location = locationText(info);
     // 驾驶员仍在控车：车门由驾驶员开关，停站从开门起算，出站许可放出后等列车起步才记发车。
+    // 车上有车掌时车门由车掌开关（自动运行的车也一样），放行前还要等车掌的发车信号。
     boolean driverDoorsAtStop =
-        driverStop != null && driverStop.active() && driverControlled(properties);
+        driverStop != null
+            && driverStop.active()
+            && (driverControlled(properties) || guardOperatesDoors(properties));
     if (driverStop != null) {
       if (driverDoorsAtStop) {
         driverStop.markStopped();
@@ -893,8 +960,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         if (!driverDoors) {
           return false;
         }
-        if (!driverControlled(group.getProperties())) {
-          // 停站中交还了自动运行：剩下的开关门与发车按自动运行处理，驾驶员开着的门随驾驶结束关上。
+        if (!driverControlled(group.getProperties())
+            && !guardOperatesDoors(group.getProperties())) {
+          // 停站中交还了自动运行（车掌离岗）：剩下的开关门与发车按自动运行处理，驾驶员或车掌开着的门随会话结束关上。
           driverDoors = false;
           stationStop.end();
           if (doorsFromStation) {
@@ -910,8 +978,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             closeStarted = true;
             applyExitOffset();
             stationStop.setPhase(DriverStationStop.Phase.DWELL);
-          } else if (ticksSinceStop >= DRIVER_DOOR_TIMEOUT_TICKS) {
-            // 驾驶员迟迟不开门：由站台开关门，停站照常。
+          } else if (ticksSinceStop
+              >= (guardOperatesDoors(group.getProperties())
+                  ? GUARD_DOOR_BACKSTOP_TICKS
+                  : DRIVER_DOOR_TIMEOUT_TICKS)) {
+            // 驾驶员迟迟不开门：由站台开关门，停站照常。车掌的开门时限由车掌那边代开，这里只兜底开不了门的情况。
             driverDoors = false;
             stationStop.markDoorsTakenOver();
             stationStop.end();
@@ -957,7 +1028,41 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 .getRuntimeDispatchService()
                 .map(dispatch -> dispatch.checkDeparture(group, definition))
                 .orElse(true);
-        if (!canDepart) {
+        TrainProperties current = group.getProperties();
+        ControlAuthority authority = plugin.getControlAuthority();
+        CrewDeparture step =
+            crewDeparture(
+                canDepart,
+                guardOperatesDoors(current),
+                exitOpen -> authority.holdForGuard(current, exitOpen),
+                driverControlled(current),
+                () -> authority.holdDeparture(current));
+        if (step == CrewDeparture.HOLD) {
+          return true;
+        }
+        if (step == CrewDeparture.RELEASE_AUTOMATIC) {
+          // 车掌开关门的自动运行列车：与自动运行同一放行动作，列车立即开走。
+          plugin
+              .getRuntimeDispatchService()
+              .ifPresent(
+                  dispatch -> {
+                    dispatch.stationStops().handleDeparture(group, definition);
+                    dispatch.releaseDepartureGate(trainName, stopSessionId);
+                  });
+          exitOffsetState.restore();
+          finalWaitState.run();
+          plugin.getDwellRegistry().ifPresent(registry -> registry.clear(trainName));
+          Bukkit.getScheduler()
+              .runTask(
+                  plugin,
+                  () ->
+                      plugin
+                          .getRuntimeDispatchService()
+                          .ifPresent(dispatch -> dispatch.refreshSignal(group)));
+          lowerPantograph(group, trainName, stopSessionId);
+          // 车掌据此开始出站监视；列车开出后由车掌那边结束这一站。
+          stationStop.setPhase(DriverStationStop.Phase.DEPART);
+          cancel();
           return true;
         }
         plugin
@@ -992,7 +1097,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             opened,
             closeStarted,
             doorDirection != AutoStationDoorDirection.NONE,
-            plugin.getControlAuthority().driverOperatesDoors(group.getProperties()))) {
+            plugin.getControlAuthority().driverOperatesDoors(group.getProperties())
+                || guardOperatesDoors(group.getProperties()))) {
           return false;
         }
         DriverStationStop handed =

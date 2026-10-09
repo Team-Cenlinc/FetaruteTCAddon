@@ -13,12 +13,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverDirective;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverInterrupt;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
+import org.fetarute.fetaruteTCAddon.drive.guard.GuardLink;
 
 /**
- * 哪些调度列车由驾驶员控制。
+ * 哪些调度列车由驾驶员控制，哪些车上有车掌。
  *
  * <p>以列车属性对象的身份为准（改名、同一编组过门都不受影响）；属性对象被换掉时，按车名找到绑定、再核对列车标签里的驾驶员一致后重新挂上。
- * 标签存在但这里没有绑定的车一律按自动运行处理。只在服务器主线程调用。
+ * 标签存在但这里没有绑定的车一律按自动运行处理。车掌只在内存里登记（不写标签），属性对象被换掉时按车名找回。只在服务器主线程调用。
  */
 public final class DriverControlRegistry implements ControlAuthority {
 
@@ -40,6 +41,8 @@ public final class DriverControlRegistry implements ControlAuthority {
 
   private final Map<TrainProperties, DriverLink> byProperties = new IdentityHashMap<>();
   private final Map<String, DriverLink> byName = new HashMap<>();
+  private final Map<TrainProperties, GuardLink> guardsByProperties = new IdentityHashMap<>();
+  private final Map<String, GuardLink> guardsByName = new HashMap<>();
   private Handler handler = NO_HANDLER;
   private long atoConfirmTicks = 300L;
   private java.util.function.Predicate<String> awaitingDriver = trainName -> false;
@@ -85,6 +88,77 @@ public final class DriverControlRegistry implements ControlAuthority {
     return byName.isEmpty();
   }
 
+  /** 让车掌上岗：这列车的车门归他。 */
+  public void bindGuard(TrainProperties properties, GuardLink guard) {
+    Objects.requireNonNull(properties, "properties");
+    Objects.requireNonNull(guard, "guard");
+    guard.rebind(properties);
+    guardsByProperties.put(properties, guard);
+    guardsByName.put(guard.trainName(), guard);
+  }
+
+  /** 车掌离岗。 */
+  public void unbindGuard(GuardLink guard) {
+    if (guard == null) {
+      return;
+    }
+    guardsByProperties.values().removeIf(existing -> existing == guard);
+    guardsByName.remove(guard.trainName(), guard);
+  }
+
+  /** 这列车上的车掌；没有时为空。 */
+  public Optional<GuardLink> guardOf(TrainProperties properties) {
+    return Optional.ofNullable(resolveGuard(properties));
+  }
+
+  /** 按车名找车掌（调度改名后按列车属性上的当前车名也认）。 */
+  public Optional<GuardLink> guardOfName(String trainName) {
+    if (trainName == null || guardsByName.isEmpty()) {
+      return Optional.empty();
+    }
+    GuardLink guard = guardsByName.get(trainName);
+    if (guard != null) {
+      return Optional.of(guard);
+    }
+    for (GuardLink candidate : guardsByName.values()) {
+      TrainProperties properties = candidate.properties();
+      if (properties != null && trainName.equals(properties.getTrainName())) {
+        return Optional.of(candidate);
+      }
+    }
+    return Optional.empty();
+  }
+
+  private GuardLink resolveGuard(TrainProperties properties) {
+    if (properties == null || guardsByName.isEmpty()) {
+      return null;
+    }
+    GuardLink guard = guardsByProperties.get(properties);
+    if (guard != null) {
+      return guard;
+    }
+    GuardLink found = guardOfName(properties.getTrainName()).orElse(null);
+    if (found == null) {
+      return null;
+    }
+    // 属性对象被换掉了（例如区块重载）：按车名找回后重新挂上。
+    guardsByProperties.values().removeIf(existing -> existing == found);
+    guardsByProperties.put(properties, found);
+    found.rebind(properties);
+    return found;
+  }
+
+  @Override
+  public boolean guardOperatesDoors(TrainProperties properties) {
+    return resolveGuard(properties) != null;
+  }
+
+  @Override
+  public boolean holdForGuard(TrainProperties properties, boolean exitOpen) {
+    GuardLink guard = resolveGuard(properties);
+    return guard != null && guard.holdDeparture(exitOpen);
+  }
+
   private DriverLink resolve(TrainProperties properties) {
     if (properties == null || byName.isEmpty()) {
       return null;
@@ -120,10 +194,11 @@ public final class DriverControlRegistry implements ControlAuthority {
     return properties != null && awaitingDriver(properties.getTrainName());
   }
 
+  /** 人工驾驶的驾驶员亲手开关车门；车上有车掌时车门归车掌。 */
   @Override
   public boolean driverOperatesDoors(TrainProperties properties) {
     DriverLink link = resolve(properties);
-    return link != null && link.controlsPhysically();
+    return link != null && link.controlsPhysically() && resolveGuard(properties) == null;
   }
 
   @Override
@@ -212,11 +287,19 @@ public final class DriverControlRegistry implements ControlAuthority {
     }
   }
 
+  /** 站台交出停站：交给控车的驾驶员（ATO 驾驶员不接，停站与车门由站台或车掌负责）与车上的车掌。 */
   @Override
   public void beginStationStop(TrainProperties properties, DriverStationStop stop) {
+    if (stop == null) {
+      return;
+    }
     DriverLink link = resolve(properties);
-    if (link != null && stop != null) {
+    if (link != null && (link.controlsPhysically() || link.cabHold())) {
       link.beginStationStop(stop);
+    }
+    GuardLink guard = resolveGuard(properties);
+    if (guard != null) {
+      guard.beginStationStop(stop);
     }
   }
 

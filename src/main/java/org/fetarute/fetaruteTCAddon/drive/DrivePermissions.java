@@ -41,6 +41,9 @@ public final class DrivePermissions {
   /** 新手教程与驾驶提示。 */
   public static final String TUTORIAL = "fetarute.drive.tutorial";
 
+  /** 在调度列车上当车掌（{@code /fta guard}）。 */
+  public static final String GUARD = "fetarute.drive.guard";
+
   /** 不领任务直接接管停站中的调度列车（运营人员、调试）。 */
   public static final String DRIVER_ADMIN = "fetarute.drive.driver.admin";
 
@@ -58,7 +61,7 @@ public final class DrivePermissions {
 
   /** 打包节点包含的玩家功能节点。 */
   public static final List<String> PLAYER_NODES =
-      List.of(BASE, FREE, DRIVER, ATO, LEVEL, RECORDS, TOP, TUTORIAL);
+      List.of(BASE, FREE, DRIVER, ATO, LEVEL, RECORDS, TOP, TUTORIAL, GUARD);
 
   /**
    * 一个子命令。

@@ -46,6 +46,23 @@ public final class DriveSidebar {
    * @return 玩家此刻看到的是驾驶员侧边栏（被别的插件换掉时为 {@code false}）
    */
   public boolean update(Player player, DriveSession session) {
+    return update(
+        player,
+        "drive.sidebar.title",
+        session.trainName(),
+        DriveSidebarRows.build(session, Bukkit.getCurrentTick()));
+  }
+
+  /**
+   * 按给定的标题与各行刷新（车掌也用这块侧边栏）。
+   *
+   * @param titleKey 标题的语言键，占位符 {@code <train>}
+   * @param train 列车名
+   * @param rows 各行
+   * @return 玩家此刻看到的是这块侧边栏
+   */
+  public boolean update(
+      Player player, String titleKey, String train, List<DriveSidebarRows.Row> rows) {
     State state = states.get(player.getUniqueId());
     if (state == null) {
       state = create(player);
@@ -58,16 +75,18 @@ public final class DriveSidebar {
     long generation = locale.generation();
     boolean reloaded = generation != state.localeGeneration;
     state.localeGeneration = generation;
-    String train = session.trainName();
-    if (reloaded || state.title == null || !train.equals(state.titleTrain)) {
-      Component title = locale.component("drive.sidebar.title", Map.of("train", train));
+    if (reloaded
+        || state.title == null
+        || !train.equals(state.titleTrain)
+        || !titleKey.equals(state.titleKey)) {
+      Component title = locale.component(titleKey, Map.of("train", train));
       if (!title.equals(state.title)) {
         state.objective.displayName(title);
         state.title = title;
       }
       state.titleTrain = train;
+      state.titleKey = titleKey;
     }
-    List<DriveSidebarRows.Row> rows = DriveSidebarRows.build(session, Bukkit.getCurrentTick());
     List<Component> lines = new ArrayList<>(rows.size());
     for (int i = 0; i < rows.size(); i++) {
       DriveSidebarRows.Row row = rows.get(i);
@@ -161,6 +180,7 @@ public final class DriveSidebar {
     private final Scoreboard previous;
     private Component title;
     private String titleTrain;
+    private String titleKey;
     private long localeGeneration = -1L;
     private List<DriveSidebarRows.Row> rows = List.of();
     private List<Component> lines = List.of();

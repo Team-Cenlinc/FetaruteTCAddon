@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaDriveCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaGuardCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand;
@@ -761,6 +762,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaDriveCommand(this).register(commandManager);
+    new FtaGuardCommand(this).register(commandManager);
     new FtaLicenseCommand(this).register(commandManager);
     new FtaGraphPortalCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);

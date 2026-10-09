@@ -33,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
 import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
+import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
@@ -49,7 +50,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
  * <p>会话有三个阶段：{@link Phase#ACTIVE 驾驶中}；驾驶员离开后进入 {@link Phase#STOPPING 制动停车}，由会话自己把列车刹停，
  * 以免无人驾驶的列车一路冲出去；停稳后 {@link Phase#ENDED 结束}。
  */
-public final class DriveSession {
+public final class DriveSession implements DriveDoors.Cab {
 
   /** 直接送进驾驶室后，等 TrainCarts 让人坐下最多等几个 tick。 */
   private static final long CAB_MOVE_SETTLE_TICKS = 5L;
