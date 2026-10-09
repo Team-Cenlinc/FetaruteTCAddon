@@ -325,6 +325,10 @@ public final class RuntimeDispatchDiagnosticGate implements DiagnosticSink {
           // 所以这一条一旦非零，就是 Phase 4 确实跑通了——归因干净。
           // 体量受限于同时可释放的区间数，不随 tick 放大。
           "SMART_PHYSICAL_EDGE_RETAIN_RELEASED",
+          // 恢复动作把停滞车推过节点（之后又停下时停滞清车按整段计）的唯一记录：
+          // 车走走停停、为什么一直没被清，要靠它把各次推动连起来。生产端只在新的一次推动时输出（同一个动作让车连过几个节点只记一次），
+          // 规模受限于同时被推动的停滞车，不随 tick 放大。
+          "HEALTH_RECOVERY_PUSH_PROGRESS",
           // 全局重建 = **全网停车**。这一行被预算丢掉时，"发生过多少次、谁触发的"两个都答不出；
           // 多辆车 heldSeconds 相同（回推到同一瞬间）而停因各异时，也只能靠它证实或排除
           // "被同一个全局事件打中"。每次重建至多一行，不随 tick 放大。

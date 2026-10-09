@@ -457,8 +457,8 @@ class TrainHealthMonitorTest {
   /**
    * 恢复动作每次只把车推过一个节点、车又停在下一段前：停滞计时与恢复次数不随这几下推进清零，清车按整段停滞算。
    *
-   * <p>t+10 刷新放行，t+15 过节点；t+25 再推，t+30 再过节点；t+40 第三次恢复后停住。按最后一次推进算，t+45 只停了 15 秒（不到 20 秒阈值）；按整段算已停
-   * 45 秒。
+   * <p>t+10 刷新放行，t+15 过节点；t+25 再推，t+30 再过节点；t+40 这一次停车先试一次恢复。按最后一次推进算，t+45 只停了 15 秒（不到 20 秒阈值）；
+   * 按整段算，从第一次推动（t+10）起已 35 秒。
    */
   @Test
   void aTrainOnlyPushedAlongByRecoveryKeepsItsStuckClock() {
@@ -488,7 +488,7 @@ class TrainHealthMonitorTest {
             "train1",
             3,
             true,
-            Duration.ofSeconds(45),
+            Duration.ofSeconds(35),
             Duration.ofSeconds(20),
             Duration.ofSeconds(60),
             Set.of());
@@ -497,16 +497,18 @@ class TrainHealthMonitorTest {
         debugLogs.stream()
             .anyMatch(
                 line ->
-                    line.startsWith("HEALTH_RECOVERY_PUSH_PROGRESS train=train1 idx=5 pushes=2")),
+                    line.startsWith("HEALTH_RECOVERY_PUSH_PROGRESS: train=train1 idx=5 pushes=2")),
         debugLogs::toString);
   }
 
-  /** 推一下之后车自己开下去（推动 30 秒以后还在过节点）：这段停滞结束，之后再停从新的停车起算。 */
+  /** 推一下之后车自己开下去（推动 30 秒以后还在过节点）：这段停滞结束，这时才宣布已恢复；之后再停从新的停车起算。一个动作让车连过几个节点只算一次推动。 */
   @Test
   void aTrainThatRunsOnAfterThePushStartsAFreshStuckClock() {
     AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
         new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
     proceedTrainWithState(current);
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
     configureFastCleanup();
     monitor.setStallThreshold(Duration.ofSeconds(1000));
     Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
@@ -517,10 +519,19 @@ class TrainHealthMonitorTest {
       current.set(state("train1", 3 + i, SignalAspect.PROCEED, 0.5));
       monitor.check(Set.of("train1"), t0.plusSeconds(10 + 5L * i));
     }
+    assertTrue(alerts.stream().noneMatch(HealthAlert::autoFixed), "被推着过节点时还不算恢复: " + alerts);
     current.set(state("train1", 10, SignalAspect.PROCEED, 0.0));
     for (int second = 45; second <= 65; second += 5) {
       monitor.check(Set.of("train1"), t0.plusSeconds(second));
     }
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert -> alert.autoFixed() && alert.message().contains("推动 1 次后车辆持续推进 累计停滞=35秒")),
+        alerts::toString);
+    assertTrue(
+        debugLogs.stream().noneMatch(line -> line.contains("pushes=2")),
+        "同一个动作让车连过几个节点只算一次: " + debugLogs);
     verify(dispatchService, never()).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
 
     monitor.check(Set.of("train1"), t0.plusSeconds(70));
@@ -579,7 +590,34 @@ class TrainHealthMonitorTest {
                         && alert
                             .message()
                             .contains(
-                                "累计停滞=25秒 恢复后推进=1次 再停=OCCUPANCY_HOLD(train2 持有 EDGE:a~b 等2处)")),
+                                "累计停滞=15秒 恢复后推进=1次 再停=OCCUPANCY_HOLD(train2 持有 EDGE:a~b 等2处)")),
+        alerts::toString);
+  }
+
+  /** 运行时的停车记录早于推动：那是上一次为什么停，不当成这一次的停因。 */
+  @Test
+  void aStopRecordOlderThanThePushIsNotReportedAsTheRestopCause() {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
+    proceedTrainWithState(current);
+    when(dispatchService.getActiveStopState("train1"))
+        .thenReturn(Optional.of(stopBehind("train2", "2026-01-01T00:00:05Z")));
+    configureFastCleanup();
+    monitor.setStallThreshold(Duration.ofSeconds(1000));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    current.set(state("train1", 4, SignalAspect.PROCEED, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(15));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(25));
+
+    assertTrue(
+        alerts.stream().anyMatch(alert -> alert.message().contains("再停=未记录新停因(停车记录早于推动)")),
         alerts::toString);
   }
 
@@ -603,6 +641,272 @@ class TrainHealthMonitorTest {
     assertTrue(
         alerts.stream().anyMatch(alert -> alert.message().contains("清车=未开启 等待 ghost(残留占用)")),
         alerts::toString);
+  }
+
+  /** 红灯下的解锁动作（这里是释放自持残留保留）报告生效后过了节点，同样算被推了一下。 */
+  @Test
+  void aStopSignalUnlockThatMovesTheTrainCountsAsAPush() {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.STOP, 0.0));
+    proceedTrainWithState(current);
+    RuntimeDispatchService.SmartRecoveryInput input =
+        smartRecoveryInput("train1", SignalAspect.STOP, true, "self-owned-retain");
+    when(dispatchService.smartRecoveryInput(eq("train1"), any(), eq(SignalAspect.STOP)))
+        .thenReturn(input);
+    when(dispatchService.applySmartSelfOwnedStaleRetainRelease(input))
+        .thenReturn(
+            new RuntimeDispatchService.SmartRecoveryActionResult(
+                true,
+                true,
+                "SMART_RELEASE_SELF_OWNED_STALE_RETAIN",
+                "released-self-owned-stale-retain",
+                DispatchEffectClass.OCCUPANCY_MUTATION));
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    current.set(state("train1", 4, SignalAspect.STOP, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(15));
+
+    assertTrue(
+        debugLogs.stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("HEALTH_RECOVERY_PUSH_PROGRESS: train=train1 idx=4 pushes=1")),
+        debugLogs::toString);
+  }
+
+  /** 推过的车进站停站：这段停滞结束、宣布已恢复；停站后正常发车不再算被推了一下。 */
+  @Test
+  void aStationStopEndsTheCreepAndForgetsThePush() {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
+    proceedTrainWithState(current);
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    configureFastCleanup();
+    monitor.setStallThreshold(Duration.ofSeconds(1000));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    current.set(state("train1", 4, SignalAspect.PROCEED, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(15));
+
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.of(5));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    when(dwellRegistry.remainingSeconds("train1")).thenReturn(Optional.empty());
+    current.set(state("train1", 5, SignalAspect.PROCEED, 0.5));
+    monitor.check(Set.of("train1"), t0.plusSeconds(25));
+
+    assertTrue(
+        alerts.stream()
+            .anyMatch(alert -> alert.autoFixed() && alert.message().contains("推动 1 次后车辆持续推进")),
+        alerts::toString);
+    assertTrue(
+        debugLogs.stream()
+            .noneMatch(line -> line.contains("HEALTH_RECOVERY_PUSH_PROGRESS: train=train1 idx=5")),
+        debugLogs::toString);
+  }
+
+  /** 载客车被推着往前走：没到载客清车阈值，清车不会接手，推动照常继续，不冻结。 */
+  @Test
+  void aPassengerCreeperKeepsBeingPushed() {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
+    proceedTrainWithState(current);
+    when(dispatchService.deadlockTrainContext("train1"))
+        .thenReturn(
+            Optional.of(
+                context("train1", 3, RouteOperationType.OPERATION, false, false, true, false)));
+    configureFastCleanup();
+    monitor.setStallThreshold(Duration.ofSeconds(1000));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    current.set(state("train1", 4, SignalAspect.PROCEED, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(15));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    monitor.check(Set.of("train1"), t0.plusSeconds(25));
+    current.set(state("train1", 5, SignalAspect.PROCEED, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(30));
+    monitor.check(Set.of("train1"), t0.plusSeconds(35));
+    monitor.check(Set.of("train1"), t0.plusSeconds(40));
+    clearInvocations(dispatchService);
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(45));
+
+    verify(dispatchService).refreshSignalByName("train1");
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+  }
+
+  /** 被推过又停下：累计次数与时长都够了，这一次停车也得先试一次恢复，下一轮才交给清车。 */
+  @Test
+  void aNewStopAfterAPushGetsItsOwnRecoveryAttempt() {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
+    proceedTrainWithState(current);
+    configureFastCleanup();
+    monitor.setStuckCleanupThreshold(Duration.ofSeconds(10));
+    monitor.setStallThreshold(Duration.ofSeconds(1000));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    monitor.check(Set.of("train1"), t0.plusSeconds(15));
+    monitor.check(Set.of("train1"), t0.plusSeconds(20));
+    current.set(state("train1", 4, SignalAspect.PROCEED, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(25));
+    monitor.check(Set.of("train1"), t0.plusSeconds(30));
+    clearInvocations(dispatchService);
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(35));
+
+    verify(dispatchService).refreshSignalByName("train1");
+    verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(40));
+
+    verify(dispatchService).destroyTrainByName("train1", "health-stuck-cleanup-timeout");
+  }
+
+  /** 服务器冻结后平移时钟：停滞段的起点一并平移，冻结的时长不算进累计停滞。 */
+  @Test
+  void aFreezeShiftsTheCreepClock() {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
+    proceedTrainWithState(current);
+    configureFastCleanup();
+    monitor.setStallThreshold(Duration.ofSeconds(1000));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(10));
+    current.set(state("train1", 4, SignalAspect.PROCEED, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(15));
+    monitor.rebaseAfterFreeze(Duration.ofSeconds(100));
+    monitor.check(Set.of("train1"), t0.plusSeconds(120));
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("train1"), t0.plusSeconds(125));
+
+    assertTrue(
+        alerts.stream().anyMatch(alert -> alert.message().contains("累计停滞=15秒")), alerts::toString);
+  }
+
+  /** 推动窗口外慢慢爬过一个节点后，又停在同一列车前：同一段停滞，接着算。 */
+  @Test
+  void aSlowCrawlBackToTheSameBlockerContinuesTheCreep() {
+    List<HealthAlert> alerts = crawlThenStopBehind("train2");
+
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert -> alert.message().contains("累计停滞=110秒 恢复后推进=1次 再停=OCCUPANCY_HOLD(train2")),
+        alerts::toString);
+  }
+
+  /** 爬过节点后停在别的车前：推动确实让它离开了原来的死结，这段停滞结束、宣布已恢复。 */
+  @Test
+  void aStopBehindAnotherTrainEndsTheCreep() {
+    List<HealthAlert> alerts = crawlThenStopBehind("train9");
+
+    assertTrue(
+        alerts.stream()
+            .anyMatch(
+                alert -> alert.autoFixed() && alert.message().contains("推动 1 次后车辆持续推进 累计停滞=45秒")),
+        alerts::toString);
+    assertTrue(
+        alerts.stream().noneMatch(alert -> alert.message().contains("累计停滞=110秒")),
+        alerts::toString);
+  }
+
+  /**
+   * t+70 被判停滞（train2 挡着）并推动，t+75 过节点；之后 35 秒一直在动、没判停滞，t+110 过下一个节点（推动窗口外），t+112 停在 {@code
+   * restopOwner} 前；t+180 再被判停滞。
+   */
+  private List<HealthAlert> crawlThenStopBehind(String restopOwner) {
+    AtomicReference<RuntimeDispatchService.TrainRuntimeState> current =
+        new AtomicReference<>(state("train1", 3, SignalAspect.PROCEED, 0.0));
+    proceedTrainWithState(current);
+    AtomicReference<Optional<RuntimeStopState>> stop =
+        new AtomicReference<>(Optional.of(stopBehind("train2", "2026-01-01T00:00:05Z")));
+    when(dispatchService.getActiveStopState("train1")).thenAnswer(invocation -> stop.get());
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+    monitor.setProgressStuckThreshold(Duration.ofSeconds(60));
+    monitor.setProgressStopGraceThreshold(Duration.ofSeconds(60));
+    monitor.setRecoveryCooldown(Duration.ofSeconds(1));
+    monitor.setStallThreshold(Duration.ofSeconds(1000));
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    monitor.check(Set.of("train1"), t0);
+    monitor.check(Set.of("train1"), t0.plusSeconds(70));
+    stop.set(Optional.empty());
+    current.set(state("train1", 4, SignalAspect.PROCEED, 0.5));
+    for (int second = 75; second <= 105; second += 5) {
+      monitor.check(Set.of("train1"), t0.plusSeconds(second));
+    }
+    current.set(state("train1", 5, SignalAspect.PROCEED, 0.5));
+    monitor.check(Set.of("train1"), t0.plusSeconds(110));
+    stop.set(Optional.of(stopBehind(restopOwner, "2026-01-01T00:01:52Z")));
+    current.set(state("train1", 5, SignalAspect.STOP, 0.0));
+    monitor.check(Set.of("train1"), t0.plusSeconds(115));
+    monitor.check(Set.of("train1"), t0.plusSeconds(150));
+    alertBus.clear();
+    monitor.check(Set.of("train1"), t0.plusSeconds(180));
+    return alerts;
+  }
+
+  private static RuntimeStopState stopBehind(String owner, String enteredAt) {
+    return new RuntimeStopState(
+        "train1",
+        "OCCUPANCY_HOLD",
+        "blocked",
+        RuntimeStopState.ReleaseCondition.BLOCKING_RESOURCES_RELEASED_OR_TRANSFERRED,
+        RuntimeStopState.RetryTrigger.OCCUPANCY_CHANGE_OR_PERIODIC_RECHECK,
+        List.of(new RuntimeStopState.Blocker("EDGE:a~b", owner, "MOVEMENT_REQUIRED")),
+        false,
+        Instant.parse(enteredAt));
+  }
+
+  /** 占用上记的是改名前的逻辑名：按运行时解析出的现名找它的停滞记录，不报"状态未知"。 */
+  @Test
+  void aRenamedBlockerIsDescribedUnderItsRuntimeName() {
+    stuckWaiting("waiting", "old-name");
+    when(dispatchService.deadlockTrainContext("old-name"))
+        .thenReturn(Optional.of(context("leader", 7, RouteOperationType.OPERATION, false, false)));
+    when(dwellRegistry.remainingSeconds("leader")).thenReturn(Optional.empty());
+    when(dispatchService.getTrainState("leader"))
+        .thenReturn(Optional.of(state("leader", 7, SignalAspect.STOP, 0.0)));
+    configureFastCleanup();
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+    for (int i = 0; i < 4; i++) {
+      monitor.check(Set.of("waiting", "leader"), t0.plusSeconds(10L * i));
+    }
+    alertBus.clear();
+    List<HealthAlert> alerts = new ArrayList<>();
+    alertBus.subscribe(alerts::add);
+
+    monitor.check(Set.of("waiting", "leader"), t0.plusSeconds(40));
+
+    assertTrue(
+        alerts.stream().anyMatch(alert -> alert.message().contains("清车=等待 old-name(停滞 40秒)")),
+        alerts::toString);
+  }
+
+  /** 清车关着时，挡路车的解析结果按告警节奏（一分钟）复用，不每轮都解析。 */
+  @Test
+  void disabledCleanupVerdictIsReusedWithinAMinute() {
+    stuckWaiting("waiting", "ghost");
+    configureFastCleanup();
+    monitor.setTrainCleanupEnabled(false);
+    Instant t0 = Instant.parse("2026-01-01T00:00:00Z");
+
+    for (int i = 0; i <= 6; i++) {
+      monitor.check(Set.of("waiting"), t0.plusSeconds(10L * i));
+    }
+
+    verify(dispatchService, times(1)).deadlockTrainContext("ghost");
   }
 
   /** 信号放行、却一直不过节点的受管空车；状态由用例改写。 */
