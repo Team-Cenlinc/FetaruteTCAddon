@@ -757,6 +757,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       plugin.getDwellRegistry().ifPresent(registry -> registry.start(trainName, dwellSeconds));
     }
     TrainProperties properties = group.getProperties();
+    // 一次新的停站开始：驾驶侧上一站没放行就结束的发车确认状态作废。
+    ControlAuthority authority = plugin.getControlAuthority();
+    if (authority != null) {
+      authority.stationStopStarted(properties);
+    }
     // 进入 WaitState 前先获取发车许可锁，避免信号 tick 在门控放行前提前发车。
     plugin
         .getRuntimeDispatchService()

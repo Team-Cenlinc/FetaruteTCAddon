@@ -147,6 +147,15 @@ final class PluginControlAuthority implements ControlAuthority {
   }
 
   @Override
+  public void stationStopStarted(TrainProperties properties) {
+    try {
+      delegate().stationStopStarted(properties);
+    } catch (RuntimeException ignored) {
+      // 通知不到只影响驾驶侧的发车确认计时，不影响停站本身。
+    }
+  }
+
+  @Override
   public void beginStationStop(TrainProperties properties, DriverStationStop stop) {
     try {
       delegate().beginStationStop(properties, stop);

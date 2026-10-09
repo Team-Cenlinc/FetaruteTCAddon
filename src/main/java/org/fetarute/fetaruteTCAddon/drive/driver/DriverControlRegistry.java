@@ -205,6 +205,14 @@ public final class DriverControlRegistry implements ControlAuthority {
   }
 
   @Override
+  public void stationStopStarted(TrainProperties properties) {
+    DriverLink link = resolve(properties);
+    if (link != null) {
+      link.stationStopStarted();
+    }
+  }
+
+  @Override
   public void beginStationStop(TrainProperties properties, DriverStationStop stop) {
     DriverLink link = resolve(properties);
     if (link != null && stop != null) {

@@ -86,6 +86,10 @@ public final class DriverLink {
   private DriverRescueLadder.Stage ladderStage = DriverRescueLadder.Stage.NONE;
   private long departureHoldSince = -1L;
   private long departureHoldQueriedAt = -1L;
+
+  /** 本站出站放行着的累计时长（tick）：只有它计入确认发车的时限，前方不放行的时间不算。 */
+  private long departureOpenTicks;
+
   private boolean departureConfirmed;
   private int lateDepartures;
 
@@ -676,26 +680,41 @@ public final class DriverLink {
     distanceOdometer = now;
   }
 
-  /** 两次询问相隔超过这么久，算作新的一次停站。 */
+  /** 站台多久没再问，就不再提示“站台正在等确认”（出站门控关上时站台不问）。 */
   private static final long DEPARTURE_QUERY_GAP_TICKS = 60L;
 
+  /** 出站放行着时站台每隔这么久问一次；两次询问相隔更久，说明中间门控关过。 */
+  private static final long DEPARTURE_POLL_TICKS = 20L;
+
+  /** 站台开始一次停站：上一站没放行就结束的确认状态作废（终点原地折返、停站被别的流程接手）。 */
+  public void stationStopStarted() {
+    clearDepartureHold();
+  }
+
   /**
-   * ATO 下站台问是否还要扣着等驾驶员确认发车。驾驶员确认过就放行；等太久也放行，记一次迟确认。
+   * ATO 下站台问是否还要扣着等驾驶员确认发车：站台只在出站门控放行时才问。驾驶员确认过就放行；放行着的时间累计满时限也放行，记一次迟确认。
    *
-   * @param timeoutTicks 最多等多久
+   * <p>前方不放行（闭塞、按表扣车）的时间不计入时限：两次询问之间相隔超过一个询问周期，说明中间门控关过，那一段不算。已给的确认在列车动之前一直有效，门控关上再放行时一问就走。
+   *
+   * @param timeoutTicks 出站放行着最多等多久
    */
   public boolean holdDeparture(long timeoutTicks) {
     if (mode != DrivingMode.ATO) {
       return false;
     }
     long now = clock.getAsLong();
-    if (departureHoldQueriedAt < 0L || now - departureHoldQueriedAt > DEPARTURE_QUERY_GAP_TICKS) {
+    if (departureHoldSince < 0L) {
       departureHoldSince = now;
-      // 停站结束前已提前确认（之后列车没动过）：站台一问就放行，驾驶员的反应时间不算进停站。
-      departureConfirmed = stillAt(preConfirmOdometer);
-      preConfirmOdometer = Double.NaN;
+      departureOpenTicks = 0L;
+    } else if (now - departureHoldQueriedAt <= DEPARTURE_POLL_TICKS) {
+      departureOpenTicks += Math.max(0L, now - departureHoldQueriedAt);
     }
     departureHoldQueriedAt = now;
+    // 停站结束前或门控关着时已确认（之后列车没动过）：站台一问就放行，驾驶员的反应时间不算进停站。
+    if (stillAt(preConfirmOdometer)) {
+      departureConfirmed = true;
+    }
+    preConfirmOdometer = Double.NaN;
     if (departureConfirmed) {
       releaseDeparture();
       markPresent();
@@ -704,7 +723,7 @@ public final class DriverLink {
       }
       return false;
     }
-    if (now - departureHoldSince >= timeoutTicks) {
+    if (departureOpenTicks >= timeoutTicks) {
       releaseDeparture();
       lateDepartures++;
       boolean settledTerminal = takeSettledTerminal();
@@ -785,6 +804,7 @@ public final class DriverLink {
   private void clearDepartureHold() {
     departureHoldSince = -1L;
     departureHoldQueriedAt = -1L;
+    departureOpenTicks = 0L;
     departureConfirmed = false;
   }
 
@@ -811,10 +831,10 @@ public final class DriverLink {
     }
   }
 
-  /** 驾驶员已确认发车，等站台放行（提前确认的或停站结束后确认的）。 */
+  /** 驾驶员已确认发车，等站台放行（提前确认的或停站结束后确认的；出站门控关着时同样记着）。 */
   public boolean departureConfirmed() {
     return mode == DrivingMode.ATO
-        && (stillAt(preConfirmOdometer) || (departurePending() && departureConfirmed));
+        && (stillAt(preConfirmOdometer) || (departureHoldSince >= 0L && departureConfirmed));
   }
 
   /** 要提示驾驶员确认发车：停站将尽或站台正在等，且还没确认。 */

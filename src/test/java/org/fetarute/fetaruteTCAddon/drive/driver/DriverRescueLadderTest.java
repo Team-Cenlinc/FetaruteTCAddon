@@ -85,6 +85,87 @@ class DriverRescueLadderTest {
   }
 
   @Test
+  @DisplayName("ATO 确认发车的时限只算出站放行着的时间：门控关上的那几秒不计，关多久都一样")
+  void atoDepartureTimeoutCountsOnlyOpenTime() {
+    long[] clock = {1000L};
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T", null, () -> 0.0, () -> clock[0]);
+    link.setMode(DrivingMode.ATO);
+    // 放行 200 tick（10 次询问）
+    assertEquals(true, link.holdDeparture(300));
+    for (int i = 0; i < 10; i++) {
+      clock[0] += 20;
+      assertEquals(true, link.holdDeparture(300));
+    }
+    // 门控关上 2 秒（站台不问），再放行
+    clock[0] += 40;
+    assertEquals(true, link.holdDeparture(300), "关上的 2 秒不计");
+    // 门控关上 1 分钟，再放行
+    clock[0] += 1200;
+    assertEquals(true, link.holdDeparture(300), "关多久都不计，也不当作新的一次停站");
+    for (int i = 0; i < 4; i++) {
+      clock[0] += 20;
+      assertEquals(true, link.holdDeparture(300));
+    }
+    clock[0] += 20;
+    assertEquals(false, link.holdDeparture(300), "放行着累计满 300 tick 才放行");
+    assertEquals(1, link.lateDepartures());
+  }
+
+  @Test
+  @DisplayName("ATO 已给的确认在出站门控关上期间一直有效：再放行时一问就走，不记迟确认")
+  void atoConfirmationSurvivesAClosedGate() {
+    long[] clock = {1000L};
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T", null, () -> 0.0, () -> clock[0]);
+    link.setMode(DrivingMode.ATO);
+    assertEquals(true, link.holdDeparture(300));
+    clock[0] += 10;
+    assertEquals(true, link.confirmDeparture());
+    // 确认后门控关上 10 秒：站台不问
+    clock[0] += 200;
+    assertEquals(true, link.departureConfirmed(), "门控关着也显示已确认");
+    assertEquals(false, link.departurePrompt(), "不再提示确认");
+    assertEquals(false, link.holdDeparture(300), "再放行即发车");
+    assertEquals(0, link.lateDepartures());
+  }
+
+  @Test
+  @DisplayName("ATO 门控关上超过提示时间后确认的：同样记着，再放行一问就走")
+  void atoConfirmationGivenWhileTheGateIsClosed() {
+    long[] clock = {1000L};
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T", null, () -> 0.0, () -> clock[0]);
+    link.setMode(DrivingMode.ATO);
+    assertEquals(true, link.holdDeparture(300));
+    clock[0] += 200;
+    link.openDepartureArm();
+    assertEquals(true, link.departurePrompt());
+    assertEquals(true, link.confirmDeparture());
+    clock[0] += 200;
+    assertEquals(false, link.holdDeparture(300));
+    assertEquals(0, link.lateDepartures());
+  }
+
+  @Test
+  @DisplayName("站台开始新的一次停站：上一站没放行就结束的计时与确认作废（原地折返、停站被接手）")
+  void aNewStationStopStartsAFreshHold() {
+    long[] clock = {1000L};
+    DriverLink link = new DriverLink(UUID.randomUUID(), "T", null, () -> 0.0, () -> clock[0]);
+    link.setMode(DrivingMode.ATO);
+    assertEquals(true, link.holdDeparture(300));
+    for (int i = 0; i < 14; i++) {
+      clock[0] += 20;
+      assertEquals(true, link.holdDeparture(300));
+    }
+    assertEquals(true, link.confirmDeparture());
+
+    link.stationStopStarted();
+    clock[0] += 20;
+    assertEquals(true, link.holdDeparture(300), "旧的确认作废");
+    clock[0] += 20;
+    assertEquals(true, link.holdDeparture(300), "旧的 280 tick 不接着算");
+    assertEquals(0, link.lateDepartures());
+  }
+
+  @Test
   @DisplayName("ATO 提前确认：停站将尽时确认，停站一结束站台一问就放行；列车动过即作废")
   void atoDepartureConfirmedInAdvance() {
     long[] clock = {1000L};

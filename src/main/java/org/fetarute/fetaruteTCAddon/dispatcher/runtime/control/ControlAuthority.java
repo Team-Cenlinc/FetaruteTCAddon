@@ -45,6 +45,9 @@ public interface ControlAuthority {
     return false;
   }
 
+  /** 列车在站台停稳、开始一次停站（自动运行与驾驶员控车都通知）：上一站留下的发车确认状态到此作废。 */
+  default void stationStopStarted(TrainProperties properties) {}
+
   /** 自动运行停站结束、出站许可就绪时，是否还要扣着等车上的驾驶员（ATO）确认发车。 */
   default boolean holdDeparture(TrainProperties properties) {
     return false;
