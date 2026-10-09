@@ -88,7 +88,7 @@ class GuardMessagesTest {
     }
   }
 
-  /** 各阶段、各种发车前状态、各开门侧的提示与侧边栏行都有文案。 */
+  /** 各阶段、各种发车前状态、各开门侧的侧边栏行都有文案。 */
   @ParameterizedTest
   @ValueSource(strings = {"zh_CN", "en_US"})
   void everyPromptAndRowHasAMessage(String localeTag) throws Exception {
@@ -113,7 +113,6 @@ class GuardMessagesTest {
                         ? Optional.of(new GuardDisplay.CabChangeState(3, flag ? 40L : -1L))
                         : Optional.empty(),
                     Optional.empty());
-            keys.add(GuardDisplay.prompt(snapshot).key());
             for (DriveSidebarRows.Row row : GuardDisplay.rows(snapshot)) {
               keys.add(row.labelKey());
               keys.add(row.valueKey());
@@ -122,8 +121,14 @@ class GuardMessagesTest {
         }
       }
     }
-    keys.add("drive.guard.prompt.running");
     keys.add("drive.guard.sidebar.title");
+    // 关门动画放着且两侧都已关、出站未开放且还没确认，上面的组合拼不出来。
+    keys.add("drive.guard.sidebar.value.step-closing");
+    keys.add("drive.guard.sidebar.value.step-wait-exit");
+    for (String watch : List.of("closing", "departure")) {
+      keys.add("drive.guard.watch." + watch + "-ok");
+      keys.add("drive.guard.watch." + watch + "-missed");
+    }
     GuardDisplay.Snapshot between =
         new GuardDisplay.Snapshot(
             "T",
@@ -134,7 +139,6 @@ class GuardMessagesTest {
             0,
             Optional.empty(),
             Optional.of("S"));
-    keys.add(GuardDisplay.prompt(between).key());
     for (DriveSidebarRows.Row row : GuardDisplay.rows(between)) {
       keys.add(row.labelKey());
       keys.add(row.valueKey());

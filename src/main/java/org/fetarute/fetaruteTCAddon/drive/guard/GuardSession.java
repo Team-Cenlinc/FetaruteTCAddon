@@ -1,10 +1,12 @@
 package org.fetarute.fetaruteTCAddon.drive.guard;
 
 import java.util.Objects;
+import java.util.Optional;
 import java.util.UUID;
 import org.bukkit.inventory.ItemStack;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
+import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
@@ -63,6 +65,8 @@ public final class GuardSession implements DriveDoors.Cab {
   private DriverStationStop lastSettledStop;
   private DriverStationStop.Phase lastPhase;
   private long noticeUntilTick;
+  private DriveSidebarRows.Row notice;
+  private boolean sidebarDirty;
   private boolean signalAnnounced;
   private boolean forcedSignalHandled;
   private boolean sneakHeld;
@@ -368,13 +372,32 @@ public final class GuardSession implements DriveDoors.Cab {
     this.lastPhase = phase;
   }
 
-  /** 动作栏提示停留到这个 tick，之前不被常驻提示覆盖。 */
-  public long noticeUntilTick() {
-    return noticeUntilTick;
+  /**
+   * 侧边栏最上面的“提示”一行：按钮的反馈、超时与演练结果，显示到 {@code untilTick}，下一拍就刷新侧边栏。
+   *
+   * @param row 提示行
+   */
+  void showNotice(DriveSidebarRows.Row row, long untilTick) {
+    this.notice = row;
+    this.noticeUntilTick = untilTick;
+    this.sidebarDirty = true;
   }
 
-  public void setNoticeUntilTick(long tick) {
-    this.noticeUntilTick = tick;
+  /** 还没过时的提示行；没有时为空。 */
+  Optional<DriveSidebarRows.Row> notice(long nowTick) {
+    return nowTick < noticeUntilTick ? Optional.ofNullable(notice) : Optional.empty();
+  }
+
+  /** 下一拍就刷新侧边栏（不等固定的刷新间隔）。 */
+  void markSidebarDirty() {
+    this.sidebarDirty = true;
+  }
+
+  /** 取走“要立即刷新侧边栏”的标记。 */
+  boolean takeSidebarDirty() {
+    boolean dirty = sidebarDirty;
+    sidebarDirty = false;
+    return dirty;
   }
 
   /** 这一站的发车信号已经告诉过驾驶员。 */

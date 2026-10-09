@@ -56,7 +56,7 @@
 ## 紧急停车与监视
 
 - 紧急停车（快捷栏 9 号，车掌阀）：只在列车行驶中有效（停着时不按发车铃列车就不会开）。人工驾驶的车把驾驶员的手柄拨到 EB（等同驾驶员自己拉 EB，不记防护介入、不扣驾驶员的分），由驾驶员停稳后缓解；自动运行（含 ATO）的车立即停住并扣着：扣着期间 `DriverControlRegistry#isDriverControlled` 为真，调度不替它起步、健康层不当它停滞，车掌停稳后按住发车铃一长声解除（`drive.guard.emergency.released`），或扣满 `emergency-hold-seconds`（默认 120）自动解除，解除时立即重算一次信号。车掌离岗时扣着的一并解除。驾驶员动作栏同时提示。
-- 关门监视：关门动画放着时每 5 tick 采样一次（`GuardWatch#closingWatch`）：不在车上、离自己那节车厢不超过 `watch-radius-blocks`、视线水平方向与车身夹角不超过 `watch-angle-degrees`（朝车头或车尾都行）。合格的采样不少于 `watch-ratio` 算合格；动画放完时动作栏告知结果。
+- 关门监视：关门动画放着时每 5 tick 采样一次（`GuardWatch#closingWatch`）：不在车上、离自己那节车厢不超过 `watch-radius-blocks`、视线水平方向与车身夹角不超过 `watch-angle-degrees`（朝车头或车尾都行）。合格的采样不少于 `watch-ratio` 算合格；动画放完时侧边栏的提示行告知结果，不合格也发到聊天框。
 - 出站监视：车掌放行、列车开出这一站时开始，到车头走过“车长 + `departure-watch-extra-blocks`”（直线距离）或 `departure-watch-max-seconds` 为止，每 5 tick 采样一次（`GuardWatch#departureWatch`）：坐在车掌座位上，视线朝站台一侧或朝车后（车掌驾驶室面朝的方向），夹角不超过 60°。结束时告知结果。
 - 两种监视的结果记在这一站的 `GuardStopWork` 里，供成绩使用。
 
@@ -90,6 +90,9 @@
 
 ## 显示
 
-- 车掌侧边栏（与驾驶员同一套 `DriveSidebar`，标题 `drive.guard.sidebar.title`）：列车、值乘（驾驶员 / ATO / 自动运行）、车站、作业与剩余秒数、出站（等发车时）、车门、超时站数。
-- 动作栏：这一步要做的事（`GuardDisplay#prompt`）；按钮的结果停留 2 秒不被覆盖。
+- 车掌的提示全在侧边栏（与驾驶员同一套 `DriveSidebar`，标题 `drive.guard.sidebar.title`），不用动作栏：车厢里的乘客信息（`ActionBarTrainHudManager`）与报站（`PidsAnnouncer`）都走动作栏，车掌也会被它们覆盖。自上而下：
+  - 提示（`GuardSession#showNotice`）：按钮的结果、超时代做、监视结果、演练结果，停留 3 秒，有新提示时下一拍就刷新；超时代做、监视不合格、紧急停车与解除、演练处置完成、驾驶员呼叫另发到聊天框（`drive.guard.alert`）。
+  - 演练：考试演练进行中时剩余秒数与再开门、报告两项是否已做。
+  - 列车、值乘（驾驶员 / ATO / 自动运行）、车站（停站时带开门方向）或下一站、作业（写明右键哪一格与剩余秒数，`GuardDisplay#stepRow`）、出站（等发车时）、车门、超时站数、换端。
+- 上岗前（任务已领、列车到站）的“请坐第几节”、他人坐车掌预留座位的提醒仍用动作栏：那时还没有车掌侧边栏。
 - 驾驶员那边：车掌上岗、离岗、发车信号、呼叫、应答、报告都在动作栏提示（`drive.guard.driver.*`）。

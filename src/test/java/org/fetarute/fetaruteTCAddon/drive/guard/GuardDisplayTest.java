@@ -11,7 +11,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 import org.junit.jupiter.api.Test;
 
-/** 车掌的动作栏提示与侧边栏：按停站阶段与发车前的几道条件给出要做的事。 */
+/** 车掌的侧边栏：按停站阶段与发车前的几道条件给出要做的事。 */
 class GuardDisplayTest {
 
   private static GuardDisplay.StopState stop(
@@ -41,50 +41,74 @@ class GuardDisplayTest {
         Optional.empty());
   }
 
-  private static String prompt(GuardDisplay.StopState stop, boolean seated) {
-    return GuardDisplay.prompt(snapshot(stop, seated)).key();
+  /** 侧边栏“作业”一行。 */
+  private static DriveSidebarRows.Row step(GuardDisplay.Snapshot snapshot) {
+    return GuardDisplay.rows(snapshot).stream()
+        .filter(row -> row.labelKey().equals("drive.guard.sidebar.label.step"))
+        .findFirst()
+        .orElseThrow();
+  }
+
+  private static String step(GuardDisplay.StopState stop, boolean seated) {
+    return step(snapshot(stop, seated)).valueKey();
   }
 
   @Test
-  void promptsFollowThePhase() {
-    assertEquals(
-        "drive.guard.prompt.running",
-        GuardDisplay.prompt(
-                new GuardDisplay.Snapshot(
-                    "T-1",
-                    Optional.empty(),
-                    false,
-                    Optional.empty(),
-                    true,
-                    0,
-                    Optional.empty(),
-                    Optional.empty()))
-            .key());
-    GuardDisplay.Line open =
-        GuardDisplay.prompt(snapshot(stop(Phase.OPEN_DOORS, false, false, false), true));
-    assertEquals("drive.guard.prompt.open-doors-left", open.key());
+  void stepsFollowThePhase() {
+    GuardDisplay.Snapshot running =
+        new GuardDisplay.Snapshot(
+            "T-1",
+            Optional.empty(),
+            false,
+            Optional.empty(),
+            true,
+            0,
+            Optional.empty(),
+            Optional.empty());
+    assertTrue(
+        GuardDisplay.rows(running).stream().noneMatch(row -> row.labelKey().endsWith(".step")),
+        "两站之间没有作业");
+    DriveSidebarRows.Row open = step(snapshot(stop(Phase.OPEN_DOORS, false, false, false), true));
+    assertEquals("drive.guard.sidebar.value.step-open-left", open.valueKey());
     assertEquals(Map.of("seconds", "10"), open.values());
-    assertEquals("drive.guard.prompt.dwell", prompt(stop(Phase.DWELL, false, false, false), true));
     assertEquals(
-        "drive.guard.prompt.close-doors",
-        prompt(stop(Phase.CLOSE_DOORS, false, false, false), true));
+        "drive.guard.sidebar.value.step-dwell", step(stop(Phase.DWELL, false, false, false), true));
+    assertEquals(
+        "drive.guard.sidebar.value.step-close",
+        step(stop(Phase.CLOSE_DOORS, false, false, false), true));
+    GuardDisplay.StopState closing =
+        new GuardDisplay.StopState(
+            "PPK",
+            Phase.CLOSE_DOORS,
+            DriverDoorSide.LEFT,
+            false,
+            false,
+            true,
+            200L,
+            false,
+            false,
+            false);
+    assertEquals("drive.guard.sidebar.value.step-closing", step(closing, true));
   }
 
   /** 等发车那一步：先回座，再等出站开放、确认，最后按铃。 */
   @Test
   void departureStepsComeInOrder() {
     assertEquals(
-        "drive.guard.prompt.return-seat",
-        prompt(stop(Phase.WAIT_DEPARTURE, true, false, false), false));
+        "drive.guard.sidebar.value.step-return",
+        step(stop(Phase.WAIT_DEPARTURE, true, false, false), false));
     assertEquals(
-        "drive.guard.prompt.exit-closed",
-        prompt(stop(Phase.WAIT_DEPARTURE, false, false, false), true));
+        "drive.guard.sidebar.value.step-wait-exit",
+        step(stop(Phase.WAIT_DEPARTURE, false, false, false), true));
     assertEquals(
-        "drive.guard.prompt.confirm", prompt(stop(Phase.WAIT_DEPARTURE, true, false, false), true));
+        "drive.guard.sidebar.value.step-confirm",
+        step(stop(Phase.WAIT_DEPARTURE, true, false, false), true));
     assertEquals(
-        "drive.guard.prompt.buzzer", prompt(stop(Phase.WAIT_DEPARTURE, false, true, false), true));
+        "drive.guard.sidebar.value.step-buzzer",
+        step(stop(Phase.WAIT_DEPARTURE, false, true, false), true));
     assertEquals(
-        "drive.guard.prompt.released", prompt(stop(Phase.WAIT_DEPARTURE, true, true, true), true));
+        "drive.guard.sidebar.value.step-released",
+        step(stop(Phase.WAIT_DEPARTURE, true, true, true), true));
   }
 
   @Test
@@ -100,24 +124,26 @@ class GuardDisplayTest {
     assertEquals("drive.guard.sidebar.value.crew-ato", dwell.get(1).valueKey());
   }
 
-  /** 换端：开门、停站、关门这几步仍先提示停站作业，其余时候提示换端；放行前告知不显示秒数。 */
+  /** 换端：停站作业照常显示，另起一行写到第几节；放行前告知不显示秒数。 */
   @Test
-  void cabChangeComesAfterTheDoorWork() {
-    Optional<GuardDisplay.CabChangeState> active =
-        Optional.of(new GuardDisplay.CabChangeState(4, 200L));
-    GuardDisplay.Line running =
-        GuardDisplay.prompt(
-            new GuardDisplay.Snapshot(
-                "T-1",
-                Optional.empty(),
-                false,
-                Optional.empty(),
-                false,
-                0,
-                active,
-                Optional.empty()));
-    assertEquals("drive.guard.prompt.cab-change", running.key());
-    assertEquals(Map.of("car", "4", "seconds", "10"), running.values());
+  void cabChangeGetsItsOwnRow() {
+    GuardDisplay.Snapshot running =
+        new GuardDisplay.Snapshot(
+            "T-1",
+            Optional.empty(),
+            false,
+            Optional.empty(),
+            false,
+            0,
+            Optional.of(new GuardDisplay.CabChangeState(4, 200L)),
+            Optional.empty());
+    DriveSidebarRows.Row change =
+        GuardDisplay.rows(running).stream()
+            .filter(row -> row.labelKey().equals("drive.guard.sidebar.label.cab-change"))
+            .findFirst()
+            .orElseThrow();
+    assertEquals("drive.guard.sidebar.value.cab-change", change.valueKey());
+    assertEquals(Map.of("car", "4", "seconds", "10"), change.values());
     GuardDisplay.Snapshot dwell =
         new GuardDisplay.Snapshot(
             "T-1",
@@ -128,22 +154,13 @@ class GuardDisplayTest {
             0,
             Optional.of(new GuardDisplay.CabChangeState(1, -1L)),
             Optional.empty());
-    assertEquals("drive.guard.prompt.dwell", GuardDisplay.prompt(dwell).key());
+    assertEquals("drive.guard.sidebar.value.step-dwell", step(dwell).valueKey());
     assertTrue(
         GuardDisplay.rows(dwell).stream()
             .anyMatch(
-                row -> row.valueKey().equals("drive.guard.sidebar.value.cab-change-announced")));
-    GuardDisplay.Snapshot waiting =
-        new GuardDisplay.Snapshot(
-            "T-1",
-            Optional.empty(),
-            false,
-            Optional.of(stop(Phase.WAIT_DEPARTURE, false, false, false)),
-            true,
-            0,
-            Optional.of(new GuardDisplay.CabChangeState(1, -1L)),
-            Optional.empty());
-    assertEquals("drive.guard.prompt.cab-change-announced", GuardDisplay.prompt(waiting).key());
+                row ->
+                    row.valueKey().equals("drive.guard.sidebar.value.cab-change-announced")
+                        && row.values().equals(Map.of("car", "1"))));
   }
 
   /** 成绩单：每项扣分一行，全无扣分一行说明，异常报告另起一行。 */
@@ -184,9 +201,6 @@ class GuardDisplayTest {
             0,
             Optional.empty(),
             Optional.of("西湖"));
-    assertEquals(
-        new GuardDisplay.Line("drive.guard.prompt.running-next", Map.of("station", "西湖")),
-        GuardDisplay.prompt(running));
     assertTrue(
         GuardDisplay.rows(running).stream()
             .anyMatch(

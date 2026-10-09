@@ -9,7 +9,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 
-/** 车掌的侧边栏与动作栏提示：由这一刻的值乘状态算出语言键与占位符，不依赖服务器对象。 */
+/** 车掌的侧边栏：由这一刻的值乘状态算出各行的语言键与占位符，不依赖服务器对象。车掌的提示都在侧边栏，动作栏留给车厢的乘客信息与报站。 */
 public final class GuardDisplay {
 
   /**
@@ -93,62 +93,21 @@ public final class GuardDisplay {
     }
   }
 
-  private static final String PROMPT = "drive.guard.prompt.";
   private static final String LABEL = "drive.guard.sidebar.label.";
   private static final String VALUE = "drive.guard.sidebar.value.";
   private static final String SHEET = "drive.guard.sheet.";
 
   private GuardDisplay() {}
 
-  /** 动作栏上要车掌做的事。换端时除了开门、停站、关门这几步，都先提示换端。 */
-  public static Line prompt(Snapshot snapshot) {
-    if (snapshot.cabChange().isPresent()
-        && snapshot.stop().map(stop -> !stop.phase().needsDriver()).orElse(true)) {
-      return cabChangeLine(PROMPT, snapshot.cabChange().get());
-    }
-    if (snapshot.stop().isEmpty()) {
-      return snapshot
-          .nextStation()
-          .map(station -> new Line(PROMPT + "running-next", Map.of("station", station)))
-          .orElseGet(() -> new Line(PROMPT + "running", Map.of()));
-    }
-    StopState stop = snapshot.stop().get();
-    String seconds = seconds(stop.remainingTicks());
-    return switch (stop.phase()) {
-      case APPROACH -> new Line(PROMPT + "approach", Map.of("station", stop.station()));
-      case OPEN_DOORS -> new Line(
-          PROMPT + "open-doors-" + sideSuffix(stop.required()), Map.of("seconds", seconds));
-      case DWELL -> new Line(PROMPT + "dwell", Map.of());
-      case CLOSE_DOORS -> stop.closing() && !stop.leftOpen() && !stop.rightOpen()
-          ? new Line(PROMPT + "closing", Map.of())
-          : new Line(PROMPT + "close-doors", Map.of("seconds", seconds));
-      case WAIT_DEPARTURE -> departurePrompt(snapshot, stop, seconds);
-      case DEPART, ENDED -> new Line(PROMPT + "released", Map.of());
-    };
-  }
-
-  private static Line cabChangeLine(String prefix, CabChangeState change) {
+  /** 换端一行：放行前只告知到第几节，放行后带剩余秒数。 */
+  private static DriveSidebarRows.Row cabChangeRow(CabChangeState change) {
     String car = String.valueOf(change.car());
     return change.remainingTicks() < 0L
-        ? new Line(prefix + "cab-change-announced", Map.of("car", car))
-        : new Line(
-            prefix + "cab-change", Map.of("car", car, "seconds", seconds(change.remainingTicks())));
-  }
-
-  private static Line departurePrompt(Snapshot snapshot, StopState stop, String seconds) {
-    if (stop.released()) {
-      return new Line(PROMPT + "released", Map.of());
-    }
-    if (!snapshot.seated()) {
-      return new Line(PROMPT + "return-seat", Map.of("seconds", seconds));
-    }
-    if (!stop.confirmed() && !stop.exitOpen()) {
-      return new Line(PROMPT + "exit-closed", Map.of());
-    }
-    if (!stop.confirmed()) {
-      return new Line(PROMPT + "confirm", Map.of("seconds", seconds));
-    }
-    return new Line(PROMPT + "buzzer", Map.of("seconds", seconds));
+        ? row("cab-change", "cab-change-announced", Map.of("car", car))
+        : row(
+            "cab-change",
+            "cab-change",
+            Map.of("car", car, "seconds", seconds(change.remainingTicks())));
   }
 
   /** 侧边栏各行。 */
@@ -182,13 +141,7 @@ public final class GuardDisplay {
               }
               rows.add(row("doors", doorsValue(stop), Map.of()));
             });
-    snapshot
-        .cabChange()
-        .ifPresent(
-            change -> {
-              Line value = cabChangeLine(VALUE, change);
-              rows.add(new DriveSidebarRows.Row(LABEL + "cab-change", value.key(), value.values()));
-            });
+    snapshot.cabChange().ifPresent(change -> rows.add(cabChangeRow(change)));
     if (snapshot.timeoutStops() > 0) {
       rows.add(
           row("timeouts", "timeouts", Map.of("count", String.valueOf(snapshot.timeoutStops()))));
@@ -203,14 +156,18 @@ public final class GuardDisplay {
       case OPEN_DOORS -> row(
           "step", "step-open-" + sideSuffix(stop.required()), Map.of("seconds", seconds));
       case DWELL -> row("step", "step-dwell", Map.of());
-      case CLOSE_DOORS -> row("step", "step-close", Map.of("seconds", seconds));
+      case CLOSE_DOORS -> stop.closing() && !stop.leftOpen() && !stop.rightOpen()
+          ? row("step", "step-closing", Map.of())
+          : row("step", "step-close", Map.of("seconds", seconds));
       case WAIT_DEPARTURE -> stop.released()
           ? row("step", "step-released", Map.of())
           : !snapshot.seated()
               ? row("step", "step-return", Map.of("seconds", seconds))
-              : !stop.confirmed()
-                  ? row("step", "step-confirm", Map.of("seconds", seconds))
-                  : row("step", "step-buzzer", Map.of("seconds", seconds));
+              : !stop.confirmed() && !stop.exitOpen()
+                  ? row("step", "step-wait-exit", Map.of())
+                  : !stop.confirmed()
+                      ? row("step", "step-confirm", Map.of("seconds", seconds))
+                      : row("step", "step-buzzer", Map.of("seconds", seconds));
       case DEPART, ENDED -> row("step", "step-released", Map.of());
     };
   }

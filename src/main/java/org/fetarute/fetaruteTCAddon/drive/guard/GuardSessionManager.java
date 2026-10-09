@@ -50,6 +50,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
+import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
@@ -65,7 +66,7 @@ import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 车掌值乘：上岗、离岗，每 tick 推进站停作业（开关门、监视、出发确认、发车铃），快捷栏按钮、菜单、侧边栏与动作栏提示。
+ * 车掌值乘：上岗、离岗，每 tick 推进站停作业（开关门、监视、出发确认、发车铃），快捷栏按钮、菜单与侧边栏提示。
  *
  * <p>车掌坐车尾驾驶室，站台把停站交给他（{@link GuardLink}）；他开关门、回报车门，站台在等发车那一步问他是否还扣着。驾驶员那边的提示与铃声经 {@link
  * DriverSide} 转达。主线程入口都在服务器主线程调用；{@link #rewriterFor}、{@link #menuTopSize} 与 {@link #onInput}
@@ -205,8 +206,14 @@ public final class GuardSessionManager {
     EQUIPMENT
   }
 
-  /** 动作栏提示停留多久（tick），不被常驻提示覆盖。 */
-  private static final long NOTICE_HOLD_TICKS = 40L;
+  /** 侧边栏的“提示”一行显示多久（tick）。 */
+  private static final long NOTICE_HOLD_TICKS = 60L;
+
+  /** 侧边栏“提示”一行的标签。 */
+  private static final String NOTICE_LABEL = "drive.guard.sidebar.label.notice";
+
+  /** 侧边栏“演练”一行的标签。 */
+  private static final String DRILL_LABEL = "drive.guard.sidebar.label.drill";
 
   /** 侧边栏与常驻提示的刷新间隔。 */
   private static final int DISPLAY_INTERVAL_TICKS = 10;
@@ -662,14 +669,15 @@ public final class GuardSessionManager {
     }
     session.buzzer().tick(now).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
     refreshHotbar(player, session, false);
-    if (tickCounter % DISPLAY_INTERVAL_TICKS == 0) {
+    // 车掌的提示都在侧边栏：动作栏留给车厢的乘客信息与报站，免得互相覆盖。
+    boolean dirty = session.takeSidebarDirty();
+    if (dirty || tickCounter % DISPLAY_INTERVAL_TICKS == 0) {
       GuardDisplay.Snapshot snapshot = snapshot(session, group, seated, now);
       sidebar.update(
-          player, "drive.guard.sidebar.title", snapshot.train(), GuardDisplay.rows(snapshot));
-      if (now >= session.noticeUntilTick()) {
-        GuardDisplay.Line line = GuardDisplay.prompt(snapshot);
-        player.sendActionBar(locale.component(line.key(), line.values()));
-      }
+          player,
+          "drive.guard.sidebar.title",
+          snapshot.train(),
+          sidebarRows(session, snapshot, now));
     }
   }
 
@@ -707,11 +715,11 @@ public final class GuardSessionManager {
       switch (work.tick(stop.phase())) {
         case FORCE_OPEN -> {
           openRequired(group, session, stop, side);
-          notice(player, session, "drive.guard.timeout.open", Map.of());
+          alert(player, session, "drive.guard.timeout.open", Map.of());
         }
         case FORCE_CLOSE -> {
           closeAll(group, session, stop);
-          notice(player, session, "drive.guard.timeout.close", Map.of());
+          alert(player, session, "drive.guard.timeout.close", Map.of());
         }
         case NONE -> {}
       }
@@ -720,7 +728,7 @@ public final class GuardSessionManager {
         if (!seated) {
           SeatLocator.reseat(player, group, session.binding());
         }
-        notice(player, session, "drive.guard.timeout.signal", Map.of());
+        alert(player, session, "drive.guard.timeout.signal", Map.of());
       }
       if (work.released() && !session.signalAnnounced()) {
         session.setSignalAnnounced(true);
@@ -885,21 +893,21 @@ public final class GuardSessionManager {
     }
     Optional<DriverStationStop> stop = session.link().stationStop();
     if (stop.isEmpty() || group.isMoving() || !doorsReleasable(stop.get().phase())) {
-      notice(player, session, "drive.guard.deny.doors-not-released", Map.of());
+      notice(session, "drive.guard.deny.doors-not-released", Map.of());
       return;
     }
     if (session.link().work().map(GuardStopWork::released).orElse(false)) {
-      notice(player, session, "drive.guard.deny.signal-given", Map.of());
+      notice(session, "drive.guard.deny.signal-given", Map.of());
       return;
     }
     if (left ? session.isLeftDoorOpen() : session.isRightDoorOpen()) {
-      notice(player, session, "drive.guard.deny.already-open", Map.of());
+      notice(session, "drive.guard.deny.already-open", Map.of());
       return;
     }
     DriveDoors.Result result =
         session.doors().toggle(group, session, left, chime.get(), stop.get().doorCars());
     if (result == DriveDoors.Result.UNAVAILABLE) {
-      notice(player, session, "drive.guard.deny.no-door-animation", Map.of());
+      notice(session, "drive.guard.deny.no-door-animation", Map.of());
       return;
     }
     if (session.drill() != null) {
@@ -918,7 +926,7 @@ public final class GuardSessionManager {
   private void closeDoors(Player player, GuardSession session, MinecartGroup group) {
     Optional<DriverStationStop> stop = session.link().stationStop();
     if (stop.isEmpty() || !session.anyDoorOpen()) {
-      notice(player, session, "drive.guard.deny.no-door-open", Map.of());
+      notice(session, "drive.guard.deny.no-door-open", Map.of());
       return;
     }
     session.link().work().ifPresent(work -> work.noteClosed(stop.get().phase()));
@@ -945,10 +953,10 @@ public final class GuardSessionManager {
             "drive.guard.drill.alert",
             Map.of("station", stop.stationName(), "seconds", String.valueOf(seconds))));
     sounds.play(player, DriveCue.FAULT);
-    showDrill(player, session, Bukkit.getCurrentTick());
+    session.markSidebarDirty();
   }
 
-  /** 演练计时：再开门与报告都做了算处置完成，过了时限算没处置；进行中动作栏一直提示还差哪一项。 */
+  /** 演练计时：再开门与报告都做了算处置完成，过了时限算没处置；进行中侧边栏一直显示还差哪一项。 */
   private void tickDrill(Player player, GuardSession session, long now) {
     GuardDrill drill = session.drill();
     if (drill == null) {
@@ -957,7 +965,7 @@ public final class GuardSessionManager {
     if (drill.handled() || drill.expired(now)) {
       session.setDrill(null);
       if (drill.handled()) {
-        notice(
+        alert(
             player,
             session,
             "drive.guard.drill.handled",
@@ -965,45 +973,49 @@ public final class GuardSessionManager {
         sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
       }
       examiner.onDrillDone(player, drill.station(), drill.handled(), drill.seconds(now));
-      return;
-    }
-    if (now >= session.noticeUntilTick()) {
-      showDrill(player, session, now);
     }
   }
 
-  private void showDrill(Player player, GuardSession session, long now) {
+  /** 侧边栏各行：最上面是还没过时的提示，其次是进行中的演练，然后是值乘状态。 */
+  private List<DriveSidebarRows.Row> sidebarRows(
+      GuardSession session, GuardDisplay.Snapshot snapshot, long now) {
+    List<DriveSidebarRows.Row> rows = new ArrayList<>();
+    session.notice(now).ifPresent(rows::add);
     GuardDrill drill = session.drill();
-    notice(
-        player,
-        session,
-        "drive.guard.drill.todo",
-        Map.of(
-            "seconds",
-            String.valueOf(drill.secondsLeft(now)),
-            "reopen",
-            drill.reopened() ? GuardDrill.DONE : GuardDrill.PENDING,
-            "report",
-            drill.reported() ? GuardDrill.DONE : GuardDrill.PENDING));
+    if (drill != null) {
+      rows.add(
+          new DriveSidebarRows.Row(
+              DRILL_LABEL,
+              "drive.guard.drill.todo",
+              Map.of(
+                  "seconds",
+                  String.valueOf(drill.secondsLeft(now)),
+                  "reopen",
+                  drill.reopened() ? GuardDrill.DONE : GuardDrill.PENDING,
+                  "report",
+                  drill.reported() ? GuardDrill.DONE : GuardDrill.PENDING)));
+    }
+    rows.addAll(GuardDisplay.rows(snapshot));
+    return rows;
   }
 
   private void confirm(Player player, GuardSession session) {
     Optional<DriverStationStop> stop = session.link().stationStop();
     Optional<GuardStopWork> work = session.link().work();
     if (stop.isEmpty() || work.isEmpty()) {
-      notice(player, session, "drive.guard.confirm.not-at-station", Map.of());
+      notice(session, "drive.guard.confirm.not-at-station", Map.of());
       return;
     }
     GuardStopWork.Confirm result = work.get().confirm(stop.get().phase());
     switch (result) {
       case CONFIRMED -> {
-        notice(player, session, "drive.guard.confirm.confirmed", Map.of());
+        notice(session, "drive.guard.confirm.confirmed", Map.of());
         sounds.play(player, DriveCue.SIGNAL_ACKNOWLEDGED);
       }
-      case ALREADY -> notice(player, session, "drive.guard.confirm.already", Map.of());
-      case DOORS_OPEN -> notice(player, session, "drive.guard.confirm.doors-open", Map.of());
-      case EXIT_CLOSED -> notice(player, session, "drive.guard.confirm.exit-closed", Map.of());
-      case RELEASED -> notice(player, session, "drive.guard.confirm.released", Map.of());
+      case ALREADY -> notice(session, "drive.guard.confirm.already", Map.of());
+      case DOORS_OPEN -> notice(session, "drive.guard.confirm.doors-open", Map.of());
+      case EXIT_CLOSED -> notice(session, "drive.guard.confirm.exit-closed", Map.of());
+      case RELEASED -> notice(session, "drive.guard.confirm.released", Map.of());
     }
   }
 
@@ -1018,24 +1030,23 @@ public final class GuardSessionManager {
           if (group.isPresent() && !group.get().isMoving()) {
             releaseEmergency(player, session, group.get(), "drive.guard.emergency.released");
           } else {
-            notice(player, session, "drive.guard.emergency.still-moving", Map.of());
+            notice(session, "drive.guard.emergency.still-moving", Map.of());
           }
           return;
         }
         Optional<DriverStationStop> stop = session.link().stationStop();
         Optional<GuardStopWork> work = session.link().work();
         if (stop.isEmpty() || work.isEmpty()) {
-          notice(player, session, "drive.guard.signal.not-at-station", Map.of());
+          notice(session, "drive.guard.signal.not-at-station", Map.of());
           return;
         }
         GuardStopWork.Signal result = work.get().signal(stop.get().phase(), seated);
         switch (result) {
-          case GIVEN -> notice(player, session, "drive.guard.signal.given", Map.of());
-          case ALREADY -> notice(player, session, "drive.guard.signal.already", Map.of());
-          case DOORS_OPEN -> notice(player, session, "drive.guard.signal.doors-open", Map.of());
-          case NOT_CONFIRMED -> notice(
-              player, session, "drive.guard.signal.not-confirmed", Map.of());
-          case NOT_SEATED -> notice(player, session, "drive.guard.signal.not-seated", Map.of());
+          case GIVEN -> notice(session, "drive.guard.signal.given", Map.of());
+          case ALREADY -> notice(session, "drive.guard.signal.already", Map.of());
+          case DOORS_OPEN -> notice(session, "drive.guard.signal.doors-open", Map.of());
+          case NOT_CONFIRMED -> notice(session, "drive.guard.signal.not-confirmed", Map.of());
+          case NOT_SEATED -> notice(session, "drive.guard.signal.not-seated", Map.of());
         }
       }
       case SHORT -> drivers
@@ -1056,7 +1067,7 @@ public final class GuardSessionManager {
                       "drive.guard.driver.call",
                       Map.of("guard", session.playerName()),
                       DriveCue.BUZZER),
-              () -> notice(player, session, "drive.guard.call.no-driver", Map.of()));
+              () -> notice(session, "drive.guard.call.no-driver", Map.of()));
     }
   }
 
@@ -1123,11 +1134,16 @@ public final class GuardSessionManager {
       if (guardPlayer == null) {
         continue;
       }
-      String key =
-          kind.get() == BuzzerPress.Kind.CALL
-              ? "drive.guard.from-driver.call"
-              : "drive.guard.from-driver.ack";
-      notice(guardPlayer, guard.get(), key, Map.of("driver", driver.getName()));
+      // 驾驶员呼叫要车掌回应，也发到聊天框；回一短只在侧边栏提示。
+      if (kind.get() == BuzzerPress.Kind.CALL) {
+        alert(
+            guardPlayer,
+            guard.get(),
+            "drive.guard.from-driver.call",
+            Map.of("driver", driver.getName()));
+      } else {
+        notice(guard.get(), "drive.guard.from-driver.ack", Map.of("driver", driver.getName()));
+      }
     }
   }
 
@@ -1144,7 +1160,7 @@ public final class GuardSessionManager {
     Optional<GuardStopWork> work =
         session.link().stationStop().flatMap(stop -> session.link().work());
     if (work.isEmpty()) {
-      notice(player, session, "drive.guard.report.not-at-station", Map.of());
+      notice(session, "drive.guard.report.not-at-station", Map.of());
       return;
     }
     if (reason == IncidentReason.CAUGHT && session.drill() != null) {
@@ -1152,7 +1168,7 @@ public final class GuardSessionManager {
       session.drill().noteReported();
     }
     if (!work.get().report()) {
-      notice(player, session, "drive.guard.report.used-up", Map.of());
+      notice(session, "drive.guard.report.used-up", Map.of());
       return;
     }
     callEvent(
@@ -1165,7 +1181,6 @@ public final class GuardSessionManager {
         "drive.guard.report.reason." + reason.name().toLowerCase(java.util.Locale.ROOT);
     String reasonText = locale.text(reasonKey);
     notice(
-        player,
         session,
         "drive.guard.report.filed",
         Map.of(
@@ -1192,11 +1207,11 @@ public final class GuardSessionManager {
   /** 紧急停车（车掌阀）：人工驾驶的车按调度要求紧急制动处理，由驾驶员停稳后缓解；自动运行（含 ATO）的车立即停住并扣着，车掌停稳后按住发车铃一长声或到时限才解除。 */
   private void emergency(Player player, GuardSession session, MinecartGroup group) {
     if (session.link().emergencyHold()) {
-      notice(player, session, "drive.guard.emergency.already", Map.of());
+      notice(session, "drive.guard.emergency.already", Map.of());
       return;
     }
     if (!group.isMoving()) {
-      notice(player, session, "drive.guard.emergency.stopped", Map.of());
+      notice(session, "drive.guard.emergency.stopped", Map.of());
       return;
     }
     String train = session.link().currentTrainName();
@@ -1209,7 +1224,7 @@ public final class GuardSessionManager {
       group.stop();
     }
     sounds.play(player, DriveCue.EMERGENCY);
-    notice(player, session, "drive.guard.emergency.pulled", Map.of());
+    alert(player, session, "drive.guard.emergency.pulled", Map.of());
     callEvent(new GuardEmergencyStopEvent(session.playerId(), train));
     driver.ifPresent(
         id ->
@@ -1224,7 +1239,7 @@ public final class GuardSessionManager {
       Player player, GuardSession session, MinecartGroup group, String key) {
     session.link().releaseEmergency();
     drivers.refreshSignal(group);
-    notice(player, session, key, Map.of());
+    alert(player, session, key, Map.of());
     drivers
         .driverOf(session.link().currentTrainName())
         .ifPresent(
@@ -1255,13 +1270,7 @@ public final class GuardSessionManager {
     if (session.closingWatchActive()) {
       session.setClosingWatchActive(false);
       work.closingWatchPassed()
-          .ifPresent(
-              passed ->
-                  notice(
-                      player,
-                      session,
-                      passed ? "drive.guard.watch.closing-ok" : "drive.guard.watch.closing-missed",
-                      Map.of()));
+          .ifPresent(passed -> watchResult(player, session, passed, "closing"));
     }
   }
 
@@ -1341,15 +1350,16 @@ public final class GuardSessionManager {
     watch
         .work()
         .departureWatchPassed()
-        .ifPresent(
-            passed ->
-                notice(
-                    player,
-                    session,
-                    passed
-                        ? "drive.guard.watch.departure-ok"
-                        : "drive.guard.watch.departure-missed",
-                    Map.of()));
+        .ifPresent(passed -> watchResult(player, session, passed, "departure"));
+  }
+
+  /** 监视合格只在侧边栏提示；不合格要扣分，也发到聊天框。 */
+  private void watchResult(Player player, GuardSession session, boolean passed, String watch) {
+    if (passed) {
+      notice(session, "drive.guard.watch." + watch + "-ok", Map.of());
+    } else {
+      alert(player, session, "drive.guard.watch." + watch + "-missed", Map.of());
+    }
   }
 
   // ---- 菜单 ----
@@ -1434,7 +1444,7 @@ public final class GuardSessionManager {
   private void teleportToSeat(Player player, GuardSession session) {
     Optional<MinecartGroup> group = findGroup(session);
     if (group.isEmpty() || group.get().isMoving()) {
-      notice(player, session, "drive.guard.seat.moving", Map.of());
+      notice(session, "drive.guard.seat.moving", Map.of());
       return;
     }
     GuardCabChange change = session.cabChange();
@@ -1443,15 +1453,15 @@ public final class GuardSessionManager {
       player.closeInventory();
       String car = String.valueOf(GuardCabChange.targetCar(change.target(), group.get().size()));
       if (moveGuard(player, session, group.get(), change.target())) {
-        notice(player, session, "drive.guard.cab-change.moved", Map.of("car", car));
+        notice(session, "drive.guard.cab-change.moved", Map.of("car", car));
         notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
       } else {
-        notice(player, session, "drive.guard.cab-change.unavailable", Map.of("car", car));
+        notice(session, "drive.guard.cab-change.unavailable", Map.of("car", car));
       }
       return;
     }
     if (seated(player, session, group.get())) {
-      notice(player, session, "drive.guard.seat.already", Map.of());
+      notice(session, "drive.guard.seat.already", Map.of());
       return;
     }
     player.closeInventory();
@@ -1459,7 +1469,7 @@ public final class GuardSessionManager {
       player.leaveVehicle();
     }
     if (!SeatLocator.reseat(player, group.get(), session.binding())) {
-      notice(player, session, "drive.guard.seat.unavailable", Map.of());
+      notice(session, "drive.guard.seat.unavailable", Map.of());
     }
   }
 
@@ -1792,7 +1802,7 @@ public final class GuardSessionManager {
       }
       case COMPLETED -> {
         adoptSeat(player, session, group);
-        notice(player, session, "drive.guard.cab-change.done", Map.of("car", car));
+        notice(session, "drive.guard.cab-change.done", Map.of("car", car));
         notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
       }
       case TIMED_OUT -> {
@@ -1804,7 +1814,7 @@ public final class GuardSessionManager {
             locale.component("drive.guard.cab-change.timeout-moved", Map.of("car", car)));
         notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
       }
-      case CANCELLED -> notice(player, session, "drive.guard.cab-change.cancelled", Map.of());
+      case CANCELLED -> notice(session, "drive.guard.cab-change.cancelled", Map.of());
       case NONE -> {}
     }
     return false;
@@ -2006,7 +2016,7 @@ public final class GuardSessionManager {
     }
     // 换端途中：车门关着也可以下车走到另一端。
     if (!session.anyDoorOpen() && !session.cabChange().changing()) {
-      notice(player, session, "drive.guard.seat-exit.doors-closed", Map.of());
+      notice(session, "drive.guard.seat-exit.doors-closed", Map.of());
       return false;
     }
     return true;
@@ -2043,15 +2053,15 @@ public final class GuardSessionManager {
                 String car =
                     String.valueOf(GuardCabChange.targetCar(change.target(), group.size()));
                 if (target == member && moveGuardTo(player, session, group, change.target())) {
-                  notice(player, session, "drive.guard.cab-change.done", Map.of("car", car));
+                  notice(session, "drive.guard.cab-change.done", Map.of("car", car));
                   notifyDriverOf(session, "drive.guard.driver.cab-changed", car);
                 } else {
-                  notice(player, session, "drive.guard.cab-change.go-to", Map.of("car", car));
+                  notice(session, "drive.guard.cab-change.go-to", Map.of("car", car));
                 }
                 return;
               }
               if (!SeatLocator.reseat(player, group, session.binding())) {
-                notice(player, session, "drive.guard.seat.unavailable", Map.of());
+                notice(session, "drive.guard.seat.unavailable", Map.of());
               }
             });
     return true;
@@ -2707,8 +2717,20 @@ public final class GuardSessionManager {
     return Optional.ofNullable(guardByTrain.get(trainName.toLowerCase(java.util.Locale.ROOT)));
   }
 
-  private void notice(Player player, GuardSession session, String key, Map<String, String> values) {
-    player.sendActionBar(locale.component(key, values));
-    session.setNoticeUntilTick(Bukkit.getCurrentTick() + NOTICE_HOLD_TICKS);
+  /** 侧边栏最上面一行“提示”：按钮的反馈、超时与演练结果，下一拍就显示。 */
+  private void notice(GuardSession session, String key, Map<String, String> values) {
+    session.showNotice(
+        new DriveSidebarRows.Row(NOTICE_LABEL, key, values),
+        Bukkit.getCurrentTick() + NOTICE_HOLD_TICKS);
+  }
+
+  /** 超时代做、监视不合格、紧急停车、演练结果、驾驶员呼叫这类要紧的事：侧边栏提示之外也发到聊天框，过后还查得到。 */
+  private void alert(Player player, GuardSession session, String key, Map<String, String> values) {
+    notice(session, key, values);
+    player.sendMessage(
+        locale.component(
+            "drive.guard.alert",
+            net.kyori.adventure.text.minimessage.tag.resolver.Placeholder.component(
+                "text", locale.component(key, values))));
   }
 }
