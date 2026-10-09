@@ -187,6 +187,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** 叫来的车写在列车上的标签：{@code 叫车 id@车站}。带着它的待命车只给叫车票接（跑完一趟沿途有人叫就接着跑），按表或按间隔的票都不接； 列车改名后标签跟着车走。 */
   public static final String TAG_CALLED_TRAIN = "FTA_CALL";
 
+  /** 折返车写在列车上的标签：{@code 叫车 id}。开进终点等着接这一单叫车的票，别的票（包括别的叫车票）都不接它。 */
+  public static final String TAG_CALL_TURNBACK = "FTA_CALL_TURNBACK";
+
   /** 在车库等计划时刻的提前出车写在列车上的标签：{@code 放行时刻(epoch 秒)[;交路意图]}。门控与扣车记录只在内存里，重启或重载后按它重新扣住、 重新绑回交路。 */
   static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
 
@@ -693,10 +696,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     boolean onDemand = ticket != null && ticket.source() == TripSource.ON_DEMAND;
     boolean managed =
         onDemand && ticket.service() != null && timetableRoute.test(ticket.service().routeId());
+    Optional<String> callId =
+        onDemand ? OnDemandTrip.callIdOf(ticket.serviceTripId()) : Optional.empty();
     List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(candidates.size());
     for (LayoverRegistry.LayoverCandidate candidate : candidates) {
       boolean accepted =
-          onDemand ? callMayTake(candidate, managed, dutyBound) : !isCalledTrain(candidate);
+          onDemand ? callMayTake(candidate, managed, dutyBound, callId) : !isCalledTrain(candidate);
       if (accepted) {
         allowed.add(candidate);
       }
@@ -705,17 +710,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   /**
-   * 叫车票能不能接这辆待命车：叫来的车都能接；交路按表运行时只接叫来的车，否则不接绑着时刻表交路的车。叫车排车源与发车共用这一条。
+   * 叫车票能不能接这辆待命车：叫来的车都能接（留给某一单的折返车只给那一单接）；交路按表运行时只接叫来的车， 否则不接绑着时刻表交路的车。叫车排车源与发车共用这一条。
    *
    * @param managedRoute 叫车跑的交路按表运行
    * @param dutyBound 列车是否绑着时刻表交路
+   * @param callId 叫车票的叫车编号；排车源（还没出票）时为空，留给别的单的折返车一律不接
    */
   public static boolean callMayTake(
       LayoverRegistry.LayoverCandidate candidate,
       boolean managedRoute,
-      java.util.function.Predicate<String> dutyBound) {
+      java.util.function.Predicate<String> dutyBound,
+      Optional<String> callId) {
     if (candidate == null) {
       return false;
+    }
+    String reservedFor = candidate.tags() == null ? null : candidate.tags().get(TAG_CALL_TURNBACK);
+    if (reservedFor != null && !reservedFor.isBlank()) {
+      return callId.filter(id -> id.equalsIgnoreCase(reservedFor.trim())).isPresent();
     }
     return isCalledTrain(candidate) || (!managedRoute && !dutyBound.test(candidate.trainName()));
   }

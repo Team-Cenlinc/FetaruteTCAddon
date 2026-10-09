@@ -31,7 +31,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
@@ -58,7 +60,24 @@ final class CallPlanner {
     /** 本站上游的区间点生成。 */
     WAYPOINT,
     /** 从车库出车。 */
-    DEPOT
+    DEPOT,
+    /** 折返车：先开进叫车交路的首站（终点）再折返。 */
+    TURNBACK
+  }
+
+  /**
+   * 折返车：在开往叫车交路首站这个终点、终点进待命池的同线路交路上区间生成，开进终点后由这一单的票接走。
+   *
+   * @param routeId 开进终点的交路
+   * @param entry 在那条交路上的生成点
+   * @param departSeconds 预计几秒后从终点折返开出；估不出时为空
+   */
+  record Turnback(UUID routeId, Entry entry, OptionalInt departSeconds) {
+    Turnback {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(entry, "entry");
+      Objects.requireNonNull(departSeconds, "departSeconds");
+    }
   }
 
   /**
@@ -88,9 +107,20 @@ final class CallPlanner {
    * @param source 车源
    * @param entry 区间生成点（车源为 {@link Source#WAYPOINT} 时）
    * @param etaSeconds 预计多少秒后到站；估不出时为空
+   * @param turnback 折返车（车源为 {@link Source#TURNBACK} 时）
    */
   record Plan(
-      UUID routeId, int stopIndex, Source source, Optional<Entry> entry, OptionalInt etaSeconds) {
+      UUID routeId,
+      int stopIndex,
+      Source source,
+      Optional<Entry> entry,
+      OptionalInt etaSeconds,
+      Optional<Turnback> turnback) {
+
+    Plan(
+        UUID routeId, int stopIndex, Source source, Optional<Entry> entry, OptionalInt etaSeconds) {
+      this(routeId, stopIndex, source, entry, etaSeconds, Optional.empty());
+    }
 
     OptionalInt etaMinutes() {
       return etaSeconds.isPresent()
@@ -138,6 +168,10 @@ final class CallPlanner {
   private static final int STANDBY_OVERHEAD_SECONDS = 15;
   private static final int ENTRY_OVERHEAD_SECONDS = 20;
   private static final int DEPOT_OVERHEAD_SECONDS = 40;
+
+  /** 折返车开进终点到再开出：停站、换端、派票。 */
+  static final int TURNBACK_OVERHEAD_SECONDS = 45;
+
   private static final double FALLBACK_SPEED_BPS = 8.0D;
   private static final Duration TIMING_TTL = Duration.ofMinutes(10);
   private static final Duration DEFAULT_DWELL = Duration.ofSeconds(20);
@@ -222,6 +256,12 @@ final class CallPlanner {
           best = faster(best, new Plan(route.routeId(), stop, Source.WAYPOINT, entry, eta));
         }
       }
+      if (route.origin() != CallCatalog.Origin.DEPOT) {
+        Optional<Plan> turnback = turnbackPlan(cache, route, timing);
+        if (turnback.isPresent()) {
+          best = faster(best, turnback.get());
+        }
+      }
     }
     if (bestStandby != null && best != null && bestStandby != best) {
       OptionalInt standbyEta = bestStandby.etaSeconds();
@@ -233,6 +273,117 @@ final class CallPlanner {
       }
     }
     return Optional.ofNullable(best);
+  }
+
+  /**
+   * 折返车：在开往叫车交路首站的交路上区间生成，开进终点再折返。取预计最快的那条交路与生成点；没有能开进来的交路、或它们上游都生成不了车时为空。
+   *
+   * @param timing 叫车交路的走行时分
+   */
+  private Optional<Plan> turnbackPlan(
+      RouteDefinitionCache cache, CallCatalog.CallRoute route, Optional<int[][]> timing) {
+    Plan best = null;
+    for (RouteDefinitionCache.RouteEntry inbound :
+        inboundRoutes(cache.entries(), route.routeId())) {
+      RouteDefinition definition = inbound.definition();
+      Optional<WorldGraph> graph = graphOf(definition);
+      if (graph.isEmpty()) {
+        continue;
+      }
+      int terminal = definition.waypoints().size() - 1;
+      Optional<Entry> entry =
+          pickEntry(
+              inbound.routeId(),
+              definition,
+              inbound.stops(),
+              terminal,
+              graph.get(),
+              trainLengthBlocks(inbound.routeId()));
+      if (entry.isEmpty()) {
+        continue;
+      }
+      Optional<int[][]> inboundTiming =
+          timingOf(inbound.routeId(), definition, inbound.stops(), graph);
+      OptionalInt depart =
+          inboundTiming.isPresent()
+              ? OptionalInt.of(
+                  entryEtaSeconds(inboundTiming.get(), terminal, entry.get())
+                      + TURNBACK_OVERHEAD_SECONDS)
+              : OptionalInt.empty();
+      OptionalInt eta =
+          depart.isPresent() && timing.isPresent()
+              ? OptionalInt.of(depart.getAsInt() + timing.get()[0][route.stopIndex()])
+              : OptionalInt.empty();
+      best =
+          faster(
+              best,
+              new Plan(
+                  route.routeId(),
+                  route.stopIndex(),
+                  Source.TURNBACK,
+                  Optional.empty(),
+                  eta,
+                  Optional.of(new Turnback(inbound.routeId(), entry.get(), depart))));
+    }
+    return Optional.ofNullable(best);
+  }
+
+  /**
+   * 能当折返车开进叫车交路首站的交路：同一线路、终点进待命池（不是开进车库或终点销毁的）、终点就是叫车交路首站所在的车站（同站别的站台、 DYNAMIC 写法都算）。
+   *
+   * @param entries 交路缓存的全部交路
+   * @param callRouteId 叫车跑的交路
+   */
+  static List<RouteDefinitionCache.RouteEntry> inboundRoutes(
+      java.util.Collection<RouteDefinitionCache.RouteEntry> entries, UUID callRouteId) {
+    if (entries == null || callRouteId == null) {
+      return List.of();
+    }
+    RouteDefinitionCache.RouteEntry call = null;
+    for (RouteDefinitionCache.RouteEntry entry : entries) {
+      if (entry != null && callRouteId.equals(entry.routeId())) {
+        call = entry;
+        break;
+      }
+    }
+    if (call == null || call.definition().waypoints().isEmpty() || call.stops().isEmpty()) {
+      return List.of();
+    }
+    NodeId start = call.definition().waypoints().get(0);
+    RouteStop startStop = call.stops().get(0);
+    List<RouteDefinitionCache.RouteEntry> out = new ArrayList<>();
+    for (RouteDefinitionCache.RouteEntry entry : entries) {
+      if (entry == null
+          || callRouteId.equals(entry.routeId())
+          || !call.record().line().id().equals(entry.record().line().id())
+          || entry.definition().lifecycleMode() != RouteLifecycleMode.REUSE_AT_TERM
+          || entry.definition().waypoints().size() < 2) {
+        continue;
+      }
+      List<NodeId> waypoints = entry.definition().waypoints();
+      NodeId terminal = waypoints.get(waypoints.size() - 1);
+      if (DynamicStopMatcher.matchesStop(terminal, startStop)
+          || TerminalKeyResolver.matches(
+              TerminalKeyResolver.toTerminalKey(terminal),
+              TerminalKeyResolver.toTerminalKey(start))) {
+        out.add(entry);
+      }
+    }
+    return out;
+  }
+
+  /** 叫车交路能不能靠折返车出车：有交路能开进它的首站、上游又生成得了车（只看轨道几何，交路校验用）。 */
+  boolean turnbackPossible(UUID routeId) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (cache.isEmpty()) {
+      return false;
+    }
+    for (RouteDefinitionCache.RouteEntry inbound : inboundRoutes(cache.get().entries(), routeId)) {
+      if (entryPossible(inbound.routeId(), inbound.definition().waypoints().size() - 1)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

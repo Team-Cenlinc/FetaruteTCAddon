@@ -2090,6 +2090,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             ? null
             : (trainName, location) ->
                 location != null && returns.awaitsOwnReturnAt(trainName, location.value()));
+    // 开进终点等着接叫车的折返车：回收不碰
+    reclaimManager.setHeldForCall(
+        trainName -> getCallService().map(calls -> calls.heldForCall(trainName)).orElse(false));
     // 叫来的车没有交路：先走与叫车交路同一交路组的回库交路，从哪个车库来就回哪个车库。
     reclaimManager.setPreferredReturnRoute(
         trainName ->

@@ -53,6 +53,24 @@ class OnDemandSpawnTest {
     assertEquals(List.of(free, bound), forHeadway, "别的票不接叫来的车");
   }
 
+  /** 留给某一单的折返车只给那一单的票接：别的叫车票、排车源（还没出票）都不接它。 */
+  @Test
+  void aTurnbackTrainServesOnlyItsOwnCall() {
+    LayoverRegistry.LayoverCandidate turnback =
+        candidate(
+            "turnback-1",
+            Map.of(
+                SimpleTicketAssigner.TAG_CALLED_TRAIN,
+                "aaa@SURC:NTA",
+                SimpleTicketAssigner.TAG_CALL_TURNBACK,
+                "aaa"));
+
+    assertTrue(SimpleTicketAssigner.callMayTake(turnback, true, name -> false, Optional.of("AAA")));
+    assertFalse(
+        SimpleTicketAssigner.callMayTake(turnback, true, name -> false, Optional.of("bbb")));
+    assertFalse(SimpleTicketAssigner.callMayTake(turnback, false, name -> false, Optional.empty()));
+  }
+
   /** 回库交路上的叫车票走区间生成，不落进回库票的折返复用；别的回库票照旧。 */
   @Test
   void returnRouteCallsTakeTheEntryPath() {

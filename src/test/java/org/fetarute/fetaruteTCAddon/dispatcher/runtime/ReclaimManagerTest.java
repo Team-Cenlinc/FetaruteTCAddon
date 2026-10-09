@@ -1120,6 +1120,21 @@ class ReclaimManagerTest {
         List.of("train-a:reclaim-mainline-turnback"), fixture.destroyed, "没有从 CHT 出发的回库线路时原地处理");
   }
 
+  /** 开进终点等叫车的票来接的折返车：单股道车站的立即回收也不碰它，闲置再久也不碰。 */
+  @Test
+  void aTurnbackTrainHeldForACallIsNeverReclaimed() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:CHT:3"));
+    fixture.manager.setSingleTrackStation(node -> node.value().equals("SURC:S:CHT:3"));
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    fixture.manager.setReturnGate(train -> true);
+    fixture.manager.setHeldForCall(train -> train.equals("train-a"));
+
+    fixture.checkAfterIdle(4000);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
   /** 单股道车站上、下一班还接得上的车照常等：立即回收闸不放行时，站台那道回库闸照旧说了算。 */
   @Test
   void aSingleTrackStationKeepsATrainWhoseNextTripIsStillReachable() {

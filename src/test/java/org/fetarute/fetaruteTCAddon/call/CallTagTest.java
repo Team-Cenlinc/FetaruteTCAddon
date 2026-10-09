@@ -81,6 +81,25 @@ class CallTagTest {
         "下标 0 不算区间生成");
   }
 
+  /** 折返车票：带折返标记，叫车标签与编号照读，去掉入路时标记留着（改走车源后还是折返车）。 */
+  @Test
+  void turnbackTripsAreMarked() {
+    UUID callId = UUID.randomUUID();
+    String tag = new CallTag(callId, new PidsStationKey("SURC", "NTA")).format();
+    OnDemandTrip.Entry entry =
+        new OnDemandTrip.Entry(17, Optional.of(NodeId.of("SURC:TPC:NTA:2:003")));
+    Optional<String> turnback = Optional.of(OnDemandTrip.format(tag, Optional.of(entry), true));
+    Optional<String> plain = Optional.of(OnDemandTrip.format(tag, Optional.of(entry)));
+
+    assertTrue(OnDemandTrip.isTurnback(turnback));
+    assertFalse(OnDemandTrip.isTurnback(plain));
+    assertEquals(Optional.of(tag), OnDemandTrip.callTagOf(turnback));
+    assertEquals(Optional.of(callId.toString()), OnDemandTrip.callIdOf(turnback));
+    assertEquals(Optional.of(entry), OnDemandTrip.entryOf(turnback));
+    assertTrue(OnDemandTrip.isTurnback(OnDemandTrip.withoutEntry(turnback)));
+    assertFalse(OnDemandTrip.isTurnback(Optional.of("TIMETABLE-x~T")));
+  }
+
   @Test
   void lineFlagsReadOnlyExplicitValues() {
     assertTrue(LineCallMetadata.allowsPlayerCall(Map.of("allow_player_call", true)));

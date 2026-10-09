@@ -134,6 +134,9 @@ public class ReclaimManager {
    */
   private volatile java.util.function.Predicate<String> returnGate = trainName -> true;
 
+  /** 留给还没派出的叫车的折返车：开进终点等这一单的票来接，回收一律不碰。默认没有。 */
+  private volatile java.util.function.Predicate<String> heldForCall = trainName -> false;
+
   /**
    * 正线折返点的立即回收闸：参数是列车名与它刚跑完的交路（{@code FTA_ROUTE_ID}）。默认恒拒绝—— 不按表运行时没有"这辆车接哪一班"的对应关系， 照旧等闲置上限或方向供需。
    *
@@ -286,6 +289,11 @@ public class ReclaimManager {
     return RuntimeDispatchService.hasPlayerPassengers(properties);
   }
 
+  /** 装上“留给叫车的折返车”判定；{@code null} 恢复默认（没有）。 */
+  public void setHeldForCall(java.util.function.Predicate<String> held) {
+    this.heldForCall = held == null ? trainName -> false : held;
+  }
+
   /** 装上回库闸；{@code null} 恢复恒放行。 */
   public void setReturnGate(java.util.function.Predicate<String> gate) {
     this.returnGate = gate == null ? trainName -> true : gate;
@@ -424,6 +432,10 @@ public class ReclaimManager {
             .collect(Collectors.toList());
 
     for (LayoverRegistry.LayoverCandidate candidate : sorted) {
+      if (heldForCall.test(candidate.trainName())) {
+        // 折返车在终点等叫车的票来接：单股道车站、正线折返点的立即回收也不碰它
+        continue;
+      }
       boolean shouldReclaim = false;
       long idleSec = ChronoUnit.SECONDS.between(candidate.readyAt(), now);
       String directionKey = toDirectionKey(candidate.terminalKey());
@@ -581,7 +593,9 @@ public class ReclaimManager {
     Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
     for (LayoverRegistry.LayoverCandidate candidate : candidates) {
       long idleSec = ChronoUnit.SECONDS.between(candidate.readyAt(), now);
-      if (idleSec < MAINLINE_TURNBACK_MIN_IDLE_SECONDS || !isIdleForGood(candidate)) {
+      if (idleSec < MAINLINE_TURNBACK_MIN_IDLE_SECONDS
+          || heldForCall.test(candidate.trainName())
+          || !isIdleForGood(candidate)) {
         continue;
       }
       logIdleForGood(candidate, idleSec);
