@@ -18,6 +18,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DwellRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ControlAuthority;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.DispatchAction;
@@ -58,6 +59,13 @@ public final class TrainHealthMonitor {
 
   /** 同一 safe recovery 候选连续无效达到该次数后，允许后续恢复阶段继续评估。 */
   private static final int SAFE_CANDIDATE_FAILURE_THRESHOLD = 2;
+
+  /**
+   * 恢复动作生效后多久之内的推进算"被推了一下"，而不是车自己恢复了。
+   *
+   * <p>实测恢复动作派发后 6–10 秒车重新推进；真正恢复的车会一直开下去，过了这段时间仍在动或又过了节点。 被推一下就停的车（推进一个节点后又停在下一段前）在这段时间之后不会再动。
+   */
+  static final Duration RECOVERY_PUSH_WINDOW = Duration.ofSeconds(30);
 
   /** 列车状态快照。 */
   private record TrainSnapshot(
@@ -106,8 +114,70 @@ public final class TrainHealthMonitor {
      */
     private final Map<String, DriverBlock> driverBlocks = new LinkedHashMap<>();
 
+    /** 恢复动作上一次报告生效（解锁、刷新放行、重发目的地、重新发车）的时刻。不随 {@link #resetProgress} 清零。 */
+    private Instant lastRecoveryPushAt = Instant.EPOCH;
+
+    /**
+     * 这段停滞从何时起：车被恢复动作推了一下、又停下时，停滞清车按整段计时，不因这几下推进清零。 {@link Instant#EPOCH} 表示没有这样的停滞段，清车按最后一次推进起算。
+     *
+     * <p>车自己开起来（推动之后 {@link #RECOVERY_PUSH_WINDOW} 以外还在动或又过了节点）或进站停站，这段停滞就结束。
+     * 只影响停滞清车与它之前的恢复冻结；互卡判定、恢复链的节奏仍按最后一次推进计。
+     */
+    private Instant creepSince = Instant.EPOCH;
+
+    /** 这段停滞里被恢复动作推动的次数。 */
+    private int creepPushes;
+
+    /** 这段停滞里前几次停车已经做过的恢复尝试（推进时 {@link #resetProgress} 会把当次计数清零）。 */
+    private int creepAttempts;
+
+    /** 这段停滞里前几次停车最后一次恢复尝试的时刻。 */
+    private Instant creepLastAttemptAt = Instant.EPOCH;
+
     private boolean hasPendingRecovery() {
       return !Instant.EPOCH.equals(pendingRecoveryAt);
+    }
+
+    private boolean pushedRecently(Instant now) {
+      return !Instant.EPOCH.equals(lastRecoveryPushAt)
+          && Duration.between(lastRecoveryPushAt, now).compareTo(RECOVERY_PUSH_WINDOW) <= 0;
+    }
+
+    private boolean creeping() {
+      return !Instant.EPOCH.equals(creepSince);
+    }
+
+    /** 车被推了一下：停滞段从这次停下的时刻起（已有停滞段时沿用更早的起点），带上这次停车的恢复尝试。 */
+    private void recordPush(Instant stoppedSince) {
+      if (!creeping()) {
+        creepSince = stoppedSince;
+      }
+      creepPushes++;
+      creepAttempts += progressRecoveryAttempts;
+      creepLastAttemptAt = latestAttemptAt();
+    }
+
+    private void endCreep() {
+      creepSince = Instant.EPOCH;
+      creepPushes = 0;
+      creepAttempts = 0;
+      creepLastAttemptAt = Instant.EPOCH;
+    }
+
+    /** 停滞清车看的恢复尝试次数：这段停滞里累计的。 */
+    private int cleanupAttempts() {
+      return creepAttempts + progressRecoveryAttempts;
+    }
+
+    /** 最近一次恢复尝试（进度停滞、静止、这段停滞里先前的停车）的时刻；没有时为 {@link Instant#EPOCH}。 */
+    private Instant latestAttemptAt() {
+      Instant latest = creepLastAttemptAt;
+      for (Instant at : new Instant[] {lastProgressAttemptAt, lastStallAttemptAt}) {
+        if (at != null && at.isAfter(latest)) {
+          latest = at;
+        }
+      }
+      return latest;
     }
 
     /**
@@ -760,6 +830,22 @@ public final class TrainHealthMonitor {
       if (prev == null) {
         continue; // 首次采样，跳过检测
       }
+      boolean pushedRecently = recovery.pushedRecently(now);
+      if (progressed && pushedRecently) {
+        // 恢复动作刚推过：先不算恢复。推进一个节点就又停下的车，停滞清车接着按整段计。
+        recovery.recordPush(prev.lastProgressTime());
+        debugLogger.accept(
+            "HEALTH_RECOVERY_PUSH_PROGRESS train="
+                + trainName
+                + " idx="
+                + currentProgress
+                + " pushes="
+                + recovery.creepPushes
+                + " stuckSinceSeconds="
+                + Duration.between(recovery.creepSince, now).toSeconds());
+      } else if ((progressed || isMoving) && !pushedRecently) {
+        recovery.endCreep();
+      }
       if (progressed) {
         // **只有到这里，才有资格说"恢复了"**——车的进度索引真的向前走了。
         // 若在派发恢复动作那一刻就宣布已修复，一辆一步没挪的车会被反复宣布"已修复"。
@@ -793,14 +879,18 @@ public final class TrainHealthMonitor {
         recovery.resetStall();
         recovery.resetProgress();
         recovery.resetDeadlock();
+        recovery.endCreep();
         continue;
       }
 
       Duration progressDuration = Duration.between(lastProgress, now);
+      // 停滞清车按整段停滞计：被恢复动作推一下又停下的车不从零起算（见 RecoveryState#creepSince）。
+      Duration cleanupDuration =
+          recovery.creeping() ? Duration.between(recovery.creepSince, now) : progressDuration;
       boolean cleanupRecoveryAttemptLimitReached =
           trainCleanupEnabled
-              && progressDuration.compareTo(stuckCleanupThreshold) >= 0
-              && recovery.progressRecoveryAttempts >= 3;
+              && cleanupDuration.compareTo(stuckCleanupThreshold) >= 0
+              && recovery.cleanupAttempts() >= 3;
 
       // 检测：有 PROCEED 信号但长时间静止
       if (currentSignal == SignalAspect.PROCEED && !isMoving) {
@@ -812,6 +902,7 @@ public final class TrainHealthMonitor {
             fixed = tryFixStall(trainName, recovery, now);
             if (fixed) {
               fixedCount++;
+              recovery.lastRecoveryPushAt = now;
             }
           }
           alertBus.publish(
@@ -938,6 +1029,7 @@ public final class TrainHealthMonitor {
                   trainName, currentSignal, progressDuration, recovery, now, smartRecoveryInput);
           if (fixed) {
             recoveryDispatchedCount++;
+            recovery.lastRecoveryPushAt = now;
             if (!recovery.hasPendingRecovery()) {
               // 只记"已派发、待验证"。真正的 fixedCount 在车重新推进那一刻才加。
               recovery.pendingRecoveryAt = now;
@@ -946,7 +1038,7 @@ public final class TrainHealthMonitor {
         }
         String cleanupVerdict =
             collectStuckCleanupCandidate(
-                trainName, progressDuration, recovery, now, stuckCleanupCandidates, activeKeys);
+                trainName, cleanupDuration, recovery, now, stuckCleanupCandidates, activeKeys);
         // 无论是否派发了动作，这里都只是**告警**：车还没动。
         alertBus.publish(
             HealthAlert.of(
@@ -960,6 +1052,7 @@ public final class TrainHealthMonitor {
                     + currentSignal
                     + " 恢复尝试="
                     + recovery.progressRecoveryAttempts
+                    + creepSummary(trainName, currentSignal, recovery, cleanupDuration)
                     + cleanupVerdict));
       } else if (progressed || progressDuration.compareTo(progressStuckThreshold) <= 0) {
         recovery.resetProgress();
@@ -1220,7 +1313,10 @@ public final class TrainHealthMonitor {
       return "";
     }
     if (!trainCleanupEnabled) {
-      return " 清车=未开启";
+      // 清车关着也说出在等谁：这一行常常是唯一留下来的现场，"为什么停着"不能只剩"未开启"。
+      Set<String> blockers = dispatchService.recentBlockerTrains(trainName, blockerSnapshotMaxAge);
+      return " 清车=未开启"
+          + (blockers.isEmpty() ? "" : " 等待 " + describeBlockers(blockers, activeKeys, now));
     }
     Optional<RuntimeDispatchService.DeadlockTrainContext> context =
         dispatchService.deadlockTrainContext(trainName);
@@ -1258,6 +1354,45 @@ public final class TrainHealthMonitor {
               + (recovery == null ? 0 : recovery.progressRecoveryAttempts));
     }
     return " 清车=" + cleanupVerdict(eligibility, blockers, activeKeys, now);
+  }
+
+  /**
+   * 被恢复动作推过又停下的车，告警补上整段停滞、推动次数与这次是谁拦住的；没有这样的停滞段时为空串。
+   *
+   * <p>"再停"取运行时当前的停车记录：推进之后重新停下是新的一段停车，它的停因与 blocker 说的就是这一次为什么停。
+   */
+  private String creepSummary(
+      String trainName, SignalAspect signal, RecoveryState recovery, Duration cleanupDuration) {
+    if (!recovery.creeping()) {
+      return "";
+    }
+    return " 累计停滞="
+        + cleanupDuration.toSeconds()
+        + "秒 恢复后推进="
+        + recovery.creepPushes
+        + "次 再停="
+        + restopCause(trainName, signal);
+  }
+
+  /** 这次停下的原因：停因代码，加上第一个 blocker（持有者与资源）。 */
+  private String restopCause(String trainName, SignalAspect signal) {
+    Optional<RuntimeStopState> stop = dispatchService.getActiveStopState(trainName);
+    if (stop.isEmpty()) {
+      return signal == SignalAspect.STOP ? "未记录停因" : "信号" + signal + "未推进";
+    }
+    List<RuntimeStopState.Blocker> blockers = stop.get().blockers();
+    if (blockers == null || blockers.isEmpty()) {
+      return stop.get().reasonCode();
+    }
+    RuntimeStopState.Blocker first = blockers.get(0);
+    String owner = "-".equals(first.owner()) ? "未知" : first.owner();
+    return stop.get().reasonCode()
+        + "("
+        + owner
+        + " 持有 "
+        + first.resource()
+        + (blockers.size() > 1 ? " 等" + blockers.size() + "处" : "")
+        + ")";
   }
 
   /** 清车结论的中文短语：够格就是"待执行"，排队等前车时点名在等谁、那列车此刻是什么状态。 */
@@ -1336,7 +1471,11 @@ public final class TrainHealthMonitor {
     if (snapshot == null) {
       return "状态未知";
     }
-    return "停滞 " + Duration.between(snapshot.lastProgressTime(), now).toSeconds() + "秒";
+    String stalled = "停滞 " + Duration.between(snapshot.lastProgressTime(), now).toSeconds() + "秒";
+    RecoveryState blockerRecovery = recoveryStates.get(key);
+    return blockerRecovery != null && blockerRecovery.creeping()
+        ? stalled + " 累计 " + Duration.between(blockerRecovery.creepSince, now).toSeconds() + "秒"
+        : stalled;
   }
 
   /**
@@ -1346,15 +1485,10 @@ public final class TrainHealthMonitor {
    * cooldown 到期，才能把列车交给 cleanup 复审。
    */
   private boolean cleanupRecoveryObservationComplete(RecoveryState recovery, Instant now) {
-    if (recovery == null || now == null || recovery.progressRecoveryAttempts < 3) {
+    if (recovery == null || now == null || recovery.cleanupAttempts() < 3) {
       return false;
     }
-    Instant lastRecoveryAttempt = recovery.lastProgressAttemptAt;
-    if (recovery.lastStallAttemptAt != null
-        && (lastRecoveryAttempt == null
-            || recovery.lastStallAttemptAt.isAfter(lastRecoveryAttempt))) {
-      lastRecoveryAttempt = recovery.lastStallAttemptAt;
-    }
+    Instant lastRecoveryAttempt = recovery.latestAttemptAt();
     if (lastRecoveryAttempt == null
         || lastRecoveryAttempt.equals(Instant.EPOCH)
         || !now.isAfter(lastRecoveryAttempt)) {
@@ -4601,6 +4735,9 @@ public final class TrainHealthMonitor {
       recovery.lastProgressAttemptAt = shiftInstant(recovery.lastProgressAttemptAt, gap);
       recovery.lastDeadlockAttemptAt = shiftInstant(recovery.lastDeadlockAttemptAt, gap);
       recovery.pendingRecoveryAt = shiftInstant(recovery.pendingRecoveryAt, gap);
+      recovery.lastRecoveryPushAt = shiftInstant(recovery.lastRecoveryPushAt, gap);
+      recovery.creepSince = shiftInstant(recovery.creepSince, gap);
+      recovery.creepLastAttemptAt = shiftInstant(recovery.creepLastAttemptAt, gap);
     }
     deadlockPairLastAttemptAt.replaceAll((key, at) -> shiftInstant(at, gap));
     deadlockPairLastDestroyAt.replaceAll((key, at) -> shiftInstant(at, gap));
