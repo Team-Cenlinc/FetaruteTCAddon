@@ -103,6 +103,7 @@ public final class GuardTrip {
       case COMMAND, OFFLINE, DEATH, GAME_MODE -> DriverTask.State.ABANDONED;
       case TRAIN_GONE, DISABLED, ADMIN, EXAM -> DriverTask.State.INTERRUPTED;
       case TIMEOUTS, LEFT_BEHIND, CAB_CHANGE -> DriverTask.State.FAILED;
+      case HANDOVER -> DriverTask.State.COMPLETED;
     };
   }
 

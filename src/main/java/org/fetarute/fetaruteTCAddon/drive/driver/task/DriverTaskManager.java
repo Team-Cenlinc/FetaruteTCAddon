@@ -779,6 +779,40 @@ public final class DriverTaskManager {
     return matched;
   }
 
+  /**
+   * 担当这一班的列车的绑定（含最近停过的停靠序号）。先在时刻表服务的原始绑定里按车次对上，只换算对上的那一列车。
+   *
+   * @return 还没有列车绑定这一班时为空
+   */
+  public Optional<TimetableApi.TrainAssignment> assignmentOf(TaskKey key) {
+    Optional<TimetableApi> api = timetables();
+    if (api.isEmpty() || key == null) {
+      return Optional.empty();
+    }
+    Optional<TimetableService> service =
+        plugin == null ? Optional.empty() : plugin.getTimetableService();
+    if (service.isEmpty()) {
+      for (TimetableApi.TrainAssignment assignment : api.get().listAssignments()) {
+        if (key.matches(
+            assignment.timetableId(), assignment.tripCode(), assignment.serviceDate())) {
+          return Optional.of(assignment);
+        }
+      }
+      return Optional.empty();
+    }
+    for (TimetableAssignment raw : service.get().assignments()) {
+      if (key.matches(raw.timetableId(), raw.tripCode(), raw.serviceDate())) {
+        return api.get().getAssignment(raw.trainName());
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 列车正在停站（站台停站计时中或挂着发车门控）。 */
+  public boolean isDwelling(String trainName) {
+    return trainName != null && dwelling(trainName);
+  }
+
   /** 给玩家发提示。 */
   public interface Notifier {
     void send(Player player, String key, Map<String, String> values);

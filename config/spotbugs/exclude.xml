@@ -209,6 +209,12 @@
         <Method name="tasks"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 车掌任务表由车掌会话、任务板命令与 API 共用，按引用交出 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager"/>
+        <Method name="tasks"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction"/>
         <Bug pattern="EI_EXPOSE_REP2"/>

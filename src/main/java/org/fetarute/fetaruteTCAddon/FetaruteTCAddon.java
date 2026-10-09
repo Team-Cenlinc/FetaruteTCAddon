@@ -510,7 +510,23 @@ public final class FetaruteTCAddon extends JavaPlugin {
                             .component(
                                 manager.claimTask(player, holder, row, mode),
                                 Map.of("trip", row.key().tripCode(), "route", row.routeCode()))),
-                manager::chooseLevel),
+                manager::chooseLevel,
+                (player, holder, row) ->
+                    manager
+                        .guards()
+                        .ifPresent(
+                            guards ->
+                                player.sendMessage(
+                                    getLocaleManager()
+                                        .component(
+                                            guards.claimFromBoard(player, holder, row),
+                                            Map.of(
+                                                "trip",
+                                                row.key().tripCode(),
+                                                "route",
+                                                row.routeCode(),
+                                                "station",
+                                                holder.stationName()))))),
             this);
     driveSessionManager.start();
     // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试，车掌每做完一站讲评、判定车掌考试。

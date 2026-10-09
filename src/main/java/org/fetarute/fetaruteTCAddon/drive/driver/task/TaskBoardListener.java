@@ -12,12 +12,17 @@ import org.bukkit.inventory.Inventory;
 import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.drive.driver.DrivingMode;
 
-/** 任务板的点击：一律取消（物品不进出背包），车次左键领人工驾驶、右键领 ATO；点难度按钮换仿真等级。 */
+/** 任务板的点击：一律取消（物品不进出背包），车次左键领人工驾驶、右键领 ATO；点难度按钮换仿真等级。车掌任务板左键领车掌。 */
 public final class TaskBoardListener implements Listener {
 
   /** 领取的回调。 */
   public interface ClaimHandler {
     void claim(Player player, TaskBoardHolder holder, TaskBoardEntries.Row row, DrivingMode mode);
+  }
+
+  /** 车掌任务板领取的回调。 */
+  public interface GuardClaimHandler {
+    void claim(Player player, TaskBoardHolder holder, TaskBoardEntries.Row row);
   }
 
   /** 选择驾驶难度的回调。 */
@@ -27,10 +32,12 @@ public final class TaskBoardListener implements Listener {
 
   private final ClaimHandler handler;
   private final LevelHandler levels;
+  private final GuardClaimHandler guards;
 
-  public TaskBoardListener(ClaimHandler handler, LevelHandler levels) {
+  public TaskBoardListener(ClaimHandler handler, LevelHandler levels, GuardClaimHandler guards) {
     this.handler = handler;
     this.levels = levels;
+    this.guards = guards;
   }
 
   @EventHandler(priority = EventPriority.LOWEST, ignoreCancelled = false)
@@ -47,6 +54,18 @@ public final class TaskBoardListener implements Listener {
     }
     ClickType click = event.getClick();
     if (click != ClickType.LEFT && click != ClickType.RIGHT) {
+      return;
+    }
+    if (holder.kind() == TaskBoard.Kind.GUARD) {
+      if (click == ClickType.LEFT) {
+        holder
+            .rowAt(event.getSlot())
+            .ifPresent(
+                row -> {
+                  player.closeInventory();
+                  guards.claim(player, holder, row);
+                });
+      }
       return;
     }
     Optional<SimulationLevel> level = holder.levelAt(event.getSlot());

@@ -38,7 +38,9 @@ public final class GuardSession implements DriveDoors.Cab {
     /** 终点站换端时没能坐进车尾端驾驶室。 */
     CAB_CHANGE,
     /** 车掌考试没有通过（考试期间临时有车掌权限）。 */
-    EXAM
+    EXAM,
+    /** 车掌任务值乘到交班站。 */
+    HANDOVER
   }
 
   private final UUID playerId;
@@ -74,6 +76,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private GuardTrip trip = new GuardTrip(null, "", java.time.Instant.now());
   private WorkedStop pendingExamStop;
   private GuardDrill drill;
+  private GuardTask task;
 
   /**
    * 考试中做完、还在采出站监视的一站：采完再交给考官。
@@ -185,6 +188,15 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setPendingExamStop(WorkedStop stop) {
     this.pendingExamStop = stop;
+  }
+
+  /** 这次值乘接的车掌任务；不是领任务上岗、或任务已结算时为 {@code null}。 */
+  public GuardTask task() {
+    return task;
+  }
+
+  void setTask(GuardTask task) {
+    this.task = task;
   }
 
   /** 正在进行的夹人夹物演练；没有时为 {@code null}。 */

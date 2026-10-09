@@ -54,6 +54,33 @@ class GuardMessagesTest {
     }
     keys.add("drive.command.start.guard-on-duty");
     keys.add("drive.menu.deny.guard-doors");
+    for (GuardTasks.ClaimOutcome outcome : GuardTasks.ClaimOutcome.values()) {
+      keys.add("drive.guard.task.claim." + keyOf(outcome));
+    }
+    for (GuardTask.State state : GuardTask.State.values()) {
+      keys.add("drive.guard.task.state." + keyOf(state));
+    }
+    for (String reason : List.of("departed", "timeout", "pickup-timeout", "disabled")) {
+      keys.add("drive.guard.task.ended." + reason);
+    }
+    for (String key : List.of("arrived", "wrong-cab", "hold")) {
+      keys.add("drive.guard.task." + key);
+      keys.add("drive.guard.task." + key + "-either");
+    }
+    for (String item :
+        List.of(
+            "title",
+            "info",
+            "info-left",
+            "info-claimed",
+            "entry-left",
+            "entry-claimed",
+            "entry-claimed-self")) {
+      keys.add("drive.guard.board." + item);
+    }
+    for (String sub : List.of("on", "off", "seat", "status", "tasks", "task", "stop")) {
+      keys.add("drive.guard.command.help." + sub);
+    }
     for (String key : keys) {
       assertTrue(lang.isString(key), localeTag + " 缺少 " + key);
     }

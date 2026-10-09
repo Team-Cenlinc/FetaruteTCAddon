@@ -22,6 +22,7 @@ import org.bukkit.inventory.ItemStack;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DriverStationStop.Phase;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
@@ -32,6 +33,9 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriverDoorSide;
 import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
@@ -129,7 +133,31 @@ public final class GuardSessionManager {
 
     /** 列车按交路进度的下一个停靠站（与乘客 HUD 同一口径）；展示层未启用或查不到时为空。 */
     Optional<String> nextStationOf(MinecartGroup group);
+
+    /** 担当这一班的列车与它最近停过的停靠序号；还没对上列车时为空。 */
+    Optional<TripTrain> trainForTrip(TaskKey key);
+
+    /** 列车正在停站（站台停站计时中或挂着发车门控）。 */
+    boolean dwelling(String trainName);
+
+    /** 始发站扣车等人的时限：与驾驶员接车相同（等 pickup-wait-seconds，且不晚于票据作废之前）。 */
+    Instant pickupDeadline(Instant now, Instant plannedDeparture);
+
+    /**
+     * 传送到列车某一端驾驶室旁边（不塞进座位）。
+     *
+     * @return 给玩家的提示语言键
+     */
+    String teleportBesideCab(Player player, String trainName, CabSeats.End end);
   }
+
+  /**
+   * 担当一班车的列车。
+   *
+   * @param trainName 车名
+   * @param lastStopSequence 最近停过的停靠序号；还没停过为 -1
+   */
+  public record TripTrain(String trainName, int lastStopSequence) {}
 
   /** 上岗的结果。 */
   public enum StartOutcome {
@@ -184,6 +212,7 @@ public final class GuardSessionManager {
   private final Map<UUID, Long> lastUseTick = new ConcurrentHashMap<>();
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
   private final PendingAcks pendingAcks = new PendingAcks();
+  private final GuardTasks tasks = new GuardTasks();
   private BukkitTask task;
   private long tickCounter;
   private GuardExaminer examiner = GuardExaminer.NONE;
@@ -209,6 +238,11 @@ public final class GuardSessionManager {
   /** 接上车掌考法的考官（驾驶证服务）。 */
   public void setExaminer(GuardExaminer examiner) {
     this.examiner = examiner == null ? GuardExaminer.NONE : examiner;
+  }
+
+  /** 车掌任务（任务板领取与插件派出）。 */
+  public GuardTasks tasks() {
+    return tasks;
   }
 
   // ---- 查询 ----
@@ -278,6 +312,15 @@ public final class GuardSessionManager {
 
   /** 让坐在车尾驾驶室的玩家上岗当车掌。 */
   public StartOutcome start(Player player) {
+    return start(player, null);
+  }
+
+  /**
+   * 上岗。
+   *
+   * @param layoverDeparture 始发站扣着的终点站待命车下一趟的发车端：车掌坐它的另一头（分不出时两头都行）；为空时坐车尾驾驶室
+   */
+  private StartOutcome start(Player player, CabSeats.Departure layoverDeparture) {
     DriveConfig current = config.get();
     UUID id = player.getUniqueId();
     if (!current.guard().enabled()) {
@@ -309,7 +352,10 @@ public final class GuardSessionManager {
       return StartOutcome.NOT_MANAGED;
     }
     CabSeats cabs = SeatLocator.cabSeats(train, current.driver().cabSeatNames());
-    if (!guardCab(cabs.endOf(seat.get()), train.size())) {
+    CabSeats.End end = cabs.endOf(seat.get());
+    if (!(layoverDeparture == null
+        ? guardCab(end, train.size())
+        : layoverCab(end, layoverDeparture, train.size()))) {
       return StartOutcome.NOT_TAIL_CAB;
     }
     if (registry.guardOf(train.getProperties()).isPresent()) {
@@ -343,6 +389,7 @@ public final class GuardSessionManager {
     session.setTrip(
         new GuardTrip(trip, trip == null ? "" : drivers.routeCodeOf(trip), Instant.now()));
     sessions.put(id, session);
+    attachTask(player, session, seat.get().trainName());
     refreshHotbar(player, session, true);
     ensureTask();
     drivers
@@ -355,6 +402,39 @@ public final class GuardSessionManager {
                     Map.of("guard", player.getName()),
                     DriveCue.BUZZER));
     return StartOutcome.STARTED;
+  }
+
+  /** 始发站终点站待命车上车掌坐哪一端：下一趟发车端的另一头；分不出发车端或单节车时两头的驾驶室都行。 */
+  static boolean layoverCab(CabSeats.End end, CabSeats.Departure departure, int memberCount) {
+    if (memberCount <= 1 || departure == CabSeats.Departure.EITHER) {
+      return end != CabSeats.End.NONE;
+    }
+    return end == GuardCabChange.guardEnd(departure);
+  }
+
+  /** 上岗时接上自己领的这一班车掌：列车就是任务的那一列（始发站扣着的、或对上这一班的），或正跑着这一班。 */
+  private void attachTask(Player player, GuardSession session, String trainName) {
+    Optional<GuardTask> claimed =
+        tasks
+            .activeTaskOf(session.playerId())
+            .filter(task -> task.state() == GuardTask.State.CLAIMED);
+    if (claimed.isEmpty()) {
+      return;
+    }
+    GuardTask task = claimed.get();
+    boolean sameTrain =
+        trainName.equalsIgnoreCase(Objects.requireNonNullElse(task.heldTrain(), ""))
+            || trainName.equalsIgnoreCase(Objects.requireNonNullElse(task.trainName(), ""))
+            || drivers.tripOf(trainName).filter(task.key()::equals).isPresent();
+    if (!sameTrain) {
+      return;
+    }
+    task.start(trainName);
+    session.setTask(task);
+    player.sendMessage(
+        locale.component(
+            "drive.guard.task.on-duty",
+            Map.of("trip", task.key().tripCode(), "station", task.stationName())));
   }
 
   /** 车掌所坐的这一端能不能当车掌座：车尾端的驾驶室；单节车两头在同一节车里，坐另一头的驾驶室即可。 */
@@ -397,6 +477,8 @@ public final class GuardSessionManager {
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("车掌值乘结算出错 " + session.playerName() + ": " + ex);
     }
+    // 任务这一趟没做过作业（没结算）时按结束原因了结。
+    finishTask(player, session, GuardTrip.stateFor(reason), reason.name());
     if (player != null) {
       sidebar.hide(player);
       if (session.menuTopSize() > 0) {
@@ -445,6 +527,9 @@ public final class GuardSessionManager {
     DriveConfig current = config.get();
     if (!current.guard().enabled()) {
       stopAll(GuardSession.EndReason.DISABLED);
+      for (GuardTask task : tasks.claimed()) {
+        endClaim(task, GuardTask.State.INTERRUPTED, "disabled");
+      }
       return;
     }
     for (GuardSession session : sessions.values()) {
@@ -472,6 +557,13 @@ public final class GuardSessionManager {
     }
     tickDriverPresses(now);
     tickAcks(now);
+    if (tickCounter % CLAIM_POLL_TICKS == 0) {
+      try {
+        tickClaims();
+      } catch (RuntimeException ex) {
+        plugin.getLogger().warning("车掌任务处理出错: " + ex);
+      }
+    }
   }
 
   private void tick(GuardSession session, long now) {
@@ -499,6 +591,10 @@ public final class GuardSessionManager {
     session.doors().followCab(group, session);
     stationWork(player, session, group, seated, now);
     if (!sessions.containsKey(session.playerId())) {
+      return;
+    }
+    if (handoverReached(session)) {
+      stop(session.playerId(), GuardSession.EndReason.HANDOVER);
       return;
     }
     trackTrip(player, session, group, now);
@@ -1400,8 +1496,10 @@ public final class GuardSessionManager {
     if (trip.examined() && online != null) {
       online.sendMessage(locale.component("drive.guard.result-exam"));
     }
+    GuardTask task = session.task();
+    boolean taskTrip = task != null && !task.state().finished() && key.get().equals(task.key());
     DriveRewards.Reward reward =
-        GuardTrip.rewarded(state) && !trip.examined()
+        GuardTrip.rewarded(state) && !trip.examined() && (!taskTrip || task.rewards())
             ? DriveRewards.guard(
                 current.rewards(),
                 current.guard().rewardStopRatio(),
@@ -1433,6 +1531,10 @@ public final class GuardSessionManager {
             trip.startedAt(),
             Instant.now(),
             GuardRecordCodec.encode(score, trip.blocks())));
+    if (taskTrip) {
+      task.setResult(result.points(), result.grade().name());
+      finishTask(online, session, state, state.name());
+    }
   }
 
   /** 一趟的大字评级与成绩单。 */
@@ -2002,6 +2104,375 @@ public final class GuardSessionManager {
     session.setHotbar(
         view, new HotbarRewriter<>(GuardHotbar.build(locale, view), session::menuTopSize));
     player.updateInventory();
+  }
+
+  // ---- 车掌任务 ----
+
+  /** 多久推进一次已领取的车掌任务（tick）。 */
+  private static final long CLAIM_POLL_TICKS = 20L;
+
+  /**
+   * 车掌任务板领取一班车掌。
+   *
+   * @return 给玩家的提示语言键
+   */
+  public String claimFromBoard(Player player, TaskBoardHolder holder, TaskBoardEntries.Row row) {
+    DriverTaskManager.TaskSpec spec =
+        new DriverTaskManager.TaskSpec(
+            row.key(),
+            row.routeCode(),
+            holder.operatorCode(),
+            holder.stationCode(),
+            holder.stationName(),
+            row.nodeId(),
+            row.stopSequence(),
+            row.plannedDeparture(),
+            row.trainName(),
+            -1,
+            "",
+            "",
+            false,
+            GuardTask.SOURCE_BOARD,
+            Map.of(),
+            true);
+    GuardTasks.ClaimOutcome outcome = claim(player, spec, row.cancelled() || row.terminating());
+    return "drive.guard.task.claim."
+        + outcome.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-');
+  }
+
+  /**
+   * 领取或派出一班车掌（任务板与插件共用）：车掌功能可用、不在值乘、不在驾驶；一个车次一名车掌、一名玩家一个未结束的任务。
+   *
+   * @param unavailable 车次已取消或在接班站终到
+   */
+  public GuardTasks.ClaimOutcome claim(
+      Player player, DriverTaskManager.TaskSpec spec, boolean unavailable) {
+    UUID id = player.getUniqueId();
+    if (!available()) {
+      return GuardTasks.ClaimOutcome.DISABLED;
+    }
+    if (sessions.containsKey(id)) {
+      return GuardTasks.ClaimOutcome.ON_DUTY;
+    }
+    if (drivers.isDriving(id)) {
+      return GuardTasks.ClaimOutcome.DRIVING;
+    }
+    GuardTasks.ClaimOutcome outcome =
+        tasks.register(id, player.getName(), spec, unavailable, Instant.now());
+    if (outcome == GuardTasks.ClaimOutcome.CLAIMED) {
+      ensureTask();
+    }
+    return outcome;
+  }
+
+  /** 推进已领取的任务：对上列车、到接班站时提示上车并在坐进车掌那一端后上岗、过时作废。 */
+  private void tickClaims() {
+    List<GuardTask> claimed = tasks.claimed();
+    if (claimed.isEmpty()) {
+      return;
+    }
+    Instant now = Instant.now();
+    for (GuardTask task : claimed) {
+      Optional<TripTrain> train = drivers.trainForTrip(task.key());
+      if (train.isPresent() && task.heldTrain() == null) {
+        task.setTrainName(train.get().trainName());
+      }
+      int last = train.map(TripTrain::lastStopSequence).orElse(-1);
+      boolean dwelling = train.isPresent() && drivers.dwelling(train.get().trainName());
+      switch (GuardTasks.step(task, train.isPresent(), last, dwelling, now)) {
+        case EXPIRE_DEPARTED -> endClaim(task, GuardTask.State.EXPIRED, "departed");
+        case EXPIRE_TIMEOUT -> endClaim(task, GuardTask.State.EXPIRED, "timeout");
+        case BOARD -> board(task, train.get().trainName(), null);
+        case WAIT -> {
+          if (task.heldTrain() != null) {
+            board(task, task.heldTrain(), task.heldDeparture());
+          }
+        }
+      }
+    }
+  }
+
+  /** 列车停在接班站（或始发站扣着等车掌）：坐进车掌那一端的驾驶室即上岗，否则提示坐第几节。 */
+  private void board(GuardTask task, String trainName, CabSeats.Departure layoverDeparture) {
+    Player player = Bukkit.getPlayer(task.playerId());
+    if (player == null || !player.isOnline()) {
+      return;
+    }
+    Map<String, String> values = new java.util.HashMap<>();
+    values.put("trip", task.key().tripCode());
+    values.put("train", trainName);
+    values.put("station", task.stationName());
+    GuardSession session = sessions.get(task.playerId());
+    if (session != null) {
+      if (session.link().currentTrainName().equalsIgnoreCase(trainName)) {
+        attachTask(player, session, trainName);
+      } else {
+        player.sendActionBar(locale.component("drive.guard.task.busy", values));
+      }
+      return;
+    }
+    if (drivers.isDriving(task.playerId())) {
+      player.sendActionBar(locale.component("drive.guard.task.busy", values));
+      return;
+    }
+    CabSeats.End end = guardEndFor(layoverDeparture);
+    int cars = SeatLocator.findGroup(trainName).map(MinecartGroup::size).orElse(1);
+    values.put("car", String.valueOf(GuardCabChange.targetCar(end, cars)));
+    values.put("cars", String.valueOf(cars));
+    Optional<SeatBinding> seat = SeatLocator.locate(player);
+    if (seat.isPresent() && seat.get().trainName().equalsIgnoreCase(trainName)) {
+      StartOutcome outcome = start(player, layoverDeparture);
+      if (outcome == StartOutcome.STARTED) {
+        return;
+      }
+      player.sendActionBar(
+          locale.component(
+              outcome == StartOutcome.NOT_TAIL_CAB
+                  ? cabKey("drive.guard.task.wrong-cab", end)
+                  : "drive.guard.command.start."
+                      + outcome.name().toLowerCase(java.util.Locale.ROOT).replace('_', '-'),
+              values));
+      return;
+    }
+    player.sendActionBar(locale.component(cabKey("drive.guard.task.arrived", end), values));
+  }
+
+  /** 车掌要坐哪一端：始发站按下一趟发车端的另一头（分不出时两头都行），其余是车尾端。 */
+  static CabSeats.End guardEndFor(CabSeats.Departure layoverDeparture) {
+    return layoverDeparture == null ? CabSeats.End.TAIL : GuardCabChange.guardEnd(layoverDeparture);
+  }
+
+  /** 两头都行时用 {@code -either} 的说法（写两端的车厢号）。 */
+  private static String cabKey(String key, CabSeats.End end) {
+    return end == CabSeats.End.NONE ? key + "-either" : key;
+  }
+
+  /** 结束还没上岗的任务并告诉车掌。 */
+  private void endClaim(GuardTask task, GuardTask.State state, String reason) {
+    if (!task.finish(state, reason)) {
+      return;
+    }
+    Player player = Bukkit.getPlayer(task.playerId());
+    if (player != null && player.isOnline()) {
+      player.sendMessage(
+          locale.component(
+              "drive.guard.task.ended." + reason,
+              Map.of("trip", task.key().tripCode(), "station", task.stationName())));
+    }
+  }
+
+  /** 值乘中的任务随它那一趟结算或值乘结束了结。 */
+  private void finishTask(
+      Player player, GuardSession session, DriverTask.State state, String reason) {
+    GuardTask task = session.task();
+    if (task == null) {
+      return;
+    }
+    session.setTask(null);
+    if (!task.finish(taskState(state), reason)) {
+      return;
+    }
+    if (player != null && player.isOnline() && task.state() == GuardTask.State.COMPLETED) {
+      player.sendMessage(
+          locale.component("drive.guard.task.complete", Map.of("trip", task.key().tripCode())));
+    }
+  }
+
+  /** 一趟的终态对应的任务终态。 */
+  static GuardTask.State taskState(DriverTask.State state) {
+    return switch (state) {
+      case COMPLETED -> GuardTask.State.COMPLETED;
+      case ABANDONED -> GuardTask.State.ABANDONED;
+      case FAILED -> GuardTask.State.FAILED;
+      case EXPIRED -> GuardTask.State.EXPIRED;
+      default -> GuardTask.State.INTERRUPTED;
+    };
+  }
+
+  /** 任务值乘到交班站：列车在交班站停妥（这一趟、车门还没开）即交班，车门交还站台。 */
+  private boolean handoverReached(GuardSession session) {
+    GuardTask task = session.task();
+    if (task == null || task.handoverStationCode().isBlank()) {
+      return false;
+    }
+    Optional<DriverStationStop> stop = session.link().stationStop();
+    if (stop.isEmpty()
+        || stop.get().phase() == Phase.APPROACH
+        || !task.key().equals(session.trackedTrip())) {
+      return false;
+    }
+    return RouteTerminals.stationIdentityOfNode(stop.get().node().value())
+        .map(ref -> ref.stationCode().equalsIgnoreCase(task.handoverStationCode()))
+        .orElse(false);
+  }
+
+  /** 有没有已领取、等着上岗的车掌任务：没有时派车侧不必逐张票去问。 */
+  public boolean hasPickupInterest() {
+    return !tasks.claimed().isEmpty();
+  }
+
+  /**
+   * 派车侧问：终点站待命车 {@code trainName} 能不能派去跑这一班。这一班有车掌领了、要在始发站上岗时先扣着等他，坐好上岗后放行；等到时限照常派车，这一班车掌作废。
+   *
+   * @param key 要开的车次；不是表定车次时为 {@code null}
+   * @param plannedDeparture 始发站计划发车
+   */
+  public boolean allowLayoverDispatch(TaskKey key, String trainName, Instant plannedDeparture) {
+    if (trainName == null) {
+      return true;
+    }
+    Instant now = Instant.now();
+    if (tasks.heldForOther(trainName, key, now)) {
+      return false;
+    }
+    Optional<GuardTask> found = tasks.taskForTrip(key);
+    if (found.isEmpty()) {
+      return true;
+    }
+    GuardTask task = found.get();
+    Player player = Bukkit.getPlayer(task.playerId());
+    boolean online = player != null && player.isOnline() && available();
+    switch (GuardTasks.layover(task, trainName, online, now)) {
+      case HOLD -> {
+        return false;
+      }
+      case GIVE_UP -> {
+        endClaim(task, GuardTask.State.EXPIRED, "pickup-timeout");
+        return true;
+      }
+      case START -> {
+        CabSeats.Departure departure =
+            SeatLocator.findGroup(trainName)
+                .map(drivers::layoverDeparture)
+                .orElse(CabSeats.Departure.EITHER);
+        task.hold(trainName, drivers.pickupDeadline(now, plannedDeparture), departure);
+        ensureTask();
+        announceHold(player, task);
+        return false;
+      }
+      default -> {
+        return true;
+      }
+    }
+  }
+
+  /** 始发站扣车等车掌的通知：坐第几节、还剩几秒，开着接车传送时附“前往”按钮。 */
+  private void announceHold(Player player, GuardTask task) {
+    CabSeats.End end = guardEndFor(task.heldDeparture());
+    int cars = SeatLocator.findGroup(task.heldTrain()).map(MinecartGroup::size).orElse(1);
+    long seconds =
+        Math.max(0L, java.time.Duration.between(Instant.now(), task.holdDeadline()).toSeconds());
+    player.sendMessage(
+        locale.component(
+            cabKey("drive.guard.task.hold", end),
+            Map.of(
+                "trip",
+                task.key().tripCode(),
+                "train",
+                task.heldTrain(),
+                "station",
+                task.stationName(),
+                "car",
+                String.valueOf(GuardCabChange.targetCar(end, cars)),
+                "cars",
+                String.valueOf(cars),
+                "seconds",
+                String.valueOf(seconds))));
+    player.sendMessage(locale.component("drive.guard.task.goto-button"));
+  }
+
+  /**
+   * 放弃车掌任务：还没上岗的直接作废，值乘中的结束值乘。
+   *
+   * @return 给玩家的提示语言键
+   */
+  public String abandonTask(Player player) {
+    UUID id = player.getUniqueId();
+    Optional<GuardTask> task = tasks.activeTaskOf(id);
+    if (task.isEmpty()) {
+      return "drive.guard.task.none";
+    }
+    if (task.get().state() == GuardTask.State.CLAIMED) {
+      task.get().finish(GuardTask.State.ABANDONED, "command");
+    } else {
+      stop(id, GuardSession.EndReason.COMMAND);
+    }
+    return "drive.guard.task.abandoned";
+  }
+
+  /**
+   * 前往接班：列车停在接班站（或始发站扣着等车掌）、玩家就在附近时直接坐进车掌那一端的驾驶室；离得远时，始发站扣车且开着接车传送才送到驾驶室旁。
+   *
+   * @return 给玩家的提示语言键
+   */
+  public String gotoTask(Player player) {
+    Optional<GuardTask> claimed =
+        tasks
+            .activeTaskOf(player.getUniqueId())
+            .filter(task -> task.state() == GuardTask.State.CLAIMED);
+    if (claimed.isEmpty()) {
+      return "drive.guard.task.goto.none";
+    }
+    GuardTask task = claimed.get();
+    String trainName = task.heldTrain();
+    CabSeats.Departure departure = task.heldDeparture();
+    if (trainName == null) {
+      Optional<TripTrain> train = drivers.trainForTrip(task.key());
+      if (train.isEmpty()
+          || train.get().lastStopSequence() != task.takeoverStopSequence()
+          || !drivers.dwelling(train.get().trainName())) {
+        return "drive.guard.task.goto.not-arrived";
+      }
+      trainName = train.get().trainName();
+    }
+    Optional<MinecartGroup> group = SeatLocator.findGroup(trainName);
+    if (group.isEmpty()) {
+      return "drive.guard.task.goto.not-arrived";
+    }
+    CabSeats.End end = guardEndFor(departure);
+    if (end == CabSeats.End.NONE) {
+      end = CabSeats.End.TAIL;
+    }
+    if (SeatLocator.cabMember(player, group.get(), end) != null) {
+      player.closeInventory();
+      CabSeats cabs = SeatLocator.cabSeats(group.get(), config.get().driver().cabSeatNames());
+      return SeatLocator.enterCab(player, group.get(), cabs, end).isPresent()
+          ? "drive.guard.task.goto.seated"
+          : "drive.guard.task.goto.no-seat";
+    }
+    if (task.heldTrain() != null && config.get().driver().pickupTeleport()) {
+      String key = drivers.teleportBesideCab(player, trainName, end);
+      return key.equals("drive.task.goto.teleported") ? "drive.guard.task.goto.teleported" : key;
+    }
+    return "drive.guard.task.goto.far";
+  }
+
+  /** 车掌任务状况。 */
+  public void sendTaskStatus(Player player) {
+    Optional<GuardTask> found = tasks.taskOf(player.getUniqueId());
+    if (found.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.task.none"));
+      return;
+    }
+    GuardTask task = found.get();
+    Map<String, String> values = new java.util.HashMap<>();
+    values.put("trip", task.key().tripCode());
+    values.put("route", task.routeCode());
+    values.put("station", task.stationName());
+    values.put(
+        "time",
+        org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoard.format(task.plannedDeparture()));
+    values.put("train", task.trainName() == null ? "-" : task.trainName());
+    values.put(
+        "state",
+        locale.text(
+            "drive.guard.task.state." + task.state().name().toLowerCase(java.util.Locale.ROOT)));
+    player.sendMessage(locale.component("drive.guard.task.status", values));
+    if (!task.handoverStationCode().isBlank()) {
+      player.sendMessage(
+          locale.component(
+              "drive.guard.task.status-handover", Map.of("station", task.handoverStationName())));
+    }
   }
 
   private void notice(Player player, GuardSession session, String key, Map<String, String> values) {

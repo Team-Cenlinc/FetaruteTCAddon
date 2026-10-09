@@ -699,6 +699,35 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
+      public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.TripTrain>
+          trainForTrip(TaskKey key) {
+        return tasks
+            .assignmentOf(key)
+            .map(
+                assignment ->
+                    new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.TripTrain(
+                        assignment.trainName(), assignment.lastStopSequence().orElse(-1)));
+      }
+
+      @Override
+      public boolean dwelling(String trainName) {
+        return tasks.isDwelling(trainName);
+      }
+
+      @Override
+      public Instant pickupDeadline(Instant now, Instant plannedDeparture) {
+        return DriveSessionManager.this.pickupDeadline(now, plannedDeparture);
+      }
+
+      @Override
+      public String teleportBesideCab(Player player, String trainName, CabSeats.End end) {
+        return DriveSessionManager.this.teleportBesideCab(
+            player,
+            trainName,
+            end == CabSeats.End.TAIL ? CabSeats.Departure.TAIL : CabSeats.Departure.HEAD);
+      }
+
+      @Override
       public void missedAck(UUID driverId) {
         DriveSession session = active.get(driverId);
         if (session != null && session.driverLink() != null) {
@@ -3980,9 +4009,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   // ---- 始发站与车库接班 ----
 
-  /** 有没有可能要等驾驶员接车：没有驾驶任务时派车侧不必逐张票去查车次。 */
+  /** 有没有可能要等驾驶员或车掌接车：没有驾驶任务、也没有等着上岗的车掌任务时派车侧不必逐张票去查车次。 */
   public boolean hasDriverPickupInterest() {
-    return tasks.hasActiveTasks() || !pickups.isEmpty();
+    return tasks.hasActiveTasks()
+        || !pickups.isEmpty()
+        || (guards != null && guards.hasPickupInterest());
   }
 
   /**
@@ -3993,6 +4024,19 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * @param trip 票据要开的车次；不是表定车次时为 {@code null}
    */
   public boolean allowLayoverDispatch(TimetableService.DueTrip trip, String trainName) {
+    // 驾驶员与车掌各自判定、各自开始扣车，两人都放行才派车。
+    boolean driver = driverAllowsLayoverDispatch(trip, trainName);
+    boolean guard =
+        guards == null
+            || trip == null
+            || guards.allowLayoverDispatch(
+                new TaskKey(trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate()),
+                trainName,
+                trip.departure());
+    return driver && guard;
+  }
+
+  private boolean driverAllowsLayoverDispatch(TimetableService.DueTrip trip, String trainName) {
     Instant now = Instant.now();
     Optional<DriverTask> task =
         trip == null

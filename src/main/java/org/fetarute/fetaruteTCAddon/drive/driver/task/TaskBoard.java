@@ -26,13 +26,22 @@ import org.fetarute.fetaruteTCAddon.drive.SimulationLevel;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 
 /**
- * 任务板：一个车站即将发出的车次，一格一趟，写明终点站、停站数与按表的运行时长。左键领取人工驾驶，右键领取 ATO。 正在本站停站的车次用画着内容的地图，其余用空地图。
+ * 任务板：一个车站即将发出的车次，一格一趟，写明终点站、停站数与按表的运行时长。驾驶员的任务板左键领取人工驾驶，右键领取 ATO；车掌的任务板左键领取车掌。
+ * 正在本站停站的车次用画着内容的地图，其余用空地图。
  *
- * <p>已被领走的车次照样列出，灰色显示领取人，点击不起作用。界面只读：所有点击都被取消，物品不会进出背包。
+ * <p>已被领走的车次照样列出，灰色显示领取人，点击不起作用（驾驶员与车掌的名额分开算）。界面只读：所有点击都被取消，物品不会进出背包。
  *
- * <p>最后一行左侧是驾驶难度（仿真等级）的两个按钮，选中的发光；选择记在玩家数据里，从下一次开始驾驶起生效。玩家不能自选等级时不显示。
+ * <p>驾驶员任务板最后一行左侧是驾驶难度（仿真等级）的两个按钮，选中的发光；选择记在玩家数据里，从下一次开始驾驶起生效。玩家不能自选等级时不显示。
  */
 public final class TaskBoard {
+
+  /** 任务板给谁用。 */
+  public enum Kind {
+    /** 驾驶员：左键人工驾驶、右键 ATO，有驾驶难度按钮。 */
+    DRIVER,
+    /** 车掌：左键领取车掌。 */
+    GUARD
+  }
 
   /** 界面大小：六行。 */
   static final int SIZE = 54;
@@ -66,34 +75,42 @@ public final class TaskBoard {
       TaskBoardHolder holder,
       boolean atoAllowed,
       Optional<SimulationLevel> level) {
+    Kind kind = holder.kind();
     Inventory inventory =
         Bukkit.createInventory(
             holder,
             SIZE,
-            locale.component("drive.task.board.title", Map.of("station", holder.stationName())));
+            locale.component(key(kind, "title"), Map.of("station", holder.stationName())));
     holder.bind(inventory);
+    boolean ato = kind == Kind.DRIVER && atoAllowed;
     for (int slot = 0; slot < ENTRY_SLOTS; slot++) {
       int index = slot;
       holder
           .entryAt(slot)
           .ifPresent(
               entry ->
-                  inventory.setItem(index, entry(locale, entry, holder.playerId(), atoAllowed)));
+                  inventory.setItem(index, entry(locale, entry, holder.playerId(), ato, kind)));
     }
     if (holder.entryAt(0).isEmpty()) {
       inventory.setItem(
           22, item(Material.BARRIER, locale, "drive.task.board.empty", Map.of(), List.of()));
     }
     List<String> info = new ArrayList<>();
-    info.add("drive.task.board.info-left");
-    if (atoAllowed) {
+    info.add(key(kind, "info-left"));
+    if (ato) {
       info.add("drive.task.board.info-right");
     }
-    info.add("drive.task.board.info-claimed");
-    inventory.setItem(
-        INFO_SLOT, item(Material.BOOK, locale, "drive.task.board.info", Map.of(), info));
-    level.ifPresent(chosen -> showLevel(holder, locale, chosen));
+    info.add(key(kind, "info-claimed"));
+    inventory.setItem(INFO_SLOT, item(Material.BOOK, locale, key(kind, "info"), Map.of(), info));
+    if (kind == Kind.DRIVER) {
+      level.ifPresent(chosen -> showLevel(holder, locale, chosen));
+    }
     return player.openInventory(inventory) != null;
+  }
+
+  /** 驾驶员与车掌说法不同的那几项：车掌的在 {@code drive.guard.board} 下，其余共用 {@code drive.task.board}。 */
+  static String key(Kind kind, String item) {
+    return (kind == Kind.GUARD ? "drive.guard.board." : "drive.task.board.") + item;
   }
 
   /** 在已打开的任务板上换选中的难度按钮。 */
@@ -162,7 +179,11 @@ public final class TaskBoard {
   }
 
   private static ItemStack entry(
-      LocaleManager locale, TaskBoardEntries.Entry entry, UUID viewer, boolean atoAllowed) {
+      LocaleManager locale,
+      TaskBoardEntries.Entry entry,
+      UUID viewer,
+      boolean atoAllowed,
+      Kind kind) {
     TaskBoardEntries.Row row = entry.row();
     TaskBoardEntries.Trip trip = entry.trip();
     Map<String, String> values = new HashMap<>();
@@ -189,7 +210,7 @@ public final class TaskBoard {
     if (entry.claimed()) {
       if (entry.claimedBy(viewer)) {
         // 自己领的：图标照常、发光，一眼找得到；点击同样不起作用。
-        lore.add("drive.task.board.entry-claimed-self");
+        lore.add(key(kind, "entry-claimed-self"));
         if (row.dwelling()) {
           lore.add("drive.task.board.entry-dwelling");
         }
@@ -203,7 +224,7 @@ public final class TaskBoard {
         }
         return own;
       }
-      lore.add("drive.task.board.entry-claimed");
+      lore.add(key(kind, "entry-claimed"));
       ItemStack taken =
           item(claimedMaterial(), locale, "drive.task.board.entry-name-claimed", values, lore);
       if (taken.getItemMeta() instanceof MapMeta map) {
@@ -221,7 +242,7 @@ public final class TaskBoard {
     if (row.dwelling()) {
       lore.add("drive.task.board.entry-dwelling");
     }
-    lore.add("drive.task.board.entry-left");
+    lore.add(key(kind, "entry-left"));
     if (atoAllowed) {
       lore.add("drive.task.board.entry-right");
     }

@@ -9,6 +9,13 @@
 - 权限 `fetarute.drive.guard`（默认 OP，含在 `fetarute.drive.player` 打包节点里；考过车掌证也给这个节点）。
 - 值乘结束（含离线、死亡、列车不在了、漏乘、连续超时、换端没坐进车尾）时车掌开着的门随之关上，车门交还驾驶员或站台；站台的停站发现车门不归车掌了，剩下的开关门与发车按原来的方式进行。
 
+## 车掌任务（`GuardTasks`、`GuardTask`）
+
+- `/fta guard tasks [车站]` 打开车掌任务板（`TaskBoard.Kind.GUARD`，与驾驶员任务板同一套车次与筛选，名额分开算）：左键领取本班车掌，已领的车次红色标出领取人。一个车次一名车掌、一名玩家一个未结束的任务；值乘中、驾驶中不能领。
+- 已领取的任务每秒推进（`GuardSessionManager#tickClaims`，判定在 `GuardTasks#step`）：对上列车后它停在接班站时，动作栏提示坐第几节车尾驾驶室，坐进去即自动上岗（不用再确认）；列车开过接班站、或还没对上列车而计划发车已过 10 分钟即作废。`/fta guard task goto` 在列车旁时直接坐进车掌那一端，`status`、`abandon` 查看与放弃（值乘中放弃即离岗）。也可以先 `/fta guard on`：上岗时列车就是任务的那一列（或正跑着那一班）就接上任务。
+- 始发站（接班站序号 0）的终点站待命车：派车前（`DriveSessionManager#allowLayoverDispatch`，驾驶员与车掌各自判定，都放行才派）先扣着一列车等车掌（`GuardTasks#layover`），时限与驾驶员接车相同；通知车掌坐下一趟发车端另一头的驾驶室（分不出发车端时两头都行，`layoverCab`），坐好上岗后只派这一列；扣车期间这一班的其他候选车也不派，被扣的车不派去跑别的车次（`heldForOther`）；到时限没上岗照常派车，任务作废。开着接车传送时，离得远可用 `goto` 送到驾驶室旁。
+- 任务那一趟结算时（终点站换车次、或值乘结束）任务随之结束，记下成绩；没做过作业就结束的按结束原因了结。带交班站的任务（插件派出）在列车到交班站停妥、车门还没开时交班（`EndReason.HANDOVER`，算开完），车门交还站台。插件派任务可关掉奖励（`TaskSpec#rewards`）。
+
 ## 站台与车掌
 
 站台把停站交给车掌：与驾驶员控车时同一个 `DriverStationStop`，经 `ControlAuthority#beginStationStop` 交给车上的 `GuardLink`（`DriverControlRegistry` 里与驾驶员链路并列登记，按列车属性对象，换掉时按车名找回）。
