@@ -4,7 +4,7 @@ plugins {
 }
 
 group = "org.fetarute"
-version = "0.2.0"
+version = "0.3.0"
 
 base {
     archivesName = "FetaruteTCAddonExtension"
@@ -24,12 +24,15 @@ typewriter {
 
     extension {
         name = "FetaruteTCAddon"
-        shortDescription = "Give players FetaruteTC driving tasks from Typewriter."
+        shortDescription = "Give players FetaruteTC driving tasks and guard duties from Typewriter."
         description = """
             |The FetaruteTC extension connects Typewriter to the FetaruteTCAddon dispatcher.
             |Give players a scheduled trip to drive (from a station, optionally only up to a given station),
             |react when they take over, stop at a station or finish the task, and read their driving state,
             |last score and completed task count as facts for quests and dialogue criteria.
+            |Give players the guard duty of a scheduled trip the same way, react to their station work,
+            |starting signals, incident reports and trip scores, and read their guard state and records as facts.
+            |Needs FetaruteTCAddon 1.14.0 or newer.
         """.trimMargin()
         engineVersion = property("typewriterEngineVersion") as String
         channel = com.typewritermc.moduleplugin.ReleaseChannel.BETA

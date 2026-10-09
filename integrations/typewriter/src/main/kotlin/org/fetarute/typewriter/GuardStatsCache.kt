@@ -11,13 +11,13 @@ import org.bukkit.event.EventPriority
 import org.bukkit.event.Listener
 import org.bukkit.event.player.PlayerJoinEvent
 import org.bukkit.event.player.PlayerQuitEvent
-import org.fetarute.fetaruteTCAddon.api.event.DriverTaskFinishedEvent
+import org.fetarute.fetaruteTCAddon.api.event.GuardTripScoredEvent
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-/** 一名玩家的累计驾驶成绩。 */
-data class DriverStats(
-    val tasks: Int = 0,
+/** 一名玩家的累计车掌成绩。 */
+data class GuardStats(
+    val trips: Int = 0,
     val completed: Int = 0,
     val totalPoints: Long = 0,
     val bestGrade: String = "",
@@ -25,13 +25,13 @@ data class DriverStats(
 )
 
 /**
- * 在线玩家累计成绩的缓存：事实条目可能在异步线程读，不能每次查库。
+ * 在线玩家累计车掌成绩的缓存：事实条目可能在异步线程读，不能每次查库。
  *
- * 进服时从 FetaruteTCAddon 读一次，之后每开完一趟就地累加（结束事件带成绩即已写入记录）。
+ * 进服时从 FetaruteTCAddon 读一次，之后每结算一趟就地累加（每趟成绩事件与车掌记录同一口径：只算按时刻表运行、做过作业的趟）。
  */
 @Singleton
-class DriverStatsCache : Initializable, Listener {
-    private val stats = ConcurrentHashMap<UUID, DriverStats>()
+class GuardStatsCache : Initializable, Listener {
+    private val stats = ConcurrentHashMap<UUID, GuardStats>()
 
     override suspend fun initialize() {
         plugin.registerEvents(this)
@@ -43,12 +43,12 @@ class DriverStatsCache : Initializable, Listener {
         stats.clear()
     }
 
-    fun of(playerId: UUID): DriverStats = stats[playerId] ?: DriverStats()
+    fun of(playerId: UUID): GuardStats = stats[playerId] ?: GuardStats()
 
     private fun load(playerId: UUID) {
-        val api = driveApi() ?: return
+        val api = guardApi() ?: return
         api.stats(playerId).thenCombine(api.records(playerId, 1)) { total, last ->
-            DriverStats(
+            GuardStats(
                 total.tasks(),
                 total.completed(),
                 total.totalPoints(),
@@ -70,32 +70,18 @@ class DriverStatsCache : Initializable, Listener {
     }
 
     @EventHandler(priority = EventPriority.LOWEST)
-    fun onTaskFinished(event: DriverTaskFinishedEvent) {
-        // 路考练习不进驾驶记录，这里也不累加，否则在线期间与库里对不上
-        if (event.task.source() == TaskSource.PRACTICE) return
-        val score = event.score.orElse(null) ?: return
-        val completed = event.task.state().name == TaskEndState.COMPLETED.name
+    fun onTripScored(event: GuardTripScoredEvent) {
+        val score = event.score
+        val completed = event.state == GuardTripState.COMPLETED.name
         stats.compute(event.playerId) { _, current ->
-            val base = current ?: DriverStats()
+            val base = current ?: GuardStats()
             base.copy(
-                tasks = base.tasks + 1,
+                trips = base.trips + 1,
                 completed = base.completed + if (completed) 1 else 0,
                 totalPoints = base.totalPoints + if (completed) score.points().coerceAtLeast(0) else 0,
-                bestGrade = better(base.bestGrade, score.grade()),
+                bestGrade = DriverStatsCache.better(base.bestGrade, score.grade()),
                 lastPoints = score.points(),
             )
         }
-    }
-
-    companion object {
-        private const val GRADE_ORDER = "SABCD"
-
-        /** 评级换成数：S=5 … D=1，没有评级为 0。 */
-        fun gradeRank(grade: String): Int {
-            val index = if (grade.isEmpty()) -1 else GRADE_ORDER.indexOf(grade)
-            return if (index < 0) 0 else GRADE_ORDER.length - index
-        }
-
-        internal fun better(a: String, b: String): String = if (gradeRank(b) > gradeRank(a)) b else a
     }
 }
