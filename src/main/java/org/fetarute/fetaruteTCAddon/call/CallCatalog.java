@@ -35,16 +35,13 @@ public final class CallCatalog {
 
   private CallCatalog() {}
 
-  /** 只能区间生成的方向，本站在交路节点表里的下标至少是这个数：生成点要落在首节点之后的区段里（{@code CallPlanner.RouteGeometry}）、 又在本站之前。 */
-  static final int MIN_ENTRY_STOP_INDEX = 2;
-
   /** 交路本来的车源（区间生成不在此列，各种交路都可以）。 */
   public enum Origin {
     /** 首站带 {@code CRET}：从车库出车。 */
     DEPOT,
     /** 运营交路、首站不是车库：接首站的待命车。 */
     STANDBY,
-    /** 载客回库交路：只能区间生成，跑完直接进库。 */
+    /** 载客回库交路：只能区间生成或靠折返车（先开进首站再折返），跑完直接进库。 */
     ENTRY
   }
 
@@ -157,10 +154,6 @@ public final class CallCatalog {
         }
         if (!stationKeyAt(entry, stops, stations, i).filter(station::equals).isPresent()) {
           continue;
-        }
-        if (origin.get() == Origin.ENTRY && i < MIN_ENTRY_STOP_INDEX) {
-          // 只能区间生成的交路在前两站按构造就没有车源（生成点要在首节点之后的区段里、又在本站之前），不列
-          break;
         }
         Set<String> platforms = platformsOf(stop, entry.definition().waypoints().get(i).value());
         Set<String> shown = platforms;

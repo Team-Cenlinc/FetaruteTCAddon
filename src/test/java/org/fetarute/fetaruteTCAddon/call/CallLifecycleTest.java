@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
@@ -130,6 +131,61 @@ class CallLifecycleTest {
         "交路没写交路组时不挑");
   }
 
+  /** 折返车能走的交路：同一线路、终点进待命池、终点就是叫车交路首站所在的车站（同站别的站台、DYNAMIC 首站都算）。 开进车库（DSTY 收尾）的、别的线路的、终点在别处的都不算。 */
+  @Test
+  void turnbackInboundRoutesEndAtTheCallStartAndStayThere() {
+    Line ws = line("WS");
+    Line mt = line("MT");
+    RouteDefinitionCache.RouteEntry call =
+        routeEntry(
+            ws,
+            "WS-2N",
+            RouteOperationType.OPERATION,
+            RouteLifecycleMode.REUSE_AT_TERM,
+            List.of("SURC:S:NTA:1", "SURC:S:TPC:1", "SURC:S:CHT:3"),
+            "DYNAMIC:SURC:S:NTA");
+    RouteDefinitionCache.RouteEntry inbound =
+        routeEntry(
+            ws,
+            "WS-2C",
+            RouteOperationType.OPERATION,
+            RouteLifecycleMode.REUSE_AT_TERM,
+            List.of("SURC:S:CHT:3", "SURC:S:TPC:2", "SURC:S:NTA:2"),
+            null);
+    RouteDefinitionCache.RouteEntry intoDepot =
+        routeEntry(
+            ws,
+            "WS-9D",
+            RouteOperationType.RETURN,
+            RouteLifecycleMode.DESTROY_AFTER_TERM,
+            List.of("SURC:S:CHT:3", "SURC:S:NTA:1"),
+            null);
+    RouteDefinitionCache.RouteEntry otherLine =
+        routeEntry(
+            mt,
+            "MT-3O",
+            RouteOperationType.OPERATION,
+            RouteLifecycleMode.REUSE_AT_TERM,
+            List.of("SURC:S:PPK:1", "SURC:S:NTA:1"),
+            null);
+    RouteDefinitionCache.RouteEntry elsewhere =
+        routeEntry(
+            ws,
+            "WS-1L",
+            RouteOperationType.OPERATION,
+            RouteLifecycleMode.REUSE_AT_TERM,
+            List.of("SURC:S:HHU:2", "SURC:S:CHT:3"),
+            null);
+
+    assertEquals(
+        List.of(inbound.routeId()),
+        CallPlanner.inboundRoutes(
+                List.of(call, inbound, intoDepot, otherLine, elsewhere), call.routeId())
+            .stream()
+            .map(RouteDefinitionCache.RouteEntry::routeId)
+            .toList());
+  }
+
   /** 到站预计的后车间隔：同一站台本车之后最早的那一班；本车不在行里时不知道，身后没车时无穷远。 */
   @Test
   void rearGapComesFromTheNextStationForecast() {
@@ -158,6 +214,70 @@ class CallLifecycleTest {
   private static LayoverRegistry.LayoverCandidate candidate(String name, Map<String, String> tags) {
     return new LayoverRegistry.LayoverCandidate(
         name, "SURC:S:PPK", NodeId.of("SURC:S:PPK:1"), T, tags);
+  }
+
+  /** 一条交路：首站可写成 DYNAMIC（{@code firstNotes}），其余各站按节点写。 */
+  private static RouteDefinitionCache.RouteEntry routeEntry(
+      Line line,
+      String code,
+      RouteOperationType type,
+      RouteLifecycleMode mode,
+      List<String> nodes,
+      String firstNotes) {
+    UUID routeId = UUID.randomUUID();
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops = new java.util.ArrayList<>();
+    for (int i = 0; i < nodes.size(); i++) {
+      boolean dynamic = i == 0 && firstNotes != null;
+      stops.add(
+          new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+              routeId,
+              i,
+              Optional.empty(),
+              dynamic ? Optional.empty() : Optional.of(nodes.get(i)),
+              Optional.empty(),
+              i == nodes.size() - 1
+                  ? org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.TERMINATE
+                  : org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.STOP,
+              dynamic ? Optional.of(firstNotes) : Optional.empty()));
+    }
+    Route route =
+        new Route(
+            routeId,
+            code,
+            line.id(),
+            code,
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            type,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            T,
+            T);
+    return new RouteDefinitionCache.RouteEntry(
+        routeId,
+        new RouteDefinition(
+            new RouteId("SURC:" + line.code() + ":" + code),
+            nodes.stream().map(NodeId::of).toList(),
+            Optional.empty(),
+            mode),
+        new RouteDefinitionCache.RouteRecord(operator(), line, route),
+        stops);
+  }
+
+  private static Operator operator() {
+    return new Operator(
+        UUID.randomUUID(),
+        "SURC",
+        UUID.randomUUID(),
+        "SURC",
+        Optional.empty(),
+        Optional.empty(),
+        0,
+        Optional.empty(),
+        Map.of(),
+        T,
+        T);
   }
 
   private static PidsRow row(String train, String platform, Instant at, PidsRow.Status status) {

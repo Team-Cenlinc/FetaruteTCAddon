@@ -476,6 +476,48 @@ class CallRestoreTest {
         "还在跑叫车那一趟的两辆占满上限");
   }
 
+  /** 折返车派出：写上叫车标签与留给这一单的标记，叫车不算派出（不删库、不通知），折返车留着等这一单的票、回收不碰；这一单的票接走它以后才算派出。 */
+  @Test
+  void aTurnbackTrainWaitsForItsCallTicket() {
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+    CallService service = new CallService(plugin);
+    service.restorePending(T);
+    ArgumentCaptor<SpawnTicket> callTicket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(callTicket.capture());
+    SpawnTicket ticket = ticketOnRoute();
+    SpawnTicket turnback =
+        new SpawnTicket(
+            UUID.randomUUID(),
+            ticket.service(),
+            T,
+            T,
+            T,
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(
+                OnDemandTrip.format(new CallTag(call.id(), PPK).format(), Optional.empty(), true)),
+            TripSource.ON_DEMAND,
+            0,
+            Optional.empty());
+    TrainProperties properties = mock(TrainProperties.class);
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.exists("tb-1")).thenReturn(true);
+      store.when(() -> TrainPropertiesStore.get("tb-1")).thenReturn(properties);
+      service.onDispatched(turnback, "tb-1");
+
+      verify(properties).addTags(SimpleTicketAssigner.TAG_CALL_TURNBACK + "=" + call.id());
+      assertTrue(service.heldForCall("tb-1"), "折返车等这一单的票来接");
+      verify(stored, never()).delete(call.id());
+
+      service.onDispatched(callTicket.getValue(), "tb-1");
+    }
+    assertTrue(!service.heldForCall("tb-1"), "这一单的票接走以后不再留着");
+    verify(stored).delete(call.id());
+  }
+
   /** 一辆叫来的车：叫车跑的是本夹具的交路，此刻跑在 {@code currentRoute} 上。 */
   private TrainProperties calledTrain(String name, UUID currentRoute) {
     TrainProperties properties = mock(TrainProperties.class);

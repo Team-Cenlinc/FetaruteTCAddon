@@ -215,7 +215,7 @@ class CallCatalogTest {
     assertEquals(CallCatalog.Origin.DEPOT, directions.get(0).routes().get(0).origin());
   }
 
-  /** 沿途停站的回库交路也能叫：开往最后一个载客站，只区间生成；车库那一段不算终点；前两站按构造没有车源，不列。 */
+  /** 沿途停站的回库交路也能叫：开往最后一个载客站，只区间生成或靠折返车；车库那一段不算终点。 */
   @Test
   void returnRoutesCarryingPassengersAreEntryOnly() {
     UUID routeId = UUID.randomUUID();
@@ -253,11 +253,12 @@ class CallCatalogTest {
     assertEquals(new PidsStationKey("SURC", "AAA"), directions.get(0).destination());
     assertEquals(CallCatalog.Origin.ENTRY, directions.get(0).routes().get(0).origin());
     assertFalse(directions.get(0).routes().get(0).fromDepot());
-    assertTrue(
+    assertEquals(
+        1,
         CallCatalog.directions(
                 entries, null, line -> true, new PidsStationKey("SURC", "BBB"), Set.of())
-            .isEmpty(),
-        "第二站上游只有首站那一段，生成不了车");
+            .size(),
+        "第二站上游生成不了车也列：车源由折返车（开进首站再折返）判定");
     assertEquals(
         List.of(new PidsStationKey("SURC", "NTA"), new PidsStationKey("SURC", "BBB"), PPK),
         CallCatalog.stationsServed(entries, null, MT.id()),
