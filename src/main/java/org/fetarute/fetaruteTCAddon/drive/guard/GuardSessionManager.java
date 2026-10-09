@@ -176,6 +176,7 @@ public final class GuardSessionManager {
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
   private BukkitTask task;
   private long tickCounter;
+  private GuardExaminer examiner = GuardExaminer.NONE;
 
   public GuardSessionManager(
       Plugin plugin,
@@ -193,6 +194,11 @@ public final class GuardSessionManager {
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
     this.sidebar = new DriveSidebar(locale);
+  }
+
+  /** 接上车掌考法的考官（驾驶证服务）。 */
+  public void setExaminer(GuardExaminer examiner) {
+    this.examiner = examiner == null ? GuardExaminer.NONE : examiner;
   }
 
   // ---- 查询 ----
@@ -357,6 +363,8 @@ public final class GuardSessionManager {
     Player gone = Bukkit.getPlayer(playerId);
     // 已做完的站按结束原因结算：中途离开、被撤下的按做过的站给，连续超时、漏乘、换端没坐进车尾的判为未完成。
     recordSettled(gone, session);
+    flushExamStop(gone, session);
+    examiner.onDutyEnded(playerId, reason);
     settleTrip(gone, session, session.trip(), GuardTrip.stateFor(reason));
     Optional<MinecartGroup> train = findGroup(session);
     boolean held = session.link().holdsTrain();
@@ -478,6 +486,9 @@ public final class GuardSessionManager {
     }
     if (now % WATCH_SAMPLE_TICKS == 0) {
       sampleDepartureWatch(player, session, group, seated, now);
+    }
+    if (!sessions.containsKey(session.playerId())) {
+      return;
     }
     session.buzzer().tick(now).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
     refreshHotbar(player, session, false);
@@ -1019,6 +1030,7 @@ public final class GuardSessionManager {
     double travelled = group.head().getEntity().getLocation().toVector().distance(watch.origin());
     if (travelled >= watch.blocks() || now >= watch.untilTick()) {
       session.setDepartureWatch(null);
+      flushExamStop(player, session);
       watch
           .work()
           .departureWatchPassed()
@@ -1192,7 +1204,24 @@ public final class GuardSessionManager {
               ? session.trackedTrip()
               : session.trip().key().orElse(null);
       switchTrip(player, session, key);
-      session.trip().addStop(settled.stop().stationName(), settled.work());
+      String station = settled.stop().stationName();
+      session.trip().addStop(station, settled.work());
+      if (examiner.examining(session.playerId())) {
+        session.trip().markExamined();
+        GuardSession.DepartureWatch watch = session.departureWatch();
+        session.setPendingExamStop(new GuardSession.WorkedStop(station, settled.work()));
+        if (watch == null || watch.work() != settled.work()) {
+          flushExamStop(player, session);
+        }
+      }
+    }
+  }
+
+  /** 考试中做完的一站交给考官（出站监视采完、或值乘结束时）。 */
+  private void flushExamStop(Player player, GuardSession session) {
+    GuardSession.WorkedStop pending = session.takePendingExamStop();
+    if (pending != null && player != null && player.isOnline()) {
+      examiner.onStopWorked(player, GuardScore.Stop.of(pending.station(), pending.work()));
     }
   }
 
@@ -1232,8 +1261,11 @@ public final class GuardSessionManager {
     if (key.isEmpty()) {
       return;
     }
+    if (trip.examined() && online != null) {
+      online.sendMessage(locale.component("drive.guard.result-exam"));
+    }
     DriveRewards.Reward reward =
-        GuardTrip.rewarded(state)
+        GuardTrip.rewarded(state) && !trip.examined()
             ? DriveRewards.guard(
                 current.rewards(),
                 current.guard().rewardStopRatio(),

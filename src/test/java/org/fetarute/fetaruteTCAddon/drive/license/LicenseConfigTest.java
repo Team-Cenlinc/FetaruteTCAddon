@@ -98,6 +98,30 @@ class LicenseConfigTest {
   }
 
   @Test
+  @DisplayName("车掌证：不要求驾驶证，在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
+  void guardClass() throws Exception {
+    LicenseClass guard = LicenseConfig.defaults().find("guard").orElseThrow();
+    assertEquals(LicenseClass.Exam.GUARD, guard.exam());
+    assertEquals(List.of(), guard.requires());
+    assertEquals(List.of(DrivePermissions.GUARD), guard.grants());
+    assertEquals(0, guard.trainingRuns());
+    assertEquals(3, guard.examStops());
+    assertEquals(LicenseClass.Exam.GUARD, LicenseClass.Exam.parse(" Guard "));
+
+    YamlConfiguration bundled = new YamlConfiguration();
+    try (var stream = getClass().getClassLoader().getResourceAsStream("drive.yml")) {
+      bundled.loadFromString(
+          new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+    }
+    List<String> warnings = new ArrayList<>();
+    LicenseConfig parsed =
+        LicenseConfig.from(bundled.getConfigurationSection("license"), warnings::add);
+    assertEquals(List.of(), warnings);
+    assertEquals(guard, parsed.find("guard").orElseThrow());
+    assertEquals(3, parsed.levelOf("guard"));
+  }
+
+  @Test
   @DisplayName("证号由 UUID 得出，同一名玩家永远相同")
   void cardNumberStable() {
     UUID id = UUID.fromString("3a988dae-ea58-374f-a756-10d056914b46");

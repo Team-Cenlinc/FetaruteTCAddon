@@ -36,7 +36,7 @@ public record LicenseConfig(
     training = training == null ? TrainingConfig.defaults() : training;
   }
 
-  /** 默认两级：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考。 */
+  /** 默认三级：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考；车掌证不要求驾驶证，在调度列车上值乘考。 */
   public static LicenseConfig defaults() {
     return new LicenseConfig(
         true,
@@ -71,7 +71,21 @@ public record LicenseConfig(
                 false,
                 false,
                 1,
-                List.of(DrivePermissions.DRIVER))),
+                List.of(DrivePermissions.DRIVER)),
+            new LicenseClass(
+                "guard",
+                "车掌证",
+                "在调度列车上当车掌：开关车门、站台监视、确认出站信号、按发车铃",
+                true,
+                List.of(),
+                LicenseClass.Exam.GUARD,
+                3,
+                70,
+                false,
+                false,
+                false,
+                0,
+                List.of(DrivePermissions.GUARD))),
         TrainingConfig.defaults());
   }
 
@@ -114,7 +128,7 @@ public record LicenseConfig(
         LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "road-test"));
         if (exam == null) {
           sink.accept(
-              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial 或 road-test，已跳过这一级");
+              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial、road-test 或 guard，已跳过这一级");
           continue;
         }
         classes.add(

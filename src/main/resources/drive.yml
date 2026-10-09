@@ -304,8 +304,8 @@ license:
     emergency-reaction-seconds: 3
     # 只用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时用正式车次
     routes: []
-  # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
-  # 或 road-test（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
+  # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）、
+  # road-test（路考：驾驶一段调度列车的区间任务）或 guard（车掌：在调度列车上值乘，做满几站作业）；grants：持证时给的权限节点。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
   classes:
     learner:
@@ -335,6 +335,20 @@ license:
       allow-wrong-door: false
       grants:
         - fetarute.drive.driver
+    guard:
+      name: "车掌证"
+      description: "在调度列车上当车掌：开关车门、站台监视、确认出站信号、按发车铃"
+      enabled: true
+      requires: []
+      exam: guard
+      # 考试中要做满几站作业
+      exam-stops: 3
+      # 及格分（0–100）；哪一站有超时（站台代开、代关或代发发车信号）即不及格
+      min-points: 70
+      # 为 false 时开错车门即不及格
+      allow-wrong-door: false
+      grants:
+        - fetarute.drive.guard
 
 # 驾驶奖励：驾驶调度列车的任务（领任务或接管时刻表车次）按驾驶距离与停站数给经验与服务器钱币。
 # 开到终点站全额；中途结束、被收回按已开的部分；卡住被收回、超过任务时限、越站交还不发；路考与练习不发。

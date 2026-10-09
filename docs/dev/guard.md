@@ -6,7 +6,7 @@
 
 - `/fta guard on`：坐在调度列车（`ManagedTrains.isFtaManaged`）车尾驾驶室的座位上执行。驾驶座的认定与驾驶员相同（`drive.yml` 的 `driver.cab-seat-names`，没有标记时按车厢位置）；车尾端（`CabSeats.End.TAIL`）才行，单节车坐另一头的驾驶室即可。一列车只有一名车掌；正在驾驶的玩家不能当车掌，车掌也不能同时驾驶（`drive.command.start.guard-on-duty`）。
 - `/fta guard off` 结束值乘，`/fta guard seat` 传送入座，`/fta guard status` 查看，管理员 `/fta guard stop <玩家>` 撤下。车掌菜单（F）里“结束值乘”点两次也结束。
-- 权限 `fetarute.drive.guard`（默认 OP，含在 `fetarute.drive.player` 打包节点里）。
+- 权限 `fetarute.drive.guard`（默认 OP，含在 `fetarute.drive.player` 打包节点里；考过车掌证也给这个节点）。
 - 值乘结束（含离线、死亡、列车不在了、漏乘、连续超时、换端没坐进车尾）时车掌开着的门随之关上，车门交还驾驶员或站台；站台的停站发现车门不归车掌了，剩下的开关门与发车按原来的方式进行。
 
 ## 站台与车掌
@@ -64,6 +64,13 @@
 - 奖励（`DriveRewards#guard`，单价、评级系数、货币与发放方式沿用 `rewards` 段）：每完成一站作业按驾驶员人工停站单价乘 `guard.reward-per-stop-ratio`（默认 1.0），里程（值乘期间列车车头走过的距离）按驾驶员每公里单价乘 `guard.reward-per-km-ratio`（默认 0.5），再乘评级系数；车掌搭 ATO 也全额。完成、放弃、中断的按做过的站发，未完成的不发（成绩单后说明）。
 - 记录：写进 `drive_task_records`，`mode` 为 `GUARD`（`DriveTaskRecord#MODE_GUARD`），明细见 `GuardRecordCodec`；`/fta drive records` 照样列出，驾驶排行与驾驶员的汇总（`/fta drive top`、API 的统计）不算车掌的记录。
 - 不按时刻表运行的列车没有车次：整段值乘算一趟，只给成绩，不记录、不发奖励（与驾驶员接管不按表运行的列车不记任务一致）。
+
+## 车掌证（驾驶证的车掌考法）
+
+- `drive.yml` 的 `license.classes.guard`：考法 `exam: guard`（`LicenseClass.Exam.GUARD`），不要求先有驾驶证，考过给 `fetarute.drive.guard`。默认做满 `exam-stops`（3）站、及格 `min-points`（70），`allow-wrong-door: false`。
+- 报名（`/fta license exam guard`）后在 `exam-window-minutes` 内到调度列车车尾驾驶室上岗；考试期间临时挂上车掌权限，考完或超时后收回（值乘中不超时，等做满站数或值乘结束再判定）。报名时讲考试内容、讲评方式、及格条件、开始方式，并发一本《FTCA 车掌手册》（`DriverHandbook#guard`，`/fta handbook guard` 再领）。
+- 考官（`GuardExaminer`，驾驶证服务实现）：车掌每做完一站作业（出站监视采完）交给它，逐站讲评开门、关门、关门监视、发车信号、出站监视（`GuardExam#review`）；哪一站超时当场不及格，开错车门按 `allow-wrong-door`，做满站数后按车掌成绩判定（`GuardExam#judge`）。值乘中途结束：连续超时、漏乘、换端没坐进车尾为不及格，其余不计成绩（`GuardExam#ended`）。不及格进入 `retry-cooldown-minutes` 冷却，并在下一拍结束这次值乘（`EXAM`）；及格当场发证，值乘照常继续。
+- 考试中做的这一趟不发奖励（`GuardTrip#examined`），记录照写。车掌证没有单独的练习（`/fta license practice guard` 提示读手册）。
 
 ## 显示
 

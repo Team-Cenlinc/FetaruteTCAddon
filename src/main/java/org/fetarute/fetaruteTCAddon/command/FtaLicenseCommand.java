@@ -111,6 +111,13 @@ public final class FtaLicenseCommand {
     manager.command(
         manager
             .commandBuilder("fta")
+            .literal("handbook")
+            .literal("guard")
+            .permission(player)
+            .handler(ctx -> handleGuardHandbook(ctx.sender())));
+    manager.command(
+        manager
+            .commandBuilder("fta")
             .literal("license")
             .literal("reissue")
             .permission(player)
@@ -263,6 +270,8 @@ public final class FtaLicenseCommand {
       String key;
       if (license.exam() == LicenseClass.Exam.TUTORIAL) {
         key = "drive.license.info.level-open-tutorial";
+      } else if (license.exam() == LicenseClass.Exam.GUARD) {
+        key = "drive.license.info.level-open-guard";
       } else if (licenses.trainingRuns(id, license.id()) < license.trainingRuns()) {
         key = "drive.license.info.level-need-practice";
       } else {
@@ -282,6 +291,17 @@ public final class FtaLicenseCommand {
     }
     licenses.handbook().give(player, plugin.getLocaleManager(), false);
     sender.sendMessage(plugin.getLocaleManager().component("drive.handbook.driver.given"));
+  }
+
+  /** 领一本《FTCA 车掌手册》。 */
+  private void handleGuardHandbook(CommandSender sender) {
+    Player player = requirePlayer(sender);
+    LicenseService licenses = requireService(sender);
+    if (player == null || licenses == null) {
+      return;
+    }
+    licenses.guardHandbook().give(player, plugin.getLocaleManager(), false);
+    sender.sendMessage(plugin.getLocaleManager().component("drive.handbook.guard.given"));
   }
 
   private void handleExam(CommandSender sender, String classId, Optional<String> station) {

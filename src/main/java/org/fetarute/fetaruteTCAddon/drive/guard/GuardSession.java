@@ -36,7 +36,9 @@ public final class GuardSession implements DriveDoors.Cab {
     /** 管理员撤下。 */
     ADMIN,
     /** 终点站换端时没能坐进车尾端驾驶室。 */
-    CAB_CHANGE
+    CAB_CHANGE,
+    /** 车掌考试没有通过（考试期间临时有车掌权限）。 */
+    EXAM
   }
 
   private final UUID playerId;
@@ -70,6 +72,16 @@ public final class GuardSession implements DriveDoors.Cab {
   private CabSeats.Departure layoverDeparture;
   private CabSeatsMemo cabSeatsMemo;
   private GuardTrip trip = new GuardTrip(null, "", java.time.Instant.now());
+  private WorkedStop pendingExamStop;
+
+  /**
+   * 考试中做完、还在采出站监视的一站：采完再交给考官。
+   *
+   * @param station 站名
+   * @param work 这一站的作业
+   */
+  public record WorkedStop(String station, GuardStopWork work) {}
+
   private TaskKey trackedTrip;
   private org.bukkit.util.Vector lastHead;
   private java.util.UUID lastWorld;
@@ -168,6 +180,17 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setTrip(GuardTrip trip) {
     this.trip = Objects.requireNonNull(trip, "trip");
+  }
+
+  /** 取走等出站监视采完再交给考官的那一站；没有时为 {@code null}。 */
+  public WorkedStop takePendingExamStop() {
+    WorkedStop pending = pendingExamStop;
+    pendingExamStop = null;
+    return pending;
+  }
+
+  public void setPendingExamStop(WorkedStop stop) {
+    this.pendingExamStop = stop;
   }
 
   /** 正在跟着的那一站开始时列车跑的车次；不按时刻表运行时为 {@code null}。 */

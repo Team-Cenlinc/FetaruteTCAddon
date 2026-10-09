@@ -595,6 +595,7 @@ drive:
       disabled: "<prefix> <yellow>Guard duty has been disabled; duty ended</yellow>"
       admin: "<prefix> <yellow>An administrator ended your duty</yellow>"
       cab-change: "<prefix> <red>Could not get into the rear cab when changing ends; duty ended (incomplete)</red> <gray><stops> stops worked</gray>"
+      exam: "<prefix> <yellow>Guard exam failed; duty ended</yellow>"
     timeout:
       open: "<red>Too slow to open: the station opened the doors</red>"
       close: "<red>Too slow to close: the station closed the doors</red>"
@@ -665,6 +666,7 @@ drive:
     result: "<prefix> <gold>Guard</gold> trip <white><trip></white> <gray><state></gray>: <white><points></white> points <gold><grade></gold>"
     result-subtitle: "<gray>Guard · <trip> · <state> · <points> points</gray>"
     result-untracked: "<prefix> <gray>This train does not run to a timetable: the trip is scored but not recorded or rewarded</gray>"
+    result-exam: "<prefix> <gray>No reward for a trip worked during the guard exam</gray>"
     sheet:
       forced-open: "<gray>· <station></gray> <red>Doors not opened in time, opened by the station −5</red>"
       forced-close: "<gray>· <station></gray> <red>Doors not closed in time, closed by the station −5</red>"
@@ -1010,6 +1012,27 @@ drive:
     next: "<prefix> <white>Next: Level <level> · <aqua><name></aqua></white> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
     top: "<prefix> <gold>You hold every licence level</gold>"
     exam:
+      guard:
+        stop: "<prefix> <gray>Guard exam <done>/<total></gray> <white><station></white> <gray>open</gray> <open> <gray>close</gray> <close> <gray>closing watch</gray> <closing> <gray>signal</gray> <signal> <gray>departure watch</gray> <departure>"
+        passed: "<prefix> <green><bold>Guard exam passed</bold></green> <white><reason>; you now hold level <level> · <name></white>"
+        failed: "<prefix> <red><bold>Guard exam failed</bold></red> <white><reason></white>"
+        void: "<prefix> <yellow>This guard exam does not count: <reason></yellow>"
+        reason:
+          timeout: "timed out at <station>; the station did it for you"
+          wrong-door: "opened the wrong doors at <station>"
+          points: "scored <points>, below the pass mark of <min>"
+          passed: "scored <points>"
+          timeouts: "too many stops in a row timed out; duty ended"
+          left-behind: "the train left without you"
+          cab-change: "did not reach the rear cab when changing ends"
+          ended: "duty ended early"
+        tip:
+          timeout: "<prefix> <gray>Tip: open the platform-side doors soon after stopping, close them as soon as the dwell ends, then return to your seat, confirm once the starting signal clears and hold the buzzer. The action bar always shows the next step and the seconds left.</gray>"
+          wrong-door: "<prefix> <gray>Tip: check the door side on the action bar before opening; left and right follow the way you face.</gray>"
+          points: "<prefix> <gray>Tip: watch the doors from the platform while they close; after departure look at the platform or behind until the rear has left; do not close before the dwell ends.</gray>"
+          timeouts: "<prefix> <gray>Tip: every step has a time limit and the station steps in when it runs out; report an incident to get more time when something holds you up.</gray>"
+          left-behind: "<prefix> <gray>Tip: return to your guard seat after closing the doors and stay aboard until the signal is given.</gray>"
+          cab-change: "<prefix> <gray>Tip: when the train reverses at a terminal, walk to the cab at the other end as prompted, or use Back to seat in the guard menu.</gray>"
       unknown-class: "<prefix> <red>No such licence level: <white><class></white></red>"
       already-held: "<prefix> <yellow>You already hold the <white><name></white></yellow>"
       requires: "<prefix> <red>The <white><name></white> requires: <white><required></white></red>"
@@ -1068,6 +1091,14 @@ drive:
         ato: "<prefix> <yellow>Road test: switched to ATO, this attempt does not count</yellow>"
         hint: "<prefix> <gray>You may keep driving to the hand-over station for practice, or end the exam with /fta drive task abandon.</gray>"
       brief:
+        guard:
+          header: "<prefix> <gold><bold>Level <level> · <name> exam</bold></gold>"
+          duties: "<prefix> <white>What you do:</white><gray> work <stops> stops as guard on a dispatched train: open the platform-side doors, close them when the dwell ends, watch them close, return to your seat, confirm the starting signal and sound the buzzer, then watch the platform on departure.</gray>"
+          watch: "<prefix> <white>Review:</white><gray> each stop is reviewed item by item: opening, closing, closing watch, starting signal, departure watch.</gray>"
+          pass: "<prefix> <white>To pass:</white><gray> work <stops> stops and score at least <min>; any timeout (doors opened or closed by the station, or the signal given for you) fails the exam.</gray>"
+          no-wrong-door: "<prefix> <white>Note:</white><gray> opening the wrong side fails the exam.</gray>"
+          how: "<prefix> <white>How to start:</white><gray> within <minutes> minutes sit in the rear cab of any dispatched train and run <aqua>/fta guard on</aqua>; you have guard permission for the exam only.</gray>"
+          handbook: "<prefix> <white>Study:</white><gray> the FTCA Guard Handbook is in your inventory; read it before you start.</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>Get another copy</gray>'><aqua>[Guard Handbook]</aqua></hover></click>"
         tutorial:
           header: "<prefix> <gold><bold>Level <level> · <name> exam</bold></gold>"
           content: "<prefix> <white>What: </white><gray>complete the driving tutorial. It teaches starting the train, the reverser, setting off, coasting, braking to a stop, the doors and the emergency brake.</gray>"
@@ -1088,6 +1119,7 @@ drive:
       expired: "<prefix> <yellow>The <white><name></white> practice run timed out; you can sign up again</yellow>"
       in-progress: "<prefix> <yellow>You are on a <white><name></white> practice run; finish it first</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>Abandon this practice run (it does not count)</gray>'><gray>[Abandon practice]</gray></hover></click>"
       not-road: "<prefix> <yellow>The <white><name></white> is earned through the tutorial and has no road-test practice; run /fta drive tutorial start any time to practise</yellow>"
+      not-guard: "<prefix> <yellow>The <white><name></white> has no separate practice: every stop is reviewed during the exam; read the FTCA Guard Handbook first</yellow> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>Get the guard handbook</gray>'><aqua>[Guard Handbook]</aqua></hover></click>"
       no-trip-routes: "<prefix> <yellow>No practice-route trip (<white><routes></white>) at <white><station></white> soon; sign up at a station on a practice route</yellow>"
       brief:
         header: "<prefix> <gold><bold>Level <level> · <name> road-test practice</bold></gold>"
@@ -1174,6 +1206,7 @@ drive:
       level-practice-running: "  <yellow>…</yellow> <white>Level <level> · <name></white> <yellow>practice in progress</yellow>"
       level-need-practice: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>complete road-test practice first (<done>/<required>)</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice (near a station)</gray>'><green>[Start practice]</green></hover></click>"
       level-open-tutorial: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>exam: complete the tutorial</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
+      level-open-guard: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>guard duty <stops> stops, pass mark <min></gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up</gray>'><green>[Take the exam]</green></hover></click>"
       level-open-road-test: "  <aqua>○</aqua> <white>Level <level> · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>road test of <stops> stops, pass mark <min></gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>Click to sign up for practice (no licence)</gray>'><aqua>[Practise]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>Click to sign up (near a station)</gray>'><green>[Take the road test]</green></hover></click>"
       level-locked: "  <dark_gray>○ Level <level> · <name> (requires <required>)</dark_gray>"
       level-closed: "  <dark_gray>○ Level <level> · <name> (not yet available)</dark_gray>"
@@ -1199,6 +1232,16 @@ drive:
       class: "<black>· <name></black>\n  <dark_gray><date></dark_gray>"
       notice: "<black>Valid across the server for every FTCA train.</black>\n\n<dark_gray>Driving permission follows the system record; this book is only a certificate. Lost it? Run /fta license reissue.\n\nLevels and exams: /fta license</dark_gray>"
   handbook:
+    guard:
+      title: "FTCA Guard Handbook"
+      author: "Fetarute"
+      given: "<prefix> <green>The FTCA Guard Handbook is in your inventory</green>"
+      page-1: "<dark_blue><bold>FTCA Guard Handbook</bold></dark_blue>\n\n<black>1. Going on duty\n2. Station work\n3. Closing and watching\n4. Buzzer and emergency stop\n5. Terminals, scores and the exam</black>"
+      page-2: "<dark_blue><bold>1. Going on duty</bold></dark_blue>\n<black>Sit in the rear cab of a dispatched train and run /fta guard on (single cars: the other end). Your seat is reserved for you. The hotbar becomes the guard buttons, F opens the guard menu, /fta guard off ends duty.</black>"
+      page-3: "<dark_blue><bold>2. Station work</bold></dark_blue>\n<black>Once stopped, open the platform-side doors (1 left, 2 right, as you face) and step onto the platform. When the dwell ends press 3 to close. Opening has 30 s and closing 15 s; on timeout the station does it and it counts as a timeout. Report incidents with 4 for 30 s more.</black>"
+      page-4: "<dark_blue><bold>3. Closing and watching</bold></dark_blue>\n<black>While the doors close, stand on the platform near your car and watch along the train until they are shut. Then return to your seat. After departure look at the platform or behind until the rear has left. Both watches count.</black>"
+      page-5: "<dark_blue><bold>4. Buzzer and emergency</bold></dark_blue>\n<black>Back in your seat, press 6 to confirm once the starting signal clears, then hold 7 for about a second (one long) to give the signal. One short means received, two shorts call the driver. Press 9 for an emergency stop; release it with one long when stopped.</black>"
+      page-6: "<dark_blue><bold>5. Terminals and scores</bold></dark_blue>\n<black>At a terminal move to the cab at the other end; you and the driver swap together, and are moved for you when time is short. Timeouts and wrong doors cost 5 points, early closing and missed watches 2. Exam: /fta license exam guard</black>"
     driver:
       title: "FTCA Driver Handbook"
       author: "Fetarute"

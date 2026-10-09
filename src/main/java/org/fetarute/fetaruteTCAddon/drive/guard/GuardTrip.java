@@ -20,6 +20,7 @@ public final class GuardTrip {
   private final Instant startedAt;
   private final List<Worked> stops = new ArrayList<>();
   private double blocks;
+  private boolean examined;
 
   /** 做过作业的一站：作业记录到结算时才折成成绩（出站监视在离站后还要采样一会儿）。 */
   private record Worked(String station, GuardStopWork work) {}
@@ -73,6 +74,15 @@ public final class GuardTrip {
     }
   }
 
+  /** 这一趟有车掌考试中做的站：不发奖励。 */
+  public boolean examined() {
+    return examined;
+  }
+
+  public void markExamined() {
+    this.examined = true;
+  }
+
   /** 做过停站作业：值得结算。 */
   public boolean hasStops() {
     return !stops.isEmpty();
@@ -91,7 +101,7 @@ public final class GuardTrip {
   public static DriverTask.State stateFor(GuardSession.EndReason reason) {
     return switch (reason) {
       case COMMAND, OFFLINE, DEATH, GAME_MODE -> DriverTask.State.ABANDONED;
-      case TRAIN_GONE, DISABLED, ADMIN -> DriverTask.State.INTERRUPTED;
+      case TRAIN_GONE, DISABLED, ADMIN, EXAM -> DriverTask.State.INTERRUPTED;
       case TIMEOUTS, LEFT_BEHIND, CAB_CHANGE -> DriverTask.State.FAILED;
     };
   }

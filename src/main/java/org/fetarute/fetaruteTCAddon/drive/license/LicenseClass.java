@@ -13,11 +13,11 @@ import java.util.Objects;
  * @param enabled 是否开放考试与发证
  * @param requires 考这一级前要先持有的等级
  * @param exam 考试方式
- * @param examStops 路考区间要开过几个停车站（{@link Exam#ROAD_TEST}）
- * @param minPoints 路考及格分（0–100）
+ * @param examStops 路考区间要开过几个停车站（{@link Exam#ROAD_TEST}）；车掌考试要做满几站作业（{@link Exam#GUARD}）
+ * @param minPoints 路考与车掌考试的及格分（0–100）
  * @param allowEmergency 路考中触发紧急制动是否仍可及格
  * @param allowOverrun 路考中停过头、越站是否仍可及格
- * @param allowWrongDoor 路考中开错门是否仍可及格
+ * @param allowWrongDoor 路考、车掌考试中开错门是否仍可及格
  * @param trainingRuns 报名路考前至少要完整开完几次练习（0 为不强制）
  * @param grants 持证时给的权限节点（子节点随之生效）
  */
@@ -41,7 +41,9 @@ public record LicenseClass(
     /** 在非调度列车上完整做完新手教程（不跳过练习步骤）。 */
     TUTORIAL,
     /** 路考：驾驶一段调度列车的区间任务，按成绩判定。 */
-    ROAD_TEST;
+    ROAD_TEST,
+    /** 车掌：在调度列车上值乘，做满几站作业后按车掌成绩判定。 */
+    GUARD;
 
     /** 按配置写法解析（旧写法 {@code dispatch} 照认）；认不出时为空。 */
     public static Exam parse(String raw) {
@@ -51,6 +53,7 @@ public record LicenseClass(
       return switch (raw.trim().toLowerCase(Locale.ROOT)) {
         case "tutorial" -> TUTORIAL;
         case "road-test", "dispatch" -> ROAD_TEST;
+        case "guard" -> GUARD;
         default -> null;
       };
     }

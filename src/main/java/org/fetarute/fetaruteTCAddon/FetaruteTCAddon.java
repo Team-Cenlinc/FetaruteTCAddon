@@ -513,12 +513,14 @@ public final class FetaruteTCAddon extends JavaPlugin {
                 manager::chooseLevel),
             this);
     driveSessionManager.start();
-    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试。
+    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试，车掌每做完一站讲评、判定车掌考试。
     this.licenseService =
         new LicenseService(this, () -> driveSessionManager, driveSessionManager.config().license());
     getServer().getPluginManager().registerEvents(licenseService, this);
     driveSessionManager.tutorials().onFinished(licenseService::onTutorialFinished);
     driveSessionManager.tutorials().onForfeit(licenseService::onTutorialForfeit);
+    LicenseService examiner = licenseService;
+    driveSessionManager.guards().ifPresent(guards -> guards.setExaminer(examiner));
     licenseService.start();
   }
 

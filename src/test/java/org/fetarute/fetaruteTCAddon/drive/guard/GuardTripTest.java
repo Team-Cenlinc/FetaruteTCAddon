@@ -68,6 +68,10 @@ class GuardTripTest {
     assertEquals(DriverTask.State.FAILED, GuardTrip.stateFor(GuardSession.EndReason.TIMEOUTS));
     assertEquals(DriverTask.State.FAILED, GuardTrip.stateFor(GuardSession.EndReason.LEFT_BEHIND));
     assertEquals(DriverTask.State.FAILED, GuardTrip.stateFor(GuardSession.EndReason.CAB_CHANGE));
+    assertEquals(
+        DriverTask.State.INTERRUPTED,
+        GuardTrip.stateFor(GuardSession.EndReason.EXAM),
+        "考试没过被撤下：考试中的这一趟本来就不发");
     assertTrue(GuardTrip.rewarded(DriverTask.State.COMPLETED));
     assertTrue(GuardTrip.rewarded(DriverTask.State.ABANDONED));
     assertTrue(GuardTrip.rewarded(DriverTask.State.INTERRUPTED));

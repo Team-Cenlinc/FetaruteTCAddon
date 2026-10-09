@@ -2299,6 +2299,7 @@ drive:
       disabled: "<prefix> <yellow>车掌功能已关闭，值乘已结束</yellow>"
       admin: "<prefix> <yellow>管理员已结束你的值乘</yellow>"
       cab-change: "<prefix> <red>换端时未能坐进车尾驾驶室，值乘已结束（未完成）</red> <gray>完成 <stops> 站</gray>"
+      exam: "<prefix> <yellow>车掌考试未通过，值乘已结束</yellow>"
     timeout:
       open: "<red>开门超时，已由站台代开车门</red>"
       close: "<red>关门超时，已由站台代关车门</red>"
@@ -2369,6 +2370,7 @@ drive:
     result: "<prefix> <gold>车掌</gold> 车次 <white><trip></white> <gray><state></gray>：<white><points></white> 分 <gold><grade></gold>"
     result-subtitle: "<gray>车掌 · <trip> · <state> · <points> 分</gray>"
     result-untracked: "<prefix> <gray>本列车未按时刻表运行，本趟只给成绩，不记录、不发奖励</gray>"
+    result-exam: "<prefix> <gray>车掌考试中的这一趟不发奖励</gray>"
     sheet:
       forced-open: "<gray>· <station></gray> <red>开门超时，站台代开 −5</red>"
       forced-close: "<gray>· <station></gray> <red>关门超时，站台代关 −5</red>"
@@ -2714,6 +2716,27 @@ drive:
     next: "<prefix> <white>下一级：第 <level> 级 · <aqua><name></aqua></white> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><green>[报名考试]</green></hover></click>"
     top: "<prefix> <gold>你已取得全部等级的驾驶证</gold>"
     exam:
+      guard:
+        stop: "<prefix> <gray>车掌考试 <done>/<total></gray> <white><station></white> <gray>开门</gray> <open> <gray>关门</gray> <close> <gray>关门监视</gray> <closing> <gray>发车信号</gray> <signal> <gray>出站监视</gray> <departure>"
+        passed: "<prefix> <green><bold>车掌考试及格</bold></green> <white><reason>，已取得第 <level> 级 · <name></white>"
+        failed: "<prefix> <red><bold>车掌考试未通过</bold></red> <white><reason></white>"
+        void: "<prefix> <yellow>本次车掌考试不计成绩：<reason></yellow>"
+        reason:
+          timeout: "在 <station> 超时，由站台代做"
+          wrong-door: "在 <station> 开错了车门"
+          points: "得分 <points>，未达到及格线 <min> 分"
+          passed: "得分 <points>"
+          timeouts: "连续多站超时，值乘已结束"
+          left-behind: "列车开走时未在车上（漏乘）"
+          cab-change: "终点站换端时未能坐进车尾驾驶室"
+          ended: "值乘提前结束"
+        tip:
+          timeout: "<prefix> <gray>要领：停妥后尽快开站台一侧的车门，停站时间到即关门；门全关后回座，出站信号开放时确认并按住发车铃。动作栏随时提示下一步与剩余秒数。</gray>"
+          wrong-door: "<prefix> <gray>要领：开门前看动作栏提示的开门方向，左右以你面朝的方向为准。</gray>"
+          points: "<prefix> <gray>要领：关门时到站台上注视车门；起步后朝站台一侧或车后看，直到车尾离开站台；停站时间未到不要关门。</gray>"
+          timeouts: "<prefix> <gray>要领：每一步都有时限，超时由站台代做；遇夹人夹物等情况可按异常报告延长时限。</gray>"
+          left-behind: "<prefix> <gray>要领：关门后及时回到车掌座位，发车信号发出前不要离开列车。</gray>"
+          cab-change: "<prefix> <gray>要领：终点站折返时按提示走到另一头的驾驶室，或在车掌菜单点“传送入座”。</gray>"
       unknown-class: "<prefix> <red>没有这一级驾驶证：<white><class></white></red>"
       already-held: "<prefix> <yellow>你已持有<white><name></white>，无需再考</yellow>"
       requires: "<prefix> <red>报考<white><name></white>须先取得：<white><required></white></red>"
@@ -2772,6 +2795,14 @@ drive:
         ato: "<prefix> <yellow>路考：已转为 ATO，本次不计成绩</yellow>"
         hint: "<prefix> <gray>可继续开到交班站作为练习，也可以输入 /fta drive task abandon 结束考试。</gray>"
       brief:
+        guard:
+          header: "<prefix> <gold><bold>第 <level> 级 · <name> 考试</bold></gold>"
+          duties: "<prefix> <white>考试内容：</white><gray>在调度列车上值乘 <stops> 站，每站完成开门（站台一侧）、停站时间到后关门、关门监视、回座确认出站信号并按发车铃、出站监视。</gray>"
+          watch: "<prefix> <white>讲评：</white><gray>每做完一站逐项讲评：开门、关门、关门监视、发车信号、出站监视。</gray>"
+          pass: "<prefix> <white>及格：</white><gray>做满 <stops> 站且得分不低于 <min> 分；任何一站超时（站台代开、代关或代发发车信号）即不及格。</gray>"
+          no-wrong-door: "<prefix> <white>注意：</white><gray>开错车门即不及格。</gray>"
+          how: "<prefix> <white>开始方式：</white><gray>在 <minutes> 分钟内坐进任一调度列车车尾的驾驶室，输入 <aqua>/fta guard on</aqua> 上岗；考试期间临时开放车掌权限，考完或超时后收回。</gray>"
+          handbook: "<prefix> <white>学习：</white><gray>《FTCA 车掌手册》已放进背包，上岗前请先读一遍。</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>再领一本车掌手册</gray>'><aqua>[车掌手册]</aqua></hover></click>"
         tutorial:
           header: "<prefix> <gold><bold>第 <level> 级 · <name> 考试</bold></gold>"
           content: "<prefix> <white>考试内容：</white><gray>完成全部新手教程。教程将逐步引导你完成启动列车、换向、起步、惰行、制动停车、开关车门与紧急制动。</gray>"
@@ -2792,6 +2823,7 @@ drive:
       expired: "<prefix> <yellow><white><name></white>路考练习已超时，可以重新报名</yellow>"
       in-progress: "<prefix> <yellow>你正在进行<white><name></white>路考练习，请先完成本次练习</yellow> <click:run_command:'/fta drive task abandon'><hover:show_text:'<gray>放弃本次练习（不计练习次数）</gray>'><gray>[放弃本次练习]</gray></hover></click>"
       not-road: "<prefix> <yellow><white><name></white>的考试内容为新手教程，没有路考练习；可随时输入 /fta drive tutorial start 练习教程</yellow>"
+      not-guard: "<prefix> <yellow><white><name></white>没有单独的练习：报名考试后每站都会逐项讲评，可先阅读《FTCA 车掌手册》</yellow> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>领取车掌手册</gray>'><aqua>[车掌手册]</aqua></hover></click>"
       no-trip-routes: "<prefix> <yellow><white><station></white> 近期没有练习线路（<white><routes></white>）的车次，请到练习线路的车站报名</yellow>"
       brief:
         header: "<prefix> <gold><bold>第 <level> 级 · <name> 路考练习</bold></gold>"
@@ -2878,6 +2910,7 @@ drive:
       level-practice-running: "  <yellow>…</yellow> <white>第 <level> 级 · <name></white> <yellow>路考练习中</yellow>"
       level-need-practice: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>报名路考前须完成路考练习（<done>/<required> 次）</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"
       level-open-tutorial: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>考试：完整做完新手教程</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><green>[报名考试]</green></hover></click>"
+      level-open-guard: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>车掌值乘 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><green>[报名考试]</green></hover></click>"
       level-open-road-test: "  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>路考 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（不发证）</gray>'><aqua>[练习]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click>"
       level-locked: "  <dark_gray>○ 第 <level> 级 · <name>（须先取得<required>）</dark_gray>"
       level-closed: "  <dark_gray>○ 第 <level> 级 · <name>（暂未开放）</dark_gray>"
@@ -2903,6 +2936,16 @@ drive:
       class: "<black>· <name></black>\n  <dark_gray><date></dark_gray>"
       notice: "<black>本证全服通用，可驾驶全部 FTCA 列车。</black>\n\n<dark_gray>驾驶权限以系统记录为准，本证仅作凭证。遗失可输入 /fta license reissue 补发。\n\n查看等级与报名考试：/fta license</dark_gray>"
   handbook:
+    guard:
+      title: "FTCA 车掌手册"
+      author: "Fetarute"
+      given: "<prefix> <green>《FTCA 车掌手册》已放进背包</green>"
+      page-1: "<dark_blue><bold>FTCA 车掌手册</bold></dark_blue>\n\n<black>一、上岗与座位\n二、站停作业\n三、关门与监视\n四、发车铃与紧急停车\n五、终点、成绩与考试</black>"
+      page-2: "<dark_blue><bold>一、上岗与座位</bold></dark_blue>\n<black>坐进调度列车车尾的驾驶室，输入 /fta guard on 上岗（单节车坐另一头）。车掌座位为你预留，他人不能坐。快捷栏换成车掌按钮，F 打开车掌菜单；/fta guard off 结束值乘。</black>"
+      page-3: "<dark_blue><bold>二、站停作业</bold></dark_blue>\n<black>停妥后按开门键开站台一侧的车门（1 左、2 右，以你面朝的方向为准），随后可下车到站台。停站时间到后按 3 关门。开门限 30 秒、关门限 15 秒，超时由站台代做并记一次超时；连续 3 站超时，值乘结束。夹人夹物等情况按 4 报告，时限延长 30 秒。</black>"
+      page-4: "<dark_blue><bold>三、关门与监视</bold></dark_blue>\n<black>关门时站在站台上、靠近自己那节车门，视线沿车身注视车门，直到车门关好。门全关后回到车掌座位。列车起步后朝站台一侧或车后看，直到车尾离开站台。两项监视计入成绩。</black>"
+      page-5: "<dark_blue><bold>四、发车铃与紧急停车</bold></dark_blue>\n<black>回座后，出站信号开放时按 6 确认，再按住 7 约一秒（一长声）发出发车信号；一短为收到，连按两下为呼叫驾驶员。出站信号未开放时不计时。行驶中遇危险按 9 紧急停车，停稳后按住发车铃一长声解除。</black>"
+      page-6: "<dark_blue><bold>五、终点、成绩与考试</bold></dark_blue>\n<black>终点站折返时换到另一头的驾驶室；驾驶员换端时两人一同换座，时间不足时直接送入。每站作业计分：超时、开错门各扣 5 分，提前关门、监视不合格各扣 2 分。考车掌证：/fta license exam guard</black>"
     driver:
       title: "FTCA 驾驶员手册"
       author: "Fetarute"
