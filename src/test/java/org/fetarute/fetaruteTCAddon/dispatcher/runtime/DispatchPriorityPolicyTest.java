@@ -32,4 +32,22 @@ final class DispatchPriorityPolicyTest {
         DispatchPriorityPolicy.RETURN_OFFSET,
         DispatchPriorityPolicy.depotSpawnPriority(RouteOperationType.RETURN, 0));
   }
+
+  /** 叫车票与叫来的车不论交路类型都排在回库车之后。 */
+  @Test
+  void calledTrainsRankLowestWhateverTheRoute() {
+    for (RouteOperationType type : RouteOperationType.values()) {
+      assertEquals(
+          DispatchPriorityPolicy.CALLED_OFFSET,
+          DispatchPriorityPolicy.depotSpawnPriority(type, 0, true));
+      assertEquals(
+          DispatchPriorityPolicy.CALLED_OFFSET,
+          DispatchPriorityPolicy.operationOffset(type, false, true));
+      assertEquals(
+          DispatchPriorityPolicy.depotSpawnPriority(type, 0),
+          DispatchPriorityPolicy.depotSpawnPriority(type, 0, false),
+          "不是叫车票时与原来一样");
+    }
+    assertTrue(DispatchPriorityPolicy.CALLED_OFFSET < DispatchPriorityPolicy.RETURN_OFFSET);
+  }
 }

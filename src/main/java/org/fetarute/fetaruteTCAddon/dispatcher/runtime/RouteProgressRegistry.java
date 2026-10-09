@@ -99,23 +99,55 @@ public final class RouteProgressRegistry {
   /**
    * 根据 tags 初始化列车进度。
    *
-   * <p>当 tag 缺失时回退为 0。
+   * <p>当 tag 缺失时回退为 0。交路中途生成、还没离开生成点的车（见 {@link #entrySpawnNode}），最后经过的图节点记为生成点：
+   * 生成点不在交路节点表里时，运行时据此从生成点、而不是从身后的交路节点起算授权。
    */
   public RouteProgressEntry initFromTags(
       String trainName, TrainProperties properties, RouteDefinition route) {
     Objects.requireNonNull(route, "route");
     String normalizedName = requireTrainName(trainName);
     int index = TrainTagHelper.readIntTag(properties, TAG_ROUTE_INDEX).orElse(0);
+    Instant now = Instant.now();
     RouteProgressEntry entry =
         upsert(
             normalizedName,
             parseRouteId(properties).orElse(null),
             route,
             index,
-            Instant.now(),
+            now,
             Optional.empty());
+    Optional<NodeId> spawnedAt = entrySpawnNode(properties, route, entry.currentIndex());
+    if (spawnedAt.isPresent() && updateLastPassedGraphNode(normalizedName, spawnedAt.get(), now)) {
+      entry = get(normalizedName).orElse(entry);
+    }
     TrainTagHelper.writeTag(properties, TAG_TRAIN_NAME, normalizedName);
     return entry;
+  }
+
+  /**
+   * 交路中途生成、还没离开生成点的车的生成点：进度在首节点之后、生成位置标记仍是 pending、生成点（{@code FTA_DEPOT_ID}）不是这个下标处的交路节点。
+   * 是交路节点时为空（照常按交路节点认位置）。
+   */
+  static Optional<NodeId> entrySpawnNode(
+      TrainProperties properties, RouteDefinition route, int currentIndex) {
+    if (properties == null
+        || route == null
+        || currentIndex <= 0
+        || currentIndex >= route.waypoints().size() - 1) {
+      return Optional.empty();
+    }
+    boolean pending =
+        TrainTagHelper.readTagValue(properties, TrainSpawnTagInitializer.TAG_SPAWN_ORIGIN_PENDING)
+            .map(value -> Boolean.parseBoolean(value.trim()))
+            .orElse(false);
+    if (!pending) {
+      return Optional.empty();
+    }
+    return TrainTagHelper.readTagValue(properties, "FTA_DEPOT_ID")
+        .map(String::trim)
+        .filter(value -> !value.isEmpty())
+        .map(NodeId::of)
+        .filter(node -> !node.equals(route.waypoints().get(currentIndex)));
   }
 
   /**

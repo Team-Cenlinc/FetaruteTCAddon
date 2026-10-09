@@ -95,6 +95,42 @@ class DispatchPriorityResolverTest {
     assertEquals(-10, ret.policyAdjustment());
   }
 
+  /** 叫来的车（含回库途中）排在所有车之后：偏移 −20，比回库车还低。 */
+  @Test
+  void calledTrainsRankBelowReturnTrains() {
+    Fixture operation = fixture(RouteOperationType.OPERATION, 5, "OPR");
+    Fixture returning = fixture(RouteOperationType.RETURN, 5, "RET");
+
+    DispatchPriorityResolution called =
+        operation
+            .resolver(new ArrayList<>())
+            .resolve(
+                "test",
+                "train-called",
+                trainProperties(
+                    "train-called",
+                    "FTA_ROUTE_ID=" + operation.routeId(),
+                    "FTA_ROUTE_INDEX=0",
+                    "FTA_CALL=00000000-0000-0000-0000-000000000001@SURC:PPK"),
+                operation.routeDefinition());
+    DispatchPriorityResolution calledReturning =
+        returning
+            .resolver(new ArrayList<>())
+            .resolve(
+                "test",
+                "train-called-return",
+                trainProperties(
+                    "train-called-return",
+                    "FTA_ROUTE_ID=" + returning.routeId(),
+                    "FTA_ROUTE_INDEX=0",
+                    "FTA_CALL=00000000-0000-0000-0000-000000000001@SURC:PPK"),
+                returning.routeDefinition());
+
+    assertEquals(-15, called.priority());
+    assertEquals(DispatchPriorityPolicy.CALLED_OFFSET, called.policyAdjustment());
+    assertEquals(-15, calledReturning.priority(), "回库途中同一档");
+  }
+
   @Test
   void codeTagsResolveOperationTypeWhenRouteUuidIsMissing() {
     Fixture fixture = fixture(RouteOperationType.OPERATION, 4, "OPR");

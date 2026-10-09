@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 
 /**
@@ -69,6 +70,9 @@ public final class StationStopCoordinator {
   /** 当前放宽了线路限速的车。只用来在进入/退出时各留一行审计，不参与判定。 */
   private final ConcurrentMap<String, Boolean> overspeedEngaged = new ConcurrentHashMap<>();
 
+  /** 叫来的车按需降速。 */
+  private final CalledTrainPacer calledTrainPacer;
+
   /**
    * 晚点追赶参数。
    *
@@ -100,6 +104,7 @@ public final class StationStopCoordinator {
       Function<TrainProperties, Optional<UUID>> routeUuids) {
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
     this.clock = clock == null ? Instant::now : clock;
+    this.calledTrainPacer = new CalledTrainPacer(this.debugLogger, this.clock);
     this.routeDefinitions = routeDefinitions;
     this.managedTrains = managedTrains;
     this.trainNames = trainNames;
@@ -505,16 +510,60 @@ public final class StationStopCoordinator {
   }
 
   /**
-   * 线路限速倍率：本车次最近一次到发晚点达到阈值时放宽线路限速，赶上计划（或早于阈值）即恢复。
+   * 线路限速倍率：本车次最近一次到发晚点达到阈值时放宽线路限速，赶上计划（或早于阈值）即恢复；叫来的车追近前车时按需降速 （{@link CalledTrainPacer}）。
    *
-   * <p>控车每个信号 tick 都会问。倍率只作用于写明的线路限速（见 {@code
+   * <p>控车每个信号 tick 都会问。放宽只作用于写明的线路限速，降速作用于最终的边限速（见 {@code
    * RailGraphService#effectiveSpeedLimitBlocksPerSecond(UUID, RailEdge, Instant, double, double)}），
-   * 进站限速、临时限速、CAUTION 与信号速度都不受影响；制动距离与移动授权按实际车速算，跑得快只会刹得早。 晚点只在到发时更新，所以同一区间内倍率不会来回跳。
+   * 进站限速、CAUTION 与信号速度都不受影响；制动距离与移动授权按实际车速算，跑得快只会刹得早。 晚点只在到发时更新，所以同一区间内倍率不会来回跳。
    *
    * @param trainName 列车名
-   * @return 倍率；不放宽时为 1
+   * @return 倍率；不放宽也不降速时为 1
    */
   public double lineSpeedFactor(String trainName) {
+    return recoveryFactor(trainName) * calledTrainPacer.factor(trainName);
+  }
+
+  /**
+   * 装上叫来的车按需降速的参数。
+   *
+   * @param settings 参数；{@code null} 表示不降速
+   */
+  public void setCalledTrainPacing(CalledTrainPacer.Settings settings) {
+    calledTrainPacer.setSettings(settings);
+  }
+
+  /**
+   * 装上“叫来的车身后有车追近”的判定（按到站预计算的后车间隔，补前瞻窗口看不到的远处后车）。
+   *
+   * @param rearClose 列车名 → 身后有车追近；{@code null} 表示只看前瞻
+   */
+  public void setCalledTrainRearCheck(Predicate<String> rearClose) {
+    calledTrainPacer.setRearCheck(rearClose);
+  }
+
+  /**
+   * 信号 tick 的前瞻结果：叫来的车据此按需降速（{@link CalledTrainPacer#observe}）。
+   *
+   * @param decision 前瞻用的占用判定
+   * @param blockerDistance 到首个阻塞资源的距离；前瞻没有阻塞时为空
+   * @param speedBps 本车车速（格/秒）
+   */
+  public void observeLookahead(
+      String trainName,
+      TrainProperties properties,
+      OccupancyDecision decision,
+      OptionalLong blockerDistance,
+      double speedBps) {
+    try {
+      calledTrainPacer.observe(
+          trainName, properties, decision, blockerDistance, speedBps, clock.get());
+    } catch (RuntimeException ex) {
+      debugLogger.accept("CALL_PACING_OBSERVE_FAILED train=" + trainName + " error=" + ex);
+    }
+  }
+
+  /** 晚点追赶的线路限速倍率（见 {@link #lineSpeedFactor}）。 */
+  private double recoveryFactor(String trainName) {
     Recovery current = this.recovery;
     ScheduledDeparturePlan source = this.plan;
     String key = holdKey(trainName);

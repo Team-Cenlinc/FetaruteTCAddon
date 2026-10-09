@@ -14,6 +14,7 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
@@ -42,13 +43,16 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnServiceKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.storage.StorageManager;
@@ -288,7 +292,7 @@ class CallRestoreTest {
     verify(spawnManager).requeue(any());
   }
 
-  /** 按表运行打开时找回不接待命车：刚重启时账本是空的，首站那辆车看着没绑交路，其实多半还担着时刻表的班。 */
+  /** 按表运行打开时找回只接叫来的待命车：刚重启时账本是空的，首站那辆车看着没绑交路，其实多半还担着时刻表的班。 */
   @Test
   void restoreDoesNotTakeAStandbyTrainWhenTheTimetableIsOn() {
     PendingCallRecord call = standbyOnlyRoute();
@@ -304,6 +308,186 @@ class CallRestoreTest {
 
     verify(spawnManager, never()).requeue(any());
     verify(stored).delete(call.id());
+  }
+
+  /** 按表运行打开时，首站等着的是叫来的车（车上有叫车标签，重启后照样认得）：找回可以接它。 */
+  @Test
+  void restoreTakesACalledStandbyTrainWhenTheTimetableIsOn() {
+    PendingCallRecord call = standbyOnlyRoute();
+    LayoverRegistry registry = new LayoverRegistry();
+    registry.register(
+        "called-1",
+        "surc:s:aaa:1",
+        NodeId.of("SURC:S:AAA:1"),
+        T.minusSeconds(60),
+        Map.of(SimpleTicketAssigner.TAG_CALLED_TRAIN, UUID.randomUUID() + "@SURC:NTA"));
+    when(plugin.getLayoverRegistry()).thenReturn(Optional.of(registry));
+    TimetableService timetable = mock(TimetableService.class);
+    when(timetable.settings())
+        .thenReturn(
+            new TimetableService.Settings(
+                true, true, Duration.ZERO, Duration.ofSeconds(300), Duration.ZERO));
+    when(timetable.dutyBindingOf(any())).thenReturn(Optional.empty());
+    when(plugin.getTimetableService()).thenReturn(Optional.of(timetable));
+
+    new CallService(plugin).restorePending(T);
+
+    ArgumentCaptor<SpawnTicket> ticket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(ticket.capture());
+    assertEquals(call.id(), ticket.getValue().id());
+  }
+
+  /** 车库让表定：同一出库点 3 分钟内有表定出库时不从车库出车，区间生成也不行（这里没有调度图）就排不出车；区间生成一直不成时也不改走车库。 */
+  @Test
+  void theDepotYieldsToATimetableDeparture() {
+    storedCall(T.minusSeconds(30));
+    // 找回按叫车服务给的时刻判，改走车源按此刻判：两处各放一班
+    TimetableService timetable =
+        timetableWithDeparture(T.plusSeconds(60), Instant.now().plusSeconds(60));
+    when(plugin.getTimetableService()).thenReturn(Optional.of(timetable));
+    CallService service = new CallService(plugin);
+
+    service.restorePending(T);
+
+    verify(spawnManager, never()).requeue(any());
+    assertTrue(!service.allowsDepotSpawn(ticketOnRoute()), "车库要让给表定出库，不改走车库");
+  }
+
+  /** 表定出库在 3 分钟开外：车库照常出车（对照）。 */
+  @Test
+  void aLaterTimetableDepartureDoesNotBlockTheDepot() {
+    storedCall(T.minusSeconds(30));
+    TimetableService timetable =
+        timetableWithDeparture(
+            T.plus(CallService.DEPOT_YIELD_AHEAD).plusSeconds(60),
+            Instant.now().plus(CallService.DEPOT_YIELD_AHEAD).plusSeconds(60));
+    when(plugin.getTimetableService()).thenReturn(Optional.of(timetable));
+    CallService service = new CallService(plugin);
+
+    service.restorePending(T);
+
+    verify(spawnManager).requeue(any());
+    assertTrue(service.allowsDepotSpawn(ticketOnRoute()));
+  }
+
+  /** 按表运行打开、同一车库的这条交路在 {@code departures} 各有一班表定出库。 */
+  private TimetableService timetableWithDeparture(Instant... departures) {
+    TimetableService timetable = mock(TimetableService.class);
+    when(timetable.settings())
+        .thenReturn(
+            new TimetableService.Settings(
+                true, true, Duration.ZERO, Duration.ofSeconds(300), Duration.ZERO));
+    when(timetable.dutyBindingOf(any())).thenReturn(Optional.empty());
+    UUID timetableId = UUID.randomUUID();
+    TimetableTrip trip =
+        new TimetableTrip(UUID.randomUUID(), timetableId, routeId, 0, "T1", 0, Optional.empty());
+    when(timetable.tripsBetween(any(), any()))
+        .thenAnswer(
+            invocation -> {
+              Instant from = invocation.getArgument(0);
+              Instant to = invocation.getArgument(1);
+              List<TimetableService.DueTrip> due = new ArrayList<>();
+              for (Instant at : departures) {
+                if (at.isAfter(from) && !at.isAfter(to)) {
+                  due.add(
+                      new TimetableService.DueTrip(
+                          mock(Timetable.class), trip, LocalDate.of(2026, 10, 9), at));
+                }
+              }
+              return due;
+            });
+    when(timetable.legsBetween(any(), any())).thenReturn(List.of());
+    return timetable;
+  }
+
+  private SpawnTicket ticketOnRoute() {
+    return new SpawnTicket(
+        UUID.randomUUID(),
+        new SpawnService(
+            new SpawnServiceKey(routeId),
+            UUID.randomUUID(),
+            "SURC",
+            operator.id(),
+            "SURC",
+            line.id(),
+            "WS",
+            routeId,
+            "WS-N",
+            Duration.ofMinutes(10),
+            "SURC:D:DEP:1"),
+        T,
+        T,
+        T,
+        0,
+        0L,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        TripSource.ON_DEMAND,
+        0,
+        Optional.empty());
+  }
+
+  /** 回库途中的叫来的车（跑上别的回库交路）：叫车标签留着（时刻表照样不管它），不算线路的叫车车数；还在跑叫车那一趟的照常算（对照）。 */
+  @Test
+  void returningCalledTrainsKeepTheirTagButFreeTheLineLimit() {
+    UUID returnRouteId = UUID.randomUUID();
+    Route returnRoute =
+        new Route(
+            returnRouteId,
+            "WS-D",
+            line.id(),
+            "WS-D",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.RETURN,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of(),
+            T,
+            T);
+    when(cache.findRecord(returnRouteId))
+        .thenReturn(Optional.of(new RouteDefinitionCache.RouteRecord(operator, line, returnRoute)));
+    TrainProperties first = calledTrain("ret-1", returnRouteId);
+    TrainProperties second = calledTrain("ret-2", returnRouteId);
+    CallService returning = new CallService(plugin);
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(TrainPropertiesStore::getAll).thenReturn(List.of(first, second));
+      returning.sweep(T);
+    }
+
+    assertTrue(returning.isCalledTrain("ret-1"), "回库途中仍是叫来的车");
+    verify(first, never()).removeTags(any(String[].class));
+    assertEquals(
+        CallRules.Outcome.AVAILABLE,
+        returning.options(PPK, Set.of(), Optional.empty(), T).get(0).verdict().outcome(),
+        "回库途中的两辆不占线路的叫车车数（上限 2）");
+
+    CallService serving = new CallService(plugin);
+    List<TrainProperties> running =
+        List.of(calledTrain("run-1", routeId), calledTrain("run-2", routeId));
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(TrainPropertiesStore::getAll).thenReturn(running);
+      serving.sweep(T);
+    }
+    assertEquals(
+        CallRules.Outcome.LINE_LIMIT,
+        serving.options(PPK, Set.of(), Optional.empty(), T).get(0).verdict().outcome(),
+        "还在跑叫车那一趟的两辆占满上限");
+  }
+
+  /** 一辆叫来的车：叫车跑的是本夹具的交路，此刻跑在 {@code currentRoute} 上。 */
+  private TrainProperties calledTrain(String name, UUID currentRoute) {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.getTrainName()).thenReturn(name);
+    when(properties.hasTags()).thenReturn(true);
+    when(properties.getTags())
+        .thenReturn(
+            List.of(
+                SimpleTicketAssigner.TAG_CALLED_TRAIN + "=" + UUID.randomUUID() + "@SURC:NTA",
+                "FTA_ROUTE_ID=" + currentRoute,
+                CallService.TAG_CALL_ROUTE + "=" + routeId));
+    return properties;
   }
 
   /** 不按表运行的线路：首站的待命车照常可接（对照）。 */

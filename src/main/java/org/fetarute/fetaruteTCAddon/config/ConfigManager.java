@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 40;
+  private static final int EXPECTED_CONFIG_VERSION = 41;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -210,7 +210,10 @@ public final class ConfigManager {
         readNonNegativeInt(
             section, "terminal-wait-seconds", defaults.terminalWaitSeconds(), "call", logger),
         readNonNegativeInt(
-            section, "default-max-trains", defaults.defaultMaxTrains(), "call", logger));
+            section, "default-max-trains", defaults.defaultMaxTrains(), "call", logger),
+        readNonNegativeInt(section, "min-lead-minutes", defaults.minLeadMinutes(), "call", logger),
+        readNonNegativeInt(
+            section, "follow-gap-seconds", defaults.followGapSeconds(), "call", logger));
   }
 
   /**
@@ -1684,19 +1687,29 @@ public final class ConfigManager {
    * @param cooldownSeconds 每位玩家两次叫车的最短间隔
    * @param terminalWaitSeconds 叫来的车到终点后等多久：期间沿途有人叫车、这趟经过就接着跑，否则派回库
    * @param defaultMaxTrains 线路没写 {@code call_max_trains} 时同时最多几辆叫来的车（含排队的叫车票）
+   * @param minLeadMinutes 叫来的车至少要比同方向下一班早到这么多分钟才能叫：早得不够多就只会把下一班压在后面晚点；0 表示不比
+   * @param followGapSeconds 叫来的车离前车不到这么多秒时按需降速（最低到线路限速的七成），后车追到 {@code minLeadMinutes} 以内时不降；0
+   *     表示不降速
    */
   public record CallSettings(
-      int minWaitMinutes, int cooldownSeconds, int terminalWaitSeconds, int defaultMaxTrains) {
+      int minWaitMinutes,
+      int cooldownSeconds,
+      int terminalWaitSeconds,
+      int defaultMaxTrains,
+      int minLeadMinutes,
+      int followGapSeconds) {
 
     public CallSettings {
       minWaitMinutes = Math.max(0, minWaitMinutes);
       cooldownSeconds = Math.max(0, cooldownSeconds);
       terminalWaitSeconds = Math.max(0, terminalWaitSeconds);
       defaultMaxTrains = Math.max(1, defaultMaxTrains);
+      minLeadMinutes = Math.max(0, minLeadMinutes);
+      followGapSeconds = Math.max(0, followGapSeconds);
     }
 
     public static CallSettings defaults() {
-      return new CallSettings(5, 60, 60, 2);
+      return new CallSettings(5, 60, 60, 2, 2, 60);
     }
   }
 

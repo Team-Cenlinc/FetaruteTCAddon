@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
@@ -28,7 +29,7 @@ class OnDemandSpawnTest {
 
   private static final Instant NOW = Instant.parse("2026-10-08T00:00:00Z");
 
-  /** 叫车票接叫来的车或没绑交路的车；别的票不接叫来的车。 */
+  /** 叫车票接叫来的车或没绑交路的车；按表运行的交路上只接叫来的车；别的票不接叫来的车。 */
   @Test
   void calledTrainsOnlyServeCalls() {
     LayoverRegistry.LayoverCandidate called =
@@ -39,13 +40,59 @@ class OnDemandSpawnTest {
 
     List<LayoverRegistry.LayoverCandidate> forCall =
         SimpleTicketAssigner.filterCalledTrains(
-            ticket(TripSource.ON_DEMAND), all, name -> name.startsWith("bound"));
+            ticket(TripSource.ON_DEMAND), all, name -> name.startsWith("bound"), route -> false);
+    List<LayoverRegistry.LayoverCandidate> forCallOnTimetable =
+        SimpleTicketAssigner.filterCalledTrains(
+            ticket(TripSource.ON_DEMAND), all, name -> name.startsWith("bound"), route -> true);
     List<LayoverRegistry.LayoverCandidate> forHeadway =
         SimpleTicketAssigner.filterCalledTrains(
-            ticket(TripSource.SCHEDULED), all, name -> name.startsWith("bound"));
+            ticket(TripSource.SCHEDULED), all, name -> name.startsWith("bound"), route -> true);
 
     assertEquals(List.of(called, free), forCall, "叫车票不抢绑着时刻表交路的车");
+    assertEquals(List.of(called), forCallOnTimetable, "按表运行的交路上只接叫来的车");
     assertEquals(List.of(free, bound), forHeadway, "别的票不接叫来的车");
+  }
+
+  /** 回库交路上的叫车票走区间生成，不落进回库票的折返复用；别的回库票照旧。 */
+  @Test
+  void returnRouteCallsTakeTheEntryPath() {
+    assertFalse(SimpleTicketAssigner.takesReturnBranch(RouteOperationType.RETURN, true));
+    assertTrue(SimpleTicketAssigner.takesReturnBranch(RouteOperationType.RETURN, false));
+    assertFalse(SimpleTicketAssigner.takesReturnBranch(RouteOperationType.OPERATION, false));
+  }
+
+  /** 区间生成试够了才改走交路本来的车源；回库交路、车库要让给表定出库时不改。 */
+  @Test
+  void entryFallbackRespectsReturnRoutesAndTheDepotGate() {
+    assertTrue(SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.OPERATION, true, true));
+    assertTrue(SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.CREATE, true, true));
+    assertFalse(
+        SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.OPERATION, false, true), "还没试够");
+    assertFalse(
+        SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.RETURN, true, true),
+        "回库交路没有别的车源");
+    assertFalse(
+        SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.OPERATION, true, false),
+        "车库要让给表定出库");
+  }
+
+  /** 生成点在两个交路节点之间：入路下标处换成生成点，授权与首个 destination 从它算；生成点就是交路节点时原样。 */
+  @Test
+  void entryBetweenRouteNodesReplacesTheIndexNode() {
+    List<NodeId> nodes = List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C"), NodeId.of("D"));
+
+    assertEquals(
+        List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("X"), NodeId.of("D")),
+        SimpleTicketAssigner.entrySpawnWaypoints(
+            nodes, new OnDemandTrip.Entry(2, Optional.of(NodeId.of("X")))));
+    assertEquals(
+        nodes,
+        SimpleTicketAssigner.entrySpawnWaypoints(
+            nodes, new OnDemandTrip.Entry(2, Optional.empty())));
+    assertEquals(
+        nodes,
+        SimpleTicketAssigner.entrySpawnWaypoints(
+            nodes, new OnDemandTrip.Entry(2, Optional.of(NodeId.of("C")))));
   }
 
   /** 区间生成：首个 destination 是生成点的下一个节点。 */

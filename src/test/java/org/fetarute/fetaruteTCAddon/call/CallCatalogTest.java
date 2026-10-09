@@ -161,6 +161,109 @@ class CallCatalogTest {
     assertTrue(directions.get(0).routes().get(0).fromDepot());
   }
 
+  /** 出库交路（首站是车库、沿途停站）也能叫：从车库出车；首站不是车库的出库交路出不了车，不列。 */
+  @Test
+  void createRoutesFromTheDepotAreCallable() {
+    UUID routeId = UUID.randomUUID();
+    List<String> nodes = List.of("SURC:D:DEP:3", "SURC:S:PPK:1", "SURC:S:NTA:1");
+    List<RouteStop> stops = new ArrayList<>();
+    stops.add(
+        new RouteStop(
+            routeId,
+            0,
+            Optional.empty(),
+            Optional.of(nodes.get(0)),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET SURC:D:DEP:3")));
+    stops.add(stop(routeId, 1, nodes.get(1), RouteStopPassType.STOP));
+    stops.add(stop(routeId, 2, nodes.get(2), RouteStopPassType.TERMINATE));
+    UUID bareId = UUID.randomUUID();
+    List<String> bareNodes = List.of("SURC:S:AAA:1", "SURC:S:PPK:1", "SURC:S:BBB:1");
+    List<RouteStop> bareStops =
+        List.of(
+            stop(bareId, 0, bareNodes.get(0), RouteStopPassType.STOP),
+            stop(bareId, 1, bareNodes.get(1), RouteStopPassType.STOP),
+            stop(bareId, 2, bareNodes.get(2), RouteStopPassType.TERMINATE));
+
+    List<CallCatalog.CallDirection> directions =
+        CallCatalog.directions(
+            List.of(
+                entry(
+                    routeId,
+                    WS,
+                    "WS-F",
+                    RoutePatternType.LOCAL,
+                    RouteOperationType.CREATE,
+                    nodes,
+                    stops),
+                entry(
+                    bareId,
+                    WS,
+                    "WS-X",
+                    RoutePatternType.LOCAL,
+                    RouteOperationType.CREATE,
+                    bareNodes,
+                    bareStops)),
+            null,
+            line -> true,
+            PPK,
+            Set.of());
+
+    assertEquals(1, directions.size(), "首站不是车库的出库交路不列");
+    assertEquals(new PidsStationKey("SURC", "NTA"), directions.get(0).destination());
+    assertEquals(CallCatalog.Origin.DEPOT, directions.get(0).routes().get(0).origin());
+  }
+
+  /** 沿途停站的回库交路也能叫：开往最后一个载客站，只区间生成；车库那一段不算终点；前两站按构造没有车源，不列。 */
+  @Test
+  void returnRoutesCarryingPassengersAreEntryOnly() {
+    UUID routeId = UUID.randomUUID();
+    List<String> nodes =
+        List.of("SURC:S:NTA:2", "SURC:S:BBB:2", "SURC:S:PPK:2", "SURC:S:AAA:2", "SURC:D:DEP:1");
+    List<RouteStop> stops = new ArrayList<>();
+    stops.add(stop(routeId, 0, nodes.get(0), RouteStopPassType.STOP));
+    stops.add(stop(routeId, 1, nodes.get(1), RouteStopPassType.STOP));
+    stops.add(stop(routeId, 2, nodes.get(2), RouteStopPassType.STOP));
+    stops.add(stop(routeId, 3, nodes.get(3), RouteStopPassType.TERMINATE));
+    stops.add(
+        new RouteStop(
+            routeId,
+            4,
+            Optional.empty(),
+            Optional.of(nodes.get(4)),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("DSTY SURC:D:DEP:1")));
+    List<RouteDefinitionCache.RouteEntry> entries =
+        List.of(
+            entry(
+                routeId,
+                MT,
+                "MT-D",
+                RoutePatternType.LOCAL,
+                RouteOperationType.RETURN,
+                nodes,
+                stops));
+
+    List<CallCatalog.CallDirection> directions =
+        CallCatalog.directions(entries, null, line -> true, PPK, Set.of());
+
+    assertEquals(1, directions.size());
+    assertEquals(new PidsStationKey("SURC", "AAA"), directions.get(0).destination());
+    assertEquals(CallCatalog.Origin.ENTRY, directions.get(0).routes().get(0).origin());
+    assertFalse(directions.get(0).routes().get(0).fromDepot());
+    assertTrue(
+        CallCatalog.directions(
+                entries, null, line -> true, new PidsStationKey("SURC", "BBB"), Set.of())
+            .isEmpty(),
+        "第二站上游只有首站那一段，生成不了车");
+    assertEquals(
+        List.of(new PidsStationKey("SURC", "NTA"), new PidsStationKey("SURC", "BBB"), PPK),
+        CallCatalog.stationsServed(entries, null, MT.id()),
+        "回库交路停的站也算线路停车的车站");
+  }
+
   /** 线路停车的车站：只算本线运营交路、在终点之前停车的站，按交路顺序去重。 */
   @Test
   void stationsServedListsEveryStopBeforeTheTerminal() {
@@ -202,6 +305,17 @@ class CallCatalogTest {
       RoutePatternType pattern,
       List<String> nodes,
       List<RouteStop> stops) {
+    return entry(routeId, line, code, pattern, RouteOperationType.OPERATION, nodes, stops);
+  }
+
+  private static RouteDefinitionCache.RouteEntry entry(
+      UUID routeId,
+      Line line,
+      String code,
+      RoutePatternType pattern,
+      RouteOperationType operationType,
+      List<String> nodes,
+      List<RouteStop> stops) {
     Route route =
         new Route(
             routeId,
@@ -210,7 +324,7 @@ class CallCatalogTest {
             code,
             Optional.empty(),
             pattern,
-            RouteOperationType.OPERATION,
+            operationType,
             Optional.empty(),
             Optional.empty(),
             Map.of(),

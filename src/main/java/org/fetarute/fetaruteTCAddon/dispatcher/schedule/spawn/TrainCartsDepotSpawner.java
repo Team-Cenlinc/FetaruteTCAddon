@@ -258,10 +258,11 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
         choice
             .pattern()
             .or(() -> DepotSpawnPattern.fromRoute(route))
-            .or(() -> depotSignPattern(service.depotNodeId()));
+            .or(() -> depotSignPattern(service.depotNodeId()))
+            .or(() -> destroyDepotSignPattern(provider, route));
     if (patternOpt.isEmpty()) {
       debugLogger.accept(
-          "区间生成失败: 缺少 spawn pattern（交路未写 spawn_train_pattern，首站也不是车库）route=" + route.code());
+          "区间生成失败: 缺少 spawn pattern（交路未写 spawn_train_pattern，首站与收尾都不是车库）route=" + route.code());
       return Optional.empty();
     }
     String pattern = patternOpt.get();
@@ -318,6 +319,22 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
                     now,
                     choice.tags(),
                     entry.index())));
+  }
+
+  /** 交路收尾 DSTY 那个车库牌子第 4 行的编组（回库交路首站不是车库，借它回的那个车库的）；没有 DSTY 或读不到时为空。 */
+  private Optional<String> destroyDepotSignPattern(StorageProvider provider, Route route) {
+    try {
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      for (int i = stops.size() - 1; i >= 0; i--) {
+        Optional<String> target = SpawnDirectiveParser.findDirectiveTarget(stops.get(i), "DSTY");
+        if (target.isPresent()) {
+          return depotSignPattern(target.get());
+        }
+      }
+    } catch (RuntimeException ex) {
+      debugLogger.accept("区间生成读回库车库编组失败 route=" + route.code() + " error=" + ex);
+    }
+    return Optional.empty();
   }
 
   /** 车库牌子第 4 行的编组（区间生成没有车库牌子可读时，借首站车库的）；不是车库或读不到时为空。 */

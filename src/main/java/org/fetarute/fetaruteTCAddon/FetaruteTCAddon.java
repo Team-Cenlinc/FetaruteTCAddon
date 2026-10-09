@@ -1754,6 +1754,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     settings.recoveryOverspeedPercent(),
                     settings.recoveryEngageDelaySeconds())
                 : null);
+    // 叫来的车按需降速：跟车间隔；后车追到叫车的 min-lead 以内时不降。有表、无表的线路一样。
+    ConfigManager.CallSettings callSettings = configManager.current().callSettings();
+    runtimeDispatchService
+        .stationStops()
+        .setCalledTrainPacing(
+            new org.fetarute.fetaruteTCAddon.dispatcher.runtime.CalledTrainPacer.Settings(
+                callSettings.followGapSeconds(), callSettings.minLeadMinutes() * 60));
+    runtimeDispatchService
+        .stationStops()
+        .setCalledTrainRearCheck(
+            trainName ->
+                getCallService().map(calls -> calls.trainCloseBehind(trainName)).orElse(false));
     // ETA 与站内扣留同一口径：早到的车在站内等点的时间计入 ETA，上限同扣留上限（含 150 秒硬顶）。
     if (etaService != null) {
       etaService.attachPlannedDepartures(
@@ -1957,6 +1969,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
         dutyTimetable == null
             ? null
             : trainName -> dutyTimetable.dutyBindingOf(trainName).isPresent());
+    // 按表运行的交路上叫车票只接叫来的车；车库要让给表定出库时叫车票不从车库出车
+    simpleAssigner.setTimetableRoute(dutyTimetable == null ? null : dutyTimetable::managed);
+    simpleAssigner.setOnDemandDepotGate(
+        ticket -> getCallService().map(calls -> calls.allowsDepotSpawn(ticket)).orElse(true));
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
@@ -2074,7 +2090,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
             ? null
             : (trainName, location) ->
                 location != null && returns.awaitsOwnReturnAt(trainName, location.value()));
-    reclaimManager.setPreferredReturnRoute(returns == null ? null : returns::returnRouteOf);
+    // 叫来的车没有交路：先走与叫车交路同一交路组的回库交路，从哪个车库来就回哪个车库。
+    reclaimManager.setPreferredReturnRoute(
+        trainName ->
+            (returns == null ? Optional.<java.util.UUID>empty() : returns.returnRouteOf(trainName))
+                .or(
+                    () ->
+                        getCallService().flatMap(calls -> calls.preferredReturnRoute(trainName))));
     reclaimManager.setReclaimListener(returns == null ? null : returns::reclaimed);
     // 停在正线折返点的车：按表交路上接不上下一班就立即回收，不挡着正线等到末班过期。
     reclaimManager.setMainlineReturnGate(
