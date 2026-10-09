@@ -532,6 +532,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return active.containsKey(playerId);
   }
 
+  /** 玩家正在驾驶或值乘车掌：用的是驾驶员侧边栏，乘客的计分板要让位。 */
+  public boolean usesCrewSidebar(UUID playerId) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return active.containsKey(playerId) || (crew != null && crew.isOnDuty(playerId));
+  }
+
   /** 玩家的快捷栏被驾驶物品或车掌按钮占着：驾驶员与车掌的物品一样要保护。 */
   public boolean isProtected(UUID playerId) {
     org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;

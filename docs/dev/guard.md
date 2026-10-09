@@ -93,7 +93,7 @@
 
 ## 显示
 
-- 车掌的提示全在侧边栏（与驾驶员同一套 `DriveSidebar`，标题 `drive.guard.sidebar.title`），不用动作栏：车厢里的乘客信息（`ActionBarTrainHudManager`）与报站（`PidsAnnouncer`）都走动作栏，车掌也会被它们覆盖。自上而下：
+- 车掌的提示全在侧边栏（与驾驶员同一套 `DriveSidebar`，标题 `drive.guard.sidebar.title`），不用动作栏：车厢里的乘客信息（`ActionBarTrainHudManager`）与报站（`PidsAnnouncer`）都走动作栏，车掌也会被它们覆盖。乘客的计分板 HUD（`ScoreboardTrainHudManager`）对驾驶员与值乘中的车掌都让位（`DriveSessionManager#usesCrewSidebar`）：车掌也坐在车上，它不让位就会把计分板换成乘客的，`DriveSidebar` 被换掉后让给对方、不再抢回。自上而下：
   - 提示（`GuardSession#showNotice`）：按钮的结果、超时代做、监视结果、演练结果，停留 3 秒，有新提示时下一拍就刷新；超时代做、监视不合格、紧急停车与解除、演练处置完成、驾驶员呼叫另发到聊天框（`drive.guard.alert`）。
   - 演练：考试演练进行中时剩余秒数与再开门、报告两项是否已做。
   - 列车、值乘（驾驶员 / ATO / 自动运行）、车站（停站时带开门方向）或下一站、作业（写明右键哪一格与剩余秒数，`GuardDisplay#stepRow`）、出站（等发车时）、车门、超时站数、换端。
