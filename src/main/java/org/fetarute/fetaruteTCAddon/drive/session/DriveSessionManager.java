@@ -2981,6 +2981,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (tickCounter % HOTBAR_REFRESH_TICKS == 0) {
       refreshInventory(player, session);
     }
+    DriverLink crew = session.driverLink();
+    if (crew != null) {
+      // 车掌上岗、离岗随时会变：显示与提示前按此刻的登记更新。
+      crew.setGuardAboard(driverRegistry.guardOperatesDoors(group.getProperties()));
+    }
     if (tickCounter % DriveTutorials.TICK_INTERVAL == 0) {
       tutorials.tick(player, session, now);
     }

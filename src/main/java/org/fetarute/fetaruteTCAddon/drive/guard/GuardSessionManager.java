@@ -237,6 +237,7 @@ public final class GuardSessionManager {
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
   private final PendingAcks pendingAcks = new PendingAcks();
   private final GuardTasks tasks = new GuardTasks();
+  private final GuardTips tips;
 
   /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
   private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
@@ -263,7 +264,13 @@ public final class GuardSessionManager {
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
     this.sidebar = new DriveSidebar(locale);
+    this.tips = new GuardTips(plugin, locale, sounds);
     tasks.setBeforeClaim(task -> callEvent(new GuardTaskClaimEvent(GuardViews.of(task))));
+  }
+
+  /** 清掉这名玩家出过的车掌提示，下次值乘时从头再提示一遍（与驾驶提示一起由 /fta drive tutorial reset 重置）。 */
+  public void resetTips(Player player) {
+    tips.reset(player);
   }
 
   /** 接上车掌考法的考官（驾驶证服务）。 */
@@ -427,6 +434,7 @@ public final class GuardSessionManager {
     session.setTrip(
         new GuardTrip(trip, trip == null ? "" : drivers.routeCodeOf(trip), Instant.now()));
     sessions.put(id, session);
+    tips.onDuty(player);
     attachTask(player, session, seat.get().trainName());
     refreshHotbar(player, session, true);
     ensureTask();
@@ -495,6 +503,7 @@ public final class GuardSessionManager {
       return;
     }
     lastUseTick.remove(playerId);
+    tips.forget(playerId);
     GuardTask dutyTask = session.task();
     // 先把列车交还：扣着的紧急停车与换端扣车解除、车掌登记撤下、开着的门关上，结算出错也不会把列车扣住。
     Optional<MinecartGroup> train = findGroup(session);
@@ -678,6 +687,8 @@ public final class GuardSessionManager {
           "drive.guard.sidebar.title",
           snapshot.train(),
           sidebarRows(session, snapshot, now));
+      // 第一次遇到某一步时说明一次（与驾驶员的驾驶提示同一套做法）。
+      tips.tick(player, snapshot, now);
     }
   }
 

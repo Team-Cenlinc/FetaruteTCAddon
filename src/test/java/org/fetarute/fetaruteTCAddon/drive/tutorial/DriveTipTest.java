@@ -98,6 +98,34 @@ class DriveTipTest {
   }
 
   @Test
+  @DisplayName("第一次与车掌同车时说明一次（人工与 ATO 都出），车上有车掌时不出开关门的提示")
+  void guardAboard() {
+    for (DriverStationHint.Kind kind :
+        new DriverStationHint.Kind[] {
+          DriverStationHint.Kind.GUARD_DOORS, DriverStationHint.Kind.GUARD_SIGNAL
+        }) {
+      assertEquals(
+          Optional.of(DriveTip.GUARD_ABOARD),
+          DriveTip.firstDue(manualDispatch().stationHint(kind).build(), Set.of()),
+          kind.name());
+      assertTrue(DriveTip.GUARD_ABOARD.due(manualDispatch().ato(true).stationHint(kind).build()));
+    }
+    assertEquals(
+        Optional.empty(),
+        DriveTip.firstDue(
+            manualDispatch()
+                .stationHint(DriverStationHint.Kind.GUARD_DOORS)
+                .doorsRequired(true)
+                .build(),
+            EnumSet.of(DriveTip.GUARD_ABOARD)),
+        "车门归车掌：开门提示不出");
+    assertFalse(
+        DriveTip.GUARD_ABOARD.due(
+            TutorialSnapshot.builder().stationHint(DriverStationHint.Kind.GUARD_DOORS).build()),
+        "非调度列车没有车掌");
+  }
+
+  @Test
   @DisplayName("提示的键各不相同（持久数据标记靠它区分）")
   void keysAreUnique() {
     Set<String> keys = new java.util.HashSet<>();

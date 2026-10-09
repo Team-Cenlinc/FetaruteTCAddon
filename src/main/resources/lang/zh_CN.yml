@@ -1789,6 +1789,8 @@ drive:
       close-doors: "<yellow>停站时间已到，请关门</yellow>"
       doors-closing: "<gray>车门关闭中</gray>"
       wait-departure: "<gray>等待发车</gray>"
+      guard-doors: "<gray>车门由车掌开关</gray>"
+      guard-signal: "<gray>等候车掌发车信号</gray>"
       depart: "<green><bold>发车信号</bold></green>"
     ato:
       confirm: "<yellow><bold>ATO：右键确认发车</bold></yellow>"
@@ -1862,6 +1864,8 @@ drive:
       close-doors: "<aqua><station></aqua> <yellow>停站时间已到，请关门</yellow>"
       doors-closing: "<aqua><station></aqua> <gray>车门关闭中</gray>"
       wait-departure: "<aqua><station></aqua> <gray>等待发车</gray>"
+      guard-doors: "<aqua><station></aqua> <gray>车门由车掌开关</gray>"
+      guard-signal: "<aqua><station></aqua> <gray>等候车掌发车信号</gray>"
       depart: "<green><bold>发车信号</bold></green>"
   grade:
     s: "<gold><bold>S</bold></gold>"
@@ -1966,6 +1970,8 @@ drive:
         close-doors: "<yellow>请关门</yellow>"
         doors-closing: "<gray>车门关闭中</gray>"
         wait-departure: "<gray>等待发车</gray>"
+        guard-doors: "<gray>车掌开关门</gray>"
+        guard-signal: "<gray>等候车掌发车信号</gray>"
         standby: "<gray>待命，等候下一趟</gray>"
         standby-plain: "<gray>待命</gray>"
         depart: "<green>可以发车</green>"
@@ -2446,6 +2452,35 @@ drive:
       clean: "  <green>全部 <count> 站作业无扣分</green>"
       incidents: "  <gray>报告</gray> 异常情况 <white><count></white> 次（不扣分）"
     alert: "<prefix> <text>"
+    tip: "<prefix> <aqua>车掌提示</aqua> <text>"
+    tips:
+      on-duty:
+        chat: "<white>值乘提示：</white><gray>每一步要做的事都写在右侧侧边栏的“作业”一行（右键哪一格、还剩几秒），按钮的结果显示在最上面的“提示”一行；快捷栏选中后右键使用，F 打开车掌菜单。</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>领取《FTCA 车掌手册》</gray>'><aqua>[车掌手册]</aqua></hover></click>"
+        subtitle: "<aqua>作业提示见右侧侧边栏</aqua>"
+      open-doors:
+        chat: "<white>开门：</white><gray>列车已停妥。侧边栏“车站”一行写本站开哪一侧，左右以你面朝的方向为准：第 1 格右键开左侧门，第 2 格右键开右侧门。开门后可按 Shift 下车到站台。</gray>"
+        subtitle: "<yellow>看侧边栏开哪一侧，右键第 1 或第 2 格开门</yellow>"
+      close-doors:
+        chat: "<white>关门与关门监视：</white><gray>停站时间已到。请站在站台上、靠近自己那节车门，第 3 格右键关门，并注视车门直到关好；关门监视计入成绩。</gray>"
+        subtitle: "<yellow>在站台上注视车门，右键第 3 格关门</yellow>"
+      return-seat:
+        chat: "<white>回座：</white><gray>车门已关好，请回到车掌座位：上车坐回原来的驾驶室，或在站台上右键自己的列车，也可在 F 菜单点“传送入座”。</gray>"
+        subtitle: "<yellow>回到车掌座位</yellow>"
+      wait-exit:
+        chat: "<white>等候出站信号：</white><gray>出站信号还未开放，这一步不计时；侧边栏“出站”一行变为开放后再确认。</gray>"
+        subtitle: "<gray>出站信号开放前不计时</gray>"
+      confirm:
+        chat: "<white>出发确认：</white><gray>出站信号已开放，请在第 6 格右键确认出发信号。</gray>"
+        subtitle: "<yellow>右键第 6 格出发确认</yellow>"
+      buzzer:
+        chat: "<white>发车铃：</white><gray>请在第 7 格按住右键约一秒，发出一长声发车信号，驾驶员（或 ATO）收到后起步；一秒内右键两下为呼叫驾驶员。</gray>"
+        subtitle: "<yellow>第 7 格按住右键约一秒</yellow>"
+      departure-watch:
+        chat: "<white>出站监视：</white><gray>发车信号已发出。列车起步后请朝站台一侧或车后看，直到车尾离开站台；出站监视计入成绩。行驶中遇到危险可在第 9 格右键紧急停车。</gray>"
+        subtitle: "<yellow>起步后朝站台看，直到车尾离开站台</yellow>"
+      cab-change:
+        chat: "<white>终点换端：</white><gray>下一趟由另一端发车，请换到侧边栏“换端”一行写的那一节车掌座位；时间不够时会直接送过去，驾驶员换端时两人一同换座。</gray>"
+        subtitle: "<yellow>换到另一端的车掌座位</yellow>"
     seat-exit:
       moving: "<prefix> <red>行驶中不能下车</red>"
       doors-closed: "<red>车门开着时才能下车监视</red>"
@@ -2743,6 +2778,9 @@ drive:
         subtitle: "<yellow>按信号开到终点站</yellow>"
     tip: "<prefix> <aqua>驾驶提示</aqua> <text>"
     tips:
+      guard-aboard:
+        chat: "<white>车掌同车：</white><gray>本车有车掌值乘，车门由车掌开关，驾驶员不用开关门。车掌在出站信号开放后按发车铃（一长声），动作栏显示「发车信号」后再起步；simulation 级须在几秒内按一下 Q 键回一短。连按两下 Q 键可呼叫车掌。</gray>"
+        subtitle: "<aqua>本车有车掌：等车掌的发车信号再起步</aqua>"
       signal-acknowledge:
         chat: "<white>信号变严：</white><gray>前方信号转为减速或停车时，动作栏提示「信号变严：右键确认」。请按右键确认，并按新的限速行车；约 4 秒内未确认将施加常用制动，再不确认将紧急制动。</gray>"
         subtitle: "<gold>信号变严：右键确认</gold>"
@@ -2773,7 +2811,7 @@ drive:
       armed: "<prefix> <green>已准备新手教程：请坐上列车座位后执行</green> <click:run_command:'/fta drive on'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive on</white>'><yellow>/fta drive on</yellow></hover></click> <green>开始驾驶，教程随之开始。</green>"
       stopped: "<prefix> <yellow>已退出新手教程，此后不再自动提示；可随时输入 /fta drive tutorial start 重新开始。</yellow>"
       dismissed: "<prefix> <gray>已关闭新手教程提示；可随时输入 /fta drive tutorial start 开始。</gray>"
-      reset: "<prefix> <green>已重置新手教程与驾驶提示，下次开始驾驶时将重新提示。</green>"
+      reset: "<prefix> <green>已重置新手教程、驾驶提示与车掌提示，下次开始驾驶或值乘时将重新提示。</green>"
       not-running: "<prefix> <red>当前没有进行中的新手教程</red>"
       invalid: "<prefix> <red>操作只能是 start、restart、stop、reset 或 skip</red>"
   license:
@@ -2975,6 +3013,8 @@ drive:
       dwell: "<prefix> <aqua>教练：</aqua><gray>停站中，请留意侧边栏的停站倒计时。</gray>"
       close-doors: "<prefix> <aqua>教练：</aqua><gray>停站时间已到，请按 F 关闭车门。</gray>"
       wait-departure: "<prefix> <aqua>教练：</aqua><gray>车门已关好，请等待出站信号变为允许。</gray>"
+      guard-doors: "<prefix> <aqua>教练：</aqua><gray>已停稳。本车有车掌，车门由车掌开关，驾驶员不用动手；请等车掌关门并发出发车信号。</gray>"
+      guard-signal: "<prefix> <aqua>教练：</aqua><gray>车门已关好，请等车掌在出站信号开放后发出发车信号（一长声），动作栏显示发车信号后再起步。</gray>"
       depart: "<prefix> <aqua>教练：</aqua><gray>可以发车。请将手柄置于 P1 平稳起步，随后跟随 Boss 栏的建议速度行车。</gray>"
       side:
         left: "左侧"
@@ -3074,12 +3114,12 @@ drive:
       given: "<prefix> <green>《FTCA 驾驶员手册》已放进背包</green>"
       page-1: "<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与正点\n八、终点与换端\n九、异常处置</black>"
       page-2: "<dark_blue><bold>一、FTCA 是什么</bold></dark_blue>\n<black>FTCA 按时刻表自动派车、排进路、控制信号。玩家可以接班驾驶这些列车：调度给出行车许可与停站要求，驾驶员负责平稳行车、停准、开关车门、准点到发。</black>"
-      page-3: "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"
+      page-3: "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先坐上调度列车练习，再在车站报名路考，及格取得，可领任务驾驶调度列车。\n附注 车掌：另行考取，见《车掌手册》。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"
       page-4: "<dark_blue><bold>三、领任务与接班</bold></dark_blue>\n<black>在车站输入 /fta drive tasks 打开任务板：左键人工驾驶，右键 ATO。列车到站后坐进车头驾驶室，确认座位后输入 /fta drive on 接班；未坐在驾驶座时，可点聊天栏的按钮传送入座。</black>"
       page-5: "<dark_blue><bold>四、驾驶台</bold></dark_blue>\n<black>快捷栏 1–3 牵引 P3–P1，4 惰行 N，5–8 制动 B1–B4，9 紧急制动 EB。\n停稳后按 F 打开驾驶台菜单（开关车门、结束驾驶等）。\n动作栏：车速与限速。\n侧边栏：信号、停站、时刻、车门。</black>"
       page-6: "<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在信号前停车。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"
       page-7: "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准为佳；欠标可前移对标，过标后不得退行。终点站最多越过停车点 3 米，超出即强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"
-      page-8: "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"
+      page-8: "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n有车掌时车门由车掌开关，等车掌的发车信号再起步。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"
       page-9: "<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。ATO 下同样须换端，坐好后列车自动发车。</black>"
       page-10: "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。行驶中不能离座；终点站等下一趟时可离座走到发车端，其余情况离座即结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"
   end:

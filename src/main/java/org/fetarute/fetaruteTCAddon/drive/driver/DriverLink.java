@@ -30,6 +30,7 @@ public final class DriverLink {
   private final DoubleSupplier odometer;
   private final LongSupplier clock;
   private TrainProperties properties;
+  private boolean guardAboard;
   private DrivingMode mode = DrivingMode.MANUAL;
 
   private DriverDirective directive;
@@ -153,6 +154,15 @@ public final class DriverLink {
 
   public String trainName() {
     return trainName;
+  }
+
+  /** 这列车上有值乘的车掌：车门由车掌开关，发车等车掌的发车信号。 */
+  public boolean guardAboard() {
+    return guardAboard;
+  }
+
+  public void setGuardAboard(boolean guardAboard) {
+    this.guardAboard = guardAboard;
   }
 
   public TrainProperties properties() {

@@ -127,6 +127,36 @@ class DriverStationHintTest {
   }
 
   @Test
+  @DisplayName("车上有车掌：开关门写由车掌开关、等发车写等车掌信号，都不要驾驶员动手；停站倒计时与发车信号照常")
+  void guardAboard() {
+    link.setGuardAboard(true);
+    link.beginStationStop(stop);
+    link.setRequiredDoorSide(DriverDoorSide.LEFT);
+    stop.markStopped();
+    DriverStationHint.Hint open = DriverStationHint.of(link, true).orElseThrow();
+    assertEquals("drive.hud.station.guard-doors", open.key());
+    assertEquals("drive.sidebar.value.stop.guard-doors", open.sidebarKey());
+    assertFalse(open.actionable(), "车门归车掌，动作栏不催驾驶员开门");
+    assertTrue(open.atStation());
+    stop.setPhase(DriverStationStop.Phase.DWELL);
+    assertEquals("drive.hud.station.dwell", DriverStationHint.of(link, true).orElseThrow().key());
+    stop.setPhase(DriverStationStop.Phase.CLOSE_DOORS);
+    link.setDoorsClosing(true);
+    assertEquals(
+        "drive.hud.station.guard-doors", DriverStationHint.of(link, true).orElseThrow().key());
+    stop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
+    DriverStationHint.Hint waiting = DriverStationHint.of(link, true).orElseThrow();
+    assertEquals("drive.hud.station.guard-signal", waiting.key());
+    assertFalse(waiting.actionable());
+    stop.setPhase(DriverStationStop.Phase.DEPART);
+    assertEquals("drive.hud.station.depart", DriverStationHint.of(link, true).orElseThrow().key());
+    link.setGuardAboard(false);
+    stop.setPhase(DriverStationStop.Phase.WAIT_DEPARTURE);
+    assertEquals(
+        "drive.hud.station.wait-departure", DriverStationHint.of(link, true).orElseThrow().key());
+  }
+
+  @Test
   @DisplayName("进站前停车（等信号）不提示前移")
   void noMoveUpBeforeEnteringTheStation() {
     link.updateApproach(
