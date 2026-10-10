@@ -2452,6 +2452,7 @@ drive:
       clean: "  <green>全部 <count> 站作业无扣分</green>"
       incidents: "  <gray>报告</gray> 异常情况 <white><count></white> 次（不扣分）"
     alert: "<prefix> <text>"
+    return-seat-offer: "<prefix> <yellow>车门已关好，请回到车掌座位</yellow> <click:run_command:'/fta guard seat'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard seat</white>'><aqua>[传送回座位]</aqua></hover></click>"
     tip: "<prefix> <aqua>车掌提示</aqua> <text>"
     tips:
       on-duty:
@@ -2484,6 +2485,7 @@ drive:
     seat-exit:
       moving: "<prefix> <red>行驶中不能下车</red> <gray>要结束值乘，请在 F 菜单点两次「结束值乘」或输入 /fta guard off</gray>"
       doors-closed: "<red>车门开着时才能下车监视；结束值乘请用 F 菜单</red>"
+      placed: "<gray>本节车厢在站台外不开门，已送到第 <white><car></white> 节车门旁的站台</gray>"
     command:
       player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
       not-on-duty: "<prefix> <red>你当前没有在值乘</red>"

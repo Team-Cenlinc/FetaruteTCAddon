@@ -60,6 +60,36 @@ public final class PickupSpot {
     return Optional.empty();
   }
 
+  /**
+   * 只在指定的一侧找落脚处（例如站台在哪一侧已知时，不落到轨道那一侧）。
+   *
+   * @param car 车厢的位置
+   * @param side 往哪一侧找（只取水平分量）
+   * @return 落脚点（方块底面中心）；这一侧都站不住时为空
+   */
+  public static Optional<Vector> findOnSide(Vector car, Vector side, Standable standable) {
+    if (car == null || side == null || standable == null) {
+      return Optional.empty();
+    }
+    double length = Math.hypot(side.getX(), side.getZ());
+    if (length < 1.0e-6) {
+      return Optional.empty();
+    }
+    Vector unit = new Vector(side.getX() / length, 0.0, side.getZ() / length);
+    int baseY = (int) Math.floor(car.getY());
+    for (double distance : SIDE_BLOCKS) {
+      int x = (int) Math.floor(car.getX() + unit.getX() * distance);
+      int z = (int) Math.floor(car.getZ() + unit.getZ() * distance);
+      for (int dy : HEIGHT_OFFSETS) {
+        int y = baseY + dy;
+        if (standable.test(x, y, z)) {
+          return Optional.of(new Vector(x + 0.5, y, z + 0.5));
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
   /** 与走向垂直的两侧；走向不明时取四个方向。 */
   private static Vector[] sides(Vector travel) {
     if (travel != null) {

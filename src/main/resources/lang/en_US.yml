@@ -748,6 +748,7 @@ drive:
       clean: "  <green>No deductions over all <count> stops</green>"
       incidents: "  <gray>Reports</gray> incidents <white><count></white> (no deduction)"
     alert: "<prefix> <text>"
+    return-seat-offer: "<prefix> <yellow>Doors closed; return to the guard's seat</yellow> <click:run_command:'/fta guard seat'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard seat</white>'><aqua>[Back to seat]</aqua></hover></click>"
     tip: "<prefix> <aqua>Guard tip</aqua> <text>"
     tips:
       on-duty:
@@ -780,6 +781,7 @@ drive:
     seat-exit:
       moving: "<prefix> <red>You cannot get off while moving</red> <gray>To end duty, click End duty twice in the F panel or run /fta guard off</gray>"
       doors-closed: "<red>You can only step out to watch while the doors are open; end duty from the F panel</red>"
+      placed: "<gray>Your car is off the platform and its doors stay shut; you were moved to the platform by car <white><car></white></gray>"
     command:
       player-only: "<prefix> <red>Only players can run this command</red>"
       not-on-duty: "<prefix> <red>You are not on guard duty</red>"

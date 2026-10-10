@@ -843,6 +843,11 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager"/>
+        <Method name="placeOnPlatformLater"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
     <Match>

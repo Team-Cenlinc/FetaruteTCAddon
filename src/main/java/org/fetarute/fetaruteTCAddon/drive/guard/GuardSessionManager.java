@@ -46,6 +46,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.record.DriveTaskRecord;
 import org.fetarute.fetaruteTCAddon.drive.driver.score.ScoreRules;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTask;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.DriverTaskManager;
+import org.fetarute.fetaruteTCAddon.drive.driver.task.PickupSpot;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardEntries;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
@@ -661,6 +662,7 @@ public final class GuardSessionManager {
     if (!sessions.containsKey(session.playerId())) {
       return;
     }
+    offerReturnSeat(player, session, seated);
     if (handoverReached(session)) {
       stop(session.playerId(), GuardSession.EndReason.HANDOVER);
       return;
@@ -708,6 +710,7 @@ public final class GuardSessionManager {
         session.setTrackedTrip(drivers.tripOf(group.getProperties().getTrainName()).orElse(null));
         session.setLastPhase(null);
         session.setSignalAnnounced(false);
+        session.setReturnOffered(false);
         session.setForcedSignalHandled(false);
       }
       if (stop.takeHandedOverDoors()) {
@@ -2059,7 +2062,102 @@ public final class GuardSessionManager {
       notice(session, "drive.guard.seat-exit.doors-closed", Map.of());
       return false;
     }
+    if (!session.cabChange().changing()) {
+      placeOnPlatformLater(player, session, group.get());
+    }
     return true;
+  }
+
+  /** 下车监视时车掌那节车厢不开门（停车位置标只开部分车厢，车尾可能在站台外）：下一拍把车掌送到最近一节开门车厢旁的站台上， 免得落到没有站台的地方。先找站台那一侧，找不到再两侧都试。 */
+  private void placeOnPlatformLater(Player player, GuardSession session, MinecartGroup group) {
+    Optional<DriverStationStop> stop = session.link().stationStop();
+    if (stop.isEmpty() || stop.get().doorCars().all()) {
+      return;
+    }
+    int own = session.binding().memberIndex();
+    org.bukkit.Location car = null;
+    int nearestIndex = -1;
+    int nearestGap = Integer.MAX_VALUE;
+    int index = 0;
+    for (MinecartMember<?> member : group) {
+      int i = index++;
+      if (member.getEntity() == null
+          || !stop.get().doorCars().includes(member.getEntity().getUniqueId())) {
+        continue;
+      }
+      if (i == own) {
+        // 自己这节就开门：照常从这节下车。
+        return;
+      }
+      int gap = Math.abs(i - own);
+      if (gap < nearestGap) {
+        nearestGap = gap;
+        nearestIndex = i;
+        car = member.getEntity().getLocation();
+      }
+    }
+    if (car == null) {
+      return;
+    }
+    org.bukkit.World world = car.getWorld();
+    if (world == null) {
+      return;
+    }
+    org.bukkit.util.Vector platformSide =
+        stop.get().platformFace().map(org.bukkit.block.BlockFace::getDirection).orElse(null);
+    Optional<org.bukkit.util.Vector> spot =
+        PickupSpot.findOnSide(car.toVector(), platformSide, PickupSpot.standable(world));
+    if (spot.isEmpty()) {
+      spot =
+          PickupSpot.find(car.toVector(), StopAlignment.travel(group), PickupSpot.standable(world));
+    }
+    if (spot.isEmpty()) {
+      return;
+    }
+    org.bukkit.util.Vector at = spot.get();
+    int carNumber = nearestIndex + 1;
+    Bukkit.getScheduler()
+        .runTask(
+            plugin,
+            () -> {
+              if (!player.isOnline()
+                  || player.getVehicle() != null
+                  || !sessions.containsKey(player.getUniqueId())) {
+                return;
+              }
+              org.bukkit.Location target =
+                  new org.bukkit.Location(
+                      world,
+                      at.getX(),
+                      at.getY(),
+                      at.getZ(),
+                      player.getLocation().getYaw(),
+                      player.getLocation().getPitch());
+              player.teleport(target);
+              notice(
+                  session,
+                  "drive.guard.seat-exit.placed",
+                  Map.of("car", String.valueOf(carNumber)));
+            });
+  }
+
+  /** 车门已关好、车掌还没回座：每站在聊天栏发一次带“传送回座位”按钮的提示。 */
+  private void offerReturnSeat(Player player, GuardSession session, boolean seated) {
+    if (seated || session.returnOffered()) {
+      return;
+    }
+    boolean waiting =
+        session
+                .link()
+                .stationStop()
+                .filter(stop -> stop.phase() == Phase.WAIT_DEPARTURE)
+                .isPresent()
+            && session.link().work().map(work -> !work.released()).orElse(false);
+    if (!waiting) {
+      return;
+    }
+    session.setReturnOffered(true);
+    player.sendMessage(locale.component("drive.guard.return-seat-offer"));
   }
 
   /**

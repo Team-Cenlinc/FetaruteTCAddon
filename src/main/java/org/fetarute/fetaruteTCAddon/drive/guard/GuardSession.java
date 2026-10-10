@@ -68,6 +68,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private DriveSidebarRows.Row notice;
   private boolean sidebarDirty;
   private boolean signalAnnounced;
+  private boolean returnOffered;
   private boolean forcedSignalHandled;
   private boolean sneakHeld;
   private com.bergerkiller.bukkit.tc.controller.MinecartGroup lastGroup;
@@ -404,6 +405,15 @@ public final class GuardSession implements DriveDoors.Cab {
     boolean dirty = sidebarDirty;
     sidebarDirty = false;
     return dirty;
+  }
+
+  /** 这一站已经发过“传送回座位”的提示。 */
+  public boolean returnOffered() {
+    return returnOffered;
+  }
+
+  public void setReturnOffered(boolean returnOffered) {
+    this.returnOffered = returnOffered;
   }
 
   /** 这一站的发车信号已经告诉过驾驶员。 */
