@@ -60,7 +60,7 @@ public final class GuardDisplay {
    * @param leftOpen 行进方向左侧的门开着
    * @param rightOpen 行进方向右侧的门开着
    * @param closing 关门动画在放
-   * @param remainingTicks 当前这一步还剩多少 tick；不计时为 -1
+   * @param remainingTicks 当前这一步还剩多少 tick；停站时为剩余停站时间；不计时为 -1
    * @param exitOpen 站台上次问时出站是否放行
    * @param confirmed 已确认出发信号
    * @param released 车掌这边已放行（发了发车信号或超时代发）
@@ -155,7 +155,7 @@ public final class GuardDisplay {
       case APPROACH -> row("step", "step-approach", Map.of());
       case OPEN_DOORS -> row(
           "step", "step-open-" + sideSuffix(stop.required()), Map.of("seconds", seconds));
-      case DWELL -> row("step", "step-dwell", Map.of());
+      case DWELL -> row("step", "step-dwell", Map.of("seconds", seconds));
       case CLOSE_DOORS -> stop.closing() && !stop.leftOpen() && !stop.rightOpen()
           ? row("step", "step-closing", Map.of())
           : row("step", "step-close", Map.of("seconds", seconds));

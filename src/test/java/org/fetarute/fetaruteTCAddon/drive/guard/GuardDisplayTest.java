@@ -71,8 +71,9 @@ class GuardDisplayTest {
     DriveSidebarRows.Row open = step(snapshot(stop(Phase.OPEN_DOORS, false, false, false), true));
     assertEquals("drive.guard.sidebar.value.step-open-left", open.valueKey());
     assertEquals(Map.of("seconds", "10"), open.values());
-    assertEquals(
-        "drive.guard.sidebar.value.step-dwell", step(stop(Phase.DWELL, false, false, false), true));
+    DriveSidebarRows.Row dwelling = step(snapshot(stop(Phase.DWELL, false, false, false), true));
+    assertEquals("drive.guard.sidebar.value.step-dwell", dwelling.valueKey());
+    assertEquals(Map.of("seconds", "10"), dwelling.values(), "停站倒数剩余停站时间");
     assertEquals(
         "drive.guard.sidebar.value.step-close",
         step(stop(Phase.CLOSE_DOORS, false, false, false), true));

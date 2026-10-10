@@ -612,7 +612,7 @@ drive:
         step-open-right: "<yellow>Right-click slot 2: open right</yellow> <gray><seconds> s</gray>"
         step-open-both: "<yellow>Right-click slots 1 and 2: open both</yellow> <gray><seconds> s</gray>"
         step-open-any: "<yellow>Right-click slot 1 or 2: platform side</yellow> <gray><seconds> s</gray>"
-        step-dwell: "<white>Dwell</white> <gray>you may watch from the platform</gray>"
+        step-dwell: "<white>Dwell <seconds> s</white> <gray>you may watch from the platform</gray>"
         step-close: "<yellow>Right-click slot 3: close doors</yellow> <gray><seconds> s</gray>"
         step-closing: "<gold>Doors closing; watch them from the platform</gold>"
         step-return: "<yellow>Return to the guard's seat</yellow> <gray><seconds> s</gray>"
@@ -755,7 +755,7 @@ drive:
         chat: "<white>On duty:</white> <gray>each step is shown in the sidebar's Task row (which slot to right-click and the seconds left); button results show in the Notice row at the top. Select a hotbar slot and right-click to use it; F opens the guard panel. To leave midway, click End duty twice in the F panel or run /fta guard off: stops done so far are scored and a claimed duty counts as abandoned; walking away without ending counts as left behind.</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>Get the FTCA Guard Handbook</gray>'><aqua>[Guard Handbook]</aqua></hover></click>"
         subtitle: "<aqua>Each step is shown in the sidebar</aqua>"
       open-doors:
-        chat: "<white>Open the doors:</white> <gray>the train has stopped. The sidebar's Station row says which side to open, in the direction of travel (sitting at the rear facing back, that is the opposite of your own left and right): right-click slot 1 for the left doors, slot 2 for the right. Once open you may press Shift to step onto the platform.</gray>"
+        chat: "<white>Open the doors:</white> <gray>the train has stopped. The sidebar's Station row says which side to open, in the direction of travel (sitting at the rear facing back, that is the opposite of your own left and right): right-click slot 1 for the left doors, slot 2 for the right. Once open you may press Shift to step onto the platform; the sidebar's Task row counts down the dwell; close the doors when it reaches zero.</gray>"
         subtitle: "<yellow>Check the side in the sidebar; right-click slot 1 or 2</yellow>"
       close-doors:
         chat: "<white>Closing and watching:</white> <gray>the dwell is over. Stand on the platform near your car, right-click slot 3 to close, and watch the doors until they are shut; the closing watch counts towards your score.</gray>"
@@ -1402,7 +1402,7 @@ drive:
       given: "<prefix> <green>The FTCA Guard Handbook is in your inventory</green>"
       page-1: "<dark_blue><bold>FTCA Guard Handbook</bold></dark_blue>\n\n<black>1. Going on duty\n2. Station work\n3. Closing and watching\n4. Buzzer and emergency stop\n5. Terminals and scores\n6. Practice and exam</black>"
       page-2: "<dark_blue><bold>1. Going on duty</bold></dark_blue>\n<black>Sit in the rear cab of a dispatched train and run /fta guard on, or take a duty with /fta guard tasks and sit in the rear cab when it arrives. Your seat is reserved. Hotbar: select, right-click. F: menu. /fta guard off ends duty.</black>"
-      page-3: "<dark_blue><bold>2. Station work</bold></dark_blue>\n<black>Once stopped, right-click 1 (left) or 2 (right, by direction of travel) for the platform-side doors and step out. When the dwell ends, right-click 3 to close. Opening has 30 s, closing 15 s; on timeout the station does it. Right-click 4 to report: 30 s more.</black>"
+      page-3: "<dark_blue><bold>2. Station work</bold></dark_blue>\n<black>Once stopped, right-click 1 (left) or 2 (right, by direction of travel) for the platform-side doors and step out. When the sidebar dwell count ends, right-click 3 to close. Opening has 30 s, closing 15 s; on timeout the station does it. Right-click 4 to report: 30 s more.</black>"
       page-4: "<dark_blue><bold>3. Closing and watching</bold></dark_blue>\n<black>While the doors close, stand on the platform near your car and watch along the train until they are shut. Then return to your seat. After departure look at the platform or behind until the rear has left. Both watches count.</black>"
       page-5: "<dark_blue><bold>4. Buzzer and emergency</bold></dark_blue>\n<black>Seated, right-click 6 once the starting signal clears, then hold right-click on 7 for a second (one long). One short: received; two clicks: call the driver. Right-click 9: emergency stop; one long releases it.</black>"
       page-6: "<dark_blue><bold>5. Terminals and scores</bold></dark_blue>\n<black>At a terminal move to the cab at the other end; you and the driver swap together, and are moved for you when time is short. Timeouts and wrong doors cost 5 points, early closing and missed watches 2; incident reports cost nothing.</black>"

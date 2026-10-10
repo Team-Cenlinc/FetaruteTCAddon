@@ -99,7 +99,7 @@
 - 车掌的提示全在侧边栏（与驾驶员同一套 `DriveSidebar`，标题 `drive.guard.sidebar.title`），不用动作栏：车厢里的乘客信息（`ActionBarTrainHudManager`）与报站（`PidsAnnouncer`）都走动作栏，车掌也会被它们覆盖。乘客的计分板 HUD（`ScoreboardTrainHudManager`）对驾驶员与值乘中的车掌都让位（`DriveSessionManager#usesCrewSidebar`）：车掌也坐在车上，它不让位就会把计分板换成乘客的，`DriveSidebar` 被换掉后让给对方、不再抢回。自上而下：
   - 提示（`GuardSession#showNotice`）：按钮的结果、超时代做、监视结果、演练结果，停留 3 秒，有新提示时下一拍就刷新；超时代做、监视不合格、紧急停车与解除、演练处置完成、驾驶员呼叫另发到聊天框（`drive.guard.alert`）。
   - 演练：考试演练进行中时剩余秒数与再开门、报告两项是否已做。
-  - 列车、值乘（驾驶员 / ATO / 自动运行）、车站（停站时带开门方向）或下一站、作业（写明右键哪一格与剩余秒数，`GuardDisplay#stepRow`）、出站（等发车时）、车门、超时站数、换端。
+  - 列车、值乘（驾驶员 / ATO / 自动运行）、车站（停站时带开门方向）或下一站、作业（写明右键哪一格与剩余秒数，停站时倒数站台的剩余停站时间 `DriverStationStop#dwellRemainingTicks`，`GuardDisplay#stepRow`）、出站（等发车时）、车门、超时站数、换端。
 - 上岗前（任务已领、列车到站）的“请坐第几节”、他人坐车掌预留座位的提醒仍用动作栏：那时还没有车掌侧边栏。
 - 车掌提示（`GuardTip`，`GuardTips` 记录与弹出）：第一次上岗、开门、关门与关门监视、回座、等候出站信号、出发确认、发车铃、出站监视、终点换端时，各在聊天框与屏幕下方说明一次要做什么；每名玩家每种只出一次（玩家持久数据 `guard_tip_*`），两条之间至少隔 3 秒。与驾驶员的驾驶提示同一套做法，`/fta drive tutorial reset` 一并重置。第一次上岗那条附《车掌手册》按钮。
 - 驾驶员那边：车掌上岗、离岗、发车信号、呼叫、应答、报告都在动作栏提示（`drive.guard.driver.*`）。车上有车掌时（`DriverLink#guardAboard`，DSM 每拍按 `DriverControlRegistry#guardOperatesDoors` 更新），驾驶员的车站提示开关门那几步写“车门由车掌开关”、等发车写“等候车掌发车信号”，都不要驾驶员动手（`DriverStationHint.Kind.GUARD_DOORS`/`GUARD_SIGNAL`），开关门的驾驶提示与练习教练也不再教驾驶员开关门；驾驶员第一次与车掌同车时出一次驾驶提示 `guard-aboard`，讲清车门归车掌、等一长声再起步、simulation 级要按一下 Q 键回一短、连按两下 Q 键呼叫车掌。

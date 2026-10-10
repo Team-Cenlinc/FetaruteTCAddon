@@ -2295,7 +2295,9 @@ public final class GuardSessionManager {
                                     session.isLeftDoorOpen(),
                                     session.isRightDoorOpen(),
                                     session.doorsClosing(now),
-                                    work.remainingTicks(current.phase()),
+                                    current.phase() == Phase.DWELL
+                                        ? current.dwellRemainingTicks()
+                                        : work.remainingTicks(current.phase()),
                                     work.exitOpen(),
                                     work.confirmed(),
                                     work.released())));
