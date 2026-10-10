@@ -563,7 +563,7 @@ public final class PidsComposer {
     }
     return PidsPlatformSelection.hasCarousel(layout)
         ? result
-        : new PidsViewBuilder.Calls(false, result.calledTrains());
+        : new PidsViewBuilder.Calls(() -> false, result.calledTrains(), result.extraTrains());
   }
 
   private Set<String> screenLines(PidsScreen screen, PidsStationKey station) {

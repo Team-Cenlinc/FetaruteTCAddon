@@ -4,6 +4,8 @@ import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
 import java.time.Duration;
 import java.time.Instant;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
@@ -84,6 +86,9 @@ public final class CallService {
 
   /** 叫来的车这一趟叫车跑的交路：车跑上别的回库交路就是在回库途中（{@link #refreshCalledTrains}）。 */
   public static final String TAG_CALL_ROUTE = "FTA_CALL_ROUTE";
+
+  /** 加开的车（管理员表外加开的一班）：站台屏写“加开”，不算进线路的叫车车数，玩家叫车也不当它是叫来的车。 */
+  public static final String TAG_CALL_EXTRA = "FTA_CALL_EXTRA";
 
   /** 车库在表定出库前后多久之内不给叫车出车（那条股道或车库池留给表定列车）。 */
   static final Duration DEPOT_YIELD_AHEAD = Duration.ofMinutes(3);
@@ -200,6 +205,39 @@ public final class CallService {
    */
   public record UnsourcedDirection(PidsStationKey station, CallCatalog.CallDirection direction) {}
 
+  /** 加开的结果。 */
+  public enum ExtraOutcome {
+    /** 已出票。 */
+    ISSUED,
+    /** 交路不在交路缓存里。 */
+    NO_ROUTE,
+    /** 交路首站不是车库（加开只从车库出车）。 */
+    NOT_FROM_DEPOT,
+    /** 命令里的车库不是这条交路出库的车库。 */
+    WRONG_DEPOT,
+    /** 拼不出发车服务或发车侧不可用。 */
+    FAILED
+  }
+
+  /**
+   * 加开的结果。
+   *
+   * @param id 加开的编号（也是票的编号）；没出票时为空
+   * @param routeDepot 交路的出库写法（车库不对时提示用）；交路首站不是车库时为空
+   */
+  public record ExtraResult(ExtraOutcome outcome, Optional<UUID> id, Optional<String> routeDepot) {}
+
+  /**
+   * 还没派出的加开。
+   *
+   * @param id 编号
+   * @param routeId 交路
+   * @param depotNode 命令里写的车库节点
+   * @param departAt 计划发车时刻
+   * @param issuer 加开的人；控制台为全零 UUID
+   */
+  public record ExtraTrip(UUID id, UUID routeId, String depotNode, Instant departAt, UUID issuer) {}
+
   /**
    * 还没派出的叫车。
    *
@@ -221,6 +259,11 @@ public final class CallService {
       return new PendingCallRecord(
           id, playerId, station, screenPlatforms, directionKey, lineId, createdAt, etaSeconds);
     }
+
+    /** 管理员加开的一班（方向一栏写着加开的交路与车库，叫车时刻一栏是计划发车时刻）。 */
+    boolean extra() {
+      return ExtraTrips.isExtra(directionKey);
+    }
   }
 
   /**
@@ -228,6 +271,7 @@ public final class CallService {
    *
    * @param returning 跑完叫车、正在回库交路上（不算线路的叫车车数）
    * @param turnback 折返车：正开进终点、等着接这一单的票（{@link SimpleTicketAssigner#TAG_CALL_TURNBACK}）
+   * @param extra 管理员加开的车（{@link #TAG_CALL_EXTRA}）
    */
   private record CalledTrain(
       String name,
@@ -235,7 +279,8 @@ public final class CallService {
       Optional<UUID> lineId,
       Optional<PlatformPin> pin,
       boolean returning,
-      boolean turnback) {}
+      boolean turnback,
+      boolean extra) {}
 
   /** 此后一段时间里按表从车库出车的出库点（CRET 写法），按计算时刻缓存。 */
   private record DepotDepartures(Instant computedAt, List<String> depots) {}
@@ -664,6 +709,235 @@ public final class CallService {
 
   private boolean isDispatched(UUID callId) {
     return dispatchedCallIds().contains(callId);
+  }
+
+  // ---------------------------------------------------------------- 加开
+
+  /** 加开提示里的时刻（服务器时区）。 */
+  public static final DateTimeFormatter EXTRA_CLOCK =
+      DateTimeFormatter.ofPattern("MM-dd HH:mm").withZone(ZoneId.systemDefault());
+
+  /** 控制台加开时记的“加开的人”。 */
+  public static final UUID CONSOLE = new UUID(0L, 0L);
+
+  /**
+   * 加开一班（表外）：从车库出车，跑这条交路的全程；不进时刻表、跑完回库（与叫来的车同一套），站台屏写“加开”。到计划时刻才出车， 车库在表定出库前后照样让表定那一班先出。
+   *
+   * @param routeId 交路
+   * @param depotNode 出车的车库节点：须是交路出库的车库（股道仍按交路的出库写法选）
+   * @param departAt 计划发车时刻；不晚于现在时尽快出车
+   * @param issuer 加开的人（派出、没开成时告诉他）；控制台为 {@link #CONSOLE}
+   */
+  public ExtraResult addExtra(UUID routeId, String depotNode, Instant departAt, UUID issuer) {
+    Instant now = Instant.now();
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (routeId == null || cache.isEmpty() || cache.get().findById(routeId).isEmpty()) {
+      return new ExtraResult(ExtraOutcome.NO_ROUTE, Optional.empty(), Optional.empty());
+    }
+    Optional<String> depot = depotOf(routeId);
+    if (depot.isEmpty()) {
+      return new ExtraResult(ExtraOutcome.NOT_FROM_DEPOT, Optional.empty(), Optional.empty());
+    }
+    if (depotNode == null || !sameYard(depot.get(), depotNode)) {
+      return new ExtraResult(ExtraOutcome.WRONG_DEPOT, Optional.empty(), depot);
+    }
+    UUID id = UUID.randomUUID();
+    Instant planned = departAt == null || departAt.isBefore(now) ? now : departAt;
+    if (!issueExtra(
+        id,
+        new ExtraTrips.Key(routeId, depotNode.trim()),
+        planned,
+        issuer == null ? CONSOLE : issuer,
+        now)) {
+      return new ExtraResult(ExtraOutcome.FAILED, Optional.empty(), depot);
+    }
+    debug(
+        "加开出票 call="
+            + id
+            + " route="
+            + routeCodeOf(routeId)
+            + " depot="
+            + depotNode
+            + " at="
+            + EXTRA_CLOCK.format(planned));
+    return new ExtraResult(ExtraOutcome.ISSUED, Optional.of(id), depot);
+  }
+
+  /**
+   * 出加开的票并记进库里。
+   *
+   * @param planned 计划发车时刻（存库的叫车时刻一栏，超时从它算）；不到它不出车
+   */
+  private boolean issueExtra(
+      UUID id, ExtraTrips.Key key, Instant planned, UUID issuer, Instant now) {
+    Optional<SpawnManager> spawnManager = plugin.getSpawnManager();
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (spawnManager.isEmpty() || cache.isEmpty()) {
+      return false;
+    }
+    Optional<RouteDefinitionCache.RouteRecord> record = cache.get().findRecord(key.routeId());
+    Optional<SpawnService> service = serviceFor(spawnManager.get(), cache.get(), key.routeId());
+    if (record.isEmpty() || service.isEmpty()) {
+      return false;
+    }
+    PidsStationKey station =
+        firstStationOf(key.routeId())
+            .orElse(new PidsStationKey(record.get().operator().code(), "EXTRA"));
+    String trip = OnDemandTrip.format(new CallTag(id, station).format(), Optional.empty());
+    Instant due = planned.isAfter(now) ? planned : now;
+    SpawnTicket ticket =
+        new SpawnTicket(
+            id,
+            service.get(),
+            due,
+            due,
+            due,
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of(trip),
+            TripSource.ON_DEMAND,
+            0,
+            Optional.empty());
+    PendingCall call =
+        new PendingCall(
+            id,
+            issuer,
+            station,
+            Set.of(),
+            key.format(),
+            record.get().line().id(),
+            planned,
+            OptionalInt.empty(),
+            Optional.empty(),
+            Optional.empty());
+    pending.put(id, call);
+    spawnManager.get().requeue(ticket);
+    remember(call);
+    hints.clear();
+    plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
+    return true;
+  }
+
+  /** 找回重启前还没派出的加开：交路还在、首站仍从那个车库出车时按原编号、原计划时刻重新出票。 */
+  private boolean reissueExtra(PendingCall call, Instant now) {
+    Optional<ExtraTrips.Key> key = ExtraTrips.Key.parse(call.directionKey());
+    if (key.isEmpty()) {
+      return false;
+    }
+    Optional<String> depot = depotOf(key.get().routeId());
+    if (depot.isEmpty() || !sameYard(depot.get(), key.get().depotNode())) {
+      return false;
+    }
+    pending.remove(call.id());
+    return issueExtra(call.id(), key.get(), call.createdAt(), call.playerId(), now);
+  }
+
+  /**
+   * 撤销还没派出的加开。
+   *
+   * @param id 加开编号
+   */
+  public CancelOutcome cancelExtra(UUID id) {
+    PendingCall call = id == null ? null : pending.get(id);
+    if (call == null || !call.extra()) {
+      return id != null && isDispatched(id)
+          ? CancelOutcome.ALREADY_DEPARTED
+          : CancelOutcome.NOT_FOUND;
+    }
+    boolean withdrawn = plugin.getSpawnTicketAssigner().map(a -> a.withdraw(id)).orElse(false);
+    if (!withdrawn) {
+      return CancelOutcome.ALREADY_DEPARTED;
+    }
+    pending.remove(id);
+    forget(id);
+    hints.clear();
+    plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
+    debug("加开撤销 call=" + id);
+    return CancelOutcome.CANCELLED;
+  }
+
+  /** 还没派出的加开，按计划发车时刻排。 */
+  public List<ExtraTrip> pendingExtras() {
+    List<ExtraTrip> out = new ArrayList<>();
+    for (PendingCall call : pending.values()) {
+      ExtraTrips.Key.parse(call.directionKey())
+          .ifPresent(
+              key ->
+                  out.add(
+                      new ExtraTrip(
+                          call.id(),
+                          key.routeId(),
+                          key.depotNode(),
+                          call.createdAt(),
+                          call.playerId())));
+    }
+    out.sort(java.util.Comparator.comparing(ExtraTrip::departAt).thenComparing(ExtraTrip::id));
+    return List.copyOf(out);
+  }
+
+  /** 正在跑的加开的车（列车名）。 */
+  public Set<String> extraTrainNames() {
+    Set<String> out = new HashSet<>();
+    for (CalledTrain train : calledTrains.values()) {
+      if (train.extra()) {
+        out.add(train.name());
+      }
+    }
+    return Set.copyOf(out);
+  }
+
+  /** 交路编号；查不到时为“-”。 */
+  public String routeCodeOf(UUID routeId) {
+    return plugin
+        .getRouteDefinitionCache()
+        .flatMap(cache -> cache.findRecord(routeId))
+        .map(record -> record.route().code())
+        .orElse("-");
+  }
+
+  private String routeCodeOf(SpawnTicket ticket) {
+    return ticket.service() == null ? "-" : routeCodeOf(ticket.service().routeId());
+  }
+
+  /** 交路第一个停车的车站（加开的车站一栏）；查不到时为空。 */
+  private Optional<PidsStationKey> firstStationOf(UUID routeId) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (cache.isEmpty()) {
+      return Optional.empty();
+    }
+    StationDirectory.Snapshot directory =
+        plugin.getStationDirectory().map(StationDirectory::snapshot).orElse(null);
+    for (RouteDefinitionCache.RouteEntry entry : cache.get().entries()) {
+      if (!routeId.equals(entry.routeId())) {
+        continue;
+      }
+      List<RouteStop> stops = entry.stops();
+      List<StationDirectory.StopStation> stations =
+          directory == null
+              ? List.of()
+              : directory.stopStations(
+                  entry.routeId(), stops, Optional.of(entry.record().operator()));
+      for (int i = 0; i < stops.size(); i++) {
+        if (stops.get(i).stops() && RouteTerminals.isStationStop(stops.get(i))) {
+          Optional<PidsStationKey> key = CallCatalog.stationKeyAt(entry, stops, stations, i);
+          if (key.isPresent()) {
+            return key;
+          }
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 两个出库写法是不是同一个车库：不看股道，DYNAMIC 写法按车库池。 */
+  static boolean sameYard(String a, String b) {
+    if (a == null || b == null || a.isBlank() || b.isBlank()) {
+      return false;
+    }
+    Optional<String> yard = depotKey(a);
+    return yard.isPresent() && yard.equals(depotKey(b));
   }
 
   /** 撤掉这一单还没派出的折返车票；已经开出的折返车开进终点后没人接，照常派回库。 */
@@ -1134,6 +1408,9 @@ public final class CallService {
 
   /** 按原编号重新排车出票；方向没了（线路关了叫车、交路改了）或排不出车时为 false。 */
   private boolean reissue(PendingCall call, Instant now) {
+    if (call.extra()) {
+      return reissueExtra(call, now);
+    }
     Optional<CallCatalog.CallDirection> direction =
         directions(call.station(), call.screenPlatforms()).stream()
             .filter(candidate -> candidate.key().equals(call.directionKey()))
@@ -1171,11 +1448,29 @@ public final class CallService {
     forget(call.id());
     hints.clear();
     debug(reason + " call=" + call.id());
+    if (call.extra()) {
+      // 加开：告诉加开的人是哪条交路、计划几点那一班没开成
+      notifyPlayer(
+          call.playerId(),
+          messageKey.replace("call.", "call.extra."),
+          Map.of(
+              "route",
+              ExtraTrips.Key.parse(call.directionKey())
+                  .map(key -> routeCodeOf(key.routeId()))
+                  .orElse("-"),
+              "time",
+              EXTRA_CLOCK.format(call.createdAt())));
+      return;
+    }
     notifyPlayer(call.playerId(), messageKey, Map.of());
   }
 
   /** 叫车等多久没派出就撤：预计到站再加 5 分钟，至少 {@link #PENDING_MIN_TIMEOUT}。 */
   private static Duration timeoutOf(PendingCall call) {
+    if (call.extra()) {
+      // 加开：叫车时刻一栏是计划发车时刻，过了它 ExtraTrips.TIMEOUT 还没派出就撤
+      return ExtraTrips.TIMEOUT;
+    }
     Duration timeout =
         call.etaSeconds().isPresent()
             ? Duration.ofSeconds(call.etaSeconds().getAsInt()).plusMinutes(5)
@@ -1264,6 +1559,7 @@ public final class CallService {
     }
     PendingCall call = pending.remove(tag.get().callId());
     Optional<PlatformPin> pin = call == null ? Optional.empty() : call.pin();
+    boolean extra = call != null && call.extra();
     try {
       if (TrainPropertiesStore.exists(trainName)) {
         TrainProperties properties = TrainPropertiesStore.get(trainName);
@@ -1281,19 +1577,31 @@ public final class CallService {
         }
         // 折返车被这一单接走了：不再是留着的车
         TrainTagHelper.removeTagKey(properties, SimpleTicketAssigner.TAG_CALL_TURNBACK);
+        // 加开的车跑完后又被叫车接走时就是叫来的车了：只有这一单是加开才写加开标记。
+        if (extra) {
+          TrainTagHelper.writeTag(properties, TAG_CALL_EXTRA, tag.get().callId().toString());
+        } else {
+          TrainTagHelper.removeTagKey(properties, TAG_CALL_EXTRA);
+        }
       }
     } catch (RuntimeException | LinkageError ex) {
       debug("叫车标签写入失败 train=" + trainName + " error=" + ex);
     }
     Map<String, CalledTrain> updated = new HashMap<>(calledTrains);
     updated.put(
-        trainName, new CalledTrain(trainName, tag.get(), lineIdOf(ticket), pin, false, false));
+        trainName,
+        new CalledTrain(trainName, tag.get(), lineIdOf(ticket), pin, false, false, extra));
     calledTrains = Map.copyOf(updated);
     forget(tag.get().callId());
     hints.clear();
     plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
-    debug("叫车派出 call=" + tag.get().callId() + " train=" + trainName);
-    if (call != null) {
+    debug((extra ? "加开派出" : "叫车派出") + " call=" + tag.get().callId() + " train=" + trainName);
+    if (call != null && extra) {
+      notifyPlayer(
+          call.playerId(),
+          "call.extra.departed",
+          Map.of("route", routeCodeOf(ticket), "train", trainName));
+    } else if (call != null) {
       notifyPlayer(
           call.playerId(), "call.departed", Map.of("station", stationName(call.station())));
     }
@@ -1323,7 +1631,7 @@ public final class CallService {
     Map<String, CalledTrain> updated = new HashMap<>(calledTrains);
     updated.put(
         trainName,
-        new CalledTrain(trainName, tag, lineIdOf(ticket), Optional.empty(), false, true));
+        new CalledTrain(trainName, tag, lineIdOf(ticket), Optional.empty(), false, true, false));
     calledTrains = Map.copyOf(updated);
     hints.clear();
     plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
@@ -1438,7 +1746,8 @@ public final class CallService {
                   .flatMap(PlatformPin::parse),
               returning,
               TrainTagHelper.readTagValue(properties, SimpleTicketAssigner.TAG_CALL_TURNBACK)
-                  .isPresent()));
+                  .isPresent(),
+              TrainTagHelper.readTagValue(properties, TAG_CALL_EXTRA).isPresent()));
     }
     calledTrains = Map.copyOf(found);
   }
@@ -2022,17 +2331,19 @@ public final class CallService {
     return line == null ? fallback : LineCallMetadata.maxTrains(line.metadata()).orElse(fallback);
   }
 
-  /** 线路上叫来的车（不含回库途中的）与还没派出的叫车；一单叫车只算一辆。 */
-  private Map<UUID, Integer> activeCallsByLine() {
+  /** 线路上叫来的车（不含回库途中的）与还没派出的叫车；一单叫车只算一辆。加开的不是玩家叫的，不占线路的叫车车数。 */
+  Map<UUID, Integer> activeCallsByLine() {
     Map<UUID, Integer> out = new HashMap<>();
     for (CalledTrain train : calledTrains.values()) {
       // 还没派出的那一单已经算过：它的折返车不再另算
-      if (!train.returning() && !pending.containsKey(train.tag().callId())) {
+      if (!train.returning() && !train.extra() && !pending.containsKey(train.tag().callId())) {
         train.lineId().ifPresent(lineId -> out.merge(lineId, 1, Integer::sum));
       }
     }
     for (PendingCall call : pending.values()) {
-      out.merge(call.lineId(), 1, Integer::sum);
+      if (!call.extra()) {
+        out.merge(call.lineId(), 1, Integer::sum);
+      }
     }
     return out;
   }
@@ -2057,7 +2368,13 @@ public final class CallService {
         return OptionalInt.of(Math.max(1, (remaining + 59) / 60));
       }
     }
-    Set<String> called = calledTrains.keySet();
+    // 加开的车按普通班次看（算进下一班几分钟到），不当成同方向已叫的车
+    Set<String> called = new HashSet<>();
+    for (CalledTrain train : calledTrains.values()) {
+      if (!train.extra()) {
+        called.add(train.name());
+      }
+    }
     OptionalInt best = OptionalInt.empty();
     for (PidsRow row : rows) {
       if (row.trainName().filter(called::contains).isEmpty() || !serves(direction, row)) {
@@ -2074,7 +2391,13 @@ public final class CallService {
   /** 同方向下一班可以乘坐的车（不算叫来的车）几分钟后到；看不到时为空。 */
   private OptionalInt nextTrainMinutes(
       CallCatalog.CallDirection direction, List<PidsRow> rows, Instant now) {
-    Set<String> called = calledTrains.keySet();
+    // 加开的车算作下一班（它会照常停这一站）
+    Set<String> called = new HashSet<>();
+    for (CalledTrain train : calledTrains.values()) {
+      if (!train.extra()) {
+        called.add(train.name());
+      }
+    }
     OptionalInt best = OptionalInt.empty();
     for (PidsRow row : rows) {
       if (row.trainName().filter(called::contains).isPresent() || !serves(direction, row)) {

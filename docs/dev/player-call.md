@@ -118,5 +118,17 @@
   - 交路车长（量车长要解析编组与存档车）按交路记住，交路改了随走行时分一起作废；写了编组却量不出来（TrainCarts 还没读入存档车）时不记。
   - 开放叫车的线路表每 10 秒在后台重读（`CallService#reloadLines`，同一时刻只读一份），读完之前沿用上一份，读完有变化时提示缓存作废；读失败也记下时刻，过 10 秒再试，不是每次刷新都重试。插件未启用时当场读。
   - 右键站台屏开对话框：同一玩家 1 秒内只开一次（按住右键每秒触发好几次，每次都要把各方向排一遍）。
-- 叫来的车照常显示，状态格写“叫车 / On call”（与“正点 / On time”同一排法）。
-- 文案在 `lang/zh_CN.yml` 的 `pids.board.call-hint`、`pids.board.no-more-trains-call`、`pids.board.status.on-call` 与 `call.*`。
+- 叫来的车照常显示，状态格写“叫车 / On call”（与“正点 / On time”同一排法）；加开的车写“加开 / Extra”（见下节）。
+- 文案在 `lang/zh_CN.yml` 的 `pids.board.call-hint`、`pids.board.no-more-trains-call`、`pids.board.status.on-call`、`pids.board.status.extra` 与 `call.*`。
+
+## 加开（表外加开一班）
+
+管理员 `/fta depot spawn <company> <operator> <line> <route> <node> --extra [--at HH:MM]` 加开一班：有表、无表的线路都可以，不要求线路开了叫车。
+
+- 只从车库出车：交路首站须带 CRET，命令里的车库须是这条交路出库的车库（不看股道，DYNAMIC 写法按车库池，`CallService#sameYard`）；股道仍按交路的出库写法选，`--pattern` 不用（按交路车型）。
+- 不写 `--at` 时尽快出车；写了按服务器时区的今天这个时刻，已过就是次日（`ExtraTrips#departAt`）。票的 `notBefore` 就是计划时刻，到点才出车；站台屏照常按票显示这一班。
+- 复用叫车的票与生命周期（`CallService#addExtra`）：一张 `ON_DEMAND` 票，车次标识照叫车写法（车站一栏是交路第一个停车的车站）；派出的车带叫车标签，另写 `FTA_CALL_EXTRA=<编号>`——不进时刻表、进路排队排在最后、跑完全程回库，都与叫来的车相同；车库在表定出库前后照样让表定那一班先出。
+- 与玩家叫车分开：不占线路的叫车车数（`activeCallsByLine`），玩家叫车时把它当普通班次（算进下一班几分钟到，不算同方向已叫的车）；跑完后被玩家叫车接走跑的那一趟摘掉加开标记。
+- 还没派出的加开与叫车同一张表存库（`pending_calls`）：方向一栏写 `EXTRA:<交路>:<车库节点>`（`ExtraTrips.Key`），叫车时刻一栏写计划发车时刻；重启后按原编号、原计划时刻重新出票。过了计划时刻 `ExtraTrips.TIMEOUT`（30 分钟）还没出车就撤票，告诉加开的人。
+- `/fta depot extra list` 列出还没派出的加开（编号前 8 位、交路、计划时刻、车库）与正在跑的加开的车；`/fta depot extra cancel <编号>` 撤销还没派出的（编号写前几位即可）。权限同 `fetarute.depot.spawn`。
+- 站台屏状态格写“加开 / Extra”（`PidsViewBuilder.Calls#extraTrains`，先认加开再认叫车）；车内 HUD 不另标。

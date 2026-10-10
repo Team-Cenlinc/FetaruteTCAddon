@@ -206,7 +206,8 @@ public final class PidsService {
                                           () ->
                                               calls.callableAt(
                                                   station, screen.platforms(), screen.lines()),
-                                          calls.calledTrainNames())))
+                                          calls.calledTrainNames(),
+                                          calls.extraTrainNames())))
                   .orElse(PidsViewBuilder.Calls.NONE));
     }
     this.items = new PidsItems(plugin, locale);

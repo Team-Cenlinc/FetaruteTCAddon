@@ -1253,6 +1253,25 @@ command:
       route-empty: "<prefix> <red>运行图没有停靠表</red> <gray>(route=<white><route></white>)</gray>"
       route-mismatch: "<prefix> <red>首个 stop 与车库不匹配</red> <gray>(route=<white><route></white>, node=<white><node></white>)</gray>"
       success: "<prefix> <dark_aqua>已生成列车</dark_aqua> <gray>(train=<white><train></white>, route=<white><route></white>, pattern=<white><pattern></white>, dest=<white><dest></white>, run=<white><run_id></white>)</gray>"
+    extra:
+      issued: "<prefix> <dark_aqua>已加开一班</dark_aqua> <white><route></white><gray>：计划 <white><time></white> 自车库 <white><node></white> 出车，跑完全程后回库。编号</gray> <white><id></white> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
+      issued-now: "<prefix> <dark_aqua>已加开一班</dark_aqua> <white><route></white><gray>：尽快自车库 <white><node></white> 出车，跑完全程后回库。编号</gray> <white><id></white> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
+      pattern-ignored: "<prefix> <gray>加开按交路车型出车，已忽略 --pattern</gray>"
+      at-needs-extra: "<prefix> <yellow>--at 只能与 --extra 一起使用（加开一班时指定发车时刻）</yellow>"
+      invalid-time: "<prefix> <red>时刻写法无效：</red><white><value></white> <gray>写法为 HH:MM（服务器时区），已过的时刻视为次日</gray>"
+      unavailable: "<prefix> <red>加开暂不可用：调度尚未就绪</red>"
+      no-route: "<prefix> <red>交路 <white><route></white> 不在调度的交路缓存中，请确认交路已生效</red>"
+      not-from-depot: "<prefix> <red>交路 <white><route></white> 的首站不是车库，无法加开</red> <gray>加开只从车库出车</gray>"
+      wrong-depot: "<prefix> <red>交路 <white><route></white> 不从车库 <white><node></white> 出车</red> <gray>（出库写法：<white><depot></white>）</gray>"
+      failed: "<prefix> <red>加开 <white><route></white> 失败：发车服务不可用，请查看控制台日志</red>"
+      list-header: "<prefix> <dark_aqua>加开</dark_aqua>"
+      list-empty: "<prefix> <gray>当前没有加开的车次</gray>"
+      list-pending: "  <white><id></white> <white><route></white> <gray>计划 <white><time></white> 自 <white><node></white> 出车</gray> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
+      list-running: "  <gray>运行中</gray> <white><train></white>"
+      cancelled: "<prefix> <dark_aqua>已撤销加开</dark_aqua> <white><id></white>"
+      cancel-too-late: "<prefix> <yellow>加开 <white><id></white> 已经出车，无法撤销</yellow>"
+      cancel-not-found: "<prefix> <yellow>没有编号以 <white><id></white> 开头的待出车加开</yellow>"
+      cancel-ambiguous: "<prefix> <yellow>编号以 <white><id></white> 开头的加开不止一个，请多写几位</yellow>"
     schedule:
       header: "<prefix> <dark_aqua>车库出库检查</dark_aqua> <gray>(node=<white><node></white>, trips=<white><trips></white>, services=<white><services></white>, queue=<white><queue></white>, pending=<white><pending></white>)</gray>"
       settings: "<gray>-</gray> spawn.enabled=<white><enabled></white> tick=<white><tick></white> maxSpawn=<white><max_spawn></white> maxGenerate=<white><max_generate></white>"
@@ -1429,6 +1448,10 @@ call:
   not-found: "<prefix> <yellow>该方向已不能叫车，请重新打开叫车对话框</yellow>"
   error: "<prefix> <red>叫车失败，请稍后再试</red>"
 
+  extra:
+    departed: "<prefix> <dark_aqua>加开的一班已出车：</dark_aqua><white><route></white> <gray>（列车 <white><train></white>）</gray>"
+    failed: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）未能出车，已撤销</yellow>"
+    timeout: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）过了计划时刻 30 分钟仍未出车，已撤销</yellow>"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:
@@ -1466,6 +1489,8 @@ pids:
       on-time-secondary: "On time"
       on-call: "叫车"
       on-call-secondary: "On call"
+      extra: "加开"
+      extra-secondary: "Extra"
       late: "晚点 <minutes> 分"
       late-secondary: "Late <minutes> min"
       severely-late: "严重晚点 <minutes> 分"

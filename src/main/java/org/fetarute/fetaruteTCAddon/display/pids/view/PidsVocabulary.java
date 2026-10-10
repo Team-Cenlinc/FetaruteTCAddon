@@ -60,6 +60,11 @@ public final class PidsVocabulary {
     return names("status.on-call");
   }
 
+  /** 管理员加开的车的状态：“加开”。 */
+  public Names extra() {
+    return names("status.extra");
+  }
+
   /** 准点。 */
   public Names onTime() {
     return names("status.on-time");

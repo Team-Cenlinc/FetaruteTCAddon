@@ -218,21 +218,28 @@ public final class PidsViewBuilder {
    *
    * @param hint 本屏此刻能不能叫车（能叫时空行写“可右键本屏叫车”）：要写空行时才问，屏上排满了班次就不问——判定要排车源，不便宜
    * @param calledTrains 叫来的车（列车名）：状态格写“叫车”
+   * @param extraTrains 管理员加开的车（列车名）：状态格写“加开”
    */
-  public record Calls(BooleanSupplier hint, Set<String> calledTrains) {
+  public record Calls(BooleanSupplier hint, Set<String> calledTrains, Set<String> extraTrains) {
 
     public static final Calls NONE = new Calls(false, Set.of());
 
     public Calls {
       hint = hint == null ? () -> false : hint;
       calledTrains = calledTrains == null ? Set.of() : Set.copyOf(calledTrains);
+      extraTrains = extraTrains == null ? Set.of() : Set.copyOf(extraTrains);
+    }
+
+    /** 没有加开的车。 */
+    public Calls(BooleanSupplier hint, Set<String> calledTrains) {
+      this(hint, calledTrains, Set.of());
     }
 
     /**
      * @param callable 本屏此刻能叫车
      */
     public Calls(boolean callable, Set<String> calledTrains) {
-      this(() -> callable, calledTrains);
+      this(() -> callable, calledTrains, Set.of());
     }
 
     /** 本屏此刻能叫车。 */
@@ -707,6 +714,15 @@ public final class PidsViewBuilder {
     boolean cancelled = row.status() == PidsRow.Status.CANCELLED;
     Arrival arrival = arrival(row, cancelled, request.now());
     if (arrival.mode() == ArrivalMode.COUNTDOWN
+        && row.trainName().filter(request.calls().extraTrains()::contains).isPresent()) {
+      // 加开的车：状态格写“加开”，与“正点”同一排法（加开的车同样带叫车标签，先认加开）
+      arrival =
+          new Arrival(
+              arrival.mode(),
+              arrival.minutes(),
+              arrival.minutesTone(),
+              Optional.of(Label.of(vocabulary.extra(), Tone.NORMAL)));
+    } else if (arrival.mode() == ArrivalMode.COUNTDOWN
         && row.trainName().filter(request.calls().calledTrains()::contains).isPresent()) {
       // 叫来的车：状态格写“叫车”，与“正点”同一排法
       arrival =
