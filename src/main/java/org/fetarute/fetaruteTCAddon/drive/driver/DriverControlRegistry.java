@@ -95,11 +95,15 @@ public final class DriverControlRegistry implements ControlAuthority {
     guard.rebind(properties);
     guardsByProperties.put(properties, guard);
     guardsByName.put(guard.trainName(), guard);
-    // 停站中途上岗：站台已把这一站交给了人工驾驶的驾驶员，车门此刻起归车掌，这一站一并交给车掌；
-    // 否则驾驶员开不了门、车掌也没有这一站可做，只能等站台兜底接手。
+    // 停站中途上岗：站台已把这一站交给了人工驾驶的驾驶员，车门此刻起归车掌，还没开门的这一站一并交给车掌；
+    // 否则驾驶员开不了门、车掌也没有这一站可做，只能等站台兜底接手。已经开过门的（停站、关门、等发车）不交：
+    // 车掌没做这一站的作业，不算他做过的站（与自动运行的车停站中途上岗只在关门前交车门同一口径）。
     DriverLink driver = resolve(properties);
     if (driver != null && guard.stationStop().isEmpty()) {
-      driver.stationStop().ifPresent(guard::beginStationStop);
+      driver
+          .stationStop()
+          .filter(stop -> !stop.phase().doorsOpened())
+          .ifPresent(guard::beginStationStop);
     }
   }
 

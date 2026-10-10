@@ -1264,6 +1264,7 @@ command:
       not-from-depot: "<prefix> <red>交路 <white><route></white> 的首站不是车库，无法加开</red> <gray>加开只从车库出车</gray>"
       wrong-depot: "<prefix> <red>交路 <white><route></white> 不从车库 <white><node></white> 出车</red> <gray>（出库写法：<white><depot></white>）</gray>"
       failed: "<prefix> <red>加开 <white><route></white> 失败：发车服务不可用，请查看控制台日志</red>"
+      spawn-disabled: "<prefix> <red>发车已关闭（spawn.enabled），加开的车不会出车</red>"
       list-header: "<prefix> <dark_aqua>加开</dark_aqua>"
       list-empty: "<prefix> <gray>当前没有加开的车次</gray>"
       list-pending: "  <white><id></white> <white><route></white> <gray>计划 <white><time></white> 自 <white><node></white> 出车</gray> <click:suggest_command:'/fta depot extra cancel <full_id>'><hover:show_text:'<gray>撤销这一班</gray>'><gray>[撤销]</gray></hover></click>"
@@ -1451,7 +1452,7 @@ call:
   extra:
     departed: "<prefix> <dark_aqua>加开的一班已出车：</dark_aqua><white><route></white> <gray>（列车 <white><train></white>）</gray>"
     failed: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）未能出车，已撤销</yellow>"
-    timeout: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）过了计划时刻 30 分钟仍未出车，已撤销</yellow>"
+    timeout: "<prefix> <yellow>加开的 <white><route></white>（计划 <white><time></white>）过了计划时刻 <white><minutes></white> 分钟仍未出车，已撤销</yellow>"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:

@@ -71,14 +71,15 @@ public final class ExtraTrips {
   }
 
   /**
-   * {@code --at HH:MM} 的发车时刻（服务器时区）：今天的这个时刻，已经过了就是明天的。
+   * {@code --at HH:MM} 的发车时刻（服务器时区）：今天的这个时刻，已经过了就是明天的；写的就是此刻这一分钟时按此刻（尽快出车）。
    *
    * @param at 时分
    * @param now 现在（服务器时区）
    */
   public static Instant departAt(LocalTime at, ZonedDateTime now) {
     ZonedDateTime today = now.with(at.withSecond(0).withNano(0));
-    return (today.isAfter(now) ? today : today.plusDays(1)).toInstant();
+    boolean thisMinute = !today.isBefore(now.truncatedTo(java.time.temporal.ChronoUnit.MINUTES));
+    return (today.isAfter(now) || thisMinute ? today : today.plusDays(1)).toInstant();
   }
 
   /**

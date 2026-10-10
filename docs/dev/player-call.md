@@ -124,7 +124,7 @@
 ## 公开 API 与事件
 
 - `FetaruteApi#call()`（`CallApi`，`api/internal/CallApiImpl` 转给 `CallService`）：`directionsAt` 列车站上能叫车的方向与此刻能不能叫（`CallService#options` 不带玩家，不看个人冷却，主线程）；`callOf`/`callsOf` 读叫车单快照（`CallService#snapshotOf`/`snapshotsOf`，任意线程）。不代玩家叫车。
-- 事件（`api/event/TrainCall*`）：叫车（`call` 出票成功后当场发）、没派出就结束（取消、撤票、作废，当场发）、派出（`onDispatched`）、到站（车站停靠观察者 `call` 转到 `CallService#onStationArrival`，站台节点按 `运营商:S:站码` 认车站，每张叫车单只发一次）；后两种在调度主路径上，下一拍再发（`CallService#post`）。
+- 事件（`api/event/TrainCall*`）：叫车（`call` 出票成功后当场发）、没派出就结束（取消、撤票、作废，当场发）、派出（`onDispatched`）、到站（车站停靠观察者 `call` 转到 `CallService#onStationArrival`，按交路与停靠下标认车站——与叫车方向同一认法，交路查不到时按站台节点 `运营商:S:站码` 认；每张叫车单只发一次；首站待命车、折返车在叫车的车站接走时，派出时已停在这一站，到站事件跟着派出事件发）；后两种在调度主路径上，下一拍再发（`CallService#post`）。
 - 派出以后叫车的玩家只记在内存（`callers`，叫来的车不在了就忘掉）：重启后已派出的叫车查不到叫车的玩家。
 - 加开的车不是叫车：不在 `CallApi` 里，也不发叫车事件。
 
@@ -133,9 +133,10 @@
 管理员 `/fta depot spawn <company> <operator> <line> <route> <node> --extra [--at HH:MM]` 加开一班：有表、无表的线路都可以，不要求线路开了叫车。
 
 - 只从车库出车：交路首站须带 CRET，命令里的车库须是这条交路出库的车库（不看股道，DYNAMIC 写法按车库池，`CallService#sameYard`）；股道仍按交路的出库写法选，`--pattern` 不用（按交路车型）。
-- 不写 `--at` 时尽快出车；写了按服务器时区的今天这个时刻，已过就是次日（`ExtraTrips#departAt`）。票的 `notBefore` 就是计划时刻，到点才出车；站台屏照常按票显示这一班。
-- 复用叫车的票与生命周期（`CallService#addExtra`）：一张 `ON_DEMAND` 票，车次标识照叫车写法（车站一栏是交路第一个停车的车站）；派出的车带叫车标签，另写 `FTA_CALL_EXTRA=<编号>`——不进时刻表、进路排队排在最后、跑完全程回库，都与叫来的车相同；车库在表定出库前后照样让表定那一班先出。
+- 不写 `--at` 时尽快出车；写了按服务器时区的今天这个时刻，已过就是次日，写的就是此刻这一分钟时按此刻（`ExtraTrips#departAt`）。票的 `notBefore` 就是计划时刻，到点才出车；站台屏照常按票显示这一班。
+- 发车已关闭（`spawn.enabled`）时不收（票不会被处理）。
+- 复用叫车的票与生命周期（`CallService#addExtra`）：一张 `ON_DEMAND` 票，车次标识照叫车写法再带加开标记 `~X`（`OnDemandTrip#formatExtra`，车站一栏是交路第一个停车的车站；派出时按票本身认加开，待派表里那一单不在了也不会当成玩家叫车）；派出的车带叫车标签，另写 `FTA_CALL_EXTRA=<编号>`——不进时刻表、进路排队排在最后、跑完全程回库，都与叫来的车相同；车库在表定出库前后照样让表定那一班先出。
 - 与玩家叫车分开：不占线路的叫车车数（`activeCallsByLine`），玩家叫车时把它当普通班次（算进下一班几分钟到，不算同方向已叫的车）；跑完后被玩家叫车接走跑的那一趟摘掉加开标记。
-- 还没派出的加开与叫车同一张表存库（`pending_calls`）：方向一栏写 `EXTRA:<交路>:<车库节点>`（`ExtraTrips.Key`），叫车时刻一栏写计划发车时刻；重启后按原编号、原计划时刻重新出票。过了计划时刻 `ExtraTrips.TIMEOUT`（30 分钟）还没出车就撤票，告诉加开的人。
+- 还没派出的加开与叫车同一张表存库（`pending_calls`，表里没有类型一栏）：方向一栏写 `EXTRA:<交路>:<车库节点>`（`ExtraTrips.Key`），叫车时刻一栏写计划发车时刻；读库时按方向一栏认成加开（`PendingCall#fromRecord`，内存里的待派单带明确的 `extra` 标记）。重启后按原编号、原计划时刻重新出票；找回之前 `/fta depot extra list|cancel` 先读库，撤销直接从库里去掉。过了计划时刻 `ExtraTrips.TIMEOUT`（30 分钟）还没出车就撤票，告诉加开的人（控制台加开的发到控制台）。玩家取消叫车的入口撤不掉加开。
 - `/fta depot extra list` 列出还没派出的加开（编号前 8 位、交路、计划时刻、车库）与正在跑的加开的车；`/fta depot extra cancel <编号>` 撤销还没派出的（编号写前几位即可）。权限同 `fetarute.depot.spawn`。
 - 站台屏状态格写“加开 / Extra”（`PidsViewBuilder.Calls#extraTrains`，先认加开再认叫车）；车内 HUD 不另标。

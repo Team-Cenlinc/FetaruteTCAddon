@@ -12,6 +12,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  * 与下一个节点之间图路径上的区间点（交路节点表里没有它）；没写时生成点就是交路节点 {@code 入路下标}。重载时票据原样迁移，标识跟着走。
  *
  * <p>{@code ~T} 是折返车票：叫车的交路从终点出发、本站上游又生成不了车时，先在开往这个终点的交路上生成一列车， 它开进终点后由同一单叫车的票接走（见叫车服务）。
+ *
+ * <p>{@code ~X} 是管理员加开（表外加开一班）的票：不是玩家叫车，派出的车按加开对待（见叫车服务）。
  */
 public final class OnDemandTrip {
 
@@ -19,6 +21,7 @@ public final class OnDemandTrip {
   private static final char ENTRY_SEPARATOR = '#';
   private static final char NODE_SEPARATOR = '/';
   private static final String TURNBACK_MARK = "~T";
+  private static final String EXTRA_MARK = "~X";
 
   private OnDemandTrip() {}
 
@@ -69,6 +72,30 @@ public final class OnDemandTrip {
         .orElse(out);
   }
 
+  /**
+   * 写加开票的车次标识（从车库出车，不区间生成）。
+   *
+   * @param callTag 叫车标签（不含 {@code #}、{@code ~}）
+   */
+  public static String formatExtra(String callTag) {
+    return PREFIX
+        + (callTag == null ? "" : callTag.replace(ENTRY_SEPARATOR, '_').replace('~', '_'))
+        + EXTRA_MARK;
+  }
+
+  /** 是不是加开票（见类说明）。 */
+  public static boolean isExtra(Optional<String> serviceTripId) {
+    return serviceTripId != null
+        && serviceTripId
+            .filter(id -> id.startsWith(PREFIX))
+            .map(
+                id -> {
+                  int at = id.indexOf(ENTRY_SEPARATOR);
+                  return (at < 0 ? id : id.substring(0, at)).endsWith(EXTRA_MARK);
+                })
+            .orElse(false);
+  }
+
   /** 叫车标签；不是叫车票时为空。 */
   public static Optional<String> callTagOf(Optional<String> serviceTripId) {
     return serviceTripId
@@ -78,8 +105,11 @@ public final class OnDemandTrip {
             rest -> {
               int at = rest.indexOf(ENTRY_SEPARATOR);
               String head = at < 0 ? rest : rest.substring(0, at);
-              return head.endsWith(TURNBACK_MARK)
-                  ? head.substring(0, head.length() - TURNBACK_MARK.length())
+              if (head.endsWith(TURNBACK_MARK)) {
+                return head.substring(0, head.length() - TURNBACK_MARK.length());
+              }
+              return head.endsWith(EXTRA_MARK)
+                  ? head.substring(0, head.length() - EXTRA_MARK.length())
                   : head;
             })
         .filter(tag -> !tag.isBlank());

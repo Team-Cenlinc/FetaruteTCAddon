@@ -33,15 +33,12 @@ import org.fetarute.fetaruteTCAddon.api.event.TrainCallDispatchedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainCallEndedEvent;
 import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
-import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
-import org.fetarute.fetaruteTCAddon.company.model.LineStatus;
 import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
-import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
@@ -52,7 +49,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnServiceKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
@@ -62,9 +58,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableServi
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableTrip;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsService;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
-import org.fetarute.fetaruteTCAddon.storage.StorageManager;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
-import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -81,13 +75,14 @@ class CallRestoreTest {
   private static final Instant T = Instant.parse("2026-10-08T12:00:00Z");
   private static final PidsStationKey PPK = new PidsStationKey("SURC", "PPK");
 
-  private final UUID routeId = UUID.randomUUID();
-  private final FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
-  private final PendingCallRepository stored = mock(PendingCallRepository.class);
-  private final TicketAssigner assigner = mock(TicketAssigner.class);
-  private final SpawnManager spawnManager = mock(SpawnManager.class);
-  private final List<PendingCallRecord> rows = new ArrayList<>();
-  private final RouteDefinitionCache cache = mock(RouteDefinitionCache.class);
+  private CallFixture fixture;
+  private UUID routeId;
+  private FetaruteTCAddon plugin;
+  private PendingCallRepository stored;
+  private TicketAssigner assigner;
+  private SpawnManager spawnManager;
+  private List<PendingCallRecord> rows;
+  private RouteDefinitionCache cache;
   private Line line;
   private Operator operator;
   private MockedStatic<Bukkit> bukkit;
@@ -95,86 +90,16 @@ class CallRestoreTest {
   @BeforeEach
   void setUp() {
     bukkit = mockStatic(Bukkit.class);
-    line = line(Map.of("allow_player_call", true));
-    operator =
-        new Operator(
-            UUID.randomUUID(),
-            "SURC",
-            UUID.randomUUID(),
-            "SURC",
-            Optional.empty(),
-            Optional.empty(),
-            0,
-            Optional.empty(),
-            Map.of(),
-            T,
-            T);
-    List<NodeId> nodes =
-        List.of(NodeId.of("SURC:D:DEP:1"), NodeId.of("SURC:S:PPK:1"), NodeId.of("SURC:S:NTA:1"));
-    RouteDefinition definition =
-        new RouteDefinition(new RouteId("SURC:WS:WS-N"), nodes, Optional.empty());
-    List<RouteStop> stops =
-        List.of(
-            stop(0, "SURC:D:DEP:1", RouteStopPassType.PASS, "CRET SURC:D:DEP:1"),
-            stop(1, "SURC:S:PPK:1", RouteStopPassType.STOP, null),
-            stop(2, "SURC:S:NTA:1", RouteStopPassType.TERMINATE, null));
-    Route route =
-        new Route(
-            routeId,
-            "WS-N",
-            line.id(),
-            "WS-N",
-            Optional.empty(),
-            RoutePatternType.LOCAL,
-            RouteOperationType.OPERATION,
-            Optional.empty(),
-            Optional.empty(),
-            Map.of(),
-            T,
-            T);
-    RouteDefinitionCache.RouteRecord record =
-        new RouteDefinitionCache.RouteRecord(operator, line, route);
-    when(cache.entries())
-        .thenReturn(
-            List.of(new RouteDefinitionCache.RouteEntry(routeId, definition, record, stops)));
-    when(cache.findById(routeId)).thenReturn(Optional.of(definition));
-    when(cache.listStops(definition.id())).thenReturn(stops);
-    when(cache.findRecord(routeId)).thenReturn(Optional.of(record));
-    when(plugin.getRouteDefinitionCache()).thenReturn(Optional.of(cache));
-    when(plugin.getStationDirectory()).thenReturn(Optional.empty());
-    when(plugin.getTimetableService()).thenReturn(Optional.empty());
-    when(plugin.getLayoverRegistry()).thenReturn(Optional.empty());
-    when(plugin.getPidsService()).thenReturn(Optional.empty());
-
-    StorageProvider provider = mock(StorageProvider.class);
-    LineRepository lines = mock(LineRepository.class);
-    when(lines.listAll()).thenAnswer(invocation -> List.of(line));
-    when(provider.lines()).thenReturn(lines);
-    when(provider.pendingCalls()).thenReturn(stored);
-    when(stored.listAll()).thenAnswer(invocation -> List.copyOf(rows));
-    StorageManager storage = mock(StorageManager.class);
-    when(storage.provider()).thenReturn(Optional.of(provider));
-    when(plugin.getStorageManager()).thenReturn(storage);
-
-    when(plugin.getSpawnTicketAssigner()).thenReturn(Optional.of(assigner));
-    when(plugin.getSpawnManager()).thenReturn(Optional.of(spawnManager));
-    when(spawnManager.snapshotPlan())
-        .thenReturn(
-            new SpawnPlan(
-                T,
-                List.of(
-                    new SpawnService(
-                        new SpawnServiceKey(routeId),
-                        UUID.randomUUID(),
-                        "SURC",
-                        operator.id(),
-                        "SURC",
-                        line.id(),
-                        "WS",
-                        routeId,
-                        "WS-N",
-                        Duration.ofMinutes(10),
-                        "SURC:D:DEP:1"))));
+    fixture = new CallFixture(T, Map.of("allow_player_call", true));
+    routeId = fixture.routeId;
+    plugin = fixture.plugin;
+    stored = fixture.stored;
+    assigner = fixture.assigner;
+    spawnManager = fixture.spawnManager;
+    rows = fixture.rows;
+    cache = fixture.cache;
+    line = fixture.line;
+    operator = fixture.operator;
   }
 
   @AfterEach
@@ -221,7 +146,7 @@ class CallRestoreTest {
   @Test
   void aStoredCallWhoseDirectionIsGoneIsDropped() {
     PendingCallRecord call = storedCall(T.minusSeconds(30));
-    line = line(Map.of());
+    line = fixture.line = line(Map.of());
     CallService service = new CallService(plugin);
 
     service.restorePending(T);
@@ -289,9 +214,9 @@ class CallRestoreTest {
       store.when(() -> TrainPropertiesStore.get("Train-1")).thenReturn(mock(TrainProperties.class));
       service.onDispatched(ticket.getValue(), "Train-1");
     }
-    service.onStationArrival("Train-1", "SURC:S:NTA:1");
-    service.onStationArrival("Train-1", "SURC:S:PPK:1");
-    service.onStationArrival("Train-1", "SURC:S:PPK:2");
+    service.onStationArrival("Train-1", Optional.of(routeId), 2, "SURC:S:NTA:1");
+    service.onStationArrival("Train-1", Optional.of(routeId), 1, "SURC:S:PPK:1");
+    service.onStationArrival("Train-1", Optional.of(routeId), 1, "SURC:S:PPK:2");
 
     ArgumentCaptor<Event> fired = ArgumentCaptor.forClass(Event.class);
     verify(events, org.mockito.Mockito.times(2)).callEvent(fired.capture());
@@ -311,13 +236,58 @@ class CallRestoreTest {
     assertEquals(List.of(running), service.snapshotsOf(call.playerId()));
   }
 
+  /** 首站待命车在叫车的车站接走：车派出时已经停在这一站，到站事件跟着派出事件发出（之后不会再“到达”这一站）。 */
+  @Test
+  void aCallServedAtTheCalledStationArrivesOnDispatch() {
+    PluginManager events = mock(PluginManager.class);
+    bukkit.when(Bukkit::getPluginManager).thenReturn(events);
+    useRoute(
+        List.of(
+            stop(0, "SURC:S:PPK:1", RouteStopPassType.STOP, null),
+            stop(1, "SURC:S:NTA:1", RouteStopPassType.TERMINATE, null)));
+    LayoverRegistry registry = new LayoverRegistry();
+    registry.register(
+        "standby-1", "surc:s:ppk:1", NodeId.of("SURC:S:PPK:1"), T.minusSeconds(60), Map.of());
+    when(plugin.getLayoverRegistry()).thenReturn(Optional.of(registry));
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+    CallService service = new CallService(plugin);
+    service.restorePending(T);
+    when(plugin.isEnabled()).thenReturn(true);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    when(scheduler.runTask(eq(plugin), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              ((Runnable) invocation.getArgument(1)).run();
+              return null;
+            });
+    bukkit.when(Bukkit::getScheduler).thenReturn(scheduler);
+    ArgumentCaptor<SpawnTicket> ticket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(ticket.capture());
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.exists("standby-1")).thenReturn(true);
+      store
+          .when(() -> TrainPropertiesStore.get("standby-1"))
+          .thenReturn(mock(TrainProperties.class));
+      service.onDispatched(ticket.getValue(), "standby-1");
+    }
+    service.onStationArrival("standby-1", Optional.of(routeId), 0, "SURC:S:PPK:1");
+
+    ArgumentCaptor<Event> fired = ArgumentCaptor.forClass(Event.class);
+    verify(events, org.mockito.Mockito.times(2)).callEvent(fired.capture());
+    assertTrue(fired.getAllValues().get(0) instanceof TrainCallDispatchedEvent);
+    TrainCallArrivedEvent arrived = (TrainCallArrivedEvent) fired.getAllValues().get(1);
+    assertEquals(call.id(), arrived.getCallId());
+    assertEquals("SURC:S:PPK:1", arrived.getNodeId());
+  }
+
+  /** 交路查不到时按站台节点的写法认车站。 */
   @Test
   void stationNodesBelongToTheirStation() {
-    assertTrue(CallService.atStation("SURC:S:PPK:2", PPK));
-    assertTrue(CallService.atStation("surc:s:ppk:1", PPK));
-    assertFalse(CallService.atStation("SURC:S:NTA:1", PPK));
-    assertFalse(CallService.atStation("SURC:D:PPK:1", PPK));
-    assertFalse(CallService.atStation("PPK", PPK));
+    assertEquals(Optional.of(PPK), CallService.stationOfNode("SURC:S:PPK:2"));
+    assertEquals(Optional.of(PPK), CallService.stationOfNode("surc:s:ppk:1"));
+    assertTrue(CallService.stationOfNode("SURC:D:PPK:1").isEmpty());
+    assertTrue(CallService.stationOfNode("PPK").isEmpty());
   }
 
   /** 读库只在第一次启动时做：之后再启动（重载）不会把已删掉的叫车读回来。 */
@@ -1097,30 +1067,10 @@ class CallRestoreTest {
   }
 
   private Line line(Map<String, Object> metadata) {
-    UUID id = line == null ? UUID.randomUUID() : line.id();
-    return new Line(
-        id,
-        "WS",
-        UUID.randomUUID(),
-        "WS",
-        Optional.empty(),
-        LineServiceType.METRO,
-        Optional.empty(),
-        LineStatus.ACTIVE,
-        Optional.empty(),
-        metadata,
-        T,
-        T);
+    return fixture.line(metadata);
   }
 
   private RouteStop stop(int sequence, String node, RouteStopPassType type, String notes) {
-    return new RouteStop(
-        routeId,
-        sequence,
-        Optional.empty(),
-        Optional.of(node),
-        Optional.empty(),
-        type,
-        Optional.ofNullable(notes));
+    return fixture.stop(sequence, node, type, notes);
   }
 }

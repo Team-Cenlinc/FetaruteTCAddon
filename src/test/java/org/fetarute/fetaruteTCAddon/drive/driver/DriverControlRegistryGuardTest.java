@@ -87,6 +87,20 @@ class DriverControlRegistryGuardTest {
     assertFalse(registry.driverOperatesDoors(properties));
   }
 
+  /** 已经开过门的这一站（停站、关门、等发车）不交给后来上岗的车掌：他没做这一站的作业。 */
+  @Test
+  void aGuardJoiningAfterTheDoorsOpenedDoesNotGetTheStop() {
+    DriverLink driver = new DriverLink(UUID.randomUUID(), "T-1", null, () -> 0.0, () -> 0L);
+    when(properties.getTrainName()).thenReturn("T-1");
+    registry.bind(properties, driver);
+    driver.setMode(DrivingMode.MANUAL);
+    DriverStationStop stop = stop();
+    registry.beginStationStop(properties, stop);
+    stop.setPhase(Phase.WAIT_DEPARTURE);
+
+    assertTrue(guard().stationStop().isEmpty());
+  }
+
   @Test
   void aGuardJoiningBetweenStationsHasNoStop() {
     DriverLink driver = new DriverLink(UUID.randomUUID(), "T-1", null, () -> 0.0, () -> 0L);

@@ -1729,7 +1729,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
               org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {
             org.fetarute.fetaruteTCAddon.call.CallService calls = callService;
             if (calls != null) {
-              calls.onStationArrival(event.trainName(), event.nodeId());
+              calls.onStationArrival(
+                  event.trainName(), event.routeUuid(), event.stopIndex(), event.nodeId());
             }
           }
 

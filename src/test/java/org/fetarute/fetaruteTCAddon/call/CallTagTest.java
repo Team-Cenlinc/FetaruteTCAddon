@@ -100,6 +100,21 @@ class CallTagTest {
     assertFalse(OnDemandTrip.isTurnback(Optional.of("TIMETABLE-x~T")));
   }
 
+  /** 加开票的车次标识带加开标记，叫车标签照样读得出，不是折返车票、不区间生成。 */
+  @Test
+  void extraTripsAreMarked() {
+    UUID callId = UUID.randomUUID();
+    String tag = new CallTag(callId, new PidsStationKey("SURC", "PPK")).format();
+    Optional<String> extra = Optional.of(OnDemandTrip.formatExtra(tag));
+
+    assertTrue(OnDemandTrip.isExtra(extra));
+    assertFalse(OnDemandTrip.isTurnback(extra));
+    assertFalse(OnDemandTrip.isExtra(Optional.of(OnDemandTrip.format(tag, Optional.empty()))));
+    assertEquals(Optional.of(tag), OnDemandTrip.callTagOf(extra));
+    assertEquals(Optional.of(callId.toString()), OnDemandTrip.callIdOf(extra));
+    assertTrue(OnDemandTrip.entryOf(extra).isEmpty());
+  }
+
   @Test
   void lineFlagsReadOnlyExplicitValues() {
     assertTrue(LineCallMetadata.allowsPlayerCall(Map.of("allow_player_call", true)));

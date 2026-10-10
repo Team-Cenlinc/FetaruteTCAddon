@@ -1425,6 +1425,8 @@ public final class FtaDepotCommand {
                   result.routeDepot().orElse("-"))));
       case FAILED -> sender.sendMessage(
           locale.component("command.depot.extra.failed", Map.of("route", route)));
+      case SPAWN_DISABLED -> sender.sendMessage(
+          locale.component("command.depot.extra.spawn-disabled"));
     }
   }
 

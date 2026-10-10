@@ -912,7 +912,7 @@ public class BoardListener implements Listener {
 |------|------|
 | `TrainCallPlacedEvent` | 玩家叫了一趟车：叫车票已出、车源已排好；含方向、线路、交路与估计几分钟到站 |
 | `TrainCallDispatchedEvent` | 叫来的车派出（车库出车、区间生成或首站待命车接走）；折返车开出时不发，等它开进终点被这一单接走才发 |
-| `TrainCallArrivedEvent` | 叫来的车到达叫车的车站（进度推进到本站），每张叫车单只发一次 |
+| `TrainCallArrivedEvent` | 叫来的车到达叫车的车站（进度推进到本站），每张叫车单只发一次；首站待命车、折返车在叫车的车站接走时，派出时已停在这一站，跟着派出事件发（`getNodeId()` 为交路这一站的写法） |
 | `TrainCallEndedEvent` | 没派出就结束：玩家取消（`CANCELLED`）、等太久撤票（`TIMED_OUT`）、排不出车作废（`FAILED`） |
 
 ---
