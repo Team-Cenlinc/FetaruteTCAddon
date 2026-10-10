@@ -257,6 +257,12 @@ public final class FtaLineCommand {
                   }
                   String color = flags.getValue(colorFlag, null);
                   Integer freqBaseline = flags.getValue(freqBaselineFlag, null);
+                  // --maxTrains 与 line set 同一写法：大于 0 时写进线路元数据，0 表示不设上限。
+                  Integer maxTrains = flags.getValue(maxTrainsFlag, null);
+                  Map<String, Object> metadata =
+                      maxTrains != null && maxTrains > 0
+                          ? Map.of(LineSpawnMetadata.KEY_MAX_TRAINS, maxTrains)
+                          : Map.of();
 
                   Instant now = Instant.now();
                   Line line =
@@ -270,7 +276,7 @@ public final class FtaLineCommand {
                           Optional.ofNullable(color).map(String::trim).filter(s -> !s.isBlank()),
                           statusOpt.get(),
                           Optional.ofNullable(freqBaseline),
-                          Map.of(),
+                          metadata,
                           now,
                           now);
                   provider.lines().save(line);

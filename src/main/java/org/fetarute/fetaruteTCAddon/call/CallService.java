@@ -94,9 +94,6 @@ public final class CallService {
   /** 表定出库的车库清单缓存多久：站台屏每次判定都要问。 */
   private static final Duration DEPOT_YIELD_TTL = Duration.ofSeconds(5);
 
-  /** 折返车在终点最多为这一单留多久：票一直接不走它就作废这一单、放它回库，不长时间占着终点股道（单股道车站尤其）。 */
-  static final Duration TURNBACK_HOLD = Duration.ofSeconds(90);
-
   /** 派出时写不上的叫车标签（车还没进 TrainPropertiesStore）最多补写多久。 */
   static final Duration TAG_RETRY = Duration.ofSeconds(30);
 
@@ -1471,6 +1468,7 @@ public final class CallService {
     Set<UUID> dispatched = dispatchedCallIds();
     Optional<TicketAssigner> assigner = plugin.getSpawnTicketAssigner();
     Map<UUID, LayoverRegistry.LayoverCandidate> waitingTurnbacks = waitingTurnbacks();
+    Duration turnbackHold = Duration.ofSeconds(settings().turnbackHoldSeconds());
     for (PendingCall call : List.copyOf(pending.values())) {
       if (dispatched.contains(call.id())) {
         pending.remove(call.id());
@@ -1486,9 +1484,9 @@ public final class CallService {
         dropPending(call, "call.failed", "叫车折返车未能派出");
         continue;
       }
-      if (turnbackHeldTooLong(waitingTurnbacks.get(call.id()), now)
+      if (turnbackHeldTooLong(waitingTurnbacks.get(call.id()), now, turnbackHold)
           && assigner.map(a -> a.withdraw(call.id())).orElse(false)) {
-        // 折返车在终点就绪满 TURNBACK_HOLD 这一单的票还没接走它：作废，放车回库，不长时间占着终点股道
+        // 折返车在终点就绪满 call.turnback-hold-seconds 这一单的票还没接走它：作废，放车回库，不长时间占着终点股道
         dropPending(call, "call.failed", "叫车折返车在终点等候超时");
         continue;
       }
@@ -1526,13 +1524,18 @@ public final class CallService {
     return out;
   }
 
-  /** 折返车在终点就绪满 {@link #TURNBACK_HOLD} 还没被接走（正在交接的不算）。 */
-  static boolean turnbackHeldTooLong(LayoverRegistry.LayoverCandidate waiting, Instant now) {
-    if (waiting == null || waiting.dispatchAttempt().isPresent()) {
+  /**
+   * 折返车在终点就绪满 {@code hold} 还没被接走（正在交接的不算）。折返车在终点最多为这一单留这么久：票一直接不走它就作废这一单、放它回库， 不长时间占着终点股道（单股道车站尤其）。
+   *
+   * @param hold {@code call.turnback-hold-seconds}；为零时不设上限
+   */
+  static boolean turnbackHeldTooLong(
+      LayoverRegistry.LayoverCandidate waiting, Instant now, Duration hold) {
+    if (waiting == null || waiting.dispatchAttempt().isPresent() || hold.isZero()) {
       return false;
     }
     Instant readyAt = waiting.readyAt() == null ? now : waiting.readyAt();
-    return now.isAfter(readyAt.plus(TURNBACK_HOLD));
+    return now.isAfter(readyAt.plus(hold));
   }
 
   /**

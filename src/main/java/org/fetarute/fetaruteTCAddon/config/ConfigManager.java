@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 41;
+  private static final int EXPECTED_CONFIG_VERSION = 42;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -213,7 +213,9 @@ public final class ConfigManager {
             section, "default-max-trains", defaults.defaultMaxTrains(), "call", logger),
         readNonNegativeInt(section, "min-lead-minutes", defaults.minLeadMinutes(), "call", logger),
         readNonNegativeInt(
-            section, "follow-gap-seconds", defaults.followGapSeconds(), "call", logger));
+            section, "follow-gap-seconds", defaults.followGapSeconds(), "call", logger),
+        readNonNegativeInt(
+            section, "turnback-hold-seconds", defaults.turnbackHoldSeconds(), "call", logger));
   }
 
   /**
@@ -1690,6 +1692,8 @@ public final class ConfigManager {
    * @param minLeadMinutes 叫来的车至少要比同方向下一班早到这么多分钟才能叫：早得不够多就只会把下一班压在后面晚点；0 表示不比
    * @param followGapSeconds 叫来的车离前车不到这么多秒时按需降速（最低到线路限速的七成），后车追到 {@code minLeadMinutes} 以内时不降；0
    *     表示不降速
+   * @param turnbackHoldSeconds 折返车（终点站与交路第一站叫车时先开进终点再折返的车）在终点就绪后最多等这么多秒，这一单的票还没接走它就作废这一单、 车回库；0
+   *     表示不设上限，等到叫车超时
    */
   public record CallSettings(
       int minWaitMinutes,
@@ -1697,7 +1701,8 @@ public final class ConfigManager {
       int terminalWaitSeconds,
       int defaultMaxTrains,
       int minLeadMinutes,
-      int followGapSeconds) {
+      int followGapSeconds,
+      int turnbackHoldSeconds) {
 
     public CallSettings {
       minWaitMinutes = Math.max(0, minWaitMinutes);
@@ -1706,10 +1711,11 @@ public final class ConfigManager {
       defaultMaxTrains = Math.max(1, defaultMaxTrains);
       minLeadMinutes = Math.max(0, minLeadMinutes);
       followGapSeconds = Math.max(0, followGapSeconds);
+      turnbackHoldSeconds = Math.max(0, turnbackHoldSeconds);
     }
 
     public static CallSettings defaults() {
-      return new CallSettings(5, 60, 60, 2, 2, 60);
+      return new CallSettings(5, 60, 60, 2, 2, 60, 90);
     }
   }
 

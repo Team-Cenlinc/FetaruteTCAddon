@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 41
+config-version: 42
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -320,6 +320,9 @@ call:
   # 叫来的车离前车不到该秒数时按需降速（最低到线路限速的七成，再近交给信号），后车追到 min-lead-minutes 以内时不降；0 表示不降速。
   # 叫来的车在合流、进路排队时排在所有列车之后
   follow-gap-seconds: 60
+  # 终点站与交路第一站叫车时，折返车在终点就绪后最多等候的秒数：这一单的票还没接走它就作废这一单、车回库，不长时间占着终点股道；
+  # 0 表示不设上限（等到叫车超时）
+  turnback-hold-seconds: 90
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

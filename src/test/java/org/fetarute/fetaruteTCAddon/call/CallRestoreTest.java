@@ -607,7 +607,7 @@ class CallRestoreTest {
     verify(properties).addTags(SimpleTicketAssigner.TAG_CALL_TURNBACK + "=" + call.id());
   }
 
-  /** 折返车在终点等这一单的票：留着期间不派回库；就绪满 {@link CallService#TURNBACK_HOLD} 还没被接走就作废这一单、放车回库。 */
+  /** 折返车在终点等这一单的票：留着期间不派回库；就绪满 call.turnback-hold-seconds（默认 90 秒）还没被接走就作废这一单、放车回库。 */
   @Test
   void aTurnbackHeldTooLongDropsTheCallAndGoesBackToTheDepot() {
     PendingCallRecord call = storedCall(T.minusSeconds(30));
@@ -640,7 +640,7 @@ class CallRestoreTest {
     verify(reclaim, never()).returnCalledTrain(any(), any());
     verify(stored, never()).delete(call.id());
 
-    sweep(service, T.plus(CallService.TURNBACK_HOLD).plusSeconds(1), trains);
+    sweep(service, T.plusSeconds(91), trains);
     verify(assigner).withdraw(call.id());
     verify(assigner).withdraw(turnbackTicket);
     verify(stored).delete(call.id());
