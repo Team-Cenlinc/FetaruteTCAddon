@@ -40,13 +40,25 @@ class OnDemandSpawnTest {
 
     List<LayoverRegistry.LayoverCandidate> forCall =
         SimpleTicketAssigner.filterCalledTrains(
-            ticket(TripSource.ON_DEMAND), all, name -> name.startsWith("bound"), route -> false);
+            ticket(TripSource.ON_DEMAND),
+            all,
+            name -> name.startsWith("bound"),
+            route -> false,
+            id -> true);
     List<LayoverRegistry.LayoverCandidate> forCallOnTimetable =
         SimpleTicketAssigner.filterCalledTrains(
-            ticket(TripSource.ON_DEMAND), all, name -> name.startsWith("bound"), route -> true);
+            ticket(TripSource.ON_DEMAND),
+            all,
+            name -> name.startsWith("bound"),
+            route -> true,
+            id -> true);
     List<LayoverRegistry.LayoverCandidate> forHeadway =
         SimpleTicketAssigner.filterCalledTrains(
-            ticket(TripSource.SCHEDULED), all, name -> name.startsWith("bound"), route -> true);
+            ticket(TripSource.SCHEDULED),
+            all,
+            name -> name.startsWith("bound"),
+            route -> true,
+            id -> true);
 
     assertEquals(List.of(called, free), forCall, "叫车票不抢绑着时刻表交路的车");
     assertEquals(List.of(called), forCallOnTimetable, "按表运行的交路上只接叫来的车");
@@ -65,10 +77,47 @@ class OnDemandSpawnTest {
                 SimpleTicketAssigner.TAG_CALL_TURNBACK,
                 "aaa"));
 
-    assertTrue(SimpleTicketAssigner.callMayTake(turnback, true, name -> false, Optional.of("AAA")));
+    assertTrue(
+        SimpleTicketAssigner.callMayTake(
+            turnback, true, name -> false, Optional.of("AAA"), id -> true));
     assertFalse(
-        SimpleTicketAssigner.callMayTake(turnback, true, name -> false, Optional.of("bbb")));
-    assertFalse(SimpleTicketAssigner.callMayTake(turnback, false, name -> false, Optional.empty()));
+        SimpleTicketAssigner.callMayTake(
+            turnback, true, name -> false, Optional.of("bbb"), id -> true));
+    assertFalse(
+        SimpleTicketAssigner.callMayTake(
+            turnback, false, name -> false, Optional.empty(), id -> true));
+    assertTrue(
+        SimpleTicketAssigner.callMayTake(
+            turnback, true, name -> false, Optional.of("bbb"), id -> false),
+        "留给的那一单已经没了：当普通的叫来的车接");
+  }
+
+  /** 折返车票区间生成一直不成也不改走交路本来的车源（那样要从交路首站开起）；普通叫车票试够了才改走。 */
+  @Test
+  void aTurnbackTicketNeverGivesUpItsEntry() {
+    Optional<OnDemandTrip.Entry> entry =
+        Optional.of(new OnDemandTrip.Entry(1, Optional.of(NodeId.of("X"))));
+    Instant longAgo = NOW.minusSeconds(120);
+
+    assertFalse(
+        SimpleTicketAssigner.entryGivesUp(
+            ticket(Optional.of(OnDemandTrip.format("aaa@SURC:NTA", entry, true)), longAgo), NOW));
+    assertTrue(
+        SimpleTicketAssigner.entryGivesUp(
+            ticket(Optional.of(OnDemandTrip.format("aaa@SURC:NTA", entry)), longAgo), NOW));
+    assertFalse(
+        SimpleTicketAssigner.entryGivesUp(
+            ticket(Optional.of(OnDemandTrip.format("aaa@SURC:NTA", entry)), NOW), NOW),
+        "还没试够");
+  }
+
+  /** 只接首站待命车的叫车票不过拥堵闸门：不多出一列车；区间生成、从车库出车的照常过闸门。 */
+  @Test
+  void reuseOnlyCallTicketsSkipTheCongestionGate() {
+    assertTrue(SimpleTicketAssigner.onDemandReuseOnly(TripSource.ON_DEMAND, false, false));
+    assertFalse(SimpleTicketAssigner.onDemandReuseOnly(TripSource.ON_DEMAND, true, false));
+    assertFalse(SimpleTicketAssigner.onDemandReuseOnly(TripSource.ON_DEMAND, false, true));
+    assertFalse(SimpleTicketAssigner.onDemandReuseOnly(TripSource.SCHEDULED, false, false));
   }
 
   /** 回库交路上的叫车票走区间生成，不落进回库票的折返复用；别的回库票照旧。 */
@@ -157,6 +206,14 @@ class OnDemandSpawnTest {
   }
 
   private static SpawnTicket ticket(TripSource source) {
+    return ticket(source, Optional.empty(), NOW);
+  }
+
+  private static SpawnTicket ticket(Optional<String> trip, Instant firstDueAt) {
+    return ticket(TripSource.ON_DEMAND, trip, firstDueAt);
+  }
+
+  private static SpawnTicket ticket(TripSource source, Optional<String> trip, Instant firstDueAt) {
     return new SpawnTicket(
         UUID.randomUUID(),
         new SpawnService(
@@ -173,12 +230,12 @@ class OnDemandSpawnTest {
             "SURC:S:AAA:1"),
         NOW,
         NOW,
-        NOW,
+        firstDueAt,
         0,
         0L,
         Optional.empty(),
         Optional.empty(),
-        Optional.empty(),
+        trip,
         source,
         0,
         Optional.empty());

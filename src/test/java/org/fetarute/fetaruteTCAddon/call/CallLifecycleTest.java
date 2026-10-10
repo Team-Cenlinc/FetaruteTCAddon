@@ -42,11 +42,44 @@ class CallLifecycleTest {
     LayoverRegistry.LayoverCandidate free = candidate("free-1", Map.of());
     LayoverRegistry.LayoverCandidate bound = candidate("bound-1", Map.of());
 
-    assertTrue(CallService.acceptsStandby(called, true, BOUND));
-    assertFalse(CallService.acceptsStandby(free, true, BOUND), "没绑交路的车可能正等着跑首班或等回收");
-    assertTrue(CallService.acceptsStandby(free, false, BOUND));
-    assertFalse(CallService.acceptsStandby(bound, false, BOUND));
-    assertFalse(CallService.acceptsStandby(null, false, BOUND));
+    assertTrue(CallService.acceptsStandby(called, true, BOUND, id -> true));
+    assertFalse(CallService.acceptsStandby(free, true, BOUND, id -> true), "没绑交路的车可能正等着跑首班或等回收");
+    assertTrue(CallService.acceptsStandby(free, false, BOUND, id -> true));
+    assertFalse(CallService.acceptsStandby(bound, false, BOUND, id -> true));
+    assertFalse(CallService.acceptsStandby(null, false, BOUND, id -> true));
+
+    LayoverRegistry.LayoverCandidate turnback =
+        candidate(
+            "called-2",
+            Map.of(
+                SimpleTicketAssigner.TAG_CALLED_TRAIN,
+                "aaa@SURC:PPK",
+                SimpleTicketAssigner.TAG_CALL_TURNBACK,
+                "aaa"));
+    assertFalse(CallService.acceptsStandby(turnback, true, BOUND, id -> true), "留给别的单的折返车不接");
+    assertTrue(CallService.acceptsStandby(turnback, true, BOUND, id -> false), "留给的那一单没了就当普通的叫来的车");
+  }
+
+  /** 折返车在终点就绪满 90 秒还没被接走算等太久；正在交接的不算。 */
+  @Test
+  void aTurnbackIsHeldForAtMostTheHoldTime() {
+    LayoverRegistry.LayoverCandidate waiting = candidate("tb-1", Map.of());
+    Instant limit = T.plus(CallService.TURNBACK_HOLD);
+
+    assertFalse(CallService.turnbackHeldTooLong(waiting, limit));
+    assertTrue(CallService.turnbackHeldTooLong(waiting, limit.plusSeconds(1)));
+    assertFalse(
+        CallService.turnbackHeldTooLong(
+            new LayoverRegistry.LayoverCandidate(
+                "tb-1",
+                "SURC:S:PPK",
+                NodeId.of("SURC:S:PPK:1"),
+                T,
+                Map.of(),
+                Optional.of(new LayoverRegistry.DispatchAttempt("ticket", "tb-1", limit))),
+            limit.plusSeconds(1)),
+        "这一单的票正在接它");
+    assertFalse(CallService.turnbackHeldTooLong(null, limit.plusSeconds(1)));
   }
 
   /** 回库途中：跑在回库交路上、又不是这一趟叫车跑的交路。叫车方向本身是回库交路时那一趟照常算叫来的车。 */

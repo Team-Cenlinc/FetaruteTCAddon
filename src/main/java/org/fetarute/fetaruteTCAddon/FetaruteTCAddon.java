@@ -1973,6 +1973,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     simpleAssigner.setTimetableRoute(dutyTimetable == null ? null : dutyTimetable::managed);
     simpleAssigner.setOnDemandDepotGate(
         ticket -> getCallService().map(calls -> calls.allowsDepotSpawn(ticket)).orElse(true));
+    // 折返车的保留只在那一单还没派出时算数
+    simpleAssigner.setCallReservationLive(
+        callId -> getCallService().map(calls -> calls.reservationLive(callId)).orElse(true));
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
