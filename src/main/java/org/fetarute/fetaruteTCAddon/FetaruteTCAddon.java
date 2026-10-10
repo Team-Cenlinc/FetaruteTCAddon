@@ -1720,6 +1720,23 @@ public final class FetaruteTCAddon extends JavaPlugin {
             timetableService.release(trainName, reason);
           }
         });
+    // 叫来的车到达叫车的车站：转成公开的到站事件（叫车服务可能晚于本方法建立或被重建，每次取当前的那个）。
+    stationStopHub.register(
+        "call",
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopObserver() {
+          @Override
+          public void onStationArrival(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {
+            org.fetarute.fetaruteTCAddon.call.CallService calls = callService;
+            if (calls != null) {
+              calls.onStationArrival(event.trainName(), event.nodeId());
+            }
+          }
+
+          @Override
+          public void onStationDeparture(
+              org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopEvent event) {}
+        });
     // 车次取消转成公开事件；事件桥可能晚于本方法建立或被重建，每次取当前的那个。
     timetableService.setCancellationListener(
         cancellation -> {
@@ -2343,6 +2360,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         new org.fetarute.fetaruteTCAddon.api.internal.DriveApiImpl(this));
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.installGuard(
         new org.fetarute.fetaruteTCAddon.api.internal.GuardApiImpl(this));
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.installCall(
+        new org.fetarute.fetaruteTCAddon.api.internal.CallApiImpl(this));
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");

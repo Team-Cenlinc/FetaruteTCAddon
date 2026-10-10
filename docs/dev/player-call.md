@@ -121,6 +121,13 @@
 - 叫来的车照常显示，状态格写“叫车 / On call”（与“正点 / On time”同一排法）；加开的车写“加开 / Extra”（见下节）。
 - 文案在 `lang/zh_CN.yml` 的 `pids.board.call-hint`、`pids.board.no-more-trains-call`、`pids.board.status.on-call`、`pids.board.status.extra` 与 `call.*`。
 
+## 公开 API 与事件
+
+- `FetaruteApi#call()`（`CallApi`，`api/internal/CallApiImpl` 转给 `CallService`）：`directionsAt` 列车站上能叫车的方向与此刻能不能叫（`CallService#options` 不带玩家，不看个人冷却，主线程）；`callOf`/`callsOf` 读叫车单快照（`CallService#snapshotOf`/`snapshotsOf`，任意线程）。不代玩家叫车。
+- 事件（`api/event/TrainCall*`）：叫车（`call` 出票成功后当场发）、没派出就结束（取消、撤票、作废，当场发）、派出（`onDispatched`）、到站（车站停靠观察者 `call` 转到 `CallService#onStationArrival`，站台节点按 `运营商:S:站码` 认车站，每张叫车单只发一次）；后两种在调度主路径上，下一拍再发（`CallService#post`）。
+- 派出以后叫车的玩家只记在内存（`callers`，叫来的车不在了就忘掉）：重启后已派出的叫车查不到叫车的玩家。
+- 加开的车不是叫车：不在 `CallApi` 里，也不发叫车事件。
+
 ## 加开（表外加开一班）
 
 管理员 `/fta depot spawn <company> <operator> <line> <route> <node> --extra [--at HH:MM]` 加开一班：有表、无表的线路都可以，不要求线路开了叫车。

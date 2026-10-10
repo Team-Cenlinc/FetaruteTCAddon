@@ -24,8 +24,13 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.Bukkit;
+import org.bukkit.event.Event;
+import org.bukkit.plugin.PluginManager;
 import org.bukkit.scheduler.BukkitScheduler;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.api.event.TrainCallArrivedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TrainCallDispatchedEvent;
+import org.fetarute.fetaruteTCAddon.api.event.TrainCallEndedEvent;
 import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
 import org.fetarute.fetaruteTCAddon.company.model.LineServiceType;
@@ -235,6 +240,84 @@ class CallRestoreTest {
 
     verify(spawnManager, never()).requeue(any());
     verify(stored).delete(call.id());
+  }
+
+  /** 找回时已超时作废：发叫车结束事件（等太久撤票）。 */
+  @Test
+  void aTimedOutCallFiresTheEndedEvent() {
+    PluginManager events = mock(PluginManager.class);
+    bukkit.when(Bukkit::getPluginManager).thenReturn(events);
+    PendingCallRecord call = storedCall(T.minus(Duration.ofMinutes(11)));
+
+    new CallService(plugin).restorePending(T);
+
+    ArgumentCaptor<Event> fired = ArgumentCaptor.forClass(Event.class);
+    verify(events).callEvent(fired.capture());
+    TrainCallEndedEvent ended = (TrainCallEndedEvent) fired.getValue();
+    assertEquals(call.id(), ended.getCallId());
+    assertEquals(Optional.of(call.playerId()), ended.getPlayerId());
+    assertEquals(TrainCallEndedEvent.Reason.TIMED_OUT, ended.getReason());
+    assertEquals("PPK", ended.getStationCode());
+  }
+
+  /** 派出与到站各发一次事件（下一拍发出），带着叫车的玩家；叫车单从还没派出变成已派出。到别的站、再到一次都不发。 */
+  @Test
+  void dispatchAndArrivalFireTheirEventsOnce() {
+    PluginManager events = mock(PluginManager.class);
+    bukkit.when(Bukkit::getPluginManager).thenReturn(events);
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+    CallService service = new CallService(plugin);
+    service.restorePending(T);
+    // 派出与到站事件下一拍才发：插件启用后由调度器排到主线程（这里当场执行）
+    when(plugin.isEnabled()).thenReturn(true);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    when(scheduler.runTask(eq(plugin), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              ((Runnable) invocation.getArgument(1)).run();
+              return null;
+            });
+    bukkit.when(Bukkit::getScheduler).thenReturn(scheduler);
+    assertEquals(
+        Optional.of(false),
+        service.snapshotOf(call.id()).map(CallService.CallSnapshot::dispatched));
+    ArgumentCaptor<SpawnTicket> ticket = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager).requeue(ticket.capture());
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.exists("Train-1")).thenReturn(true);
+      store.when(() -> TrainPropertiesStore.get("Train-1")).thenReturn(mock(TrainProperties.class));
+      service.onDispatched(ticket.getValue(), "Train-1");
+    }
+    service.onStationArrival("Train-1", "SURC:S:NTA:1");
+    service.onStationArrival("Train-1", "SURC:S:PPK:1");
+    service.onStationArrival("Train-1", "SURC:S:PPK:2");
+
+    ArgumentCaptor<Event> fired = ArgumentCaptor.forClass(Event.class);
+    verify(events, org.mockito.Mockito.times(2)).callEvent(fired.capture());
+    TrainCallDispatchedEvent dispatched = (TrainCallDispatchedEvent) fired.getAllValues().get(0);
+    assertEquals(call.id(), dispatched.getCallId());
+    assertEquals(Optional.of(call.playerId()), dispatched.getPlayerId());
+    assertEquals("Train-1", dispatched.getTrainName());
+    assertEquals(Optional.of(routeId), dispatched.getRouteId());
+    TrainCallArrivedEvent arrived = (TrainCallArrivedEvent) fired.getAllValues().get(1);
+    assertEquals(call.id(), arrived.getCallId());
+    assertEquals(Optional.of(call.playerId()), arrived.getPlayerId());
+    assertEquals("SURC:S:PPK:1", arrived.getNodeId());
+
+    CallService.CallSnapshot running = service.snapshotOf(call.id()).orElseThrow();
+    assertTrue(running.dispatched());
+    assertEquals(Optional.of("Train-1"), running.trainName());
+    assertEquals(List.of(running), service.snapshotsOf(call.playerId()));
+  }
+
+  @Test
+  void stationNodesBelongToTheirStation() {
+    assertTrue(CallService.atStation("SURC:S:PPK:2", PPK));
+    assertTrue(CallService.atStation("surc:s:ppk:1", PPK));
+    assertFalse(CallService.atStation("SURC:S:NTA:1", PPK));
+    assertFalse(CallService.atStation("SURC:D:PPK:1", PPK));
+    assertFalse(CallService.atStation("PPK", PPK));
   }
 
   /** 读库只在第一次启动时做：之后再启动（重载）不会把已删掉的叫车读回来。 */
