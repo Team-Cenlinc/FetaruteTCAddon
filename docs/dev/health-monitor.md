@@ -75,6 +75,23 @@
 
 LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 corridor owner 保留完整原子授权；对向/后继列车按 Gate Queue 等待。只有 owner 自身长期无进展、没有在等待另一列 live blocker、且安全恢复已经耗尽时，才可能成为普通 cleanup 候选。实现不按线路、车库或站名写特判。
 
+### 车身重叠（叠车）
+
+调度出的车关了列车间碰撞（`SpawnPhysicsProperties`），两车接近只靠闭塞隔开；闭塞一旦放错，后车会直接开进前车车身，常见的是两车居中停在同一站台上叠成一团。
+叠上之后两车互相压着对方要走的资源，谁也发不了车；现场重叠在占用重建时也按设计保持 STOP。而上面几条都收不了它：互卡销毁只认单线区对向互卡与道岔区实占环（站台上互挡的是 NODE/EDGE，只会成为仅诊断的 weaker episode），
+互卡与清车都把停站、发车门控、按表扣车的车排除在外，普通清车也不收在等前车的车。
+
+1. 每轮检查 `TrainOverlapSampler` 在主线程取静止的受管列车，先只按车厢粗筛（`TrainOverlapDetector#mayOverlap`：有一对车厢可能嵌进对方），通过的才读整列实时轨道足迹；读过的足迹按编组缓存，车厢没挪过就复用。平时各车相距很远，一份足迹都不读。读足迹或车厢时有异常，本轮打一行 `HEALTH_TRAIN_OVERLAP_SAMPLE_ERRORS`。
+2. `TrainOverlapDetector` 判据：有一对车厢真的嵌进对方（两车厢半车长之和减中心距至少 2 格），且这两节车厢都压在对方的实时足迹上。
+   只看足迹不够：足迹两端带余量，跨多段路径时保留整段路径（TCCoasters 一段可以很长），紧跟前车排队的车也会共用不少格；只看车厢距离也不够：并列股道并排停的车厢中心只隔几格；
+   两车足迹随便共用一格也不够：余量可能顺着渡线道岔漏到邻线。所以"在同一条轨道上"落在嵌进去的那对车厢自己身上。两组同名的车照样报出来。
+3. `TrainHealthMonitor#resolveTrainOverlaps`：同一对叠着、都没动满 `health.deadlock-destroy-threshold-seconds`（为 0 时按 60 秒只告警）；中途没采到不超过 `health.deadlock-episode-grace-seconds` 不从头计时。**不看停站、发车门控、按表扣车**——车身重叠本身就是证据。
+4. 处理顺序：先看不用读运行状态的拦截——同名（分不出删哪组）、`health.auto-fix-enabled`、`health.deadlock-destroy-enabled`、冷却（与互卡销毁共用全局冷却，另有本对冷却，销毁失败也进本对冷却）、Smart Dispatcher `DESTROY_ACTION` mode gate（只有 `ENFORCE`）——任一拦住只告警，既不读两车运行状态，也不请驾驶员交还。
+   过了这些才读两车运行状态（各读一次）：读不到不删；有驾驶员在岗的车先请交还；有玩家乘坐或人工扣车的那列不删（两列都是就只告警）；其余按停滞清车同一口径挑一列销毁（回库车、出库车、运营车，再按车库相关、优先级低、车名），另一列随即刷新信号。
+   同一轮里删掉的车，涉及它的其它对本轮跳过；服务器冻结后计时随之平移。
+5. 告警（WARN，必留）：`车身重叠: 与 X 重叠约 N 格 持续=… 处理=<结论>`，结论有 `自动修复未开启（health.auto-fix-enabled）`、`销毁未开启（health.deadlock-destroy-enabled）`、`销毁冷却中`、`调度模式不允许销毁`、
+   `有驾驶员在岗，已请交还自动运行`、`两列都有玩家乘坐或人工扣车，不销毁`、`运行状态读不到（…），不销毁`、`两组同名的车叠在一起…需手动处理`、`销毁 X 失败` 等；同一对同一结论只告警一次。销毁后另发 `已修复: … 车身重叠: 已销毁 与 X 重叠约 N 格`。
+
 ### 互卡销毁诊断
 - Health/runtime 桥接入口使用统一的 alias-aware 解析：先匹配 TrainCarts 精确名，再匹配 runtime active state、FTA 逻辑名、`FTA_TRAIN_NAME`/历史名与 split alias。解析不使用包含、前缀或编辑距离等模糊匹配。
 - `destroyTrainByName`、`refreshSignalByName`、`reapplyHardStopByName`、`getTrainState`、`deadlockTrainContext` 共用同一解析结果，避免“state 能找到但 destroy 找不到”的分裂。
@@ -109,7 +126,7 @@ LWN 与 HHU 之间的 WS 进路按同一通用规则处理：仍在移动的 cor
 - `health.progress-stuck-threshold-seconds`
 - `health.progress-stop-grace-seconds`
 - `health.deadlock-threshold-seconds`
-- `health.deadlock-destroy-enabled`（兼容保留的实体列车 destructive cleanup 总开关；同时控制 confirmed deadlock 与普通长时间停滞 cleanup）
+- `health.deadlock-destroy-enabled`（兼容保留的实体列车 destructive cleanup 总开关；同时控制 confirmed deadlock、普通长时间停滞 cleanup 与车身重叠销毁）
 - `health.deadlock-destroy-threshold-seconds`（0 表示禁用最终销毁兜底，默认 60 秒）
 - `health.deadlock-destroy-cooldown-seconds`
 - `health.stuck-cleanup-threshold-seconds`（空车默认 600 秒）

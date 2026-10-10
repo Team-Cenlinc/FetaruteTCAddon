@@ -57,7 +57,7 @@ health:
   progress-stop-grace-seconds: 60
   # 红灯下停滞超过该秒数时，优先尝试解开两车互卡
   deadlock-threshold-seconds: 45
-  # 销毁类清理总开关：同时控制"互卡销毁"与"长时间停滞清车"。
+  # 销毁类清理总开关：同时控制"互卡销毁"、"长时间停滞清车"与"车身重叠"（两车叠在一起、连续不动超过下面的销毁秒数时删其中一列）。
   # 关闭时卡死的列车只能手动删除；长期运行的服务器建议开启（还需 smart-dispatcher.mode 为 ENFORCE）。
   # 停滞告警里的"清车=…"会说明清车为何没有执行，例如在等哪一列车、那列车处于什么状态。
   deadlock-destroy-enabled: false
