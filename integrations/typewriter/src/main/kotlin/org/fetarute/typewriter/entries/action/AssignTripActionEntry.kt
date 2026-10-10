@@ -26,24 +26,21 @@ import java.time.Duration
 import java.time.Instant
 
 @Tags("fetarute_assign_trip")
-@Entry("fetarute_assign_trip", "Give the player a FetaruteTC driving task", Colors.RED, "mdi:train")
+@Entry("fetarute_assign_trip", "给玩家派 FTCA 驾驶任务", Colors.RED, "mdi:train")
 /**
- * The `Assign Trip` action gives the player a scheduled trip to drive.
+ * “派驾驶任务”动作：给玩家派一趟表定车次去驾驶。
  *
- * It takes the next departure from the given station (optionally only of one route, or one exact trip)
- * and assigns it to the player. The player then takes over the train at that station, confirms the seat
- * and drives it to the terminus, or only up to the handover station when one is set.
+ * 从指定车站即将发出的车次里挑一趟（可以只挑某个交路，或指定车次）派给玩家。玩家到站后接班、确认座位，
+ * 开到终点站，或开到设定的交班站为止。
  *
- * Driving rewards (experience and money, set in FetaruteTCAddon's `drive.yml`) are paid as for any other task
- * unless turned off here, e.g. when the quest gives its own reward.
+ * 驾驶奖励（经验与钱币，在 FetaruteTCAddon 的 `drive.yml` 里设定）与其他任务一样照发，
+ * 剧情另发奖励时可以在这里关掉。
  *
- * The triggers of this action only fire when the task was actually assigned.
- * When no trip could be assigned (none departing in the window, already taken, the player already
- * has a task, driving tasks closed, ...) the failed triggers fire instead.
+ * 只有真的派出了任务，本动作的后续条目才会触发。派不成时（窗口内没有车次、车次已被领走、玩家已有任务、
+ * 驾驶任务未开放等）改为触发“派不成时触发”的条目。
  *
- * ## How could this be used?
- * Start a "first shift" quest: assign the next local train from the depot station and
- * let the player drive three stations before handing over.
+ * ## 用法示例
+ * 开始“第一次当班”剧情：从车库所在的车站派下一班普通车，让玩家开三站后交班。
  */
 class AssignTripActionEntry(
     override val id: String = "",
@@ -51,27 +48,27 @@ class AssignTripActionEntry(
     override val criteria: List<Criteria> = emptyList(),
     override val modifiers: List<Modifier> = emptyList(),
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Station code where the player takes over the train.")
+    @Help("接班站站码。")
     val station: Var<String> = ConstVar(""),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: Var<String> = ConstVar(""),
-    @Help("This exact trip code. Leave blank to take the next departure.")
+    @Help("指定车次号；留空则派最近发出的一趟。")
     val trip: Var<String> = ConstVar(""),
-    @Help("Station code where the player hands the train back. Leave blank to drive to the terminus.")
+    @Help("交班站站码；留空则开到终点站。")
     val handoverStation: Var<String> = ConstVar(""),
-    @Help("How far ahead to look for departures, in minutes.")
+    @Help("往后找多少分钟内发车的车次。")
     @Default("20")
     val windowMinutes: Var<Int> = ConstVar(20),
-    @Help("Manual driving or ATO.")
+    @Help("人工驾驶或 ATO。")
     val mode: DrivingMode = DrivingMode.MANUAL,
-    @Help("When the train comes out of a depot, pick it up at the depot.")
+    @Help("车次从车库出车时，改到车库接车。")
     val depotPickup: Boolean = false,
-    @Help("Also take a train already standing at the station. It may leave before the player gets there.")
+    @Help("也派已经停在站里的车（可能等不到玩家赶到就开走）。")
     val includeStanding: Boolean = false,
-    @Help("Pay FetaruteTCAddon's driving rewards (experience and money) for this task.")
+    @Help("照发 FTCA 自带的驾驶奖励（经验与钱币）。")
     @Default("true")
     val builtInRewards: Boolean = true,
-    @Help("Fired when no trip could be assigned.")
+    @Help("没派成驾驶任务时触发。")
     val failedTriggers: List<Ref<TriggerableEntry>> = emptyList(),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
@@ -100,7 +97,7 @@ class AssignTripActionEntry(
                         (tripCode.isEmpty() || offer.tripCode().equals(tripCode, ignoreCase = true))
                 }
             if (offer == null) {
-                logger.info("[FetaruteTC] no trip to assign at $stationCode for ${player.name}")
+                logger.info("[FetaruteTC] $stationCode 没有可派给 ${player.name} 的车次")
                 failedTriggers.triggerFor(player)
                 return@launch
             }
@@ -114,7 +111,7 @@ class AssignTripActionEntry(
             if (result == DriveApi.AssignResult.ASSIGNED) {
                 triggerManually()
             } else {
-                logger.info("[FetaruteTC] assign ${offer.tripCode()} to ${player.name}: $result")
+                logger.info("[FetaruteTC] 车次 ${offer.tripCode()} 未能派给 ${player.name}：$result")
                 failedTriggers.triggerFor(player)
             }
         }

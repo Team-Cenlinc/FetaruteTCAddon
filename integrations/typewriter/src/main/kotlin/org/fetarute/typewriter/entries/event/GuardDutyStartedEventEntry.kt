@@ -21,22 +21,21 @@ import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.entries.action.AssignGuardDutyActionEntry
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_duty_started_event", "When a player goes on duty as a FetaruteTC guard", Colors.YELLOW, "mdi:bell-ring")
+@Entry("fetarute_guard_duty_started_event", "玩家上岗当 FTCA 车掌时", Colors.YELLOW, "mdi:bell-ring")
 @ContextKeys(GuardDutyStartedContextKeys::class)
 /**
- * The `Guard Duty Started Event` is triggered when the player goes on duty as the guard of a train:
- * by sitting in the rear cab for a guard duty, or with `/fta guard on`.
+ * “车掌上岗”事件：玩家当上一列车的车掌时触发——为车掌任务坐进车尾驾驶室，或用 `/fta guard on` 上岗。
  *
- * ## How could this be used?
- * Show a title with the trip number, or start a quest objective "open the doors at the next station".
+ * ## 用法示例
+ * 用标题显示车次号，或开始一个“到下一站开门”的剧情目标。
  */
 class GuardDutyStartedEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only duties given by this action. Leave empty for any duty, also going on duty without one.")
+    @Help("只要这个动作派出的车掌任务；留空则任何上岗都算，包括不领任务直接上岗。")
     val assignedBy: Ref<AssignGuardDutyActionEntry> = emptyRef(),
-    @Help("Only duties from these sources. Leave empty for any duty, also going on duty without one.")
+    @Help("只要这些来源的车掌任务；留空则任何上岗都算，包括不领任务直接上岗。")
     val sources: List<GuardTaskSource> = emptyList(),
 ) : EventEntry
 

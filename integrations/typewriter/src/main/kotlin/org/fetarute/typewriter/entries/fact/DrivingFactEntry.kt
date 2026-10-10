@@ -10,20 +10,20 @@ import com.typewritermc.engine.paper.facts.FactData
 import org.bukkit.entity.Player
 import org.fetarute.typewriter.driveApi
 
-@Entry("fetarute_driving_fact", "Whether the player is driving a FetaruteTC train", Colors.PURPLE, "mdi:steering")
+@Entry("fetarute_driving_fact", "玩家是否在驾驶 FTCA 列车", Colors.PURPLE, "mdi:steering")
 /**
- * A [fact](/docs/creating-stories/facts) that tells whether the player is driving a train.
+ * [事实](/docs/creating-stories/facts)：玩家是否在驾驶列车。
  *
  * <fields.ReadonlyFactInfo />
  *
- * | Status | Value |
- * |--------|-------|
- * | Not driving | 0 |
- * | Free driving (not a scheduled train) | 1 |
- * | Driving a scheduled train | 2 |
+ * | 状态 | 值 |
+ * |------|----|
+ * | 未驾驶 | 0 |
+ * | 自由驾驶（非调度列车） | 1 |
+ * | 驾驶调度列车 | 2 |
  *
- * ## How could this be used?
- * Hide dialogue options while the player is at the controls.
+ * ## 用法示例
+ * 玩家驾驶时隐藏某些对话选项。
  */
 class DrivingFactEntry(
     override val id: String = "",

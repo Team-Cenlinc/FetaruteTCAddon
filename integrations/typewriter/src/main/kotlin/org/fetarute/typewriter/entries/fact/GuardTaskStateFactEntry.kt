@@ -16,33 +16,32 @@ import org.fetarute.typewriter.entries.action.AssignGuardDutyActionEntry
 import org.fetarute.typewriter.guardApi
 import org.koin.java.KoinJavaComponent
 
-@Entry("fetarute_guard_task_state_fact", "The state of the player's FetaruteTC guard duty", Colors.PURPLE, "mdi:clipboard-clock")
+@Entry("fetarute_guard_task_state_fact", "玩家的 FTCA 车掌任务进行到哪一步", Colors.PURPLE, "mdi:clipboard-clock")
 /**
- * A [fact](/docs/creating-stories/facts) with the state of the player's latest guard duty.
+ * [事实](/docs/creating-stories/facts)：玩家最近的车掌任务进行到哪一步。
  *
  * <fields.ReadonlyFactInfo />
  *
- * | Status | Value |
- * |--------|-------|
- * | No guard duty | 0 |
- * | Given, waiting for the train | 1 |
- * | On duty | 2 |
- * | Worked to the end (terminus or handover station) | 3 |
- * | Ended otherwise (abandoned, expired, failed, interrupted) | -1 |
+ * | 状态 | 值 |
+ * |------|----|
+ * | 没有车掌任务 | 0 |
+ * | 已派，等列车 | 1 |
+ * | 值乘中 | 2 |
+ * | 值乘到底（终点站或交班站） | 3 |
+ * | 以其他方式结束（放弃、作废、未完成、中断） | -1 |
  *
- * With an assigning action set, the fact follows the duty that action gave: it keeps the value
- * after the duty ends, also when the player later takes another duty from the guard board.
- * Leave it empty to read whatever guard duty the player has now.
+ * 指定了派任务的动作时，跟着这个动作派出的那个任务走：任务结束后数值保留，玩家之后又从车掌任务板领了别的任务也不变。
+ * 留空则读玩家此刻的车掌任务。
  *
- * ## How could this be used?
- * Use it as the criteria of a quest objective: "work the trip as guard" is done when the value is 3.
+ * ## 用法示例
+ * 作为剧情目标的条件：“当一趟车掌”在数值为 3 时完成。
  */
 class GuardTaskStateFactEntry(
     override val id: String = "",
     override val name: String = "",
     override val comment: String = "",
     override val group: Ref<GroupEntry> = emptyRef(),
-    @Help("Only duties given by this action. Leave empty for the player's current guard duty, whatever gave it.")
+    @Help("只看这个动作派出的车掌任务；留空则看玩家此刻的车掌任务，不论来源。")
     val assignedBy: Ref<AssignGuardDutyActionEntry> = emptyRef(),
 ) : ReadableFactEntry {
     override fun readSinglePlayer(player: Player): FactData {

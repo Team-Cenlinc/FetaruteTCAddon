@@ -17,21 +17,20 @@ import org.fetarute.typewriter.GuardDutyEndReason
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_duty_ended_event", "When a player goes off duty as a FetaruteTC guard", Colors.YELLOW, "mdi:bell-off")
+@Entry("fetarute_guard_duty_ended_event", "FTCA 车掌离岗时", Colors.YELLOW, "mdi:bell-off")
 @ContextKeys(GuardDutyEndedContextKeys::class)
 /**
- * The `Guard Duty Ended Event` is triggered when the player stops being the guard of a train:
- * they went off duty, reached the handover station, missed the train, timed out too often,
- * logged off, or were taken off duty.
+ * “车掌离岗”事件：玩家不再是这列车的车掌时触发——自己结束、值乘到交班站、漏乘、连续超时、
+ * 下线，或被撤下。
  *
- * ## How could this be used?
- * Hide the guard sidebar hints, or tell the player what to do next after the handover station.
+ * ## 用法示例
+ * 收起车掌相关的剧情提示，或在交班站之后告诉玩家下一步做什么。
  */
 class GuardDutyEndedEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only duties that ended for this reason. Leave empty for any reason.")
+    @Help("只要因这个原因离岗的；留空不限原因。")
     val reason: Optional<GuardDutyEndReason> = Optional.empty(),
 ) : EventEntry
 

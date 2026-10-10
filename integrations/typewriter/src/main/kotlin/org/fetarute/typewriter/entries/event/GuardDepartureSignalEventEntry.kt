@@ -17,22 +17,21 @@ import org.fetarute.typewriter.SignalGivenBy
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_departure_signal_event", "When a FetaruteTC guard gives the starting signal", Colors.YELLOW, "mdi:bell-ring-outline")
+@Entry("fetarute_guard_departure_signal_event", "FTCA 车掌发出发车信号时", Colors.YELLOW, "mdi:bell-ring-outline")
 @ContextKeys(GuardDepartureSignalContextKeys::class)
 /**
- * The `Guard Departure Signal Event` is triggered when the starting signal goes to the driver: the guard held the
- * buzzer, or the time ran out and the station gave it instead (counted as a timeout).
+ * “车掌发车信号”事件：发车信号传给驾驶员时触发——车掌按了发车铃，或时限到了由站台代发（记一次超时）。
  *
- * ## How could this be used?
- * Teach the buzzer: praise the player the first time they give the signal themselves.
+ * ## 用法示例
+ * 教发车铃：玩家第一次自己发出发车信号时表扬一句。
  */
 class GuardDepartureSignalEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only this station name. Leave blank for any station.")
+    @Help("只要这个站名的车站；留空不限车站。")
     val station: String = "",
-    @Help("Only signals given this way. Leave empty for both.")
+    @Help("只要以这种方式发出的信号；留空两种都算。")
     val givenBy: Optional<SignalGivenBy> = Optional.empty(),
 ) : EventEntry
 

@@ -20,25 +20,24 @@ import org.fetarute.typewriter.entries.action.AssignGuardDutyActionEntry
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_trip_scored_event", "When a FetaruteTC guard's trip is scored", Colors.YELLOW, "mdi:star-circle")
+@Entry("fetarute_guard_trip_scored_event", "FTCA 车掌的一趟结算时", Colors.YELLOW, "mdi:star-circle")
 @ContextKeys(GuardTripScoredContextKeys::class)
 /**
- * The `Guard Trip Scored Event` is triggered each time a trip the player worked as guard is scored:
- * when the train starts its next trip at the terminus, or when the player goes off duty.
- * Only scheduled trips with at least one worked station are scored.
+ * “车掌一趟结算”事件：玩家当车掌的一趟结算时触发——列车在终点站开下一趟时，或玩家离岗时。
+ * 只结算按时刻表运行、至少做了一站作业的车次。
  *
- * ## How could this be used?
- * Reward the player when the trip was worked to the end with grade A or better.
+ * ## 用法示例
+ * 这一趟值乘到底、评级 A 以上时发奖励。
  */
 class GuardTripScoredEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only the trip of a duty given by this action. Leave empty for any trip, also without a duty.")
+    @Help("只要这个动作派出的车掌任务里的那一趟；留空则任何一趟都算，包括不领任务的值乘。")
     val assignedBy: Ref<AssignGuardDutyActionEntry> = emptyRef(),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: String = "",
-    @Help("Only trips that ended this way. Leave empty for any end.")
+    @Help("只要以这种结局结束的一趟；留空不限结局。")
     val state: Optional<GuardTripState> = Optional.empty(),
 ) : EventEntry
 

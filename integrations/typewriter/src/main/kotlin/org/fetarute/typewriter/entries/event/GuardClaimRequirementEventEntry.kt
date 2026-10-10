@@ -19,28 +19,26 @@ import org.fetarute.typewriter.GuardTaskSource
 import org.fetarute.typewriter.allows
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_claim_requirement", "Refuse FetaruteTC guard duties the player has not unlocked", Colors.YELLOW, "mdi:lock")
+@Entry("fetarute_guard_claim_requirement", "玩家未解锁时拒绝领取 FTCA 车掌任务", Colors.YELLOW, "mdi:lock")
 @ContextKeys(GuardClaimRequirementContextKeys::class)
 /**
- * The `Guard Claim Requirement` refuses a guard duty when the player does not meet the requirements,
- * for example a line that is only unlocked further on in the story. Its triggers fire when it refused a duty.
+ * “车掌任务领取条件”：玩家不满足条件时拒绝他领取车掌任务，例如剧情推进到某一步才开放的线路。拒绝了任务时触发后续条目。
  *
- * It applies to duties taken from the guard board and to duties given by plugins, Typewriter included:
- * an `Assign Guard Duty` refused here fires its failed triggers. A player who goes on duty with `/fta guard on`
- * without taking a duty is not affected.
+ * 对车掌任务板领取和插件派发都有效，Typewriter 也在内：被这里拒绝的“派车掌任务”会触发它的“派不成时触发”。
+ * 不领任务、直接用 `/fta guard on` 上岗的玩家不受影响。
  *
- * ## How could this be used?
- * Lock the express line until the player has worked five trips as guard on the local line, and tell them so when they try.
+ * ## 用法示例
+ * 玩家在普通车上值乘满五趟之前锁住快车线路，他想领时告诉他还差什么。
  */
 class GuardClaimRequirementEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: String = "",
-    @Help("Only duties from these sources. Leave empty for any source.")
+    @Help("只要这些来源的车掌任务；留空不限来源。")
     val sources: List<GuardTaskSource> = emptyList(),
-    @Help("The player needs to meet all of these to take the duty. Leave empty to never refuse.")
+    @Help("玩家须同时满足这些条件才能领取；留空则从不拒绝。")
     val requirements: List<Criteria> = emptyList(),
 ) : EventEntry
 

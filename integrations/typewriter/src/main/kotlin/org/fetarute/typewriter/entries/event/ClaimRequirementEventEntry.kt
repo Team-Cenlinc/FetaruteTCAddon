@@ -19,29 +19,26 @@ import org.fetarute.typewriter.TaskSource
 import org.fetarute.typewriter.allows
 import kotlin.reflect.KClass
 
-@Entry("fetarute_claim_requirement", "Refuse FetaruteTC driving tasks the player has not unlocked", Colors.YELLOW, "mdi:lock")
+@Entry("fetarute_claim_requirement", "玩家未解锁时拒绝领取 FTCA 驾驶任务", Colors.YELLOW, "mdi:lock")
 @ContextKeys(ClaimRequirementContextKeys::class)
 /**
- * The `Claim Requirement` refuses a driving task when the player does not meet the requirements,
- * for example a line that is only unlocked further on in the story. Its triggers fire when it refused a task.
+ * “驾驶任务领取条件”：玩家不满足条件时拒绝他领取驾驶任务，例如剧情推进到某一步才开放的线路。拒绝了任务时触发后续条目。
  *
- * It applies to tasks taken from the task board and to tasks given by plugins, Typewriter included:
- * an `Assign Trip` refused here fires its failed triggers. When a player takes over a scheduled train directly,
- * or drives on with the next trip at the terminus, refusing the task does not stop the train;
- * the player still drives it, only without a score.
+ * 对任务板领取和插件派发都有效，Typewriter 也在内：被这里拒绝的“派驾驶任务”会触发它的“派不成时触发”。
+ * 玩家直接接管调度列车、或在终点站接着开下一趟时，拒绝任务不会让列车停下，玩家照样开，只是这一趟不计分。
  *
- * ## How could this be used?
- * Lock route R2 until the player has completed five trips on route R1, and tell them so when they try.
+ * ## 用法示例
+ * 玩家在交路 R1 开完五趟之前锁住交路 R2，他想领时告诉他还差什么。
  */
 class ClaimRequirementEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: String = "",
-    @Help("Only tasks from these sources. Leave empty for any source.")
+    @Help("只要这些来源的驾驶任务；留空不限来源。")
     val sources: List<TaskSource> = emptyList(),
-    @Help("The player needs to meet all of these to take the task. Leave empty to never refuse.")
+    @Help("玩家须同时满足这些条件才能领取；留空则从不拒绝。")
     val requirements: List<Criteria> = emptyList(),
 ) : EventEntry
 

@@ -17,15 +17,15 @@ import org.fetarute.typewriter.SOURCE
 import org.fetarute.typewriter.assignedBy
 import org.fetarute.typewriter.driveApi
 
-@Entry("fetarute_abandon_task", "Abandon the player's FetaruteTC driving task", Colors.RED, "mdi:train-variant")
+@Entry("fetarute_abandon_task", "放弃玩家的 FTCA 驾驶任务", Colors.RED, "mdi:train-variant")
 /**
- * The `Abandon Task` action ends the player's current driving task, if Typewriter gave it.
- * A task not yet started is dropped; a train being driven is stopped and handed back to automatic operation.
+ * “放弃驾驶任务”动作：结束玩家由 Typewriter 派出的驾驶任务。
+ * 还没接班的直接作废；正在驾驶的，列车停下后交还自动运行。
  *
- * Tasks the player took from the in-game task board are left alone.
+ * 玩家自己从任务板领的任务不受影响。
  *
- * ## How could this be used?
- * Cancel the driving task when the player gives up the quest.
+ * ## 用法示例
+ * 玩家放弃剧情任务时，一并取消派给他的驾驶任务。
  */
 class AbandonTaskActionEntry(
     override val id: String = "",
@@ -33,7 +33,7 @@ class AbandonTaskActionEntry(
     override val criteria: List<Criteria> = emptyList(),
     override val modifiers: List<Modifier> = emptyList(),
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only a task given by this action. Leave empty for any task given by Typewriter.")
+    @Help("只放弃这个动作派出的驾驶任务；留空则放弃任何由 Typewriter 派出的驾驶任务。")
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {

@@ -25,26 +25,22 @@ import java.time.Duration
 import java.time.Instant
 
 @Tags("fetarute_assign_guard_duty")
-@Entry("fetarute_assign_guard_duty", "Give the player a FetaruteTC guard duty", Colors.RED, "mdi:bell-ring")
+@Entry("fetarute_assign_guard_duty", "给玩家派 FTCA 车掌任务", Colors.RED, "mdi:bell-ring")
 /**
- * The `Assign Guard Duty` action makes the player the guard of a scheduled trip.
+ * “派车掌任务”动作：让玩家当一班表定车次的车掌。
  *
- * It takes the next departure from the given station (optionally only of one route, or one exact trip)
- * and gives its guard duty to the player. When the train stands at that station, the player sits in
- * the rear cab and is on duty: they open and close the doors, watch the platform, confirm the starting signal
- * and sound the buzzer, up to the terminus or the handover station when one is set.
- * At the first station of a trip the train waits for the player before it leaves.
+ * 从指定车站即将发出的车次里挑一趟（可以只挑某个交路，或指定车次），把它的车掌任务派给玩家。列车停在这一站时，
+ * 玩家坐进车尾驾驶室即上岗：开关车门、监视站台、确认出站信号、按发车铃，值乘到终点站，或到设定的交班站为止。
+ * 接班站是这趟车的始发站时，列车会停着等玩家上岗。
  *
- * The guard's rewards (experience and money, set in FetaruteTCAddon's `drive.yml`) are paid as for any other
- * guard duty unless turned off here, e.g. when the quest gives its own reward.
+ * 车掌奖励（经验与钱币，在 FetaruteTCAddon 的 `drive.yml` 里设定）与其他车掌任务一样照发，
+ * 剧情另发奖励时可以在这里关掉。
  *
- * The triggers of this action only fire when the duty was actually given.
- * When none could be given (no trip departing in the window, the trip already has a guard, the player is on duty,
- * driving or already has a guard duty, guards are switched off, ...) the failed triggers fire instead.
+ * 只有真的派出了车掌任务，本动作的后续条目才会触发。派不成时（窗口内没有车次、这趟车已有车掌、
+ * 玩家正在值乘、正在驾驶或已有车掌任务、车掌功能未开启等）改为触发“派不成时触发”的条目。
  *
- * ## How could this be used?
- * A "first day as a guard" quest: give the player the guard duty of the next local train and
- * let them work three stations before handing over.
+ * ## 用法示例
+ * “第一天当车掌”剧情：把下一班普通车的车掌任务派给玩家，值乘三站后交班。
  */
 class AssignGuardDutyActionEntry(
     override val id: String = "",
@@ -52,23 +48,23 @@ class AssignGuardDutyActionEntry(
     override val criteria: List<Criteria> = emptyList(),
     override val modifiers: List<Modifier> = emptyList(),
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Station code where the player goes on duty.")
+    @Help("上岗的车站站码。")
     val station: Var<String> = ConstVar(""),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: Var<String> = ConstVar(""),
-    @Help("This exact trip code. Leave blank to take the next departure.")
+    @Help("指定车次号；留空则派最近发出的一趟。")
     val trip: Var<String> = ConstVar(""),
-    @Help("Station code where the player's duty ends. Leave blank to work to the terminus.")
+    @Help("交班站站码；留空则值乘到终点站。")
     val handoverStation: Var<String> = ConstVar(""),
-    @Help("How far ahead to look for departures, in minutes.")
+    @Help("往后找多少分钟内发车的车次。")
     @Default("20")
     val windowMinutes: Var<Int> = ConstVar(20),
-    @Help("Also take a train already standing at the station. It may leave before the player gets there.")
+    @Help("也派已经停在站里的车（可能等不到玩家赶到就开走）。")
     val includeStanding: Boolean = false,
-    @Help("Pay FetaruteTCAddon's guard rewards (experience and money) for this duty.")
+    @Help("照发 FTCA 自带的车掌奖励（经验与钱币）。")
     @Default("true")
     val builtInRewards: Boolean = true,
-    @Help("Fired when no guard duty could be given.")
+    @Help("没派成车掌任务时触发。")
     val failedTriggers: List<Ref<TriggerableEntry>> = emptyList(),
 ) : ActionEntry {
     override fun ActionTrigger.execute() {
@@ -97,7 +93,7 @@ class AssignGuardDutyActionEntry(
                         (tripCode.isEmpty() || offer.tripCode().equals(tripCode, ignoreCase = true))
                 }
             if (offer == null) {
-                logger.info("[FetaruteTC] no guard duty to give at $stationCode for ${player.name}")
+                logger.info("[FetaruteTC] $stationCode 没有可派给 ${player.name} 的车掌任务")
                 failedTriggers.triggerFor(player)
                 return@launch
             }
@@ -109,7 +105,7 @@ class AssignGuardDutyActionEntry(
             if (result == GuardApi.AssignResult.ASSIGNED) {
                 triggerManually()
             } else {
-                logger.info("[FetaruteTC] guard duty ${offer.tripCode()} for ${player.name}: $result")
+                logger.info("[FetaruteTC] 车次 ${offer.tripCode()} 的车掌任务未能派给 ${player.name}：$result")
                 failedTriggers.triggerFor(player)
             }
         }

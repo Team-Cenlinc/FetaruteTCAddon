@@ -16,33 +16,32 @@ import org.fetarute.typewriter.driveApi
 import org.fetarute.typewriter.entries.action.AssignTripActionEntry
 import org.koin.java.KoinJavaComponent
 
-@Entry("fetarute_task_state_fact", "The state of the player's FetaruteTC driving task", Colors.PURPLE, "mdi:clipboard-text-clock")
+@Entry("fetarute_task_state_fact", "玩家的 FTCA 驾驶任务进行到哪一步", Colors.PURPLE, "mdi:clipboard-text-clock")
 /**
- * A [fact](/docs/creating-stories/facts) with the state of the player's latest driving task.
+ * [事实](/docs/creating-stories/facts)：玩家最近的驾驶任务进行到哪一步。
  *
  * <fields.ReadonlyFactInfo />
  *
- * | Status | Value |
- * |--------|-------|
- * | No task | 0 |
- * | Assigned, waiting for the train | 1 |
- * | Driving | 2 |
- * | Driven to the end | 3 |
- * | Ended otherwise (abandoned, expired, failed, interrupted) | -1 |
+ * | 状态 | 值 |
+ * |------|----|
+ * | 没有任务 | 0 |
+ * | 已派，等列车 | 1 |
+ * | 驾驶中 | 2 |
+ * | 开到终点 | 3 |
+ * | 以其他方式结束（放弃、作废、未完成、中断） | -1 |
  *
- * With an assigning action set, the fact follows the task that action gave: it keeps the value
- * after the task ends, also when the player drives on with the next trip of the same train at the terminus.
- * Leave it empty to read whatever task the player has now, which can be that next trip.
+ * 指定了派任务的动作时，跟着这个动作派出的那个任务走：任务结束后数值保留，玩家在终点站接着开同一列车的下一趟也不变。
+ * 留空则读玩家此刻的任务（可能就是那下一趟）。
  *
- * ## How could this be used?
- * Use it as the criteria of a quest objective: "drive the trip" is done when the value is 3.
+ * ## 用法示例
+ * 作为剧情目标的条件：“开完这一趟”在数值为 3 时完成。
  */
 class TaskStateFactEntry(
     override val id: String = "",
     override val name: String = "",
     override val comment: String = "",
     override val group: Ref<GroupEntry> = emptyRef(),
-    @Help("Only tasks given by this action. Leave empty for the player's current task, whatever gave it.")
+    @Help("只看这个动作派出的驾驶任务；留空则看玩家此刻的驾驶任务，不论来源。")
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
 ) : ReadableFactEntry {
     override fun readSinglePlayer(player: Player): FactData {

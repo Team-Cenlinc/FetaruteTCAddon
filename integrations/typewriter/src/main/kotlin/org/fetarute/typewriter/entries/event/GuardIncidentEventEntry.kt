@@ -17,23 +17,22 @@ import org.fetarute.typewriter.GuardIncident
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_incident_event", "When a FetaruteTC guard reports an incident", Colors.YELLOW, "mdi:alert-circle")
+@Entry("fetarute_guard_incident_event", "FTCA 车掌报告异常情况时", Colors.YELLOW, "mdi:alert-circle")
 @ContextKeys(GuardIncidentContextKeys::class)
 /**
- * The `Guard Incident Event` is triggered when the guard files an incident report at a station
- * (person or object caught in a door, crowded boarding, passenger assistance, equipment fault).
- * The current step gets more time; reports cost no points.
+ * “车掌异常报告”事件：车掌在车站提交异常情况报告时触发（夹人夹物、上下车拥挤、乘客求助、设备异常）。
+ * 当前这一步的时限延长；报告不扣分。
  *
- * ## How could this be used?
- * Start a side quest when the player reports a passenger asking for help.
+ * ## 用法示例
+ * 玩家报告乘客求助时开启一段支线剧情。
  */
 class GuardIncidentEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only this reason. Leave empty for any reason.")
+    @Help("只要这个原因；留空不限原因。")
     val incident: Optional<GuardIncident> = Optional.empty(),
-    @Help("Only this station name. Leave blank for any station.")
+    @Help("只要这个站名的车站；留空不限车站。")
     val station: String = "",
 ) : EventEntry
 

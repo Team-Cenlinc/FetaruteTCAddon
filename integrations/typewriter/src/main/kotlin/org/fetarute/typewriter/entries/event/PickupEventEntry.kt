@@ -42,28 +42,26 @@ enum class PickupStage {
     EXPIRED,
 }
 
-@Entry("fetarute_pickup_event", "When a FetaruteTC train waits for its driver", Colors.YELLOW, "mdi:train-car-passenger-door")
+@Entry("fetarute_pickup_event", "FTCA 列车等驾驶员接车时", Colors.YELLOW, "mdi:train-car-passenger-door")
 @ContextKeys(PickupContextKeys::class)
 /**
- * The `Pickup Event` is triggered as the train of a driving task waits for the player
- * at the terminus or in the depot: when it stops to wait, when the player boards,
- * and when the time is up and the train leaves without them.
+ * “接车”事件：驾驶任务的列车在终点站或车库等玩家时触发——停下等候时、玩家上车接班时、
+ * 等到时限照常发车时。
  *
- * ## How could this be used?
- * Tell the player where the train is waiting ("your train is ready at platform 2"),
- * or move the quest back a step when the train left without them.
+ * ## 用法示例
+ * 告诉玩家列车停在哪里（“你的车在 2 站台等你”），或列车没等到玩家开走了时把剧情退回一步。
  */
 class PickupEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only tasks given by this action. Leave empty for any task.")
+    @Help("只要这个动作派出的驾驶任务；留空不限。")
     val assignedBy: Ref<AssignTripActionEntry> = emptyRef(),
-    @Help("Only tasks from these sources. Leave empty for any source.")
+    @Help("只要这些来源的驾驶任务；留空不限来源。")
     val sources: List<TaskSource> = emptyList(),
-    @Help("Only pickups at the terminus or in the depot. Leave empty for both.")
+    @Help("只要终点站或车库的接车；留空两种都算。")
     val kind: Optional<PickupKind> = Optional.empty(),
-    @Help("Only this step. Leave empty for every step.")
+    @Help("只要这一步进展；留空每一步都算。")
     val stage: Optional<PickupStage> = Optional.empty(),
 ) : EventEntry
 

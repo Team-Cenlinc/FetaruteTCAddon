@@ -22,30 +22,29 @@ enum class GuardStat {
     LAST_POINTS,
 }
 
-@Entry("fetarute_guard_stat_fact", "A FetaruteTC guard record of the player", Colors.PURPLE, "mdi:medal")
+@Entry("fetarute_guard_stat_fact", "玩家的 FTCA 车掌记录", Colors.PURPLE, "mdi:medal")
 /**
- * A [fact](/docs/creating-stories/facts) with one of the player's guard records.
- * Only scheduled trips on which the player did station work count.
+ * [事实](/docs/creating-stories/facts)：玩家的一项车掌记录。只算按时刻表运行、做过作业的车次。
  *
  * <fields.ReadonlyFactInfo />
  *
- * | Stat | Value |
- * |------|-------|
- * | Trips | Trips the player worked as guard |
- * | Completed | Trips worked to the end |
- * | Total points | Sum of points over trips worked to the end |
- * | Best grade | S = 5, A = 4, B = 3, C = 2, D = 1, none = 0 |
- * | Last points | Points of the last trip (0 to 100) |
+ * | 记录 | 值 |
+ * |------|----|
+ * | 趟数 | 玩家当车掌值乘过的趟数 |
+ * | 开完 | 值乘到底的趟数 |
+ * | 总得分 | 值乘到底的趟数得分合计 |
+ * | 最好评级 | S = 5，A = 4，B = 3，C = 2，D = 1，没有 = 0 |
+ * | 最近得分 | 最近一趟的得分（0 到 100） |
  *
- * ## How could this be used?
- * Offer the driving licence quest after the player has worked ten trips as guard.
+ * ## 用法示例
+ * 玩家当车掌值乘满十趟后开放驾驶证剧情。
  */
 class GuardStatFactEntry(
     override val id: String = "",
     override val name: String = "",
     override val comment: String = "",
     override val group: Ref<GroupEntry> = emptyRef(),
-    @Help("Which record to read.")
+    @Help("读哪一项记录。")
     val stat: GuardStat = GuardStat.COMPLETED,
 ) : ReadableFactEntry {
     override fun readSinglePlayer(player: Player): FactData {

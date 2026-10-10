@@ -21,29 +21,29 @@ enum class DriverStat {
     LAST_POINTS,
 }
 
-@Entry("fetarute_driver_stat_fact", "A FetaruteTC driving record of the player", Colors.PURPLE, "mdi:trophy")
+@Entry("fetarute_driver_stat_fact", "玩家的 FTCA 驾驶记录", Colors.PURPLE, "mdi:trophy")
 /**
- * A [fact](/docs/creating-stories/facts) with one of the player's driving records.
+ * [事实](/docs/creating-stories/facts)：玩家的一项驾驶记录。
  *
  * <fields.ReadonlyFactInfo />
  *
- * | Stat | Value |
- * |------|-------|
- * | Tasks | Trips the player drove |
- * | Completed | Trips driven to the end |
- * | Total points | Sum of points over trips driven to the end (same as the leaderboard) |
- * | Best grade | S = 5, A = 4, B = 3, C = 2, D = 1, none = 0 |
- * | Last points | Points of the last trip (0 to 100) |
+ * | 记录 | 值 |
+ * |------|----|
+ * | 车次数 | 玩家开过的车次数 |
+ * | 开完 | 开到终点的车次数 |
+ * | 总得分 | 开到终点的车次得分合计（与排行相同） |
+ * | 最好评级 | S = 5，A = 4，B = 3，C = 2，D = 1，没有 = 0 |
+ * | 最近得分 | 最近一趟的得分（0 到 100） |
  *
- * ## How could this be used?
- * Unlock a harder line after the player has completed five trips with grade B or better.
+ * ## 用法示例
+ * 玩家以 B 级以上开完五趟后解锁更难的线路。
  */
 class DriverStatFactEntry(
     override val id: String = "",
     override val name: String = "",
     override val comment: String = "",
     override val group: Ref<GroupEntry> = emptyRef(),
-    @Help("Which record to read.")
+    @Help("读哪一项记录。")
     val stat: DriverStat = DriverStat.COMPLETED,
 ) : ReadableFactEntry {
     override fun readSinglePlayer(player: Player): FactData {

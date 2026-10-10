@@ -20,18 +20,18 @@ import org.fetarute.fetaruteTCAddon.api.event.DriveSessionEndedEvent
 import org.fetarute.fetaruteTCAddon.api.event.DriveSessionStartEvent
 import org.fetarute.typewriter.driveApi
 
-@Entry("fetarute_driving_audience", "Filter players driving a FetaruteTC train", Colors.MEDIUM_SEA_GREEN, "mdi:steering")
+@Entry("fetarute_driving_audience", "正在驾驶 FTCA 列车的玩家", Colors.MEDIUM_SEA_GREEN, "mdi:steering")
 /**
- * The `Driving Audience` filters players who are at the controls of a train.
+ * “驾驶中的玩家”受众：筛选正在驾驶列车的玩家。
  *
- * ## How could this be used?
- * Show a sidebar or boss bar with quest hints only while the player is driving.
+ * ## 用法示例
+ * 只在玩家驾驶时显示剧情提示。
  */
 class DrivingAudienceEntry(
     override val id: String = "",
     override val name: String = "",
     override val children: List<Ref<out AudienceEntry>> = emptyList(),
-    @Help("Only players driving a scheduled train, not free driving.")
+    @Help("只算驾驶调度列车的玩家，不算自由驾驶。")
     val dispatchedOnly: Boolean = false,
     override val inverted: Boolean = false,
 ) : AudienceFilterEntry, Invertible {

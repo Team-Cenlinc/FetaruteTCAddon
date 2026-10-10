@@ -22,29 +22,28 @@ import org.fetarute.typewriter.entries.action.AssignGuardDutyActionEntry
 import java.util.Optional
 import kotlin.reflect.KClass
 
-@Entry("fetarute_guard_task_finished_event", "When a player's FetaruteTC guard duty ends", Colors.YELLOW, "mdi:bell-check")
+@Entry("fetarute_guard_task_finished_event", "玩家的 FTCA 车掌任务结束时", Colors.YELLOW, "mdi:bell-check")
 @ContextKeys(GuardTaskFinishedContextKeys::class)
 /**
- * The `Guard Task Finished Event` is triggered when a guard duty ends: worked to the terminus or handover station,
- * abandoned, expired before the player went on duty (or the train left without them), failed, or interrupted.
+ * “车掌任务结束”事件：车掌任务结束时触发——值乘到终点站或交班站、放弃、还没上岗就作废（或列车没等到玩家开走了）、
+ * 未完成，或被中断。
  *
- * Points and grade are only set when the player worked at least one station of the trip; otherwise they are 0 and empty.
+ * 得分与评级只在玩家至少做了这一趟的一站作业时才有，否则为 0 与空。
  *
- * ## How could this be used?
- * Reward the player when the duty was completed with grade A or better,
- * or move the quest back a step when the train left without them.
+ * ## 用法示例
+ * 车掌任务以 A 级以上完成时发奖励；列车没等到玩家开走了时把剧情退回一步。
  */
 class GuardTaskFinishedEventEntry(
     override val id: String = "",
     override val name: String = "",
     override val triggers: List<Ref<TriggerableEntry>> = emptyList(),
-    @Help("Only duties given by this action. Leave empty for any duty.")
+    @Help("只要这个动作派出的车掌任务；留空不限。")
     val assignedBy: Ref<AssignGuardDutyActionEntry> = emptyRef(),
-    @Help("Only trips of this route code. Leave blank for any route.")
+    @Help("只要这个交路编号的车次；留空不限交路。")
     val route: String = "",
-    @Help("Only duties that ended this way. Leave empty for any end.")
+    @Help("只要以这种终态结束的；留空不限终态。")
     val state: Optional<TaskEndState> = Optional.empty(),
-    @Help("Only duties from these sources. Leave empty for any source.")
+    @Help("只要这些来源的车掌任务；留空不限来源。")
     val sources: List<GuardTaskSource> = emptyList(),
 ) : EventEntry
 

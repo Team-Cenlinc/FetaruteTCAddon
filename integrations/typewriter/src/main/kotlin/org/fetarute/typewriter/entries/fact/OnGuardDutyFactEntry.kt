@@ -10,20 +10,20 @@ import com.typewritermc.engine.paper.facts.FactData
 import org.bukkit.entity.Player
 import org.fetarute.typewriter.guardApi
 
-@Entry("fetarute_guard_duty_fact", "Whether the player is on duty as a FetaruteTC guard", Colors.PURPLE, "mdi:bell-ring")
+@Entry("fetarute_guard_duty_fact", "玩家是否在当 FTCA 车掌", Colors.PURPLE, "mdi:bell-ring")
 /**
- * A [fact](/docs/creating-stories/facts) that tells whether the player is the guard of a train right now.
+ * [事实](/docs/creating-stories/facts)：玩家此刻是否在当车掌。
  *
  * <fields.ReadonlyFactInfo />
  *
- * | Status | Value |
- * |--------|-------|
- * | Not on duty | 0 |
- * | On duty | 1 |
- * | On duty for a guard duty they were given or took from the guard board | 2 |
+ * | 状态 | 值 |
+ * |------|----|
+ * | 未值乘 | 0 |
+ * | 值乘中 | 1 |
+ * | 为车掌任务（被派的或从车掌任务板领的）值乘中 | 2 |
  *
- * ## How could this be used?
- * Hide dialogue options while the player is working as a guard.
+ * ## 用法示例
+ * 玩家值乘时隐藏某些对话选项。
  */
 class OnGuardDutyFactEntry(
     override val id: String = "",

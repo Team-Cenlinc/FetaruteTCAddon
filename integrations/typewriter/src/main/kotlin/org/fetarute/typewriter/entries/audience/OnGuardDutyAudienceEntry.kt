@@ -20,18 +20,18 @@ import org.fetarute.fetaruteTCAddon.api.event.GuardDutyEndedEvent
 import org.fetarute.fetaruteTCAddon.api.event.GuardDutyStartEvent
 import org.fetarute.typewriter.guardApi
 
-@Entry("fetarute_guard_duty_audience", "Filter players on duty as a FetaruteTC guard", Colors.MEDIUM_SEA_GREEN, "mdi:bell-ring")
+@Entry("fetarute_guard_duty_audience", "正在当 FTCA 车掌的玩家", Colors.MEDIUM_SEA_GREEN, "mdi:bell-ring")
 /**
- * The `Guard Duty Audience` filters players who are the guard of a train.
+ * “值乘中的车掌”受众：筛选正在当车掌的玩家。
  *
- * ## How could this be used?
- * Show a sidebar or boss bar with quest hints only while the player is working as a guard.
+ * ## 用法示例
+ * 只在玩家值乘时显示剧情提示。
  */
 class OnGuardDutyAudienceEntry(
     override val id: String = "",
     override val name: String = "",
     override val children: List<Ref<out AudienceEntry>> = emptyList(),
-    @Help("Only players on duty for a guard duty they were given or took from the guard board.")
+    @Help("只算为车掌任务（被派的或从车掌任务板领的）值乘的玩家。")
     val withTaskOnly: Boolean = false,
     override val inverted: Boolean = false,
 ) : AudienceFilterEntry, Invertible {
