@@ -14,6 +14,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
 
 /**
  * 一趟车眼中的交路停靠：声明节点、实际节点与停靠配置三者按 {@code waypoints()} 下标对齐。
@@ -37,6 +38,9 @@ public final class RouteStopPlan {
   private final List<RouteStop> stops;
   private final Set<Integer> placed;
   private final Map<Integer, NodeId> planned;
+
+  /** 各站的换模加时：第一次查停站秒数时推算（见 {@link RoutePowerModes#switchDwellPlan}）。 */
+  private int[] powerDwell;
 
   private RouteStopPlan(
       List<NodeId> declared,
@@ -164,7 +168,12 @@ public final class RouteStopPlan {
 
   /** 该下标的计划停站秒数（PASS 与无配置为 0，停车没配 dwell 取运行时缺省）。 */
   public int plannedDwellSec(int index) {
-    return stop(index).map(RouteStop::plannedDwellSeconds).orElse(0);
+    // 多模车在这一站做涉及内燃的换模时另加换模时间，与编表、现场停站同一口径
+    if (powerDwell == null) {
+      powerDwell = RoutePowerModes.switchDwellPlan(stops);
+    }
+    return stop(index).map(RouteStop::plannedDwellSeconds).orElse(0)
+        + (index >= 0 && index < powerDwell.length ? powerDwell[index] : 0);
   }
 
   /** {@code after} 之后第一个停车点的下标。 */

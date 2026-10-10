@@ -58,6 +58,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
@@ -67,6 +68,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
+import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.incendo.cloud.CommandManager;
@@ -101,7 +103,7 @@ public final class FtaRouteCommand {
 
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
-  private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION");
+  private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION", "POWER");
   private static final Set<String> DIRECTIVE_PREFIXES = Set.of("CRET", "DSTY");
   private static final List<String> ROUTE_PATTERN_ALIASES =
       List.of("LOCAL", "RAPID", "NEO_RAPID", "EXPRESS", "LTD_EXPRESS", "LIMITED_EXPRESS");
@@ -1549,8 +1551,10 @@ public final class FtaRouteCommand {
                             route.id(), ignored -> provider.routeStops().listByRoute(route.id()));
                     RouteValidationResult result = validateRouteStops(provider, stops, true);
                     List<RouteValidationIssue> spawnIssues =
-                        validateRouteSpawnConfig(
-                            resolved.line(), route, allLineRoutes, stopsByRoute);
+                        new ArrayList<>(
+                            validateRouteSpawnConfig(
+                                resolved.line(), route, allLineRoutes, stopsByRoute));
+                    validatePowerDirectives(stops, spawnIssues, true);
                     if (result.reachabilitySkipped()) {
                       reachabilitySkipped = true;
                     }
@@ -3712,6 +3716,7 @@ public final class FtaRouteCommand {
           new RouteValidationIssue(
               "command.route.define.dsty-not-last", Map.of("seq", String.valueOf(dstySeq))));
     }
+    validatePowerDirectives(stops, issues, false);
 
     boolean missingNode = false;
     // 每个 stop 对应的可用 NodeId 列表（普通 stop 只有 1 个，DYNAMIC 可能有多个）
@@ -4161,6 +4166,46 @@ public final class FtaRouteCommand {
     issues.add(
         new RouteValidationIssue(
             "command.route.define.node-missing", Map.of("seq", String.valueOf(stop.sequence()))));
+  }
+
+  /** 多模车换模备注 POWER：受电方式认不出时报错；{@code hints} 时只给提示——涉及内燃却写在不停车的路径点上，推迟到其后第一个停车点（不拦保存）。 */
+  static void validatePowerDirectives(
+      List<RouteStop> stops, List<RouteValidationIssue> issues, boolean hints) {
+    if (hints
+        && !stops.isEmpty()
+        && RoutePowerModes.raw(stops.get(0)).isEmpty()
+        && stops.stream().anyMatch(stop -> RoutePowerModes.raw(stop).isPresent())) {
+      // 首站没写：出发模式取决于列车当前的模式，编表只能估算换模加时
+      issues.add(new RouteValidationIssue("command.route.define.power-no-start", Map.of()));
+    }
+    for (int i = 0; i < stops.size(); i++) {
+      RouteStop stop = stops.get(i);
+      Optional<String> raw = RoutePowerModes.raw(stop);
+      if (raw.isEmpty()) {
+        continue;
+      }
+      Optional<PowerSupply> target = PowerSupply.parse(raw.get());
+      if (target.isEmpty()) {
+        if (hints) {
+          continue;
+        }
+        issues.add(
+            new RouteValidationIssue(
+                "command.route.define.power-invalid",
+                Map.of("seq", String.valueOf(stop.sequence()), "value", raw.get())));
+        continue;
+      }
+      PowerSupply before = RoutePowerModes.modeAt(stops, i - 1).orElse(null);
+      if (hints
+          && !RoutePowerModes.dwells(stop)
+          && target.get() != before
+          && RoutePowerModes.needsStop(before, target.get())) {
+        issues.add(
+            new RouteValidationIssue(
+                "command.route.define.power-deferred",
+                Map.of("seq", String.valueOf(stop.sequence()))));
+      }
+    }
   }
 
   /** 从 RouteStop 的 notes 中提取 action 行（仅保留支持的前缀）。 */
@@ -4774,7 +4819,7 @@ public final class FtaRouteCommand {
     }
     String upper = raw.toUpperCase(java.util.Locale.ROOT);
     // 按优先级检测 directive 前缀并附加显示
-    for (String directive : List.of("CRET", "DSTY", "DYNAMIC", "CHANGE", "ACTION")) {
+    for (String directive : List.of("CRET", "DSTY", "DYNAMIC", "CHANGE", "POWER", "ACTION")) {
       if (upper.startsWith(directive + " ")
           || upper.startsWith(directive + ":")
           || directive.equals(upper)) {

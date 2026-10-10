@@ -15,6 +15,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 
 /**
@@ -207,6 +208,8 @@ public final class TimetableTimingCalculator {
    * 停站时长：PASS 路径点不停站，永远是 0——兜底值只给"停靠却没配 dwell"的站。
    *
    * <p>否则一条 route 上每个路径点都会被算成一次 {@code --dwell} 长的停站：全程时分被虚增一到三成， 冲突检查里每个路径点还会多出一段假的站台占用。
+   *
+   * <p>多模车在这一站做涉及内燃的换模时另加换模时间（{@link RoutePowerModes#switchDwellSeconds}），与现场停站、到站预测同一口径。
    */
   private static int resolveDwellSeconds(List<RouteStop> stops, int index, int fallback) {
     if (stops == null || index < 0 || index >= stops.size()) {
@@ -219,7 +222,8 @@ public final class TimetableTimingCalculator {
     if (stop.passType() == RouteStopPassType.PASS) {
       return 0;
     }
-    return stop.dwellSeconds().filter(value -> value >= 0).orElse(fallback);
+    return stop.dwellSeconds().filter(value -> value >= 0).orElse(fallback)
+        + RoutePowerModes.switchDwellSeconds(stops, index);
   }
 
   /**

@@ -40,7 +40,7 @@ public final class CabSystems {
 
   private final boolean enabled;
   private final CabConfig config;
-  private final CabVehicle vehicle;
+  private CabVehicle vehicle;
   private final AirSystem air;
   private final BrakePipe brakePipe;
   private final BrakeTest brakeTest;
@@ -193,6 +193,12 @@ public final class CabSystems {
 
   public CabFaults faults() {
     return faults;
+  }
+
+  /** 多模车换了受电方式：是否电力牵引（电制动、受电中断与主断跳闸）与恒功率拐点跟着换；动力配置方式与编组不变。 */
+  public void vehicleChanged(CabVehicle next) {
+    this.vehicle = Objects.requireNonNull(next, "next");
+    faults.setElectric(next.electric());
   }
 
   /** 牵引被封锁的首要原因；没有封锁时为空。 */

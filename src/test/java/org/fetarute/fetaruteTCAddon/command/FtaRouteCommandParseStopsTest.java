@@ -55,6 +55,29 @@ class FtaRouteCommandParseStopsTest {
     assertTrue(stops.get(2).notes().orElse("").startsWith("DSTY "));
   }
 
+  /** 多模车换模备注 POWER 与 CHANGE 一样是动作行：挂在前一个停靠点上，存为 POWER:ptg6。 */
+  @Test
+  void parseStopsFromBookAttachesPowerToThePreviousStop() {
+    FtaRouteCommand command = new FtaRouteCommand(mockPlugin());
+    LocaleManager locale = mockLocale();
+    StorageProvider provider = mockProvider();
+    Player player = mock(Player.class);
+    List<FtaRouteCommand.BookLine> lines =
+        List.of(
+            new FtaRouteCommand.BookLine(1, "SURN:S:STATION:1"),
+            new FtaRouteCommand.BookLine(2, "POWER ptg6"),
+            new FtaRouteCommand.BookLine(3, "SURN:S:STATION:2"));
+
+    Optional<List<RouteStop>> result =
+        command.parseStopsFromBook(
+            locale, provider, UUID.randomUUID(), UUID.randomUUID(), player, lines);
+
+    assertTrue(result.isPresent());
+    assertEquals(2, result.get().size());
+    assertEquals("POWER:ptg6", result.get().get(0).notes().orElse(""));
+    assertTrue(result.get().get(1).notes().isEmpty());
+  }
+
   @Test
   void parseStopsFromBookRejectsDstyNotLast() {
     FtaRouteCommand command = new FtaRouteCommand(mockPlugin());

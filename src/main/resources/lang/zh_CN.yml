@@ -983,6 +983,7 @@ command:
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
+      power-no-start: "<prefix> <yellow>写了 POWER 但首站没有：出发时沿用列车当前的受电方式，编表按“换成电力不加时、换成内燃加时”估算，与实际可能不符；建议在首站写明出发方式</yellow>"
       success: "<prefix> <dark_aqua>停靠表已写入：</dark_aqua><white><code></white> <gray>（共 <count> 个停靠点）</gray>"
       empty: "<prefix> <red>书中没有可用定义</red> <gray>请至少写入一行站码或节点 ID</gray>"
       book:
@@ -996,6 +997,8 @@ command:
       cret-not-first: "<prefix> <red>CRET 只能出现在首个停靠点</red> <gray>(seq=<white><seq></white>)</gray>"
       dsty-multi: "<prefix> <red>DSTY 只能出现一次</red>"
       dsty-not-last: "<prefix> <red>DSTY 必须为最后一个停靠点</red> <gray>(seq=<white><seq></white>)</gray>"
+      power-invalid: "<prefix> <red>POWER 的受电方式无法识别：</red><white><value></white> <gray>(seq=<white><seq></white>；可写 ptg5、ptg6、shoe、diesel、supercap)</gray>"
+      power-deferred: "<prefix> <yellow>第 <white><seq></white> 个停靠点不停车，涉及内燃的换模推迟到其后第一个停车点</yellow>"
       graph-missing: "<prefix> <gray>未加载调度图快照，已跳过可达性校验</gray>"
       station-missing: "<prefix> <red>第 <white><seq></white> 个停靠点的站点不存在</red>"
       station-graph-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少图节点</red> <gray>(station=<white><station></white>)</gray>"
@@ -1326,6 +1329,7 @@ command:
       save-hint: "<gray>只改了这列车；要让以后出库的车也带上标记，请把列车保存回存车</gray> <aqua>[/train save]</aqua>"
       save-hover: "<gray>点击填入 /train save，再写上存车名</gray>"
     config:
+      power-too-many: "<prefix> <red>受电方式最多写 3 种（驾驶台菜单只有 3 个位置）：</red><white><raw></white>"
       set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 配置已更新： type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
       list: "<prefix> 列车 <dark_aqua><train></dark_aqua>: type=<white><type></white> accel=<white><accel></white> decel=<white><decel></white>"
       drive-set: "<prefix> 列车 <dark_aqua><train></dark_aqua> 驾驶参数已更新： mode=<white><mode></white> mt=<white><mt></white> max=<white><max></white> power=<white><power></white>"
@@ -1774,6 +1778,8 @@ drive:
     b4: "<gold>B4 常用制动 4 档</gold>"
     eb: "<red>EB 紧急制动</red>"
   hud:
+    power:
+      pending: "<yellow>本区段改用<mode>：停车后在驾驶台菜单切换</yellow>"
     line: "<speed> <gray>/</gray> <limit> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     line-no-limit: "<speed> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     direction-tag: "<aqua><direction></aqua>"
@@ -1899,6 +1905,22 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+  power:
+    short:
+      ptg5: "5米弓"
+      ptg6: "6米弓"
+      shoe: "第三轨"
+      diesel: "内燃"
+      supercap: "电容"
+    name:
+      ptg5: "受电弓（5 米接触网）"
+      ptg6: "受电弓（6 米接触网）"
+      shoe: "第三轨"
+      diesel: "内燃"
+      supercap: "超级电容"
+    pending: "<yellow>本区段改用<white><mode></white>受电，请停车后在驾驶台菜单第三排切换</yellow>"
+    switching: "<green>开始切换为<white><mode></white>受电，受电接通前不能牵引</green>"
+    switched: "<gray>已切换为<white><mode></white>受电</gray>"
   supercap:
     low: "<yellow>超级电容电量偏低（<white><percent>%</white>），请在下一站开门充电</yellow>"
     depleted: "<red>超级电容电量耗尽，牵引已切除，制动不受影响</red>"
@@ -1931,6 +1953,7 @@ drive:
     title: "<gold><bold>驾驶台</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
+      power: "受电"
       train: "列车"
       signal: "信号"
       next-station: "下一站"
@@ -1949,6 +1972,9 @@ drive:
       door-bypass: "门旁路"
       supercap: "电容"
     value:
+      power:
+        current: "<white><mode></white>"
+        pending: "<white><mode></white> <gray>→</gray> <yellow><target></yellow>"
       text: "<white><text></white>"
       supercap:
         normal: "<green><percent>%</green>"
@@ -2049,6 +2075,9 @@ drive:
   menu:
     title: "驾驶台"
     item:
+      power-mode-on: "<green>受电方式：<mode>（当前）</green>"
+      power-mode-off: "<gray>受电方式：<mode></gray>"
+      power-mode-busy: "<yellow>受电方式：<mode>（接通中）</yellow>"
       reverser-forward: "<green>换向手柄：前进</green>"
       reverser-neutral: "<gray>换向手柄：零位</gray>"
       reverser-reverse: "<aqua>换向手柄：后退</aqua>"
@@ -2102,6 +2131,8 @@ drive:
       door-bypass-on: "<gold>门旁路：已旁路</gold>"
       door-bypass-off: "<gray>门旁路：未旁路</gray>"
     hint:
+      power-mode-current: "<gray>列车当前使用的受电方式</gray>"
+      power-mode-select: "<gray>点击切换为这种受电方式；simulation 级受电重新接通期间不能牵引</gray>"
       reverser: "<gray>点击选择方向</gray>"
       door: "<gray>点击开关车门</gray>"
       stopped: "<gray>停稳后才能操作</gray>"
@@ -2122,6 +2153,7 @@ drive:
       gauge: "<gray>表计只显示读数，不能操作</gray>"
       faults: "<gray>故障指示只显示，不能操作</gray>"
     detail:
+      power-required: "<yellow>本区段要求使用这种受电方式</yellow>"
       reservoir: "<gray>主风缸 <white><mr></white> kPa</gray>"
       parking-needs: "<gray>缓解需要主风缸 ≥ <white><need></white> kPa（当前 <white><mr></white>）</gray>"
       brake-test-not-done: "<gray>制动缸 <white><bc></white> kPa</gray>"

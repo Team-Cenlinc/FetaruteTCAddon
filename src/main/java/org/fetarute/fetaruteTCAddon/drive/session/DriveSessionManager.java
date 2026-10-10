@@ -52,6 +52,7 @@ import org.fetarute.fetaruteTCAddon.api.event.DriverTaskStartedEvent;
 import org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DriverControlTags;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
@@ -1045,6 +1046,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       if (!dispatchTrain) {
         session.restoreSupercap(TrainSetupStore.loadSupercap(group.getProperties()));
       }
+      session.setPowerSupplies(TrainPower.supplies(group.getProperties(), current.defaultPower()));
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("开始驾驶失败: " + ex);
       return StartOutcome.FAILED;
@@ -1919,6 +1921,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
       case TASK_CARD -> {}
       case DOOR_BYPASS -> toggleDoorBypass(player, session);
+      case POWER_MODE_1, POWER_MODE_2, POWER_MODE_3 -> selectPowerMode(
+          player, session, action.powerModeIndex());
     }
     Inventory top = player.getOpenInventory().getTopInventory();
     if (DriveMenu.isMenu(top)) {
@@ -2020,6 +2024,111 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       denyMenu(player, "drive.menu.deny.no-door-animation");
       tutorials.onDoorUnavailable(player);
     }
+  }
+
+  // ---- 多模车换模 ----
+
+  /** 有人手动驾驶这列车：多模车的升降弓归驾驶会话。 */
+  public boolean drivesTrain(String trainName) {
+    return driverSessionOfTrain(trainName).isPresent();
+  }
+
+  /**
+   * 交路备注 POWER：这一点起应当用的受电方式，记进驾驶会话（{@code null} 清掉上一段的要求）。
+   *
+   * @return simulation 级、换模涉及内燃时为 true：由驾驶员停车后在驾驶台换；其余为 false，由调度直接换
+   */
+  public boolean powerSectionReached(String trainName, PowerSupply mode) {
+    Optional<DriveSession> found = driverSessionOfTrain(trainName);
+    if (found.isEmpty()) {
+      return false;
+    }
+    DriveSession session = found.get();
+    boolean wasPending = session.pendingPower().isPresent();
+    session.setSectionPower(mode);
+    PowerSupply current = session.setup().supply();
+    if (mode == null
+        || mode == current
+        || session.setupMode() != SimulationLevel.SetupMode.MANUAL
+        || !RoutePowerModes.needsStop(current, mode)) {
+      return false;
+    }
+    if (!wasPending) {
+      traceSession(session, "换模点：本区段要求 " + mode.key());
+      Player player = Bukkit.getPlayer(session.playerId());
+      if (player != null) {
+        notice(player, "drive.power.pending", Map.of("mode", powerName(mode)));
+      }
+    }
+    return true;
+  }
+
+  /** 调度换了模（standard 级跟着换）：驾驶会话的受电方式随之换，受电接通着时降下原来的弓、升起新的。 */
+  public void powerSwitchedByDispatch(String trainName, PowerSupply from, PowerSupply to) {
+    driverSessionOfTrain(trainName)
+        .ifPresent(
+            session -> {
+              session.setSectionPower(to);
+              applyPowerSwitch(session, from, to, false, "调度换模");
+              Player player = Bukkit.getPlayer(session.playerId());
+              if (player != null) {
+                notice(player, "drive.power.switched", Map.of("mode", powerName(to)));
+              }
+            });
+  }
+
+  /**
+   * 驾驶台第三排的受电方式按钮：换成第 {@code index} 种（菜单只在停稳时打开，内燃也能换）。simulation 级受电按新方式重新接通，期间不能牵引； standard
+   * 级直接换。在交路上换成别的方式时，standard 级经过下一个节点会被调度换回这一段要求的方式。
+   */
+  private void selectPowerMode(Player player, DriveSession session, int index) {
+    List<PowerSupply> supplies = session.powerSupplies();
+    if (index < 0 || index >= supplies.size()) {
+      return;
+    }
+    PowerSupply target = supplies.get(index);
+    PowerSupply from = session.setup().supply();
+    if (target == from) {
+      return;
+    }
+    if (session.setup().busy()) {
+      denyMenu(player, "drive.menu.deny.setup-busy");
+      return;
+    }
+    boolean timed = session.setupMode() == SimulationLevel.SetupMode.MANUAL;
+    applyPowerSwitch(session, from, target, timed, "驾驶台换模");
+    notice(
+        player,
+        timed ? "drive.power.switching" : "drive.power.switched",
+        Map.of("mode", powerName(target)));
+  }
+
+  /** 会话换受电方式：标签、升降弓（受电接通着时）、车上系统的电力特征与超级电容一起换。 */
+  private void applyPowerSwitch(
+      DriveSession session, PowerSupply from, PowerSupply to, boolean timed, String reason) {
+    TrainSetup setup = session.setup();
+    boolean powered = setup.state(SetupSystem.POWER) == TrainSetup.State.ON;
+    if (!setup.switchSupply(to, timed, Bukkit.getCurrentTick())) {
+      traceSession(session, reason + " 未换（已是 " + to.key() + " 或正在接通）");
+      return;
+    }
+    session.powerSupplyChanged();
+    Optional<MinecartGroup> group = findSessionGroup(session);
+    if (group.isPresent()) {
+      TrainPower.setActive(group.get().getProperties(), to);
+      if (powered) {
+        SetupAnimations.playPower(group.get(), from, false);
+        SetupAnimations.playPower(group.get(), to, true);
+      }
+      session.cab().vehicleChanged(cabVehicle(group.get(), config, session.params()));
+      saveTrainState(session, group.get());
+    }
+    traceSession(
+        session, reason + " " + from.key() + "→" + to.key() + (timed && powered ? "（重新受电）" : ""));
+  }
+
+  private String powerName(PowerSupply supply) {
+    return plugin.getLocaleManager().text("drive.power.name." + supply.key());
   }
 
   // ---- 启动流程 ----

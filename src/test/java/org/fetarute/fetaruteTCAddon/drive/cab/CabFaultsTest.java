@@ -166,4 +166,22 @@ class CabFaultsTest {
     assertEquals(
         0.0, new FaultConfig(true, 0.0, EnumSet.allOf(CabFault.class), 600, 6.0).chancePerSecond());
   }
+
+  /** 多模车换成非电力：受电中断、主断跳闸随之解除并记一条解除事件；换回电力又可能发生。 */
+  @Test
+  void switchingToANonElectricSupplyClearsElectricFaults() {
+    CabFaults faults = new CabFaults(DEFAULTS, true);
+    faults.inject(CabFault.LINE_LOSS, 0);
+    faults.inject(CabFault.COMPRESSOR, 0);
+    faults.takeEvents();
+
+    faults.setElectric(false);
+
+    assertFalse(faults.active(CabFault.LINE_LOSS));
+    assertTrue(faults.active(CabFault.COMPRESSOR), "与受电无关的故障不受影响");
+    assertFalse(faults.applicable(CabFault.BREAKER_TRIP));
+    assertEquals(1, faults.takeEvents().size());
+    faults.setElectric(true);
+    assertTrue(faults.applicable(CabFault.LINE_LOSS));
+  }
 }

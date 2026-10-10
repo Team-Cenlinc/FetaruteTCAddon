@@ -212,4 +212,37 @@ class DriveSidebarRowsTest {
         "drive.sidebar.value.doors.closed",
         row(DriveSidebarRows.build(session, 40L), "doors").valueKey());
   }
+
+  /** 多模车的受电一行：当前方式，这一段要求换别的时后面跟要换成什么；单模车没有这一行。 */
+  @Test
+  void multiModeTrainsShowTheirPowerSupply() {
+    List<org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply> two =
+        List.of(
+            org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG6,
+            org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.DIESEL);
+
+    DriveSidebarRows.Row current =
+        DriveSidebarRows.powerRow(
+                two,
+                org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG6,
+                java.util.Optional.empty())
+            .orElseThrow();
+    DriveSidebarRows.Row pending =
+        DriveSidebarRows.powerRow(
+                two,
+                org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG6,
+                java.util.Optional.of(org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.DIESEL))
+            .orElseThrow();
+
+    assertEquals("drive.sidebar.value.power.current", current.valueKey());
+    assertEquals(Map.of("mode", "ptg6"), current.values());
+    assertEquals("drive.sidebar.value.power.pending", pending.valueKey());
+    assertEquals(Map.of("mode", "ptg6", "target", "diesel"), pending.values());
+    assertTrue(
+        DriveSidebarRows.powerRow(
+                List.of(org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG5),
+                org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG5,
+                java.util.Optional.empty())
+            .isEmpty());
+  }
 }

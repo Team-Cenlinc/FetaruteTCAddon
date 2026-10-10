@@ -860,19 +860,24 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     // 晚点的车压缩停站：必须在到站进度提交之后（按本站序号查计划发车）、排关门时刻之前定下来。
     int effectiveDwellSeconds =
         plugin
-            .getRuntimeDispatchService()
-            .map(
-                dispatch ->
-                    dispatch
-                        .stationStops()
-                        .dwellSecondsFor(
-                            group,
-                            definition,
-                            dwellSeconds,
-                            firstStop,
-                            firstStop ? DOOR_OPEN_FIRST_DELAY_TICKS : DOOR_OPEN_DELAY_TICKS,
-                            doorFloorSeconds(session)))
-            .orElse(dwellSeconds);
+                .getRuntimeDispatchService()
+                .map(
+                    dispatch ->
+                        dispatch
+                            .stationStops()
+                            .dwellSecondsFor(
+                                group,
+                                definition,
+                                dwellSeconds,
+                                firstStop,
+                                firstStop ? DOOR_OPEN_FIRST_DELAY_TICKS : DOOR_OPEN_DELAY_TICKS,
+                                doorFloorSeconds(session)))
+                .orElse(dwellSeconds)
+            // 多模车在这一站做涉及内燃的换模：多停换模时间，加在晚点压缩之后，不会被压掉
+            + plugin
+                .getPowerModeSwitcher()
+                .map(power -> power.takeStationDwell(trainName))
+                .orElse(0);
     if (dwellRegistered && effectiveDwellSeconds != dwellSeconds) {
       plugin
           .getDwellRegistry()

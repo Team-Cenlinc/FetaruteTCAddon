@@ -55,9 +55,9 @@ public final class TrainSetup {
    */
   public record Progress(SetupSystem system, long remainingTicks) {}
 
-  private final PowerSupply supply;
+  private PowerSupply supply;
   private final SetupTimings timings;
-  private final List<SetupSystem> sequence;
+  private List<SetupSystem> sequence;
   private final Map<SetupSystem, State> states = new EnumMap<>(SetupSystem.class);
   private SetupSystem starting;
   private long startingDoneTick;
@@ -66,16 +66,81 @@ public final class TrainSetup {
   public TrainSetup(PowerSupply supply, SetupTimings timings) {
     this.supply = Objects.requireNonNull(supply, "supply");
     this.timings = Objects.requireNonNull(timings, "timings");
+    this.sequence = sequenceOf(supply);
+    for (SetupSystem system : sequence) {
+      states.put(system, State.OFF);
+    }
+  }
+
+  /** 这种受电方式下的启动顺序：电力才有主断路器。 */
+  private static List<SetupSystem> sequenceOf(PowerSupply supply) {
     List<SetupSystem> order = new ArrayList<>();
     for (SetupSystem system : SetupSystem.values()) {
       if (system != SetupSystem.BREAKER || supply.electric()) {
         order.add(system);
       }
     }
-    this.sequence = List.copyOf(order);
+    return List.copyOf(order);
+  }
+
+  /**
+   * 多模车换受电方式。
+   *
+   * <p>受电没接通（冷车）时只换方式，之后照常启动。受电接通着时：{@code timed} 为 false 直接换过去，系统保持接通（跟着调度换模）；为 true
+   * 时受电按新方式重新接通，耗时同启动流程的受电一步，期间主电路断电、不能牵引（simulation 级驾驶员换模）。换成电力时主断随辅助电源的状态一起接通，换成非电力时没有主断。
+   *
+   * <p>不计时的换模不等正在接通的系统：调度已经换了，会话必须跟上。正在接通的那一步作废，换完后一键启动还在进行的接着启动。
+   *
+   * @return 是否换了；已是这种方式、或计时换模时有系统正在接通为 false
+   */
+  public boolean switchSupply(PowerSupply next, boolean timed, long nowTick) {
+    Objects.requireNonNull(next, "next");
+    if (next == supply || (timed && starting != null)) {
+      return false;
+    }
+    boolean resumeAuto = autoStart;
+    if (starting != null) {
+      states.put(starting, State.OFF);
+      starting = null;
+    }
+    State key = state(SetupSystem.KEY);
+    State power = state(SetupSystem.POWER);
+    State breaker = state(SetupSystem.BREAKER);
+    State aux = state(SetupSystem.AUX);
+    supply = next;
+    sequence = sequenceOf(next);
+    states.clear();
     for (SetupSystem system : sequence) {
       states.put(system, State.OFF);
     }
+    autoStart = false;
+    states.put(SetupSystem.KEY, key);
+    if (power != State.ON) {
+      if (resumeAuto) {
+        startAll(nowTick);
+      }
+      return true;
+    }
+    if (applies(SetupSystem.BREAKER)) {
+      states.put(
+          SetupSystem.BREAKER, breaker == State.ON || aux == State.ON ? State.ON : State.OFF);
+    }
+    states.put(SetupSystem.AUX, aux);
+    if (!timed) {
+      states.put(SetupSystem.POWER, State.ON);
+      if (resumeAuto) {
+        startAll(nowTick);
+      }
+      return true;
+    }
+    int ticks = timings.ticksOf(SetupSystem.POWER, next);
+    states.put(SetupSystem.POWER, State.STARTING);
+    starting = SetupSystem.POWER;
+    startingDoneTick = nowTick + ticks;
+    if (ticks == 0) {
+      tick(nowTick);
+    }
+    return true;
   }
 
   /** 全部已接通的状态机：不需要启动流程的仿真等级使用。 */
@@ -93,7 +158,7 @@ public final class TrainSetup {
 
   /** 这种受电方式下的启动顺序。 */
   public List<SetupSystem> sequence() {
-    return sequence;
+    return List.copyOf(sequence);
   }
 
   /** 该受电方式是否有这个系统。 */
@@ -220,7 +285,11 @@ public final class TrainSetup {
   public void cabDeactivated() {
     autoStart = false;
     if (starting != null) {
-      states.put(starting, State.OFF);
+      // 作废正在接通的那一步：它之后的系统一并断开（换模时受电重新接通期间，主断与辅助电源还记着接通）
+      int from = sequence.indexOf(starting);
+      for (int i = Math.max(0, from); i < sequence.size(); i++) {
+        states.put(sequence.get(i), State.OFF);
+      }
       starting = null;
     }
     if (applies(SetupSystem.KEY)) {

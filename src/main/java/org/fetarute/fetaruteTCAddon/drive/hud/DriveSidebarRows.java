@@ -109,6 +109,8 @@ public final class DriveSidebarRows {
                               score.grade().name()))));
     }
     rows.add(new Row("drive.sidebar.label.doors", doorsKey(session, nowTick), Map.of()));
+    powerRow(session.powerSupplies(), session.setup().supply(), session.pendingPower())
+        .ifPresent(rows::add);
     session.supercap().map(DriveSidebarRows::supercapRow).ifPresent(rows::add);
     CabSystems cab = session.cab();
     if (cab.enabled()) {
@@ -217,6 +219,26 @@ public final class DriveSidebarRows {
             : "drive.sidebar.label.scheduled-arrival",
         "drive.sidebar.value.schedule." + schedule.state().key(),
         Map.of("time", CLOCK.format(schedule.planned()), "deviation", schedule.deviationText()));
+  }
+
+  /** 多模车的受电一行：当前用的方式，这一段要求换别的方式时后面跟要换成什么；单模车没有这一行。 */
+  static Optional<Row> powerRow(
+      List<org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply> supplies,
+      org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply current,
+      Optional<org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply> pending) {
+    if (supplies == null || supplies.size() <= 1 || current == null) {
+      return Optional.empty();
+    }
+    return Optional.of(
+        pending.isPresent()
+            ? new Row(
+                "drive.sidebar.label.power",
+                "drive.sidebar.value.power.pending",
+                Map.of("mode", current.key(), "target", pending.get().key()))
+            : new Row(
+                "drive.sidebar.label.power",
+                "drive.sidebar.value.power.current",
+                Map.of("mode", current.key())));
   }
 
   /** 超级电容：电量百分比；充电中、偏低、耗尽另有颜色。 */

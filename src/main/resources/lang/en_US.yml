@@ -44,6 +44,8 @@ drive:
     b4: "<gold>B4 Service Brake 4</gold>"
     eb: "<red>EB Emergency Brake</red>"
   hud:
+    power:
+      pending: "<yellow>This section uses <mode>: stop and switch in the cab menu</yellow>"
     line: "<speed> <gray>/</gray> <limit> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     line-no-limit: "<speed> <gray>km/h</gray>   <yellow><notch></yellow> <force><direction>"
     direction-tag: "<aqua><direction></aqua>"
@@ -169,6 +171,22 @@ drive:
     b: "<green><bold>B</bold></green>"
     c: "<yellow><bold>C</bold></yellow>"
     d: "<red><bold>D</bold></red>"
+  power:
+    short:
+      ptg5: "Panto 5m"
+      ptg6: "Panto 6m"
+      shoe: "3rd rail"
+      diesel: "Diesel"
+      supercap: "Supercap"
+    name:
+      ptg5: "pantograph (5 m catenary)"
+      ptg6: "pantograph (6 m catenary)"
+      shoe: "third rail"
+      diesel: "diesel"
+      supercap: "supercapacitor"
+    pending: "<yellow>This section uses <white><mode></white> power. Stop and switch it in the third row of the cab menu.</yellow>"
+    switching: "<green>Switching to <white><mode></white> power; no traction until it is up.</green>"
+    switched: "<gray>Switched to <white><mode></white> power.</gray>"
   supercap:
     low: "<yellow>Supercapacitor low (<white><percent>%</white>): open the doors at the next station to charge</yellow>"
     depleted: "<red>Supercapacitor empty: traction cut, brakes still work</red>"
@@ -201,6 +219,7 @@ drive:
     title: "<gold><bold>Cab Panel</bold></gold> <gray><train></gray>"
     row: "<gray><label></gray> <value>"
     label:
+      power: "Power"
       train: "Train"
       signal: "Signal"
       next-station: "Next"
@@ -219,6 +238,9 @@ drive:
       door-bypass: "Door bypass"
       supercap: "Supercap"
     value:
+      power:
+        current: "<white><mode></white>"
+        pending: "<white><mode></white> <gray>→</gray> <yellow><target></yellow>"
       text: "<white><text></white>"
       supercap:
         normal: "<green><percent>%</green>"
@@ -319,6 +341,9 @@ drive:
   menu:
     title: "Cab Panel"
     item:
+      power-mode-on: "<green>Power: <mode> (in use)</green>"
+      power-mode-off: "<gray>Power: <mode></gray>"
+      power-mode-busy: "<yellow>Power: <mode> (connecting)</yellow>"
       reverser-forward: "<green>Reverser: Forward</green>"
       reverser-neutral: "<gray>Reverser: Neutral</gray>"
       reverser-reverse: "<aqua>Reverser: Reverse</aqua>"
@@ -372,6 +397,8 @@ drive:
       door-bypass-on: "<gold>Door bypass: on</gold>"
       door-bypass-off: "<gray>Door bypass: off</gray>"
     hint:
+      power-mode-current: "<gray>The power supply the train is using</gray>"
+      power-mode-select: "<gray>Click to switch to this power supply; at simulation level there is no traction until it is connected</gray>"
       reverser: "<gray>Click to select the direction</gray>"
       door: "<gray>Click to open or close the door</gray>"
       stopped: "<gray>Only while the train is stopped</gray>"
@@ -392,6 +419,7 @@ drive:
       gauge: "<gray>Gauges only show readings</gray>"
       faults: "<gray>The fault display only shows information</gray>"
     detail:
+      power-required: "<yellow>This section requires this power supply</yellow>"
       reservoir: "<gray>Main reservoir <white><mr></white> kPa</gray>"
       parking-needs: "<gray>Release needs main reservoir ≥ <white><need></white> kPa (now <white><mr></white>)</gray>"
       brake-test-not-done: "<gray>Brake cylinder <white><bc></white> kPa</gray>"

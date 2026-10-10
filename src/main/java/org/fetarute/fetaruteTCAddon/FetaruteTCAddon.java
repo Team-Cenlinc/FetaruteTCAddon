@@ -183,6 +183,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private org.fetarute.fetaruteTCAddon.dispatcher.health.HealthAlertBus apiEventAlertBus;
   private org.bukkit.scheduler.BukkitTask apiEventTask;
   private RuntimeDispatchService runtimeDispatchService;
+  private org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher powerModeSwitcher;
   private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
   private boolean runtimeDispatchRecoveryComplete;
   private ReclaimManager reclaimManager;
@@ -615,6 +616,66 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   public HudDefaultTemplateService getHudDefaultTemplateService() {
     return hudDefaultTemplateService;
+  }
+
+  /** 多模车换模（交路备注 POWER）；调度未初始化时为空。 */
+  public Optional<org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher>
+      getPowerModeSwitcher() {
+    return Optional.ofNullable(powerModeSwitcher);
+  }
+
+  /** 多模车换模器：第一次用时建立，之后重载沿用；手动驾驶会话按当前的驾驶管理器查。 */
+  private org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher powerModeSwitcher() {
+    if (powerModeSwitcher != null) {
+      return powerModeSwitcher;
+    }
+    powerModeSwitcher =
+        new org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher(
+            this::getRouteDefinitionCache,
+            () -> {
+              DriveSessionManager drive = driveSessionManager;
+              return drive == null
+                  ? org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG5
+                  : drive.config().defaultPower();
+            },
+            message -> {
+              if (loggerManager != null) {
+                loggerManager.debug(message);
+              }
+            });
+    powerModeSwitcher.setDriverControl(
+        new org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher.DriverControl() {
+          @Override
+          public boolean driven(String trainName) {
+            DriveSessionManager drive = driveSessionManager;
+            return drive != null && drive.drivesTrain(trainName);
+          }
+
+          @Override
+          public boolean driverSwitches(
+              String trainName, org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply sectionMode) {
+            DriveSessionManager drive = driveSessionManager;
+            return drive != null && drive.powerSectionReached(trainName, sectionMode);
+          }
+
+          @Override
+          public void switched(
+              String trainName,
+              org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply from,
+              org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply to) {
+            DriveSessionManager drive = driveSessionManager;
+            if (drive != null) {
+              drive.powerSwitchedByDispatch(trainName, from, to);
+            }
+          }
+        });
+    powerModeSwitcher.setLaterRunner(
+        (ticks, task) -> {
+          if (isEnabled()) {
+            getServer().getScheduler().runTaskLater(this, task, ticks);
+          }
+        });
+    return powerModeSwitcher;
   }
 
   /** 返回运行时调度服务（若未初始化则为空）。 */
@@ -1995,6 +2056,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     simpleAssigner.setCallReservationLive(
         callId -> getCallService().map(calls -> calls.reservationLive(callId)).orElse(true));
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
+    // 多模车：出车、接续时按交路起点换模并升弓，到达或经过交路节点时按交路备注 POWER 换模
+    org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher power = powerModeSwitcher();
+    runtimeDispatchService.setRouteNodeListener(power::onRouteNode);
+    simpleAssigner.addDispatchObserver(power::onDispatched);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
     simpleAssigner.setLayoverReuseGate(

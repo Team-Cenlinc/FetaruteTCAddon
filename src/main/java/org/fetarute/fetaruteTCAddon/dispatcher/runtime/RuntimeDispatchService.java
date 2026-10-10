@@ -259,6 +259,7 @@ public final class RuntimeDispatchService {
   private final RuntimeTrainController runtimeTrainController = new RuntimeTrainController();
   private final Consumer<String> debugLogger;
   private Consumer<LayoverRegistry.LayoverCandidate> layoverListener = candidate -> {};
+  private RouteNodeListener routeNodeListener = RouteNodeListener.NONE;
   private Runnable startupRecoveryRequestedListener = () -> {};
 
   /**
@@ -1691,6 +1692,11 @@ public final class RuntimeDispatchService {
   /** 注册 Layover 事件监听器（在列车进入 Layover 时触发）。 */
   public void setLayoverListener(Consumer<LayoverRegistry.LayoverCandidate> listener) {
     this.layoverListener = listener != null ? listener : candidate -> {};
+  }
+
+  /** 注册到达/经过交路节点的回调（多模车换模）；传入 {@code null} 恢复为空操作。 */
+  public void setRouteNodeListener(RouteNodeListener listener) {
+    this.routeNodeListener = listener != null ? listener : RouteNodeListener.NONE;
   }
 
   /**
@@ -5654,6 +5660,12 @@ public final class RuntimeDispatchService {
       }
       // 处理 CHANGE 移交指令
       handleChangeAction(trainName, properties, stop);
+      try {
+        // 多模车换模：车站停站多停的秒数由 AutoStation 向换模器取
+        routeNodeListener.onRouteNode(trainName, properties, route.id(), currentIndex, true);
+      } catch (RuntimeException ex) {
+        debugLogger.accept("交路节点回调异常 train=" + trainName + " error=" + ex);
+      }
     }
     // 推进 routeIndex
     recordArrivalProgress(
@@ -6178,8 +6190,20 @@ public final class RuntimeDispatchService {
       }
       // 处理 CHANGE 移交指令：仅更新 operator/line 标识，不改变当前 route
       handleChangeAction(trainName, properties, stop);
+      int powerDwellSeconds = 0;
+      try {
+        powerDwellSeconds =
+            routeNodeListener.onRouteNode(
+                trainName,
+                properties,
+                route.id(),
+                currentIndex,
+                stop.passType() != RouteStopPassType.PASS);
+      } catch (RuntimeException ex) {
+        debugLogger.accept("交路节点回调异常 train=" + trainName + " error=" + ex);
+      }
       if (shouldEnterLayoverAtTerminateStop(route, currentIndex, stop)) {
-        int dwellSeconds = resolveWaypointDwellSeconds(stop);
+        int dwellSeconds = resolveWaypointDwellSeconds(stop) + powerDwellSeconds;
         recordArrivalProgress(
             trainName,
             routeUuidOpt.orElse(null),
@@ -6226,7 +6250,7 @@ public final class RuntimeDispatchService {
         return;
       }
       if (shouldStopAtWaypoint(definition, stop)) {
-        waypointDwellSeconds = resolveWaypointDwellSeconds(stop);
+        waypointDwellSeconds = resolveWaypointDwellSeconds(stop) + powerDwellSeconds;
         stopAtWaypoint = waypointDwellSeconds > 0;
       }
     }

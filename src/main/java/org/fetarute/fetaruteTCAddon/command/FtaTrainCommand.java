@@ -59,6 +59,9 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 /** /fta train 命令注册（列车速度/加减速配置）。 */
 public final class FtaTrainCommand {
 
+  /** 一列车最多几种受电方式：驾驶台菜单第三排只有这么多个按钮。 */
+  private static final int MAX_POWER_SUPPLIES = 3;
+
   private static final int SUGGESTION_LIMIT = 20;
   private static final String TRAIN_SELECTOR_PREFIX = "@train[";
   private static final List<String> TRAIN_SELECTOR_KEYS =
@@ -154,8 +157,11 @@ public final class FtaTrainCommand {
                 CommandComponent.builder("power", StringParser.stringParser())
                     .suggestionProvider(
                         SuggestionProvider.suggestingStrings(
-                            java.util.Arrays.stream(PowerSupply.values())
-                                .map(PowerSupply::key)
+                            java.util.stream.Stream.concat(
+                                    java.util.Arrays.stream(PowerSupply.values())
+                                        .map(PowerSupply::key),
+                                    java.util.stream.Stream.of(
+                                        "ptg5,ptg6", "ptg6,diesel", "ptg5,supercap"))
                                 .toList()))
                     .build())
             .build();
@@ -224,8 +230,8 @@ public final class FtaTrainCommand {
                               .map(RailSpeed::blocksPerSecond)
                               .orElse(Double.NaN);
                   String powerRaw = ctx.flags().getValue(powerFlag, null);
-                  Optional<PowerSupply> power =
-                      Optional.ofNullable(powerRaw).flatMap(PowerSupply::parse);
+                  Optional<java.util.List<PowerSupply>> power =
+                      Optional.ofNullable(powerRaw).flatMap(PowerSupply::parseList);
                   Optional<DriveMode> driveMode =
                       Optional.ofNullable(modeRaw).flatMap(DriveMode::parse);
                   String invalidDrive = null;
@@ -237,6 +243,13 @@ public final class FtaTrainCommand {
                     invalidDrive = "--max-speed " + maxSpeedRaw;
                   } else if (powerRaw != null && power.isEmpty()) {
                     invalidDrive = "--power " + powerRaw;
+                  } else if (power.filter(list -> list.size() > MAX_POWER_SUPPLIES).isPresent()) {
+                    // 驾驶台菜单第三排只有 3 个受电方式按钮
+                    ctx.sender()
+                        .sendMessage(
+                            locale.component(
+                                "command.train.config.power-too-many", Map.of("raw", powerRaw)));
+                    return;
                   }
                   if (invalidDrive != null) {
                     ctx.sender()
@@ -292,9 +305,15 @@ public final class FtaTrainCommand {
                             properties, TrainConfigResolver.TAG_TRAIN_MT, mtRaw.trim());
                       }
                       power.ifPresent(
-                          value ->
-                              TrainTagHelper.writeTag(
-                                  properties, TrainConfigResolver.TAG_TRAIN_POWER, value.key()));
+                          value -> {
+                            TrainTagHelper.writeTag(
+                                properties,
+                                TrainConfigResolver.TAG_TRAIN_POWER,
+                                PowerSupply.format(value));
+                            // 改了受电方式就回到默认模式（第一个），之后由交路备注 POWER 切换
+                            TrainTagHelper.removeTagKey(
+                                properties, TrainConfigResolver.TAG_TRAIN_POWER_ACTIVE);
+                          });
                       if (maxSpeed != null) {
                         TrainTagHelper.writeTag(
                             properties,
@@ -1300,7 +1319,29 @@ public final class FtaTrainCommand {
         "max",
         TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_MAX_BPS).orElse("-"),
         "power",
-        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_POWER).orElse("-"));
+        powerLabel(properties));
+  }
+
+  /** 受电方式标签；多模车另写当前用的那一种（{@code ptg6,diesel → diesel}）。 */
+  private static String powerLabel(TrainProperties properties) {
+    Optional<String> raw =
+        TrainTagHelper.readTagValue(properties, TrainConfigResolver.TAG_TRAIN_POWER);
+    if (raw.isEmpty()) {
+      return "-";
+    }
+    if (!org.fetarute.fetaruteTCAddon.drive.setup.TrainPower.multiMode(properties)) {
+      return raw.get();
+    }
+    return raw.get()
+        + " → "
+        + org.fetarute
+            .fetaruteTCAddon
+            .drive
+            .setup
+            .TrainPower
+            .recordedActive(properties)
+            .map(PowerSupply::key)
+            .orElse(PowerSupply.parseList(raw.get()).map(list -> list.get(0).key()).orElse("-"));
   }
 
   /** 把玩家所坐的座位标为驾驶座或取消标记，并说明这个座位现在算不算驾驶室：一列车有标记时只认端车（第一节、最后一节）上的标记座位。 */

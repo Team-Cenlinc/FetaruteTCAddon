@@ -68,9 +68,9 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  */
 public final class DynamicStopMatcher {
 
-  /** 动作指令前缀正则：CHANGE/DYNAMIC/ACTION/CRET/DSTY */
+  /** 动作指令前缀正则：CHANGE/DYNAMIC/ACTION/POWER/CRET/DSTY */
   private static final Pattern ACTION_PREFIX_PATTERN =
-      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
+      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|POWER|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
   private static final Pattern DYNAMIC_DIRECTIVE_PATTERN =
       Pattern.compile("(?:^|\\s)DYNAMIC(?:$|[\\s:])", Pattern.CASE_INSENSITIVE);

@@ -125,4 +125,26 @@ class MenuLayoutTest {
         () -> MenuLayout.modelKey(MenuAction.TASK_CARD, false, PTG5),
         "任务卡用原版书本贴图");
   }
+
+  /** 多模车的受电方式按钮在第三排最后三格，贴图沿用受电开关那一套（受电弓按网高、集电靴、发动机、超级电容）。 */
+  @Test
+  void powerModeButtonsTakeTheLastThreeSlots() {
+    assertEquals(MenuAction.POWER_MODE_1, MenuLayout.actionAt(24).orElseThrow());
+    assertEquals(MenuAction.POWER_MODE_2, MenuLayout.actionAt(25).orElseThrow());
+    assertEquals(MenuAction.POWER_MODE_3, MenuLayout.actionAt(26).orElseThrow());
+    assertEquals(2, MenuAction.POWER_MODE_3.powerModeIndex());
+    assertEquals(-1, MenuAction.POWER.powerModeIndex());
+    assertEquals(
+        "panel/engine_on",
+        MenuLayout.modelKey(
+            MenuAction.POWER_MODE_2,
+            true,
+            org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.DIESEL));
+    assertEquals(
+        "panel/ptg6_off",
+        MenuLayout.modelKey(
+            MenuAction.POWER_MODE_1,
+            false,
+            org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG6));
+  }
 }

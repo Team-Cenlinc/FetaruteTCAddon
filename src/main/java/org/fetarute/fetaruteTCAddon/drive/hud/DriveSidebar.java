@@ -160,7 +160,14 @@ public final class DriveSidebar {
 
   private Component render(DriveSidebarRows.Row row) {
     Component label = locale.component(row.labelKey());
-    Component value = locale.component(row.valueKey(), row.values());
+    Map<String, String> values = row.values();
+    if ("drive.sidebar.label.power".equals(row.labelKey())) {
+      // 受电一行的值是受电方式的键，换成简称
+      Map<String, String> named = new java.util.HashMap<>();
+      values.forEach((key, mode) -> named.put(key, locale.text("drive.power.short." + mode)));
+      values = named;
+    }
+    Component value = locale.component(row.valueKey(), values);
     return locale.component(
         "drive.sidebar.row",
         TagResolver.builder()

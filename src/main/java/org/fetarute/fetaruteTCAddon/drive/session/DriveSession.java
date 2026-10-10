@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
@@ -163,8 +164,14 @@ public final class DriveSession implements DriveDoors.Cab {
   private CabSeatKey pendingCabSeat;
   private CabSeatKey confirmedCabSeat;
 
-  /** 超级电容车的储能；别的受电方式为空。 */
-  private final SuperCapacitor supercap;
+  /** 超级电容车的储能（多模车换到超级电容时补上）；从没用过超级电容的为空。 */
+  private SuperCapacitor supercap;
+
+  /** 多模车：交路备注 POWER 要求的这一段受电方式；交路到这里还没写 POWER 时为空。 */
+  private PowerSupply sectionPower;
+
+  /** 车上有的受电方式（第一个是默认模式）；单模车只有一种。 */
+  private List<PowerSupply> powerSupplies = List.of();
 
   /** 上一次报过的电量状态（跨越时提示一次）。 */
   private SuperCapacitor.Level reportedSupercapLevel = SuperCapacitor.Level.NORMAL;
@@ -228,9 +235,48 @@ public final class DriveSession implements DriveDoors.Cab {
         setup.supply().storesEnergy() ? new SuperCapacitor(config.supercap(), 1.0) : null;
   }
 
-  /** 超级电容车的储能；别的受电方式为空。 */
+  /** 超级电容车的储能；当前不用超级电容时为空。 */
   public Optional<SuperCapacitor> supercap() {
-    return Optional.ofNullable(supercap);
+    return Optional.ofNullable(activeSupercap());
+  }
+
+  private SuperCapacitor activeSupercap() {
+    return setup.supply().storesEnergy() ? supercap : null;
+  }
+
+  /** 受电方式换了（多模车）：换成超级电容时补上储能，按满电算（此前一直在网下行驶）。 */
+  public void powerSupplyChanged() {
+    if (setup.supply().storesEnergy() && supercap == null) {
+      supercap = new SuperCapacitor(config.supercap(), 1.0);
+    }
+  }
+
+  /** 记下这一段要求的受电方式（交路备注 POWER）；{@code null} 清掉。 */
+  public void setSectionPower(PowerSupply mode) {
+    this.sectionPower = mode;
+  }
+
+  /** 车上有的受电方式；多于一种时驾驶台菜单第三排显示各模式按钮、侧边栏显示受电一行。 */
+  public List<PowerSupply> powerSupplies() {
+    return powerSupplies;
+  }
+
+  public void setPowerSupplies(List<PowerSupply> supplies) {
+    this.powerSupplies = supplies == null ? List.of() : List.copyOf(supplies);
+  }
+
+  /** 这一段要求、而列车还没换过去的受电方式；没有要换的时为空。 */
+  public Optional<PowerSupply> pendingPower() {
+    return sectionPower == null || sectionPower == setup.supply()
+        ? Optional.empty()
+        : Optional.of(sectionPower);
+  }
+
+  /** simulation 级：这一段要求别的受电方式（涉及内燃的由驾驶员在驾驶台换），而当前方式要靠接触网或第三轨，开进来就没电。 */
+  public boolean noLinePower() {
+    return setupMode() == SimulationLevel.SetupMode.MANUAL
+        && pendingPower().isPresent()
+        && !setup.supply().selfPowered();
   }
 
   /** 取出并清除待报的电量事件；没有时为空。 */
@@ -381,7 +427,8 @@ public final class DriveSession implements DriveDoors.Cab {
   public boolean tractionBlocked() {
     return !setup.ready()
         || cab.tractionBlock().isPresent()
-        || (supercap != null && supercap.depleted())
+        || noLinePower()
+        || (activeSupercap() != null && activeSupercap().depleted())
         || reverser == ReverserPosition.NEUTRAL
         || anyDoorOpen()
         || doorsClosing(lastAdvanceTick);
@@ -461,6 +508,7 @@ public final class DriveSession implements DriveDoors.Cab {
    */
   private void tickSupercap(
       boolean failSafe, boolean mainCircuit, double tractionScale, double speedBefore) {
+    SuperCapacitor supercap = activeSupercap();
     if (supercap == null) {
       return;
     }

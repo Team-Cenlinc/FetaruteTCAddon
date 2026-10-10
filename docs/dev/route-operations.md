@@ -46,11 +46,16 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 - 语法：`DYNAMIC:<OperatorCode>:<StationCode>` 或 `DYNAMIC:<OperatorCode>:<DepotCode>`
 - 可附带区间：如 `DYNAMIC:SURN:PTK:[1:3]`
 
+### POWER（多模车换模）
+- 语法：`POWER <ptg5|ptg6|shoe|diesel|supercap>`，写在所属停靠点（含 PASS 路径点）之后，与 CHANGE 同为动作行。
+- 语义：多模车从这一点起换成这种受电方式；单模车、车上没有这种方式的车照旧跑。电对电经过即换，涉及内燃推迟到停车点并多停 25 秒。见 `multi-mode-power.md`。
+
 ## define 校验（当前）
 `/fta route define` 会做基础一致性校验：
 - CRET 只能出现一次，且必须是首个 stop。
 - DSTY 只能出现一次，且必须是最后 stop。
 - 若调度图快照已加载，会校验相邻 stop 的 NodeId 是否存在可达边；图未加载时仅提示并跳过校验。
+- POWER 的受电方式认不出时报错。
 
 `/fta route debug <company> <operator> <line> <route> [page]` 可直接查看已保存线路的 stop 回显（无需先 define）。
 `/fta route debug <company> <operator> <line> <route> [page]` 会进行调试展示：
@@ -63,5 +68,6 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 - 调度图快照未加载时仅做结构校验，跳过可达性检查。
 - 额外校验自动发车配置：不存在的 `spawn_group`、缺失 line/group baseline、同组多条 `OPERATION` route 缺少 `spawn_weight`、`CREATE` 首站缺少 `CRET`。
 - 对 `DYNAMIC` stop：显式范围（如 `[1:3]`）会逐轨道检查；未显式范围时会在已加载图快照中扫描实际匹配的 Station/Depot 节点，避免只检查 `:1`。
+- POWER 涉及内燃却写在不停车的路径点上时提示推迟到其后第一个停车点；写了 POWER 而首站没写时提示出发模式取决于列车（只提示，define 不拦）。
 
 > 调度层的实际行为（终到等待/回库/销毁）将在后续运行时调度阶段接入。

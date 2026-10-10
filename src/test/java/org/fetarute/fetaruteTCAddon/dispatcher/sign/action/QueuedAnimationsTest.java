@@ -155,15 +155,15 @@ class QueuedAnimationsTest {
   void detectsARaisedPantograph() {
     AttachmentInternalState state = new AttachmentInternalState();
     Attachment pantograph = attachment(state);
-    assertFalse(SupercapPantograph.raised(pantograph, "ptg5"), "从没升过");
+    assertFalse(Pantographs.raised(pantograph, "ptg5"), "从没升过");
 
     Animation up = animation("ptg5");
     pantograph.startAnimation(up);
-    assertTrue(SupercapPantograph.raised(pantograph, "ptg5"), "牌子正放 ptg5");
+    assertTrue(Pantographs.raised(pantograph, "ptg5"), "牌子正放 ptg5");
 
     AnimationOptions down = new AnimationOptions("ptg5");
     down.setSpeed(-1.0);
     QueuedAnimations.playNamed(List.of(pantograph), down);
-    assertFalse(SupercapPantograph.raised(pantograph, "ptg5"), "已经排了降弓");
+    assertFalse(Pantographs.raised(pantograph, "ptg5"), "已经排了降弓");
   }
 }

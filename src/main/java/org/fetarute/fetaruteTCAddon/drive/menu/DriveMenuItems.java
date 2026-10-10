@@ -26,7 +26,10 @@ public final class DriveMenuItems {
   public static ItemStack build(LocaleManager locale, ButtonView view) {
     ItemStack stack = new ItemStack(materialOf(view));
     ItemMeta meta = stack.getItemMeta();
-    meta.displayName(locale.component(nameKey(view)).decoration(TextDecoration.ITALIC, false));
+    meta.displayName(
+        locale
+            .component(nameKey(view), nameValues(locale, view))
+            .decoration(TextDecoration.ITALIC, false));
     meta.lore(lore(locale, view));
     meta.setItemModel(
         new NamespacedKey(
@@ -54,7 +57,15 @@ public final class DriveMenuItems {
       case REVERSER_NEUTRAL -> Material.GRAY_DYE;
       case REVERSER_REVERSE -> Material.LIGHT_BLUE_DYE;
       case DOOR_LEFT, DOOR_RIGHT -> view.active() ? Material.LIME_DYE : Material.GRAY_DYE;
-      case KEY, POWER, BREAKER, AUX, COMPRESSOR, BRAKE_TEST -> view.busy()
+      case KEY,
+          POWER,
+          BREAKER,
+          AUX,
+          COMPRESSOR,
+          BRAKE_TEST,
+          POWER_MODE_1,
+          POWER_MODE_2,
+          POWER_MODE_3 -> view.busy()
           ? Material.YELLOW_DYE
           : view.active() ? Material.LIME_DYE : Material.GRAY_DYE;
       case START -> view.busy()
@@ -66,6 +77,13 @@ public final class DriveMenuItems {
       case TASK_CARD -> Material.BOOK;
       case DOOR_BYPASS -> view.active() ? Material.ORANGE_DYE : Material.GRAY_DYE;
     };
+  }
+
+  /** 按钮名称里的占位符：受电方式按钮写方式名称。 */
+  static Map<String, String> nameValues(LocaleManager locale, ButtonView view) {
+    return view.action().powerModeIndex() >= 0
+        ? Map.of("mode", locale.text("drive.power.name." + view.supply().key()))
+        : Map.of();
   }
 
   /** 按钮名称的语言键。 */
@@ -90,6 +108,7 @@ public final class DriveMenuItems {
           case END_DRIVING -> view.active() ? "end-driving-confirm" : "end-driving";
           case TASK_CARD -> "task-card-free";
           case DOOR_BYPASS -> view.active() ? "door-bypass-on" : "door-bypass-off";
+          case POWER_MODE_1, POWER_MODE_2, POWER_MODE_3 -> "power-mode-" + state;
         };
   }
 
@@ -132,6 +151,9 @@ public final class DriveMenuItems {
           : "drive.menu.hint.end-driving";
       case TASK_CARD -> "drive.menu.hint.task-card";
       case DOOR_BYPASS -> "drive.menu.hint.door-bypass";
+      case POWER_MODE_1, POWER_MODE_2, POWER_MODE_3 -> view.active()
+          ? "drive.menu.hint.power-mode-current"
+          : "drive.menu.hint.power-mode-select";
     };
   }
 
