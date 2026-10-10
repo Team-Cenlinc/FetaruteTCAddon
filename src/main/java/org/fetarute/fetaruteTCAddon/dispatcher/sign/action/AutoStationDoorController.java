@@ -393,9 +393,19 @@ public final class AutoStationDoorController {
       return session.close();
     }
 
-    /** 这一侧的门已由站台打开（停站中途交给驾驶员）：记成开着，不再播开门动画，之后照常关门。 */
+    /**
+     * 这一侧的门已由站台打开（停站中途交给驾驶员或车掌）：记成开着，不再播开门动画，之后照常关门。
+     *
+     * <p>门会话也要记成开过门：关门只对开过门的会话播动画，否则关门时动画不播、车门仍开着，状态却记成已关，列车带着开着的门开走。
+     */
     public void markOpenedByStation() {
       open = true;
+      session.markOpenedByStation();
+    }
+
+    /** 这扇门的开关门会话（单测用）。 */
+    DoorSession session() {
+      return session;
     }
 
     /** 这一侧的门当前是否由本句柄打开着。 */
@@ -1742,9 +1752,14 @@ public final class AutoStationDoorController {
       return false;
     }
 
-    /** 是否曾成功触发开门动画。 */
+    /** 是否曾成功触发开门动画（或车门已由站台打开、交给了驾驶员或车掌）。 */
     boolean openSucceeded() {
       return openSucceeded;
+    }
+
+    /** 车门已由站台打开：当作开过门，之后照常播关门动画与提示音。 */
+    void markOpenedByStation() {
+      openSucceeded = true;
     }
 
     /** 估算关门动画时长（tick），取各节车里最长的；量不出时为 -1。 */

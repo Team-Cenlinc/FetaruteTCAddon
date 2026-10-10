@@ -825,15 +825,19 @@ public final class GuardSessionManager {
     }
   }
 
-  /** 站台开着的车门交给车掌（停站中途上岗）：站台侧记成开着，之后按这一侧关门。 */
+  /**
+   * 站台开着的车门交给车掌（停站中途上岗）：站台侧记成开着，之后按这一侧关门。站台侧判不出时两侧都记成开着（与驾驶员接管同一做法）：
+   * 站台已不再关门，宁可多关一侧，也不能把开着的一侧当成关着放行。
+   */
   private void adoptStationDoors(
       GuardSession session, MinecartGroup group, DriverStationStop stop) {
     DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.doorFacing(group, session));
     ConfigManager.AutoStationSettings settings = chime.get();
-    if (side == DriverDoorSide.LEFT || side == DriverDoorSide.BOTH || side == DriverDoorSide.ANY) {
+    boolean unknown = side != DriverDoorSide.LEFT && side != DriverDoorSide.RIGHT;
+    if (side == DriverDoorSide.LEFT || unknown) {
       session.doors().adoptOpen(group, session, true, settings, stop.doorCars());
     }
-    if (side == DriverDoorSide.RIGHT || side == DriverDoorSide.BOTH) {
+    if (side == DriverDoorSide.RIGHT || unknown) {
       session.doors().adoptOpen(group, session, false, settings, stop.doorCars());
     }
   }

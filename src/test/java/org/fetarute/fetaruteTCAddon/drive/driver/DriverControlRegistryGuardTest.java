@@ -70,6 +70,36 @@ class DriverControlRegistryGuardTest {
     assertTrue(driver.stationStop().isEmpty(), "ATO 驾驶员不接停站");
   }
 
+  /** 停站中途上岗：站台已交给人工驾驶的驾驶员的这一站一并交给车掌，车掌接着开关门、发发车信号。 */
+  @Test
+  void aGuardJoiningMidStopTakesOverTheDriversStop() {
+    DriverLink driver = new DriverLink(UUID.randomUUID(), "T-1", null, () -> 0.0, () -> 0L);
+    when(properties.getTrainName()).thenReturn("T-1");
+    registry.bind(properties, driver);
+    driver.setMode(DrivingMode.MANUAL);
+    DriverStationStop stop = stop();
+    registry.beginStationStop(properties, stop);
+    assertEquals(Optional.of(stop), driver.stationStop());
+
+    GuardLink guard = guard();
+    assertEquals(Optional.of(stop), guard.stationStop(), "车掌接上这一站");
+    assertTrue(guard.work().isPresent());
+    assertFalse(registry.driverOperatesDoors(properties));
+  }
+
+  @Test
+  void aGuardJoiningBetweenStationsHasNoStop() {
+    DriverLink driver = new DriverLink(UUID.randomUUID(), "T-1", null, () -> 0.0, () -> 0L);
+    when(properties.getTrainName()).thenReturn("T-1");
+    registry.bind(properties, driver);
+    driver.setMode(DrivingMode.MANUAL);
+    DriverStationStop stop = stop();
+    registry.beginStationStop(properties, stop);
+    stop.end();
+
+    assertTrue(guard().stationStop().isEmpty(), "已结束的停站不交给车掌");
+  }
+
   @Test
   void theStationAsksTheGuardBeforeDeparture() {
     GuardLink guard = guard();
