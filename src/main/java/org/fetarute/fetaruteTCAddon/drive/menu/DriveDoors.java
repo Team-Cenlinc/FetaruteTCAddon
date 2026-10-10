@@ -30,11 +30,16 @@ public final class DriveDoors {
     /** 驾驶室此刻是不是编组的车头端。 */
     boolean cabAtHead(int memberCount);
 
+    /** 车门的左右按哪一端的朝向算：默认按所坐驾驶室面朝的方向（驾驶员坐车头，就是行进方向）。车掌坐车尾、面朝后方，覆盖成按车头端， 左右与报站、站台屏一样按列车行进方向。 */
+    default boolean doorsFromHead(int memberCount) {
+      return cabAtHead(memberCount);
+    }
+
     boolean isLeftDoorOpen();
 
     boolean isRightDoorOpen();
 
-    /** 记录一侧车门开着与否（按开关门的人面朝的方向算左右）。 */
+    /** 记录一侧车门开着与否（左右按 {@link #doorsFromHead} 的朝向算）。 */
     void setDoorOpen(boolean left, boolean open);
 
     /** 关门动画放到这个 tick 才结束。 */
@@ -78,7 +83,7 @@ public final class DriveDoors {
       forget(session);
       group = current;
     }
-    Vector nowFacing = cabFacing(current, session);
+    Vector nowFacing = doorFacing(current, session);
     if (nowFacing != null) {
       facing = nowFacing;
     }
@@ -101,7 +106,10 @@ public final class DriveDoors {
     } else {
       side =
           AutoStationDoorController.resolveManualDoorSide(
-              current, nowFacing, physicalLeft, physicalLeft == session.cabAtHead(current.size()));
+              current,
+              nowFacing,
+              physicalLeft,
+              physicalLeft == session.doorsFromHead(current.size()));
     }
     ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime, cars);
     lastSummary = door.summary();
@@ -134,7 +142,7 @@ public final class DriveDoors {
       forget(session);
       group = current;
     }
-    Vector nowFacing = cabFacing(current, session);
+    Vector nowFacing = doorFacing(current, session);
     if (nowFacing != null) {
       facing = nowFacing;
     }
@@ -147,7 +155,7 @@ public final class DriveDoors {
                 current,
                 nowFacing,
                 physicalLeft,
-                physicalLeft == session.cabAtHead(current.size()));
+                physicalLeft == session.doorsFromHead(current.size()));
     ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime, cars);
     door.markOpenedByStation();
     lastSummary = door.summary();
@@ -167,7 +175,7 @@ public final class DriveDoors {
     if (current != group || facing == null) {
       return;
     }
-    Vector nowFacing = cabFacing(current, session);
+    Vector nowFacing = doorFacing(current, session);
     if (!reversed(facing, nowFacing)) {
       return;
     }
@@ -227,6 +235,25 @@ public final class DriveDoors {
       headward = direction == null ? null : direction.getDirection();
     }
     return facingFrom(headward, session.cabAtHead(size));
+  }
+
+  /** 车门左右用的朝向：按 {@link Cab#doorsFromHead}（驾驶员是所坐驾驶室的朝向，车掌是列车行进方向）。 */
+  public static Vector doorFacing(MinecartGroup group, Cab session) {
+    int size = group.size();
+    return doorFacing(
+        cabFacing(group, session), session.cabAtHead(size), session.doorsFromHead(size));
+  }
+
+  /**
+   * 由所坐驾驶室面朝的方向得到车门左右用的朝向：两者按同一端算时不变，否则反过来。
+   *
+   * @param seatFacing 所坐驾驶室面朝的方向，可为 {@code null}
+   */
+  static Vector doorFacing(Vector seatFacing, boolean cabAtHead, boolean doorsFromHead) {
+    if (seatFacing == null || doorsFromHead == cabAtHead) {
+      return seatFacing;
+    }
+    return seatFacing.clone().multiply(-1.0);
   }
 
   /**

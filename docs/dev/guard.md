@@ -26,6 +26,7 @@
 站台把停站交给车掌：与驾驶员控车时同一个 `DriverStationStop`，经 `ControlAuthority#beginStationStop` 交给车上的 `GuardLink`（`DriverControlRegistry` 里与驾驶员链路并列登记，按列车属性对象，换掉时按车名找回）。
 
 - 自动运行（含 ATO 驾驶员）的车照样由站台对位停车、加等待动作，只把车门交给车掌；人工驾驶的车由驾驶员停车，车门同样归车掌（`driverOperatesDoors` 在有车掌时为假，驾驶员的左右门按钮提示 `drive.menu.deny.guard-doors`，驾驶员会话也不再回报车门）。
+- 中途离开：F 菜单点两次「结束值乘」或 `/fta guard off`（`COMMAND`），已做的站照常结算，领的任务记为放弃；上岗说明、第一次上岗的提示、行驶中或关着门按 Shift 被拦时都告诉车掌怎么结束；不结束就走开、车开走后算漏乘（`LEFT_BEHIND`）。
 - 车掌会话每 tick 按站台推进到的阶段回报车门（关门动画放完前仍算开着），站台按它推进：等开门 → 停站（从开门起算）→ 等关门 → 等发车 → 放行。
 - 等发车那一步依次过三道（`AutoStationSignAction#crewDeparture`）：出站门控、车掌的发车信号（`ControlAuthority#holdForGuard`，门控不放行时也问，车掌据此暂停计时）、ATO 驾驶员的确认发车（车掌放行之后才问）。人工驾驶放出出站许可等驾驶员起步；自动运行的车与自动运行同一放行动作，列车立即开走，停站阶段置为 `DEPART`，车掌会话在列车开出时结束这一站。
 - 停站中途上岗：站台已开着、还没开始关的门交给车掌（`handOverOpenDoors`，与驾驶员中途接管同一套）。
@@ -46,7 +47,7 @@
 
 ## 按钮与铃
 
-- 快捷栏（数据包层改写，背包本身不动）：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃、9 紧急停车；5、8 空着。左右按车掌座位的朝向算（`DriveDoors` 与驾驶员共用，`DriveDoors.Cab`）。开门键对已开着的一侧无效，关门后再开门照样按开门键。选中格子后右键按下，按住右键时客户端连续发包只算一次；发车铃按住多久响多久。
+- 快捷栏（数据包层改写，背包本身不动）：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃、9 紧急停车；5、8 空着。左右按列车行进方向算（与报站、站台屏、驾驶员一致；车掌坐车尾面朝后方，与自己的左右相反）：`DriveDoors` 与驾驶员共用，车掌的 `DriveDoors.Cab#doorsFromHead` 固定按车头端，开门、应开哪一侧、开错门、侧边栏都用 `DriveDoors#doorFacing`；出站监视的车后方向仍按车掌实际面朝的方向（`DriveDoors#cabFacing`）。开门键对已开着的一侧无效，关门后再开门照样按开门键。选中格子后右键按下，按住右键时客户端连续发包只算一次；发车铃按住多久响多久。
 - 贴图键：车门沿用驾驶台的 `fetarute:drive/panel/door_l_*`、`door_r_*`；其余是 `fetarute:drive/guard/<键>`（`door_close[_on]`、`report[_used]`、`confirm_stop|go|done`、`buzzer[_on]`、`emergency[_on]`、菜单的 `seat`），结束值乘沿用 `panel/end|end_confirm`。没装材质包时按染料区分，“亮起”加附魔光效。
 - simulation 级人工驾驶的驾驶员收到发车信号后，要在 `ack-seconds`（默认 5）秒内按丢弃键回一短表示收到（`PendingAcks`，期限另留出认出一短要等的时间；等的期间转成 ATO 的不记），提示写在发车信号那一行（`drive.guard.driver.signal-ack`）；到时没回记一次漏确认（与漏确认信号同一项，扣 5 分）。车掌离岗时不再等。
 - 铃（`BuzzerPress`）：按住约 0.8 秒（`buzzer-long-ticks`）为一长；一短之后 1 秒（`buzzer-double-ticks`）内再按一下为呼叫。车掌一长＝发车信号；一短＝收到；两短＝呼叫驾驶员。驾驶员的铃是丢弃键（Q，驾驶中本来不用）：一短收到、两短呼叫车掌。铃声（`sounds.buzzer`）只给这列车上的驾驶员与车掌听。
@@ -55,7 +56,7 @@
 
 ## 紧急停车与监视
 
-- 紧急停车（快捷栏 9 号，车掌阀）：只在列车行驶中有效（停着时不按发车铃列车就不会开）。人工驾驶的车把驾驶员的手柄拨到 EB（等同驾驶员自己拉 EB，不记防护介入、不扣驾驶员的分），由驾驶员停稳后缓解；自动运行（含 ATO）的车立即停住并扣着：扣着期间 `DriverControlRegistry#isDriverControlled` 为真，调度不替它起步、健康层不当它停滞，车掌停稳后按住发车铃一长声解除（`drive.guard.emergency.released`），或扣满 `emergency-hold-seconds`（默认 120）自动解除，解除时立即重算一次信号。车掌离岗时扣着的一并解除。驾驶员动作栏同时提示。
+- 紧急停车（快捷栏 9 号，车掌阀）：只在列车行驶中有效（停着时不按发车铃列车就不会开）。人工驾驶的车把驾驶员的手柄拨到 EB（等同驾驶员自己拉 EB，不记防护介入、不扣驾驶员的分），由驾驶员停稳后缓解；自动运行（含 ATO）的车按紧急制动减速度刹停（`GuardEmergencyBrakeAction`，与驾驶员拨到 EB 同一口径：车种减速度 × `emergency-multiplier`）并扣着：扣着期间 `DriverControlRegistry#isDriverControlled` 为真，调度不替它起步、健康层不当它停滞，车掌停稳后按住发车铃一长声解除（`drive.guard.emergency.released`），或扣满 `emergency-hold-seconds`（默认 120）自动解除，解除时立即重算一次信号。车掌离岗时扣着的一并解除。驾驶员动作栏同时提示。
 - 关门监视：关门动画放着时每 5 tick 采样一次（`GuardWatch#closingWatch`）：不在车上、离自己那节车厢不超过 `watch-radius-blocks`、视线水平方向与车身夹角不超过 `watch-angle-degrees`（朝车头或车尾都行）。合格的采样不少于 `watch-ratio` 算合格；动画放完时侧边栏的提示行告知结果，不合格也发到聊天框。
 - 出站监视：车掌放行、列车开出这一站时开始，到车头走过“车长 + `departure-watch-extra-blocks`”（直线距离）或 `departure-watch-max-seconds` 为止，每 5 tick 采样一次（`GuardWatch#departureWatch`）：坐在车掌座位上，视线朝站台一侧或朝车后（车掌驾驶室面朝的方向），夹角不超过 60°。结束时告知结果。
 - 两种监视的结果记在这一站的 `GuardStopWork` 里，供成绩使用。
@@ -66,7 +67,7 @@
 - 放行前已知下一趟由车掌这一端发车：聊天栏告知换到另一头（`drive.guard.cab-change.announce`），不计时。派车放行、列车调头后车掌预留的座位不在车尾端：在换端时间预留（与驾驶员相同，`driver.cab-change` 段按车长算）内坐进车尾端驾驶室；超时、或人工驾驶的驾驶员先开了车，直接送进去，送不了值乘结束（`CAB_CHANGE`）。
 - 换端途中车门关着也可以下车；在站台上右键要换到的那一端的车厢入座。菜单“传送入座”或 `/fta guard seat` 直接送过去（时间够时可选）。
 - 一起传送：驾驶员被直接送进发车端（准备时间不足、换端超时、点了直接换端）时，车掌一起送进另一头（`GuardSessionManager#moveWithDriver`）；车掌被直接送过去时，驾驶员也在换端就一起送（`DriverSide#moveWithGuard`）。同一拍里先请坐在对方要去那一端的人下车，再分别入座，两人不会抢同一个座位。
-- 座位预留：车掌值乘期间，别人（乘客、驾驶员）坐不进车掌预留的座位（TrainCarts `MemberBeforeSeatEnterEvent`，`GuardSessionManager#blocksSeat`）；换端时预留只让给这列车的驾驶员（乘客照样坐不进），坐进另一头后预留改到新座位。左右车门的记录随车掌面朝的方向对调（`DriveDoors#followCab`）。
+- 座位预留：车掌值乘期间，别人（乘客、驾驶员）坐不进车掌预留的座位（TrainCarts `MemberBeforeSeatEnterEvent`，`GuardSessionManager#blocksSeat`）；换端时预留只让给这列车的驾驶员（乘客照样坐不进），坐进另一头后预留改到新座位。左右车门的记录按行进方向记，车掌换端不对调；开着门时列车调头（行进方向反了）才对调（`DriveDoors#followCab`）。
 - 正线原地折返（没经过待命的调头）：开始换端时列车还停着，同样扣住（撤掉调头后排上的发车动作），车掌坐进车尾端后重算信号发车；已经开动了才开始换端的直接送进去。
 - 换端扣车：车上没有人工驾驶的驾驶员（只有车掌，或 ATO 驾驶员）时，从终点站待命起扣着列车（`GuardLink#cabHold`，按驾驶员控制处理）；派车放行时只调头、不发车（只有车掌时由 `GuardLink#takeTurnback` 取走调头标记），车掌坐进车尾端（或不必换）后解除并重算信号，交回自动运行发车。人工驾驶由驾驶员自己起步，驾驶员动作栏提示车掌换端与就位。
 

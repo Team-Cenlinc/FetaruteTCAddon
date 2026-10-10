@@ -2455,10 +2455,10 @@ drive:
     tip: "<prefix> <aqua>车掌提示</aqua> <text>"
     tips:
       on-duty:
-        chat: "<white>值乘提示：</white><gray>每一步要做的事都写在右侧侧边栏的“作业”一行（右键哪一格、还剩几秒），按钮的结果显示在最上面的“提示”一行；快捷栏选中后右键使用，F 打开车掌菜单。</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>领取《FTCA 车掌手册》</gray>'><aqua>[车掌手册]</aqua></hover></click>"
+        chat: "<white>值乘提示：</white><gray>每一步要做的事都写在右侧侧边栏的“作业”一行（右键哪一格、还剩几秒），按钮的结果显示在最上面的“提示”一行；快捷栏选中后右键使用，F 打开车掌菜单。中途要离开时，在 F 菜单点两次「结束值乘」或输入 /fta guard off：已做的站照常结算，领的任务记为放弃；不结束就走开会算漏乘。</gray> <click:run_command:'/fta handbook guard'><hover:show_text:'<gray>领取《FTCA 车掌手册》</gray>'><aqua>[车掌手册]</aqua></hover></click>"
         subtitle: "<aqua>作业提示见右侧侧边栏</aqua>"
       open-doors:
-        chat: "<white>开门：</white><gray>列车已停妥。侧边栏“车站”一行写本站开哪一侧，左右以你面朝的方向为准：第 1 格右键开左侧门，第 2 格右键开右侧门。开门后可按 Shift 下车到站台。</gray>"
+        chat: "<white>开门：</white><gray>列车已停妥。侧边栏“车站”一行写本站开哪一侧，左右以列车行进方向为准（车掌坐在车尾面朝后方，与自己的左右相反）：第 1 格右键开左侧门，第 2 格右键开右侧门。开门后可按 Shift 下车到站台。</gray>"
         subtitle: "<yellow>看侧边栏开哪一侧，右键第 1 或第 2 格开门</yellow>"
       close-doors:
         chat: "<white>关门与关门监视：</white><gray>停站时间已到。请站在站台上、靠近自己那节车门，第 3 格右键关门，并注视车门直到关好；关门监视计入成绩。</gray>"
@@ -2482,8 +2482,8 @@ drive:
         chat: "<white>终点换端：</white><gray>下一趟由另一端发车，请换到侧边栏“换端”一行写的那一节车掌座位；时间不够时会直接送过去，驾驶员换端时两人一同换座。</gray>"
         subtitle: "<yellow>换到另一端的车掌座位</yellow>"
     seat-exit:
-      moving: "<prefix> <red>行驶中不能下车</red>"
-      doors-closed: "<red>车门开着时才能下车监视</red>"
+      moving: "<prefix> <red>行驶中不能下车</red> <gray>要结束值乘，请在 F 菜单点两次「结束值乘」或输入 /fta guard off</gray>"
+      doors-closed: "<red>车门开着时才能下车监视；结束值乘请用 F 菜单</red>"
     command:
       player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
       not-on-duty: "<prefix> <red>你当前没有在值乘</red>"
@@ -2498,7 +2498,7 @@ drive:
         tasks: "<yellow>/fta guard tasks [车站]</yellow> <gray>打开车掌任务板，领取一班车掌</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>查看、放弃车掌任务或前往上岗</gray>"
       start:
-        started: "<prefix> <green>已上岗当车掌</green> <gray>快捷栏选中后右键：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃（按住右键约一秒）、9 紧急停车；F 打开车掌菜单；作业提示见侧边栏</gray>"
+        started: "<prefix> <green>已上岗当车掌</green> <gray>快捷栏选中后右键：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃（按住右键约一秒）、9 紧急停车；F 打开车掌菜单；作业提示见侧边栏。中途结束值乘：F 菜单点两次「结束值乘」，或输入 /fta guard off</gray>"
         disabled: "<prefix> <red>车掌功能已关闭</red>"
         unavailable: "<prefix> <red>车掌功能当前不可用，请查看控制台日志</red>"
         already-on-duty: "<prefix> <yellow>你已经在值乘中</yellow>"
@@ -2850,7 +2850,7 @@ drive:
           drill: "在 <station> 未按时处置夹人夹物"
         tip:
           timeout: "<prefix> <gray>要领：停妥后尽快开站台一侧的车门，停站时间到即关门；门全关后回座，出站信号开放时在第 6 格右键确认，再在第 7 格按住右键约一秒。侧边栏随时显示下一步与剩余秒数。</gray>"
-          wrong-door: "<prefix> <gray>要领：开门前看侧边栏“车站”一行的开门方向，左右以你面朝的方向为准。</gray>"
+          wrong-door: "<prefix> <gray>要领：开门前看侧边栏“车站”一行的开门方向，左右以列车行进方向为准，与报站一致；车掌面朝后方，与自己的左右相反。</gray>"
           points: "<prefix> <gray>要领：关门时到站台上注视车门；起步后朝站台一侧或车后看，直到车尾离开站台；停站时间未到不要关门。</gray>"
           timeouts: "<prefix> <gray>要领：每一步都有时限，超时由站台代做；遇夹人夹物等情况可按异常报告延长时限。</gray>"
           left-behind: "<prefix> <gray>要领：关门后及时回到车掌座位，发车信号发出前不要离开列车。</gray>"
@@ -3104,7 +3104,7 @@ drive:
       given: "<prefix> <green>《FTCA 车掌手册》已放进背包</green>"
       page-1: "<dark_blue><bold>FTCA 车掌手册</bold></dark_blue>\n\n<black>一、上岗与座位\n二、站停作业\n三、关门与监视\n四、发车铃与紧急停车\n五、终点与成绩\n六、练习与考试</black>"
       page-2: "<dark_blue><bold>一、上岗与座位</bold></dark_blue>\n<black>坐进调度列车车尾的驾驶室，输入 /fta guard on 上岗（单节车坐另一头）；也可在车站输入 /fta guard tasks 领一班车掌，车到站后坐进车尾即上岗。车掌座位为你预留，他人不能坐。快捷栏换成车掌按钮，选中后右键使用，F 打开车掌菜单；/fta guard off 结束值乘。</black>"
-      page-3: "<dark_blue><bold>二、站停作业</bold></dark_blue>\n<black>停妥后右键开门格开站台一侧的车门（1 左、2 右，以你面朝的方向为准），随后可下车到站台。停站时间到后右键 3 关门。开门限 30 秒、关门限 15 秒，超时由站台代做；连续 3 站超时，值乘结束。夹人夹物等情况右键 4 报告，时限延长 30 秒。</black>"
+      page-3: "<dark_blue><bold>二、站停作业</bold></dark_blue>\n<black>停妥后右键开门格开站台一侧的车门（1 左、2 右，以列车行进方向为准），随后可下车到站台。停站时间到后右键 3 关门。开门限 30 秒、关门限 15 秒，超时由站台代做；连续 3 站超时，值乘结束。夹人夹物等情况右键 4 报告，时限延长 30 秒。</black>"
       page-4: "<dark_blue><bold>三、关门与监视</bold></dark_blue>\n<black>关门时站在站台上、靠近自己那节车门，视线沿车身注视车门，直到车门关好。门全关后回到车掌座位。列车起步后朝站台一侧或车后看，直到车尾离开站台。两项监视计入成绩。</black>"
       page-5: "<dark_blue><bold>四、发车铃与紧急停车</bold></dark_blue>\n<black>回座后，出站信号开放时右键 6 确认，再在 7 上按住右键约一秒（一长声）发出发车信号；一短为收到，一秒内右键两下为呼叫驾驶员。出站信号未开放时不计时。遇危险右键 9 紧急停车，停稳后再发一长声解除。</black>"
       page-6: "<dark_blue><bold>五、终点与成绩</bold></dark_blue>\n<black>终点站折返时换到另一头的驾驶室；驾驶员换端时两人一同换座，时间不足时直接送入。每站作业计分：超时、开错门各扣 5 分，提前关门、监视不合格各扣 2 分；异常报告不扣分。</black>"

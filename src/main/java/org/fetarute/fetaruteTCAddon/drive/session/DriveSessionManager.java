@@ -637,6 +637,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
+      public double emergencyDecelBps2(MinecartGroup group) {
+        DriveConfig current = config;
+        return resolveParams(group, current).decelBps2() * current.emergencyMultiplier();
+      }
+
+      @Override
       public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.Outlook>
           driverOutlook(MinecartGroup group) {
         return driverSessionOfTrain(group.getProperties().getTrainName())

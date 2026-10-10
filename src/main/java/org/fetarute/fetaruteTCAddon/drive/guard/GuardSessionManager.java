@@ -107,6 +107,9 @@ public final class GuardSessionManager {
      */
     boolean emergencyByGuard(String trainName);
 
+    /** 这列车的紧急制动减速度（格/秒²），与驾驶员拨到 EB 时同一口径：车种减速度乘紧急制动倍数。 */
+    double emergencyDecelBps2(MinecartGroup group);
+
     /** 这列车有驾驶员（人工或 ATO）时车掌换端看的发车端（见 {@link GuardCabChange#fromDriver}）；没有驾驶员时为空。 */
     Optional<GuardCabChange.Outlook> driverOutlook(MinecartGroup group);
 
@@ -652,7 +655,7 @@ public final class GuardSessionManager {
       stop(session.playerId(), GuardSession.EndReason.LEFT_BEHIND);
       return;
     }
-    // 开着门换到另一端：预留座位改了，车掌面朝的方向反了，左右车门的记录跟着对调（TrainCarts 晚一拍才让人坐下也照样对调）。
+    // 车门左右按列车行进方向算：开着门时列车调头（行进方向反了），左右车门的记录跟着对调；车掌自己换端不影响。
     session.doors().followCab(group, session);
     stationWork(player, session, group, seated, now);
     if (!sessions.containsKey(session.playerId())) {
@@ -710,7 +713,7 @@ public final class GuardSessionManager {
       if (stop.takeHandedOverDoors()) {
         adoptStationDoors(session, group, stop);
       }
-      DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.cabFacing(group, session));
+      DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.doorFacing(group, session));
       boolean left = session.isLeftDoorOpen();
       boolean right = session.isRightDoorOpen();
       boolean closing = session.doorsClosing(now);
@@ -822,7 +825,7 @@ public final class GuardSessionManager {
   /** 站台开着的车门交给车掌（停站中途上岗）：站台侧记成开着，之后按这一侧关门。 */
   private void adoptStationDoors(
       GuardSession session, MinecartGroup group, DriverStationStop stop) {
-    DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.cabFacing(group, session));
+    DriverDoorSide side = DriverDoorSide.required(stop, DriveDoors.doorFacing(group, session));
     ConfigManager.AutoStationSettings settings = chime.get();
     if (side == DriverDoorSide.LEFT || side == DriverDoorSide.BOTH || side == DriverDoorSide.ANY) {
       session.doors().adoptOpen(group, session, true, settings, stop.doorCars());
@@ -1231,8 +1234,11 @@ public final class GuardSessionManager {
       session
           .link()
           .latchEmergency(Bukkit.getCurrentTick() + config.get().guard().emergencyHoldTicks());
+      // 自动运行（含 ATO）的车：按紧急制动减速度刹停，不是当拍停住；停稳后由紧急停车扣着。
       group.getActions().clear();
-      group.stop();
+      group
+          .getActions()
+          .addAction(new GuardEmergencyBrakeAction(drivers.emergencyDecelBps2(group)));
     }
     sounds.play(player, DriveCue.EMERGENCY);
     alert(player, session, "drive.guard.emergency.pulled", Map.of());
@@ -2187,7 +2193,7 @@ public final class GuardSessionManager {
                                     current.stationName(),
                                     current.phase(),
                                     DriverDoorSide.required(
-                                        current, DriveDoors.cabFacing(group, session)),
+                                        current, DriveDoors.doorFacing(group, session)),
                                     session.isLeftDoorOpen(),
                                     session.isRightDoorOpen(),
                                     session.doorsClosing(now),

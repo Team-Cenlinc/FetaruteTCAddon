@@ -279,6 +279,12 @@ public final class GuardSession implements DriveDoors.Cab {
     return memberCount > 1 && binding.cabSign(memberCount) > 0;
   }
 
+  /** 车掌的车门左右按列车行进方向（车头端）算，与报站、站台屏、驾驶员一致，不按车掌坐在车尾面朝后方的方向。 */
+  @Override
+  public boolean doorsFromHead(int memberCount) {
+    return true;
+  }
+
   @Override
   public boolean isLeftDoorOpen() {
     return leftDoorOpen;

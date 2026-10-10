@@ -63,8 +63,8 @@ public final class GuardHotbar {
   /**
    * 按钮此刻的样子。
    *
-   * @param leftOpen 车掌左手边的门开着
-   * @param rightOpen 车掌右手边的门开着
+   * @param leftOpen 行进方向左侧的门开着
+   * @param rightOpen 行进方向右侧的门开着
    * @param closing 关门动画在放
    * @param reportUsed 本站报告次数已用完
    * @param confirm 出发确认按钮

@@ -56,9 +56,9 @@ public final class GuardDisplay {
    *
    * @param station 站名
    * @param phase 站台推进到的阶段
-   * @param required 应开哪一侧（按车掌面朝的方向）
-   * @param leftOpen 车掌左手边的门开着
-   * @param rightOpen 车掌右手边的门开着
+   * @param required 应开哪一侧（按列车行进方向）
+   * @param leftOpen 行进方向左侧的门开着
+   * @param rightOpen 行进方向右侧的门开着
    * @param closing 关门动画在放
    * @param remainingTicks 当前这一步还剩多少 tick；不计时为 -1
    * @param exitOpen 站台上次问时出站是否放行
