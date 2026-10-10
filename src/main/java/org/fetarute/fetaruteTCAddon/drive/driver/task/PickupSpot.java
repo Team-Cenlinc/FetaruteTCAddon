@@ -44,16 +44,11 @@ public final class PickupSpot {
       return Optional.empty();
     }
     Vector[] sides = sides(travel);
-    int baseY = (int) Math.floor(head.getY());
     for (double distance : SIDE_BLOCKS) {
       for (Vector side : sides) {
-        int x = (int) Math.floor(head.getX() + side.getX() * distance);
-        int z = (int) Math.floor(head.getZ() + side.getZ() * distance);
-        for (int dy : HEIGHT_OFFSETS) {
-          int y = baseY + dy;
-          if (standable.test(x, y, z)) {
-            return Optional.of(new Vector(x + 0.5, y, z + 0.5));
-          }
+        Optional<Vector> spot = spotAt(head, side, distance, standable);
+        if (spot.isPresent()) {
+          return spot;
         }
       }
     }
@@ -76,15 +71,25 @@ public final class PickupSpot {
       return Optional.empty();
     }
     Vector unit = new Vector(side.getX() / length, 0.0, side.getZ() / length);
-    int baseY = (int) Math.floor(car.getY());
     for (double distance : SIDE_BLOCKS) {
-      int x = (int) Math.floor(car.getX() + unit.getX() * distance);
-      int z = (int) Math.floor(car.getZ() + unit.getZ() * distance);
-      for (int dy : HEIGHT_OFFSETS) {
-        int y = baseY + dy;
-        if (standable.test(x, y, z)) {
-          return Optional.of(new Vector(x + 0.5, y, z + 0.5));
-        }
+      Optional<Vector> spot = spotAt(car, unit, distance, standable);
+      if (spot.isPresent()) {
+        return spot;
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 从 {@code from} 沿水平单位向量 {@code unit} 走 {@code distance} 格处，高度上下各试一格。 */
+  private static Optional<Vector> spotAt(
+      Vector from, Vector unit, double distance, Standable standable) {
+    int x = (int) Math.floor(from.getX() + unit.getX() * distance);
+    int z = (int) Math.floor(from.getZ() + unit.getZ() * distance);
+    int baseY = (int) Math.floor(from.getY());
+    for (int dy : HEIGHT_OFFSETS) {
+      int y = baseY + dy;
+      if (standable.test(x, y, z)) {
+        return Optional.of(new Vector(x + 0.5, y, z + 0.5));
       }
     }
     return Optional.empty();

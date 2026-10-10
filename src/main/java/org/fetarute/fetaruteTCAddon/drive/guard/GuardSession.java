@@ -69,6 +69,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private boolean sidebarDirty;
   private boolean signalAnnounced;
   private boolean returnOffered;
+  private long platformPlacementTick = Long.MIN_VALUE;
   private boolean forcedSignalHandled;
   private boolean sneakHeld;
   private com.bergerkiller.bukkit.tc.controller.MinecartGroup lastGroup;
@@ -414,6 +415,15 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setReturnOffered(boolean returnOffered) {
     this.returnOffered = returnOffered;
+  }
+
+  /** 最近一次安排“送到开门车厢旁的站台”是在哪一 tick（同一拍不重复安排）。 */
+  public long platformPlacementTick() {
+    return platformPlacementTick;
+  }
+
+  public void setPlatformPlacementTick(long tick) {
+    this.platformPlacementTick = tick;
   }
 
   /** 这一站的发车信号已经告诉过驾驶员。 */

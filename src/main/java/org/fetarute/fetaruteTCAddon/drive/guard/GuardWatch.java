@@ -14,7 +14,7 @@ final class GuardWatch {
    * 关门监视：车掌下到了站台（不在车上）、离自己那节车厢够近、视线沿着车身（朝车头或车尾都行）。
    *
    * @param onTrain 车掌此刻坐在车上
-   * @param distance 车掌离自己那节车厢的距离（格）
+   * @param distance 车掌离自己那节车厢的距离（格）；本站自己那节不开门时，量到下车时被送到的那节开门车厢
    * @param radius 最远几格
    * @param look 车掌的视线方向
    * @param axis 车身方向（不分正反）

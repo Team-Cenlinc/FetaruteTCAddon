@@ -1221,7 +1221,10 @@ public final class GuardSessionManager {
   /** 监视每隔这么多 tick 采样一次。 */
   private static final long WATCH_SAMPLE_TICKS = 5L;
 
-  /** 紧急停车（车掌阀）：人工驾驶的车按调度要求紧急制动处理，由驾驶员停稳后缓解；自动运行（含 ATO）的车立即停住并扣着，车掌停稳后按住发车铃一长声或到时限才解除。 */
+  /**
+   * 紧急停车（车掌阀）：人工驾驶的车按调度要求紧急制动处理，由驾驶员停稳后缓解；自动运行（含
+   * ATO）的车按紧急制动减速度刹停并扣着（返回时列车多半还在动），车掌停稳后按住发车铃一长声或到时限才解除。
+   */
   private void emergency(Player player, GuardSession session, MinecartGroup group) {
     if (session.link().emergencyHold()) {
       notice(session, "drive.guard.emergency.already", Map.of());
@@ -1296,7 +1299,8 @@ public final class GuardSessionManager {
 
   private boolean closingWatching(
       Player player, GuardSession session, MinecartGroup group, boolean seated) {
-    int index = session.binding().memberIndex();
+    // 自己那节本站不开门（停车位置标只开部分车厢）时，看的是下车时被送到的那节开门车厢。
+    int index = watchCar(session, group, session.link().stationStop());
     if (index < 0 || index >= group.size()) {
       return false;
     }
@@ -2068,15 +2072,14 @@ public final class GuardSessionManager {
     return true;
   }
 
-  /** 下车监视时车掌那节车厢不开门（停车位置标只开部分车厢，车尾可能在站台外）：下一拍把车掌送到最近一节开门车厢旁的站台上， 免得落到没有站台的地方。先找站台那一侧，找不到再两侧都试。 */
-  private void placeOnPlatformLater(Player player, GuardSession session, MinecartGroup group) {
-    Optional<DriverStationStop> stop = session.link().stationStop();
-    if (stop.isEmpty() || stop.get().doorCars().all()) {
-      return;
-    }
+  /** 车掌下车监视看的那节车厢：本站自己那节开门（或全列开门、不在停站）时就是自己那节；停车位置标只开部分车厢、自己那节不开时， 是离自己最近的一节开门车厢。 */
+  private static int watchCar(
+      GuardSession session, MinecartGroup group, Optional<DriverStationStop> stop) {
     int own = session.binding().memberIndex();
-    org.bukkit.Location car = null;
-    int nearestIndex = -1;
+    if (stop.isEmpty() || stop.get().doorCars().all()) {
+      return own;
+    }
+    int nearest = -1;
     int nearestGap = Integer.MAX_VALUE;
     int index = 0;
     for (MinecartMember<?> member : group) {
@@ -2086,36 +2089,51 @@ public final class GuardSessionManager {
         continue;
       }
       if (i == own) {
-        // 自己这节就开门：照常从这节下车。
-        return;
+        return own;
       }
       int gap = Math.abs(i - own);
       if (gap < nearestGap) {
         nearestGap = gap;
-        nearestIndex = i;
-        car = member.getEntity().getLocation();
+        nearest = i;
       }
     }
-    if (car == null) {
+    return nearest < 0 ? own : nearest;
+  }
+
+  /**
+   * 下车监视时车掌那节车厢不开门（停车位置标只开部分车厢，车尾可能在站台外）：下一拍把车掌送到最近一节开门车厢旁的站台上，
+   * 免得落到没有站台的地方。站台在哪一侧已知时只找那一侧（找不到就不送，免得落到邻线轨道上）， 不知道时两侧都试。同一拍只安排一次（TrainCarts 的离座事件与原版下车事件都会问到这里）。
+   */
+  private void placeOnPlatformLater(Player player, GuardSession session, MinecartGroup group) {
+    long nowTick = Bukkit.getCurrentTick();
+    if (session.platformPlacementTick() == nowTick) {
       return;
     }
+    Optional<DriverStationStop> stop = session.link().stationStop();
+    int own = session.binding().memberIndex();
+    int index = watchCar(session, group, stop);
+    if (stop.isEmpty() || index == own || index < 0 || index >= group.size()) {
+      return;
+    }
+    org.bukkit.Location car = group.get(index).getEntity().getLocation();
     org.bukkit.World world = car.getWorld();
     if (world == null) {
       return;
     }
-    org.bukkit.util.Vector platformSide =
-        stop.get().platformFace().map(org.bukkit.block.BlockFace::getDirection).orElse(null);
     Optional<org.bukkit.util.Vector> spot =
-        PickupSpot.findOnSide(car.toVector(), platformSide, PickupSpot.standable(world));
-    if (spot.isEmpty()) {
-      spot =
-          PickupSpot.find(car.toVector(), StopAlignment.travel(group), PickupSpot.standable(world));
-    }
+        stop.get().platformFace().isPresent()
+            ? PickupSpot.findOnSide(
+                car.toVector(),
+                stop.get().platformFace().get().getDirection(),
+                PickupSpot.standable(world))
+            : PickupSpot.find(
+                car.toVector(), StopAlignment.travel(group), PickupSpot.standable(world));
     if (spot.isEmpty()) {
       return;
     }
+    session.setPlatformPlacementTick(nowTick);
     org.bukkit.util.Vector at = spot.get();
-    int carNumber = nearestIndex + 1;
+    int carNumber = index + 1;
     Bukkit.getScheduler()
         .runTask(
             plugin,
@@ -2143,7 +2161,8 @@ public final class GuardSessionManager {
 
   /** 车门已关好、车掌还没回座：每站在聊天栏发一次带“传送回座位”按钮的提示。 */
   private void offerReturnSeat(Player player, GuardSession session, boolean seated) {
-    if (seated || session.returnOffered()) {
+    // 终点换端途中要去的是另一端，侧边栏“换端”一行另有提示。
+    if (seated || session.returnOffered() || session.cabChange().changing()) {
       return;
     }
     boolean waiting =

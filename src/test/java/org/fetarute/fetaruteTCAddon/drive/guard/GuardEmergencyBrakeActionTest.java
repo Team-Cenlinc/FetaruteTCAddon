@@ -20,4 +20,11 @@ class GuardEmergencyBrakeActionTest {
     assertEquals(19.9, GuardEmergencyBrakeAction.nextSpeed(20.0, 2.0), 1e-9);
     assertEquals(0.0, GuardEmergencyBrakeAction.nextSpeed(0.05, 2.0), "不会减成负数");
   }
+
+  @Test
+  void neverSpeedsBackUp() {
+    assertEquals(12.0, GuardEmergencyBrakeAction.brakingFrom(-1.0, 12.0), "第一 tick 取实际车速");
+    assertEquals(0.0, GuardEmergencyBrakeAction.brakingFrom(15.0, 0.0), "被调度硬停车后不再推起来");
+    assertEquals(9.0, GuardEmergencyBrakeAction.brakingFrom(9.0, 9.4), "实际略快时仍按算出的车速");
+  }
 }

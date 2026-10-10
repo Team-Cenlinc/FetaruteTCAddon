@@ -52,12 +52,12 @@
 - simulation 级人工驾驶的驾驶员收到发车信号后，要在 `ack-seconds`（默认 5）秒内按丢弃键回一短表示收到（`PendingAcks`，期限另留出认出一短要等的时间；等的期间转成 ATO 的不记），提示写在发车信号那一行（`drive.guard.driver.signal-ack`）；到时没回记一次漏确认（与漏确认信号同一项，扣 5 分）。车掌离岗时不再等。
 - 铃（`BuzzerPress`）：按住约 0.8 秒（`buzzer-long-ticks`）为一长；一短之后 1 秒（`buzzer-double-ticks`）内再按一下为呼叫。车掌一长＝发车信号；一短＝收到；两短＝呼叫驾驶员。驾驶员的铃是丢弃键（Q，驾驶中本来不用）：一短收到、两短呼叫车掌。铃声（`sounds.buzzer`）只给这列车上的驾驶员与车掌听。
 - 车掌菜单（F，27 格）：传送入座、呼叫驾驶员、异常报告、结束值乘。
-- 离座：停稳且车门开着时 Shift 才放行（下到站台监视），行驶中、车门关着时拦下；在站台上右键自己的列车回到车掌座位。停车位置标只开部分车厢的车门、车掌那节不开时，下车后的下一拍送到最近一节开门车厢旁的站台上（先找站台那一侧，`PickupSpot#findOnSide`；找不到再两侧都试），免得落到站台外；车门全关、还没回座时每站在聊天栏发一次带“传送回座位”按钮的提示（`drive.guard.return-seat-offer`，即 `/fta guard seat`）。列车开走时车掌不在车上、离每节车厢都超过 48 格：漏乘，值乘结束（`LEFT_BEHIND`）。
+- 离座：停稳且车门开着时 Shift 才放行（下到站台监视），行驶中、车门关着时拦下；在站台上右键自己的列车回到车掌座位。停车位置标只开部分车厢的车门、车掌那节不开时，下车后的下一拍送到最近一节开门车厢旁的站台上（站台在哪一侧已知时只找那一侧，`PickupSpot#findOnSide`，找不到就不送，免得落到邻线轨道上；不知道时两侧都试；TrainCarts 离座事件与原版下车事件都会问到，同一拍只安排一次），免得落到站台外；车门全关、还没回座时每站在聊天栏发一次带“传送回座位”按钮的提示（`drive.guard.return-seat-offer`，即 `/fta guard seat`）。列车开走时车掌不在车上、离每节车厢都超过 48 格：漏乘，值乘结束（`LEFT_BEHIND`）。
 
 ## 紧急停车与监视
 
-- 紧急停车（快捷栏 9 号，车掌阀）：只在列车行驶中有效（停着时不按发车铃列车就不会开）。人工驾驶的车把驾驶员的手柄拨到 EB（等同驾驶员自己拉 EB，不记防护介入、不扣驾驶员的分），由驾驶员停稳后缓解；自动运行（含 ATO）的车按紧急制动减速度刹停（`GuardEmergencyBrakeAction`，与驾驶员拨到 EB 同一口径：车种减速度 × `emergency-multiplier`）并扣着：扣着期间 `DriverControlRegistry#isDriverControlled` 为真，调度不替它起步、健康层不当它停滞，车掌停稳后按住发车铃一长声解除（`drive.guard.emergency.released`），或扣满 `emergency-hold-seconds`（默认 120）自动解除，解除时立即重算一次信号。车掌离岗时扣着的一并解除。驾驶员动作栏同时提示。
-- 关门监视：关门动画放着时每 5 tick 采样一次（`GuardWatch#closingWatch`）：不在车上、离自己那节车厢不超过 `watch-radius-blocks`、视线水平方向与车身夹角不超过 `watch-angle-degrees`（朝车头或车尾都行）。合格的采样不少于 `watch-ratio` 算合格；动画放完时侧边栏的提示行告知结果，不合格也发到聊天框。
+- 紧急停车（快捷栏 9 号，车掌阀）：只在列车行驶中有效（停着时不按发车铃列车就不会开）。人工驾驶的车把驾驶员的手柄拨到 EB（等同驾驶员自己拉 EB，不记防护介入、不扣驾驶员的分），由驾驶员停稳后缓解；自动运行（含 ATO）的车按紧急制动减速度刹停（`GuardEmergencyBrakeAction`，与驾驶员拨到 EB 同一口径：车种减速度 × `emergency-multiplier`；车速只降不升，每 tick 先取实际车速与算出的车速中较小的一个，调度的硬停车只归零车速、不清动作队列，也不会被推回去）并扣着：扣着期间 `DriverControlRegistry#isDriverControlled` 为真，调度不替它起步、健康层不当它停滞，车掌停稳后按住发车铃一长声解除（`drive.guard.emergency.released`），或扣满 `emergency-hold-seconds`（默认 120）自动解除，解除时立即重算一次信号。车掌离岗时扣着的一并解除。驾驶员动作栏同时提示。
+- 关门监视：关门动画放着时每 5 tick 采样一次（`GuardWatch#closingWatch`）：不在车上、离自己那节车厢（本站自己那节不开门时，量到最近一节开门车厢，即下车时被送到的那节，`GuardSessionManager#watchCar`）不超过 `watch-radius-blocks`、视线水平方向与车身夹角不超过 `watch-angle-degrees`（朝车头或车尾都行）。合格的采样不少于 `watch-ratio` 算合格；动画放完时侧边栏的提示行告知结果，不合格也发到聊天框。
 - 出站监视：车掌放行、列车开出这一站时开始，到车头走过“车长 + `departure-watch-extra-blocks`”（直线距离）或 `departure-watch-max-seconds` 为止，每 5 tick 采样一次（`GuardWatch#departureWatch`）：坐在车掌座位上，视线朝站台一侧或朝车后（车掌驾驶室面朝的方向），夹角不超过 60°。结束时告知结果。
 - 两种监视的结果记在这一站的 `GuardStopWork` 里，供成绩使用。
 
