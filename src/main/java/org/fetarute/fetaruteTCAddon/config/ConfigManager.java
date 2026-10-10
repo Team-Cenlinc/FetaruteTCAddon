@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 38;
+  private static final int EXPECTED_CONFIG_VERSION = 41;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -117,6 +117,7 @@ public final class ConfigManager {
 
   private static final double DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD = 0.58D;
   private static final double DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD = 0.48D;
+  private static final int DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES = 15;
   private final FetaruteTCAddon plugin;
   private final java.util.logging.Logger logger;
   private ConfigView current;
@@ -177,6 +178,8 @@ public final class ConfigManager {
     SmartDispatcherSettings smartDispatcherSettings = parseSmartDispatcher(config, logger);
     ConfigurationSection timetableSection = config.getConfigurationSection("timetable");
     TimetableSettings timetableSettings = parseTimetable(timetableSection, logger);
+    ConfigurationSection callSection = config.getConfigurationSection("call");
+    CallSettings callSettings = parseCall(callSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -190,7 +193,27 @@ public final class ConfigManager {
         reclaimSettings,
         smartDispatcherSettings,
         healthSettings,
-        timetableSettings);
+        timetableSettings,
+        callSettings);
+  }
+
+  /** 解析叫车配置段；缺段或取值无效时用默认值。 */
+  private static CallSettings parseCall(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    CallSettings defaults = CallSettings.defaults();
+    if (section == null) {
+      return defaults;
+    }
+    return new CallSettings(
+        readNonNegativeInt(section, "min-wait-minutes", defaults.minWaitMinutes(), "call", logger),
+        readNonNegativeInt(section, "cooldown-seconds", defaults.cooldownSeconds(), "call", logger),
+        readNonNegativeInt(
+            section, "terminal-wait-seconds", defaults.terminalWaitSeconds(), "call", logger),
+        readNonNegativeInt(
+            section, "default-max-trains", defaults.defaultMaxTrains(), "call", logger),
+        readNonNegativeInt(section, "min-lead-minutes", defaults.minLeadMinutes(), "call", logger),
+        readNonNegativeInt(
+            section, "follow-gap-seconds", defaults.followGapSeconds(), "call", logger));
   }
 
   /**
@@ -245,6 +268,9 @@ public final class ConfigManager {
             defaults.stationStopOverheadSeconds(),
             "timetable",
             logger);
+    int maxDelaySeconds =
+        readNonNegativeInt(
+            section, "max-delay-seconds", defaults.maxDelaySeconds(), "timetable", logger);
     ConfigurationSection recovery = section.getConfigurationSection("recovery");
     int recoveryMinDwellSeconds = defaults.recoveryMinDwellSeconds();
     int recoveryOverspeedPercent = defaults.recoveryOverspeedPercent();
@@ -279,7 +305,8 @@ public final class ConfigManager {
         stationStopOverheadSeconds,
         recoveryMinDwellSeconds,
         recoveryOverspeedPercent,
-        recoveryEngageDelaySeconds);
+        recoveryEngageDelaySeconds,
+        maxDelaySeconds);
   }
 
   private static int readNonNegativeInt(
@@ -820,6 +847,7 @@ public final class ConfigManager {
     int congestionNetworkReferenceTrains = DEFAULT_SPAWN_CONGESTION_NETWORK_REFERENCE_TRAINS;
     double congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
     double congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
+    int earlySpawnMaxLeadMinutes = DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES;
     if (section != null) {
       enabled = section.getBoolean("enabled", enabled);
       tickIntervalTicks = section.getInt("tick-interval-ticks", tickIntervalTicks);
@@ -910,6 +938,12 @@ public final class ConfigManager {
         congestionHoldThreshold = DEFAULT_SPAWN_CONGESTION_HOLD_THRESHOLD;
         congestionReleaseThreshold = DEFAULT_SPAWN_CONGESTION_RELEASE_THRESHOLD;
       }
+      earlySpawnMaxLeadMinutes =
+          section.getInt("early-spawn-max-lead-minutes", earlySpawnMaxLeadMinutes);
+      if (earlySpawnMaxLeadMinutes < 1) {
+        logger.warning("spawn.early-spawn-max-lead-minutes 配置无效: " + earlySpawnMaxLeadMinutes);
+        earlySpawnMaxLeadMinutes = DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES;
+      }
     }
     return new SpawnSettings(
         enabled,
@@ -926,7 +960,8 @@ public final class ConfigManager {
         maxActiveTrains,
         congestionNetworkReferenceTrains,
         congestionHoldThreshold,
-        congestionReleaseThreshold);
+        congestionReleaseThreshold,
+        earlySpawnMaxLeadMinutes);
   }
 
   /** 解析 storage 配置段。 */
@@ -1462,7 +1497,8 @@ public final class ConfigManager {
       ReclaimSettings reclaimSettings,
       SmartDispatcherSettings smartDispatcherSettings,
       HealthSettings healthSettings,
-      TimetableSettings timetableSettings) {
+      TimetableSettings timetableSettings,
+      CallSettings callSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
@@ -1470,6 +1506,39 @@ public final class ConfigManager {
               : smartDispatcherSettings;
       timetableSettings =
           timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
+      callSettings = callSettings == null ? CallSettings.defaults() : callSettings;
+    }
+
+    /** 兼容尚未感知叫车配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings,
+        TimetableSettings timetableSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          timetableSettings,
+          CallSettings.defaults());
     }
 
     /** 兼容尚未感知时刻表配置的调用方与测试夹具。 */
@@ -1545,6 +1614,7 @@ public final class ConfigManager {
    * @param recoveryMinDwellSeconds 晚点追赶：晚点车中途站最少停多少秒；0 表示不压缩停站
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
    * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
+   * @param maxDelaySeconds 交路上的下一班晚过计划发车这么多秒还没开出，车就从交路上解下、后面的班次交给替补；0 表示不限
    */
   public record TimetableSettings(
       boolean enabled,
@@ -1557,7 +1627,8 @@ public final class ConfigManager {
       int stationStopOverheadSeconds,
       int recoveryMinDwellSeconds,
       int recoveryOverspeedPercent,
-      int recoveryEngageDelaySeconds) {
+      int recoveryEngageDelaySeconds,
+      int maxDelaySeconds) {
 
     /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
     public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
@@ -1575,6 +1646,9 @@ public final class ConfigManager {
     /** 晚点多少秒起放宽线路限速：再小的晚点靠停站压缩就追得回来。 */
     public static final int DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS = 10;
 
+    /** 晚点上限的缺省值：晚过这么久的车次，乘客早已改乘，再让原车接着跑只会把后面的班次一路拖晚。 */
+    public static final int DEFAULT_MAX_DELAY_SECONDS = 900;
+
     public TimetableSettings {
       holdMaxSeconds = Math.max(0, holdMaxSeconds);
       assignToleranceSeconds = Math.max(0, assignToleranceSeconds);
@@ -1585,6 +1659,7 @@ public final class ConfigManager {
       recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
       recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
       recoveryEngageDelaySeconds = Math.max(0, recoveryEngageDelaySeconds);
+      maxDelaySeconds = Math.max(0, maxDelaySeconds);
     }
 
     /** 全部关闭的默认值；晚点追赶的参数有缺省值，但按表运行关着时不起作用。 */
@@ -1600,7 +1675,41 @@ public final class ConfigManager {
           DEFAULT_STATION_STOP_OVERHEAD_SECONDS,
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
-          DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS);
+          DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
+          DEFAULT_MAX_DELAY_SECONDS);
+    }
+  }
+
+  /**
+   * 叫车（玩家在站台屏或命令叫一趟车）配置。
+   *
+   * @param minWaitMinutes 本站台该方向下一班超过多少分钟才能叫车；0 表示随时能叫
+   * @param cooldownSeconds 每位玩家两次叫车的最短间隔
+   * @param terminalWaitSeconds 叫来的车到终点后等多久：期间沿途有人叫车、这趟经过就接着跑，否则派回库
+   * @param defaultMaxTrains 线路没写 {@code call_max_trains} 时同时最多几辆叫来的车（含排队的叫车票）
+   * @param minLeadMinutes 叫来的车至少要比同方向下一班早到这么多分钟才能叫：早得不够多就只会把下一班压在后面晚点；0 表示不比
+   * @param followGapSeconds 叫来的车离前车不到这么多秒时按需降速（最低到线路限速的七成），后车追到 {@code minLeadMinutes} 以内时不降；0
+   *     表示不降速
+   */
+  public record CallSettings(
+      int minWaitMinutes,
+      int cooldownSeconds,
+      int terminalWaitSeconds,
+      int defaultMaxTrains,
+      int minLeadMinutes,
+      int followGapSeconds) {
+
+    public CallSettings {
+      minWaitMinutes = Math.max(0, minWaitMinutes);
+      cooldownSeconds = Math.max(0, cooldownSeconds);
+      terminalWaitSeconds = Math.max(0, terminalWaitSeconds);
+      defaultMaxTrains = Math.max(1, defaultMaxTrains);
+      minLeadMinutes = Math.max(0, minLeadMinutes);
+      followGapSeconds = Math.max(0, followGapSeconds);
+    }
+
+    public static CallSettings defaults() {
+      return new CallSettings(5, 60, 60, 2, 2, 60);
     }
   }
 
@@ -1799,7 +1908,44 @@ public final class ConfigManager {
       int maxActiveTrains,
       int congestionNetworkReferenceTrains,
       double congestionHoldThreshold,
-      double congestionReleaseThreshold) {
+      double congestionReleaseThreshold,
+      int earlySpawnMaxLeadMinutes) {
+
+    /** 兼容旧调用：未指定手动提前出车的最早提前量时取 15 分钟。 */
+    public SpawnSettings(
+        boolean enabled,
+        int tickIntervalTicks,
+        int planRefreshTicks,
+        int maxSpawnPerTick,
+        int maxGeneratePerTick,
+        int maxBacklogPerService,
+        int retryDelayTicks,
+        int maxAttempts,
+        double layoverFallbackMultiplier,
+        long queuedTicketMaxAgeSeconds,
+        long pendingLayoverMaxAgeSeconds,
+        int maxActiveTrains,
+        int congestionNetworkReferenceTrains,
+        double congestionHoldThreshold,
+        double congestionReleaseThreshold) {
+      this(
+          enabled,
+          tickIntervalTicks,
+          planRefreshTicks,
+          maxSpawnPerTick,
+          maxGeneratePerTick,
+          maxBacklogPerService,
+          retryDelayTicks,
+          maxAttempts,
+          layoverFallbackMultiplier,
+          queuedTicketMaxAgeSeconds,
+          pendingLayoverMaxAgeSeconds,
+          maxActiveTrains,
+          congestionNetworkReferenceTrains,
+          congestionHoldThreshold,
+          congestionReleaseThreshold,
+          DEFAULT_SPAWN_EARLY_MAX_LEAD_MINUTES);
+    }
 
     /**
      * 兼容旧调用：未指定全网参考车数时，沿用在网列车上限。

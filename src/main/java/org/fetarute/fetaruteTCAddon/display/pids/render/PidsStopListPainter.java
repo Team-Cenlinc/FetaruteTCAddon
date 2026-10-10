@@ -115,7 +115,7 @@ final class PidsStopListPainter {
     int pages = train.map(found -> list.pages(found.stops().size(), noted)).orElse(1);
     int page = Math.floorMod(view.page(), pages);
     train.ifPresent(found -> drawStops(list, found, noted, page, view.labels()));
-    drawFooter(list, train.flatMap(Train::status), page, pages);
+    drawFooter(list, train.flatMap(Train::status).or(view::callHint), page, pages);
   }
 
   /** 首行：色牌，靠右的多久到达；分钟数伸到色牌上时改用小字号（与空位页同一画法）。 */

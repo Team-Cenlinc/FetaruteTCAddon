@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaDriveCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaEtaCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaGraphPortalCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaGuardCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaHealthCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaInfoCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaLicenseCommand;
@@ -185,6 +186,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private RuntimeDispatchDiagnosticGate runtimeDispatchDiagnosticGate;
   private boolean runtimeDispatchRecoveryComplete;
   private ReclaimManager reclaimManager;
+  private org.fetarute.fetaruteTCAddon.call.CallService callService;
   private org.bukkit.scheduler.BukkitTask runtimeMonitorTask;
   private org.bukkit.scheduler.BukkitTask runtimeRecoveryTask;
 
@@ -253,6 +255,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     initTimetable();
     initSpawnScheduler();
     initReclaimManager();
+    initCallService();
     initHudTemplateService();
     initHudDefaultTemplateService();
     initDisplayService();
@@ -313,6 +316,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (reclaimManager != null) {
       reclaimManager.stop();
       reclaimManager = null;
+    }
+    if (callService != null) {
+      callService.stop();
+      callService = null;
     }
     runtimeDispatchRecoveryComplete = false;
     if (timetableReloadTask != null) {
@@ -380,6 +387,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       reclaimManager.stop();
       reclaimManager = null;
     }
+    if (callService != null) {
+      callService.stop();
+    }
     ConfigUpdater.forPlugin(getDataFolder(), () -> getResource("config.yml"), loggerManager)
         .update();
     this.configManager.reload();
@@ -421,6 +431,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
           spawnReplacementSnapshot, replacementPendingTickets, replacementAt);
     }
     initReclaimManager();
+    initCallService();
     initDisplayService();
     // 重新初始化公开 API，确保外部插件引用有效
     initApi();
@@ -499,15 +510,33 @@ public final class FetaruteTCAddon extends JavaPlugin {
                             .component(
                                 manager.claimTask(player, holder, row, mode),
                                 Map.of("trip", row.key().tripCode(), "route", row.routeCode()))),
-                manager::chooseLevel),
+                manager::chooseLevel,
+                (player, holder, row) ->
+                    manager
+                        .guards()
+                        .ifPresent(
+                            guards ->
+                                player.sendMessage(
+                                    getLocaleManager()
+                                        .component(
+                                            guards.claimFromBoard(player, holder, row),
+                                            Map.of(
+                                                "trip",
+                                                row.key().tripCode(),
+                                                "route",
+                                                row.routeCode(),
+                                                "station",
+                                                holder.stationName()))))),
             this);
     driveSessionManager.start();
-    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试。
+    // 驾驶证：考过后按驾驶证替玩家挂上驾驶权限；教程做完时判定教程考试，车掌每做完一站讲评、判定车掌考试。
     this.licenseService =
         new LicenseService(this, () -> driveSessionManager, driveSessionManager.config().license());
     getServer().getPluginManager().registerEvents(licenseService, this);
     driveSessionManager.tutorials().onFinished(licenseService::onTutorialFinished);
     driveSessionManager.tutorials().onForfeit(licenseService::onTutorialForfeit);
+    LicenseService examiner = licenseService;
+    driveSessionManager.guards().ifPresent(guards -> guards.setExaminer(examiner));
     licenseService.start();
   }
 
@@ -751,6 +780,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaSpeedCommand(this).register(commandManager);
     new FtaTrainCommand(this).register(commandManager);
     new FtaDriveCommand(this).register(commandManager);
+    new FtaGuardCommand(this).register(commandManager);
     new FtaLicenseCommand(this).register(commandManager);
     new FtaGraphPortalCommand(this).register(commandManager);
     new FtaGraphCommand(this).register(commandManager);
@@ -761,6 +791,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaPidsCommand(this).register(commandManager);
     new FtaPidsBulletinCommand(this).register(commandManager);
     new FtaTripCommand(this).register(commandManager);
+    new org.fetarute.fetaruteTCAddon.command.FtaCallCommand(this).register(commandManager);
     new FtaAnnounceCommand(this).register(commandManager);
     infoCommand.register(commandManager);
 
@@ -912,6 +943,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (this.routeDefinitionCache == null) {
       this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
       routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
+      // 交路改了：叫车缓存的走行时分作废
+      routeDefinitionCache.addChangeListener(
+          () ->
+              getCallService()
+                  .ifPresent(org.fetarute.fetaruteTCAddon.call.CallService::invalidate));
     }
     if (this.stationDirectory == null) {
       // 与交路缓存同寿命：重载不换实例，公开 API 的数据版本不会回退。
@@ -1266,6 +1302,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
       if (reclaimManager != null) {
         reclaimManager.start();
       }
+      if (callService != null) {
+        callService.start();
+      }
+      // 在车库等候的提前出车先重新扣住、绑回交路，再打开授权门：门控与交路记录只在内存里，重启后不能让它抢先开走。
+      if (spawnTicketAssigner != null) {
+        spawnTicketAssigner.restoreEarlySpawnHolds(handles, java.time.Instant.now());
+      }
       if (!service.completeStartupOccupancyReconstruction(handles)) {
         runtimeDispatchRecoveryComplete = false;
         suspendRuntimeDispatchComponentsForRecovery();
@@ -1389,6 +1432,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (reclaimManager != null) {
       reclaimManager.stop();
     }
+    if (callService != null) {
+      callService.stop();
+    }
   }
 
   /**
@@ -1464,6 +1510,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
       etaService.attachPlacedStops(runtimeDispatchService::hasEffectiveNode);
       // 选台前站牌写计划站台（时刻表排定）或下一个停车站的暂定站台，与选台偏好同一份。
       etaService.attachPlannedPlatforms(runtimeDispatchService.stationStops()::displayPlatform);
+      // 还没派出的叫车票：站牌排队行写叫车指定的站台（右键的那条）。
+      etaService.attachTicketPlatforms(
+          (ticket, index) ->
+              getCallService().flatMap(calls -> calls.pinnedPlatformOf(ticket, index)));
     }
     // 到站后、停站计时注册前的几秒，本站停站按计划计入 ETA。
     etaService.attachStationPresence(this::getStationPresence);
@@ -1638,8 +1688,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     0,
                     settings.stationStopOverheadSeconds()
                         - org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction
-                            .doorOpenDelaySeconds()))));
+                            .doorOpenDelaySeconds())),
+            java.time.Duration.ofSeconds(settings.maxDelaySeconds())));
     runtimeDispatchService.stationStops().setPlan(settings.enabled() ? timetableService : null);
+    // 叫来的车不归时刻表排站台：DYNAMIC 停靠停右键的那条，选台与站牌读同一份。
+    runtimeDispatchService
+        .stationStops()
+        .setPinnedPlatforms(
+            (trainName, routeId, stopIndex) ->
+                getCallService()
+                    .flatMap(calls -> calls.pinnedPlatformOf(trainName, routeId, stopIndex)));
     // 列车销毁/改派时立刻释放它的车次绑定、交路进度与交路归属，不等下一次定时 retain：
     // 迟释放会让 trip claim 挂着、让同名新车继承旧交路。观察者不依赖开关，release 在关闭状态下是空操作。
     stationStopHub.register(
@@ -1696,6 +1754,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
                     settings.recoveryOverspeedPercent(),
                     settings.recoveryEngageDelaySeconds())
                 : null);
+    // 叫来的车按需降速：跟车间隔；后车追到叫车的 min-lead 以内时不降。有表、无表的线路一样。
+    ConfigManager.CallSettings callSettings = configManager.current().callSettings();
+    runtimeDispatchService
+        .stationStops()
+        .setCalledTrainPacing(
+            new org.fetarute.fetaruteTCAddon.dispatcher.runtime.CalledTrainPacer.Settings(
+                callSettings.followGapSeconds(), callSettings.minLeadMinutes() * 60));
+    runtimeDispatchService
+        .stationStops()
+        .setCalledTrainRearCheck(
+            trainName ->
+                getCallService().map(calls -> calls.trainCloseBehind(trainName)).orElse(false));
     // ETA 与站内扣留同一口径：早到的车在站内等点的时间计入 ETA，上限同扣留上限（含 150 秒硬顶）。
     if (etaService != null) {
       etaService.attachPlannedDepartures(
@@ -1775,6 +1845,21 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(layoverRegistry);
   }
 
+  /** 交路定义缓存（若未初始化则为空）。 */
+  public Optional<RouteDefinitionCache> getRouteDefinitionCache() {
+    return Optional.ofNullable(routeDefinitionCache);
+  }
+
+  /** 闲置回收（若未初始化则为空）。 */
+  public Optional<ReclaimManager> getReclaimManager() {
+    return Optional.ofNullable(reclaimManager);
+  }
+
+  /** 叫车服务（若未初始化则为空）。 */
+  public Optional<org.fetarute.fetaruteTCAddon.call.CallService> getCallService() {
+    return Optional.ofNullable(callService);
+  }
+
   /** 终点站待命车派车前问驾驶会话；驾驶未启用或出错时照常派车。 */
   private boolean driverPickupAllowsDispatch(
       org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager scheduled,
@@ -1813,6 +1898,17 @@ public final class FetaruteTCAddon extends JavaPlugin {
   public Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService>
       getTimetableService() {
     return Optional.ofNullable(timetableService);
+  }
+
+  /** 当前已加载的全部列车。 */
+  private static List<RuntimeTrainHandle> loadedTrainHandles() {
+    List<RuntimeTrainHandle> out = new ArrayList<>();
+    for (MinecartGroup group : MinecartGroupStore.getGroups()) {
+      if (group != null && group.isValid()) {
+        out.add(new TrainCartsRuntimeHandle(group));
+      }
+    }
+    return out;
   }
 
   private void initSpawnScheduler() {
@@ -1862,6 +1958,24 @@ public final class FetaruteTCAddon extends JavaPlugin {
             spawnSettings.maxAttempts());
     this.spawnTicketAssigner = simpleAssigner;
     simpleAssigner.setConsistArbiter(consistArbiter);
+    simpleAssigner.setLiveTrainSource(FetaruteTCAddon::loadedTrainHandles);
+    // 叫车：派出的车写上叫车标签；叫车票不抢绑着时刻表交路的待命车
+    simpleAssigner.addDispatchObserver(
+        (ticket, trainName) ->
+            getCallService().ifPresent(calls -> calls.onDispatched(ticket, trainName)));
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService dutyTimetable =
+        timetableService;
+    simpleAssigner.setDutyBoundVehicle(
+        dutyTimetable == null
+            ? null
+            : trainName -> dutyTimetable.dutyBindingOf(trainName).isPresent());
+    // 按表运行的交路上叫车票只接叫来的车；车库要让给表定出库时叫车票不从车库出车
+    simpleAssigner.setTimetableRoute(dutyTimetable == null ? null : dutyTimetable::managed);
+    simpleAssigner.setOnDemandDepotGate(
+        ticket -> getCallService().map(calls -> calls.allowsDepotSpawn(ticket)).orElse(true));
+    // 折返车的保留只在那一单还没派出时算数
+    simpleAssigner.setCallReservationLive(
+        callId -> getCallService().map(calls -> calls.reservationLive(callId)).orElse(true));
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
@@ -1884,6 +1998,34 @@ public final class FetaruteTCAddon extends JavaPlugin {
           (ticket, trainName) -> driverPickupHoldsDepotSpawn(scheduled, ticket, trainName));
       simpleAssigner.setTicketExpiry(scheduled::expiryOf);
       simpleAssigner.setDispatchListener(scheduled::onDispatched);
+      // 提前出车在车库等候：交路意图写进列车标签，重启后据此绑回交路，到点不会再出一辆。
+      simpleAssigner.setEarlySpawnBinding(
+          new org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .schedule
+              .spawn
+              .SimpleTicketAssigner
+              .EarlySpawnBinding() {
+            @Override
+            public Optional<String> tokenOf(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket) {
+              return scheduled.earlyHoldToken(ticket);
+            }
+
+            @Override
+            public boolean restore(String trainName, String token) {
+              return scheduled.restoreEarlyHold(trainName, token);
+            }
+
+            @Override
+            public Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.EarlySpawnPlan>
+                recheckPlan(
+                    org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket ticket,
+                    java.time.Instant now) {
+              return scheduled.earlyRecheckPlan(ticket, now);
+            }
+          });
       if (timetableService != null) {
         timetableService.setPendingTicketProbe(scheduled::hasPendingTicket);
       }
@@ -1892,6 +2034,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     if (timetableService != null) {
       // 区分车型的交路只让同车型的车接：接首班与门控就近绑定都读车上的编组标签。
+      // 叫来的车不进时刻表：不匹配车次、不按表扣车
+      timetableService.setUnscheduledTrain(
+          trainName -> getCallService().map(calls -> calls.isCalledTrain(trainName)).orElse(false));
       timetableService.setConsistOfTrain(
           trainName ->
               consistTagOf(trainName)
@@ -1948,7 +2093,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
             ? null
             : (trainName, location) ->
                 location != null && returns.awaitsOwnReturnAt(trainName, location.value()));
-    reclaimManager.setPreferredReturnRoute(returns == null ? null : returns::returnRouteOf);
+    // 开进终点等着接叫车的折返车：回收不碰
+    reclaimManager.setHeldForCall(
+        trainName -> getCallService().map(calls -> calls.heldForCall(trainName)).orElse(false));
+    // 叫来的车没有交路：先走与叫车交路同一交路组的回库交路，从哪个车库来就回哪个车库。
+    reclaimManager.setPreferredReturnRoute(
+        trainName ->
+            (returns == null ? Optional.<java.util.UUID>empty() : returns.returnRouteOf(trainName))
+                .or(
+                    () ->
+                        getCallService().flatMap(calls -> calls.preferredReturnRoute(trainName))));
     reclaimManager.setReclaimListener(returns == null ? null : returns::reclaimed);
     // 停在正线折返点的车：按表交路上接不上下一班就立即回收，不挡着正线等到末班过期。
     reclaimManager.setMainlineReturnGate(
@@ -1958,6 +2112,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
     // 交路已换车的车再也没有班可跑：闲置一个短门槛就回收，不占着站台等闲置上限。
     reclaimManager.setRetiredVehicle(
         timetableService == null ? null : timetableService::retiredFromDuty);
+    // 按表再也没有班可跑的车（交路跑完又没有本站出发的回库班、剩下的班次这里都接不上）：同样立即回收，回不了库就原地销毁。
+    reclaimManager.setIdleForGood(
+        returns == null
+            ? null
+            : (trainName, location, routeId) ->
+                returns.idleForGoodAt(trainName, location.value(), routeId));
     // 绑着交路的车停在没有回库线路的车站（原地折返）：接不上本交路的下一班就再也走不了，与正线折返点同一条立即回收规则。
     org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetable =
         timetableService;
@@ -1965,6 +2125,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
         timetable == null ? null : trainName -> timetable.dutyBindingOf(trainName).isPresent());
     if (runtimeDispatchRecoveryComplete) {
       this.reclaimManager.start();
+    }
+  }
+
+  /** 叫车服务：同一实例跨重载保留（叫车记录在内存里，重载不丢）；周期扫描与回收同一个启动门，现场占用重建完成后才开始。 */
+  private void initCallService() {
+    if (callService == null) {
+      callService = new org.fetarute.fetaruteTCAddon.call.CallService(this);
+    } else {
+      callService.invalidate();
+    }
+    if (runtimeDispatchRecoveryComplete) {
+      callService.start();
     }
   }
 
@@ -2169,6 +2341,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         () -> stationDirectory == null ? 0L : stationDirectory.revision());
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.installDrive(
         new org.fetarute.fetaruteTCAddon.api.internal.DriveApiImpl(this));
+    org.fetarute.fetaruteTCAddon.api.FetaruteApi.installGuard(
+        new org.fetarute.fetaruteTCAddon.api.internal.GuardApiImpl(this));
     startApiEvents();
     getLogger()
         .info("公开 API v" + org.fetarute.fetaruteTCAddon.api.FetaruteApi.API_VERSION + " 已初始化");

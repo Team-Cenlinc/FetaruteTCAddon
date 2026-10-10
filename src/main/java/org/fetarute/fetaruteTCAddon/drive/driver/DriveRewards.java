@@ -48,9 +48,41 @@ public final class DriveRewards {
             score.atoStops(),
             config.atoMultiplier(),
             config.gradeMultiplier(grade));
-    double experience = basis.amount(config.experiencePerKm(), config.experiencePerStop());
-    double money = basis.amount(config.moneyPerKm(), config.moneyPerStop());
-    // 浮点乘出来的整数常差一点点（35.99999999999999）：先补一个极小量再取整，钱币四舍五入到分。
+    return rounded(
+        basis.amount(config.experiencePerKm(), config.experiencePerStop()),
+        basis.amount(config.moneyPerKm(), config.moneyPerStop()));
+  }
+
+  /**
+   * 车掌一次值乘的奖励：每站按驾驶员人工停站的单价乘 {@code stopRatio}，里程按驾驶员每公里的单价乘 {@code kmRatio}，再乘评级系数。 不分人工驾驶与
+   * ATO：车掌的活都是人工做的。
+   *
+   * @param stops 完成作业的停站数
+   * @param blocks 值乘期间列车走过的距离（格）
+   */
+  public static Reward guard(
+      DriveRewardConfig config,
+      double stopRatio,
+      double kmRatio,
+      int stops,
+      double blocks,
+      ScoreRules.Grade grade) {
+    if (config == null || !config.enabled()) {
+      return Reward.NONE;
+    }
+    double km = Double.isFinite(blocks) ? Math.max(0.0, blocks) / BLOCKS_PER_KM : 0.0;
+    int count = Math.max(0, stops);
+    double multiplier = config.gradeMultiplier(grade);
+    return rounded(
+        multiplier
+            * (count * config.experiencePerStop() * stopRatio
+                + km * config.experiencePerKm() * kmRatio),
+        multiplier
+            * (count * config.moneyPerStop() * stopRatio + km * config.moneyPerKm() * kmRatio));
+  }
+
+  /** 浮点乘出来的整数常差一点点（35.99999999999999）：先补一个极小量再取整，钱币四舍五入到分。 */
+  private static Reward rounded(double experience, double money) {
     return new Reward(
         (int) Math.floor(Math.max(0.0, experience) + ROUNDING_EPSILON),
         BigDecimal.valueOf(Math.max(0.0, money)).setScale(2, RoundingMode.HALF_UP).doubleValue());

@@ -243,6 +243,23 @@ final class TrainingCoach {
   private void coachPhase(Player player, DriverLink link, DriverStationStop stop) {
     Map<String, String> values = new HashMap<>();
     values.put("station", stop.stationName());
+    if (link.guardAboard()) {
+      // 车上有车掌：开关门归车掌，发车等车掌的信号，不教驾驶员去开关门。
+      switch (stop.phase()) {
+        case OPEN_DOORS -> {
+          tell(player, "drive.license.coach.guard-doors", values);
+          return;
+        }
+        case CLOSE_DOORS -> {
+          return;
+        }
+        case WAIT_DEPARTURE -> {
+          tell(player, "drive.license.coach.guard-signal", values);
+          return;
+        }
+        default -> {}
+      }
+    }
     switch (stop.phase()) {
       case APPROACH -> tell(player, "drive.license.coach.approach", values);
       case OPEN_DOORS -> {

@@ -5,6 +5,7 @@ import edu.umd.cs.findbugs.annotations.SuppressFBWarnings;
 import java.time.Instant;
 import java.util.Objects;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsRuntimeHandle;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -47,4 +48,34 @@ public interface DepotSpawner {
    */
   Optional<MaterializedSpawn> spawn(
       StorageProvider provider, SpawnTicket ticket, String trainName, Instant now);
+
+  /**
+   * 交路中途的区间生成点（叫车）。
+   *
+   * @param index 生成点在交路节点表里的下标
+   * @param node 生成点（区间点）
+   * @param towardX 下一个节点相对生成点的水平方向 X 分量
+   * @param towardZ 下一个节点相对生成点的水平方向 Z 分量
+   */
+  record EntrySpawn(int index, NodeId node, double towardX, double towardZ) {
+    public EntrySpawn {
+      Objects.requireNonNull(node, "node");
+    }
+  }
+
+  /**
+   * 在交路中途的区间点生成列车：车头停在区间点、车身在它后方，面朝下一个节点；交路进度从 {@code entry.index()} 起算。
+   *
+   * <p>与 {@link #spawn} 同一事务约定：物理编组一生成就返回，可失败的初始化封装在返回值里。默认不支持。
+   *
+   * @return 成功则返回物理编组与延后初始化动作
+   */
+  default Optional<MaterializedSpawn> spawnAtEntry(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      String trainName,
+      EntrySpawn entry,
+      Instant now) {
+    return Optional.empty();
+  }
 }

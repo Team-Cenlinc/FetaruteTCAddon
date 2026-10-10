@@ -810,7 +810,10 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
     续班票等本交路的车时不到期，车还在路上就不会走到这一条：换下它会让这一班的票立即作废，而它本来会晚点把这一班跑掉；
   - **晚点超过容差 + 120 秒**（`TimetableService.VACATE_MARGIN`：停站压缩与超速每趟约追回一到两分钟，超出这段追不回来），且替补车赶得上它的**下一班**——
     不等下一班作废，替补车早一点出库（`reason=late-<秒>s`）。替补只赶得上更后面的班次时不提前换：原车晚点跑下一班也许还在容差内（终点有折返余量时）。
-  替补车赶不上时不换：换了只会让原车连后面还接得上的班次也跑不了。停在正线折返点或单股道车站、接不上下一班的车照旧立即回收（见 `reclaim-policy.md`），
+  - **晚点上限**（`timetable.max-delay-seconds`，默认 900，`0` 不限）：交路的下一班晚过计划发车这么久还没开出（开出即推进进度），
+    **不论有没有替补、票在不在等它**都换下（`reason=late-<秒>s`，每轮出票时扫一遍），替补赶不上的班次当即登记取消（同"车没了"）。
+    续班票等本交路的车没有时限，没有这条上限的话，一辆卡住的车会让这一班的票一直挂着、站牌一直写着一班不会来的车，后面的班次一路拖晚。
+  前两个时机替补车赶不上时不换：换了只会让原车连后面还接得上的班次也跑不了。停在正线折返点或单股道车站、接不上下一班的车照旧立即回收（见 `reclaim-policy.md`），
   替补由同一轮扫描判定。
 - **派替补**（`TimetableService#replacementsDue`，每轮出票时问；`TIMETABLE_DUTY_REPLACEMENT`）：从空缺起找第一班还没过容差、
   有出库线路能把车及时送到它起点的——表里终点在那一班起点站台组的 CREATE 线路（走行最短），出库时刻 = 计划发车 − 走行 − 就绪
@@ -827,7 +830,8 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
   TrainCarts **卸载**不走这一套（`StationStopObserver#RELEASE_UNLOADED`）：车在离线存储里，醒来还是它，交了替补同一交路就有两辆车；只照旧取消当前这一班。
 
 交路身份里的**服务日**统一按计划窗口算：跨零点的班次取模后落在下一个日历日，但它属于前一个服务日的交路
-（`Timetable#serviceDayOf`），与出库/回库票同一口径。
+（`Timetable#serviceDayOf`），与出库/回库票同一口径。计划窗口从零点起（`0`–`86400`）的表，末几班拖过 24 点时发车时刻同样取模成了凌晨，
+只认窗口起点会把它算成服务日当天凌晨、整整早 24 小时；这时按所属交路判：交路的计划开始不取模，车次（取模后）比它早半天以上的就是零点后开的。
 
 列车销毁或改派时，运行时通过 `StationStopObserver#onTrainReleased` 立刻释放它的绑定、交路进度与 trip 占用；
 定时 `retain` 只是兜底，用的是调度层的规范列车名。绑定只在内存，重启后回到自由运行。
@@ -900,6 +904,7 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 | `hold-max-seconds` | `120` | 早到扣留上限，运行时再被 150 秒硬上限封顶 |
 | `assign-tolerance-seconds` | `300` | 车次绑定允许的最大偏差 |
 | `max-catch-up-seconds` | `300` | 发车侧单次轮询的回补窗口上限 |
+| `max-delay-seconds` | `900` | 晚点上限：交路的下一班晚过计划发车这么久还没开出，车就从交路上换下（见"交路换车"）；`0` 不限 |
 | `reload-interval-seconds` | `60` | publish/unpublish 后最多多久生效（读库在异步线程，兜底 retain 回主线程） |
 | `zone` | `""` | 时刻表默认时区，留空用服务器默认 |
 | `recovery.min-dwell-seconds` | `10` | 晚点追赶：晚点车中途站最少停多少秒（开门 1 秒 + 关门动画 5 秒，再短就是开门即关门）；0 关闭停站压缩 |

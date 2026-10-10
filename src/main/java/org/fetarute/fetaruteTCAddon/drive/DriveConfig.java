@@ -11,6 +11,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.DriveRewardConfig;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverConfig;
 import org.fetarute.fetaruteTCAddon.drive.dynamics.Notch;
 import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitorConfig;
+import org.fetarute.fetaruteTCAddon.drive.guard.GuardConfig;
 import org.fetarute.fetaruteTCAddon.drive.license.LicenseConfig;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupTimings;
@@ -51,6 +52,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveSoundConfig;
  * @param supercap 超级电容车的储能与充电
  * @param license 驾驶证与考试
  * @param rewards 驾驶奖励（经验与服务器钱币）
+ * @param guard 车掌
  */
 public record DriveConfig(
     boolean enabled,
@@ -82,7 +84,8 @@ public record DriveConfig(
     int ebGraceTicks,
     SuperCapacitorConfig supercap,
     LicenseConfig license,
-    DriveRewardConfig rewards) {
+    DriveRewardConfig rewards,
+    GuardConfig guard) {
 
   private static final int TRACTION_STEPS = 3;
   private static final int BRAKE_STEPS = 4;
@@ -102,6 +105,7 @@ public record DriveConfig(
     supercap = supercap == null ? SuperCapacitorConfig.defaults() : supercap;
     license = license == null ? LicenseConfig.defaults() : license;
     rewards = rewards == null ? DriveRewardConfig.defaults() : rewards;
+    guard = guard == null ? GuardConfig.defaults() : guard;
     tractionFractions = List.copyOf(tractionFractions);
     brakeFractions = List.copyOf(brakeFractions);
     if (tractionFractions.size() != TRACTION_STEPS || brakeFractions.size() != BRAKE_STEPS) {
@@ -145,7 +149,8 @@ public record DriveConfig(
         ebGraceTicks,
         supercap,
         license,
-        rewards);
+        rewards,
+        guard);
   }
 
   /** 内置默认值。 */
@@ -180,7 +185,8 @@ public record DriveConfig(
         TICKS_PER_SECOND,
         SuperCapacitorConfig.defaults(),
         LicenseConfig.defaults(),
-        DriveRewardConfig.defaults());
+        DriveRewardConfig.defaults(),
+        GuardConfig.defaults());
   }
 
   /** 给定档位的牵引力比例（占满牵引）；非牵引档为 0。 */
@@ -257,7 +263,8 @@ public record DriveConfig(
                     * TICKS_PER_SECOND),
         SuperCapacitorConfig.from(section.getConfigurationSection("supercap"), sink),
         LicenseConfig.from(section.getConfigurationSection("license"), sink),
-        DriveRewardConfig.from(section.getConfigurationSection("rewards"), sink));
+        DriveRewardConfig.from(section.getConfigurationSection("rewards"), sink),
+        GuardConfig.from(section.getConfigurationSection("guard"), sink));
   }
 
   private static CabConfig cab(

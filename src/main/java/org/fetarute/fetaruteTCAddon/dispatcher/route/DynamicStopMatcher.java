@@ -97,13 +97,7 @@ public final class DynamicStopMatcher {
     if (spec == null || graph == null) {
       return List.of();
     }
-    String prefix =
-        spec.operatorCode().trim()
-            + ":"
-            + spec.nodeType().trim()
-            + ":"
-            + spec.nodeName().trim()
-            + ":";
+    String prefix = spec.trackPrefix();
     List<Integer> tracks = new ArrayList<>();
     if (!spec.unbounded()) {
       int maxTrack = Math.min(spec.toTrack(), spec.fromTrack() + MAX_TRACK_CANDIDATES - 1);
@@ -141,7 +135,7 @@ public final class DynamicStopMatcher {
     }
     List<NodeId> out = new ArrayList<>(tracks.size());
     for (int track : tracks) {
-      NodeId candidate = NodeId.of(prefix + track);
+      NodeId candidate = spec.nodeIdForTrack(track);
       if (graph.findNode(candidate).isPresent()) {
         out.add(candidate);
       }
@@ -576,6 +570,20 @@ public final class DynamicStopMatcher {
     /** 是否为 Station 类型。 */
     public boolean isStation() {
       return "S".equalsIgnoreCase(nodeType);
+    }
+
+    /** 股道节点名的前缀 {@code OP:S/D:NAME:}（运营商、类型、站名照规范原样、去掉首尾空白）。 */
+    String trackPrefix() {
+      return operatorCode.trim() + ":" + nodeType.trim() + ":" + nodeName.trim() + ":";
+    }
+
+    /**
+     * 这个站（车库）第 {@code track} 条股道的节点：选台候选与叫车指定站台用同一个写法。
+     *
+     * @param track 股道号
+     */
+    public NodeId nodeIdForTrack(int track) {
+      return NodeId.of(trackPrefix() + track);
     }
 
     /**

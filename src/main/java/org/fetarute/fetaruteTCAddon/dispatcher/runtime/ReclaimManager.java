@@ -134,6 +134,9 @@ public class ReclaimManager {
    */
   private volatile java.util.function.Predicate<String> returnGate = trainName -> true;
 
+  /** 留给还没派出的叫车的折返车：开进终点等这一单的票来接，回收一律不碰。默认没有。 */
+  private volatile java.util.function.Predicate<String> heldForCall = trainName -> false;
+
   /**
    * 正线折返点的立即回收闸：参数是列车名与它刚跑完的交路（{@code FTA_ROUTE_ID}）。默认恒拒绝—— 不按表运行时没有"这辆车接哪一班"的对应关系， 照旧等闲置上限或方向供需。
    *
@@ -185,6 +188,31 @@ public class ReclaimManager {
   private volatile java.util.function.BiPredicate<
           String, org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId>
       ownReturnWait = (trainName, location) -> false;
+
+  /** 按表没有后续任务的判定。 */
+  @FunctionalInterface
+  public interface IdleForGood {
+
+    /**
+     * @param trainName 列车名
+     * @param location 车停的节点
+     * @param routeId 车刚跑完的交路（{@code FTA_ROUTE_ID}）
+     * @return 按时刻表确知它再也没有班可跑时为 true
+     */
+    boolean test(
+        String trainName,
+        org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId location,
+        Optional<UUID> routeId);
+  }
+
+  /**
+   * 按表没有后续任务：这辆待命车按时刻表再也没有班可跑。默认恒否。
+   *
+   * <p>成立时与换下来的车一样，闲置满 {@link #MAINLINE_TURNBACK_MIN_IDLE_SECONDS} 就回收、不过回库闸，没有回库线路时原地销毁。
+   * 回收关着（{@code reclaim.enabled: false}）也照做：时刻表确知它没有活，留着只会占住站台。按表运行时装上 {@code
+   * TimetableService#idleForGoodAt}。
+   */
+  private volatile IdleForGood idleForGood = (trainName, location, routeId) -> false;
 
   /** 回收派车成功后的通知（派走前的列车名、走的回库线路）。按表运行时用来结清交路。 */
   private volatile java.util.function.BiConsumer<String, UUID> reclaimListener =
@@ -261,6 +289,11 @@ public class ReclaimManager {
     return RuntimeDispatchService.hasPlayerPassengers(properties);
   }
 
+  /** 装上“留给叫车的折返车”判定；{@code null} 恢复默认（没有）。 */
+  public void setHeldForCall(java.util.function.Predicate<String> held) {
+    this.heldForCall = held == null ? trainName -> false : held;
+  }
+
   /** 装上回库闸；{@code null} 恢复恒放行。 */
   public void setReturnGate(java.util.function.Predicate<String> gate) {
     this.returnGate = gate == null ? trainName -> true : gate;
@@ -278,6 +311,15 @@ public class ReclaimManager {
    */
   public void setRetiredVehicle(java.util.function.Predicate<String> predicate) {
     this.retiredVehicle = predicate == null ? trainName -> false : predicate;
+  }
+
+  /**
+   * 装上按表没有后续任务的判定。
+   *
+   * @param predicate 列车按表还有没有活；{@code null} 恢复为恒否
+   */
+  public void setIdleForGood(IdleForGood predicate) {
+    this.idleForGood = predicate == null ? (trainName, location, routeId) -> false : predicate;
   }
 
   /**
@@ -353,6 +395,7 @@ public class ReclaimManager {
   void performReclaimCheck() {
     ConfigManager.ReclaimSettings settings = configManager.current().reclaimSettings();
     if (!settings.enabled()) {
+      reclaimIdleForGood(settings);
       return;
     }
 
@@ -389,6 +432,10 @@ public class ReclaimManager {
             .collect(Collectors.toList());
 
     for (LayoverRegistry.LayoverCandidate candidate : sorted) {
+      if (heldForCall.test(candidate.trainName())) {
+        // 折返车在终点等叫车的票来接：单股道车站、正线折返点的立即回收也不碰它
+        continue;
+      }
       boolean shouldReclaim = false;
       long idleSec = ChronoUnit.SECONDS.between(candidate.readyAt(), now);
       String directionKey = toDirectionKey(candidate.terminalKey());
@@ -410,7 +457,8 @@ public class ReclaimManager {
               && mainlineReturnGate.test(
                   candidate.trainName(),
                   parseUuidTag(candidate.tags(), RouteProgressRegistry.TAG_ROUTE_ID));
-      boolean retired = false;
+      // 时刻表已经放行（车被换下、或按表没有后续任务）：不过回库闸，没有回库线路时原地销毁。
+      boolean released = false;
       if (mainlineReturn) {
         shouldReclaim = true;
         debugLogger.accept(
@@ -425,9 +473,13 @@ public class ReclaimManager {
                 + "s");
       } else if (idleSec >= MAINLINE_TURNBACK_MIN_IDLE_SECONDS
           && retiredVehicle.test(candidate.trainName())) {
-        retired = true;
+        released = true;
         shouldReclaim = true;
         debugLogger.accept("回收触发: 交路已换车 train=" + candidate.trainName() + " idle=" + idleSec + "s");
+      } else if (idleSec >= MAINLINE_TURNBACK_MIN_IDLE_SECONDS && isIdleForGood(candidate)) {
+        released = true;
+        shouldReclaim = true;
+        logIdleForGood(candidate, idleSec);
       } else if (maxOperationTrips > 0 && operationTrips >= maxOperationTrips) {
         shouldReclaim = true;
         debugLogger.accept(
@@ -472,33 +524,153 @@ public class ReclaimManager {
         }
       }
 
-      if (shouldReclaim && !mainlineReturn && !returnGate.test(candidate.trainName())) {
+      if (shouldReclaim
+          && !mainlineReturn
+          && !released
+          && !returnGate.test(candidate.trainName())) {
         // 交路还有班次：这不是派不出回库票，不能记成滞留。
         debugLogger.accept("回收跳过: 交路还有班次要跑 train=" + candidate.trainName());
         continue;
       }
-      if (shouldReclaim && !mainlineReturn && waitingOwnReturn.contains(candidate.trainName())) {
+      if (shouldReclaim
+          && !mainlineReturn
+          && !released
+          && waitingOwnReturn.contains(candidate.trainName())) {
         // 自己交路的带客回库班还开得成：让它的票带走车，不抢先派去别的车库。
         if (ownReturnWaitReported.add(candidate.trainName())) {
           debugLogger.accept("回收跳过: 等本交路的带客回库班 train=" + candidate.trainName());
         }
         continue;
       }
-      if (shouldReclaim) {
-        ReturnOutcome outcome = assignReturnTicket(candidate, providerOpt);
-        if (outcome == ReturnOutcome.ASSIGNED) {
-          strandedSince.remove(candidate.trainName());
-          decrementDirectionSupply(layoverSupplyByDirection, directionKey);
-          if (pressure) {
-            pressure = false; // 本轮执行一次回收后，立即解除压力模式
-          }
-        } else if (outcome == ReturnOutcome.NO_ROUTE && (mainlineReturn || retired)) {
-          // 时刻表已经放行（或车已被换下）、又没有回库线路：它不会再有班可跑，等滞留计时只会占着终点。
-          destroyWithoutReturnRoute(
-              candidate, now, idleSec, settings.strandedDestroySeconds(), mainlineLocation);
-        } else {
-          destroyIfStranded(candidate, now, settings.strandedDestroySeconds());
-        }
+      if (shouldReclaim
+          && reclaim(
+                  candidate,
+                  providerOpt,
+                  now,
+                  idleSec,
+                  settings,
+                  mainlineReturn || released,
+                  mainlineLocation)
+              == ReturnOutcome.ASSIGNED) {
+        decrementDirectionSupply(layoverSupplyByDirection, directionKey);
+        pressure = false; // 本轮执行一次回收后，立即解除压力模式
+      }
+    }
+  }
+
+  /**
+   * 派回库票；派不出去时按情形销毁或进滞留计时。
+   *
+   * @param timetableReleased 时刻表已经放行（立即回收的几种情形、车被换下、按表没有后续任务）：没有回库线路时它不会再有班可跑， 等滞留计时只会占着终点，原地销毁
+   * @param mainlineLocation 停在正线折返点或单股道车站（只影响日志）
+   */
+  private ReturnOutcome reclaim(
+      LayoverRegistry.LayoverCandidate candidate,
+      Optional<StorageProvider> providerOpt,
+      Instant now,
+      long idleSec,
+      ConfigManager.ReclaimSettings settings,
+      boolean timetableReleased,
+      boolean mainlineLocation) {
+    ReturnOutcome outcome = assignReturnTicket(candidate, providerOpt);
+    if (outcome == ReturnOutcome.ASSIGNED) {
+      strandedSince.remove(candidate.trainName());
+    } else if (outcome == ReturnOutcome.NO_ROUTE && timetableReleased) {
+      destroyWithoutReturnRoute(
+          candidate, now, idleSec, settings.strandedDestroySeconds(), mainlineLocation);
+    } else {
+      destroyIfStranded(candidate, now, settings.strandedDestroySeconds());
+    }
+    return outcome;
+  }
+
+  /** 回收关着时只收按表没有后续任务的车（{@link #idleForGood}）。 */
+  private void reclaimIdleForGood(ConfigManager.ReclaimSettings settings) {
+    List<LayoverRegistry.LayoverCandidate> candidates = layoverRegistry.snapshot();
+    pruneStableReturnTickets(candidates);
+    pruneStranded(candidates);
+    Instant now = clock.get();
+    Optional<StorageProvider> providerOpt = plugin.getStorageManager().provider();
+    for (LayoverRegistry.LayoverCandidate candidate : candidates) {
+      long idleSec = ChronoUnit.SECONDS.between(candidate.readyAt(), now);
+      if (idleSec < MAINLINE_TURNBACK_MIN_IDLE_SECONDS
+          || heldForCall.test(candidate.trainName())
+          || !isIdleForGood(candidate)) {
+        continue;
+      }
+      logIdleForGood(candidate, idleSec);
+      reclaim(
+          candidate,
+          providerOpt,
+          now,
+          idleSec,
+          settings,
+          true,
+          blockingTurnbackKind(candidate.locationNodeId()) != null);
+    }
+  }
+
+  private boolean isIdleForGood(LayoverRegistry.LayoverCandidate candidate) {
+    return candidate.locationNodeId() != null
+        && idleForGood.test(
+            candidate.trainName(),
+            candidate.locationNodeId(),
+            parseUuidTag(candidate.tags(), RouteProgressRegistry.TAG_ROUTE_ID));
+  }
+
+  private void logIdleForGood(LayoverRegistry.LayoverCandidate candidate, long idleSec) {
+    debugLogger.accept(
+        "回收触发: 按表没有后续任务 train="
+            + candidate.trainName()
+            + " node="
+            + candidate.locationNodeId().value()
+            + " idle="
+            + idleSec
+            + "s");
+  }
+
+  /** 叫来的车送回库的结果。 */
+  public enum CalledReturn {
+    /** 已派出回库交路。 */
+    ASSIGNED,
+    /** 这个终点没有回库交路：按滞留兜底处理（{@code reclaim.stranded-destroy-seconds} 为 0 时只记滞留）。 */
+    NO_ROUTE,
+    /** 这一拍没派出去：回库交路被拒、闭塞或交接进行中，下一拍再试；滞留计时照走。 */
+    BLOCKED,
+    /** 车已不在待命池里（被叫车票接走或已离开）。 */
+    NOT_WAITING
+  }
+
+  /**
+   * 叫来的车在终点等完：立即派回库，不看 {@code reclaim.enabled} 与闲置门槛。
+   *
+   * <p>叫来的车不属于任何交路、也不会再有班可跑，所以不过交路闸；没有回库交路时与时刻表放行的车同一条路（原地销毁，有乘客、 折返事务进行中不碰），派不出去时进滞留计时。
+   *
+   * @param trainName 列车名
+   * @param now 当前时刻
+   */
+  public CalledReturn returnCalledTrain(String trainName, Instant now) {
+    Optional<LayoverRegistry.LayoverCandidate> candidate = layoverRegistry.get(trainName);
+    if (candidate.isEmpty() || now == null) {
+      return CalledReturn.NOT_WAITING;
+    }
+    ConfigManager.ReclaimSettings settings = configManager.current().reclaimSettings();
+    ReturnOutcome outcome =
+        assignReturnTicket(candidate.get(), plugin.getStorageManager().provider());
+    switch (outcome) {
+      case ASSIGNED -> {
+        strandedSince.remove(trainName);
+        return CalledReturn.ASSIGNED;
+      }
+      case NO_ROUTE -> {
+        long idleSeconds = Math.max(0L, ChronoUnit.SECONDS.between(candidate.get().readyAt(), now));
+        destroyWithoutReturnRoute(
+            candidate.get(), now, idleSeconds, settings.strandedDestroySeconds(), false);
+        return CalledReturn.NO_ROUTE;
+      }
+      default -> {
+        destroyIfStranded(candidate.get(), now, settings.strandedDestroySeconds());
+        return CalledReturn.BLOCKED;
       }
     }
   }

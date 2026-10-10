@@ -33,8 +33,8 @@ import org.fetarute.fetaruteTCAddon.drive.dynamics.ReverserPosition;
 import org.fetarute.fetaruteTCAddon.drive.energy.SuperCapacitor;
 import org.fetarute.fetaruteTCAddon.drive.hud.OverspeedLevel;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
+import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
-import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.setup.SetupSystem;
 import org.fetarute.fetaruteTCAddon.drive.setup.TrainSetup;
@@ -49,7 +49,7 @@ import org.fetarute.fetaruteTCAddon.drive.sound.DriveCueTracker;
  * <p>会话有三个阶段：{@link Phase#ACTIVE 驾驶中}；驾驶员离开后进入 {@link Phase#STOPPING 制动停车}，由会话自己把列车刹停，
  * 以免无人驾驶的列车一路冲出去；停稳后 {@link Phase#ENDED 结束}。
  */
-public final class DriveSession {
+public final class DriveSession implements DriveDoors.Cab {
 
   /** 直接送进驾驶室后，等 TrainCarts 让人坐下最多等几个 tick。 */
   private static final long CAB_MOVE_SETTLE_TICKS = 5L;
@@ -320,14 +320,11 @@ public final class DriveSession {
     return phase == Phase.ACTIVE && seated && !cabChange.holding();
   }
 
-  /** 换端判定读到的驾驶室座位（要逐节看座位附件的名字），连同读时的编组、节数与 tick：尽头式待命可能持续几分钟，不必每 tick 重读。 */
-  public record CabSeatsMemo(MinecartGroup group, int size, long tick, CabSeats seats) {}
-
   /** 换端判定查到的计划发车（终点待命时要查下一趟），连同查时的 tick、是否待命、列车名与驾驶任务；查不到时为 {@code null}。列车改名或任务换了（接续下一趟）都要重查。 */
   public record PlannedDepartureMemo(
       long tick, boolean layover, String trainName, Object taskKey, java.time.Instant planned) {}
 
-  private CabSeatsMemo cabSeatsMemo;
+  private org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo cabSeatsMemo;
   private PlannedDepartureMemo plannedDepartureMemo;
 
   /** 上次找到的编组：按列车名找要遍历全服编组，每 tick 都找时先看它还在不在、名字对不对。 */
@@ -341,11 +338,11 @@ public final class DriveSession {
     this.lastGroup = group;
   }
 
-  public CabSeatsMemo cabSeatsMemo() {
+  public org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo cabSeatsMemo() {
     return cabSeatsMemo;
   }
 
-  public void setCabSeatsMemo(CabSeatsMemo memo) {
+  public void setCabSeatsMemo(org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo memo) {
     this.cabSeatsMemo = memo;
   }
 

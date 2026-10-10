@@ -668,13 +668,13 @@ public final class RailGraphService {
   }
 
   /**
-   * 同 {@link #effectiveSpeedLimitBlocksPerSecond(UUID, RailEdge, Instant,
-   * double)}，另按倍率放宽线路限速——晚点追赶用。
+   * 同 {@link #effectiveSpeedLimitBlocksPerSecond(UUID, RailEdge, Instant, double)}，另按倍率放宽或压低限速：大于 1
+   * 是晚点追赶，小于 1 是叫来的车追近前车时按需降速。
    *
-   * <p>只放宽<b>写明了的线路限速</b>：边基础限速（牌子写的）或永久限速覆盖，也就是编表按它算表定时分的那个数。 不放宽的有三类：没写限速、按默认速度走的边——没有证据说它扛得住更快；
-   * 临时限速——施工、限行是运维硬约束；以及不经过这里的进站限速、CAUTION 与信号给出的速度。
+   * <p>放宽只放<b>写明了的线路限速</b>：边基础限速（牌子写的）或永久限速覆盖，也就是编表按它算表定时分的那个数。 不放宽的有三类：没写限速、按默认速度走的边——没有证据说它扛得住更快；
+   * 临时限速——施工、限行是运维硬约束；以及不经过这里的进站限速、CAUTION 与信号给出的速度。压低则作用于算完的边限速（含默认速度与临时限速）。
    *
-   * @param lineSpeedFactor 线路限速倍率；不大于 1 或非有限值时按 1
+   * @param lineSpeedFactor 限速倍率；等于 1 或非有限值、非正值时按 1
    */
   public double effectiveSpeedLimitBlocksPerSecond(
       UUID worldId,
@@ -690,6 +690,10 @@ public final class RailGraphService {
     }
     double factor =
         Double.isFinite(lineSpeedFactor) && lineSpeedFactor > 1.0 ? lineSpeedFactor : 1.0;
+    double slowdown =
+        Double.isFinite(lineSpeedFactor) && lineSpeedFactor > 0.0 && lineSpeedFactor < 1.0
+            ? lineSpeedFactor
+            : 1.0;
 
     double baseFromEdge = edge.baseSpeedLimit();
     boolean baseWritten = Double.isFinite(baseFromEdge) && baseFromEdge > 0.0;
@@ -697,7 +701,7 @@ public final class RailGraphService {
 
     EdgeId edgeId = edge.id();
     if (edgeId == null) {
-      return base;
+      return base * slowdown;
     }
     EdgeId normalized = EdgeId.undirected(edgeId.a(), edgeId.b());
     RailEdgeOverrideRecord override =
@@ -710,9 +714,9 @@ public final class RailGraphService {
       effective = Math.min(effective, override.tempSpeedLimitBlocksPerSecond().getAsDouble());
     }
     if (!Double.isFinite(effective) || effective <= 0.0) {
-      return base;
+      return base * slowdown;
     }
-    return effective;
+    return effective * slowdown;
   }
 
   public Map<UUID, RailGraphSnapshot> snapshotAll() {

@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
@@ -104,6 +105,60 @@ class StorageSpawnManagerTest {
     assertTrue(replacement.snapshotQueue().isEmpty());
     assertEquals(
         snapshot.nextDueAtByService(), replacement.snapshotForReplacement().nextDueAtByService());
+  }
+
+  /** 叫车的按需票不由服务生成：服务不在计划里也照留，派出不动 backlog，排队时能撤回。 */
+  @Test
+  void onDemandTicketsSurvivePlanRefreshAndCanBeWithdrawn() {
+    StorageProvider provider = mockProvider(enabledRoute());
+    StorageSpawnManager.SpawnManagerSettings settings =
+        new StorageSpawnManager.SpawnManagerSettings(
+            Duration.ZERO, Duration.ZERO, 5, 5, 10, Duration.ofHours(1));
+    StorageSpawnManager manager = new StorageSpawnManager(settings, null);
+    Instant now = Instant.parse("2026-01-19T00:00:00Z");
+    manager.pollDueTickets(provider, now);
+    SpawnService foreign =
+        new SpawnService(
+            new SpawnServiceKey(UUID.randomUUID()),
+            UUID.randomUUID(),
+            "C",
+            UUID.randomUUID(),
+            "SURN",
+            UUID.randomUUID(),
+            "CALL",
+            UUID.randomUUID(),
+            "R-CALL",
+            Duration.ofMinutes(10),
+            "SURN:S:X:1");
+    SpawnTicket call = onDemand(foreign, now);
+    manager.requeue(call);
+
+    List<SpawnTicket> due = manager.pollDueTickets(provider, now.plusSeconds(1));
+
+    assertTrue(due.contains(call), "服务不在发车计划里的按需票照常放出");
+    manager.complete(call);
+    SpawnTicket second = onDemand(foreign, now);
+    manager.requeue(second);
+    assertTrue(manager.withdraw(second.id()));
+    assertFalse(manager.withdraw(second.id()), "已撤回的票不能再撤");
+    assertTrue(manager.snapshotQueue().stream().noneMatch(t -> t.id().equals(second.id())));
+  }
+
+  private static SpawnTicket onDemand(SpawnService service, Instant now) {
+    return new SpawnTicket(
+        UUID.randomUUID(),
+        service,
+        now,
+        now,
+        now,
+        0,
+        0L,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.of("CALL-test"),
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource.ON_DEMAND,
+        0,
+        Optional.empty());
   }
 
   @Test

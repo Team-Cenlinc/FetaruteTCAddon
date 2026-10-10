@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 
 /**
@@ -108,7 +109,8 @@ public final class StorageSpawnManager
 
   @Override
   public void complete(SpawnTicket ticket) {
-    if (ticket == null || ticket.service() == null) {
+    // 按需票（叫车）不占服务的 backlog：它不是这个服务生成的
+    if (ticket == null || ticket.service() == null || onDemand(ticket)) {
       return;
     }
     ServiceState state = states.get(ticket.service().key());
@@ -116,6 +118,17 @@ public final class StorageSpawnManager
       return;
     }
     state.backlog = Math.max(0, state.backlog - 1);
+  }
+
+  @Override
+  public boolean withdraw(UUID ticketId) {
+    return ticketId != null
+        && queue.removeIf(ticket -> ticket != null && ticketId.equals(ticket.id()));
+  }
+
+  /** 按需票（叫车）：不由服务生成，不计 backlog，计划刷新时服务不在计划里也照留。 */
+  private static boolean onDemand(SpawnTicket ticket) {
+    return ticket != null && ticket.source() == TripSource.ON_DEMAND;
   }
 
   @Override
@@ -177,10 +190,13 @@ public final class StorageSpawnManager
         continue;
       }
       queue.add(ticket);
+      globalSequence = Math.max(globalSequence, ticket.sequenceNumber() + 1L);
+      if (onDemand(ticket)) {
+        continue;
+      }
       ServiceState state =
           states.computeIfAbsent(ticket.service().key(), ignored -> new ServiceState());
       state.backlog++;
-      globalSequence = Math.max(globalSequence, ticket.sequenceNumber() + 1L);
     }
     safeSnapshot
         .nextDueAtByService()
@@ -292,7 +308,9 @@ public final class StorageSpawnManager
       int before = queue.size();
       queue.removeIf(
           ticket ->
-              ticket == null || ticket.service() == null || !live.contains(ticket.service().key()));
+              ticket == null
+                  || ticket.service() == null
+                  || (!onDemand(ticket) && !live.contains(ticket.service().key())));
       int removed = before - queue.size();
       if (removed > 0) {
         debugLogger.accept("SpawnPlan 清理过期票据: removed=" + removed);
@@ -317,7 +335,7 @@ public final class StorageSpawnManager
           if (!isExpiredQueuedTicket(ticket, now, maxAge)) {
             return false;
           }
-          if (ticket != null && ticket.service() != null) {
+          if (ticket != null && ticket.service() != null && !onDemand(ticket)) {
             removedByService.merge(ticket.service().key(), 1, Integer::sum);
           }
           return true;

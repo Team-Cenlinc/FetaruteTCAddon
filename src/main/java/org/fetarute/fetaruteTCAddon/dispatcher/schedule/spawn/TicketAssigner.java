@@ -49,6 +49,32 @@ public interface TicketAssigner {
   }
 
   /**
+   * 撤回一张还没派出的票（叫车取消）：在发车队列或等待待命车的票撤掉；已进入实体化或折返交接的票不撤。
+   *
+   * @param ticketId 票据 id
+   * @return 撤回了时为 true
+   */
+  default boolean withdraw(java.util.UUID ticketId) {
+    return false;
+  }
+
+  /**
+   * 票据是否还在处理中：在发车队列里、在等待待命车，或已进入实体化事务。
+   *
+   * @param ticketId 票据 id
+   */
+  default boolean isTicketLive(java.util.UUID ticketId) {
+    return false;
+  }
+
+  /**
+   * 追加派发成功的观察者（在主回调之后调用）。
+   *
+   * @param observer 票据与最终派出的列车名
+   */
+  default void addDispatchObserver(java.util.function.BiConsumer<SpawnTicket, String> observer) {}
+
+  /**
    * 清理待分配/等待 Layover 的票据。
    *
    * @return 清理的票据数量
@@ -69,4 +95,16 @@ public interface TicketAssigner {
 
   /** 清理出车诊断计数（成功/重试/错误分布）。 */
   default void resetDiagnostics() {}
+
+  /**
+   * 重启或重载后找回在车库等候的提前出车：启动恢复在打开授权门之前调用。默认不处理。
+   *
+   * @param trains 列车
+   * @param now 当前时刻
+   */
+  default void restoreEarlySpawnHolds(
+      java.util.Collection<
+              ? extends org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle>
+          trains,
+      Instant now) {}
 }

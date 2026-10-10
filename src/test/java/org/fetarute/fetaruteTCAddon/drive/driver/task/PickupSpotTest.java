@@ -25,6 +25,25 @@ class PickupSpotTest {
   }
 
   @Test
+  @DisplayName("站台在哪一侧已知时只在那一侧找：另一侧（轨道边）站得住也不去")
+  void onlyThePlatformSide() {
+    // 两侧都站得住；站台在 +z 一侧。
+    Optional<Vector> spot =
+        PickupSpot.findOnSide(
+            new Vector(10.5, 64.0, 20.5), new Vector(0.0, 0.0, 1.0), (x, y, z) -> y == 64);
+
+    assertEquals(new Vector(10.5, 64.0, 22.5), spot.orElseThrow());
+    assertTrue(
+        PickupSpot.findOnSide(
+                new Vector(10.5, 64.0, 20.5), new Vector(0.0, 0.0, 1.0), (x, y, z) -> z < 20)
+            .isEmpty(),
+        "这一侧站不住时为空，由调用方退回两侧都试");
+    assertTrue(
+        PickupSpot.findOnSide(new Vector(0, 64, 0), null, (x, y, z) -> true).isEmpty(),
+        "不知道站台在哪一侧时为空");
+  }
+
+  @Test
   @DisplayName("同一高度站不住时上下各试一格")
   void triesOneBlockUpAndDown() {
     Optional<Vector> spot =

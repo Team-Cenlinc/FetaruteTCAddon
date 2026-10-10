@@ -46,6 +46,15 @@ public final class DoorCars {
     return new DoorCars(chosen, sign.describeDoors());
   }
 
+  /**
+   * 只有这一节车厢（逐节判定开门侧时每节车单独播动画）。
+   *
+   * @param cart 车厢实体 UUID；为 {@code null} 时不含任何车厢
+   */
+  public static DoorCars only(UUID cart) {
+    return new DoorCars(cart == null ? Set.of() : Set.of(cart), "1");
+  }
+
   /** 是否全车开门。 */
   public boolean all() {
     return carts == null;

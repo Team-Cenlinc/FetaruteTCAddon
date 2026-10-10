@@ -195,4 +195,16 @@ class TimetableDispatchBindingTest {
         List.of("train-B"),
         service.assignments().stream().map(TimetableAssignment::trainName).toList());
   }
+
+  /** 手动提前出的车在计划时刻之前派出、在车库等到点才走：绑定时不记成提前。 */
+  @Test
+  void anEarlyDispatchIsBoundAtThePlannedDeparture() {
+    start();
+    clock.set(Instant.parse("2026-03-02T07:50:00Z"));
+    service.bindDuty("train-A", duty, "ticket-operation");
+
+    service.bindDispatchedTrip("train-A", intent(0), Optional.of(trip(0)));
+
+    assertEquals(0, service.assignmentOf("train-A").orElseThrow().initialDeviationSeconds());
+  }
 }

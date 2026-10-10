@@ -149,10 +149,21 @@ public final class DispatchPriorityResolver {
     }
 
     boolean depotExitContext = isDepotExitPriorityContext(properties, route);
+    // 叫来的车（车上有叫车标签，回库途中也留着）排在所有车之后
+    boolean called =
+        TrainTagHelper.readTagValue(
+                properties,
+                org.fetarute
+                    .fetaruteTCAddon
+                    .dispatcher
+                    .schedule
+                    .spawn
+                    .SimpleTicketAssigner
+                    .TAG_CALLED_TRAIN)
+            .isPresent();
     int policyAdjustment =
-        DispatchPriorityPolicy.operationOffset(operationType.get(), depotExitContext);
-    int priority =
-        DispatchPriorityPolicy.runtimePriority(basePriority, operationType.get(), depotExitContext);
+        DispatchPriorityPolicy.operationOffset(operationType.get(), depotExitContext, called);
+    int priority = basePriority + policyAdjustment;
     DispatchPriorityResolution resolution =
         new DispatchPriorityResolution(
             priority,

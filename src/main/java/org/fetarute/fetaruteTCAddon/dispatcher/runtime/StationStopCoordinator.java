@@ -20,6 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyDecision;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 
 /**
@@ -53,6 +54,9 @@ public final class StationStopCoordinator {
   private volatile StationStopObserver observer;
   private volatile ScheduledDeparturePlan plan;
 
+  /** 预先指定的站台（叫来的车）；时刻表没有排定站台时才看它。 */
+  private volatile PinnedPlatforms pinnedPlatforms = PinnedPlatforms.NONE;
+
   /** 选台器：站牌经本类读暂定站台，站台落定事件经本类读原计划。调度服务构造时接上。 */
   private volatile DynamicPlatformAllocator platforms;
 
@@ -65,6 +69,9 @@ public final class StationStopCoordinator {
 
   /** 当前放宽了线路限速的车。只用来在进入/退出时各留一行审计，不参与判定。 */
   private final ConcurrentMap<String, Boolean> overspeedEngaged = new ConcurrentHashMap<>();
+
+  /** 叫来的车按需降速。 */
+  private final CalledTrainPacer calledTrainPacer;
 
   /**
    * 晚点追赶参数。
@@ -97,6 +104,7 @@ public final class StationStopCoordinator {
       Function<TrainProperties, Optional<UUID>> routeUuids) {
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
     this.clock = clock == null ? Instant::now : clock;
+    this.calledTrainPacer = new CalledTrainPacer(this.debugLogger, this.clock);
     this.routeDefinitions = routeDefinitions;
     this.managedTrains = managedTrains;
     this.trainNames = trainNames;
@@ -115,17 +123,58 @@ public final class StationStopCoordinator {
   }
 
   /**
-   * 计划站台（{@link DynamicPlatformAllocator.PlatformPreference}）：按当前计划源查这辆车在该停靠点排定的股道。 没有计划源或没有计划时为空。
+   * 计划站台（{@link DynamicPlatformAllocator.PlatformPreference}）：按当前计划源查这辆车在该停靠点排定的股道；时刻表没有排定时，
+   * 看这辆车有没有预先指定的站台（叫来的车停右键的那条）。都没有时为空。
    */
   Optional<NodeId> plannedPlatform(String trainName, RouteDefinition route, int stopIndex) {
-    ScheduledDeparturePlan current = plan;
-    if (current == null || route == null || routeDefinitions == null) {
+    if (route == null || routeDefinitions == null) {
       return Optional.empty();
     }
-    return routeDefinitions
-        .findUuid(route.id())
-        .flatMap(routeId -> current.plannedPlatformOf(trainName, routeId, stopIndex))
-        .map(NodeId::of);
+    Optional<UUID> routeId = routeDefinitions.findUuid(route.id());
+    if (routeId.isEmpty()) {
+      return Optional.empty();
+    }
+    ScheduledDeparturePlan current = plan;
+    Optional<String> planned =
+        current == null
+            ? Optional.empty()
+            : current.plannedPlatformOf(trainName, routeId.get(), stopIndex);
+    if (planned.isEmpty()) {
+      try {
+        Optional<String> pinned =
+            pinnedPlatforms.pinnedPlatformOf(trainName, routeId.get(), stopIndex);
+        planned = pinned == null ? Optional.empty() : pinned;
+      } catch (RuntimeException ex) {
+        debugLogger.accept(
+            "PINNED_PLATFORM_READ_FAILED train="
+                + trainName
+                + " stopIndex="
+                + stopIndex
+                + " error="
+                + ex);
+      }
+    }
+    return planned.map(NodeId::of);
+  }
+
+  /** 预先指定的站台：不归时刻表排、但这一趟要停某条股道的车（叫来的车停右键的那条）。只读、廉价，信号 tick 里每车可能问一次。 */
+  @FunctionalInterface
+  public interface PinnedPlatforms {
+
+    PinnedPlatforms NONE = (trainName, routeId, stopIndex) -> Optional.empty();
+
+    /**
+     * @param trainName 列车名
+     * @param routeId 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 指定的股道节点；没有时为空
+     */
+    Optional<String> pinnedPlatformOf(String trainName, UUID routeId, int stopIndex);
+  }
+
+  /** 接上预先指定站台的来源；{@code null} 表示没有。 */
+  public void setPinnedPlatforms(PinnedPlatforms next) {
+    this.pinnedPlatforms = next == null ? PinnedPlatforms.NONE : next;
   }
 
   /** 接上选台器（调度服务构造时）。 */
@@ -220,6 +269,19 @@ public final class StationStopCoordinator {
     }
     scheduledHolds.remove(key, until);
     return false;
+  }
+
+  /**
+   * 登记一次车库扣车：手动提前出车的车在车库等到计划发车时刻。健康检查据此把它当成按表扣车（{@link #holdingForSchedule}），到点自动失效。
+   *
+   * @param trainName 列车名
+   * @param until 计划发车时刻
+   */
+  public void holdAtDepotUntil(String trainName, Instant until) {
+    String key = holdKey(trainName);
+    if (key != null && until != null) {
+      scheduledHolds.put(key, until);
+    }
   }
 
   /** 扣留判定本体：要扣就返回扣到几点。 */
@@ -448,16 +510,60 @@ public final class StationStopCoordinator {
   }
 
   /**
-   * 线路限速倍率：本车次最近一次到发晚点达到阈值时放宽线路限速，赶上计划（或早于阈值）即恢复。
+   * 线路限速倍率：本车次最近一次到发晚点达到阈值时放宽线路限速，赶上计划（或早于阈值）即恢复；叫来的车追近前车时按需降速 （{@link CalledTrainPacer}）。
    *
-   * <p>控车每个信号 tick 都会问。倍率只作用于写明的线路限速（见 {@code
+   * <p>控车每个信号 tick 都会问。放宽只作用于写明的线路限速，降速作用于最终的边限速（见 {@code
    * RailGraphService#effectiveSpeedLimitBlocksPerSecond(UUID, RailEdge, Instant, double, double)}），
-   * 进站限速、临时限速、CAUTION 与信号速度都不受影响；制动距离与移动授权按实际车速算，跑得快只会刹得早。 晚点只在到发时更新，所以同一区间内倍率不会来回跳。
+   * 进站限速、CAUTION 与信号速度都不受影响；制动距离与移动授权按实际车速算，跑得快只会刹得早。 晚点只在到发时更新，所以同一区间内倍率不会来回跳。
    *
    * @param trainName 列车名
-   * @return 倍率；不放宽时为 1
+   * @return 倍率；不放宽也不降速时为 1
    */
   public double lineSpeedFactor(String trainName) {
+    return recoveryFactor(trainName) * calledTrainPacer.factor(trainName);
+  }
+
+  /**
+   * 装上叫来的车按需降速的参数。
+   *
+   * @param settings 参数；{@code null} 表示不降速
+   */
+  public void setCalledTrainPacing(CalledTrainPacer.Settings settings) {
+    calledTrainPacer.setSettings(settings);
+  }
+
+  /**
+   * 装上“叫来的车身后有车追近”的判定（按到站预计算的后车间隔，补前瞻窗口看不到的远处后车）。
+   *
+   * @param rearClose 列车名 → 身后有车追近；{@code null} 表示只看前瞻
+   */
+  public void setCalledTrainRearCheck(Predicate<String> rearClose) {
+    calledTrainPacer.setRearCheck(rearClose);
+  }
+
+  /**
+   * 信号 tick 的前瞻结果：叫来的车据此按需降速（{@link CalledTrainPacer#observe}）。
+   *
+   * @param decision 前瞻用的占用判定
+   * @param blockerDistance 到首个阻塞资源的距离；前瞻没有阻塞时为空
+   * @param speedBps 本车车速（格/秒）
+   */
+  public void observeLookahead(
+      String trainName,
+      TrainProperties properties,
+      OccupancyDecision decision,
+      OptionalLong blockerDistance,
+      double speedBps) {
+    try {
+      calledTrainPacer.observe(
+          trainName, properties, decision, blockerDistance, speedBps, clock.get());
+    } catch (RuntimeException ex) {
+      debugLogger.accept("CALL_PACING_OBSERVE_FAILED train=" + trainName + " error=" + ex);
+    }
+  }
+
+  /** 晚点追赶的线路限速倍率（见 {@link #lineSpeedFactor}）。 */
+  private double recoveryFactor(String trainName) {
     Recovery current = this.recovery;
     ScheduledDeparturePlan source = this.plan;
     String key = holdKey(trainName);

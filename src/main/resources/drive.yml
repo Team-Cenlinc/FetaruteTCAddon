@@ -287,12 +287,13 @@ license:
   retry-cooldown-minutes: 10
   # 两次补发驾驶证之间至少隔多久（分钟）
   reissue-cooldown-minutes: 10
-  # 路考练习（/fta license practice）：和路考一样派一段区间任务，有教练逐步提示与一次应急演练，不发证、不记入驾驶记录。
-  # 练习与路考都跑在正式车次上，下面的晚点阈值用来保护调度：已经晚点的车次不派给考生，跑着跑着晚点过大先撤演练，再大就交还自动运行。
+  # 练习（/fta license practice <等级>）：不派车，玩家先坐上要练的那列调度列车（中途站停站中，或在终点站待命）再报名，从这一站起做满考试的站数。
+  # 驾驶员练习有教练逐步提示与一次应急演练，车掌练习逐站讲评并安排夹人夹物演练；都不发证、不记入记录。路考与车掌考试则由系统在报名的车站指派车次。
+  # 练习与考试都跑在正式车次上，下面的晚点阈值用来保护调度：已经晚点的车次不派给考生、不能拿来练习，跑着跑着晚点过大先撤演练，再大就交还自动运行。
   training:
     # 是否安排应急演练（受电中断、车门故障、紧急停车；仿真级另有主断跳闸），开过第一站后随机一次，只讲评不影响计次
     drill: true
-    # 晚点超过多少秒就不派这趟车、不开始演练
+    # 晚点超过多少秒就不派这趟车、不能拿来练习、不开始演练
     drill-max-delay-seconds: 30
     # 晚点超过多少秒撤掉进行中的演练，提示驾驶员先恢复正点
     max-delay-seconds: 120
@@ -302,10 +303,11 @@ license:
     line-loss-seconds: 15
     # 紧急停车演练：从提示到拨到 EB 的合格反应时间（秒）
     emergency-reaction-seconds: 3
-    # 只用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时用正式车次
+    # 只能用这些交路代码的车次练习（以后建了专用练习线时填写）；留空时任何正式车次都能练
     routes: []
-  # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）
-  # 或 road-test（路考：驾驶一段调度列车的区间任务）；grants：持证时给的权限节点。
+  # 各级驾驶证，按顺序列出，依次为第 1 级、第 2 级……；requires：要先持有的等级；exam：tutorial（完整做完新手教程，不跳过练习步骤）、
+  # road-test（路考：驾驶一段调度列车的区间任务）或 guard（车掌：在调度列车上值乘，做满几站作业）；grants：持证时给的权限节点。
+  # exam: guard 的一项不占级数，是驾驶证上的附注（驾驶证与 /fta license 里单列“附注”一栏，提示里称“<名称>附注”）。
   # 不想开放某一级时把它的 enabled 设为 false，不要删掉（删掉的会在下次更新配置时补回）。
   classes:
     learner:
@@ -335,6 +337,25 @@ license:
       allow-wrong-door: false
       grants:
         - fetarute.drive.driver
+    guard:
+      name: "车掌"
+      description: "在调度列车上当车掌：开关车门、站台监视、确认出站信号、按发车铃"
+      enabled: true
+      requires: []
+      exam: guard
+      # 报名考试前要做完几次车掌练习；0 表示不要求
+      training-runs: 1
+      # 考试与练习中要做满几站作业（交班站排在其后一站）
+      exam-stops: 3
+      # 及格分（0–100）；哪一站有超时（站台代开、代关或代发发车信号）即不及格
+      min-points: 70
+      # 为 false 时开错车门即不及格
+      allow-wrong-door: false
+      # 夹人夹物演练：考试中随机一站（不是第一站）关门时站台报告夹人夹物，须在这么多秒内再开车门并报告“夹人夹物”，
+      # 未按时处置即不及格；列车晚点超过 training.drill-max-delay-seconds 时顺延到下一站。0 为不演练
+      drill-seconds: 15
+      grants:
+        - fetarute.drive.guard
 
 # 驾驶奖励：驾驶调度列车的任务（领任务或接管时刻表车次）按驾驶距离与停站数给经验与服务器钱币。
 # 开到终点站全额；中途结束、被收回按已开的部分；卡住被收回、超过任务时限、越站交还不发；路考与练习不发。
@@ -363,6 +384,39 @@ rewards:
   # ATO 下连续多少站超时未确认发车就判定驾驶员离开：从第一次超时起的里程与停站不计奖励，确认一次发车即恢复；
   # 不到这么多站就确认过（或本趟结束）的照常计。0 表示不判定
   away-after-timeouts: 3
+
+# 车掌：坐车尾驾驶室，停站时开关门、下站台监视，门全关后回座确认出站信号、按发车铃；驾驶员（或 ATO）收到发车信号才起步。
+# 有车掌时车门归车掌。各步时限按秒；发车铃那一步只累计出站放行着的时间（闭塞、按表扣车时不计）。
+guard:
+  enabled: true
+  # 停妥后多久不开门，由站台代开（记一次超时）
+  open-doors-seconds: 30
+  # 停站时间到后多久不关门，由站台代关（记一次超时）
+  close-doors-seconds: 15
+  # 门全关后、出站放行着累计多久还没按发车铃：传送回车掌座位、代发发车信号（记一次超时）
+  depart-signal-seconds: 15
+  # 异常情况报告：当前这一步的时限延长多久；每站最多报告几次
+  incident-extension-seconds: 30
+  incident-max-per-stop: 2
+  # 连续多少站有超时就结束车掌任务（判未完成）；0 表示不处置
+  end-after-timeouts: 3
+  # 关门监视：离自己那节车门最远几格、视线与车身夹角最大几度（朝车头或车尾都行）、合格采样至少几成
+  watch-radius-blocks: 8.0
+  watch-angle-degrees: 45
+  watch-ratio: 0.7
+  # 出站监视：列车走过“车长 + 这么多格”算车尾离开站台；最长几秒
+  departure-watch-extra-blocks: 24
+  departure-watch-max-seconds: 20
+  # 发车铃：按住多久（tick）算一长；两次短按相隔多久（tick）以内算呼叫
+  buzzer-long-ticks: 16
+  buzzer-double-ticks: 20
+  # simulation 级：驾驶员收到发车信号后多久（秒）内要回一短
+  ack-seconds: 5
+  # 自动运行（含 ATO）的车被车掌拉下紧急停车后最多扣多久（秒），到时自动解除；车掌停稳后按住发车铃一长声可提前解除
+  emergency-hold-seconds: 120
+  # 奖励（单价、评级系数与货币沿用 rewards 段）：每完成一站作业按驾驶员人工停站单价的几倍、每公里按驾驶员每公里单价的几倍；车掌搭 ATO 也全额
+  reward-per-stop-ratio: 1.0
+  reward-per-km-ratio: 0.5
 
 sounds:
   enabled: true
@@ -426,6 +480,12 @@ sounds:
     key: "minecraft:block.note_block.bell"
     volume: 0.8
     pitch: 1.0
+  # 车掌与驾驶员之间的铃（驾驶室里的蜂鸣器）：只给这列车上的驾驶员与车掌听，按住时每 4 tick 补一次形成连续的“嗡”声。
+  # 可换成材质包里的 fetarute:drive.buzzer
+  buzzer:
+    key: "minecraft:block.note_block.bit"
+    volume: 1.0
+    pitch: 0.5
   # 停妥时的对标结果：停准；可开门范围内；越过窗口或停短
   stop-accurate:
     key: "minecraft:entity.player.levelup"

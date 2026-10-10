@@ -15191,6 +15191,13 @@ public final class RuntimeDispatchService {
       blockerDistanceOpt = lookahead.distanceToBlocker();
       constraintDistanceOpt = lookahead.minConstraintDistance();
     }
+    // 叫来的车按需降速：前车间隔由这里的阻塞距离折算，下一拍起作用；挡着别的车时记为后车追近。
+    stationStopCoordinator.observeLookahead(
+        trainName,
+        properties,
+        lookaheadDecision,
+        blockerDistanceOpt,
+        train.currentSpeedBlocksPerTick() * SPEED_TICKS_PER_SECOND);
     nextAspect =
         stageSignalAspectForAuthorityAndAdvisory(
             trainName, nextAspect, decision, advisoryDecision, advisoryPreview.risks());
@@ -22129,6 +22136,7 @@ public final class RuntimeDispatchService {
    * @param trainName 预生成列车的稳定逻辑名称
    * @param route 当前 Route 定义
    * @param spawnWaypoints 已将第 0 个节点替换为实际 Depot 的节点序列
+   * @param startIndex 列车生成处在节点序列里的下标：车库出车为 0，交路中途的区间生成为该区间点下标
    * @param graph 本次 Depot gate 使用的调度图
    * @param now 本次准备时间
    * @return 可安全用于 gate 的节点序列；无法安全 materialize 紧邻目标时返回 empty
@@ -22137,6 +22145,7 @@ public final class RuntimeDispatchService {
       String trainName,
       RouteDefinition route,
       List<NodeId> spawnWaypoints,
+      int startIndex,
       RailGraph graph,
       Instant now) {
     if (trainName == null
@@ -22144,16 +22153,17 @@ public final class RuntimeDispatchService {
         || route == null
         || spawnWaypoints == null
         || spawnWaypoints.size() != route.waypoints().size()
-        || spawnWaypoints.size() < 2
+        || startIndex < 0
+        || spawnWaypoints.size() < startIndex + 2
         || graph == null) {
       return Optional.empty();
     }
-    NodeId currentNode = spawnWaypoints.get(0);
+    NodeId currentNode = spawnWaypoints.get(startIndex);
     RouteDefinition spawnRoute =
         new RouteDefinition(route.id(), spawnWaypoints, route.metadata(), route.lifecycleMode());
     DynamicResolution<DynamicPlatformAllocator.AllocationResult> resolution =
         dynamicAllocator.resolveAllocation(
-            trainName, spawnRoute, 0, graph, currentNode, Optional.empty());
+            trainName, spawnRoute, startIndex, graph, currentNode, Optional.empty());
     if (resolution.isBlocked()) {
       cancelPreparedDepotSpawnDynamicAuthority(trainName);
       debugLogger.accept(
@@ -22175,11 +22185,11 @@ public final class RuntimeDispatchService {
 
     List<NodeId> effectiveNodes =
         new java.util.ArrayList<>(resolveEffectiveWaypoints(trainName, route));
-    effectiveNodes.set(0, currentNode);
+    effectiveNodes.set(startIndex, currentNode);
     Optional<DynamicAuthorityWindow> windowOpt =
         resolveDynamicAuthorityWindow(
-            trainName, route, effectiveNodes, effectiveNodes, 0, OptionalInt.empty());
-    if (windowOpt.isEmpty() || windowOpt.get().movementNodes().size() < 2) {
+            trainName, route, effectiveNodes, effectiveNodes, startIndex, OptionalInt.empty());
+    if (windowOpt.isEmpty() || windowOpt.get().movementNodes().size() < startIndex + 2) {
       cancelPreparedDepotSpawnDynamicAuthority(trainName);
       debugLogger.accept(
           "DYNAMIC 目标等待: source=depot-spawn train="

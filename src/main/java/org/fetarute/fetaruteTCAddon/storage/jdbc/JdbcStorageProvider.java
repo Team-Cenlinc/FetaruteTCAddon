@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage.jdbc;
 
 import javax.sql.DataSource;
+import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
@@ -40,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcHudTemplateRepos
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLicenseRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcLineRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcOperatorRepository;
+import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPendingCallRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsBulletinRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPidsScreenRepository;
 import org.fetarute.fetaruteTCAddon.storage.jdbc.repository.JdbcPlayerIdentityRepository;
@@ -92,6 +94,7 @@ public final class JdbcStorageProvider implements StorageProvider {
   private final HudLineBindingRepository hudLineBindingRepository;
   private final PidsScreenRepository pidsScreenRepository;
   private final PidsBulletinRepository pidsBulletinRepository;
+  private final PendingCallRepository pendingCallRepository;
 
   public JdbcStorageProvider(
       DataSource dataSource, SqlDialect dialect, String tablePrefix, LoggerManager logger) {
@@ -146,6 +149,8 @@ public final class JdbcStorageProvider implements StorageProvider {
         new JdbcPidsScreenRepository(dataSource, dialect, tablePrefix, logger::debug);
     this.pidsBulletinRepository =
         new JdbcPidsBulletinRepository(dataSource, dialect, tablePrefix, logger::debug);
+    this.pendingCallRepository =
+        new JdbcPendingCallRepository(dataSource, dialect, tablePrefix, logger::debug);
   }
 
   public DataSource dataSource() {
@@ -279,6 +284,11 @@ public final class JdbcStorageProvider implements StorageProvider {
   @Override
   public PidsBulletinRepository pidsBulletins() {
     return pidsBulletinRepository;
+  }
+
+  @Override
+  public PendingCallRepository pendingCalls() {
+    return pendingCallRepository;
   }
 
   @Override

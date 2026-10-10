@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.drive.inventory;
 
+import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatEnterEvent;
 import com.bergerkiller.bukkit.tc.events.seat.MemberBeforeSeatExitEvent;
 import com.destroystokyo.paper.event.player.PlayerRecipeBookClickEvent;
 import io.papermc.paper.event.player.PlayerPickItemEvent;
@@ -41,6 +42,7 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.plugin.Plugin;
+import org.fetarute.fetaruteTCAddon.drive.guard.GuardMenu;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveMenu;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
 import org.fetarute.fetaruteTCAddon.drive.session.DriveSessionManager;
@@ -96,6 +98,14 @@ public final class DriveListener implements Listener {
         && !event.isSeatChange()
         && event.getEntity() instanceof Player player
         && !manager.allowSeatExit(player)) {
+      event.setCancelled(true);
+    }
+  }
+
+  /** 车掌预留的座位：别人不能坐进去（车掌换端时先让出来）。 */
+  @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+  public void onSeatEnter(MemberBeforeSeatEnterEvent event) {
+    if (!manager.allowSeatEnter(event.getEntity(), event.getMember(), event.getSeat())) {
       event.setCancelled(true);
     }
   }
@@ -240,8 +250,8 @@ public final class DriveListener implements Listener {
 
   @EventHandler(priority = EventPriority.HIGHEST)
   public void onInventoryOpen(InventoryOpenEvent event) {
-    if (DriveMenu.isMenu(event.getInventory())) {
-      // 停车后菜单是我们自己打开的虚拟界面，放行；其它界面一律不许打开。
+    if (DriveMenu.isMenu(event.getInventory()) || GuardMenu.isMenu(event.getInventory())) {
+      // 停车后菜单与车掌菜单是我们自己打开的虚拟界面，放行；其它界面一律不许打开。
       return;
     }
     if (event.getPlayer() instanceof Player player) {
@@ -256,10 +266,13 @@ public final class DriveListener implements Listener {
     }
     // 点击一律取消；菜单上半部分的左键、右键点击再交给会话管理器处理。
     var top = event.getView().getTopInventory();
-    if (DriveMenu.isMenu(top)
-        && event.getClickedInventory() == top
-        && (event.getClick() == ClickType.LEFT || event.getClick() == ClickType.RIGHT)) {
+    boolean buttonClick =
+        event.getClickedInventory() == top
+            && (event.getClick() == ClickType.LEFT || event.getClick() == ClickType.RIGHT);
+    if (DriveMenu.isMenu(top) && buttonClick) {
       manager.onMenuClick(player, event.getSlot());
+    } else if (GuardMenu.isMenu(top) && buttonClick) {
+      manager.guards().ifPresent(guards -> guards.onMenuClick(player, top, event.getSlot()));
     }
   }
 
@@ -267,6 +280,9 @@ public final class DriveListener implements Listener {
   public void onInventoryClose(InventoryCloseEvent event) {
     if (DriveMenu.isMenu(event.getInventory()) && event.getPlayer() instanceof Player player) {
       manager.onMenuClosed(player);
+    }
+    if (GuardMenu.isMenu(event.getInventory()) && event.getPlayer() instanceof Player player) {
+      manager.guards().ifPresent(guards -> guards.onMenuClosed(player));
     }
   }
 
@@ -285,12 +301,12 @@ public final class DriveListener implements Listener {
   }
 
   /**
-   * 玩家正在驾驶就取消事件。
+   * 玩家正在驾驶或当车掌就取消事件。
    *
-   * @return 玩家是否正在驾驶（即事件是否被取消）
+   * @return 玩家是否正在驾驶或当车掌（即事件是否被取消）
    */
   private boolean guard(Player player, Cancellable event) {
-    if (!manager.isDriving(player.getUniqueId())) {
+    if (!manager.isProtected(player.getUniqueId())) {
       return false;
     }
     event.setCancelled(true);

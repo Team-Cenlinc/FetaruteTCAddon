@@ -56,11 +56,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPhysicsProperties;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TrainCartsDepotSpawner;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.SignNodeInfo;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -141,13 +141,6 @@ public final class FtaDepotCommand {
                 ctx -> {
                   CommandSender sender = ctx.sender();
                   LocaleManager locale = plugin.getLocaleManager();
-                  if (plugin
-                      .getRuntimeDispatchService()
-                      .map(service -> service.requiresCoordinatedMaterializedSpawn())
-                      .orElse(false)) {
-                    sender.sendMessage(locale.component("command.depot.spawn.coordinated-only"));
-                    return;
-                  }
                   Optional<org.fetarute.fetaruteTCAddon.storage.api.StorageProvider> providerOpt =
                       readyProvider(sender);
                   if (providerOpt.isEmpty()) {
@@ -182,6 +175,23 @@ public final class FtaDepotCommand {
                     sender.sendMessage(
                         locale.component(
                             "command.depot.spawn.not-depot", Map.of("node", depotId.value())));
+                    return;
+                  }
+                  // 有表线路：提前出这条线路从该车库开出的下一班，出车后在车库等到计划时刻再走。
+                  if (spawnTimetabledEarly(
+                      sender,
+                      locale,
+                      provider,
+                      resolved,
+                      depotId,
+                      ctx.flags().getValue(patternFlag, null) != null)) {
+                    return;
+                  }
+                  if (plugin
+                      .getRuntimeDispatchService()
+                      .map(service -> service.requiresCoordinatedMaterializedSpawn())
+                      .orElse(false)) {
+                    sender.sendMessage(locale.component("command.depot.spawn.coordinated-only"));
                     return;
                   }
 
@@ -271,8 +281,8 @@ public final class FtaDepotCommand {
 
                   MinecartGroup group = spawnedOpt.get();
                   TrainProperties properties = group.getProperties();
-                  // 与自动出库一致：出库车必须常驻加载，否则首个物理 tick 就会被 TrainCarts 卸载。
-                  TrainCartsDepotSpawner.ensureKeepChunksLoaded(properties);
+                  // 与自动出库一致：关摩擦、重力、碰撞，常驻加载（否则首个物理 tick 就会被 TrainCarts 卸载）。
+                  SpawnPhysicsProperties.apply(properties);
                   UUID runId = UUID.randomUUID();
                   Optional<RouteDestinationResolver.DestinationInfo> destInfoOpt =
                       RouteDestinationResolver.resolve(provider, resolved.route());
@@ -1300,4 +1310,189 @@ public final class FtaDepotCommand {
   }
 
   private record ResolvedRoute(Company company, Operator operator, Line line, Route route) {}
+
+  /** 有表线路提前出车往后找下一班找多远。 */
+  private static final Duration EARLY_SPAWN_HORIZON = Duration.ofMinutes(60);
+
+  private static final java.time.format.DateTimeFormatter EARLY_SPAWN_CLOCK =
+      java.time.format.DateTimeFormatter.ofPattern("HH:mm:ss")
+          .withZone(java.time.ZoneId.systemDefault());
+
+  /**
+   * 有表线路的手动出车：提前出这条线路从该车库开出的下一班，车型按交路，出车后在车库等到计划时刻再走。
+   *
+   * <p>只提前下一班，最多提前 {@code spawn.early-spawn-max-lead-minutes} 分钟；股道由发车侧挑选，占用后会挡住别的车出库、回库时不出。
+   *
+   * @return 线路归时刻表发车、已经回复过时为 true；否则交给原来的手动出车
+   */
+  private boolean spawnTimetabledEarly(
+      CommandSender sender,
+      LocaleManager locale,
+      org.fetarute.fetaruteTCAddon.storage.api.StorageProvider provider,
+      ResolvedRoute resolved,
+      NodeId depotId,
+      boolean patternGiven) {
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager>
+        timetabled =
+            plugin
+                .getSpawnManager()
+                .filter(
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .schedule
+                            .spawn
+                            .TimetableSpawnManager
+                            .class
+                        ::isInstance)
+                .map(
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .schedule
+                            .spawn
+                            .TimetableSpawnManager
+                            .class
+                        ::cast);
+    if (timetabled.isEmpty()) {
+      return false;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner> assigner =
+        plugin
+            .getSpawnTicketAssigner()
+            .filter(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner.class
+                    ::isInstance)
+            .map(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner.class
+                    ::cast);
+    Duration maxLead =
+        Duration.ofMinutes(
+            plugin.getConfigManager().current().spawnSettings().earlySpawnMaxLeadMinutes());
+    // 往后找下一班至少找到最早提前量那么远，否则提前量配得比它大时永远找不到车次。
+    Duration horizon = maxLead.compareTo(EARLY_SPAWN_HORIZON) > 0 ? maxLead : EARLY_SPAWN_HORIZON;
+    Instant now = Instant.now();
+    var result =
+        timetabled
+            .get()
+            .issueEarly(
+                resolved.route().id(),
+                depotId.value(),
+                now,
+                horizon,
+                maxLead,
+                plan ->
+                    assigner
+                        .map(found -> found.chooseEarlySpawnTrack(provider, plan, now))
+                        .orElseGet(
+                            () ->
+                                org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn
+                                    .EarlySpawnYard.Decision.blocked(
+                                    org.fetarute
+                                        .fetaruteTCAddon
+                                        .dispatcher
+                                        .schedule
+                                        .spawn
+                                        .EarlySpawnYard
+                                        .Reason
+                                        .YARD_UNKNOWN,
+                                    depotId.value())));
+    String time = result.plannedDeparture().map(EARLY_SPAWN_CLOCK::format).orElse("-");
+    switch (result.outcome()) {
+      case NOT_TIMETABLED -> {
+        return false;
+      }
+      case NO_SERVICE -> sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.early-no-service", Map.of("route", resolved.route().code())));
+      case NONE_UPCOMING -> sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.early-none",
+              Map.of(
+                  "route",
+                  resolved.route().code(),
+                  "node",
+                  depotId.value(),
+                  "minutes",
+                  String.valueOf(horizon.toMinutes()))));
+      case ALREADY_OUT -> sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.early-already-out",
+              Map.of("trip", result.tripCode(), "time", time)));
+      case TOO_EARLY -> sender.sendMessage(
+          locale.component(
+              "command.depot.spawn.early-too-early",
+              Map.of(
+                  "trip",
+                  result.tripCode(),
+                  "time",
+                  time,
+                  "earliest",
+                  result
+                      .plannedDeparture()
+                      .map(planned -> EARLY_SPAWN_CLOCK.format(planned.minus(maxLead)))
+                      .orElse("-"),
+                  "minutes",
+                  String.valueOf(maxLead.toMinutes()))));
+      case BLOCKED -> sender.sendMessage(
+          earlySpawnBlockedMessage(locale, depotId, result.blocker().orElse(null)));
+      case ISSUED -> {
+        if (patternGiven) {
+          sender.sendMessage(locale.component("command.depot.spawn.early-pattern-ignored"));
+        }
+        sender.sendMessage(
+            locale.component(
+                "command.depot.spawn.early-issued",
+                Map.of(
+                    "trip",
+                    result.tripCode(),
+                    "node",
+                    result.depotNode().orElse(depotId.value()),
+                    "time",
+                    time)));
+      }
+    }
+    return true;
+  }
+
+  /** 选不出股道时的提示：说明是哪条股道、会挡住谁。 */
+  private net.kyori.adventure.text.Component earlySpawnBlockedMessage(
+      LocaleManager locale,
+      NodeId depotId,
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.EarlySpawnYard.Blocker blocker) {
+    if (blocker == null) {
+      return locale.component(
+          "command.depot.spawn.early-blocked-unknown", Map.of("node", depotId.value()));
+    }
+    return switch (blocker.reason()) {
+      case YARD_UNKNOWN -> locale.component(
+          "command.depot.spawn.early-blocked-unknown", Map.of("node", depotId.value()));
+      case TRACK_OCCUPIED -> locale.component(
+          "command.depot.spawn.early-blocked-occupied", Map.of("track", blocker.track()));
+      case NO_FREE_TRACK -> locale.component(
+          "command.depot.spawn.early-blocked-no-track", Map.of("node", depotId.value()));
+      case NEEDED_BY_OTHERS -> blocker
+          .use()
+          .map(
+              use ->
+                  locale.component(
+                      switch (use.kind()) {
+                        case DEPARTURE -> "command.depot.spawn.early-blocked-departure";
+                        case ARRIVAL -> "command.depot.spawn.early-blocked-arrival";
+                        case INBOUND -> "command.depot.spawn.early-blocked-inbound";
+                      },
+                      Map.of(
+                          "track",
+                          blocker.track(),
+                          "subject",
+                          use.subject(),
+                          "time",
+                          use.at().map(EARLY_SPAWN_CLOCK::format).orElse("-"))))
+          .orElseGet(
+              () ->
+                  locale.component(
+                      "command.depot.spawn.early-blocked-no-track",
+                      Map.of("node", depotId.value())));
+    };
+  }
 }

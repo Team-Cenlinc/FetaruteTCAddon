@@ -726,7 +726,11 @@ public final class FtaDriveCommand {
           case "start" -> drive.startTutorial(player);
           case "restart" -> drive.restartTutorial(player);
           case "stop" -> drive.tutorials().stop(player);
-          case "reset" -> drive.tutorials().reset(player);
+          case "reset" -> {
+            // 车掌提示与驾驶提示一起重置。
+            drive.guards().ifPresent(guards -> guards.resetTips(player));
+            yield drive.tutorials().reset(player);
+          }
           case "skip" -> drive.skipTutorialStep(player);
           default -> "drive.tutorial.command.invalid";
         };

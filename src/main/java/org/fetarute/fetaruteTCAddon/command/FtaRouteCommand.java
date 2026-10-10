@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -1532,7 +1533,7 @@ public final class FtaRouteCommand {
                   }
 
                   List<RouteValidationEntry> entries = new ArrayList<>();
-                  int routeIssueCount = 0;
+                  Set<String> issueRoutes = new LinkedHashSet<>();
                   boolean reachabilitySkipped = false;
                   List<Route> allLineRoutes = provider.routes().listByLine(resolved.line().id());
                   Map<UUID, List<RouteStop>> stopsByRoute = new HashMap<>();
@@ -1556,7 +1557,7 @@ public final class FtaRouteCommand {
                     if (result.issues().isEmpty() && spawnIssues.isEmpty()) {
                       continue;
                     }
-                    routeIssueCount++;
+                    issueRoutes.add(route.code());
                     for (RouteValidationIssue issue : result.issues()) {
                       entries.add(new RouteValidationEntry(route.code(), issue));
                     }
@@ -1564,6 +1565,8 @@ public final class FtaRouteCommand {
                       entries.add(new RouteValidationEntry(route.code(), issue));
                     }
                   }
+                  callSourceIssues(resolved.line(), routes, issueRoutes, entries);
+                  int routeIssueCount = issueRoutes.size();
 
                   sender.sendMessage(
                       locale.component(
@@ -3830,6 +3833,71 @@ public final class FtaRouteCommand {
   }
 
   /**
+   * 线路开了叫车时，列出没有车源的叫车方向：每条能跑这一趟的交路都是首站不是车库、没有交路在首站终到、本站上游也没有能生成车的区间点。 这样的方向不会出现在叫车对话框里。
+   *
+   * <p>挂在能跑这一趟、又在本次校验范围里的交路上（几条交路用 “/” 连起来）。
+   */
+  private void callSourceIssues(
+      Line line, List<Route> routes, Set<String> issueRoutes, List<RouteValidationEntry> entries) {
+    if (line == null
+        || !org.fetarute.fetaruteTCAddon.call.LineCallMetadata.allowsPlayerCall(line.metadata())) {
+      return;
+    }
+    Optional<org.fetarute.fetaruteTCAddon.call.CallService> calls = plugin.getCallService();
+    if (calls.isEmpty()) {
+      return;
+    }
+    Set<UUID> validated = new HashSet<>();
+    for (Route route : routes) {
+      validated.add(route.id());
+    }
+    org.fetarute.fetaruteTCAddon.call.CallService service = calls.get();
+    addCallSourceIssues(
+        service.unsourcedDirections(line.id()),
+        validated,
+        unsourced -> {
+          Map<String, String> params =
+              new HashMap<>(service.directionPlaceholders(unsourced.direction()));
+          params.put("station", service.stationName(unsourced.station()));
+          return params;
+        },
+        issueRoutes,
+        entries);
+  }
+
+  /**
+   * 把没有车源的方向挂到本次校验范围里、能跑这一趟的交路上（几条交路用 “/” 连起来）；一条都不在范围里的方向不报。被挂上的交路记进 {@code issueRoutes}。
+   *
+   * @param validated 本次校验的交路
+   * @param params 方向的文案占位符
+   */
+  static void addCallSourceIssues(
+      List<org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection> unsourced,
+      Set<UUID> validated,
+      java.util.function.Function<
+              org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection, Map<String, String>>
+          params,
+      Set<String> issueRoutes,
+      List<RouteValidationEntry> entries) {
+    for (org.fetarute.fetaruteTCAddon.call.CallService.UnsourcedDirection direction : unsourced) {
+      List<String> codes =
+          direction.direction().routes().stream()
+              .filter(route -> validated.contains(route.routeId()))
+              .map(org.fetarute.fetaruteTCAddon.call.CallCatalog.CallRoute::routeCode)
+              .toList();
+      if (codes.isEmpty()) {
+        continue;
+      }
+      issueRoutes.addAll(codes);
+      entries.add(
+          new RouteValidationEntry(
+              String.join("/", codes),
+              new RouteValidationIssue(
+                  "command.route.validate.call-no-source", params.apply(direction))));
+    }
+  }
+
+  /**
    * 校验 route 与自动发车配置之间的关系。
    *
    * <p>这里覆盖容易导致 SpawnPlan 静默跳过的配置项：交路组引用、baseline 来源、组内运营 route 权重，以及 CREATE 首站 CRET 要求。
@@ -4121,12 +4189,12 @@ public final class FtaRouteCommand {
     return lines;
   }
 
-  private record RouteValidationIssue(String key, Map<String, String> params) {}
+  record RouteValidationIssue(String key, Map<String, String> params) {}
 
   private record RouteValidationResult(
       List<RouteValidationIssue> issues, boolean reachabilitySkipped) {}
 
-  private record RouteValidationEntry(String routeCode, RouteValidationIssue issue) {}
+  record RouteValidationEntry(String routeCode, RouteValidationIssue issue) {}
 
   private record ResolvedLine(Company company, Operator operator, Line line) {}
 

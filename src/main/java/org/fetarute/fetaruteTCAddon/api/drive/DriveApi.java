@@ -67,7 +67,8 @@ public interface DriveApi {
   boolean abandon(UUID playerId, String reason);
 
   /**
-   * 玩家最近的驾驶记录（只含开过车的任务），新的在前。
+   * 玩家最近的驾驶记录（只含开过车的任务），新的在前。当过车掌的玩家也含车掌的记录（{@link TaskRecord#mode()} 为 {@code
+   * GUARD}，1.14.0），只要车掌的记录请用 {@code GuardApi#records}。
    *
    * @param limit 最多几条
    */

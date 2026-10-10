@@ -19,6 +19,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsSnapshot;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.render.PidsTheme;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Arrival;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.ArrivalMode;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
@@ -422,6 +423,88 @@ class PidsViewBuilderTest {
     assertFalse(builder.hasVacancy(platformRequest("1", moved)), "只有改去别处的那一班：没有空位页");
   }
 
+  /** 开放叫车时空行写的话：没车写“暂无后续列车”与提示；有车可乘只写提示；只剩终到的车写合并的一句。不开放时照旧。 */
+  @Test
+  void callableScreensWriteTheHintInEmptyRows() {
+    PidsViewBuilder.Calls callable = new PidsViewBuilder.Calls(true, Set.of());
+    PidsRow terminating = loaded(PidsRow.Status.BOARDING, true, List.of());
+
+    assertEquals(
+        List.of(names("no-more-trains"), names("call-hint")),
+        builder.build(withCalls(callable)).emptyMessages());
+    assertEquals(
+        List.of(names("call-hint")),
+        builder
+            .build(withCalls(callable, row(PidsRow.Status.EN_ROUTE, 720, OptionalLong.of(0))))
+            .emptyMessages(),
+        "有车可乘：不改动已有班次，只在空行写提示");
+    assertEquals(
+        List.of(names("no-more-trains-call")),
+        builder.build(withCalls(callable, terminating)).emptyMessages());
+    assertEquals(
+        List.of(names("no-more-trains")),
+        builder.build(withCalls(PidsViewBuilder.Calls.NONE)).emptyMessages(),
+        "不开放叫车：照旧只写暂无后续列车");
+  }
+
+  /** 能不能叫车要排车源、不便宜：屏上三行都排满了班次时不问（空行的话写不出来），有空行才问一次。 */
+  @Test
+  void theCallHintIsOnlyAskedWhenARowIsFree() {
+    int[] asked = {0};
+    PidsViewBuilder.Calls counting =
+        new PidsViewBuilder.Calls(
+            () -> {
+              asked[0]++;
+              return true;
+            },
+            Set.of());
+    PidsRow first = row(PidsRow.Status.EN_ROUTE, 120, OptionalLong.of(0));
+    PidsRow second = row(PidsRow.Status.EN_ROUTE, 420, OptionalLong.of(0));
+    PidsRow third = row(PidsRow.Status.EN_ROUTE, 720, OptionalLong.of(0));
+
+    builder.build(withCalls(counting, first, second, third));
+    assertEquals(0, asked[0], "排满了不问");
+
+    assertEquals(
+        List.of(names("call-hint")),
+        builder.build(withCalls(counting, first, second)).emptyMessages());
+    assertEquals(1, asked[0], "有空行问一次");
+  }
+
+  /** 叫来的车：状态格写“叫车”，与“准点”同一排法。 */
+  @Test
+  void calledTrainsShowOnCall() {
+    PidsView view =
+        builder.build(
+            withCalls(
+                new PidsViewBuilder.Calls(false, Set.of("train")),
+                row(PidsRow.Status.EN_ROUTE, 180, OptionalLong.of(0))));
+
+    Arrival arrival = view.rows().get(0).arrival();
+    assertEquals(ArrivalMode.COUNTDOWN, arrival.mode());
+    assertEquals(3, arrival.minutes());
+    assertEquals(names("status.on-call"), arrival.status().orElseThrow().text());
+  }
+
+  private static PidsView.Names names(String key) {
+    return new PidsView.Names(text("pids.board." + key), text("pids.board." + key + "-secondary"));
+  }
+
+  private static PidsViewBuilder.Request withCalls(PidsViewBuilder.Calls calls, PidsRow... rows) {
+    return new PidsViewBuilder.Request(
+        new PidsSnapshot(STATION, NOW, List.of(rows)),
+        NOW,
+        ZoneId.of("Asia/Shanghai"),
+        PidsTheme.DARK,
+        Set.of(),
+        List.of("1"),
+        3,
+        false,
+        Optional.empty(),
+        false,
+        calls);
+  }
+
   @Test
   void minutesRoundUpAndNeverGoNegative() {
     assertEquals(0, PidsViewBuilder.minutesUntil(NOW.minusSeconds(5), NOW));
@@ -620,7 +703,17 @@ class PidsViewBuilderTest {
           Map.entry("pids.board.vacancy.advice", "请优先考虑较空的车厢"),
           Map.entry("pids.board.status.platform-changed", "站台变更"),
           Map.entry("pids.board.status.moved", "改至 <platform> 站台"),
-          Map.entry("pids.board.minutes", "分"));
+          Map.entry("pids.board.minutes", "分"),
+          Map.entry("pids.board.no-more-trains", "暂无后续列车"),
+          Map.entry("pids.board.no-more-trains-secondary", "No further trains"),
+          Map.entry("pids.board.call-hint", "可右键本屏叫车"),
+          Map.entry("pids.board.call-hint-secondary", "Right-click to call a train"),
+          Map.entry("pids.board.no-more-trains-call", "暂无后续列车，可右键本屏叫车"),
+          Map.entry(
+              "pids.board.no-more-trains-call-secondary",
+              "No further trains. Right-click to call a train."),
+          Map.entry("pids.board.status.on-call", "叫车"),
+          Map.entry("pids.board.status.on-call-secondary", "On call"));
 
   /** 只认识 WS 线、NFY 与 NTA 两站。 */
   private static final class MapDirectory implements PidsDirectory {

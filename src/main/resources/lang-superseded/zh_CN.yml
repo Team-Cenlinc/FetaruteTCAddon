@@ -132,6 +132,8 @@ command:
       status: ["<gray>状态:</gray> <dark_aqua><status></dark_aqua>"]
       color: ["<gray>颜色:</gray> <dark_aqua><color></dark_aqua>"]
       spawn-max: ["<gray>最大车数:</gray> <dark_aqua><max_trains></dark_aqua>"]
+    set:
+      noop: ["<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--service/--color/--status/--freqBaseline/--maxTrains）</gray>"]
     depot:
       list:
         header: ["<prefix> <dark_aqua>线路 Depot</dark_aqua> <gray>(line=<white><line></white>, count=<white><count></white>)</gray>"]
@@ -374,6 +376,7 @@ drive:
   tutorial:
     finished: ["<prefix> <green>新手教程已完成。</green> <gray>驾驶调度列车时，第一次遇到信号确认、进站对标、开关门与发车信号时另有一次简短提示。输入 /fta drive tutorial reset 可重新开始。</gray>"]
     command:
+      reset: ["<prefix> <green>已重置新手教程与驾驶提示，下次开始驾驶时将重新提示。</green>"]
       already-running: ["<prefix> <yellow>新手教程正在进行中</yellow>"]
       invalid: ["<prefix> <red>操作只能是 start、stop、reset 或 skip</red>"]
     tips:
@@ -407,7 +410,7 @@ drive:
           how: ["<prefix> <white>开始方式：</white><gray>列车进站后坐进车头驾驶室，按提示确认座位并输入 <aqua>/fta drive on</aqua>。</gray> <click:run_command:'/fta drive task goto'><hover:show_text:'<gray>传送到列车旁</gray>'><green>[前往列车]</green></hover></click>"]
           feedback: ["<prefix> <gray>每到一站会点评停车结果，出现不及格项会马上提示。</gray>"]
           no-overrun: ["<prefix> <gray>· 每站停在可开门范围内，不得停过头或越站</gray>"]
-          route: ["<prefix> <white>考试车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>"]
+          route: ["<prefix> <white>考试车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>", "<prefix> <white>考试车次 <aqua><trip></aqua>：在 <yellow><takeover></yellow> 接班，开过 <stops> 个停车站，到 <yellow><handover></yellow> 结束。</white>"]
         tutorial:
           rule: ["<prefix> <white>要求：</white><gray>练习步骤须自己完成，不能点「跳过」；说明类步骤读完点「继续」即可；最后一步结束驾驶，教程即告完成。</gray>"]
           content: ["<prefix> <white>考试内容：</white><gray>完整做完新手教程。教程会一步步教你启动列车、换向、起步、惰行、制动停车、开关车门与紧急制动。</gray>"]
@@ -431,7 +434,7 @@ drive:
         points: ["<prefix> <gray>要领：得分看停车精度、防护介入、信号确认与正晚点。跟着 Boss 栏的建议速度驾驶，每站停准，信号变严时及时右键确认。</gray>"]
         overrun: ["<prefix> <gray>要领：进站时看侧边栏的停车点距离，提早减速，越接近停车点制动越轻；停在可开门范围内即可，停短还可以前移对标。</gray>"]
       has-task: ["<prefix> <red>你已领取了驾驶任务，请先完成或放弃（/fta drive task abandon）再报名路考或练习</red>"]
-      need-training: ["<prefix> <yellow>报考<white><name></white>路考前，须先完整开完 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"]
+      need-training: ["<prefix> <yellow>报考<white><name></white>路考前，须先完整开完 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>", "<prefix> <yellow>报考<white><name></white>路考前，须先完成 <white><required></white> 次路考练习（已完成 <white><done></white> 次）</yellow> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"]
       tutorial-skipped: ["<prefix> <yellow>本次教程跳过了练习步骤，不计为<white><name></white>考试成绩，请重新做一遍并自己完成练习步骤</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive tutorial start</white>'><aqua>[重新开始教程]</aqua></hover></click>", "<prefix> <yellow>本次教程跳过了练习步骤，不计入<white><name></white>考试，请重新开始教程并独立完成全部练习步骤</yellow> <click:run_command:'/fta drive tutorial start'><hover:show_text:'<gray>点击执行:</gray> <white>/fta drive tutorial start</white>'><aqua>[重新开始教程]</aqua></hover></click>"]
       retry-now: ["<prefix> <gray>可以马上重新报名</gray> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名</gray>'><yellow>[重新报名]</yellow></hover></click>"]
     practice:
@@ -440,7 +443,7 @@ drive:
         hint: ["<prefix> <gray>请继续开到下车站完成练习，结束时给出讲评。</gray>"]
       brief:
         feedback: ["<prefix> <gray>每到一站会点评停车结果。完整开到下车站计一次练习；本车次晚点较多时，系统将先取消演练，必要时交还自动运行。</gray>"]
-        route: ["<prefix> <white>练习车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>"]
+        route: ["<prefix> <white>练习车次 <aqua><trip></aqua>：在 <yellow><board></yellow> 接班，开过 <stops> 个停车站，到 <yellow><alight></yellow> 结束。</white>", "<prefix> <white>练习车次 <aqua><trip></aqua>：在 <yellow><takeover></yellow> 接班，开过 <stops> 个停车站，到 <yellow><handover></yellow> 结束。</white>"]
       review:
         not-counted: ["<prefix> <yellow>没有开到下车站，本次不计练习次数。</yellow>"]
       not-road: ["<prefix> <yellow><white><name></white>考的是新手教程，没有路考练习；可随时输入 /fta drive tutorial start 练习教程</yellow>"]
@@ -461,6 +464,8 @@ drive:
     reissue:
       cooldown: ["<prefix> <yellow>补发太频繁，<white><minutes></white> 分钟后再试</yellow>"]
     info:
+      level-open-road-test: ["  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>路考 <stops> 站，及格 <min> 分</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（不发证）</gray>'><aqua>[练习]</aqua></hover></click> <click:run_command:'/fta license exam <class>'><hover:show_text:'<gray>点击报名（在车站附近报名）</gray>'><green>[报名路考]</green></hover></click>"]
+      level-need-practice: ["  <aqua>○</aqua> <white>第 <level> 级 · <hover:show_text:'<gray><description></gray>'><name></hover></white> <gray>报名路考前须完成路考练习（<done>/<required> 次）</gray> <click:run_command:'/fta license practice <class>'><hover:show_text:'<gray>点击报名练习（在车站附近报名）</gray>'><green>[开始练习]</green></hover></click>"]
       footer: ["<prefix> <click:run_command:'/fta handbook driver'><hover:show_text:'<gray>领取驾驶员手册</gray>'><aqua>[驾驶员手册]</aqua></hover></click> <click:run_command:'/fta license reissue'><hover:show_text:'<gray>驾驶证丢了？点击补发</gray>'><aqua>[补发驾驶证]</aqua></hover></click>"]
     admin:
       granted: ["<prefix> <green>已给 <white><player></white> 发放<white><name></white></green>"]
@@ -471,10 +476,10 @@ drive:
     driver:
       page-4: ["<dark_blue><bold>三、领任务与接班</bold></dark_blue>\n<black>在车站输入 /fta drive tasks 打开任务板：左键人工驾驶，右键 ATO。列车到站后坐进车头驾驶室，确认座位后输入 /fta drive on 接班。</black>"]
       page-9: ["<dark_blue><bold>八、终点与换端</bold></dark_blue>\n<black>到终点站开门后结算本趟成绩，可以结束驾驶，也可以接着驾驶本车的下一趟。\n需要换端时，车门可以开着，走到另一端驾驶室坐下；驾驶座未标记的列车须确认座位。</black>"]
-      page-3: ["<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"]
+      page-3: ["<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 自由驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 调度驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>", "<dark_blue><bold>二、驾驶证</bold></dark_blue>\n<black>第 1 级 见习驾驶证：完整做完新手教程即可取得，可驾驶非调度列车。\n第 2 级 正式驾驶证：先完成路考练习，再参加路考，及格取得，可领任务驾驶调度列车。\n驾驶证全服通用。</black>\n<dark_gray>查看与报名：/fta license</dark_gray>"]
       page-7: ["<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>", "<dark_blue><bold>六、进站与车门</bold></dark_blue>\n<black>侧边栏「停车点」显示剩余米数。提早减速，停在可开门范围内即合格，停准更好；停短可前移对标，停过头不能后退。终点站最多越过停车点 3 米，超出会被强制停车。\n停稳后按 F 开站台一侧的车门，停站计时结束后关门。</black>"]
       page-1: ["<dark_blue><bold>FTCA 驾驶员手册</bold></dark_blue>\n\n<black>一、FTCA 是什么\n二、驾驶证\n三、领任务与接班\n四、驾驶台\n五、信号与控速\n六、进站与车门\n七、发车与准点\n八、终点与换端\n九、出了状况</black>"]
-      page-8: ["<dark_blue><bold>七、发车与准点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步会被拦下。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"]
+      page-8: ["<dark_blue><bold>七、发车与准点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步会被拦下。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>", "<dark_blue><bold>七、发车与正点</bold></dark_blue>\n<black>车门关好、出站信号允许后起步，提前起步将被制止。\n侧边栏显示表定时刻与正晚点，晚点时可在限速内追回。\n每站成绩与全程得分在结束时给出。</black>"]
       page-10: ["<dark_blue><bold>九、出了状况</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车卡住时可以交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>", "<dark_blue><bold>九、异常处置</bold></dark_blue>\n<black>被调度扣停时等待信号，不要强行起步。紧急制动只在必须立即停车时使用。离座会结束驾驶；列车无法运行时可交还自动运行。</black>\n<dark_gray>完整内容见 Fetarute Wiki《驾驶员手册》。</dark_gray>"]
       page-6: ["<dark_blue><bold>五、信号与控速</bold></dark_blue>\n<black>侧边栏「信号」给出行车许可：允许时按限速行车；注意、减速时降速；停车时须在前方停住。信号变严时按提示右键确认。\nBoss 栏的建议速度按时刻表的运行曲线给出，跟着它驾驶即可准点。</black>"]
   sidebar:

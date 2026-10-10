@@ -10,7 +10,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.DoorCars;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController.ManualDoor;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationDoorController.ManualDoorSide;
-import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
+import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 
 /**
  * 一次驾驶会话里左右车门的开关。复用 AutoStation 的门动画与提示音。
@@ -21,6 +21,30 @@ import org.fetarute.fetaruteTCAddon.drive.session.DriveSession;
  * <p>开着门折返换端后驾驶员面朝的方向反了过来，原来左手边的门到了右手边：由 {@link #followCab} 把左右记录对调。
  */
 public final class DriveDoors {
+
+  /** 开关门的人所在的驾驶室与车门记录：驾驶员会话与车掌会话都是。 */
+  public interface Cab {
+    /** 座位绑定（第几节车厢）。 */
+    SeatBinding binding();
+
+    /** 驾驶室此刻是不是编组的车头端。 */
+    boolean cabAtHead(int memberCount);
+
+    /** 车门的左右按哪一端的朝向算：默认按所坐驾驶室面朝的方向（驾驶员坐车头，就是行进方向）。车掌坐车尾、面朝后方，覆盖成按车头端， 左右与报站、站台屏一样按列车行进方向。 */
+    default boolean doorsFromHead(int memberCount) {
+      return cabAtHead(memberCount);
+    }
+
+    boolean isLeftDoorOpen();
+
+    boolean isRightDoorOpen();
+
+    /** 记录一侧车门开着与否（左右按 {@link #doorsFromHead} 的朝向算）。 */
+    void setDoorOpen(boolean left, boolean open);
+
+    /** 关门动画放到这个 tick 才结束。 */
+    void markDoorsClosing(long untilTick);
+  }
 
   /** 一次开关的结果。 */
   public enum Result {
@@ -50,7 +74,7 @@ public final class DriveDoors {
    */
   public Result toggle(
       MinecartGroup current,
-      DriveSession session,
+      Cab session,
       boolean physicalLeft,
       ConfigManager.AutoStationSettings chime,
       DoorCars cars) {
@@ -59,7 +83,7 @@ public final class DriveDoors {
       forget(session);
       group = current;
     }
-    Vector nowFacing = cabFacing(current, session);
+    Vector nowFacing = doorFacing(current, session);
     if (nowFacing != null) {
       facing = nowFacing;
     }
@@ -78,11 +102,14 @@ public final class DriveDoors {
     ManualDoorSide side;
     if (other != null && other.isOpen()) {
       // 对侧门已开：这一侧必须是另一组动画，否则两个按钮会操纵同一扇门而状态错乱。
-      side = new ManualDoorSide(!other.modelLeft(), "opposite-of-open-door");
+      side = other.side().opposite();
     } else {
       side =
           AutoStationDoorController.resolveManualDoorSide(
-              current, nowFacing, physicalLeft, physicalLeft == session.cabAtHead(current.size()));
+              current,
+              nowFacing,
+              physicalLeft,
+              physicalLeft == session.doorsFromHead(current.size()));
     }
     ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime, cars);
     lastSummary = door.summary();
@@ -107,7 +134,7 @@ public final class DriveDoors {
    */
   public void adoptOpen(
       MinecartGroup current,
-      DriveSession session,
+      Cab session,
       boolean physicalLeft,
       ConfigManager.AutoStationSettings chime,
       DoorCars cars) {
@@ -115,7 +142,7 @@ public final class DriveDoors {
       forget(session);
       group = current;
     }
-    Vector nowFacing = cabFacing(current, session);
+    Vector nowFacing = doorFacing(current, session);
     if (nowFacing != null) {
       facing = nowFacing;
     }
@@ -123,12 +150,12 @@ public final class DriveDoors {
     // 对侧已记成开着：这一侧必须是另一组动画，与 toggle 一致，免得两个句柄操纵同一扇门。
     ManualDoorSide side =
         other != null && other.isOpen()
-            ? new ManualDoorSide(!other.modelLeft(), "opposite-of-open-door")
+            ? other.side().opposite()
             : AutoStationDoorController.resolveManualDoorSide(
                 current,
                 nowFacing,
                 physicalLeft,
-                physicalLeft == session.cabAtHead(current.size()));
+                physicalLeft == session.doorsFromHead(current.size()));
     ManualDoor door = AutoStationDoorController.manualDoor(current, side, chime, cars);
     door.markOpenedByStation();
     lastSummary = door.summary();
@@ -144,11 +171,11 @@ public final class DriveDoors {
    * 驾驶员换到另一端驾驶室后跟着对调左右：面朝方向与上次开关门时相反（夹角超过 90°）时，原来的左门记为右门、右门记为左门。
    * 列车停着时面朝方向只会因换端而反过来（整列调头只翻转车厢序号，不改驾驶员实际朝向）。
    */
-  public void followCab(MinecartGroup current, DriveSession session) {
+  public void followCab(MinecartGroup current, Cab session) {
     if (current != group || facing == null) {
       return;
     }
-    Vector nowFacing = cabFacing(current, session);
+    Vector nowFacing = doorFacing(current, session);
     if (!reversed(facing, nowFacing)) {
       return;
     }
@@ -170,7 +197,7 @@ public final class DriveDoors {
   }
 
   /** 关门动画还排在门附件的队里没轮到（前面有牌子排的动画在播）：车门其实还开着，把“车门关闭中”往后推，牵引继续封锁。每 tick 调用。 */
-  public void holdClosingWhilePending(DriveSession session, long nowTick) {
+  public void holdClosingWhilePending(Cab session, long nowTick) {
     for (ManualDoor door : new ManualDoor[] {left, right}) {
       if (door != null && door.closePending()) {
         long closeTicks = door.closeDurationTicks();
@@ -192,7 +219,7 @@ public final class DriveDoors {
    *
    * @return 取不到方向时为 {@code null}
    */
-  public static Vector cabFacing(MinecartGroup group, DriveSession session) {
+  public static Vector cabFacing(MinecartGroup group, Cab session) {
     int size = group.size();
     int index = session.binding().memberIndex();
     if (index < 0 || index >= size) {
@@ -208,6 +235,25 @@ public final class DriveDoors {
       headward = direction == null ? null : direction.getDirection();
     }
     return facingFrom(headward, session.cabAtHead(size));
+  }
+
+  /** 车门左右用的朝向：按 {@link Cab#doorsFromHead}（驾驶员是所坐驾驶室的朝向，车掌是列车行进方向）。 */
+  public static Vector doorFacing(MinecartGroup group, Cab session) {
+    int size = group.size();
+    return doorFacing(
+        cabFacing(group, session), session.cabAtHead(size), session.doorsFromHead(size));
+  }
+
+  /**
+   * 由所坐驾驶室面朝的方向得到车门左右用的朝向：两者按同一端算时不变，否则反过来。
+   *
+   * @param seatFacing 所坐驾驶室面朝的方向，可为 {@code null}
+   */
+  static Vector doorFacing(Vector seatFacing, boolean cabAtHead, boolean doorsFromHead) {
+    if (seatFacing == null || doorsFromHead == cabAtHead) {
+      return seatFacing;
+    }
+    return seatFacing.clone().multiply(-1.0);
   }
 
   /**
@@ -228,7 +274,7 @@ public final class DriveDoors {
   }
 
   /** 关上所有还开着的车门。会话结束时调用。 */
-  public void closeAll(DriveSession session) {
+  public void closeAll(Cab session) {
     if (left != null && left.isOpen()) {
       left.close();
     }
@@ -238,7 +284,7 @@ public final class DriveDoors {
     forget(session);
   }
 
-  private void forget(DriveSession session) {
+  private void forget(Cab session) {
     left = null;
     right = null;
     facing = null;

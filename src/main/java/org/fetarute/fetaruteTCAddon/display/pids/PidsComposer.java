@@ -85,6 +85,10 @@ public final class PidsComposer {
   private final PidsCarousel carousel = new PidsCarousel();
   private final PidsBulletinBoard bulletins;
 
+  /** 叫车：本屏能不能叫车、哪些车是叫来的。未接入时一律不叫车。 */
+  private volatile Function<PidsScreen, PidsViewBuilder.Calls> calls =
+      screen -> PidsViewBuilder.Calls.NONE;
+
   /** 公告按布局排好的版：同一条公告、同一布局只排一次。 */
   private final Map<TypesetKey, PidsBulletinTypesetter.Result> typeset = new ConcurrentHashMap<>();
 
@@ -141,6 +145,15 @@ public final class PidsComposer {
   }
 
   /** 没有公告。 */
+  /**
+   * 接入叫车：站台屏空行写叫车提示、叫来的车状态写“叫车”。
+   *
+   * @param calls 屏幕 → 叫车显示；null 恢复默认（不叫车）
+   */
+  public void setCalls(Function<PidsScreen, PidsViewBuilder.Calls> calls) {
+    this.calls = calls == null ? screen -> PidsViewBuilder.Calls.NONE : calls;
+  }
+
   public PidsComposer(
       PidsScreenRegistry registry,
       BooleanSupplier registryLoaded,
@@ -377,7 +390,8 @@ public final class PidsComposer {
             layout.rowCapacity(),
             layout.departures().map(d -> d.columns().platform().isPresent()).orElse(false),
             Optional.of(placement(screen)),
-            PidsCarousel.remarks(station, now, settings.get().render(), rotating));
+            PidsCarousel.remarks(station, now, settings.get().render(), rotating),
+            callsOf(screen, layout));
     Optional<PidsLayout.StopList> stopList = layout.stopList();
     if (stopList.isPresent()) {
       return stopList(screen, layout, stopList.get(), snapshot, request, now);
@@ -536,6 +550,22 @@ public final class PidsComposer {
   }
 
   /** 屏幕显示的线路代码（大写）。 */
+  /** 叫车显示；只有站台屏（单站台、多站台、2×1）写叫车提示，车站统屏右键照样能叫、但不写提示。 */
+  private PidsViewBuilder.Calls callsOf(PidsScreen screen, PidsLayout layout) {
+    PidsViewBuilder.Calls result;
+    try {
+      result = calls.apply(screen);
+    } catch (RuntimeException ex) {
+      return PidsViewBuilder.Calls.NONE;
+    }
+    if (result == null) {
+      return PidsViewBuilder.Calls.NONE;
+    }
+    return PidsPlatformSelection.hasCarousel(layout)
+        ? result
+        : new PidsViewBuilder.Calls(false, result.calledTrains());
+  }
+
   private Set<String> screenLines(PidsScreen screen, PidsStationKey station) {
     if (!screen.lines().isEmpty()) {
       return screen.lines();

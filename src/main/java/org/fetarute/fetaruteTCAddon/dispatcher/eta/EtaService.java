@@ -54,8 +54,10 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeStopState;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationPresenceTracker;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.TrainConfig;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DutyContinuitySupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnForecastSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
@@ -154,6 +156,9 @@ public final class EtaService {
   private volatile PlacedStops placedStops;
 
   private volatile PlannedPlatforms plannedPlatforms;
+
+  /** 还没派出的票预先指定的站台（叫车）；为 null 时没有。 */
+  private volatile TicketPlatforms ticketPlatforms;
 
   /** 列车在站记录，用来识别“已到站、停站计时尚未开始”的空档；未接入时该空档按 0 计。 */
   private volatile java.util.function.Supplier<Optional<StationPresenceTracker>> stationPresence;
@@ -278,6 +283,27 @@ public final class EtaService {
    */
   public void attachPlannedPlatforms(PlannedPlatforms plannedPlatforms) {
     this.plannedPlatforms = plannedPlatforms;
+  }
+
+  /**
+   * 接入还没派出的票预先指定的站台：叫车票在 DYNAMIC 停靠指定了右键的那条股道时，站牌排队行写它。
+   *
+   * @param ticketPlatforms 来源；传 null 表示断开
+   */
+  public void attachTicketPlatforms(TicketPlatforms ticketPlatforms) {
+    this.ticketPlatforms = ticketPlatforms;
+  }
+
+  /** 还没派出的票在某个 DYNAMIC 停靠预先指定的站台。 */
+  @FunctionalInterface
+  public interface TicketPlatforms {
+
+    /**
+     * @param ticket 发车票
+     * @param index 交路节点下标
+     * @return 指定的股道；没有时为空
+     */
+    Optional<NodeId> pinned(SpawnTicket ticket, int index);
   }
 
   /** 运行中列车在某个尚未选台的 DYNAMIC 停靠的计划或暂定站台。 */
@@ -1359,7 +1385,8 @@ public final class EtaService {
                 () ->
                     continuity()
                         .flatMap(support -> support.plannedPlatformOf(ticket, target.index()))
-                        .map(NodeId::of)),
+                        .map(NodeId::of)
+                        .or(() -> ticketPinnedPlatform(ticket, target.index()))),
             target,
             lineName,
             worldIdForRouteSegment(route, 0, Math.max(1, target.index())));
@@ -1811,6 +1838,45 @@ public final class EtaService {
     return lookup.get().map(node -> plan.withPlanned(index, node)).orElse(plan);
   }
 
+  /** 还没派出的票预先指定的站台（只读）。 */
+  private Optional<NodeId> ticketPinnedPlatform(SpawnTicket ticket, int index) {
+    TicketPlatforms source = this.ticketPlatforms;
+    if (source == null) {
+      return Optional.empty();
+    }
+    try {
+      Optional<NodeId> pinned = source.pinned(ticket, index);
+      return pinned == null ? Optional.empty() : pinned;
+    } catch (RuntimeException ex) {
+      debugLogger.accept("ETA_TICKET_PLATFORM_READ_FAILED ticket=" + ticket.id() + " error=" + ex);
+      return Optional.empty();
+    }
+  }
+
+  /** 区间生成的叫车票，生成点在目标站上或目标站之后：车不会经过目标站。 */
+  static boolean spawnsDownstreamOf(SpawnTicket ticket, int targetIndex) {
+    if (ticket == null || ticket.source() != TripSource.ON_DEMAND) {
+      return false;
+    }
+    java.util.OptionalInt entry = OnDemandTrip.entryIndexOf(ticket.serviceTripId());
+    return entry.isPresent() && entry.getAsInt() > 0 && entry.getAsInt() >= targetIndex;
+  }
+
+  /**
+   * 票据的车从交路哪个节点出发：区间生成的叫车票从生成点起（{@link OnDemandTrip#entryIndexOf}），其余从首站起。
+   *
+   * @param targetIndex 目标站下标；生成点不在它之前时按首站算
+   */
+  static int ticketStartIndex(SpawnTicket ticket, int targetIndex) {
+    if (ticket == null || ticket.source() != TripSource.ON_DEMAND) {
+      return 0;
+    }
+    java.util.OptionalInt entry = OnDemandTrip.entryIndexOf(ticket.serviceTripId());
+    return entry.isPresent() && entry.getAsInt() > 0 && entry.getAsInt() < targetIndex
+        ? entry.getAsInt()
+        : 0;
+  }
+
   /** 运行中列车的计划或暂定站台（只读：暂定站台由调度这边在信号 tick 里定）。 */
   private Optional<NodeId> runningPlannedPlatform(
       String trainName, RouteDefinition route, int index) {
@@ -2072,12 +2138,18 @@ public final class EtaService {
     }
     TargetSelection targetSel = targetSelOpt.get();
     NodeId targetNode = targetSel.nodeId();
+    if (spawnsDownstreamOf(ticket, targetSel.index())) {
+      // 区间生成的车在生成点才出现，不经过它之前（含生成点本身）的车站：这些站的站牌不列它。
+      return EtaResult.unavailable("N/A", List.of(EtaReason.NO_TARGET));
+    }
+    // 区间生成的叫车票：车在生成点出现，从那里起算，不从交路首站起算。
+    int startIndex = ticketStartIndex(ticket, targetSel.index());
     int remainingEdgeCount = 0;
     int travelSec = 0;
     int dwellSec = 0;
 
-    if (targetSel.index() > 0) {
-      Optional<UUID> worldOpt = worldIdForRouteSegment(route, 0, targetSel.index());
+    if (targetSel.index() > startIndex) {
+      Optional<UUID> worldOpt = worldIdForRouteSegment(route, startIndex, targetSel.index());
       Optional<RailGraph> graphOpt =
           worldOpt.flatMap(
               id ->
@@ -2100,7 +2172,7 @@ public final class EtaService {
               graphOpt.get(),
               routeTravelTimeModel,
               plan,
-              0,
+              startIndex,
               targetSel.index(),
               null,
               OptionalDouble.empty(),
@@ -2113,13 +2185,17 @@ public final class EtaService {
       targetNode = routedOpt.get().node();
       dwellSec =
           plan.stopSecondsBetween(
-              0,
+              startIndex,
               targetSel.index(),
               graphOpt.get(),
               routeTravelTimeModel.stationStopOverheadSeconds());
     }
 
-    Instant departAt = resolveTicketDepartTime(ticket, route, vehicleReady);
+    // 区间生成不接首站的待命车，首站待命车的就绪时刻与它无关。
+    Instant departAt =
+        startIndex > 0
+            ? resolveTicketDepartTime(ticket)
+            : resolveTicketDepartTime(ticket, route, vehicleReady);
     // 距计划发车向上取整：向下取整会让 ETA 系统性早于计划发车（最多差 1 秒）。
     long untilDepart = ceilSeconds(Duration.between(now, departAt));
     long overdueSec = untilDepart < 0L ? -untilDepart : 0L;
@@ -2136,13 +2212,13 @@ public final class EtaService {
     // 若目标站点有咽喉，检查到咽喉的剩余边数用于 arriving 判定
     final int baseEdgeCount = remainingEdgeCount;
     int edgesForArriving = remainingEdgeCount;
-    if (targetSel.index() > 0) {
+    if (targetSel.index() > startIndex) {
       Optional<RailGraph> graphOptForThroat =
-          resolveGraphForRouteSegment(route, 0, targetSel.index());
+          resolveGraphForRouteSegment(route, startIndex, targetSel.index());
       if (graphOptForThroat.isPresent()) {
         Optional<Integer> throatEdgesOpt =
             remainingEdgesToThroat(
-                graphOptForThroat.get(), plan.effectiveNodes(), 0, targetNode, null);
+                graphOptForThroat.get(), plan.effectiveNodes(), startIndex, targetNode, null);
         edgesForArriving =
             throatEdgesOpt.map(te -> Math.min(te, baseEdgeCount)).orElse(baseEdgeCount);
       }

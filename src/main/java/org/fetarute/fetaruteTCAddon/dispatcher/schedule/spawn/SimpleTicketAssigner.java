@@ -10,6 +10,7 @@ import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -27,11 +28,13 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.DispatchPriorityPolicy;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LaunchAuthorizationService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverDispatchResult;
@@ -40,11 +43,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeTrainHandle;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ServiceTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainNameFormatter;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainSpawnTagInitializer;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpawnMotionTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.AuthorizationPurpose;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
@@ -131,6 +136,22 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   private volatile java.util.function.BiConsumer<SpawnTicket, String> dispatchListener =
       (ticket, trainName) -> {};
 
+  /** 派发成功的追加观察者（叫车登记派出的车），在主回调之后调用。 */
+  private final List<java.util.function.BiConsumer<SpawnTicket, String>> dispatchObservers =
+      new java.util.concurrent.CopyOnWriteArrayList<>();
+
+  /** 列车是否绑着时刻表交路：叫车票不抢这样的待命车，否则那一班就开了天窗。默认都没绑。 */
+  private volatile java.util.function.Predicate<String> dutyBoundVehicle = trainName -> false;
+
+  /** 交路是否按表运行：这样的交路上叫车票只接叫来的车（没绑交路的车可能正等着跑首班或等回收）。默认都不按表。 */
+  private volatile java.util.function.Predicate<java.util.UUID> timetableRoute = routeId -> false;
+
+  /** 叫车票此刻能不能从车库出车（车库要让给表定出库时不能）：出车前与区间生成放弃改走车库前都问。默认能。 */
+  private volatile java.util.function.Predicate<SpawnTicket> onDemandDepotGate = ticket -> true;
+
+  /** 折返车的保留还算不算数（留给的那一单还没派出）：单作废后车上的标记不再拦别的叫车票。默认都算（宁可不接）。 */
+  private volatile java.util.function.Predicate<String> callReservationLive = callId -> true;
+
   /** 车型裁决：route 绑了编组方案时，复用只接方案里的车型、按份额挑车，派发后按车型记账。默认不裁决。 */
   private volatile ConsistArbiter consistArbiter = ConsistArbiter.NONE;
 
@@ -140,6 +161,86 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   /** 等驾驶员接车时挂的发车门控会话号：驾驶员上车或等到时限后按它放行。 */
   public static final String DRIVER_PICKUP_GATE = "driver-pickup";
+
+  /** 手动提前出车的车在车库等计划时刻时挂的发车门控会话号。 */
+  public static final String EARLY_SPAWN_GATE = "early-spawn";
+
+  /** 发车门控 180 秒兜底失效：提前出车扣得更久时，隔这么久重挂一次。 */
+  private static final Duration EARLY_SPAWN_GATE_REARM = Duration.ofSeconds(60);
+
+  /**
+   * 手动提前出车、在车库等计划时刻的车。
+   *
+   * @param train 列车
+   * @param trainName 车名
+   * @param releaseAt 计划发车时刻，到点放行
+   * @param ours 门控是不是本类挂的（驾驶员接车的门控由驾驶侧放）
+   * @param armedAt 本类最近一次挂门控的时刻
+   */
+  private record EarlySpawnHold(
+      RuntimeTrainHandle train,
+      String trainName,
+      Instant releaseAt,
+      boolean ours,
+      Instant armedAt) {}
+
+  /** 只在服务器主线程读写。 */
+  private final Map<String, EarlySpawnHold> earlySpawnHolds = new LinkedHashMap<>();
+
+  /** 叫来的车写在列车上的标签：{@code 叫车 id@车站}。带着它的待命车只给叫车票接（跑完一趟沿途有人叫就接着跑），按表或按间隔的票都不接； 列车改名后标签跟着车走。 */
+  public static final String TAG_CALLED_TRAIN = "FTA_CALL";
+
+  /** 折返车写在列车上的标签：{@code 叫车 id}。开进终点等着接这一单叫车的票，别的票（包括别的叫车票）都不接它。 */
+  public static final String TAG_CALL_TURNBACK = "FTA_CALL_TURNBACK";
+
+  /** 在车库等计划时刻的提前出车写在列车上的标签：{@code 放行时刻(epoch 秒)[;交路意图]}。门控与扣车记录只在内存里，重启或重载后按它重新扣住、 重新绑回交路。 */
+  static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
+
+  /** 重启后找回提前出车的扫描间隔。 */
+  private static final Duration EARLY_SPAWN_RESTORE_SCAN = Duration.ofSeconds(10);
+
+  /** 兜底扫描只在发车检查开始后的这段时间内进行：重启后在车库等候的车随世界加载，启动恢复之后很快就都在了。 */
+  private static final Duration EARLY_SPAWN_RESTORE_WINDOW = Duration.ofMinutes(5);
+
+  /** 下一次扫描找回提前出车的时刻；为空时下一拍就扫。 */
+  private Instant nextEarlySpawnRestoreScan;
+
+  /** 兜底扫描的截止时刻；第一次发车检查时定下。 */
+  private Instant earlySpawnRestoreScanUntil;
+
+  /** 提前出车与交路的绑定：出车时记下交路意图写进列车标签，重启后据此绑回交路。默认不记、不绑（不按表运行时没有交路）。 */
+  public interface EarlySpawnBinding {
+    /** 不记交路意图。 */
+    EarlySpawnBinding NONE =
+        new EarlySpawnBinding() {
+          @Override
+          public Optional<String> tokenOf(SpawnTicket ticket) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean restore(String trainName, String token) {
+            return false;
+          }
+        };
+
+    /** 这张提前出车的票的交路意图写法；没有时为空。 */
+    Optional<String> tokenOf(SpawnTicket ticket);
+
+    /** 重启后把车绑回交路；绑上时为 true。 */
+    boolean restore(String trainName, String token);
+
+    /** 出车前复查股道用的计划；没有时出车前不复查。 */
+    default Optional<EarlySpawnPlan> recheckPlan(SpawnTicket ticket, Instant now) {
+      return Optional.empty();
+    }
+  }
+
+  private volatile EarlySpawnBinding earlySpawnBinding = EarlySpawnBinding.NONE;
+
+  /** 当前所有已加载的列车，用于重启后找回在车库等候的提前出车。默认没有。 */
+  private volatile java.util.function.Supplier<? extends java.util.Collection<RuntimeTrainHandle>>
+      liveTrains = List::of;
 
   static final String TAG_OPERATION_TRIPS = "FTA_OP_TRIPS";
 
@@ -312,7 +413,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnControl.Lease spawnLease,
       List<SpawnDepot> lineDepots,
       DepotGateRequest gateRequest,
-      long recoveryEpoch) {
+      long recoveryEpoch,
+      Optional<DepotSpawner.EntrySpawn> entry) {
 
     private PreparedDepotSpawn {
       ticket = Objects.requireNonNull(ticket, "ticket");
@@ -321,6 +423,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       lineDepots =
           lineDepots == null ? List.of() : lineDepots.stream().filter(Objects::nonNull).toList();
       gateRequest = Objects.requireNonNull(gateRequest, "gateRequest");
+      entry = entry == null ? Optional.empty() : entry;
     }
   }
 
@@ -580,6 +683,271 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return false;
   }
 
+  /**
+   * 叫车与待命车的配对规则：叫车票接叫来的车；交路不按表运行时也接没绑时刻表交路的车。别的票不接叫来的车。
+   *
+   * <p>按表运行的交路上，没绑交路的待命车也不接：它可能正等着跑某个交路的首班，或正等着回收。
+   *
+   * @param dutyBound 列车是否绑着时刻表交路
+   * @param timetableRoute 交路是否按表运行
+   * @param reservationLive 折返车留给的那一单还没派出
+   */
+  static List<LayoverRegistry.LayoverCandidate> filterCalledTrains(
+      SpawnTicket ticket,
+      List<LayoverRegistry.LayoverCandidate> candidates,
+      java.util.function.Predicate<String> dutyBound,
+      java.util.function.Predicate<java.util.UUID> timetableRoute,
+      java.util.function.Predicate<String> reservationLive) {
+    boolean onDemand = ticket != null && ticket.source() == TripSource.ON_DEMAND;
+    boolean managed =
+        onDemand && ticket.service() != null && timetableRoute.test(ticket.service().routeId());
+    Optional<String> callId =
+        onDemand ? OnDemandTrip.callIdOf(ticket.serviceTripId()) : Optional.empty();
+    List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(candidates.size());
+    for (LayoverRegistry.LayoverCandidate candidate : candidates) {
+      boolean accepted =
+          onDemand
+              ? callMayTake(candidate, managed, dutyBound, callId, reservationLive)
+              : !isCalledTrain(candidate);
+      if (accepted) {
+        allowed.add(candidate);
+      }
+    }
+    return allowed;
+  }
+
+  /**
+   * 叫车票能不能接这辆待命车：叫来的车都能接（留给某一单的折返车只给那一单接）；交路按表运行时只接叫来的车， 否则不接绑着时刻表交路的车。叫车排车源与发车共用这一条。
+   *
+   * @param managedRoute 叫车跑的交路按表运行
+   * @param dutyBound 列车是否绑着时刻表交路
+   * @param callId 叫车票的叫车编号；排车源（还没出票）时为空，留给别的单的折返车一律不接
+   * @param reservationLive 折返车留给的那一单还没派出；不算数的保留当普通的叫来的车
+   */
+  public static boolean callMayTake(
+      LayoverRegistry.LayoverCandidate candidate,
+      boolean managedRoute,
+      java.util.function.Predicate<String> dutyBound,
+      Optional<String> callId,
+      java.util.function.Predicate<String> reservationLive) {
+    if (candidate == null) {
+      return false;
+    }
+    String reservedFor = candidate.tags() == null ? null : candidate.tags().get(TAG_CALL_TURNBACK);
+    if (reservedFor != null && !reservedFor.isBlank() && reservationLive.test(reservedFor.trim())) {
+      return callId.filter(id -> id.equalsIgnoreCase(reservedFor.trim())).isPresent();
+    }
+    return isCalledTrain(candidate) || (!managedRoute && !dutyBound.test(candidate.trainName()));
+  }
+
+  private static boolean isCalledTrain(LayoverRegistry.LayoverCandidate candidate) {
+    return candidate.tags() != null && candidate.tags().containsKey(TAG_CALLED_TRAIN);
+  }
+
+  /** 区间生成最多试这么久，之后改走交路本来的车源。 */
+  private static final Duration ENTRY_SPAWN_GIVE_UP = Duration.ofSeconds(60);
+
+  /** 叫车服务判定叫车票此刻能不能从车库出车（车库要让给表定出库时不能）；判定出错时不能。 */
+  private boolean onDemandDepotAllowed(SpawnTicket ticket) {
+    try {
+      return onDemandDepotGate.test(ticket);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("叫车车库出车判定异常: ticket=" + ticket.id() + " error=" + ex);
+      return false;
+    }
+  }
+
+  /**
+   * 区间生成一直不成的叫车票改不改走交路本来的车源：放弃了、交路不是回库交路（回库交路没有别的车源）、叫车服务又允许（车库此刻不让给表定出库）。
+   *
+   * @param givenUp 区间生成已经试够了
+   * @param depotAllowed 叫车服务允许这张票从车库出车
+   */
+  static boolean onDemandFallsBack(
+      RouteOperationType operationType, boolean givenUp, boolean depotAllowed) {
+    return givenUp && operationType != RouteOperationType.RETURN && depotAllowed;
+  }
+
+  /** 区间生成的叫车票试够了、该改走交路本来的车源。折返车票不改：从那条交路的首站开起要跑完整条交路才到终点，叫车多半先超时，车白跑一趟。 */
+  static boolean entryGivesUp(SpawnTicket ticket, Instant now) {
+    return !OnDemandTrip.isTurnback(ticket.serviceTripId()) && entrySpawnGivenUp(ticket, now);
+  }
+
+  /** 只接首站待命车的叫车票：不多出一列车，不过拥堵闸门。 */
+  static boolean onDemandReuseOnly(TripSource source, boolean entrySpawn, boolean startsWithCret) {
+    return source == TripSource.ON_DEMAND && !entrySpawn && !startsWithCret;
+  }
+
+  /** 走回库票的折返复用分支：回库交路、又不是叫车的区间生成（回库交路上的叫车票只区间生成）。 */
+  static boolean takesReturnBranch(RouteOperationType operationType, boolean entrySpawn) {
+    return operationType == RouteOperationType.RETURN && !entrySpawn;
+  }
+
+  private static boolean entrySpawnGivenUp(SpawnTicket ticket, Instant now) {
+    Instant first = ticket.firstDueAt() == null ? ticket.dueAt() : ticket.firstDueAt();
+    return first != null
+        && now != null
+        && Duration.between(first, now).compareTo(ENTRY_SPAWN_GIVE_UP) >= 0;
+  }
+
+  /** 票上的入路，下标落在交路节点表里（首节点之后、末节点之前）时才算；否则按普通票处理。 */
+  private static Optional<OnDemandTrip.Entry> entryWithin(
+      SpawnTicket ticket, RouteDefinition route) {
+    Optional<OnDemandTrip.Entry> entry = OnDemandTrip.entryOf(ticket.serviceTripId());
+    if (entry.isEmpty()
+        || route == null
+        || entry.get().index() < 1
+        || entry.get().index() > route.waypoints().size() - 2) {
+      return Optional.empty();
+    }
+    return entry;
+  }
+
+  /** 生成点：票上写了图上的区间点就是它，否则是入路下标处的交路节点。 */
+  private static NodeId entryNode(OnDemandTrip.Entry entry, RouteDefinition route) {
+    return entry.node().orElse(route.waypoints().get(entry.index()));
+  }
+
+  /** 发车用的节点序列：生成点不是交路节点时，把入路下标处换成生成点——与车库出车把第 0 个节点换成实际股道同一个做法， 授权与首个 destination 都从生成点算。 */
+  static List<NodeId> entrySpawnWaypoints(List<NodeId> waypoints, OnDemandTrip.Entry entry) {
+    if (entry.node().isEmpty() || entry.node().get().equals(waypoints.get(entry.index()))) {
+      return waypoints;
+    }
+    List<NodeId> out = new ArrayList<>(waypoints);
+    out.set(entry.index(), entry.node().get());
+    return List.copyOf(out);
+  }
+
+  /**
+   * 区间生成的朝向：车头所在区间点指向下一个节点的方向，加上从身后指向它的方向（车身那一侧），各按图上的路径取紧邻节点， 弯道上也不会把车放反。
+   *
+   * <p>生成点在两个交路节点之间时，要落在入路下标处的节点到下一个节点的最短路上（运行时按这条路认车的位置），否则不生成。
+   */
+  private Optional<DepotSpawner.EntrySpawn> entrySpawnGeometry(
+      RailGraph graph, RouteDefinition route, OnDemandTrip.Entry entry) {
+    List<NodeId> nodes = route.waypoints();
+    int index = entry.index();
+    NodeId here = entryNode(entry, route);
+    Optional<org.bukkit.util.Vector> herePos =
+        graph
+            .findNode(here)
+            .map(org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode::worldPosition);
+    if (herePos.isEmpty()) {
+      return Optional.empty();
+    }
+    RailGraphPathFinder finder = new RailGraphPathFinder();
+    NodeId behindFrom = nodes.get(index - 1);
+    if (!here.equals(nodes.get(index))) {
+      Optional<org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath> leg =
+          finder.shortestPath(
+              graph,
+              nodes.get(index),
+              nodes.get(index + 1),
+              RailGraphPathFinder.Options.shortestDistance());
+      if (leg.isEmpty() || !leg.get().nodes().contains(here)) {
+        return Optional.empty();
+      }
+      behindFrom = nodes.get(index);
+    }
+    Optional<org.bukkit.util.Vector> ahead =
+        finder
+            .shortestPath(
+                graph, here, nodes.get(index + 1), RailGraphPathFinder.Options.shortestDistance())
+            .filter(path -> path.nodes().size() >= 2)
+            .flatMap(path -> graph.findNode(path.nodes().get(1)))
+            .map(org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode::worldPosition);
+    Optional<org.bukkit.util.Vector> behind =
+        finder
+            .shortestPath(graph, behindFrom, here, RailGraphPathFinder.Options.shortestDistance())
+            .filter(path -> path.nodes().size() >= 2)
+            .flatMap(path -> graph.findNode(path.nodes().get(path.nodes().size() - 2)))
+            .map(org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode::worldPosition);
+    double x = 0.0;
+    double z = 0.0;
+    if (ahead.isPresent()) {
+      double[] d =
+          horizontalUnit(
+              ahead.get().getX() - herePos.get().getX(), ahead.get().getZ() - herePos.get().getZ());
+      x += d[0];
+      z += d[1];
+    }
+    if (behind.isPresent()) {
+      double[] d =
+          horizontalUnit(
+              herePos.get().getX() - behind.get().getX(),
+              herePos.get().getZ() - behind.get().getZ());
+      x += d[0];
+      z += d[1];
+    }
+    if (Math.abs(x) < 1.0E-6 && Math.abs(z) < 1.0E-6) {
+      return Optional.empty();
+    }
+    return Optional.of(new DepotSpawner.EntrySpawn(index, here, x, z));
+  }
+
+  private static double[] horizontalUnit(double dx, double dz) {
+    double length = Math.sqrt(dx * dx + dz * dz);
+    return length < 1.0E-6 ? new double[] {0.0, 0.0} : new double[] {dx / length, dz / length};
+  }
+
+  /** 节点所在世界（按牌子登记表找，不限节点类型）。 */
+  private Optional<java.util.UUID> resolveNodeWorldId(NodeId nodeId) {
+    Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
+    if (infos == null || infos.isEmpty() || nodeId == null) {
+      return Optional.empty();
+    }
+    return infos.values().stream()
+        .filter(info -> info != null && info.definition() != null)
+        .filter(info -> nodeId.equals(info.definition().nodeId()))
+        .map(SignNodeRegistry.SignNodeInfo::worldId)
+        .findFirst();
+  }
+
+  /** 去掉区间生成的入路下标，其余照旧。 */
+  private static SpawnTicket withoutEntrySpawn(SpawnTicket ticket) {
+    return new SpawnTicket(
+        ticket.id(),
+        ticket.service(),
+        ticket.dueAt(),
+        ticket.notBefore(),
+        ticket.firstDueAt(),
+        ticket.attempts(),
+        ticket.sequenceNumber(),
+        Optional.empty(),
+        ticket.lastError(),
+        OnDemandTrip.withoutEntry(ticket.serviceTripId()),
+        ticket.source(),
+        ticket.priority(),
+        ticket.consist());
+  }
+
+  /**
+   * 叫来的车只给叫车票接；叫车票不接绑着时刻表交路的车（那辆车要跑表里的下一班）。
+   *
+   * <p>叫来的车跑到终点后在待命池里等一会儿：沿途又有人叫车、这趟经过就接着跑，否则由叫车服务派回库。按表或按间隔的票接走它， 它就成了一辆没人管的运营车，回库也就落空了。
+   */
+  private List<LayoverRegistry.LayoverCandidate> calledTrainCandidates(
+      SpawnTicket ticket, List<LayoverRegistry.LayoverCandidate> candidates) {
+    boolean onDemand = ticket != null && ticket.source() == TripSource.ON_DEMAND;
+    List<LayoverRegistry.LayoverCandidate> allowed =
+        filterCalledTrains(
+            ticket,
+            candidates,
+            this.dutyBoundVehicle,
+            this.timetableRoute,
+            this.callReservationLive);
+    if (allowed.size() != candidates.size()) {
+      debugLogger.accept(
+          "Layover 候选按叫车过滤: ticket="
+              + (ticket == null ? "-" : ticket.id())
+              + " onDemand="
+              + onDemand
+              + " rejected="
+              + (candidates.size() - allowed.size()));
+    }
+    return allowed;
+  }
+
   /** 回收派 RETURN：车库只收方案里的车型。裁决出错时放行，不让车滞留在终点。 */
   private boolean acceptsConsist(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
     try {
@@ -619,6 +987,33 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         .map(PendingLayoverEntry::ticket)
         .filter(Objects::nonNull)
         .toList();
+  }
+
+  @Override
+  public boolean withdraw(java.util.UUID ticketId) {
+    if (ticketId == null || hasMaterializedSpawnTransaction(ticketId)) {
+      return false;
+    }
+    PendingLayoverEntry pending = pendingLayoverTickets.get(ticketId);
+    if (pending != null) {
+      if (preservePendingDispatchAttempt(pending.ticket(), "withdraw")) {
+        return false;
+      }
+      return pendingLayoverTickets.remove(ticketId, pending) | spawnManager.withdraw(ticketId);
+    }
+    return spawnManager.withdraw(ticketId);
+  }
+
+  @Override
+  public boolean isTicketLive(java.util.UUID ticketId) {
+    if (ticketId == null) {
+      return false;
+    }
+    if (pendingLayoverTickets.containsKey(ticketId) || hasMaterializedSpawnTransaction(ticketId)) {
+      return true;
+    }
+    return spawnManager.snapshotQueue().stream()
+        .anyMatch(ticket -> ticket != null && ticketId.equals(ticket.id()));
   }
 
   @Override
@@ -725,6 +1120,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     spawnControl.pruneExpired(now);
     cleanupStaleCongestionGates(now);
     advancePendingMaterializedSpawns(now);
+    scanEarlySpawnHolds(now);
+    advanceEarlySpawnHolds(now);
     Map<String, Integer> selectedDepotsThisTick = new HashMap<>();
     if (!pendingLayoverTickets.isEmpty()) {
       refreshExpiredPendingTickets(provider, now, selectedDepotsThisTick);
@@ -1280,7 +1677,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     SpawnTicket prepared = ticket;
     List<SpawnDepot> lineDepots = List.of();
     Optional<SpawnDepot> configuredSelection = Optional.empty();
-    if (prepared.selectedDepotNodeId().isEmpty()) {
+    if (prepared.selectedDepotNodeId().isEmpty() && !isEarlySpawnTicket(prepared, now)) {
       Optional<Route> routeOpt = provider.routes().findById(ticket.service().routeId());
       Optional<Line> lineOpt = routeOpt.flatMap(route -> provider.lines().findById(route.lineId()));
       if (lineOpt.isPresent()) {
@@ -1561,6 +1958,23 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return false;
     }
     Route routeEntity = routeEntityOpt.get();
+    // 叫车的区间生成：在交路中途的区间点生成，从那个下标起跑，不看首站是车库还是待命车（回库交路也一样）
+    boolean entrySpawn = OnDemandTrip.entryIndexOf(ticket.serviceTripId()).isPresent();
+    boolean entryGivenUp = entrySpawn && entryGivesUp(ticket, now);
+    if (onDemandFallsBack(
+        routeEntity.operationType(), entryGivenUp, entryGivenUp && onDemandDepotAllowed(ticket))) {
+      // 区间生成一直不成（后方有车、附近有人、闭塞不放）：改走交路本来的车源，不让叫车的人一直等。
+      // 回库交路没有别的车源（首站的车要接着跑运营班），车库此刻要让给表定出库时也不改，一直试到叫车超时撤票。
+      SpawnTicket fallback = withoutEntrySpawn(ticket);
+      debugLogger.accept(
+          "叫车区间生成放弃，改走交路车源: ticket="
+              + ticket.id()
+              + " route="
+              + service.routeCode()
+              + " lastError="
+              + ticket.lastError().orElse("-"));
+      return trySpawn(provider, now, fallback, selectedDepotsThisTick);
+    }
     Optional<Line> lineOpt = provider.lines().findById(routeEntity.lineId());
     if (lineOpt.isEmpty()) {
       requeue(ticket, now, "line-not-found");
@@ -1575,7 +1989,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     RouteDefinition route = routeOpt.get();
 
-    if (routeEntity.operationType() == RouteOperationType.RETURN) {
+    if (takesReturnBranch(routeEntity.operationType(), entrySpawn)) {
       // 若票据已经进入 pending 且达到降级阈值，则尝试 depot 补发。
       java.util.OptionalLong fallbackTimeoutSeconds = resolveLayoverFallbackTimeoutSeconds(service);
       if (fallbackTimeoutSeconds.isPresent()) {
@@ -1612,23 +2026,30 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
 
-    if (shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
-      // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
-      deferByGate(ticket, now, "congestion-hold");
-      return false;
-    }
-
     List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
         provider.routeStops().listByRoute(routeEntity.id());
     boolean startsWithCret =
         !stops.isEmpty()
             && SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isPresent();
+    // 只接首站待命车的叫车票不多出一列车（接的是已在网里、多半是留给它的折返车），不过拥堵闸门：
+    // 闸门把终点待命车算进压力，拦下它只会让折返车在终点干等、压力更高。
+    if (!onDemandReuseOnly(ticket.source(), entrySpawn, startsWithCret)
+        && shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
+      // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
+      deferByGate(ticket, now, "congestion-hold");
+      return false;
+    }
     if (routeEntity.operationType() == RouteOperationType.CREATE && !startsWithCret) {
       requeue(ticket, now, "create-without-cret");
       return false;
     }
-    if (!startsWithCret) {
+    if (!startsWithCret && !entrySpawn) {
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
+    }
+    if (!entrySpawn && ticket.source() == TripSource.ON_DEMAND && !onDemandDepotAllowed(ticket)) {
+      // 叫车票排队期间车库到了表定出库的时候：让表定那一班先出，过了再出（不耗重试预算）。
+      deferByGate(ticket, now, "call-depot-yields-timetable");
+      return false;
     }
 
     Optional<SpawnControl.Lease> spawnLeaseOpt =
@@ -1811,8 +2232,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         || route == null) {
       return false;
     }
-    if (routeEntity.operationType() == RouteOperationType.RETURN) {
-      // RETURN 线路完全绕过拥堵闸门，这里输出豁免记录使其可见。
+    if (routeEntity.operationType() == RouteOperationType.RETURN
+        && (ticket == null || ticket.source() != TripSource.ON_DEMAND)) {
+      // RETURN 线路完全绕过拥堵闸门，这里输出豁免记录使其可见。叫车票在回库交路上区间生成的是一趟载客车，照常受闸门约束。
       // 豁免的理由：RETURN 是把车收回去，拦住反而会让车积在线上。按 gateKey 去重，一条线至多一行。
       String returnKey = buildCongestionGateKey(service);
       if (congestionScoreReported.put(returnKey, "return-exempt") == null) {
@@ -2649,6 +3071,49 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * <p>在票据向 SpawnManager 报完成之前调用，带最终的列车名（复用时是改名后的名字）。传入 {@code null} 恢复空回调。
    */
+  @Override
+  public void addDispatchObserver(java.util.function.BiConsumer<SpawnTicket, String> observer) {
+    if (observer != null) {
+      dispatchObservers.add(observer);
+    }
+  }
+
+  /**
+   * 接入“列车绑着时刻表交路”的判定：叫车票不接这样的待命车。
+   *
+   * @param bound 列车名 → 是否绑着交路；null 恢复默认（都没绑）
+   */
+  public void setDutyBoundVehicle(java.util.function.Predicate<String> bound) {
+    this.dutyBoundVehicle = bound == null ? trainName -> false : bound;
+  }
+
+  /**
+   * 接入“交路按表运行”的判定：这样的交路上叫车票只接叫来的车。
+   *
+   * @param managed 交路 → 是否按表运行；null 恢复默认（都不按表）
+   */
+  public void setTimetableRoute(java.util.function.Predicate<java.util.UUID> managed) {
+    this.timetableRoute = managed == null ? routeId -> false : managed;
+  }
+
+  /**
+   * 接入“叫车票此刻能不能从车库出车”的判定：不能时车库出车的票推迟（不耗重试预算），区间生成一直不成的票也不改走车库、接着试区间生成。
+   *
+   * @param gate 票据 → 能不能从车库出车；null 恢复默认（能）
+   */
+  public void setOnDemandDepotGate(java.util.function.Predicate<SpawnTicket> gate) {
+    this.onDemandDepotGate = gate == null ? ticket -> true : gate;
+  }
+
+  /**
+   * 接入“折返车的保留还算不算数”的判定：留给的那一单已经派出、取消或作废时，车上的标记不再拦别的叫车票。
+   *
+   * @param live 叫车编号 → 那一单还没派出；null 恢复默认（都算）
+   */
+  public void setCallReservationLive(java.util.function.Predicate<String> live) {
+    this.callReservationLive = live == null ? callId -> true : live;
+  }
+
   public void setDispatchListener(java.util.function.BiConsumer<SpawnTicket, String> listener) {
     this.dispatchListener = listener == null ? (ticket, trainName) -> {} : listener;
   }
@@ -2659,6 +3124,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   public void setDepotSpawnHold(java.util.function.BiPredicate<SpawnTicket, String> hold) {
     this.depotSpawnHold = hold == null ? (ticket, trainName) -> false : hold;
+  }
+
+  /** 注册提前出车与交路的绑定（见 {@link EarlySpawnBinding}）。传入 {@code null} 恢复"不记、不绑"。 */
+  public void setEarlySpawnBinding(EarlySpawnBinding binding) {
+    this.earlySpawnBinding = binding == null ? EarlySpawnBinding.NONE : binding;
+  }
+
+  /** 注册已加载列车的来源，用于重启后找回在车库等候的提前出车。传入 {@code null} 恢复"没有"。 */
+  public void setLiveTrainSource(
+      java.util.function.Supplier<? extends java.util.Collection<RuntimeTrainHandle>> source) {
+    this.liveTrains = source == null ? List::of : source;
   }
 
   /** 驾驶员要从车库接车：先挂发车门控，第一拍信号就把车按在股道上。 */
@@ -2676,6 +3152,282 @@ public final class SimpleTicketAssigner implements TicketAssigner {
               + trainName
               + " error="
               + failure.getMessage());
+    }
+  }
+
+  /**
+   * 手动提前出的车（{@link TripSource#MANUAL}，计划时刻还没到）：第一拍信号之前挂上发车门控，停在车库股道上等到计划时刻。 驾驶员接车已经扣着时不覆盖，接车放开后由
+   * {@link #advanceEarlySpawnHolds} 接着扣。放行时刻与交路意图写进列车标签，重启后据此找回（{@link #restoreEarlySpawnHolds}）。
+   */
+  private void holdEarlySpawnUntilDue(
+      SpawnTicket ticket, String trainName, RuntimeTrainHandle train, Instant now) {
+    if (ticket.source() != TripSource.MANUAL || !ticket.dueAt().isAfter(now)) {
+      return;
+    }
+    boolean ours = !runtimeDispatchService.hasDepartureGate(trainName);
+    if (ours) {
+      runtimeDispatchService.acquireDepartureGate(trainName, EARLY_SPAWN_GATE, "early_spawn");
+    }
+    earlySpawnHolds.put(trainName, new EarlySpawnHold(train, trainName, ticket.dueAt(), ours, now));
+    markScheduledDepotHold(trainName, ticket.dueAt());
+    Optional<String> token = Optional.empty();
+    try {
+      token = earlySpawnBinding.tokenOf(ticket);
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车交路意图读取异常: ticket=" + ticket.id() + " error=" + failure.getMessage());
+    }
+    writeEarlySpawnHoldTag(train, ticket.dueAt(), token);
+    debugLogger.accept(
+        "提前出车在车库等计划时刻: train="
+            + trainName
+            + " plannedDeparture="
+            + ticket.dueAt()
+            + " ticket="
+            + ticket.id());
+  }
+
+  /** 健康检查把它当成按表扣车：静止、进度不变是计划内的，不派恢复动作；到点自动失效。 */
+  private void markScheduledDepotHold(String trainName, Instant until) {
+    StationStopCoordinator stationStops = runtimeDispatchService.stationStops();
+    if (stationStops != null) {
+      stationStops.holdAtDepotUntil(trainName, until);
+    }
+  }
+
+  /** 提前出车的车：到计划时刻放行；没到点时保持门控（接车放开了就重新扣上，门控快到兜底失效时重挂）。车没了或已经开走就不再管。 */
+  private void advanceEarlySpawnHolds(Instant now) {
+    if (earlySpawnHolds.isEmpty()) {
+      return;
+    }
+    java.util.Iterator<EarlySpawnHold> holds = earlySpawnHolds.values().iterator();
+    List<EarlySpawnHold> rearmed = new ArrayList<>();
+    Map<String, RouteProgressRegistry.RouteProgressEntry> progress = null;
+    while (holds.hasNext()) {
+      EarlySpawnHold hold = holds.next();
+      RuntimeTrainHandle train = hold.train();
+      if (train == null || !train.isValid()) {
+        holds.remove();
+        clearEarlySpawnHoldTag(train);
+        continue;
+      }
+      if (train.isMoving()) {
+        // 被推了一下、物理沉降都会短暂移动；只有越过车库节点（进度前进）才算开走，否则接着扣（下面重挂门控）。
+        if (progress == null) {
+          progress = runtimeDispatchService.snapshotProgressEntries();
+        }
+        if (leftDepot(progress, hold.trainName())) {
+          holds.remove();
+          clearEarlySpawnHoldTag(train);
+          continue;
+        }
+      }
+      if (!now.isBefore(hold.releaseAt())) {
+        holds.remove();
+        clearEarlySpawnHoldTag(train);
+        // 按会话号放行：留着的旧门控（同名车回滚后重出）同样放掉，驾驶员接车的门控会话号不同、不受影响。
+        if (runtimeDispatchService.releaseDepartureGate(hold.trainName(), EARLY_SPAWN_GATE)) {
+          runtimeDispatchService.refreshSignal(train);
+          debugLogger.accept("提前出车到点放行: train=" + hold.trainName());
+        }
+        continue;
+      }
+      boolean gated = runtimeDispatchService.hasDepartureGate(hold.trainName());
+      boolean rearm =
+          !gated
+              || (hold.ours()
+                  && Duration.between(hold.armedAt(), now).compareTo(EARLY_SPAWN_GATE_REARM) >= 0);
+      if (rearm) {
+        runtimeDispatchService.acquireDepartureGate(
+            hold.trainName(), EARLY_SPAWN_GATE, "early_spawn");
+        markScheduledDepotHold(hold.trainName(), hold.releaseAt());
+        holds.remove();
+        rearmed.add(new EarlySpawnHold(train, hold.trainName(), hold.releaseAt(), true, now));
+      }
+    }
+    for (EarlySpawnHold hold : rearmed) {
+      earlySpawnHolds.put(hold.trainName(), hold);
+    }
+  }
+
+  /**
+   * 重启或重载后找回在车库等候的提前出车：门控、扣车记录、交路绑定都只在内存里，不找回的话车会提前开走，
+   * 这一班到点时还会再出一辆。按列车标签重新扣到放行时刻、重新绑回交路；放行时刻已过的只清掉标签，按普通在线列车处理。
+   */
+  private void scanEarlySpawnHolds(Instant now) {
+    if (earlySpawnRestoreScanUntil == null) {
+      earlySpawnRestoreScanUntil = now.plus(EARLY_SPAWN_RESTORE_WINDOW);
+    }
+    if (!now.isBefore(earlySpawnRestoreScanUntil)
+        || (nextEarlySpawnRestoreScan != null && now.isBefore(nextEarlySpawnRestoreScan))) {
+      return;
+    }
+    nextEarlySpawnRestoreScan = now.plus(EARLY_SPAWN_RESTORE_SCAN);
+    java.util.Collection<? extends RuntimeTrainHandle> trains;
+    try {
+      trains = liveTrains.get();
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车找回：读取在线列车失败: " + failure.getMessage());
+      return;
+    }
+    restoreEarlySpawnHolds(trains, now);
+  }
+
+  /**
+   * 按列车标签找回在车库等候的提前出车（见 {@link #TAG_EARLY_SPAWN_HOLD}）。启动恢复在打开授权门之前调用一次，车不会抢先开走； 之后发车检查每 {@link
+   * #EARLY_SPAWN_RESTORE_SCAN} 再扫一次已加载的列车兜底。只在服务器主线程调用。
+   *
+   * @param trains 列车
+   * @param now 当前时刻
+   */
+  @Override
+  public void restoreEarlySpawnHolds(
+      java.util.Collection<? extends RuntimeTrainHandle> trains, Instant now) {
+    if (trains == null || now == null) {
+      return;
+    }
+    for (RuntimeTrainHandle train : trains) {
+      if (train == null || !train.isValid() || train.properties() == null) {
+        continue;
+      }
+      TrainProperties properties = train.properties();
+      Optional<String> raw = TrainTagHelper.readTagValue(properties, TAG_EARLY_SPAWN_HOLD);
+      if (raw.isEmpty()) {
+        continue;
+      }
+      String trainName = properties.getTrainName();
+      if (trainName == null || earlySpawnHolds.containsKey(trainName)) {
+        continue;
+      }
+      Optional<EarlySpawnHoldTag> tag = EarlySpawnHoldTag.parse(raw.get());
+      if (tag.isEmpty() || !now.isBefore(tag.get().releaseAt()) || train.isMoving()) {
+        TrainTagHelper.removeTagKey(properties, TAG_EARLY_SPAWN_HOLD);
+        continue;
+      }
+      Instant releaseAt = tag.get().releaseAt();
+      boolean ours = !runtimeDispatchService.hasDepartureGate(trainName);
+      if (ours) {
+        runtimeDispatchService.acquireDepartureGate(trainName, EARLY_SPAWN_GATE, "early_spawn");
+      }
+      earlySpawnHolds.put(trainName, new EarlySpawnHold(train, trainName, releaseAt, ours, now));
+      markScheduledDepotHold(trainName, releaseAt);
+      boolean bound = false;
+      if (tag.get().token().isPresent()) {
+        try {
+          bound = earlySpawnBinding.restore(trainName, tag.get().token().get());
+        } catch (RuntimeException failure) {
+          debugLogger.accept(
+              "提前出车找回：绑回交路异常: train=" + trainName + " error=" + failure.getMessage());
+        }
+      }
+      debugLogger.accept(
+          "提前出车找回: train="
+              + trainName
+              + " plannedDeparture="
+              + releaseAt
+              + " dutyRestored="
+              + bound);
+    }
+  }
+
+  /** 手动提前出车、计划时刻还没到的票。 */
+  private static boolean isEarlySpawnTicket(SpawnTicket ticket, Instant now) {
+    return ticket != null
+        && now != null
+        && ticket.source() == TripSource.MANUAL
+        && ticket.dueAt().isAfter(now);
+  }
+
+  /** 提前出车出库前复查股道：通过时返回钉在挑出的股道上的票；挡别的车时为空。不是提前出车、或没有复查计划时原样返回。 */
+  private Optional<SpawnTicket> recheckEarlySpawnTrack(
+      StorageProvider provider, SpawnTicket ticket, Instant now) {
+    if (!isEarlySpawnTicket(ticket, now)) {
+      return Optional.of(ticket);
+    }
+    Optional<EarlySpawnPlan> plan = earlySpawnRecheckPlan(ticket, now);
+    if (plan.isEmpty()) {
+      return Optional.of(ticket);
+    }
+    EarlySpawnYard.Decision decision = chooseEarlySpawnTrack(provider, plan.get(), now);
+    if (decision.blocker().isPresent()) {
+      debugLogger.accept(
+          "提前出车出库前复查未通过: ticket=" + ticket.id() + " reason=" + decision.blocker().get());
+      return Optional.empty();
+    }
+    return Optional.of(ticket.withSelectedDepot(decision.track().orElseThrow()));
+  }
+
+  private Optional<EarlySpawnPlan> earlySpawnRecheckPlan(SpawnTicket ticket, Instant now) {
+    try {
+      return earlySpawnBinding.recheckPlan(ticket, now);
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车出库前复查异常: ticket=" + ticket.id() + " error=" + failure.getMessage());
+      return Optional.empty();
+    }
+  }
+
+  /** 列车已越过出车的车库节点（交路进度前进到首站之后）。 */
+  private static boolean leftDepot(
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress, String trainName) {
+    if (progress == null || trainName == null) {
+      return false;
+    }
+    for (RouteProgressRegistry.RouteProgressEntry entry : progress.values()) {
+      if (entry != null
+          && trainName.equalsIgnoreCase(entry.trainName())
+          && entry.currentIndex() > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private void writeEarlySpawnHoldTag(
+      RuntimeTrainHandle train, Instant releaseAt, Optional<String> token) {
+    if (train == null || train.properties() == null) {
+      return;
+    }
+    TrainTagHelper.writeTag(
+        train.properties(), TAG_EARLY_SPAWN_HOLD, new EarlySpawnHoldTag(releaseAt, token).format());
+  }
+
+  private static void clearEarlySpawnHoldTag(RuntimeTrainHandle train) {
+    if (train == null || !train.isValid() || train.properties() == null) {
+      return;
+    }
+    TrainTagHelper.removeTagKey(train.properties(), TAG_EARLY_SPAWN_HOLD);
+  }
+
+  /**
+   * 列车上的提前出车标签。
+   *
+   * @param releaseAt 放行时刻
+   * @param token 交路意图；不按表运行时为空
+   */
+  record EarlySpawnHoldTag(Instant releaseAt, Optional<String> token) {
+    EarlySpawnHoldTag {
+      Objects.requireNonNull(releaseAt, "releaseAt");
+      token = token == null ? Optional.empty() : token.filter(value -> !value.isBlank());
+    }
+
+    String format() {
+      return releaseAt.getEpochSecond() + token.map(value -> ";" + value).orElse("");
+    }
+
+    static Optional<EarlySpawnHoldTag> parse(String raw) {
+      if (raw == null || raw.isBlank()) {
+        return Optional.empty();
+      }
+      String value = raw.trim();
+      int split = value.indexOf(';');
+      String seconds = split < 0 ? value : value.substring(0, split);
+      Optional<String> token =
+          split < 0 ? Optional.empty() : Optional.of(value.substring(split + 1).trim());
+      try {
+        return Optional.of(
+            new EarlySpawnHoldTag(Instant.ofEpochSecond(Long.parseLong(seconds.trim())), token));
+      } catch (RuntimeException ex) {
+        return Optional.empty();
+      }
     }
   }
 
@@ -2704,6 +3456,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
               + trainName
               + " error="
               + failure.getMessage());
+    }
+    for (java.util.function.BiConsumer<SpawnTicket, String> observer : dispatchObservers) {
+      try {
+        observer.accept(ticket, trainName);
+      } catch (RuntimeException failure) {
+        debugLogger.accept(
+            "派发观察者异常: ticket="
+                + ticket.id()
+                + " train="
+                + trainName
+                + " error="
+                + failure.getMessage());
+      }
     }
   }
 
@@ -2813,6 +3578,13 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         }
         return false;
       }
+    }
+    readyCandidates = calledTrainCandidates(ticket, readyCandidates);
+    if (readyCandidates.isEmpty()) {
+      if (!pendingAttempt) {
+        putPendingLayoverTicket(ticket, now);
+      }
+      return false;
     }
     java.util.function.BiPredicate<SpawnTicket, String> filter = this.layoverCandidateFilter;
     List<LayoverRegistry.LayoverCandidate> matching = new ArrayList<>(readyCandidates.size());
@@ -3057,7 +3829,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return LineSpawnMetadata.parseGroupMaxOperationTrips(lineOpt.get().metadata(), groupOpt.get());
   }
 
-  private static Optional<String> readSpawnGroup(Map<String, Object> metadata) {
+  /** 交路 metadata 里的交路组（{@code spawn_group}）；没写或为空时为空。 */
+  public static Optional<String> readSpawnGroup(Map<String, Object> metadata) {
     if (metadata == null || metadata.isEmpty()) {
       return Optional.empty();
     }
@@ -3162,7 +3935,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   private Optional<PreparedDepotSpawn> prepareDepotSpawn(
       StorageProvider provider,
-      SpawnTicket ticket,
+      SpawnTicket incomingTicket,
       SpawnService service,
       RouteDefinition route,
       Line line,
@@ -3188,15 +3961,28 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       // 持续顶住上限一段时间后本该发的车就再也不会发了——
       // 那是"取消发车"，不是"推迟发车"，等网疏通了班次已经凭空少了一批。
       // 无限延后的兜底是 spawn.queued-ticket-max-age-seconds。
-      deferByGate(ticket, now, reasonPrefix + "fleet-cap");
+      deferByGate(incomingTicket, now, reasonPrefix + "fleet-cap");
       return Optional.empty();
     }
 
+    // 提前出的车要在股道上停到计划时刻：出车前按此刻的车库情况复查，挡别的车就推迟（到计划时刻后按正点出车）。
+    Optional<SpawnTicket> checked = recheckEarlySpawnTrack(provider, incomingTicket, now);
+    if (checked.isEmpty()) {
+      releaseSpawnLease(spawnLease);
+      deferByGate(incomingTicket, now, reasonPrefix + "early-spawn-yard");
+      return Optional.empty();
+    }
+    SpawnTicket ticket = checked.get();
+    // 叫车的区间生成：生成处是交路中途的区间点，不挑车库股道
+    Optional<OnDemandTrip.Entry> entry = entryWithin(ticket, route);
     List<SpawnDepot> lineDepots = LineSpawnMetadata.parseDepots(line.metadata());
     Map<String, Integer> depotSelections =
         selectedThisTick == null ? new HashMap<>() : selectedThisTick;
     Optional<SpawnDepot> selectedDepotOpt = Optional.empty();
-    if (!lineDepots.isEmpty() && ticket.selectedDepotNodeId().isEmpty()) {
+    if (!lineDepots.isEmpty()
+        && entry.isEmpty()
+        && ticket.selectedDepotNodeId().isEmpty()
+        && !isEarlySpawnTicket(ticket, now)) {
       LineRuntimeSnapshot runtimeSnapshot = LineRuntimeSnapshot.capture(runtimeDispatchService);
       selectedDepotOpt =
           selectBalancedDepot(
@@ -3204,14 +3990,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     SpawnTicket effectiveTicket =
         selectedDepotOpt.map(depot -> ticket.withSelectedDepot(depot.nodeId())).orElse(ticket);
-    effectiveTicket =
-        materializeDynamicDepotSelection(
-            provider,
-            service,
-            effectiveTicket,
-            LineRuntimeSnapshot.capture(runtimeDispatchService),
-            depotSelections,
-            now);
+    if (entry.isEmpty()) {
+      effectiveTicket =
+          materializeDynamicDepotSelection(
+              provider,
+              service,
+              effectiveTicket,
+              LineRuntimeSnapshot.capture(runtimeDispatchService),
+              depotSelections,
+              now);
+    }
     if (effectiveOrigin.fallback()) {
       recordSelectedDepotForTick(effectiveTicket, lineDepots, selectedDepotOpt, depotSelections);
     }
@@ -3234,7 +4022,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
 
     Optional<java.util.UUID> worldIdOpt =
-        resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
+        entry.isPresent()
+            ? resolveNodeWorldId(entryNode(entry.get(), route))
+            : resolveDepotWorldId(service, effectiveTicket.selectedDepotNodeId());
     if (worldIdOpt.isEmpty()) {
       releaseSpawnLease(spawnLease);
       requeue(effectiveTicket, now, reasonPrefix + "depot-world-missing");
@@ -3250,10 +4040,24 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
 
-    List<NodeId> spawnWaypoints = resolveDepotSpawnWaypoints(route, service, effectiveTicket);
+    int startIndex = entry.map(OnDemandTrip.Entry::index).orElse(0);
+    List<NodeId> spawnWaypoints =
+        entry.isPresent()
+            ? entrySpawnWaypoints(route.waypoints(), entry.get())
+            : resolveDepotSpawnWaypoints(route, service, effectiveTicket);
+    Optional<DepotSpawner.EntrySpawn> entrySpawn = Optional.empty();
+    if (entry.isPresent()) {
+      entrySpawn = entrySpawnGeometry(graphOpt.get(), route, entry.get());
+      if (entrySpawn.isEmpty()) {
+        releaseSpawnLease(spawnLease);
+        // 生成点不在运行时的最短路上（覆盖、封锁改了路）：不耗重试预算，等区间生成试够了改走交路本来的车源
+        deferByGate(effectiveTicket, now, reasonPrefix + "entry-geometry-missing");
+        return Optional.empty();
+      }
+    }
     Optional<List<NodeId>> preparedWaypointsOpt =
         runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            trainName, route, spawnWaypoints, graphOpt.get(), now);
+            trainName, route, spawnWaypoints, startIndex, graphOpt.get(), now);
     if (preparedWaypointsOpt.isEmpty()) {
       runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
@@ -3265,7 +4069,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     OccupancyRequestBuilder builder =
         new OccupancyRequestBuilder(
             graphOpt.get(),
-            depotSpawnLookaheadEdges(runtime),
+            entry.isPresent()
+                ? Math.max(1, runtime.lookaheadEdges())
+                : depotSpawnLookaheadEdges(runtime),
             runtime.minClearEdges(),
             runtime.rearGuardEdges(),
             runtime.switcherZoneEdges(),
@@ -3279,6 +4085,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             service,
             effectiveTicket,
             routeEntity.operationType(),
+            startIndex,
             now);
     if (gateRequestOpt.isEmpty()) {
       runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
@@ -3292,7 +4099,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
         trainName, graphOpt.get(), gateRequest.context())) {
       runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
-      deferBlockedAtDepot(effectiveTicket, now, reasonPrefix + "smart-depot-long-single-held");
+      if (entry.isPresent()) {
+        deferByGate(effectiveTicket, now, reasonPrefix + "entry-smart-admission");
+      } else {
+        deferBlockedAtDepot(effectiveTicket, now, reasonPrefix + "smart-depot-long-single-held");
+      }
       return Optional.empty();
     }
     LaunchAuthorizationService.AuthorizationResult authorization =
@@ -3310,10 +4121,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
           reasonPrefix + "preview");
       runtimeDispatchService.cancelPreparedDepotSpawnDynamicAuthority(trainName);
       releaseSpawnLease(spawnLease);
-      deferBlockedAtDepot(
-          effectiveTicket,
-          now,
-          reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
+      if (entry.isPresent()) {
+        deferByGate(
+            effectiveTicket,
+            now,
+            reasonPrefix + "entry-gate-blocked:" + spawnGateSignalText(authorization));
+      } else {
+        deferBlockedAtDepot(
+            effectiveTicket,
+            now,
+            reasonPrefix + "gate-blocked:" + spawnGateSignalText(authorization));
+      }
       return Optional.empty();
     }
 
@@ -3335,7 +4153,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             spawnLease,
             lineDepots,
             gateRequest,
-            startupRecoveryEpoch.getAsLong()));
+            startupRecoveryEpoch.getAsLong(),
+            entrySpawn));
   }
 
   /**
@@ -3357,7 +4176,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     materializationsThisTick++;
     try {
       Optional<DepotSpawner.MaterializedSpawn> materializedSpawn =
-          depotSpawner.spawn(provider, prepared.ticket(), prepared.trainName(), now);
+          prepared.entry().isPresent()
+              ? depotSpawner.spawnAtEntry(
+                  provider, prepared.ticket(), prepared.trainName(), prepared.entry().get(), now)
+              : depotSpawner.spawn(provider, prepared.ticket(), prepared.trainName(), now);
       if (materializedSpawn.isPresent()) {
         return materializedSpawn;
       }
@@ -3506,7 +4328,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       TrainProperties properties =
           initializeMaterializedSpawnWithRollbackMarker(context.materializedSpawn());
-      if (applyPreparedSpawnDestination(properties, context.gateRequest().effectiveWaypoints())) {
+      if (applyPreparedSpawnDestination(
+          properties,
+          context.gateRequest().effectiveWaypoints(),
+          context.gateRequest().startIndex())) {
         applySpawnLifecycleTags(
             Optional.of(context.provider()),
             properties,
@@ -3515,6 +4340,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       }
       TrainSpawnTagInitializer.markMaterializedSpawnTransactionPending(properties);
       holdDepotSpawnIfRequested(context.ticket(), context.trainName());
+      holdEarlySpawnUntilDue(context.ticket(), context.trainName(), train, context.now());
       if (!registerExpectedMaterializedSpawnBeforeFirstRefresh(
           runtimeDispatchService,
           train,
@@ -3796,7 +4622,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     if (ticket == null) {
       return;
     }
-    if (isDepotGateFailure(error)) {
+    if (isDepotGateFailure(error)
+        || (error != null && error.contains("spawn-failed") && isEarlySpawnTicket(ticket, now))) {
       depotDispatchCoordinator.recordOccupancyFailure(ticket, now);
     }
     int nextAttempts = ticket.attempts() + 1;
@@ -3962,7 +4789,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       List<NodeId> expandedPathNodes,
       Optional<NodeId> selectedDepotNode,
       NodeId originalFirstWaypoint,
-      NodeId effectiveFirstWaypoint) {
+      NodeId effectiveFirstWaypoint,
+      int startIndex) {
     private DepotGateRequest {
       Objects.requireNonNull(request, "request");
       Objects.requireNonNull(context, "context");
@@ -3980,16 +4808,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnService service,
       SpawnTicket ticket,
       RouteOperationType operationType,
+      int startIndex,
       Instant now) {
     int priority =
         DispatchPriorityPolicy.depotSpawnPriority(
-            operationType, ticket == null ? 0 : ticket.priority());
+            operationType,
+            ticket == null ? 0 : ticket.priority(),
+            ticket != null && ticket.source() == TripSource.ON_DEMAND);
     Optional<OccupancyRequestContext> ctxOpt =
         builder.buildContextFromNodes(
             trainName,
             Optional.ofNullable(route.id()),
             spawnWaypoints,
-            0,
+            startIndex,
             now,
             priority,
             AuthorizationPurpose.DEPOT_SPAWN);
@@ -4004,7 +4835,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     OccupancyRequestContext requestContext = ctxOpt.get();
     OccupancyRequest request = requestContext.request();
     NodeId originalFirst = route.waypoints().isEmpty() ? null : route.waypoints().get(0);
-    NodeId effectiveFirst = spawnWaypoints.isEmpty() ? null : spawnWaypoints.get(0);
+    NodeId effectiveFirst =
+        spawnWaypoints.size() <= startIndex ? null : spawnWaypoints.get(startIndex);
     debugLogger.accept(
         "SMART_DEPOT_SPAWN_AUTHORITY_WINDOW train="
             + trainName
@@ -4032,7 +4864,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
             ctxOpt.get().pathNodes(),
             depotNode,
             originalFirst,
-            effectiveFirst));
+            effectiveFirst,
+            startIndex));
   }
 
   private static int depotSpawnLookaheadEdges(ConfigManager.RuntimeSettings runtime) {
@@ -4055,12 +4888,25 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   static boolean applyPreparedSpawnDestination(
       TrainProperties properties, List<NodeId> effectiveWaypoints) {
-    if (properties == null || effectiveWaypoints == null || effectiveWaypoints.size() < 2) {
+    return applyPreparedSpawnDestination(properties, effectiveWaypoints, 0);
+  }
+
+  /**
+   * 同上，列车生成在节点序列的 {@code startIndex} 处（区间生成）：首个 destination 是它的下一个节点。
+   *
+   * @param startIndex 生成处的下标；车库出车为 0
+   */
+  static boolean applyPreparedSpawnDestination(
+      TrainProperties properties, List<NodeId> effectiveWaypoints, int startIndex) {
+    if (properties == null
+        || effectiveWaypoints == null
+        || startIndex < 0
+        || effectiveWaypoints.size() < startIndex + 2) {
       return false;
     }
     properties.clearDestinationRoute();
     properties.clearDestination();
-    properties.setDestination(effectiveWaypoints.get(1).value());
+    properties.setDestination(effectiveWaypoints.get(startIndex + 1).value());
     return true;
   }
 
@@ -5223,6 +6069,227 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return Optional.empty();
     }
     return Optional.of(depotSpec.trim());
+  }
+
+  /**
+   * 手动提前出车挑股道：收集车库现场情况，交给 {@link EarlySpawnYard#choose} 判定。
+   *
+   * <p>本车可用的股道：出库点写成 DYNAMIC 时是该写法覆盖的全部股道，固定写法时是命令里指定的那条。别的车对车库的使用：
+   *
+   * <ul>
+   *   <li>计划发车之前要出库的票：只算首站带 CRET、真从车库出车的；票没指定出库点而线路配了车库池时按车库池算；
+   *   <li>按时刻表回库的交路：按回库线路 DSTY 的写法，查不到时按时刻表记下的回库点；
+   *   <li>正在回库的列车：线路以 DSTY 收尾，且剩下的只有不停车的途经点。
+   * </ul>
+   *
+   * 股道空不空按占用判断。
+   *
+   * @param provider 存储，用于读线路的车库池；为空时不考虑车库池
+   * @param plan 提前出车
+   * @param now 当前时刻（车库股道退避）
+   */
+  public EarlySpawnYard.Decision chooseEarlySpawnTrack(
+      StorageProvider provider, EarlySpawnPlan plan, Instant now) {
+    if (plan == null) {
+      return EarlySpawnYard.Decision.blocked(EarlySpawnYard.Reason.YARD_UNKNOWN, "");
+    }
+    List<String> candidates = earlySpawnCandidates(plan, now);
+    List<EarlySpawnYard.Use> uses = new ArrayList<>();
+    Map<UUID, List<SpawnDepot>> lineDepotsByRoute = new HashMap<>();
+    List<SpawnTicket> departures = new ArrayList<>(plan.departures());
+    // 本类自己拿着的票：等折返复用、超时后会降级从车库出车的。
+    for (PendingLayoverEntry pending : pendingLayoverTickets.values()) {
+      if (pending != null
+          && pending.ticket() != null
+          && !pending.ticket().id().equals(plan.ticket().id())) {
+        departures.add(pending.ticket());
+      }
+    }
+    for (SpawnTicket ticket : departures) {
+      Set<String> tracks = departureTracksOf(provider, ticket, lineDepotsByRoute);
+      if (!tracks.isEmpty()) {
+        uses.add(
+            new EarlySpawnYard.Use(
+                EarlySpawnYard.UseKind.DEPARTURE,
+                ticket.service().routeCode(),
+                Optional.of(ticket.dueAt()),
+                tracks));
+      }
+    }
+    for (EarlySpawnPlan.DepotArrival arrival : plan.arrivals()) {
+      Set<String> tracks =
+          arrival
+              .routeId()
+              .flatMap(this::destroyTargetOf)
+              .map(this::depotTracksOf)
+              .filter(found -> !found.isEmpty())
+              .orElseGet(() -> depotTracksOf(arrival.depotNodeId()));
+      if (!tracks.isEmpty()) {
+        uses.add(
+            new EarlySpawnYard.Use(
+                EarlySpawnYard.UseKind.ARRIVAL,
+                arrival.subject(),
+                Optional.of(arrival.at()),
+                tracks));
+      }
+    }
+    for (RouteProgressRegistry.RouteProgressEntry entry :
+        runtimeDispatchService.snapshotProgressEntries().values()) {
+      inboundTargetOf(entry)
+          .map(this::depotTracksOf)
+          .filter(found -> !found.isEmpty())
+          .ifPresent(
+              tracks ->
+                  uses.add(
+                      new EarlySpawnYard.Use(
+                          EarlySpawnYard.UseKind.INBOUND,
+                          entry.trainName(),
+                          Optional.empty(),
+                          tracks)));
+    }
+    Set<String> involved = new LinkedHashSet<>(candidates);
+    for (EarlySpawnYard.Use use : uses) {
+      involved.addAll(use.tracks());
+    }
+    Set<String> free = new HashSet<>();
+    for (String track : involved) {
+      if (!occupancyManager.isNodeOccupied(NodeId.of(track))) {
+        free.add(track);
+      }
+    }
+    return EarlySpawnYard.choose(candidates, free, uses);
+  }
+
+  /** 提前出车可用的股道：出库点写成 DYNAMIC 时是该写法覆盖的全部股道（刚出库失败、正在退避的股道只在别无可选时才用），否则是指定的那条。 */
+  private List<String> earlySpawnCandidates(EarlySpawnPlan plan, Instant now) {
+    String spec = plan.ticket().service().depotNodeId();
+    if (!SpawnDirectiveParser.isDynamicTarget(spec)) {
+      return List.of(plan.requestedNode());
+    }
+    List<String> ready = new ArrayList<>();
+    List<String> backedOff = new ArrayList<>();
+    for (String track : depotTracksOf(spec)) {
+      if (now != null && depotDispatchCoordinator.backoffUntil(track, now).isPresent()) {
+        backedOff.add(track);
+      } else {
+        ready.add(track);
+      }
+    }
+    return ready.isEmpty() ? backedOff : ready;
+  }
+
+  /** 一张票会从哪些股道出库；不从车库出车（首站没有 CRET）时为空。 */
+  private Set<String> departureTracksOf(
+      StorageProvider provider, SpawnTicket ticket, Map<UUID, List<SpawnDepot>> lineDepotsByRoute) {
+    if (ticket == null || ticket.service() == null) {
+      return Set.of();
+    }
+    UUID routeId = ticket.service().routeId();
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops = routeStopsOf(routeId);
+    if (stops.isEmpty()
+        || SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isEmpty()) {
+      return Set.of();
+    }
+    List<String> specs = new ArrayList<>();
+    if (ticket.selectedDepotNodeId().isPresent()) {
+      specs.add(ticket.selectedDepotNodeId().get());
+    } else {
+      List<SpawnDepot> lineDepots =
+          lineDepotsByRoute.computeIfAbsent(routeId, id -> lineDepotsOf(provider, id));
+      if (lineDepots.isEmpty()) {
+        specs.add(ticket.service().depotNodeId());
+      } else {
+        lineDepots.forEach(depot -> specs.add(depot.nodeId()));
+      }
+    }
+    Set<String> tracks = new LinkedHashSet<>();
+    for (String spec : specs) {
+      tracks.addAll(depotTracksOf(spec));
+    }
+    return tracks;
+  }
+
+  private List<SpawnDepot> lineDepotsOf(StorageProvider provider, UUID routeId) {
+    if (provider == null || routeId == null) {
+      return List.of();
+    }
+    try {
+      return provider
+          .routes()
+          .findById(routeId)
+          .flatMap(route -> provider.lines().findById(route.lineId()))
+          .map(line -> LineSpawnMetadata.parseDepots(line.metadata()))
+          .orElse(List.of());
+    } catch (RuntimeException failure) {
+      debugLogger.accept("提前出车：读取线路车库池失败: route=" + routeId + " error=" + failure.getMessage());
+      return List.of();
+    }
+  }
+
+  /** 车库写法覆盖的股道：DYNAMIC 写法展开成车库里匹配的股道节点，固定写法就是它自己。 */
+  private Set<String> depotTracksOf(String spec) {
+    if (spec == null || spec.isBlank()) {
+      return Set.of();
+    }
+    if (!SpawnDirectiveParser.isDynamicTarget(spec)) {
+      return Set.of(spec.trim());
+    }
+    if (!isDynamicDepotSpec(spec)) {
+      return Set.of();
+    }
+    Set<String> tracks = new LinkedHashSet<>();
+    for (SignNodeRegistry.SignNodeInfo info : findDynamicDepotNodeInfos(spec)) {
+      if (info.definition().nodeType() == NodeType.DEPOT) {
+        tracks.add(info.definition().nodeId().value());
+      }
+    }
+    return tracks;
+  }
+
+  /** 线路以 DSTY 收尾时它的目标写法。 */
+  private Optional<String> destroyTargetOf(UUID routeId) {
+    return SpawnDirectiveParser.findDirectiveTarget(routeStopsOf(routeId), "DSTY");
+  }
+
+  /** 正在回库的列车要去的车库写法：线路以 DSTY 收尾、还没到，且剩下的只有不停车的途经点。 */
+  private Optional<String> inboundTargetOf(RouteProgressRegistry.RouteProgressEntry entry) {
+    if (entry == null || entry.routeUuid() == null) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinition> definition = routeDefinitions.findById(entry.routeUuid());
+    if (definition.isEmpty()) {
+      return Optional.empty();
+    }
+    RouteId routeKey = definition.get().id();
+    int last = definition.get().waypoints().size() - 1;
+    if (last <= 0 || entry.currentIndex() >= last) {
+      return Optional.empty();
+    }
+    Optional<String> target =
+        routeDefinitions
+            .findStop(routeKey, last)
+            .flatMap(stop -> SpawnDirectiveParser.findDirectiveTarget(stop, "DSTY"));
+    if (target.isEmpty()) {
+      return Optional.empty();
+    }
+    for (int index = Math.max(0, entry.currentIndex() + 1); index < last; index++) {
+      Optional<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stop =
+          routeDefinitions.findStop(routeKey, index);
+      if (stop.isEmpty() || stop.get().stops()) {
+        return Optional.empty();
+      }
+    }
+    return target;
+  }
+
+  private List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> routeStopsOf(UUID routeId) {
+    if (routeId == null) {
+      return List.of();
+    }
+    return routeDefinitions
+        .findById(routeId)
+        .map(definition -> routeDefinitions.listStops(definition.id()))
+        .orElse(List.of());
   }
 
   private Optional<SignNodeRegistry.SignNodeInfo> resolveDynamicDepotNodeInfo(String dynamicSpec) {

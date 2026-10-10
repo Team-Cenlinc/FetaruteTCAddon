@@ -196,6 +196,22 @@ class EtaBoardPlatformPendingTest {
     assertFalse(row.platformPending());
   }
 
+  /** 还没派出的叫车票：写叫车指定的站台（右键的那条），不算待定。 */
+  @Test
+  void aCallTicketShowsItsPinnedTrack() {
+    Fixture fixture = new Fixture(List.of(PPK_1, PPK_2));
+    fixture.attachContinuity(List.of(fixture.ticket(Instant.now().plusSeconds(60))));
+    fixture.service.attachTicketPlatforms(
+        (ticket, index) -> index == 1 ? Optional.of(PPK_2) : Optional.empty());
+
+    BoardResult.BoardRow row = onlyRow(fixture.service);
+
+    assertEquals(BoardPhase.PENDING, row.phase());
+    assertEquals("2", row.platform());
+    assertTrue(row.platformPlanned());
+    assertFalse(row.platformPending());
+  }
+
   /** 计划股道不在这一站的 DYNAMIC 范围里（编表之后改过交路）：不认，照旧待定。 */
   @Test
   void aPlanOutsideTheDynamicRangeIsIgnored() {

@@ -15,6 +15,7 @@ public final class TaskBoardHolder implements InventoryHolder {
   private final String stationCode;
   private final String stationName;
   private final List<TaskBoardEntries.Entry> entries;
+  private final TaskBoard.Kind kind;
   private Inventory inventory;
   private SimulationLevel level;
 
@@ -24,6 +25,20 @@ public final class TaskBoardHolder implements InventoryHolder {
       String stationCode,
       String stationName,
       List<TaskBoardEntries.Entry> entries) {
+    this(playerId, operatorCode, stationCode, stationName, entries, TaskBoard.Kind.DRIVER);
+  }
+
+  /**
+   * @param kind 给驾驶员还是车掌用
+   */
+  public TaskBoardHolder(
+      UUID playerId,
+      String operatorCode,
+      String stationCode,
+      String stationName,
+      List<TaskBoardEntries.Entry> entries,
+      TaskBoard.Kind kind) {
+    this.kind = kind == null ? TaskBoard.Kind.DRIVER : kind;
     this.playerId = playerId;
     this.operatorCode = operatorCode;
     this.stationCode = stationCode;
@@ -42,6 +57,11 @@ public final class TaskBoardHolder implements InventoryHolder {
 
   public UUID playerId() {
     return playerId;
+  }
+
+  /** 给驾驶员还是车掌用。 */
+  public TaskBoard.Kind kind() {
+    return kind;
   }
 
   public String operatorCode() {

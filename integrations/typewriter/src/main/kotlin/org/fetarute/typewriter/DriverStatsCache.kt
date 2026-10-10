@@ -96,6 +96,6 @@ class DriverStatsCache : Initializable, Listener {
             return if (index < 0) 0 else GRADE_ORDER.length - index
         }
 
-        private fun better(a: String, b: String): String = if (gradeRank(b) > gradeRank(a)) b else a
+        internal fun better(a: String, b: String): String = if (gradeRank(b) > gradeRank(a)) b else a
     }
 }

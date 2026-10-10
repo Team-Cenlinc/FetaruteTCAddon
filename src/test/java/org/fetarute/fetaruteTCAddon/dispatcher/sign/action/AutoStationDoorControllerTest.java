@@ -208,4 +208,72 @@ class AutoStationDoorControllerTest {
     assertNull(AutoStationDoorController.lateralCompassFace(null, true));
     assertNull(AutoStationDoorController.lateralCompassFace(new Vector(Double.NaN, 0, 1), true));
   }
+
+  /** 判不出的车厢按最近的已判定车厢推：朝向相同开同一组，反着挂的开另一组。 */
+  @Test
+  void undecidedCarsFollowTheNearestDecidedCarByOrientation() {
+    Vector east = new Vector(1, 0, 0);
+    Vector west = new Vector(-1, 0, 0);
+    java.util.List<Boolean> decided = java.util.Arrays.asList(true, null, null, null);
+    java.util.List<Vector> forwards = java.util.List.of(east, east, west, west);
+
+    assertEquals(
+        java.util.List.of(true, true, false, false),
+        AutoStationDoorController.inferCarSides(decided, forwards));
+  }
+
+  /** 已判定的车厢不改；前后一样近时取前面那节。 */
+  @Test
+  void inferenceKeepsDecidedCarsAndPrefersTheFrontNeighbourOnATie() {
+    Vector east = new Vector(1, 0, 0);
+    Vector west = new Vector(-1, 0, 0);
+    java.util.List<Boolean> decided = java.util.Arrays.asList(false, null, true);
+    java.util.List<Vector> forwards = java.util.List.of(east, west, east);
+
+    assertEquals(
+        java.util.List.of(false, true, true),
+        AutoStationDoorController.inferCarSides(decided, forwards),
+        "中间那节与前一节反向：开前一节的另一组");
+  }
+
+  /** 弯道上相邻车厢夹角不到 90° 仍算同向；读不到朝向时按同向处理。 */
+  @Test
+  void inferenceTreatsCurvesAndUnknownOrientationAsTheSameDirection() {
+    java.util.List<Boolean> decided = java.util.Arrays.asList(true, null, null);
+    java.util.List<Vector> forwards =
+        java.util.Arrays.asList(new Vector(1, 0, 0), new Vector(1, 0, 0.9), null);
+
+    assertEquals(
+        java.util.List.of(true, true, true),
+        AutoStationDoorController.inferCarSides(decided, forwards));
+  }
+
+  /** 一节都没判出时原样返回，交给上层按判不出处理。 */
+  @Test
+  void inferenceLeavesEverythingUndecidedWhenNoCarIsDecided() {
+    java.util.List<Boolean> decided = java.util.Arrays.asList(null, null);
+
+    assertEquals(
+        decided,
+        AutoStationDoorController.inferCarSides(
+            decided, java.util.List.of(new Vector(1, 0, 0), new Vector(-1, 0, 0))));
+  }
+
+  /** 手动开关门的对侧：另一组动画、相反的世界方位；不知道方位时只换动画组。 */
+  @Test
+  void manualDoorOppositeFlipsTheModelSideAndTheWorldFace() {
+    AutoStationDoorController.ManualDoorSide east =
+        new AutoStationDoorController.ManualDoorSide(
+            true, "test", java.util.Optional.of(BlockFace.EAST));
+
+    AutoStationDoorController.ManualDoorSide opposite = east.opposite();
+
+    assertFalse(opposite.modelLeft());
+    assertEquals(java.util.Optional.of(BlockFace.WEST), opposite.worldFace());
+    assertEquals(
+        java.util.Optional.empty(),
+        new AutoStationDoorController.ManualDoorSide(false, "legacy").opposite().worldFace());
+    assertTrue(
+        new AutoStationDoorController.ManualDoorSide(false, "legacy").opposite().modelLeft());
+  }
 }

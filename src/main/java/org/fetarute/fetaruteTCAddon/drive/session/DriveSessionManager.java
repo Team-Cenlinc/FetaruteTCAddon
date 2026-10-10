@@ -126,6 +126,7 @@ import org.fetarute.fetaruteTCAddon.drive.menu.MenuLayout;
 import org.fetarute.fetaruteTCAddon.drive.menu.TaskCard;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
+import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
@@ -183,7 +184,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     /** 调度列车：已有其他驾驶员领了这列车的任务、正等他接班。 */
     RESERVED_BY_OTHER,
     /** {@code /fta drive on cab}：发车端驾驶室没有空座位，或离列车太远，没能送进去。 */
-    CAB_SEAT_UNAVAILABLE
+    CAB_SEAT_UNAVAILABLE,
+    /** 玩家正在当车掌。 */
+    GUARD_ON_DUTY
   }
 
   /** 领取驾驶任务、驾驶调度列车。 */
@@ -197,9 +200,6 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 终点站接车留出的余量（秒）：票据到 assign-tolerance 作废之前先放行。 */
   private static final long PICKUP_TOLERANCE_MARGIN_SECONDS = 30L;
-
-  /** 直接送进另一端驾驶室时，驾驶员离那一节车最远多少格（走远了不强拉回来）。 */
-  private static final double CAB_MOVE_RANGE_BLOCKS = 64.0;
 
   /** 每隔多少 tick 评估一次拥堵保护。 */
   private static final int PROTECTION_TICKS = 100;
@@ -304,6 +304,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final DriverPickups pickups = new DriverPickups();
 
   private final DriverControlRegistry driverRegistry = new DriverControlRegistry();
+
+  /** 车掌值乘；没有接上时为空。 */
+  private org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager guards;
+
   private final DriverTaskManager tasks;
   private final DriveTutorials tutorials;
   private final DriveLevelPreference levels;
@@ -336,6 +340,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     this.tutorials = new DriveTutorials(plugin, plugin::getLocaleManager, sounds);
     this.levels = new DriveLevelPreference(plugin);
     applyDriverConfig(config);
+    this.guards =
+        new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager(
+            plugin,
+            driverRegistry,
+            sounds,
+            plugin.getLocaleManager(),
+            this::config,
+            () -> plugin.getConfigManager().current().autoStationSettings(),
+            driverSide());
   }
 
   /** 驾驶任务。 */
@@ -486,6 +499,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       bossBar.hide(playerId);
     }
     stopMarker.removeAll();
+    if (guards != null) {
+      guards.stopAll(org.fetarute.fetaruteTCAddon.drive.guard.GuardSession.EndReason.DISABLED);
+    }
     DrivePacketListener.unregister(plugin);
   }
 
@@ -499,6 +515,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (!newConfig.driver().enabled()) {
       handbackAll("disabled");
     }
+    if (guards != null) {
+      guards.reload();
+    }
   }
 
   public void setTrace(boolean enabled) {
@@ -511,6 +530,323 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   public boolean isDriving(UUID playerId) {
     return active.containsKey(playerId);
+  }
+
+  /** 玩家领了驾驶或车掌任务、还没开始：坐在车上等接班时，接班提示（坐第几节驾驶室）发在动作栏，乘客的动作栏要让位，不然提示被盖掉。 */
+  public boolean awaitingCrewDuty(UUID playerId) {
+    if (tasks
+        .taskOf(playerId)
+        .filter(task -> task.state() == DriverTask.State.CLAIMED)
+        .isPresent()) {
+      return true;
+    }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return crew != null
+        && crew.tasks()
+            .activeTaskOf(playerId)
+            .filter(
+                task ->
+                    task.state()
+                        == org.fetarute.fetaruteTCAddon.drive.guard.GuardTask.State.CLAIMED)
+            .isPresent();
+  }
+
+  /** 玩家正在驾驶或值乘车掌：用的是驾驶员侧边栏，乘客的计分板要让位。 */
+  public boolean usesCrewSidebar(UUID playerId) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return active.containsKey(playerId) || (crew != null && crew.isOnDuty(playerId));
+  }
+
+  /** 玩家的快捷栏被驾驶物品或车掌按钮占着：驾驶员与车掌的物品一样要保护。 */
+  public boolean isProtected(UUID playerId) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return active.containsKey(playerId) || (crew != null && crew.isOnDuty(playerId));
+  }
+
+  /** 接上车掌值乘。 */
+  public void setGuards(org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager guards) {
+    this.guards = guards;
+  }
+
+  /** 车掌值乘；没有接上时为空。 */
+  public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager> guards() {
+    return Optional.ofNullable(guards);
+  }
+
+  /** 这列车此刻有没有玩家在驾驶。 */
+  public boolean trainDriven(String trainName) {
+    return driverSessionOfTrain(trainName).isPresent();
+  }
+
+  /** 驾驶员那边给车掌用的接口：找这列车的驾驶员、给他提示。 */
+  public org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.DriverSide driverSide() {
+    return new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.DriverSide() {
+      @Override
+      public Optional<UUID> driverOf(String trainName) {
+        return driverSessionOfTrain(trainName).map(DriveSession::playerId);
+      }
+
+      @Override
+      public boolean driverAto(UUID driverId) {
+        DriveSession session = active.get(driverId);
+        return session != null && session.isAto();
+      }
+
+      @Override
+      public void notifyDriver(
+          UUID driverId, String key, Map<String, String> values, DriveCue cue) {
+        Player driver = Bukkit.getPlayer(driverId);
+        if (driver == null || !driver.isOnline()) {
+          return;
+        }
+        notice(driver, key, values);
+        if (cue != null) {
+          sounds.play(driver, cue);
+        }
+      }
+
+      @Override
+      public boolean isDriving(UUID playerId) {
+        return active.containsKey(playerId);
+      }
+
+      @Override
+      public boolean hotbarReady() {
+        return packetsReady;
+      }
+
+      @Override
+      public boolean driverDoorsOpen(String trainName) {
+        return driverSessionOfTrain(trainName).map(DriveSession::anyDoorOpen).orElse(false);
+      }
+
+      @Override
+      public void refreshSignal(MinecartGroup group) {
+        plugin.getRuntimeDispatchService().ifPresent(dispatch -> dispatch.refreshSignal(group));
+      }
+
+      @Override
+      public boolean emergencyByGuard(String trainName) {
+        Optional<DriveSession> session = driverSessionOfTrain(trainName);
+        if (session.isEmpty() || session.get().isAto()) {
+          return false;
+        }
+        session.get().forceEmergency();
+        traceSession(session.get(), "车掌拉下紧急停车");
+        return true;
+      }
+
+      @Override
+      public double emergencyDecelBps2(MinecartGroup group) {
+        DriveConfig current = config;
+        return resolveParams(group, current).decelBps2() * current.emergencyMultiplier();
+      }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.Outlook>
+          driverOutlook(MinecartGroup group) {
+        return driverSessionOfTrain(group.getProperties().getTrainName())
+            .map(
+                session -> {
+                  CabChange change = session.cabChange();
+                  DriverLink link = session.driverLink();
+                  return org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.fromDriver(
+                      change.stage(),
+                      change.eitherEnd(),
+                      change.target(),
+                      link != null && link.turnbackPending(),
+                      session.binding().memberIndex(),
+                      group.size());
+                });
+      }
+
+      @Override
+      public boolean atLayover(String trainName) {
+        return isLayover(trainName);
+      }
+
+      @Override
+      public CabSeats.Departure layoverDeparture(MinecartGroup group) {
+        return TerminalCabEnd.of(plugin, group);
+      }
+
+      @Override
+      public boolean moveWithGuard(
+          String trainName, CabSeats.End guardEnd, java.util.function.BooleanSupplier seatGuard) {
+        return moveDriverWithGuard(trainName, guardEnd, seatGuard);
+      }
+
+      @Override
+      public Optional<TaskKey> tripOf(String trainName) {
+        return DriverTaskManager.timetables()
+            .flatMap(api -> api.getAssignment(trainName))
+            .map(
+                assignment ->
+                    new TaskKey(
+                        assignment.timetableId(), assignment.tripCode(), assignment.serviceDate()));
+      }
+
+      @Override
+      public String routeCodeOf(TaskKey key) {
+        return plugin
+            .getTimetableService()
+            .flatMap(
+                service -> service.tripPlan(key.timetableId(), key.tripCode(), key.serviceDate()))
+            .map(plan -> plan.routeCode())
+            .orElse("");
+      }
+
+      @Override
+      public void payGuard(
+          UUID playerId, String playerName, DriveRewards.Reward reward, boolean forfeited) {
+        DriveRewardPayer.Paid paid =
+            forfeited || reward.empty()
+                ? new DriveRewardPayer.Paid(0, Optional.empty())
+                : rewardPayer.pay(playerId, playerName, reward, config.rewards());
+        Player player = Bukkit.getPlayer(playerId);
+        if (player != null && player.isOnline()) {
+          tellReward(player, paid, forfeited, config.rewards().currencyName());
+        }
+      }
+
+      @Override
+      public void saveRecord(DriveTaskRecord record) {
+        DriveSessionManager.this.saveRecord(record);
+      }
+
+      @Override
+      public boolean ackRequired(UUID driverId) {
+        DriveSession session = active.get(driverId);
+        return session != null
+            && session.driverLink() != null
+            && !session.isAto()
+            && session.level() == SimulationLevel.SIMULATION;
+      }
+
+      @Override
+      public Optional<String> nextStationOf(MinecartGroup group) {
+        return plugin
+            .getDisplayService()
+            .flatMap(display -> display.hudContext(group))
+            .map(TrainHudContext::nextStation)
+            .filter(station -> !station.isEmpty())
+            .map(TrainHudContext.StationDisplay::label)
+            .filter(label -> !label.isBlank());
+      }
+
+      @Override
+      public boolean hasDriverTask(UUID playerId) {
+        return tasks.activeTaskOf(playerId).isPresent();
+      }
+
+      @Override
+      public Optional<org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.TripTrain>
+          trainForTrip(TaskKey key) {
+        return tasks
+            .assignmentOf(key)
+            .map(
+                assignment ->
+                    new org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager.TripTrain(
+                        assignment.trainName(), assignment.lastStopSequence().orElse(-1)));
+      }
+
+      @Override
+      public boolean dwelling(String trainName) {
+        return tasks.isDwelling(trainName);
+      }
+
+      @Override
+      public Instant pickupDeadline(Instant now, Instant plannedDeparture) {
+        return DriveSessionManager.this.pickupDeadline(now, plannedDeparture);
+      }
+
+      @Override
+      public String teleportBesideCab(Player player, String trainName, CabSeats.End end) {
+        return DriveSessionManager.this.teleportBesideCab(
+            player,
+            trainName,
+            end == CabSeats.End.TAIL ? CabSeats.Departure.TAIL : CabSeats.Departure.HEAD);
+      }
+
+      @Override
+      public void missedAck(UUID driverId) {
+        DriveSession session = active.get(driverId);
+        if (session != null && session.driverLink() != null) {
+          session.driverLink().signalAcknowledge().recordMiss();
+          traceSession(session, "未应答车掌的发车信号");
+        }
+      }
+    };
+  }
+
+  /**
+   * 车掌被直接送进要换到的那一端：驾驶员也在换端、要去另一头时一起送进发车端。驾驶员还坐在车掌要去的那一端时先请下来，车掌入座后再送驾驶员。
+   *
+   * @return 车掌是否已入座
+   */
+  private boolean moveDriverWithGuard(
+      String trainName, CabSeats.End guardEnd, java.util.function.BooleanSupplier seatGuard) {
+    Optional<DriveSession> found = driverSessionOfTrain(trainName);
+    if (found.isEmpty()) {
+      return seatGuard.getAsBoolean();
+    }
+    DriveSession session = found.get();
+    CabChange change = session.cabChange();
+    Player driver = Bukkit.getPlayer(session.playerId());
+    Optional<MinecartGroup> groupOpt = findSessionGroup(session);
+    if (driver == null
+        || groupOpt.isEmpty()
+        || change.stage() == CabChange.Stage.IDLE
+        || change.eitherEnd()
+        || change.target()
+            != org.fetarute.fetaruteTCAddon.drive.guard.GuardCabChange.opposite(guardEnd)) {
+      return seatGuard.getAsBoolean();
+    }
+    MinecartGroup group = groupOpt.get();
+    CabSeats cabs = SeatLocator.cabSeats(group, config.driver().cabSeatNames());
+    boolean atGuardEnd =
+        SeatLocator.locate(driver)
+            .filter(seat -> seat.trainName().equals(group.getProperties().getTrainName()))
+            .filter(seat -> cabs.endOf(seat) == guardEnd)
+            .isPresent();
+    if (atGuardEnd) {
+      driver.leaveVehicle();
+    }
+    boolean guardSeated = seatGuard.getAsBoolean();
+    if (seatInCab(session, group, driver, change.target())) {
+      sendTaskChat(
+          driver,
+          "drive.task.cab-change.moved-with-guard",
+          Map.of("car", String.valueOf(change.targetCar())));
+    }
+    return guardSeated;
+  }
+
+  /** 驾驶这列车的会话（按会话的车名，调度改名后按列车属性上的当前车名也认）。 */
+  private Optional<DriveSession> driverSessionOfTrain(String trainName) {
+    if (trainName == null) {
+      return Optional.empty();
+    }
+    for (DriveSession session : active.values()) {
+      DriverLink link = session.driverLink();
+      if (trainName.equals(session.trainName())
+          || (link != null && trainName.equals(link.currentTrainName()))) {
+        return Optional.of(session);
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 驾驶员按了铃：车上有车掌时一短收到、两短呼叫；没有车掌时只重发背包（丢弃键本来的处理）。 */
+  private void driverBuzzer(Player player) {
+    DriveSession session = active.get(player.getUniqueId());
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (session == null || crew == null) {
+      return;
+    }
+    DriverLink link = session.driverLink();
+    String train = link != null ? link.currentTrainName() : session.trainName();
+    crew.driverBuzzer(player, train);
   }
 
   public Optional<DriveSession> sessionOf(UUID playerId) {
@@ -529,7 +865,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   @Override
   public HotbarRewriter<ItemStack> rewriterFor(UUID playerId) {
     DriveSession session = active.get(playerId);
-    return session == null ? null : session.rewriter();
+    if (session != null) {
+      return session.rewriter();
+    }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return crew == null ? null : crew.rewriterFor(playerId);
   }
 
   @Override
@@ -547,12 +887,25 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   @Override
   public int menuTopSize(UUID playerId) {
     DriveSession session = active.get(playerId);
-    return session == null ? 0 : session.menuTopSize();
+    if (session != null) {
+      return session.menuTopSize();
+    }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    return crew == null ? 0 : crew.menuTopSize(playerId);
   }
 
   @Override
   public void onInput(Player player, InputSignal signal) {
     UUID id = player.getUniqueId();
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (!active.containsKey(id) && crew != null && crew.isOnDuty(id)) {
+      crew.onInput(player, signal);
+      return;
+    }
+    if (signal == InputSignal.DROP) {
+      // 丢弃键是驾驶员的铃：一短收到，两短呼叫车掌（车上有车掌时）。
+      Bukkit.getScheduler().runTask(plugin, () -> driverBuzzer(player));
+    }
     if (signal == InputSignal.SWAP_HANDS) {
       // F 键打开停车后菜单。这个信号不能和其它信号合并，否则同一 tick 里的丢弃键会把它吞掉。
       Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
@@ -842,6 +1195,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (!isGameModeAllowed(player.getGameMode())) {
       return StartOutcome.BAD_GAME_MODE;
     }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew != null && crew.isOnDuty(player.getUniqueId())) {
+      return StartOutcome.GUARD_ON_DUTY;
+    }
     DriveSession running = active.get(player.getUniqueId());
     if (running != null) {
       // 换端坐进了驾驶座没有标记的那一端：同一个命令用来确认座位。
@@ -981,22 +1338,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   public boolean canEnterCab(Player player) {
     DriveConfig current = config.withLevel(levels.effective(player, config.level()));
     return cabTarget(player, current)
-        .filter(target -> cabMember(player, target.group(), target.end()) != null)
+        .filter(target -> SeatLocator.cabMember(player, target.group(), target.end()) != null)
         .isPresent();
-  }
-
-  /** 某一端的端车：离玩家不超过 {@value #CAB_MOVE_RANGE_BLOCKS} 格、在同一世界时才返回。 */
-  private static MinecartMember<?> cabMember(Player player, MinecartGroup group, CabSeats.End end) {
-    MinecartMember<?> member = end == CabSeats.End.TAIL ? group.tail() : group.head();
-    if (member == null
-        || member.getEntity() == null
-        || group.getWorld() == null
-        || !group.getWorld().equals(player.getWorld())
-        || member.getEntity().getLocation().distanceSquared(player.getLocation())
-            > CAB_MOVE_RANGE_BLOCKS * CAB_MOVE_RANGE_BLOCKS) {
-      return null;
-    }
-    return member;
   }
 
   /**
@@ -1006,17 +1349,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private OptionalInt enterCab(
       Player player, MinecartGroup group, CabSeats.End end, DriveConfig current) {
-    MinecartMember<?> member = cabMember(player, group, end);
-    if (member == null) {
-      return OptionalInt.empty();
-    }
-    int memberIndex = group.indexOf(member);
     CabSeats cabs = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
-    return SeatLocator.enterNearestFreeSeatIndex(
-                player, member, index -> cabs.endOf(memberIndex, index) == end)
-            .isPresent()
-        ? OptionalInt.of(memberIndex)
-        : OptionalInt.empty();
+    return SeatLocator.enterCab(player, group, cabs, end)
+        .map(seat -> OptionalInt.of(seat.memberIndex()))
+        .orElse(OptionalInt.empty());
   }
 
   /**
@@ -1087,6 +1423,22 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (session != null) {
       leave(session, reason);
     }
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew != null && crew.isOnDuty(playerId)) {
+      crew.stop(
+          playerId,
+          switch (reason) {
+            case DEATH -> org.fetarute.fetaruteTCAddon.drive.guard.GuardSession.EndReason.DEATH;
+            case GAME_MODE -> org.fetarute
+                .fetaruteTCAddon
+                .drive
+                .guard
+                .GuardSession
+                .EndReason
+                .GAME_MODE;
+            default -> org.fetarute.fetaruteTCAddon.drive.guard.GuardSession.EndReason.OFFLINE;
+          });
+    }
   }
 
   /** 玩家按了潜行：记下时刻，离座时据此判断是不是主动离座。 */
@@ -1123,12 +1475,32 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /**
+   * TrainCarts 入座前：车掌预留的座位别人（乘客、驾驶员）不能坐。
+   *
+   * @return 是否放行这次入座
+   */
+  public boolean allowSeatEnter(
+      org.bukkit.entity.Entity entity,
+      MinecartMember<?> member,
+      com.bergerkiller.bukkit.tc.attachments.control.CartAttachmentSeat seat) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew == null || !crew.anyOnDuty()) {
+      return true;
+    }
+    return crew.allowSeatEnter(entity, member, () -> SeatLocator.seatIndexOf(member, seat));
+  }
+
+  /**
    * 原版下车事件上的同一道判定，不依赖 TrainCarts 是否把潜行下车交给它的离座事件：只管潜行键此刻按着的驾驶员， 插件自己把人挪座位（送回座位、换端入座）不受影响。
    *
    * @return 是否放行
    */
   public boolean allowDismount(Player player) {
     DriveSession session = active.get(player.getUniqueId());
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (session == null && crew != null && crew.isOnDuty(player.getUniqueId())) {
+      return crew.allowDismount(player);
+    }
     if (session == null || !session.sneakHeld()) {
       return true;
     }
@@ -1137,6 +1509,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 潜行键状态变化（输入事件）。 */
   public void noteSneakInput(UUID playerId, boolean sneaking) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew != null) {
+      crew.noteSneakInput(playerId, sneaking);
+    }
     DriveSession session = active.get(playerId);
     if (session != null) {
       session.noteSneakInput(sneaking, Bukkit.getCurrentTick());
@@ -1151,7 +1527,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   public boolean allowSeatExit(Player player) {
     DriveSession session = active.get(player.getUniqueId());
     if (session == null) {
-      return true;
+      org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+      return crew == null || crew.allowSeatExit(player);
     }
     long now = Bukkit.getCurrentTick();
     // 按列车实测速度判断：卡住不动、编组找不到时指令速度可能一直不为零，驾驶员会下不了车。
@@ -1268,6 +1645,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 驾驶会话中右键了实体：为保护背包，这次交互已被拦下。点的是自己驾驶的列车、且此刻没坐在座位上时，代为坐进这节车厢最近的空驾驶座—— 折返换端时走到另一端、被挤下座位后回座都靠它。 */
   public void onGuardedEntityClick(Player player, Entity clicked) {
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (!active.containsKey(player.getUniqueId()) && crew != null) {
+      crew.onEntityClick(player, clicked);
+      return;
+    }
     DriveSession session = active.get(player.getUniqueId());
     if (session == null
         || session.phase() != DriveSession.Phase.ACTIVE
@@ -1610,6 +1992,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     Optional<MinecartGroup> group = findSessionGroup(session);
     if (group.isEmpty()) {
       denyMenu(player, "drive.menu.deny.unavailable");
+      return;
+    }
+    if (driverRegistry.guardOperatesDoors(group.get().getProperties())) {
+      denyMenu(player, "drive.menu.deny.guard-doors");
       return;
     }
     boolean opening = left ? !session.isLeftDoorOpen() : !session.isRightDoorOpen();
@@ -2620,6 +3006,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (tickCounter % HOTBAR_REFRESH_TICKS == 0) {
       refreshInventory(player, session);
     }
+    DriverLink crew = session.driverLink();
+    if (crew != null) {
+      // 车掌上岗、离岗随时会变：显示与提示前按此刻的登记更新。
+      crew.setGuardAboard(driverRegistry.guardOperatesDoors(group.getProperties()));
+    }
     if (tickCounter % DriveTutorials.TICK_INTERVAL == 0) {
       tutorials.tick(player, session, now);
     }
@@ -2726,9 +3117,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       boolean left = session.isLeftDoorOpen();
       boolean right = session.isRightDoorOpen();
       boolean closing = session.doorsClosing(Bukkit.getCurrentTick());
-      // 关门动画放完前仍按车门开着报给站台：动画结束才进入等待发车。
-      current.reportDoors(
-          side.satisfied(left, right), left || right || closing, side.wrong(left, right));
+      // 关门动画放完前仍按车门开着报给站台：动画结束才进入等待发车。车上有车掌时车门由车掌回报。
+      if (!driverRegistry.guardOperatesDoors(group.getProperties())) {
+        current.reportDoors(
+            side.satisfied(left, right), left || right || closing, side.wrong(left, right));
+      }
       link.setDoorsClosing(closing);
       link.setRequiredDoorSide(side);
       link.setTargetLabel(current.stationName());
@@ -3662,9 +4055,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   // ---- 始发站与车库接班 ----
 
-  /** 有没有可能要等驾驶员接车：没有驾驶任务时派车侧不必逐张票去查车次。 */
+  /** 玩家在当车掌、或领了还没结束的车掌任务：同一时间只能当一个角色。 */
+  private boolean guardBusy(UUID playerId) {
+    return guards != null
+        && (guards.isOnDuty(playerId) || guards.tasks().activeTaskOf(playerId).isPresent());
+  }
+
+  /** 有没有可能要等驾驶员或车掌接车：没有驾驶任务、也没有等着上岗的车掌任务时派车侧不必逐张票去查车次。 */
   public boolean hasDriverPickupInterest() {
-    return tasks.hasActiveTasks() || !pickups.isEmpty();
+    return tasks.hasActiveTasks()
+        || !pickups.isEmpty()
+        || (guards != null && guards.hasPickupInterest());
   }
 
   /**
@@ -3675,6 +4076,21 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    * @param trip 票据要开的车次；不是表定车次时为 {@code null}
    */
   public boolean allowLayoverDispatch(TimetableService.DueTrip trip, String trainName) {
+    // 驾驶员与车掌各自判定、各自开始扣车，两人都放行才派车。
+    boolean driver = driverAllowsLayoverDispatch(trip, trainName);
+    boolean guard =
+        guards == null
+            || guards.allowLayoverDispatch(
+                trip == null
+                    ? null
+                    : new TaskKey(
+                        trip.timetable().id(), trip.trip().tripCode(), trip.serviceDate()),
+                trainName,
+                trip == null ? null : trip.departure());
+    return driver && guard;
+  }
+
+  private boolean driverAllowsLayoverDispatch(TimetableService.DueTrip trip, String trainName) {
     Instant now = Instant.now();
     Optional<DriverTask> task =
         trip == null
@@ -4538,23 +4954,26 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private boolean moveToCab(
       DriveSession session, MinecartGroup group, Player player, CabSeats.End end) {
-    MinecartMember<?> member = end == CabSeats.End.NONE ? null : cabMember(player, group, end);
-    if (member == null) {
-      return false;
+    org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
+    if (crew == null || end == CabSeats.End.NONE) {
+      return seatInCab(session, group, player, end);
     }
-    int memberIndex = group.indexOf(member);
+    // 车上有车掌：车掌坐在这一端时先请下来，驾驶员入座后车掌一起换到另一头。
+    return crew.moveWithDriver(group, end, () -> seatInCab(session, group, player, end));
+  }
+
+  /** 让驾驶员坐进那一端驾驶室的空座位（见 {@link #moveToCab}）。 */
+  private boolean seatInCab(
+      DriveSession session, MinecartGroup group, Player player, CabSeats.End end) {
     CabSeats cabs = SeatLocator.cabSeats(group, config.driver().cabSeatNames());
-    OptionalInt seatIndex =
-        SeatLocator.enterNearestFreeSeatIndex(
-            player, member, index -> cabs.endOf(memberIndex, index) == end);
-    traceSession(
-        session,
-        "直接送进第 " + (memberIndex + 1) + " 节驾驶室: " + (seatIndex.isPresent() ? "已入座" : "没有空的驾驶座"));
-    if (seatIndex.isEmpty()) {
+    Optional<SeatBinding> seat = SeatLocator.enterCab(player, group, cabs, end);
+    traceSession(session, "直接送进" + end + "端驾驶室: " + (seat.isPresent() ? "已入座" : "没有空的驾驶座或离列车太远"));
+    if (seat.isEmpty()) {
       return false;
     }
     // 按选中的座位记下：TrainCarts 晚一拍才让人坐下时，送回座位也送回这个座位；系统送进去的座位就是驾驶室，驾驶座没有标记的列车不用再确认。
-    SeatBinding binding = new SeatBinding(session.trainName(), memberIndex, seatIndex.getAsInt());
+    SeatBinding binding =
+        new SeatBinding(session.trainName(), seat.get().memberIndex(), seat.get().seatIndex());
     session.rebind(binding);
     session.noteCabMove(Bukkit.getCurrentTick());
     CabSeatKey.of(group, binding).ifPresent(session::setConfirmedCabSeat);
@@ -4723,16 +5142,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   /** 驾驶室座位：同一编组、同样节数时每秒最多重读一次（挂上或摘下车厢时马上重读）。 */
   private static CabSeats cabSeatsOf(
       DriveSession session, MinecartGroup group, DriveConfig current, long nowTick) {
-    DriveSession.CabSeatsMemo memo = session.cabSeatsMemo();
-    if (memo != null
-        && memo.group() == group
-        && memo.size() == group.size()
-        && nowTick - memo.tick() < CAB_CHANGE_REFRESH_TICKS) {
-      return memo.seats();
-    }
-    CabSeats seats = SeatLocator.cabSeats(group, current.driver().cabSeatNames());
-    session.setCabSeatsMemo(new DriveSession.CabSeatsMemo(group, group.size(), nowTick, seats));
-    return seats;
+    CabSeatsMemo memo =
+        CabSeatsMemo.refresh(
+            session.cabSeatsMemo(), group, current.driver().cabSeatNames(), nowTick);
+    session.setCabSeatsMemo(memo);
+    return memo.seats();
   }
 
   /** 计划发车：每秒最多查一次（待命与否、列车改名或驾驶任务换了都马上重查）。 */
@@ -4880,7 +5294,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   public DriverTaskManager.ClaimOutcome assignTask(
       Player player, DriverTaskManager.TaskSpec spec, DrivingMode mode, boolean notify) {
-    if (continuations.containsKey(player.getUniqueId())) {
+    if (continuations.containsKey(player.getUniqueId()) || guardBusy(player.getUniqueId())) {
       return DriverTaskManager.ClaimOutcome.ALREADY_HAS_TASK;
     }
     DriverTaskManager.ClaimOutcome outcome =
@@ -5034,6 +5448,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     if (continuations.containsKey(player.getUniqueId())) {
       // 正在等接续本车的下一趟：先结束驾驶再领别的车次，免得开出后这一趟记不成任务。
       return "drive.task.claim.continuing";
+    }
+    if (guardBusy(player.getUniqueId())) {
+      return "drive.task.claim.guard-busy";
     }
     DriveConfig current = config;
     DriverTaskManager.ClaimOutcome outcome =

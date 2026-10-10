@@ -16,6 +16,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.Columns;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.Departures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.DestinationStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.Header;
+import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.HighlightArrangement;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.PlatformStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.RowStyle;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout.TextStyle;
@@ -359,8 +360,20 @@ public final class PidsLayoutParser {
             status.optBool("stacked", true),
             status.optInt("offset", 0),
             textStyle(highlight, 12, 10, 4),
-            highlight.optBool("spread", true),
+            highlightArrangement(highlight),
             arrival.optBool("dash", true)));
+  }
+
+  /** 写了 {@code stacked} 按它；只写了 {@code spread} 的布局照旧左右分开或同行；都没写时上下叠放。 */
+  private static HighlightArrangement highlightArrangement(Node highlight) {
+    boolean stacked =
+        highlight.has("stacked") ? highlight.optBool("stacked", true) : !highlight.has("spread");
+    if (stacked) {
+      return HighlightArrangement.STACKED;
+    }
+    return highlight.optBool("spread", true)
+        ? HighlightArrangement.SPREAD
+        : HighlightArrangement.INLINE;
   }
 
   private static TextStyle textStyle(Node node, int size, int secondary, int gap) {

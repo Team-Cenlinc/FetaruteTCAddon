@@ -1,0 +1,243 @@
+package org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import com.bergerkiller.bukkit.tc.properties.TrainProperties;
+import com.bergerkiller.bukkit.tc.properties.standard.type.ChunkLoadOptions;
+import com.bergerkiller.bukkit.tc.properties.standard.type.CollisionOptions;
+import com.bergerkiller.bukkit.tc.properties.standard.type.SlowdownMode;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
+import org.junit.jupiter.api.Test;
+
+/** 叫车在发车侧的规则：待命车配对、区间生成的首个 destination、出车物理属性。 */
+class OnDemandSpawnTest {
+
+  private static final Instant NOW = Instant.parse("2026-10-08T00:00:00Z");
+
+  /** 叫车票接叫来的车或没绑交路的车；按表运行的交路上只接叫来的车；别的票不接叫来的车。 */
+  @Test
+  void calledTrainsOnlyServeCalls() {
+    LayoverRegistry.LayoverCandidate called =
+        candidate("called-1", Map.of(SimpleTicketAssigner.TAG_CALLED_TRAIN, "x@SURC:PPK"));
+    LayoverRegistry.LayoverCandidate free = candidate("free-1", Map.of());
+    LayoverRegistry.LayoverCandidate bound = candidate("bound-1", Map.of());
+    List<LayoverRegistry.LayoverCandidate> all = List.of(called, free, bound);
+
+    List<LayoverRegistry.LayoverCandidate> forCall =
+        SimpleTicketAssigner.filterCalledTrains(
+            ticket(TripSource.ON_DEMAND),
+            all,
+            name -> name.startsWith("bound"),
+            route -> false,
+            id -> true);
+    List<LayoverRegistry.LayoverCandidate> forCallOnTimetable =
+        SimpleTicketAssigner.filterCalledTrains(
+            ticket(TripSource.ON_DEMAND),
+            all,
+            name -> name.startsWith("bound"),
+            route -> true,
+            id -> true);
+    List<LayoverRegistry.LayoverCandidate> forHeadway =
+        SimpleTicketAssigner.filterCalledTrains(
+            ticket(TripSource.SCHEDULED),
+            all,
+            name -> name.startsWith("bound"),
+            route -> true,
+            id -> true);
+
+    assertEquals(List.of(called, free), forCall, "叫车票不抢绑着时刻表交路的车");
+    assertEquals(List.of(called), forCallOnTimetable, "按表运行的交路上只接叫来的车");
+    assertEquals(List.of(free, bound), forHeadway, "别的票不接叫来的车");
+  }
+
+  /** 留给某一单的折返车只给那一单的票接：别的叫车票、排车源（还没出票）都不接它。 */
+  @Test
+  void aTurnbackTrainServesOnlyItsOwnCall() {
+    LayoverRegistry.LayoverCandidate turnback =
+        candidate(
+            "turnback-1",
+            Map.of(
+                SimpleTicketAssigner.TAG_CALLED_TRAIN,
+                "aaa@SURC:NTA",
+                SimpleTicketAssigner.TAG_CALL_TURNBACK,
+                "aaa"));
+
+    assertTrue(
+        SimpleTicketAssigner.callMayTake(
+            turnback, true, name -> false, Optional.of("AAA"), id -> true));
+    assertFalse(
+        SimpleTicketAssigner.callMayTake(
+            turnback, true, name -> false, Optional.of("bbb"), id -> true));
+    assertFalse(
+        SimpleTicketAssigner.callMayTake(
+            turnback, false, name -> false, Optional.empty(), id -> true));
+    assertTrue(
+        SimpleTicketAssigner.callMayTake(
+            turnback, true, name -> false, Optional.of("bbb"), id -> false),
+        "留给的那一单已经没了：当普通的叫来的车接");
+  }
+
+  /** 折返车票区间生成一直不成也不改走交路本来的车源（那样要从交路首站开起）；普通叫车票试够了才改走。 */
+  @Test
+  void aTurnbackTicketNeverGivesUpItsEntry() {
+    Optional<OnDemandTrip.Entry> entry =
+        Optional.of(new OnDemandTrip.Entry(1, Optional.of(NodeId.of("X"))));
+    Instant longAgo = NOW.minusSeconds(120);
+
+    assertFalse(
+        SimpleTicketAssigner.entryGivesUp(
+            ticket(Optional.of(OnDemandTrip.format("aaa@SURC:NTA", entry, true)), longAgo), NOW));
+    assertTrue(
+        SimpleTicketAssigner.entryGivesUp(
+            ticket(Optional.of(OnDemandTrip.format("aaa@SURC:NTA", entry)), longAgo), NOW));
+    assertFalse(
+        SimpleTicketAssigner.entryGivesUp(
+            ticket(Optional.of(OnDemandTrip.format("aaa@SURC:NTA", entry)), NOW), NOW),
+        "还没试够");
+  }
+
+  /** 只接首站待命车的叫车票不过拥堵闸门：不多出一列车；区间生成、从车库出车的照常过闸门。 */
+  @Test
+  void reuseOnlyCallTicketsSkipTheCongestionGate() {
+    assertTrue(SimpleTicketAssigner.onDemandReuseOnly(TripSource.ON_DEMAND, false, false));
+    assertFalse(SimpleTicketAssigner.onDemandReuseOnly(TripSource.ON_DEMAND, true, false));
+    assertFalse(SimpleTicketAssigner.onDemandReuseOnly(TripSource.ON_DEMAND, false, true));
+    assertFalse(SimpleTicketAssigner.onDemandReuseOnly(TripSource.SCHEDULED, false, false));
+  }
+
+  /** 回库交路上的叫车票走区间生成，不落进回库票的折返复用；别的回库票照旧。 */
+  @Test
+  void returnRouteCallsTakeTheEntryPath() {
+    assertFalse(SimpleTicketAssigner.takesReturnBranch(RouteOperationType.RETURN, true));
+    assertTrue(SimpleTicketAssigner.takesReturnBranch(RouteOperationType.RETURN, false));
+    assertFalse(SimpleTicketAssigner.takesReturnBranch(RouteOperationType.OPERATION, false));
+  }
+
+  /** 区间生成试够了才改走交路本来的车源；回库交路、车库要让给表定出库时不改。 */
+  @Test
+  void entryFallbackRespectsReturnRoutesAndTheDepotGate() {
+    assertTrue(SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.OPERATION, true, true));
+    assertTrue(SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.CREATE, true, true));
+    assertFalse(
+        SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.OPERATION, false, true), "还没试够");
+    assertFalse(
+        SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.RETURN, true, true),
+        "回库交路没有别的车源");
+    assertFalse(
+        SimpleTicketAssigner.onDemandFallsBack(RouteOperationType.OPERATION, true, false),
+        "车库要让给表定出库");
+  }
+
+  /** 生成点在两个交路节点之间：入路下标处换成生成点，授权与首个 destination 从它算；生成点就是交路节点时原样。 */
+  @Test
+  void entryBetweenRouteNodesReplacesTheIndexNode() {
+    List<NodeId> nodes = List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C"), NodeId.of("D"));
+
+    assertEquals(
+        List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("X"), NodeId.of("D")),
+        SimpleTicketAssigner.entrySpawnWaypoints(
+            nodes, new OnDemandTrip.Entry(2, Optional.of(NodeId.of("X")))));
+    assertEquals(
+        nodes,
+        SimpleTicketAssigner.entrySpawnWaypoints(
+            nodes, new OnDemandTrip.Entry(2, Optional.empty())));
+    assertEquals(
+        nodes,
+        SimpleTicketAssigner.entrySpawnWaypoints(
+            nodes, new OnDemandTrip.Entry(2, Optional.of(NodeId.of("C")))));
+  }
+
+  /** 区间生成：首个 destination 是生成点的下一个节点。 */
+  @Test
+  void entrySpawnHeadsForTheNodeAfterTheEntry() {
+    TrainProperties properties = mock(TrainProperties.class);
+    List<NodeId> nodes = List.of(NodeId.of("A"), NodeId.of("B"), NodeId.of("C"), NodeId.of("D"));
+
+    assertTrue(SimpleTicketAssigner.applyPreparedSpawnDestination(properties, nodes, 2));
+    verify(properties).setDestination("D");
+    assertFalse(
+        SimpleTicketAssigner.applyPreparedSpawnDestination(properties, nodes, 3), "末节点之后没有下一站");
+  }
+
+  /** 出车物理属性：关摩擦、重力、碰撞，常驻加载用最小范围。 */
+  @Test
+  void spawnPhysicsDisablesFrictionGravityAndCollision() {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.getChunkLoadOptions()).thenReturn(ChunkLoadOptions.DEFAULT);
+
+    assertTrue(SpawnPhysicsProperties.apply(properties));
+    verify(properties).setSlowingDown(SlowdownMode.FRICTION, false);
+    verify(properties).setSlowingDown(SlowdownMode.GRAVITY, false);
+    verify(properties).setCollision(CollisionOptions.CANCEL);
+    verify(properties)
+        .setChunkLoadOptions(ChunkLoadOptions.DEFAULT.withMode(ChunkLoadOptions.Mode.MINIMAL));
+  }
+
+  /** 属性写不上不冒泡：物理编组已经存在，出车事务只看返回值。 */
+  @Test
+  void spawnPhysicsSwallowsFailures() {
+    TrainProperties properties = mock(TrainProperties.class);
+    org.mockito.Mockito.doThrow(new IllegalStateException("unloaded"))
+        .when(properties)
+        .setCollision(any());
+
+    assertFalse(SpawnPhysicsProperties.apply(properties));
+    assertFalse(SpawnPhysicsProperties.apply(null));
+  }
+
+  private static LayoverRegistry.LayoverCandidate candidate(String name, Map<String, String> tags) {
+    return new LayoverRegistry.LayoverCandidate(
+        name, "SURC:PPK", NodeId.of("SURC:S:PPK:1"), NOW, tags);
+  }
+
+  private static SpawnTicket ticket(TripSource source) {
+    return ticket(source, Optional.empty(), NOW);
+  }
+
+  private static SpawnTicket ticket(Optional<String> trip, Instant firstDueAt) {
+    return ticket(TripSource.ON_DEMAND, trip, firstDueAt);
+  }
+
+  private static SpawnTicket ticket(TripSource source, Optional<String> trip, Instant firstDueAt) {
+    return new SpawnTicket(
+        UUID.randomUUID(),
+        new SpawnService(
+            new SpawnServiceKey(UUID.randomUUID()),
+            UUID.randomUUID(),
+            "C",
+            UUID.randomUUID(),
+            "SURC",
+            UUID.randomUUID(),
+            "WS",
+            UUID.randomUUID(),
+            "WS-1",
+            Duration.ofMinutes(10),
+            "SURC:S:AAA:1"),
+        NOW,
+        NOW,
+        firstDueAt,
+        0,
+        0L,
+        Optional.empty(),
+        Optional.empty(),
+        trip,
+        source,
+        0,
+        Optional.empty());
+  }
+}

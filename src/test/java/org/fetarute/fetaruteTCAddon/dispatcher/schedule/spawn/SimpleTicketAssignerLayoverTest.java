@@ -5,6 +5,7 @@ import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.eq;
@@ -1924,6 +1925,7 @@ class SimpleTicketAssignerLayoverTest {
             anyString(),
             any(RouteDefinition.class),
             any(),
+            anyInt(),
             any(RailGraph.class),
             any(Instant.class)))
         .thenAnswer(
@@ -2546,7 +2548,7 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            anyString(), any(RouteDefinition.class), any(), eq(graph), any(Instant.class)))
+            anyString(), any(RouteDefinition.class), any(), eq(0), eq(graph), any(Instant.class)))
         .thenReturn(Optional.empty());
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     RouteDefinition route =
@@ -2572,7 +2574,7 @@ class SimpleTicketAssignerLayoverTest {
 
     verify(runtimeDispatchService)
         .prepareDepotSpawnDynamicAuthority(
-            anyString(), eq(route), eq(route.waypoints()), eq(graph), any(Instant.class));
+            anyString(), eq(route), eq(route.waypoints()), eq(0), eq(graph), any(Instant.class));
     verify(runtimeDispatchService).cancelPreparedDepotSpawnDynamicAuthority(anyString());
     verify(occupancyManager, never()).canEnterPreview(any(OccupancyRequest.class));
     verify(occupancyManager, never()).canEnter(any(OccupancyRequest.class));
@@ -2613,7 +2615,7 @@ class SimpleTicketAssignerLayoverTest {
     RuntimeDispatchService runtimeDispatchService =
         mockRuntimeDispatchServiceAllowingSmartAdmission();
     when(runtimeDispatchService.prepareDepotSpawnDynamicAuthority(
-            anyString(), any(RouteDefinition.class), any(), eq(graph), eq(now)))
+            anyString(), any(RouteDefinition.class), any(), eq(0), eq(graph), eq(now)))
         .thenReturn(Optional.of(List.of(depotNode, actualPlatform)));
     DepotSpawner depotSpawner = mock(DepotSpawner.class);
     when(depotSpawner.spawn(eq(provider), any(), anyString(), eq(now)))
@@ -3769,6 +3771,473 @@ class SimpleTicketAssignerLayoverTest {
             .acquireDepartureGate(anyString(), anyString(), anyString());
       }
     }
+  }
+
+  /** 手动提前出车：出库后在第一拍信号之前挂上门控，停在车库等计划时刻；门控快到兜底失效时重挂，到点放行并刷新信号。 */
+  @Test
+  void earlySpawnWaitsAtTheDepotUntilItsPlannedDeparture() {
+    UUID routeId = UUID.randomUUID();
+    NodeId depotNode = NodeId.of("SURN:D:DEPOT:1");
+    NodeId nextNode = NodeId.of("B");
+    Instant spawnedAt = Instant.parse("2026-07-31T00:00:00Z");
+    SpawnTicket planned = buildTicket(routeId);
+    SpawnTicket ticket =
+        new SpawnTicket(
+            planned.id(),
+            planned.service(),
+            spawnedAt.plusSeconds(300),
+            spawnedAt,
+            0,
+            0L,
+            Optional.empty(),
+            Optional.empty(),
+            Optional.of("TIMETABLE-TT1-R1-001-2026-07-31"),
+            TripSource.MANUAL,
+            0);
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(eq(provider), eq(spawnedAt))).thenReturn(List.of(ticket));
+    when(spawnManager.pollDueTickets(
+            eq(provider),
+            org.mockito.ArgumentMatchers.argThat(at -> at != null && at.isAfter(spawnedAt))))
+        .thenReturn(List.of());
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(
+            Optional.of(
+                new RailGraphService.RailGraphSnapshot(
+                    graphWithSingleEdge(depotNode, nextNode), spawnedAt)));
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    org.mockito.stubbing.Answer<OccupancyDecision> allow =
+        invocation -> {
+          OccupancyRequest request = invocation.getArgument(0);
+          return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+        };
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class))).thenAnswer(allow);
+    when(occupancyManager.canEnter(any(OccupancyRequest.class))).thenAnswer(allow);
+    when(occupancyManager.acquire(any(OccupancyRequest.class))).thenAnswer(allow);
+
+    MutableTrainTags trainTags = new MutableTrainTags();
+    RuntimeTrainHandle train = mock(RuntimeTrainHandle.class);
+    when(train.isValid()).thenReturn(true);
+    when(train.properties()).thenReturn(trainTags.properties());
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), eq(ticket), anyString(), eq(spawnedAt)))
+        .thenReturn(Optional.of(new DepotSpawner.MaterializedSpawn(train, () -> {})));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(
+                Map.of(
+                    routeId,
+                    new RouteDefinition(
+                        RouteId.of("OP:L1:R1"), List.of(depotNode, nextNode), Optional.empty()))),
+            runtimeDispatchService,
+            mockConfigManager(),
+            registryWithDepot(worldId, depotNode),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+
+    assigner.tick(provider, spawnedAt);
+
+    org.mockito.ArgumentCaptor<String> name = org.mockito.ArgumentCaptor.forClass(String.class);
+    InOrder order = inOrder(runtimeDispatchService);
+    order
+        .verify(runtimeDispatchService)
+        .acquireDepartureGate(
+            name.capture(), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    order.verify(runtimeDispatchService).refreshSignal(train);
+    String trainName = name.getValue();
+    assertTrue(trainTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD), "放行时刻写进列车标签，重启后据此找回");
+    when(runtimeDispatchService.hasDepartureGate(trainName)).thenReturn(true);
+
+    assigner.tick(provider, spawnedAt.plusSeconds(30));
+    verify(runtimeDispatchService, times(1))
+        .acquireDepartureGate(
+            eq(trainName), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    assigner.tick(provider, spawnedAt.plusSeconds(61));
+    verify(runtimeDispatchService, times(2))
+        .acquireDepartureGate(
+            eq(trainName), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    verify(runtimeDispatchService, never()).releaseDepartureGate(anyString(), anyString());
+
+    when(runtimeDispatchService.releaseDepartureGate(
+            trainName, SimpleTicketAssigner.EARLY_SPAWN_GATE))
+        .thenReturn(true);
+    int refreshesBefore =
+        org.mockito.Mockito.mockingDetails(runtimeDispatchService).getInvocations().stream()
+            .filter(invocation -> invocation.getMethod().getName().equals("refreshSignal"))
+            .mapToInt(invocation -> 1)
+            .sum();
+    assigner.tick(provider, spawnedAt.plusSeconds(300));
+    verify(runtimeDispatchService)
+        .releaseDepartureGate(trainName, SimpleTicketAssigner.EARLY_SPAWN_GATE);
+    verify(runtimeDispatchService, times(refreshesBefore + 1)).refreshSignal(train);
+    assertFalse(trainTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD), "放行后清掉标签");
+
+    assigner.tick(provider, spawnedAt.plusSeconds(400));
+    verify(runtimeDispatchService, times(1))
+        .releaseDepartureGate(trainName, SimpleTicketAssigner.EARLY_SPAWN_GATE);
+  }
+
+  /** 重启后按列车标签找回提前出车：重新挂门控、绑回交路，到点放行并清掉标签；放行时刻已过的只清标签、不扣车。 */
+  @Test
+  void earlySpawnHoldsAreRestoredFromTrainTagsAfterARestart() {
+    Instant now = Instant.parse("2026-07-31T00:00:00Z");
+    UUID routeId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(any(), any())).thenReturn(List.of());
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            mockRouteDefinitions(Map.of()),
+            runtimeDispatchService,
+            mockConfigManager(),
+            registryWithDepot(UUID.randomUUID(), NodeId.of("SURN:D:DEPOT:1")),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    List<String> restored = new ArrayList<>();
+    assigner.setEarlySpawnBinding(
+        new SimpleTicketAssigner.EarlySpawnBinding() {
+          @Override
+          public Optional<String> tokenOf(SpawnTicket ticket) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean restore(String trainName, String token) {
+            restored.add(trainName + "|" + token);
+            return true;
+          }
+        });
+    MutableTrainTags heldTags = new MutableTrainTags();
+    when(heldTags.properties().getTrainName()).thenReturn("SURN-L1-A");
+    TrainTagHelper.writeTag(
+        heldTags.properties(),
+        SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD,
+        now.plusSeconds(300).getEpochSecond() + ";TOKEN");
+    RuntimeTrainHandle held = mock(RuntimeTrainHandle.class);
+    when(held.isValid()).thenReturn(true);
+    when(held.properties()).thenReturn(heldTags.properties());
+    MutableTrainTags staleTags = new MutableTrainTags();
+    when(staleTags.properties().getTrainName()).thenReturn("SURN-L1-B");
+    TrainTagHelper.writeTag(
+        staleTags.properties(),
+        SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD,
+        String.valueOf(now.minusSeconds(5).getEpochSecond()));
+    RuntimeTrainHandle stale = mock(RuntimeTrainHandle.class);
+    when(stale.isValid()).thenReturn(true);
+    when(stale.properties()).thenReturn(staleTags.properties());
+
+    assigner.restoreEarlySpawnHolds(List.of(held, stale), now);
+
+    verify(runtimeDispatchService)
+        .acquireDepartureGate(
+            eq("SURN-L1-A"), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    verify(runtimeDispatchService, never())
+        .acquireDepartureGate(eq("SURN-L1-B"), anyString(), anyString());
+    assertEquals(List.of("SURN-L1-A|TOKEN"), restored);
+    assertTrue(heldTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD));
+    assertFalse(staleTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD), "放行时刻已过，只清标签");
+
+    assigner.restoreEarlySpawnHolds(List.of(held), now.plusSeconds(1));
+    verify(runtimeDispatchService, times(1))
+        .acquireDepartureGate(
+            eq("SURN-L1-A"), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    assertEquals(1, restored.size(), "已经在扣的车不重复找回");
+
+    when(runtimeDispatchService.hasDepartureGate("SURN-L1-A")).thenReturn(true);
+    when(runtimeDispatchService.releaseDepartureGate(
+            "SURN-L1-A", SimpleTicketAssigner.EARLY_SPAWN_GATE))
+        .thenReturn(true);
+    assigner.tick(provider, now.plusSeconds(300));
+    verify(runtimeDispatchService)
+        .releaseDepartureGate("SURN-L1-A", SimpleTicketAssigner.EARLY_SPAWN_GATE);
+    verify(runtimeDispatchService).refreshSignal(held);
+    assertFalse(heldTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD), "到点放行后清掉标签");
+  }
+
+  /** 提前出车挑股道的现场数据：别的线路从同一条固定股道出库就拒绝；车库池按占用挑空股道，正驶向车库回库的车也要留一条。 */
+  @Test
+  void earlySpawnTrackChoiceSeesSharedTracksAndInboundTrains() {
+    UUID ownRoute = UUID.randomUUID();
+    UUID otherLineRoute = UUID.randomUUID();
+    UUID returnRoute = UUID.randomUUID();
+    RouteDefinition otherLine =
+        new RouteDefinition(
+            RouteId.of("SURN:L2:DS"),
+            List.of(NodeId.of("SURN:D:HHU:3"), NodeId.of("B")),
+            Optional.empty());
+    RouteDefinition returning =
+        new RouteDefinition(
+            RouteId.of("SURN:L1:RET"),
+            List.of(NodeId.of("SURN:S:CCC:1"), NodeId.of("SURN:D:OFL:1")),
+            Optional.empty());
+    RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    when(routeDefinitions.findById(otherLineRoute)).thenReturn(Optional.of(otherLine));
+    when(routeDefinitions.listStops(otherLine.id()))
+        .thenReturn(
+            List.of(
+                directiveStop(otherLineRoute, 0, "CRET SURN:D:HHU:3"),
+                new RouteStop(
+                    otherLineRoute,
+                    1,
+                    Optional.empty(),
+                    Optional.of("B"),
+                    Optional.empty(),
+                    RouteStopPassType.STOP,
+                    Optional.empty())));
+    when(routeDefinitions.findById(returnRoute)).thenReturn(Optional.of(returning));
+    when(routeDefinitions.findStop(returning.id(), 1))
+        .thenReturn(Optional.of(directiveStop(returnRoute, 1, "DSTY DYNAMIC:SURN:D:OFL:[1:2]")));
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.isNodeOccupied(NodeId.of("SURN:D:OFL:1"))).thenReturn(true);
+    SignNodeRegistry registry = mock(SignNodeRegistry.class);
+    Map<String, SignNodeRegistry.SignNodeInfo> depots = new java.util.HashMap<>();
+    for (String track : List.of("SURN:D:HHU:3", "SURN:D:OFL:1", "SURN:D:OFL:2")) {
+      depots.put(
+          track,
+          new SignNodeRegistry.SignNodeInfo(
+              new SignNodeDefinition(
+                  NodeId.of(track), NodeType.DEPOT, Optional.empty(), Optional.empty()),
+              UUID.randomUUID(),
+              "TestWorld",
+              0,
+              64,
+              0));
+    }
+    when(registry.snapshotInfos()).thenReturn(depots);
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            mock(SpawnManager.class),
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            routeDefinitions,
+            runtimeDispatchService,
+            mockConfigManager(),
+            registry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    Instant planned = Instant.parse("2026-07-31T08:00:00Z");
+
+    SpawnTicket otherDeparture = ticketFrom(otherLineRoute, "DS-1F_Full", "SURN:D:HHU:3");
+    EarlySpawnYard.Decision shared =
+        assigner.chooseEarlySpawnTrack(
+            null,
+            new EarlySpawnPlan(
+                ticketFrom(ownRoute, "MT-2F_Short", "SURN:D:HHU:3"),
+                "SURN:D:HHU:3",
+                "MT-001",
+                planned,
+                List.of(otherDeparture),
+                List.of()),
+            planned);
+    EarlySpawnYard.Blocker blocker = shared.blocker().orElseThrow();
+    assertEquals(EarlySpawnYard.Reason.NEEDED_BY_OTHERS, blocker.reason());
+    assertEquals(EarlySpawnYard.UseKind.DEPARTURE, blocker.use().orElseThrow().kind());
+    assertEquals("DS-1F_Full", blocker.use().orElseThrow().subject());
+
+    EarlySpawnPlan pool =
+        new EarlySpawnPlan(
+            ticketFrom(ownRoute, "MT-1N_Short", "DYNAMIC:SURN:D:OFL:[1:2]"),
+            "SURN:D:OFL:1",
+            "MT-002",
+            planned,
+            List.of(),
+            List.of());
+    assertEquals(
+        Optional.of("SURN:D:OFL:2"),
+        assigner.chooseEarlySpawnTrack(null, pool, planned).track(),
+        "车库池：挑空着的股道，不用指定的那条");
+
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(
+            Map.of(
+                "SURN-L1-RET",
+                new RouteProgressRegistry.RouteProgressEntry(
+                    "SURN-L1-RET",
+                    returnRoute,
+                    returning.id(),
+                    0,
+                    Optional.empty(),
+                    Optional.empty(),
+                    SignalAspect.PROCEED,
+                    planned)));
+    EarlySpawnYard.Blocker inbound =
+        assigner.chooseEarlySpawnTrack(null, pool, planned).blocker().orElseThrow();
+    assertEquals(EarlySpawnYard.UseKind.INBOUND, inbound.use().orElseThrow().kind());
+    assertEquals("SURN-L1-RET", inbound.use().orElseThrow().subject());
+  }
+
+  private static RouteStop directiveStop(UUID routeId, int sequence, String directive) {
+    return new RouteStop(
+        routeId,
+        sequence,
+        Optional.empty(),
+        Optional.empty(),
+        Optional.empty(),
+        RouteStopPassType.PASS,
+        Optional.of(directive));
+  }
+
+  private static SpawnTicket ticketFrom(UUID routeId, String routeCode, String depot) {
+    SpawnService service =
+        new SpawnService(
+            new SpawnServiceKey(routeId),
+            UUID.randomUUID(),
+            "COMP",
+            UUID.randomUUID(),
+            "SURN",
+            UUID.randomUUID(),
+            "L1",
+            routeId,
+            routeCode,
+            Duration.ofSeconds(60),
+            depot);
+    Instant at = Instant.parse("2026-07-31T07:55:00Z");
+    return new SpawnTicket(
+        UUID.randomUUID(), service, at, at, 0, 0L, Optional.empty(), Optional.empty());
+  }
+
+  /** 提前出车扣车：被推了一下（在动但没越过车库节点）不丢扣车、门控被清掉就重挂；越过车库节点才算开走。到点按会话号放行，留着的旧门控（不是本次挂的）也放掉。 */
+  @Test
+  void earlySpawnHoldSurvivesANudgeAndReleasesByGateSession() {
+    Instant now = Instant.parse("2026-07-31T00:00:00Z");
+    UUID routeId = UUID.randomUUID();
+    StorageProvider provider = mockProvider(routeId, true);
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    when(spawnManager.pollDueTickets(any(), any())).thenReturn(List.of());
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            mock(DepotSpawner.class),
+            occupancyManager,
+            mock(RailGraphService.class),
+            mockRouteDefinitions(Map.of()),
+            runtimeDispatchService,
+            mockConfigManager(),
+            registryWithDepot(UUID.randomUUID(), NodeId.of("SURN:D:DEPOT:1")),
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            1,
+            10);
+    MutableTrainTags nudgedTags = new MutableTrainTags();
+    when(nudgedTags.properties().getTrainName()).thenReturn("SURN-L1-A");
+    TrainTagHelper.writeTag(
+        nudgedTags.properties(),
+        SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD,
+        String.valueOf(now.plusSeconds(300).getEpochSecond()));
+    RuntimeTrainHandle nudged = mock(RuntimeTrainHandle.class);
+    when(nudged.isValid()).thenReturn(true);
+    when(nudged.properties()).thenReturn(nudgedTags.properties());
+    MutableTrainTags departedTags = new MutableTrainTags();
+    when(departedTags.properties().getTrainName()).thenReturn("SURN-L1-C");
+    TrainTagHelper.writeTag(
+        departedTags.properties(),
+        SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD,
+        String.valueOf(now.plusSeconds(300).getEpochSecond()));
+    RuntimeTrainHandle departed = mock(RuntimeTrainHandle.class);
+    when(departed.isValid()).thenReturn(true);
+    when(departed.properties()).thenReturn(departedTags.properties());
+    // A 身上留着一道旧门控（不是本次挂的）：找回时记成不是自己的。
+    when(runtimeDispatchService.hasDepartureGate("SURN-L1-A")).thenReturn(true);
+
+    assigner.restoreEarlySpawnHolds(List.of(nudged, departed), now);
+    verify(runtimeDispatchService, never())
+        .acquireDepartureGate(eq("SURN-L1-A"), anyString(), anyString());
+
+    when(nudged.isMoving()).thenReturn(true);
+    when(departed.isMoving()).thenReturn(true);
+    when(runtimeDispatchService.hasDepartureGate("SURN-L1-A")).thenReturn(false);
+    when(runtimeDispatchService.snapshotProgressEntries())
+        .thenReturn(
+            Map.of(
+                "SURN-L1-A",
+                new RouteProgressRegistry.RouteProgressEntry(
+                    "SURN-L1-A",
+                    routeId,
+                    RouteId.of("SURN:L1:R1"),
+                    0,
+                    Optional.empty(),
+                    Optional.empty(),
+                    SignalAspect.PROCEED,
+                    now),
+                "SURN-L1-C",
+                new RouteProgressRegistry.RouteProgressEntry(
+                    "SURN-L1-C",
+                    routeId,
+                    RouteId.of("SURN:L1:R1"),
+                    1,
+                    Optional.empty(),
+                    Optional.empty(),
+                    SignalAspect.PROCEED,
+                    now)));
+    assigner.tick(provider, now.plusSeconds(10));
+
+    verify(runtimeDispatchService)
+        .acquireDepartureGate(
+            eq("SURN-L1-A"), eq(SimpleTicketAssigner.EARLY_SPAWN_GATE), anyString());
+    assertTrue(nudgedTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD), "被推了一下，接着扣");
+    assertFalse(departedTags.hasTag(SimpleTicketAssigner.TAG_EARLY_SPAWN_HOLD), "越过车库节点才算开走");
+
+    when(runtimeDispatchService.releaseDepartureGate(
+            "SURN-L1-A", SimpleTicketAssigner.EARLY_SPAWN_GATE))
+        .thenReturn(true);
+    assigner.tick(provider, now.plusSeconds(300));
+    verify(runtimeDispatchService)
+        .releaseDepartureGate("SURN-L1-A", SimpleTicketAssigner.EARLY_SPAWN_GATE);
+    verify(runtimeDispatchService).refreshSignal(nudged);
+  }
+
+  /** 列车上的提前出车标签：写法读回来相同，坏写法读不出。 */
+  @Test
+  void earlySpawnHoldTagRoundTrips() {
+    Instant at = Instant.ofEpochSecond(1_790_000_000L);
+    SimpleTicketAssigner.EarlySpawnHoldTag tag =
+        new SimpleTicketAssigner.EarlySpawnHoldTag(at, Optional.of("a,b,c"));
+
+    assertEquals(Optional.of(tag), SimpleTicketAssigner.EarlySpawnHoldTag.parse(tag.format()));
+    assertEquals(
+        Optional.of(new SimpleTicketAssigner.EarlySpawnHoldTag(at, Optional.empty())),
+        SimpleTicketAssigner.EarlySpawnHoldTag.parse(String.valueOf(at.getEpochSecond())));
+    assertTrue(SimpleTicketAssigner.EarlySpawnHoldTag.parse("soon").isEmpty());
   }
 
   @Test

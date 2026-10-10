@@ -19,6 +19,9 @@ public final class DispatchPriorityPolicy {
   /** 回库/回送：默认让行，避免摘车压住补车与正线运营。 */
   public static final int RETURN_OFFSET = -10;
 
+  /** 叫来的车（含它回库途中）：比回库还低，进路排队时让表定与按间隔发的车先走。 */
+  public static final int CALLED_OFFSET = -20;
+
   private DispatchPriorityPolicy() {}
 
   /**
@@ -39,6 +42,16 @@ public final class DispatchPriorityPolicy {
       return DEPOT_EXIT_OFFSET;
     }
     return OPERATION_OFFSET;
+  }
+
+  /**
+   * 同 {@link #operationOffset(RouteOperationType, boolean)}，叫来的车一律取 {@link #CALLED_OFFSET}。
+   *
+   * @param called 列车是叫来的车
+   */
+  public static int operationOffset(
+      RouteOperationType operationType, boolean depotExitContext, boolean called) {
+    return called ? CALLED_OFFSET : operationOffset(operationType, depotExitContext);
   }
 
   /**
@@ -66,5 +79,15 @@ public final class DispatchPriorityPolicy {
    */
   public static int depotSpawnPriority(RouteOperationType operationType, int ticketPriority) {
     return ticketPriority + operationOffset(operationType, true);
+  }
+
+  /**
+   * 同 {@link #depotSpawnPriority(RouteOperationType, int)}，叫车票一律取 {@link #CALLED_OFFSET}。
+   *
+   * @param called 叫车票
+   */
+  public static int depotSpawnPriority(
+      RouteOperationType operationType, int ticketPriority, boolean called) {
+    return ticketPriority + operationOffset(operationType, true, called);
   }
 }

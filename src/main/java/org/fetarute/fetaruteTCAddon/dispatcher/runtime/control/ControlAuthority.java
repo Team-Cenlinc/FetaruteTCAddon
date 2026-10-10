@@ -45,6 +45,23 @@ public interface ControlAuthority {
     return false;
   }
 
+  /** 列车在站台停稳、开始一次停站（自动运行与驾驶员控车都通知）：上一站留下的发车确认状态到此作废。 */
+  default void stationStopStarted(TrainProperties properties) {}
+
+  /** 车上是否有车掌在岗：有就由车掌开关车门（自动运行与人工驾驶都一样），站台把停站交给他。 */
+  default boolean guardOperatesDoors(TrainProperties properties) {
+    return false;
+  }
+
+  /**
+   * 车上有车掌时，站台在等发车那一步每秒问一次：车掌是否还扣着（还没给发车信号）。
+   *
+   * @param exitOpen 此刻出站门控是否放行；不放行时也要问，车掌据此暂停计时
+   */
+  default boolean holdForGuard(TrainProperties properties, boolean exitOpen) {
+    return false;
+  }
+
   /** 自动运行停站结束、出站许可就绪时，是否还要扣着等车上的驾驶员（ATO）确认发车。 */
   default boolean holdDeparture(TrainProperties properties) {
     return false;

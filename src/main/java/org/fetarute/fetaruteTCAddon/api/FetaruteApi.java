@@ -4,6 +4,7 @@ import java.util.Optional;
 import java.util.function.LongSupplier;
 import org.bukkit.plugin.Plugin;
 import org.fetarute.fetaruteTCAddon.api.drive.DriveApi;
+import org.fetarute.fetaruteTCAddon.api.drive.GuardApi;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
 import org.fetarute.fetaruteTCAddon.api.line.LineApi;
@@ -59,6 +60,7 @@ import org.fetarute.fetaruteTCAddon.api.train.TrainApi;
  * @see EtaApi
  * @see TimetableApi
  * @see DriveApi
+ * @see GuardApi
  * @see org.fetarute.fetaruteTCAddon.api.event
  */
 public final class FetaruteApi {
@@ -79,6 +81,7 @@ public final class FetaruteApi {
   private final TimetableApi timetableApi;
   private final LongSupplier dataRevision;
   private volatile DriveApi driveApi = DriveApi.UNAVAILABLE;
+  private volatile GuardApi guardApi = GuardApi.UNAVAILABLE;
 
   private FetaruteApi(
       GraphApi graphApi,
@@ -231,6 +234,13 @@ public final class FetaruteApi {
   }
 
   /**
+   * 车掌 API（1.14.0）：派车掌任务、查任务与值乘状态、读车掌记录。车掌功能未加载时返回占位实现，{@link GuardApi#enabled()} 为 {@code false}。
+   */
+  public GuardApi guard() {
+    return guardApi;
+  }
+
+  /**
    * 当前 API 版本。
    *
    * @return 语义版本字符串
@@ -349,6 +359,18 @@ public final class FetaruteApi {
     FetaruteApi current = instance;
     if (current != null) {
       current.driveApi = drive == null ? DriveApi.UNAVAILABLE : drive;
+    }
+  }
+
+  /**
+   * 装上或换掉车掌 API 的实现（仅供 {@code FetaruteTCAddon} 调用）：随驾驶模块加载、重载。
+   *
+   * @param guard 实现；{@code null} 恢复为占位实现
+   */
+  public static void installGuard(GuardApi guard) {
+    FetaruteApi current = instance;
+    if (current != null) {
+      current.guardApi = guard == null ? GuardApi.UNAVAILABLE : guard;
     }
   }
 

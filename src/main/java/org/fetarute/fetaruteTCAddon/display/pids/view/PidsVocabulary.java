@@ -45,6 +45,21 @@ public final class PidsVocabulary {
         names("header.arrival"));
   }
 
+  /** 叫车提示：“可右键本屏叫车”。 */
+  public Names callHint() {
+    return names("call-hint");
+  }
+
+  /** 暂无后续列车且能叫车：“暂无后续列车，可右键本屏叫车”。 */
+  public Names noMoreTrainsCall() {
+    return names("no-more-trains-call");
+  }
+
+  /** 叫来的车的状态：“叫车”。 */
+  public Names onCall() {
+    return names("status.on-call");
+  }
+
   /** 准点。 */
   public Names onTime() {
     return names("status.on-time");

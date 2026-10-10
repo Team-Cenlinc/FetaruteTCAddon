@@ -13,6 +13,13 @@ import org.fetarute.fetaruteTCAddon.drive.hud.DriverStationHint;
  * <p>与新手教程互相独立：没做教程的玩家也会在第一次遇到时看到。本类不依赖服务器对象。
  */
 public enum DriveTip {
+  /** 第一次与车掌同车（人工驾驶；ATO 自己起步）：车门归车掌，发车等车掌的信号。排在开关门之前，车上有车掌时开关门的提示不会出。 */
+  GUARD_ABOARD(
+      "guard-aboard",
+      s ->
+          manual(s)
+              && (s.stationHint() == DriverStationHint.Kind.GUARD_DOORS
+                  || s.stationHint() == DriverStationHint.Kind.GUARD_SIGNAL)),
   /** 信号变严，要右键确认。 */
   SIGNAL_ACKNOWLEDGE(
       "signal-acknowledge", "signal-confirm", s -> manual(s) && s.signalAcknowledgePending()),

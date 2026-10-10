@@ -214,6 +214,23 @@ class RuntimeDispatchDiagnosticGateTest {
     assertEquals(List.of(observation, arrival, entered, transitioned, cleared, entered), messages);
   }
 
+  /** 健康层的推动记录（带冒号的健康事件格式）在观察预算用完后照样保留：把车走走停停的各次推动连起来全靠它。 */
+  @Test
+  void preservesRecoveryPushRecordsAfterObservationBudgetIsExhausted() {
+    List<String> messages = new ArrayList<>();
+    RuntimeDispatchDiagnosticGate gate =
+        new RuntimeDispatchDiagnosticGate(
+            messages::add, Duration.ofSeconds(5), 32, Duration.ofSeconds(60), 1, () -> 0L);
+    String observation = "SIGNAL_CAUTION_REASON train=MT-1 reason=budget-filler";
+    String push =
+        "HEALTH_RECOVERY_PUSH_PROGRESS: train=MT-1 idx=5 pushes=2 blocker=MT-2 creepSeconds=40";
+
+    gate.accept(observation);
+    gate.accept(push);
+
+    assertEquals(List.of(observation, push), messages);
+  }
+
   @Test
   void preservesActualClaimChangesAfterBudgetExhaustionWithoutRepeatingStableRefreshes() {
     List<String> messages = new ArrayList<>();

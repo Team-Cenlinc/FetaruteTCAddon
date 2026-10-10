@@ -14,6 +14,7 @@ import net.kyori.adventure.text.event.HoverEvent;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.call.LineCallMetadata;
 import org.fetarute.fetaruteTCAddon.company.api.CompanyQueryService;
 import org.fetarute.fetaruteTCAddon.company.model.Company;
 import org.fetarute.fetaruteTCAddon.company.model.CompanyMember;
@@ -150,6 +151,20 @@ public final class FtaLineCommand {
             .withComponent(
                 CommandComponent.<CommandSender, Integer>builder(
                         "maxTrains", IntegerParser.integerParser(0, 10000))
+                    .suggestionProvider(CommandSuggestionProviders.placeholder("<count>")))
+            .build();
+    var allowPlayerCallFlag =
+        CommandFlag.<CommandSender>builder("allow-player-call")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "allow-player-call", StringParser.stringParser())
+                    .suggestionProvider(SuggestionProvider.suggestingStrings("true", "false")))
+            .build();
+    var callMaxTrainsFlag =
+        CommandFlag.<CommandSender>builder("call-max-trains")
+            .withComponent(
+                CommandComponent.<CommandSender, Integer>builder(
+                        "call-max-trains", IntegerParser.integerParser(0, 1000))
                     .suggestionProvider(CommandSuggestionProviders.placeholder("<count>")))
             .build();
 
@@ -466,6 +481,18 @@ public final class FtaLineCommand {
                   sender.sendMessage(
                       locale.component(
                           "command.line.info.spawn-max", Map.of("max_trains", maxDisplay)));
+                  boolean allowCall = LineCallMetadata.allowsPlayerCall(line.metadata());
+                  sender.sendMessage(
+                      locale.component(
+                          allowCall
+                              ? "command.line.info.player-call-on"
+                              : "command.line.info.player-call-off",
+                          Map.of(
+                              "max_trains",
+                              LineCallMetadata.maxTrains(line.metadata()).isPresent()
+                                  ? String.valueOf(
+                                      LineCallMetadata.maxTrains(line.metadata()).getAsInt())
+                                  : locale.text("command.line.info.player-call-default"))));
                   sender.sendMessage(
                       locale.component(
                           "command.line.info.spawn-depots", Map.of("depots", depotText)));
@@ -486,6 +513,9 @@ public final class FtaLineCommand {
             .flag(colorFlag)
             .flag(statusFlag)
             .flag(freqBaselineFlag)
+            .flag(maxTrainsFlag)
+            .flag(allowPlayerCallFlag)
+            .flag(callMaxTrainsFlag)
             .handler(
                 ctx -> {
                   Player sender = (Player) ctx.sender();
@@ -540,7 +570,9 @@ public final class FtaLineCommand {
                           || flags.hasFlag(colorFlag)
                           || flags.hasFlag(statusFlag)
                           || flags.hasFlag(freqBaselineFlag)
-                          || flags.hasFlag(maxTrainsFlag);
+                          || flags.hasFlag(maxTrainsFlag)
+                          || flags.hasFlag(allowPlayerCallFlag)
+                          || flags.hasFlag(callMaxTrainsFlag);
                   if (!any) {
                     sender.sendMessage(locale.component("command.line.set.noop"));
                     return;
@@ -591,6 +623,26 @@ public final class FtaLineCommand {
                       metadata.remove(LineSpawnMetadata.KEY_MAX_TRAINS);
                     } else {
                       metadata.put(LineSpawnMetadata.KEY_MAX_TRAINS, maxTrains);
+                    }
+                  }
+                  if (flags.hasFlag(allowPlayerCallFlag)) {
+                    String raw = flags.getValue(allowPlayerCallFlag, null);
+                    Optional<Boolean> allow = parseBooleanToken(raw);
+                    if (allow.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.common.invalid-boolean",
+                              Map.of("value", String.valueOf(raw))));
+                      return;
+                    }
+                    metadata.put(LineCallMetadata.KEY_ALLOW_PLAYER_CALL, allow.get());
+                  }
+                  if (flags.hasFlag(callMaxTrainsFlag)) {
+                    Integer callMax = flags.getValue(callMaxTrainsFlag, null);
+                    if (callMax == null || callMax <= 0) {
+                      metadata.remove(LineCallMetadata.KEY_CALL_MAX_TRAINS);
+                    } else {
+                      metadata.put(LineCallMetadata.KEY_CALL_MAX_TRAINS, callMax);
                     }
                   }
 
@@ -1531,5 +1583,17 @@ public final class FtaLineCommand {
     } catch (IllegalArgumentException ex) {
       return Optional.empty();
     }
+  }
+
+  /** 解析 {@code true/false/yes/no/1/0}，用于命令行布尔参数。 */
+  private static Optional<Boolean> parseBooleanToken(String raw) {
+    if (raw == null) {
+      return Optional.empty();
+    }
+    return switch (raw.trim().toLowerCase(java.util.Locale.ROOT)) {
+      case "true", "yes", "y", "1" -> Optional.of(true);
+      case "false", "no", "n", "0" -> Optional.of(false);
+      default -> Optional.empty();
+    };
   }
 }

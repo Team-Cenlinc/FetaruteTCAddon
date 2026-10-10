@@ -48,6 +48,16 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 public final class TrainCartsDepotSpawner implements DepotSpawner {
 
   private static final long DEPOT_CHUNK_TICKET_TICKS = 200L;
+
+  /** 区间生成前在后台加载好的区块挂票保留多久：够发车侧再试几次。 */
+  private static final long ENTRY_PRELOAD_TICKET_TICKS = 600L;
+
+  /** TrainCarts 生成时每节车周围加载几圈区块（{@code SpawnLocationList#loadChunks}）。 */
+  static final int TC_SPAWN_CHUNK_RADIUS = 2;
+
+  /** 区间生成点附近这么多格内有玩家就不生成：车不能凭空出现在玩家眼前。 */
+  public static final double ENTRY_PLAYER_RADIUS_BLOCKS = 48.0D;
+
   private static final long OFFLINE_PROBE_COOLDOWN_MILLIS = 60_000L;
   private static final long OFFLINE_WARN_COOLDOWN_MILLIS = 600_000L;
 
@@ -64,6 +74,11 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
 
   /** 每个车库上次就离线编组告警的时间。 */
   private final Map<String, Long> offlineWarnAtMillis = new ConcurrentHashMap<>();
+
+  /** 为区间生成正在后台加载的区块：不重复请求。 */
+  private final Set<EntryChunk> entryChunkLoads = ConcurrentHashMap.newKeySet();
+
+  private record EntryChunk(UUID worldId, int x, int z) {}
 
   public TrainCartsDepotSpawner(
       FetaruteTCAddon plugin, SignNodeRegistry signNodeRegistry, Consumer<String> debugLogger) {
@@ -172,7 +187,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
 
     MinecartGroup group = spawnedOpt.get();
     // 必须在本 tick 内（TrainCarts 首个物理 tick 之前）设置，否则未开启常驻加载的出库车会立刻被卸载。
-    warnAboutKeepChunksLoaded(group.getProperties(), pattern, depotId);
+    applySpawnPhysics(group.getProperties(), pattern, depotId);
     return Optional.of(
         new DepotSpawner.MaterializedSpawn(
             group,
@@ -187,7 +202,201 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
                     provider,
                     trainName,
                     now,
-                    choice.tags())));
+                    choice.tags(),
+                    0)));
+  }
+
+  @Override
+  public Optional<DepotSpawner.MaterializedSpawn> spawnAtEntry(
+      StorageProvider provider,
+      SpawnTicket ticket,
+      String trainName,
+      DepotSpawner.EntrySpawn entry,
+      Instant now) {
+    if (provider == null
+        || ticket == null
+        || ticket.service() == null
+        || trainName == null
+        || entry == null) {
+      return Optional.empty();
+    }
+    SpawnService service = ticket.service();
+    Optional<Route> routeOpt = provider.routes().findById(service.routeId());
+    if (routeOpt.isEmpty()) {
+      return Optional.empty();
+    }
+    Route route = routeOpt.get();
+    Optional<SignNodeRegistry.SignNodeInfo> nodeInfo =
+        signNodeRegistry.snapshotInfos().values().stream()
+            .filter(info -> info != null && info.definition() != null)
+            .filter(info -> entry.node().equals(info.definition().nodeId()))
+            .findFirst();
+    if (nodeInfo.isEmpty()) {
+      debugLogger.accept("区间生成失败: 未找到区间点牌子 node=" + entry.node().value());
+      return Optional.empty();
+    }
+    SignNodeRegistry.SignNodeInfo info = nodeInfo.get();
+    World world = Bukkit.getWorld(info.worldId());
+    if (world == null) {
+      debugLogger.accept("区间生成失败: 世界未加载 node=" + entry.node().value());
+      return Optional.empty();
+    }
+    double limit = ENTRY_PLAYER_RADIUS_BLOCKS * ENTRY_PLAYER_RADIUS_BLOCKS;
+    Vector center = new Vector(info.x() + 0.5D, info.y() + 0.5D, info.z() + 0.5D);
+    for (org.bukkit.entity.Player player : world.getPlayers()) {
+      if (player.getLocation().toVector().distanceSquared(center) <= limit) {
+        debugLogger.accept("区间生成推迟: 生成点附近有玩家 node=" + entry.node().value());
+        return Optional.empty();
+      }
+    }
+    ConsistArbiter.SpawnChoice choice = chooseConsist(ticket);
+    if (choice.kind() == ConsistArbiter.SpawnChoice.Kind.BLOCKED) {
+      debugLogger.accept("区间生成失败: 编组方案里没有能出的车型 route=" + route.code() + " " + choice.reason());
+      return Optional.empty();
+    }
+    Optional<String> patternOpt =
+        choice
+            .pattern()
+            .or(() -> DepotSpawnPattern.fromRoute(route))
+            .or(() -> depotSignPattern(service.depotNodeId()))
+            .or(() -> destroyDepotSignPattern(provider, route));
+    if (patternOpt.isEmpty()) {
+      debugLogger.accept(
+          "区间生成失败: 缺少 spawn pattern（交路未写 spawn_train_pattern，首站与收尾都不是车库）route=" + route.code());
+      return Optional.empty();
+    }
+    String pattern = patternOpt.get();
+    TrainCarts trainCarts = TrainCarts.plugin;
+    if (trainCarts == null) {
+      return Optional.empty();
+    }
+    SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
+    if (spawnable == null || spawnable.getMembers().isEmpty()) {
+      debugLogger.accept("区间生成失败: pattern 无效 pattern=" + pattern);
+      return Optional.empty();
+    }
+    // 区间点离玩家远，车身那一带常常没加载；TrainCarts 生成时会在主线程把每节车周围的区块同步读进来，几十个区块会卡服。
+    // 还有没加载的就先在后台加载并挂票，这一次不生成，发车侧稍后再试。
+    if (preloadEntryChunks(
+        world,
+        entryBodyChunks(
+            info.x(), info.z(), entry.towardX(), entry.towardZ(), spawnable.getTotalLength()))) {
+      debugLogger.accept("区间生成推迟: 车身一带的区块在后台加载 node=" + entry.node().value());
+      return Optional.empty();
+    }
+    loadNearbyChunks(world, info.x(), info.z(), 4, plugin, DEPOT_CHUNK_TICKET_TICKS);
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
+    Set<RailBlockPos> anchors =
+        findAnchorRails(
+            access,
+            new DepotInfo(
+                entry.node(), info.worldId(), info.x(), info.y(), info.z(), info.locationText()));
+    if (anchors.isEmpty()) {
+      debugLogger.accept("区间生成失败: 区间点附近无轨道 node=" + entry.node().value());
+      return Optional.empty();
+    }
+    Optional<MinecartGroup> spawnedOpt =
+        spawnHeadAtAnchors(world, spawnable, anchors, entry.towardX(), entry.towardZ());
+    if (spawnedOpt.isEmpty()) {
+      debugLogger.accept("区间生成失败: 区间点后方放不下整列车或已有车 node=" + entry.node().value());
+      return Optional.empty();
+    }
+    MinecartGroup group = spawnedOpt.get();
+    applySpawnPhysics(group.getProperties(), pattern, entry.node());
+    return Optional.of(
+        new DepotSpawner.MaterializedSpawn(
+            group,
+            () ->
+                initializeMaterializedSpawn(
+                    group,
+                    ticket,
+                    service,
+                    entry.node(),
+                    pattern,
+                    route,
+                    provider,
+                    trainName,
+                    now,
+                    choice.tags(),
+                    entry.index())));
+  }
+
+  /** 交路收尾 DSTY 那个车库牌子第 4 行的编组（回库交路首站不是车库，借它回的那个车库的）；没有 DSTY 或读不到时为空。 */
+  private Optional<String> destroyDepotSignPattern(StorageProvider provider, Route route) {
+    try {
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      for (int i = stops.size() - 1; i >= 0; i--) {
+        Optional<String> target = SpawnDirectiveParser.findDirectiveTarget(stops.get(i), "DSTY");
+        if (target.isPresent()) {
+          return depotSignPattern(target.get());
+        }
+      }
+    } catch (RuntimeException ex) {
+      debugLogger.accept("区间生成读回库车库编组失败 route=" + route.code() + " error=" + ex);
+    }
+    return Optional.empty();
+  }
+
+  /** 车库牌子第 4 行的编组（区间生成没有车库牌子可读时，借首站车库的）；不是车库或读不到时为空。 */
+  private Optional<String> depotSignPattern(String depotSpec) {
+    try {
+      Optional<DepotInfo> depot = resolveDepotInfo(depotSpec);
+      if (depot.isEmpty()) {
+        return Optional.empty();
+      }
+      World world = Bukkit.getWorld(depot.get().worldId());
+      if (world == null) {
+        return Optional.empty();
+      }
+      Block block = world.getBlockAt(depot.get().x(), depot.get().y(), depot.get().z());
+      return block.getState() instanceof Sign sign
+          ? DepotSpawnPattern.fromSign(sign)
+          : Optional.empty();
+    } catch (RuntimeException ex) {
+      return Optional.empty();
+    }
+  }
+
+  /**
+   * 车头放在锚点、车身向后铺（{@link SpawnMode#REVERSE}），面朝下一个节点。
+   *
+   * <p>两个方向里取与“去下一个节点”同向的那个；后方放不下整列车或已有车时换下一个锚点。
+   */
+  private static Optional<MinecartGroup> spawnHeadAtAnchors(
+      World world,
+      SpawnableGroup spawnable,
+      Set<RailBlockPos> anchors,
+      double towardX,
+      double towardZ) {
+    for (RailBlockPos anchor : anchors) {
+      Block railBlock = world.getBlockAt(anchor.x(), anchor.y(), anchor.z());
+      RailPiece piece = RailPiece.create(railBlock);
+      if (piece == null || piece.isNone()) {
+        continue;
+      }
+      RailState state = RailState.getSpawnState(piece);
+      if (state == null || state.motionVector() == null) {
+        continue;
+      }
+      Vector direction = state.motionVector().clone();
+      if (direction.getX() * towardX + direction.getZ() * towardZ < 0.0) {
+        direction.multiply(-1.0);
+      }
+      SpawnLocationList locations =
+          spawnable.findSpawnLocations(piece, direction, SpawnMode.REVERSE);
+      if (locations == null) {
+        continue;
+      }
+      locations.loadChunks();
+      if (locations.isOccupied()) {
+        continue;
+      }
+      MinecartGroup group = spawnable.spawn(locations);
+      if (group != null) {
+        return Optional.of(group);
+      }
+    }
+    return Optional.empty();
   }
 
   /** 问车型裁决；裁决本身出错时按旧规则取编组，不因为它停发。票上指定了车型的除外：改出别的车型就对不上表了。 */
@@ -214,14 +423,27 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       StorageProvider provider,
       String trainName,
       Instant now,
-      Map<String, String> consistTags) {
+      Map<String, String> consistTags,
+      int entryIndex) {
     if (group.getProperties() != null) {
       initializeSpawnOwner(group.getProperties(), trainName);
       group.getProperties().clearDestinationRoute();
       group.getProperties().clearDestination();
-      addTags(group.getProperties(), ticket.id(), service, depotId, pattern, route, provider, now);
+      addTags(
+          group.getProperties(),
+          ticket.id(),
+          service,
+          depotId,
+          pattern,
+          route,
+          provider,
+          now,
+          entryIndex);
       stampMotion(group.getProperties(), consistTags);
-      TrainTagHelper.writeTag(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX, "0");
+      TrainTagHelper.writeTag(
+          group.getProperties(),
+          RouteProgressRegistry.TAG_ROUTE_INDEX,
+          String.valueOf(Math.max(0, entryIndex)));
       TrainTagHelper.writeTag(
           group.getProperties(),
           RouteProgressRegistry.TAG_ROUTE_UPDATED_AT,
@@ -305,33 +527,25 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
   }
 
-  /** 出库后开启常驻加载；开启了、或开启失败且仍未常驻，都按 pattern 去重后告警一次。 */
-  private void warnAboutKeepChunksLoaded(
+  /**
+   * 写上出车物理属性（{@link SpawnPhysicsProperties}：关摩擦、重力、碰撞，常驻加载取最小范围）；写不上、或写完仍未常驻加载时按 pattern 去重后告警一次。
+   */
+  private void applySpawnPhysics(
       com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
       String pattern,
-      NodeId depotId) {
+      NodeId spawnNode) {
     warnIfKeepChunksLoadedOnlyWhenMoving();
-    if (ensureKeepChunksLoaded(properties)) {
-      if (keepChunksLoadedWarnedPatterns.add(pattern)) {
-        plugin
-            .getLogger()
-            .warning(
-                "出库车的 spawn pattern 未开启 keepChunksLoaded，已强制开启（否则 TrainCarts 会在首个物理 tick 卸载出库车，"
-                    + "冻结在出库口并被后续班次叠放）。请在该存档中开启常驻加载以消除本告警 pattern="
-                    + pattern
-                    + " depot="
-                    + depotId.value());
-      }
+    if (SpawnPhysicsProperties.apply(properties) && keepsChunksLoaded(properties)) {
       return;
     }
-    if (!keepsChunksLoaded(properties) && keepChunksLoadedWarnedPatterns.add("failed|" + pattern)) {
+    if (keepChunksLoadedWarnedPatterns.add("failed|" + pattern)) {
       plugin
           .getLogger()
           .warning(
-              "无法为出库车开启 keepChunksLoaded，该车可能被 TrainCarts 卸载并冻结在出库口 pattern="
+              "无法为出车写入物理属性（摩擦、重力、碰撞、常驻加载），该车可能被 TrainCarts 卸载并冻结在出车点 pattern="
                   + pattern
-                  + " depot="
-                  + depotId.value());
+                  + " node="
+                  + spawnNode.value());
     }
   }
 
@@ -491,7 +705,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
         }
         if (plugin != null && holdTicks > 0L) {
           if (world.addPluginChunkTicket(cx, cz, plugin)) {
-            ticketed.add((((long) cx) << 32) ^ (cz & 0xffffffffL));
+            ticketed.add(chunkKey(cx, cz));
           }
         }
       }
@@ -509,6 +723,108 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
               },
               holdTicks);
     }
+  }
+
+  /**
+   * 区间生成时 TrainCarts 要加载的区块：车头在区间点、车身沿来车方向（{@code toward} 的反方向）铺开，每节车周围 {@link
+   * #TC_SPAWN_CHUNK_RADIUS} 圈。车身按直线估计，弯道上偏出去的少数区块仍由 TrainCarts 当场加载。
+   *
+   * @param x 区间点方块 X
+   * @param z 区间点方块 Z
+   * @param towardX 去下一个节点的水平方向 X 分量（不必是单位向量）；与 Z 都为 0 时按区间点周围一个车长估计
+   * @param towardZ 同上，Z 分量
+   * @param bodyLength 车长（格）
+   * @return 区块键（见 {@link #chunkKey}）
+   */
+  static Set<Long> entryBodyChunks(
+      int x, int z, double towardX, double towardZ, double bodyLength) {
+    double length = Double.isFinite(bodyLength) ? Math.max(0.0, bodyLength) : 0.0;
+    Set<Long> chunks = new java.util.HashSet<>();
+    double norm = Math.hypot(towardX, towardZ);
+    if (!(norm > 1.0E-6)) {
+      int radius = (((int) Math.ceil(length) + 15) >> 4) + TC_SPAWN_CHUNK_RADIUS;
+      addChunkSquare(chunks, x >> 4, z >> 4, radius);
+      return chunks;
+    }
+    double backX = -towardX / norm;
+    double backZ = -towardZ / norm;
+    for (double along = 0.0; ; along += 8.0) {
+      double at = Math.min(along, length);
+      int cx = ((int) Math.floor(x + 0.5 + backX * at)) >> 4;
+      int cz = ((int) Math.floor(z + 0.5 + backZ * at)) >> 4;
+      addChunkSquare(chunks, cx, cz, TC_SPAWN_CHUNK_RADIUS);
+      if (at >= length) {
+        return chunks;
+      }
+    }
+  }
+
+  private static void addChunkSquare(Set<Long> chunks, int cx, int cz, int radius) {
+    for (int dx = -radius; dx <= radius; dx++) {
+      for (int dz = -radius; dz <= radius; dz++) {
+        chunks.add(chunkKey(cx + dx, cz + dz));
+      }
+    }
+  }
+
+  static long chunkKey(int cx, int cz) {
+    return (((long) cx) << 32) ^ (cz & 0xffffffffL);
+  }
+
+  /**
+   * 还没加载的区块在后台加载，加载好后挂插件票保留 {@link #ENTRY_PRELOAD_TICKET_TICKS}，免得发车侧再试之前又被卸掉。
+   *
+   * @return 还有区块没加载（这一次先不生成）
+   */
+  boolean preloadEntryChunks(World world, Set<Long> chunks) {
+    boolean missing = false;
+    for (long key : chunks) {
+      int cx = (int) (key >> 32);
+      int cz = (int) key;
+      if (world.isChunkLoaded(cx, cz)) {
+        continue;
+      }
+      missing = true;
+      EntryChunk chunk = new EntryChunk(world.getUID(), cx, cz);
+      if (!entryChunkLoads.add(chunk)) {
+        continue;
+      }
+      java.util.concurrent.CompletableFuture<org.bukkit.Chunk> loading;
+      try {
+        loading = world.getChunkAtAsync(cx, cz);
+      } catch (RuntimeException ex) {
+        loading = null;
+      }
+      if (loading == null) {
+        entryChunkLoads.remove(chunk);
+        continue;
+      }
+      loading.whenComplete(
+          (loaded, error) -> {
+            if (error == null && loaded != null) {
+              runOnMainThread(() -> holdChunk(world, cx, cz, ENTRY_PRELOAD_TICKET_TICKS));
+            }
+            entryChunkLoads.remove(chunk);
+          });
+    }
+    return missing;
+  }
+
+  private void runOnMainThread(Runnable task) {
+    if (Bukkit.isPrimaryThread() || !plugin.isEnabled()) {
+      task.run();
+    } else {
+      Bukkit.getScheduler().runTask(plugin, task);
+    }
+  }
+
+  /** 给已加载的区块挂插件票，到时摘掉；已经挂着本插件的票就不动（摘票归挂票的那一方）。 */
+  private void holdChunk(World world, int cx, int cz, long holdTicks) {
+    if (!world.isChunkLoaded(cx, cz) || !world.addPluginChunkTicket(cx, cz, plugin)) {
+      return;
+    }
+    Bukkit.getScheduler()
+        .runTaskLater(plugin, () -> world.removePluginChunkTicket(cx, cz, plugin), holdTicks);
   }
 
   private static SpawnLocationList findSpawnLocations(
@@ -534,12 +850,14 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       String spawnPattern,
       Route route,
       StorageProvider provider,
-      Instant now) {
+      Instant now,
+      int entryIndex) {
     if (properties == null || runId == null || service == null || route == null) {
       return;
     }
     TrainSpawnTagInitializer.replaceLifecycleTags(
-        properties, spawnTags(runId, service, depotId, spawnPattern, route, provider, now));
+        properties,
+        spawnTags(runId, service, depotId, spawnPattern, route, provider, now, entryIndex));
   }
 
   /**
@@ -557,12 +875,31 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
       Route route,
       StorageProvider provider,
       Instant now) {
+    return spawnTags(runId, service, depotId, spawnPattern, route, provider, now, 0);
+  }
+
+  /**
+   * 同上，交路进度从 {@code entryIndex} 起算（区间生成）：线路标签取到这个下标为止的有效 CHANGE。
+   *
+   * @param entryIndex 生成点在交路节点表里的下标；车库出车为 0
+   */
+  static Map<String, String> spawnTags(
+      UUID runId,
+      SpawnService service,
+      NodeId depotId,
+      String spawnPattern,
+      Route route,
+      StorageProvider provider,
+      Instant now,
+      int entryIndex) {
     Instant ts = now == null ? Instant.now() : now;
     List<RouteStop> stops =
         provider == null ? List.of() : provider.routeStops().listByRoute(route.id());
     RouteLineChanges.LineRef line =
         RouteLineChanges.entryLine(
-            stops, 0, new RouteLineChanges.LineRef(service.operatorCode(), service.lineCode()));
+            stops,
+            Math.max(0, entryIndex),
+            new RouteLineChanges.LineRef(service.operatorCode(), service.lineCode()));
     Map<String, String> tags = new HashMap<>();
     tags.put("FTA_RUN_ID", runId.toString());
     tags.put(TrainSpawnTagInitializer.TAG_TRAIN_UID, runId.toString());

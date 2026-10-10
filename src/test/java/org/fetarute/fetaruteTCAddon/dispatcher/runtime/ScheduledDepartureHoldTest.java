@@ -196,4 +196,20 @@ class ScheduledDepartureHoldTest {
 
     assertFalse(holds(service, T0));
   }
+
+  /** 手动提前出车在车库等计划时刻：健康检查当成按表扣车，到点自动失效。 */
+  @Test
+  void depotHoldIsVisibleUntilThePlannedDeparture() {
+    java.util.concurrent.atomic.AtomicReference<Instant> clock =
+        new java.util.concurrent.atomic.AtomicReference<>(T0);
+    StationStopCoordinator service =
+        TestServices.minimal(new ArrayList<>(), clock::get).stationStops();
+
+    service.holdAtDepotUntil("train-A", T0.plusSeconds(600));
+    assertTrue(service.holdingForSchedule("TRAIN-A"));
+    clock.set(T0.plusSeconds(599));
+    assertTrue(service.holdingForSchedule("train-A"), "扣得比门控上限久也照样可见");
+    clock.set(T0.plusSeconds(600));
+    assertFalse(service.holdingForSchedule("train-A"), "到点失效");
+  }
 }

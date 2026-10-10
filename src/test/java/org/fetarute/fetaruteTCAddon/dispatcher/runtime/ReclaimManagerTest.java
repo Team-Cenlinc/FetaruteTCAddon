@@ -1120,6 +1120,21 @@ class ReclaimManagerTest {
         List.of("train-a:reclaim-mainline-turnback"), fixture.destroyed, "没有从 CHT 出发的回库线路时原地处理");
   }
 
+  /** 开进终点等叫车的票来接的折返车：单股道车站的立即回收也不碰它，闲置再久也不碰。 */
+  @Test
+  void aTurnbackTrainHeldForACallIsNeverReclaimed() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:CHT:3"));
+    fixture.manager.setSingleTrackStation(node -> node.value().equals("SURC:S:CHT:3"));
+    fixture.manager.setMainlineReturnGate((train, route) -> true);
+    fixture.manager.setReturnGate(train -> true);
+    fixture.manager.setHeldForCall(train -> train.equals("train-a"));
+
+    fixture.checkAfterIdle(4000);
+
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(fixture.destroyed.isEmpty());
+  }
+
   /** 单股道车站上、下一班还接得上的车照常等：立即回收闸不放行时，站台那道回库闸照旧说了算。 */
   @Test
   void aSingleTrackStationKeepsATrainWhoseNextTripIsStillReachable() {
@@ -1295,6 +1310,76 @@ class ReclaimManagerTest {
     assertEquals(List.of("train-a:reclaim-no-return-route"), fixture.destroyed);
   }
 
+  /** 按表再也没有班可跑的车：闲置满短门槛就回收，不等闲置上限（这里是 3600 秒），也不过回库闸。 判定拿到车停的节点与它刚跑完的交路。 */
+  @Test
+  void aVehicleWithoutTimetableWorkIsReclaimedPastTheReturnGate() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"));
+    List<String> asked = new ArrayList<>();
+    fixture.manager.setReturnGate(train -> false);
+    fixture.manager.setIdleForGood(
+        (train, location, routeId) -> {
+          asked.add(train + "@" + location.value() + ":" + routeId.orElseThrow());
+          return true;
+        });
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS - 1);
+    verify(fixture.ticketAssigner, never()).forceAssign(any(), any(), any());
+    assertTrue(asked.isEmpty(), "不到短门槛不问");
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    verify(fixture.ticketAssigner).forceAssign(eq(fixture.provider), eq("train-a"), any());
+    assertEquals(List.of("train-a@SURC:S:PPK:1:" + fixture.shortRoute), asked);
+    assertTrue(
+        fixture.logs.stream()
+            .anyMatch(line -> line.startsWith("回收触发: 按表没有后续任务 train=train-a node=SURC:S:PPK:1")),
+        fixture.logs::toString);
+  }
+
+  /** 按表没有活、终点又没有回库线路：当场销毁，不进滞留计时。 */
+  @Test
+  void aVehicleWithoutTimetableWorkAtAStationWithoutReturnRoutesIsClearedInPlace() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    fixture.manager.setIdleForGood((train, location, routeId) -> true);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+
+    assertEquals(List.of("train-a:reclaim-no-return-route"), fixture.destroyed);
+  }
+
+  /** 回收关着也收按表没有活的车：时刻表确知它没有班可跑；别的车照旧不碰。 */
+  @Test
+  void vehiclesWithoutTimetableWorkAreClearedEvenWithReclaimDisabled() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:NTA:2"));
+    when(fixture.view.reclaimSettings())
+        .thenReturn(new ConfigManager.ReclaimSettings(false, 3600, 100, 60, 600));
+
+    fixture.checkAfterIdle(4000);
+    assertTrue(fixture.destroyed.isEmpty(), "没装判定：回收关着就什么都不做");
+
+    fixture.manager.setIdleForGood((train, location, routeId) -> true);
+    fixture.checkAfterIdle(4000);
+    assertEquals(List.of("train-a:reclaim-no-return-route"), fixture.destroyed);
+  }
+
+  /** 回收关着、按表没有活、回库线路只是这一拍派不出去：进滞留计时，不当场销毁。 */
+  @Test
+  void aBlockedReturnWithReclaimDisabledStartsTheStrandedClock() {
+    MainlineFixture fixture = new MainlineFixture(NodeId.of("SURC:S:PPK:1"));
+    when(fixture.view.reclaimSettings())
+        .thenReturn(new ConfigManager.ReclaimSettings(false, 3600, 100, 60, 600));
+    when(fixture.ticketAssigner.forceAssign(eq(fixture.provider), eq("train-a"), any()))
+        .thenReturn(false);
+    fixture.manager.setIdleForGood((train, location, routeId) -> true);
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS);
+    verify(fixture.ticketAssigner, org.mockito.Mockito.atLeastOnce())
+        .forceAssign(eq(fixture.provider), eq("train-a"), any());
+    assertTrue(fixture.destroyed.isEmpty());
+
+    fixture.checkAfterIdle(ReclaimManager.MAINLINE_TURNBACK_MIN_IDLE_SECONDS + 600);
+    assertEquals(List.of("train-a:reclaim-stranded"), fixture.destroyed);
+  }
+
   /** "终点有没有回库线路"在复查窗口内只查一次库：每轮扫描都要问，查一次要扫遍全部运营商的交路与首站。 */
   @Test
   void theReturnRouteLookupIsReusedWithinTheRecheckWindow() {
@@ -1328,6 +1413,7 @@ class ReclaimManagerTest {
     final List<String> destroyed = new ArrayList<>();
     final List<String> logs = new ArrayList<>();
     final LayoverRegistry layoverRegistry = new LayoverRegistry();
+    final ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
     private final java.util.concurrent.atomic.AtomicReference<Instant> clock =
         new java.util.concurrent.atomic.AtomicReference<>(ARRIVED);
 
@@ -1384,7 +1470,6 @@ class ReclaimManagerTest {
               RouteProgressRegistry.TAG_ROUTE_ID,
               shortRoute.toString()));
       ConfigManager configManager = mock(ConfigManager.class);
-      ConfigManager.ConfigView view = mock(ConfigManager.ConfigView.class);
       when(configManager.current()).thenReturn(view);
       when(view.reclaimSettings())
           .thenReturn(

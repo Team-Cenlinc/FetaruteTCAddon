@@ -36,7 +36,7 @@ public record LicenseConfig(
     training = training == null ? TrainingConfig.defaults() : training;
   }
 
-  /** 默认两级：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考。 */
+  /** 默认两级准驾等级与一项附注：见习驾驶证考新手教程；正式驾驶证要先有见习驾驶证，再路考；车掌附注不要求驾驶证，在调度列车上值乘考。 */
   public static LicenseConfig defaults() {
     return new LicenseConfig(
         true,
@@ -71,14 +71,40 @@ public record LicenseConfig(
                 false,
                 false,
                 1,
-                List.of(DrivePermissions.DRIVER))),
+                List.of(DrivePermissions.DRIVER)),
+            new LicenseClass(
+                "guard",
+                "车掌",
+                "在调度列车上当车掌：开关车门、站台监视、确认出站信号、按发车铃",
+                true,
+                List.of(),
+                LicenseClass.Exam.GUARD,
+                3,
+                70,
+                false,
+                false,
+                false,
+                1,
+                List.of(DrivePermissions.GUARD))),
         TrainingConfig.defaults());
   }
 
-  /** 第几级：按配置里的先后，从 1 起；没有这一级时为 0。 */
+  /** 第几级：按配置里的先后数准驾等级，从 1 起；附注（车掌）不占级数，与没有这一级一样为 0。 */
   public int levelOf(String id) {
     Optional<LicenseClass> found = find(id);
-    return found.map(c -> classes.indexOf(c) + 1).orElse(0);
+    if (found.isEmpty() || found.get().endorsement()) {
+      return 0;
+    }
+    int level = 0;
+    for (LicenseClass license : classes) {
+      if (!license.endorsement()) {
+        level++;
+      }
+      if (license == found.get()) {
+        return level;
+      }
+    }
+    return 0;
   }
 
   /** 按标识找一级（不分大小写）。 */
@@ -114,7 +140,7 @@ public record LicenseConfig(
         LicenseClass.Exam exam = LicenseClass.Exam.parse(entry.getString("exam", "road-test"));
         if (exam == null) {
           sink.accept(
-              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial 或 road-test，已跳过这一级");
+              "drive.yml 的 license.classes." + key + ".exam 只能是 tutorial、road-test 或 guard，已跳过这一级");
           continue;
         }
         classes.add(
@@ -130,8 +156,11 @@ public record LicenseConfig(
                 entry.getBoolean("allow-emergency", false),
                 entry.getBoolean("allow-overrun", false),
                 entry.getBoolean("allow-wrong-door", false),
-                entry.getInt("training-runs", exam == LicenseClass.Exam.ROAD_TEST ? 1 : 0),
-                entry.getStringList("grants")));
+                entry.getInt("training-runs", exam == LicenseClass.Exam.TUTORIAL ? 0 : 1),
+                entry.getStringList("grants"),
+                exam == LicenseClass.Exam.GUARD
+                    ? entry.getInt("drill-seconds", LicenseClass.DEFAULT_DRILL_SECONDS)
+                    : 0));
       }
     }
     Set<String> ids = new LinkedHashSet<>();

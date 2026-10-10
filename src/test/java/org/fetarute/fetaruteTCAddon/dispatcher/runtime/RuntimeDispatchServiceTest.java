@@ -1914,7 +1914,7 @@ class RuntimeDispatchServiceTest {
 
     Optional<List<NodeId>> prepared =
         service.prepareDepotSpawnDynamicAuthority(
-            "spawn-dynamic-train", route, route.waypoints(), graph, Instant.EPOCH);
+            "spawn-dynamic-train", route, route.waypoints(), 0, graph, Instant.EPOCH);
 
     assertEquals(Optional.of(List.of(depot, platformTwo)), prepared);
     assertEquals(
@@ -1966,7 +1966,7 @@ class RuntimeDispatchServiceTest {
     List<NodeId> prepared =
         service
             .prepareDepotSpawnDynamicAuthority(
-                "spawn-boundary-train", route, route.waypoints(), graph, Instant.EPOCH)
+                "spawn-boundary-train", route, route.waypoints(), 0, graph, Instant.EPOCH)
             .orElseThrow();
 
     assertEquals(nodes.subList(0, dynamicIndex), prepared);

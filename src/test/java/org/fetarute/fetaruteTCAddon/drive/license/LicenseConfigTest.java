@@ -98,6 +98,73 @@ class LicenseConfigTest {
   }
 
   @Test
+  @DisplayName("车掌附注：不占准驾等级，不要求驾驶证，先练习一次再在调度列车上值乘考，考过给车掌权限；随插件附带的 drive.yml 与默认值一致")
+  void guardClass() throws Exception {
+    LicenseClass guard = LicenseConfig.defaults().find("guard").orElseThrow();
+    assertEquals(LicenseClass.Exam.GUARD, guard.exam());
+    assertEquals(List.of(), guard.requires());
+    assertEquals(List.of(DrivePermissions.GUARD), guard.grants());
+    assertEquals(1, guard.trainingRuns(), "报名车掌考试前也要先练习一次");
+    assertEquals(3, guard.examStops());
+    assertEquals(LicenseClass.Exam.GUARD, LicenseClass.Exam.parse(" Guard "));
+
+    YamlConfiguration bundled = new YamlConfiguration();
+    try (var stream = getClass().getClassLoader().getResourceAsStream("drive.yml")) {
+      bundled.loadFromString(
+          new String(stream.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8));
+    }
+    List<String> warnings = new ArrayList<>();
+    LicenseConfig parsed =
+        LicenseConfig.from(bundled.getConfigurationSection("license"), warnings::add);
+    assertEquals(List.of(), warnings);
+    assertEquals(guard, parsed.find("guard").orElseThrow());
+    assertTrue(guard.endorsement(), "车掌是驾驶证附注，不是更高一级");
+    assertEquals(0, parsed.levelOf("guard"), "附注不占级数");
+    assertEquals(2, parsed.levelOf("driver"));
+
+    YamlConfiguration custom = new YamlConfiguration();
+    custom.loadFromString(
+        """
+        classes:
+          guard:
+            exam: guard
+            drill-seconds: 20
+          quiet:
+            exam: guard
+            drill-seconds: 0
+          driver:
+            exam: road-test
+            drill-seconds: 20
+        """);
+    LicenseConfig drills = LicenseConfig.from(custom, warnings::add);
+    assertEquals(20, drills.find("guard").orElseThrow().drillSeconds());
+    assertEquals(0, drills.find("quiet").orElseThrow().drillSeconds(), "0 为不演练");
+    assertEquals(0, drills.find("driver").orElseThrow().drillSeconds(), "演练只用于车掌考试");
+  }
+
+  @Test
+  @DisplayName("附注不论排在哪里都不占级数，准驾等级照顺序编号")
+  void endorsementsDoNotCountAsLevels() throws Exception {
+    YamlConfiguration yaml = new YamlConfiguration();
+    yaml.loadFromString(
+        """
+        classes:
+          guard:
+            exam: guard
+          learner:
+            exam: tutorial
+          driver:
+            exam: road-test
+            requires: [learner]
+        """);
+    LicenseConfig config = LicenseConfig.from(yaml, message -> {});
+    assertEquals(0, config.levelOf("guard"));
+    assertEquals(1, config.levelOf("learner"));
+    assertEquals(2, config.levelOf("driver"));
+    assertEquals(0, config.levelOf("missing"));
+  }
+
+  @Test
   @DisplayName("证号由 UUID 得出，同一名玩家永远相同")
   void cardNumberStable() {
     UUID id = UUID.fromString("3a988dae-ea58-374f-a756-10d056914b46");

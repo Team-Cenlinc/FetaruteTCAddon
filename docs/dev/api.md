@@ -80,6 +80,7 @@ FetaruteApi 提供十个子模块、一个数据版本号 `dataRevision()`（1.6
 | `eta()` | `EtaApi` | ETA：列车/票据/站牌列表（1.9.0 站牌行结构化） |
 | `timetables()` | `TimetableApi` | 时刻表：已发布时刻表、车次、站点计划到发、列车当前车次与偏差（1.4.0；1.5.0 统一停靠序号口径；1.8.0 车次取消；1.11.0 车型） |
 | `drive()` | `DriveApi` | 驾驶任务：派任务、查询任务与驾驶状态、成绩记录（1.10.0；1.12.0 接班站与交班站改称 `takeoverStation`/`handoverStation`、停车结果改为 `StopOutcome`，旧名 `board`/`alight`/`StopWindow` 标为弃用、照常可用；1.13.0 `TaskRequest.rewards(false)` 不发驾驶奖励） |
+| `guard()` | `GuardApi` | 车掌（1.14.0）：派车掌任务（`TaskRequest` 写法同驾驶任务，可设交班站、不发奖励）、查询任务与值乘、按车名找车掌、车掌记录与累计成绩；车掌功能未加载时为占位实现（`enabled()` 为 false） |
 
 ---
 
@@ -860,6 +861,23 @@ public class BoardListener implements Listener {
 
 请监听具体事件类；抽象基类 `TrainStationEvent` 不能直接监听。
 
+### 车掌事件（1.14.0）
+
+车掌事件由车掌模块在主线程**当场**发出（不经上面的队列），发出前先刷新 `GuardApi` 的快照，监听方转到其他线程读 `taskOf`/`dutyOf` 也是最新的。
+`GuardTaskClaimEvent`、`GuardDutyStartEvent` 可以取消，其余只读；监听器抛异常只记日志。抽象基类 `GuardEvent` 不能直接监听。
+
+| 事件 | 时机 |
+|------|------|
+| `GuardTaskClaimEvent` | 领取（任务板或 `GuardApi#assign`）、登记之前，可取消 |
+| `GuardDutyStartEvent` | 上岗、接过车门之前，可取消；带上要接的任务（直接 `/fta guard on` 时为空） |
+| `GuardStopWorkedEvent` | 一站的作业结算（列车开出这一站）；越站、开门前就结束的停站不发 |
+| `GuardDepartureSignalEvent` | 发出发车信号；`isByStation()` 为发车铃超时、站台代发 |
+| `GuardEmergencyStopEvent` | 行驶中拉下紧急停车 |
+| `GuardIncidentReportEvent` | 异常情况报告（`GuardApi.Incident`） |
+| `GuardTripScoredEvent` | 做过作业的一趟结算（换车次或值乘结束），只发按时刻表运行的车次；含终态与成绩 |
+| `GuardTaskFinishedEvent` | 车掌任务结束（完成、放弃、作废、未完成、中断），每个任务一次 |
+| `GuardDutyEndedEvent` | 值乘结束，含原因（如 `COMMAND`、`HANDOVER`、`TIMEOUTS`） |
+
 ---
 
 ## 线程安全
@@ -1009,6 +1027,7 @@ public class BlueMapBridge extends JavaPlugin {
 
 | 版本 | 变更 |
 |------|------|
+| 1.14.0 | 新增 `FetaruteApi#guard()` 与 `GuardApi`（车掌任务、值乘、记录）及车掌事件（`GuardTaskClaimEvent`、`GuardDutyStartEvent`、`GuardStopWorkedEvent`、`GuardDepartureSignalEvent`、`GuardEmergencyStopEvent`、`GuardIncidentReportEvent`、`GuardTripScoredEvent`、`GuardTaskFinishedEvent`、`GuardDutyEndedEvent`）。`DriveApi#records` 照旧返回该玩家的全部记录，车掌的记录 `mode` 为 `GUARD` |
 | 1.9.0 | 站牌行结构化。**记录新增字段**：`EtaApi.BoardRow` 增加 `etaEpochMillis`（附 `eta()`）、`phase`（新枚举 `EtaApi.BoardPhase`）、`stopSequence`、`passing`、`terminating`、`outOfService`、`trainName`、`delaySeconds`、`platformPending`、`platformCandidates`；保留 1.8.0 的全参构造器作为次级构造器（时刻为 0、阶段为 `EN_ROUTE`、序号为 -1、`outOfService` 按主目的地 ID 是否为 `OUT_OF_SERVICE` 推断），按旧签名 `new` 的代码源码与二进制均兼容；使用记录模式解构的代码需补上新增分量；`Optional` 分量传 `null` 时规整为空。`EtaApi.BoardRow` 另增 `platformPlanned` 与 `cars`（新记录 `EtaApi.CarLoad`，附 `vacantSeats()`）；`TimetableApi.Departure` 增加 `plannedNodeId`（动态站台的计划股道），保留 1.8.0 与 1.7.0 的构造器。`RouteApi.RouteDetail` 增加 `via`（显式配置的经由站码，未配置为空列表），保留 1.8.0 的五参构造器。**新方法**：`TimetableApi#cancellations(from, to)`（按计划始发时刻查已取消车次，新记录 `TimetableApi.CancelledTrip`）、
 `TrainApi#listAllActiveTrains(boolean includeEta)`（为 false 时不算 ETA，接口带默认实现）。**新事件**：`TrainPlatformAssignedEvent`（站台定下来或变了）。**行为变更**：`getBoard` 列出停在本站的列车（`AT_STATION`）；时刻表预测排除已取消的车次；动态站台尚未选台时 `platform` 为计划站台或 `-`（此前为占位股道）；折返站上已知下一趟的来车按下一趟列出 |
 | 1.8.0 | 车次取消：`TimetableApi.Departure` 增加 `cancelled`（保留 1.7.0 构造器，取消为 false），新增 `TimetableTripCancelledEvent` |

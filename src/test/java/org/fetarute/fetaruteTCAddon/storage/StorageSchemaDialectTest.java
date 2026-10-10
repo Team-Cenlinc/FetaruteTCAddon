@@ -4,10 +4,47 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.List;
 import org.fetarute.fetaruteTCAddon.storage.dialect.MySqlDialect;
+import org.fetarute.fetaruteTCAddon.storage.dialect.PostgresDialect;
 import org.fetarute.fetaruteTCAddon.storage.schema.StorageSchema;
 import org.junit.jupiter.api.Test;
 
 final class StorageSchemaDialectTest {
+
+  /** 未派出叫车表三种方言都建得出来，列与可空约束一致。 */
+  @Test
+  void pendingCallsTableRendersForEveryDialect() {
+    StorageSchema schema = new StorageSchema("fta_");
+    for (List<String> ddl :
+        List.of(
+            schema.sqliteStatements(),
+            schema.statements(new MySqlDialect()),
+            schema.statements(new PostgresDialect()))) {
+      String table =
+          ddl.stream()
+              .filter(sql -> sql.contains("CREATE TABLE IF NOT EXISTS fta_pending_calls"))
+              .findFirst()
+              .orElseThrow();
+      for (String column :
+          List.of(
+              "id ",
+              "player_uuid ",
+              "operator_code ",
+              "station_code ",
+              "screen_platforms ",
+              "direction_key ",
+              "line_id ",
+              "created_at ",
+              "eta_seconds ")) {
+        assertTrue(table.contains(column), column + " in " + table);
+      }
+      assertTrue(
+          table
+              .lines()
+              .filter(line -> line.contains("eta_seconds"))
+              .noneMatch(line -> line.contains("NOT NULL")),
+          "预计到站可空: " + table);
+    }
+  }
 
   @Test
   void sqliteSchemaUsesTablePrefix() {

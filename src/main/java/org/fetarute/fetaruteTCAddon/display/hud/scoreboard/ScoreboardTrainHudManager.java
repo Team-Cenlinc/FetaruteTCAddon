@@ -143,8 +143,8 @@ public final class ScoreboardTrainHudManager implements Listener {
     Set<String> activeTrains = new HashSet<>();
     Set<UUID> activePlayers = new HashSet<>();
     for (Player player : Bukkit.getOnlinePlayers()) {
-      if (isDriving(player)) {
-        // 手动驾驶的驾驶员有自己的计分板，乘客的让位。
+      if (usesCrewSidebar(player)) {
+        // 驾驶员与车掌有自己的侧边栏，乘客的让位：车掌也坐在车上，不让位就会把车掌的侧边栏换掉。
         clear(player);
         continue;
       }
@@ -165,9 +165,9 @@ public final class ScoreboardTrainHudManager implements Listener {
     clearInactivePlayers(activePlayers);
   }
 
-  private boolean isDriving(Player player) {
+  private boolean usesCrewSidebar(Player player) {
     var drive = plugin.getDriveSessionManager();
-    return drive != null && drive.isDriving(player.getUniqueId());
+    return drive != null && drive.usesCrewSidebar(player.getUniqueId());
   }
 
   public void shutdown() {

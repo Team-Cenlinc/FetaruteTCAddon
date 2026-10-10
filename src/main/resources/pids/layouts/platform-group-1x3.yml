@@ -50,7 +50,7 @@ widgets:
           number-gap: 3
           unit: {size: 12, secondary: 10, gap: 1, stacked: true}
           status: {size: 12, secondary: 10, gap: 1, stacked: true}
-          highlight: {size: 24, secondary: 10, spread: true}
+          highlight: {size: 24, secondary: 10, gap: 2, stacked: true}
       # 其余两行
       - height: 30
         divider: 2
@@ -66,4 +66,4 @@ widgets:
           number-gap: 2
           unit: {size: 12}
           status: {size: 12, secondary: 10, gap: 2, stacked: true}
-          highlight: {size: 12, secondary: 10, spread: true}
+          highlight: {size: 12, secondary: 10, gap: 2, stacked: true}

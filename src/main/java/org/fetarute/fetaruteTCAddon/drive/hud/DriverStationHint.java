@@ -8,7 +8,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopWindow;
 import org.fetarute.fetaruteTCAddon.drive.driver.DriverLink;
 
 /**
- * 驾驶调度列车时与车站有关的提示：进站时离停车点多远、停短了要前移、该开哪侧门、停站倒计时、关门、发车信号。
+ * 驾驶调度列车时与车站有关的提示：进站时离停车点多远、停短了要前移、该开哪侧门、停站倒计时、关门、发车信号。车上有车掌时， 开关门写成由车掌开关、等发车写成等车掌的发车信号（都不要驾驶员动手）。
  *
  * <p>同一条提示在动作栏与侧边栏各有一套语言键：侧边栏常驻显示全部，动作栏只放要驾驶员动手的（{@link Hint#actionable()}）。 本类不依赖服务器对象，便于单测。
  */
@@ -40,7 +40,11 @@ public final class DriverStationHint {
     /** 车门已关，等出站许可。 */
     WAIT_DEPARTURE("wait-departure", false, true),
     /** 已有出站许可，可以起步。 */
-    DEPART("depart", true, true);
+    DEPART("depart", true, true),
+    /** 车上有车掌：开门、关门由车掌做，驾驶员不用动手。 */
+    GUARD_DOORS("guard-doors", false, true),
+    /** 车上有车掌：车门已关，等车掌在出站信号开放后发出发车信号。 */
+    GUARD_SIGNAL("guard-signal", false, true);
 
     private final String key;
     private final boolean actionable;
@@ -106,8 +110,12 @@ public final class DriverStationHint {
       Map<String, String> station = Map.of("station", current.stationName());
       return switch (current.phase()) {
         case OPEN_DOORS -> Optional.of(
-            new Hint(
-                Kind.OPEN_DOORS, link.requiredDoorSide().name().toLowerCase(Locale.ROOT), station));
+            link.guardAboard()
+                ? new Hint(Kind.GUARD_DOORS, "", station)
+                : new Hint(
+                    Kind.OPEN_DOORS,
+                    link.requiredDoorSide().name().toLowerCase(Locale.ROOT),
+                    station));
         case DWELL -> Optional.of(
             new Hint(
                 Kind.DWELL,
@@ -120,8 +128,12 @@ public final class DriverStationHint {
                         (current.dwellRemainingTicks() + TICKS_PER_SECOND - 1)
                             / TICKS_PER_SECOND))));
         case CLOSE_DOORS -> Optional.of(
-            new Hint(link.doorsClosing() ? Kind.DOORS_CLOSING : Kind.CLOSE_DOORS, "", station));
-        case WAIT_DEPARTURE -> Optional.of(new Hint(Kind.WAIT_DEPARTURE, "", station));
+            link.guardAboard()
+                ? new Hint(Kind.GUARD_DOORS, "", station)
+                : new Hint(
+                    link.doorsClosing() ? Kind.DOORS_CLOSING : Kind.CLOSE_DOORS, "", station));
+        case WAIT_DEPARTURE -> Optional.of(
+            new Hint(link.guardAboard() ? Kind.GUARD_SIGNAL : Kind.WAIT_DEPARTURE, "", station));
         case DEPART -> Optional.of(new Hint(Kind.DEPART, "", station));
         default -> Optional.empty();
       };

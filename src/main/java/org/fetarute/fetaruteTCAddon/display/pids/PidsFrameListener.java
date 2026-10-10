@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.display.pids;
 
 import io.papermc.paper.event.player.PlayerPickEntityEvent;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -21,6 +22,8 @@ import org.bukkit.event.world.EntitiesLoadEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.ItemStack;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.call.CallDialog;
+import org.fetarute.fetaruteTCAddon.call.CallService;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.map.PidsFrames;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
@@ -59,10 +62,12 @@ public final class PidsFrameListener implements Listener {
     Optional<UUID> screenId = screenOf(service, frame);
     if (screenId.isPresent()) {
       event.setCancelled(true);
-      if (service.isPresent()
-          && event.getHand() == EquipmentSlot.HAND
-          && service.get().items().isStick(hand)) {
-        openMenu(player, service.get(), frame, screenId.get());
+      if (service.isPresent() && event.getHand() == EquipmentSlot.HAND) {
+        if (service.get().items().isStick(hand)) {
+          openMenu(player, service.get(), frame, screenId.get());
+        } else if (player.hasPermission(CallService.PERMISSION)) {
+          openCall(player, service.get(), screenId.get());
+        }
       }
       return;
     }
@@ -116,6 +121,24 @@ public final class PidsFrameListener implements Listener {
   @EventHandler(priority = EventPriority.MONITOR)
   public void onEntitiesLoad(EntitiesLoadEvent event) {
     plugin.getPidsService().ifPresent(service -> service.cleanOrphans(event.getEntities()));
+  }
+
+  /** 右键站台屏叫车：按屏幕绑定的车站与站台列方向；测试卡、未绑车站、线路运行状况屏不叫车。 */
+  private void openCall(Player player, PidsService service, UUID screenId) {
+    Optional<PidsScreen> screen = service.find(screenId);
+    if (screen.isEmpty()
+        || screen.get().mode() != PidsScreen.Mode.LIVE
+        || screen.get().station().isEmpty()
+        || service.isLineStatus(screen.get())) {
+      return;
+    }
+    // 按住右键每秒触发好几次：同一玩家间隔太短的不再开，免得每次都把各方向的车源排一遍。
+    if (plugin
+        .getCallService()
+        .map(calls -> calls.dialogAllowed(player.getUniqueId(), Instant.now()))
+        .orElse(true)) {
+      CallDialog.open(plugin, player, screen.get().station().get(), screen.get().platforms(), true);
+    }
   }
 
   /** 展示框属于哪块屏幕；服务不可用时只看框里的地图物品。 */

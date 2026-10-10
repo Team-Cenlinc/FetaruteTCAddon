@@ -13,6 +13,7 @@ import java.time.Instant;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Optional;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -38,6 +39,27 @@ class TimetableDutyReplacementTest {
             true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
     service.reload(providerWith(published));
     service.scheduledDepartureAt(event("train-A", 0, T0));
+  }
+
+  /** 同 {@link #start}，另设晚点上限 900 秒。 */
+  private void startWithDelayCap(Timetable published) {
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            true,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300),
+            Duration.ZERO,
+            Duration.ofSeconds(900)));
+    service.reload(providerWith(published));
+    service.scheduledDepartureAt(event("train-A", 0, T0));
+  }
+
+  /** 第二班（交路第 1 班）的票一直在等 train-A：晚点就晚发，不按容差作废。 */
+  private void secondTripTicketWaits() {
+    service.setPendingTicketProbe(
+        intent -> intent.kind() == RouteOperationType.OPERATION && intent.tripIndex() == 1);
   }
 
   private TimetableService.DutyKey dutyOfTrainA() {
@@ -373,8 +395,165 @@ class TimetableDutyReplacementTest {
     assertEquals(2, heard.size(), "00:10 那班替补赶得上，不取消: " + heard);
   }
 
+  /**
+   * 晚点上限：第二班 08:10 的票一直在等 train-A（续班票等本交路的车没有时限）。晚过 900 秒（08:25）还没开出， 即使没有替补可派也从交路上解下，
+   * 剩下的两班当即取消——不然那张票会一直挂着，站牌上一直是一班不会来的车。
+   */
+  @Test
+  void aVehicleBeyondTheDelayCapIsVacatedEvenWithoutAReplacement() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = withoutCreateRoutes(timetable(TimetableStatus.PUBLISHED, 3));
+    startWithDelayCap(table);
+    secondTripTicketWaits();
+
+    assertTrue(at("08:24:59").isEmpty());
+    assertTrue(service.dutyBindingOf("train-A").isPresent(), "晚 899 秒，票还在等它");
+
+    assertTrue(at("08:25:00").isEmpty(), "没有出库线路，派不出替补");
+    assertTrue(service.dutyBindingOf("train-A").isEmpty());
+    assertTrue(service.retiredFromDuty("train-A"), "解下的车由回收带走");
+    assertTrue(
+        logs.stream()
+            .anyMatch(
+                line ->
+                    line.startsWith("TIMETABLE_DUTY_VACATED train=train-A")
+                        && line.contains("reason=late-900s")
+                        && line.contains("fromTrip=1")),
+        logs::toString);
+    assertEquals(
+        table.duties().get(0).tripIds().subList(1, 3),
+        heard.stream().map(TripCancellations.Cancellation::tripId).toList(),
+        "剩下的两班当即取消");
+    assertTrue(heard.get(0).detail().startsWith("duty-vacated:late-900s"), heard.get(0).detail());
+  }
+
+  /** 晚点上限触发后，替补赶得上的班次照常由替补接：08:25 解下，第四班 08:30 的替补 08:27 出库；中间赶不上的第二、三班取消。 */
+  @Test
+  void theDelayCapHandsLaterTripsToAReplacement() {
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    Timetable table = timetable(TimetableStatus.PUBLISHED, 4);
+    startWithDelayCap(table);
+    secondTripTicketWaits();
+
+    assertTrue(at("08:15:30").isEmpty());
+    assertTrue(service.dutyBindingOf("train-A").isPresent(), "票还在等它：不按接不上下一班换车");
+
+    assertTrue(at("08:25:00").isEmpty());
+    assertTrue(service.dutyBindingOf("train-A").isEmpty());
+    assertEquals(
+        table.duties().get(0).tripIds().subList(1, 3),
+        heard.stream().map(TripCancellations.Cancellation::tripId).toList());
+    List<TimetableService.Replacement> issued = at("08:27:00");
+    assertEquals(1, issued.size());
+    assertEquals(3, issued.get(0).tripIndex());
+  }
+
+  /** 不设晚点上限（0）时，票在等的车照旧一直等。 */
+  @Test
+  void withoutADelayCapAWaitedVehicleKeepsItsDuty() {
+    start(timetable(TimetableStatus.PUBLISHED, 3));
+    secondTripTicketWaits();
+
+    at("08:40:00");
+
+    assertTrue(service.dutyBindingOf("train-A").isPresent());
+  }
+
+  /** 停在这里的车按表还有没有活：交路里还没跑的班次有一班从这里发车、还赶得上（没过容差，或票还在等它）就有；夹具的班次都从 AAA 发车，停在 CCC 的车没有活。 */
+  @Test
+  void idleForGoodFollowsTheRemainingTripsOfTheDuty() {
+    start(timetable(TimetableStatus.PUBLISHED, 3));
+
+    clock.set(Instant.parse("2026-03-02T08:05:00Z"));
+    assertFalse(service.idleForGoodAt("train-A", "OP:S:AAA:1", Optional.empty()));
+    assertTrue(service.idleForGoodAt("train-A", "OP:S:CCC:1", Optional.empty()), "没有一班从 CCC 发车");
+
+    clock.set(Instant.parse("2026-03-02T08:15:30Z"));
+    assertFalse(
+        service.idleForGoodAt("train-A", "OP:S:AAA:2", Optional.empty()),
+        "第二班过了容差，第三班 08:20 还赶得上（同一站台组）");
+
+    clock.set(Instant.parse("2026-03-02T08:25:30Z"));
+    secondTripTicketWaits();
+    assertFalse(service.idleForGoodAt("train-A", "OP:S:AAA:1", Optional.empty()), "第二班的票还在等它");
+    service.setPendingTicketProbe(intent -> false);
+    assertTrue(service.idleForGoodAt("train-A", "OP:S:AAA:1", Optional.empty()), "剩下的班次都过了容差");
+  }
+
+  /** 换下来的车没有活；叫来的车不归时刻表判；只扣车不出票时不判。 */
+  @Test
+  void idleForGoodCoversRetiredButNotUnscheduledVehicles() {
+    start(timetable(TimetableStatus.PUBLISHED, 3));
+    at("08:15:30");
+    assertTrue(service.retiredFromDuty("train-A"));
+    assertTrue(service.idleForGoodAt("train-A", "OP:S:AAA:1", Optional.empty()));
+
+    service.setUnscheduledTrain(train -> train.equals("train-A"));
+    assertFalse(service.idleForGoodAt("train-A", "OP:S:AAA:1", Optional.empty()));
+
+    service.setUnscheduledTrain(train -> false);
+    service.applySettings(
+        new TimetableService.Settings(
+            true,
+            false,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(300)));
+    assertFalse(service.idleForGoodAt("train-A", "OP:S:AAA:1", Optional.empty()));
+  }
+
+  /** 没绑交路的车只能接首班：刚跑完由时刻表出票的交路、10 分钟内没有首班从它停的地方发车时没有活；别的交路的车不判。 */
+  @Test
+  void anUnboundVehicleIsIdleForGoodWithoutAFirstTripNearby() {
+    start(timetable(TimetableStatus.PUBLISHED, 3));
+    Optional<UUID> managedRoute = Optional.of(TimetableServiceTest.ROUTE);
+
+    clock.set(Instant.parse("2026-03-02T07:55:00Z"));
+    assertFalse(service.idleForGoodAt("train-B", "OP:S:AAA:1", managedRoute), "08:00 的首班从 AAA 发车");
+    assertTrue(service.idleForGoodAt("train-B", "OP:S:CCC:1", managedRoute));
+    assertFalse(
+        service.idleForGoodAt("train-B", "OP:S:CCC:1", Optional.of(UUID.randomUUID())),
+        "不由时刻表出票的交路");
+    assertFalse(service.idleForGoodAt("train-B", "OP:S:CCC:1", Optional.empty()));
+
+    clock.set(Instant.parse("2026-03-02T07:49:00Z"));
+    assertTrue(service.idleForGoodAt("train-B", "OP:S:AAA:1", managedRoute), "首班在 11 分钟后");
+  }
+
+  /**
+   * 计划窗口从零点起、交路却拖过 24 点（实服三张表都是这样）：零点后的班次属于前一个服务日，在服务日的下一个日历日发车。
+   *
+   * <p>只认窗口起点时，00:00 那班会被算成服务日当天凌晨——整整早 24 小时，票不出、交路的续班一开始就"过了容差"。
+   */
+  @Test
+  void tripsAfterMidnightBelongToTheDutysServiceDayWhenTheWindowStartsAtMidnight() {
+    Timetable table = overnight(timetable(TimetableStatus.PUBLISHED, 3), 0, 24 * 3600);
+    List<UUID> ids = table.duties().get(0).tripIds();
+    TimetableTrip lateEvening = table.trip(ids.get(0)).orElseThrow();
+    TimetableTrip midnight = table.trip(ids.get(1)).orElseThrow();
+    LocalDate march2 = LocalDate.of(2026, 3, 2);
+
+    assertEquals(march2, table.serviceDayOf(midnight, march2.plusDays(1)));
+    assertEquals(
+        Instant.parse("2026-03-03T00:00:00Z"), table.departureOnServiceDay(midnight, march2));
+    assertEquals(march2, table.serviceDayOf(lateEvening, march2));
+    assertEquals(
+        Instant.parse("2026-03-02T23:50:00Z"), table.departureOnServiceDay(lateEvening, march2));
+
+    Timetable morning = timetable(TimetableStatus.PUBLISHED, 3);
+    TimetableTrip first = morning.trip(morning.duties().get(0).tripIds().get(0)).orElseThrow();
+    assertEquals(march2, morning.serviceDayOf(first, march2), "白天的交路不受影响");
+  }
+
   /** 同一份表挪到深夜：三班 23:50、00:00、00:10，计划窗口 23:00 起，后两班跨零点。 */
   private static Timetable overnight(Timetable source) {
+    return overnight(source, 23 * 3600, 25 * 3600);
+  }
+
+  /** 同一份表挪到深夜，计划窗口另给。 */
+  private static Timetable overnight(Timetable source, int serviceStart, int serviceEnd) {
     VehicleDuty duty = source.duties().get(0);
     int[] departures = {23 * 3600 + 50 * 60, 0, 10 * 60};
     List<TimetableTrip> trips = new ArrayList<>();
@@ -414,8 +593,8 @@ class TimetableDutyReplacementTest {
         source.name(),
         source.status(),
         source.zoneId(),
-        23 * 3600,
-        25 * 3600,
+        serviceStart,
+        serviceEnd,
         source.routePlans(),
         trips,
         List.of(shifted),

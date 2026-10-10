@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.storage.provider;
 
 import java.lang.reflect.Proxy;
+import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
@@ -173,6 +174,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public PidsBulletinRepository pidsBulletins() {
     return unsupported(PidsBulletinRepository.class);
+  }
+
+  @Override
+  public PendingCallRepository pendingCalls() {
+    return unsupported(PendingCallRepository.class);
   }
 
   @Override
