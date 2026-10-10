@@ -149,6 +149,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   /** 叫车票此刻能不能从车库出车（车库要让给表定出库时不能）：出车前与区间生成放弃改走车库前都问。默认能。 */
   private volatile java.util.function.Predicate<SpawnTicket> onDemandDepotGate = ticket -> true;
 
+  /** 折返车的保留还算不算数（留给的那一单还没派出）：单作废后车上的标记不再拦别的叫车票。默认都算（宁可不接）。 */
+  private volatile java.util.function.Predicate<String> callReservationLive = callId -> true;
+
   /** 车型裁决：route 绑了编组方案时，复用只接方案里的车型、按份额挑车，派发后按车型记账。默认不裁决。 */
   private volatile ConsistArbiter consistArbiter = ConsistArbiter.NONE;
 
@@ -687,12 +690,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    *
    * @param dutyBound 列车是否绑着时刻表交路
    * @param timetableRoute 交路是否按表运行
+   * @param reservationLive 折返车留给的那一单还没派出
    */
   static List<LayoverRegistry.LayoverCandidate> filterCalledTrains(
       SpawnTicket ticket,
       List<LayoverRegistry.LayoverCandidate> candidates,
       java.util.function.Predicate<String> dutyBound,
-      java.util.function.Predicate<java.util.UUID> timetableRoute) {
+      java.util.function.Predicate<java.util.UUID> timetableRoute,
+      java.util.function.Predicate<String> reservationLive) {
     boolean onDemand = ticket != null && ticket.source() == TripSource.ON_DEMAND;
     boolean managed =
         onDemand && ticket.service() != null && timetableRoute.test(ticket.service().routeId());
@@ -701,7 +706,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     List<LayoverRegistry.LayoverCandidate> allowed = new ArrayList<>(candidates.size());
     for (LayoverRegistry.LayoverCandidate candidate : candidates) {
       boolean accepted =
-          onDemand ? callMayTake(candidate, managed, dutyBound, callId) : !isCalledTrain(candidate);
+          onDemand
+              ? callMayTake(candidate, managed, dutyBound, callId, reservationLive)
+              : !isCalledTrain(candidate);
       if (accepted) {
         allowed.add(candidate);
       }
@@ -715,17 +722,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * @param managedRoute 叫车跑的交路按表运行
    * @param dutyBound 列车是否绑着时刻表交路
    * @param callId 叫车票的叫车编号；排车源（还没出票）时为空，留给别的单的折返车一律不接
+   * @param reservationLive 折返车留给的那一单还没派出；不算数的保留当普通的叫来的车
    */
   public static boolean callMayTake(
       LayoverRegistry.LayoverCandidate candidate,
       boolean managedRoute,
       java.util.function.Predicate<String> dutyBound,
-      Optional<String> callId) {
+      Optional<String> callId,
+      java.util.function.Predicate<String> reservationLive) {
     if (candidate == null) {
       return false;
     }
     String reservedFor = candidate.tags() == null ? null : candidate.tags().get(TAG_CALL_TURNBACK);
-    if (reservedFor != null && !reservedFor.isBlank()) {
+    if (reservedFor != null && !reservedFor.isBlank() && reservationLive.test(reservedFor.trim())) {
       return callId.filter(id -> id.equalsIgnoreCase(reservedFor.trim())).isPresent();
     }
     return isCalledTrain(candidate) || (!managedRoute && !dutyBound.test(candidate.trainName()));
@@ -757,6 +766,16 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   static boolean onDemandFallsBack(
       RouteOperationType operationType, boolean givenUp, boolean depotAllowed) {
     return givenUp && operationType != RouteOperationType.RETURN && depotAllowed;
+  }
+
+  /** 区间生成的叫车票试够了、该改走交路本来的车源。折返车票不改：从那条交路的首站开起要跑完整条交路才到终点，叫车多半先超时，车白跑一趟。 */
+  static boolean entryGivesUp(SpawnTicket ticket, Instant now) {
+    return !OnDemandTrip.isTurnback(ticket.serviceTripId()) && entrySpawnGivenUp(ticket, now);
+  }
+
+  /** 只接首站待命车的叫车票：不多出一列车，不过拥堵闸门。 */
+  static boolean onDemandReuseOnly(TripSource source, boolean entrySpawn, boolean startsWithCret) {
+    return source == TripSource.ON_DEMAND && !entrySpawn && !startsWithCret;
   }
 
   /** 走回库票的折返复用分支：回库交路、又不是叫车的区间生成（回库交路上的叫车票只区间生成）。 */
@@ -911,7 +930,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       SpawnTicket ticket, List<LayoverRegistry.LayoverCandidate> candidates) {
     boolean onDemand = ticket != null && ticket.source() == TripSource.ON_DEMAND;
     List<LayoverRegistry.LayoverCandidate> allowed =
-        filterCalledTrains(ticket, candidates, this.dutyBoundVehicle, this.timetableRoute);
+        filterCalledTrains(
+            ticket,
+            candidates,
+            this.dutyBoundVehicle,
+            this.timetableRoute,
+            this.callReservationLive);
     if (allowed.size() != candidates.size()) {
       debugLogger.accept(
           "Layover 候选按叫车过滤: ticket="
@@ -1936,7 +1960,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     Route routeEntity = routeEntityOpt.get();
     // 叫车的区间生成：在交路中途的区间点生成，从那个下标起跑，不看首站是车库还是待命车（回库交路也一样）
     boolean entrySpawn = OnDemandTrip.entryIndexOf(ticket.serviceTripId()).isPresent();
-    boolean entryGivenUp = entrySpawn && entrySpawnGivenUp(ticket, now);
+    boolean entryGivenUp = entrySpawn && entryGivesUp(ticket, now);
     if (onDemandFallsBack(
         routeEntity.operationType(), entryGivenUp, entryGivenUp && onDemandDepotAllowed(ticket))) {
       // 区间生成一直不成（后方有车、附近有人、闭塞不放）：改走交路本来的车源，不让叫车的人一直等。
@@ -2002,17 +2026,19 @@ public final class SimpleTicketAssigner implements TicketAssigner {
       return tryReuseLayover(Optional.of(provider), ticket, service, route, now, false);
     }
 
-    if (shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
-      // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
-      deferByGate(ticket, now, "congestion-hold");
-      return false;
-    }
-
     List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
         provider.routeStops().listByRoute(routeEntity.id());
     boolean startsWithCret =
         !stops.isEmpty()
             && SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET").isPresent();
+    // 只接首站待命车的叫车票不多出一列车（接的是已在网里、多半是留给它的折返车），不过拥堵闸门：
+    // 闸门把终点待命车算进压力，拦下它只会让折返车在终点干等、压力更高。
+    if (!onDemandReuseOnly(ticket.source(), entrySpawn, startsWithCret)
+        && shouldHoldByCongestion(provider, ticket, service, line, routeEntity, route, now)) {
+      // 同 fleet-cap：拥堵是线网状态，不是这张票的过错，不该消耗它的重试预算。
+      deferByGate(ticket, now, "congestion-hold");
+      return false;
+    }
     if (routeEntity.operationType() == RouteOperationType.CREATE && !startsWithCret) {
       requeue(ticket, now, "create-without-cret");
       return false;
@@ -3077,6 +3103,15 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   public void setOnDemandDepotGate(java.util.function.Predicate<SpawnTicket> gate) {
     this.onDemandDepotGate = gate == null ? ticket -> true : gate;
+  }
+
+  /**
+   * 接入“折返车的保留还算不算数”的判定：留给的那一单已经派出、取消或作废时，车上的标记不再拦别的叫车票。
+   *
+   * @param live 叫车编号 → 那一单还没派出；null 恢复默认（都算）
+   */
+  public void setCallReservationLive(java.util.function.Predicate<String> live) {
+    this.callReservationLive = live == null ? callId -> true : live;
   }
 
   public void setDispatchListener(java.util.function.BiConsumer<SpawnTicket, String> listener) {

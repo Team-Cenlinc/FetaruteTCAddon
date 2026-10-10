@@ -94,6 +94,12 @@ public final class CallService {
   /** 表定出库的车库清单缓存多久：站台屏每次判定都要问。 */
   private static final Duration DEPOT_YIELD_TTL = Duration.ofSeconds(5);
 
+  /** 折返车在终点最多为这一单留多久：票一直接不走它就作废这一单、放它回库，不长时间占着终点股道（单股道车站尤其）。 */
+  static final Duration TURNBACK_HOLD = Duration.ofSeconds(90);
+
+  /** 派出时写不上的叫车标签（车还没进 TrainPropertiesStore）最多补写多久。 */
+  static final Duration TAG_RETRY = Duration.ofSeconds(30);
+
   private static final long SWEEP_PERIOD_TICKS = 20L;
   private static final Duration HINT_TTL = Duration.ofSeconds(5);
   private static final Duration LINE_CACHE_TTL = Duration.ofSeconds(10);
@@ -237,6 +243,9 @@ public final class CallService {
   /** 此后一段时间里按表从车库出车的出库点（CRET 写法），按计算时刻缓存。 */
   private record DepotDepartures(Instant computedAt, List<String> depots) {}
 
+  /** 派出时没写上的叫车标签：每秒扫描时补写。 */
+  private record DeferredTags(Instant since, UUID callId, Consumer<TrainProperties> writer) {}
+
   private record HintKey(PidsStationKey station, Set<String> platforms, Set<String> lines) {}
 
   private record CachedHint(Instant computedAt, boolean callable) {}
@@ -244,6 +253,7 @@ public final class CallService {
   private final FetaruteTCAddon plugin;
   private final CallPlanner planner;
   private final Map<UUID, PendingCall> pending = new ConcurrentHashMap<>();
+  private final Map<String, DeferredTags> deferredTags = new ConcurrentHashMap<>();
   private final Map<UUID, Instant> lastCallByPlayer = new ConcurrentHashMap<>();
   private final Map<UUID, Instant> lastDialogByPlayer = new ConcurrentHashMap<>();
   private final Map<String, Instant> returnRetryAt = new ConcurrentHashMap<>();
@@ -277,8 +287,12 @@ public final class CallService {
   private BukkitTask task;
 
   public CallService(FetaruteTCAddon plugin) {
+    this(plugin, new CallPlanner(plugin));
+  }
+
+  CallService(FetaruteTCAddon plugin, CallPlanner planner) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
-    this.planner = new CallPlanner(plugin);
+    this.planner = Objects.requireNonNull(planner, "planner");
   }
 
   // ---------------------------------------------------------------- 生命周期
@@ -446,7 +460,8 @@ public final class CallService {
     return new CallPlanner.Constraints() {
       @Override
       public boolean acceptsStandby(UUID routeId, LayoverRegistry.LayoverCandidate candidate) {
-        return CallService.acceptsStandby(candidate, managed.test(routeId), dutyBound);
+        return CallService.acceptsStandby(
+            candidate, managed.test(routeId), dutyBound, CallService.this::reservationLive);
       }
 
       @Override
@@ -464,8 +479,19 @@ public final class CallService {
   static boolean acceptsStandby(
       LayoverRegistry.LayoverCandidate candidate,
       boolean managedRoute,
-      Predicate<String> dutyBound) {
-    return SimpleTicketAssigner.callMayTake(candidate, managedRoute, dutyBound, Optional.empty());
+      Predicate<String> dutyBound,
+      Predicate<String> reservationLive) {
+    return SimpleTicketAssigner.callMayTake(
+        candidate, managedRoute, dutyBound, Optional.empty(), reservationLive);
+  }
+
+  /**
+   * 折返车的保留还算不算数：留给的那一单还没派出。单作废以后车上的标记还在（待命池登记的是快照），据此不再把它当留着的车。
+   *
+   * @param callId 车上写的叫车编号
+   */
+  public boolean reservationLive(String callId) {
+    return parseUuid(callId == null ? "" : callId).map(pending::containsKey).orElse(false);
   }
 
   /** 先当作有车可派：只看下一班多久到、同方向已叫的车、车数上限与个人冷却。 */
@@ -1283,20 +1309,19 @@ public final class CallService {
    * @param tag 这一单叫车的标签
    */
   private void onTurnbackDispatched(SpawnTicket ticket, CallTag tag, String trainName) {
-    try {
-      if (TrainPropertiesStore.exists(trainName)) {
-        TrainProperties properties = TrainPropertiesStore.get(trainName);
-        TrainTagHelper.writeTag(properties, SimpleTicketAssigner.TAG_CALLED_TRAIN, tag.format());
-        TrainTagHelper.writeTag(
-            properties, SimpleTicketAssigner.TAG_CALL_TURNBACK, tag.callId().toString());
-        if (ticket.service() != null) {
+    Optional<UUID> route =
+        ticket.service() == null ? Optional.empty() : Optional.of(ticket.service().routeId());
+    Consumer<TrainProperties> writer =
+        properties -> {
+          TrainTagHelper.writeTag(properties, SimpleTicketAssigner.TAG_CALLED_TRAIN, tag.format());
           TrainTagHelper.writeTag(
-              properties, TAG_CALL_ROUTE, ticket.service().routeId().toString());
-        }
-        TrainTagHelper.removeTagKey(properties, TAG_CALL_PLATFORM);
-      }
-    } catch (RuntimeException | LinkageError ex) {
-      debug("折返车标签写入失败 train=" + trainName + " error=" + ex);
+              properties, SimpleTicketAssigner.TAG_CALL_TURNBACK, tag.callId().toString());
+          route.ifPresent(id -> TrainTagHelper.writeTag(properties, TAG_CALL_ROUTE, id.toString()));
+          TrainTagHelper.removeTagKey(properties, TAG_CALL_PLATFORM);
+        };
+    if (!writeTags(trainName, writer)) {
+      // 写不上（车还没进属性表）：每秒补写。不补的话它是一辆没有叫车标签的车，按表运行的交路上会被时刻表匹配成表里的车次。
+      deferredTags.put(trainName, new DeferredTags(Instant.now(), tag.callId(), writer));
     }
     Map<String, CalledTrain> updated = new HashMap<>(calledTrains);
     updated.put(
@@ -1306,6 +1331,32 @@ public final class CallService {
     hints.clear();
     plugin.getPidsService().ifPresent(PidsService::invalidateSnapshots);
     debug("叫车折返车派出 call=" + tag.callId() + " train=" + trainName);
+  }
+
+  /** 写列车标签；车不在属性表里或写入出错时为 false。 */
+  private boolean writeTags(String trainName, Consumer<TrainProperties> writer) {
+    try {
+      if (TrainPropertiesStore.exists(trainName)) {
+        writer.accept(TrainPropertiesStore.get(trainName));
+        return true;
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      debug("叫车标签写入失败 train=" + trainName + " error=" + ex);
+    }
+    return false;
+  }
+
+  /** 补写派出时没写上的叫车标签；补了 {@link #TAG_RETRY} 还写不上就放弃。 */
+  private void retryDeferredTags(Instant now) {
+    for (Map.Entry<String, DeferredTags> entry : List.copyOf(deferredTags.entrySet())) {
+      if (writeTags(entry.getKey(), entry.getValue().writer())) {
+        deferredTags.remove(entry.getKey(), entry.getValue());
+        debug("叫车标签已补写 train=" + entry.getKey());
+      } else if (now.isAfter(entry.getValue().since().plus(TAG_RETRY))) {
+        deferredTags.remove(entry.getKey(), entry.getValue());
+        debug("叫车标签补写放弃 train=" + entry.getKey());
+      }
+    }
   }
 
   private static Optional<UUID> lineIdOf(SpawnTicket ticket) {
@@ -1319,6 +1370,7 @@ public final class CallService {
   /** 周期扫描：登记叫来的车、终点等完的车派回库、没派出去的叫车超时或作废。 */
   void sweep(Instant now) {
     try {
+      retryDeferredTags(now);
       refreshCalledTrains();
       if (restoreDueAt != null) {
         // 找回之前不撤票：重启后票还没回到发车侧，撤了就找不回了。线路开关还没读到时也等：读不到就当方向没了，叫车会被作废。
@@ -1418,6 +1470,7 @@ public final class CallService {
     }
     Set<UUID> dispatched = dispatchedCallIds();
     Optional<TicketAssigner> assigner = plugin.getSpawnTicketAssigner();
+    Map<UUID, LayoverRegistry.LayoverCandidate> waitingTurnbacks = waitingTurnbacks();
     for (PendingCall call : List.copyOf(pending.values())) {
       if (dispatched.contains(call.id())) {
         pending.remove(call.id());
@@ -1433,6 +1486,12 @@ public final class CallService {
         dropPending(call, "call.failed", "叫车折返车未能派出");
         continue;
       }
+      if (turnbackHeldTooLong(waitingTurnbacks.get(call.id()), now)
+          && assigner.map(a -> a.withdraw(call.id())).orElse(false)) {
+        // 折返车在终点就绪满 TURNBACK_HOLD 这一单的票还没接走它：作废，放车回库，不长时间占着终点股道
+        dropPending(call, "call.failed", "叫车折返车在终点等候超时");
+        continue;
+      }
       if (now.isAfter(call.createdAt().plus(timeoutOf(call)))
           && assigner.map(a -> a.withdraw(call.id())).orElse(false)) {
         dropPending(call, "call.timeout", "叫车等候超时撤票");
@@ -1440,11 +1499,40 @@ public final class CallService {
     }
   }
 
-  /** 折返车的票没了（放弃、撤掉）车却没开出来：这一单等不来车了。 */
+  /** 折返车的票没了（放弃、撤掉）车却没开出来：这一单等不来车了。标签还在补写的折返车算开出来了。 */
   private boolean turnbackLost(PendingCall call, Optional<TicketAssigner> assigner) {
     return call.turnbackTicket().isPresent()
         && !assigner.map(a -> a.isTicketLive(call.turnbackTicket().get())).orElse(false)
-        && !turnbackTrainFor(call.id());
+        && !turnbackTrainFor(call.id())
+        && deferredTags.values().stream().noneMatch(write -> write.callId().equals(call.id()));
+  }
+
+  /** 已经开进终点、在待命池里等着的折返车（按留给的叫车编号）。 */
+  private Map<UUID, LayoverRegistry.LayoverCandidate> waitingTurnbacks() {
+    Optional<LayoverRegistry> registry = plugin.getLayoverRegistry();
+    if (registry.isEmpty()) {
+      return Map.of();
+    }
+    Map<UUID, LayoverRegistry.LayoverCandidate> out = new HashMap<>();
+    for (LayoverRegistry.LayoverCandidate candidate : registry.get().snapshot()) {
+      String reservedFor =
+          candidate == null || candidate.tags() == null
+              ? null
+              : candidate.tags().get(SimpleTicketAssigner.TAG_CALL_TURNBACK);
+      if (reservedFor != null) {
+        parseUuid(reservedFor).ifPresent(callId -> out.put(callId, candidate));
+      }
+    }
+    return out;
+  }
+
+  /** 折返车在终点就绪满 {@link #TURNBACK_HOLD} 还没被接走（正在交接的不算）。 */
+  static boolean turnbackHeldTooLong(LayoverRegistry.LayoverCandidate waiting, Instant now) {
+    if (waiting == null || waiting.dispatchAttempt().isPresent()) {
+      return false;
+    }
+    Instant readyAt = waiting.readyAt() == null ? now : waiting.readyAt();
+    return now.isAfter(readyAt.plus(TURNBACK_HOLD));
   }
 
   /**

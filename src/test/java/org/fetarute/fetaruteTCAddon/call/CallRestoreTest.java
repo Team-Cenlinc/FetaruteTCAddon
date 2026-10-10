@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.call;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
@@ -41,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.LayoverRegistry;
+import org.fetarute.fetaruteTCAddon.dispatcher.runtime.ReclaimManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
@@ -516,6 +518,193 @@ class CallRestoreTest {
     }
     assertTrue(!service.heldForCall("tb-1"), "这一单的票接走以后不再留着");
     verify(stored).delete(call.id());
+  }
+
+  /** 折返车车源：叫车票与折返车票一起出；叫车票的票面时刻写折返车预计开出终点的时刻，两张票都从现在起可派。 */
+  @Test
+  void aTurnbackCallIssuesBothTicketsAndDatesTheCallTicket() {
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+
+    turnbackService().restorePending(T);
+
+    List<SpawnTicket> tickets = requeued(2);
+    SpawnTicket callTicket = tickets.get(0);
+    SpawnTicket turnback = tickets.get(1);
+    assertEquals(call.id(), callTicket.id());
+    assertFalse(OnDemandTrip.isTurnback(callTicket.serviceTripId()));
+    assertEquals(T.plusSeconds(TURNBACK_DEPART_SECONDS), callTicket.dueAt(), "票面时刻是折返车开出终点的时刻");
+    assertEquals(T, callTicket.notBefore());
+    assertTrue(OnDemandTrip.isTurnback(turnback.serviceTripId()));
+    assertEquals(
+        Optional.of(call.id().toString()), OnDemandTrip.callIdOf(turnback.serviceTripId()));
+    assertEquals(OptionalInt.of(1), OnDemandTrip.entryIndexOf(turnback.serviceTripId()));
+    assertEquals(T, turnback.dueAt());
+  }
+
+  /** 取消、超时撤票时一并撤掉还没派出的折返车票。 */
+  @Test
+  void droppingATurnbackCallWithdrawsTheTurnbackTicket() {
+    PendingCallRecord cancelled = storedCall(T.minusSeconds(30));
+    PendingCallRecord timedOut = storedCall(T.minusSeconds(30));
+    CallService service = turnbackService();
+    service.restorePending(T);
+    List<SpawnTicket> tickets = requeued(4);
+    UUID cancelledTurnback = turnbackTicketOf(tickets, cancelled.id());
+    UUID timedOutTurnback = turnbackTicketOf(tickets, timedOut.id());
+    when(assigner.isTicketLive(any())).thenReturn(true);
+    when(assigner.withdraw(any())).thenReturn(true);
+
+    assertEquals(
+        CallService.CancelOutcome.CANCELLED, service.cancel(cancelled.playerId(), cancelled.id()));
+    verify(assigner).withdraw(cancelledTurnback);
+    verify(assigner, never()).withdraw(timedOutTurnback);
+
+    sweep(service, T.plus(Duration.ofMinutes(20)), List.of());
+    verify(assigner).withdraw(timedOut.id());
+    verify(assigner).withdraw(timedOutTurnback);
+    verify(stored).delete(timedOut.id());
+  }
+
+  /** 折返车票没了、车也没开出来：这一单作废；折返车已经在路上就不作废（对照）。 */
+  @Test
+  void aLostTurnbackDropsTheCall() {
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+    CallService service = turnbackService();
+    service.restorePending(T);
+    when(assigner.isTicketLive(call.id())).thenReturn(true);
+    when(assigner.withdraw(call.id())).thenReturn(true);
+
+    sweep(service, T.plusSeconds(1), List.of(turnbackTrain("tb-1", call.id())));
+    verify(stored, never()).delete(call.id());
+
+    sweep(service, T.plusSeconds(2), List.of());
+    verify(assigner).withdraw(call.id());
+    verify(stored).delete(call.id());
+  }
+
+  /** 派出时标签写不上（车还没进属性表）：补写期间不当作折返车丢了，车进了属性表就补上。 */
+  @Test
+  void turnbackTagsThatCannotBeWrittenYetAreRetried() {
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+    CallService service = turnbackService();
+    service.restorePending(T);
+    SpawnTicket turnback = requeued(2).get(1);
+    when(assigner.isTicketLive(call.id())).thenReturn(true);
+    when(assigner.withdraw(call.id())).thenReturn(true);
+    TrainProperties properties = mock(TrainProperties.class);
+
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(() -> TrainPropertiesStore.exists("tb-1")).thenReturn(false);
+      store.when(TrainPropertiesStore::getAll).thenReturn(List.of());
+      service.onDispatched(turnback, "tb-1");
+      service.sweep(T.plusSeconds(1));
+      verify(stored, never()).delete(call.id());
+
+      store.when(() -> TrainPropertiesStore.exists("tb-1")).thenReturn(true);
+      store.when(() -> TrainPropertiesStore.get("tb-1")).thenReturn(properties);
+      service.sweep(T.plusSeconds(2));
+    }
+    verify(properties).addTags(SimpleTicketAssigner.TAG_CALL_TURNBACK + "=" + call.id());
+  }
+
+  /** 折返车在终点等这一单的票：留着期间不派回库；就绪满 {@link CallService#TURNBACK_HOLD} 还没被接走就作废这一单、放车回库。 */
+  @Test
+  void aTurnbackHeldTooLongDropsTheCallAndGoesBackToTheDepot() {
+    PendingCallRecord call = storedCall(T.minusSeconds(30));
+    CallService service = turnbackService();
+    service.restorePending(T);
+    UUID turnbackTicket = turnbackTicketOf(requeued(2), call.id());
+    when(assigner.isTicketLive(any())).thenReturn(true);
+    when(assigner.withdraw(any())).thenReturn(true);
+    LayoverRegistry registry = new LayoverRegistry();
+    registry.register(
+        "tb-1",
+        "surc:s:aaa:1",
+        NodeId.of("SURC:S:AAA:1"),
+        T,
+        Map.of(
+            SimpleTicketAssigner.TAG_CALLED_TRAIN,
+            new CallTag(call.id(), PPK).format(),
+            SimpleTicketAssigner.TAG_CALL_TURNBACK,
+            call.id().toString()));
+    when(plugin.getLayoverRegistry()).thenReturn(Optional.of(registry));
+    ReclaimManager reclaim = mock(ReclaimManager.class);
+    when(reclaim.returnCalledTrain(eq("tb-1"), any()))
+        .thenReturn(ReclaimManager.CalledReturn.ASSIGNED);
+    when(plugin.getReclaimManager()).thenReturn(Optional.of(reclaim));
+    List<TrainProperties> trains = List.of(turnbackTrain("tb-1", call.id()));
+
+    sweep(service, T.plusSeconds(80), trains);
+    assertTrue(service.heldForCall("tb-1"));
+    assertTrue(service.reservationLive(call.id().toString()));
+    verify(reclaim, never()).returnCalledTrain(any(), any());
+    verify(stored, never()).delete(call.id());
+
+    sweep(service, T.plus(CallService.TURNBACK_HOLD).plusSeconds(1), trains);
+    verify(assigner).withdraw(call.id());
+    verify(assigner).withdraw(turnbackTicket);
+    verify(stored).delete(call.id());
+    assertFalse(service.reservationLive(call.id().toString()), "这一单没了，车上的保留不再算数");
+    verify(reclaim).returnCalledTrain(eq("tb-1"), any());
+  }
+
+  private static final int TURNBACK_DEPART_SECONDS = 120;
+
+  /** 车源是折返车的叫车服务：在开往本交路首站的交路（这里借用本交路）第 1 段区间生成。 */
+  private CallService turnbackService() {
+    CallPlanner planner = mock(CallPlanner.class);
+    CallPlanner.Plan plan =
+        new CallPlanner.Plan(
+            routeId,
+            1,
+            CallPlanner.Source.TURNBACK,
+            Optional.empty(),
+            OptionalInt.of(200),
+            Optional.of(
+                new CallPlanner.Turnback(
+                    routeId,
+                    new CallPlanner.Entry(1, NodeId.of("SURC:S:AAA:1"), 0L, 100L),
+                    OptionalInt.of(TURNBACK_DEPART_SECONDS))));
+    when(planner.plan(any(), any(), any())).thenReturn(Optional.of(plan));
+    return new CallService(plugin, planner);
+  }
+
+  private List<SpawnTicket> requeued(int count) {
+    ArgumentCaptor<SpawnTicket> tickets = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(spawnManager, org.mockito.Mockito.times(count)).requeue(tickets.capture());
+    return tickets.getAllValues();
+  }
+
+  private static UUID turnbackTicketOf(List<SpawnTicket> tickets, UUID callId) {
+    return tickets.stream()
+        .filter(ticket -> OnDemandTrip.isTurnback(ticket.serviceTripId()))
+        .filter(
+            ticket ->
+                OnDemandTrip.callIdOf(ticket.serviceTripId())
+                    .equals(Optional.of(callId.toString())))
+        .findFirst()
+        .orElseThrow()
+        .id();
+  }
+
+  private static void sweep(CallService service, Instant now, List<TrainProperties> trains) {
+    try (MockedStatic<TrainPropertiesStore> store = mockStatic(TrainPropertiesStore.class)) {
+      store.when(TrainPropertiesStore::getAll).thenReturn(trains);
+      service.sweep(now);
+    }
+  }
+
+  /** 留给叫车 {@code callId} 的折返车。 */
+  private static TrainProperties turnbackTrain(String name, UUID callId) {
+    TrainProperties properties = mock(TrainProperties.class);
+    when(properties.getTrainName()).thenReturn(name);
+    when(properties.hasTags()).thenReturn(true);
+    when(properties.getTags())
+        .thenReturn(
+            List.of(
+                SimpleTicketAssigner.TAG_CALLED_TRAIN + "=" + new CallTag(callId, PPK).format(),
+                SimpleTicketAssigner.TAG_CALL_TURNBACK + "=" + callId));
+    return properties;
   }
 
   /** 一辆叫来的车：叫车跑的是本夹具的交路，此刻跑在 {@code currentRoute} 上。 */

@@ -254,6 +254,8 @@ final class CallPlanner {
                   .map(t -> OptionalInt.of(entryEtaSeconds(t, stop, entry.get())))
                   .orElse(OptionalInt.empty());
           best = faster(best, new Plan(route.routeId(), stop, Source.WAYPOINT, entry, eta));
+          // 本站上游生成得了车时折返车一定更慢（它要先开进首站再折返，再从首站跑过来），不必再算
+          continue;
         }
       }
       if (route.origin() != CallCatalog.Origin.DEPOT) {
