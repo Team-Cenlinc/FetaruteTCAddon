@@ -4168,7 +4168,7 @@ public final class FtaRouteCommand {
             "command.route.define.node-missing", Map.of("seq", String.valueOf(stop.sequence()))));
   }
 
-  /** 多模车换模备注 POWER：受电方式认不出时报错；{@code hints} 时只给提示——涉及内燃却写在不停车的路径点上，推迟到其后第一个停车点（不拦保存）。 */
+  /** 多模车换模备注 POWER：受电方式认不出时报错；{@code hints} 时只给提示——涉及内燃却写在不停车的路径点上（首站除外），推迟到其后第一个停车点（不拦保存）。 */
   static void validatePowerDirectives(
       List<RouteStop> stops, List<RouteValidationIssue> issues, boolean hints) {
     if (hints
@@ -4196,7 +4196,9 @@ public final class FtaRouteCommand {
         continue;
       }
       PowerSupply before = RoutePowerModes.modeAt(stops, i - 1).orElse(null);
+      // 首站是出车点，不停车（车库点）也在出车时换好，不推迟
       if (hints
+          && i > 0
           && !RoutePowerModes.dwells(stop)
           && target.get() != before
           && RoutePowerModes.needsStop(before, target.get())) {

@@ -108,7 +108,7 @@ class DriveRewardPayerTest {
     FakeHooks hooks = new FakeHooks();
     hooks.online = false;
     DriveRewardConfig noCommand =
-        new DriveRewardConfig(true, 10, 2, 20, 5, 0.5, java.util.Map.of(), "", "FRD", 3);
+        new DriveRewardConfig(true, 10, 2, 20, 5, 0.5, java.util.Map.of(), "", "FRD", 3, 0.5);
     DriveRewardPayer.Paid paid =
         new DriveRewardPayer(m -> {}, hooks).pay(UUID.randomUUID(), "Steve", REWARD, noCommand);
 

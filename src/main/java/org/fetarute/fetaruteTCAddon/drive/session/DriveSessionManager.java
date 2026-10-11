@@ -618,7 +618,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
       @Override
       public boolean driverDoorsOpen(String trainName) {
-        return driverSessionOfTrain(trainName).map(DriveSession::anyDoorOpen).orElse(false);
+        // 关门动画放完前也算开着：这时上岗，这一站不交给车掌（已开过门），站台还在等驾驶员回报关好
+        return driverSessionOfTrain(trainName)
+            .filter(
+                session -> session.anyDoorOpen() || session.doorsClosing(Bukkit.getCurrentTick()))
+            .isPresent();
       }
 
       @Override
@@ -678,6 +682,14 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       }
 
       @Override
+      public boolean drivenManually(String trainName) {
+        return driverSessionOfTrain(trainName)
+            .map(DriveSession::driverLink)
+            .filter(DriverLink::controlsPhysically)
+            .isPresent();
+      }
+
+      @Override
       public Optional<TaskKey> tripOf(String trainName) {
         return DriverTaskManager.timetables()
             .flatMap(api -> api.getAssignment(trainName))
@@ -706,7 +718,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 : rewardPayer.pay(playerId, playerName, reward, config.rewards());
         Player player = Bukkit.getPlayer(playerId);
         if (player != null && player.isOnline()) {
-          tellReward(player, paid, forfeited, config.rewards().currencyName());
+          tellReward(player, paid, forfeited, reward.crewBonus());
         }
       }
 
@@ -1992,13 +2004,19 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     traceSession(session, "换向手柄: " + position);
   }
 
+  /** 驾驶员此刻在停的站；不在停站、不是调度列车时为 {@code null}。 */
+  private static DriverStationStop currentStop(DriveSession session) {
+    DriverLink link = session.driverLink();
+    return link == null ? null : link.stationStop().orElse(null);
+  }
+
   private void toggleDoor(Player player, DriveSession session, boolean left) {
     Optional<MinecartGroup> group = findSessionGroup(session);
     if (group.isEmpty()) {
       denyMenu(player, "drive.menu.deny.unavailable");
       return;
     }
-    if (driverRegistry.guardOperatesDoors(group.get().getProperties())) {
+    if (driverRegistry.guardOperatesDoorsAt(group.get().getProperties(), currentStop(session))) {
       denyMenu(player, "drive.menu.deny.guard-doors");
       return;
     }
@@ -3117,8 +3135,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     DriverLink crew = session.driverLink();
     if (crew != null) {
-      // 车掌上岗、离岗随时会变：显示与提示前按此刻的登记更新。
-      crew.setGuardAboard(driverRegistry.guardOperatesDoors(group.getProperties()));
+      // 车掌上岗、离岗随时会变：显示与提示前按此刻的登记更新。驾驶员在这一站开过门之后车掌才上岗时，这一站的车门仍归驾驶员。
+      crew.setGuardAboard(
+          driverRegistry.guardOperatesDoorsAt(
+              group.getProperties(), crew.stationStop().orElse(null)));
     }
     if (tickCounter % DriveTutorials.TICK_INTERVAL == 0) {
       tutorials.tick(player, session, now);
@@ -3227,7 +3247,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       boolean right = session.isRightDoorOpen();
       boolean closing = session.doorsClosing(Bukkit.getCurrentTick());
       // 关门动画放完前仍按车门开着报给站台：动画结束才进入等待发车。车上有车掌时车门由车掌回报。
-      if (!driverRegistry.guardOperatesDoors(group.getProperties())) {
+      if (!driverRegistry.guardOperatesDoorsAt(group.getProperties(), current)) {
         current.reportDoors(
             side.satisfied(left, right), left || right || closing, side.wrong(left, right));
       }
@@ -5634,14 +5654,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     ScoreRules.Result result = ScoreRules.evaluate(score, task.state() != DriverTask.State.FAILED);
     String grade = result.grade().name();
     task.setResult(result.points(), grade);
-    DriveRewardPayer.Paid paid =
+    DriveRewards.Reward reward =
         earnsReward(task.state(), task.source(), task.rewards())
-            ? rewardPayer.pay(
-                task.playerId(),
-                task.playerName(),
-                DriveRewards.of(config.rewards(), score, result.grade()),
-                config.rewards())
-            : new DriveRewardPayer.Paid(0, Optional.empty());
+            ? DriveRewards.of(config.rewards(), score, result.grade())
+            : DriveRewards.Reward.NONE;
+    DriveRewardPayer.Paid paid =
+        rewardPayer.pay(task.playerId(), task.playerName(), reward, config.rewards());
     Player player = Bukkit.getPlayer(session.playerId());
     if (player != null && player.isOnline()) {
       showResult(player, task, result);
@@ -5671,7 +5689,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
               && task.rewards()
               && rewardableSource(task.source())
               && task.state() == DriverTask.State.FAILED,
-          config.rewards().currencyName());
+          reward.crewBonus());
     }
     DriveTaskRecord record =
         new DriveTaskRecord(
@@ -5759,24 +5777,32 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   }
 
   /** 成绩单后面一行说明本趟发了多少经验与钱币；判为未完成时说明不发；其余什么也没发时不说。 */
+  /**
+   * @param crewBonus 发的奖励里含同车加成：另起一行说明
+   */
   private void tellReward(
-      Player player, DriveRewardPayer.Paid paid, boolean forfeited, String currency) {
+      Player player, DriveRewardPayer.Paid paid, boolean forfeited, boolean crewBonus) {
     Optional<String> key = rewardMessageKey(paid, forfeited);
     if (key.isEmpty()) {
       return;
     }
+    LocaleManager locale = plugin.getLocaleManager();
     player.sendMessage(
-        plugin
-            .getLocaleManager()
-            .component(
-                key.get(),
-                Map.of(
-                    "experience",
-                    String.valueOf(paid.experience()),
-                    "money",
-                    paid.money().orElse(""),
-                    "currency",
-                    currency)));
+        locale.component(
+            key.get(),
+            Map.of(
+                "experience",
+                String.valueOf(paid.experience()),
+                "money",
+                paid.money().orElse(""),
+                "currency",
+                config.rewards().currencyName())));
+    if (crewBonus && !forfeited && !paid.empty()) {
+      player.sendMessage(
+          locale.component(
+              "drive.reward.crew-bonus",
+              Map.of("percent", DriveRewards.formatAmount(config.rewards().crewBonus() * 100.0))));
+    }
   }
 
   /** 任务结束时的大字评级：标题是评级，副标题是车次、终态与得分；完成时配音效。 */

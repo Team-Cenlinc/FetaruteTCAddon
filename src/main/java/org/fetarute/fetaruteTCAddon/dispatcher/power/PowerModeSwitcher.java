@@ -16,6 +16,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.Pantographs;
@@ -81,8 +82,11 @@ public final class PowerModeSwitcher {
   /** 换模那一站要多停的秒数，按交路与节点下标认：同一节点的重复到达事件不清掉它，车开到别的节点才作废。 */
   private record PendingDwell(RouteId route, int index, int seconds) {}
 
-  /** 列车 → 这一站因换模要多停的秒数：车站停站时 AutoStation 取走。 */
+  /** 列车 → 这一站因换模要多停的秒数：车站停站时 AutoStation 取走（路径点的由调度直接加到停车时长上，不记在这里）。 */
   private final Map<String, PendingDwell> stationDwell = new ConcurrentHashMap<>();
+
+  /** 越站期间（{@link #passThrough}）到达的交路节点按不停车处理。 */
+  private final ThreadLocal<Boolean> passing = ThreadLocal.withInitial(() -> false);
 
   /** 日志去重表的上限。 */
   private static final int SKIP_MEMORY = 1024;
@@ -174,8 +178,8 @@ public final class PowerModeSwitcher {
       stationDwell.remove(key, pending);
     }
     List<RouteStop> stops = routes.get().map(cache -> cache.listStops(route)).orElse(List.of());
-    int extra = reconcile(trainName, properties, stops, index, dwelling, "node");
-    if (extra > 0) {
+    int extra = reconcile(trainName, properties, stops, index, dwelling && !passing.get(), "node");
+    if (extra > 0 && index < stops.size() && RouteTerminals.isStationStop(stops.get(index))) {
       if (stationDwell.size() > SKIP_MEMORY) {
         // 车被删掉后它在换模站记下的秒数没人取：记多了整表清掉
         stationDwell.clear();
@@ -183,6 +187,21 @@ public final class PowerModeSwitcher {
       stationDwell.put(key, new PendingDwell(route, index, extra));
     }
     return extra;
+  }
+
+  /**
+   * 越站（驾驶员越过停车点太多，本站不停）：期间到达的交路节点按不停车处理，涉及内燃的换模推迟到下一个停车点。
+   *
+   * @param arrival 越站时照常记下的到站处理
+   */
+  public void passThrough(Runnable arrival) {
+    boolean outer = passing.get();
+    passing.set(true);
+    try {
+      arrival.run();
+    } finally {
+      passing.set(outer);
+    }
   }
 
   /**

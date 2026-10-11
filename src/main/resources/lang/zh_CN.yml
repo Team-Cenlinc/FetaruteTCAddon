@@ -2033,6 +2033,8 @@ drive:
         left: "<red>左侧开</red>"
         right: "<red>右侧开</red>"
         both: "<red>两侧开</red>"
+        guard-open: "<red>车掌已开门</red>"
+        guard-closed: "<green>关闭</green> <gray>（车掌开关）</gray>"
       air:
         ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
@@ -2154,6 +2156,8 @@ drive:
       faults: "<gray>故障指示只显示，不能操作</gray>"
     detail:
       power-required: "<yellow>本区段要求使用这种受电方式</yellow>"
+      guard-doors: "<gray>车门由车掌开关</gray>"
+      guard-doors-open: "<red>车掌已开门</red> <gray>（车门由车掌开关）</gray>"
       reservoir: "<gray>主风缸 <white><mr></white> kPa</gray>"
       parking-needs: "<gray>缓解需要主风缸 ≥ <white><need></white> kPa（当前 <white><mr></white>）</gray>"
       brake-test-not-done: "<gray>制动缸 <white><bc></white> kPa</gray>"
@@ -2721,6 +2725,7 @@ drive:
       away: "<prefix> <yellow>已连续 <count> 站未确认发车，判定为离开：此后的里程与停站不计奖励，确认一次发车即恢复</yellow>"
       back: "<prefix> <green>已确认发车，恢复计算奖励</green>"
       forfeited: "<prefix> <gray>本趟判为未完成，不发奖励</gray>"
+      crew-bonus: "<prefix> <gray>含驾驶员与车掌同车加成：同车的停站与里程多发 <white><percent>%</white></gray>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:

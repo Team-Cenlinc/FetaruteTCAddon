@@ -430,7 +430,7 @@ public final class DriveSession implements DriveDoors.Cab {
         || noLinePower()
         || (activeSupercap() != null && activeSupercap().depleted())
         || reverser == ReverserPosition.NEUTRAL
-        || anyDoorOpen()
+        || trainDoorsOpen()
         || doorsClosing(lastAdvanceTick);
   }
 
@@ -501,7 +501,8 @@ public final class DriveSession implements DriveDoors.Cab {
   }
 
   /**
-   * 超级电容：停稳且开着车门时充电（升降弓由站台上的 TC 牌子负责），否则按本步的牵引与常用制动耗电、再生。电量跨越预警线、耗尽、充满时记一个事件。
+   * 超级电容：停站时充电（升降弓由站台上的 TC 牌子负责；车门由车掌或站台开关时也算，见 {@link #chargesSupercap()}），否则按本步的牵引与常用制动耗电、再生。
+   * 电量跨越预警线、耗尽、充满时记一个事件。
    *
    * @param failSafe 本步是失效导向安全的制动（紧急、停放、无人）：不再生
    * @param mainCircuit 主电路是否接通：断开时没有电制动，不再生
@@ -513,7 +514,7 @@ public final class DriveSession implements DriveDoors.Cab {
       return;
     }
     boolean wasFull = supercap.full();
-    if (isStopped() && anyDoorOpen()) {
+    if (chargesSupercap()) {
       supercap.charge(STEP_SECONDS);
       if (!wasFull && supercap.full()) {
         pendingSupercapEvent = SupercapEvent.CHARGED;
@@ -537,6 +538,17 @@ public final class DriveSession implements DriveDoors.Cab {
       }
       reportedSupercapLevel = level;
     }
+  }
+
+  /** 停站充电：停稳且开着车门（{@link #trainDoorsOpen}），或停在站台接手开关门的这一站（驾驶员这边看不到站台开的门，按停在这一站算）。 */
+  boolean chargesSupercap() {
+    return isStopped()
+        && (trainDoorsOpen() || (driverLink != null && driverLink.stationDoorsTakenOver()));
+  }
+
+  /** 车门开着：驾驶员自己开的，或这一站车门归车掌、车掌开着（含关门动画；驾驶员这边的车门状态这时一直是关着的）。 */
+  public boolean trainDoorsOpen() {
+    return anyDoorOpen() || (driverLink != null && driverLink.guardDoorsOpen());
   }
 
   /** 会话结束：不再充电。 */

@@ -161,15 +161,28 @@ class TrainHealthMonitorOverlapTest {
   }
 
   @Test
-  @DisplayName("有驾驶员在岗：先请交还，不删")
-  void driverIsAskedToHandBack() {
-    authority.controlName("B-2");
+  @DisplayName("要删的那列有驾驶员在岗：先请交还，不删")
+  void driverOfTheVictimIsAskedToHandBack() {
+    authority.controlName("A-1");
 
     observe(0, PAIR);
     observe(60, PAIR);
 
     verify(dispatchService, never()).destroyTrainByName(anyString(), anyString());
-    assertTrue(authority.handbacks().contains("B-2:deadlock"), authority.handbacks()::toString);
+    assertTrue(authority.handbacks().contains("A-1:deadlock"), authority.handbacks()::toString);
+  }
+
+  @Test
+  @DisplayName("驾驶员坐在留下的那列上：不打断他，删另一列")
+  void seatedDriverOfTheSurvivorIsLeftAlone() {
+    authority.controlName("A-1");
+    context("A-1", RouteOperationType.OPERATION, true, 0);
+
+    observe(0, PAIR);
+    observe(60, PAIR);
+
+    verify(dispatchService).destroyTrainByName("B-2", "health-overlap-destroy");
+    assertTrue(authority.handbacks().isEmpty(), authority.handbacks()::toString);
   }
 
   @Test

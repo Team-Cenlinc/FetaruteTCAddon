@@ -66,20 +66,31 @@ public final class Pantographs {
    */
   public static int set(MinecartGroup group, String name, boolean raise) {
     List<Attachment> attachments = attachments(group);
-    if (attachments.isEmpty()) {
-      return 0;
-    }
+    return attachments.isEmpty() ? 0 : set(group, attachments, name, raise);
+  }
+
+  /**
+   * 同 {@link #set(MinecartGroup, String, boolean)}，附件已取好。有的附件已升着时只给其余带这个动画的附件补升（不碰 {@code group}）：
+   * 附件是逐节车厢挂载的，重新挂载过的车厢回到默认（降弓）姿态。
+   */
+  static int set(MinecartGroup group, List<Attachment> attachments, String name, boolean raise) {
     List<Attachment> raisedOnes = new ArrayList<>();
+    List<Attachment> loweredOnes = new ArrayList<>();
     for (Attachment attachment : attachments) {
-      if (attachment.isAttached() && raised(attachment, name)) {
-        raisedOnes.add(attachment);
+      if (attachment.isAttached()) {
+        (raised(attachment, name) ? raisedOnes : loweredOnes).add(attachment);
       }
     }
     if (!raise) {
       return raisedOnes.isEmpty() ? 0 : play(raisedOnes, name, false);
     }
     if (!raisedOnes.isEmpty()) {
-      return 0;
+      if (loweredOnes.isEmpty()) {
+        return 0;
+      }
+      AnimationOptions up = new AnimationOptions(name);
+      up.setSpeed(1.0);
+      return QueuedAnimations.withFallback(QueuedAnimations.playStored(loweredOnes, up)).size();
     }
     String actual = actualName(group, name);
     if (actual == null) {

@@ -35,7 +35,7 @@ public final class TutorialSnapshots {
         .handle(session.selector().current())
         .speedBps(session.speedBps())
         .stopped(session.isStopped())
-        .doorsOpen(session.anyDoorOpen())
+        .doorsOpen(session.trainDoorsOpen())
         .doorsClosing(session.doorsClosing(nowTick))
         .signalAcknowledgePending(link != null && link.signalAcknowledge().pending())
         .stationHint(hint.map(DriverStationHint.Hint::kind).orElse(null))

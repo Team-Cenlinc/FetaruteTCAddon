@@ -164,6 +164,20 @@ public final class DriverControlRegistry implements ControlAuthority {
     return resolveGuard(properties) != null;
   }
 
+  /**
+   * 驾驶员这一站的车门归不归车掌：车上有车掌，且这一站交给了车掌；驾驶员没有在停的站时只看车上有没有车掌。
+   *
+   * <p>车掌在驾驶员已开过门之后才上岗时这一站不交给车掌（{@link #bindGuard}），车门仍归驾驶员：驾驶员照常开关门、回报车门，下一站起归车掌。
+   *
+   * @param driverStop 驾驶员此刻在停的站；没有时为 {@code null}
+   */
+  public boolean guardOperatesDoorsAt(TrainProperties properties, DriverStationStop driverStop) {
+    GuardLink guard = resolveGuard(properties);
+    return guard != null
+        && (driverStop == null
+            || guard.stationStop().filter(stop -> stop == driverStop).isPresent());
+  }
+
   @Override
   public boolean holdForGuard(TrainProperties properties, boolean exitOpen) {
     GuardLink guard = resolveGuard(properties);

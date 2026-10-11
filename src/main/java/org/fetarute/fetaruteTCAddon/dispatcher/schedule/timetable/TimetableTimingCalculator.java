@@ -75,6 +75,7 @@ public final class TimetableTimingCalculator {
       return TimingResult.failure("交路至少需要两个节点");
     }
     int dwellFallback = defaultDwell == null ? 0 : (int) Math.max(0L, defaultDwell.toSeconds());
+    int[] powerDwell = RoutePowerModes.switchDwellPlan(stops);
 
     List<RailGraphPath> legs = new ArrayList<>(waypoints.size() - 1);
     for (int i = 1; i < waypoints.size(); i++) {
@@ -137,7 +138,8 @@ public final class TimetableTimingCalculator {
       int stopSeconds =
           last
               ? 0
-              : stopSeconds(graph, runTimeModel, waypoints.get(end), stops, end, dwellFallback);
+              : stopSeconds(
+                  graph, runTimeModel, waypoints.get(end), stops, end, dwellFallback, powerDwell);
       profile.add(stopAt(waypoints.get(end), stops, end, arrival, arrival + stopSeconds));
       departure = arrival + stopSeconds;
       runStart = end;
@@ -172,7 +174,13 @@ public final class TimetableTimingCalculator {
     }
     int last = waypoints.size() - 1;
     return stopSeconds(
-        graph, runTimeModel, waypoints.get(last), stops, last, Math.max(0, fallbackSeconds));
+        graph,
+        runTimeModel,
+        waypoints.get(last),
+        stops,
+        last,
+        Math.max(0, fallbackSeconds),
+        RoutePowerModes.switchDwellPlan(stops));
   }
 
   /**
@@ -186,11 +194,12 @@ public final class TimetableTimingCalculator {
       NodeId node,
       List<RouteStop> stops,
       int index,
-      int fallback) {
+      int fallback,
+      int[] powerDwell) {
     if (!stopsAt(stops, index)) {
       return 0;
     }
-    int dwell = resolveDwellSeconds(stops, index, fallback);
+    int dwell = resolveDwellSeconds(stops, index, fallback, powerDwell);
     boolean station =
         graph != null && StopApproach.targetOf(graph, node).kind() == StopApproach.Kind.STATION;
     return station ? dwell + runTimeModel.stationStopOverheadSeconds() : dwell;
@@ -209,9 +218,11 @@ public final class TimetableTimingCalculator {
    *
    * <p>否则一条 route 上每个路径点都会被算成一次 {@code --dwell} 长的停站：全程时分被虚增一到三成， 冲突检查里每个路径点还会多出一段假的站台占用。
    *
-   * <p>多模车在这一站做涉及内燃的换模时另加换模时间（{@link RoutePowerModes#switchDwellSeconds}），与现场停站、到站预测同一口径。
+   * <p>多模车在这一站做涉及内燃的换模时另加换模时间（{@code powerDwell}，即 {@link
+   * RoutePowerModes#switchDwellPlan}），与现场停站、到站预测同一口径。
    */
-  private static int resolveDwellSeconds(List<RouteStop> stops, int index, int fallback) {
+  private static int resolveDwellSeconds(
+      List<RouteStop> stops, int index, int fallback, int[] powerDwell) {
     if (stops == null || index < 0 || index >= stops.size()) {
       return fallback;
     }
@@ -223,7 +234,7 @@ public final class TimetableTimingCalculator {
       return 0;
     }
     return stop.dwellSeconds().filter(value -> value >= 0).orElse(fallback)
-        + RoutePowerModes.switchDwellSeconds(stops, index);
+        + (index < powerDwell.length ? powerDwell[index] : 0);
   }
 
   /**

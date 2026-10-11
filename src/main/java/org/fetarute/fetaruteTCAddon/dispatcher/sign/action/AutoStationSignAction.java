@@ -500,7 +500,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         .getRuntimeDispatchService()
         .ifPresent(
             dispatch -> {
-              dispatch.handleStationArrival(group, definition);
+              // 本站不停：多模车涉及内燃的换模推迟到下一个停车点
+              Runnable arrival = () -> dispatch.handleStationArrival(group, definition);
+              plugin
+                  .getPowerModeSwitcher()
+                  .ifPresentOrElse(power -> power.passThrough(arrival), arrival);
               dispatch.stationStops().handleDeparture(group, definition);
             });
     readIntTagValue(group.getProperties(), RouteProgressRegistry.TAG_ROUTE_INDEX)
@@ -873,10 +877,15 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                                 firstStop ? DOOR_OPEN_FIRST_DELAY_TICKS : DOOR_OPEN_DELAY_TICKS,
                                 doorFloorSeconds(session)))
                 .orElse(dwellSeconds)
-            // 多模车在这一站做涉及内燃的换模：多停换模时间，加在晚点压缩之后，不会被压掉
+            // 多模车在这一站做涉及内燃的换模：多停换模时间，加在晚点压缩之后，不会被压掉。
+            // 换模器按调度的车名记（到站处理刚写进标签），改名过渡期可能与 TrainCarts 车名不同
             + plugin
                 .getPowerModeSwitcher()
-                .map(power -> power.takeStationDwell(trainName))
+                .map(
+                    power ->
+                        power.takeStationDwell(
+                            readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+                                .orElse(trainName)))
                 .orElse(0);
     if (dwellRegistered && effectiveDwellSeconds != dwellSeconds) {
       plugin

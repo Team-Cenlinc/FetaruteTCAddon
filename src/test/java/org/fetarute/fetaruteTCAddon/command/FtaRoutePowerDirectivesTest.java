@@ -58,6 +58,16 @@ class FtaRoutePowerDirectivesTest {
   }
 
   @Test
+  void dieselOnAPassDepotStartIsNotDeferred() {
+    List<FtaRouteCommand.RouteValidationIssue> hints = new ArrayList<>();
+
+    FtaRouteCommand.validatePowerDirectives(
+        List.of(stop(0, true, "diesel"), stop(1, false, null)), hints, true);
+
+    assertTrue(hints.isEmpty(), "首站是出车点，出车时就换好：" + hints);
+  }
+
+  @Test
   void aRouteWithPowerButNoneAtTheStartGetsAHint() {
     List<FtaRouteCommand.RouteValidationIssue> hints = new ArrayList<>();
     FtaRouteCommand.validatePowerDirectives(

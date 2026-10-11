@@ -69,6 +69,13 @@ public final class DriverLink {
   private double pendingManualBlocks;
 
   private double pendingAtoBlocks;
+
+  /** 挂起的人工驾驶里程里车掌在岗的那段（同车加成）。 */
+  private double pendingCrewBlocks;
+
+  /** 上一站结束时的里程表读数（站台接手开关门时据此判断列车还在不在那一站）。 */
+  private double lastStopEndedOdometer = Double.NaN;
+
   private int pendingAtoStops;
 
   /** 刚判定不在 / 刚恢复，等驾驶会话提示一次。 */
@@ -159,6 +166,22 @@ public final class DriverLink {
   /** 这列车上有值乘的车掌：车门由车掌开关，发车等车掌的发车信号。 */
   public boolean guardAboard() {
     return guardAboard;
+  }
+
+  /**
+   * 这一站车门归车掌（见 {@code
+   * DriverControlRegistry#guardOperatesDoorsAt}）、车掌开着门（车掌回报给站台的，关门动画放完前也算开着）；不改停站状态。
+   */
+  public boolean guardDoorsOpen() {
+    return guardAboard && stationStop != null && stationStop.active() && stationStop.anyDoorOpen();
+  }
+
+  /** 刚结束的这一站由站台接手开关门（驾驶员或车掌迟迟不开门），列车还停在原地：车门由站台开关，驾驶员与车掌这边都看不到。 */
+  public boolean stationDoorsTakenOver() {
+    return stationStop == null
+        && lastStop != null
+        && lastStop.doorsTakenOver()
+        && stillAt(lastStopEndedOdometer);
   }
 
   public void setGuardAboard(boolean guardAboard) {
@@ -368,6 +391,14 @@ public final class DriverLink {
   /** 估计值超过这么久没有更新就不再使用。 */
   private static final long APPROACH_SAMPLE_MAX_AGE_TICKS = 100L;
 
+  /** 记一站停站成绩；人工驾驶、车上有车掌在岗时另记一站同车（越站不算）。 */
+  private void recordStop(DriverStationStop stop) {
+    score.addStop(StopScore.of(stop));
+    if (guardAboard && controlsPhysically() && !stop.skipped()) {
+      score.addCrewStop();
+    }
+  }
+
   /** 站台交来一次停站。 */
   public void beginStationStop(DriverStationStop stop) {
     this.stationStop = Objects.requireNonNull(stop, "stop");
@@ -384,8 +415,9 @@ public final class DriverLink {
         approachRemainingAtSample = Double.NaN;
       }
       lastStop = stationStop;
+      lastStopEndedOdometer = odometer.getAsDouble();
       if (stationStop != settledStop) {
-        score.addStop(StopScore.of(stationStop));
+        recordStop(stationStop);
       }
       if (stationStop.skipped()) {
         skippedStation = stationStop.stationName();
@@ -532,7 +564,7 @@ public final class DriverLink {
       // 停在站内就结束驾驶（到终点站、到交班站、停站中放弃）：这一站已停妥，交还后才由站台收尾，这里先记下。
       lastStop = stationStop;
       if (stationStop != settledStop) {
-        score.addStop(StopScore.of(stationStop));
+        recordStop(stationStop);
       }
       stationStop = null;
     }
@@ -566,7 +598,7 @@ public final class DriverLink {
     if (stationStop != null
         && stationStop != settledStop
         && stationStop.phase() != DriverStationStop.Phase.APPROACH) {
-      score.addStop(StopScore.of(stationStop));
+      recordStop(stationStop);
       settledStop = stationStop;
     }
     // 不走 finalizeScore：那会把正在停的这一站从链路上摘掉，终点站的停站显示与换端还要用它。
@@ -682,9 +714,15 @@ public final class DriverLink {
           pendingAtoBlocks += delta;
         } else {
           pendingManualBlocks += delta;
+          if (guardAboard) {
+            pendingCrewBlocks += delta;
+          }
         }
       } else if (!away()) {
         score.addDistance(delta, ato);
+        if (!ato && guardAboard) {
+          score.addCrewDistance(delta);
+        }
       }
     }
     distanceOdometer = now;
@@ -792,6 +830,7 @@ public final class DriverLink {
   private void creditPending() {
     score.addDistance(pendingManualBlocks, false);
     score.addDistance(pendingAtoBlocks, true);
+    score.addCrewDistance(pendingCrewBlocks);
     for (int i = 0; i < pendingAtoStops; i++) {
       score.addAtoStop();
     }
@@ -801,6 +840,7 @@ public final class DriverLink {
   private void clearPending() {
     pendingManualBlocks = 0.0;
     pendingAtoBlocks = 0.0;
+    pendingCrewBlocks = 0.0;
     pendingAtoStops = 0;
   }
 

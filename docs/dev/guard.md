@@ -78,6 +78,9 @@
 - 计分（`GuardScore`，满分 100，评级阈值与驾驶员共用 `ScoreRules#gradeOf`）：开门超时、关门超时、发车铃超时、开错一侧车门各 5 分；停站时间未到就关门、关门监视不合格、出站监视不合格各 2 分（没采到样的不判）；异常情况报告只记次数不扣分。成绩单每项扣分一行（`drive.guard.sheet.*`），全无扣分时一行说明。
 - 终态：开完一趟为完成；车掌自己结束、离线、死亡、游戏模式不允许为放弃；管理员撤下、列车不在了、功能关闭为中断；连续超时、漏乘、换端没坐进车尾为未完成（最高 D）。
 - 奖励（`DriveRewards#guard`，单价、评级系数、货币与发放方式沿用 `rewards` 段）：每完成一站作业按驾驶员人工停站单价乘 `guard.reward-per-stop-ratio`（默认 1.0），里程（值乘期间列车车头走过的距离）按驾驶员每公里单价乘 `guard.reward-per-km-ratio`（默认 0.5），再乘评级系数；车掌搭 ATO 也全额。完成、放弃、中断的按做过的站发，未完成的不发（成绩单后说明）。
+- 同车加成（`rewards.crew-bonus`，默认 0.5 即 +50%，0 不加）：驾驶员人工驾驶（ATO 不算）、车上同时有车掌在岗的那段，双方都按各自的单价对这部分多发这个比例，再乘评级系数。
+  驾驶员一侧：`DriverLink` 按每拍的 `guardAboard` 另记同车里程（`TaskScore#addCrewDistance`，ATO 判离开前挂起的那段同样挂起），人工停站结束时车掌在岗另记一站（越站不算）；
+  车掌一侧：`GuardTrip` 按 `DriverSide#drivenManually` 另记同车里程与做过作业的站。发了加成时奖励提示后另起一行说明（`drive.reward.crew-bonus`）。
 - 记录：写进 `drive_task_records`，`mode` 为 `GUARD`（`DriveTaskRecord#MODE_GUARD`），明细见 `GuardRecordCodec`；`/fta drive records` 照样列出，驾驶排行与驾驶员的汇总（`/fta drive top`、API 的统计）不算车掌的记录。
 - 不按时刻表运行的列车没有车次：整段值乘算一趟，只给成绩，不记录、不发奖励（与驾驶员接管不按表运行的列车不记任务一致）。
 
@@ -103,3 +106,7 @@
 - 上岗前（任务已领、列车到站）的“请坐第几节”、他人坐车掌预留座位的提醒仍用动作栏：那时还没有车掌侧边栏。
 - 车掌提示（`GuardTip`，`GuardTips` 记录与弹出）：第一次上岗、开门、关门与关门监视、回座、等候出站信号、出发确认、发车铃、出站监视、终点换端时，各在聊天框与屏幕下方说明一次要做什么；每名玩家每种只出一次（玩家持久数据 `guard_tip_*`），两条之间至少隔 3 秒。与驾驶员的驾驶提示同一套做法，`/fta drive tutorial reset` 一并重置。第一次上岗那条附《车掌手册》按钮。
 - 驾驶员那边：车掌上岗、离岗、发车信号、呼叫、应答、报告都在动作栏提示（`drive.guard.driver.*`）。车上有车掌时（`DriverLink#guardAboard`，DSM 每拍按 `DriverControlRegistry#guardOperatesDoors` 更新），驾驶员的车站提示开关门那几步写“车门由车掌开关”、等发车写“等候车掌发车信号”，都不要驾驶员动手（`DriverStationHint.Kind.GUARD_DOORS`/`GUARD_SIGNAL`），开关门的驾驶提示与练习教练也不再教驾驶员开关门；驾驶员第一次与车掌同车时出一次驾驶提示 `guard-aboard`，讲清车门归车掌、等一长声再起步、simulation 级要按一下 Q 键回一短、连按两下 Q 键呼叫车掌。
+  车门归属按这一站在谁手里（`DriverControlRegistry#guardOperatesDoorsAt`）：车掌在驾驶员这一站已开过门之后才上岗时，这一站不交给车掌，车门仍归驾驶员（驾驶员照常开关门、回报车门，`guardAboard` 这一站为假），下一站起归车掌；驾驶员关门动画放完前也算开着，这时不让车掌上岗。
+  车门归车掌时驾驶员这边的车门状态一直是关着的，凡是要看「车门开着」的地方改看车掌回报给这一站的车门（`DriverLink#guardDoorsOpen`、`DriveSession#trainDoorsOpen`）：车门牵引联锁、超级电容停站充电、教程步骤；侧边栏车门一行写「车掌已开门 / 关闭（车掌开关）」，驾驶台左右门按钮不亮、不能点并写明车掌开着还是关着。
+  站台接手开关门（驾驶员或车掌迟迟不开门）的这一站，列车停在原地时同样按停站充电（`DriverLink#stationDoorsTakenOver`）。
+  车门归车掌的站（`DriverStationStop#doorsByGuard`，车掌接这一站时标上）开错侧门、站台代开不记进驾驶员的停站成绩，车掌自己的成绩里照记。

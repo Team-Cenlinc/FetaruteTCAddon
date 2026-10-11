@@ -46,22 +46,79 @@ class DriveRewardsTest {
   @DisplayName("车掌：每站按人工停站单价、里程按每公里单价的一半，再乘评级系数，不分 ATO")
   void guardStopsFirstHalfDistance() {
     DriveRewards.Reward reward =
-        DriveRewards.guard(DriveRewardConfig.defaults(), 1.0, 0.5, 4, 3000.0, ScoreRules.Grade.A);
+        DriveRewards.guard(
+            DriveRewardConfig.defaults(), 1.0, 0.5, 4, 3000.0, 0, 0.0, ScoreRules.Grade.A);
 
     // 经验 1.2 × (4 站 × 2 + 3 km × 10 × 0.5) = 27.6
     assertEquals(27, reward.experience());
     // 钱币 1.2 × (4 × 5 + 3 × 20 × 0.5) = 60
     assertEquals(60.0, reward.money(), 1e-9);
+    assertFalse(reward.crewBonus());
     assertEquals(
         DriveRewards.Reward.NONE,
         DriveRewards.guard(
             new DriveRewardConfig(
-                false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3),
+                false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3, 0.5),
             1.0,
             0.5,
             4,
             3000.0,
+            4,
+            3000.0,
             ScoreRules.Grade.A));
+  }
+
+  @Test
+  @DisplayName("同车加成：驾驶员人工驾驶、车掌在岗的那几站与那段里程，双方都多发 50%")
+  void crewBonusOnTheSharedPart() {
+    TaskScore score = score();
+    score.addCrewDistance(1000.0);
+    score.addCrewStop();
+
+    DriveRewards.Reward driver =
+        DriveRewards.of(DriveRewardConfig.defaults(), score, ScoreRules.Grade.A);
+
+    // 经验 37.2 + 1.2 × 0.5 × (1 km × 10 + 1 站 × 2) = 44.4
+    assertEquals(44, driver.experience());
+    // 钱币 78 + 1.2 × 0.5 × (1 × 20 + 1 × 5) = 93
+    assertEquals(93.0, driver.money(), 1e-9);
+    assertTrue(driver.crewBonus());
+
+    DriveRewards.Reward guard =
+        DriveRewards.guard(
+            DriveRewardConfig.defaults(), 1.0, 0.5, 4, 3000.0, 2, 1000.0, ScoreRules.Grade.A);
+    // 经验 27.6 + 1.2 × 0.5 × (2 站 × 2 + 1 km × 10 × 0.5) = 33
+    assertEquals(33, guard.experience());
+    // 钱币 60 + 1.2 × 0.5 × (2 × 5 + 1 × 20 × 0.5) = 72
+    assertEquals(72.0, guard.money(), 1e-9);
+    assertTrue(guard.crewBonus());
+
+    DriveRewardConfig off =
+        new DriveRewardConfig(true, 10, 2, 20, 5, 0.5, java.util.Map.of(), "", "FRD", 3, 0.0);
+    DriveRewards.Reward plain = DriveRewards.of(off, score, ScoreRules.Grade.A);
+    // 没写评级系数按 1：2 × 20 + 2 × 5 + 0.5 × (1 × 20 + 2 × 5) = 65，同车那段不另加
+    assertEquals(65.0, plain.money(), 1e-9, "crew-bonus 为 0 不加");
+    assertFalse(plain.crewBonus());
+  }
+
+  @Test
+  @DisplayName("同车里程与停站只在人工驾驶、车掌在岗时记；ATO 那段不算")
+  void linkTracksCrewOnlyWhenDrivingWithAGuard() {
+    double[] odometer = {0.0};
+    long[] clock = {0L};
+    DriverLink link =
+        new DriverLink(UUID.randomUUID(), "T-1", null, () -> odometer[0], () -> clock[0]);
+    link.trackDistance(false);
+    odometer[0] = 100.0;
+    link.trackDistance(false);
+    link.setGuardAboard(true);
+    odometer[0] = 250.0;
+    link.trackDistance(false);
+    odometer[0] = 300.0;
+    link.trackDistance(true);
+
+    assertEquals(250.0, link.score().manualBlocks(), 1e-9);
+    assertEquals(150.0, link.score().crewBlocks(), 1e-9, "车掌上岗后的人工驾驶里程");
   }
 
   @Test
@@ -69,7 +126,7 @@ class DriveRewardsTest {
   void nothingWhenDisabledOrIdle() {
     DriveRewardConfig off =
         new DriveRewardConfig(
-            false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3);
+            false, 10, 2, 20, 5, 0.5, java.util.Map.of(), "eco give {player}", "FRD", 3, 0.5);
     assertTrue(DriveRewards.of(off, score(), ScoreRules.Grade.S).empty());
     assertTrue(
         DriveRewards.of(DriveRewardConfig.defaults(), new TaskScore(), ScoreRules.Grade.S).empty());
@@ -92,6 +149,7 @@ class DriveRewardsTest {
     assertEquals("eco give {player} {amount}", defaults.moneyCommand());
     assertEquals("FRD", defaults.currencyName());
     assertEquals(3, defaults.awayAfterTimeouts());
+    assertEquals(0.5, defaults.crewBonus(), 1e-9);
 
     YamlConfiguration yaml = new YamlConfiguration();
     yaml.loadFromString(
@@ -106,7 +164,8 @@ class DriveRewardsTest {
             "  X: 2",
             "money-command: ''",
             "currency-name: 金币",
-            "away-after-timeouts: 0"));
+            "away-after-timeouts: 0",
+            "crew-bonus: 0.25"));
     List<String> warnings = new ArrayList<>();
     DriveRewardConfig config = DriveRewardConfig.from(yaml, warnings::add);
 
@@ -119,6 +178,7 @@ class DriveRewardsTest {
     assertEquals("", config.moneyCommand());
     assertEquals("金币", config.currencyName());
     assertEquals(0, config.awayAfterTimeouts());
+    assertEquals(0.25, config.crewBonus(), 1e-9);
     assertEquals(2, warnings.size(), warnings::toString);
   }
 
@@ -232,7 +292,7 @@ class DriveRewardsTest {
     TaskScore score = new TaskScore();
     score.addDistance(4350.0, false);
     DriveRewardConfig config =
-        new DriveRewardConfig(true, 100, 0, 0.1, 0, 0.5, java.util.Map.of(), "", "FRD", 3);
+        new DriveRewardConfig(true, 100, 0, 0.1, 0, 0.5, java.util.Map.of(), "", "FRD", 3, 0.5);
 
     DriveRewards.Reward reward = DriveRewards.of(config, score, ScoreRules.Grade.B);
 

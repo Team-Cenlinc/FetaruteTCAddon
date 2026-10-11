@@ -132,6 +132,9 @@ public final class GuardSessionManager {
     /** 列车此刻跑的车次（按时刻表的列车分配）；不按时刻表运行时为空。 */
     Optional<TaskKey> tripOf(String trainName);
 
+    /** 列车此刻有驾驶员在人工驾驶（ATO 不算）：车掌这时做的站与走的里程有同车加成。 */
+    boolean drivenManually(String trainName);
+
     /** 车次的交路代码；查不到时为空串。 */
     String routeCodeOf(TaskKey key);
 
@@ -1520,7 +1523,8 @@ public final class GuardSessionManager {
               session.moveHead(
                   at.getWorld() == null ? null : at.getWorld().getUID(),
                   at.toVector(),
-                  MAX_HEAD_STEP_BLOCKS));
+                  MAX_HEAD_STEP_BLOCKS),
+              drivers.drivenManually(group.getProperties().getTrainName()));
     }
     if (now % TRIP_POLL_TICKS != 0 || session.link().stationStop().isPresent()) {
       return;
@@ -1544,7 +1548,10 @@ public final class GuardSessionManager {
               : session.trip().key().orElse(null);
       switchTrip(player, session, key);
       String station = settled.stop().stationName();
-      session.trip().addStop(station, settled.work());
+      session
+          .trip()
+          .addStop(
+              station, settled.work(), drivers.drivenManually(session.link().currentTrainName()));
       callEvent(
           new GuardStopWorkedEvent(
               session.playerId(),
@@ -1628,6 +1635,8 @@ public final class GuardSessionManager {
                 current.guard().rewardKmRatio(),
                 score.stopCount(),
                 trip.blocks(),
+                trip.crewStops(),
+                trip.crewBlocks(),
                 result.grade())
             : DriveRewards.Reward.NONE;
     drivers.payGuard(

@@ -9,8 +9,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.StopAlignment;
  * @param station 站名
  * @param offsetBlocks 停妥时列车中心相对停车点的偏移；量不出时为 {@code NaN}
  * @param outcome 停车结果
- * @param wrongDoor 开过非站台侧的门
- * @param doorsTakenOver 迟迟不开门，由站台代开
+ * @param wrongDoor 开过非站台侧的门（车门归车掌的站不记）
+ * @param doorsTakenOver 迟迟不开门，由站台代开（车门归车掌的站不记）
  */
 public record StopScore(
     String station,
@@ -29,11 +29,13 @@ public record StopScore(
       return null;
     }
     double offset = stop.stoppedOffsetBlocks();
+    // 车门归车掌的站：开错门、站台代开是车掌的事（车掌自己的成绩里记），不扣驾驶员
+    boolean driverDoors = !stop.doorsByGuard();
     return new StopScore(
         stop.stationName(),
         offset,
         stop.window().classify(offset),
-        stop.wrongDoorOpened(),
-        stop.doorsTakenOver());
+        driverDoors && stop.wrongDoorOpened(),
+        driverDoors && stop.doorsTakenOver());
   }
 }

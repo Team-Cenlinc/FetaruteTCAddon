@@ -28,12 +28,12 @@ class GuardTripTest {
   void aTripEndsWhenTheTrainRunsAnotherTrip() {
     GuardTrip trip = new GuardTrip(TRIP, "L1-A", Instant.EPOCH);
     assertFalse(trip.endedBy(null), "没做过作业的不结算");
-    trip.addStop("A", new GuardStopWork(GuardConfig.defaults()));
+    trip.addStop("A", new GuardStopWork(GuardConfig.defaults()), false);
     assertFalse(trip.endedBy(TRIP));
     assertTrue(trip.endedBy(new TaskKey(TRIP.timetableId(), "1025", TRIP.serviceDate())));
     assertTrue(trip.endedBy(null), "列车不再担当车次（终到收车）");
     GuardTrip untracked = new GuardTrip(null, "", Instant.EPOCH);
-    untracked.addStop("A", new GuardStopWork(GuardConfig.defaults()));
+    untracked.addStop("A", new GuardStopWork(GuardConfig.defaults()), false);
     assertFalse(untracked.endedBy(null));
     assertEquals(Optional.empty(), untracked.key());
   }
@@ -43,7 +43,7 @@ class GuardTripTest {
   void theScoreIsReadAtSettlement() {
     GuardTrip trip = new GuardTrip(TRIP, "L1-A", Instant.EPOCH);
     GuardStopWork work = new GuardStopWork(GuardConfig.defaults());
-    trip.addStop("A", work);
+    trip.addStop("A", work, false);
     assertEquals(100, trip.score().evaluate(true).points());
     work.sampleDeparture(false);
     assertEquals(98, trip.score().evaluate(true).points());
@@ -52,10 +52,24 @@ class GuardTripTest {
   @Test
   void distanceIgnoresJumps() {
     GuardTrip trip = new GuardTrip(TRIP, "", Instant.EPOCH);
-    trip.addBlocks(2.5);
-    trip.addBlocks(-1.0);
-    trip.addBlocks(Double.NaN);
+    trip.addBlocks(2.5, false);
+    trip.addBlocks(-1.0, false);
+    trip.addBlocks(Double.NaN, false);
     assertEquals(2.5, trip.blocks(), 1e-9);
+  }
+
+  /** 同车加成：驾驶员人工驾驶时做的站与走的里程另记一份。 */
+  @Test
+  void crewPartIsCountedSeparately() {
+    GuardTrip trip = new GuardTrip(TRIP, "", Instant.EPOCH);
+    trip.addStop("A", new GuardStopWork(GuardConfig.defaults()), true);
+    trip.addStop("B", new GuardStopWork(GuardConfig.defaults()), false);
+    trip.addBlocks(100.0, true);
+    trip.addBlocks(40.0, false);
+
+    assertEquals(1, trip.crewStops());
+    assertEquals(100.0, trip.crewBlocks(), 1e-9);
+    assertEquals(140.0, trip.blocks(), 1e-9);
   }
 
   /** 结束原因：中途离开为放弃、被撤下为中断（都按做过的站发），连续超时、漏乘、换端没坐进车尾为未完成（不发）。 */

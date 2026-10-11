@@ -11,7 +11,9 @@ import org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply;
  * 交路备注 {@code POWER <受电方式>}：多模车从这个停靠点（含路径点）起换成这种受电方式。
  *
  * <p>电对电（受电弓高度、受电弓与第三轨）经过即换；涉及内燃（启停发动机）只在停车时换：写在不停车的路径点上的推迟到其后第一个停车点。 涉及内燃的那一站停站多加 {@link
- * #DIESEL_SWITCH_SECONDS}，编表、到站预测与现场停站同一口径。没写 POWER 的交路、单模车都不受影响。
+ * #DIESEL_SWITCH_SECONDS}，编表、到站预测与现场停站同一口径。没写 POWER 的交路不受影响。
+ *
+ * <p>编表与到站预测按交路推算，不看派的是哪种车：单模车跑写了 POWER 的交路，表定照样多停这几秒（现场不换模、按表等着）。 写 POWER 的交路宜只派多模车。
  */
 public final class RoutePowerModes {
 
@@ -19,20 +21,6 @@ public final class RoutePowerModes {
   public static final int DIESEL_SWITCH_SECONDS = 25;
 
   private RoutePowerModes() {}
-
-  /** 最近一次推算过的停靠表（按列表本身认）：编表与到站预测逐站查同一份停靠表，免得每一站都从头扫一遍备注。 */
-  private static volatile DwellPlan lastPlan;
-
-  /** 一份停靠表各站的换模加时。 */
-  private static final class DwellPlan {
-    private final List<RouteStop> stops;
-    private final int[] seconds;
-
-    private DwellPlan(List<RouteStop> stops, int[] seconds) {
-      this.stops = stops;
-      this.seconds = seconds;
-    }
-  }
 
   /** 这个停靠点写的 POWER 原文；没写时为空。 */
   public static Optional<String> raw(RouteStop stop) {
@@ -84,21 +72,17 @@ public final class RoutePowerModes {
    * 第 {@code index} 个停靠点停站要多加的换模秒数：按交路推算，车在这一站做涉及内燃的换模（含路径点上推迟到这一站的）时为 {@link
    * #DIESEL_SWITCH_SECONDS}，否则 0。
    *
-   * <p>交路首站不加（出车、接续时在首站就换好，不占途中停站）；交路开头还不知道列车用什么时，换成内燃按要换算，换成电力按不用换算。 同一份停靠表连续查询时只推算一次（停靠表应当不可变）。
+   * <p>交路首站不加：首站是出车、接续的地方，不论停不停车（车库出车的首站是不停车的车库点）都在那里就换好，不占途中停站。
+   * 交路开头还不知道列车用什么时，换成内燃按要换算，换成电力按不用换算。每次都推算整份停靠表，逐站查询请先取 {@link #switchDwellPlan}。
    */
   public static int switchDwellSeconds(List<RouteStop> stops, int index) {
     if (stops == null || index <= 0 || index >= stops.size()) {
       return 0;
     }
-    DwellPlan cached = lastPlan;
-    if (cached == null || cached.stops != stops) {
-      cached = new DwellPlan(stops, switchDwellPlan(stops));
-      lastPlan = cached;
-    }
-    return cached.seconds[index];
+    return switchDwellPlan(stops)[index];
   }
 
-  /** 整份停靠表各站的换模加时（见 {@link #switchDwellSeconds}），一遍推算完。 */
+  /** 整份停靠表各站的换模加时（见 {@link #switchDwellSeconds}），一遍推算完；调用方按交路持有结果，逐站取。 */
   public static int[] switchDwellPlan(List<RouteStop> stops) {
     int[] out = new int[stops == null ? 0 : stops.size()];
     PowerSupply current = null;
@@ -118,7 +102,8 @@ public final class RoutePowerModes {
         pending = null;
         continue;
       }
-      if (!dwells(stop)) {
+      // 首站是出车点：不停车（车库点）也在这里换好
+      if (i > 0 && !dwells(stop)) {
         continue;
       }
       if (i > 0) {

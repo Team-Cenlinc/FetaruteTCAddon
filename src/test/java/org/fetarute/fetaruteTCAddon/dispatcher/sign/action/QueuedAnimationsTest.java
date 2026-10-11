@@ -166,4 +166,21 @@ class QueuedAnimationsTest {
     QueuedAnimations.playNamed(List.of(pantograph), down);
     assertFalse(Pantographs.raised(pantograph, "ptg5"), "已经排了降弓");
   }
+
+  @Test
+  @DisplayName("有的车厢已升弓：只给重新挂载后降着的那节补升，升着的不重放")
+  void raisesOnlyTheCarsThatAreDown() {
+    AttachmentInternalState upState = new AttachmentInternalState();
+    Attachment up = attachment(upState);
+    Animation raising = animation("ptg5");
+    up.startAnimation(raising);
+    AttachmentInternalState downState = new AttachmentInternalState();
+    Attachment down = attachment(downState);
+
+    assertEquals(1, Pantographs.set(null, List.of(up, down), "ptg5", true));
+
+    assertSame(raising, upState.currentAnimation, "升着的不重放");
+    assertTrue(Pantographs.raised(down, "ptg5"), "降着的那节补升");
+    assertEquals(0, Pantographs.set(null, List.of(up, down), "ptg5", true), "都升着就不再动");
+  }
 }

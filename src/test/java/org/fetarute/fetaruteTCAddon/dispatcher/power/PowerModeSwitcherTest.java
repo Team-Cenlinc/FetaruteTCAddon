@@ -204,6 +204,44 @@ class PowerModeSwitcherTest {
     assertEquals(List.of("section:ptg6", "section:ptg6", "switched:ptg5>ptg6"), heard);
   }
 
+  /** 越站：本站不停，涉及内燃的换模不做，也不给车站留多停的秒数。 */
+  @Test
+  void aSkippedStationDoesNotSwitchToDiesel() {
+    TrainProperties properties = multiMode("ws-8");
+    pass(properties, 3, true);
+
+    int[] seconds = new int[1];
+    switcher.passThrough(() -> seconds[0] = pass(properties, 5, true));
+
+    assertEquals(0, seconds[0]);
+    assertEquals(PowerSupply.PTG6, TrainPower.of(properties, PowerSupply.PTG5), "推迟到下一个停车点");
+    assertEquals(0, switcher.takeStationDwell("ws-8"));
+    assertEquals(25, pass(properties, 5, true), "越站之外照常换");
+  }
+
+  /** 区间路径点停车换模：多停的秒数由调度直接加到停车时长上，不留给下一个车站。 */
+  @Test
+  void aWaypointSwitchLeavesNothingForTheNextStation() {
+    RouteId waypointRoute = new RouteId("SURC:WS:WS-W");
+    when(cache.listStops(waypointRoute))
+        .thenReturn(
+            List.of(
+                stop(0, false, "ptg5"),
+                new RouteStop(
+                    routeUuid,
+                    1,
+                    Optional.empty(),
+                    Optional.of("SURC:N0:N2:1:00"),
+                    Optional.empty(),
+                    RouteStopPassType.STOP,
+                    Optional.of("POWER:diesel")),
+                stop(2, false, null)));
+    TrainProperties properties = multiMode("ws-9");
+
+    assertEquals(25, switcher.onRouteNode("ws-9", properties, waypointRoute, 1, true), "路径点照样多停");
+    assertEquals(0, switcher.takeStationDwell("ws-9"), "下一站到站处理没走到换模器时也取不到");
+  }
+
   /** 换模那一站要多停的秒数：同一节点的重复到达事件不清掉它，车开到别的节点才作废。 */
   @Test
   void stationDwellSurvivesRepeatedArrivalsAtTheSameNode() {

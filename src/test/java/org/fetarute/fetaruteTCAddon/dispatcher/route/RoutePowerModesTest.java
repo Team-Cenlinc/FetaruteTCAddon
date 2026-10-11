@@ -89,6 +89,18 @@ class RoutePowerModesTest {
     assertEquals(0, RoutePowerModes.switchDwellSeconds(route(false, "diesel", false, null), 1));
   }
 
+  /** 车库出车：首站是不停车的车库点，写在那里的内燃在出车时就换好，不推迟到第一个车站多停。 */
+  @Test
+  void aDepotStartSwitchesAtDispatch() {
+    List<RouteStop> stops = route(true, "diesel", false, null, false, "ptg6");
+
+    int[] plan = RoutePowerModes.switchDwellPlan(stops);
+
+    assertEquals(0, plan[0]);
+    assertEquals(0, plan[1], "首站已换成内燃，第一个车站不多停");
+    assertEquals(RoutePowerModes.DIESEL_SWITCH_SECONDS, plan[2], "从内燃换回电力照常多停");
+  }
+
   /** 整份停靠表一遍推算，与逐站查询一致。 */
   @Test
   void thePlanMatchesPerStopQueries() {

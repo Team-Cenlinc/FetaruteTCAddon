@@ -299,6 +299,8 @@ drive:
         left: "<red>Left open</red>"
         right: "<red>Right open</red>"
         both: "<red>Both open</red>"
+        guard-open: "<red>Opened by guard</red>"
+        guard-closed: "<green>Closed</green> <gray>(guard)</gray>"
       air:
         ok: "<white><mr></white><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
         warn: "<yellow><mr></yellow><dark_gray>/</dark_gray><white><bc></white> <gray>kPa</gray> <green><pump></green>"
@@ -420,6 +422,8 @@ drive:
       faults: "<gray>The fault display only shows information</gray>"
     detail:
       power-required: "<yellow>This section requires this power supply</yellow>"
+      guard-doors: "<gray>The guard operates the doors</gray>"
+      guard-doors-open: "<red>Opened by the guard</red> <gray>(the guard operates the doors)</gray>"
       reservoir: "<gray>Main reservoir <white><mr></white> kPa</gray>"
       parking-needs: "<gray>Release needs main reservoir ≥ <white><need></white> kPa (now <white><mr></white>)</gray>"
       brake-test-not-done: "<gray>Brake cylinder <white><bc></white> kPa</gray>"
@@ -987,6 +991,7 @@ drive:
       away: "<prefix> <yellow>No departure confirmed for <count> stops in a row; you are treated as away and the distance and stops from here on earn no reward. Confirm a departure to resume</yellow>"
       back: "<prefix> <green>Departure confirmed; rewards resume</green>"
       forfeited: "<prefix> <gray>This trip is marked incomplete; no reward is paid</gray>"
+      crew-bonus: "<prefix> <gray>Includes the driver–guard crew bonus: <white>+<percent>%</white> for stops and distance worked together</gray>"
     sheet:
       stop: "  <gray><station></gray>  <result><flags>"
       result:

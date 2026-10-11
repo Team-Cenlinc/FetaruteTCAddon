@@ -85,6 +85,8 @@ class DriverControlRegistryGuardTest {
     assertEquals(Optional.of(stop), guard.stationStop(), "车掌接上这一站");
     assertTrue(guard.work().isPresent());
     assertFalse(registry.driverOperatesDoors(properties));
+    assertTrue(registry.guardOperatesDoorsAt(properties, stop), "这一站车门归车掌");
+    assertTrue(stop.doorsByGuard(), "车门类扣分不记给驾驶员");
   }
 
   /** 已经开过门的这一站（停站、关门、等发车）不交给后来上岗的车掌：他没做这一站的作业。 */
@@ -99,6 +101,9 @@ class DriverControlRegistryGuardTest {
     stop.setPhase(Phase.WAIT_DEPARTURE);
 
     assertTrue(guard().stationStop().isEmpty());
+    assertFalse(registry.guardOperatesDoorsAt(properties, stop), "这一站车门仍归驾驶员：照常开关门、回报车门");
+    assertFalse(stop.doorsByGuard());
+    assertTrue(registry.guardOperatesDoorsAt(properties, null), "下一站起归车掌");
   }
 
   @Test

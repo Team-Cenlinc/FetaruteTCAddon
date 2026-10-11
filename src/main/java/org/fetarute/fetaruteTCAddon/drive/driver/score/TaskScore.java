@@ -25,6 +25,8 @@ public final class TaskScore {
   private double manualBlocks;
   private double atoBlocks;
   private int atoStops;
+  private double crewBlocks;
+  private int crewStops;
 
   public void addStop(StopScore stop) {
     if (stop != null) {
@@ -71,6 +73,28 @@ public final class TaskScore {
   /** ATO 下停的站数。 */
   public int atoStops() {
     return atoStops;
+  }
+
+  /** 人工驾驶、车上同时有车掌在岗时走过的距离（格）：已记在人工驾驶里程里，另记一份给同车加成。 */
+  public void addCrewDistance(double blocks) {
+    if (blocks > 0.0 && Double.isFinite(blocks)) {
+      crewBlocks += blocks;
+    }
+  }
+
+  /** 同车（人工驾驶、车掌在岗）走过的距离（格）。 */
+  public double crewBlocks() {
+    return crewBlocks;
+  }
+
+  /** 人工驾驶、车上同时有车掌在岗时停了一站：已记在停站成绩里，另记一份给同车加成。 */
+  public void addCrewStop() {
+    crewStops++;
+  }
+
+  /** 同车（人工驾驶、车掌在岗）停的站数。 */
+  public int crewStops() {
+    return crewStops;
   }
 
   /** 记下防护介入与确认的计数（结束时一次写入）。 */

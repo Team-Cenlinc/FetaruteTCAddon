@@ -288,6 +288,11 @@ public final class DriveSidebarRows {
   }
 
   private static String doorsKey(DriveSession session, long nowTick) {
+    DriverLink crew = session.driverLink();
+    if (crew != null && crew.guardAboard()) {
+      // 车门归车掌：驾驶员这边的车门状态一直是关着的，按车掌回报的写（分不出哪一侧）
+      return "drive.sidebar.value.doors." + (crew.guardDoorsOpen() ? "guard-open" : "guard-closed");
+    }
     boolean left = session.isLeftDoorOpen();
     boolean right = session.isRightDoorOpen();
     String state =

@@ -1152,7 +1152,7 @@ public final class TrainHealthMonitor {
    * deadlock-destroy-threshold-seconds} 都叠着、都没动，就销毁其中一列，另一列随即能走。中途短暂没采到（不超过 {@code
    * deadlock-episode-grace-seconds}）不从头计时。
    *
-   * <p>不碰的情形：自动修复或销毁开关关着、在冷却中、调度模式不允许销毁时只告警，也不请驾驶员交还；有驾驶员在岗的车先请交还；
+   * <p>不碰的情形：自动修复或销毁开关关着、在冷却中、调度模式不允许销毁时只告警，也不请驾驶员交还；挑中要删的车有驾驶员在岗时先请交还；
    * 有玩家乘坐或人工扣车的车不销毁，两列都是就只告警；两组同名的车分不出删哪一组，只告警。销毁与互卡销毁共用全局冷却，一个冷却窗口最多删一列； 销毁失败的这一对也进冷却。
    *
    * @param pairs 本轮采样到的重叠列车对（两车都静止）
@@ -1225,7 +1225,7 @@ public final class TrainHealthMonitor {
 
   /**
    * 决定这一对怎么处理。不用读运行状态的拦截（开关、冷却、调度模式）排在最前：它们拦住时每轮都会走到这里，不该每轮都去解析两列车；
-   * 请驾驶员交还也排在它们之后——反正不会删，就不该把驾驶员请下来。
+   * 请驾驶员交还排在挑车之后、只请要删的那列——反正不会删的车，就不该把驾驶员请下来。
    */
   private OverlapDecision decideOverlap(TrainOverlapDetector.Pair pair, Instant now) {
     if (pair.sameName()) {
@@ -1259,12 +1259,13 @@ public final class TrainHealthMonitor {
         || second.get().speedBlocksPerTick() > lowSpeedThresholdBpt) {
       return OverlapDecision.hold("仍在移动");
     }
-    if (requestDriverHandback(List.of(pair.trainA(), pair.trainB()))) {
-      return OverlapDecision.hold("有驾驶员在岗，已请交还自动运行");
-    }
     Optional<String> victim = overlapDestroyTarget(pair, first.get(), second.get());
     if (victim.isEmpty()) {
       return OverlapDecision.hold("两列都有玩家乘坐或人工扣车，不销毁");
+    }
+    // 只请要删的那列交还：坐在车上的驾驶员算玩家乘坐，他那列不会被挑中，不必打断他
+    if (requestDriverHandback(List.of(victim.get()))) {
+      return OverlapDecision.hold("要销毁的 " + victim.get() + " 有驾驶员在岗，已请交还自动运行");
     }
     if (!smartDispatcherAllowsHealthMutation(
         victim.get(), DispatchAction.EXECUTE_VERIFIED_DEADLOCK_DESTROY, "health-overlap-destroy")) {

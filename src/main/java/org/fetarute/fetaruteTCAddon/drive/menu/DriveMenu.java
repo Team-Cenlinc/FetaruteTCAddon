@@ -187,6 +187,22 @@ public final class DriveMenu {
           busy ? remainingSeconds(setup, now) : -1,
           true);
     }
+    if ((action == MenuAction.DOOR_LEFT || action == MenuAction.DOOR_RIGHT)
+        && session.driverLink() != null
+        && session.driverLink().guardAboard()) {
+      // 车门归车掌：按钮不亮、不能点，说明车掌开着还是关着
+      return new ButtonView(
+          action,
+          false,
+          false,
+          org.fetarute.fetaruteTCAddon.drive.setup.PowerSupply.PTG5,
+          -1,
+          false,
+          session.driverLink().guardDoorsOpen()
+              ? "drive.menu.detail.guard-doors-open"
+              : "drive.menu.detail.guard-doors",
+          Map.of());
+    }
     return ButtonView.simple(action, isActive(action, session));
   }
 

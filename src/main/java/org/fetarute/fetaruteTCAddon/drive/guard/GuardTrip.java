@@ -20,11 +20,16 @@ public final class GuardTrip {
   private final Instant startedAt;
   private final List<Worked> stops = new ArrayList<>();
   private double blocks;
+  private double crewBlocks;
   private boolean examined;
   private boolean practiced;
 
-  /** 做过作业的一站：作业记录到结算时才折成成绩（出站监视在离站后还要采样一会儿）。 */
-  private record Worked(String station, GuardStopWork work) {}
+  /**
+   * 做过作业的一站：作业记录到结算时才折成成绩（出站监视在离站后还要采样一会儿）。
+   *
+   * @param crew 驾驶员人工驾驶时做的（同车加成）
+   */
+  private record Worked(String station, GuardStopWork work, boolean crew) {}
 
   /**
    * @param key 车次；不按时刻表运行时为 {@code null}
@@ -49,9 +54,24 @@ public final class GuardTrip {
     return startedAt;
   }
 
-  /** 记一站作业。 */
-  public void addStop(String station, GuardStopWork work) {
-    stops.add(new Worked(station, Objects.requireNonNull(work, "work")));
+  /**
+   * 记一站作业。
+   *
+   * @param crew 驾驶员人工驾驶时做的（同车加成）
+   */
+  public void addStop(String station, GuardStopWork work, boolean crew) {
+    stops.add(new Worked(station, Objects.requireNonNull(work, "work"), crew));
+  }
+
+  /** 驾驶员人工驾驶时做的站数（同车加成）。 */
+  public int crewStops() {
+    int count = 0;
+    for (Worked stop : stops) {
+      if (stop.crew()) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** 这一趟到此刻的成绩。 */
@@ -68,11 +88,23 @@ public final class GuardTrip {
     return blocks;
   }
 
-  /** 列车又走了一段（车掌在车上时）。 */
-  public void addBlocks(double moved) {
+  /**
+   * 列车又走了一段（车掌在车上时）。
+   *
+   * @param crew 驾驶员正在人工驾驶（同车加成）
+   */
+  public void addBlocks(double moved, boolean crew) {
     if (Double.isFinite(moved) && moved > 0.0) {
       blocks += moved;
+      if (crew) {
+        crewBlocks += moved;
+      }
     }
+  }
+
+  /** 其中驾驶员人工驾驶时走过的距离（格，同车加成）。 */
+  public double crewBlocks() {
+    return crewBlocks;
   }
 
   /** 这一趟有车掌考试中做的站：不发奖励。 */
