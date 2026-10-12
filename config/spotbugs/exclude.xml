@@ -31,6 +31,12 @@
         <Method name="getSignNodeRegistry"/>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
+    <!-- 改牌监听与图命令必须共享同一同步器及其签名核验队列，不能复制外部托管句柄。 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
+        <Method name="getSignNodeStorageSync"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.FetaruteTCAddon"/>
         <Method name="getStopMarkIndex"/>

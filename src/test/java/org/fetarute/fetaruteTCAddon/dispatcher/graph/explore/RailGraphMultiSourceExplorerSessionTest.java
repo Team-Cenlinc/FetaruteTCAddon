@@ -19,6 +19,83 @@ import org.junit.jupiter.api.Test;
 final class RailGraphMultiSourceExplorerSessionTest {
 
   @Test
+  void keepsAdjacentNodesConnectedWhenTheirDistanceRoundsToZero() {
+    InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
+    RailBlockPos first = new RailBlockPos(0, 0, 0);
+    RailBlockPos second = new RailBlockPos(1, 0, 0);
+    access.connect(first, second, 0.2);
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    List<String> warnings = new java.util.ArrayList<>();
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(a, Set.of(first), b, Set.of(second)), access, 64, null, warnings::add);
+    while (!session.isDone()) {
+      session.step(10);
+    }
+    assertEquals(1, session.edgeLengths().get(EdgeId.undirected(a, b)));
+    assertEquals(
+        Set.of(cell(first), cell(second)),
+        session.exploredEdges().get(EdgeId.undirected(a, b)).footprint().cells());
+    assertEquals(1, warnings.size(), "同一对节点从两侧发现，仍只告警一次");
+    assertTrue(warnings.get(0).contains("A ↔ B"));
+  }
+
+  @Test
+  void sharedAnchorProducesAnEdgeInsteadOfLosingTheSecondNode() {
+    RailBlockPos shared = new RailBlockPos(0, 0, 0);
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    List<String> warnings = new java.util.ArrayList<>();
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(a, Set.of(shared), b, Set.of(shared)),
+            InMemoryRailBlockAccess.line(0, 0),
+            64,
+            null,
+            warnings::add);
+    while (!session.isDone()) {
+      session.step(10);
+    }
+    assertEquals(1, session.edgeLengths().get(EdgeId.undirected(a, b)));
+    assertEquals(
+        Set.of(cell(shared)),
+        session.exploredEdges().get(EdgeId.undirected(a, b)).footprint().cells());
+    assertEquals(1, warnings.size());
+  }
+
+  @Test
+  void wavefrontMeetingAlsoKeepsSubBlockEdgesAndTheirFootprint() {
+    InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
+    for (int x = 0; x < 3; x++) {
+      access.connect(new RailBlockPos(x, 0, 0), new RailBlockPos(x + 1, 0, 0), 0.1);
+    }
+    NodeId a = NodeId.of("A");
+    NodeId b = NodeId.of("B");
+    List<String> warnings = new java.util.ArrayList<>();
+    RailGraphMultiSourceExplorerSession session =
+        new RailGraphMultiSourceExplorerSession(
+            Map.of(a, Set.of(new RailBlockPos(0, 0, 0)), b, Set.of(new RailBlockPos(3, 0, 0))),
+            access,
+            64,
+            null,
+            warnings::add);
+    while (!session.isDone()) {
+      session.step(10);
+    }
+    var edge = session.exploredEdges().get(EdgeId.undirected(a, b));
+    assertEquals(1, edge.lengthBlocks());
+    assertEquals(
+        Set.of(
+            new RailFootprintCell(0, 0, 0),
+            new RailFootprintCell(1, 0, 0),
+            new RailFootprintCell(2, 0, 0),
+            new RailFootprintCell(3, 0, 0)),
+        edge.footprint().cells());
+    assertEquals(1, warnings.size());
+  }
+
+  @Test
   void unionsEverySuccessfulCandidateFootprintWhileKeepingShortestLength() {
     InMemoryRailBlockAccess access = new InMemoryRailBlockAccess();
     RailBlockPos shortA = new RailBlockPos(0, 0, 0);

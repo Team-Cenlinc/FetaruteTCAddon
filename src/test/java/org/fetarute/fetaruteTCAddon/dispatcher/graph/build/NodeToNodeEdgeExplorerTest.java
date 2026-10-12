@@ -4,14 +4,29 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.mockConstruction;
+import static org.mockito.Mockito.mockStatic;
+import static org.mockito.Mockito.when;
 
+import com.bergerkiller.bukkit.tc.controller.components.RailPath;
+import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.controller.components.RailState;
+import com.bergerkiller.bukkit.tc.utils.TrackWalkingPoint;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import org.bukkit.World;
+import org.bukkit.block.Block;
+import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.NodeToNodeEdgeExplorer.WalkerStep;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
+import org.mockito.MockedConstruction;
+import org.mockito.MockedStatic;
 
 final class NodeToNodeEdgeExplorerTest {
 
@@ -95,5 +110,69 @@ final class NodeToNodeEdgeExplorerTest {
         new RailGraphBuildOutcome(result, RailGraphBuildCompletion.COMPLETE, null, directions);
     directions.clear();
     assertEquals(1, outcome.unterminatedDirections().size());
+  }
+
+  @Test
+  void zeroLengthWarningNamesBothNodesAndAnchors() {
+    String warning =
+        NodeToNodeEdgeExplorer.zeroLengthWarning(
+            NodeId.of("SWITCHER:Towny:-673:41:735"),
+            new RailBlockPos(-673, 41, 735),
+            NodeId.of("SURC:S:RVS:2"),
+            null);
+    assertTrue(warning.contains("SWITCHER:Towny:-673:41:735 (-673, 41, 735)"));
+    assertTrue(warning.contains("SURC:S:RVS:2 (?)"));
+  }
+
+  @Test
+  void zeroDistanceArrivalKeepsTheEdgeAndItsMeasuredFootprint() throws Exception {
+    World world = mock(World.class);
+    Block start = mock(Block.class);
+    Block target = mock(Block.class);
+    when(target.getX()).thenReturn(1);
+    when(world.getBlockAt(0, 0, 0)).thenReturn(start);
+    RailPiece piece = mock(RailPiece.class);
+    when(piece.getJunctions()).thenReturn(List.of());
+    RailState state = mock(RailState.class);
+    when(state.clone()).thenReturn(state);
+    when(state.position()).thenReturn(new RailPath.Position());
+    when(state.railBlock()).thenReturn(start);
+    RailPath path = RailPath.create(new Vector(0.2, 0.5, 0.5), new Vector(0.8, 0.5, 0.5));
+    List<String> warnings = new ArrayList<>();
+    NodeToNodeEdgeExplorer explorer =
+        new NodeToNodeEdgeExplorer(world, Map.of(new RailBlockPos(1, 0, 0), OTHER), ignored -> {})
+            .warnTo(warnings::add);
+    explorer.addNode(START, Set.of(new RailBlockPos(0, 0, 0)));
+
+    try (MockedStatic<RailPiece> pieces = mockStatic(RailPiece.class);
+        MockedStatic<RailState> states = mockStatic(RailState.class);
+        MockedConstruction<TrackWalkingPoint> walkers =
+            mockConstruction(
+                TrackWalkingPoint.class,
+                (walker, context) -> {
+                  // TC 的行走状态为公开 final 字段；测试替身不运行实际世界轨道初始化。
+                  var stateField = TrackWalkingPoint.class.getField("state");
+                  assertTrue(stateField.trySetAccessible());
+                  stateField.set(walker, state);
+                  walker.currentRailPath = path;
+                  when(walker.moveFull())
+                      .thenAnswer(
+                          ignored -> {
+                            when(state.railBlock()).thenReturn(target);
+                            return true;
+                          });
+                })) {
+      pieces.when(() -> RailPiece.create(start)).thenReturn(piece);
+      states.when(() -> RailState.getSpawnState(piece)).thenReturn(state);
+      explorer.step(Long.MAX_VALUE, 10);
+    }
+
+    var edge = explorer.getExploredEdges().get(EdgeId.undirected(START, OTHER));
+    assertEquals(1, edge.lengthBlocks());
+    assertEquals(
+        Set.of(new RailFootprintCell(0, 0, 0), new RailFootprintCell(1, 0, 0)),
+        edge.footprint().cells());
+    assertTrue(edge.footprint().complete());
+    assertEquals(1, warnings.size(), "两个方向重复发现同一区间，仍只告警一次");
   }
 }

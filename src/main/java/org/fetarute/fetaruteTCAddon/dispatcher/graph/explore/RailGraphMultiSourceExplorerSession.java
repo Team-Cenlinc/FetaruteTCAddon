@@ -8,6 +8,7 @@ import java.util.Objects;
 import java.util.PriorityQueue;
 import java.util.Set;
 import java.util.function.Consumer;
+import java.util.logging.Logger;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdge;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.ExploredRailEdgeAccumulator;
@@ -37,6 +38,8 @@ public final class RailGraphMultiSourceExplorerSession {
   private final RailBlockAccess access;
   private final int maxDistanceBlocks;
   private final Consumer<RailBlockPos> onJunction;
+  private final Consumer<String> warnLogger;
+  private final Set<EdgeId> zeroLengthEdges = new HashSet<>();
   private final PriorityQueue<Entry> queue = new PriorityQueue<>(ENTRY_ORDER);
   private final Map<RailBlockPos, Visit> visits = new HashMap<>();
   private final Map<EdgeId, ExploredRailEdgeAccumulator> exploredEdges = new HashMap<>();
@@ -61,6 +64,24 @@ public final class RailGraphMultiSourceExplorerSession {
       RailBlockAccess access,
       int maxDistanceBlocks,
       Consumer<RailBlockPos> onJunction) {
+    this(anchorsByNode, access, maxDistanceBlocks, onJunction, null);
+  }
+
+  /**
+   * 创建探索会话，并允许注入告警输出。
+   *
+   * @param anchorsByNode 节点到轨道锚点的映射，共用锚点的不同节点仍会建立区间
+   * @param access 不主动加载区块的轨道访问器
+   * @param maxDistanceBlocks 单个波前的最大探索距离
+   * @param onJunction 可选分叉回调
+   * @param warnLogger 零长度区间的告警；为空时写入插件日志，同一区间只报一次
+   */
+  public RailGraphMultiSourceExplorerSession(
+      Map<NodeId, Set<RailBlockPos>> anchorsByNode,
+      RailBlockAccess access,
+      int maxDistanceBlocks,
+      Consumer<RailBlockPos> onJunction,
+      Consumer<String> warnLogger) {
     Objects.requireNonNull(anchorsByNode, "anchorsByNode");
     this.access = Objects.requireNonNull(access, "access");
     if (maxDistanceBlocks <= 0) {
@@ -68,6 +89,8 @@ public final class RailGraphMultiSourceExplorerSession {
     }
     this.maxDistanceBlocks = maxDistanceBlocks;
     this.onJunction = onJunction;
+    this.warnLogger =
+        warnLogger != null ? warnLogger : Logger.getLogger("FetaruteTCAddon")::warning;
 
     for (Map.Entry<NodeId, Set<RailBlockPos>> entry : anchorsByNode.entrySet()) {
       NodeId owner = entry.getKey();
@@ -87,6 +110,9 @@ public final class RailGraphMultiSourceExplorerSession {
         if (existing == null || existing.distance > 0.0) {
           visits.put(anchor, new Visit(owner, 0.0, new PathTrace(anchor, null)));
           queue.add(new Entry(anchor, owner, 0.0));
+        } else if (!existing.owner.equals(owner)) {
+          // 同轨道上的节点共用锚点：先连接两个节点，再沿已有波前探索，不能丢掉后来登记的节点。
+          recordCandidate(EdgeId.undirected(existing.owner, owner), 0, existing.pathTrace);
         }
       }
     }
@@ -161,11 +187,8 @@ public final class RailGraphMultiSourceExplorerSession {
           // 邻居是另一个节点的锚点：记录边，但不继续扩展
           if (!currentVisit.owner.value().equals(neighborAnchorOwner.value())) {
             int candidateInt = (int) Math.round(nextDistance);
-            if (candidateInt > 0) {
-              EdgeId edgeId = EdgeId.undirected(currentVisit.owner, neighborAnchorOwner);
-              recordCandidate(
-                  edgeId, candidateInt, new PathTrace(neighbor, currentVisit.pathTrace));
-            }
+            EdgeId edgeId = EdgeId.undirected(currentVisit.owner, neighborAnchorOwner);
+            recordCandidate(edgeId, candidateInt, new PathTrace(neighbor, currentVisit.pathTrace));
           }
           // 不将邻居加入队列，因为它是另一个节点的锚点，该节点会自己从那里开始扩展
           continue;
@@ -195,9 +218,6 @@ public final class RailGraphMultiSourceExplorerSession {
             continue;
           }
           int candidateInt = (int) Math.round(candidate);
-          if (candidateInt <= 0) {
-            continue;
-          }
           EdgeId edgeId = EdgeId.undirected(currentVisit.owner, neighborVisit.owner);
           recordCandidate(
               edgeId,
@@ -249,6 +269,16 @@ public final class RailGraphMultiSourceExplorerSession {
   }
 
   private void recordCandidate(EdgeId edgeId, int lengthBlocks, PathTrace... traces) {
+    // 真实正距离也可能四舍五入成 0：按 1 格记，保住连通并提示运维核对牌子位置。
+    if (lengthBlocks <= 0 && zeroLengthEdges.add(edgeId)) {
+      warnLogger.accept(
+          "调度图区间长度为 0，按 1 格计: "
+              + edgeId.a().value()
+              + " ↔ "
+              + edgeId.b().value()
+              + "；锚点轨道重叠或距离过短，请检查节点牌子位置");
+    }
+    int length = Math.max(1, lengthBlocks);
     Set<RailFootprintCell> cells = new HashSet<>();
     for (PathTrace trace : traces) {
       PathTrace current = trace;
@@ -259,7 +289,7 @@ public final class RailGraphMultiSourceExplorerSession {
     }
     exploredEdges
         .computeIfAbsent(edgeId, ignored -> new ExploredRailEdgeAccumulator())
-        .recordCandidate(lengthBlocks, cells);
+        .recordCandidate(length, cells);
   }
 
   private boolean isJunction(

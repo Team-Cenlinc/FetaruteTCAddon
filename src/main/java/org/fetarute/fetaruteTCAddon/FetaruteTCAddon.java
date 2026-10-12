@@ -103,6 +103,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeStorageSynchronizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignRemoveListener;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignChangeListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.TrainSignBypassListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.DepotSignAction;
@@ -152,6 +153,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
   private SignNodeRegistry signNodeRegistry;
   private RailGraphService railGraphService;
   private GraphStaleNotifier graphStaleNotifier;
+  private SignNodeStorageSynchronizer signNodeStorageSync = SignNodeStorageSynchronizer.noop();
   private final PortalLinkRegistry portalLinks = new PortalLinkRegistry();
   private WaypointSignAction waypointSignAction;
   private AutoStationSignAction autoStationSignAction;
@@ -687,6 +689,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return railGraphService;
   }
 
+  /** 节点牌子与 rail_nodes 的增量同步：删改库里的节点经它走，图失效的判定与提示照常。 */
+  public SignNodeStorageSynchronizer getSignNodeStorageSync() {
+    return signNodeStorageSync;
+  }
+
   /** 返回调度图失效告警器（若未初始化则为 null）。 */
   public GraphStaleNotifier getGraphStaleNotifier() {
     return graphStaleNotifier;
@@ -902,6 +909,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
             graphStaleNotifier,
             this::findRouteNodeUsage,
             task -> getServer().getScheduler().runTask(this, task));
+    this.signNodeStorageSync = storageSync;
     this.waypointSignAction =
         new WaypointSignAction(signNodeRegistry, loggerManager::debug, localeManager, storageSync);
     this.autoStationSignAction =
@@ -933,6 +941,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
             new SignRemoveListener(
                 signNodeRegistry, localeManager, loggerManager::debug, storageSync),
             this);
+    getServer()
+        .getPluginManager()
+        .registerEvents(new SwitcherSignChangeListener(storageSync, loggerManager::debug), this);
     getServer()
         .getPluginManager()
         .registerEvents(

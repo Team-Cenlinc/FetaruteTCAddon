@@ -2,6 +2,7 @@ package org.fetarute.fetaruteTCAddon.dispatcher.sign;
 
 import com.bergerkiller.bukkit.tc.SignActionHeader;
 import com.bergerkiller.bukkit.tc.controller.components.RailPiece;
+import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedRealSign;
 import com.bergerkiller.bukkit.tc.rails.RailLookup.TrackedSign;
 import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
@@ -42,6 +43,92 @@ public final class SwitcherSignDefinitionParser {
 
   private SwitcherSignDefinitionParser() {}
 
+  /** TC 牌子按道岔用途分类。 */
+  public enum Kind {
+    /** 不是 switcher 牌子。 */
+    NONE,
+    /** 寻路道岔：第三、四行都空着，按列车 destination 寻路切换；进调度图。 */
+    PATHFINDING,
+    /** 写了条件或 tag 的道岔：不进调度图，探索时当作没有。 */
+    CONDITIONAL
+  }
+
+  /**
+   * 按牌子文字分类。
+   *
+   * @param header 第一行解析出的牌头；{@code [train]} 或 {@code [cart]} 之外的都不算
+   * @param action 第二行
+   * @param line3 第三行，非空表示条件或标签用途
+   * @param line4 第四行，非空表示条件或标签用途
+   */
+  public static Kind kindOf(SignActionHeader header, String action, String line3, String line4) {
+    if (header == null || (!header.isTrain() && !header.isCart())) {
+      return Kind.NONE;
+    }
+    if (action == null || !action.trim().equalsIgnoreCase("switcher")) {
+      return Kind.NONE;
+    }
+    boolean blank3 = line3 == null || line3.trim().isEmpty();
+    boolean blank4 = line4 == null || line4.trim().isEmpty();
+    return blank3 && blank4 ? Kind.PATHFINDING : Kind.CONDITIONAL;
+  }
+
+  /**
+   * 一段轨道上的道岔牌子是否只剩写了条件或 tag 的：登记在这段轨道上的道岔节点已经作废。
+   *
+   * @param kinds 这段轨道上各块牌子的分类
+   * @return 有寻路道岔、或一块道岔牌子都没有（判不了）时为 {@code false}
+   */
+  public static boolean onlyConditional(Iterable<Kind> kinds) {
+    boolean conditional = false;
+    for (Kind kind : kinds) {
+      if (kind == Kind.PATHFINDING) {
+        return false;
+      }
+      conditional |= kind == Kind.CONDITIONAL;
+    }
+    return conditional;
+  }
+
+  /** 按牌子文字分类（TrainCarts 跟踪的牌子，含 TCCoasters 的虚拟牌子）。 */
+  public static Kind kindOf(TrackedSign trackedSign) {
+    if (trackedSign == null) {
+      return Kind.NONE;
+    }
+    return kindOf(
+        trackedSign.getHeader(),
+        safeLine(trackedSign, 1),
+        safeLine(trackedSign, 2),
+        safeLine(trackedSign, 3));
+  }
+
+  /**
+   * 读取关联牌子当前的用途，供会删除节点的改牌监听与剪枝使用。
+   *
+   * <p>实体牌子直接读取自身方块及对应牌面，绕过同一 tick 内仍可能过期的 TC 文本跟踪器；虚拟牌子使用 TrackedSign 的文本接口。
+   * 区块未加载或读取失败时返回空值，调用方必须保留节点，不能把无法确认当作没有寻路牌子。
+   */
+  public static Optional<Kind> currentKindOf(TrackedSign trackedSign) {
+    if (trackedSign == null) {
+      return Optional.empty();
+    }
+    try {
+      if (!(trackedSign instanceof TrackedRealSign real)) {
+        return Optional.of(kindOf(trackedSign));
+      }
+      Block block = real.signBlock;
+      if (block == null || !block.getWorld().isChunkLoaded(block.getX() >> 4, block.getZ() >> 4)) {
+        return Optional.empty();
+      }
+      if (!(block.getState() instanceof Sign sign)) {
+        return Optional.of(Kind.NONE);
+      }
+      return Optional.of(kindOf(sign, real.isFrontText() ? Side.FRONT : Side.BACK));
+    } catch (RuntimeException | LinkageError ex) {
+      return Optional.empty();
+    }
+  }
+
   /**
    * 解析 TC 的 switcher 牌子。
    *
@@ -55,30 +142,21 @@ public final class SwitcherSignDefinitionParser {
   }
 
   private static Optional<SignNodeDefinition> parseFromSide(Sign sign, Side side) {
-    String trainHeader = safeLine(sign, side, 0).trim();
-    SignActionHeader parsedHeader = SignActionHeader.parse(trainHeader);
-    if (parsedHeader == null || (!parsedHeader.isTrain() && !parsedHeader.isCart())) {
+    // 只接受寻路道岔：TC 的 tag 牌子、写了条件或 tag 的 switcher 都不代表调度图的道岔节点。
+    if (kindOf(sign, side) != Kind.PATHFINDING) {
       return Optional.empty();
     }
-    String header = safeLine(sign, side, 1).trim().toLowerCase(java.util.Locale.ROOT);
-    // 只接受明确的 switcher 行为牌子：TC 的 tag 牌子通常用于标记/过滤，不代表“道岔节点”，不应纳入 RailGraph。
-    if (!header.equals("switcher")) {
-      return Optional.empty();
-    }
-    // 第三行/第四行有内容时跳过：这类 switcher 通常用于条件切换/标签过滤等非寻路用途。
-    String line2 = safeLine(sign, side, 2).trim();
-    String line3 = safeLine(sign, side, 3).trim();
-    if (!line2.isEmpty() || !line3.isEmpty()) {
-      return Optional.empty();
-    }
+    return nodeIdNearSign(sign.getBlock()).map(SwitcherSignDefinitionParser::definitionOf);
+  }
 
-    String worldName = sign.getWorld().getName();
-    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(sign.getWorld());
-    RailBlockPos center =
-        new RailBlockPos(
-            sign.getLocation().getBlockX(),
-            sign.getLocation().getBlockY(),
-            sign.getLocation().getBlockZ());
+  /**
+   * 牌子方块对应的道岔节点 ID：取牌子附近最近的轨道（等距时按坐标确定性选一段）。
+   *
+   * @return 附近没有轨道时为空
+   */
+  static Optional<NodeId> nodeIdNearSign(Block signBlock) {
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(signBlock.getWorld());
+    RailBlockPos center = new RailBlockPos(signBlock.getX(), signBlock.getY(), signBlock.getZ());
     Set<RailBlockPos> anchors = access.findNearestRailBlocks(center, 2);
     if (anchors.isEmpty()) {
       return Optional.empty();
@@ -86,10 +164,22 @@ public final class SwitcherSignDefinitionParser {
     // findNearestRailBlocks 可能返回多个“等距离”的轨道锚点；若直接 findFirst() 会因 Set 的迭代顺序不稳定
     // 导致 NodeId 漂移，进而引起图签名抖动/快照重复写入等问题。因此这里必须做确定性选择。
     RailBlockPos anchor = selectDeterministicAnchor(anchors);
-    NodeId nodeId = nodeIdForRail(worldName, anchor);
-    return Optional.of(
-        new SignNodeDefinition(
-            nodeId, NodeType.SWITCHER, Optional.of(SWITCHER_SIGN_MARKER), Optional.empty()));
+    return Optional.of(nodeIdForRail(signBlock.getWorld().getName(), anchor));
+  }
+
+  /** 道岔节点定义。 */
+  public static SignNodeDefinition definitionOf(NodeId nodeId) {
+    return new SignNodeDefinition(
+        nodeId, NodeType.SWITCHER, Optional.of(SWITCHER_SIGN_MARKER), Optional.empty());
+  }
+
+  /** 实体牌子某一面按道岔用途的分类。 */
+  static Kind kindOf(Sign sign, Side side) {
+    return kindOf(
+        SignActionHeader.parse(safeLine(sign, side, 0).trim()),
+        safeLine(sign, side, 1),
+        safeLine(sign, side, 2),
+        safeLine(sign, side, 3));
   }
 
   /**
@@ -102,19 +192,7 @@ public final class SwitcherSignDefinitionParser {
     if (trackedSign == null) {
       return Optional.empty();
     }
-    SignActionHeader header = trackedSign.getHeader();
-    if (header == null || (!header.isTrain() && !header.isCart())) {
-      return Optional.empty();
-    }
-
-    String action = safeLine(trackedSign, 1).trim().toLowerCase(java.util.Locale.ROOT);
-    if (!action.equals("switcher")) {
-      return Optional.empty();
-    }
-    // 第三行/第四行有内容时跳过：这类 switcher 通常用于条件切换/标签过滤等非寻路用途。
-    String line2 = safeLine(trackedSign, 2).trim();
-    String line3 = safeLine(trackedSign, 3).trim();
-    if (!line2.isEmpty() || !line3.isEmpty()) {
+    if (kindOf(trackedSign) != Kind.PATHFINDING) {
       return Optional.empty();
     }
 
@@ -125,10 +203,7 @@ public final class SwitcherSignDefinitionParser {
 
     String worldName = railBlock.getWorld().getName();
     RailBlockPos railPos = new RailBlockPos(railBlock.getX(), railBlock.getY(), railBlock.getZ());
-    NodeId nodeId = nodeIdForRail(worldName, railPos);
-    return Optional.of(
-        new SignNodeDefinition(
-            nodeId, NodeType.SWITCHER, Optional.of(SWITCHER_SIGN_MARKER), Optional.empty()));
+    return Optional.of(definitionOf(nodeIdForRail(worldName, railPos)));
   }
 
   static RailBlockPos selectDeterministicAnchor(Set<RailBlockPos> anchors) {

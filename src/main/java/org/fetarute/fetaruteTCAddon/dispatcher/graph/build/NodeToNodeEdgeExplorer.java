@@ -70,6 +70,10 @@ public final class NodeToNodeEdgeExplorer {
   private final Set<NodeId> switcherNodeIds;
   private final double maxDistance;
   private final Consumer<String> debugLogger;
+  private Consumer<String> warnLogger;
+
+  /** 已经告警过的零长度区间（同一对节点从几个方向都会撞上，只报一次）。 */
+  private final Set<EdgeId> zeroLengthEdges = new HashSet<>();
 
   private final Queue<EdgeExplorationTask> pendingTasks = new ArrayDeque<>();
   private final Map<EdgeId, ExploredRailEdgeAccumulator> discoveredEdges = new HashMap<>();
@@ -120,6 +124,13 @@ public final class NodeToNodeEdgeExplorer {
     this.switcherNodeIds = switcherNodeIds == null ? Set.of() : Set.copyOf(switcherNodeIds);
     this.maxDistance = maxDistance > 0 ? maxDistance : DEFAULT_MAX_DISTANCE;
     this.debugLogger = debugLogger != null ? debugLogger : msg -> {};
+    this.warnLogger = this.debugLogger;
+  }
+
+  /** 设置告警输出（零长度区间等需要运维处理的问题）；不设时写进调试日志。 */
+  public NodeToNodeEdgeExplorer warnTo(Consumer<String> warnLogger) {
+    this.warnLogger = warnLogger != null ? warnLogger : debugLogger;
+    return this;
   }
 
   /**
@@ -383,6 +394,19 @@ public final class NodeToNodeEdgeExplorer {
     if (step == WalkerStep.ARRIVED) {
       int distance = (int) Math.round(walker.movedTotal);
       EdgeId edgeId = EdgeId.undirected(startNodeId, targetNodeId);
+      if (distance <= 0) {
+        // 两个节点的锚点轨道重叠或紧挨着：告警，区间按 1 格记，不让整次建图失败。
+        // 不能跳过：同一段轨道上的两块牌子，其中一个节点的每个方向都会先撞上另一个，跳过就一条区间都没有了。
+        if (zeroLengthEdges.add(edgeId)) {
+          warnLogger.accept(
+              zeroLengthWarning(
+                  startNodeId,
+                  currentTask == null ? null : currentTask.startAnchor,
+                  targetNodeId,
+                  currentPos));
+        }
+        distance = 1;
+      }
 
       discoveredEdges
           .computeIfAbsent(edgeId, ignored -> new ExploredRailEdgeAccumulator())
@@ -394,6 +418,24 @@ public final class NodeToNodeEdgeExplorer {
     }
 
     return false;
+  }
+
+  /** 零长度区间的告警文字：两端节点与各自的锚点轨道坐标。 */
+  static String zeroLengthWarning(
+      NodeId from, RailBlockPos fromAnchor, NodeId to, RailBlockPos toAnchor) {
+    return "调度图区间长度为 0，按 1 格计: "
+        + from.value()
+        + " "
+        + formatPos(fromAnchor)
+        + " ↔ "
+        + to.value()
+        + " "
+        + formatPos(toAnchor)
+        + "；两个节点的锚点轨道重叠或紧挨着，请把其中一块牌子挪开一两格";
+  }
+
+  private static String formatPos(RailBlockPos pos) {
+    return pos == null ? "(?)" : "(" + pos.x() + ", " + pos.y() + ", " + pos.z() + ")";
   }
 
   /** 单步推进后的判定结果。 */

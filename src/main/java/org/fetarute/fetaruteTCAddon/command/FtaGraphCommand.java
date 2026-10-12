@@ -6063,11 +6063,19 @@ public final class FtaGraphCommand {
     int signAnchorRadius = graphSettings.signAnchorSearchRadius();
     int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
 
-    List<RailNodeRecord> nodes;
+    List<RailNodeRecord> loaded;
     try {
-      nodes = providerOpt.get().railNodes().listByWorld(worldId);
+      loaded = providerOpt.get().railNodes().listByWorld(worldId);
     } catch (Exception ex) {
       sender.sendMessage(Component.text("从存储加载节点失败: " + ex.getMessage(), NamedTextColor.RED));
+      return;
+    }
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
+    List<RailNodeRecord> nodes;
+    try {
+      nodes = pruneStaleSwitcherNodes(world, access, loaded);
+    } catch (RuntimeException ex) {
+      sender.sendMessage(Component.text("清理作废道岔节点失败: " + ex.getMessage(), NamedTextColor.RED));
       return;
     }
     if (nodes.isEmpty()) {
@@ -6075,7 +6083,6 @@ public final class FtaGraphCommand {
       return;
     }
 
-    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
     Map<RailBlockPos, NodeId> anchorIndex = new HashMap<>();
     Set<NodeId> switcherNodeIds = new HashSet<>();
@@ -6110,6 +6117,7 @@ public final class FtaGraphCommand {
             switcherNodeIds,
             EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
             plugin.getLoggerManager()::debug);
+    explorer.warnTo(plugin.getLogger()::warning);
     anchorsByNode.forEach(explorer::addNode);
 
     long startNanos = System.nanoTime();
@@ -6222,6 +6230,42 @@ public final class FtaGraphCommand {
   }
 
   /**
+   * 去掉库里已经作废的道岔节点：登记时是寻路道岔，牌子后来改成了写条件或 tag 的道岔（这类道岔不进图）。告警并返回剩下的节点。
+   *
+   * <p>完整建图按牌子重新扫描，不会带进这类节点；快速刷新与增补直接读库，要先清掉。删除经节点增量同步，图失效的判定与提示照常。写库失败时同步器告警并标失效，
+   * 此处重新核对节点表后中止，避免继续探索或错误报告清理成功。区块未加载、判不了的保留。
+   */
+  private List<RailNodeRecord> pruneStaleSwitcherNodes(
+      World world, TrainCartsRailBlockAccess access, List<RailNodeRecord> nodes) {
+    List<RailNodeRecord> remaining = new ArrayList<>(nodes.size());
+    for (RailNodeRecord node : nodes) {
+      if (node.nodeType() != NodeType.SWITCHER) {
+        remaining.add(node);
+        continue;
+      }
+      RailBlockPos rail =
+          SwitcherSignDefinitionParser.tryParseRailPos(node.nodeId())
+              .orElse(new RailBlockPos(node.x(), node.y(), node.z()));
+      if (!access.hasOnlyConditionalSwitchers(rail)) {
+        remaining.add(node);
+        continue;
+      }
+      plugin
+          .getSignNodeStorageSync()
+          .delete(
+              world.getBlockAt(rail.x(), rail.y(), rail.z()),
+              SwitcherSignDefinitionParser.definitionOf(node.nodeId()));
+      plugin
+          .getLogger()
+          .warning("道岔 " + node.nodeId().value() + " 的牌子已改为写条件或 tag 的道岔（不进调度图），请求从库中移除该节点");
+    }
+    if (remaining.size() < nodes.size() && storedNodesDiffer(world.getUID(), remaining)) {
+      throw new IllegalStateException("节点删除未同步到存储或节点表已变更，请检查日志后重试");
+    }
+    return remaining;
+  }
+
+  /**
    * 增量增补：把库里有、图里还没有的节点牌子补进图，只往从未探索过的轨道方向走，不改动任何已有区间。
    *
    * <p>新牌子落在已有区间中间、新轨道接进已有区间中间、新轨道上有没挂牌子的道岔、有节点被拆或换了位置时都拒绝，提示用 build。 区块必须已加载（新轨道附近要有人）。
@@ -6243,11 +6287,19 @@ public final class FtaGraphCommand {
       sender.sendMessage(locale.component("command.graph.build.storage-not-ready"));
       return;
     }
-    List<RailNodeRecord> stored;
+    List<RailNodeRecord> loaded;
     try {
-      stored = plugin.getStorageManager().provider().get().railNodes().listByWorld(worldId);
+      loaded = plugin.getStorageManager().provider().get().railNodes().listByWorld(worldId);
     } catch (Exception ex) {
       sender.sendMessage(Component.text("从存储加载节点失败: " + ex.getMessage(), NamedTextColor.RED));
+      return;
+    }
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
+    List<RailNodeRecord> stored;
+    try {
+      stored = pruneStaleSwitcherNodes(world, access, loaded);
+    } catch (RuntimeException ex) {
+      sender.sendMessage(Component.text("清理作废道岔节点失败: " + ex.getMessage(), NamedTextColor.RED));
       return;
     }
     RailGraphExtension.Planned planned = RailGraphExtension.plan(base, stored);
@@ -6259,7 +6311,6 @@ public final class FtaGraphCommand {
     ConfigManager.GraphSettings graphSettings = plugin.getConfigManager().current().graphSettings();
     int signAnchorRadius = graphSettings.signAnchorSearchRadius();
     int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
-    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     java.util.function.ToIntFunction<NodeType> radiusFor =
         type -> RailGraphBuildJob.anchorRadius(type, signAnchorRadius, switcherAnchorRadius);
     Map<NodeId, Set<RailBlockPos>> newAnchors = new HashMap<>();
@@ -6311,6 +6362,7 @@ public final class FtaGraphCommand {
             newSwitcherIds,
             EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
             plugin.getLoggerManager()::debug);
+    explorer.warnTo(plugin.getLogger()::warning);
     newAnchors.forEach(explorer::addNode);
 
     long startNanos = System.nanoTime();
