@@ -108,38 +108,46 @@ final class TimetableTripNumbering {
   }
 
   /**
-   * 带客的回库班落 trip 行：交路以带客的 RETURN 线路收尾时，回库票的发出时刻就是这一班的发车。
+   * 带客出入库落 trip 行：发车时刻取交路对应的出库或回库时刻，保留停站展示。
    *
-   * <p>它不进 {@code duty.tripIds()}——交路进度与回库票仍按走行段处理（运行时出的是走行票，不再出运营票）；这一行只为 PIDS、导出与
+   * <p>这些车次不进 {@code duty.tripIds()}——交路进度与出入库票仍按辅助段处理（运行时出的是走行票，不再出运营票）；这一行只为 PIDS、导出与
    * 冲突模型里的车辆身份（dutyId 指向所属交路）。序号按发车时刻、再按 duty 号，与运营班次各自连续。
    *
-   * @param passengerReturns 带客的 RETURN 线路
+   * @param passengerLegs 带客的出入库线路
    * @param routeCodeById route code
    */
-  static List<TimetableTrip> appendReturnTrips(
+  static List<TimetableTrip> appendPassengerLegTrips(
       UUID timetableId,
       TimetableBuildOptions options,
       List<TimetableTrip> trips,
       List<VehicleDuty> duties,
-      java.util.Set<UUID> passengerReturns,
+      java.util.Set<UUID> passengerLegs,
       Map<UUID, String> routeCodeById) {
-    if (passengerReturns.isEmpty()) {
+    if (passengerLegs.isEmpty()) {
       return trips;
     }
-    List<VehicleDuty> ordered =
-        duties.stream()
-            .filter(duty -> duty.returnRouteId().map(passengerReturns::contains).orElse(false))
-            .sorted(
-                Comparator.comparingInt(VehicleDuty::returnSecondOfDay)
-                    .thenComparing(VehicleDuty::dutyCode))
-            .toList();
+    List<LegDeparture> ordered = new ArrayList<>();
+    for (VehicleDuty duty : duties) {
+      duty.createRouteId()
+          .filter(passengerLegs::contains)
+          .ifPresent(
+              routeId ->
+                  ordered.add(new LegDeparture(duty, routeId, duty.plannedStartSecondOfDay())));
+      duty.returnRouteId()
+          .filter(passengerLegs::contains)
+          .ifPresent(
+              routeId -> ordered.add(new LegDeparture(duty, routeId, duty.returnSecondOfDay())));
+    }
+    ordered.sort(
+        Comparator.comparingInt(LegDeparture::secondOfDay)
+            .thenComparing(leg -> leg.duty().dutyCode()));
     if (ordered.isEmpty()) {
       return trips;
     }
     Map<String, Integer> perRouteCounter = new LinkedHashMap<>();
     List<TimetableTrip> out = new ArrayList<>(trips);
-    for (VehicleDuty duty : ordered) {
-      UUID routeId = duty.returnRouteId().orElseThrow();
+    for (LegDeparture leg : ordered) {
+      UUID routeId = leg.routeId();
       String routeCode = routeCodeById.getOrDefault(routeId, "?");
       int serial = perRouteCounter.merge(routeCode, 1, Integer::sum);
       String tripCode =
@@ -151,8 +159,8 @@ final class TimetableTripNumbering {
               routeId,
               0,
               tripCode,
-              Math.floorMod(duty.returnSecondOfDay(), TimetableTrip.SECONDS_PER_DAY),
-              java.util.Optional.of(duty.id())));
+              Math.floorMod(leg.secondOfDay(), TimetableTrip.SECONDS_PER_DAY),
+              java.util.Optional.of(leg.duty().id())));
     }
     // 序号按当日秒数重排：回库班插进运营班次之间，顺序对人可读，主键不受影响。
     out.sort(
@@ -173,6 +181,9 @@ final class TimetableTripNumbering {
     }
     return List.copyOf(renumbered);
   }
+
+  /** 一次出入库的展示发车时刻；不增加车辆交路内的运营班次数。 */
+  private record LegDeparture(VehicleDuty duty, UUID routeId, int secondOfDay) {}
 
   /**
    * 由时刻表 ID 与车次号派生稳定的 trip UUID。

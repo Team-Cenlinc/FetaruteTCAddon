@@ -14,6 +14,7 @@ import java.util.OptionalDouble;
 import java.util.Set;
 import java.util.UUID;
 import org.bukkit.util.Vector;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
@@ -179,12 +180,16 @@ public final class TimetablePlatformPlanner {
         Walk walk = new Walk(table.id(), table.id() + "|" + duty.dutyCode());
         duty.createRouteId()
             .ifPresent(
-                routeId ->
-                    walk.run(
-                        Optional.empty(),
-                        routeId,
-                        profiles.get(routeId),
-                        duty.plannedStartSecondOfDay() - zero));
+                routeId -> {
+                  Optional<UUID> createTrip =
+                      table.legTrip(duty, RouteOperationType.CREATE).map(TimetableTrip::id);
+                  createTrip.ifPresent(covered::add);
+                  walk.run(
+                      createTrip,
+                      routeId,
+                      profiles.get(routeId),
+                      duty.plannedStartSecondOfDay() - zero);
+                });
         for (UUID tripId : duty.tripIds()) {
           TimetableTrip trip = tripsById.get(tripId);
           if (trip == null) {

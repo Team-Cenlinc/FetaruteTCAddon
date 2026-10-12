@@ -47,6 +47,7 @@ import org.junit.jupiter.api.Test;
 
 /** refresh/extend 的道岔剪枝使用真实增量同步，删除与写库失败都会更新失效状态。 */
 final class FtaGraphCommandSwitcherPruningTest {
+  @org.junit.jupiter.api.io.TempDir java.nio.file.Path pluginFolder;
 
   @Test
   void pruningUpdatesStorageAndMarksTheGraphStale() throws Exception {
@@ -92,7 +93,7 @@ final class FtaGraphCommandSwitcherPruningTest {
         fixture.command(), fixture.world(), fixture.access(), List.copyOf(fixture.stored()));
   }
 
-  private static Fixture fixture() throws Exception {
+  private Fixture fixture() throws Exception {
     World world = mock(World.class);
     UUID worldId = UUID.randomUUID();
     when(world.getUID()).thenReturn(worldId);
@@ -155,6 +156,7 @@ final class FtaGraphCommandSwitcherPruningTest {
             Set.of()),
         Instant.EPOCH);
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getStorageManager()).thenReturn(storage);
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
     when(plugin.getSignNodeStorageSync())

@@ -18,6 +18,8 @@ import java.util.Set;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockFace;
+import org.bukkit.block.Sign;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.sign.SwitcherSignDefinitionParser;
 
 /**
@@ -41,6 +43,44 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
 
   public TrainCartsRailBlockAccess(World world) {
     this.world = Objects.requireNonNull(world, "world");
+  }
+
+  /**
+   * 解析节点所属轨道，建图各入口必须使用相同的关联规则。
+   *
+   * <p>真实节点以 TrainCarts 的牌子关联为准；“最近轨道”可能是另一条平行股道，不能作为真实牌子的回退。 TCC 虚拟节点与 Switcher/Portal
+   * 的记录本身就是轨道坐标，精确取该轨道。 区块未加载或关联丢失时返回空，不加载区块，也不猜另一条轨道。
+   *
+   * @param center 真实牌子方块或虚拟节点轨道坐标
+   * @param type 节点类型
+   * @param radius Switcher/Portal 旧坐标的兼容搜索半径，真实牌子不使用几何回退
+   */
+  @Override
+  public Set<RailBlockPos> findNodeRailAnchors(RailBlockPos center, NodeType type, int radius) {
+    Objects.requireNonNull(center, "center");
+    Objects.requireNonNull(type, "type");
+    if (radius < 0) {
+      throw new IllegalArgumentException("radius 不能为负");
+    }
+    if (!world.isChunkLoaded(center.x() >> 4, center.z() >> 4)) {
+      return Set.of();
+    }
+    Block block = world.getBlockAt(center.x(), center.y(), center.z());
+    if (block.getState() instanceof Sign) {
+      RailPiece piece = RailLookup.discoverRailPieceFromSign(block);
+      if (piece == null || piece.isNone() || piece.block() == null) {
+        return Set.of();
+      }
+      Block rail = piece.block();
+      RailBlockPos anchor = new RailBlockPos(rail.getX(), rail.getY(), rail.getZ());
+      return world.isChunkLoaded(anchor.x() >> 4, anchor.z() >> 4) ? Set.of(anchor) : Set.of();
+    }
+    if (isRail(center)) {
+      return Set.of(center);
+    }
+    return type == NodeType.SWITCHER || type == NodeType.PORTAL
+        ? findNearestRailBlocks(center, radius)
+        : Set.of();
   }
 
   @Override

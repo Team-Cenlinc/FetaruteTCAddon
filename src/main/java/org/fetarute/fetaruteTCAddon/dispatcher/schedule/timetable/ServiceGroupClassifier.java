@@ -20,9 +20,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectivePars
 /**
  * 把 build 输入的 route 按交路组分组、按（起点站台组, 终点站台组）分方向。
  *
- * <p>分类落在 route 上，不在组上：OPERATION 与中途有 STOP 的 CREATE / RETURN 是<b>带客 route</b>，它是班次，上它所属组的子网格； 中途没有
- * STOP 的 CREATE / RETURN 是<b>纯走行</b>，只做交路的两头。CREATE / RETURN / CRET / DSTY 只决定车的生灭，不决定它是不是班次——DS 那种
- * {@code CREATE → RETURN} 完整生灭的一对和 WS 用 {@code OPERATION + CRET} 写的出库班是同一回事。
+ * <p>OPERATION 与未标记按运营调度的带客 CREATE/RETURN 参与子网格；纯走行和 {@code dispatchByOperation} 出入库只做交路两头。后者即使带中途
+ * STOP，也保留停站与乘客展示， 不形成独立周期或分摊运营频率。
  *
  * <p>组名取 route metadata 的 {@code spawn_group}；没配的一律进 {@link #DEFAULT_GROUP}——一条线没分组就是一个组，
  * 往返对才能锚在一起。 按起点站推导是错的：正向从 A 出发、反向从 B 出发会被拆成两组，谁也锚不到谁。纯数据，确定性：组按名字、方向按键、候选按 code 排序。
@@ -71,7 +70,7 @@ public final class ServiceGroupClassifier {
    *
    * @param name 组名
    * @param directions 带客 route 的方向，按键排序
-   * @param pureLegs 纯走行 route（只做交路两头）
+   * @param pureLegs 交路走行 route（含按运营调度的带客出入库）
    */
   public record Group(String name, List<Direction> directions, List<UUID> pureLegs) {
     public Group {
@@ -116,7 +115,7 @@ public final class ServiceGroupClassifier {
         continue;
       }
       String group = groupNameOf(route);
-      if (!carriesPassengers(route)) {
+      if (route.dispatchByOperation() || !carriesPassengers(route)) {
         pureLegsByGroup.computeIfAbsent(group, key -> new ArrayList<>()).add(route.routeId());
         continue;
       }

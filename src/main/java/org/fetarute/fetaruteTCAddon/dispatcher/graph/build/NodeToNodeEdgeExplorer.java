@@ -36,7 +36,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
  *
  * <ul>
  *   <li>不会遍历无节点的轨道（如废弃矿井）
- *   <li>遇到节点就停止，边长就是实际轨道距离
+ *   <li>遇到节点就停止，边长取 TC 几何距离与实际轨道方块步数的较大值
  *   <li>使用 TC 原生轨道行走逻辑，更准确
  * </ul>
  *
@@ -348,6 +348,7 @@ public final class NodeToNodeEdgeExplorer {
     if (!ws.startCaptured) {
       captureCurrentPath(ws);
       ws.startCaptured = true;
+      ws.previousRailPos = currentTask.startAnchor;
     }
 
     // 移动一个轨道块
@@ -377,8 +378,15 @@ public final class NodeToNodeEdgeExplorer {
 
     RailBlockPos currentPos =
         new RailBlockPos(currentBlock.getX(), currentBlock.getY(), currentBlock.getZ());
+    if (!currentPos.equals(ws.previousRailPos)) {
+      ws.railBlockSteps++;
+      ws.previousRailPos = currentPos;
+    }
+    // moveFull 从 junction 端点出发，首次进入相邻轨道时几何距离可以为零。
+    // 区间至少包含实际跨过的轨道步数；TCC 长曲线仍采用 TC 累计的几何长度。
+    double measuredDistance = Math.max(walker.movedTotal, ws.railBlockSteps);
     NodeId targetNodeId = anchorIndex.get(currentPos);
-    WalkerStep step = classifyStep(startNodeId, targetNodeId, walker.movedTotal, maxDistance);
+    WalkerStep step = classifyStep(startNodeId, targetNodeId, measuredDistance, maxDistance);
     if (step == WalkerStep.UNTERMINATED) {
       recordUnterminatedDirection(new UnterminatedDirection(startNodeId, currentPos));
       debugLogger.accept(
@@ -392,10 +400,10 @@ public final class NodeToNodeEdgeExplorer {
     }
 
     if (step == WalkerStep.ARRIVED) {
-      int distance = (int) Math.round(walker.movedTotal);
+      int distance = (int) Math.round(measuredDistance);
       EdgeId edgeId = EdgeId.undirected(startNodeId, targetNodeId);
       if (distance <= 0) {
-        // 两个节点的锚点轨道重叠或紧挨着：告警，区间按 1 格记，不让整次建图失败。
+        // 不同节点共享同一锚点：告警，区间按 1 格记，不让整次建图失败。
         // 不能跳过：同一段轨道上的两块牌子，其中一个节点的每个方向都会先撞上另一个，跳过就一条区间都没有了。
         if (zeroLengthEdges.add(edgeId)) {
           warnLogger.accept(
@@ -431,7 +439,7 @@ public final class NodeToNodeEdgeExplorer {
         + to.value()
         + " "
         + formatPos(toAnchor)
-        + "；两个节点的锚点轨道重叠或紧挨着，请把其中一块牌子挪开一两格";
+        + "；请核对 TrainCarts 的牌子轨道关联及锚点索引；不同股道映射到同一坐标可能是关联异常";
   }
 
   private static String formatPos(RailBlockPos pos) {
@@ -549,6 +557,8 @@ public final class NodeToNodeEdgeExplorer {
     final Set<RailFootprintCell> footprintCells = new TreeSet<>();
     boolean footprintCaptured = true;
     boolean startCaptured;
+    RailBlockPos previousRailPos;
+    int railBlockSteps;
 
     WalkerState(TrackWalkingPoint walker) {
       this.walker = walker;

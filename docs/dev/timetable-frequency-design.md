@@ -422,3 +422,9 @@ public final class TimetableHeadwayDefaults {
   的 `<line>` 接受逗号列表（补全跟着最后一段走），整组发布同一时刻并互记基线。与设计稿的出入：`SetResult` 不是 `Map<lineId, TimetableBuildResult>` 而是
   一份联编报告 + 每线一张表 + 每线一份基线——报告本来就是全部线一起的，拆开只会重复；`--headway` 没加 `组=秒` 语法，用 `--group-headway`（可重复）。
 - 未验实服：Q1 的验收量（WS 2C/2N 各 150 s、CHT 偏离网格班次数、DS 能编出表）要拿 `.handoff/WsChtDiagnosisTest.java.txt`（已移出仓库，`git show 6efe6c1:.handoff/WsChtDiagnosisTest.java.txt` 取回）对 `../fetarute_experimental` 跑一遍。
+
+## 2026-10-12 补充：显式按运营调度的出入库
+
+新增 route 标记 `dispatch_by_operation`（命令 `--dispatch-by-operation true|false`），只用于 CREATE/RETURN。
+它补充 A1/A2：未标记的带客出入库仍沿用原有分类；标记的带客出入库只作为交路接入/退出，不形成独立频率网格，
+仍保留停站时分、客运展示行和站台占用。详细配置与重启恢复见 `spawn-scheduler.md` 的“按运营交路调度出入库”。

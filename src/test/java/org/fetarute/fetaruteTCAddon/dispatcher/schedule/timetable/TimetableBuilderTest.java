@@ -45,6 +45,64 @@ class TimetableBuilderTest {
 
   private static final String FOREIGN_DEP = "CHT:D:DEP2:1";
 
+  /** 带客出库按运营需求调度：每个 duty 一次出库，保留中途停站时间，不独立分摊班次。 */
+  @Test
+  void passengerCreateCanBeDispatchedOnlyForOperationDuties() {
+    UUID crt = TimetableTestFixtures.routeId("CRT-DEMAND");
+    UUID op = TimetableTestFixtures.routeId("OP-DEMAND");
+    UUID ret = TimetableTestFixtures.routeId("RET-DEMAND");
+    TimetableBuilder.RouteInput create =
+        new TimetableBuilder.RouteInput(
+                crt,
+                "CRT-DEMAND",
+                RouteOperationType.CREATE,
+                1,
+                TimetableTestFixtures.route("CRT-DEMAND", List.of(DEP, A, B)),
+                TimetableTestFixtures.createStops(crt, 3, DEP),
+                Optional.empty())
+            .withDispatchByOperation(true);
+    List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops =
+        new ArrayList<>(create.stops());
+    var middle = stops.get(1);
+    stops.set(
+        1,
+        new org.fetarute.fetaruteTCAddon.company.model.RouteStop(
+            crt,
+            1,
+            middle.stationId(),
+            middle.waypointNodeId(),
+            Optional.of(35),
+            middle.passType(),
+            middle.notes()));
+    Fixture fixture =
+        new Fixture(
+            chain(),
+            List.of(
+                create.withStops(stops),
+                operation(op, "OP-DEMAND", 1, List.of(B, C)),
+                new TimetableBuilder.RouteInput(
+                        ret,
+                        "RET-DEMAND",
+                        RouteOperationType.RETURN,
+                        0,
+                        TimetableTestFixtures.route("RET-DEMAND", List.of(C, DEP)),
+                        TimetableTestFixtures.returnStops(ret, 2, DEP),
+                        Optional.empty())
+                    .withDispatchByOperation(true)));
+
+    TimetableBuildResult result = build(fixture, options(600));
+    Timetable table = result.timetable().orElseThrow();
+    assertFalse(table.duties().isEmpty());
+    assertTrue(
+        table.duties().stream().allMatch(d -> d.createRouteId().filter(crt::equals).isPresent()));
+    assertTrue(result.shares().stream().noneMatch(share -> share.key().contains("CRT-DEMAND")));
+    assertTrue(table.routePlan(crt).orElseThrow().totalRunSeconds() >= 50, "出库 15 秒加中途停站 35 秒不能忽略");
+    assertEquals(
+        (long) table.duties().size(),
+        table.trips().stream().filter(t -> t.routeId().equals(crt)).count(),
+        "每个出库段需要一条可展示的带客车次，不能按频率多排");
+  }
+
   /** 同样输入构建两次，逐字段一致——包括 trip 与 duty 的主键。 */
   @Test
   void buildIsDeterministic() {

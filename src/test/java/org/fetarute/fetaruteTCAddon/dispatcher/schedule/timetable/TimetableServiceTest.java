@@ -37,6 +37,94 @@ class TimetableServiceTest {
   private static final UUID RETURN_ROUTE = UUID.randomUUID();
   static final UUID TIMETABLE = UUID.randomUUID();
 
+  /** 服务日、表版本、车次和交路共同限定恢复身份，同一交路只能恢复一辆真实车。 */
+  @Test
+  void recoveryRejectsStaleTokensAndDeduplicatesDutyOwners() {
+    Timetable table = timetable(TimetableStatus.PUBLISHED);
+    VehicleDuty duty = table.duties().get(0);
+    var day = java.time.LocalDate.of(2026, 3, 2);
+    var key = new TimetableService.DutyKey(table.id(), duty.id(), day);
+    var current =
+        new DutyRecoveryToken(
+            key, table.updatedAt().toEpochMilli(), 1, Optional.of(duty.tripIds().get(0)));
+    var tokens = new java.util.LinkedHashMap<String, String>();
+    tokens.put(
+        "stale-version",
+        new DutyRecoveryToken(key, current.tableVersion() - 1, 1, current.lastTrip()).encode());
+    tokens.put(
+        "stale-day",
+        new DutyRecoveryToken(
+                new TimetableService.DutyKey(table.id(), duty.id(), day.minusDays(3)),
+                current.tableVersion(),
+                1,
+                current.lastTrip())
+            .encode());
+    tokens.put(
+        "invalid-progress",
+        new DutyRecoveryToken(key, current.tableVersion(), 99, current.lastTrip()).encode());
+    tokens.put("actual-vehicle", current.encode());
+    tokens.put("duplicate-owner", current.encode());
+    var restarted = service(true, table);
+    restarted.setDutyStore(
+        new TimetableDutyStore() {
+          @Override
+          public java.util.Map<String, String> read() {
+            return tokens;
+          }
+
+          @Override
+          public void write(String name, Optional<String> token) {}
+        });
+    restarted.restoreDutyBindings(FIXTURE_NOW.plusSeconds(45));
+    assertTrue(restarted.dutyBindingOf("stale-version").isEmpty());
+    assertTrue(restarted.dutyBindingOf("stale-day").isEmpty());
+    assertTrue(restarted.dutyBindingOf("invalid-progress").isEmpty());
+    assertTrue(restarted.dutyBindingOf("actual-vehicle").isPresent());
+    assertTrue(restarted.dutyBindingOf("duplicate-owner").isEmpty());
+    assertTrue(
+        DutyRecoveryToken.parse(current.encode().replace("2026-03-02", "invalid-date")).isEmpty());
+  }
+
+  /** 普通行驶车辆也恢复到原班次和交路，退役标记不会让同一车重启后抢回交路。 */
+  @Test
+  void persistedDutyRestoresProgressAndPreventsDuplicateCreate() {
+    Timetable table = timetable(TimetableStatus.PUBLISHED);
+    java.util.Map<String, String> tokens = new java.util.HashMap<>();
+    TimetableDutyStore store =
+        new TimetableDutyStore() {
+          @Override
+          public java.util.Map<String, String> read() {
+            return java.util.Map.copyOf(tokens);
+          }
+
+          @Override
+          public void write(String name, Optional<String> token) {
+            token.ifPresentOrElse(value -> tokens.put(name, value), () -> tokens.remove(name));
+          }
+        };
+    TimetableService initial = service(true, table);
+    initial.setDutyStore(store);
+    initial.scheduledDepartureAt(event("train-A", 0, FIXTURE_NOW));
+    assertFalse(tokens.isEmpty(), "成功绑定时持久化到列车");
+
+    TimetableService restarted = service(true, table);
+    restarted.setDutyStore(store);
+    restarted.restoreDutyBindings(FIXTURE_NOW.plusSeconds(45));
+    assertEquals(initial.dutyBindingOf("train-A"), restarted.dutyBindingOf("train-A"));
+    assertEquals(initial.dutyProgressOf("train-A"), restarted.dutyProgressOf("train-A"));
+    assertEquals(
+        initial.assignmentOf("train-A").map(TimetableAssignment::tripId),
+        restarted.assignmentOf("train-A").map(TimetableAssignment::tripId));
+    TimetableService.DutyKey key = restarted.dutyBindingOf("train-A").orElseThrow();
+    assertEquals(
+        Optional.of("train-a"),
+        restarted.runningVehicleFor(
+            new TimetableService.TicketIntent(
+                TIMETABLE, key.dutyId(), key.serviceDate(), RouteOperationType.CREATE, 0)));
+    restarted.release("train-A", "destroyed");
+    assertTrue(tokens.isEmpty(), "被移除车辆不得带着旧归属重启");
+  }
+
   /** 两班车、一个只能跑两班的交路。 */
   private static Timetable timetable(TimetableStatus status) {
     return timetable(status, 2);

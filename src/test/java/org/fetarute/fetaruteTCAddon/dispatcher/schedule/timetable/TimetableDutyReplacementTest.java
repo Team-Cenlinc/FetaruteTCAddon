@@ -361,10 +361,8 @@ class TimetableDutyReplacementTest {
     service.release("train-A", StationStopObserver.RELEASE_UNLOADED);
 
     assertEquals(0, service.vacantDutyCount());
-    assertEquals(
-        List.of(table.duties().get(0).tripIds().get(0)),
-        heard.stream().map(TripCancellations.Cancellation::tripId).toList(),
-        "只有当前这一班（与改动前相同）");
+    assertTrue(service.dutyBindingOf("train-A").isPresent(), "离线车辆仍持有交路");
+    assertTrue(heard.isEmpty(), "卸载不代表车辆消失，不取消它正在跑的班次");
   }
 
   /**

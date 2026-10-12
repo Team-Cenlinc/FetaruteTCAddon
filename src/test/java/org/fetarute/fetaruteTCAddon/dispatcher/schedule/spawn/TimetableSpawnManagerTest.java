@@ -51,6 +51,135 @@ class TimetableSpawnManagerTest {
   private static final UUID TRIP_TWO = UUID.randomUUID();
   private static final Instant DAY = Instant.parse("2026-03-02T00:00:00Z");
 
+  /** 带客出库展示行只绑定走行票，不另外出车，也不消耗首个运营班次的进度。 */
+  @Test
+  void passengerCreateDisplayRowSharesOneTicketAndKeepsOperationProgressAtZero() {
+    Timetable table = timetable();
+    var createTrip =
+        new TimetableTrip(
+            UUID.randomUUID(),
+            TIMETABLE,
+            CREATE_ROUTE,
+            2,
+            "CRT-001",
+            8 * 3600 - 180,
+            Optional.of(DUTY));
+    List<TimetableTrip> rows = new ArrayList<>(table.trips());
+    rows.add(createTrip);
+    Fixture fixture = fixture(table.withTripsAndDuties(rows, table.duties()));
+    List<SpawnTicket> tickets = fixture.pollAll();
+    assertEquals(4, tickets.size(), "展示行不增加独立出票");
+    assertEquals(
+        TRIP_ONE,
+        fixture.manager.pickupTripOf(tickets.get(0)).orElseThrow().trip().id(),
+        "驾驶员接车仍以要接的运营班次为准");
+    fixture.manager.onDispatched(tickets.get(0), "passenger-create");
+    assertEquals(
+        Optional.of(createTrip.id()),
+        fixture
+            .service
+            .assignmentOf("passenger-create")
+            .map(
+                org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableAssignment
+                    ::tripId));
+    assertEquals(
+        0, fixture.service.dutyProgressOf("passenger-create").orElseThrow().assignedTrips());
+    assertEquals(
+        Optional.of(tickets.get(0).dueAt()),
+        fixture.service.plannedDepartureOf("passenger-create", 0),
+        "窗口前出库的展示车次仍属于实际出票当天");
+    fixture.manager.onDispatched(tickets.get(1), "passenger-create");
+    assertEquals(
+        1, fixture.service.dutyProgressOf("passenger-create").orElseThrow().assignedTrips());
+  }
+
+  /** 未派出的带客出库票作废时同步取消展示车次，不把取消记到运营首班。 */
+  @Test
+  void abandonedPassengerCreateCancelsItsDisplayTrip() {
+    Timetable table = passengerCreateTimetable();
+    Fixture fixture = fixture(table);
+    SpawnTicket create = fixture.pollAll().get(0);
+    var display = table.legTrip(table.duties().get(0), RouteOperationType.CREATE).orElseThrow();
+    List<org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TripCancellations.Cancellation>
+        cancelled = new ArrayList<>();
+    fixture.service.setCancellationListener(cancelled::add);
+
+    fixture.manager.complete(create);
+    fixture.manager.complete(create);
+
+    var date = java.time.LocalDate.ofInstant(create.dueAt(), ZONE);
+    assertEquals(1, cancelled.size(), "重复完成不能重复发送取消事件");
+    assertTrue(fixture.service.cancellationOf(TIMETABLE, display.id(), date).isPresent());
+    assertTrue(fixture.service.cancellationOf(TIMETABLE, TRIP_ONE, date).isEmpty());
+  }
+
+  /** 提前出票进入重试队列的带客出库票过期，仍走同一取消路径。 */
+  @Test
+  void expiredPassengerCreateRetryCancelsItsDisplayTrip() {
+    Timetable table = passengerCreateTimetable();
+    Fixture fixture = fixture(table);
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(7 * 3600));
+    SpawnTicket create =
+        fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 - 180)).get(0);
+    fixture.manager.requeue(create);
+    fixture.manager.pollDueTickets(fixture.provider, create.dueAt().plusSeconds(301));
+    var display = table.legTrip(table.duties().get(0), RouteOperationType.CREATE).orElseThrow();
+    assertTrue(
+        fixture
+            .service
+            .cancellationOf(
+                TIMETABLE, display.id(), java.time.LocalDate.ofInstant(create.dueAt(), ZONE))
+            .isPresent());
+  }
+
+  /** 中途开服没有出库票窗口：缺车的按需交路只补仍来得及的班次，并且一单只派一辆。 */
+  @Test
+  void coldStartRecoversAnUnboundOperationDispatchedDuty() {
+    SpawnService create = service(CREATE_ROUTE, "CRT", "OP:D:DEP:1");
+    SpawnPlan demandPlan =
+        new SpawnPlan(
+            Instant.EPOCH,
+            List.of(
+                new SpawnService(
+                    create.key(),
+                    create.companyId(),
+                    create.companyCode(),
+                    create.operatorId(),
+                    create.operatorCode(),
+                    create.lineId(),
+                    create.lineCode(),
+                    create.routeId(),
+                    create.routeCode(),
+                    Optional.empty(),
+                    create.depotNodeId()),
+                service(ROUTE, "R1", "OP:D:DEP:1"),
+                service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
+    Fixture fixture = fixture(timetable(), demandPlan);
+    fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
+    Instant now = DAY.plusSeconds(8 * 3600 + 11 * 60 + 30);
+
+    List<SpawnTicket> tickets = fixture.manager.pollDueTickets(fixture.provider, now);
+
+    assertEquals(1, tickets.size(), tickets::toString);
+    SpawnTicket replacement = tickets.get(0);
+    assertEquals(CREATE_ROUTE, replacement.service().routeId());
+    assertEquals(
+        1,
+        fixture
+            .manager
+            .pickupTripOf(replacement)
+            .orElseThrow()
+            .timetable()
+            .duties()
+            .get(0)
+            .tripIds()
+            .indexOf(TRIP_TWO));
+    assertEquals(TRIP_TWO, fixture.manager.pickupTripOf(replacement).orElseThrow().trip().id());
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(1)).isEmpty());
+    fixture.manager.onDispatched(replacement, "replacement");
+    assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(2)).isEmpty());
+  }
+
   /** 一天之内的四张票按时间依次出现，各带正确的交路意图：CREATE、第 0 班、第 1 班、RETURN。 */
   @Test
   void ticketsCarryTheirDutyIntent() {
@@ -800,6 +929,7 @@ class TimetableSpawnManagerTest {
    */
   @Test
   void aVacantDutyGetsAReplacementCreateTicket() {
+    Timetable table = passengerCreateTimetable();
     java.util.concurrent.atomic.AtomicReference<Instant> clock =
         new java.util.concurrent.atomic.AtomicReference<>(DAY.plusSeconds(8 * 3600 + 5));
     List<String> logs = new ArrayList<>();
@@ -810,7 +940,7 @@ class TimetableSpawnManagerTest {
     StorageProvider provider = mock(StorageProvider.class);
     TimetableRepository repository = mock(TimetableRepository.class);
     when(provider.timetables()).thenReturn(repository);
-    when(repository.listPublished()).thenReturn(List.of(timetable()));
+    when(repository.listPublished()).thenReturn(List.of(table));
     service.reload(provider);
     SpawnManager delegate = mock(SpawnManager.class);
     when(delegate.pollDueTickets(any(), any())).thenReturn(List.of());
@@ -832,6 +962,11 @@ class TimetableSpawnManagerTest {
         logs::toString);
 
     manager.complete(replacement);
+    UUID createTrip =
+        table.legTrip(table.duties().get(0), RouteOperationType.CREATE).orElseThrow().id();
+    assertTrue(
+        service.cancellationOf(TIMETABLE, createTrip, java.time.LocalDate.of(2026, 3, 2)).isEmpty(),
+        "中途替补弃票不能取消原始出库展示行");
     List<SpawnTicket> retried = manager.pollDueTickets(provider, clock.get().plusSeconds(5));
     assertEquals(1, retried.size(), "作废之后还赶得上，再发一张");
 
@@ -953,6 +1088,21 @@ class TimetableSpawnManagerTest {
     return source.withTripsAndDuties(source.trips(), duties);
   }
 
+  private static Timetable passengerCreateTimetable() {
+    Timetable table = timetable();
+    List<TimetableTrip> rows = new ArrayList<>(table.trips());
+    rows.add(
+        new TimetableTrip(
+            UUID.randomUUID(),
+            TIMETABLE,
+            CREATE_ROUTE,
+            2,
+            "CRT-001",
+            8 * 3600 - 180,
+            Optional.of(DUTY)));
+    return table.withTripsAndDuties(rows, table.duties());
+  }
+
   private static Fixture fixture() {
     return fixture(timetable());
   }
@@ -963,7 +1113,7 @@ class TimetableSpawnManagerTest {
 
   private static Fixture fixture(Timetable published, SpawnPlan spawnPlan) {
     List<String> logs = new ArrayList<>();
-    TimetableService service = new TimetableService(Instant::now, logs::add);
+    TimetableService service = new TimetableService(() -> DAY.plusSeconds(8 * 3600), logs::add);
     service.applySettings(
         new TimetableService.Settings(
             true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofHours(24)));

@@ -56,12 +56,11 @@ public final class TimetableOccupancyProjector {
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
     Map<UUID, TimetableTrip> tripsById = new HashMap<>();
-    Set<UUID> returnRouteIds = returnRouteIdsOf(timetable);
+    Set<UUID> legRouteIds = legRouteIdsOf(timetable);
     int serviceStart = timetable.serviceStartSecondOfDay();
     for (TimetableTrip trip : timetable.trips()) {
       tripsById.put(trip.id(), trip);
-      addTripMovement(
-          trip, profiles, returnRouteIds, serviceStart, zeroSecondOfDay, tag, movements);
+      addTripMovement(trip, profiles, legRouteIds, serviceStart, zeroSecondOfDay, tag, movements);
     }
     for (VehicleDuty duty : timetable.duties()) {
       appendDutyLegs(
@@ -78,7 +77,7 @@ public final class TimetableOccupancyProjector {
    * @param duty 交路（时刻已改写）
    * @param trips 它的班次，时刻已改写；顺序无关，按 {@link VehicleDuty#tripIds()} 取用
    * @param profiles 各 route 的投影（含 CREATE/RETURN）
-   * @param returnRouteIds 以 RETURN 收尾的 route：这些班次的运行由回库走行投影，不再单独投一遍
+   * @param legRouteIds 交路出入库 route：展示班次由走行投影，不再单独投一遍
    * @param serviceStartSecondOfDay 计划窗口起点，判跨零点用
    * @param zeroSecondOfDay 零点
    */
@@ -86,7 +85,7 @@ public final class TimetableOccupancyProjector {
       VehicleDuty duty,
       List<TimetableTrip> trips,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      Set<UUID> returnRouteIds,
+      Set<UUID> legRouteIds,
       int serviceStartSecondOfDay,
       int zeroSecondOfDay) {
     Objects.requireNonNull(duty, "duty");
@@ -95,7 +94,7 @@ public final class TimetableOccupancyProjector {
     for (TimetableTrip trip : trips == null ? List.<TimetableTrip>of() : trips) {
       tripsById.put(trip.id(), trip);
     }
-    Set<UUID> returns = returnRouteIds == null ? Set.of() : returnRouteIds;
+    Set<UUID> returns = legRouteIds == null ? Set.of() : legRouteIds;
     List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
     List<TimetableConflictChecker.Stay> stays = new ArrayList<>();
     for (UUID tripId : duty.tripIds()) {
@@ -123,27 +122,30 @@ public final class TimetableOccupancyProjector {
     return new Occupancy(movements, stays);
   }
 
-  /** 表里以 RETURN 收尾的 route：它们的班次行不单独投影运行。 */
-  public static Set<UUID> returnRouteIdsOf(Timetable timetable) {
+  /** 交路的出入库走行 route：展示车次行由交路走行投影，避免同一辆车重复占用资源。 */
+  public static Set<UUID> legRouteIdsOf(Timetable timetable) {
     Set<UUID> out = new HashSet<>();
     for (TimetableRoutePlan plan : timetable.routePlans()) {
       if (plan.kind() == RouteOperationType.RETURN) {
         out.add(plan.routeId());
       }
     }
+    for (VehicleDuty duty : timetable.duties()) {
+      duty.createRouteId().ifPresent(out::add);
+    }
     return out;
   }
 
-  /** 一班车的运行。带客的回库班有 trip 行，但它的运行由 duty 的回库走行投影（同一辆车、同一时刻），这里不再投一遍。 */
+  /** 一班车的运行。带客出入库有 trip 行，但它的运行由 duty 的走行投影（同一辆车、同一时刻），这里不再投一遍。 */
   private static void addTripMovement(
       TimetableTrip trip,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
-      Set<UUID> returnRouteIds,
+      Set<UUID> legRouteIds,
       int serviceStartSecondOfDay,
       int zeroSecondOfDay,
       Optional<String> owner,
       List<TimetableConflictChecker.Movement> movements) {
-    if (profiles.containsKey(trip.routeId()) && !returnRouteIds.contains(trip.routeId())) {
+    if (profiles.containsKey(trip.routeId()) && !legRouteIds.contains(trip.routeId())) {
       movements.add(
           new TimetableConflictChecker.Movement(
               trip.tripCode(),

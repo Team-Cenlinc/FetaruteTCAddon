@@ -41,6 +41,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteDispatchMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
@@ -846,12 +847,14 @@ public final class FtaTimetableCommand {
               Optional.empty(),
               Optional.ofNullable(declared.typeOf().get(route.id())),
               externalRoutes.contains(route.id()),
-              readSpawnGroup(route));
+              readSpawnGroup(route),
+              RouteDispatchMetadata.enabled(route));
       // 带客的出库班（CREATE 且中途有停站）也是班次：DS 那种只有 CREATE + RETURN 的线一样能编表。
       anyOperation |=
           own.contains(route.id())
               && (route.operationType() == RouteOperationType.OPERATION
                   || (route.operationType() == RouteOperationType.CREATE
+                      && !routeInput.dispatchByOperation()
                       && ServiceGroupClassifier.carriesPassengers(routeInput)));
       routeInputs.add(routeInput);
     }

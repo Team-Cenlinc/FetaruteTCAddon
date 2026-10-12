@@ -70,6 +70,53 @@ class TimetableSetBuilderTest {
   private final Set<UUID> wsRoutes = Set.of(id("FA"), id("FB"), id("CRT1"), id("RET1"));
   private final Set<UUID> mtRoutes = Set.of(id("SA"), id("SB"), id("CRT2"), id("RET2"));
 
+  /** 联编添加线路组前缀后，带客出库仍只依附运营交路，不能重新进入独立频率网格。 */
+  @Test
+  void jointBuildPreservesOperationDispatchedPassengerCreate() {
+    TimetableBuilder.BuildInput ws = wsInput();
+    var create =
+        leg("CRT1", RouteOperationType.CREATE, List.of(DEP, B, A1)).withDispatchByOperation(true);
+    var routes =
+        ws.routes().stream()
+            .map(route -> route.routeId().equals(create.routeId()) ? create : route)
+            .toList();
+    var demand =
+        new TimetableBuilder.BuildInput(
+            ws.timetableId(),
+            ws.companyId(),
+            ws.operatorId(),
+            ws.lineId(),
+            ws.code(),
+            ws.name(),
+            routes,
+            ws.graph(),
+            ws.runTimeModel(),
+            ws.notes());
+    var result =
+        new TimetableSetBuilder()
+            .build(
+                new TimetableSetBuilder.SetInput(
+                    List.of(
+                        new TimetableSetBuilder.Member(demand, "WS", "co/op/WS", wsRoutes),
+                        new TimetableSetBuilder.Member(mtInput(), "MT", "co/op/MT", mtRoutes)),
+                    List.of()),
+                options(Map.of("WS/default", 600, "MT/default", 300)),
+                BUILT_AT);
+
+    assertTrue(result.success(), () -> result.joint().warnings().toString());
+    assertTrue(
+        result.joint().shares().stream().noneMatch(share -> share.key().contains("CRT1")),
+        "按运营调度的出库段不占运营网格份额");
+    Timetable table = result.tables().get(WS);
+    assertFalse(table.duties().isEmpty());
+    assertEquals(
+        (long) table.duties().size(),
+        table.trips().stream().filter(trip -> trip.routeId().equals(create.routeId())).count());
+    assertTrue(
+        table.duties().stream()
+            .allMatch(duty -> duty.createRouteId().filter(create.routeId()::equals).isPresent()));
+  }
+
   /** 每线一张表：同 code、同 updatedAt；班次与交路都在自己的表里，主键按自己的表 id 派生；走行线路进引用它的表。 */
   @Test
   void twoLinesBuildIntoOneTablePerLine() {

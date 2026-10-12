@@ -1367,6 +1367,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
       return false;
     }
     try {
+      if (timetableService != null) {
+        timetableService.restoreDutyBindings(java.time.Instant.now());
+      }
       restartHealthMonitorTask();
       restartRuntimeMonitor();
       initSignalEventDrivenComponents();
@@ -1745,6 +1748,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
           new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService(
               java.time.Instant::now, loggerManager::debug);
       timetableService.setWarningLogger(getLogger()::warning);
+      timetableService.setDutyStore(
+          new org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsTimetableDutyStore());
     }
     ConfigManager.TimetableSettings settings = configManager.current().timetableSettings();
     timetableService.applySettings(
@@ -1924,7 +1929,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
         activeNames.add(properties.getTrainName());
       }
     }
-    timetableService.retain(activeNames);
+    // 已保存的离线编组仍拥有交路，不能当作消失而补出第二辆；站台存在状态仍只使用真实在线 group。
+    java.util.List<String> dutyNames = new ArrayList<>(activeNames);
+    dutyNames.addAll(
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsTimetableDutyStore()
+            .read()
+            .keySet());
+    timetableService.retain(dutyNames);
     if (stationPresence != null) {
       stationPresence.retain(java.util.Set.copyOf(activeNames));
     }

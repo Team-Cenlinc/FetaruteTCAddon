@@ -80,6 +80,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.InterlockingZo
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailFootprintCell;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingEdgeSignature;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.PendingRailGraphStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
@@ -115,7 +116,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
 
 /**
  * 调度图诊断与运维命令：/fta graph
- * build|refresh|extend|continue|status|cancel|info|delete|query|path|component|sign|portal。
+ * build|refresh|extend|continue|activate|status|cancel|info|delete|query|path|component|sign|portal。
  *
  * <p>图构建分为两个阶段：
  *
@@ -153,6 +154,7 @@ public final class FtaGraphCommand {
   private static final int CONCURRENT_CHUNK_LOADS = 4;
 
   private final ConcurrentMap<UUID, RailGraphBuildTask> jobs = new ConcurrentHashMap<>();
+  private final PendingRailGraphStore pendingGraphs;
 
   /**
    * build 续跑缓存：仅用于 HERE 模式的“按轨道扩张”。
@@ -164,6 +166,8 @@ public final class FtaGraphCommand {
 
   public FtaGraphCommand(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
+    this.pendingGraphs =
+        new PendingRailGraphStore(plugin.getDataFolder().toPath().resolve("pending-graphs"));
   }
 
   /**
@@ -539,6 +543,7 @@ public final class FtaGraphCommand {
                   RailGraphBuildTask job = jobs.get(world.getUID());
                   if (job == null) {
                     ctx.sender().sendMessage(locale.component("command.graph.status.idle"));
+                    reportPendingGraph(ctx.sender(), world, locale);
                     return;
                   }
                   job.getStatus()
@@ -563,6 +568,17 @@ public final class FtaGraphCommand {
                               ctx.sender()
                                   .sendMessage(locale.component("command.graph.status.idle")));
                 }));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("graph")
+            .literal("activate")
+            .permission("fetarute.graph.build")
+            .handler(
+                ctx ->
+                    activatePendingGraph(
+                        ctx.sender(), resolveWorld(ctx.sender()), plugin.getLocaleManager())));
 
     manager.command(
         manager
@@ -620,6 +636,7 @@ public final class FtaGraphCommand {
                   boolean deletedFromStorage = deleteGraphFromStorage(world, hard);
                   plugin.getRailGraphService().clearSnapshot(world);
                   dropContinuations(worldId);
+                  clearPendingGraph(worldId);
 
                   if (!hadSnapshot && !deletedFromStorage) {
                     ctx.sender().sendMessage(locale.component("command.graph.delete.none"));
@@ -4720,6 +4737,13 @@ public final class FtaGraphCommand {
           ClickEvent.suggestCommand("/fta graph continue "),
           locale.component("command.graph.help.hover-continue"));
     }
+    if (sender.hasPermission("fetarute.graph.build")) {
+      sendHelpEntry(
+          sender,
+          locale.component("command.graph.help.entry-activate"),
+          ClickEvent.runCommand("/fta graph activate"),
+          locale.component("command.graph.help.hover-activate"));
+    }
     if (sender.hasPermission("fetarute.graph.status")) {
       sendHelpEntry(
           sender,
@@ -6092,8 +6116,9 @@ public final class FtaGraphCommand {
         switcherNodeIds.add(node.nodeId());
       }
       Set<RailBlockPos> anchors =
-          access.findNearestRailBlocks(
+          access.findNodeRailAnchors(
               new RailBlockPos(node.x(), node.y(), node.z()),
+              node.nodeType(),
               RailGraphBuildJob.anchorRadius(
                   node.nodeType(), signAnchorRadius, switcherAnchorRadius));
       if (anchors.isEmpty()) {
@@ -6321,8 +6346,9 @@ public final class FtaGraphCommand {
         newSwitcherIds.add(node.nodeId());
       }
       Set<RailBlockPos> anchors =
-          access.findNearestRailBlocks(
+          access.findNodeRailAnchors(
               new RailBlockPos(node.x(), node.y(), node.z()),
+              node.nodeType(),
               radiusFor.applyAsInt(node.nodeType()));
       if (anchors.isEmpty()) {
         sendExtendRefusal(
@@ -6347,11 +6373,12 @@ public final class FtaGraphCommand {
             newAnchorIndex,
             base.nodes(),
             node ->
-                access.findNearestRailBlocks(
+                access.findNodeRailAnchors(
                     new RailBlockPos(
                         node.worldPosition().getBlockX(),
                         node.worldPosition().getBlockY(),
                         node.worldPosition().getBlockZ()),
+                    node.type(),
                     radiusFor.applyAsInt(node.type())),
             state,
             Math.max(signAnchorRadius, switcherAnchorRadius));
@@ -6795,13 +6822,119 @@ public final class FtaGraphCommand {
    */
   private void activatePersistedGraph(World world, RailGraphBuildResult result) {
     RailGraphService service = plugin.getRailGraphService();
-    service.validateSnapshotActivation(world, result.graph());
+    try {
+      service.validateSnapshotActivation(world, result.graph());
+    } catch (IllegalStateException blocked) {
+      try {
+        pendingGraphs.save(
+            world.getUID(),
+            new PendingRailGraphStore.Candidate(
+                result, currentGraphBuiltAt(world), currentNodeSignature(world)));
+      } catch (java.io.IOException | RuntimeException failure) {
+        throw new GraphPersistException("候选图缓存保存失败: " + failure.getMessage());
+      }
+      throw blocked;
+    }
     if (!persistGraph(world, result)) {
       throw new GraphPersistException("调度图持久化失败，保留旧内存快照");
     }
     boolean wasStale = service.getStaleState(world).isPresent();
     service.putSnapshot(world, result.graph(), result.builtAt());
     notifyRecovered(world, wasStale);
+    clearPendingGraph(world.getUID());
+  }
+
+  /** 候选基线取生效快照；重启预热后仍能校验同一份 SQL 图。 */
+  private Optional<Instant> currentGraphBuiltAt(World world) {
+    Optional<Instant> active =
+        plugin
+            .getRailGraphService()
+            .getSnapshot(world)
+            .map(RailGraphService.RailGraphSnapshot::builtAt);
+    return active.isPresent()
+        ? active
+        : graphProvider()
+            .railGraphSnapshots()
+            .findByWorld(world.getUID())
+            .map(RailGraphSnapshotRecord::builtAt);
+  }
+
+  private StorageProvider graphProvider() {
+    StorageManager storage = plugin.getStorageManager();
+    if (storage == null || !storage.isReady()) {
+      throw new IllegalStateException("调度图存储未就绪");
+    }
+    return storage.provider().orElseThrow(() -> new IllegalStateException("调度图存储不可用"));
+  }
+
+  /** 增量建牌/拆牌会改节点签名，等待期间发生此类变化时必须重建。 */
+  private String currentNodeSignature(World world) {
+    return RailGraphSignature.signatureForNodes(
+        graphProvider().railNodes().listByWorld(world.getUID()));
+  }
+
+  private void clearPendingGraph(UUID worldId) {
+    try {
+      pendingGraphs.delete(worldId);
+    } catch (java.io.IOException ex) {
+      plugin.getLogger().warning("清理候选图缓存失败: " + ex.getMessage());
+    }
+  }
+
+  /** 显示待激活图与生效图的区别，debug stick 始终查询生效图。 */
+  private void reportPendingGraph(CommandSender sender, World world, LocaleManager locale) {
+    try {
+      pendingGraphs
+          .load(world.getUID())
+          .ifPresent(
+              candidate ->
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.pending.saved",
+                          Map.of(
+                              "nodes",
+                              String.valueOf(candidate.result().graph().nodes().size()),
+                              "edges",
+                              String.valueOf(candidate.result().graph().edges().size()),
+                              "built_at",
+                              candidate.result().builtAt().toString()))));
+    } catch (java.io.IOException ex) {
+      sender.sendMessage(
+          locale.component("command.graph.pending.failed", Map.of("error", ex.getMessage())));
+    }
+  }
+
+  /** 重试完整候选的激活，沿用 active claim 校验和先 SQL 后内存的提交顺序。 */
+  private void activatePendingGraph(CommandSender sender, World world, LocaleManager locale) {
+    if (world == null) {
+      sender.sendMessage("未找到可用世界");
+      return;
+    }
+    if (jobs.containsKey(world.getUID())) {
+      sender.sendMessage(locale.component("command.graph.build.running"));
+      return;
+    }
+    try {
+      Optional<PendingRailGraphStore.Candidate> pending = pendingGraphs.load(world.getUID());
+      if (pending.isEmpty()) {
+        sender.sendMessage(locale.component("command.graph.pending.none"));
+        return;
+      }
+      var candidate = pending.orElseThrow();
+      if (!candidate.matchesBase(currentGraphBuiltAt(world), currentNodeSignature(world))) {
+        sender.sendMessage(locale.component("command.graph.pending.outdated"));
+        return;
+      }
+      activatePersistedGraph(world, candidate.result());
+      syncSignNodeRegistry(world, candidate.result().nodes());
+      scheduleStationAutoSync(world, candidate.result().nodes());
+      sender.sendMessage(locale.component("command.graph.pending.activated"));
+    } catch (GraphPersistException | java.io.IOException ex) {
+      sender.sendMessage(
+          locale.component("command.graph.pending.failed", Map.of("error", ex.getMessage())));
+    } catch (IllegalStateException ex) {
+      sender.sendMessage(locale.component("command.graph.build.activation-blocked"));
+    }
   }
 
   /**
@@ -6948,16 +7081,23 @@ public final class FtaGraphCommand {
       }
       return rails;
     }
-    RailBlockPos center =
-        findNearbyNodeSign(player, 4)
-            .map(node -> new RailBlockPos(node.x(), node.y(), node.z()))
+    var nearbyNode = findNearbyNodeSign(player, 4);
+    Set<RailBlockPos> rails =
+        nearbyNode
+            .map(
+                node ->
+                    railAccess.findNodeRailAnchors(
+                        new RailBlockPos(node.x(), node.y(), node.z()),
+                        node.nodeType(),
+                        signAnchorRadius))
             .orElseGet(
                 () ->
-                    new RailBlockPos(
-                        player.getLocation().getBlockX(),
-                        player.getLocation().getBlockY(),
-                        player.getLocation().getBlockZ()));
-    Set<RailBlockPos> rails = railAccess.findNearestRailBlocks(center, signAnchorRadius);
+                    railAccess.findNearestRailBlocks(
+                        new RailBlockPos(
+                            player.getLocation().getBlockX(),
+                            player.getLocation().getBlockY(),
+                            player.getLocation().getBlockZ()),
+                        signAnchorRadius));
     if (rails.isEmpty()) {
       player.sendMessage(locale.component("command.graph.build.no-start-node"));
     }
@@ -6984,7 +7124,7 @@ public final class FtaGraphCommand {
           return;
         } catch (IllegalStateException exception) {
           plugin.getLogger().warning("调度图构建未激活: " + exception.getMessage());
-          discardContinuation(cacheKey, outcome);
+          replaceContinuation(cacheKey, outcome.continuation());
           sender.sendMessage(locale.component("command.graph.build.activation-blocked"));
           return;
         }

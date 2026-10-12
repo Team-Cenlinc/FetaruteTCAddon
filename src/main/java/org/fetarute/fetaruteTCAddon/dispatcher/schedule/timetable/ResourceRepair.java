@@ -694,7 +694,7 @@ public final class ResourceRepair {
     private final Map<UUID, TimetableConflictChecker.RouteProfile> allProfiles;
     private final Rescan mode;
     private final java.util.function.Function<String, String> vehicleOf;
-    private final Set<UUID> returnRouteIds;
+    private final Set<UUID> legRouteIds;
     private final int serviceStartSecondOfDay;
     private final Map<String, List<TimetableConflictChecker.Conflict>> byResource = new HashMap<>();
     private OccupationIndex occupations;
@@ -709,7 +709,7 @@ public final class ResourceRepair {
       this.allProfiles = allProfiles;
       this.mode = mode;
       this.vehicleOf = TimetableConflictChecker.vehicleOf(initial);
-      this.returnRouteIds = TimetableOccupancyProjector.returnRouteIdsOf(initial);
+      this.legRouteIds = TimetableOccupancyProjector.legRouteIdsOf(initial);
       this.serviceStartSecondOfDay = initial.serviceStartSecondOfDay();
       replaceAll(
           mode == Rescan.FULL ? scan(input, allProfiles, initial).conflicts() : rebuild(initial));
@@ -747,7 +747,7 @@ public final class ResourceRepair {
                 rewritten.duty(),
                 rewritten.trips(),
                 input.profiles(),
-                returnRouteIds,
+                legRouteIds,
                 serviceStartSecondOfDay,
                 input.zeroSecondOfDay());
         movements = occupancy.movements();

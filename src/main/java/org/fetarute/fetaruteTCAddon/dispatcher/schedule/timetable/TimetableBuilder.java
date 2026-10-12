@@ -811,7 +811,7 @@ public final class TimetableBuilder {
     List<VehicleDutyPlanner.Leg> returnLegs = new ArrayList<>();
     Map<UUID, String> legStation = new HashMap<>();
     Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new HashMap<>();
-    Set<UUID> passengerReturns = new HashSet<>();
+    Set<UUID> passengerLegs = new HashSet<>();
     Map<UUID, Integer> runByRoute = new HashMap<>();
     // 车型变体：基础 route → 车型键 → 变体 ID。不区分车型时为空。
     Map<UUID, Map<String, UUID>> variants = new HashMap<>();
@@ -889,11 +889,17 @@ public final class TimetableBuilder {
                     route.routeCode(), "CREATE 线路首站没有 CRET 指令，无法实体化列车"));
             continue;
           }
-          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
+          if (owned
+              && !route.dispatchByOperation()
+              && ServiceGroupClassifier.carriesPassengers(route)) {
             // 带客的出库班是班次：上它所属组的子网格，从车库实体化（与 OPERATION + CRET 同一条路径），而不是当走行段。
             // 别的线的带客出库班不在此列——我只是借它出库，把它排成我的班次会连人家自己的 headway 票一起拦掉。
             operations.add(new OperationPlan(route, true, endsAtDepot(route.stops())));
             break;
+          }
+          if (owned && ServiceGroupClassifier.carriesPassengers(route)) {
+            passengerLegs.add(route.routeId());
+            passengerLegs.addAll(variantIds.values());
           }
           createLegs.add(
               new VehicleDutyPlanner.Leg(
@@ -916,7 +922,7 @@ public final class TimetableBuilder {
           boolean passenger = owned && ServiceGroupClassifier.carriesPassengers(route);
           if (passenger) {
             // 带客的回库班：仍由派车器在交路收尾处生成（到达 + 折返），但落 trip 行给 PIDS 与导出。
-            passengerReturns.add(route.routeId());
+            passengerLegs.add(route.routeId());
           }
           returnLegs.add(
               new VehicleDutyPlanner.Leg(
@@ -929,7 +935,7 @@ public final class TimetableBuilder {
           variantIds.forEach(
               (key, variantId) -> {
                 if (passenger) {
-                  passengerReturns.add(variantId);
+                  passengerLegs.add(variantId);
                 }
                 returnLegs.add(
                     new VehicleDutyPlanner.Leg(
@@ -1043,7 +1049,7 @@ public final class TimetableBuilder {
         Map.copyOf(profiles),
         List.copyOf(infeasible),
         classification,
-        Set.copyOf(passengerReturns),
+        Set.copyOf(passengerLegs),
         Map.copyOf(runByRoute),
         trajectoriesOf(input, modelByRoute),
         Map.copyOf(variants),
@@ -1422,12 +1428,12 @@ public final class TimetableBuilder {
       routeCodeById.put(plan.routeId(), plan.routeCode());
     }
     List<TimetableTrip> withReturns =
-        TimetableTripNumbering.appendReturnTrips(
+        TimetableTripNumbering.appendPassengerLegTrips(
             timetableId,
             options,
             numbered.trips(),
             numbered.duties(),
-            prepared.passengerReturns(),
+            prepared.passengerLegs(),
             routeCodeById);
     Timetable timetable =
         timetableOf(input, options, prepared, withReturns, numbered.duties(), builtAt);
@@ -2394,7 +2400,7 @@ public final class TimetableBuilder {
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
       List<TimetableBuildResult.InfeasibleRoute> infeasible,
       ServiceGroupClassifier.Classification classification,
-      Set<UUID> passengerReturns,
+      Set<UUID> passengerLegs,
       Map<UUID, Integer> runByRoute,
       BlockingTimes.Trajectories trajectories,
       Map<UUID, Map<String, UUID>> variants,
@@ -2430,7 +2436,7 @@ public final class TimetableBuilder {
           profiles,
           infeasible,
           classification,
-          passengerReturns,
+          passengerLegs,
           Map.copyOf(run),
           trajectories,
           variants,
@@ -2938,7 +2944,7 @@ public final class TimetableBuilder {
    *
    * @param routeId Route UUID
    * @param routeCode Route code
-   * @param operationType route 类型；CREATE/RETURN 不进发车表，只提供出库/回库走行
+   * @param operationType route 类型；带客 CREATE 缺省独立发车，其余出入库提供交路辅助段
    * @param weight 目标服务比例权重（仅 OPERATION 有意义）
    * @param definition 已解析的交路定义
    * @param stops route 的停靠配置，索引与 waypoints 对齐
@@ -2948,6 +2954,7 @@ public final class TimetableBuilder {
    * @param external 属于别的 operator：进足迹、进交路，但不受本表管辖（见 {@link TimetableRoutePlan#external()}）
    * @param spawnGroup 交路组（route metadata 的 spawn_group）；空则进 {@link
    *     ServiceGroupClassifier#DEFAULT_GROUP}
+   * @param dispatchByOperation 出入库仅由运营交路驱动，保留停站，但不生成独立周期班次
    */
   public record RouteInput(
       UUID routeId,
@@ -2959,12 +2966,74 @@ public final class TimetableBuilder {
       Optional<String> depotNodeId,
       Optional<RouteOperationType> declaredAs,
       boolean external,
-      Optional<String> spawnGroup) {
+      Optional<String> spawnGroup,
+      boolean dispatchByOperation) {
+
+    /** 兼容既有输入：缺省仍按原来的客运班次分类。 */
+    public RouteInput(
+        UUID routeId,
+        String routeCode,
+        RouteOperationType operationType,
+        int weight,
+        RouteDefinition definition,
+        List<RouteStop> stops,
+        Optional<String> depotNodeId,
+        Optional<RouteOperationType> declaredAs,
+        boolean external,
+        Optional<String> spawnGroup) {
+      this(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          spawnGroup,
+          false);
+    }
+
+    /** 保持停站与带客属性，仅修改出入库需求来源。 */
+    public RouteInput withDispatchByOperation(boolean enabled) {
+      return new RouteInput(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          spawnGroup,
+          enabled);
+    }
+
+    /** 修改交路组并保留出入库需求来源；联合排班加线路前缀时不改变 route 的调度语义。 */
+    public RouteInput withSpawnGroup(Optional<String> nextGroup) {
+      return new RouteInput(
+          routeId,
+          routeCode,
+          operationType,
+          weight,
+          definition,
+          stops,
+          depotNodeId,
+          declaredAs,
+          external,
+          nextGroup,
+          dispatchByOperation);
+    }
 
     public RouteInput {
       Objects.requireNonNull(routeId, "routeId");
       Objects.requireNonNull(definition, "definition");
       operationType = operationType == null ? RouteOperationType.OPERATION : operationType;
+      if (dispatchByOperation && operationType == RouteOperationType.OPERATION) {
+        throw new IllegalArgumentException("dispatchByOperation 仅允许 CREATE/RETURN");
+      }
       routeCode = routeCode == null ? "" : routeCode.trim();
       stops = stops == null ? List.of() : List.copyOf(stops);
       depotNodeId = depotNodeId == null ? Optional.empty() : depotNodeId;
@@ -2987,7 +3056,8 @@ public final class TimetableBuilder {
           depotNodeId,
           declaredAs,
           external,
-          spawnGroup);
+          spawnGroup,
+          dispatchByOperation);
     }
 
     /** 没有交路组信息的构造：进默认组。 */

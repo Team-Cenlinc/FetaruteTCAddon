@@ -30,6 +30,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.ServiceTrip;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.planner.SchedulePlanner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteDispatchMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
@@ -378,7 +379,10 @@ public final class FtaSpawnCommand {
                       "operator", svc.operatorCode(),
                       "line", svc.lineCode(),
                       "route", svc.routeCode(),
-                      "headway", formatDuration(svc.baseHeadway()),
+                      "headway",
+                          svc.baseHeadway()
+                              .map(value -> formatDuration(value))
+                              .orElse(locale.text("command.spawn.dispatch-by-operation")),
                       "depots", svc.depotNodeId()))
               .append(Component.space())
               .append(
@@ -727,7 +731,21 @@ public final class FtaSpawnCommand {
         && LineSpawnMetadata.findGroup(configuredGroups, explicitGroup.get()).isEmpty()) {
       notes.add("spawn_group 不存在");
     }
-    if (groupBaseline.isEmpty() && lineBaseline.isEmpty()) {
+    if (RouteDispatchMetadata.enabled(route)) {
+      notes.add("随运营交路出入库（无独立频率）");
+      boolean timetabled =
+          plugin
+              .getTimetableService()
+              .filter(
+                  service ->
+                      service.settings().enabled()
+                          && service.settings().spawnEnabled()
+                          && service.managed(route.id()))
+              .isPresent();
+      if (!timetabled) {
+        blockers.add("未由已发布时刻表接管，不自动发车");
+      }
+    } else if (groupBaseline.isEmpty() && lineBaseline.isEmpty()) {
       blockers.add("缺 baseline");
     }
     if (route.operationType() == RouteOperationType.OPERATION) {

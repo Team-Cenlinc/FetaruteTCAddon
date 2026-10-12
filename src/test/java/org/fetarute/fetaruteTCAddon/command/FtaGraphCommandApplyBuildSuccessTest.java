@@ -62,6 +62,89 @@ import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 final class FtaGraphCommandApplyBuildSuccessTest {
+  @org.junit.jupiter.api.io.TempDir java.nio.file.Path pluginFolder;
+
+  /** 占用阻止发布时保留完整候选；占用释放后的重试才写 SQL 和内存。 */
+  @Test
+  void activeClaimsKeepOldGraphAndPersistCandidateForRetry() throws Exception {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    var nodes = List.of(nodeRecord(worldId, "A", 1), nodeRecord(worldId, "B", 2));
+    EdgeId edgeId = EdgeId.undirected(NodeId.of("A"), NodeId.of("B"));
+    RailGraph old =
+        graph(
+            Set.of(node("A", 1), node("B", 2)),
+            Set.of(edge("A", "B", 12)),
+            RailInterlockingState.incomplete(worldId, Set.of(edgeId)));
+    RailGraph next =
+        graph(
+            worldId,
+            Set.of(node("A", 1), node("B", 2)),
+            Set.of(edge("A", "B", 12)),
+            Map.of(
+                edgeId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 1)))));
+    RailGraphService service = new RailGraphService(ignored -> old);
+    Instant baseTime = Instant.parse("2026-10-12T00:00:00Z");
+    service.putSnapshot(world, old, baseTime);
+    service.setSnapshotActivationGuard(() -> false);
+    var provider = mock(StorageProvider.class);
+    var nodeRepo = mock(RailNodeRepository.class);
+    when(provider.railNodes()).thenReturn(nodeRepo);
+    when(nodeRepo.listByWorld(worldId)).thenReturn(nodes);
+    when(provider.railEdges()).thenReturn(mock(RailEdgeRepository.class));
+    when(provider.railGraphSnapshots()).thenReturn(mock(RailGraphSnapshotRepository.class));
+    when(provider.railInterlockingSnapshots())
+        .thenReturn(mock(RailInterlockingSnapshotRepository.class));
+    when(provider.transactionManager()).thenReturn(new InlineTransactionManager());
+    var storage = mock(StorageManager.class);
+    when(storage.isReady()).thenReturn(true);
+    when(storage.provider()).thenReturn(Optional.of(provider));
+    var plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
+    when(plugin.getRailGraphService()).thenReturn(service);
+    when(plugin.getStorageManager()).thenReturn(storage);
+    when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+    var command = new FtaGraphCommand(plugin);
+    var result =
+        new RailGraphBuildResult(
+            next,
+            baseTime.plusSeconds(60),
+            RailGraphSignature.signatureForNodes(nodes),
+            nodes,
+            List.of(),
+            List.of());
+    Method activate =
+        FtaGraphCommand.class.getDeclaredMethod(
+            "activatePersistedGraph", World.class, RailGraphBuildResult.class);
+    assertTrue(activate.trySetAccessible());
+    var failure =
+        assertThrows(
+            InvocationTargetException.class, () -> activate.invoke(command, world, result));
+    assertInstanceOf(IllegalStateException.class, failure.getCause());
+    assertSame(old, service.getSnapshot(world).orElseThrow().graph());
+    org.mockito.Mockito.verify(nodeRepo, org.mockito.Mockito.never()).replaceWorld(any(), any());
+    var store =
+        new org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.PendingRailGraphStore(
+            pluginFolder.resolve("pending-graphs"));
+    var candidate = store.load(worldId).orElseThrow();
+    assertTrue(
+        candidate.matchesBase(Optional.of(baseTime), RailGraphSignature.signatureForNodes(nodes)));
+    assertFalse(
+        ((RailGraphInterlockingSupport) candidate.result().graph())
+            .interlockingState()
+            .cellCoverageAvailable());
+    assertTrue(
+        ((RailGraphInterlockingSupport) next)
+            .interlockingState()
+            .sameResourceProjection(
+                ((RailGraphInterlockingSupport) candidate.result().graph()).interlockingState()));
+    service.setSnapshotActivationGuard(() -> true);
+    activate.invoke(command, world, candidate.result());
+    assertEquals(result.builtAt(), service.getSnapshot(world).orElseThrow().builtAt());
+    verify(nodeRepo).replaceWorld(eq(worldId), eq(nodes));
+    assertTrue(store.load(worldId).isEmpty());
+  }
 
   @Test
   void refreshWithAllAnchorsMissingCannotRetainCompleteInterlockingCoverage() {
@@ -154,6 +237,7 @@ final class FtaGraphCommandApplyBuildSuccessTest {
 
     SignNodeRegistry registry = new SignNodeRegistry();
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getRailGraphService()).thenReturn(railGraphService);
     when(plugin.getSignNodeRegistry()).thenReturn(registry);
     when(plugin.getStorageManager()).thenReturn(storageManager);
@@ -283,6 +367,7 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     when(provider.transactionManager()).thenReturn(new FailingTransactionManager());
     when(storageManager.provider()).thenReturn(Optional.of(provider));
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getRailGraphService()).thenReturn(railGraphService);
     when(plugin.getStorageManager()).thenReturn(storageManager);
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));

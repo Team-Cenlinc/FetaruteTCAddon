@@ -44,6 +44,7 @@ public final class TrainSpawnTagInitializer {
           "FTA_OP_TRIPS",
           "FTA_OP_MAX",
           "FTA_SPAWN_GROUP",
+          TrainCartsTimetableDutyStore.TAG_DUTY,
           "FTA_TICKET_ID");
 
   private static final List<String> TRANSIENT_CONTROL_TAG_KEYS =

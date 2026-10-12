@@ -125,11 +125,21 @@ final class NodeToNodeEdgeExplorerTest {
   }
 
   @Test
-  void zeroDistanceArrivalKeepsTheEdgeAndItsMeasuredFootprint() throws Exception {
+  void adjacentRailsAreOneBlockApartEvenWhenWalkerStartsAtJunctionBoundary() throws Exception {
+    assertZeroWalkerDistanceEdge(1, 0);
+  }
+
+  @Test
+  void differentNodesSharingAnAnchorKeepTheirEdgeAndWarnOnce() throws Exception {
+    assertZeroWalkerDistanceEdge(0, 1);
+  }
+
+  private static void assertZeroWalkerDistanceEdge(int targetX, int expectedWarnings)
+      throws Exception {
     World world = mock(World.class);
     Block start = mock(Block.class);
     Block target = mock(Block.class);
-    when(target.getX()).thenReturn(1);
+    when(target.getX()).thenReturn(targetX);
     when(world.getBlockAt(0, 0, 0)).thenReturn(start);
     RailPiece piece = mock(RailPiece.class);
     when(piece.getJunctions()).thenReturn(List.of());
@@ -140,7 +150,8 @@ final class NodeToNodeEdgeExplorerTest {
     RailPath path = RailPath.create(new Vector(0.2, 0.5, 0.5), new Vector(0.8, 0.5, 0.5));
     List<String> warnings = new ArrayList<>();
     NodeToNodeEdgeExplorer explorer =
-        new NodeToNodeEdgeExplorer(world, Map.of(new RailBlockPos(1, 0, 0), OTHER), ignored -> {})
+        new NodeToNodeEdgeExplorer(
+                world, Map.of(new RailBlockPos(targetX, 0, 0), OTHER), ignored -> {})
             .warnTo(warnings::add);
     explorer.addNode(START, Set.of(new RailBlockPos(0, 0, 0)));
 
@@ -170,9 +181,11 @@ final class NodeToNodeEdgeExplorerTest {
     var edge = explorer.getExploredEdges().get(EdgeId.undirected(START, OTHER));
     assertEquals(1, edge.lengthBlocks());
     assertEquals(
-        Set.of(new RailFootprintCell(0, 0, 0), new RailFootprintCell(1, 0, 0)),
+        targetX == 0
+            ? Set.of(new RailFootprintCell(0, 0, 0))
+            : Set.of(new RailFootprintCell(0, 0, 0), new RailFootprintCell(1, 0, 0)),
         edge.footprint().cells());
     assertTrue(edge.footprint().complete());
-    assertEquals(1, warnings.size(), "两个方向重复发现同一区间，仍只告警一次");
+    assertEquals(expectedWarnings, warnings.size(), "相邻轨道不告警；真实共享锚点两个方向只告警一次");
   }
 }

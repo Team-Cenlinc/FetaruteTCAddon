@@ -48,6 +48,7 @@ import org.junit.jupiter.api.Test;
 
 /** refresh/extend 收尾前的核验，以及构建激活失败时的续跑状态处理。 */
 final class FtaGraphCommandIncrementalGuardsTest {
+  @org.junit.jupiter.api.io.TempDir java.nio.file.Path pluginFolder;
 
   @Test
   void extendRefusesWhenTheOccupancyManagerIsNotReady() throws Exception {
@@ -183,8 +184,9 @@ final class FtaGraphCommandIncrementalGuardsTest {
     verify(notifier).onRecovered(world);
   }
 
-  private static FetaruteTCAddon plugin() {
+  private FetaruteTCAddon plugin() {
     FetaruteTCAddon plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
     return plugin;
   }

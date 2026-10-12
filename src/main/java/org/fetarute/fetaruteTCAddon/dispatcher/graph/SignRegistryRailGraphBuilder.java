@@ -110,7 +110,8 @@ public final class SignRegistryRailGraphBuilder implements RailGraphBuilder {
       nodesById.put(node.id(), node);
 
       RailBlockPos center = new RailBlockPos(info.x(), info.y(), info.z());
-      Set<RailBlockPos> anchors = railAccess.findNearestRailBlocks(center, anchorSearchRadius);
+      Set<RailBlockPos> anchors =
+          railAccess.findNodeRailAnchors(center, def.nodeType(), anchorSearchRadius);
       if (anchors.isEmpty()) {
         debugLogger.accept(
             "图构建：节点附近未找到轨道锚点: node=" + def.nodeId().value() + " @ " + info.locationText());

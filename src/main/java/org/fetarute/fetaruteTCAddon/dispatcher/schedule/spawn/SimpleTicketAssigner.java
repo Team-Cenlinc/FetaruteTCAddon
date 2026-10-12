@@ -1890,14 +1890,14 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private java.util.OptionalLong resolveLayoverFallbackTimeoutSeconds(SpawnService service) {
-    if (service == null || service.baseHeadway() == null) {
+    if (service == null || service.baseHeadway().isEmpty()) {
       return java.util.OptionalLong.empty();
     }
     double multiplier = configManager.current().spawnSettings().layoverFallbackMultiplier();
     if (multiplier <= 0D) {
       return java.util.OptionalLong.empty();
     }
-    long baselineSeconds = Math.max(1L, service.baseHeadway().getSeconds());
+    long baselineSeconds = Math.max(1L, service.baseHeadway().orElseThrow().getSeconds());
     long timeoutSeconds = (long) Math.ceil(baselineSeconds * multiplier);
     if (timeoutSeconds <= 0L) {
       return java.util.OptionalLong.empty();
@@ -2527,9 +2527,12 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    */
   private static int estimateRouteTargetTrains(
       SpawnService service, Route routeEntity, RouteDefinition route) {
+    if (service != null && service.baseHeadway().isEmpty()) {
+      return 0;
+    }
     long headwaySeconds =
-        service != null && service.baseHeadway() != null
-            ? Math.max(1L, service.baseHeadway().getSeconds())
+        service != null && service.baseHeadway().isPresent()
+            ? Math.max(1L, service.baseHeadway().orElseThrow().getSeconds())
             : 60L;
     long runtimeSeconds =
         routeEntity != null

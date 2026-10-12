@@ -570,7 +570,10 @@ public final class FtaDepotCommand {
                   "route",
                   service.routeCode(),
                   "headway",
-                  formatDuration(service.baseHeadway()),
+                  service
+                      .baseHeadway()
+                      .map(value -> formatDuration(value))
+                      .orElse(locale.text("command.spawn.dispatch-by-operation")),
                   "depots",
                   SpawnScheduleDiagnostics.depotCandidatesText(provider, service))));
     }

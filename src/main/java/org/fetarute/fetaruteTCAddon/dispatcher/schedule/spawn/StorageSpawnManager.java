@@ -212,7 +212,10 @@ public final class StorageSpawnManager
       }
       ServiceState state = states.get(ticket.service().key());
       if (state != null && state.nextDueAt == null) {
-        state.nextDueAt = restoreBase.plus(ticket.service().baseHeadway());
+        ticket
+            .service()
+            .baseHeadway()
+            .ifPresent(headway -> state.nextDueAt = restoreBase.plus(headway));
       }
     }
     globalSequence = Math.max(globalSequence, safeSnapshot.nextSequence());
@@ -255,14 +258,14 @@ public final class StorageSpawnManager
     Instant cutoff = now.plus(horizon);
     List<SpawnTicket> out = new ArrayList<>();
     for (SpawnService service : planSnapshot.services()) {
-      if (service == null) {
+      if (service == null || service.baseHeadway().isEmpty()) {
         continue;
       }
       Instant nextDueAt = resolveForecastStart(service, now);
       if (nextDueAt.isAfter(cutoff)) {
         continue;
       }
-      Duration headway = service.baseHeadway();
+      Duration headway = service.baseHeadway().orElseThrow();
       Instant due = nextDueAt;
       int count = 0;
       long seq = 0;
@@ -385,7 +388,7 @@ public final class StorageSpawnManager
       nextDueAt = initialDueAt(service, now);
     }
     if (nextDueAt.isBefore(now)) {
-      nextDueAt = alignToNextSlot(nextDueAt, now, service.baseHeadway());
+      nextDueAt = alignToNextSlot(nextDueAt, now, service.baseHeadway().orElseThrow());
     }
     return nextDueAt;
   }
@@ -452,7 +455,7 @@ public final class StorageSpawnManager
    * <p>票据追赶由外层轮转多轮完成，这样在 {@code maxGeneratePerTick} 较小时，长期积压的第一条服务不会独占全部生成预算。
    */
   private boolean tryGenerateOneTicket(SpawnService service, Instant now) {
-    if (service == null) {
+    if (service == null || service.baseHeadway().isEmpty()) {
       return false;
     }
     ServiceState state = states.computeIfAbsent(service.key(), key -> new ServiceState());
@@ -476,7 +479,7 @@ public final class StorageSpawnManager
             Optional.empty());
     queue.add(ticket);
     state.backlog++;
-    state.nextDueAt = dueAt.plus(service.baseHeadway());
+    state.nextDueAt = dueAt.plus(service.baseHeadway().orElseThrow());
     return true;
   }
 
@@ -654,6 +657,22 @@ public final class StorageSpawnManager
     Map<String, List<RouteSelection>> byGroup = new HashMap<>();
     for (RouteSelection selection : selections) {
       if (selection == null) {
+        continue;
+      }
+      if (RouteDispatchMetadata.enabled(selection.route())) {
+        services.add(
+            new SpawnService(
+                new SpawnServiceKey(selection.route().id()),
+                company.id(),
+                company.code(),
+                operator.id(),
+                operator.code(),
+                line.id(),
+                line.code(),
+                selection.route().id(),
+                selection.route().code(),
+                Optional.empty(),
+                selection.depotNodeId()));
         continue;
       }
       String group = resolveCirculationGroupKey(line, selection);

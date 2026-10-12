@@ -152,7 +152,7 @@ public final class CapacityReport {
       for (TimetableTrip trip : table.trips()) {
         tripsById.put(trip.id(), trip);
       }
-      Set<UUID> returnRouteIds = TimetableOccupancyProjector.returnRouteIdsOf(table);
+      Set<UUID> legRouteIds = TimetableOccupancyProjector.legRouteIdsOf(table);
       for (VehicleDuty duty : table.duties()) {
         List<TimetableTrip> trips = new ArrayList<>();
         Map<String, TimetableTrip> byCode = new HashMap<>();
@@ -168,7 +168,7 @@ public final class CapacityReport {
                 duty,
                 trips,
                 profiles,
-                returnRouteIds,
+                legRouteIds,
                 table.serviceStartSecondOfDay(),
                 zeroSecondOfDay);
         Vehicle vehicle = new Vehicle();

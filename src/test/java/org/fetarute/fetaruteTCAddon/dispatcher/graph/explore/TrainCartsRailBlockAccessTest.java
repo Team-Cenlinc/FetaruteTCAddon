@@ -26,6 +26,65 @@ import org.mockito.MockedStatic;
 /** 剪枝必须重新发现节点关联牌子，不受 TrainCarts 尚未刷新的轨道缓存影响。 */
 final class TrainCartsRailBlockAccessTest {
 
+  /** 关联失效必须返回缺锚点，不能用平行股道代替，也不能加载区块。 */
+  @Test
+  void missingSignAssociationDoesNotFallBackToNearbyTracks() {
+    World world = mock(World.class);
+    when(world.isChunkLoaded(0, 0)).thenReturn(true);
+    Block block = mock(Block.class);
+    when(world.getBlockAt(2, 64, 2)).thenReturn(block);
+    when(block.getState()).thenReturn(mock(Sign.class));
+    var access = org.mockito.Mockito.spy(new TrainCartsRailBlockAccess(world));
+    try (MockedStatic<RailLookup> lookup = mockStatic(RailLookup.class)) {
+      lookup.when(() -> RailLookup.discoverRailPieceFromSign(block)).thenReturn(RailPiece.NONE);
+      assertTrue(
+          access
+              .findNodeRailAnchors(
+                  new RailBlockPos(2, 64, 2),
+                  org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.WAYPOINT,
+                  4)
+              .isEmpty());
+      verify(access, never()).findNearestRailBlocks(org.mockito.ArgumentMatchers.any(), anyInt());
+    }
+    assertTrue(
+        access
+            .findNodeRailAnchors(
+                new RailBlockPos(64, 64, 2),
+                org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.WAYPOINT,
+                4)
+            .isEmpty());
+    verify(world, never()).getBlockAt(64, 64, 2);
+  }
+
+  /** 牌子虽离另一股道更近，锚点仍必须是 TC 认定的轨道，不能桥接平行线路。 */
+  @Test
+  void nodeAnchorUsesSignAssociationInsteadOfTheClosestParallelTrack() {
+    World world = mock(World.class);
+    when(world.isChunkLoaded(0, 0)).thenReturn(true);
+    Block signBlock = mock(Block.class);
+    when(world.getBlockAt(2, 64, 2)).thenReturn(signBlock);
+    when(signBlock.getState()).thenReturn(mock(Sign.class));
+    Block linkedRail = mock(Block.class);
+    when(linkedRail.getX()).thenReturn(5);
+    when(linkedRail.getY()).thenReturn(66);
+    when(linkedRail.getZ()).thenReturn(2);
+    RailPiece piece = mock(RailPiece.class);
+    when(piece.block()).thenReturn(linkedRail);
+    TrainCartsRailBlockAccess access =
+        org.mockito.Mockito.spy(new TrainCartsRailBlockAccess(world));
+    org.mockito.Mockito.doReturn(false).when(access).isRail(org.mockito.ArgumentMatchers.any());
+    org.mockito.Mockito.doReturn(true).when(access).isRail(new RailBlockPos(2, 65, 2));
+    try (MockedStatic<RailLookup> lookup = mockStatic(RailLookup.class)) {
+      lookup.when(() -> RailLookup.discoverRailPieceFromSign(signBlock)).thenReturn(piece);
+      org.junit.jupiter.api.Assertions.assertEquals(
+          java.util.Set.of(new RailBlockPos(5, 66, 2)),
+          access.findNodeRailAnchors(
+              new RailBlockPos(2, 64, 2),
+              org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.WAYPOINT,
+              4));
+    }
+  }
+
   @Test
   void readsThePhysicalSignEvenWhenFreshDiscoveryReturnsAnOldTextTracker() throws Exception {
     World world = mock(World.class);

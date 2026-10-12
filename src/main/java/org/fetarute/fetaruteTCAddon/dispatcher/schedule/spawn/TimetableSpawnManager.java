@@ -91,6 +91,7 @@ public final class TimetableSpawnManager
       lastPoll = now;
       return delegated;
     }
+    timetableService.restoreDutyBindings(now);
 
     List<SpawnTicket> out = new ArrayList<>(delegated.size());
     for (SpawnTicket ticket : delegated) {
@@ -113,6 +114,12 @@ public final class TimetableSpawnManager
     if (from != null) {
       out.addAll(withoutRunningDuties(buildTimetableTickets(from, now)));
     }
+    Set<UUID> demandCreates =
+        delegate.snapshotPlan().services().stream()
+            .filter(service -> service.baseHeadway().isEmpty())
+            .map(SpawnService::routeId)
+            .collect(java.util.stream.Collectors.toSet());
+    timetableService.recoverUnboundDuties(demandCreates, now);
     out.addAll(withoutRunningDuties(buildReplacementTickets(now)));
     return List.copyOf(out);
   }
@@ -226,7 +233,7 @@ public final class TimetableSpawnManager
     }
     OwnedTicket owned = ownedTickets.remove(ticket.id());
     if (owned != null) {
-      // 派发成功会先经过 onDispatched 把意图摘掉；走到这里还有意图，说明票是被放弃的：运营票这一趟就此取消。
+      // 派发成功会先经过 onDispatched 把意图摘掉；仍有意图的弃票同步取消自身车次，包含带客出入库展示行。
       owned
           .intent()
           .ifPresent(
@@ -234,6 +241,7 @@ public final class TimetableSpawnManager
                 logAbandoned(ticket, intent);
                 owned
                     .trip()
+                    .or(() -> timetableService.legTripOfIntent(intent))
                     .ifPresent(due -> timetableService.cancelUndispatched(due, "ticket-abandoned"));
                 // 替补出库票作废：空缺退回待派（普通出库票没有空缺，这一步是空操作）。
                 timetableService.replacementAbandoned(intent);
@@ -985,14 +993,10 @@ public final class TimetableSpawnManager
     return ticket.serviceTripId().map(forecast::get);
   }
 
-  /** 一趟车对应票据的车次标识：带客回库班由交路的回库走行票开出，标识跟走行票走（交路号 + 服务日）； 其余按车次号 + 起点发车日历日。 */
+  /** 一趟车对应票据的车次标识：带客出入库由交路的走行票开出，标识跟走行票走（交路号 + 服务日）； 其余按车次号 + 起点发车日历日。 */
   private static String serviceTripIdOf(TimetableService.DueTrip due) {
-    boolean returnTrip =
-        due.timetable()
-            .routePlan(due.trip().routeId())
-            .map(plan -> plan.kind() == RouteOperationType.RETURN)
-            .orElse(false);
-    if (returnTrip) {
+    boolean legTrip = due.timetable().isLegTrip(due.trip());
+    if (legTrip) {
       Optional<String> legId =
           due.trip()
               .dutyId()
@@ -1001,7 +1005,13 @@ public final class TimetableSpawnManager
                   duty ->
                       legTicketId(
                           due.timetable().code(),
-                          duty.dutyCode() + "-" + RouteOperationType.RETURN.name(),
+                          duty.dutyCode()
+                              + "-"
+                              + due.timetable()
+                                  .routePlan(due.trip().routeId())
+                                  .orElseThrow()
+                                  .kind()
+                                  .name(),
                           due.timetable().serviceDayOf(due.trip(), due.serviceDate())));
       if (legId.isPresent()) {
         return legId.get();

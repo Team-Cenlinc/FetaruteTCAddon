@@ -176,7 +176,10 @@ public final class TimetableSetBuilder {
           lineByRoute.put(route.routeId(), member.input().lineId());
         }
         TimetableBuilder.RouteInput tagged =
-            own ? withGroup(route, groupKey(member.lineCode(), route.spawnGroup(), true)) : route;
+            own
+                ? route.withSpawnGroup(
+                    Optional.of(groupKey(member.lineCode(), route.spawnGroup(), true)))
+                : route;
         if (own || !routes.containsKey(route.routeId())) {
           routes.put(route.routeId(), tagged);
         }
@@ -412,20 +415,5 @@ public final class TimetableSetBuilder {
       }
     }
     return new ConsistFleet(consists, plans, plain, blocked, issues);
-  }
-
-  private static TimetableBuilder.RouteInput withGroup(
-      TimetableBuilder.RouteInput route, String group) {
-    return new TimetableBuilder.RouteInput(
-        route.routeId(),
-        route.routeCode(),
-        route.operationType(),
-        route.weight(),
-        route.definition(),
-        route.stops(),
-        route.depotNodeId(),
-        route.declaredAs(),
-        route.external(),
-        Optional.of(group));
   }
 }

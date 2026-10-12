@@ -98,7 +98,7 @@ public final class SchedulePlanner {
 
   private List<ServiceTrip> buildTripsForService(
       StorageProvider provider, SpawnService service, Instant windowStart, Instant windowEnd) {
-    if (service == null || service.baseHeadway().isZero() || service.baseHeadway().isNegative()) {
+    if (service == null || service.baseHeadway().isEmpty()) {
       return List.of();
     }
     Optional<Route> routeOpt = provider.routes().findById(service.routeId());
@@ -150,7 +150,7 @@ public final class SchedulePlanner {
               depotCandidates,
               maxOperationTrips,
               Optional.empty()));
-      departure = departure.plus(service.baseHeadway());
+      departure = departure.plus(service.baseHeadway().orElseThrow());
     }
     return List.copyOf(out);
   }

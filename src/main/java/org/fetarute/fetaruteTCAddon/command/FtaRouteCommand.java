@@ -65,6 +65,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.LineSpawnMetadata;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteDispatchMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRouteMetadata;
@@ -234,6 +235,13 @@ public final class FtaRouteCommand {
             .withComponent(
                 CommandComponent.<CommandSender, String>builder(
                         "spawn-enabled", StringParser.stringParser())
+                    .suggestionProvider(placeholderSuggestion("<true|false>")))
+            .build();
+    var dispatchByOperationFlag =
+        CommandFlag.<CommandSender>builder("dispatch-by-operation")
+            .withComponent(
+                CommandComponent.<CommandSender, String>builder(
+                        "dispatch-by-operation", StringParser.stringParser())
                     .suggestionProvider(placeholderSuggestion("<true|false>")))
             .build();
     var spawnWeightFlag =
@@ -755,6 +763,14 @@ public final class FtaRouteCommand {
                               Map.of("seconds", spawnGroupBaseline))
                           .clickEvent(
                               ClickEvent.suggestCommand(setPrefix + "--spawn-group-baseline ")));
+                  sender.sendMessage(
+                      locale
+                          .component(
+                              "command.route.info.dispatch-by-operation",
+                              Map.of(
+                                  "enabled", String.valueOf(RouteDispatchMetadata.enabled(route))))
+                          .clickEvent(
+                              ClickEvent.suggestCommand(setPrefix + "--dispatch-by-operation ")));
                   List<String> via = RouteViaMetadata.read(route.metadata());
                   sender.sendMessage(
                       locale
@@ -1639,6 +1655,7 @@ public final class FtaRouteCommand {
             .flag(timetableReturnRouteFlag)
             .flag(timetableReturnRouteClearFlag)
             .flag(spawnEnabledFlag)
+            .flag(dispatchByOperationFlag)
             .flag(spawnWeightFlag)
             .flag(spawnGroupFlag)
             .flag(spawnGroupClearFlag)
@@ -1680,6 +1697,7 @@ public final class FtaRouteCommand {
                           || flags.hasFlag(timetableReturnRouteFlag)
                           || flags.hasFlag(timetableReturnRouteClearFlag)
                           || flags.hasFlag(spawnEnabledFlag)
+                          || flags.hasFlag(dispatchByOperationFlag)
                           || flags.hasFlag(spawnWeightFlag)
                           || flags.hasFlag(spawnGroupFlag)
                           || flags.hasFlag(spawnGroupClearFlag)
@@ -1848,6 +1866,31 @@ public final class FtaRouteCommand {
                                         String.valueOf(flags.getValue(spawnEnabledFlag, null)))));
                             return false;
                           }
+                        }
+                        if (flags.hasFlag(dispatchByOperationFlag)) {
+                          Optional<Boolean> enabled =
+                              parseBooleanToken(flags.getValue(dispatchByOperationFlag, null));
+                          if (enabled.isEmpty()) {
+                            sender.sendMessage(
+                                locale.component(
+                                    "command.common.invalid-boolean",
+                                    Map.of(
+                                        "value",
+                                        String.valueOf(
+                                            flags.getValue(dispatchByOperationFlag, null)))));
+                            return false;
+                          }
+                          if (enabled.get()) {
+                            metadata.put(RouteDispatchMetadata.KEY, true);
+                          } else {
+                            metadata.remove(RouteDispatchMetadata.KEY);
+                          }
+                        }
+                        if (RouteDispatchMetadata.read(metadata)
+                            && !RouteDispatchMetadata.supports(operationOpt.get())) {
+                          sender.sendMessage(
+                              locale.component("command.route.set.dispatch-by-operation-type"));
+                          return false;
                         }
                         if (flags.hasFlag(spawnWeightFlag)) {
                           Integer weight = flags.getValue(spawnWeightFlag, null);
@@ -3938,6 +3981,14 @@ public final class FtaRouteCommand {
       return List.copyOf(issues);
     }
 
+    if (RouteDispatchMetadata.read(route.metadata())
+        && !RouteDispatchMetadata.supports(route.operationType())) {
+      issues.add(
+          new RouteValidationIssue("command.route.validate.dispatch-by-operation-type", Map.of()));
+    }
+    if (RouteDispatchMetadata.enabled(route)) {
+      return List.copyOf(issues);
+    }
     Optional<Integer> routeGroupBaseline = resolveValidationGroupBaselineSeconds(line, route);
     Optional<Integer> lineBaseline = line.spawnFreqBaselineSec().filter(value -> value > 0);
     if (routeGroupBaseline.isEmpty() && lineBaseline.isEmpty()) {

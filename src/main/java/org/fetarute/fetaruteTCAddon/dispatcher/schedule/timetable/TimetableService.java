@@ -113,11 +113,112 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 不按表跑的列车（叫来的车）：不匹配车次、不绑交路、不按表扣车。 */
   private volatile java.util.function.Predicate<String> unscheduledTrain = name -> false;
 
+  private TimetableDutyStore dutyStore;
+
+  /** 已发布表由异步任务重载，恢复请求必须对主线程出票可见。 */
+  private volatile boolean dutyRecoveryPending;
+
+  private boolean restoringDuties;
+
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
     this.matcher = new TripMatcher(this.debugLogger);
     this.ledger = new DutyLedger(this.debugLogger);
+    ledger.setChangeListener(this::persistDuty);
+  }
+
+  /** 设置随列车保存的交路记录。 */
+  public void setDutyStore(TimetableDutyStore store) {
+    dutyStore = store;
+    dutyRecoveryPending = store != null;
+  }
+
+  /** 恢复当前已发布表中的车辆归属和进度，必须在补车前执行。 */
+  public void restoreDutyBindings(Instant now) {
+    if (!settings.enabled() || !dutyRecoveryPending || now == null) {
+      return;
+    }
+    Map<String, String> saved = dutyStore.read();
+    restoringDuties = true;
+    try {
+      saved.forEach(
+          (name, value) ->
+              DutyRecoveryToken.parse(value).ifPresent(token -> restoreDuty(name, token, now)));
+      dutyRecoveryPending = false;
+    } finally {
+      restoringDuties = false;
+    }
+  }
+
+  private void restoreDuty(String name, DutyRecoveryToken token, Instant now) {
+    String key = keyOf(name);
+    Timetable table = snapshot.byId().get(token.key().timetableId());
+    if (key == null
+        || table == null
+        || unscheduledTrain.test(name)
+        || table.updatedAt().toEpochMilli() != token.tableVersion()
+        || ledger.bindingOf(key).isPresent()
+        || ledger.heldByOther(token.key(), key)) {
+      return;
+    }
+    LocalDate today = LocalDate.ofInstant(now, table.zoneId());
+    Optional<VehicleDuty> duty = table.duty(token.key().dutyId());
+    if (!SERVICE_DATE_OFFSETS.stream()
+            .anyMatch(offset -> today.plusDays(offset).equals(token.key().serviceDate()))
+        || duty.isEmpty()
+        || token.assignedTrips() > duty.get().tripCount()
+        || duty.get()
+            .consist()
+            .filter(consist -> !Optional.of(consist).equals(consistOfTrain.apply(name)))
+            .isPresent()) {
+      return;
+    }
+    Optional<TimetableTrip> trip =
+        token
+            .lastTrip()
+            .flatMap(table::trip)
+            .filter(last -> last.dutyId().filter(duty.get().id()::equals).isPresent());
+    if (token.lastTrip().isPresent() && trip.isEmpty()) {
+      return;
+    }
+    ledger.bind(name, key, token.key(), "persistent-restore");
+    if (trip.isPresent()) {
+      Instant departure = table.departureOnServiceDay(trip.get(), token.key().serviceDate());
+      matcher.assignExact(
+          key, name, table, trip.get(), LocalDate.ofInstant(departure, table.zoneId()), departure);
+      ledger.restoreProgress(key, duty.get(), token.assignedTrips(), trip.get().id());
+    } else if (!duty.get().tripIds().isEmpty()) {
+      ledger.restoreProgress(
+          key,
+          duty.get(),
+          token.assignedTrips(),
+          duty.get().tripIds().get(Math.min(token.assignedTrips(), duty.get().tripCount() - 1)));
+    }
+  }
+
+  /** 交路变化时保存身份与位置；退役/解绑要清标记，不能在重启后再次抢回原交路。 */
+  private void persistDuty(String key) {
+    if (dutyStore == null || restoringDuties) {
+      return;
+    }
+    Optional<String> token =
+        ledger
+            .bindingOf(key)
+            .flatMap(
+                bound ->
+                    Optional.ofNullable(snapshot.byId().get(bound.timetableId()))
+                        .map(
+                            table -> {
+                              Optional<DutyProgress> progress = ledger.progressOf(key);
+                              return new DutyRecoveryToken(
+                                      bound,
+                                      table.updatedAt().toEpochMilli(),
+                                      progress.map(DutyProgress::assignedTrips).orElse(0),
+                                      matcher.get(key).map(TimetableAssignment::tripId))
+                                  .encode();
+                            }));
+    dutyStore.write(ledger.displayName(key), token);
   }
 
   /** 更新配置；关闭时会立刻清空绑定，避免留下"已经不生效但还显示着"的状态。 */
@@ -259,6 +360,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Optional<Map<UUID, Map<Integer, String>>> plans =
           loadPlatformPlans(provider, next.timetables());
       this.snapshot = next;
+      dutyRecoveryPending = dutyStore != null;
       plans.ifPresent(loaded -> this.platformPlans = loaded);
       dropClaimsOutsideSnapshot(next);
       debugLogger.accept(
@@ -350,7 +452,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
           .flatMap(duty -> plannedPlatform(duty.tripIds().get(intent.tripIndex()), stopIndex));
       case RETURN -> returnTripOf(intent.key())
           .flatMap(due -> plannedPlatform(due.trip().id(), stopIndex));
-      case CREATE -> createLegPlan(intent.key(), Optional.empty(), stopIndex);
+      case CREATE -> legTripOf(intent.key(), RouteOperationType.CREATE)
+          .flatMap(due -> plannedPlatform(due.trip().id(), stopIndex))
+          .or(() -> createLegPlan(intent.key(), Optional.empty(), stopIndex));
     };
   }
 
@@ -373,6 +477,23 @@ public final class TimetableService implements ScheduledDeparturePlan {
         .filter(duty -> intent.tripIndex() < duty.tripIds().size())
         .flatMap(duty -> timetable.trip(duty.tripIds().get(intent.tripIndex())))
         .map(trip -> dueTrip(timetable, trip, intent.key()));
+  }
+
+  /**
+   * 出入库票自身的带客展示车次，供派车绑定与未派发取消使用。
+   *
+   * <p>与驾驶员接车使用的 {@link #tripOfIntent} 分开：出库展示行不是要接的运营首班。中途替补出库也不复用最初的展示行，避免取消已经完成的原始出库。
+   *
+   * @param intent 票据的交路意图
+   * @return 对应的展示车次；运营票、中途替补或纯走行段为空
+   */
+  public Optional<DueTrip> legTripOfIntent(TicketIntent intent) {
+    if (intent == null
+        || intent.kind() == RouteOperationType.OPERATION
+        || (intent.kind() == RouteOperationType.CREATE && intent.tripIndex() > 0)) {
+      return Optional.empty();
+    }
+    return legTripOf(intent.key(), intent.kind());
   }
 
   /**
@@ -879,6 +1000,41 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Instant at = now != null && now.isAfter(issueAt) ? now : issueAt;
       return new DueLeg(
           timetable, duty, RouteOperationType.CREATE, createRouteId, key.serviceDate(), at);
+    }
+  }
+
+  /**
+   * 恢复已开始但尚无车辆的按运营调度交路，随后由既有替补算法挑选还能赶上的班次。
+   *
+   * <p>必须先恢复真实车辆绑定再调用。原出库票仍在队列时不登记；未来交路与已经结束的交路不补车。 服务日使用本表时区并覆盖跨午夜窗口，不把已错过的首班重新出票。
+   *
+   * @param createRoutes 没有周期 headway 的本线出库服务
+   * @param now 当前时间
+   */
+  public void recoverUnboundDuties(Set<UUID> createRoutes, Instant now) {
+    if (!settings.enabled() || !settings.spawnEnabled() || createRoutes.isEmpty() || now == null) {
+      return;
+    }
+    for (Timetable timetable : snapshot.timetables()) {
+      LocalDate today = LocalDate.ofInstant(now, timetable.zoneId());
+      for (VehicleDuty duty : timetable.duties()) {
+        if (duty.createRouteId().filter(createRoutes::contains).isEmpty()) {
+          continue;
+        }
+        for (int offset : SERVICE_DATE_OFFSETS) {
+          LocalDate day = today.plusDays(offset);
+          Instant start = day.atStartOfDay(timetable.zoneId()).toInstant();
+          if (start.plusSeconds(duty.plannedStartSecondOfDay()).isAfter(now)
+              || !start.plusSeconds(duty.plannedEndSecondOfDay()).isAfter(now)) {
+            continue;
+          }
+          DutyKey key = new DutyKey(timetable.id(), duty.id(), day);
+          if (!pendingTicket.test(
+              new TicketIntent(timetable.id(), duty.id(), day, RouteOperationType.CREATE, 0))) {
+            ledger.registerUnbound(key, duty, now);
+          }
+        }
+      }
     }
   }
 
@@ -1560,13 +1716,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /**
    * 派车成功：按派出的那一班在起点（序号 0）绑定车次。
    *
-   * <p>运营票带着车次；回库票对应交路的带客回库班。折返复用的车在起点不经过门控，不在这里绑就要到第一个中途站才按时间匹配上， 首段没有车次，站牌与车内都拿不到晚点。出库走行不是车次，不绑。
+   * <p>运营票带着车次；带客出入库票绑定自身的展示车次，纯走行票不绑定。折返复用的车在起点不经过门控，不在这里绑就要到第一个中途站才按时间匹配上，首段没有车次，站牌与车内都拿不到晚点。
    *
    * <p>手动提前出的车在计划时刻之前就派出、在车库等到点才走：绑定时的偏差按计划时刻算（不记成提前）。
    *
    * @param trainName 派出的列车（折返改名后的新名字）
    * @param intent 票据的交路意图
-   * @param trip 运营票的车次；回库票为空
+   * @param trip 运营票的车次；出入库票为空，按意图查询自身展示车次
    */
   public void bindDispatchedTrip(String trainName, TicketIntent intent, Optional<DueTrip> trip) {
     if (!settings.enabled() || intent == null) {
@@ -1576,10 +1732,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (key == null) {
       return;
     }
-    Optional<DueTrip> due =
-        trip.isPresent()
-            ? trip
-            : intent.kind() == RouteOperationType.RETURN ? returnTripOf(intent.key()) : trip;
+    Optional<DueTrip> due = trip.or(() -> legTripOfIntent(intent));
     Instant now = clock.get();
     due.ifPresent(
         dispatched ->
@@ -1599,6 +1752,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
                           dispatched.serviceDate());
                       ledger.startOrAdvance(key, dispatched.timetable(), dispatched.trip());
                     }));
+    if (due.isEmpty() && intent.kind() == RouteOperationType.CREATE) {
+      Optional.ofNullable(snapshot.byId().get(intent.timetableId()))
+          .flatMap(table -> table.duty(intent.dutyId()))
+          .filter(duty -> !duty.tripIds().isEmpty() && intent.tripIndex() < duty.tripCount())
+          .ifPresent(
+              duty ->
+                  ledger.restoreProgress(
+                      key, duty, intent.tripIndex(), duty.tripIds().get(intent.tripIndex())));
+    }
   }
 
   /**
@@ -1767,19 +1929,18 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   /** 交路的带客回库班（RETURN 线路上、属于这个交路的车次）。 */
   private Optional<DueTrip> returnTripOf(DutyKey key) {
+    return legTripOf(key, RouteOperationType.RETURN);
+  }
+
+  /** 查询交路出入库展示车次，日期按实际发车所在的日历日计算。 */
+  private Optional<DueTrip> legTripOf(DutyKey key, RouteOperationType kind) {
     Timetable timetable = snapshot.byId().get(key.timetableId());
     if (timetable == null) {
       return Optional.empty();
     }
     return timetable
         .duty(key.dutyId())
-        .flatMap(VehicleDuty::returnRouteId)
-        .flatMap(
-            returnRoute ->
-                timetable.trips().stream()
-                    .filter(trip -> trip.routeId().equals(returnRoute))
-                    .filter(trip -> trip.dutyId().filter(key.dutyId()::equals).isPresent())
-                    .findFirst())
+        .flatMap(duty -> timetable.legTrip(duty, kind))
         .map(trip -> dueTrip(timetable, trip, key));
   }
 
@@ -1824,6 +1985,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
   public void release(String trainName, String reason) {
     String key = keyOf(trainName);
     if (key == null) {
+      return;
+    }
+    if (StationStopObserver.RELEASE_UNLOADED.equals(reason)) {
+      // 卸载只是转入 TrainCarts 离线编组，归属与恢复标记均保留，不能签发缺车替补。
       return;
     }
     Optional<TimetableAssignment> released = matcher.release(key, reason);
@@ -2145,13 +2310,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
     List<DueTrip> out = new ArrayList<>();
     for (Timetable timetable : snapshot.timetables()) {
       for (TimetableTrip trip : timetable.trips()) {
-        // 带客的回库班有 trip 行，但它由 duty 的回库走行票出车，这里不再出运营票。
-        boolean returnTrip =
-            timetable
-                .routePlan(trip.routeId())
-                .map(plan -> plan.kind() == RouteOperationType.RETURN)
-                .orElse(false);
-        if (returnTrip) {
+        // 带客出入库由交路两端出票，这里不能再出一张运营票。
+        if (timetable.isLegTrip(trip)) {
           continue;
         }
         for (int offset : SERVICE_DATE_OFFSETS) {

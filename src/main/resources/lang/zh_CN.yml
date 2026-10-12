@@ -400,6 +400,7 @@ command:
       hover-debug-path: "<gray>点击填入：</gray> <white>/fta occupancy debug acquire path </white>\n<dark_aqua>参数： \"from\" \"to\"</dark_aqua>"
 
   spawn:
+    dispatch-by-operation: "按运营交路调度"
     not-ready: "<prefix> <red>发车管理器未就绪</red>"
     consist:
       header: "<prefix> <dark_aqua>车型份额</dark_aqua> <gray>（已发班次只记在内存，重启或方案修改后从零计）</gray>"
@@ -521,6 +522,8 @@ command:
       hover-extend: "<gray>点击填入：</gray> <white>/fta graph extend</white>\n<dark_aqua>只往图里还没探索过的方向增补，不改已有区间</dark_aqua>\n<gray>新牌子落在已有区间中间时会拒绝，请改用 build</gray>"
       entry-continue: "<gray>/fta graph continue</gray> <white>-</white> <dark_aqua>续跑 here 扩张构建</dark_aqua>"
       hover-continue: "<gray>点击填入：</gray> <white>/fta graph continue </white>\n<dark_aqua>继续 here 扩张构建</dark_aqua>"
+      entry-activate: "<gray>/fta graph activate</gray> <white>-</white> <dark_aqua>重试已保存候选图的激活</dark_aqua>"
+      hover-activate: "<gray>占用释放后激活候选，仍执行联锁保护校验</gray>"
       entry-status: "<gray>/fta graph status</gray> <white>-</white> <dark_aqua>查看构建进度</dark_aqua>"
       hover-status: "<gray>点击执行：</gray> <white>/fta graph status</white>\n<dark_aqua>查看构建进度</dark_aqua>"
       entry-cancel: "<gray>/fta graph cancel</gray> <white>-</white> <dark_aqua>取消构建任务</dark_aqua>"
@@ -552,6 +555,12 @@ command:
       entry-portal: "<gray>/fta graph portal</gray> <white>-</white> <dark_aqua>跨世界传送门连接</dark_aqua>"
       hover-portal: "<gray>点击填入：</gray> <white>/fta graph portal </white>\n<dark_aqua>子命令：</dark_aqua> <white>list/scan/link/unlink</white>\n<dark_aqua>scan 按 MyWorlds 自动连接；link/unlink 手动连接或删除（节点 ID 可按 Tab 补全）</dark_aqua>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
+    pending:
+      saved: "<prefix> <yellow>待激活图</yellow> <gray>nodes=<nodes>, edges=<edges>, built_at=<built_at>；/fta graph activate</gray>"
+      none: "<prefix> <gray>当前世界没有待激活图</gray>"
+      outdated: "<prefix> <yellow>候选图基线已变化，请重新构建；旧候选不会覆盖后来更新的图或节点</yellow>"
+      failed: "<prefix> <red>候选图保存或激活失败</red> <gray><error></gray>"
+      activated: "<prefix> <dark_aqua>候选调度图已激活</dark_aqua>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"
       running: "<prefix> <gray>当前世界已有调度图构建任务在运行</gray> <dark_aqua>请稍后或 /fta graph cancel</dark_aqua>"
@@ -564,7 +573,7 @@ command:
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
-      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>当前仍有列车占用 claim；请先停车并清空占用后重试，旧快照保持生效</gray>"
+      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>候选图已保存，旧快照保持生效；占用安全释放后使用 /fta graph activate 重试</gray>"
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
@@ -933,6 +942,7 @@ command:
       spawn-pattern: "<gray>车型/编组：</gray> <dark_aqua><pattern></dark_aqua>"
       consist-plan: "<gray>编组方案：</gray> <dark_aqua><plan></dark_aqua>"
       spawn-group: "<gray>交路组：</gray> <dark_aqua><group></dark_aqua>"
+      dispatch-by-operation: "<gray>随运营交路出入库：</gray> <dark_aqua><enabled></dark_aqua> <gray>（保留沿途停站，无独立频率）</gray>"
       spawn-group-baseline: "<gray>发车基线（秒）：</gray> <dark_aqua><seconds></dark_aqua>"
       via: "<gray>经由：</gray> <dark_aqua><via></dark_aqua>"
       via-auto: "未配置（站台屏按换乘站、大站与直通站推断）"
@@ -974,12 +984,13 @@ command:
     set:
       success: "<prefix> <dark_aqua>运行图已更新：</dark_aqua><white><code></white>"
       batch-success: "<prefix> <dark_aqua>已批量更新 <white><count></white> 条运行图：</dark_aqua><white><codes></white>"
+      dispatch-by-operation-type: "<prefix> <red>--dispatch-by-operation 仅允许 CREATE/RETURN；请先关闭该设置再改为 OPERATION。</red>"
       batch-partial: "<prefix> <yellow>批量更新中途停止，以下运行图已经更新：</yellow><white><codes></white>"
       batch-type:
         create: "<code>（出库）"
         return: "<code>（回送）"
-      wildcard-flags: "<prefix> <red>运行图写成通配（* 代表任意个字符，? 代表一个字符）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
-      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
+      wildcard-flags: "<prefix> <red>运行图写成通配（* 代表任意个字符，? 代表一个字符）批量设置时，只能改各条运行图取同一个值的出车设置：--spawn、--spawn-clear、--consist-plan、--consist-plan-clear、--spawn-enabled、--dispatch-by-operation、--spawn-weight、--spawn-group、--spawn-group-clear；不能同时用</red> <white><flags></white>"
+      noop: "<prefix> <gray>未提供任何更新字段（可用 --name/--secondary/--pattern/--operation/--runtime/--distance/--spawn/--spawn-clear/--spawn-enabled/--dispatch-by-operation/--spawn-weight/--spawn-group/--spawn-group-clear/--spawn-group-baseline/--spawn-group-baseline-clear/--via/--via-clear）</gray>"
     delete:
       success: "<prefix> <dark_aqua>运行图已删除：</dark_aqua><white><code></white>"
     define:
@@ -1029,6 +1040,7 @@ command:
       entry: "<prefix> <gray>[<route>]</gray> <error>"
       more: "<prefix> <gray>已省略 <white><count></white> 条问题</gray>"
       spawn-group-missing: "<prefix> <red>运行图绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"
+      dispatch-by-operation-type: "<prefix> <red>随运营交路调度仅允许 CREATE/RETURN。</red>"
       spawn-baseline-missing: "<prefix> <red>交路组与线路都缺少发车基线</red> <gray>(group=<white><group></white>)</gray>"
       spawn-weight-missing: "<prefix> <red>同一交路组有多条运营运行图，但本运行图未设置出车权重（spawn_weight）</red> <gray>(group=<white><group></white>)</gray>"
       create-missing-cret: "<prefix> <red>出库运行图的首个停靠点必须写 CRET</red>"
