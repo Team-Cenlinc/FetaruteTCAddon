@@ -56,4 +56,14 @@ class SpawnDirectiveParserTest {
         SpawnDirectiveParser.effectiveDepotSpec("OP:D:DEP:1", Optional.of("OP:D:OTHER:1")));
     assertEquals(Optional.empty(), SpawnDirectiveParser.effectiveDepotSpec(" ", Optional.empty()));
   }
+
+  /** DYNAMIC 车库写法只认带前缀、能解析、类型为 D 的；派票、出车与车库排队共用。 */
+  @Test
+  void dynamicDepotRequiresAValidDepotSpec() {
+    assertEquals(true, SpawnDirectiveParser.dynamicDepot("DYNAMIC:OP:D:DEP:[1:3]").isPresent());
+    assertEquals(true, SpawnDirectiveParser.dynamicDepot("dynamic:op:d:dep").isPresent());
+    assertEquals(false, SpawnDirectiveParser.dynamicDepot("DYNAMIC:OP:S:STA").isPresent());
+    assertEquals(false, SpawnDirectiveParser.dynamicDepot("DYNAMIC:OP:D:DEP:[]").isPresent());
+    assertEquals(false, SpawnDirectiveParser.dynamicDepot("OP:D:DEP:1").isPresent());
+  }
 }

@@ -226,7 +226,8 @@ public final class SchedulePlanner {
     }
     String normalized = nodeId.trim();
     if (normalized.toUpperCase(Locale.ROOT).startsWith("DYNAMIC:")) {
-      normalized = normalized.substring("DYNAMIC:".length());
+      return DynamicStopMatcher.parseDynamicSpec(normalized)
+          .map(DynamicStopMatcher.DynamicSpec::nodeName);
     }
     String[] parts = normalized.split(":");
     if (parts.length < 3) {

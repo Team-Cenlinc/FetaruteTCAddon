@@ -198,10 +198,8 @@ public final class DepotSpawnScheduler implements DepotDispatchCoordinator {
       return false;
     }
     String normalized = key.trim().toLowerCase(Locale.ROOT);
-    if (normalized.startsWith("dynamic:")) {
-      String rest = normalized.substring("dynamic:".length());
-      String[] parts = rest.split(":", 4);
-      return parts.length >= 2 && "d".equals(parts[1].trim());
+    if (SpawnDirectiveParser.isDynamicTarget(normalized)) {
+      return SpawnDirectiveParser.dynamicDepot(normalized).isPresent();
     }
     String[] parts = normalized.split(":", 4);
     return parts.length >= 2 && "d".equals(parts[1].trim());

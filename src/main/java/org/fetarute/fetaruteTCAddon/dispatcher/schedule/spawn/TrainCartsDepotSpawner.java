@@ -972,9 +972,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
    * <p>解析 "DYNAMIC:OP:D:DEPOT" 或 "DYNAMIC:OP:D:DEPOT:[1:3]" 格式， 选择第一个可用（空闲）的轨道。
    */
   private Optional<DepotInfo> resolveDynamicDepotInfo(String dynamicSpec) {
-    var parsed =
-        DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
-            .filter(DynamicStopMatcher.DynamicSpec::isDepot);
+    var parsed = SpawnDirectiveParser.dynamicDepot(dynamicSpec);
     if (parsed.isEmpty()) {
       debugLogger.accept("DYNAMIC depot: 定义无效 spec=" + dynamicSpec);
       return Optional.empty();
@@ -986,11 +984,9 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
             .filter(info -> info.definition().nodeType() == NodeType.DEPOT)
             .filter(info -> DynamicStopMatcher.matches(info.definition().nodeId(), spec))
             .sorted(
-                java.util.Comparator.comparingInt(
-                        (SignNodeRegistry.SignNodeInfo info) ->
-                            DynamicStopMatcher.trackNumber(info.definition().nodeId())
-                                .orElseThrow())
-                    .thenComparing(info -> info.definition().nodeId().value()))
+                java.util.Comparator.comparing(
+                    (SignNodeRegistry.SignNodeInfo info) -> info.definition().nodeId(),
+                    DynamicStopMatcher.TRACK_ORDER))
             .toList();
     if (inRange.isEmpty()) {
       debugLogger.accept("DYNAMIC depot: 集合内无节点 spec=" + dynamicSpec);

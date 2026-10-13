@@ -94,6 +94,20 @@ public final class SpawnDirectiveParser {
   }
 
   /**
+   * DYNAMIC 车库写法：带 {@code DYNAMIC:} 前缀、能按统一语法解析且类型为 D。派票、出车与车库排队都经这里认写法。
+   *
+   * @param target 出库点写法
+   * @return 解析出的车库声明；不是 DYNAMIC、写法无效或不是车库时为空
+   */
+  public static Optional<DynamicStopMatcher.DynamicSpec> dynamicDepot(String target) {
+    if (target == null || !isDynamicTarget(target.trim())) {
+      return Optional.empty();
+    }
+    return DynamicStopMatcher.parseDynamicSpec(target)
+        .filter(DynamicStopMatcher.DynamicSpec::isDepot);
+  }
+
+  /**
    * 票上已选出库点与交路出库写法合起来，得出这张票实际用的出库写法。派票器与出车器共用这一口径，不能一边放行、一边拒绝。
    *
    * <p>已选值缺省或空白时用交路写法。交路写法是 DYNAMIC 车库时它本身必须有效，已选的具体股道还必须在它的允许集合内； 已选值仍是 DYNAMIC（线路车库池里的 DYNAMIC
@@ -111,9 +125,7 @@ public final class SpawnDirectiveParser {
       return Optional.empty();
     }
     if (routeDepot != null && isDynamicTarget(routeDepot.trim())) {
-      Optional<DynamicStopMatcher.DynamicSpec> source =
-          DynamicStopMatcher.parseDynamicSpec(routeDepot)
-              .filter(DynamicStopMatcher.DynamicSpec::isDepot);
+      Optional<DynamicStopMatcher.DynamicSpec> source = dynamicDepot(routeDepot);
       if (source.isEmpty()
           || (chosen.isPresent()
               && !isDynamicTarget(spec)

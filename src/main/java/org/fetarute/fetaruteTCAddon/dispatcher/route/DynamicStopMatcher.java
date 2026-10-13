@@ -72,6 +72,11 @@ public final class DynamicStopMatcher {
   private static final Pattern DYNAMIC_DIRECTIVE_PATTERN =
       Pattern.compile("(?:^|\\s)DYNAMIC(?:$|[\\s:])", Pattern.CASE_INSENSITIVE);
 
+  /** 股道节点的统一顺序：按数字股道号，再按节点名（10 道排在 2 道之后）；选台、编表、出车与派票共用。 */
+  public static final Comparator<NodeId> TRACK_ORDER =
+      Comparator.comparingInt((NodeId node) -> trackNumber(node).orElse(Integer.MAX_VALUE))
+          .thenComparing(NodeId::value);
+
   /** 候选股道数的安全上限，防止规范范围写得过大时逐条寻路卡服。 */
   public static final int MAX_TRACK_CANDIDATES = 20;
 
@@ -175,12 +180,7 @@ public final class DynamicStopMatcher {
 
   private static java.util.stream.Stream<NodeId> sortedMatchingNodes(
       DynamicSpec spec, java.util.stream.Stream<NodeId> nodes) {
-    return nodes
-        .filter(node -> matches(node, spec))
-        .distinct()
-        .sorted(
-            Comparator.comparingInt((NodeId node) -> trackNumber(node).orElseThrow())
-                .thenComparing(NodeId::value));
+    return nodes.filter(node -> matches(node, spec)).distinct().sorted(TRACK_ORDER);
   }
 
   /** 四段行为节点中的正整数股道号；五段咽喉不具有停靠资格。 */

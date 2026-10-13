@@ -46,6 +46,20 @@ class DynamicStopMatcherTest {
         DynamicStopMatcher.parseDynamicSpec(raw).orElseThrow(), nodes);
   }
 
+  /** 股道按数字排序：10 道在 2 道之后；选台、出车与派票共用这一顺序。 */
+  @Test
+  void tracksAreOrderedNumerically() {
+    java.util.List<NodeId> nodes =
+        new java.util.ArrayList<>(
+            java.util.List.of(
+                NodeId.of("OP:D:DEP:10"), NodeId.of("OP:D:DEP:2"), NodeId.of("OP:D:DEP:1")));
+    nodes.sort(DynamicStopMatcher.TRACK_ORDER);
+    assertEquals(
+        java.util.List.of(
+            NodeId.of("OP:D:DEP:1"), NodeId.of("OP:D:DEP:2"), NodeId.of("OP:D:DEP:10")),
+        nodes);
+  }
+
   /** 固定声明节点与同站容错不能覆盖明确的 DYNAMIC 股道限制。 */
   @Test
   void dynamicRestrictionOverridesFixedWaypointTolerance() {

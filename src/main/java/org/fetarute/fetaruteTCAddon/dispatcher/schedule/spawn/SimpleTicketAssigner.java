@@ -5004,13 +5004,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private static boolean isDynamicDepotSpec(String dynamicSpec) {
-    if (dynamicSpec == null
-        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
-      return false;
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    return parts.length >= 2 && "D".equalsIgnoreCase(parts[1]);
+    return SpawnDirectiveParser.dynamicDepot(dynamicSpec).isPresent();
   }
 
   /**
@@ -5790,8 +5784,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 两种常用写法。后者需要按轨道号过滤，否则负载统计与实际发车会把同名 depot 的其它股道错误纳入候选。
    */
   private static boolean matchesDynamicDepotNode(String dynamicSpec, String nodeId) {
-    return DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
-        .filter(DynamicStopMatcher.DynamicSpec::isDepot)
+    return SpawnDirectiveParser.dynamicDepot(dynamicSpec)
         .filter(spec -> DynamicStopMatcher.matches(nodeId, spec))
         .isPresent();
   }
@@ -6303,20 +6296,10 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     return Optional.of(candidates.get(Math.floorMod(cursor, candidates.size())));
   }
 
+  /** DYNAMIC 车库写法在牌子注册表里匹配的节点，按股道号数字排序（与出车器、运行时选台一致）。 */
   private List<SignNodeRegistry.SignNodeInfo> findDynamicDepotNodeInfos(String dynamicSpec) {
-    if (dynamicSpec == null
-        || !dynamicSpec.toUpperCase(java.util.Locale.ROOT).startsWith("DYNAMIC:")) {
-      return List.of();
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return List.of();
-    }
-    String operatorCode = parts[0].trim();
-    String nodeType = parts[1].trim();
-    String nodeName = parts[2].trim();
-    if (operatorCode.isEmpty() || nodeType.isEmpty() || nodeName.isEmpty()) {
+    Optional<DynamicStopMatcher.DynamicSpec> spec = SpawnDirectiveParser.dynamicDepot(dynamicSpec);
+    if (spec.isEmpty()) {
       return List.of();
     }
     Map<String, SignNodeRegistry.SignNodeInfo> infos = signNodeRegistry.snapshotInfos();
@@ -6325,14 +6308,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     }
     return infos.values().stream()
         .filter(info -> info != null && info.definition() != null)
-        .filter(
-            info -> {
-              String nodeIdValue = info.definition().nodeId().value();
-              return matchesDynamicDepotNode(dynamicSpec, nodeIdValue);
-            })
+        .filter(info -> DynamicStopMatcher.matches(info.definition().nodeId(), spec.get()))
         .sorted(
             Comparator.comparing(
-                info -> info.definition().nodeId().value(), String.CASE_INSENSITIVE_ORDER))
+                (SignNodeRegistry.SignNodeInfo info) -> info.definition().nodeId(),
+                DynamicStopMatcher.TRACK_ORDER))
         .toList();
   }
 }
