@@ -31,6 +31,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
@@ -2649,24 +2650,8 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   }
 
   private static Optional<String> parseDynamicDirectionKey(String dynamicSpec) {
-    if (dynamicSpec == null || dynamicSpec.isBlank()) {
-      return Optional.empty();
-    }
-    if (!dynamicSpec.startsWith("dynamic:")) {
-      return Optional.empty();
-    }
-    String rest = dynamicSpec.substring("dynamic:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    String operator = parts[0].trim();
-    String type = parts[1].trim();
-    String name = parts[2].trim();
-    if (operator.isBlank() || type.isBlank() || name.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(operator + ":" + type + ":" + name);
+    return DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
+        .map(DynamicStopMatcher.DynamicSpec::toTerminalKey);
   }
 
   /** 定期清理长时间未更新的拥挤门控状态，避免内存累积。 */
@@ -5802,85 +5787,11 @@ public final class SimpleTicketAssigner implements TicketAssigner {
    * 两种常用写法。后者需要按轨道号过滤，否则负载统计与实际发车会把同名 depot 的其它股道错误纳入候选。
    */
   private static boolean matchesDynamicDepotNode(String dynamicSpec, String nodeId) {
-    if (dynamicSpec == null
-        || nodeId == null
-        || !SpawnDirectiveParser.isDynamicTarget(dynamicSpec)) {
-      return false;
-    }
-    String rest = dynamicSpec.substring("DYNAMIC:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3 || !"D".equalsIgnoreCase(parts[1].trim())) {
-      return false;
-    }
-    String prefix = parts[0].trim() + ":" + parts[1].trim() + ":" + parts[2].trim() + ":";
-    if (!nodeId.toUpperCase(Locale.ROOT).startsWith(prefix.toUpperCase(Locale.ROOT))) {
-      return false;
-    }
-    if (parts.length < 4 || parts[3].isBlank()) {
-      return true;
-    }
-    Optional<TrackRange> range = parseTrackRange(parts[3]);
-    if (range.isEmpty()) {
-      return true;
-    }
-    int track = extractTrackNumber(nodeId);
-    return track >= range.get().from() && track <= range.get().to();
+    return DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
+        .filter(DynamicStopMatcher.DynamicSpec::isDepot)
+        .filter(spec -> DynamicStopMatcher.matches(nodeId, spec))
+        .isPresent();
   }
-
-  /**
-   * 解析 DYNAMIC 轨道范围。
-   *
-   * <p>当前仅支持单股道（{@code 2}）和闭区间（{@code [1:3]}）。解析失败返回 empty，上层会按“无范围限制” 处理，以兼容历史上未写范围的 DYNAMIC
-   * depot。
-   */
-  private static Optional<TrackRange> parseTrackRange(String rawRange) {
-    if (rawRange == null || rawRange.isBlank()) {
-      return Optional.empty();
-    }
-    String trimmed = rawRange.trim();
-    if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
-      String inner = trimmed.substring(1, trimmed.length() - 1);
-      int colon = inner.indexOf(':');
-      if (colon > 0) {
-        try {
-          int from = Integer.parseInt(inner.substring(0, colon).trim());
-          int to = Integer.parseInt(inner.substring(colon + 1).trim());
-          return Optional.of(new TrackRange(Math.min(from, to), Math.max(from, to)));
-        } catch (NumberFormatException ignored) {
-          return Optional.empty();
-        }
-      }
-    }
-    try {
-      int track = Integer.parseInt(trimmed);
-      return Optional.of(new TrackRange(track, track));
-    } catch (NumberFormatException ignored) {
-      return Optional.empty();
-    }
-  }
-
-  /**
-   * 从 NodeId 最后一段提取轨道号。
-   *
-   * <p>Depot 行为节点的轨道号位于最后一段；若传入的是无法识别的咽喉/自定义节点，则返回 {@link Integer#MAX_VALUE}， 使带范围的 DYNAMIC 匹配自然失败。
-   */
-  private static int extractTrackNumber(String nodeId) {
-    if (nodeId == null || nodeId.isBlank()) {
-      return Integer.MAX_VALUE;
-    }
-    int lastColon = nodeId.lastIndexOf(':');
-    if (lastColon < 0 || lastColon >= nodeId.length() - 1) {
-      return Integer.MAX_VALUE;
-    }
-    try {
-      return Integer.parseInt(nodeId.substring(lastColon + 1).trim());
-    } catch (NumberFormatException ignored) {
-      return Integer.MAX_VALUE;
-    }
-  }
-
-  /** DYNAMIC depot 轨道号闭区间。 */
-  private record TrackRange(int from, int to) {}
 
   /** 本轮执行排序使用的 depot 负载候选。 */
   private record DepotExecutionCandidate(SpawnTicket ticket, int originalIndex, double loadScore) {}
@@ -6067,6 +5978,17 @@ public final class SimpleTicketAssigner implements TicketAssigner {
     String depotSpec = depotOverride.filter(s -> !s.isBlank()).orElseGet(service::depotNodeId);
     if (depotSpec == null || depotSpec.isBlank()) {
       return Optional.empty();
+    }
+    if (SpawnDirectiveParser.isDynamicTarget(service.depotNodeId())) {
+      var source =
+          DynamicStopMatcher.parseDynamicSpec(service.depotNodeId())
+              .filter(DynamicStopMatcher.DynamicSpec::isDepot);
+      if (source.isEmpty()
+          || (depotOverride.filter(value -> !value.isBlank()).isPresent()
+              && !SpawnDirectiveParser.isDynamicTarget(depotSpec)
+              && !DynamicStopMatcher.matches(NodeId.of(depotSpec), source.get()))) {
+        return Optional.empty();
+      }
     }
     return Optional.of(depotSpec.trim());
   }

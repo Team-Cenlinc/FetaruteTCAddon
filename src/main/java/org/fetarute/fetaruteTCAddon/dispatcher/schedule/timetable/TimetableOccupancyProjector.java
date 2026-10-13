@@ -211,7 +211,9 @@ public final class TimetableOccupancyProjector {
                           stays.add(
                               new TimetableConflictChecker.Stay(
                                   duty.dutyCode(),
-                                  platform,
+                                  create == null
+                                      ? platform
+                                      : create.terminal().map(platform::intersect).orElse(platform),
                                   Math.min(arrival, firstDeparture),
                                   firstDeparture,
                                   owner)));
@@ -221,6 +223,7 @@ public final class TimetableOccupancyProjector {
           relativeDeparture(chain.get(i), serviceStart, zero)
               + lastArrival(chainProfiles.get(i).stops());
       int nextDeparture = relativeDeparture(chain.get(i + 1), serviceStart, zero);
+      Optional<TimetableConflictChecker.Platform> nextOrigin = chainProfiles.get(i + 1).origin();
       chainProfiles
           .get(i)
           .terminal()
@@ -229,7 +232,7 @@ public final class TimetableOccupancyProjector {
                   stays.add(
                       new TimetableConflictChecker.Stay(
                           duty.dutyCode(),
-                          platform,
+                          nextOrigin.map(platform::intersect).orElse(platform),
                           arrival,
                           Math.max(arrival, nextDeparture),
                           owner)));
@@ -244,6 +247,7 @@ public final class TimetableOccupancyProjector {
               int arrival =
                   relativeDeparture(chain.get(lastIndex), serviceStart, zero)
                       + lastArrival(chainProfiles.get(lastIndex).stops());
+              TimetableConflictChecker.RouteProfile returning = profiles.get(routeId);
               chainProfiles
                   .get(lastIndex)
                   .terminal()
@@ -252,7 +256,12 @@ public final class TimetableOccupancyProjector {
                           stays.add(
                               new TimetableConflictChecker.Stay(
                                   duty.dutyCode(),
-                                  platform,
+                                  returning == null
+                                      ? platform
+                                      : returning
+                                          .origin()
+                                          .map(platform::intersect)
+                                          .orElse(platform),
                                   arrival,
                                   Math.max(arrival, returnAt),
                                   owner)));

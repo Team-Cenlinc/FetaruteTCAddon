@@ -853,8 +853,7 @@ public final class CallService {
       return Optional.empty();
     }
     DynamicStopMatcher.DynamicSpec dynamic = spec.get();
-    if (track < 1
-        || (!dynamic.unbounded() && (track < dynamic.fromTrack() || track > dynamic.toTrack()))) {
+    if (!dynamic.tracks().contains(track)) {
       return Optional.empty();
     }
     return Optional.of(new PlatformPin(routeId, stopIndex, dynamic.nodeIdForTrack(track).value()));

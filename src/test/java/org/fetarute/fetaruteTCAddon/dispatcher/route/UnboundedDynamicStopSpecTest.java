@@ -35,8 +35,8 @@ class UnboundedDynamicStopSpecTest {
 
     assertTrue(spec.isPresent());
     assertFalse(spec.get().unbounded());
-    assertEquals(1, spec.get().fromTrack());
-    assertEquals(3, spec.get().toTrack());
+    assertEquals(1, spec.get().tracks().firstDeclaredTrack().orElseThrow());
+    assertEquals(3, spec.get().tracks().lastDeclaredTrack().orElseThrow());
   }
 
   @Test

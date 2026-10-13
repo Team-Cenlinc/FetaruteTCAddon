@@ -155,7 +155,19 @@ public final class CallCatalog {
         if (!stationKeyAt(entry, stops, stations, i).filter(station::equals).isPresent()) {
           continue;
         }
-        Set<String> platforms = platformsOf(stop, entry.definition().waypoints().get(i).value());
+        if (DynamicStopMatcher.isDynamicStop(stop)
+            && DynamicStopMatcher.parseDynamicSpec(stop).isEmpty()) {
+          continue;
+        }
+        Set<String> platforms =
+            platformsOf(stop, entry.definition().waypoints().get(i).value(), screen);
+        if (!screen.isEmpty()
+            && DynamicStopMatcher.parseDynamicSpec(stop)
+                .filter(spec -> !spec.unbounded())
+                .isPresent()
+            && platforms.isEmpty()) {
+          continue;
+        }
         Set<String> shown = platforms;
         if (!screen.isEmpty() && !platforms.isEmpty()) {
           shown = new TreeSet<>(platforms);
@@ -308,17 +320,33 @@ public final class CallCatalog {
 
   /** 停靠点的站台：DYNAMIC 停靠取股道范围（不限股道时为空），否则取节点的股道号。 */
   static Set<String> platformsOf(RouteStop stop, String nodeId) {
+    return platformsOf(stop, nodeId, Set.of());
+  }
+
+  /** 屏幕已限定股道时直接做成员判断；全站目录最多展示 20 个声明值，不展开巨大区间。 */
+  private static Set<String> platformsOf(RouteStop stop, String nodeId, Set<String> screen) {
     Optional<DynamicStopMatcher.DynamicSpec> dynamic = DynamicStopMatcher.parseDynamicSpec(stop);
     if (dynamic.isPresent()) {
-      DynamicStopMatcher.DynamicSpec spec = dynamic.get();
-      if (spec.unbounded() || spec.fromTrack() <= 0 || spec.toTrack() < spec.fromTrack()) {
+      var tracks = dynamic.get().tracks();
+      if (tracks.isUnbounded()) {
         return Set.of();
       }
-      Set<String> out = new TreeSet<>();
-      for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
-        out.add(String.valueOf(track));
+      if (!screen.isEmpty()) {
+        Set<String> out = new TreeSet<>();
+        for (String platform : screen) {
+          try {
+            if (tracks.contains(Integer.parseInt(platform))) {
+              out.add(platform);
+            }
+          } catch (NumberFormatException ignored) {
+            // 字母股道不具有 DYNAMIC 数字集合资格。
+          }
+        }
+        return out;
       }
-      return out;
+      return tracks.firstTracks(20).stream()
+          .map(String::valueOf)
+          .collect(java.util.stream.Collectors.toCollection(TreeSet::new));
     }
     String platform = RouteTerminals.platformOf(nodeId);
     return "-".equals(platform) ? Set.of() : Set.of(platform);

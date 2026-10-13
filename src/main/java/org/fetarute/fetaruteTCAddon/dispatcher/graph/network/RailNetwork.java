@@ -7,6 +7,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -20,6 +21,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphConflictSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphCorridorSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphInterlockingSupport;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphPlatformSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphSectionSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionInfo;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlockingState;
@@ -52,6 +54,7 @@ public final class RailNetwork {
   private final Map<NodeId, NodeId> components;
   private final Map<UUID, View> views = new ConcurrentHashMap<>();
   private final List<RailNode> allNodes;
+  private final Map<String, List<NodeId>> platformNodesByTerminal;
   private final List<RailEdge> allEdges;
 
   private RailNetwork(
@@ -77,6 +80,9 @@ public final class RailNetwork {
     }
     edges.addAll(portalEdges.values());
     this.allNodes = Collections.unmodifiableList(nodes);
+    this.platformNodesByTerminal =
+        RailGraphPlatformSupport.indexPlatformNodes(
+            nodes.stream().map(RailNode::id).distinct().toList());
     this.allEdges = Collections.unmodifiableList(edges);
     this.components = components(nodes, edges);
   }
@@ -213,12 +219,23 @@ public final class RailNetwork {
 
   /** 站在一个世界看路网：节点与边全网，物理联锁的实时观测是这个世界的，各边的联锁区按边所在世界。 */
   public final class View
-      implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
+      implements RailGraph,
+          RailGraphSectionSupport,
+          RailGraphInterlockingSupport,
+          RailGraphPlatformSupport {
 
     private final UUID worldId;
 
     private View(UUID worldId) {
       this.worldId = worldId;
+    }
+
+    /** 路网创建时合并各世界的站点身份索引，查询视图只读取本站节点。 */
+    @Override
+    public List<NodeId> platformNodes(String terminalKey) {
+      return terminalKey == null
+          ? List.of()
+          : platformNodesByTerminal.getOrDefault(terminalKey.toLowerCase(Locale.ROOT), List.of());
     }
 
     @Override

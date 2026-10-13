@@ -1009,8 +1009,10 @@ class RuntimeDispatchServiceTest {
             RouteStopPassType.STOP,
             Optional.of("CRET DYNAMIC:SURC:D:LWN:[3:4]"));
     RouteDefinitionCache routeDefinitions = mock(RouteDefinitionCache.class);
+    java.util.concurrent.atomic.AtomicReference<RouteStop> currentStop =
+        new java.util.concurrent.atomic.AtomicReference<>(oldStop);
     when(routeDefinitions.findStop(route.id(), 0))
-        .thenReturn(Optional.of(oldStop), Optional.of(refreshedStop));
+        .thenAnswer(ignored -> Optional.of(currentStop.get()));
     List<String> debugMessages = new ArrayList<>();
     RuntimeDispatchService service =
         createMinimalService(
@@ -1024,6 +1026,7 @@ class RuntimeDispatchServiceTest {
             NodeId.class);
     forceOverride.setAccessible(true);
     forceOverride.invoke(service, "dynamic-rule-train", route, 0, materializedDepot);
+    currentStop.set(refreshedStop);
 
     assertEquals(
         List.of(placeholder, next),

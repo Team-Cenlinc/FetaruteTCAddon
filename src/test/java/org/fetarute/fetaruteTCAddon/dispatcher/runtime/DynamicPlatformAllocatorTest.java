@@ -35,12 +35,15 @@ class DynamicPlatformAllocatorTest {
   private OccupancyManager occupancyManager;
   private RailGraph graph;
   private DynamicPlatformAllocator allocator;
+  private List<RailNode> graphNodes;
 
   @BeforeEach
   void setUp() {
     routeDefinitions = mock(RouteDefinitionCache.class);
     occupancyManager = mock(OccupancyManager.class);
     graph = mock(RailGraph.class);
+    graphNodes = new ArrayList<>();
+    when(graph.nodes()).thenAnswer(invocation -> List.copyOf(graphNodes));
     allocator =
         new DynamicPlatformAllocator(routeDefinitions, occupancyManager, System.out::println);
   }
@@ -519,7 +522,7 @@ class DynamicPlatformAllocatorTest {
   }
 
   @Test
-  void cachedDynamicAllocationReselectsWhenExternalClaimAppears() {
+  void cachedDynamicAllocationKeepsTargetWhenExternalClaimAppears() {
     NodeId fromId = NodeId.of("OP:W:FROM:1:0");
     NodeId firstId = NodeId.of("OP:S:DEST:1");
     NodeId secondId = NodeId.of("OP:S:DEST:2");
@@ -545,9 +548,8 @@ class DynamicPlatformAllocatorTest {
     DynamicResolution<DynamicPlatformAllocator.AllocationResult> revalidated =
         allocator.resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty());
 
-    assertTrue(revalidated.isSelected());
-    assertEquals(secondId, revalidated.selected().orElseThrow().allocatedNode());
-    assertEquals(Optional.of(secondId), allocator.getAllocation("train-cache", routeId, 0));
+    assertTrue(revalidated.isBlocked());
+    assertEquals(Optional.of(firstId), allocator.getAllocation("train-cache", routeId, 0));
   }
 
   @Test
@@ -573,8 +575,8 @@ class DynamicPlatformAllocatorTest {
         allocator.resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty());
 
     assertTrue(revalidated.isBlocked());
-    assertEquals("no-available-platform", revalidated.reason());
-    assertEquals(Optional.empty(), allocator.getAllocation("train-cache", routeId, 0));
+    assertEquals("materialized-platform-unavailable", revalidated.reason());
+    assertEquals(Optional.of(platformId), allocator.getAllocation("train-cache", routeId, 0));
   }
 
   @Test
@@ -740,13 +742,11 @@ class DynamicPlatformAllocatorTest {
             java.util.List.of(
                 claim(firstResource, "train-cache"), claim(firstResource, "external-train")));
 
-    assertEquals(
-        secondId,
+    assertTrue(
         allocator
             .resolveAllocation("train-cache", route, 0, graph, fromId, Optional.empty())
-            .selected()
-            .orElseThrow()
-            .allocatedNode());
+            .isBlocked());
+    assertEquals(Optional.of(firstId), allocator.getAllocation("train-cache", routeId, 0));
   }
 
   @Test
@@ -866,6 +866,7 @@ class DynamicPlatformAllocatorTest {
     when(node.worldPosition()).thenReturn(pos);
     when(node.type()).thenReturn(type);
     when(graph.findNode(id)).thenReturn(Optional.of(node));
+    graphNodes.add(node);
     return node;
   }
 

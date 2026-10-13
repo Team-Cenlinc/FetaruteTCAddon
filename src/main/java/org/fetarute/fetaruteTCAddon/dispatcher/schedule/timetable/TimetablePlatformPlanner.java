@@ -85,18 +85,47 @@ public final class TimetablePlatformPlanner {
    * @param plans 每张表的计划股道，键是表 id
    * @param planned 排上了股道的停留段数（每段可能覆盖终到与下一班始发两处停靠）
    * @param unplaced 计划时段里没有空闲候选股道、没有排的停留段数
-   * @param failure 排程本身出错时的原因（此时没有计划，时刻表照常落库，运行时临时选台）
+   * @param failure 排程本身出错时的原因
+   * @param restrictedUnplaced 明确限制股道的停留段中无法落实整段计划的数量；编表必须拒绝这些结果
    */
   public record Result(
-      Map<UUID, List<PlatformPlan>> plans, int planned, int unplaced, Optional<String> failure) {
+      Map<UUID, List<PlatformPlan>> plans,
+      int planned,
+      int unplaced,
+      Optional<String> failure,
+      int restrictedUnplaced) {
     public Result {
-      plans = plans == null ? Map.of() : Map.copyOf(plans);
+      if (plans == null) {
+        plans = Map.of();
+      } else {
+        Map<UUID, List<PlatformPlan>> frozen = new LinkedHashMap<>();
+        plans.forEach((table, values) -> frozen.put(table, List.copyOf(values)));
+        plans = Map.copyOf(frozen);
+      }
       failure = failure == null ? Optional.empty() : failure;
     }
 
     /** 排程正常结束的结果。 */
     public Result(Map<UUID, List<PlatformPlan>> plans, int planned, int unplaced) {
-      this(plans, planned, unplaced, Optional.empty());
+      this(plans, planned, unplaced, Optional.empty(), 0);
+    }
+
+    /** 兼容没有受限股道统计的结果。 */
+    public Result(
+        Map<UUID, List<PlatformPlan>> plans, int planned, int unplaced, Optional<String> failure) {
+      this(plans, planned, unplaced, failure, 0);
+    }
+
+    /**
+     * 发布前保证受限集合在整个连续停留中确有同一股道可用。
+     *
+     * <p>容量扫描只验证各个时刻的匹配，不足以证明跨时段可固定股道。受限集合定不下计划时拒绝本次编表， 避免用运行时临时选台兜底掩盖不可执行的计划；不限制无选择器的既有计划兜底行为。
+     */
+    public void requireFeasibleRestrictedAssignments() {
+      if (restrictedUnplaced > 0) {
+        throw new IllegalStateException(
+            "受限 DYNAMIC 有 " + restrictedUnplaced + " 段连续停留无法排定合法股道，请放宽允许集合或调整发车间隔");
+      }
     }
 
     /** 排程出错：没有计划。 */
@@ -394,10 +423,14 @@ public final class TimetablePlatformPlanner {
       Map<UUID, List<PlatformPlan>> plans = new LinkedHashMap<>();
       int planned = 0;
       int unplaced = 0;
+      int restrictedUnplaced = 0;
       for (Visit visit : dynamicVisits) {
         Optional<String> chosen = choose(visit);
         if (chosen.isEmpty()) {
           unplaced++;
+          if (visit.dynamicStops.stream().anyMatch(this::hasExplicitSelection)) {
+            restrictedUnplaced++;
+          }
           for (String node : visit.fixedNodes) {
             book(node, new Booking(visit.from, visit.to, visit.vehicle));
           }
@@ -414,7 +447,16 @@ public final class TimetablePlatformPlanner {
                           .add(new PlatformPlan(tripId, stop.index(), chosen.get())));
         }
       }
-      return new Result(plans, planned, unplaced);
+      return new Result(plans, planned, unplaced, Optional.empty(), restrictedUnplaced);
+    }
+
+    /** 显式集合不能靠临时换股道解决排程失败，结果需交给编表入口拒绝保存。 */
+    private boolean hasExplicitSelection(DynamicStop stop) {
+      List<RouteStop> stops = input.stopsByRoute().getOrDefault(stop.routeId(), List.of());
+      return stop.index() < stops.size()
+          && DynamicStopMatcher.parseDynamicSpec(stops.get(stop.index()))
+              .filter(spec -> !spec.unbounded())
+              .isPresent();
     }
 
     /**

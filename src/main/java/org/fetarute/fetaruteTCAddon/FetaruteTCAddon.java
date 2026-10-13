@@ -941,7 +941,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
 
   private void initRouteDefinitionCache() {
     if (this.routeDefinitionCache == null) {
-      this.routeDefinitionCache = new RouteDefinitionCache(loggerManager::debug);
+      this.routeDefinitionCache =
+          new RouteDefinitionCache(loggerManager::debug, loggerManager::warn);
       routeDefinitionCache.addChangeListener(routeNodeUsageVersion::incrementAndGet);
       // 交路改了：叫车缓存的走行时分作废
       routeDefinitionCache.addChangeListener(

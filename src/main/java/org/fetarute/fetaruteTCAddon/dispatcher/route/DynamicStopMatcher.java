@@ -1,15 +1,16 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.route;
 
-import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
-import java.util.TreeSet;
 import java.util.regex.Pattern;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphPlatformSupport;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 
@@ -19,7 +20,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  * <h3>DYNAMIC 格式</h3>
  *
  * <pre>{@code
- * DYNAMIC:OP:TYPE:NAME:[FROM:TO]
+ * DYNAMIC:OP:TYPE:NAME:[1,3,5-7]
  * }</pre>
  *
  * <p>各部分含义：
@@ -28,7 +29,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  *   <li>{@code OP}：运营商代码（如 SURC）
  *   <li>{@code TYPE}：节点类型，{@code S} 表示 Station，{@code D} 表示 Depot
  *   <li>{@code NAME}：站点/车库名称（如 PPK、OFL）
- *   <li>{@code [FROM:TO]}：轨道范围（如 {@code [1:3]} 表示轨道 1-3）
+ *   <li>{@code [1,3,5-7]}：股道允许集合；单值、冒号区间与省略选择器继续兼容
  * </ul>
  *
  * <h3>格式示例</h3>
@@ -36,7 +37,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  * <ul>
  *   <li>{@code DYNAMIC:SURC:S:PPK:[1:3]} - Station PPK，轨道范围 1-3
  *   <li>{@code DYNAMIC:SURC:D:OFL:[1:2]} - Depot OFL，轨道范围 1-2
- *   <li>{@code DYNAMIC:SURC:S:PPK} - Station PPK，默认轨道 1（无范围限制）
+ *   <li>{@code DYNAMIC:SURC:S:PPK} - Station PPK，不限该站现有数字股道
  *   <li>{@code DYNAMIC:SURC:PPK:[1:3]} - 旧格式兼容（默认 Station 类型）
  * </ul>
  *
@@ -48,7 +49,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  *   <li>{@code operatorCode} 匹配（忽略大小写）
  *   <li>{@code nodeType} 匹配（S/D）
  *   <li>{@code nodeName} 匹配（忽略大小写）
- *   <li>{@code track} 在 {@code [fromTrack, toTrack]} 范围内
+ *   <li>{@code track} 属于允许集合
  * </ol>
  *
  * <h3>咽喉节点区分</h3>
@@ -75,17 +76,18 @@ public final class DynamicStopMatcher {
   private static final Pattern DYNAMIC_DIRECTIVE_PATTERN =
       Pattern.compile("(?:^|\\s)DYNAMIC(?:$|[\\s:])", Pattern.CASE_INSENSITIVE);
 
+  private static final Pattern DYNAMIC_TOKEN_PATTERN =
+      Pattern.compile("(?:^|(?<=\\s))DYNAMIC(?:\\s+|:)(\\S+)", Pattern.CASE_INSENSITIVE);
+
   /** 候选股道数的安全上限，防止规范范围写得过大时逐条寻路卡服。 */
-  static final int MAX_TRACK_CANDIDATES = 20;
+  public static final int MAX_TRACK_CANDIDATES = 20;
 
   private DynamicStopMatcher() {}
 
   /**
    * DYNAMIC 规范在图上实际存在的候选股道节点（按股道号升序）。
    *
-   * <p>声明了范围就按范围；<b>未声明范围时枚举该站在图上实际存在的全部股道</b>（按前缀匹配、只取纯数字股道段）。 {@link #parseDynamicSpec}
-   * 对未声明范围的规范返回 {@code from=1, to=1, unbounded=true}，若忽略 {@code unbounded()}，{@code
-   * DYNAMIC:SURC:S:PPK} 就退化成只看 1 号股道，多站台车站的其余站台永远不会成为候选。
+   * <p>允许集合只用于筛选真实节点，不展开数值空间。省略选择器时允许本站现有的全部数字股道； 实际寻路预算限制为数字顺序前 20 个合法节点，与集合成员资格分离。
    *
    * <p>选台（{@code DynamicPlatformAllocator}）与尚未选台时的 ETA 估算共用这一份枚举。
    *
@@ -94,53 +96,84 @@ public final class DynamicStopMatcher {
    * @return 图上存在的候选节点，至多 {@link #MAX_TRACK_CANDIDATES} 个
    */
   public static List<NodeId> candidateNodes(DynamicSpec spec, RailGraph graph) {
+    return candidateNodes(spec, graph, message -> {});
+  }
+
+  /** 实际候选超过预算时输出诊断；已索引的快照只访问本站节点，未知图实现保留扫描兼容。 */
+  public static List<NodeId> candidateNodes(
+      DynamicSpec spec, RailGraph graph, java.util.function.Consumer<String> diagnostic) {
     if (spec == null || graph == null) {
       return List.of();
     }
-    String prefix = spec.trackPrefix();
-    List<Integer> tracks = new ArrayList<>();
-    if (!spec.unbounded()) {
-      int maxTrack = Math.min(spec.toTrack(), spec.fromTrack() + MAX_TRACK_CANDIDATES - 1);
-      for (int track = spec.fromTrack(); track <= maxTrack; track++) {
-        tracks.add(track);
+    List<NodeId> preview =
+        sortedMatchingNodes(spec, knownNodeStream(spec, graph))
+            .limit(MAX_TRACK_CANDIDATES + 1L)
+            .toList();
+    if (preview.size() > MAX_TRACK_CANDIDATES) {
+      if (diagnostic != null) {
+        diagnostic.accept(
+            "DYNAMIC_CANDIDATE_BUDGET spec="
+                + spec.payload()
+                + " evaluated="
+                + MAX_TRACK_CANDIDATES
+                + " additionalCandidates=true");
       }
-    } else {
-      TreeSet<Integer> discovered = new TreeSet<>();
-      for (RailNode node : graph.nodes()) {
-        if (node == null || node.id() == null || node.id().value() == null) {
-          continue;
-        }
-        String value = node.id().value();
-        if (!value.regionMatches(true, 0, prefix, 0, prefix.length())) {
-          continue;
-        }
-        String trackPart = value.substring(prefix.length());
-        if (trackPart.isEmpty() || trackPart.indexOf(':') >= 0) {
-          continue;
-        }
-        try {
-          int track = Integer.parseInt(trackPart);
-          if (track >= 1) {
-            discovered.add(track);
-          }
-        } catch (NumberFormatException ignored) {
-          // 非数字股道段不是候选。
-        }
-        if (discovered.size() >= MAX_TRACK_CANDIDATES) {
-          break;
-        }
-      }
-      // 图上一个都发现不了时退回声明值（随后按“图上不存在”滤掉）。
-      tracks.addAll(discovered.isEmpty() ? List.of(spec.fromTrack()) : discovered);
+      return List.copyOf(preview.subList(0, MAX_TRACK_CANDIDATES));
     }
-    List<NodeId> out = new ArrayList<>(tracks.size());
-    for (int track : tracks) {
-      NodeId candidate = spec.nodeIdForTrack(track);
-      if (graph.findNode(candidate).isPresent()) {
-        out.add(candidate);
-      }
+    return preview;
+  }
+
+  /**
+   * 从实际节点集合中筛出所有合法股道；不展开数值区间，也不把候选预算混入集合资格。
+   *
+   * @param spec DYNAMIC 声明
+   * @param nodes 图或牌子注册表中的实际节点
+   * @return 保留实际 NodeId、按数字股道号与节点名稳定排序的候选
+   */
+  public static List<NodeId> matchingNodes(DynamicSpec spec, Collection<NodeId> nodes) {
+    if (spec == null || nodes == null) {
+      return List.of();
     }
-    return List.copyOf(out);
+    return sortedMatchingNodes(spec, nodes.stream()).toList();
+  }
+
+  /**
+   * 图中全部合法节点，供资格检查与容量通知使用；查询索引但不施加寻路评估预算。
+   *
+   * @param spec DYNAMIC 声明
+   * @param graph 生产快照或包装视图；未知兼容实现才扫描节点
+   * @return 保留实际 NodeId、按数字股道稳定排序的完整资格集合
+   */
+  public static List<NodeId> matchingNodes(DynamicSpec spec, RailGraph graph) {
+    return spec == null || graph == null
+        ? List.of()
+        : sortedMatchingNodes(spec, knownNodeStream(spec, graph)).toList();
+  }
+
+  private static java.util.stream.Stream<NodeId> knownNodeStream(
+      DynamicSpec spec, RailGraph graph) {
+    return graph instanceof RailGraphPlatformSupport indexed
+        ? indexed.platformNodes(spec.toTerminalKey()).stream()
+        : graph.nodes().stream().filter(Objects::nonNull).map(RailNode::id);
+  }
+
+  private static java.util.stream.Stream<NodeId> sortedMatchingNodes(
+      DynamicSpec spec, java.util.stream.Stream<NodeId> nodes) {
+    return nodes
+        .filter(node -> matches(node, spec))
+        .distinct()
+        .sorted(
+            Comparator.comparingInt((NodeId node) -> trackNumber(node).orElseThrow())
+                .thenComparing(NodeId::value));
+  }
+
+  /** 四段行为节点中的正整数股道号；五段咽喉不具有停靠资格。 */
+  public static OptionalInt trackNumber(NodeId node) {
+    if (node == null) {
+      return OptionalInt.empty();
+    }
+    String[] parts = node.value().split(":", -1);
+    return parts.length == 4 ? parsePositiveInt(parts[3]) : OptionalInt.empty();
   }
 
   /**
@@ -231,47 +264,15 @@ public final class DynamicStopMatcher {
       }
     }
 
-    if (operatorCode.isBlank() || nodeName.isBlank()) {
+    boolean explicitType =
+        parts.length >= 3 && (parts[1].equalsIgnoreCase("S") || parts[1].equalsIgnoreCase("D"));
+    boolean selectorDeclared = parts.length > (explicitType ? 3 : 2);
+    if (operatorCode.isBlank() || nodeName.isBlank() || (selectorDeclared && rangeRaw.isBlank())) {
       return Optional.empty();
     }
 
-    // 解析范围。未声明范围时不再假定 1..10 这样的人为上限：
-    // 该上限既可能漏掉编号更大的股道，也无法表达"这个站现有的全部股道"。
-    // 未声明范围的规范标记为 unbounded，由调用方按图上实际存在的股道枚举。
-    boolean unbounded = rangeRaw.isBlank();
-    int fromTrack = 1;
-    int toTrack = 1;
-    if (!rangeRaw.isBlank()) {
-      String normalizedRange = rangeRaw.trim();
-      if (normalizedRange.startsWith("[") && normalizedRange.endsWith("]")) {
-        normalizedRange = normalizedRange.substring(1, normalizedRange.length() - 1).trim();
-      }
-      if (!normalizedRange.isBlank()) {
-        int colon = normalizedRange.indexOf(':');
-        if (colon < 0) {
-          OptionalInt single = parsePositiveInt(normalizedRange);
-          if (single.isEmpty()) {
-            return Optional.empty();
-          }
-          fromTrack = single.getAsInt();
-          toTrack = single.getAsInt();
-        } else {
-          OptionalInt from = parsePositiveInt(normalizedRange.substring(0, colon));
-          OptionalInt to = parsePositiveInt(normalizedRange.substring(colon + 1));
-          if (from.isEmpty() || to.isEmpty()) {
-            return Optional.empty();
-          }
-          fromTrack = from.getAsInt();
-          toTrack = to.getAsInt();
-        }
-      }
-    }
-    if (fromTrack <= 0 || toTrack <= 0) {
-      return Optional.empty();
-    }
-    int start = Math.min(fromTrack, toTrack);
-    int end = Math.max(fromTrack, toTrack);
-    return Optional.of(new DynamicSpec(operatorCode, nodeType, nodeName, start, end, unbounded));
+    return (rangeRaw.isBlank() ? Optional.of(TrackSelection.all()) : TrackSelection.parse(rangeRaw))
+        .map(selection -> new DynamicSpec(operatorCode, nodeType, nodeName, selection));
   }
 
   /**
@@ -283,7 +284,7 @@ public final class DynamicStopMatcher {
    *   <li>operator 必须匹配（忽略大小写）
    *   <li>nodeType 必须匹配（S/D）
    *   <li>nodeName 必须匹配（忽略大小写）
-   *   <li>track 必须在 [fromTrack, toTrack] 范围内
+   *   <li>track 必须属于允许集合
    * </ul>
    *
    * @param nodeId 实际 nodeId（如 "SURC:D:OFL:1"）
@@ -337,10 +338,7 @@ public final class DynamicStopMatcher {
       return false;
     }
     int track = trackOpt.getAsInt();
-    if (spec.unbounded()) {
-      return track >= 1;
-    }
-    return track >= spec.fromTrack() && track <= spec.toTrack();
+    return spec.tracks().contains(track);
   }
 
   /**
@@ -353,6 +351,11 @@ public final class DynamicStopMatcher {
   public static boolean matchesStop(NodeId nodeId, RouteStop stop) {
     if (nodeId == null || stop == null) {
       return false;
+    }
+    if (isDynamicStop(stop)) {
+      Optional<DynamicSpec> spec = parseDynamicSpec(stop);
+      return spec.isPresent()
+          && (matches(nodeId, spec.get()) || matchesFixedDepotDirective(nodeId, stop, spec.get()));
     }
     // 先检查普通 waypointNodeId 匹配
     if (stop.waypointNodeId().isPresent()) {
@@ -374,12 +377,85 @@ public final class DynamicStopMatcher {
         }
       }
     }
-    // 检查 DYNAMIC 匹配
-    Optional<DynamicSpec> specOpt = parseDynamicSpec(stop);
-    if (specOpt.isPresent()) {
-      return matches(nodeId, specOpt.get());
+    return false;
+  }
+
+  /**
+   * 判断普通站点匹配是否可以使用此实际节点；DYNAMIC 的 UUID、站码与固定节点入口都必须先经过该资格闸。
+   *
+   * <p>CRET/DSTY 固定 Depot 附带其他车站的 DYNAMIC 动作时，保留原有固定 Depot 身份，不把出库点解释成车站。
+   */
+  public static boolean allowsStopNode(NodeId node, RouteStop stop) {
+    return stop != null && (!isDynamicStop(stop) || matchesStop(node, stop));
+  }
+
+  /** 固定 CRET/DSTY Depot 携带另一个站的 DYNAMIC 动作时，当前停靠身份仍是固定 Depot。 */
+  public static boolean isFixedDepotDirectiveTarget(String node, RouteStop stop) {
+    if (node == null || node.isBlank() || stop == null) {
+      return false;
+    }
+    return parseDynamicSpec(stop)
+        .filter(spec -> matchesFixedDepotDirective(NodeId.of(node), stop, spec))
+        .isPresent();
+  }
+
+  private static boolean matchesFixedDepotDirective(NodeId node, RouteStop stop, DynamicSpec spec) {
+    if (node.value().split(":", -1).length != 4) {
+      return false;
+    }
+    Optional<String> actualKey = extractStationKey(node.value());
+    for (String prefix : List.of("CRET", "DSTY")) {
+      Optional<String> fixed = RouteStopDirectives.target(stop, prefix);
+      if (fixed.isEmpty()) {
+        continue;
+      }
+      String[] parts = fixed.get().split(":", -1);
+      if (parts.length != 4 || !"D".equalsIgnoreCase(parts[1])) {
+        continue;
+      }
+      Optional<String> fixedKey = extractStationKey(fixed.get());
+      if (fixedKey.isPresent()
+          && !fixedKey.get().equals(spec.toTerminalKey())
+          && actualKey.filter(fixedKey.get()::equals).isPresent()) {
+        return true;
+      }
     }
     return false;
+  }
+
+  /**
+   * 比较停靠定义证据：保留动作、停车方式与时间等字段，仅归一化 DYNAMIC 的等价集合写法。
+   *
+   * <p>选台缓存与 effective-node 覆盖必须共用该规则；不能只比较 RouteId，也不能忽略 CHANGE 等其他动作。
+   */
+  public static boolean sameDefinition(Optional<RouteStop> before, Optional<RouteStop> after) {
+    if (before.equals(after) || before.isEmpty() || after.isEmpty()) {
+      return before.equals(after);
+    }
+    RouteStop old = before.get();
+    RouteStop current = after.get();
+    return Objects.equals(old.routeId(), current.routeId())
+        && old.sequence() == current.sequence()
+        && old.stationId().equals(current.stationId())
+        && old.waypointNodeId().equals(current.waypointNodeId())
+        && old.dwellSeconds().equals(current.dwellSeconds())
+        && old.passType() == current.passType()
+        && semanticNotes(old.notes()).equals(semanticNotes(current.notes()));
+  }
+
+  private static String semanticNotes(Optional<String> notes) {
+    String raw = notes.orElse("").replace("\r\n", "\n").replace('\r', '\n');
+    java.util.regex.Matcher matcher = DYNAMIC_TOKEN_PATTERN.matcher(raw);
+    StringBuilder normalized = new StringBuilder();
+    while (matcher.find()) {
+      String canonical =
+          parseDynamicSpec(matcher.group(1))
+              .map(spec -> "DYNAMIC:" + spec.payload().toUpperCase(Locale.ROOT))
+              .orElse(matcher.group());
+      matcher.appendReplacement(normalized, java.util.regex.Matcher.quoteReplacement(canonical));
+    }
+    matcher.appendTail(normalized);
+    return normalized.toString();
   }
 
   /**
@@ -460,7 +536,7 @@ public final class DynamicStopMatcher {
         if (dynamicMatcher.find()) {
           String afterDynamic = trimmed.substring(dynamicMatcher.end()).trim();
           if (!afterDynamic.isBlank()) {
-            return Optional.of(afterDynamic);
+            return Optional.of(afterDynamic.split("\\s+", 2)[0]);
           }
         }
         continue;
@@ -539,27 +615,73 @@ public final class DynamicStopMatcher {
    * @param operatorCode 运营商代码
    * @param nodeType 节点类型："S" 表示 Station，"D" 表示 Depot
    * @param nodeName 站点/车库名称
-   * @param fromTrack 起始轨道号
-   * @param toTrack 结束轨道号
-   * @param unbounded 规范是否未声明轨道范围
+   * @param tracks 股道允许集合；不限股道是明确状态
    */
   public record DynamicSpec(
-      String operatorCode,
-      String nodeType,
-      String nodeName,
-      int fromTrack,
-      int toTrack,
-      boolean unbounded) {
+      String operatorCode, String nodeType, String nodeName, TrackSelection tracks) {
     public DynamicSpec {
       Objects.requireNonNull(operatorCode, "operatorCode");
       Objects.requireNonNull(nodeType, "nodeType");
       Objects.requireNonNull(nodeName, "nodeName");
+      Objects.requireNonNull(tracks, "tracks");
+      operatorCode = operatorCode.trim();
+      nodeType = nodeType.trim().toUpperCase(Locale.ROOT);
+      nodeName = nodeName.trim();
     }
 
     /** 兼容旧调用：显式范围即非 unbounded。 */
     public DynamicSpec(
         String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
-      this(operatorCode, nodeType, nodeName, fromTrack, toTrack, false);
+      this(operatorCode, nodeType, nodeName, TrackSelection.between(fromTrack, toTrack));
+    }
+
+    /** 兼容显式区间或未声明范围的构造入口；最终仅保存集合值。 */
+    public DynamicSpec(
+        String operatorCode,
+        String nodeType,
+        String nodeName,
+        int fromTrack,
+        int toTrack,
+        boolean unbounded) {
+      this(
+          operatorCode,
+          nodeType,
+          nodeName,
+          unbounded ? TrackSelection.all() : TrackSelection.between(fromTrack, toTrack));
+    }
+
+    /** 是否省略了股道选择器。 */
+    public boolean unbounded() {
+      return tracks.isUnbounded();
+    }
+
+    /** 大小写不影响站点身份；保留原文用于构造 NodeId 与展示。 */
+    @Override
+    public boolean equals(Object value) {
+      return value instanceof DynamicSpec other
+          && operatorCode.equalsIgnoreCase(other.operatorCode)
+          && nodeType.equalsIgnoreCase(other.nodeType)
+          && nodeName.equalsIgnoreCase(other.nodeName)
+          && tracks.equals(other.tracks);
+    }
+
+    @Override
+    public int hashCode() {
+      return Objects.hash(
+          operatorCode.toLowerCase(Locale.ROOT),
+          nodeType.toLowerCase(Locale.ROOT),
+          nodeName.toLowerCase(Locale.ROOT),
+          tracks);
+    }
+
+    /** 可重新解析的完整 payload（不含 DYNAMIC 前缀）；不限范围省略尾段。 */
+    public String payload() {
+      return operatorCode
+          + ":"
+          + nodeType
+          + ":"
+          + nodeName
+          + tracks.formatSelector().map(selector -> ":" + selector).orElse("");
     }
 
     /** 是否为 Depot 类型。 */
@@ -589,7 +711,7 @@ public final class DynamicStopMatcher {
     /**
      * 生成 placeholder nodeId（用于 spawn plan 和 layover 匹配）。
      *
-     * <p>格式：{@code OP:S/D:NAME:fromTrack}
+     * <p>使用最小声明股道作为占位；不限范围用 1 作占位，不能据此授权停靠。
      *
      * @return placeholder nodeId
      */
@@ -600,7 +722,7 @@ public final class DynamicStopMatcher {
           + ":"
           + nodeName
           + ":"
-          + fromTrack;
+          + tracks.firstDeclaredTrack().orElse(1);
     }
 
     /**

@@ -13,6 +13,49 @@ import org.junit.jupiter.api.Test;
 /** DynamicStopMatcher 单元测试。 */
 class DynamicStopMatcherTest {
 
+  /** 离散允许集合必须保留空洞，不能用最小/最大股道替代集合成员判断。 */
+  @Test
+  void sparseSelectionOnlyMatchesDeclaredTracks() {
+    DynamicSpec spec =
+        DynamicStopMatcher.parseDynamicSpec("DYNAMIC:OP:S:DEST:[1,3,5]").orElseThrow();
+    assertTrue(DynamicStopMatcher.matches("OP:S:DEST:1", spec));
+    assertTrue(DynamicStopMatcher.matches("OP:S:DEST:3", spec));
+    assertTrue(DynamicStopMatcher.matches("OP:S:DEST:5", spec));
+    assertFalse(DynamicStopMatcher.matches("OP:S:DEST:2", spec));
+    assertFalse(DynamicStopMatcher.matches("OP:S:DEST:4", spec));
+  }
+
+  /** 固定声明节点与同站容错不能覆盖明确的 DYNAMIC 股道限制。 */
+  @Test
+  void dynamicRestrictionOverridesFixedWaypointTolerance() {
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of("OP:S:DEST:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:OP:S:DEST:[1:1]"));
+    assertFalse(DynamicStopMatcher.matchesStop(NodeId.of("OP:S:DEST:2"), stop));
+  }
+
+  /** 固定车库与辅助动态站台组合保留车库身份，但五段咽喉不是出库行为节点。 */
+  @Test
+  void fixedDepotWithAuxiliaryStationRejectsThroatArrival() {
+    RouteStop stop =
+        new RouteStop(
+            UUID.randomUUID(),
+            0,
+            Optional.empty(),
+            Optional.of("OP:D:DEPOT:1"),
+            Optional.empty(),
+            RouteStopPassType.PASS,
+            Optional.of("CRET OP:D:DEPOT:1\nDYNAMIC:OP:S:DEST:[1,3]"));
+    assertTrue(DynamicStopMatcher.matchesStop(NodeId.of("OP:D:DEPOT:1"), stop));
+    assertFalse(DynamicStopMatcher.matchesStop(NodeId.of("OP:D:DEPOT:1:001"), stop));
+  }
+
   @Test
   void parseDynamicSpec_stationWithRange() {
     Optional<DynamicSpec> result = DynamicStopMatcher.parseDynamicSpec("DYNAMIC:SURC:S:PPK:[1:3]");
@@ -21,8 +64,8 @@ class DynamicStopMatcherTest {
     assertEquals("SURC", spec.operatorCode());
     assertEquals("S", spec.nodeType());
     assertEquals("PPK", spec.nodeName());
-    assertEquals(1, spec.fromTrack());
-    assertEquals(3, spec.toTrack());
+    assertEquals(1, spec.tracks().firstDeclaredTrack().orElseThrow());
+    assertEquals(3, spec.tracks().lastDeclaredTrack().orElseThrow());
     assertTrue(spec.isStation());
     assertFalse(spec.isDepot());
   }
@@ -35,8 +78,8 @@ class DynamicStopMatcherTest {
     assertEquals("SURC", spec.operatorCode());
     assertEquals("D", spec.nodeType());
     assertEquals("OFL", spec.nodeName());
-    assertEquals(1, spec.fromTrack());
-    assertEquals(2, spec.toTrack());
+    assertEquals(1, spec.tracks().firstDeclaredTrack().orElseThrow());
+    assertEquals(2, spec.tracks().lastDeclaredTrack().orElseThrow());
     assertFalse(spec.isStation());
     assertTrue(spec.isDepot());
   }
@@ -54,7 +97,7 @@ class DynamicStopMatcherTest {
     assertTrue(result.isPresent());
     DynamicSpec spec = result.get();
     assertTrue(spec.unbounded());
-    assertEquals(1, spec.fromTrack());
+    assertTrue(spec.tracks().firstDeclaredTrack().isEmpty());
   }
 
   @Test

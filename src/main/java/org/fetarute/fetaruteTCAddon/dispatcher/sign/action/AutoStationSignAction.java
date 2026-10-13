@@ -1885,14 +1885,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (stops.isEmpty()) {
       return Optional.empty();
     }
-    RouteStop match = findStop(stops, definition, stationOpt, stationCode, routeIndexOpt);
-    if (match == null) {
-      return Optional.empty();
-    }
-    if (match.passType() == RouteStopPassType.PASS) {
-      return Optional.empty();
-    }
-    return Optional.of(match.plannedDwellSeconds());
+    return findStop(stops, definition, stationOpt, stationCode, routeIndexOpt)
+        .filter(stop -> stop.passType() != RouteStopPassType.PASS)
+        .map(RouteStop::plannedDwellSeconds);
   }
 
   /** 读取 AutoStation 提示音配置，缺失则返回禁用配置。 */
@@ -1912,9 +1907,11 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /**
    * 在 RouteStop 中按站点 ID 或 waypoint nodeId 进行匹配。
    *
-   * <p>优先站点 ID 匹配，其次 nodeId，最后尝试 DYNAMIC 范围匹配。
+   * <p>每个动态停靠先验证允许集合，再按站点 ID、节点与站码匹配，禁止元数据容错绕过股道资格。
+   *
+   * @return 本次实际到站对应的停靠；没有合法匹配时为空，不触发停站动作。
    */
-  private static RouteStop findStop(
+  static Optional<RouteStop> findStop(
       List<RouteStop> stops,
       SignNodeDefinition definition,
       Optional<Station> stationOpt,
@@ -1924,34 +1921,36 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     NodeId nodeId = definition.nodeId();
     String nodeIdValue = nodeId.value();
     for (RouteStop stop : stops) {
-      if (stop == null) {
+      if (stop == null || !DynamicStopMatcher.allowsStopNode(nodeId, stop)) {
         continue;
       }
       if (stationId != null
           && stop.stationId().isPresent()
           && stationId.equals(stop.stationId().get())) {
-        return stop;
+        return Optional.of(stop);
       }
       if (stop.waypointNodeId().isPresent()
           && nodeIdValue.equalsIgnoreCase(stop.waypointNodeId().get())) {
-        return stop;
+        return Optional.of(stop);
       }
       // DYNAMIC 范围匹配
       if (DynamicStopMatcher.matchesStop(nodeId, stop)) {
-        return stop;
+        return Optional.of(stop);
       }
     }
 
     // fallback: RouteStop 使用 station 的 waypoint_node_id（含 track），但列车实际停靠在同站其他股道时，
     // 精确 nodeId 无法匹配，导致 AutoStation 误判为 PASS。这里尝试按站码匹配（忽略 track）并用 routeIndex 消歧义。
     if (stationCode == null || stationCode.isBlank()) {
-      return null;
+      return Optional.empty();
     }
     String expectedOperator =
         definition.waypointMetadata().map(WaypointMetadata::operator).orElse(null);
     List<RouteStop> candidates = new java.util.ArrayList<>();
     for (RouteStop stop : stops) {
-      if (stop == null || stop.passType() == RouteStopPassType.PASS) {
+      if (stop == null
+          || stop.passType() == RouteStopPassType.PASS
+          || !DynamicStopMatcher.allowsStopNode(nodeId, stop)) {
         continue;
       }
       if (stop.waypointNodeId().isEmpty()) {
@@ -1976,13 +1975,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       candidates.add(stop);
     }
     if (candidates.isEmpty()) {
-      return null;
+      return Optional.empty();
     }
     if (candidates.size() == 1) {
-      return candidates.get(0);
+      return Optional.of(candidates.get(0));
     }
     if (routeIndexOpt == null || routeIndexOpt.isEmpty()) {
-      return candidates.get(0);
+      return Optional.of(candidates.get(0));
     }
     int idx = routeIndexOpt.get();
     RouteStop best = null;
@@ -1995,7 +1994,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         best = cand;
       }
     }
-    return best != null ? best : candidates.get(0);
+    return Optional.of(best != null ? best : candidates.get(0));
   }
 
   private static String shortUuid(UUID uuid) {

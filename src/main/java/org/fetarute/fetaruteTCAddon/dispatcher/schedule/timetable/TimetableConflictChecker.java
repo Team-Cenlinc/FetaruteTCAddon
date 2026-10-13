@@ -5,6 +5,7 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -43,7 +44,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
  * <tr><td>JUNCTION 道岔</td><td>路径穿越的 SWITCHER 节点</td><td>两次通过之间要留 separation</td></tr>
  * </table>
  *
- * <p>每次停靠同时登记两层站台占用：站台组一层抓"车比股道多"，具体股道一层抓"同一股道被两辆车用"。DYNAMIC 停靠只有组一层—— 它到底停哪股道是运行时才决定的。
+ * <p>每次停靠同时登记两层站台占用：站台组一层检验车辆与允许股道之间是否存在可行分配，具体股道一层抓固定股道互斥。 DYNAMIC
+ * 停靠只有组一层，但携带实际股道允许集合；同一车辆连续停留取各段允许集合的交集。
  *
  * <p>本类刻意<b>不</b>建模的东西：授权窗口、制动距离扩展的 lookahead、恢复链。那些属于真调度器；回放如果发现本模型漏了约束， 修的是本模型，不是让 build 去依赖回放。
  */
@@ -156,7 +158,7 @@ public final class TimetableConflictChecker {
             resources,
             new LinkedHashMap<>(),
             vehicleOf == null ? Function.identity() : vehicleOf,
-            footprints.index().platformCapacity());
+            footprints);
     for (Movement movement : movements == null ? List.<Movement>of() : movements) {
       RouteProfile profile = profiles.get(movement.routeId());
       if (profile == null) {
@@ -248,7 +250,7 @@ public final class TimetableConflictChecker {
     void expire(int separation, int from) {
       int kept = 0;
       for (int i = 0; i < size; i++) {
-        if (items[i].to() + separation > from) {
+        if ((long) items[i].to() + separation > from) {
           items[kept++] = items[i];
         }
       }
@@ -305,7 +307,7 @@ public final class TimetableConflictChecker {
       Map<String, Resource> resources,
       Map<String, int[]> touched,
       Function<String, String> vehicleOf,
-      Map<String, Integer> platformCapacity) {
+      Footprints footprints) {
 
     void add(
         String key,
@@ -316,7 +318,8 @@ public final class TimetableConflictChecker {
         int to,
         int direction,
         Optional<String> owner,
-        String vehicle) {
+        String vehicle,
+        Optional<PlatformEligibility> eligibility) {
       // 记下这批占用在该资源上覆盖的时段 [from, to]；to 的取法与 Resource.add 一致。
       int[] span =
           touched.computeIfAbsent(key, k -> new int[] {Integer.MAX_VALUE, Integer.MIN_VALUE});
@@ -324,7 +327,7 @@ public final class TimetableConflictChecker {
       span[1] = Math.max(span[1], Math.max(from, to));
       resources
           .computeIfAbsent(key, k -> new Resource(k, kind, capacity))
-          .add(code, from, to, direction, owner, vehicle);
+          .add(code, from, to, direction, owner, vehicle, eligibility);
     }
   }
 
@@ -350,7 +353,9 @@ public final class TimetableConflictChecker {
     for (int i = 0; i < stops.size(); i++) {
       String nodeId = waypoints != null && i < waypoints.size() ? waypoints.get(i).value() : "";
       RouteStop routeStop = routeStops != null && i < routeStops.size() ? routeStops.get(i) : null;
-      boolean dynamic = routeStop != null && DynamicStopMatcher.isDynamicStop(routeStop);
+      boolean declaredDynamic = routeStop != null && DynamicStopMatcher.isDynamicStop(routeStop);
+      boolean dynamic =
+          declaredDynamic && !DynamicStopMatcher.isFixedDepotDirectiveTarget(nodeId, routeStop);
       if (!dynamic && nodeTypes != null && !nodeTypes.isEmpty() && !nodeId.isBlank()) {
         NodeType type = nodeTypes.get(NodeId.of(nodeId));
         if (type != NodeType.STATION && type != NodeType.DEPOT) {
@@ -358,7 +363,16 @@ public final class TimetableConflictChecker {
           continue;
         }
       }
-      out.add(new Platform(nodeId, groupOf(nodeId), dynamic));
+      Optional<DynamicStopMatcher.DynamicSpec> parsed =
+          declaredDynamic ? DynamicStopMatcher.parseDynamicSpec(routeStop) : Optional.empty();
+      if (declaredDynamic && parsed.isEmpty()) {
+        throw new IllegalArgumentException("无效 DYNAMIC 停靠: " + routeStop.notes().orElse(""));
+      }
+      Optional<DynamicStopMatcher.DynamicSpec> spec = dynamic ? parsed : Optional.empty();
+      String group =
+          spec.map(value -> value.operatorCode() + ":" + value.nodeType() + ":" + value.nodeName())
+              .orElseGet(() -> groupOf(nodeId));
+      out.add(new Platform(nodeId, group, dynamic, spec));
     }
     return List.copyOf(out);
   }
@@ -449,15 +463,57 @@ public final class TimetableConflictChecker {
    * @param to 相对发车的离开偏移
    * @param direction 单线方向（其余资源为 0）
    */
-  record Slot(String key, Kind kind, int capacity, int from, int to, int direction) {}
+  record Slot(
+      String key,
+      Kind kind,
+      int capacity,
+      int from,
+      int to,
+      int direction,
+      Optional<PlatformEligibility> eligibility) {
+    Slot(String key, Kind kind, int capacity, int from, int to, int direction) {
+      this(key, kind, capacity, from, to, direction, Optional.empty());
+    }
+  }
+
+  /**
+   * 图上实际可用的股道集合。排序键随集合一次生成，增量撤销占用时可精确比较，避免扫描时重复拼接。
+   *
+   * @param nodes 可用节点的稳定排序列表；空集合意味着该停靠无合法股道
+   * @param orderKey 集合的全序键
+   * @param restricted 相对物理站台组是否有约束
+   */
+  record PlatformEligibility(List<String> nodes, String orderKey, boolean restricted) {
+    PlatformEligibility {
+      nodes = List.copyOf(nodes);
+    }
+
+    static PlatformEligibility of(List<String> nodes, int groupSize) {
+      List<String> sorted = nodes.stream().distinct().sorted().toList();
+      return new PlatformEligibility(sorted, String.join("\n", sorted), sorted.size() < groupSize);
+    }
+  }
 
   /** 足迹缓存：按 route 记住。只能配同一份 {@code profiles} 与图索引用（一次全扫、一个 {@link OccupationIndex} 的生命周期）。 */
   static final class Footprints {
     private final GraphIndex index;
     private final Map<UUID, Footprint> byRoute = new HashMap<>();
+    private final Map<String, List<NodeId>> nodesByGroup = new HashMap<>();
+    private final Map<Platform, Optional<PlatformEligibility>> eligibilityByPlatform =
+        new HashMap<>();
 
     Footprints(GraphIndex index) {
       this.index = Objects.requireNonNull(index, "index");
+      index
+          .nodeTypes()
+          .forEach(
+              (node, type) -> {
+                if ((type == NodeType.STATION || type == NodeType.DEPOT)
+                    && node.value().split(":", -1).length == 4) {
+                  String group = groupOf(node.value()).toLowerCase(Locale.ROOT);
+                  nodesByGroup.computeIfAbsent(group, key -> new ArrayList<>()).add(node);
+                }
+              });
     }
 
     GraphIndex index() {
@@ -465,7 +521,47 @@ public final class TimetableConflictChecker {
     }
 
     Footprint of(UUID routeId, RouteProfile profile) {
-      return byRoute.computeIfAbsent(routeId, id -> footprintOf(profile, index));
+      return byRoute.computeIfAbsent(routeId, id -> footprintOf(profile, this));
+    }
+
+    /** 同一份图与停靠定义只求一次资格；headway 修复与车辆重投影复用结果。 */
+    Optional<PlatformEligibility> eligibility(Platform platform) {
+      Optional<PlatformEligibility> cached = eligibilityByPlatform.get(platform);
+      if (cached != null) {
+        return cached;
+      }
+      Optional<PlatformEligibility> result = computeEligibility(platform);
+      eligibilityByPlatform.put(platform, result);
+      return result;
+    }
+
+    private Optional<PlatformEligibility> computeEligibility(Platform key) {
+      List<NodeId> group = nodesByGroup.get(key.group().toLowerCase(Locale.ROOT));
+      if (group == null) {
+        return Optional.empty();
+      }
+      List<String> nodes;
+      if (!key.requirements().isEmpty()) {
+        Set<String> intersection = new LinkedHashSet<>(group.stream().map(NodeId::value).toList());
+        for (Platform requirement : key.requirements()) {
+          eligibility(requirement).ifPresent(value -> intersection.retainAll(value.nodes()));
+        }
+        nodes = List.copyOf(intersection);
+      } else if (!key.dynamic()) {
+        if (key.nodeId().split(":", -1).length != 4) {
+          return Optional.empty();
+        }
+        nodes = List.of(key.nodeId());
+      } else if (key.spec().isPresent()) {
+        nodes =
+            DynamicStopMatcher.matchingNodes(key.spec().get(), group).stream()
+                .limit(DynamicStopMatcher.MAX_TRACK_CANDIDATES)
+                .map(NodeId::value)
+                .toList();
+      } else {
+        nodes = group.stream().map(NodeId::value).toList();
+      }
+      return Optional.of(PlatformEligibility.of(nodes, group.size()));
     }
   }
 
@@ -483,7 +579,8 @@ public final class TimetableConflictChecker {
           base + slot.to(),
           slot.direction(),
           movement.owner(),
-          vehicle);
+          vehicle,
+          slot.eligibility());
     }
   }
 
@@ -492,7 +589,8 @@ public final class TimetableConflictChecker {
    *
    * <p>档案带车尾出清（{@link RouteProfile#tailBlocks()}）时，每个资源的离开时刻改用车尾离开它的时刻（{@link TailClock}）。
    */
-  private static Footprint footprintOf(RouteProfile profile, GraphIndex index) {
+  private static Footprint footprintOf(RouteProfile profile, Footprints footprints) {
+    GraphIndex index = footprints.index();
     List<Slot> slots = new ArrayList<>();
     SingleLineSectionIndex sections = index.sections();
     Map<NodeId, NodeType> nodeTypes = index.nodeTypes();
@@ -529,7 +627,11 @@ public final class TimetableConflictChecker {
           slots.add(new Slot(junctionKey(node), Kind.JUNCTION, 1, at, clear, 0));
         } else if (type == NodeType.STATION) {
           addPlatformSlots(
-              slots, new Platform(node.value(), groupOf(node.value()), false), at, clear, index);
+              slots,
+              new Platform(node.value(), groupOf(node.value()), false),
+              at,
+              clear,
+              footprints);
         }
       }
       // 单线区段：连续落在同一 section 的边合并成一个带方向的占用区间。
@@ -574,7 +676,7 @@ public final class TimetableConflictChecker {
           platform,
           stop.arrivalOffsetSeconds(),
           tail.leavesStop(i, stop.departureOffsetSeconds()),
-          index);
+          footprints);
     }
     return new Footprint(slots);
   }
@@ -670,7 +772,7 @@ public final class TimetableConflictChecker {
   }
 
   private static void addPlatformSlots(
-      List<Slot> slots, Platform platform, int from, int to, GraphIndex index) {
+      List<Slot> slots, Platform platform, int from, int to, Footprints footprints) {
     if (platform == null) {
       return;
     }
@@ -679,10 +781,13 @@ public final class TimetableConflictChecker {
           new Slot(
               key,
               Kind.PLATFORM,
-              platformCapacityOf(key, platform, index.platformCapacity()),
+              platformCapacityOf(key, platform, footprints.index().platformCapacity()),
               from,
               to,
-              0));
+              0,
+              key.startsWith("platform-group:")
+                  ? footprints.eligibility(platform)
+                  : Optional.empty()));
     }
   }
 
@@ -704,13 +809,16 @@ public final class TimetableConflictChecker {
       sink.add(
           key,
           Kind.PLATFORM,
-          platformCapacityOf(key, platform, sink.platformCapacity()),
+          platformCapacityOf(key, platform, sink.footprints().index().platformCapacity()),
           code,
           from,
           to,
           0,
           owner,
-          vehicle);
+          vehicle,
+          key.startsWith("platform-group:")
+              ? sink.footprints().eligibility(platform)
+              : Optional.empty());
     }
   }
 
@@ -871,16 +979,50 @@ public final class TimetableConflictChecker {
    * @param nodeId 具体股道节点（DYNAMIC 时是占位的首股道，不用于具体股道层）
    * @param group 站台组 {@code OP:S:NAME}；解析不出来为空
    * @param dynamic 是否 DYNAMIC 停靠（运行时才选股道，只登记组一层）
+   * @param spec 原始动态声明；外部旧档案可能只有站台组
+   * @param requirements 连续停留合并后的原始资格要求；候选取交集
    */
-  public record Platform(String nodeId, String group, boolean dynamic) {
+  public record Platform(
+      String nodeId,
+      String group,
+      boolean dynamic,
+      Optional<DynamicStopMatcher.DynamicSpec> spec,
+      List<Platform> requirements) {
     public Platform {
       nodeId = nodeId == null ? "" : nodeId.trim();
       group = group == null ? "" : group.trim();
+      spec = spec == null ? Optional.empty() : spec;
+      requirements = requirements == null ? List.of() : List.copyOf(requirements);
+    }
+
+    /** 带动态声明的停靠资源。 */
+    public Platform(
+        String nodeId,
+        String group,
+        boolean dynamic,
+        Optional<DynamicStopMatcher.DynamicSpec> spec) {
+      this(nodeId, group, dynamic, spec, List.of());
+    }
+
+    /** 兼容只有站台组的外部档案；没有声明时动态组按现有物理股道建模。 */
+    public Platform(String nodeId, String group, boolean dynamic) {
+      this(nodeId, group, dynamic, Optional.empty());
     }
 
     /** 占位：这个停靠点不是站台（路径点、道岔），不登记任何站台资源。 */
     public static Platform none() {
       return new Platform("", "", false);
+    }
+
+    /** 同站连续停留必须同时满足到站与下一班始发的股道资格；保持全部原始要求，图索引建候选时取交集。 不同站台组不能合并；交路衔接的站点一致性仍由构建校验负责。 */
+    public Platform intersect(Platform other) {
+      if (other == null || !group.equalsIgnoreCase(other.group()) || equals(other)) {
+        return this;
+      }
+      List<Platform> combined = new ArrayList<>();
+      combined.addAll(requirements.isEmpty() ? List.of(this) : requirements);
+      combined.addAll(other.requirements().isEmpty() ? List.of(other) : other.requirements());
+      return new Platform(nodeId, group, true, Optional.empty(), combined);
     }
 
     public boolean absent() {
@@ -1082,7 +1224,13 @@ public final class TimetableConflictChecker {
    * @param vehicle 车辆身份：{@code owner|vehicleOf(code)}。同一辆车的占用之间不报冲突；带上 owner 是因为邻表的车次号可能与我的同名。
    */
   record Occupation(
-      String code, int from, int to, int direction, Optional<String> owner, String vehicle) {
+      String code,
+      int from,
+      int to,
+      int direction,
+      Optional<String> owner,
+      String vehicle,
+      Optional<PlatformEligibility> eligibility) {
 
     /** 邻表之间的冲突不属于我：它们在各自发布时已经被检查过，报出来只会淹没我的问题。 */
     boolean bothExternal(Occupation other) {
@@ -1106,7 +1254,9 @@ public final class TimetableConflictChecker {
           .thenComparing(Occupation::code)
           .thenComparingInt(Occupation::to)
           .thenComparingInt(Occupation::direction)
-          .thenComparing(Occupation::vehicle);
+          .thenComparing(Occupation::vehicle)
+          .thenComparing(
+              value -> value.eligibility().map(PlatformEligibility::orderKey).orElse(""));
 
   static final class Resource {
     private final String key;
@@ -1117,6 +1267,8 @@ public final class TimetableConflictChecker {
     /** 桶里出现过的最长一条占用；撤掉占用时不回缩——偏大只会让窗口扫描多扫几条，不会漏。 */
     private int maxSpan;
 
+    private boolean hasRestrictedEligibility;
+
     private Resource(String key, Kind kind, int capacity) {
       this.key = key;
       this.kind = kind;
@@ -1125,9 +1277,16 @@ public final class TimetableConflictChecker {
 
     /** 按 {@link #OCCUPATION_ORDER} 插进去，桶因此始终有序：扫描不必再排，增量重扫每步省掉一次全桶排序。 */
     private void add(
-        String code, int from, int to, int direction, Optional<String> owner, String vehicle) {
+        String code,
+        int from,
+        int to,
+        int direction,
+        Optional<String> owner,
+        String vehicle,
+        Optional<PlatformEligibility> eligibility) {
       Occupation occupation =
-          new Occupation(code, from, Math.max(from, to), direction, owner, vehicle);
+          new Occupation(code, from, Math.max(from, to), direction, owner, vehicle, eligibility);
+      hasRestrictedEligibility |= eligibility.map(PlatformEligibility::restricted).orElse(false);
       int at = Collections.binarySearch(occupations, occupation, OCCUPATION_ORDER);
       occupations.add(at < 0 ? -at - 1 : at, occupation);
       maxSpan = Math.max(maxSpan, occupation.to() - occupation.from());
@@ -1234,26 +1393,122 @@ public final class TimetableConflictChecker {
           active.add(next);
           continue;
         }
-        if (active.size() >= capacity) {
-          // 在场里最早的那个可归责的；并列取先遇到的（与 Stream.min 的取法一致）。
-          Occupation partner = null;
-          for (int k = 0; k < active.size(); k++) {
-            Occupation current = active.get(k);
-            if (current.sameVehicle(next) || current.bothExternal(next)) {
-              continue;
-            }
-            if (partner == null || current.from() < partner.from()) {
-              partner = current;
-            }
-          }
-          if (partner != null) {
-            out = out == null ? new ArrayList<>() : out;
-            out.add(conflict(partner, next));
-          }
+        Optional<Occupation> partner = capacityConflict(active, next);
+        if (partner.isEmpty() && hasRestrictedEligibility) {
+          partner = eligibilityConflict(active, next);
+        }
+        if (partner.isPresent()) {
+          out = out == null ? new ArrayList<>() : out;
+          out.add(conflict(partner.get(), next));
         }
         active.add(next);
       }
       return out == null ? List.of() : out;
+    }
+
+    /** 无子集限制时保留容量快速路径，并把同一辆车的重复到发投影只计一次。 */
+    private Optional<Occupation> capacityConflict(Active active, Occupation next) {
+      if (active.size() < capacity) {
+        return Optional.empty();
+      }
+      Set<String> vehicles = new HashSet<>();
+      vehicles.add(next.vehicle());
+      Occupation partner = null;
+      for (int i = 0; i < active.size(); i++) {
+        Occupation current = active.get(i);
+        vehicles.add(current.vehicle());
+        if (!current.sameVehicle(next)
+            && !current.bothExternal(next)
+            && (partner == null || current.from() < partner.from())) {
+          partner = current;
+        }
+      }
+      return vehicles.size() > capacity ? Optional.ofNullable(partner) : Optional.empty();
+    }
+
+    /**
+     * 对每辆车与允许股道做二分匹配，捕获容量总数看不出的共享子集瓶颈。
+     *
+     * <p>同一车辆时间相交的到站、待命、发车合并为停留并取允许集合交集；先后停留仍在安全裕量内时，分别保留对其它车辆的股道限制。
+     * 不能将先后停留取空交集，否则前车无法进入匹配，反而会漏报新到车辆的真实争用。这里验证瞬时可分配性；整段固定股道由 {@link
+     * TimetablePlatformPlanner.Result#requireFeasibleRestrictedAssignments()} 在编表保存前保证。
+     * 先匹配仍在场车辆，再插入本次车辆； 失败的增广路径给出真实争用股道的车辆，只向它们归责。未知图的外部档案仍按容量判断。
+     */
+    private Optional<Occupation> eligibilityConflict(Active active, Occupation next) {
+      if (next.eligibility().isEmpty()) {
+        return capacityConflict(active, next);
+      }
+      record Visit(Occupation representative, int end) {}
+      Map<Occupation, Set<String>> candidates = new LinkedHashMap<>();
+      Map<String, Visit> latestVisits = new HashMap<>();
+      for (int i = 0; i <= active.size(); i++) {
+        Occupation value = i == active.size() ? next : active.get(i);
+        // 同车已经离开的停靠只保留对其他车辆的安全裕量，不要求本车在两个先后股道同时停留。
+        if (value.sameVehicle(next) && value.to() < next.from()) {
+          continue;
+        }
+        if (value.eligibility().isEmpty()) {
+          return capacityConflict(active, next);
+        }
+        Set<String> nodes = new LinkedHashSet<>(value.eligibility().get().nodes());
+        Visit previous = latestVisits.get(value.vehicle());
+        if (previous == null || previous.end() < value.from()) {
+          candidates.put(value, nodes);
+          latestVisits.put(value.vehicle(), new Visit(value, value.to()));
+        } else {
+          candidates.get(previous.representative()).retainAll(nodes);
+          latestVisits.put(
+              value.vehicle(),
+              new Visit(previous.representative(), Math.max(previous.end(), value.to())));
+        }
+      }
+      Occupation targetVisit = latestVisits.get(next.vehicle()).representative();
+      Map<String, Occupation> assigned = new HashMap<>();
+      for (Occupation visit : candidates.keySet()) {
+        if (!visit.equals(targetVisit)) {
+          augment(visit, candidates, assigned, new HashSet<>(), new LinkedHashSet<>());
+        }
+      }
+      Set<Occupation> blocked = new LinkedHashSet<>();
+      if (augment(targetVisit, candidates, assigned, new HashSet<>(), blocked)) {
+        return Optional.empty();
+      }
+      // 空交集意味着同一车辆的连续停留本身不可行；保留冲突使构建失败，而不是发布空计划。
+      if (candidates.get(targetVisit).isEmpty()) {
+        return Optional.of(targetVisit);
+      }
+      Occupation partner = null;
+      for (Occupation value : blocked) {
+        if (!value.sameVehicle(next)
+            && !value.bothExternal(next)
+            && (partner == null || value.from() < partner.from())) {
+          partner = value;
+        }
+      }
+      return Optional.ofNullable(partner);
+    }
+
+    /** 允许重新分配尚未落实的计划股道；遍历节点集合受实际股道数与候选预算限制。 */
+    private static boolean augment(
+        Occupation visit,
+        Map<Occupation, Set<String>> candidates,
+        Map<String, Occupation> assigned,
+        Set<String> seenNodes,
+        Set<Occupation> seenVisits) {
+      if (!seenVisits.add(visit)) {
+        return false;
+      }
+      for (String node : candidates.get(visit)) {
+        if (!seenNodes.add(node)) {
+          continue;
+        }
+        Occupation owner = assigned.get(node);
+        if (owner == null || augment(owner, candidates, assigned, seenNodes, seenVisits)) {
+          assigned.put(node, visit);
+          return true;
+        }
+      }
+      return false;
     }
 
     /** 对向互斥：不同方向（或方向未知）的占用不能重叠；同向追踪交给边互斥。 */
