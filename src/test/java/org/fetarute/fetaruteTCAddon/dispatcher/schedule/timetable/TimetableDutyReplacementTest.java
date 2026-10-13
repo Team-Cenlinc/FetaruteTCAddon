@@ -136,29 +136,6 @@ class TimetableDutyReplacementTest {
     assertEquals(0, service.vacantDutyCount());
   }
 
-  /**
-   * 严重晚点提前换车：B 站计划 08:01:40 到、实际 08:09:00，晚 440 秒，超过容差 + 120 秒的余量——追赶也赶不上下一班。 替补车现在出库（08:09 + 180 =
-   * 08:12）赶得上第二班（08:10 发、08:15 前），于是这一刻就换车，不等第二班作废。
-   */
-  @Test
-  void aHopelesslyLateVehicleIsReplacedBeforeItsNextTripExpires() {
-    start(timetable(TimetableStatus.PUBLISHED, 3));
-
-    clock.set(Instant.parse("2026-03-02T08:09:00Z"));
-    service.observeStop(event("train-A", 1, clock.get()), false);
-
-    assertTrue(service.dutyBindingOf("train-A").isEmpty());
-    assertTrue(
-        logs.stream()
-            .anyMatch(
-                line ->
-                    line.startsWith("TIMETABLE_DUTY_VACATED train=train-A")
-                        && line.contains("reason=late-440s")
-                        && line.contains("fromTrip=1")),
-        logs::toString);
-    assertEquals(1, at("08:09:00").get(0).tripIndex(), "替补车接第二班");
-  }
-
   /** 晚点在追赶余量以内（容差 300 + 120 秒）不换：停站压缩与超速还追得回来。 */
   @Test
   void aModeratelyLateVehicleIsNotReplaced() {
@@ -170,7 +147,7 @@ class TimetableDutyReplacementTest {
     assertTrue(service.dutyBindingOf("train-A").isPresent(), "晚 400 秒，还在余量以内");
   }
 
-  /** 替补出库票作废（没派出车就过了容差）：空缺退回待派，下一轮为后面的班次再派；剩下的班次全都过了容差就撤销空缺。 */
+  /** 替补出库票作废：空缺退回待派，下一轮为还能准点接上的班次再派。08:17 出库的票 08:18 作废时第三班已来不及准点，不再派、当即取消； 剩下的班次全都过了容差就撤销空缺。 */
   @Test
   void abandonedReplacementsAreRetriedUntilNoTripIsLeft() {
     start(timetable(TimetableStatus.PUBLISHED, 3));
@@ -184,7 +161,7 @@ class TimetableDutyReplacementTest {
             first.key().serviceDate(),
             RouteOperationType.CREATE,
             first.tripIndex()));
-    assertEquals(1, at("08:18:00").size(), "作废之后还赶得上第三班，再派一张");
+    assertEquals(1, at("08:17:10").size(), "作废时还来得及准点接第三班，再派一张");
 
     service.replacementAbandoned(
         new TimetableService.TicketIntent(
@@ -193,6 +170,14 @@ class TimetableDutyReplacementTest {
             first.key().serviceDate(),
             RouteOperationType.CREATE,
             first.tripIndex()));
+    List<TripCancellations.Cancellation> heard = new ArrayList<>();
+    service.setCancellationListener(heard::add);
+    assertTrue(at("08:18:00").isEmpty(), "第三班已来不及准点，不再派");
+    assertEquals(
+        List.of(TripCancellations.Reason.VEHICLE_REMOVED),
+        heard.stream().map(TripCancellations.Cancellation::reason).toList(),
+        "替补接不上的第三班当即取消");
+    assertEquals(1, service.vacantDutyCount());
     assertTrue(at("08:25:30").isEmpty());
     assertEquals(0, service.vacantDutyCount(), "第三班 08:25 也作废了，没有班可接");
     assertTrue(

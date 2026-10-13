@@ -1043,6 +1043,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
   static final Duration VACATE_MARGIN = Duration.ofSeconds(120);
 
   /**
+   * 替补按计划出库时刻算准点的宽限：出票每隔几秒才检查一次，计划出库时刻落在两次检查之间的那一班，检查到时已经过去几秒， 不能因此被当成来不及。
+   *
+   * <p>多出的这几秒由出库后的就绪时间吸收。
+   */
+  static final Duration REPLACEMENT_ISSUE_GRACE = Duration.ofSeconds(15);
+
+  /**
    * 替补车计划：空缺交路的第 {@code tripIndex} 班由一辆新车接，它走出库线路 {@code createRouteId} 从车库开到那一班的起点。
    *
    * @param timetable 所属时刻表
@@ -1051,8 +1058,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param tripIndex 替补车接起的那一班（交路内 0 起）
    * @param trip 那一班
    * @param createRouteId 替补车的出库线路
-   * @param issueAt 按计划该出库的时刻（计划发车 − 走行 − 就绪），可能已经过去
-   * @param latestIssue 最晚还来得及的出库时刻（计划发车 + 容差 − 走行 − 就绪）：出库票的到期时刻
+   * @param issueAt 按计划该出库的时刻（计划发车 − 走行 − 就绪），至多过去 {@link #REPLACEMENT_ISSUE_GRACE}
+   * @param latestIssue 出库票的到期时刻（计划发车 + 容差 − 走行 − 就绪）：选班按准点，票出了以后在车库口被挡的那段与普通出库票一样以容差为限
    * @param departure 那一班的计划发车
    */
   public record Replacement(
@@ -1067,7 +1074,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       Instant departure) {
 
     /**
-     * 替补车的出库走行，与交路自己的出库票同一形状；票面时刻取计划出库与现在的较晚者——替补常常是晚了才派的， 按过去的时刻出票，它的到期也会按过去算。
+     * 替补车的出库走行，与交路自己的出库票同一形状；票面时刻取计划出库与现在的较晚者——出票检查常常落在计划出库时刻之后几秒， 按过去的时刻出票，它的到期也会按过去算。
      *
      * @param now 出票时刻
      * @return 出库走行
@@ -1123,7 +1130,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * 出票侧每轮问一次：该派哪些替补车。
    *
    * <p>顺带做三件事：下一班晚过晚点上限（{@link Settings#maxDelay()}）还没开出的车，不论有没有替补，从交路上解下，替补赶不上的班次当场取消；
-   * 接不上下一班（过了容差、票也不在了）、而替补车赶得上它后面某一班的车，同样解下；剩下的班次全都过了容差的空缺撤销。 每个空缺同时只派一辆（出库票在路上时不再派），替补车绑上交路即填上。
+   * 接不上下一班（过了容差、票也不在了）、而替补车能准点接上它后面某一班的车，同样解下；剩下的班次全都过了容差的空缺撤销。 每个空缺同时只派一辆（出库票在路上时不再派），替补车绑上交路即填上。
+   *
+   * <p>替补只接能准点接上的那一班（{@link #replacementFor}），出库票按那一班的计划出库时刻发出：开服时多个交路同时空缺，替补也按各自的计划出库时刻错开，
+   * 不在同一轮一起出库。替补跳过的、还没到发车时刻的班次当即取消，站牌不再挂着等一辆不会来的车。
    *
    * @param now 调度层当前时间
    * @return 这一轮要发出的替补出库票
@@ -1170,6 +1180,17 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
       Optional<Replacement> planned =
           replacementFor(vacancy.key(), vacancy.fromIndex(), now, current);
+      // 替补跳过的班次（来不及准点）此刻就登记取消；开服登记的空缺从首班算起，只取消还没到发车时刻的，不回头补记早已过去的班次。
+      boolean unbound = vacancy.retiredTrain().isBlank();
+      cancelSkipped(
+          vacancy,
+          planned,
+          Optional.of(now),
+          unbound
+              ? TripCancellations.Reason.NOT_DISPATCHED
+              : TripCancellations.Reason.VEHICLE_REMOVED,
+          unbound ? Optional.empty() : Optional.of(vacancy.retiredTrain()),
+          "duty-vacant:" + vacancy.reason());
       if (planned.isEmpty() || planned.get().issueAt().isAfter(now)) {
         continue;
       }
@@ -1286,10 +1307,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 替补车最早能接交路里的哪一班：从 {@code fromIndex} 起第一班还没过容差、有出库线路能把车及时送到它起点的。
+   * 替补车最早能接交路里的哪一班：从 {@code fromIndex} 起第一班有出库线路能把车<b>准点</b>送到它起点的。
    *
    * <p>起点本身就是车库（首站 CRET）的班次不在这里派：那一班自己的票就会从车库出车，交路空着时出车即绑上。 出库线路取表里终点在那一班起点站台组的 CREATE
-   * 线路（走行最短的那条），出库时刻 = 计划发车 − 走行 − 就绪；已经过了这个时刻， 只要现在出库还能在容差内到达也行。没有出库线路或来不及时试下一班。
+   * 线路（走行最短的那条），出库时刻 = 计划发车 − 走行 − 就绪；这个时刻已经过去（超出 {@link #REPLACEMENT_ISSUE_GRACE}）的班次跳过，
+   * 不在发车容差内晚点接：晚到的替补会和同线路的下一班挤在一起开，接着又被晚点上限换下、连带取消后面的班次。没有出库线路或来不及准点时试下一班。
    *
    * @return 替补计划；一班都接不上时为空
    */
@@ -1314,7 +1336,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       TimetableTrip trip = tripOpt.get();
       Instant departure = timetable.departureOnServiceDay(trip, key.serviceDate());
       Instant deadline = departure.plus(current.assignTolerance());
-      if (!deadline.isAfter(now) || startsAtDepot(planOpt.get())) {
+      if (departure.isBefore(now) || startsAtDepot(planOpt.get())) {
         continue;
       }
       Optional<TimetableRoutePlan> create =
@@ -1324,8 +1346,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
       long lead = create.get().totalRunSeconds() + readySeconds(timetable, create.get());
       Instant issueAt = departure.minusSeconds(lead);
-      Instant arrival = (issueAt.isAfter(now) ? issueAt : now).plusSeconds(lead);
-      if (arrival.isAfter(deadline)) {
+      if (issueAt.plus(REPLACEMENT_ISSUE_GRACE).isBefore(now)) {
         continue;
       }
       return Optional.of(
@@ -2126,6 +2147,29 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   private void cancelUncoverable(
       DutyLedger.Vacancy vacancy, String trainName, String reason, Instant now, Settings current) {
+    cancelSkipped(
+        vacancy,
+        replacementFor(vacancy.key(), vacancy.fromIndex(), now, current),
+        Optional.empty(),
+        TripCancellations.Reason.VEHICLE_REMOVED,
+        Optional.of(trainName),
+        "duty-vacated:" + reason);
+  }
+
+  /**
+   * 空缺交路里替补接不上的班次整趟取消：从空缺起到替补接起的那一班之前；派不出替补时到交路末班。起点是车库的班次不取消（它自己的票会出车）， 已有车接着的不取消。
+   *
+   * @param replacement 替补计划
+   * @param notBefore 只取消计划发车不早于这一刻的班次；为空时不限
+   * @param detail 诊断明细前缀，后面接替补从哪一班接起
+   */
+  private void cancelSkipped(
+      DutyLedger.Vacancy vacancy,
+      Optional<Replacement> replacement,
+      Optional<Instant> notBefore,
+      TripCancellations.Reason reason,
+      Optional<String> trainName,
+      String detail) {
     Timetable timetable = snapshot.byId().get(vacancy.key().timetableId());
     VehicleDuty duty =
         timetable == null ? null : timetable.duty(vacancy.key().dutyId()).orElse(null);
@@ -2133,12 +2177,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
       return;
     }
     List<UUID> ids = duty.tripIds();
-    Optional<Replacement> replacement =
-        replacementFor(vacancy.key(), vacancy.fromIndex(), now, current);
     int coveredFrom = replacement.map(Replacement::tripIndex).orElse(ids.size());
-    String detail =
-        "duty-vacated:"
-            + reason
+    String fullDetail =
+        detail
             + replacement
                 .map(planned -> " replacement-from=" + planned.trip().tripCode())
                 .orElse(" no-replacement");
@@ -2149,6 +2190,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
         continue;
       }
       Instant departure = timetable.departureOnServiceDay(trip, vacancy.key().serviceDate());
+      if (notBefore.filter(departure::isBefore).isPresent()) {
+        continue;
+      }
       // 取消登记、站牌与出票都按起点发车所在的日历日；交路身份用的是服务日，跨零点的班次两者差一天。
       LocalDate departureDate = LocalDate.ofInstant(departure, timetable.zoneId());
       OptionalInt origin = plan.firstStopAfter(-1);
@@ -2165,9 +2209,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
               departure,
               TripCancellations.Scope.FULL,
               origin.getAsInt(),
-              TripCancellations.Reason.VEHICLE_REMOVED,
-              Optional.of(trainName),
-              detail));
+              reason,
+              trainName,
+              fullDetail));
     }
   }
 
@@ -2241,8 +2285,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 严重晚点提前换车：晚点超过容差 + {@link #VACATE_MARGIN}，追赶也赶不上下一班；替补车赶得上下一班时，现在就把车从交路上解下来，
-   * 让替补车早一点出库。这一趟照常跑完，车到终点后没有交路，由回收带走。替补车赶不上下一班时不解——解了反而让原车连后面还接得上的班次也跑不了。
+   * 严重晚点提前换车：晚点超过容差 + {@link #VACATE_MARGIN}，追赶也赶不上下一班；替补车能准点接上下一班时，现在就把车从交路上解下来，
+   * 让替补车早一点出库。这一趟照常跑完，车到终点后没有交路，由回收带走。替补车不能准点接上下一班时不解——解了反而让原车连后面还接得上的班次也跑不了。
    */
   private void vacateIfHopeless(String key, String trainName, long delaySeconds, Instant now) {
     Settings current = settings;
@@ -2252,7 +2296,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     Optional<DutyKey> bound = ledger.bindingOf(key);
     Optional<DutyProgress> progress = ledger.progressOf(key).filter(p -> !p.exhausted());
-    // 只在替补车赶得上<b>下一班</b>时提前换：下一班本身替补也赶不上，原车晚点跑说不定还在容差内（终点有折返余量时），换了反而丢班。
+    // 只在替补车能准点接上<b>下一班</b>时提前换：下一班替补也接不上准点，原车晚点跑说不定还在容差内（终点有折返余量时），换了反而丢班。
     if (bound.isPresent()
         && progress.isPresent()
         && replacementFor(bound.get(), progress.get().assignedTrips(), now, current)
