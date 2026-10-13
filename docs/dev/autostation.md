@@ -36,7 +36,8 @@ autostation
   - 对 `doorL10/doorR10`：默认取前 5 秒作为开门段，剩余部分作为关门段；若总时长不足 10 秒则按一半切分。
   - 其他 legacy 动画：开门段优先按 “scene marker 含 open” 的节点截取，其次按“位姿变化量最大”的节点；若无明显变化再用“最长持续时间”兜底。
   - 若无法解析动画节点，将回退直接播放 `doorL10/doorR10`。
-- AutoStation 开/关门动画同时置 `reset` 与 `queue`。TrainCarts 的 `Attachment#startAnimation` 先判 `reset`：直接顶掉附件上当前的动画并清空队列，`queue` 分支走不到——即门动画**总会打断**同一附件上正在播放的其它模型动画（升弓、受电弓复位等），并不排队。要真正排队必须去掉 `reset`，那样门动画不再从头开始，行为会变，需单独评估。
+- AutoStation 开/关门动画与受电弓动画只排队、不带 `reset`（`QueuedAnimations`）。TrainCarts 的 `Attachment#startAnimation` 遇到 `reset`、或不带 `queue` 的动画都会顶掉当前动画并清空排队列表，TC 牌子 `animate queue` 排进去的动画就没了；只排队时等附件上正在播的放完再播，轮到时正放从头、倒放从末尾开始，不需要 `reset`。排队超过 3 秒还没轮到（卡在循环或速度为 0 的动画后面）才带 `reset` 强行播。
+- 超级电容车：升弓由站台上的 TC `animate` 牌子负责；停站结束放行发车时，`ptg5`/`ptg6` 还升着（或正排着升弓）就排一个倒放降弓（`SupercapPantograph`）。
 - 出库与首站**不做门动画预热**。曾经的预热以 `reset + speed=0` 播放门动画把门摆回起点，但速度为零则动画永远播不完，TrainCarts 只在当前动画播完后才推进附件动画队列，此后显式带 `queue` 且不带 `reset` 的动画（TC 牌子 `animate` 写了 `queue`、命令 `--queue`）会一直卡在它后面；用 chest 生成的车没有这一步，动画从第一次起就能动。
 - N/E/S/W/NE/NW/SE/SW 的门侧判定必须由 `doorL/doorR` 附件世界位置决定，不使用列车 facing/travel vector 猜测动画名。附件局部探针仅用于取得更可靠的世界位置，不改变“世界方向投影更大者胜出”的规则。
 - 关门提示音：关门时会在门位置播放提示音，仅当附近 12 格内存在玩家时触发。
