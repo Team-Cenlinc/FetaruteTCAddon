@@ -39,7 +39,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * <p>纯函数，依赖只有名称目录与文案。状态词口径：
  *
  * <ul>
- *   <li>取消：色牌与站台空心，终点划掉，到站写“取消”（红）
+ *   <li>取消：色牌与站台空心，终点划掉，到站写“取消”（红）。只在计划发车之前列出；正在进站、停靠中的车排在它前面；行数不够时真会来的车优先， 取消行只占剩下的行
  *   <li>回库：色牌空心写“—”，终点写“回库”，不显示时间
  *   <li>停靠中、进站、即将通过：到站格反白
  *   <li>通过：终点用次要色，状态写“通过”，优先于晚点
@@ -299,18 +299,70 @@ public final class PidsViewBuilder {
     return List.of(vocabulary.noMoreTrainsCall());
   }
 
-  /** 本屏显示的行：按站台过滤，至多布局行数。 */
+  /** 本屏显示的行：按站台过滤，进站、停靠中的车排在取消行之前，至多布局行数（真会来的车优先）。 */
   private static List<PidsRow> shown(Request request) {
+    List<PidsRow> here =
+        live(request)
+            .filter(row -> request.platforms().isEmpty() || row.mayUse(request.platforms()))
+            .toList();
+    return fit(atPlatformFirst(here), request.capacity());
+  }
+
+  /** 快照里此刻还该显示的行：取消行到计划发车为止。快照有有效期，按显示时刻再筛一遍。 */
+  private static Stream<PidsRow> live(Request request) {
+    return request.snapshot().rows().stream()
+        .filter(row -> !cancelled(row) || row.expectedAt().isAfter(request.now()));
+  }
+
+  /** 正在进站或停靠的车排在它之前的取消行前面：首行留给站台上真有的车，取消行接在其后，其余照旧按时间。 */
+  private static List<PidsRow> atPlatformFirst(List<PidsRow> rows) {
+    int last = -1;
+    for (int i = 0; i < rows.size(); i++) {
+      if (atPlatform(rows.get(i))) {
+        last = i;
+      }
+    }
+    if (last < 0) {
+      return rows;
+    }
+    List<PidsRow> out = new ArrayList<>(rows.size());
+    List<PidsRow> held = new ArrayList<>();
+    for (PidsRow row : rows.subList(0, last + 1)) {
+      (cancelled(row) ? held : out).add(row);
+    }
+    out.addAll(held);
+    out.addAll(rows.subList(last + 1, rows.size()));
+    return out;
+  }
+
+  /** 至多 {@code limit} 行，真会来的车优先：取消行只占真车用剩的行（按先后取），保持原来的顺序。 */
+  private static List<PidsRow> fit(List<PidsRow> rows, int limit) {
+    int real = (int) Math.min(rows.stream().filter(row -> !cancelled(row)).count(), limit);
+    int spare = Math.max(0, limit - real);
     List<PidsRow> out = new ArrayList<>();
-    for (PidsRow row : request.snapshot().rows()) {
-      if (out.size() >= request.capacity()) {
+    for (PidsRow row : rows) {
+      if (real == 0 && spare == 0) {
         break;
       }
-      if (request.platforms().isEmpty() || row.mayUse(request.platforms())) {
+      if (!cancelled(row) && real > 0) {
         out.add(row);
+        real--;
+      } else if (cancelled(row) && spare > 0) {
+        out.add(row);
+        spare--;
       }
     }
     return out;
+  }
+
+  private static boolean cancelled(PidsRow row) {
+    return row.status() == PidsRow.Status.CANCELLED;
+  }
+
+  /** 真车正在进站或停靠。 */
+  private static boolean atPlatform(PidsRow row) {
+    return !cancelled(row)
+        && (row.status() == PidsRow.Status.ARRIVING || row.status() == PidsRow.Status.BOARDING);
   }
 
   /**
@@ -353,8 +405,8 @@ public final class PidsViewBuilder {
    * 2×1 停站屏：本屏站台下一班可以上车的列车（不是取消、通过、本站终到或回库，改去别的站台的不算）往后停哪些站，到终点为止。
    *
    * <p>色牌、终点、多久到达与站台屏首行相同；要提醒的状态（站台待定、站台变更、晚点）另写一行。终点下面一行依次写：
-   * 下一班之前本站台被取消的班次（终点与计划时刻），直通（换入的线路、从哪站起），第一个经由站。停站表上的经由站、换线站与备注同一口径 （{@link
-   * PidsRemarks}）。换线站之后的站按新线路着色，可换乘的线路不含列车所属的线路。
+   * 下一班之前本站台被取消、计划发车还没到的班次（终点与计划时刻；下一班已在进站或停靠时不写，这一行留给它自己），直通（换入的线路、从哪站起），第一个经由站。停站表上的经由站、换线站与备注同一口径
+   * （{@link PidsRemarks}）。换线站之后的站按新线路着色，可换乘的线路不含列车所属的线路。
    *
    * @param request 显示要求；不看 {@code capacity}，按站台过滤后取第一班可以上车的
    * @return 第 0 页；合成器按布局每页行数与时钟翻页
@@ -364,10 +416,12 @@ public final class PidsViewBuilder {
     int index = nextIndex(here);
     Optional<PidsRow> next = index < 0 ? Optional.empty() : Optional.of(here.get(index));
     Optional<PidsRow> cancelled =
-        here.stream()
-            .filter(row -> row.status() == PidsRow.Status.CANCELLED)
-            .filter(row -> next.isEmpty() || !row.expectedAt().isAfter(next.get().expectedAt()))
-            .findFirst();
+        next.filter(PidsViewBuilder::atPlatform).isPresent()
+            ? Optional.empty()
+            : here.stream()
+                .filter(PidsViewBuilder::cancelled)
+                .filter(row -> next.isEmpty() || !row.expectedAt().isAfter(next.get().expectedAt()))
+                .findFirst();
     List<PidsView.Row> rows = next.map(row -> List.of(row(row, request))).orElse(List.of());
     return new PidsStopListView(
         request.theme(),
@@ -384,7 +438,7 @@ public final class PidsViewBuilder {
   }
 
   /**
-   * 2×1 停站屏的后续列车页：本屏站台下一班可以上车的列车之后，可以上车的列车与取消的班次（通过、本站终到、回库的不列）。
+   * 2×1 停站屏的后续列车页：本屏站台下一班可以上车的列车之后，可以上车的列车与取消的班次（通过、本站终到、回库的不列）。 放不下时可以上车的列车优先，取消的班次只占剩下的位置。
    *
    * <p>每班沿用站台屏一行的写法：色牌（取消时空心）、终点（取消时划掉）、多久到达与状态。
    *
@@ -397,7 +451,9 @@ public final class PidsViewBuilder {
     List<PidsRow> here = platformRows(plain);
     int next = nextIndex(here);
     List<PidsView.Row> trains =
-        followingRows(here, next).limit(Math.max(0, limit)).map(row -> row(row, plain)).toList();
+        fit(followingRows(here, next).toList(), Math.max(0, limit)).stream()
+            .map(row -> row(row, plain))
+            .toList();
     List<PidsView.Row> bands = next < 0 ? List.of() : List.of(row(here.get(next), plain));
     return new PidsFollowingView(
         request.theme(),
@@ -434,9 +490,9 @@ public final class PidsViewBuilder {
     return byLine.size() > 1 || byLine.values().stream().anyMatch(types -> types.size() > 1);
   }
 
-  /** 本屏站台的行：会停在本屏站台之一、且没有改去别的股道（统屏不过滤）。 */
+  /** 本屏站台此刻还该显示的行：会停在本屏站台之一、且没有改去别的股道（统屏不过滤）。 */
   private static List<PidsRow> platformRows(Request request) {
-    return request.snapshot().rows().stream()
+    return live(request)
         .filter(row -> request.platforms().isEmpty() || row.mayUse(request.platforms()))
         .filter(row -> !row.movedAwayFrom(request.platforms()))
         .toList();

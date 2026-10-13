@@ -221,6 +221,77 @@ class PidsViewBuilderTest {
     assertEquals(List.of("1"), view.platforms());
   }
 
+  /** 取消行只在计划发车之前显示：快照里还留着、但此刻已过计划发车的取消行不列。 */
+  @Test
+  void cancelledRowsAreDroppedOnceTheirTimeHasPassed() {
+    PidsRow expired = cancelled(-10);
+    PidsRow due = cancelled(0);
+    PidsRow real = row(PidsRow.Status.EN_ROUTE, 120, OptionalLong.empty());
+
+    List<PidsView.Row> rows = build(expired, due, real);
+
+    assertEquals(1, rows.size());
+    assertFalse(rows.get(0).badge().hollow(), "只剩真会来的车");
+  }
+
+  /** 正在进站、停靠中的车排在最前：取消的班次计划时刻再早，也不占首行。 */
+  @Test
+  void aTrainAtThePlatformComesBeforeCancelledRows() {
+    PidsRow arriving = row(PidsRow.Status.ARRIVING, 40, OptionalLong.empty());
+    PidsRow later = row(PidsRow.Status.EN_ROUTE, 300, OptionalLong.empty());
+
+    List<PidsView.Row> rows = build(cancelled(20), arriving, later);
+
+    assertEquals(
+        List.of(false, true, false),
+        rows.stream().map(row -> row.badge().hollow()).toList(),
+        "进站的车在首行，取消行在它之后，仍按时间排在后面的车之前");
+    assertEquals(ArrivalMode.HIGHLIGHT, rows.get(0).arrival().mode());
+  }
+
+  /** 行数有限时真会来的车优先：取消行只占剩下的行，按先后取，不把真车挤出屏幕。 */
+  @Test
+  void cancelledRowsNeverPushRealTrainsOffTheScreen() {
+    PidsRow first = row(PidsRow.Status.EN_ROUTE, 120, OptionalLong.empty());
+    PidsRow second = row(PidsRow.Status.EN_ROUTE, 240, OptionalLong.empty());
+    PidsRow third = row(PidsRow.Status.EN_ROUTE, 360, OptionalLong.empty());
+
+    assertEquals(
+        List.of("2", "4", "6"),
+        shape(capped(3, cancelled(60), cancelled(90), first, second, third)),
+        "三班真车占满三行，取消行不列");
+    assertEquals(
+        List.of("取消", "2", "4"),
+        shape(capped(3, cancelled(60), first, cancelled(180), second)),
+        "只有两班真车：剩一行给最早的取消行，按时间排");
+  }
+
+  /** 每行写成“取消”或到站分钟数。 */
+  private static List<String> shape(PidsView view) {
+    return view.rows().stream()
+        .map(row -> row.badge().hollow() ? "取消" : String.valueOf(row.arrival().minutes()))
+        .toList();
+  }
+
+  private PidsView capped(int capacity, PidsRow... rows) {
+    return builder.build(
+        new PidsViewBuilder.Request(
+            new PidsSnapshot(STATION, NOW, List.of(rows)),
+            NOW,
+            ZoneId.of("Asia/Shanghai"),
+            PidsTheme.DARK,
+            Set.of(),
+            List.of("1"),
+            capacity,
+            true));
+  }
+
+  /** 计划在 {@code seconds} 秒后发车、已取消的班次。 */
+  private static PidsRow cancelled(long seconds) {
+    return withStatus(
+        row(PidsRow.Status.EN_ROUTE, seconds, OptionalLong.empty()), PidsRow.Status.CANCELLED);
+  }
+
   @Test
   void bandSkipsOutOfServiceRowsAndViewsCompareByValue() {
     PidsRow outOfService =
