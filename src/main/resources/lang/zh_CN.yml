@@ -598,6 +598,9 @@ command:
       refused: "<prefix> <yellow>未增补</yellow> <gray><reason></gray>"
       started: "<prefix> <dark_aqua>开始增补</dark_aqua> <gray>(新节点 <white><nodes></white> 个；分段执行，可用 /fta graph status 查看进度)</gray>"
       success: "<prefix> <dark_aqua>调度图已增补</dark_aqua> <gray>(world=<white><world></white>, 新节点 <white><added_nodes></white> 个、新区间 <white><added_edges></white> 条；共 nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
+      stale-switchers: "<prefix> <yellow>未增补</yellow> <gray>已从库中移除 <white><count></white> 个牌子改为条件或 tag 道岔的作废道岔节点；当前调度图仍含这些节点，请先执行 /fta graph refresh 或 /fta graph build</gray>"
+    switcher-audit:
+      unverified: "<prefix> <yellow><count> 个道岔节点未能核对</yellow> <gray>相关区块加载失败、超出本次加载上限或判定出错，已保留这些节点；可在附近区块加载后重新执行</gray>"
     continue:
       none: "<prefix> <gray>当前没有可续跑的图构建状态</gray> <dark_aqua>请先执行 /fta graph build</dark_aqua>"
       started: "<prefix> <dark_aqua>续跑已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"

@@ -351,7 +351,7 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
    */
   public boolean hasOnlyConditionalSwitchers(RailBlockPos pos) {
     Objects.requireNonNull(pos, "pos");
-    if (!world.isChunkLoaded(pos.x() >> 4, pos.z() >> 4)) {
+    if (!chunksAroundLoaded(world, pos)) {
       return false;
     }
     RailPiece piece = RailPiece.create(world.getBlockAt(pos.x(), pos.y(), pos.z()));
@@ -371,6 +371,22 @@ public final class TrainCartsRailBlockAccess implements RailBlockAccess {
       kinds.add(kind.get());
     }
     return SwitcherSignDefinitionParser.onlyConditional(kinds);
+  }
+
+  /**
+   * 轨道 x、z 各 ±1 覆盖的区块是否都已加载。
+   *
+   * <p>TrainCarts 查牌子会读这一圈的牌子柱，遇到没加载的区块会在主线程同步加载；判定作废道岔之前必须先确认这一圈都在内存里。
+   */
+  public static boolean chunksAroundLoaded(World world, RailBlockPos rail) {
+    for (int dx = -1; dx <= 1; dx++) {
+      for (int dz = -1; dz <= 1; dz++) {
+        if (!world.isChunkLoaded((rail.x() + dx) >> 4, (rail.z() + dz) >> 4)) {
+          return false;
+        }
+      }
+    }
+    return true;
   }
 
   private Set<RailBlockPos> fallbackNeighborCandidates(Block railBlock) {

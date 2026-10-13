@@ -107,6 +107,19 @@ final class SwitcherSignChangeListenerTest {
     verify(fixture.sync(), never()).delete(any(), any());
   }
 
+  /** 牌子柱跨进未加载的相邻区块时判不全：保留节点，也不去查牌子（那会同步加载区块）。 */
+  @Test
+  void keepsNodeWhenTheSignColumnReachesAnUnloadedChunk() {
+    Fixture base = fixture();
+    Fixture fixture = new Fixture(base.sync(), base.block(), base.sign(), base.event(), rail(15));
+    try (MockedStatic<SignActionHeader> headers = headers();
+        MockedStatic<RailLookup> lookup = lookup(fixture, new TrackedSign[0])) {
+      fixture.listener().onSignChange(fixture.event());
+      lookup.verify(() -> RailLookup.discoverSignsAtRailPiece(any()), never());
+    }
+    verify(fixture.sync(), never()).delete(any(), any());
+  }
+
   private static Fixture fixture() {
     Block block = mock(Block.class);
     Sign sign = mock(Sign.class);
@@ -167,11 +180,17 @@ final class SwitcherSignChangeListenerTest {
   }
 
   private static RailPiece rail() {
+    return rail(12);
+  }
+
+  /** 轨道在 (x, 64, 3)；只有区块 (0, 0) 已加载。 */
+  private static RailPiece rail(int x) {
     World world = mock(World.class);
     when(world.getName()).thenReturn("world");
+    when(world.isChunkLoaded(0, 0)).thenReturn(true);
     Block block = mock(Block.class);
     when(block.getWorld()).thenReturn(world);
-    when(block.getX()).thenReturn(12);
+    when(block.getX()).thenReturn(x);
     when(block.getY()).thenReturn(64);
     when(block.getZ()).thenReturn(3);
     RailPiece piece = mock(RailPiece.class);

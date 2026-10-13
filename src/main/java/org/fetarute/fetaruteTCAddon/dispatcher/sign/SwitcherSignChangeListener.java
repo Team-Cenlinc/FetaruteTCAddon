@@ -17,6 +17,7 @@ import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.SignChangeEvent;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 
 /**
@@ -78,14 +79,17 @@ public final class SwitcherSignChangeListener implements Listener {
       return;
     }
     RailPiece piece = attached.get();
+    Block rail = piece.block();
+    RailBlockPos railPos = new RailBlockPos(rail.getX(), rail.getY(), rail.getZ());
+    if (!TrainCartsRailBlockAccess.chunksAroundLoaded(rail.getWorld(), railPos)) {
+      // 牌子柱跨进了未加载的区块：查牌子会同步加载它，判不全就保留节点。
+      return;
+    }
     if (otherPathfindingSwitcher(piece, block)) {
       // 这段轨道上还有别的寻路道岔牌子，道岔节点照旧有效。
       return;
     }
-    Block rail = piece.block();
-    NodeId nodeId =
-        SwitcherSignDefinitionParser.nodeIdForRail(
-            rail.getWorld().getName(), new RailBlockPos(rail.getX(), rail.getY(), rail.getZ()));
+    NodeId nodeId = SwitcherSignDefinitionParser.nodeIdForRail(rail.getWorld().getName(), railPos);
     storageSync.delete(rail, SwitcherSignDefinitionParser.definitionOf(nodeId));
     debugLogger.accept(
         "道岔牌子改为条件或 tag 道岔，移除库中道岔节点: node=" + nodeId.value() + " @ " + block.getLocation());

@@ -1,7 +1,6 @@
 package org.fetarute.fetaruteTCAddon.command;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
@@ -10,8 +9,6 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -19,6 +16,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.logging.Logger;
 import org.bukkit.World;
 import org.bukkit.block.Block;
@@ -28,6 +26,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.SwitcherNodeAudit;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailGraphSnapshotRecord;
@@ -67,9 +66,7 @@ final class FtaGraphCommandSwitcherPruningTest {
     when(fixture.nodes().delete(fixture.world().getUID(), fixture.switcher().nodeId()))
         .thenThrow(new StorageException("delete failed"));
 
-    InvocationTargetException exception =
-        assertThrows(InvocationTargetException.class, () -> prune(fixture));
-    assertInstanceOf(IllegalStateException.class, exception.getCause());
+    assertThrows(IllegalStateException.class, () -> prune(fixture));
     assertTrue(fixture.graph().getStaleState(fixture.world()).isPresent());
     assertEquals(2, fixture.stored().size());
   }
@@ -84,14 +81,38 @@ final class FtaGraphCommandSwitcherPruningTest {
     verify(fixture.nodes(), never()).delete(any(), any());
   }
 
-  private static Object prune(Fixture fixture) throws Exception {
-    Method method =
-        FtaGraphCommand.class.getDeclaredMethod(
-            "pruneStaleSwitcherNodes", World.class, TrainCartsRailBlockAccess.class, List.class);
-    assertTrue(method.trySetAccessible());
-    return method.invoke(
-        fixture.command(), fixture.world(), fixture.access(), List.copyOf(fixture.stored()));
+  /** 跑完核对（区块都已加载），再按结果移除作废节点。 */
+  private static List<RailNodeRecord> prune(Fixture fixture) {
+    List<RailNodeRecord> loaded = List.copyOf(fixture.stored());
+    SwitcherNodeAudit audit =
+        new SwitcherNodeAudit(
+            loaded, ALL_LOADED, fixture.access()::hasOnlyConditionalSwitchers, 4, 256);
+    while (!audit.step(Long.MAX_VALUE)) {
+      // 区块都已加载，一步就能走完
+    }
+    return fixture.command().removeStaleSwitchers(fixture.world(), loaded, audit.result());
   }
+
+  private static final SwitcherNodeAudit.ChunkAccess ALL_LOADED =
+      new SwitcherNodeAudit.ChunkAccess() {
+        @Override
+        public boolean isLoaded(int chunkX, int chunkZ) {
+          return true;
+        }
+
+        @Override
+        public CompletableFuture<?> load(int chunkX, int chunkZ) {
+          return CompletableFuture.completedFuture(null);
+        }
+
+        @Override
+        public boolean hold(int chunkX, int chunkZ) {
+          return false;
+        }
+
+        @Override
+        public void release(int chunkX, int chunkZ) {}
+      };
 
   private Fixture fixture() throws Exception {
     World world = mock(World.class);

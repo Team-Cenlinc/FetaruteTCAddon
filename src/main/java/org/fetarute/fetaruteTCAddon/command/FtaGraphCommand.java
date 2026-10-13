@@ -69,6 +69,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphBuildTask;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphEdgeExploreJob;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphExtension;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.RailGraphSignature;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.SwitcherAuditJob;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.SwitcherNodeAudit;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.build.UnterminatedDirection;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideLister;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.EdgeOverrideRailGraph;
@@ -152,6 +154,9 @@ public final class FtaGraphCommand {
   /** 世界维度的构建任务：同一世界同一时间只允许一个 build/continue 任务运行。 */
   /** HERE 构建沿轨道加载区块时的并发上限。 */
   private static final int CONCURRENT_CHUNK_LOADS = 4;
+
+  /** refresh/extend 核对道岔时最多新加载的区块数，与 build 的默认 maxChunks 一致。 */
+  private static final int SWITCHER_AUDIT_MAX_CHUNKS = 256;
 
   private final ConcurrentMap<UUID, RailGraphBuildTask> jobs = new ConcurrentHashMap<>();
   private final PendingRailGraphStore pendingGraphs;
@@ -6083,10 +6088,6 @@ public final class FtaGraphCommand {
       sender.sendMessage(locale.component("command.graph.build.storage-not-ready"));
       return;
     }
-    ConfigManager.GraphSettings graphSettings = plugin.getConfigManager().current().graphSettings();
-    int signAnchorRadius = graphSettings.signAnchorSearchRadius();
-    int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
-
     List<RailNodeRecord> loaded;
     try {
       loaded = providerOpt.get().railNodes().listByWorld(worldId);
@@ -6094,18 +6095,32 @@ public final class FtaGraphCommand {
       sender.sendMessage(Component.text("从存储加载节点失败: " + ex.getMessage(), NamedTextColor.RED));
       return;
     }
-    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
-    List<RailNodeRecord> nodes;
-    try {
-      nodes = pruneStaleSwitcherNodes(world, access, loaded);
-    } catch (RuntimeException ex) {
-      sender.sendMessage(Component.text("清理作废道岔节点失败: " + ex.getMessage(), NamedTextColor.RED));
-      return;
-    }
+    auditSwitchersThen(
+        sender,
+        world,
+        tickBudgetMs,
+        locale,
+        "refresh",
+        loaded,
+        (nodes, audit) -> startRefreshExploration(sender, world, tickBudgetMs, locale, nodes));
+  }
+
+  /** 道岔核对完之后的快速刷新：按剩下的节点找锚点、建边探索任务（由调用方登记并启动）。 */
+  private Optional<RailGraphEdgeExploreJob> startRefreshExploration(
+      CommandSender sender,
+      World world,
+      int tickBudgetMs,
+      LocaleManager locale,
+      List<RailNodeRecord> nodes) {
+    UUID worldId = world.getUID();
     if (nodes.isEmpty()) {
       sender.sendMessage(locale.component("command.graph.build.no-nodes"));
-      return;
+      return Optional.empty();
     }
+    ConfigManager.GraphSettings graphSettings = plugin.getConfigManager().current().graphSettings();
+    int signAnchorRadius = graphSettings.signAnchorSearchRadius();
+    int switcherAnchorRadius = graphSettings.switcherAnchorSearchRadius();
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
 
     Map<NodeId, Set<RailBlockPos>> anchorsByNode = new HashMap<>();
     Map<RailBlockPos, NodeId> anchorIndex = new HashMap<>();
@@ -6132,7 +6147,7 @@ public final class FtaGraphCommand {
     }
     if (anchorsByNode.isEmpty()) {
       sender.sendMessage(Component.text("未找到任何有效锚点，请检查节点位置是否在已加载区块内", NamedTextColor.RED));
-      return;
+      return Optional.empty();
     }
 
     NodeToNodeEdgeExplorer explorer =
@@ -6164,13 +6179,9 @@ public final class FtaGraphCommand {
               }
             },
             exploreFailed(sender, worldId, locale));
-    if (jobs.putIfAbsent(worldId, job) != null) {
-      sender.sendMessage(locale.component("command.graph.build.running"));
-      return;
-    }
-    job.start();
     sender.sendMessage(
         Component.text("快速刷新模式: 从存储加载 " + nodes.size() + " 个节点，开始边探索...", NamedTextColor.YELLOW));
+    return Optional.of(job);
   }
 
   private void finishRefresh(
@@ -6255,26 +6266,84 @@ public final class FtaGraphCommand {
   }
 
   /**
-   * 去掉库里已经作废的道岔节点：登记时是寻路道岔，牌子后来改成了写条件或 tag 的道岔（这类道岔不进图）。告警并返回剩下的节点。
+   * 先核对库里的道岔节点，再继续 refresh/extend。
+   *
+   * <p>核对按需分批异步加载区块（见 {@link SwitcherNodeAudit}），期间占住本世界的建图任务位；完成后在主线程移除作废的道岔节点、报告未核对的数量， 再把剩下的节点交给
+   * {@code then}。{@code then} 返回边探索任务时原位换上并启动，返回空则释放任务位。
+   */
+  private void auditSwitchersThen(
+      CommandSender sender,
+      World world,
+      int tickBudgetMs,
+      LocaleManager locale,
+      String phase,
+      List<RailNodeRecord> loaded,
+      java.util.function.BiFunction<
+              List<RailNodeRecord>, SwitcherNodeAudit.Result, Optional<RailGraphEdgeExploreJob>>
+          then) {
+    UUID worldId = world.getUID();
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
+    SwitcherNodeAudit audit =
+        new SwitcherNodeAudit(
+            loaded,
+            SwitcherNodeAudit.bukkitChunks(world, plugin),
+            access::hasOnlyConditionalSwitchers,
+            CONCURRENT_CHUNK_LOADS,
+            SWITCHER_AUDIT_MAX_CHUNKS);
+    SwitcherAuditJob job =
+        new SwitcherAuditJob(
+            plugin,
+            audit,
+            phase,
+            loaded.size(),
+            tickBudgetMs,
+            (self, result) -> {
+              try {
+                List<RailNodeRecord> remaining = removeStaleSwitchers(world, loaded, result);
+                if (!result.unverified().isEmpty()) {
+                  sender.sendMessage(
+                      locale.component(
+                          "command.graph.switcher-audit.unverified",
+                          Map.of("count", String.valueOf(result.unverified().size()))));
+                }
+                Optional<RailGraphEdgeExploreJob> next = then.apply(remaining, result);
+                if (next.isPresent() && jobs.replace(worldId, self, next.get())) {
+                  next.get().start();
+                } else {
+                  jobs.remove(worldId, self);
+                }
+              } catch (RuntimeException ex) {
+                jobs.remove(worldId, self);
+                sender.sendMessage(
+                    Component.text("清理作废道岔节点失败: " + ex.getMessage(), NamedTextColor.RED));
+              }
+            },
+            exploreFailed(sender, worldId, locale));
+    if (jobs.putIfAbsent(worldId, job) != null) {
+      audit.close();
+      sender.sendMessage(locale.component("command.graph.build.running"));
+      return;
+    }
+    job.start();
+  }
+
+  /**
+   * 从库里移除核对出的作废道岔节点：牌子已改成写条件或 tag 的道岔（这类道岔不进图）。告警并返回剩下的节点。
    *
    * <p>完整建图按牌子重新扫描，不会带进这类节点；快速刷新与增补直接读库，要先清掉。删除经节点增量同步，图失效的判定与提示照常。写库失败时同步器告警并标失效，
-   * 此处重新核对节点表后中止，避免继续探索或错误报告清理成功。区块未加载、判不了的保留。
+   * 此处重新核对节点表后中止，避免继续探索或错误报告清理成功。
    */
-  private List<RailNodeRecord> pruneStaleSwitcherNodes(
-      World world, TrainCartsRailBlockAccess access, List<RailNodeRecord> nodes) {
-    List<RailNodeRecord> remaining = new ArrayList<>(nodes.size());
-    for (RailNodeRecord node : nodes) {
-      if (node.nodeType() != NodeType.SWITCHER) {
-        remaining.add(node);
-        continue;
-      }
+  List<RailNodeRecord> removeStaleSwitchers(
+      World world, List<RailNodeRecord> nodes, SwitcherNodeAudit.Result result) {
+    if (result.stale().isEmpty()) {
+      return nodes;
+    }
+    Set<NodeId> stale = new HashSet<>();
+    for (RailNodeRecord node : result.stale()) {
+      stale.add(node.nodeId());
       RailBlockPos rail =
           SwitcherSignDefinitionParser.tryParseRailPos(node.nodeId())
               .orElse(new RailBlockPos(node.x(), node.y(), node.z()));
-      if (!access.hasOnlyConditionalSwitchers(rail)) {
-        remaining.add(node);
-        continue;
-      }
       plugin
           .getSignNodeStorageSync()
           .delete(
@@ -6284,7 +6353,9 @@ public final class FtaGraphCommand {
           .getLogger()
           .warning("道岔 " + node.nodeId().value() + " 的牌子已改为写条件或 tag 的道岔（不进调度图），请求从库中移除该节点");
     }
-    if (remaining.size() < nodes.size() && storedNodesDiffer(world.getUID(), remaining)) {
+    List<RailNodeRecord> remaining =
+        nodes.stream().filter(node -> !stale.contains(node.nodeId())).toList();
+    if (storedNodesDiffer(world.getUID(), remaining)) {
       throw new IllegalStateException("节点删除未同步到存储或节点表已变更，请检查日志后重试");
     }
     return remaining;
@@ -6305,7 +6376,6 @@ public final class FtaGraphCommand {
       sender.sendMessage(locale.component("command.graph.extend.no-graph"));
       return;
     }
-    RailGraph base = served.get();
     if (plugin.getStorageManager() == null
         || !plugin.getStorageManager().isReady()
         || plugin.getStorageManager().provider().isEmpty()) {
@@ -6319,18 +6389,52 @@ public final class FtaGraphCommand {
       sender.sendMessage(Component.text("从存储加载节点失败: " + ex.getMessage(), NamedTextColor.RED));
       return;
     }
-    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
-    List<RailNodeRecord> stored;
-    try {
-      stored = pruneStaleSwitcherNodes(world, access, loaded);
-    } catch (RuntimeException ex) {
-      sender.sendMessage(Component.text("清理作废道岔节点失败: " + ex.getMessage(), NamedTextColor.RED));
-      return;
+    auditSwitchersThen(
+        sender,
+        world,
+        tickBudgetMs,
+        locale,
+        "extend",
+        loaded,
+        (stored, audit) -> {
+          if (!audit.stale().isEmpty()) {
+            sender.sendMessage(
+                locale.component(
+                    "command.graph.extend.stale-switchers",
+                    Map.of("count", String.valueOf(audit.stale().size()))));
+            return Optional.empty();
+          }
+          return startExtendExploration(sender, world, tickBudgetMs, locale, stored);
+        });
+  }
+
+  /**
+   * 道岔核对完之后的增补：规划新节点、建边探索任务（由调用方登记并启动）。
+   *
+   * <p>核对刚移除了作废道岔节点时拒绝：正在用的图里还有这些节点，增补只往从未探索过的方向走，消不掉它们；须 refresh 或 build。
+   */
+  private Optional<RailGraphEdgeExploreJob> startExtendExploration(
+      CommandSender sender,
+      World world,
+      int tickBudgetMs,
+      LocaleManager locale,
+      List<RailNodeRecord> stored) {
+    UUID worldId = world.getUID();
+    Optional<RailGraph> served =
+        plugin
+            .getRailGraphService()
+            .getSnapshot(world)
+            .map(RailGraphService.RailGraphSnapshot::graph);
+    if (served.isEmpty()) {
+      sender.sendMessage(locale.component("command.graph.extend.no-graph"));
+      return Optional.empty();
     }
+    RailGraph base = served.get();
+    TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     RailGraphExtension.Planned planned = RailGraphExtension.plan(base, stored);
     if (planned.refusal().isPresent()) {
       sendExtendRefusal(sender, locale, planned.refusal().get());
-      return;
+      return Optional.empty();
     }
 
     ConfigManager.GraphSettings graphSettings = plugin.getConfigManager().current().graphSettings();
@@ -6353,7 +6457,7 @@ public final class FtaGraphCommand {
       if (anchors.isEmpty()) {
         sendExtendRefusal(
             sender, locale, "节点 " + node.nodeId().value() + " 附近找不到轨道（区块未加载？）；请靠近新轨道重试");
-        return;
+        return Optional.empty();
       }
       newAnchors.put(node.nodeId(), anchors);
       anchors.forEach(anchor -> newAnchorIndex.put(anchor, node.nodeId()));
@@ -6365,7 +6469,7 @@ public final class FtaGraphCommand {
     Optional<String> explored = RailGraphExtension.checkUnexplored(state, newAnchors);
     if (explored.isPresent()) {
       sendExtendRefusal(sender, locale, explored.get());
-      return;
+      return Optional.empty();
     }
 
     RailGraphExtension.AnchorLookup lookup =
@@ -6425,15 +6529,11 @@ public final class FtaGraphCommand {
               }
             },
             exploreFailed(sender, worldId, locale));
-    if (jobs.putIfAbsent(worldId, job) != null) {
-      sender.sendMessage(locale.component("command.graph.build.running"));
-      return;
-    }
-    job.start();
     sender.sendMessage(
         locale.component(
             "command.graph.extend.started",
             Map.of("nodes", String.valueOf(planned.newNodes().size()))));
+    return Optional.of(job);
   }
 
   /**
