@@ -21,7 +21,7 @@ class RailGraphServiceEdgeOverrideSnapshotTest {
 
   @Test
   void snapshotIsReusedUntilOverridesChange() {
-    RailGraphService service = new RailGraphService(world -> SimpleRailGraph.empty());
+    RailGraphService service = new RailGraphService();
 
     Map<EdgeId, RailEdgeOverrideRecord> empty = service.edgeOverrides(WORLD);
     assertTrue(empty.isEmpty());

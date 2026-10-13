@@ -39,7 +39,7 @@ class RailGraphServiceTest {
     NodeId c = NodeId.of("C");
     RailGraph graph = graphWithEdges(edge(a, b), edge(b, c));
 
-    RailGraphService service = new RailGraphService(world -> graph);
+    RailGraphService service = new RailGraphService();
     World world = mock(World.class);
     UUID worldId = UUID.randomUUID();
     when(world.getUID()).thenReturn(worldId);
@@ -59,7 +59,7 @@ class RailGraphServiceTest {
     RailGraph graphA = graphWithEdges(edge(a, b));
     RailGraph graphB = graphWithEdges(edge(b, c));
 
-    RailGraphService service = new RailGraphService(world -> graphA);
+    RailGraphService service = new RailGraphService();
     World world1 = mock(World.class);
     UUID worldId1 = UUID.randomUUID();
     when(world1.getUID()).thenReturn(worldId1);
@@ -127,7 +127,7 @@ class RailGraphServiceTest {
         interlockingGraph(
             worldId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 8))));
     RailGraph changedGraph = interlockingGraph(worldId, new RailEdgeFootprint(0, false, Set.of()));
-    RailGraphService service = new RailGraphService(ignored -> oldGraph);
+    RailGraphService service = new RailGraphService();
     service.putSnapshot(world, oldGraph, Instant.parse("2026-01-01T00:00:00Z"));
     service.setSnapshotActivationGuard(() -> false);
 
@@ -147,7 +147,7 @@ class RailGraphServiceTest {
         interlockingGraph(
             worldId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 8))));
     RailGraph changedGraph = interlockingGraph(worldId, new RailEdgeFootprint(0, false, Set.of()));
-    RailGraphService service = new RailGraphService(ignored -> oldGraph);
+    RailGraphService service = new RailGraphService();
     service.putSnapshot(world, oldGraph, Instant.parse("2026-01-01T00:00:00Z"));
     service.setSnapshotActivationGuard(() -> false);
 
@@ -165,7 +165,7 @@ class RailGraphServiceTest {
         interlockingGraph(
             worldId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 8))));
     RailGraph changedGraph = interlockingGraph(worldId, new RailEdgeFootprint(0, false, Set.of()));
-    RailGraphService service = new RailGraphService(ignored -> oldGraph);
+    RailGraphService service = new RailGraphService();
     service.putSnapshot(world, oldGraph, Instant.parse("2026-01-01T00:00:00Z"));
     service.setSnapshotActivationGuard(() -> false);
     service.markStale(
@@ -186,7 +186,7 @@ class RailGraphServiceTest {
     NodeId a = NodeId.of("A");
     NodeId b = NodeId.of("B");
     RailGraph graph = graphWithEdges(edge(a, b));
-    RailGraphService service = new RailGraphService(ignored -> graph);
+    RailGraphService service = new RailGraphService();
     World world = mock(World.class);
     UUID worldId = UUID.randomUUID();
     when(world.getUID()).thenReturn(worldId);
@@ -307,7 +307,7 @@ class RailGraphServiceTest {
     RailGraph builtGraph =
         interlockingGraph(
             worldId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(2, 64, 8))));
-    new RailGraphService(ignored -> builtGraph, builtLog::add).rebuild(world);
+    new RailGraphService(builtLog::add).putSnapshot(world, builtGraph, Instant.now());
     String builtLine = coverageLine(builtLog);
     assertTrue(builtLine.contains("cellCoverageAvailable=true"), "完整图构建的索引应当可用：" + builtLine);
 
@@ -329,7 +329,7 @@ class RailGraphServiceTest {
             List.of(nodeRecord(worldId, a, 0), nodeRecord(worldId, b, 10)),
             List.of(new RailEdgeRecord(worldId, edgeId, 10, 0.0, true)),
             Optional.of(snapshot));
-    new RailGraphService(ignored -> restoredGraph, restoredLog::add).rebuild(world);
+    new RailGraphService(restoredLog::add).putSnapshot(world, restoredGraph, Instant.now());
     String restoredLine = coverageLine(restoredLog);
     assertTrue(
         restoredLine.contains("cellCoverageAvailable=false"),

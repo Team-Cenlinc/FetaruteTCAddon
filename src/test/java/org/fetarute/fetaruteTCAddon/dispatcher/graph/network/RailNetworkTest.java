@@ -130,7 +130,7 @@ class RailNetworkTest {
   @Test
   @DisplayName("图服务：未开启时运行时图就是本世界的图；开启后可跨世界找路")
   void serviceIntegration() {
-    RailGraphService service = new RailGraphService(world -> OVERWORLD);
+    RailGraphService service = new RailGraphService();
     World over = mock(World.class);
     when(over.getUID()).thenReturn(OVER);
     when(over.getName()).thenReturn("over");

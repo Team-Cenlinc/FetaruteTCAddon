@@ -555,11 +555,15 @@ command:
       entry-portal: "<gray>/fta graph portal</gray> <white>-</white> <dark_aqua>跨世界传送门连接</dark_aqua>"
       hover-portal: "<gray>点击填入：</gray> <white>/fta graph portal </white>\n<dark_aqua>子命令：</dark_aqua> <white>list/scan/link/unlink</white>\n<dark_aqua>scan 按 MyWorlds 自动连接；link/unlink 手动连接或删除（节点 ID 可按 Tab 补全）</dark_aqua>"
       footer: "<gray>提示：先 /fta graph build 才能进行 query/path/component；玩家端 nodeId 需用引号包裹；ETA 为估算值</gray>"
+    no-world: "<prefix> <red>未找到可用世界</red>"
     pending:
-      saved: "<prefix> <yellow>待激活图</yellow> <gray>nodes=<nodes>, edges=<edges>, built_at=<built_at>；/fta graph activate</gray>"
+      saved: "<prefix> <yellow>有待激活的候选调度图</yellow> <gray>节点 <white><nodes></white> 个、区间 <white><edges></white> 条，构建于 <white><built_at></white>；占用安全释放后可执行 /fta graph activate 激活</gray>"
       none: "<prefix> <gray>当前世界没有待激活图</gray>"
       outdated: "<prefix> <yellow>候选图基线已变化，请重新构建；旧候选不会覆盖后来更新的图或节点</yellow>"
-      failed: "<prefix> <red>候选图保存或激活失败</red> <gray><error></gray>"
+      failed: "<prefix> <red>候选图读取或激活失败</red> <gray><error></gray>"
+      stored: "<prefix> <gray>候选图已保存；占用安全释放后使用 /fta graph activate 重试</gray>"
+      save-failed: "<prefix> <red>候选图保存失败</red> <gray><error>；旧快照保持生效，需要时请重新构建</gray>"
+      still-blocked: "<prefix> <yellow>候选图仍未激活</yellow> <gray>仍有列车占用受影响的联锁资源，旧快照保持生效，候选图保留；占用安全释放后再执行 /fta graph activate</gray>"
       activated: "<prefix> <dark_aqua>候选调度图已激活</dark_aqua>"
     build:
       started: "<prefix> <dark_aqua>调度图构建已开始</dark_aqua> <gray>（分段执行，可用 /fta graph status 查看进度）</gray>"
@@ -573,7 +577,7 @@ command:
       tcc-player-only: "<prefix> <red>控制台无法使用 --tcc</red>"
       no-tcc-selection: "<prefix> <red>未检测到 TCC 选中的轨道方块</red> <gray>请在 TCC 编辑器中选中一个节点/轨道后重试</gray>"
       failed: "<prefix> <red>调度图构建失败</red> <gray><error></gray>"
-      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>候选图已保存，旧快照保持生效；占用安全释放后使用 /fta graph activate 重试</gray>"
+      activation-blocked: "<prefix> <yellow>调度图未切换</yellow> <gray>仍有列车占用受影响的联锁资源，旧快照保持生效；候选图正在后台保存，保存结果另行提示</gray>"
       success: "<prefix> <dark_aqua>调度图已更新</dark_aqua> <gray>(world=<white><world></white>, nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
       merged: "<prefix> <dark_aqua>已合并到现有调度图</dark_aqua> <gray>(action=<white><action></white>, removed_edges=<white><removed_edges></white>, total_nodes=<white><total_nodes></white>, total_edges=<white><total_edges></white>)</gray>"
       paused: "<prefix> <yellow>已达到 maxChunks，已保存续跑状态</yellow> <gray>(pending_chunks=<white><pending_chunks></white>)</gray> <dark_aqua>/fta graph continue</dark_aqua>"
@@ -593,12 +597,13 @@ command:
     refresh:
       nodes-changed: "<prefix> <yellow>未刷新</yellow> <gray>刷新期间有节点牌子被增删或移动，结果未写入；请重新执行 /fta graph refresh</gray>"
       coverage-incomplete: "<prefix> <yellow>联锁按不完整发布</yellow> <gray>刷新无法证明区间齐全，按实测覆盖提前释放尾部保护的机制将暂停，列车间隔会偏保守；需要恢复时请执行 /fta graph build</gray>"
+      stale-switchers-removed: "<prefix> <dark_aqua>已随刷新从调度图与节点表移除 <white><count></white> 个作废道岔节点</dark_aqua> <gray>这些道岔的牌子已改为写条件或 tag 的道岔，不再进图</gray>"
     extend:
       no-graph: "<prefix> <red>当前世界没有载入调度图</red> <gray>增补只能在已有调度图上进行，请先执行 /fta graph build</gray>"
       refused: "<prefix> <yellow>未增补</yellow> <gray><reason></gray>"
       started: "<prefix> <dark_aqua>开始增补</dark_aqua> <gray>(新节点 <white><nodes></white> 个；分段执行，可用 /fta graph status 查看进度)</gray>"
       success: "<prefix> <dark_aqua>调度图已增补</dark_aqua> <gray>(world=<white><world></white>, 新节点 <white><added_nodes></white> 个、新区间 <white><added_edges></white> 条；共 nodes=<white><nodes></white>, edges=<white><edges></white>, took=<white><took_ms></white>ms)</gray>"
-      stale-switchers: "<prefix> <yellow>未增补</yellow> <gray>已从库中移除 <white><count></white> 个牌子改为条件或 tag 道岔的作废道岔节点；当前调度图仍含这些节点，请先执行 /fta graph refresh 或 /fta graph build</gray>"
+      stale-switchers: "<prefix> <yellow>未增补</yellow> <gray>有 <white><count></white> 个道岔节点的牌子已改为写条件或 tag 的道岔，应从调度图中移除；增补只往未探索的方向延伸，无法移除这些节点，请先执行 /fta graph refresh 或 /fta graph build</gray>"
     switcher-audit:
       unverified: "<prefix> <yellow><count> 个道岔节点未能核对</yellow> <gray>相关区块加载失败、超出本次加载上限或判定出错，已保留这些节点；可在附近区块加载后重新执行</gray>"
     continue:

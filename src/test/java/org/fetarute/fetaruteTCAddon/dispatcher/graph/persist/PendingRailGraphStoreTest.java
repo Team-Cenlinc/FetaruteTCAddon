@@ -24,8 +24,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
-import org.junit.jupiter.params.ParameterizedTest;
-import org.junit.jupiter.params.provider.ValueSource;
 
 class PendingRailGraphStoreTest {
   @TempDir Path directory;
@@ -95,9 +93,8 @@ class PendingRailGraphStoreTest {
    *
    * <p>固定世界标识包含普通轨道坐标的数字片段，确保缓存断言检查真实结构而不是随机元数据。
    */
-  @ParameterizedTest
-  @ValueSource(ints = {1, 2})
-  void legacyCandidatesRestoreCrossingZonesWithoutOrdinaryRailCells(int version) throws Exception {
+  @Test
+  void legacyCandidatesRestoreCrossingZonesWithoutOrdinaryRailCells() throws Exception {
     UUID world = UUID.fromString("00000000-0000-4000-8000-000000000000");
     List<RailNodeRecord> nodes =
         java.util.stream.IntStream.range(0, 4)
@@ -154,19 +151,18 @@ class PendingRailGraphStoreTest {
         savedState.zones().values().stream()
             .noneMatch(zone -> zone.overlapCells().contains(ordinary)),
         "稀疏 Zone 不保存非交叉轨道采样");
-    // 改写成旧格式：v2 没有足迹栏；v1 曾写过足迹栏但从不当作证据。两者读回都只有稀疏 Zone。
+    // 改写成旧格式：v2 没有足迹栏与计数，读回只有稀疏 Zone。
     var json = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
-    json.addProperty("version", version);
+    json.addProperty("version", 2);
+    json.remove("nodeCount");
+    json.remove("edgeCount");
     for (var edge : json.getAsJsonArray("edges")) {
       edge.getAsJsonObject().remove("footprint");
     }
-    if (version == 1) {
-      json.getAsJsonArray("edges")
-          .get(0)
-          .getAsJsonObject()
-          .addProperty("footprint", RailEdgeFootprintCodec.encode(Set.of(ordinary, crossing)));
-    }
     Files.writeString(file, json.toString());
+    var legacySummary = store.summary(world).orElseThrow();
+    assertEquals(4, legacySummary.nodeCount(), "旧缓存没有计数：读整份候选得出");
+    assertEquals(2, legacySummary.edgeCount());
     var restored =
         ((RailGraphInterlockingSupport) store.load(world).orElseThrow().result().graph())
             .interlockingState();
@@ -188,6 +184,86 @@ class PendingRailGraphStoreTest {
     data.addProperty("interlocking", interlocking.toString());
     Files.writeString(file, data.toString());
     assertThrows(java.io.IOException.class, () -> store.load(world), "联锁与拓扑不匹配时拒绝候选");
+  }
+
+  /** 状态显示只读文件开头的元数据：后面的拓扑与联锁即使损坏也不去解码。 */
+  @Test
+  void summaryReadsOnlyTheHeader() throws Exception {
+    UUID world = UUID.randomUUID();
+    var store = new PendingRailGraphStore(directory);
+    store.save(
+        world, new PendingRailGraphStore.Candidate(twoNodeResult(world), Optional.empty(), ""));
+    Path file = directory.resolve(world + ".json");
+    String text = Files.readString(file);
+    int nodes = text.indexOf("\"nodes\"");
+    assertTrue(nodes > 0 && text.indexOf("\"nodeCount\"") < nodes, "计数写在拓扑之前");
+    Files.writeString(file, text.substring(0, nodes) + "\"nodes\": [ broken");
+
+    var summary = store.summary(world).orElseThrow();
+    assertEquals(2, summary.nodeCount());
+    assertEquals(1, summary.edgeCount());
+    assertEquals(Instant.parse("2026-10-12T00:01:00Z"), summary.builtAt());
+    assertThrows(java.io.IOException.class, () -> store.load(world), "激活仍要读整份并校验");
+    assertTrue(store.summary(UUID.randomUUID()).isEmpty());
+  }
+
+  /** 候选格式从 v2 起才写盘，v1 从未存在过，按损坏处理。 */
+  @Test
+  void versionOneIsRejected() throws Exception {
+    UUID world = UUID.randomUUID();
+    var store = new PendingRailGraphStore(directory);
+    store.save(
+        world, new PendingRailGraphStore.Candidate(twoNodeResult(world), Optional.empty(), ""));
+    Path file = directory.resolve(world + ".json");
+    var json = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
+    json.addProperty("version", 1);
+    Files.writeString(file, json.toString());
+    assertThrows(java.io.IOException.class, () -> store.load(world));
+    assertThrows(java.io.IOException.class, () -> store.summary(world));
+  }
+
+  /** 后台保存在落盘前发现自己已被更新的保存或清理取代时，不写文件。 */
+  @Test
+  void supersededSaveLeavesNoFile() throws Exception {
+    UUID world = UUID.randomUUID();
+    var store = new PendingRailGraphStore(directory);
+    assertFalse(
+        store.save(
+            world,
+            new PendingRailGraphStore.Candidate(twoNodeResult(world), Optional.empty(), ""),
+            () -> false));
+    assertTrue(store.load(world).isEmpty());
+    try (var files = Files.list(directory)) {
+      assertEquals(0, files.count(), "临时文件也要清掉");
+    }
+  }
+
+  private static RailGraphBuildResult twoNodeResult(UUID world) {
+    NodeId a = NodeId.of("OP:S:A:1"), b = NodeId.of("OP:S:B:1");
+    List<RailNodeRecord> nodes =
+        List.of(
+            new RailNodeRecord(
+                world, a, NodeType.WAYPOINT, 0, 64, 0, Optional.empty(), Optional.empty()),
+            new RailNodeRecord(
+                world, b, NodeType.WAYPOINT, 10, 64, 0, Optional.empty(), Optional.empty()));
+    var graph =
+        RailGraphService.buildGraphFromRecords(
+            nodes,
+            List.of(
+                new RailEdgeRecord(
+                    world,
+                    EdgeId.undirected(a, b),
+                    10,
+                    8.0,
+                    true,
+                    Set.of(new RailFootprintCell(5, 64, 0)))));
+    return new RailGraphBuildResult(
+        graph,
+        Instant.parse("2026-10-12T00:01:00Z"),
+        RailGraphSignature.signatureForNodes(nodes),
+        nodes,
+        List.of(),
+        List.of());
   }
 
   @Test

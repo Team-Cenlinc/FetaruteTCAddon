@@ -30,8 +30,8 @@ import org.mockito.MockedStatic;
 
 final class NodeToNodeEdgeExplorerTest {
 
-  private static final NodeId START = NodeId.of("SURC:S:CHT:3");
-  private static final NodeId OTHER = NodeId.of("SWITCHER:Towny:-141:90:367");
+  private static final NodeId START = NodeId.of("OP:S:A:3");
+  private static final NodeId OTHER = NodeId.of("SWITCHER:world:-141:90:367");
   private static final double LIMIT = 4096.0;
 
   @Test
@@ -116,12 +116,12 @@ final class NodeToNodeEdgeExplorerTest {
   void zeroLengthWarningNamesBothNodesAndAnchors() {
     String warning =
         NodeToNodeEdgeExplorer.zeroLengthWarning(
-            NodeId.of("SWITCHER:Towny:-673:41:735"),
+            NodeId.of("SWITCHER:world:-673:41:735"),
             new RailBlockPos(-673, 41, 735),
-            NodeId.of("SURC:S:RVS:2"),
+            NodeId.of("OP:S:B:2"),
             null);
-    assertTrue(warning.contains("SWITCHER:Towny:-673:41:735 (-673, 41, 735)"));
-    assertTrue(warning.contains("SURC:S:RVS:2 (?)"));
+    assertTrue(warning.contains("SWITCHER:world:-673:41:735 (-673, 41, 735)"));
+    assertTrue(warning.contains("OP:S:B:2 (?)"));
   }
 
   @Test
@@ -151,8 +151,12 @@ final class NodeToNodeEdgeExplorerTest {
     List<String> warnings = new ArrayList<>();
     NodeToNodeEdgeExplorer explorer =
         new NodeToNodeEdgeExplorer(
-                world, Map.of(new RailBlockPos(targetX, 0, 0), OTHER), ignored -> {})
-            .warnTo(warnings::add);
+            world,
+            Map.of(new RailBlockPos(targetX, 0, 0), OTHER),
+            Set.of(),
+            EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
+            ignored -> {},
+            warnings::add);
     explorer.addNode(START, Set.of(new RailBlockPos(0, 0, 0)));
 
     try (MockedStatic<RailPiece> pieces = mockStatic(RailPiece.class);

@@ -55,7 +55,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.EtaRuntimeSampler;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.runtime.TrainSnapshotStore;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.SignRegistryRailGraphBuilder;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.control.SpeedSettingStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.debug.GraphDebugStickListener;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
@@ -892,11 +891,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
         configManager != null
             ? configManager.current().graphSettings()
             : ConfigManager.GraphSettings.defaults();
-    this.railGraphService =
-        new RailGraphService(
-            new SignRegistryRailGraphBuilder(
-                signNodeRegistry, loggerManager::debug, graphSettings.signAnchorSearchRadius()),
-            loggerManager::debug);
+    this.railGraphService = new RailGraphService(loggerManager::debug);
     railGraphService.configureCrossWorld(graphSettings.crossWorld(), portalLinks);
     this.graphStaleNotifier =
         GraphStaleNotifier.forPlugin(this, railGraphService, localeManager, loggerManager);

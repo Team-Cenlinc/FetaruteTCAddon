@@ -31,7 +31,7 @@ class RailGraphServiceLineSpeedFactorTest {
   }
 
   private static RailGraphService service() {
-    return new RailGraphService(world -> null);
+    return new RailGraphService();
   }
 
   private static RailEdgeOverrideRecord override(
