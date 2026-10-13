@@ -80,12 +80,11 @@ class PendingRailGraphStoreTest {
         "SQLite 重载后的毫秒精度仍是同一份基线");
     assertFalse(restored.matchesBase(Optional.of(base.plusSeconds(1)), "old-nodes"));
     assertFalse(restored.matchesBase(Optional.of(base), "edited-nodes"));
+    // 激活时要原样写库：候选不带逐边足迹的话，写库会把库里的足迹清空，尾部保护从此保守到重新 build。
     var state = ((RailGraphInterlockingSupport) restored.result().graph()).interlockingState();
-    assertFalse(state.cellCoverageAvailable(), "稀疏候选不能声称具有全轨道 cell 索引");
-    assertTrue(state.edgesForCell(cell).isEmpty());
-    assertFalse(
-        Files.readString(directory.resolve(world + ".json")).contains("\"footprint\""),
-        "普通轨道方块不得进入候选 JSON");
+    assertTrue(state.cellCoverageAvailable(), "候选带回逐边足迹，cell 索引可用");
+    assertEquals(Set.of(edge), state.edgesForCell(cell));
+    assertEquals(Map.of(edge, Set.of(cell)), state.footprintCellsByEdge());
     assertTrue(new PendingRailGraphStore(directory).load(UUID.randomUUID()).isEmpty());
     new PendingRailGraphStore(directory).delete(world);
     assertTrue(new PendingRailGraphStore(directory).load(world).isEmpty());
@@ -98,7 +97,7 @@ class PendingRailGraphStoreTest {
    */
   @ParameterizedTest
   @ValueSource(ints = {1, 2})
-  void crossingZonesSurviveRestartWithoutOrdinaryRailCells(int version) throws Exception {
+  void legacyCandidatesRestoreCrossingZonesWithoutOrdinaryRailCells(int version) throws Exception {
     UUID world = UUID.fromString("00000000-0000-4000-8000-000000000000");
     List<RailNodeRecord> nodes =
         java.util.stream.IntStream.range(0, 4)
@@ -148,9 +147,6 @@ class PendingRailGraphStoreTest {
     store.save(world, new PendingRailGraphStore.Candidate(result, Optional.empty(), ""));
     Path file = directory.resolve(world + ".json");
     var saved = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
-    for (var edge : saved.getAsJsonArray("edges")) {
-      assertFalse(edge.getAsJsonObject().has("footprint"), "候选拓扑不保存普通轨道足迹");
-    }
     var savedState =
         RailInterlockingSnapshotCodec.decode(world, saved.get("interlocking").getAsString())
             .orElseThrow();
@@ -158,15 +154,19 @@ class PendingRailGraphStoreTest {
         savedState.zones().values().stream()
             .noneMatch(zone -> zone.overlapCells().contains(ordinary)),
         "稀疏 Zone 不保存非交叉轨道采样");
+    // 改写成旧格式：v2 没有足迹栏；v1 曾写过足迹栏但从不当作证据。两者读回都只有稀疏 Zone。
+    var json = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
+    json.addProperty("version", version);
+    for (var edge : json.getAsJsonArray("edges")) {
+      edge.getAsJsonObject().remove("footprint");
+    }
     if (version == 1) {
-      var json = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
-      json.addProperty("version", 1);
       json.getAsJsonArray("edges")
           .get(0)
           .getAsJsonObject()
           .addProperty("footprint", RailEdgeFootprintCodec.encode(Set.of(ordinary, crossing)));
-      Files.writeString(file, json.toString());
     }
+    Files.writeString(file, json.toString());
     var restored =
         ((RailGraphInterlockingSupport) store.load(world).orElseThrow().result().graph())
             .interlockingState();

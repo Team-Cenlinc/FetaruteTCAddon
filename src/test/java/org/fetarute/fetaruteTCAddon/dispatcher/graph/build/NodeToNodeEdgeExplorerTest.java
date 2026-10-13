@@ -188,4 +188,14 @@ final class NodeToNodeEdgeExplorerTest {
     assertTrue(edge.footprint().complete());
     assertEquals(expectedWarnings, warnings.size(), "相邻轨道不告警；真实共享锚点两个方向只告警一次");
   }
+
+  /** 步数只在几何距离不足一格时兜底：原版斜线轨道每块只有约 0.707 格，按步数取大值会把斜线区间放大约 41%。 */
+  @Test
+  void railStepsOnlyFloorASubBlockDistance() {
+    assertEquals(141.4, NodeToNodeEdgeExplorer.measuredDistance(141.4, 200), 1.0e-9, "斜线按几何长度");
+    assertEquals(35.0, NodeToNodeEdgeExplorer.measuredDistance(35.0, 35), 1.0e-9);
+    assertEquals(1.0, NodeToNodeEdgeExplorer.measuredDistance(0.0, 1), 1.0e-9, "从接点出发跨进相邻轨道算一格");
+    assertEquals(1.0, NodeToNodeEdgeExplorer.measuredDistance(0.3, 2), 1.0e-9);
+    assertEquals(0.0, NodeToNodeEdgeExplorer.measuredDistance(0.0, 0), 1.0e-9);
+  }
 }

@@ -382,9 +382,7 @@ public final class NodeToNodeEdgeExplorer {
       ws.railBlockSteps++;
       ws.previousRailPos = currentPos;
     }
-    // moveFull 从 junction 端点出发，首次进入相邻轨道时几何距离可以为零。
-    // 区间至少包含实际跨过的轨道步数；TCC 长曲线仍采用 TC 累计的几何长度。
-    double measuredDistance = Math.max(walker.movedTotal, ws.railBlockSteps);
+    double measuredDistance = measuredDistance(walker.movedTotal, ws.railBlockSteps);
     NodeId targetNodeId = anchorIndex.get(currentPos);
     WalkerStep step = classifyStep(startNodeId, targetNodeId, measuredDistance, maxDistance);
     if (step == WalkerStep.UNTERMINATED) {
@@ -426,6 +424,19 @@ public final class NodeToNodeEdgeExplorer {
     }
 
     return false;
+  }
+
+  /**
+   * 区间的实测长度：按 TrainCarts 累计的几何长度。
+   *
+   * <p>moveFull 从 junction 端点出发、首次进入相邻轨道时几何距离可以为零，跨过了轨道却不到一格时按一格计。 不能拿步数当下限：原版斜线轨道每块只有约 0.707
+   * 格，按步数取大值会把斜线区间放大约 41%，进而影响时分、ETA 与超距判定。
+   *
+   * @param movedTotal TrainCarts 累计的几何长度（格）
+   * @param railBlockSteps 跨过的轨道方块数
+   */
+  static double measuredDistance(double movedTotal, int railBlockSteps) {
+    return movedTotal < 1.0 && railBlockSteps > 0 ? 1.0 : movedTotal;
   }
 
   /** 零长度区间的告警文字：两端节点与各自的锚点轨道坐标。 */

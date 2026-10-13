@@ -92,7 +92,8 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     var nodeRepo = mock(RailNodeRepository.class);
     when(provider.railNodes()).thenReturn(nodeRepo);
     when(nodeRepo.listByWorld(worldId)).thenReturn(nodes);
-    when(provider.railEdges()).thenReturn(mock(RailEdgeRepository.class));
+    var edgeRepo = mock(RailEdgeRepository.class);
+    when(provider.railEdges()).thenReturn(edgeRepo);
     when(provider.railGraphSnapshots()).thenReturn(mock(RailGraphSnapshotRepository.class));
     when(provider.railInterlockingSnapshots())
         .thenReturn(mock(RailInterlockingSnapshotRepository.class));
@@ -130,7 +131,8 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     var candidate = store.load(worldId).orElseThrow();
     assertTrue(
         candidate.matchesBase(Optional.of(baseTime), RailGraphSignature.signatureForNodes(nodes)));
-    assertFalse(
+    // 候选带回逐边足迹：激活写库时不能把库里的足迹清空。
+    assertTrue(
         ((RailGraphInterlockingSupport) candidate.result().graph())
             .interlockingState()
             .cellCoverageAvailable());
@@ -143,6 +145,17 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     activate.invoke(command, world, candidate.result());
     assertEquals(result.builtAt(), service.getSnapshot(world).orElseThrow().builtAt());
     verify(nodeRepo).replaceWorld(eq(worldId), eq(nodes));
+    verify(edgeRepo)
+        .replaceWorld(
+            eq(worldId),
+            org.mockito.ArgumentMatchers.argThat(
+                edges ->
+                    edges.stream()
+                        .anyMatch(
+                            record ->
+                                record
+                                    .footprintCells()
+                                    .contains(new RailFootprintCell(1, 64, 1)))));
     assertTrue(store.load(worldId).isEmpty());
   }
 
