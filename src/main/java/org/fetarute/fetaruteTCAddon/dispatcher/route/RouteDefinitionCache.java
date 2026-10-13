@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 public final class RouteDefinitionCache {
 
   private final Consumer<String> debugLogger;
+  private final Consumer<String> invalidDefinitionLogger;
   private final ConcurrentMap<UUID, RouteDefinition> cache = new ConcurrentHashMap<>();
   private final ConcurrentMap<RouteCodeKey, RouteDefinition> codeCache = new ConcurrentHashMap<>();
   private final ConcurrentMap<String, List<RouteStop>> stopCache = new ConcurrentHashMap<>();
@@ -44,7 +45,18 @@ public final class RouteDefinitionCache {
   private final List<Runnable> changeListeners = new CopyOnWriteArrayList<>();
 
   public RouteDefinitionCache(Consumer<String> debugLogger) {
+    this(debugLogger, debugLogger);
+  }
+
+  /**
+   * @param debugLogger 缓存加载诊断
+   * @param invalidDefinitionLogger 存量非法定义的告警；生产环境应使用不受 debug 开关控制的日志
+   */
+  public RouteDefinitionCache(
+      Consumer<String> debugLogger, Consumer<String> invalidDefinitionLogger) {
     this.debugLogger = debugLogger != null ? debugLogger : message -> {};
+    this.invalidDefinitionLogger =
+        invalidDefinitionLogger != null ? invalidDefinitionLogger : this.debugLogger;
   }
 
   /** 根据 routeId 获取缓存定义。 */
@@ -408,6 +420,19 @@ public final class RouteDefinitionCache {
       if (stop == null) {
         continue;
       }
+      if (DynamicStopMatcher.isDynamicStop(stop)
+          && DynamicStopMatcher.parseDynamicSpec(stop).isEmpty()) {
+        invalidDefinitionLogger.accept(
+            "停用线路定义(无效 DYNAMIC): route="
+                + route.code()
+                + " id="
+                + route.id()
+                + " sequence="
+                + stop.sequence()
+                + " reason=invalid-dynamic-syntax notes="
+                + stop.notes().orElse(""));
+        return Optional.empty();
+      }
       Optional<NodeId> nodeIdOpt = resolveNodeId(stop, stations);
       if (stop.waypointNodeId().isPresent()) {
         waypointStops++;
@@ -519,16 +544,7 @@ public final class RouteDefinitionCache {
     Optional<DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(stop);
     if (specOpt.isPresent()) {
       DynamicSpec spec = specOpt.get();
-      // 生成占位 NodeId：OP:S:STATION:fromTrack 或 OP:D:DEPOT:fromTrack
-      String placeholder =
-          spec.operatorCode()
-              + ":"
-              + spec.nodeType()
-              + ":"
-              + spec.nodeName()
-              + ":"
-              + spec.fromTrack();
-      return Optional.of(NodeId.of(placeholder));
+      return Optional.of(NodeId.of(spec.toPlaceholderNodeId()));
     }
     return Optional.empty();
   }

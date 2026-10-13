@@ -56,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointKind;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDestinationResolver;
@@ -16535,6 +16536,9 @@ public final class RuntimeDispatchService {
       return LayoverDispatchResult.failed(trainName, "terminal-mismatch");
     }
 
+    if (!stops.isEmpty() && !DynamicStopMatcher.allowsStopNode(startNode, stops.get(0))) {
+      return LayoverDispatchResult.failed(trainName, "dynamic-start-not-eligible");
+    }
     // 使用 DYNAMIC 匹配确定 startIndex
     int startIndex =
         RouteIndexResolver.resolveCurrentIndexWithDynamic(
@@ -20503,159 +20507,6 @@ public final class RuntimeDispatchService {
   }
 
   /**
-   * 解析 DYNAMIC 动态站台指令。
-   *
-   * <p>支持格式（大小写不敏感）：
-   *
-   * <ul>
-   *   <li>{@code DYNAMIC:OP:STATION:[1:3]}
-   *   <li>{@code OP:STATION:[1:3]}（已去掉 DYNAMIC: 前缀的 remainder）
-   *   <li>{@code DYNAMIC:OP:STATION} / {@code OP:STATION}（默认 track=1）
-   * </ul>
-   */
-  /**
-   * 解析 DYNAMIC stop 规范字符串。
-   *
-   * <p>支持以下格式：
-   *
-   * <ul>
-   *   <li>{@code OP:S:STATION:[1:3]} - Station 类型，轨道范围 1-3
-   *   <li>{@code OP:D:DEPOT:[1:3]} - Depot 类型，轨道范围 1-3
-   *   <li>{@code OP:S:STATION:1} - Station 类型，单轨道 1
-   *   <li>{@code OP:STATION:[1:3]} - 旧格式兼容（默认 Station 类型）
-   * </ul>
-   *
-   * @param raw 原始字符串（可能带有 DYNAMIC: 前缀）
-   * @return 解析结果
-   */
-  private static Optional<DynamicStopSpec> parseDynamicStopSpec(String raw) {
-    if (raw == null || raw.isBlank()) {
-      return Optional.empty();
-    }
-    String trimmed = raw.trim();
-    // 去掉可能的 DYNAMIC: 前缀
-    if (trimmed.regionMatches(true, 0, "DYNAMIC", 0, "DYNAMIC".length())) {
-      String rest = trimmed.substring("DYNAMIC".length()).trim();
-      if (rest.startsWith(":")) {
-        rest = rest.substring(1).trim();
-      }
-      trimmed = rest;
-    }
-    if (trimmed.isBlank()) {
-      return Optional.empty();
-    }
-
-    // 解析格式: OP:S:STATION:[range] 或 OP:D:DEPOT:[range] 或 OP:STATION:[range]
-    String[] parts = trimmed.split(":", -1);
-    if (parts.length < 2) {
-      return Optional.empty();
-    }
-
-    String operatorCode;
-    String nodeType; // "S" or "D"
-    String nodeName;
-    String rangeRaw;
-
-    if (parts.length >= 3 && (parts[1].equalsIgnoreCase("S") || parts[1].equalsIgnoreCase("D"))) {
-      // 新格式: OP:S:STATION:... 或 OP:D:DEPOT:...
-      operatorCode = parts[0].trim();
-      nodeType = parts[1].trim().toUpperCase(java.util.Locale.ROOT);
-      nodeName = parts[2].trim();
-      // 剩余部分作为 range（可能是 "1" 或 "[1:3]" 或 "1:3"）
-      if (parts.length > 3) {
-        rangeRaw = String.join(":", java.util.Arrays.copyOfRange(parts, 3, parts.length)).trim();
-      } else {
-        rangeRaw = "";
-      }
-    } else {
-      // 旧格式兼容: OP:STATION:[range]
-      operatorCode = parts[0].trim();
-      nodeType = "S"; // 默认 Station
-      nodeName = parts[1].trim();
-      if (parts.length > 2) {
-        rangeRaw = String.join(":", java.util.Arrays.copyOfRange(parts, 2, parts.length)).trim();
-      } else {
-        rangeRaw = "";
-      }
-    }
-
-    if (operatorCode.isBlank() || nodeName.isBlank()) {
-      return Optional.empty();
-    }
-
-    // 解析范围。未声明范围时不再默认成单一 1 道：那会让候选集合只剩 1 道，
-    // 而 DynamicStopMatcher 的同名解析把未声明范围视作更宽的区间，两者口径不一致时，
-    // 已固化到 2 道的列车会与唯一候选 1 道不相等，循环静默走空，最终只留下
-    // "no-available-dynamic-target rejections=[]"——列车被永久硬停在站外且无任何原因。
-    // 未声明范围统一表示"该站现有的全部股道"，由调用方按图枚举。
-    boolean unbounded = rangeRaw.isBlank();
-    int fromTrack = 1;
-    int toTrack = 1;
-    if (!rangeRaw.isBlank()) {
-      String normalizedRange = rangeRaw.trim();
-      if (normalizedRange.startsWith("[") && normalizedRange.endsWith("]")) {
-        normalizedRange = normalizedRange.substring(1, normalizedRange.length() - 1).trim();
-      }
-      if (!normalizedRange.isBlank()) {
-        int colon = normalizedRange.indexOf(':');
-        if (colon < 0) {
-          OptionalInt single = OccupancyClaimEvidence.parsePositiveInt(normalizedRange);
-          if (single.isEmpty()) {
-            return Optional.empty();
-          }
-          fromTrack = single.getAsInt();
-          toTrack = single.getAsInt();
-        } else {
-          OptionalInt from =
-              OccupancyClaimEvidence.parsePositiveInt(normalizedRange.substring(0, colon));
-          OptionalInt to =
-              OccupancyClaimEvidence.parsePositiveInt(normalizedRange.substring(colon + 1));
-          if (from.isEmpty() || to.isEmpty()) {
-            return Optional.empty();
-          }
-          fromTrack = from.getAsInt();
-          toTrack = to.getAsInt();
-        }
-      }
-    }
-    if (fromTrack <= 0 || toTrack <= 0) {
-      return Optional.empty();
-    }
-    int start = Math.min(fromTrack, toTrack);
-    int end = Math.max(fromTrack, toTrack);
-    return Optional.of(
-        new DynamicStopSpec(operatorCode, nodeType, nodeName, start, end, unbounded));
-  }
-
-  /**
-   * DYNAMIC 动态站台指令规范化结果。
-   *
-   * @param operatorCode 运营商代码
-   * @param nodeType 节点类型："S" 表示 Station，"D" 表示 Depot
-   * @param nodeName 站点/车库名称
-   * @param fromTrack 起始轨道号
-   * @param toTrack 结束轨道号
-   */
-  /**
-   * DYNAMIC 目标规范。
-   *
-   * @param unbounded 规范未声明轨道范围；表示"该站现有的全部股道"，不得退化成单一 1 道
-   */
-  private record DynamicStopSpec(
-      String operatorCode,
-      String nodeType,
-      String nodeName,
-      int fromTrack,
-      int toTrack,
-      boolean unbounded) {
-    private DynamicStopSpec {
-      Objects.requireNonNull(operatorCode, "operatorCode");
-      Objects.requireNonNull(nodeType, "nodeType");
-      Objects.requireNonNull(nodeName, "nodeName");
-    }
-  }
-
-  /**
    * 解析紧邻 RouteStop 的 DYNAMIC 目标（车站停站结束、STOP 路点推进到下一站时）。
    *
    * <p>只有当前 stop 不声明 DYNAMIC 时返回 {@code NOT_APPLICABLE}。声明存在但格式无效、没有空闲可达候选时返回 {@code
@@ -20685,7 +20536,11 @@ public final class RuntimeDispatchService {
         readEffectiveNode(trainName, route, targetIndex)
             .filter(node -> DynamicStopMatcher.matchesStop(node, stopOpt.get()));
     if (materialized.isPresent()) {
-      return DynamicResolution.selected(materialized.get());
+      return dynamicAllocator.isAvailableForMaterialization(
+              materialized.get(), trainName, graph, fromNode)
+          ? DynamicResolution.selected(materialized.get())
+          : DynamicResolution.blocked(
+              "materialized-platform-unavailable", OptionalInt.of(targetIndex));
     }
     DynamicResolution<DynamicPlatformAllocator.AllocationResult> allocation =
         dynamicAllocator.resolveAllocation(
@@ -20748,13 +20603,13 @@ public final class RuntimeDispatchService {
     if (occupancyManager == null) {
       return DynamicResolution.blocked("occupancy-manager-unavailable");
     }
-    Optional<DynamicStopSpec> specOpt = parseDynamicStopSpec(remainder.get());
+    Optional<DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(remainder.get());
     if (specOpt.isEmpty()) {
       debugLogger.accept(
           "DYNAMIC 解析失败: train=" + trainName + " idx=" + targetIndex + " raw=" + remainder.get());
       return DynamicResolution.blocked("dynamic-stop-invalid");
     }
-    DynamicStopSpec spec = specOpt.get();
+    DynamicSpec spec = specOpt.get();
     List<NodeId> baseNodes = resolveEffectiveWaypoints(trainName, route);
     if (targetIndex < 0 || targetIndex >= baseNodes.size()) {
       return DynamicResolution.blocked("dynamic-target-index-out-of-range");
@@ -20784,53 +20639,6 @@ public final class RuntimeDispatchService {
    *
    * <p>候选 owner/角色仅是诊断证据，不能写入实际授权 blocker 集合；咽喉忙碌的可用站台仍进入普通 FIFO 授权链。
    */
-  /**
-   * 解析 DYNAMIC 规范实际要枚举的股道号。
-   *
-   * <p>声明了范围就按范围；未声明范围时<b>枚举该站在图上实际存在的全部股道</b>，而不是套用一个人为上限。 人为上限既可能漏掉编号更大的股道，也不能表达"这个站现有的所有股道"这一意图。
-   */
-  private List<Integer> dynamicCandidateTracks(DynamicStopSpec spec, RailGraph graph) {
-    if (!spec.unbounded()) {
-      List<Integer> declared = new ArrayList<>();
-      for (int track = spec.fromTrack(); track <= spec.toTrack(); track++) {
-        declared.add(track);
-      }
-      return declared;
-    }
-    String prefix =
-        spec.operatorCode().trim()
-            + ":"
-            + spec.nodeType().trim()
-            + ":"
-            + spec.nodeName().trim()
-            + ":";
-    java.util.TreeSet<Integer> discovered = new java.util.TreeSet<>();
-    if (graph != null) {
-      for (org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node : graph.nodes()) {
-        if (node == null || node.id() == null || node.id().value() == null) {
-          continue;
-        }
-        String value = node.id().value();
-        if (!value.regionMatches(true, 0, prefix, 0, prefix.length())) {
-          continue;
-        }
-        String trackPart = value.substring(prefix.length());
-        if (trackPart.isEmpty() || trackPart.indexOf(':') >= 0) {
-          continue;
-        }
-        try {
-          int track = Integer.parseInt(trackPart);
-          if (track >= 1) {
-            discovered.add(track);
-          }
-        } catch (NumberFormatException ignored) {
-          // 非数字股道段不是候选。
-        }
-      }
-    }
-    return new ArrayList<>(discovered);
-  }
-
   private DynamicResolution<DynamicSelection> selectDynamicStationTargetForProgressCandidate(
       String trainName,
       RouteDefinition route,
@@ -20842,7 +20650,7 @@ public final class RuntimeDispatchService {
       Instant now,
       int priority,
       List<NodeId> baseNodes,
-      DynamicStopSpec spec,
+      DynamicSpec spec,
       Optional<NodeId> materializedTarget,
       AuthorizationPurpose purpose) {
     String operator = spec.operatorCode().trim();
@@ -20852,24 +20660,18 @@ public final class RuntimeDispatchService {
     // 收集所有可行的候选
     List<DynamicCandidate> candidates = new java.util.ArrayList<>();
     List<String> rejections = new ArrayList<>();
-    List<Integer> tracks = dynamicCandidateTracks(spec, graph);
+    List<NodeId> tracks =
+        materializedTarget
+            .map(List::of)
+            .orElseGet(
+                () ->
+                    DynamicStopMatcher.candidateNodes(
+                        spec, graph, dynamicAllocator::reportCandidateBudget));
     if (tracks.isEmpty()) {
       rejections.add(
           "spec=" + operator + ":" + nodeType + ":" + nodeName + ":no-known-track-on-graph");
     }
-    for (int track : tracks) {
-      NodeId candidate = NodeId.of(operator + ":" + nodeType + ":" + nodeName + ":" + track);
-      if (materializedTarget.isPresent() && !materializedTarget.get().equals(candidate)) {
-        // 必须记录：若这条分支静默 continue，当已固化目标与任何候选都不相等时，
-        // 整个循环会一声不响地走空，最终只留下 "no-available-dynamic-target rejections=[]"——
-        // 列车被硬停在站外而系统说不出任何理由。
-        rejections.add(
-            "candidate="
-                + candidate.value()
-                + ":not-materialized-target:"
-                + materializedTarget.get().value());
-        continue;
-      }
+    for (NodeId candidate : tracks) {
       if (!isDynamicCandidateKnown(candidate, graph)) {
         rejections.add("candidate=" + candidate.value() + ":node-or-sign-missing");
         continue;
@@ -20887,13 +20689,8 @@ public final class RuntimeDispatchService {
                     .toList());
         continue;
       }
-      if (materializedTarget.isEmpty()
-          && dynamicAllocator.isReservedByOtherTrain(candidate, trainName)) {
-        rejections.add("candidate=" + candidate.value() + ":reserved-by-other-train");
-        continue;
-      }
-      if (resolveShortestDistance(graph, fromNode, candidate).isEmpty()) {
-        rejections.add("candidate=" + candidate.value() + ":unreachable");
+      if (!dynamicAllocator.isAvailableForMaterialization(candidate, trainName, graph, fromNode)) {
+        rejections.add("candidate=" + candidate.value() + ":reservation-or-approach-unavailable");
         continue;
       }
       List<NodeId> nodes = new java.util.ArrayList<>(baseNodes);
@@ -20932,26 +20729,28 @@ public final class RuntimeDispatchService {
               + " name="
               + nodeName
               + " range="
-              + spec.fromTrack()
-              + ":"
-              + spec.toTrack());
+              + spec.tracks().formatSelector().orElse("-"));
       return DynamicResolution.blocked(
           "no-available-dynamic-target rejections=" + rejections, OptionalInt.of(targetIndex));
     }
 
-    List<DynamicCandidate> preferredCandidates =
-        candidates.stream().filter(candidate -> candidate.decision.allowed()).toList();
-    List<DynamicCandidate> selectionPool =
-        preferredCandidates.isEmpty() ? candidates : preferredCandidates;
+    // 计划股道有容量且可达时沿用计划；咽喉暂忙交给普通 Gate Queue，不能把计划从候选池移除。
     Optional<NodeId> planned = dynamicAllocator.preferredPlatform(trainName, route, targetIndex);
     Optional<DynamicCandidate> plannedCandidate =
         planned.flatMap(
-            node -> selectionPool.stream().filter(c -> c.candidate.equals(node)).findFirst());
+            node ->
+                candidates.stream()
+                    .filter(candidate -> candidate.candidate.equals(node))
+                    .findFirst());
     if (plannedCandidate.isPresent()) {
       DynamicCandidate chosen = plannedCandidate.get();
       return DynamicResolution.selected(
           new DynamicSelection(chosen.candidate, chosen.context, chosen.decision));
     }
+    List<DynamicCandidate> preferredCandidates =
+        candidates.stream().filter(candidate -> candidate.decision.allowed()).toList();
+    List<DynamicCandidate> selectionPool =
+        preferredCandidates.isEmpty() ? candidates : preferredCandidates;
     if (selectionPool.size() == 1) {
       DynamicCandidate single = selectionPool.get(0);
       return DynamicResolution.selected(
@@ -28728,6 +28527,7 @@ public final class RuntimeDispatchService {
         || index >= route.waypoints().size()) {
       return;
     }
+    dynamicAllocator.recordMaterialization(trainName, route, index, effectiveNode);
     dynamicCapacityWaits.targetResolved(trainName, route.id(), index);
     NodeId declared = route.waypoints().get(index);
     String key = normalizeTrainKey(trainName);
@@ -28872,6 +28672,7 @@ public final class RuntimeDispatchService {
     if (key.isEmpty()) {
       return;
     }
+    dynamicAllocator.recordMaterialization(trainName, route, index, effectiveNode);
     EffectiveNodeOverride previous =
         effectiveNodeOverrides
             .computeIfAbsent(key, k -> new java.util.concurrent.ConcurrentHashMap<>())
@@ -28940,7 +28741,7 @@ public final class RuntimeDispatchService {
     }
     Optional<RouteStop> currentStop =
         routeDefinitions == null ? Optional.empty() : routeDefinitions.findStop(route.id(), index);
-    return override.declaredStop().equals(currentStop);
+    return DynamicStopMatcher.sameDefinition(override.declaredStop(), currentStop);
   }
 
   private void traceEffectiveNodeOverrideRejected(
@@ -29007,6 +28808,33 @@ public final class RuntimeDispatchService {
           NodeId currentNode) {
     if (train == null || route == null || dynamicDestinationResolver == null) {
       return DynamicResolution.notApplicable("dynamic-resolver-unavailable");
+    }
+    for (int index = currentIndex + 1;
+        index < route.waypoints().size()
+            && index <= currentIndex + DynamicPlatformAllocator.ALLOCATION_EDGE_THRESHOLD + 2;
+        index++) {
+      Optional<RouteStop> stop = routeDefinitions.findStop(route.id(), index);
+      if (stop.isEmpty() || !DynamicStopMatcher.isDynamicStop(stop.get())) {
+        continue;
+      }
+      Optional<NodeId> held = readEffectiveNode(trainName, route, index);
+      if (held.isEmpty()) {
+        break;
+      }
+      Optional<DynamicSpec> spec = DynamicStopMatcher.parseDynamicSpec(stop.get());
+      Optional<RailGraph> graph = resolveGraph(train.worldId(), clockNow());
+      if (spec.isEmpty()
+          || !DynamicStopMatcher.matches(held.get(), spec.get())
+          || graph.isEmpty()
+          || !isDynamicCandidateKnown(held.get(), graph.get())
+          || !dynamicAllocator.isAvailableForMaterialization(
+              held.get(), trainName, graph.get(), currentNode)) {
+        return DynamicResolution.blocked(
+            "materialized-platform-unavailable", java.util.OptionalInt.of(index));
+      }
+      return DynamicResolution.selected(
+          new DynamicDestinationResolver.ResolvedDynamicDestination(
+              index, held.get(), "existing-materialization"));
     }
     DynamicResolution<DynamicDestinationResolver.ResolvedDynamicDestination> resolution =
         dynamicDestinationResolver.resolveSignalTickDestination(
@@ -29994,9 +29822,7 @@ public final class RuntimeDispatchService {
             .map(node -> List.of(OccupancyResource.forNode(node)))
             .orElseGet(
                 () ->
-                    graph.nodes().stream()
-                        .map(RailNode::id)
-                        .filter(node -> DynamicStopMatcher.matches(node, spec.get()))
+                    DynamicStopMatcher.matchingNodes(spec.get(), graph).stream()
                         .map(OccupancyResource::forNode)
                         .toList());
     // 等待位置取物理位置（最后经过的图节点），不取路径点；未知时记 null，不参与选台的物理先后裁定。

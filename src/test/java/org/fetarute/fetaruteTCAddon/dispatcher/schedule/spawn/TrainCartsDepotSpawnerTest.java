@@ -27,6 +27,49 @@ import org.junit.jupiter.api.Test;
 
 class TrainCartsDepotSpawnerTest {
 
+  /** 已选出库节点也必须符合原始 DYNAMIC；不能借票据字段绕过空集合或受限选择器。 */
+  @Test
+  void selectedDepotCannotBypassDynamicMembership() {
+    var registry = mock(org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.class);
+    var spawner =
+        new TrainCartsDepotSpawner(
+            mock(org.fetarute.fetaruteTCAddon.FetaruteTCAddon.class), registry, message -> {});
+    var provider = mock(org.fetarute.fetaruteTCAddon.storage.api.StorageProvider.class);
+    var routes = mock(org.fetarute.fetaruteTCAddon.company.repository.RouteRepository.class);
+    when(provider.routes()).thenReturn(routes);
+    java.util.UUID routeId = java.util.UUID.randomUUID();
+    when(routes.findById(routeId))
+        .thenReturn(
+            java.util.Optional.of(mock(org.fetarute.fetaruteTCAddon.company.model.Route.class)));
+    for (String selector : List.of("[3]", "[1,3,5]", "[]")) {
+      var service =
+          new SpawnService(
+              new SpawnServiceKey(routeId),
+              java.util.UUID.randomUUID(),
+              "C",
+              java.util.UUID.randomUUID(),
+              "OP",
+              java.util.UUID.randomUUID(),
+              "L",
+              routeId,
+              "R",
+              java.time.Duration.ofSeconds(30),
+              "DYNAMIC:OP:D:DEP:" + selector);
+      var ticket =
+          new SpawnTicket(
+              java.util.UUID.randomUUID(),
+              service,
+              java.time.Instant.EPOCH,
+              java.time.Instant.EPOCH,
+              0,
+              1,
+              java.util.Optional.of("OP:D:DEP:2"),
+              java.util.Optional.empty());
+      assertTrue(spawner.spawn(provider, ticket, "train", java.time.Instant.EPOCH).isEmpty());
+    }
+    org.mockito.Mockito.verifyNoInteractions(registry);
+  }
+
   @Test
   void spawnOwnerIdentityOverridesInheritedTemplateTagBeforeSignalRefresh() {
     MutableTrainProperties train =

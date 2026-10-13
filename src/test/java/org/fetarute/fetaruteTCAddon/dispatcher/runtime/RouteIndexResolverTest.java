@@ -11,6 +11,40 @@ import org.junit.jupiter.api.Test;
 
 class RouteIndexResolverTest {
 
+  /** 同站容错以及精确占位匹配都必须服从动态允许集合。 */
+  @Test
+  void restrictedDynamicStopRejectsExcludedTrackBeforeStationTolerance() {
+    NodeId placeholder = NodeId.of("OP:S:DEST:2");
+    RouteDefinition route =
+        new RouteDefinition(
+            RouteId.of("sparse"), List.of(NodeId.of("A"), placeholder), java.util.Optional.empty());
+    var stop = RuntimeDispatchTestFixtures.dynamicStop(1, placeholder, "DYNAMIC:OP:S:DEST:[1,3,5]");
+    assertEquals(
+        -1,
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route,
+            List.of(
+                RuntimeDispatchTestFixtures.routeStop(
+                    0,
+                    NodeId.of("A"),
+                    org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.PASS),
+                stop),
+            OptionalInt.of(0),
+            placeholder));
+    assertEquals(
+        1,
+        RouteIndexResolver.resolveCurrentIndexWithDynamic(
+            route,
+            List.of(
+                RuntimeDispatchTestFixtures.routeStop(
+                    0,
+                    NodeId.of("A"),
+                    org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType.PASS),
+                stop),
+            OptionalInt.of(0),
+            NodeId.of("OP:S:DEST:3")));
+  }
+
   @Test
   void resolveCurrentIndexFallsBackToStationKeyWhenTrackDiffers() {
     RouteDefinition route =

@@ -7,6 +7,7 @@ import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
@@ -34,9 +35,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  * <p>本顺序只为可复现而定，不表达运营偏好；需要选择语义的地方（选台、路径平局）必须在消费方显式写出规则，而不是依赖这里的顺序。
  */
 public final class SimpleRailGraph
-    implements RailGraph, RailGraphSectionSupport, RailGraphInterlockingSupport {
+    implements RailGraph,
+        RailGraphSectionSupport,
+        RailGraphInterlockingSupport,
+        RailGraphPlatformSupport {
 
   private final Map<NodeId, RailNode> nodesById;
+  private final Map<String, List<NodeId>> platformNodesByTerminal;
   private final Map<EdgeId, RailEdge> edgesById;
   private final Map<NodeId, Set<RailEdge>> edgesFrom;
   private final Set<EdgeId> blockedEdges;
@@ -66,6 +71,8 @@ public final class SimpleRailGraph
     Objects.requireNonNull(edgesById, "edgesById");
     Objects.requireNonNull(blockedEdges, "blockedEdges");
     this.nodesById = sortedByKey(nodesById);
+    this.platformNodesByTerminal =
+        RailGraphPlatformSupport.indexPlatformNodes(this.nodesById.keySet());
     this.edgesById = sortedByKey(edgesById);
     this.blockedEdges = Set.copyOf(blockedEdges);
     this.interlockingState = Objects.requireNonNull(interlockingState, "interlockingState");
@@ -77,6 +84,13 @@ public final class SimpleRailGraph
    */
   public static SimpleRailGraph empty() {
     return new SimpleRailGraph(Map.of(), Map.of(), Set.of());
+  }
+
+  @Override
+  public List<NodeId> platformNodes(String terminalKey) {
+    return terminalKey == null
+        ? List.of()
+        : platformNodesByTerminal.getOrDefault(terminalKey.toLowerCase(Locale.ROOT), List.of());
   }
 
   @Override

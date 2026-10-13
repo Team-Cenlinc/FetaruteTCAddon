@@ -169,6 +169,55 @@ class TimetablePlatformPlannerTest {
     assertTrue(!plans.containsKey(key(d3, 0, 2)) && !plans.containsKey(key(d3, 1, 0)));
   }
 
+  /** 瞬时匹配可行但整段无固定股道时，受限交路必须在保存前失败。 */
+  @Test
+  void restrictedStayCannotSwitchTracksBetweenTwoAdjacentBookings() {
+    Duty duty = new Duty("D001", List.of(new Run(OUT, 1000), new Run(BACK, 1300)));
+    var table = table(List.of(duty));
+    var neighbor =
+        new NeighborTimetable(
+            UUID.randomUUID(),
+            "NEIGHBOR",
+            Instant.EPOCH,
+            ZoneId.of("UTC"),
+            1,
+            false,
+            false,
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay(
+                    "B",
+                    new TimetableConflictChecker.Platform(BBB1, "OP:S:BBB", false),
+                    1120,
+                    1210,
+                    Optional.of("NEIGHBOR")),
+                new TimetableConflictChecker.Stay(
+                    "C",
+                    new TimetableConflictChecker.Platform(BBB2, "OP:S:BBB", false),
+                    1210,
+                    1300,
+                    Optional.of("NEIGHBOR"))),
+            List.of());
+    var restrictedStops = new LinkedHashMap<>(stops);
+    restrictedStops.put(OUT, routeStops(OUT, Optional.empty(), Optional.of(DYNAMIC + ":[1,2]")));
+    var result =
+        TimetablePlatformPlanner.plan(
+            new TimetablePlatformPlanner.Input(
+                List.of(table),
+                Map.of(TABLE, Map.of(OUT, profile(OUT), BACK, profile(BACK))),
+                restrictedStops,
+                definitions,
+                graph,
+                index,
+                List.of(neighbor),
+                0,
+                0));
+    assertEquals(1, result.restrictedUnplaced());
+    org.junit.jupiter.api.Assertions.assertThrows(
+        IllegalStateException.class, result::requireFeasibleRestrictedAssignments);
+  }
+
   // ------------------------------------------------------------------ 夹具
 
   private record Run(UUID routeId, int departure) {}

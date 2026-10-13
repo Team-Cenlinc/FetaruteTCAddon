@@ -91,11 +91,15 @@ class PendingRailGraphStoreTest {
     assertTrue(new PendingRailGraphStore(directory).load(world).isEmpty());
   }
 
-  /** 新旧缓存都只恢复真实平交 Zone，普通轨道不建立全图反查索引。 */
+  /**
+   * 新旧缓存都只恢复真实平交 Zone，普通轨道不建立全图反查索引。
+   *
+   * <p>固定世界标识包含普通轨道坐标的数字片段，确保缓存断言检查真实结构而不是随机元数据。
+   */
   @ParameterizedTest
   @ValueSource(ints = {1, 2})
   void crossingZonesSurviveRestartWithoutOrdinaryRailCells(int version) throws Exception {
-    UUID world = UUID.randomUUID();
+    UUID world = UUID.fromString("00000000-0000-4000-8000-000000000000");
     List<RailNodeRecord> nodes =
         java.util.stream.IntStream.range(0, 4)
             .mapToObj(
@@ -143,7 +147,17 @@ class PendingRailGraphStoreTest {
     var store = new PendingRailGraphStore(directory);
     store.save(world, new PendingRailGraphStore.Candidate(result, Optional.empty(), ""));
     Path file = directory.resolve(world + ".json");
-    assertFalse(Files.readString(file).contains("4000"));
+    var saved = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
+    for (var edge : saved.getAsJsonArray("edges")) {
+      assertFalse(edge.getAsJsonObject().has("footprint"), "候选拓扑不保存普通轨道足迹");
+    }
+    var savedState =
+        RailInterlockingSnapshotCodec.decode(world, saved.get("interlocking").getAsString())
+            .orElseThrow();
+    assertTrue(
+        savedState.zones().values().stream()
+            .noneMatch(zone -> zone.overlapCells().contains(ordinary)),
+        "稀疏 Zone 不保存非交叉轨道采样");
     if (version == 1) {
       var json = com.google.gson.JsonParser.parseString(Files.readString(file)).getAsJsonObject();
       json.addProperty("version", 1);

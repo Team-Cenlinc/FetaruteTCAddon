@@ -421,4 +421,66 @@ class RouteDefinitionCacheTest {
     List<RouteStop> stops = cache.listStops(def.id());
     assertEquals(waypoints.size(), stops.size());
   }
+
+  /** 存量非法声明必须停用整条交路并记录停靠位置，不能删去坏站后继续运行。 */
+  @org.junit.jupiter.params.ParameterizedTest
+  @org.junit.jupiter.params.provider.ValueSource(booleans = {false, true})
+  void invalidStoredDynamicCannotBePrunedOrFallBackToItsWaypoint(boolean hasWaypoint) {
+    UUID routeId = UUID.randomUUID();
+    Operator operator = mock(Operator.class);
+    when(operator.code()).thenReturn("OP");
+    Line line = mock(Line.class);
+    when(line.code()).thenReturn("L1");
+    Route route = mock(Route.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.code()).thenReturn("R1");
+    when(route.name()).thenReturn("Route 1");
+    RouteStop first =
+        new RouteStop(
+            routeId,
+            0,
+            Optional.empty(),
+            Optional.of("OP:S:A:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    RouteStop last =
+        new RouteStop(
+            routeId,
+            2,
+            Optional.empty(),
+            Optional.of("OP:S:C:1"),
+            Optional.empty(),
+            RouteStopPassType.TERMINATE,
+            Optional.empty());
+    RouteStop invalid =
+        new RouteStop(
+            routeId,
+            1,
+            Optional.empty(),
+            hasWaypoint ? Optional.of("OP:S:B:1") : Optional.empty(),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:OP:S:B:[]"));
+    StorageProvider provider = mock(StorageProvider.class);
+    RouteStopRepository stops = mock(RouteStopRepository.class);
+    when(provider.routeStops()).thenReturn(stops);
+    when(provider.stations()).thenReturn(mock(StationRepository.class));
+    when(stops.listByRoute(routeId)).thenReturn(List.of(first, last));
+    java.util.List<String> logs = new java.util.ArrayList<>();
+    RouteDefinitionCache cache = new RouteDefinitionCache(message -> {}, logs::add);
+    RouteDefinition original = cache.refresh(provider, operator, line, route).orElseThrow();
+    when(stops.listByRoute(routeId)).thenReturn(List.of(first, invalid, last));
+    assertTrue(cache.refresh(provider, operator, line, route).isEmpty());
+    assertTrue(cache.findById(routeId).isEmpty());
+    assertTrue(cache.listStops(original.id()).isEmpty());
+    assertTrue(
+        logs.stream()
+            .anyMatch(
+                message ->
+                    message.contains("route=R1")
+                        && message.contains("sequence=1")
+                        && message.contains("DYNAMIC:OP:S:B:[]")),
+        () -> logs.toString());
+  }
 }

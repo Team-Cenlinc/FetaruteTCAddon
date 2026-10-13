@@ -3309,6 +3309,119 @@ class SimpleTicketAssignerLayoverTest {
   }
 
   @Test
+  void tickMaterializesSparseDynamicDepotTicketsWithoutExcludedTracks() {
+    UUID lineId = UUID.randomUUID();
+    UUID routeOneId = UUID.randomUUID();
+    UUID routeTwoId = UUID.randomUUID();
+    NodeId depotOne = NodeId.of("SURN:D:DEPOT:1");
+    NodeId depotTwo = NodeId.of("SURN:D:DEPOT:3");
+    NodeId nodeA = NodeId.of("A");
+    NodeId nodeB = NodeId.of("B");
+    String dynamicDepot = "DYNAMIC:SURN:D:DEPOT:[1,3,5]";
+    SpawnTicket first = buildTicket(routeOneId, lineId, "R1", 0L);
+    SpawnTicket second = buildTicket(routeTwoId, lineId, "R2", 1L);
+    StorageProvider provider =
+        mockProviderForRoutes(
+            lineId,
+            Map.of(routeOneId, "R1", routeTwoId, "R2"),
+            true,
+            Map.of(LineSpawnMetadata.KEY_DEPOTS, List.of(dynamicDepot)));
+    SpawnManager spawnManager = mock(SpawnManager.class);
+    Instant now = Instant.parse("2026-02-01T00:00:00Z");
+    when(spawnManager.pollDueTickets(eq(provider), eq(now))).thenReturn(List.of(first, second));
+    when(spawnManager.snapshotQueue()).thenReturn(List.of());
+
+    UUID worldId = UUID.randomUUID();
+    NodeId excludedDepot = NodeId.of("SURN:D:DEPOT:2");
+    SimpleRailGraph base = graphWithTwoDepotStarts(depotOne, depotTwo, nodeA, nodeB);
+    Map<NodeId, RailNode> nodes = new java.util.HashMap<>();
+    base.nodes().forEach(node -> nodes.put(node.id(), node));
+    nodes.put(
+        excludedDepot,
+        new SignRailNode(
+            excludedDepot,
+            NodeType.DEPOT,
+            new Vector(-15, 64, 0),
+            Optional.empty(),
+            Optional.empty()));
+    Map<EdgeId, RailEdge> edges = new java.util.HashMap<>();
+    base.edges().forEach(edge -> edges.put(edge.id(), edge));
+    RailEdge excludedEdge =
+        new RailEdge(
+            EdgeId.undirected(excludedDepot, nodeA),
+            excludedDepot,
+            nodeA,
+            10,
+            20,
+            true,
+            Optional.empty());
+    edges.put(excludedEdge.id(), excludedEdge);
+    SimpleRailGraph withExcludedTrack = new SimpleRailGraph(nodes, edges, Set.of());
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getSnapshot(worldId))
+        .thenReturn(Optional.of(new RailGraphService.RailGraphSnapshot(withExcludedTrack, now)));
+    SignNodeRegistry signNodeRegistry = registryWithDepots(worldId, depotOne, depotTwo);
+    Map<String, SignNodeRegistry.SignNodeInfo> allDepots =
+        new java.util.HashMap<>(signNodeRegistry.snapshotInfos());
+    allDepots.put(
+        "excluded",
+        new SignNodeRegistry.SignNodeInfo(
+            new SignNodeDefinition(
+                excludedDepot, NodeType.DEPOT, Optional.empty(), Optional.empty()),
+            worldId,
+            "TestWorld",
+            -15,
+            64,
+            0));
+    when(signNodeRegistry.snapshotInfos()).thenReturn(Map.copyOf(allDepots));
+    PreviewOccupancyManager occupancyManager = mock(PreviewOccupancyManager.class);
+    when(occupancyManager.snapshotClaims()).thenReturn(List.of());
+    when(occupancyManager.canEnterPreview(any(OccupancyRequest.class)))
+        .thenAnswer(
+            inv -> {
+              OccupancyRequest request = inv.getArgument(0);
+              return new OccupancyDecision(true, request.now(), SignalAspect.PROCEED, List.of());
+            });
+
+    DepotSpawner depotSpawner = mock(DepotSpawner.class);
+    when(depotSpawner.spawn(eq(provider), any(), any(), eq(now))).thenReturn(Optional.empty());
+    RuntimeDispatchService runtimeDispatchService =
+        mockRuntimeDispatchServiceAllowingSmartAdmission();
+
+    RouteDefinition routeOne =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R1"), List.of(depotOne, nodeA, nodeB), Optional.empty());
+    RouteDefinition routeTwo =
+        new RouteDefinition(
+            RouteId.of("OP:L1:R2"), List.of(depotOne, nodeA, nodeB), Optional.empty());
+    SimpleTicketAssigner assigner =
+        new SimpleTicketAssigner(
+            spawnManager,
+            depotSpawner,
+            occupancyManager,
+            railGraphService,
+            mockRouteDefinitions(Map.of(routeOneId, routeOne, routeTwoId, routeTwo)),
+            runtimeDispatchService,
+            mockConfigManager(),
+            signNodeRegistry,
+            mock(LayoverRegistry.class),
+            null,
+            Duration.ofSeconds(1),
+            2,
+            10);
+
+    assigner.tick(provider, now);
+
+    ArgumentCaptor<SpawnTicket> ticketCaptor = ArgumentCaptor.forClass(SpawnTicket.class);
+    verify(depotSpawner, times(2)).spawn(eq(provider), ticketCaptor.capture(), any(), eq(now));
+    assertEquals(
+        Set.of(depotOne.value(), depotTwo.value()),
+        ticketCaptor.getAllValues().stream()
+            .map(ticket -> ticket.selectedDepotNodeId().orElse(""))
+            .collect(java.util.stream.Collectors.toSet()));
+  }
+
+  @Test
   void tickBuildsTrainNameFromDestinationCodeForCretSpawn() {
     UUID lineId = UUID.randomUUID();
     UUID routeId = UUID.randomUUID();

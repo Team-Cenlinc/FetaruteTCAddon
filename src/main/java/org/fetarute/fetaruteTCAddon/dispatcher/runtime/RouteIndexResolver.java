@@ -5,6 +5,7 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
@@ -45,6 +46,12 @@ public final class RouteIndexResolver {
    */
   public static int resolveCurrentIndex(
       RouteDefinition route, OptionalInt tagIndex, NodeId currentNode) {
+    return resolveCurrentIndex(route, tagIndex, currentNode, index -> true);
+  }
+
+  /** 每一处精确或同站匹配都必须通过对应 stop 的资格闸，失败后继续搜索后续合法索引。 */
+  private static int resolveCurrentIndex(
+      RouteDefinition route, OptionalInt tagIndex, NodeId currentNode, IntPredicate eligible) {
     Objects.requireNonNull(route, "route");
     if (currentNode == null) {
       return -1;
@@ -64,11 +71,11 @@ public final class RouteIndexResolver {
     if (tagIndex != null && tagIndex.isPresent()) {
       int index = tagIndex.getAsInt();
       if (index >= 0 && index < nodes.size()) {
-        if (currentNode.equals(nodes.get(index))) {
+        if (currentNode.equals(nodes.get(index)) && eligible.test(index)) {
           return index;
         }
         for (int i = index + 1; i < nodes.size(); i++) {
-          if (currentNode.equals(nodes.get(i))) {
+          if (currentNode.equals(nodes.get(i)) && eligible.test(i)) {
             return i;
           }
         }
@@ -84,7 +91,9 @@ public final class RouteIndexResolver {
               continue;
             }
             Optional<String> candidateKey = TerminalKeyResolver.extractStationKey(candidateValue);
-            if (candidateKey.isPresent() && candidateKey.get().equals(currentStationKey.get())) {
+            if (candidateKey.isPresent()
+                && candidateKey.get().equals(currentStationKey.get())
+                && eligible.test(i)) {
               return i;
             }
           }
@@ -93,7 +102,7 @@ public final class RouteIndexResolver {
     }
 
     for (int i = 0; i < nodes.size(); i++) {
-      if (currentNode.equals(nodes.get(i))) {
+      if (currentNode.equals(nodes.get(i)) && eligible.test(i)) {
         return i;
       }
     }
@@ -109,7 +118,9 @@ public final class RouteIndexResolver {
           continue;
         }
         Optional<String> candidateKey = TerminalKeyResolver.extractStationKey(candidateValue);
-        if (candidateKey.isPresent() && candidateKey.get().equals(currentStationKey.get())) {
+        if (candidateKey.isPresent()
+            && candidateKey.get().equals(currentStationKey.get())
+            && eligible.test(i)) {
           return i;
         }
       }
@@ -131,7 +142,16 @@ public final class RouteIndexResolver {
   public static int resolveCurrentIndexWithDynamic(
       RouteDefinition route, List<RouteStop> stops, OptionalInt tagIndex, NodeId currentNode) {
     // 先尝试普通匹配
-    int basicResult = resolveCurrentIndex(route, tagIndex, currentNode);
+    List<RouteStop> definitions = stops == null ? List.of() : stops;
+    int basicResult =
+        resolveCurrentIndex(
+            route,
+            tagIndex,
+            currentNode,
+            index ->
+                index >= definitions.size()
+                    || definitions.get(index) == null
+                    || DynamicStopMatcher.allowsStopNode(currentNode, definitions.get(index)));
     if (basicResult >= 0) {
       return basicResult;
     }

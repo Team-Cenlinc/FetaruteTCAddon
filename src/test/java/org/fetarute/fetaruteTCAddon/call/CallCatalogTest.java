@@ -48,6 +48,41 @@ class CallCatalogTest {
   private static final Line WS = line("WS");
   private static final Line MT = line("MT");
 
+  /** 屏幕绑定允许股道才可叫车；大编号不会因展示预算被排除，也不会展开巨大区间。 */
+  @Test
+  void sparseAndLargeDynamicSetsFilterScreenEligibility() {
+    UUID routeId = UUID.randomUUID();
+    List<String> nodes = List.of("SURC:S:AAA:1", "SURC:S:PPK:1", "SURC:S:NTA:1");
+    RouteStop dynamic =
+        new RouteStop(
+            routeId,
+            1,
+            Optional.empty(),
+            Optional.of(nodes.get(1)),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DYNAMIC:SURC:S:PPK:[1,3,2147483647]"));
+    var entry =
+        entry(
+            routeId,
+            WS,
+            "SPARSE",
+            RoutePatternType.LOCAL,
+            nodes,
+            List.of(
+                stop(routeId, 0, nodes.get(0), RouteStopPassType.STOP),
+                dynamic,
+                stop(routeId, 2, nodes.get(2), RouteStopPassType.TERMINATE)));
+    assertTrue(
+        CallCatalog.directions(List.of(entry), null, line -> true, PPK, Set.of("2")).isEmpty());
+    assertEquals(
+        "2147483647",
+        CallCatalog.directions(List.of(entry), null, line -> true, PPK, Set.of("2147483647"))
+            .get(0)
+            .platformLabel());
+    assertEquals(Set.of("1", "3", "2147483647"), CallCatalog.platformsOf(dynamic, nodes.get(1)));
+  }
+
   @Test
   void listsDirectionsThroughTheStationButNotTerminatingOnes() {
     List<RouteDefinitionCache.RouteEntry> entries =

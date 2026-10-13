@@ -28,6 +28,35 @@ import org.junit.jupiter.api.Test;
 
 class FtaRouteCommandParseStopsTest {
 
+  /** 书本保留离散表达原文，命令与运行时共享同一资格语义。 */
+  @Test
+  void bookPreservesSparseDynamicSource() {
+    String source = "DYNAMIC:SURN:S:STATION:[5,1,3-3]";
+    var result =
+        new FtaRouteCommand(mockPlugin())
+            .parseStopsFromBook(
+                mockLocale(),
+                mockProvider(),
+                UUID.randomUUID(),
+                UUID.randomUUID(),
+                mock(Player.class),
+                List.of(
+                    new FtaRouteCommand.BookLine(1, "CRET SURN:D:DEPOT:1"),
+                    new FtaRouteCommand.BookLine(2, "STOP " + source)));
+    RouteStop stop = result.orElseThrow().get(1);
+    assertTrue(stop.notes().orElseThrow().contains(source));
+    var spec =
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .route
+            .DynamicStopMatcher
+            .parseDynamicSpec(stop)
+            .orElseThrow();
+    assertTrue(spec.tracks().contains(3));
+    assertTrue(!spec.tracks().contains(2));
+  }
+
   @Test
   void parseStopsFromBookCreatesCretAndDstyStops() {
     FtaRouteCommand command = new FtaRouteCommand(mockPlugin());

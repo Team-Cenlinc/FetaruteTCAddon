@@ -151,6 +151,31 @@ class OccupationIndexTest {
     assertEquals(expected, partial.conflicts());
   }
 
+  /** 带股道资格的占用在替换、撤销后，与重新投影全表逐字段相等。 */
+  @Test
+  void restrictedPlatformsRemainConsistentAfterIncrementalReplacement() {
+    var spec =
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .route
+            .DynamicStopMatcher
+            .parseDynamicSpec("DYNAMIC:OP:S:C:[1]")
+            .orElseThrow();
+    var restricted = new TimetableConflictChecker.Platform(C1, "OP:S:C", true, Optional.of(spec));
+    var first = new TimetableConflictChecker.Stay("T1", restricted, 0, 100);
+    var second = new TimetableConflictChecker.Stay("T2", restricted, 20, 100);
+    var occupations =
+        OccupationIndex.of(index, Map.of(), List.of(), List.of(first, second), Function.identity());
+    assertFalse(occupations.scanAll(0).clean());
+    var moved = new TimetableConflictChecker.Stay("T2", restricted, 110, 200);
+    var touched = occupations.replaceVehicle("|T2", List.of(), List.of(moved));
+    var expected =
+        TimetableConflictChecker.check(index, Map.of(), List.of(), List.of(first, moved), 0);
+    assertEquals(expected, occupations.scanAll(0));
+    assertTrue(occupations.scan(touched, 0).clean());
+  }
+
   /** 时段之外的冲突；没有时段（资源没被碰到）就是全部。 */
   private static List<TimetableConflictChecker.Conflict> outside(
       List<TimetableConflictChecker.Conflict> conflicts, TimetableConflictChecker.Window window) {
