@@ -16,6 +16,7 @@ command:
         nav:
           hint: ["<gray>(点击翻页)</gray>"]
     validate:
+      dispatch-by-operation-type: ["<prefix> <red>随运营交路调度仅允许 CREATE/RETURN。</red>"]
       spawn-group-missing: ["<prefix> <red>route 绑定了不存在的交路组</red> <gray>(group=<white><group></white>)</gray>"]
       spawn-weight-missing: ["<prefix> <red>同一交路组存在多条 OPERATION route，但本 route 未配置 spawn_weight</red> <gray>(group=<white><group></white>)</gray>"]
       create-missing-cret: ["<prefix> <red>CREATE route 首个停靠点必须配置 CRET</red>"]
@@ -28,6 +29,7 @@ command:
       archived:
         lore-2: ["<gray>写入时间:</gray> <white><when></white>"]
     info:
+      dispatch-by-operation: ["<gray>随运营交路出入库：</gray> <dark_aqua><enabled></dark_aqua> <gray>（保留沿途停站，无独立频率）</gray>"]
       pattern: ["<gray>模式:</gray> <dark_aqua><pattern></dark_aqua>"]
       spawn-group-baseline: ["<gray>交路基线(秒):</gray> <dark_aqua><seconds></dark_aqua>"]
       operation: ["<gray>运营属性:</gray> <dark_aqua><operation></dark_aqua>"]

@@ -1767,6 +1767,25 @@ public final class FtaRouteCommand {
                         locale.component("command.route.not-found", Map.of("route", routeArg)));
                     return;
                   }
+                  // 运营运行图不能按运营交路调度：通配批量打开时先剔除，否则写到第一条运营运行图就中途停下。
+                  List<String> skippedOperation = List.of();
+                  if (wildcard
+                      && flags.hasFlag(dispatchByOperationFlag)
+                      && parseBooleanToken(flags.getValue(dispatchByOperationFlag, null))
+                          .orElse(false)) {
+                    List<Route> legs = dispatchByOperationTargets(targets);
+                    if (legs.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component("command.route.set.dispatch-by-operation-type"));
+                      return;
+                    }
+                    skippedOperation =
+                        targets.stream()
+                            .filter(route -> !legs.contains(route))
+                            .map(Route::code)
+                            .toList();
+                    targets = legs;
+                  }
                   // 编组方案与运行图无关：先查一次，方案不存在时在写任何一条之前就失败。
                   Optional<ConsistPlan> consistPlan = Optional.empty();
                   if (flags.hasFlag(consistPlanFlag)) {
@@ -2095,6 +2114,12 @@ public final class FtaRouteCommand {
                             Map.of(
                                 "count", String.valueOf(done.size()),
                                 "codes", String.join("、", done))));
+                    if (!skippedOperation.isEmpty()) {
+                      sender.sendMessage(
+                          locale.component(
+                              "command.route.set.batch-skipped-operation",
+                              Map.of("codes", String.join("、", skippedOperation))));
+                    }
                     return;
                   }
                   sender.sendMessage(
@@ -2964,6 +2989,13 @@ public final class FtaRouteCommand {
   /** 交路参数写成了通配（含 {@code *} 或 {@code ?}）。 */
   static boolean isRoutePattern(String arg) {
     return arg != null && (arg.indexOf('*') >= 0 || arg.indexOf('?') >= 0);
+  }
+
+  /** 按运营交路调度只适用于出库与回送运行图：通配批量打开时只改这些，运营运行图跳过。 */
+  static List<Route> dispatchByOperationTargets(List<Route> routes) {
+    return routes.stream()
+        .filter(route -> RouteDispatchMetadata.supports(route.operationType()))
+        .toList();
   }
 
   /** 交路代码按通配匹配：{@code *} 代表任意个字符，{@code ?} 代表一个字符，其余按字面，不分大小写；按代码排序。 */
