@@ -4,6 +4,8 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Optional;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 
 /** 从 RouteStop 的 notes 中解析 CRET/DSTY 等指令的目标。 */
 public final class SpawnDirectiveParser {
@@ -88,6 +90,37 @@ public final class SpawnDirectiveParser {
    */
   public static boolean isDynamicTarget(String target) {
     return target != null && target.toUpperCase(Locale.ROOT).startsWith("DYNAMIC:");
+  }
+
+  /**
+   * 票上已选出库点与交路出库写法合起来，得出这张票实际用的出库写法。派票器与出车器共用这一口径，不能一边放行、一边拒绝。
+   *
+   * <p>已选值缺省或空白时用交路写法。交路写法是 DYNAMIC 车库时它本身必须有效，已选的具体股道还必须在它的允许集合内； 已选值仍是 DYNAMIC（线路车库池里的 DYNAMIC
+   * 车库，派票时没选出具体股道）时原样交给出车时再选。交路写法是固定车库时， 线路车库池选出的任何出库点都照用。
+   *
+   * @param routeDepot 交路的出库写法（固定节点或 DYNAMIC）
+   * @param selected 票上已选的出库点
+   * @return 实际出库写法（去掉首尾空白）；交路写法无效或已选股道不在允许集合内时为空
+   */
+  public static Optional<String> effectiveDepotSpec(String routeDepot, Optional<String> selected) {
+    Optional<String> chosen =
+        selected == null ? Optional.empty() : selected.map(String::trim).filter(s -> !s.isEmpty());
+    String spec = chosen.orElse(routeDepot == null ? "" : routeDepot.trim());
+    if (spec.isEmpty()) {
+      return Optional.empty();
+    }
+    if (routeDepot != null && isDynamicTarget(routeDepot.trim())) {
+      Optional<DynamicStopMatcher.DynamicSpec> source =
+          DynamicStopMatcher.parseDynamicSpec(routeDepot)
+              .filter(DynamicStopMatcher.DynamicSpec::isDepot);
+      if (source.isEmpty()
+          || (chosen.isPresent()
+              && !isDynamicTarget(spec)
+              && !DynamicStopMatcher.matches(NodeId.of(spec), source.get()))) {
+        return Optional.empty();
+      }
+    }
+    return Optional.of(spec);
   }
 
   private static String firstToken(String line) {

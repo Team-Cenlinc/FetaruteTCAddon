@@ -123,21 +123,19 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
     Route route = routeOpt.get();
 
-    // 解析 depot nodeId（可能是 DYNAMIC）
-    String depotSpec =
-        ticket.selectedDepotNodeId().filter(s -> !s.isBlank()).orElse(service.depotNodeId());
-    if (SpawnDirectiveParser.isDynamicTarget(service.depotNodeId())) {
-      var source =
-          DynamicStopMatcher.parseDynamicSpec(service.depotNodeId())
-              .filter(DynamicStopMatcher.DynamicSpec::isDepot);
-      if (source.isEmpty()
-          || (ticket.selectedDepotNodeId().isPresent()
-              && !DynamicStopMatcher.matches(NodeId.of(depotSpec), source.get()))) {
-        debugLogger.accept(
-            "自动发车失败: DYNAMIC 定义或已选股道无效 spec=" + service.depotNodeId() + " selected=" + depotSpec);
-        return Optional.empty();
-      }
+    // 解析 depot nodeId（可能是 DYNAMIC）：与派票器同一口径校验已选股道
+    Optional<String> depotSpecOpt =
+        SpawnDirectiveParser.effectiveDepotSpec(
+            service.depotNodeId(), ticket.selectedDepotNodeId());
+    if (depotSpecOpt.isEmpty()) {
+      debugLogger.accept(
+          "自动发车失败: 出库写法无效或已选股道不在允许集合内 spec="
+              + service.depotNodeId()
+              + " selected="
+              + ticket.selectedDepotNodeId().orElse("-"));
+      return Optional.empty();
     }
+    String depotSpec = depotSpecOpt.get();
     Optional<DepotInfo> depotInfoOpt = resolveDepotInfo(depotSpec);
     if (depotInfoOpt.isEmpty()) {
       debugLogger.accept("自动发车失败: 未找到 depot 牌子 spec=" + depotSpec);

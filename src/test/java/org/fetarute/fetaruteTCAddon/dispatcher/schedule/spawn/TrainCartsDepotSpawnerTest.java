@@ -70,6 +70,51 @@ class TrainCartsDepotSpawnerTest {
     org.mockito.Mockito.verifyNoInteractions(registry);
   }
 
+  /** 已选股道在允许集合内、或派票时还没选出具体股道（仍是 DYNAMIC）时，出车器与派票器一样放行，接着去找车库牌子。 */
+  @Test
+  void aLegalSelectedDepotPassesValidationAndLooksUpTheSign() {
+    for (String selected : List.of("OP:D:DEP:2", "DYNAMIC:OP:D:DEP:[1:3]", " ")) {
+      var registry = mock(org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry.class);
+      when(registry.snapshotInfos()).thenReturn(Map.of());
+      var spawner =
+          new TrainCartsDepotSpawner(
+              mock(org.fetarute.fetaruteTCAddon.FetaruteTCAddon.class), registry, message -> {});
+      var provider = mock(org.fetarute.fetaruteTCAddon.storage.api.StorageProvider.class);
+      var routes = mock(org.fetarute.fetaruteTCAddon.company.repository.RouteRepository.class);
+      when(provider.routes()).thenReturn(routes);
+      java.util.UUID routeId = java.util.UUID.randomUUID();
+      when(routes.findById(routeId))
+          .thenReturn(
+              java.util.Optional.of(mock(org.fetarute.fetaruteTCAddon.company.model.Route.class)));
+      var service =
+          new SpawnService(
+              new SpawnServiceKey(routeId),
+              java.util.UUID.randomUUID(),
+              "C",
+              java.util.UUID.randomUUID(),
+              "OP",
+              java.util.UUID.randomUUID(),
+              "L",
+              routeId,
+              "R",
+              java.time.Duration.ofSeconds(30),
+              "DYNAMIC:OP:D:DEP:[1:3]");
+      var ticket =
+          new SpawnTicket(
+              java.util.UUID.randomUUID(),
+              service,
+              java.time.Instant.EPOCH,
+              java.time.Instant.EPOCH,
+              0,
+              1,
+              java.util.Optional.of(selected),
+              java.util.Optional.empty());
+
+      assertTrue(spawner.spawn(provider, ticket, "train", java.time.Instant.EPOCH).isEmpty());
+      verify(registry, org.mockito.Mockito.atLeastOnce()).snapshotInfos();
+    }
+  }
+
   @Test
   void spawnOwnerIdentityOverridesInheritedTemplateTagBeforeSignalRefresh() {
     MutableTrainProperties train =

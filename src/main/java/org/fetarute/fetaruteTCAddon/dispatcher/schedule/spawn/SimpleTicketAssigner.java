@@ -5975,25 +5975,9 @@ public final class SimpleTicketAssigner implements TicketAssigner {
 
   private static Optional<String> resolveDepotSpec(
       SpawnService service, Optional<String> depotOverride) {
-    if (service == null) {
-      return Optional.empty();
-    }
-    String depotSpec = depotOverride.filter(s -> !s.isBlank()).orElseGet(service::depotNodeId);
-    if (depotSpec == null || depotSpec.isBlank()) {
-      return Optional.empty();
-    }
-    if (SpawnDirectiveParser.isDynamicTarget(service.depotNodeId())) {
-      var source =
-          DynamicStopMatcher.parseDynamicSpec(service.depotNodeId())
-              .filter(DynamicStopMatcher.DynamicSpec::isDepot);
-      if (source.isEmpty()
-          || (depotOverride.filter(value -> !value.isBlank()).isPresent()
-              && !SpawnDirectiveParser.isDynamicTarget(depotSpec)
-              && !DynamicStopMatcher.matches(NodeId.of(depotSpec), source.get()))) {
-        return Optional.empty();
-      }
-    }
-    return Optional.of(depotSpec.trim());
+    return service == null
+        ? Optional.empty()
+        : SpawnDirectiveParser.effectiveDepotSpec(service.depotNodeId(), depotOverride);
   }
 
   /**
