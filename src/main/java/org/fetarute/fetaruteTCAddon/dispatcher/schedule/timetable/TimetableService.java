@@ -123,12 +123,20 @@ public final class TimetableService implements ScheduledDeparturePlan {
 
   private boolean restoringDuties;
 
+  /** 读交路记录失败已经告警过：恢复每次出票都会重试，持续失败只告警一次，恢复成功后复位。 */
+  private boolean dutyRecoveryWarned;
+
+  /** 一次匹配里交路进度与归属先后都会变，合并成一次写回；期间的变化记在 {@link #persistDeferredDirty}。只在主线程读写。 */
+  private boolean persistDeferred;
+
+  private boolean persistDeferredDirty;
+
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
     this.clock = clock == null ? Instant::now : clock;
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
     this.matcher = new TripMatcher(this.debugLogger);
     this.ledger = new DutyLedger(this.debugLogger);
-    ledger.setChangeListener(this::persistDuty);
+    ledger.setChangeListener(this::onDutyChanged);
   }
 
   /** 设置随列车保存的交路记录。 */
@@ -138,18 +146,35 @@ public final class TimetableService implements ScheduledDeparturePlan {
     unboundRecoveryPending = true;
   }
 
-  /** 恢复当前已发布表中的车辆归属和进度，必须在补车前执行。 */
+  /**
+   * 恢复当前已发布表中的车辆归属和进度，必须在补车前执行。
+   *
+   * <p>读记录或恢复出错时不抛出：保持待恢复（期间 {@link #recoverUnboundDuties} 不补车），下次出票再试。
+   * 同一交路有两辆车带着记录时按车名取第一辆，结果与读出的顺序无关。
+   */
   public void restoreDutyBindings(Instant now) {
     if (!settings.enabled() || !dutyRecoveryPending || now == null) {
       return;
     }
-    Map<String, String> saved = dutyStore.read();
     restoringDuties = true;
     try {
-      saved.forEach(
-          (name, value) ->
-              DutyRecoveryToken.parse(value).ifPresent(token -> restoreDuty(name, token, now)));
+      List<Map.Entry<String, String>> saved = new ArrayList<>(dutyStore.read().entrySet());
+      saved.sort(
+          Comparator.comparing(
+                  (Map.Entry<String, String> entry) -> String.valueOf(keyOf(entry.getKey())))
+              .thenComparing(Map.Entry::getKey));
+      for (Map.Entry<String, String> entry : saved) {
+        DutyRecoveryToken.parse(entry.getValue())
+            .ifPresent(token -> restoreDuty(entry.getKey(), token, now));
+      }
       dutyRecoveryPending = false;
+      dutyRecoveryWarned = false;
+    } catch (RuntimeException ex) {
+      if (!dutyRecoveryWarned) {
+        dutyRecoveryWarned = true;
+        warningLogger.accept("恢复列车的交路归属失败，暂不补缺车交路，下次出票时重试：" + ex);
+      }
+      debugLogger.accept("TIMETABLE_DUTY_RESTORE_FAILED error=" + ex);
     } finally {
       restoringDuties = false;
     }
@@ -160,7 +185,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     Timetable table = snapshot.byId().get(token.key().timetableId());
     if (key == null
         || table == null
-        || unscheduledTrain.test(name)
+        || unscheduled(name)
         || table.updatedAt().toEpochMilli() != token.tableVersion()
         || ledger.bindingOf(key).isPresent()
         || ledger.heldByOther(token.key(), key)) {
@@ -168,6 +193,13 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
     LocalDate today = LocalDate.ofInstant(now, table.zoneId());
     Optional<VehicleDuty> duty = table.duty(token.key().dutyId());
+    if (duty.isPresent() && !now.isBefore(dutyRecoveryDeadline(table, duty.get(), token.key()))) {
+      // 交路早已回库（停服过夜最常见）：绑回去只会被判严重晚点、退役并取消那一天的班次；清掉记录，这辆车按没有交路的车处理。
+      debugLogger.accept(
+          "TIMETABLE_DUTY_RESTORE_EXPIRED train=" + name + " duty=" + token.key().describe());
+      dutyStore.write(name, Optional.empty());
+      return;
+    }
     if (!SERVICE_DATE_OFFSETS.stream()
             .anyMatch(offset -> today.plusDays(offset).equals(token.key().serviceDate()))
         || duty.isEmpty()
@@ -201,6 +233,42 @@ public final class TimetableService implements ScheduledDeparturePlan {
     }
   }
 
+  /** 交路恢复的截止时刻：服务日零点 + 计划回到车库的时刻 + 晚点上限（未设上限时不留余量）。 */
+  private Instant dutyRecoveryDeadline(Timetable table, VehicleDuty duty, DutyKey key) {
+    return key.serviceDate()
+        .atStartOfDay(table.zoneId())
+        .toInstant()
+        .plusSeconds(duty.plannedEndSecondOfDay())
+        .plus(settings.maxDelay());
+  }
+
+  private void onDutyChanged(String key) {
+    if (persistDeferred) {
+      persistDeferredDirty = true;
+      return;
+    }
+    persistDuty(key);
+  }
+
+  /** 把一串账本变化合并成一次写回：变过才写，写的是最后的状态。 */
+  private void changeDuty(String key, Runnable change) {
+    if (persistDeferred) {
+      change.run();
+      return;
+    }
+    persistDeferred = true;
+    persistDeferredDirty = false;
+    try {
+      change.run();
+    } finally {
+      persistDeferred = false;
+    }
+    if (persistDeferredDirty) {
+      persistDeferredDirty = false;
+      persistDuty(key);
+    }
+  }
+
   /** 交路变化时保存身份与位置；退役/解绑要清标记，不能在重启后再次抢回原交路。 */
   private void persistDuty(String key) {
     if (dutyStore == null || restoringDuties) {
@@ -214,7 +282,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
                     Optional.ofNullable(snapshot.byId().get(bound.timetableId()))
                         .map(
                             table -> {
-                              Optional<DutyProgress> progress = ledger.progressOf(key);
+                              Optional<DutyProgress> progress =
+                                  ledger
+                                      .progressOf(key)
+                                      .filter(current -> current.dutyId().equals(bound.dutyId()));
                               return new DutyRecoveryToken(
                                       bound,
                                       table.updatedAt().toEpochMilli(),
@@ -1966,7 +2037,12 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return List.copyOf(matcher.assignments());
   }
 
-  /** 保留仍在网的列车绑定，其余释放。由运行时清理 tick 调用。 */
+  /**
+   * 保留仍在网的列车绑定，其余释放。由运行时清理 tick 调用。
+   *
+   * <p>"在网"还包括随车保存了交路记录的离线编组（{@link #setDutyStore}）：它们仍拥有交路，不能当作消失而补出第二辆。 卸载时 {@link #release}
+   * 提前返回留下的车次绑定与晚点账，等车被删、记录随之消失后由这里清掉。读记录失败时这一轮什么都不清。
+   */
   public void retain(Collection<String> activeTrainNames) {
     if (activeTrainNames == null) {
       clearAssignments("retain-empty");
@@ -1977,6 +2053,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
       String key = keyOf(name);
       if (key != null) {
         keep.add(key);
+      }
+    }
+    if (dutyStore != null) {
+      try {
+        for (String name : dutyStore.read().keySet()) {
+          String key = keyOf(name);
+          if (key != null) {
+            keep.add(key);
+          }
+        }
+      } catch (RuntimeException ex) {
+        debugLogger.accept("TIMETABLE_RETAIN_SKIPPED error=" + ex);
+        return;
       }
     }
     matcher.retain(keep);
@@ -2498,8 +2587,14 @@ public final class TimetableService implements ScheduledDeparturePlan {
     // 取消之后又有车接上了这趟车（重启后留在线上的车、晚到的车）：站牌恢复正常。
     cancellations.revoke(
         match.timetable().id(), match.trip().id(), match.assignment().serviceDate());
-    ledger.startOrAdvance(key, match.timetable(), match.trip());
-    match.duty().ifPresent(duty -> ledger.bind(event.trainName(), key, duty, "trip-assigned"));
+    changeDuty(
+        key,
+        () -> {
+          ledger.startOrAdvance(key, match.timetable(), match.trip());
+          match
+              .duty()
+              .ifPresent(duty -> ledger.bind(event.trainName(), key, duty, "trip-assigned"));
+        });
     return Optional.of(match.assignment());
   }
 

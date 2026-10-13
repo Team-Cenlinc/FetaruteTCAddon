@@ -732,7 +732,7 @@ public final class FtaSpawnCommand {
       notes.add("spawn_group 不存在");
     }
     if (RouteDispatchMetadata.enabled(route)) {
-      notes.add("随运营交路出入库（无独立频率）");
+      notes.add("按运营交路调度（无独立频率）");
       boolean timetabled =
           plugin
               .getTimetableService()

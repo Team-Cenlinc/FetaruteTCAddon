@@ -53,6 +53,25 @@ class FtaRouteCommandWildcardTest {
   }
 
   @Test
+  @DisplayName("通配批量打开按运营交路调度：运营运行图不能带这个标记，写之前就剔除，不会写到一半失败")
+  void dispatchByOperationBatchSkipsOperationRoutes() {
+    List<Route> routes =
+        List.of(
+            route("MT-1N", RouteOperationType.OPERATION),
+            route("MT-1NC", RouteOperationType.CREATE),
+            route("MT-1ND", RouteOperationType.RETURN),
+            route("MT-1O", RouteOperationType.OPERATION));
+
+    assertEquals(
+        List.of("MT-1NC", "MT-1ND"),
+        FtaRouteCommand.dispatchByOperationTargets(routes).stream().map(Route::code).toList());
+    assertEquals(
+        List.of(),
+        FtaRouteCommand.dispatchByOperationTargets(List.of(route("MT-1N"))),
+        "全是运营运行图时没有可改的");
+  }
+
+  @Test
   @DisplayName("补全：空输入给 \"*\" 与前缀通配（通配一律带引号），输入前缀时给输入加 *，起了引号时代码也带引号")
   void patternSuggestions() {
     List<String> codes = List.of("MT-1N_Short", "MT-1N_ShortR", "MT-1O_ShortR", "MT-3N_DPExp");

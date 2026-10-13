@@ -37,7 +37,7 @@ class TimetableServiceTest {
   private static final UUID RETURN_ROUTE = UUID.randomUUID();
   static final UUID TIMETABLE = UUID.randomUUID();
 
-  /** 服务日、表版本、车次和交路共同限定恢复身份，同一交路只能恢复一辆真实车。 */
+  /** 服务日、表版本、车次和交路共同限定恢复身份，同一交路只能恢复一辆真实车（按车名取第一辆）。 */
   @Test
   void recoveryRejectsStaleTokensAndDeduplicatesDutyOwners() {
     Timetable table = timetable(TimetableStatus.PUBLISHED);
@@ -47,7 +47,7 @@ class TimetableServiceTest {
     var current =
         new DutyRecoveryToken(
             key, table.updatedAt().toEpochMilli(), 1, Optional.of(duty.tripIds().get(0)));
-    var tokens = new java.util.LinkedHashMap<String, String>();
+    var tokens = new java.util.HashMap<String, String>();
     tokens.put(
         "stale-version",
         new DutyRecoveryToken(key, current.tableVersion() - 1, 1, current.lastTrip()).encode());

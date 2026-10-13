@@ -1367,10 +1367,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
     if (service == null || runtimeDispatchService != service) {
       return false;
     }
-    try {
-      if (timetableService != null) {
+    // 交路归属恢复不是授权恢复的一部分，失败不能拖住启动门、更不能触发全局重建：保持待恢复（期间不补缺车交路），由出票轮询重试。
+    if (timetableService != null) {
+      try {
         timetableService.restoreDutyBindings(java.time.Instant.now());
+      } catch (RuntimeException | LinkageError ex) {
+        getLogger()
+            .warning(
+                "恢复列车的交路归属失败，暂不补缺车交路，出票时重试: "
+                    + ex.getClass().getSimpleName()
+                    + ":"
+                    + String.valueOf(ex.getMessage()));
       }
+    }
+    try {
       restartHealthMonitorTask();
       restartRuntimeMonitor();
       initSignalEventDrivenComponents();
@@ -1930,13 +1940,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
         activeNames.add(properties.getTrainName());
       }
     }
-    // 已保存的离线编组仍拥有交路，不能当作消失而补出第二辆；站台存在状态仍只使用真实在线 group。
-    java.util.List<String> dutyNames = new ArrayList<>(activeNames);
-    dutyNames.addAll(
-        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainCartsTimetableDutyStore()
-            .read()
-            .keySet());
-    timetableService.retain(dutyNames);
+    // 已保存的离线编组仍拥有交路，由服务按注入的交路记录一并保留；站台存在状态仍只使用真实在线 group。
+    timetableService.retain(activeNames);
     if (stationPresence != null) {
       stationPresence.retain(java.util.Set.copyOf(activeNames));
     }
