@@ -69,15 +69,8 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
  */
 public final class DynamicStopMatcher {
 
-  /** 动作指令前缀正则：CHANGE/DYNAMIC/ACTION/POWER/CRET/DSTY */
-  private static final Pattern ACTION_PREFIX_PATTERN =
-      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|POWER|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
-
   private static final Pattern DYNAMIC_DIRECTIVE_PATTERN =
       Pattern.compile("(?:^|\\s)DYNAMIC(?:$|[\\s:])", Pattern.CASE_INSENSITIVE);
-
-  private static final Pattern DYNAMIC_TOKEN_PATTERN =
-      Pattern.compile("(?:^|(?<=\\s))DYNAMIC(?:\\s+|:)(\\S+)", Pattern.CASE_INSENSITIVE);
 
   /** 候选股道数的安全上限，防止规范范围写得过大时逐条寻路卡服。 */
   public static final int MAX_TRACK_CANDIDATES = 20;
@@ -223,7 +216,7 @@ public final class DynamicStopMatcher {
     if (stop == null || stop.notes().isEmpty()) {
       return Optional.empty();
     }
-    Optional<String> target = findDirectiveTarget(stop, "DYNAMIC");
+    Optional<String> target = directiveTarget(stop);
     if (target.isEmpty()) {
       return Optional.empty();
     }
@@ -287,12 +280,10 @@ public final class DynamicStopMatcher {
       }
     }
 
-    boolean explicitType =
-        parts.length >= 3 && (parts[1].equalsIgnoreCase("S") || parts[1].equalsIgnoreCase("D"));
-    boolean selectorDeclared = parts.length > (explicitType ? 3 : 2);
-    if (operatorCode.isBlank() || nodeName.isBlank() || (selectorDeclared && rangeRaw.isBlank())) {
+    if (operatorCode.isBlank() || nodeName.isBlank()) {
       return Optional.empty();
     }
+    // 末尾只有冒号（OP:S:NAME:）与省略选择器同义：旧版本就这样解释，存量定义依赖它。
 
     return (rangeRaw.isBlank() ? Optional.of(TrackSelection.all()) : TrackSelection.parse(rangeRaw))
         .map(selection -> new DynamicSpec(operatorCode, nodeType, nodeName, selection));
@@ -468,16 +459,27 @@ public final class DynamicStopMatcher {
 
   private static String semanticNotes(Optional<String> notes) {
     String raw = notes.orElse("").replace("\r\n", "\n").replace('\r', '\n');
-    java.util.regex.Matcher matcher = DYNAMIC_TOKEN_PATTERN.matcher(raw);
+    java.util.regex.Matcher matcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(raw);
     StringBuilder normalized = new StringBuilder();
-    while (matcher.find()) {
-      String canonical =
-          parseDynamicSpec(matcher.group(1))
-              .map(spec -> "DYNAMIC:" + spec.payload().toUpperCase(Locale.ROOT))
-              .orElse(matcher.group());
-      matcher.appendReplacement(normalized, java.util.regex.Matcher.quoteReplacement(canonical));
+    int copied = 0;
+    int from = 0;
+    while (from <= raw.length() && matcher.find(from)) {
+      if (raw.charAt(matcher.end() - 1) == '\n') {
+        from = matcher.end();
+        continue;
+      }
+      int keyword = matcher.start() + (Character.isWhitespace(raw.charAt(matcher.start())) ? 1 : 0);
+      int end = payloadEnd(raw, matcher.end());
+      String payload = raw.substring(matcher.end(), end).trim();
+      Optional<DynamicSpec> spec = payload.isEmpty() ? Optional.empty() : parseDynamicSpec(payload);
+      if (spec.isPresent()) {
+        normalized.append(raw, copied, keyword);
+        normalized.append("DYNAMIC:").append(spec.get().payload().toUpperCase(Locale.ROOT));
+        copied = end;
+      }
+      from = Math.max(end, matcher.end());
     }
-    matcher.appendTail(normalized);
+    normalized.append(raw, copied, raw.length());
     return normalized.toString();
   }
 
@@ -543,77 +545,81 @@ public final class DynamicStopMatcher {
         + spec.nodeName().toLowerCase(Locale.ROOT);
   }
 
-  private static Optional<String> findDirectiveTarget(RouteStop stop, String prefix) {
-    if (stop == null || prefix == null || prefix.isBlank() || stop.notes().isEmpty()) {
+  /**
+   * 备注里 DYNAMIC 指令的写法（不含 {@code DYNAMIC:} 前缀）：取第一行带 DYNAMIC 的指令，可以跟在 CRET/DSTY/STOP 等之后。
+   *
+   * <p>运行时（{@link RouteStopDirectives#target}）与本类读同一段，见 {@link #leadingPayload}。
+   */
+  static Optional<String> directiveTarget(RouteStop stop) {
+    if (stop == null || stop.notes().isEmpty()) {
       return Optional.empty();
     }
-    String raw = stop.notes().orElse("");
-    for (String line : raw.split("[\r\n]+")) {
-      String trimmed = line.trim();
-      if (trimmed.isEmpty()) {
-        continue;
-      }
-      // 特殊处理 "CRET DYNAMIC:..." 格式
-      if ("DYNAMIC".equalsIgnoreCase(prefix)) {
-        java.util.regex.Matcher dynamicMatcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(trimmed);
-        if (dynamicMatcher.find()) {
-          String afterDynamic = trimmed.substring(dynamicMatcher.end()).trim();
-          if (!afterDynamic.isBlank()) {
-            return Optional.of(afterDynamic.split("\\s+", 2)[0]);
-          }
+    for (String line : stop.notes().orElse("").split("[\r\n]+")) {
+      java.util.regex.Matcher matcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(line);
+      if (matcher.find()) {
+        String payload = line.substring(matcher.end(), payloadEnd(line, matcher.end())).trim();
+        if (!payload.isEmpty()) {
+          return Optional.of(payload);
         }
-        continue;
       }
-      String normalizedAction = normalizeActionLine(trimmed);
-      String actualPrefix = firstSegment(normalizedAction).trim();
-      if (!actualPrefix.equalsIgnoreCase(prefix)) {
-        continue;
-      }
-      String rest = normalizedAction.substring(actualPrefix.length()).trim();
-      if (rest.startsWith(":")) {
-        rest = rest.substring(1).trim();
-      }
-      if (rest.isBlank()) {
-        continue;
-      }
-      return Optional.of(rest);
     }
     return Optional.empty();
   }
 
-  private static String firstSegment(String line) {
-    if (line == null || line.isEmpty()) {
-      return "";
-    }
-    int idx = 0;
-    while (idx < line.length()) {
-      char ch = line.charAt(idx);
-      if (Character.isWhitespace(ch) || ch == ':') {
-        break;
-      }
-      idx++;
-    }
-    return line.substring(0, idx);
+  /**
+   * DYNAMIC 之后的文本里属于写法本身的那一段（去掉首尾空白）。
+   *
+   * <p>方括号内、冒号两侧的空白属于写法（旧版本容忍 {@code [1, 3]}、{@code NAME: [1:3]}）；写法之后同一行的其它内容 （如 {@code
+   * CHANGE:...}、说明文字）不并进来。
+   *
+   * @param text 紧跟 {@code DYNAMIC:} 或 {@code DYNAMIC } 之后的文本
+   */
+  public static String leadingPayload(String text) {
+    return text == null ? "" : text.substring(0, payloadEnd(text, 0)).trim();
   }
 
-  private static String normalizeActionLine(String line) {
-    String trimmed = line.trim();
-    java.util.regex.Matcher matcher = ACTION_PREFIX_PATTERN.matcher(trimmed);
-    if (!matcher.find()) {
-      return trimmed;
+  /** 从 {@code start} 起写法结束的位置（不含）。 */
+  private static int payloadEnd(String text, int start) {
+    int depth = 0;
+    int lastSolid = -1;
+    int index = start;
+    while (index < text.length()) {
+      char ch = text.charAt(index);
+      if (ch == '\n' || ch == '\r') {
+        break;
+      }
+      if (depth == 0 && Character.isWhitespace(ch)) {
+        int next = index;
+        while (next < text.length()
+            && Character.isWhitespace(text.charAt(next))
+            && text.charAt(next) != '\n'
+            && text.charAt(next) != '\r') {
+          next++;
+        }
+        if (lastSolid < 0) {
+          index = next;
+          continue;
+        }
+        if (next >= text.length() || !continuesPayload(text.charAt(lastSolid), text.charAt(next))) {
+          break;
+        }
+        index = next;
+        continue;
+      }
+      if (ch == '[') {
+        depth++;
+      } else if (ch == ']' && depth > 0) {
+        depth--;
+      }
+      lastSolid = index;
+      index++;
     }
-    String prefix = matcher.group(1).toUpperCase(Locale.ROOT);
-    String rest = trimmed.substring(prefix.length()).trim();
-    if (rest.isEmpty()) {
-      return prefix;
-    }
-    if (rest.startsWith(":")) {
-      rest = rest.substring(1).trim();
-    }
-    if ("CRET".equals(prefix) || "DSTY".equals(prefix)) {
-      return rest.isEmpty() ? prefix : prefix + " " + rest;
-    }
-    return prefix + ":" + rest;
+    return lastSolid < 0 ? start : lastSolid + 1;
+  }
+
+  /** 空白两侧仍属同一写法：后面紧跟冒号，或前面是冒号、后面是选择器的开头。 */
+  private static boolean continuesPayload(char before, char after) {
+    return after == ':' || (before == ':' && (after == '[' || Character.isDigit(after)));
   }
 
   private static OptionalInt parsePositiveInt(String raw) {

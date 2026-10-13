@@ -67,8 +67,9 @@ public final class SpawnDirectiveParser {
       }
       // 检查是否是 DYNAMIC 格式
       if (rest.toUpperCase(Locale.ROOT).startsWith("DYNAMIC:")) {
-        // 返回完整的 DYNAMIC 规范（包含 "DYNAMIC:" 前缀）
-        return Optional.of(rest);
+        // 返回完整的 DYNAMIC 规范（包含 "DYNAMIC:" 前缀）；写法之后同一行的其它内容不并进来
+        return Optional.of(
+            "DYNAMIC:" + DynamicStopMatcher.leadingPayload(rest.substring("DYNAMIC:".length())));
       }
       // 普通格式：CRET <NodeId> 或 DSTY <NodeId>（NodeId 不包含空格）
       int ws = rest.indexOf(' ');

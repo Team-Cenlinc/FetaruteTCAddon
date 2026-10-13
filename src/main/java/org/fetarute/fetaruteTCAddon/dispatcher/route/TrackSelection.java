@@ -20,6 +20,10 @@ import java.util.regex.Pattern;
 public final class TrackSelection {
 
   private static final Pattern ITEM = Pattern.compile("([0-9]+)(?:[:-]([0-9]+))?");
+
+  /** 分隔符两侧的空白：旧版本容忍 {@code [1 : 3]}、{@code [1, 3]} 这类写法。 */
+  private static final Pattern DELIMITER_SPACING = Pattern.compile("\\s*([\\[\\],:\\-])\\s*");
+
   private static final TrackSelection ALL = new TrackSelection(true, List.of());
   private final boolean unbounded;
   private final List<Interval> intervals;
@@ -45,7 +49,8 @@ public final class TrackSelection {
   /**
    * 解析显式选择器：单值、旧冒号区间，以及方括号内的单值/闭区间并集。
    *
-   * <p>省略选择器由调用方使用 {@link #all()} 表达；空串、空括号、空项与内部空白均失败，不放宽为不限股道。
+   * <p>省略选择器由调用方使用 {@link #all()} 表达；空串、空括号、空项、正负号均失败，不放宽为不限股道。
+   * 括号与分隔符两侧的空白、全角数字按旧版本兼容；两个数字之间夹着空白仍失败。
    *
    * @param raw 如 {@code [1,3,5]}、{@code [1,2,3-5]}、{@code [1:5]} 或 {@code 3}
    * @return 合并后的非空集合；任何一项无效时整条选择器失败
@@ -54,7 +59,7 @@ public final class TrackSelection {
     if (raw == null || raw.isBlank()) {
       return Optional.empty();
     }
-    String body = raw.trim();
+    String body = DELIMITER_SPACING.matcher(halfWidthDigits(raw.trim())).replaceAll("$1");
     if (body.chars().anyMatch(Character::isWhitespace)) {
       return Optional.empty();
     }
@@ -98,6 +103,16 @@ public final class TrackSelection {
       }
     }
     return Optional.of(new TrackSelection(false, merged));
+  }
+
+  /** 全角数字换成半角；其它字符原样保留，由后续格式检查判定。 */
+  private static String halfWidthDigits(String raw) {
+    StringBuilder out = new StringBuilder(raw.length());
+    for (int i = 0; i < raw.length(); i++) {
+      char ch = raw.charAt(i);
+      out.append(ch >= '\uFF10' && ch <= '\uFF19' ? (char) ('0' + (ch - '\uFF10')) : ch);
+    }
+    return out.toString();
   }
 
   /** 是否省略了选择器；与“显式范围很大”不同。 */

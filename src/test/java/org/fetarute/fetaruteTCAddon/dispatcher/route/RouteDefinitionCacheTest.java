@@ -478,9 +478,86 @@ class RouteDefinitionCacheTest {
         logs.stream()
             .anyMatch(
                 message ->
-                    message.contains("route=R1")
-                        && message.contains("sequence=1")
+                    message.contains("OP:L1:R1")
+                        && message.contains("第 1 个停靠点")
                         && message.contains("DYNAMIC:OP:S:B:[]")),
         () -> logs.toString());
+  }
+
+  /** 全量加载时停用的交路汇总成一条告警，列出交路码与原因；逐条细节只进调试日志。 */
+  @Test
+  void reloadSummarizesDisabledRoutesInOneWarning() {
+    Company company = mock(Company.class);
+    UUID companyId = UUID.randomUUID();
+    when(company.id()).thenReturn(companyId);
+    Operator operator = mock(Operator.class);
+    UUID operatorId = UUID.randomUUID();
+    when(operator.id()).thenReturn(operatorId);
+    when(operator.code()).thenReturn("OP");
+    Line line = mock(Line.class);
+    UUID lineId = UUID.randomUUID();
+    when(line.id()).thenReturn(lineId);
+    when(line.code()).thenReturn("L1");
+    StorageProvider provider = mock(StorageProvider.class);
+    CompanyRepository companies = mock(CompanyRepository.class);
+    OperatorRepository operators = mock(OperatorRepository.class);
+    LineRepository lines = mock(LineRepository.class);
+    RouteRepository routes = mock(RouteRepository.class);
+    RouteStopRepository routeStops = mock(RouteStopRepository.class);
+    when(provider.companies()).thenReturn(companies);
+    when(provider.operators()).thenReturn(operators);
+    when(provider.lines()).thenReturn(lines);
+    when(provider.routes()).thenReturn(routes);
+    when(provider.routeStops()).thenReturn(routeStops);
+    when(provider.stations()).thenReturn(mock(StationRepository.class));
+    when(companies.listAll()).thenReturn(List.of(company));
+    when(operators.listByCompany(companyId)).thenReturn(List.of(operator));
+    when(lines.listByOperator(operatorId)).thenReturn(List.of(line));
+    Route good = routeWithDynamic(routeStops, "GOOD", "DYNAMIC:OP:S:B:[1:2]");
+    Route empty = routeWithDynamic(routeStops, "EMPTY", "DYNAMIC:OP:S:B:[]");
+    Route signed = routeWithDynamic(routeStops, "SIGNED", "DYNAMIC:OP:S:B:+3");
+    when(routes.listByLine(lineId)).thenReturn(List.of(good, empty, signed));
+    List<String> warnings = new java.util.ArrayList<>();
+    List<String> debug = new java.util.ArrayList<>();
+    RouteDefinitionCache cache = new RouteDefinitionCache(debug::add, warnings::add);
+
+    cache.reload(provider);
+
+    assertTrue(cache.findById(good.id()).isPresent());
+    assertEquals(1, warnings.size(), warnings::toString);
+    String warning = warnings.get(0);
+    assertTrue(warning.contains("2"), warning);
+    assertTrue(warning.contains("OP:L1:EMPTY"), warning);
+    assertTrue(warning.contains("OP:L1:SIGNED"), warning);
+    assertTrue(warning.contains("DYNAMIC"), warning);
+    assertTrue(debug.stream().anyMatch(message -> message.contains("DYNAMIC:OP:S:B:+3")));
+  }
+
+  private static Route routeWithDynamic(RouteStopRepository repository, String code, String notes) {
+    UUID routeId = UUID.randomUUID();
+    Route route = mock(Route.class);
+    when(route.id()).thenReturn(routeId);
+    when(route.code()).thenReturn(code);
+    when(route.name()).thenReturn(code);
+    when(repository.listByRoute(routeId))
+        .thenReturn(
+            List.of(
+                new RouteStop(
+                    routeId,
+                    0,
+                    Optional.empty(),
+                    Optional.of("OP:S:A:1"),
+                    Optional.empty(),
+                    RouteStopPassType.STOP,
+                    Optional.empty()),
+                new RouteStop(
+                    routeId,
+                    1,
+                    Optional.empty(),
+                    Optional.empty(),
+                    Optional.empty(),
+                    RouteStopPassType.TERMINATE,
+                    Optional.of(notes))));
+    return route;
   }
 }
