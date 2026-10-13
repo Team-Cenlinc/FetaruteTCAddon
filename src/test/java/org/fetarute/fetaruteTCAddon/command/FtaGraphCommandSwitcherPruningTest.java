@@ -161,7 +161,7 @@ final class FtaGraphCommandSwitcherPruningTest {
     StorageManager storage = mock(StorageManager.class);
     when(storage.isReady()).thenReturn(true);
     when(storage.provider()).thenReturn(Optional.of(provider));
-    RailGraphService graph = new RailGraphService(ignored -> SimpleRailGraph.empty());
+    RailGraphService graph = new RailGraphService();
     graph.putSnapshot(
         world,
         new SimpleRailGraph(

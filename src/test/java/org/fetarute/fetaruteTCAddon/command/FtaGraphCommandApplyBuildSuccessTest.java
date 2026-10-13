@@ -84,7 +84,7 @@ final class FtaGraphCommandApplyBuildSuccessTest {
             Set.of(edge("A", "B", 12)),
             Map.of(
                 edgeId, new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 1)))));
-    RailGraphService service = new RailGraphService(ignored -> old);
+    RailGraphService service = new RailGraphService();
     Instant baseTime = Instant.parse("2026-10-12T00:00:00Z");
     service.putSnapshot(world, old, baseTime);
     service.setSnapshotActivationGuard(() -> false);
@@ -217,7 +217,7 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     when(world.getUID()).thenReturn(worldId);
     when(world.getName()).thenReturn("world");
 
-    RailGraphService railGraphService = new RailGraphService(w -> SimpleRailGraph.empty());
+    RailGraphService railGraphService = new RailGraphService();
 
     StorageManager storageManager = mock(StorageManager.class);
     when(storageManager.isReady()).thenReturn(true);
@@ -371,7 +371,7 @@ final class FtaGraphCommandApplyBuildSuccessTest {
             Set.of(node("A", 1), node("B", 2)),
             Set.of(edge("A", "B", 12)),
             Map.of(edgeId, oldFootprint));
-    RailGraphService railGraphService = new RailGraphService(ignored -> oldGraph);
+    RailGraphService railGraphService = new RailGraphService();
     railGraphService.putSnapshot(world, oldGraph, Instant.parse("2026-01-01T00:00:00Z"));
 
     StorageManager storageManager = mock(StorageManager.class);

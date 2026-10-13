@@ -124,7 +124,7 @@ import org.incendo.cloud.suggestion.SuggestionProvider;
  *
  * <ul>
  *   <li>discover_nodes：发现节点（扫描牌子；默认从脚下沿轨道连通性扩展，按需加载区块）
- *   <li>explore_edges：在轨道方块图上用多源 Dijkstra 计算节点之间区间距离
+ *   <li>explore_edges：从各节点锚点沿轨道（TrainCarts 行走）探索到相邻节点，记录区间距离
  * </ul>
  *
  * <p>{@code build} 默认从脚下（或 {@code --tcc} 选中的轨道）沿轨道扩张并自动加载区块，用 {@code --maxChunks} 控制加载范围；{@code
@@ -6156,8 +6156,8 @@ public final class FtaGraphCommand {
             anchorIndex,
             switcherNodeIds,
             EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
-            plugin.getLoggerManager()::debug);
-    explorer.warnTo(plugin.getLogger()::warning);
+            plugin.getLoggerManager()::debug,
+            plugin.getLogger()::warning);
     anchorsByNode.forEach(explorer::addNode);
 
     long startNanos = System.nanoTime();
@@ -6492,8 +6492,8 @@ public final class FtaGraphCommand {
             lookup,
             newSwitcherIds,
             EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
-            plugin.getLoggerManager()::debug);
-    explorer.warnTo(plugin.getLogger()::warning);
+            plugin.getLoggerManager()::debug,
+            plugin.getLogger()::warning);
     newAnchors.forEach(explorer::addNode);
 
     long startNanos = System.nanoTime();

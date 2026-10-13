@@ -107,7 +107,7 @@ final class FtaGraphCommandIncrementalGuardsTest {
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     when(world.getName()).thenReturn("world");
-    RailGraphService service = new RailGraphService(ignored -> SimpleRailGraph.empty());
+    RailGraphService service = new RailGraphService();
     // 存储未就绪：写库失败，走激活失败分支。
     StorageManager notReady = storage(mock(RailNodeRepository.class), false);
     FetaruteTCAddon plugin = plugin();
@@ -161,7 +161,7 @@ final class FtaGraphCommandIncrementalGuardsTest {
     World world = mock(World.class);
     when(world.getUID()).thenReturn(worldId);
     when(world.getName()).thenReturn("world");
-    RailGraphService service = new RailGraphService(ignored -> SimpleRailGraph.empty());
+    RailGraphService service = new RailGraphService();
     service.markStale(
         world, new RailGraphService.RailGraphStaleState(Instant.EPOCH, "old", "new", 0, 0, 0));
     GraphStaleNotifier notifier = mock(GraphStaleNotifier.class);

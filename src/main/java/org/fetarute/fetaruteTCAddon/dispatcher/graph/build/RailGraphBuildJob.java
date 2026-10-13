@@ -539,8 +539,8 @@ public final class RailGraphBuildJob implements Runnable, RailGraphBuildTask {
             anchorIndex,
             switcherNodes,
             EdgeExploreMode.NODE_TO_NODE_MAX_DISTANCE,
-            debugLogger);
-    explorer.warnTo(plugin.getLogger()::warning);
+            debugLogger,
+            plugin.getLogger()::warning);
 
     // 添加所有节点作为探索起点
     for (Map.Entry<NodeId, Set<RailBlockPos>> entry : anchorsByNode.entrySet()) {
