@@ -132,7 +132,7 @@ class TimetableSpawnManagerTest {
             .isPresent());
   }
 
-  /** 中途开服没有出库票窗口：缺车的按需交路只补仍来得及的班次，并且一单只派一辆。 */
+  /** 中途开服没有出库票窗口：缺车的按需交路只补还能准点接上的班次，按它的计划出库时刻出票，并且一单只派一辆。 */
   @Test
   void coldStartRecoversAnUnboundOperationDispatchedDuty() {
     SpawnService create = service(CREATE_ROUTE, "CRT", "OP:D:DEP:1");
@@ -156,7 +156,13 @@ class TimetableSpawnManagerTest {
                 service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
     Fixture fixture = fixture(timetable(), demandPlan);
     fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
-    Instant now = DAY.plusSeconds(8 * 3600 + 11 * 60 + 30);
+    assertTrue(
+        fixture
+            .manager
+            .pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 + 5 * 60))
+            .isEmpty(),
+        "第二班 08:10 的替补 08:07 才出库");
+    Instant now = DAY.plusSeconds(8 * 3600 + 7 * 60);
 
     List<SpawnTicket> tickets = fixture.manager.pollDueTickets(fixture.provider, now);
 
@@ -204,7 +210,8 @@ class TimetableSpawnManagerTest {
   void dispatchDoesNotBindASecondVehicleToARunningDuty() {
     Fixture fixture = fixture(timetable(), demandPlan());
     fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
-    Instant now = DAY.plusSeconds(8 * 3600 + 11 * 60 + 30);
+    fixture.manager.pollDueTickets(fixture.provider, DAY.plusSeconds(8 * 3600 + 5 * 60));
+    Instant now = DAY.plusSeconds(8 * 3600 + 7 * 60);
     SpawnTicket replacement = fixture.manager.pollDueTickets(fixture.provider, now).get(0);
     var duty = fixture.manager.pickupTripOf(replacement).orElseThrow();
     fixture.service.bindDuty(
@@ -986,8 +993,7 @@ class TimetableSpawnManagerTest {
   }
 
   /**
-   * 交路换车：车晚 460 秒到终点 CCC（超过容差 + 追赶余量），替补车现在出库还赶得上第二班（08:10 发、08:15 前），交路空出来；
-   * 下一次轮询发出替补出库票，派发时新车绑上交路。替补票作废则下一轮再发。
+   * 交路换车：车在 08:05 被清掉，交路空出来；替补车按第二班（08:10 发）的计划出库时刻 08:07 发出替补出库票，派发时新车绑上交路。 替补票作废时还来得及准点，下一轮再发。
    */
   @Test
   void aVacantDutyGetsAReplacementCreateTicket() {
@@ -1010,10 +1016,12 @@ class TimetableSpawnManagerTest {
     TimetableSpawnManager manager = new TimetableSpawnManager(delegate, service, logs::add);
 
     service.scheduledDepartureAt(stop("train-A", 0, clock.get()));
-    clock.set(DAY.plusSeconds(8 * 3600 + 11 * 60 + 30));
-    service.observeStop(stop("train-A", 1, clock.get()), false);
-    assertTrue(service.dutyBindingOf("train-A").isEmpty(), "晚 460 秒，交路换车");
+    clock.set(DAY.plusSeconds(8 * 3600 + 5 * 60));
+    service.release("train-A", "train-removed");
+    assertEquals(1, service.vacantDutyCount(), "车被清掉，交路空缺");
+    assertTrue(manager.pollDueTickets(provider, clock.get()).isEmpty(), "替补按计划 08:07 出库");
 
+    clock.set(DAY.plusSeconds(8 * 3600 + 7 * 60));
     List<SpawnTicket> first = manager.pollDueTickets(provider, clock.get());
     assertEquals(1, first.size(), first::toString);
     SpawnTicket replacement = first.get(0);
