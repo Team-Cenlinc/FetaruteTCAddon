@@ -212,6 +212,51 @@ class PidsStopListViewTest {
     assertTrue(view(cancelled).note().isPresent(), "没有下一班时也写出取消");
   }
 
+  /** 下一班已在进站或停靠：终点下面一行只写这一班自己的直通或经由，之前取消的班次不占这一行；停站表按这一班画。 */
+  @Test
+  void aTrainAtThePlatformKeepsTheNoteLine() {
+    PidsRow cancelled = at(row(PLAIN, PidsRow.Status.CANCELLED, "2"), 30);
+    for (PidsRow.Status status : List.of(PidsRow.Status.ARRIVING, PidsRow.Status.BOARDING)) {
+      PidsRow here = at(row(THROUGH, status, "2"), 60);
+
+      PidsStopListView view = view(cancelled, here);
+
+      assertTrue(view.cancelled().isEmpty(), status + "：不写取消");
+      assertEquals(Optional.of("浦蓝线"), view.note().map(Note::primary), status + "：写这一班的直通");
+      assertEquals(4, view.train().orElseThrow().stops().size(), status + "：按在站的这一班画");
+    }
+  }
+
+  /** 取消的班次过了计划发车就不再写：只在它本该开出之前提醒乘客。 */
+  @Test
+  void aCancelledTrainIsOnlyNotedBeforeItsPlannedDeparture() {
+    PidsRow expired = at(row(PLAIN, PidsRow.Status.CANCELLED, "2"), -30);
+    PidsRow due = at(row(PLAIN, PidsRow.Status.CANCELLED, "2"), 0);
+    PidsRow next = row(THROUGH, PidsRow.Status.EN_ROUTE, "2");
+
+    assertTrue(view(expired, due, next).cancelled().isEmpty());
+    assertTrue(view(expired).note().isEmpty(), "没有下一班时也不写过了时刻的取消");
+    assertTrue(
+        following(4, row(PLAIN, PidsRow.Status.EN_ROUTE, "2"), expired, next).trains().stream()
+            .noneMatch(train -> train.badge().hollow()),
+        "后续列车页也不列");
+  }
+
+  /** 后续列车页放不下时真会来的车优先，取消的班次只占剩下的位置。 */
+  @Test
+  void followingTrainsPutRealTrainsFirst() {
+    PidsRow next = row(PLAIN, PidsRow.Status.EN_ROUTE, "2");
+    PidsRow cancelled = at(row(THROUGH, PidsRow.Status.CANCELLED, "2"), 150);
+    PidsRow later = at(row(THROUGH, PidsRow.Status.PLANNED, "2"), 300);
+    PidsRow last = at(row(LOCAL, PidsRow.Status.PLANNED, "2"), 600);
+
+    assertEquals(
+        List.of(false, false),
+        following(2, next, cancelled, later, last).trains().stream()
+            .map(train -> train.badge().hollow())
+            .toList());
+  }
+
   /** 后续列车页：下一班之后可以上车的列车与取消的班次，按先后、不多于一页放得下的；通过、本站终到、回库与别的站台的不列。 */
   @Test
   void followingTrainsComeAfterTheNextOne() {
@@ -393,6 +438,24 @@ class PidsStopListViewTest {
         false,
         false,
         Optional.empty());
+  }
+
+  /** 同一行，预计（取消行为计划）在 {@code seconds} 秒后。 */
+  private static PidsRow at(PidsRow row, long seconds) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        NOW.plusSeconds(seconds),
+        row.delaySeconds(),
+        row.stopSequence(),
+        row.passing(),
+        row.terminating(),
+        row.outOfService(),
+        row.trainName());
   }
 
   private static PidsRow copy(

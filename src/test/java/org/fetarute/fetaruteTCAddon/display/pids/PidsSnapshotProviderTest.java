@@ -72,7 +72,7 @@ class PidsSnapshotProviderTest {
     assertEquals("DDD", cancelled.destination());
     assertEquals(Optional.of("SURN:DDD"), cancelled.destinationId());
     assertEquals("2", cancelled.platform());
-    assertEquals(T0.plusSeconds(270), cancelled.expectedAt(), "取消行按计划到达");
+    assertEquals(T0.plusSeconds(300), cancelled.expectedAt(), "取消行按计划发车");
     assertEquals(1, cancelled.stopSequence());
     assertTrue(cancelled.delaySeconds().isEmpty());
   }
@@ -89,7 +89,7 @@ class PidsSnapshotProviderTest {
         .departuresAt(
             isNull(),
             eq("CCC"),
-            eq(T0.minus(PidsSnapshotProvider.CANCELLED_LOOKBACK)),
+            eq(T0.minus(PidsSnapshotProvider.PLANNED_LOOKBACK)),
             eq(PidsSnapshotProvider.TIMETABLE_WINDOW),
             eq(PidsSnapshotProvider.DEPARTURE_LOOKUP_LIMIT));
   }
@@ -104,6 +104,25 @@ class PidsSnapshotProviderTest {
     when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
 
     assertEquals(1, provider.snapshot(CCC).rows().size());
+  }
+
+  @Test
+  // 取消行只在计划发车之前显示：查询往前多看的那几分钟只为末班比对晚点车，已过计划发车的取消班次不列。
+  void cancelledRowsDisappearOnceTheirPlannedDepartureHasPassed() {
+    board();
+    departures(
+        departure(true, "SURN:S:CCC:2", T0.minusSeconds(60)),
+        departure(true, "SURN:S:CCC:2", T0),
+        departure(true, "SURN:S:CCC:2", T0.plusSeconds(300)));
+    when(routes.getRoute(ROUTE)).thenReturn(Optional.of(routeChangingToL2AtCcc()));
+
+    assertEquals(
+        List.of(T0.plusSeconds(300)),
+        provider.snapshot(CCC).rows().stream().map(PidsRow::expectedAt).toList(),
+        "计划发车已过或正当此刻的不列");
+
+    now.set(T0.plusSeconds(300));
+    assertTrue(provider.snapshot(CCC).rows().isEmpty(), "计划到发缓存未过期，取快照时照样按此刻筛掉");
   }
 
   @Test
