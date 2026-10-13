@@ -28708,7 +28708,9 @@ public final class RuntimeDispatchService {
     if (override == null) {
       return Optional.empty();
     }
-    if (effectiveNodeOverrideMatches(override, route, index)) {
+    // 选台器放弃了这个已选站台（不在图上、走不到或占用超过上限）：当作没有覆盖，下一拍重新选台。
+    if (effectiveNodeOverrideMatches(override, route, index)
+        && !dynamicAllocator.isAbandoned(trainName, override.node())) {
       return Optional.of(override.node());
     }
     if (overrides.remove(index, override)) {

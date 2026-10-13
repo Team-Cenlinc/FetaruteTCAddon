@@ -104,6 +104,21 @@ public final class DynamicPlatformAllocator {
   /** trainKey -> 下一次重看暂定站台的时刻。 */
   private final Map<String, Instant> tentativeRefreshAt = new ConcurrentHashMap<>();
 
+  /** 已选站台被暂时占住时最多保持多久：超过就放弃改选，避免列车在区间里无限期停着。 */
+  static final Duration STICKY_LIMIT = Duration.ofSeconds(120);
+
+  /**
+   * trainKey -> 已放弃的已选站台。运行时读有效节点覆盖时遇到它就当作没有，下一拍重新选台；同一站台重新被选上时撤销。
+   *
+   * <p>两种情况放弃：站台已不在图上或走不到（永久性，立即放弃）；被占用、被别车预订或前车在等持续超过 {@link #STICKY_LIMIT}。
+   */
+  private final Map<String, java.util.Set<NodeId>> abandoned = new ConcurrentHashMap<>();
+
+  /** trainKey -> (已选站台 -> 首次因暂时性原因不可用的时刻，纳秒)。 */
+  private final Map<String, Map<NodeId, Long>> unavailableSince = new ConcurrentHashMap<>();
+
+  private volatile java.util.function.LongSupplier clockNanos = System::nanoTime;
+
   /** 已分配记录：trainName -> (routeId:stopSequence) -> 带定义证据的分配。 */
   private final Map<String, Map<String, CachedAllocation>> allocations = new ConcurrentHashMap<>();
 
@@ -498,14 +513,17 @@ public final class DynamicPlatformAllocator {
             currentSpec,
             stop,
             waypoints.get(targetIndex))) {
-          if (!isAvailableForMaterialization(
+          if (isAvailableForMaterialization(
               cached.allocatedNode(), trainName, graph, currentNode)) {
+            return DynamicResolution.selected(
+                new AllocationResult(
+                    trainName, route.id(), targetIndex, currentSpec, cached.allocatedNode()));
+          }
+          if (!isAbandoned(trainName, cached.allocatedNode())) {
             return DynamicResolution.blocked(
                 "materialized-platform-unavailable", java.util.OptionalInt.of(targetIndex));
           }
-          return DynamicResolution.selected(
-              new AllocationResult(
-                  trainName, route.id(), targetIndex, currentSpec, cached.allocatedNode()));
+          // 已放弃（不在图上、走不到或占用超过上限）：缓存已撤，往下按候选重新选。
         }
         trainAllocations.remove(allocationKey, cached);
         debugLogger.accept(
@@ -704,6 +722,11 @@ public final class DynamicPlatformAllocator {
       return;
     }
     pruneStaleRouteAllocations(trainName, route);
+    java.util.Set<NodeId> given = abandoned.get(TrainNameNormalizer.normalizeKey(trainName));
+    if (given != null) {
+      // 重新选上同一站台（它又可用了）：撤销放弃，运行时照常读这条覆盖。
+      given.remove(node);
+    }
     Map<String, CachedAllocation> held =
         allocations.computeIfAbsent(
             TrainNameNormalizer.normalizeKey(trainName), ignored -> new ConcurrentHashMap<>());
@@ -821,6 +844,8 @@ public final class DynamicPlatformAllocator {
   public void clearAllocations(String trainName) {
     if (trainName != null) {
       allocations.remove(TrainNameNormalizer.normalizeKey(trainName));
+      abandoned.remove(TrainNameNormalizer.normalizeKey(trainName));
+      unavailableSince.remove(TrainNameNormalizer.normalizeKey(trainName));
       orderWithheldReported.remove(TrainNameNormalizer.normalizeKey(trainName));
       tentatives.remove(TrainNameNormalizer.normalizeKey(trainName));
       tentativeRefreshAt.remove(TrainNameNormalizer.normalizeKey(trainName));
@@ -1026,30 +1051,88 @@ public final class DynamicPlatformAllocator {
    *
    * <p>后车先订到站台、前车随后开始等台时，后车让出预订优先权，保持同一目标直到前车通过。 预订与目标事实分开，避免后车握住空台形成互卡；此操作不释放任何真实
    * NODE/EDGE/CONFLICT claim。
+   *
+   * <p>站台已不在图上或走不到时立即放弃这个选择；暂时性原因持续超过 {@link #STICKY_LIMIT} 也放弃（见 {@link #isAbandoned}）。
    */
   boolean isAvailableForMaterialization(
       NodeId node, String trainName, RailGraph graph, NodeId currentNode) {
-    if (occupancyManager == null
-        || graph == null
-        || currentNode == null
-        || graph.findNode(node).isEmpty()) {
+    if (occupancyManager == null || graph == null || currentNode == null) {
+      return false;
+    }
+    if (graph.findNode(node).isEmpty()) {
+      abandon(trainName, node, "node-missing");
       return false;
     }
     if (waiterAheadOnApproach(trainName, node, graph).isPresent()) {
       setReservationActive(trainName, node, false);
+      return temporarilyUnavailable(trainName, node, "waiter-ahead");
+    }
+    if (new RailGraphPathFinder()
+        .shortestPath(graph, currentNode, node, RailGraphPathFinder.Options.shortestDistance())
+        .isEmpty()) {
+      abandon(trainName, node, "unreachable");
       return false;
     }
-    boolean available =
-        !isExternallyOccupied(node, trainName)
-            && !isReservedByOtherTrain(node, trainName)
-            && new RailGraphPathFinder()
-                .shortestPath(
-                    graph, currentNode, node, RailGraphPathFinder.Options.shortestDistance())
-                .isPresent();
-    if (available) {
-      setReservationActive(trainName, node, true);
+    if (isExternallyOccupied(node, trainName) || isReservedByOtherTrain(node, trainName)) {
+      return temporarilyUnavailable(trainName, node, "occupied");
     }
-    return available;
+    Map<NodeId, Long> since = unavailableSince.get(TrainNameNormalizer.normalizeKey(trainName));
+    if (since != null) {
+      since.remove(node);
+    }
+    setReservationActive(trainName, node, true);
+    return true;
+  }
+
+  /**
+   * 这列车是否已放弃这个已选站台：运行时读有效节点覆盖时遇到它就当作没有，重新选台。
+   *
+   * @param trainName 列车名
+   * @param node 已选站台
+   */
+  public boolean isAbandoned(String trainName, NodeId node) {
+    if (trainName == null || node == null) {
+      return false;
+    }
+    java.util.Set<NodeId> nodes = abandoned.get(TrainNameNormalizer.normalizeKey(trainName));
+    return nodes != null && nodes.contains(node);
+  }
+
+  /** 测试用：替换计时。 */
+  void setClock(java.util.function.LongSupplier nanos) {
+    clockNanos = nanos == null ? System::nanoTime : nanos;
+  }
+
+  /** 暂时不可用：记下起始时刻，持续超过上限就放弃。始终返回 {@code false}。 */
+  private boolean temporarilyUnavailable(String trainName, NodeId node, String reason) {
+    long now = clockNanos.getAsLong();
+    long since =
+        unavailableSince
+            .computeIfAbsent(
+                TrainNameNormalizer.normalizeKey(trainName), ignored -> new ConcurrentHashMap<>())
+            .computeIfAbsent(node, ignored -> now);
+    if (now - since >= STICKY_LIMIT.toNanos()) {
+      abandon(trainName, node, reason + "-over-" + STICKY_LIMIT.toSeconds() + "s");
+    }
+    return false;
+  }
+
+  /** 放弃已选站台：撤掉缓存的分配与预订，记入放弃表，下一拍按候选重新选台。 */
+  private void abandon(String trainName, NodeId node, String reason) {
+    String key = TrainNameNormalizer.normalizeKey(trainName);
+    if (!abandoned.computeIfAbsent(key, ignored -> ConcurrentHashMap.newKeySet()).add(node)) {
+      return;
+    }
+    Map<String, CachedAllocation> held = allocations.get(key);
+    if (held != null) {
+      held.values().removeIf(value -> value.allocatedNode().equals(node));
+    }
+    Map<NodeId, Long> since = unavailableSince.get(key);
+    if (since != null) {
+      since.remove(node);
+    }
+    debugLogger.accept(
+        "DYNAMIC 放弃已选站台并改选: train=" + trainName + " node=" + node.value() + " reason=" + reason);
   }
 
   /** 只切换内部预订资格，materialized 节点与定义证据保持不变。 */

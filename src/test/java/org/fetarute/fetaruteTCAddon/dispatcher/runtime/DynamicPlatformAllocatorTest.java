@@ -860,6 +860,58 @@ class DynamicPlatformAllocatorTest {
     assertEquals(platform, result.selected().orElseThrow().allocatedNode());
   }
 
+  /** 已选站台从图上消失（改图、拆牌）：立即放弃，下一拍重新选台，不能就地永远停着。 */
+  @Test
+  void aSelectedPlatformThatLeftTheGraphIsAbandonedAtOnce() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    NodeId gone = NodeId.of("OP:S:DEST:2");
+
+    assertFalse(allocator.isAvailableForMaterialization(gone, "train1", graph, fromId));
+    assertTrue(allocator.isAbandoned("train1", gone));
+  }
+
+  /** 已选站台走不到了（区间封锁）：立即放弃。 */
+  @Test
+  void anUnreachableSelectedPlatformIsAbandonedAtOnce() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId);
+    mockEdges(targetId);
+
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertTrue(allocator.isAbandoned("train1", targetId));
+  }
+
+  /** 已选站台被别的车占着：保持原选择（站牌不来回跳），持续超过上限才放弃改选。 */
+  @Test
+  void aTemporarilyOccupiedPlatformIsKeptUntilTheStickyLimit() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId, edge(from, target));
+    mockEdges(targetId, edge(target, from));
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(List.of(claim(OccupancyResource.forNode(targetId), "other")));
+    java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+    allocator.setClock(nanos::get);
+
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    nanos.addAndGet(DynamicPlatformAllocator.STICKY_LIMIT.minusSeconds(1).toNanos());
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isAbandoned("train1", targetId), "上限之内保持原选择");
+
+    nanos.addAndGet(Duration.ofSeconds(2).toNanos());
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertTrue(allocator.isAbandoned("train1", targetId), "超过上限放弃改选");
+
+    allocator.clearAllocations("train1");
+    assertFalse(allocator.isAbandoned("train1", targetId), "列车移除后放弃记录一并清掉");
+  }
+
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {
     RailNode node = mock(RailNode.class);
     when(node.id()).thenReturn(id);
