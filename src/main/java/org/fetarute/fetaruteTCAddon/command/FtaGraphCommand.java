@@ -161,6 +161,12 @@ public final class FtaGraphCommand {
   private final ConcurrentMap<UUID, RailGraphBuildTask> jobs = new ConcurrentHashMap<>();
   private final PendingRailGraphStore pendingGraphs;
 
+  /** 各世界最近一次交给后台保存的候选编号；落盘前比对，被更新的保存或清理取代的旧保存不再写出。 */
+  private final ConcurrentMap<UUID, Long> pendingSaveTickets = new ConcurrentHashMap<>();
+
+  private final java.util.concurrent.atomic.AtomicLong pendingSaveSequence =
+      new java.util.concurrent.atomic.AtomicLong();
+
   /**
    * build 续跑缓存：仅用于 HERE 模式的“按轨道扩张”。
    *
@@ -245,7 +251,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -326,7 +333,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -354,7 +362,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -383,7 +392,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -541,7 +551,8 @@ public final class FtaGraphCommand {
                 ctx -> {
                   World world = resolveWorld(ctx.sender());
                   if (world == null) {
-                    ctx.sender().sendMessage("未找到可用世界");
+                    ctx.sender()
+                        .sendMessage(plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -595,7 +606,8 @@ public final class FtaGraphCommand {
                 ctx -> {
                   World world = resolveWorld(ctx.sender());
                   if (world == null) {
-                    ctx.sender().sendMessage("未找到可用世界");
+                    ctx.sender()
+                        .sendMessage(plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -621,7 +633,8 @@ public final class FtaGraphCommand {
                 ctx -> {
                   World world = resolveWorld(ctx.sender());
                   if (world == null) {
-                    ctx.sender().sendMessage("未找到可用世界");
+                    ctx.sender()
+                        .sendMessage(plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -715,9 +728,11 @@ public final class FtaGraphCommand {
                     String signature = RailGraphSignature.signatureForNodes(nodes);
                     try {
                       activatePersistedGraph(
+                          player,
                           world,
                           new RailGraphBuildResult(
-                              nextGraph, now, signature, nodes, List.of(), List.of()));
+                              nextGraph, now, signature, nodes, List.of(), List.of()),
+                          locale);
                     } catch (GraphPersistException exception) {
                       plugin.getLogger().warning("局部删除调度图写库失败: " + exception.getMessage());
                       player.sendMessage(locale.component("command.graph.build.persist-failed"));
@@ -764,7 +779,8 @@ public final class FtaGraphCommand {
                           .map(name -> plugin.getServer().getWorld(name))
                           .orElseGet(() -> resolveWorld(ctx.sender()));
                   if (world == null) {
-                    ctx.sender().sendMessage("未找到可用世界");
+                    ctx.sender()
+                        .sendMessage(plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   boolean showIsolated = ctx.flags().isPresent(isolatedFlag);
@@ -1051,7 +1067,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1166,7 +1183,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1255,7 +1273,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1383,7 +1402,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1472,7 +1492,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1631,7 +1652,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1800,7 +1822,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -1894,7 +1917,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2002,7 +2026,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2130,7 +2155,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2220,7 +2246,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2389,7 +2416,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2493,7 +2521,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2583,7 +2612,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2698,7 +2728,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2787,7 +2818,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -2935,7 +2967,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3095,7 +3128,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3207,7 +3241,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3370,7 +3405,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3492,7 +3528,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3642,7 +3679,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3743,7 +3781,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3858,7 +3897,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -3967,7 +4007,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4027,7 +4068,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4081,7 +4123,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4154,7 +4197,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4204,7 +4248,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4262,7 +4307,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4360,7 +4406,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4421,7 +4468,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4522,7 +4570,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -4592,7 +4641,8 @@ public final class FtaGraphCommand {
                   CommandSender sender = ctx.sender();
                   World world = resolveWorld(sender);
                   if (world == null) {
-                    sender.sendMessage("未找到可用世界");
+                    sender.sendMessage(
+                        plugin.getLocaleManager().component("command.graph.no-world"));
                     return;
                   }
                   LocaleManager locale = plugin.getLocaleManager();
@@ -5681,8 +5731,12 @@ public final class FtaGraphCommand {
    *
    * @return 最终写入的图结果，以及可选的 merge 统计（用于命令回显）
    */
-  private AppliedGraphBuild applyBuildSuccess(
-      World world, RailGraphBuildResult result, RailGraphBuildCompletion completion) {
+  AppliedGraphBuild applyBuildSuccess(
+      CommandSender sender,
+      World world,
+      RailGraphBuildResult result,
+      RailGraphBuildCompletion completion,
+      LocaleManager locale) {
     RailGraphService service = plugin.getRailGraphService();
 
     Optional<RailGraph> baseGraph =
@@ -5707,13 +5761,13 @@ public final class FtaGraphCommand {
               mergedNodes,
               result.missingSwitcherJunctions(),
               result.duplicateNodeIds());
-      activatePersistedGraph(world, merged);
+      activatePersistedGraph(sender, world, merged, locale);
       syncSignNodeRegistry(world, mergedNodes);
       scheduleStationAutoSync(world, merged.nodes());
       return new AppliedGraphBuild(merged, Optional.of(merge));
     }
 
-    activatePersistedGraph(world, result);
+    activatePersistedGraph(sender, world, result, locale);
     syncSignNodeRegistry(world, result.nodes());
     scheduleStationAutoSync(world, result.nodes());
     return new AppliedGraphBuild(result, Optional.empty());
@@ -6247,7 +6301,7 @@ public final class FtaGraphCommand {
             List.of(),
             List.of());
     try {
-      activatePersistedGraph(world, result);
+      activatePersistedGraph(sender, world, result, locale);
     } catch (GraphPersistException exception) {
       plugin.getLogger().warning("调度图快速刷新写库失败: " + exception.getMessage());
       sender.sendMessage(locale.component("command.graph.build.persist-failed"));
@@ -6931,25 +6985,47 @@ public final class FtaGraphCommand {
       int routesChecked, int routeIssueCount, List<RouteValidationEntry> entries) {}
 
   /**
-   * 先提交持久化事务，再激活同一份内存快照。
+   * 先提交持久化事务，再激活同一份内存快照；被占用拦下时把完整候选交给后台保存。
    *
-   * <p>调用发生在 Bukkit 主线程的单一构建完成回调中。激活前校验先阻止 active claim 下的资源投影切换；随后 SQL 任一步失败都会终止流程，旧内存快照、Sign
-   * registry 和运行时联锁定义均保持不变。
+   * <p>调用发生在 Bukkit 主线程。激活前校验先阻止 active claim 下的资源投影切换；随后 SQL 任一步失败都会终止流程，旧内存快照、Sign registry
+   * 和运行时联锁定义均保持不变。
+   *
+   * <p>被拦下时候选的基线（生效图版本与节点签名）当场在主线程取：节点表只在主线程改，晚取会把拦下之后的改牌算进基线，旧候选就可能盖掉它们。 整图序列化与写盘交给后台线程，保存结果另行告知
+   * {@code sender}。
+   *
+   * @throws ActivationBlockedException 仍有占用，旧图保持生效
+   * @throws GraphPersistException 写库失败，或取不到候选基线
    */
-  private void activatePersistedGraph(World world, RailGraphBuildResult result) {
+  void activatePersistedGraph(
+      CommandSender sender, World world, RailGraphBuildResult result, LocaleManager locale) {
+    try {
+      commitGraph(world, result);
+    } catch (ActivationBlockedException blocked) {
+      PendingRailGraphStore.Candidate candidate;
+      try {
+        candidate =
+            new PendingRailGraphStore.Candidate(
+                result, currentGraphBuiltAt(world), currentNodeSignature(world));
+      } catch (RuntimeException failure) {
+        throw new GraphPersistException("候选图基线读取失败: " + failure.getMessage());
+      }
+      savePendingGraphAsync(sender, world.getUID(), candidate, locale);
+      throw blocked;
+    }
+  }
+
+  /**
+   * 先 SQL 后内存地激活一份图，成功后清掉该世界的候选。
+   *
+   * @throws ActivationBlockedException 仍有占用，未改动任何东西
+   * @throws GraphPersistException 写库失败，旧内存快照保持不变
+   */
+  private void commitGraph(World world, RailGraphBuildResult result) {
     RailGraphService service = plugin.getRailGraphService();
     try {
       service.validateSnapshotActivation(world, result.graph());
     } catch (IllegalStateException blocked) {
-      try {
-        pendingGraphs.save(
-            world.getUID(),
-            new PendingRailGraphStore.Candidate(
-                result, currentGraphBuiltAt(world), currentNodeSignature(world)));
-      } catch (java.io.IOException | RuntimeException failure) {
-        throw new GraphPersistException("候选图缓存保存失败: " + failure.getMessage());
-      }
-      throw blocked;
+      throw new ActivationBlockedException(blocked.getMessage());
     }
     if (!persistGraph(world, result)) {
       throw new GraphPersistException("调度图持久化失败，保留旧内存快照");
@@ -6958,6 +7034,54 @@ public final class FtaGraphCommand {
     service.putSnapshot(world, result.graph(), result.builtAt());
     notifyRecovered(world, wasStale);
     clearPendingGraph(world.getUID());
+  }
+
+  /** 后台线程序列化并写盘候选，结果回主线程告知；同一世界只有最近交出的那份会落盘。 */
+  private void savePendingGraphAsync(
+      CommandSender sender,
+      UUID worldId,
+      PendingRailGraphStore.Candidate candidate,
+      LocaleManager locale) {
+    Long ticket = pendingSaveSequence.incrementAndGet();
+    pendingSaveTickets.put(worldId, ticket);
+    var scheduler = plugin.getServer().getScheduler();
+    try {
+      scheduler.runTaskAsynchronously(
+          plugin,
+          () -> {
+            Runnable report;
+            try {
+              boolean saved =
+                  pendingGraphs.save(
+                      worldId, candidate, () -> ticket.equals(pendingSaveTickets.get(worldId)));
+              report =
+                  saved
+                      ? () -> sender.sendMessage(locale.component("command.graph.pending.stored"))
+                      : () -> {};
+            } catch (java.io.IOException | RuntimeException failure) {
+              plugin.getLogger().warning("候选图缓存保存失败: " + failure.getMessage());
+              String error =
+                  failure.getMessage() != null
+                      ? failure.getMessage()
+                      : failure.getClass().getSimpleName();
+              report =
+                  () ->
+                      sender.sendMessage(
+                          locale.component(
+                              "command.graph.pending.save-failed", Map.of("error", error)));
+            } finally {
+              pendingSaveTickets.remove(worldId, ticket);
+            }
+            try {
+              scheduler.runTask(plugin, report);
+            } catch (RuntimeException ex) {
+              // 插件已停用：回不到主线程，保存失败时日志里已有记录。
+            }
+          });
+    } catch (RuntimeException ex) {
+      pendingSaveTickets.remove(worldId, ticket);
+      throw new GraphPersistException("候选图缓存保存失败: " + ex.getMessage());
+    }
   }
 
   /** 候选基线取生效快照；重启预热后仍能校验同一份 SQL 图。 */
@@ -6989,7 +7113,9 @@ public final class FtaGraphCommand {
         graphProvider().railNodes().listByWorld(world.getUID()));
   }
 
+  /** 删除候选文件，并让还在后台的保存作废，免得清理之后又写出旧候选。 */
   private void clearPendingGraph(UUID worldId) {
+    pendingSaveTickets.remove(worldId);
     try {
       pendingGraphs.delete(worldId);
     } catch (java.io.IOException ex) {
@@ -6997,37 +7123,42 @@ public final class FtaGraphCommand {
     }
   }
 
-  /** 显示待激活图与生效图的区别，debug stick 始终查询生效图。 */
+  /** 显示待激活图的节点数、区间数与构建时间（只读候选文件开头的元数据）；debug stick 始终查询生效图。 */
   private void reportPendingGraph(CommandSender sender, World world, LocaleManager locale) {
     try {
       pendingGraphs
-          .load(world.getUID())
+          .summary(world.getUID())
           .ifPresent(
-              candidate ->
+              summary ->
                   sender.sendMessage(
                       locale.component(
                           "command.graph.pending.saved",
                           Map.of(
                               "nodes",
-                              String.valueOf(candidate.result().graph().nodes().size()),
+                              String.valueOf(summary.nodeCount()),
                               "edges",
-                              String.valueOf(candidate.result().graph().edges().size()),
+                              String.valueOf(summary.edgeCount()),
                               "built_at",
-                              candidate.result().builtAt().toString()))));
+                              summary.builtAt().toString()))));
     } catch (java.io.IOException ex) {
       sender.sendMessage(
           locale.component("command.graph.pending.failed", Map.of("error", ex.getMessage())));
     }
   }
 
-  /** 重试完整候选的激活，沿用 active claim 校验和先 SQL 后内存的提交顺序。 */
-  private void activatePendingGraph(CommandSender sender, World world, LocaleManager locale) {
+  /** 重试完整候选的激活，沿用 active claim 校验和先 SQL 后内存的提交顺序；仍被拦下时候选原样保留。 */
+  void activatePendingGraph(CommandSender sender, World world, LocaleManager locale) {
     if (world == null) {
-      sender.sendMessage("未找到可用世界");
+      sender.sendMessage(locale.component("command.graph.no-world"));
       return;
     }
     if (jobs.containsKey(world.getUID())) {
       sender.sendMessage(locale.component("command.graph.build.running"));
+      return;
+    }
+    StorageManager storage = plugin.getStorageManager();
+    if (storage == null || !storage.isReady() || storage.provider().isEmpty()) {
+      sender.sendMessage(locale.component("command.graph.build.storage-not-ready"));
       return;
     }
     try {
@@ -7041,15 +7172,19 @@ public final class FtaGraphCommand {
         sender.sendMessage(locale.component("command.graph.pending.outdated"));
         return;
       }
-      activatePersistedGraph(world, candidate.result());
+      commitGraph(world, candidate.result());
       syncSignNodeRegistry(world, candidate.result().nodes());
       scheduleStationAutoSync(world, candidate.result().nodes());
       sender.sendMessage(locale.component("command.graph.pending.activated"));
+    } catch (ActivationBlockedException ex) {
+      sender.sendMessage(locale.component("command.graph.pending.still-blocked"));
     } catch (GraphPersistException | java.io.IOException ex) {
       sender.sendMessage(
           locale.component("command.graph.pending.failed", Map.of("error", ex.getMessage())));
-    } catch (IllegalStateException ex) {
-      sender.sendMessage(locale.component("command.graph.build.activation-blocked"));
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("候选调度图激活失败: " + ex);
+      String error = ex.getMessage() != null ? ex.getMessage() : ex.getClass().getSimpleName();
+      sender.sendMessage(locale.component("command.graph.pending.failed", Map.of("error", error)));
     }
   }
 
@@ -7232,7 +7367,8 @@ public final class FtaGraphCommand {
       try {
         AppliedGraphBuild applied;
         try {
-          applied = applyBuildSuccess(world, outcome.result(), outcome.completion());
+          applied =
+              applyBuildSuccess(sender, world, outcome.result(), outcome.completion(), locale);
         } catch (GraphPersistException exception) {
           plugin.getLogger().warning("调度图写库失败: " + exception.getMessage());
           discardContinuation(cacheKey, outcome);
@@ -7376,6 +7512,15 @@ public final class FtaGraphCommand {
     private static final long serialVersionUID = 1L;
 
     private GraphPersistException(String message) {
+      super(message);
+    }
+  }
+
+  /** 物理联锁资源投影变了且仍有列车占用：拒绝切换，旧图保持生效。 */
+  private static final class ActivationBlockedException extends IllegalStateException {
+    private static final long serialVersionUID = 1L;
+
+    private ActivationBlockedException(String message) {
       super(message);
     }
   }

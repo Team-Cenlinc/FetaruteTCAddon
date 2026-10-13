@@ -12,8 +12,6 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-import java.lang.reflect.InvocationTargetException;
-import java.lang.reflect.Method;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
@@ -25,6 +23,7 @@ import java.util.logging.Logger;
 import java.util.stream.Collectors;
 import org.bukkit.Server;
 import org.bukkit.World;
+import org.bukkit.command.CommandSender;
 import org.bukkit.scheduler.BukkitScheduler;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
@@ -58,13 +57,14 @@ import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageTransactionManager;
 import org.fetarute.fetaruteTCAddon.storage.api.TransactionCallback;
+import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
 final class FtaGraphCommandApplyBuildSuccessTest {
   @org.junit.jupiter.api.io.TempDir java.nio.file.Path pluginFolder;
 
-  /** 占用阻止发布时保留完整候选；占用释放后的重试才写 SQL 和内存。 */
+  /** 占用阻止发布时保留完整候选：基线在主线程取，整图序列化与写盘在后台线程；占用释放后的重试才写 SQL 和内存。 */
   @Test
   void activeClaimsKeepOldGraphAndPersistCandidateForRetry() throws Exception {
     UUID worldId = UUID.randomUUID();
@@ -106,6 +106,9 @@ final class FtaGraphCommandApplyBuildSuccessTest {
     when(plugin.getRailGraphService()).thenReturn(service);
     when(plugin.getStorageManager()).thenReturn(storage);
     when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+    Scheduled scheduled = scheduled(plugin);
+    var sender = mock(CommandSender.class);
+    var locale = mock(LocaleManager.class);
     var command = new FtaGraphCommand(plugin);
     var result =
         new RailGraphBuildResult(
@@ -115,19 +118,20 @@ final class FtaGraphCommandApplyBuildSuccessTest {
             nodes,
             List.of(),
             List.of());
-    Method activate =
-        FtaGraphCommand.class.getDeclaredMethod(
-            "activatePersistedGraph", World.class, RailGraphBuildResult.class);
-    assertTrue(activate.trySetAccessible());
-    var failure =
-        assertThrows(
-            InvocationTargetException.class, () -> activate.invoke(command, world, result));
-    assertInstanceOf(IllegalStateException.class, failure.getCause());
+    assertThrows(
+        IllegalStateException.class,
+        () -> command.activatePersistedGraph(sender, world, result, locale));
     assertSame(old, service.getSnapshot(world).orElseThrow().graph());
     org.mockito.Mockito.verify(nodeRepo, org.mockito.Mockito.never()).replaceWorld(any(), any());
     var store =
         new org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.PendingRailGraphStore(
             pluginFolder.resolve("pending-graphs"));
+    assertTrue(store.load(worldId).isEmpty(), "整图写盘交给后台线程，被拦下的这一拍不写");
+    // 基线已在主线程取好：后台写盘时节点表再变，也不能让候选认新基线。
+    when(nodeRepo.listByWorld(worldId)).thenReturn(List.of());
+    scheduled.runAll();
+    when(nodeRepo.listByWorld(worldId)).thenReturn(nodes);
+    verify(locale).component("command.graph.pending.stored");
     var candidate = store.load(worldId).orElseThrow();
     assertTrue(
         candidate.matchesBase(Optional.of(baseTime), RailGraphSignature.signatureForNodes(nodes)));
@@ -141,8 +145,14 @@ final class FtaGraphCommandApplyBuildSuccessTest {
             .interlockingState()
             .sameResourceProjection(
                 ((RailGraphInterlockingSupport) candidate.result().graph()).interlockingState()));
+    service.setSnapshotActivationGuard(() -> false);
+    command.activatePendingGraph(sender, world, locale);
+    verify(locale).component("command.graph.pending.still-blocked");
+    assertTrue(scheduled.isEmpty(), "重试仍被拦下时候选原样保留，不再重写");
+    assertSame(old, service.getSnapshot(world).orElseThrow().graph());
     service.setSnapshotActivationGuard(() -> true);
-    activate.invoke(command, world, candidate.result());
+    command.activatePendingGraph(sender, world, locale);
+    verify(locale).component("command.graph.pending.activated");
     assertEquals(result.builtAt(), service.getSnapshot(world).orElseThrow().builtAt());
     verify(nodeRepo).replaceWorld(eq(worldId), eq(nodes));
     verify(edgeRepo)
@@ -157,6 +167,57 @@ final class FtaGraphCommandApplyBuildSuccessTest {
                                     .footprintCells()
                                     .contains(new RailFootprintCell(1, 64, 1)))));
     assertTrue(store.load(worldId).isEmpty());
+  }
+
+  /** 存储未就绪时取不到基线：如实提示存储问题，不说成被占用拦下。 */
+  @Test
+  void activatingPendingGraphWithoutStorageReportsStorageNotReady() throws Exception {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    var nodes = List.of(nodeRecord(worldId, "A", 1), nodeRecord(worldId, "B", 2));
+    RailGraph graph =
+        graph(
+            worldId,
+            Set.of(node("A", 1), node("B", 2)),
+            Set.of(edge("A", "B", 12)),
+            Map.of(
+                EdgeId.undirected(NodeId.of("A"), NodeId.of("B")),
+                new RailEdgeFootprint(1, true, Set.of(new RailFootprintCell(1, 64, 1)))));
+    new org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.PendingRailGraphStore(
+            pluginFolder.resolve("pending-graphs"))
+        .save(
+            worldId,
+            new org.fetarute
+                .fetaruteTCAddon
+                .dispatcher
+                .graph
+                .persist
+                .PendingRailGraphStore
+                .Candidate(
+                new RailGraphBuildResult(
+                    graph,
+                    Instant.EPOCH,
+                    RailGraphSignature.signatureForNodes(nodes),
+                    nodes,
+                    List.of(),
+                    List.of()),
+                Optional.empty(),
+                ""));
+    var storage = mock(StorageManager.class);
+    when(storage.isReady()).thenReturn(false);
+    var plugin = mock(FetaruteTCAddon.class);
+    when(plugin.getDataFolder()).thenReturn(pluginFolder.toFile());
+    when(plugin.getRailGraphService()).thenReturn(new RailGraphService());
+    when(plugin.getStorageManager()).thenReturn(storage);
+    when(plugin.getLogger()).thenReturn(Logger.getLogger("test"));
+    var locale = mock(LocaleManager.class);
+
+    new FtaGraphCommand(plugin).activatePendingGraph(mock(CommandSender.class), world, locale);
+
+    verify(locale).component("command.graph.build.storage-not-ready");
+    verify(locale, org.mockito.Mockito.never()).component("command.graph.build.activation-blocked");
+    verify(locale, org.mockito.Mockito.never()).component("command.graph.pending.still-blocked");
   }
 
   @Test
@@ -291,14 +352,12 @@ final class FtaGraphCommandApplyBuildSuccessTest {
             List.of(),
             List.of());
 
-    Method applyBuildSuccess =
-        FtaGraphCommand.class.getDeclaredMethod(
-            "applyBuildSuccess",
-            World.class,
-            RailGraphBuildResult.class,
-            RailGraphBuildCompletion.class);
-    assertTrue(applyBuildSuccess.trySetAccessible());
-    applyBuildSuccess.invoke(command, world, update, RailGraphBuildCompletion.COMPLETE);
+    command.applyBuildSuccess(
+        mock(CommandSender.class),
+        world,
+        update,
+        RailGraphBuildCompletion.COMPLETE,
+        mock(LocaleManager.class));
 
     RailGraph merged = railGraphService.getSnapshot(world).orElseThrow().graph();
     assertEquals(4, merged.nodes().size());
@@ -400,23 +459,51 @@ final class FtaGraphCommandApplyBuildSuccessTest {
             nodes,
             List.of(),
             List.of());
-    Method applyBuildSuccess =
-        FtaGraphCommand.class.getDeclaredMethod(
-            "applyBuildSuccess",
-            World.class,
-            RailGraphBuildResult.class,
-            RailGraphBuildCompletion.class);
-    assertTrue(applyBuildSuccess.trySetAccessible());
+    assertThrows(
+        IllegalStateException.class,
+        () ->
+            command.applyBuildSuccess(
+                mock(CommandSender.class),
+                world,
+                update,
+                RailGraphBuildCompletion.COMPLETE,
+                mock(LocaleManager.class)));
 
-    InvocationTargetException failure =
-        assertThrows(
-            InvocationTargetException.class,
-            () ->
-                applyBuildSuccess.invoke(
-                    command, world, update, RailGraphBuildCompletion.COMPLETE));
-
-    assertTrue(failure.getCause() instanceof IllegalStateException);
     assertSame(oldGraph, railGraphService.getSnapshot(world).orElseThrow().graph());
+  }
+
+  /** 捕获交给调度器的任务，由测试决定何时执行（后台线程与回主线程的任务都按提交顺序跑）。 */
+  private static Scheduled scheduled(FetaruteTCAddon plugin) {
+    Server server = mock(Server.class);
+    BukkitScheduler scheduler = mock(BukkitScheduler.class);
+    when(plugin.getServer()).thenReturn(server);
+    when(server.getScheduler()).thenReturn(scheduler);
+    Scheduled scheduled = new Scheduled(new java.util.ArrayDeque<>());
+    when(scheduler.runTaskAsynchronously(any(), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              scheduled.tasks().add(invocation.getArgument(1));
+              return mock(BukkitTask.class);
+            });
+    when(scheduler.runTask(any(), any(Runnable.class)))
+        .thenAnswer(
+            invocation -> {
+              scheduled.tasks().add(invocation.getArgument(1));
+              return mock(BukkitTask.class);
+            });
+    return scheduled;
+  }
+
+  private record Scheduled(java.util.Deque<Runnable> tasks) {
+    void runAll() {
+      while (!tasks.isEmpty()) {
+        tasks.poll().run();
+      }
+    }
+
+    boolean isEmpty() {
+      return tasks.isEmpty();
+    }
   }
 
   private static RailNodeRecord nodeRecord(UUID worldId, String nodeId, int x) {
