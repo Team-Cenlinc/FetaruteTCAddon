@@ -180,6 +180,68 @@ class TimetableSpawnManagerTest {
     assertTrue(fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(2)).isEmpty());
   }
 
+  /** 开服补车只补一次：交路时间窗还没过、但已经没有能补的班次时，后续出票不能每轮都重新补登、再以过期关掉（刷日志、重派已取消的班）。 */
+  @Test
+  void coldStartRecoveryRunsOnceAfterRestore() {
+    Fixture fixture = fixture(timetable(), demandPlan());
+    fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
+    Instant now = DAY.plusSeconds(8 * 3600 + 16 * 60);
+
+    for (int i = 0; i < 3; i++) {
+      assertTrue(
+          fixture.manager.pollDueTickets(fixture.provider, now.plusSeconds(5L * i)).isEmpty());
+    }
+
+    long closed =
+        fixture.logs.stream()
+            .filter(line -> line.startsWith("TIMETABLE_DUTY_VACANCY_CLOSED"))
+            .count();
+    assertEquals(1, closed, fixture.logs::toString);
+  }
+
+  /** 替补票派出时交路已被别的车接下（重启后留在线上的车按时间绑回）：不能再把第二辆车绑上同一交路。 */
+  @Test
+  void dispatchDoesNotBindASecondVehicleToARunningDuty() {
+    Fixture fixture = fixture(timetable(), demandPlan());
+    fixture.service.setPendingTicketProbe(fixture.manager::hasPendingTicket);
+    Instant now = DAY.plusSeconds(8 * 3600 + 11 * 60 + 30);
+    SpawnTicket replacement = fixture.manager.pollDueTickets(fixture.provider, now).get(0);
+    var duty = fixture.manager.pickupTripOf(replacement).orElseThrow();
+    fixture.service.bindDuty(
+        "survivor",
+        new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService.DutyKey(
+            TIMETABLE,
+            duty.timetable().duties().get(0).id(),
+            java.time.LocalDate.ofInstant(now, ZONE)),
+        "test-survivor");
+
+    fixture.manager.onDispatched(replacement, "replacement");
+
+    assertTrue(fixture.service.dutyBindingOf("replacement").isEmpty(), "交路已有车时不绑第二辆");
+    assertTrue(fixture.service.dutyBindingOf("survivor").isPresent());
+  }
+
+  private static SpawnPlan demandPlan() {
+    SpawnService create = service(CREATE_ROUTE, "CRT", "OP:D:DEP:1");
+    return new SpawnPlan(
+        Instant.EPOCH,
+        List.of(
+            new SpawnService(
+                create.key(),
+                create.companyId(),
+                create.companyCode(),
+                create.operatorId(),
+                create.operatorCode(),
+                create.lineId(),
+                create.lineCode(),
+                create.routeId(),
+                create.routeCode(),
+                Optional.empty(),
+                create.depotNodeId()),
+            service(ROUTE, "R1", "OP:D:DEP:1"),
+            service(RETURN_ROUTE, "RET", "OP:D:DEP:1")));
+  }
+
   /** 一天之内的四张票按时间依次出现，各带正确的交路意图：CREATE、第 0 班、第 1 班、RETURN。 */
   @Test
   void ticketsCarryTheirDutyIntent() {

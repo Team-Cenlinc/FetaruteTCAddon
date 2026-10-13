@@ -1047,9 +1047,16 @@ public final class TimetableConflictChecker {
       return new Platform("", "", false);
     }
 
-    /** 同站连续停留必须同时满足到站与下一班始发的股道资格；保持全部原始要求，图索引建候选时取交集。 不同站台组不能合并；交路衔接的站点一致性仍由构建校验负责。 */
+    /**
+     * 同站连续停留必须同时满足到站与下一班始发的股道资格；保持全部原始要求，图索引建候选时取交集。 不同站台组不能合并；交路衔接的站点一致性仍由构建校验负责。
+     *
+     * <p>两端都是固定股道时不合并，只保留到站股道：两条不同的固定股道交集必然为空，会让现有交路编表必然失败。
+     */
     public Platform intersect(Platform other) {
-      if (other == null || !group.equalsIgnoreCase(other.group()) || equals(other)) {
+      if (other == null
+          || !group.equalsIgnoreCase(other.group())
+          || equals(other)
+          || (!dynamic && !other.dynamic())) {
         return this;
       }
       List<Platform> combined = new ArrayList<>();

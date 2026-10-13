@@ -316,6 +316,27 @@ class TimetableConflictCheckerTest {
             .clean());
   }
 
+  /** 两端都是固定股道时不取交集，只登记到站股道；否则股道不同的现有交路会必然编表失败。 */
+  @Test
+  void twoFixedPlatformsKeepTheArrivalTrack() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(List.of(B, B2), new int[] {100}, new double[] {10.0});
+    TimetableConflictChecker.Platform arrival =
+        new TimetableConflictChecker.Platform(B, "OP:S:B", false);
+    TimetableConflictChecker.Platform departure =
+        new TimetableConflictChecker.Platform(B2, "OP:S:B", false);
+    assertEquals(arrival, arrival.intersect(departure));
+    assertTrue(
+        TimetableConflictChecker.check(
+                graph,
+                Map.of(),
+                List.of(),
+                List.of(
+                    new TimetableConflictChecker.Stay("T1", arrival.intersect(departure), 0, 100)),
+                0)
+            .clean());
+  }
+
   /** 已离开股道的安全裕量不能与当前停靠取空交集，从而吞掉另一辆车的真实争用。 */
   @Test
   void successiveVisitsRetainBothSeparationAndCurrentPlatformRestrictions() {

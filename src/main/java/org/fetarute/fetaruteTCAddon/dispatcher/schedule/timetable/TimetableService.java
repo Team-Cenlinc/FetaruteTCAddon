@@ -118,6 +118,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 已发布表由异步任务重载，恢复请求必须对主线程出票可见。 */
   private volatile boolean dutyRecoveryPending;
 
+  /** 开服或重载表后补登缺车交路只做一次：每轮都补会把提前跑完、被回收的交路反复当成缺车，重复派车。 */
+  private volatile boolean unboundRecoveryPending = true;
+
   private boolean restoringDuties;
 
   public TimetableService(Supplier<Instant> clock, Consumer<String> debugLogger) {
@@ -132,6 +135,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
   public void setDutyStore(TimetableDutyStore store) {
     dutyStore = store;
     dutyRecoveryPending = store != null;
+    unboundRecoveryPending = true;
   }
 
   /** 恢复当前已发布表中的车辆归属和进度，必须在补车前执行。 */
@@ -361,6 +365,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
           loadPlatformPlans(provider, next.timetables());
       this.snapshot = next;
       dutyRecoveryPending = dutyStore != null;
+      unboundRecoveryPending = true;
       plans.ifPresent(loaded -> this.platformPlans = loaded);
       dropClaimsOutsideSnapshot(next);
       debugLogger.accept(
@@ -1006,7 +1011,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /**
    * 恢复已开始但尚无车辆的按运营调度交路，随后由既有替补算法挑选还能赶上的班次。
    *
-   * <p>必须先恢复真实车辆绑定再调用。原出库票仍在队列时不登记；未来交路与已经结束的交路不补车。 服务日使用本表时区并覆盖跨午夜窗口，不把已错过的首班重新出票。
+   * <p>必须先恢复真实车辆绑定再调用：恢复还没做时不登记。开服或重载表后只登记一次，之后交路提前跑完、车被回收都不再当作缺车。原出库票仍在队列时不登记； 未来交路与已经结束的交路不补车。
+   * 服务日使用本表时区并覆盖跨午夜窗口，不把已错过的首班重新出票。
    *
    * @param createRoutes 没有周期 headway 的本线出库服务
    * @param now 当前时间
@@ -1015,6 +1021,10 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (!settings.enabled() || !settings.spawnEnabled() || createRoutes.isEmpty() || now == null) {
       return;
     }
+    if (!unboundRecoveryPending || dutyRecoveryPending) {
+      return;
+    }
+    unboundRecoveryPending = false;
     for (Timetable timetable : snapshot.timetables()) {
       LocalDate today = LocalDate.ofInstant(now, timetable.zoneId());
       for (VehicleDuty duty : timetable.duties()) {

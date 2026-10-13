@@ -353,6 +353,22 @@ public final class TimetableSpawnManager
     }
     // 意图摘掉、到期作废：票已经派出去了，之后 complete 不再记 abandoned，也不会再被到期清理。
     ownedTickets.put(ticket.id(), OwnedTicket.dispatched());
+    Optional<String> running = timetableService.runningVehicleFor(intent);
+    if (running.isPresent()
+        && timetableService.dutyBindingOf(trainName).filter(intent.key()::equals).isEmpty()) {
+      // 出票到派出之间，交路已被别的车接下（重启后留在线上的车在门控上按时间绑回）：同一交路只能有一辆车，
+      // 这辆不绑，按没有交路的车由回收处理。
+      debugLogger.accept(
+          "TIMETABLE_SPAWN_DUPLICATE kind="
+              + intent.kind().name()
+              + " duty="
+              + intent.key().describe()
+              + " train="
+              + trainName
+              + " running="
+              + running.get());
+      return;
+    }
     timetableService.bindDuty(
         trainName,
         intent.key(),
