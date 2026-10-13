@@ -38,14 +38,6 @@ public final class TrackSelection {
     return ALL;
   }
 
-  /** 创建包含两端的闭区间；逆序端点按已有范围语义归一化。 */
-  public static TrackSelection between(int from, int to) {
-    if (from < 1 || to < 1) {
-      throw new IllegalArgumentException("股道号必须为正整数");
-    }
-    return new TrackSelection(false, List.of(new Interval(Math.min(from, to), Math.max(from, to))));
-  }
-
   /**
    * 解析显式选择器：单值、旧冒号区间，以及方括号内的单值/闭区间并集。
    *
@@ -147,13 +139,6 @@ public final class TrackSelection {
   /** 显式集合的最小允许股道；不限范围没有声明代表值。 */
   public OptionalInt firstDeclaredTrack() {
     return unbounded ? OptionalInt.empty() : OptionalInt.of(intervals.get(0).from());
-  }
-
-  /** 显式集合的最大允许股道；仅用于描述，不得作为成员判断。 */
-  public OptionalInt lastDeclaredTrack() {
-    return unbounded
-        ? OptionalInt.empty()
-        : OptionalInt.of(intervals.get(intervals.size() - 1).to());
   }
 
   /** 显式集合的元素总数；不限范围没有可计算的声明数量。 */

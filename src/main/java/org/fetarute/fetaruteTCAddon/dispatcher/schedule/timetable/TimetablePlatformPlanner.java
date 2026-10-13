@@ -125,8 +125,11 @@ public final class TimetablePlatformPlanner {
      */
     public void requireFeasibleRestrictedAssignments() {
       if (restrictedUnplaced > 0) {
-        throw new IllegalStateException(
-            "受限 DYNAMIC 有 " + restrictedUnplaced + " 段连续停留无法排定合法股道，请放宽允许集合或调整发车间隔");
+        throw new RestrictedPlatformException(
+            "command.timetable.build.restricted-unplaced",
+            "count",
+            String.valueOf(restrictedUnplaced),
+            null);
       }
     }
 
@@ -176,6 +179,36 @@ public final class TimetablePlatformPlanner {
         && DynamicStopMatcher.parseDynamicSpec(stop)
             .filter(spec -> DynamicStopMatcher.restricts(spec, graph))
             .isPresent();
+  }
+
+  /** 受限停留排不出整段可用股道，编表必须拒绝保存。带语言文件的键与占位符，由编表入口按玩家语言显示；异常消息只供日志。 */
+  public static final class RestrictedPlatformException extends IllegalStateException {
+    private static final long serialVersionUID = 1L;
+    private final String messageKey;
+    private final String placeholder;
+    private final String value;
+
+    /**
+     * @param messageKey 语言文件的键
+     * @param placeholder 唯一占位符名
+     * @param value 占位符的值
+     * @param cause 排程出错时的原始异常；可为空
+     */
+    public RestrictedPlatformException(
+        String messageKey, String placeholder, String value, Throwable cause) {
+      super(messageKey + " " + placeholder + "=" + value, cause);
+      this.messageKey = messageKey;
+      this.placeholder = placeholder;
+      this.value = value;
+    }
+
+    public String messageKey() {
+      return messageKey;
+    }
+
+    public Map<String, String> placeholders() {
+      return Map.of(placeholder, value);
+    }
   }
 
   /** 一处 DYNAMIC 停靠：哪条 route 的第几个节点；有车次时记车次，出库走行没有车次。 */

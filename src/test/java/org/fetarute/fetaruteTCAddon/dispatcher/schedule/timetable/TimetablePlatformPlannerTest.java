@@ -174,8 +174,26 @@ class TimetablePlatformPlannerTest {
   void restrictedStayCannotSwitchTracksBetweenTwoAdjacentBookings() {
     var result = planAroundAdjacentNeighborStays(DYNAMIC + ":[2]");
     assertEquals(1, result.restrictedUnplaced());
-    org.junit.jupiter.api.Assertions.assertThrows(
-        IllegalStateException.class, result::requireFeasibleRestrictedAssignments);
+    var thrown =
+        org.junit.jupiter.api.Assertions.assertThrows(
+            TimetablePlatformPlanner.RestrictedPlatformException.class,
+            result::requireFeasibleRestrictedAssignments);
+    assertEquals(Map.of("count", "1"), thrown.placeholders());
+    assertTrue(languageFile().isString(thrown.messageKey()), thrown.messageKey());
+    assertTrue(languageFile().isString("command.timetable.build.restricted-plan-failed"));
+  }
+
+  private static org.bukkit.configuration.file.YamlConfiguration languageFile() {
+    try (var reader =
+        new java.io.InputStreamReader(
+            TimetablePlatformPlannerTest.class
+                .getClassLoader()
+                .getResourceAsStream("lang/zh_CN.yml"),
+            StandardCharsets.UTF_8)) {
+      return org.bukkit.configuration.file.YamlConfiguration.loadConfiguration(reader);
+    } catch (java.io.IOException ex) {
+      throw new java.io.UncheckedIOException(ex);
+    }
   }
 
   /** 显式集合覆盖了该站现有全部股道时与不限股道同一口径：排不下照常留给运行时选台，不拒绝编表。 */

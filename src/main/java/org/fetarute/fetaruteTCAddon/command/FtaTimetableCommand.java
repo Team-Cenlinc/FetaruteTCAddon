@@ -694,7 +694,16 @@ public final class FtaTimetableCommand {
                         plugin,
                         () ->
                             sender.sendMessage(
-                                Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
+                                ex
+                                        instanceof
+                                        TimetablePlatformPlanner.RestrictedPlatformException
+                                        restricted
+                                    ? plugin
+                                        .getLocaleManager()
+                                        .component(
+                                            restricted.messageKey(), restricted.placeholders())
+                                    : Component.text(
+                                        "编表失败：" + ex.getMessage(), NamedTextColor.RED)));
                 return;
               } catch (Error error) {
                 buildJobs.finish(job.id());
@@ -1093,7 +1102,8 @@ public final class FtaTimetableCommand {
       return TimetablePlatformPlanner.plan(input);
     } catch (RuntimeException ex) {
       if (TimetablePlatformPlanner.hasRestrictedStops(input)) {
-        throw new IllegalStateException("受限 DYNAMIC 股道排程失败，无法证明整段计划可执行", ex);
+        throw new TimetablePlatformPlanner.RestrictedPlatformException(
+            "command.timetable.build.restricted-plan-failed", "reason", String.valueOf(ex), ex);
       }
       return TimetablePlatformPlanner.Result.failed(ex.toString());
     }

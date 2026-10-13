@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.route;
 
+import java.util.Arrays;
 import java.util.Collection;
 import java.util.Comparator;
 import java.util.List;
@@ -7,7 +8,10 @@ import java.util.Locale;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.function.Consumer;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.stream.Stream;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphPlatformSupport;
@@ -99,7 +103,7 @@ public final class DynamicStopMatcher {
 
   /** 实际候选超过预算时输出诊断；已索引的快照只访问本站节点，未知图实现保留扫描兼容。 */
   public static List<NodeId> candidateNodes(
-      DynamicSpec spec, RailGraph graph, java.util.function.Consumer<String> diagnostic) {
+      DynamicSpec spec, RailGraph graph, Consumer<String> diagnostic) {
     if (spec == null || graph == null) {
       return List.of();
     }
@@ -171,15 +175,13 @@ public final class DynamicStopMatcher {
     return matchingNodes(spec, graph).size() < matchingNodes(spec.allTracks(), graph).size();
   }
 
-  private static java.util.stream.Stream<NodeId> knownNodeStream(
-      DynamicSpec spec, RailGraph graph) {
+  private static Stream<NodeId> knownNodeStream(DynamicSpec spec, RailGraph graph) {
     return graph instanceof RailGraphPlatformSupport indexed
         ? indexed.platformNodes(spec.toTerminalKey()).stream()
         : graph.nodes().stream().filter(Objects::nonNull).map(RailNode::id);
   }
 
-  private static java.util.stream.Stream<NodeId> sortedMatchingNodes(
-      DynamicSpec spec, java.util.stream.Stream<NodeId> nodes) {
+  private static Stream<NodeId> sortedMatchingNodes(DynamicSpec spec, Stream<NodeId> nodes) {
     return nodes.filter(node -> matches(node, spec)).distinct().sorted(TRACK_ORDER);
   }
 
@@ -264,7 +266,7 @@ public final class DynamicStopMatcher {
       nodeName = parts[2].trim();
       // 剩余部分作为 range（可能是 "1" 或 "[1:3]" 或 "1:3"）
       if (parts.length > 3) {
-        rangeRaw = String.join(":", java.util.Arrays.copyOfRange(parts, 3, parts.length)).trim();
+        rangeRaw = String.join(":", Arrays.copyOfRange(parts, 3, parts.length)).trim();
       } else {
         rangeRaw = "";
       }
@@ -274,7 +276,7 @@ public final class DynamicStopMatcher {
       nodeType = "S"; // 默认 Station
       nodeName = parts[1].trim();
       if (parts.length > 2) {
-        rangeRaw = String.join(":", java.util.Arrays.copyOfRange(parts, 2, parts.length)).trim();
+        rangeRaw = String.join(":", Arrays.copyOfRange(parts, 2, parts.length)).trim();
       } else {
         rangeRaw = "";
       }
@@ -459,7 +461,7 @@ public final class DynamicStopMatcher {
 
   private static String semanticNotes(Optional<String> notes) {
     String raw = notes.orElse("").replace("\r\n", "\n").replace('\r', '\n');
-    java.util.regex.Matcher matcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(raw);
+    Matcher matcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(raw);
     StringBuilder normalized = new StringBuilder();
     int copied = 0;
     int from = 0;
@@ -555,7 +557,7 @@ public final class DynamicStopMatcher {
       return Optional.empty();
     }
     for (String line : stop.notes().orElse("").split("[\r\n]+")) {
-      java.util.regex.Matcher matcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(line);
+      Matcher matcher = DYNAMIC_DIRECTIVE_PATTERN.matcher(line);
       if (matcher.find()) {
         String payload = line.substring(matcher.end(), payloadEnd(line, matcher.end())).trim();
         if (!payload.isEmpty()) {
@@ -656,27 +658,6 @@ public final class DynamicStopMatcher {
       operatorCode = operatorCode.trim();
       nodeType = nodeType.trim().toUpperCase(Locale.ROOT);
       nodeName = nodeName.trim();
-    }
-
-    /** 兼容旧调用：显式范围即非 unbounded。 */
-    public DynamicSpec(
-        String operatorCode, String nodeType, String nodeName, int fromTrack, int toTrack) {
-      this(operatorCode, nodeType, nodeName, TrackSelection.between(fromTrack, toTrack));
-    }
-
-    /** 兼容显式区间或未声明范围的构造入口；最终仅保存集合值。 */
-    public DynamicSpec(
-        String operatorCode,
-        String nodeType,
-        String nodeName,
-        int fromTrack,
-        int toTrack,
-        boolean unbounded) {
-      this(
-          operatorCode,
-          nodeType,
-          nodeName,
-          unbounded ? TrackSelection.all() : TrackSelection.between(fromTrack, toTrack));
     }
 
     /** 是否省略了股道选择器。 */

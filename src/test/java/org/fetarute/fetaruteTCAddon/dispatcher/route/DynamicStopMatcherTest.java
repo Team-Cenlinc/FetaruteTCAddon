@@ -100,7 +100,8 @@ class DynamicStopMatcherTest {
     assertEquals("S", spec.nodeType());
     assertEquals("PPK", spec.nodeName());
     assertEquals(1, spec.tracks().firstDeclaredTrack().orElseThrow());
-    assertEquals(3, spec.tracks().lastDeclaredTrack().orElseThrow());
+    assertTrue(spec.tracks().contains(3));
+    assertFalse(spec.tracks().contains(4));
     assertTrue(spec.isStation());
     assertFalse(spec.isDepot());
   }
@@ -114,7 +115,8 @@ class DynamicStopMatcherTest {
     assertEquals("D", spec.nodeType());
     assertEquals("OFL", spec.nodeName());
     assertEquals(1, spec.tracks().firstDeclaredTrack().orElseThrow());
-    assertEquals(2, spec.tracks().lastDeclaredTrack().orElseThrow());
+    assertTrue(spec.tracks().contains(2));
+    assertFalse(spec.tracks().contains(3));
     assertFalse(spec.isStation());
     assertTrue(spec.isDepot());
   }
@@ -156,7 +158,7 @@ class DynamicStopMatcherTest {
 
   @Test
   void matches_stationNodeIdMatchesDynamicSpec() {
-    DynamicSpec spec = new DynamicSpec("SURC", "S", "PPK", 1, 3);
+    DynamicSpec spec = parse("SURC:S:PPK:[1:3]");
     assertTrue(DynamicStopMatcher.matches("SURC:S:PPK:1", spec));
     assertTrue(DynamicStopMatcher.matches("SURC:S:PPK:2", spec));
     assertTrue(DynamicStopMatcher.matches("SURC:S:PPK:3", spec));
@@ -166,7 +168,7 @@ class DynamicStopMatcherTest {
 
   @Test
   void matches_depotNodeIdMatchesDynamicSpec() {
-    DynamicSpec spec = new DynamicSpec("SURC", "D", "OFL", 1, 2);
+    DynamicSpec spec = parse("SURC:D:OFL:[1:2]");
     assertTrue(DynamicStopMatcher.matches("SURC:D:OFL:1", spec));
     assertTrue(DynamicStopMatcher.matches("SURC:D:OFL:2", spec));
     assertFalse(DynamicStopMatcher.matches("SURC:D:OFL:3", spec));
@@ -175,26 +177,26 @@ class DynamicStopMatcherTest {
 
   @Test
   void matches_caseInsensitive() {
-    DynamicSpec spec = new DynamicSpec("SURC", "S", "PPK", 1, 3);
+    DynamicSpec spec = parse("SURC:S:PPK:[1:3]");
     assertTrue(DynamicStopMatcher.matches("surc:s:ppk:1", spec));
     assertTrue(DynamicStopMatcher.matches("Surc:S:Ppk:2", spec));
   }
 
   @Test
   void matches_differentOperator_fails() {
-    DynamicSpec spec = new DynamicSpec("SURC", "S", "PPK", 1, 3);
+    DynamicSpec spec = parse("SURC:S:PPK:[1:3]");
     assertFalse(DynamicStopMatcher.matches("SURM:S:PPK:1", spec));
   }
 
   @Test
   void matches_differentNodeName_fails() {
-    DynamicSpec spec = new DynamicSpec("SURC", "S", "PPK", 1, 3);
+    DynamicSpec spec = parse("SURC:S:PPK:[1:3]");
     assertFalse(DynamicStopMatcher.matches("SURC:S:JBS:1", spec));
   }
 
   @Test
   void matches_nodeId_wrapper() {
-    DynamicSpec spec = new DynamicSpec("SURC", "D", "OFL", 1, 2);
+    DynamicSpec spec = parse("SURC:D:OFL:[1:2]");
     assertTrue(DynamicStopMatcher.matches(NodeId.of("SURC:D:OFL:1"), spec));
     assertFalse(DynamicStopMatcher.matches(NodeId.of("SURC:D:OFL:3"), spec));
   }
@@ -279,8 +281,12 @@ class DynamicStopMatcherTest {
 
   @Test
   void specToStationKey() {
-    DynamicSpec spec = new DynamicSpec("SURC", "S", "PPK", 1, 3);
+    DynamicSpec spec = parse("SURC:S:PPK:[1:3]");
     assertEquals("surc:s:ppk", DynamicStopMatcher.specToStationKey(spec));
+  }
+
+  private static DynamicSpec parse(String raw) {
+    return DynamicStopMatcher.parseDynamicSpec(raw).orElseThrow();
   }
 
   private RouteStop createStop(String notes) {
