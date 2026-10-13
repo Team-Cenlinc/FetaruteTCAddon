@@ -48,6 +48,21 @@ class TimetableDepotAllocatorTest {
     assertEquals(Optional.of(SHORT), plan(List.of()).duties().get(0).createRouteId());
   }
 
+  /** 联编多线时等待相同优先本线车库：借来的出库段更短也不选，避免两条线整体对调车库。 */
+  @Test
+  void aQuietHomeDepotWinsOverAShorterBorrowedOne() {
+    var result = linedPlan(List.of());
+    assertEquals(Optional.of(LONG), result.duties().get(0).createRouteId());
+    assertEquals(QUIET, result.duties().get(0).startDepotNodeId());
+  }
+
+  /** 本线出库段更挤时照常借用：本线优先只在等待不比借用多时生效。 */
+  @Test
+  void aBusyHomeDepotStillBorrows() {
+    var result = linedPlan(List.of(new TimetableConflictChecker.Movement("BLOCK", LONG, 580)));
+    assertEquals(Optional.of(SHORT), result.duties().get(0).createRouteId());
+  }
+
   /** 回同一车库的两条进路中，较短进路被占用时应使用较长而空闲的进路。 */
   @Test
   void aBusyShorterReturnDoesNotWinEveryClosing() {
@@ -169,6 +184,42 @@ class TimetableDepotAllocatorTest {
             traffic,
             List.of(),
             15);
+    return VehicleDutyPlanner.plan(
+        UUID.randomUUID(),
+        List.of(trip),
+        legs,
+        VehicleDutyPlanner.Limits.defaults(),
+        Map.of(),
+        Map.of(),
+        selector);
+  }
+
+  /** 首班属于 HOME 线；短出库段 SHORT 属于另一条线（借用），长出库段 LONG 属于 HOME 线。 */
+  private static VehicleDutyPlanner.Result linedPlan(
+      List<TimetableConflictChecker.Movement> traffic) {
+    UUID home = UUID.randomUUID();
+    UUID other = UUID.randomUUID();
+    UUID service = TimetableTestFixtures.routeId("SERVICE");
+    var shortLeg = new VehicleDutyPlanner.Leg(SHORT, "SHORT", BUSY, 10);
+    var longLeg = new VehicleDutyPlanner.Leg(LONG, "LONG", QUIET, 20);
+    UUID ret = TimetableTestFixtures.routeId("RETURN");
+    var legs =
+        VehicleDutyPlanner.Legs.of(
+            List.of(shortLeg, longLeg),
+            List.of(new VehicleDutyPlanner.Leg(ret, "RETURN", QUIET, 10)),
+            Map.of(SHORT, HUB, LONG, HUB, ret, HUB));
+    var trip =
+        new VehicleDutyPlanner.PlannedTrip(
+            UUID.randomUUID(), service, "FIRST", HUB, HUB, 600, 100, false, false, "");
+    Map<UUID, UUID> lines = Map.of(service, home, LONG, home, ret, home, SHORT, other);
+    var selector =
+        new TimetableDepotAllocator(
+            TimetableConflictChecker.GraphIndex.of(GRAPH),
+            Map.of(SHORT, profile(SHORT, "SHORT", BUSY), LONG, profile(LONG, "LONG", QUIET)),
+            traffic,
+            List.of(),
+            15,
+            route -> Optional.ofNullable(lines.get(route)));
     return VehicleDutyPlanner.plan(
         UUID.randomUUID(),
         List.of(trip),

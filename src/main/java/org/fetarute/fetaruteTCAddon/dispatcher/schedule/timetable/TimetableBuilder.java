@@ -1684,8 +1684,14 @@ public final class TimetableBuilder {
       movements.addAll(neighbor.movements());
       stays.addAll(neighbor.stays());
     }
+    // 班次与出入库走行用的是车型变体 ID，线路归属登记在基础 route 上。
     return new TimetableDepotAllocator(
-        prepared.graphIndex(), profiles, movements, stays, separation);
+        prepared.graphIndex(),
+        profiles,
+        movements,
+        stays,
+        separation,
+        route -> Optional.ofNullable(input.lineByRoute().get(prepared.baseOf(route))));
   }
 
   /** 一班允许的车型、份额权重与按各车型跑的全程时分（按方案里的顺序）。不区分车型、或这条 route 一个车型的时分都算不出来时为空。 */
