@@ -150,6 +150,29 @@ public final class DynamicStopMatcher {
         : sortedMatchingNodes(spec, knownNodeStream(spec, graph)).toList();
   }
 
+  /**
+   * 允许集合是否真正限制了这个站（车库）：落在集合里的实际股道少于该站全部数字股道。
+   *
+   * <p>不限股道、或显式集合覆盖了该站现有的全部股道，都不算受限。编表冲突检查、计划站台与编表入口共用这一口径。
+   *
+   * @param spec DYNAMIC 声明
+   * @param nodes 图或牌子注册表中的实际节点；可含其它站的节点
+   */
+  public static boolean restricts(DynamicSpec spec, Collection<NodeId> nodes) {
+    if (spec == null || nodes == null || spec.unbounded()) {
+      return false;
+    }
+    return matchingNodes(spec, nodes).size() < matchingNodes(spec.allTracks(), nodes).size();
+  }
+
+  /** {@link #restricts(DynamicSpec, Collection)} 的调度图版本：只查本站节点。 */
+  public static boolean restricts(DynamicSpec spec, RailGraph graph) {
+    if (spec == null || graph == null || spec.unbounded()) {
+      return false;
+    }
+    return matchingNodes(spec, graph).size() < matchingNodes(spec.allTracks(), graph).size();
+  }
+
   private static java.util.stream.Stream<NodeId> knownNodeStream(
       DynamicSpec spec, RailGraph graph) {
     return graph instanceof RailGraphPlatformSupport indexed
@@ -653,6 +676,13 @@ public final class DynamicStopMatcher {
     /** 是否省略了股道选择器。 */
     public boolean unbounded() {
       return tracks.isUnbounded();
+    }
+
+    /** 同一站（车库）、不限股道的声明。 */
+    public DynamicSpec allTracks() {
+      return unbounded()
+          ? this
+          : new DynamicSpec(operatorCode, nodeType, nodeName, TrackSelection.all());
     }
 
     /** 大小写不影响站点身份；保留原文用于构造 NodeId 与展示。 */

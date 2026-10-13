@@ -25,6 +25,27 @@ class DynamicStopMatcherTest {
     assertFalse(DynamicStopMatcher.matches("OP:S:DEST:4", spec));
   }
 
+  /** “受限”只看允许集合是否小于该站实际股道数：覆盖全部现有股道的显式集合与不限股道同样不受限。 */
+  @Test
+  void restrictionComparesTheAllowedSetWithTheStationsActualTracks() {
+    java.util.List<NodeId> station =
+        java.util.List.of(
+            NodeId.of("OP:S:DEST:1"),
+            NodeId.of("OP:S:DEST:2"),
+            NodeId.of("OP:S:OTHER:3"),
+            NodeId.of("OP:S:DEST:1:001"));
+    assertFalse(restricts("DYNAMIC:OP:S:DEST", station));
+    assertFalse(restricts("DYNAMIC:OP:S:DEST:[1,2]", station));
+    assertFalse(restricts("DYNAMIC:OP:S:DEST:[1:5]", station));
+    assertTrue(restricts("DYNAMIC:OP:S:DEST:[1]", station));
+    assertTrue(restricts("DYNAMIC:OP:S:DEST:[2,3]", station));
+  }
+
+  private static boolean restricts(String raw, java.util.List<NodeId> nodes) {
+    return DynamicStopMatcher.restricts(
+        DynamicStopMatcher.parseDynamicSpec(raw).orElseThrow(), nodes);
+  }
+
   /** 固定声明节点与同站容错不能覆盖明确的 DYNAMIC 股道限制。 */
   @Test
   void dynamicRestrictionOverridesFixedWaypointTolerance() {

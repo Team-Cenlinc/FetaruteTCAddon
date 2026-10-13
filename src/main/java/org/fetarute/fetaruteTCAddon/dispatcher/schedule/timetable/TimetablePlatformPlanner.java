@@ -87,7 +87,7 @@ public final class TimetablePlatformPlanner {
    * @param planned 排上了股道的停留段数（每段可能覆盖终到与下一班始发两处停靠）
    * @param unplaced 计划时段里没有空闲候选股道、没有排的停留段数
    * @param failure 排程本身出错时的原因
-   * @param restrictedUnplaced 明确限制股道的停留段中无法落实整段计划的数量；编表必须拒绝这些结果
+   * @param restrictedUnplaced 受限停留段（允许集合小于该站实际股道数）中无法落实整段计划的数量；编表必须拒绝这些结果
    */
   public record Result(
       Map<UUID, List<PlatformPlan>> plans,
@@ -120,7 +120,8 @@ public final class TimetablePlatformPlanner {
     /**
      * 发布前保证受限集合在整个连续停留中确有同一股道可用。
      *
-     * <p>容量扫描只验证各个时刻的匹配，不足以证明跨时段可固定股道。受限集合定不下计划时拒绝本次编表， 避免用运行时临时选台兜底掩盖不可执行的计划；不限制无选择器的既有计划兜底行为。
+     * <p>容量扫描只验证各个时刻的匹配，不足以证明跨时段可固定股道。受限集合定不下计划时拒绝本次编表，
+     * 避免用运行时临时选台兜底掩盖不可执行的计划；不限股道或集合覆盖全部股道时仍按既有计划兜底。
      */
     public void requireFeasibleRestrictedAssignments() {
       if (restrictedUnplaced > 0) {
@@ -154,6 +155,27 @@ public final class TimetablePlatformPlanner {
       planning.bookNeighbor(neighbor);
     }
     return planning.color();
+  }
+
+  /**
+   * 本次编的表里是否有受限的 DYNAMIC 停靠（允许集合小于该站实际股道数）。
+   *
+   * <p>只看 {@code tables} 用到的 route：{@code stopsByRoute} 里还有邻表与无表线路的停靠，它们不归这次编表负责。
+   */
+  public static boolean hasRestrictedStops(Input input) {
+    Objects.requireNonNull(input, "input");
+    return input.tables().stream()
+        .flatMap(table -> table.routeIds().stream())
+        .distinct()
+        .flatMap(routeId -> input.stopsByRoute().getOrDefault(routeId, List.of()).stream())
+        .anyMatch(stop -> restricted(stop, input.graph()));
+  }
+
+  private static boolean restricted(RouteStop stop, RailGraph graph) {
+    return stop != null
+        && DynamicStopMatcher.parseDynamicSpec(stop)
+            .filter(spec -> DynamicStopMatcher.restricts(spec, graph))
+            .isPresent();
   }
 
   /** 一处 DYNAMIC 停靠：哪条 route 的第几个节点；有车次时记车次，出库走行没有车次。 */
@@ -433,7 +455,7 @@ public final class TimetablePlatformPlanner {
         Optional<String> chosen = choose(visit);
         if (chosen.isEmpty()) {
           unplaced++;
-          if (visit.dynamicStops.stream().anyMatch(this::hasExplicitSelection)) {
+          if (visit.dynamicStops.stream().anyMatch(this::isRestricted)) {
             restrictedUnplaced++;
           }
           for (String node : visit.fixedNodes) {
@@ -455,13 +477,10 @@ public final class TimetablePlatformPlanner {
       return new Result(plans, planned, unplaced, Optional.empty(), restrictedUnplaced);
     }
 
-    /** 显式集合不能靠临时换股道解决排程失败，结果需交给编表入口拒绝保存。 */
-    private boolean hasExplicitSelection(DynamicStop stop) {
+    /** 受限集合不能靠临时换股道解决排程失败，结果需交给编表入口拒绝保存。 */
+    private boolean isRestricted(DynamicStop stop) {
       List<RouteStop> stops = input.stopsByRoute().getOrDefault(stop.routeId(), List.of());
-      return stop.index() < stops.size()
-          && DynamicStopMatcher.parseDynamicSpec(stops.get(stop.index()))
-              .filter(spec -> !spec.unbounded())
-              .isPresent();
+      return stop.index() < stops.size() && restricted(stops.get(stop.index()), input.graph());
     }
 
     /**

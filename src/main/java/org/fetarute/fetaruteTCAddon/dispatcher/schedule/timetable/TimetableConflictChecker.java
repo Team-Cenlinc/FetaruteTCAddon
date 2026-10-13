@@ -514,16 +514,16 @@ public final class TimetableConflictChecker {
    *
    * @param nodes 可用节点的稳定排序列表；空集合意味着该停靠无合法股道
    * @param orderKey 集合的全序键
-   * @param restricted 相对物理站台组是否有约束
+   * @param restricted 允许集合是否小于该站实际股道数（{@link DynamicStopMatcher#restricts}）
    */
   record PlatformEligibility(List<String> nodes, String orderKey, boolean restricted) {
     PlatformEligibility {
       nodes = List.copyOf(nodes);
     }
 
-    static PlatformEligibility of(List<String> nodes, int groupSize) {
+    static PlatformEligibility of(List<String> nodes, boolean restricted) {
       List<String> sorted = nodes.stream().distinct().sorted().toList();
-      return new PlatformEligibility(sorted, String.join("\n", sorted), sorted.size() < groupSize);
+      return new PlatformEligibility(sorted, String.join("\n", sorted), restricted);
     }
   }
 
@@ -574,28 +574,40 @@ public final class TimetableConflictChecker {
         return Optional.empty();
       }
       List<String> nodes;
+      boolean restricted;
       if (!key.requirements().isEmpty()) {
         Set<String> intersection = new LinkedHashSet<>(group.stream().map(NodeId::value).toList());
         for (Platform requirement : key.requirements()) {
           eligibility(requirement).ifPresent(value -> intersection.retainAll(value.nodes()));
         }
         nodes = List.copyOf(intersection);
+        restricted = nodes.size() < stationTrackCount(group);
       } else if (!key.dynamic()) {
         if (key.nodeId().split(":", -1).length != 4) {
           return Optional.empty();
         }
         nodes = List.of(key.nodeId());
+        restricted = nodes.size() < stationTrackCount(group);
       } else if (key.spec().isPresent()) {
+        // 与运行时选台同一份候选（同样只评估数字顺序前 20 条）；受限与否按完整允许集合判断，不受评估上限影响。
         nodes =
             DynamicStopMatcher.matchingNodes(key.spec().get(), group).stream()
                 .limit(DynamicStopMatcher.MAX_TRACK_CANDIDATES)
                 .map(NodeId::value)
                 .toList();
+        restricted = DynamicStopMatcher.restricts(key.spec().get(), group);
       } else {
         nodes = group.stream().map(NodeId::value).toList();
+        restricted = false;
       }
-      return Optional.of(PlatformEligibility.of(nodes, group.size()));
+      return Optional.of(PlatformEligibility.of(nodes, restricted));
     }
+  }
+
+  /** 站台组里的数字股道数：“受限”与它比较，与 {@link DynamicStopMatcher#restricts} 同一口径。 */
+  private static int stationTrackCount(List<NodeId> group) {
+    return (int)
+        group.stream().filter(node -> DynamicStopMatcher.trackNumber(node).isPresent()).count();
   }
 
   /** 把足迹平移到这趟车的发车时刻落进资源桶。 */
