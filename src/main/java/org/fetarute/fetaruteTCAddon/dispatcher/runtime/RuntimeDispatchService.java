@@ -28832,12 +28832,13 @@ public final class RuntimeDispatchService {
       }
       Optional<DynamicSpec> spec = DynamicStopMatcher.parseDynamicSpec(stop.get());
       Optional<RailGraph> graph = resolveGraph(train.worldId(), clockNow());
+      // 先核对持有：站台离图或走不到时由选台器当场放弃，不能被节点/牌子检查短路成永久等待。
       if (spec.isEmpty()
           || !DynamicStopMatcher.matches(held.get(), spec.get())
           || graph.isEmpty()
-          || !isDynamicCandidateKnown(held.get(), graph.get())
           || !dynamicAllocator.isAvailableForMaterialization(
-              held.get(), trainName, graph.get(), currentNode)) {
+              held.get(), trainName, graph.get(), currentNode)
+          || !isDynamicCandidateKnown(held.get(), graph.get())) {
         return DynamicResolution.blocked(
             "materialized-platform-unavailable", java.util.OptionalInt.of(index));
       }
