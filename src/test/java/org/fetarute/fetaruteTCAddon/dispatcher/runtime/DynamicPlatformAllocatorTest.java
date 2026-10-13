@@ -912,6 +912,80 @@ class DynamicPlatformAllocatorTest {
     assertFalse(allocator.isAbandoned("train1", targetId), "列车移除后放弃记录一并清掉");
   }
 
+  /** 可达性走注入的距离缓存：信号 tick 逐候选查可用时不能每拍重新跑最短路。 */
+  @Test
+  void availabilityReadsReachabilityFromTheInjectedDistanceCache() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    java.util.concurrent.atomic.AtomicInteger lookups =
+        new java.util.concurrent.atomic.AtomicInteger();
+    DynamicPlatformAllocator cached =
+        new DynamicPlatformAllocator(
+            routeDefinitions,
+            occupancyManager,
+            message -> {},
+            null,
+            null,
+            (g, from, to) -> {
+              lookups.incrementAndGet();
+              return java.util.OptionalLong.of(20L);
+            });
+
+    assertTrue(cached.isCandidateAvailable(targetId, "train1", graph, fromId));
+    assertTrue(cached.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertEquals(2, lookups.get(), "图上没有边，结果只能来自距离缓存");
+  }
+
+  /** 缓存里的“不可达”可能是旧图留下的：放弃前按当前图重算确认，确实可达就不放弃。 */
+  @Test
+  void aStaleCachedUnreachableIsConfirmedBeforeAbandoning() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId, edge(from, target));
+    mockEdges(targetId, edge(target, from));
+    DynamicPlatformAllocator cached =
+        new DynamicPlatformAllocator(
+            routeDefinitions,
+            occupancyManager,
+            message -> {},
+            null,
+            null,
+            (g, a, b) -> java.util.OptionalLong.empty());
+
+    assertTrue(cached.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertFalse(cached.isAbandoned("train1", targetId));
+  }
+
+  /** 逐候选查可用只是判断：不记暂时不可用的起始时刻，也不放弃没选过的站台。 */
+  @Test
+  void checkingACandidateHasNoSideEffects() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId targetId = NodeId.of("OP:S:DEST:2");
+    NodeId gone = NodeId.of("OP:S:DEST:3");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode target = mockNode(targetId, new Vector(0, 0, 20), NodeType.STATION);
+    mockEdges(fromId, edge(from, target));
+    mockEdges(targetId, edge(target, from));
+    when(occupancyManager.snapshotClaims())
+        .thenReturn(List.of(claim(OccupancyResource.forNode(targetId), "other")));
+    java.util.concurrent.atomic.AtomicLong nanos = new java.util.concurrent.atomic.AtomicLong();
+    allocator.setClock(nanos::get);
+
+    assertFalse(allocator.isCandidateAvailable(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isCandidateAvailable(gone, "train1", graph, fromId));
+    nanos.addAndGet(DynamicPlatformAllocator.STICKY_LIMIT.plusSeconds(1).toNanos());
+    assertFalse(allocator.isCandidateAvailable(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isAbandoned("train1", targetId));
+    assertFalse(allocator.isAbandoned("train1", gone));
+
+    assertFalse(allocator.isAvailableForMaterialization(targetId, "train1", graph, fromId));
+    assertFalse(allocator.isAbandoned("train1", targetId), "持有时长从第一次按已选站台核对时才开始计");
+  }
+
   private RailNode mockNode(NodeId id, Vector pos, NodeType type) {
     RailNode node = mock(RailNode.class);
     when(node.id()).thenReturn(id);
