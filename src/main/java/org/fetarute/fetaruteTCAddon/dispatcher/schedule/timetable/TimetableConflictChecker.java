@@ -209,6 +209,39 @@ public final class TimetableConflictChecker {
   }
 
   /**
+   * 在现有投影上试放一段站台等待，不修改原资源桶。
+   *
+   * <p>只复制这段等待涉及的站台资源及其窗口内占用，继续使用同一套车辆身份、股道资格、容量与安全裕量判据。 其它时刻或其它股道上的冲突不能替这段等待判失败。
+   */
+  static boolean accommodatesStay(
+      Map<String, Resource> resources,
+      Footprints footprints,
+      Stay waiting,
+      Function<String, String> vehicleOf,
+      int separationSeconds) {
+    Map<String, Resource> candidate = new LinkedHashMap<>();
+    Map<String, Window> windows =
+        projectInto(candidate, footprints, Map.of(), List.of(), List.of(waiting), vehicleOf);
+    mergeOverlapping(candidate, resources, separationSeconds);
+    return scanWindows(candidate, windows, separationSeconds).conflicts().isEmpty();
+  }
+
+  /** 将试放足迹涉及的资源与时窗从基础投影复制过来；只修改试放桶，可用于等待容量和补车成本比较。 */
+  static void mergeOverlapping(
+      Map<String, Resource> candidate, Map<String, Resource> resources, int separationSeconds) {
+    for (Map.Entry<String, Resource> entry : candidate.entrySet()) {
+      Resource existing = resources.get(entry.getKey());
+      if (existing != null) {
+        int from =
+            entry.getValue().occupations().stream().mapToInt(Occupation::from).min().orElse(0);
+        int to =
+            entry.getValue().occupations().stream().mapToInt(Occupation::to).max().orElse(from);
+        entry.getValue().addOverlapping(existing, from, to, separationSeconds);
+      }
+    }
+  }
+
+  /**
    * 只扫各资源上受影响的时段（见 {@link Window}）：报出后到占用在窗内进入的冲突，窗外的冲突不报也不会变。
    *
    * @param resources 资源桶
@@ -1295,6 +1328,26 @@ public final class TimetableConflictChecker {
     /** 桶里的占用，按 {@link #OCCUPATION_ORDER} 有序。{@link OccupationIndex} 拿它来按值精确撤销。 */
     List<Occupation> occupations() {
       return occupations;
+    }
+
+    /** 将等待窗口内仍占用或仍处于安全裕量中的记录复制进试放桶，原桶保持不变。 */
+    private void addOverlapping(Resource existing, int from, int to, int separation) {
+      int margin = Math.max(0, separation);
+      for (Occupation value : existing.occupations) {
+        if ((long) value.from() > (long) to + margin) {
+          break;
+        }
+        if ((long) value.to() + margin >= from) {
+          add(
+              value.code(),
+              value.from(),
+              value.to(),
+              value.direction(),
+              value.owner(),
+              value.vehicle(),
+              value.eligibility());
+        }
+      }
     }
 
     /**

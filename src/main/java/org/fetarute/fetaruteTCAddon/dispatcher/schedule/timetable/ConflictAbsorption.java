@@ -31,7 +31,7 @@ import java.util.UUID;
  *   <li><b>容量 1 的端点</b>：<b>后车要等的地方</b>只有一股道 → 不可吸收，在这里等就是堵死岔线。判不出后车在哪等时
  *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
- *   <li><b>让车点没有容量</b>：后车要等的地方在那一刻已经站满 → 不可吸收。
+ *   <li><b>让车点没有容量</b>：后车在始发等待窗口内无法停在合格股道上 → 不可吸收。
  *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
  *       写得进去的顺推已由让车修复的必等顺推写进表（{@link ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait}
  *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
@@ -63,7 +63,7 @@ public final class ConflictAbsorption {
     STUB_TERMINAL,
     /** 预计等待超过单步上限。 */
     OVER_MAX_WAIT,
-    /** 让车点在那一刻没有空位。 */
+    /** 始发等待窗口内没有合格的空位。 */
     NO_WAITING_CAPACITY,
     /** 顺推超限：后续班次赶不上表定时刻、而表上没有推后它们（推迟超 {@code --max-wait} 或会截断）。 */
     CHAIN_TOO_DEEP
@@ -106,7 +106,7 @@ public final class ConflictAbsorption {
    *
    * @param report 让车修复之后剩下的冲突报告
    * @param timetable 最终表：用来找后车所在的交路与它的起点
-   * @param occupancy 最终表的投影：数让车点在那一刻有几辆车在待命
+   * @param occupancy 最终表及邻表的完整投影：检查整个始发等待窗口，按车辆身份去重
    * @param index 图索引：站台组容量
    * @param separationSeconds 相邻占用裕量
    * @param maxWaitSeconds 单步让车上限
@@ -121,11 +121,36 @@ public final class ConflictAbsorption {
       int separationSeconds,
       int maxWaitSeconds,
       TurnaroundTable turnaround) {
+    return classify(
+        report,
+        timetable,
+        occupancy,
+        index,
+        separationSeconds,
+        maxWaitSeconds,
+        turnaround,
+        Map.of());
+  }
+
+  /**
+   * 带完整 route 档案的分类：编表与发布重检必须使用它。
+   *
+   * @param profiles 与占用投影一致的全部档案，包含车型变体与邻表；保留 DYNAMIC 股道资格和途中停站占用
+   */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Timetable timetable,
+      TimetableOccupancyProjector.Occupancy occupancy,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds,
+      TurnaroundTable turnaround,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
     if (report == null || report.conflicts().isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.of(timetable, occupancy, index, turnaround),
+        Context.of(timetable, occupancy, index, turnaround, profiles),
         report,
         separationSeconds,
         maxWaitSeconds);
@@ -193,12 +218,13 @@ public final class ConflictAbsorption {
       TimetableOccupancyProjector.Occupancy occupancy,
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
-      int maxWaitSeconds) {
+      int maxWaitSeconds,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
     if (conflicts == null || conflicts.isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.of(timetable, occupancy, index, TurnaroundTable.none()).withoutChain(),
+        Context.of(timetable, occupancy, index, TurnaroundTable.none(), profiles).withoutChain(),
         new TimetableConflictChecker.Report(conflicts),
         separationSeconds,
         maxWaitSeconds);
@@ -337,7 +363,13 @@ public final class ConflictAbsorption {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
     }
     // 4. 让车点有没有空位。
-    if (waitingPoint.isPresent() && !context.hasRoom(waitingPoint.get(), conflict.secondFrom())) {
+    if (waitingPoint.isPresent()
+        && !context.hasRoom(
+            waitingPoint.get(),
+            mover,
+            context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
+            wait,
+            separation)) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
     }
     // 5. 连锁：这一等会顶掉后面几班。
@@ -358,12 +390,14 @@ public final class ConflictAbsorption {
   /**
    * 分类需要的只读索引：全部从成品表、投影、图索引与折返表算出来，不含构建过程的中间状态。
    *
+   * @param departureByCode 班次的实际始发时刻，相对计划窗口起点；禁止用远处冲突时刻替代
+   * @param waitingCapacity 整段等待的物理股道、同车与邻表占用检查
    * @param chainAfter 班次 code → 从它起到交路末班，每班的 {@code [发车（相对计划窗口起点）, 发车到可再发车的秒数]}
    */
   private record Context(
       Map<String, String> waitingPointByCode,
-      Map<String, List<int[]>> staysByGroup,
-      Map<String, Integer> capacityByGroup,
+      Map<String, Integer> departureByCode,
+      TimetableWaitingCapacity waitingCapacity,
       Set<String> stubGroups,
       Map<String, List<int[]>> chainAfter) {
 
@@ -371,17 +405,22 @@ public final class ConflictAbsorption {
         Timetable timetable,
         TimetableOccupancyProjector.Occupancy occupancy,
         TimetableConflictChecker.GraphIndex index,
-        TurnaroundTable turnaround) {
+        TurnaroundTable turnaround,
+        Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
       TurnaroundTable turnarounds = turnaround == null ? TurnaroundTable.none() : turnaround;
-      Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
       Set<String> stubs = ConflictAbsorption.stubGroups(index);
 
       Map<String, String> waitingPoint = new HashMap<>();
+      Map<String, Integer> departures = new HashMap<>();
       Map<String, List<int[]>> chain = new HashMap<>();
       if (timetable != null) {
         Map<UUID, TimetableTrip> tripById = new HashMap<>();
         for (TimetableTrip trip : timetable.trips()) {
           tripById.put(trip.id(), trip);
+          departures.put(
+              trip.tripCode(),
+              TimetableOccupancyProjector.relativeDeparture(
+                  timetable, trip, timetable.serviceStartSecondOfDay()));
           timetable
               .routePlan(trip.routeId())
               .ifPresent(
@@ -430,17 +469,12 @@ public final class ConflictAbsorption {
         }
       }
 
-      Map<String, List<int[]>> stays = new HashMap<>();
-      if (occupancy != null) {
-        for (TimetableConflictChecker.Stay stay : occupancy.stays()) {
-          if (stay.platform() != null && !stay.platform().group().isBlank()) {
-            stays
-                .computeIfAbsent(stay.platform().group(), key -> new ArrayList<>())
-                .add(new int[] {stay.from(), stay.to()});
-          }
-        }
-      }
-      return new Context(waitingPoint, stays, capacity, stubs, chain);
+      return new Context(
+          waitingPoint,
+          departures,
+          TimetableWaitingCapacity.of(timetable, occupancy, index, profiles),
+          stubs,
+          chain);
     }
 
     /**
@@ -450,12 +484,11 @@ public final class ConflictAbsorption {
      */
     static Context ofWaitingPoints(
         Map<String, String> waitingPointByCode, TimetableConflictChecker.GraphIndex index) {
-      Map<String, Integer> capacity = index == null ? Map.of() : index.platformCapacity();
       Set<String> stubs = ConflictAbsorption.stubGroups(index);
       return new Context(
           waitingPointByCode == null ? Map.of() : Map.copyOf(waitingPointByCode),
           Map.of(),
-          capacity,
+          TimetableWaitingCapacity.of(null, null, index, Map.of()),
           stubs,
           Map.of());
     }
@@ -482,23 +515,13 @@ public final class ConflictAbsorption {
 
     /** 同一份上下文，不带交路链：顺推判据恒不成立。 */
     Context withoutChain() {
-      return new Context(waitingPointByCode, staysByGroup, capacityByGroup, stubGroups, Map.of());
+      return new Context(
+          waitingPointByCode, departureByCode, waitingCapacity, stubGroups, Map.of());
     }
 
-    /** 让车点在这一刻还有没有空位：容量减去那一刻已经在待命的车。 */
-    boolean hasRoom(String group, int atSecond) {
-      if (group == null || group.isBlank()) {
-        // 车库：容量不限，车在库里多待一会儿不占别人的地方。
-        return true;
-      }
-      int capacity = capacityByGroup.getOrDefault(group, 1);
-      int occupied = 0;
-      for (int[] window : staysByGroup.getOrDefault(group, List.of())) {
-        if (window[0] <= atSecond && atSecond < window[1]) {
-          occupied++;
-        }
-      }
-      return capacity - occupied >= 1;
+    /** 始发等待使用完整资源模型；远处冲突时刻不用于始发站容量判定。 */
+    boolean hasRoom(String group, String mover, int atSecond, int waitSeconds, int separation) {
+      return waitingCapacity.hasRoom(mover, group, atSecond, waitSeconds, separation);
     }
 
     /**

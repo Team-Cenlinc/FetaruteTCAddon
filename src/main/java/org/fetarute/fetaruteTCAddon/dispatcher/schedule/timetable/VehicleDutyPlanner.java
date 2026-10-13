@@ -105,6 +105,36 @@ public final class VehicleDutyPlanner {
       Limits limits,
       Map<String, NavigableSet<Integer>> nextSlotByOrigin,
       Map<UUID, Set<UUID>> preferredFeeders) {
+    return plan(
+        timetableId,
+        trips,
+        legs,
+        limits,
+        nextSlotByOrigin,
+        preferredFeeders,
+        (trip, candidates, ignored) -> candidates.get(0));
+  }
+
+  /** 出入库候选已满足车型、车库偏好与交路硬约束；选择器只能返回其中一条，可记录实际分配。 */
+  @FunctionalInterface
+  public interface DepotLegSelector {
+    Leg selectCreate(PlannedTrip trip, List<Leg> candidates, Limits limits);
+
+    /** 回库开始时刻已包含末班走行与折返；默认保持合格候选的确定性顺序。 */
+    default Leg selectReturn(PlannedTrip trip, int returnAt, List<Leg> candidates) {
+      return candidates.get(0);
+    }
+  }
+
+  /** 带出入库资源偏好的派车；旧调用保持确定性的走行最短顺序。 */
+  public static Result plan(
+      UUID timetableId,
+      List<PlannedTrip> trips,
+      Legs legs,
+      Limits limits,
+      Map<String, NavigableSet<Integer>> nextSlotByOrigin,
+      Map<UUID, Set<UUID>> preferredFeeders,
+      DepotLegSelector depotSelector) {
     Objects.requireNonNull(timetableId, "timetableId");
     Objects.requireNonNull(limits, "limits");
     Map<UUID, Set<UUID>> feedersByRoute = preferredFeeders == null ? Map.of() : preferredFeeders;
@@ -148,12 +178,13 @@ public final class VehicleDutyPlanner {
                 access,
                 limits,
                 minTripDuration,
-                minClosingTail);
+                minClosingTail,
+                depotSelector);
         if (opening.blocker() != null) {
           unassigned.add(new UnassignedTrip(trip.tripId(), trip.tripCode(), opening.blocker()));
           continue;
         }
-        host = open(dutySequence, trip, opening.consist(), access, limits);
+        host = open(dutySequence, trip, opening.consist(), opening.create(), limits);
         open.add(host);
         dutySequence++;
       }
@@ -166,7 +197,7 @@ public final class VehicleDutyPlanner {
       VehicleDuty.CloseReason reason =
           closeReasonAfter(host, access, limits, minTripDuration, minClosingTail, nextSlotByOrigin);
       if (reason != null) {
-        host.seal(reason);
+        host.seal(reason, access, limits, depotSelector);
         closed.add(host);
         open.remove(host);
       }
@@ -192,14 +223,17 @@ public final class VehicleDutyPlanner {
       duty.seal(
           trimmed || duty.readyAtSeconds <= lastDeparture
               ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT
-              : VehicleDuty.CloseReason.HORIZON_END);
+              : VehicleDuty.CloseReason.HORIZON_END,
+          access,
+          limits,
+          depotSelector);
       closed.add(duty);
     }
     open.clear();
 
     List<VehicleDuty> built = new ArrayList<>(closed.size());
     for (OpenDuty duty : closed) {
-      built.add(duty.toDuty(timetableId, access, limits));
+      built.add(duty.toDuty(timetableId, limits));
     }
     built.sort(
         Comparator.comparingInt(VehicleDuty::plannedStartSecondOfDay)
@@ -286,7 +320,7 @@ public final class VehicleDutyPlanner {
       // 否则这辆车会被困在那里。
       int tail =
           closable
-              ? access.closingTail(trip, duty.consist, limits)
+              ? access.closingTail(trip, duty.consist, limits, Optional.of(duty.startDepot))
               : limits.turnaround().minimumSeconds() + minTripDuration + minClosingTail;
       int endIfAccepted = trip.departureSeconds() + trip.durationFor(duty.consist) + tail;
       if (endIfAccepted - duty.startSeconds > limits.maxDutyDurationSeconds()) {
@@ -333,7 +367,8 @@ public final class VehicleDutyPlanner {
    * @param consist 新交路的车型；不区分车型时为空
    * @param blocker 开不出来的原因；开得出来时为 null
    */
-  private record Opening(Optional<String> consist, UnassignedReason blocker) {}
+  private record Opening(
+      Optional<String> consist, UnassignedReason blocker, Optional<Leg> create) {}
 
   /**
    * 这一班允许的车型，按班次份额欠得多少排先后；不区分车型时只有一个"空车型"。
@@ -372,22 +407,58 @@ public final class VehicleDutyPlanner {
       Legs access,
       Limits limits,
       int minTripDuration,
-      int minClosingTail) {
+      int minClosingTail,
+      DepotLegSelector selector) {
     UnassignedReason first = null;
     boolean onlyMissingCreate = true;
     for (Optional<String> consist : ranked) {
-      UnassignedReason blocker =
-          openBlocker(trip, consist, access, limits, minTripDuration, minClosingTail);
-      if (blocker == null) {
-        return new Opening(consist, null);
+      if (trip.startsAtDepot()) {
+        UnassignedReason blocker =
+            openBlocker(
+                trip, consist, access, limits, minTripDuration, minClosingTail, Optional.empty());
+        if (blocker == null) {
+          return new Opening(consist, null, Optional.empty());
+        }
+        if (first == null) {
+          first = blocker;
+        }
+        onlyMissingCreate = false;
+        continue;
       }
-      if (first == null) {
-        first = blocker;
+      List<Leg> feasible = new ArrayList<>();
+      for (Leg leg : access.createCandidates().getOrDefault(trip.originNodeId(), List.of())) {
+        if (!leg.consist().equals(consist)) {
+          continue;
+        }
+        UnassignedReason blocker =
+            openBlocker(
+                trip, consist, access, limits, minTripDuration, minClosingTail, Optional.of(leg));
+        if (blocker == null) {
+          feasible.add(leg);
+        } else {
+          if (first == null) {
+            first = blocker;
+          }
+          onlyMissingCreate = false;
+        }
       }
-      onlyMissingCreate &= blocker == UnassignedReason.NO_CREATE_ACCESS;
+      if (!feasible.isEmpty()) {
+        List<Leg> declared = feasible.stream().filter(Leg::declared).toList();
+        List<Leg> candidates = declared.isEmpty() ? List.copyOf(feasible) : declared;
+        Leg chosen = selector.selectCreate(trip, candidates, limits);
+        if (!candidates.contains(chosen)) {
+          throw new IllegalArgumentException("出库选择器返回了不合格候选");
+        }
+        return new Opening(consist, null, Optional.of(chosen));
+      }
     }
     boolean mismatch = consistBlocked && onlyMissingCreate && !trip.consists().isEmpty();
-    return new Opening(Optional.empty(), mismatch ? UnassignedReason.CONSIST_MISMATCH : first);
+    return new Opening(
+        Optional.empty(),
+        mismatch
+            ? UnassignedReason.CONSIST_MISMATCH
+            : first == null ? UnassignedReason.NO_CREATE_ACCESS : first,
+        Optional.empty());
   }
 
   /**
@@ -401,12 +472,12 @@ public final class VehicleDutyPlanner {
       Legs access,
       Limits limits,
       int minTripDuration,
-      int minClosingTail) {
+      int minClosingTail,
+      Optional<Leg> create) {
     int start;
     if (trip.startsAtDepot()) {
       start = trip.departureSeconds();
     } else {
-      Optional<Leg> create = access.createLegAt(trip.originNodeId(), consist);
       if (create.isEmpty()) {
         return UnassignedReason.NO_CREATE_ACCESS;
       }
@@ -415,7 +486,13 @@ public final class VehicleDutyPlanner {
     boolean closable = access.closable(trip, consist);
     int tail =
         closable
-            ? access.closingTail(trip, consist, limits)
+            ? access.closingTail(
+                trip,
+                consist,
+                limits,
+                trip.startsAtDepot()
+                    ? Optional.of(trip.originNodeId())
+                    : create.map(Leg::depotNodeId))
             : limits.turnaround().minimumSeconds() + minTripDuration + minClosingTail;
     int end = trip.departureSeconds() + trip.durationFor(consist) + tail;
     if (end - start > limits.maxDutyDurationSeconds()) {
@@ -429,7 +506,11 @@ public final class VehicleDutyPlanner {
 
   /** 在这一班上开一个新 duty。前提是 {@link #openBlocker} 对这个车型返回 null。 */
   private static OpenDuty open(
-      int sequence, PlannedTrip trip, Optional<String> consist, Legs access, Limits limits) {
+      int sequence,
+      PlannedTrip trip,
+      Optional<String> consist,
+      Optional<Leg> create,
+      Limits limits) {
     if (trip.startsAtDepot()) {
       return new OpenDuty(
           sequence,
@@ -439,7 +520,7 @@ public final class VehicleDutyPlanner {
           trip.pool(),
           consist);
     }
-    Leg leg = access.createLegAt(trip.originNodeId(), consist).orElseThrow();
+    Leg leg = create.orElseThrow();
     return new OpenDuty(
         sequence,
         leg.depotNodeId(),
@@ -454,7 +535,7 @@ public final class VehicleDutyPlanner {
    *
    * <p>就绪时间取 <b>CREATE 线路自己</b>终到站的 dwell——车是按那条线路到的首站，能不能走由那条线路的停靠配置决定。
    */
-  private static int openingStart(PlannedTrip trip, Leg create, Limits limits) {
+  static int openingStart(PlannedTrip trip, Leg create, Limits limits) {
     return trip.departureSeconds()
         - create.runSeconds()
         - limits.turnaround().secondsFor(create.routeId());
@@ -552,6 +633,7 @@ public final class VehicleDutyPlanner {
     private int endSeconds;
     private int readyAtSeconds;
     private VehicleDuty.CloseReason closeReason;
+    private Optional<Leg> closingLeg = Optional.empty();
 
     private OpenDuty(
         int sequence,
@@ -610,11 +692,37 @@ public final class VehicleDutyPlanner {
       return trips.size();
     }
 
-    private void seal(VehicleDuty.CloseReason reason) {
+    /** 封口时立即选定并记账回库走行，后续补车和回库能看到这条真实进路的压力。 */
+    private void seal(
+        VehicleDuty.CloseReason reason, Legs access, Limits limits, DepotLegSelector selector) {
+      PlannedTrip last = lastTrip();
+      if (!last.endsAtDepot()) {
+        int returnAt =
+            last.departureSeconds()
+                + lastDuration()
+                + limits.turnaround().secondsFor(last.routeId());
+        List<Leg> candidates =
+            access
+                .returnCandidatesAt(last.terminalNodeId(), Optional.of(startDepot), consist)
+                .stream()
+                .filter(
+                    leg ->
+                        (long) returnAt + leg.runSeconds() - startSeconds
+                            <= limits.maxDutyDurationSeconds())
+                .toList();
+        if (candidates.isEmpty()) {
+          throw new IllegalStateException("duty 没有符合硬时长约束的回库线路: " + last.terminalNodeId());
+        }
+        Leg selected = selector.selectReturn(last, returnAt, candidates);
+        if (!candidates.contains(selected)) {
+          throw new IllegalArgumentException("回库选择器返回了不合格候选");
+        }
+        closingLeg = Optional.of(selected);
+      }
       this.closeReason = reason;
     }
 
-    private VehicleDuty toDuty(UUID timetableId, Legs access, Limits limits) {
+    private VehicleDuty toDuty(UUID timetableId, Limits limits) {
       PlannedTrip last = lastTrip();
       int arrival = last.departureSeconds() + lastDuration();
       String endDepot;
@@ -627,12 +735,7 @@ public final class VehicleDutyPlanner {
         returnAt = arrival;
         end = arrival;
       } else {
-        // 回自己出库的那个库：startDepot 是这条交路的出库点。
-        Leg leg =
-            access
-                .returnLegAt(last.terminalNodeId(), startDepot, consist)
-                .orElseThrow(
-                    () -> new IllegalStateException("duty 停在没有回库线路的终点: " + last.terminalNodeId()));
+        Leg leg = closingLeg.orElseThrow();
         endDepot = leg.depotNodeId();
         returnRouteId = Optional.of(leg.routeId());
         returnAt = arrival + limits.turnaround().secondsFor(last.routeId());
@@ -1027,29 +1130,30 @@ public final class VehicleDutyPlanner {
     /** 带车库偏好、按车型的回库段：只认按这个车型算的变体（不区分车型时只认不区分车型的段），其余同 {@link #returnLegAt(String, String)}。 */
     public Optional<Leg> returnLegAt(
         String stationNodeId, String preferredDepotNodeId, Optional<String> consist) {
-      List<Leg> candidates = returnCandidates.get(stationNodeId);
-      if (candidates == null) {
-        return Optional.empty();
-      }
-      return pickReturn(
-          candidates.stream().filter(leg -> leg.consist().equals(consist)).toList(),
-          preferredDepotNodeId);
+      return returnCandidatesAt(stationNodeId, Optional.ofNullable(preferredDepotNodeId), consist)
+          .stream()
+          .findFirst();
     }
 
-    private static Optional<Leg> pickReturn(List<Leg> candidates, String preferredDepotNodeId) {
-      if (candidates == null || candidates.isEmpty()) {
-        return Optional.empty();
-      }
-      String preferredGroup = depotGroupOf(preferredDepotNodeId);
+    /** 先保留车型，再保留原库候选及显式指定；资源选择不能越过这些运营约束。 */
+    private List<Leg> returnCandidatesAt(
+        String stationNodeId, Optional<String> preferredDepot, Optional<String> consist) {
+      List<Leg> candidates =
+          returnCandidates.getOrDefault(stationNodeId, List.of()).stream()
+              .filter(leg -> leg.consist().equals(consist))
+              .toList();
+      String preferredGroup = preferredDepot.map(Legs::depotGroupOf).orElse("");
       if (!preferredGroup.isEmpty()) {
-        for (Leg leg : candidates) {
-          if (depotGroupOf(leg.depotNodeId()).equals(preferredGroup)) {
-            return Optional.of(leg);
-          }
+        List<Leg> home =
+            candidates.stream()
+                .filter(leg -> depotGroupOf(leg.depotNodeId()).equals(preferredGroup))
+                .toList();
+        if (!home.isEmpty()) {
+          candidates = home;
         }
       }
-      // 候选已按"显式指定 > 走行最短"排好序，第一条就是无偏好时的答案。
-      return Optional.of(candidates.get(0));
+      List<Leg> declared = candidates.stream().filter(Leg::declared).toList();
+      return declared.isEmpty() ? candidates : declared;
     }
 
     /** 车库组：{@code 运营商:D:库名}，解析不出时用节点 id 本身，保证同一个库永远同一个键。 */
@@ -1066,13 +1170,19 @@ public final class VehicleDutyPlanner {
       return trip.endsAtDepot() || returnLegAt(trip.terminalNodeId(), null, consist).isPresent();
     }
 
-    /** 这个车型跑完这一班到回到车库还要多久（含折返）。前提是 {@link #closable(PlannedTrip, Optional)}。 */
-    int closingTail(PlannedTrip trip, Optional<String> consist, Limits limits) {
+    /** 硬时长检查与封口使用相同的车库偏好及候选约束；额外压力择路仍需满足总时长上限。 */
+    int closingTail(
+        PlannedTrip trip,
+        Optional<String> consist,
+        Limits limits,
+        Optional<String> preferredDepot) {
       if (trip.endsAtDepot()) {
         return 0;
       }
-      Leg leg = returnLegAt(trip.terminalNodeId(), null, consist).orElse(null);
-      return leg == null ? 0 : limits.turnaround().secondsFor(trip.routeId()) + leg.runSeconds();
+      return returnCandidatesAt(trip.terminalNodeId(), preferredDepot, consist).stream()
+          .findFirst()
+          .map(leg -> limits.turnaround().secondsFor(trip.routeId()) + leg.runSeconds())
+          .orElse(0);
     }
 
     /**

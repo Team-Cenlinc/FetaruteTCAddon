@@ -121,7 +121,7 @@ class ConflictAbsorptionTest {
   @Test
   void roomAtTheWaitingPointMakesItAbsorbable() {
     TimetableConflictChecker.Platform platform =
-        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+        new TimetableConflictChecker.Platform(WIDE + ":2", WIDE, false);
     TimetableOccupancyProjector.Occupancy occupancy =
         new TimetableOccupancyProjector.Occupancy(
             List.of(),
@@ -137,6 +137,176 @@ class ConflictAbsorptionTest {
             MAX_WAIT);
 
     assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(0).verdict());
+  }
+
+  /** 整趟晚发在始发站等待：远处冲突发生时始发站已满，不影响更早的晚发窗口。 */
+  @Test
+  void aFullOriginAtTheRemoteConflictTimeDoesNotRejectAnEarlierDepartureHold() {
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("D001", platform, 900, 1200),
+                new TimetableConflictChecker.Stay("D002", platform, 950, 1200)));
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 980, 1000)),
+                timetableWithOriginAt(WIDE),
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(10, residual.waitSeconds());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 晚发窗口开始时有位，但其他车辆在窗口内到站占满，不能继续停在这里等待。 */
+  @Test
+  void capacityMustRemainAvailableThroughoutTheDepartureHold() {
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("D001", platform, 10, 100),
+                new TimetableConflictChecker.Stay("D002", platform, 20, 100)));
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                timetableWithOriginAt(WIDE),
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(40, residual.waitSeconds());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 旧冲突的安全裕量恰在晚发窗口开始时结束，不能替后车判定无处等待。 */
+  @Test
+  void anEndedConflictDoesNotRejectALaterDepartureHold() {
+    Timetable base = TimetableTestFixtures.singleTripTimetable("RA-001", WIDE + ":1");
+    TimetableTrip original = base.trips().get(0);
+    TimetableTrip moved =
+        new TimetableTrip(
+            original.id(),
+            original.timetableId(),
+            original.routeId(),
+            original.sequence(),
+            original.tripCode(),
+            100,
+            original.dutyId());
+    Timetable table = base.withTripsAndDuties(List.of(moved), List.of());
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    var occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("A", platform, 0, 85),
+                new TimetableConflictChecker.Stay("B", platform, 30, 85)));
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 1010, 1000)),
+                table,
+                occupancy,
+                INDEX,
+                15,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(25, residual.waitSeconds());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 同一辆车的连续到发记录可能重叠，但只能占用一个等待位置。 */
+  @Test
+  void overlappingStaysOfOneVehicleOnlyConsumeOnePlace() {
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":2", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("D001", platform, 0, 100),
+                new TimetableConflictChecker.Stay("D001", platform, 0, 200)));
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                timetableWithOriginAt(WIDE),
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 发车班次与它所属 duty 的待命是同一辆车，延长这段待命不能再占一个位置。 */
+  @Test
+  void aVehicleDoesNotNeedAnExtraPlaceToExtendItsOwnStay() {
+    Timetable base = TimetableTestFixtures.singleTripTimetable("RA-001", WIDE + ":1", "D001");
+    Timetable table =
+        base.withTripsAndDuties(
+            List.of(base.trips().get(0).withDuty(base.duties().get(0).id())), base.duties());
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("D001", platform, 0, 100),
+                new TimetableConflictChecker.Stay(
+                    "D002",
+                    new TimetableConflictChecker.Platform(WIDE + ":2", WIDE, false),
+                    0,
+                    100)));
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                table,
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 总容量有空位不代表指定股道有空位：固定始发股道被另一辆车占着时不能在那里晚发。 */
+  @Test
+  void spareCapacityOnAnotherTrackDoesNotFreeTheFixedOriginTrack() {
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false);
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(), List.of(new TimetableConflictChecker.Stay("D001", platform, 0, 100)));
+
+    ConflictAbsorption.Residual residual =
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                timetableWithOriginAt(WIDE),
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
   /** 同一份输入分两次，判决与顺序都必须一致：build 与 publish 重检各算一遍，不一致就是 bug。 */
@@ -316,6 +486,121 @@ class ConflictAbsorptionTest {
   private static ConflictAbsorption.Residual only(TimetableConflictChecker.Conflict conflict) {
     return ConflictAbsorption.classify(report(conflict), null, null, INDEX, SEPARATION, MAX_WAIT)
         .get(0);
+  }
+
+  /** DYNAMIC 占位首股道已占用时，声明允许的第二股道仍可用于始发等待。 */
+  @Test
+  void dynamicOriginCanWaitOnAnotherEligibleTrack() {
+    Timetable table = timetableWithOriginAt(WIDE);
+    java.util.UUID route = table.trips().get(0).routeId();
+    TimetableConflictChecker.RouteProfile profile =
+        new TimetableConflictChecker.RouteProfile(
+            route,
+            "RA",
+            List.of(),
+            List.of(),
+            List.of(new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, true)));
+    TimetableOccupancyProjector.Occupancy occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(new TimetableConflictChecker.Movement("RA-001", route, 0)),
+            List.of(
+                new TimetableConflictChecker.Stay(
+                    "OTHER",
+                    new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false),
+                    0,
+                    100)));
+
+    assertEquals(
+        ConflictAbsorption.Verdict.ABSORBABLE,
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                table,
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT,
+                TurnaroundTable.none(),
+                Map.of(route, profile))
+            .get(0)
+            .verdict());
+  }
+
+  /** 站台组三股道不代表 DYNAMIC 有三股道可用；声明只允许的两条已满时必须拒绝等待。 */
+  @Test
+  void dynamicWaitingRetainsItsDeclaredTrackSubset() {
+    Timetable table = timetableWithOriginAt(WIDE);
+    java.util.UUID route = table.trips().get(0).routeId();
+    var graph =
+        TimetableTestFixtures.graph(
+            Map.of(
+                WIDE + ":1",
+                org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.STATION,
+                WIDE + ":2",
+                org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.STATION,
+                WIDE + ":3",
+                org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType.STATION),
+            List.of());
+    var spec =
+        org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.parseDynamicSpec(
+            "DYNAMIC:OP:S:WIDE:[1,2]");
+    var platform = new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, true, spec);
+    var profile =
+        new TimetableConflictChecker.RouteProfile(
+            route, "RA", List.of(), List.of(), List.of(platform));
+    var occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(new TimetableConflictChecker.Movement("RA-001", route, 0)),
+            List.of(
+                new TimetableConflictChecker.Stay(
+                    "OTHER1",
+                    new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false),
+                    0,
+                    100),
+                new TimetableConflictChecker.Stay(
+                    "OTHER2",
+                    new TimetableConflictChecker.Platform(WIDE + ":2", WIDE, false),
+                    0,
+                    100)));
+
+    assertEquals(
+        ConflictAbsorption.Verdict.NO_WAITING_CAPACITY,
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                table,
+                occupancy,
+                TimetableConflictChecker.GraphIndex.of(graph),
+                SEPARATION,
+                MAX_WAIT,
+                TurnaroundTable.none(),
+                Map.of(route, profile))
+            .get(0)
+            .verdict());
+  }
+
+  /** 邻表 code 与本表相同也不是同车；邻表占位不能被本车豁免。 */
+  @Test
+  void neighbourWithTheSameTripCodeStillOccupiesTheOrigin() {
+    var occupancy =
+        new TimetableOccupancyProjector.Occupancy(
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay(
+                    "RA-001",
+                    new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false),
+                    0,
+                    100,
+                    Optional.of("OTHER-TIMETABLE"))));
+    assertEquals(
+        ConflictAbsorption.Verdict.NO_WAITING_CAPACITY,
+        ConflictAbsorption.classify(
+                report(conflictOn("edge:REMOTE~NEXT", 60, 50)),
+                timetableWithOriginAt(WIDE),
+                occupancy,
+                INDEX,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0)
+            .verdict());
   }
 
   private static TimetableConflictChecker.Report report(

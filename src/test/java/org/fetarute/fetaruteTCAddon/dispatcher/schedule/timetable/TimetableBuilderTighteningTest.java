@@ -79,7 +79,7 @@ class TimetableBuilderTighteningTest {
     // 回退提示只列仍被放宽的组：最小的组间隔已不能代表"放宽到多少"。
     String fallback =
         result.warnings().stream()
-            .filter(text -> text.contains("已回退到最小可行间隔"))
+            .filter(text -> text.contains("已回退到搜索找到的可行间隔"))
             .findFirst()
             .orElseThrow();
     assertTrue(fallback.contains("tight 120→" + effective.get("tight") + "s"), fallback);

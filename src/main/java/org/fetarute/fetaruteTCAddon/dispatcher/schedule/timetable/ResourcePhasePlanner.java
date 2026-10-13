@@ -42,6 +42,9 @@ import java.util.UUID;
  */
 public final class ResourcePhasePlanner {
 
+  /** 每次间隔尝试至多再完成多少个相位候选；这是搜索预算，不是物理可行性证明。 */
+  public static final int COMPLETION_CANDIDATE_LIMIT = 24;
+
   /** 扫描步长。 */
   public static final int SCAN_STEP_SECONDS = 10;
 
@@ -57,6 +60,103 @@ public final class ResourcePhasePlanner {
   static final int MAX_CYCLES = 4 * CYCLES;
 
   private ResourcePhasePlanner() {}
+
+  /**
+   * 完成交路后的评分：硬冲突优先，其次取消数、发车偏移平方和、总冲突与等待量。
+   *
+   * <p>周期模板不含按需求补车和待命，不能替代这个判据。偏移平方和惩罚集中延后，避免只把平均频率排好。
+   */
+  public record CompletionScore(
+      int unabsorbable, int dropped, long displacement, int conflicts, long waitSeconds)
+      implements Comparable<CompletionScore> {
+    @Override
+    public int compareTo(CompletionScore other) {
+      int value = Integer.compare(unabsorbable, other.unabsorbable);
+      if (value == 0) {
+        value = Integer.compare(dropped, other.dropped);
+      }
+      if (value == 0) {
+        value = Long.compare(displacement, other.displacement);
+      }
+      if (value == 0) {
+        value = Integer.compare(conflicts, other.conflicts);
+      }
+      return value == 0 ? Long.compare(waitSeconds, other.waitSeconds) : value;
+    }
+  }
+
+  /** 按完整派车、出入库与等待投影重选相位；评分器必须返回对应相位实际构建的结果。 */
+  public static PhasePlanner.Phases refineCompleted(
+      PhasePlanner.Phases phases,
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervals,
+      int maxIdleSeconds,
+      Set<UUID> inPlaceTurnbackRoutes,
+      java.util.function.Function<PhasePlanner.Phases, CompletionScore> complete) {
+    List<Direction> order = orderOf(groups, phases, intervals);
+    Map<String, Integer> delta = new LinkedHashMap<>(phases.deltaByDirection());
+    PhasePlanner.Phases bestPhases = phases;
+    CompletionScore best = complete.apply(phases);
+    int evaluated = 0;
+    List<String> notes = new ArrayList<>(phases.resourceNotes());
+    for (Unit unit : unitsOf(order, groups, phases.connections(), inPlaceTurnbackRoutes)) {
+      int limit = unit.reverse() ? Math.min(maxIdleSeconds, unit.interval()) : unit.interval();
+      int start = delta.getOrDefault(unit.keys().get(0), 0);
+      Set<Integer> candidates = new java.util.LinkedHashSet<>();
+      candidates.add(start);
+      candidates.add(0);
+      for (int fraction = 1; fraction < 5; fraction++) {
+        candidates.add(
+            Math.floorMod((long) start + (long) fraction * unit.interval() / 5, unit.interval()));
+      }
+      int chosen = start;
+      for (int candidate : candidates) {
+        if (candidate == start || candidate < 0 || candidate > limit) {
+          continue;
+        }
+        if (evaluated >= COMPLETION_CANDIDATE_LIMIT) {
+          break;
+        }
+        Map<String, Integer> trial = new LinkedHashMap<>(delta);
+        for (String key : unit.keys()) {
+          trial.put(key, candidate);
+        }
+        PhasePlanner.Phases trialPhases = withDelta(phases, trial, notes);
+        CompletionScore score = complete.apply(trialPhases);
+        evaluated++;
+        // 禁止通过额外取消班次换取更低冲突数；并列保留原锚定相位。
+        if (score.dropped() <= best.dropped() && score.compareTo(best) < 0) {
+          best = score;
+          chosen = candidate;
+          bestPhases = trialPhases;
+        }
+      }
+      for (String key : unit.keys()) {
+        delta.put(key, chosen);
+      }
+      if (chosen != start) {
+        notes.add(
+            String.join(" + ", unit.keys())
+                + " 完整交路相位 "
+                + chosen
+                + "s（让不掉的 "
+                + best.unabsorbable()
+                + " 处）");
+      }
+    }
+    return bestPhases.equals(phases) ? phases : withDelta(phases, delta, notes);
+  }
+
+  private static PhasePlanner.Phases withDelta(
+      PhasePlanner.Phases base, Map<String, Integer> delta, List<String> notes) {
+    return new PhasePlanner.Phases(
+        base.phaseByDirection(),
+        base.offsetByGroup(),
+        delta,
+        base.notes(),
+        notes,
+        base.connections());
+  }
 
   /**
    * 评分：越小越好，字典序。

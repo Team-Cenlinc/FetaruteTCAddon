@@ -28,6 +28,75 @@ class ResourcePhasePlannerTest {
             List.of(A, B, C), new int[] {100, 100}, new double[] {10.0, 10.0}));
   }
 
+  /** CREATE 按需求出现，周期模板看不到它；完整资源评分必须能改变运营相位来避开这趟出库。 */
+  @Test
+  void completedScoringIncludesDemandCreateMovements() {
+    Fixture fixture = opposingPair(300);
+    String direction = fixture.groups().get(0).directions().get(0).key();
+    UUID route = fixture.groups().get(0).directions().get(0).routeIds().get(0);
+    PhasePlanner.Phases initial =
+        new PhasePlanner.Phases(Map.of(direction, 0), Map.of(), List.of());
+    var graph = index();
+    java.util.function.Function<PhasePlanner.Phases, ResourcePhasePlanner.CompletionScore>
+        completion =
+            candidate -> {
+              var report =
+                  TimetableConflictChecker.check(
+                      graph,
+                      fixture.profiles(),
+                      List.of(
+                          new TimetableConflictChecker.Movement("DEMAND-CREATE", route, 0),
+                          new TimetableConflictChecker.Movement(
+                              "OPERATION", route, candidate.effectivePhaseOf(direction))),
+                      List.of(),
+                      SEPARATION);
+              return new ResourcePhasePlanner.CompletionScore(
+                  report.conflicts().size(), 0, 0, report.conflicts().size(), 0);
+            };
+
+    var chosen =
+        ResourcePhasePlanner.refineCompleted(
+            initial,
+            fixture.groups(),
+            fixture.intervals(),
+            300,
+            java.util.Set.of(route),
+            completion);
+
+    assertTrue(completion.apply(initial).unabsorbable() > 0);
+    assertEquals(0, completion.apply(chosen).unabsorbable());
+    assertTrue(chosen.effectivePhaseOf(direction) > 0);
+    assertEquals(
+        chosen.deltaByDirection().get(direction),
+        chosen.deltaByDirection().get(fixture.groups().get(0).directions().get(0).reverseKey()),
+        "原地折返对必须保持整体平移，不能拆开接续");
+  }
+
+  /** 更少冲突但需要额外取消的候选不能胜出；评分调用也受完整候选预算限制。 */
+  @Test
+  void completedSearchDoesNotTradeExtraCancellationsForFewerConflicts() {
+    Fixture fixture = opposingPair(300);
+    java.util.concurrent.atomic.AtomicInteger calls =
+        new java.util.concurrent.atomic.AtomicInteger();
+    var chosen =
+        ResourcePhasePlanner.refineCompleted(
+            fixture.phases(),
+            fixture.groups(),
+            fixture.intervals(),
+            300,
+            java.util.Set.of(),
+            candidate -> {
+              calls.incrementAndGet();
+              boolean original =
+                  candidate.deltaByDirection().equals(fixture.phases().deltaByDirection());
+              return new ResourcePhasePlanner.CompletionScore(
+                  original ? 10 : 0, original ? 0 : 1, 0, original ? 10 : 0, 0);
+            });
+
+    assertEquals(fixture.phases(), chosen);
+    assertTrue(calls.get() <= ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1);
+  }
+
   /** 没有可动的东西时原样返回：只有一个方向就没有"相对相位"可谈。 */
   @Test
   void aSingleFlowIsLeftAlone() {

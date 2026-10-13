@@ -415,13 +415,13 @@ class TimetableBuilderTest {
   }
 
   /**
-   * 终点没有回库线路的班次不会被硬排：取消并逐条报告，份额按保留的班次重算。
+   * 完整相位可以避免无库终点的窗口末尾孤立班次，保持班次数且所有 duty 都能回库。
    *
    * <p>RA: A→C、RB: C→A，回库线路只有 A→DEP。RA 的班次只有接上 RB 回到 A 才能收口。 每方向 600 s 一班，RB 锚在 RA 到达 + 折返上：窗口装下
-   * RA×5、RB×4， 最后那班 RA（05:40）停在 C 且后面没有 RB，必须被取消。
+   * RA×5、RB×4，最后那班 RA 停在 C 且后面没有 RB；整体平移后铺 RA×4、RB×4，保留同样八班且不需要取消。
    */
   @Test
-  void tripsWithoutReturnAccessAreDroppedAndReported() {
+  void completedPhaseAvoidsAnUnclosableLastTripWithoutLosingService() {
     RailGraph graph = chain();
     UUID ra = TimetableTestFixtures.routeId("RA");
     UUID rb = TimetableTestFixtures.routeId("RB");
@@ -460,28 +460,15 @@ class TimetableBuilderTest {
     TimetableBuildResult result = build(new Fixture(graph, routes), options);
     Timetable timetable = result.timetable().orElseThrow();
 
-    assertEquals(1, result.droppedTrips().size(), "停在 C 的最后一班 RA 必须被取消");
-    assertEquals("05:40:00", result.droppedTrips().get(0).departureText());
-    assertEquals(
-        VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS,
-        result.droppedTrips().get(0).reason());
+    assertTrue(result.success(), () -> result.warnings().toString());
+    assertTrue(result.droppedTrips().isEmpty(), () -> result.droppedTrips().toString());
+    assertFalse(result.headwayRelaxed());
     assertEquals(8, timetable.trips().size());
-    assertTrue(
-        result.droppedTrips().stream()
-            .allMatch(
-                dropped ->
-                    dropped.routeCode().equals("RA")
-                        || dropped.reason()
-                            == VehicleDutyPlanner.UnassignedReason.NO_CREATE_ACCESS),
-        () -> result.droppedTrips().toString());
-    assertTrue(
-        result.warnings().stream().anyMatch(text -> text.contains("取消")),
-        () -> result.warnings().toString());
     for (VehicleDuty duty : timetable.duties()) {
       assertEquals(DEP, duty.endDepotNodeId());
       assertEquals(Optional.of(ret), duty.returnRouteId());
     }
-    // 取消之后车次号仍然连续：RA-001、RA-002…，没有空洞。
+    // 相位重选之后车次号仍然连续：RA-001、RA-002…，没有空洞。
     List<String> raCodes =
         timetable.trips().stream()
             .filter(trip -> trip.routeId().equals(ra))
@@ -557,7 +544,7 @@ class TimetableBuilderTest {
         result.effectiveHeadwaySeconds() >= 210,
         () -> "至少要等前车折返完: " + result.effectiveHeadwaySeconds());
     assertFalse(result.conflictsAtTarget().isEmpty());
-    assertTrue(result.warnings().stream().anyMatch(text -> text.contains("已回退到最小可行间隔")));
+    assertTrue(result.warnings().stream().anyMatch(text -> text.contains("已回退到搜索找到的可行间隔")));
     Timetable timetable = result.timetable().orElseThrow();
     // 比名义时隙：DEP–A 是出库与回库共用的车库咽喉，第二趟的出库要等第一趟的回库车过完，实际发车会晚几秒。
     Map<String, Integer> nominal = new HashMap<>();
