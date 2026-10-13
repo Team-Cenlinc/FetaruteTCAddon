@@ -3672,14 +3672,13 @@ public final class FtaRouteCommand {
           // 部分轨道不存在（警告，不阻止定义）
           issues.add(
               new RouteValidationIssue(
-                  "command.route.define.dynamic-partial-tracks",
+                  missingCount > missingTracks.size()
+                      ? "command.route.define.dynamic-partial-tracks-more"
+                      : "command.route.define.dynamic-partial-tracks",
                   Map.of(
                       "seq", String.valueOf(stop.sequence()),
-                      "missing",
-                          String.join(", ", missingTracks)
-                              + (missingCount > missingTracks.size()
-                                  ? " …（共 " + missingCount + " 条）"
-                                  : ""),
+                      "missing", String.join(", ", missingTracks),
+                      "total", String.valueOf(missingCount),
                       "valid", String.valueOf(validNodes.size()))));
         }
         if (validNodes.size() > DynamicStopMatcher.MAX_TRACK_CANDIDATES) {

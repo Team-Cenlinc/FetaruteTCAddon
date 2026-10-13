@@ -23,6 +23,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Operator;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -957,26 +958,10 @@ public final class StorageSpawnManager
     return stationKey.orElse(normalized);
   }
 
+  /** DYNAMIC 起点的分组键：站（车库）一级的 {@code op:s/d:name}，与选台、终点匹配同一个解析器。 */
   private static Optional<String> parseDynamicGroupKey(String dynamicSpec) {
-    if (dynamicSpec == null || dynamicSpec.isBlank()) {
-      return Optional.empty();
-    }
-    String normalized = dynamicSpec.trim().toLowerCase(Locale.ROOT);
-    if (!normalized.startsWith("dynamic:")) {
-      return Optional.empty();
-    }
-    String rest = normalized.substring("dynamic:".length());
-    String[] parts = rest.split(":", 4);
-    if (parts.length < 3) {
-      return Optional.empty();
-    }
-    String operator = parts[0].trim();
-    String type = parts[1].trim();
-    String name = parts[2].trim();
-    if (operator.isBlank() || type.isBlank() || name.isBlank()) {
-      return Optional.empty();
-    }
-    return Optional.of(operator + ":" + type + ":" + name);
+    return DynamicStopMatcher.parseDynamicSpec(dynamicSpec)
+        .map(DynamicStopMatcher.DynamicSpec::toTerminalKey);
   }
 
   private Optional<String> readString(Map<String, Object> meta, String key) {
@@ -1256,8 +1241,7 @@ public final class StorageSpawnManager
       return stop.waypointNodeId().get();
     }
     // 尝试解析 DYNAMIC
-    Optional<org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec> specOpt =
-        org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.parseDynamicSpec(stop);
+    Optional<DynamicStopMatcher.DynamicSpec> specOpt = DynamicStopMatcher.parseDynamicSpec(stop);
     if (specOpt.isPresent()) {
       return specOpt.get().toPlaceholderNodeId();
     }

@@ -694,7 +694,16 @@ public final class FtaTimetableCommand {
                         plugin,
                         () ->
                             sender.sendMessage(
-                                Component.text("编表失败：" + ex.getMessage(), NamedTextColor.RED)));
+                                ex
+                                        instanceof
+                                        TimetablePlatformPlanner.RestrictedPlatformException
+                                        restricted
+                                    ? plugin
+                                        .getLocaleManager()
+                                        .component(
+                                            restricted.messageKey(), restricted.placeholders())
+                                    : Component.text(
+                                        "编表失败：" + ex.getMessage(), NamedTextColor.RED)));
                 return;
               } catch (Error error) {
                 buildJobs.finish(job.id());
@@ -1065,7 +1074,7 @@ public final class FtaTimetableCommand {
   /**
    * 给编出来的表排计划站台（异步线程）：时刻用表上落库的时刻（{@link NeighborInputs#myProfiles}），与运行时、邻表同一口径。 编表失败时不排。
    *
-   * <p>显式允许集合需要整段可用股道的证明，排程出错则拒绝保存；未限制股道的旧交路保留计划偏好兜底。
+   * <p>受限的允许集合（小于该站实际股道数）需要整段可用股道的证明，排程出错则拒绝保存；不限股道或覆盖全部股道的交路保留计划偏好兜底。 只看本次编的表，邻表的写法不影响。
    */
   private static TimetablePlatformPlanner.Result planPlatforms(
       TimetableSetBuilder.SetResult result,
@@ -1078,36 +1087,23 @@ public final class FtaTimetableCommand {
     if (!result.success()) {
       return new TimetablePlatformPlanner.Result(Map.of(), 0, 0);
     }
+    TimetablePlatformPlanner.Input input =
+        new TimetablePlatformPlanner.Input(
+            List.copyOf(result.tables().values()),
+            profiles,
+            inputs.stopsByRoute(),
+            inputs.definitions(),
+            graph,
+            index,
+            neighbors,
+            options.serviceStartSecondOfDay(),
+            (int) options.separation().toSeconds());
     try {
-      List<Timetable> tables = List.copyOf(result.tables().values());
-      return TimetablePlatformPlanner.plan(
-          new TimetablePlatformPlanner.Input(
-              tables,
-              profiles,
-              inputs.stopsByRoute(),
-              inputs.definitions(),
-              graph,
-              index,
-              neighbors,
-              options.serviceStartSecondOfDay(),
-              (int) options.separation().toSeconds()));
+      return TimetablePlatformPlanner.plan(input);
     } catch (RuntimeException ex) {
-      boolean restricted =
-          inputs.stopsByRoute().values().stream()
-              .flatMap(List::stream)
-              .flatMap(
-                  stop ->
-                      org
-                          .fetarute
-                          .fetaruteTCAddon
-                          .dispatcher
-                          .route
-                          .DynamicStopMatcher
-                          .parseDynamicSpec(stop)
-                          .stream())
-              .anyMatch(spec -> !spec.unbounded());
-      if (restricted) {
-        throw new IllegalStateException("受限 DYNAMIC 股道排程失败，无法证明整段计划可执行", ex);
+      if (TimetablePlatformPlanner.hasRestrictedStops(input)) {
+        throw new TimetablePlatformPlanner.RestrictedPlatformException(
+            "command.timetable.build.restricted-plan-failed", "reason", String.valueOf(ex), ex);
       }
       return TimetablePlatformPlanner.Result.failed(ex.toString());
     }

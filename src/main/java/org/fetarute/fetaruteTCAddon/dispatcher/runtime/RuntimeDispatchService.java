@@ -1634,7 +1634,8 @@ public final class RuntimeDispatchService {
             occupancyManager,
             this.debugLogger,
             dynamicCapacityWaits,
-            this.progressRegistry::lastPassedGraphNode);
+            this.progressRegistry::lastPassedGraphNode,
+            this::resolveShortestDistance);
     // 计划站台跟着停靠协调器的计划源走，站牌经协调器读暂定站台：方法引用不占本类方法数。
     this.dynamicAllocator.setPreference(this.stationStopCoordinator::plannedPlatform);
     this.stationStopCoordinator.attachPlatforms(this.dynamicAllocator);
@@ -20689,7 +20690,13 @@ public final class RuntimeDispatchService {
                     .toList());
         continue;
       }
-      if (!dynamicAllocator.isAvailableForMaterialization(candidate, trainName, graph, fromNode)) {
+      // 已选站台按持有规则核对（超时放弃、让出预订）；尚未选定的候选只做无副作用的判断。
+      boolean available =
+          materializedTarget.isPresent()
+              ? dynamicAllocator.isAvailableForMaterialization(
+                  candidate, trainName, graph, fromNode)
+              : dynamicAllocator.isCandidateAvailable(candidate, trainName, graph, fromNode);
+      if (!available) {
         rejections.add("candidate=" + candidate.value() + ":reservation-or-approach-unavailable");
         continue;
       }

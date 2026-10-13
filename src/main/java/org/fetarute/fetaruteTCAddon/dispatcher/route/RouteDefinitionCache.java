@@ -192,6 +192,7 @@ public final class RouteDefinitionCache {
 
     // 先在旁边建好，再整体替换：重载期间其他线程读到的是新旧混合，但不会读到空缓存或半条交路。
     Staging staging = new Staging();
+    List<String> disabled = new ArrayList<>();
     int loaded = 0;
     for (var company : companies.listAll()) {
       if (company == null) {
@@ -212,7 +213,7 @@ public final class RouteDefinitionCache {
             }
             List<RouteStop> stops = routeStops.listByRoute(route.id());
             Optional<RouteDefinition> definitionOpt =
-                buildDefinition(operator, line, route, stops, stations);
+                buildDefinition(operator, line, route, stops, stations, disabled::add);
             if (definitionOpt.isEmpty()) {
               continue;
             }
@@ -232,6 +233,10 @@ public final class RouteDefinitionCache {
     replaceContents(uuidByRouteKey, staging.uuids);
     replaceContents(entryCache, staging.entries);
     debugLogger.accept("加载 RouteDefinition 缓存完成: routes=" + loaded);
+    if (!disabled.isEmpty()) {
+      invalidDefinitionLogger.accept(
+          "有 " + disabled.size() + " 条交路因停靠点写法无效已停用，修正后重载即可恢复: " + String.join("；", disabled));
+    }
     fireChanged();
   }
 
@@ -254,7 +259,13 @@ public final class RouteDefinitionCache {
     List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
     StationRepository stations = provider.stations();
     Optional<RouteDefinition> definitionOpt =
-        buildDefinition(operator, line, route, stops, stations);
+        buildDefinition(
+            operator,
+            line,
+            route,
+            stops,
+            stations,
+            reason -> invalidDefinitionLogger.accept("交路因停靠点写法无效已停用: " + reason));
     RouteCodeKey codeKey = RouteCodeKey.of(operator.code(), line.code(), route.code());
     if (definitionOpt.isPresent()) {
       RouteDefinition definition = definitionOpt.get();
@@ -386,13 +397,16 @@ public final class RouteDefinitionCache {
    * 构建单条 RouteDefinition，并统计解析过程中的异常情况用于日志输出。
    *
    * <p>优先使用 waypoint nodeId；若为站点，则读取 Station.graphNodeId。
+   *
+   * @param disabled 因写法无效停用整条交路时，收到“交路码（第 N 个停靠点 原因）”一句
    */
   private Optional<RouteDefinition> buildDefinition(
       Operator operator,
       Line line,
       Route route,
       List<RouteStop> stops,
-      StationRepository stations) {
+      StationRepository stations,
+      Consumer<String> disabled) {
     if (operator == null || line == null || route == null) {
       return Optional.empty();
     }
@@ -422,7 +436,7 @@ public final class RouteDefinitionCache {
       }
       if (DynamicStopMatcher.isDynamicStop(stop)
           && DynamicStopMatcher.parseDynamicSpec(stop).isEmpty()) {
-        invalidDefinitionLogger.accept(
+        debugLogger.accept(
             "停用线路定义(无效 DYNAMIC): route="
                 + route.code()
                 + " id="
@@ -431,6 +445,13 @@ public final class RouteDefinitionCache {
                 + stop.sequence()
                 + " reason=invalid-dynamic-syntax notes="
                 + stop.notes().orElse(""));
+        disabled.accept(
+            RouteCodeKey.formatRouteId(operator.code(), line.code(), route.code(), route.id())
+                + "（第 "
+                + stop.sequence()
+                + " 个停靠点 DYNAMIC 写法无效: "
+                + stop.notes().orElse("").replace('\n', ' ').trim()
+                + "）");
         return Optional.empty();
       }
       Optional<NodeId> nodeIdOpt = resolveNodeId(stop, stations);

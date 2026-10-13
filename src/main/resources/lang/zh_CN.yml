@@ -1025,10 +1025,11 @@ command:
       node-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少节点</red>"
       edge-unreachable: "<prefix> <red>停靠点之间不可达</red> <gray>(from=<white><from></white>, to=<white><to></white>)</gray>"
       path-cross-world: "<prefix> <red>停靠点跨世界/跨图，未处于同一调度图内</red>"
-      dynamic-invalid: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点语法无效，不能回退到声明占位节点</red>"
-      dynamic-candidate-budget: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 有 <white><valid></white> 条实际候选，选台仅评估数字顺序前 <white><limit></white> 条；集合资格不受此预算改变</yellow>"
+      dynamic-invalid: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点的股道写法无效，请按 [1,3,5] 或 [1-3] 的格式填写，不写则不限股道</red>"
+      dynamic-candidate-budget: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点有 <white><valid></white> 条可用股道，运行时只在股道号最小的 <white><limit></white> 条中选台；列车停在其余股道上仍算到站</yellow>"
       dynamic-no-valid-tracks: "<prefix> <red>第 <white><seq></white> 个 DYNAMIC 停靠点所有轨道均不存在</red> <gray>(<white><spec></white> <white><range></white>)</gray>"
       dynamic-partial-tracks: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失： <white><missing></white>, 有效： <white><valid></white>)</gray>"
+      dynamic-partial-tracks-more: "<prefix> <yellow>第 <white><seq></white> 个 DYNAMIC 停靠点部分轨道不存在</yellow> <gray>(缺失： <white><missing></white> …（共 <white><total></white> 条）, 有效： <white><valid></white>)</gray>"
       debug:
         start-line: "起步线路"
         header: "<prefix> <dark_aqua>停靠表解析结果</dark_aqua>"
@@ -1112,6 +1113,11 @@ command:
       detour-step: "  <gray>└→</gray> <white><node></white>"
       unreachable: "<red>✗</red> <white><from></white> <dark_aqua>───</dark_aqua> <white><to></white> <red>（不可达）</red>"
       summary: "<prefix> <dark_aqua>总计：</dark_aqua> <white><total_blocks></white> <gray>格</gray> | <gray>原节点：</gray> <white><original_count></white> <gray>扩展后：</gray> <white><expanded_count></white> | <gray>绕行：</gray> <white><has_detour></white>"
+
+  timetable:
+    build:
+      restricted-unplaced: "<prefix> <red>编表失败：限定股道的 DYNAMIC 停靠有 <white><count></white> 段连续停留排不出一条始终空闲的股道，请放宽允许的股道或调整发车间隔</red>"
+      restricted-plan-failed: "<prefix> <red>编表失败：限定股道的 DYNAMIC 停靠排台时出错，无法确认每段停留都有可用股道</red> <gray>(<white><reason></white>)</gray>"
 
   station:
     not-found: "<prefix> <red>未找到站点：</red><white><operator></white><gray>/</gray><white><station></white>"
