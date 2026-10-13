@@ -30,16 +30,23 @@ public final class TrainCartsTimetableDutyStore implements TimetableDutyStore {
     return Map.copyOf(tokens);
   }
 
+  /** 账本每变一次就写一次：按车名直接取属性（名字大小写不一致时退回宽松查找），不扫全部属性，查不到不新建。 */
   @Override
   public void write(String trainName, Optional<String> token) {
-    for (TrainProperties properties : TrainPropertiesStore.getAll()) {
-      if (properties.getTrainName().equalsIgnoreCase(trainName)) {
-        token.ifPresentOrElse(
-            value -> TrainTagHelper.writeTag(properties, TAG_DUTY, value),
-            () -> TrainTagHelper.removeTagKey(properties, TAG_DUTY));
-        return;
-      }
+    if (trainName == null || trainName.isBlank()) {
+      return;
     }
+    TrainProperties properties = TrainPropertiesStore.get(trainName);
+    if (properties == null) {
+      properties = TrainPropertiesStore.getRelaxed(trainName);
+    }
+    if (properties == null) {
+      return;
+    }
+    TrainProperties target = properties;
+    token.ifPresentOrElse(
+        value -> TrainTagHelper.writeTag(target, TAG_DUTY, value),
+        () -> TrainTagHelper.removeTagKey(target, TAG_DUTY));
   }
 
   private static boolean exists(TrainProperties properties) {

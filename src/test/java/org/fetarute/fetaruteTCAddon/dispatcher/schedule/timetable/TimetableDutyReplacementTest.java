@@ -546,12 +546,12 @@ class TimetableDutyReplacementTest {
   }
 
   /** 同一份表挪到深夜：三班 23:50、00:00、00:10，计划窗口 23:00 起，后两班跨零点。 */
-  private static Timetable overnight(Timetable source) {
+  static Timetable overnight(Timetable source) {
     return overnight(source, 23 * 3600, 25 * 3600);
   }
 
   /** 同一份表挪到深夜，计划窗口另给。 */
-  private static Timetable overnight(Timetable source, int serviceStart, int serviceEnd) {
+  static Timetable overnight(Timetable source, int serviceStart, int serviceEnd) {
     VehicleDuty duty = source.duties().get(0);
     int[] departures = {23 * 3600 + 50 * 60, 0, 10 * 60};
     List<TimetableTrip> trips = new ArrayList<>();

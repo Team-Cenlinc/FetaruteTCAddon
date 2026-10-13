@@ -147,7 +147,7 @@ final class DutyLedger {
   /**
    * 把一辆车绑到某个交路上。已经绑在别的交路上时不覆盖——那是一辆被错派的车，覆盖只会把错误藏起来。
    *
-   * <p>从这个交路上被解下的车不许绑回去；绑上的是替补车时，空缺就此填上。
+   * <p>从这个交路上被解下的车不许绑回去；绑上的是替补车时，空缺就此填上。只有真的绑上才通知写回，拒绝、冲突与重复确认都不算变化。
    */
   void bind(String trainName, String key, TimetableService.DutyKey duty, String reason) {
     if (duty.equals(retired.get(key))) {
@@ -188,6 +188,7 @@ final class DutyLedger {
                 + " vacatedAt="
                 + filled.vacatedAt());
       }
+      changeListener.accept(key);
     } else if (!previous.equals(duty)) {
       debugLogger.accept(
           "TIMETABLE_DUTY_BIND_CONFLICT train="
@@ -199,7 +200,6 @@ final class DutyLedger {
               + " reason="
               + reason);
     }
-    changeListener.accept(key);
   }
 
   /**
