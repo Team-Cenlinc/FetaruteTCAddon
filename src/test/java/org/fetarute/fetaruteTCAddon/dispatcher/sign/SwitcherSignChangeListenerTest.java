@@ -89,6 +89,19 @@ final class SwitcherSignChangeListenerTest {
     verify(fixture.sync(), never()).delete(any(), any());
   }
 
+  /** 同轨道上另一块牌子读不出来（区块未加载、读牌面出错）时判不了它是不是寻路道岔：保留节点。 */
+  @Test
+  void keepsNodeWhenAnotherSignOnTheRailCannotBeRead() {
+    Fixture fixture = fixture();
+    TrackedSign unreadable = mock(TrackedSign.class);
+    when(unreadable.getHeader()).thenThrow(new IllegalStateException("unreadable"));
+    try (MockedStatic<SignActionHeader> headers = headers();
+        MockedStatic<RailLookup> lookup = lookup(fixture, new TrackedSign[] {unreadable})) {
+      fixture.listener().onSignChange(fixture.event());
+    }
+    verify(fixture.sync(), never()).delete(any(), any());
+  }
+
   @Test
   void cancelledEditLeavesNodeUntouched() {
     Fixture fixture = fixture();
