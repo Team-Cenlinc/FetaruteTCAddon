@@ -979,8 +979,79 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
+  /**
+   * 支线在站前道岔 J 汇入：本车与它都经 J 进 MID（紧邻前驱相同），但本车从上一个停车点起走的是 WIDE — J，它走的是 SIDE — J， 不是一路跟在本车后面的车，算放不下。
+   */
+  @Test
+  void aBranchMergingRightBeforeTheStationIsNotAFollower() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:J:1", "OP:X:XB:1", END + ":1");
+    UUID branch = corridor.through("RC", SIDE + ":1", "OP:X:J:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RC-001", branch, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /**
+   * 途中折返：本车 WIDE → MID → TURN 折返 → 再进 MID（第二次停 MID 是让车点，从 XB 一侧进站）。从 WIDE 开来的车经 XA 进 MID——XA
+   * 是本车第一次进 MID 之前走过的节点，但这一次本车从另一侧来，它是对向车，算放不下。
+   */
+  @Test
+  void aTrainFromTheOtherSideAfterAMidRouteTurnbackIsNotAFollower() {
+    Corridor corridor = new Corridor();
+    UUID turning = corridor.turnback("RA");
+    UUID main = corridor.through("RO", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", turning, 0, "D001");
+    corridor.run("RO-001", main, 300, "D002");
+
+    ConflictAbsorption.Residual residual =
+        corridor.classify(conflictOn("edge:MID~SIDE", 410, 400), ConflictAbsorption.Recovery.NONE);
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 同一站经过两次：同一条折返 route 的后车第二次进 MID，与本车同一侧、同一段进站，是后车，可吸收。 */
+  @Test
+  void aFollowerOnTheSecondVisitOfTheSameStationIsAbsorbable() {
+    Corridor corridor = new Corridor();
+    UUID turning = corridor.turnback("RA");
+    corridor.run("RA-001", turning, 0, "D001");
+    corridor.run("RA-002", turning, 60, "D002");
+
+    ConflictAbsorption.Residual residual =
+        corridor.classify(conflictOn("edge:MID~SIDE", 410, 400), ConflictAbsorption.Recovery.NONE);
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /**
+   * 环线：本车 WIDE → XB → END → XA → MID，反向绕行的车经 XB 进 MID。XB 在本车进 MID 之前的路上，但本车是从 XA 一侧进站的，
+   * 那辆车是对向车，算放不下。
+   */
+  @Test
+  void aCounterRotatingTrainOnALoopIsNotAFollower() {
+    Corridor corridor = new Corridor();
+    UUID loop = corridor.loop("RA");
+    UUID counter = corridor.through("RO", SIDE + ":1", "OP:X:XB:1", "OP:X:XD:1", WIDE + ":1");
+    corridor.run("RA-001", loop, 0, "D001");
+    corridor.run("RO-001", counter, 160, "D002");
+
+    ConflictAbsorption.Residual residual =
+        corridor.classify(conflictOn("edge:MID~SIDE", 250, 240), ConflictAbsorption.Recovery.NONE);
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
   private static final String SIDE = "OP:S:SIDE";
   private static final String END = "OP:S:END";
+  private static final String TURN = "OP:S:TURN";
 
   /**
    * 带逐边路径的走廊：贯通 route 是 {@code 起点 — x — MID:1 — y — 终点}，0 s 发、100 s 到 MID、120 s 发、300 s 到终点。
@@ -996,7 +1067,7 @@ class ConflictAbsorptionTest {
     private final java.util.Set<String> dynamicStops = new java.util.HashSet<>();
     private final TimetableConflictChecker.GraphIndex index =
         new TimetableConflictChecker.GraphIndex(
-            null, Map.of(WIDE, 2, MID, 2, END, 2, SIDE, 2), Map.of());
+            null, Map.of(WIDE, 2, MID, 2, END, 2, SIDE, 2, TURN, 2), Map.of());
 
     UUID through(String code, String from, String x, String y, String to) {
       return through(code, from, x, y, to, MID + ":1", false);
@@ -1029,6 +1100,46 @@ class ConflictAbsorptionTest {
           List.of(segment(0, 1, List.of(from, x, to), List.of(0, 50, 100))));
     }
 
+    /**
+     * 途中折返：WIDE:1（0 s 发）— XA — MID:1（100 s 到、120 s 发）— XB — TURN:1（200 s 到、260 s 发）— XB — MID:1（340
+     * s 到、360 s 发）— XC — SIDE:1（460 s 终到）。
+     */
+    UUID turnback(String code) {
+      return add(
+          code,
+          List.of(
+              stop(0, WIDE + ":1", 0, 0, RouteStopPassType.STOP),
+              stop(1, MID + ":1", 100, 120, RouteStopPassType.STOP),
+              stop(2, TURN + ":1", 200, 260, RouteStopPassType.STOP),
+              stop(3, MID + ":1", 340, 360, RouteStopPassType.STOP),
+              stop(4, SIDE + ":1", 460, 460, RouteStopPassType.TERMINATE)),
+          List.of(
+              segment(0, 1, List.of(WIDE + ":1", "OP:X:XA:1", MID + ":1"), List.of(0, 50, 100)),
+              segment(1, 2, List.of(MID + ":1", "OP:X:XB:1", TURN + ":1"), List.of(120, 160, 200)),
+              segment(2, 3, List.of(TURN + ":1", "OP:X:XB:1", MID + ":1"), List.of(260, 300, 340)),
+              segment(
+                  3, 4, List.of(MID + ":1", "OP:X:XC:1", SIDE + ":1"), List.of(360, 410, 460))));
+    }
+
+    /**
+     * 环线的一段：WIDE:1（0 s 发）— XB — END:1（100 s 到、120 s 发）— XA — MID:1（200 s 到、220 s 发）— XC —
+     * SIDE:1（300 s 终到）。
+     */
+    UUID loop(String code) {
+      return add(
+          code,
+          List.of(
+              stop(0, WIDE + ":1", 0, 0, RouteStopPassType.STOP),
+              stop(1, END + ":1", 100, 120, RouteStopPassType.STOP),
+              stop(2, MID + ":1", 200, 220, RouteStopPassType.STOP),
+              stop(3, SIDE + ":1", 300, 300, RouteStopPassType.TERMINATE)),
+          List.of(
+              segment(0, 1, List.of(WIDE + ":1", "OP:X:XB:1", END + ":1"), List.of(0, 50, 100)),
+              segment(1, 2, List.of(END + ":1", "OP:X:XA:1", MID + ":1"), List.of(120, 160, 200)),
+              segment(
+                  2, 3, List.of(MID + ":1", "OP:X:XC:1", SIDE + ":1"), List.of(220, 260, 300))));
+    }
+
     void run(String code, UUID route, int start, String duty) {
       runs.add(new String[] {code, String.valueOf(start), duty});
       routeOfRun.put(code, route);
@@ -1045,6 +1156,22 @@ class ConflictAbsorptionTest {
     /** 同一处冲突在报告里出现 {@code times} 次：累计上限按报告顺序逐处扣。 */
     List<ConflictAbsorption.Residual> classifyRepeated(
         int times, ConflictAbsorption.Recovery recovery) {
+      List<TimetableConflictChecker.Conflict> conflicts = new ArrayList<>();
+      for (int i = 0; i < times; i++) {
+        conflicts.add(conflictOn("edge:MID~END", 210, 200));
+      }
+      return classifyAll(conflicts, recovery);
+    }
+
+    /** 只分类给定的这一处冲突。 */
+    ConflictAbsorption.Residual classify(
+        TimetableConflictChecker.Conflict conflict, ConflictAbsorption.Recovery recovery) {
+      return classifyAll(List.of(conflict), recovery).get(0);
+    }
+
+    /** 按报告顺序分类这几处冲突。 */
+    List<ConflictAbsorption.Residual> classifyAll(
+        List<TimetableConflictChecker.Conflict> conflicts, ConflictAbsorption.Recovery recovery) {
       UUID tableId = uuid("corridor");
       List<TimetableTrip> trips = new ArrayList<>();
       Map<String, List<UUID>> dutyTrips = new LinkedHashMap<>();
@@ -1098,10 +1225,6 @@ class ConflictAbsorptionTest {
               Optional.empty(),
               Instant.EPOCH,
               Instant.EPOCH);
-      List<TimetableConflictChecker.Conflict> conflicts = new ArrayList<>();
-      for (int i = 0; i < times; i++) {
-        conflicts.add(conflictOn("edge:MID~END", 210, 200));
-      }
       return ConflictAbsorption.classify(
           new TimetableConflictChecker.Report(conflicts),
           table,
