@@ -32,6 +32,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
@@ -1938,11 +1939,24 @@ public final class TimetableBuilder {
         Map.copyOf(slotByCode));
   }
 
-  /** 顺推判据用的停站压缩：最短停站来自参数，档案里多算的停站开销来自走行模型（编表时加进停站的就是它）。 */
+  /**
+   * 顺推判据用的停站压缩：最短停站来自参数，档案里多算的停站开销来自走行模型（编表时加进停站的就是它），车门下限取运行时的缺省， 换模加时按各 route
+   * 的停靠表推算（与时分档案加进停站的是同一份）。
+   */
   private static ConflictAbsorption.Recovery recoveryOf(
       TimetableBuildOptions options, BuildInput input) {
+    Map<UUID, List<Integer>> switches = new HashMap<>();
+    for (RouteInput route : input.routes()) {
+      int[] plan = RoutePowerModes.switchDwellPlan(route.stops());
+      if (java.util.Arrays.stream(plan).anyMatch(seconds -> seconds > 0)) {
+        switches.put(route.routeId(), java.util.Arrays.stream(plan).boxed().toList());
+      }
+    }
     return new ConflictAbsorption.Recovery(
-        options.recoveryMinDwellSeconds(), input.runTimeModel().stationStopOverheadSeconds());
+        options.recoveryMinDwellSeconds(),
+        input.runTimeModel().stationStopOverheadSeconds(),
+        ConflictAbsorption.Recovery.RUNTIME_DOOR_FLOOR_SECONDS,
+        switches);
   }
 
   /** 每个方向的班次卷进了几处不可吸收残余：一处残余两边的班次各记一次（同一方向只记一次）。出入库走行与邻表的班次不属于任何方向，不记。 第三层据此决定先挑哪个单元。 */

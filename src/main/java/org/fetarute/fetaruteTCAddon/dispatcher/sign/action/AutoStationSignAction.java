@@ -103,6 +103,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   /** 晚点压缩停站时，关门动画开始前车门至少全开多久（tick）。 */
   private static final long DOOR_MIN_OPEN_TICKS = 60L;
 
+  /**
+   * 压缩停站的车门下限（秒）的缺省：非旧式动画的车，关门动画提前 {@link #DOOR_CLOSE_EARLY_TICKS} 开始，之前车门至少全开 {@link
+   * #DOOR_MIN_OPEN_TICKS}，按秒向上取整。编表按它估运行时能压到多短（旧式动画按实测时长，只会更长）。
+   */
+  public static final int DEFAULT_DOOR_FLOOR_SECONDS =
+      (int) ((DOOR_CLOSE_EARLY_TICKS + DOOR_MIN_OPEN_TICKS + 19L) / 20L);
+
   private static final int DOOR_OPEN_MAX_ATTEMPTS = 12;
   private static final long DOOR_OPEN_MAX_RETRY_WINDOW_TICKS = 160L;
   private static final double EXIT_OFFSET_DISTANCE_BLOCKS = 3.0;
@@ -628,14 +635,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
    * 关门动画会让车门刚开就关。只对压缩生效，计划停站本身不受影响。
    */
   private static int doorFloorSeconds(AutoStationDoorController.DoorSession session) {
-    long closeTicks = DOOR_CLOSE_EARLY_TICKS;
     if (session != null && session.usesLegacyDoorAnimation()) {
       long estimated = session.estimatedCloseDurationTicks();
       if (estimated > 0L) {
-        closeTicks = estimated;
+        return (int) ((estimated + DOOR_MIN_OPEN_TICKS + 19L) / 20L);
       }
     }
-    return (int) ((closeTicks + DOOR_MIN_OPEN_TICKS + 19L) / 20L);
+    return DEFAULT_DOOR_FLOOR_SECONDS;
   }
 
   /**

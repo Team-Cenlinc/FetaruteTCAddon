@@ -220,6 +220,13 @@ public record TimetableRoutePlan(
     return kind == RouteOperationType.OPERATION;
   }
 
+  /** 列车在这条 route 上从车库出车：出库线路，或有出库点、起点就是车库（首站 CRET）的运营线路。 */
+  public boolean startsAtDepot() {
+    return kind == RouteOperationType.CREATE
+        || depotNodeId.isPresent()
+        || TimetableConflictChecker.groupOf(originNodeId).contains(":D:");
+  }
+
   /** 全程时分（首站发车 → 末站到达），秒。 */
   public int totalRunSeconds() {
     return stops.isEmpty() ? 0 : stops.get(stops.size() - 1).arrivalOffsetSeconds();

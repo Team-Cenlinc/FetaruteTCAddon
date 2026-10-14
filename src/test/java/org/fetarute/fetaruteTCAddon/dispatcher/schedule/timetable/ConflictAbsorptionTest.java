@@ -793,7 +793,7 @@ class ConflictAbsorptionTest {
 
   /**
    * 后车被挡 30 s 后 390 s 才到，下一班 380 s 发：晚 10 s。下一班途中 MID 表定停 20 s，压到最短 10 s 能追回 10 s，
-   * 在那一班里就追回来了，链不算深，可吸收；不按追回量判时照旧顺推超限。
+   * 在那一班里就追回来了，链不算深，可吸收；不按追回量判时照旧顺推超限。交路 D002 后面还有一班，后两班可追回共 20 s，累计上限 10 s 够用。
    */
   @Test
   void aDelayTheNextTripCanRecoverByShorterStopsIsAbsorbable() {
@@ -802,6 +802,7 @@ class ConflictAbsorptionTest {
     corridor.run("RA-001", main, 0, "D001");
     corridor.run("RA-002", main, 60, "D002");
     corridor.run("RA-003", main, 380, "D002");
+    corridor.run("RA-004", main, 1000, "D002");
 
     ConflictAbsorption.Residual recovered =
         corridor.classifyMover(new ConflictAbsorption.Recovery(10, 0));
@@ -844,20 +845,42 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residual.verdict());
   }
 
+  /** 交路只有两班：第二班可追回 10 s，累计上限只有一半（5 s），晚 10 s 靠追回吸收不了，仍是顺推超限。 */
+  @Test
+  void aShortDutyCannotSpendAllOfItsRecoverableSeconds() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RA-003", main, 380, "D002");
+
+    ConflictAbsorption.Residual residual =
+        corridor.classifyMover(new ConflictAbsorption.Recovery(10, 0));
+
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residual.verdict());
+    assertEquals(1, residual.chainDepth());
+  }
+
   /**
-   * 同一辆车靠追回吸收的顺推按交路累计，不超过 {@value ConflictAbsorption#RECOVERABLE_CHAIN_BUDGET_SECONDS} 秒：每处晚 15 s、
-   * 下一班能追回 15 s，前两处共 30 s 可吸收，第三处超出累计上限判顺推超限。
+   * 同一辆车靠追回吸收的顺推按交路累计，不超过这一交路可追回总量的 {@value ConflictAbsorption#RECOVERABLE_BUDGET_PERCENT}%：
+   * 三圈里每圈的后车都晚 15 s、在交路下一班压缩停站追回 15 s；交路 D002 六班、后五班各能追回 15 s，上限 37 s——前两圈共 30 s 可吸收，
+   * 第三圈超出累计上限判顺推超限。
    */
   @Test
   void recoveredDelaysAreBudgetedPerDuty() {
     Corridor corridor = new Corridor();
     UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
-    corridor.run("RA-001", main, 0, "D001");
-    corridor.run("RA-002", main, 60, "D002");
-    corridor.run("RA-003", main, 375, "D002");
+    List<TimetableConflictChecker.Conflict> conflicts = new ArrayList<>();
+    for (int lap = 0; lap < 3; lap++) {
+      int base = 1000 * lap;
+      corridor.run("RA-0" + lap + "1", main, base, "D0" + lap + "1");
+      corridor.run("RA-0" + lap + "2", main, base + 60, "D002");
+      corridor.run("RA-0" + lap + "3", main, base + 375, "D002");
+      conflicts.add(conflictOn("edge:MID~END", base + 210, base + 200, "RA-0" + lap + "1"));
+    }
 
     List<ConflictAbsorption.Residual> residuals =
-        corridor.classifyRepeated(3, new ConflictAbsorption.Recovery(5, 0));
+        corridor.classifyAll(conflicts, new ConflictAbsorption.Recovery(5, 0, 0, Map.of()));
 
     assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(0).verdict());
     assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(1).verdict());
@@ -865,35 +888,128 @@ class ConflictAbsorptionTest {
     assertEquals(1, residuals.get(2).chainDepth());
   }
 
-  /** 可追回量只算途中停站：起点与终到不压缩，PASS 不停站。 */
+  /** 同一班在两处各等 30 s（两处的前车不同）：单看每一处，到终点晚 30 s 都赶得上 340 s 的下一班；两处加起来晚 60 s 就赶不上了—— 第二处判顺推超限，不能各算各的。 */
   @Test
-  void recoverableSecondsCountOnlyIntermediateStops() {
-    UUID route = TimetableTestFixtures.routeId("RR");
-    TimetableRoutePlan plan =
-        new TimetableRoutePlan(
-            route,
-            "RR",
-            RouteOperationType.OPERATION,
-            1,
-            List.of(
-                new TimetableStop(
-                    0, Optional.empty(), Optional.of("A"), 0, 30, RouteStopPassType.STOP),
-                new TimetableStop(
-                    1, Optional.empty(), Optional.of("B"), 100, 130, RouteStopPassType.STOP),
-                new TimetableStop(
-                    2, Optional.empty(), Optional.of("C"), 200, 200, RouteStopPassType.PASS),
-                new TimetableStop(
-                    3, Optional.empty(), Optional.of("D"), 300, 314, RouteStopPassType.STOP),
-                new TimetableStop(
-                    4, Optional.empty(), Optional.of("E"), 400, 460, RouteStopPassType.TERMINATE)),
-            "A",
-            "E",
-            Optional.empty(),
-            Optional.empty());
+  void waitsOfOneTripAddUpBeforeTheChainIsJudged() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-005", main, 340, "D001");
 
-    // B 停 30 s：扣开销 4 s、留最短 10 s，追回 16 s；D 停 14 s 扣完不剩；起点 A 与终到 E 不算。
-    assertEquals(16, new ConflictAbsorption.Recovery(10, 4).recoverableSeconds(plan));
+    List<ConflictAbsorption.Residual> residuals =
+        corridor.classifyAll(
+            List.of(
+                conflictOn("edge:MID~XB", 200, 200, "RA-001", "RB-001"),
+                conflictOn("edge:XB~END", 250, 250, "RA-001", "RB-002")),
+            ConflictAbsorption.Recovery.NONE);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(0).verdict());
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residuals.get(1).verdict());
+    assertEquals(1, residuals.get(1).chainDepth());
+  }
+
+  /** 同一对车在相邻几个资源上各报一处冲突：后车在第一处之前等够了，后面几处也就让开了，等待不重复累加。 */
+  @Test
+  void repeatedConflictsWithTheSameLeaderDoNotAddUp() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-005", main, 340, "D001");
+
+    List<ConflictAbsorption.Residual> residuals =
+        corridor.classifyAll(
+            List.of(
+                conflictOn("edge:MID~XB", 200, 200, "RA-001", "RB-001"),
+                conflictOn("edge:XB~END", 250, 250, "RA-001", "RB-001")),
+            ConflictAbsorption.Recovery.NONE);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(0).verdict());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(1).verdict());
+  }
+
+  /** 可追回量只算途中车站：起点与终到不压缩，PASS 不停站，区间停车点不是车站（运行时只在车站压缩）。 */
+  @Test
+  void recoverableSecondsCountOnlyIntermediateStations() {
+    TimetableRoutePlan plan = recoveryPlan("RR", "OP:S:A:1", Optional.empty());
+
+    // B 停 30 s：扣开销 4 s、留最短 10 s，追回 16 s；X 是区间停车点不算；D 停 14 s 扣完不剩；起点 A 与终到 E 不算。
+    assertEquals(16, new ConflictAbsorption.Recovery(10, 4, 0, Map.of()).recoverableSeconds(plan));
     assertEquals(0, ConflictAbsorption.Recovery.NONE.recoverableSeconds(plan));
+  }
+
+  /** 运行时压缩的下限是最短停站与车门开关过程取大：最短停站 5 s、车门要 8 s 时，各站只能压到 8 s。 */
+  @Test
+  void theDoorFloorBoundsTheCompression() {
+    TimetableRoutePlan plan = recoveryPlan("RR", "OP:S:A:1", Optional.empty());
+
+    // B 30 − 4 − 8，D 14 − 4 − 8。
+    assertEquals(
+        18 + 2, new ConflictAbsorption.Recovery(5, 4, 8, Map.of()).recoverableSeconds(plan));
+    int floor = ConflictAbsorption.Recovery.RUNTIME_DOOR_FLOOR_SECONDS;
+    assertEquals(
+        (30 - 4 - floor) + Math.max(0, 14 - 4 - floor),
+        new ConflictAbsorption.Recovery(1, 4).recoverableSeconds(plan),
+        "不给车门下限时按运行时的缺省");
+  }
+
+  /** 从车库出车的班次：出库后第一个车站运行时不压缩（开门延迟更长），只剩后面的车站。 */
+  @Test
+  void theFirstStationAfterLeavingTheDepotIsNotCompressed() {
+    TimetableRoutePlan fromDepot = recoveryPlan("RD", "OP:D:DEP:1", Optional.of("OP:D:DEP:1"));
+    TimetableRoutePlan fromStation = recoveryPlan("RR", "OP:S:A:1", Optional.empty());
+    ConflictAbsorption.Recovery recovery = new ConflictAbsorption.Recovery(5, 4, 0, Map.of());
+
+    // 车站始发：B 30 − 4 − 5 = 21，D 14 − 4 − 5 = 5；车库始发少了 B。
+    assertEquals(21 + 5, recovery.recoverableSeconds(fromStation));
+    assertEquals(5, recovery.recoverableSeconds(fromDepot));
+  }
+
+  /** 表定停站里的换模加时运行时不压缩：B 停 30 s 里有 20 s 是换模，只剩 10 s 可压（扣开销 4 s、最短 5 s 后追回 1 s）。 */
+  @Test
+  void powerSwitchDwellIsNotRecoverable() {
+    TimetableRoutePlan plan = recoveryPlan("RR", "OP:S:A:1", Optional.empty());
+    ConflictAbsorption.Recovery recovery =
+        new ConflictAbsorption.Recovery(
+            5, 4, 0, Map.of(plan.routeId(), List.of(0, 20, 0, 0, 0, 0)));
+
+    assertEquals(1 + 5, recovery.recoverableSeconds(plan));
+  }
+
+  /**
+   * A（起点）— B 车站（停 30 s）— C 通过 — X 区间停车点（停 40 s）— D 车站（停 14 s）— E 终到。
+   *
+   * @param origin 起点节点
+   * @param depot 出库点：有它表示从车库出车
+   */
+  private static TimetableRoutePlan recoveryPlan(
+      String code, String origin, Optional<String> depot) {
+    return new TimetableRoutePlan(
+        TimetableTestFixtures.routeId(code),
+        code,
+        RouteOperationType.OPERATION,
+        1,
+        List.of(
+            new TimetableStop(
+                0, Optional.empty(), Optional.of(origin), 0, 30, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.of("B"), Optional.of("OP:S:B:1"), 100, 130, RouteStopPassType.STOP),
+            new TimetableStop(
+                2, Optional.of("C"), Optional.of("OP:S:C:1"), 200, 200, RouteStopPassType.PASS),
+            new TimetableStop(
+                3, Optional.empty(), Optional.of("OP:X:X:1"), 250, 290, RouteStopPassType.STOP),
+            new TimetableStop(
+                4, Optional.of("D"), Optional.of("OP:S:D:1"), 300, 314, RouteStopPassType.STOP),
+            new TimetableStop(
+                5,
+                Optional.of("E"),
+                Optional.of("OP:S:E:1"),
+                400,
+                460,
+                RouteStopPassType.TERMINATE)),
+        origin,
+        "OP:S:E:1",
+        depot,
+        Optional.empty());
   }
 
   /** 对向来车要进同一股道：它从本车要去的方向来，与本车互等，放不下。 */
@@ -1272,10 +1388,16 @@ class ConflictAbsorptionTest {
       return UUID.nameUUIDFromBytes(name.getBytes(StandardCharsets.UTF_8));
     }
 
+    /** 车站本体节点带站码（运行时只在车站压缩停站），区间点、车库不带。 */
     private static TimetableStop stop(
         int index, String node, int arrival, int departure, RouteStopPassType pass) {
       return new TimetableStop(
-          index, Optional.empty(), Optional.of(node), arrival, departure, pass);
+          index,
+          org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals.stationCodeOf(node),
+          Optional.of(node),
+          arrival,
+          departure,
+          pass);
     }
 
     private static TimetableTimingCalculator.SegmentTiming segment(
@@ -1431,6 +1553,12 @@ class ConflictAbsorptionTest {
   /** 同上，另外指定后车的 code：出入库走行是 {@code Dxxx-CREATE / -RETURN}，待命是交路号。 */
   private static TimetableConflictChecker.Conflict conflictOn(
       String resource, int firstTo, int secondFrom, String second) {
+    return conflictOn(resource, firstTo, secondFrom, second, "RB-001");
+  }
+
+  /** 同上，另外指定前车的 code。 */
+  private static TimetableConflictChecker.Conflict conflictOn(
+      String resource, int firstTo, int secondFrom, String second, String first) {
     return new TimetableConflictChecker.Conflict(
         resource.startsWith("platform")
             ? TimetableConflictChecker.Kind.PLATFORM
@@ -1438,7 +1566,7 @@ class ConflictAbsorptionTest {
                 ? TimetableConflictChecker.Kind.SINGLE_LINE
                 : TimetableConflictChecker.Kind.TRACK,
         resource,
-        "RB-001",
+        first,
         second,
         0,
         firstTo,
