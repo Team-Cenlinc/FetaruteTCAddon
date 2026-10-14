@@ -291,12 +291,61 @@ class TimetableBuilderRapidStaggerTest {
     }
   }
 
+  /** 错峰时间上限按进度的时钟算：时钟每读一次走一分钟、上限一分钟，第一批之前就到点，一个候选也不编，保持原表并写明超时；上限 0 不限时照常搜。 */
+  @Test
+  void theStaggerTimeLimitUsesTheProgressClock() {
+    TimetableBuildResult limited =
+        build(
+            new TimetableBuilder(new TimetableBuildProgress(new SteppingClock()), 1), 60, true, 1);
+    TimetableBuildResult unlimited =
+        build(
+            new TimetableBuilder(new TimetableBuildProgress(new SteppingClock()), 1), 60, true, 0);
+
+    String note =
+        limited.phaseNotes().stream()
+            .filter(line -> line.startsWith("快车错峰："))
+            .findFirst()
+            .orElseThrow(() -> new AssertionError(limited.phaseNotes().toString()));
+    assertTrue(note.startsWith("快车错峰：错峰超时（到 1 分钟上限停下，只在已编过的 0 个位置里挑）"), note);
+    assertTrue(note.contains("保持原表"), note);
+    assertTrue(
+        unlimited.phaseNotes().stream()
+            .anyMatch(line -> line.startsWith("快车错峰：") && !line.contains("错峰超时")),
+        unlimited.phaseNotes()::toString);
+  }
+
+  /** 每读一次走一分钟的时钟。 */
+  private static final class SteppingClock extends java.time.Clock {
+    private Instant now = BUILT_AT;
+
+    @Override
+    public synchronized Instant instant() {
+      now = now.plus(Duration.ofMinutes(1));
+      return now;
+    }
+
+    @Override
+    public ZoneId getZone() {
+      return ZONE;
+    }
+
+    @Override
+    public java.time.Clock withZone(ZoneId zone) {
+      return this;
+    }
+  }
+
   /** 错峰说明里的用时随机器快慢变，比较时去掉。 */
   private static List<String> withoutTiming(List<String> notes) {
     return notes.stream().map(note -> note.replaceAll("用时 \\d+s", "用时 ?s")).toList();
   }
 
   private TimetableBuildResult build(TimetableBuilder builder, int localDwell, boolean stagger) {
+    return build(builder, localDwell, stagger, 0);
+  }
+
+  private TimetableBuildResult build(
+      TimetableBuilder builder, int localDwell, boolean stagger, int staggerMinutes) {
     List<TimetableBuilder.RouteInput> routes =
         List.of(
             operation(local, "LOC", List.of(A, B, C, D, E), localDwell, "local"),
@@ -327,7 +376,8 @@ class TimetableBuilderRapidStaggerTest {
                 Duration.ofSeconds(TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS),
                 false,
                 Map.of("local", 400, "rapid", 800))
-            .withRapidStagger(stagger),
+            .withRapidStagger(stagger)
+            .withStaggerMinutes(staggerMinutes),
         BUILT_AT);
   }
 

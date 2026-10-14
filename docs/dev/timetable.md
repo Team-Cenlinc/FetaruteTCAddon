@@ -572,6 +572,10 @@ duty 还没跑完   → allowsReturn=false（回库票带不走它）→ 留在�
    原表本身已放宽（目标间隔排不开）时只试第 0 步，第 0 步也没找到时报告给出按放宽后的间隔重编的按钮。
 
 每个候选都是一次完整构建，一次十几秒到半分钟（build 在后台线程，不阻塞主线程；核数少的主机上会和主线程抢 CPU）；
+**时间上限**（`--stagger-minutes <分钟>`，缺省 10，`TimetableBuildOptions.DEFAULT_STAGGER_MINUTES`；0 为不限）：候选数随相对周期、加停点与档位相乘，
+大路网上不设上限可以跑几个小时。每编一批之前看一次钟（进度的时钟，测试可注入），到点就不再编，停在已编过的候选里按同样的规则挑（或保持原表），
+"快车错峰"一行开头写 `错峰超时（到 N 分钟上限停下，只在已编过的 K 个位置里挑）`。只在批与批之间停，一批已交给线程池的照常编完，
+所以到点时编到哪一个随线程数变；不到点时与不限时逐个候选相同。重建按钮带上非缺省的 `--stagger-minutes`，`/fta timetable config` 有一行"快车错峰时限"。
 候选按 `timetable.build-threads` 成批并行编，挑选与串行相同（见"构建耗时"里的"并行"）。prod 库上试了 10 个位置、约 3 分钟：
 MT-3 整组再平移 70 秒，搜索顺带让 WS-1L 在 HHU 多停 15 秒，快车被卡 14140 秒 → 0，班次 2616、高峰 18 列车不变、不放宽，
 运行时残余从 2569 处降到 0；代价是 WS-2N 发车间隔由均匀 360 秒变为 331/389 交替、MT-3 在南渡的折返停留中位 63 → 169 秒。表不常变，换取的是准确：
@@ -842,7 +846,7 @@ duty 的 `planned_start_second` 可以是负数（出库早于服务日零点）
         [--headway <sec>] [--group-headway "<组>=<sec>,<组>=<sec>"]
         [--start <HH:mm>] [--end <HH:mm>] [--dwell <sec>]
         [--max-trips <n>] [--max-duty-minutes <n>] [--turnaround <sec>（覆盖终到站停站）]
-        [--separation <sec>] [--max-wait <sec>] [--max-idle <sec>] [--strict [--max-cancel <n>]] [--rapid-stagger]
+        [--separation <sec>] [--max-wait <sec>] [--max-idle <sec>] [--strict [--max-cancel <n>]] [--rapid-stagger [--stagger-minutes <n>]]
         [--name "<name>"] [--prefix <p>]
 /fta timetable config <company> <operator> <line>          # 参数一览：生效值、来源与改它的入口
 /fta timetable neighbors <company> <operator> <line> <code>
@@ -913,7 +917,10 @@ baseline 是目标不是硬约束：排出来有冲突时先等比放宽到可�
 
 **错峰平移候选复用原表的相位。** 平移只叠加在选好的相位上（`shiftedAttempt`），选相位本身与平移无关：
 平移候选与原表同一份准备、同一组参数，直接复用原表在目标间隔下选好相位的试排（`TargetMemo`，一次 build 一份），
-不再每个候选把相位第三层重跑一遍。每个平移候选从约 25 次完整试排降到 1 次，结果与重算相同。加停与加长折返的候选改了停站，照旧重新准备、重新选相位。
+不再每个候选把相位第三层重跑一遍。每个平移候选从约 25 次完整试排降到 1 次，结果与重算相同。加停与加长折返的候选改了停站，要重新准备；相位**热启动**：不再整套重选（第三层的完整候选评估是一次构建里最贵的部分），
+直接按原表选好的相位、叠上候选的组平移试排一次（`TimetableBuilder#warmAttempt`），原表相位在新时分下排不出任何班次时才退回整套重选。
+这是启发式：整套重选可能在新停站下挑出另一个相位，热启动看不到它；挑选规则不变，只是每个这类候选按原表相位评。
+原表的试排是这次 build 里第一份、在任何候选之前记下的，串行与并行结果相同。只给错峰候选用，原表自己的各种重排（喂车多停、放宽）照旧整套选。
 
 **完整构建按用途计数。** 构建进度（`/fta timetable status` 的"完整构建"一行）与编表报告（"编表用时"一行）除了总次数，还分开写出
 第三层完整候选、严格取消重排、错峰候选各几次（`TimetableBuildProgress.Trial`），看得出用时花在哪。

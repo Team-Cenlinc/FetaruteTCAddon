@@ -55,6 +55,27 @@ class TimetableBuildReportSenderTest {
             .startsWith("快车 9 班在共线段被慢车拖住，共 500 秒。带 --rapid-stagger"));
   }
 
+  /** 重建命令只在错峰时限不是缺省值时写出 --stagger-minutes；悬停说明写明缺省时限。 */
+  @Test
+  void theRebuildCarriesANonDefaultStaggerLimit() {
+    assertEquals(
+        "",
+        TimetableBuildReportSender.staggerMinutesArgument(
+            OPTIONS.withStaggerMinutes(TimetableBuildOptions.DEFAULT_STAGGER_MINUTES)));
+    assertEquals(
+        " --stagger-minutes 0",
+        TimetableBuildReportSender.staggerMinutesArgument(OPTIONS.withStaggerMinutes(0)));
+    assertEquals(
+        " --stagger-minutes 30",
+        TimetableBuildReportSender.staggerMinutesArgument(OPTIONS.withStaggerMinutes(30)));
+    String hint =
+        TimetableBuildReportSender.rapidStaggerHint(
+                false, false, new TimetableBuildResult.CatchUp(30L, 1, 0L))
+            .orElseThrow();
+    assertTrue(
+        hint.contains("默认最多 " + TimetableBuildOptions.DEFAULT_STAGGER_MINUTES + " 分钟"), hint);
+  }
+
   /** 可点命令里几条线要加引号：客户端不认不带引号的逗号，整条命令标红发不出去。 */
   @Test
   void severalLinesAreQuotedInClickableCommands() {

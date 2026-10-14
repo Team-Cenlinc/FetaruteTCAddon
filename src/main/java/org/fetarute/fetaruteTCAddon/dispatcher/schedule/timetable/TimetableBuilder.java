@@ -696,6 +696,11 @@ public final class TimetableBuilder {
       boolean turnbackOnly) {
     long started = System.nanoTime();
     stage(TimetableBuildProgress.Stage.STAGGER);
+    // 时间上限按进度的时钟算：与"已用时"同一个钟，测试可注入。
+    int budgetMinutes = requested.staggerMinutes();
+    Instant deadline = progress.now().plus(Duration.ofMinutes(budgetMinutes));
+    java.util.function.BooleanSupplier expired =
+        budgetMinutes <= 0 ? () -> false : () -> !progress.now().isBefore(deadline);
     // 候选在池内线程上并发编，序号只用来报进度。
     AtomicInteger candidatesTried = new AtomicInteger();
     Prepared prepared = base.prepared().orElseThrow();
@@ -760,7 +765,8 @@ public final class TimetableBuilder {
                     input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.of(dwell));
               }
             },
-            pool());
+            pool(),
+            expired);
     long millis = (System.nanoTime() - started) / 1_000_000L;
     TimetableBuildResult chosen =
         search.improved().map(RapidStagger.Candidate::result).orElse(base.result());
@@ -773,7 +779,8 @@ public final class TimetableBuilder {
                 search.improved().map(RapidStagger.Candidate::asReported),
                 search.tried(),
                 millis,
-                turnbackOnly));
+                turnbackOnly,
+                search.timedOut() ? budgetMinutes : 0));
   }
 
   /**
@@ -1273,15 +1280,48 @@ public final class TimetableBuilder {
       Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
     // 平移只叠加在选好的相位上（shiftedAttempt）：选相位与平移无关，原表已经选过的直接拿来。
     TimetableBuildOptions key = options.withRapidStagger(false);
+    Optional<Attempt> known = memo.find(prepared, key);
+    if (known.isEmpty() && !relaxAllowed) {
+      Optional<Attempt> warm = warmAttempt(prepared, options, key, input, builtAt);
+      if (warm.isPresent()) {
+        return warm.get();
+      }
+    }
     Attempt selected =
-        memo.find(prepared, key)
-            .orElseGet(
-                () -> {
-                  Attempt chosen = selectedAttempt(prepared, options, input, builtAt);
-                  memo.offer(prepared, key, chosen);
-                  return chosen;
-                });
+        known.orElseGet(
+            () -> {
+              Attempt chosen = selectedAttempt(prepared, options, input, builtAt);
+              memo.offer(prepared, key, chosen);
+              return chosen;
+            });
     return shiftedAttempt(prepared, options, input, builtAt, selected);
+  }
+
+  /**
+   * 错峰加停、加长折返的候选从原表选好的相位起排（热启动）：这类候选只改了一条 route 的停站，准备要重做，但相位不再整套重选
+   * （第三层的完整候选评估是一次构建里最贵的部分），直接按原表的相位、叠上候选的组平移试排一次。
+   *
+   * <p>这是启发式：整套重选可能在新停站下挑出另一个相位，热启动看不到它；候选的挑选规则不变，只是每个候选按原表相位评。 原表的试排是这次 build
+   * 里第一份、在任何候选之前记下的，与线程数无关，串行与并行结果相同。 原表相位在新时分下排不出任何班次（{@link
+   * BuildFailure}）时退回整套重选。只给错峰候选（不许放宽的编表器）用，原表自己的各种重排照旧。
+   *
+   * @return 热启动的试排；没有可用的原表相位或排不出时为空
+   */
+  private Optional<Attempt> warmAttempt(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      TimetableBuildOptions key,
+      BuildInput input,
+      Instant builtAt) {
+    Optional<PhasePlanner.Phases> phases = memo.phasesFor(key);
+    if (phases.isEmpty()) {
+      return Optional.empty();
+    }
+    try {
+      return Optional.of(attemptAtPhases(prepared, options, input, builtAt, phases, groupShift));
+    } catch (BuildFailure failure) {
+      return Optional.empty();
+    }
   }
 
   /** 按目标间隔选相位并试排（不含快车错峰的平移）。 */
@@ -1456,7 +1496,8 @@ public final class TimetableBuilder {
         options.following(),
         options.recoveryMinDwellSeconds(),
         options.maxCancelTrips(),
-        options.holdMaxSeconds());
+        options.holdMaxSeconds(),
+        options.staggerMinutes());
   }
 
   /**
@@ -3356,6 +3397,13 @@ public final class TimetableBuilder {
     synchronized Optional<Attempt> find(Prepared prepared, TimetableBuildOptions options) {
       return this.prepared == prepared && options.equals(this.options)
           ? Optional.of(attempt)
+          : Optional.empty();
+    }
+
+    /** 原表选好的相位：参数相同（准备可以不同，如加停的候选）时给出，没有记下或参数不同时为空。 */
+    synchronized Optional<PhasePlanner.Phases> phasesFor(TimetableBuildOptions options) {
+      return attempt != null && options.equals(this.options)
+          ? Optional.of(attempt.phases())
           : Optional.empty();
     }
 
