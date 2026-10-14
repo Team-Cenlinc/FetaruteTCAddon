@@ -221,7 +221,7 @@ class PidsViewBuilderTest {
     assertEquals(List.of("1"), view.platforms());
   }
 
-  /** 取消行只在计划发车之前显示：快照里还留着、但此刻已过计划发车的取消行不列。 */
+  /** 取消行只在计划到达之前显示：快照里还留着、但此刻已过计划到达的取消行不列。 */
   @Test
   void cancelledRowsAreDroppedOnceTheirTimeHasPassed() {
     PidsRow expired = cancelled(-10);
@@ -247,6 +247,41 @@ class PidsViewBuilderTest {
         rows.stream().map(row -> row.badge().hollow()).toList(),
         "进站的车在首行，取消行在它之后，仍按时间排在后面的车之前");
     assertEquals(ArrivalMode.HIGHLIGHT, rows.get(0).arrival().mode());
+  }
+
+  /** 统屏：别的站台有车进站，不打乱这个站台按时间排的取消行；只有同一站台的进站车才排到取消行前面。 */
+  @Test
+  void aTrainArrivingAtAnotherPlatformKeepsCancelledRowsInTimeOrder() {
+    PidsRow arrivingAtTwo =
+        new PidsRow(
+            PidsRow.Status.ARRIVING,
+            "WS",
+            "SURC:WS:R1",
+            "NFY",
+            Optional.of("SURC:NFY"),
+            "2",
+            NOW.plusSeconds(40),
+            OptionalLong.empty(),
+            2,
+            false,
+            false,
+            false,
+            Optional.of("train"));
+    PidsViewBuilder.Request unified =
+        new PidsViewBuilder.Request(
+            new PidsSnapshot(STATION, NOW, List.of(cancelled(20), arrivingAtTwo)),
+            NOW,
+            ZoneId.of("Asia/Shanghai"),
+            PidsTheme.DARK,
+            Set.of(),
+            List.of(),
+            6,
+            true);
+
+    assertEquals(
+        List.of(true, false),
+        builder.build(unified).rows().stream().map(row -> row.badge().hollow()).toList(),
+        "1 站台的取消行仍排在 2 站台进站车之前");
   }
 
   /** 行数有限时真会来的车优先：取消行只占剩下的行，按先后取，不把真车挤出屏幕。 */

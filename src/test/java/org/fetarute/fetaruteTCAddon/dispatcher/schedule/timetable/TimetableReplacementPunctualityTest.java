@@ -132,8 +132,8 @@ class TimetableReplacementPunctualityTest {
    * 开服时两个交路都没有车（D001 08:00/08:10/08:20，D002 08:03/08:13/08:23），08:11 开始补车。
    *
    * <p>以前两个交路的替补在同一轮一起出库：D001 晚 4 分钟接 08:10、D002 晚 1 分钟接 08:13。现在各按准点能接的下一班的计划出库时刻错开： D001 08:17
-   * 出库接 08:20，D002 08:20 出库接 08:23。D002 08:13 那班还没到发车时刻却已来不及准点，当即取消；开服前就已过了发车时刻的班次
-   * （08:00、08:03、08:10）不回头取消。
+   * 出库接 08:20，D002 08:20 出库接 08:23。D002 08:13 那班已来不及准点，当即取消；D001 08:10 那班刚过发车、还在容差内又没有车，
+   * 同样取消（否则站牌把它当晚点待发挂到容差截止）；过了容差的 08:00、08:03 不回头取消。
    */
   @Test
   void startupReplacementsAreStaggeredByTheirPlannedIssueTimes() {
@@ -148,7 +148,8 @@ class TimetableReplacementPunctualityTest {
     assertEquals(2, service.vacantDutyCount());
 
     assertTrue(at("08:11:00").isEmpty(), "两个交路都等计划出库时刻");
-    assertEquals(List.of(second.get(1)), cancelledTrips(), "只取消现在之后、已来不及准点的那一班");
+    assertEquals(
+        Set.of(first.get(1), second.get(1)), Set.copyOf(cancelledTrips()), "取消还没过容差、又没有车接的班次");
     assertEquals(TripCancellations.Reason.NOT_DISPATCHED, heard.get(0).reason());
     assertTrue(heard.get(0).trainName().isEmpty());
 
@@ -162,7 +163,7 @@ class TimetableReplacementPunctualityTest {
     assertEquals(1, d002.size());
     assertEquals(second, d002.get(0).duty().tripIds());
     assertEquals(2, d002.get(0).tripIndex());
-    assertEquals(1, heard.size(), "替补接上的班次不取消: " + heard);
+    assertEquals(2, heard.size(), "替补接上的班次不取消: " + heard);
   }
 
   /**
@@ -215,6 +216,49 @@ class TimetableReplacementPunctualityTest {
     assertTrue(service.nextDepartureOf("train-A").isEmpty());
     assertEquals(List.of(trips.get(2)), cancelledTrips(), logs::toString);
     assertEquals(3, at("08:27:00").get(0).tripIndex());
+  }
+
+  /** 两次出票检查相隔比宽限更久（出票间隔调大、服务器卡顿）：计划出库时刻落在两次检查之间的那一班仍按准点派，不白白取消。 */
+  @Test
+  void aLongerPollGapStillCatchesTheTripWhoseIssueTimeFellBetweenChecks() {
+    Timetable table = timetable(TimetableStatus.PUBLISHED, 3);
+    List<UUID> trips = table.duties().get(0).tripIds();
+    start(table);
+    clock.set(Instant.parse("2026-03-02T08:08:30Z"));
+    service.release("train-A", "train-removed");
+    at("08:16:40");
+
+    List<TimetableService.Replacement> issued = at("08:17:25");
+
+    assertEquals(1, issued.size(), "08:17 计划出库，检查相隔 45 秒，08:17:25 仍算准点");
+    assertEquals(2, issued.get(0).tripIndex());
+    assertFalse(cancelledTrips().contains(trips.get(2)));
+  }
+
+  /**
+   * 开服时交路记录没恢复上的幸存车随后按时刻接回空缺的交路：替补阶段给它后面班次登记的取消一并撤销，站牌不再把它要跑的班次标成取消。
+   *
+   * <p>班次每 2 分钟一班（08:00…08:06），08:01:30 开服：08:02、08:04 已来不及准点、当即取消，替补按计划 08:03 出库接 08:06。 08:02:05
+   * 幸存车开出 08:02 那班，接回交路，08:04 那班的取消随之撤销。
+   */
+  @Test
+  void aSurvivorTakingBackAVacantDutyRevokesItsSkippedCancellations() {
+    Timetable table = spaced(timetable(TimetableStatus.PUBLISHED, 4), 120);
+    List<UUID> trips = table.duties().get(0).tripIds();
+    apply(table);
+    clock.set(Instant.parse("2026-03-02T08:01:30Z"));
+    service.restoreDutyBindings(clock.get());
+    service.recoverUnboundDuties(Set.of(CREATE_ROUTE), clock.get());
+    at("08:01:30");
+    java.time.LocalDate day = java.time.LocalDate.parse("2026-03-02");
+    assertTrue(service.cancellationOf(table.id(), trips.get(2), day).isPresent(), logs::toString);
+
+    clock.set(Instant.parse("2026-03-02T08:02:05Z"));
+    service.scheduledDepartureAt(event("train-S", 0, clock.get()));
+
+    assertTrue(service.dutyBindingOf("train-S").isPresent(), logs::toString);
+    assertTrue(service.cancellationOf(table.id(), trips.get(1), day).isEmpty());
+    assertTrue(service.cancellationOf(table.id(), trips.get(2), day).isEmpty(), "后面的班次由它接着跑");
   }
 
   /** 同一份表把班次间隔改成 {@code spacing} 秒（首班仍是 08:00）。 */

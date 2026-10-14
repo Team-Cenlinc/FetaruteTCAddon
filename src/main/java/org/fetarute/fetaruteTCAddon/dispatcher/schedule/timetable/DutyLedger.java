@@ -283,6 +283,11 @@ final class DutyLedger {
     return java.util.Map.copyOf(bindings);
   }
 
+  /** 这个交路此刻空缺。 */
+  boolean isVacant(TimetableService.DutyKey duty) {
+    return vacancies.containsKey(duty);
+  }
+
   /** 当前全部空缺的快照。 */
   java.util.List<Vacancy> vacancies() {
     return java.util.List.copyOf(vacancies.values());

@@ -1043,11 +1043,18 @@ public final class TimetableService implements ScheduledDeparturePlan {
   static final Duration VACATE_MARGIN = Duration.ofSeconds(120);
 
   /**
-   * 替补按计划出库时刻算准点的宽限：出票每隔几秒才检查一次，计划出库时刻落在两次检查之间的那一班，检查到时已经过去几秒， 不能因此被当成来不及。
+   * 替补算准点的宽限：替补车至多比计划出库时刻晚这么多出库。
    *
-   * <p>多出的这几秒由出库后的就绪时间吸收。
+   * <p>出票每隔几秒才检查一次，两次检查相隔更久（{@code spawn.tick-interval-ticks} 调大、服务器卡顿）时按实际相隔放宽，至多 {@link
+   * #REPLACEMENT_CHECK_GAP_LIMIT}：计划出库时刻落在两次检查之间的那一班不能因此被当成来不及。
    */
   static final Duration REPLACEMENT_ISSUE_GRACE = Duration.ofSeconds(15);
+
+  /** 按两次出票检查的实际相隔放宽准点宽限的上限。 */
+  static final Duration REPLACEMENT_CHECK_GAP_LIMIT = Duration.ofSeconds(60);
+
+  /** 上一次 {@link #replacementsDue} 的时刻：替补的准点宽限按两次检查的实际相隔放宽。只在主线程读写。 */
+  private Instant lastReplacementCheck;
 
   /**
    * 替补车计划：空缺交路的第 {@code tripIndex} 班由一辆新车接，它走出库线路 {@code createRouteId} 从车库开到那一班的起点。
@@ -1059,7 +1066,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * @param trip 那一班
    * @param createRouteId 替补车的出库线路
    * @param issueAt 按计划该出库的时刻（计划发车 − 走行 − 就绪），至多过去 {@link #REPLACEMENT_ISSUE_GRACE}
-   * @param latestIssue 出库票的到期时刻（计划发车 + 容差 − 走行 − 就绪）：选班按准点，票出了以后在车库口被挡的那段与普通出库票一样以容差为限
+   * @param latestIssue 出库票的到期时刻（计划出库 + 准点宽限）：票出了以后在车库口被挡到赶不上准点就作废，空缺退回、按准点改接后面的班次
    * @param departure 那一班的计划发车
    */
   public record Replacement(
@@ -1143,6 +1150,14 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (!current.enabled() || !current.spawnEnabled() || now == null) {
       return List.of();
     }
+    List<Replacement> out = replacementsDueAt(now, current);
+    lastReplacementCheck = now;
+    return out;
+  }
+
+  private List<Replacement> replacementsDueAt(Instant now, Settings current) {
+    // 这一轮因晚点超限换下、解下时已经取消过的交路：下面的空缺循环不再走一遍。
+    Set<DutyKey> cancelledNow = new HashSet<>();
     for (Map.Entry<String, DutyKey> bound : ledger.bindings().entrySet()) {
       String key = bound.getKey();
       Optional<DutyProgress> progress = ledger.progressOf(key).filter(p -> !p.exhausted());
@@ -1156,7 +1171,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
         String reason = "late-" + late.getAsLong() + "s";
         ledger
             .vacate(key, trainName, reason, now)
-            .ifPresent(vacancy -> cancelUncoverable(vacancy, trainName, reason, now, current));
+            .ifPresent(
+                vacancy -> {
+                  cancelUncoverable(vacancy, trainName, reason, now, current);
+                  cancelledNow.add(vacancy.key());
+                });
       } else if (nextTripMissed(key, progress.get(), current)
           && replacementFor(bound.getValue(), progress.get().assignedTrips(), now, current)
               .isPresent()) {
@@ -1180,17 +1199,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
       Optional<Replacement> planned =
           replacementFor(vacancy.key(), vacancy.fromIndex(), now, current);
-      // 替补跳过的班次（来不及准点）此刻就登记取消；开服登记的空缺从首班算起，只取消还没到发车时刻的，不回头补记早已过去的班次。
-      boolean unbound = vacancy.retiredTrain().isBlank();
-      cancelSkipped(
-          vacancy,
-          planned,
-          Optional.of(now),
-          unbound
-              ? TripCancellations.Reason.NOT_DISPATCHED
-              : TripCancellations.Reason.VEHICLE_REMOVED,
-          unbound ? Optional.empty() : Optional.of(vacancy.retiredTrain()),
-          "duty-vacant:" + vacancy.reason());
+      // 替补跳过的班次（来不及准点）此刻就登记取消；只取消还没过发车容差的（过了容差的票早已作废），不回头补记早已过去的班次。
+      if (!cancelledNow.contains(vacancy.key())) {
+        boolean unbound = vacancy.retiredTrain().isBlank();
+        cancelSkipped(
+            vacancy,
+            planned,
+            Optional.of(now.minus(current.assignTolerance())),
+            unbound
+                ? TripCancellations.Reason.NOT_DISPATCHED
+                : TripCancellations.Reason.VEHICLE_REMOVED,
+            unbound ? Optional.empty() : Optional.of(vacancy.retiredTrain()),
+            "duty-vacant:" + vacancy.reason());
+      }
       if (planned.isEmpty() || planned.get().issueAt().isAfter(now)) {
         continue;
       }
@@ -1335,8 +1356,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
       TimetableTrip trip = tripOpt.get();
       Instant departure = timetable.departureOnServiceDay(trip, key.serviceDate());
-      Instant deadline = departure.plus(current.assignTolerance());
-      if (departure.isBefore(now) || startsAtDepot(planOpt.get())) {
+      if (startsAtDepot(planOpt.get())) {
         continue;
       }
       Optional<TimetableRoutePlan> create =
@@ -1346,7 +1366,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
       }
       long lead = create.get().totalRunSeconds() + readySeconds(timetable, create.get());
       Instant issueAt = departure.minusSeconds(lead);
-      if (issueAt.plus(REPLACEMENT_ISSUE_GRACE).isBefore(now)) {
+      // 最晚出库：计划出库时刻再宽限几秒（出票检查的间隔），晚过这一刻出库就赶不上准点。
+      Instant latestIssue = issueAt.plus(replacementGrace(now));
+      if (latestIssue.isBefore(now)) {
         continue;
       }
       return Optional.of(
@@ -1358,10 +1380,26 @@ public final class TimetableService implements ScheduledDeparturePlan {
               trip,
               create.get().routeId(),
               issueAt,
-              deadline.minusSeconds(lead),
+              latestIssue,
               departure));
     }
     return Optional.empty();
+  }
+
+  /**
+   * 替补准点宽限：{@link #REPLACEMENT_ISSUE_GRACE}，两次出票检查相隔更久时按实际相隔，至多 {@link
+   * #REPLACEMENT_CHECK_GAP_LIMIT}。
+   */
+  private Duration replacementGrace(Instant now) {
+    Instant last = lastReplacementCheck;
+    if (last == null || !last.isBefore(now)) {
+      return REPLACEMENT_ISSUE_GRACE;
+    }
+    Duration gap = Duration.between(last, now);
+    if (gap.compareTo(REPLACEMENT_CHECK_GAP_LIMIT) > 0) {
+      gap = REPLACEMENT_CHECK_GAP_LIMIT;
+    }
+    return gap.compareTo(REPLACEMENT_ISSUE_GRACE) > 0 ? gap : REPLACEMENT_ISSUE_GRACE;
   }
 
   /** 这条运营线路是不是从车库出发（首站 CRET）：它的票自己会出车。 */
@@ -2631,6 +2669,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     // 取消之后又有车接上了这趟车（重启后留在线上的车、晚到的车）：站牌恢复正常。
     cancellations.revoke(
         match.timetable().id(), match.trip().id(), match.assignment().serviceDate());
+    Optional<DutyKey> filling = match.duty().filter(ledger::isVacant);
     changeDuty(
         key,
         () -> {
@@ -2639,7 +2678,29 @@ public final class TimetableService implements ScheduledDeparturePlan {
               .duty()
               .ifPresent(duty -> ledger.bind(event.trainName(), key, duty, "trip-assigned"));
         });
+    // 空缺的交路被线上的车按时刻接回（交路记录没恢复上的幸存车）：替补阶段给它后面班次登记的取消一并撤销，这辆车会接着跑。
+    filling
+        .filter(duty -> ledger.bindingOf(key).filter(duty::equals).isPresent())
+        .ifPresent(duty -> revokeFrom(match.timetable(), duty, match.trip()));
     return Optional.of(match.assignment());
+  }
+
+  /** 撤销交路里从 {@code from} 这一班起各班的取消登记（按起点发车所在的日历日，与登记同一口径）。 */
+  private void revokeFrom(Timetable timetable, DutyKey duty, TimetableTrip from) {
+    List<UUID> ids = timetable.duty(duty.dutyId()).map(VehicleDuty::tripIds).orElse(List.of());
+    int start = ids.indexOf(from.id());
+    for (int j = Math.max(0, start); start >= 0 && j < ids.size(); j++) {
+      timetable
+          .trip(ids.get(j))
+          .ifPresent(
+              trip ->
+                  cancellations.revoke(
+                      timetable.id(),
+                      trip.id(),
+                      LocalDate.ofInstant(
+                          timetable.departureOnServiceDay(trip, duty.serviceDate()),
+                          timetable.zoneId())));
+    }
   }
 
   /** 自启动以来绑定失败的累计次数。 */

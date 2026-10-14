@@ -32,7 +32,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  *
  * <ul>
  *   <li>到发：{@link EtaApi#getBoard}，含运行中列车、已出票未发车与未出票预测
- *   <li>取消：{@link TimetableApi#departuresAt} 中带取消标记的计划到发，只列计划发车还没到的（过了就撤，不再挂在屏上）。预测已排除取消车次，两处不会重复
+ *   <li>取消：{@link TimetableApi#departuresAt} 中带取消标记的计划到发，只列计划到达还没到的（过了就撤，不再挂在屏上）。预测已排除取消车次，两处不会重复
  *   <li>末班车：同一份计划到发里每个服务日开往各终点的最后一班（{@link PidsLastTrains}），只在按表运行启用时标
  * </ul>
  *
@@ -49,7 +49,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
  */
 public final class PidsSnapshotProvider {
 
-  /** 计划到发从多久之前查起：晚点的末班车计划发车已过、人还没开出，末班要比得上它。取消行另按计划发车筛，过了就不列。 */
+  /** 计划到发从多久之前查起：晚点的末班车计划发车已过、人还没开出，末班要比得上它。取消行另按计划到达筛，过了就不列。 */
   static final Duration PLANNED_LOOKBACK = Duration.ofMinutes(5);
 
   /** 计划到发查多远：末班要比到当天最后一班，取时刻表接口的上限一整天。 */
@@ -208,7 +208,7 @@ public final class PidsSnapshotProvider {
   }
 
   /**
-   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按计划发车与显示窗口筛）与末班。
+   * 一个车站的计划到发派生出的两样：取消行（不限窗口，取快照时再按计划到达与显示窗口筛）与末班。
    *
    * @param takenAt 取数时刻
    * @param cancelled 取消行
@@ -270,7 +270,7 @@ public final class PidsSnapshotProvider {
         dynamicStop(route, departure.stopSequence())
             ? departure.plannedNodeId().map(RouteTerminals::platformOf).orElse("-")
             : departure.nodeId().map(RouteTerminals::platformOf).orElse("-"),
-        departure.plannedDeparture(),
+        departure.plannedArrival(),
         OptionalLong.empty(),
         departure.stopSequence(),
         false,

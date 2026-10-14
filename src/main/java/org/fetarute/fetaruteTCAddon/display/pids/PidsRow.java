@@ -18,7 +18,7 @@ import java.util.OptionalLong;
  * @param destination 主目的地（站码；回库车越过运营终点后为“回库”）
  * @param destinationId 主目的地 ID（{@code 运营商:站码}），用于查站名
  * @param platform 站台号；无法解析或站台待定时为 {@code -}
- * @param expectedAt 预计到达或通过本站的时刻；已在站为快照时刻；取消行为计划发车
+ * @param expectedAt 预计到达或通过本站的时刻；已在站为快照时刻；取消行为计划到达（与运行中列车的到站时刻同一口径）
  * @param delaySeconds 相对计划的偏差（正数为晚点）；不按表运行或已取消时为空
  * @param stopSequence 本站停靠序号（交路节点的 0 起下标）；未知时为 -1
  * @param passing 本站通过不停

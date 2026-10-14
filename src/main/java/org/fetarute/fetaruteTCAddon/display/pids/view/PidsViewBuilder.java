@@ -5,6 +5,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -39,7 +40,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * <p>纯函数，依赖只有名称目录与文案。状态词口径：
  *
  * <ul>
- *   <li>取消：色牌与站台空心，终点划掉，到站写“取消”（红）。只在计划发车之前列出；正在进站、停靠中的车排在它前面；行数不够时真会来的车优先， 取消行只占剩下的行
+ *   <li>取消：色牌与站台空心，终点划掉，到站写“取消”（红）。只在计划到达之前列出；正在进站、停靠中的车排在它前面；行数不够时真会来的车优先， 取消行只占剩下的行
  *   <li>回库：色牌空心写“—”，终点写“回库”，不显示时间
  *   <li>停靠中、进站、即将通过：到站格反白
  *   <li>通过：终点用次要色，状态写“通过”，优先于晚点
@@ -308,30 +309,41 @@ public final class PidsViewBuilder {
     return fit(atPlatformFirst(here), request.capacity());
   }
 
-  /** 快照里此刻还该显示的行：取消行到计划发车为止。快照有有效期，按显示时刻再筛一遍。 */
+  /** 快照里此刻还该显示的行：取消行到计划到达为止。快照有有效期，按显示时刻再筛一遍。 */
   private static Stream<PidsRow> live(Request request) {
     return request.snapshot().rows().stream()
         .filter(row -> !cancelled(row) || row.expectedAt().isAfter(request.now()));
   }
 
-  /** 正在进站或停靠的车排在它之前的取消行前面：首行留给站台上真有的车，取消行接在其后，其余照旧按时间。 */
+  /**
+   * 正在进站或停靠的车排在它之前、同一站台的取消行前面：首行留给站台上真有的车，取消行接在其后，其余照旧按时间。
+   *
+   * <p>只挪同一站台的取消行：统屏上别的站台有车进站，不打乱这个站台按时间排的取消行。
+   */
   private static List<PidsRow> atPlatformFirst(List<PidsRow> rows) {
-    int last = -1;
+    Map<String, Integer> lastAt = new HashMap<>();
     for (int i = 0; i < rows.size(); i++) {
       if (atPlatform(rows.get(i))) {
-        last = i;
+        lastAt.put(rows.get(i).platform(), i);
       }
     }
-    if (last < 0) {
+    if (lastAt.isEmpty()) {
       return rows;
     }
     List<PidsRow> out = new ArrayList<>(rows.size());
-    List<PidsRow> held = new ArrayList<>();
-    for (PidsRow row : rows.subList(0, last + 1)) {
-      (cancelled(row) ? held : out).add(row);
+    Map<String, List<PidsRow>> held = new HashMap<>();
+    for (int i = 0; i < rows.size(); i++) {
+      PidsRow row = rows.get(i);
+      Integer last = lastAt.get(row.platform());
+      if (cancelled(row) && last != null && i < last) {
+        held.computeIfAbsent(row.platform(), ignored -> new ArrayList<>()).add(row);
+        continue;
+      }
+      out.add(row);
+      if (last != null && i == last) {
+        out.addAll(held.getOrDefault(row.platform(), List.of()));
+      }
     }
-    out.addAll(held);
-    out.addAll(rows.subList(last + 1, rows.size()));
     return out;
   }
 
@@ -405,7 +417,7 @@ public final class PidsViewBuilder {
    * 2×1 停站屏：本屏站台下一班可以上车的列车（不是取消、通过、本站终到或回库，改去别的站台的不算）往后停哪些站，到终点为止。
    *
    * <p>色牌、终点、多久到达与站台屏首行相同；要提醒的状态（站台待定、站台变更、晚点）另写一行。终点下面一行依次写：
-   * 下一班之前本站台被取消、计划发车还没到的班次（终点与计划时刻；下一班已在进站或停靠时不写，这一行留给它自己），直通（换入的线路、从哪站起），第一个经由站。停站表上的经由站、换线站与备注同一口径
+   * 下一班之前本站台被取消、计划到达还没到的班次（终点与计划时刻；下一班已在进站或停靠时不写，这一行留给它自己），直通（换入的线路、从哪站起），第一个经由站。停站表上的经由站、换线站与备注同一口径
    * （{@link PidsRemarks}）。换线站之后的站按新线路着色，可换乘的线路不含列车所属的线路。
    *
    * @param request 显示要求；不看 {@code capacity}，按站台过滤后取第一班可以上车的

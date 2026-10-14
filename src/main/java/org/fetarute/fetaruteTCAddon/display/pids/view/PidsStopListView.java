@@ -18,7 +18,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  * @param clock 当前时间（{@code HH:mm}），布局带时钟组件时显示
  * @param platforms 站台号方块里写的站台
  * @param train 下一班；本站台没有可以上车的列车时为空，屏上写“暂无后续列车”
- * @param cancelled 下一班之前（没有下一班时为窗口内）本站台被取消、计划发车还没到的第一班；下一班已在进站或停靠时为空。终点下面一行优先写它
+ * @param cancelled 下一班之前（没有下一班时为窗口内）本站台被取消、计划到达还没到的第一班；下一班已在进站或停靠时为空。终点下面一行优先写它
  * @param page 第几页（0 起）
  * @param labels 固定文案
  * @param bandColors 线路色带

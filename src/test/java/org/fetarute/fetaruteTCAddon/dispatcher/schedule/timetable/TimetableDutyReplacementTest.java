@@ -106,9 +106,9 @@ class TimetableDutyReplacementTest {
     assertEquals(Instant.parse("2026-03-02T08:20:00Z"), replacement.departure());
     assertEquals(RouteOperationType.CREATE, replacement.leg(clock.get()).kind());
     assertEquals(
-        Instant.parse("2026-03-02T08:22:00Z"),
+        Instant.parse("2026-03-02T08:18:00Z"),
         replacement.latestIssue(),
-        "最晚 08:22 出库：+180 秒到站，正好卡在 08:25 的容差截止");
+        "最晚 08:18 出库：计划出库 08:17 再宽限两次出票检查的相隔（08:15:30 到 08:17，至多 60 秒），晚过就赶不上准点");
     assertTrue(at("08:17:05").isEmpty(), "出库票在路上，不再派第二辆");
 
     service.bindDuty("train-B", duty, "ticket-create");
