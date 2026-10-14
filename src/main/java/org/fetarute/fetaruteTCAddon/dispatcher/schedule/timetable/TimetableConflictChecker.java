@@ -227,12 +227,14 @@ public final class TimetableConflictChecker {
   }
 
   /**
-   * 在现有投影上试放一段站台等待，只看它<b>新造成</b>的冲突：同一窗口分别扫"有这段等待"与"没有这段等待"两次，被挡住的占用只在前一次出现才算。
+   * 在现有投影上试放一段站台等待，只取它<b>新造成</b>的冲突：同一窗口分别扫"有这段等待"与"没有这段等待"两次，被挡住的占用只在前一次出现才算。
    *
    * <p>途中停车点的等待用它：那辆车本来就停在这股道上（原占用到车尾离开为止），按原时刻也挡得住的车、别的车之间原有的冲突都另有记录，
    * 不是多等造成的。这段等待自己作为后到占用被挡的那一条也不算——它与本车原占用接在一起，那一刻在场的车按原时刻同样在场。
+   *
+   * @return 新增的冲突，按 {@link #CONFLICT_ORDER}；每条的后到占用就是被这段等待新挡住的那辆车
    */
-  static boolean addsNoConflict(
+  static List<Conflict> conflictsAddedBy(
       Map<String, Resource> resources,
       Footprints footprints,
       Stay waiting,
@@ -246,23 +248,24 @@ public final class TimetableConflictChecker {
     mergeOverlapping(candidate, resources, separationSeconds);
     List<Conflict> with = scanWindows(candidate, windows, separationSeconds).conflicts();
     if (with.isEmpty()) {
-      return true;
+      return List.of();
     }
     own.forEach((key, gone) -> candidate.get(key).removeAll(gone));
     Set<Blocked> before = new HashSet<>();
     for (Conflict conflict : scanWindows(candidate, windows, separationSeconds).conflicts()) {
       before.add(Blocked.of(conflict));
     }
+    List<Conflict> added = new ArrayList<>();
     for (Conflict conflict : with) {
       boolean itself =
           conflict.second().equals(waiting.code())
               && conflict.secondFrom() == waiting.from()
               && conflict.secondOwner().equals(waiting.owner());
       if (!itself && !before.contains(Blocked.of(conflict))) {
-        return false;
+        added.add(conflict);
       }
     }
-    return true;
+    return List.copyOf(added);
   }
 
   /** 一条冲突里被挡住的那条占用：每条后到占用在一个资源上至多报一次，用它认"同一处冲突"。 */

@@ -32,11 +32,13 @@ import java.util.UUID;
  *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
  *   <li><b>让车点没有容量</b>：让车点无法在等待窗口内停在合格股道上 → 不可吸收。冲突在后车某个途中停车点之后时，让车点是冲突资源之前最后一个停车的车站
- *       （运行时在那一站的发车门控前被挡住，或驶出后在区间信号前等；只算这段等待新挡住的车），不再看起点——残余不写进表，车按原时刻离开起点；
- *       冲突在第一个停车点之前时让车点是起点。第二条的"后车要等的地方"也是同一个让车点。
+ *       （运行时在那一站的发车门控前被挡住，或驶出后在区间信号前等），不再看起点——残余不写进表，车按原时刻离开起点；
+ *       冲突在第一个停车点之前时让车点是起点。第二条的"后车要等的地方"也是同一个让车点。途中站只算这段等待新挡住、且会与它互等或交叉的车
+ *       （对向、别的路径汇入或交叉、邻表、待命，或这一站是端点、折返站）；同方向同路径跟在后面的后车只是排队，不算放不下， 它要多等的秒数照样受第三条的上限与第五条的连锁约束（{@link
+ *       TimetableWaitingCapacity#room}）。
  *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
- *       写得进去的顺推已由让车修复的必等顺推写进表（{@link ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait}
- *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
+ *       途中站上被这一等挡住的同方向后车同样算：它晚到多少，就按它自己的交路链判一遍，取最深的。 写得进去的顺推已由让车修复的必等顺推写进表（{@link
+ *       ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait} 或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
  * </ol>
  *
  * <p>单线对向本身是<b>可吸收</b>的：运行时按区段互斥，后车在区段外等。不可吸收的是"等的地方是容量 1 站台"那一种， 已被第 2 条覆盖。
@@ -392,22 +394,34 @@ public final class ConflictAbsorption {
     if (wait > maxWait) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
     }
-    // 4. 让车点有没有空位。
-    boolean room =
-        enRoute.isPresent()
-            ? context.waitingCapacity().hasRoom(mover, enRoute.get(), wait, separation)
-            : origin.isEmpty()
-                || context.hasRoom(
-                    origin.get(),
-                    mover,
-                    context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
-                    wait,
-                    separation);
-    if (!room) {
+    // 4. 让车点有没有空位。途中站上被这一等挡住的同方向后车不算放不下（它在后面排队），它要多等的交给第 3、5 条。
+    Map<String, Integer> followers = Map.of();
+    if (enRoute.isPresent()) {
+      TimetableWaitingCapacity.EnRouteRoom room =
+          context.waitingCapacity().room(mover, enRoute.get(), wait, separation);
+      if (!room.fits()) {
+        return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
+      }
+      followers = room.followers();
+    } else if (origin.isPresent()
+        && !context.hasRoom(
+            origin.get(),
+            mover,
+            context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
+            wait,
+            separation)) {
       return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
     }
-    // 5. 连锁：这一等会顶掉后面几班。
+    for (int followerWait : followers.values()) {
+      if (followerWait > maxWait) {
+        return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
+      }
+    }
+    // 5. 连锁：这一等会顶掉后面几班；被它挡住的后车各自晚到，也顶得掉它们交路里的后面几班，取最深的。
     int depth = context.chainDepthAfter(mover, wait);
+    for (Map.Entry<String, Integer> follower : followers.entrySet()) {
+      depth = Math.max(depth, context.chainDepthAfter(follower.getKey(), follower.getValue()));
+    }
     if (depth > MAX_CHAIN_DEPTH) {
       return new Residual(conflict, mover, wait, waitingPoint, depth, Verdict.CHAIN_TOO_DEEP);
     }

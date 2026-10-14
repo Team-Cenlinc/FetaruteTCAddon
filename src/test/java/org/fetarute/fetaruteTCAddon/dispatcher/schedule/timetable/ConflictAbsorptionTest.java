@@ -4,10 +4,21 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailEdge;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -740,6 +751,254 @@ class ConflictAbsorptionTest {
               TurnaroundTable.none(),
               Map.of(route, profile))
           .get(0);
+    }
+  }
+
+  // ------------------------------------------------------------------ 途中站多等挡住的是谁
+
+  /** 同方向同路径的后车被途中站多等挡住：它在后面排队，不算放不下；它自己交路里赶得上下一班就可吸收。 */
+  @Test
+  void aFollowerQueuingBehindAtAThroughStationIsAbsorbable() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+    assertEquals(0, residual.chainDepth());
+  }
+
+  /**
+   * 同一个后车，它交路里的下一班 370 s 就要发：被挡 30 s（MID 上本车 160 s 才走，加裕量 30 s）之后 60 + 300 + 30 = 390 s 才到，赶不上——
+   * 后车的连锁照样算，顺推超限。
+   */
+  @Test
+  void aFollowerWhoseNextTripCannotAbsorbTheDelayIsTooDeep() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RA-003", main, 370, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residual.verdict());
+    assertEquals(1, residual.chainDepth());
+  }
+
+  /** 对向来车要进同一股道：它从本车要去的方向来，与本车互等，放不下。 */
+  @Test
+  void anOpposingTrainBlockedByTheWaitMeansNoRoom() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID back = corridor.through("RO", END + ":1", "OP:X:XB:1", "OP:X:XA:1", WIDE + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RO-001", back, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 从另一条支线汇入、要用同一股道的车：进路交叉，放不下。 */
+  @Test
+  void aTrainFromAnotherBranchBlockedByTheWaitMeansNoRoom() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID branch = corridor.through("RC", SIDE + ":1", "OP:X:XC:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RC-001", branch, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 这一站是别的 route 的终点（折返站）：在这里多等挡住的哪怕是同方向后车，也算放不下。 */
+  @Test
+  void aFollowerBlockedAtATurnbackStationMeansNoRoom() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID shortTurn = corridor.ending("RT", SIDE + ":1", "OP:X:XC:1", MID + ":2");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RT-001", shortTurn, 5000, "D003");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  private static final String SIDE = "OP:S:SIDE";
+  private static final String END = "OP:S:END";
+
+  /**
+   * 带逐边路径的走廊：贯通 route 是 {@code 起点 — x — MID:1 — y — 终点}，0 s 发、100 s 到 MID、120 s 发、300 s 到终点。
+   *
+   * <p>后车 RA-001 在 MID 之后的区间与前车冲突（{@code firstTo = 210, secondFrom = 200}），在 MID 多等 40 s；同一股道上 60 s
+   * 发车的车 160 s 进 MID，按原时刻不冲突（120 + 30 ≤ 160），多等就被挡住。
+   */
+  private static final class Corridor {
+    private final Map<UUID, TimetableConflictChecker.RouteProfile> profiles = new LinkedHashMap<>();
+    private final Map<UUID, TimetableRoutePlan> plans = new LinkedHashMap<>();
+    private final List<String[]> runs = new ArrayList<>();
+    private final Map<String, UUID> routeOfRun = new HashMap<>();
+    private final TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(
+            null, Map.of(WIDE, 2, MID, 2, END, 2, SIDE, 2), Map.of());
+
+    UUID through(String code, String from, String x, String y, String to) {
+      List<String> nodes = List.of(from, x, MID + ":1", y, to);
+      return add(
+          code,
+          List.of(
+              stop(0, from, 0, 0, RouteStopPassType.STOP),
+              stop(1, MID + ":1", 100, 120, RouteStopPassType.STOP),
+              stop(2, to, 300, 300, RouteStopPassType.TERMINATE)),
+          List.of(
+              segment(0, 1, nodes.subList(0, 3), List.of(0, 50, 100)),
+              segment(1, 2, nodes.subList(2, 5), List.of(120, 200, 300))));
+    }
+
+    UUID ending(String code, String from, String x, String to) {
+      return add(
+          code,
+          List.of(
+              stop(0, from, 0, 0, RouteStopPassType.STOP),
+              stop(1, to, 100, 100, RouteStopPassType.TERMINATE)),
+          List.of(segment(0, 1, List.of(from, x, to), List.of(0, 50, 100))));
+    }
+
+    void run(String code, UUID route, int start, String duty) {
+      runs.add(new String[] {code, String.valueOf(start), duty});
+      routeOfRun.put(code, route);
+    }
+
+    ConflictAbsorption.Residual classifyMover() {
+      UUID tableId = uuid("corridor");
+      List<TimetableTrip> trips = new ArrayList<>();
+      Map<String, List<UUID>> dutyTrips = new LinkedHashMap<>();
+      Map<String, Integer> dutyStart = new HashMap<>();
+      List<TimetableConflictChecker.Movement> movements = new ArrayList<>();
+      for (String[] run : runs) {
+        UUID tripId = uuid(run[0]);
+        int start = Integer.parseInt(run[1]);
+        UUID route = routeOfRun.get(run[0]);
+        trips.add(
+            new TimetableTrip(
+                tripId, tableId, route, trips.size(), run[0], start, Optional.of(uuid(run[2]))));
+        dutyTrips.computeIfAbsent(run[2], ignored -> new ArrayList<>()).add(tripId);
+        dutyStart.putIfAbsent(run[2], start);
+        movements.add(new TimetableConflictChecker.Movement(run[0], route, start));
+      }
+      List<VehicleDuty> duties = new ArrayList<>();
+      for (Map.Entry<String, List<UUID>> duty : dutyTrips.entrySet()) {
+        int start = dutyStart.get(duty.getKey());
+        duties.add(
+            new VehicleDuty(
+                uuid(duty.getKey()),
+                tableId,
+                duties.size(),
+                duty.getKey(),
+                "OP:D:DEP:1",
+                "OP:D:DEP:1",
+                Optional.empty(),
+                Optional.empty(),
+                duty.getValue(),
+                start,
+                start + 7000,
+                start + 7100,
+                VehicleDuty.CloseReason.HORIZON_END));
+      }
+      Timetable table =
+          new Timetable(
+              tableId,
+              uuid("company"),
+              uuid("operator"),
+              uuid("line"),
+              "CORRIDOR",
+              "走廊",
+              TimetableStatus.DRAFT,
+              ZoneId.of("UTC"),
+              0,
+              86_400,
+              new ArrayList<>(plans.values()),
+              trips,
+              duties,
+              Optional.empty(),
+              Instant.EPOCH,
+              Instant.EPOCH);
+      return ConflictAbsorption.classify(
+              report(conflictOn("edge:MID~END", 210, 200)),
+              table,
+              new TimetableOccupancyProjector.Occupancy(movements, List.of()),
+              index,
+              SEPARATION,
+              MAX_WAIT,
+              TurnaroundTable.none(),
+              profiles)
+          .get(0);
+    }
+
+    private UUID add(
+        String code,
+        List<TimetableStop> stops,
+        List<TimetableTimingCalculator.SegmentTiming> segments) {
+      UUID id = TimetableTestFixtures.routeId(code);
+      List<TimetableConflictChecker.Platform> platforms = new ArrayList<>();
+      for (TimetableStop stop : stops) {
+        String node = stop.nodeId().orElseThrow();
+        platforms.add(
+            new TimetableConflictChecker.Platform(
+                node, TimetableConflictChecker.groupOf(node), false));
+      }
+      profiles.put(
+          id, new TimetableConflictChecker.RouteProfile(id, code, stops, segments, platforms));
+      plans.put(
+          id,
+          new TimetableRoutePlan(
+              id,
+              code,
+              RouteOperationType.OPERATION,
+              1,
+              stops,
+              stops.get(0).nodeId().orElseThrow(),
+              stops.get(stops.size() - 1).nodeId().orElseThrow(),
+              Optional.empty(),
+              Optional.empty()));
+      return id;
+    }
+
+    private static UUID uuid(String name) {
+      return UUID.nameUUIDFromBytes(name.getBytes(StandardCharsets.UTF_8));
+    }
+
+    private static TimetableStop stop(
+        int index, String node, int arrival, int departure, RouteStopPassType pass) {
+      return new TimetableStop(
+          index, Optional.empty(), Optional.of(node), arrival, departure, pass);
+    }
+
+    private static TimetableTimingCalculator.SegmentTiming segment(
+        int fromStop, int toStop, List<String> nodes, List<Integer> offsets) {
+      List<NodeId> ids = nodes.stream().map(NodeId::of).toList();
+      List<RailEdge> edges = new ArrayList<>();
+      for (int k = 0; k + 1 < ids.size(); k++) {
+        edges.add(
+            new RailEdge(
+                EdgeId.undirected(ids.get(k), ids.get(k + 1)),
+                ids.get(k),
+                ids.get(k + 1),
+                10,
+                10.0,
+                true,
+                Optional.empty()));
+      }
+      return new TimetableTimingCalculator.SegmentTiming(fromStop, toStop, ids, edges, offsets);
     }
   }
 
