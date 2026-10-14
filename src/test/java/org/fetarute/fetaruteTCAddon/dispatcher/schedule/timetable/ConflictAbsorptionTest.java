@@ -789,6 +789,113 @@ class ConflictAbsorptionTest {
     assertEquals(1, residual.chainDepth());
   }
 
+  // ------------------------------------------------------------------ 顺推按可追回量吸收
+
+  /**
+   * 后车被挡 30 s 后 390 s 才到，下一班 380 s 发：晚 10 s。下一班途中 MID 表定停 20 s，压到最短 10 s 能追回 10 s，
+   * 在那一班里就追回来了，链不算深，可吸收；不按追回量判时照旧顺推超限。
+   */
+  @Test
+  void aDelayTheNextTripCanRecoverByShorterStopsIsAbsorbable() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RA-003", main, 380, "D002");
+
+    ConflictAbsorption.Residual recovered =
+        corridor.classifyMover(new ConflictAbsorption.Recovery(10, 0));
+    ConflictAbsorption.Residual strict = corridor.classifyMover(ConflictAbsorption.Recovery.NONE);
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, recovered.verdict());
+    assertEquals(0, recovered.chainDepth());
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, strict.verdict(), "不按追回量判时是旧行为");
+    assertEquals(1, strict.chainDepth());
+  }
+
+  /** 晚 20 s，下一班只能追回 10 s：追不回来，仍是顺推超限。 */
+  @Test
+  void aDelayLongerThanTheRecoverableStopsIsStillTooDeep() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RA-003", main, 370, "D002");
+
+    ConflictAbsorption.Residual residual =
+        corridor.classifyMover(new ConflictAbsorption.Recovery(10, 0));
+
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residual.verdict());
+    assertEquals(1, residual.chainDepth());
+  }
+
+  /** 停站开销不算可追回：表定停 20 s 里有 10 s 是居中刹停与开门延迟，压到最短 10 s 一秒也追不回。 */
+  @Test
+  void theStopOverheadIsNotRecoverable() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RA-003", main, 380, "D002");
+
+    ConflictAbsorption.Residual residual =
+        corridor.classifyMover(new ConflictAbsorption.Recovery(10, 10));
+
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residual.verdict());
+  }
+
+  /**
+   * 同一辆车靠追回吸收的顺推按交路累计，不超过 {@value ConflictAbsorption#RECOVERABLE_CHAIN_BUDGET_SECONDS} 秒：每处晚 15 s、
+   * 下一班能追回 15 s，前两处共 30 s 可吸收，第三处超出累计上限判顺推超限。
+   */
+  @Test
+  void recoveredDelaysAreBudgetedPerDuty() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RA-002", main, 60, "D002");
+    corridor.run("RA-003", main, 375, "D002");
+
+    List<ConflictAbsorption.Residual> residuals =
+        corridor.classifyRepeated(3, new ConflictAbsorption.Recovery(5, 0));
+
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(0).verdict());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residuals.get(1).verdict());
+    assertEquals(ConflictAbsorption.Verdict.CHAIN_TOO_DEEP, residuals.get(2).verdict());
+    assertEquals(1, residuals.get(2).chainDepth());
+  }
+
+  /** 可追回量只算途中停站：起点与终到不压缩，PASS 不停站。 */
+  @Test
+  void recoverableSecondsCountOnlyIntermediateStops() {
+    UUID route = TimetableTestFixtures.routeId("RR");
+    TimetableRoutePlan plan =
+        new TimetableRoutePlan(
+            route,
+            "RR",
+            RouteOperationType.OPERATION,
+            1,
+            List.of(
+                new TimetableStop(
+                    0, Optional.empty(), Optional.of("A"), 0, 30, RouteStopPassType.STOP),
+                new TimetableStop(
+                    1, Optional.empty(), Optional.of("B"), 100, 130, RouteStopPassType.STOP),
+                new TimetableStop(
+                    2, Optional.empty(), Optional.of("C"), 200, 200, RouteStopPassType.PASS),
+                new TimetableStop(
+                    3, Optional.empty(), Optional.of("D"), 300, 314, RouteStopPassType.STOP),
+                new TimetableStop(
+                    4, Optional.empty(), Optional.of("E"), 400, 460, RouteStopPassType.TERMINATE)),
+            "A",
+            "E",
+            Optional.empty(),
+            Optional.empty());
+
+    // B 停 30 s：扣开销 4 s、留最短 10 s，追回 16 s；D 停 14 s 扣完不剩；起点 A 与终到 E 不算。
+    assertEquals(16, new ConflictAbsorption.Recovery(10, 4).recoverableSeconds(plan));
+    assertEquals(0, ConflictAbsorption.Recovery.NONE.recoverableSeconds(plan));
+  }
+
   /** 对向来车要进同一股道：它从本车要去的方向来，与本车互等，放不下。 */
   @Test
   void anOpposingTrainBlockedByTheWaitMeansNoRoom() {
@@ -928,6 +1035,16 @@ class ConflictAbsorptionTest {
     }
 
     ConflictAbsorption.Residual classifyMover() {
+      return classifyMover(ConflictAbsorption.Recovery.NONE);
+    }
+
+    ConflictAbsorption.Residual classifyMover(ConflictAbsorption.Recovery recovery) {
+      return classifyRepeated(1, recovery).get(0);
+    }
+
+    /** 同一处冲突在报告里出现 {@code times} 次：累计上限按报告顺序逐处扣。 */
+    List<ConflictAbsorption.Residual> classifyRepeated(
+        int times, ConflictAbsorption.Recovery recovery) {
       UUID tableId = uuid("corridor");
       List<TimetableTrip> trips = new ArrayList<>();
       Map<String, List<UUID>> dutyTrips = new LinkedHashMap<>();
@@ -981,16 +1098,20 @@ class ConflictAbsorptionTest {
               Optional.empty(),
               Instant.EPOCH,
               Instant.EPOCH);
+      List<TimetableConflictChecker.Conflict> conflicts = new ArrayList<>();
+      for (int i = 0; i < times; i++) {
+        conflicts.add(conflictOn("edge:MID~END", 210, 200));
+      }
       return ConflictAbsorption.classify(
-              report(conflictOn("edge:MID~END", 210, 200)),
-              table,
-              new TimetableOccupancyProjector.Occupancy(movements, List.of()),
-              index,
-              SEPARATION,
-              MAX_WAIT,
-              TurnaroundTable.none(),
-              profiles)
-          .get(0);
+          new TimetableConflictChecker.Report(conflicts),
+          table,
+          new TimetableOccupancyProjector.Occupancy(movements, List.of()),
+          index,
+          SEPARATION,
+          MAX_WAIT,
+          TurnaroundTable.none(),
+          profiles,
+          recovery);
     }
 
     private UUID add(

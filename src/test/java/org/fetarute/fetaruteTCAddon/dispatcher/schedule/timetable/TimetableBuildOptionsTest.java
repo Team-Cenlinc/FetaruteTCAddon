@@ -78,4 +78,26 @@ class TimetableBuildOptionsTest {
     assertEquals(0, none.maxWaitSeconds());
     assertEquals(300, none.toleranceSeconds());
   }
+
+  /** 顺推追回与取消上限：旧构造都是 0（旧行为），换间隔、让车、折返表等都原样带过去，负值按 0。 */
+  @Test
+  void recoveryAndCancelLimitSurviveTheWithers() {
+    TimetableBuildOptions legacy = TimetableBuildOptions.defaults(ZoneId.of("UTC"));
+    assertEquals(0, legacy.recoveryMinDwellSeconds());
+    assertEquals(0, legacy.maxCancelTrips());
+
+    TimetableBuildOptions options = legacy.withRecoveryMinDwell(10).withMaxCancelTrips(7);
+    for (TimetableBuildOptions derived :
+        java.util.List.of(
+            options.withHeadway(Duration.ofSeconds(200)),
+            options.withRepair(TimetableBuildOptions.Repair.none()),
+            options.withRapidStagger(true),
+            options.withFollowing(TimetableBuildOptions.Following.NONE),
+            options.withTurnaround(TurnaroundTable.fixed(45)))) {
+      assertEquals(10, derived.recoveryMinDwellSeconds());
+      assertEquals(7, derived.maxCancelTrips());
+    }
+    assertEquals(0, legacy.withMaxCancelTrips(-3).maxCancelTrips());
+    assertEquals(0, legacy.withRecoveryMinDwell(-3).recoveryMinDwellSeconds());
+  }
 }

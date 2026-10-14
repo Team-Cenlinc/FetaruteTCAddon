@@ -534,6 +534,9 @@ final class TimetableBuildReportSender {
     }
     if (options.strictConflicts()) {
       command.append(" --strict");
+      if (options.maxCancelTrips() != TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS) {
+        command.append(" --max-cancel ").append(options.maxCancelTrips());
+      }
     }
     if (!options.tripCodePrefix().isBlank()) {
       command.append(" --prefix ").append(options.tripCodePrefix());
