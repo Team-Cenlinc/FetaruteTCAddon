@@ -43,20 +43,27 @@ import java.util.UUID;
 public final class ResourcePhasePlanner {
 
   /**
-   * 每次间隔尝试至多再完成多少个相位候选（所有单元合计）；这是搜索预算，不是物理可行性证明。
+   * 粗档把一个间隔分成几份：起点 + 间隔 × k / 份数（k = 1 … 份数 − 1，取模）。
    *
-   * <p>实际预算是 {@code min(本上限, 单元数 × }{@link #COMPLETION_CANDIDATES_PER_UNIT}{@code
-   * )}：单元不多时每个单元的候选都试完； 单元多到封顶时先平分、余下的按优先序补，没试完的单元写进资源相位说明。
+   * <p>完整候选每个都是一次完整构建，不能逐 {@link #SCAN_STEP_SECONDS} 秒扫一整个间隔；五等分时最远的两档离起点五分之二个间隔，
+   * 足以把一个单元挪到周期里另一段空当。
    */
-  public static final int COMPLETION_CANDIDATE_LIMIT = 96;
-
-  /** 一个单元至多有几个完整候选：δ=0、起点 ±{@link #FINE_STEPS_SECONDS} 的细档、四个间隔/5 的粗档。 */
-  public static final int COMPLETION_CANDIDATES_PER_UNIT = 11;
+  static final int COARSE_DIVISIONS = 5;
 
   /**
-   * 起点附近的细档。粗档（间隔/5，340 秒间隔时 68 秒一档）太粗：真实库回放里组间隔每变 5 秒，不可吸收数在 0 到 400 之间跳， 可行相位往往就在周期评估给的起点旁边几十秒内。
+   * 细档取粗档步长（间隔 / {@value #COARSE_DIVISIONS}）的几分之几：四分之一、二分之一、四分之三，即间隔的 1/20、1/10、3/20。
+   *
+   * <p>粗档太粗：组间隔每变几秒，不可吸收数就可能大起大落，可行相位往往就在周期评估给的起点旁边、离起点不到一个粗档的地方。 细档把起点与最近的粗档之间等分填满，随间隔等比伸缩；向下取整到
+   * {@link #SCAN_STEP_SECONDS} 的倍数、不小于它，取整后重合的只算一个。
    */
-  static final int[] FINE_STEPS_SECONDS = {10, 20, 30};
+  static final int FINE_QUARTERS = 3;
+
+  /**
+   * 每个单元至少试的候选：δ=0 与离起点最远的两个粗档（起点 + 间隔 × 2/5、× 3/5）。
+   *
+   * <p>没卷进不可吸收残余的单元只试这几个：它本身没有要消掉的冲突，只看把它整体挪开一大段能不能给别的单元腾地方； 卷进了的单元把细档与近处的粗档也试完（{@link #budgets}）。
+   */
+  static final int COMPLETION_FLOOR_PER_UNIT = 3;
 
   /** 扫描步长。 */
   public static final int SCAN_STEP_SECONDS = 10;
@@ -78,9 +85,8 @@ public final class ResourcePhasePlanner {
    * 完成交路后的评分：硬冲突优先，其次取消数、发车偏移平方和、总冲突与等待量。
    *
    * <p>周期模板不含按需求补车和待命，不能替代这个判据。偏移平方和惩罚集中延后，避免只把平均频率排好。
-   */
-  /**
-   * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余；不参与比较，只决定单元先后
+   *
+   * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余；不参与比较，只决定单元先后与候选多少
    */
   public record CompletionScore(
       int unabsorbable,
@@ -141,8 +147,8 @@ public final class ResourcePhasePlanner {
    *
    * <p>单元内各候选只差这个单元的 δ，互不依赖；评完按原顺序逐个比，并列仍保留先评的那个，挑选与串行相同。单元之间有先后（后面的单元以前面定下的 δ 为起点），仍逐个来。
    *
-   * <p>单元先后按它在起点评分的不可吸收残余里出现的次数排，多的先定，平局按原来的组名序：卡住的单元先挑， 后面的单元在它定下的相位上再挑。候选预算按单元分（{@link
-   * #budgets}），前面的单元吃不掉后面单元的份额。
+   * <p>单元先后按它在起点评分的不可吸收残余里出现的次数排，多的先定，平局按原来的组名序：卡住的单元先挑， 后面的单元在它定下的相位上再挑。候选多少按单元定（{@link
+   * #budgets}），与别的单元无关，前面的单元吃不掉后面单元的份额。
    *
    * @param pool 并行池；{@code complete} 会在池内线程上被并发调用，必须线程安全
    */
@@ -165,23 +171,23 @@ public final class ResourcePhasePlanner {
             best.unabsorbableByDirection());
     // 单元的 δ 只在轮到它时才改，起点与候选在开始前就定了。
     List<List<Integer>> candidates = new ArrayList<>(units.size());
-    for (Unit unit : units) {
-      int limit = unit.reverse() ? Math.min(maxIdleSeconds, unit.interval()) : unit.interval();
+    boolean[] involved = new boolean[units.size()];
+    for (int u = 0; u < units.size(); u++) {
+      Unit unit = units.get(u);
+      // 正向平移一个整间隔与不平移完全相同：上限不含间隔本身。反向的 δ 是端点多等，受闲置上限约束。
+      int limit = unit.reverse() ? Math.min(maxIdleSeconds, unit.interval()) : unit.interval() - 1;
       candidates.add(
           candidatesOf(delta.getOrDefault(unit.keys().get(0), 0), unit.interval(), limit));
+      involved[u] = involved(unit, best);
     }
-    int[] budgets = budgets(candidates.stream().mapToInt(List::size).toArray());
+    int[] budgets = budgets(candidates.stream().mapToInt(List::size).toArray(), involved);
     List<String> shortened = new ArrayList<>();
     for (int u = 0; u < units.size(); u++) {
       Unit unit = units.get(u);
       int start = delta.getOrDefault(unit.keys().get(0), 0);
       List<Integer> tried = candidates.get(u).subList(0, budgets[u]);
       if (budgets[u] < candidates.get(u).size()) {
-        shortened.add(
-            String.join(" + ", unit.keys())
-                + " 少试 "
-                + (candidates.get(u).size() - budgets[u])
-                + " 个");
+        shortened.add(String.join(" + ", unit.keys()));
       }
       List<PhasePlanner.Phases> trials = new ArrayList<>(tried.size());
       for (int candidate : tried) {
@@ -216,11 +222,7 @@ public final class ResourcePhasePlanner {
       }
     }
     if (!shortened.isEmpty()) {
-      notes.add(
-          "完整交路相位候选预算 "
-              + COMPLETION_CANDIDATE_LIMIT
-              + " 个用完，没试完的单元："
-              + String.join("、", shortened));
+      notes.add("完整交路相位：没卷进让不掉的冲突的单元只试 δ=0 与两个远端粗档：" + String.join("、", shortened));
     }
     return bestPhases.equals(phases) && shortened.isEmpty()
         ? phases
@@ -228,50 +230,78 @@ public final class ResourcePhasePlanner {
   }
 
   /**
-   * 一个单元的完整候选，按试的先后：δ=0、起点 ±10/±20/±30 秒的细档、起点 + 间隔/5 的四个粗档（取模）。去掉起点本身与落在 [0, {@code limit}]
-   * 之外的，去重。
+   * 一个单元的完整候选，按试的先后：δ=0；离起点最远的两个粗档（起点 + 间隔 × 2/5、× 3/5）；再由近及远细粗交替——第一级细档 ±、 起点 + 间隔 × 1/5、第二级细档
+   * ±、起点 + 间隔 × 4/5、第三级细档 ±（细档见 {@link #fineSteps}，粗档取模）。去掉起点本身与落在 [0, {@code limit}] 之外的，去重。
+   *
+   * <p>排在前面的先保住：只给一个单元试前几个时（{@link #budgets}），留下的是 δ=0 与两个能把它挪开一大段的粗档，而不是挤在起点旁边的细档。
    */
   static List<Integer> candidatesOf(int start, int interval, int limit) {
     Set<Integer> out = new java.util.LinkedHashSet<>();
     out.add(0);
-    for (int step : FINE_STEPS_SECONDS) {
-      out.add(start - step);
-      out.add(start + step);
-    }
-    for (int fraction = 1; fraction < 5; fraction++) {
-      out.add((int) Math.floorMod((long) start + (long) fraction * interval / 5, interval));
+    out.add(coarse(start, interval, 2));
+    out.add(coarse(start, interval, 3));
+    int[] fine = fineSteps(interval);
+    int[] nearCoarse = {1, COARSE_DIVISIONS - 1};
+    for (int level = 0; level < fine.length; level++) {
+      out.add(start - fine[level]);
+      out.add(start + fine[level]);
+      if (level < nearCoarse.length) {
+        out.add(coarse(start, interval, nearCoarse[level]));
+      }
     }
     out.removeIf(candidate -> candidate == start || candidate < 0 || candidate > limit);
     return List.copyOf(out);
   }
 
+  /** 起点 + 间隔 × {@code k} / {@value #COARSE_DIVISIONS}，取模到 [0, 间隔)。 */
+  private static int coarse(int start, int interval, int k) {
+    return (int) Math.floorMod((long) start + (long) k * interval / COARSE_DIVISIONS, interval);
+  }
+
   /**
-   * 各单元能试几个候选。总预算 {@code min(}{@link #COMPLETION_CANDIDATE_LIMIT}{@code , 单元数 × }{@link
-   * #COMPLETION_CANDIDATES_PER_UNIT}{@code )}：先给每个单元平分的一份（不超过它的候选数），余下的按单元先后补满。
+   * 细档的步长：粗档步长的 1/4、2/4、3/4，向下取整到 {@link #SCAN_STEP_SECONDS} 的倍数（不越过那个比例）、不小于它，重合的去掉。
+   *
+   * @param interval 组间隔
+   * @return 从小到大
+   */
+  static int[] fineSteps(int interval) {
+    Set<Integer> steps = new java.util.TreeSet<>();
+    for (int quarter = 1; quarter <= FINE_QUARTERS; quarter++) {
+      double raw = (double) Math.max(0, interval) * quarter / (4.0 * COARSE_DIVISIONS);
+      long floored = (long) Math.floor(raw / SCAN_STEP_SECONDS) * SCAN_STEP_SECONDS;
+      steps.add((int) Math.max(SCAN_STEP_SECONDS, floored));
+    }
+    return steps.stream().mapToInt(Integer::intValue).toArray();
+  }
+
+  /**
+   * 各单元试几个候选：卷进了不可吸收残余的单元试完全部候选，其余只试前 {@value #COMPLETION_FLOOR_PER_UNIT} 个（δ=0 与两个远端粗档）。
+   *
+   * <p>总量因此随单元数线性增长、每个单元有保底，不设全局封顶：排在后面的单元不会被前面的吃光份额，也不会只剩挤在起点旁边的细档。 最坏（每个单元都卷进残余）是单元数 ×
+   * 一个单元的候选数（至多 11）次完整构建；构建进度与报告里写出实际试了几次。
    *
    * @param sizes 各单元的候选数，按单元先后
+   * @param involved 各单元有没有卷进不可吸收残余
    */
-  static int[] budgets(int[] sizes) {
-    int total =
-        (int)
-            Math.min(
-                COMPLETION_CANDIDATE_LIMIT, (long) sizes.length * COMPLETION_CANDIDATES_PER_UNIT);
+  static int[] budgets(int[] sizes, boolean[] involved) {
     int[] out = new int[sizes.length];
-    if (sizes.length == 0) {
-      return out;
-    }
-    int fair = total / sizes.length;
-    int left = total;
     for (int i = 0; i < sizes.length; i++) {
-      out[i] = Math.min(sizes[i], fair);
-      left -= out[i];
-    }
-    for (int i = 0; i < sizes.length && left > 0; i++) {
-      int extra = Math.min(left, sizes[i] - out[i]);
-      out[i] += extra;
-      left -= extra;
+      out[i] = involved[i] ? sizes[i] : Math.min(sizes[i], COMPLETION_FLOOR_PER_UNIT);
     }
     return out;
+  }
+
+  /** 单元有没有卷进起点评分的不可吸收残余。评分没按方向分摊残余时（只知道总数）看总数：有残余就当每个单元都卷进了，宁可多试。 */
+  private static boolean involved(Unit unit, CompletionScore score) {
+    if (score.unabsorbableByDirection().isEmpty()) {
+      return score.unabsorbable() > 0;
+    }
+    for (String key : unit.keys()) {
+      if (score.unabsorbableByDirection().getOrDefault(key, 0) > 0) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** 单元按卷进不可吸收残余的次数从多到少排；稳定排序，平局保持原来的组名序。 */

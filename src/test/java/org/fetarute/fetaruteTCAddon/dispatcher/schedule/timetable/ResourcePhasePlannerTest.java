@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
+import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -20,6 +21,9 @@ class ResourcePhasePlannerTest {
   private static final String C = "OP:S:C:1";
   private static final int SEPARATION = 30;
   private static final int MAX_WAIT = 300;
+
+  /** 一个单元至多几个完整候选：δ=0、四个粗档、三级细档各 ±。 */
+  private static final int MAX_CANDIDATES_PER_UNIT = 11;
 
   /** 单股道直链 A–B–C：每段 100 blocks、10 bps，站间 10 秒。 */
   private static TimetableConflictChecker.GraphIndex index() {
@@ -72,7 +76,7 @@ class ResourcePhasePlannerTest {
         "原地折返对必须保持整体平移，不能拆开接续");
   }
 
-  /** 更少冲突但需要额外取消的候选不能胜出；评分调用也受完整候选预算限制。 */
+  /** 更少冲突但需要额外取消的候选不能胜出；评分调用不超过各单元候选数之和。 */
   @Test
   void completedSearchDoesNotTradeExtraCancellationsForFewerConflicts() {
     Fixture fixture = opposingPair(300);
@@ -94,14 +98,13 @@ class ResourcePhasePlannerTest {
             });
 
     assertEquals(fixture.phases(), chosen);
-    assertTrue(calls.get() <= ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1);
+    assertTrue(calls.get() <= 1 + 2 * MAX_CANDIDATES_PER_UNIT, () -> calls.get() + " 次");
   }
 
   /**
-   * 单元内各候选并行评分：挑出的相位、写下的说明与评分次数都与串行相同，并列仍取先评的那个，候选预算照样截在第 {@value
-   * ResourcePhasePlanner#COMPLETION_CANDIDATE_LIMIT} 个。
+   * 单元内各候选并行评分：挑出的相位、写下的说明与评分次数都与串行相同，并列仍取先评的那个。
    *
-   * <p>十六个互不相干的方向（每个单元 7 个候选，合计超出预算），评分是相位的确定函数、大量并列。
+   * <p>十六个互不相干的方向，评分是相位的确定函数、大量并列。
    */
   @Test
   void parallelCompletedScoringMatchesSerial() {
@@ -162,16 +165,17 @@ class ResourcePhasePlannerTest {
                   pool);
           assertEquals(serial, parallel, "评分 " + i + "，" + threads + " 线程");
           assertEquals(serialCalls.get(), parallelCalls.get());
-          assertEquals(ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1, serialCalls.get());
+          assertTrue(serialCalls.get() > groups.size(), "每个单元至少试过");
         }
       }
     }
   }
 
   /**
-   * 完整候选预算按单元保证：排在后面的单元也要把自己的候选试完，不能被前面的单元吃光预算。
+   * 卷进不可吸收残余的单元试完全部候选（评分没按方向分摊时按总数算，有残余就都算卷进）。
    *
-   * <p>八个互不相干的方向，起点 δ 都是 100：每个单元 0、±10/±20/±30 细档与四个粗档共 11 个候选，合计 88 个，都要试到。
+   * <p>八个互不相干的方向，间隔 300 s、起点 δ 都是 100：细档步长是间隔的 1/20、1/10、3/20 向下取整到 10 s（10、30、40）； 每个单元
+   * δ=0、两个远端粗档（220、280）、细档 ±10/±30/±40 与两个近处粗档（160、40）共 11 个候选，都要试到。
    */
   @Test
   void everyUnitGetsItsOwnCandidates() {
@@ -191,9 +195,9 @@ class ResourcePhasePlannerTest {
 
     for (String key : units.keys()) {
       assertEquals(
-          java.util.Set.of(0, 70, 80, 90, 110, 120, 130, 160, 220, 280, 40),
+          java.util.Set.of(0, 220, 280, 90, 110, 160, 70, 130, 40, 60, 140),
           tried.get(key),
-          key + " 的候选：0、起点 ±10/±20/±30、起点 + 间隔/5 的四个粗档（取模）");
+          key + " 的候选：0、远端粗档、细档与近处粗档");
     }
   }
 
@@ -214,7 +218,37 @@ class ResourcePhasePlannerTest {
           return new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0);
         });
 
-    assertEquals(java.util.Set.of(10, 20, 30, 60, 120, 180, 240), tried.get(units.keys().get(0)));
+    assertEquals(java.util.Set.of(10, 30, 40, 60, 120, 180, 240), tried.get(units.keys().get(0)));
+  }
+
+  /** 正向单元平移一个整间隔与不平移相同：起点 290、间隔 300 时细档 +10 落在 300 上，不试。 */
+  @Test
+  void aForwardUnitNeverTriesAWholeInterval() {
+    Units units = units(1, 300, 290);
+    Map<String, java.util.Set<Integer>> tried = new java.util.TreeMap<>();
+
+    ResourcePhasePlanner.refineCompleted(
+        units.initial(),
+        units.groups(),
+        units.intervals(),
+        300,
+        java.util.Set.of(),
+        phases -> {
+          record(units.initial(), phases, tried);
+          return new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0);
+        });
+
+    assertTrue(
+        tried.get(units.keys().get(0)).stream().allMatch(delta -> delta < 300), tried.toString());
+  }
+
+  /** 细档随间隔等比伸缩：间隔的 1/20、1/10、3/20，向下取整到扫描步长、不小于它，重合的只留一个。 */
+  @Test
+  void fineStepsScaleWithTheInterval() {
+    assertArrayEquals(new int[] {10, 20}, ResourcePhasePlanner.fineSteps(150));
+    assertArrayEquals(new int[] {10, 20, 40}, ResourcePhasePlanner.fineSteps(270));
+    assertArrayEquals(new int[] {30, 60, 90}, ResourcePhasePlanner.fineSteps(600));
+    assertArrayEquals(new int[] {10}, ResourcePhasePlanner.fineSteps(60));
   }
 
   /** 单元按它在不可吸收残余里出现的次数排，多的先定；平局按原来的组名序。 */
@@ -244,16 +278,15 @@ class ResourcePhasePlannerTest {
   }
 
   /**
-   * 单元太多、总预算封顶时，每个单元先分到同样多的候选，余下的按优先序补；没试完的单元在资源相位说明里写明。
-   *
-   * <p>十二个单元各 11 个候选共 132 个，超过上限：每个单元至少试到上限 / 单元数个。
+   * 单元多（十二个）、只有其中两个卷进不可吸收残余：这两个试完全部 11 个候选，其余每个都保住 δ=0 与两个远端粗档（不是挤在起点旁边的细档）， 资源相位说明里写明哪些单元只试了这几个。
    */
   @Test
-  void aBindingBudgetIsSharedAndReported() {
+  void unitsOutsideTheResidualsKeepTheirCoarseCandidates() {
     Units units = units(12, 300, 100);
     Map<String, java.util.Set<Integer>> tried = new java.util.TreeMap<>();
     java.util.concurrent.atomic.AtomicInteger calls =
         new java.util.concurrent.atomic.AtomicInteger();
+    Map<String, Integer> involved = Map.of(units.keys().get(3), 2, units.keys().get(7), 1);
 
     PhasePlanner.Phases chosen =
         ResourcePhasePlanner.refineCompleted(
@@ -265,19 +298,20 @@ class ResourcePhasePlannerTest {
             phases -> {
               calls.incrementAndGet();
               record(units.initial(), phases, tried);
-              return new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0);
+              return new ResourcePhasePlanner.CompletionScore(3, 0, 0, 0, 0, involved);
             });
 
-    assertEquals(ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1, calls.get());
+    assertEquals(1 + 2 * MAX_CANDIDATES_PER_UNIT + 10 * 3, calls.get());
     for (String key : units.keys()) {
-      assertTrue(
-          tried.getOrDefault(key, java.util.Set.of()).size()
-              >= ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT / 12,
-          key + " 只试了 " + tried.get(key));
+      if (involved.containsKey(key)) {
+        assertEquals(MAX_CANDIDATES_PER_UNIT, tried.get(key).size(), key);
+      } else {
+        assertEquals(java.util.Set.of(0, 220, 280), tried.get(key), key);
+      }
     }
     assertTrue(
         chosen.resourceNotes().stream()
-            .anyMatch(note -> note.contains("预算") && note.contains(units.keys().get(11))),
+            .anyMatch(note -> note.contains("远端粗档") && note.contains(units.keys().get(11))),
         chosen.resourceNotes().toString());
   }
 
