@@ -1509,8 +1509,9 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 同上，另外取消几个名义格子上的班次（严格模式 {@code --max-cancel}）：它们在派车之前就拿掉，记为 {@link
-   * VehicleDutyPlanner.UnassignedReason#CONFLICT_CANCELLED}，其余班次照常派车、串行、让车。
+   * 同上，另外取消几个名义格子上的班次（严格模式 {@code --max-cancel}）：派车照常把它们算进去（与不取消时派出同一套交路）， 派完再从各自的交路里拿掉（{@link
+   * DutyWithdrawal}），记为 {@link
+   * VehicleDutyPlanner.UnassignedReason#CONFLICT_CANCELLED}；别的交路不动，之后照常串行、让车。
    *
    * @param cancelled 要取消的名义格子
    */
@@ -1610,22 +1611,14 @@ public final class TimetableBuilder {
     Map<UUID, Placed> placedByProvisional = new HashMap<>();
     List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
     List<Integer> droppedAt = new ArrayList<>();
+    // 取消的格子照常进派车（派车结果与不取消时逐条相同），派完再从各自的交路里拿掉，见 DutyWithdrawal。
+    Set<UUID> withdrawn = new HashSet<>();
     for (int i = 0; i < placed.size(); i++) {
       Placed item = placed.get(i);
       int candidateIndex = candidateIndexByRoute.get(item.slot().routeId());
       OperationPlan op = prepared.operations().get(candidateIndex);
       TimetableRoutePlan plan = operationPlans.get(candidateIndex);
       int departureSeconds = item.slot().departureSeconds();
-      // 取消的格子不进派车：临时主键仍按格子下标派生，其余班次的主键与不取消时相同。
-      if (cancelled.contains(new CancelSlot(plan.routeId(), departureSeconds))) {
-        dropped.add(
-            new TimetableBuildResult.DroppedTrip(
-                plan.routeCode(),
-                clock(secondOfDay(departureSeconds, options)),
-                VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED));
-        droppedAt.add(departureSeconds);
-        continue;
-      }
       UUID provisional =
           UUID.nameUUIDFromBytes(
               ("provisional:" + timetableId + ":" + i)
@@ -1633,6 +1626,9 @@ public final class TimetableBuilder {
       allocationByProvisional.put(
           provisional, new WeightedTripAllocator.Allocation(item.slot().slot(), candidateIndex));
       placedByProvisional.put(provisional, item);
+      if (cancelled.contains(new CancelSlot(plan.routeId(), departureSeconds))) {
+        withdrawn.add(provisional);
+      }
       VehicleDutyPlanner.PlannedTrip trip =
           new VehicleDutyPlanner.PlannedTrip(
               provisional,
@@ -1670,15 +1666,23 @@ public final class TimetableBuilder {
             .add(trip.departureSeconds());
       }
     }
+    TimetableDepotAllocator allocator = depotAllocator(prepared, plannedTrips, input, separation);
     VehicleDutyPlanner.Result planned =
-        VehicleDutyPlanner.plan(
+        DutyWithdrawal.withdraw(
             timetableId,
+            VehicleDutyPlanner.plan(
+                timetableId,
+                plannedTrips,
+                prepared.legs(),
+                options.dutyLimits(),
+                nextSlotByOrigin,
+                preferredFeeders(phases.connections()),
+                allocator),
             plannedTrips,
+            withdrawn,
             prepared.legs(),
             options.dutyLimits(),
-            nextSlotByOrigin,
-            preferredFeeders(phases.connections()),
-            depotAllocator(prepared, plannedTrips, input, separation));
+            allocator);
     Map<UUID, VehicleDutyPlanner.UnassignedTrip> unassigned = new HashMap<>();
     for (VehicleDutyPlanner.UnassignedTrip trip : planned.unassigned()) {
       unassigned.put(trip.tripId(), trip);
@@ -2233,7 +2237,9 @@ public final class TimetableBuilder {
    * <p>取消发生在相位选择与完整窗口复核之后，不回头改相位：相位层"不拿取消换冲突"比的是相位候选，这里是相位定了之后拿掉个别班次。
    * 后车不是运营班次（出入库走行、待命、带客回库班）或已经取消过时取对方；两方都取消不了就看下一处，一处也取消不了就停。
    *
-   * <p>取消的班次在派车之前拿掉，交路照常重新派车，不会出现取消一班、整条交路后面接不上；派车因此另外截断的班次照常记为取消， 一并计入上限。
+   * <p>取消是局部的：派车与不取消时相同，只从卷进去的交路里拿掉这一班（{@link DutyWithdrawal}），别的交路的车辆、班次与出入库不动。
+   * 那辆车在被取消那一班的起点上待命到下一班，接不上就在那里回库、后面的班次另出一辆车；因此另外截断的班次照常记为取消，一并计入上限。
+   * 端点串行与让车修复照常在整张表上重做（只改时刻、不换车）。不重新派车：重新派车会让一大片交路换车，端点上的冲突整片换一批。
    */
   private Cancellation cancelUnabsorbable(
       Prepared prepared,
@@ -3510,14 +3516,14 @@ public final class TimetableBuilder {
    *
    * @param attempt 最后一次试排
    * @param cancelled 按先后取消的班次
-   * @param count 计入上限的取消数：取消的班次，加上因此派车截断而多取消的班次
+   * @param count 计入上限的取消数：取消的班次，加上交路因此接不上、截断而多取消的班次
    */
   private record Cancellation(Attempt attempt, List<Cancelled> cancelled, int count) {
 
-    /** "N 班"；重新派车另外截断了班次时写明其中几班是截断的。 */
+    /** "N 班"；因取消另外截断了班次时写明其中几班是截断的。 */
     String countText() {
       int induced = count - cancelled.size();
-      return count + " 班" + (induced > 0 ? "（其中重新派车另外截断 " + induced + " 班）" : "");
+      return count + " 班" + (induced > 0 ? "（其中因此另外截断 " + induced + " 班）" : "");
     }
   }
 

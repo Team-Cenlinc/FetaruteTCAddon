@@ -1027,14 +1027,64 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
-  /** 从另一条支线汇入、要用同一股道的车：进路交叉，放不下。 */
+  /** 从另一条支线开来、要用同一股道的车：进站前与本车没有共同节点，但出站后与本车走同一侧（XB、END），是同一行进方向在站上汇合的车， 在本车身后排队，可吸收。 */
   @Test
-  void aTrainFromAnotherBranchBlockedByTheWaitMeansNoRoom() {
+  void aSameDirectionTrainFromAnotherBranchQueuesBehind() {
     Corridor corridor = new Corridor();
     UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
     UUID branch = corridor.through("RC", SIDE + ":1", "OP:X:XC:1", "OP:X:XB:1", END + ":1");
     corridor.run("RA-001", main, 0, "D001");
     corridor.run("RC-001", branch, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 反方向从另一条支线进同一股道的车：进站前与本车没有共同节点，出站后开往本车来的那一侧（XA），与本车互等，放不下。 */
+  @Test
+  void anOpposingTrainFromAnotherBranchMeansNoRoom() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID back = corridor.through("RO", SIDE + ":1", "OP:X:XC:1", "OP:X:XA:1", WIDE + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RO-001", back, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /**
+   * 进路与本车去路交叉的车：它从 SIDE 开来，进站前穿过本车出站要走的道岔 XB，再经 XD 进同一股道。它被挡时停在本车前方要用的资源上， 与本车互卡——哪怕它出站后也开往
+   * END，放不下。
+   */
+  @Test
+  void aTrainWhoseApproachCrossesOurWayOutMeansNoRoom() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID crossing =
+        corridor.along(
+            "RX", List.of(SIDE + ":1", "OP:X:XB:1", "OP:X:XD:1"), List.of("OP:X:XE:1", END + ":1"));
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RX-001", crossing, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 两车在这一站前后没有任何共同节点：方向判不清，保守算放不下。 */
+  @Test
+  void aTrainSharingNoNodeAroundTheStationMeansNoRoom() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID other = corridor.through("RO", SIDE + ":1", "OP:X:XC:1", "OP:X:XD:1", TURN + ":1");
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RO-001", other, 60, "D002");
 
     ConflictAbsorption.Residual residual = corridor.classifyMover();
 
@@ -1095,11 +1145,9 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
-  /**
-   * 支线在站前道岔 J 汇入：本车与它都经 J 进 MID（紧邻前驱相同），但本车从上一个停车点起走的是 WIDE — J，它走的是 SIDE — J， 不是一路跟在本车后面的车，算放不下。
-   */
+  /** 支线在站前道岔 J 汇入：本车从上一个停车点起走的是 WIDE — J，它走的是 SIDE — J，进路不同，但都经 J 进 MID、同一行进方向， 它在本车身后排队，可吸收。 */
   @Test
-  void aBranchMergingRightBeforeTheStationIsNotAFollower() {
+  void aBranchMergingRightBeforeTheStationQueuesBehind() {
     Corridor corridor = new Corridor();
     UUID main = corridor.through("RA", WIDE + ":1", "OP:X:J:1", "OP:X:XB:1", END + ":1");
     UUID branch = corridor.through("RC", SIDE + ":1", "OP:X:J:1", "OP:X:XB:1", END + ":1");
@@ -1109,7 +1157,7 @@ class ConflictAbsorptionTest {
     ConflictAbsorption.Residual residual = corridor.classifyMover();
 
     assertEquals(Optional.of(MID), residual.waitingPoint());
-    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
   }
 
   /**
@@ -1222,6 +1270,35 @@ class ConflictAbsorptionTest {
           List.of(
               segment(0, 1, nodes.subList(0, 3), List.of(0, 50, 100)),
               segment(1, 2, nodes.subList(2, 5), List.of(120, 200, 300))));
+    }
+
+    /**
+     * 任意进出站路径：{@code approach} 首节点 0 s 发，经其余节点 100 s 到 MID:1、120 s 发，经 {@code departure} 300 s
+     * 终到其末节点。
+     */
+    UUID along(String code, List<String> approach, List<String> departure) {
+      List<String> before = new ArrayList<>(approach);
+      before.add(MID + ":1");
+      List<String> after = new ArrayList<>();
+      after.add(MID + ":1");
+      after.addAll(departure);
+      return add(
+          code,
+          List.of(
+              stop(0, approach.get(0), 0, 0, RouteStopPassType.STOP),
+              stop(1, MID + ":1", 100, 120, RouteStopPassType.STOP),
+              stop(2, departure.get(departure.size() - 1), 300, 300, RouteStopPassType.TERMINATE)),
+          List.of(
+              segment(0, 1, before, evenly(0, 100, before.size())),
+              segment(1, 2, after, evenly(120, 300, after.size()))));
+    }
+
+    private static List<Integer> evenly(int from, int to, int count) {
+      List<Integer> out = new ArrayList<>(count);
+      for (int k = 0; k < count; k++) {
+        out.add(from + (to - from) * k / (count - 1));
+      }
+      return out;
     }
 
     UUID ending(String code, String from, String x, String to) {

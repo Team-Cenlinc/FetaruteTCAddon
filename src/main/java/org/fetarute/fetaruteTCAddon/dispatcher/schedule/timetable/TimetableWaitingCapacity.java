@@ -11,7 +11,6 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 import java.util.function.Function;
-import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 
 /**
  * 让车点的等待容量：整趟晚发时的始发站，或冲突之前最后一个途中停车站，在已有占用上试放完整等待窗口。
@@ -64,7 +63,7 @@ final class TimetableWaitingCapacity {
    * 途中停车点上多等的结论。
    *
    * @param fits 放得下：这段等待没有新挡住会与它互等或交叉的车
-   * @param followers 被这段等待新挡住、同方向同路径跟在后面的本表后车，code → 它要多等的秒数（按 code 排序）
+   * @param followers 被这段等待新挡住、与本车同一行进方向的本表后车，code → 它要多等的秒数（按 code 排序）
    */
   record EnRouteRoom(boolean fits, Map<String, Integer> followers) {
     static final EnRouteRoom FULL = new EnRouteRoom(false, Map.of());
@@ -74,28 +73,39 @@ final class TimetableWaitingCapacity {
   /**
    * 一条 route 的路径：节点按经过顺序（段与段相接处只记一次），与各节点相对发车的时刻。
    *
-   * @param edges 第 i 条是 {@code nodes[i] → nodes[i+1]} 走的边；段与段接不上的地方为 {@code null}
    * @param stopSequences 节点是某个停靠点（段的端点）时为它的停靠序号，否则为 -1
    */
-  private record Path(
-      List<String> nodes, List<Integer> times, List<EdgeId> edges, List<Integer> stopSequences) {
+  private record Path(List<String> nodes, List<Integer> times, List<Integer> stopSequences) {
 
     /**
-     * 第 {@code index} 个节点之前、本车最后一个停车的停靠点在路径上的下标；之前没有停车点时为 0（起点）。
+     * 第 {@code index} 个节点之前、最后一个停车的停靠点在路径上的下标；之前没有停车点时为 0（起点）。
      *
      * @param stops 档案的停靠点，按停靠序号查停车方式
      */
     int previousStop(int index, List<TimetableStop> stops) {
       for (int i = index - 1; i > 0; i--) {
-        int sequence = stopSequences.get(i);
-        if (sequence >= 0 && stopsAt(stops, sequence)) {
+        if (stopsAt(stops, i)) {
           return i;
         }
       }
       return 0;
     }
 
-    private static boolean stopsAt(List<TimetableStop> stops, int sequence) {
+    /** 第 {@code index} 个节点之后、下一个停车的停靠点在路径上的下标；之后没有停车点时为末节点。 */
+    int nextStop(int index, List<TimetableStop> stops) {
+      for (int i = index + 1; i < nodes.size() - 1; i++) {
+        if (stopsAt(stops, i)) {
+          return i;
+        }
+      }
+      return nodes.size() - 1;
+    }
+
+    private boolean stopsAt(List<TimetableStop> stops, int index) {
+      int sequence = stopSequences.get(index);
+      if (sequence < 0) {
+        return false;
+      }
       for (TimetableStop stop : stops) {
         if (stop.stopSequence() == sequence) {
           return stop.stops();
@@ -106,31 +116,49 @@ final class TimetableWaitingCapacity {
   }
 
   /**
-   * 对方是不是一路跟在本车后面进这一站的同方向同路径后车：从本车上一个停车点（下标 {@code approachFrom}）到进站节点（{@code mine}）这一段，
-   * 对方进站之前走的是同一串节点、同一串边——至少要有紧邻前驱与进站边相同。对方起点在这一段中途时，只比它起点之后的部分（它从本车来的路上出发， 同样在本车身后）。
+   * 对方是不是与本车同一行进方向进这一站的车：它在本车身后排队，不会与本车互卡。
    *
-   * <p>只看紧邻前驱会把这几种车误认作后车：支线在站前道岔汇入（它的前驱就是本车也走过的道岔）、环线上反向绕行的车、途中折返之后第二次进站时
-   * 从另一侧来的车（它们的前驱都是本车早先走过的节点）。
+   * <p>方向按两车各自的路径判，不看图上的进路是否相同（图里没有方向信息，节点也不分两端）。本车在这一站的"身后"是从上一个停车点 （下标 {@code
+   * myFrom}）到进站之前的节点，"前方"是出站之后到下一个停车点（下标 {@code myTo}）的节点；对方取同样两段（它自己的上一个、下一个停车点）。
+   * 对方进站前那一段碰到本车前方的节点（对向来车、或进路穿过本车去路，会停在本车要用的资源上）、出站后那一段碰到本车身后的节点（它迎着本车来的方向开走），
+   * 都不是同方向；两段都没碰到本车的任何节点、或本车身后与前方有同一个节点（环线、回头线分不出两侧）时判不清，也不算。
+   * 余下的，进站前碰到本车身后的节点、或出站后碰到本车前方的节点，至少有一处为证，就是同方向——不论它经哪条进路、从哪个道岔汇入。
+   *
+   * <p>对方从这一站始发时没有"进站前"，判不清（这一站是它的起点，本就是端点）。
    */
-  private static boolean follows(
-      Path myPath, int approachFrom, int mine, Path otherPath, int theirs) {
-    int span = Math.min(mine - approachFrom, theirs);
-    if (span < 1) {
+  private static boolean sameDirection(
+      Path myPath,
+      int myFrom,
+      int mine,
+      int myTo,
+      Path otherPath,
+      int theirFrom,
+      int theirs,
+      int theirTo) {
+    if (theirs < 1) {
       return false;
     }
-    for (int back = 0; back <= span; back++) {
-      if (!myPath.nodes().get(mine - back).equals(otherPath.nodes().get(theirs - back))) {
+    Set<String> behind = new HashSet<>(myPath.nodes().subList(myFrom, mine));
+    Set<String> ahead = new HashSet<>(myPath.nodes().subList(mine + 1, myTo + 1));
+    for (String node : behind) {
+      if (ahead.contains(node)) {
         return false;
       }
-      if (back > 0) {
-        EdgeId myEdge = myPath.edges().get(mine - back);
-        EdgeId theirEdge = otherPath.edges().get(theirs - back);
-        if (myEdge == null || !myEdge.equals(theirEdge)) {
-          return false;
-        }
-      }
     }
-    return true;
+    boolean evidence = false;
+    for (String node : otherPath.nodes().subList(theirFrom, theirs)) {
+      if (ahead.contains(node)) {
+        return false;
+      }
+      evidence |= behind.contains(node);
+    }
+    for (String node : otherPath.nodes().subList(theirs + 1, theirTo + 1)) {
+      if (behind.contains(node)) {
+        return false;
+      }
+      evidence |= ahead.contains(node);
+    }
+    return evidence;
   }
 
   private TimetableWaitingCapacity(
@@ -285,10 +313,10 @@ final class TimetableWaitingCapacity {
    * 那段时间里本就挡得住的车（前车刚离开、裕量盖住了发车，或紧跟着进站的车）是到站时就有的冲突，别的车之间原有的冲突也各有记录， 都不是多等造成的。恰在原离开 +
    * 裕量进入的车按原时刻不冲突、多等就撞上，算挡住。
    *
-   * <p>新挡住的车分两种。<b>同方向同路径跟在后面的本表后车</b>：从本车上一个停车点起到进这一站，它走的是与本车同一串节点、 同一条进站边（{@link
-   * #follows}）——它在本车身后同一段线路上，运行时在前一个闭塞区间排队，是连锁延误、不会与本车互卡，
-   * 不算放不下，记下它要多等多久交给连锁判据。其余都算放不下：对向来车、从别的路径汇入或交叉的车（哪怕只在站前最后一个道岔才并上来）、
-   * 邻表的车（挪不动，也算不了它的连锁）、待命车（不知道从哪来），以及判不清的（档案没有逐边路径、同一站台组经过多次分不出是哪一次）。
+   * <p>新挡住的车分两种。<b>与本车同一行进方向的本表后车</b>（{@link #sameDirection}），不论经哪条进路、在哪个道岔汇入：
+   * 它在本车身后排队，是连锁延误、不会与本车互卡，不算放不下，记下它要多等多久交给连锁判据。其余都算放不下：对向来车、
+   * 进路穿过本车去路的车（它会停在本车前方要用的资源上）、邻表的车（挪不动，也算不了它的连锁）、待命车（不知道从哪来），
+   * 以及判不清的（档案没有逐边路径、同一站台组经过多次分不出是哪一次、两车路径在这一站前后没有共同节点）。
    * 这一站本身是有车始发或终到的端点、折返站时，挡住任何车都算放不下；这一条排在固定股道那一层之前，是有意的保守：端点上的超员
    * 哪怕只是站台组一层多算一辆，也会卡住折返与出入库，不去细分。不是端点时，先去掉只在站台组一层超员、没真被挡住的车（{@link #blockedOnTheirTrack}）。
    */
@@ -336,13 +364,28 @@ final class TimetableWaitingCapacity {
       return EnRouteRoom.FULL;
     }
     Path myPath = path(mine);
-    int approachFrom = myPath.previousStop(myVisit.get(), mine.profile().stops());
+    int at = myVisit.get();
+    int myFrom = myPath.previousStop(at, mine.profile().stops());
+    int myTo = myPath.nextStop(at, mine.profile().stops());
     Map<String, Integer> followers = new TreeMap<>();
     for (TimetableConflictChecker.Conflict conflict : blocked) {
       Run other = conflict.secondOwner().isPresent() ? null : runs.get(conflict.second());
-      Optional<Integer> at =
+      Optional<Integer> theirs =
           other == null ? Optional.empty() : visit(other, group, conflict.secondFrom());
-      if (at.isEmpty() || !follows(myPath, approachFrom, myVisit.get(), path(other), at.get())) {
+      if (theirs.isEmpty()) {
+        return EnRouteRoom.FULL;
+      }
+      Path otherPath = path(other);
+      List<TimetableStop> otherStops = other.profile().stops();
+      if (!sameDirection(
+          myPath,
+          myFrom,
+          at,
+          myTo,
+          otherPath,
+          otherPath.previousStop(theirs.get(), otherStops),
+          theirs.get(),
+          otherPath.nextStop(theirs.get(), otherStops))) {
         return EnRouteRoom.FULL;
       }
       int wait = (int) Math.max(0L, (long) until + separation - conflict.secondFrom());
@@ -458,7 +501,6 @@ final class TimetableWaitingCapacity {
   private static Path pathOf(TimetableConflictChecker.RouteProfile profile) {
     List<String> nodes = new ArrayList<>();
     List<Integer> times = new ArrayList<>();
-    List<EdgeId> edges = new ArrayList<>();
     List<Integer> sequences = new ArrayList<>();
     for (TimetableTimingCalculator.SegmentTiming segment : profile.segments()) {
       for (int k = 0; k < segment.nodes().size(); k++) {
@@ -468,21 +510,12 @@ final class TimetableWaitingCapacity {
         if (k == 0 && !nodes.isEmpty() && nodes.get(nodes.size() - 1).equals(node)) {
           continue;
         }
-        if (!nodes.isEmpty()) {
-          // 第 k 个节点之前的那条边；段首节点与上一段末节点接不上时没有边。
-          edges.add(k == 0 ? null : segment.edges().get(k - 1).id());
-        }
         nodes.add(node);
         times.add(segment.nodeOffsets().get(k));
         sequences.add(sequence);
       }
     }
-    edges.add(null);
-    return new Path(
-        List.copyOf(nodes),
-        List.copyOf(times),
-        java.util.Collections.unmodifiableList(edges),
-        List.copyOf(sequences));
+    return new Path(List.copyOf(nodes), List.copyOf(times), List.copyOf(sequences));
   }
 
   private boolean hasRoom(
