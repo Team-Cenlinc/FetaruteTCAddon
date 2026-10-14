@@ -20,6 +20,8 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -106,12 +108,27 @@ public final class TimetableBuilder {
   /** 进度：错峰候选与发起的编表器共用一份，完整构建次数一起数。 */
   private final TimetableBuildProgress progress;
 
+  /** 编表线程数（{@code timetable.build-threads} 换算后）；1 为串行。 */
+  private final int threads;
+
+  /** 这次 build 的并行池，错峰候选与发起的编表器共用；为空时 {@link #build} 现开一个、编完关掉。 */
+  private final BuildPool pool;
+
   public TimetableBuilder() {
     this(TimetableBuildProgress.untracked());
   }
 
+  /** 串行编表：测试与不关心线程数的调用方用，不起线程，行为与并行之前完全相同。 */
   public TimetableBuilder(TimetableBuildProgress progress) {
-    this(new TimetableTimingCalculator(), Map.of(), true, progress);
+    this(progress, 1);
+  }
+
+  /**
+   * @param progress 进度
+   * @param threads 编表线程数；1 为串行。结果与线程数无关，线程数只影响快慢
+   */
+  public TimetableBuilder(TimetableBuildProgress progress, int threads) {
+    this(new TimetableTimingCalculator(), Map.of(), true, progress, threads, null);
   }
 
   public TimetableBuilder(TimetableTimingCalculator timingCalculator) {
@@ -137,10 +154,22 @@ public final class TimetableBuilder {
       Map<String, Integer> groupShift,
       boolean relaxAllowed,
       TimetableBuildProgress progress) {
+    this(timingCalculator, groupShift, relaxAllowed, progress, 1, null);
+  }
+
+  private TimetableBuilder(
+      TimetableTimingCalculator timingCalculator,
+      Map<String, Integer> groupShift,
+      boolean relaxAllowed,
+      TimetableBuildProgress progress,
+      int threads,
+      BuildPool pool) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
     this.groupShift = Map.copyOf(groupShift);
     this.relaxAllowed = relaxAllowed;
     this.progress = Objects.requireNonNull(progress, "progress");
+    this.threads = Math.max(1, threads);
+    this.pool = pool;
   }
 
   /**
@@ -152,6 +181,19 @@ public final class TimetableBuilder {
    * @return 构建结果
    */
   public TimetableBuildResult build(
+      BuildInput input, TimetableBuildOptions requested, Instant now) {
+    if (pool != null) {
+      return buildInPool(input, requested, now);
+    }
+    // 一次 build 一个池：错峰候选、相位候选都在里面编，编完关掉，不留线程。
+    try (BuildPool opened = BuildPool.open(threads)) {
+      return new TimetableBuilder(
+              timingCalculator, groupShift, relaxAllowed, progress, threads, opened)
+          .buildInPool(input, requested, now);
+    }
+  }
+
+  private TimetableBuildResult buildInPool(
       BuildInput input, TimetableBuildOptions requested, Instant now) {
     Objects.requireNonNull(input, "input");
     Objects.requireNonNull(requested, "requested");
@@ -579,7 +621,8 @@ public final class TimetableBuilder {
       boolean turnbackOnly) {
     long started = System.nanoTime();
     stage(TimetableBuildProgress.Stage.STAGGER);
-    int[] candidatesTried = {0};
+    // 候选在池内线程上并发编，序号只用来报进度。
+    AtomicInteger candidatesTried = new AtomicInteger();
     Prepared prepared = base.prepared().orElseThrow();
     TimetableBuildOptions candidateOptions = requested.withRapidStagger(false);
     Map<UUID, String> codes = routeCodes(prepared);
@@ -622,7 +665,7 @@ public final class TimetableBuilder {
             new RapidStagger.Evaluator() {
               @Override
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
-                detail("第 " + ++candidatesTried[0] + " 个候选：平移 " + shift);
+                detail("第 " + candidatesTried.incrementAndGet() + " 个候选：平移 " + shift);
                 return stagger(
                     input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.empty());
               }
@@ -632,7 +675,7 @@ public final class TimetableBuilder {
                   Map<String, Integer> shift, RapidStagger.Dwell dwell) {
                 detail(
                     "第 "
-                        + ++candidatesTried[0]
+                        + candidatesTried.incrementAndGet()
                         + " 个候选："
                         + dwell.routeCode()
                         + " 加停 "
@@ -641,7 +684,8 @@ public final class TimetableBuilder {
                 return stagger(
                     input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.of(dwell));
               }
-            });
+            },
+            pool());
     long millis = (System.nanoTime() - started) / 1_000_000L;
     TimetableBuildResult chosen =
         search.improved().map(RapidStagger.Candidate::result).orElse(base.result());
@@ -689,7 +733,7 @@ public final class TimetableBuilder {
                 })
             .orElse(input);
     Built built =
-        new TimetableBuilder(timingCalculator, shift, false, progress)
+        new TimetableBuilder(timingCalculator, shift, false, progress, threads, pool())
             .buildOnce(variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
     RapidStagger.Outcome outcome = RapidStagger.Outcome.of(built.result());
     if (built.chosen().isEmpty()
@@ -719,6 +763,11 @@ public final class TimetableBuilder {
     if (relaxAllowed) {
       progress.detail(text);
     }
+  }
+
+  /** 这次 build 的并行池；不经 {@link #build} 直接用时串行。 */
+  private BuildPool pool() {
+    return pool == null ? BuildPool.serial() : pool;
   }
 
   private static int separationOf(TimetableBuildOptions options) {
@@ -1152,7 +1201,8 @@ public final class TimetableBuilder {
       return shiftedAttempt(prepared, options, input, builtAt, initial);
     }
     TimetableBuildOptions trialOptions = completionOptions(options, initial.intervals());
-    Map<Map<String, Integer>, Attempt> completed = new HashMap<>();
+    // 各相位候选在池内线程上并发试排，结果按相位记在这里。
+    Map<Map<String, Integer>, Attempt> completed = new ConcurrentHashMap<>();
     completed.put(
         initial.phases().deltaByDirection(),
         trialOptions.equals(options)
@@ -1184,7 +1234,8 @@ public final class TimetableBuilder {
                 completed.put(phases.deltaByDirection(), result);
               }
               return result.completionScore();
-            });
+            },
+            pool());
     if (selected.deltaByDirection().equals(initial.phases().deltaByDirection())) {
       return shiftedAttempt(prepared, options, input, builtAt, initial);
     }

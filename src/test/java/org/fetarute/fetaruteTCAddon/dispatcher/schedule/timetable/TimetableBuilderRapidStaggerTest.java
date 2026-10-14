@@ -208,6 +208,78 @@ class TimetableBuilderRapidStaggerTest {
                 false));
   }
 
+  /**
+   * 并行编表与串行逐字段相同：班次、交路、相位与错峰说明、警告都一样。
+   *
+   * <p>慢车停站 30/60/90 秒时快车在表里给慢车让车，错峰会搜：30 秒那次平移扫到错开的窗口就停（早停落在一批的中间）， 60、90
+   * 秒扫完整个周期再细试。每次编表里相位第三层的完整候选也并行评。
+   */
+  @Test
+  void aParallelBuildEqualsTheSerialOne() {
+    for (int dwell : new int[] {30, 60, 90}) {
+      TimetableBuildResult serial =
+          build(new TimetableBuilder(TimetableBuildProgress.untracked(), 1), dwell, true);
+      assertTrue(
+          serial.phaseNotes().stream().anyMatch(note -> note.startsWith("快车错峰：")),
+          serial.phaseNotes()::toString);
+      for (int threads : new int[] {3, 4}) {
+        TimetableBuildResult parallel =
+            build(new TimetableBuilder(TimetableBuildProgress.untracked(), threads), dwell, true);
+        assertEquals(
+            serial.timetable(), parallel.timetable(), "停站 " + dwell + "，" + threads + " 线程");
+        assertEquals(withoutTiming(serial.phaseNotes()), withoutTiming(parallel.phaseNotes()));
+        assertEquals(serial.warnings(), parallel.warnings());
+        assertEquals(serial.resourcePhaseNotes(), parallel.resourcePhaseNotes());
+        assertEquals(
+            withoutTiming(List.of(serial.toString())), withoutTiming(List.of(parallel.toString())));
+      }
+    }
+  }
+
+  /**
+   * 并行编表时取消：进了错峰搜索就取消，各候选在下一次完整构建前停下，取消从 build 抛出（不当作失败），完整构建次数远少于编完。
+   *
+   * <p>取消与编完是赛跑：极少数情况下观察到错峰阶段时已经编完，就再来一次。
+   */
+  @Test
+  void aParallelBuildStopsWhenCancelled() throws Exception {
+    TimetableBuildProgress whole = new TimetableBuildProgress();
+    build(new TimetableBuilder(whole, 4), 60, true);
+    java.util.concurrent.ExecutorService runner =
+        java.util.concurrent.Executors.newSingleThreadExecutor();
+    try {
+      boolean stopped = false;
+      for (int attempt = 0; attempt < 5 && !stopped; attempt++) {
+        TimetableBuildProgress progress = new TimetableBuildProgress();
+        java.util.concurrent.Future<TimetableBuildResult> running =
+            runner.submit(() -> build(new TimetableBuilder(progress, 4), 60, true));
+        while (progress.snapshot().stage() != TimetableBuildProgress.Stage.STAGGER
+            && !running.isDone()) {
+          Thread.onSpinWait();
+        }
+        progress.cancel();
+        try {
+          running.get(60, java.util.concurrent.TimeUnit.SECONDS);
+        } catch (java.util.concurrent.ExecutionException failure) {
+          assertTrue(
+              failure.getCause() instanceof TimetableBuildProgress.Cancelled, failure::toString);
+          assertTrue(
+              progress.snapshot().fullBuilds() < whole.snapshot().fullBuilds(),
+              () -> progress.snapshot() + " / " + whole.snapshot());
+          stopped = true;
+        }
+      }
+      assertTrue(stopped, "五次都在取消之前编完了");
+    } finally {
+      runner.shutdownNow();
+    }
+  }
+
+  /** 错峰说明里的用时随机器快慢变，比较时去掉。 */
+  private static List<String> withoutTiming(List<String> notes) {
+    return notes.stream().map(note -> note.replaceAll("用时 \\d+s", "用时 ?s")).toList();
+  }
+
   private TimetableBuildResult build(TimetableBuilder builder, int localDwell, boolean stagger) {
     List<TimetableBuilder.RouteInput> routes =
         List.of(

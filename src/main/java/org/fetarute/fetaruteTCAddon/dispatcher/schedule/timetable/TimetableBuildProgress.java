@@ -8,14 +8,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * 一次编表的进度：编表线程写，主线程随时读。
+ * 一次编表的进度：编表线程写（并行编候选时是池内几个线程一起写），主线程随时读；各字段都是 volatile 或原子量。
  *
  * <p>编表的耗时几乎全在完整构建（{@code attempt}：派车、串行、让车修复、冲突扫描）的次数上——目标间隔排不开时放宽搜索、
  * 逐组收紧、快车错峰的每个候选都要完整构建一次。所以除了阶段， 还报完整构建了几次：次数在涨就是在干活，不是卡死。
  *
  * <p>只记不算：不知道总共要编几次（搜索会提前收手），不给百分比。
  *
- * <p>取消是协作式的：每次完整构建开始前查一次（{@link #checkpoint}），被取消就抛 {@link Cancelled}，最多等完当前这一次构建。 编完交给落库（{@link
+ * <p>取消是协作式的：每次完整构建开始前查一次（{@link #checkpoint}），被取消就抛 {@link Cancelled}，最多等完当前这一次构建；
+ * 并行的各候选共用这一份，取消后都在各自的下一次完整构建前停下。 编完交给落库（{@link
  * #beginSaving}）之后就取消不了：取消与开始保存只有一个能成，不会出现"说了不保存却存上了"。
  */
 public final class TimetableBuildProgress {

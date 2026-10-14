@@ -93,6 +93,31 @@ public final class ResourcePhasePlanner {
       int maxIdleSeconds,
       Set<UUID> inPlaceTurnbackRoutes,
       java.util.function.Function<PhasePlanner.Phases, CompletionScore> complete) {
+    return refineCompleted(
+        phases,
+        groups,
+        intervals,
+        maxIdleSeconds,
+        inPlaceTurnbackRoutes,
+        complete,
+        BuildPool.serial());
+  }
+
+  /**
+   * 同上，一个单元的各候选并行评分。
+   *
+   * <p>单元内各候选只差这个单元的 δ，互不依赖；评完按原顺序逐个比，并列仍保留先评的那个，挑选与串行相同。单元之间有先后（后面的单元以前面定下的 δ 为起点），仍逐个来。
+   *
+   * @param pool 并行池；{@code complete} 会在池内线程上被并发调用，必须线程安全
+   */
+  public static PhasePlanner.Phases refineCompleted(
+      PhasePlanner.Phases phases,
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervals,
+      int maxIdleSeconds,
+      Set<UUID> inPlaceTurnbackRoutes,
+      java.util.function.Function<PhasePlanner.Phases, CompletionScore> complete,
+      BuildPool pool) {
     List<Direction> order = orderOf(groups, phases, intervals);
     Map<String, Integer> delta = new LinkedHashMap<>(phases.deltaByDirection());
     PhasePlanner.Phases bestPhases = phases;
@@ -109,26 +134,32 @@ public final class ResourcePhasePlanner {
         candidates.add(
             Math.floorMod((long) start + (long) fraction * unit.interval() / 5, unit.interval()));
       }
-      int chosen = start;
+      List<Integer> tried = new ArrayList<>();
+      List<PhasePlanner.Phases> trials = new ArrayList<>();
       for (int candidate : candidates) {
         if (candidate == start || candidate < 0 || candidate > limit) {
           continue;
         }
-        if (evaluated >= COMPLETION_CANDIDATE_LIMIT) {
+        if (evaluated + trials.size() >= COMPLETION_CANDIDATE_LIMIT) {
           break;
         }
         Map<String, Integer> trial = new LinkedHashMap<>(delta);
         for (String key : unit.keys()) {
           trial.put(key, candidate);
         }
-        PhasePlanner.Phases trialPhases = withDelta(phases, trial, notes);
-        CompletionScore score = complete.apply(trialPhases);
+        tried.add(candidate);
+        trials.add(withDelta(phases, trial, notes));
+      }
+      List<BuildPool.Evaluated<CompletionScore>> scores = pool.evaluate(trials, complete);
+      int chosen = start;
+      for (int i = 0; i < scores.size(); i++) {
+        CompletionScore score = scores.get(i).get();
         evaluated++;
         // 禁止通过额外取消班次换取更低冲突数；并列保留原锚定相位。
         if (score.dropped() <= best.dropped() && score.compareTo(best) < 0) {
           best = score;
-          chosen = candidate;
-          bestPhases = trialPhases;
+          chosen = tried.get(i);
+          bestPhases = trials.get(i);
         }
       }
       for (String key : unit.keys()) {

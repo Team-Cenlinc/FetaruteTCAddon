@@ -97,6 +97,89 @@ class ResourcePhasePlannerTest {
     assertTrue(calls.get() <= ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1);
   }
 
+  /**
+   * 单元内各候选并行评分：挑出的相位、写下的说明与评分次数都与串行相同，并列仍取先评的那个，候选预算照样截在第 {@value
+   * ResourcePhasePlanner#COMPLETION_CANDIDATE_LIMIT} 个。
+   *
+   * <p>八个互不相干的方向（每个单元 4 个候选，合计超出预算），评分是相位的确定函数、大量并列。
+   */
+  @Test
+  void parallelCompletedScoringMatchesSerial() {
+    List<ServiceGroupClassifier.Group> groups = new java.util.ArrayList<>();
+    Map<String, Integer> intervals = new java.util.TreeMap<>();
+    for (int i = 0; i < 8; i++) {
+      String name = "g" + i;
+      groups.add(
+          new ServiceGroupClassifier.Group(
+              name,
+              List.of(
+                  new ServiceGroupClassifier.Direction(
+                      "S" + i,
+                      "T" + i,
+                      List.of(),
+                      List.of(TimetableTestFixtures.routeId("R" + i)))),
+              List.of()));
+      intervals.put(name, 300 + 60 * i);
+    }
+    PhasePlanner.Phases initial = new PhasePlanner.Phases(Map.of(), Map.of(), List.of());
+    List<java.util.function.Function<PhasePlanner.Phases, ResourcePhasePlanner.CompletionScore>>
+        scorers =
+            List.of(
+                phases -> score(phases, 7, 3),
+                phases -> score(phases, 5, 2),
+                phases -> score(phases, 11, 1),
+                phases -> new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0));
+    for (int threads : new int[] {2, 3, 4}) {
+      try (BuildPool pool = BuildPool.open(threads)) {
+        for (int i = 0; i < scorers.size(); i++) {
+          var scorer = scorers.get(i);
+          java.util.concurrent.atomic.AtomicInteger serialCalls =
+              new java.util.concurrent.atomic.AtomicInteger();
+          java.util.concurrent.atomic.AtomicInteger parallelCalls =
+              new java.util.concurrent.atomic.AtomicInteger();
+          PhasePlanner.Phases serial =
+              ResourcePhasePlanner.refineCompleted(
+                  initial,
+                  groups,
+                  intervals,
+                  300,
+                  java.util.Set.of(),
+                  phases -> {
+                    serialCalls.incrementAndGet();
+                    return scorer.apply(phases);
+                  });
+          PhasePlanner.Phases parallel =
+              ResourcePhasePlanner.refineCompleted(
+                  initial,
+                  groups,
+                  intervals,
+                  300,
+                  java.util.Set.of(),
+                  phases -> {
+                    parallelCalls.incrementAndGet();
+                    return scorer.apply(phases);
+                  },
+                  pool);
+          assertEquals(serial, parallel, "评分 " + i + "，" + threads + " 线程");
+          assertEquals(serialCalls.get(), parallelCalls.get());
+          assertEquals(ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1, serialCalls.get());
+        }
+      }
+    }
+  }
+
+  /** 由各方向 δ 算出的评分，取模制造大量并列。 */
+  private static ResourcePhasePlanner.CompletionScore score(
+      PhasePlanner.Phases phases, int modulus, int buckets) {
+    long sum = 0;
+    for (Map.Entry<String, Integer> entry :
+        new java.util.TreeMap<>(phases.deltaByDirection()).entrySet()) {
+      sum += (long) entry.getKey().hashCode() % 97 + entry.getValue() / 10;
+    }
+    int value = (int) Math.floorMod(sum, modulus);
+    return new ResourcePhasePlanner.CompletionScore(value / buckets, 0, value % buckets, 0, 0);
+  }
+
   /** 没有可动的东西时原样返回：只有一个方向就没有"相对相位"可谈。 */
   @Test
   void aSingleFlowIsLeftAlone() {
