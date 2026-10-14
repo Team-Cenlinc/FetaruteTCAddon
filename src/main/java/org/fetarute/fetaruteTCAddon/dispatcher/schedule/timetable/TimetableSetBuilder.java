@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -260,7 +261,8 @@ public final class TimetableSetBuilder {
   }
 
   /**
-   * 从联编的表里拆出一条线的表：本线 route 的班次、这些班次所在的交路（车池保证交路不跨线）、交路引用的走行线路；主键按本表 id 重新派生， duty 号从 D001 起、序号连续。
+   * 从联编的表里拆出一条线的表：本线的交路（车池保证交路不跨线）与挂在它们上面的班次（含借别线出入库线路的展示车次）、不挂交路的本线 route 班次、 交路引用的走行线路；主键按本表 id
+   * 重新派生， duty 号从 D001 起、序号连续。
    */
   static Timetable split(
       Timetable joint, Member member, TimetableBuildOptions options, Instant builtAt) {
@@ -272,10 +274,12 @@ public final class TimetableSetBuilder {
     }
     // 交路归属：首班的 route 属于本线。
     List<VehicleDuty> duties = new ArrayList<>();
+    Set<UUID> staffed = new HashSet<>();
     for (VehicleDuty duty : joint.duties()) {
       if (duty.tripIds().isEmpty()) {
         continue;
       }
+      staffed.add(duty.id());
       TimetableTrip head = tripsById.get(duty.tripIds().get(0));
       if (head != null && own.contains(head.routeId())) {
         duties.add(duty);
@@ -292,13 +296,15 @@ public final class TimetableSetBuilder {
           duties.get(i).id(), VehicleDutyPlanner.deterministicDutyId(timetableId, code));
       dutyCodeByOld.put(duties.get(i).id(), code);
     }
-    // 班次归属：本线 route 的班次，或挂在本线交路上的班次（带客的回库班）。
+    // 班次归属跟着交路走：挂在本线交路上的班次（含借别线出入库线路的展示车次）归我；挂在别线交路上的不归我，
+    // 哪怕 route 是本线的——别线的车借我的出入库线路出车，那趟展示车次由它的交路两端出票，留在本表就成了没有交路的普通班次。
+    // 不挂交路的班次按 route 归属。
     List<TimetableTrip> trips = new ArrayList<>();
     Map<UUID, UUID> tripIdByOld = new HashMap<>();
     for (TimetableTrip trip : joint.trips()) {
-      boolean mine =
-          own.contains(trip.routeId()) || trip.dutyId().map(dutyIdByOld::containsKey).orElse(false);
-      if (!mine) {
+      boolean onMyDuty = trip.dutyId().map(dutyIdByOld::containsKey).orElse(false);
+      boolean onOtherDuty = !onMyDuty && trip.dutyId().filter(staffed::contains).isPresent();
+      if (onOtherDuty || !(onMyDuty || own.contains(trip.routeId()))) {
         continue;
       }
       UUID id = TimetableTripNumbering.deterministicTripId(timetableId, trip.tripCode());

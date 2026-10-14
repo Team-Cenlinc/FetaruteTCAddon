@@ -63,6 +63,57 @@ class TimetableDepotAllocatorTest {
     assertEquals(Optional.of(SHORT), result.duties().get(0).createRouteId());
   }
 
+  /**
+   * 本线只比借用多等几秒也照常借用：不设容差。投影是名义班次，让车修复挪动运营车之后，这点等待常常落到运营车身上、在没有空股道的让车点让不掉 （MT,WS,IS 联编回放：容差 10
+   * 秒或一个最小间隔都让严格模式失败）。
+   */
+  @Test
+  void aSlightlyBusierHomeDepotStillBorrows() {
+    var result = linedPlan(List.of(new TimetableConflictChecker.Movement("BLOCK", LONG, 560)));
+    assertEquals(Optional.of(SHORT), result.duties().get(0).createRouteId());
+  }
+
+  /** 同一对车在一次相遇里压到的边与两端道岔只算一次，取最长的等待；不同的车、隔开的两次相遇分别计。 */
+  @Test
+  void pressureCountsEachEncounterOnce() {
+    var crossing =
+        List.of(
+            conflict("edge:X", "A", "B", 100, 120, 110, 130),
+            conflict("junction:X1", "A", "B", 98, 101, 108, 111),
+            conflict("junction:X2", "B", "A", 119, 122, 129, 132));
+    var once = TimetableDepotAllocator.pressureOf(crossing, 15);
+    assertEquals(25, once.waitSeconds());
+    assertEquals(1, once.conflicts());
+
+    var more = new java.util.ArrayList<>(crossing);
+    more.add(conflict("edge:Y", "A", "C", 100, 120, 130, 150));
+    more.add(conflict("edge:Z", "B", "A", 400, 420, 430, 450));
+    var three = TimetableDepotAllocator.pressureOf(more, 15);
+    assertEquals(25 + 5 + 5, three.waitSeconds());
+    assertEquals(3, three.conflicts());
+  }
+
+  private static TimetableConflictChecker.Conflict conflict(
+      String resource,
+      String first,
+      String second,
+      int firstFrom,
+      int firstTo,
+      int secondFrom,
+      int secondTo) {
+    return new TimetableConflictChecker.Conflict(
+        TimetableConflictChecker.Kind.TRACK,
+        resource,
+        first,
+        second,
+        firstFrom,
+        firstTo,
+        secondFrom,
+        secondTo,
+        Optional.empty(),
+        Optional.empty());
+  }
+
   /** 回同一车库的两条进路中，较短进路被占用时应使用较长而空闲的进路。 */
   @Test
   void aBusyShorterReturnDoesNotWinEveryClosing() {

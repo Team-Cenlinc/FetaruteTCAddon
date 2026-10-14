@@ -1331,7 +1331,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * 替补车最早能接交路里的哪一班：从 {@code fromIndex} 起第一班有出库线路能把车<b>准点</b>送到它起点的。
    *
    * <p>起点本身就是车库（首站 CRET）的班次不在这里派：那一班自己的票就会从车库出车，交路空着时出车即绑上。 出库线路取表里终点在那一班起点站台组的 CREATE
-   * 线路（走行最短的那条），出库时刻 = 计划发车 − 走行 − 就绪；这个时刻已经过去（超出 {@link #REPLACEMENT_ISSUE_GRACE}）的班次跳过，
+   * 线路（交路原定的那条优先，见 {@link #positioningRoute}），出库时刻 = 计划发车 − 走行 − 就绪；这个时刻已经过去（超出 {@link
+   * #REPLACEMENT_ISSUE_GRACE}）的班次跳过，
    * 不在发车容差内晚点接：晚到的替补会和同线路的下一班挤在一起开，接着又被晚点上限换下、连带取消后面的班次。没有出库线路或来不及准点时试下一班。
    *
    * @return 替补计划；一班都接不上时为空
@@ -1360,7 +1361,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
         continue;
       }
       Optional<TimetableRoutePlan> create =
-          positioningRoute(timetable, planOpt.get(), duty.consist());
+          positioningRoute(timetable, planOpt.get(), duty.consist(), duty.createRouteId());
       if (create.isEmpty()) {
         continue;
       }
@@ -1409,25 +1410,34 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。
+   * 替补车的出库线路：终点在这条线路起点站台组的 CREATE 线路。交路原定的出库线路到得了就用它——替补从原定车库出、回原定车库， 与编表投影一致；到不了时在本线 CREATE
+   * 线路（外线走行没有本线的出库服务）里取走行最短的那条。
    *
    * <p>交路带车型时替补车出的是这个车型，只在编表时允许这个车型的出库线路里选（表里有它的变体计划），时分也按这个车型； 一条都没有时派不出替补。交路不带车型时只比不分车型的那份计划。
    *
    * @param consist 交路的车型
+   * @param planned 交路原定的出库线路
    */
   private static Optional<TimetableRoutePlan> positioningRoute(
-      Timetable timetable, TimetableRoutePlan target, Optional<String> consist) {
+      Timetable timetable,
+      TimetableRoutePlan target,
+      Optional<String> consist,
+      Optional<UUID> planned) {
     String origin = TimetableConflictChecker.groupOf(target.originNodeId());
     if (origin.isBlank()) {
       return Optional.empty();
     }
     TimetableRoutePlan best = null;
     for (TimetableRoutePlan plan : timetable.routePlans()) {
-      if (plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)
-          && plan.kind() == RouteOperationType.CREATE
-          && !plan.external()
-          && origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))
-          && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {
+      if (!plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)
+          || plan.kind() != RouteOperationType.CREATE
+          || !origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))) {
+        continue;
+      }
+      if (planned.filter(plan.routeId()::equals).isPresent()) {
+        return Optional.of(plan);
+      }
+      if (!plan.external() && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {
         best = plan;
       }
     }
