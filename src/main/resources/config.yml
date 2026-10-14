@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 42
+config-version: 43
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -289,6 +289,9 @@ timetable:
   # 编表时每次车站停车在停站时间（dwell）之外额外计入的秒数，涵盖列车对位刹停与开门延迟。
   # 若实际"到站→发车"总时长与表定明显不符，可按实测调整，修改后需重新编排时刻表
   station-stop-overhead-seconds: 4
+  # 编表（/fta timetable build，含快车错峰搜索）用几个线程并行试候选；结果与线程数无关，线程数只影响快慢。
+  # auto 取核数的一半（至少 1、至多 4），给游戏留出余量；0 表示用全部核；1 为单线程
+  build-threads: auto
   # 晚点追赶：只对已绑定表定车次且确实晚点的列车生效，只会缩短等待，不会让列车更晚。
   # 每趟车结束时日志记录一行 TIMETABLE_TRIP_DELAY，可据此评估追赶效果
   recovery:

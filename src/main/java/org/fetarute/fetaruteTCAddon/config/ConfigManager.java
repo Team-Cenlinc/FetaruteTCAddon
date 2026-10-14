@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 42;
+  private static final int EXPECTED_CONFIG_VERSION = 43;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -308,7 +308,26 @@ public final class ConfigManager {
         recoveryMinDwellSeconds,
         recoveryOverspeedPercent,
         recoveryEngageDelaySeconds,
-        maxDelaySeconds);
+        maxDelaySeconds,
+        parseBuildThreads(section, logger));
+  }
+
+  /**
+   * 编表线程数：{@code auto}（或不写）按核数自动取，非负整数照用（0 表示全部核）；其余回退自动并告警。
+   *
+   * @return 配置值；自动时为 {@link TimetableSettings#AUTO_BUILD_THREADS}
+   */
+  private static int parseBuildThreads(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    Object raw = section.get("build-threads");
+    if (raw == null || "auto".equalsIgnoreCase(String.valueOf(raw).trim())) {
+      return TimetableSettings.AUTO_BUILD_THREADS;
+    }
+    if (raw instanceof Integer value && value >= 0) {
+      return value;
+    }
+    logger.warning("timetable.build-threads 配置无效: " + raw + "，已回退为 auto");
+    return TimetableSettings.AUTO_BUILD_THREADS;
   }
 
   private static int readNonNegativeInt(
@@ -1617,6 +1636,7 @@ public final class ConfigManager {
    * @param recoveryOverspeedPercent 晚点追赶：线路限速放宽的百分比；0 表示不放宽
    * @param recoveryEngageDelaySeconds 晚点追赶：晚点达到多少秒才放宽线路限速
    * @param maxDelaySeconds 交路上的下一班晚过计划发车这么多秒还没开出，车就从交路上解下、后面的班次交给替补；0 表示不限
+   * @param buildThreads 编表（含快车错峰搜索）用几个线程：{@link #AUTO_BUILD_THREADS} 按核数自动取，0 表示全部核，1 为串行；结果与线程数无关
    */
   public record TimetableSettings(
       boolean enabled,
@@ -1630,7 +1650,8 @@ public final class ConfigManager {
       int recoveryMinDwellSeconds,
       int recoveryOverspeedPercent,
       int recoveryEngageDelaySeconds,
-      int maxDelaySeconds) {
+      int maxDelaySeconds,
+      int buildThreads) {
 
     /** 车站停车开销的缺省值：dwell 20 秒时，"压牌→发车"的中位耗时约 24 秒。 */
     public static final int DEFAULT_STATION_STOP_OVERHEAD_SECONDS = 4;
@@ -1651,6 +1672,9 @@ public final class ConfigManager {
     /** 晚点上限的缺省值：晚过这么久的车次，乘客早已改乘，再让原车接着跑只会把后面的班次一路拖晚。 */
     public static final int DEFAULT_MAX_DELAY_SECONDS = 900;
 
+    /** 编表线程数按核数自动取（{@code build-threads: auto}）：核数一半，至少 1、至多 4。 */
+    public static final int AUTO_BUILD_THREADS = -1;
+
     public TimetableSettings {
       holdMaxSeconds = Math.max(0, holdMaxSeconds);
       assignToleranceSeconds = Math.max(0, assignToleranceSeconds);
@@ -1662,6 +1686,7 @@ public final class ConfigManager {
       recoveryOverspeedPercent = Math.max(0, recoveryOverspeedPercent);
       recoveryEngageDelaySeconds = Math.max(0, recoveryEngageDelaySeconds);
       maxDelaySeconds = Math.max(0, maxDelaySeconds);
+      buildThreads = buildThreads < 0 ? AUTO_BUILD_THREADS : buildThreads;
     }
 
     /** 全部关闭的默认值；晚点追赶的参数有缺省值，但按表运行关着时不起作用。 */
@@ -1678,7 +1703,8 @@ public final class ConfigManager {
           DEFAULT_RECOVERY_MIN_DWELL_SECONDS,
           DEFAULT_RECOVERY_OVERSPEED_PERCENT,
           DEFAULT_RECOVERY_ENGAGE_DELAY_SECONDS,
-          DEFAULT_MAX_DELAY_SECONDS);
+          DEFAULT_MAX_DELAY_SECONDS,
+          AUTO_BUILD_THREADS);
     }
   }
 
