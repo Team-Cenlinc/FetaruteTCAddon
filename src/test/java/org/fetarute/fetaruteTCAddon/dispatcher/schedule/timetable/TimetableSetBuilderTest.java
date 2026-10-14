@@ -3,6 +3,8 @@ package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -18,6 +20,8 @@ import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraph;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.repository.TimetableRepository;
+import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -117,6 +121,96 @@ class TimetableSetBuilderTest {
             .allMatch(duty -> duty.createRouteId().filter(create.routeId()::equals).isPresent()));
   }
 
+  /**
+   * WS 没有自己的出库线路，借 MT 的带客出库线路 CRTX（DEP–A2–B–A1，按运营交路调度）出车：这些出入库展示车次跟着交路进 WS 表， 带交路与车型、是展示车次；MT
+   * 表里不留没有交路的副本，按表出票时也不会为它们另发运营票。
+   */
+  @Test
+  void borrowedPassengerLegTripsFollowTheirDuty() {
+    UUID crtx = id("CRTX");
+    var borrowed =
+        leg("CRTX", RouteOperationType.CREATE, List.of(DEP, A2, B, A1))
+            .withDispatchByOperation(true);
+    ConsistFleet fleet =
+        new ConsistFleet(
+            Map.of(
+                "m6",
+                new ConsistFleet.Consist(
+                    "m6", "SH_A6", TimetableTestFixtures.perEdgeSpeedModel(), 60.0)),
+            Map.of());
+    List<TimetableBuilder.RouteInput> wsRoutesIn = new ArrayList<>();
+    wsRoutesIn.add(operation("FA", List.of(A1, B, C1)));
+    wsRoutesIn.add(operation("FB", List.of(C1, B, A1)));
+    wsRoutesIn.add(borrowed);
+    wsRoutesIn.add(leg("RET1", RouteOperationType.RETURN, List.of(A1, DEP)));
+    List<TimetableBuilder.RouteInput> mtRoutesIn = new ArrayList<>();
+    mtRoutesIn.add(operation("SA", List.of(A2, B, C2)));
+    mtRoutesIn.add(operation("SB", List.of(C2, B, A2)));
+    mtRoutesIn.add(leg("CRT2", RouteOperationType.CREATE, List.of(DEP, A2)));
+    mtRoutesIn.add(leg("RET2", RouteOperationType.RETURN, List.of(A2, DEP)));
+    mtRoutesIn.add(borrowed);
+    TimetableBuilder.BuildInput ws = withRoutes(wsInput(), wsRoutesIn).withFleet(fleet);
+    TimetableBuilder.BuildInput mt = withRoutes(mtInput(), mtRoutesIn).withFleet(fleet);
+    Set<UUID> wsOwn = Set.of(id("FA"), id("FB"), id("RET1"));
+    Set<UUID> mtOwn = Set.of(id("SA"), id("SB"), id("CRT2"), id("RET2"), crtx);
+
+    TimetableSetBuilder.SetResult result =
+        new TimetableSetBuilder()
+            .build(
+                new TimetableSetBuilder.SetInput(
+                    List.of(
+                        new TimetableSetBuilder.Member(ws, "WS", "co/op/WS", wsOwn),
+                        new TimetableSetBuilder.Member(mt, "MT", "co/op/MT", mtOwn)),
+                    List.of()),
+                options(Map.of("WS/default", 600, "MT/default", 300)),
+                BUILT_AT);
+
+    assertTrue(result.success(), () -> result.joint().warnings().toString());
+    Timetable wsTable = result.tables().get(WS);
+    Timetable mtTable = result.tables().get(MT);
+    assertFalse(wsTable.duties().isEmpty());
+    assertTrue(
+        wsTable.duties().stream()
+            .allMatch(duty -> duty.createRouteId().filter(crtx::equals).isPresent()),
+        "WS 只能借 CRTX 出库");
+    // MT 表：不留挂在别表交路上的出库展示车次。
+    assertTrue(
+        mtTable.trips().stream().noneMatch(trip -> trip.routeId().equals(crtx)),
+        () -> "MT 表里有借出的出库车次：" + mtTable.trips());
+    for (TimetableTrip trip : mtTable.trips()) {
+      assertTrue(trip.dutyId().flatMap(mtTable::duty).isPresent(), trip.tripCode() + " 没有交路");
+    }
+    // WS 表：每个交路一趟出库展示车次，带交路与车型。
+    List<TimetableTrip> legs =
+        wsTable.trips().stream().filter(trip -> trip.routeId().equals(crtx)).toList();
+    assertEquals(wsTable.duties().size(), legs.size());
+    for (TimetableTrip trip : legs) {
+      assertTrue(wsTable.isLegTrip(trip), trip.tripCode());
+      assertEquals(Optional.of("m6"), wsTable.consistOf(trip), trip.tripCode());
+    }
+    for (VehicleDuty duty : wsTable.duties()) {
+      assertTrue(wsTable.legTrip(duty, RouteOperationType.CREATE).isPresent(), duty.dutyCode());
+    }
+    TimetableRoutePlan plan = wsTable.routePlan(crtx).orElseThrow();
+    assertFalse(plan.external(), "同一 operator 的走行线路：借用方按表管辖它的车次");
+
+    // 两张表都发布后，按表出票不会为出入库展示车次另发运营票。
+    TimetableService service = new TimetableService(() -> BUILT_AT, ignored -> {});
+    service.applySettings(
+        new TimetableService.Settings(
+            true, true, Duration.ofSeconds(120), Duration.ofSeconds(300), Duration.ofSeconds(300)));
+    StorageProvider provider = mock(StorageProvider.class);
+    TimetableRepository repository = mock(TimetableRepository.class);
+    when(provider.timetables()).thenReturn(repository);
+    when(repository.listPublished()).thenReturn(List.of(published(wsTable), published(mtTable)));
+    service.reload(provider);
+    Instant day = BUILT_AT.plusSeconds(86400);
+    List<TimetableService.DueTrip> due = service.tripsBetween(day, day.plusSeconds(86400));
+    assertFalse(due.isEmpty());
+    assertTrue(
+        due.stream().noneMatch(trip -> trip.trip().routeId().equals(crtx)), "出入库展示车次只由交路两端的票执行");
+  }
+
   /** 每线一张表：同 code、同 updatedAt；班次与交路都在自己的表里，主键按自己的表 id 派生；走行线路进引用它的表。 */
   @Test
   void twoLinesBuildIntoOneTablePerLine() {
@@ -160,6 +254,37 @@ class TimetableSetBuilderTest {
     Set<String> groups = new HashSet<>();
     result.joint().groupIntervals().forEach(g -> groups.add(g.group()));
     assertEquals(Set.of("WS/default", "MT/default"), groups);
+  }
+
+  /**
+   * 交路首班的 route 不属于任何一条线时，拆表哪张表都不收它和挂在上面的班次：报一条提示，不悄悄丢掉。
+   *
+   * <p>正常编出来的联编表归属齐全，不报；同一张表换成 WS 的运营 route 无主的成员表，WS 的交路全报出来。
+   */
+  @Test
+  void dutiesHeadedByAnUnownedRouteAreReported() {
+    TimetableSetBuilder.SetResult result =
+        build(options(Map.of("WS/default", 600, "MT/default", 300)));
+    assertTrue(result.success(), () -> result.joint().warnings().toString());
+    Timetable joint = result.joint().timetable().orElseThrow();
+    assertTrue(
+        result.joint().warnings().stream().noneMatch(line -> line.startsWith("联编拆表")),
+        () -> result.joint().warnings().toString());
+
+    List<String> warnings =
+        TimetableSetBuilder.unownedDuties(
+            joint,
+            List.of(
+                new TimetableSetBuilder.Member(
+                    wsInput(), "WS", "co/op/WS", Set.of(id("CRT1"), id("RET1"))),
+                new TimetableSetBuilder.Member(mtInput(), "MT", "co/op/MT", mtRoutes)));
+
+    assertEquals(1, warnings.size(), warnings::toString);
+    assertTrue(warnings.get(0).startsWith("联编拆表："), warnings.get(0));
+    assertFalse(result.tables().get(WS).duties().isEmpty());
+    assertTrue(
+        warnings.get(0).contains(result.tables().get(WS).duties().size() + " 条交路"),
+        warnings.get(0));
   }
 
   /** 车不跨线：每条交路的班次全部属于同一条线。 */
@@ -236,6 +361,41 @@ class TimetableSetBuilderTest {
   }
 
   // ------------------------------------------------------------------ 夹具
+
+  private static TimetableBuilder.BuildInput withRoutes(
+      TimetableBuilder.BuildInput input, List<TimetableBuilder.RouteInput> routes) {
+    return new TimetableBuilder.BuildInput(
+        input.timetableId(),
+        input.companyId(),
+        input.operatorId(),
+        input.lineId(),
+        input.code(),
+        input.name(),
+        routes,
+        input.graph(),
+        input.runTimeModel(),
+        input.notes());
+  }
+
+  private static Timetable published(Timetable draft) {
+    return new Timetable(
+        draft.id(),
+        draft.companyId(),
+        draft.operatorId(),
+        draft.lineId(),
+        draft.code(),
+        draft.name(),
+        TimetableStatus.PUBLISHED,
+        draft.zoneId(),
+        draft.serviceStartSecondOfDay(),
+        draft.serviceEndSecondOfDay(),
+        draft.routePlans(),
+        draft.trips(),
+        draft.duties(),
+        draft.notes(),
+        draft.createdAt(),
+        draft.updatedAt());
+  }
 
   private TimetableSetBuilder.SetResult build(TimetableBuildOptions options) {
     return new TimetableSetBuilder()

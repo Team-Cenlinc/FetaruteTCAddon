@@ -4,6 +4,7 @@ import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -225,6 +226,7 @@ public final class TimetableSetBuilder {
     for (Member member : members) {
       tables.put(member.input().lineId(), split(table, member, options, builtAt));
     }
+    result = result.withWarnings(unownedDuties(table, members));
     Map<UUID, List<TimetableBaseline>> baselines = new LinkedHashMap<>();
     for (Member member : members) {
       List<TimetableBaseline> mine = new ArrayList<>();
@@ -260,7 +262,58 @@ public final class TimetableSetBuilder {
   }
 
   /**
-   * 从联编的表里拆出一条线的表：本线 route 的班次、这些班次所在的交路（车池保证交路不跨线）、交路引用的走行线路；主键按本表 id 重新派生， duty 号从 D001 起、序号连续。
+   * 拆表时哪张表都不收的交路：首班的 route 不属于任何一条线（或首班查不到）。交路按首班归线，挂在交路上的班次跟着交路走，
+   * 这些交路与它们的班次因此不进任何一张表——编出来了却不会运行，报出来，不悄悄丢掉。
+   *
+   * @return 至多一行提示；没有这种交路时为空
+   */
+  static List<String> unownedDuties(Timetable joint, List<Member> members) {
+    Set<UUID> owned = new HashSet<>();
+    for (Member member : members) {
+      owned.addAll(member.ownRouteIds());
+    }
+    Map<UUID, TimetableTrip> tripsById = new HashMap<>();
+    for (TimetableTrip trip : joint.trips()) {
+      tripsById.put(trip.id(), trip);
+    }
+    List<String> codes = new ArrayList<>();
+    Set<UUID> orphaned = new HashSet<>();
+    for (VehicleDuty duty : joint.duties()) {
+      if (duty.tripIds().isEmpty()) {
+        continue;
+      }
+      TimetableTrip head = tripsById.get(duty.tripIds().get(0));
+      if (head == null || !owned.contains(head.routeId())) {
+        codes.add(duty.dutyCode());
+        orphaned.add(duty.id());
+      }
+    }
+    if (codes.isEmpty()) {
+      return List.of();
+    }
+    long trips =
+        joint.trips().stream()
+            .filter(trip -> trip.dutyId().filter(orphaned::contains).isPresent())
+            .count();
+    String shown =
+        String.join("、", codes.subList(0, Math.min(codes.size(), UNOWNED_DUTY_DETAIL_LIMIT)))
+            + (codes.size() > UNOWNED_DUTY_DETAIL_LIMIT ? " 等" : "");
+    return List.of(
+        "联编拆表："
+            + codes.size()
+            + " 条交路（"
+            + shown
+            + "）的首班 route 不属于联编的任何一条线，这些交路与挂在上面的 "
+            + trips
+            + " 个班次不进任何一张表；请检查各线的 route 归属");
+  }
+
+  /** 拆表提示里最多列出几条交路号。 */
+  private static final int UNOWNED_DUTY_DETAIL_LIMIT = 8;
+
+  /**
+   * 从联编的表里拆出一条线的表：本线的交路（车池保证交路不跨线）与挂在它们上面的班次（含借别线出入库线路的展示车次）、不挂交路的本线 route 班次、 交路引用的走行线路；主键按本表 id
+   * 重新派生， duty 号从 D001 起、序号连续。
    */
   static Timetable split(
       Timetable joint, Member member, TimetableBuildOptions options, Instant builtAt) {
@@ -272,10 +325,12 @@ public final class TimetableSetBuilder {
     }
     // 交路归属：首班的 route 属于本线。
     List<VehicleDuty> duties = new ArrayList<>();
+    Set<UUID> staffed = new HashSet<>();
     for (VehicleDuty duty : joint.duties()) {
       if (duty.tripIds().isEmpty()) {
         continue;
       }
+      staffed.add(duty.id());
       TimetableTrip head = tripsById.get(duty.tripIds().get(0));
       if (head != null && own.contains(head.routeId())) {
         duties.add(duty);
@@ -292,13 +347,15 @@ public final class TimetableSetBuilder {
           duties.get(i).id(), VehicleDutyPlanner.deterministicDutyId(timetableId, code));
       dutyCodeByOld.put(duties.get(i).id(), code);
     }
-    // 班次归属：本线 route 的班次，或挂在本线交路上的班次（带客的回库班）。
+    // 班次归属跟着交路走：挂在本线交路上的班次（含借别线出入库线路的展示车次）归我；挂在别线交路上的不归我，
+    // 哪怕 route 是本线的——别线的车借我的出入库线路出车，那趟展示车次由它的交路两端出票，留在本表就成了没有交路的普通班次。
+    // 不挂交路的班次按 route 归属。
     List<TimetableTrip> trips = new ArrayList<>();
     Map<UUID, UUID> tripIdByOld = new HashMap<>();
     for (TimetableTrip trip : joint.trips()) {
-      boolean mine =
-          own.contains(trip.routeId()) || trip.dutyId().map(dutyIdByOld::containsKey).orElse(false);
-      if (!mine) {
+      boolean onMyDuty = trip.dutyId().map(dutyIdByOld::containsKey).orElse(false);
+      boolean onOtherDuty = !onMyDuty && trip.dutyId().filter(staffed::contains).isPresent();
+      if (onOtherDuty || !(onMyDuty || own.contains(trip.routeId()))) {
         continue;
       }
       UUID id = TimetableTripNumbering.deterministicTripId(timetableId, trip.tripCode());

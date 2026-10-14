@@ -1,5 +1,9 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
+import java.lang.management.ManagementFactory;
+import java.lang.management.MemoryPoolMXBean;
+import java.lang.management.MemoryType;
+import java.lang.management.MemoryUsage;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Objects;
@@ -92,8 +96,8 @@ public final class BuildPool implements AutoCloseable {
    *
    * <p>串行时依次编，某一个抛了异常就不再编后面的（交回的列表到它为止）：调用方消费到它就抛，与从前一样不会去编下一个。
    *
-   * <p>每个候选都带着一整张表：堆上剩余不到四分之一时这一批改为依次编，不再同时摊开几张表。某个候选抛了 {@link Error}（多半是内存不够）时，
-   * 同一批里还没开编的直接记成同一个错误、不再编，正在编的编完为止。挑选结果都不受影响。
+   * <p>每个候选都带着一整张表：堆上剩余不到四分之一时（按老年代上次 GC 后的占用算，见 {@link #retainedHeap}）这一批改为依次编，不再同时摊开几张表。某个候选抛了
+   * {@link Error}（多半是内存不够）时， 同一批里还没开编的直接记成同一个错误、不再编，正在编的编完为止。挑选结果都不受影响。
    *
    * @param items 互不依赖的候选
    * @param task 编一个候选；必须线程安全
@@ -154,8 +158,65 @@ public final class BuildPool implements AutoCloseable {
     if (max == Long.MAX_VALUE) {
       return false;
     }
-    long used = runtime.totalMemory() - runtime.freeMemory();
+    return lowMemory(max, retainedHeap(runtime));
+  }
+
+  /** 已占 {@code used} 之后剩余不到 {@code max} 的四分之一。 */
+  static boolean lowMemory(long max, long used) {
     return max - used < max / 4;
+  }
+
+  /**
+   * 堆上真正占着的量：老年代上次 GC 之后的占用。
+   *
+   * <p>不用 {@code total − free}：那里含着还没回收的垃圾，游戏服务器的堆常年七八成满（年轻代填满才收一次），按它判并行几乎一直关着。
+   * 老年代上次收完还剩的才是长期占着的。老年代还没收过时取它当前的占用：没收过说明它还没涨到触发并发回收的程度， 当前占用含垃圾也只会偏大。代价是年轻代里活着的数据与两次 GC
+   * 之间新长的部分看不到——真到内存吃紧时 GC 会先跑、更新这个数， 某个候选仍抛 {@link Error} 时同一批停编兜底。没有老年代这一池（取不到）时退回 {@code total −
+   * free}。
+   */
+  private static long retainedHeap(Runtime runtime) {
+    MemoryPoolMXBean pool = OldGeneration.POOL;
+    if (pool != null && pool.isValid()) {
+      MemoryUsage collected = pool.getCollectionUsage();
+      if (collected != null && collected.getUsed() > 0) {
+        return collected.getUsed();
+      }
+      MemoryUsage current = pool.getUsage();
+      if (current != null) {
+        return current.getUsed();
+      }
+    }
+    return runtime.totalMemory() - runtime.freeMemory();
+  }
+
+  /**
+   * 是不是老年代这一池：各收集器的叫法（G1/Parallel/CMS 的 "Old Gen"、Serial 的 "Tenured Gen"、分代 ZGC 的 "Old
+   * Generation"）。
+   */
+  static boolean isOldGeneration(String poolName) {
+    String name = poolName == null ? "" : poolName.toLowerCase(java.util.Locale.ROOT);
+    return name.contains("old gen") || name.contains("tenured");
+  }
+
+  /** 堆上的老年代池；只有一池的收集器（非分代 ZGC、Shenandoah）就取那一池。JVM 里池是固定的，只找一次。 */
+  private static final class OldGeneration {
+    static final MemoryPoolMXBean POOL = find(ManagementFactory.getMemoryPoolMXBeans());
+
+    private static MemoryPoolMXBean find(List<MemoryPoolMXBean> pools) {
+      MemoryPoolMXBean only = null;
+      int heapPools = 0;
+      for (MemoryPoolMXBean pool : pools) {
+        if (pool.getType() != MemoryType.HEAP) {
+          continue;
+        }
+        if (isOldGeneration(pool.getName())) {
+          return pool;
+        }
+        heapPools++;
+        only = pool;
+      }
+      return heapPools == 1 ? only : null;
+    }
   }
 
   @Override

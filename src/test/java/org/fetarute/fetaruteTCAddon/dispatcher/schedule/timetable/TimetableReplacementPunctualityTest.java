@@ -16,6 +16,8 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicReference;
+import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -259,6 +261,140 @@ class TimetableReplacementPunctualityTest {
     assertTrue(service.dutyBindingOf("train-S").isPresent(), logs::toString);
     assertTrue(service.cancellationOf(table.id(), trips.get(1), day).isEmpty());
     assertTrue(service.cancellationOf(table.id(), trips.get(2), day).isEmpty(), "后面的班次由它接着跑");
+  }
+
+  /**
+   * 替补从交路原定的车库出：表里另有一条走行更短的出库线路（OTHER 库 → AAA，30 秒）也到 AAA，替补仍走交路自己的 DEP 出库线路， 与编表投影一致（原定回库还是
+   * DEP），08:06 车被清掉时它按走行 + 就绪 08:07 出库仍赶得上第二班，就用它。
+   */
+  @Test
+  void aReplacementLeavesFromTheDutysOwnDepot() {
+    UUID shorter = UUID.randomUUID();
+    Timetable table =
+        withPlan(
+            timetable(TimetableStatus.PUBLISHED, 3),
+            createPlan(shorter, "OTHER", "OP:D:OTHER:1", "OP:S:AAA:1", 30));
+    start(table);
+    clock.set(Instant.parse("2026-03-02T08:06:00Z"));
+    service.release("train-A", "train-removed");
+
+    assertTrue(at("08:06:00").isEmpty());
+    List<TimetableService.Replacement> issued = at("08:07:00");
+
+    assertEquals(1, issued.size(), logs::toString);
+    assertEquals(1, issued.get(0).tripIndex());
+    assertEquals(CREATE_ROUTE, issued.get(0).createRouteId());
+    assertEquals(Instant.parse("2026-03-02T08:07:00Z"), issued.get(0).issueAt());
+  }
+
+  /** 交路原定的出库线路到不了那一班的起点时，照旧在到得了的出库线路里挑走行最短的。 */
+  @Test
+  void aReplacementFallsBackWhenTheDutysDepotCannotReachTheTrip() {
+    UUID elsewhere = UUID.randomUUID();
+    UUID shorter = UUID.randomUUID();
+    Timetable base =
+        withPlan(
+            withPlan(
+                timetable(TimetableStatus.PUBLISHED, 3),
+                createPlan(elsewhere, "FAR", "OP:D:DEP:1", "OP:S:ZZZ:1", 20)),
+            createPlan(shorter, "OTHER", "OP:D:OTHER:1", "OP:S:AAA:1", 30));
+    VehicleDuty duty = base.duties().get(0);
+    Timetable table =
+        copy(
+            base,
+            base.trips(),
+            List.of(
+                new VehicleDuty(
+                    duty.id(),
+                    duty.timetableId(),
+                    duty.sequence(),
+                    duty.dutyCode(),
+                    duty.startDepotNodeId(),
+                    duty.endDepotNodeId(),
+                    Optional.of(elsewhere),
+                    duty.returnRouteId(),
+                    duty.tripIds(),
+                    duty.plannedStartSecondOfDay(),
+                    duty.returnSecondOfDay(),
+                    duty.plannedEndSecondOfDay(),
+                    duty.closeReason())));
+    start(table);
+    clock.set(Instant.parse("2026-03-02T08:08:30Z"));
+    service.release("train-A", "train-removed");
+
+    List<TimetableService.Replacement> issued = at("08:19:30");
+
+    assertEquals(1, issued.size(), logs::toString);
+    assertEquals(shorter, issued.get(0).createRouteId());
+  }
+
+  /**
+   * 交路原定的出库线路赶不上准点、走行更短的本线出库线路赶得上：用短的那条接这一班，不白白取消。
+   *
+   * <p>08:08:30 车被清掉：原定 DEP 出库要提前 180 秒（08:07）出库，第二班 08:10 已来不及；OTHER 库走行 30 秒，08:09:30 出库准点到站。
+   */
+  @Test
+  void aShorterHomeDepotTakesTheTripWhenTheDutysOwnDepotIsTooLate() {
+    UUID shorter = UUID.randomUUID();
+    Timetable table =
+        withPlan(
+            timetable(TimetableStatus.PUBLISHED, 3),
+            createPlan(shorter, "OTHER", "OP:D:OTHER:1", "OP:S:AAA:1", 30));
+    List<UUID> trips = table.duties().get(0).tripIds();
+    start(table);
+    clock.set(Instant.parse("2026-03-02T08:08:30Z"));
+    service.release("train-A", "train-removed");
+
+    assertTrue(at("08:08:30").isEmpty(), "按短线路的计划出库时刻 08:09:30 出库");
+    assertFalse(cancelledTrips().contains(trips.get(1)), "第二班赶得上准点，不取消: " + logs);
+    List<TimetableService.Replacement> issued = at("08:09:30");
+
+    assertEquals(1, issued.size(), logs::toString);
+    assertEquals(1, issued.get(0).tripIndex());
+    assertEquals(shorter, issued.get(0).createRouteId());
+    assertEquals(Instant.parse("2026-03-02T08:09:30Z"), issued.get(0).issueAt());
+  }
+
+  /** 加一条计划。 */
+  private static Timetable withPlan(Timetable source, TimetableRoutePlan plan) {
+    List<TimetableRoutePlan> plans = new ArrayList<>(source.routePlans());
+    plans.add(plan);
+    return new Timetable(
+        source.id(),
+        source.companyId(),
+        source.operatorId(),
+        source.lineId(),
+        source.code(),
+        source.name(),
+        source.status(),
+        source.zoneId(),
+        source.serviceStartSecondOfDay(),
+        source.serviceEndSecondOfDay(),
+        plans,
+        source.trips(),
+        source.duties(),
+        source.notes(),
+        source.createdAt(),
+        source.updatedAt());
+  }
+
+  /** 车库 {@code depot} 到 {@code terminal} 的出库线路，走行 {@code run} 秒。 */
+  private static TimetableRoutePlan createPlan(
+      UUID id, String code, String depot, String terminal, int run) {
+    return new TimetableRoutePlan(
+        id,
+        code,
+        RouteOperationType.CREATE,
+        0,
+        List.of(
+            new TimetableStop(
+                0, Optional.empty(), Optional.of(depot), 0, 0, RouteStopPassType.STOP),
+            new TimetableStop(
+                1, Optional.empty(), Optional.of(terminal), run, run, RouteStopPassType.STOP)),
+        depot,
+        terminal,
+        Optional.empty(),
+        Optional.empty());
   }
 
   /** 同一份表把班次间隔改成 {@code spacing} 秒（首班仍是 08:00）。 */

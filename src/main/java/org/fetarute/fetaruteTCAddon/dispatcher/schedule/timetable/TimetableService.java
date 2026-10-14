@@ -1331,7 +1331,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
    * 替补车最早能接交路里的哪一班：从 {@code fromIndex} 起第一班有出库线路能把车<b>准点</b>送到它起点的。
    *
    * <p>起点本身就是车库（首站 CRET）的班次不在这里派：那一班自己的票就会从车库出车，交路空着时出车即绑上。 出库线路取表里终点在那一班起点站台组的 CREATE
-   * 线路（走行最短的那条），出库时刻 = 计划发车 − 走行 − 就绪；这个时刻已经过去（超出 {@link #REPLACEMENT_ISSUE_GRACE}）的班次跳过，
+   * 线路（交路原定的那条优先，见 {@link #positioningRoutes}），出库时刻 = 计划发车 − 走行 − 就绪；这个时刻已经过去（超出 {@link
+   * #REPLACEMENT_ISSUE_GRACE}）就换下一条候选：原定线路赶不上准点、走行最短的本线线路赶得上时用后者，两条都赶不上才跳过这一班，
    * 不在发车容差内晚点接：晚到的替补会和同线路的下一班挤在一起开，接着又被晚点上限换下、连带取消后面的班次。没有出库线路或来不及准点时试下一班。
    *
    * @return 替补计划；一班都接不上时为空
@@ -1359,29 +1360,19 @@ public final class TimetableService implements ScheduledDeparturePlan {
       if (startsAtDepot(planOpt.get())) {
         continue;
       }
-      Optional<TimetableRoutePlan> create =
-          positioningRoute(timetable, planOpt.get(), duty.consist());
-      if (create.isEmpty()) {
-        continue;
+      for (TimetableRoutePlan create :
+          positioningRoutes(timetable, planOpt.get(), duty.consist(), duty.createRouteId())) {
+        long lead = create.totalRunSeconds() + readySeconds(timetable, create);
+        Instant issueAt = departure.minusSeconds(lead);
+        // 最晚出库：计划出库时刻再宽限几秒（出票检查的间隔），晚过这一刻出库就赶不上准点。
+        Instant latestIssue = issueAt.plus(replacementGrace(now));
+        if (latestIssue.isBefore(now)) {
+          continue;
+        }
+        return Optional.of(
+            new Replacement(
+                timetable, duty, key, j, trip, create.routeId(), issueAt, latestIssue, departure));
       }
-      long lead = create.get().totalRunSeconds() + readySeconds(timetable, create.get());
-      Instant issueAt = departure.minusSeconds(lead);
-      // 最晚出库：计划出库时刻再宽限几秒（出票检查的间隔），晚过这一刻出库就赶不上准点。
-      Instant latestIssue = issueAt.plus(replacementGrace(now));
-      if (latestIssue.isBefore(now)) {
-        continue;
-      }
-      return Optional.of(
-          new Replacement(
-              timetable,
-              duty,
-              key,
-              j,
-              trip,
-              create.get().routeId(),
-              issueAt,
-              latestIssue,
-              departure));
     }
     return Optional.empty();
   }
@@ -1409,29 +1400,47 @@ public final class TimetableService implements ScheduledDeparturePlan {
   }
 
   /**
-   * 表里终点就在这条线路起点站台组的本线 CREATE 线路（外线走行没有本线的出库服务），走行最短的那条。
+   * 替补车的出库线路候选，按优先顺序：终点在这条线路起点站台组的 CREATE 线路里，先是交路原定的那条——替补从原定车库出、回原定车库， 与编表投影一致；再是本线 CREATE
+   * 线路（外线走行没有本线的出库服务）里走行最短的那条。原定线路到不了时只有后者； 原定线路更长、赶不上准点时由调用方退到后者。
    *
    * <p>交路带车型时替补车出的是这个车型，只在编表时允许这个车型的出库线路里选（表里有它的变体计划），时分也按这个车型； 一条都没有时派不出替补。交路不带车型时只比不分车型的那份计划。
    *
    * @param consist 交路的车型
+   * @param planned 交路原定的出库线路
+   * @return 至多两条，不重复；一条都没有时为空
    */
-  private static Optional<TimetableRoutePlan> positioningRoute(
-      Timetable timetable, TimetableRoutePlan target, Optional<String> consist) {
+  private static List<TimetableRoutePlan> positioningRoutes(
+      Timetable timetable,
+      TimetableRoutePlan target,
+      Optional<String> consist,
+      Optional<UUID> planned) {
     String origin = TimetableConflictChecker.groupOf(target.originNodeId());
     if (origin.isBlank()) {
-      return Optional.empty();
+      return List.of();
     }
+    TimetableRoutePlan own = null;
     TimetableRoutePlan best = null;
     for (TimetableRoutePlan plan : timetable.routePlans()) {
-      if (plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)
-          && plan.kind() == RouteOperationType.CREATE
-          && !plan.external()
-          && origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))
-          && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {
+      if (!plan.consist().map(TimetableRoutePlan.ConsistVariant::key).equals(consist)
+          || plan.kind() != RouteOperationType.CREATE
+          || !origin.equals(TimetableConflictChecker.groupOf(plan.terminalNodeId()))) {
+        continue;
+      }
+      if (own == null && planned.filter(plan.routeId()::equals).isPresent()) {
+        own = plan;
+      }
+      if (!plan.external() && (best == null || plan.totalRunSeconds() < best.totalRunSeconds())) {
         best = plan;
       }
     }
-    return Optional.ofNullable(best);
+    List<TimetableRoutePlan> out = new ArrayList<>(2);
+    if (own != null) {
+      out.add(own);
+    }
+    if (best != null && best != own) {
+      out.add(best);
+    }
+    return out;
   }
 
   /**

@@ -226,6 +226,60 @@ public final class TimetableConflictChecker {
     return scanWindows(candidate, windows, separationSeconds).conflicts().isEmpty();
   }
 
+  /**
+   * 在现有投影上试放一段站台等待，只取它<b>新造成</b>的冲突：同一窗口分别扫"有这段等待"与"没有这段等待"两次，被挡住的占用只在前一次出现才算。
+   *
+   * <p>途中停车点的等待用它：那辆车本来就停在这股道上（原占用到车尾离开为止），按原时刻也挡得住的车、别的车之间原有的冲突都另有记录，
+   * 不是多等造成的。这段等待自己作为后到占用被挡的那一条也不算——它与本车原占用接在一起，那一刻在场的车按原时刻同样在场。
+   *
+   * @return 新增的冲突，按 {@link #CONFLICT_ORDER}；每条的后到占用就是被这段等待新挡住的那辆车
+   */
+  static List<Conflict> conflictsAddedBy(
+      Map<String, Resource> resources,
+      Footprints footprints,
+      Stay waiting,
+      Function<String, String> vehicleOf,
+      int separationSeconds) {
+    Map<String, Resource> candidate = new LinkedHashMap<>();
+    Map<String, Window> windows =
+        projectInto(candidate, footprints, Map.of(), List.of(), List.of(waiting), vehicleOf);
+    Map<String, List<Occupation>> own = new LinkedHashMap<>();
+    candidate.forEach((key, resource) -> own.put(key, List.copyOf(resource.occupations())));
+    mergeOverlapping(candidate, resources, separationSeconds);
+    List<Conflict> with = scanWindows(candidate, windows, separationSeconds).conflicts();
+    if (with.isEmpty()) {
+      return List.of();
+    }
+    own.forEach((key, gone) -> candidate.get(key).removeAll(gone));
+    Set<Blocked> before = new HashSet<>();
+    for (Conflict conflict : scanWindows(candidate, windows, separationSeconds).conflicts()) {
+      before.add(Blocked.of(conflict));
+    }
+    List<Conflict> added = new ArrayList<>();
+    for (Conflict conflict : with) {
+      boolean itself =
+          conflict.second().equals(waiting.code())
+              && conflict.secondFrom() == waiting.from()
+              && conflict.secondOwner().equals(waiting.owner());
+      if (!itself && !before.contains(Blocked.of(conflict))) {
+        added.add(conflict);
+      }
+    }
+    return List.copyOf(added);
+  }
+
+  /** 一条冲突里被挡住的那条占用：每条后到占用在一个资源上至多报一次，用它认"同一处冲突"。 */
+  private record Blocked(String resource, String code, int from, int to, Optional<String> owner) {
+    static Blocked of(Conflict conflict) {
+      return new Blocked(
+          conflict.resource(),
+          conflict.second(),
+          conflict.secondFrom(),
+          conflict.secondTo(),
+          conflict.secondOwner());
+    }
+  }
+
   /** 将试放足迹涉及的资源与时窗从基础投影复制过来；只修改试放桶，可用于等待容量和补车成本比较。 */
   static void mergeOverlapping(
       Map<String, Resource> candidate, Map<String, Resource> resources, int separationSeconds) {
@@ -724,6 +778,22 @@ public final class TimetableConflictChecker {
           footprints);
     }
     return new Footprint(slots);
+  }
+
+  /**
+   * 各停靠点上车尾离开站台的时刻（相对发车）：与足迹里中间停靠那一格的离开同一口径，档案不带车尾出清时就是表定发车。
+   *
+   * @param profile route 档案
+   * @return 按停靠序号排列
+   */
+  static List<Integer> stopLeaveOffsets(RouteProfile profile) {
+    TailClock tail = TailClock.of(profile);
+    List<TimetableStop> stops = profile.stops();
+    List<Integer> out = new ArrayList<>(stops.size());
+    for (int i = 0; i < stops.size(); i++) {
+      out.add(tail.leavesStop(i, stops.get(i).departureOffsetSeconds()));
+    }
+    return List.copyOf(out);
   }
 
   /**
@@ -1448,7 +1518,7 @@ public final class TimetableConflictChecker {
     }
 
     /**
-     * 容量 n：同时在场的占用超过 n 就冲突；报的是新来的与在场里最早离开的那个<b>可归责</b>的占用。
+     * 容量 n：同时在场的车超过 n 就冲突；报的是新来的与在场里最先腾出股道的那辆<b>可归责</b>的车（同一辆车按它最晚离开的那条占用算）。
      *
      * <p>"可归责"指不是两份邻表之间的对：新来的若是邻表，就找在场的我；新来的若是我，在场里谁都算。 只拿在场最早的那个比会被两份邻表夹住——它们之间的重叠不报，我夹在中间的占用就被漏掉。
      */
@@ -1485,20 +1555,44 @@ public final class TimetableConflictChecker {
       }
       Set<String> vehicles = new HashSet<>();
       vehicles.add(next.vehicle());
-      Occupation partner = null;
+      for (int i = 0; i < active.size(); i++) {
+        vehicles.add(active.get(i).vehicle());
+      }
+      return vehicles.size() > capacity
+          ? Optional.ofNullable(firstToClear(active, next, null))
+          : Optional.empty();
+    }
+
+    /**
+     * 容量满时后来的车等的是最先腾出的那一股道：同一辆车在场的几条占用（到站、待命、发车的重复投影）按它最晚离开的那条算——它走之前那股道一直被它占着；
+     * 车与车之间取最先腾出的，同时腾出取先到的。
+     *
+     * @param among 只在这些车里取；为空时在场的可归责车辆都算
+     */
+    private static Occupation firstToClear(Active active, Occupation next, Set<String> among) {
+      Map<String, Occupation> lastByVehicle = new LinkedHashMap<>();
       for (int i = 0; i < active.size(); i++) {
         Occupation current = active.get(i);
-        vehicles.add(current.vehicle());
-        // 容量满时后来的车等的是最先腾出的那一股道：记在场里最早离开的那辆，等待按它算；同时离开取先到的。
-        if (!current.sameVehicle(next)
-            && !current.bothExternal(next)
-            && (partner == null
-                || current.to() < partner.to()
-                || (current.to() == partner.to() && current.from() < partner.from()))) {
-          partner = current;
+        if (current.sameVehicle(next)
+            || current.bothExternal(next)
+            || (among != null && !among.contains(current.vehicle()))) {
+          continue;
+        }
+        lastByVehicle.merge(
+            current.vehicle(), current, (kept, other) -> clearsEarlier(kept, other) ? other : kept);
+      }
+      Occupation partner = null;
+      for (Occupation candidate : lastByVehicle.values()) {
+        if (partner == null || clearsEarlier(candidate, partner)) {
+          partner = candidate;
         }
       }
-      return vehicles.size() > capacity ? Optional.ofNullable(partner) : Optional.empty();
+      return partner;
+    }
+
+    /** {@code a} 比 {@code b} 先腾出：离开更早，同时离开时到得更早。 */
+    private static boolean clearsEarlier(Occupation a, Occupation b) {
+      return a.to() < b.to() || (a.to() == b.to() && a.from() < b.from());
     }
 
     /**
@@ -1552,15 +1646,12 @@ public final class TimetableConflictChecker {
       if (candidates.get(targetVisit).isEmpty()) {
         return Optional.of(targetVisit);
       }
-      Occupation partner = null;
+      // 与容量路径同一口径：争用股道的车里按车取最晚离开，再取最先腾出的那辆。
+      Set<String> contenders = new HashSet<>();
       for (Occupation value : blocked) {
-        if (!value.sameVehicle(next)
-            && !value.bothExternal(next)
-            && (partner == null || value.from() < partner.from())) {
-          partner = value;
-        }
+        contenders.add(value.vehicle());
       }
-      return Optional.ofNullable(partner);
+      return Optional.ofNullable(firstToClear(active, next, contenders));
     }
 
     /** 允许重新分配尚未落实的计划股道；遍历节点集合受实际股道数与候选预算限制。 */

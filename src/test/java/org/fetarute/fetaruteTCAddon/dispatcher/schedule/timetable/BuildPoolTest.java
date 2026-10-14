@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -12,6 +13,27 @@ import org.junit.jupiter.api.Test;
 
 /** 编表候选的并行池：按原顺序交回、异常留在原位、嵌套不卡死、线程数换算。 */
 class BuildPoolTest {
+
+  /** 剩余不到四分之一才算内存紧：按传入的已占量判，不再含年轻代里没收的垃圾（那部分由调用方换成老年代占用）。 */
+  @Test
+  void lowMemoryMeansLessThanAQuarterLeft() {
+    assertTrue(BuildPool.lowMemory(1000, 800));
+    assertFalse(BuildPool.lowMemory(1000, 750));
+    assertFalse(BuildPool.lowMemory(1000, 300));
+  }
+
+  /** 各收集器的老年代池名都认得出，年轻代与幸存区不算。 */
+  @Test
+  void oldGenerationPoolsAreRecognisedByName() {
+    for (String name :
+        List.of("G1 Old Gen", "PS Old Gen", "CMS Old Gen", "Tenured Gen", "ZGC Old Generation")) {
+      assertTrue(BuildPool.isOldGeneration(name), name);
+    }
+    for (String name :
+        List.of("G1 Eden Space", "G1 Survivor Space", "PS Eden Space", "ZGC Young Generation")) {
+      assertFalse(BuildPool.isOldGeneration(name), name);
+    }
+  }
 
   /** 结果按候选的顺序交回，与谁先编完无关。 */
   @Test

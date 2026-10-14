@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -11,7 +13,8 @@ import java.util.function.Function;
  * 按同一份图与运行投影比较出入库途径；显式指定、原库偏好、车型与时长约束由派车器先过滤。
  *
  * <p>联编多线时等待相同优先本线的出入库段：只看等待会让共用终点的两条线整体对调车库（各自借对方的库），本线车库反而闲着。
- * 本线候选的等待不比最好的候选多就用本线；本线更挤时照常借用。不知道线路归属（单线编表、外线走行）时只按等待选。
+ * 本线候选的等待不比最好的候选多就用本线；本线更挤时照常借用。不放宽成"多等几秒也用本线"：投影是名义班次，让车修复挪动运营车之后，
+ * 本线出库多出的那点等待常常落到运营车身上、在没有空股道的让车点让不掉。不知道线路归属（单线编表、外线走行）时只按等待选。
  */
 public final class TimetableDepotAllocator implements VehicleDutyPlanner.DepotLegSelector {
   private static final String CREATE_PREFIX = "depot-create:";
@@ -101,13 +104,7 @@ public final class TimetableDepotAllocator implements VehicleDutyPlanner.DepotLe
               TimetableDepotAllocator::vehicleOf);
       TimetableConflictChecker.mergeOverlapping(trial, resources, separation);
       var report = TimetableConflictChecker.scanWindows(trial, windows, separation);
-      long wait =
-          report.conflicts().stream()
-              .mapToLong(
-                  conflict ->
-                      Math.max(0L, (long) conflict.firstTo() + separation - conflict.secondFrom()))
-              .sum();
-      Pressure pressure = new Pressure(wait, report.conflicts().size());
+      Pressure pressure = pressureOf(report.conflicts(), separation);
       if (bestPressure == null || pressure.compareTo(bestPressure) < 0) {
         best = leg;
         bestPressure = pressure;
@@ -140,8 +137,61 @@ public final class TimetableDepotAllocator implements VehicleDutyPlanner.DepotLe
     return code.startsWith(RETURN_PREFIX) ? code.substring(RETURN_PREFIX.length()) : code;
   }
 
-  /** 等待总量优先，冲突条数打破并列；完全并列保留已排好的显式指定、走行时分、code 序。 */
-  private record Pressure(long waitSeconds, int conflicts) implements Comparable<Pressure> {
+  /**
+   * 一段走行的压力：按相遇计，不按冲突条数计。
+   *
+   * <p>两辆车在一处交叉相遇时，边与两端道岔各报一条冲突，逐条求和会把同一次相遇算成三次，交叉多的进路被成倍放大。
+   * 同一对车、时窗相接（间隔不超过最小间隔）的冲突并成一次相遇，只计其中最长的那段等待——让过最长的那一处，其余几处一起让开了。
+   *
+   * @param conflicts 这段走行与已有占用的冲突
+   * @param separation 最小间隔（秒）
+   */
+  static Pressure pressureOf(List<TimetableConflictChecker.Conflict> conflicts, int separation) {
+    List<TimetableConflictChecker.Conflict> sorted = new ArrayList<>(conflicts);
+    sorted.sort(
+        Comparator.comparing(TimetableDepotAllocator::pairOf)
+            .thenComparingInt(TimetableDepotAllocator::spanFrom)
+            .thenComparingInt(TimetableDepotAllocator::spanTo)
+            .thenComparing(TimetableConflictChecker.Conflict::resource));
+    long total = 0L;
+    int encounters = 0;
+    String pair = null;
+    int until = Integer.MIN_VALUE;
+    long longest = 0L;
+    for (TimetableConflictChecker.Conflict conflict : sorted) {
+      long wait = Math.max(0L, (long) conflict.firstTo() + separation - conflict.secondFrom());
+      String key = pairOf(conflict);
+      if (key.equals(pair) && spanFrom(conflict) <= (long) until + separation) {
+        longest = Math.max(longest, wait);
+        until = Math.max(until, spanTo(conflict));
+        continue;
+      }
+      total += longest;
+      encounters++;
+      pair = key;
+      until = spanTo(conflict);
+      longest = wait;
+    }
+    return new Pressure(total + longest, encounters);
+  }
+
+  /** 冲突双方，不分先后；带上所属表——邻表的交路号可能与本表同名（都有 D001-CREATE），不同表的同名车不是同一辆。 */
+  private static String pairOf(TimetableConflictChecker.Conflict conflict) {
+    String first = conflict.firstOwner().orElse("") + "|" + conflict.first();
+    String second = conflict.secondOwner().orElse("") + "|" + conflict.second();
+    return first.compareTo(second) <= 0 ? first + "\n" + second : second + "\n" + first;
+  }
+
+  private static int spanFrom(TimetableConflictChecker.Conflict conflict) {
+    return Math.min(conflict.firstFrom(), conflict.secondFrom());
+  }
+
+  private static int spanTo(TimetableConflictChecker.Conflict conflict) {
+    return Math.max(conflict.firstTo(), conflict.secondTo());
+  }
+
+  /** 等待总量优先，相遇次数打破并列；完全并列保留已排好的显式指定、走行时分、code 序。 */
+  record Pressure(long waitSeconds, int conflicts) implements Comparable<Pressure> {
     @Override
     public int compareTo(Pressure other) {
       int wait = Long.compare(waitSeconds, other.waitSeconds);

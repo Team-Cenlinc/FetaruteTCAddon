@@ -596,10 +596,10 @@ public final class ResourcePhasePlanner {
     TimetableConflictChecker.Report report =
         TimetableConflictChecker.check(index, profiles, movements, List.of(), separationSeconds);
     // 与 builder 的成功判据同一把尺子：都按"后车在哪等"判，而不是按冲突落在哪个资源上。
-    // 这里没有成品表，但每条流的始发站台组是知道的，足够喂进同一条判据。
+    // 这里没有成品表，但每条流的始发站台组是知道的；铺开的运行与档案也在手上，冲突在途中停车点之后的同样认得出让车点。
     List<ConflictAbsorption.Residual> residuals =
         ConflictAbsorption.classify(
-            report, waitingPoints, index, separationSeconds, maxWaitSeconds);
+            report, waitingPoints, movements, profiles, index, separationSeconds, maxWaitSeconds);
     int unabsorbable = ConflictAbsorption.unabsorbable(residuals).size();
     long wait = residuals.stream().mapToLong(ConflictAbsorption.Residual::waitSeconds).sum();
     return new Score(unabsorbable, report.conflicts().size(), wait);
