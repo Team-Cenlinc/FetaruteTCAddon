@@ -118,6 +118,22 @@ class TimetableBuilderStrictCancelTest {
                 trip -> trip.reason() == VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED));
   }
 
+  /** 进度按用途分开数完整构建：取消三班就有三次严格取消重排，第三层完整候选另记，没有错峰候选。 */
+  @Test
+  void progressCountsTheCancelRetries() {
+    TimetableBuildProgress progress = TimetableBuildProgress.untracked();
+    build(new TimetableBuilder(progress), true, 10);
+
+    TimetableBuildProgress.Snapshot snapshot = progress.snapshot();
+    assertEquals(3, snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY));
+    assertEquals(0, snapshot.trials(TimetableBuildProgress.Trial.STAGGER_CANDIDATE));
+    assertTrue(
+        snapshot.fullBuilds()
+            >= snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY)
+                + snapshot.trials(TimetableBuildProgress.Trial.PHASE_CANDIDATE),
+        snapshot::toString);
+  }
+
   /** 串行与并行编出同一张表、同一份取消。 */
   @Test
   void cancellationIsTheSameWithThreads() {

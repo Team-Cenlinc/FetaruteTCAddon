@@ -753,6 +753,7 @@ public final class FtaTimetableCommand {
                                   groupSources,
                                   maxTripsSource,
                                   buildWarnings,
+                                  progress.snapshot(),
                                   release);
                         } finally {
                           // 交给了落库就等事务结束再解锁；没走到落库（编表失败、拆表出错）当场解锁。
@@ -1175,6 +1176,7 @@ public final class FtaTimetableCommand {
   /**
    * 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。落库交给异步事务。
    *
+   * @param progress 编完时的进度：报告里写用时与各用途的完整构建次数
    * @param saved 落库事务结束（成功、被拒或出错）后在主线程调用；返回 false 时不会被调用
    * @return 交给了落库为 true
    */
@@ -1191,11 +1193,21 @@ public final class FtaTimetableCommand {
       Map<String, String> groupSources,
       String maxTripsSource,
       List<String> warnings,
+      TimetableBuildProgress.Snapshot progress,
       Runnable saved) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(
         result, options, headway, groupSources, maxTripsSource, describeRun(run));
+    sender.sendMessage(
+        field(
+            "编表用时",
+            elapsed(progress.elapsed())
+                + "，完整构建 "
+                + progress.fullBuilds()
+                + " 次（"
+                + progress.describeTrials()
+                + "）"));
     for (String warning : warnings) {
       sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.YELLOW));
     }
@@ -2701,7 +2713,7 @@ public final class FtaTimetableCommand {
       if (!snapshot.detail().isBlank()) {
         lines.add(field("  正在", snapshot.detail()));
       }
-      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次"));
+      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次（" + snapshot.describeTrials() + "）"));
     }
     return lines;
   }

@@ -835,6 +835,13 @@ public final class TimetableBuilder {
             reportedRapids(built, fastRoutes, searched)));
   }
 
+  /** 记一次第三层完整候选；错峰候选里的另记在错峰名下（{@link #attemptAtPhases}）。 */
+  private void phaseTrial() {
+    if (relaxAllowed) {
+      progress.trial(TimetableBuildProgress.Trial.PHASE_CANDIDATE);
+    }
+  }
+
   /** 错峰候选（不许放宽）的阶段由发起它的错峰搜索报，自己不改阶段。 */
   private void stage(TimetableBuildProgress.Stage stage) {
     if (relaxAllowed) {
@@ -1310,6 +1317,9 @@ public final class TimetableBuilder {
                 .orElse(0));
     // 各相位候选在池内线程上并发试排，结果按相位记在这里；只留评分最好的那份，其余算完分数就丢，免得几十份整表同时压在堆上。
     Map<Map<String, Integer>, Attempt> completed = new ConcurrentHashMap<>();
+    if (!trialOptions.equals(options)) {
+      phaseTrial();
+    }
     completed.put(
         initial.phases().deltaByDirection(),
         trialOptions.equals(options)
@@ -1326,6 +1336,7 @@ public final class TimetableBuilder {
             phases -> {
               Attempt result = completed.get(phases.deltaByDirection());
               if (result == null) {
+                phaseTrial();
                 try {
                   result =
                       attemptAtPhases(
@@ -1507,6 +1518,10 @@ public final class TimetableBuilder {
       Map<String, Integer> extraShift,
       Set<CancelSlot> cancelled) {
     progress.fullBuild();
+    if (!relaxAllowed) {
+      // 不许放宽的编表器只用来编快车错峰的候选：它里面的每一次完整构建都记在错峰名下。
+      progress.trial(TimetableBuildProgress.Trial.STAGGER_CANDIDATE);
+    }
     UUID timetableId = prepared.timetableId();
     int horizon = options.horizonSeconds();
     int separation = (int) Math.min(Integer.MAX_VALUE, options.separation().toSeconds());
@@ -2229,6 +2244,9 @@ public final class TimetableBuilder {
               found.get().cause());
       cancelled.put(next.slot(), next);
       detail("严格模式取消让不掉的班次：第 " + cancelled.size() + " 班（上限 " + limit + "）");
+      if (relaxAllowed) {
+        progress.trial(TimetableBuildProgress.Trial.CANCEL_RETRY);
+      }
       Attempt retried;
       try {
         retried =
