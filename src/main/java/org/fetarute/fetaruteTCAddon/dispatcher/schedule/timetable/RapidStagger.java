@@ -774,10 +774,13 @@ final class RapidStagger {
     int tried = 0;
     for (Dwell point : turnbackPoints.apply(base.measure())) {
       boolean reached = false;
-      for (int from = 0; !reached && from < TURNBACK_MARGINS.size(); from += batch) {
+      // 多半第一档（余量 0）就把全网损失压到 0：先只编它，没停下再成批往后试，免得并行时每个点白编一整批。
+      for (int from = 0, size = 1;
+          !reached && from < TURNBACK_MARGINS.size();
+          from += size, size = batch) {
         List<Dwell> trials = new ArrayList<>();
         for (int margin :
-            TURNBACK_MARGINS.subList(from, Math.min(from + batch, TURNBACK_MARGINS.size()))) {
+            TURNBACK_MARGINS.subList(from, Math.min(from + size, TURNBACK_MARGINS.size()))) {
           trials.add(point.withSeconds(point.seconds() + margin));
         }
         for (BuildPool.Evaluated<Optional<Candidate>> built :

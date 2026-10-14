@@ -114,6 +114,9 @@ public final class TimetableBuilder {
   /** 这次 build 的并行池，错峰候选与发起的编表器共用；为空时 {@link #build} 现开一个、编完关掉。 */
   private final BuildPool pool;
 
+  /** 原表在目标间隔下的试排：错峰的平移候选与原表同一份准备、同一组参数，直接复用，不再各自把相位重选一遍。 */
+  private final TargetMemo memo;
+
   public TimetableBuilder() {
     this(TimetableBuildProgress.untracked());
   }
@@ -128,7 +131,8 @@ public final class TimetableBuilder {
    * @param threads 编表线程数；1 为串行。结果与线程数无关，线程数只影响快慢
    */
   public TimetableBuilder(TimetableBuildProgress progress, int threads) {
-    this(new TimetableTimingCalculator(), Map.of(), true, progress, threads, null);
+    this(
+        new TimetableTimingCalculator(), Map.of(), true, progress, threads, null, new TargetMemo());
   }
 
   public TimetableBuilder(TimetableTimingCalculator timingCalculator) {
@@ -154,7 +158,7 @@ public final class TimetableBuilder {
       Map<String, Integer> groupShift,
       boolean relaxAllowed,
       TimetableBuildProgress progress) {
-    this(timingCalculator, groupShift, relaxAllowed, progress, 1, null);
+    this(timingCalculator, groupShift, relaxAllowed, progress, 1, null, new TargetMemo());
   }
 
   private TimetableBuilder(
@@ -163,13 +167,15 @@ public final class TimetableBuilder {
       boolean relaxAllowed,
       TimetableBuildProgress progress,
       int threads,
-      BuildPool pool) {
+      BuildPool pool,
+      TargetMemo memo) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
     this.groupShift = Map.copyOf(groupShift);
     this.relaxAllowed = relaxAllowed;
     this.progress = Objects.requireNonNull(progress, "progress");
     this.threads = Math.max(1, threads);
     this.pool = pool;
+    this.memo = Objects.requireNonNull(memo, "memo");
   }
 
   /**
@@ -185,10 +191,16 @@ public final class TimetableBuilder {
     if (pool != null) {
       return buildInPool(input, requested, now);
     }
-    // 一次 build 一个池：错峰候选、相位候选都在里面编，编完关掉，不留线程。
+    // 一次 build 一个池、一份原表试排记录：错峰候选、相位候选都在里面编，编完关掉，不留线程也不留整表。
     try (BuildPool opened = BuildPool.open(threads)) {
       return new TimetableBuilder(
-              timingCalculator, groupShift, relaxAllowed, progress, threads, opened)
+              timingCalculator,
+              groupShift,
+              relaxAllowed,
+              progress,
+              threads,
+              opened,
+              new TargetMemo())
           .buildInPool(input, requested, now);
     }
   }
@@ -733,7 +745,7 @@ public final class TimetableBuilder {
                 })
             .orElse(input);
     Built built =
-        new TimetableBuilder(timingCalculator, shift, false, progress, threads, pool())
+        new TimetableBuilder(timingCalculator, shift, false, progress, threads, pool(), memo)
             .buildOnce(variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
     RapidStagger.Outcome outcome = RapidStagger.Outcome.of(built.result());
     if (built.chosen().isEmpty()
@@ -1189,6 +1201,22 @@ public final class TimetableBuilder {
   /** 每组每方向铺子网格、选相位、派车、串行、编号、查冲突。排不出任何班次时抛 {@link BuildFailure}。 */
   private Attempt attempt(
       Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
+    // 平移只叠加在选好的相位上（shiftedAttempt）：选相位与平移无关，原表已经选过的直接拿来。
+    TimetableBuildOptions key = options.withRapidStagger(false);
+    Attempt selected =
+        memo.find(prepared, key)
+            .orElseGet(
+                () -> {
+                  Attempt chosen = selectedAttempt(prepared, options, input, builtAt);
+                  memo.offer(prepared, key, chosen);
+                  return chosen;
+                });
+    return shiftedAttempt(prepared, options, input, builtAt, selected);
+  }
+
+  /** 按目标间隔选相位并试排（不含快车错峰的平移）。 */
+  private Attempt selectedAttempt(
+      Prepared prepared, TimetableBuildOptions options, BuildInput input, Instant builtAt) {
     Attempt initial =
         attemptAtPhases(prepared, options, input, builtAt, Optional.empty(), Map.of());
     List<ServiceGroupClassifier.Group> groups =
@@ -1198,10 +1226,10 @@ public final class TimetableBuilder {
                 .map(TimetableRoutePlan::routeId)
                 .collect(java.util.stream.Collectors.toSet()));
     if (groups.isEmpty()) {
-      return shiftedAttempt(prepared, options, input, builtAt, initial);
+      return initial;
     }
     TimetableBuildOptions trialOptions = completionOptions(options, initial.intervals());
-    // 各相位候选在池内线程上并发试排，结果按相位记在这里。
+    // 各相位候选在池内线程上并发试排，结果按相位记在这里；只留评分最好的那份，其余算完分数就丢，免得几十份整表同时压在堆上。
     Map<Map<String, Integer>, Attempt> completed = new ConcurrentHashMap<>();
     completed.put(
         initial.phases().deltaByDirection(),
@@ -1231,17 +1259,19 @@ public final class TimetableBuilder {
                       Integer.MAX_VALUE,
                       Long.MAX_VALUE);
                 }
-                completed.put(phases.deltaByDirection(), result);
+                keepBest(completed, phases.deltaByDirection(), result);
               }
               return result.completionScore();
             },
             pool());
     if (selected.deltaByDirection().equals(initial.phases().deltaByDirection())) {
-      return shiftedAttempt(prepared, options, input, builtAt, initial);
+      return initial;
     }
+    // 选中的不一定还留着（挑选还看取消数，不只看评分）：没留住就按选中的相位再排一次，结果相同。
+    Attempt kept = trialOptions.equals(options) ? completed.get(selected.deltaByDirection()) : null;
     Attempt chosen =
-        trialOptions.equals(options)
-            ? completed.get(selected.deltaByDirection())
+        kept != null
+            ? kept
             : attemptAtPhases(prepared, options, input, builtAt, Optional.of(selected), Map.of());
     // 预览只是候选排序，不能作为发布或回退的可行性判据；完整窗口必须再次通过相同硬约束与取消数检查。
     Attempt best =
@@ -1249,7 +1279,27 @@ public final class TimetableBuilder {
                 && chosen.completionScore().compareTo(initial.completionScore()) < 0
             ? chosen.withPhases(selected)
             : initial;
-    return shiftedAttempt(prepared, options, input, builtAt, best);
+    return best;
+  }
+
+  /** 只留评分最好的一份试排：先比评分、评分相同再比相位，按这个全序留最前的一份，与候选编完的先后无关（串行与并行留下的相同）。 */
+  private static void keepBest(
+      Map<Map<String, Integer>, Attempt> completed, Map<String, Integer> delta, Attempt result) {
+    synchronized (completed) {
+      boolean better = true;
+      for (Map.Entry<Map<String, Integer>, Attempt> kept : completed.entrySet()) {
+        int byScore = result.completionScore().compareTo(kept.getValue().completionScore());
+        if (byScore > 0
+            || (byScore == 0 && delta.toString().compareTo(kept.getKey().toString()) >= 0)) {
+          better = false;
+          break;
+        }
+      }
+      if (better) {
+        completed.clear();
+        completed.put(delta, result);
+      }
+    }
   }
 
   /** 显式快车错峰只叠加在已选相位上，不能反向影响自动评分而改变其它组的名义网格。 */
@@ -2883,6 +2933,27 @@ public final class TimetableBuilder {
   }
 
   /** 按某个 headway 排出来的一份完整计划及其冲突报告。 */
+  /** 原表在目标间隔下选好相位的试排，只记第一份（原表那份）；错峰平移候选同一份准备、同一组参数时复用。 */
+  private static final class TargetMemo {
+    private Prepared prepared;
+    private TimetableBuildOptions options;
+    private Attempt attempt;
+
+    synchronized Optional<Attempt> find(Prepared prepared, TimetableBuildOptions options) {
+      return this.prepared == prepared && options.equals(this.options)
+          ? Optional.of(attempt)
+          : Optional.empty();
+    }
+
+    synchronized void offer(Prepared prepared, TimetableBuildOptions options, Attempt attempt) {
+      if (this.prepared == null) {
+        this.prepared = prepared;
+        this.options = options;
+        this.attempt = attempt;
+      }
+    }
+  }
+
   private record Attempt(
       int headwaySeconds,
       Timetable timetable,

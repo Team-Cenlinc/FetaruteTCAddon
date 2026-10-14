@@ -239,39 +239,55 @@ class TimetableBuilderRapidStaggerTest {
   /**
    * 并行编表时取消：进了错峰搜索就取消，各候选在下一次完整构建前停下，取消从 build 抛出（不当作失败），完整构建次数远少于编完。
    *
-   * <p>取消与编完是赛跑：极少数情况下观察到错峰阶段时已经编完，就再来一次。
+   * <p>取消在进入错峰阶段的那一刻同步发出（进度换阶段时会读一次时钟，测试的时钟在这时取消），不靠线程赛跑。
    */
   @Test
-  void aParallelBuildStopsWhenCancelled() throws Exception {
+  void aParallelBuildStopsWhenCancelled() {
     TimetableBuildProgress whole = new TimetableBuildProgress();
     build(new TimetableBuilder(whole, 4), 60, true);
-    java.util.concurrent.ExecutorService runner =
-        java.util.concurrent.Executors.newSingleThreadExecutor();
-    try {
-      boolean stopped = false;
-      for (int attempt = 0; attempt < 5 && !stopped; attempt++) {
-        TimetableBuildProgress progress = new TimetableBuildProgress();
-        java.util.concurrent.Future<TimetableBuildResult> running =
-            runner.submit(() -> build(new TimetableBuilder(progress, 4), 60, true));
-        while (progress.snapshot().stage() != TimetableBuildProgress.Stage.STAGGER
-            && !running.isDone()) {
-          Thread.onSpinWait();
-        }
-        progress.cancel();
+    CancelOnStagger clock = new CancelOnStagger();
+    TimetableBuildProgress progress = new TimetableBuildProgress(clock);
+    clock.progress = progress;
+
+    assertThrows(
+        TimetableBuildProgress.Cancelled.class,
+        () -> build(new TimetableBuilder(progress, 4), 60, true));
+
+    assertTrue(
+        progress.snapshot().fullBuilds() < whole.snapshot().fullBuilds(),
+        () -> progress.snapshot() + " / " + whole.snapshot());
+  }
+
+  /** 进度换到错峰阶段时读时钟，这时取消；读进度本身也会读时钟，用标记防止重入。 */
+  private static final class CancelOnStagger extends java.time.Clock {
+    private final java.time.Instant now = java.time.Instant.parse("2026-03-02T08:00:00Z");
+    private final ThreadLocal<Boolean> inside = ThreadLocal.withInitial(() -> false);
+    private volatile TimetableBuildProgress progress;
+
+    @Override
+    public java.time.Instant instant() {
+      TimetableBuildProgress watched = progress;
+      if (watched != null && !inside.get()) {
+        inside.set(true);
         try {
-          running.get(60, java.util.concurrent.TimeUnit.SECONDS);
-        } catch (java.util.concurrent.ExecutionException failure) {
-          assertTrue(
-              failure.getCause() instanceof TimetableBuildProgress.Cancelled, failure::toString);
-          assertTrue(
-              progress.snapshot().fullBuilds() < whole.snapshot().fullBuilds(),
-              () -> progress.snapshot() + " / " + whole.snapshot());
-          stopped = true;
+          if (watched.snapshot().stage() == TimetableBuildProgress.Stage.STAGGER) {
+            watched.cancel();
+          }
+        } finally {
+          inside.set(false);
         }
       }
-      assertTrue(stopped, "五次都在取消之前编完了");
-    } finally {
-      runner.shutdownNow();
+      return now;
+    }
+
+    @Override
+    public java.time.ZoneId getZone() {
+      return java.time.ZoneOffset.UTC;
+    }
+
+    @Override
+    public java.time.Clock withZone(java.time.ZoneId zone) {
+      return this;
     }
   }
 
