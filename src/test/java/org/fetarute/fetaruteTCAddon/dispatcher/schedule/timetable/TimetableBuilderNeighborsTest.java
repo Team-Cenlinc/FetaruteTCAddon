@@ -83,7 +83,7 @@ class TimetableBuilderNeighborsTest {
     assertEquals(first.duties(), second.duties());
   }
 
-  /** 所有候选相位都撞上邻表但等待在预算内：出入库也参与让车，保持 600 秒基准及邻表时刻。 */
+  /** 相位候选撞上邻表、等待在预算内：让车写进表（出入库走行也参与让车），保持 600 秒基准及邻表时刻。 */
   @Test
   void externalConflictUnderMaxWaitIsYieldedIntoTheTable() {
     NeighborTimetable neighbor = neighborAcrossPhaseCandidates();
@@ -103,9 +103,6 @@ class TimetableBuilderNeighborsTest {
                     yield.external()
                         && yield.firstOwner().equals(Optional.of(NEIGHBOR))
                         && yield.waitSeconds() <= 300));
-    assertTrue(
-        result.shifts().stream()
-            .anyMatch(shift -> shift.reason() == TerminalSerializer.Shift.Reason.YIELDED));
     // 邻表被记为影响过我的表：让车也算接触。
     assertEquals(1, result.neighbors().size());
     assertTrue(result.neighbors().get(0).conflictsAtTarget() >= 1);

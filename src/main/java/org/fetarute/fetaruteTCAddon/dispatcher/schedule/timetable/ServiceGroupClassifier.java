@@ -209,8 +209,7 @@ public final class ServiceGroupClassifier {
    * 起点站台组：第一个<b>落在车站上的停靠点</b>（STOP / TERMINATE；DYNAMIC 取它的目标站）；都找不到才退回首路径点。
    *
    * <p>方向是乘客看到的"从哪到哪"，<b>车库与走行路径点不是站</b>。按首末路径点取会把同一条线的往返拆成互不相识的两个方向：
-   * 出库端从车库出发、入库端到车库结束，两者的键都不是站，于是往返对锚不到一起，第二层的组间错开也找不到共用起点，
-   * 同一条交路的出库班与回库班还会被拆成两个方向、把进站流量算成两倍。
+   * 出库端从车库出发、入库端到车库结束，两者的键都不是站，于是往返对锚不到一起，第二层的组间错开也找不到共用起点， 同一条交路的出库班与回库班还会被拆成两个方向、把进站流量算成两倍。
    */
   static String originGroupOf(TimetableBuilder.RouteInput route) {
     return passengerEndpointGroup(route, true);

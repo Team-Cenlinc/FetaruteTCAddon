@@ -104,8 +104,7 @@ class TimetableBuildReportTextTest {
     }
     residuals.add(
         residual("L1-9", "OP:S:B", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:c~d"));
-    residuals.add(
-        residual("L2-1", "OP:S:C", ConflictAbsorption.Verdict.STUB_TERMINAL, "single:s"));
+    residuals.add(residual("L2-1", "OP:S:C", ConflictAbsorption.Verdict.STUB_TERMINAL, "single:s"));
 
     List<String> lines = TimetableBuildReportText.describeUnabsorbable(residuals, 0);
 

@@ -172,7 +172,7 @@ class ResourcePhasePlannerTest {
   }
 
   /**
-   * 卷进不可吸收残余的单元试完全部候选（评分没按方向分摊时按总数算，有残余就都算卷进）。
+   * 每个单元的候选都试到。
    *
    * <p>八个互不相干的方向，间隔 300 s、起点 δ 都是 100：细档步长是间隔的 1/20、1/10、3/20 向下取整到 10 s（10、30、40）； 每个单元
    * δ=0、两个远端粗档（220、280）、细档 ±10/±30/±40 与两个近处粗档（160、40）共 11 个候选，都要试到。
@@ -277,42 +277,32 @@ class ResourcePhasePlannerTest {
     assertEquals(List.of(keys.get(2), keys.get(1), keys.get(3), keys.get(0)), order);
   }
 
-  /**
-   * 单元多（十二个）、只有其中两个卷进不可吸收残余：这两个试完全部 11 个候选，其余每个都保住 δ=0 与两个远端粗档（不是挤在起点旁边的细档）， 资源相位说明里写明哪些单元只试了这几个。
-   */
+  /** 单元多（十二个）时不设全局预算：每个单元都试完自己的 11 个候选，远端与近处的粗档都在里面，排在后面的单元不会被前面的吃光份额。 */
   @Test
-  void unitsOutsideTheResidualsKeepTheirCoarseCandidates() {
+  void manyUnitsEachTryAllTheirCandidates() {
     Units units = units(12, 300, 100);
     Map<String, java.util.Set<Integer>> tried = new java.util.TreeMap<>();
     java.util.concurrent.atomic.AtomicInteger calls =
         new java.util.concurrent.atomic.AtomicInteger();
-    Map<String, Integer> involved = Map.of(units.keys().get(3), 2, units.keys().get(7), 1);
 
-    PhasePlanner.Phases chosen =
-        ResourcePhasePlanner.refineCompleted(
-            units.initial(),
-            units.groups(),
-            units.intervals(),
-            300,
-            java.util.Set.of(),
-            phases -> {
-              calls.incrementAndGet();
-              record(units.initial(), phases, tried);
-              return new ResourcePhasePlanner.CompletionScore(3, 0, 0, 0, 0, involved);
-            });
+    ResourcePhasePlanner.refineCompleted(
+        units.initial(),
+        units.groups(),
+        units.intervals(),
+        300,
+        java.util.Set.of(),
+        phases -> {
+          calls.incrementAndGet();
+          record(units.initial(), phases, tried);
+          return new ResourcePhasePlanner.CompletionScore(
+              3, 0, 0, 0, 0, Map.of(units.keys().get(3), 2));
+        });
 
-    assertEquals(1 + 2 * MAX_CANDIDATES_PER_UNIT + 10 * 3, calls.get());
+    assertEquals(1 + 12 * MAX_CANDIDATES_PER_UNIT, calls.get());
     for (String key : units.keys()) {
-      if (involved.containsKey(key)) {
-        assertEquals(MAX_CANDIDATES_PER_UNIT, tried.get(key).size(), key);
-      } else {
-        assertEquals(java.util.Set.of(0, 220, 280), tried.get(key), key);
-      }
+      assertEquals(MAX_CANDIDATES_PER_UNIT, tried.get(key).size(), key);
+      assertTrue(tried.get(key).containsAll(java.util.Set.of(220, 280, 160, 40)), key);
     }
-    assertTrue(
-        chosen.resourceNotes().stream()
-            .anyMatch(note -> note.contains("远端粗档") && note.contains(units.keys().get(11))),
-        chosen.resourceNotes().toString());
   }
 
   /** 记下这次评分里哪些方向的 δ 偏离了起点。 */
