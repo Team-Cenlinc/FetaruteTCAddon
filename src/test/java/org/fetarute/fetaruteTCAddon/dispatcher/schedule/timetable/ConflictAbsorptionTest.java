@@ -7,6 +7,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.junit.jupiter.api.Test;
 
 /**
@@ -481,6 +482,179 @@ class ConflictAbsorptionTest {
             .get(0)
             .verdict(),
         "判不出从哪来就退回按资源保守判");
+  }
+
+  /**
+   * 冲突在途中停车点之后：运行时后车在那一站发车前被挡（或在区间信号前减速），不会回到起点去等。
+   *
+   * <p>起点站已满、途中停车点有空位：让车点是途中停车点，可吸收。按起点判会把双线区间上的跟车判成"始发站无容量"。
+   */
+  @Test
+  void aConflictAfterAnIntermediateStopWaitsThereNotAtTheOrigin() {
+    EnRoute fixture = new EnRoute();
+    var occupancy = fixture.occupancy(fixture.originFull());
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), occupancy);
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(40, residual.waitSeconds());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 途中停车点的那股道在等待窗口内被别的车占着：没地方等，与起点同一口径判无容量。 */
+  @Test
+  void anOccupiedIntermediateStopHasNoWaitingCapacity() {
+    EnRoute fixture = new EnRoute();
+    List<TimetableConflictChecker.Stay> stays = new java.util.ArrayList<>(fixture.originFull());
+    stays.add(
+        new TimetableConflictChecker.Stay(
+            "OTHER", new TimetableConflictChecker.Platform(MID + ":1", MID, false), 155, 400));
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(stays));
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /**
+   * 前车刚离开这一站、离开时刻加裕量盖住了后车的发车：那是到站时就有的冲突（另有一条记录），不是多等造成的，不能算让车点无容量。
+   *
+   * <p>运行时后车在这一站多停，只会挡住等待期间要进这股道的车；已经走了的前车不受影响。
+   */
+  @Test
+  void aLeaderThatAlreadyLeftTheStopDoesNotBlockTheWait() {
+    EnRoute fixture = new EnRoute();
+    List<TimetableConflictChecker.Stay> stays = new java.util.ArrayList<>(fixture.originFull());
+    stays.add(
+        new TimetableConflictChecker.Stay(
+            "LEAD", new TimetableConflictChecker.Platform(MID + ":1", MID, false), 40, 100));
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(stays));
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /**
+   * 途中停车点没有空位、起点有：整趟晚发写得进表（车在起点多站），仍可吸收，让车点记起点。
+   *
+   * <p>两个让车点都是兑现得了的：途中最后一个停车点是运行时自己会等的地方，起点是表上写得进去的地方。中间别的车站两样都不是，不用。
+   */
+  @Test
+  void aFullIntermediateStopFallsBackToTheOrigin() {
+    EnRoute fixture = new EnRoute();
+    List<TimetableConflictChecker.Stay> stays =
+        List.of(
+            new TimetableConflictChecker.Stay(
+                "OTHER", new TimetableConflictChecker.Platform(MID + ":1", MID, false), 155, 400));
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(stays));
+
+    assertEquals(Optional.of(WIDE), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 冲突在第一个停车点之前（含它的站台本身）：车还没到那一站，让车点仍是起点。 */
+  @Test
+  void aConflictBeforeTheFirstStopStillWaitsAtTheOrigin() {
+    EnRoute fixture = new EnRoute();
+    var occupancy = fixture.occupancy(fixture.originFull());
+
+    ConflictAbsorption.Residual onLine =
+        fixture.classify(conflictOn("edge:WIDE~MID", 70, 50), occupancy);
+    ConflictAbsorption.Residual atPlatform =
+        fixture.classify(conflictOn("platform:" + MID + ":1", 110, 100), occupancy);
+
+    assertEquals(Optional.of(WIDE), onLine.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, onLine.verdict());
+    assertEquals(Optional.of(WIDE), atPlatform.waitingPoint(), "到站冲突时车还在上一站");
+  }
+
+  /** 不停车通过的车站不是让车点：运行时只在停车点的发车门控扣车。 */
+  @Test
+  void aPassedStationIsNotAWaitingPoint() {
+    EnRoute fixture = new EnRoute(RouteStopPassType.PASS);
+    var occupancy = fixture.occupancy(fixture.originFull());
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), occupancy);
+
+    assertEquals(Optional.of(WIDE), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  private static final String MID = "OP:S:MID";
+
+  /** 起点 WIDE（两股道）→ 途中 MID（两股道，100 s 到、120 s 发）→ 终点 END（300 s 到）。 */
+  private static final class EnRoute {
+    private final Timetable table = timetableWithOriginAt(WIDE);
+    private final java.util.UUID route = table.trips().get(0).routeId();
+    private final TimetableConflictChecker.RouteProfile profile;
+    private final TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(
+            null, Map.of(STUB, 1, WIDE, 2, MID, 2, "OP:S:END", 2), Map.of());
+
+    EnRoute() {
+      this(RouteStopPassType.STOP);
+    }
+
+    EnRoute(RouteStopPassType midPass) {
+      int midDeparture = midPass == RouteStopPassType.PASS ? 100 : 120;
+      profile =
+          new TimetableConflictChecker.RouteProfile(
+              route,
+              "RA",
+              List.of(
+                  new TimetableStop(
+                      0, Optional.empty(), Optional.of(WIDE + ":1"), 0, 0, RouteStopPassType.STOP),
+                  new TimetableStop(
+                      1, Optional.empty(), Optional.of(MID + ":1"), 100, midDeparture, midPass),
+                  new TimetableStop(
+                      2,
+                      Optional.empty(),
+                      Optional.of("OP:S:END:1"),
+                      300,
+                      300,
+                      RouteStopPassType.TERMINATE)),
+              List.of(),
+              List.of(
+                  new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false),
+                  new TimetableConflictChecker.Platform(MID + ":1", MID, false),
+                  new TimetableConflictChecker.Platform("OP:S:END:1", "OP:S:END", false)));
+    }
+
+    /** 起点两股道在 [0, 500) 都被别的车占着。 */
+    List<TimetableConflictChecker.Stay> originFull() {
+      return List.of(
+          new TimetableConflictChecker.Stay(
+              "D001", new TimetableConflictChecker.Platform(WIDE + ":1", WIDE, false), 0, 500),
+          new TimetableConflictChecker.Stay(
+              "D002", new TimetableConflictChecker.Platform(WIDE + ":2", WIDE, false), 0, 500));
+    }
+
+    TimetableOccupancyProjector.Occupancy occupancy(List<TimetableConflictChecker.Stay> stays) {
+      return new TimetableOccupancyProjector.Occupancy(
+          List.of(new TimetableConflictChecker.Movement("RA-001", route, 0)), stays);
+    }
+
+    ConflictAbsorption.Residual classify(
+        TimetableConflictChecker.Conflict conflict,
+        TimetableOccupancyProjector.Occupancy occupancy) {
+      return ConflictAbsorption.classify(
+              report(conflict),
+              table,
+              occupancy,
+              index,
+              SEPARATION,
+              MAX_WAIT,
+              TurnaroundTable.none(),
+              Map.of(route, profile))
+          .get(0);
+    }
   }
 
   private static ConflictAbsorption.Residual only(TimetableConflictChecker.Conflict conflict) {

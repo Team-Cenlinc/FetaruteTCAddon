@@ -1448,7 +1448,7 @@ public final class TimetableConflictChecker {
     }
 
     /**
-     * 容量 n：同时在场的占用超过 n 就冲突；报的是新来的与在场里最早的那个<b>可归责</b>的占用。
+     * 容量 n：同时在场的占用超过 n 就冲突；报的是新来的与在场里最早离开的那个<b>可归责</b>的占用。
      *
      * <p>"可归责"指不是两份邻表之间的对：新来的若是邻表，就找在场的我；新来的若是我，在场里谁都算。 只拿在场最早的那个比会被两份邻表夹住——它们之间的重叠不报，我夹在中间的占用就被漏掉。
      */
@@ -1489,9 +1489,12 @@ public final class TimetableConflictChecker {
       for (int i = 0; i < active.size(); i++) {
         Occupation current = active.get(i);
         vehicles.add(current.vehicle());
+        // 容量满时后来的车等的是最先腾出的那一股道：记在场里最早离开的那辆，等待按它算；同时离开取先到的。
         if (!current.sameVehicle(next)
             && !current.bothExternal(next)
-            && (partner == null || current.from() < partner.from())) {
+            && (partner == null
+                || current.to() < partner.to()
+                || (current.to() == partner.to() && current.from() < partner.from()))) {
           partner = current;
         }
       }

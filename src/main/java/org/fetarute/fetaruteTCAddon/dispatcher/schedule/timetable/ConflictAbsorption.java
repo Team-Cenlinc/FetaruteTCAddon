@@ -31,7 +31,8 @@ import java.util.UUID;
  *   <li><b>容量 1 的端点</b>：<b>后车要等的地方</b>只有一股道 → 不可吸收，在这里等就是堵死岔线。判不出后车在哪等时
  *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
- *   <li><b>让车点没有容量</b>：后车在始发等待窗口内无法停在合格股道上 → 不可吸收。
+ *   <li><b>让车点没有容量</b>：两个让车点都无法在等待窗口内停在合格股道上 → 不可吸收。一个是后车在冲突资源之前最后一个停车的车站
+ *       （运行时在那一站的发车门控前被挡住，或驶出后在区间信号前等；只算等待期间才来的车），一个是起点（整趟晚发写得进表）； 冲突在第一个停车点之前时只有起点。
  *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
  *       写得进去的顺推已由让车修复的必等顺推写进表（{@link ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait}
  *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
@@ -341,7 +342,7 @@ public final class ConflictAbsorption {
     String mover = moverOf(conflict);
     int wait = conflict.firstTo() + separation - conflict.secondFrom();
     wait = Math.max(0, wait);
-    Optional<String> waitingPoint = context.waitingPointOf(mover);
+    Optional<String> origin = context.waitingPointOf(mover);
 
     // 2. 容量 1 的端点：后车要在只有一股道的地方等，那才是堵死岔线。
     //
@@ -351,26 +352,42 @@ public final class ConflictAbsorption {
     //
     // 车库（空串）算"知道在哪等"，不算"判不出"：车在库里等不堵任何人。
     // 只有连后车在哪等都判不出来时（相位第三层评估时手上没有成品表），才退回按资源保守判。
-    boolean waitsOnStub =
-        waitingPoint.isPresent()
-            ? context.isStubGroup(waitingPoint.get())
+    boolean originOnStub =
+        origin.isPresent()
+            ? context.isStubGroup(origin.get())
             : context.isStubResource(conflict.resource());
-    if (waitsOnStub) {
-      return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.STUB_TERMINAL);
+    // 冲突在后车某个途中停车点之后：运行时它在那一站的发车门控前被挡住（或驶出后在区间信号前等），不会回到起点去等，
+    // 那一站是第二个让车点。两个让车点都兑现得了——途中这一站是运行时自己会等的地方，起点是整趟晚发写得进表的地方；
+    // 中间别的车站两样都不是，不用。冲突在第一个停车点之前时只有起点。
+    Optional<TimetableWaitingCapacity.EnRoute> enRoute =
+        context.enRoute(mover, conflict.secondFrom());
+    boolean enRouteOnStub = enRoute.isPresent() && context.isStubGroup(enRoute.get().group());
+    if (originOnStub && (enRoute.isEmpty() || enRouteOnStub)) {
+      Optional<String> at = enRoute.isPresent() ? Optional.of(enRoute.get().group()) : origin;
+      return new Residual(conflict, mover, wait, at, 0, Verdict.STUB_TERMINAL);
     }
     // 3. 预算：与让车修复同一个上限。
+    Optional<String> nearest = enRoute.isPresent() ? Optional.of(enRoute.get().group()) : origin;
     if (wait > maxWait) {
-      return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
+      return new Residual(conflict, mover, wait, nearest, 0, Verdict.OVER_MAX_WAIT);
     }
-    // 4. 让车点有没有空位。
-    if (waitingPoint.isPresent()
-        && !context.hasRoom(
-            waitingPoint.get(),
-            mover,
-            context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
-            wait,
-            separation)) {
-      return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
+    // 4. 让车点有没有空位：先看途中这一站，再看起点。
+    Optional<String> waitingPoint;
+    if (enRoute.isPresent()
+        && !enRouteOnStub
+        && context.waitingCapacity().hasRoom(mover, enRoute.get(), wait, separation)) {
+      waitingPoint = nearest;
+    } else if (!originOnStub
+        && (origin.isEmpty()
+            || context.hasRoom(
+                origin.get(),
+                mover,
+                context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
+                wait,
+                separation))) {
+      waitingPoint = origin;
+    } else {
+      return new Residual(conflict, mover, wait, nearest, 0, Verdict.NO_WAITING_CAPACITY);
     }
     // 5. 连锁：这一等会顶掉后面几班。
     int depth = context.chainDepthAfter(mover, wait);
@@ -517,6 +534,11 @@ public final class ConflictAbsorption {
     Context withoutChain() {
       return new Context(
           waitingPointByCode, departureByCode, waitingCapacity, stubGroups, Map.of());
+    }
+
+    /** 后车在冲突之前最后一个途中停车点；冲突在第一个停车点之前时为空。 */
+    Optional<TimetableWaitingCapacity.EnRoute> enRoute(String code, int enterSecond) {
+      return waitingCapacity.enRoute(code, enterSecond);
     }
 
     /** 始发等待使用完整资源模型；远处冲突时刻不用于始发站容量判定。 */
