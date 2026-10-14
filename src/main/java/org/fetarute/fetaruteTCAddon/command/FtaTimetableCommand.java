@@ -47,6 +47,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnGroup;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPatternLength;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnPlan;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.BuildPool;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CapacityReport;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.ConsistFleet;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PublishedTimetables;
@@ -634,6 +635,7 @@ public final class FtaTimetableCommand {
           Component.text("已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟；在后台线程运行，不阻塞服务器主线程。", NamedTextColor.GRAY));
     }
     Instant builtAt = Instant.now();
+    int threads = buildThreads();
     TimetableHeadwayDefaults.Choice headwayChoice = headway;
     plugin
         .getServer()
@@ -657,7 +659,7 @@ public final class FtaTimetableCommand {
                     neighborInputs.project(graphSnapshot, index, footprint, options);
                 progress.checkpoint();
                 result =
-                    new TimetableSetBuilder(progress)
+                    new TimetableSetBuilder(progress, threads)
                         .build(
                             new TimetableSetBuilder.SetInput(setMembers, neighbors),
                             options,
@@ -1913,6 +1915,16 @@ public final class FtaTimetableCommand {
             Component.empty()));
     sender.sendMessage(
         configRow(
+            "编表线程",
+            buildThreads() + " 个",
+            settings.buildThreads() == ConfigManager.TimetableSettings.AUTO_BUILD_THREADS
+                ? "config.yml 的 timetable.build-threads（auto：核数的一半，至多 "
+                    + BuildPool.DEFAULT_MAX_THREADS
+                    + " 个）；只影响编表快慢，不影响结果"
+                : "config.yml 的 timetable.build-threads；只影响编表快慢，不影响结果",
+            Component.empty()));
+    sender.sendMessage(
+        configRow(
             "交路最长在线",
             VehicleDutyPlanner.Limits.DEFAULT_MAX_DURATION_SECONDS / 60 + " 分钟",
             "默认（无持久化位置）",
@@ -2997,6 +3009,15 @@ public final class FtaTimetableCommand {
     }
     return new TimetableBuildOptions.Repair(
         Duration.ofSeconds(maxWait), Duration.ofSeconds(tolerance));
+  }
+
+  /** 编表线程数：{@code timetable.build-threads} 换算后的值（auto 按核数取）。 */
+  private int buildThreads() {
+    ConfigManager.TimetableSettings settings =
+        plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
+            ? plugin.getConfigManager().current().timetableSettings()
+            : ConfigManager.TimetableSettings.defaults();
+    return BuildPool.resolveThreads(settings.buildThreads());
   }
 
   /** 站台扣留上限：报告里用它区分让车发生在站台还是资源前。 */

@@ -208,6 +208,94 @@ class TimetableBuilderRapidStaggerTest {
                 false));
   }
 
+  /**
+   * 并行编表与串行逐字段相同：班次、交路、相位与错峰说明、警告都一样。
+   *
+   * <p>慢车停站 30/60/90 秒时快车在表里给慢车让车，错峰会搜：30 秒那次平移扫到错开的窗口就停（早停落在一批的中间）， 60、90
+   * 秒扫完整个周期再细试。每次编表里相位第三层的完整候选也并行评。
+   */
+  @Test
+  void aParallelBuildEqualsTheSerialOne() {
+    for (int dwell : new int[] {30, 60, 90}) {
+      TimetableBuildResult serial =
+          build(new TimetableBuilder(TimetableBuildProgress.untracked(), 1), dwell, true);
+      assertTrue(
+          serial.phaseNotes().stream().anyMatch(note -> note.startsWith("快车错峰：")),
+          serial.phaseNotes()::toString);
+      for (int threads : new int[] {3, 4}) {
+        TimetableBuildResult parallel =
+            build(new TimetableBuilder(TimetableBuildProgress.untracked(), threads), dwell, true);
+        assertEquals(
+            serial.timetable(), parallel.timetable(), "停站 " + dwell + "，" + threads + " 线程");
+        assertEquals(withoutTiming(serial.phaseNotes()), withoutTiming(parallel.phaseNotes()));
+        assertEquals(serial.warnings(), parallel.warnings());
+        assertEquals(serial.resourcePhaseNotes(), parallel.resourcePhaseNotes());
+        assertEquals(
+            withoutTiming(List.of(serial.toString())), withoutTiming(List.of(parallel.toString())));
+      }
+    }
+  }
+
+  /**
+   * 并行编表时取消：进了错峰搜索就取消，各候选在下一次完整构建前停下，取消从 build 抛出（不当作失败），完整构建次数远少于编完。
+   *
+   * <p>取消在进入错峰阶段的那一刻同步发出（进度换阶段时会读一次时钟，测试的时钟在这时取消），不靠线程赛跑。
+   */
+  @Test
+  void aParallelBuildStopsWhenCancelled() {
+    TimetableBuildProgress whole = new TimetableBuildProgress();
+    build(new TimetableBuilder(whole, 4), 60, true);
+    CancelOnStagger clock = new CancelOnStagger();
+    TimetableBuildProgress progress = new TimetableBuildProgress(clock);
+    clock.progress = progress;
+
+    assertThrows(
+        TimetableBuildProgress.Cancelled.class,
+        () -> build(new TimetableBuilder(progress, 4), 60, true));
+
+    assertTrue(
+        progress.snapshot().fullBuilds() < whole.snapshot().fullBuilds(),
+        () -> progress.snapshot() + " / " + whole.snapshot());
+  }
+
+  /** 进度换到错峰阶段时读时钟，这时取消；读进度本身也会读时钟，用标记防止重入。 */
+  private static final class CancelOnStagger extends java.time.Clock {
+    private final java.time.Instant now = java.time.Instant.parse("2026-03-02T08:00:00Z");
+    private final ThreadLocal<Boolean> inside = ThreadLocal.withInitial(() -> false);
+    private volatile TimetableBuildProgress progress;
+
+    @Override
+    public java.time.Instant instant() {
+      TimetableBuildProgress watched = progress;
+      if (watched != null && !inside.get()) {
+        inside.set(true);
+        try {
+          if (watched.snapshot().stage() == TimetableBuildProgress.Stage.STAGGER) {
+            watched.cancel();
+          }
+        } finally {
+          inside.set(false);
+        }
+      }
+      return now;
+    }
+
+    @Override
+    public java.time.ZoneId getZone() {
+      return java.time.ZoneOffset.UTC;
+    }
+
+    @Override
+    public java.time.Clock withZone(java.time.ZoneId zone) {
+      return this;
+    }
+  }
+
+  /** 错峰说明里的用时随机器快慢变，比较时去掉。 */
+  private static List<String> withoutTiming(List<String> notes) {
+    return notes.stream().map(note -> note.replaceAll("用时 \\d+s", "用时 ?s")).toList();
+  }
+
   private TimetableBuildResult build(TimetableBuilder builder, int localDwell, boolean stagger) {
     List<TimetableBuilder.RouteInput> routes =
         List.of(

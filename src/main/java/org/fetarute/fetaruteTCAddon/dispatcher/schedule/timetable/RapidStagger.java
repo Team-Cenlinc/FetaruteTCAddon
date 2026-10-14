@@ -749,20 +749,53 @@ final class RapidStagger {
       Function<Measure, List<Dwell>> dwellPoints,
       boolean turnbackOnly,
       Evaluator evaluator) {
+    return search(
+        periods, base, turnbackPoints, dwellPoints, turnbackOnly, evaluator, BuildPool.serial());
+  }
+
+  /**
+   * 同 {@link #search(Map, Candidate, Function, Function, boolean, Evaluator)}，候选成批并行编。
+   *
+   * <p>每批编 {@link BuildPool#threads()} 个，按原顺序逐个消费、套用同样的早停；早停之后同一批里多编的直接丢掉，"试了几个位置"也只数消费到的。
+   * 所以选中的候选、报告里的数与串行完全相同，只是多编了几个用不上的。平移两轮之间、组与组之间仍是先后关系，各自成批。
+   *
+   * @param pool 并行池；{@code evaluator} 会在池内线程上被并发调用，必须线程安全
+   */
+  static Search search(
+      Map<String, Integer> periods,
+      Candidate base,
+      Function<Measure, List<Dwell>> turnbackPoints,
+      Function<Measure, List<Dwell>> dwellPoints,
+      boolean turnbackOnly,
+      Evaluator evaluator,
+      BuildPool pool) {
     Picks picks = new Picks(base);
+    int batch = Math.max(1, pool.threads());
     int tried = 0;
     for (Dwell point : turnbackPoints.apply(base.measure())) {
-      for (int margin : TURNBACK_MARGINS) {
-        tried++;
-        Optional<Candidate> candidate =
-            evaluator.dwell(Map.of(), point.withSeconds(point.seconds() + margin));
-        if (candidate.isEmpty()) {
-          continue;
+      boolean reached = false;
+      // 多半第一档（余量 0）就把全网损失压到 0：先只编它，没停下再成批往后试，免得并行时每个点白编一整批。
+      for (int from = 0, size = 1;
+          !reached && from < TURNBACK_MARGINS.size();
+          from += size, size = batch) {
+        List<Dwell> trials = new ArrayList<>();
+        for (int margin :
+            TURNBACK_MARGINS.subList(from, Math.min(from + size, TURNBACK_MARGINS.size()))) {
+          trials.add(point.withSeconds(point.seconds() + margin));
         }
-        picks.offer(candidate.get());
-        if (candidate.get().networkLost() == 0L) {
-          // 余量从小到大：全网已经没有一秒损失，再加只是多停。
-          break;
+        for (BuildPool.Evaluated<Optional<Candidate>> built :
+            pool.evaluate(trials, trial -> evaluator.dwell(Map.of(), trial))) {
+          tried++;
+          Optional<Candidate> candidate = built.get();
+          if (candidate.isEmpty()) {
+            continue;
+          }
+          picks.offer(candidate.get());
+          if (candidate.get().networkLost() == 0L) {
+            // 余量从小到大：全网已经没有一秒损失，再加只是多停。
+            reached = true;
+            break;
+          }
         }
       }
     }
@@ -785,25 +818,37 @@ final class RapidStagger {
       Integer bestOffset = null;
       for (int round = 0; round < 2; round++) {
         boolean inClearWindow = false;
-        for (int offset : offsets) {
-          Map<String, Integer> next = new TreeMap<>(shift);
-          next.put(group, offset);
-          tried++;
-          Optional<Candidate> candidate = evaluator.shift(next);
-          boolean clear = candidate.isPresent() && candidate.get().measure().seconds() == 0L;
-          if (inClearWindow && !clear) {
-            // 第一段完全错开的窗口扫完了：被卡 0 已到底，后面的位置只可能在次要指标上略好，不值得每个再编一遍。
-            break;
+        boolean windowPassed = false;
+        for (int from = 0; !windowPassed && from < offsets.size(); from += batch) {
+          List<Integer> slice = offsets.subList(from, Math.min(from + batch, offsets.size()));
+          List<Map<String, Integer>> trials = new ArrayList<>(slice.size());
+          for (int offset : slice) {
+            Map<String, Integer> next = new TreeMap<>(shift);
+            next.put(group, offset);
+            trials.add(next);
           }
-          inClearWindow |= clear;
-          if (candidate.isEmpty()) {
-            continue;
-          }
-          keepTop(top, candidate.get());
-          picks.offer(candidate.get());
-          if (shiftBest == null || ORDER.compare(candidate.get(), shiftBest) < 0) {
-            shiftBest = candidate.get();
-            bestOffset = offset;
+          List<BuildPool.Evaluated<Optional<Candidate>>> built =
+              pool.evaluate(trials, evaluator::shift);
+          for (int i = 0; i < built.size(); i++) {
+            int offset = slice.get(i);
+            tried++;
+            Optional<Candidate> candidate = built.get(i).get();
+            boolean clear = candidate.isPresent() && candidate.get().measure().seconds() == 0L;
+            if (inClearWindow && !clear) {
+              // 第一段完全错开的窗口扫完了：被卡 0 已到底，后面的位置只可能在次要指标上略好，不值得每个再编一遍。
+              windowPassed = true;
+              break;
+            }
+            inClearWindow |= clear;
+            if (candidate.isEmpty()) {
+              continue;
+            }
+            keepTop(top, candidate.get());
+            picks.offer(candidate.get());
+            if (shiftBest == null || ORDER.compare(candidate.get(), shiftBest) < 0) {
+              shiftBest = candidate.get();
+              bestOffset = offset;
+            }
           }
         }
         if (bestOffset == null) {
@@ -823,15 +868,25 @@ final class RapidStagger {
     if (!picks.settled()) {
       List<Candidate> starts = new ArrayList<>(top);
       starts.add(base);
+      // 这一步没有早停，各起点、各加停点、各档一个接一个排成一串，成批编、按原顺序收。
+      List<Map.Entry<Map<String, Integer>, Dwell>> trials = new ArrayList<>();
       for (Candidate start : starts) {
         if (start.measure().seconds() == 0L) {
           continue;
         }
         for (Dwell point : dwellPoints.apply(start.measure())) {
           for (int seconds : DWELL_STEPS) {
-            tried++;
-            evaluator.dwell(start.shift(), point.withSeconds(seconds)).ifPresent(picks::offer);
+            trials.add(Map.entry(start.shift(), point.withSeconds(seconds)));
           }
+        }
+      }
+      for (int from = 0; from < trials.size(); from += batch) {
+        for (BuildPool.Evaluated<Optional<Candidate>> built :
+            pool.evaluate(
+                trials.subList(from, Math.min(from + batch, trials.size())),
+                trial -> evaluator.dwell(trial.getKey(), trial.getValue()))) {
+          tried++;
+          built.get().ifPresent(picks::offer);
         }
       }
     }
