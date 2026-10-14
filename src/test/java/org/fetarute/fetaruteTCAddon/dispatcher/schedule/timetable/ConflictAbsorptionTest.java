@@ -818,6 +818,45 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
+  /**
+   * 本车占着自己的固定股道 MID:1 多等，对向车进的是另一股道 MID:2：它在自己股道上没有新增冲突，只是站台组按车辆数 + 裕量多算了一辆而超员 （MID:2 上前一辆 RX 140 s
+   * 才走，加裕量盖到 170 s），并没有被本车挡住，可吸收。
+   */
+  @Test
+  void anOpposingTrainOnAnotherFixedTrackIsNotBlockedByTheWait() {
+    Corridor corridor = new Corridor();
+    UUID main = corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1");
+    UUID back =
+        corridor.through(
+            "RO", END + ":1", "OP:X:XB:2", "OP:X:XA:2", WIDE + ":1", MID + ":2", false);
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RX-001", back, 20, "D002");
+    corridor.run("RO-001", back, 60, "D003");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /** 本车停的是 DYNAMIC 停靠（没有自己的固定股道）：站台组层的超员就是真的少一股道，照旧放不下。 */
+  @Test
+  void aDynamicStopStillCountsTheStationGroup() {
+    Corridor corridor = new Corridor();
+    UUID main =
+        corridor.through("RA", WIDE + ":1", "OP:X:XA:1", "OP:X:XB:1", END + ":1", MID + ":1", true);
+    UUID back =
+        corridor.through(
+            "RO", END + ":1", "OP:X:XB:2", "OP:X:XA:2", WIDE + ":1", MID + ":2", false);
+    corridor.run("RA-001", main, 0, "D001");
+    corridor.run("RX-001", back, 20, "D002");
+    corridor.run("RO-001", back, 60, "D003");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
   /** 这一站是别的 route 的终点（折返站）：在这里多等挡住的哪怕是同方向后车，也算放不下。 */
   @Test
   void aFollowerBlockedAtATurnbackStationMeansNoRoom() {
@@ -847,17 +886,27 @@ class ConflictAbsorptionTest {
     private final Map<UUID, TimetableRoutePlan> plans = new LinkedHashMap<>();
     private final List<String[]> runs = new ArrayList<>();
     private final Map<String, UUID> routeOfRun = new HashMap<>();
+    private final java.util.Set<String> dynamicStops = new java.util.HashSet<>();
     private final TimetableConflictChecker.GraphIndex index =
         new TimetableConflictChecker.GraphIndex(
             null, Map.of(WIDE, 2, MID, 2, END, 2, SIDE, 2), Map.of());
 
     UUID through(String code, String from, String x, String y, String to) {
-      List<String> nodes = List.of(from, x, MID + ":1", y, to);
+      return through(code, from, x, y, to, MID + ":1", false);
+    }
+
+    /** 同上，指定停 MID 的哪一股道；{@code dynamic} 时 MID 是 DYNAMIC 停靠（只登记站台组一层）。 */
+    UUID through(
+        String code, String from, String x, String y, String to, String midTrack, boolean dynamic) {
+      List<String> nodes = List.of(from, x, midTrack, y, to);
+      if (dynamic) {
+        dynamicStops.add(code);
+      }
       return add(
           code,
           List.of(
               stop(0, from, 0, 0, RouteStopPassType.STOP),
-              stop(1, MID + ":1", 100, 120, RouteStopPassType.STOP),
+              stop(1, midTrack, 100, 120, RouteStopPassType.STOP),
               stop(2, to, 300, 300, RouteStopPassType.TERMINATE)),
           List.of(
               segment(0, 1, nodes.subList(0, 3), List.of(0, 50, 100)),
@@ -952,9 +1001,11 @@ class ConflictAbsorptionTest {
       List<TimetableConflictChecker.Platform> platforms = new ArrayList<>();
       for (TimetableStop stop : stops) {
         String node = stop.nodeId().orElseThrow();
+        boolean dynamic =
+            dynamicStops.contains(code) && stop.stopSequence() > 0 && stop.stopSequence() < 2;
         platforms.add(
             new TimetableConflictChecker.Platform(
-                node, TimetableConflictChecker.groupOf(node), false));
+                node, TimetableConflictChecker.groupOf(node), dynamic));
       }
       profiles.put(
           id, new TimetableConflictChecker.RouteProfile(id, code, stops, segments, platforms));

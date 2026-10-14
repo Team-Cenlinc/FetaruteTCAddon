@@ -27,6 +27,7 @@ final class TimetableWaitingCapacity {
   private final Map<Hold, Boolean> answers = new HashMap<>();
   private final Map<Hold, EnRouteRoom> enRouteAnswers = new HashMap<>();
   private final Map<UUID, Path> paths = new HashMap<>();
+  private final Map<String, List<String>> trackKeysByGroup = new HashMap<>();
 
   private record Hold(
       String code,
@@ -218,6 +219,7 @@ final class TimetableWaitingCapacity {
    * 运行时在前一个闭塞区间排队，是连锁延误、不会与本车互卡，不算放不下，记下它要多等多久交给连锁判据。其余都算放不下：对向来车、
    * 从别的路径汇入或交叉的车（进站前的节点不在本车来的路上）、邻表的车（挪不动，也算不了它的连锁）、待命车（不知道从哪来），
    * 以及判不清的（档案没有逐边路径、同一站台组经过多次分不出是哪一次）。这一站本身是有车始发或终到的端点、折返站时，挡住任何车都算放不下。
+   * 不是端点时，先去掉只在站台组一层超员、没真被挡住的车（{@link #blockedOnTheirTrack}）。
    */
   EnRouteRoom room(String code, EnRoute stop, int waitSeconds, int separation) {
     int sep = Math.max(0, separation);
@@ -252,6 +254,10 @@ final class TimetableWaitingCapacity {
     if (endpointGroups.contains(group)) {
       return EnRouteRoom.FULL;
     }
+    List<TimetableConflictChecker.Conflict> blocked = blockedOnTheirTrack(stop.platform(), added);
+    if (blocked.isEmpty()) {
+      return EnRouteRoom.EMPTY;
+    }
     Run mine = runs.get(code);
     Optional<Integer> myVisit =
         mine == null ? Optional.empty() : visit(mine, group, stop.departure());
@@ -260,7 +266,7 @@ final class TimetableWaitingCapacity {
     }
     Set<String> behind = new HashSet<>(path(mine).nodes().subList(0, myVisit.get()));
     Map<String, Integer> followers = new TreeMap<>();
-    for (TimetableConflictChecker.Conflict conflict : added) {
+    for (TimetableConflictChecker.Conflict conflict : blocked) {
       Run other = conflict.secondOwner().isPresent() ? null : runs.get(conflict.second());
       Optional<Integer> at =
           other == null ? Optional.empty() : visit(other, group, conflict.secondFrom());
@@ -273,6 +279,80 @@ final class TimetableWaitingCapacity {
       followers.merge(conflict.second(), wait, Math::max);
     }
     return new EnRouteRoom(true, java.util.Collections.unmodifiableMap(followers));
+  }
+
+  /**
+   * 去掉只在站台组一层超员、没真被挡住的那些：本车停的是自己的固定股道时，另一辆停在别的固定股道上的车， 若在它自己的股道上没有新增冲突，站台组的超员只是按"车辆数 +
+   * 裕量"多算了一辆（例如它那股道上前车刚走、裕量还没过），本车并没有挡住它。
+   *
+   * <p>本车是 DYNAMIC 停靠或带股道资格要求时没有自己的固定股道，站台组层的超员就是真的少一股道，照旧算；被挡的车没有固定股道（DYNAMIC）时同理。
+   * 等待只占站台资源，被挡的车在区间、道岔上不会因它新增冲突，只看股道一层就够。
+   */
+  private List<TimetableConflictChecker.Conflict> blockedOnTheirTrack(
+      TimetableConflictChecker.Platform platform, List<TimetableConflictChecker.Conflict> added) {
+    if (platform.dynamic() || !platform.requirements().isEmpty() || platform.nodeId().isBlank()) {
+      return added;
+    }
+    List<TimetableConflictChecker.Conflict> kept = new ArrayList<>(added.size());
+    for (TimetableConflictChecker.Conflict conflict : added) {
+      if (!conflict.resource().startsWith(GROUP_PREFIX)
+          || onOwnTrack(added, conflict)
+          || !hasFixedTrack(platform.group(), conflict)) {
+        kept.add(conflict);
+      }
+    }
+    return kept;
+  }
+
+  private static final String GROUP_PREFIX = "platform-group:";
+  private static final String TRACK_PREFIX = "platform:";
+
+  /** 同一辆被挡的车在某一股道上也有新增冲突：真被挡住了。 */
+  private static boolean onOwnTrack(
+      List<TimetableConflictChecker.Conflict> added, TimetableConflictChecker.Conflict blocked) {
+    for (TimetableConflictChecker.Conflict other : added) {
+      if (other.resource().startsWith(TRACK_PREFIX)
+          && other.second().equals(blocked.second())
+          && other.secondFrom() == blocked.secondFrom()
+          && other.secondOwner().equals(blocked.secondOwner())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 被挡的这一次进站登记在这一站台组的某条固定股道上（DYNAMIC 停靠只有站台组一层）。 */
+  private boolean hasFixedTrack(String group, TimetableConflictChecker.Conflict blocked) {
+    for (String key : trackKeys(group)) {
+      for (TimetableConflictChecker.Occupation occupation : resources.get(key).occupations()) {
+        if (occupation.from() > blocked.secondFrom()) {
+          break;
+        }
+        if (occupation.from() == blocked.secondFrom()
+            && occupation.code().equals(blocked.second())
+            && occupation.owner().equals(blocked.secondOwner())) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  /** 基础投影里属于这一站台组的具体股道键。 */
+  private List<String> trackKeys(String group) {
+    return trackKeysByGroup.computeIfAbsent(
+        group,
+        ignored -> {
+          List<String> keys = new ArrayList<>();
+          for (String key : resources.keySet()) {
+            if (key.startsWith(TRACK_PREFIX)
+                && group.equals(
+                    TimetableConflictChecker.groupOf(key.substring(TRACK_PREFIX.length())))) {
+              keys.add(key);
+            }
+          }
+          return List.copyOf(keys);
+        });
   }
 
   /**
