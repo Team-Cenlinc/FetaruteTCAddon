@@ -34,7 +34,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  * @param recoveryMinDwellSeconds 运行时晚点车途中站最少停多少秒（{@code
  *     timetable.recovery.min-dwell-seconds}）：顺推按下一班的可追回量判可不可吸收 （{@link
  *     ConflictAbsorption.Recovery}）；0 表示不按追回量判，顺推一班也不放过
- * @param maxCancelTrips 严格模式最多取消几班让不掉的班次（{@code --max-cancel}）；0 表示不取消，目标间隔有不可吸收残余就失败
+ * @param maxCancelTrips 严格模式最多取消几班让不掉的班次（{@code --max-cancel}）；0 表示不取消，目标间隔有不可吸收残余就失败； 负数（缺省 {@link
+ *     #DEFAULT_MAX_CANCEL_TRIPS}）表示按运营班次的比例定（{@link #maxCancelTripsFor}）
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -209,11 +210,16 @@ public record TimetableBuildOptions(
   public static final int DEFAULT_SEPARATION_SECONDS = 15;
 
   /**
-   * {@code --max-cancel} 的缺省值：严格模式最多取消 10 班让不掉的班次。
+   * {@code --max-cancel} 的缺省值：不给绝对班数，按运营班次的 {@value #DEFAULT_MAX_CANCEL_PERCENT}% 定（{@link
+   * #maxCancelTripsFor}）。
    *
-   * <p>一整天几百班里取消个位数班次，乘客几乎感觉不到，换来的是目标间隔不放宽；再多就说明目标间隔本身排不开，该放宽或改结构，而不是成片取消。
+   * <p>取消的代价按比例看：一整天几百、几千班里取消百分之一，乘客几乎感觉不到，换来的是目标间隔不放宽；再多就说明目标间隔本身排不开， 该放宽或改结构，而不是成片取消。
+   * 写成绝对班数时，班次少的线路一取消就是一大截，班次多的线路又几乎不让取消，所以缺省随班次数伸缩；{@code --max-cancel N} 仍可给绝对值。
    */
-  public static final int DEFAULT_MAX_CANCEL_TRIPS = 10;
+  public static final int DEFAULT_MAX_CANCEL_TRIPS = -1;
+
+  /** 缺省的取消上限占运营班次的百分比；至少 1 班。 */
+  public static final int DEFAULT_MAX_CANCEL_PERCENT = 1;
 
   public TimetableBuildOptions {
     if (serviceStartSecondOfDay < 0 || serviceStartSecondOfDay >= TimetableTrip.SECONDS_PER_DAY) {
@@ -251,7 +257,26 @@ public record TimetableBuildOptions(
     repair = repair == null ? Repair.defaults() : repair;
     following = following == null ? Following.NONE : following;
     recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
-    maxCancelTrips = Math.max(0, maxCancelTrips);
+    maxCancelTrips = maxCancelTrips < 0 ? DEFAULT_MAX_CANCEL_TRIPS : maxCancelTrips;
+  }
+
+  /** 取消上限是不是按运营班次的比例定（没给 {@code --max-cancel}）。 */
+  public boolean maxCancelByShare() {
+    return maxCancelTrips < 0;
+  }
+
+  /**
+   * 严格模式这一次最多取消几班。
+   *
+   * @param operatingTrips 目标间隔下排出的运营班次数（不含出入库走行）
+   * @return 给了 {@code --max-cancel} 时就是它；没给时取运营班次的 {@value #DEFAULT_MAX_CANCEL_PERCENT}%（向下取整），至少 1
+   *     班
+   */
+  public int maxCancelTripsFor(int operatingTrips) {
+    if (!maxCancelByShare()) {
+      return maxCancelTrips;
+    }
+    return Math.max(1, Math.max(0, operatingTrips) * DEFAULT_MAX_CANCEL_PERCENT / 100);
   }
 
   /** 不按追回量判、严格模式不取消班次的构造（命令层另用 {@link #withRecoveryMinDwell} 与 {@link #withMaxCancelTrips} 补上）。 */

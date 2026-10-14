@@ -1,6 +1,7 @@
 package org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.time.Duration;
 import java.time.ZoneId;
@@ -97,7 +98,26 @@ class TimetableBuildOptionsTest {
       assertEquals(10, derived.recoveryMinDwellSeconds());
       assertEquals(7, derived.maxCancelTrips());
     }
-    assertEquals(0, legacy.withMaxCancelTrips(-3).maxCancelTrips());
+    assertEquals(
+        TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS,
+        legacy.withMaxCancelTrips(-3).maxCancelTrips(),
+        "负数一律是按比例");
     assertEquals(0, legacy.withRecoveryMinDwell(-3).recoveryMinDwellSeconds());
+  }
+
+  /** 取消上限：给了 --max-cancel 就是绝对班数（0 不取消）；没给时按运营班次的 1%，向下取整、至少 1 班。 */
+  @Test
+  void theDefaultCancelLimitScalesWithTheOperatingTrips() {
+    TimetableBuildOptions byShare =
+        TimetableBuildOptions.defaults(ZoneId.of("UTC"))
+            .withMaxCancelTrips(TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS);
+
+    assertTrue(byShare.maxCancelByShare());
+    assertEquals(1, byShare.maxCancelTripsFor(0));
+    assertEquals(1, byShare.maxCancelTripsFor(150));
+    assertEquals(3, byShare.maxCancelTripsFor(399));
+    assertEquals(21, byShare.maxCancelTripsFor(2112));
+    assertEquals(7, byShare.withMaxCancelTrips(7).maxCancelTripsFor(2112));
+    assertEquals(0, byShare.withMaxCancelTrips(0).maxCancelTripsFor(2112));
   }
 }

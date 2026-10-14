@@ -436,18 +436,20 @@ public final class TimetableBuilder {
         // 严格模式不放宽间隔；喂车方向中途多停不改间隔，与非严格模式同一个顺序先试它，排开了就用。
         Optional<Found> held =
             holdsAtTarget(holds, options, targetHeadway, builtAt, searchNotes, failed);
-        // 多停也排不开：在已选相位上取消让不掉的班次，至多 --max-cancel 班（0 不取消）。
+        // 多停也排不开：在已选相位上取消让不掉的班次，至多 --max-cancel 班（0 不取消；没给时按运营班次的比例）。
+        int cancelLimit = options.maxCancelTripsFor(target.slotByCode().size());
+        String cancelLimitText = cancelLimitText(options, cancelLimit, target.slotByCode().size());
         Optional<Cancellation> cancellation =
-            held.isEmpty() && options.maxCancelTrips() > 0
-                ? Optional.of(cancelUnabsorbable(prepared, options, input, builtAt, target))
+            held.isEmpty() && cancelLimit > 0
+                ? Optional.of(
+                    cancelUnabsorbable(prepared, options, input, builtAt, target, cancelLimit))
                 : Optional.empty();
         boolean cancelledClean =
             cancellation.isPresent()
                 && cancellation.get().attempt().clean()
-                && cancellation.get().count() <= options.maxCancelTrips();
+                && cancellation.get().count() <= cancelLimit;
         if (held.isEmpty() && !cancelledClean) {
           long tried = holds.feasible(options).stream().filter(hold -> !hold.isNone()).count();
-          Attempt last = cancellation.map(Cancellation::attempt).orElse(target);
           List<String> reasons = new ArrayList<>();
           reasons.add(
               summary
@@ -457,26 +459,28 @@ public final class TimetableBuilder {
                       .map(
                           done ->
                               done.attempt().clean()
-                                  ? "，取消 "
-                                      + done.countText()
-                                      + "才排开，超过上限（--max-cancel "
-                                      + options.maxCancelTrips()
-                                      + "）"
+                                  ? "，取消 " + done.countText() + "才排开，超过上限（" + cancelLimitText + "）"
                                   : "，取消 "
                                       + done.countText()
                                       + "后仍有 "
                                       + done.attempt().unabsorbable().size()
-                                      + " 处（--max-cancel "
-                                      + options.maxCancelTrips()
+                                      + " 处（"
+                                      + cancelLimitText
                                       + "）")
                       .orElse(""));
           cancellation.ifPresent(
               done -> reasons.addAll(describeCancelled(done.cancelled(), prepared, options)));
+          // 失败结果里的冲突与残余保持"目标间隔原表"的口径；取消之后还剩的只写进文案。
+          Optional<Attempt> afterCancel =
+              cancellation.map(Cancellation::attempt).filter(after -> !after.clean());
+          if (afterCancel.isPresent()) {
+            reasons.add("取消之后仍让不掉的：");
+          }
           reasons.addAll(
               TimetableBuildReportText.describeUnabsorbable(
-                  last.unabsorbable(), options.serviceStartSecondOfDay()));
+                  afterCancel.orElse(target).unabsorbable(), options.serviceStartSecondOfDay()));
           return new Built(
-              targetFailure(String.join("\n", reasons), prepared, last),
+              targetFailure(String.join("\n", reasons), prepared, target),
               Optional.of(prepared),
               Optional.empty(),
               options);
@@ -494,8 +498,8 @@ public final class TimetableBuilder {
               summary
                   + "，间隔不变（严格模式不放宽间隔，取消 "
                   + done.countText()
-                  + "让不掉的班次，--max-cancel "
-                  + options.maxCancelTrips()
+                  + "让不掉的班次，"
+                  + cancelLimitText
                   + "）：");
           warnings.addAll(describeCancelled(done.cancelled(), prepared, options));
         }
@@ -2205,8 +2209,8 @@ public final class TimetableBuilder {
       TimetableBuildOptions options,
       BuildInput input,
       Instant builtAt,
-      Attempt target) {
-    int limit = options.maxCancelTrips();
+      Attempt target,
+      int limit) {
     // 报告用目标间隔原表里的车次号：每取消一班就重新编号，取消时的车次号前后对不上。
     Map<CancelSlot, String> targetCodes = new HashMap<>();
     target.slotByCode().forEach((code, slot) -> targetCodes.put(slot, code));
@@ -2284,6 +2288,19 @@ public final class TimetableBuilder {
               options.serviceStartSecondOfDay()));
     }
     return out;
+  }
+
+  /** 取消上限的写法：给了 {@code --max-cancel} 就照写，没给时写明是按运营班次的比例算出来的。 */
+  private static String cancelLimitText(TimetableBuildOptions options, int limit, int trips) {
+    return options.maxCancelByShare()
+        ? "上限 "
+            + limit
+            + " 班，即运营班次 "
+            + trips
+            + " 班的 "
+            + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT
+            + "%，可用 --max-cancel 改"
+        : "--max-cancel " + limit;
   }
 
   /** 目标间隔排不开的失败结果：带上目标间隔的冲突、残余与第三层的相位说明。 */

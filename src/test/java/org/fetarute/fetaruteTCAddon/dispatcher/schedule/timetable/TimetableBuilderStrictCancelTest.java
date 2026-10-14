@@ -66,16 +66,31 @@ class TimetableBuilderStrictCancelTest {
     assertTrue(report.contains("[邻表]"), report);
   }
 
-  /** 上限 2：取消两班之后还剩一处，失败文案写明"取消 N 班后仍有 M 处"。 */
+  /** 上限 2：取消两班之后还剩一处，失败文案写明"取消 N 班后仍有 M 处"并列出取消之后还剩的；失败结果里的冲突与残余仍是目标间隔原表的（与不取消时相同）， 不混进取消之后的那份。 */
   @Test
   void failsWhenTheLimitIsNotEnough() {
     TimetableBuildResult result = build(true, 2);
+    TimetableBuildResult uncancelled = build(true, 0);
 
     assertFalse(result.success());
     String reason = String.join("\n", result.warnings());
     assertTrue(reason.contains("取消 2 班后仍有 "), reason);
-    assertFalse(result.unabsorbable().isEmpty(), reason);
+    assertTrue(reason.contains("取消之后仍让不掉的："), reason);
     assertTrue(reason.contains("--max-cancel 2"), reason);
+    assertEquals(uncancelled.unabsorbable(), result.unabsorbable());
+    assertEquals(uncancelled.conflictsAtTarget(), result.conflictsAtTarget());
+  }
+
+  /** 不给 --max-cancel：上限按运营班次的 1% 算、至少 1 班；这张表一小时 7 班，只许取消 1 班，失败文案写明上限是怎么来的。 */
+  @Test
+  void theDefaultLimitIsAShareOfTheOperatingTrips() {
+    TimetableBuildResult result = build(true, TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS);
+
+    assertFalse(result.success());
+    String reason = String.join("\n", result.warnings());
+    assertTrue(reason.contains("取消 1 班后仍有 "), reason);
+    assertTrue(reason.contains("上限 1 班，即运营班次 "), reason);
+    assertTrue(reason.contains("的 1%"), reason);
   }
 
   /** 上限 0：旧行为，不取消、直接失败，文案里没有取消。 */
