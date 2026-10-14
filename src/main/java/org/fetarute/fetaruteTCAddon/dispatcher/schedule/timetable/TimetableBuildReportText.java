@@ -192,6 +192,62 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /**
+   * 构建失败时的残余明细：只列让不掉的那些。先按判决、再按让车点汇总（同一判决里多的在前，同数按名字），然后给前几条明细。
+   *
+   * <p>可吸收的冲突运行时自己会让，列出来只会把真正卡住的那几处淹没。
+   */
+  public static List<String> describeUnabsorbable(
+      List<ConflictAbsorption.Residual> unabsorbable, int serviceStartSecondOfDay) {
+    List<String> out = new ArrayList<>();
+    if (unabsorbable == null || unabsorbable.isEmpty()) {
+      return out;
+    }
+    out.add("  让不掉的冲突按判决与让车点：");
+    Map<ConflictAbsorption.Verdict, Map<String, Integer>> byVerdict =
+        new java.util.EnumMap<>(ConflictAbsorption.Verdict.class);
+    for (ConflictAbsorption.Residual residual : unabsorbable) {
+      byVerdict
+          .computeIfAbsent(residual.verdict(), verdict -> new java.util.TreeMap<>())
+          .merge(waitingPointText(residual), 1, Integer::sum);
+    }
+    byVerdict.forEach(
+        (verdict, byPoint) -> {
+          List<Map.Entry<String, Integer>> points = new ArrayList<>(byPoint.entrySet());
+          points.sort(Map.Entry.<String, Integer>comparingByValue().reversed());
+          StringBuilder text = new StringBuilder();
+          int total = 0;
+          for (Map.Entry<String, Integer> point : points) {
+            if (text.length() > 0) {
+              text.append("、");
+            }
+            text.append(point.getKey()).append(' ').append(point.getValue());
+            total += point.getValue();
+          }
+          out.add("  · " + describe(verdict) + " " + total + " 处：" + text);
+        });
+    int shown = Math.min(unabsorbable.size(), TimetableBuildResult.CONFLICT_DETAIL_LIMIT);
+    for (int i = 0; i < shown; i++) {
+      ConflictAbsorption.Residual residual = unabsorbable.get(i);
+      out.add(
+          String.format(
+              Locale.ROOT,
+              "  · [%s] %s 等 %ds 于 %s：%s",
+              describe(residual.verdict()),
+              residual.mover(),
+              residual.waitSeconds(),
+              waitingPointText(residual),
+              residual
+                  .conflict()
+                  .describe(
+                      seconds -> TimetableCsvExporter.clock(serviceStartSecondOfDay + seconds))));
+    }
+    if (unabsorbable.size() > shown) {
+      out.add("  · … 另有 " + (unabsorbable.size() - shown) + " 处");
+    }
+    return out;
+  }
+
   /** 取消的班次按 route + 原因归组，每组列出前几个时刻。 */
   public static List<String> describeDropped(List<TimetableBuildResult.DroppedTrip> dropped) {
     Map<String, List<TimetableBuildResult.DroppedTrip>> groups = new LinkedHashMap<>();
@@ -534,8 +590,10 @@ public final class TimetableBuildReportText {
   }
 
   /**
-   * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名剩余冲突最多的资源。
+   * 搜索失败的文案：端点利用率超过 100% 时说"结构上不可能"，否则说"范围内没找到"并点名让不掉的冲突最多的资源。
    * 两种情况下运营者要做的事不同：前者改折返/权重/股道，后者改裕量或等下一轮把咽喉也串行。
+   *
+   * @param conflictsAtTarget 目标间隔下让不掉的那些冲突（可吸收的运行时自己会让，点名它们会指错地方）
    */
   public static String describeSearchFailure(
       int targetHeadway,
@@ -560,7 +618,7 @@ public final class TimetableBuildReportText {
         + targetHeadway
         + "s 在放宽到 "
         + limitHeadway
-        + "s 的范围内没有找到无冲突的间隔；剩余冲突集中在 "
+        + "s 的范围内没有找到无冲突的间隔；让不掉的冲突集中在 "
         + String.join("、", conflictsAtTarget.topResources(3))
         + "。检查单线区段、站台数量与折返时间";
   }

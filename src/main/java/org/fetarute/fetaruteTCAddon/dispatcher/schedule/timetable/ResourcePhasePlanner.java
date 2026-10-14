@@ -42,8 +42,21 @@ import java.util.UUID;
  */
 public final class ResourcePhasePlanner {
 
-  /** 每次间隔尝试至多再完成多少个相位候选；这是搜索预算，不是物理可行性证明。 */
-  public static final int COMPLETION_CANDIDATE_LIMIT = 24;
+  /**
+   * 每次间隔尝试至多再完成多少个相位候选（所有单元合计）；这是搜索预算，不是物理可行性证明。
+   *
+   * <p>实际预算是 {@code min(本上限, 单元数 × }{@link #COMPLETION_CANDIDATES_PER_UNIT}{@code
+   * )}：单元不多时每个单元的候选都试完； 单元多到封顶时先平分、余下的按优先序补，没试完的单元写进资源相位说明。
+   */
+  public static final int COMPLETION_CANDIDATE_LIMIT = 96;
+
+  /** 一个单元至多有几个完整候选：δ=0、起点 ±{@link #FINE_STEPS_SECONDS} 的细档、四个间隔/5 的粗档。 */
+  public static final int COMPLETION_CANDIDATES_PER_UNIT = 11;
+
+  /**
+   * 起点附近的细档。粗档（间隔/5，340 秒间隔时 68 秒一档）太粗：真实库回放里组间隔每变 5 秒，不可吸收数在 0 到 400 之间跳， 可行相位往往就在周期评估给的起点旁边几十秒内。
+   */
+  static final int[] FINE_STEPS_SECONDS = {10, 20, 30};
 
   /** 扫描步长。 */
   public static final int SCAN_STEP_SECONDS = 10;
@@ -66,9 +79,29 @@ public final class ResourcePhasePlanner {
    *
    * <p>周期模板不含按需求补车和待命，不能替代这个判据。偏移平方和惩罚集中延后，避免只把平均频率排好。
    */
+  /**
+   * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余；不参与比较，只决定单元先后
+   */
   public record CompletionScore(
-      int unabsorbable, int dropped, long displacement, int conflicts, long waitSeconds)
+      int unabsorbable,
+      int dropped,
+      long displacement,
+      int conflicts,
+      long waitSeconds,
+      Map<String, Integer> unabsorbableByDirection)
       implements Comparable<CompletionScore> {
+
+    public CompletionScore {
+      unabsorbableByDirection =
+          unabsorbableByDirection == null ? Map.of() : Map.copyOf(unabsorbableByDirection);
+    }
+
+    /** 不按方向分摊残余的评分。 */
+    public CompletionScore(
+        int unabsorbable, int dropped, long displacement, int conflicts, long waitSeconds) {
+      this(unabsorbable, dropped, displacement, conflicts, waitSeconds, Map.of());
+    }
+
     @Override
     public int compareTo(CompletionScore other) {
       int value = Integer.compare(unabsorbable, other.unabsorbable);
@@ -108,6 +141,9 @@ public final class ResourcePhasePlanner {
    *
    * <p>单元内各候选只差这个单元的 δ，互不依赖；评完按原顺序逐个比，并列仍保留先评的那个，挑选与串行相同。单元之间有先后（后面的单元以前面定下的 δ 为起点），仍逐个来。
    *
+   * <p>单元先后按它在起点评分的不可吸收残余里出现的次数排，多的先定，平局按原来的组名序：卡住的单元先挑， 后面的单元在它定下的相位上再挑。候选预算按单元分（{@link
+   * #budgets}），前面的单元吃不掉后面单元的份额。
+   *
    * @param pool 并行池；{@code complete} 会在池内线程上被并发调用，必须线程安全
    */
   public static PhasePlanner.Phases refineCompleted(
@@ -122,39 +158,43 @@ public final class ResourcePhasePlanner {
     Map<String, Integer> delta = new LinkedHashMap<>(phases.deltaByDirection());
     PhasePlanner.Phases bestPhases = phases;
     CompletionScore best = complete.apply(phases);
-    int evaluated = 0;
     List<String> notes = new ArrayList<>(phases.resourceNotes());
-    for (Unit unit : unitsOf(order, groups, phases.connections(), inPlaceTurnbackRoutes)) {
+    List<Unit> units =
+        prioritized(
+            unitsOf(order, groups, phases.connections(), inPlaceTurnbackRoutes),
+            best.unabsorbableByDirection());
+    // 单元的 δ 只在轮到它时才改，起点与候选在开始前就定了。
+    List<List<Integer>> candidates = new ArrayList<>(units.size());
+    for (Unit unit : units) {
       int limit = unit.reverse() ? Math.min(maxIdleSeconds, unit.interval()) : unit.interval();
+      candidates.add(
+          candidatesOf(delta.getOrDefault(unit.keys().get(0), 0), unit.interval(), limit));
+    }
+    int[] budgets = budgets(candidates.stream().mapToInt(List::size).toArray());
+    List<String> shortened = new ArrayList<>();
+    for (int u = 0; u < units.size(); u++) {
+      Unit unit = units.get(u);
       int start = delta.getOrDefault(unit.keys().get(0), 0);
-      Set<Integer> candidates = new java.util.LinkedHashSet<>();
-      candidates.add(start);
-      candidates.add(0);
-      for (int fraction = 1; fraction < 5; fraction++) {
-        candidates.add(
-            Math.floorMod((long) start + (long) fraction * unit.interval() / 5, unit.interval()));
+      List<Integer> tried = candidates.get(u).subList(0, budgets[u]);
+      if (budgets[u] < candidates.get(u).size()) {
+        shortened.add(
+            String.join(" + ", unit.keys())
+                + " 少试 "
+                + (candidates.get(u).size() - budgets[u])
+                + " 个");
       }
-      List<Integer> tried = new ArrayList<>();
-      List<PhasePlanner.Phases> trials = new ArrayList<>();
-      for (int candidate : candidates) {
-        if (candidate == start || candidate < 0 || candidate > limit) {
-          continue;
-        }
-        if (evaluated + trials.size() >= COMPLETION_CANDIDATE_LIMIT) {
-          break;
-        }
+      List<PhasePlanner.Phases> trials = new ArrayList<>(tried.size());
+      for (int candidate : tried) {
         Map<String, Integer> trial = new LinkedHashMap<>(delta);
         for (String key : unit.keys()) {
           trial.put(key, candidate);
         }
-        tried.add(candidate);
         trials.add(withDelta(phases, trial, notes));
       }
       List<BuildPool.Evaluated<CompletionScore>> scores = pool.evaluate(trials, complete);
       int chosen = start;
       for (int i = 0; i < scores.size(); i++) {
         CompletionScore score = scores.get(i).get();
-        evaluated++;
         // 禁止通过额外取消班次换取更低冲突数；并列保留原锚定相位。
         if (score.dropped() <= best.dropped() && score.compareTo(best) < 0) {
           best = score;
@@ -175,7 +215,76 @@ public final class ResourcePhasePlanner {
                 + " 处）");
       }
     }
-    return bestPhases.equals(phases) ? phases : withDelta(phases, delta, notes);
+    if (!shortened.isEmpty()) {
+      notes.add(
+          "完整交路相位候选预算 "
+              + COMPLETION_CANDIDATE_LIMIT
+              + " 个用完，没试完的单元："
+              + String.join("、", shortened));
+    }
+    return bestPhases.equals(phases) && shortened.isEmpty()
+        ? phases
+        : withDelta(phases, delta, notes);
+  }
+
+  /**
+   * 一个单元的完整候选，按试的先后：δ=0、起点 ±10/±20/±30 秒的细档、起点 + 间隔/5 的四个粗档（取模）。去掉起点本身与落在 [0, {@code limit}]
+   * 之外的，去重。
+   */
+  static List<Integer> candidatesOf(int start, int interval, int limit) {
+    Set<Integer> out = new java.util.LinkedHashSet<>();
+    out.add(0);
+    for (int step : FINE_STEPS_SECONDS) {
+      out.add(start - step);
+      out.add(start + step);
+    }
+    for (int fraction = 1; fraction < 5; fraction++) {
+      out.add((int) Math.floorMod((long) start + (long) fraction * interval / 5, interval));
+    }
+    out.removeIf(candidate -> candidate == start || candidate < 0 || candidate > limit);
+    return List.copyOf(out);
+  }
+
+  /**
+   * 各单元能试几个候选。总预算 {@code min(}{@link #COMPLETION_CANDIDATE_LIMIT}{@code , 单元数 × }{@link
+   * #COMPLETION_CANDIDATES_PER_UNIT}{@code )}：先给每个单元平分的一份（不超过它的候选数），余下的按单元先后补满。
+   *
+   * @param sizes 各单元的候选数，按单元先后
+   */
+  static int[] budgets(int[] sizes) {
+    int total =
+        (int)
+            Math.min(
+                COMPLETION_CANDIDATE_LIMIT, (long) sizes.length * COMPLETION_CANDIDATES_PER_UNIT);
+    int[] out = new int[sizes.length];
+    if (sizes.length == 0) {
+      return out;
+    }
+    int fair = total / sizes.length;
+    int left = total;
+    for (int i = 0; i < sizes.length; i++) {
+      out[i] = Math.min(sizes[i], fair);
+      left -= out[i];
+    }
+    for (int i = 0; i < sizes.length && left > 0; i++) {
+      int extra = Math.min(left, sizes[i] - out[i]);
+      out[i] += extra;
+      left -= extra;
+    }
+    return out;
+  }
+
+  /** 单元按卷进不可吸收残余的次数从多到少排；稳定排序，平局保持原来的组名序。 */
+  private static List<Unit> prioritized(List<Unit> units, Map<String, Integer> byDirection) {
+    if (byDirection.isEmpty()) {
+      return units;
+    }
+    List<Unit> out = new ArrayList<>(units);
+    out.sort(
+        java.util.Comparator.comparingInt(
+            (Unit unit) ->
+                -unit.keys().stream().mapToInt(key -> byDirection.getOrDefault(key, 0)).sum()));
+    return List.copyOf(out);
   }
 
   private static PhasePlanner.Phases withDelta(
