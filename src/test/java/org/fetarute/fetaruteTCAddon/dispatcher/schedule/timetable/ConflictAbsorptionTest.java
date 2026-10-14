@@ -539,12 +539,12 @@ class ConflictAbsorptionTest {
   }
 
   /**
-   * 途中停车点没有空位、起点有：整趟晚发写得进表（车在起点多站），仍可吸收，让车点记起点。
+   * 途中停车点没有空位、起点有：仍判无容量，让车点记途中这一站。
    *
-   * <p>两个让车点都是兑现得了的：途中最后一个停车点是运行时自己会等的地方，起点是表上写得进去的地方。中间别的车站两样都不是，不用。
+   * <p>残余不写进表，运行时也不读让车点：车按原时刻离开起点，到这一站发车前被挡，在这里等。起点有空位兑现不了。
    */
   @Test
-  void aFullIntermediateStopFallsBackToTheOrigin() {
+  void aFullIntermediateStopIsNotRescuedByARoomyOrigin() {
     EnRoute fixture = new EnRoute();
     List<TimetableConflictChecker.Stay> stays =
         List.of(
@@ -554,8 +554,88 @@ class ConflictAbsorptionTest {
     ConflictAbsorption.Residual residual =
         fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(stays));
 
-    assertEquals(Optional.of(WIDE), residual.waitingPoint());
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 途中这一站只有一股道：在这里等就是堵死岔线，起点有几股道都一样。 */
+  @Test
+  void aCapacityOneIntermediateStopIsAStubEvenFromAWideOrigin() {
+    EnRoute fixture = new EnRoute(RouteStopPassType.STOP, 1);
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(List.of()));
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, residual.verdict());
+  }
+
+  /** 别的车恰在"表定发车 + 裕量"进入这股道：按原时刻它与后车不冲突（后车的裕量刚好结束），后车多等就撞上了，算等待挡住的车。 */
+  @Test
+  void aTrainEnteringRightAtDeparturePlusSeparationIsBlockedByTheWait() {
+    EnRoute fixture = new EnRoute();
+    List<TimetableConflictChecker.Stay> stays =
+        List.of(
+            new TimetableConflictChecker.Stay(
+                "OTHER",
+                new TimetableConflictChecker.Platform(MID + ":1", MID, false),
+                120 + SEPARATION,
+                400));
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(stays));
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
+  /** 别的车之间原本就有的冲突：站台组在后车多等之前就已超员（X、Z 在场时 Y 又进来），那一处另有记录，与后车多等无关，不能算这一站没空位。 */
+  @Test
+  void anOldConflictBetweenOtherTrainsDoesNotFillTheStop() {
+    EnRoute fixture = new EnRoute();
+    List<TimetableConflictChecker.Stay> stays = new java.util.ArrayList<>(fixture.originFull());
+    stays.add(
+        new TimetableConflictChecker.Stay(
+            "X", new TimetableConflictChecker.Platform(MID + ":2", MID, false), 130, 400));
+    stays.add(
+        new TimetableConflictChecker.Stay(
+            "Z", new TimetableConflictChecker.Platform(MID + ":3", MID, false), 140, 400));
+    stays.add(
+        new TimetableConflictChecker.Stay(
+            "Y", new TimetableConflictChecker.Platform(MID + ":3", MID, false), 170, 400));
+
+    ConflictAbsorption.Residual residual =
+        fixture.classify(conflictOn("edge:MID~END", 210, 200), fixture.occupancy(stays));
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
     assertEquals(ConflictAbsorption.Verdict.ABSORBABLE, residual.verdict());
+  }
+
+  /**
+   * 相位第三层与成品表的成功判据对同一处冲突得出同一结论：第三层没有成品表，但手上有铺开的运行与档案，途中让车点照样认得出。
+   *
+   * <p>途中这一站只有一股道、起点两股道：两层都判在途中这一站等、堵死岔线。第三层若只看起点，会把它判成可吸收，挑 δ 用的尺子比成功判据松。
+   */
+  @Test
+  void thePhaseLayerSeesTheSameIntermediateStopAsTheBuild() {
+    EnRoute fixture = new EnRoute(RouteStopPassType.STOP, 1);
+    TimetableConflictChecker.Conflict conflict = conflictOn("edge:MID~END", 210, 200);
+
+    ConflictAbsorption.Residual build = fixture.classify(conflict, fixture.occupancy(List.of()));
+    ConflictAbsorption.Residual phase =
+        ConflictAbsorption.classify(
+                report(conflict),
+                Map.of("RA-001", WIDE),
+                List.of(new TimetableConflictChecker.Movement("RA-001", fixture.route, 0)),
+                Map.of(fixture.route, fixture.profile),
+                fixture.index,
+                SEPARATION,
+                MAX_WAIT)
+            .get(0);
+
+    assertEquals(ConflictAbsorption.Verdict.STUB_TERMINAL, build.verdict());
+    assertEquals(build.verdict(), phase.verdict());
+    assertEquals(build.waitingPoint(), phase.waitingPoint());
   }
 
   /** 冲突在第一个停车点之前（含它的站台本身）：车还没到那一站，让车点仍是起点。 */
@@ -589,20 +669,26 @@ class ConflictAbsorptionTest {
 
   private static final String MID = "OP:S:MID";
 
-  /** 起点 WIDE（两股道）→ 途中 MID（两股道，100 s 到、120 s 发）→ 终点 END（300 s 到）。 */
+  /** 起点 WIDE（两股道）→ 途中 MID（默认两股道，100 s 到、120 s 发）→ 终点 END（300 s 到）。 */
   private static final class EnRoute {
     private final Timetable table = timetableWithOriginAt(WIDE);
     private final java.util.UUID route = table.trips().get(0).routeId();
     private final TimetableConflictChecker.RouteProfile profile;
-    private final TimetableConflictChecker.GraphIndex index =
-        new TimetableConflictChecker.GraphIndex(
-            null, Map.of(STUB, 1, WIDE, 2, MID, 2, "OP:S:END", 2), Map.of());
+    private final TimetableConflictChecker.GraphIndex index;
 
     EnRoute() {
       this(RouteStopPassType.STOP);
     }
 
     EnRoute(RouteStopPassType midPass) {
+      this(midPass, 2);
+    }
+
+    /** {@code midTracks}：MID 有几股道。 */
+    EnRoute(RouteStopPassType midPass, int midTracks) {
+      index =
+          new TimetableConflictChecker.GraphIndex(
+              null, Map.of(STUB, 1, WIDE, 2, MID, midTracks, "OP:S:END", 2), Map.of());
       int midDeparture = midPass == RouteStopPassType.PASS ? 100 : 120;
       profile =
           new TimetableConflictChecker.RouteProfile(

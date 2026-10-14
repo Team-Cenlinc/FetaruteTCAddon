@@ -29,8 +29,13 @@ final class TimetableWaitingCapacity {
       int until,
       int separation) {}
 
-  /** 一次本表运行：从几时起按哪份档案跑。 */
-  private record Run(int start, TimetableConflictChecker.RouteProfile profile) {}
+  /**
+   * 一次本表运行：从几时起按哪份档案跑。
+   *
+   * @param leaves 各停靠点车尾离开站台的偏移（{@link TimetableConflictChecker#stopLeaveOffsets}）
+   */
+  private record Run(
+      int start, TimetableConflictChecker.RouteProfile profile, List<Integer> leaves) {}
 
   /**
    * 途中停车点上的等待：后车在冲突资源之前最后一个停车的车站发车前被挡住。
@@ -38,8 +43,10 @@ final class TimetableWaitingCapacity {
    * @param stopIndex 停靠序号（不是起点）
    * @param platform 那一站的站台
    * @param departure 那一站的表定发车（相对零点）
+   * @param leaves 按原时刻车尾离开那一站站台的时刻（相对零点），即本车在那里的原占用到几时为止
    */
-  record EnRoute(int stopIndex, TimetableConflictChecker.Platform platform, int departure) {
+  record EnRoute(
+      int stopIndex, TimetableConflictChecker.Platform platform, int departure, int leaves) {
     String group() {
       return platform.group();
     }
@@ -81,25 +88,59 @@ final class TimetableWaitingCapacity {
         occupancy == null
             ? new TimetableOccupancyProjector.Occupancy(List.of(), List.of())
             : occupancy;
-    Map<String, Run> runs = new HashMap<>();
-    for (TimetableConflictChecker.Movement movement : actual.movements()) {
-      TimetableConflictChecker.RouteProfile profile = profiles.get(movement.routeId());
-      if (profile != null && movement.owner().isEmpty()) {
-        profile.origin().ifPresent(platform -> origins.put(movement.code(), platform));
-        runs.put(movement.code(), new Run(movement.startSeconds(), profile));
-      }
-    }
     Function<String, String> vehicleOf =
         timetable == null ? Function.identity() : TimetableConflictChecker.vehicleOf(timetable);
     TimetableWaitingCapacity out =
         new TimetableWaitingCapacity(
             origins,
-            runs,
+            runsOf(actual.movements(), profiles, origins),
             index == null ? TimetableConflictChecker.GraphIndex.of(null) : index,
             vehicleOf);
     TimetableConflictChecker.projectInto(
         out.resources, out.footprints, profiles, actual.movements(), actual.stays(), vehicleOf);
     return out;
+  }
+
+  /**
+   * 只认运行、不投影占用：相位第三层手上只有按周期铺开的运行与档案，没有成品表与待命。
+   *
+   * <p>途中让车点与成品表同一口径认得出来；容量查询面对的是空投影，一律有空位——第三层只在几个 δ 之间做相对比较， 不是最终的成功判据。
+   */
+  static TimetableWaitingCapacity ofRuns(
+      List<TimetableConflictChecker.Movement> movements,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      TimetableConflictChecker.GraphIndex index) {
+    Map<String, TimetableConflictChecker.Platform> origins = new HashMap<>();
+    Map<String, Run> runs =
+        runsOf(
+            movements == null ? List.of() : movements,
+            profiles == null ? Map.of() : profiles,
+            origins);
+    return new TimetableWaitingCapacity(
+        origins,
+        runs,
+        index == null ? TimetableConflictChecker.GraphIndex.of(null) : index,
+        Function.identity());
+  }
+
+  /** 本表运行（邻表的不算：它们不是我要让的车）；起点站台顺手按档案补上。 */
+  private static Map<String, Run> runsOf(
+      List<TimetableConflictChecker.Movement> movements,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      Map<String, TimetableConflictChecker.Platform> origins) {
+    Map<String, Run> runs = new HashMap<>();
+    Map<UUID, List<Integer>> leavesByRoute = new HashMap<>();
+    for (TimetableConflictChecker.Movement movement : movements) {
+      TimetableConflictChecker.RouteProfile profile = profiles.get(movement.routeId());
+      if (profile != null && movement.owner().isEmpty()) {
+        profile.origin().ifPresent(platform -> origins.put(movement.code(), platform));
+        List<Integer> leaves =
+            leavesByRoute.computeIfAbsent(
+                movement.routeId(), ignored -> TimetableConflictChecker.stopLeaveOffsets(profile));
+        runs.put(movement.code(), new Run(movement.startSeconds(), profile, leaves));
+      }
+    }
+    return runs;
   }
 
   /** 车库等待不占站台；其余等待必须在完整窗口及安全裕量内满足同车去重与股道资格。 */
@@ -116,35 +157,27 @@ final class TimetableWaitingCapacity {
   }
 
   /**
-   * 途中停车点上的等待：股道取那一站的站台，在已有占用上试放 {@code [表定发车, 表定发车 + 等待]}。
+   * 途中停车点上的等待：股道取那一站的站台，在已有占用上试放 {@code [表定发车, 原车尾离开 + 等待]}。
    *
-   * <p>只有<b>等待期间才来</b>的车算挡住：进入时刻晚于"表定发车 + 裕量"的占用。车按表定发车也挡得住的那些（前车刚离开、裕量盖住了发车，
-   * 或紧跟着进站的车）是到站时就有的冲突，各自另有一条记录，不是多等造成的。
+   * <p>只数这段等待<b>新造成</b>的冲突（{@link TimetableConflictChecker#addsNoConflict}）：本车按原时刻停到车尾离开为止，
+   * 那段时间里本就挡得住的车（前车刚离开、裕量盖住了发车，或紧跟着进站的车）是到站时就有的冲突，别的车之间原有的冲突也各有记录， 都不是多等造成的。恰在原离开 +
+   * 裕量进入的车按原时刻不冲突、多等就撞上，算挡住。
    */
   boolean hasRoom(String code, EnRoute stop, int waitSeconds, int separation) {
     int sep = Math.max(0, separation);
     int from = stop.departure();
-    int until = (int) Math.min(Integer.MAX_VALUE, (long) from + Math.max(0, waitSeconds));
+    int until = (int) Math.min(Integer.MAX_VALUE, (long) stop.leaves() + Math.max(0, waitSeconds));
     Hold hold = new Hold(code, stop.platform(), from, until, sep);
     return enRouteAnswers.computeIfAbsent(
         hold,
-        key -> {
-          Map<String, TimetableConflictChecker.Resource> candidate = new LinkedHashMap<>();
-          Map<String, TimetableConflictChecker.Window> windows =
-              TimetableConflictChecker.projectInto(
-                  candidate,
-                  footprints,
-                  Map.of(),
-                  List.of(),
-                  List.of(
-                      new TimetableConflictChecker.Stay(
-                          code, stop.platform(), from, until, Optional.empty())),
-                  vehicleOf);
-          TimetableConflictChecker.mergeOverlapping(candidate, resources, sep);
-          long latest = (long) from + sep;
-          return TimetableConflictChecker.scanWindows(candidate, windows, sep).conflicts().stream()
-              .noneMatch(conflict -> conflict.secondFrom() > latest);
-        });
+        key ->
+            TimetableConflictChecker.addsNoConflict(
+                resources,
+                footprints,
+                new TimetableConflictChecker.Stay(
+                    code, stop.platform(), from, until, Optional.empty()),
+                vehicleOf,
+                sep));
   }
 
   private boolean hasRoom(
@@ -193,7 +226,8 @@ final class TimetableWaitingCapacity {
       if (i >= platforms.size() || platforms.get(i).absent()) {
         return Optional.empty();
       }
-      return Optional.of(new EnRoute(i, platforms.get(i), departure));
+      int leaves = run.start() + (i < run.leaves().size() ? run.leaves().get(i) : 0);
+      return Optional.of(new EnRoute(i, platforms.get(i), departure, Math.max(departure, leaves)));
     }
     return Optional.empty();
   }

@@ -31,8 +31,9 @@ import java.util.UUID;
  *   <li><b>容量 1 的端点</b>：<b>后车要等的地方</b>只有一股道 → 不可吸收，在这里等就是堵死岔线。判不出后车在哪等时
  *       （手上没有成品表），退回看冲突落在不落在这类端点的站台或进站单线上。
  *   <li><b>预计等待超过 {@code --max-wait}</b> → 不可吸收。与让车修复同一个预算。
- *   <li><b>让车点没有容量</b>：两个让车点都无法在等待窗口内停在合格股道上 → 不可吸收。一个是后车在冲突资源之前最后一个停车的车站
- *       （运行时在那一站的发车门控前被挡住，或驶出后在区间信号前等；只算等待期间才来的车），一个是起点（整趟晚发写得进表）； 冲突在第一个停车点之前时只有起点。
+ *   <li><b>让车点没有容量</b>：让车点无法在等待窗口内停在合格股道上 → 不可吸收。冲突在后车某个途中停车点之后时，让车点是冲突资源之前最后一个停车的车站
+ *       （运行时在那一站的发车门控前被挡住，或驶出后在区间信号前等；只算这段等待新挡住的车），不再看起点——残余不写进表，车按原时刻离开起点；
+ *       冲突在第一个停车点之前时让车点是起点。第二条的"后车要等的地方"也是同一个让车点。
  *   <li><b>顺推超限</b>：这一等让后续班次赶不上表定时刻（本班到达 + 折返 + 等待 &gt; 下一班发车），而表上没有推后它 → 不可吸收。
  *       写得进去的顺推已由让车修复的必等顺推写进表（{@link ResourceRepair}），还剩下的就是推不动的——推迟超过 {@code --max-wait}
  *       或会截掉班次。间隔规整优先于多排几班：这种情况判排不开，由搜索放宽间隔。
@@ -190,11 +191,31 @@ public final class ConflictAbsorption {
       TimetableConflictChecker.GraphIndex index,
       int separationSeconds,
       int maxWaitSeconds) {
+    return classify(
+        report, waitingPointByCode, List.of(), Map.of(), index, separationSeconds, maxWaitSeconds);
+  }
+
+  /**
+   * 同上，再给铺开的运行与档案：途中让车点（冲突之前最后一个停车站）因此与成品表同一口径认得出来。
+   *
+   * <p>相位第三层必须走这条：只给始发站台组的话，冲突在途中停车点之后的那些仍按起点判，与成功判据的结论分叉。
+   *
+   * @param movements 铺开的运行，与 {@code report} 出自同一次检查
+   * @param profiles 这些运行的档案
+   */
+  public static List<Residual> classify(
+      TimetableConflictChecker.Report report,
+      Map<String, String> waitingPointByCode,
+      List<TimetableConflictChecker.Movement> movements,
+      Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+      TimetableConflictChecker.GraphIndex index,
+      int separationSeconds,
+      int maxWaitSeconds) {
     if (report == null || report.conflicts().isEmpty()) {
       return List.of();
     }
     return classify(
-        Context.ofWaitingPoints(waitingPointByCode, index),
+        Context.ofWaitingPoints(waitingPointByCode, movements, profiles, index),
         report,
         separationSeconds,
         maxWaitSeconds);
@@ -343,6 +364,14 @@ public final class ConflictAbsorption {
     int wait = conflict.firstTo() + separation - conflict.secondFrom();
     wait = Math.max(0, wait);
     Optional<String> origin = context.waitingPointOf(mover);
+    // 后车在哪等：冲突在它某个途中停车点之后时，运行时它在那一站的发车门控前被挡住（或驶出后在区间信号前等），
+    // 不会回到起点去等，让车点就是那一站。这时不再看起点：残余不写进表（只顺推后续班次，这一班自身仍按原时刻），
+    // 运行时也不读让车点——车准点离开起点、到这一站被挡，起点有空位兑现不了。中间别的车站同理不用。
+    // 冲突在第一个停车点之前时让车点是起点。
+    Optional<TimetableWaitingCapacity.EnRoute> enRoute =
+        context.enRoute(mover, conflict.secondFrom());
+    Optional<String> waitingPoint =
+        enRoute.isPresent() ? Optional.of(enRoute.get().group()) : origin;
 
     // 2. 容量 1 的端点：后车要在只有一股道的地方等，那才是堵死岔线。
     //
@@ -352,42 +381,30 @@ public final class ConflictAbsorption {
     //
     // 车库（空串）算"知道在哪等"，不算"判不出"：车在库里等不堵任何人。
     // 只有连后车在哪等都判不出来时（相位第三层评估时手上没有成品表），才退回按资源保守判。
-    boolean originOnStub =
-        origin.isPresent()
-            ? context.isStubGroup(origin.get())
+    boolean onStub =
+        waitingPoint.isPresent()
+            ? context.isStubGroup(waitingPoint.get())
             : context.isStubResource(conflict.resource());
-    // 冲突在后车某个途中停车点之后：运行时它在那一站的发车门控前被挡住（或驶出后在区间信号前等），不会回到起点去等，
-    // 那一站是第二个让车点。两个让车点都兑现得了——途中这一站是运行时自己会等的地方，起点是整趟晚发写得进表的地方；
-    // 中间别的车站两样都不是，不用。冲突在第一个停车点之前时只有起点。
-    Optional<TimetableWaitingCapacity.EnRoute> enRoute =
-        context.enRoute(mover, conflict.secondFrom());
-    boolean enRouteOnStub = enRoute.isPresent() && context.isStubGroup(enRoute.get().group());
-    if (originOnStub && (enRoute.isEmpty() || enRouteOnStub)) {
-      Optional<String> at = enRoute.isPresent() ? Optional.of(enRoute.get().group()) : origin;
-      return new Residual(conflict, mover, wait, at, 0, Verdict.STUB_TERMINAL);
+    if (onStub) {
+      return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.STUB_TERMINAL);
     }
     // 3. 预算：与让车修复同一个上限。
-    Optional<String> nearest = enRoute.isPresent() ? Optional.of(enRoute.get().group()) : origin;
     if (wait > maxWait) {
-      return new Residual(conflict, mover, wait, nearest, 0, Verdict.OVER_MAX_WAIT);
+      return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.OVER_MAX_WAIT);
     }
-    // 4. 让车点有没有空位：先看途中这一站，再看起点。
-    Optional<String> waitingPoint;
-    if (enRoute.isPresent()
-        && !enRouteOnStub
-        && context.waitingCapacity().hasRoom(mover, enRoute.get(), wait, separation)) {
-      waitingPoint = nearest;
-    } else if (!originOnStub
-        && (origin.isEmpty()
-            || context.hasRoom(
-                origin.get(),
-                mover,
-                context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
-                wait,
-                separation))) {
-      waitingPoint = origin;
-    } else {
-      return new Residual(conflict, mover, wait, nearest, 0, Verdict.NO_WAITING_CAPACITY);
+    // 4. 让车点有没有空位。
+    boolean room =
+        enRoute.isPresent()
+            ? context.waitingCapacity().hasRoom(mover, enRoute.get(), wait, separation)
+            : origin.isEmpty()
+                || context.hasRoom(
+                    origin.get(),
+                    mover,
+                    context.departureByCode().getOrDefault(mover, conflict.secondFrom()),
+                    wait,
+                    separation);
+    if (!room) {
+      return new Residual(conflict, mover, wait, waitingPoint, 0, Verdict.NO_WAITING_CAPACITY);
     }
     // 5. 连锁：这一等会顶掉后面几班。
     int depth = context.chainDepthAfter(mover, wait);
@@ -495,17 +512,21 @@ public final class ConflictAbsorption {
     }
 
     /**
-     * 只有让车点的上下文：容量与岔线端点仍从图索引来，待命与连锁没有依据，按"没有"算。
+     * 只有让车点与铺开运行的上下文：容量与岔线端点仍从图索引来，途中让车点从运行与档案来，待命与连锁没有依据，按"没有"算。
      *
      * <p>少了待命就判不出"让车点满没满"，少了交路链就判不出连锁深度——这两条都只会让判决更宽松， 而第三层本来就只用来在几个 δ 之间做相对比较，不是最终的成功判据。
+     * 让车点本身（起点还是途中停车站、是不是容量 1 的端点）必须与成功判据一致，所以运行照样建。
      */
     static Context ofWaitingPoints(
-        Map<String, String> waitingPointByCode, TimetableConflictChecker.GraphIndex index) {
+        Map<String, String> waitingPointByCode,
+        List<TimetableConflictChecker.Movement> movements,
+        Map<UUID, TimetableConflictChecker.RouteProfile> profiles,
+        TimetableConflictChecker.GraphIndex index) {
       Set<String> stubs = ConflictAbsorption.stubGroups(index);
       return new Context(
           waitingPointByCode == null ? Map.of() : Map.copyOf(waitingPointByCode),
           Map.of(),
-          TimetableWaitingCapacity.of(null, null, index, Map.of()),
+          TimetableWaitingCapacity.ofRuns(movements, profiles, index),
           stubs,
           Map.of());
     }

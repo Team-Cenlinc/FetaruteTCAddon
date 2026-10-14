@@ -213,6 +213,62 @@ class TimetableConflictCheckerTest {
     assertEquals(60, report.conflicts().get(0).firstTo());
   }
 
+  /**
+   * 同一辆车在场的几条占用（到站、待命的重复投影）按它最晚离开的那条算：它走之前那股道一直被它占着。
+   *
+   * <p>A 的两条占用 250、400 离开，B 300 离开：最先腾出股道的是 B，不是 A 早结束的那一条。
+   */
+  @Test
+  void aVehicleWithSeveralOccupationsLeavesWithItsLastOne() {
+    TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(null, Map.of("OP:S:B", 2), Map.of());
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(B, "OP:S:B", true);
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            index,
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("A1", platform, 0, 250),
+                new TimetableConflictChecker.Stay("A2", platform, 10, 400),
+                new TimetableConflictChecker.Stay("B1", platform, 20, 300),
+                new TimetableConflictChecker.Stay("C1", platform, 200, 260)),
+            0,
+            code -> code.substring(0, 1));
+
+    assertEquals(1, report.conflicts().size(), () -> report.conflicts().toString());
+    assertEquals("B1", report.conflicts().get(0).first());
+    assertEquals(300, report.conflicts().get(0).firstTo());
+  }
+
+  /** 股道资格受限时的匹配路径同一口径：被挡住的车里按车取最晚离开，再取最先腾出的那辆。 */
+  @Test
+  void restrictedEligibilityBlamesTheVehicleThatClearsFirst() {
+    RailGraph graph =
+        TimetableTestFixtures.chain(
+            List.of(B, B2, "OP:S:B:3"), new int[] {100, 100}, new double[] {10.0, 10.0});
+    TimetableConflictChecker.Platform narrow = dynamicPlatform("[1,2]");
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            TimetableConflictChecker.GraphIndex.of(graph),
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("A1", narrow, 0, 250),
+                new TimetableConflictChecker.Stay("A2", narrow, 10, 400),
+                new TimetableConflictChecker.Stay("B1", narrow, 20, 300),
+                new TimetableConflictChecker.Stay("C1", narrow, 200, 260)),
+            0,
+            code -> code.substring(0, 1));
+
+    assertEquals(1, report.conflicts().size(), () -> report.conflicts().toString());
+    assertEquals("B1", report.conflicts().get(0).first());
+    assertEquals(300, report.conflicts().get(0).firstTo());
+  }
+
   /** 待命的车占着单股道车站：不停靠经过它的车撞上去。 */
   @Test
   void passingThroughAnOccupiedSingleTrackStationConflicts() {
