@@ -93,6 +93,29 @@ class TimetableDepotAllocatorTest {
     assertEquals(3, three.conflicts());
   }
 
+  /** 邻表的交路号可能与本表同名（都有 D001-CREATE）：不同表的同名车不是同一辆车，各算一次相遇。 */
+  @Test
+  void sameCodesFromDifferentTimetablesAreDifferentEncounters() {
+    var mine = conflict("edge:X", "D001-CREATE", "R-001", 100, 120, 110, 130);
+    var neighbour =
+        new TimetableConflictChecker.Conflict(
+            TimetableConflictChecker.Kind.JUNCTION,
+            "junction:X1",
+            "D001-CREATE",
+            "R-001",
+            98,
+            101,
+            108,
+            111,
+            Optional.of("FTAS/SURC/DS"),
+            Optional.empty());
+
+    var pressure = TimetableDepotAllocator.pressureOf(List.of(mine, neighbour), 15);
+
+    assertEquals(25 + 8, pressure.waitSeconds());
+    assertEquals(2, pressure.conflicts());
+  }
+
   private static TimetableConflictChecker.Conflict conflict(
       String resource,
       String first,

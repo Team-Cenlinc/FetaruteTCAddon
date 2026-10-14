@@ -175,10 +175,10 @@ public final class TimetableDepotAllocator implements VehicleDutyPlanner.DepotLe
     return new Pressure(total + longest, encounters);
   }
 
-  /** 冲突双方，不分先后。 */
+  /** 冲突双方，不分先后；带上所属表——邻表的交路号可能与本表同名（都有 D001-CREATE），不同表的同名车不是同一辆。 */
   private static String pairOf(TimetableConflictChecker.Conflict conflict) {
-    String first = conflict.first();
-    String second = conflict.second();
+    String first = conflict.firstOwner().orElse("") + "|" + conflict.first();
+    String second = conflict.secondOwner().orElse("") + "|" + conflict.second();
     return first.compareTo(second) <= 0 ? first + "\n" + second : second + "\n" + first;
   }
 
