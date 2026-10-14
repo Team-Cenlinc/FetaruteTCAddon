@@ -12,8 +12,8 @@ import java.util.function.IntPredicate;
 /**
  * 把 weight 解释成<b>目标服务比例</b>并分配班次。
  *
- * <p>weight 是 objective，不是 lottery。{@code WS=5, MT=3, DS=2} 的含义是"长期应收敛到 50/30/20"， 不是"每次发车各按
- * 50%/30%/20% 抽一次"。抽签的问题不在期望值，而在方差：它允许连开五班 WS 再连开三班 DS， 而那在运营上是不可接受的——乘客感知的是间隔，不是长期期望。
+ * <p>weight 是 objective，不是 lottery。{@code R1=5, R2=3, R3=2} 的含义是"长期应收敛到 50/30/20"， 不是"每次发车各按
+ * 50%/30%/20% 抽一次"。抽签的问题不在期望值，而在方差：它允许连开五班 R1 再连开三班 R3， 而那在运营上是不可接受的——乘客感知的是间隔，不是长期期望。
  *
  * <p>因此这里用 <b>smooth weighted round-robin</b>（SWRR，即 nginx 的平滑加权轮询）：
  *

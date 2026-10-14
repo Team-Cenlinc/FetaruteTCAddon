@@ -22,6 +22,18 @@ class BuildPoolTest {
     assertFalse(BuildPool.lowMemory(1000, 300));
   }
 
+  /**
+   * 长期占用取老年代上次专门回收后的占用与最近一次任何 GC 后老年代的占用之大者：只有年轻代 GC 时前者不更新（G1 只在混合/完全回收后才更新）， 晋升上来的数据要靠后者看见；
+   * 都还没有时取老年代当前占用。
+   */
+  @Test
+  void retainedHeapTakesTheLaterOfTheTwoAfterGcReadings() {
+    assertEquals(700, BuildPool.retained(200, 700, 900));
+    assertEquals(500, BuildPool.retained(500, 300, 900));
+    assertEquals(400, BuildPool.retained(0, 400, 900));
+    assertEquals(900, BuildPool.retained(0, 0, 900), "都没收过时取当前占用");
+  }
+
   /** 各收集器的老年代池名都认得出，年轻代与幸存区不算。 */
   @Test
   void oldGenerationPoolsAreRecognisedByName() {

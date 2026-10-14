@@ -194,7 +194,7 @@ final class TimetableBuildReportSender {
     if (!result.droppedTrips().isEmpty()) {
       sender.sendMessage(
           Component.text(
-              "  取消班次: " + result.droppedTrips().size() + "（起终点缺出库/回库线路，详见下方警告）",
+              "  取消班次: " + TimetableBuildReportText.describeDroppedCount(result.droppedTrips()),
               NamedTextColor.YELLOW));
     }
 

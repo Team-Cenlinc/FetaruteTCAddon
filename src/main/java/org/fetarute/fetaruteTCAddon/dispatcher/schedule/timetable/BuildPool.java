@@ -167,26 +167,43 @@ public final class BuildPool implements AutoCloseable {
   }
 
   /**
-   * 堆上真正占着的量：老年代上次 GC 之后的占用。
+   * 堆上真正占着的量：老年代在 GC 之后的占用。
    *
    * <p>不用 {@code total − free}：那里含着还没回收的垃圾，游戏服务器的堆常年七八成满（年轻代填满才收一次），按它判并行几乎一直关着。
-   * 老年代上次收完还剩的才是长期占着的。老年代还没收过时取它当前的占用：没收过说明它还没涨到触发并发回收的程度， 当前占用含垃圾也只会偏大。代价是年轻代里活着的数据与两次 GC
-   * 之间新长的部分看不到——真到内存吃紧时 GC 会先跑、更新这个数， 某个候选仍抛 {@link Error} 时同一批停编兜底。没有老年代这一池（取不到）时退回 {@code total −
-   * free}。
+   * 老年代收完还剩的才是长期占着的。取两个读数之大者（{@link #retained}）：老年代上次专门回收后的占用（{@code getCollectionUsage}），与最近一次任何
+   * GC （含年轻代 GC）之后老年代的占用。只看前者不够及时：G1 只在混合回收与完全回收之后才更新它，长时间只有年轻代 GC 时它停在旧值， 其间晋升到老年代的数据看不见；后者每次 GC
+   * 都更新，含老年代里还没回收的垃圾，只会偏大——G1 在老年代占到堆的一定比例时就开始并发标记、随后混合回收，
+   * 这部分垃圾不会无限堆积，偏大的程度有限。两者都还没有时取老年代当前的占用。没有老年代这一池（取不到）时退回 {@code total − free}。 仍可能漏看两次 GC
+   * 之间新长的部分，某个候选抛 {@link Error} 时同一批停编兜底。
    */
   private static long retainedHeap(Runtime runtime) {
     MemoryPoolMXBean pool = OldGeneration.POOL;
     if (pool != null && pool.isValid()) {
-      MemoryUsage collected = pool.getCollectionUsage();
-      if (collected != null && collected.getUsed() > 0) {
-        return collected.getUsed();
-      }
       MemoryUsage current = pool.getUsage();
-      if (current != null) {
-        return current.getUsed();
-      }
+      return retained(
+          usedOf(pool.getCollectionUsage()),
+          OldGeneration.usedAfterLatestGc(pool),
+          usedOf(current));
     }
     return runtime.totalMemory() - runtime.freeMemory();
+  }
+
+  /**
+   * 老年代长期占用的读数：两次 GC 后读数之大者；都没有（≤ 0）时取当前占用。
+   *
+   * @param collected 老年代上次专门回收后的占用
+   * @param afterLatestGc 最近一次任何 GC 之后老年代的占用
+   * @param current 老年代当前占用
+   */
+  static long retained(long collected, long afterLatestGc, long current) {
+    if (collected > 0L || afterLatestGc > 0L) {
+      return Math.max(collected, afterLatestGc);
+    }
+    return Math.max(0L, current);
+  }
+
+  private static long usedOf(MemoryUsage usage) {
+    return usage == null ? 0L : usage.getUsed();
   }
 
   /**
@@ -201,6 +218,45 @@ public final class BuildPool implements AutoCloseable {
   /** 堆上的老年代池；只有一池的收集器（非分代 ZGC、Shenandoah）就取那一池。JVM 里池是固定的，只找一次。 */
   private static final class OldGeneration {
     static final MemoryPoolMXBean POOL = find(ManagementFactory.getMemoryPoolMXBeans());
+
+    /** 管着这一池的收集器（G1 的年轻代收集器也列着老年代：年轻代 GC 会把对象晋升进去）。 */
+    static final List<java.lang.management.GarbageCollectorMXBean> COLLECTORS = collectorsOf(POOL);
+
+    private static List<java.lang.management.GarbageCollectorMXBean> collectorsOf(
+        MemoryPoolMXBean pool) {
+      List<java.lang.management.GarbageCollectorMXBean> out = new ArrayList<>();
+      if (pool == null) {
+        return out;
+      }
+      for (java.lang.management.GarbageCollectorMXBean collector :
+          ManagementFactory.getGarbageCollectorMXBeans()) {
+        if (java.util.Arrays.asList(collector.getMemoryPoolNames()).contains(pool.getName())) {
+          out.add(collector);
+        }
+      }
+      return List.copyOf(out);
+    }
+
+    /** 最近一次（按结束时刻）管着这一池的 GC 之后这一池的占用；取不到（非 HotSpot、还没 GC 过）时为 0。 */
+    static long usedAfterLatestGc(MemoryPoolMXBean pool) {
+      long latestEnd = Long.MIN_VALUE;
+      long used = 0L;
+      for (java.lang.management.GarbageCollectorMXBean collector : COLLECTORS) {
+        if (!(collector instanceof com.sun.management.GarbageCollectorMXBean hotspot)) {
+          continue;
+        }
+        com.sun.management.GcInfo info = hotspot.getLastGcInfo();
+        if (info == null || info.getEndTime() < latestEnd) {
+          continue;
+        }
+        MemoryUsage after = info.getMemoryUsageAfterGc().get(pool.getName());
+        if (after != null) {
+          latestEnd = info.getEndTime();
+          used = after.getUsed();
+        }
+      }
+      return used;
+    }
 
     private static MemoryPoolMXBean find(List<MemoryPoolMXBean> pools) {
       MemoryPoolMXBean only = null;

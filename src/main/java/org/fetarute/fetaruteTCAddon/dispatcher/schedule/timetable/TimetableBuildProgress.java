@@ -44,6 +44,26 @@ public final class TimetableBuildProgress {
     }
   }
 
+  /** 完整构建的几种用途：编表用时大多花在这几处，分开数才看得出时间去了哪。 */
+  public enum Trial {
+    /** 相位第三层在完整交路上试的候选。 */
+    PHASE_CANDIDATE("第三层完整候选"),
+    /** 严格模式取消一班之后的重排。 */
+    CANCEL_RETRY("严格取消重排"),
+    /** 快车错峰候选里的完整构建。 */
+    STAGGER_CANDIDATE("错峰候选");
+
+    private final String label;
+
+    Trial(String label) {
+      this.label = label;
+    }
+
+    public String label() {
+      return label;
+    }
+  }
+
   /**
    * 某一时刻的进度。
    *
@@ -52,9 +72,37 @@ public final class TimetableBuildProgress {
    * @param fullBuilds 已完整构建的次数（含错峰候选）
    * @param elapsed 从开始编表起的用时
    * @param stageElapsed 进入当前阶段后的用时
+   * @param trialCounts 按 {@link Trial} 的顺序，各用途完整构建了几次
    */
   public record Snapshot(
-      Stage stage, String detail, int fullBuilds, Duration elapsed, Duration stageElapsed) {}
+      Stage stage,
+      String detail,
+      int fullBuilds,
+      Duration elapsed,
+      Duration stageElapsed,
+      java.util.List<Integer> trialCounts) {
+
+    public Snapshot {
+      trialCounts = trialCounts == null ? java.util.List.of() : java.util.List.copyOf(trialCounts);
+    }
+
+    /** 某一用途完整构建了几次。 */
+    public int trials(Trial kind) {
+      return kind.ordinal() < trialCounts.size() ? trialCounts.get(kind.ordinal()) : 0;
+    }
+
+    /** "第三层完整候选 N、严格取消重排 N、错峰候选 N"。 */
+    public String describeTrials() {
+      StringBuilder out = new StringBuilder();
+      for (Trial kind : Trial.values()) {
+        if (out.length() > 0) {
+          out.append('、');
+        }
+        out.append(kind.label()).append(' ').append(trials(kind));
+      }
+      return out.toString();
+    }
+  }
 
   /** 编表被取消：从编表线程一路抛到发起处，不当作编表失败。 */
   public static final class Cancelled extends RuntimeException {
@@ -75,6 +123,8 @@ public final class TimetableBuildProgress {
   private final Clock clock;
   private final Instant startedAt;
   private final AtomicInteger fullBuilds = new AtomicInteger();
+  private final java.util.concurrent.atomic.AtomicIntegerArray trials =
+      new java.util.concurrent.atomic.AtomicIntegerArray(Trial.values().length);
   private volatile Stage stage = Stage.QUEUED;
   private volatile String detail = "";
   private volatile Instant stageStartedAt;
@@ -114,6 +164,11 @@ public final class TimetableBuildProgress {
   public void fullBuild() {
     checkpoint();
     fullBuilds.incrementAndGet();
+  }
+
+  /** 记一次某种用途的完整构建（与 {@link #fullBuild} 一起调：那里数总数、管取消，这里只分用途）。 */
+  public void trial(Trial kind) {
+    trials.incrementAndGet(Objects.requireNonNull(kind, "kind").ordinal());
   }
 
   /**
@@ -159,12 +214,17 @@ public final class TimetableBuildProgress {
   public Snapshot snapshot() {
     Instant now = clock.instant();
     Stage currentStage = stage;
+    java.util.List<Integer> counts = new java.util.ArrayList<>(trials.length());
+    for (int i = 0; i < trials.length(); i++) {
+      counts.add(trials.get(i));
+    }
     return new Snapshot(
         currentStage,
         detail,
         fullBuilds.get(),
         nonNegative(Duration.between(startedAt, now)),
-        nonNegative(Duration.between(stageStartedAt, now)));
+        nonNegative(Duration.between(stageStartedAt, now)),
+        counts);
   }
 
   private static Duration nonNegative(Duration duration) {

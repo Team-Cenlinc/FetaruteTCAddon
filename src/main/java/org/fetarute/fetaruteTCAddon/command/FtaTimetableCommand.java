@@ -365,7 +365,9 @@ public final class FtaTimetableCommand {
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
                 + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict"
-                + " --max-cancel --rapid-stagger --name --prefix",
+                + " --max-cancel（缺省为运营班次的 "
+                + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT
+                + "%，至少 1 班） --rapid-stagger --name --prefix",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("参数一览", "/fta timetable config <company> <operator> <line>"));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
@@ -568,7 +570,13 @@ public final class FtaTimetableCommand {
             following,
             // 顺推按运行时晚点追赶的停站压缩判：与运行时用同一份配置。
             timetableSettings().recoveryMinDwellSeconds(),
-            flags.maxCancelTrips());
+            flags.maxCancelTrips(),
+            // 表上的喂车多停靠早到等点兑现：上限与运行时同一份配置，再被调度层的硬上限封顶。
+            (int)
+                Math.min(
+                    holdMaxSeconds(),
+                    org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
+                        .HOLD_CEILING.toSeconds()));
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -751,6 +759,7 @@ public final class FtaTimetableCommand {
                                   groupSources,
                                   maxTripsSource,
                                   buildWarnings,
+                                  progress.snapshot(),
                                   release);
                         } finally {
                           // 交给了落库就等事务结束再解锁；没走到落库（编表失败、拆表出错）当场解锁。
@@ -1173,6 +1182,7 @@ public final class FtaTimetableCommand {
   /**
    * 构建完成后的主线程收尾：报告（联编时一份）、逐线落库、给出发布与查看入口。落库交给异步事务。
    *
+   * @param progress 编完时的进度：报告里写用时与各用途的完整构建次数
    * @param saved 落库事务结束（成功、被拒或出错）后在主线程调用；返回 false 时不会被调用
    * @return 交给了落库为 true
    */
@@ -1189,11 +1199,21 @@ public final class FtaTimetableCommand {
       Map<String, String> groupSources,
       String maxTripsSource,
       List<String> warnings,
+      TimetableBuildProgress.Snapshot progress,
       Runnable saved) {
     TimetableBuildResult result = set.joint();
     TimetableBuildReportSender report = new TimetableBuildReportSender(sender, holdMaxSeconds());
     report.sendBuildReport(
         result, options, headway, groupSources, maxTripsSource, describeRun(run));
+    sender.sendMessage(
+        field(
+            "编表用时",
+            elapsed(progress.elapsed())
+                + "，完整构建 "
+                + progress.fullBuilds()
+                + " 次（"
+                + progress.describeTrials()
+                + "）"));
     for (String warning : warnings) {
       sender.sendMessage(Component.text("  ! " + warning, NamedTextColor.YELLOW));
     }
@@ -1904,8 +1924,8 @@ public final class FtaTimetableCommand {
     sender.sendMessage(
         configRow(
             "严格模式取消上限",
-            TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS + " 班",
-            "默认（无持久化位置），仅 --strict 时生效",
+            "运营班次的 " + TimetableBuildOptions.DEFAULT_MAX_CANCEL_PERCENT + "%（至少 1 班）",
+            "默认（无持久化位置），仅 --strict 时生效；--max-cancel 给绝对班数",
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-cancel ", "只对这一次构建生效")));
     sender.sendMessage(
         configRow(
@@ -2699,7 +2719,7 @@ public final class FtaTimetableCommand {
       if (!snapshot.detail().isBlank()) {
         lines.add(field("  正在", snapshot.detail()));
       }
-      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次"));
+      lines.add(field("  完整构建", snapshot.fullBuilds() + " 次（" + snapshot.describeTrials() + "）"));
     }
     return lines;
   }
@@ -3589,7 +3609,7 @@ public final class FtaTimetableCommand {
    * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
-   * @param maxCancelTrips 严格模式最多取消几班让不掉的班次；0 表示不取消
+   * @param maxCancelTrips 严格模式最多取消几班让不掉的班次；0 表示不取消；没给 {@code --max-cancel} 时为负，按运营班次的比例定
    * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀

@@ -18,6 +18,30 @@ class TimetableBuildReportTextTest {
       new TerminalSerializer.TerminalReport(
           "OP:S:X", 10, 1100, 0.31D, 10, 10, 30, 110, 4, 2.0D, 55, 0, 0);
 
+  /** "取消班次"一行按原因分类写：出入库缺失合在一起，严格模式取消、端点排队超限各写各的，没有的原因不写。 */
+  @Test
+  void droppedTripsAreCountedByReason() {
+    List<TimetableBuildResult.DroppedTrip> dropped =
+        List.of(
+            new TimetableBuildResult.DroppedTrip(
+                "R1", "05:00", VehicleDutyPlanner.UnassignedReason.NO_CREATE_ACCESS),
+            new TimetableBuildResult.DroppedTrip(
+                "R1", "23:50", VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS),
+            new TimetableBuildResult.DroppedTrip(
+                "R2", "08:00", VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED),
+            new TimetableBuildResult.DroppedTrip(
+                "R2", "09:00", VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED),
+            new TimetableBuildResult.DroppedTrip(
+                "R2", "10:00", VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+
+    assertEquals(
+        "5（起终点缺出库/回库线路 2、端点排队或让车累计超限 1、严格模式取消让不掉的 2，详见下方警告）",
+        TimetableBuildReportText.describeDroppedCount(dropped));
+    assertEquals(
+        "1（严格模式取消让不掉的 1，详见下方警告）",
+        TimetableBuildReportText.describeDroppedCount(List.of(dropped.get(2))));
+  }
+
   @Test
   void terminalLinesAreRendered() {
     List<String> lines =
@@ -76,19 +100,18 @@ class TimetableBuildReportTextTest {
     for (int i = 0; i < 9; i++) {
       residuals.add(
           residual(
-              "WS-" + i, "SURC:S:CHT", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:a~b"));
+              "L1-" + i, "OP:S:A", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:a~b"));
     }
     residuals.add(
-        residual("WS-9", "SURC:S:NTA", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:c~d"));
-    residuals.add(
-        residual("MT-1", "SURC:S:PPK", ConflictAbsorption.Verdict.STUB_TERMINAL, "single:s"));
+        residual("L1-9", "OP:S:B", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:c~d"));
+    residuals.add(residual("L2-1", "OP:S:C", ConflictAbsorption.Verdict.STUB_TERMINAL, "single:s"));
 
     List<String> lines = TimetableBuildReportText.describeUnabsorbable(residuals, 0);
 
     assertEquals("  让不掉的冲突按判决与让车点：", lines.get(0));
-    assertEquals("  · 容量 1 端点 1 处：SURC:S:PPK 1", lines.get(1));
-    assertEquals("  · 让车点无容量 10 处：SURC:S:CHT 9、SURC:S:NTA 1", lines.get(2));
-    assertTrue(lines.get(3).startsWith("  · [让车点无容量] WS-0 等 400s 于 SURC:S:CHT："), lines.get(3));
+    assertEquals("  · 容量 1 端点 1 处：OP:S:C 1", lines.get(1));
+    assertEquals("  · 让车点无容量 10 处：OP:S:A 9、OP:S:B 1", lines.get(2));
+    assertTrue(lines.get(3).startsWith("  · [让车点无容量] L1-0 等 400s 于 OP:S:A："), lines.get(3));
     assertTrue(lines.get(3).contains("TRACK edge:a~b: T1 [00:00:00–00:00:10]"), lines.get(3));
     assertEquals(
         "  · … 另有 " + (residuals.size() - TimetableBuildResult.CONFLICT_DETAIL_LIMIT) + " 处",

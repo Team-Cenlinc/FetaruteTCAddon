@@ -1136,7 +1136,7 @@ public final class VehicleDutyPlanner {
     }
 
     /** 先保留车型，再保留原库候选及显式指定；资源选择不能越过这些运营约束。 */
-    private List<Leg> returnCandidatesAt(
+    List<Leg> returnCandidatesAt(
         String stationNodeId, Optional<String> preferredDepot, Optional<String> consist) {
       List<Leg> candidates =
           returnCandidates.getOrDefault(stationNodeId, List.of()).stream()

@@ -427,8 +427,8 @@ public final class TimetableConflictChecker {
   /**
    * 站台映射：只有图里类型为 STATION / DEPOT 的节点才是站台。
    *
-   * <p>路径点常常命名在站台的命名空间下（{@code OP:S:CHT:3:003} 是 CHT 三号道的进站路径点），按名字解析会把它算进站台组 {@code
-   * OP:S:CHT}，而站台组容量只数真站台——占用与容量口径不一致，一辆车在进站路径上也在消耗站台容量。 DYNAMIC 停靠只有组一层，节点 id 是占位串，不查类型。{@code
+   * <p>路径点常常命名在站台的命名空间下（{@code OP:S:A:3:003} 是 A 站三号道的进站路径点），按名字解析会把它算进站台组 {@code
+   * OP:S:A}，而站台组容量只数真站台——占用与容量口径不一致，一辆车在进站路径上也在消耗站台容量。 DYNAMIC 停靠只有组一层，节点 id 是占位串，不查类型。{@code
    * nodeTypes} 为空（没有图）时退回按名字解析。
    */
   public static List<Platform> platformsOf(

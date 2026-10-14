@@ -33,7 +33,7 @@ class TimetableBuilderStrictCancelTest {
   private static final String A = "OP:S:A:1";
   private static final String B = "OP:S:B:1";
   private static final String C = "OP:S:C:1";
-  private static final String NEIGHBOR = "CHT/SURN/NL/NL-TT";
+  private static final String NEIGHBOR = "CO/OP/L2/L2-TT";
 
   private final RailGraph graph =
       TimetableTestFixtures.chain(
@@ -66,16 +66,31 @@ class TimetableBuilderStrictCancelTest {
     assertTrue(report.contains("[邻表]"), report);
   }
 
-  /** 上限 2：取消两班之后还剩一处，失败文案写明"取消 N 班后仍有 M 处"。 */
+  /** 上限 2：取消两班之后还剩一处，失败文案写明"取消 N 班后仍有 M 处"并列出取消之后还剩的；失败结果里的冲突与残余仍是目标间隔原表的（与不取消时相同）， 不混进取消之后的那份。 */
   @Test
   void failsWhenTheLimitIsNotEnough() {
     TimetableBuildResult result = build(true, 2);
+    TimetableBuildResult uncancelled = build(true, 0);
 
     assertFalse(result.success());
     String reason = String.join("\n", result.warnings());
     assertTrue(reason.contains("取消 2 班后仍有 "), reason);
-    assertFalse(result.unabsorbable().isEmpty(), reason);
+    assertTrue(reason.contains("取消之后仍让不掉的："), reason);
     assertTrue(reason.contains("--max-cancel 2"), reason);
+    assertEquals(uncancelled.unabsorbable(), result.unabsorbable());
+    assertEquals(uncancelled.conflictsAtTarget(), result.conflictsAtTarget());
+  }
+
+  /** 不给 --max-cancel：上限按运营班次的 1% 算、至少 1 班；这张表一小时 7 班，只许取消 1 班，失败文案写明上限是怎么来的。 */
+  @Test
+  void theDefaultLimitIsAShareOfTheOperatingTrips() {
+    TimetableBuildResult result = build(true, TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS);
+
+    assertFalse(result.success());
+    String reason = String.join("\n", result.warnings());
+    assertTrue(reason.contains("取消 1 班后仍有 "), reason);
+    assertTrue(reason.contains("上限 1 班，即运营班次 "), reason);
+    assertTrue(reason.contains("的 1%"), reason);
   }
 
   /** 上限 0：旧行为，不取消、直接失败，文案里没有取消。 */
@@ -101,6 +116,22 @@ class TimetableBuilderStrictCancelTest {
         withLimit.droppedTrips().stream()
             .noneMatch(
                 trip -> trip.reason() == VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED));
+  }
+
+  /** 进度按用途分开数完整构建：取消三班就有三次严格取消重排，第三层完整候选另记，没有错峰候选。 */
+  @Test
+  void progressCountsTheCancelRetries() {
+    TimetableBuildProgress progress = TimetableBuildProgress.untracked();
+    build(new TimetableBuilder(progress), true, 10);
+
+    TimetableBuildProgress.Snapshot snapshot = progress.snapshot();
+    assertEquals(3, snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY));
+    assertEquals(0, snapshot.trials(TimetableBuildProgress.Trial.STAGGER_CANDIDATE));
+    assertTrue(
+        snapshot.fullBuilds()
+            >= snapshot.trials(TimetableBuildProgress.Trial.CANCEL_RETRY)
+                + snapshot.trials(TimetableBuildProgress.Trial.PHASE_CANDIDATE),
+        snapshot::toString);
   }
 
   /** 串行与并行编出同一张表、同一份取消。 */
@@ -145,7 +176,7 @@ class TimetableBuilderStrictCancelTest {
       }
     }
     return new NeighborTimetable(
-        UUID.nameUUIDFromBytes("NL-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+        UUID.nameUUIDFromBytes("L2-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
         NEIGHBOR,
         Instant.parse("2026-02-28T12:00:00Z"),
         ZONE,

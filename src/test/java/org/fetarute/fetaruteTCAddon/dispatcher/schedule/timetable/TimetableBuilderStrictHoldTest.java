@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 /**
  * 严格模式也试喂车方向中途多停：多停不改间隔，与非严格模式第一步同一个顺序。
  *
- * <p>仿 WS 的形状：大交路 A↔Z（A、Z 都是单股道端点，上下行分线经过 H、M），小交路 SM 从车库 DEP 出库、过咽喉路径点 J、 在 M 第一次停车，再经 H 终到 A，到 A
+ * <p>形状：大交路 A↔Z（A、Z 都是单股道端点，上下行分线经过 H、M），小交路 SM 从车库 DEP 出库、过咽喉路径点 J、 在 M 第一次停车，再经 H 终到 A，到 A
  * 折返后接大交路 A→Z。回库 A→J→DEP 与 SM 出库共用咽喉 DEP–J。
  */
 class TimetableBuilderStrictHoldTest {
@@ -77,6 +77,18 @@ class TimetableBuilderStrictHoldTest {
     assertEquals(lenient.timetable(), strict.timetable(), "非严格模式第一步也是这一种多停");
   }
 
+  /** 运行时不扣车（扣车上限 0）时表上写进去的多停兑现不了：不试多停，上面那张靠多停才排开的表在严格模式下排不开。 */
+  @Test
+  void noFeederHoldWhenTheRuntimeDoesNotHold() {
+    TimetableBuildResult strict = build(103, true, 30, 80, 0);
+
+    assertFalse(strict.success(), () -> strict.warnings().toString());
+    assertTrue(
+        strict.warnings().stream()
+            .noneMatch(text -> text.contains("多停 ") && text.contains("种也排不开")),
+        () -> strict.warnings().toString());
+  }
+
   /** 间隔排得开时严格与非严格逐字段相同：严格模式多出来的只是失败前的那一步。 */
   @Test
   void aCleanTargetIsUnaffected() {
@@ -92,6 +104,15 @@ class TimetableBuilderStrictHoldTest {
    * @param throatToM J 到 M 两股道的长度（blocks）
    */
   private TimetableBuildResult build(int interval, boolean strict, int throatToA, int throatToM) {
+    return build(
+        interval, strict, throatToA, throatToM, TimetableBuildOptions.DEFAULT_HOLD_MAX_SECONDS);
+  }
+
+  /**
+   * @param holdMax 运行时扣车上限：喂车多停至多它的一半
+   */
+  private TimetableBuildResult build(
+      int interval, boolean strict, int throatToA, int throatToM, int holdMax) {
     TimetableBuildOptions options =
         new TimetableBuildOptions(
                 5 * 3600,
@@ -104,7 +125,8 @@ class TimetableBuilderStrictHoldTest {
                 Duration.ofSeconds(15),
                 strict)
             .withIntervals(
-                Duration.ofSeconds(interval), Map.of("full", interval, "short", interval));
+                Duration.ofSeconds(interval), Map.of("full", interval, "short", interval))
+            .withHoldMax(holdMax);
     return new TimetableBuilder().build(input(throatToA, throatToM), options, BUILT_AT);
   }
 
