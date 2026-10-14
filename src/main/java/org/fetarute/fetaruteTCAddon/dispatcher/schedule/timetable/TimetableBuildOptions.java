@@ -36,6 +36,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  *     ConflictAbsorption.Recovery}）；0 表示不按追回量判，顺推一班也不放过
  * @param maxCancelTrips 严格模式最多取消几班让不掉的班次（{@code --max-cancel}）；0 表示不取消，目标间隔有不可吸收残余就失败； 负数（缺省 {@link
  *     #DEFAULT_MAX_CANCEL_TRIPS}）表示按运营班次的比例定（{@link #maxCancelTripsFor}）
+ * @param holdMaxSeconds 运行时早到列车在站台最多被扣多久（{@code timetable.hold-max-seconds} 与调度层硬上限取小）：
+ *     表上写进去的多停靠早到等点兑现，不能超过它（{@link #feederHoldLimitSeconds}）；负数取 {@link #DEFAULT_HOLD_MAX_SECONDS}
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -52,7 +54,8 @@ public record TimetableBuildOptions(
     boolean rapidStagger,
     Following following,
     int recoveryMinDwellSeconds,
-    int maxCancelTrips) {
+    int maxCancelTrips,
+    int holdMaxSeconds) {
 
   /**
    * 运行时同向跟车的规则，编表按它算闭塞时间（{@link BlockingTimes}）：后车多早要用到一段线路、前车多晚才放出来。
@@ -221,6 +224,9 @@ public record TimetableBuildOptions(
   /** 缺省的取消上限占运营班次的百分比；至少 1 班。 */
   public static final int DEFAULT_MAX_CANCEL_PERCENT = 1;
 
+  /** 不给 {@code holdMaxSeconds} 时的运行时扣车上限：与 {@code timetable.hold-max-seconds} 的默认值相同。 */
+  public static final int DEFAULT_HOLD_MAX_SECONDS = 120;
+
   public TimetableBuildOptions {
     if (serviceStartSecondOfDay < 0 || serviceStartSecondOfDay >= TimetableTrip.SECONDS_PER_DAY) {
       throw new IllegalArgumentException("serviceStartSecondOfDay 超出一天范围");
@@ -258,6 +264,38 @@ public record TimetableBuildOptions(
     following = following == null ? Following.NONE : following;
     recoveryMinDwellSeconds = Math.max(0, recoveryMinDwellSeconds);
     maxCancelTrips = maxCancelTrips < 0 ? DEFAULT_MAX_CANCEL_TRIPS : maxCancelTrips;
+    holdMaxSeconds = holdMaxSeconds < 0 ? DEFAULT_HOLD_MAX_SECONDS : holdMaxSeconds;
+  }
+
+  /**
+   * 按车接续的喂车方向在中途最多多停几秒：运行时扣车上限的一半。
+   *
+   * <p>多停写进表里，运行时靠"早到等点"兑现，受 {@link #holdMaxSeconds} 封顶；同一处扣车还要吸收这辆车本来的早到，
+   * 所以只拿一半写进表，保证表上的每一次多停运行时都真的会扣。 运行时不扣车（上限 0）时不多停。
+   */
+  public int feederHoldLimitSeconds() {
+    return holdMaxSeconds / 2;
+  }
+
+  /** 换运行时扣车上限，其余不变。 */
+  public TimetableBuildOptions withHoldMax(int seconds) {
+    return new TimetableBuildOptions(
+        serviceStartSecondOfDay,
+        serviceEndSecondOfDay,
+        headway,
+        defaultDwell,
+        dutyLimits,
+        tripCodePrefix,
+        zoneId,
+        separation,
+        strictConflicts,
+        groupIntervals,
+        repair,
+        rapidStagger,
+        following,
+        recoveryMinDwellSeconds,
+        maxCancelTrips,
+        seconds);
   }
 
   /** 取消上限是不是按运营班次的比例定（没给 {@code --max-cancel}）。 */
@@ -309,7 +347,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         following,
         0,
-        0);
+        0,
+        DEFAULT_HOLD_MAX_SECONDS);
   }
 
   /** 不按闭塞时间算的构造：快车被卡按占用区间量。 */
@@ -481,7 +520,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         following,
         recoveryMinDwellSeconds,
-        maxCancelTrips);
+        maxCancelTrips,
+        holdMaxSeconds);
   }
 
   /** 换让车参数，其余不变。 */
@@ -501,7 +541,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         following,
         recoveryMinDwellSeconds,
-        maxCancelTrips);
+        maxCancelTrips,
+        holdMaxSeconds);
   }
 
   /** 开关快车错峰搜索，其余不变。 */
@@ -521,7 +562,8 @@ public record TimetableBuildOptions(
         enabled,
         following,
         recoveryMinDwellSeconds,
-        maxCancelTrips);
+        maxCancelTrips,
+        holdMaxSeconds);
   }
 
   /** 换一组跟车规则，其余不变。 */
@@ -541,7 +583,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         nextFollowing,
         recoveryMinDwellSeconds,
-        maxCancelTrips);
+        maxCancelTrips,
+        holdMaxSeconds);
   }
 
   /** 换运行时的最短停站（顺推按可追回量判），其余不变。 */
@@ -561,7 +604,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         following,
         seconds,
-        maxCancelTrips);
+        maxCancelTrips,
+        holdMaxSeconds);
   }
 
   /** 换严格模式的取消上限，其余不变。 */
@@ -581,7 +625,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         following,
         recoveryMinDwellSeconds,
-        trips);
+        trips,
+        holdMaxSeconds);
   }
 
   /** 计划窗口长度（秒）：首班发车到运营结束。 */
@@ -621,7 +666,8 @@ public record TimetableBuildOptions(
         rapidStagger,
         following,
         recoveryMinDwellSeconds,
-        maxCancelTrips);
+        maxCancelTrips,
+        holdMaxSeconds);
   }
 
   /**

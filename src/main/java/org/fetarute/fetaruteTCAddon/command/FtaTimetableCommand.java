@@ -570,7 +570,13 @@ public final class FtaTimetableCommand {
             following,
             // 顺推按运行时晚点追赶的停站压缩判：与运行时用同一份配置。
             timetableSettings().recoveryMinDwellSeconds(),
-            flags.maxCancelTrips());
+            flags.maxCancelTrips(),
+            // 表上的喂车多停靠早到等点兑现：上限与运行时同一份配置，再被调度层的硬上限封顶。
+            (int)
+                Math.min(
+                    holdMaxSeconds(),
+                    org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
+                        .HOLD_CEILING.toSeconds()));
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是

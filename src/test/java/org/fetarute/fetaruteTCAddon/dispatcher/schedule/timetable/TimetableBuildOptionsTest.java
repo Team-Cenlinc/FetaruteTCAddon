@@ -105,6 +105,29 @@ class TimetableBuildOptionsTest {
     assertEquals(0, legacy.withRecoveryMinDwell(-3).recoveryMinDwellSeconds());
   }
 
+  /** 喂车多停上限是运行时扣车上限的一半（缺省与配置默认值一致），换间隔、让车等都原样带过去，扣车上限 0 时不多停。 */
+  @Test
+  void feederHoldsFollowTheRuntimeHoldLimit() {
+    TimetableBuildOptions options = TimetableBuildOptions.defaults(ZoneId.of("UTC"));
+
+    assertEquals(
+        org.fetarute
+            .fetaruteTCAddon
+            .config
+            .ConfigManager
+            .TimetableSettings
+            .defaults()
+            .holdMaxSeconds(),
+        options.holdMaxSeconds());
+    assertEquals(
+        TimetableBuildOptions.DEFAULT_HOLD_MAX_SECONDS / 2, options.feederHoldLimitSeconds());
+    TimetableBuildOptions held = options.withHoldMax(40);
+    assertEquals(20, held.feederHoldLimitSeconds());
+    assertEquals(
+        40, held.withHeadway(Duration.ofSeconds(200)).withMaxCancelTrips(3).holdMaxSeconds());
+    assertEquals(0, options.withHoldMax(0).feederHoldLimitSeconds());
+  }
+
   /** 取消上限：给了 --max-cancel 就是绝对班数（0 不取消）；没给时按运营班次的 1%，向下取整、至少 1 班。 */
   @Test
   void theDefaultCancelLimitScalesWithTheOperatingTrips() {

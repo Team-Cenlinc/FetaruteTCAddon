@@ -81,14 +81,6 @@ public final class TimetableBuilder {
   /** 搜索可行 headway 时最多放宽到目标的多少倍。 */
   public static final int HEADWAY_SEARCH_MAX_MULTIPLIER = 4;
 
-  /**
-   * 按车接续的喂车方向在中途最多多停几秒。
-   *
-   * <p>多停写进表里，运行时靠"早到等点"执行（{@code timetable.hold-max-seconds}，默认 120 秒；调度层另有 150 秒硬上限）。
-   * 上限取得远低于它，保证表上的每一次多停运行时都真的会扣。
-   */
-  public static final int FEEDER_HOLD_LIMIT_SECONDS = 60;
-
   /** 逐组收紧最多走几遍：后收紧的单元可能给先前收不紧的腾出空间，走到一遍里谁都收不动为止。 */
   static final int TIGHTEN_PASSES = 3;
 
@@ -1314,6 +1306,11 @@ public final class TimetableBuilder {
             prepared.operationPlans().stream()
                 .mapToInt(TimetableRoutePlan::totalRunSeconds)
                 .max()
+                .orElse(0),
+            prepared.plans().stream()
+                .filter(plan -> plan.kind() == RouteOperationType.RETURN)
+                .mapToInt(TimetableRoutePlan::totalRunSeconds)
+                .max()
                 .orElse(0));
     // 各相位候选在池内线程上并发试排，结果按相位记在这里；只留评分最好的那份，其余算完分数就丢，免得几十份整表同时压在堆上。
     Map<Map<String, Integer>, Attempt> completed = new ConcurrentHashMap<>();
@@ -1458,26 +1455,34 @@ public final class TimetableBuilder {
         options.rapidStagger(),
         options.following(),
         options.recoveryMinDwellSeconds(),
-        options.maxCancelTrips());
+        options.maxCancelTrips(),
+        options.holdMaxSeconds());
   }
 
   /**
    * 相位候选的取消从哪一秒起不计：试排窗口比计划窗口短时，末端的班次会因端点排队、让车被推过窗口末端而截掉（"越过计划窗口"）——
-   * 那是窗口人为截断，哪个相位把更多班次推到末端，哪个就多取消几班，与它在真实窗口里取消多少无关。拿它去比"不拿取消换冲突"会误杀候选。 剔掉的只是末端"最长一趟全程 +
-   * 单步让车上限"之内发车的那些：再早发车的班次被推过窗口末端之前先撞上的是交路上限，那是真取消。
+   * 那是窗口人为截断，哪个相位把更多班次推到末端，哪个就多取消几班，与它在真实窗口里取消多少无关。拿它去比"不拿取消换冲突"会误杀候选。 剔掉的只是末端"最长一趟全程 + 单步让车上限 +
+   * 最长一段回库走行"之内发车的那些（交路收尾要把回库也排进窗口，末班之后的回库同样会被窗口截断）： 再早发车的班次被推过窗口末端之前先撞上的是交路上限，那是真取消。
    * 不取整个最长交路寿命：试排视野只有两个交路寿命，剔掉后一半等于只看开班那一段，稳态里反复出现的取消看不见，选中的相位到完整窗口上多取消、被打回原相位。
    * 试排窗口就是计划窗口时末端是真的，全算。
    *
    * <p>剔掉的只是候选之间的比较；选中的相位还要在完整窗口上与原相位比一次取消数（{@link #selectedAttempt}），真多取消的照样不要。
    *
    * @param longestRunSeconds 最长一条运营 route 的全程时分
+   * @param longestReturnSeconds 最长一条回库线路（RETURN）的全程时分；没有回库线路时为 0
    */
   static int completionTailFrom(
-      TimetableBuildOptions requested, TimetableBuildOptions trial, int longestRunSeconds) {
+      TimetableBuildOptions requested,
+      TimetableBuildOptions trial,
+      int longestRunSeconds,
+      int longestReturnSeconds) {
     if (trial.horizonSeconds() >= requested.horizonSeconds()) {
       return Integer.MAX_VALUE;
     }
-    long tail = (long) Math.max(0, longestRunSeconds) + trial.repair().maxWaitSeconds();
+    long tail =
+        (long) Math.max(0, longestRunSeconds)
+            + trial.repair().maxWaitSeconds()
+            + Math.max(0, longestReturnSeconds);
     return (int) Math.max(0L, trial.horizonSeconds() - tail);
   }
 
@@ -1999,14 +2004,25 @@ public final class TimetableBuilder {
         directionByCode.put(trip.tripCode(), key);
       }
     }
+    return countByDirection(ConflictAbsorption.unabsorbable(residuals), directionByCode);
+  }
+
+  /**
+   * 每个方向卷进了几处残余：一处残余两边的本表班次各记一次（同一方向只记一次）。邻表那一边不记——它的车次号可能与本表的某一班相同， 按车次号查方向会把邻表的冲突记到本表那个方向头上。
+   *
+   * @param directionByCode 本表班次的车次号 → 方向键
+   */
+  static Map<String, Integer> countByDirection(
+      List<ConflictAbsorption.Residual> residuals, Map<String, String> directionByCode) {
     Map<String, Integer> out = new TreeMap<>();
-    for (ConflictAbsorption.Residual residual : ConflictAbsorption.unabsorbable(residuals)) {
+    for (ConflictAbsorption.Residual residual : residuals) {
+      TimetableConflictChecker.Conflict conflict = residual.conflict();
       Set<String> keys = new TreeSet<>();
-      for (String code : List.of(residual.conflict().first(), residual.conflict().second())) {
-        String key = directionByCode.get(code);
-        if (key != null) {
-          keys.add(key);
-        }
+      if (conflict.firstOwner().isEmpty()) {
+        Optional.ofNullable(directionByCode.get(conflict.first())).ifPresent(keys::add);
+      }
+      if (conflict.secondOwner().isEmpty()) {
+        Optional.ofNullable(directionByCode.get(conflict.second())).ifPresent(keys::add);
       }
       for (String key : keys) {
         out.merge(key, 1, Integer::sum);
@@ -2174,7 +2190,7 @@ public final class TimetableBuilder {
                   candidates.skippedFrom(),
                   candidates.skippedTo(),
                   candidates.skipped(),
-                  FEEDER_HOLD_LIMIT_SECONDS));
+                  relaxed.feederHoldLimitSeconds()));
         }
         if (!hold.isNone()) {
           searchNotes.add(holds.describe(hold));
@@ -3159,7 +3175,7 @@ public final class TimetableBuilder {
       if (feeders.isEmpty()) {
         return out;
       }
-      int limit = Math.min(FEEDER_HOLD_LIMIT_SECONDS, minInterval(intervalsOf(base, at)) - 1);
+      int limit = Math.min(at.feederHoldLimitSeconds(), minInterval(intervalsOf(base, at)) - 1);
       int[] gap = new int[limit + 1];
       gap[0] = clearance.getAsInt();
       for (int h = 1; h <= limit; h++) {

@@ -311,6 +311,42 @@ public final class TimetableBuildReportText {
     return out;
   }
 
+  /**
+   * 报告里"取消班次"一行的计数：总数后按原因分类写，原因按枚举顺序，缺的原因不写。
+   *
+   * @return 如 {@code "5（起终点缺出库/回库线路 2、严格模式取消让不掉的 3，详见下方警告）"}
+   */
+  public static String describeDroppedCount(List<TimetableBuildResult.DroppedTrip> dropped) {
+    Map<VehicleDutyPlanner.UnassignedReason, Integer> byReason =
+        new java.util.EnumMap<>(VehicleDutyPlanner.UnassignedReason.class);
+    for (TimetableBuildResult.DroppedTrip trip : dropped) {
+      byReason.merge(trip.reason(), 1, Integer::sum);
+    }
+    // 起点缺出库、终点缺回库两种合在一起写，与从前的说法一致。
+    int access =
+        byReason.getOrDefault(VehicleDutyPlanner.UnassignedReason.NO_CREATE_ACCESS, 0)
+            + byReason.getOrDefault(VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS, 0);
+    List<String> parts = new ArrayList<>();
+    if (access > 0) {
+      parts.add("起终点缺出库/回库线路 " + access);
+    }
+    byReason.forEach(
+        (reason, count) -> {
+          String label =
+              switch (reason) {
+                case NO_CREATE_ACCESS, NO_RETURN_ACCESS -> null;
+                case EXCEEDS_DUTY_LIMITS -> "单班超出交路时长上限";
+                case STUB_SATURATED -> "端点排队或让车累计超限";
+                case CONSIST_MISMATCH -> "车型不许跑";
+                case CONFLICT_CANCELLED -> "严格模式取消让不掉的";
+              };
+          if (label != null) {
+            parts.add(label + " " + count);
+          }
+        });
+    return dropped.size() + "（" + String.join("、", parts) + "，详见下方警告）";
+  }
+
   public static String describe(TimetableConflictChecker.Kind kind) {
     return switch (kind) {
       case TRACK -> "区间";

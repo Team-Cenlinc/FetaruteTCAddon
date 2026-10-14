@@ -24,8 +24,8 @@ import org.junit.jupiter.api.Test;
 /**
  * 残余分类：运行时能不能让、在哪让、让多久。
  *
- * <p>成功判据从"零冲突"改成"零不可吸收残余"之后，这个判决直接决定一张表发不发得出去，所以六个判决各钉一例， 并钉住"同一份输入两次分类结果相同"——build 与 publish
- * 重检各算一遍，两边不一致就是 bug。
+ * <p>成功判据从"零冲突"改成"零不可吸收残余"之后，这个判决直接决定一张表发不发得出去，所以六个判决各钉一例， 并钉住"同一份输入两次分类结果相同"——相位候选、
+ * 完整窗口复核与严格模式取消都要分类，同一输入结论不一致就是 bug。
  */
 class ConflictAbsorptionTest {
 
@@ -321,7 +321,7 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
-  /** 同一份输入分两次，判决与顺序都必须一致：build 与 publish 重检各算一遍，不一致就是 bug。 */
+  /** 同一份输入分两次，判决与顺序都必须一致：编表里同一张表会被分类多次，不一致就是 bug。 */
   @Test
   void classificationIsDeterministic() {
     TimetableConflictChecker.Report report =
@@ -1165,6 +1165,23 @@ class ConflictAbsorptionTest {
     assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
   }
 
+  /**
+   * 途中原地折返的车站（进站与出站走同一个相邻节点，车在站台上换向）与端点同样对待：本车在 MID 换向后从后车来的那一侧出站， 后车排在进站区间里就是与本车顶牛，哪怕它是同一条 route
+   * 的后车，挡住了也算放不下。
+   */
+  @Test
+  void aMidRouteReversalStationCountsAsAnEndpoint() {
+    Corridor corridor = new Corridor();
+    UUID reversing = corridor.reversing("RA");
+    corridor.run("RA-001", reversing, 0, "D001");
+    corridor.run("RA-002", reversing, 60, "D002");
+
+    ConflictAbsorption.Residual residual = corridor.classifyMover();
+
+    assertEquals(Optional.of(MID), residual.waitingPoint());
+    assertEquals(ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, residual.verdict());
+  }
+
   private static final String SIDE = "OP:S:SIDE";
   private static final String END = "OP:S:END";
   private static final String TURN = "OP:S:TURN";
@@ -1235,6 +1252,19 @@ class ConflictAbsorptionTest {
               segment(2, 3, List.of(TURN + ":1", "OP:X:XB:1", MID + ":1"), List.of(260, 300, 340)),
               segment(
                   3, 4, List.of(MID + ":1", "OP:X:XC:1", SIDE + ":1"), List.of(360, 410, 460))));
+    }
+
+    /** 在 MID 原地换向：WIDE:1（0 s 发）— XA — MID:1（100 s 到、120 s 发）— XA — END:1（300 s 终到）。 */
+    UUID reversing(String code) {
+      return add(
+          code,
+          List.of(
+              stop(0, WIDE + ":1", 0, 0, RouteStopPassType.STOP),
+              stop(1, MID + ":1", 100, 120, RouteStopPassType.STOP),
+              stop(2, END + ":1", 300, 300, RouteStopPassType.TERMINATE)),
+          List.of(
+              segment(0, 1, List.of(WIDE + ":1", "OP:X:XA:1", MID + ":1"), List.of(0, 50, 100)),
+              segment(1, 2, List.of(MID + ":1", "OP:X:XA:1", END + ":1"), List.of(120, 200, 300))));
     }
 
     /**

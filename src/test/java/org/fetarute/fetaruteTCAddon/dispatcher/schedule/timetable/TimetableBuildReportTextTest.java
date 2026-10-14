@@ -18,6 +18,30 @@ class TimetableBuildReportTextTest {
       new TerminalSerializer.TerminalReport(
           "OP:S:X", 10, 1100, 0.31D, 10, 10, 30, 110, 4, 2.0D, 55, 0, 0);
 
+  /** "取消班次"一行按原因分类写：出入库缺失合在一起，严格模式取消、端点排队超限各写各的，没有的原因不写。 */
+  @Test
+  void droppedTripsAreCountedByReason() {
+    List<TimetableBuildResult.DroppedTrip> dropped =
+        List.of(
+            new TimetableBuildResult.DroppedTrip(
+                "R1", "05:00", VehicleDutyPlanner.UnassignedReason.NO_CREATE_ACCESS),
+            new TimetableBuildResult.DroppedTrip(
+                "R1", "23:50", VehicleDutyPlanner.UnassignedReason.NO_RETURN_ACCESS),
+            new TimetableBuildResult.DroppedTrip(
+                "R2", "08:00", VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED),
+            new TimetableBuildResult.DroppedTrip(
+                "R2", "09:00", VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED),
+            new TimetableBuildResult.DroppedTrip(
+                "R2", "10:00", VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+
+    assertEquals(
+        "5（起终点缺出库/回库线路 2、端点排队或让车累计超限 1、严格模式取消让不掉的 2，详见下方警告）",
+        TimetableBuildReportText.describeDroppedCount(dropped));
+    assertEquals(
+        "1（严格模式取消让不掉的 1，详见下方警告）",
+        TimetableBuildReportText.describeDroppedCount(List.of(dropped.get(2))));
+  }
+
   @Test
   void terminalLinesAreRendered() {
     List<String> lines =

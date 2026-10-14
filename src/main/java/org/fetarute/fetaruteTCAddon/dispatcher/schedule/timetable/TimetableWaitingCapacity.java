@@ -212,7 +212,10 @@ final class TimetableWaitingCapacity {
         Function.identity());
   }
 
-  /** 有车始发或终到的站台组（含邻表）：端点与折返站。车在这里多等挡住的任何车都算放不下。 */
+  /**
+   * 有车始发或终到的站台组（含邻表）：端点与折返站，以及途中原地换向的车站（进站与出站经过同一个相邻节点）。车在这里多等挡住的任何车都算放不下：
+   * 换向的车出站时迎着进站方向开，排在进站区间里的"后车"其实与它顶牛。
+   */
   private static Set<String> endpointGroupsOf(
       List<TimetableConflictChecker.Movement> movements,
       Map<UUID, TimetableConflictChecker.RouteProfile> profiles) {
@@ -229,6 +232,13 @@ final class TimetableWaitingCapacity {
               profile.platforms().get(profile.platforms().size() - 1))) {
         if (!end.absent() && !end.group().isBlank()) {
           out.add(end.group());
+        }
+      }
+      List<String> nodes = pathOf(profile).nodes();
+      for (int i = 1; i + 1 < nodes.size(); i++) {
+        String group = TimetableConflictChecker.groupOf(nodes.get(i));
+        if (!group.isBlank() && nodes.get(i - 1).equals(nodes.get(i + 1))) {
+          out.add(group);
         }
       }
     }

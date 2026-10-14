@@ -50,7 +50,9 @@ import java.util.UUID;
  *
  * <p>单线对向本身是<b>可吸收</b>的：运行时按区段互斥，后车在区段外等。不可吸收的是"等的地方是容量 1 站台"那一种， 已被第 2 条覆盖。
  *
- * <p>本类不落库：build 与 publish 重检各算一遍，两边必须得到同一结果——所以它只依赖成品表、投影与图索引， 不依赖构建过程里的任何中间状态。
+ * <p>本类不落库，只在 build 里算（成功判据、相位第三层、严格模式取消都用它）；publish 时的作用域检查（{@code
+ * FtaTimetableCommand#scopeCheck}）只扫与已发布邻表的外部冲突，不再分类。它只依赖成品表、投影与图索引，不依赖构建过程里的任何中间状态，
+ * 同一份输入分类两次得到同一结果。
  */
 public final class ConflictAbsorption {
 
@@ -251,7 +253,7 @@ public final class ConflictAbsorption {
   }
 
   /**
-   * 带完整 route 档案的分类：编表与发布重检必须使用它。
+   * 带完整 route 档案的分类：编表必须使用它。
    *
    * @param profiles 与占用投影一致的全部档案，包含车型变体与邻表；保留 DYNAMIC 股道资格和途中停站占用
    */
