@@ -226,6 +226,7 @@ public final class TimetableSetBuilder {
     for (Member member : members) {
       tables.put(member.input().lineId(), split(table, member, options, builtAt));
     }
+    result = result.withWarnings(unownedDuties(table, members));
     Map<UUID, List<TimetableBaseline>> baselines = new LinkedHashMap<>();
     for (Member member : members) {
       List<TimetableBaseline> mine = new ArrayList<>();
@@ -259,6 +260,56 @@ public final class TimetableSetBuilder {
     }
     return new SetResult(result, tables, baselines);
   }
+
+  /**
+   * 拆表时哪张表都不收的交路：首班的 route 不属于任何一条线（或首班查不到）。交路按首班归线，挂在交路上的班次跟着交路走，
+   * 这些交路与它们的班次因此不进任何一张表——编出来了却不会运行，报出来，不悄悄丢掉。
+   *
+   * @return 至多一行提示；没有这种交路时为空
+   */
+  static List<String> unownedDuties(Timetable joint, List<Member> members) {
+    Set<UUID> owned = new HashSet<>();
+    for (Member member : members) {
+      owned.addAll(member.ownRouteIds());
+    }
+    Map<UUID, TimetableTrip> tripsById = new HashMap<>();
+    for (TimetableTrip trip : joint.trips()) {
+      tripsById.put(trip.id(), trip);
+    }
+    List<String> codes = new ArrayList<>();
+    Set<UUID> orphaned = new HashSet<>();
+    for (VehicleDuty duty : joint.duties()) {
+      if (duty.tripIds().isEmpty()) {
+        continue;
+      }
+      TimetableTrip head = tripsById.get(duty.tripIds().get(0));
+      if (head == null || !owned.contains(head.routeId())) {
+        codes.add(duty.dutyCode());
+        orphaned.add(duty.id());
+      }
+    }
+    if (codes.isEmpty()) {
+      return List.of();
+    }
+    long trips =
+        joint.trips().stream()
+            .filter(trip -> trip.dutyId().filter(orphaned::contains).isPresent())
+            .count();
+    String shown =
+        String.join("、", codes.subList(0, Math.min(codes.size(), UNOWNED_DUTY_DETAIL_LIMIT)))
+            + (codes.size() > UNOWNED_DUTY_DETAIL_LIMIT ? " 等" : "");
+    return List.of(
+        "联编拆表："
+            + codes.size()
+            + " 条交路（"
+            + shown
+            + "）的首班 route 不属于联编的任何一条线，这些交路与挂在上面的 "
+            + trips
+            + " 个班次不进任何一张表；请检查各线的 route 归属");
+  }
+
+  /** 拆表提示里最多列出几条交路号。 */
+  private static final int UNOWNED_DUTY_DETAIL_LIMIT = 8;
 
   /**
    * 从联编的表里拆出一条线的表：本线的交路（车池保证交路不跨线）与挂在它们上面的班次（含借别线出入库线路的展示车次）、不挂交路的本线 route 班次、 交路引用的走行线路；主键按本表 id

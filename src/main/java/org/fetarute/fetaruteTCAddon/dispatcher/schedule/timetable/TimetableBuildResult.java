@@ -202,6 +202,48 @@ public record TimetableBuildResult(
     return copy(timetable, List.copyOf(notes), rapidCatchUp, capacity, consistNotes);
   }
 
+  /** 同一份结果，提示末尾追加几行。 */
+  public TimetableBuildResult withWarnings(List<String> more) {
+    if (more == null || more.isEmpty()) {
+      return this;
+    }
+    List<String> all = new ArrayList<>(warnings);
+    all.addAll(more);
+    return new TimetableBuildResult(
+        timetable,
+        shares,
+        infeasibleRoutes,
+        droppedTrips,
+        dutyCount,
+        plannedVehicles,
+        peakConcurrentVehicles,
+        maxTripsInAnyDuty,
+        maxDutyDurationSeconds,
+        allDutiesReturnToStorage,
+        longestTripSeconds,
+        targetHeadwaySeconds,
+        effectiveHeadwaySeconds,
+        conflictsAtTarget,
+        neighbors,
+        baselines,
+        shifts,
+        yields,
+        terminals,
+        throats,
+        groupIntervals,
+        interleaves,
+        dutyShapes,
+        phaseNotes,
+        absorbable,
+        unabsorbable,
+        resourcePhaseNotes,
+        residues,
+        all,
+        rapidCatchUp,
+        capacity,
+        consistNotes);
+  }
+
   /** 同一份结果，换上成品表的快车被卡合计。 */
   public TimetableBuildResult withRapidCatchUp(CatchUp catchUp) {
     return copy(timetable, phaseNotes, catchUp, capacity, consistNotes);

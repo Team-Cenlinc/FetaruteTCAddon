@@ -256,6 +256,37 @@ class TimetableSetBuilderTest {
     assertEquals(Set.of("WS/default", "MT/default"), groups);
   }
 
+  /**
+   * 交路首班的 route 不属于任何一条线时，拆表哪张表都不收它和挂在上面的班次：报一条提示，不悄悄丢掉。
+   *
+   * <p>正常编出来的联编表归属齐全，不报；同一张表换成 WS 的运营 route 无主的成员表，WS 的交路全报出来。
+   */
+  @Test
+  void dutiesHeadedByAnUnownedRouteAreReported() {
+    TimetableSetBuilder.SetResult result =
+        build(options(Map.of("WS/default", 600, "MT/default", 300)));
+    assertTrue(result.success(), () -> result.joint().warnings().toString());
+    Timetable joint = result.joint().timetable().orElseThrow();
+    assertTrue(
+        result.joint().warnings().stream().noneMatch(line -> line.startsWith("联编拆表")),
+        () -> result.joint().warnings().toString());
+
+    List<String> warnings =
+        TimetableSetBuilder.unownedDuties(
+            joint,
+            List.of(
+                new TimetableSetBuilder.Member(
+                    wsInput(), "WS", "co/op/WS", Set.of(id("CRT1"), id("RET1"))),
+                new TimetableSetBuilder.Member(mtInput(), "MT", "co/op/MT", mtRoutes)));
+
+    assertEquals(1, warnings.size(), warnings::toString);
+    assertTrue(warnings.get(0).startsWith("联编拆表："), warnings.get(0));
+    assertFalse(result.tables().get(WS).duties().isEmpty());
+    assertTrue(
+        warnings.get(0).contains(result.tables().get(WS).duties().size() + " 条交路"),
+        warnings.get(0));
+  }
+
   /** 车不跨线：每条交路的班次全部属于同一条线。 */
   @Test
   void vehiclesNeverCrossLines() {
