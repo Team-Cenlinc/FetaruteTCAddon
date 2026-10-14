@@ -3400,9 +3400,14 @@ public final class TimetableBuilder {
           : Optional.empty();
     }
 
-    /** 原表选好的相位：参数相同（准备可以不同，如加停的候选）时给出，没有记下或参数不同时为空。 */
+    /**
+     * 原表选好的相位：参数相同（准备可以不同，如加停的候选）时给出，没有记下或参数不同时为空。
+     *
+     * <p>折返表不算在内：没有 {@code --turnaround} 时它由各 route 终到停站推出，加长折返的候选正是改了它；相位按组间隔与方向排， 试排时派车照新的折返表接续。
+     */
     synchronized Optional<PhasePlanner.Phases> phasesFor(TimetableBuildOptions options) {
-      return attempt != null && options.equals(this.options)
+      return attempt != null
+              && options.withTurnaround(this.options.dutyLimits().turnaround()).equals(this.options)
           ? Optional.of(attempt.phases())
           : Optional.empty();
     }
