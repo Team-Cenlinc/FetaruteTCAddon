@@ -185,6 +185,34 @@ class TimetableConflictCheckerTest {
         () -> "两股道停三辆车必须有站台冲突: " + three.conflicts());
   }
 
+  /**
+   * 容量大于 1 的资源满了：后来的车等的是<b>最先腾出</b>的那一股道，前车记在场里最早离开的那辆。
+   *
+   * <p>记成最早到的那辆会把等待算成它整段待命——两股道的终点站上，一辆长时间待命的车会让每一处冲突都按它离开的时刻算等待， 让车修复与残余分类据此高估等待、误判让车点无容量。
+   */
+  @Test
+  void aFullMultiTrackResourceBlamesTheOccupantThatLeavesFirst() {
+    TimetableConflictChecker.GraphIndex index =
+        new TimetableConflictChecker.GraphIndex(null, Map.of("OP:S:B", 2), Map.of());
+    TimetableConflictChecker.Platform platform =
+        new TimetableConflictChecker.Platform(B, "OP:S:B", true);
+
+    TimetableConflictChecker.Report report =
+        TimetableConflictChecker.check(
+            index,
+            Map.of(),
+            List.of(),
+            List.of(
+                new TimetableConflictChecker.Stay("LONG", platform, 0, 300),
+                new TimetableConflictChecker.Stay("SHORT", platform, 10, 60),
+                new TimetableConflictChecker.Stay("LATE", platform, 40, 100)),
+            0);
+
+    assertEquals(1, report.conflicts().size(), () -> report.conflicts().toString());
+    assertEquals("SHORT", report.conflicts().get(0).first());
+    assertEquals(60, report.conflicts().get(0).firstTo());
+  }
+
   /** 待命的车占着单股道车站：不停靠经过它的车撞上去。 */
   @Test
   void passingThroughAnOccupiedSingleTrackStationConflicts() {

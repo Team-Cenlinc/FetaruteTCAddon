@@ -1162,7 +1162,10 @@ public final class ResourceRepair {
           create == null || create.stops().isEmpty()
               ? 0
               : create.stops().get(create.stops().size() - 1).arrivalOffsetSeconds();
-      int start = duty.plannedStartSecondOfDay() - input.zeroSecondOfDay() + startDelay[d];
+      // 与 TerminalSerializer.rewriteDuty 同一口径：出库跟着首班的延后一起走，再加出库自己的延后。
+      int firstDelta = firstDeparture - nominal.get(first.id());
+      int start =
+          duty.plannedStartSecondOfDay() - input.zeroSecondOfDay() + firstDelta + startDelay[d];
       return Math.min(start + run, firstDeparture);
     }
 
@@ -1186,10 +1189,14 @@ public final class ResourceRepair {
       if (returnDelay[d] + wait > input.toleranceSeconds()) {
         return false;
       }
-      VehicleDuty duty = table.duties().get(d);
-      int dutyStart = duty.plannedStartSecondOfDay() - input.zeroSecondOfDay() + startDelay[d];
-      int end = duty.plannedEndSecondOfDay() - input.zeroSecondOfDay() + returnDelay[d] + wait;
-      if (end - dutyStart > input.limits().maxDutyDurationSeconds()) {
+      // 时长按改写后的交路量：班次让车、出库晚发都已经挪过首末两端，拿原表的起讫会少算。
+      TerminalSerializer.RewrittenDuty rewritten = rewriteOne(d);
+      if (rewritten == null) {
+        return false;
+      }
+      VehicleDuty duty = rewritten.duty();
+      if ((long) duty.plannedEndSecondOfDay() + wait - duty.plannedStartSecondOfDay()
+          > input.limits().maxDutyDurationSeconds()) {
         return false;
       }
       returnDelay[d] += wait;
