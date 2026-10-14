@@ -39,7 +39,7 @@ class TimetableBuilderNeighborsTest {
   private static final String A = "OP:S:A:1";
   private static final String B = "OP:S:B:1";
   private static final String C = "OP:S:C:1";
-  private static final String NEIGHBOR = "CHT/SURN/NL/NL-TT";
+  private static final String NEIGHBOR = "CO/OP/L2/L2-TT";
 
   private final RailGraph graph =
       TimetableTestFixtures.chain(
@@ -254,7 +254,7 @@ class TimetableBuilderNeighborsTest {
             timing.segments(),
             TimetableConflictChecker.platformsOf(timing.stops(), stops, definition.waypoints()));
     return new NeighborTimetable(
-        UUID.nameUUIDFromBytes("NL-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+        UUID.nameUUIDFromBytes("L2-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
         NEIGHBOR,
         Instant.parse("2026-02-28T12:00:00Z"),
         ZONE,

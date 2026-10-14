@@ -12,6 +12,7 @@ import java.util.OptionalInt;
 import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.action.AutoStationSignAction;
 
 /**
  * 残余冲突的分类：运行时能不能让、在哪让、让多久。
@@ -101,13 +102,7 @@ public final class ConflictAbsorption {
 
     /** 运行时车门开关过程的缺省下限（秒），与 AutoStation 同一口径：关门动画提前开始的时长加车门至少全开的时长，按秒向上取整。 */
     public static final int RUNTIME_DOOR_FLOOR_SECONDS =
-        org.fetarute
-            .fetaruteTCAddon
-            .dispatcher
-            .sign
-            .action
-            .AutoStationSignAction
-            .DEFAULT_DOOR_FLOOR_SECONDS;
+        AutoStationSignAction.DEFAULT_DOOR_FLOOR_SECONDS;
 
     /** 不按追回量判：顺推一班也不放过。 */
     public static final Recovery NONE = new Recovery(0, 0, 0, Map.of());

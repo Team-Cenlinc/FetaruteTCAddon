@@ -100,19 +100,19 @@ class TimetableBuildReportTextTest {
     for (int i = 0; i < 9; i++) {
       residuals.add(
           residual(
-              "WS-" + i, "SURC:S:CHT", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:a~b"));
+              "L1-" + i, "OP:S:A", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:a~b"));
     }
     residuals.add(
-        residual("WS-9", "SURC:S:NTA", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:c~d"));
+        residual("L1-9", "OP:S:B", ConflictAbsorption.Verdict.NO_WAITING_CAPACITY, "edge:c~d"));
     residuals.add(
-        residual("MT-1", "SURC:S:PPK", ConflictAbsorption.Verdict.STUB_TERMINAL, "single:s"));
+        residual("L2-1", "OP:S:C", ConflictAbsorption.Verdict.STUB_TERMINAL, "single:s"));
 
     List<String> lines = TimetableBuildReportText.describeUnabsorbable(residuals, 0);
 
     assertEquals("  让不掉的冲突按判决与让车点：", lines.get(0));
-    assertEquals("  · 容量 1 端点 1 处：SURC:S:PPK 1", lines.get(1));
-    assertEquals("  · 让车点无容量 10 处：SURC:S:CHT 9、SURC:S:NTA 1", lines.get(2));
-    assertTrue(lines.get(3).startsWith("  · [让车点无容量] WS-0 等 400s 于 SURC:S:CHT："), lines.get(3));
+    assertEquals("  · 容量 1 端点 1 处：OP:S:C 1", lines.get(1));
+    assertEquals("  · 让车点无容量 10 处：OP:S:A 9、OP:S:B 1", lines.get(2));
+    assertTrue(lines.get(3).startsWith("  · [让车点无容量] L1-0 等 400s 于 OP:S:A："), lines.get(3));
     assertTrue(lines.get(3).contains("TRACK edge:a~b: T1 [00:00:00–00:00:10]"), lines.get(3));
     assertEquals(
         "  · … 另有 " + (residuals.size() - TimetableBuildResult.CONFLICT_DETAIL_LIMIT) + " 处",

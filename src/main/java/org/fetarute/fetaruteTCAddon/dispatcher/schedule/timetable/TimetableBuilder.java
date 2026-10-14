@@ -2958,7 +2958,7 @@ public final class TimetableBuilder {
    * 车只能在终点原地折返的运营 route：{@link #mainlineTurnbackRoutes} 加上末站 TERMINATE、终点没有 RETURN 线路的那些（{@link
    * VehicleDutyPlanner.Legs#returnLegAt}，与派车器的"能不能回库"同一口径）。
    *
-   * <p>没有出入库线路的站台（例如 WS 的终点 NTA）车停着不挡人，但一辆车也调不走，只能等本端的下一班：周期余量若堆在那一端，
+   * <p>没有出入库线路的站台（例如某条线在别的线终点上折返、那里没有本线的车库）车停着不挡人，但一辆车也调不走，只能等本端的下一班：周期余量若堆在那一端，
    * 超出闲置上限就接不上。往返对因此锚在这一端（余量落在另一端）并整对平移，第三层不能单独动一边。
    */
   static Set<UUID> inPlaceTurnbackRoutes(

@@ -39,7 +39,7 @@ class ResourceRepairTest {
   private static final String C2 = "OP:S:C:2";
   private static final int TURNAROUND = 60;
   private static final int SEPARATION = 30;
-  private static final String NEIGHBOR = "CHT/SURN/NL/NL-TT";
+  private static final String NEIGHBOR = "CO/OP/L2/L2-TT";
 
   private final RailGraph graph =
       TimetableTestFixtures.graph(
@@ -515,7 +515,7 @@ class ResourceRepairTest {
             TimetableConflictChecker.platformsOf(
                 timing.stops(), stops, definition.waypoints(), index.nodeTypes()));
     return new NeighborTimetable(
-        UUID.nameUUIDFromBytes("NL-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
+        UUID.nameUUIDFromBytes("L2-TT".getBytes(java.nio.charset.StandardCharsets.UTF_8)),
         NEIGHBOR,
         Instant.parse("2026-02-28T12:00:00Z"),
         ZoneId.of("UTC"),

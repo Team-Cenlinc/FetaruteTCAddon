@@ -23,7 +23,7 @@ import org.junit.jupiter.api.Test;
 /**
  * 严格模式也试喂车方向中途多停：多停不改间隔，与非严格模式第一步同一个顺序。
  *
- * <p>仿 WS 的形状：大交路 A↔Z（A、Z 都是单股道端点，上下行分线经过 H、M），小交路 SM 从车库 DEP 出库、过咽喉路径点 J、 在 M 第一次停车，再经 H 终到 A，到 A
+ * <p>形状：大交路 A↔Z（A、Z 都是单股道端点，上下行分线经过 H、M），小交路 SM 从车库 DEP 出库、过咽喉路径点 J、 在 M 第一次停车，再经 H 终到 A，到 A
  * 折返后接大交路 A→Z。回库 A→J→DEP 与 SM 出库共用咽喉 DEP–J。
  */
 class TimetableBuilderStrictHoldTest {

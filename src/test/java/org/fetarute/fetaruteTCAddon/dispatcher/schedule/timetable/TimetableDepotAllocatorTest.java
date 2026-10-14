@@ -64,7 +64,7 @@ class TimetableDepotAllocatorTest {
   }
 
   /**
-   * 本线只比借用多等几秒也照常借用：不设容差。投影是名义班次，让车修复挪动运营车之后，这点等待常常落到运营车身上、在没有空股道的让车点让不掉 （MT,WS,IS 联编回放：容差 10
+   * 本线只比借用多等几秒也照常借用：不设容差。投影是名义班次，让车修复挪动运营车之后，这点等待常常落到运营车身上、在没有空股道的让车点让不掉 （真实线网回放：容差 10
    * 秒或一个最小间隔都让严格模式失败）。
    */
   @Test
@@ -107,7 +107,7 @@ class TimetableDepotAllocatorTest {
             101,
             108,
             111,
-            Optional.of("FTAS/SURC/DS"),
+            Optional.of("CO/OP/L2"),
             Optional.empty());
 
     var pressure = TimetableDepotAllocator.pressureOf(List.of(mine, neighbour), 15);

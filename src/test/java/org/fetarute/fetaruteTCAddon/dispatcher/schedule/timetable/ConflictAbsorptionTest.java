@@ -51,7 +51,7 @@ class ConflictAbsorptionTest {
             60,
             50,
             110,
-            Optional.of("FTAS/SURC/DS"),
+            Optional.of("CO/OP/L2"),
             Optional.empty());
 
     ConflictAbsorption.Residual residual = only(conflict);
