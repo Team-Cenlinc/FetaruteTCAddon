@@ -1285,7 +1285,9 @@ public final class VehicleDutyPlanner {
     /** 单股道端点排队：等端点空出来会让交路超过时长上限或越过计划窗口，从这一班起截断交路。 */
     STUB_SATURATED,
     /** 起点有车在等，但车型都不许跑这一班；起点也没有能出许可车型的出库线路。 */
-    CONSIST_MISMATCH
+    CONSIST_MISMATCH,
+    /** 严格模式目标间隔下这一班卷进运行时让不掉的冲突，按 {@code --max-cancel} 取消：不排、不出票。 */
+    CONFLICT_CANCELLED
   }
 
   /**

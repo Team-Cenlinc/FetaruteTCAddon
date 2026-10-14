@@ -153,6 +153,7 @@ public final class FtaTimetableCommand {
     var maxDutyFlag = intFlag("max-duty-minutes", "<minutes>", 1, 1440);
     var turnaroundFlag = intFlag("turnaround", "<seconds>", 0, 3600);
     var separationFlag = intFlag("separation", "<seconds>", 0, 3600);
+    var maxCancelFlag = intFlag("max-cancel", "<trips>", 0, TimetableBuildOptions.MAX_TRIPS);
     CommandFlag<Void> strictFlag = CommandFlag.builder("strict").build();
     CommandFlag<Void> rapidStaggerFlag = CommandFlag.builder("rapid-stagger").build();
 
@@ -185,6 +186,7 @@ public final class FtaTimetableCommand {
             .flag(maxWaitFlag)
             .flag(maxIdleFlag)
             .flag(strictFlag)
+            .flag(maxCancelFlag)
             .flag(rapidStaggerFlag)
             .flag(nameFlag)
             .flag(prefixFlag)
@@ -211,6 +213,8 @@ public final class FtaTimetableCommand {
                             ctx.flags().getValue(maxWaitFlag).orElse(null),
                             ctx.flags().getValue(maxIdleFlag).orElse(null),
                             ctx.flags().isPresent(strictFlag),
+                            intValue(
+                                ctx, maxCancelFlag, TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS),
                             ctx.flags().isPresent(rapidStaggerFlag),
                             ctx.flags().getValue(nameFlag).orElse(null),
                             ctx.flags().getValue(prefixFlag).orElse(null)))));
@@ -361,7 +365,7 @@ public final class FtaTimetableCommand {
         Component.text(
             "    可选: --headway --group-headway <组>=<秒>（可重复） --start --end --dwell --max-trips"
                 + " --max-duty-minutes --turnaround --separation --max-wait --max-idle --strict"
-                + " --rapid-stagger --name --prefix",
+                + " --max-cancel --rapid-stagger --name --prefix",
             NamedTextColor.DARK_GRAY));
     sender.sendMessage(hint("参数一览", "/fta timetable config <company> <operator> <line>"));
     sender.sendMessage(hint("列表", "/fta timetable list <company> <operator> <line>"));
@@ -561,7 +565,10 @@ public final class FtaTimetableCommand {
             groupIntervals,
             repairOptions(sender, flags.maxWaitSeconds()),
             flags.rapidStagger(),
-            following);
+            following,
+            // 顺推按运行时晚点追赶的停站压缩判：与运行时用同一份配置。
+            timetableSettings().recoveryMinDwellSeconds(),
+            flags.maxCancelTrips());
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -1888,6 +1895,20 @@ public final class FtaTimetableCommand {
             CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-wait ", "只对这一次构建生效")));
     sender.sendMessage(
         configRow(
+            "顺推可追回",
+            settings.recoveryMinDwellSeconds() > 0
+                ? "途中站最短停 " + settings.recoveryMinDwellSeconds() + "s"
+                : "不按追回量判",
+            "config.yml 的 timetable.recovery.min-dwell-seconds",
+            Component.empty()));
+    sender.sendMessage(
+        configRow(
+            "严格模式取消上限",
+            TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS + " 班",
+            "默认（无持久化位置），仅 --strict 时生效",
+            CommandUx.suggestAction("[本次覆盖]", buildPrefix + " --max-cancel ", "只对这一次构建生效")));
+    sender.sendMessage(
+        configRow(
             "占用裕量",
             TimetableBuildOptions.DEFAULT_SEPARATION_SECONDS + "s",
             "默认（无持久化位置）",
@@ -3013,11 +3034,14 @@ public final class FtaTimetableCommand {
 
   /** 编表线程数：{@code timetable.build-threads} 换算后的值（auto 按核数取）。 */
   private int buildThreads() {
-    ConfigManager.TimetableSettings settings =
-        plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
-            ? plugin.getConfigManager().current().timetableSettings()
-            : ConfigManager.TimetableSettings.defaults();
-    return BuildPool.resolveThreads(settings.buildThreads());
+    return BuildPool.resolveThreads(timetableSettings().buildThreads());
+  }
+
+  /** 当前的时刻表配置；读不到时用缺省值。 */
+  private ConfigManager.TimetableSettings timetableSettings() {
+    return plugin.getConfigManager() != null && plugin.getConfigManager().current() != null
+        ? plugin.getConfigManager().current().timetableSettings()
+        : ConfigManager.TimetableSettings.defaults();
   }
 
   /** 站台扣留上限：报告里用它区分让车发生在站台还是资源前。 */
@@ -3565,6 +3589,7 @@ public final class FtaTimetableCommand {
    * @param turnaroundSeconds 终端折返时间；{@code null} 表示不覆盖，按各 route 终到站的 dwell 算
    * @param separationSeconds 冲突检查里相邻占用之间的最小间隔
    * @param strict 目标 headway 有冲突时构建失败而不是回退
+   * @param maxCancelTrips 严格模式最多取消几班让不掉的班次；0 表示不取消
    * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
@@ -3582,6 +3607,7 @@ public final class FtaTimetableCommand {
       Integer maxWaitSeconds,
       Integer maxIdleSeconds,
       boolean strict,
+      int maxCancelTrips,
       boolean rapidStagger,
       String name,
       String tripCodePrefix) {}

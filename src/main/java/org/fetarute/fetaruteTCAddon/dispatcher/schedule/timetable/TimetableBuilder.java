@@ -435,23 +435,69 @@ public final class TimetableBuilder {
         // 严格模式不放宽间隔；喂车方向中途多停不改间隔，与非严格模式同一个顺序先试它，排开了就用。
         Optional<Found> held =
             holdsAtTarget(holds, options, targetHeadway, builtAt, searchNotes, failed);
-        if (held.isEmpty()) {
+        // 多停也排不开：在已选相位上取消让不掉的班次，至多 --max-cancel 班（0 不取消）。
+        Optional<Cancellation> cancellation =
+            held.isEmpty() && options.maxCancelTrips() > 0
+                ? Optional.of(cancelUnabsorbable(prepared, options, input, builtAt, target))
+                : Optional.empty();
+        boolean cancelledClean =
+            cancellation.isPresent()
+                && cancellation.get().attempt().clean()
+                && cancellation.get().count() <= options.maxCancelTrips();
+        if (held.isEmpty() && !cancelledClean) {
           long tried = holds.feasible(options).stream().filter(hold -> !hold.isNone()).count();
+          Attempt last = cancellation.map(Cancellation::attempt).orElse(target);
           List<String> reasons = new ArrayList<>();
-          reasons.add(summary + "；严格模式下不放宽间隔" + (tried > 0 ? "，喂车方向中途多停 " + tried + " 种也排不开" : ""));
+          reasons.add(
+              summary
+                  + "；严格模式下不放宽间隔"
+                  + (tried > 0 ? "，喂车方向中途多停 " + tried + " 种也排不开" : "")
+                  + cancellation
+                      .map(
+                          done ->
+                              done.attempt().clean()
+                                  ? "，取消 "
+                                      + done.countText()
+                                      + "才排开，超过上限（--max-cancel "
+                                      + options.maxCancelTrips()
+                                      + "）"
+                                  : "，取消 "
+                                      + done.countText()
+                                      + "后仍有 "
+                                      + done.attempt().unabsorbable().size()
+                                      + " 处（--max-cancel "
+                                      + options.maxCancelTrips()
+                                      + "）")
+                      .orElse(""));
+          cancellation.ifPresent(
+              done -> reasons.addAll(describeCancelled(done.cancelled(), prepared, options)));
           reasons.addAll(
               TimetableBuildReportText.describeUnabsorbable(
-                  target.unabsorbable(), options.serviceStartSecondOfDay()));
+                  last.unabsorbable(), options.serviceStartSecondOfDay()));
           return new Built(
-              targetFailure(String.join("\n", reasons), prepared, target),
+              targetFailure(String.join("\n", reasons), prepared, last),
               Optional.of(prepared),
               Optional.empty(),
               options);
         }
-        chosenPrepared = held.get().prepared();
-        chosen = held.get().attempt();
-        warnings.addAll(searchNotes);
-        warnings.add(summary + "，间隔不变（严格模式不放宽间隔，靠喂车方向中途多停排开，见上）");
+        if (held.isPresent()) {
+          chosenPrepared = held.get().prepared();
+          chosen = held.get().attempt();
+          warnings.addAll(searchNotes);
+          warnings.add(summary + "，间隔不变（严格模式不放宽间隔，靠喂车方向中途多停排开，见上）");
+        } else {
+          Cancellation done = cancellation.orElseThrow();
+          chosen = done.attempt();
+          warnings.addAll(searchNotes);
+          warnings.add(
+              summary
+                  + "，间隔不变（严格模式不放宽间隔，取消 "
+                  + done.countText()
+                  + "让不掉的班次，--max-cancel "
+                  + options.maxCancelTrips()
+                  + "）：");
+          warnings.addAll(describeCancelled(done.cancelled(), prepared, options));
+        }
       } else {
         Optional<Found> fallback =
             searchFeasibleHeadway(
@@ -1394,7 +1440,9 @@ public final class TimetableBuilder {
         options.groupIntervals(),
         options.repair(),
         options.rapidStagger(),
-        options.following());
+        options.following(),
+        options.recoveryMinDwellSeconds(),
+        options.maxCancelTrips());
   }
 
   /**
@@ -1436,6 +1484,23 @@ public final class TimetableBuilder {
       Instant builtAt,
       Optional<PhasePlanner.Phases> selectedPhases,
       Map<String, Integer> extraShift) {
+    return attemptAtPhases(prepared, options, input, builtAt, selectedPhases, extraShift, Set.of());
+  }
+
+  /**
+   * 同上，另外取消几个名义格子上的班次（严格模式 {@code --max-cancel}）：它们在派车之前就拿掉，记为 {@link
+   * VehicleDutyPlanner.UnassignedReason#CONFLICT_CANCELLED}，其余班次照常派车、串行、让车。
+   *
+   * @param cancelled 要取消的名义格子
+   */
+  private Attempt attemptAtPhases(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Optional<PhasePlanner.Phases> selectedPhases,
+      Map<String, Integer> extraShift,
+      Set<CancelSlot> cancelled) {
     progress.fullBuild();
     UUID timetableId = prepared.timetableId();
     int horizon = options.horizonSeconds();
@@ -1518,12 +1583,24 @@ public final class TimetableBuilder {
     List<VehicleDutyPlanner.PlannedTrip> plannedTrips = new ArrayList<>(placed.size());
     Map<UUID, WeightedTripAllocator.Allocation> allocationByProvisional = new HashMap<>();
     Map<UUID, Placed> placedByProvisional = new HashMap<>();
+    List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
+    List<Integer> droppedAt = new ArrayList<>();
     for (int i = 0; i < placed.size(); i++) {
       Placed item = placed.get(i);
       int candidateIndex = candidateIndexByRoute.get(item.slot().routeId());
       OperationPlan op = prepared.operations().get(candidateIndex);
       TimetableRoutePlan plan = operationPlans.get(candidateIndex);
       int departureSeconds = item.slot().departureSeconds();
+      // 取消的格子不进派车：临时主键仍按格子下标派生，其余班次的主键与不取消时相同。
+      if (cancelled.contains(new CancelSlot(plan.routeId(), departureSeconds))) {
+        dropped.add(
+            new TimetableBuildResult.DroppedTrip(
+                plan.routeCode(),
+                clock(secondOfDay(departureSeconds, options)),
+                VehicleDutyPlanner.UnassignedReason.CONFLICT_CANCELLED));
+        droppedAt.add(departureSeconds);
+        continue;
+      }
       UUID provisional =
           UUID.nameUUIDFromBytes(
               ("provisional:" + timetableId + ":" + i)
@@ -1593,8 +1670,6 @@ public final class TimetableBuilder {
     // ---- 3. 只保留派上车的班次，其余取消并说明原因。编号要等端点串行之后再做：串行会改时刻、也会改先后。
     Map<UUID, Integer> nominalByProvisional = new HashMap<>();
     List<TimetableTrip> provisionalTrips = new ArrayList<>(plannedTrips.size());
-    List<TimetableBuildResult.DroppedTrip> dropped = new ArrayList<>();
-    List<Integer> droppedAt = new ArrayList<>();
     for (VehicleDutyPlanner.PlannedTrip provisional : plannedTrips) {
       WeightedTripAllocator.Allocation allocation =
           allocationByProvisional.get(provisional.tripId());
@@ -1747,10 +1822,18 @@ public final class TimetableBuilder {
       codeByFinalId.put(trip.id(), trip.tripCode());
     }
     Map<String, String> finalCodeByProvisionalCode = new HashMap<>();
+    // 运营班次的最终车次号 → 名义格子：严格模式按它取消，重排之后车次号会变，格子不变。
+    Map<String, CancelSlot> slotByCode = new HashMap<>();
     for (TimetableTrip trip : repaired.timetable().trips()) {
       UUID finalId = numbered.finalByProvisional().get(trip.id());
       if (finalId != null) {
-        finalCodeByProvisionalCode.put(trip.tripCode(), codeByFinalId.getOrDefault(finalId, "?"));
+        String finalCode = codeByFinalId.getOrDefault(finalId, "?");
+        finalCodeByProvisionalCode.put(trip.tripCode(), finalCode);
+        Placed item = placedByProvisional.get(trip.id());
+        if (item != null) {
+          slotByCode.put(
+              finalCode, new CancelSlot(item.slot().routeId(), item.slot().departureSeconds()));
+        }
       }
     }
     List<ResourceRepair.Yield> yields =
@@ -1803,7 +1886,8 @@ public final class TimetableBuilder {
             separation,
             options.repair().maxWaitSeconds(),
             options.dutyLimits().turnaround(),
-            profiles);
+            profiles,
+            recoveryOf(options, input));
 
     // 份额按方向报：weight 只在同方向多 route 之间切，跨方向、跨组比没有意义。
     // 数的必须是<b>让车修复之后</b>还留在表上的班次：端点串行之后让车还会再截断一批，按串行后的表数会把
@@ -1850,7 +1934,15 @@ public final class TimetableBuilder {
             options.dutyLimits().turnaround(),
             inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())),
         phases,
-        unabsorbableByDirection(residuals, timetable, prepared, gridGroups));
+        unabsorbableByDirection(residuals, timetable, prepared, gridGroups),
+        Map.copyOf(slotByCode));
+  }
+
+  /** 顺推判据用的停站压缩：最短停站来自参数，档案里多算的停站开销来自走行模型（编表时加进停站的就是它）。 */
+  private static ConflictAbsorption.Recovery recoveryOf(
+      TimetableBuildOptions options, BuildInput input) {
+    return new ConflictAbsorption.Recovery(
+        options.recoveryMinDwellSeconds(), input.runTimeModel().stationStopOverheadSeconds());
   }
 
   /** 每个方向的班次卷进了几处不可吸收残余：一处残余两边的班次各记一次（同一方向只记一次）。出入库走行与邻表的班次不属于任何方向，不记。 第三层据此决定先挑哪个单元。 */
@@ -2083,6 +2175,101 @@ public final class TimetableBuilder {
       }
     }
     return Optional.empty();
+  }
+
+  /**
+   * 严格模式取消让不掉的班次：目标间隔（喂车多停也试过）仍有不可吸收残余时，按残余的顺序取第一处里要等的那一班（后车）取消， 在已选的相位上重排一次、重新分类，直到干净，或取消数到 {@code
+   * --max-cancel} 上限。
+   *
+   * <p>取消发生在相位选择与完整窗口复核之后，不回头改相位：相位层"不拿取消换冲突"比的是相位候选，这里是相位定了之后拿掉个别班次。
+   * 后车不是运营班次（出入库走行、待命、带客回库班）或已经取消过时取对方；两方都取消不了就看下一处，一处也取消不了就停。
+   *
+   * <p>取消的班次在派车之前拿掉，交路照常重新派车，不会出现取消一班、整条交路后面接不上；派车因此另外截断的班次照常记为取消， 一并计入上限。
+   */
+  private Cancellation cancelUnabsorbable(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Attempt target) {
+    int limit = options.maxCancelTrips();
+    // 报告用目标间隔原表里的车次号：每取消一班就重新编号，取消时的车次号前后对不上。
+    Map<CancelSlot, String> targetCodes = new HashMap<>();
+    target.slotByCode().forEach((code, slot) -> targetCodes.put(slot, code));
+    Map<CancelSlot, Cancelled> cancelled = new LinkedHashMap<>();
+    Attempt current = target;
+    int count = 0;
+    while (!current.clean() && cancelled.size() < limit) {
+      Optional<Cancelled> found = nextCancel(current, cancelled.keySet());
+      if (found.isEmpty()) {
+        break;
+      }
+      Cancelled next =
+          new Cancelled(
+              found.get().slot(),
+              targetCodes.getOrDefault(found.get().slot(), found.get().tripCode()),
+              found.get().cause());
+      cancelled.put(next.slot(), next);
+      detail("严格模式取消让不掉的班次：第 " + cancelled.size() + " 班（上限 " + limit + "）");
+      Attempt retried;
+      try {
+        retried =
+            attemptAtPhases(
+                prepared,
+                options,
+                input,
+                builtAt,
+                Optional.of(target.phases()),
+                groupShift,
+                Set.copyOf(cancelled.keySet()));
+      } catch (BuildFailure failure) {
+        cancelled.remove(next.slot());
+        break;
+      }
+      current = retried;
+      count = Math.max(cancelled.size(), current.dropped().size() - target.dropped().size());
+      if (count > limit) {
+        break;
+      }
+    }
+    return new Cancellation(current, List.copyOf(cancelled.values()), count);
+  }
+
+  /** 下一班取消谁：按残余的顺序，先后车、再对方；只取本表的运营班次，已经取消过的跳过。 */
+  private static Optional<Cancelled> nextCancel(Attempt attempt, Set<CancelSlot> done) {
+    for (ConflictAbsorption.Residual residual : attempt.unabsorbable()) {
+      TimetableConflictChecker.Conflict conflict = residual.conflict();
+      List<String> codes = new ArrayList<>(2);
+      codes.add(residual.mover());
+      if (residual.mover().equals(conflict.second()) && conflict.firstOwner().isEmpty()) {
+        codes.add(conflict.first());
+      } else if (residual.mover().equals(conflict.first()) && conflict.secondOwner().isEmpty()) {
+        codes.add(conflict.second());
+      }
+      for (String code : codes) {
+        CancelSlot slot = attempt.slotByCode().get(code);
+        if (slot != null && !done.contains(slot)) {
+          return Optional.of(new Cancelled(slot, code, residual));
+        }
+      }
+    }
+    return Optional.empty();
+  }
+
+  /** 取消了哪几班、各因哪一处：报告里一班一行。 */
+  private static List<String> describeCancelled(
+      List<Cancelled> cancelled, Prepared prepared, TimetableBuildOptions options) {
+    List<String> out = new ArrayList<>(cancelled.size());
+    for (Cancelled item : cancelled) {
+      out.add(
+          TimetableBuildReportText.describeCancelled(
+              item.tripCode(),
+              planOf(prepared.operationPlans(), item.slot().routeId()).routeCode(),
+              clock(secondOfDay(item.slot().nominalSeconds(), options)),
+              item.cause(),
+              options.serviceStartSecondOfDay()));
+    }
+    return out;
   }
 
   /** 目标间隔排不开的失败结果：带上目标间隔的冲突、残余与第三层的相位说明。 */
@@ -3113,6 +3300,7 @@ public final class TimetableBuilder {
   /**
    * @param droppedAt 各取消班次的名义发车（相对秒），与 {@code dropped} 一一对应：相位候选按它剔除截短窗口末端的取消
    * @param unabsorbableByDirection 方向键 → 它的班次卷进了几处不可吸收残余
+   * @param slotByCode 运营班次的车次号 → 名义格子（严格模式取消用）；出入库走行与带客回库班不在里面
    */
   private record Attempt(
       int headwaySeconds,
@@ -3132,7 +3320,8 @@ public final class TimetableBuilder {
       List<String> resourceNotes,
       List<PhasePlanner.Residue> residues,
       PhasePlanner.Phases phases,
-      Map<String, Integer> unabsorbableByDirection) {
+      Map<String, Integer> unabsorbableByDirection,
+      Map<String, CancelSlot> slotByCode) {
 
     /** 完整窗口上的评分：取消全算。 */
     ResourcePhasePlanner.CompletionScore completionScore() {
@@ -3187,7 +3376,8 @@ public final class TimetableBuilder {
           selected.resourceNotes(),
           residues,
           selected,
-          unabsorbableByDirection);
+          unabsorbableByDirection,
+          slotByCode);
     }
 
     /** 成功判据：只看运行时让不掉的那些。可吸收残余照常发布，运行时会在让车点等一会儿。 */
@@ -3232,6 +3422,39 @@ public final class TimetableBuilder {
 
   /** 一个格子连同它所属的方向：份额按方向报，主键与交路按全局候选下标找。 */
   private record Placed(GroupGrid.Slot slot, ServiceGroupClassifier.Direction direction) {}
+
+  /**
+   * 严格模式取消的名义格子：运营 route + 名义发车（相对计划窗口起点）。重排之后车次号与派车都会变，格子不变。
+   *
+   * @param routeId 运营 route（基础 route，不是车型变体）
+   * @param nominalSeconds 名义发车
+   */
+  private record CancelSlot(UUID routeId, int nominalSeconds) {}
+
+  /**
+   * 严格模式取消的一班。
+   *
+   * @param slot 名义格子
+   * @param tripCode 目标间隔原表（一班都没取消时）里的车次号
+   * @param cause 让它取消的那处残余
+   */
+  private record Cancelled(CancelSlot slot, String tripCode, ConflictAbsorption.Residual cause) {}
+
+  /**
+   * 严格模式取消的结果。
+   *
+   * @param attempt 最后一次试排
+   * @param cancelled 按先后取消的班次
+   * @param count 计入上限的取消数：取消的班次，加上因此派车截断而多取消的班次
+   */
+  private record Cancellation(Attempt attempt, List<Cancelled> cancelled, int count) {
+
+    /** "N 班"；重新派车另外截断了班次时写明其中几班是截断的。 */
+    String countText() {
+      int induced = count - cancelled.size();
+      return count + " 班" + (induced > 0 ? "（其中重新派车另外截断 " + induced + " 班）" : "");
+    }
+  }
 
   /** 构建失败：只带原因，不可行 route 清单由调用方持有。 */
   private static final class BuildFailure extends RuntimeException {

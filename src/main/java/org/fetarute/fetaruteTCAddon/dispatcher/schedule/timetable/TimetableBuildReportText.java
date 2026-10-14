@@ -193,6 +193,36 @@ public final class TimetableBuildReportText {
   }
 
   /**
+   * 严格模式取消的一班："车次 X（route R 名义 HH:mm:ss 发车）：[判决] 后车 等 Ns 于 让车点：冲突明细"。
+   *
+   * @param tripCode 目标间隔原表（一班都没取消时）里这一班的车次号
+   * @param routeCode 所属 route
+   * @param departureText 名义发车时刻
+   * @param cause 让它取消的那处残余
+   * @param serviceStartSecondOfDay 计划窗口起点（冲突时刻换算成当日时钟）
+   */
+  public static String describeCancelled(
+      String tripCode,
+      String routeCode,
+      String departureText,
+      ConflictAbsorption.Residual cause,
+      int serviceStartSecondOfDay) {
+    return String.format(
+        Locale.ROOT,
+        "  · 车次 %s（route %s 名义 %s 发车）：[%s] %s 等 %ds 于 %s：%s",
+        tripCode,
+        routeCode,
+        departureText,
+        describe(cause.verdict()),
+        cause.mover(),
+        cause.waitSeconds(),
+        waitingPointText(cause),
+        cause
+            .conflict()
+            .describe(seconds -> TimetableCsvExporter.clock(serviceStartSecondOfDay + seconds)));
+  }
+
+  /**
    * 构建失败时的残余明细：只列让不掉的那些。先按判决、再按让车点汇总（同一判决里多的在前，同数按名字），然后给前几条明细。
    *
    * <p>可吸收的冲突运行时自己会让，列出来只会把真正卡住的那几处淹没。
@@ -297,6 +327,7 @@ public final class TimetableBuildReportText {
       case EXCEEDS_DUTY_LIMITS -> "单独一班连同出库、回库走行就超过交路时长上限";
       case STUB_SATURATED -> "端点排队或让车累计超限，等到能发车时交路已超上限或越过计划窗口";
       case CONSIST_MISMATCH -> "起点有车在等，但车型都不许跑这一班，也没有能出许可车型的出库线路";
+      case CONFLICT_CANCELLED -> "严格模式下这一班卷进让不掉的冲突，按 --max-cancel 取消";
     };
   }
 
