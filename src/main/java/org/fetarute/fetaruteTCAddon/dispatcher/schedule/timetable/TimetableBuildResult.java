@@ -309,6 +309,24 @@ public record TimetableBuildResult(
 
   /** 失败结果，只带原因。 */
   public static TimetableBuildResult failure(String reason, List<InfeasibleRoute> infeasible) {
+    return failure(reason, infeasible, List.of(), List.of(), List.of(), List.of());
+  }
+
+  /**
+   * 目标间隔排不开的失败结果：带上目标间隔下的冲突与残余，调用方据此看到底是哪几处让不掉。
+   *
+   * @param conflictsAtTarget 目标间隔下的全部冲突
+   * @param absorbable 其中运行时能让的残余
+   * @param unabsorbable 其中让不掉的残余——构建失败就是因为它们
+   * @param resourcePhaseNotes 目标间隔那次构建第三层选了哪些相位、预算够不够
+   */
+  public static TimetableBuildResult failure(
+      String reason,
+      List<InfeasibleRoute> infeasible,
+      List<TimetableConflictChecker.Conflict> conflictsAtTarget,
+      List<ConflictAbsorption.Residual> absorbable,
+      List<ConflictAbsorption.Residual> unabsorbable,
+      List<String> resourcePhaseNotes) {
     return new TimetableBuildResult(
         Optional.empty(),
         List.of(),
@@ -323,6 +341,7 @@ public record TimetableBuildResult(
         0,
         0,
         0,
+        conflictsAtTarget,
         List.of(),
         List.of(),
         List.of(),
@@ -333,10 +352,9 @@ public record TimetableBuildResult(
         List.of(),
         List.of(),
         List.of(),
-        List.of(),
-        List.of(),
-        List.of(),
-        List.of(),
+        absorbable,
+        unabsorbable,
+        resourcePhaseNotes,
         List.of(),
         List.of(Objects.requireNonNullElse(reason, "构建失败")),
         CatchUp.NONE,

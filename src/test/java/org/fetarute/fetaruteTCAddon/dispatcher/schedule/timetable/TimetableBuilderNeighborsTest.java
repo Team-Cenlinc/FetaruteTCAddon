@@ -121,7 +121,7 @@ class TimetableBuilderNeighborsTest {
             new TimetableBuilder(new TimetableTimingCalculator(), Map.of(), false),
             List.of(neighborAcrossPhaseCandidates()),
             600,
-            new TimetableBuildOptions.Repair(Duration.ofSeconds(30), Duration.ofSeconds(300)),
+            new TimetableBuildOptions.Repair(Duration.ofSeconds(5), Duration.ofSeconds(300)),
             false);
 
     assertFalse(result.success(), () -> result.warnings().toString());
@@ -143,8 +143,8 @@ class TimetableBuilderNeighborsTest {
   }
 
   /**
-   * 让车上限装不下（30 < 40）且所有相位都撞车时回到放宽：目标 600 下那 40 s 是真冲突；放宽到 610 后差的 30 s 又能让了——
-   * 搜索找的是"让车装得下"的最小间隔。邻表的运行在冲突记录里一动不动；基线记下了对方。
+   * 让车上限装不下且所有相位都撞车时回到放宽：上限 5 秒，零偏移要让 40 秒，相位候选里离邻表最远的细档（起点 +30 秒）也要让 10 秒，目标 600 下全是真冲突；
+   * 放宽之后差的那几秒又能让了—— 搜索找的是"让车装得下"的最小间隔。邻表的运行在冲突记录里一动不动；基线记下了对方。
    */
   @Test
   void externalConflictOverMaxWaitRelaxesMyHeadwayAndNeverMovesTheNeighbor() {
@@ -154,13 +154,13 @@ class TimetableBuilderNeighborsTest {
         build(
             List.of(neighbor),
             600,
-            new TimetableBuildOptions.Repair(Duration.ofSeconds(30), Duration.ofSeconds(300)),
+            new TimetableBuildOptions.Repair(Duration.ofSeconds(5), Duration.ofSeconds(300)),
             false);
 
     assertTrue(result.success(), () -> result.warnings().toString());
     assertTrue(result.headwayRelaxed(), "目标 600s 的全部相位与邻表撞上，必须放宽");
     assertTrue(
-        result.yields().stream().allMatch(yield -> yield.waitSeconds() <= 30),
+        result.yields().stream().allMatch(yield -> yield.waitSeconds() <= 5),
         () -> result.yields().toString());
     assertTrue(
         result.effectiveHeadwaySeconds() >= 610,

@@ -591,6 +591,70 @@ class TimetableBuilderTest {
         () -> result.warnings().toString());
   }
 
+  /** 严格失败也带上目标间隔的冲突与残余：失败文案只列让不掉的那些（按判决与让车点汇总再给明细），不再列前几条可吸收的冲突。 */
+  @Test
+  void strictFailureCarriesTheUnabsorbableResiduals() {
+    TimetableBuildOptions options =
+        new TimetableBuildOptions(
+            5 * 3600,
+            7 * 3600,
+            Duration.ofSeconds(120),
+            Duration.ofSeconds(0),
+            new VehicleDutyPlanner.Limits(1, 5400, 180),
+            "",
+            ZONE,
+            Duration.ofSeconds(30),
+            true);
+
+    TimetableBuildResult result = build(twoRouteFixture(1, 1), options);
+
+    assertFalse(result.success());
+    assertFalse(result.unabsorbable().isEmpty(), () -> result.warnings().toString());
+    assertFalse(result.conflictsAtTarget().isEmpty());
+    String reason = String.join("\n", result.warnings());
+    ConflictAbsorption.Residual first = result.unabsorbable().get(0);
+    assertTrue(reason.contains(first.mover()), reason);
+    assertTrue(reason.contains("让不掉的冲突按判决与让车点"), reason);
+    for (ConflictAbsorption.Residual absorbable : result.absorbable()) {
+      assertFalse(
+          reason.contains(
+              absorbable
+                  .conflict()
+                  .describe(seconds -> TimetableCsvExporter.clock(5 * 3600 + seconds))),
+          reason);
+    }
+  }
+
+  /** 相位候选在截短的窗口里试排：窗口末端一个最长交路寿命之内的取消是窗口人为截断造成的，不参与"不拿取消换冲突"的比较； 窗口没截短时末端就是真的计划窗口末端，全都算。 */
+  @Test
+  void truncatedTrialWindowIgnoresDropsNearItsEnd() {
+    TimetableBuildOptions full =
+        new TimetableBuildOptions(
+            0,
+            86_400,
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(20),
+            new VehicleDutyPlanner.Limits(8, 7200, TurnaroundTable.none(), 300),
+            "",
+            ZONE);
+    TimetableBuildOptions trial =
+        new TimetableBuildOptions(
+            0,
+            14_400,
+            Duration.ofSeconds(300),
+            Duration.ofSeconds(20),
+            full.dutyLimits(),
+            "",
+            ZONE);
+
+    int maxWait = trial.repair().maxWaitSeconds();
+    assertEquals(14_400 - 900 - maxWait, TimetableBuilder.completionTailFrom(full, trial, 900));
+    assertEquals(Integer.MAX_VALUE, TimetableBuilder.completionTailFrom(full, full, 900));
+    assertEquals(2, TimetableBuilder.droppedBefore(List.of(100, 7199, 7200, 14_000), 7200));
+    assertEquals(
+        4, TimetableBuilder.droppedBefore(List.of(100, 7199, 7200, 14_000), Integer.MAX_VALUE));
+  }
+
   /** 宽松的间隔下没有冲突，表按目标间隔成表。 */
   @Test
   void feasibleHeadwayIsKeptAsIs() {

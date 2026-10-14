@@ -101,14 +101,14 @@ class ResourcePhasePlannerTest {
    * 单元内各候选并行评分：挑出的相位、写下的说明与评分次数都与串行相同，并列仍取先评的那个，候选预算照样截在第 {@value
    * ResourcePhasePlanner#COMPLETION_CANDIDATE_LIMIT} 个。
    *
-   * <p>八个互不相干的方向（每个单元 4 个候选，合计超出预算），评分是相位的确定函数、大量并列。
+   * <p>十六个互不相干的方向（每个单元 7 个候选，合计超出预算），评分是相位的确定函数、大量并列。
    */
   @Test
   void parallelCompletedScoringMatchesSerial() {
     List<ServiceGroupClassifier.Group> groups = new java.util.ArrayList<>();
     Map<String, Integer> intervals = new java.util.TreeMap<>();
-    for (int i = 0; i < 8; i++) {
-      String name = "g" + i;
+    for (int i = 0; i < 16; i++) {
+      String name = String.format(java.util.Locale.ROOT, "g%02d", i);
       groups.add(
           new ServiceGroupClassifier.Group(
               name,
@@ -166,6 +166,161 @@ class ResourcePhasePlannerTest {
         }
       }
     }
+  }
+
+  /**
+   * 完整候选预算按单元保证：排在后面的单元也要把自己的候选试完，不能被前面的单元吃光预算。
+   *
+   * <p>八个互不相干的方向，起点 δ 都是 100：每个单元 0、±10/±20/±30 细档与四个粗档共 11 个候选，合计 88 个，都要试到。
+   */
+  @Test
+  void everyUnitGetsItsOwnCandidates() {
+    Units units = units(8, 300, 100);
+    Map<String, java.util.Set<Integer>> tried = new java.util.TreeMap<>();
+
+    ResourcePhasePlanner.refineCompleted(
+        units.initial(),
+        units.groups(),
+        units.intervals(),
+        300,
+        java.util.Set.of(),
+        phases -> {
+          record(units.initial(), phases, tried);
+          return new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0);
+        });
+
+    for (String key : units.keys()) {
+      assertEquals(
+          java.util.Set.of(0, 70, 80, 90, 110, 120, 130, 160, 220, 280, 40),
+          tried.get(key),
+          key + " 的候选：0、起点 ±10/±20/±30、起点 + 间隔/5 的四个粗档（取模）");
+    }
+  }
+
+  /** 细档只取落在 [0, 上限] 内的：起点 δ 为 0 时没有负的细档，反向方向不超过闲置上限。 */
+  @Test
+  void fineCandidatesStayWithinTheLimit() {
+    Units units = units(1, 300, 0);
+    Map<String, java.util.Set<Integer>> tried = new java.util.TreeMap<>();
+
+    ResourcePhasePlanner.refineCompleted(
+        units.initial(),
+        units.groups(),
+        units.intervals(),
+        300,
+        java.util.Set.of(),
+        phases -> {
+          record(units.initial(), phases, tried);
+          return new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0);
+        });
+
+    assertEquals(java.util.Set.of(10, 20, 30, 60, 120, 180, 240), tried.get(units.keys().get(0)));
+  }
+
+  /** 单元按它在不可吸收残余里出现的次数排，多的先定；平局按原来的组名序。 */
+  @Test
+  void unitsWithMoreUnabsorbableResidualsGoFirst() {
+    Units units = units(4, 300, 100);
+    List<String> keys = units.keys();
+    List<String> order = new java.util.ArrayList<>();
+
+    ResourcePhasePlanner.refineCompleted(
+        units.initial(),
+        units.groups(),
+        units.intervals(),
+        300,
+        java.util.Set.of(),
+        phases -> {
+          for (String key : keys) {
+            if (!phases.deltaByDirection().get(key).equals(100) && !order.contains(key)) {
+              order.add(key);
+            }
+          }
+          return new ResourcePhasePlanner.CompletionScore(
+              4, 0, 0, 0, 0, Map.of(keys.get(2), 7, keys.get(3), 2, keys.get(1), 2));
+        });
+
+    assertEquals(List.of(keys.get(2), keys.get(1), keys.get(3), keys.get(0)), order);
+  }
+
+  /**
+   * 单元太多、总预算封顶时，每个单元先分到同样多的候选，余下的按优先序补；没试完的单元在资源相位说明里写明。
+   *
+   * <p>十二个单元各 11 个候选共 132 个，超过上限：每个单元至少试到上限 / 单元数个。
+   */
+  @Test
+  void aBindingBudgetIsSharedAndReported() {
+    Units units = units(12, 300, 100);
+    Map<String, java.util.Set<Integer>> tried = new java.util.TreeMap<>();
+    java.util.concurrent.atomic.AtomicInteger calls =
+        new java.util.concurrent.atomic.AtomicInteger();
+
+    PhasePlanner.Phases chosen =
+        ResourcePhasePlanner.refineCompleted(
+            units.initial(),
+            units.groups(),
+            units.intervals(),
+            300,
+            java.util.Set.of(),
+            phases -> {
+              calls.incrementAndGet();
+              record(units.initial(), phases, tried);
+              return new ResourcePhasePlanner.CompletionScore(1, 0, 0, 0, 0);
+            });
+
+    assertEquals(ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT + 1, calls.get());
+    for (String key : units.keys()) {
+      assertTrue(
+          tried.getOrDefault(key, java.util.Set.of()).size()
+              >= ResourcePhasePlanner.COMPLETION_CANDIDATE_LIMIT / 12,
+          key + " 只试了 " + tried.get(key));
+    }
+    assertTrue(
+        chosen.resourceNotes().stream()
+            .anyMatch(note -> note.contains("预算") && note.contains(units.keys().get(11))),
+        chosen.resourceNotes().toString());
+  }
+
+  /** 记下这次评分里哪些方向的 δ 偏离了起点。 */
+  private static void record(
+      PhasePlanner.Phases initial,
+      PhasePlanner.Phases candidate,
+      Map<String, java.util.Set<Integer>> tried) {
+    candidate
+        .deltaByDirection()
+        .forEach(
+            (key, value) -> {
+              if (!value.equals(initial.deltaByDirection().get(key))) {
+                tried.computeIfAbsent(key, k -> new java.util.TreeSet<>()).add(value);
+              }
+            });
+  }
+
+  private record Units(
+      List<ServiceGroupClassifier.Group> groups,
+      Map<String, Integer> intervals,
+      PhasePlanner.Phases initial,
+      List<String> keys) {}
+
+  /** {@code count} 个互不相干的单方向组，间隔相同，起点 δ 都是 {@code start}。 */
+  private static Units units(int count, int interval, int start) {
+    List<ServiceGroupClassifier.Group> groups = new java.util.ArrayList<>();
+    Map<String, Integer> intervals = new java.util.TreeMap<>();
+    Map<String, Integer> delta = new java.util.TreeMap<>();
+    List<String> keys = new java.util.ArrayList<>();
+    for (int i = 0; i < count; i++) {
+      String name = String.format(java.util.Locale.ROOT, "g%02d", i);
+      ServiceGroupClassifier.Direction direction =
+          new ServiceGroupClassifier.Direction(
+              "S" + i, "T" + i, List.of(), List.of(TimetableTestFixtures.routeId("R" + i)));
+      groups.add(new ServiceGroupClassifier.Group(name, List.of(direction), List.of()));
+      intervals.put(name, interval);
+      delta.put(direction.key(), start);
+      keys.add(direction.key());
+    }
+    PhasePlanner.Phases initial =
+        new PhasePlanner.Phases(Map.of(), Map.of(), delta, List.of(), List.of(), List.of());
+    return new Units(groups, intervals, initial, List.copyOf(keys));
   }
 
   /** 由各方向 δ 算出的评分，取模制造大量并列。 */
