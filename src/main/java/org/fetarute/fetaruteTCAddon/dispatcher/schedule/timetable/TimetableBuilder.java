@@ -109,7 +109,7 @@ public final class TimetableBuilder {
   private final BuildPool pool;
 
   /** 原表在目标间隔下的试排：错峰的平移候选与原表同一份准备、同一组参数，直接复用，不再各自把相位重选一遍。 */
-  private final TargetMemo memo;
+  private final TargetMemo<Prepared, Attempt> memo;
 
   /** 准备与原表不同时从原表的相位起排（{@link #warmAttempt}）：只给错峰的中途加停候选开。 */
   private final boolean warmStart;
@@ -138,7 +138,7 @@ public final class TimetableBuilder {
         progress,
         threads,
         null,
-        new TargetMemo(),
+        new TargetMemo<>(),
         false);
   }
 
@@ -165,7 +165,7 @@ public final class TimetableBuilder {
       Map<String, Integer> groupShift,
       boolean relaxAllowed,
       TimetableBuildProgress progress) {
-    this(timingCalculator, groupShift, relaxAllowed, progress, 1, null, new TargetMemo(), false);
+    this(timingCalculator, groupShift, relaxAllowed, progress, 1, null, new TargetMemo<>(), false);
   }
 
   private TimetableBuilder(
@@ -175,7 +175,7 @@ public final class TimetableBuilder {
       TimetableBuildProgress progress,
       int threads,
       BuildPool pool,
-      TargetMemo memo,
+      TargetMemo<Prepared, Attempt> memo,
       boolean warmStart) {
     this.timingCalculator = Objects.requireNonNull(timingCalculator, "timingCalculator");
     this.groupShift = Map.copyOf(groupShift);
@@ -202,44 +202,65 @@ public final class TimetableBuilder {
     }
     // 一次 build 一个池、一份原表试排记录：错峰候选、相位候选都在里面编，编完关掉，不留线程也不留整表。
     try (BuildPool opened = BuildPool.open(threads)) {
-      return new TimetableBuilder(
-              timingCalculator,
-              groupShift,
-              relaxAllowed,
-              progress,
-              threads,
-              opened,
-              new TargetMemo(),
-              warmStart)
-          .buildInPool(input, requested, now);
+      return inPool(opened).buildInPool(input, requested, now);
     }
+  }
+
+  /** 同样设定、在给定的池里编的编表器，带一份新的原表试排记录。 */
+  private TimetableBuilder inPool(BuildPool opened) {
+    return new TimetableBuilder(
+        timingCalculator,
+        groupShift,
+        relaxAllowed,
+        progress,
+        threads,
+        opened,
+        new TargetMemo<>(),
+        warmStart);
   }
 
   private TimetableBuildResult buildInPool(
       BuildInput input, TimetableBuildOptions requested, Instant now) {
-    Objects.requireNonNull(input, "input");
-    Objects.requireNonNull(requested, "requested");
-    requested = withConsistLengths(input, requested);
-    Instant builtAt = now == null ? Instant.now() : now;
-    Built base = buildOnce(input, requested, builtAt, Optional.empty(), Optional.empty());
+    Original original = original(input, requested, now);
+    Built base = original.base();
     if (base.chosen().isEmpty()) {
       return collapsed(base.result());
     }
-    Prepared chosen = base.chosen().get();
-    Set<UUID> fastRoutes = fastRoutesOf(base);
+    Set<UUID> fastRoutes = original.fastRoutes();
     RapidStagger.Measure measure =
         measureRapids(base, fastRoutes, TimetableBuildOptions.Following.NONE);
     RapidStagger.Measure reported = reportedRapids(base, fastRoutes, measure);
     TimetableBuildResult result =
         switch (RapidStagger.plan(
-            requested.rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
-          case MEASURE_ONLY -> RapidStagger.annotate(base.result(), reported, routeCodes(chosen));
-          case TURNBACK_ONLY -> staggerRapids(
-              input, requested, builtAt, base, measure, reported, fastRoutes, true);
-          case SEARCH -> staggerRapids(
-              input, requested, builtAt, base, measure, reported, fastRoutes, false);
+            original.options().rapidStagger(), measure, reported, base.result().headwayRelaxed())) {
+          case MEASURE_ONLY -> RapidStagger.annotate(
+              base.result(), reported, routeCodes(base.chosen().get()));
+          case TURNBACK_ONLY -> staggerRapids(input, original, measure, reported, true);
+          case SEARCH -> staggerRapids(input, original, measure, reported, false);
         };
     return collapsed(result);
+  }
+
+  /**
+   * 原表与它的编表参数：错峰搜索与包内的单候选入口（{@link #staggerCandidate}）都从它出发编候选（{@link #stagger}）。
+   *
+   * @param options 补上车型车长后的参数（{@link #withConsistLengths}）
+   * @param builtAt 构建时间
+   * @param base 原表
+   * @param fastRoutes 快车交路；原表排不出时为空
+   */
+  private record Original(
+      TimetableBuildOptions options, Instant builtAt, Built base, Set<UUID> fastRoutes) {}
+
+  /** 补上车型车长、编原表、找快车交路。 */
+  private Original original(BuildInput input, TimetableBuildOptions requested, Instant now) {
+    Objects.requireNonNull(input, "input");
+    Objects.requireNonNull(requested, "requested");
+    TimetableBuildOptions options = withConsistLengths(input, requested);
+    Instant builtAt = now == null ? Instant.now() : now;
+    Built base = buildOnce(input, options, builtAt, Optional.empty(), Optional.empty());
+    return new Original(
+        options, builtAt, base, base.chosen().isEmpty() ? Set.of() : fastRoutesOf(base));
   }
 
   /** 快车交路：按基础 route 判定；区分车型时班次挂的是变体，变体随它的基础 route 算快车。 */
@@ -269,30 +290,12 @@ public final class TimetableBuilder {
       Optional<RapidStagger.Dwell> dwell,
       java.util.function.BooleanSupplier expired) {
     try (BuildPool opened = BuildPool.open(threads)) {
-      TimetableBuilder inPool =
-          new TimetableBuilder(
-              timingCalculator,
-              groupShift,
-              relaxAllowed,
-              progress,
-              threads,
-              opened,
-              new TargetMemo(),
-              warmStart);
-      TimetableBuildOptions options = withConsistLengths(input, requested);
-      Built base = inPool.buildOnce(input, options, now, Optional.empty(), Optional.empty());
-      if (base.chosen().isEmpty()) {
-        throw new IllegalStateException(base.result().warnings().toString());
+      TimetableBuilder inPool = inPool(opened);
+      Original original = inPool.original(input, requested, now);
+      if (original.base().chosen().isEmpty()) {
+        throw new IllegalStateException(original.base().result().warnings().toString());
       }
-      return inPool.stagger(
-          input,
-          options.withRapidStagger(false),
-          now,
-          base,
-          fastRoutesOf(base),
-          shift,
-          dwell,
-          expired);
+      return inPool.stagger(input, original, shift, dwell, expired, new AtomicInteger());
     }
   }
 
@@ -744,20 +747,21 @@ public final class TimetableBuilder {
    *
    * <p>快车被卡量两遍：搜索里的取舍与早停按占用区间，最终在编过的候选里按闭塞时间挑、报告也写闭塞时间的数（见 {@link RapidStagger}）。
    *
+   * @param original 原表（排得出）
    * @param baseMeasure 原表按占用区间量的被卡
    * @param baseReported 原表按闭塞时间量的被卡（没有跟车规则时同 {@code baseMeasure}）
    * @param turnbackOnly 原表已放宽：只试加长折返（它可能正好让目标间隔排得开），不平移、不中途加停
    */
   private TimetableBuildResult staggerRapids(
       BuildInput input,
-      TimetableBuildOptions requested,
-      Instant builtAt,
-      Built base,
+      Original original,
       RapidStagger.Measure baseMeasure,
       RapidStagger.Measure baseReported,
-      Set<UUID> fastRoutes,
       boolean turnbackOnly) {
     long started = System.nanoTime();
+    TimetableBuildOptions requested = original.options();
+    Built base = original.base();
+    Set<UUID> fastRoutes = original.fastRoutes();
     stage(TimetableBuildProgress.Stage.STAGGER);
     // 时间上限按进度的时钟算：与"已用时"同一个钟，测试可注入。
     int budgetMinutes = requested.staggerMinutes();
@@ -766,8 +770,8 @@ public final class TimetableBuilder {
         budgetMinutes <= 0 ? () -> false : () -> !progress.now().isBefore(deadline);
     // 候选在池内线程上并发编，序号只用来报进度。
     AtomicInteger candidatesTried = new AtomicInteger();
+    AtomicInteger unrebuilt = new AtomicInteger();
     Prepared prepared = base.prepared().orElseThrow();
-    TimetableBuildOptions candidateOptions = requested.withRapidStagger(false);
     Map<UUID, String> codes = routeCodes(prepared);
     Map<String, Integer> intervals = intervalsOf(prepared, base.options());
     List<String> fastGroups =
@@ -785,7 +789,7 @@ public final class TimetableBuilder {
           group,
           RapidStagger.period(intervals.getOrDefault(group, minInterval(intervals)), others));
     }
-    RapidStagger.Candidate original =
+    RapidStagger.Candidate unshifted =
         new RapidStagger.Candidate(
             Map.of(),
             Optional.empty(),
@@ -796,7 +800,7 @@ public final class TimetableBuilder {
     RapidStagger.Search search =
         RapidStagger.search(
             periods,
-            original,
+            unshifted,
             RapidStagger.turnbackSource(
                 base.options().dutyLimits().turnaround(),
                 base.result().timetable().orElseThrow(),
@@ -809,15 +813,7 @@ public final class TimetableBuilder {
               @Override
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
                 detail("第 " + candidatesTried.incrementAndGet() + " 个候选：平移 " + shift);
-                return stagger(
-                    input,
-                    candidateOptions,
-                    builtAt,
-                    base,
-                    fastRoutes,
-                    shift,
-                    Optional.empty(),
-                    expired);
+                return stagger(input, original, shift, Optional.empty(), expired, unrebuilt);
               }
 
               @Override
@@ -831,15 +827,7 @@ public final class TimetableBuilder {
                         + " 加停 "
                         + dwell.seconds()
                         + "s");
-                return stagger(
-                    input,
-                    candidateOptions,
-                    builtAt,
-                    base,
-                    fastRoutes,
-                    shift,
-                    Optional.of(dwell),
-                    expired);
+                return stagger(input, original, shift, Optional.of(dwell), expired, unrebuilt);
               }
             },
             pool(),
@@ -852,12 +840,13 @@ public final class TimetableBuilder {
     return RapidStagger.annotate(chosen, chosenMeasure, codes)
         .withPhaseNote(
             RapidStagger.describeSearch(
-                original.asReported(),
+                unshifted.asReported(),
                 search.improved().map(RapidStagger.Candidate::asReported),
                 search.tried(),
                 millis,
                 turnbackOnly,
-                search.timedOut() ? budgetMinutes : 0));
+                search.timedOut() ? budgetMinutes : 0,
+                unrebuilt.get()));
   }
 
   /**
@@ -873,17 +862,21 @@ public final class TimetableBuilder {
    * <p>加长折返的候选不热启动：往返对的反向相位按"走行 + 折返"锚定（{@link PhasePlanner}），它正是靠折返加长把反向整体往后推；
    * 沿用原表相位时反向发车与原表逐班相同，加长只落在派车接续上。
    *
+   * @param original 原表（排得出）
    * @param expired 错峰到没到时间上限
+   * @param unrebuilt 热启动排出来不可用、因到点没有重编的候选在这里记一个
    */
   private Optional<RapidStagger.Candidate> stagger(
       BuildInput input,
-      TimetableBuildOptions options,
-      Instant builtAt,
-      Built base,
-      Set<UUID> fastRoutes,
+      Original original,
       Map<String, Integer> shift,
       Optional<RapidStagger.Dwell> dwell,
-      java.util.function.BooleanSupplier expired) {
+      java.util.function.BooleanSupplier expired,
+      AtomicInteger unrebuilt) {
+    TimetableBuildOptions options = original.options().withRapidStagger(false);
+    Instant builtAt = original.builtAt();
+    Built base = original.base();
+    Set<UUID> fastRoutes = original.fastRoutes();
     Optional<Prepared> known = dwell.isPresent() ? Optional.empty() : base.prepared();
     BuildInput variant =
         dwell
@@ -901,7 +894,7 @@ public final class TimetableBuilder {
                   return input.withRoutes(routes);
                 })
             .orElse(input);
-    RapidStagger.Outcome original = RapidStagger.Outcome.of(base.result());
+    RapidStagger.Outcome baseOutcome = RapidStagger.Outcome.of(base.result());
     TimetableBuilder candidate =
         new TimetableBuilder(
             timingCalculator,
@@ -911,14 +904,19 @@ public final class TimetableBuilder {
             threads,
             pool(),
             memo,
+            // 加长折返不开热启动。它改了终到停站，折返表跟着变，原表试排的参数比较（TargetMemo#originalFor）本来也认不到原表；
+            // 两道闸有意重复：任一道被改松，另一道仍挡着。
             dwell.filter(d -> !d.turnback()).isPresent());
     Built built =
         candidate.buildOnce(
             variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
     if (candidate.warmAdopted.get()
         && (built.chosen().isEmpty()
-            || !RapidStagger.acceptable(original, RapidStagger.Outcome.of(built.result())))
-        && !expired.getAsBoolean()) {
+            || !RapidStagger.acceptable(baseOutcome, RapidStagger.Outcome.of(built.result())))) {
+      if (expired.getAsBoolean()) {
+        unrebuilt.incrementAndGet();
+        return Optional.empty();
+      }
       built =
           new TimetableBuilder(
                   timingCalculator, shift, false, progress, threads, pool(), memo, false)
@@ -930,7 +928,7 @@ public final class TimetableBuilder {
                   base.prepared().map(Prepared::graphIndex));
     }
     RapidStagger.Outcome outcome = RapidStagger.Outcome.of(built.result());
-    if (built.chosen().isEmpty() || !RapidStagger.acceptable(original, outcome)) {
+    if (built.chosen().isEmpty() || !RapidStagger.acceptable(baseOutcome, outcome)) {
       return Optional.empty();
     }
     RapidStagger.Measure searched =
@@ -3524,13 +3522,20 @@ public final class TimetableBuilder {
   }
 
   /** 按某个 headway 排出来的一份完整计划及其冲突报告。 */
-  /** 原表在目标间隔下选好相位的试排，只记第一份（原表那份）；错峰平移候选同一份准备、同一组参数时复用。 */
-  private static final class TargetMemo {
-    private Prepared prepared;
+  /**
+   * 原表在目标间隔下选好相位的试排，只记第一份（原表那份）；错峰平移候选同一份准备、同一组参数时复用。
+   *
+   * <p>准备与试排的类型做成参数，只为包内测试能单独钉住参数比较（{@link #originalFor}），编表器里固定是 {@code Prepared}、{@code Attempt}。
+   *
+   * @param <P> 准备
+   * @param <A> 试排
+   */
+  static final class TargetMemo<P, A> {
+    private P prepared;
     private TimetableBuildOptions options;
-    private Attempt attempt;
+    private A attempt;
 
-    synchronized Optional<Attempt> find(Prepared prepared, TimetableBuildOptions options) {
+    synchronized Optional<A> find(P prepared, TimetableBuildOptions options) {
       return this.prepared == prepared && options.equals(this.options)
           ? Optional.of(attempt)
           : Optional.empty();
@@ -3539,15 +3544,16 @@ public final class TimetableBuilder {
     /**
      * 原表在选好的相位上的试排：参数相同（准备可以不同，如中途加停的候选）时给出，没有记下或参数不同时为空。
      *
-     * <p>折返表也要相同：反向相位按它锚定，折返表变了（终到停站改了）原表的相位就不再是这组参数下的锚定。
+     * <p>折返表也要相同：反向相位按它锚定，折返表变了（终到停站改了）原表的相位就不再是这组参数下的锚定。加长折返的候选因此在这里就认不到原表； 发起候选时它本来也不开热启动（{@link
+     * TimetableBuilder#stagger}）——两道闸有意重复，任一道被改松，另一道仍把加长折返挡在热启动之外。
      */
-    synchronized Optional<Attempt> originalFor(TimetableBuildOptions options) {
+    synchronized Optional<A> originalFor(TimetableBuildOptions options) {
       return attempt != null && options.equals(this.options)
           ? Optional.of(attempt)
           : Optional.empty();
     }
 
-    synchronized void offer(Prepared prepared, TimetableBuildOptions options, Attempt attempt) {
+    synchronized void offer(P prepared, TimetableBuildOptions options, A attempt) {
       if (this.prepared == null) {
         this.prepared = prepared;
         this.options = options;

@@ -132,6 +132,70 @@ class TimetableBuilderStaggerWarmStartTest {
     assertEquals(1, expired.builds());
   }
 
+  /**
+   * 热启动被拒（原表相位上让不掉的冲突比原表多）时，同一次构建里就退回整套重选；整套重选编出来仍不可用，候选为空，不再重编—— 重编只看热启动有没有真的用上，不看候选开没开热启动。完整构建次数
+   * = 被拒的热启动一次 + 整套重选一次。
+   *
+   * <p>到了错峰时间上限次数也一样：退回整套重选是在热启动被拒的那次构建里，不是事后的重编。
+   */
+  @Test
+  void aRejectedWarmStartIsNotRebuiltWhenTheReselectionIsUnusable() {
+    int seconds = 300;
+    RapidStagger.Dwell hold = new RapidStagger.Dwell(rapidBack, "RAPR", 2, C2, seconds);
+
+    Counted candidate = candidate(hold, () -> false);
+    Counted expired = candidate(hold, () -> true);
+    TimetableBuildProgress progress = new TimetableBuildProgress();
+    TimetableBuildResult reselected =
+        new TimetableBuilder(new TimetableTimingCalculator(), Map.of(), false, progress)
+            .build(
+                input(route -> route.routeId().equals(rapidBack) ? held(route, 2, seconds) : route),
+                options(false),
+                BUILT_AT);
+    int reselection = progress.snapshot().fullBuilds();
+
+    assertFalse(
+        RapidStagger.acceptable(
+            RapidStagger.Outcome.of(base()), RapidStagger.Outcome.of(reselected)),
+        () -> "整套重选也不可用：" + reselected);
+    assertTrue(candidate.result().isEmpty(), "这一档不可用");
+    assertEquals(1 + reselection, candidate.builds(), "被拒的热启动一次 + 整套重选一次，不再重编");
+    assertTrue(expired.result().isEmpty());
+    assertEquals(1 + reselection, expired.builds(), "热启动被拒，退回整套重选与时间上限无关");
+  }
+
+  /**
+   * 热启动认原表只看参数（{@link TimetableBuilder.TargetMemo#originalFor}）：准备不同照认（中途加停的候选），折返表不同不认——
+   * 终到停站改了，反向相位的锚定跟着变，原表的相位不再是这组参数下的锚定。与"加长折返不开热启动"是有意重复的两道闸，这里单独钉住这一道。
+   */
+  @Test
+  void theOriginalPhasesAreNotReusedUnderAnotherTurnaroundTable() {
+    TimetableBuildOptions original =
+        options(false)
+            .withTurnaround(TurnaroundTable.ofSeconds(Map.of(rapid, 20, rapidBack, 20), 20));
+    TimetableBuildOptions longer =
+        original.withTurnaround(TurnaroundTable.ofSeconds(Map.of(rapid, 80, rapidBack, 20), 20));
+    TimetableBuilder.TargetMemo<Object, String> memo = new TimetableBuilder.TargetMemo<>();
+
+    assertTrue(memo.originalFor(original).isEmpty(), "还没记下原表");
+    Object prepared = new Object();
+    memo.offer(prepared, original, "原表");
+    memo.offer(new Object(), original, "后来的候选");
+
+    assertEquals(Optional.of("原表"), memo.originalFor(original), "只记第一份");
+    assertEquals(
+        Optional.of("原表"),
+        memo.originalFor(
+            options(false)
+                .withTurnaround(
+                    TurnaroundTable.ofSeconds(
+                        new LinkedHashMap<>(Map.of(rapid, 20, rapidBack, 20)), 20))),
+        "另编的一份参数、折返表逐项相同就认");
+    assertTrue(memo.originalFor(longer).isEmpty(), "折返表不同不认原表");
+    assertEquals(Optional.of("原表"), memo.find(prepared, original));
+    assertTrue(memo.find(new Object(), original).isEmpty(), "复用整份试排还要同一份准备");
+  }
+
   /** 各班反向发车减同一序号的正向发车：每一对都相同时返回它。 */
   private int uniformGap(TimetableBuildResult result) {
     List<Integer> forward = departures(result, rapid);
