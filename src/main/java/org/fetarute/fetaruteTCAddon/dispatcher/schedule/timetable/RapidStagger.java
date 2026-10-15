@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
+import java.util.function.BooleanSupplier;
 import java.util.function.Function;
 import java.util.stream.IntStream;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
@@ -677,8 +678,15 @@ final class RapidStagger {
    *
    * @param improved 比原表好（{@link Candidate#betterThan}）的最好候选；没有时为空
    * @param tried 编了几个候选
+   * @param timedOut 到了时间上限、没搜完就停下（{@code improved} 只从已编过的候选里挑）
    */
-  record Search(Optional<Candidate> improved, int tried) {}
+  record Search(Optional<Candidate> improved, int tried, boolean timedOut) {
+
+    /** 搜完了。 */
+    Search(Optional<Candidate> improved, int tried) {
+      this(improved, tried, false);
+    }
+  }
 
   /**
    * 最终答案：只从比原表好（{@link Candidate#betterThan}）的候选里取 {@link #ORDER} 最前的。
@@ -716,8 +724,8 @@ final class RapidStagger {
       return clear;
     }
 
-    Search finish(int tried) {
-      return new Search(Optional.ofNullable(chosen), tried);
+    Search finish(int tried, boolean timedOut) {
+      return new Search(Optional.ofNullable(chosen), tried, timedOut);
     }
   }
 
@@ -769,6 +777,27 @@ final class RapidStagger {
       boolean turnbackOnly,
       Evaluator evaluator,
       BuildPool pool) {
+    return search(
+        periods, base, turnbackPoints, dwellPoints, turnbackOnly, evaluator, pool, () -> false);
+  }
+
+  /**
+   * 同上，带时间上限：每编一批之前问一次 {@code expired}，到点就不再编，停在已编过的候选里按同样的规则挑（{@link Search#timedOut}）。
+   *
+   * <p>只在批与批之间停：一批已经交给池子的候选照常编完、照常消费。串行时一批一个，并行时一批 {@link BuildPool#threads()} 个，
+   * 所以到点停下时编到哪一个随线程数而变；不到点时与不限时的搜索逐个候选相同。
+   *
+   * @param expired 到没到时间上限
+   */
+  static Search search(
+      Map<String, Integer> periods,
+      Candidate base,
+      Function<Measure, List<Dwell>> turnbackPoints,
+      Function<Measure, List<Dwell>> dwellPoints,
+      boolean turnbackOnly,
+      Evaluator evaluator,
+      BuildPool pool,
+      BooleanSupplier expired) {
     Picks picks = new Picks(base);
     int batch = Math.max(1, pool.threads());
     int tried = 0;
@@ -778,6 +807,9 @@ final class RapidStagger {
       for (int from = 0, size = 1;
           !reached && from < TURNBACK_MARGINS.size();
           from += size, size = batch) {
+        if (expired.getAsBoolean()) {
+          return picks.finish(tried, true);
+        }
         List<Dwell> trials = new ArrayList<>();
         for (int margin :
             TURNBACK_MARGINS.subList(from, Math.min(from + size, TURNBACK_MARGINS.size()))) {
@@ -800,7 +832,7 @@ final class RapidStagger {
       }
     }
     if (turnbackOnly || picks.settled()) {
-      return picks.finish(tried);
+      return picks.finish(tried, false);
     }
     // 每个候选都带着一整张表：只留排名前几的（第二轮要用），其余算完即丢，免得几十张表一起压在堆上。
     List<Candidate> top = new ArrayList<>();
@@ -820,6 +852,9 @@ final class RapidStagger {
         boolean inClearWindow = false;
         boolean windowPassed = false;
         for (int from = 0; !windowPassed && from < offsets.size(); from += batch) {
+          if (expired.getAsBoolean()) {
+            return picks.finish(tried, true);
+          }
           List<Integer> slice = offsets.subList(from, Math.min(from + batch, offsets.size()));
           List<Map<String, Integer>> trials = new ArrayList<>(slice.size());
           for (int offset : slice) {
@@ -881,6 +916,9 @@ final class RapidStagger {
         }
       }
       for (int from = 0; from < trials.size(); from += batch) {
+        if (expired.getAsBoolean()) {
+          return picks.finish(tried, true);
+        }
         for (BuildPool.Evaluated<Optional<Candidate>> built :
             pool.evaluate(
                 trials.subList(from, Math.min(from + batch, trials.size())),
@@ -890,7 +928,7 @@ final class RapidStagger {
         }
       }
     }
-    return picks.finish(tried);
+    return picks.finish(tried, false);
   }
 
   /** 把候选放进按 {@link #ORDER} 排好的前 {@link #DWELL_SHORTLIST} 名里，多出来的丢掉。 */
@@ -913,11 +951,49 @@ final class RapidStagger {
    */
   static String describeSearch(
       Candidate base, Optional<Candidate> chosen, int tried, long millis, boolean turnbackOnly) {
+    return describeSearch(base, chosen, tried, millis, turnbackOnly, 0);
+  }
+
+  /**
+   * 同 {@link #describeSearch(Candidate, Optional, int, long, boolean)}；搜索到了时间上限没搜完时（{@code
+   * timedOutMinutes > 0}），开头写明"错峰超时"与上限，后面的结论只针对已编过的候选（编过几个只在结论里写一次）。
+   *
+   * @param timedOutMinutes 到点停下时的上限分钟数；搜完了为 0
+   */
+  static String describeSearch(
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      int timedOutMinutes) {
+    boolean timedOut = timedOutMinutes > 0;
+    String line = describeConclusion(base, chosen, tried, millis, turnbackOnly, timedOut);
+    if (!timedOut) {
+      return line;
+    }
+    String head = "快车错峰：";
+    return head
+        + "错峰超时（约 "
+        + timedOutMinutes
+        + " 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），"
+        + line.substring(head.length());
+  }
+
+  private static String describeConclusion(
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      boolean timedOut) {
     if (chosen.isEmpty()) {
       String scope =
           turnbackOnly
               ? tried == 0
-                  ? "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；也没有可加长的原地折返端（或折返时间由 --turnaround 固定），这次没有搜"
+                  ? timedOut
+                      ? "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；只试原地折返端加长折返，到点时一档也还没编"
+                      : "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；也没有可加长的原地折返端（或折返时间由 --turnaround 固定），这次没有搜"
                   : String.format(
                       Locale.ROOT,
                       "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；只试了原地折返端加长折返 %d 档，没有在目标间隔下排得开、比原表好的",

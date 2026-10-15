@@ -188,6 +188,143 @@ class RapidStaggerTest {
     assertEquals(List.of(), evaluator.dwells, "已经完全错开，不试加停");
     assertEquals(Map.of("G", 30), search.improved().orElseThrow().shift());
     assertEquals(7, search.tried());
+    assertFalse(search.timedOut());
+  }
+
+  /**
+   * 到了时间上限就不再编下一批，停在已编过的候选里按同样的规则挑：每编一批之前问一次，串行一批一个。
+   *
+   * <p>夹具同上一例：第 3 次问之后到点，只编了 10、20 两个位置，都不比原表好，保持原表。
+   */
+  @Test
+  void theSearchStopsAtTheTimeLimitAndPicksAmongWhatWasBuilt() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L);
+    int[] asked = {0};
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator,
+            BuildPool.serial(),
+            () -> ++asked[0] > 2);
+
+    assertTrue(search.timedOut());
+    assertEquals(2, search.tried());
+    assertEquals(List.of(10, 20), evaluator.shifts);
+    assertTrue(search.improved().isEmpty(), search::toString);
+  }
+
+  /** 到点之前已经编到更好的就选它：错开的窗口刚进去就到点，选已编过的那一个，不再细试、不试加停。 */
+  @Test
+  void aTimeLimitKeepsTheBestSoFar() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> shift.get("G") == 30 || shift.get("G") == 40 ? 0L : 100L);
+    int[] asked = {0};
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 100),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator,
+            BuildPool.serial(),
+            () -> ++asked[0] > 3);
+
+    assertTrue(search.timedOut());
+    assertEquals(3, search.tried());
+    assertEquals(List.of(10, 20, 30), evaluator.shifts);
+    assertEquals(Map.of("G", 30), search.improved().orElseThrow().shift());
+    assertEquals(List.of(), evaluator.dwells);
+  }
+
+  /** 加长折返阶段里到点也一样：编过的那一档照常参与挑选，不再往长试、不平移。 */
+  @Test
+  void aTimeLimitInTheTurnbackStageStopsThere() {
+    FakeEvaluator evaluator =
+        new FakeEvaluator(shift -> 500L)
+            .dwelling((shift, dwell) -> dwell.turnback() && dwell.seconds() >= 150 ? 0L : 80L);
+    int[] asked = {0};
+
+    RapidStagger.Search search =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(turnbackPoint(120)),
+            measure -> List.of(dwellPoint()),
+            false,
+            evaluator,
+            BuildPool.serial(),
+            () -> ++asked[0] > 1);
+
+    assertTrue(search.timedOut());
+    assertEquals(1, search.tried());
+    assertEquals(List.of(120), evaluator.dwells.stream().map(RapidStagger.Dwell::seconds).toList());
+    assertTrue(evaluator.history.isEmpty(), evaluator.history::toString);
+    assertEquals(120, search.improved().orElseThrow().dwell().orElseThrow().seconds());
+  }
+
+  /** 一直不到点：与不限时的搜索逐个候选相同，也不算超时。 */
+  @Test
+  void aTimeLimitThatIsNeverReachedChangesNothing() {
+    FakeEvaluator unlimited =
+        new FakeEvaluator(shift -> shift.get("G") == 20 ? 30L : 60L)
+            .dwelling(
+                (shift, dwell) ->
+                    shift.getOrDefault("G", 0) == 20 && dwell.seconds() == 30 ? 0L : 40L);
+    FakeEvaluator limited =
+        new FakeEvaluator(shift -> shift.get("G") == 20 ? 30L : 60L)
+            .dwelling(
+                (shift, dwell) ->
+                    shift.getOrDefault("G", 0) == 20 && dwell.seconds() == 30 ? 0L : 40L);
+
+    RapidStagger.Search before =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            unlimited,
+            BuildPool.serial());
+    RapidStagger.Search after =
+        RapidStagger.search(
+            Map.of("G", 40),
+            base(100L),
+            measure -> List.of(),
+            measure -> List.of(dwellPoint()),
+            false,
+            limited,
+            BuildPool.serial(),
+            () -> false);
+
+    assertEquals(before, after);
+    assertEquals(unlimited.history, limited.history);
+    assertEquals(unlimited.dwells, limited.dwells);
+    assertFalse(after.timedOut());
+  }
+
+  /** 超时的说明：开头写明错峰超时与上限，后面照常；没超时（0）与不带上限的写法相同。 */
+  @Test
+  void theReportSaysTheSearchTimedOut() {
+    String line = RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10);
+
+    assertTrue(line.startsWith("快车错峰：错峰超时（约 10 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），试了 4 个位置"), line);
+    assertEquals(1, line.split("4 个位置", -1).length - 1, "编过几个只写一次：" + line);
+    assertTrue(line.endsWith("保持原表（被卡 150s），用时 600s"), line);
+    String turnbackOnly =
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 0, 600_000L, true, 10);
+    assertTrue(turnbackOnly.contains("到点时一档也还没编"), turnbackOnly);
+    assertFalse(turnbackOnly.contains("没有可加长的原地折返端"), "超时不是没有可试的：" + turnbackOnly);
+    assertEquals(
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false),
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0));
   }
 
   /**

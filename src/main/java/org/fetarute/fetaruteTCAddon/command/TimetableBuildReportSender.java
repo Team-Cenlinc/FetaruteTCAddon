@@ -426,7 +426,8 @@ final class TimetableBuildReportSender {
                             CommandUx.suggestAction(
                                 "[用快车错峰重建]",
                                 rebuildCommand(first, lineArg, saved.get(0), options, result)
-                                    + " --rapid-stagger",
+                                    + " --rapid-stagger"
+                                    + staggerMinutesArgument(options),
                                 hint))));
   }
 
@@ -468,7 +469,16 @@ final class TimetableBuildReportSender {
             + "。"
             + how
             + "逐个试原地折返端加长折返、快车组整组平移与快车中途加停，"
-            + "在班次不少、最多多用一列车、不放宽间隔、不把普通车往后推的前提下挑快车与全网让车损失最少的方案；需要几分钟，在后台线程运行，不阻塞服务器主线程");
+            + "在班次不少、最多多用一列车、不放宽间隔、不把普通车往后推的前提下挑快车与全网让车损失最少的方案；需要几分钟（默认约 "
+            + TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
+            + " 分钟上限，到点后编完当时那一批就停，--stagger-minutes 可改），在后台线程运行，不阻塞服务器主线程");
+  }
+
+  /** 重建命令里的错峰时限：与缺省值不同才写出。 */
+  static String staggerMinutesArgument(TimetableBuildOptions options) {
+    return options.staggerMinutes() == TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
+        ? ""
+        : " --stagger-minutes " + options.staggerMinutes();
   }
 
   /** 线路参数在可点命令里的写法：几条线时加双引号，客户端不认不带引号的逗号，整条命令会标红发不出去。 */

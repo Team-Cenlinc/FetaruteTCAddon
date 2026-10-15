@@ -207,6 +207,11 @@ public final class TimetableBuildProgress {
     }
   }
 
+  /** 进度时钟的当前时刻：编表里按时间截止的地方（快车错峰的时间上限）用它，与快照里的用时同一个钟。 */
+  public Instant now() {
+    return clock.instant();
+  }
+
   public Instant startedAt() {
     return startedAt;
   }

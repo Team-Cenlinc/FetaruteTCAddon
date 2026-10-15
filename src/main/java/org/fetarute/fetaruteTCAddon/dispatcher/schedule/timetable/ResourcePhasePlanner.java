@@ -413,6 +413,7 @@ public final class ResourcePhasePlanner {
       List<ServiceGroupClassifier.Group> groups,
       PhasePlanner.Phases phases,
       Map<String, Integer> intervalByGroup) {
+    PhasePlanner.requireUniqueKeys(groups);
     List<Direction> out = new ArrayList<>();
     for (ServiceGroupClassifier.Group group : groups) {
       int interval = intervalByGroup.getOrDefault(group.name(), 0);
