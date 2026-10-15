@@ -211,12 +211,12 @@ class TimetableBuilderRapidStaggerTest {
   /**
    * 并行编表与串行逐字段相同：班次、交路、相位与错峰说明、警告都一样。
    *
-   * <p>慢车停站 30/60/90 秒时快车在表里给慢车让车，错峰会搜：30 秒那次平移扫到错开的窗口就停（早停落在一批的中间）， 60、90
-   * 秒扫完整个周期再细试。每次编表里相位第三层的完整候选也并行评。
+   * <p>两组同在 A、E 之间开行，相位各选各的：停站短时第三层就把快车错到不给慢车让车的位置，错峰不搜。慢车停站 130/135/140 秒时 错不开，快车在表里给慢车让车，错峰会搜：135
+   * 秒那次平移扫到错开的窗口就停（早停）， 130、140 秒扫完整个周期再细试。每次编表里相位第三层的完整候选也并行评。
    */
   @Test
   void aParallelBuildEqualsTheSerialOne() {
-    for (int dwell : new int[] {30, 60, 90}) {
+    for (int dwell : new int[] {130, 135, 140}) {
       TimetableBuildResult serial =
           build(new TimetableBuilder(TimetableBuildProgress.untracked(), 1), dwell, true);
       assertTrue(
@@ -244,14 +244,14 @@ class TimetableBuilderRapidStaggerTest {
   @Test
   void aParallelBuildStopsWhenCancelled() {
     TimetableBuildProgress whole = new TimetableBuildProgress();
-    build(new TimetableBuilder(whole, 4), 60, true);
+    build(new TimetableBuilder(whole, 4), 140, true);
     CancelOnStagger clock = new CancelOnStagger();
     TimetableBuildProgress progress = new TimetableBuildProgress(clock);
     clock.progress = progress;
 
     assertThrows(
         TimetableBuildProgress.Cancelled.class,
-        () -> build(new TimetableBuilder(progress, 4), 60, true));
+        () -> build(new TimetableBuilder(progress, 4), 140, true));
 
     assertTrue(
         progress.snapshot().fullBuilds() < whole.snapshot().fullBuilds(),
@@ -296,10 +296,10 @@ class TimetableBuilderRapidStaggerTest {
   void theStaggerTimeLimitUsesTheProgressClock() {
     TimetableBuildResult limited =
         build(
-            new TimetableBuilder(new TimetableBuildProgress(new SteppingClock()), 1), 60, true, 1);
+            new TimetableBuilder(new TimetableBuildProgress(new SteppingClock()), 1), 140, true, 1);
     TimetableBuildResult unlimited =
         build(
-            new TimetableBuilder(new TimetableBuildProgress(new SteppingClock()), 1), 60, true, 0);
+            new TimetableBuilder(new TimetableBuildProgress(new SteppingClock()), 1), 140, true, 0);
 
     String note =
         limited.phaseNotes().stream()

@@ -39,7 +39,7 @@ public final class PhasePlanner {
   /**
    * 相位结果。
    *
-   * @param phaseByDirection 方向键 → 相位
+   * @param phaseByDirection 方向键 → 相位（方向键在全部交路组里唯一，见 {@link ServiceGroupClassifier.Direction}）
    * @param offsetByGroup 组 → 整体偏移（第二层的选择，供报告）
    * @param deltaByDirection 第三层给的 δ
    * @param notes 说明（哪些方向锚定了、哪些组按共用起点交错了）
@@ -326,6 +326,7 @@ public final class PhasePlanner {
       Map<String, List<StopCall>> callsByDirection,
       Topology topology) {
     Objects.requireNonNull(groups, "groups");
+    requireUniqueKeys(groups);
     Topology shape = topology == null ? Topology.none() : topology;
     Map<String, Integer> phases = new TreeMap<>();
     Map<String, Integer> offsets = new TreeMap<>();
@@ -484,6 +485,23 @@ public final class PhasePlanner {
       notes.add("这些方向算不出沿途合流点，只按起点交错，不会与算得出的方向互相错开：" + String.join("、", withoutCalls));
     }
     return new Phases(phases, offsets, Map.of(), notes, List.of(), placedConnections);
+  }
+
+  /**
+   * 方向键必须在全部交路组里唯一：相位表、往返对、按车接续都按键跨组查找，两组同名时后放的覆盖前一组，反向还会找到别组的方向。 分类器给同名的方向带上组名（{@link
+   * ServiceGroupClassifier.Direction#qualifier}）；手工拼出的组没这样做就直接拒绝，不悄悄算错。
+   */
+  static void requireUniqueKeys(List<ServiceGroupClassifier.Group> groups) {
+    Map<String, String> owner = new LinkedHashMap<>();
+    for (ServiceGroupClassifier.Group group : groups) {
+      for (ServiceGroupClassifier.Direction direction : group.directions()) {
+        String previous = owner.putIfAbsent(direction.key(), group.name());
+        if (previous != null && !previous.equals(group.name())) {
+          throw new IllegalArgumentException(
+              "方向键 " + direction.key() + " 同时出现在交路组 " + previous + " 与 " + group.name() + " 里");
+        }
+      }
+    }
   }
 
   /**

@@ -6,7 +6,9 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
@@ -36,32 +38,64 @@ public final class ServiceGroupClassifier {
   /**
    * 一个方向：同组内起点站台组与终点站台组相同的带客 route 共用一张子网格，按 weight 切份额。
    *
+   * <p><b>方向键在全部交路组里唯一</b>：相位表、往返对锚定、跨组按车接续、周期模板都按方向键跨组查找。 两个组在同一对站台组之间往返（例如慢车与快车共用两端终点站）时，
+   * 光凭"起点→终点"会同名，后放的组覆盖前一组的相位，反向找到的也可能是别组的方向。所以这样的方向带上本组组名（{@code qualifier}）；
+   * 没有同名的方向不带，键与只看起终点时完全相同。
+   *
    * @param originGroup 起点站台组（解析不出组时用节点 id）
    * @param terminalGroup 终点站台组
    * @param candidates 该方向的候选，按 code 排序；weight 是方向内的目标比例
    * @param routeIds 与 candidates 对齐
+   * @param qualifier 区分同名方向的组名：别的组也在这一对站台组之间开行（任一走向）时为本组组名，否则为空
    */
   public record Direction(
       String originGroup,
       String terminalGroup,
       List<WeightedTripAllocator.Candidate> candidates,
-      List<UUID> routeIds) {
+      List<UUID> routeIds,
+      String qualifier) {
 
     public Direction {
       originGroup = originGroup == null ? "" : originGroup;
       terminalGroup = terminalGroup == null ? "" : terminalGroup;
       candidates = candidates == null ? List.of() : List.copyOf(candidates);
       routeIds = routeIds == null ? List.of() : List.copyOf(routeIds);
+      qualifier = qualifier == null ? "" : qualifier;
     }
 
-    /** 方向键：相位表与报告用。 */
+    /** 不与别组同名的方向。 */
+    public Direction(
+        String originGroup,
+        String terminalGroup,
+        List<WeightedTripAllocator.Candidate> candidates,
+        List<UUID> routeIds) {
+      this(originGroup, terminalGroup, candidates, routeIds, "");
+    }
+
+    /** 方向键：相位表与报告用；与别组同名时带组名，如 {@code A→B（组名）}。 */
     public String key() {
-      return originGroup + "→" + terminalGroup;
+      return keyOf(originGroup, terminalGroup);
     }
 
-    /** 反方向的键：往返对锚定用。 */
+    /** 反方向的键：往返对锚定用。与本方向带同一个组名，只会找到同组的反向。 */
     public String reverseKey() {
-      return terminalGroup + "→" + originGroup;
+      return keyOf(terminalGroup, originGroup);
+    }
+
+    private String keyOf(String from, String to) {
+      return from + "→" + to + (qualifier.isEmpty() ? "" : "（" + qualifier + "）");
+    }
+
+    /** 同一个方向带上组名：别的组也在这一对站台组之间开行时用。 */
+    Direction qualifiedBy(String group) {
+      return new Direction(originGroup, terminalGroup, candidates, routeIds, group);
+    }
+
+    /** 不分走向的一对站台组：同名判定用，正反两个走向落到同一个值。 */
+    String endpointPair() {
+      return originGroup.compareTo(terminalGroup) <= 0
+          ? originGroup + "\n" + terminalGroup
+          : terminalGroup + "\n" + originGroup;
     }
   }
 
@@ -125,7 +159,7 @@ public final class ServiceGroupClassifier {
           .computeIfAbsent(key, ignored -> new ArrayList<>())
           .add(route);
     }
-    List<Group> groups = new ArrayList<>();
+    Map<String, List<Direction>> directionsByGroup = new TreeMap<>();
     for (String name :
         new TreeMap<>(merge(byGroupAndDirection.keySet(), pureLegsByGroup.keySet())).keySet()) {
       List<Direction> directions = new ArrayList<>();
@@ -143,6 +177,29 @@ public final class ServiceGroupClassifier {
         directions.add(
             new Direction(
                 originGroupOf(sorted.get(0)), terminalGroupOf(sorted.get(0)), candidates, ids));
+      }
+      directionsByGroup.put(name, directions);
+    }
+    // 方向键要在全部组里唯一（见 Direction）：同一对站台组（不分走向）出现在两个以上组里时，这些方向都带上组名。
+    // 按不分走向判：只带一个走向的组名，往返对另一走向的键就对不上，reverseKey 会找到别组的反向。
+    Map<String, Set<String>> groupsByPair = new TreeMap<>();
+    directionsByGroup.forEach(
+        (name, directions) -> {
+          for (Direction direction : directions) {
+            groupsByPair
+                .computeIfAbsent(direction.endpointPair(), ignored -> new TreeSet<>())
+                .add(name);
+          }
+        });
+    List<Group> groups = new ArrayList<>();
+    for (Map.Entry<String, List<Direction>> entry : directionsByGroup.entrySet()) {
+      String name = entry.getKey();
+      List<Direction> directions = new ArrayList<>(entry.getValue().size());
+      for (Direction direction : entry.getValue()) {
+        directions.add(
+            groupsByPair.get(direction.endpointPair()).size() > 1
+                ? direction.qualifiedBy(name)
+                : direction);
       }
       directions.sort(Comparator.comparing(Direction::key));
       List<UUID> legs = pureLegsByGroup.getOrDefault(name, List.of());
