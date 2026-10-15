@@ -66,6 +66,10 @@ permissions:
       fetarute.timetable.record: true
       fetarute.timetable.manage: true
       fetarute.pids.manage: true
+      fetarute.coupler: true
+  fetarute.coupler:
+    description: 使用车钩扳手开/锁车钩、拆开与推挂列车（/fta coupler wrench；调度管着的车只能动不在运营中的）
+    default: op
   fetarute.pids.manage:
     description: 管理全部站台屏（/fta pids；公司成员无此权限也可管理本公司车站的屏幕）
     default: op

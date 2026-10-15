@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 43
+config-version: 44
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -326,6 +326,18 @@ call:
   # 终点站与交路第一站叫车时，折返车在终点就绪后最多等候的秒数：这一单的票还没接走它就作废这一单、车回库，不长时间占着终点股道；
   # 0 表示不设上限（等到叫车超时）
   turnback-hold-seconds: 90
+
+coupler:
+  # 车钩扳手（/fta coupler wrench 领取，权限 fetarute.coupler）：右键端车端部开/锁车钩，右键两节车的连接处拆开，
+  # Shift+右键开着车钩的端车把整列车慢慢推向前方的车并挂上（对方这一端车钩也要开着）。
+  # 调度管着的车只能动不在运营中的（终点待命车、已过最后一个载客站的回库车）
+  enabled: true
+  # 联挂后最多几节；0 表示只受 TrainCarts 自己的上限
+  max-cars: 0
+  # 推车时沿轨道最远找多少格内的对方端车（两车之间的空隙）
+  push-max-blocks: 8
+  # 推车速度（格/秒）
+  push-speed-blocks-per-second: 1.0
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

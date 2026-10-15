@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 43;
+  private static final int EXPECTED_CONFIG_VERSION = 44;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -180,6 +180,8 @@ public final class ConfigManager {
     TimetableSettings timetableSettings = parseTimetable(timetableSection, logger);
     ConfigurationSection callSection = config.getConfigurationSection("call");
     CallSettings callSettings = parseCall(callSection, logger);
+    ConfigurationSection couplerSection = config.getConfigurationSection("coupler");
+    CouplerSettings couplerSettings = parseCoupler(couplerSection, logger);
     return new ConfigView(
         version,
         debugEnabled,
@@ -194,7 +196,28 @@ public final class ConfigManager {
         smartDispatcherSettings,
         healthSettings,
         timetableSettings,
-        callSettings);
+        callSettings,
+        couplerSettings);
+  }
+
+  /** 解析车钩扳手配置段；缺段或取值无效时用默认值。 */
+  private static CouplerSettings parseCoupler(
+      ConfigurationSection section, java.util.logging.Logger logger) {
+    CouplerSettings defaults = CouplerSettings.defaults();
+    if (section == null) {
+      return defaults;
+    }
+    double speed =
+        section.getDouble("push-speed-blocks-per-second", defaults.pushSpeedBlocksPerSecond());
+    if (!(speed > 0.0) || !Double.isFinite(speed)) {
+      logger.warning("coupler.push-speed-blocks-per-second 配置无效: " + speed + "，已回退为默认值");
+      speed = defaults.pushSpeedBlocksPerSecond();
+    }
+    return new CouplerSettings(
+        section.getBoolean("enabled", defaults.enabled()),
+        readNonNegativeInt(section, "max-cars", defaults.maxCars(), "coupler", logger),
+        readNonNegativeInt(section, "push-max-blocks", defaults.pushMaxBlocks(), "coupler", logger),
+        speed);
   }
 
   /** 解析叫车配置段；缺段或取值无效时用默认值。 */
@@ -1519,7 +1542,8 @@ public final class ConfigManager {
       SmartDispatcherSettings smartDispatcherSettings,
       HealthSettings healthSettings,
       TimetableSettings timetableSettings,
-      CallSettings callSettings) {
+      CallSettings callSettings,
+      CouplerSettings couplerSettings) {
     public ConfigView {
       smartDispatcherSettings =
           smartDispatcherSettings == null
@@ -1528,6 +1552,41 @@ public final class ConfigManager {
       timetableSettings =
           timetableSettings == null ? TimetableSettings.defaults() : timetableSettings;
       callSettings = callSettings == null ? CallSettings.defaults() : callSettings;
+      couplerSettings = couplerSettings == null ? CouplerSettings.defaults() : couplerSettings;
+    }
+
+    /** 兼容尚未感知车钩扳手配置的调用方与测试夹具。 */
+    public ConfigView(
+        int configVersion,
+        boolean debugEnabled,
+        String locale,
+        StorageSettings storageSettings,
+        GraphSettings graphSettings,
+        AutoStationSettings autoStationSettings,
+        RuntimeSettings runtimeSettings,
+        SpawnSettings spawnSettings,
+        TrainConfigSettings trainConfigSettings,
+        ReclaimSettings reclaimSettings,
+        SmartDispatcherSettings smartDispatcherSettings,
+        HealthSettings healthSettings,
+        TimetableSettings timetableSettings,
+        CallSettings callSettings) {
+      this(
+          configVersion,
+          debugEnabled,
+          locale,
+          storageSettings,
+          graphSettings,
+          autoStationSettings,
+          runtimeSettings,
+          spawnSettings,
+          trainConfigSettings,
+          reclaimSettings,
+          smartDispatcherSettings,
+          healthSettings,
+          timetableSettings,
+          callSettings,
+          CouplerSettings.defaults());
     }
 
     /** 兼容尚未感知叫车配置的调用方与测试夹具。 */
@@ -1742,6 +1801,31 @@ public final class ConfigManager {
 
     public static CallSettings defaults() {
       return new CallSettings(5, 60, 60, 2, 2, 60, 90);
+    }
+  }
+
+  /**
+   * 车钩扳手。
+   *
+   * @param enabled 扳手能不能用；关掉后右键车厢不起作用（拆挂留下的同股道列车对照常维护）
+   * @param maxCars 联挂后最多几节；0 表示只受 TrainCarts 自己的上限
+   * @param pushMaxBlocks Shift+右键推车时沿轨道最远找多少格内的对方端车
+   * @param pushSpeedBlocksPerSecond 推车速度（格/秒）
+   */
+  public record CouplerSettings(
+      boolean enabled, int maxCars, int pushMaxBlocks, double pushSpeedBlocksPerSecond) {
+
+    public CouplerSettings {
+      maxCars = Math.max(0, maxCars);
+      pushMaxBlocks = Math.max(1, pushMaxBlocks);
+      pushSpeedBlocksPerSecond =
+          pushSpeedBlocksPerSecond > 0.0 && Double.isFinite(pushSpeedBlocksPerSecond)
+              ? pushSpeedBlocksPerSecond
+              : 1.0;
+    }
+
+    public static CouplerSettings defaults() {
+      return new CouplerSettings(true, 0, 8, 1.0);
     }
   }
 

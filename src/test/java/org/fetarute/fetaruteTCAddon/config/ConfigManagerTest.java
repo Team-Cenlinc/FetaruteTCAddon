@@ -505,6 +505,34 @@ class ConfigManagerTest {
     assertEquals(4, parsed.defaultMaxTrains());
   }
 
+  /** 车钩扳手配置：模板与代码缺省一致，缺段用缺省，取值无效回退缺省。 */
+  @Test
+  void couplerSettingsParseWithDefaults() throws Exception {
+    YamlConfiguration template = new YamlConfiguration();
+    try (java.io.InputStream in = ConfigManager.class.getResourceAsStream("/config.yml")) {
+      template.load(new java.io.InputStreamReader(in, java.nio.charset.StandardCharsets.UTF_8));
+    }
+    assertEquals(
+        ConfigManager.CouplerSettings.defaults(),
+        ConfigManager.parse(template, Logger.getLogger("config-test")).couplerSettings());
+    assertEquals(
+        ConfigManager.CouplerSettings.defaults(),
+        ConfigManager.parse(new YamlConfiguration(), Logger.getLogger("config-test"))
+            .couplerSettings());
+
+    YamlConfiguration explicit = new YamlConfiguration();
+    explicit.set("coupler.enabled", false);
+    explicit.set("coupler.max-cars", 12);
+    explicit.set("coupler.push-max-blocks", -1);
+    explicit.set("coupler.push-speed-blocks-per-second", 0.0);
+    ConfigManager.CouplerSettings parsed =
+        ConfigManager.parse(explicit, Logger.getLogger("config-test")).couplerSettings();
+    assertEquals(false, parsed.enabled());
+    assertEquals(12, parsed.maxCars());
+    assertEquals(8, parsed.pushMaxBlocks(), "负数回退缺省");
+    assertEquals(1.0, parsed.pushSpeedBlocksPerSecond(), 1e-9, "0 回退缺省");
+  }
+
   /** 模板里的晚点追赶参数与代码缺省值一致。 */
   @Test
   void bundledTemplateRecoveryMatchesTheDefaults() throws Exception {

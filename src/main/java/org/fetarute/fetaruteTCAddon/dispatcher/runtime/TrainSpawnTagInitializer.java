@@ -68,6 +68,11 @@ public final class TrainSpawnTagInitializer {
 
   private TrainSpawnTagInitializer() {}
 
+  /** 发车控制类瞬时标签：每次出车清掉，换了身份的列车（如拆下的半列车）也要清掉。 */
+  public static List<String> transientControlTagKeys() {
+    return TRANSIENT_CONTROL_TAG_KEYS;
+  }
+
   /**
    * 标记一个已经实体化、但票据尚未完成提交的发车事务。
    *

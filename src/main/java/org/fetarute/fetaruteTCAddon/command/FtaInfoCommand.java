@@ -143,6 +143,11 @@ public final class FtaInfoCommand {
         locale.component("command.help.hover-train"));
     sendHelpEntry(
         sender,
+        locale.component("command.help.entry-coupler"),
+        ClickEvent.suggestCommand("/fta coupler wrench"),
+        locale.component("command.help.hover-coupler"));
+    sendHelpEntry(
+        sender,
         locale.component("command.help.entry-consist"),
         ClickEvent.suggestCommand("/fta consist "),
         locale.component("command.help.hover-consist"));

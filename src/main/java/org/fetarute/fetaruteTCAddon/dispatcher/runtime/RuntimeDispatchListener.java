@@ -199,11 +199,27 @@ public final class RuntimeDispatchListener implements Listener {
     }
     MinecartGroup first = event.getGroup1();
     MinecartGroup second = event.getGroup2();
-    dispatchService.beginExpectedPhysicalTopologyRecovery(
-        identityDistinctMatching(List.of(first, second), group -> group != null).stream()
-            .map(TrainCartsRuntimeHandle::new)
-            .toList(),
-        "group-link");
+    handleGroupLink(
+        first,
+        second,
+        () ->
+            dispatchService.beginExpectedPhysicalTopologyRecovery(
+                identityDistinctMatching(List.of(first, second), group -> group != null).stream()
+                    .map(TrainCartsRuntimeHandle::new)
+                    .toList(),
+                "group-link"));
+  }
+
+  /**
+   * 联挂完成：全网先停车按现场重建；插件自己发起的联挂除外（收尾由发起方按车名改写身份、清掉被并掉的那列）。
+   *
+   * <p>编组以对象传入，TrainCarts 事件对象的适配留在入口处，单测不必初始化 TrainCarts 的静态类型。
+   */
+  void handleGroupLink(Object first, Object second, Runnable stopFirstRecovery) {
+    if (expectedTopologyChange(first, second)) {
+      return;
+    }
+    stopFirstRecovery.run();
   }
 
   /**
@@ -216,10 +232,22 @@ public final class RuntimeDispatchListener implements Listener {
     if (event == null || event.getGroup1() == null || event.getGroup2() == null) {
       return;
     }
-    vetoLinkIfCrossOwner(
-        new TrainCartsRuntimeHandle(event.getGroup1()),
-        new TrainCartsRuntimeHandle(event.getGroup2()),
-        event::setCancelled);
+    handleGroupLinkVeto(
+        event.getGroup1(),
+        event.getGroup2(),
+        () ->
+            vetoLinkIfCrossOwner(
+                new TrainCartsRuntimeHandle(event.getGroup1()),
+                new TrainCartsRuntimeHandle(event.getGroup2()),
+                event::setCancelled));
+  }
+
+  /** 联挂之前：跨属主的否决；插件自己发起的联挂不否决。 */
+  void handleGroupLinkVeto(Object first, Object second, Runnable veto) {
+    if (expectedTopologyChange(first, second)) {
+      return;
+    }
+    veto.run();
   }
 
   /**
@@ -400,6 +428,18 @@ public final class RuntimeDispatchListener implements Listener {
     }
     MinecartMember<?> member = event.getMember();
     MinecartGroup sourceGroup = event.getGroup();
+    handleMemberRemove(sourceGroup, () -> containMemberRemove(member, sourceGroup));
+  }
+
+  /** 成员移除：隔离并排“意外拆分”检查；插件自己发起的拆分/联挂除外（收尾由发起方负责）。 */
+  void handleMemberRemove(Object sourceGroup, Runnable containment) {
+    if (expectedTopologyChange(sourceGroup)) {
+      return;
+    }
+    containment.run();
+  }
+
+  private void containMemberRemove(MinecartMember<?> member, MinecartGroup sourceGroup) {
     MinecartGroup detachedGroup = member != null ? member.getGroup() : null;
     boolean sourceFta = hasFtaRuntimeTag(sourceGroup);
     boolean detachedFta = hasFtaRuntimeTag(detachedGroup);
@@ -425,6 +465,13 @@ public final class RuntimeDispatchListener implements Listener {
         sourceFta || detachedFta);
   }
 
+  /** 这些编组是否正处在插件自己发起的拆分/联挂里（见 {@code CouplingOperations}）。 */
+  private boolean expectedTopologyChange(Object... groups) {
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime coupling =
+        dispatchService.coupling();
+    return coupling != null && coupling.operations().involvesAny(groups);
+  }
+
   private boolean hasFtaRuntimeTag(MinecartGroup group) {
     return group != null
         && group.getProperties() != null
@@ -433,10 +480,16 @@ public final class RuntimeDispatchListener implements Listener {
 
   private void handleGroupRemoved(MinecartGroup group) {
     pendingUnexpectedSplits.cancel(group);
-    if (group == null) {
+    handleGroupRemoval(
+        group, () -> dispatchService.handleTrainRemoved(new TrainCartsRuntimeHandle(group)));
+  }
+
+  /** 编组移除：按物理身份清理；插件自己发起的联挂里被并掉的那组除外（发起方按车名清理）。 */
+  void handleGroupRemoval(Object group, Runnable removal) {
+    if (group == null || expectedTopologyChange(group)) {
       return;
     }
-    dispatchService.handleTrainRemoved(new TrainCartsRuntimeHandle(group));
+    removal.run();
   }
 
   private void queueUnexpectedSplitCheck(

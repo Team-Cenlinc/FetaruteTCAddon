@@ -195,7 +195,7 @@ public final class SimpleTicketAssigner implements TicketAssigner {
   public static final String TAG_CALL_TURNBACK = "FTA_CALL_TURNBACK";
 
   /** 在车库等计划时刻的提前出车写在列车上的标签：{@code 放行时刻(epoch 秒)[;交路意图]}。门控与扣车记录只在内存里，重启或重载后按它重新扣住、 重新绑回交路。 */
-  static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
+  public static final String TAG_EARLY_SPAWN_HOLD = "FTA_EARLY_HOLD";
 
   /** 重启后找回提前出车的扫描间隔。 */
   private static final Duration EARLY_SPAWN_RESTORE_SCAN = Duration.ofSeconds(10);

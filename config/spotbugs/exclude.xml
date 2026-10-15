@@ -860,4 +860,30 @@
         <Class name="org.fetarute.fetaruteTCAddon.command.FtaGuardCommand"/>
         <Bug pattern="EI_EXPOSE_REP2"/>
     </Match>
+
+    <!-- 车钩扳手：命令持有插件实例、同股道列车对按引用交给占用判定；ItemStack#setItemMeta 会修改物品；MinecartMember#getEntity 的泛型返回值 -->
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.command.FtaCouplerCommand"/>
+        <Bug pattern="EI_EXPOSE_REP2"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.CouplerService"/>
+        <Method name="pairs"/>
+        <Bug pattern="EI_EXPOSE_REP"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.CouplerService"/>
+        <Method name="center"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.CarEnds"/>
+        <Method name="center"/>
+        <Bug pattern="BC_UNCONFIRMED_CAST_OF_RETURN_VALUE"/>
+    </Match>
+    <Match>
+        <Class name="org.fetarute.fetaruteTCAddon.coupler.WrenchItem"/>
+        <Method name="create"/>
+        <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
 </FindBugsFilter>

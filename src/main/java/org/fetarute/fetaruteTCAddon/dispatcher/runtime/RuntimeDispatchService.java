@@ -270,6 +270,10 @@ public final class RuntimeDispatchService {
    */
   private final StationStopCoordinator stationStopCoordinator;
 
+  /** 拆分/联挂：插件自己发起的操作登记，与操作后按现场车身重新认列车的入口。 */
+  private final org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime
+      couplingRuntime;
+
   /**
    * 请求下一 tick 进入唯一完整信号重评估入口。
    *
@@ -1619,6 +1623,9 @@ public final class RuntimeDispatchService {
             this::resolveTrackedTrainName,
             this::resolveRouteDefinition,
             this::readRouteUuid);
+    this.couplingRuntime =
+        new org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime(
+            this::forgetPhysicalHydration);
     this.smartDispatcherController = new SmartDispatcherController(this.debugLogger);
     this.launchAuthorizationService =
         new LaunchAuthorizationService(
@@ -1709,6 +1716,23 @@ public final class RuntimeDispatchService {
    */
   public StationStopCoordinator stationStops() {
     return stationStopCoordinator;
+  }
+
+  /** 返回拆分/联挂协作者：插件自己发起的操作登记，与操作后按现场车身重新认列车。 */
+  public org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingRuntime coupling() {
+    return couplingRuntime;
+  }
+
+  /**
+   * 忘掉这列车已认定的物理车身：下一次进入调度入口时走单车水合，按现场车身原子替换它的占用（其它列车的占用不动）。
+   *
+   * <p>拆分、联挂改变了车身而编组对象可能不变，已认定的车身不能再沿用。
+   */
+  private void forgetPhysicalHydration(String trainName) {
+    String key = normalizeTrainKey(trainName);
+    if (!key.isBlank()) {
+      hydratedPhysicalOwnerIdentities.remove(key);
+    }
   }
 
   /**

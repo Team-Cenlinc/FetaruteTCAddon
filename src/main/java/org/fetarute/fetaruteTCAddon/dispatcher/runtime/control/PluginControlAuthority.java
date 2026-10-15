@@ -10,6 +10,8 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
  *
  * <p>执行层对象（控车执行器、TrainCarts 句柄）在很多地方临时创建，拿不到插件引用；这里第一次使用时找到插件，之后每次转发给它当前的控制权。
  * 找不到插件（单元测试、插件未启用）时一律视为自动运行；转发出现异常时也按自动运行处理，不让控制权问题把列车冻住。
+ *
+ * <p>正在调车（{@link ShuntingRegistry}）的列车与驾驶员接管同样算作人工控制，不经驾驶会话。
  */
 final class PluginControlAuthority implements ControlAuthority {
 
@@ -50,7 +52,9 @@ final class PluginControlAuthority implements ControlAuthority {
   @Override
   public boolean isDriverControlled(TrainProperties properties) {
     try {
-      return properties != null && delegate().isDriverControlled(properties);
+      return properties != null
+          && (ShuntingRegistry.isShunting(properties.getTrainName())
+              || delegate().isDriverControlled(properties));
     } catch (RuntimeException ex) {
       return false;
     }
@@ -59,7 +63,9 @@ final class PluginControlAuthority implements ControlAuthority {
   @Override
   public boolean isDriverControlledName(String trainName) {
     try {
-      return trainName != null && delegate().isDriverControlledName(trainName);
+      return trainName != null
+          && (ShuntingRegistry.isShunting(trainName)
+              || delegate().isDriverControlledName(trainName));
     } catch (RuntimeException ex) {
       return false;
     }
