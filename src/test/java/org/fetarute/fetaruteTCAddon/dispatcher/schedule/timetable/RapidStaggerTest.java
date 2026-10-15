@@ -327,6 +327,24 @@ class RapidStaggerTest {
         RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0));
   }
 
+  /** 超时时另写到点未重编的候选数（它们也算在"试了 N 个位置"里）；没有就不写，没超时也不写。 */
+  @Test
+  void theTimeoutReportCountsCandidatesNotRebuilt() {
+    String line =
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10, 2);
+
+    assertTrue(
+        line.startsWith(
+            "快车错峰：错峰超时（约 10 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑；其中 2 个按原表相位排出来不可用、到点未重编），试了 4 个位置"),
+        line);
+    assertEquals(
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10),
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10, 0));
+    assertEquals(
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0),
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0, 2));
+  }
+
   /**
    * 两个口径：搜索里的早停按搜索口径（同上一例，30、40 两档被卡 0，扫到 50 停、细试 25、35），最终答案在编过的候选里按报告口径挑。 报告口径下 40 只被卡 5 秒、30 被卡
    * 8 秒，选 40；没编过的位置不补。

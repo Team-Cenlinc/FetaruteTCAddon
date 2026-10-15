@@ -967,6 +967,24 @@ final class RapidStagger {
       long millis,
       boolean turnbackOnly,
       int timedOutMinutes) {
+    return describeSearch(base, chosen, tried, millis, turnbackOnly, timedOutMinutes, 0);
+  }
+
+  /**
+   * 同 {@link #describeSearch(Candidate, Optional, int, long, boolean,
+   * int)}；超时时另写有几个候选到点未重编：中途加停的候选从原表相位热启动， 排出来不可用时本该整套重选再编一次，到点就不再重编、直接淘汰——它们也算在"试了 N
+   * 个位置"里，但只按原表相位评过。
+   *
+   * @param unrebuilt 到点未重编的候选数；没超时时不写
+   */
+  static String describeSearch(
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      int timedOutMinutes,
+      int unrebuilt) {
     boolean timedOut = timedOutMinutes > 0;
     String line = describeConclusion(base, chosen, tried, millis, turnbackOnly, timedOut);
     if (!timedOut) {
@@ -976,7 +994,9 @@ final class RapidStagger {
     return head
         + "错峰超时（约 "
         + timedOutMinutes
-        + " 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），"
+        + " 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑"
+        + (unrebuilt > 0 ? "；其中 " + unrebuilt + " 个按原表相位排出来不可用、到点未重编" : "")
+        + "），"
         + line.substring(head.length());
   }
 

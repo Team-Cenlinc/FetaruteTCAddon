@@ -132,6 +132,35 @@ class ServiceGroupClassifierTest {
     }
   }
 
+  /**
+   * 两组各只开一个走向、走向相反（一组只开 A→C，另一组只开 C→A）：不分走向判也算同名，两组的方向都带组名。 一组的反向键不会落到另一组的方向上——两组不互相锚定，
+   * 按方向键跨组查找的地方也不再把它们当成同一对往返。
+   */
+  @Test
+  void oppositeOneWayGroupsAreQualifiedToo() {
+    List<TimetableBuilder.RouteInput> routes =
+        List.of(
+            operation("OA", List.of(A, B, C), "outbound"),
+            operation("IB", List.of(C, B, A), "inbound"));
+
+    ServiceGroupClassifier.Classification classification = ServiceGroupClassifier.classify(routes);
+
+    assertEquals(2, classification.groups().size());
+    List<ServiceGroupClassifier.Direction> directions = new ArrayList<>();
+    for (ServiceGroupClassifier.Group group : classification.groups()) {
+      assertEquals(1, group.directions().size(), group::toString);
+      ServiceGroupClassifier.Direction direction = group.directions().get(0);
+      assertEquals(group.name(), direction.qualifier());
+      directions.add(direction);
+    }
+    ServiceGroupClassifier.Direction inbound = directions.get(0);
+    ServiceGroupClassifier.Direction outbound = directions.get(1);
+    assertEquals("OP:S:C→OP:S:A（inbound）", inbound.key());
+    assertEquals("OP:S:A→OP:S:C（outbound）", outbound.key());
+    assertFalse(inbound.reverseKey().equals(outbound.key()), inbound::reverseKey);
+    assertFalse(outbound.reverseKey().equals(inbound.key()), outbound::reverseKey);
+  }
+
   /** 没有同名方向的多组线网：方向键与只看起终点时逐字相同（相位表、报告、编出的表都不受影响）。 */
   @Test
   void directionsWithoutCrossGroupTwinsKeepTheBareKey() {
