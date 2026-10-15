@@ -21,6 +21,7 @@ import java.util.TreeMap;
 import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.IntPredicate;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
@@ -110,8 +111,11 @@ public final class TimetableBuilder {
   /** 原表在目标间隔下的试排：错峰的平移候选与原表同一份准备、同一组参数，直接复用，不再各自把相位重选一遍。 */
   private final TargetMemo memo;
 
-  /** 准备与原表不同时从原表的相位起排（{@link #warmAttempt}）：只给错峰的加停、加长折返候选开。 */
+  /** 准备与原表不同时从原表的相位起排（{@link #warmAttempt}）：只给错峰的中途加停候选开。 */
   private final boolean warmStart;
+
+  /** 这个编表器有没有哪次试排真的用了热启动（{@link #warmAttempt} 给出了结果）：没用上时它编出来的就是整套重选的结果。 */
+  private final AtomicBoolean warmAdopted = new AtomicBoolean();
 
   public TimetableBuilder() {
     this(TimetableBuildProgress.untracked());
@@ -222,15 +226,7 @@ public final class TimetableBuilder {
       return collapsed(base.result());
     }
     Prepared chosen = base.chosen().get();
-    // 快车按基础 route 判定；区分车型时班次挂的是变体，变体随它的基础 route 算快车。
-    Set<UUID> fastRoutes =
-        withVariants(
-            RapidStagger.fastRoutes(
-                chosen.classification().groups(),
-                chosen.profiles(),
-                chosen.graphIndex(),
-                separationOf(base.options())),
-            chosen);
+    Set<UUID> fastRoutes = fastRoutesOf(base);
     RapidStagger.Measure measure =
         measureRapids(base, fastRoutes, TimetableBuildOptions.Following.NONE);
     RapidStagger.Measure reported = reportedRapids(base, fastRoutes, measure);
@@ -244,6 +240,60 @@ public final class TimetableBuilder {
               input, requested, builtAt, base, measure, reported, fastRoutes, false);
         };
     return collapsed(result);
+  }
+
+  /** 快车交路：按基础 route 判定；区分车型时班次挂的是变体，变体随它的基础 route 算快车。 */
+  private static Set<UUID> fastRoutesOf(Built base) {
+    Prepared chosen = base.chosen().orElseThrow();
+    return withVariants(
+        RapidStagger.fastRoutes(
+            chosen.classification().groups(),
+            chosen.profiles(),
+            chosen.graphIndex(),
+            separationOf(base.options())),
+        chosen);
+  }
+
+  /**
+   * 编原表，再按给定的组平移与多停编一个快车错峰候选，与错峰搜索里的是同一条路径（{@link #stagger}）：包内测试用它钉住单个候选的编法， 不必让搜索恰好走到那个候选。
+   *
+   * @param expired 错峰到没到时间上限
+   * @return 候选；不可用时为空
+   * @throws IllegalStateException 原表排不出
+   */
+  Optional<RapidStagger.Candidate> staggerCandidate(
+      BuildInput input,
+      TimetableBuildOptions requested,
+      Instant now,
+      Map<String, Integer> shift,
+      Optional<RapidStagger.Dwell> dwell,
+      java.util.function.BooleanSupplier expired) {
+    try (BuildPool opened = BuildPool.open(threads)) {
+      TimetableBuilder inPool =
+          new TimetableBuilder(
+              timingCalculator,
+              groupShift,
+              relaxAllowed,
+              progress,
+              threads,
+              opened,
+              new TargetMemo(),
+              warmStart);
+      TimetableBuildOptions options = withConsistLengths(input, requested);
+      Built base = inPool.buildOnce(input, options, now, Optional.empty(), Optional.empty());
+      if (base.chosen().isEmpty()) {
+        throw new IllegalStateException(base.result().warnings().toString());
+      }
+      return inPool.stagger(
+          input,
+          options.withRapidStagger(false),
+          now,
+          base,
+          fastRoutesOf(base),
+          shift,
+          dwell,
+          expired);
+    }
   }
 
   /** 快车型被卡：同一段共线上，快的车型跟在慢的车型后面追上前车（与快车被卡同一套实测，{@link CorridorCatchUp}）。只报告，不改表； 不区分车型或没有快慢之分时为空。 */
@@ -760,7 +810,14 @@ public final class TimetableBuilder {
               public Optional<RapidStagger.Candidate> shift(Map<String, Integer> shift) {
                 detail("第 " + candidatesTried.incrementAndGet() + " 个候选：平移 " + shift);
                 return stagger(
-                    input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.empty());
+                    input,
+                    candidateOptions,
+                    builtAt,
+                    base,
+                    fastRoutes,
+                    shift,
+                    Optional.empty(),
+                    expired);
               }
 
               @Override
@@ -775,7 +832,14 @@ public final class TimetableBuilder {
                         + dwell.seconds()
                         + "s");
                 return stagger(
-                    input, candidateOptions, builtAt, base, fastRoutes, shift, Optional.of(dwell));
+                    input,
+                    candidateOptions,
+                    builtAt,
+                    base,
+                    fastRoutes,
+                    shift,
+                    Optional.of(dwell),
+                    expired);
               }
             },
             pool(),
@@ -802,8 +866,14 @@ public final class TimetableBuilder {
    * <p>只平移相位时输入不变，沿用原表的准备；加停改了停站，时分与投影都要重算。终到折返加长改的是终到停靠的停站时间， 折返表按它重算（{@link
    * #resolveTurnarounds}）。
    *
-   * <p>加停与加长折返的候选先从原表的相位起排（{@link #warmAttempt}）；这样排出来不可用时，再整套重选相位编一次——
-   * 不可用可能只是相位没跟着新停站选（多用车、少班次、目标间隔排不开），热启动不能因此丢掉一个整套重选时可用的候选。
+   * <p>中途加停的候选先从原表的相位起排（{@link #warmAttempt}）；热启动真的用上了、排出来却不可用时，再整套重选相位编一次——
+   * 不可用可能只是相位没跟着新停站选（多用车、少班次、目标间隔排不开），热启动不能因此丢掉一个整套重选时可用的候选。 热启动没用上时编出来的已经是整套重选的结果，不再重编；
+   * 到了错峰的时间上限也不再重编。
+   *
+   * <p>加长折返的候选不热启动：往返对的反向相位按"走行 + 折返"锚定（{@link PhasePlanner}），它正是靠折返加长把反向整体往后推；
+   * 沿用原表相位时反向发车与原表逐班相同，加长只落在派车接续上。
+   *
+   * @param expired 错峰到没到时间上限
    */
   private Optional<RapidStagger.Candidate> stagger(
       BuildInput input,
@@ -812,7 +882,8 @@ public final class TimetableBuilder {
       Built base,
       Set<UUID> fastRoutes,
       Map<String, Integer> shift,
-      Optional<RapidStagger.Dwell> dwell) {
+      Optional<RapidStagger.Dwell> dwell,
+      java.util.function.BooleanSupplier expired) {
     Optional<Prepared> known = dwell.isPresent() ? Optional.empty() : base.prepared();
     BuildInput variant =
         dwell
@@ -831,18 +902,32 @@ public final class TimetableBuilder {
                 })
             .orElse(input);
     RapidStagger.Outcome original = RapidStagger.Outcome.of(base.result());
-    Built built =
+    TimetableBuilder candidate =
         new TimetableBuilder(
-                timingCalculator, shift, false, progress, threads, pool(), memo, dwell.isPresent())
-            .buildOnce(variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
-    if (dwell.isPresent()
+            timingCalculator,
+            shift,
+            false,
+            progress,
+            threads,
+            pool(),
+            memo,
+            dwell.filter(d -> !d.turnback()).isPresent());
+    Built built =
+        candidate.buildOnce(
+            variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
+    if (candidate.warmAdopted.get()
         && (built.chosen().isEmpty()
-            || !RapidStagger.acceptable(original, RapidStagger.Outcome.of(built.result())))) {
+            || !RapidStagger.acceptable(original, RapidStagger.Outcome.of(built.result())))
+        && !expired.getAsBoolean()) {
       built =
           new TimetableBuilder(
                   timingCalculator, shift, false, progress, threads, pool(), memo, false)
               .buildOnce(
-                  variant, options, builtAt, known, base.prepared().map(Prepared::graphIndex));
+                  variant,
+                  options,
+                  builtAt,
+                  built.prepared().or(() -> known),
+                  base.prepared().map(Prepared::graphIndex));
     }
     RapidStagger.Outcome outcome = RapidStagger.Outcome.of(built.result());
     if (built.chosen().isEmpty() || !RapidStagger.acceptable(original, outcome)) {
@@ -1310,6 +1395,7 @@ public final class TimetableBuilder {
     if (known.isEmpty() && warmStart) {
       Optional<Attempt> warm = warmAttempt(prepared, options, key, input, builtAt);
       if (warm.isPresent()) {
+        warmAdopted.set(true);
         return warm.get();
       }
     }
@@ -1324,15 +1410,17 @@ public final class TimetableBuilder {
   }
 
   /**
-   * 错峰加停、加长折返的候选从原表选好的相位起排（热启动）：这类候选只改了一条 route 的停站，准备要重做，但相位不再整套重选
+   * 错峰中途加停的候选从原表选好的相位起排（热启动）：这类候选只改了一条 route 的停站，准备要重做，但相位不再整套重选
    * （第三层的完整候选评估是一次构建里最贵的部分），直接按原表的相位、叠上候选的组平移试排一次。
    *
    * <p>这是启发式：整套重选可能在新停站下挑出另一个相位，热启动看不到它；候选的挑选规则不变，只是每个候选按原表相位评。 原表的试排是这次 build
    * 里第一份、在任何候选之前记下的，与线程数无关，串行与并行结果相同。
    *
    * <p>原表相位在新时分下不可行时退回整套重选：排不出任何班次（{@link BuildFailure}），或让不掉的冲突比原表在自己的相位上还多——
-   * 停站改了，原表相位上的交会点跟着挪，多出来的冲突在目标间隔下往往让不掉，候选就此被淘汰；那不是这个加停不好，是相位没跟着选。 只给错峰的加停、加长折返候选用（{@link
+   * 停站改了，原表相位上的交会点跟着挪，多出来的冲突在目标间隔下往往让不掉，候选就此被淘汰；那不是这个加停不好，是相位没跟着选。 只给错峰的中途加停候选用（{@link
    * #warmStart}），原表自己的各种重排照旧；热启动排出来的候选不可用时，候选再整套重选编一次（{@link #stagger}）。
+   *
+   * <p>相位说明不沿用原表的：那是按原表的走行与折返写的，换成一句"沿用原表相位"。
    *
    * @return 热启动的试排；没有可用的原表相位或原表相位不可行时为空
    */
@@ -1354,10 +1442,23 @@ public final class TimetableBuilder {
     } catch (BuildFailure failure) {
       return Optional.empty();
     }
-    return warm.unabsorbable().size() <= original.get().unabsorbable().size()
-        ? Optional.of(warm)
-        : Optional.empty();
+    if (warm.unabsorbable().size() > original.get().unabsorbable().size()) {
+      return Optional.empty();
+    }
+    PhasePlanner.Phases phases = warm.phases();
+    return Optional.of(
+        warm.withPhases(
+            new PhasePlanner.Phases(
+                phases.phaseByDirection(),
+                phases.offsetByGroup(),
+                phases.deltaByDirection(),
+                List.of(WARM_START_NOTE),
+                List.of(),
+                phases.connections())));
   }
+
+  /** 热启动的候选的相位说明。 */
+  static final String WARM_START_NOTE = "相位沿用原表（快车错峰的候选从原表相位热启动，不按新停站重选）";
 
   /** 按目标间隔选相位并试排（不含快车错峰的平移）。 */
   private Attempt selectedAttempt(
@@ -3436,16 +3537,12 @@ public final class TimetableBuilder {
     }
 
     /**
-     * 原表在选好的相位上的试排：参数相同（准备可以不同，如加停的候选）时给出，没有记下或参数不同时为空。
+     * 原表在选好的相位上的试排：参数相同（准备可以不同，如中途加停的候选）时给出，没有记下或参数不同时为空。
      *
-     * <p>折返表不算在内：没有 {@code --turnaround} 时它由各 route 终到停站推出，加长折返的候选正是改了它；相位按组间隔与方向排， 试排时派车照新的折返表接续。
+     * <p>折返表也要相同：反向相位按它锚定，折返表变了（终到停站改了）原表的相位就不再是这组参数下的锚定。
      */
     synchronized Optional<Attempt> originalFor(TimetableBuildOptions options) {
-      TimetableBuildOptions original = this.options;
-      if (attempt == null || original == null) {
-        return Optional.empty();
-      }
-      return options.withTurnaround(original.dutyLimits().turnaround()).equals(original)
+      return attempt != null && options.equals(this.options)
           ? Optional.of(attempt)
           : Optional.empty();
     }

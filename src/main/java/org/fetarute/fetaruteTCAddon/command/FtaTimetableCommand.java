@@ -218,10 +218,7 @@ public final class FtaTimetableCommand {
                             intValue(
                                 ctx, maxCancelFlag, TimetableBuildOptions.DEFAULT_MAX_CANCEL_TRIPS),
                             ctx.flags().isPresent(rapidStaggerFlag),
-                            intValue(
-                                ctx,
-                                staggerMinutesFlag,
-                                TimetableBuildOptions.DEFAULT_STAGGER_MINUTES),
+                            ctx.flags().getValue(staggerMinutesFlag).orElse(null),
                             ctx.flags().getValue(nameFlag).orElse(null),
                             ctx.flags().getValue(prefixFlag).orElse(null)))));
 
@@ -583,7 +580,7 @@ public final class FtaTimetableCommand {
                     holdMaxSeconds(),
                     org.fetarute.fetaruteTCAddon.dispatcher.runtime.StationStopCoordinator
                         .HOLD_CEILING.toSeconds()),
-            flags.staggerMinutes());
+            flags.staggerMinutesOrDefault());
     String timetableName = flags.name() == null ? code : flags.name();
 
     // 邻表输入（已发布表、无表线路的 route 与停靠）、足迹计算、邻表投影与 build 一起在异步线程做：已发布表一读就是
@@ -653,14 +650,19 @@ public final class FtaTimetableCommand {
             .append(Component.text(" "))
             .append(CommandUx.runAction("[查看进度]", "/fta timetable status", "正在进行的编表与所处阶段")));
     if (flags.rapidStagger()) {
+      int staggerMinutes = flags.staggerMinutesOrDefault();
       sender.sendMessage(
           Component.text(
               "已开启快车错峰搜索：每个候选位置都完整编一遍，需要几分钟"
-                  + (flags.staggerMinutes() > 0
-                      ? "（最多 " + flags.staggerMinutes() + " 分钟，到点就在已编过的候选里挑）"
+                  + (staggerMinutes > 0
+                      ? "（约 " + staggerMinutes + " 分钟上限，到点后编完当时那一批，就在已编过的候选里挑）"
                       : "（不限时）")
                   + "；在后台线程运行，不阻塞服务器主线程。",
               NamedTextColor.GRAY));
+    } else if (flags.staggerMinutes() != null) {
+      sender.sendMessage(
+          Component.text(
+              "--stagger-minutes 只在 --rapid-stagger 时生效；这次没开快车错峰搜索，忽略。", NamedTextColor.GRAY));
     }
     Instant builtAt = Instant.now();
     int threads = buildThreads();
@@ -1944,7 +1946,7 @@ public final class FtaTimetableCommand {
         configRow(
             "快车错峰时限",
             TimetableBuildOptions.DEFAULT_STAGGER_MINUTES + " 分钟",
-            "默认（无持久化位置），仅 --rapid-stagger 时生效；0 为不限",
+            "默认（无持久化位置），仅 --rapid-stagger 时生效；到点后编完当时那一批才停；0 为不限",
             CommandUx.suggestAction(
                 "[本次覆盖]", buildPrefix + " --rapid-stagger --stagger-minutes ", "只对这一次构建生效")));
     sender.sendMessage(
@@ -3631,7 +3633,7 @@ public final class FtaTimetableCommand {
    * @param strict 目标 headway 有冲突时构建失败而不是回退
    * @param maxCancelTrips 严格模式最多取消几班让不掉的班次；0 表示不取消；没给 {@code --max-cancel} 时为负，按运营班次的比例定
    * @param rapidStagger 快车错峰搜索：逐个试原地折返端的折返、快车组的平移与停站、按成品表实测挑（慢）
-   * @param staggerMinutes 快车错峰搜索最多花几分钟；0 表示不限
+   * @param staggerMinutes 快车错峰搜索的时间上限（分钟，0 表示不限）；没给 {@code --stagger-minutes} 时为空
    * @param name 时刻表展示名
    * @param tripCodePrefix 车次号前缀
    */
@@ -3650,7 +3652,15 @@ public final class FtaTimetableCommand {
       boolean strict,
       int maxCancelTrips,
       boolean rapidStagger,
-      int staggerMinutes,
+      Integer staggerMinutes,
       String name,
-      String tripCodePrefix) {}
+      String tripCodePrefix) {
+
+    /** 错峰时间上限：没给时取缺省值。 */
+    int staggerMinutesOrDefault() {
+      return staggerMinutes == null
+          ? TimetableBuildOptions.DEFAULT_STAGGER_MINUTES
+          : staggerMinutes;
+    }
+  }
 }

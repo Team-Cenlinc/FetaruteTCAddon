@@ -306,7 +306,7 @@ class TimetableBuilderRapidStaggerTest {
             .filter(line -> line.startsWith("快车错峰："))
             .findFirst()
             .orElseThrow(() -> new AssertionError(limited.phaseNotes().toString()));
-    assertTrue(note.startsWith("快车错峰：错峰超时（到 1 分钟上限停下，只在已编过的 0 个位置里挑）"), note);
+    assertTrue(note.startsWith("快车错峰：错峰超时（约 1 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），试了 0 个位置"), note);
     assertTrue(note.contains("保持原表"), note);
     assertTrue(
         unlimited.phaseNotes().stream()

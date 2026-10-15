@@ -956,7 +956,7 @@ final class RapidStagger {
 
   /**
    * 同 {@link #describeSearch(Candidate, Optional, int, long, boolean)}；搜索到了时间上限没搜完时（{@code
-   * timedOutMinutes > 0}），开头写明"错峰超时"与上限，后面的结论只针对已编过的候选。
+   * timedOutMinutes > 0}），开头写明"错峰超时"与上限，后面的结论只针对已编过的候选（编过几个只在结论里写一次）。
    *
    * @param timedOutMinutes 到点停下时的上限分钟数；搜完了为 0
    */
@@ -967,27 +967,33 @@ final class RapidStagger {
       long millis,
       boolean turnbackOnly,
       int timedOutMinutes) {
-    String line = describeConclusion(base, chosen, tried, millis, turnbackOnly);
-    if (timedOutMinutes <= 0) {
+    boolean timedOut = timedOutMinutes > 0;
+    String line = describeConclusion(base, chosen, tried, millis, turnbackOnly, timedOut);
+    if (!timedOut) {
       return line;
     }
     String head = "快车错峰：";
     return head
-        + "错峰超时（到 "
+        + "错峰超时（约 "
         + timedOutMinutes
-        + " 分钟上限停下，只在已编过的 "
-        + tried
-        + " 个位置里挑），"
+        + " 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），"
         + line.substring(head.length());
   }
 
   private static String describeConclusion(
-      Candidate base, Optional<Candidate> chosen, int tried, long millis, boolean turnbackOnly) {
+      Candidate base,
+      Optional<Candidate> chosen,
+      int tried,
+      long millis,
+      boolean turnbackOnly,
+      boolean timedOut) {
     if (chosen.isEmpty()) {
       String scope =
           turnbackOnly
               ? tried == 0
-                  ? "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；也没有可加长的原地折返端（或折返时间由 --turnaround 固定），这次没有搜"
+                  ? timedOut
+                      ? "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；只试原地折返端加长折返，到点时一档也还没编"
+                      : "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；也没有可加长的原地折返端（或折返时间由 --turnaround 固定），这次没有搜"
                   : String.format(
                       Locale.ROOT,
                       "目标间隔本身排不开（已放宽），平移与中途加停要先把间隔排开才比得了；只试了原地折返端加长折返 %d 档，没有在目标间隔下排得开、比原表好的",

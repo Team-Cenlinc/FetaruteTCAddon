@@ -73,7 +73,7 @@ class TimetableBuildReportSenderTest {
                 false, false, new TimetableBuildResult.CatchUp(30L, 1, 0L))
             .orElseThrow();
     assertTrue(
-        hint.contains("默认最多 " + TimetableBuildOptions.DEFAULT_STAGGER_MINUTES + " 分钟"), hint);
+        hint.contains("默认约 " + TimetableBuildOptions.DEFAULT_STAGGER_MINUTES + " 分钟上限"), hint);
   }
 
   /** 可点命令里几条线要加引号：客户端不认不带引号的逗号，整条命令标红发不出去。 */

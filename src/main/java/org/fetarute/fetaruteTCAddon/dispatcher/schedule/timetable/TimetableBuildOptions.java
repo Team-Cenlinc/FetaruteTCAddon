@@ -38,7 +38,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
  *     #DEFAULT_MAX_CANCEL_TRIPS}）表示按运营班次的比例定（{@link #maxCancelTripsFor}）
  * @param holdMaxSeconds 运行时早到列车在站台最多被扣多久（{@code timetable.hold-max-seconds} 与调度层硬上限取小）：
  *     表上写进去的多停靠早到等点兑现，不能超过它（{@link #feederHoldLimitSeconds}）；负数取 {@link #DEFAULT_HOLD_MAX_SECONDS}
- * @param staggerMinutes 快车错峰搜索最多花几分钟（{@code --stagger-minutes}）；到点就停在已编过的候选里挑。0 表示不限
+ * @param staggerMinutes 快车错峰搜索的时间上限（分钟，{@code --stagger-minutes}）；到点后编完当时那一批，就停在已编过的候选里挑。0 表示不限
  */
 public record TimetableBuildOptions(
     int serviceStartSecondOfDay,
@@ -230,7 +230,7 @@ public record TimetableBuildOptions(
   public static final int DEFAULT_HOLD_MAX_SECONDS = 120;
 
   /**
-   * {@code --stagger-minutes} 的缺省值：快车错峰搜索最多花 10 分钟。
+   * {@code --stagger-minutes} 的缺省值：快车错峰搜索约 10 分钟上限（到点后编完当时那一批才停，见 {@link RapidStagger#search}）。
    *
    * <p>错峰的每个候选都是一次完整编表，候选数随相对周期、加停点与档位相乘，大路网上不设上限可以跑几个小时。build 在后台线程跑、但占着编表线程与核，
    * 一次构建多等十分钟还在发起人愿意守着看结果的范围内；到点停下时已编过的候选照样按原规则挑，最先编的（加长折返、整组平移）往往已经给出了大部分改善。 要搜完整个空间就显式给更大的值或 0。

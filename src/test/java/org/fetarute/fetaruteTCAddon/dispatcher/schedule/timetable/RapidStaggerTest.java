@@ -315,8 +315,13 @@ class RapidStaggerTest {
   void theReportSaysTheSearchTimedOut() {
     String line = RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 10);
 
-    assertTrue(line.startsWith("快车错峰：错峰超时（到 10 分钟上限停下，只在已编过的 4 个位置里挑），试了 4 个位置"), line);
+    assertTrue(line.startsWith("快车错峰：错峰超时（约 10 分钟上限到点，编完当时那一批就停，只在已编过的候选里挑），试了 4 个位置"), line);
+    assertEquals(1, line.split("4 个位置", -1).length - 1, "编过几个只写一次：" + line);
     assertTrue(line.endsWith("保持原表（被卡 150s），用时 600s"), line);
+    String turnbackOnly =
+        RapidStagger.describeSearch(base(150L), Optional.empty(), 0, 600_000L, true, 10);
+    assertTrue(turnbackOnly.contains("到点时一档也还没编"), turnbackOnly);
+    assertFalse(turnbackOnly.contains("没有可加长的原地折返端"), "超时不是没有可试的：" + turnbackOnly);
     assertEquals(
         RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false),
         RapidStagger.describeSearch(base(150L), Optional.empty(), 4, 600_000L, false, 0));
