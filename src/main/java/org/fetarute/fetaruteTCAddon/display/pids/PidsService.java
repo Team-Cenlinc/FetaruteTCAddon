@@ -707,6 +707,37 @@ public final class PidsService {
 
   private record CachedOperators(long expiresAtMillis, List<String> codes) {}
 
+  /** 屏幕有线路运行状况页（只显示状况，或与到发组合翻页）：可以按运营商轮播。 */
+  public boolean hasLineStatus(PidsScreen screen) {
+    return pagesOf(screen).stream().anyMatch(layout -> layout.lineStatus().isPresent());
+  }
+
+  /**
+   * 能加进按运营商轮播的运营商：与屏幕所属运营商同一公司的运营商（大写代码，按代码排序）；屏幕没有运营商或查不到公司时为空。
+   *
+   * <p>取自名称目录（内存），与显示时认的运营商同一口径。
+   */
+  public List<String> rotationChoices(PidsScreen screen) {
+    return screen
+        .operatorCode()
+        .flatMap(directory::companyOfOperator)
+        .map(directory::operatorsOfCompany)
+        .orElse(List.of());
+  }
+
+  /** 屏幕所属的公司换了（改绑车站或运营商）：轮播清单里不再是同一公司的去掉，只剩一家时回到不轮播。 */
+  public PidsScreen keepRotationInCompany(PidsScreen screen) {
+    if (screen.rotation().isEmpty()) {
+      return screen;
+    }
+    List<String> choices = rotationChoices(screen);
+    List<String> kept = screen.rotation().stream().filter(choices::contains).toList();
+    if (kept.equals(screen.rotation())) {
+      return screen;
+    }
+    return screen.withRotation(kept.size() > 1 ? kept : List.of(), now());
+  }
+
   /** 屏幕只显示线路运行状况（各布局都带状况表组件）：不按站台显示，站台选择不起作用。 */
   public boolean isLineStatus(PidsScreen screen) {
     List<PidsLayout> pages = pagesOf(screen);

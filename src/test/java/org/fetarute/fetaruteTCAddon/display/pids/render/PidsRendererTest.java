@@ -914,6 +914,63 @@ class PidsRendererTest {
     assertEquals(theme.panel(), rgb(image, 5, 118 + 52), "第二行在 52 之后");
   }
 
+  /** 按运营商轮播：右侧按轮播顺序列出各家代码标签，轮到的那家反白；标签太宽时只画轮到的那家。 */
+  @Test
+  void aRotatingLineStatusTagsEachOperatorAndHighlightsTheOneShown() {
+    PidsLayout layout = PidsFixtures.builtInLayout("status-3x5");
+    PidsLineStatusView single =
+        statusView(
+            false, 0, 2, statusRow("WS", "浦蓝线", PidsLineStatusView.Style.GOOD, Optional.empty()));
+
+    BufferedImage plain = renderer.renderLineStatus(layout, single);
+    BufferedImage tagged =
+        renderer.renderLineStatus(layout, rotating(single, List.of("SURN", "SURC", "SURW"), 1));
+    List<String> many =
+        java.util.stream.IntStream.rangeClosed(1, 8).mapToObj(i -> "SURCENTRAL" + i).toList();
+    BufferedImage crowded = renderer.renderLineStatus(layout, rotating(single, many, 3));
+
+    int x = 320;
+    int top = 64;
+    int width = 308;
+    int height = 24;
+    int muted = PidsTheme.DARK.muted();
+    int text = PidsTheme.DARK.text();
+    assertTrue(
+        countColor(tagged, x, top, width, height, text)
+            > countColor(plain, x, top, width, height, text) + 300,
+        "轮到的那家反白（页码写进它的标签）");
+    assertTrue(
+        countColor(tagged, x, top, width, height, muted)
+            > countColor(plain, x, top, width, height, muted),
+        "另外两家描边灰字");
+    assertTrue(countColor(crowded, x, top, width, height, text) > 300, "标签太宽：仍画轮到的那家");
+    assertEquals(0, countColor(crowded, x, top, width, height, muted), "标签太宽：其余几家不画");
+
+    BufferedImage oversized =
+        renderer.renderLineStatus(layout, rotating(single, List.of("SURC", "S".repeat(120)), 1));
+    for (int y = top; y < top + height; y++) {
+      for (int px = 0; px < plain.getWidth(); px++) {
+        assertEquals(rgb(plain, px, y), rgb(oversized, px, y), "一个标签也放不下：照不轮播写页码");
+      }
+    }
+  }
+
+  private static PidsLineStatusView rotating(
+      PidsLineStatusView view, List<String> rotation, int index) {
+    return new PidsLineStatusView(
+        view.theme(),
+        view.clock(),
+        view.title(),
+        view.operator(),
+        view.labels(),
+        view.rows(),
+        view.roomy(),
+        view.page(),
+        view.pages(),
+        rotation,
+        index);
+  }
+
   @Test
   void anEmptyLineStatusSaysSo() {
     PidsLayout layout = PidsFixtures.builtInLayout("status-3x5");

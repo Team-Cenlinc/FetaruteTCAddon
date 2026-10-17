@@ -296,23 +296,47 @@ public final class PidsComposer {
     if (widget.isEmpty()) {
       return live(screen, shown, screen.station().orElseThrow());
     }
+    // 按运营商轮播：每家分自己的页，依次放完一家再到下一家（只有一家时就是原来的翻页）
+    List<String> operators =
+        PidsStatusRotation.operators(
+            operator,
+            screen.rotation(),
+            directory::companyOfOperator,
+            code -> directory.operatorName(code).isPresent());
+    List<PidsLineStatusViews.Request> requests =
+        operators.stream()
+            .map(
+                code ->
+                    new PidsLineStatusViews.Request(
+                        code,
+                        screen.station(),
+                        PidsLineStatusViews.linesFor(code, operator, screen.lines()),
+                        theme(screen),
+                        now,
+                        zone,
+                        widget.get().rowsPerPage(widget.get().roomy()),
+                        widget.get().rowsPerPage(widget.get().compact())))
+            .toList();
+    if (requests.size() == 1) {
+      return lineStatus(shown, requests.get(0).withPage(turn.round()), List.of(), 0);
+    }
+    PidsStatusRotation.Slot slot =
+        PidsStatusRotation.slot(
+            requests.stream().map(lineStatusViews::pageCount).toList(), turn.round());
     return lineStatus(
         shown,
-        new PidsLineStatusViews.Request(
-            operator,
-            screen.station(),
-            screen.lines(),
-            theme(screen),
-            now,
-            zone,
-            widget.get().rowsPerPage(widget.get().roomy()),
-            widget.get().rowsPerPage(widget.get().compact()),
-            turn.round()));
+        requests.get(slot.operator()).withPage(slot.page()),
+        slot.shown().stream().map(operators::get).toList(),
+        slot.position());
   }
 
   /** 线路运行状况的一页：线路少时用大行，多了用小行并分页。 */
-  private PidsContent lineStatus(PidsLayout layout, PidsLineStatusViews.Request request) {
-    PidsLineStatusView view = lineStatusViews.build(request, lineStatuses);
+  private PidsContent lineStatus(
+      PidsLayout layout,
+      PidsLineStatusViews.Request request,
+      List<String> rotation,
+      int rotationIndex) {
+    PidsLineStatusView view = lineStatusViews.build(request, lineStatuses, rotation, rotationIndex);
     return new PidsContent(
         new LineStatusKey(layout, view), () -> renderer.renderLineStatus(layout, view));
   }

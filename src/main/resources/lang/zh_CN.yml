@@ -1225,6 +1225,9 @@ command:
       need-binding: "<prefix> <red>请先绑定车站或运营商再启用显示</red>"
       unknown-operator: "<prefix> <red>未找到运营商</red> <gray>(operator=<white><operator></white>)</gray>"
       operator-line-status-only: "<prefix> <red>只有线路运行状况屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"
+      rotate-line-status-only: "<prefix> <red>只有带线路运行状况页的屏幕可以按运营商轮播</red>"
+      rotate-need-operator: "<prefix> <red>请先绑定车站或运营商，再选择轮播的运营商</red>"
+      rotate-other-company: "<prefix> <red>只能轮播与本屏运营商同一公司的运营商</red> <gray>(operator=<white><operator></white>)</gray>"
       need-platform: "<prefix> <red>站台屏须选定站台</red> <gray>站台号写在左上角，不能为空，也不能选全部；需要显示全部站台时请换用车站统屏布局</gray>"
       too-many-platforms: "<prefix> <red>这块屏幕最多显示 <white><max></white> 个站台</red> <gray>请先去掉一个，或换用车站统屏布局</gray>"
       page-is-primary: "<prefix> <red>该布局已是主布局</red> <gray>(layout=<white><layout></white>)，主布局请在“布局”一行改选</gray>"
@@ -1838,6 +1841,8 @@ pids:
     layout: "<gray>布局</gray>"
     pages: "<gray>组合翻页</gray>"
     pages-hint: "<dark_gray>与主布局轮流显示，再点一次取消</dark_gray>"
+    rotation: "<gray>轮播运营商</gray>"
+    rotation-hint: "<dark_gray>线路运行状况依次显示各运营商的线路，再点一次取消</dark_gray>"
     appearance: "<gray>外观</gray>"
     actions: "<gray>操作</gray>"
     station-manual: "手动指定…"
@@ -1863,6 +1868,7 @@ pids:
   info:
     header: "<prefix> <dark_aqua>站台屏 <white><id></white></dark_aqua> <gray>· <white><layout></white>（<size>）· <mode></gray>"
     binding: "<gray>车站：<white><station></white> · <platforms> · 线路：<white><lines></white> · 外观：<white><appearance></white></gray>"
+    rotation: "<gray>轮播运营商：<white><operators></white></gray>"
     location: "<gray>位置：<white><world></white> <white><x></white> <white><y></white> <white><z></white> · 朝 <white><facing></white></gray>"
   remove:
     confirm: "<prefix> <yellow>确认拆除站台屏 <white><id></white>？</yellow><gray>展示框将还原为空，并退回安装纸。</gray> "

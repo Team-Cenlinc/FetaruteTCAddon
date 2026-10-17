@@ -17,8 +17,10 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
  * @param labels 表头与空表提示
  * @param rows 这一页的线路
  * @param roomy 线路少、一页放得下时用大行（字大一档）；否则用小行并翻页
- * @param page 第几页（0 起）
- * @param pages 共几页
+ * @param page 第几页（0 起）；按运营商轮播时是这一家的第几页
+ * @param pages 共几页；按运营商轮播时是这一家共几页
+ * @param rotation 按运营商轮播时依次轮到的几家（运营商代码，页头标签用）；不轮播时为空
+ * @param rotationIndex 这一页是其中第几家（0 起）；不轮播时为 0
  */
 public record PidsLineStatusView(
     PidsTheme theme,
@@ -29,7 +31,23 @@ public record PidsLineStatusView(
     List<Row> rows,
     boolean roomy,
     int page,
-    int pages) {
+    int pages,
+    List<String> rotation,
+    int rotationIndex) {
+
+  /** 不按运营商轮播的一页。 */
+  public PidsLineStatusView(
+      PidsTheme theme,
+      String clock,
+      Names title,
+      Names operator,
+      Labels labels,
+      List<Row> rows,
+      boolean roomy,
+      int page,
+      int pages) {
+    this(theme, clock, title, operator, labels, rows, roomy, page, pages, List.of(), 0);
+  }
 
   public PidsLineStatusView {
     Objects.requireNonNull(theme, "theme");
@@ -38,6 +56,16 @@ public record PidsLineStatusView(
     Objects.requireNonNull(operator, "operator");
     Objects.requireNonNull(labels, "labels");
     rows = List.copyOf(rows);
+    rotation = List.copyOf(rotation);
+    if (!rotation.isEmpty() && (rotationIndex < 0 || rotationIndex >= rotation.size())) {
+      throw new IllegalArgumentException(
+          "rotationIndex 超出轮播家数: " + rotationIndex + "/" + rotation.size());
+    }
+  }
+
+  /** 按运营商轮播（不止一家）。 */
+  public boolean rotating() {
+    return rotation.size() > 1;
   }
 
   /**

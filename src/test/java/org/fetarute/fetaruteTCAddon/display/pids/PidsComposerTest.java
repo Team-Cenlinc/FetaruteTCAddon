@@ -70,6 +70,9 @@ class PidsComposerTest {
   /** 运营商在大都会线、浦蓝线之外另有几条线路。 */
   private int extraLines;
 
+  /** 目录认得运营商名（按运营商轮播的用例用；默认不认得，测试卡等写运营商代码）。 */
+  private boolean operatorsNamed;
+
   private Function<PidsDirectory.OperatorLine, PidsLineStatus> statuses =
       line -> PidsLineStatus.of(PidsLineStatus.Condition.GOOD);
 
@@ -782,6 +785,89 @@ class PidsComposerTest {
     assertEquals(first, lineStatusPage(screen));
   }
 
+  /** 按运营商轮播：每家一页时 15 秒换一家，页头标出轮到第几家；每家只列自己的线路。 */
+  @Test
+  void aRotatingStatusScreenTakesTurnsBetweenOperatorsOfOneCompany() {
+    operatorsNamed = true;
+    PidsScreen screen =
+        register(PidsScreen.Mode.LIVE, Set.of(), "status-3x5", 3, 5)
+            .withRotation(List.of("SURC", "SURN"), NOW);
+    registry.put(screen);
+    long start = roundStart(15);
+
+    now = Instant.ofEpochSecond(start);
+    PidsLineStatusView first = statusView(screen);
+    now = Instant.ofEpochSecond(start + 15);
+    PidsLineStatusView second = statusView(screen);
+    now = Instant.ofEpochSecond(start + 30);
+    PidsLineStatusView third = statusView(screen);
+
+    List<PidsLineStatusView> views = List.of(first, second);
+    PidsLineStatusView surc =
+        views.stream().filter(view -> view.rotationIndex() == 0).findFirst().orElseThrow();
+    PidsLineStatusView surn =
+        views.stream().filter(view -> view.rotationIndex() == 1).findFirst().orElseThrow();
+    assertEquals("南城铁路", surc.operator().primary());
+    assertEquals(List.of("MT", "WS"), surc.rows().stream().map(row -> row.line().code()).toList());
+    assertEquals("北城铁路", surn.operator().primary());
+    assertEquals(List.of("NL"), surn.rows().stream().map(row -> row.line().code()).toList());
+    assertEquals(List.of("SURC", "SURN"), surc.rotation(), "页头按轮播顺序列出两家的代码");
+    assertEquals(first.rotationIndex(), third.rotationIndex(), "两家各一页：一圈 30 秒");
+    assertEquals(
+        640,
+        composer
+            .content(Optional.of(screen.id()), 640, 384)
+            .orElseThrow()
+            .image()
+            .get()
+            .getWidth());
+  }
+
+  /** 只写线路代码的过滤是给屏幕所属运营商选的：别家照常显示全部线路，不会因为对不上被跳过。 */
+  @Test
+  void aBareLineFilterOnlyNarrowsTheScreensOwnOperator() {
+    operatorsNamed = true;
+    PidsScreen screen =
+        register(PidsScreen.Mode.LIVE, Set.of("MT"), "status-3x5", 3, 5)
+            .withRotation(List.of("SURC", "SURN"), NOW);
+    registry.put(screen);
+    long start = roundStart(15);
+
+    now = Instant.ofEpochSecond(start);
+    PidsLineStatusView first = statusView(screen);
+    now = Instant.ofEpochSecond(start + 15);
+    PidsLineStatusView second = statusView(screen);
+
+    List<PidsLineStatusView> views = List.of(first, second);
+    assertEquals(
+        List.of(List.of("MT"), List.of("NL")),
+        views.stream()
+            .sorted(java.util.Comparator.comparingInt(PidsLineStatusView::rotationIndex))
+            .map(view -> view.rows().stream().map(row -> row.line().code()).toList())
+            .toList());
+  }
+
+  @Test
+  void rotationIgnoresOperatorsOfAnotherCompany() {
+    operatorsNamed = true;
+    PidsScreen screen =
+        register(PidsScreen.Mode.LIVE, Set.of(), "status-3x5", 3, 5)
+            .withRotation(List.of("SURC", "FOO"), NOW);
+    registry.put(screen);
+
+    PidsLineStatusView view = statusView(screen);
+
+    assertFalse(view.rotating(), "别的公司的运营商不轮");
+    assertEquals("南城铁路", view.operator().primary());
+  }
+
+  private PidsLineStatusView statusView(PidsScreen screen) {
+    return assertInstanceOf(
+            PidsComposer.LineStatusKey.class,
+            composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+        .view();
+  }
+
   private int lineStatusPage(PidsScreen screen) {
     PidsLineStatusView view =
         assertInstanceOf(
@@ -925,9 +1011,21 @@ class PidsComposerTest {
 
     @Override
     public Optional<UUID> companyOfOperator(String operatorCode) {
-      return "SURC".equals(operatorCode)
+      return "SURC".equals(operatorCode) || "SURN".equals(operatorCode)
           ? Optional.of(PidsBulletinFixtures.COMPANY)
           : Optional.empty();
+    }
+
+    @Override
+    public Optional<Names> operatorName(String operatorCode) {
+      if (!operatorsNamed) {
+        return Optional.empty();
+      }
+      return switch (operatorCode) {
+        case "SURC" -> Optional.of(new Names("南城铁路", "SURcentral"));
+        case "SURN" -> Optional.of(new Names("北城铁路", "SURnorth"));
+        default -> Optional.empty();
+      };
     }
 
     @Override
@@ -937,6 +1035,15 @@ class PidsComposerTest {
 
     @Override
     public List<OperatorLine> operatorLines(String operatorCode) {
+      if ("SURN".equals(operatorCode)) {
+        return List.of(
+            new OperatorLine(
+                UUID.randomUUID(),
+                "SURN",
+                new PidsView.LineChip("NL", 0x3060C0, new Names("北环线", "North Loop")),
+                LineApi.LineStatus.ACTIVE,
+                Optional.empty()));
+      }
       List<OperatorLine> lines = new ArrayList<>();
       lines.add(
           new OperatorLine(

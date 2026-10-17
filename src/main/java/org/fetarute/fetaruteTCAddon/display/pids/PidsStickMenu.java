@@ -85,6 +85,7 @@ public final class PidsStickMenu {
           operators.append(suggest(locale.text("pids.menu.station-manual"), set + "operator "));
       sender.sendMessage(operators);
     }
+    rotationRow(service, screen, set).ifPresent(sender::sendMessage);
     if (screen.station().isPresent() && !lineStatus) {
       sender.sendMessage(platformRow(service, screen, screen.station().get(), set));
       sender.sendMessage(lineRow(service, screen, set));
@@ -163,6 +164,11 @@ public final class PidsStickMenu {
                 locale.text(
                     "pids.menu.appearance-"
                         + screen.appearance().name().toLowerCase(Locale.ROOT)))));
+    if (!screen.rotation().isEmpty()) {
+      sender.sendMessage(
+          locale.component(
+              "pids.info.rotation", Map.of("operators", String.join(" → ", screen.rotation()))));
+    }
     sender.sendMessage(
         locale.component(
             "pids.info.location",
@@ -276,6 +282,34 @@ public final class PidsStickMenu {
     }
     return Optional.of(
         row.append(Component.space()).append(locale.component("pids.menu.pages-hint")));
+  }
+
+  /** 按运营商轮播：有线路运行状况页、绑了车站或运营商的屏幕，列同一公司的运营商（轮播中的按轮播顺序在前），点一次加入、再点一次去掉。 不轮播时屏幕所属的运营商显示为选中。 */
+  private Optional<Component> rotationRow(PidsService service, PidsScreen screen, String set) {
+    Optional<String> own = screen.operatorCode();
+    List<String> choices = service.rotationChoices(screen);
+    if (!service.hasLineStatus(screen) || own.isEmpty() || choices.size() < 2) {
+      return Optional.empty();
+    }
+    List<String> selected = screen.rotation().isEmpty() ? List.of(own.get()) : screen.rotation();
+    List<String> shown = new ArrayList<>(selected.stream().filter(choices::contains).toList());
+    choices.stream().filter(code -> !shown.contains(code)).forEach(shown::add);
+    Component row = label("pids.menu.rotation");
+    for (String operator : shown) {
+      row =
+          row.append(
+              button(
+                  service
+                      .directory()
+                      .operatorName(operator)
+                      .map(PidsView.Names::primary)
+                      .orElse(operator),
+                  selected.contains(operator),
+                  null,
+                  set + "rotate " + operator));
+    }
+    return Optional.of(
+        row.append(Component.space()).append(locale.component("pids.menu.rotation-hint")));
   }
 
   /** 线路过滤：线路运行状况屏列屏幕所属运营商的线路，其余列停靠本站的线路。 */

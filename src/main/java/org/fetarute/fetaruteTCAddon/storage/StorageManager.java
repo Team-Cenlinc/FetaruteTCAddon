@@ -189,6 +189,7 @@ public final class StorageManager {
     ensureTimetableDutyConsistColumn(connection);
     ensureTimetableDutyCouplingColumns(connection);
     ensurePidsScreenPagesColumn(connection);
+    ensurePidsScreenRotationColumn(connection);
     migrateLicenseClassIds(connection);
   }
 
@@ -267,6 +268,26 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 pids_screens.page_layouts: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 pids_screens.page_layouts: " + ex.getMessage());
+    }
+  }
+
+  /** 兼容性迁移：为旧版 pids_screens 补齐 rotation_operators 列（线路运行状况按运营商轮播；旧表为空，不轮播）。 */
+  private void ensurePidsScreenRotationColumn(java.sql.Connection connection) {
+    String screensTable = storageSchema.tablePrefix() + "pids_screens";
+    String sql =
+        "ALTER TABLE " + screensTable + " ADD COLUMN rotation_operators " + dialect.jsonType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: pids_screens.rotation_operators (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.rotation_operators: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.rotation_operators: " + ex.getMessage());
     }
   }
 

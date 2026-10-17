@@ -190,6 +190,15 @@ public final class ApiPidsDirectory implements PidsDirectory {
   }
 
   @Override
+  public List<String> operatorsOfCompany(UUID companyId) {
+    return index.operatorCompanies.entrySet().stream()
+        .filter(entry -> entry.getValue().equals(companyId))
+        .map(Map.Entry::getKey)
+        .sorted()
+        .toList();
+  }
+
+  @Override
   public Optional<RouteApi.LineRef> lineOfRoute(UUID routeId) {
     return Optional.ofNullable(routeId).map(index.routeLines::get);
   }

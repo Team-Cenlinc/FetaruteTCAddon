@@ -139,4 +139,35 @@ class PidsScreenTest {
     assertEquals(Optional.empty(), stationBound.operator(), "绑了车站就不再单独记运营商");
     assertEquals(Optional.of("OFL"), stationBound.operatorCode());
   }
+
+  /** 按运营商轮播的增删：第一次加入时本运营商排在前面，再点一次去掉，只剩一家时回到不轮播；代码规整为大写、去重。 */
+  @Test
+  void rotationTogglesInOrderAndCollapsesBackToOwn() {
+    List<String> once = PidsScreen.toggleRotation(List.of(), "surc", "surn");
+    assertEquals(List.of("SURC", "SURN"), once);
+    List<String> twice = PidsScreen.toggleRotation(once, "SURC", "SURW");
+    assertEquals(List.of("SURC", "SURN", "SURW"), twice, "按加入的先后");
+    assertEquals(List.of("SURC", "SURW"), PidsScreen.toggleRotation(twice, "SURC", "surn"));
+    assertEquals(List.of(), PidsScreen.toggleRotation(once, "SURC", "SURN"), "只剩本运营商：不轮播");
+    assertEquals(
+        List.of("SURN", "SURW"), PidsScreen.toggleRotation(twice, "SURC", "SURC"), "本运营商也能去掉");
+    assertEquals(List.of(), PidsScreen.toggleRotation(List.of(), "SURC", "SURC"), "只点本运营商：不变");
+    assertEquals(List.of(), PidsScreen.toggleRotation(once, "SURC", "SURC"), "去掉本运营商只剩一家：同样回到不轮播");
+  }
+
+  /** 不再轮播的运营商写在线路过滤里的“运营商:线路”随之去掉；只写线路代码的、屏幕所属运营商的保留。 */
+  @Test
+  void droppingAnOperatorFromTheRotationDropsItsLineFilters() {
+    PidsScreen screen =
+        screen(PidsFacing.SOUTH, 3, 5)
+            .withOperator("SURC", Set.of("MT", "SURC:WS", "SURN:NL", "SURW:XL"), Instant.EPOCH)
+            .withRotation(List.of("SURC", "SURN", "SURW"), Instant.EPOCH);
+    assertEquals(Set.of("MT", "SURC:WS", "SURN:NL", "SURW:XL"), screen.lines());
+
+    PidsScreen dropped = screen.withRotation(List.of("SURC", "SURW"), Instant.EPOCH);
+
+    assertEquals(Set.of("MT", "SURC:WS", "SURW:XL"), dropped.lines());
+    assertEquals(
+        Set.of("MT", "SURC:WS"), dropped.withRotation(List.of(), Instant.EPOCH).lines(), "清空轮播");
+  }
 }

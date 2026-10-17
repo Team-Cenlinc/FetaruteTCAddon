@@ -152,6 +152,15 @@ public interface PidsDirectory {
   }
 
   /**
+   * 公司的运营商（线路运行状况按运营商轮播的可选项）。
+   *
+   * @return 大写代码，按代码排序；与 {@link #companyOfOperator} 同一口径
+   */
+  default List<String> operatorsOfCompany(UUID companyId) {
+    return List.of();
+  }
+
+  /**
    * 交路的阶段（出库、运营、回库）。
    *
    * @param routeId {@code 运营商:线路:交路}
