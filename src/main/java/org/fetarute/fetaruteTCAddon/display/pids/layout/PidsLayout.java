@@ -8,7 +8,7 @@ import java.util.Optional;
  * 站台屏布局：画布尺寸与一组内置组件的摆放。
  *
  * <p>坐标与尺寸均为地图像素，原点在左上角；一块地图 {@value #TILE}×{@value
- * #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表、线路运行状况）， 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
+ * #TILE}。组件种类是固定的（站台号、时钟、线路色带、站名、换乘条、到发表、停站表、线路运行状况、站场图与图例）， 布局只决定它们的位置、尺寸、字号与行数；新的视觉形式需要新增组件类型。
  *
  * @param id 布局 ID（文件名去掉扩展名）
  * @param name 显示名
@@ -113,6 +113,11 @@ public record PidsLayout(
         .findFirst();
   }
 
+  /** 站场图组件；不是站场图屏时为空。 */
+  public Optional<Yard> yard() {
+    return widgets.stream().filter(Yard.class::isInstance).map(Yard.class::cast).findFirst();
+  }
+
   /** 组件。 */
   public sealed interface Widget
       permits Platform,
@@ -122,7 +127,58 @@ public record PidsLayout(
           LineStrip,
           Departures,
           StopList,
-          LineStatus {}
+          LineStatus,
+          Yard,
+          YardLegend {}
+
+  /**
+   * 站场图：本站站场的轨道按真实走向投影成横向示意图，按占用着色，车身与车次窗叠在上面。
+   *
+   * <p>上下各画一条分隔线；轨道画在 {@code inset} 以内，车次窗与股道号可以伸进留白。
+   *
+   * @param x 左
+   * @param y 上
+   * @param width 宽
+   * @param height 高
+   * @param inset 轨道距组件边缘的留白（上方另留一行标签的高度）
+   * @param labelSize 股道号、车次窗与去向的字号
+   */
+  public record Yard(int x, int y, int width, int height, int inset, int labelSize)
+      implements Widget {
+
+    /** 轨道可用区域的左缘。 */
+    public int trackLeft() {
+      return x + inset;
+    }
+
+    /** 轨道可用区域的顶边：留出一行车次窗。 */
+    public int trackTop() {
+      return y + inset + labelSize + 4;
+    }
+
+    /** 轨道可用区域的宽。 */
+    public int trackWidth() {
+      return width - 2 * inset;
+    }
+
+    /** 轨道可用区域的高。 */
+    public int trackHeight() {
+      return height - (trackTop() - y) - inset;
+    }
+  }
+
+  /**
+   * 站场图图例：各种占用的画法与车次窗颜色说明，排成两列三行之内。
+   *
+   * @param x 左
+   * @param y 上（顶边画一条分隔线）
+   * @param width 宽
+   * @param height 高
+   * @param label 图例文字（中英文同行）
+   * @param noteSize 说明一行的字号
+   */
+  public record YardLegend(int x, int y, int width, int height, TextStyle label, int noteSize)
+      implements Widget {}
 
   /**
    * 一组中英文字的字号。

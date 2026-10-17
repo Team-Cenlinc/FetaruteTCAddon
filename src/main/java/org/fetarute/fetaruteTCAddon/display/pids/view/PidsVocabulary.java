@@ -6,6 +6,7 @@ import java.util.Optional;
 import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.api.route.RouteApi;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 
 /**
  * 站台屏文案。中英文同时显示，每条文案取两个键：{@code <键>} 为中文，{@code <键>-secondary} 为英文。
@@ -490,6 +491,30 @@ public final class PidsVocabulary {
       case EXPRESS -> Optional.of(primary("type.express"));
       case NORMAL, OTHER -> Optional.empty();
     };
+  }
+
+  /** 站场图图例。 */
+  public PidsYardView.Legend yardLegend() {
+    return new PidsYardView.Legend(
+        names("yard.legend.free"),
+        names("yard.legend.route"),
+        names("yard.legend.held"),
+        names("yard.legend.occupied"),
+        names("yard.legend.train"),
+        names("yard.legend.note"));
+  }
+
+  /** 站场图画不出来的原因。 */
+  public Names yardProblem(YardPicture.Problem problem) {
+    return switch (problem) {
+      case GRAPH_NOT_READY -> names("yard.no-graph");
+      case STATION_NOT_IN_GRAPH -> names("yard.no-station");
+    };
+  }
+
+  /** 有区间缺少轨道几何、以直线代替。 */
+  public Names yardPartial() {
+    return names("yard.partial");
   }
 
   private Names names(String key) {

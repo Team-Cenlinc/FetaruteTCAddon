@@ -42,6 +42,10 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardViews;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardSource;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 
 /**
  * 决定一块屏幕此刻显示什么。
@@ -50,6 +54,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
  *   <li>地图物品不指向任何已知屏幕：测试卡“未注册”（屏幕表尚未成功读入时不判定，保持原画面）
  *   <li>展示框拼出的尺寸与记录不符（有展示框被挪走）：测试卡“尺寸不符”
  *   <li>测试卡模式：测试卡，列出布局、识别出的车站（或运营商）与屏幕编号
+ *   <li>站场图屏（布局带站场图组件）：本站站场的轨道、占用与列车（{@link PidsYardSource}）；要绑车站，不组合翻页、不放公告
  *   <li>线路运行状况屏（布局带状况表组件）：屏幕所属运营商各线路的运行状况（{@link PidsLineStatusViews}），不轮播宣传页；线路多时分页； 可以不绑车站、只绑运营商
  *   <li>组合翻页（屏幕除主布局外还选了布局，见 {@link PidsScreenPages}）：按时钟轮流显示各布局，每个布局照它自己的规则显示，
  *       线路运行状况分页时每轮放一页、按轮轮换；线路运行状况屏单独用时也按这套时钟翻页。只绑运营商的屏幕只轮流显示线路运行状况
@@ -89,6 +94,11 @@ public final class PidsComposer {
   /** 叫车：本屏能不能叫车、哪些车是叫来的。未接入时一律不叫车。 */
   private volatile Function<PidsScreen, PidsViewBuilder.Calls> calls =
       screen -> PidsViewBuilder.Calls.NONE;
+
+  /** 站场图的数据。未接入时站场图屏写“调度图未就绪”。 */
+  private volatile PidsYardSource yards = PidsYardSource.NONE;
+
+  private final PidsYardViews yardViews;
 
   /** 公告按布局排好的版：同一条公告、同一布局只排一次。 */
   private final Map<TypesetKey, PidsBulletinTypesetter.Result> typeset = new ConcurrentHashMap<>();
@@ -142,7 +152,17 @@ public final class PidsComposer {
     this.vocabulary = new PidsVocabulary(texts);
     this.lineStatuses = Objects.requireNonNull(lineStatuses, "lineStatuses");
     this.lineStatusViews = new PidsLineStatusViews(directory, vocabulary);
+    this.yardViews = new PidsYardViews(directory, vocabulary);
     this.bulletins = Objects.requireNonNull(bulletins, "bulletins");
+  }
+
+  /**
+   * 接入站场图的数据。
+   *
+   * @param yards 数据来源；null 恢复默认（写“调度图未就绪”）
+   */
+  public void setYards(PidsYardSource yards) {
+    this.yards = yards == null ? PidsYardSource.NONE : yards;
   }
 
   /** 没有公告。 */
@@ -206,6 +226,9 @@ public final class PidsComposer {
   /** 公告页的内容标识：视图含当前页的排版。 */
   record BulletinKey(PidsLayout layout, PidsBulletinView view) {}
 
+  /** 站场图屏的内容标识：几何按对象身份比较，占用与列车按值比较。 */
+  record YardKey(PidsLayout layout, PidsYardView view) {}
+
   /** 排版缓存的键：公告内容版本与布局编号、尺寸（重要与否已含在内容版本里）。布局与文案随站台屏服务一起重建，不必比较整个布局。 */
   private record TypesetKey(String revision, String layoutId, int tileRows, int tileCols) {}
 
@@ -256,6 +279,15 @@ public final class PidsComposer {
     }
     if (screen.mode() == PidsScreen.Mode.TEST_CARD) {
       return Optional.of(card(testCard(screen, pages)));
+    }
+    // 站场图屏不能组合翻页，只有主布局一页；要绑车站
+    PidsLayout primary = pages.get(0);
+    if (primary.yard().isPresent()) {
+      return Optional.of(
+          screen
+              .station()
+              .map(station -> yard(screen, primary, station))
+              .orElseGet(() -> card(testCard(screen, pages))));
     }
     // 到发页要绑车站：只绑运营商的屏幕只显示其中的线路运行状况
     List<PidsLayout> shown =
@@ -328,6 +360,13 @@ public final class PidsComposer {
         requests.get(slot.operator()).withPage(slot.page()),
         slot.shown().stream().map(operators::get).toList(),
         slot.position());
+  }
+
+  /** 站场图：本站站场的占用与列车，按站台屏的检查间隔刷新。 */
+  private PidsContent yard(PidsScreen screen, PidsLayout layout, PidsStationKey station) {
+    YardPicture picture = yards.picture(station, screen.worldId(), layout.yard().orElseThrow());
+    PidsYardView view = yardViews.build(station, theme(screen), clock.instant(), zone, picture);
+    return new PidsContent(new YardKey(layout, view), () -> renderer.renderYard(layout, view));
   }
 
   /** 线路运行状况的一页：线路少时用大行，多了用小行并分页。 */

@@ -168,6 +168,22 @@ public final class PidsLayoutParser {
       case "departures" -> Optional.of(departures(node));
       case "stop-list" -> Optional.of(stopList(node));
       case "line-status" -> Optional.of(lineStatus(node));
+      case "yard" -> Optional.of(
+          new PidsLayout.Yard(
+              node.requireInt("x"),
+              node.requireInt("y"),
+              node.requireInt("width"),
+              node.requireInt("height"),
+              node.optInt("inset", 6),
+              node.optInt("label", 10)));
+      case "yard-legend" -> Optional.of(
+          new PidsLayout.YardLegend(
+              node.requireInt("x"),
+              node.requireInt("y"),
+              node.requireInt("width"),
+              node.requireInt("height"),
+              textStyle(node.child("label"), 12, 10, 6),
+              node.optInt("note", 10)));
       case "" -> Optional.empty();
       default -> {
         node.problem("type", "未知组件类型 " + type);
@@ -585,10 +601,24 @@ public final class PidsLayoutParser {
     void run() {
       boolean stopList = layout.stopList().isPresent();
       boolean lineStatus = layout.lineStatus().isPresent();
+      boolean yard = layout.yard().isPresent();
+      if (yard && lineStatus) {
+        problems.add("站场图与线路运行状况不能放在同一个布局里");
+      }
       for (int i = 0; i < layout.widgets().size(); i++) {
         Widget widget = layout.widgets().get(i);
         check("widgets[" + i + "]", widget);
-        if (lineStatus) {
+        if (widget instanceof PidsLayout.YardLegend && !yard) {
+          problems.add("widgets[" + i + "]: 站场图例要与站场图组件放在同一个布局里");
+        }
+        if (yard) {
+          if (!(widget instanceof PidsLayout.Clock
+              || widget instanceof PidsLayout.StationTitle
+              || widget instanceof PidsLayout.Yard
+              || widget instanceof PidsLayout.YardLegend)) {
+            problems.add("widgets[" + i + "]: 站场图屏只画站名、时钟、站场图与图例，不支持这个组件");
+          }
+        } else if (lineStatus) {
           if (!(widget instanceof PidsLayout.Clock || widget instanceof PidsLayout.LineStatus)) {
             problems.add("widgets[" + i + "]: 线路运行状况屏只画时钟与状况表，不支持这个组件");
           }
@@ -636,6 +666,15 @@ public final class PidsLayoutParser {
         checkStopList(path, l);
       } else if (widget instanceof PidsLayout.LineStatus l) {
         checkLineStatus(path, l);
+      } else if (widget instanceof PidsLayout.Yard y) {
+        within(path, y.x(), y.y(), y.width(), y.height());
+        if (y.inset() < 0 || y.trackWidth() < 32 || y.trackHeight() < 32) {
+          problems.add(path + ": 去掉留白后画轨道的区域不足 32×32");
+        }
+        sizes(path, y.labelSize());
+      } else if (widget instanceof PidsLayout.YardLegend l) {
+        within(path, l.x(), l.y(), l.width(), l.height());
+        sizes(path, l.label().size(), l.label().secondarySize(), l.noteSize());
       }
     }
 

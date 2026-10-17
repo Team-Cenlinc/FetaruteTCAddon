@@ -35,6 +35,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Arrival;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Label;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
 
 /**
  * 把 {@link PidsView} 按 {@link PidsLayout} 画成一帧 RGB 图像。
@@ -1058,6 +1059,31 @@ public final class PidsRenderer {
         });
   }
 
+  /** 渲染站场图屏：站名、时钟、站场图与图例（{@link PidsYardPainter}；布局校验不许站场图屏带其他组件）。 */
+  public BufferedImage renderYard(PidsLayout layout, PidsYardView view) {
+    Objects.requireNonNull(layout, "layout");
+    Objects.requireNonNull(view, "view");
+    return paint(
+        layout.width(),
+        layout.height(),
+        view.theme(),
+        layout.boldFrom(),
+        p -> {
+          PidsYardPainter yard = new PidsYardPainter(p);
+          for (PidsLayout.Widget widget : layout.widgets()) {
+            if (widget instanceof PidsLayout.Clock clock) {
+              drawClock(p, clock, view.clock());
+            } else if (widget instanceof PidsLayout.StationTitle title) {
+              drawStationTitle(p, title, view.station());
+            } else if (widget instanceof PidsLayout.Yard diagram) {
+              yard.draw(diagram, view);
+            } else if (widget instanceof PidsLayout.YardLegend legend) {
+              yard.drawLegend(legend, view);
+            }
+          }
+        });
+  }
+
   /** 停站屏的一页：按布局画站台号（不写“站台”二字）、时钟、色带，停站表组件交给 {@code body}。 */
   private BufferedImage renderStopListPage(
       PidsLayout layout,
@@ -1905,6 +1931,38 @@ public final class PidsRenderer {
     void triangle(int[] xs, int[] ys, int rgb) {
       g.setColor(new Color(rgb));
       g.fillPolygon(xs, ys, 3);
+    }
+
+    /**
+     * 像素直线（Bresenham），每一步画一个 {@code thickness} 见方的方块；两端相同时画一个点。
+     *
+     * <p>不抗锯齿：地图只有调色板颜色，混色会变成杂色。
+     */
+    void line(int x0, int y0, int x1, int y1, int thickness, int rgb) {
+      g.setColor(new Color(rgb));
+      int half = (thickness - 1) / 2;
+      int dx = Math.abs(x1 - x0);
+      int dy = -Math.abs(y1 - y0);
+      int stepX = x0 < x1 ? 1 : -1;
+      int stepY = y0 < y1 ? 1 : -1;
+      int error = dx + dy;
+      int x = x0;
+      int y = y0;
+      while (true) {
+        g.fillRect(x - half, y - half, thickness, thickness);
+        if (x == x1 && y == y1) {
+          return;
+        }
+        int doubled = 2 * error;
+        if (doubled >= dy) {
+          error += dy;
+          x += stepX;
+        }
+        if (doubled <= dx) {
+          error += dx;
+          y += stepY;
+        }
+      }
     }
 
     void outline(int x, int y, int width, int height, int rgb) {

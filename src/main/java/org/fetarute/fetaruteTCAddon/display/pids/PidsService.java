@@ -36,6 +36,8 @@ import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsPlatformChanges;
 import org.fetarute.fetaruteTCAddon.display.pids.bulletin.PidsBulletin;
@@ -54,10 +56,13 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsWallFinder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.ApiPidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusViews;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.TrainCartsYardTrains;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardProvider;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -209,6 +214,22 @@ public final class PidsService {
                                           calls.calledTrainNames(),
                                           calls.extraTrainNames())))
                   .orElse(PidsViewBuilder.Calls.NONE));
+      // 站场图：几何取自调度图快照，占用与列车位置每次检查时现取（主线程）
+      composer.setYards(
+          new YardProvider(
+              worldId ->
+                  Optional.ofNullable(addon.getRailGraphService())
+                      .flatMap(graphs -> graphs.getSnapshot(worldId))
+                      .map(RailGraphService.RailGraphSnapshot::graph),
+              () ->
+                  Optional.ofNullable(addon.getOccupancyManager())
+                      .map(OccupancyManager::snapshotClaims)
+                      .orElse(List.of()),
+              new TrainCartsYardTrains(
+                  addon::getTimetableService,
+                  (operator, line) ->
+                      directory.line(operator, line).map(PidsDirectory.LineStyle::color)),
+              stationId -> directory.stationName(stationId).map(PidsView.Names::primary)));
     }
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);

@@ -15,7 +15,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
  * 组合翻页：一块屏幕除主布局外还可以选几个布局，按时钟轮流显示（如车站统屏的到发与线路运行状况）。
  *
  * <ul>
- *   <li>能组合的只有不按站台轮播的布局（没有站台号组件：车站统屏、线路运行状况屏）；站台屏、多站台屏与停站屏有自己的轮播，只能单独用。
+ *   <li>能组合的只有不按站台轮播的布局（没有站台号组件：车站统屏、线路运行状况屏）；站台屏、多站台屏与停站屏有自己的轮播，只能单独用； 站场图要一直看着，也只能单独用。
  *   <li>翻页布局须与屏幕同尺寸。显示时跳过不存在、尺寸不符或不能组合的（布局文件改过、删过）；主布局不能组合时只显示主布局。
  *   <li>到发要绑车站：没绑车站（只绑运营商或都没绑）的屏幕不能加入到发页，已存着的显示时跳过。
  *   <li>每一轮各布局依次显示一次，停留时间按布局种类取（{@link PidsSettings.PageSettings}）。线路运行状况分几页时每轮只放其中一页、
@@ -27,9 +27,9 @@ public final class PidsScreenPages {
 
   private PidsScreenPages() {}
 
-  /** 布局能否与别的布局组合翻页：没有自己的轮播（{@link PidsPlatformSelection#hasCarousel}）。 */
+  /** 布局能否与别的布局组合翻页：没有自己的轮播（{@link PidsPlatformSelection#hasCarousel}），也不是站场图。 */
   public static boolean combinable(PidsLayout layout) {
-    return !PidsPlatformSelection.hasCarousel(layout);
+    return !PidsPlatformSelection.hasCarousel(layout) && layout.yard().isEmpty();
   }
 
   /**

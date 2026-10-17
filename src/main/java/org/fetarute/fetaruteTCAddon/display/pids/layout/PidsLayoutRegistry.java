@@ -44,7 +44,8 @@ public final class PidsLayoutRegistry {
           "platform-group-1x4",
           "platform-2x1",
           "station-3x5",
-          "status-3x5");
+          "status-3x5",
+          "yard-3x5");
 
   /**
    * 由同尺寸站台屏左右对调得出的内置布局（布局 ID → 原布局 ID）：站台号在右，屏幕挂在站台另一侧时站台号靠着站台一边，兼作指示。 不另存文件，原布局改了随之改（见 {@link

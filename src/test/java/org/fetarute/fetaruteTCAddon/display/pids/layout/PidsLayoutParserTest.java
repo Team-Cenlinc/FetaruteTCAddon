@@ -124,6 +124,63 @@ class PidsLayoutParserTest {
         "五条小行之下留 8 像素");
   }
 
+  @Test
+  void theBuiltInYardLayoutLeavesARowForTrainLabelsAboveTheTracks() {
+    PidsLayout layout = PidsFixtures.builtInLayout("yard-3x5");
+    PidsLayout.Yard yard = layout.yard().orElseThrow();
+
+    assertEquals(640, layout.width());
+    assertEquals(384, layout.height());
+    assertEquals(52, yard.trackTop(), "分隔线 32 + 留白 6 + 车次窗 10 + 4");
+    assertEquals(628, yard.trackWidth());
+    assertEquals(206, yard.trackHeight());
+    assertTrue(layout.lineStatus().isEmpty());
+  }
+
+  /** 站场图屏只画站名、时钟、站场图与图例；图例离开站场图没有意义。 */
+  @Test
+  void yardLayoutsRejectOtherWidgetsAndLoneLegends() throws Exception {
+    PidsLayoutParser.Result withDepartures =
+        parse(
+            MINIMAL
+                + """
+                  - type: yard
+                    x: 0
+                    y: 0
+                    width: 384
+                    height: 128
+                """);
+    PidsLayoutParser.Result loneLegend =
+        parse(
+            """
+            format: 1
+            tiles: {rows: 1, cols: 3}
+            widgets:
+              - type: yard-legend
+                x: 0
+                y: 0
+                width: 384
+                height: 128
+            """);
+    PidsLayoutParser.Result cramped =
+        parse(
+            """
+            format: 1
+            tiles: {rows: 1, cols: 3}
+            widgets:
+              - type: yard
+                x: 0
+                y: 0
+                width: 384
+                height: 40
+            """);
+
+    assertEquals(
+        List.of("widgets[1]: 站场图屏只画站名、时钟、站场图与图例，不支持这个组件"), withDepartures.problems(), "时钟可以，到发表不行");
+    assertEquals(List.of("widgets[0]: 站场图例要与站场图组件放在同一个布局里"), loneLegend.problems());
+    assertEquals(List.of("widgets[0]: 去掉留白后画轨道的区域不足 32×32"), cramped.problems());
+  }
+
   /** 线路运行状况屏只画时钟与状况表；省略的样式键取内置 3×5 的值。 */
   @Test
   void lineStatusLayoutsRejectOtherWidgetsAndDefaultTheirStyles() throws Exception {

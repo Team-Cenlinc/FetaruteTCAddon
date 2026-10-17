@@ -61,6 +61,7 @@ class PidsScreenPagesTest {
     assertFalse(PidsScreenPages.combinable(layout("platform-1x3")), "站台屏有自己的轮播");
     assertFalse(PidsScreenPages.combinable(layout("platform-group-1x4")));
     assertFalse(PidsScreenPages.combinable(layout("platform-2x1")), "停站屏也有自己的轮播");
+    assertFalse(PidsScreenPages.combinable(layout("yard-3x5")), "站场图要一直看着，不组合翻页");
   }
 
   @Test

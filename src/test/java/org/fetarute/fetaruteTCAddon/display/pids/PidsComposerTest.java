@@ -48,6 +48,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -910,6 +911,57 @@ class PidsComposerTest {
           "没绑车站时到发页不出现");
     }
     assertEquals(0, snapshotCalls, "不取到发快照");
+  }
+
+  /** 站场图屏：画面只随站场图变，不取到发快照；没接入调度时写“调度图未就绪”。 */
+  @Test
+  void yardScreensDrawTheYardAndKeepTheirContentWhileNothingChanges() {
+    PidsScreen screen = registerPaged(PidsScreen.Mode.LIVE, "yard-3x5");
+    PidsContent idle = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    assertEquals(
+        Optional.of(new Names("调度图未就绪", "Rail graph not ready")),
+        assertInstanceOf(PidsComposer.YardKey.class, idle.key()).view().message());
+
+    YardPicture picture = YardPicture.unavailable(YardPicture.Problem.STATION_NOT_IN_GRAPH);
+    List<PidsStationKey> asked = new ArrayList<>();
+    composer.setYards(
+        (station, world, widget) -> {
+          asked.add(station);
+          return picture;
+        });
+    PidsContent first = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+    PidsContent second = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
+
+    assertEquals(first.key(), second.key(), "站场图没变，画面不重发");
+    assertEquals(List.of(HHU, HHU), asked);
+    assertEquals(640, first.image().get().getWidth());
+    assertEquals(0, snapshotCalls, "不取到发快照");
+  }
+
+  @Test
+  void yardScreensWithoutAStationShowTheTestCard() {
+    PidsScreen screen =
+        new PidsScreen(
+            UUID.randomUUID(),
+            WORLD,
+            new PidsScreen.Position(0, 64, 0),
+            PidsFacing.SOUTH,
+            3,
+            5,
+            List.of("yard-3x5"),
+            Optional.empty(),
+            Optional.of("SURC"),
+            Set.of(),
+            Set.of(),
+            PidsScreen.Appearance.AUTO,
+            PidsScreen.Mode.LIVE,
+            NOW,
+            NOW);
+    registry.put(screen);
+
+    assertInstanceOf(
+        PidsTestCard.class,
+        composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key());
   }
 
   private PidsScreen registerPaged(PidsScreen.Mode mode, String... layouts) {

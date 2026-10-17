@@ -59,6 +59,7 @@ command:
       give:
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；或自定义布局）</dark_aqua>"
     list:
       operator-only: ["<operator>（<code>，不绑车站）"]
   train:
