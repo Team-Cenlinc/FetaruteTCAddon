@@ -56,7 +56,9 @@ command:
     max-speed: ["，最高 <value> 格/秒"]
   pids:
     help:
-      give: ["<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"]
+      give:
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
     list:
       operator-only: ["<operator>（<code>，不绑车站）"]
   train:

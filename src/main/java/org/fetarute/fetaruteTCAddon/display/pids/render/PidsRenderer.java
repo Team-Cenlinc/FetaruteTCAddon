@@ -1096,8 +1096,18 @@ public final class PidsRenderer {
       return;
     }
     int box = platform.box();
+    boolean right = platform.align() == PidsLayout.Align.RIGHT;
     for (int i = 0; i < platforms.size(); i++) {
-      int x = platform.x() + (i % platform.perRow()) * (box + platform.gap());
+      int column = i % platform.perRow();
+      int x;
+      if (right) {
+        // 靠右：每行最后一个方块贴右缘（最后一行不满时也贴右缘）
+        int row = i / platform.perRow();
+        int inRow = Math.min(platform.perRow(), platforms.size() - row * platform.perRow());
+        x = platform.x() - (inRow - column) * (box + platform.gap()) + platform.gap();
+      } else {
+        x = platform.x() + column * (box + platform.gap());
+      }
       int y = platform.y() + (i / platform.perRow()) * (box + platform.gap());
       p.fill(x, y, box, box, p.theme.inverseBackground());
       // 站台号原字号放不下时（如“12”“A1”）改用 12 号，仍放不下再省略
@@ -1117,13 +1127,27 @@ public final class PidsRenderer {
       return;
     }
     int rows = (platforms.size() + platform.perRow() - 1) / platform.perRow();
-    p.stacked(
-        caption,
-        platform.label(),
-        platform.x(),
-        platform.y() + rows * box + (rows - 1) * platform.gap() + platform.labelGap(),
-        p.theme.text(),
-        p.theme.muted());
+    int top = platform.y() + rows * box + (rows - 1) * platform.gap() + platform.labelGap();
+    if (right) {
+      // 靠右的标签往左伸：最多伸到画布左缘，放不下时省略
+      TextStyle style = platform.label();
+      p.textInkRight(
+          p.ellipsize(caption.primary(), style.size(), platform.x()),
+          style.size(),
+          platform.x(),
+          top,
+          p.theme.text());
+      if (style.hasSecondary() && !caption.secondary().isEmpty()) {
+        p.regularInkRight(
+            p.ellipsizeWords(caption.secondary(), style.secondarySize(), platform.x()),
+            style.secondarySize(),
+            platform.x(),
+            top + style.size() + style.gap(),
+            p.theme.muted());
+      }
+      return;
+    }
+    p.stacked(caption, platform.label(), platform.x(), top, p.theme.text(), p.theme.muted());
   }
 
   private void drawStationTitle(Painter p, PidsLayout.StationTitle title, Names names) {

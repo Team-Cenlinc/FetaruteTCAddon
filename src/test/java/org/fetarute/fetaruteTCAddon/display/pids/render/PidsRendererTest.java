@@ -113,6 +113,91 @@ class PidsRendererTest {
     assertEquals(PidsTheme.DARK.inverseBackground(), rgb(image, 9, 6), "站台号方块");
   }
 
+  /** 站台号在右的版式：方块贴右缘 376，到发列表从左缘 8 起。 */
+  @Test
+  void platformNumberCanSitOnTheRight() throws Exception {
+    PidsView view = platformView(PidsTheme.DARK, List.of(countdown()));
+    BufferedImage left = renderer.render(PidsFixtures.builtInLayout("platform-1x3"), view);
+    BufferedImage right = renderer.render(PidsFixtures.builtInLayout("platform-1x3-right"), view);
+    int inverse = PidsTheme.DARK.inverseBackground();
+
+    assertEquals(inverse, rgb(left, 9, 6), "原版站台号在左");
+    assertEquals(inverse, rgb(right, 353, 6), "站台号方块左上角");
+    assertEquals(inverse, rgb(right, 375, 28), "站台号方块贴右缘");
+    assertEquals(PidsTheme.DARK.panel(), rgb(right, 9, 6), "到发列表首行从左缘起");
+  }
+
+  /** 靠右的标签为空时不画字（停站屏、后续列车页传空标签走同一处）；浅色主题方块同样贴右缘。 */
+  @Test
+  void rightAlignedPlatformHandlesEmptyCaptionsAndTheLightTheme() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3-right");
+    PidsView.Labels noCaption =
+        new PidsView.Labels(
+            new Names("", ""),
+            LABELS.minutes(),
+            LABELS.noMoreTrains(),
+            LABELS.headerLine(),
+            LABELS.headerDestination(),
+            LABELS.headerPlatform(),
+            LABELS.headerArrival());
+    PidsView dark = platformView(PidsTheme.DARK, List.of(countdown()));
+    PidsView bare =
+        new PidsView(
+            PidsTheme.DARK,
+            "21:40",
+            List.of("1"),
+            Optional.empty(),
+            List.of(),
+            List.of(WS),
+            List.of(countdown()),
+            noCaption);
+
+    // 方块 352–376、y 5–29，标签从 32 起写到 60 左右
+    assertTrue(
+        countColor(renderer.render(layout, dark), 324, 32, 52, 28, PidsTheme.DARK.text()) > 0,
+        "有标签时写“站台”");
+    assertEquals(
+        0,
+        countColor(renderer.render(layout, bare), 324, 32, 52, 28, PidsTheme.DARK.text()),
+        "标签为空时不画字");
+    BufferedImage light =
+        renderer.render(layout, platformView(PidsTheme.LIGHT, List.of(countdown())));
+    assertEquals(PidsTheme.LIGHT.inverseBackground(), rgb(light, 375, 28), "浅色主题方块贴右缘");
+  }
+
+  /** 多站台、靠右：每行最后一个方块贴右缘，最后一行不满时也贴右缘。 */
+  @Test
+  void rightAlignedPlatformRowsHugTheRightEdge() throws Exception {
+    PidsLayout layout =
+        PidsFixtures.builtInLayout(
+            "platform-group-1x3",
+            text ->
+                text.replace(
+                        "  - type: platform\n    x: 8\n",
+                        "  - type: platform\n    x: 376\n    align: right\n")
+                    .replace(
+                        "  - type: departures\n    x: 66\n", "  - type: departures\n    x: 8\n"));
+    PidsView view =
+        new PidsView(
+            PidsTheme.DARK,
+            "21:40",
+            List.of("1", "2", "3"),
+            Optional.empty(),
+            List.of(),
+            List.of(WS),
+            List.of(countdown()),
+            LABELS);
+
+    BufferedImage image = renderer.render(layout, view);
+    int inverse = PidsTheme.DARK.inverseBackground();
+
+    // 方块 24、间距 4：第一行 324–348、352–376，第二行只有一个，在 352–376。
+    assertEquals(inverse, rgb(image, 325, 6), "第一行第一个");
+    assertEquals(inverse, rgb(image, 353, 6), "第一行第二个");
+    assertEquals(inverse, rgb(image, 353, 34), "第二行唯一一个贴右缘");
+    assertEquals(PidsTheme.DARK.background(), rgb(image, 325, 34), "第二行左边空着");
+  }
+
   /** 整格提示：英文在中文下方、与中文同一左缘；到站格右半边不写字。 */
   @Test
   void highlightStacksTheEnglishUnderTheChinese() throws Exception {

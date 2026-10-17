@@ -810,7 +810,9 @@ public final class PidsService {
     }
     if (used.isEmpty()) {
       layouts.all().stream()
+          // 对调出的布局与原布局排版公告相同（公告页占满全屏），不重复列出
           .filter(layout -> PidsLayoutRegistry.BUILT_IN.contains(layout.id()))
+          .filter(layout -> !PidsLayoutRegistry.MIRRORED.containsKey(layout.id()))
           .filter(PidsComposer::showsBulletins)
           .forEach(layout -> used.put(layout.id(), layout));
     }

@@ -264,6 +264,27 @@ class PidsLayoutParserTest {
         () -> atLeftEdge.problems().toString());
   }
 
+  /** 站台号靠右：x 为右缘，按方块与标签往左量是否出界。 */
+  @Test
+  void rightAlignedPlatformIsAnchoredAtItsRightEdge() throws Exception {
+    PidsLayoutParser.Result atRightEdge =
+        parse(MINIMAL.replace("widgets:\n", "widgets:\n" + rightPlatformAt(376)));
+    PidsLayoutParser.Result pastLeftEdge =
+        parse(MINIMAL.replace("widgets:\n", "widgets:\n" + rightPlatformAt(20)));
+
+    assertTrue(atRightEdge.problems().isEmpty(), () -> atRightEdge.problems().toString());
+    PidsLayout.Platform widget =
+        (PidsLayout.Platform) atRightEdge.layout().orElseThrow().widgets().get(0);
+    assertEquals(PidsLayout.Align.RIGHT, widget.align());
+    assertTrue(
+        pastLeftEdge.problems().get(0).startsWith("widgets[0]: 超出画布"),
+        () -> pastLeftEdge.problems().toString());
+  }
+
+  private static String rightPlatformAt(int x) {
+    return "  - type: platform\n    x: " + x + "\n    y: 5\n    box: 24\n    align: right\n";
+  }
+
   @Test
   void negativeBoldFromIsRejected() throws Exception {
     PidsLayoutParser.Result result = parse("bold-from: -1\n" + MINIMAL);
