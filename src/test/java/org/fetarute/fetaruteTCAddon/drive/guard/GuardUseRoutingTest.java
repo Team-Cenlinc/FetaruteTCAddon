@@ -37,7 +37,7 @@ class GuardUseRoutingTest {
   /** 分行后等选择期间按的发车铃不作数：清掉之后不会再认出一长。 */
   @Test
   void resetDropsAHalfRecognisedPress() {
-    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    BuzzerPress press = new BuzzerPress(16, 20);
     for (long t = 1_000; t <= 2_000; t += 200) {
       press.press(t);
     }

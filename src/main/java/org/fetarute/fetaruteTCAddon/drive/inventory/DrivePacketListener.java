@@ -47,6 +47,9 @@ public final class DrivePacketListener implements PacketListener {
     /** 驾驶员按下了潜行键（离座意图）。运行在网络线程，实现必须自行切回主线程处理。 */
     default void onSneak(Player player) {}
 
+    /** 任一玩家的客户端结束了一 tick（客户端时钟，见 {@link ClientClock}）。每名玩家每秒 20 次，运行在网络线程，实现必须轻量、线程安全。 */
+    default void onClientTickEnd(Player player) {}
+
     /** 诊断输出：驾驶员触发了某个数据包。运行在网络线程。 */
     default void trace(Player player, String message) {}
   }
@@ -60,7 +63,8 @@ public final class DrivePacketListener implements PacketListener {
     PacketType.IN_USE_ENTITY,
     PacketType.IN_WINDOW_CLICK,
     PacketType.IN_SET_CREATIVE_SLOT,
-    PacketType.IN_ENTITY_ACTION
+    PacketType.IN_ENTITY_ACTION,
+    PacketType.IN_CLIENT_TICK_END
   };
 
   private final Host host;
@@ -122,10 +126,18 @@ public final class DrivePacketListener implements PacketListener {
   @Override
   public void onPacketReceive(PacketReceiveEvent event) {
     Player player = event.getPlayer();
-    if (player == null || host.rewriterFor(player.getUniqueId()) == null) {
+    if (player == null) {
       return;
     }
     PacketType type = event.getType();
+    if (type == PacketType.IN_CLIENT_TICK_END) {
+      // 所有玩家都数：开始驾驶或值乘时客户端时钟已经在走
+      host.onClientTickEnd(player);
+      return;
+    }
+    if (host.rewriterFor(player.getUniqueId()) == null) {
+      return;
+    }
     if (type == PacketType.IN_BLOCK_DIG) {
       handleDig(event, player);
     } else if (type == PacketType.IN_BLOCK_PLACE) {

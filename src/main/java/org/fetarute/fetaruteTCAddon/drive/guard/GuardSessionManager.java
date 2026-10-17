@@ -52,6 +52,7 @@ import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskBoardHolder;
 import org.fetarute.fetaruteTCAddon.drive.driver.task.TaskKey;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
+import org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
 import org.fetarute.fetaruteTCAddon.drive.inventory.UseClicks;
@@ -228,9 +229,9 @@ public final class GuardSessionManager {
   /** 侧边栏与常驻提示的刷新间隔。 */
   private static final int DISPLAY_INTERVAL_TICKS = 10;
 
-  /** 右键按住时客户端连续发包：相隔超过这么久（毫秒，按真实时间量，服务器卡顿补拍不影响）才算新按下（发车铃以外的按钮按一下只算一次）。 */
+  /** 右键按住时客户端连续发包：相隔超过这么久（毫秒，按客户端时钟量）才算新按下（发车铃以外的按钮按一下只算一次）。 */
   private static final long FRESH_PRESS_GAP_MILLIS =
-      BuzzerPress.RELEASE_GAP_TICKS * BuzzerPress.MILLIS_PER_TICK;
+      BuzzerPress.RELEASE_GAP_TICKS * ClientClock.MILLIS_PER_TICK;
 
   /** 结束值乘的第一次点击之后，多久内再点一次才结束。 */
   private static final long END_CONFIRM_TICKS = 60L;
@@ -250,6 +251,7 @@ public final class GuardSessionManager {
   private final GuardTasks tasks = new GuardTasks();
   private final GuardTips tips;
   private final GuardSeatReach reach;
+  private final ClientClock clock;
 
   /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
   private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
@@ -267,7 +269,8 @@ public final class GuardSessionManager {
       LocaleManager locale,
       Supplier<DriveConfig> config,
       Supplier<ConfigManager.AutoStationSettings> chime,
-      DriverSide drivers) {
+      DriverSide drivers,
+      ClientClock clock) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.registry = Objects.requireNonNull(registry, "registry");
     this.sounds = Objects.requireNonNull(sounds, "sounds");
@@ -275,6 +278,7 @@ public final class GuardSessionManager {
     this.config = Objects.requireNonNull(config, "config");
     this.chime = Objects.requireNonNull(chime, "chime");
     this.drivers = Objects.requireNonNull(drivers, "drivers");
+    this.clock = Objects.requireNonNull(clock, "clock");
     this.sidebar = new DriveSidebar(locale);
     this.tips = new GuardTips(plugin, locale, sounds);
     this.reach = new GuardSeatReach(plugin);
@@ -355,9 +359,9 @@ public final class GuardSessionManager {
     switch (signal) {
       case SWAP_HANDS -> Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
       case USE, USE_ON_BLOCK, USE_ENTITY -> {
-        // 按下的时刻取收到数据包的那一刻：主线程卡住、之后连跑几拍补进度时，按住也不会被当成松开。
+        // 按下的时刻在收到数据包时按客户端时钟读：网络抖动、丢包重传、主线程卡住都不会把按住当成松开。
         // 选中的是哪一格留到主线程上看：切换快捷栏的数据包那时已经处理过。
-        long now = BuzzerPress.clockMillis();
+        long now = clock.now(id);
         Long previous = lastUseMillis.put(id, now);
         if (UseClicks.sameClick(previous, now)) {
           // 同一次右键客户端会连发几个包（对着实体或方块一个，再加一个使用）：只算一次
@@ -369,7 +373,9 @@ public final class GuardSessionManager {
         Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh, entity, clientHeld, now));
       }
       case RELEASE_USE -> {
-        long now = BuzzerPress.clockMillis();
+        // 松开之后的下一个右键一定是新按下的：不与松开之前的包算作同一次右键
+        lastUseMillis.remove(id);
+        long now = clock.now(id);
         Bukkit.getScheduler().runTask(plugin, () -> onUseReleased(player, now));
       }
       default -> Bukkit.getScheduler().runTask(plugin, player::updateInventory);
@@ -458,8 +464,7 @@ public final class GuardSessionManager {
             link,
             key.get(),
             seat.get(),
-            BuzzerPress.inMillis(
-                current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()),
+            new BuzzerPress(current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()),
             Bukkit.getCurrentTick());
     TaskKey trip = drivers.tripOf(seat.get().trainName()).orElse(null);
     session.setTrip(
@@ -885,7 +890,7 @@ public final class GuardSessionManager {
         plugin.getLogger().warning("车掌值乘处理出错 " + session.playerName() + ": " + ex);
       }
     }
-    tickDriverPresses(now);
+    tickDriverPresses();
     tickAcks(now);
     if (tickCounter % CLAIM_POLL_TICKS == 0) {
       try {
@@ -1182,7 +1187,7 @@ public final class GuardSessionManager {
   /**
    * @param entity 准星对着实体
    * @param clientHeld 拿着发车铃时客户端会一直报着按住、松开时另发包（{@link #heldByClient}）
-   * @param at 收到这一次右键的时刻（{@link BuzzerPress#clockMillis()}）
+   * @param at 收到这一次右键时客户端时钟的读数
    */
   private void onUse(Player player, boolean fresh, boolean entity, boolean clientHeld, long at) {
     GuardSession session = sessions.get(player.getUniqueId());
@@ -1238,7 +1243,7 @@ public final class GuardSessionManager {
    */
   private void tickBuzzer(Player player, GuardSession session, boolean seated, long now) {
     BuzzerPress buzzer = session.buzzer();
-    long nowMillis = BuzzerPress.clockMillis();
+    long nowMillis = clock.now(session.playerId());
     if (buzzer.ringing(nowMillis)
         && GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot())
             .filter(GuardHotbar.Button.BUZZER::equals)
@@ -1455,9 +1460,10 @@ public final class GuardSessionManager {
   /**
    * 驾驶员按了铃（丢弃键）：一短收到、两短呼叫车掌。
    *
+   * @param at 按下的时刻（客户端时钟的读数）
    * @return 这列车上有车掌（铃响了）
    */
-  public boolean driverBuzzer(Player driver, String trainName) {
+  public boolean driverBuzzer(Player driver, String trainName, long at) {
     Optional<GuardSession> guard = guardOfTrain(trainName);
     if (guard.isEmpty()) {
       return false;
@@ -1469,14 +1475,14 @@ public final class GuardSessionManager {
             id ->
                 new BuzzerPress(
                     current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()))
-        .press(Bukkit.getCurrentTick());
+        .press(at);
     ringBuzzer(driver, trainName);
     return true;
   }
 
-  private void tickDriverPresses(long now) {
+  private void tickDriverPresses() {
     for (Map.Entry<UUID, BuzzerPress> entry : new ArrayList<>(driverPresses.entrySet())) {
-      Optional<BuzzerPress.Kind> kind = entry.getValue().tick(now);
+      Optional<BuzzerPress.Kind> kind = entry.getValue().tick(clock.now(entry.getKey()));
       if (kind.isEmpty()) {
         continue;
       }
@@ -2725,7 +2731,7 @@ public final class GuardSessionManager {
             session.doorsClosing(now),
             work.map(w -> !w.canReport()).orElse(false),
             lamp,
-            session.buzzer().ringing(BuzzerPress.clockMillis()),
+            session.buzzer().ringing(clock.now(session.playerId())),
             session.link().emergencyHold());
     if (!force && view.equals(session.view())) {
       return;

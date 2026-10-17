@@ -258,9 +258,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final ConcurrentHashMap<UUID, Boolean> freshUse = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<UUID, Boolean> plainUse = new ConcurrentHashMap<>();
 
-  /** 右键包间隔超过这么久（毫秒，按真实时间量）才算新按下（按住时客户端每 4 tick 发一次）。 */
+  /** 右键包间隔超过这么久（毫秒，按客户端时钟量）才算新按下（按住时客户端每 4 tick 发一次）。 */
   private static final long USE_HOLD_GAP_MILLIS =
-      8L * org.fetarute.fetaruteTCAddon.drive.guard.BuzzerPress.MILLIS_PER_TICK;
+      8L * org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock.MILLIS_PER_TICK;
+
+  /** 每名玩家的客户端时钟：按键之间隔多久按客户端的 tick 量。 */
+  private final org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock clientClock =
+      new org.fetarute.fetaruteTCAddon.drive.inventory.ClientClock();
 
   private final DrivePacketListener packetListener = new DrivePacketListener(this);
   private final DriveMenu menu;
@@ -388,7 +392,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             plugin.getLocaleManager(),
             this::config,
             () -> plugin.getConfigManager().current().autoStationSettings(),
-            driverSide());
+            driverSide(),
+            clientClock);
   }
 
   /** 驾驶任务。 */
@@ -889,8 +894,12 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     return Optional.empty();
   }
 
-  /** 驾驶员按了铃：车上有车掌时一短收到、两短呼叫；没有车掌时只重发背包（丢弃键本来的处理）。 */
-  private void driverBuzzer(Player player) {
+  /**
+   * 驾驶员按了铃：车上有车掌时一短收到、两短呼叫；没有车掌时只重发背包（丢弃键本来的处理）。
+   *
+   * @param at 按下的时刻（客户端时钟的读数）
+   */
+  private void driverBuzzer(Player player, long at) {
     DriveSession session = active.get(player.getUniqueId());
     org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager crew = guards;
     if (session == null || crew == null) {
@@ -898,7 +907,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     }
     DriverLink link = session.driverLink();
     String train = link != null ? link.currentTrainName() : session.trainName();
-    crew.driverBuzzer(player, train);
+    crew.driverBuzzer(player, train, at);
   }
 
   public Optional<DriveSession> sessionOf(UUID playerId) {
@@ -959,8 +968,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return;
     }
     if (signal == InputSignal.DROP) {
-      // 丢弃键是驾驶员的铃：一短收到，两短呼叫车掌（车上有车掌时）。
-      Bukkit.getScheduler().runTask(plugin, () -> driverBuzzer(player));
+      // 丢弃键是驾驶员的铃：一短收到，两短呼叫车掌（车上有车掌时）。按下的时刻在收到时按客户端时钟读。
+      long at = clientClock.now(id);
+      Bukkit.getScheduler().runTask(plugin, () -> driverBuzzer(player, at));
     }
     if (signal == InputSignal.SWAP_HANDS) {
       // F 键打开停车后菜单。这个信号不能和其它信号合并，否则同一 tick 里的丢弃键会把它吞掉。
@@ -970,9 +980,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
         || signal == InputSignal.USE_ON_BLOCK
         || signal == InputSignal.USE_ENTITY) {
       // 右键是警惕装置、信号与 ATO 发车的确认键。它不会让客户端改动快捷栏，不必重发背包；按住右键时客户端会连续发包，合并到一次。
-      // 只认新按下的右键：一直按住不算确认（否则按住不放就能让警惕装置与信号确认失效）。间隔按真实时间量，服务器卡顿补拍不影响。
+      // 只认新按下的右键：一直按住不算确认（否则按住不放就能让警惕装置与信号确认失效）。间隔按客户端时钟量，网络抖动与服务器卡顿都不影响。
       // 对着实体（站台屏、空车厢）右键时客户端只发与实体交互，同样算确认；不在座位上时点自己的列车入座由实体交互事件处理。
-      long now = org.fetarute.fetaruteTCAddon.drive.guard.BuzzerPress.clockMillis();
+      long now = clientClock.now(id);
       Long previous = lastUseMillis.put(id, now);
       if (org.fetarute.fetaruteTCAddon.drive.inventory.UseClicks.fresh(
           previous, now, USE_HOLD_GAP_MILLIS)) {
@@ -1034,6 +1044,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 refreshInventory(player, session);
               }
             });
+  }
+
+  @Override
+  public void onClientTickEnd(Player player) {
+    clientClock.tickEnded(player.getUniqueId());
   }
 
   @Override
@@ -1495,6 +1510,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 玩家下线、死亡、切换到不允许的游戏模式等：立即结束，无需（也无法）重发背包。 */
   public void onPlayerGone(UUID playerId, DriveSession.EndReason reason) {
+    if (reason == DriveSession.EndReason.OFFLINE) {
+      clientClock.forget(playerId);
+    }
     DriveSession session = active.get(playerId);
     if (session != null) {
       leave(session, reason);
