@@ -288,9 +288,14 @@ pids:
       queue:
         title-secondary: ["Please queue"]
         body: ["请勿拥挤，有序上车"]
-        body-secondary: ["No pushing, board in order"]
+        body-secondary: ["No pushing, board in order", "Board in turn, without pushing"]
       doors:
-        body-secondary: ["Do not rush as the doors close"]
+        body-secondary: ["Do not rush as the doors close", "Don't board as the doors close"]
+      check:
+        title-secondary: ["Check your train"]
+        body-secondary: ["Not all trains make the same stops"]
+      gap:
+        body-secondary: ["Watch your step as you board"]
       passing:
         body: ["请勿靠近站台边缘"]
         body-secondary: ["Stand clear of the platform edge"]

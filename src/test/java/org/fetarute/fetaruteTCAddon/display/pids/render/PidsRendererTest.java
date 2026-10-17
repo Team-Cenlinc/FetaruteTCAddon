@@ -366,7 +366,7 @@ class PidsRendererTest {
               new PidsNoticeView(
                   PidsTheme.DARK,
                   notice,
-                  new Names("确认终点", "Check your train"),
+                  new Names("确认终点", "Check destination"),
                   new Names("快速列车跨站停靠", "Rapid trains skip some stations"),
                   List.of(WS)));
       assertTrue(

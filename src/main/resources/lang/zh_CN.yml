@@ -1749,22 +1749,22 @@ pids:
         title: "排队候车"
         title-secondary: "Queue to board"
         body: "请勿拥挤，依次上车"
-        body-secondary: "Board in turn, without pushing"
+        body-secondary: "Don't push when boarding"
       doors:
         title: "勿挡车门"
         title-secondary: "Keep doors clear"
         body: "车门关闭时请勿抢上"
-        body-secondary: "Don't board as the doors close"
+        body-secondary: "Don't board when the doors are closing"
       check:
         title: "确认终点"
-        title-secondary: "Check your train"
+        title-secondary: "Check destination"
         body: "各次列车停站不同"
-        body-secondary: "Not all trains make the same stops"
+        body-secondary: "Not all trains stop at every station"
       gap:
         title: "注意间隙"
         title-secondary: "Mind the gap"
         body: "上下车请留意脚下"
-        body-secondary: "Watch your step as you board"
+        body-secondary: "Watch your step getting on and off"
       passing:
         title: "列车通过"
         title-secondary: "Train passing"
