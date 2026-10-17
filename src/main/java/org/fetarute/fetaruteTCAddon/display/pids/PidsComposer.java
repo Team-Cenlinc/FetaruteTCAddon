@@ -28,6 +28,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsBulletinView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDivisionView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusSource;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
@@ -190,6 +191,8 @@ public final class PidsComposer {
 
   /** 空位页的内容标识：渲染随布局（色牌样式、色带位置）而定。 */
   record VacancyKey(PidsLayout layout, PidsVacancyView view) {}
+
+  record DivisionKey(PidsLayout layout, PidsDivisionView view) {}
 
   /** 2×1 停站屏的内容标识：视图含当前页号。 */
   record StopListKey(PidsLayout layout, PidsStopListView view) {}
@@ -405,7 +408,7 @@ public final class PidsComposer {
               station,
               new PidsCarousel.Signals(
                   passingSoon(screen, snapshot),
-                  views.hasVacancy(request),
+                  views.hasCarPage(request),
                   arrivingHere(screen, snapshot),
                   courtesy(request),
                   postings.stream().map(Posting::info).toList()),
@@ -422,10 +425,13 @@ public final class PidsComposer {
         }
         return new PidsContent(new LiveKey(layout, view), () -> renderer.render(layout, view));
       }
-      Optional<PidsVacancyView> vacancy =
-          slide.isPresent() ? views.vacancy(request) : Optional.empty();
-      if (vacancy.isPresent()) {
-        PidsVacancyView seats = vacancy.get();
+      // 车厢页时段：下一班要分行时先放分行页（乘客要按去向选车厢），否则放空位页
+      Optional<Object> cars = slide.isPresent() ? views.carPage(request) : Optional.empty();
+      if (cars.isPresent() && cars.get() instanceof PidsDivisionView parts) {
+        return new PidsContent(
+            new DivisionKey(layout, parts), () -> renderer.renderDivision(layout, parts));
+      }
+      if (cars.isPresent() && cars.get() instanceof PidsVacancyView seats) {
         return new PidsContent(
             new VacancyKey(layout, seats), () -> renderer.renderVacancy(layout, seats));
       }

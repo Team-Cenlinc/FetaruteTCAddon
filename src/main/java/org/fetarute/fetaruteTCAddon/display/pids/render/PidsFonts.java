@@ -4,6 +4,7 @@ import java.awt.Font;
 import java.awt.FontFormatException;
 import java.awt.font.FontRenderContext;
 import java.awt.font.LineMetrics;
+import java.awt.geom.Rectangle2D;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.UncheckedIOException;
@@ -143,6 +144,18 @@ public final class PidsFonts {
       return 0;
     }
     return (int) Math.ceil(font.getStringBounds(text, context).getWidth() - 1e-6);
+  }
+
+  /** 文字右侧的留白（像素）：步进宽度减去墨迹右缘。中文字形右边自带留白、英文末字母留白少，按步进宽度右对齐时两行的墨迹差一两个像素； 右对齐时加上它就按墨迹对齐。 */
+  public int trailing(Font font, String text) {
+    if (text == null || text.isBlank()) {
+      return 0;
+    }
+    Rectangle2D ink = font.createGlyphVector(context, text).getVisualBounds();
+    if (ink.isEmpty()) {
+      return 0;
+    }
+    return Math.max(0, width(font, text) - (int) Math.ceil(ink.getMaxX() - 1e-6));
   }
 
   /** 基线到文本框顶边的距离：文本框高为字号，内容区（上伸部加下伸部）居中其中。 */

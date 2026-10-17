@@ -185,7 +185,19 @@ public final class PidsSnapshotProvider {
         row.cars().stream().map(car -> new PidsRow.Car(car.seats(), car.occupied())).toList(),
         row.trainName()
             .flatMap(train -> platformChanges.previousOf(train, station, row.platform())),
-        lastTrains.matches(row.routeId(), row.stopSequence(), expectedAt, row.delaySeconds()));
+        lastTrains.matches(row.routeId(), row.stopSequence(), expectedAt, row.delaySeconds()),
+        row.division().map(PidsSnapshotProvider::division));
+  }
+
+  private static PidsRow.Division division(EtaApi.Division division) {
+    return new PidsRow.Division(
+        division.stopSequence(),
+        division.stationId(),
+        division.parts().stream()
+            .map(
+                part ->
+                    new PidsRow.Division.Part(part.cars(), part.detached(), part.destinationId()))
+            .toList());
   }
 
   private static PidsRow.Status status(EtaApi.BoardPhase phase) {

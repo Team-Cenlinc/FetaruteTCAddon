@@ -13,6 +13,7 @@ import java.util.Set;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsGlyphForm;
 import org.fetarute.fetaruteTCAddon.display.pids.fixtures.PidsFixtures;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDivisionView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsNotice;
@@ -470,6 +471,69 @@ class PidsRendererTest {
     assertTrue(countColor(image, 8, 71, 368, 2, PidsTheme.DARK.muted()) > 300, "站台线");
     assertTrue(countColor(image, 8, 88, 368, 24, PidsTheme.DARK.text()) > 0, "提示与图例");
     assertEquals(WS, rgb(image, 200, 124), "色带与主页同一位置");
+  }
+
+  /** 空位页、分行页右上角的“停靠中 / Boarding”“进站 / Arriving”：中英文两行按墨迹右缘对齐（中文字形右边自带留白）。 */
+  @Test
+  void highlightedArrivalLinesAlignOnTheirInk() throws Exception {
+    PidsLayout layout = PidsFixtures.builtInLayout("platform-1x3");
+    for (Names status : List.of(new Names("停靠中", "Boarding"), new Names("进站", "Arriving"))) {
+      Arrival arrival =
+          new Arrival(
+              ArrivalMode.HIGHLIGHT, 0, Tone.NORMAL, Optional.of(Label.of(status, Tone.NORMAL)));
+      BufferedImage vacancy =
+          renderer.renderVacancy(
+              layout,
+              new PidsVacancyView(
+                  PidsTheme.DARK,
+                  new Badge("WS", Optional.of("各停"), WS, false),
+                  new Names("南渡", "Nam Toa"),
+                  arrival,
+                  List.of(new PidsVacancyView.Car(PidsVacancyView.Level.MANY, 8)),
+                  Optional.empty(),
+                  new PidsVacancyView.Labels(
+                      new Names("分", "min"),
+                      new Names("请优先考虑较空的车厢", "Please use less crowded cars"),
+                      new Names("座位充足", "Many seats"),
+                      new Names("座位较少", "Some seats"),
+                      new Names("座位紧张", "Few seats")),
+                  List.of(WS)));
+      BufferedImage division =
+          renderer.renderDivision(
+              layout,
+              new PidsDivisionView(
+                  PidsTheme.DARK,
+                  new Badge("WS", Optional.of("各停"), WS, false),
+                  new Names("本次列车在本站分行", "Divides at this station"),
+                  arrival,
+                  List.of(
+                      new PidsDivisionView.Segment(
+                          4, new Names("前 4 节开往南渡", "Front 4 cars to Nam Toa"), false),
+                      new PidsDivisionView.Segment(
+                          4, new Names("后 4 节本站止", "Rear 4 cars terminate here"), true)),
+                  Optional.empty(),
+                  new Names("分", "min"),
+                  List.of(WS)));
+
+      for (BufferedImage image : List.of(vacancy, division)) {
+        int primary = inkRight(image, 300, 40, PidsTheme.DARK.text());
+        int secondary = inkRight(image, 300, 40, PidsTheme.DARK.muted());
+        assertTrue(primary > 300, status.primary() + "：中文在右上");
+        assertEquals(primary, secondary, status.primary() + " 与 " + status.secondary() + " 的右缘");
+      }
+    }
+  }
+
+  /** 区域 {@code [fromX, 宽) × [0, height)} 里某色最右的一列；没有时为 -1。 */
+  private static int inkRight(BufferedImage image, int fromX, int height, int color) {
+    for (int x = image.getWidth() - 1; x >= fromX; x--) {
+      for (int y = 0; y < height; y++) {
+        if (rgb(image, x, y) == color) {
+          return x;
+        }
+      }
+    }
+    return -1;
   }
 
   /** 站台变更过的站台方块用琥珀色。 */

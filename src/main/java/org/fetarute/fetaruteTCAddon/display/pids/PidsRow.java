@@ -30,6 +30,7 @@ import java.util.OptionalLong;
  * @param cars 运行中列车各节车的座位与在座乘客，车头在前；没有载客数据时为空
  * @param previousPlatform 站台变更前的站台：这辆车在本站的站台定下来时与计划（或暂定）不同、或定下后又改了；没有变更时为空
  * @param lastTrain 当天从本站开往这个终点的最后一班（按已发布时刻表）
+ * @param division 运行中列车在本站或前方某站分行；不分行、票据与预测为空
  */
 public record PidsRow(
     Status status,
@@ -49,7 +50,8 @@ public record PidsRow(
     List<String> platformCandidates,
     List<Car> cars,
     Optional<String> previousPlatform,
-    boolean lastTrain) {
+    boolean lastTrain,
+    Optional<Division> division) {
 
   public PidsRow {
     Objects.requireNonNull(status, "status");
@@ -64,6 +66,49 @@ public record PidsRow(
     platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
     cars = cars == null ? List.of() : List.copyOf(cars);
     previousPlatform = previousPlatform == null ? Optional.empty() : previousPlatform;
+    division = division == null ? Optional.empty() : division;
+  }
+
+  /** 不分行的行。 */
+  public PidsRow(
+      Status status,
+      String lineName,
+      String routeId,
+      String destination,
+      Optional<String> destinationId,
+      String platform,
+      Instant expectedAt,
+      OptionalLong delaySeconds,
+      int stopSequence,
+      boolean passing,
+      boolean terminating,
+      boolean outOfService,
+      Optional<String> trainName,
+      boolean platformPending,
+      List<String> platformCandidates,
+      List<Car> cars,
+      Optional<String> previousPlatform,
+      boolean lastTrain) {
+    this(
+        status,
+        lineName,
+        routeId,
+        destination,
+        destinationId,
+        platform,
+        expectedAt,
+        delaySeconds,
+        stopSequence,
+        passing,
+        terminating,
+        outOfService,
+        trainName,
+        platformPending,
+        platformCandidates,
+        cars,
+        previousPlatform,
+        lastTrain,
+        Optional.empty());
   }
 
   /** 不是末班车的行。 */
@@ -221,6 +266,57 @@ public record PidsRow(
    * @param occupied 在座乘客数
    */
   public record Car(int seats, int occupied) {}
+
+  /**
+   * 列车分行：在分行站拆成两列，各开往不同的地方。
+   *
+   * @param stopSequence 分行站的停靠序号；等于本行的停靠序号时就在本站分行
+   * @param stationId 分行站（{@code 运营商:站码}）
+   * @param parts 两段，车头在前
+   */
+  public record Division(int stopSequence, String stationId, List<Part> parts) {
+
+    public Division {
+      Objects.requireNonNull(stationId, "stationId");
+      parts = List.copyOf(parts);
+    }
+
+    /**
+     * 一段车厢。
+     *
+     * @param cars 节数
+     * @param detached 在分行站解下另走；否则留下继续本交路
+     * @param destinationId 分行后开往的车站（{@code 运营商:站码}）；分行后不载客时为空
+     */
+    public record Part(int cars, boolean detached, Optional<String> destinationId) {
+
+      public Part {
+        destinationId = destinationId == null ? Optional.empty() : destinationId;
+      }
+    }
+
+    /** 解下另走的那一段；没有时为空。 */
+    public Optional<Part> detachedPart() {
+      return parts.stream().filter(Part::detached).findFirst();
+    }
+
+    /** 解下的那一段在车头一侧。 */
+    public boolean detachedAtFront() {
+      return !parts.isEmpty() && parts.get(0).detached();
+    }
+  }
+
+  /** 列车在本站或前方分行（只认拆成两段的）。 */
+  public Optional<Division> dividing() {
+    return division
+        .filter(found -> found.parts().size() == 2 && found.stopSequence() >= 0)
+        .filter(found -> stopSequence < 0 || found.stopSequence() >= stopSequence);
+  }
+
+  /** 列车就在本站分行。 */
+  public boolean dividesHere() {
+    return dividing().filter(found -> found.stopSequence() == stopSequence).isPresent();
+  }
 
   /** 列车会停在这些站台之一（站台已定时看站台号，待定时看候选），或原定停在这些站台之一、后来改了站台。 */
   public boolean mayUse(Collection<String> platforms) {

@@ -2562,7 +2562,10 @@ public final class FetaruteTCAddon extends JavaPlugin {
     }
     org.fetarute.fetaruteTCAddon.api.eta.EtaApi etaApi =
         etaService != null
-            ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(etaService)
+            ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(
+                etaService,
+                // 站牌行带上分行：解编服务每秒预测一次，任意线程读
+                name -> getCouplerService().flatMap(coupler -> coupler.decoupling().forecast(name)))
             : null;
     org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi timetableApi =
         new org.fetarute.fetaruteTCAddon.api.internal.TimetableApiImpl(

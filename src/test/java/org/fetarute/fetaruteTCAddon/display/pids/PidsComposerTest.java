@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreenRegistry;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsBulletinView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDirectory;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsDivisionView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsFollowingView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatus;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusView;
@@ -297,6 +298,57 @@ class PidsComposerTest {
     assertInstanceOf(
         PidsComposer.LiveKey.class,
         composer.content(Optional.of(screen.id()), 384, 128).orElseThrow().key());
+  }
+
+  /** 本站台的下一班要分行：车厢页时段（进站时也翻）放分行页，有座位数据时也先放它；文案取自语言文件，英文按单复数。 */
+  @Test
+  void aDividingTrainTakesTheCarPageEvenWhileArriving() {
+    settings = withSlides(12, 4);
+    PidsScreen screen = register(PidsScreen.Mode.LIVE, Set.of());
+    now = roundStart().plusSeconds(13);
+    PidsRow base = arriving("3");
+    rows =
+        List.of(
+            new PidsRow(
+                base.status(),
+                base.lineName(),
+                base.routeId(),
+                base.destination(),
+                base.destinationId(),
+                base.platform(),
+                base.expectedAt(),
+                base.delaySeconds(),
+                base.stopSequence(),
+                false,
+                false,
+                false,
+                base.trainName(),
+                false,
+                List.of(),
+                List.of(new PidsRow.Car(4, 1), new PidsRow.Car(4, 1)),
+                Optional.empty(),
+                false,
+                Optional.of(
+                    new PidsRow.Division(
+                        5,
+                        "SURC:HHU",
+                        List.of(
+                            new PidsRow.Division.Part(1, false, Optional.of("SURC:TPC")),
+                            new PidsRow.Division.Part(1, true, Optional.empty()))))),
+            row("MT", 120));
+
+    PidsContent content = composer.content(Optional.of(screen.id()), 384, 128).orElseThrow();
+
+    PidsDivisionView division =
+        assertInstanceOf(PidsComposer.DivisionKey.class, content.key()).view();
+    assertEquals(new Names("本次列车在新笛矢·壑湖分行", "Divides at Neo Fueya - Hor Huu"), division.title());
+    assertEquals(
+        new Names("前 1 节开往大港城", "Front 1 car to The Port City"),
+        division.segments().get(0).destination());
+    assertEquals(
+        new Names("后 1 节至新笛矢·壑湖止", "Rear 1 car terminates at Neo Fueya - Hor Huu"),
+        division.segments().get(1).destination());
+    assertEquals(128, content.image().get().getHeight(), "画得出来");
   }
 
   @Test

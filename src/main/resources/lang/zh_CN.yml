@@ -1660,10 +1660,33 @@ pids:
     # 备注：终点下面英文那一格轮换显示的标签（色块反白），标签后写站名或线路名
     remark:
       last-train: "末班车"
+      division: "分行"
+      division-here: "本站分行"
       through: "直通"
       through-secondary: "thru"
       via: "经由"
       via-secondary: "via"
+    # 分行（列车在本站或前方某站拆成两列，各开往不同的地方）：分行页标题、各段说明与到发行备注；
+    # <station> 分行站，<end> 前或后，<cars> 节数，<destination> 分行后开往的车站
+    division:
+      title: "本次列车在<station>分行"
+      title-secondary: "Divides at <station>"
+      title-here: "本次列车在本站分行"
+      title-here-secondary: "Divides at this station"
+      front: "前"
+      front-secondary: "Front"
+      rear: "后"
+      rear-secondary: "Rear"
+      to: "<end> <cars> 节开往<destination>"
+      to-secondary: "<end> <cars> cars to <destination>"
+      to-one-secondary: "<end> <cars> car to <destination>"
+      ends: "<end> <cars> 节至<station>止"
+      ends-secondary: "<end> <cars> cars terminate at <station>"
+      ends-one-secondary: "<end> <cars> car terminates at <station>"
+      ends-here: "<end> <cars> 节本站止"
+      ends-here-secondary: "<end> <cars> cars terminate here"
+      ends-here-one-secondary: "<end> <cars> car terminates here"
+      remark: "<end> <cars> 节往<destination>"
     # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题
     stop-list:
       through-from: "<station>起"

@@ -23,6 +23,9 @@ public final class PidsVocabulary {
   private static final String FROM = "<from>";
   private static final String TO = "<to>";
   private static final String TIME = "<time>";
+  private static final String END = "<end>";
+  private static final String CARS = "<cars>";
+  private static final String DESTINATION = "<destination>";
 
   private final Function<String, String> text;
 
@@ -160,6 +163,82 @@ public final class PidsVocabulary {
   /** 备注标签：末班车。 */
   public String lastTrainTag() {
     return primary("remark.last-train");
+  }
+
+  /** 备注标签：分行；本站分行时“本站分行”。 */
+  public String divisionTag(boolean here) {
+    return primary(here ? "remark.division-here" : "remark.division");
+  }
+
+  /**
+   * 分行页标题：“本次列车在 X 分行 / Divides at X”。
+   *
+   * @param station 分行站；为空时就在本站分行
+   */
+  public Names divisionTitle(Optional<Names> station) {
+    if (station.isEmpty()) {
+      return names("division.title-here");
+    }
+    Names names = names("division.title");
+    return new Names(
+        names.primary().replace(STATION, station.get().primary()),
+        names.secondary().replace(STATION, secondaryOrPrimary(station.get())));
+  }
+
+  /**
+   * 分行页一段车厢的说明：“前 4 节开往南渡 / Front 4 cars to Nam Toa”；分行后不载客时“后 2 节至 X 止”，在本站分行时“后 2 节本站止”。
+   *
+   * @param front 车头一侧的一段
+   * @param destination 分行后开往的车站；不载客时为空
+   * @param station 分行站；为空时就在本站分行
+   */
+  public Names divisionSegment(
+      boolean front, int cars, Optional<Names> destination, Optional<Names> station) {
+    Names end = names(front ? "division.front" : "division.rear");
+    String key;
+    Names place;
+    if (destination.isPresent()) {
+      key = "division.to";
+      place = destination.get();
+    } else if (station.isPresent()) {
+      key = "division.ends";
+      place = station.get();
+    } else {
+      key = "division.ends-here";
+      place = new Names("", "");
+    }
+    // 英文按单复数另有一套（“1 car terminates”）
+    String secondary = text.apply(PREFIX + key + (cars == 1 ? "-one" : "") + SECONDARY);
+    return new Names(
+        fill(primary(key), end.primary(), cars, place.primary()),
+        fill(secondary, secondaryOrPrimary(end), cars, secondaryOrPrimary(place)));
+  }
+
+  /**
+   * 备注：解下另走的那一段，“后 4 节往大港城”；分行后不载客时“后 2 节至 X 止”，在本站分行时“后 2 节本站止”。
+   *
+   * @param front 解下的一段在车头一侧
+   * @param destination 分行后开往的车站名；不载客时为空
+   * @param station 分行站名；为空时就在本站分行
+   */
+  public String divisionRemark(
+      boolean front, int cars, Optional<String> destination, Optional<String> station) {
+    String end = primary(front ? "division.front" : "division.rear");
+    if (destination.isPresent()) {
+      return fill(primary("division.remark"), end, cars, destination.get());
+    }
+    return station
+        .map(name -> fill(primary("division.ends"), end, cars, name))
+        .orElseGet(() -> fill(primary("division.ends-here"), end, cars, ""));
+  }
+
+  /** 填分行说明里的 {@code <end>}、{@code <cars>} 与地名（{@code <destination>} 或 {@code <station>}）。 */
+  private static String fill(String template, String end, int cars, String place) {
+    return template
+        .replace(END, end)
+        .replace(CARS, Integer.toString(cars))
+        .replace(DESTINATION, place)
+        .replace(STATION, place);
   }
 
   /** 备注标签：直通。 */

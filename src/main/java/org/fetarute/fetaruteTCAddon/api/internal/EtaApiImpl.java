@@ -6,7 +6,9 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.function.Function;
 import org.fetarute.fetaruteTCAddon.api.eta.EtaApi;
+import org.fetarute.fetaruteTCAddon.coupler.DivisionForecast;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaConfidence;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaReason;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
@@ -24,8 +26,19 @@ public final class EtaApiImpl implements EtaApi {
 
   private final EtaService etaService;
 
+  /** 运行中列车的分行预测（按车名查）。 */
+  private final Function<String, Optional<DivisionForecast>> divisions;
+
   public EtaApiImpl(EtaService etaService) {
+    this(etaService, name -> Optional.empty());
+  }
+
+  /**
+   * @param divisions 运行中列车的分行预测（按车名查，任意线程可调）
+   */
+  public EtaApiImpl(EtaService etaService, Function<String, Optional<DivisionForecast>> divisions) {
     this.etaService = Objects.requireNonNull(etaService, "etaService");
+    this.divisions = divisions == null ? name -> Optional.empty() : divisions;
   }
 
   @Override
@@ -199,9 +212,37 @@ public final class EtaApiImpl implements EtaApi {
                           load.cars().stream()
                               .map(car -> new EtaApi.CarLoad(car.seats(), car.occupied()))
                               .toList())
-                  .orElse(List.of())));
+                  .orElse(List.of()),
+              divisionOf(row)));
     }
     return new BoardResult(List.copyOf(rows));
+  }
+
+  /** 这一行的列车在本站或前方分行：同一交路、分行站不在本站之前。 */
+  private Optional<EtaApi.Division> divisionOf(
+      org.fetarute.fetaruteTCAddon.dispatcher.eta.BoardResult.BoardRow row) {
+    if (row.trainName().isEmpty() || row.stopIndex() < 0) {
+      return Optional.empty();
+    }
+    return divisions
+        .apply(row.trainName().get())
+        .filter(found -> found.routeId().equalsIgnoreCase(row.routeId()))
+        .filter(found -> found.stopIndex() >= row.stopIndex())
+        .map(
+            found ->
+                new EtaApi.Division(
+                    found.stopIndex(),
+                    found.stationId(),
+                    found.station(),
+                    found.parts().stream()
+                        .map(
+                            part ->
+                                new EtaApi.DivisionPart(
+                                    part.cars(),
+                                    part.detached(),
+                                    part.destinationId(),
+                                    part.destination()))
+                        .toList()));
   }
 
   private static BoardPhase convertPhase(

@@ -22,6 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.RemarkPart;
  *
  * <ol>
  *   <li>末班车：快照标出的当天从本站开往这个终点的最后一班，红色标签
+ *   <li>分行：运行中的列车在本站或前方某站拆成两列，写解下另走的那一段（“后 4 节往 X”，分行后不载客时“后 2 节至 X 止”）， 钢蓝标签；本站分行时标签为“本站分行”
  *   <li>直通：本站之后、终点之前第一次换线（CHANGE），写换入线路的名称（放不下改写线路代码），标签用该线路的颜色
  *   <li>经由：本站之后、终点之前停车的站，琥珀色标签。交路配置了经由站就只写配置的、还没经过的站，配置的站都已经过就不写；
  *       没有配置时推一个：换乘线路最多的站，一样多时站台多的，再一样时直通站优先，最后取离本站近的。 只停一条线、站台不到 {@value #BIG_STATION_PLATFORMS}
@@ -58,6 +59,7 @@ final class PidsRemarks {
       parts.add(
           new RemarkPart(vocabulary.lastTrainTag(), theme.red(), List.of(), Optional.empty()));
     }
+    row.dividing().flatMap(division -> division(row, division, theme)).ifPresent(parts::add);
     trip(row)
         .ifPresent(
             trip -> {
@@ -83,6 +85,24 @@ final class PidsRemarks {
               }
             });
     return parts.isEmpty() ? Optional.empty() : Optional.of(new Remark(parts));
+  }
+
+  /** 分行：解下另走的那一段去哪里（留下的一段的终点就是这一行的终点）。 */
+  private Optional<RemarkPart> division(PidsRow row, PidsRow.Division division, PidsTheme theme) {
+    Optional<PidsRow.Division.Part> detached = division.detachedPart();
+    if (detached.isEmpty()) {
+      return Optional.empty();
+    }
+    boolean here = row.dividesHere();
+    String text =
+        vocabulary.divisionRemark(
+            division.detachedAtFront(),
+            detached.get().cars(),
+            detached.get().destinationId().map(this::stationName),
+            here ? Optional.empty() : Optional.of(stationName(division.stationId())));
+    return Optional.of(
+        new RemarkPart(
+            vocabulary.divisionTag(here), theme.info(), List.of(text), Optional.empty()));
   }
 
   /**

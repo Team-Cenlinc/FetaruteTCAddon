@@ -210,6 +210,7 @@ public interface EtaApi {
    *     列车还没有选台，进站前选台时这条股道被占会改停别的站台，届时发 {@code TrainPlatformAssignedEvent}（原因 {@code
    *     CHANGED_FROM_PLAN}）。有计划站台时不算待定
    * @param cars 运行中列车各节车的座位与在座乘客，车头在前（1.9.0）；票据、预测与读不到车辆模型时为空
+   * @param division 列车在本站或前方某站分行（1.14.0）：交路写了解编，按表运行时表上这一班要拆、按现场编组切得开； 只给运行中的列车，票据、预测为空
    */
   record BoardRow(
       String lineName,
@@ -234,7 +235,8 @@ public interface EtaApi {
       boolean platformPending,
       List<String> platformCandidates,
       boolean platformPlanned,
-      List<CarLoad> cars) {
+      List<CarLoad> cars,
+      Optional<Division> division) {
 
     public BoardRow {
       destinationId = destinationId == null ? Optional.empty() : destinationId;
@@ -246,6 +248,59 @@ public interface EtaApi {
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
       platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
       cars = cars == null ? List.of() : List.copyOf(cars);
+      division = division == null ? Optional.empty() : division;
+    }
+
+    /** 1.9.0 至 1.13.0 的全参构造器（源码与二进制兼容）：不分行。 */
+    public BoardRow(
+        String lineName,
+        String routeId,
+        String destination,
+        Optional<String> destinationId,
+        String endRoute,
+        Optional<String> endRouteId,
+        String endOperation,
+        Optional<String> endOperationId,
+        String platform,
+        String statusText,
+        List<Reason> reasons,
+        long etaEpochMillis,
+        BoardPhase phase,
+        int stopSequence,
+        boolean passing,
+        boolean terminating,
+        boolean outOfService,
+        Optional<String> trainName,
+        OptionalLong delaySeconds,
+        boolean platformPending,
+        List<String> platformCandidates,
+        boolean platformPlanned,
+        List<CarLoad> cars) {
+      this(
+          lineName,
+          routeId,
+          destination,
+          destinationId,
+          endRoute,
+          endRouteId,
+          endOperation,
+          endOperationId,
+          platform,
+          statusText,
+          reasons,
+          etaEpochMillis,
+          phase,
+          stopSequence,
+          passing,
+          terminating,
+          outOfService,
+          trainName,
+          delaySeconds,
+          platformPending,
+          platformCandidates,
+          platformPlanned,
+          cars,
+          Optional.empty());
     }
 
     /** 全车空位数；没有载客数据时为空。 */
@@ -294,7 +349,8 @@ public interface EtaApi {
           false,
           List.of(),
           false,
-          List.of());
+          List.of(),
+          Optional.empty());
     }
 
     /** 预计到达或通过本站的时间（1.9.0）；1.8.0 构造器创建的行为空。 */
@@ -302,6 +358,51 @@ public interface EtaApi {
       return etaEpochMillis <= 0L
           ? Optional.empty()
           : Optional.of(Instant.ofEpochMilli(etaEpochMillis));
+    }
+  }
+
+  /**
+   * 列车分行（1.14.0）：在分行站拆成两列，各开往不同的地方。乘客按要去的地方坐对车厢。
+   *
+   * @param stopSequence 分行站的停靠序号（与站牌行的 {@code stopSequence} 同一口径；相等时就在本站分行）
+   * @param stationId 分行站 ID（{@code 运营商:站码}）
+   * @param station 分行站显示名
+   * @param parts 两段，车头在前
+   */
+  record Division(int stopSequence, String stationId, String station, List<DivisionPart> parts) {
+
+    public Division {
+      stationId = stationId == null ? "" : stationId;
+      station = station == null ? "" : station;
+      parts = parts == null ? List.of() : List.copyOf(parts);
+    }
+
+    /** 列车在 {@code stopSequence} 这一站（含）之前不分行。 */
+    public boolean ahead(int stopSequence) {
+      return this.stopSequence >= stopSequence;
+    }
+  }
+
+  /**
+   * 分行后的一段（1.14.0）。
+   *
+   * @param cars 节数
+   * @param detached 在分行站解下另走；否则留下继续本交路
+   * @param destinationId 分行后开往的车站 ID（{@code 运营商:站码}）；分行后不载客（就地待命、回库）时为空
+   * @param destination 开往的车站显示名；不载客时为空字符串
+   */
+  record DivisionPart(
+      int cars, boolean detached, Optional<String> destinationId, String destination) {
+
+    public DivisionPart {
+      cars = Math.max(1, cars);
+      destinationId = destinationId == null ? Optional.empty() : destinationId;
+      destination = destination == null ? "" : destination;
+    }
+
+    /** 分行后继续载客。 */
+    public boolean inService() {
+      return destinationId.isPresent();
     }
   }
 

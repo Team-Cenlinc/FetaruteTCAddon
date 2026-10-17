@@ -49,7 +49,7 @@ public final class PidsCarousel {
      */
     record Notice(PidsNotice notice) implements Slide, StopListSlide {}
 
-    /** 下一班列车的空位页。 */
+    /** 下一班列车的车厢页：要分行时是分行页，否则是空位页。 */
     record Vacancy() implements Slide {}
 
     /**
@@ -99,7 +99,7 @@ public final class PidsCarousel {
    * 本屏此刻的状况。
    *
    * @param passingSoon 本屏的站台此刻有通过列车即将通过
-   * @param vacancy 本屏下一班列车有空位信息（空位页可以出现；停站屏不用）
+   * @param vacancy 本屏下一班列车有车厢页可放：要分行（分行页）或有空位信息（空位页）；停站屏不用
    * @param arriving 本屏的下一班正在进站或停靠（不翻到宣传页）
    * @param courtesy 本屏轮换的宣传页，按顺序；为空时不放宣传页
    * @param bulletins 本屏可轮播的公告，按轮播顺序（重要的在前）

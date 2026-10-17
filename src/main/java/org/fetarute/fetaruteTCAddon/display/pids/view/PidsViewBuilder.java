@@ -386,7 +386,10 @@ public final class PidsViewBuilder {
    * @return 空位页；没有可显示的空位时为空，轮播跳过这一页
    */
   public Optional<PidsVacancyView> vacancy(Request request) {
-    List<PidsRow> shown = shown(request);
+    return vacancy(request, shown(request));
+  }
+
+  private Optional<PidsVacancyView> vacancy(Request request, List<PidsRow> shown) {
     Optional<PidsRow> found = vacancyRow(request, shown);
     if (found.isEmpty()) {
       return Optional.empty();
@@ -406,6 +409,88 @@ public final class PidsViewBuilder {
                 .flatMap(placement -> front(next, request.snapshot().station(), placement)),
             vocabulary.vacancyLabels(),
             bandColors(request, rows)));
+  }
+
+  /**
+   * 分行页：本屏下一班真会来的列车（改去别的站台的不算）是可以上车的运行中列车、在本站或前方某站分行时才有。 色牌与到站与主页上这一行相同，车头朝向与空位页相同，色带与主页相同。
+   *
+   * @param request 与主页相同的显示要求
+   * @return 分行页；不分行时为空
+   */
+  public Optional<PidsDivisionView> division(Request request) {
+    return division(request, shown(request));
+  }
+
+  private Optional<PidsDivisionView> division(Request request, List<PidsRow> shown) {
+    Optional<PidsRow> found = divisionRow(request, shown);
+    if (found.isEmpty()) {
+      return Optional.empty();
+    }
+    PidsRow next = found.get();
+    PidsRow.Division division = next.dividing().orElseThrow();
+    PidsView.Row view = row(next, request);
+    List<PidsView.Row> rows = shown.stream().map(row -> row(row, request)).toList();
+    Optional<Names> station =
+        next.dividesHere()
+            ? Optional.empty()
+            : Optional.of(
+                stationNames(division.stationId(), PidsRemarks.code(division.stationId())));
+    List<PidsDivisionView.Segment> segments = new ArrayList<>();
+    for (int i = 0; i < division.parts().size(); i++) {
+      PidsRow.Division.Part part = division.parts().get(i);
+      Optional<Names> destination =
+          part.destinationId().map(id -> stationNames(id, PidsRemarks.code(id)));
+      segments.add(
+          new PidsDivisionView.Segment(
+              part.cars(),
+              vocabulary.divisionSegment(i == 0, part.cars(), destination, station),
+              part.detached()));
+    }
+    return Optional.of(
+        new PidsDivisionView(
+            request.theme(),
+            view.badge(),
+            vocabulary.divisionTitle(station),
+            view.arrival(),
+            segments,
+            request
+                .placement()
+                .flatMap(placement -> front(next, request.snapshot().station(), placement)),
+            vocabulary.labels().minutes(),
+            bandColors(request, rows)));
+  }
+
+  /** 本屏此刻有没有分行页（轮播据此让车厢页时段先放分行页）。只看那一行，不构建视图。 */
+  public boolean hasDivision(Request request) {
+    return divisionRow(request, shown(request)).isPresent();
+  }
+
+  /** 本屏此刻有没有车厢页（分行页或空位页）：轮播据此决定副页能不能轮到车厢页。只看那一行，不构建视图。 */
+  public boolean hasCarPage(Request request) {
+    List<PidsRow> shown = shown(request);
+    return divisionRow(request, shown).isPresent() || vacancyRow(request, shown).isPresent();
+  }
+
+  /**
+   * 车厢页时段放的那一页：下一班要分行时是分行页（乘客要按去向选车厢），否则是空位页。
+   *
+   * @return 分行页或空位页；都没有时为空
+   */
+  public Optional<Object> carPage(Request request) {
+    List<PidsRow> shown = shown(request);
+    Optional<PidsDivisionView> division = division(request, shown);
+    return division.isPresent()
+        ? Optional.of(division.get())
+        : vacancy(request, shown).map(Object.class::cast);
+  }
+
+  /** 分行页画的那一班：本屏首个真会来本站台的行，且可以上车、在本站或前方分行。 */
+  private static Optional<PidsRow> divisionRow(Request request, List<PidsRow> shown) {
+    return shown.stream()
+        .filter(row -> !row.movedAwayFrom(request.platforms()))
+        .findFirst()
+        .filter(PidsViewBuilder::boardable)
+        .filter(row -> row.dividing().isPresent());
   }
 
   /** 本屏此刻有没有空位页：轮播据此决定副页能不能轮到空位页。只看那一行，不构建视图。 */
