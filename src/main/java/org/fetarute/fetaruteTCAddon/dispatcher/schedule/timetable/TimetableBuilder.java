@@ -33,7 +33,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.SingleLineSectionIndex;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLifecycleMode;
-import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.scope.NeighborTimetable;
@@ -1280,8 +1279,17 @@ public final class TimetableBuilder {
     if (candidates.stream().allMatch(candidate -> candidate.weight() <= 0)) {
       throw new BuildFailure("所有运营 route 的 weight 都不是正数，无法分配服务比例");
     }
+    // 加解编：支线交路由主干派生，不上网格；写法有问题（切不开、读不到编组）编表直接报错
+    CouplingPlanner.Analysis couplings = couplingsOf(input, plans);
+    if (!couplings.errors().isEmpty()) {
+      throw new BuildFailure("加解编写法有误：" + String.join("；", couplings.errors()));
+    }
     // 只对进发车表的 route 分组分方向：走行段不上网格。
-    List<RouteInput> scheduled = operations.stream().map(OperationPlan::route).toList();
+    List<RouteInput> scheduled =
+        operations.stream()
+            .map(OperationPlan::route)
+            .filter(route -> !couplings.branchRoutes().contains(route.routeId()))
+            .toList();
     ServiceGroupClassifier.Classification classification =
         ServiceGroupClassifier.classify(scheduled);
     return new Prepared(
@@ -1299,7 +1307,52 @@ public final class TimetableBuilder {
         Map.copyOf(runByRoute),
         trajectoriesOf(input, modelByRoute),
         Map.copyOf(variants),
-        baseByVariant(variants));
+        baseByVariant(variants),
+        couplings);
+  }
+
+  /** 推出加解编结构（基础时分）。 */
+  private static CouplingPlanner.Analysis couplingsOf(
+      BuildInput input, List<TimetableRoutePlan> plans) {
+    if (input.couplings() == CouplingInputs.NONE
+        && input.routes().stream()
+            .flatMap(route -> route.stops().stream())
+            .noneMatch(
+                stop ->
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawDecouple(stop)
+                            .isPresent()
+                        || org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawCouple(stop)
+                            .isPresent())) {
+      return CouplingPlanner.Analysis.NONE;
+    }
+    Map<UUID, TimetableRoutePlan> byRoute = new HashMap<>();
+    for (TimetableRoutePlan plan : plans) {
+      if (plan.consist().isEmpty()) {
+        byRoute.putIfAbsent(plan.routeId(), plan);
+      }
+    }
+    Set<UUID> planned = new HashSet<>();
+    for (RouteInput route : input.routes()) {
+      if (!input.fleet().sharesFor(route.routeId()).isEmpty()) {
+        planned.add(route.routeId());
+      }
+    }
+    return CouplingPlanner.analyze(
+        input.sortedRoutes(),
+        byRoute,
+        input.couplings(),
+        planned,
+        org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.coupleSeconds());
   }
 
   /**
@@ -1698,6 +1751,65 @@ public final class TimetableBuilder {
       Optional<PhasePlanner.Phases> selectedPhases,
       Map<String, Integer> extraShift,
       Set<CancelSlot> cancelled) {
+    // 加解编把几条交路连在一起：派车之后端点串行、让车修复截掉了卷进加解编的班次，就带着这些截断重派——
+    // 主干被截掉的下一轮不排，只有派生的支线被截掉的下一轮照跑主干、不拆挂。轮数有上限，用完按最后一轮的结果。
+    Set<CancelSlot> excluded = new HashSet<>();
+    Set<CancelSlot> uncoupled = new HashSet<>();
+    Once previous = null;
+    for (int round = 0; ; round++) {
+      Once once;
+      try {
+        once =
+            attemptOnce(
+                prepared,
+                options,
+                input,
+                builtAt,
+                selectedPhases,
+                extraShift,
+                cancelled,
+                excluded,
+                uncoupled);
+      } catch (BuildFailure failure) {
+        // 重派那一轮反倒排不出（例如截掉的主干正是剩下的全部）：用上一轮的结果
+        if (previous == null) {
+          throw failure;
+        }
+        return previous.attempt();
+      }
+      if ((once.brokenTrunks().isEmpty() && once.brokenBranches().isEmpty())
+          || round >= COUPLING_ROUNDS) {
+        return once.attempt();
+      }
+      excluded.addAll(once.brokenTrunks());
+      uncoupled.addAll(once.brokenBranches());
+      previous = once;
+    }
+  }
+
+  /** 加解编截断后重派的轮数上限。 */
+  private static final int COUPLING_ROUNDS = 3;
+
+  /**
+   * 一次完整构建与它截断的加解编班次。
+   *
+   * @param attempt 构建结果
+   * @param brokenTrunks 被截掉的主干（下一轮不排）
+   * @param brokenBranches 派生的支线被截掉的主干（下一轮照跑、不拆挂）
+   */
+  private record Once(
+      Attempt attempt, Set<CancelSlot> brokenTrunks, Set<CancelSlot> brokenBranches) {}
+
+  private Once attemptOnce(
+      Prepared prepared,
+      TimetableBuildOptions options,
+      BuildInput input,
+      Instant builtAt,
+      Optional<PhasePlanner.Phases> selectedPhases,
+      Map<String, Integer> extraShift,
+      Set<CancelSlot> cancelled,
+      Set<CancelSlot> excluded,
+      Set<CancelSlot> uncoupled) {
     progress.fullBuild();
     if (!relaxAllowed) {
       // 不许放宽的编表器只用来编快车错峰的候选：它里面的每一次完整构建都记在错峰名下。
@@ -1794,6 +1906,16 @@ public final class TimetableBuilder {
       OperationPlan op = prepared.operations().get(candidateIndex);
       TimetableRoutePlan plan = operationPlans.get(candidateIndex);
       int departureSeconds = item.slot().departureSeconds();
+      if (excluded.contains(new CancelSlot(plan.routeId(), departureSeconds))) {
+        // 加解编：上一轮端点串行、让车修复截掉了这一班主干，这一轮不排
+        dropped.add(
+            new TimetableBuildResult.DroppedTrip(
+                plan.routeCode(),
+                clock(secondOfDay(departureSeconds, options)),
+                VehicleDutyPlanner.UnassignedReason.STUB_SATURATED));
+        droppedAt.add(departureSeconds);
+        continue;
+      }
       UUID provisional =
           UUID.nameUUIDFromBytes(
               ("provisional:" + timetableId + ":" + i)
@@ -1816,8 +1938,50 @@ public final class TimetableBuilder {
               op.startsAtDepot(),
               op.endsAtDepot(),
               input.poolOf(plan.routeId()),
-              consistOptions(input, prepared, plan.routeId()));
+              prepared
+                  .couplings()
+                  .consistOptions(plan.routeId(), plan.totalRunSeconds())
+                  .orElseGet(() -> consistOptions(input, prepared, plan.routeId())));
       plannedTrips.add(trip);
+    }
+    // 加解编：按每一班主干派生支线班次（不上网格、与主干同频），连同拆挂计划交给派车。主干被取消，派生的一并取消。
+    VehicleDutyPlanner.Couplings couplingPlan = VehicleDutyPlanner.Couplings.none();
+    Map<UUID, UUID> derivedParent = new HashMap<>();
+    if (!prepared.couplings().isEmpty()) {
+      Map<UUID, TimetableRoutePlan> planById = new HashMap<>();
+      Map<UUID, boolean[]> flags = new HashMap<>();
+      for (int i = 0; i < operationPlans.size(); i++) {
+        planById.put(operationPlans.get(i).routeId(), operationPlans.get(i));
+        OperationPlan op = prepared.operations().get(i);
+        flags.put(op.route().routeId(), new boolean[] {op.startsAtDepot(), op.endsAtDepot()});
+      }
+      CouplingPlanner.Derived derived =
+          CouplingPlanner.derive(
+              prepared.couplings(),
+              plannedTrips.stream()
+                  .filter(
+                      trip ->
+                          !uncoupled.contains(
+                              new CancelSlot(trip.routeId(), trip.departureSeconds())))
+                  .toList(),
+              planById,
+              flags,
+              org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives
+                  .coupleSeconds());
+      for (VehicleDutyPlanner.PlannedTrip trip : derived.trips()) {
+        Integer candidateIndex = candidateIndexByRoute.get(trip.routeId());
+        if (candidateIndex == null) {
+          continue;
+        }
+        allocationByProvisional.put(
+            trip.tripId(), new WeightedTripAllocator.Allocation(0, candidateIndex));
+        if (withdrawn.contains(derived.parentOf().get(trip.tripId()))) {
+          withdrawn.add(trip.tripId());
+        }
+        plannedTrips.add(trip);
+      }
+      couplingPlan = derived.couplings();
+      derivedParent.putAll(derived.parentOf());
     }
 
     // 各起点上的名义发车时刻：派车器用它回答"这辆车在终点还要等多久才有下一班"，
@@ -1852,15 +2016,29 @@ public final class TimetableBuilder {
                 options.dutyLimits(),
                 nextSlotByOrigin,
                 preferredFeeders(phases.connections()),
-                allocator),
+                allocator,
+                couplingPlan),
             plannedTrips,
             withdrawn,
             prepared.legs(),
             options.dutyLimits(),
             allocator);
     Map<UUID, VehicleDutyPlanner.UnassignedTrip> unassigned = new HashMap<>();
+    List<String> stranded = new ArrayList<>();
     for (VehicleDutyPlanner.UnassignedTrip trip : planned.unassigned()) {
+      if (trip.reason() == VehicleDutyPlanner.UnassignedReason.DECOUPLE_STRANDED) {
+        // 解下的车就地待命或回库，但解编站回不了库、也没有班次接它：用户定编表报错，须改写法
+        stranded.add(trip.tripCode());
+        continue;
+      }
       unassigned.put(trip.tripId(), trip);
+    }
+    if (!stranded.isEmpty()) {
+      throw new BuildFailure(
+          "解编（IDLE/RETURN）切下的车回不了库：解编站没有回库线路，也没有班次接它（"
+              + String.join("、", stranded.stream().limit(5).toList())
+              + (stranded.size() > 5 ? " 等 " + stranded.size() + " 班" : "")
+              + "）；请给解编站配回库线路，或改用 GOTO");
     }
     Map<UUID, UUID> dutyByProvisional = new HashMap<>();
     Map<UUID, Optional<String>> consistByDuty = new HashMap<>();
@@ -1926,7 +2104,8 @@ public final class TimetableBuilder {
               shiftToServiceDay(duty.returnSecondOfDay(), options),
               shiftToServiceDay(duty.plannedEndSecondOfDay(), options),
               duty.closeReason(),
-              duty.consist()));
+              duty.consist(),
+              duty.coupling()));
     }
     Timetable provisionalTable =
         timetableOf(input, options, prepared, provisionalTrips, provisionalDuties, builtAt);
@@ -2003,10 +2182,19 @@ public final class TimetableBuilder {
       throw new BuildFailure("让车累计超限，没有一班能在计划窗口内跑完：检查裕量、折返时间与 --max-wait");
     }
 
+    // ---- 3.65 加解编对齐：串行、让车挪了主干之后，派生的支线班次跟着推后；回程支线晚了主干在联挂站等它 ----
+    Timetable alignedTable =
+        CouplingAlignment.align(
+            repaired.timetable(),
+            prepared.couplings(),
+            routeId -> planOf(prepared.plans(), routeId),
+            prepared::baseOf,
+            options.dutyLimits().turnaround(),
+            org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.coupleSeconds());
+
     // ---- 3.6 按实际发车顺序编号、派生主键、替换 duty 引用 ----------------------------
     TimetableTripNumbering.Numbered numbered =
-        TimetableTripNumbering.number(
-            timetableId, options, repaired.timetable(), nominalByProvisional);
+        TimetableTripNumbering.number(timetableId, options, alignedTable, nominalByProvisional);
     Map<UUID, String> routeCodeById = new HashMap<>();
     for (TimetableRoutePlan plan : prepared.plans()) {
       routeCodeById.put(plan.routeId(), plan.routeCode());
@@ -2115,31 +2303,53 @@ public final class TimetableBuilder {
                 direction.candidates(), keptByDirection.getOrDefault(direction.key(), List.of())));
       }
     }
-    return new Attempt(
-        (int) headwaySeconds,
-        timetable,
-        List.copyOf(dropped),
-        List.copyOf(droppedAt),
-        List.copyOf(shares),
-        conflicts,
-        residuals,
-        List.copyOf(shifts),
-        yields,
-        serialized.terminals(),
-        serialized.throats(),
-        Map.copyOf(intervalByGroup),
-        PhasePlanner.interleaves(grids),
-        phases.notes(),
-        phases.resourceNotes(),
-        PhasePlanner.residues(
-            gridGroups,
-            intervalByGroup,
-            prepared.runByRoute(),
-            options.dutyLimits().turnaround(),
-            inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())),
-        phases,
-        unabsorbableByDirection(residuals, timetable, prepared, gridGroups),
-        Map.copyOf(slotByCode));
+    Set<CancelSlot> brokenTrunks = new HashSet<>();
+    Set<CancelSlot> brokenBranches = new HashSet<>();
+    if (!derivedParent.isEmpty()) {
+      Map<UUID, VehicleDutyPlanner.PlannedTrip> plannedById = new HashMap<>();
+      plannedTrips.forEach(trip -> plannedById.put(trip.tripId(), trip));
+      Set<UUID> coupledTrunks = new HashSet<>(derivedParent.values());
+      Set<UUID> truncatedAll = new HashSet<>(serialized.truncatedTripIds());
+      truncatedAll.addAll(repaired.truncatedTripIds());
+      for (UUID truncatedId : truncatedAll) {
+        UUID parent = derivedParent.get(truncatedId);
+        VehicleDutyPlanner.PlannedTrip trunk =
+            plannedById.get(parent != null ? parent : truncatedId);
+        if (trunk == null || (parent == null && !coupledTrunks.contains(truncatedId))) {
+          continue;
+        }
+        CancelSlot slot = new CancelSlot(trunk.routeId(), trunk.departureSeconds());
+        (parent == null ? brokenTrunks : brokenBranches).add(slot);
+      }
+    }
+    return new Once(
+        new Attempt(
+            (int) headwaySeconds,
+            timetable,
+            List.copyOf(dropped),
+            List.copyOf(droppedAt),
+            List.copyOf(shares),
+            conflicts,
+            residuals,
+            List.copyOf(shifts),
+            yields,
+            serialized.terminals(),
+            serialized.throats(),
+            Map.copyOf(intervalByGroup),
+            PhasePlanner.interleaves(grids),
+            phases.notes(),
+            phases.resourceNotes(),
+            PhasePlanner.residues(
+                gridGroups,
+                intervalByGroup,
+                prepared.runByRoute(),
+                options.dutyLimits().turnaround(),
+                inPlaceTurnbackRoutes(prepared.operationPlans(), prepared.legs())),
+            phases,
+            unabsorbableByDirection(residuals, timetable, prepared, gridGroups),
+            Map.copyOf(slotByCode)),
+        brokenTrunks,
+        brokenBranches);
   }
 
   /**
@@ -2150,7 +2360,8 @@ public final class TimetableBuilder {
       TimetableBuildOptions options, BuildInput input) {
     Map<UUID, List<Integer>> switches = new HashMap<>();
     for (RouteInput route : input.routes()) {
-      int[] plan = RoutePowerModes.switchDwellPlan(route.stops());
+      int[] plan =
+          org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopExtraDwell.plan(route.stops());
       if (java.util.Arrays.stream(plan).anyMatch(seconds -> seconds > 0)) {
         switches.put(route.routeId(), java.util.Arrays.stream(plan).boxed().toList());
       }
@@ -3244,7 +3455,8 @@ public final class TimetableBuilder {
       Map<UUID, Integer> runByRoute,
       BlockingTimes.Trajectories trajectories,
       Map<UUID, Map<String, UUID>> variants,
-      Map<UUID, UUID> baseByVariant) {
+      Map<UUID, UUID> baseByVariant,
+      CouplingPlanner.Analysis couplings) {
 
     /** route 按某个车型跑的变体 ID；不区分车型、或这个车型不能跑这条 route 时就是 route 本身。 */
     UUID variantOf(UUID routeId, Optional<String> consist) {
@@ -3280,7 +3492,8 @@ public final class TimetableBuilder {
           Map.copyOf(run),
           trajectories,
           variants,
-          baseByVariant);
+          baseByVariant,
+          couplings);
     }
   }
 
@@ -3760,7 +3973,40 @@ public final class TimetableBuilder {
       Optional<String> notes,
       List<NeighborTimetable> neighbors,
       Map<UUID, UUID> lineByRoute,
-      ConsistFleet fleet) {
+      ConsistFleet fleet,
+      CouplingInputs couplings) {
+
+    /** 没有加解编输入的构建。 */
+    public BuildInput(
+        UUID timetableId,
+        UUID companyId,
+        UUID operatorId,
+        UUID lineId,
+        String code,
+        String name,
+        List<RouteInput> routes,
+        RailGraph graph,
+        RunTimeModel runTimeModel,
+        Optional<String> notes,
+        List<NeighborTimetable> neighbors,
+        Map<UUID, UUID> lineByRoute,
+        ConsistFleet fleet) {
+      this(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute,
+          fleet,
+          CouplingInputs.NONE);
+    }
 
     /** 不区分车型的构建。 */
     public BuildInput(
@@ -3802,6 +4048,7 @@ public final class TimetableBuilder {
       neighbors = neighbors == null ? List.of() : List.copyOf(neighbors);
       lineByRoute = lineByRoute == null ? Map.of() : Map.copyOf(lineByRoute);
       fleet = fleet == null ? ConsistFleet.none() : fleet;
+      couplings = couplings == null ? CouplingInputs.NONE : couplings;
     }
 
     /** 换一份 route 列表，其余不变。 */
@@ -3819,7 +4066,8 @@ public final class TimetableBuilder {
           notes,
           neighbors,
           lineByRoute,
-          fleet);
+          fleet,
+          couplings);
     }
 
     /** 换一组车型，其余不变。 */
@@ -3837,7 +4085,27 @@ public final class TimetableBuilder {
           notes,
           neighbors,
           lineByRoute,
-          nextFleet);
+          nextFleet,
+          couplings);
+    }
+
+    /** 换一份加解编输入，其余不变。 */
+    public BuildInput withCouplings(CouplingInputs nextCouplings) {
+      return new BuildInput(
+          timetableId,
+          companyId,
+          operatorId,
+          lineId,
+          code,
+          name,
+          routes,
+          graph,
+          runTimeModel,
+          notes,
+          neighbors,
+          lineByRoute,
+          fleet,
+          nextCouplings);
     }
 
     /** 单线构建：所有 route 同一车池。 */

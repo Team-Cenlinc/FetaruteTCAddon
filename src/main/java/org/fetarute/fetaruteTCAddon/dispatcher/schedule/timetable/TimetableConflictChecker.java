@@ -407,6 +407,12 @@ public final class TimetableConflictChecker {
         Optional<String> owner,
         String vehicle,
         Optional<PlatformEligibility> eligibility) {
+      // 加解编那一站：解下的车与回程支线车在那一站的站台上记在主干那辆车名下，两车共用股道不报冲突
+      if (kind == Kind.PLATFORM
+          && owner.isEmpty()
+          && vehicleOf instanceof VehicleIdentity identity) {
+        vehicle = identity.sharedAt(key, code).map(duty -> "|" + duty).orElse(vehicle);
+      }
       // 记下这批占用在该资源上覆盖的时段 [from, to]；to 的取法与 Resource.add 一致。
       int[] span =
           touched.computeIfAbsent(key, k -> new int[] {Integer.MAX_VALUE, Integer.MIN_VALUE});
@@ -1330,14 +1336,100 @@ public final class TimetableConflictChecker {
       byCode.put(duty.dutyCode(), duty.dutyCode());
       byCode.put(duty.dutyCode() + "-CREATE", duty.dutyCode());
       byCode.put(duty.dutyCode() + "-RETURN", duty.dutyCode());
+      byCode.put(duty.dutyCode() + SPLIT_STAY, duty.dutyCode());
+      byCode.put(duty.dutyCode() + JOIN_STAY, duty.dutyCode());
     }
+    Map<UUID, TimetableTrip> tripsById = new HashMap<>();
     for (TimetableTrip trip : timetable.trips()) {
+      tripsById.put(trip.id(), trip);
       trip.dutyId()
           .map(dutyCodeById::get)
           .ifPresent(dutyCode -> byCode.put(trip.tripCode(), dutyCode));
     }
-    Map<String, String> frozen = Map.copyOf(byCode);
-    return code -> frozen.getOrDefault(code, code);
+    return new VehicleIdentity(
+        Map.copyOf(byCode), sharedPlatforms(timetable, tripsById, dutyCodeById));
+  }
+
+  /** 由解编开始的交路在解编站等首班的站台待命 code 后缀。 */
+  static final String SPLIT_STAY = "-SPLIT";
+
+  /** 以联挂结束的交路在联挂站等主干的站台待命 code 后缀。 */
+  static final String JOIN_STAY = "-JOIN";
+
+  /**
+   * 加解编那一站两车共用股道：解下的车（解编站的待命与第一班）记在解编它的那辆车名下，回程支线车（联挂站的待命与最后一班）记在并入的那辆车名下—— 只在那一站的站台资源上，别处各算各的。键
+   * {@code 站台组|code}。
+   */
+  private static Map<String, String> sharedPlatforms(
+      Timetable timetable, Map<UUID, TimetableTrip> tripsById, Map<UUID, String> dutyCodeById) {
+    Map<String, String> out = new HashMap<>();
+    for (VehicleDuty duty : timetable.duties()) {
+      List<TimetableTrip> chain = new ArrayList<>();
+      for (UUID id : duty.tripIds()) {
+        TimetableTrip trip = tripsById.get(id);
+        if (trip != null) {
+          chain.add(trip);
+        }
+      }
+      duty.coupling()
+          .splitFromTripId()
+          .map(tripsById::get)
+          .flatMap(TimetableTrip::dutyId)
+          .map(dutyCodeById::get)
+          .ifPresent(
+              parent -> {
+                String group = groupOf(duty.startDepotNodeId());
+                out.put(group + "|" + duty.dutyCode() + SPLIT_STAY, parent);
+                if (!chain.isEmpty()) {
+                  out.put(group + "|" + chain.get(0).tripCode(), parent);
+                }
+              });
+      duty.coupling()
+          .joinsTripId()
+          .map(tripsById::get)
+          .flatMap(TimetableTrip::dutyId)
+          .map(dutyCodeById::get)
+          .ifPresent(
+              trunk -> {
+                String group = groupOf(duty.endDepotNodeId());
+                out.put(group + "|" + duty.dutyCode() + JOIN_STAY, trunk);
+                if (!chain.isEmpty()) {
+                  out.put(group + "|" + chain.get(chain.size() - 1).tripCode(), trunk);
+                }
+              });
+    }
+    return Map.copyOf(out);
+  }
+
+  /**
+   * 一份表的车辆身份：code → 车（duty 号），外加加解编那一站两车共用股道的例外（见 {@link #sharedPlatforms}）。
+   *
+   * @param byCode code → duty 号
+   * @param shared {@code 站台组|code} → 在那一站的站台上记在谁名下
+   */
+  record VehicleIdentity(Map<String, String> byCode, Map<String, String> shared)
+      implements Function<String, String> {
+
+    @Override
+    public String apply(String code) {
+      return byCode.getOrDefault(code, code);
+    }
+
+    /** 这条占用在这个站台资源上记在谁名下；不是加解编那一站时为空。 */
+    Optional<String> sharedAt(String resourceKey, String code) {
+      if (shared.isEmpty()) {
+        return Optional.empty();
+      }
+      String group;
+      if (resourceKey.startsWith("platform-group:")) {
+        group = resourceKey.substring("platform-group:".length());
+      } else if (resourceKey.startsWith("platform:")) {
+        group = groupOf(resourceKey.substring("platform:".length()));
+      } else {
+        return Optional.empty();
+      }
+      return Optional.ofNullable(shared.get(group + "|" + code));
+    }
   }
 
   // ------------------------------------------------------------------ 扫描

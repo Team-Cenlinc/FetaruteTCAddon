@@ -268,6 +268,59 @@ class DynamicPlatformAllocatorTest {
         "计划站台被占：照常选空闲的，不因计划把车挡在站外");
   }
 
+  /** 联挂：搭档停着的股道对后到的车不算被占，选台优先它；别的车照样当被占。 */
+  @Test
+  void aCouplingPartnerPlatformIsSelectableOnlyForItsPartner() {
+    NodeId fromId = NodeId.of("OP:W:FROM:1:0");
+    NodeId firstId = NodeId.of("OP:S:DEST:1");
+    NodeId secondId = NodeId.of("OP:S:DEST:2");
+    RailNode from = mockNode(fromId, new Vector(0, 0, 0), NodeType.WAYPOINT);
+    RailNode first = mockNode(firstId, new Vector(10, 0, 0), NodeType.STATION);
+    RailNode second = mockNode(secondId, new Vector(20, 0, 0), NodeType.STATION);
+    mockEdges(fromId, edge(from, first), edge(from, second));
+    mockEdges(firstId);
+    mockEdges(secondId);
+    RouteId routeId = RouteId.of("COUPLING");
+    RouteDefinition route = routeWithDynamicStop(routeId, fromId);
+    RouteStop stop = dynamicStop();
+    when(routeDefinitions.findStop(routeId, 1)).thenReturn(Optional.of(stop));
+    OccupancyResource busy = OccupancyResource.forNode(secondId);
+    when(occupancyManager.isNodeOccupied(secondId)).thenReturn(true);
+    when(occupancyManager.getClaim(busy))
+        .thenReturn(
+            Optional.of(
+                new OccupancyClaim(
+                    busy,
+                    "feeder",
+                    Optional.empty(),
+                    java.time.Instant.EPOCH,
+                    Duration.ZERO,
+                    Optional.empty())));
+    allocator.setPreference((train, r, stopIndex) -> Optional.of(secondId));
+    allocator.setCouplingPartners(
+        new DynamicPlatformAllocator.CouplingPartners() {
+          @Override
+          public Optional<NodeId> platformOf(
+              String trainName, java.util.UUID routeUuid, int stopIndex) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean partner(String trainName, String claimant) {
+            return "trunk".equals(trainName) && "feeder".equals(claimant);
+          }
+        });
+
+    assertEquals(
+        secondId,
+        allocator.tryAllocate("trunk", route, 0, graph, fromId).orElseThrow().allocatedNode(),
+        "搭档停着的股道：后到的车照样能选");
+    assertEquals(
+        firstId,
+        allocator.tryAllocate("other", route, 0, graph, fromId).orElseThrow().allocatedNode(),
+        "别的车照样当被占");
+  }
+
   /** 暂定站台沿用不变；别的车暂定的股道不再给；选台在空闲候选里优先兑现暂定站台，它也是站台落定事件里的"原计划"。 */
   @Test
   void aTentativePlatformIsKeptAndSteersTheSelection() {

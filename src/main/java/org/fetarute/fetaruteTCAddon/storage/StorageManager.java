@@ -187,6 +187,7 @@ public final class StorageManager {
     ensureRouteOperationTypeColumn(connection);
     migrateRoutePatternTypeEnums(connection);
     ensureTimetableDutyConsistColumn(connection);
+    ensureTimetableDutyCouplingColumns(connection);
     ensurePidsScreenPagesColumn(connection);
     migrateLicenseClassIds(connection);
   }
@@ -285,6 +286,28 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 timetable_duties.consist_key: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 timetable_duties.consist_key: " + ex.getMessage());
+    }
+  }
+
+  /** 兼容性迁移：为旧版 timetable_duties 补齐加解编两列（由哪一班解编生出、在哪一班联挂并入；旧表为空）。 */
+  private void ensureTimetableDutyCouplingColumns(java.sql.Connection connection) {
+    String dutiesTable = storageSchema.tablePrefix() + "timetable_duties";
+    for (String column : List.of("split_from_trip_id", "joins_trip_id")) {
+      String sql =
+          "ALTER TABLE " + dutiesTable + " ADD COLUMN " + column + " " + dialect.uuidType();
+      try (var statement = connection.createStatement()) {
+        statement.executeUpdate(sql);
+        logger.debug("已应用兼容性迁移: timetable_duties." + column + " (added)");
+      } catch (java.sql.SQLException ex) {
+        String message =
+            ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+        if (message.contains("duplicate") || message.contains("already exists")) {
+          continue;
+        }
+        logger.warn("应用兼容性迁移失败: 添加 timetable_duties." + column + ": " + ex.getMessage());
+      } catch (Exception ex) {
+        logger.warn("应用兼容性迁移失败: 添加 timetable_duties." + column + ": " + ex.getMessage());
+      }
     }
   }
 

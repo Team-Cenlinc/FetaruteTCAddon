@@ -70,7 +70,8 @@ public final class ConsistVariants {
               duty.returnSecondOfDay(),
               duty.plannedEndSecondOfDay(),
               duty.closeReason(),
-              duty.consist()));
+              duty.consist(),
+              duty.coupling()));
     }
     return table.withPlansTripsAndDuties(plans, trips, duties);
   }

@@ -281,6 +281,14 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
 
     var group = info.getGroup();
     String trainName = safeTrainName(info);
+    if (plugin
+        .getCouplerService()
+        .map(coupler -> coupler.coupling().approaching(trainName))
+        .orElse(false)) {
+      // 联挂进站中：挂上后对合并的列车重新触发这块牌子
+      debug("AutoStation 跳过: 联挂进站中 (train=" + trainName + ") @ " + locationText(info));
+      return;
+    }
     String stopSessionId = shortUuid(UUID.randomUUID());
     boolean driverControlled = driverControlled(properties);
     // 车上有车掌：车门归车掌。自动运行的车照样由站台对位停车，只把停站与站台侧交给车掌。
@@ -892,6 +900,18 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                         power.takeStationDwell(
                             readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
                                 .orElse(trainName)))
+                .orElse(0)
+            // 解编 DECP、联挂 COPL 那一站多停解编、联挂时间，同样加在压缩之后
+            + plugin
+                .getCouplerService()
+                .map(
+                    coupler -> {
+                      String name =
+                          readTagValue(properties, RouteProgressRegistry.TAG_TRAIN_NAME)
+                              .orElse(trainName);
+                      return coupler.decoupling().takeStationDwell(name)
+                          + coupler.coupling().takeStationDwell(name);
+                    })
                 .orElse(0);
     if (dwellRegistered && effectiveDwellSeconds != dwellSeconds) {
       plugin

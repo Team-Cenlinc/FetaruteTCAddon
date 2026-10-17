@@ -588,6 +588,8 @@ public final class StorageSchema {
                     planned_end_second %s NOT NULL,
                     close_reason %s NOT NULL,
                     consist_key %s,
+                    split_from_trip_id %s,
+                    joins_trip_id %s,
                     FOREIGN KEY (timetable_id) REFERENCES %s(id) ON DELETE CASCADE
                 );
                 """,
@@ -606,6 +608,8 @@ public final class StorageSchema {
         dialect.intType(),
         dialect.stringType(),
         dialect.stringType(),
+        dialect.uuidType(),
+        dialect.uuidType(),
         table("timetables"));
   }
 

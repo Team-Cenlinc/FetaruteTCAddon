@@ -83,7 +83,7 @@ final class TimetableTripNumbering {
           ids.add(finalId);
         }
       }
-      if (ids.isEmpty()) {
+      if (ids.isEmpty() && !duty.coupling().startsBySplit()) {
         continue;
       }
       duties.add(
@@ -101,7 +101,8 @@ final class TimetableTripNumbering {
               duty.returnSecondOfDay(),
               duty.plannedEndSecondOfDay(),
               duty.closeReason(),
-              duty.consist()));
+              duty.consist(),
+              duty.coupling().remap(finalByProvisional::get)));
     }
     // 交路引用换成正式主键后，班次的 dutyId 不变（duty 主键在派车时已按 dutyCode 派生）。
     return new Numbered(List.copyOf(trips), List.copyOf(duties), Map.copyOf(finalByProvisional));

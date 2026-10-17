@@ -24,6 +24,7 @@ import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
@@ -1009,6 +1010,20 @@ public final class StorageSpawnManager
     }
     List<RouteSelection> operationCandidates = new ArrayList<>();
     List<RouteSelection> createCandidates = new ArrayList<>();
+    Map<UUID, List<RouteStop>> stopsByRoute = new HashMap<>();
+    Set<String> decoupleTargets = new HashSet<>();
+    for (Route route : routes) {
+      if (route == null) {
+        continue;
+      }
+      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      stopsByRoute.put(route.id(), stops);
+      for (RouteStop stop : stops) {
+        RouteCouplingDirectives.decouple(stop)
+            .flatMap(RouteCouplingDirectives.Decouple::target)
+            .ifPresent(target -> decoupleTargets.add(target.toLowerCase(Locale.ROOT)));
+      }
+    }
     for (Route route : routes) {
       if (route == null) {
         continue;
@@ -1017,8 +1032,14 @@ public final class StorageSpawnManager
           && route.operationType() != RouteOperationType.CREATE) {
         continue;
       }
-      List<RouteStop> stops = provider.routeStops().listByRoute(route.id());
+      List<RouteStop> stops = stopsByRoute.getOrDefault(route.id(), List.of());
       if (stops.isEmpty()) {
+        continue;
+      }
+      if (decoupleTargets.contains(route.code().toLowerCase(Locale.ROOT))) {
+        // 解编 GOTO 指向的交路由解下的车跑，不单独发车
+        debugLogger.accept(
+            "SpawnPlan 跳过解编目标 route: line=" + line.code() + " route=" + route.code());
         continue;
       }
       RouteStop first = stops.get(0);

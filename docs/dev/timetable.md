@@ -817,6 +817,18 @@ RouteTrip C ─┘   决定"跑什么"                        决定"谁来跑"
 第三步只在容量为 1 的端点上偏离名义时隙：续班锚在车上，进站班次只能延后、不能提前；其余班次仍在网格上。
 绝不允许"某终点恰好停着一辆车，于是多发这条线"——那会让车辆周转反过来扭曲服务比例，而这种扭曲在运营上是看不见的。
 
+### 加解编：交路可以由拆分开始、由联挂结束
+
+交路备注 `DECP`（解编）与 `COPL`（联挂）把"一辆车从出库到回库始终是同一列"这条不变量放宽成：**每条交路以出库或拆分开始、以回库或联挂结束**，车型在交路中途变化。
+
+- 班次（`CouplingPlanner`）：写 DECP/COPL 的主干交路照常上网格；被 `DECP …:GOTO:B` 指向的 B、被 `COPL FROM:B′` 指向的 B′ 不上网格、不进份额与相位层，每一班主干派生一班（B 在主干离开解编站时发车，B′ 在主干到联挂站前 `couple-seconds` 到站），与主干同频。主干被取消，派生的一并取消。
+- 车型：编组写法须是组合写法（`A+B`），解编按切下的那几段推出留下与切下的车型（切点须在段的分界上，指定那头不行改拆另一头）；联挂后车型变回整列。主干班次的车型按它起点时车上的编组定，派生班次按切下的那几段。不写车型的普通班次不接拆出来的短编组。
+- 派车（`VehicleDutyPlanner` 带 `Couplings`）：主干班次派给某辆车，到解编站时生出一条子交路（记父班次）：GOTO 的子交路钉着派生的 B 班次；IDLE 的子交路进解编站的车池，可以接本站始发、允许这个车型的班次，没人接就回库；RETURN 的子交路只有回库走行。B′ 照常在车池里挑车，到联挂站后交路以联挂结束（`CloseReason.COUPLED`，没有回库走行），并进跑 COPL 主干班次的那辆车。主干那班没派上车时这次联挂作废、重派（最多 4 轮）。IDLE/RETURN 的子交路回不了库（解编站没有回库线路）时编表报错。
+- 截断重派：端点串行、让车修复截掉了卷进加解编的班次时带着这些截断重派（最多 3 轮）：主干被截掉的下一轮不排；只截掉派生支线的，下一轮主干照跑、不拆挂。
+- 对齐（`CouplingAlignment`）：串行与让车挪了班次之后只往后推，让子交路的首班不早于主干离开解编站、主干进联挂站不早于回程支线到站 + 联挂提前量、同一辆车的下一班不早于上一班到达 + 折返。
+- 冲突检查：拆分站上子交路的车、联挂站上回程支线的车与主干那辆车按同一辆车豁免（站台停留码加 `-SPLIT` / `-JOIN`）。
+- 停站：解编、联挂那一站多停 `decouple-seconds` / `couple-seconds`，时分档案、到站预测与现场同一口径（`RouteStopExtraDwell`）。
+
 ## 数据模型
 
 时刻表以**线路**为单位，一条线下的多条 route 通过 weight 分配比例。三层各自回答一个问题：
@@ -839,7 +851,7 @@ RouteTrip C ─┘   决定"跑什么"                        决定"谁来跑"
 | `fta_timetable_platform_plans` | 计划站台：`(timetable_id, trip_id, stop_sequence)` → `node_id`，只有动态站台停靠且排上了股道的才有。build 在保存表之后整份重写；重存表（车次换了）时一并清空，翻发布状态不碰 |
 | `fta_timetable_baselines` | build 当时读到的邻表身份（`neighbor_timetable_id` + `neighbor_code` + `neighbor_updated_at`）与共用资源数、目标间隔下的冲突数。publish 重检靠它判断邻表集合有没有变；**只由 build / publish 重检 / delete 写**，改状态的 save 不碰它 |
 
-`end_depot_node_id` 是 NOT NULL 的：没有回库端点的 duty 是一条没有出口的链，不允许落库。
+`end_depot_node_id` 是 NOT NULL 的：没有回库端点的 duty 是一条没有出口的链，不允许落库。由拆分开始的 duty 记 `split_from_trip_id`（父班次），`start_depot_node_id` 是解编站；以联挂结束的 duty 记 `joins_trip_id`（并入的班次），`end_depot_node_id` 是联挂站（开服时按需补这两列）。
 duty 的 `planned_start_second` 可以是负数（出库早于服务日零点），`planned_end_second` 可以超过一天（跨零点）。
 本项目没有 schema 迁移机制：如果开发库里已经建过旧形状的 `fta_timetable_duties`，需要手工删表重建。
 
@@ -1055,6 +1067,10 @@ TIMETABLE_TRIP_DELAY train=… trip=… date=… reason=terminated marks=4 carri
 | 到期 `expiryOf` | 计划时刻 + `assign-tolerance-seconds` 还没车就作废（`TIMETABLE_SPAWN_SKIP reason=abandoned`），pending 与重试队列都适用，不走全局 max-age。**例外**：续班票与回库票的交路有车在路上（`TimetableService#awaitsOwnVehicle`：车还绑在交路上、还没跑过这一班）时不到期，晚点就晚发；车被换下或离开运行时管辖后照常到期，外层仍有 `spawn.pending-layover-max-age-seconds` |
 | 派发回调 `onDispatched` | 出库票实体化的车、接了首班的车，立刻绑到交路上（`TIMETABLE_DUTY_BOUND`） |
 | 交路已有车 `runningVehicleFor` | 会新出一辆车的票（出库票；交路没有出库走行时的首班票）每次放出前都问：交路已经绑了车就作废（`TIMETABLE_SPAWN_SKIP reason=duty-already-running`）。同一交路同一时刻只能有一辆车（换车见下） |
+
+以联挂结束的交路的车跑完、在联挂站等主干：`joinTrunkOf` 回答表上那一班主干还会不会来（主干交路有车、还没跑过那一班、那一班没取消），主干那辆车的 `joinPlanOf` 回答这一班由哪辆回程支线车并进来；现场的等候、选台与进站见 `coupler.md`。
+
+由拆分开始的交路（`DutyCoupling#startsBySplit`）：首班票在主干那辆车还没跑过拆分那一班时同样等它；解编时解下的车由 `pinSplit` 钉给子交路——首班只接这辆车，这辆车只接子交路的票，派出后由交路绑定接手。拆不开时子交路记为落空，首班不接任何车、到期照常取消。以联挂结束的交路没有回库票。
 
 于是"接班没车"的语义是**等**：续班票在 pending 里等本交路那辆车到站（晚点就晚点跑），不抓别的交路的车，也不新出库；
 车还在路上就一直等，交路没有车（没出库、被换下、被删）时超过容差才作废。

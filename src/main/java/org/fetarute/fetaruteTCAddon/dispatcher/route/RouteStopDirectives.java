@@ -14,7 +14,8 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 public final class RouteStopDirectives {
 
   private static final Pattern ACTION_PREFIX_PATTERN =
-      Pattern.compile("^(CHANGE|DYNAMIC|ACTION|POWER|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
+      Pattern.compile(
+          "^(CHANGE|DYNAMIC|ACTION|POWER|DECP|COPL|CRET|DSTY)\\b", Pattern.CASE_INSENSITIVE);
 
   private RouteStopDirectives() {}
 

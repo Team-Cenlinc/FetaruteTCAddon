@@ -339,6 +339,8 @@ public final class TimetableBuildReportText {
                 case STUB_SATURATED -> "端点排队或让车累计超限";
                 case CONSIST_MISMATCH -> "车型不许跑";
                 case CONFLICT_CANCELLED -> "严格模式取消让不掉的";
+                case DECOUPLE_NO_VEHICLE -> "解编派生却没有解下的车";
+                case DECOUPLE_STRANDED -> "解下的车回不了库";
               };
           if (label != null) {
             parts.add(label + " " + count);
@@ -364,6 +366,8 @@ public final class TimetableBuildReportText {
       case STUB_SATURATED -> "端点排队或让车累计超限，等到能发车时交路已超上限或越过计划窗口";
       case CONSIST_MISMATCH -> "起点有车在等，但车型都不许跑这一班，也没有能出许可车型的出库线路";
       case CONFLICT_CANCELLED -> "严格模式下这一班卷进让不掉的冲突，按 --max-cancel 取消";
+      case DECOUPLE_NO_VEHICLE -> "解编派生的班次：解编它的那一班主干没派上车，或解下的车赶不上";
+      case DECOUPLE_STRANDED -> "解编：切下的车就地待命或回库，但解编站没有能回库的线路、也没有班次接它（须改写法）";
     };
   }
 

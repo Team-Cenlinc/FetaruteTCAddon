@@ -56,6 +56,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.DynamicStopMatcher.DynamicSpec;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteLineChanges;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RoutePowerModes;
@@ -104,7 +105,8 @@ public final class FtaRouteCommand {
 
   private static final Pattern DWELL_PATTERN =
       Pattern.compile("\\bdwell=(\\d+)\\b", Pattern.CASE_INSENSITIVE);
-  private static final Set<String> ACTION_PREFIXES = Set.of("CHANGE", "DYNAMIC", "ACTION", "POWER");
+  private static final Set<String> ACTION_PREFIXES =
+      Set.of("CHANGE", "DYNAMIC", "ACTION", "POWER", "DECP", "COPL");
   private static final Set<String> DIRECTIVE_PREFIXES = Set.of("CRET", "DSTY");
   private static final List<String> ROUTE_PATTERN_ALIASES =
       List.of("LOCAL", "RAPID", "NEO_RAPID", "EXPRESS", "LTD_EXPRESS", "LIMITED_EXPRESS");
@@ -1571,6 +1573,13 @@ public final class FtaRouteCommand {
                             validateRouteSpawnConfig(
                                 resolved.line(), route, allLineRoutes, stopsByRoute));
                     validatePowerDirectives(stops, spawnIssues, true);
+                    for (RouteCouplingDirectives.Issue issue :
+                        RouteCouplingDirectives.validateTargets(
+                            couplingRef(route, stops), couplingRefs(allLineRoutes, stopsByRoute))) {
+                      spawnIssues.add(
+                          new RouteValidationIssue(
+                              "command.route.define." + issue.key(), issue.params()));
+                    }
                     if (result.reachabilitySkipped()) {
                       reachabilitySkipped = true;
                     }
@@ -3613,6 +3622,9 @@ public final class FtaRouteCommand {
               "command.route.define.dsty-not-last", Map.of("seq", String.valueOf(dstySeq))));
     }
     validatePowerDirectives(stops, issues, false);
+    for (RouteCouplingDirectives.Issue issue : RouteCouplingDirectives.validateLocal(stops)) {
+      issues.add(new RouteValidationIssue("command.route.define." + issue.key(), issue.params()));
+    }
 
     boolean missingNode = false;
     // 每个 stop 对应的可用 NodeId 列表（普通 stop 只有 1 个，DYNAMIC 可能有多个）
@@ -4040,6 +4052,23 @@ public final class FtaRouteCommand {
     issues.add(
         new RouteValidationIssue(
             "command.route.define.node-missing", Map.of("seq", String.valueOf(stop.sequence()))));
+  }
+
+  /** 加解编指令跨交路校验用的交路概况。 */
+  private static RouteCouplingDirectives.RouteRef couplingRef(Route route, List<RouteStop> stops) {
+    return new RouteCouplingDirectives.RouteRef(
+        route.code(), RouteCouplingDirectives.groupOf(route.metadata()), stops);
+  }
+
+  private static List<RouteCouplingDirectives.RouteRef> couplingRefs(
+      List<Route> routes, Map<UUID, List<RouteStop>> stopsByRoute) {
+    List<RouteCouplingDirectives.RouteRef> refs = new ArrayList<>();
+    for (Route route : routes) {
+      if (route != null) {
+        refs.add(couplingRef(route, stopsByRoute.getOrDefault(route.id(), List.of())));
+      }
+    }
+    return refs;
   }
 
   /** 多模车换模备注 POWER：受电方式认不出时报错；{@code hints} 时只给提示——涉及内燃却写在不停车的路径点上（首站除外），推迟到其后第一个停车点（不拦保存）。 */
@@ -4695,7 +4724,8 @@ public final class FtaRouteCommand {
     }
     String upper = raw.toUpperCase(java.util.Locale.ROOT);
     // 按优先级检测 directive 前缀并附加显示
-    for (String directive : List.of("CRET", "DSTY", "DYNAMIC", "CHANGE", "POWER", "ACTION")) {
+    for (String directive :
+        List.of("CRET", "DSTY", "DYNAMIC", "CHANGE", "POWER", "DECP", "COPL", "ACTION")) {
       if (upper.startsWith(directive + " ")
           || upper.startsWith(directive + ":")
           || directive.equals(upper)) {

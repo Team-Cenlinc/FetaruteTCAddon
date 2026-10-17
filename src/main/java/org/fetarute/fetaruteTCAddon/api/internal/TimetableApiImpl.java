@@ -494,7 +494,9 @@ public final class TimetableApiImpl implements TimetableApi {
                             .toList(),
                         d.plannedStartSecondOfDay(),
                         d.plannedEndSecondOfDay(),
-                        d.consist()))
+                        d.consist(),
+                        d.coupling().splitFromTripId().map(tripCodeById::get),
+                        d.coupling().joinsTripId().map(tripCodeById::get)))
             .toList();
     return new TimetableDetail(info(t), plans, trips, duties);
   }

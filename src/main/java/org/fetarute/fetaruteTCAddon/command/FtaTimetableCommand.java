@@ -618,7 +618,8 @@ public final class FtaTimetableCommand {
                       graphSnapshot,
                       model,
                       Optional.empty())
-                  .withFleet(fleetOf(member.consistPlans(), graph.worldId())),
+                  .withFleet(fleetOf(member.consistPlans(), graph.worldId()))
+                  .withCouplings(member.couplings()),
               member.line().line().code(),
               display,
               member.ownRouteIds()));
@@ -804,7 +805,8 @@ public final class FtaTimetableCommand {
       WorldGraph graph,
       UUID timetableId,
       Map<UUID, Long> trainLengths,
-      ConsistPlans consistPlans) {}
+      ConsistPlans consistPlans,
+      org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs couplings) {}
 
   /**
    * 一条线各 route 绑定的编组方案。
@@ -916,7 +918,72 @@ public final class FtaTimetableCommand {
         graph,
         existingId.orElseGet(UUID::randomUUID),
         trainLengthsOf(routes, routeInputs),
-        consistPlansOf(provider, routes));
+        consistPlansOf(provider, routes),
+        couplingInputsOf(routes, routeInputs));
+  }
+
+  /**
+   * 加解编编表要用的出车编组与组合写法各段节数（主线程读 TrainCarts）。线上没有一条交路写了 DECP/COPL 时不读。
+   *
+   * <p>编组写法的来源与车长同一套：route metadata 写明的，其次首站 CRET 指向的车库牌子。
+   */
+  private org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs
+      couplingInputsOf(List<Route> routes, List<TimetableBuilder.RouteInput> inputs) {
+    boolean any =
+        inputs.stream()
+            .flatMap(input -> input.stops().stream())
+            .anyMatch(
+                stop ->
+                    org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawDecouple(stop)
+                            .isPresent()
+                        || org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .route
+                            .RouteCouplingDirectives
+                            .rawCouple(stop)
+                            .isPresent());
+    if (!any) {
+      return org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs.NONE;
+    }
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    Map<UUID, String> patterns = new java.util.HashMap<>();
+    Map<String, List<Integer>> sizes = new java.util.HashMap<>();
+    for (TimetableBuilder.RouteInput input : inputs) {
+      Optional<Route> route =
+          routes.stream().filter(candidate -> candidate.id().equals(input.routeId())).findFirst();
+      Optional<String> pattern =
+          route
+              .flatMap(DepotSpawnPattern::fromRoute)
+              .or(
+                  () ->
+                      registry == null
+                          ? Optional.empty()
+                          : SpawnDirectiveParser.findDirectiveTarget(input.stops(), "CRET")
+                              .map(NodeId::of)
+                              .flatMap(depot -> DepotSpawnPattern.read(registry, depot)))
+              .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey::tidy);
+      if (pattern.isEmpty()) {
+        continue;
+      }
+      patterns.put(input.routeId(), pattern.get());
+      if (!sizes.containsKey(pattern.get())) {
+        org.fetarute
+            .fetaruteTCAddon
+            .dispatcher
+            .consist
+            .CompositeSpawnPattern
+            .parse(com.bergerkiller.bukkit.tc.TrainCarts.plugin, pattern.get())
+            .ifPresent(parsed -> sizes.put(pattern.get(), parsed.partSizes()));
+      }
+    }
+    return new org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.CouplingInputs(
+        patterns, sizes);
   }
 
   /**

@@ -1021,6 +1021,22 @@ command:
       dsty-not-last: "<prefix> <red>DSTY 必须为最后一个停靠点</red> <gray>(seq=<white><seq></white>)</gray>"
       power-invalid: "<prefix> <red>POWER 的受电方式无法识别：</red><white><value></white> <gray>(seq=<white><seq></white>；可写 ptg5、ptg6、shoe、diesel、supercap)</gray>"
       power-deferred: "<prefix> <yellow>第 <white><seq></white> 个停靠点不停车，涉及内燃的换模推迟到其后第一个停车点</yellow>"
+      decouple-syntax: "<prefix> <red>DECP 写法有误：</red><white><value></white> <gray>(seq=<white><seq></white>；应写 DECP FRONT|REAR:节数:GOTO:交路、…:IDLE 或 …:RETURN)</gray>"
+      decouple-end: "<prefix> <red>DECP 须指明从车头（FRONT）还是车尾（REAR）切：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      decouple-cars: "<prefix> <red>DECP 的节数须为正整数：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      decouple-action: "<prefix> <red>DECP 的去向须为 GOTO、IDLE 或 RETURN：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      decouple-goto-missing: "<prefix> <red>DECP …:GOTO 须写明交路码：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      couple-syntax: "<prefix> <red>COPL 写法有误：</red><white><value></white> <gray>(seq=<white><seq></white>；应写 COPL FROM:交路 或 COPL FROM:交路:WAIT:秒)</gray>"
+      couple-wait: "<prefix> <red>COPL 的等待秒数须为非负整数：</red><white><value></white> <gray>(seq=<white><seq></white>)</gray>"
+      coupling-at-end: "<prefix> <red>第 <white><seq></white> 个停靠点是交路首站或末站，不得写 DECP 或 COPL</red>"
+      coupling-at-pass: "<prefix> <red>第 <white><seq></white> 个停靠点不停车（PASS），不得写 DECP 或 COPL</red>"
+      coupling-duplicate: "<prefix> <red>第 <white><seq></white> 个停靠点写了多条 DECP 或 COPL，一站至多各一条</red>"
+      decouple-front-idle: "<prefix> <red>第 <white><seq></white> 个停靠点 DECP 切下车头后就地待命，会挡住本交路继续前行；请改为切车尾，或改用 GOTO、RETURN</red>"
+      coupling-target-missing: "<prefix> <red>第 <white><seq></white> 个停靠点的加解编指向的交路 </red><white><route></white><red> 在本线路中不存在</red>"
+      coupling-target-self: "<prefix> <red>第 <white><seq></white> 个停靠点的加解编不得指向本交路</red>"
+      coupling-target-group: "<prefix> <red>第 <white><seq></white> 个停靠点的加解编指向的交路 </red><white><route></white><red> 不在同一交路组</red>"
+      decouple-target-start: "<prefix> <red>第 <white><seq></white> 个停靠点 DECP 指向的交路 </red><white><route></white><red> 首站须为本站</red>"
+      couple-target-end: "<prefix> <red>第 <white><seq></white> 个停靠点 COPL 指向的交路 </red><white><route></white><red> 末站须为本站</red>"
       graph-missing: "<prefix> <gray>未加载调度图快照，已跳过可达性校验</gray>"
       station-missing: "<prefix> <red>第 <white><seq></white> 个停靠点的站点不存在</red>"
       station-graph-missing: "<prefix> <red>第 <white><seq></white> 个停靠点缺少图节点</red> <gray>(station=<white><station></white>)</gray>"
@@ -1566,6 +1582,13 @@ coupler:
     unmanaged: "普通 TrainCarts 列车，可以操作"
     allowed: "调度管理的列车，当前不在运营中，可以操作"
     denied: "调度管理的列车，暂不可操作："
+  # 运营中解编：值乘的人选择继续哪一段时对两段车的说明（<end>、<cars>、<destination>）
+  decouple:
+    segment: "<end> <cars> 节，开往<destination>"
+    front: "前"
+    rear: "后"
+    idle: "本站待命"
+    return: "回库"
 pids:
   # 站台屏文案：中英文同时显示，<键> 为中文、<键>-secondary 为英文；按纯文本读取，不解析 MiniMessage
   board:

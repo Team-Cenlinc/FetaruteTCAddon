@@ -87,7 +87,8 @@ final class DutyWithdrawal {
               duty.returnSecondOfDay(),
               duty.plannedEndSecondOfDay(),
               duty.closeReason(),
-              duty.consist()));
+              duty.consist(),
+              duty.coupling()));
     }
     unassigned.sort(Comparator.comparing(VehicleDutyPlanner.UnassignedTrip::tripCode));
     return new VehicleDutyPlanner.Result(
@@ -226,7 +227,8 @@ final class DutyWithdrawal {
                     duty.returnRouteId(),
                     duty.returnSecondOfDay(),
                     duty.plannedEndSecondOfDay(),
-                    duty.closeReason()));
+                    duty.closeReason(),
+                    true));
             return;
           }
           current = reopenWithoutFirst(current);
@@ -241,7 +243,8 @@ final class DutyWithdrawal {
                   Optional.empty(),
                   arrival,
                   arrival,
-                  VehicleDuty.CloseReason.ROUTE_ENDS_AT_DEPOT));
+                  VehicleDuty.CloseReason.ROUTE_ENDS_AT_DEPOT,
+                  false));
           return;
         }
         int returnAt = readyAt(last);
@@ -271,7 +274,8 @@ final class DutyWithdrawal {
                 Optional.of(chosen.routeId()),
                 returnAt,
                 returnAt + chosen.runSeconds(),
-                VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT));
+                VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT,
+                false));
         return;
       }
     }
@@ -297,8 +301,14 @@ final class DutyWithdrawal {
         Optional<UUID> returnRoute,
         int returnAt,
         int end,
-        VehicleDuty.CloseReason reason) {
+        VehicleDuty.CloseReason reason,
+        boolean originalEnd) {
       pieces++;
+      // 由解编开始只留给沿用原交路开头的那一段，以联挂结束只留给沿用原交路收尾的那一段；中间另开的段是普通交路。
+      DutyCoupling coupling =
+          new DutyCoupling(
+              piece.opened ? Optional.empty() : duty.coupling().splitFromTripId(),
+              originalEnd ? duty.coupling().joinsTripId() : Optional.empty());
       return new VehicleDuty(
           VehicleDutyPlanner.deterministicDutyId(timetableId, duty.dutyCode() + "." + pieces),
           duty.timetableId(),
@@ -313,7 +323,8 @@ final class DutyWithdrawal {
           returnAt,
           end,
           reason,
-          consist);
+          consist,
+          coupling);
     }
 
     private void drop(

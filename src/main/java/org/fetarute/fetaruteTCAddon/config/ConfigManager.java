@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.supervisor.SmartDispatche
  */
 public final class ConfigManager {
 
-  private static final int EXPECTED_CONFIG_VERSION = 44;
+  private static final int EXPECTED_CONFIG_VERSION = 45;
   private static final String DEFAULT_LOCALE = "zh_CN";
   private static final double DEFAULT_GRAPH_SPEED_BLOCKS_PER_SECOND = 8.0;
   private static final int DEFAULT_GRAPH_SIGN_ANCHOR_SEARCH_RADIUS = 6;
@@ -217,7 +217,29 @@ public final class ConfigManager {
         section.getBoolean("enabled", defaults.enabled()),
         readNonNegativeInt(section, "max-cars", defaults.maxCars(), "coupler", logger),
         readNonNegativeInt(section, "push-max-blocks", defaults.pushMaxBlocks(), "coupler", logger),
-        speed);
+        speed,
+        readNonNegativeInt(
+            section, "decouple-seconds", defaults.decoupleSeconds(), "coupler", logger),
+        readNonNegativeInt(section, "couple-seconds", defaults.coupleSeconds(), "coupler", logger),
+        readNonNegativeInt(
+            section, "couple-wait-seconds", defaults.coupleWaitSeconds(), "coupler", logger),
+        readPositiveDouble(
+            section,
+            "approach-speed-blocks-per-second",
+            defaults.approachSpeedBlocksPerSecond(),
+            logger),
+        readNonNegativeInt(
+            section, "approach-max-blocks", defaults.approachMaxBlocks(), "coupler", logger));
+  }
+
+  private static double readPositiveDouble(
+      ConfigurationSection section, String key, double fallback, java.util.logging.Logger logger) {
+    double value = section.getDouble(key, fallback);
+    if (!(value > 0.0) || !Double.isFinite(value)) {
+      logger.warning("coupler." + key + " 配置无效: " + value + "，已回退为默认值");
+      return fallback;
+    }
+    return value;
   }
 
   /** 解析叫车配置段；缺段或取值无效时用默认值。 */
@@ -1811,9 +1833,22 @@ public final class ConfigManager {
    * @param maxCars 联挂后最多几节；0 表示只受 TrainCarts 自己的上限
    * @param pushMaxBlocks Shift+右键推车时沿轨道最远找多少格内的对方端车
    * @param pushSpeedBlocksPerSecond 推车速度（格/秒）
+   * @param decoupleSeconds 交路写了解编（DECP）的那一站多停的秒数（编表、到站预测与现场同一口径）
+   * @param coupleSeconds 交路写了联挂（COPL）的那一站多停的秒数；回程支线车也提前这么多秒到站等主干
+   * @param coupleWaitSeconds 联挂指令不写 {@code WAIT} 时等对方的秒数（不超过发车扣留上限 150 秒）
+   * @param approachSpeedBlocksPerSecond 联挂时后到的车开进站台的速度（格/秒）；最后几格按推车速度
+   * @param approachMaxBlocks 联挂时后到的车离对方最远多少格（沿调度图）才开进去；也是开进去最多走的距离
    */
   public record CouplerSettings(
-      boolean enabled, int maxCars, int pushMaxBlocks, double pushSpeedBlocksPerSecond) {
+      boolean enabled,
+      int maxCars,
+      int pushMaxBlocks,
+      double pushSpeedBlocksPerSecond,
+      int decoupleSeconds,
+      int coupleSeconds,
+      int coupleWaitSeconds,
+      double approachSpeedBlocksPerSecond,
+      int approachMaxBlocks) {
 
     public CouplerSettings {
       maxCars = Math.max(0, maxCars);
@@ -1822,10 +1857,37 @@ public final class ConfigManager {
           pushSpeedBlocksPerSecond > 0.0 && Double.isFinite(pushSpeedBlocksPerSecond)
               ? pushSpeedBlocksPerSecond
               : 1.0;
+      decoupleSeconds = Math.max(0, decoupleSeconds);
+      coupleSeconds = Math.max(0, coupleSeconds);
+      coupleWaitSeconds = Math.max(0, coupleWaitSeconds);
+      approachSpeedBlocksPerSecond =
+          approachSpeedBlocksPerSecond > 0.0 && Double.isFinite(approachSpeedBlocksPerSecond)
+              ? approachSpeedBlocksPerSecond
+              : 3.0;
+      approachMaxBlocks = Math.max(1, approachMaxBlocks);
     }
 
     public static CouplerSettings defaults() {
-      return new CouplerSettings(true, 0, 8, 1.0);
+      return new CouplerSettings(
+          true,
+          0,
+          8,
+          1.0,
+          org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .route
+              .RouteCouplingDirectives
+              .DEFAULT_COUPLING_SECONDS,
+          org.fetarute
+              .fetaruteTCAddon
+              .dispatcher
+              .route
+              .RouteCouplingDirectives
+              .DEFAULT_COUPLING_SECONDS,
+          120,
+          3.0,
+          120);
     }
   }
 

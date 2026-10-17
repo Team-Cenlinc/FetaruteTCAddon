@@ -62,6 +62,13 @@ public final class StationStopCoordinator {
 
   private volatile Duration maxHold = Duration.ZERO;
 
+  /** 联挂搭档：后到的车要开进搭档停着的股道（选台优先它，搭档的占用不算外部占用）。 */
+  private volatile DynamicPlatformAllocator.CouplingPartners couplingPartners =
+      DynamicPlatformAllocator.CouplingPartners.NONE;
+
+  /** 联挂等对方：列车名 → 扣到几点（不扣时为空）。上限由联挂指令的等候秒数定，不受按表扣车上限约束。 */
+  private volatile Function<String, Optional<Instant>> couplingHold = name -> Optional.empty();
+
   private volatile Recovery recovery = Recovery.DISABLED;
 
   /** 正在按表扣留的车 → 扣到几点。只用来回答健康检查"它是不是在等点"，不参与任何放行判定。 */
@@ -117,6 +124,21 @@ public final class StationStopCoordinator {
     this.observer = next;
   }
 
+  /** 接上联挂搭档（选台用）；{@code null} 恢复为没有。 */
+  public void setCouplingPartners(DynamicPlatformAllocator.CouplingPartners partners) {
+    this.couplingPartners =
+        partners == null ? DynamicPlatformAllocator.CouplingPartners.NONE : partners;
+    DynamicPlatformAllocator allocator = platforms;
+    if (allocator != null) {
+      allocator.setCouplingPartners(this.couplingPartners);
+    }
+  }
+
+  /** 注册联挂等候；{@code null} 恢复不扣。 */
+  public void setCouplingHold(Function<String, Optional<Instant>> hold) {
+    this.couplingHold = hold == null ? name -> Optional.empty() : hold;
+  }
+
   /** 注册发车计划源；{@code null} 会立刻停止一切计划扣留，不需要等任何超时。 */
   public void setPlan(ScheduledDeparturePlan next) {
     this.plan = next;
@@ -133,6 +155,21 @@ public final class StationStopCoordinator {
     Optional<UUID> routeId = routeDefinitions.findUuid(route.id());
     if (routeId.isEmpty()) {
       return Optional.empty();
+    }
+    // 联挂：要开进搭档停着的那条股道，先于时刻表排定的计划站台
+    try {
+      Optional<NodeId> partner = couplingPartners.platformOf(trainName, routeId.get(), stopIndex);
+      if (partner != null && partner.isPresent()) {
+        return partner;
+      }
+    } catch (RuntimeException ex) {
+      debugLogger.accept(
+          "COUPLING_PLATFORM_READ_FAILED train="
+              + trainName
+              + " stopIndex="
+              + stopIndex
+              + " error="
+              + ex);
     }
     ScheduledDeparturePlan current = plan;
     Optional<String> planned =
@@ -180,6 +217,9 @@ public final class StationStopCoordinator {
   /** 接上选台器（调度服务构造时）。 */
   void attachPlatforms(DynamicPlatformAllocator allocator) {
     this.platforms = allocator;
+    if (allocator != null) {
+      allocator.setCouplingPartners(couplingPartners);
+    }
   }
 
   /**
@@ -240,7 +280,9 @@ public final class StationStopCoordinator {
       NodeId nodeId,
       Instant now) {
     Optional<Instant> heldUntil =
-        scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now);
+        later(
+            scheduledHoldTarget(trainName, route, routeUuid, currentIndex, nodeId, now),
+            couplingHoldTarget(trainName, now));
     String key = holdKey(trainName);
     if (key != null) {
       heldUntil.ifPresentOrElse(
@@ -282,6 +324,26 @@ public final class StationStopCoordinator {
     if (key != null && until != null) {
       scheduledHolds.put(key, until);
     }
+  }
+
+  /** 联挂等对方扣到几点；判定出错时不扣（按现状放行）。 */
+  private Optional<Instant> couplingHoldTarget(String trainName, Instant now) {
+    try {
+      return couplingHold.apply(trainName).filter(until -> now != null && now.isBefore(until));
+    } catch (RuntimeException ex) {
+      debugLogger.accept("COUPLING_HOLD_FAILED train=" + trainName + " error=" + ex);
+      return Optional.empty();
+    }
+  }
+
+  private static Optional<Instant> later(Optional<Instant> a, Optional<Instant> b) {
+    if (a.isEmpty()) {
+      return b;
+    }
+    if (b.isEmpty()) {
+      return a;
+    }
+    return a.get().isAfter(b.get()) ? a : b;
   }
 
   /** 扣留判定本体：要扣就返回扣到几点。 */

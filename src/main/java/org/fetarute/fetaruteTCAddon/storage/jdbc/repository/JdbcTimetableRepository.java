@@ -19,6 +19,7 @@ import java.util.UUID;
 import javax.sql.DataSource;
 import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.DutyCoupling;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.PlatformPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
@@ -55,7 +56,7 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
   private static final String DUTY_COLUMNS =
       "id, timetable_id, sequence, duty_code, start_depot_node_id, end_depot_node_id,"
           + " create_route_id, return_route_id, trip_ids, planned_start_second, return_second,"
-          + " planned_end_second, close_reason, consist_key";
+          + " planned_end_second, close_reason, consist_key, split_from_trip_id, joins_trip_id";
 
   public JdbcTimetableRepository(
       DataSource dataSource,
@@ -233,7 +234,7 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
               + table("timetable_duties")
               + " ("
               + DUTY_COLUMNS
-              + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+              + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
       try (var statement = connection.prepareStatement(sql)) {
         for (VehicleDuty duty : timetable.duties()) {
           setUuid(statement, 1, duty.id());
@@ -250,6 +251,8 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
           statement.setInt(12, duty.plannedEndSecondOfDay());
           statement.setString(13, duty.closeReason().name());
           statement.setString(14, duty.consist().orElse(null));
+          setUuid(statement, 15, duty.coupling().splitFromTripId().orElse(null));
+          setUuid(statement, 16, duty.coupling().joinsTripId().orElse(null));
           statement.addBatch();
         }
         statement.executeBatch();
@@ -544,7 +547,10 @@ public final class JdbcTimetableRepository extends JdbcRepositorySupport
         readRequiredInt(rs, "return_second"),
         readRequiredInt(rs, "planned_end_second"),
         reason,
-        Optional.ofNullable(rs.getString("consist_key")));
+        Optional.ofNullable(rs.getString("consist_key")),
+        new DutyCoupling(
+            Optional.ofNullable(readUuid(rs, "split_from_trip_id")),
+            Optional.ofNullable(readUuid(rs, "joins_trip_id"))));
   }
 
   private int readRequiredInt(ResultSet rs, String column) throws SQLException {

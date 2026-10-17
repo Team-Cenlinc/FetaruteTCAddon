@@ -77,16 +77,34 @@ public final class CouplerService {
   private WrenchItem wrench;
   private CouplerWrenchListener wrenchListener;
   private CouplerLinkGate linkGate;
+  private final DecoupleService decoupling;
+  private final CoupleService coupling;
 
   public CouplerService(FetaruteTCAddon plugin) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.pairs = new CoLocatedPairs(this::nodePosition);
+    this.decoupling = new DecoupleService(plugin, this);
+    this.coupling = new CoupleService(plugin, this);
+  }
+
+  /** 联挂指令 COPL 的执行。 */
+  public CoupleService coupling() {
+    return coupling;
+  }
+
+  /** 解编指令 DECP 的执行。 */
+  public DecoupleService decoupling() {
+    return decoupling;
   }
 
   /** 接入占用判定、开始维护同股道列车对，接上扳手的交互与碰撞联挂的车钩判定。 */
   public void start() {
     if (plugin.getOccupancyManager() instanceof SimpleOccupancyManager occupancy) {
-      occupancy.setCoLocationPolicy(pairs);
+      // 同股道列车对（拆开后背离对方的一方先走）与联挂进站（后到的车开进对方所在站台）两种豁免
+      occupancy.setCoLocationPolicy(
+          (request, resource, claim) ->
+              pairs.exempts(request, resource, claim)
+                  || coupling.exempts(request, resource, claim));
     }
     if (maintainTask == null) {
       maintainTask =
@@ -106,6 +124,8 @@ public final class CouplerService {
       Bukkit.getPluginManager().registerEvents(linkGate, plugin);
     }
     wrenchListener.start();
+    decoupling.start();
+    coupling.start();
   }
 
   /** 撤下占用判定的接入、停止维护，推着的车就地停下，撤下扳手的交互。 */
@@ -127,6 +147,8 @@ public final class CouplerService {
       occupancy.setCoLocationPolicy(null);
     }
     pairs.clear();
+    decoupling.stop();
+    coupling.stop();
   }
 
   /** 扳手物品。 */
@@ -275,21 +297,42 @@ public final class CouplerService {
     if (dispatch.isEmpty()) {
       return new SplitAttempt(CouplerEligibility.Verdict.ALLOWED, Optional.empty());
     }
+    TrainSplitter.Result result = splitAndPair(dispatch.get(), group, at, false);
+    return new SplitAttempt(CouplerEligibility.Verdict.ALLOWED, Optional.of(result));
+  }
+
+  /**
+   * 解编：交路指令在停站的列车上拆开。不判能不能动——车在运营中、停站，拆开本身就是这一站的作业。
+   *
+   * @param at 后一半第一节在编组里的下标
+   * @param keepRear 后一半保留原身份（切车头）；否则前一半保留
+   * @return 拆分结果；调度没启用时为空
+   */
+  Optional<TrainSplitter.Result> splitInService(MinecartGroup group, int at, boolean keepRear) {
+    return plugin
+        .getRuntimeDispatchService()
+        .map(dispatch -> splitAndPair(dispatch, group, at, keepRear));
+  }
+
+  /** 拆开，两半按各自的车厢来源重写编组键；受管列车的两半登记成同股道列车对。 */
+  private TrainSplitter.Result splitAndPair(
+      RuntimeDispatchService dispatch, MinecartGroup group, int at, boolean keepRear) {
     TrainSplitter splitter =
         new TrainSplitter(
-            dispatch.get(),
+            dispatch,
             task -> Bukkit.getScheduler().runTask(plugin, task),
             message -> plugin.getLoggerManager().debug(message));
     CarTags.stampOrigins(group);
-    TrainSplitter.Result result = splitter.split(group, at);
+    TrainSplitter.Result result =
+        keepRear ? splitter.splitKeepingRear(group, at) : splitter.split(group, at);
     if (result.outcome() == TrainSplitter.Outcome.SPLIT) {
       CarTags.rewriteConsist(group);
       result.detached().ifPresent(CarTags::rewriteConsist);
     }
     if (result.outcome() == TrainSplitter.Outcome.SPLIT
         && result.detachedName().isPresent()
-        && dispatch.get().hasFtaRuntimeTag(group.getProperties())) {
-      String keptName = trainName(dispatch.get(), group.getProperties());
+        && dispatch.hasFtaRuntimeTag(group.getProperties())) {
+      String keptName = trainName(dispatch, group.getProperties());
       // 编组键刚按留下的车厢重写：待命登记里的标签快照（编组方案按它认车）跟着刷新。
       TrainLinker.refreshStandby(plugin.getLayoverRegistry(), group, keptName);
       MinecartGroup detached = result.detached().orElseThrow();
@@ -301,7 +344,7 @@ public final class CouplerService {
           PAIR_ATTEMPTS,
           PAIR_FIRST_DELAY_TICKS);
     }
-    return new SplitAttempt(CouplerEligibility.Verdict.ALLOWED, Optional.of(result));
+    return result;
   }
 
   /**
@@ -332,6 +375,56 @@ public final class CouplerService {
             message -> plugin.getLoggerManager().debug(message));
     return new LinkAttempt(
         CouplerEligibility.Verdict.ALLOWED, Optional.of(linker.link(moving, standing, maxCars)));
+  }
+
+  /**
+   * 联挂指令：把回程支线车挂到主干上，主干保留身份。不判能不能动——两车都在运营中，联挂本身就是这一站的作业。调用方已让两车贴着（空隙不超过联挂距离）。
+   *
+   * @param feeder 回程支线车朝着主干的端车
+   * @param trunk 主干朝着回程支线车的端车
+   * @return 联挂结果；调度没启用时为空
+   */
+  Optional<TrainLinker.Result> linkInService(MinecartMember<?> feeder, MinecartMember<?> trunk) {
+    Optional<RuntimeDispatchService> dispatch = plugin.getRuntimeDispatchService();
+    if (dispatch.isEmpty()) {
+      return Optional.empty();
+    }
+    TrainLinker linker =
+        new TrainLinker(
+            dispatch.get(),
+            pairs,
+            plugin.getLayoverRegistry(),
+            task -> Bukkit.getScheduler().runTask(plugin, task),
+            message -> plugin.getLoggerManager().debug(message));
+    // TrainLinker 保留“被接上的一方”的身份与编组对象：主干当作被接上的一方
+    return Optional.of(linker.link(feeder, trunk, settings().maxCars()));
+  }
+
+  /** 联挂进站失败、两车已经挨在同一段轨道上：登记成同股道列车对，背离对方的一方先走（与拆开后同一套）。 */
+  void pairAfterFailedApproach(
+      String first, MinecartGroup firstGroup, String second, MinecartGroup secondGroup) {
+    schedulePairing(first, firstGroup, second, secondGroup, PAIR_ATTEMPTS, PAIR_FIRST_DELAY_TICKS);
+  }
+
+  /** 这列车占着这个资源。 */
+  boolean claims(String trainName, OccupancyResource resource) {
+    OccupancyManager occupancy = plugin.getOccupancyManager();
+    if (occupancy == null || resource == null) {
+      return false;
+    }
+    for (OccupancyClaim claim : occupancy.snapshotClaims()) {
+      if (claim != null
+          && resource.equals(claim.resource())
+          && TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** 两车共占的资源（已按现场车身水合）。 */
+  Set<OccupancyResource> sharedClaimsOf(String first, String second) {
+    return sharedClaims(first, second);
   }
 
   /**
@@ -493,6 +586,10 @@ public final class CouplerService {
   public boolean allowsLayoverDispatch(SpawnTicket ticket, String trainName) {
     if (org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShuntingRegistry.isShunting(
         trainName)) {
+      return false;
+    }
+    if (!decoupling.allowsLayoverDispatch(ticket, trainName)
+        || !coupling.allowsLayoverDispatch(trainName)) {
       return false;
     }
     if (partialConsist(trainName) && !returnTicket(ticket)) {

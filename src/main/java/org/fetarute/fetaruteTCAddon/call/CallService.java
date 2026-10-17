@@ -57,11 +57,11 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.OnDemandTrip;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteSpawnServices;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SimpleTicketAssigner;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
-import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnServiceKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TicketAssigner;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsRow;
@@ -1755,49 +1755,8 @@ public final class CallService {
   /** 交路的发车服务：发车计划里有就用它（车库规范一致），否则按交路现拼一份（叫车不靠发车间隔，间隔只是占位）。 */
   private Optional<SpawnService> serviceFor(
       SpawnManager spawnManager, RouteDefinitionCache cache, UUID routeId) {
-    for (SpawnService service : spawnManager.snapshotPlan().services()) {
-      if (service != null && routeId.equals(service.routeId())) {
-        return Optional.of(service);
-      }
-    }
-    Optional<RouteDefinitionCache.RouteRecord> record = cache.findRecord(routeId);
-    Optional<RouteDefinition> definition = cache.findById(routeId);
-    Optional<StorageProvider> provider = plugin.getStorageManager().provider();
-    if (record.isEmpty() || definition.isEmpty() || provider.isEmpty()) {
-      return Optional.empty();
-    }
-    List<RouteStop> stops = cache.listStops(definition.get().id());
-    String depotNode =
-        stops.isEmpty()
-            ? definition.get().waypoints().get(0).value()
-            : SpawnDirectiveParser.findDirectiveTarget(stops.get(0), "CRET")
-                .orElse(definition.get().waypoints().get(0).value());
-    UUID companyId = record.get().operator().companyId();
-    String companyCode =
-        provider
-            .get()
-            .companies()
-            .findById(companyId)
-            .map(company -> company.code())
-            .orElse(record.get().operator().code());
-    try {
-      return Optional.of(
-          new SpawnService(
-              new SpawnServiceKey(routeId),
-              companyId,
-              companyCode,
-              record.get().operator().id(),
-              record.get().operator().code(),
-              record.get().line().id(),
-              record.get().line().code(),
-              routeId,
-              record.get().route().code(),
-              Duration.ofMinutes(10),
-              depotNode));
-    } catch (IllegalArgumentException ex) {
-      debug("叫车拼发车服务失败 route=" + routeId + " error=" + ex.getMessage());
-      return Optional.empty();
-    }
+    return RouteSpawnServices.forRoute(
+        spawnManager, cache, plugin.getStorageManager().provider(), routeId, this::debug);
   }
 
   // ---------------------------------------------------------------- 派车回调

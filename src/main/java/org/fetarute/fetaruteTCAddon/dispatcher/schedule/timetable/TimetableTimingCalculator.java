@@ -75,7 +75,8 @@ public final class TimetableTimingCalculator {
       return TimingResult.failure("交路至少需要两个节点");
     }
     int dwellFallback = defaultDwell == null ? 0 : (int) Math.max(0L, defaultDwell.toSeconds());
-    int[] powerDwell = RoutePowerModes.switchDwellPlan(stops);
+    int[] powerDwell =
+        org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopExtraDwell.plan(stops);
 
     List<RailGraphPath> legs = new ArrayList<>(waypoints.size() - 1);
     for (int i = 1; i < waypoints.size(); i++) {
@@ -180,7 +181,7 @@ public final class TimetableTimingCalculator {
         stops,
         last,
         Math.max(0, fallbackSeconds),
-        RoutePowerModes.switchDwellPlan(stops));
+        org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopExtraDwell.plan(stops));
   }
 
   /**

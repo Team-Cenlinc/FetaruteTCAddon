@@ -1,5 +1,5 @@
 # 配置版本，由插件维护，请勿修改
-config-version: 44
+config-version: 45
 
 # 界面语言，对应 lang/ 目录下的文件名（如 zh_CN、en_US）
 locale: zh_CN
@@ -338,6 +338,16 @@ coupler:
   push-max-blocks: 8
   # 推车速度（格/秒）
   push-speed-blocks-per-second: 1.0
+  # 交路写了解编（DECP）、联挂（COPL）的那一站多停的秒数：编表、到站预测与现场停站同一口径，改了要重新编表。
+  # 联挂时回程支线车按表提前 couple-seconds 到站，在股道上等主干进站挂上
+  decouple-seconds: 30
+  couple-seconds: 30
+  # 联挂（COPL）不写 WAIT 时等对方的秒数：主干先到等回程支线车、支线车先到等主干，等不到各走各的。不超过发车扣留上限 150 秒
+  couple-wait-seconds: 120
+  # 联挂时后到的车先被对方的占用挡在站台外，停稳后由插件以这个速度开进去（格/秒），最后几格按 push-speed-blocks-per-second 对位挂上
+  approach-speed-blocks-per-second: 3.0
+  # 后到的车离对方最远多少格（沿调度图）才开进去；也是开进去最多走的距离，走过了还没碰到就停车放弃
+  approach-max-blocks: 120
 
 train:
   # 默认车种（metro / emu / dmu / diesel_push_pull / electric_loco）：未打车种标签的列车按它控车，

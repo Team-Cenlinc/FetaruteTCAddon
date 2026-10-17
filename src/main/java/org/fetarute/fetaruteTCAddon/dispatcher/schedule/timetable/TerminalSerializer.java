@@ -616,7 +616,11 @@ public final class TerminalSerializer {
             zero + returnAt,
             zero + end,
             truncatedDuty ? VehicleDuty.CloseReason.NO_COMPATIBLE_NEXT : duty.closeReason(),
-            duty.consist()),
+            duty.consist(),
+            // 截断了的交路改为回库收尾，不再并入原来那一班主干
+            truncatedDuty
+                ? new DutyCoupling(duty.coupling().splitFromTripId(), java.util.Optional.empty())
+                : duty.coupling()),
         rows);
   }
 

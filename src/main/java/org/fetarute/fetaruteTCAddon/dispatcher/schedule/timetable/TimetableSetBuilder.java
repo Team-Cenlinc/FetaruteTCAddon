@@ -215,7 +215,10 @@ public final class TimetableSetBuilder {
             first.input().notes(),
             input.neighbors(),
             lineByRoute,
-            mergedFleet(members));
+            mergedFleet(members),
+            members.stream()
+                .map(member -> member.input().couplings())
+                .reduce(CouplingInputs.NONE, CouplingInputs::merge));
     TimetableBuildResult result =
         new TimetableBuilder(progress, threads).build(joint, options, builtAt);
     if (result.timetable().isEmpty()) {
@@ -398,7 +401,8 @@ public final class TimetableSetBuilder {
               duty.returnSecondOfDay(),
               duty.plannedEndSecondOfDay(),
               duty.closeReason(),
-              duty.consist()));
+              duty.consist(),
+              duty.coupling().remap(tripIdByOld::get)));
     }
     for (TimetableTrip trip : trips) {
       referencedRoutes.add(trip.routeId());
@@ -445,7 +449,8 @@ public final class TimetableSetBuilder {
         input.notes(),
         neighbors.isEmpty() ? input.neighbors() : neighbors,
         lineByRoute,
-        input.fleet());
+        input.fleet(),
+        input.couplings());
   }
 
   /**

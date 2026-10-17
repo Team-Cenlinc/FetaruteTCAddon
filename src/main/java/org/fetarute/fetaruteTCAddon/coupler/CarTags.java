@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.coupler;
 
+import com.bergerkiller.bukkit.tc.TrainCarts;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.properties.CartProperties;
@@ -11,6 +12,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.UUID;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 
@@ -102,7 +104,35 @@ public final class CarTags {
     }
   }
 
-  /** 给还没有来源的车厢打上来源编组：这些车厢算作一个来源编组（编组键取列车当前的，没有时为 {@code ?}）。 */
+  /**
+   * 出车时按组合写法逐段打来源编组（车头到车尾，第 i 段的车厢记第 i 段的写法）。各段节数之和与列车节数不符时整列算一个来源编组。
+   *
+   * @param parts 各段写法
+   * @param sizes 各段节数
+   */
+  public static void stampSpawnOrigins(
+      MinecartGroup group, List<String> parts, List<Integer> sizes) {
+    if (group == null || parts == null || sizes == null || parts.size() != sizes.size()) {
+      return;
+    }
+    int total = sizes.stream().mapToInt(Integer::intValue).sum();
+    if (parts.size() < 2 || total != group.size()) {
+      return;
+    }
+    int index = 0;
+    for (int part = 0; part < parts.size(); part++) {
+      CarConsist.Origin origin =
+          new CarConsist.Origin(parts.get(part), UUID.randomUUID().toString(), sizes.get(part));
+      for (int car = 0; car < sizes.get(part); car++) {
+        write(group.get(index++), CarConsist.TAG_CAR_CONSIST, origin.format());
+      }
+    }
+  }
+
+  /**
+   * 给还没有来源的车厢打上来源编组。整列都没有来源、编组键是组合写法且各段节数对得上时按段打（出车时没打上的老车）； 否则这些车厢算作一个来源编组（编组键取列车当前的，没有时为 {@code
+   * ?}）。
+   */
   static void stampOrigins(MinecartGroup group) {
     List<MinecartMember<?>> unstamped = new ArrayList<>();
     for (MinecartMember<?> member : group) {
@@ -118,6 +148,15 @@ public final class CarTags {
         TrainTagHelper.readTagValue(properties, ConsistKey.TRAIN_TAG)
             .flatMap(ConsistKey::tidy)
             .orElse("?");
+    if (unstamped.size() == group.size() && CompositeSpawnPattern.isComposite(pattern)) {
+      Optional<CompositeSpawnPattern.Parsed> parsed =
+          CompositeSpawnPattern.parse(TrainCarts.plugin, pattern);
+      if (parsed.isPresent()
+          && parsed.get().partSizes().stream().mapToInt(Integer::intValue).sum() == group.size()) {
+        stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
+        return;
+      }
+    }
     CarConsist.Origin origin =
         new CarConsist.Origin(pattern, UUID.randomUUID().toString(), unstamped.size());
     for (MinecartMember<?> member : unstamped) {

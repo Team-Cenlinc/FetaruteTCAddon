@@ -170,7 +170,7 @@ public final class RouteStopPlan {
   public int plannedDwellSec(int index) {
     // 多模车在这一站做涉及内燃的换模时另加换模时间，与编表、现场停站同一口径
     if (powerDwell == null) {
-      powerDwell = RoutePowerModes.switchDwellPlan(stops);
+      powerDwell = org.fetarute.fetaruteTCAddon.dispatcher.route.RouteStopExtraDwell.plan(stops);
     }
     return stop(index).map(RouteStop::plannedDwellSeconds).orElse(0)
         + (index >= 0 && index < powerDwell.length ? powerDwell[index] : 0);

@@ -191,12 +191,51 @@ public final class TimetableOccupancyProjector {
       chain.add(trip);
       chainProfiles.add(profile);
     }
+    int dutyStart = duty.plannedStartSecondOfDay() - zero;
+    int returnAt = duty.returnSecondOfDay() - zero;
     if (chain.isEmpty()) {
+      // 解编切下、没有班次的车（就地待命没人接、直接回库）：在解编站等到回库，再走回库走行
+      if (duty.coupling().startsBySplit()) {
+        duty.returnRouteId()
+            .ifPresent(
+                routeId -> {
+                  movements.add(
+                      new TimetableConflictChecker.Movement(
+                          duty.dutyCode() + "-RETURN", routeId, returnAt, owner));
+                  TimetableConflictChecker.RouteProfile returning = profiles.get(routeId);
+                  if (returning != null && returnAt > dutyStart) {
+                    returning
+                        .origin()
+                        .ifPresent(
+                            platform ->
+                                stays.add(
+                                    new TimetableConflictChecker.Stay(
+                                        duty.dutyCode() + TimetableConflictChecker.SPLIT_STAY,
+                                        platform,
+                                        dutyStart,
+                                        returnAt,
+                                        owner)));
+                  }
+                });
+      }
       return;
     }
     int firstDeparture = relativeDeparture(chain.get(0), serviceStart, zero);
-    int dutyStart = duty.plannedStartSecondOfDay() - zero;
-    int returnAt = duty.returnSecondOfDay() - zero;
+    if (duty.coupling().startsBySplit() && dutyStart < firstDeparture) {
+      // 解下的车在解编站等它的第一班
+      chainProfiles
+          .get(0)
+          .origin()
+          .ifPresent(
+              platform ->
+                  stays.add(
+                      new TimetableConflictChecker.Stay(
+                          duty.dutyCode() + TimetableConflictChecker.SPLIT_STAY,
+                          platform,
+                          dutyStart,
+                          firstDeparture,
+                          owner)));
+    }
     duty.createRouteId()
         .ifPresent(
             routeId -> {
@@ -240,6 +279,26 @@ public final class TimetableOccupancyProjector {
                           owner)));
     }
     int lastIndex = chain.size() - 1;
+    if (duty.coupling().endsByJoin()) {
+      // 回程支线车到联挂站后在股道上等主干进站挂上，直到主干离开
+      int arrival =
+          relativeDeparture(chain.get(lastIndex), serviceStart, zero)
+              + lastArrival(chainProfiles.get(lastIndex).stops());
+      if (returnAt > arrival) {
+        chainProfiles
+            .get(lastIndex)
+            .terminal()
+            .ifPresent(
+                platform ->
+                    stays.add(
+                        new TimetableConflictChecker.Stay(
+                            duty.dutyCode() + TimetableConflictChecker.JOIN_STAY,
+                            platform,
+                            arrival,
+                            returnAt,
+                            owner)));
+      }
+    }
     duty.returnRouteId()
         .ifPresent(
             routeId -> {

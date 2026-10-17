@@ -82,6 +82,9 @@ public final class TimetableService implements ScheduledDeparturePlan {
   /** 交路进度、交路归属与三道闸。 */
   private final DutyLedger ledger;
 
+  /** 解编生出的子交路由解下的那列车跑。 */
+  private final SplitVehicles splitVehicles;
+
   /** 车次取消登记：站牌与公开事件读这里。 */
   private final TripCancellations cancellations = new TripCancellations();
 
@@ -136,6 +139,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     this.debugLogger = debugLogger == null ? message -> {} : debugLogger;
     this.matcher = new TripMatcher(this.debugLogger);
     this.ledger = new DutyLedger(this.debugLogger);
+    this.splitVehicles = new SplitVehicles(this.debugLogger);
     ledger.setChangeListener(this::onDutyChanged);
   }
 
@@ -1501,7 +1505,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     boolean continuation =
         returnLeg || (intent.kind() == RouteOperationType.OPERATION && intent.tripIndex() > 0);
     if (!continuation) {
-      return false;
+      return splitChildAwaitsVehicle(intent);
     }
     Optional<String> holder = ledger.holderOf(intent.key());
     if (holder.isEmpty()) {
@@ -1522,6 +1526,205 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return returnTripOf(intent.key())
         .filter(due -> due.trip().id().equals(progress.get().lastTripId()))
         .isEmpty();
+  }
+
+  /** 由拆分开始的交路的首班：车已经解下在等，或主干那辆车还没跑过拆分的那一班，票就等它（与续班同一条：晚点就晚发）。 主干拆不开、主干没车或已经跑过去了就不等，票照常到期。 */
+  private boolean splitChildAwaitsVehicle(TicketIntent intent) {
+    if (intent.kind() != RouteOperationType.OPERATION
+        || intent.tripIndex() != 0
+        || splitVehicles.failed(intent.key())) {
+      return false;
+    }
+    if (splitVehicles.waiting(intent.key())) {
+      return true;
+    }
+    Timetable timetable = snapshot.byId().get(intent.timetableId());
+    Optional<UUID> parentTrip =
+        timetable == null
+            ? Optional.empty()
+            : timetable.duty(intent.dutyId()).flatMap(duty -> duty.coupling().splitFromTripId());
+    if (parentTrip.isEmpty()) {
+      return false;
+    }
+    for (VehicleDuty parent : timetable.duties()) {
+      int position = parent.tripIds().indexOf(parentTrip.get());
+      if (position < 0) {
+        continue;
+      }
+      DutyKey parentKey = new DutyKey(intent.timetableId(), parent.id(), intent.serviceDate());
+      return ledger
+          .holderOf(parentKey)
+          .flatMap(ledger::progressOf)
+          .filter(progress -> progress.dutyId().equals(parent.id()))
+          .map(progress -> progress.assignedTrips() <= position + 1)
+          .orElse(false);
+    }
+    return false;
+  }
+
+  /** 交路由拆分开始。 */
+  private boolean splitStarted(DutyKey key) {
+    Timetable timetable = snapshot.byId().get(key.timetableId());
+    return timetable != null
+        && timetable.duty(key.dutyId()).map(duty -> duty.coupling().startsBySplit()).orElse(false);
+  }
+
+  /**
+   * 解编：车在本站要解下的那一段在表上对应哪条子交路（主干车正在跑的这一班生出的那条）。
+   *
+   * @param trainName 主干车
+   * @return 车没绑交路时为 {@link SplitPlan#UNBOUND}（按无表处理）；绑了交路、表上这一班不拆时为 {@link SplitPlan#NONE}
+   */
+  public SplitPlan splitPlanOf(String trainName) {
+    String key = keyOf(trainName);
+    if (!settings.enabled() || key == null) {
+      return SplitPlan.UNBOUND;
+    }
+    Optional<DutyKey> bound = ledger.bindingOf(key);
+    if (bound.isEmpty()) {
+      return SplitPlan.UNBOUND;
+    }
+    Timetable timetable = snapshot.byId().get(bound.get().timetableId());
+    Optional<DutyProgress> progress = ledger.progressOf(key);
+    if (timetable == null || progress.isEmpty()) {
+      return SplitPlan.NONE;
+    }
+    UUID running = progress.get().lastTripId();
+    for (VehicleDuty duty : timetable.duties()) {
+      if (duty.coupling().splitFromTripId().filter(running::equals).isPresent()) {
+        return new SplitPlan(
+            true,
+            Optional.of(new DutyKey(timetable.id(), duty.id(), bound.get().serviceDate())),
+            duty.tripIds().isEmpty());
+      }
+    }
+    return SplitPlan.NONE;
+  }
+
+  /**
+   * 解下的车接子交路：有班次的子交路由首班票接它（首班只接它、它只接子交路的票）；只回库的子交路直接绑上，回库票带它走。
+   *
+   * @param child 子交路
+   * @param trainName 解下的车
+   * @param tripless 子交路没有班次（只回库）
+   */
+  public void pinSplit(DutyKey child, String trainName, boolean tripless) {
+    String key = keyOf(trainName);
+    if (child == null || key == null) {
+      return;
+    }
+    if (tripless) {
+      bindDuty(trainName, child, "split");
+      return;
+    }
+    splitVehicles.pin(child, key);
+    debugLogger.accept("TIMETABLE_SPLIT_PINNED train=" + trainName + " duty=" + child.describe());
+  }
+
+  /**
+   * 联挂：主干车在本站要挂上的回程支线车（表上主干正在跑的这一班由哪条交路的车并进来）。
+   *
+   * @param trainName 主干车
+   * @return 车没绑交路时为 {@link JoinPlan#UNBOUND}（按无表处理）；绑了交路、表上这一班不挂时为 {@link JoinPlan#NONE}
+   */
+  public JoinPlan joinPlanOf(String trainName) {
+    String key = keyOf(trainName);
+    if (!settings.enabled() || key == null) {
+      return JoinPlan.UNBOUND;
+    }
+    Optional<DutyKey> bound = ledger.bindingOf(key);
+    if (bound.isEmpty()) {
+      return JoinPlan.UNBOUND;
+    }
+    Timetable timetable = snapshot.byId().get(bound.get().timetableId());
+    Optional<DutyProgress> progress = ledger.progressOf(key);
+    if (timetable == null || progress.isEmpty()) {
+      return JoinPlan.NONE;
+    }
+    UUID running = progress.get().lastTripId();
+    for (VehicleDuty duty : timetable.duties()) {
+      if (duty.coupling().joinsTripId().filter(running::equals).isPresent()) {
+        DutyKey feeder = new DutyKey(timetable.id(), duty.id(), bound.get().serviceDate());
+        return new JoinPlan(
+            true, Optional.of(feeder), ledger.holderOf(feeder).map(ledger::displayName));
+      }
+    }
+    return JoinPlan.NONE;
+  }
+
+  /**
+   * 以联挂结束的交路的车跑完、在联挂站等主干：它要并进的那一班主干还会不会来（主干那辆车绑着交路、还没跑过那一班、那一班没取消）。
+   *
+   * @param trainName 回程支线车
+   * @return 车的交路不以联挂结束时为空；否则为主干车名（主干不会来时为空串）
+   */
+  public Optional<String> joinTrunkOf(String trainName) {
+    String key = keyOf(trainName);
+    if (!settings.enabled() || key == null) {
+      return Optional.empty();
+    }
+    Optional<DutyKey> bound = ledger.bindingOf(key);
+    Timetable timetable = bound.map(b -> snapshot.byId().get(b.timetableId())).orElse(null);
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    Optional<UUID> trunkTrip =
+        timetable.duty(bound.get().dutyId()).flatMap(duty -> duty.coupling().joinsTripId());
+    if (trunkTrip.isEmpty()) {
+      return Optional.empty();
+    }
+    if (cancellations
+        .find(timetable.id(), trunkTrip.get(), bound.get().serviceDate())
+        .isPresent()) {
+      return Optional.of("");
+    }
+    for (VehicleDuty trunk : timetable.duties()) {
+      int position = trunk.tripIds().indexOf(trunkTrip.get());
+      if (position < 0) {
+        continue;
+      }
+      DutyKey trunkKey = new DutyKey(timetable.id(), trunk.id(), bound.get().serviceDate());
+      Optional<String> holder = ledger.holderOf(trunkKey);
+      boolean coming =
+          holder
+              .flatMap(ledger::progressOf)
+              .filter(p -> p.dutyId().equals(trunk.id()))
+              .map(p -> p.assignedTrips() <= position + 1)
+              .orElse(false);
+      return Optional.of(coming ? holder.map(ledger::displayName).orElse("") : "");
+    }
+    return Optional.of("");
+  }
+
+  /** 解下的车被派走或不再等子交路：作废它的解编对应。 */
+  public void unpinSplit(String trainName) {
+    String key = keyOf(trainName);
+    if (key != null) {
+      splitVehicles.release(key);
+    }
+  }
+
+  /** 交路首班的线路；查不到表、交路，或交路没有班次时为空。 */
+  public Optional<UUID> firstRouteOf(DutyKey duty) {
+    if (duty == null) {
+      return Optional.empty();
+    }
+    Timetable timetable = snapshot.byId().get(duty.timetableId());
+    if (timetable == null) {
+      return Optional.empty();
+    }
+    return timetable
+        .duty(duty.dutyId())
+        .filter(found -> !found.tripIds().isEmpty())
+        .flatMap(found -> timetable.trip(found.tripIds().get(0)))
+        .map(TimetableTrip::routeId);
+  }
+
+  /** 主干拆不开：子交路落空，首班不接任何车，票到期照常登记取消。 */
+  public void splitFailed(DutyKey child) {
+    if (child != null) {
+      splitVehicles.fail(child);
+    }
   }
 
   /**
@@ -1641,6 +1844,15 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (key == null) {
       return true;
     }
+    boolean splitStarted = splitStarted(intent.key());
+    // 主干还会来、车还没解下来：首班留给它（已经绑上这条交路的车不受限）
+    boolean trunkComing =
+        splitStarted
+            && ledger.bindingOf(key).filter(intent.key()::equals).isEmpty()
+            && splitChildAwaitsVehicle(intent);
+    if (!splitVehicles.accepts(intent, key, trainName, splitStarted, trunkComing)) {
+      return false;
+    }
     if (!ledger.acceptsVehicle(intent, key, trainName)) {
       return false;
     }
@@ -1727,6 +1939,8 @@ public final class TimetableService implements ScheduledDeparturePlan {
     String key = keyOf(trainName);
     if (key != null) {
       ledger.bind(trainName, key, duty, reason);
+      // 解下的车绑上了交路：由交路绑定接手，不再按解编对应挑票
+      splitVehicles.release(key);
     }
   }
 
@@ -2158,6 +2372,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
       // 卸载只是转入 TrainCarts 离线编组，归属与恢复标记均保留，不能签发缺车替补。
       return;
     }
+    splitVehicles.release(key);
     Optional<TimetableAssignment> released = matcher.release(key, reason);
     ServedStops served = servedStops.remove(key);
     released.ifPresent(assignment -> cancelRemainingStops(assignment, served, reason));
@@ -2599,6 +2814,11 @@ public final class TimetableService implements ScheduledDeparturePlan {
     List<DueArrival> out = new ArrayList<>();
     for (Timetable timetable : snapshot.timetables()) {
       for (VehicleDuty duty : timetable.duties()) {
+        if (duty.coupling().endsByJoin()
+            || (duty.returnRouteId().isEmpty() && duty.tripIds().isEmpty())) {
+          // 以联挂结束的车并进别的车，不进车库
+          continue;
+        }
         Optional<UUID> routeId =
             duty.returnRouteId()
                 .or(
@@ -2744,6 +2964,7 @@ public final class TimetableService implements ScheduledDeparturePlan {
     released.forEach(key -> closeDelays(key, key, "timetable-unpublished"));
     cancellations.retainTimetables(next.byId().keySet());
     skippedStops.retainTimetables(next.byId().keySet());
+    splitVehicles.retainTimetables(next.byId().keySet());
   }
 
   private static String keyOf(String trainName) {
@@ -2901,6 +3122,43 @@ public final class TimetableService implements ScheduledDeparturePlan {
       LocalDate serviceDate,
       Optional<UUID> routeId,
       Instant at) {}
+
+  /**
+   * 解编时主干车在表上的情况。
+   *
+   * @param bound 主干车绑着时刻表交路
+   * @param child 这一班生出的子交路；表上这一班不拆时为空
+   * @param tripless 子交路没有班次（只回库）
+   */
+  public record SplitPlan(boolean bound, Optional<DutyKey> child, boolean tripless) {
+
+    /** 车没绑交路：按无表处理。 */
+    public static final SplitPlan UNBOUND = new SplitPlan(false, Optional.empty(), false);
+
+    /** 车绑着交路，表上这一班不拆。 */
+    public static final SplitPlan NONE = new SplitPlan(true, Optional.empty(), false);
+
+    /** 表上这一班不拆（车绑着交路、却没有生出子交路）。 */
+    public boolean skips() {
+      return bound && child.isEmpty();
+    }
+  }
+
+  /**
+   * 联挂时主干车在表上的情况。
+   *
+   * @param bound 主干车绑着时刻表交路
+   * @param feeder 这一班并进来的交路；表上这一班不挂时为空
+   * @param feederTrain 那条交路此刻的车；还没有车时为空
+   */
+  public record JoinPlan(boolean bound, Optional<DutyKey> feeder, Optional<String> feederTrain) {
+
+    /** 车没绑交路：按无表处理。 */
+    public static final JoinPlan UNBOUND = new JoinPlan(false, Optional.empty(), Optional.empty());
+
+    /** 车绑着交路，表上这一班不挂。 */
+    public static final JoinPlan NONE = new JoinPlan(true, Optional.empty(), Optional.empty());
+  }
 
   /**
    * 一个交路在某一天的身份。

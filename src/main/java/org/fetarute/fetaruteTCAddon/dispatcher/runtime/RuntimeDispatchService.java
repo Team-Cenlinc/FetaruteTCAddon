@@ -14408,6 +14408,12 @@ public final class RuntimeDispatchService {
     trainName = handleRenameIfNeeded(properties);
     // 改名之后再记指纹：按新名存，避免又一条"旧名残留记录"。
     rememberLivePhysicalFootprintFingerprint(trainName, train);
+    // 解编解下的车停在主干交路的中途站：待命登记只在内存里，重启后按标记重新登记，免得它接着跑主干的交路
+    if (layoverRegistry.get(trainName).isEmpty()
+        && org.fetarute.fetaruteTCAddon.coupler.DetachedHold.restore(
+            properties, trainName, layoverRegistry, now)) {
+      layoverRegistry.get(trainName).ifPresent(layoverListener);
+    }
     if (layoverRegistry.get(trainName).isPresent()) {
       clearDepartureGate(trainName);
       LayoverCandidate candidate = layoverRegistry.get(trainName).orElse(null);

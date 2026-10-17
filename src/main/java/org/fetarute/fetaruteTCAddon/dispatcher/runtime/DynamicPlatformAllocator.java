@@ -11,6 +11,7 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.OptionalInt;
 import java.util.OptionalLong;
+import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Consumer;
 import java.util.function.Function;
@@ -98,6 +99,9 @@ public final class DynamicPlatformAllocator {
 
   /** 站台偏好（计划站台）；为空时只按方向优选。 */
   private volatile PlatformPreference preference = PlatformPreference.NONE;
+
+  /** 联挂搭档：搭档停着的股道对后到的车不算被占。 */
+  private volatile CouplingPartners couplingPartners = CouplingPartners.NONE;
 
   /** 暂定站台：trainKey -> 下一个停车站的暂定股道。一辆车同时只有一条。 */
   private final Map<String, Tentative> tentatives = new ConcurrentHashMap<>();
@@ -420,6 +424,84 @@ public final class DynamicPlatformAllocator {
   }
 
   /**
+   * 联挂（交路指令 COPL）：后到的车要开进搭档停着的那条股道。
+   *
+   * <p>只读、廉价：选台时每个候选都可能问一次。
+   */
+  public interface CouplingPartners {
+
+    /** 没有联挂。 */
+    CouplingPartners NONE =
+        new CouplingPartners() {
+          @Override
+          public Optional<NodeId> platformOf(String trainName, UUID routeId, int stopIndex) {
+            return Optional.empty();
+          }
+
+          @Override
+          public boolean partner(String trainName, String claimant) {
+            return false;
+          }
+        };
+
+    /**
+     * @param trainName 列车名
+     * @param routeId 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 这辆车在这一站要开进的股道（搭档停着的那条）；不联挂时为空
+     */
+    Optional<NodeId> platformOf(String trainName, UUID routeId, int stopIndex);
+
+    /**
+     * @param trainName 列车名
+     * @param claimant 占用或预订站台的那列车
+     * @return {@code claimant} 是这辆车眼下要挂上的搭档
+     */
+    boolean partner(String trainName, String claimant);
+
+    /**
+     * 先不选台：搭档还没到、正开往本站（有上限，过了照常选台）。
+     *
+     * @param trainName 列车名
+     * @param routeId 列车当前交路
+     * @param stopIndex 交路节点下标
+     * @return 这一拍不选台、在站外等
+     */
+    default boolean defer(String trainName, UUID routeId, int stopIndex) {
+      return false;
+    }
+  }
+
+  /** 接入联挂搭档；{@code null} 恢复为没有。 */
+  void setCouplingPartners(CouplingPartners partners) {
+    this.couplingPartners = partners == null ? CouplingPartners.NONE : partners;
+  }
+
+  /** 联挂搭档还没到：这一拍先不选台；判定出错时照常选台。 */
+  private boolean deferForCouplingPartner(String trainName, RouteDefinition route, int stopIndex) {
+    if (couplingPartners == CouplingPartners.NONE) {
+      return false;
+    }
+    try {
+      Optional<UUID> routeId = routeDefinitions.findUuid(route.id());
+      return routeId.isPresent() && couplingPartners.defer(trainName, routeId.get(), stopIndex);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("DYNAMIC 联挂等搭档判定失败: train=" + trainName + ", error=" + ex);
+      return false;
+    }
+  }
+
+  /** {@code claimant} 是这辆车的联挂搭档；判定出错时不算。 */
+  private boolean couplingPartner(String trainName, String claimant) {
+    try {
+      return couplingPartners.partner(trainName, claimant);
+    } catch (RuntimeException ex) {
+      debugLogger.accept("DYNAMIC 联挂搭档判定失败: train=" + trainName + ", error=" + ex);
+      return false;
+    }
+  }
+
+  /**
    * 检查并尝试为列车分配动态站台。
    *
    * <p>该入口保留旧版 {@link Optional} 合约：没有待解析的 DYNAMIC stop 与 DYNAMIC stop 当前被阻塞都会返回 {@link
@@ -596,6 +678,10 @@ public final class DynamicPlatformAllocator {
                 + edgeDistance
                 + ", previewThreshold="
                 + ALLOCATION_EDGE_THRESHOLD);
+      }
+
+      if (deferForCouplingPartner(trainName, route, targetIndex)) {
+        return DynamicResolution.blocked("coupling-partner-pending", OptionalInt.of(targetIndex));
       }
 
       // 执行分配
@@ -1030,7 +1116,8 @@ public final class DynamicPlatformAllocator {
       if (claim == null || !resource.equals(claim.resource())) {
         continue;
       }
-      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)) {
+      if (!TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)
+          && !couplingPartner(trainName, claim.trainName())) {
         return true;
       }
       selfClaimSeen = true;
@@ -1043,7 +1130,10 @@ public final class DynamicPlatformAllocator {
     }
     return occupancyManager
         .getClaim(resource)
-        .map(claim -> !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName))
+        .map(
+            claim ->
+                !TrainNameNormalizer.sameLogicalTrain(claim.trainName(), trainName)
+                    && !couplingPartner(trainName, claim.trainName()))
         .orElse(true);
   }
 
@@ -1055,7 +1145,8 @@ public final class DynamicPlatformAllocator {
     for (Map.Entry<String, Map<String, CachedAllocation>> entry : allocations.entrySet()) {
       if (entry == null
           || entry.getKey() == null
-          || TrainNameNormalizer.sameLogicalTrain(entry.getKey(), trainName)) {
+          || TrainNameNormalizer.sameLogicalTrain(entry.getKey(), trainName)
+          || couplingPartner(trainName, entry.getKey())) {
         continue;
       }
       Map<String, CachedAllocation> trainAllocations = entry.getValue();

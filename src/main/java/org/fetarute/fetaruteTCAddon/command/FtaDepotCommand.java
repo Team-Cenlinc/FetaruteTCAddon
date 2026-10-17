@@ -35,6 +35,8 @@ import org.fetarute.fetaruteTCAddon.company.model.PlayerIdentity;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager.SpawnSettings;
+import org.fetarute.fetaruteTCAddon.coupler.CarTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistProfile;
 import org.fetarute.fetaruteTCAddon.dispatcher.consist.ResolvedConsistPlan;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
@@ -295,13 +297,15 @@ public final class FtaDepotCommand {
                     sender.sendMessage(locale.component("command.depot.spawn.spawn-failed"));
                     return;
                   }
-                  SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
-                  if (spawnable == null || spawnable.getMembers().isEmpty()) {
+                  Optional<CompositeSpawnPattern.Parsed> parsed =
+                      CompositeSpawnPattern.parse(trainCarts, pattern);
+                  if (parsed.isEmpty()) {
                     sender.sendMessage(
                         locale.component(
                             "command.depot.spawn.pattern-invalid", Map.of("pattern", pattern)));
                     return;
                   }
+                  SpawnableGroup spawnable = parsed.get().group();
 
                   TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
                   Set<RailBlockPos> anchors = findAnchorRails(access, depotInfo);
@@ -324,6 +328,7 @@ public final class FtaDepotCommand {
                   TrainProperties properties = group.getProperties();
                   // 与自动出库一致：关摩擦、重力、碰撞，常驻加载（否则首个物理 tick 就会被 TrainCarts 卸载）。
                   SpawnPhysicsProperties.apply(properties);
+                  CarTags.stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
                   UUID runId = UUID.randomUUID();
                   Optional<RouteDestinationResolver.DestinationInfo> destInfoOpt =
                       RouteDestinationResolver.resolve(provider, resolved.route());

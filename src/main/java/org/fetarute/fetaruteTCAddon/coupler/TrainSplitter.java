@@ -11,6 +11,7 @@ import java.util.function.Consumer;
 import java.util.function.Predicate;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RuntimeDispatchService;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.coupling.CouplingOperations;
+import org.fetarute.fetaruteTCAddon.drive.session.TrainPropertyGuard;
 
 /**
  * 在指定处把一列车拆成两列。
@@ -105,6 +106,8 @@ public final class TrainSplitter {
     if (detached == null || detached == group || !detached.isValid()) {
       return Result.of(Outcome.NOT_SPLIT);
     }
+    // 拆下的一半照搬了原车的列车属性：有人驾驶时那是驾驶期间改过的（不减速、限速抬高），按留存的原值还原
+    TrainPropertyGuard.restore(detached.getProperties());
     if (!managed) {
       return new Result(
           Outcome.SPLIT,
@@ -138,6 +141,32 @@ public final class TrainSplitter {
             + " cars="
             + detached.size());
     return new Result(Outcome.SPLIT, Optional.of(group), Optional.of(detached), name);
+  }
+
+  /**
+   * 在第 {@code at} 节车之前拆开，但让后一半（第 at 节起）保留原身份、前一半拆下：解编切车头时用。
+   *
+   * <p>先调头、按调头后的下标拆，再把两半各调回来。两半都停着，调头只换车头与运行方向，车厢朝向不变。
+   *
+   * @param group 列车（须已停稳）
+   * @param at 后一半第一节在编组里的下标（1..size-1）
+   */
+  public Result splitKeepingRear(MinecartGroup group, int at) {
+    if (group == null || !group.isValid() || at <= 0 || at >= group.size()) {
+      return Result.of(Outcome.INVALID);
+    }
+    int size = group.size();
+    group.reverse();
+    Result result;
+    try {
+      result = split(group, size - at);
+    } finally {
+      if (group.isValid()) {
+        group.reverse();
+      }
+    }
+    result.detached().filter(MinecartGroup::isValid).ifPresent(MinecartGroup::reverse);
+    return result;
   }
 
   /** 给拆下的一半取新车名、改 TrainCarts 车名并换上新身份的标签；取不到可用车名时为空。 */

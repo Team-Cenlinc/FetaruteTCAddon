@@ -110,6 +110,13 @@ coupler:
     unmanaged: "Regular TrainCarts train, can be worked on"
     allowed: "Dispatched train, currently out of service, can be worked on"
     denied: "Dispatched train, cannot be worked on now: "
+  # In-service division: how each half is described when the crew chooses which one to continue with (<end>, <cars>, <destination>)
+  decouple:
+    segment: "<end> <cars> cars: <destination>"
+    front: "Front"
+    rear: "Rear"
+    idle: "stays at this station"
+    return: "to depot"
 drive:
   notch:
     p3: "<green>P3 Traction 3</green>"

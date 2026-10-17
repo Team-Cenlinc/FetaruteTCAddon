@@ -27,6 +27,8 @@ import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.Route;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.config.ConfigManager;
+import org.fetarute.fetaruteTCAddon.coupler.CarTags;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.RailBlockPos;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.explore.TrainCartsRailBlockAccess;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
@@ -177,11 +179,13 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (trainCarts == null) {
       return Optional.empty();
     }
-    SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
-    if (spawnable == null || spawnable.getMembers().isEmpty()) {
+    Optional<CompositeSpawnPattern.Parsed> parsed =
+        CompositeSpawnPattern.parse(trainCarts, pattern);
+    if (parsed.isEmpty()) {
       debugLogger.accept("自动发车失败: pattern 无效 pattern=" + pattern);
       return Optional.empty();
     }
+    SpawnableGroup spawnable = parsed.get().group();
 
     TrainCartsRailBlockAccess access = new TrainCartsRailBlockAccess(world);
     Set<RailBlockPos> anchors = findAnchorRails(access, depotInfo);
@@ -199,6 +203,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     MinecartGroup group = spawnedOpt.get();
     // 必须在本 tick 内（TrainCarts 首个物理 tick 之前）设置，否则未开启常驻加载的出库车会立刻被卸载。
     applySpawnPhysics(group.getProperties(), pattern, depotId);
+    CarTags.stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
     return Optional.of(
         new DepotSpawner.MaterializedSpawn(
             group,
@@ -281,11 +286,13 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     if (trainCarts == null) {
       return Optional.empty();
     }
-    SpawnableGroup spawnable = SpawnableGroup.parse(trainCarts, pattern);
-    if (spawnable == null || spawnable.getMembers().isEmpty()) {
+    Optional<CompositeSpawnPattern.Parsed> parsed =
+        CompositeSpawnPattern.parse(trainCarts, pattern);
+    if (parsed.isEmpty()) {
       debugLogger.accept("区间生成失败: pattern 无效 pattern=" + pattern);
       return Optional.empty();
     }
+    SpawnableGroup spawnable = parsed.get().group();
     // 区间点离玩家远，车身那一带常常没加载；TrainCarts 生成时会在主线程把每节车周围的区块同步读进来，几十个区块会卡服。
     // 还有没加载的就先在后台加载并挂票，这一次不生成，发车侧稍后再试。
     if (preloadEntryChunks(
@@ -314,6 +321,7 @@ public final class TrainCartsDepotSpawner implements DepotSpawner {
     }
     MinecartGroup group = spawnedOpt.get();
     applySpawnPhysics(group.getProperties(), pattern, entry.node());
+    CarTags.stampSpawnOrigins(group, parsed.get().parts(), parsed.get().partSizes());
     return Optional.of(
         new DepotSpawner.MaterializedSpawn(
             group,

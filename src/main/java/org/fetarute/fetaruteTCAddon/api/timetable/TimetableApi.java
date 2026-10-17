@@ -293,6 +293,10 @@ public interface TimetableApi {
    * @param plannedStartSecondOfDay 计划出库（当日秒数，可为负表示前一日）
    * @param plannedEndSecondOfDay 计划回库（当日秒数，可超过 86400）
    * @param consist 车型键（1.11.0）：出库出的就是这个车型；不区分车型时为空
+   * @param splitFromTripCode 由拆分开始的交路（1.14.0）：车是从这个车次的列车上解编（{@code DECP}）解下的，不从车库出车， {@code
+   *     startDepotNodeId} 是解编站；不是时为空
+   * @param joinsTripCode 以联挂结束的交路（1.14.0）：车在终点站并入这个车次的列车（{@code COPL}），不回库， {@code endDepotNodeId}
+   *     是联挂站；不是时为空
    */
   record Duty(
       UUID id,
@@ -302,10 +306,37 @@ public interface TimetableApi {
       List<String> tripCodes,
       int plannedStartSecondOfDay,
       int plannedEndSecondOfDay,
-      Optional<String> consist) {
+      Optional<String> consist,
+      Optional<String> splitFromTripCode,
+      Optional<String> joinsTripCode) {
     public Duty {
       tripCodes = tripCodes == null ? List.of() : List.copyOf(tripCodes);
       consist = consist == null ? Optional.empty() : consist;
+      splitFromTripCode = splitFromTripCode == null ? Optional.empty() : splitFromTripCode;
+      joinsTripCode = joinsTripCode == null ? Optional.empty() : joinsTripCode;
+    }
+
+    /** 1.13.0 及以前的构造器（源码与二进制兼容）：不加解编。 */
+    public Duty(
+        UUID id,
+        String dutyCode,
+        String startDepotNodeId,
+        String endDepotNodeId,
+        List<String> tripCodes,
+        int plannedStartSecondOfDay,
+        int plannedEndSecondOfDay,
+        Optional<String> consist) {
+      this(
+          id,
+          dutyCode,
+          startDepotNodeId,
+          endDepotNodeId,
+          tripCodes,
+          plannedStartSecondOfDay,
+          plannedEndSecondOfDay,
+          consist,
+          Optional.empty(),
+          Optional.empty());
     }
 
     /** 1.10.0 及以前的构造器（源码与二进制兼容）：不区分车型。 */

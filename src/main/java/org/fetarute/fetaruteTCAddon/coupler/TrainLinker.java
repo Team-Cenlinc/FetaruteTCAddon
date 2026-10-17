@@ -1,10 +1,12 @@
 package org.fetarute.fetaruteTCAddon.coupler;
 
+import com.bergerkiller.bukkit.common.config.ConfigurationNode;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroupStore;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import java.time.Instant;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -106,6 +108,18 @@ public final class TrainLinker {
     String standingName = standingManaged ? trainName(standingGroup) : "";
     Map<String, String> standingTags =
         standingManaged ? trainLevelTags(standingGroup.getProperties()) : Map.of();
+    // TrainCarts 联挂时挂过来那列较大（或一样大、更老）就把它的列车属性整份装进被接上那列：先存下被接上那列的，挂上后装回
+    boolean propertiesSwapped =
+        movingGroup.size() > standingGroup.size()
+            || (movingGroup.size() == standingGroup.size()
+                && movingGroup.getTicksLived() > standingGroup.getTicksLived());
+    ConfigurationNode standingProperties = new ConfigurationNode();
+    if (propertiesSwapped) {
+      standingGroup
+          .getProperties()
+          .getConfig()
+          .cloneIntoExcept(standingProperties, Collections.singleton("carts"));
+    }
 
     MinecartGroupStore.LinkResult linked;
     CouplingOperations operations = dispatch.coupling().operations();
@@ -116,6 +130,10 @@ public final class TrainLinker {
       return Result.of(Outcome.NOT_LINKED, String.valueOf(linked));
     }
     MinecartGroup merged = standing.getGroup();
+    if (propertiesSwapped) {
+      // 限速、自然减速、碰撞方式等都还原成被接上那列的（挂过来那列可能正被人驾驶、属性是驾驶时改过的）
+      merged.getProperties().load(standingProperties);
+    }
     CarTags.restore(merged, cars);
     if (standingManaged) {
       adoptStandingIdentity(merged, standingName, standingTags);

@@ -49,7 +49,9 @@ import java.util.UUID;
  * @param returnSecondOfDay 回库票的发出时刻（末班到达 + 折返）；无回库票时等于末班到达
  * @param plannedEndSecondOfDay 到达车库的时刻（相对同一服务日的秒数，可超过一天表示跨零点）
  * @param closeReason duty 为什么在这里结束
- * @param consist 这条交路的车型（编组方案里的车型键）；编表不区分车型时为空，出车按 route 的编组
+ * @param consist 这条交路的车型（编组方案里的车型键）；编表不区分车型时为空，出车按 route 的编组。有加解编时是出发时的编组，途中按解编、联挂变化
+ * @param coupling 加解编：由哪一班解编生出、在哪一班联挂并入；普通交路为 {@link
+ *     DutyCoupling#NONE}。由解编开始的交路可以一班都没有（解下的车就地待命或直接回库）， 出库点记解编站；以联挂结束的交路回库点记联挂站、没有回库走行
  */
 public record VehicleDuty(
     UUID id,
@@ -65,7 +67,42 @@ public record VehicleDuty(
     int returnSecondOfDay,
     int plannedEndSecondOfDay,
     CloseReason closeReason,
-    Optional<String> consist) {
+    Optional<String> consist,
+    DutyCoupling coupling) {
+
+  /** 没有加解编的交路（旧表与单元测试）。复制已有交路时用规范构造器，不要用它，否则加解编关系会丢。 */
+  public VehicleDuty(
+      UUID id,
+      UUID timetableId,
+      int sequence,
+      String dutyCode,
+      String startDepotNodeId,
+      String endDepotNodeId,
+      Optional<UUID> createRouteId,
+      Optional<UUID> returnRouteId,
+      List<UUID> tripIds,
+      int plannedStartSecondOfDay,
+      int returnSecondOfDay,
+      int plannedEndSecondOfDay,
+      CloseReason closeReason,
+      Optional<String> consist) {
+    this(
+        id,
+        timetableId,
+        sequence,
+        dutyCode,
+        startDepotNodeId,
+        endDepotNodeId,
+        createRouteId,
+        returnRouteId,
+        tripIds,
+        plannedStartSecondOfDay,
+        returnSecondOfDay,
+        plannedEndSecondOfDay,
+        closeReason,
+        consist,
+        DutyCoupling.NONE);
+  }
 
   /** 不区分车型的交路（旧表与单元测试）。复制已有交路时用规范构造器，不要用它，否则车型会丢。 */
   public VehicleDuty(
@@ -119,7 +156,8 @@ public record VehicleDuty(
     createRouteId = createRouteId == null ? Optional.empty() : createRouteId;
     returnRouteId = returnRouteId == null ? Optional.empty() : returnRouteId;
     tripIds = tripIds == null ? List.of() : List.copyOf(tripIds);
-    if (tripIds.isEmpty()) {
+    coupling = coupling == null ? DutyCoupling.NONE : coupling;
+    if (tripIds.isEmpty() && !coupling.startsBySplit()) {
       throw new IllegalArgumentException("duty 至少要包含一趟车");
     }
     if (returnSecondOfDay < plannedStartSecondOfDay) {
@@ -165,7 +203,10 @@ public record VehicleDuty(
      * <p>与运行时 {@code ReclaimManager} 的"待命超过 {@code reclaim.max-idle-seconds} 就派回库票"是同一条规则。
      * 没有这条时编表会让车在终点干等到下一个时隙，而运行时早已把它收回库， 于是表上那段待命占用是假的，还会把站台判成冲突。
      */
-    IDLE_LIMIT;
+    IDLE_LIMIT,
+
+    /** 在联挂站并入一班主干班次（{@code COPL}），没有回库走行。 */
+    COUPLED;
 
     /** 该原因是否来自硬上限（而非"恰好没有下一班"）。 */
     public boolean bounded() {

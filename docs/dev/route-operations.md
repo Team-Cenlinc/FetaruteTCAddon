@@ -50,12 +50,20 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 - 语法：`POWER <ptg5|ptg6|shoe|diesel|supercap>`，写在所属停靠点（含 PASS 路径点）之后，与 CHANGE 同为动作行。
 - 语义：多模车从这一点起换成这种受电方式；单模车、车上没有这种方式的车照旧跑。电对电经过即换，涉及内燃推迟到停车点并多停 25 秒。见 `multi-mode-power.md`。
 
+### DECP / COPL（解编与联挂）
+- 语法：`DECP FRONT|REAR:<节数>:GOTO:<交路>` / `DECP …:IDLE` / `DECP …:RETURN`；`COPL FROM:<交路>[:WAIT:<秒>]`。写在所属停靠点之后的动作行，在该站停车时执行。
+- 解编：按运行方向从车头（FRONT）或车尾（REAR）切下这么多节；没被指定的部分继续本交路。GOTO 的交路须与本交路同一条线、同一交路组（`spawn_group`），首站是本站；IDLE 就地成待命车；RETURN 回库。
+- 联挂：与同组里终到本站的 FROM 交路的车挂成一列，沿用写 COPL 一方的身份。先到的车在站台等（WAIT 不写取 `coupler.couple-wait-seconds`），后到的车开进同一条股道挂上；等不到各走各的。
+- 那一站多停 `coupler.decouple-seconds` / `couple-seconds`（缺省 30 秒），编表、到站预测与现场停站同一口径。运行时见 `coupler.md`，编表见 `timetable.md`。
+- 编组写法可写组合 `A+B`：各段交给 TrainCarts 解析后按顺序拼成一列出车，每段车厢打上各自的来源编组（`FTA_CAR_CONSIST`），解编只在来源编组分界上切。
+
 ## define 校验（当前）
 `/fta route define` 会做基础一致性校验：
 - CRET 只能出现一次，且必须是首个 stop。
 - DSTY 只能出现一次，且必须是最后 stop。
 - 若调度图快照已加载，会校验相邻 stop 的 NodeId 是否存在可达边；图未加载时仅提示并跳过校验。
 - POWER 的受电方式认不出时报错。
+- DECP / COPL 写法认不出、写在首站末站或不停车的站上、一站写了多条、`FRONT:n:IDLE`（解下的车头会挡住本交路继续前行）时报错（`RouteCouplingDirectives#validateLocal`）。
 
 `/fta route debug <company> <operator> <line> <route> [page]` 可直接查看已保存线路的 stop 回显（无需先 define）。
 `/fta route debug <company> <operator> <line> <route> [page]` 会进行调试展示：
@@ -69,5 +77,6 @@ RouteStop 的 notes 支持 action 行（`ACTION:PAYLOAD`），常用标记：
 - 额外校验自动发车配置：不存在的 `spawn_group`、缺失 line/group baseline、同组多条 `OPERATION` route 缺少 `spawn_weight`、`CREATE` 首站缺少 `CRET`。
 - 对 `DYNAMIC` stop：显式范围（如 `[1:3]`）会逐轨道检查；未显式范围时会在已加载图快照中扫描实际匹配的 Station/Depot 节点，避免只检查 `:1`。
 - POWER 涉及内燃却写在不停车的路径点上时提示推迟到其后第一个停车点；写了 POWER 而首站没写时提示出发模式取决于列车（只提示，define 不拦）。
+- DECP / COPL 指向的交路：须存在、不是本交路、同一交路组；GOTO 的交路首站是解编站，FROM 的交路末站是联挂站（`RouteCouplingDirectives#validateTargets`）。
 
 > 调度层的实际行为（终到等待/回库/销毁）将在后续运行时调度阶段接入。

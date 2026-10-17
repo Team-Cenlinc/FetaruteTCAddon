@@ -230,6 +230,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
     this.configManager = new ConfigManager(this);
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
+    org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.configureDwell(
+        configManager.current().couplerSettings().decoupleSeconds(),
+        configManager.current().couplerSettings().coupleSeconds());
     ServerIdentity.configure(getConfig().getString("server-id", ""));
 
     this.loggerManager = new LoggerManager(getLogger());
@@ -402,6 +405,9 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .update();
     this.configManager.reload();
     GraphSignParsers.setPortalsEnabled(configManager.current().graphSettings().crossWorld());
+    org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives.configureDwell(
+        configManager.current().couplerSettings().decoupleSeconds(),
+        configManager.current().couplerSettings().coupleSeconds());
     ServerIdentity.configure(getConfig().getString("server-id", ""));
     this.loggerManager.setDebugEnabled(configManager.current().debugEnabled());
     refreshSpawnMotionTags(configManager.current());
@@ -1955,6 +1961,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(layoverRegistry);
   }
 
+  /** 列车交路进度（若未初始化则为空）。 */
+  public Optional<RouteProgressRegistry> getRouteProgressRegistry() {
+    return Optional.ofNullable(routeProgressRegistry);
+  }
+
   /** 交路定义缓存（若未初始化则为空）。 */
   public Optional<RouteDefinitionCache> getRouteDefinitionCache() {
     return Optional.ofNullable(routeDefinitionCache);
@@ -2089,8 +2100,16 @@ public final class FetaruteTCAddon extends JavaPlugin {
     runtimeDispatchService.setLayoverListener(spawnTicketAssigner::onLayoverRegistered);
     // 多模车：出车、接续时按交路起点换模并升弓，到达或经过交路节点时按交路备注 POWER 换模
     org.fetarute.fetaruteTCAddon.dispatcher.power.PowerModeSwitcher power = powerModeSwitcher();
-    runtimeDispatchService.setRouteNodeListener(power::onRouteNode);
+    // 解编 DECP：与换模并在同一个交路节点监听上，多停的秒数相加
+    org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteNodeListener powerNodes =
+        power::onRouteNode;
+    runtimeDispatchService.setRouteNodeListener(
+        powerNodes.andThen(this::decoupleOnRouteNode).andThen(this::coupleOnRouteNode));
     simpleAssigner.addDispatchObserver(power::onDispatched);
+    simpleAssigner.addDispatchObserver(
+        (ticket, trainName) ->
+            getCouplerService()
+                .ifPresent(coupler -> coupler.decoupling().onDispatched(ticket, trainName)));
     // 车辆交路额度用完就不再接运营班次。回收动作仍由 ReclaimManager/StorageSpawnManager 负责，
     // 这里只是把"不准再接班"这个事实告诉它们——时刻表层不复制一套车辆所有权。
     simpleAssigner.setLayoverReuseGate(
@@ -2215,7 +2234,15 @@ public final class FetaruteTCAddon extends JavaPlugin {
         trainName ->
             org.fetarute.fetaruteTCAddon.dispatcher.runtime.control.ShuntingRegistry.isShunting(
                     trainName)
-                || getCallService().map(calls -> calls.heldForCall(trainName)).orElse(false));
+                || getCallService().map(calls -> calls.heldForCall(trainName)).orElse(false)
+                // 解编解下、等着被指定的票或子交路接走的车，或值乘的人正选继续哪一段；联挂时在站台等对方或正在进站的车
+                || getCouplerService()
+                    .map(
+                        coupler ->
+                            coupler.decoupling().holds(trainName)
+                                || coupler.decoupling().crewHolding(trainName).isPresent()
+                                || coupler.coupling().holds(trainName))
+                    .orElse(false));
     // 叫来的车没有交路：先走与叫车交路同一交路组的回库交路，从哪个车库来就回哪个车库。
     reclaimManager.setPreferredReturnRoute(
         trainName ->
@@ -2254,11 +2281,53 @@ public final class FetaruteTCAddon extends JavaPlugin {
       couplerService = new org.fetarute.fetaruteTCAddon.coupler.CouplerService(this);
     }
     couplerService.start();
+    if (runtimeDispatchService != null) {
+      // 联挂：主干先到等回程支线车、对方正开进来时停站扣留；后到的车选对方停着的股道
+      org.fetarute.fetaruteTCAddon.coupler.CoupleService coupling = couplerService.coupling();
+      org.fetarute.fetaruteTCAddon.coupler.DecoupleService decoupling = couplerService.decoupling();
+      // 解编后值乘的人选继续哪一段时，留下的一段也扣在站里
+      runtimeDispatchService
+          .stationStops()
+          .setCouplingHold(
+              name -> {
+                Optional<java.time.Instant> crew = decoupling.crewHolding(name);
+                Optional<java.time.Instant> partner = coupling.couplingHold(name);
+                // 两种都扣着时扣到较晚的那个
+                return crew.isPresent() && partner.isPresent()
+                    ? Optional.of(crew.get().isAfter(partner.get()) ? crew.get() : partner.get())
+                    : crew.or(() -> partner);
+              });
+      runtimeDispatchService.stationStops().setCouplingPartners(coupling.partners());
+    }
   }
 
   /** 拆挂服务（未初始化时为空）。 */
   public Optional<org.fetarute.fetaruteTCAddon.coupler.CouplerService> getCouplerService() {
     return Optional.ofNullable(couplerService);
+  }
+
+  /** 解编 DECP 的到站回调（拆挂服务没起来时什么也不做）。 */
+  private int decoupleOnRouteNode(
+      String trainName,
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
+      org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId route,
+      int index,
+      boolean dwelling) {
+    return couplerService == null
+        ? 0
+        : couplerService.decoupling().onRouteNode(trainName, properties, route, index, dwelling);
+  }
+
+  /** 联挂 COPL 的到站回调（拆挂服务没起来时什么也不做）。 */
+  private int coupleOnRouteNode(
+      String trainName,
+      com.bergerkiller.bukkit.tc.properties.TrainProperties properties,
+      org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId route,
+      int index,
+      boolean dwelling) {
+    return couplerService == null
+        ? 0
+        : couplerService.coupling().onRouteNode(trainName, properties, route, index, dwelling);
   }
 
   /** 同股道列车对里交路第一段朝对方开的待命车不接票（见 {@code CouplerService#allowsLayoverDispatch}）。 */

@@ -525,12 +525,22 @@ class ConfigManagerTest {
     explicit.set("coupler.max-cars", 12);
     explicit.set("coupler.push-max-blocks", -1);
     explicit.set("coupler.push-speed-blocks-per-second", 0.0);
+    explicit.set("coupler.decouple-seconds", 45);
+    explicit.set("coupler.couple-seconds", -1);
+    explicit.set("coupler.couple-wait-seconds", 60);
+    explicit.set("coupler.approach-speed-blocks-per-second", -2.0);
+    explicit.set("coupler.approach-max-blocks", 80);
     ConfigManager.CouplerSettings parsed =
         ConfigManager.parse(explicit, Logger.getLogger("config-test")).couplerSettings();
     assertEquals(false, parsed.enabled());
     assertEquals(12, parsed.maxCars());
     assertEquals(8, parsed.pushMaxBlocks(), "负数回退缺省");
     assertEquals(1.0, parsed.pushSpeedBlocksPerSecond(), 1e-9, "0 回退缺省");
+    assertEquals(45, parsed.decoupleSeconds());
+    assertEquals(30, parsed.coupleSeconds(), "负数回退缺省");
+    assertEquals(60, parsed.coupleWaitSeconds());
+    assertEquals(3.0, parsed.approachSpeedBlocksPerSecond(), 1e-9, "负数回退缺省");
+    assertEquals(80, parsed.approachMaxBlocks());
   }
 
   /** 模板里的晚点追赶参数与代码缺省值一致。 */

@@ -9,6 +9,7 @@ import static org.mockito.Mockito.when;
 
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -579,6 +580,67 @@ class StorageSpawnManagerTest {
             Optional.of("CRET SURN:D:DEPOT:1"));
 
     return new Fixture(company, operator, line, List.of(route), Map.of(routeId, List.of(cret)));
+  }
+
+  @Test
+  void decoupleTargetsAreNotSpawnedOnTheirOwn() {
+    Fixture base = enabledRoute();
+    Route trunk = base.routes().get(0);
+    UUID branchId = UUID.randomUUID();
+    Instant ts = Instant.parse("2026-01-01T00:00:00Z");
+    Route branch =
+        new Route(
+            branchId,
+            "BR",
+            base.line().id(),
+            "Branch",
+            Optional.empty(),
+            RoutePatternType.LOCAL,
+            RouteOperationType.OPERATION,
+            Optional.empty(),
+            Optional.empty(),
+            Map.of("spawn_enabled", true),
+            ts,
+            ts);
+    List<RouteStop> trunkStops = new ArrayList<>(base.stopsByRouteId().get(trunk.id()));
+    trunkStops.add(
+        new RouteStop(
+            trunk.id(),
+            1,
+            Optional.empty(),
+            Optional.of("SURN:S:MID:1"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.of("DECP REAR:2:GOTO:BR")));
+    RouteStop branchStart =
+        new RouteStop(
+            branchId,
+            0,
+            Optional.empty(),
+            Optional.of("SURN:S:MID:2"),
+            Optional.empty(),
+            RouteStopPassType.STOP,
+            Optional.empty());
+    StorageProvider provider =
+        mockProvider(
+            new Fixture(
+                base.company(),
+                base.operator(),
+                base.line(),
+                List.of(trunk, branch),
+                Map.of(trunk.id(), trunkStops, branchId, List.of(branchStart))));
+    StorageSpawnManager manager =
+        new StorageSpawnManager(
+            new StorageSpawnManager.SpawnManagerSettings(
+                Duration.ofSeconds(999), Duration.ZERO, 5, 10, 10),
+            null);
+
+    manager.pollDueTickets(provider, Instant.parse("2026-01-19T00:00:00Z"));
+
+    List<String> codes =
+        manager.snapshotPlan().services().stream().map(SpawnService::routeCode).toList();
+    assertTrue(codes.contains("R1"), codes::toString);
+    assertFalse(codes.contains("BR"), "解编 GOTO 指向的交路由解下的车跑：" + codes);
   }
 
   private static Fixture operationAndReturnRoutes() {

@@ -868,7 +868,11 @@
     </Match>
     <Match>
         <Class name="org.fetarute.fetaruteTCAddon.coupler.CouplerService"/>
-        <Method name="pairs"/>
+        <Or>
+            <Method name="pairs"/>
+            <Method name="decoupling"/>
+            <Method name="coupling"/>
+        </Or>
         <Bug pattern="EI_EXPOSE_REP"/>
     </Match>
     <Match>
@@ -885,5 +889,10 @@
         <Class name="org.fetarute.fetaruteTCAddon.coupler.WrenchItem"/>
         <Method name="create"/>
         <Bug pattern="RV_RETURN_VALUE_IGNORED_NO_SIDE_EFFECT"/>
+    </Match>
+    <Match>
+        <!-- 组合编组解析结果带着 TrainCarts 的 SpawnableGroup：只在出车那一刻用，不另行复制 -->
+        <Class name="org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern$Parsed"/>
+        <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
     </Match>
 </FindBugsFilter>
