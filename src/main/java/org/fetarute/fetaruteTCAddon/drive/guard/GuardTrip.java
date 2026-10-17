@@ -145,8 +145,28 @@ public final class GuardTrip {
       case COMMAND, OFFLINE, DEATH, GAME_MODE -> DriverTask.State.ABANDONED;
       case TRAIN_GONE, DISABLED, ADMIN, EXAM -> DriverTask.State.INTERRUPTED;
       case TIMEOUTS, LEFT_BEHIND, CAB_CHANGE -> DriverTask.State.FAILED;
-      case HANDOVER -> DriverTask.State.COMPLETED;
+      case HANDOVER, SPLIT_END, SPLIT_SWITCH, COUPLING -> DriverTask.State.COMPLETED;
+      case SPLIT_TIMEOUT -> DriverTask.State.INTERRUPTED;
     };
+  }
+
+  /**
+   * 车掌任务的终态：分行、联挂在中途结束值乘时，只有没设交班站、不是考试或练习派的任务算开完（与驾驶员中途结算同一口径），其余按中断了结；别的原因同 {@link #stateFor}。
+   *
+   * @param handoverStopSequence 任务的交班站停靠序号；没有时为负
+   * @param source 任务来源
+   */
+  public static DriverTask.State taskStateFor(
+      GuardSession.EndReason reason, int handoverStopSequence, String source) {
+    boolean midTrip =
+        reason == GuardSession.EndReason.SPLIT_END
+            || reason == GuardSession.EndReason.SPLIT_SWITCH
+            || reason == GuardSession.EndReason.COUPLING;
+    boolean interval =
+        handoverStopSequence >= 0
+            || DriverTask.SOURCE_EXAM.equals(source)
+            || DriverTask.SOURCE_TRAINING.equals(source);
+    return midTrip && interval ? DriverTask.State.INTERRUPTED : stateFor(reason);
   }
 
   /** 这个终态给不给奖励：开完一趟、中途离开、被撤下的按做过的站给；未完成的不给。 */

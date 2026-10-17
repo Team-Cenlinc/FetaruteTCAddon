@@ -778,6 +778,23 @@ drive:
       cab-change: "<prefix> <red>Could not get into the rear cab when changing ends; duty ended (incomplete)</red> <gray><stops> stops worked</gray>"
       exam: "<prefix> <yellow>Guard exam failed; duty ended</yellow>"
       handover: "<prefix> <green>Hand-over station reached; duty ended and the doors are back with the station</green> <gray><stops> stops worked</gray>"
+      split-end: "<prefix> <green>The train has divided; duty ended</green> <gray><stops> stops worked</gray>"
+      split-switch: "<prefix> <green>Duty on this part has been scored; moving you to the detached part</green> <gray><stops> stops worked</gray>"
+      split-timeout: "<prefix> <yellow>No part of the divided train was chosen in time; duty ended</yellow> <gray><stops> stops worked</gray>"
+      coupling: "<prefix> <green>The train is about to join the main train; duty ended</green> <gray><stops> stops worked</gray>"
+    couple:
+      moved: "<prefix> <gray>After coupling you were moved to the rear cab</gray>"
+      seat-failed: "<prefix> <yellow>No free cab seat at the rear after coupling; please walk to the rear cab</yellow>"
+    # After the train divides at this station: choose which part to stay on (<kept>, <detached>, <segment> read like "Front 4 cars: Nam Toa")
+    split:
+      offer: "<prefix> <white>The train has divided here. Choose within <yellow><seconds></yellow> s:</white> <click:run_command:'/fta guard split keep'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard split keep</white>'><green>[Stay on <kept>]</green></hover></click> <click:run_command:'/fta guard split switch'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard split switch</white>'><aqua>[Switch to <detached>]</aqua></hover></click> <click:run_command:'/fta guard split end'><hover:show_text:'<gray>Click to run:</gray> <white>/fta guard split end</white>'><red>[End duty]</red></hover></click> <gray>Duty ends if you do not choose; if the train moves off first you stay on the part that stays</gray>"
+      kept: "<prefix> <green>Staying on <white><segment></white></green>"
+      switched: "<prefix> <green>Now on duty on <white><segment></white></green>"
+      seat-failed: "<prefix> <red>No free cab seat at the rear of the part that stays; duty ended</red>"
+      switch-gone: "<prefix> <red>The detached part no longer exists; stay on or end duty</red>"
+      switch-failed: "<prefix> <red>Could not seat you in the detached part's cab; take a seat and use /fta guard on</red>"
+      not-choosing: "<prefix> <red>There is no division waiting for your choice</red>"
+      usage: "<prefix> <red>Usage: /fta guard split keep|switch|end</red>"
     timeout:
       open: "<red>Too slow to open: the station opened the doors</red>"
       close: "<red>Too slow to close: the station closed the doors</red>"
@@ -912,6 +929,7 @@ drive:
         stop: "<yellow>/fta guard stop <player></yellow> <gray>Take a guard off duty</gray>"
         tasks: "<yellow>/fta guard tasks [station]</yellow> <gray>Open the guard board and take a guard duty</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>Check or abandon your guard duty, or go to the train</gray>"
+        split: "<yellow>/fta guard split <keep|switch|end></yellow> <gray>After the train divides: stay on the part that stays, switch to the detached part, or end duty</gray>"
       start:
         started: "<prefix> <green>You are on guard duty</green> <gray>Select a hotbar slot and right-click: 1 left doors, 2 right doors, 3 close, 4 report, 6 signal check, 7 buzzer (hold right-click ~1 s), 9 emergency stop; F opens the guard panel; the sidebar shows each step. To end duty midway, click End duty twice in the F panel or run /fta guard off</gray>"
         disabled: "<prefix> <red>Guard duty is disabled</red>"
@@ -1551,6 +1569,26 @@ drive:
     task-complete: "<prefix> <green>Arrived at the terminus: task complete, the train is back under automatic operation</green>"
     service-end: "<prefix> <green>The train has reached the end of its run; driving has ended</green>"
     settled: "<prefix> <green>This trip has been scored; driving has ended and the train returns to automatic operation</green>"
+    split-timeout: "<prefix> <yellow>No part of the divided train was chosen in time; driving has ended and both parts return to automatic operation</yellow>"
+    coupling: "<prefix> <yellow>Dispatch is bringing the train in to couple; this trip has been scored. If nobody drives the coupled train, it will be handed back to you</yellow>"
+  # Coupling (COPL): dispatch brings the train in and couples it, then hands driving back
+  couple:
+    rejoined: "<prefix> <green>Coupled; driving has been handed back to you, scored separately from this station</green>"
+    taken: "<prefix> <yellow>Coupled; the combined train is driven by <white><driver></white>, so your driving has ended</yellow>"
+    rejoin-failed: "<prefix> <yellow>Coupled, but you could not be seated in the cab; take a seat within <seconds> s and use /fta drive on</yellow>"
+    not-rejoined: "<prefix> <yellow>Coupled, but driving cannot be handed back now; the train runs under dispatch control</yellow>"
+    not-coupled: "<prefix> <yellow>Coupling did not complete; the train runs under dispatch control</yellow>"
+    moved-cab: "<prefix> <gray>After coupling you were moved to the front cab</gray>"
+  # After the train divides at this station: choose which part to keep driving (<kept>, <detached>, <segment> read like "Front 4 cars: Nam Toa")
+  split:
+    offer: "<prefix> <white>The train has divided here and this trip has been scored. Choose within <yellow><seconds></yellow> s:</white> <click:run_command:'/fta drive split keep'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive split keep</white>'><green>[Keep driving <kept>]</green></hover></click> <click:run_command:'/fta drive split switch'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive split switch</white>'><aqua>[Switch to <detached>]</aqua></hover></click> <click:run_command:'/fta drive split end'><hover:show_text:'<gray>Click to run:</gray> <white>/fta drive split end</white>'><red>[End driving]</red></hover></click> <gray>Driving ends if you do not choose; moving off counts as keeping the part that stays</gray>"
+    kept: "<prefix> <green>Keep driving <white><segment></white></green>"
+    switched: "<prefix> <green>Now driving <white><segment></white>; the other part returns to automatic operation. Its next trip is scored separately</green>"
+    seat-failed: "<prefix> <yellow>Could not seat you in the cab of the part that stays; please walk to its front cab</yellow>"
+    switch-gone: "<prefix> <red>The detached part no longer exists; keep driving or end driving</red>"
+    not-split: "<prefix> <yellow>The train could not divide here; please continue this trip</yellow>"
+    not-choosing: "<prefix> <red>There is no division waiting for your choice</red>"
+    usage: "<prefix> <red>Usage: /fta drive split keep|switch|end</red>"
   command:
     player-only: "<prefix> <red>Only players can run this command</red>"
     unavailable: "<prefix> <red>Manual driving is not ready yet</red>"
@@ -1560,6 +1598,7 @@ drive:
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- Stop driving</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- Show the current driving state</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- Set the reverser while stopped</gray>"
+      entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- After the train divides: keep driving the part that stays, switch to the detached part, or end driving</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- List all driving sessions</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [player]</white> <gray>- Force a player to stop driving</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- Toggle driving input diagnostics</gray>"

@@ -11,6 +11,7 @@ import java.time.Instant;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -292,6 +293,42 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
 
   /** 没领任务直接接管调度列车的驾驶员（运营人员）：到终点站结算后没有接续车次也不交还，照旧可以开到回库。 */
   private final Set<UUID> takeovers = new HashSet<>();
+
+  /** 解编站上选继续哪一段（留下的一段、解下的一段或结束）。 */
+  private final SplitChoices splitChoices = new SplitChoices();
+
+  /** 解编时车上的驾驶员：拆之前等这一站开门结算，拆开后请驾驶员选继续哪一段。 */
+  private final org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew decoupleCrew =
+      new org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew() {
+        @Override
+        public boolean crewed(String trainName) {
+          return driverSessionOfTrain(trainName).filter(s -> s.driverLink() != null).isPresent();
+        }
+
+        @Override
+        public boolean readyToSplit(String trainName) {
+          // 与 crewed 同一口径：只等调度列车上的驾驶员（他们才会在这一站结算）
+          return driverSessionOfTrain(trainName)
+              .filter(s -> s.driverLink() != null)
+              .map(session -> splitChoices.readyFor(session.playerId(), trainName))
+              .orElse(true);
+        }
+
+        @Override
+        public void split(Split split) {
+          onDivided(split);
+        }
+
+        @Override
+        public void notSplit(String trainName) {
+          onDivisionFailed(trainName);
+        }
+
+        @Override
+        public Optional<Instant> holding(String trainName) {
+          return splitChoices.holding(trainName);
+        }
+      };
 
   /** 已提示过确认接班的座位：换了座位才再在聊天栏提示一次。 */
   private final Map<UUID, SeatBinding> seatPrompts = new HashMap<>();
@@ -1257,8 +1294,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       reply.accept(startSession(player));
       return;
     }
-    MinecartGroup group = target.get().group();
-    OptionalInt car = enterCab(player, group, target.get().end(), current);
+    seatThenStart(player, target.get().group(), target.get().end(), current, reply);
+  }
+
+  /** 送进列车某一端的驾驶室，等 TrainCarts 让人坐下后开始驾驶。 */
+  private void seatThenStart(
+      Player player,
+      MinecartGroup group,
+      CabSeats.End end,
+      DriveConfig current,
+      java.util.function.Consumer<StartOutcome> reply) {
+    OptionalInt car = enterCab(player, group, end, current);
     if (car.isEmpty()) {
       reply.accept(StartOutcome.CAB_SEAT_UNAVAILABLE);
       return;
@@ -2628,6 +2674,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           DISPATCH_ABORT,
           TASK_COMPLETE,
           SERVICE_END,
+          SPLIT_TIMEOUT,
+          COUPLING,
           WATCHDOG -> player.sendMessage(
           plugin
               .getLocaleManager()
@@ -2641,6 +2689,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     session.finish(reason);
     continuations.remove(session.playerId());
     takeovers.remove(session.playerId());
+    splitChoices.forget(session.playerId());
     tasks.releaseReservation(session.playerId());
     closeDoors(session);
     releaseCab(session);
@@ -2756,8 +2805,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       return TakeoverCheck.refused(StartOutcome.MANAGED_TRAIN);
     }
     String name = group.getProperties().getTrainName();
-    boolean ownClaim = tasks.claimFor(player.getUniqueId(), name).isPresent();
-    if (!player.hasPermission(PERMISSION_DRIVER_ADMIN)) {
+    // 分行后改驾解下的一段、联挂后交还驾驶：原来就在值乘这列车，不另要任务，也不要求停站计时已经开始
+    boolean switching = splitChoices.switchTo(player.getUniqueId(), name).isPresent();
+    boolean ownClaim = tasks.claimFor(player.getUniqueId(), name).isPresent() || switching;
+    if (!player.hasPermission(PERMISSION_DRIVER_ADMIN) && !switching) {
       if (tasks.congestionProtection().open(Instant.now())) {
         return TakeoverCheck.refused(StartOutcome.PROTECTION_ACTIVE);
       }
@@ -2785,7 +2836,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                         && waiting.stage() == DriverPickups.Stage.WAITING);
     // 终点站待命、等派下一趟的车：停着等派车，与驾驶员结算后留在车上等接续是同一个状态，也可以接管。
     boolean layover = !dwelling && isLayover(name);
-    if (!dwelling && !layover && pickup.isEmpty()) {
+    if (!dwelling && !layover && pickup.isEmpty() && !switching) {
       return TakeoverCheck.refused(StartOutcome.NOT_STOPPED_AT_STATION);
     }
     // 一般坐车头端；终点站接车、终点站停站（这一趟已跑完）与待命车按预计的发车端（尽头式站台是车尾端，方向未定时两端都可以，
@@ -2972,6 +3023,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
     } catch (RuntimeException ex) {
       plugin.getLogger().warning("驾驶任务维护失败: " + ex);
     }
+    try {
+      tickSplitChoices();
+    } catch (RuntimeException ex) {
+      plugin.getLogger().warning("分行选择维护失败: " + ex);
+    }
     tickHorns(now);
     try {
       stopMarker.tick(now);
@@ -3065,8 +3121,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
             session.markSeated();
           });
     }
-    if (seat.isEmpty() && session.cabChange().allowsLeavingSeat()) {
+    if (seat.isEmpty()
+        && (session.cabChange().allowsLeavingSeat() || splitChoices.choosing(session.playerId()))) {
       // 折返换端途中：走向另一端驾驶室，不结束驾驶，也不送回原来的座位；列车由自动制动保持停车。
+      // 分行后等选择：驾驶室可能随解下的一段分开了，选定之前不送回原来的座位。
       if (session.markSeatLost(now) == 0) {
         traceSession(session, "换端途中离座");
       }
@@ -3327,6 +3385,17 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       handback(session, DriveSession.EndReason.TASK_COMPLETE);
       return true;
     }
+    if (tickCounter % TERMINAL_CHECK_TICKS == 0
+        && session.isStopped()
+        // 站台还没交来停站时等它（停站计时开始或停稳三秒）：免得在开门之前就结算、拆开
+        && link.stationStop()
+            .map(stop -> stop.phase().doorsOpened())
+            .orElseGet(() -> divisionSettled(trainName))
+        && !splitChoices.readyFor(session.playerId(), trainName)
+        && !splitChoices.choosing(session.playerId())
+        && dividesHere(trainName)) {
+      settleForDivision(session, link, task, trainName);
+    }
     Continuation waiting = continuations.get(session.playerId());
     if (waiting != null && tickCounter % TASK_TICKS == 0) {
       if (!session.isStopped()) {
@@ -3343,8 +3412,8 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       requestHandback(session, "max-task-minutes");
       return session.phase() == DriveSession.Phase.ENDED;
     }
-    // 停在终点站待命等派车是计划内的：既不算卡住，也不算被扣；折返换端有自己的时限，期间按被扣计。
-    if (!layover) {
+    // 停在终点站待命等派车是计划内的：既不算卡住，也不算被扣；折返换端有自己的时限，期间按被扣计。分行后等选择也有自己的时限。
+    if (!layover && !splitChoices.choosing(session.playerId())) {
       link.tickStuck(session.cabChange().holding() || heldByDispatch(session, link, trainName));
     }
     if (link.heldSeconds() >= HELD_HANDBACK_SECONDS && !link.handbackRequested()) {
@@ -3643,6 +3712,487 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                     new DriverTaskStartedEvent(task.playerId(), TaskViews.of(task), trainName)));
   }
 
+  // ---- 分行 ----
+
+  /** 联挂进站前让出控制、挂上后等交还的驾驶员。 */
+  private final Map<UUID, Rejoin> rejoins = new HashMap<>();
+
+  /** 让出控制后最多等多久挂上（进站、推挂、停稳都在内）；过了不再交还。 */
+  private static final java.time.Duration REJOIN_WAIT = java.time.Duration.ofMinutes(3);
+
+  /**
+   * 联挂进站前让出控制的驾驶员。
+   *
+   * @param approach 那一次联挂
+   * @param rank 交还的先后：原在主干上的先（0），原在回程支线车上的后（1）
+   * @param takeover 原来是直接接管
+   * @param ato 原来以 ATO 驾驶
+   * @param deadline 等到这时还没挂上就不再交还
+   */
+  private record Rejoin(
+      org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.Approach approach,
+      int rank,
+      boolean takeover,
+      boolean ato,
+      Instant deadline) {}
+
+  private final org.fetarute.fetaruteTCAddon.coupler.CoupleCrew coupleCrew =
+      new org.fetarute.fetaruteTCAddon.coupler.CoupleCrew() {
+        @Override
+        public void yieldBeforeApproach(Approach approach) {
+          yieldForCoupling(approach);
+        }
+
+        @Override
+        public void coupled(Approach approach) {
+          onCoupled(approach);
+        }
+
+        @Override
+        public void notCoupled(Approach approach) {
+          onNotCoupled(approach);
+        }
+      };
+
+  /** 联挂时两车上的驾驶员（接到联挂服务上）。 */
+  public org.fetarute.fetaruteTCAddon.coupler.CoupleCrew coupleCrew() {
+    return coupleCrew;
+  }
+
+  /** 进站前：后到的车上、回程支线车上的驾驶员把这一趟在这里结算、结束驾驶，记下挂上后交还给谁。 */
+  private void yieldForCoupling(org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.Approach approach) {
+    for (String train : List.of(approach.moverName(), approach.feederName())) {
+      Optional<DriveSession> found =
+          driverSessionOfTrain(train).filter(candidate -> candidate.driverLink() != null);
+      if (found.isEmpty()) {
+        continue;
+      }
+      DriveSession session = found.get();
+      UUID playerId = session.playerId();
+      DriverLink link = session.driverLink();
+      tasks
+          .activeTaskOf(playerId)
+          .filter(task -> task.state() == DriverTask.State.DRIVING)
+          .filter(DriveSessionManager::settlesMidTrip)
+          .ifPresent(
+              task -> {
+                traceSession(session, "联挂进站由调度控车，本趟在这里结算");
+                tasks.completeHere(playerId, "couple");
+                settleTrip(session, link, task, train);
+              });
+      rejoins.put(
+          playerId,
+          new Rejoin(
+              approach,
+              train.equalsIgnoreCase(approach.trunkName()) ? 0 : 1,
+              takeovers.contains(playerId),
+              session.isAto(),
+              Instant.now().plus(REJOIN_WAIT)));
+      handback(session, DriveSession.EndReason.COUPLING);
+    }
+  }
+
+  /** 挂上了：主干原有的驾驶员落在列车中间时换到车头；合并的列车没人驾驶时把让出控制的驾驶员送回发车端驾驶室。 */
+  private void onCoupled(org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.Approach approach) {
+    List<Map.Entry<UUID, Rejoin>> waiting =
+        rejoins.entrySet().stream()
+            .filter(entry -> entry.getValue().approach().equals(approach))
+            .sorted(Comparator.comparingInt(entry -> entry.getValue().rank()))
+            .toList();
+    waiting.forEach(entry -> rejoins.remove(entry.getKey()));
+    Optional<MinecartGroup> merged = SeatLocator.findGroup(approach.trunkName());
+    Optional<DriveSession> driver = driverSessionOfTrain(approach.trunkName());
+    if (driver.isPresent() && merged.isPresent()) {
+      keepDriverAtHead(driver.get(), merged.get());
+    }
+    boolean free = driver.isEmpty() && merged.isPresent();
+    for (Map.Entry<UUID, Rejoin> entry : waiting) {
+      Player player = Bukkit.getPlayer(entry.getKey());
+      if (player == null || !player.isOnline()) {
+        continue;
+      }
+      if (free && !isDriving(entry.getKey())) {
+        free = false;
+        rejoinAfterCoupling(player, merged.get(), entry.getValue());
+      } else {
+        sendTaskChat(
+            player,
+            "drive.couple.taken",
+            Map.of("driver", driver.map(DriveSession::playerName).orElse("-")));
+      }
+    }
+  }
+
+  /** 主干原有的驾驶员：挂上后不在车头那一端时换到车头驾驶室。 */
+  private void keepDriverAtHead(DriveSession session, MinecartGroup merged) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    CabSeats cabs = SeatLocator.cabSeats(merged, config.driver().cabSeatNames());
+    boolean atHead =
+        player != null
+            && SeatLocator.locate(player)
+                .filter(seat -> seat.trainName().equals(session.trainName()))
+                .map(seat -> cabs.endOf(seat) == CabSeats.End.HEAD)
+                .orElse(false);
+    if (player == null || atHead) {
+      return;
+    }
+    if (moveToCab(session, merged, player, CabSeats.End.HEAD)) {
+      sendTaskChat(player, "drive.couple.moved-cab", Map.of());
+    } else {
+      sendTaskChat(player, "drive.split.seat-failed", Map.of());
+    }
+  }
+
+  /** 把让出控制的驾驶员送回合并列车发车端的驾驶室，开始后从这一站接着记车次。 */
+  private void rejoinAfterCoupling(Player player, MinecartGroup merged, Rejoin rejoin) {
+    UUID playerId = player.getUniqueId();
+    DriveConfig current = config.withLevel(levels.effective(player, config.level()));
+    String trainName = merged.getProperties().getTrainName();
+    splitChoices.beginSwitch(
+        playerId,
+        new SplitChoices.Switch(
+            trainName,
+            "",
+            Optional.empty(),
+            rejoin.takeover(),
+            Instant.now().plus(SplitChoices.SWITCH_WINDOW),
+            true,
+            rejoin.ato()));
+    TakeoverCheck check = checkTakeoverExceptCab(player, merged, current);
+    if (check.refusal() != null) {
+      splitChoices.takeSwitch(playerId);
+      sendTaskChat(player, "drive.couple.not-rejoined", Map.of());
+      return;
+    }
+    CabSeats.End end =
+        switch (check.expected()) {
+          case HEAD -> CabSeats.End.HEAD;
+          case TAIL -> CabSeats.End.TAIL;
+          case EITHER -> nearerEnd(merged, player.getLocation().toVector());
+        };
+    // 送不进驾驶室时放行留到期限：期间可以自己走过去入座后开始驾驶
+    seatThenStart(
+        player,
+        merged,
+        end,
+        current,
+        outcome -> {
+          if (outcome != StartOutcome.STARTED) {
+            sendTaskChat(
+                player,
+                "drive.couple.rejoin-failed",
+                Map.of("seconds", String.valueOf(SplitChoices.SWITCH_WINDOW.toSeconds())));
+          }
+        });
+  }
+
+  /** 没挂上：让出控制的驾驶员不再送回。 */
+  private void onNotCoupled(org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.Approach approach) {
+    for (Iterator<Map.Entry<UUID, Rejoin>> it = rejoins.entrySet().iterator(); it.hasNext(); ) {
+      Map.Entry<UUID, Rejoin> entry = it.next();
+      if (entry.getValue().approach().equals(approach)) {
+        it.remove();
+        Player player = Bukkit.getPlayer(entry.getKey());
+        if (player != null) {
+          sendTaskChat(player, "drive.couple.not-coupled", Map.of());
+        }
+      }
+    }
+  }
+
+  /** 解编时车上的驾驶员（接到解编服务上）。 */
+  public org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew decoupleCrew() {
+    return decoupleCrew;
+  }
+
+  /** 列车要在此刻停着的这一站分行。 */
+  private boolean dividesHere(String trainName) {
+    return plugin
+        .getCouplerService()
+        .map(coupler -> coupler.decoupling().dividesHere(trainName))
+        .orElse(false);
+  }
+
+  /** 分行的这一站列车已停妥到站台接手（见 {@code DecoupleService#settledHere}）。 */
+  private boolean divisionSettled(String trainName) {
+    return plugin
+        .getCouplerService()
+        .map(coupler -> coupler.decoupling().settledHere(trainName))
+        .orElse(false);
+  }
+
+  /** 列车要在这一站分行：开过门后先把这一趟在这一站结算（像到了终点），解编等它才拆。 */
+  private void settleForDivision(
+      DriveSession session, DriverLink link, Optional<DriverTask> task, String trainName) {
+    Optional<TaskKey> resume = Optional.empty();
+    if (task.isPresent() && settlesMidTrip(task.get())) {
+      traceSession(session, "到达分行站，本趟在这一站结算");
+      tasks.completeHere(session.playerId(), "divide");
+      settleTrip(session, link, task.get(), trainName);
+      resume = Optional.of(task.get().key());
+    }
+    splitChoices.markReady(session.playerId(), new SplitChoices.Ready(trainName, resume));
+  }
+
+  /**
+   * 中途（分行站、联挂进站前）能不能把这一趟当作开完结算：区间任务（含路考、练习）按交班站或停站数判定，中途结算会提前判完成，不在中途结算——
+   * 继续驾驶留下的一段时照旧往下开，结束或改驾时按中断了结。
+   */
+  private static boolean settlesMidTrip(DriverTask task) {
+    return task.handoverStopSequence() < 0
+        && !DriverTask.SOURCE_EXAM.equals(task.source())
+        && !DriverTask.SOURCE_TRAINING.equals(task.source());
+  }
+
+  /** 拆开了：请驾驶员在时限内选继续哪一段。 */
+  private void onDivided(org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.Split split) {
+    Optional<DriveSession> found = driverSessionOfTrain(split.keptName());
+    if (found.isEmpty()) {
+      return;
+    }
+    DriveSession session = found.get();
+    splitChoices.open(session.playerId(), split, Instant.now());
+    traceSession(session, "列车已分行，等选择继续哪一段");
+    debugLog(
+        "DRIVE_SPLIT_OFFER player="
+            + session.playerName()
+            + " kept="
+            + split.keptName()
+            + " detached="
+            + split.detachedName());
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player != null) {
+      sendTaskChat(
+          player,
+          "drive.split.offer",
+          Map.of(
+              "kept",
+              split.keptLabel(),
+              "detached",
+              split.detachedLabel(),
+              "seconds",
+              String.valueOf(SplitChoices.WINDOW.toSeconds())));
+    }
+  }
+
+  /** 已经结算、却没能拆开（编组对不上等）：从这一站接着驾驶本趟。 */
+  private void onDivisionFailed(String trainName) {
+    Optional<DriveSession> found = driverSessionOfTrain(trainName);
+    if (found.isEmpty() || !splitChoices.readyFor(found.get().playerId(), trainName)) {
+      return;
+    }
+    DriveSession session = found.get();
+    Optional<SplitChoices.Ready> ready = splitChoices.takeReady(session.playerId());
+    Player player = Bukkit.getPlayer(session.playerId());
+    traceSession(session, "本站未能分行，继续驾驶本趟");
+    if (player == null) {
+      return;
+    }
+    sendTaskChat(player, "drive.split.not-split", Map.of());
+    ready
+        .flatMap(SplitChoices.Ready::resume)
+        .ifPresent(key -> resumeTrip(player, session, trainName, key));
+  }
+
+  /** 选择期限到了结束驾驶（防挂机）；还没选就开车视为继续留下的一段。 */
+  private void tickSplitChoices() {
+    Instant now = Instant.now();
+    splitChoices.pruneSwitches(now);
+    for (Iterator<Map.Entry<UUID, Rejoin>> it = rejoins.entrySet().iterator(); it.hasNext(); ) {
+      Map.Entry<UUID, Rejoin> entry = it.next();
+      if (!now.isBefore(entry.getValue().deadline())) {
+        // 让出控制后一直没挂上（没开动就放弃、等着再试）：不再交还
+        it.remove();
+        Player player = Bukkit.getPlayer(entry.getKey());
+        if (player != null) {
+          sendTaskChat(player, "drive.couple.not-coupled", Map.of());
+        }
+      }
+    }
+    for (UUID playerId : splitChoices.choosers()) {
+      DriveSession session = active.get(playerId);
+      Optional<SplitChoices.Choice> choice = splitChoices.choiceOf(playerId);
+      Player player = Bukkit.getPlayer(playerId);
+      if (session == null || choice.isEmpty() || player == null) {
+        splitChoices.closeChoice(playerId);
+      } else if (!now.isBefore(choice.get().deadline())) {
+        splitChoices.closeChoice(playerId);
+        traceSession(session, "分行后未在时限内选择，结束驾驶");
+        handback(session, DriveSession.EndReason.SPLIT_TIMEOUT);
+      } else if (!session.isStopped()) {
+        keepAfterSplit(player, session, choice.get(), true);
+      }
+    }
+  }
+
+  /**
+   * 分行后选继续哪一段（{@code /fta drive split keep|switch|end}）。
+   *
+   * @param raw keep、switch 或 end
+   * @param reply 改驾解下的一段时，在那一段开始驾驶的结果
+   */
+  public void chooseSplit(
+      Player player, String raw, java.util.function.Consumer<StartOutcome> reply) {
+    UUID playerId = player.getUniqueId();
+    Optional<SplitChoices.Option> option = SplitChoices.Option.parse(raw);
+    DriveSession session = active.get(playerId);
+    Optional<SplitChoices.Choice> choice = splitChoices.choiceOf(playerId);
+    if (option.isEmpty()) {
+      sendTaskChat(player, "drive.split.usage", Map.of());
+      return;
+    }
+    if (session == null || choice.isEmpty()) {
+      sendTaskChat(player, "drive.split.not-choosing", Map.of());
+      return;
+    }
+    switch (option.get()) {
+      case KEEP -> keepAfterSplit(player, session, choice.get(), false);
+      case SWITCH -> switchAfterSplit(player, session, choice.get(), reply);
+      case END -> {
+        splitChoices.closeChoice(playerId);
+        traceSession(session, "分行后结束驾驶");
+        handback(session, DriveSession.EndReason.HANDBACK);
+      }
+    }
+  }
+
+  /** 继续驾驶留下的一段：驾驶室随解下的一段分开时送进留下那一段车头的驾驶室；中途结算的车次从这一站接着记。 */
+  private void keepAfterSplit(
+      Player player, DriveSession session, SplitChoices.Choice choice, boolean implicit) {
+    splitChoices.closeChoice(player.getUniqueId());
+    traceSession(session, implicit ? "分行后未选择即开车，按继续留下的一段处理" : "分行后继续驾驶留下的一段");
+    boolean seated =
+        SeatLocator.locate(player)
+            .filter(seat -> seat.trainName().equals(session.trainName()))
+            .isPresent();
+    if (!seated) {
+      Optional<MinecartGroup> kept = findSessionGroup(session);
+      if (kept.isEmpty() || !moveToCab(session, kept.get(), player, CabSeats.End.HEAD)) {
+        sendTaskChat(player, "drive.split.seat-failed", Map.of());
+      }
+    }
+    sendTaskChat(player, "drive.split.kept", Map.of("segment", choice.split().keptLabel()));
+    choice.resume().ifPresent(key -> resumeTrip(player, session, session.trainName(), key));
+  }
+
+  /** 改驾解下的一段：留下的一段交还调度，送进解下那一段发车端的驾驶室后开始驾驶。 */
+  private void switchAfterSplit(
+      Player player,
+      DriveSession session,
+      SplitChoices.Choice choice,
+      java.util.function.Consumer<StartOutcome> reply) {
+    UUID playerId = player.getUniqueId();
+    org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.Split split = choice.split();
+    Optional<MinecartGroup> detached = SeatLocator.findGroup(split.detachedName());
+    if (detached.isEmpty()) {
+      sendTaskChat(player, "drive.split.switch-gone", Map.of());
+      return;
+    }
+    DriveConfig current = config.withLevel(levels.effective(player, config.level()));
+    Optional<TaskKey> after =
+        choice
+            .resume()
+            .or(() -> Optional.ofNullable(continuations.get(playerId)).map(Continuation::after));
+    boolean takeover = takeovers.contains(playerId);
+    splitChoices.beginSwitch(
+        playerId,
+        new SplitChoices.Switch(
+            split.detachedName(),
+            split.detachedLabel(),
+            after,
+            takeover,
+            Instant.now().plus(SplitChoices.SWITCH_WINDOW),
+            false,
+            session.isAto()));
+    MinecartGroup group = detached.get();
+    // 先确认接得了解下的一段，再交还留下的一段：接不了时选择照旧开着，还可以继续驾驶留下的一段
+    TakeoverCheck check = checkTakeoverExceptCab(player, group, current);
+    if (check.refusal() != null) {
+      splitChoices.takeSwitch(playerId);
+      reply.accept(check.refusal());
+      return;
+    }
+    splitChoices.closeChoice(playerId);
+    traceSession(session, "分行后改驾解下的一段 " + split.detachedName());
+    handback(session, DriveSession.EndReason.SPLIT_SWITCH);
+    CabSeats.End end =
+        switch (check.expected()) {
+          case HEAD -> CabSeats.End.HEAD;
+          case TAIL -> CabSeats.End.TAIL;
+          case EITHER -> nearerEnd(group, player.getLocation().toVector());
+        };
+    // 送不进驾驶室时放行留到期限：期间可以自己走过去入座后开始驾驶
+    seatThenStart(player, group, end, current, reply);
+  }
+
+  /** 改驾解下的一段、或连挂后交还驾驶后开始驾驶：不另记接管。改驾的那一段开出别的车次时再记成任务；连挂后从这一站接着记。 */
+  private void adoptDetached(Player player, DriveSession session, SplitChoices.Switch switched) {
+    splitChoices.takeSwitch(player.getUniqueId());
+    if (switched.takeover()) {
+      takeovers.add(player.getUniqueId());
+    }
+    if (switched.ato()) {
+      findSessionGroup(session).ifPresent(group -> switchToAto(session, group, "沿用原来的驾驶方式"));
+    }
+    if (switched.resumeTrip()) {
+      traceSession(session, "连挂后交还驾驶 " + session.trainName());
+      String trainName = session.trainName();
+      afterStartMessage(
+          () -> {
+            if (active.get(player.getUniqueId()) != session) {
+              return;
+            }
+            sendTaskChat(player, "drive.couple.rejoined", Map.of());
+            DriverTaskManager.timetables()
+                .flatMap(api -> api.getAssignment(trainName))
+                .filter(assignment -> assignment.nextStopSequence().isPresent())
+                .map(
+                    assignment ->
+                        new TaskKey(
+                            assignment.timetableId(),
+                            assignment.tripCode(),
+                            assignment.serviceDate()))
+                .ifPresent(key -> resumeTrip(player, session, trainName, key));
+          });
+      return;
+    }
+    switched
+        .after()
+        .ifPresent(
+            after ->
+                continuations.put(
+                    player.getUniqueId(),
+                    new Continuation(
+                        after, false, session.odometerBlocks(), Bukkit.getCurrentTick())));
+    traceSession(session, "改驾分行解下的一段 " + session.trainName());
+    afterStartMessage(
+        () -> sendTaskChat(player, "drive.split.switched", Map.of("segment", switched.label())));
+  }
+
+  /** 在分行站结算过的车次从这一站接着记成新任务（选继续留下的一段、或没能拆开时），单独计分。 */
+  private void resumeTrip(Player player, DriveSession session, String trainName, TaskKey key) {
+    int sequence =
+        DriverTaskManager.timetables()
+            .flatMap(api -> api.getAssignment(trainName))
+            .filter(assignment -> sameTrip(key, assignment))
+            .flatMap(TimetableApi.TrainAssignment::lastStopSequence)
+            .orElse(0);
+    DriverTaskManager.ClaimOutcome outcome =
+        adoptTrip(session, trainName, key, sequence, DriverTask.SOURCE_CONTINUATION);
+    refreshViews();
+    traceSession(session, "分行站接着驾驶 " + key.tripCode() + ": " + outcome);
+    if (outcome != DriverTaskManager.ClaimOutcome.CLAIMED) {
+      return;
+    }
+    sendTaskChat(player, "drive.task.continued", Map.of("trip", key.tripCode()));
+    tasks
+        .activeTaskOf(session.playerId())
+        .ifPresent(
+            task ->
+                callEvent(
+                    new DriverTaskStartedEvent(task.playerId(), TaskViews.of(task), trainName)));
+  }
+
   /**
    * 没领任务直接接管调度列车：按列车此刻跑的车次记成驾驶中的任务，到终点站同样结算。停在终点站（这一趟已跑完）接管时等开出下一趟再记。
    *
@@ -3650,6 +4200,11 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
    */
   private void adoptTakeover(Player player, DriveSession session, String trainName) {
     if (tasks.activeTaskOf(player.getUniqueId()).isPresent()) {
+      return;
+    }
+    Optional<SplitChoices.Switch> switched = splitChoices.switchTo(player.getUniqueId(), trainName);
+    if (switched.isPresent()) {
+      adoptDetached(player, session, switched.get());
       return;
     }
     takeovers.add(player.getUniqueId());

@@ -84,7 +84,13 @@ public final class DriveSession implements DriveDoors.Cab {
     /** 驾驶调度列车：折返换端没能在时限内坐进前端驾驶室，交还自动运行发车。 */
     CAB_CHANGE_TIMEOUT,
     /** 驾驶调度列车：列车按交路开到收车地点（通常是车库）正常收车，驾驶正常结束。 */
-    SERVICE_END
+    SERVICE_END,
+    /** 驾驶调度列车：列车分行后未在时限内选择继续哪一段，交还自动运行。 */
+    SPLIT_TIMEOUT,
+    /** 驾驶调度列车：列车分行后改驾解下的一段，留下的一段交还自动运行。 */
+    SPLIT_SWITCH,
+    /** 驾驶调度列车：联挂进站与挂车由调度控车，本趟在进站前结算；挂上后可交还驾驶。 */
+    COUPLING
   }
 
   private static final double TICKS_PER_SECOND = 20.0;

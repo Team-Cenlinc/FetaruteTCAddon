@@ -42,7 +42,15 @@ public final class GuardSession implements DriveDoors.Cab {
     /** 车掌考试没有通过（考试期间临时有车掌权限）。 */
     EXAM,
     /** 车掌任务值乘到交班站。 */
-    HANDOVER
+    HANDOVER,
+    /** 列车分行后选择结束值乘。 */
+    SPLIT_END,
+    /** 列车分行后改为值乘解下的一段：这一段的值乘结束。 */
+    SPLIT_SWITCH,
+    /** 列车分行后未在时限内选择。 */
+    SPLIT_TIMEOUT,
+    /** 回程支线车并入主干（身份作废）：进站前结束值乘。 */
+    COUPLING
   }
 
   private final UUID playerId;

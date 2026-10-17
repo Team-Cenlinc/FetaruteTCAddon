@@ -93,6 +93,35 @@ class GuardTripTest {
     assertFalse(GuardTrip.rewarded(DriverTask.State.FAILED));
   }
 
+  /** 分行、联挂中途结束：普通任务算开完；设了交班站、考试与练习派的任务按中断了结（与驾驶员中途结算同一口径）。 */
+  @Test
+  void midTripEndsOnlyCompleteOpenEndedTasks() {
+    for (GuardSession.EndReason reason :
+        List.of(
+            GuardSession.EndReason.SPLIT_END,
+            GuardSession.EndReason.SPLIT_SWITCH,
+            GuardSession.EndReason.COUPLING)) {
+      assertEquals(
+          DriverTask.State.COMPLETED, GuardTrip.taskStateFor(reason, -1, GuardTask.SOURCE_BOARD));
+      assertEquals(
+          DriverTask.State.INTERRUPTED,
+          GuardTrip.taskStateFor(reason, 5, GuardTask.SOURCE_BOARD),
+          "交班站在后面");
+      assertEquals(
+          DriverTask.State.INTERRUPTED, GuardTrip.taskStateFor(reason, -1, DriverTask.SOURCE_EXAM));
+      assertEquals(
+          DriverTask.State.INTERRUPTED,
+          GuardTrip.taskStateFor(reason, -1, DriverTask.SOURCE_TRAINING));
+    }
+    assertEquals(
+        DriverTask.State.COMPLETED,
+        GuardTrip.taskStateFor(GuardSession.EndReason.HANDOVER, 5, DriverTask.SOURCE_EXAM),
+        "到交班站交班照旧算开完");
+    assertEquals(
+        DriverTask.State.ABANDONED,
+        GuardTrip.taskStateFor(GuardSession.EndReason.COMMAND, -1, GuardTask.SOURCE_BOARD));
+  }
+
   /** 站结算时进队列，同一拍里下一站开始也不会丢。 */
   @Test
   void settledStopsQueueUntilDrained() {

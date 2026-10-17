@@ -61,6 +61,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
+import org.fetarute.fetaruteTCAddon.drive.session.SplitChoices;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
 import org.fetarute.fetaruteTCAddon.interlink.ServerIdentity;
@@ -316,6 +317,11 @@ public final class GuardSessionManager {
     return new ArrayList<>(sessions.values());
   }
 
+  /** 解编时车上的车掌：拆之前等这一站开过门，拆开后请车掌选继续值乘哪一段。 */
+  public org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew decoupleCrew() {
+    return decoupleCrew;
+  }
+
   /** 这列车上的车掌（按当前车名）。 */
   public Optional<GuardSession> guardOfTrain(String trainName) {
     return registry
@@ -509,6 +515,7 @@ public final class GuardSessionManager {
     if (session == null) {
       return;
     }
+    splitChoices.forget(playerId);
     lastUseTick.remove(playerId);
     tips.forget(playerId);
     GuardTask dutyTask = session.task();
@@ -535,7 +542,14 @@ public final class GuardSessionManager {
       plugin.getLogger().warning("车掌值乘结算出错 " + session.playerName() + ": " + ex);
     }
     // 任务这一趟没做过作业（没结算）时按结束原因了结。
-    finishTask(player, session, GuardTrip.stateFor(reason), reason.name());
+    // 分行、联挂中途结束时，设了交班站或考试、练习派的任务不算开完（与驾驶员中途结算同一口径）。
+    finishTask(
+        player,
+        session,
+        dutyTask == null
+            ? GuardTrip.stateFor(reason)
+            : GuardTrip.taskStateFor(reason, dutyTask.handoverStopSequence(), dutyTask.source()),
+        reason.name());
     if (player != null) {
       sidebar.hide(player);
       if (session.menuTopSize() > 0) {
@@ -578,6 +592,238 @@ public final class GuardSessionManager {
     }
   }
 
+  // ---- 分行 ----
+
+  /** 选了改驾后等坐进解下那一段驾驶室的最长 tick 数。 */
+  private static final int SPLIT_SEATING_WAIT_TICKS = 10;
+
+  /** 解编站上选继续值乘哪一段。 */
+  private final SplitChoices splitChoices = new SplitChoices();
+
+  private final org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew decoupleCrew =
+      new org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew() {
+        @Override
+        public boolean crewed(String trainName) {
+          return guardOfTrain(trainName).isPresent();
+        }
+
+        @Override
+        public boolean readyToSplit(String trainName) {
+          // 车掌不在中途结算（留下的一段还是这一趟）：等这一站开过门再拆
+          return guardOfTrain(trainName)
+              .map(
+                  session ->
+                      session
+                          .link()
+                          .stationStop()
+                          .map(stop -> stop.phase().doorsOpened())
+                          .orElse(true))
+              .orElse(true);
+        }
+
+        @Override
+        public void split(Split split) {
+          onDivided(split);
+        }
+
+        @Override
+        public Optional<Instant> holding(String trainName) {
+          return splitChoices.holding(trainName);
+        }
+      };
+
+  private final org.fetarute.fetaruteTCAddon.coupler.CoupleCrew coupleCrew =
+      new org.fetarute.fetaruteTCAddon.coupler.CoupleCrew() {
+        @Override
+        public void yieldBeforeApproach(Approach approach) {
+          // 回程支线车挂上后身份作废：车上的车掌在进站前结束值乘
+          guardOfTrain(approach.feederName())
+              .ifPresent(session -> stop(session.playerId(), GuardSession.EndReason.COUPLING));
+        }
+
+        @Override
+        public void coupled(Approach approach) {
+          guardOfTrain(approach.trunkName()).ifPresent(GuardSessionManager.this::keepGuardAtTail);
+        }
+
+        @Override
+        public void notCoupled(Approach approach) {}
+      };
+
+  /** 联挂时两车上的车掌（接到联挂服务上）。 */
+  public org.fetarute.fetaruteTCAddon.coupler.CoupleCrew coupleCrew() {
+    return coupleCrew;
+  }
+
+  /** 主干上的车掌：挂上后不在车尾那一端时换到车尾驾驶室。 */
+  private void keepGuardAtTail(GuardSession session) {
+    Player player = Bukkit.getPlayer(session.playerId());
+    Optional<MinecartGroup> merged = findGroup(session);
+    if (player == null
+        || merged.isEmpty()
+        || !updateBinding(session, merged.get())
+        || GuardCabChange.endOfCar(session.binding().memberIndex(), merged.get().size())
+            == CabSeats.End.TAIL) {
+      return;
+    }
+    player.sendMessage(
+        locale.component(
+            moveGuardTo(player, session, merged.get(), CabSeats.End.TAIL)
+                ? "drive.guard.couple.moved"
+                : "drive.guard.couple.seat-failed"));
+  }
+
+  /** 拆开了：请车掌在时限内选继续值乘哪一段。 */
+  private void onDivided(org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.Split split) {
+    Optional<GuardSession> found = guardOfTrain(split.keptName());
+    if (found.isEmpty()) {
+      return;
+    }
+    GuardSession session = found.get();
+    splitChoices.open(session.playerId(), split, Instant.now());
+    Player player = Bukkit.getPlayer(session.playerId());
+    if (player != null) {
+      player.sendMessage(
+          locale.component(
+              "drive.guard.split.offer",
+              Map.of(
+                  "kept",
+                  split.keptLabel(),
+                  "detached",
+                  split.detachedLabel(),
+                  "seconds",
+                  String.valueOf(SplitChoices.WINDOW.toSeconds()))));
+    }
+  }
+
+  /** 选择期限到了结束值乘（防挂机）；还没选列车就开走视为继续值乘留下的一段。 */
+  private void tickSplitChoice(Player player, GuardSession session) {
+    Optional<SplitChoices.Choice> choice = splitChoices.choiceOf(session.playerId());
+    if (choice.isEmpty()) {
+      return;
+    }
+    if (!Instant.now().isBefore(choice.get().deadline())) {
+      splitChoices.closeChoice(session.playerId());
+      stop(session.playerId(), GuardSession.EndReason.SPLIT_TIMEOUT);
+      return;
+    }
+    if (findGroup(session).filter(MinecartGroup::isMoving).isPresent()) {
+      keepAfterSplit(player, session);
+    }
+  }
+
+  /**
+   * 分行后选继续值乘哪一段（{@code /fta guard split keep|switch|end}）。
+   *
+   * @param raw keep、switch 或 end
+   */
+  public void chooseSplit(Player player, String raw) {
+    UUID playerId = player.getUniqueId();
+    Optional<SplitChoices.Option> option = SplitChoices.Option.parse(raw);
+    GuardSession session = sessions.get(playerId);
+    Optional<SplitChoices.Choice> choice = splitChoices.choiceOf(playerId);
+    if (option.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.split.usage"));
+      return;
+    }
+    if (session == null || choice.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.split.not-choosing"));
+      return;
+    }
+    switch (option.get()) {
+      case KEEP -> keepAfterSplit(player, session);
+      case SWITCH -> switchAfterSplit(player, choice.get());
+      case END -> {
+        splitChoices.closeChoice(playerId);
+        stop(playerId, GuardSession.EndReason.SPLIT_END);
+      }
+    }
+  }
+
+  /** 继续值乘留下的一段：座位随解下的一段分开时送进留下那一段车尾的驾驶室。 */
+  private void keepAfterSplit(Player player, GuardSession session) {
+    Optional<SplitChoices.Choice> choice = splitChoices.closeChoice(session.playerId());
+    Optional<MinecartGroup> kept = findGroup(session);
+    if (kept.isPresent()
+        && !updateBinding(session, kept.get())
+        && !moveGuardTo(player, session, kept.get(), CabSeats.End.TAIL)) {
+      // 留下的一段车尾没有空的驾驶座：这一段值乘不下去
+      player.sendMessage(locale.component("drive.guard.split.seat-failed"));
+      stop(session.playerId(), GuardSession.EndReason.SPLIT_END);
+      return;
+    }
+    choice.ifPresent(
+        found ->
+            player.sendMessage(
+                locale.component(
+                    "drive.guard.split.kept", Map.of("segment", found.split().keptLabel()))));
+  }
+
+  /** 改为值乘解下的一段：这一段的值乘按做过的站结算后结束，送进解下那一段车掌那一头的驾驶室重新上岗。 */
+  private void switchAfterSplit(Player player, SplitChoices.Choice choice) {
+    UUID playerId = player.getUniqueId();
+    org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.Split split = choice.split();
+    Optional<MinecartGroup> detached = SeatLocator.findGroup(split.detachedName());
+    if (detached.isEmpty()) {
+      player.sendMessage(locale.component("drive.guard.split.switch-gone"));
+      return;
+    }
+    splitChoices.closeChoice(playerId);
+    splitChoices.beginSwitch(
+        playerId,
+        new SplitChoices.Switch(
+            split.detachedName(),
+            split.detachedLabel(),
+            Optional.empty(),
+            false,
+            Instant.now().plus(SplitChoices.SWITCH_WINDOW),
+            false,
+            false));
+    stop(playerId, GuardSession.EndReason.SPLIT_SWITCH);
+    MinecartGroup group = detached.get();
+    CabSeats.Departure departure = drivers.layoverDeparture(group);
+    CabSeats.End end = guardEndFor(departure);
+    CabSeats cabs = SeatLocator.cabSeats(group, config.get().driver().cabSeatNames());
+    if (SeatLocator.enterCab(
+            player, group, cabs, end == CabSeats.End.NONE ? CabSeats.End.TAIL : end)
+        .isEmpty()) {
+      splitChoices.takeSwitch(playerId);
+      player.sendMessage(locale.component("drive.guard.split.switch-failed"));
+      return;
+    }
+    String trainName = group.getProperties().getTrainName();
+    int[] waited = {0};
+    Bukkit.getScheduler()
+        .runTaskTimer(
+            plugin,
+            timer -> {
+              boolean seated =
+                  SeatLocator.locate(player)
+                      .filter(seat -> seat.trainName().equals(trainName))
+                      .isPresent();
+              if (!player.isOnline()) {
+                timer.cancel();
+                splitChoices.takeSwitch(playerId);
+              } else if (seated || ++waited[0] >= SPLIT_SEATING_WAIT_TICKS) {
+                timer.cancel();
+                splitChoices.takeSwitch(playerId);
+                StartOutcome outcome = start(player, departure);
+                player.sendMessage(
+                    outcome == StartOutcome.STARTED
+                        ? locale.component(
+                            "drive.guard.split.switched", Map.of("segment", split.detachedLabel()))
+                        : locale.component(
+                            "drive.guard.command.start."
+                                + outcome
+                                    .name()
+                                    .toLowerCase(java.util.Locale.ROOT)
+                                    .replace('_', '-')));
+              }
+            },
+            1L,
+            1L);
+  }
+
   /** 全部车掌离岗（插件停用、车掌功能被关掉）。 */
   public void stopAll(GuardSession.EndReason reason) {
     for (UUID id : new ArrayList<>(sessions.keySet())) {
@@ -612,6 +858,7 @@ public final class GuardSessionManager {
   void tick() {
     long now = Bukkit.getCurrentTick();
     tickCounter++;
+    splitChoices.pruneSwitches(Instant.now());
     for (GuardSession session : new ArrayList<>(sessions.values())) {
       try {
         tick(session, now);
@@ -642,6 +889,11 @@ public final class GuardSessionManager {
     Player player = Bukkit.getPlayer(session.playerId());
     if (player == null || !player.isOnline()) {
       stop(session.playerId(), GuardSession.EndReason.OFFLINE);
+      return;
+    }
+    if (splitChoices.choosing(session.playerId())) {
+      // 分行后等选择：座位可能随解下的一段分开了，选定之前不按离开列车处理，这一站的作业也先停着
+      tickSplitChoice(player, session);
       return;
     }
     Optional<MinecartGroup> groupOpt = findGroup(session);

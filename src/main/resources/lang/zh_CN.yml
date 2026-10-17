@@ -2559,6 +2559,23 @@ drive:
       cab-change: "<prefix> <red>换端时未能坐进车尾驾驶室，值乘已结束（未完成）</red> <gray>完成 <stops> 站</gray>"
       exam: "<prefix> <yellow>车掌考试未通过，值乘已结束</yellow>"
       handover: "<prefix> <green>已到交班站，值乘结束，车门交还站台</green> <gray>完成 <stops> 站</gray>"
+      split-end: "<prefix> <green>列车已分行，值乘结束</green> <gray>完成 <stops> 站</gray>"
+      split-switch: "<prefix> <green>本段值乘已结算，正前往解下的一段</green> <gray>完成 <stops> 站</gray>"
+      split-timeout: "<prefix> <yellow>列车分行后未在时限内选择继续值乘的一段，值乘已结束</yellow> <gray>完成 <stops> 站</gray>"
+      coupling: "<prefix> <green>列车即将并入主干，值乘结束</green> <gray>完成 <stops> 站</gray>"
+    couple:
+      moved: "<prefix> <gray>连挂后已换到列车车尾的驾驶室</gray>"
+      seat-failed: "<prefix> <yellow>连挂后车尾没有可用的驾驶座，请自行前往车尾驾驶室</yellow>"
+    # 列车在本站分行（解编）后选择继续值乘哪一段（<kept>、<detached>、<segment> 为“前 4 节，开往南渡”之类的说明）
+    split:
+      offer: "<prefix> <white>列车已在本站分行。请在 <yellow><seconds></yellow> 秒内选择：</white> <click:run_command:'/fta guard split keep'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard split keep</white>'><green>[继续值乘 <kept>]</green></hover></click> <click:run_command:'/fta guard split switch'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard split switch</white>'><aqua>[改为值乘 <detached>]</aqua></hover></click> <click:run_command:'/fta guard split end'><hover:show_text:'<gray>点击执行：</gray> <white>/fta guard split end</white>'><red>[结束值乘]</red></hover></click> <gray>超时未选择将结束值乘；未选择列车即开出视为继续值乘留下的一段</gray>"
+      kept: "<prefix> <green>继续值乘 <white><segment></white></green>"
+      switched: "<prefix> <green>已改为值乘 <white><segment></white></green>"
+      seat-failed: "<prefix> <red>留下一段的车尾没有可用的驾驶座，值乘已结束</red>"
+      switch-gone: "<prefix> <red>解下的一段已不存在，请选择继续值乘或结束值乘</red>"
+      switch-failed: "<prefix> <red>未能送入解下一段的驾驶室，请自行入座后输入 /fta guard on 上岗</red>"
+      not-choosing: "<prefix> <red>当前没有待选择的分行</red>"
+      usage: "<prefix> <red>用法：/fta guard split keep|switch|end</red>"
     timeout:
       open: "<red>开门超时，已由站台代开车门</red>"
       close: "<red>关门超时，已由站台代关车门</red>"
@@ -2693,6 +2710,7 @@ drive:
         stop: "<yellow>/fta guard stop <玩家></yellow> <gray>撤下车掌</gray>"
         tasks: "<yellow>/fta guard tasks [车站]</yellow> <gray>打开车掌任务板，领取一班车掌</gray>"
         task: "<yellow>/fta guard task [status|abandon|goto]</yellow> <gray>查看、放弃车掌任务或前往上岗</gray>"
+        split: "<yellow>/fta guard split <keep|switch|end></yellow> <gray>列车分行后选择继续值乘留下的一段、改为值乘解下的一段或结束值乘</gray>"
       start:
         started: "<prefix> <green>已上岗当车掌</green> <gray>快捷栏选中后右键：1 开左门、2 开右门、3 关门、4 异常报告、6 出发确认、7 发车铃（按住右键约一秒）、9 紧急停车；F 打开车掌菜单；作业提示见侧边栏。中途结束值乘：F 菜单点两次「结束值乘」，或输入 /fta guard off</gray>"
         disabled: "<prefix> <red>车掌功能已关闭</red>"
@@ -3332,6 +3350,26 @@ drive:
     task-complete: "<prefix> <green>已到达终点站，任务完成，列车交还自动运行</green>"
     service-end: "<prefix> <green>列车已到达收车地点，本次驾驶结束</green>"
     settled: "<prefix> <green>本趟成绩已结算，驾驶结束，列车交还自动运行</green>"
+    split-timeout: "<prefix> <yellow>列车分行后未在时限内选择继续驾驶的一段，驾驶结束，两段列车均交还自动运行</yellow>"
+    coupling: "<prefix> <yellow>列车由调度进站连挂，本趟成绩已结算；连挂完成后如合并的列车无人驾驶，将交还给你</yellow>"
+  # 联挂（COPL）：进站与挂车由调度控车，挂上后交还驾驶
+  couple:
+    rejoined: "<prefix> <green>连挂完成，已交还驾驶；自本站起另行记分</green>"
+    taken: "<prefix> <yellow>连挂完成，合并后的列车由 <white><driver></white> 驾驶，本次驾驶结束</yellow>"
+    rejoin-failed: "<prefix> <yellow>连挂完成，未能送入驾驶室；请在 <seconds> 秒内自行入座后输入 /fta drive on</yellow>"
+    not-rejoined: "<prefix> <yellow>连挂完成，当前无法交还驾驶，列车由调度运行</yellow>"
+    not-coupled: "<prefix> <yellow>连挂未完成，列车已交由调度运行</yellow>"
+    moved-cab: "<prefix> <gray>连挂后已换到列车前端的驾驶室</gray>"
+  # 列车在本站分行（解编）后选择继续驾驶哪一段（<kept>、<detached>、<segment> 为“前 4 节，开往南渡”之类的说明）
+  split:
+    offer: "<prefix> <white>列车已在本站分行，本趟成绩已结算。请在 <yellow><seconds></yellow> 秒内选择：</white> <click:run_command:'/fta drive split keep'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive split keep</white>'><green>[继续驾驶 <kept>]</green></hover></click> <click:run_command:'/fta drive split switch'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive split switch</white>'><aqua>[改驾 <detached>]</aqua></hover></click> <click:run_command:'/fta drive split end'><hover:show_text:'<gray>点击执行：</gray> <white>/fta drive split end</white>'><red>[结束驾驶]</red></hover></click> <gray>超时未选择将结束驾驶；未选择即开车视为继续驾驶留下的一段</gray>"
+    kept: "<prefix> <green>继续驾驶 <white><segment></white></green>"
+    switched: "<prefix> <green>已改驾 <white><segment></white>，另一段已交还自动运行；本段开出下一趟时另行记分</green>"
+    seat-failed: "<prefix> <yellow>未能送入留下一段的驾驶室，请自行前往车头驾驶室</yellow>"
+    switch-gone: "<prefix> <red>解下的一段已不存在，请选择继续驾驶或结束驾驶</red>"
+    not-split: "<prefix> <yellow>列车未能在本站分行，请继续驾驶本趟</yellow>"
+    not-choosing: "<prefix> <red>当前没有待选择的分行</red>"
+    usage: "<prefix> <red>用法：/fta drive split keep|switch|end</red>"
   command:
     player-only: "<prefix> <red>只有玩家可以执行此命令</red>"
     unavailable: "<prefix> <red>驾驶功能尚未就绪</red>"
@@ -3341,6 +3379,7 @@ drive:
       entry-off: "  <gray>•</gray> <white>/fta drive off</white> <gray>- 结束驾驶</gray>"
       entry-status: "  <gray>•</gray> <white>/fta drive status</white> <gray>- 查看当前驾驶状态</gray>"
       entry-reverser: "  <gray>•</gray> <white>/fta drive reverser <forward|neutral|reverse></white> <gray>- 停稳后设置换向手柄</gray>"
+      entry-split: "  <gray>•</gray> <white>/fta drive split <keep|switch|end></white> <gray>- 列车分行后选择继续驾驶留下的一段、改驾解下的一段或结束驾驶</gray>"
       entry-list: "  <gray>•</gray> <white>/fta drive list</white> <gray>- 列出全部驾驶会话</gray>"
       entry-stop: "  <gray>•</gray> <white>/fta drive stop [玩家]</white> <gray>- 强制结束某名玩家的驾驶</gray>"
       entry-probe: "  <gray>•</gray> <white>/fta drive probe [on|off]</white> <gray>- 开关驾驶输入诊断日志</gray>"

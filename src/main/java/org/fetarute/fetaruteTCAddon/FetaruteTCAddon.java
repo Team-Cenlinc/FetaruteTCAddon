@@ -2285,6 +2285,40 @@ public final class FetaruteTCAddon extends JavaPlugin {
       // 联挂：主干先到等回程支线车、对方正开进来时停站扣留；后到的车选对方停着的股道
       org.fetarute.fetaruteTCAddon.coupler.CoupleService coupling = couplerService.coupling();
       org.fetarute.fetaruteTCAddon.coupler.DecoupleService decoupling = couplerService.decoupling();
+      // 车上的驾驶员与车掌：拆之前在这一站结算，拆开后选继续哪一段（驾驶模块会重载，每次再取）
+      decoupling.setCrew(
+          org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.all(
+              List.of(
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.NONE
+                          : driveSessionManager.decoupleCrew(),
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.NONE
+                          : driveSessionManager
+                              .guards()
+                              .map(
+                                  org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager
+                                      ::decoupleCrew)
+                              .orElse(org.fetarute.fetaruteTCAddon.coupler.DecoupleCrew.NONE))));
+      // 联挂进站由调度控车：车上的驾驶员先让出控制，挂上后交还；作废一方上的值乘先结束
+      coupling.setCrew(
+          org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.all(
+              List.of(
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.NONE
+                          : driveSessionManager.coupleCrew(),
+                  () ->
+                      driveSessionManager == null
+                          ? org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.NONE
+                          : driveSessionManager
+                              .guards()
+                              .map(
+                                  org.fetarute.fetaruteTCAddon.drive.guard.GuardSessionManager
+                                      ::coupleCrew)
+                              .orElse(org.fetarute.fetaruteTCAddon.coupler.CoupleCrew.NONE))));
       // 解编后值乘的人选继续哪一段时，留下的一段也扣在站里
       runtimeDispatchService
           .stationStops()

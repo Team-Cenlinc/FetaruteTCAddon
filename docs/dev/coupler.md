@@ -91,7 +91,13 @@ TrainCarts 的拆分（`MinecartGroup#split`）与联挂（`MinecartGroupStore#l
    - IDLE：普通待命车。
    - RETURN：交给回收立即派回库（`ReclaimManager#returnCalledTrain`），派不出去 5 秒后再试，5 分钟后放手。
    - 等着被接走的车回收不收（`heldForCall`）。
-5. 重启：待命登记只在内存里，解下的车照搬了主干的交路与进度。信号检查见到 `FTA_DECP_HOLD`、车还停在记下的那一站就重新登记成待命车（`DetachedHold#restore`）；车被派上别的交路后标记作废、见到就删。重启后只给它接的票与子交路的对应都没了，它按普通待命车处理。
+5. 值乘的人（`DecoupleCrew`，驾驶员与车掌两方经 `DecoupleCrew.all` 合起，每次调用再取驾驶模块此刻的实现）：
+   - 拆之前：驾驶员在这一站开过门（不开门的站台停稳即算）后，这一趟像到了终点一样在这一站结算（`DriverTaskManager#completeHere`，原因 `divide`）；车掌不在中途结算，只等这一站开过门。各方都好了才拆（`DecoupleService#dividesHere` 告诉驾驶侧这一站要拆）。结算后没能拆开（编组对不上等）时 `notSplit`：驾驶员从这一站接着记本趟。
+   - 拆开后：在登记待命、出票之前交给值乘的人选择（`SplitChoices`），聊天栏三个按钮 `/fta drive split keep|switch|end`（车掌 `/fta guard split …`），说明写“前 4 节，开往南渡”（GOTO 写目标交路终点站，按表写子交路首班终点，IDLE 写本站待命，RETURN 写回库）。选择期间两段车都扣着：留下的一段经停站扣留（与联挂扣留并在 `setCouplingHold`），解下的一段不接票（`allowsLayoverDispatch`），回收也不收；扣到选择期限，最长 60 秒，过了结束值乘（防挂机），两段车都交给调度。选择期间驾驶员、车掌的座位可能随解下的一段分开，不按离座、列车不在处理。
+   - keep：驾驶室随解下的一段分开时送进留下一段车头（车掌车尾）的驾驶室；驾驶员从这一站接着记本趟（新任务，来源 `continuation`，单独计分）。还没选就开车视为 keep。
+   - switch：驾驶员交还留下的一段（结束原因 `SPLIT_SWITCH`，留下的一段由调度控车），送进解下一段发车端的驾驶室后开始驾驶（不另要任务，`SplitChoices.Switch` 放行接管检查）；那一段开出别的车次时记成新任务。车掌按做过的站结算后结束，送进解下一段车掌那一头重新上岗。期间解下的一段扣 15 秒。
+   - end：结束值乘，两段车都交给调度。
+6. 重启：待命登记只在内存里，解下的车照搬了主干的交路与进度。信号检查见到 `FTA_DECP_HOLD`、车还停在记下的那一站就重新登记成待命车（`DetachedHold#restore`）；车被派上别的交路后标记作废、见到就删。重启后只给它接的票与子交路的对应都没了，它按普通待命车处理。
 
 ## 联挂指令 COPL（`CoupleService`）
 
@@ -105,6 +111,7 @@ TrainCarts 的拆分（`MinecartGroup#split`）与联挂（`MinecartGroupStore#l
 4. 进站：后到的车登记调车中（调度让出控制，照常排进路、写目的地），这一对之间的占用互相不挡（与同股道列车对并成一个 `CoLocationPolicy`）。调度把进路排进对方的资源或排到那条股道后（10 秒内没排进来就放弃，5 秒后可再试），由 `ApproachAction` 推着走：以 `approach-speed-blocks-per-second` 起步，沿轨道（`PushTargetFinder`，每 4 tick 看一次，近了每 tick）看得见对方、空隙小于 6 格后降到 `push-speed-blocks-per-second`，空隙不超过 0.25 格停车（`ApproachRules`）。看不见对方时（道岔还没扳到）照常往前走，但不超过“图上距离 + 对方车身 + 8 格”；先碰到别的列车、对方动了、推不动、超时都停车放弃。推的期间 AutoStation 不处理它。
 5. 挂上（`CouplerService#linkInService`）：把主干当作被接上的一方交给 `TrainLinker`，主干保留车名、交路、进度与编组对象，回程支线车的身份作废。回程支线车先到时，挂上后对合并的列车重新触发那一站的车站牌子（`SignAction.executeAll`），照常记到站、开门、停站、发车，这一站不再多停 `couple-seconds`（进站已经用掉了）。主干先到时它本来就在停站。
 6. 退路：没开动就放弃的，5 秒后可再试；开动后失败的，两车登记成同股道列车对（背离对方的一方先走），双方的等候都放掉，各走各的。插件停用时进行中的进站全部停车放弃。
+7. 值乘的人（`CoupleCrew`，驾驶员与车掌两方合起）：进站与挂车由调度控车。开始进站前（`yieldBeforeApproach`，同步办完）：后到的车上、回程支线车上的驾驶员把这一趟在这里结算（原因 `couple`）后结束驾驶（`COUPLING`），回程支线车上的车掌结束值乘（它的身份挂上后作废）。挂上后（回程支线车先到时在重新触发车站牌子之后）：主干原有的驾驶员不在车头那一端时换到车头，车掌不在车尾时换到车尾；合并的列车没人驾驶时，把让出控制的驾驶员（原在主干上的优先）送回发车端驾驶室，从这一站接着记车次。开动后失败时告诉他们不再交还；没开动就放弃、等着再试的，3 分钟没挂上同样不再交还。
 
 ## 推车（`ShuntPusher`）
 
@@ -123,4 +130,5 @@ Shift+右键车钩已开启的端车：
 - `CouplingBypassListenerTest`：监听器的四个入口（联挂否决、联挂、成员移除、编组移除）对登记过的编组跳过事故处理、对没登记的照旧（入口按对象接收编组，不必初始化 TrainCarts 静态类型）。
 - `CouplingIndexTest`：联挂索引；`ApproachRulesTest`：进站每一拍的判定与速度；`TimetableJoinRuntimeTest`：按表时谁等谁；`DynamicPlatformAllocatorTest#aCouplingPartnerPlatformIsSelectableOnlyForItsPartner`。联挂进站与重新到站要真实的 TrainCarts 编组，靠实验服验证。
 - `DecoupleCutTest`：切点规则；`TimetableSplitRuntimeTest`：按表时子交路首班等主干、只接解下的车、拆不开就落空；`StorageSpawnManagerTest#decoupleTargetsAreNotSpawnedOnTheirOwn`。
+- `SplitChoicesTest`：分行后结算、限时选择、改驾三步的状态与两段车扣到几点；`CrewCompositionTest`：驾驶员与车掌合起后的判定、扣留与通知。
 - 推车动作要真实的 TrainCarts 编组（单测里 `MinecartGroup` 无法构造或 mock），靠实验服验证。

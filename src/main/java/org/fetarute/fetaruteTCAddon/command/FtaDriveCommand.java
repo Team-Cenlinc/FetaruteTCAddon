@@ -205,6 +205,21 @@ public final class FtaDriveCommand {
         manager
             .commandBuilder("fta")
             .literal("drive")
+            .literal("split")
+            .permission(permissionOf("split"))
+            .required(
+                "option",
+                StringParser.stringParser(),
+                SuggestionProvider.blockingStrings(
+                    (ctx, input) ->
+                        CommandUx.suggestions(
+                            List.of("keep", "switch", "end"), input.lastRemainingToken())))
+            .handler(ctx -> handleSplit(ctx.sender(), ((String) ctx.get("option")).trim())));
+
+    manager.command(
+        manager
+            .commandBuilder("fta")
+            .literal("drive")
             .literal("reverser")
             .permission(permissionOf("reverser"))
             .required("direction", StringParser.stringParser(), directionSuggestions)
@@ -531,6 +546,18 @@ public final class FtaDriveCommand {
       return;
     }
     sender.sendMessage(plugin.getLocaleManager().component(drive.switchCab(player)));
+  }
+
+  private void handleSplit(CommandSender sender, String option) {
+    Player player = requirePlayer(sender);
+    if (player == null) {
+      return;
+    }
+    DriveSessionManager drive = requireManager(sender);
+    if (drive == null) {
+      return;
+    }
+    drive.chooseSplit(player, option, outcome -> sendStartOutcome(player, drive, outcome));
   }
 
   private void handleReverser(CommandSender sender, String direction) {
