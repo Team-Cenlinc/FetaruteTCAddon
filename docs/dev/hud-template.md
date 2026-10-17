@@ -220,6 +220,14 @@ BossBar/ActionBar 支持以下占位符（模板中使用 `{xxx}`）：
 - `through_operator`：换线后线路的运营商 code
   - 例：`本列车自 {through_station} 起直通运行 <{through_line_color_tag}>{through_line}</{through_line_color_tag}>`
 
+### 分行字段
+列车在前方（或此刻停着、还没拆的这一站）分行（交路 `DECP`）时按玩家所在的车厢给出，与站台屏分行页同一来源（解编服务的分行预测）；不分行、不知道玩家在第几节时都是 `-`。
+- `division_station` / `division_station_code` / `division_station_lang2`：分行站
+- `car_destination` / `car_destination_lang2`：本节车厢那一段分行后开往的车站；那一段分行后不载客（本站待命、回库）时为 `-`
+- `car_terminates` / `car_terminates_lang2`：本节车厢那一段分行后不载客时为分行站（本节车厢在那里停止载客），否则为 `-`
+- 默认模板的 ActionBar 在站内（`AT_STATION`）与行驶中（`IN_TRIP`）各轮播一句：`本列车在 {?division_station} 分行 ┃ 本节车厢开往 {?car_destination}`，
+  本节车厢不再载客时改为 `本列车在 {?car_terminates} 分行 ┃ 本节车厢在该站停止载客`
+
 ### 换乘与晚点字段
 - `transfer_lines`：下一站可换乘的线路，每条线一个线路色色块紧跟线路代码（如 `█DS █WS`）；没有换乘为 `-`
 - `transfer_line_names` / `transfer_line_names_lang2`：同上，文字为线路名 / 第二语言名（未填写时为线路名）

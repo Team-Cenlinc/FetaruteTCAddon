@@ -42,6 +42,7 @@ import org.fetarute.fetaruteTCAddon.company.model.RouteOperationType;
 import org.fetarute.fetaruteTCAddon.company.model.RoutePatternType;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
+import org.fetarute.fetaruteTCAddon.coupler.DivisionForecast;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaResult;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService;
 import org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaTarget;
@@ -902,6 +903,7 @@ public final class TrainHudContextResolver {
     placeholders.put("player_carriage_no", carriageNo > 0 ? String.valueOf(carriageNo) : "-");
     placeholders.put(
         "player_carriage_total", carriageTotal > 0 ? String.valueOf(carriageTotal) : "-");
+    putDivisionPlaceholders(placeholders, group, carriageNo);
     placeholders.put(
         "trip_dialog_key",
         plugin
@@ -909,6 +911,92 @@ public final class TrainHudContextResolver {
             .flatMap(DisplayService::tripDialog)
             .flatMap(dialog -> dialog.hintKey(player))
             .orElse(HudText.MISSING));
+  }
+
+  /**
+   * 分行占位符（按玩家所在的车厢）：列车在前方（或此刻停着、还没拆的这一站）分行时，
+   *
+   * <ul>
+   *   <li>{@code division_station} / {@code division_station_code} / {@code
+   *       division_station_lang2}：分行站
+   *   <li>{@code car_destination} / {@code
+   *       car_destination_lang2}：本节车厢那一段分行后开往的车站；那一段分行后不载客（本站待命、回库）时为 {@code -}
+   *   <li>{@code car_terminates} / {@code car_terminates_lang2}：本节车厢那一段分行后不载客时为分行站（本节车厢在那里止），否则为
+   *       {@code -}
+   * </ul>
+   *
+   * <p>不分行、不知道玩家在第几节时都是 {@code -}，配合条件占位符只在要分行时显示。数据与站台屏同一来源（解编服务的分行预测）。
+   */
+  private void putDivisionPlaceholders(
+      Map<String, String> placeholders, MinecartGroup group, int carriageNo) {
+    Optional<DivisionForecast> forecast =
+        group == null || group.getProperties() == null || carriageNo <= 0
+            ? Optional.empty()
+            : plugin
+                .getCouplerService()
+                .flatMap(
+                    coupler -> coupler.decoupling().forecast(group.getProperties().getTrainName()));
+    Optional<DivisionForecast.Part> part = forecast.flatMap(found -> partOf(found, carriageNo));
+    if (part.isEmpty()) {
+      for (String key :
+          List.of(
+              "division_station",
+              "division_station_code",
+              "division_station_lang2",
+              "car_destination",
+              "car_destination_lang2",
+              "car_terminates",
+              "car_terminates_lang2")) {
+        placeholders.put(key, HudText.MISSING);
+      }
+      return;
+    }
+    StationDisplay station =
+        divisionStation(forecast.get().stationId(), forecast.get().station()).sanitized();
+    placeholders.put("division_station", station.label());
+    placeholders.put("division_station_code", station.code());
+    placeholders.put("division_station_lang2", station.lang2());
+    Optional<StationDisplay> destination =
+        part.get()
+            .destinationId()
+            .map(id -> divisionStation(id, part.get().destination()).sanitized());
+    placeholders.put(
+        "car_destination", destination.map(StationDisplay::label).orElse(HudText.MISSING));
+    placeholders.put(
+        "car_destination_lang2", destination.map(StationDisplay::lang2).orElse(HudText.MISSING));
+    placeholders.put("car_terminates", destination.isPresent() ? HudText.MISSING : station.label());
+    placeholders.put(
+        "car_terminates_lang2", destination.isPresent() ? HudText.MISSING : station.lang2());
+  }
+
+  /** 第 {@code carriageNo} 节（从车头数起）在分行后的哪一段；两段节数对不上编组时为空。 */
+  static Optional<DivisionForecast.Part> partOf(DivisionForecast forecast, int carriageNo) {
+    int from = 0;
+    for (DivisionForecast.Part part : forecast.parts()) {
+      if (carriageNo > from && carriageNo <= from + part.cars()) {
+        return Optional.of(part);
+      }
+      from += part.cars();
+    }
+    return Optional.empty();
+  }
+
+  /** 分行预测里的车站（{@code 运营商:站码}）：按车站目录取中英文名，查不到时用预测给的名字。 */
+  private StationDisplay divisionStation(String stationId, String fallbackName) {
+    int colon = stationId == null ? -1 : stationId.indexOf(':');
+    if (colon > 0 && colon < stationId.length() - 1) {
+      StationKey key =
+          new StationKey(stationId.substring(0, colon), stationId.substring(colon + 1));
+      StationDisplay resolved = resolveStationDisplay(key);
+      if (!resolved.isEmpty()) {
+        return resolved;
+      }
+      return StationDisplay.of(
+          fallbackName == null || fallbackName.isBlank() ? key.station() : fallbackName,
+          key.station(),
+          "-");
+    }
+    return StationDisplay.of(fallbackName, "-", "-");
   }
 
   /** 注入 ETA 状态占位符（含当前语言与指定语言版本）。 */
