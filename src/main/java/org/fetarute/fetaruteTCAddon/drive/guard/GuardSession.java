@@ -66,6 +66,10 @@ public final class GuardSession implements DriveDoors.Cab {
   private boolean leftDoorOpen;
   private boolean rightDoorOpen;
   private long doorsClosingUntilTick;
+
+  /** 发车铃上一次响的 tick（按住期间按固定间隔补响）。 */
+  private long buzzedAt;
+
   private volatile HotbarRewriter<ItemStack> rewriter;
   private volatile int menuTopSize;
   private GuardHotbar.View view;
@@ -265,6 +269,14 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public BuzzerPress buzzer() {
     return buzzer;
+  }
+
+  public long buzzedAt() {
+    return buzzedAt;
+  }
+
+  public void setBuzzedAt(long tick) {
+    this.buzzedAt = tick;
   }
 
   public long startedTick() {

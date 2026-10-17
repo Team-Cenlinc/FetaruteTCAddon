@@ -136,7 +136,7 @@ public final class DrivePacketListener implements PacketListener {
     } else if (type == PacketType.IN_USE_ITEM) {
       // 对方块右键：取消数据包会让客户端的方块预测悬空，这里只读取信号，由事件拦截取消并让服务器纠正客户端。
       host.trace(player, "右键使用(方块)");
-      host.onInput(player, InputSignal.USE);
+      host.onInput(player, InputSignal.USE_ON_BLOCK);
     } else if (type == PacketType.IN_USE_ENTITY) {
       // 对实体右键：只读取，不取消，由实体交互事件拦截（点自己的列车回座也在那里处理）。
       handleUseEntity(event, player);
@@ -226,7 +226,12 @@ public final class DrivePacketListener implements PacketListener {
         host.trace(player, "与副手交换");
         host.onInput(player, InputSignal.SWAP_HANDS);
       }
-      case "RELEASE_USE_ITEM" -> event.setCancelled(true);
+      case "RELEASE_USE_ITEM" -> {
+        // 只有客户端处于使用状态时才发（车掌按住发车铃后松开）：服务器那边从没开始使用，不放行。
+        event.setCancelled(true);
+        host.trace(player, "松开右键");
+        host.onInput(player, InputSignal.RELEASE_USE);
+      }
       default -> {
         // 挖掘方块等动作放行，由事件拦截统一处理。
       }

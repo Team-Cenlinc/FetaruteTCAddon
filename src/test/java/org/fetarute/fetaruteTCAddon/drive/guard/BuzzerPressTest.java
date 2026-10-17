@@ -105,4 +105,82 @@ class BuzzerPressTest {
     assertEquals(List.of(BuzzerPress.Kind.SHORT), seen);
     assertTrue(BuzzerPress.clockMillis() > 0, "时钟从 1 起，-1 留作没有");
   }
+
+  /** 客户端报着按住（处于使用状态，松开时另发包）：按住期间一个包也没有，照样一直响着，松开时按真实时长认一长。 */
+  @Test
+  void aClientHeldPressLastsUntilTheRelease() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    List<BuzzerPress.Kind> seen = new ArrayList<>();
+    assertTrue(press.press(1_000, true), "新按下");
+    for (long t = 1_050; t <= 1_900; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+      assertTrue(press.ringing(t), "没有重发也还按着");
+    }
+    press.release(1_900);
+    assertFalse(press.ringing(1_900));
+    press.tick(1_950).ifPresent(seen::add);
+    assertEquals(List.of(BuzzerPress.Kind.LONG), seen);
+  }
+
+  /** 客户端报着按住时，松开与再按下都有包：两下点得再快也分得开（按重发间隔量时相隔不到 0.3 秒的两下会并成一下）。 */
+  @Test
+  void quickClientHeldTapsAreACall() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    List<BuzzerPress.Kind> seen = new ArrayList<>();
+    press.press(1_000, true);
+    press.release(1_080);
+    press.tick(1_100).ifPresent(seen::add);
+    press.press(1_200, true);
+    press.release(1_270);
+    for (long t = 1_300; t <= 3_000; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.CALL), seen);
+
+    press.press(5_000, true);
+    press.release(5_100);
+    seen.clear();
+    for (long t = 5_150; t <= 7_000; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.SHORT), seen, "按得不够久是一短");
+  }
+
+  /** 按住期间又收到包，说明客户端没有处于使用状态、在重发：改按重发间隔判松开，不会一直响下去。 */
+  @Test
+  void aResendDuringAClientHoldFallsBackToTheGap() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    press.press(1_000, true);
+    assertFalse(press.press(1_200, true), "还按着，不是新按下");
+    assertTrue(press.ringing(1_450));
+    assertFalse(press.ringing(1_550), "重发停了 0.3 秒以上算松开");
+    List<BuzzerPress.Kind> seen = new ArrayList<>();
+    for (long t = 1_550; t <= 3_000; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.SHORT), seen);
+  }
+
+  /** 客户端报着按住却一直等不到松开：按满上限作废，不当成一长。 */
+  @Test
+  void aClientHoldWithoutReleaseIsDroppedAtTheLimit() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    press.press(1_000, true);
+    long limit = BuzzerPress.MAX_HELD_TICKS * BuzzerPress.MILLIS_PER_TICK;
+    assertTrue(press.ringing(1_000 + limit));
+    List<BuzzerPress.Kind> seen = new ArrayList<>();
+    for (long t = 1_000 + limit + 50; t <= 1_000 + limit + 3_000; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(), seen);
+    assertFalse(press.ringing(1_000 + limit + 100));
+  }
+
+  @Test
+  void aReleaseWithoutAPressDoesNothing() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    press.release(1_000);
+    assertEquals(Optional.empty(), press.tick(1_050));
+    assertFalse(press.ringing(1_050));
+  }
 }

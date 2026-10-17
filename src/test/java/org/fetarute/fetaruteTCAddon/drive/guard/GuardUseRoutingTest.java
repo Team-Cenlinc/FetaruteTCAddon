@@ -1,8 +1,11 @@
 package org.fetarute.fetaruteTCAddon.drive.guard;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import java.util.Optional;
+import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
 import org.junit.jupiter.api.Test;
 
 /** 车掌的右键按在哪个按钮上：坐在车上时对着实体也算；站在站台上对着实体右键是点列车回座，不按按钮、不响铃。 */
@@ -42,5 +45,13 @@ class GuardUseRoutingTest {
     for (long t = 2_050; t <= 4_000; t += 50) {
       assertEquals(Optional.empty(), press.tick(t));
     }
+  }
+
+  /** 只有第一个包就是“使用”的右键，客户端才会一直报着按住发车铃；对着方块、实体的右键按重发间隔量。 */
+  @Test
+  void onlyPlainUsesAreHeldByTheClient() {
+    assertTrue(GuardSessionManager.heldByClient(InputSignal.USE));
+    assertFalse(GuardSessionManager.heldByClient(InputSignal.USE_ON_BLOCK));
+    assertFalse(GuardSessionManager.heldByClient(InputSignal.USE_ENTITY));
   }
 }

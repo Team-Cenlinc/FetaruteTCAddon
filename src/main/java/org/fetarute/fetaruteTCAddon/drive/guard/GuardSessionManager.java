@@ -249,6 +249,7 @@ public final class GuardSessionManager {
   private final PendingAcks pendingAcks = new PendingAcks();
   private final GuardTasks tasks = new GuardTasks();
   private final GuardTips tips;
+  private final GuardSeatReach reach;
 
   /** 给公开 API 的快照：任务、值乘、按车名找车掌（车名小写）。主线程刷新，任意线程读。 */
   private volatile Map<UUID, GuardApi.TaskView> taskViews = Map.of();
@@ -276,6 +277,7 @@ public final class GuardSessionManager {
     this.drivers = Objects.requireNonNull(drivers, "drivers");
     this.sidebar = new DriveSidebar(locale);
     this.tips = new GuardTips(plugin, locale, sounds);
+    this.reach = new GuardSeatReach(plugin);
     tasks.setBeforeClaim(task -> callEvent(new GuardTaskClaimEvent(GuardViews.of(task))));
   }
 
@@ -352,7 +354,7 @@ public final class GuardSessionManager {
     UUID id = player.getUniqueId();
     switch (signal) {
       case SWAP_HANDS -> Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
-      case USE, USE_ENTITY -> {
+      case USE, USE_ON_BLOCK, USE_ENTITY -> {
         // 按下的时刻取收到数据包的那一刻：主线程卡住、之后连跑几拍补进度时，按住也不会被当成松开。
         // 选中的是哪一格留到主线程上看：切换快捷栏的数据包那时已经处理过。
         long now = BuzzerPress.clockMillis();
@@ -363,7 +365,12 @@ public final class GuardSessionManager {
         }
         boolean fresh = UseClicks.fresh(previous, now, FRESH_PRESS_GAP_MILLIS);
         boolean entity = signal == InputSignal.USE_ENTITY;
-        Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh, entity, now));
+        boolean clientHeld = heldByClient(signal);
+        Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh, entity, clientHeld, now));
+      }
+      case RELEASE_USE -> {
+        long now = BuzzerPress.clockMillis();
+        Bukkit.getScheduler().runTask(plugin, () -> onUseReleased(player, now));
       }
       default -> Bukkit.getScheduler().runTask(plugin, player::updateInventory);
     }
@@ -562,6 +569,7 @@ public final class GuardSessionManager {
             : GuardTrip.taskStateFor(reason, dutyTask.handoverStopSequence(), dutyTask.source()),
         reason.name());
     if (player != null) {
+      reach.update(player, false);
       sidebar.hide(player);
       if (session.menuTopSize() > 0) {
         player.closeInventory();
@@ -906,6 +914,7 @@ public final class GuardSessionManager {
       // 分行后等选择：座位可能随解下的一段分开了，选定之前不按离开列车处理，这一站的作业也先停着；
       // 这段时间按的发车铃不作数，免得选完后被认成一长发出发车信号
       session.buzzer().reset();
+      reach.update(player, false);
       tickSplitChoice(player, session);
       return;
     }
@@ -915,6 +924,8 @@ public final class GuardSessionManager {
       return;
     }
     MinecartGroup group = groupOpt.get();
+    // 换端途中也要跟着撤：走到另一头要点座位才能坐下
+    reach.update(player, seated(player, session, group));
     if (tickCabChange(player, session, group, now)) {
       return;
     }
@@ -949,10 +960,10 @@ public final class GuardSessionManager {
     if (!sessions.containsKey(session.playerId())) {
       return;
     }
-    session
-        .buzzer()
-        .tick(BuzzerPress.clockMillis())
-        .ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
+    tickBuzzer(player, session, seated, now);
+    if (!sessions.containsKey(session.playerId())) {
+      return;
+    }
     refreshHotbar(player, session, false);
     // 车掌的提示都在侧边栏：动作栏留给车厢的乘客信息与报站，免得互相覆盖。
     boolean dirty = session.takeSidebarDirty();
@@ -1157,10 +1168,23 @@ public final class GuardSessionManager {
   }
 
   /**
+   * 这一下右键之后客户端会不会一直报着按住发车铃、松开时另发包。
+   *
+   * <p>发车铃是“可使用”的物品：一次右键的第一个包就是“使用”（准星没对着方块或实体）时，客户端随即处于使用状态，直到松开。对着方块时服务器取消这一下，Paper
+   * 会让客户端停止使用，客户端改为每 4 tick 重发；对着实体时多数实体吃掉这一下，不发“使用”。这两种只能按重发间隔判松开。
+   *
+   * @param first 这一次右键的第一个包
+   */
+  static boolean heldByClient(InputSignal first) {
+    return first == InputSignal.USE;
+  }
+
+  /**
    * @param entity 准星对着实体
+   * @param clientHeld 拿着发车铃时客户端会一直报着按住、松开时另发包（{@link #heldByClient}）
    * @param at 收到这一次右键的时刻（{@link BuzzerPress#clockMillis()}）
    */
-  private void onUse(Player player, boolean fresh, boolean entity, long at) {
+  private void onUse(Player player, boolean fresh, boolean entity, boolean clientHeld, long at) {
     GuardSession session = sessions.get(player.getUniqueId());
     if (session == null) {
       return;
@@ -1174,8 +1198,11 @@ public final class GuardSessionManager {
       return;
     }
     if (button.get() == GuardHotbar.Button.BUZZER) {
-      session.buzzer().press(at);
-      ringBuzzer(player, session.link().currentTrainName());
+      // 按下时当场响一声；按住期间由每 tick 的推进按固定间隔补响（见 tickBuzzer），不跟着收包响
+      if (session.buzzer().press(at, clientHeld)) {
+        ringBuzzer(player, session.link().currentTrainName());
+        session.setBuzzedAt(Bukkit.getCurrentTick());
+      }
       return;
     }
     if (!fresh) {
@@ -1193,6 +1220,35 @@ public final class GuardSessionManager {
       case CONFIRM -> confirm(player, session);
       case EMERGENCY -> emergency(player, session, group.get());
       case BUZZER -> {}
+    }
+  }
+
+  /** 松开右键（客户端按住发车铃之后松开）。 */
+  private void onUseReleased(Player player, long at) {
+    GuardSession session = sessions.get(player.getUniqueId());
+    if (session != null) {
+      session.buzzer().release(at);
+    }
+  }
+
+  /**
+   * 发车铃每 tick 的推进：认出松开时的按法，按住期间按固定间隔补响。
+   *
+   * <p>铃声不跟着收包响：重发的包有快有慢，跟着响时断时续；客户端报着按住时整段按住期间根本不发包。手离开了发车铃这一格就算松开——换到别的格子客户端不再使用发车铃，也不会发松开。
+   */
+  private void tickBuzzer(Player player, GuardSession session, boolean seated, long now) {
+    BuzzerPress buzzer = session.buzzer();
+    long nowMillis = BuzzerPress.clockMillis();
+    if (buzzer.ringing(nowMillis)
+        && GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot())
+            .filter(GuardHotbar.Button.BUZZER::equals)
+            .isEmpty()) {
+      buzzer.release(nowMillis);
+    }
+    buzzer.tick(nowMillis).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
+    if (buzzer.ringing(nowMillis) && now - session.buzzedAt() >= BuzzerPress.USE_REPEAT_TICKS) {
+      ringBuzzer(player, session.link().currentTrainName());
+      session.setBuzzedAt(now);
     }
   }
 

@@ -954,6 +954,10 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       crew.onInput(player, signal);
       return;
     }
+    if (signal == InputSignal.RELEASE_USE) {
+      // 驾驶台上没有要按住的按钮：松开右键不用处理。
+      return;
+    }
     if (signal == InputSignal.DROP) {
       // 丢弃键是驾驶员的铃：一短收到，两短呼叫车掌（车上有车掌时）。
       Bukkit.getScheduler().runTask(plugin, () -> driverBuzzer(player));
@@ -962,7 +966,9 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       // F 键打开停车后菜单。这个信号不能和其它信号合并，否则同一 tick 里的丢弃键会把它吞掉。
       Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
     }
-    if (signal == InputSignal.USE || signal == InputSignal.USE_ENTITY) {
+    if (signal == InputSignal.USE
+        || signal == InputSignal.USE_ON_BLOCK
+        || signal == InputSignal.USE_ENTITY) {
       // 右键是警惕装置、信号与 ATO 发车的确认键。它不会让客户端改动快捷栏，不必重发背包；按住右键时客户端会连续发包，合并到一次。
       // 只认新按下的右键：一直按住不算确认（否则按住不放就能让警惕装置与信号确认失效）。间隔按真实时间量，服务器卡顿补拍不影响。
       // 对着实体（站台屏、空车厢）右键时客户端只发与实体交互，同样算确认；不在座位上时点自己的列车入座由实体交互事件处理。
@@ -972,7 +978,7 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
           previous, now, USE_HOLD_GAP_MILLIS)) {
         freshUse.put(id, Boolean.TRUE);
       }
-      if (signal == InputSignal.USE) {
+      if (signal != InputSignal.USE_ENTITY) {
         plainUse.put(id, Boolean.TRUE);
       }
       if (ackPending.putIfAbsent(id, Boolean.TRUE) == null) {

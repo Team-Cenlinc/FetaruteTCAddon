@@ -1,8 +1,12 @@
 package org.fetarute.fetaruteTCAddon.drive.guard;
 
+import io.papermc.paper.datacomponent.DataComponentTypes;
+import io.papermc.paper.datacomponent.item.Consumable;
+import io.papermc.paper.datacomponent.item.consumable.ItemUseAnimation;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import net.kyori.adventure.key.Key;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
@@ -84,6 +88,9 @@ public final class GuardHotbar {
         new View(false, false, false, false, ConfirmLamp.STOP, false, false);
   }
 
+  /** 发车铃的“使用”时长（秒）：远长于任何一次按住，客户端在松开之前一直处于使用状态。 */
+  static final float BUZZER_USE_SECONDS = 3600f;
+
   private GuardHotbar() {}
 
   /** 按快捷栏槽位顺序构建九格。 */
@@ -114,6 +121,18 @@ public final class GuardHotbar {
     }
     if (!stack.setItemMeta(meta)) {
       throw new IllegalStateException("无法为车掌按钮 " + button + " 设置物品元数据");
+    }
+    if (button == Button.BUZZER) {
+      // 做成“可使用”的物品：按住右键时客户端一直处于使用状态、松开时另发一个包，按住多久就是多久（见 BuzzerPress）。
+      // 不放动画、声音与粒子；用完只在服务器上判定，而服务器从没开始使用，客户端自己不会把它用掉。
+      stack.setData(
+          DataComponentTypes.CONSUMABLE,
+          Consumable.consumable()
+              .consumeSeconds(BUZZER_USE_SECONDS)
+              .animation(ItemUseAnimation.NONE)
+              .sound(Key.key("intentionally_empty"))
+              .hasConsumeParticles(false)
+              .build());
     }
     return stack;
   }

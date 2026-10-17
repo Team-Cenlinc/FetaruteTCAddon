@@ -482,7 +482,7 @@ sounds:
     key: "minecraft:block.note_block.bell"
     volume: 0.8
     pitch: 1.0
-  # 车掌与驾驶员之间的铃（驾驶室里的蜂鸣器）：只给这列车上的驾驶员与车掌听，按住时每 4 tick 补一次形成连续的“嗡”声。
+  # 车掌与驾驶员之间的铃（驾驶室里的蜂鸣器）：只给这列车上的驾驶员与车掌听，按住期间每 4 tick 补响一次形成连续的“嗡”声。
   # 可换成材质包里的 fetarute:drive.buzzer
   buzzer:
     key: "minecraft:block.note_block.bit"
