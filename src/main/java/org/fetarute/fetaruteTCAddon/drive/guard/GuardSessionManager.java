@@ -54,6 +54,7 @@ import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebar;
 import org.fetarute.fetaruteTCAddon.drive.hud.DriveSidebarRows;
 import org.fetarute.fetaruteTCAddon.drive.inventory.HotbarRewriter;
 import org.fetarute.fetaruteTCAddon.drive.inventory.InputSignal;
+import org.fetarute.fetaruteTCAddon.drive.inventory.UseClicks;
 import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
@@ -61,6 +62,7 @@ import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatsMemo;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatLocator;
 import org.fetarute.fetaruteTCAddon.drive.session.ManagedTrains;
+import org.fetarute.fetaruteTCAddon.drive.session.SeatExitGuard;
 import org.fetarute.fetaruteTCAddon.drive.session.SplitChoices;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveCue;
 import org.fetarute.fetaruteTCAddon.drive.sound.DriveSounds;
@@ -226,8 +228,9 @@ public final class GuardSessionManager {
   /** 侧边栏与常驻提示的刷新间隔。 */
   private static final int DISPLAY_INTERVAL_TICKS = 10;
 
-  /** 右键按住时客户端连续发包：相隔超过这么久才算新按下（发车铃以外的按钮按一下只算一次）。 */
-  private static final long FRESH_PRESS_GAP_TICKS = 6L;
+  /** 右键按住时客户端连续发包：相隔超过这么久（毫秒，按真实时间量，服务器卡顿补拍不影响）才算新按下（发车铃以外的按钮按一下只算一次）。 */
+  private static final long FRESH_PRESS_GAP_MILLIS =
+      BuzzerPress.RELEASE_GAP_TICKS * BuzzerPress.MILLIS_PER_TICK;
 
   /** 结束值乘的第一次点击之后，多久内再点一次才结束。 */
   private static final long END_CONFIRM_TICKS = 60L;
@@ -241,7 +244,7 @@ public final class GuardSessionManager {
   private final DriverSide drivers;
   private final DriveSidebar sidebar;
   private final Map<UUID, GuardSession> sessions = new ConcurrentHashMap<>();
-  private final Map<UUID, Long> lastUseTick = new ConcurrentHashMap<>();
+  private final Map<UUID, Long> lastUseMillis = new ConcurrentHashMap<>();
   private final Map<UUID, BuzzerPress> driverPresses = new ConcurrentHashMap<>();
   private final PendingAcks pendingAcks = new PendingAcks();
   private final GuardTasks tasks = new GuardTasks();
@@ -349,11 +352,18 @@ public final class GuardSessionManager {
     UUID id = player.getUniqueId();
     switch (signal) {
       case SWAP_HANDS -> Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
-      case USE -> {
-        long now = Bukkit.getCurrentTick();
-        Long previous = lastUseTick.put(id, now);
-        boolean fresh = previous == null || now - previous > FRESH_PRESS_GAP_TICKS;
-        Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh));
+      case USE, USE_ENTITY -> {
+        // 按下的时刻取收到数据包的那一刻：主线程卡住、之后连跑几拍补进度时，按住也不会被当成松开。
+        // 选中的是哪一格留到主线程上看：切换快捷栏的数据包那时已经处理过。
+        long now = BuzzerPress.clockMillis();
+        Long previous = lastUseMillis.put(id, now);
+        if (UseClicks.sameClick(previous, now)) {
+          // 同一次右键客户端会连发几个包（对着实体或方块一个，再加一个使用）：只算一次
+          return;
+        }
+        boolean fresh = UseClicks.fresh(previous, now, FRESH_PRESS_GAP_MILLIS);
+        boolean entity = signal == InputSignal.USE_ENTITY;
+        Bukkit.getScheduler().runTask(plugin, () -> onUse(player, fresh, entity, now));
       }
       default -> Bukkit.getScheduler().runTask(plugin, player::updateInventory);
     }
@@ -441,7 +451,8 @@ public final class GuardSessionManager {
             link,
             key.get(),
             seat.get(),
-            new BuzzerPress(current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()),
+            BuzzerPress.inMillis(
+                current.guard().buzzerLongTicks(), current.guard().buzzerDoubleTicks()),
             Bukkit.getCurrentTick());
     TaskKey trip = drivers.tripOf(seat.get().trainName()).orElse(null);
     session.setTrip(
@@ -516,7 +527,7 @@ public final class GuardSessionManager {
       return;
     }
     splitChoices.forget(playerId);
-    lastUseTick.remove(playerId);
+    lastUseMillis.remove(playerId);
     tips.forget(playerId);
     GuardTask dutyTask = session.task();
     // 先把列车交还：扣着的紧急停车与换端扣车解除、车掌登记撤下、开着的门关上，结算出错也不会把列车扣住。
@@ -892,7 +903,9 @@ public final class GuardSessionManager {
       return;
     }
     if (splitChoices.choosing(session.playerId())) {
-      // 分行后等选择：座位可能随解下的一段分开了，选定之前不按离开列车处理，这一站的作业也先停着
+      // 分行后等选择：座位可能随解下的一段分开了，选定之前不按离开列车处理，这一站的作业也先停着；
+      // 这段时间按的发车铃不作数，免得选完后被认成一长发出发车信号
+      session.buzzer().reset();
       tickSplitChoice(player, session);
       return;
     }
@@ -936,7 +949,10 @@ public final class GuardSessionManager {
     if (!sessions.containsKey(session.playerId())) {
       return;
     }
-    session.buzzer().tick(now).ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
+    session
+        .buzzer()
+        .tick(BuzzerPress.clockMillis())
+        .ifPresent(kind -> onGuardBuzzer(player, session, kind, seated));
     refreshHotbar(player, session, false);
     // 车掌的提示都在侧边栏：动作栏留给车厢的乘客信息与报站，免得互相覆盖。
     boolean dirty = session.takeSidebarDirty();
@@ -1127,19 +1143,38 @@ public final class GuardSessionManager {
 
   // ---- 按钮 ----
 
-  private void onUse(Player player, boolean fresh) {
+  /**
+   * 右键按在哪个按钮上。
+   *
+   * @param held 选中的那一格
+   * @param entity 准星对着实体（站台屏、空车厢等）：客户端发的是与实体交互，不发使用物品
+   * @param seated 车掌坐在车上
+   * @return 不在座位上对着实体右键时为空：那是点自己的列车回座（由实体交互事件处理），不按按钮、不响铃
+   */
+  static Optional<GuardHotbar.Button> buttonForUse(
+      Optional<GuardHotbar.Button> held, boolean entity, boolean seated) {
+    return entity && !seated ? Optional.empty() : held;
+  }
+
+  /**
+   * @param entity 准星对着实体
+   * @param at 收到这一次右键的时刻（{@link BuzzerPress#clockMillis()}）
+   */
+  private void onUse(Player player, boolean fresh, boolean entity, long at) {
     GuardSession session = sessions.get(player.getUniqueId());
     if (session == null) {
       return;
     }
     Optional<GuardHotbar.Button> button =
-        GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot());
+        buttonForUse(
+            GuardHotbar.Button.fromSlot(player.getInventory().getHeldItemSlot()),
+            entity,
+            player.getVehicle() != null);
     if (button.isEmpty()) {
       return;
     }
-    long now = Bukkit.getCurrentTick();
     if (button.get() == GuardHotbar.Button.BUZZER) {
-      session.buzzer().press(now);
+      session.buzzer().press(at);
       ringBuzzer(player, session.link().currentTrainName());
       return;
     }
@@ -2323,18 +2358,30 @@ public final class GuardSessionManager {
       return true;
     }
     if (group.get().isMoving()) {
-      player.sendMessage(locale.component("drive.guard.seat-exit.moving"));
+      if (noticeBlockedExit(session)) {
+        player.sendMessage(locale.component("drive.guard.seat-exit.moving"));
+      }
       return false;
     }
     // 换端途中：车门关着也可以下车走到另一端。
     if (!session.anyDoorOpen() && !session.cabChange().changing()) {
-      notice(session, "drive.guard.seat-exit.doors-closed", Map.of());
+      if (noticeBlockedExit(session)) {
+        notice(session, "drive.guard.seat-exit.doors-closed", Map.of());
+      }
       return false;
     }
     if (!session.cabChange().changing()) {
       placeOnPlatformLater(player, session, group.get());
     }
     return true;
+  }
+
+  /** 按 Shift 被拦时要不要提示（与驾驶员同一套节流）：按住不放时每拍都有离座请求（两个事件各问一次），同一次按键只提示一次，连按也隔一段时间才再提示。 */
+  private static boolean noticeBlockedExit(GuardSession session) {
+    return session
+            .exitGuard()
+            .decide(false, true, false, Long.MIN_VALUE, false, Bukkit.getCurrentTick())
+        == SeatExitGuard.Decision.MOVING;
   }
 
   /** 车掌下车监视看的那节车厢：本站自己那节开门（或全列开门、不在停站）时就是自己那节；停车位置标只开部分车厢、自己那节不开时， 是离自己最近的一节开门车厢。 */
@@ -2622,7 +2669,7 @@ public final class GuardSessionManager {
             session.doorsClosing(now),
             work.map(w -> !w.canReport()).orElse(false),
             lamp,
-            session.buzzer().ringing(now),
+            session.buzzer().ringing(BuzzerPress.clockMillis()),
             session.link().emergencyHold());
     if (!force && view.equals(session.view())) {
       return;

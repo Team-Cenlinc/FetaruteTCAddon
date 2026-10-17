@@ -6,6 +6,7 @@ import com.bergerkiller.bukkit.common.protocol.PacketListener;
 import com.bergerkiller.bukkit.common.protocol.PacketType;
 import com.bergerkiller.bukkit.common.utils.PacketUtil;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayInBlockDigHandle;
+import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayInUseEntityHandle;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayInWindowClickHandle;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutSetSlotHandle;
 import com.bergerkiller.generated.net.minecraft.network.protocol.game.PacketPlayOutWindowItemsHandle;
@@ -56,6 +57,7 @@ public final class DrivePacketListener implements PacketListener {
     PacketType.IN_BLOCK_DIG,
     PacketType.IN_BLOCK_PLACE,
     PacketType.IN_USE_ITEM,
+    PacketType.IN_USE_ENTITY,
     PacketType.IN_WINDOW_CLICK,
     PacketType.IN_SET_CREATIVE_SLOT,
     PacketType.IN_ENTITY_ACTION
@@ -135,6 +137,9 @@ public final class DrivePacketListener implements PacketListener {
       // 对方块右键：取消数据包会让客户端的方块预测悬空，这里只读取信号，由事件拦截取消并让服务器纠正客户端。
       host.trace(player, "右键使用(方块)");
       host.onInput(player, InputSignal.USE);
+    } else if (type == PacketType.IN_USE_ENTITY) {
+      // 对实体右键：只读取，不取消，由实体交互事件拦截（点自己的列车回座也在那里处理）。
+      handleUseEntity(event, player);
     } else if (type == PacketType.IN_ENTITY_ACTION) {
       // 只读取，不取消：离座由 TrainCarts 自己处理，我们只需要知道这是主动离座。
       handleEntityAction(event, player);
@@ -164,6 +169,20 @@ public final class DrivePacketListener implements PacketListener {
           && (packet.getButton() == 0 || packet.getButton() == 1);
     } catch (RuntimeException | LinkageError ex) {
       return false;
+    }
+  }
+
+  /** 每次右键客户端都先发一个 INTERACT_AT（每只手一个），只认它，免得同一次右键算两次；左键攻击不算。 */
+  private void handleUseEntity(PacketReceiveEvent event, Player player) {
+    try {
+      PacketPlayInUseEntityHandle packet =
+          PacketPlayInUseEntityHandle.createHandle(event.getPacket().getHandle());
+      if (packet.isInteractAt()) {
+        host.trace(player, "右键使用(实体)");
+        host.onInput(player, InputSignal.USE_ENTITY);
+      }
+    } catch (RuntimeException | LinkageError ex) {
+      host.trace(player, "无法读取实体交互数据包: " + ex);
     }
   }
 

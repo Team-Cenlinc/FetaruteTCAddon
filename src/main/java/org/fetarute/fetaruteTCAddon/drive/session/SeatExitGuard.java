@@ -5,6 +5,8 @@ package org.fetarute.fetaruteTCAddon.drive.session;
  *
  * <p>中文输入法常用 Shift 切换中英文，驾驶员容易误按。按住不放时离座请求可能接连不断地来，只有新按下的一次才算“再按一次”：收得到潜行键事件时以潜行键重新按下为准；
  * 收不到时（旧版服务端）退而看离座请求之间是否隔了至少一个 tick。本类不依赖服务器对象。
+ *
+ * <p>车掌行驶中按 Shift 被拦时也用它的行驶中一档防刷屏（不收潜行键事件，按离座请求的间隔认新按下）。
  */
 public final class SeatExitGuard {
 

@@ -254,11 +254,13 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
   private final List<DriveSession> stopping = new ArrayList<>();
   private final ConcurrentHashMap<UUID, Boolean> refreshPending = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<UUID, Boolean> ackPending = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<UUID, Long> lastUseTick = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<UUID, Long> lastUseMillis = new ConcurrentHashMap<>();
   private final ConcurrentHashMap<UUID, Boolean> freshUse = new ConcurrentHashMap<>();
+  private final ConcurrentHashMap<UUID, Boolean> plainUse = new ConcurrentHashMap<>();
 
-  /** 右键包间隔超过这么多 tick 才算新按下（按住时客户端每几 tick 发一次）。 */
-  private static final long USE_HOLD_GAP_TICKS = 8L;
+  /** 右键包间隔超过这么久（毫秒，按真实时间量）才算新按下（按住时客户端每 4 tick 发一次）。 */
+  private static final long USE_HOLD_GAP_MILLIS =
+      8L * org.fetarute.fetaruteTCAddon.drive.guard.BuzzerPress.MILLIS_PER_TICK;
 
   private final DrivePacketListener packetListener = new DrivePacketListener(this);
   private final DriveMenu menu;
@@ -960,13 +962,18 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
       // F 键打开停车后菜单。这个信号不能和其它信号合并，否则同一 tick 里的丢弃键会把它吞掉。
       Bukkit.getScheduler().runTask(plugin, () -> openMenu(player));
     }
-    if (signal == InputSignal.USE) {
+    if (signal == InputSignal.USE || signal == InputSignal.USE_ENTITY) {
       // 右键是警惕装置、信号与 ATO 发车的确认键。它不会让客户端改动快捷栏，不必重发背包；按住右键时客户端会连续发包，合并到一次。
-      // 只认新按下的右键：一直按住不算确认（否则按住不放就能让警惕装置与信号确认失效）。
-      long nowTick = Bukkit.getCurrentTick();
-      Long previous = lastUseTick.put(id, nowTick);
-      if (previous == null || nowTick - previous > USE_HOLD_GAP_TICKS) {
+      // 只认新按下的右键：一直按住不算确认（否则按住不放就能让警惕装置与信号确认失效）。间隔按真实时间量，服务器卡顿补拍不影响。
+      // 对着实体（站台屏、空车厢）右键时客户端只发与实体交互，同样算确认；不在座位上时点自己的列车入座由实体交互事件处理。
+      long now = org.fetarute.fetaruteTCAddon.drive.guard.BuzzerPress.clockMillis();
+      Long previous = lastUseMillis.put(id, now);
+      if (org.fetarute.fetaruteTCAddon.drive.inventory.UseClicks.fresh(
+          previous, now, USE_HOLD_GAP_MILLIS)) {
         freshUse.put(id, Boolean.TRUE);
+      }
+      if (signal == InputSignal.USE) {
+        plainUse.put(id, Boolean.TRUE);
       }
       if (ackPending.putIfAbsent(id, Boolean.TRUE) == null) {
         Bukkit.getScheduler()
@@ -975,12 +982,15 @@ public final class DriveSessionManager implements DrivePacketListener.Host {
                 () -> {
                   ackPending.remove(id);
                   boolean fresh = freshUse.remove(id) != null;
+                  boolean plain = plainUse.remove(id) != null;
                   DriveSession session = active.get(id);
                   if (session != null
                       && fresh
                       && player.getVehicle() == null
                       && session.cabChange().allowsLeavingSeat()) {
-                    boardCabByClick(player, session);
+                    if (plain) {
+                      boardCabByClick(player, session);
+                    }
                     return;
                   }
                   if (session != null && fresh) {

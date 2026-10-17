@@ -12,6 +12,7 @@ import org.fetarute.fetaruteTCAddon.drive.menu.DriveDoors;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeatKey;
 import org.fetarute.fetaruteTCAddon.drive.seat.CabSeats;
 import org.fetarute.fetaruteTCAddon.drive.seat.SeatBinding;
+import org.fetarute.fetaruteTCAddon.drive.session.SeatExitGuard;
 
 /**
  * 一名车掌的值乘：在哪列车、预留的是哪个座位、开着哪侧的门、快捷栏此刻的样子。
@@ -80,6 +81,7 @@ public final class GuardSession implements DriveDoors.Cab {
   private long platformPlacementTick = Long.MIN_VALUE;
   private boolean forcedSignalHandled;
   private boolean sneakHeld;
+  private final SeatExitGuard exitGuard = new SeatExitGuard();
   private com.bergerkiller.bukkit.tc.controller.MinecartGroup lastGroup;
   private boolean closingWatchActive;
   private DepartureWatch departureWatch;
@@ -477,6 +479,11 @@ public final class GuardSession implements DriveDoors.Cab {
 
   public void setSneakHeld(boolean held) {
     this.sneakHeld = held;
+  }
+
+  /** 行驶中按 Shift 被拦时的提示节流（与驾驶员同一套）：按住不放时每拍都有离座请求，同一次按键只提示一次，连按也隔一段时间才再提示。 */
+  public SeatExitGuard exitGuard() {
+    return exitGuard;
   }
 
   /** 这一站发车铃超时代发后，已把车掌传送回座位。 */

@@ -10,6 +10,10 @@ public enum InputSignal {
   SWAP_HANDS,
   /** 右键使用。 */
   USE,
+  /**
+   * 准星对着实体时右键（站台屏的展示框、空车厢等）：客户端发的是与实体交互，按住时同样每 4 tick 重发；对多数实体客户端不再另发“使用”，只看 {@link #USE} 会漏掉这些右键。
+   */
+  USE_ENTITY,
   /** 点击背包或在创造模式拿取物品。 */
   INVENTORY
 }

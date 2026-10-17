@@ -61,4 +61,48 @@ class BuzzerPressTest {
     assertTrue(press.ringing(108));
     assertFalse(press.ringing(111));
   }
+
+  /** 按真实时间计时：客户端每 200 毫秒重发，按下在收到时当场记；服务器卡住 0.6 秒、之后连跑几拍补进度，按住也不会被当成松开（按 tick 计时时补进度的几拍会把间隔撑大）。 */
+  @Test
+  void aServerStallDuringTheHoldStillYieldsOneLong() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    List<BuzzerPress.Kind> seen = new ArrayList<>();
+    press.press(1_000);
+    press.tick(1_050).ifPresent(seen::add);
+    // 卡住期间主线程不推进，网络线程照收
+    press.press(1_200);
+    press.press(1_400);
+    press.press(1_600);
+    for (long t = 1_650; t <= 1_670; t += 5) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    press.press(1_800);
+    for (long t = 1_850; t <= 2_400; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.LONG), seen);
+  }
+
+  @Test
+  void realTimeTapsKeepTheShortAndCallRules() {
+    BuzzerPress press = BuzzerPress.inMillis(16, 20);
+    press.press(1_000);
+    List<BuzzerPress.Kind> seen = new ArrayList<>();
+    for (long t = 1_050; t <= 1_550; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    press.press(1_600);
+    for (long t = 1_650; t <= 3_000; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.CALL), seen, "一秒内两短");
+
+    press.press(5_000);
+    seen.clear();
+    for (long t = 5_050; t <= 7_000; t += 50) {
+      press.tick(t).ifPresent(seen::add);
+    }
+    assertEquals(List.of(BuzzerPress.Kind.SHORT), seen);
+    assertTrue(BuzzerPress.clockMillis() > 0, "时钟从 1 起，-1 留作没有");
+  }
 }
