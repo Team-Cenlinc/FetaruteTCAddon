@@ -41,7 +41,9 @@ public record YardPicture(
     /** 调度图里没有本站（控制区成员）的站台、股道或咽喉节点。 */
     NOT_IN_GRAPH,
     /** 屏幕绑的控制区不存在（已删除或代码有误）。 */
-    ZONE_NOT_FOUND
+    ZONE_NOT_FOUND,
+    /** 第一次画这片站场，几何还在后台计算。 */
+    BUILDING
   }
 
   /** 区间的占用标记。 */

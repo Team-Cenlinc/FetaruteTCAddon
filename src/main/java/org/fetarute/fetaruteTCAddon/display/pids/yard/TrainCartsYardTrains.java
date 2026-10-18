@@ -43,9 +43,9 @@ public final class TrainCartsYardTrains implements Function<UUID, List<YardTrain
     this.lineColors = Objects.requireNonNull(lineColors, "lineColors");
   }
 
+  /** 只读车厢位置；车次号、线路色与晚点留到车身落在某张站场图上时才查。 */
   @Override
   public List<YardTrain> apply(UUID worldId) {
-    Optional<TimetableService> timetable = timetables.get();
     List<YardTrain> out = new ArrayList<>();
     for (MinecartGroup group : MinecartGroupStore.getGroups()) {
       if (group == null || group.isEmpty() || group.isUnloaded()) {
@@ -60,19 +60,21 @@ public final class TrainCartsYardTrains implements Function<UUID, List<YardTrain
         continue;
       }
       String name = properties.getTrainName();
-      out.add(
-          new YardTrain(
-              name,
-              timetable
-                  .flatMap(service -> service.assignmentOf(name))
-                  .map(TimetableAssignment::tripCode)
-                  .filter(code -> code != null && !code.isBlank())
-                  .orElse(name),
-              lineColor(properties),
-              timetable.map(service -> service.currentDelaySeconds(name).orElse(0L)).orElse(0L),
-              cars(group)));
+      out.add(new YardTrain(name, cars(group), () -> details(name, properties)));
     }
     return out;
+  }
+
+  private YardTrain.Details details(String name, TrainProperties properties) {
+    Optional<TimetableService> timetable = timetables.get();
+    return new YardTrain.Details(
+        timetable
+            .flatMap(service -> service.assignmentOf(name))
+            .map(TimetableAssignment::tripCode)
+            .filter(code -> code != null && !code.isBlank())
+            .orElse(name),
+        lineColor(properties),
+        timetable.map(service -> service.currentDelaySeconds(name).orElse(0L)).orElse(0L));
   }
 
   private Optional<Integer> lineColor(TrainProperties properties) {

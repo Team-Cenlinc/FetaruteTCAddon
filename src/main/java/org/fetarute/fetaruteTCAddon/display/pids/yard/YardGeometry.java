@@ -315,6 +315,7 @@ public final class YardGeometry {
     private final Map<String, Set<Link>> through = new HashMap<>();
     private final Map<String, Double> uOf = new HashMap<>();
     private final Map<String, Double> vOf = new HashMap<>();
+    private final Map<String, Frame.Located> located = new HashMap<>();
 
     Layout(Map<String, Spot> spots, List<Link> links, Rect rect) {
       this.spots = spots;
@@ -353,11 +354,13 @@ public final class YardGeometry {
         for (Chain chain : part) {
           for (String key : chain.spots()) {
             Spot spot = spots.get(key);
-            vOf.put(key, frame.project(spot.x(), spot.z())[1]);
+            Frame.Located at = frame.locate(spot.x(), spot.z());
+            located.put(key, at);
+            vOf.put(key, at.v());
           }
         }
         for (Chain chain : part) {
-          place(chain, frame);
+          place(chain);
         }
       }
     }
@@ -477,40 +480,40 @@ public final class YardGeometry {
     }
 
     /**
-     * 一条链的横坐标：离脊线最近的节点取它在脊线上的垂足；沿链往两头走，下一个节点的垂足朝前挪了至少半个区间长时取垂足（与脊线平行的股道和脊线对齐），
+     * 一条链的横坐标：离本片脊线最近的节点（按不含平移的横向距离）取它在脊线上的垂足；沿链往两头走，下一个节点的垂足朝前挪了至少半个区间长时取垂足（与脊线平行的股道和脊线对齐），
      * 否则按轨道长度接着排（斜着岔出去的支线）。
      */
-    private void place(Chain chain, Frame frame) {
+    private void place(Chain chain) {
       List<String> keys = chain.spots();
       int anchor = 0;
       for (int i = 1; i < keys.size(); i++) {
-        if (Math.abs(vOf.get(keys.get(i))) < Math.abs(vOf.get(keys.get(anchor)))) {
+        if (Math.abs(located.get(keys.get(i)).ownV())
+            < Math.abs(located.get(keys.get(anchor)).ownV())) {
           anchor = i;
         }
       }
       Spot at = spots.get(keys.get(anchor));
-      uOf.put(at.key(), frame.project(at.x(), at.z())[0]);
+      Frame.Located where = located.get(at.key());
+      uOf.put(at.key(), where.u());
       double sign = 1.0;
       if (!chain.links().isEmpty()) {
         double[] along =
             anchor < chain.links().size()
                 ? direction(at, chain.links().get(anchor))
                 : negate(direction(at, chain.links().get(anchor - 1)));
-        double[] axis = frame.direction(at.x(), at.z());
-        sign = along[0] * axis[0] + along[1] * axis[1] >= 0 ? 1.0 : -1.0;
+        sign = along[0] * where.dirX() + along[1] * where.dirZ() >= 0 ? 1.0 : -1.0;
       }
       for (int i = anchor + 1; i < keys.size(); i++) {
-        next(keys.get(i - 1), keys.get(i), chain.links().get(i - 1), sign, frame);
+        next(keys.get(i - 1), keys.get(i), chain.links().get(i - 1), sign);
       }
       for (int i = anchor - 1; i >= 0; i--) {
-        next(keys.get(i + 1), keys.get(i), chain.links().get(i), -sign, frame);
+        next(keys.get(i + 1), keys.get(i), chain.links().get(i), -sign);
       }
     }
 
-    private void next(String from, String to, Link link, double sign, Frame frame) {
+    private void next(String from, String to, Link link, double sign) {
       double before = uOf.get(from);
-      Spot spot = spots.get(to);
-      double projected = frame.project(spot.x(), spot.z())[0];
+      double projected = located.get(to).u();
       double length = Math.max(1.0, trackLength(link));
       uOf.put(to, sign * (projected - before) >= 0.5 * length ? projected : before + sign * length);
     }
@@ -809,13 +812,14 @@ public final class YardGeometry {
       return rowOf;
     }
 
-    /** {@code other} 落在 {@code spot} 所在股道的延长线上：沿股道走向的横向偏差不到 {@value #SAME_ROW_BLOCKS} 格。 */
+    /** {@code other} 落在 {@code spot} 所在股道（取直股的走向）的延长线上：横向偏差不到 {@value #SAME_ROW_BLOCKS} 格。 */
     private boolean inLine(Spot spot, Spot other) {
-      List<Link> mine = around.getOrDefault(spot.key(), List.of());
-      if (mine.isEmpty()) {
+      Optional<Link> straight =
+          through.getOrDefault(spot.key(), Set.of()).stream().min(Comparator.comparing(Link::edge));
+      if (straight.isEmpty()) {
         return Math.abs(vOf.get(spot.key()) - vOf.get(other.key())) < SAME_ROW_BLOCKS;
       }
-      double[] along = direction(spot, mine.get(0));
+      double[] along = direction(spot, straight.get());
       double ox = other.x() - spot.x();
       double oz = other.z() - spot.z();
       return Math.abs(-ox * along[1] + oz * along[0]) < SAME_ROW_BLOCKS;
@@ -1046,14 +1050,25 @@ public final class YardGeometry {
       }
     }
 
-    /** {里程, 横向距离}。 */
-    double[] project(double x, double z) {
+    /**
+     * 一处在脊线坐标下的位置。
+     *
+     * @param u 里程（含平移）
+     * @param v 横向距离（含平移）
+     * @param ownV 离本脊线的横向距离（不含平移）
+     * @param dirX 最近处脊线走向 x
+     * @param dirZ 最近处脊线走向 z
+     */
+    record Located(double u, double v, double ownV, double dirX, double dirZ) {}
+
+    /** 只查一次最近的取样点，得出里程、横向距离与走向。 */
+    Located locate(double x, double z) {
       int i = nearest(x, z);
       double ox = x - xs[i];
       double oz = z - zs[i];
-      return new double[] {
-        shiftU + chainage[i] + ox * dx[i] + oz * dz[i], shiftV - ox * dz[i] + oz * dx[i]
-      };
+      double lateral = -ox * dz[i] + oz * dx[i];
+      return new Located(
+          shiftU + chainage[i] + ox * dx[i] + oz * dz[i], shiftV + lateral, lateral, dx[i], dz[i]);
     }
 
     /** 脊线中点。 */
@@ -1070,18 +1085,12 @@ public final class YardGeometry {
     /** 另一片轨道的脊线：保持自己的走向，平移到它的中点在 {@code reference}（离它最近、已经摆好的一片）上的位置，几片平行的股道因此保持真实的左右间距。 */
     Frame alignedTo(Frame reference) {
       int middle = xs.length / 2;
-      double[] at = reference.project(xs[middle], zs[middle]);
+      Located at = reference.locate(xs[middle], zs[middle]);
       List<double[]> samples = new ArrayList<>();
       for (int i = 0; i < xs.length; i++) {
         samples.add(new double[] {xs[i], zs[i]});
       }
-      return new Frame(samples, at[0] - chainage[middle], at[1]);
-    }
-
-    /** 最近处脊线的走向（单位向量）。 */
-    double[] direction(double x, double z) {
-      int i = nearest(x, z);
-      return new double[] {dx[i], dz[i]};
+      return new Frame(samples, at.u() - chainage[middle], at.v());
     }
 
     private int nearest(double x, double z) {

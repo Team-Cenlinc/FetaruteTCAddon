@@ -139,7 +139,8 @@ public final class ControlZoneService {
       return Result.of(Status.INVALID, zone);
     }
     if (kind == ControlZoneMember.Kind.STATION) {
-      Optional<Station> station = findStation(zone.operatorId(), trimmed);
+      Optional<Station> station =
+          new CompanyQueryService(provider).findStationIgnoreCase(zone.operatorId(), trimmed);
       if (station.isEmpty()) {
         return Result.of(Status.NOT_FOUND, zone);
       }
@@ -198,12 +199,6 @@ public final class ControlZoneService {
         .map(Operator::companyId)
         .filter(canManage)
         .isPresent();
-  }
-
-  private Optional<Station> findStation(UUID operatorId, String code) {
-    return provider.stations().listByOperator(operatorId).stream()
-        .filter(station -> station != null && station.code().equalsIgnoreCase(code))
-        .findFirst();
   }
 
   private static Optional<String> normalize(Optional<String> value) {

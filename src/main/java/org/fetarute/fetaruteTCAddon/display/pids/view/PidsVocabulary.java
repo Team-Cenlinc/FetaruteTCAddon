@@ -516,6 +516,7 @@ public final class PidsVocabulary {
       case GRAPH_NOT_READY -> names("yard.no-graph");
       case NOT_IN_GRAPH -> names("yard.not-in-graph");
       case ZONE_NOT_FOUND -> names("yard.no-zone");
+      case BUILDING -> names("yard.building");
     };
   }
 

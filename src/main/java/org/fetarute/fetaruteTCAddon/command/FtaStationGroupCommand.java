@@ -545,7 +545,7 @@ public final class FtaStationGroupCommand {
     Optional<Station> station =
         new CompanyQueryService(provider).findStation(operator.id(), stationArg);
     if (station.isEmpty()) {
-      station = findStationIgnoreCase(provider, operator.id(), stationArg);
+      station = new CompanyQueryService(provider).findStationIgnoreCase(operator.id(), stationArg);
     }
     if (station.isEmpty()) {
       sender.sendMessage(
@@ -554,16 +554,6 @@ public final class FtaStationGroupCommand {
               Map.of("operator", operator.code(), "station", stationArg)));
     }
     return station;
-  }
-
-  private static Optional<Station> findStationIgnoreCase(
-      StorageProvider provider, UUID operatorId, String code) {
-    for (Station station : provider.stations().listByOperator(operatorId)) {
-      if (station != null && station.code().equalsIgnoreCase(code)) {
-        return Optional.of(station);
-      }
-    }
-    return Optional.empty();
   }
 
   private static String qualifiedGroups(StorageProvider provider, List<StationGroup> groups) {

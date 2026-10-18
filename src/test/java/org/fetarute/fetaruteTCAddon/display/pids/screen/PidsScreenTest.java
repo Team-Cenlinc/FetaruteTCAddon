@@ -150,6 +150,10 @@ class PidsScreenTest {
         bare.withOperator("SURC", Set.of(), Instant.EPOCH)
             .withZone(Optional.of(" north "), Instant.EPOCH);
     assertEquals(Optional.of("NORTH"), zoned.zone());
+    assertEquals(
+        Optional.of("NORTH"),
+        zoned.withBinding(Optional.empty(), Set.of(), Set.of("MT"), Instant.EPOCH).zone(),
+        "只绑运营商时改线路、站台过滤（不换运营商）：保留");
 
     PidsScreen sameOperator =
         zoned.withBinding(

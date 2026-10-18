@@ -146,6 +146,90 @@ class YardProviderTest {
     assertEquals(2, train.runs().size(), "中间那节不在图上，两边不连成一条车身");
   }
 
+  /** 后台算几何：第一次显示“正在绘制”；图换了以后算好之前照旧用上一张图；用不着的旧图几何在下一次排算时清掉。 */
+  @Test
+  void geometryIsBuiltInTheBackgroundAndStaleGraphsAreDropped() {
+    List<Runnable> queued = new ArrayList<>();
+    YardProvider deferred =
+        new YardProvider(
+            world -> world.equals(WORLD) ? graph.get() : Optional.empty(),
+            () -> List.copyOf(claims),
+            world -> List.copyOf(trains),
+            id -> Optional.empty(),
+            queued::add,
+            () -> 0L,
+            0L);
+    YardScope other = YardScope.station(new PidsStationKey("SURC", "NOPE"));
+
+    assertEquals(
+        Optional.of(YardPicture.Problem.BUILDING), deferred.picture(ABC, WORLD, WIDGET).problem());
+    deferred.picture(ABC, WORLD, WIDGET);
+    assertEquals(1, queued.size(), "同一张图只排一次");
+    deferred.picture(other, WORLD, WIDGET);
+    queued.forEach(Runnable::run);
+    queued.clear();
+    YardGeometry first = deferred.picture(ABC, WORLD, WIDGET).geometry().orElseThrow();
+
+    graph.set(Optional.of(YardFixtures.graph()));
+    assertSame(
+        first, deferred.picture(ABC, WORLD, WIDGET).geometry().orElseThrow(), "新图算好之前照旧显示上一张");
+    assertEquals(
+        Optional.of(YardPicture.Problem.BUILDING),
+        deferred.picture(other, WORLD, WIDGET).problem(),
+        "另一片的旧图几何已被清掉，重新排算");
+    queued.forEach(Runnable::run);
+    assertNotSame(first, deferred.picture(ABC, WORLD, WIDGET).geometry().orElseThrow());
+  }
+
+  /** 共用时间内各屏共用一份占用与列车位置；车次窗信息只查落在图上的车。 */
+  @Test
+  void claimsAndTrainsAreSharedAndDetailsResolvedOnlyForTrainsOnTheDiagram() {
+    long[] now = {0L};
+    int[] claimReads = {0};
+    int[] trainReads = {0};
+    List<String> resolved = new ArrayList<>();
+    YardProvider shared =
+        new YardProvider(
+            world -> world.equals(WORLD) ? graph.get() : Optional.empty(),
+            () -> {
+              claimReads[0]++;
+              return List.copyOf(claims);
+            },
+            world -> {
+              trainReads[0]++;
+              return List.of(
+                  new YardTrain(
+                      "near",
+                      List.of(cell(-10, 0, false)),
+                      () -> {
+                        resolved.add("near");
+                        return new YardTrain.Details("1234", Optional.empty(), 0);
+                      }),
+                  new YardTrain(
+                      "far",
+                      List.of(cell(500, 0, false)),
+                      () -> {
+                        resolved.add("far");
+                        return new YardTrain.Details("9999", Optional.empty(), 0);
+                      }));
+            },
+            id -> Optional.empty(),
+            Runnable::run,
+            () -> now[0],
+            500L);
+
+    shared.picture(ABC, WORLD, WIDGET);
+    shared.picture(ABC, WORLD, WIDGET);
+    assertEquals(1, claimReads[0], "共用时间内只取一次占用");
+    assertEquals(1, trainReads[0], "共用时间内只读一次列车");
+    assertEquals(List.of("near"), resolved, "不在图上的车不查车次窗信息，查过的记住");
+
+    now[0] = 500L;
+    shared.picture(ABC, WORLD, WIDGET);
+    assertEquals(2, claimReads[0]);
+    assertEquals(2, trainReads[0]);
+  }
+
   private static OccupancyClaim claim(EdgeId edge, ClaimRole role) {
     return new OccupancyClaim(
         OccupancyResource.forEdge(edge),

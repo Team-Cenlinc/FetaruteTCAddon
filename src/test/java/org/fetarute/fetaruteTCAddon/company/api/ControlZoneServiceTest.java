@@ -93,6 +93,48 @@ class ControlZoneServiceTest {
         service.removeMember(zone, Kind.STATION, "PPK", companyId -> false).status());
   }
 
+  /** 两家公司有同代码的运营商：按代码只认先到的那家（与车站目录同一规则），按运营商 ID 各查各的。 */
+  @Test
+  void directoryResolvesSharedOperatorCodesLikeTheStationDirectory() {
+    ControlZone mine = create("NORTH");
+    Company other = storage.company("ZZZ");
+    Operator twin = storage.operator(other, "SURC", null);
+    ControlZone theirs =
+        new ControlZoneService(storage.provider())
+            .create(twin, "NORTH", "别家北区", Optional.empty(), ANYONE)
+            .zone()
+            .orElseThrow();
+    ControlZoneDirectory directory = new ControlZoneDirectory();
+    directory.reload(storage.provider());
+
+    UUID canonical = new StationDirectoryProbe(storage).canonicalOperatorId("SURC").orElseThrow();
+    ControlZone expected = canonical.equals(operator.id()) ? mine : theirs;
+    assertEquals(expected.id(), directory.find("SURC", "NORTH").orElseThrow().zone().id());
+    assertEquals(
+        List.of(expected.id()),
+        directory.listByOperator("SURC").stream().map(zone -> zone.zone().id()).toList());
+    assertEquals(
+        List.of(mine.id()),
+        directory.listByOperator(operator.id()).stream().map(zone -> zone.zone().id()).toList());
+    assertEquals(
+        List.of(theirs.id()),
+        directory.listByOperator(twin.id()).stream().map(zone -> zone.zone().id()).toList());
+  }
+
+  /** 按车站目录的规则找代码对应的运营商：公司、运营商按库里的先后，先到先得。 */
+  private record StationDirectoryProbe(TransitTestStorage storage) {
+    Optional<UUID> canonicalOperatorId(String code) {
+      for (Company company : storage.provider().companies().listAll()) {
+        for (Operator candidate : storage.provider().operators().listByCompany(company.id())) {
+          if (candidate.code().equalsIgnoreCase(code)) {
+            return Optional.of(candidate.id());
+          }
+        }
+      }
+      return Optional.empty();
+    }
+  }
+
   @Test
   void directoryReloadsZonesWithMembersByOperatorCode() {
     ControlZone zone = create("NORTH");

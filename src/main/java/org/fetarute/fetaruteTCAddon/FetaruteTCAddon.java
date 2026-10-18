@@ -1156,14 +1156,13 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /**
    * 车站、线路、运营商或车站组改库之后调用：重读车站目录的主数据并重建索引，公开 API 数据版本随之递增。
    *
-   * <p>删公司、删运营商会连带删掉控制区，所以这里也一并重读控制区目录。交路变化不需要调用它——交路缓存刷新时车站目录会自动重算。
+   * <p>交路变化不需要调用它——交路缓存刷新时车站目录会自动重算。控制区目录另见 {@link #refreshControlZones}。
    */
   public void refreshStationDirectory() {
     if (stationDirectory == null || storageManager == null || !storageManager.isReady()) {
       return;
     }
     storageManager.provider().ifPresent(stationDirectory::reload);
-    refreshControlZones();
   }
 
   /** 控制区目录（站场图屏按它找控制区的成员与名称）。 */
@@ -1171,12 +1170,20 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return controlZoneDirectory;
   }
 
-  /** 控制区改库之后调用：重读控制区目录。 */
+  /**
+   * 控制区、运营商或公司改库之后调用：重读控制区目录（删运营商、删公司会连带删掉控制区，运营商改代码会换掉查找键）。
+   *
+   * <p>读失败只记警告、保留旧目录：调用方的改动已经写进库，不应因此报失败。
+   */
   public void refreshControlZones() {
     if (storageManager == null || !storageManager.isReady()) {
       return;
     }
-    storageManager.provider().ifPresent(controlZoneDirectory::reload);
+    try {
+      storageManager.provider().ifPresent(controlZoneDirectory::reload);
+    } catch (RuntimeException ex) {
+      loggerManager.warn("重读控制区目录失败: " + ex.getMessage());
+    }
   }
 
   /**

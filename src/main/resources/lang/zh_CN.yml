@@ -1892,6 +1892,8 @@ pids:
       not-in-graph-secondary: "No platforms or tracks of this yard in the rail graph"
       no-zone: "未找到绑定的控制区"
       no-zone-secondary: "Control zone not found"
+      building: "正在绘制站场图"
+      building-secondary: "Drawing the yard"
       partial: "部分区间缺少轨道几何，列车位置可能显示不全；重建调度图后可修正"
       partial-secondary: "Some trains may be missing; rebuild the rail graph"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）

@@ -116,6 +116,9 @@ public final class PidsService {
   private final FetaruteApi api;
   private final InstantSource clock = InstantSource.system();
 
+  /** 站场图的占用标记与列车位置在多长时间内由各块屏幕共用（纳秒）。 */
+  private static final long YARD_SHARE_NANOS = 500_000_000L;
+
   /** 运营商补全缓存的有效期。 */
   private static final long OPERATOR_SUGGESTION_TTL_MILLIS = 30_000L;
 
@@ -225,7 +228,7 @@ public final class PidsService {
                                           calls.calledTrainNames(),
                                           calls.extraTrainNames())))
                   .orElse(PidsViewBuilder.Calls.NONE));
-      // 站场图：几何取自调度图快照，占用与列车位置每次检查时现取（主线程）
+      // 站场图：几何取自调度图快照、在异步任务里算；占用与列车位置在主线程现取，半秒内各屏共用
       composer.setYards(
           new YardProvider(
               worldId ->
@@ -240,7 +243,10 @@ public final class PidsService {
                   addon::getTimetableService,
                   (operator, line) ->
                       directory.line(operator, line).map(PidsDirectory.LineStyle::color)),
-              stationId -> directory.stationName(stationId).map(PidsView.Names::primary)));
+              stationId -> directory.stationName(stationId).map(PidsView.Names::primary),
+              task -> plugin.getServer().getScheduler().runTaskAsynchronously(plugin, task),
+              System::nanoTime,
+              YARD_SHARE_NANOS));
     }
     composer.setControlZones(
         (operator, code) ->
@@ -378,19 +384,21 @@ public final class PidsService {
    * @return 只读的帧，长度为 {@code width × height}；渲染尺寸不符时为空数组
    */
   public byte[] frame(PidsContent content, int width, int height) {
-    return frameCache.frame(
-        content.key(),
-        width,
-        height,
-        () -> {
-          BufferedImage image = content.image().get();
-          if (image.getWidth() != width || image.getHeight() != height) {
-            return new byte[0];
-          }
-          byte[] out = new byte[width * height];
-          PidsMapPalette.minecraft().convert(image, out);
-          return out;
-        });
+    // 站场图车一动就是新帧、以后不会再用：不进共享缓存，免得把各站台屏可复用的帧挤掉
+    if (content.key() instanceof PidsComposer.YardKey) {
+      return convert(content, width, height);
+    }
+    return frameCache.frame(content.key(), width, height, () -> convert(content, width, height));
+  }
+
+  private static byte[] convert(PidsContent content, int width, int height) {
+    BufferedImage image = content.image().get();
+    if (image.getWidth() != width || image.getHeight() != height) {
+      return new byte[0];
+    }
+    byte[] out = new byte[width * height];
+    PidsMapPalette.minecraft().convert(image, out);
+    return out;
   }
 
   public PidsItems items() {

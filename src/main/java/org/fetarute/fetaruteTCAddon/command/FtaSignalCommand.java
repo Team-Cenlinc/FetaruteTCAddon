@@ -3,13 +3,14 @@ package org.fetarute.fetaruteTCAddon.command;
 import static org.fetarute.fetaruteTCAddon.command.CommandSuggestionProviders.placeholder;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
@@ -204,8 +205,8 @@ public final class FtaSignalCommand {
         .ifPresent(
             target -> {
               LocaleManager locale = plugin.getLocaleManager();
-              List<ControlZone> zones =
-                  target.provider().controlZones().listByOperator(target.operator().id());
+              List<ControlZoneDirectory.Zone> zones =
+                  plugin.getControlZoneDirectory().listByOperator(target.operator().id());
               String operator = target.operator().code();
               if (zones.isEmpty()) {
                 ctx.sender()
@@ -219,9 +220,8 @@ public final class FtaSignalCommand {
                       locale.component(
                           "command.signal.zone.list.header",
                           Map.of("operator", operator, "count", String.valueOf(zones.size()))));
-              for (ControlZone zone : zones) {
-                List<ControlZoneMember> members =
-                    target.provider().controlZones().listMembers(zone.id());
+              for (ControlZoneDirectory.Zone zone : zones) {
+                List<ControlZoneMember> members = zone.members();
                 ctx.sender()
                     .sendMessage(
                         locale.component(
@@ -230,7 +230,7 @@ public final class FtaSignalCommand {
                                 "code",
                                 zone.code(),
                                 "name",
-                                zone.name(),
+                                zone.zone().name(),
                                 "stations",
                                 String.valueOf(count(members, ControlZoneMember.Kind.STATION)),
                                 "depots",
@@ -262,7 +262,15 @@ public final class FtaSignalCommand {
                   locale.component(
                       "command.signal.zone.info.secondary",
                       Map.of("secondary", zone.secondaryName().orElse("-"))));
-              List<ControlZoneMember> members = provider.controlZones().listMembers(zone.id());
+              List<ControlZoneMember> members =
+                  plugin
+                      .getControlZoneDirectory()
+                      .listByOperator(found.target().operator().id())
+                      .stream()
+                      .filter(entry -> entry.zone().id().equals(zone.id()))
+                      .findFirst()
+                      .map(ControlZoneDirectory.Zone::members)
+                      .orElse(List.of());
               if (members.isEmpty()) {
                 sender.sendMessage(locale.component("command.signal.zone.info.empty"));
                 return;
@@ -468,22 +476,39 @@ public final class FtaSignalCommand {
     return Optional.of(new Found(target, zone.get()));
   }
 
-  /** 调度图里运营商的车库代码（车库股道与车库咽喉节点），各世界合并；车库在库里没有实体，只能这样核对。 */
+  /** 调度图快照版本 → 各运营商（大写）的车库代码。 */
+  private record DepotIndex(long version, Map<String, Set<String>> codes) {}
+
+  private volatile DepotIndex depots = new DepotIndex(-1L, Map.of());
+
+  /** 调度图里运营商的车库代码（车库股道与车库咽喉节点），各世界合并；车库在库里没有实体，只能这样核对。按调度图快照版本缓存，补全时不必每次扫全图。 */
   private Set<String> depotCodes(String operator) {
     RailGraphService graphs = plugin.getRailGraphService();
-    Set<String> codes = new LinkedHashSet<>();
     if (graphs == null) {
-      return codes;
+      return Set.of();
     }
-    for (RailGraphService.RailGraphSnapshot snapshot : graphs.snapshotAll().values()) {
-      for (RailNode node : snapshot.graph().nodes()) {
-        node.waypointMetadata()
-            .filter(m -> m.kind() == WaypointKind.DEPOT || m.kind() == WaypointKind.DEPOT_THROAT)
-            .filter(m -> m.operator().equalsIgnoreCase(operator))
-            .ifPresent(m -> codes.add(m.originStation().toUpperCase(Locale.ROOT)));
+    DepotIndex index = depots;
+    long version = graphs.snapshotVersion();
+    if (index.version() != version) {
+      Map<String, Set<String>> codes = new HashMap<>();
+      for (RailGraphService.RailGraphSnapshot snapshot : graphs.snapshotAll().values()) {
+        for (RailNode node : snapshot.graph().nodes()) {
+          node.waypointMetadata()
+              .filter(m -> m.kind() == WaypointKind.DEPOT || m.kind() == WaypointKind.DEPOT_THROAT)
+              .ifPresent(
+                  m ->
+                      codes
+                          .computeIfAbsent(
+                              m.operator().toUpperCase(Locale.ROOT), ignored -> new TreeSet<>())
+                          .add(m.originStation().toUpperCase(Locale.ROOT)));
+        }
       }
+      Map<String, Set<String>> frozen = new HashMap<>();
+      codes.forEach((key, value) -> frozen.put(key, Set.copyOf(value)));
+      index = new DepotIndex(version, Map.copyOf(frozen));
+      depots = index;
     }
-    return codes;
+    return index.codes().getOrDefault(operator.toUpperCase(Locale.ROOT), Set.of());
   }
 
   private static long count(List<ControlZoneMember> members, ControlZoneMember.Kind kind) {
@@ -578,7 +603,7 @@ public final class FtaSignalCommand {
     }
     List<String> codes =
         kind.get() == ControlZoneMember.Kind.DEPOT
-            ? List.copyOf(depotCodes(operator.get()))
+            ? depotCodes(operator.get()).stream().sorted().toList()
             : stationCodes(ctx);
     codes.stream()
         .filter(code -> code.toLowerCase(Locale.ROOT).startsWith(prefix))

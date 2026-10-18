@@ -335,7 +335,9 @@ public record PidsScreen(
         platforms,
         lines,
         rotation,
-        sameOperator(station.map(PidsStationKey::operatorCode)) ? zone : Optional.empty(),
+        sameOperator(station.map(PidsStationKey::operatorCode).or(() -> operator))
+            ? zone
+            : Optional.empty(),
         appearance,
         mode,
         createdAt,
