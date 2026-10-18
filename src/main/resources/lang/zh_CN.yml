@@ -181,6 +181,8 @@ command:
     hover-depot: "<gray>点击填入：</gray> <white>/fta depot </white>\n<dark_aqua>手动触发车库生成（测试用）</dark_aqua>"
     entry-pids: "<gray>/fta pids</gray> <white>-</white> <dark_aqua>站台屏（安装纸、配置棍、列表）</dark_aqua>"
     hover-pids: "<gray>点击填入：</gray> <white>/fta pids </white>\n<dark_aqua>领取安装纸与配置棍，查看与管理站台屏</dark_aqua>"
+    entry-signal: "<gray>/fta signal</gray> <white>-</white> <dark_aqua>信号员（控制区）</dark_aqua>"
+    hover-signal: "<gray>点击填入：</gray> <white>/fta signal </white>\n<dark_aqua>划定控制区，供站场图屏显示整片站场</dark_aqua>"
     entry-graph: "<gray>/fta graph</gray> <white>-</white> <dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     hover-graph: "<gray>点击填入：</gray> <white>/fta graph </white>\n<dark_aqua>调度图诊断（重建/查看区间距离）</dark_aqua>"
     entry-occupancy: "<gray>/fta occupancy</gray> <white>-</white> <dark_aqua>调度占用诊断与清理</dark_aqua>"
@@ -1209,10 +1211,50 @@ command:
         empty: "<prefix> <gray>站点</gray> <white><station></white> <gray>未关联存车线池</gray>"
         header: "<prefix> <dark_aqua>站点</dark_aqua> <white><station></white> <dark_aqua>的存车线池</dark_aqua>"
         entry: "<white><pool></white> <gray>-</gray> <dark_aqua><nodes></dark_aqua>"
+  signal:
+    help:
+      header: "<prefix> <dark_aqua>信号员</dark_aqua> <gray>控制区：把一个运营商的若干车站与车库划为一片，站场图屏绑定后整片显示</gray>"
+      create: "<gray>/fta signal zone create <white><公司> <运营商> <代码> \"<名称>\" [\"<英文名>\"]</white></gray> <white>-</white> <dark_aqua>新建控制区</dark_aqua>"
+      list: "<gray>/fta signal zone list <white><公司> <运营商></white></gray> <white>-</white> <dark_aqua>列出运营商的控制区</dark_aqua>"
+      info: "<gray>/fta signal zone info <white><公司> <运营商> <控制区></white></gray> <white>-</white> <dark_aqua>查看成员</dark_aqua>"
+      rename: "<gray>/fta signal zone rename <white><公司> <运营商> <控制区> \"<名称>\" [\"<英文名>\"]</white></gray> <white>-</white> <dark_aqua>修改名称</dark_aqua>"
+      add: "<gray>/fta signal zone add|remove <white><公司> <运营商> <控制区> station|depot <代码></white></gray> <white>-</white> <dark_aqua>加入或移出车站、车库</dark_aqua>"
+      delete: "<gray>/fta signal zone delete <white><公司> <运营商> <控制区></white> --confirm</gray> <white>-</white> <dark_aqua>删除控制区</dark_aqua>"
+      bind: "<gray>/fta pids set <white><屏幕></white> zone <white><控制区>|none</white></gray> <white>-</white> <dark_aqua>站场图屏绑定控制区（屏幕须先绑定车站或运营商）</dark_aqua>"
+    zone:
+      not-found: "<prefix> <red>未找到控制区</red> <gray>(operator=<white><operator></white>, zone=<white><zone></white>)</gray>"
+      create:
+        success: "<prefix> <dark_aqua>已新建控制区 <white><code></white>（<name>）</dark_aqua> <gray>运营商 <white><operator></white>；请用 /fta signal zone add 加入车站与车库</gray>"
+        exists: "<prefix> <red>运营商 <white><operator></white> 下已有控制区 <white><code></white></red>"
+        invalid: "<prefix> <red>代码与名称不能为空，代码不能含冒号</red>"
+      rename:
+        success: "<prefix> <dark_aqua>已更新控制区 <white><code></white> 的名称：<white><name></white></dark_aqua>"
+        invalid: "<prefix> <red>名称不能为空</red>"
+      member:
+        added: "<prefix> <dark_aqua>已将<kind> <white><member></white> 加入控制区 <white><zone></white></dark_aqua>"
+        removed: "<prefix> <dark_aqua>已将<kind> <white><member></white> 移出控制区 <white><zone></white></dark_aqua>"
+        already: "<prefix> <yellow><kind> <white><member></white> 已在控制区 <white><zone></white> 中</yellow>"
+        not-member: "<prefix> <red><kind> <white><member></white> 不在控制区 <white><zone></white> 中</red>"
+        station-not-found: "<prefix> <red>运营商 <white><operator></white> 下没有车站 <white><member></white></red>"
+        depot-not-found: "<prefix> <red>调度图中没有运营商 <white><operator></white> 的车库 <white><member></white></red> <gray>车库按调度图中的 <white>运营商:D:车库:股道</white> 节点识别，请先建图</gray>"
+        invalid: "<prefix> <red>代码不能为空，也不能含冒号</red>"
+        invalid-kind: "<prefix> <red>种类只能是 station 或 depot</red> <gray>(<white><kind></white>)</gray>"
+      delete:
+        success: "<prefix> <dark_aqua>已删除控制区 <white><zone></white></dark_aqua> <gray>绑定该控制区的站场图屏将显示“未找到绑定的控制区”</gray>"
+      list:
+        header: "<prefix> <dark_aqua>控制区</dark_aqua> <gray>(operator=<white><operator></white>, count=<white><count></white>)</gray>"
+        entry: "<gray>-</gray> <white><code></white> <gray><name> · 车站 <white><stations></white> 个 · 车库 <white><depots></white> 个</gray>"
+        empty: "<prefix> <gray>运营商 <white><operator></white> 下暂无控制区</gray>"
+      info:
+        header: "<prefix> <dark_aqua>控制区 <white><code></white></dark_aqua> <gray><name> · 运营商 <white><operator></white></gray>"
+        secondary: "<gray>英文名：<white><secondary></white></gray>"
+        stations: "<gray>车站：<white><members></white></gray>"
+        depots: "<gray>车库：<white><members></white></gray>"
+        empty: "<gray>暂无成员</gray>"
   pids:
     help:
       header: "<prefix> <dark_aqua>站台屏</dark_aqua> <gray>挂满空展示框后用安装纸安装，再用配置棍调整</gray>"
-      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；yard-3x5 站场图；或自定义布局）</dark_aqua>"
+      give: "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；yard-3x5、yard-4x8 站场图；或自定义布局）</dark_aqua>"
       stick: "<gray>/fta pids stick</gray> <white>-</white> <dark_aqua>领取配置棍（右键菜单、左键信息、潜行左键拆除）</dark_aqua>"
       list: "<gray>/fta pids list <white>[页]</white></gray> <white>-</white> <dark_aqua>全部站台屏（需管理权限）</dark_aqua>"
       info: "<gray>/fta pids info|menu|remove <white><屏幕></white></gray> <white>-</white> <dark_aqua>按编号查看、配置或拆除</dark_aqua>"
@@ -1239,8 +1281,12 @@ command:
       unknown-layout: "<prefix> <red>没有该尺寸的布局</red> <gray>(layout=<white><layout></white>，屏幕 <white><size></white>)</gray>"
       need-station: "<prefix> <red>请先绑定车站再启用显示</red>"
       need-binding: "<prefix> <red>请先绑定车站或运营商再启用显示</red>"
+      need-yard-binding: "<prefix> <red>请先绑定车站或控制区再启用显示</red>"
       unknown-operator: "<prefix> <red>未找到运营商</red> <gray>(operator=<white><operator></white>)</gray>"
-      operator-line-status-only: "<prefix> <red>只有线路运行状况屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"
+      operator-line-status-only: "<prefix> <red>只有线路运行状况屏与站场图屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"
+      zone-yard-only: "<prefix> <red>只有站场图屏可以绑定控制区</red>"
+      zone-need-operator: "<prefix> <red>请先绑定车站或运营商，再选择控制区</red>"
+      unknown-zone: "<prefix> <red>未找到控制区</red> <gray>(operator=<white><operator></white>, zone=<white><zone></white>)</gray>"
       rotate-line-status-only: "<prefix> <red>只有带线路运行状况页的屏幕可以按运营商轮播</red>"
       rotate-need-operator: "<prefix> <red>请先绑定车站或运营商，再选择轮播的运营商</red>"
       rotate-other-company: "<prefix> <red>只能轮播与本屏运营商同一公司的运营商</red> <gray>(operator=<white><operator></white>)</gray>"
@@ -1443,6 +1489,9 @@ enum:
     commuter: "通勤"
     lrt: "轻轨"
     express: "快线"
+  control-zone-member-kind:
+    station: "车站"
+    depot: "车库"
   station-transfer-type:
     same_platform: "同台换乘"
     in_station: "站内换乘"
@@ -1817,7 +1866,7 @@ pids:
         maintenance-secondary: "Under maintenance"
         first-train: "首班 <time>"
         first-train-secondary: "First train <time>"
-    # 站场图屏（布局 yard-3x5）：图例与画不出来时的说明
+    # 站场图屏（布局 yard-3x5、yard-4x8）：图例与画不出来时的说明
     yard:
       legend:
         free: "空闲"
@@ -1830,14 +1879,21 @@ pids:
         occupied-secondary: "Occupied"
         train: "车次窗"
         train-secondary: "Train"
+        platform: "站台"
+        platform-secondary: "Platform"
         note: "车次窗文字琥珀色为晚点超过 1 分钟，红色为晚点超过 5 分钟"
         note-secondary: "Train label: amber 1+ min late · red 5+ min late"
+      # 站台块里的股道号
+      track: "<track> 道"
+      track-secondary: "Track <track>"
       no-graph: "调度图未就绪"
       no-graph-secondary: "Rail graph not ready"
-      no-station: "调度图里没有本站的站台节点"
-      no-station-secondary: "No platforms of this station in the rail graph"
-      partial: "部分区间缺少轨道几何，以直线代替；重建调度图后可修正"
-      partial-secondary: "Some sections drawn as straight lines"
+      not-in-graph: "调度图里没有本站场的站台或股道节点"
+      not-in-graph-secondary: "No platforms or tracks of this yard in the rail graph"
+      no-zone: "未找到绑定的控制区"
+      no-zone-secondary: "Control zone not found"
+      partial: "部分区间缺少轨道几何，列车位置可能显示不全；重建调度图后可修正"
+      partial-secondary: "Some trains may be missing; rebuild the rail graph"
     # 宣传页（乘车礼仪）与安全提示页（通过列车临近时显示）
     # 1×3 与 2×1 上中文标题最多 4 字、英文标题约 18 个字母；说明中文最多 9 字、英文最多两行
     notice:
@@ -1941,6 +1997,8 @@ pids:
     pages-hint: "<dark_gray>与主布局轮流显示，再点一次取消</dark_gray>"
     rotation: "<gray>轮播运营商</gray>"
     rotation-hint: "<dark_gray>线路运行状况依次显示各运营商的线路，再点一次取消</dark_gray>"
+    zone: "<gray>控制区</gray>"
+    zone-none: "不绑定"
     appearance: "<gray>外观</gray>"
     actions: "<gray>操作</gray>"
     station-manual: "手动指定…"
@@ -1967,6 +2025,7 @@ pids:
     header: "<prefix> <dark_aqua>站台屏 <white><id></white></dark_aqua> <gray>· <white><layout></white>（<size>）· <mode></gray>"
     binding: "<gray>车站：<white><station></white> · <platforms> · 线路：<white><lines></white> · 外观：<white><appearance></white></gray>"
     rotation: "<gray>轮播运营商：<white><operators></white></gray>"
+    zone: "<gray>控制区：<white><zone></white></gray>"
     location: "<gray>位置：<white><world></white> <white><x></white> <white><y></white> <white><z></white> · 朝 <white><facing></white></gray>"
   remove:
     confirm: "<prefix> <yellow>确认拆除站台屏 <white><id></white>？</yellow><gray>展示框将还原为空，并退回安装纸。</gray> "

@@ -1,9 +1,12 @@
 package org.fetarute.fetaruteTCAddon.display.pids.yard;
 
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.D1;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.IA;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.IB;
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.IC;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.P1;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.P2;
+import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.Q1;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.SW1;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.SW2;
 import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.SW3;
@@ -11,6 +14,7 @@ import static org.fetarute.fetaruteTCAddon.display.pids.yard.YardFixtures.T1;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
@@ -69,7 +73,7 @@ class YardAreaTest {
     YardArea area = YardArea.of(YardFixtures.graph(), "SURC", "ABC").orElseThrow();
 
     assertEquals(
-        Set.of(new YardArea.Track(P1, "1"), new YardArea.Track(P2, "2")),
+        Set.of(new YardArea.Track(P1, "1", "ABC"), new YardArea.Track(P2, "2", "ABC")),
         Set.copyOf(area.tracks()));
   }
 
@@ -77,5 +81,53 @@ class YardAreaTest {
   void unknownStationsHaveNoYard() {
     assertTrue(YardArea.of(YardFixtures.graph(), "SURC", "XYZ").isEmpty(), "XYZ 只出现在区间点里");
     assertTrue(YardArea.of(YardFixtures.graph(), "OTHER", "ABC").isEmpty(), "别的运营商的同名站");
+  }
+
+  /** 控制区：两端都是成员车站的区间点算区内，几个车站连成一片；不是成员的车库仍是出口。 */
+  @Test
+  void zonesJoinMemberStationsThroughTheirIntervals() {
+    YardArea area =
+        YardArea.of(
+                YardFixtures.corridor(),
+                "SURC",
+                List.of(YardArea.Member.station("abc"), YardArea.Member.station("DEF")))
+            .orElseThrow();
+
+    assertEquals(Set.of(P1, IB, Q1), area.nodes());
+    assertEquals(
+        Set.of(new YardArea.Track(P1, "1", "ABC"), new YardArea.Track(Q1, "1", "DEF")),
+        Set.copyOf(area.tracks()));
+    assertEquals(
+        Map.of(
+            EdgeId.undirected(D1, P1), Optional.of("DEP"),
+            EdgeId.undirected(Q1, IC), Optional.of("GHI")),
+        area.exits().stream()
+            .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
+  }
+
+  /** 车库成员把车库股道带进区内；另一端不是成员车站的区间点仍在区外。 */
+  @Test
+  void depotMembersBringTheirTracksIn() {
+    YardArea area =
+        YardArea.of(
+                YardFixtures.corridor(),
+                "SURC",
+                List.of(YardArea.Member.station("ABC"), YardArea.Member.depot("dep")))
+            .orElseThrow();
+
+    assertEquals(Set.of(D1, P1), area.nodes());
+    assertEquals(
+        Map.of(EdgeId.undirected(P1, IB), Optional.of("DEF")),
+        area.exits().stream()
+            .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
+    assertEquals(List.of(new YardArea.Track(P1, "1", "ABC")), area.tracks(), "车库股道不画站台");
+  }
+
+  @Test
+  void zonesWithoutMembersInTheGraphHaveNoYard() {
+    assertTrue(
+        YardArea.of(YardFixtures.corridor(), "SURC", List.of(YardArea.Member.depot("NOPE")))
+            .isEmpty());
+    assertTrue(YardArea.of(YardFixtures.corridor(), "SURC", List.of()).isEmpty());
   }
 }

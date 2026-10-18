@@ -119,6 +119,26 @@
 > 唯一约束写在建表语句内（MySQL 不支持 `CREATE INDEX IF NOT EXISTS`）；仓库写入不使用方言 upsert，冲突在两种后端上都会报错。
 > 删除公司、运营商、车站、车站组时，仓库在同一事务内显式删除相关成员与组，不依赖外键级联。
 
+### ControlZone（控制区，信号员与站场图屏的管辖范围）
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| id | UUID | 主键 |
+| operator_id | UUID | 所属运营商（`ON DELETE CASCADE`） |
+| code | VARCHAR | 代码（大写），`UNIQUE (operator_id, code)` |
+| name / secondary_name | VARCHAR | 名称 |
+| metadata | JSON | 扩展 |
+| created_at / updated_at | TIMESTAMP | 审计 |
+
+#### ControlZoneMember
+| 字段 | 类型 | 说明 |
+| --- | --- | --- |
+| zone_id | UUID | 所属控制区（`ON DELETE CASCADE`） |
+| member_kind | VARCHAR | `STATION` / `DEPOT` |
+| member_code | VARCHAR | 站码或车库代码（大写），与控制区同一运营商 |
+| sort_order | INT | 排序，默认 0 |
+> 主键 `(zone_id, member_kind, member_code)`。车库在库里没有实体（只是调度图里的 `运营商:D:车库:股道` 节点），所以成员按“种类 + 代码”记、不连外键；车站改代码或删除后成员不跟着变，使用时找不到的成员略过。
+> 删除公司、运营商、控制区时，仓库在同一事务内显式删除相关控制区与成员，不依赖外键级联。站台屏以 `pids_screens.zone_code` 绑定屏幕所属运营商名下的控制区。
+
 ### Route
 | 字段 | 类型 | 说明 |
 | --- | --- | --- |

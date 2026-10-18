@@ -22,7 +22,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyClaim
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.ResourceKind;
 import org.fetarute.fetaruteTCAddon.display.Lateness;
-import org.fetarute.fetaruteTCAddon.display.pids.PidsStationKey;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 
 /**
@@ -64,11 +63,11 @@ public final class YardProvider implements PidsYardSource {
     this.stationNames = Objects.requireNonNull(stationNames, "stationNames");
   }
 
-  private record Key(UUID worldId, PidsStationKey station, YardGeometry.Rect rect) {}
+  private record Key(UUID worldId, YardScope scope, YardGeometry.Rect rect) {}
 
   /**
    * @param graph 算几何用的图快照（按对象身份判断换没换）
-   * @param geometry 几何；图里没有本站时为空
+   * @param geometry 几何；图里没有本站（控制区成员）时为空
    * @param edges 占用资源键 → 区间，只含站场图上画了的区间
    */
   private record Cached(
@@ -77,7 +76,7 @@ public final class YardProvider implements PidsYardSource {
   private record Footprints(RailGraph graph, Map<EdgeId, Set<RailFootprintCell>> cells) {}
 
   @Override
-  public YardPicture picture(PidsStationKey station, UUID worldId, PidsLayout.Yard widget) {
+  public YardPicture picture(YardScope scope, UUID worldId, PidsLayout.Yard widget) {
     Optional<RailGraph> graph = graphs.apply(worldId);
     if (graph.isEmpty()) {
       return YardPicture.unavailable(YardPicture.Problem.GRAPH_NOT_READY);
@@ -85,14 +84,14 @@ public final class YardProvider implements PidsYardSource {
     YardGeometry.Rect rect =
         new YardGeometry.Rect(
             widget.trackLeft(), widget.trackTop(), widget.trackWidth(), widget.trackHeight());
-    Key key = new Key(worldId, station, rect);
+    Key key = new Key(worldId, scope, rect);
     Cached cached = cache.get(key);
     if (cached == null || cached.graph() != graph.get()) {
-      cached = build(graph.get(), worldId, station, rect);
+      cached = build(graph.get(), worldId, scope, rect);
       cache.put(key, cached);
     }
     if (cached.geometry().isEmpty()) {
-      return YardPicture.unavailable(YardPicture.Problem.STATION_NOT_IN_GRAPH);
+      return YardPicture.unavailable(YardPicture.Problem.NOT_IN_GRAPH);
     }
     YardGeometry geometry = cached.geometry().get();
     return new YardPicture(
@@ -102,9 +101,8 @@ public final class YardProvider implements PidsYardSource {
         Optional.empty());
   }
 
-  private Cached build(
-      RailGraph graph, UUID worldId, PidsStationKey station, YardGeometry.Rect rect) {
-    Optional<YardArea> area = YardArea.of(graph, station.operatorCode(), station.stationCode());
+  private Cached build(RailGraph graph, UUID worldId, YardScope scope, YardGeometry.Rect rect) {
+    Optional<YardArea> area = YardArea.of(graph, scope.operator(), scope.members());
     if (area.isEmpty()) {
       return new Cached(graph, Optional.empty(), Map.of());
     }
@@ -114,7 +112,7 @@ public final class YardProvider implements PidsYardSource {
             area.get(),
             footprintsOf(worldId, graph),
             rect,
-            code -> stationNames.apply(station.operatorCode() + ":" + code).orElse(code));
+            code -> stationNames.apply(scope.operator() + ":" + code).orElse(code));
     Map<String, EdgeId> edges = new HashMap<>();
     for (YardGeometry.Path path : geometry.paths()) {
       edges.put(OccupancyResource.forEdge(path.edge()).key(), path.edge());

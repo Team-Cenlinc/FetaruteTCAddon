@@ -35,6 +35,7 @@ class PidsYardPainterTest {
           new Names("保护占用", "Protected"),
           new Names("车占用", "Occupied"),
           new Names("车次窗", "Train"),
+          new Names("站台", "Platform"),
           new Names("车次窗文字琥珀色为晚点超过 1 分钟", "Train label: amber 1+ min late"));
 
   private final PidsRenderer renderer = new PidsRenderer(PidsFonts.builtIn(PidsGlyphForm.ZH_HANS));
@@ -154,6 +155,7 @@ class PidsYardPainterTest {
         "14:32",
         new Names("示例站", "Example"),
         LEGEND,
+        new Names("<track> 道", "Track <track>"),
         picture,
         message,
         Optional.empty());

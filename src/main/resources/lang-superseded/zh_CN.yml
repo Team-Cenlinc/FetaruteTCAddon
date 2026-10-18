@@ -60,6 +60,9 @@ command:
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5 或自定义布局）</dark_aqua>"
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4、platform-2x1 停站屏、station-3x5、status-3x5 线路运行状况屏或自定义布局）</dark_aqua>"
         - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；或自定义布局）</dark_aqua>"
+        - "<gray>/fta pids give <white><布局></white></gray> <white>-</white> <dark_aqua>领取安装纸（platform-1x3、platform-1x4 站台屏，加 -right 为站台号在右的版本；platform-group-1x3、platform-group-1x4 多站台屏；platform-2x1 停站屏；station-3x5 车站统屏；status-3x5 线路运行状况屏；yard-3x5 站场图；或自定义布局）</dark_aqua>"
+    set:
+      operator-line-status-only: ["<prefix> <red>只有线路运行状况屏可以不绑车站、只绑运营商</red> <gray>其余布局按车站显示到发信息</gray>"]
     list:
       operator-only: ["<operator>（<code>，不绑车站）"]
   train:
@@ -306,6 +309,9 @@ pids:
       on-time: ["准点"]
     destination:
       out-of-service-secondary: ["Not in Service"]
+    yard:
+      partial: ["部分区间缺少轨道几何，以直线代替；重建调度图后可修正"]
+      partial-secondary: ["Some sections drawn as straight lines"]
     line-status:
       filtered: ["本屏线路过滤没有匹配的线路"]
       detail:

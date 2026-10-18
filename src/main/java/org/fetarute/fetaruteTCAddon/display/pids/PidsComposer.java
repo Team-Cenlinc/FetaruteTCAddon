@@ -45,7 +45,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardViews;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardSource;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardZones;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
 
 /**
  * 决定一块屏幕此刻显示什么。
@@ -97,6 +99,8 @@ public final class PidsComposer {
 
   /** 站场图的数据。未接入时站场图屏写“调度图未就绪”。 */
   private volatile PidsYardSource yards = PidsYardSource.NONE;
+
+  private volatile PidsYardZones controlZones = PidsYardZones.NONE;
 
   private final PidsYardViews yardViews;
 
@@ -163,6 +167,15 @@ public final class PidsComposer {
    */
   public void setYards(PidsYardSource yards) {
     this.yards = yards == null ? PidsYardSource.NONE : yards;
+  }
+
+  /**
+   * 接入控制区查询（站场图屏绑控制区时用）。
+   *
+   * @param controlZones 查询；null 恢复默认（一律找不到）
+   */
+  public void setControlZones(PidsYardZones controlZones) {
+    this.controlZones = controlZones == null ? PidsYardZones.NONE : controlZones;
   }
 
   /** 没有公告。 */
@@ -280,14 +293,13 @@ public final class PidsComposer {
     if (screen.mode() == PidsScreen.Mode.TEST_CARD) {
       return Optional.of(card(testCard(screen, pages)));
     }
-    // 站场图屏不能组合翻页，只有主布局一页；要绑车站
+    // 站场图屏不能组合翻页，只有主布局一页；要绑车站或控制区
     PidsLayout primary = pages.get(0);
     if (primary.yard().isPresent()) {
       return Optional.of(
-          screen
-              .station()
-              .map(station -> yard(screen, primary, station))
-              .orElseGet(() -> card(testCard(screen, pages))));
+          screen.station().isPresent() || screen.zone().isPresent()
+              ? yard(screen, primary)
+              : card(testCard(screen, pages)));
     }
     // 到发页要绑车站：只绑运营商的屏幕只显示其中的线路运行状况
     List<PidsLayout> shown =
@@ -362,11 +374,30 @@ public final class PidsComposer {
         slot.position());
   }
 
-  /** 站场图：本站站场的占用与列车，按站台屏的检查间隔刷新。 */
-  private PidsContent yard(PidsScreen screen, PidsLayout layout, PidsStationKey station) {
-    YardPicture picture = yards.picture(station, screen.worldId(), layout.yard().orElseThrow());
-    PidsYardView view = yardViews.build(station, theme(screen), clock.instant(), zone, picture);
-    return new PidsContent(new YardKey(layout, view), () -> renderer.renderYard(layout, view));
+  /** 站场图：本站或所绑控制区的占用与列车，按站台屏的检查间隔刷新。绑了控制区时以控制区为准，标题写控制区名。 */
+  private PidsContent yard(PidsScreen screen, PidsLayout layout) {
+    PidsLayout.Yard widget = layout.yard().orElseThrow();
+    PidsYardView view;
+    if (screen.zone().isPresent()) {
+      String code = screen.zone().get();
+      Optional<PidsYardZones.Zone> found =
+          controlZones.find(screen.operatorCode().orElseThrow(), code);
+      YardPicture picture =
+          found
+              .map(z -> yards.picture(z.scope(), screen.worldId(), widget))
+              .orElseGet(() -> YardPicture.unavailable(YardPicture.Problem.ZONE_NOT_FOUND));
+      PidsView.Names title =
+          found
+              .map(z -> new PidsView.Names(z.name(), z.secondaryName().orElse("")))
+              .orElse(new PidsView.Names(code, ""));
+      view = yardViews.build(title, theme(screen), clock.instant(), zone, picture);
+    } else {
+      PidsStationKey station = screen.station().orElseThrow();
+      YardPicture picture = yards.picture(YardScope.station(station), screen.worldId(), widget);
+      view = yardViews.build(station, theme(screen), clock.instant(), zone, picture);
+    }
+    PidsYardView shown = view;
+    return new PidsContent(new YardKey(layout, shown), () -> renderer.renderYard(layout, shown));
   }
 
   /** 线路运行状况的一页：线路少时用大行，多了用小行并分页。 */

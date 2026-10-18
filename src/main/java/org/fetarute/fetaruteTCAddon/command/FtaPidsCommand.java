@@ -14,6 +14,7 @@ import org.bukkit.World;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsAccess;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsComposer;
 import org.fetarute.fetaruteTCAddon.display.pids.PidsNearby;
@@ -147,6 +148,7 @@ public final class FtaPidsCommand {
     registerSet(manager, screens, "rotate", rotateSuggestions(), this::toggleRotate);
     registerSet(manager, screens, "layout", screenLayoutSuggestions(), this::changeLayout);
     registerSet(manager, screens, "page", pageSuggestions(), this::togglePage);
+    registerSet(manager, screens, "zone", zoneSuggestions(), this::changeZone);
     registerSet(
         manager,
         screens,
@@ -390,7 +392,7 @@ public final class FtaPidsCommand {
         (service, screen) -> {
           CommandSender sender = ctx.sender();
           String operator = ((String) ctx.get("operator")).trim().toUpperCase(Locale.ROOT);
-          if (!service.isLineStatus(screen)) {
+          if (!service.isLineStatus(screen) && !service.isYard(screen)) {
             sender.sendMessage(locale().component("command.pids.set.operator-line-status-only"));
             return;
           }
@@ -560,6 +562,34 @@ public final class FtaPidsCommand {
     return Optional.of(screen.withLayouts(edit.layoutIds(), service.now()));
   }
 
+  /** 站场图屏绑控制区（屏幕所属运营商名下）；{@code none} 解绑，只画绑定的车站。 */
+  private Optional<PidsScreen> changeZone(
+      CommandSender sender, PidsService service, PidsScreen screen, String value) {
+    if (!service.isYard(screen)) {
+      sender.sendMessage(locale().component("command.pids.set.zone-yard-only"));
+      return Optional.empty();
+    }
+    String code = value.trim();
+    if (PidsScreen.NONE.equalsIgnoreCase(code)) {
+      return Optional.of(screen.withZone(Optional.empty(), service.now()));
+    }
+    Optional<String> operator = screen.operatorCode();
+    if (operator.isEmpty()) {
+      sender.sendMessage(locale().component("command.pids.set.zone-need-operator"));
+      return Optional.empty();
+    }
+    Optional<ControlZoneDirectory.Zone> zone = service.findZone(operator.get(), code);
+    if (zone.isEmpty()) {
+      sender.sendMessage(
+          locale()
+              .component(
+                  "command.pids.set.unknown-zone",
+                  Map.of("operator", operator.get(), "zone", code)));
+      return Optional.empty();
+    }
+    return Optional.of(screen.withZone(Optional.of(zone.get().code()), service.now()));
+  }
+
   private Optional<PidsScreen> changeAppearance(
       CommandSender sender, PidsService service, PidsScreen screen, String value) {
     return parseEnum(sender, PidsScreen.Appearance.class, value)
@@ -579,14 +609,22 @@ public final class FtaPidsCommand {
           locale().component("command.pids.set.invalid-value", Map.of("value", value)));
       return Optional.empty();
     }
-    // 线路运行状况屏绑车站或运营商都行，其余屏要绑车站。
+    // 线路运行状况屏绑车站或运营商都行，站场图屏绑车站或控制区都行，其余屏要绑车站。
     boolean lineStatus = service.isLineStatus(screen);
-    if (mode == PidsScreen.Mode.LIVE
-        && (lineStatus ? screen.operatorCode().isEmpty() : screen.station().isEmpty())) {
+    boolean yard = service.isYard(screen);
+    boolean unbound =
+        lineStatus
+            ? screen.operatorCode().isEmpty()
+            : screen.station().isEmpty() && (!yard || screen.zone().isEmpty());
+    if (mode == PidsScreen.Mode.LIVE && unbound) {
       sender.sendMessage(
           locale()
               .component(
-                  lineStatus ? "command.pids.set.need-binding" : "command.pids.set.need-station"));
+                  lineStatus
+                      ? "command.pids.set.need-binding"
+                      : yard
+                          ? "command.pids.set.need-yard-binding"
+                          : "command.pids.set.need-station"));
       return Optional.empty();
     }
     if (mode == PidsScreen.Mode.LIVE
@@ -863,6 +901,21 @@ public final class FtaPidsCommand {
                                   suggestions.addAll(
                                       pair.service()
                                           .platformsOf(pair.screen().worldId(), station))));
+          return suggestions;
+        });
+  }
+
+  /** 控制区补全：屏幕所属运营商名下的控制区，外加 {@code none}。 */
+  private SuggestionProvider<CommandSender> zoneSuggestions() {
+    return SuggestionProvider.blockingStrings(
+        (ctx, input) -> {
+          List<String> suggestions = new ArrayList<>(List.of("<zone>", PidsScreen.NONE));
+          screenOf(ctx)
+              .ifPresent(
+                  pair ->
+                      pair.service().zoneChoices(pair.screen()).stream()
+                          .map(ControlZoneDirectory.Zone::code)
+                          .forEach(suggestions::add));
           return suggestions;
         });
   }

@@ -38,8 +38,10 @@ public record YardPicture(
   public enum Problem {
     /** 车站所在世界还没有调度图。 */
     GRAPH_NOT_READY,
-    /** 调度图里没有本站的站台或咽喉节点。 */
-    STATION_NOT_IN_GRAPH
+    /** 调度图里没有本站（控制区成员）的站台、股道或咽喉节点。 */
+    NOT_IN_GRAPH,
+    /** 屏幕绑的控制区不存在（已删除或代码有误）。 */
+    ZONE_NOT_FOUND
   }
 
   /** 区间的占用标记。 */

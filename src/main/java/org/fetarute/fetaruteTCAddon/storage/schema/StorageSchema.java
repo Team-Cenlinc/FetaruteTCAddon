@@ -50,6 +50,8 @@ public final class StorageSchema {
     ddl.add(uniqueIndex("stations_code", "stations", "operator_id, code"));
     ddl.add(stationGroups(dialect));
     ddl.add(stationGroupMembers(dialect));
+    ddl.add(controlZones(dialect));
+    ddl.add(controlZoneMembers(dialect));
     ddl.add(routes(dialect));
     ddl.add(uniqueIndex("routes_code", "routes", "line_id, code"));
     ddl.add(routeStops(dialect));
@@ -370,6 +372,56 @@ public final class StorageSchema {
         dialect.intType(),
         table("station_groups"),
         table("stations"));
+  }
+
+  /** 控制区（站场图屏绑定的一片站场，将来的信号楼辖区）；代码在同一运营商内唯一，唯一约束写在表内。 */
+  private String controlZones(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    id %s PRIMARY KEY,
+                    operator_id %s NOT NULL,
+                    code %s NOT NULL,
+                    name %s NOT NULL,
+                    secondary_name %s,
+                    metadata %s,
+                    created_at %s NOT NULL,
+                    updated_at %s NOT NULL,
+                    UNIQUE (operator_id, code),
+                    FOREIGN KEY (operator_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("control_zones"),
+        dialect.uuidType(),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.jsonType(),
+        dialect.timestampType(),
+        dialect.timestampType(),
+        table("operators"));
+  }
+
+  /** 控制区成员：车站或车库，按代码记；车库在库里没有实体，所以不连外键。 */
+  private String controlZoneMembers(SqlDialect dialect) {
+    return formatDdl(
+        """
+                CREATE TABLE IF NOT EXISTS %s (
+                    zone_id %s NOT NULL,
+                    member_kind %s NOT NULL,
+                    member_code %s NOT NULL,
+                    sort_order %s NOT NULL DEFAULT 0,
+                    PRIMARY KEY (zone_id, member_kind, member_code),
+                    FOREIGN KEY (zone_id) REFERENCES %s(id) ON DELETE CASCADE
+                );
+                """,
+        table("control_zone_members"),
+        dialect.uuidType(),
+        dialect.stringType(),
+        dialect.stringType(),
+        dialect.intType(),
+        table("control_zones"));
   }
 
   private String routes(SqlDialect dialect) {
@@ -717,6 +769,7 @@ public final class StorageSchema {
                     platforms %s,
                     line_codes %s,
                     rotation_operators %s,
+                    zone_code %s,
                     appearance %s NOT NULL,
                     mode %s NOT NULL,
                     created_at %s NOT NULL,
@@ -740,6 +793,7 @@ public final class StorageSchema {
         dialect.jsonType(),
         dialect.jsonType(),
         dialect.jsonType(),
+        dialect.stringType(),
         dialect.stringType(),
         dialect.stringType(),
         dialect.timestampType(),

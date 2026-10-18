@@ -26,13 +26,14 @@ widgets:
     x: 0
     y: 32
     width: 640
-    height: 232
+    height: 268
     inset: 6
     label: 10
+  # 两行样例加一行说明，贴着底边
   - type: yard-legend
     x: 0
-    y: 264
+    y: 300
     width: 640
-    height: 120
+    height: 84
     label: {size: 12, secondary: 10, gap: 6}
     note: 10

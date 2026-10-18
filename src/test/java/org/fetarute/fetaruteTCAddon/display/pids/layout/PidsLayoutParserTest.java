@@ -133,7 +133,15 @@ class PidsLayoutParserTest {
     assertEquals(384, layout.height());
     assertEquals(52, yard.trackTop(), "分隔线 32 + 留白 6 + 车次窗 10 + 4");
     assertEquals(628, yard.trackWidth());
-    assertEquals(206, yard.trackHeight());
+    assertEquals(242, yard.trackHeight(), "图例贴底边，站场图占到 300");
+    assertEquals(
+        384,
+        layout.widgets().stream()
+            .filter(PidsLayout.YardLegend.class::isInstance)
+            .map(PidsLayout.YardLegend.class::cast)
+            .mapToInt(legend -> legend.y() + legend.height())
+            .max()
+            .orElseThrow());
     assertTrue(layout.lineStatus().isEmpty());
   }
 

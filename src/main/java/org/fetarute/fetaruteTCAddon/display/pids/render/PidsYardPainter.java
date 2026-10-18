@@ -21,7 +21,10 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 final class PidsYardPainter {
 
   /** 轨道线宽。 */
-  static final int TRACK = 2;
+  static final int TRACK = YardGeometry.TRACK_LINE;
+
+  /** 股道号里代表股道的占位符。 */
+  private static final String TRACK_PLACEHOLDER = "<track>";
 
   /** 车身线宽。 */
   static final int BODY = 3;
@@ -60,8 +63,17 @@ final class PidsYardPainter {
     }
     p.clip(yard.x(), yard.y() + 1, yard.width(), yard.height() - 2);
     try {
+      for (YardGeometry.Platform platform : geometry.get().platforms()) {
+        p.fill(
+            platform.left(),
+            platform.top(),
+            platform.right() - platform.left(),
+            platform.bottom() - platform.top(),
+            theme.panel());
+      }
       drawTracks(geometry.get(), view.picture().marks());
-      drawLabels(yard, geometry.get());
+      List<int[]> texts = drawPlatformLabels(yard, geometry.get(), view.track());
+      drawLabels(yard, geometry.get(), texts);
       List<int[]> placed = new ArrayList<>();
       for (YardPicture.TrainMark train : view.picture().trains()) {
         drawBody(train);
@@ -106,19 +118,88 @@ final class PidsYardPainter {
     }
   }
 
-  private void drawLabels(PidsLayout.Yard yard, YardGeometry geometry) {
+  /**
+   * 股道号写在站台块里、靠左：岛式站台上面那条股道写在块的上沿、下面那条写在下沿；块太薄放不下两行时并排写在一行，侧式站台竖向居中。
+   * 一张图里有几个车站时，站名写在第一个股道号前面（写在块外会压到股道线）。
+   *
+   * @return 写下的文字所占的矩形 {左, 上, 右, 下}，去向标签据此避让
+   */
+  private List<int[]> drawPlatformLabels(PidsLayout.Yard yard, YardGeometry geometry, Names track) {
     int size = yard.labelSize();
     int muted = p.theme().muted();
-    for (YardGeometry.Label track : geometry.tracks()) {
-      p.textCentered(track.text(), size, track.at().x(), track.at().y() - size - 4, muted);
+    List<int[]> drawn = new ArrayList<>();
+    for (YardGeometry.Platform platform : geometry.platforms()) {
+      List<String> texts = new ArrayList<>();
+      for (String number : platform.tracks()) {
+        String text = track.primary().replace(TRACK_PLACEHOLDER, number);
+        texts.add(
+            texts.isEmpty() && platform.station().isPresent()
+                ? platform.station().get() + " " + text
+                : text);
+      }
+      int left = platform.left() + 4;
+      int room = Math.max(size, platform.right() - left - 2);
+      int height = platform.bottom() - platform.top();
+      if (texts.size() == 2 && height >= 2 * size + 4) {
+        drawn.add(platformText(texts.get(0), size, left, platform.top() + 2, room, muted));
+        drawn.add(
+            platformText(texts.get(1), size, left, platform.bottom() - size - 2, room, muted));
+        continue;
+      }
+      int top = platform.top() + (height - size) / 2;
+      int x = left;
+      for (String text : texts) {
+        int[] box = platformText(text, size, x, top, Math.max(size, left + room - x), muted);
+        drawn.add(box);
+        x = box[2] + 8;
+      }
     }
+    return drawn;
+  }
+
+  private int[] platformText(String text, int size, int x, int top, int room, int rgb) {
+    String shown = p.ellipsize(text, size, room);
+    int width = p.text(shown, size, x, top, rgb);
+    return new int[] {x, top, x + width, top + size};
+  }
+
+  /**
+   * 去向写在出口末端下方，放不下（碰到下边缘、压到股道号或别的去向）时改写在上方；上下都压到股道号或别的去向时不写。 文字下铺底色，轨道穿过时也看得清。
+   *
+   * @param taken 已写下的文字所占的矩形
+   */
+  private void drawLabels(PidsLayout.Yard yard, YardGeometry geometry, List<int[]> taken) {
+    int size = yard.labelSize();
+    List<int[]> occupied = new ArrayList<>(taken);
     for (YardGeometry.Label exit : geometry.exits()) {
       String text = p.ellipsize(exit.text(), size, yard.trackWidth() / 3);
       int width = p.width(text, size);
       int x = exit.alignRight() ? exit.at().x() - width : exit.at().x();
       x = Math.max(yard.x() + 2, Math.min(x, yard.x() + yard.width() - 2 - width));
-      p.text(text, size, x, exit.at().y() + 4, muted);
+      int bottomEdge = yard.y() + yard.height() - 2;
+      int below = exit.at().y() + 4;
+      int above = exit.at().y() - size - 4;
+      for (int top : List.of(below, above)) {
+        int[] box = {x - 1, top - 1, x + width + 1, top + size + 1};
+        if (top >= yard.y() + 1
+            && top + size <= bottomEdge
+            && occupied.stream().noneMatch(other -> intersects(box, other))) {
+          label(text, size, x, top);
+          occupied.add(box);
+          break;
+        }
+      }
     }
+  }
+
+  private static boolean intersects(int[] a, int[] b) {
+    return a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+  }
+
+  private void label(String text, int size, int x, int top) {
+    PidsTheme theme = p.theme();
+    p.fill(x - 1, top - 1, p.width(text, size) + 2, size + 2, theme.background());
+    p.text(text, size, x, top, theme.muted());
   }
 
   /** 每段车厢依次连线；只有一节的段画一个点。 */
@@ -187,7 +268,7 @@ final class PidsYardPainter {
     }
   }
 
-  /** 图例：两行样例（空闲、进路锁闭、保护占用 / 车占用、车次窗），第三行是车次窗颜色说明。 */
+  /** 图例：两行样例（空闲、进路锁闭、保护占用 / 车占用、车次窗、站台），第三行是车次窗颜色说明。 */
   void drawLegend(PidsLayout.YardLegend legend, PidsYardView view) {
     PidsTheme theme = p.theme();
     p.fill(legend.x(), legend.y(), legend.width(), 1, theme.inverseMuted());
@@ -202,6 +283,16 @@ final class PidsYardPainter {
     sampleLine(left + 2 * column, top, style, TRACK, heldColor(theme), text.held(), column);
     sampleLine(left, top + rowHeight, style, BODY, theme.red(), text.occupied(), column);
     sampleDescriber(left + column, top + rowHeight, style, text.train(), column);
+    int platformTop = top + rowHeight + (style.size() - 10) / 2;
+    p.fill(left + 2 * column, platformTop, 28, 10, theme.panel());
+    p.inline(
+        text.platform(),
+        style,
+        left + 2 * column + 36,
+        top + rowHeight,
+        column - 40,
+        theme.text(),
+        theme.muted());
     p.inline(
         text.note(),
         new TextStyle(legend.noteSize(), legend.noteSize(), 6),

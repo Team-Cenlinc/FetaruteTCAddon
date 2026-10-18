@@ -501,14 +501,21 @@ public final class PidsVocabulary {
         names("yard.legend.held"),
         names("yard.legend.occupied"),
         names("yard.legend.train"),
+        names("yard.legend.platform"),
         names("yard.legend.note"));
+  }
+
+  /** 站台块里的股道号，{@code <track>} 处换成股道号。 */
+  public Names yardTrack() {
+    return names("yard.track");
   }
 
   /** 站场图画不出来的原因。 */
   public Names yardProblem(YardPicture.Problem problem) {
     return switch (problem) {
       case GRAPH_NOT_READY -> names("yard.no-graph");
-      case STATION_NOT_IN_GRAPH -> names("yard.no-station");
+      case NOT_IN_GRAPH -> names("yard.not-in-graph");
+      case ZONE_NOT_FOUND -> names("yard.no-zone");
     };
   }
 

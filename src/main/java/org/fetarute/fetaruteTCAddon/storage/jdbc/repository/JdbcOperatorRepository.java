@@ -125,18 +125,25 @@ public final class JdbcOperatorRepository extends JdbcRepositorySupport
 
   @Override
   public void delete(UUID id) {
-    // 本运营商车站的车站组成员显式删除，不依赖 PRAGMA foreign_keys 的级联（同 JdbcTimetableRepository#delete）。
+    // 本运营商车站的车站组成员与本运营商的控制区显式删除，不依赖 PRAGMA foreign_keys 的级联（同 JdbcTimetableRepository#delete）。
     String members =
         "DELETE FROM "
             + table("station_group_members")
             + " WHERE station_id IN (SELECT id FROM "
             + table("stations")
             + " WHERE operator_id = ?)";
+    String zoneMembers =
+        "DELETE FROM "
+            + table("control_zone_members")
+            + " WHERE zone_id IN (SELECT id FROM "
+            + table("control_zones")
+            + " WHERE operator_id = ?)";
+    String zones = "DELETE FROM " + table("control_zones") + " WHERE operator_id = ?";
     String operator = "DELETE FROM " + table("operators") + " WHERE id = ?";
     try {
       inTransaction(
           connection -> {
-            for (String sql : List.of(members, operator)) {
+            for (String sql : List.of(members, zoneMembers, zones, operator)) {
               try (var statement = connection.prepareStatement(sql)) {
                 setUuid(statement, 1, id);
                 statement.executeUpdate();

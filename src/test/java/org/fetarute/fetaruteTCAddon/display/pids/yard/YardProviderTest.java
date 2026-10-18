@@ -32,7 +32,7 @@ import org.junit.jupiter.api.Test;
 /** 站场图数据：几何按图快照缓存；占用按角色着色；车身按车厢所在方块定位。 */
 class YardProviderTest {
 
-  private static final PidsStationKey ABC = new PidsStationKey("SURC", "ABC");
+  private static final YardScope ABC = YardScope.station(new PidsStationKey("SURC", "ABC"));
   private static final PidsLayout.Yard WIDGET = new PidsLayout.Yard(0, 32, 640, 232, 6, 10);
 
   private final AtomicReference<Optional<RailGraph>> graph =
@@ -55,8 +55,10 @@ class YardProviderTest {
 
     graph.set(Optional.of(YardFixtures.graph()));
     assertEquals(
-        Optional.of(YardPicture.Problem.STATION_NOT_IN_GRAPH),
-        provider.picture(new PidsStationKey("SURC", "NOPE"), WORLD, WIDGET).problem());
+        Optional.of(YardPicture.Problem.NOT_IN_GRAPH),
+        provider
+            .picture(YardScope.station(new PidsStationKey("SURC", "NOPE")), WORLD, WIDGET)
+            .problem());
   }
 
   @Test

@@ -671,6 +671,16 @@ final class JdbcRepositoryTest {
         List.of("status-3x5"),
         provider.pidsScreens().findById(screenId).orElseThrow().pageLayoutIds());
 
+    // 旧表同样缺少 zone_code 列：补上后能存取控制区
+    provider
+        .pidsScreens()
+        .save(
+            combined
+                .withOperator("SURC", java.util.Set.of(), Instant.EPOCH)
+                .withZone(Optional.of("north"), Instant.EPOCH));
+    assertEquals(
+        Optional.of("NORTH"), provider.pidsScreens().findById(screenId).orElseThrow().zone());
+
     // 不认识 page_layouts 的旧版本改了主布局：清单第一项对不上，不再沿用旧的翻页
     try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
         var statement = connection.createStatement()) {

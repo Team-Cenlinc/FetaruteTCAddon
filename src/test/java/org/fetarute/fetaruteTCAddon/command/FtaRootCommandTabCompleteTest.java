@@ -21,7 +21,7 @@ class FtaRootCommandTabCompleteTest {
 
     assertEquals(
         java.util.List.of(
-            "info", "help", "company", "operator", "line", "route", "station", "pids"),
+            "info", "help", "company", "operator", "line", "route", "station", "pids", "signal"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {}));
   }
 
@@ -45,6 +45,7 @@ class FtaRootCommandTabCompleteTest {
             "route",
             "station",
             "pids",
+            "signal",
             "graph",
             "reload"),
         root.onTabComplete(sender, Mockito.mock(Command.class), "fta", new String[] {""}));

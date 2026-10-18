@@ -11,8 +11,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
  *
  * @param theme 配色
  * @param clock 当前时间（{@code HH:mm}）
- * @param station 站名
+ * @param title 标题：站名，绑了控制区时为控制区名
  * @param legend 图例文案
+ * @param track 站台块里的股道号，{@code <track>} 处换成股道号（如“1 道”）
  * @param picture 站场图
  * @param message 画不出来时写在站场图中间的说明
  * @param note 有区间用直线代替时写在站场图左下角的说明
@@ -20,8 +21,9 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
 public record PidsYardView(
     PidsTheme theme,
     String clock,
-    Names station,
+    Names title,
     Legend legend,
+    Names track,
     YardPicture picture,
     Optional<Names> message,
     Optional<Names> note) {
@@ -29,8 +31,9 @@ public record PidsYardView(
   public PidsYardView {
     Objects.requireNonNull(theme, "theme");
     Objects.requireNonNull(clock, "clock");
-    Objects.requireNonNull(station, "station");
+    Objects.requireNonNull(title, "title");
     Objects.requireNonNull(legend, "legend");
+    Objects.requireNonNull(track, "track");
     Objects.requireNonNull(picture, "picture");
     message = message == null ? Optional.empty() : message;
     note = note == null ? Optional.empty() : note;
@@ -44,8 +47,15 @@ public record PidsYardView(
    * @param held 保护占用
    * @param occupied 车占用
    * @param train 车次窗
+   * @param platform 站台
    * @param note 车次窗颜色说明
    */
   public record Legend(
-      Names free, Names route, Names held, Names occupied, Names train, Names note) {}
+      Names free,
+      Names route,
+      Names held,
+      Names occupied,
+      Names train,
+      Names platform,
+      Names note) {}
 }

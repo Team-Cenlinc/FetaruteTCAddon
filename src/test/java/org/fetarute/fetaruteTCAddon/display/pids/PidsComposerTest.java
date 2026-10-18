@@ -48,7 +48,11 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Names;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.view.PidsYardView;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardZones;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -922,18 +926,18 @@ class PidsComposerTest {
         Optional.of(new Names("调度图未就绪", "Rail graph not ready")),
         assertInstanceOf(PidsComposer.YardKey.class, idle.key()).view().message());
 
-    YardPicture picture = YardPicture.unavailable(YardPicture.Problem.STATION_NOT_IN_GRAPH);
-    List<PidsStationKey> asked = new ArrayList<>();
+    YardPicture picture = YardPicture.unavailable(YardPicture.Problem.NOT_IN_GRAPH);
+    List<YardScope> asked = new ArrayList<>();
     composer.setYards(
-        (station, world, widget) -> {
-          asked.add(station);
+        (scope, world, widget) -> {
+          asked.add(scope);
           return picture;
         });
     PidsContent first = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
     PidsContent second = composer.content(Optional.of(screen.id()), 640, 384).orElseThrow();
 
     assertEquals(first.key(), second.key(), "站场图没变，画面不重发");
-    assertEquals(List.of(HHU, HHU), asked);
+    assertEquals(List.of(YardScope.station(HHU), YardScope.station(HHU)), asked);
     assertEquals(640, first.image().get().getWidth());
     assertEquals(0, snapshotCalls, "不取到发快照");
   }
@@ -962,6 +966,47 @@ class PidsComposerTest {
     assertInstanceOf(
         PidsTestCard.class,
         composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key());
+  }
+
+  /** 绑了控制区的站场图屏：按控制区成员取站场图，标题写控制区名；控制区找不到时写说明，不取站场图。 */
+  @Test
+  void yardScreensBoundToAZoneDrawTheZone() {
+    PidsScreen screen =
+        registerPaged(PidsScreen.Mode.LIVE, "yard-3x5")
+            .withOperator(HHU.operatorCode(), Set.of(), NOW)
+            .withZone(Optional.of("north"), NOW);
+    registry.put(screen);
+    List<YardScope> asked = new ArrayList<>();
+    composer.setYards(
+        (scope, world, widget) -> {
+          asked.add(scope);
+          return YardPicture.unavailable(YardPicture.Problem.NOT_IN_GRAPH);
+        });
+
+    PidsYardView missing =
+        assertInstanceOf(
+                PidsComposer.YardKey.class,
+                composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+            .view();
+    assertEquals(new Names("NORTH", ""), missing.title());
+    assertEquals(Optional.of(new Names("未找到绑定的控制区", "Control zone not found")), missing.message());
+    assertTrue(asked.isEmpty(), "控制区找不到时不取站场图");
+
+    YardScope scope =
+        new YardScope(
+            "SURC", List.of(YardArea.Member.station("HHU"), YardArea.Member.depot("HHD")));
+    composer.setControlZones(
+        (operator, code) ->
+            operator.equals("SURC") && code.equals("NORTH")
+                ? Optional.of(new PidsYardZones.Zone("北区", Optional.of("North"), scope))
+                : Optional.empty());
+    PidsYardView found =
+        assertInstanceOf(
+                PidsComposer.YardKey.class,
+                composer.content(Optional.of(screen.id()), 640, 384).orElseThrow().key())
+            .view();
+    assertEquals(new Names("北区", "North"), found.title());
+    assertEquals(List.of(scope), asked);
   }
 
   private PidsScreen registerPaged(PidsScreen.Mode mode, String... layouts) {

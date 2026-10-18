@@ -90,6 +90,66 @@ public final class YardFixtures {
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }
 
+  public static final NodeId SW_FAR = NodeId.of("SWITCHER:world:30:64:10");
+
+  /** 1 道向东偏南拐出一条原版铁轨的斜线：每走 3 格横移 1 格，拐角处是直角台阶。 */
+  public static SimpleRailGraph staircase() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, SW_FAR, NodeType.SWITCHER, 30, 10, false);
+    List<int[]> cells = new ArrayList<>();
+    for (int x = 0; x <= 30; x++) {
+      if (x > 0 && x % 3 == 0) {
+        cells.add(new int[] {x, x / 3 - 1});
+      }
+      cells.add(new int[] {x, x / 3});
+    }
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, SW_FAR, cells, false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /** 两条平行的站台股道，各向东接一段 40 格的直线到无名目的地节点；两股道真实间距为 {@code gap} 格（1 道在北）。 */
+  public static SimpleRailGraph twoPlatforms(int gap) {
+    NodeId end1 = NodeId.of("END-1");
+    NodeId end2 = NodeId.of("END-2");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, P2, NodeType.STATION, 0, gap, false);
+    node(nodes, end1, NodeType.DESTINATION, 40, 0, false);
+    node(nodes, end2, NodeType.DESTINATION, 40, gap, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, end1, straight(0, 40, 0), false);
+    edge(edges, footprints, Set.of(), P2, end2, straight(0, 40, gap), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId D1 = NodeId.of("SURC:D:DEP:1");
+  public static final NodeId Q1 = NodeId.of("SURC:S:DEF:1");
+  public static final NodeId IC = NodeId.of("SURC:DEF:GHI:1:01");
+
+  /** 一条东西向的直线：车库 DEP 1 道 ─ ABC 1 道 ─ 区间点 IB（ABC→DEF）─ DEF 1 道 ─ 区间点 IC（DEF→GHI）。 */
+  public static SimpleRailGraph corridor() {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, D1, NodeType.DEPOT, -60, 0, false);
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, IB, NodeType.WAYPOINT, 100, 0, false);
+    node(nodes, Q1, NodeType.STATION, 200, 0, false);
+    node(nodes, IC, NodeType.WAYPOINT, 300, 0, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), D1, P1, straight(-60, 0, 0), false);
+    edge(edges, footprints, Set.of(), P1, IB, straight(0, 100, 0), false);
+    edge(edges, footprints, Set.of(), IB, Q1, straight(100, 200, 0), false);
+    edge(edges, footprints, Set.of(), Q1, IC, straight(200, 300, 0), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
   /** 东西向时 SW1–P2 的轨道方块（含斜向台阶）。 */
   static List<int[]> westTurnout() {
     List<int[]> cells = new ArrayList<>();

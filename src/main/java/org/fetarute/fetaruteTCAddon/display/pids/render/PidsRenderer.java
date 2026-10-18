@@ -1074,7 +1074,7 @@ public final class PidsRenderer {
             if (widget instanceof PidsLayout.Clock clock) {
               drawClock(p, clock, view.clock());
             } else if (widget instanceof PidsLayout.StationTitle title) {
-              drawStationTitle(p, title, view.station());
+              drawStationTitle(p, title, view.title());
             } else if (widget instanceof PidsLayout.Yard diagram) {
               yard.draw(diagram, view);
             } else if (widget instanceof PidsLayout.YardLegend legend) {

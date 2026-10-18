@@ -190,6 +190,7 @@ public final class StorageManager {
     ensureTimetableDutyCouplingColumns(connection);
     ensurePidsScreenPagesColumn(connection);
     ensurePidsScreenRotationColumn(connection);
+    ensurePidsScreenZoneColumn(connection);
     migrateLicenseClassIds(connection);
   }
 
@@ -288,6 +289,25 @@ public final class StorageManager {
       logger.warn("应用兼容性迁移失败: 添加 pids_screens.rotation_operators: " + ex.getMessage());
     } catch (Exception ex) {
       logger.warn("应用兼容性迁移失败: 添加 pids_screens.rotation_operators: " + ex.getMessage());
+    }
+  }
+
+  /** 兼容性迁移：为旧版 pids_screens 补齐 zone_code 列（站场图屏绑定的控制区；旧表为空，只画绑定的车站）。 */
+  private void ensurePidsScreenZoneColumn(java.sql.Connection connection) {
+    String screensTable = storageSchema.tablePrefix() + "pids_screens";
+    String sql = "ALTER TABLE " + screensTable + " ADD COLUMN zone_code " + dialect.stringType();
+    try (var statement = connection.createStatement()) {
+      statement.executeUpdate(sql);
+      logger.debug("已应用兼容性迁移: pids_screens.zone_code (added)");
+    } catch (java.sql.SQLException ex) {
+      String message =
+          ex.getMessage() == null ? "" : ex.getMessage().toLowerCase(java.util.Locale.ROOT);
+      if (message.contains("duplicate") || message.contains("already exists")) {
+        return;
+      }
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.zone_code: " + ex.getMessage());
+    } catch (Exception ex) {
+      logger.warn("应用兼容性迁移失败: 添加 pids_screens.zone_code: " + ex.getMessage());
     }
   }
 

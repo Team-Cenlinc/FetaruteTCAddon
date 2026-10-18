@@ -4,6 +4,7 @@ import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.ControlZoneRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
@@ -45,6 +46,9 @@ public interface StorageProvider extends AutoCloseable {
   StationRepository stations();
 
   StationGroupRepository stationGroups();
+
+  /** 控制区（信号员与站场图的管辖范围）。 */
+  ControlZoneRepository controlZones();
 
   RouteRepository routes();
 

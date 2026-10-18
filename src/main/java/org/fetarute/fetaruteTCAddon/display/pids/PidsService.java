@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.api.event.TimetableTripAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TimetableTripCancelledEvent;
 import org.fetarute.fetaruteTCAddon.api.event.TrainPlatformAssignedEvent;
 import org.fetarute.fetaruteTCAddon.api.graph.GraphApi;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.RailGraphService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyManager;
 import org.fetarute.fetaruteTCAddon.display.pids.announce.PidsAnnouncer;
@@ -61,8 +62,11 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsLineStatusViews;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsViewBuilder;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsVocabulary;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.PidsYardZones;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.TrainCartsYardTrains;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardArea;
 import org.fetarute.fetaruteTCAddon.display.pids.yard.YardProvider;
+import org.fetarute.fetaruteTCAddon.display.pids.yard.YardScope;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageException;
 import org.fetarute.fetaruteTCAddon.storage.api.StorageProvider;
 import org.fetarute.fetaruteTCAddon.utils.LocaleManager;
@@ -123,6 +127,9 @@ public final class PidsService {
   private final ApiPidsDirectory directory;
   private final PidsSnapshotProvider snapshots;
 
+  /** 控制区目录：站场图屏绑控制区时查成员与名称；不在本插件里运行（测试）时为空目录。 */
+  private final ControlZoneDirectory controlZones;
+
   /** 最近的站台变更：站台屏的行与站台广播共用。 */
   private final PidsPlatformChanges platformChanges = new PidsPlatformChanges();
 
@@ -167,6 +174,10 @@ public final class PidsService {
     this.directory =
         new ApiPidsDirectory(
             api.operators(), api.lines(), api.stations(), api.routes(), api.graph(), logger::warn);
+    this.controlZones =
+        plugin instanceof org.fetarute.fetaruteTCAddon.FetaruteTCAddon addon
+            ? addon.getControlZoneDirectory()
+            : new ControlZoneDirectory();
     this.snapshots =
         new PidsSnapshotProvider(
             api.eta(),
@@ -231,6 +242,20 @@ public final class PidsService {
                       directory.line(operator, line).map(PidsDirectory.LineStyle::color)),
               stationId -> directory.stationName(stationId).map(PidsView.Names::primary)));
     }
+    composer.setControlZones(
+        (operator, code) ->
+            controlZones
+                .find(operator, code)
+                .map(
+                    found ->
+                        new PidsYardZones.Zone(
+                            found.zone().name(),
+                            found.zone().secondaryName(),
+                            new YardScope(
+                                found.operatorCode(),
+                                found.members().stream()
+                                    .map(m -> new YardArea.Member(m.kind(), m.code()))
+                                    .toList()))));
     this.items = new PidsItems(plugin, locale);
     this.frames = new PidsFrames(plugin);
     this.access = new PidsAccess(storage, () -> api.operators().listAllOperators(), logger::warn);
@@ -781,6 +806,21 @@ public final class PidsService {
   public boolean isLineStatus(PidsScreen screen) {
     List<PidsLayout> pages = pagesOf(screen);
     return !pages.isEmpty() && pages.stream().allMatch(layout -> layout.lineStatus().isPresent());
+  }
+
+  /** 主布局是站场图（只有一页，不能组合翻页）。 */
+  public boolean isYard(PidsScreen screen) {
+    return layoutOf(screen).flatMap(PidsLayout::yard).isPresent();
+  }
+
+  /** 屏幕所属运营商名下的控制区，按代码排序；屏幕没有所属运营商时为空。 */
+  public List<ControlZoneDirectory.Zone> zoneChoices(PidsScreen screen) {
+    return screen.operatorCode().map(controlZones::listByOperator).orElse(List.of());
+  }
+
+  /** 按运营商代码与控制区代码查找（都不分大小写）。 */
+  public Optional<ControlZoneDirectory.Zone> findZone(String operatorCode, String zoneCode) {
+    return controlZones.find(operatorCode, zoneCode);
   }
 
   /** 屏幕所用布局对站台数的上限（见 {@link PidsPlatformSelection#limit}）；布局缺失时按车站统屏处理。 */

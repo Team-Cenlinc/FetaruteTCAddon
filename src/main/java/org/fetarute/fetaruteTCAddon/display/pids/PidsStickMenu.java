@@ -15,6 +15,7 @@ import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.World;
 import org.bukkit.command.CommandSender;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
 import org.fetarute.fetaruteTCAddon.display.pids.layout.PidsLayout;
 import org.fetarute.fetaruteTCAddon.display.pids.screen.PidsScreen;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView;
@@ -64,8 +65,9 @@ public final class PidsStickMenu {
     sender.sendMessage(stations);
 
     boolean lineStatus = service.isLineStatus(screen);
-    if (lineStatus) {
-      // 线路运行状况屏可以不绑车站、只绑运营商（例如挂在大厅里）。
+    boolean yard = service.isYard(screen);
+    if (lineStatus || yard) {
+      // 线路运行状况屏可以不绑车站、只绑运营商（例如挂在大厅里）；站场图屏只绑运营商时再选控制区。
       Component operators = label("pids.menu.operator");
       for (String operator : service.operatorChoices(sender, screen, OPERATOR_CHOICES)) {
         operators =
@@ -86,7 +88,9 @@ public final class PidsStickMenu {
       sender.sendMessage(operators);
     }
     rotationRow(service, screen, set).ifPresent(sender::sendMessage);
-    if (screen.station().isPresent() && !lineStatus) {
+    if (yard) {
+      sender.sendMessage(zoneRow(service, screen, set));
+    } else if (screen.station().isPresent() && !lineStatus) {
       sender.sendMessage(platformRow(service, screen, screen.station().get(), set));
       sender.sendMessage(lineRow(service, screen, set));
     } else if (lineStatus && screen.operatorCode().isPresent()) {
@@ -169,6 +173,20 @@ public final class PidsStickMenu {
           locale.component(
               "pids.info.rotation", Map.of("operators", String.join(" → ", screen.rotation()))));
     }
+    screen
+        .zone()
+        .ifPresent(
+            code ->
+                sender.sendMessage(
+                    locale.component(
+                        "pids.info.zone",
+                        Map.of(
+                            "zone",
+                            screen
+                                .operatorCode()
+                                .flatMap(operator -> service.findZone(operator, code))
+                                .map(zone -> zone.zone().name() + "（" + code + "）")
+                                .orElse(code)))));
     sender.sendMessage(
         locale.component(
             "pids.info.location",
@@ -251,6 +269,31 @@ public final class PidsStickMenu {
                             .orElse(operator))
                     .replace("<code>", operator))
         .orElseGet(() -> locale.text("command.pids.list.unbound"));
+  }
+
+  /** 站场图屏的控制区：不绑定，或屏幕所属运营商名下的控制区之一。 */
+  private Component zoneRow(PidsService service, PidsScreen screen, String set) {
+    Component row = label("pids.menu.zone");
+    if (screen.operatorCode().isEmpty()) {
+      return row.append(locale.component("pids.menu.need-binding"));
+    }
+    row =
+        row.append(
+            button(
+                locale.text("pids.menu.zone-none"),
+                screen.zone().isEmpty(),
+                null,
+                set + "zone " + PidsScreen.NONE));
+    for (ControlZoneDirectory.Zone zone : service.zoneChoices(screen)) {
+      row =
+          row.append(
+              button(
+                  zone.zone().name(),
+                  screen.zone().equals(Optional.of(zone.code())),
+                  null,
+                  set + "zone " + zone.code()));
+    }
+    return row.append(suggest(locale.text("pids.menu.station-manual"), set + "zone "));
   }
 
   /**

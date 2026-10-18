@@ -36,6 +36,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaPidsBulletinCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaPidsCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRootCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaRouteCommand;
+import org.fetarute.fetaruteTCAddon.command.FtaSignalCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpawnCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaSpeedCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaStationCommand;
@@ -45,6 +46,7 @@ import org.fetarute.fetaruteTCAddon.command.FtaTemplateCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTimetableCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTrainCommand;
 import org.fetarute.fetaruteTCAddon.command.FtaTripCommand;
+import org.fetarute.fetaruteTCAddon.company.api.ControlZoneDirectory;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.api.StationGroupChange;
 import org.fetarute.fetaruteTCAddon.company.model.Line;
@@ -178,6 +180,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
       new java.util.concurrent.atomic.AtomicLong();
 
   private volatile StationDirectory stationDirectory;
+  private final ControlZoneDirectory controlZoneDirectory = new ControlZoneDirectory();
   private RouteProgressRegistry routeProgressRegistry;
   private LayoverRegistry layoverRegistry;
   private DwellRegistry dwellRegistry;
@@ -886,6 +889,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     new FtaRouteCommand(this).register(commandManager);
     new FtaStationCommand(this).register(commandManager);
     new FtaStationGroupCommand(this).register(commandManager);
+    new FtaSignalCommand(this).register(commandManager);
     new FtaDepotCommand(this).register(commandManager);
     new FtaEtaCommand(this).register(commandManager);
     new FtaOccupancyCommand(this).register(commandManager);
@@ -1081,6 +1085,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
               provider -> {
                 routeDefinitionCache.reload(provider);
                 stationDirectory.reload(provider);
+                controlZoneDirectory.reload(provider);
               });
     }
   }
@@ -1151,13 +1156,27 @@ public final class FetaruteTCAddon extends JavaPlugin {
   /**
    * 车站、线路、运营商或车站组改库之后调用：重读车站目录的主数据并重建索引，公开 API 数据版本随之递增。
    *
-   * <p>交路变化不需要调用它——交路缓存刷新时车站目录会自动重算。
+   * <p>删公司、删运营商会连带删掉控制区，所以这里也一并重读控制区目录。交路变化不需要调用它——交路缓存刷新时车站目录会自动重算。
    */
   public void refreshStationDirectory() {
     if (stationDirectory == null || storageManager == null || !storageManager.isReady()) {
       return;
     }
     storageManager.provider().ifPresent(stationDirectory::reload);
+    refreshControlZones();
+  }
+
+  /** 控制区目录（站场图屏按它找控制区的成员与名称）。 */
+  public ControlZoneDirectory getControlZoneDirectory() {
+    return controlZoneDirectory;
+  }
+
+  /** 控制区改库之后调用：重读控制区目录。 */
+  public void refreshControlZones() {
+    if (storageManager == null || !storageManager.isReady()) {
+      return;
+    }
+    storageManager.provider().ifPresent(controlZoneDirectory::reload);
   }
 
   /**

@@ -5,6 +5,7 @@ import org.fetarute.fetaruteTCAddon.call.repository.PendingCallRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberInviteRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyMemberRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.CompanyRepository;
+import org.fetarute.fetaruteTCAddon.company.repository.ControlZoneRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.LineRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.OperatorRepository;
 import org.fetarute.fetaruteTCAddon.company.repository.PlayerIdentityRepository;
@@ -94,6 +95,11 @@ public final class UnavailableStorageProvider implements StorageProvider {
   @Override
   public StationGroupRepository stationGroups() {
     return unsupported(StationGroupRepository.class);
+  }
+
+  @Override
+  public ControlZoneRepository controlZones() {
+    return unsupported(ControlZoneRepository.class);
   }
 
   @Override
