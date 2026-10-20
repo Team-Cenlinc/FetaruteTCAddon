@@ -303,6 +303,7 @@ public final class FetaruteTCAddon extends JavaPlugin {
     org.fetarute.fetaruteTCAddon.api.FetaruteApi.shutdown();
     beginRuntimeDispatchShutdown();
     unregisterSignActions();
+    org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationExitPoints.clear();
     if (signalEventBus != null) {
       signalEventBus.clear();
       signalEventBus = null;
@@ -940,6 +941,11 @@ public final class FetaruteTCAddon extends JavaPlugin {
     stopMarkTask = getServer().getScheduler().runTaskTimer(this, marks::tick, 1L, 1L);
     this.stopMarkSignAction = new StopMarkSignAction(stopMarkIndex, localeManager);
     SignAction.register(stopMarkSignAction);
+    // 停站开门期间按牌子写的下车方位直接定乘客的落点
+    getServer()
+        .getPluginManager()
+        .registerEvents(
+            new org.fetarute.fetaruteTCAddon.dispatcher.sign.action.StationExitPoints(), this);
     // 本插件的发车动作随列车保存：区块卸载再加载后按原速度接着加速，不丢动作。
     CurveLaunchAction.registerSerializer(TrainCarts.plugin);
     preloadSignNodeRegistryFromStorage();
@@ -1223,10 +1229,12 @@ public final class FetaruteTCAddon extends JavaPlugin {
         .getPluginManager()
         .registerEvents(
             // 联挂否决是异常证据，走 WARN 而不是受 debug 开关和观察预算约束的诊断通道；监听器已按列车对限流。
+            // 受管列车车厢或编组消失的现场证据量大，走 debug。
             RuntimeDispatchListener.withDiagnostics(
                 runtimeDispatchService,
                 loggerManager::warn,
-                railGraphService::isOutsideRetainedStaleSnapshot),
+                railGraphService::isOutsideRetainedStaleSnapshot,
+                loggerManager.debugSink()),
             this);
     initCouplerService();
     initEtaService();

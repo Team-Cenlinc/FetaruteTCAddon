@@ -40,7 +40,7 @@ import org.fetarute.fetaruteTCAddon.utils.StableCollections;
  *
  * <ul>
  *   <li>长时间静止（stall）：有 PROCEED 信号但速度为 0（排除正在停站的列车）
- *   <li>进度不推进：route 索引与最近经过图节点均长时间不变化（排除正在停站的列车）
+ *   <li>进度不推进：route 索引与最近经过图节点均长时间不变化（排除正在停站与终点待命的列车）
  * </ul>
  *
  * <p>自动修复采用分级策略（带冷却）：
@@ -539,6 +539,19 @@ public final class TrainHealthMonitor {
     return stationStops != null && stationStops.holdingForSchedule(trainName);
   }
 
+  /**
+   * 终点待命：已登记 layover、停着等开出下一趟（含解编后留在中途站待命的车）。
+   *
+   * <p>与互卡判定、停滞清车用同一个判据（{@link RuntimeDispatchService.DeadlockTrainContext#layoverReady}）。
+   * 读不到上下文时按不在待命处理，照常检测。
+   */
+  private boolean inLayoverHold(String trainName) {
+    return dispatchService
+        .deadlockTrainContext(trainName)
+        .map(RuntimeDispatchService.DeadlockTrainContext::layoverReady)
+        .orElse(false);
+  }
+
   /** 替换控制权（测试用）。 */
   void setControlAuthority(ControlAuthority authority) {
     this.controlAuthority = authority == null ? ControlAuthority.NONE : authority;
@@ -927,6 +940,23 @@ public final class TrainHealthMonitor {
       if (inControlledStationStop(trainName)) {
         // Dwell 是受控停车，不应计入下一段 STOP 的互卡/停滞年龄。每次采样都把两个时钟锚定到当前时刻，
         // 这样停站结束后的短暂信号重算窗口会从零开始观察。
+        snapshots.put(
+            key,
+            new TrainSnapshot(
+                currentProgress, currentGraphNode, currentSignal, currentSpeed, now, now, now));
+        recovery.resetStall();
+        recovery.resetProgress();
+        recovery.resetDeadlock();
+        if (endCreepRecovered(trainName, recovery, now)) {
+          fixedCount++;
+        }
+        recovery.endCreep();
+        continue;
+      }
+      // 终点待命（已登记 layover、停着等开出下一趟）：静止和进度不变同样是计划内的，开出由发车与回收负责，
+      // 恢复动作对它无效。不发停滞告警、不派恢复动作、不进停滞清车与销毁兜底，时钟与受控停站一样锚定到当前，开出后从零观察。
+      // 互卡判定两侧都不收待命车（isEligibleDeadlockContext），与它成对的车的判定只看自己的时钟，跳过不改变互卡处理。
+      if (!isMoving && inLayoverHold(trainName)) {
         snapshots.put(
             key,
             new TrainSnapshot(

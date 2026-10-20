@@ -5,14 +5,12 @@ import com.bergerkiller.bukkit.tc.attachments.api.Attachment;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.events.SignActionEvent;
-import com.bergerkiller.bukkit.tc.properties.CartProperties;
+import com.bergerkiller.bukkit.tc.events.SignChangeActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
-import com.bergerkiller.bukkit.tc.properties.standard.type.ExitOffset;
 import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashSet;
-import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
@@ -115,6 +113,10 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   private static final double EXIT_OFFSET_DISTANCE_BLOCKS = 3.0;
   private static final double HORIZONTAL_DIAGONAL_MIN_RATIO = Math.tan(Math.PI / 8.0);
 
+  /** 第 4 行缺少开门方向的告警记录：按服务器进程计，同一节点只告警一次。 */
+  private static final MissingDoorDirectionWarnings MISSING_DOOR_DIRECTION_WARNINGS =
+      new MissingDoorDirectionWarnings();
+
   private final FetaruteTCAddon plugin;
 
   public AutoStationSignAction(
@@ -154,6 +156,21 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
                 .orElse(false));
   }
 
+  /** 建牌：节点注册后，第 4 行缺少有效开门方向时当场提醒建牌者（显式写 NONE 的不提醒）。 */
+  @Override
+  public boolean build(SignChangeActionEvent event) {
+    boolean handled = super.build(event);
+    if (handled
+        && !event.isCancelled()
+        && event.getPlayer() != null
+        && locale() != null
+        && registry.get(event.getBlock()).isPresent()
+        && AutoStationDoorDirection.isMissing(event.getLine(3))) {
+      event.getPlayer().sendMessage(locale().component("sign.autostation-door-missing"));
+    }
+    return handled;
+  }
+
   private Optional<SignNodeDefinition> parseFromLines(String line2, String line3) {
     Optional<SignNodeDefinition> parsed = SignTextParser.parseWaypointLike(line2, NodeType.STATION);
     if (parsed.isPresent()) {
@@ -167,6 +184,17 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
       return SignTextParser.parseWaypointLike(line2.trim() + line3.trim(), NodeType.STATION);
     }
     return Optional.empty();
+  }
+
+  /** 第 4 行未写有效开门方向的站台：停站时写 WARN 提示补上方向，同一节点只提示一次（显式写 NONE 的不提示）。 */
+  private void warnMissingDoorDirection(
+      SignNodeDefinition definition, String doorLine, SignActionEvent info) {
+    if (plugin == null || plugin.getLoggerManager() == null) {
+      return;
+    }
+    MISSING_DOOR_DIRECTION_WARNINGS
+        .onStop(definition.nodeId().value(), doorLine, locationText(info))
+        .ifPresent(plugin.getLoggerManager()::warn);
   }
 
   /** 超级电容车停站结束降弓；排了降弓时记一笔调试日志，便于从日志核对。 */
@@ -294,7 +322,9 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     // 车上有车掌：车门归车掌。自动运行的车照样由站台对位停车，只把停站与站台侧交给车掌。
     boolean guardDoors = !driverControlled && guardOperatesDoors(properties);
     Optional<StopMarks.Selected> mark = stopMarkFor(info);
-    AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(info.getLine(3));
+    String doorLine = info.getLine(3);
+    AutoStationDoorDirection doorDirection = AutoStationDoorDirection.parse(doorLine);
+    warnMissingDoorDirection(definition, doorLine, info);
     DriverStationStop driverStop = null;
     int alignTicks = 0;
     // 开关门的车厢按车头对准的停车位置标选（此刻的车头就是行进方向上的第一节）；按车站牌子居中时全车开门。
@@ -851,7 +881,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
             dispatch ->
                 dispatch.acquireDepartureGate(trainName, stopSessionId, "autostation_dwell"));
     DoorCars doorCars = session == null ? DoorCars.ALL : session.cars();
-    ExitOffsetState exitOffsetState = ExitOffsetState.forDoorCars(group, doorCars);
+    StationExitState exitOffsetState = StationExitState.forDoorCars(group, doorCars);
     // 注意：先推进运行时到站状态，再添加 WaitState。常规中间站会在 departure gate 持有期间延迟写入
     // TrainCarts destination；终点/DSTY 等非延迟路径仍需要后续 stop + WaitState 兜住物理动作。
     if (timedOut) {
@@ -1167,17 +1197,13 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         return true;
       }
 
-      /** 乘客下车偏移：与自动开门时一样，朝站台一侧偏出车外。 */
+      /** 乘客下车点：按牌子写的开门方位，落到站台一侧。 */
       private void applyExitOffset() {
         if (exitOffsetState.applied()) {
           return;
         }
-        FacingResult current = resolveFacingDirectionResult(info);
-        BlockFace face = current.face() == null ? facingDirection : current.face();
-        Vector vector = current.vector() == null ? facingVector : current.vector();
         resolveExitFace(doorDirection)
-            .flatMap(exit -> buildExitOffset(exit, face, vector, EXIT_OFFSET_DISTANCE_BLOCKS))
-            .ifPresent(exitOffsetState::apply);
+            .ifPresent(exit -> exitOffsetState.apply(exit, EXIT_OFFSET_DISTANCE_BLOCKS));
       }
 
       @Override
@@ -1425,11 +1451,7 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
         }
         if (!exitOffsetState.applied()) {
           resolveExitFace(doorDirection)
-              .flatMap(
-                  face ->
-                      buildExitOffset(
-                          face, resolvedFacing, resolvedVector, EXIT_OFFSET_DISTANCE_BLOCKS))
-              .ifPresent(exitOffsetState::apply);
+              .ifPresent(face -> exitOffsetState.apply(face, EXIT_OFFSET_DISTANCE_BLOCKS));
         }
         if (cachedSession == null) {
           return;
@@ -2115,113 +2137,52 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
   }
 
   /**
-   * 构建出站偏移（ExitOffset）。
+   * 停站期间的下车点：开门时给开门的车厢登记牌子写的下车方位（{@link StationExitPoints}），发车前撤销。
    *
-   * <p>ExitOffset 是相对于列车本地坐标系的偏移（X=左右，Z=前后）。 根据列车朝向和开门方向计算乘客应该在列车的左侧还是右侧下车。
-   *
-   * @param doorFace 开门方向（世界方位）
-   * @param trainFacing 列车行进方向（世界方位）
-   * @param distance 偏移距离（方块数）
-   * @return 相对于列车的出站偏移
+   * <p>停车位置标只开其中几节车厢的门时，其余车厢可能停在站台外（隧道、墙边），那里的乘客照 TrainCarts 原本的落点下车，不推向站台一侧。
    */
-  private static Optional<ExitOffset> buildExitOffset(
-      BlockFace doorFace, BlockFace trainFacing, Vector trainFacingVector, double distance) {
-    if (doorFace == null || trainFacing == null || !Double.isFinite(distance) || distance <= 0.0) {
-      return Optional.empty();
-    }
-    // 计算开门方向相对于列车行进方向是左侧还是右侧。
-    Double localX = computeRelativeSide(trainFacing, trainFacingVector, doorFace, distance);
-    if (localX == null) {
-      return Optional.empty();
-    }
-    return Optional.of(ExitOffset.create(localX, 0.0, 0.0, Float.NaN, Float.NaN));
-  }
-
-  /**
-   * 计算开门方向相对于列车行进方向的左右偏移。
-   *
-   * @param trainFacing 列车行进方向
-   * @param doorFace 开门方向（世界方位）
-   * @param distance 偏移距离
-   * @return 正值=TrainCarts 本地 +X（左侧），负值=本地 -X（右侧），null=无法计算
-   */
-  static Double computeRelativeSide(BlockFace trainFacing, BlockFace doorFace, double distance) {
-    return computeRelativeSide(trainFacing, null, doorFace, distance);
-  }
-
-  static Double computeRelativeSide(
-      BlockFace trainFacing, Vector trainFacingVector, BlockFace doorFace, double distance) {
-    if (!Double.isFinite(distance) || distance <= 0.0) {
-      return null;
-    }
-    String side =
-        trainFacingVector == null
-            ? AutoStationDoorController.chooseSideNameByTravelFace(trainFacing, doorFace)
-            : AutoStationDoorController.chooseSideNameByTravelVector(trainFacingVector, doorFace);
-    // TrainCarts ExitOffset 本地坐标系：+X = 左侧，-X = 右侧（与直觉相反）。
-    if ("left".equals(side)) {
-      return distance;
-    }
-    if ("right".equals(side)) {
-      return -distance;
-    }
-    return null;
-  }
-
-  /**
-   * 停站期间的下车偏移：只改开门车厢的，发车前改回各节原来的值。
-   *
-   * <p>停车位置标只开其中几节车厢的门时，其余车厢可能停在站台外（隧道、墙边），那里的乘客按原来的偏移下车，不推向站台一侧。
-   */
-  static final class ExitOffsetState {
-    private final List<CartProperties> carts;
-    private final Map<CartProperties, ExitOffset> originals = new IdentityHashMap<>();
+  static final class StationExitState {
+    private final List<UUID> cars;
     private boolean applied;
 
     /**
-     * @param carts 开门车厢的属性
+     * @param cars 开门的车厢（车厢属性的 UUID）
      */
-    ExitOffsetState(List<CartProperties> carts) {
-      this.carts = List.copyOf(carts);
+    StationExitState(List<UUID> cars) {
+      this.cars = List.copyOf(cars);
     }
 
     /** 按停站时开门的车厢建立。 */
-    static ExitOffsetState forDoorCars(MinecartGroup group, DoorCars cars) {
-      List<CartProperties> carts = new ArrayList<>();
+    static StationExitState forDoorCars(MinecartGroup group, DoorCars doorCars) {
+      List<UUID> cars = new ArrayList<>();
       if (group != null) {
         for (MinecartMember<?> member : group) {
           if (member != null
-              && AutoStationDoorController.opensDoors(cars, member)
+              && AutoStationDoorController.opensDoors(doorCars, member)
               && member.getProperties() != null) {
-            carts.add(member.getProperties());
+            cars.add(member.getProperties().getUUID());
           }
         }
       }
-      return new ExitOffsetState(carts);
+      return new StationExitState(cars);
     }
 
     boolean applied() {
       return applied;
     }
 
-    void apply(ExitOffset offset) {
-      if (offset == null) {
-        return;
+    /** 开门的车厢下车时落到座位的 {@code exitFace} 一侧 {@code distance} 格外。 */
+    void apply(BlockFace exitFace, double distance) {
+      for (UUID cart : cars) {
+        applied |= StationExitPoints.open(this, cart, exitFace, distance);
       }
-      for (CartProperties cart : carts) {
-        originals.putIfAbsent(cart, cart.getExitOffset());
-        cart.setExitOffset(offset);
-      }
-      applied = true;
     }
 
     void restore() {
       if (!applied) {
         return;
       }
-      originals.forEach(
-          (cart, original) -> cart.setExitOffset(original != null ? original : ExitOffset.DEFAULT));
-      originals.clear();
+      cars.forEach(cart -> StationExitPoints.close(this, cart));
       applied = false;
     }
   }

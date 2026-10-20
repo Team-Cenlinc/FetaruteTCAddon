@@ -45,6 +45,21 @@ enum AutoStationDoorDirection {
     };
   }
 
+  /** 第 4 行是否显式写了 {@code NONE}（该站台不开门）。 */
+  static boolean isExplicitNone(String raw) {
+    return raw != null && "NONE".equals(raw.trim().toUpperCase(Locale.ROOT));
+  }
+
+  /**
+   * 第 4 行是否缺少有效的开门方向：空行或无法识别的值。
+   *
+   * <p>{@link #parse} 对这两种情况与显式写 {@code NONE} 一样回退为 {@link #NONE}，停站照常进行、只是不开门，现场很难察觉；
+   * 区分出来是为了提示建牌者补上方向。显式写 {@code NONE} 的站台不算缺少。
+   */
+  static boolean isMissing(String raw) {
+    return parse(raw) == NONE && !isExplicitNone(raw);
+  }
+
   /**
    * 将方向转成世界方位，用于与列车行进方向推算左右门。
    *

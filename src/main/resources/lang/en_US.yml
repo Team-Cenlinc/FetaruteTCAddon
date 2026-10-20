@@ -1709,6 +1709,8 @@ drive:
     confirm: "<prefix> <yellow>Press Shift again within 2 seconds to leave the seat; this trip will then count as abandoned</yellow>"
     confirm-terminal: "<prefix> <yellow>You are at the terminus: open the doors first to score this trip, then leave the seat to change ends; leaving now abandons the trip. Press Shift again within 2 seconds to leave</yellow>"
 sign:
+  # AutoStation sign line 4 is blank or unrecognised: the doors will not open at this stop
+  autostation-door-missing: "<prefix> <yellow>Line 4 has no valid door direction; trains stopping here will not open their doors.</yellow>\n<gray>Write the world direction of the doors (N/E/S/W/NE/NW/SE/SW) or BOTH; write NONE if this platform has no doors to open.</gray>"
   stopmark:
     created: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the front end of a <white><carriages></white>-car train stops here"
     created-doors: "<prefix> <dark_aqua>Stop mark set:</dark_aqua> the front end of a <white><carriages></white>-car train stops here; only car(s) <white><doors></white>, counted from the head, open their doors"

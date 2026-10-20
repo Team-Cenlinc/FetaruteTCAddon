@@ -104,6 +104,8 @@ display:
 
 sign:
   created: "<prefix> <dark_aqua>已注册</dark_aqua> <white><type></white> <dark_aqua>节点</dark_aqua> <white><node></white>"
+  # AutoStation 牌子第 4 行为空或无法识别：停站不会开门
+  autostation-door-missing: "<prefix> <yellow>第 4 行未填写有效的开门方向，列车在此停站时不会开门。</yellow>\n<gray>请填写开门的世界方向（N/E/S/W/NE/NW/SE/SW）或 BOTH；该站台不开门请填写 NONE。</gray>"
   invalid:
     generic: "<prefix> <red>节点格式无效</red>"
     waypoint: "<prefix> <red>区间点格式无效</red> <gray>Waypoint: Operator:From:To:Track:Seq</gray>"
