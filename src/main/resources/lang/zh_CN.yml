@@ -1886,6 +1886,11 @@ pids:
       # 站台块里的股道号
       track: "<track> 道"
       track-secondary: "Track <track>"
+      # 车库：虚线框（库线多时为面板）左上角的库名，<depot> 为车库所在站名或车库代码；库线尽头的库线号
+      depot: "<depot>车库"
+      depot-secondary: "<depot> Depot"
+      depot-track: "库 <track>"
+      depot-track-secondary: "Road <track>"
       no-graph: "调度图未就绪"
       no-graph-secondary: "Rail graph not ready"
       not-in-graph: "调度图里没有本站场的站台或股道节点"

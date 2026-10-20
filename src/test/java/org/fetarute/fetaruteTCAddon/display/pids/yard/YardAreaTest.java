@@ -125,6 +125,7 @@ class YardAreaTest {
         area.exits().stream()
             .collect(Collectors.toMap(YardArea.Exit::edge, YardArea.Exit::towards)));
     assertEquals(List.of(new YardArea.Track(P1, "1", "ABC")), area.tracks(), "车库股道不画站台");
+    assertEquals(List.of(new YardArea.Track(D1, "1", "DEP")), area.depotTracks(), "库线另列");
   }
 
   /** 一条线在另一条线的区间中途岔出：经别的区间与道岔把两站连起来，伸向 XYZ 的那段走不回区内，剪掉、记为出口。 */

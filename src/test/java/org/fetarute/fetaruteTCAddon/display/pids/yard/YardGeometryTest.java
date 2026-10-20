@@ -19,6 +19,7 @@ import java.util.Set;
 import java.util.stream.Collectors;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.EdgeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.SimpleRailGraph;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.junit.jupiter.api.Test;
 
 /** 站场图几何：股道画成水平的行，股道之间只用 45° 斜线；道岔在直股那一行，侧股从道岔处拐出。 */
@@ -220,6 +221,158 @@ class YardGeometryTest {
     assertEquals(2, geometry.platforms().size(), () -> "两块侧式站台: " + geometry.platforms());
   }
 
+  /** 经过点（只连两段直股的区间点）不单独占一列：按里程插在两头之间，长线不会被一串区间点拉长。 */
+  @Test
+  void passThroughWaypointsSitBetweenTheirNeighbours() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.corridor(),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.station("DEF"));
+    int abc = geometry.pointOf(cell(0, 0, false)).orElseThrow().x();
+    int def = geometry.pointOf(cell(200, 0, false)).orElseThrow().x();
+    int waypoint = geometry.pointOf(cell(100, 0, false)).orElseThrow().x();
+
+    assertEquals((abc + def) / 2.0, waypoint, 2.0, "区间点在两站的正中");
+  }
+
+  /** 照画库线的车库：和正线几乎垂直的库线也排在分岔道岔后面；记下库名与各条库线的尽头、车挡。 */
+  @Test
+  void depotTracksFanOutPastTheirSwitchAndAreLabelled() {
+    YardGeometry geometry =
+        zone(YardFixtures.depot(2), YardArea.Member.station("ABC"), YardArea.Member.depot("DEP"));
+    int fork =
+        path(geometry, EdgeId.undirected(P1, YardFixtures.depotSwitch(1))).segments().stream()
+            .mapToInt(s -> Math.max(s.x0(), s.x1()))
+            .max()
+            .orElseThrow();
+
+    assertEquals(1, geometry.depots().size());
+    YardGeometry.Depot depot = geometry.depots().get(0);
+    assertFalse(depot.panel());
+    assertEquals("DEP", depot.code());
+    assertEquals("DEP", depot.name(), "查不到站名时写代码");
+    assertEquals(
+        List.of("1", "2"), depot.tracks().stream().map(YardGeometry.DepotTrack::number).toList());
+    for (YardGeometry.DepotTrack track : depot.tracks()) {
+      assertTrue(track.buffer(), () -> "尽头是车挡: " + track);
+      assertTrue(track.end().x() > fork, () -> "库线排在分岔道岔后面: " + track + " 道岔 x=" + fork);
+      assertEquals(1, track.outward(), "库号写在尽头外侧");
+      assertTrue(
+          track.end().x() >= depot.left()
+              && track.end().x() <= depot.right()
+              && track.end().y() >= depot.top()
+              && track.end().y() <= depot.bottom(),
+          () -> "尽头在车库范围内: " + depot);
+    }
+  }
+
+  /** 库线超过 4 条的车库收成面板：库内不再照画，每条库线是面板里的一条短条，库线上的车厢落在短条上，库门里的道岔连线不画。 */
+  @Test
+  void depotsWithManyTracksCollapseIntoAPanel() {
+    YardGeometry geometry =
+        zone(YardFixtures.depot(5), YardArea.Member.station("ABC"), YardArea.Member.depot("DEP"));
+
+    assertEquals(1, geometry.depots().size());
+    YardGeometry.Depot depot = geometry.depots().get(0);
+    assertTrue(depot.panel());
+    assertEquals(
+        List.of("1", "2", "3", "4", "5"),
+        depot.tracks().stream().map(YardGeometry.DepotTrack::number).toList());
+    for (int k = 1; k <= 5; k++) {
+      EdgeId edge =
+          EdgeId.undirected(YardFixtures.depotSwitch(Math.min(k, 4)), YardFixtures.depotTrack(k));
+      List<YardGeometry.Segment> bar = path(geometry, edge).segments();
+      assertEquals(1, bar.size(), () -> "一条短条: " + bar);
+      YardGeometry.Segment s = bar.get(0);
+      assertEquals(s.y0(), s.y1(), "水平");
+      assertTrue(
+          s.x0() >= depot.left()
+              && s.x1() <= depot.right()
+              && s.y0() > depot.top()
+              && s.y0() < depot.bottom(),
+          () -> "短条在面板里: " + s + " " + depot);
+    }
+    YardGeometry.Point car = geometry.pointOf(cell(69, 20, false)).orElseThrow();
+    assertTrue(
+        car.x() >= depot.left()
+            && car.x() <= depot.right()
+            && car.y() > depot.top()
+            && car.y() < depot.bottom(),
+        () -> "库线 1 上的车厢落在面板里: " + car);
+    assertTrue(
+        geometry.paths().stream()
+            .noneMatch(
+                p ->
+                    p.edge()
+                        .equals(
+                            EdgeId.undirected(
+                                YardFixtures.depotSwitch(1), YardFixtures.depotSwitch(2)))),
+        "库门里的道岔连线不画");
+  }
+
+  /** 两头都通库外的大车库也收成面板：库门在链中间也照样定位，最后一条库线只朝库内画成短条。 */
+  @Test
+  void depotsOpenAtBothEndsStillCollapse() {
+    YardGeometry geometry =
+        zone(
+            YardFixtures.depot(5, true),
+            YardArea.Member.station("ABC"),
+            YardArea.Member.depot("DEP"));
+
+    assertEquals(1, geometry.depots().size());
+    YardGeometry.Depot depot = geometry.depots().get(0);
+    assertTrue(depot.panel());
+    assertEquals(5, depot.tracks().size());
+    List<YardGeometry.Segment> bar =
+        path(geometry, EdgeId.undirected(YardFixtures.depotSwitch(4), YardFixtures.depotTrack(5)))
+            .segments();
+    assertEquals(1, bar.size(), () -> "库线 5 画成一条短条: " + bar);
+    assertTrue(
+        bar.get(0).y0() > depot.top() && bar.get(0).y0() < depot.bottom(),
+        () -> "短条在面板里: " + bar + " " + depot);
+  }
+
+  /** 从一条和它垂直的联络线接进来的平行线：分不出顺逆时按脊线走向排，西头仍在左、东头仍在右。 */
+  @Test
+  void chainsJoinedByAPerpendicularLinkKeepTheirOrder() {
+    YardGeometry geometry = geometry(YardFixtures.perpendicularLink());
+
+    for (int z : new int[] {0, 12}) {
+      int west = geometry.pointOf(cell(5, z, false)).orElseThrow().x();
+      int east = geometry.pointOf(cell(95, z, false)).orElseThrow().x();
+      assertTrue(west < east, () -> "z=" + z + " 的线西在左: " + west + " / " + east);
+    }
+  }
+
+  /** V 形道岔（两条斜线朝同一边离开）：两条斜线都按 45° 画，在道岔那一点汇成 Y 形，不退成别的角度的斜线。 */
+  @Test
+  void vShapedSwitchesMergeAsAY() {
+    YardGeometry geometry = geometry(YardFixtures.scissors());
+    NodeId c1 = NodeId.of("SWITCHER:world:52:64:2");
+    NodeId c2 = NodeId.of("SWITCHER:world:68:64:2");
+    YardGeometry.Segment centre = path(geometry, EdgeId.undirected(c1, c2)).segments().get(0);
+    // 线段按横坐标排好，C1 在 C2 西边，所以中间那段的西端就是 C1
+    YardGeometry.Point join = new YardGeometry.Point(centre.x0(), centre.y0());
+
+    for (NodeId a :
+        List.of(NodeId.of("SWITCHER:world:40:64:0"), NodeId.of("SWITCHER:world:40:64:4"))) {
+      YardGeometry.Path arm = path(geometry, EdgeId.undirected(a, c1));
+      for (YardGeometry.Segment s : arm.segments()) {
+        int dx = Math.abs(s.x1() - s.x0());
+        int dy = Math.abs(s.y1() - s.y0());
+        assertTrue(dy == 0 || dx == dy, () -> arm.edge() + " 有不是 45° 的斜线: " + s);
+      }
+      assertTrue(
+          arm.segments().stream()
+              .anyMatch(
+                  s ->
+                      (s.x0() == join.x() && s.y0() == join.y())
+                          || (s.x1() == join.x() && s.y1() == join.y())),
+          () -> arm.edge() + " 汇到 C1 " + join + ": " + arm.segments());
+    }
+  }
+
   /** 两条站台股道中间夹着一条正线：隔得再宽也不是两线共用的一块岛式站台。 */
   @Test
   void aTrackInBetweenRulesOutAnIsland() {
@@ -312,7 +465,14 @@ class YardGeometryTest {
       for (YardGeometry.Path path : geometry.paths()) {
         for (YardGeometry.Segment s : path.segments()) {
           if (s.y0() == s.y1() && s.x0() != s.x1()) {
-            lines.add(new int[] {s.y0(), Math.min(s.x0(), s.x1()), Math.max(s.x0(), s.x1())});
+            // 末位记下这条区间是不是斜线带水平部分（多于一段），两条这样的线在同一点汇合成 Y 形是允许的
+            lines.add(
+                new int[] {
+                  s.y0(),
+                  Math.min(s.x0(), s.x1()),
+                  Math.max(s.x0(), s.x1()),
+                  path.segments().size() > 1 ? 1 : 0
+                });
             owners.add(path.edge());
           }
         }
@@ -322,6 +482,10 @@ class YardGeometryTest {
           int[] a = lines.get(i);
           int[] b = lines.get(j);
           if (owners.get(i).equals(owners.get(j)) || a[0] != b[0]) {
+            continue;
+          }
+          boolean merging = a[3] == 1 && b[3] == 1 && (a[1] == b[1] || a[2] == b[2]);
+          if (merging) {
             continue;
           }
           int shared = Math.min(a[2], b[2]) - Math.max(a[1], b[1]);
@@ -399,7 +563,10 @@ class YardGeometryTest {
         zone(
             YardFixtures.junction(),
             YardArea.Member.station("ABC"),
-            YardArea.Member.station("DEF")));
+            YardArea.Member.station("DEF")),
+        zone(YardFixtures.depot(2), YardArea.Member.station("ABC"), YardArea.Member.depot("DEP")),
+        geometry(YardFixtures.perpendicularLink()),
+        geometry(YardFixtures.scissors()));
   }
 
   private static YardGeometry.Path path(YardGeometry geometry, EdgeId edge) {

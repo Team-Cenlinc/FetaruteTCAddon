@@ -103,6 +103,72 @@ class PidsYardPainterTest {
     }
   }
 
+  /** 车库的虚线框、车挡、库名与面板也只用调色板里的颜色；照画的车库画出了虚线框。 */
+  @Test
+  void depotsUseOnlyPaletteColours() {
+    PidsTheme theme = PidsTheme.DARK;
+    Set<Integer> allowed =
+        Set.of(
+            theme.background(),
+            theme.panel(),
+            theme.text(),
+            theme.muted(),
+            theme.outline(),
+            theme.inverseMuted(),
+            theme.amber(),
+            theme.red(),
+            PidsYardPainter.HELD_DARK);
+    for (int tracks : new int[] {2, 5}) {
+      SimpleRailGraph graph = YardFixtures.depot(tracks);
+      YardArea area =
+          YardArea.of(
+                  graph,
+                  "SURC",
+                  List.of(YardArea.Member.station("ABC"), YardArea.Member.depot("DEP")))
+              .orElseThrow();
+      PidsLayout.Yard yard = layout.yard().orElseThrow();
+      YardGeometry geometry =
+          YardGeometry.of(
+              graph,
+              area,
+              graph.interlockingState().footprintCellsByEdge(),
+              new YardGeometry.Rect(
+                  yard.trackLeft(), yard.trackTop(), yard.trackWidth(), yard.trackHeight()),
+              code -> code);
+      BufferedImage image =
+          renderer.renderYard(
+              layout,
+              view(new YardPicture(Optional.of(geometry), List.of(), List.of(), Optional.empty())));
+
+      for (int y = 0; y < image.getHeight(); y++) {
+        for (int x = 0; x < image.getWidth(); x++) {
+          int rgb = image.getRGB(x, y) & 0xFFFFFF;
+          assertTrue(allowed.contains(rgb), () -> "出现调色板外的颜色: " + Integer.toHexString(rgb));
+        }
+      }
+      if (tracks == 2) {
+        // 虚线框的下沿在库线范围下方 6 像素，画 4 空 3：这一行上一段一段的虚线占大约七分之四
+        YardGeometry.Depot depot = geometry.depots().get(0);
+        int y = depot.bottom() + 6;
+        int from = depot.left() - 6;
+        int to = depot.right() + 6;
+        int on = 0;
+        int above = 0;
+        for (int x = from; x <= to; x++) {
+          on += (image.getRGB(x, y) & 0xFFFFFF) == theme.inverseMuted() ? 1 : 0;
+          above += (image.getRGB(x, y - 1) & 0xFFFFFF) == theme.inverseMuted() ? 1 : 0;
+        }
+        int span = to - from + 1;
+        int dashed = on;
+        int beside = above;
+        assertTrue(
+            dashed >= span * 4 / 7 - 4 && dashed <= span * 4 / 7 + 4,
+            () -> "下沿是虚线（" + dashed + "/" + span + "）");
+        assertTrue(beside <= 2, () -> "虚线只有 1 像素粗（上一行 " + beside + "）");
+      }
+    }
+  }
+
   @Test
   void aMissingYardShowsTheReasonInsteadOfTracks() {
     BufferedImage image =
@@ -156,6 +222,8 @@ class PidsYardPainterTest {
         new Names("示例站", "Example"),
         LEGEND,
         new Names("<track> 道", "Track <track>"),
+        new Names("<depot>车库", "<depot> Depot"),
+        new Names("库 <track>", "Road <track>"),
         picture,
         message,
         Optional.empty());

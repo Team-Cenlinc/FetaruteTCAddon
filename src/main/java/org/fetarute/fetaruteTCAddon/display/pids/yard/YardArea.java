@@ -45,8 +45,14 @@ import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
  * @param edges 两端都在区内的区间
  * @param exits 出口：一端在区内的区间
  * @param tracks 成员车站的站台股道
+ * @param depotTracks 成员车库的库线（{@link Track#station()} 为车库代码）
  */
-public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, List<Track> tracks) {
+public record YardArea(
+    Set<NodeId> nodes,
+    Set<EdgeId> edges,
+    List<Exit> exits,
+    List<Track> tracks,
+    List<Track> depotTracks) {
 
   /** 道岔与无名目的地节点离本站站台或咽喉的最远水平距离（格）。 */
   public static final double MAX_RADIUS_BLOCKS = 256.0;
@@ -59,6 +65,7 @@ public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, L
     edges = Set.copyOf(edges);
     exits = List.copyOf(exits);
     tracks = List.copyOf(tracks);
+    depotTracks = List.copyOf(depotTracks);
   }
 
   /**
@@ -192,6 +199,7 @@ public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, L
       }
     }
     List<Track> tracks = new ArrayList<>();
+    List<Track> depotTracks = new ArrayList<>();
     for (RailNode seed : seeds) {
       RouteTerminals.stationRefOfNode(seed.id().value())
           .ifPresent(
@@ -201,8 +209,19 @@ public record YardArea(Set<NodeId> nodes, Set<EdgeId> edges, List<Exit> exits, L
                           seed.id(),
                           RouteTerminals.platformOf(seed.id().value()),
                           ref.stationCode().toUpperCase(Locale.ROOT))));
+      if (seed.type() != NodeType.SWITCHER) {
+        seed.waypointMetadata()
+            .filter(m -> m.kind() == WaypointKind.DEPOT)
+            .ifPresent(
+                m ->
+                    depotTracks.add(
+                        new Track(
+                            seed.id(),
+                            String.valueOf(m.trackNumber()),
+                            m.originStation().toUpperCase(Locale.ROOT))));
+      }
     }
-    return Optional.of(new YardArea(inner, edges, exits, tracks));
+    return Optional.of(new YardArea(inner, edges, exits, tracks, depotTracks));
   }
 
   /** 从 {@code queue} 里的节点沿区间向外展开，{@code inside} 认可的节点进区内，到 {@value #MAX_NODES} 个为止。 */

@@ -28,6 +28,8 @@ final class PidsYardPainter {
   /** 股道号里代表股道的占位符。 */
   private static final String TRACK_PLACEHOLDER = "<track>";
 
+  private static final String DEPOT_PLACEHOLDER = "<depot>";
+
   /** 车身线宽。 */
   static final int BODY = 3;
 
@@ -73,8 +75,11 @@ final class PidsYardPainter {
             platform.bottom() - platform.top(),
             theme.panel());
       }
+      drawDepotPanels(geometry.get());
       drawTracks(geometry.get(), view.picture().marks());
-      List<int[]> texts = drawPlatformLabels(yard, geometry.get(), view.track());
+      List<int[]> texts =
+          new ArrayList<>(drawDepots(yard, geometry.get(), view.depot(), view.depotTrack()));
+      texts.addAll(drawPlatformLabels(yard, geometry.get(), view.track()));
       drawLabels(yard, geometry.get(), texts);
       List<int[]> placed = new ArrayList<>();
       for (YardPicture.TrainMark train : view.picture().trains()) {
@@ -111,6 +116,127 @@ final class PidsYardPainter {
       if (mark != null) {
         drawPath(path, TRACK, mark == YardPicture.Mark.ROUTE ? theme.text() : heldColor(theme));
       }
+    }
+  }
+
+  /** 收成面板的车库先铺底色，库线短条随后照常画在上面。 */
+  private void drawDepotPanels(YardGeometry geometry) {
+    for (YardGeometry.Depot depot : geometry.depots()) {
+      if (depot.panel()) {
+        p.fill(
+            depot.left(),
+            depot.top(),
+            depot.right() - depot.left(),
+            depot.bottom() - depot.top(),
+            p.theme().panel());
+      }
+    }
+  }
+
+  /**
+   * 车库的字与框。照画库线的车库：库线尽头画车挡、写库号，外面围一圈虚线框（留出库号与库名的位置），框里左上写库名。 收成面板的车库：库名写在第一行，库号写在各条短条左边。
+   *
+   * @return 写下的文字所占的矩形 {左, 上, 右, 下}，去向标签据此避让
+   */
+  private List<int[]> drawDepots(
+      PidsLayout.Yard yard, YardGeometry geometry, Names depotName, Names depotTrack) {
+    int size = yard.labelSize();
+    int muted = p.theme().muted();
+    List<int[]> drawn = new ArrayList<>();
+    for (YardGeometry.Depot depot : geometry.depots()) {
+      String name =
+          depot.name().isEmpty()
+              ? ""
+              : depotName.primary().replace(DEPOT_PLACEHOLDER, depot.name());
+      if (depot.panel()) {
+        int room = depot.right() - depot.left() - 8;
+        if (!name.isEmpty()) {
+          drawn.add(
+              platformText(List.of(name), size, depot.left() + 4, depot.top() + 2, room, muted));
+        }
+        for (YardGeometry.DepotTrack track : depot.tracks()) {
+          String label = depotTrack.primary().replace(TRACK_PLACEHOLDER, track.number());
+          int x = depot.left() + 4;
+          drawn.add(
+              platformText(
+                  List.of(label),
+                  size,
+                  x,
+                  track.end().y() - size / 2,
+                  Math.max(size, track.end().x() - x - 4),
+                  muted));
+        }
+        continue;
+      }
+      int left = depot.left() - 6;
+      int right = depot.right() + 6;
+      int top = depot.top() - size - 8;
+      int bottom = depot.bottom() + 6;
+      for (YardGeometry.DepotTrack track : depot.tracks()) {
+        YardGeometry.Point end = track.end();
+        if (track.buffer()) {
+          p.fill(
+              track.outward() > 0 ? end.x() : end.x() - 1,
+              end.y() - 3,
+              2,
+              YardGeometry.TRACK_LINE + 6,
+              p.theme().outline());
+        }
+        String label = depotTrack.primary().replace(TRACK_PLACEHOLDER, track.number());
+        int width = p.width(label, size);
+        int x = track.outward() > 0 ? end.x() + 5 : end.x() - 5 - width;
+        // 写在尽头外侧，压到站台块或别的字时改写在尽头上方，仍压到就不写
+        int[] box = null;
+        for (int y :
+            new int[] {end.y() + YardGeometry.TRACK_LINE / 2 - size / 2, end.y() - size - 3}) {
+          int[] candidate = {x, y, x + width, y + size};
+          if (!blocked(candidate, geometry, drawn)) {
+            box = candidate;
+            break;
+          }
+        }
+        if (box == null) {
+          continue;
+        }
+        p.text(label, size, box[0], box[1], muted);
+        drawn.add(box);
+        left = Math.min(left, box[0] - 4);
+        right = Math.max(right, box[2] + 4);
+        top = Math.min(top, box[1] - size - 6);
+      }
+      if (!name.isEmpty()) {
+        int width = p.width(name, size);
+        right = Math.max(right, left + width + 8);
+        p.text(name, size, left + 4, top + 2, muted);
+        drawn.add(new int[] {left + 4, top + 2, left + 4 + width, top + 2 + size});
+      }
+      dashedBox(left, top, right, bottom, p.theme().inverseMuted());
+    }
+    return drawn;
+  }
+
+  /** 文字的矩形压到站台块或已写下的字。 */
+  private static boolean blocked(int[] box, YardGeometry geometry, List<int[]> drawn) {
+    for (YardGeometry.Platform platform : geometry.platforms()) {
+      if (intersects(
+          box, new int[] {platform.left(), platform.top(), platform.right(), platform.bottom()})) {
+        return true;
+      }
+    }
+    return drawn.stream().anyMatch(other -> intersects(box, other));
+  }
+
+  /** 1 像素的虚线框：画 4 像素、空 3 像素。 */
+  private void dashedBox(int left, int top, int right, int bottom, int rgb) {
+    for (int x = left; x <= right; x += 7) {
+      int run = Math.min(4, right - x + 1);
+      p.fill(x, top, run, 1, rgb);
+      p.fill(x, bottom, run, 1, rgb);
+    }
+    for (int y = top; y <= bottom; y += 7) {
+      int run = Math.min(4, bottom - y + 1);
+      p.fill(left, y, 1, run, rgb);
+      p.fill(right, y, 1, run, rgb);
     }
   }
 

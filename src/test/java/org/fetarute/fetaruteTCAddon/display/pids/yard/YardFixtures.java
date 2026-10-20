@@ -253,6 +253,143 @@ public final class YardFixtures {
         nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
   }
 
+  /**
+   * 车库 DEP：ABC 1 道往东接一条出库线，第 k 组道岔（x = 60 + 6k）岔出第 k 条朝南的库线（与正线几乎垂直，40 格，尽头是车挡）；
+   * 最后一条库线是最后一组道岔直股的尽头，朝东。
+   *
+   * @param tracks 库线条数（至少 2）
+   */
+  public static SimpleRailGraph depot(int tracks) {
+    return depot(tracks, false);
+  }
+
+  /**
+   * 同 {@link #depot(int)}；{@code through} 时最后一条库线不是尽头，接着往东通到 XYZ 1 道（两头都通库外的车库）。
+   *
+   * @param tracks 库线条数（至少 2）
+   * @param through 最后一条库线往东接到 XYZ
+   */
+  public static SimpleRailGraph depot(int tracks, boolean through) {
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    NodeId previous = P1;
+    int previousX = 0;
+    for (int k = 1; k < tracks; k++) {
+      int x = 60 + 6 * k;
+      NodeId fork = depotSwitch(k);
+      node(nodes, fork, NodeType.SWITCHER, x, 0, false);
+      edge(edges, footprints, Set.of(), previous, fork, straight(previousX, x, 0), false);
+      NodeId end = depotTrack(k);
+      node(nodes, end, NodeType.DEPOT, x + 3, 40, false);
+      List<int[]> cells = new ArrayList<>(line(x, 0, x + 3, 3));
+      for (int z = 4; z <= 40; z++) {
+        cells.add(new int[] {x + 3, z});
+      }
+      edge(edges, footprints, Set.of(), fork, end, cells, false);
+      previous = fork;
+      previousX = x;
+    }
+    NodeId last = depotTrack(tracks);
+    node(nodes, last, NodeType.DEPOT, previousX + 40, 0, false);
+    edge(
+        edges, footprints, Set.of(), previous, last, straight(previousX, previousX + 40, 0), false);
+    if (through) {
+      node(nodes, X1, NodeType.STATION, previousX + 120, 0, false);
+      edge(
+          edges,
+          footprints,
+          Set.of(),
+          last,
+          X1,
+          straight(previousX + 40, previousX + 120, 0),
+          false);
+    }
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  public static final NodeId MAIN_SWITCH = NodeId.of("SWITCHER:world:50:64:0");
+  public static final NodeId SIDE_SWITCH = NodeId.of("SWITCHER:world:50:64:12");
+
+  /**
+   * 两条平行线由一条垂直的联络线相连：ABC 1 道（x=0）经 MAIN_SWITCH（x=50）向东到无名终点；北边 12 格另有一条线，中间的 SIDE_SWITCH
+   * 经联络线（与两条线都垂直）接到 MAIN_SWITCH。另一条线从联络线接进来时分不出顺逆，要按脊线走向排。
+   */
+  public static SimpleRailGraph perpendicularLink() {
+    NodeId east = NodeId.of("END-E1");
+    NodeId westSide = NodeId.of("END-W2");
+    NodeId eastSide = NodeId.of("END-E2");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, MAIN_SWITCH, NodeType.SWITCHER, 50, 0, false);
+    node(nodes, east, NodeType.DESTINATION, 100, 0, false);
+    node(nodes, westSide, NodeType.DESTINATION, 0, 12, false);
+    node(nodes, SIDE_SWITCH, NodeType.SWITCHER, 50, 12, false);
+    node(nodes, eastSide, NodeType.DESTINATION, 100, 12, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, MAIN_SWITCH, straight(0, 50, 0), false);
+    edge(edges, footprints, Set.of(), MAIN_SWITCH, east, straight(50, 100, 0), false);
+    edge(edges, footprints, Set.of(), westSide, SIDE_SWITCH, straight(0, 50, 12), false);
+    edge(edges, footprints, Set.of(), SIDE_SWITCH, eastSide, straight(50, 100, 12), false);
+    edge(edges, footprints, Set.of(), MAIN_SWITCH, SIDE_SWITCH, line(50, 0, 50, 12), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /**
+   * ABC 的 1、2 道（z=0、z=4）往东经一组剪式渡线：两条线的道岔 A（x=40）各斜着接到中心道岔 C1（x=52），C1 与 C2（x=68）之间一段共用线，C2
+   * 再斜着分回两条线的道岔 B（x=80）。C1、C2 的两条斜线都朝同一边离开（V 形），在它那里汇成 Y 形。
+   */
+  public static SimpleRailGraph scissors() {
+    NodeId a1 = NodeId.of("SWITCHER:world:40:64:0");
+    NodeId a2 = NodeId.of("SWITCHER:world:40:64:4");
+    NodeId b1 = NodeId.of("SWITCHER:world:80:64:0");
+    NodeId b2 = NodeId.of("SWITCHER:world:80:64:4");
+    NodeId c1 = NodeId.of("SWITCHER:world:52:64:2");
+    NodeId c2 = NodeId.of("SWITCHER:world:68:64:2");
+    NodeId end1 = NodeId.of("END-1");
+    NodeId end2 = NodeId.of("END-2");
+    Map<NodeId, RailNode> nodes = new LinkedHashMap<>();
+    node(nodes, P1, NodeType.STATION, 0, 0, false);
+    node(nodes, P2, NodeType.STATION, 0, 4, false);
+    node(nodes, a1, NodeType.SWITCHER, 40, 0, false);
+    node(nodes, a2, NodeType.SWITCHER, 40, 4, false);
+    node(nodes, c1, NodeType.SWITCHER, 52, 2, false);
+    node(nodes, c2, NodeType.SWITCHER, 68, 2, false);
+    node(nodes, b1, NodeType.SWITCHER, 80, 0, false);
+    node(nodes, b2, NodeType.SWITCHER, 80, 4, false);
+    node(nodes, end1, NodeType.DESTINATION, 120, 0, false);
+    node(nodes, end2, NodeType.DESTINATION, 120, 4, false);
+    Map<EdgeId, RailEdge> edges = new LinkedHashMap<>();
+    Map<EdgeId, RailEdgeFootprint> footprints = new LinkedHashMap<>();
+    edge(edges, footprints, Set.of(), P1, a1, straight(0, 40, 0), false);
+    edge(edges, footprints, Set.of(), P2, a2, straight(0, 40, 4), false);
+    edge(edges, footprints, Set.of(), a1, b1, straight(40, 80, 0), false);
+    edge(edges, footprints, Set.of(), a2, b2, straight(40, 80, 4), false);
+    edge(edges, footprints, Set.of(), b1, end1, straight(80, 120, 0), false);
+    edge(edges, footprints, Set.of(), b2, end2, straight(80, 120, 4), false);
+    edge(edges, footprints, Set.of(), a1, c1, line(40, 0, 52, 2), false);
+    edge(edges, footprints, Set.of(), a2, c1, line(40, 4, 52, 2), false);
+    edge(edges, footprints, Set.of(), c1, c2, straight(52, 68, 2), false);
+    edge(edges, footprints, Set.of(), c2, b1, line(68, 2, 80, 0), false);
+    edge(edges, footprints, Set.of(), c2, b2, line(68, 2, 80, 4), false);
+    return new SimpleRailGraph(
+        nodes, edges, Set.of(), RailInterlockingState.from(WORLD, edges.keySet(), footprints));
+  }
+
+  /** 车库 DEP 的第 {@code k} 条库线。 */
+  public static NodeId depotTrack(int k) {
+    return NodeId.of("SURC:D:DEP:" + k);
+  }
+
+  /** 车库 DEP 岔出第 {@code k} 条库线的道岔。 */
+  public static NodeId depotSwitch(int k) {
+    return NodeId.of("SWITCHER:world:" + (60 + 6 * k) + ":64:0");
+  }
+
   /** 两点之间逐格连成的一条斜线（含两端）。 */
   static List<int[]> line(int fromX, int fromZ, int toX, int toZ) {
     int steps = Math.max(Math.abs(toX - fromX), Math.abs(toZ - fromZ));

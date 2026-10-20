@@ -510,6 +510,16 @@ public final class PidsVocabulary {
     return names("yard.track");
   }
 
+  /** 站场图上的车库名，{@code <depot>} 处换成车库所在站名或车库代码。 */
+  public Names yardDepot() {
+    return names("yard.depot");
+  }
+
+  /** 站场图上的库线号，{@code <track>} 处换成库线号。 */
+  public Names yardDepotTrack() {
+    return names("yard.depot-track");
+  }
+
   /** 站场图画不出来的原因。 */
   public Names yardProblem(YardPicture.Problem problem) {
     return switch (problem) {

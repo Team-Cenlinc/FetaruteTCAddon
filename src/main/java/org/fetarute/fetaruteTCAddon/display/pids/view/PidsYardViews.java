@@ -55,6 +55,8 @@ public final class PidsYardViews {
         new Names(PidsText.compactSeparators(name.primary()), name.secondary()),
         vocabulary.yardLegend(),
         vocabulary.yardTrack(),
+        vocabulary.yardDepot(),
+        vocabulary.yardDepotTrack(),
         picture,
         picture.problem().map(vocabulary::yardProblem),
         partial ? Optional.of(vocabulary.yardPartial()) : Optional.empty());

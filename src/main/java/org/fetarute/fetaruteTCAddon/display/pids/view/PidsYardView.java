@@ -14,6 +14,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.yard.YardPicture;
  * @param title 标题：站名，绑了控制区时为控制区名
  * @param legend 图例文案
  * @param track 站台块里的股道号，{@code <track>} 处换成股道号（如“1 道”）
+ * @param depot 车库名，{@code <depot>} 处换成车库所在站名或车库代码（如“林湾车库”）
+ * @param depotTrack 库线号，{@code <track>} 处换成库线号（如“库 1”）
  * @param picture 站场图
  * @param message 画不出来时写在站场图中间的说明
  * @param note 有区间用直线代替时写在站场图左下角的说明
@@ -24,6 +26,8 @@ public record PidsYardView(
     Names title,
     Legend legend,
     Names track,
+    Names depot,
+    Names depotTrack,
     YardPicture picture,
     Optional<Names> message,
     Optional<Names> note) {
@@ -34,6 +38,8 @@ public record PidsYardView(
     Objects.requireNonNull(title, "title");
     Objects.requireNonNull(legend, "legend");
     Objects.requireNonNull(track, "track");
+    Objects.requireNonNull(depot, "depot");
+    Objects.requireNonNull(depotTrack, "depotTrack");
     Objects.requireNonNull(picture, "picture");
     message = message == null ? Optional.empty() : message;
     note = note == null ? Optional.empty() : note;
