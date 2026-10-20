@@ -628,7 +628,8 @@ public final class RailGraphBuildJob implements Runnable, RailGraphBuildTask {
               node.nodeType(),
               new Vector(node.x(), node.y(), node.z()),
               node.trainCartsDestination(),
-              node.waypointMetadata());
+              node.waypointMetadata(),
+              node.doorDirection());
       nodesById.put(railNode.id(), railNode);
     }
 

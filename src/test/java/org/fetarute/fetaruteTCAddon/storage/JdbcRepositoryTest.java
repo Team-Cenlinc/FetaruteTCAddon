@@ -47,9 +47,13 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.interlocking.RailInterlocki
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeOverrideRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailEdgeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailInterlockingSnapshotRecord;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.persist.RailNodeRecord;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeOverrideRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailEdgeRepository;
+import org.fetarute.fetaruteTCAddon.dispatcher.graph.repository.RailNodeRepository;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeType;
+import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.config.SpeedCurveType;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.Timetable;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableRoutePlan;
@@ -898,6 +902,132 @@ final class JdbcRepositoryTest {
     assertEquals(12, loaded.lengthBlocks());
     assertEquals(7.25, loaded.baseSpeedLimit(), 1e-9);
     assertTrue(loaded.bidirectional());
+  }
+
+  @Test
+  void shouldPersistRailNodeDoorDirection() {
+    StorageProvider provider = setupProvider(TEST_DB);
+    RailNodeRepository repository = provider.railNodes();
+    UUID worldId = UUID.randomUUID();
+    RailNodeRecord station =
+        new RailNodeRecord(
+            worldId,
+            NodeId.of("SURC:S:PPK:1"),
+            NodeType.STATION,
+            10,
+            64,
+            -3,
+            Optional.of("SURC:S:PPK:1"),
+            Optional.of(WaypointMetadata.station("SURC", "PPK", 1)),
+            Optional.of("NORTH"));
+    RailNodeRecord waypoint =
+        new RailNodeRecord(
+            worldId,
+            NodeId.of("SURC:PPK:GPT:1:00"),
+            NodeType.WAYPOINT,
+            20,
+            64,
+            -3,
+            Optional.of("SURC:PPK:GPT:1:00"),
+            Optional.of(WaypointMetadata.interval("SURC", "PPK", "GPT", 1, "00")));
+
+    // 整表替换（建图写库）；按节点 ID 排序读回
+    repository.replaceWorld(worldId, List.of(station, waypoint));
+    assertEquals(List.of(waypoint, station), repository.listByWorld(worldId));
+
+    // 单节点 upsert（改牌）：开门方向改了要写进去，删掉了要清空
+    RailNodeRecord both =
+        new RailNodeRecord(
+            worldId,
+            station.nodeId(),
+            station.nodeType(),
+            station.x(),
+            station.y(),
+            station.z(),
+            station.trainCartsDestination(),
+            station.waypointMetadata(),
+            Optional.of("BOTH"));
+    repository.upsert(both);
+    assertEquals(List.of(both), repository.listByPosition(worldId, 10, 64, -3));
+
+    RailNodeRecord cleared =
+        new RailNodeRecord(
+            worldId,
+            station.nodeId(),
+            station.nodeType(),
+            station.x(),
+            station.y(),
+            station.z(),
+            station.trainCartsDestination(),
+            station.waypointMetadata());
+    repository.upsert(cleared);
+    assertEquals(
+        Optional.empty(), repository.listByPosition(worldId, 10, 64, -3).get(0).doorDirection());
+  }
+
+  @Test
+  void shouldMigrateLegacyRailNodesWithoutDoorDirectionColumn() throws Exception {
+    Path dbFile = Path.of("test/data/migration-rail-node-door.sqlite").toAbsolutePath();
+    UUID worldId = UUID.randomUUID();
+
+    // 旧版节点表：缺少 door_direction 列
+    try (var connection = DriverManager.getConnection("jdbc:sqlite:" + dbFile);
+        var statement = connection.createStatement()) {
+      statement.execute(
+          "CREATE TABLE fta_rail_nodes ("
+              + "world_id TEXT NOT NULL,"
+              + "node_id TEXT NOT NULL,"
+              + "node_type TEXT NOT NULL,"
+              + "x INTEGER NOT NULL,"
+              + "y INTEGER NOT NULL,"
+              + "z INTEGER NOT NULL,"
+              + "tc_destination TEXT,"
+              + "waypoint_operator TEXT,"
+              + "waypoint_origin TEXT,"
+              + "waypoint_destination TEXT,"
+              + "waypoint_track INTEGER,"
+              + "waypoint_sequence TEXT,"
+              + "waypoint_kind TEXT,"
+              + "PRIMARY KEY (world_id, node_id)"
+              + ");");
+      try (var insert =
+          connection.prepareStatement(
+              "INSERT INTO fta_rail_nodes VALUES"
+                  + " (?, 'SURC:S:PPK:1', 'STATION', 10, 64, -3, 'SURC:S:PPK:1',"
+                  + " 'SURC', 'PPK', NULL, 1, NULL, 'STATION')")) {
+        insert.setString(1, worldId.toString());
+        insert.executeUpdate();
+      }
+    }
+
+    StorageProvider provider = setupProvider(dbFile);
+    RailNodeRepository repository = provider.railNodes();
+
+    RailNodeRecord legacy = repository.listByWorld(worldId).get(0);
+    assertEquals(NodeId.of("SURC:S:PPK:1"), legacy.nodeId());
+    assertEquals(
+        Optional.of(WaypointMetadata.station("SURC", "PPK", 1)), legacy.waypointMetadata());
+    assertTrue(legacy.doorDirection().isEmpty(), "旧行没有开门方向，读成空");
+
+    RailNodeRecord updated =
+        new RailNodeRecord(
+            worldId,
+            legacy.nodeId(),
+            legacy.nodeType(),
+            legacy.x(),
+            legacy.y(),
+            legacy.z(),
+            legacy.trainCartsDestination(),
+            legacy.waypointMetadata(),
+            Optional.of("SOUTH_WEST"));
+    repository.upsert(updated);
+    assertEquals(List.of(updated), repository.listByWorld(worldId));
+
+    // 再次初始化：列已存在，迁移的 ADD COLUMN 撞上 duplicate，必须静默跳过且不丢数据
+    manager.shutdown();
+    manager = null;
+    StorageProvider reopened = setupProvider(dbFile);
+    assertEquals(List.of(updated), reopened.railNodes().listByWorld(worldId));
   }
 
   @Test

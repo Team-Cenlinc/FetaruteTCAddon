@@ -2719,7 +2719,8 @@ public final class FetaruteTCAddon extends JavaPlugin {
                           node.nodeId(),
                           node.nodeType(),
                           node.trainCartsDestination(),
-                          node.waypointMetadata()));
+                          node.waypointMetadata(),
+                          node.doorDirection()));
                   loaded++;
                 }
                 logger.debug("从存储预热节点注册表: world=" + world.getName() + " nodes=" + loaded);

@@ -113,6 +113,31 @@ final class RailGraphMergerTest {
   }
 
   @Test
+  void mergedNodeTakesDoorDirectionFromTheRescannedSign() {
+    RailGraph base =
+        graph(
+            Set.of(station("A", "NORTH"), station("B", "SOUTH"), station("C", "EAST")),
+            Set.of(edge("A", "B", 5), edge("B", "C", 5)),
+            Set.of());
+    RailGraph update =
+        graph(
+            Set.of(station("A", "BOTH"), station("B", null)), Set.of(edge("A", "B", 5)), Set.of());
+
+    RailGraph merged = RailGraphMerger.upsert(base, update).graph();
+
+    assertEquals(
+        Optional.of("BOTH"), merged.findNode(NodeId.of("A")).orElseThrow().doorDirection());
+    assertEquals(
+        Optional.empty(),
+        merged.findNode(NodeId.of("B")).orElseThrow().doorDirection(),
+        "牌子上删掉了开门方向：随之清空，不沿用旧值");
+    assertEquals(
+        Optional.of("EAST"),
+        merged.findNode(NodeId.of("C")).orElseThrow().doorDirection(),
+        "没重扫的节点原样保留");
+  }
+
+  @Test
   void mergingSeparatelyVerifiedUniversesFailsClosedUntilFullBuild() {
     UUID worldId = UUID.randomUUID();
     RailGraph base =
@@ -453,6 +478,17 @@ final class RailGraphMergerTest {
   private static org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode node(String id) {
     return new SignRailNode(
         NodeId.of(id), NodeType.WAYPOINT, new Vector(0, 0, 0), Optional.empty(), Optional.empty());
+  }
+
+  private static org.fetarute.fetaruteTCAddon.dispatcher.node.RailNode station(
+      String id, String doorDirection) {
+    return new SignRailNode(
+        NodeId.of(id),
+        NodeType.STATION,
+        new Vector(0, 0, 0),
+        Optional.empty(),
+        Optional.empty(),
+        Optional.ofNullable(doorDirection));
   }
 
   private static RailEdge edge(String a, String b, int length) {

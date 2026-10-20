@@ -889,6 +889,7 @@ public final class StorageSchema {
                     waypoint_track %s,
                     waypoint_sequence %s,
                     waypoint_kind %s,
+                    door_direction %s,
                     PRIMARY KEY (world_id, node_id)
                 );
                 """,
@@ -904,6 +905,7 @@ public final class StorageSchema {
         dialect.stringType(),
         dialect.stringType(),
         dialect.intType(),
+        dialect.stringType(),
         dialect.stringType(),
         dialect.stringType());
   }

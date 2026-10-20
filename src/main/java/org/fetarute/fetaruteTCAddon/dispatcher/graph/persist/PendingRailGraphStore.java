@@ -33,6 +33,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.node.WaypointMetadata;
  * 未激活调度图的本地缓存，与生效中的 SQL 快照隔离。
  *
  * <p>格式 v2 起写盘；v3 加逐边足迹与开头的节点、区间计数（{@link #summary} 只读这几项）。v2 仍可读取，没有足迹与计数。
+ * 节点的开门方向是可选栏，不改版本号：没有这一栏的缓存读回为空。
  *
  * <p>线程：{@link #save} 可在后台线程调用；落盘那一步与 {@link #delete} 互斥，{@code stillWanted} 在同一把锁里判定，
  * 被取代的保存不会在清理之后再写出文件。
@@ -302,8 +303,18 @@ public final class PendingRailGraphStore {
       List<EdgeData> edges,
       String interlocking) {}
 
+  /**
+   * @param door 开门方向（{@link RailNodeRecord#doorDirection()}）；没有开门方向时不写出，旧缓存没有这一栏，读回为空
+   */
   private record NodeData(
-      String id, NodeType type, int x, int y, int z, String destination, WaypointData waypoint) {
+      String id,
+      NodeType type,
+      int x,
+      int y,
+      int z,
+      String destination,
+      WaypointData waypoint,
+      String door) {
     static NodeData from(RailNodeRecord node) {
       return new NodeData(
           node.nodeId().value(),
@@ -312,7 +323,8 @@ public final class PendingRailGraphStore {
           node.y(),
           node.z(),
           node.trainCartsDestination().orElse(null),
-          node.waypointMetadata().map(WaypointData::from).orElse(null));
+          node.waypointMetadata().map(WaypointData::from).orElse(null),
+          node.doorDirection().orElse(null));
     }
 
     RailNodeRecord record(UUID world) {
@@ -324,7 +336,8 @@ public final class PendingRailGraphStore {
           y,
           z,
           Optional.ofNullable(destination),
-          Optional.ofNullable(waypoint).map(WaypointData::metadata));
+          Optional.ofNullable(waypoint).map(WaypointData::metadata),
+          Optional.ofNullable(door));
     }
   }
 

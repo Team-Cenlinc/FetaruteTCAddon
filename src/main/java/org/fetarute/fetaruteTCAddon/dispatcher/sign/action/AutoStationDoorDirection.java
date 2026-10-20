@@ -5,7 +5,7 @@ import java.util.Optional;
 import org.bukkit.block.BlockFace;
 
 /** AutoStation 牌子第 4 行的开门方向。 */
-enum AutoStationDoorDirection {
+public enum AutoStationDoorDirection {
   NONE,
   BOTH,
   NORTH,
@@ -22,7 +22,7 @@ enum AutoStationDoorDirection {
    *
    * <p>空行或无法识别的值会回退为 {@link #NONE}，避免影响通过车。
    */
-  static AutoStationDoorDirection parse(String raw) {
+  public static AutoStationDoorDirection parse(String raw) {
     if (raw == null) {
       return NONE;
     }
@@ -65,7 +65,7 @@ enum AutoStationDoorDirection {
    *
    * <p>BOTH/NONE 会返回空。
    */
-  Optional<BlockFace> toBlockFace() {
+  public Optional<BlockFace> toBlockFace() {
     return switch (this) {
       case NORTH -> Optional.of(BlockFace.NORTH);
       case NORTH_EAST -> Optional.of(BlockFace.NORTH_EAST);

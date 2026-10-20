@@ -6113,7 +6113,8 @@ public final class FtaGraphCommand {
               node.nodeId(),
               node.nodeType(),
               node.trainCartsDestination(),
-              node.waypointMetadata()));
+              node.waypointMetadata(),
+              node.doorDirection()));
     }
   }
 
@@ -6641,7 +6642,8 @@ public final class FtaGraphCommand {
               record.nodeType(),
               new Vector(record.x(), record.y(), record.z()),
               record.trainCartsDestination(),
-              record.waypointMetadata());
+              record.waypointMetadata(),
+              record.doorDirection());
       newRailNodes.add(node);
       nodesById.put(node.id(), node);
     }
@@ -6963,7 +6965,8 @@ public final class FtaGraphCommand {
               pos.getBlockY(),
               pos.getBlockZ(),
               node.trainCartsDestination(),
-              node.waypointMetadata()));
+              node.waypointMetadata(),
+              node.doorDirection()));
     }
     records.sort(Comparator.comparing(r -> r.nodeId().value()));
     return List.copyOf(records);
@@ -7578,7 +7581,8 @@ public final class FtaGraphCommand {
                     sign.getLocation().getBlockY(),
                     sign.getLocation().getBlockZ(),
                     def.trainCartsDestination(),
-                    def.waypointMetadata());
+                    def.waypointMetadata(),
+                    def.doorDirection());
           }
         }
       }

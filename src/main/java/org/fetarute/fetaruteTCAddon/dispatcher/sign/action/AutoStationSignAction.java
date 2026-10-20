@@ -187,7 +187,8 @@ public final class AutoStationSignAction extends AbstractNodeSignAction {
     if (parsed.isEmpty() && info != null) {
       String line2 = info.getLine(2);
       String line3 = info.getLine(3);
-      parsed = parseFromLines(line2, line3);
+      Optional<String> doorDirection = NodeSignDefinitionParser.doorDirectionOf(line3);
+      parsed = parseFromLines(line2, line3).map(def -> def.withDoorDirection(doorDirection));
     }
     return parsed.filter(
         definition ->

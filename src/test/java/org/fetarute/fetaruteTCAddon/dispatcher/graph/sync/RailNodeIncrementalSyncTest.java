@@ -709,6 +709,52 @@ final class RailNodeIncrementalSyncTest {
   }
 
   @Test
+  void doorDirectionOnlyChangeIsWrittenButDoesNotCountAsAGraphChange() {
+    UUID worldId = UUID.randomUUID();
+    World world = mock(World.class);
+    when(world.getUID()).thenReturn(worldId);
+    SignNodeDefinition station =
+        new SignNodeDefinition(
+            NodeId.of("SURC:S:PPK:1"),
+            NodeType.STATION,
+            Optional.of("SURC:S:PPK:1"),
+            Optional.empty(),
+            Optional.of("NORTH"));
+    RailNodeRecord stored =
+        new RailNodeRecord(
+            worldId,
+            station.nodeId(),
+            station.nodeType(),
+            1,
+            64,
+            2,
+            station.trainCartsDestination(),
+            station.waypointMetadata(),
+            Optional.of("NORTH"));
+    RailGraphService railGraphService = mock(RailGraphService.class);
+    when(railGraphService.getStaleState(world)).thenReturn(Optional.of(staleState()));
+    GraphStaleListener listener = mock(GraphStaleListener.class);
+    StorageManager storage = storageWith(worldId, List.of(stored), "deadbeef");
+    RailNodeRepository nodeRepo = storage.provider().orElseThrow().railNodes();
+    RailNodeIncrementalSync sync =
+        new RailNodeIncrementalSync(storage, railGraphService, null, listener);
+
+    // 原样重放：库没变，已失效的世界不再重复上报。
+    sync.upsert(mockBlock(world, 1, 64, 2), station);
+    verify(listener, never()).onStale(any(), any(), any(), any());
+
+    // 只改开门方向：照常写库，但不算图的变化，不上报、不移出旧图。
+    SignNodeDefinition both = station.withDoorDirection(Optional.of("BOTH"));
+    sync.upsert(mockBlock(world, 1, 64, 2), both);
+
+    ArgumentCaptor<RailNodeRecord> written = ArgumentCaptor.forClass(RailNodeRecord.class);
+    verify(nodeRepo, times(2)).upsert(written.capture());
+    assertEquals(Optional.of("NORTH"), written.getAllValues().get(0).doorDirection());
+    assertEquals(Optional.of("BOTH"), written.getAllValues().get(1).doorDirection());
+    verify(listener, never()).onStale(any(), any(), any(), any());
+  }
+
+  @Test
   void sameTickChangesShareOneSignatureCheck() {
     World world = world();
     SignNodeDefinition first = waypoint();

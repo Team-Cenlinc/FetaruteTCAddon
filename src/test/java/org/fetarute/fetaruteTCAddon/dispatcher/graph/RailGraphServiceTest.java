@@ -102,6 +102,31 @@ class RailGraphServiceTest {
   }
 
   @Test
+  void buildGraphFromRecordsCarriesDoorDirectionToRuntimeNodes() {
+    UUID worldId = UUID.randomUUID();
+    NodeId station = NodeId.of("SURC:S:PPK:1");
+    NodeId plain = NodeId.of("B");
+    List<RailNodeRecord> nodes =
+        List.of(
+            new RailNodeRecord(
+                worldId,
+                station,
+                NodeType.STATION,
+                0,
+                64,
+                0,
+                Optional.empty(),
+                Optional.empty(),
+                Optional.of("NORTH_EAST")),
+            nodeRecord(worldId, plain, 10));
+
+    RailGraph graph = RailGraphService.buildGraphFromRecords(nodes, List.of());
+
+    assertEquals(Optional.of("NORTH_EAST"), graph.findNode(station).orElseThrow().doorDirection());
+    assertEquals(Optional.empty(), graph.findNode(plain).orElseThrow().doorDirection());
+  }
+
+  @Test
   void buildGraphFromLegacyRecordsCreatesIncompleteWorldSentinel() {
     UUID worldId = UUID.randomUUID();
     NodeId a = NodeId.of("A");

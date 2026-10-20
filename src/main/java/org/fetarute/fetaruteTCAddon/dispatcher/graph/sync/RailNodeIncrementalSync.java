@@ -124,7 +124,8 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
             location.getBlockY(),
             location.getBlockZ(),
             definition.trainCartsDestination(),
-            definition.waypointMetadata());
+            definition.waypointMetadata(),
+            definition.doorDirection());
 
     provider()
         .ifPresent(
@@ -143,6 +144,7 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
                                       .listByPosition(
                                           worldId, record.x(), record.y(), record.z())) {
                                 if (existing.nodeId().equals(record.nodeId())) {
+                                  // 同一节点只改了开门方向不算图的变化：照常写库，内存里的节点等下次建图或刷新时换上
                                   unchanged = true;
                                 } else {
                                   // 同一位置原来的节点被顶掉：它的移除也要判在不在用。
@@ -515,7 +517,8 @@ public final class RailNodeIncrementalSync implements SignNodeStorageSynchronize
             record.nodeId(),
             record.nodeType(),
             record.trainCartsDestination(),
-            record.waypointMetadata()),
+            record.waypointMetadata(),
+            record.doorDirection()),
         record.x(),
         record.y(),
         record.z(),
