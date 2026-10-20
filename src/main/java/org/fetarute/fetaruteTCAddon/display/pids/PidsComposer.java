@@ -482,9 +482,7 @@ public final class PidsComposer {
       Instant now) {
     PidsStopListView full = views.stopList(request);
     int pages =
-        full.train()
-            .map(train -> widget.pages(train.stops().size(), full.note().isPresent()))
-            .orElse(1);
+        full.train().map(train -> widget.pages(train.stops().size(), full.noted())).orElse(1);
     Object train =
         full.train().<Object>map(found -> List.of(found.id(), found.stops())).orElse(List.of());
     PidsStationKey station = screen.station().orElseThrow();

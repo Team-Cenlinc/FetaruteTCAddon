@@ -137,6 +137,56 @@ class TimetableJoinRuntimeTest {
     assertEquals(Optional.of(""), service.joinTrunkOf("feeder"), "主干已经跑上下一班：那一班过去了");
   }
 
+  /** 站牌按表提前写联挂：主干被并进来的那一班、回程支线的末班各自认得出自己是哪一方，带上两边车底的编组。 */
+  @Test
+  void plannedTripsKnowTheirSideOfTheJoin() {
+    Timetable table = start();
+    UUID trunkDuty = table.duties().get(0).id();
+    UUID feederDuty = table.duties().get(1).id();
+
+    TimetableService.PlannedJoin trunk =
+        service
+            .plannedJoinOf(
+                new TimetableService.TicketIntent(
+                    table.id(),
+                    trunkDuty,
+                    DAY,
+                    org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.OPERATION,
+                    0))
+            .orElseThrow();
+    assertTrue(trunk.trunk());
+    assertEquals(table.trips().get(0).routeId(), trunk.routeId());
+    assertEquals(table.trips().get(0).routeId(), trunk.trunkRouteId());
+    assertEquals(table.trips().get(2).routeId(), trunk.feederRouteId());
+    assertEquals(table.duties().get(0).consist(), trunk.trunkConsist());
+
+    TimetableService.PlannedJoin feeder =
+        service
+            .plannedJoinOf(
+                new TimetableService.TicketIntent(
+                    table.id(),
+                    feederDuty,
+                    DAY,
+                    org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.OPERATION,
+                    0))
+            .orElseThrow();
+    assertFalse(feeder.trunk());
+    assertEquals(table.trips().get(2).routeId(), feeder.routeId());
+    assertEquals(table.duties().get(0).consist(), feeder.trunkConsist(), "主干车底联挂之前的编组");
+
+    assertTrue(
+        service
+            .plannedJoinOf(
+                new TimetableService.TicketIntent(
+                    table.id(),
+                    trunkDuty,
+                    DAY,
+                    org.fetarute.fetaruteTCAddon.company.model.RouteOperationType.OPERATION,
+                    1))
+            .isEmpty(),
+        "主干的第二班不联挂");
+  }
+
   @Test
   void aDutyThatDoesNotEndByJoiningHasNoTrunk() {
     start();

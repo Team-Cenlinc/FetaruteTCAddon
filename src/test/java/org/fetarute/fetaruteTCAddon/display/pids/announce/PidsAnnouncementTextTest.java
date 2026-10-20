@@ -96,6 +96,42 @@ class PidsAnnouncementTextTest {
     assertEquals("▶ █MT 开往 新笛矢·壑湖 的列车即将进站", plain(render(noPlatform)));
   }
 
+  /** 在本站分行的列车进站：接着说两段各去哪里，与站台屏分行页同一说法。 */
+  @Test
+  void aTrainDividingHereSaysWhichCarsGoWhere() {
+    PidsRow base = running(PidsRow.Status.ARRIVING, "0366", 20);
+    PidsRow dividing =
+        new PidsRow(
+            base.status(),
+            base.lineName(),
+            base.routeId(),
+            base.destination(),
+            base.destinationId(),
+            base.platform(),
+            base.expectedAt(),
+            base.delaySeconds(),
+            base.stopSequence(),
+            false,
+            false,
+            false,
+            base.trainName(),
+            false,
+            List.of(),
+            List.of(),
+            Optional.empty(),
+            false,
+            Optional.of(
+                new PidsRow.Division(
+                    base.stopSequence(),
+                    "SURC:TPC",
+                    List.of(
+                        new PidsRow.Division.Part(4, true, Optional.of("SURC:HHU")),
+                        new PidsRow.Division.Part(4, false, Optional.empty())))));
+
+    assertEquals(
+        "▶ 2 站台 █MT 开往 新笛矢·壑湖 的列车即将进站 ┃ 本站分行：前 4 节开往新笛矢·壑湖，后 4 节本站止", plain(render(dividing)));
+  }
+
   @Test
   void terminatingAndOutOfServiceTrainsWarnNotToBoard() {
     assertEquals(

@@ -186,7 +186,18 @@ public final class PidsSnapshotProvider {
         row.trainName()
             .flatMap(train -> platformChanges.previousOf(train, station, row.platform())),
         lastTrains.matches(row.routeId(), row.stopSequence(), expectedAt, row.delaySeconds()),
-        row.division().map(PidsSnapshotProvider::division));
+        row.division().map(PidsSnapshotProvider::division),
+        row.joining()
+            .map(
+                joining ->
+                    new PidsRow.Joining(
+                        joining.stopSequence(),
+                        joining.stationId(),
+                        joining.ownCars(),
+                        joining.joiningCars(),
+                        joining.joiningStanding(),
+                        joining.continuesOnRouteId(),
+                        joining.continuesFromSequence())));
   }
 
   private static PidsRow.Division division(EtaApi.Division division) {
@@ -196,8 +207,14 @@ public final class PidsSnapshotProvider {
         division.parts().stream()
             .map(
                 part ->
-                    new PidsRow.Division.Part(part.cars(), part.detached(), part.destinationId()))
-            .toList());
+                    new PidsRow.Division.Part(
+                        part.cars(),
+                        part.detached(),
+                        part.destinationId(),
+                        part.routeId(),
+                        part.fromSequence()))
+            .toList(),
+        division.divided());
   }
 
   private static PidsRow.Status status(EtaApi.BoardPhase phase) {

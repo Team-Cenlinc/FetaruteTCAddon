@@ -93,7 +93,11 @@ public record TripSheet(
           text.apply("display.trip.row.next"),
           text.apply("display.trip.row.stop"),
           text.apply("display.trip.row.terminal"),
-          lines.apply("display.trip.row.details"));
+          // 分行、联挂的说明另起一个键：已部署的语言文件只补缺的键，接在原有说明之后才读得到
+          java.util.stream.Stream.concat(
+                  lines.apply("display.trip.row.details").stream(),
+                  lines.apply("display.trip.row.coupling").stream())
+              .toList());
     }
   }
 

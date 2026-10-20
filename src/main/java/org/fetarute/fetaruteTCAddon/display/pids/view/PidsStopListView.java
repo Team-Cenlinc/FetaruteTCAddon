@@ -65,9 +65,20 @@ public record PidsStopListView(
         theme, clock, platforms, train, cancelled, page, labels, bandColors, callHint);
   }
 
-  /** 终点下面一行写什么：取消的班次优先，其次是下一班的直通或经由。 */
+  /** 终点下面一行写什么：取消的班次优先，其次是下一班的直通或经由；下一班分行或联挂时这一行写分行、联挂（{@link #coupling}），不写直通与经由。 */
   public Optional<Note> note() {
-    return cancelled.or(() -> train.flatMap(Train::note));
+    return cancelled.or(
+        () -> train.filter(found -> found.coupling().isEmpty()).flatMap(Train::note));
+  }
+
+  /** 终点下面一行写分行或联挂：下一班分行、联挂，且没有要先写的取消班次。 */
+  public Optional<Coupling> coupling() {
+    return cancelled.isPresent() ? Optional.empty() : train.flatMap(Train::coupling);
+  }
+
+  /** 终点下面一行有字（停站表因此少放几行）。 */
+  public boolean noted() {
+    return note().isPresent() || coupling().isPresent();
   }
 
   /**
@@ -79,7 +90,9 @@ public record PidsStopListView(
    * @param arrival 多久到达（与站台屏首行相同）
    * @param status 要提醒的状态：站台待定、站台变更、晚点（琥珀或红色）；准点、计划不写。写在最底下一行左侧
    * @param note 终点下面一行：直通或经由；都没有时为空
-   * @param stops 本站之后的停车站，到终点为止
+   * @param stops 本站之后的停车站，到终点为止；分行车列开往终点那一段的站，回程支线车接着列联挂之后的站
+   * @param coupling 终点下面一行改写分行或联挂（优先于直通与经由）；不分行、不联挂时为空
+   * @param advice 本站分行时最底下一行的提示（“前往 X 请乘前 N 节”）；要提醒的状态优先
    */
   public record Train(
       String id,
@@ -88,7 +101,9 @@ public record PidsStopListView(
       Arrival arrival,
       Optional<Label> status,
       Optional<Note> note,
-      List<Stop> stops) {
+      List<Stop> stops,
+      Optional<Coupling> coupling,
+      Optional<Names> advice) {
 
     public Train {
       Objects.requireNonNull(id, "id");
@@ -98,6 +113,38 @@ public record PidsStopListView(
       status = status == null ? Optional.empty() : status;
       note = note == null ? Optional.empty() : note;
       stops = List.copyOf(stops);
+      coupling = coupling == null ? Optional.empty() : coupling;
+      advice = advice == null ? Optional.empty() : advice;
+    }
+
+    /** 不分行、不联挂。 */
+    public Train(
+        String id,
+        Badge badge,
+        Names destination,
+        Arrival arrival,
+        Optional<Label> status,
+        Optional<Note> note,
+        List<Stop> stops) {
+      this(
+          id, badge, destination, arrival, status, note, stops, Optional.empty(), Optional.empty());
+    }
+  }
+
+  /**
+   * 终点下面一行写分行或联挂：左侧钢蓝方形标签（与直通、经由一样中英叠放），右侧两行——站名与说明。右侧两行中英随备注轮换，同一时刻只写一种。
+   *
+   * @param tag 标签（“分行 / Divides”“联挂 / Joins”）
+   * @param place 第一行：分行站、联挂站，本站分行时“本站分行”
+   * @param detail 第二行：另一段怎样（“后 4 节到此止”“后 4 节开往 X”“后 4 节本站止”），联挂时“联挂后无需换乘”
+   * @param english 这一刻右侧两行写英文
+   */
+  public record Coupling(Names tag, Names place, Names detail, boolean english) {
+
+    public Coupling {
+      Objects.requireNonNull(tag, "tag");
+      Objects.requireNonNull(place, "place");
+      Objects.requireNonNull(detail, "detail");
     }
   }
 
@@ -131,6 +178,10 @@ public record PidsStopListView(
     VIA,
     /** 换线站（直通）：圆点上半旧线路色、下半新线路色，站名后加“直通”标签。 */
     CHANGE,
+    /** 分行站：钢蓝大圆点描正文色边，站名后加“分行”标签。 */
+    DIVIDE,
+    /** 联挂站：钢蓝大圆点，站名后加“联挂”标签。 */
+    JOIN,
     /** 终点：空心大圆点。 */
     TERMINAL
   }
@@ -143,13 +194,28 @@ public record PidsStopListView(
    * @param color 列车到这一站时所属线路的颜色（竖线与圆点）
    * @param after 离开这一站时所属线路的颜色；只有换线站与 {@code color} 不同
    * @param transfers 可换乘的其他线路颜色（站名右侧的小方块），不含列车所属的线路
+   * @param partial 分行站之后、只有部分车厢开到的站：通向这一站的竖线变细，站名右侧写 {@code only}
+   * @param only 部分车厢开到时右侧的框（“仅前 4 节”）；整列都到时为空
    */
-  public record Stop(Names names, Kind kind, int color, int after, List<Integer> transfers) {
+  public record Stop(
+      Names names,
+      Kind kind,
+      int color,
+      int after,
+      List<Integer> transfers,
+      boolean partial,
+      Optional<Names> only) {
 
     public Stop {
       Objects.requireNonNull(names, "names");
       Objects.requireNonNull(kind, "kind");
       transfers = List.copyOf(transfers);
+      only = only == null ? Optional.empty() : only;
+    }
+
+    /** 整列都开到。 */
+    public Stop(Names names, Kind kind, int color, int after, List<Integer> transfers) {
+      this(names, kind, color, after, transfers, false, Optional.empty());
     }
   }
 
@@ -160,6 +226,15 @@ public record PidsStopListView(
    * @param noMoreTrains “暂无后续列车 / No further trains”
    * @param via 站名后的“经由”标签
    * @param through 站名后的“直通”标签
+   * @param divide 站名后的“分行”标签
+   * @param join 站名后的“联挂”标签
    */
-  public record Labels(Names minutes, Names noMoreTrains, Names via, Names through) {}
+  public record Labels(
+      Names minutes, Names noMoreTrains, Names via, Names through, Names divide, Names join) {
+
+    /** 没有分行、联挂标签（写空）。 */
+    public Labels(Names minutes, Names noMoreTrains, Names via, Names through) {
+      this(minutes, noMoreTrains, via, through, new Names("", ""), new Names("", ""));
+    }
+  }
 }

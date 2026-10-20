@@ -344,12 +344,13 @@ class PidsComposerTest {
 
     PidsDivisionView division =
         assertInstanceOf(PidsComposer.DivisionKey.class, content.key()).view();
-    assertEquals(new Names("本次列车在新笛矢·壑湖分行", "Divides at Neo Fueya - Hor Huu"), division.title());
+    assertEquals(
+        new Names("本次列车在新笛矢·壑湖分行", "This train divides at Neo Fueya - Hor Huu"), division.title());
     assertEquals(
         new Names("前 1 节开往大港城", "Front 1 car to The Port City"),
         division.segments().get(0).destination());
     assertEquals(
-        new Names("后 1 节至新笛矢·壑湖止", "Rear 1 car terminates at Neo Fueya - Hor Huu"),
+        new Names("后 1 节至新笛矢·壑湖止", "Rear 1 car ends at Neo Fueya - Hor Huu"),
         division.segments().get(1).destination());
     assertEquals(128, content.image().get().getHeight(), "画得出来");
   }

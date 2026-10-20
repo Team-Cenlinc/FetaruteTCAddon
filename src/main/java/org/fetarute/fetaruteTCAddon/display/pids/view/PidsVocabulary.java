@@ -167,11 +167,11 @@ public final class PidsVocabulary {
 
   /** 备注标签：分行；本站分行时“本站分行”。 */
   public String divisionTag(boolean here) {
-    return primary(here ? "remark.division-here" : "remark.division");
+    return divisionTagNames(here).primary();
   }
 
   /**
-   * 分行页标题：“本次列车在 X 分行 / Divides at X”。
+   * 分行页标题：“本次列车在 X 分行 / This train divides at X”。
    *
    * @param station 分行站；为空时就在本站分行
    */
@@ -207,11 +207,8 @@ public final class PidsVocabulary {
       key = "division.ends-here";
       place = new Names("", "");
     }
-    // 英文按单复数另有一套（“1 car terminates”）
-    String secondary = text.apply(PREFIX + key + (cars == 1 ? "-one" : "") + SECONDARY);
-    return new Names(
-        fill(primary(key), end.primary(), cars, place.primary()),
-        fill(secondary, secondaryOrPrimary(end), cars, secondaryOrPrimary(place)));
+    // 英文按单复数另有一套（“1 car ends”）
+    return counted(key, cars, end, place);
   }
 
   /**
@@ -232,6 +229,102 @@ public final class PidsVocabulary {
         .orElseGet(() -> fill(primary("division.ends-here"), end, cars, ""));
   }
 
+  /**
+   * 拆开以后的车厢页标题：“本站已分行，前 4 节即将开往南渡 / Divided · front 4 cars to Nam Toa”。
+   *
+   * @param front 这一行的列车（解下接着载客的一段）在车头一侧
+   * @param destination 它开往的车站
+   */
+  public Names dividedTitle(boolean front, int cars, Names destination) {
+    return counted(
+        "division.title-divided",
+        cars,
+        names(front ? "division.divided-front" : "division.divided-rear"),
+        destination);
+  }
+
+  /** 拆开以后接着载客的一段：“开往南渡，即将发车 / To Nam Toa · departing soon”。 */
+  public Names dividedDeparting(Names destination) {
+    return filled("division.departing", 0, new Names("", ""), destination);
+  }
+
+  /** 拆开以后不再载客的一段：“不载客，请勿上车 / Not in service”。 */
+  public Names dividedNotInService() {
+    return names("division.not-in-service");
+  }
+
+  /**
+   * 联挂页标题。前方站：“本次列车在 X 联挂 / This train joins another at X”；本站：“本次列车在本站联挂，8 节开往 Y / Joins another
+   * train here · 8 cars to Y”。
+   *
+   * @param station 联挂站；为空时就在本站联挂
+   * @param cars 联挂以后一共几节（本站联挂时写）
+   * @param destination 联挂以后开往的车站（本站联挂时写）
+   */
+  public Names joinTitle(Optional<Names> station, int cars, Names destination) {
+    if (station.isPresent()) {
+      return filled("join.title", cars, new Names("", ""), station.get());
+    }
+    return filled("join.title-here", cars, new Names("", ""), destination);
+  }
+
+  /**
+   * 联挂页一段车厢的说明。
+   *
+   * @param part 哪一段
+   * @param cars 这一段几节
+   * @param station 联挂站（前方站联挂时“在 X 挂上 4 节”用）；本站联挂时为空
+   */
+  public Names joinSegment(JoinPart part, int cars, Optional<Names> station) {
+    Names place = station.orElse(new Names("", ""));
+    return part.counted
+        ? counted(part.key, cars, new Names("", ""), place)
+        : filled(part.key, cars, new Names("", ""), place);
+  }
+
+  /** 联挂页的几段。 */
+  public enum JoinPart {
+    /** 本列车，前方站联挂：“本列车 4 节，无需换乘”（英文不写节数）。 */
+    OWN_AHEAD("join.own-ahead", false),
+    /** 前方站要挂上的几节：“在 X 挂上 4 节”。 */
+    ADDED_AHEAD("join.added", true),
+    /** 本列车，本站联挂、已在站台或另一列车还没到：“本列车 4 节”。 */
+    OWN_HERE("join.own-here", true),
+    /** 本列车，本站联挂、另一列车已在站台：“本列车 4 节，进站后挂上”。 */
+    OWN_ARRIVING("join.own-arriving", true),
+    /** 已在站台的另一列车：“已在站台的 4 节”。 */
+    STANDING("join.standing", true),
+    /** 还没到的另一列车：“进站挂上 4 节”。 */
+    JOINING("join.joining", true);
+
+    private final String key;
+
+    /** 英文按单复数另有一条。 */
+    private final boolean counted;
+
+    JoinPart(String key, boolean counted) {
+      this.key = key;
+      this.counted = counted;
+    }
+  }
+
+  /** 按节数取中英文案（英文一节另有 {@code -one} 一条），填 {@code <end>}、{@code <cars>} 与地名。 */
+  private Names counted(String key, int cars, Names end, Names place) {
+    return filled(key, cars == 1 ? "-one" : "", cars, end, place);
+  }
+
+  /** 取中英文案，填 {@code <end>}、{@code <cars>} 与地名。 */
+  private Names filled(String key, int cars, Names end, Names place) {
+    return filled(key, "", cars, end, place);
+  }
+
+  private Names filled(String key, String variant, int cars, Names end, Names place) {
+    String secondary = text.apply(PREFIX + key + variant + SECONDARY);
+    return new Names(
+        fill(primary(key), end.primary(), cars, place.primary()),
+        fill(secondary, secondaryOrPrimary(end), cars, secondaryOrPrimary(place)));
+  }
+
   /** 填分行说明里的 {@code <end>}、{@code <cars>} 与地名（{@code <destination>} 或 {@code <station>}）。 */
   private static String fill(String template, String end, int cars, String place) {
     return template
@@ -246,6 +339,11 @@ public final class PidsVocabulary {
     return primary("remark.through");
   }
 
+  /** 备注标签：联挂（后面写联挂站）。 */
+  public String joinTag() {
+    return joinTagNames().primary();
+  }
+
   /** 备注标签：经由。 */
   public String viaTag() {
     return primary("remark.via");
@@ -254,7 +352,63 @@ public final class PidsVocabulary {
   /** 2×1 停站屏文案。 */
   public PidsStopListView.Labels stopListLabels() {
     return new PidsStopListView.Labels(
-        names("minutes"), names("no-more-trains"), names("remark.via"), names("remark.through"));
+        names("minutes"),
+        names("no-more-trains"),
+        names("remark.via"),
+        names("remark.through"),
+        names("remark.division"),
+        names("remark.join"));
+  }
+
+  /** 分行标签的中英文：“分行 / Divides”；本站分行时“本站分行 / Divides here”。 */
+  public Names divisionTagNames(boolean here) {
+    return names(here ? "remark.division-here" : "remark.division");
+  }
+
+  /** 联挂标签的中英文：“联挂 / Joins”。 */
+  public Names joinTagNames() {
+    return names("remark.join");
+  }
+
+  /** 2×1 停站屏：分行后另一段不再载客，“后 4 节到此止 / Rear 4 cars end”（站名写在上一行）。 */
+  public Names stopListEndsThere(boolean front, int cars) {
+    return counted(
+        "stop-list.ends-there",
+        cars,
+        names(front ? "division.front" : "division.rear"),
+        new Names("", ""));
+  }
+
+  /** 2×1 停站屏：本站分行、另一段不再载客，“后 4 节本站止 / Rear 4 cars end”。 */
+  public Names stopListEndsHere(boolean front, int cars) {
+    return counted(
+        "stop-list.ends-here",
+        cars,
+        names(front ? "division.front" : "division.rear"),
+        new Names("", ""));
+  }
+
+  /** 2×1 停站屏：回程支线车在联挂站，“联挂后无需换乘 / Stay on board”。 */
+  public Names stopListJoinsThere() {
+    return names("stop-list.joins-there");
+  }
+
+  /** 2×1 停站屏：分行站之后的站只有部分车厢开到，“仅前 4 节 / Front 4 only”。 */
+  public Names stopListOnly(boolean front, int cars) {
+    return filled(
+        "stop-list.only",
+        cars,
+        names(front ? "division.front" : "division.rear"),
+        new Names("", ""));
+  }
+
+  /** 2×1 停站屏本站分行时最底下一行：“前往南渡请乘前 4 节 / Front 4 cars to Nam Toa”。 */
+  public Names stopListBoardPart(boolean front, int cars, Names destination) {
+    return counted(
+        "stop-list.board-part",
+        cars,
+        names(front ? "division.front" : "division.rear"),
+        destination);
   }
 
   /** 2×1 后续列车页的标题。 */

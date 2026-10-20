@@ -1565,6 +1565,38 @@ public final class TimetableService implements ScheduledDeparturePlan {
     return false;
   }
 
+  /**
+   * 联挂缺车：主干交路首班要在中途挂上回程支线的车，而那条回程支线交路此刻没有着落的车（没绑上车、没有解下待接的车、生出它的主干车也不会再拆出来）。
+   * 回程支线的车只能从解编里来，链条一断（中途开始按表、某一班拆不开）就接不上了：这时主干出车就出整列，到联挂站不等，照样能在后面的解编站拆开，
+   * 拆出的车接上支线，下一圈的回程支线就有车了。只读。
+   *
+   * @param duty 主干交路
+   * @return 首班不联挂、或回程支线的车有着落时为 false
+   */
+  public boolean feederMissing(DutyKey duty) {
+    Timetable timetable = duty == null ? null : snapshot.byId().get(duty.timetableId());
+    Optional<VehicleDuty> trunk =
+        timetable == null ? Optional.empty() : timetable.duty(duty.dutyId());
+    if (trunk.isEmpty() || trunk.get().tripIds().isEmpty()) {
+      return false;
+    }
+    UUID first = trunk.get().tripIds().get(0);
+    for (VehicleDuty feeder : timetable.duties()) {
+      if (feeder.coupling().joinsTripId().filter(first::equals).isPresent()) {
+        DutyKey key = new DutyKey(duty.timetableId(), feeder.id(), duty.serviceDate());
+        return ledger.holderOf(key).isEmpty()
+            && !splitChildAwaitsVehicle(
+                new TicketIntent(
+                    key.timetableId(),
+                    key.dutyId(),
+                    key.serviceDate(),
+                    RouteOperationType.OPERATION,
+                    0));
+      }
+    }
+    return false;
+  }
+
   /** 交路由拆分开始。 */
   private boolean splitStarted(DutyKey key) {
     Timetable timetable = snapshot.byId().get(key.timetableId());
@@ -1592,12 +1624,121 @@ public final class TimetableService implements ScheduledDeparturePlan {
     if (timetable == null || progress.isEmpty()) {
       return SplitPlan.NONE;
     }
-    UUID running = progress.get().lastTripId();
+    return splitOfTrip(timetable, progress.get().lastTripId(), bound.get().serviceDate());
+  }
+
+  /**
+   * 这辆车接下来那一趟（{@link #nextDepartureOf}）在表上拆不拆：停在终点等下一趟的车，站牌按下一趟提前写分行。只读。
+   *
+   * @param trainName 列车名
+   * @return 查不到下一趟时为 {@link SplitPlan#UNBOUND}；那一趟不拆时为 {@link SplitPlan#NONE}
+   */
+  public SplitPlan splitPlanOfNext(String trainName) {
+    Optional<DueTrip> next = nextDepartureOf(trainName);
+    if (next.isEmpty()) {
+      return SplitPlan.UNBOUND;
+    }
+    Timetable timetable = next.get().timetable();
+    UUID tripId = next.get().trip().id();
+    String key = keyOf(trainName);
+    LocalDate date =
+        Optional.ofNullable(key)
+            .flatMap(ledger::bindingOf)
+            .map(DutyKey::serviceDate)
+            .orElse(next.get().serviceDate());
+    return splitOfTrip(timetable, tripId, date);
+  }
+
+  /**
+   * 表上还没出车的一班（站牌上的预测与待发行）拆不拆：站牌按表提前写分行。只看载客班次；只读。
+   *
+   * @param intent 那一班的票据意图
+   * @return 那一班跑哪条交路、拆不拆；查不到表、交路或班次时为空
+   */
+  public Optional<PlannedTrip> plannedTripOf(TicketIntent intent) {
+    if (intent == null || intent.kind() != RouteOperationType.OPERATION) {
+      return Optional.empty();
+    }
+    Timetable timetable = snapshot.byId().get(intent.timetableId());
+    Optional<VehicleDuty> duty =
+        timetable == null ? Optional.empty() : timetable.duty(intent.dutyId());
+    if (duty.isEmpty() || intent.tripIndex() >= duty.get().tripIds().size()) {
+      return Optional.empty();
+    }
+    UUID tripId = duty.get().tripIds().get(intent.tripIndex());
+    return timetable
+        .trip(tripId)
+        .map(
+            trip ->
+                new PlannedTrip(
+                    trip.routeId(), splitOfTrip(timetable, tripId, intent.serviceDate())));
+  }
+
+  /**
+   * 表上还没出车的一班在联挂里是哪一方：站牌按表提前写联挂页与“本站联挂”。主干是被并进来的那一班；回程支线是以联挂结束的交路的末班。只读，任意线程可调。
+   *
+   * @param intent 那一班的票据意图
+   * @return 不联挂、查不到表或班次时为空
+   */
+  public Optional<PlannedJoin> plannedJoinOf(TicketIntent intent) {
+    if (intent == null || intent.kind() != RouteOperationType.OPERATION) {
+      return Optional.empty();
+    }
+    Timetable timetable = snapshot.byId().get(intent.timetableId());
+    Optional<VehicleDuty> duty =
+        timetable == null ? Optional.empty() : timetable.duty(intent.dutyId());
+    if (duty.isEmpty() || intent.tripIndex() >= duty.get().tripIds().size()) {
+      return Optional.empty();
+    }
+    UUID tripId = duty.get().tripIds().get(intent.tripIndex());
+    Optional<TimetableTrip> trip = timetable.trip(tripId);
+    if (trip.isEmpty()) {
+      return Optional.empty();
+    }
+    // 回程支线：以联挂结束的交路，末班开到联挂站并进主干那一班
+    boolean last = intent.tripIndex() == duty.get().tripIds().size() - 1;
+    Optional<UUID> joins = duty.get().coupling().joinsTripId().filter(id -> last);
+    if (joins.isPresent()) {
+      Optional<TimetableTrip> trunk = timetable.trip(joins.get());
+      return trunk.map(
+          found ->
+              new PlannedJoin(
+                  trip.get().routeId(),
+                  found.routeId(),
+                  trip.get().routeId(),
+                  false,
+                  found.dutyId().flatMap(timetable::duty).flatMap(VehicleDuty::consist),
+                  duty.get().consist()));
+    }
+    // 主干：表上有回程支线并进这一班
+    for (VehicleDuty feeder : timetable.duties()) {
+      if (feeder.coupling().joinsTripId().filter(tripId::equals).isEmpty()
+          || feeder.tripIds().isEmpty()) {
+        continue;
+      }
+      UUID feederTrip = feeder.tripIds().get(feeder.tripIds().size() - 1);
+      return timetable
+          .trip(feederTrip)
+          .map(
+              found ->
+                  new PlannedJoin(
+                      trip.get().routeId(),
+                      trip.get().routeId(),
+                      found.routeId(),
+                      true,
+                      duty.get().consist(),
+                      feeder.consist()));
+    }
+    return Optional.empty();
+  }
+
+  /** 表上第 {@code tripId} 班生出的子交路；没有时为 {@link SplitPlan#NONE}。 */
+  private static SplitPlan splitOfTrip(Timetable timetable, UUID tripId, LocalDate serviceDate) {
     for (VehicleDuty duty : timetable.duties()) {
-      if (duty.coupling().splitFromTripId().filter(running::equals).isPresent()) {
+      if (duty.coupling().splitFromTripId().filter(tripId::equals).isPresent()) {
         return new SplitPlan(
             true,
-            Optional.of(new DutyKey(timetable.id(), duty.id(), bound.get().serviceDate())),
+            Optional.of(new DutyKey(timetable.id(), duty.id(), serviceDate)),
             duty.tripIds().isEmpty());
       }
     }
@@ -3159,6 +3300,47 @@ public final class TimetableService implements ScheduledDeparturePlan {
     /** 表上这一班不拆（车绑着交路、却没有生出子交路）。 */
     public boolean skips() {
       return bound && child.isEmpty();
+    }
+  }
+
+  /**
+   * 表上还没出车的一班。
+   *
+   * @param routeId 那一班跑的交路
+   * @param split 那一班拆不拆
+   */
+  public record PlannedTrip(UUID routeId, SplitPlan split) {
+
+    public PlannedTrip {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(split, "split");
+    }
+  }
+
+  /**
+   * 表上还没出车的一班在联挂里的情况（{@link #plannedJoinOf}）。
+   *
+   * @param routeId 这一班跑的交路
+   * @param trunkRouteId 主干交路
+   * @param feederRouteId 回程支线交路
+   * @param trunk 这一班是主干；否则是回程支线
+   * @param trunkConsist 主干车底联挂之前的出车编组；表上没定车型时为空
+   * @param feederConsist 回程支线车底的编组；表上没定车型时为空
+   */
+  public record PlannedJoin(
+      UUID routeId,
+      UUID trunkRouteId,
+      UUID feederRouteId,
+      boolean trunk,
+      Optional<String> trunkConsist,
+      Optional<String> feederConsist) {
+
+    public PlannedJoin {
+      Objects.requireNonNull(routeId, "routeId");
+      Objects.requireNonNull(trunkRouteId, "trunkRouteId");
+      Objects.requireNonNull(feederRouteId, "feederRouteId");
+      trunkConsist = trunkConsist == null ? Optional.empty() : trunkConsist;
+      feederConsist = feederConsist == null ? Optional.empty() : feederConsist;
     }
   }
 

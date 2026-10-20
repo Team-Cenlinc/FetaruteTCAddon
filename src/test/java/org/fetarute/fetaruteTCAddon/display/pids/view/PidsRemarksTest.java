@@ -22,7 +22,7 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Remark;
 import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.RemarkPart;
 import org.junit.jupiter.api.Test;
 
-/** 备注：末班车、分行、直通、经由（配置优先，没配置按换乘线路数、站台数、直通站推断）。 */
+/** 备注：末班车、分行、联挂、直通、经由（配置优先，没配置按换乘线路数、站台数、直通站推断）。 */
 class PidsRemarksTest {
 
   private static final Instant NOW = Instant.parse("2026-10-01T13:40:00Z");
@@ -213,6 +213,28 @@ class PidsRemarksTest {
         divisionRemarks.of(ahead, PidsTheme.DARK).orElseThrow().parts().get(0));
   }
 
+  /** 在运营终点分行、解下的一段接着载客：这一行的主目的地已是解下那一段的去向，备注说留下、本站止的一段。 */
+  @Test
+  void whenTheRowAlreadyHeadsWhereTheDetachedCarsGoTheRemarkNamesTheOtherCars() {
+    PidsRow here =
+        withDivision(row(2, false), division(2, part(1, true, "SURC:NTA"), part(1, false, null)));
+
+    assertEquals(
+        new RemarkPart("本站分行", PidsTheme.DARK.info(), List.of("后 1 节本站止"), Optional.empty()),
+        divisionRemarks.of(here, PidsTheme.DARK).orElseThrow().parts().get(0));
+  }
+
+  /** 前方站分行、主目的地已写成解下那一段的远端：备注说留下、到分行站止的那一段。 */
+  @Test
+  void upstreamTheRemarkNamesWhereTheOtherCarsEnd() {
+    PidsRow ahead =
+        withDivision(row(0, false), division(2, part(1, true, "SURC:NTA"), part(1, false, null)));
+
+    assertEquals(
+        new RemarkPart("分行", PidsTheme.DARK.info(), List.of("后 1 节至新笛矢·壑湖止"), Optional.empty()),
+        divisionRemarks.of(ahead, PidsTheme.DARK).orElseThrow().parts().get(0));
+  }
+
   @Test
   void aDivisionBehindThisStationIsNotMentioned() {
     PidsRow row =
@@ -221,6 +243,49 @@ class PidsRemarksTest {
     assertTrue(
         divisionRemarks.of(row, PidsTheme.DARK).orElseThrow().parts().stream()
             .noneMatch(part -> part.tag().equals("分行") || part.tag().equals("本站分行")));
+  }
+
+  /** 回程支线的车：联挂站之前写“联挂”与联挂站（主目的地已是联挂后主干的终点）；到了联挂站它在那里终到，不再写。 */
+  @Test
+  void joiningNamesTheJoinStationUntilItIsReached() {
+    PidsRow.Joining joining = new PidsRow.Joining(2, "SURC:HHU");
+
+    assertEquals(
+        new RemarkPart(
+            "pids.board.remark.join", PidsTheme.DARK.info(), List.of("新笛矢·壑湖"), Optional.empty()),
+        remarks
+            .of(withJoining(row(0, false), joining), PidsTheme.DARK)
+            .orElseThrow()
+            .parts()
+            .get(0));
+    assertTrue(
+        remarks.of(withJoining(row(2, false), joining), PidsTheme.DARK).stream()
+            .flatMap(remark -> remark.parts().stream())
+            .noneMatch(part -> part.tag().equals("pids.board.remark.join")));
+  }
+
+  private static PidsRow withJoining(PidsRow row, PidsRow.Joining joining) {
+    return new PidsRow(
+        row.status(),
+        row.lineName(),
+        row.routeId(),
+        row.destination(),
+        row.destinationId(),
+        row.platform(),
+        row.expectedAt(),
+        row.delaySeconds(),
+        row.stopSequence(),
+        row.passing(),
+        row.terminating(),
+        row.outOfService(),
+        row.trainName(),
+        row.platformPending(),
+        row.platformCandidates(),
+        row.cars(),
+        row.previousPlatform(),
+        row.lastTrain(),
+        Optional.empty(),
+        Optional.of(joining));
   }
 
   private static PidsRow.Division.Part part(int cars, boolean detached, String destination) {

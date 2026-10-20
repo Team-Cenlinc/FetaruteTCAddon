@@ -47,6 +47,22 @@ class DecoupleCutTest {
     assertEquals(new DecoupleCut.Cut(6, End.REAR), cut);
   }
 
+  /** 还没出车的一班按出车编组各段的节数排出来源编组：同样写法的两段也是两个编组，与现场出车后按段写的来源同一种切法。 */
+  @Test
+  void plannedCarsCutLikeTheSpawnedTrain() {
+    List<Optional<CarConsist.Origin>> pair = DecoupleService.plannedCars(List.of(1, 1));
+    assertEquals(2, pair.size());
+    assertEquals(
+        Optional.of(new DecoupleCut.Cut(1, End.FRONT)), DecoupleCut.resolve(pair, End.FRONT, 1));
+
+    List<Optional<CarConsist.Origin>> mixed = DecoupleService.plannedCars(List.of(6, 2));
+    assertEquals(
+        Optional.of(new DecoupleCut.Cut(6, End.REAR)),
+        DecoupleCut.resolve(mixed, End.FRONT, 2),
+        "指定那头切不开时同样改拆另一头");
+    assertTrue(DecoupleCut.resolve(mixed, End.FRONT, 3).isEmpty());
+  }
+
   @Test
   void refusesWhenNeitherEndIsABoundary() {
     assertTrue(DecoupleCut.resolve(train("A", 3, "B", 5), End.REAR, 4).isEmpty());

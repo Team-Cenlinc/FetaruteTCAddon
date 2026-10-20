@@ -24,11 +24,13 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * <ul>
  *   <li>首行：色牌（与站台屏同样式）与靠右的多久到达（分钟数加“分 / min”，进站、停靠中写提示）
  *   <li>终点：中文仿粗体、英文次要色，各自放不下时省略
- *   <li>终点下面一行：方形标签（直通 / thru 或经由 / via，中英文上下叠放）加两行字；直通时线路名后加线路代码小牌
+ *   <li>终点下面一行：方形标签（直通 / thru 或经由 / via，中英文上下叠放）加两行字；直通时线路名后加线路代码小牌。
+ *       分行、联挂时是钢蓝标签（同样中英叠放）加站名与说明，右边两行中英随备注轮换
  *   <li>停站表：左侧一条竖线串起各站圆点，竖线按列车所属线路着色、换线站之后换成新线路的颜色。下一站小圆点用正文色，经由站琥珀色大圆点，
  *       换线站大圆点上半旧线路色、下半新线路色，终点空心大圆点；经由站与换线站在站名后加标签。站名右侧小方块是可换乘的其他线路。
- *       前面还有站（第二页起）时竖线从上沿接下来，后面还有站时竖线通到下沿并画向下的箭头
- *   <li>最底下一行：左侧写要提醒的状态（站台待定、站台变更、晚点），多于一页时右侧写页码“2/3”
+ *       前面还有站（第二页起）时竖线从上沿接下来，后面还有站时竖线通到下沿并画向下的箭头。
+ *       分行站钢蓝大圆点描正文色边、联挂站钢蓝大圆点，站名后加标签；分行站之后只有部分车厢开到的站，通向它的竖线变细，右侧写“仅前 N 节”框
+ *   <li>最底下一行：左侧写要提醒的状态（站台待定、站台变更、晚点），没有时写本站分行的提示（“前往 X 请乘前 N 节”），多于一页时右侧写页码“2/3”
  * </ul>
  *
  * <p>终点下面一行依次写：下一班之前本站台被取消的班次、直通、经由（{@link PidsStopListView#note()}）。
@@ -38,10 +40,14 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  */
 final class PidsStopListPainter {
 
-  /** 竖线左缘（相对组件左缘）与宽。 */
+  /** 竖线左缘（相对组件左缘）与宽；只有部分车厢开到的一段用细线。 */
   private static final int LINE_X = 7;
 
   private static final int LINE_WIDTH = 2;
+  private static final int THIN_LINE_WIDTH = 1;
+
+  /** “仅前 N 节”框与右缘的间距。 */
+  private static final int ONLY_INSET = 2;
 
   /** 圆点中心的横坐标（相对组件左缘）。 */
   private static final int DOT_CENTER = 8;
@@ -111,11 +117,17 @@ final class PidsStopListPainter {
       drawStacked(list, view.labels().noMoreTrains(), list.stop(), theme.muted(), theme.muted());
     }
     view.note().ifPresent(note -> drawNote(list, note));
-    boolean noted = view.note().isPresent();
+    view.coupling().ifPresent(coupling -> drawCoupling(list, coupling));
+    boolean noted = view.noted();
     int pages = train.map(found -> list.pages(found.stops().size(), noted)).orElse(1);
     int page = Math.floorMod(view.page(), pages);
     train.ifPresent(found -> drawStops(list, found, noted, page, view.labels()));
-    drawFooter(list, train.flatMap(Train::status).or(view::callHint), page, pages);
+    Optional<Label> footer =
+        train
+            .flatMap(Train::status)
+            .or(() -> train.flatMap(Train::advice).map(advice -> Label.of(advice, Tone.NORMAL)))
+            .or(view::callHint);
+    drawFooter(list, footer, page, pages);
   }
 
   /** 首行：色牌，靠右的多久到达；分钟数伸到色牌上时改用小字号（与空位页同一画法）。 */
@@ -313,18 +325,8 @@ final class PidsStopListPainter {
     int x = list.x() + list.inset();
     int top = list.noteTop();
     int box = list.noteHeight();
-    int tagWidth =
-        Math.max(
-            box,
-            Math.max(
-                    p.width(note.tag().primary(), TAG_SIZE),
-                    p.width(note.tag().secondary(), TAG_SIZE))
-                + TAG_PAD * 2);
+    int tagWidth = drawStackedTag(x, top, box, note.tag(), note.color());
     int ink = PidsTheme.textOn(note.color());
-    p.fill(x, top, tagWidth, box, note.color());
-    int tagTop = top + (box - TAG_SIZE * 2 - 1) / 2;
-    p.textCentered(note.tag().primary(), TAG_SIZE, x + tagWidth / 2, tagTop, ink);
-    p.textCentered(note.tag().secondary(), TAG_SIZE, x + tagWidth / 2, tagTop + TAG_SIZE + 1, ink);
 
     int textX = x + tagWidth + NOTE_TEXT_GAP;
     int right = list.x() + list.width() - list.inset();
@@ -355,6 +357,60 @@ final class PidsStopListPainter {
         false);
   }
 
+  /** 终点下面一行写分行或联挂：左侧加宽的单行钢蓝标签，右侧站名与说明；中英随备注轮换。 */
+  private void drawCoupling(PidsLayout.StopList list, PidsStopListView.Coupling coupling) {
+    int x = list.x() + list.inset();
+    int top = list.noteTop();
+    int box = list.noteHeight();
+    int tagWidth = drawStackedTag(x, top, box, coupling.tag(), theme.info());
+    int textX = x + tagWidth + NOTE_TEXT_GAP;
+    int width = list.x() + list.width() - list.inset() - textX;
+    int textTop = top + (box - NOTE_PRIMARY - NOTE_SECONDARY) / 2;
+    String place = pick(coupling.place(), coupling.english());
+    p.text(
+        coupling.english()
+            ? p.ellipsizeWords(place, NOTE_PRIMARY, width)
+            : p.ellipsize(place, NOTE_PRIMARY, width),
+        NOTE_PRIMARY,
+        textX,
+        textTop,
+        theme.text());
+    String detail = pick(coupling.detail(), coupling.english());
+    p.regular(
+        coupling.english()
+            ? p.ellipsizeWords(detail, NOTE_SECONDARY, width)
+            : p.ellipsize(detail, NOTE_SECONDARY, width),
+        NOTE_SECONDARY,
+        textX,
+        textTop + NOTE_PRIMARY,
+        theme.muted(),
+        false);
+  }
+
+  /**
+   * 终点下面一行左侧的方形标签：中英文上下叠放，至少见方，英文长时加宽。
+   *
+   * @return 标签宽
+   */
+  private int drawStackedTag(int x, int top, int box, Names tag, int color) {
+    int tagWidth =
+        Math.max(
+            box,
+            Math.max(p.width(tag.primary(), TAG_SIZE), p.width(tag.secondary(), TAG_SIZE))
+                + TAG_PAD * 2);
+    int ink = PidsTheme.textOn(color);
+    p.fill(x, top, tagWidth, box, color);
+    int tagTop = top + (box - TAG_SIZE * 2 - 1) / 2;
+    p.textCentered(tag.primary(), TAG_SIZE, x + tagWidth / 2, tagTop, ink);
+    p.textCentered(tag.secondary(), TAG_SIZE, x + tagWidth / 2, tagTop + TAG_SIZE + 1, ink);
+    return tagWidth;
+  }
+
+  /** 中文或英文；英文空着时写中文。 */
+  private static String pick(Names names, boolean english) {
+    return english && !names.secondary().isBlank() ? names.secondary() : names.primary();
+  }
+
   private void drawStops(
       PidsLayout.StopList list,
       Train train,
@@ -375,16 +431,16 @@ final class PidsStopListPainter {
     int centerOffset = list.stop().size() / 2;
 
     if (from > 0) {
-      p.fill(lineX, top, LINE_WIDTH, centerOffset, shown.get(0).color());
+      p.fill(lineX, top, lineWidth(shown.get(0)), centerOffset, shown.get(0).color());
     }
     for (int i = 0; i + 1 < shown.size(); i++) {
       int center = top + i * list.rowHeight() + centerOffset;
-      p.fill(lineX, center, LINE_WIDTH, list.rowHeight(), shown.get(i).after());
+      p.fill(lineX, center, lineWidth(shown.get(i + 1)), list.rowHeight(), shown.get(i).after());
     }
     if (to < stops.size()) {
       int last = top + (shown.size() - 1) * list.rowHeight() + centerOffset;
       int tail = shown.get(shown.size() - 1).after();
-      p.fill(lineX, last, LINE_WIDTH, bottom - ARROW_HEIGHT - last, tail);
+      p.fill(lineX, last, lineWidth(stops.get(to)), bottom - ARROW_HEIGHT - last, tail);
       int cx = list.x() + DOT_CENTER;
       p.triangle(
           new int[] {cx - ARROW_WIDTH / 2, cx + ARROW_WIDTH / 2, cx},
@@ -394,6 +450,11 @@ final class PidsStopListPainter {
     for (int i = 0; i < shown.size(); i++) {
       drawStop(list, shown.get(i), top + i * list.rowHeight(), labels);
     }
+  }
+
+  /** 通向这一站的竖线宽：只有部分车厢开到时用细线。 */
+  private static int lineWidth(Stop stop) {
+    return stop.partial() ? THIN_LINE_WIDTH : LINE_WIDTH;
   }
 
   private void drawStop(
@@ -409,15 +470,30 @@ final class PidsStopListPainter {
         switch (stop.kind()) {
           case VIA -> Optional.of(new Tag(labels.via().primary(), theme.amber()));
           case CHANGE -> Optional.of(new Tag(labels.through().primary(), stop.after()));
+          case DIVIDE -> Optional.of(new Tag(labels.divide().primary(), theme.info()));
+          case JOIN -> Optional.of(new Tag(labels.join().primary(), theme.info()));
           default -> Optional.empty();
         };
     int tagWidth = tag.map(t -> p.regularWidth(t.text(), TAG_SIZE) + TAG_PAD * 2).orElse(0);
     int tagRoom = tagWidth > 0 ? TAG_GAP + tagWidth : 0;
 
+    // “仅前 N 节”框靠右，先于可换乘线路的小方块
+    int lineRight = right;
+    if (stop.only().isPresent()) {
+      String only = stop.only().get().primary();
+      int onlyWidth = p.regularWidth(only, TAG_SIZE) + TAG_PAD * 2 + 2;
+      int onlyX = right - ONLY_INSET - onlyWidth;
+      if (textX + p.width(stop.names().primary(), style.size()) + tagRoom <= onlyX - CHIP_GAP) {
+        p.outline(onlyX, rowTop + 1, onlyWidth, TAG_SIZE + 1, theme.info());
+        p.regular(only, TAG_SIZE, onlyX + TAG_PAD + 1, rowTop + 1, theme.text(), false);
+        lineRight = onlyX - CHIP_GAP;
+      }
+    }
+
     // 站名与标签优先：放不下时先不画可换乘线路的小方块，再省略站名
     int chips = stop.transfers().size();
     int chipsWidth = chips == 0 ? 0 : chips * CHIP + (chips - 1) * CHIP_GAP;
-    int chipX = right - chipsWidth;
+    int chipX = lineRight - chipsWidth;
     boolean showChips =
         chips > 0
             && textX + p.width(stop.names().primary(), style.size()) + tagRoom
@@ -427,7 +503,7 @@ final class PidsStopListPainter {
         p.fill(chipX + i * (CHIP + CHIP_GAP), cy - CHIP / 2, CHIP, CHIP, stop.transfers().get(i));
       }
     }
-    int nameRight = showChips ? chipX - CHIP_GAP * 2 : right;
+    int nameRight = showChips ? chipX - CHIP_GAP * 2 : lineRight;
     int nameRoom = nameRight - textX - tagRoom;
     int nameWidth =
         p.text(
@@ -470,6 +546,11 @@ final class PidsStopListPainter {
         octagon(cx, cy, BIG_DOT, stop.color());
         p.unclip();
       }
+      case DIVIDE -> {
+        octagon(cx, cy, BIG_DOT, theme.text());
+        octagon(cx, cy, BIG_DOT - 2, theme.info());
+      }
+      case JOIN -> octagon(cx, cy, BIG_DOT, theme.info());
       case TERMINAL -> {
         octagon(cx, cy, BIG_DOT, stop.color());
         p.fill(cx - HOLE / 2, cy - HOLE / 2, HOLE, HOLE, theme.background());

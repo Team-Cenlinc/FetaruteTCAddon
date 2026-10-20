@@ -167,6 +167,18 @@ final class CouplingIndex {
     return feederRoute == null ? List.of() : byFeeder.getOrDefault(feederRoute, List.of());
   }
 
+  /** 回程支线联挂之后接着跑的那一处：这条交路只挂上一条主干时就是它；挂上不同的主干（去向说不准）或不挂时为空。 */
+  Optional<Join> continuationOf(UUID feederRoute) {
+    List<Join> joins = ofFeeder(feederRoute);
+    if (joins.isEmpty()) {
+      return Optional.empty();
+    }
+    UUID trunk = joins.get(0).trunkRoute();
+    return joins.stream().allMatch(join -> join.trunkRoute().equals(trunk))
+        ? Optional.of(joins.get(0))
+        : Optional.empty();
+  }
+
   private static String codeKey(UUID lineId, String group, String code) {
     return lineId
         + "|"

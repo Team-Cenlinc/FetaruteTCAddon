@@ -1,5 +1,6 @@
 package org.fetarute.fetaruteTCAddon.display.hud;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
@@ -30,6 +31,9 @@ import org.fetarute.fetaruteTCAddon.display.template.HudTemplateService;
  * @param nextStopDelaySeconds 按表运行时到达下一站的偏差秒数（正数为晚点，见 {@link
  *     org.fetarute.fetaruteTCAddon.dispatcher.eta.EtaService#arrivalDeviationSeconds}）；不按表运行时为空
  * @param nextStopIndex 前方下一个停靠站的停靠序号（与进度下标、时刻表停靠序号同一口径）；前方没有停靠站时为空
+ * @param nextTripDestination 待命车接下来那一趟开往的车站（按表运行时表上已定）；不在待命、不按表或查不到时为空
+ * @param nextTripDeparture 待命车接下来那一趟的计划发车时刻；不在待命、不按表或查不到时为空
+ * @param joinStation 联挂站：交路是回程支线，运营终点是联挂站，挂上主干后接着开往 {@code destinations.eop()}（已是主干的终点）；不联挂时为空
  */
 public record TrainHudContext(
     String trainName,
@@ -54,7 +58,10 @@ public record TrainHudContext(
     boolean outOfService,
     List<Transfer> nextStopTransfers,
     OptionalLong nextStopDelaySeconds,
-    OptionalInt nextStopIndex) {
+    OptionalInt nextStopIndex,
+    StationDisplay joinStation,
+    StationDisplay nextTripDestination,
+    Optional<Instant> nextTripDeparture) {
   public TrainHudContext {
     Objects.requireNonNull(trainName, "trainName");
     routeDefinition = routeDefinition == null ? Optional.empty() : routeDefinition;
@@ -73,6 +80,10 @@ public record TrainHudContext(
     nextStopDelaySeconds =
         nextStopDelaySeconds == null ? OptionalLong.empty() : nextStopDelaySeconds;
     nextStopIndex = nextStopIndex == null ? OptionalInt.empty() : nextStopIndex;
+    joinStation = joinStation == null ? StationDisplay.empty() : joinStation;
+    nextTripDestination =
+        nextTripDestination == null ? StationDisplay.empty() : nextTripDestination;
+    nextTripDeparture = nextTripDeparture == null ? Optional.empty() : nextTripDeparture;
   }
 
   /**

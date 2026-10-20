@@ -23,7 +23,7 @@ public record BoardResult(List<BoardRow> rows) {
    *
    * @param lineName 列车到本站时所属线路的代码
    * @param routeId 交路 ID（{@code 运营商:线路:交路}）
-   * @param destination 主目的地显示名（运营终点，回库车越过运营终点后为“回库”）
+   * @param destination 主目的地显示名（运营终点，回库车越过运营终点后为“回库”；回程支线的车在联挂站之前为联挂后主干的运营终点）
    * @param destinationId 主目的地 ID
    * @param endRoute 线路终点（EOR）显示名
    * @param endRouteId 线路终点 ID
@@ -44,6 +44,8 @@ public record BoardResult(List<BoardRow> rows) {
    * @param platformCandidates 站台待定时可能停靠的站台，按站台号升序；站台已定或候选未知时为空
    * @param platformPlanned 站台号是计划站台（时刻表排定）或暂定站台（列车下一个停车站上先定的股道）：列车还没有选台， 进站前选台时这条股道被占会改停别的站台
    * @param load 运行中列车的载客（各节车的座位与在座乘客）；票据、预测与读不到车辆模型时为空
+   * @param joining 列车在前方的联挂站挂上主干、乘客留在车上继续前往主目的地；不联挂、本站就是联挂站时为空
+   * @param serviceTripId 票据与预测行的车次标识（按表时查表上这一班拆不拆用）；按下一趟列出的车（折返站上的来车、终点待命的车）为下一趟的，其余运行中列车为空
    */
   public record BoardRow(
       String lineName,
@@ -68,7 +70,9 @@ public record BoardResult(List<BoardRow> rows) {
       boolean platformPending,
       List<String> platformCandidates,
       boolean platformPlanned,
-      Optional<TrainLoad> load) {
+      Optional<TrainLoad> load,
+      Optional<Joining> joining,
+      Optional<String> serviceTripId) {
     public BoardRow {
       Objects.requireNonNull(lineName, "lineName");
       Objects.requireNonNull(routeId, "routeId");
@@ -87,6 +91,36 @@ public record BoardResult(List<BoardRow> rows) {
       delaySeconds = delaySeconds == null ? OptionalLong.empty() : delaySeconds;
       platformCandidates = platformCandidates == null ? List.of() : List.copyOf(platformCandidates);
       load = load == null ? Optional.empty() : load;
+      joining = joining == null ? Optional.empty() : joining;
+      serviceTripId = serviceTripId == null ? Optional.empty() : serviceTripId;
+    }
+  }
+
+  /**
+   * 前方的联挂站：回程支线的车在这里挂上主干。
+   *
+   * @param stopIndex 联挂站的停靠序号（回程支线交路的运营终点）
+   * @param station 联挂站显示名
+   * @param stationId 联挂站 ID
+   * @param continuesOn 联挂以后接着跑的主干交路（{@code 运营商:线路:交路}）；不知道时为空
+   * @param continuesFrom 联挂站在主干交路里的下标；不知道时为 -1
+   */
+  public record Joining(
+      int stopIndex,
+      String station,
+      Optional<String> stationId,
+      Optional<String> continuesOn,
+      int continuesFrom) {
+
+    public Joining {
+      Objects.requireNonNull(station, "station");
+      stationId = stationId == null ? Optional.empty() : stationId;
+      continuesOn = continuesOn == null ? Optional.empty() : continuesOn;
+    }
+
+    /** 不知道接着跑哪条主干。 */
+    public Joining(int stopIndex, String station, Optional<String> stationId) {
+      this(stopIndex, station, stationId, Optional.empty(), -1);
     }
   }
 }

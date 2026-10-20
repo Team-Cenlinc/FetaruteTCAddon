@@ -594,23 +594,45 @@ public final class PidsRenderer {
     if (carWidth < 2) {
       return spans;
     }
-    int start = left + (available - (count * carWidth + (count - 1) * gap)) / 2;
+    // 已经拆开的两段之间留空：占三节之间的间距，从车厢宽度里匀出来
+    int splits = (int) segments.stream().filter(PidsDivisionView.Segment::gapBefore).count();
+    int split = gap * 3;
+    if (splits > 0) {
+      carWidth = Math.min(carWidth, (available - (count - 1) * gap - splits * split) / count);
+    }
+    int trainWidth = count * carWidth + (count - 1) * gap + splits * split;
+    int start = left + (available - trainWidth) / 2;
     int top = VACANCY_TRAIN_TOP;
     int height = VACANCY_CAR_HEIGHT;
     int background = p.theme.background();
     // 空心段只有 1 像素描边：线路色与底色对比不够（浅色主题上的浅色线路）时改用正文色
     int stroke = contrast(color, background) >= 3.0 ? color : p.theme.text();
     int index = 0;
+    int offset = 0;
     for (PidsDivisionView.Segment segment : segments) {
+      if (segment.gapBefore() && index > 0) {
+        offset += split;
+      }
       int spanLeft = Integer.MAX_VALUE;
       int spanRight = Integer.MIN_VALUE;
       for (int k = 0; k < segment.cars(); k++, index++) {
-        int x = start + (frontRight ? count - 1 - index : index) * (carWidth + gap);
+        int slot = index * (carWidth + gap) + offset;
+        int x = frontRight ? start + trainWidth - slot - carWidth : start + slot;
         spanLeft = Math.min(spanLeft, x);
         spanRight = Math.max(spanRight, x + carWidth);
-        p.fill(x, top, carWidth, height, segment.detached() ? stroke : color);
-        if (segment.detached()) {
+        int outline =
+            switch (segment.style()) {
+              case SOLID -> color;
+              case HOLLOW, DASHED -> stroke;
+              case INACTIVE -> p.theme.muted();
+            };
+        if (segment.style() == PidsDivisionView.Style.SOLID) {
+          p.fill(x, top, carWidth, height, color);
+        } else if (segment.style() == PidsDivisionView.Style.HOLLOW) {
+          p.fill(x, top, carWidth, height, outline);
           p.fill(x + 1, top + 1, carWidth - 2, height - 2, background);
+        } else {
+          drawDashedBox(p, x, top, carWidth, height, outline);
         }
         p.fill(x, top, 1, 1, background);
         p.fill(x + carWidth - 1, top, 1, 1, background);
@@ -627,12 +649,28 @@ public final class PidsRenderer {
               top + VACANCY_WINDOW_INSET,
               windowWidth,
               VACANCY_WINDOW_HEIGHT,
-              segment.detached() ? stroke : background);
+              segment.style() == PidsDivisionView.Style.SOLID ? background : outline);
         }
       }
       spans.add(new int[] {spanLeft, spanRight});
     }
     return spans;
+  }
+
+  /** 1 像素虚线框：2 像素画、1 像素空，四边各自从角上起画。 */
+  private static void drawDashedBox(Painter p, int x, int y, int width, int height, int color) {
+    for (int i = 0; i < width; i++) {
+      if (i % 3 != 2) {
+        p.fill(x + i, y, 1, 1, color);
+        p.fill(x + i, y + height - 1, 1, 1, color);
+      }
+    }
+    for (int j = 0; j < height; j++) {
+      if (j % 3 != 2) {
+        p.fill(x, y + j, 1, 1, color);
+        p.fill(x + width - 1, y + j, 1, 1, color);
+      }
+    }
   }
 
   /** 两色的对比度（WCAG 口径）。 */

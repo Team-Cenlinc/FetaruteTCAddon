@@ -197,8 +197,10 @@ public final class TripDialogService implements Listener {
     TrainHudContext context = ride.context();
     Map<String, String> placeholders = resolver.buildPlaceholders(context, 0.0f);
     resolver.applyPlayerPlaceholders(placeholders, player, ride.group());
+    // 列车分行时按玩家所在车厢那一段的行程列站
     TrainHudContextResolver.UpcomingStops upcoming =
-        resolver.resolveUpcomingStops(context, transfersOnly ? TRANSFER_SCAN_LIMIT : STOP_LIMIT);
+        resolver.resolveUpcomingStops(
+            context, transfersOnly ? TRANSFER_SCAN_LIMIT : STOP_LIMIT, player, ride.group());
     TripSheet sheet =
         TripSheet.build(
             TripSheet.Texts.load(locale::text, locale::stringList),

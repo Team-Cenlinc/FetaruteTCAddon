@@ -8,6 +8,7 @@ import java.util.UUID;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.api.StationDirectory;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.company.model.RouteStopPassType;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
@@ -26,29 +27,50 @@ final class DivisionDestinations {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
   }
 
-  /** 交路的运营终点；查不到交路或终点不是车站时不载客。 */
+  /** 交路从头跑到运营终点（解下的一段接着跑的交路）；查不到交路或终点不是车站时不载客。 */
   DivisionForecast.Destination ofRoute(Optional<UUID> route) {
     Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
-    if (route.isEmpty() || cache.isEmpty()) {
+    Optional<RouteId> id = cache.flatMap(c -> route.flatMap(c::findById)).map(d -> d.id());
+    if (id.isEmpty()) {
       return DivisionForecast.Destination.NOT_IN_SERVICE;
     }
-    return ofStops(
-        cache
-            .get()
-            .findById(route.get())
-            .map(d -> cache.get().listStops(d.id()))
-            .orElse(List.of()));
+    return along(id.get(), cache.get().listStops(id.get()), 0);
   }
 
-  /** 停靠表的运营终点（最后一个载客车站）。 */
-  DivisionForecast.Destination ofStops(List<RouteStop> stops) {
+  /**
+   * 交路 {@code route} 从第 {@code fromIndex} 站接着跑到运营终点（留下的一段跑完本交路）。
+   *
+   * @param stops 这条交路的停靠表
+   * @return 去向；运营终点不是车站时不载客
+   */
+  DivisionForecast.Destination along(RouteId route, List<RouteStop> stops, int fromIndex) {
     OptionalInt end = RouteTerminals.endOfOperationIndex(stops);
     if (end.isEmpty()) {
       return DivisionForecast.Destination.NOT_IN_SERVICE;
     }
     return stationIdOf(stops.get(end.getAsInt()))
-        .map(id -> new DivisionForecast.Destination(Optional.of(id), stationName(id)))
+        .map(
+            id ->
+                new DivisionForecast.Destination(
+                    Optional.of(id),
+                    stationName(id),
+                    stopsAfter(stops, fromIndex),
+                    Optional.of(route.value()),
+                    fromIndex))
         .orElse(DivisionForecast.Destination.NOT_IN_SERVICE);
+  }
+
+  /** 第 {@code fromIndex} 站之后、到运营终点（含）为止停几个车站：通过不停的车站与路径点不算，运营终点之后的回库段不算。纯计算。 */
+  static int stopsAfter(List<RouteStop> stops, int fromIndex) {
+    OptionalInt end = RouteTerminals.endOfOperationIndex(stops);
+    int count = 0;
+    for (int i = Math.max(0, fromIndex + 1); end.isPresent() && i <= end.getAsInt(); i++) {
+      RouteStop stop = stops.get(i);
+      if (stop.passType() != RouteStopPassType.PASS && RouteTerminals.isStationStop(stop)) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /** 解下的一段开往哪里（见类说明）。 */

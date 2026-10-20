@@ -14,6 +14,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.function.IntFunction;
+import java.util.function.Supplier;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
@@ -243,12 +244,40 @@ public final class ScoreboardTrainHudManager implements Listener {
     state =
         HudStateTracker.applyOutOfService(
             state, context.outOfService(), template.defines(HudState.OUT_OF_SERVICE));
-    TrainFrameDelta frameDelta = updateTrainFrame(trainName, context, state);
+    state =
+        HudStateTracker.applyJoin(
+            state,
+            !context.joinStation().isEmpty(),
+            template.defines(HudState.JOIN_ARRIVING),
+            template.defines(HudState.AT_JOIN_STATION));
+    // 列车层面的状态记进列车帧；分行状态按玩家所在车厢各不相同，记进去会让同车乘客互相清掉翻页窗口
+    HudState trainState = state;
+    state =
+        HudStateTracker.applyDivision(
+            state,
+            placeholders,
+            template.defines(HudState.DIVIDE_ARRIVING),
+            template.defines(HudState.AT_DIVIDE_STATION));
+    state =
+        HudStateTracker.applyCarEnd(
+            state,
+            placeholders,
+            template.defines(HudState.CAR_ENDS_ARRIVING),
+            template.defines(HudState.AT_CAR_END));
+    TrainFrameDelta frameDelta = updateTrainFrame(trainName, context, trainState);
     Optional<ScoreboardHudTemplate.Page> pageOpt =
         template.resolvePage(state, HudLanguageRotation.nowTicks());
     String title = resolveTitle(template, pageOpt, placeholders);
     List<String> resolvedLines =
-        renderPage(pageOpt, trainName, context, placeholders, state, frameDelta, tickCounter);
+        renderPage(
+            pageOpt,
+            trainName,
+            context,
+            placeholders,
+            state,
+            frameDelta,
+            tickCounter,
+            () -> contextResolver.upcomingStops(context, player, group));
     List<String> normalized = normalizeLines(resolvedLines, template.lineCount());
 
     PlayerHudState stateHolder = ensureScoreboard(player, template.lineCount());
@@ -403,7 +432,8 @@ public final class ScoreboardTrainHudManager implements Listener {
       Map<String, String> placeholders,
       HudState state,
       TrainFrameDelta frameDelta,
-      long tick) {
+      long tick,
+      Supplier<List<TrainHudContextResolver.StopInfo>> upcoming) {
     if (pageOpt.isEmpty()) {
       return List.of();
     }
@@ -412,7 +442,8 @@ public final class ScoreboardTrainHudManager implements Listener {
       return renderLineList(staticPage.lines(), placeholders);
     }
     if (page instanceof ScoreboardHudTemplate.ListPage listPage) {
-      return renderListPage(listPage, trainName, context, placeholders, state, frameDelta, tick);
+      return renderListPage(
+          listPage, trainName, context, placeholders, state, frameDelta, tick, upcoming.get());
     }
     return List.of();
   }
@@ -424,9 +455,9 @@ public final class ScoreboardTrainHudManager implements Listener {
       Map<String, String> placeholders,
       HudState state,
       TrainFrameDelta frameDelta,
-      long tick) {
+      long tick,
+      List<TrainHudContextResolver.StopInfo> ahead) {
     List<String> output = new ArrayList<>();
-    List<TrainHudContextResolver.StopInfo> ahead = contextResolver.upcomingStops(context);
     int cappedTotalStops = Math.min(ahead.size(), page.limit());
     int fixedRows = Math.min(page.window().fixed(), page.limit());
     int windowRows = Math.max(0, page.window().size());
@@ -610,7 +641,11 @@ public final class ScoreboardTrainHudManager implements Listener {
         || state == HudState.TERM_ARRIVING
         || state == HudState.IDLE
         || state == HudState.ON_LAYOVER
-        || state == HudState.AT_LAST_STATION;
+        || state == HudState.AT_LAST_STATION
+        || state == HudState.JOIN_ARRIVING
+        || state == HudState.AT_JOIN_STATION
+        || state == HudState.DIVIDE_ARRIVING
+        || state == HudState.AT_DIVIDE_STATION;
   }
 
   private void clearWindowStates(String trainName) {

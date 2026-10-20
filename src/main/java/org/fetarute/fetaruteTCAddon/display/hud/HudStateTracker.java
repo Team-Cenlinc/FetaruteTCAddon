@@ -90,6 +90,96 @@ public final class HudStateTracker {
     return HudState.OUT_OF_SERVICE;
   }
 
+  /**
+   * 回程支线的车到联挂站：挂上主干后接着走，终点站的“请全体乘客下车”换成联挂的说明。模板没写对应状态时保持原状态（旧模板里没有它们）。
+   *
+   * @param resolved 上一步的结果
+   * @param joining 列车运营终点是联挂站、联挂后接着跑主干
+   * @param definesArriving 模板写了 {@link HudState#JOIN_ARRIVING}
+   * @param definesAtStation 模板写了 {@link HudState#AT_JOIN_STATION}
+   * @return 实际使用的状态
+   */
+  public static HudState applyJoin(
+      HudState resolved, boolean joining, boolean definesArriving, boolean definesAtStation) {
+    if (!joining) {
+      return resolved;
+    }
+    if (resolved == HudState.TERM_ARRIVING && definesArriving) {
+      return HudState.JOIN_ARRIVING;
+    }
+    if (resolved == HudState.AT_LAST_STATION && definesAtStation) {
+      return HudState.AT_JOIN_STATION;
+    }
+    return resolved;
+  }
+
+  /**
+   * 列车在运营终点分行、乘客所在的这节车厢分行后接着开（解编 GOTO 到载客交路）：终点站的“请全体乘客下车”换成分行的说明。 按玩家所在车厢的占位符判断（{@code
+   * car_destination}），模板没写对应状态时保持原状态。
+   *
+   * @param resolved 上一步的结果
+   * @param placeholders 玩家的占位符（含分行与站点占位符）
+   * @param definesArriving 模板写了 {@link HudState#DIVIDE_ARRIVING}
+   * @param definesAtStation 模板写了 {@link HudState#AT_DIVIDE_STATION}
+   * @return 实际使用的状态
+   */
+  public static HudState applyDivision(
+      HudState resolved,
+      Map<String, String> placeholders,
+      boolean definesArriving,
+      boolean definesAtStation) {
+    String division = placeholders.get("division_station_code");
+    String car = placeholders.get("car_destination");
+    if (division == null || car == null || "-".equals(division) || "-".equals(car)) {
+      return resolved;
+    }
+    if (resolved == HudState.TERM_ARRIVING
+        && definesArriving
+        && division.equalsIgnoreCase(placeholders.get("next_station_code"))) {
+      return HudState.DIVIDE_ARRIVING;
+    }
+    if (resolved == HudState.AT_LAST_STATION
+        && definesAtStation
+        && division.equalsIgnoreCase(placeholders.get("current_station_code"))) {
+      return HudState.AT_DIVIDE_STATION;
+    }
+    return resolved;
+  }
+
+  /**
+   * 乘客所在的这节车厢那一段分行后不再载客（{@code car_terminates} 有值）：分行站是这节车厢的终点，到站与停站时报“本节车厢在该站止”与换乘另一段的提示。
+   * 分行站在途中（{@link HudState#ARRIVING}、{@link HudState#AT_STATION}）与在运营终点（{@link
+   * HudState#TERM_ARRIVING}、{@link HudState#AT_LAST_STATION}）都换；模板没写对应状态时保持原状态。
+   *
+   * @param resolved 上一步的结果
+   * @param placeholders 玩家的占位符（含分行与站点占位符）
+   * @param definesArriving 模板写了 {@link HudState#CAR_ENDS_ARRIVING}
+   * @param definesAtStation 模板写了 {@link HudState#AT_CAR_END}
+   * @return 实际使用的状态
+   */
+  public static HudState applyCarEnd(
+      HudState resolved,
+      Map<String, String> placeholders,
+      boolean definesArriving,
+      boolean definesAtStation) {
+    String division = placeholders.get("division_station_code");
+    String ends = placeholders.get("car_terminates");
+    if (division == null || ends == null || "-".equals(division) || "-".equals(ends)) {
+      return resolved;
+    }
+    if ((resolved == HudState.ARRIVING || resolved == HudState.TERM_ARRIVING)
+        && definesArriving
+        && division.equalsIgnoreCase(placeholders.get("next_station_code"))) {
+      return HudState.CAR_ENDS_ARRIVING;
+    }
+    if ((resolved == HudState.AT_STATION || resolved == HudState.AT_LAST_STATION)
+        && definesAtStation
+        && division.equalsIgnoreCase(placeholders.get("current_station_code"))) {
+      return HudState.AT_CAR_END;
+    }
+    return resolved;
+  }
+
   public void retain(Set<String> activeTrainNames) {
     if (activeTrainNames == null || activeTrainNames.isEmpty()) {
       states.clear();

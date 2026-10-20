@@ -1,5 +1,7 @@
 package org.fetarute.fetaruteTCAddon.coupler;
 
+import com.bergerkiller.bukkit.tc.TrainCarts;
+import com.bergerkiller.bukkit.tc.actions.WaitAction;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
@@ -14,12 +16,16 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.OptionalInt;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
 import org.bukkit.Bukkit;
 import org.bukkit.scheduler.BukkitTask;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
 import org.fetarute.fetaruteTCAddon.company.model.RouteStop;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern;
+import org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
@@ -32,11 +38,15 @@ import org.fetarute.fetaruteTCAddon.dispatcher.runtime.RouteProgressRegistry;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TerminalKeyResolver;
 import org.fetarute.fetaruteTCAddon.dispatcher.runtime.TrainTagHelper;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.model.TripSource;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteSpawnServices;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnService;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnTicket;
+import org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
+import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 
 /**
  * 解编指令 {@code DECP}（见 {@link RouteCouplingDirectives}）：列车在写了 DECP 的那一站停车时切下指定的一段。
@@ -63,6 +73,9 @@ public final class DecoupleService {
 
   /** 车站停稳后停站计时一直没开始（停站另有处理）时，停稳多久也动手（tick）。 */
   private static final int STATION_SETTLE_TICKS = 60;
+
+  /** 车站停站计时开始后还要连续停稳多久才动手（tick）：停站计时在站台对位之前就开始了。 */
+  private static final int STATION_DWELL_SETTLE_TICKS = 20;
 
   /** 到站后等停稳的上限：过了就放弃这一站的解编。 */
   private static final Duration SETTLE_TIMEOUT = Duration.ofSeconds(60);
@@ -147,6 +160,33 @@ public final class DecoupleService {
   /** 车名键 → 分行预测：主线程整份换上，任意线程读（站台屏、公开 API）。 */
   private volatile Map<String, DivisionForecast> forecasts = Map.of();
 
+  /** 出车编组写法 → 各段节数（车头到车尾）；解析不出的记为空。主线程写，任意线程读。 */
+  private final Map<String, Optional<List<Integer>>> partSizes = new ConcurrentHashMap<>();
+
+  /** 别的线程查编组时缓存里还没有的交路：主线程下一次刷新预测时解析（编组写法与车库牌子只能在主线程读）。 */
+  private final Set<UUID> patternRequests = ConcurrentHashMap.newKeySet();
+
+  /** 在运营终点分行、解下的一段接着载客时，留下（在本站终到、不再载客）的那一段：车名键 → 分行时的交路与下标。车离开这一站（进度变了）或不在了就删。 主线程写，任意线程读。 */
+  private final Map<String, Remainder> remainders = new ConcurrentHashMap<>();
+
+  private record Remainder(String routeId, int index) {}
+
+  /**
+   * 刚在本站拆开、解下的车（车名键）→ 拆开以后的车厢标识（{@link DivisionForecast#divided}）与留下那一段停在哪里。两段都还停在分行站时有效：
+   * 解下的车不再待命（开走了）或留下的一段离开就删。主线程写，任意线程读。
+   */
+  private final Map<String, Divided> divided = new ConcurrentHashMap<>();
+
+  private record Divided(
+      DivisionForecast forecast,
+      String detachedName,
+      String keptKey,
+      String keptRoute,
+      int keptIndex) {}
+
+  /** 没写 {@code spawn_train_pattern} 的主干交路 → 首站 CRET 车库牌子上的编组。主线程写，任意线程读。 */
+  private final Map<UUID, Optional<String>> depotPatterns = new ConcurrentHashMap<>();
+
   private final DivisionDestinations destinations;
 
   DecoupleService(FetaruteTCAddon plugin, CouplerService coupler) {
@@ -186,6 +226,11 @@ public final class DecoupleService {
     gotoTickets.clear();
     waiting.clear();
     forecasts = Map.of();
+    partSizes.clear();
+    depotPatterns.clear();
+    patternRequests.clear();
+    remainders.clear();
+    divided.clear();
   }
 
   // ---------------------------------------------------------------- 到站
@@ -207,7 +252,7 @@ public final class DecoupleService {
     }
     Optional<RouteCouplingDirectives.Decouple> directive =
         RouteCouplingDirectives.decouple(stops.get(index));
-    if (directive.isEmpty()) {
+    if (directive.isEmpty() || detachedAt(properties, route, index)) {
       return 0;
     }
     String key = key(trainName);
@@ -279,6 +324,17 @@ public final class DecoupleService {
     return trainName != null && waiting.containsKey(key(trainName));
   }
 
+  /**
+   * 这辆车是在交路 {@code routeId} 第 {@code index} 站（运营终点）分行后留下、在这里终到不再载客的一段，而解下的一段接着载客。站牌据此只列解下的一段。
+   * 任意线程可读。
+   */
+  public boolean remainsAt(String trainName, String routeId, int index) {
+    Remainder remainder = trainName == null ? null : remainders.get(key(trainName));
+    return remainder != null
+        && remainder.index() == index
+        && remainder.routeId().equalsIgnoreCase(routeId);
+  }
+
   /** 这列车前方（或此刻停着的这一站）的分行预测；不分行时为空。任意线程可读。 */
   public Optional<DivisionForecast> forecast(String trainName) {
     return trainName == null
@@ -315,6 +371,11 @@ public final class DecoupleService {
       crew.notSplit(item.trainName());
       return true;
     }
+    if (detachedAt(item.properties(), item.route(), item.index())) {
+      // 就是在这一站解下的那一段：照搬了主干的交路与进度，到站通知可能先于解下时写的标记到来
+      debug("DECP_SKIPPED train=" + item.trainName() + " reason=detached-here");
+      return true;
+    }
     if (!stillAt(item.properties(), item)) {
       warn("DECP_SKIPPED train=" + item.trainName() + " reason=left-station");
       crew.notSplit(item.trainName());
@@ -339,6 +400,20 @@ public final class DecoupleService {
       crew.notSplit(item.trainName());
     }
     return true;
+  }
+
+  /** 这辆车是在交路 {@code route} 第 {@code index} 站解下来的（带着解下时写的标记）。 */
+  private boolean detachedAt(TrainProperties properties, RouteId route, int index) {
+    Optional<DetachedHold.Hold> hold =
+        TrainTagHelper.readTagValue(properties, DetachedHold.TAG).flatMap(DetachedHold.Hold::parse);
+    if (hold.isEmpty() || hold.get().index() != index) {
+      return false;
+    }
+    return plugin
+        .getRouteDefinitionCache()
+        .flatMap(cache -> cache.findUuid(route))
+        .filter(hold.get().routeId()::equals)
+        .isPresent();
   }
 
   /** 按表运行时表上这一班拆不拆：车没绑交路按指令自己的动作。 */
@@ -369,7 +444,7 @@ public final class DecoupleService {
   /** 车停稳了、停站计时已经开始（车站；计时一直没开始时停稳三秒）或停稳一秒（路径点）。 */
   private boolean settled(MinecartGroup group, Pending item) {
     String key = key(item.trainName());
-    if (group.isMoving()) {
+    if (group.isMoving() || stillToMove(group)) {
       stillTicks.remove(key);
       return false;
     }
@@ -382,12 +457,19 @@ public final class DecoupleService {
     return stopped;
   }
 
-  /** 停妥：车站等停站计时开始（一直没开始时停稳三秒），路径点停稳一秒。 */
+  /** 停妥：车站等停站计时开始后再停稳一秒（一直没开始时停稳三秒），路径点停稳一秒。 */
   private boolean stopSettled(Pending item, int ticks) {
     if (item.station()) {
-      return remainingDwell(item).isPresent() || ticks >= STATION_SETTLE_TICKS;
+      return (remainingDwell(item).isPresent() && ticks >= STATION_DWELL_SETTLE_TICKS)
+          || ticks >= STATION_SETTLE_TICKS;
     }
     return ticks >= WAYPOINT_SETTLE_TICKS;
+  }
+
+  /** 车上还挂着等待以外的动作（站台对位、发车）：车还要动。对位途中车速可能有一拍降到零，这时拆开会丢掉对位动作，两段车停在对位点之前（欠标）。 */
+  private static boolean stillToMove(MinecartGroup group) {
+    return group.getActions().getScheduledActions().stream()
+        .anyMatch(action -> !(action instanceof WaitAction));
   }
 
   /** 列车此刻停着的这一站要分行，且已停妥（停站计时开始，或停稳三秒；路径点停稳一秒）。车上值乘的人没有停站可做时（站台没交来停站）以此为准在这一站结算。 */
@@ -481,6 +563,31 @@ public final class DecoupleService {
                   detached.size(),
                   detachedDestination(item, plan))));
     }
+    if (item.station()) {
+      // 解下的一段没有再压过站牌，本站的停站会话只管留下的一段：给它重新触发本站牌子，自己开门、停站、关门
+      Bukkit.getScheduler()
+          .runTask(
+              plugin,
+              () ->
+                  StationSignTrigger.arrive(plugin, detached, node)
+                      .ifPresent(
+                          reason ->
+                              warn(
+                                  "DECP_ARRIVAL_FAILED train="
+                                      + detachedName
+                                      + " platform="
+                                      + node.value()
+                                      + " reason="
+                                      + reason)));
+    }
+    if (item.station()
+        && atOperationEnd(item)
+        && destinations.detached(item.route(), directive, plan).inService()) {
+      remainders.put(key(item.trainName()), new Remainder(item.route().value(), item.index()));
+    }
+    if (item.station()) {
+      rememberDivided(item, detachedName, cut.get());
+    }
     // 先记好谁接它，再登记待命：登记会立即触发待处理票据派发
     Waiting held = arrange(item, plan, detachedName, readyAt, now);
     if (held != null) {
@@ -488,6 +595,54 @@ public final class DecoupleService {
     }
     register(detachedName, detached.getProperties(), node, readyAt);
     return true;
+  }
+
+  /** 拆开那一刻把这一站的分行预测转给解下的车（站台屏按它画拆开后的车厢标识）：取切下的那一头接着跑的交路。没有这一站的预测时不记。 */
+  private void rememberDivided(Pending item, String detachedName, DecoupleCut.Cut cut) {
+    DivisionForecast before = forecasts.get(key(item.trainName()));
+    if (before == null
+        || before.stopIndex() != item.index()
+        || !before.routeId().equalsIgnoreCase(item.route().value())) {
+      return;
+    }
+    // 预测里解下的一段要与实际切下的那一头对得上（现场改切另一头时两段的排法就不是预测的了，不记）
+    boolean frontDetached = cut.end() == RouteCouplingDirectives.End.FRONT;
+    List<DivisionForecast.Part> parts = before.parts();
+    Optional<DivisionForecast.Part> part =
+        parts.stream()
+            .filter(DivisionForecast.Part::detached)
+            .findFirst()
+            .filter(found -> (parts.indexOf(found) == 0) == frontDetached);
+    part.flatMap(before::dividedFor)
+        .ifPresent(
+            forecast ->
+                divided.put(
+                    key(detachedName),
+                    new Divided(
+                        forecast,
+                        detachedName,
+                        key(item.trainName()),
+                        item.route().value(),
+                        item.index())));
+  }
+
+  /**
+   * 刚在本站拆开、解下的这辆车：拆开以后的车厢标识（{@link DivisionForecast#divided} 为 true），交路与下标是它接着跑的那一班。两段都还停在分行站时才有。
+   * 任意线程可读。
+   */
+  public Optional<DivisionForecast> dividedHere(String trainName) {
+    Divided found = trainName == null ? null : divided.get(key(trainName));
+    return found == null ? Optional.empty() : Optional.of(found.forecast());
+  }
+
+  /** 解编站就是本交路的运营终点。 */
+  private boolean atOperationEnd(Pending item) {
+    OptionalInt end =
+        plugin
+            .getRouteDefinitionCache()
+            .map(cache -> RouteTerminals.endOfOperationIndex(cache.listStops(item.route())))
+            .orElse(OptionalInt.empty());
+    return end.isPresent() && end.getAsInt() == item.index();
   }
 
   /** 解下的车由谁接：按表由子交路，否则按指令的动作。返回等着被接走的情况；IDLE 时为 null。 */
@@ -607,6 +762,11 @@ public final class DecoupleService {
 
   /** 按交路进度重算每列车的分行预测，整份换上。 */
   private void refreshForecasts() {
+    // 站台屏（异步）查过、缓存里还没有的编组：在这里解析，每条交路只解析一次
+    for (UUID routeId : List.copyOf(patternRequests)) {
+      patternRequests.remove(routeId);
+      plannedPatternOf(routeId);
+    }
     Optional<RouteProgressRegistry> registry = plugin.getRouteProgressRegistry();
     Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
     if (registry.isEmpty() || cache.isEmpty()) {
@@ -615,7 +775,38 @@ public final class DecoupleService {
     }
     Map<RouteId, List<Integer>> decouples = new HashMap<>();
     Map<String, DivisionForecast> next = new HashMap<>();
-    for (RouteProgressRegistry.RouteProgressEntry entry : registry.get().snapshot().values()) {
+    Map<String, RouteProgressRegistry.RouteProgressEntry> progress = registry.get().snapshot();
+    // 拆开以后的车厢标识：解下的车开走（不再待命）、留下的一段离开分行站或不在了就撤掉
+    Optional<LayoverRegistry> layovers = plugin.getLayoverRegistry();
+    divided
+        .values()
+        .removeIf(
+            entry ->
+                layovers.flatMap(r -> r.get(entry.detachedName())).isEmpty()
+                    || progress.values().stream()
+                        .noneMatch(
+                            found ->
+                                key(found.trainName()).equals(entry.keptKey())
+                                    && found.currentIndex() == entry.keptIndex()
+                                    && found
+                                        .routeId()
+                                        .value()
+                                        .equalsIgnoreCase(entry.keptRoute())));
+    // 留下的一段离开分行站（进度变了）或不在了：站牌照常列它
+    remainders
+        .entrySet()
+        .removeIf(
+            remainder ->
+                progress.values().stream()
+                    .noneMatch(
+                        entry ->
+                            key(entry.trainName()).equals(remainder.getKey())
+                                && entry.currentIndex() == remainder.getValue().index()
+                                && entry
+                                    .routeId()
+                                    .value()
+                                    .equalsIgnoreCase(remainder.getValue().routeId())));
+    for (RouteProgressRegistry.RouteProgressEntry entry : progress.values()) {
       try {
         forecastOf(entry, cache.get(), decouples)
             .ifPresent(found -> next.put(key(entry.trainName()), found));
@@ -628,6 +819,8 @@ public final class DecoupleService {
 
   /**
    * 一列车的下一个分行站：交路里此后第一个写了 DECP 的车站（此刻停着的这一站只在还没拆时算），按表时表上这一班要拆、按现场编组切得开才算。
+   * 分行站就是运营终点时，只在解下的一段接着载客（GOTO 到载客交路）时算，留下的一段在这里不再载客。这一趟已经跑完、停在终点等下一趟时按下一趟算
+   * （站牌按下一趟列出这辆车，下一趟要分行就提前写上）。
    *
    * @param decouples 本轮已查过的交路 → DECP 下标（同一交路的车只解析一次）
    */
@@ -638,11 +831,7 @@ public final class DecoupleService {
     List<RouteStop> stops = cache.listStops(entry.routeId());
     List<Integer> indices =
         decouples.computeIfAbsent(entry.routeId(), id -> decoupleIndices(stops));
-    if (indices.isEmpty()) {
-      return Optional.empty();
-    }
     Pending here = pending.get(key(entry.trainName()));
-    int index = -1;
     for (int candidate : indices) {
       boolean ahead = candidate > entry.currentIndex();
       boolean dividingHere =
@@ -651,49 +840,300 @@ public final class DecoupleService {
               && here.index() == candidate
               && here.route().equals(entry.routeId());
       if (ahead || dividingHere) {
-        index = candidate;
-        break;
+        TimetableService.SplitPlan plan =
+            plugin
+                .getTimetableService()
+                .map(service -> service.splitPlanOf(entry.trainName()))
+                .orElse(TimetableService.SplitPlan.UNBOUND);
+        return forecastAt(entry.trainName(), entry.routeId(), stops, candidate, plan);
       }
     }
     OptionalInt end = RouteTerminals.endOfOperationIndex(stops);
-    if (index < 0 || (end.isPresent() && index >= end.getAsInt())) {
-      // 在运营终点（或之后）拆：乘客都在终点下车，不给乘客看
+    if (end.isEmpty() || entry.currentIndex() < end.getAsInt()) {
+      // 这一趟还没跑完：不拿下一趟的分行说这一趟
       return Optional.empty();
     }
+    return nextTripForecast(entry.trainName(), cache, decouples);
+  }
+
+  /** 停在终点等下一趟的车：下一趟（按表已定）要分行时的预测。 */
+  private Optional<DivisionForecast> nextTripForecast(
+      String trainName, RouteDefinitionCache cache, Map<RouteId, List<Integer>> decouples) {
+    Optional<TimetableService> service = plugin.getTimetableService();
+    Optional<RouteDefinition> next =
+        service
+            .flatMap(timetables -> timetables.nextDepartureOf(trainName))
+            .flatMap(due -> cache.findById(due.trip().routeId()));
+    if (next.isEmpty()) {
+      return Optional.empty();
+    }
+    RouteId route = next.get().id();
+    List<RouteStop> stops = cache.listStops(route);
+    List<Integer> indices = decouples.computeIfAbsent(route, id -> decoupleIndices(stops));
+    if (indices.isEmpty()) {
+      return Optional.empty();
+    }
+    return forecastAt(
+        trainName, route, stops, indices.get(0), service.get().splitPlanOfNext(trainName));
+  }
+
+  /** 运行中的列车在交路 {@code route} 第 {@code index} 站分行的预测：按车上各节的来源编组切。 */
+  private Optional<DivisionForecast> forecastAt(
+      String trainName,
+      RouteId route,
+      List<RouteStop> stops,
+      int index,
+      TimetableService.SplitPlan plan) {
+    MinecartGroup group = groupOf(trainName);
+    if (group == null) {
+      return Optional.empty();
+    }
+    return forecastAt(
+        route,
+        stops,
+        index,
+        plan,
+        () -> {
+          CarTags.stampOrigins(group);
+          List<Optional<CarConsist.Origin>> cars = new ArrayList<>(group.size());
+          for (MinecartMember<?> member : group) {
+            cars.add(
+                CarTags.read(member, CarConsist.TAG_CAR_CONSIST).flatMap(CarConsist.Origin::parse));
+          }
+          return cars;
+        });
+  }
+
+  /**
+   * 交路 {@code route} 第 {@code index} 站分行的预测；不给乘客看（越过运营终点、路径点、表上不拆、切不开、两段都不再载客）时为空。
+   *
+   * @param cars 车头到车尾各节的来源编组（前面几条都过了才取）
+   */
+  private Optional<DivisionForecast> forecastAt(
+      RouteId route,
+      List<RouteStop> stops,
+      int index,
+      TimetableService.SplitPlan plan,
+      Supplier<List<Optional<CarConsist.Origin>>> cars) {
+    OptionalInt end = RouteTerminals.endOfOperationIndex(stops);
+    if (end.isPresent() && index > end.getAsInt()) {
+      // 越过运营终点才拆（回库途中）：车上已经没有乘客
+      return Optional.empty();
+    }
+    boolean atTerminus = end.isPresent() && index == end.getAsInt();
     Optional<String> stationId = destinations.stationIdOf(stops.get(index));
     Optional<RouteCouplingDirectives.Decouple> directive =
         RouteCouplingDirectives.decouple(stops.get(index));
-    TimetableService.SplitPlan plan =
-        plugin
-            .getTimetableService()
-            .map(service -> service.splitPlanOf(entry.trainName()))
-            .orElse(TimetableService.SplitPlan.UNBOUND);
-    MinecartGroup group = groupOf(entry.trainName());
     // 路径点上的解编不给乘客看；表上这一班不拆时不预测
-    if (stationId.isEmpty() || directive.isEmpty() || plan.skips() || group == null) {
+    if (stationId.isEmpty() || directive.isEmpty() || plan.skips()) {
       return Optional.empty();
     }
-    CarTags.stampOrigins(group);
-    List<Optional<CarConsist.Origin>> cars = new ArrayList<>(group.size());
-    for (MinecartMember<?> member : group) {
-      cars.add(CarTags.read(member, CarConsist.TAG_CAR_CONSIST).flatMap(CarConsist.Origin::parse));
-    }
+    List<Optional<CarConsist.Origin>> origins = cars.get();
     Optional<DecoupleCut.Cut> cut =
-        DecoupleCut.resolve(cars, directive.get().end(), directive.get().cars());
+        DecoupleCut.resolve(origins, directive.get().end(), directive.get().cars());
     if (cut.isEmpty()) {
+      return Optional.empty();
+    }
+    DivisionForecast.Destination detached = destinations.detached(route, directive.get(), plan);
+    Optional<DivisionForecast.Destination> kept =
+        DivisionForecast.keptDestination(
+            atTerminus, destinations.along(route, stops, index), detached);
+    if (kept.isEmpty()) {
       return Optional.empty();
     }
     return Optional.of(
         new DivisionForecast(
-            entry.routeId().value(),
+            route.value(),
             index,
             stationId.get(),
             destinations.stationName(stationId.get()),
-            DivisionForecast.parts(
-                group.size(),
-                cut.get(),
-                destinations.ofStops(stops),
-                destinations.detached(entry.routeId(), directive.get(), plan))));
+            DivisionForecast.parts(origins.size(), cut.get(), kept.get(), detached),
+            detachedTrip(plan)));
+  }
+
+  /** 解下的一段按表接着跑的子交路首班的车次标识；不按表、子交路只回库时为空。 */
+  private Optional<String> detachedTrip(TimetableService.SplitPlan plan) {
+    if (plan.child().isEmpty() || plan.tripless()) {
+      return Optional.empty();
+    }
+    return plugin
+        .getSpawnManager()
+        .filter(TimetableSpawnManager.class::isInstance)
+        .map(TimetableSpawnManager.class::cast)
+        .flatMap(manager -> manager.firstServiceTripOf(plan.child().get()));
+  }
+
+  /**
+   * 表上还没出车的一班（站牌上的预测行、待发行）在哪一站分行：交路里第一个写了 DECP 的车站，按出车编组各段的节数切，与现场按来源编组切同一条规则。 其余同 {@link
+   * #forecast}：表上这一班不拆、切不开、两段都不再载客时为空。任意线程可调；编组写法只在主线程解析，别的线程遇到没解析过的写法时为空。
+   *
+   * @param planned 表上那一班
+   */
+  public Optional<DivisionForecast> plannedForecast(TimetableService.PlannedTrip planned) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (planned == null || planned.split().skips() || cache.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinition> route = cache.get().findById(planned.routeId());
+    if (route.isEmpty()) {
+      return Optional.empty();
+    }
+    List<RouteStop> stops = cache.get().listStops(route.get().id());
+    List<Integer> indices = decoupleIndices(stops);
+    if (indices.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<PlannedPattern> pattern = plannedPatternOf(planned.routeId());
+    if (pattern.isEmpty()) {
+      return Optional.empty();
+    }
+    return forecastAt(
+        route.get().id(),
+        stops,
+        indices.get(0),
+        planned.split(),
+        () -> plannedCars(pattern.get().sizes()));
+  }
+
+  /**
+   * 交路出车的组合编组：各段写法与节数（来源见 {@link #trunkPatternOf}）。站牌按表预告分行、联挂用。任意线程可调：缓存里没有时，主线程上当场解析，
+   * 别的线程登记下来、等主线程下一次刷新预测时解析（这一次为空）。不是组合写法时为空。
+   *
+   * @param routeId 交路
+   */
+  public Optional<PlannedPattern> plannedPatternOf(UUID routeId) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (routeId == null || cache.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<RouteDefinition> route = cache.get().findById(routeId);
+    if (route.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<String> pattern =
+        trunkPatternOf(routeId, cache.get(), cache.get().listStops(route.get().id()))
+            .flatMap(ConsistKey::tidy);
+    Optional<List<Integer>> sizes = pattern.flatMap(this::partSizesOf);
+    // 只登记还没读过的：车库牌子没读过，或组合写法还没解析过；已知没有的不再反复登记
+    boolean unread =
+        pattern.isEmpty()
+            ? !depotPatterns.containsKey(routeId)
+            : CompositeSpawnPattern.isComposite(pattern.get())
+                && !partSizes.containsKey(pattern.get());
+    if (sizes.isEmpty() && unread && !Bukkit.isPrimaryThread()) {
+      patternRequests.add(routeId);
+    }
+    return sizes.map(
+        found -> new PlannedPattern(CompositeSpawnPattern.parts(pattern.get()), found));
+  }
+
+  /**
+   * 组合编组。
+   *
+   * @param parts 各段写法
+   * @param sizes 各段节数，与 {@code parts} 一一对应
+   */
+  public record PlannedPattern(List<String> parts, List<Integer> sizes) {
+
+    public PlannedPattern {
+      parts = List.copyOf(parts);
+      sizes = List.copyOf(sizes);
+    }
+
+    /** 一共几节。 */
+    public int cars() {
+      return sizes.stream().mapToInt(Integer::intValue).sum();
+    }
+
+    /**
+     * 整列里首段或末段是 {@code part} 这几段（一方车底的编组，不分大小写）时它们的节数；对不上时为空。纯计算。
+     *
+     * @param part 一方车底的编组写法
+     */
+    public java.util.OptionalInt carsOfEnd(String part) {
+      List<String> wanted = CompositeSpawnPattern.parts(part);
+      int n = wanted.size();
+      if (n == 0 || n >= parts.size()) {
+        return java.util.OptionalInt.empty();
+      }
+      if (sameParts(parts.subList(0, n), wanted)) {
+        return java.util.OptionalInt.of(
+            sizes.subList(0, n).stream().mapToInt(Integer::intValue).sum());
+      }
+      if (sameParts(parts.subList(parts.size() - n, parts.size()), wanted)) {
+        return java.util.OptionalInt.of(
+            sizes.subList(parts.size() - n, parts.size()).stream()
+                .mapToInt(Integer::intValue)
+                .sum());
+      }
+      return java.util.OptionalInt.empty();
+    }
+
+    private static boolean sameParts(List<String> first, List<String> second) {
+      for (int i = 0; i < first.size(); i++) {
+        if (!first.get(i).equalsIgnoreCase(second.get(i))) {
+          return false;
+        }
+      }
+      return true;
+    }
+  }
+
+  /**
+   * 主干交路分行前的编组，与编表切分时同一个来源：交路写明的 {@code spawn_train_pattern}，其次首站 CRET 指向的车库牌子。交路定的车型是出车时的编组，
+   * 中途挂上回程支线的车以后就不是分行时的编组，不能用。车库牌子只在主线程、区块已加载时读，读到的按交路记下。
+   */
+  private Optional<String> trunkPatternOf(
+      UUID routeId, RouteDefinitionCache cache, List<RouteStop> stops) {
+    Optional<String> declared =
+        cache.findRecord(routeId).flatMap(record -> DepotSpawnPattern.fromRoute(record.route()));
+    if (declared.isPresent()) {
+      return declared;
+    }
+    Optional<String> known = depotPatterns.get(routeId);
+    SignNodeRegistry registry = plugin.getSignNodeRegistry();
+    if (known != null || registry == null || !Bukkit.isPrimaryThread()) {
+      return known == null ? Optional.empty() : known;
+    }
+    Optional<NodeId> depot =
+        SpawnDirectiveParser.findDirectiveTarget(stops, "CRET").map(NodeId::of);
+    if (depot.isEmpty()) {
+      depotPatterns.put(routeId, Optional.empty());
+      return Optional.empty();
+    }
+    DepotSpawnPattern.SignRead read = DepotSpawnPattern.readLoaded(registry, depot.get());
+    if (read.loaded()) {
+      depotPatterns.put(routeId, read.pattern());
+    }
+    return read.pattern();
+  }
+
+  /** 组合写法各段的节数；不是组合写法、解析不出时为空。见 {@link #plannedForecast} 的线程说明。 */
+  private Optional<List<Integer>> partSizesOf(String pattern) {
+    if (!CompositeSpawnPattern.isComposite(pattern)) {
+      return Optional.empty();
+    }
+    Optional<List<Integer>> known = partSizes.get(pattern);
+    if (known != null || !Bukkit.isPrimaryThread()) {
+      return known == null ? Optional.empty() : known;
+    }
+    Optional<List<Integer>> parsed =
+        CompositeSpawnPattern.parse(TrainCarts.plugin, pattern)
+            .map(CompositeSpawnPattern.Parsed::partSizes);
+    partSizes.put(pattern, parsed);
+    return parsed;
+  }
+
+  /** 按各段节数排出还没出车的编组：每一段是一个整列的来源编组。纯计算。 */
+  static List<Optional<CarConsist.Origin>> plannedCars(List<Integer> sizes) {
+    List<Optional<CarConsist.Origin>> cars = new ArrayList<>();
+    for (int part = 0; part < sizes.size(); part++) {
+      CarConsist.Origin origin = new CarConsist.Origin("planned", "part-" + part, sizes.get(part));
+      for (int car = 0; car < origin.size(); car++) {
+        cars.add(Optional.of(origin));
+      }
+    }
+    return List.copyOf(cars);
   }
 
   /** 交路里写了 DECP 的停靠点下标，从前往后。 */

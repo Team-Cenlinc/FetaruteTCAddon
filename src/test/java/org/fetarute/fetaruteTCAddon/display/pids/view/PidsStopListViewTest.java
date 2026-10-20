@@ -59,6 +59,24 @@ class PidsStopListViewTest {
           stop("SURC:KPO", true, null),
           stop("SURC:NTA", true, null));
 
+  private static final String TRUNK = "SURC:MT:TRUNK";
+  private static final String BRANCH = "SURC:MT:BRANCH";
+  private static final String FEEDER = "SURC:MT:FEEDER";
+
+  /** 主干：PPK → SPB → HHU 终到（在这里分行）。 */
+  private static final List<RouteStop> TRUNK_STOPS =
+      List.of(
+          stop("SURC:PPK", true, null), stop("SURC:SPB", true, null), stop("SURC:HHU", true, null));
+
+  /** 支线：HHU → KPO → NTA；也当回程支线联挂以后接着跑的主干。 */
+  private static final List<RouteStop> BRANCH_STOPS =
+      List.of(
+          stop("SURC:HHU", true, null), stop("SURC:KPO", true, null), stop("SURC:NTA", true, null));
+
+  /** 回程支线：PPK → HHU（联挂站）。 */
+  private static final List<RouteStop> FEEDER_STOPS =
+      List.of(stop("SURC:PPK", true, null), stop("SURC:HHU", true, null));
+
   private final Net net = new Net();
   private final PidsViewBuilder builder =
       new PidsViewBuilder(
@@ -73,6 +91,28 @@ class PidsStopListViewTest {
                     case "pids.board.remark.via-secondary" -> "via";
                     case "pids.board.stop-list.following" -> "后续列车";
                     case "pids.board.stop-list.following-secondary" -> "Following trains";
+                    case "pids.board.remark.division" -> "分行";
+                    case "pids.board.remark.division-secondary" -> "Divides";
+                    case "pids.board.remark.division-here" -> "本站分行";
+                    case "pids.board.remark.division-here-secondary" -> "Divides here";
+                    case "pids.board.remark.join" -> "联挂";
+                    case "pids.board.remark.join-secondary" -> "Joins";
+                    case "pids.board.division.front" -> "前";
+                    case "pids.board.division.front-secondary" -> "Front";
+                    case "pids.board.division.rear" -> "后";
+                    case "pids.board.division.rear-secondary" -> "Rear";
+                    case "pids.board.division.ends-here" -> "<end> <cars> 节本站止";
+                    case "pids.board.division.ends-here-secondary" -> "<end> <cars> cars end here";
+                    case "pids.board.stop-list.ends-there" -> "<end> <cars> 节到此止";
+                    case "pids.board.stop-list.ends-there-secondary" -> "<end> <cars> cars end";
+                    case "pids.board.stop-list.ends-here" -> "<end> <cars> 节本站止";
+                    case "pids.board.stop-list.ends-here-secondary" -> "<end> <cars> cars end";
+                    case "pids.board.stop-list.joins-there" -> "联挂后无需换乘";
+                    case "pids.board.stop-list.joins-there-secondary" -> "Stay on board";
+                    case "pids.board.stop-list.only" -> "仅<end> <cars> 节";
+                    case "pids.board.stop-list.only-secondary" -> "<end> <cars> only";
+                    case "pids.board.stop-list.board-part" -> "前往<destination>请乘<end> <cars> 节";
+                    case "pids.board.stop-list.board-part-secondary" -> "<end> <cars> cars to <destination>";
                     default -> key;
                   }));
 
@@ -95,6 +135,114 @@ class PidsStopListViewTest {
         List.of(List.of(), List.of(DS), List.of(DS), List.of()),
         stops.stream().map(Stop::transfers).toList(),
         "可换乘线路不含列车所属的线路（换线站两条都不算）");
+  }
+
+  /** 分行车：停站表到分行站为止接着列开往终点那一段跑的支线，分行站标“分行”，之后的站细线、写“仅前 4 节”；终点下面一行写分行站与另一段到此止，中英随备注轮换。 */
+  @Test
+  void aDividingTrainListsThePartThatGoesToItsDestination() {
+    PidsRow row = coupled(TRUNK, 0, Optional.of(division()), Optional.empty());
+
+    PidsStopListView view = view(row);
+    List<Stop> stops = view.train().orElseThrow().stops();
+
+    assertEquals(
+        List.of("主城湾", "新笛矢·壑湖", "KPO 站", "南渡"),
+        stops.stream().map(stop -> stop.names().primary()).toList());
+    assertEquals(
+        List.of(Kind.NEXT, Kind.DIVIDE, Kind.STOP, Kind.TERMINAL),
+        stops.stream().map(Stop::kind).toList());
+    assertEquals(List.of(false, false, true, true), stops.stream().map(Stop::partial).toList());
+    assertEquals(Optional.of(new Names("仅前 4 节", "Front 4 only")), stops.get(2).only());
+    assertTrue(stops.get(1).only().isEmpty(), "分行站整列都到");
+    assertEquals(
+        Optional.of(
+            new PidsStopListView.Coupling(
+                new Names("分行", "Divides"),
+                new Names("新笛矢·壑湖", "Neo Fueya - Hor Huu"),
+                new Names("后 4 节到此止", "Rear 4 cars end"),
+                false)),
+        view.coupling());
+    assertTrue(view.note().isEmpty(), "分行说明优先于直通与经由");
+    assertTrue(view.noted());
+    assertTrue(view.train().orElseThrow().advice().isEmpty(), "前方分行不写表尾");
+    assertTrue(builder.stopList(request(true, row)).coupling().orElseThrow().english(), "轮到备注时写英文");
+  }
+
+  /** 本站分行：第一行写“本站分行”，说明写另一段本站止；之后各站都只有部分车厢开到；最底下一行写前往终点请乘哪几节。 */
+  @Test
+  void dividingHereSaysWhichCarsToBoard() {
+    PidsStopListView view = view(coupled(TRUNK, 2, Optional.of(division()), Optional.empty()));
+
+    PidsStopListView.Train train = view.train().orElseThrow();
+    assertEquals(
+        List.of(true, true), train.stops().stream().map(Stop::partial).toList(), "本站之后都只有前 4 节开到");
+    assertEquals(new Names("本站分行", "Divides here"), view.coupling().orElseThrow().place());
+    assertEquals(new Names("后 4 节本站止", "Rear 4 cars end"), view.coupling().orElseThrow().detail());
+    assertEquals(Optional.of(new Names("前往南渡请乘前 4 节", "Front 4 cars to Nam Toa")), train.advice());
+  }
+
+  /** 回程支线车：停站表到联挂站为止接着列主干，联挂站标“联挂”；终点下面一行写联挂站与无需换乘。 */
+  @Test
+  void aJoiningTrainListsTheStopsAfterTheJoin() {
+    PidsRow row =
+        coupled(
+            FEEDER,
+            0,
+            Optional.empty(),
+            Optional.of(new PidsRow.Joining(1, "SURC:HHU", 4, 4, false, Optional.of(BRANCH), 0)));
+
+    PidsStopListView view = view(row);
+    List<Stop> stops = view.train().orElseThrow().stops();
+
+    assertEquals(
+        List.of(Kind.JOIN, Kind.STOP, Kind.TERMINAL), stops.stream().map(Stop::kind).toList());
+    assertTrue(stops.stream().noneMatch(Stop::partial), "联挂不分段");
+    assertEquals(
+        new PidsStopListView.Coupling(
+            new Names("联挂", "Joins"),
+            new Names("新笛矢·壑湖", "Neo Fueya - Hor Huu"),
+            new Names("联挂后无需换乘", "Stay on board"),
+            false),
+        view.coupling().orElseThrow());
+  }
+
+  /** 在 HHU（主干下标 2）分行：前 4 节解下开往南渡（接着跑支线，从下标 0 起），后 4 节到此止。 */
+  private static PidsRow.Division division() {
+    return new PidsRow.Division(
+        2,
+        "SURC:HHU",
+        List.of(
+            new PidsRow.Division.Part(4, true, Optional.of("SURC:NTA"), Optional.of(BRANCH), 0),
+            new PidsRow.Division.Part(4, false, Optional.empty())));
+  }
+
+  /** 开往南渡、停在本站台的运行中列车，带分行或联挂。 */
+  private static PidsRow coupled(
+      String route,
+      int stopSequence,
+      Optional<PidsRow.Division> division,
+      Optional<PidsRow.Joining> joining) {
+    return new PidsRow(
+        PidsRow.Status.EN_ROUTE,
+        "MT",
+        route,
+        "NTA",
+        Optional.of("SURC:NTA"),
+        "2",
+        NOW.plusSeconds(120),
+        OptionalLong.empty(),
+        stopSequence,
+        false,
+        false,
+        false,
+        Optional.of("train"),
+        false,
+        List.of(),
+        List.of(),
+        Optional.empty(),
+        false,
+        division,
+        joining);
   }
 
   @Test
@@ -529,6 +677,9 @@ class PidsStopListViewTest {
       return switch (routeId) {
         case THROUGH -> THROUGH_STOPS;
         case PLAIN -> PLAIN_STOPS;
+        case TRUNK -> TRUNK_STOPS;
+        case BRANCH -> BRANCH_STOPS;
+        case FEEDER -> FEEDER_STOPS;
         default -> List.of();
       };
     }

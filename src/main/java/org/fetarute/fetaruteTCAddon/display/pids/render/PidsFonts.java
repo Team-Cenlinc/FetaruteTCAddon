@@ -183,13 +183,22 @@ public final class PidsFonts {
     }
     int cut = text.lastIndexOf(' ');
     while (cut > 0) {
-      String candidate = text.substring(0, cut).stripTrailing() + ELLIPSIS;
+      String candidate = withoutTrailingJoiner(text.substring(0, cut)) + ELLIPSIS;
       if (width(font, candidate) <= maxWidth) {
         return candidate;
       }
       cut = text.lastIndexOf(' ', cut - 1);
     }
     return ellipsize(font, text, maxWidth);
+  }
+
+  /** 去掉句尾悬空的连接符（“Neo Fueya -” 截成 “Neo Fueya”），不让省略号前挂着一个连字符或间隔号。 */
+  private static String withoutTrailingJoiner(String text) {
+    String out = text.stripTrailing();
+    while (!out.isEmpty() && "-–—·/,".indexOf(out.charAt(out.length() - 1)) >= 0) {
+      out = out.substring(0, out.length() - 1).stripTrailing();
+    }
+    return out;
   }
 
   private Font load(String path) {

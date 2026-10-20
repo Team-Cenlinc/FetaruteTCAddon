@@ -11,6 +11,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalInt;
 import java.util.OptionalLong;
 import java.util.Set;
 import java.util.TreeSet;
@@ -51,6 +52,8 @@ import org.fetarute.fetaruteTCAddon.display.pids.view.PidsView.Tone;
  * </ul>
  *
  * <p>空位页（{@link #vacancy}）：首行是可以上车的运行中列车（不是还没开出、通过、本站终到或回库）且读得到载客时，给出各节车有多满与空位数。
+ *
+ * <p>车厢页时段（{@link #carPage}）依次取分行页（含刚在本站拆开以后的一张）、联挂页（{@link #join}）、空位页。
  *
  * <p>备注（末班车、直通、经由，见 {@link PidsRemarks}）只在显示要求轮到备注时写进终点，渲染器把英文那一格换成备注。
  *
@@ -412,7 +415,8 @@ public final class PidsViewBuilder {
   }
 
   /**
-   * 分行页：本屏下一班真会来的列车（改去别的站台的不算）是可以上车的运行中列车、在本站或前方某站分行时才有。 色牌与到站与主页上这一行相同，车头朝向与空位页相同，色带与主页相同。
+   * 分行页：本屏下一班真会来的列车（改去别的站台的不算）乘客能上、在本站或前方某站分行时才有；还没开出的一班按表预告，不等车开出来。
+   * 色牌与到站与主页上这一行相同，车头朝向与空位页相同，色带与主页相同。
    *
    * @param request 与主页相同的显示要求
    * @return 分行页；不分行时为空
@@ -427,6 +431,10 @@ public final class PidsViewBuilder {
       return Optional.empty();
     }
     PidsRow next = found.get();
+    Optional<PidsRow.Division> divided = next.dividedHere();
+    if (divided.isPresent()) {
+      return Optional.of(divided(request, shown, next, divided.get()));
+    }
     PidsRow.Division division = next.dividing().orElseThrow();
     PidsView.Row view = row(next, request);
     List<PidsView.Row> rows = shown.stream().map(row -> row(row, request)).toList();
@@ -460,37 +468,211 @@ public final class PidsViewBuilder {
             bandColors(request, rows)));
   }
 
+  /**
+   * 拆开以后的车厢页：这一行是刚在本站解下、接着载客的一段，另一段还停在站台上。两段之间留空；本列车实心，写“开往 X，即将发车”；另一段不再载客时灰色虚线，写“不载客，请勿上车”，
+   * 仍载客时空心，写它开往哪里。
+   *
+   * <p>车头朝向：解下的一段在车头一侧时顺着它接着跑的方向；在车尾一侧时它要倒着开走（留下的一段还挡在前面），原来的车头在它行进方向的另一侧。
+   */
+  private PidsDivisionView divided(
+      Request request, List<PidsRow> shown, PidsRow next, PidsRow.Division division) {
+    PidsView.Row view = row(next, request);
+    List<PidsView.Row> rows = shown.stream().map(row -> row(row, request)).toList();
+    Names title = view.destination().names();
+    List<PidsDivisionView.Segment> segments = new ArrayList<>();
+    for (int i = 0; i < division.parts().size(); i++) {
+      PidsRow.Division.Part part = division.parts().get(i);
+      Optional<Names> destination =
+          part.destinationId().map(id -> stationNames(id, PidsRemarks.code(id)));
+      if (part.detached()) {
+        Names to = destination.orElse(view.destination().names());
+        title = vocabulary.dividedTitle(i == 0, part.cars(), to);
+        segments.add(
+            new PidsDivisionView.Segment(
+                part.cars(), vocabulary.dividedDeparting(to), PidsDivisionView.Style.SOLID, i > 0));
+      } else if (destination.isPresent()) {
+        segments.add(
+            new PidsDivisionView.Segment(
+                part.cars(),
+                vocabulary.divisionSegment(i == 0, part.cars(), destination, Optional.empty()),
+                PidsDivisionView.Style.HOLLOW,
+                i > 0));
+      } else {
+        segments.add(
+            new PidsDivisionView.Segment(
+                part.cars(),
+                vocabulary.dividedNotInService(),
+                PidsDivisionView.Style.INACTIVE,
+                i > 0));
+      }
+    }
+    boolean detachedAtFront = division.detachedAtFront();
+    return new PidsDivisionView(
+        request.theme(),
+        view.badge(),
+        title,
+        view.arrival(),
+        segments,
+        request
+            .placement()
+            .flatMap(placement -> front(next, request.snapshot().station(), placement))
+            .map(front -> detachedAtFront ? front : opposite(front)),
+        vocabulary.labels().minutes(),
+        bandColors(request, rows));
+  }
+
+  private static PidsVacancyView.Front opposite(PidsVacancyView.Front front) {
+    return front == PidsVacancyView.Front.LEFT
+        ? PidsVacancyView.Front.RIGHT
+        : PidsVacancyView.Front.LEFT;
+  }
+
+  /**
+   * 联挂页：本屏下一班真会来的列车乘客能上（还没开出的按表预告），在前方站联挂（回程支线车）或就在本站联挂（主干）、两列车各几节都读得到时才有。与分行页同一几何。
+   *
+   * <p>前方站联挂：本列车实心，写“本列车 4 节，无需换乘”；要挂上的几节虚线，写“在 X 挂上 4 节”。本站联挂：已在站台的几节实心，还没到的几节虚线；标题写联挂以后一共几节、开往哪里。
+   * 两列车谁接在谁的哪一头读不到，本列车画在车头一侧。
+   *
+   * @param request 与主页相同的显示要求
+   * @return 联挂页；不联挂时为空
+   */
+  public Optional<PidsDivisionView> join(Request request) {
+    return join(request, shown(request));
+  }
+
+  private Optional<PidsDivisionView> join(Request request, List<PidsRow> shown) {
+    Optional<PidsRow> found = joinRow(request, shown);
+    if (found.isEmpty()) {
+      return Optional.empty();
+    }
+    PidsRow next = found.get();
+    PidsView.Row view = row(next, request);
+    List<PidsView.Row> rows = shown.stream().map(row -> row(row, request)).toList();
+    Optional<PidsRow.Joining> here = next.joiningHere();
+    List<PidsDivisionView.Segment> segments = new ArrayList<>();
+    Names title;
+    if (here.isPresent()) {
+      PidsRow.Joining joining = here.get();
+      boolean ownArriving = joining.joiningStanding() && next.status() != PidsRow.Status.BOARDING;
+      title =
+          vocabulary.joinTitle(
+              Optional.empty(),
+              joining.ownCars() + joining.joiningCars(),
+              view.destination().names());
+      segments.add(
+          new PidsDivisionView.Segment(
+              joining.ownCars(),
+              vocabulary.joinSegment(
+                  ownArriving
+                      ? PidsVocabulary.JoinPart.OWN_ARRIVING
+                      : PidsVocabulary.JoinPart.OWN_HERE,
+                  joining.ownCars(),
+                  Optional.empty()),
+              ownArriving ? PidsDivisionView.Style.DASHED : PidsDivisionView.Style.SOLID,
+              false));
+      segments.add(
+          new PidsDivisionView.Segment(
+              joining.joiningCars(),
+              vocabulary.joinSegment(
+                  joining.joiningStanding()
+                      ? PidsVocabulary.JoinPart.STANDING
+                      : PidsVocabulary.JoinPart.JOINING,
+                  joining.joiningCars(),
+                  Optional.empty()),
+              joining.joiningStanding()
+                  ? PidsDivisionView.Style.SOLID
+                  : PidsDivisionView.Style.DASHED,
+              false));
+    } else {
+      PidsRow.Joining joining = next.joiningAhead().orElseThrow();
+      Names station = stationNames(joining.stationId(), PidsRemarks.code(joining.stationId()));
+      title = vocabulary.joinTitle(Optional.of(station), 0, view.destination().names());
+      segments.add(
+          new PidsDivisionView.Segment(
+              joining.ownCars(),
+              vocabulary.joinSegment(
+                  PidsVocabulary.JoinPart.OWN_AHEAD, joining.ownCars(), Optional.empty()),
+              PidsDivisionView.Style.SOLID,
+              false));
+      segments.add(
+          new PidsDivisionView.Segment(
+              joining.joiningCars(),
+              vocabulary.joinSegment(
+                  PidsVocabulary.JoinPart.ADDED_AHEAD, joining.joiningCars(), Optional.of(station)),
+              PidsDivisionView.Style.DASHED,
+              false));
+    }
+    return Optional.of(
+        new PidsDivisionView(
+            request.theme(),
+            view.badge(),
+            title,
+            view.arrival(),
+            segments,
+            request
+                .placement()
+                .flatMap(placement -> front(next, request.snapshot().station(), placement)),
+            vocabulary.labels().minutes(),
+            bandColors(request, rows)));
+  }
+
   /** 本屏此刻有没有分行页（轮播据此让车厢页时段先放分行页）。只看那一行，不构建视图。 */
   public boolean hasDivision(Request request) {
     return divisionRow(request, shown(request)).isPresent();
   }
 
-  /** 本屏此刻有没有车厢页（分行页或空位页）：轮播据此决定副页能不能轮到车厢页。只看那一行，不构建视图。 */
+  /** 本屏此刻有没有车厢页（分行页、联挂页或空位页）：轮播据此决定副页能不能轮到车厢页。只看那一行，不构建视图。 */
   public boolean hasCarPage(Request request) {
     List<PidsRow> shown = shown(request);
-    return divisionRow(request, shown).isPresent() || vacancyRow(request, shown).isPresent();
+    return divisionRow(request, shown).isPresent()
+        || joinRow(request, shown).isPresent()
+        || vacancyRow(request, shown).isPresent();
   }
 
   /**
-   * 车厢页时段放的那一页：下一班要分行时是分行页（乘客要按去向选车厢），否则是空位页。
+   * 车厢页时段放的那一页：下一班要分行（或刚在本站拆开）时是分行页（乘客要按去向选车厢），其次是联挂页，否则是空位页。
    *
-   * @return 分行页或空位页；都没有时为空
+   * @return 分行页、联挂页或空位页；都没有时为空
    */
   public Optional<Object> carPage(Request request) {
     List<PidsRow> shown = shown(request);
-    Optional<PidsDivisionView> division = division(request, shown);
+    Optional<PidsDivisionView> division = division(request, shown).or(() -> join(request, shown));
     return division.isPresent()
         ? Optional.of(division.get())
         : vacancy(request, shown).map(Object.class::cast);
   }
 
-  /** 分行页画的那一班：本屏首个真会来本站台的行，且可以上车、在本站或前方分行。 */
+  /** 分行页画的那一班：本屏首个真会来本站台的行，且乘客能上（还没开出的按表预告）、在本站或前方分行，或刚在本站拆开。 */
   private static Optional<PidsRow> divisionRow(Request request, List<PidsRow> shown) {
+    return firstRideable(request, shown)
+        .filter(row -> row.dividing().isPresent() || row.dividedHere().isPresent());
+  }
+
+  /** 联挂页画的那一班：本屏首个真会来本站台的行，且乘客能上（还没开出的按表预告）、在前方站或本站联挂、两列车各几节都读得到。 */
+  private static Optional<PidsRow> joinRow(Request request, List<PidsRow> shown) {
+    return firstRideable(request, shown)
+        .filter(
+            row ->
+                row.joiningHere()
+                    .or(() -> row.joiningAhead().filter(found -> !found.stationId().isBlank()))
+                    .filter(PidsRow.Joining::carsKnown)
+                    .isPresent());
+  }
+
+  /** 本屏首个真会来本站台的行（改去别的站台的不算），且是可以上车的运行中列车。 */
+  private static Optional<PidsRow> firstBoardable(Request request, List<PidsRow> shown) {
     return shown.stream()
         .filter(row -> !row.movedAwayFrom(request.platforms()))
         .findFirst()
-        .filter(PidsViewBuilder::boardable)
-        .filter(row -> row.dividing().isPresent());
+        .filter(PidsViewBuilder::boardable);
+  }
+
+  /** 本屏首个真会来本站台的行，且乘客能上（还没开出的也算）：分行页、联挂页按表预告，不等车开出来。 */
+  private static Optional<PidsRow> firstRideable(Request request, List<PidsRow> shown) {
+    return shown.stream()
+        .filter(row -> !row.movedAwayFrom(request.platforms()))
+        .findFirst()
+        .filter(PidsViewBuilder::rideable);
   }
 
   /** 本屏此刻有没有空位页：轮播据此决定副页能不能轮到空位页。只看那一行，不构建视图。 */
@@ -524,7 +706,7 @@ public final class PidsViewBuilder {
         request.theme(),
         CLOCK.format(request.now().atZone(request.zone())),
         request.platformLabels(),
-        next.map(row -> train(row, rows.get(0), request.theme())),
+        next.map(row -> train(row, rows.get(0), request)),
         cancelled.map(row -> cancelledNote(row, request)),
         0,
         vocabulary.stopListLabels(),
@@ -653,8 +835,10 @@ public final class PidsViewBuilder {
         && !row.outOfService();
   }
 
-  private PidsStopListView.Train train(PidsRow row, PidsView.Row view, PidsTheme theme) {
-    Optional<PidsRemarks.Trip> trip = remarks.trip(row);
+  private PidsStopListView.Train train(PidsRow row, PidsView.Row view, Request request) {
+    PidsTheme theme = request.theme();
+    Marks marks = marks(row, view, request.remarks());
+    Optional<PidsRemarks.Trip> trip = remarks.journey(row);
     if (trip.isEmpty()) {
       return new PidsStopListView.Train(
           identity(row),
@@ -663,7 +847,9 @@ public final class PidsViewBuilder {
           view.arrival(),
           attention(view),
           Optional.empty(),
-          List.of());
+          List.of(),
+          marks.coupling(),
+          marks.advice());
     }
     Optional<PidsRemarks.Through> through = remarks.through(trip.get());
     List<String> via = remarks.via(row, trip.get());
@@ -678,7 +864,96 @@ public final class PidsViewBuilder {
         view.arrival(),
         attention(view),
         note,
-        stops(trip.get(), Set.copyOf(via), view.badge(), theme));
+        stops(trip.get(), Set.copyOf(via), view.badge(), theme, marks),
+        marks.coupling(),
+        marks.advice());
+  }
+
+  /**
+   * 停站屏上的分行与联挂：终点下面一行、分行站与联挂站的标记、分行站之后只有部分车厢开到的站。
+   *
+   * @param divideAt 停站表里的分行站下标（本站分行时是本站）
+   * @param joinAt 停站表里的联挂站下标
+   * @param only 分行站之后各站右侧的“仅前 N 节”
+   * @param coupling 终点下面一行
+   * @param advice 本站分行时最底下一行的提示
+   */
+  private record Marks(
+      OptionalInt divideAt,
+      OptionalInt joinAt,
+      Optional<Names> only,
+      Optional<PidsStopListView.Coupling> coupling,
+      Optional<Names> advice) {
+
+    static final Marks NONE =
+        new Marks(
+            OptionalInt.empty(),
+            OptionalInt.empty(),
+            Optional.empty(),
+            Optional.empty(),
+            Optional.empty());
+  }
+
+  /**
+   * 分行车：开往终点的那一段在车头一侧写“仅前 N 节”，另一段到此止写“后 N 节到此止”、仍载客写它开往哪里；本站分行时第一行写“本站分行”，最底下一行写“前往 X 请乘前 N 节”。
+   * 回程支线车：第一行写联挂站，说明写“在此联挂，无需换乘”。分行优先于联挂。对不上开往终点的那一段时不写。
+   */
+  private Marks marks(PidsRow row, PidsView.Row view, boolean english) {
+    Optional<PidsRow.Division> dividing = row.dividing();
+    if (dividing.isPresent()) {
+      PidsRow.Division division = dividing.get();
+      Optional<PidsRow.Division.Part> onward = PidsRemarks.onward(row, division);
+      if (onward.isEmpty()) {
+        return Marks.NONE;
+      }
+      PidsRow.Division.Part part = onward.get();
+      boolean front = division.parts().indexOf(part) == 0;
+      PidsRow.Division.Part other = division.parts().get(front ? 1 : 0);
+      boolean here = row.dividesHere();
+      Optional<Names> otherTo =
+          other.destinationId().map(id -> stationNames(id, PidsRemarks.code(id)));
+      Names detail =
+          otherTo.isPresent()
+              ? vocabulary.divisionSegment(!front, other.cars(), otherTo, Optional.empty())
+              : here
+                  ? vocabulary.stopListEndsHere(!front, other.cars())
+                  : vocabulary.stopListEndsThere(!front, other.cars());
+      Names place =
+          here
+              ? vocabulary.divisionTagNames(true)
+              : stationNames(division.stationId(), PidsRemarks.code(division.stationId()));
+      Names to =
+          part.destinationId()
+              .map(id -> stationNames(id, PidsRemarks.code(id)))
+              .orElse(view.destination().names());
+      return new Marks(
+          OptionalInt.of(division.stopSequence()),
+          OptionalInt.empty(),
+          Optional.of(vocabulary.stopListOnly(front, part.cars())),
+          Optional.of(
+              new PidsStopListView.Coupling(
+                  vocabulary.divisionTagNames(false), place, detail, english)),
+          here
+              ? Optional.of(vocabulary.stopListBoardPart(front, part.cars(), to))
+              : Optional.empty());
+    }
+    return row.joiningAhead()
+        .filter(joining -> !joining.stationId().isBlank())
+        .map(
+            joining ->
+                new Marks(
+                    OptionalInt.empty(),
+                    OptionalInt.of(joining.stopSequence()),
+                    Optional.empty(),
+                    Optional.of(
+                        new PidsStopListView.Coupling(
+                            vocabulary.joinTagNames(),
+                            stationNames(
+                                joining.stationId(), PidsRemarks.code(joining.stationId())),
+                            vocabulary.stopListJoinsThere(),
+                            english)),
+                    Optional.empty()))
+        .orElse(Marks.NONE);
   }
 
   private PidsStopListView.Note throughNote(
@@ -707,9 +982,9 @@ public final class PidsViewBuilder {
         names.secondary());
   }
 
-  /** 本站之后的停车站，到终点为止；换线站之后按新线路着色。 */
+  /** 本站之后的停车站，到终点为止；换线站之后按新线路着色；分行站、联挂站加标记，分行站之后的站只有部分车厢开到。 */
   private List<PidsStopListView.Stop> stops(
-      PidsRemarks.Trip trip, Set<String> via, Badge badge, PidsTheme theme) {
+      PidsRemarks.Trip trip, Set<String> via, Badge badge, PidsTheme theme, Marks marks) {
     List<PidsStopListView.Stop> out = new ArrayList<>();
     int color = badge.color();
     String line = badge.code();
@@ -726,21 +1001,31 @@ public final class PidsViewBuilder {
       }
       if (stop.stops() && stop.stationId().isPresent()) {
         String station = PidsRemarks.normalize(stop.stationId().get());
+        int index = i;
         PidsStopListView.Kind kind =
             i == trip.end()
                 ? PidsStopListView.Kind.TERMINAL
-                : change.isPresent()
-                    ? PidsStopListView.Kind.CHANGE
-                    : via.contains(station)
-                        ? PidsStopListView.Kind.VIA
-                        : out.isEmpty() ? PidsStopListView.Kind.NEXT : PidsStopListView.Kind.STOP;
+                : marks.divideAt().stream().anyMatch(at -> at == index)
+                    ? PidsStopListView.Kind.DIVIDE
+                    : marks.joinAt().stream().anyMatch(at -> at == index)
+                        ? PidsStopListView.Kind.JOIN
+                        : change.isPresent()
+                            ? PidsStopListView.Kind.CHANGE
+                            : via.contains(station)
+                                ? PidsStopListView.Kind.VIA
+                                : out.isEmpty()
+                                    ? PidsStopListView.Kind.NEXT
+                                    : PidsStopListView.Kind.STOP;
+        boolean partial = marks.divideAt().stream().anyMatch(at -> index > at);
         out.add(
             new PidsStopListView.Stop(
                 stationNames(station, PidsRemarks.code(station)),
                 kind,
                 color,
                 after,
-                transfers(station, Set.copyOf(List.of(line, afterLine)))));
+                transfers(station, Set.copyOf(List.of(line, afterLine))),
+                partial,
+                partial ? marks.only() : Optional.empty()));
       }
       color = after;
       line = afterLine;
@@ -761,10 +1046,7 @@ public final class PidsViewBuilder {
 
   /** 空位页画的那一班：本屏首个真会来本站台的行，且可以上车、读得到座位。 */
   private static Optional<PidsRow> vacancyRow(Request request, List<PidsRow> shown) {
-    return shown.stream()
-        .filter(row -> !row.movedAwayFrom(request.platforms()))
-        .findFirst()
-        .filter(PidsViewBuilder::boardable)
+    return firstBoardable(request, shown)
         .filter(row -> row.cars().stream().mapToInt(PidsRow.Car::seats).sum() > 0);
   }
 

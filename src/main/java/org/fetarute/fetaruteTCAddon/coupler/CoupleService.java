@@ -4,12 +4,8 @@ import com.bergerkiller.bukkit.tc.TCConfig;
 import com.bergerkiller.bukkit.tc.actions.GroupAction;
 import com.bergerkiller.bukkit.tc.controller.MinecartGroup;
 import com.bergerkiller.bukkit.tc.controller.MinecartMember;
-import com.bergerkiller.bukkit.tc.events.SignActionEvent;
 import com.bergerkiller.bukkit.tc.properties.TrainProperties;
 import com.bergerkiller.bukkit.tc.properties.TrainPropertiesStore;
-import com.bergerkiller.bukkit.tc.rails.RailLookup;
-import com.bergerkiller.bukkit.tc.signactions.SignAction;
-import com.bergerkiller.bukkit.tc.signactions.SignActionType;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -23,8 +19,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import org.bukkit.Bukkit;
-import org.bukkit.World;
-import org.bukkit.block.Block;
 import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 import org.fetarute.fetaruteTCAddon.FetaruteTCAddon;
@@ -33,6 +27,7 @@ import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPath;
 import org.fetarute.fetaruteTCAddon.dispatcher.graph.query.RailGraphPathFinder;
 import org.fetarute.fetaruteTCAddon.dispatcher.node.NodeId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteCouplingDirectives;
+import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinition;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteDefinitionCache;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteId;
 import org.fetarute.fetaruteTCAddon.dispatcher.route.RouteTerminals;
@@ -47,7 +42,6 @@ import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyReque
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.OccupancyResource;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.occupancy.TrainNameNormalizer;
 import org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService;
-import org.fetarute.fetaruteTCAddon.dispatcher.sign.SignNodeRegistry;
 
 /**
  * 联挂指令 {@code COPL}（见 {@link RouteCouplingDirectives}）：回程支线车与主干在联挂站挂成一列，沿用主干的身份。
@@ -216,6 +210,9 @@ public final class CoupleService {
   /** 主干车名键 → 挂上的那一站。 */
   private final Map<String, CoupledAt> coupledAt = new ConcurrentHashMap<>();
 
+  /** 主干车名键 → 已经挂上的那一站：联挂预测不再写这一站。主干离开这一站（进度变了）或不在了就删。 */
+  private final Map<String, CoupledAt> joined = new ConcurrentHashMap<>();
+
   /** 车名键 → 这一站因联挂多停的秒数：车站停站时 AutoStation 取走。 */
   private final Map<String, Integer> stationDwell = new ConcurrentHashMap<>();
 
@@ -230,12 +227,48 @@ public final class CoupleService {
 
   private BukkitTask task;
 
+  /** 联挂预测多久重算一次（拍数）。 */
+  private static final int JOIN_FORECAST_ROUNDS = 10;
+
+  private int joinForecastCountdown;
+
+  /** 车名键 → 联挂预测：主线程整份换上，任意线程读（站台屏、公开 API）。 */
+  private volatile Map<String, JoinForecast> joinForecasts = Map.of();
+
+  /** 联挂站的站名与 ID（与分行同一口径）。 */
+  private final DivisionDestinations stations;
+
   /** 两车上值乘的人；驾驶模块接入。 */
   private volatile CoupleCrew crew = CoupleCrew.NONE;
 
   CoupleService(FetaruteTCAddon plugin, CouplerService coupler) {
     this.plugin = Objects.requireNonNull(plugin, "plugin");
     this.coupler = Objects.requireNonNull(coupler, "coupler");
+    this.stations = new DivisionDestinations(plugin);
+  }
+
+  /**
+   * 回程支线联挂之后接着跑的主干。
+   *
+   * @param trunkRoute 主干交路
+   * @param joinIndex 联挂站在主干交路里的下标
+   */
+  public record Continuation(UUID trunkRoute, int joinIndex) {
+
+    public Continuation {
+      Objects.requireNonNull(trunkRoute, "trunkRoute");
+    }
+  }
+
+  /**
+   * 这条交路的车联挂之后接着跑哪条主干（乘客看到的去向按主干的终点）：只挂上一条主干时有，不挂或挂上不同的主干时为空。
+   *
+   * <p>读的是联挂服务在主线程上随交路变化重建的索引，任意线程可调。
+   */
+  public Optional<Continuation> continuationOf(UUID feederRoute) {
+    return index
+        .continuationOf(feederRoute)
+        .map(join -> new Continuation(join.trunkRoute(), join.stopIndex()));
   }
 
   /** 接入值乘的人（驾驶员、车掌）；{@code null} 恢复为没有。 */
@@ -265,6 +298,15 @@ public final class CoupleService {
     stillTicks.clear();
     retryAfter.clear();
     deferredUntil.clear();
+    joinForecasts = Map.of();
+    joined.clear();
+  }
+
+  /** 这列车前方（或此刻停着的这一站）的联挂预测；不联挂时为空。任意线程可读。 */
+  public Optional<JoinForecast> joinForecast(String trainName) {
+    return trainName == null
+        ? Optional.empty()
+        : Optional.ofNullable(joinForecasts.get(key(trainName)));
   }
 
   // ---------------------------------------------------------------- 到站
@@ -549,6 +591,10 @@ public final class CoupleService {
 
   void tick() {
     CouplingIndex current = currentIndex();
+    if (--joinForecastCountdown <= 0) {
+      joinForecastCountdown = JOIN_FORECAST_ROUNDS;
+      refreshJoinForecasts(current);
+    }
     if (current.isEmpty() && feeders.isEmpty() && trunks.isEmpty() && approaches.isEmpty()) {
       return;
     }
@@ -587,6 +633,290 @@ public final class CoupleService {
       index = CouplingIndex.build(routes);
     }
     return index;
+  }
+
+  // ---------------------------------------------------------------- 联挂预测
+
+  /**
+   * 按交路进度重算每列车的联挂预测，整份换上。回程支线车看本交路终点（联挂站）；主干看本站或前方最近的联挂站。对方是哪一列车与主干等不等它同一口径（{@link
+   * #expectFeeder}）：按表时只认表上那一班，否则取扣在联挂站或正开来的车；认不出对方时主干不写联挂（它到了也不会等）。
+   */
+  private void refreshJoinForecasts(CouplingIndex current) {
+    Optional<RouteProgressRegistry> registry = plugin.getRouteProgressRegistry();
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (registry.isEmpty() || cache.isEmpty() || current.isEmpty()) {
+      joinForecasts = Map.of();
+      return;
+    }
+    Map<String, RouteProgressRegistry.RouteProgressEntry> progress = new java.util.HashMap<>();
+    for (RouteProgressRegistry.RouteProgressEntry entry : registry.get().snapshot().values()) {
+      progress.put(key(entry.trainName()), entry);
+    }
+    joined
+        .entrySet()
+        .removeIf(
+            entry ->
+                Optional.ofNullable(progress.get(entry.getKey()))
+                    .filter(
+                        found ->
+                            entry.getValue().route().equals(found.routeUuid())
+                                && entry.getValue().index() == found.currentIndex())
+                    .isEmpty());
+    Optional<TimetableService> timetable = plugin.getTimetableService();
+    // 按表：主干 → 表上这一班挂不挂、挂哪辆；回程支线车 → 它要并进的主干
+    Map<String, TimetableService.JoinPlan> plans = new java.util.HashMap<>();
+    Map<String, String> trunkOfFeeder = new java.util.HashMap<>();
+    for (RouteProgressRegistry.RouteProgressEntry entry : progress.values()) {
+      if (current.ofTrunk(entry.routeUuid()).isEmpty() || timetable.isEmpty()) {
+        continue;
+      }
+      TimetableService.JoinPlan plan = timetable.get().joinPlanOf(entry.trainName());
+      plans.put(key(entry.trainName()), plan);
+      plan.feederTrain().ifPresent(feeder -> trunkOfFeeder.put(key(feeder), entry.trainName()));
+    }
+    Map<String, JoinForecast> next = new java.util.HashMap<>();
+    for (RouteProgressRegistry.RouteProgressEntry entry : progress.values()) {
+      try {
+        joinForecastOf(entry, current, cache.get(), progress, plans, trunkOfFeeder)
+            .ifPresent(found -> next.put(key(entry.trainName()), found));
+      } catch (RuntimeException ex) {
+        debug("COPL_FORECAST_FAILED train=" + entry.trainName() + " error=" + ex);
+      }
+    }
+    joinForecasts = Map.copyOf(next);
+  }
+
+  /**
+   * @param progress 车名键 → 交路进度
+   * @param plans 主干车名键 → 按表这一班挂不挂（不按表的车没有）
+   * @param trunkOfFeeder 回程支线车名键 → 按表它要并进的主干
+   */
+  private Optional<JoinForecast> joinForecastOf(
+      RouteProgressRegistry.RouteProgressEntry entry,
+      CouplingIndex current,
+      RouteDefinitionCache cache,
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      Map<String, TimetableService.JoinPlan> plans,
+      Map<String, String> trunkOfFeeder) {
+    int ownCars = group(entry.trainName()).map(MinecartGroup::size).orElse(0);
+    Optional<CouplingIndex.Join> asFeeder =
+        current
+            .continuationOf(entry.routeUuid())
+            .filter(join -> entry.currentIndex() < join.feederEndIndex());
+    if (asFeeder.isPresent()) {
+      CouplingIndex.Join join = asFeeder.get();
+      // 按表时是表上那一班主干；否则是在联挂站等着的、或离联挂站最近的开来的主干
+      Optional<String> trunk =
+          Optional.ofNullable(trunkOfFeeder.get(key(entry.trainName())))
+              .or(
+                  () ->
+                      trunks.values().stream()
+                          .filter(
+                              wait ->
+                                  wait.join().equals(join)
+                                      && wait.feeder()
+                                          .map(f -> sameTrain(f, entry.trainName()))
+                                          .orElse(true))
+                          .map(TrunkWait::name)
+                          .findFirst())
+              .or(
+                  () ->
+                      nearestOn(
+                          progress,
+                          join.trunkRoute(),
+                          join.stopIndex(),
+                          // 已在这一站挂上别的车的主干不算
+                          name ->
+                              Optional.ofNullable(joined.get(key(name)))
+                                  .filter(
+                                      at ->
+                                          at.route().equals(join.trunkRoute())
+                                              && at.index() == join.stopIndex())
+                                  .isEmpty()));
+      boolean standing =
+          trunk
+              .map(name -> progress.get(key(name)))
+              .filter(
+                  found ->
+                      join.trunkRoute().equals(found.routeUuid())
+                          && found.currentIndex() == join.stopIndex())
+              .isPresent();
+      int trunkCars = trunk.flatMap(CoupleService::group).map(MinecartGroup::size).orElse(0);
+      if (trunkCars <= 0 && ownCars > 0) {
+        // 主干还没出车：整列（主干交路的组合编组）减去本车
+        trunkCars =
+            coupler
+                .decoupling()
+                .plannedPatternOf(join.trunkRoute())
+                .map(pattern -> Math.max(0, pattern.cars() - ownCars))
+                .orElse(0);
+      }
+      return forecastAt(
+          entry.routeId().value(),
+          cache.listStops(entry.routeId()),
+          join.feederEndIndex(),
+          false,
+          ownCars,
+          trunkCars,
+          standing);
+    }
+    CouplingIndex.Join nearest = null;
+    CoupledAt done = joined.get(key(entry.trainName()));
+    for (CouplingIndex.Join join : current.ofTrunk(entry.routeUuid())) {
+      if (done != null
+          && done.route().equals(join.trunkRoute())
+          && done.index() == join.stopIndex()) {
+        continue;
+      }
+      if (join.stopIndex() >= entry.currentIndex()
+          && (nearest == null || join.stopIndex() < nearest.stopIndex())) {
+        nearest = join;
+      }
+    }
+    if (nearest == null) {
+      return Optional.empty();
+    }
+    CouplingIndex.Join join = nearest;
+    String trunkName = entry.trainName();
+    Optional<FeederHold> held =
+        feeders.values().stream()
+            .filter(
+                hold ->
+                    hold.joins().contains(join)
+                        && hold.trunk().map(t -> sameTrain(t, trunkName)).orElse(true))
+            .findFirst();
+    TimetableService.JoinPlan plan =
+        plans.getOrDefault(key(trunkName), TimetableService.JoinPlan.UNBOUND);
+    Optional<String> feeder =
+        plan.bound()
+            // 按表：只认表上那一班的回程支线车，扣在联挂站或正开往联挂站
+            ? plan.feederTrain()
+                .filter(
+                    name ->
+                        held.filter(hold -> sameTrain(hold.name(), name)).isPresent()
+                            || Optional.ofNullable(progress.get(key(name)))
+                                .filter(
+                                    found ->
+                                        join.feederRoute().equals(found.routeUuid())
+                                            && found.currentIndex() <= join.feederEndIndex())
+                                .isPresent())
+            : held.map(FeederHold::name)
+                .or(
+                    () ->
+                        nearestOn(
+                            progress, join.feederRoute(), join.feederEndIndex(), name -> true));
+    if (feeder.isEmpty()) {
+      return Optional.empty();
+    }
+    boolean standing =
+        held.filter(hold -> sameTrain(hold.name(), feeder.get())).isPresent()
+            || Optional.ofNullable(progress.get(key(feeder.get())))
+                .filter(
+                    found ->
+                        join.feederRoute().equals(found.routeUuid())
+                            && found.currentIndex() >= join.feederEndIndex())
+                .isPresent();
+    return forecastAt(
+        entry.routeId().value(),
+        cache.listStops(entry.routeId()),
+        join.stopIndex(),
+        true,
+        ownCars,
+        feeder.flatMap(CoupleService::group).map(MinecartGroup::size).orElse(0),
+        standing);
+  }
+
+  /** 交路 {@code route} 上还没过下标 {@code target}（含停在那里）、{@code eligible} 认的车里离它最近的一辆。 */
+  private static Optional<String> nearestOn(
+      Map<String, RouteProgressRegistry.RouteProgressEntry> progress,
+      UUID route,
+      int target,
+      java.util.function.Predicate<String> eligible) {
+    return progress.values().stream()
+        .filter(
+            found ->
+                route.equals(found.routeUuid())
+                    && found.currentIndex() <= target
+                    && eligible.test(found.trainName()))
+        .max(
+            java.util.Comparator.comparingInt(
+                RouteProgressRegistry.RouteProgressEntry::currentIndex))
+        .map(RouteProgressRegistry.RouteProgressEntry::trainName);
+  }
+
+  /**
+   * 表上还没出车的一班的联挂预测（站牌票据与预测行按表提前写联挂页与“本站联挂”）：两边各几节由主干交路的组合编组与一方车底的编组推出，推不出时为 0。
+   * 任意线程可调：只读联挂索引与编组缓存（缓存里没有的编组由主线程补上，这一次节数为 0）。
+   *
+   * @param planned 表上那一班在联挂里的情况
+   * @return 联挂站不是车站、索引里没有这一处联挂时为空
+   */
+  public Optional<JoinForecast> plannedJoinForecast(TimetableService.PlannedJoin planned) {
+    Optional<RouteDefinitionCache> cache = plugin.getRouteDefinitionCache();
+    if (planned == null || cache.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<CouplingIndex.Join> join =
+        index.ofTrunk(planned.trunkRouteId()).stream()
+            .filter(found -> found.feederRoute().equals(planned.feederRouteId()))
+            .findFirst();
+    Optional<RouteDefinition> route = cache.get().findById(planned.routeId());
+    if (join.isEmpty() || route.isEmpty()) {
+      return Optional.empty();
+    }
+    Optional<DecoupleService.PlannedPattern> pattern =
+        coupler.decoupling().plannedPatternOf(planned.trunkRouteId());
+    int total = pattern.map(DecoupleService.PlannedPattern::cars).orElse(0);
+    java.util.OptionalInt trunkCars =
+        pattern
+            .flatMap(found -> planned.trunkConsist().map(found::carsOfEnd))
+            .orElse(java.util.OptionalInt.empty());
+    java.util.OptionalInt feederCars =
+        pattern
+            .flatMap(found -> planned.feederConsist().map(found::carsOfEnd))
+            .orElse(java.util.OptionalInt.empty());
+    if (trunkCars.isEmpty() && feederCars.isPresent()) {
+      trunkCars = java.util.OptionalInt.of(total - feederCars.getAsInt());
+    } else if (feederCars.isEmpty() && trunkCars.isPresent()) {
+      feederCars = java.util.OptionalInt.of(total - trunkCars.getAsInt());
+    }
+    int trunk = trunkCars.orElse(0);
+    int feeder = feederCars.orElse(0);
+    return forecastAt(
+        route.get().id().value(),
+        cache.get().listStops(route.get().id()),
+        planned.trunk() ? join.get().stopIndex() : join.get().feederEndIndex(),
+        planned.trunk(),
+        planned.trunk() ? trunk : feeder,
+        planned.trunk() ? feeder : trunk,
+        false);
+  }
+
+  /** 联挂站是车站时的预测；路径点上的联挂不给乘客看。 */
+  private Optional<JoinForecast> forecastAt(
+      String routeId,
+      List<org.fetarute.fetaruteTCAddon.company.model.RouteStop> stops,
+      int index,
+      boolean trunk,
+      int ownCars,
+      int joiningCars,
+      boolean standing) {
+    if (index < 0 || index >= stops.size()) {
+      return Optional.empty();
+    }
+    return stations
+        .stationIdOf(stops.get(index))
+        .map(
+            stationId ->
+                new JoinForecast(
+                    routeId,
+                    index,
+                    stationId,
+                    stations.stationName(stationId),
+                    trunk,
+                    ownCars,
+                    joiningCars,
+                    standing));
   }
 
   /** 回程支线车在联挂站终到、主干会来：扣住它。 */
@@ -1148,6 +1478,9 @@ public final class CoupleService {
     }
     feeders.remove(key(approach.feederName));
     trunks.remove(key(approach.trunkName));
+    joined.put(
+        key(approach.trunkName),
+        new CoupledAt(approach.join.trunkRoute(), approach.join.stopIndex()));
     MinecartGroup merged = result.get().merged().orElse(null);
     warnInfo(
         "COPL_LINKED trunk="
@@ -1184,22 +1517,13 @@ public final class CoupleService {
     if (!group.isValid()) {
       return;
     }
-    SignNodeRegistry registry = plugin.getSignNodeRegistry();
-    Optional<SignNodeRegistry.SignNodeInfo> sign =
-        registry == null ? Optional.empty() : registry.findByNodeId(platform, null);
-    World world = sign.map(info -> Bukkit.getWorld(info.worldId())).orElse(null);
-    if (sign.isEmpty() || world == null) {
-      warn("COPL_ARRIVAL_SIGN_MISSING platform=" + platform.value());
-      return;
-    }
-    Block block = world.getBlockAt(sign.get().x(), sign.get().y(), sign.get().z());
-    try {
-      SignAction.executeAll(
-          new SignActionEvent(RailLookup.TrackedSign.forRealSign(block, true, null), group),
-          SignActionType.GROUP_ENTER);
-    } catch (RuntimeException ex) {
-      warn("COPL_ARRIVAL_FAILED platform=" + platform.value() + " error=" + ex);
-    }
+    StationSignTrigger.arrive(plugin, group, platform)
+        .ifPresent(
+            reason ->
+                warn(
+                    "sign-missing".equals(reason)
+                        ? "COPL_ARRIVAL_SIGN_MISSING platform=" + platform.value()
+                        : "COPL_ARRIVAL_FAILED platform=" + platform.value() + " error=" + reason));
   }
 
   private void fail(Approach approach, String reason) {

@@ -92,6 +92,11 @@ display:
         - "<gray>换乘</gray> {?transfer_lines}"
         - "<yellow>晚点 {?delay_minutes} 分钟</yellow>"
         - "<aqua>⇄</aqua> <gray>本站起改为</gray> <{line_color_tag}>█</{line_color_tag}><white>{?line_change}</white> <gray>运行</gray>"
+      # 分行站、联挂站那一行的说明（接在 details 之后）：本节车厢分行后去哪、联挂后接着开往哪里
+      coupling:
+        - "<aqua>⇉</aqua> <gray>本站分行，本节车厢开往</gray> <white>{?stop_car_destination}</white>"
+        - "<gold>⇉</gold> <gray>本站分行，本节车厢在</gray> <white>{?stop_car_terminates}</white> <gray>停止载客</gray>"
+        - "<aqua>⇇</aqua> <gray>本站联挂，继续开往</gray> <white>{?stop_join_destination}</white>"
     empty: "<gray>前方没有停靠站。</gray>"
     more: "<gray>另有 <count> 站未列出。</gray>"
     not-on-train: "<prefix> <gray>请在乘坐列车时查看后续站点。</gray>"
@@ -1675,18 +1680,23 @@ pids:
     remark:
       last-train: "末班车"
       division: "分行"
+      division-secondary: "Divides"
       division-here: "本站分行"
+      division-here-secondary: "Divides here"
       through: "直通"
       through-secondary: "thru"
+      # 联挂：回程支线的车在后面写的那一站挂上主干，乘客留在车上继续前往终点
+      join: "联挂"
+      join-secondary: "Joins"
       via: "经由"
       via-secondary: "via"
     # 分行（列车在本站或前方某站拆成两列，各开往不同的地方）：分行页标题、各段说明与到发行备注；
     # <station> 分行站，<end> 前或后，<cars> 节数，<destination> 分行后开往的车站
     division:
       title: "本次列车在<station>分行"
-      title-secondary: "Divides at <station>"
+      title-secondary: "This train divides at <station>"
       title-here: "本次列车在本站分行"
-      title-here-secondary: "Divides at this station"
+      title-here-secondary: "This train divides here"
       front: "前"
       front-secondary: "Front"
       rear: "后"
@@ -1695,17 +1705,68 @@ pids:
       to-secondary: "<end> <cars> cars to <destination>"
       to-one-secondary: "<end> <cars> car to <destination>"
       ends: "<end> <cars> 节至<station>止"
-      ends-secondary: "<end> <cars> cars terminate at <station>"
-      ends-one-secondary: "<end> <cars> car terminates at <station>"
+      ends-secondary: "<end> <cars> cars end at <station>"
+      ends-one-secondary: "<end> <cars> car ends at <station>"
       ends-here: "<end> <cars> 节本站止"
-      ends-here-secondary: "<end> <cars> cars terminate here"
-      ends-here-one-secondary: "<end> <cars> car terminates here"
+      ends-here-secondary: "<end> <cars> cars end here"
+      ends-here-one-secondary: "<end> <cars> car ends here"
       remark: "<end> <cars> 节往<destination>"
-    # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题
+      # 拆开以后（解下的一段接着载客、另一段还停在站台上）的车厢页：标题、本列车与另一段的说明
+      title-divided: "本站已分行，<end> <cars> 节即将开往<destination>"
+      title-divided-secondary: "Divided · <end> <cars> cars to <destination>"
+      title-divided-one-secondary: "Divided · <end> <cars> car to <destination>"
+      divided-front: "前"
+      divided-front-secondary: "front"
+      divided-rear: "后"
+      divided-rear-secondary: "rear"
+      departing: "开往<destination>，即将发车"
+      departing-secondary: "To <destination> · departing soon"
+      not-in-service: "不载客，请勿上车"
+      not-in-service-secondary: "Not in service"
+    # 联挂页（回程支线的车在前方站挂上主干，或主干在本站挂上回程支线车）：标题与各段说明；
+    # <station> 联挂站，<cars> 节数，<destination> 联挂以后开往的车站
+    join:
+      title: "本次列车在<station>联挂"
+      title-secondary: "This train joins another at <station>"
+      title-here: "本次列车在本站联挂，<cars> 节开往<destination>"
+      title-here-secondary: "Joins another train here · <cars> cars to <destination>"
+      own-ahead: "本列车 <cars> 节，无需换乘"
+      own-ahead-secondary: "This train · stay on board"
+      added: "在<station>挂上 <cars> 节"
+      added-secondary: "<cars> more cars added there"
+      added-one-secondary: "<cars> more car added there"
+      own-here: "本列车 <cars> 节"
+      own-here-secondary: "This train · <cars> cars"
+      own-here-one-secondary: "This train · <cars> car"
+      own-arriving: "本列车 <cars> 节，进站后挂上"
+      own-arriving-secondary: "This train · <cars> cars arriving"
+      own-arriving-one-secondary: "This train · <cars> car arriving"
+      standing: "已在站台的 <cars> 节"
+      standing-secondary: "<cars> cars already here"
+      standing-one-secondary: "<cars> car already here"
+      joining: "即将挂上 <cars> 节"
+      joining-secondary: "<cars> more cars joining"
+      joining-one-secondary: "<cars> more car joining"
+    # 2×1 停站屏：终点下面一行写从哪站起直通；后续列车页的标题；
+    # 分行车与回程支线车的说明（<end> 前或后，<cars> 节数，<destination> 开往的车站）；
+    # 终点下面一行的说明只有约 80 像素宽（10 号中文 8 字），站名已写在上一行，英文不再写 here / there
     stop-list:
       through-from: "<station>起"
       following: "后续列车"
       following-secondary: "Following trains"
+      ends-there: "<end> <cars> 节到此止"
+      ends-there-secondary: "<end> <cars> cars end"
+      ends-there-one-secondary: "<end> <cars> car ends"
+      ends-here: "<end> <cars> 节本站止"
+      ends-here-secondary: "<end> <cars> cars end"
+      ends-here-one-secondary: "<end> <cars> car ends"
+      joins-there: "联挂后无需换乘"
+      joins-there-secondary: "Stay on board"
+      only: "仅<end> <cars> 节"
+      only-secondary: "<end> <cars> only"
+      board-part: "前往<destination>请乘<end> <cars> 节"
+      board-part-secondary: "<end> <cars> cars to <destination>"
+      board-part-one-secondary: "<end> <cars> car to <destination>"
     # 线路运行状况屏（3×5）：本站所属运营商各线路的运行状况；说明栏文案按 12 号中文、10 号英文约 170 像素宽来写
     line-status:
       title: "线路运行状况"
@@ -1925,6 +1986,10 @@ pids:
     platform-pending: "<gray>站台待定</gray> "
     arriving: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white>"
     arriving-terminating: "<aqua>▶</aqua> <platform><line> <white>本站终到列车即将进站，请勿上车</white>"
+    # 在本站分行的列车进站：<parts> 为两段说明（与站台屏分行页相同，如“前 4 节开往南渡，后 4 节本站止”）
+    arriving-divides-here: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white> <dark_gray>┃</dark_gray> <white>本站分行：<parts></white>"
+    # 在本站与另一列车联挂的列车进站
+    arriving-joins-here: "<aqua>▶</aqua> <platform><line> <gray>开往</gray> <yellow><destination></yellow> <white>的列车即将进站</white> <dark_gray>┃</dark_gray> <white>本站联挂</white>"
     arriving-out-of-service: "<aqua>▶</aqua> <platform><white>回库列车即将进站，请勿上车</white>"
     passing: "<gold>⚠</gold> <platform><white>有列车通过，请在安全线以内候车</white>"
     cancelled: "<gray>[<station>]</gray> <platform><line> <white><time></white> <gray>开往</gray> <white><destination></white> <red>的班次已取消</red>"

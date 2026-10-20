@@ -60,6 +60,24 @@ class CouplingIndexTest {
     assertEquals(List.of(join), index.ofFeeder(feeder.id()));
     assertTrue(join.atStation(NodeId.of("OP:S:S:3")), "同站别的股道也算联挂站");
     assertTrue(index.atTrunkStop(trunk.id(), 0).isEmpty());
+    assertEquals(Optional.of(join), index.continuationOf(feeder.id()));
+    assertTrue(index.continuationOf(trunk.id()).isEmpty(), "主干自己不是回程支线");
+  }
+
+  /** 一条回程支线挂上两条不同的主干时去向说不准：不给联挂后的去向。 */
+  @Test
+  void aFeederJoiningDifferentTrunksHasNoContinuation() {
+    CouplingIndex.RouteInfo trunk =
+        route(LINE, "RR", "default", List.of("OP:S:Z:1", "OP:S:S:1", "OP:S:P:1"), "COPL FROM:BB");
+    CouplingIndex.RouteInfo other =
+        route(LINE, "RQ", "default", List.of("OP:S:Y:1", "OP:S:S:1", "OP:S:Q:1"), "COPL FROM:BB");
+    CouplingIndex.RouteInfo feeder =
+        route(LINE, "BB", "default", List.of("OP:S:T:1", "OP:S:S:2"), null);
+
+    CouplingIndex index = CouplingIndex.build(List.of(trunk, other, feeder));
+
+    assertEquals(2, index.ofFeeder(feeder.id()).size());
+    assertTrue(index.continuationOf(feeder.id()).isEmpty());
   }
 
   @Test

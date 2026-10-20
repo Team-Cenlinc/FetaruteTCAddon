@@ -1600,6 +1600,18 @@ public final class FetaruteTCAddon extends JavaPlugin {
             runtimeDispatchService != null ? runtimeDispatchService::getActiveStopState : null,
             loggerManager::debug);
     etaService = new EtaService(trainSnapshotStore, railGraphService, routeDefinitionCache);
+    // 站牌上回程支线的车开往联挂后主干的终点：联挂服务按交路建的索引，任意线程读
+    etaService.attachThroughRoutes(
+        routeId ->
+            getCouplerService()
+                .flatMap(coupler -> coupler.coupling().continuationOf(routeId))
+                .map(found -> new EtaService.ThroughRoute(found.trunkRoute(), found.joinIndex())));
+    // 在运营终点分行后留下、不再载客的一段停着时站牌不另列：解编服务主线程记、任意线程读
+    etaService.attachDivisionRemainders(
+        (train, route, index) ->
+            getCouplerService()
+                .map(coupler -> coupler.decoupling().remainsAt(train, route, index))
+                .orElse(false));
     if (layoverRegistry != null) {
       etaService.attachLayoverRegistry(layoverRegistry);
     }
@@ -2066,6 +2078,25 @@ public final class FetaruteTCAddon extends JavaPlugin {
             ? new org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager(
                 baseSpawnManager, timetableService, loggerManager::debug)
             : baseSpawnManager;
+    if (spawnManager
+        instanceof
+        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+        timetabled) {
+      // 解编 GOTO 指向的支线不进发车计划：按交路现拼发车服务，解下的车接的班次照样出票，站牌照样列出
+      RouteDefinitionCache forecastRoutes = routeDefinitionCache;
+      timetabled.setUnplannedServices(
+          routeId ->
+              org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.RouteSpawnServices.forRoute(
+                  baseSpawnManager,
+                  forecastRoutes,
+                  storageManager != null && storageManager.isReady()
+                      ? storageManager.provider()
+                      : Optional.empty(),
+                  routeId,
+                  loggerManager::debug));
+      // 回程支线没车时主干出整列：与编表同一个来源（交路的 spawn_train_pattern，其次首站 CRET 的车库牌子）
+      timetabled.setFullConsists(routeId -> fullConsistOf(forecastRoutes, routeId));
+    }
     TrainCartsDepotSpawner depotSpawner =
         new TrainCartsDepotSpawner(this, signNodeRegistry, loggerManager::debug);
     depotSpawner.setOccupancyManager(occupancyManager);
@@ -2348,6 +2379,84 @@ public final class FetaruteTCAddon extends JavaPlugin {
     return Optional.ofNullable(couplerService);
   }
 
+  /**
+   * 写了联挂的主干交路联挂之后的整列编组，与编表同一个来源：交路的 {@code spawn_train_pattern}，其次首站 CRET 指向的车库牌子（只读已加载的区块）。
+   * 不是组合写法（{@code A+B}）时为空。
+   */
+  private Optional<String> fullConsistOf(RouteDefinitionCache routes, java.util.UUID routeId) {
+    Optional<String> declared =
+        routes
+            .findRecord(routeId)
+            .flatMap(
+                record ->
+                    org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.DepotSpawnPattern
+                        .fromRoute(record.route()));
+    Optional<String> pattern =
+        declared.isPresent() || signNodeRegistry == null
+            ? declared
+            : routes
+                .findById(routeId)
+                .flatMap(
+                    definition ->
+                        org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.SpawnDirectiveParser
+                            .findDirectiveTarget(routes.listStops(definition.id()), "CRET"))
+                .flatMap(
+                    depot ->
+                        org.fetarute
+                            .fetaruteTCAddon
+                            .dispatcher
+                            .schedule
+                            .spawn
+                            .DepotSpawnPattern
+                            .readLoaded(signNodeRegistry, NodeId.of(depot))
+                            .pattern());
+    return pattern
+        .flatMap(org.fetarute.fetaruteTCAddon.dispatcher.consist.ConsistKey::tidy)
+        .filter(org.fetarute.fetaruteTCAddon.dispatcher.consist.CompositeSpawnPattern::isComposite);
+  }
+
+  /** 站牌票据与预测行（按车次标识）在表上那一班的分行预测；不按表运行、拆挂服务没起来时为空。 */
+  private Optional<org.fetarute.fetaruteTCAddon.coupler.DivisionForecast> plannedDivisionOf(
+      String serviceTripId) {
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetables =
+        timetableService;
+    if (timetables == null
+        || !(spawnManager
+            instanceof
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+            timetabled)) {
+      return Optional.empty();
+    }
+    return timetabled
+        .intentOfServiceTrip(serviceTripId)
+        .flatMap(timetables::plannedTripOf)
+        .flatMap(
+            planned ->
+                getCouplerService()
+                    .flatMap(coupler -> coupler.decoupling().plannedForecast(planned)));
+  }
+
+  /** 站牌票据与预测行（按车次标识）在表上那一班的联挂预测；不按表运行、拆挂服务没起来时为空。 */
+  private Optional<org.fetarute.fetaruteTCAddon.coupler.JoinForecast> plannedJoinOf(
+      String serviceTripId) {
+    org.fetarute.fetaruteTCAddon.dispatcher.schedule.timetable.TimetableService timetables =
+        timetableService;
+    if (timetables == null
+        || !(spawnManager
+            instanceof
+            org.fetarute.fetaruteTCAddon.dispatcher.schedule.spawn.TimetableSpawnManager
+            timetabled)) {
+      return Optional.empty();
+    }
+    return timetabled
+        .intentOfServiceTrip(serviceTripId)
+        .flatMap(timetables::plannedJoinOf)
+        .flatMap(
+            planned ->
+                getCouplerService()
+                    .flatMap(coupler -> coupler.coupling().plannedJoinForecast(planned)));
+  }
+
   /** 解编 DECP 的到站回调（拆挂服务没起来时什么也不做）。 */
   private int decoupleOnRouteNode(
       String trainName,
@@ -2572,8 +2681,22 @@ public final class FetaruteTCAddon extends JavaPlugin {
         etaService != null
             ? new org.fetarute.fetaruteTCAddon.api.internal.EtaApiImpl(
                 etaService,
-                // 站牌行带上分行：解编服务每秒预测一次，任意线程读
-                name -> getCouplerService().flatMap(coupler -> coupler.decoupling().forecast(name)))
+                // 站牌行带上分行：解编服务每秒预测一次，任意线程读；刚在本站拆开的解下车先带拆开以后的车厢标识
+                name ->
+                    getCouplerService()
+                        .flatMap(
+                            coupler ->
+                                coupler
+                                    .decoupling()
+                                    .dividedHere(name)
+                                    .or(() -> coupler.decoupling().forecast(name))),
+                // 还没出车的一班按表上拆不拆提前写分行
+                this::plannedDivisionOf,
+                // 联挂页的节数：联挂服务每秒预测一次
+                name ->
+                    getCouplerService().flatMap(coupler -> coupler.coupling().joinForecast(name)),
+                // 还没出车的一班按表上联挂提前写联挂页与“本站联挂”
+                this::plannedJoinOf)
             : null;
     org.fetarute.fetaruteTCAddon.api.timetable.TimetableApi timetableApi =
         new org.fetarute.fetaruteTCAddon.api.internal.TimetableApiImpl(
